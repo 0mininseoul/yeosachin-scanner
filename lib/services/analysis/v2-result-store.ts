@@ -29,6 +29,10 @@ import {
     type AnalysisV2ResultImageLocator,
 } from '@/lib/services/media/image-proxy-token';
 import { supabaseAdmin } from '@/lib/supabase/admin';
+import {
+    bestEffortBetaApifySettlement,
+    settleBetaApifyRequestCredit,
+} from './beta-apify-credit-settlement-runtime';
 
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const JOB_KEY_PATTERN = /^[a-z0-9][a-z0-9:._-]{0,159}$/;
@@ -1473,6 +1477,9 @@ export function createSupabaseAnalysisV2ResultStore(
             if (!parsed.success) {
                 throw new Error('ANALYSIS_V2_RESULT_PERSISTENCE_ERROR: invalid finalization result.');
             }
+            await bestEffortBetaApifySettlement(() => (
+                settleBetaApifyRequestCredit(client, claim.requestId)
+            ));
             return Object.freeze({
                 finalized: parsed.data.finalized,
                 requestStatus: parsed.data.requestStatus,
@@ -1500,6 +1507,9 @@ export function createSupabaseAnalysisV2ResultStore(
             if (!parsed.success) {
                 throw new Error('ANALYSIS_V2_RESULT_PERSISTENCE_ERROR: invalid failure result.');
             }
+            await bestEffortBetaApifySettlement(() => (
+                settleBetaApifyRequestCredit(client, claim.requestId)
+            ));
             return Object.freeze(parsed.data);
         },
 

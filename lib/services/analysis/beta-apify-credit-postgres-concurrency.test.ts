@@ -38,6 +38,10 @@ const planAdmissionMigration = readFileSync(new URL(
     '../../../supabase/migrations/20260802080000_admit_betatest_apify_plan.sql',
     import.meta.url,
 ), 'utf8');
+const terminalSettlementMigration = readFileSync(new URL(
+    '../../../supabase/migrations/20260802090000_settle_betatest_terminal_credit.sql',
+    import.meta.url,
+), 'utf8');
 const betaSlots = {
     'target-profile': 'primary',
     'relationship-followers': 'tertiary',
@@ -626,6 +630,7 @@ describe('beta Apify credit PostgreSQL 16 concurrency', () => {
         // worker wiring and the atomic 0800 admission boundary on PostgreSQL.
         await first.query(wireRuntimeMigration);
         await first.query(planAdmissionMigration);
+        await first.query(terminalSettlementMigration);
     }, 30_000);
 
     it('samples database time after the grant barrier and rejects an admission that crosses two minutes', async () => {
@@ -1079,6 +1084,14 @@ describe('beta Apify credit PostgreSQL 16 concurrency', () => {
             allocationId: admitted.allocationId,
             replayed: true,
         });
+        // The first hour is intentionally retained for idempotent terminal
+        // replay; settlement has already released capacity at this point.
+        await first.query(
+            `UPDATE public.analysis_beta_pool_allocations
+             SET settled_at = clock_timestamp() - interval '2 hours'
+             WHERE id = $1`,
+            [admitted.allocationId],
+        );
 
         // Hold the same user fence: archive must skip instead of forming a
         // reverse lock cycle, then succeed immediately after release.

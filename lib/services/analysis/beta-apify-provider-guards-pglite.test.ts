@@ -49,6 +49,10 @@ const migrationUrls = [
         '../../../supabase/migrations/20260802080000_admit_betatest_apify_plan.sql',
         import.meta.url
     ),
+    new URL(
+        '../../../supabase/migrations/20260802090000_settle_betatest_terminal_credit.sql',
+        import.meta.url
+    ),
 ];
 const migrations = migrationUrls.map(url => readFileSync(url, 'utf8'));
 
@@ -1117,6 +1121,7 @@ describe('betatest provider policy/guard migration PGlite', () => {
             '20260802060000_expose_betatest_frozen_provider_budgets.sql',
             '20260802070000_wire_betatest_preflight_credit_runtime.sql',
             '20260802080000_admit_betatest_apify_plan.sql',
+            '20260802090000_settle_betatest_terminal_credit.sql',
         ]);
         const constraint = await db.query<{ validated: boolean }>(
             `SELECT convalidated AS validated
@@ -2441,7 +2446,7 @@ describe('betatest provider policy/guard migration PGlite', () => {
         expect(held.rows).toEqual([{ state: 'preflight_held' }]);
     });
 
-    it('archives terminal ambiguous provider work as a full non-retiring debit and releases parent retention locks', async () => {
+    it('never auto-archives terminal ambiguous provider work', async () => {
         await seedPendingBetaRequest();
         await activateBeta();
         await db.query(
@@ -2463,25 +2468,13 @@ describe('betatest provider policy/guard migration PGlite', () => {
              FROM public.analysis_beta_pool_reservation_archive
              WHERE operation_family = 'relationship-followers'`
         );
-        expect(ambiguous.rows).toEqual([{
-            state: 'ambiguous_held', debit: '0.020000000000',
-            actual: '0.000000000000', released: '0.000000000000',
-        }]);
-        const newer = snapshots().map(snapshot => ({
-            ...(snapshot as Record<string, unknown>),
-            observedAt: new Date(Date.now() + 1_000).toISOString(),
-        }));
-        await serviceQuery(
-            'SELECT public.upsert_analysis_beta_apify_credit_snapshots($1::JSONB)',
-            [JSON.stringify(newer)]
-        );
-        expect(Number((await db.query<{ capacity: string }>(
-            `SELECT effective_capacity_usd AS capacity
-             FROM public.analysis_beta_pool_effective_capacity_snapshot()
-             WHERE credential_slot = 'tertiary'`
-        )).rows[0]!.capacity)).toBeCloseTo(0.98, 12);
+        expect(ambiguous.rows).toEqual([]);
+        expect((await db.query(`SELECT id FROM public.analysis_beta_pool_allocations`)).rows)
+            .toHaveLength(1);
         await db.query(`DELETE FROM public.analysis_v2_provider_runs WHERE request_id = $1`, [REQUEST_ID]);
         await db.query(`DELETE FROM public.analysis_pipeline_jobs WHERE request_id = $1`, [REQUEST_ID]);
+        await db.query(`DELETE FROM public.analysis_beta_pool_reservations WHERE allocation_id IN (SELECT id FROM public.analysis_beta_pool_allocations WHERE request_id = $1)`, [REQUEST_ID]);
+        await db.query(`DELETE FROM public.analysis_beta_pool_allocations WHERE request_id = $1`, [REQUEST_ID]);
         await db.query(`DELETE FROM public.analysis_preflights WHERE id = $1`, [PREFLIGHT_ID]);
         await db.query(`DELETE FROM public.analysis_requests WHERE id = $1`, [REQUEST_ID]);
         await expect(db.query(`DELETE FROM public.users WHERE id = $1`, [USER_ID]))
@@ -2648,6 +2641,7 @@ describe('betatest provider policy/guard migration PGlite', () => {
              WHERE credential_slot = 'tertiary'`
         );
         expect(Number(liveCapacity.rows[0]!.capacity)).toBeCloseTo(0.99, 12);
+        await db.query(`UPDATE public.analysis_beta_pool_allocations SET settled_at = pg_catalog.clock_timestamp() - INTERVAL '2 hours' WHERE id = $1`, [allocationId]);
         await serviceQuery(
             `SELECT public.archive_settled_analysis_beta_apify_credit_allocations(10)`
         );
@@ -2908,13 +2902,18 @@ describe('betatest provider policy/guard migration PGlite', () => {
                 0, 0.005200000000, NULL, pg_catalog.clock_timestamp(),
                 'recovery', 'settled', 0)`, [allocationId]
         );
+        await serviceQuery(
+            `SELECT public.settle_analysis_beta_apify_credit_allocation($1, 'request_terminal')`,
+            [allocationId]
+        );
+        await db.query(`UPDATE public.analysis_beta_pool_allocations SET settled_at = pg_catalog.clock_timestamp() - INTERVAL '2 hours' WHERE id = $1`, [allocationId]);
         await expect(serviceQuery(
             `SELECT public.archive_settled_analysis_beta_apify_credit_allocations(10)`
-        )).rejects.toThrow(/ANALYSIS_BETA_POOL_ARCHIVE_CONFLICT/);
+        )).resolves.toMatchObject({ rows: [{ archive_settled_analysis_beta_apify_credit_allocations: 0 }] });
         expect((await db.query(
             `SELECT lifecycle_state FROM public.analysis_beta_pool_allocations WHERE id = $1`,
             [allocationId]
-        )).rows).toEqual([{ lifecycle_state: 'active' }]);
+        )).rows).toEqual([{ lifecycle_state: 'settled' }]);
         expect((await db.query<{ credential_slot: string }>(
             `SELECT credential_slot FROM public.analysis_beta_pool_reservation_archive
              WHERE allocation_id = $1 AND operation_family = 'target-profile'`, [allocationId]
@@ -2950,6 +2949,7 @@ describe('betatest provider policy/guard migration PGlite', () => {
               WHERE allocation_id = $1 AND operation_family = 'target-profile'`,
             [allocationId]
         );
+        await db.query(`UPDATE public.analysis_beta_pool_allocations SET settled_at = pg_catalog.clock_timestamp() - INTERVAL '2 hours' WHERE id = $1`, [allocationId]);
         await expect(serviceQuery(
             `SELECT public.archive_settled_analysis_beta_apify_credit_allocations(10)`
         )).resolves.toBeDefined();
@@ -2965,6 +2965,14 @@ describe('betatest provider policy/guard migration PGlite', () => {
         await seedPendingBetaRequest();
         await activateBeta();
         await db.query(`UPDATE public.analysis_requests SET status = 'failed' WHERE id = $1`, [REQUEST_ID]);
+        const allocationId = (await db.query<{ id: string }>(
+            `SELECT id FROM public.analysis_beta_pool_allocations WHERE request_id = $1`, [REQUEST_ID]
+        )).rows[0]!.id;
+        await serviceQuery(
+            `SELECT public.settle_analysis_beta_apify_credit_allocation($1, 'request_terminal')`,
+            [allocationId]
+        );
+        await db.query(`UPDATE public.analysis_beta_pool_allocations SET settled_at = pg_catalog.clock_timestamp() - INTERVAL '2 hours' WHERE id = $1`, [allocationId]);
         await expect(serviceQuery(`SELECT public.archive_settled_analysis_beta_apify_credit_allocations(10)`)).resolves.toBeDefined();
         const history = await db.query<{
             allocation_id: string; operation: string; reserved: number; actual: number; released: number;

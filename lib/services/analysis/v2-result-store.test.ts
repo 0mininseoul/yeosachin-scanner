@@ -664,6 +664,10 @@ describe('analysis V2 result finalization and loading', () => {
             summary: { targetProfileImage: '/api/image-proxy?signed=1' },
         });
         expect(fake.rpc.mock.calls[0]![1].p_target_profile_image_url).toBe(canonicalImageUrl);
+        expect(fake.rpc.mock.calls[1]).toEqual([
+            'settle_analysis_beta_apify_request_credit',
+            { p_request_id: requestId },
+        ]);
         expect(signer).toHaveBeenCalledWith(canonicalImageUrl, {
             requestId,
             kind: 'target',

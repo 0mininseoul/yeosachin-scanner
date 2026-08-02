@@ -27,6 +27,10 @@ import {
     createBetaApifyPreflightCoordinator,
     createServerBetaApifyCreditClientFactory,
 } from '@/lib/services/analysis/beta-apify-preflight-coordinator';
+import {
+    bestEffortBetaApifySettlement,
+    settleBetaApifyPreflightCredit,
+} from '@/lib/services/analysis/beta-apify-credit-settlement-runtime';
 
 const workerRequestSchema = z.union([
     z.object({
@@ -108,11 +112,19 @@ async function handlePOST(
             // until a claimed row identifies itself as the dedicated beta channel.
             outcome = await processPreflight(task.preflightId, {
                 betaCreditCoordinator,
+                settleBetaCredit: preflightId => bestEffortBetaApifySettlement(
+                    () => settleBetaApifyPreflightCredit(supabaseAdmin, preflightId)
+                ).then(() => undefined),
                 observer(observation: PreflightProcessObservation) {
                     if (observation.type === 'failed') profileFailureObserved = true;
                     emitPreflightProcessObservation(context, observation);
                 },
             });
+        }
+        if (outcome === 'blocked' && isFreshAdmission) {
+            await bestEffortBetaApifySettlement(() => (
+                settleBetaApifyPreflightCredit(supabaseAdmin, task.preflightId)
+            ));
         }
         const operation = isFreshAdmission ? 'fresh_admission' : 'profile';
         const disposition = outcome === 'noop' ? 'exists' : outcome;

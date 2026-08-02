@@ -82,4 +82,19 @@ describe('preflight retention maintenance', () => {
             'scrub_terminal_analysis_v2_preflights',
         ]);
     });
+
+    it('keeps safe archive after a best-effort refresh failure', async () => {
+        const events: string[] = [];
+        await runPreflightRetention({
+            rpc: vi.fn()
+                .mockResolvedValueOnce({ data: [], error: null })
+                .mockResolvedValueOnce({ data: 0, error: null })
+                .mockResolvedValueOnce({ data: 0, error: null }),
+        }, {
+            recoverBetaCredit: async () => { events.push('recover'); },
+            refreshBetaCredit: async () => { events.push('refresh'); throw new Error('unavailable'); },
+            archiveBetaCredit: async () => { events.push('archive'); },
+        });
+        expect(events).toEqual(['recover', 'refresh', 'archive']);
+    });
 });

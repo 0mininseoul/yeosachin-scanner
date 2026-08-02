@@ -7,6 +7,11 @@ import {
     type PreflightProviderRunReconciliationStore,
     type ReconciliationApifyClient,
 } from './preflight-provider-run';
+import {
+    archiveSettledBetaApifyCredit,
+    recoverBetaApifyCredit,
+    refreshBetaApifyCreditSnapshots,
+} from './beta-apify-credit-settlement-runtime';
 
 export const PREFLIGHT_RETENTION_BATCH_LIMIT = 250;
 
@@ -27,6 +32,9 @@ interface PreflightRetentionDependencies {
     providerRunStore?: PreflightProviderRunReconciliationStore;
     clientForSlot?: (slot: ApifyCredentialSlot) => ReconciliationApifyClient;
     env?: Record<string, string | undefined>;
+    recoverBetaCredit?: () => Promise<void>;
+    refreshBetaCredit?: () => Promise<void>;
+    archiveBetaCredit?: () => Promise<void>;
 }
 
 function boundedCount(value: unknown, maximum: number, operation: string): number {
@@ -66,6 +74,32 @@ export async function runPreflightRetention(
         'purge_expired_analysis_v2_preflights',
         PREFLIGHT_RETENTION_BATCH_LIMIT * 2
     );
+    // Expiry may make held target-profile reservations terminal.  These steps
+    // remain independent of the feature flag and a refresh never releases data.
+    const maintainBeta = client === supabaseAdmin
+        || dependencies.recoverBetaCredit
+        || dependencies.refreshBetaCredit
+        || dependencies.archiveBetaCredit;
+    if (maintainBeta) {
+        try {
+            await (dependencies.recoverBetaCredit
+                ?? (() => recoverBetaApifyCredit(client)))();
+        } catch {
+            // A later pass recovers any conservative hold.
+        }
+        try {
+            await (dependencies.refreshBetaCredit
+                ?? (() => refreshBetaApifyCreditSnapshots(client, { env: dependencies.env })))();
+        } catch {
+            // Snapshot refresh is advisory and must not prevent safe archival.
+        }
+        try {
+            await (dependencies.archiveBetaCredit
+                ?? (() => archiveSettledBetaApifyCredit(client)))();
+        } catch {
+            // Retention itself must still scrub unrelated expired preflights.
+        }
+    }
     const terminalScrubbed = await runRpc(
         client,
         'scrub_terminal_analysis_v2_preflights',

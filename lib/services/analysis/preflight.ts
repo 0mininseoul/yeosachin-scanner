@@ -1138,6 +1138,8 @@ export async function processPreflight(
         betaCreditCoordinator?: BetaApifyPreflightCoordinator;
         env?: Record<string, string | undefined>;
         observer?: PreflightProcessObserver;
+        /** Post-terminal only; callers must swallow settlement faults. */
+        settleBetaCredit?: (preflightId: string) => Promise<void>;
     } = {}
 ): Promise<'noop' | 'ready' | 'blocked'> {
     const store = dependencies.store ?? preflightStore;
@@ -1353,6 +1355,15 @@ export async function processPreflight(
             retryable: true,
             httpStatus: retryFailure.httpStatus,
         }, claim.workerAttemptCount, error);
+    } finally {
+        if (terminalized) {
+            try {
+                await dependencies.settleBetaCredit?.(claim.preflightId);
+            } catch {
+                // The terminal state is already durable; maintenance recovery
+                // will retry a conservative beta allocation later.
+            }
+        }
     }
 }
 

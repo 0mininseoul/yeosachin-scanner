@@ -29,6 +29,11 @@ import {
 } from './v2-ai-scheduler-operation-store';
 import { recoverQueuedAnalysisScoreAudits } from './score-audit';
 import { supabaseAdmin } from '@/lib/supabase/admin';
+import {
+    archiveSettledBetaApifyCredit,
+    recoverBetaApifyCredit,
+    refreshBetaApifyCreditSnapshots,
+} from './beta-apify-credit-settlement-runtime';
 
 export const ANALYSIS_V2_RECOVERY_MAX_JOBS = 100;
 export const ANALYSIS_V2_RECOVERY_CONCURRENCY = 10;
@@ -69,6 +74,7 @@ type GeminiCutoffLeaseReaper = () => Promise<number>;
 type SchedulerOperationRecovery = () => Promise<number>;
 type SchedulerGeminiLeaseReaper = () => Promise<number>;
 type ScoreAuditRecovery = () => Promise<void>;
+type BetaCreditMaintenance = () => Promise<void>;
 
 type RecoveryOutcome =
     | 'dispatched'
@@ -187,6 +193,9 @@ export async function recoverAnalysisV2Jobs(
         recoverSchedulerOperations?: SchedulerOperationRecovery;
         reapSchedulerGeminiLeases?: SchedulerGeminiLeaseReaper;
         recoverScoreAudits?: ScoreAuditRecovery;
+        recoverBetaCredit?: BetaCreditMaintenance;
+        archiveBetaCredit?: BetaCreditMaintenance;
+        refreshBetaCredit?: BetaCreditMaintenance;
         scoreAuditTimeoutMs?: number;
     } = {}
 ): Promise<AnalysisV2RecoverySummary> {
@@ -321,6 +330,31 @@ export async function recoverAnalysisV2Jobs(
         if (reconciliation.failed > 0 || reconciliation.hasMore) summary.failed += 1;
     } catch {
         summary.failed += 1;
+    }
+    // Provider lifecycle is reconciled first.  Credit recovery is deliberately
+    // post-terminal and feature-flag independent; refresh is only advisory.
+    const hasBetaMaintenance = Boolean(
+        dependencies.recoverBetaCredit
+        || dependencies.archiveBetaCredit
+        || dependencies.refreshBetaCredit
+        || typeof (supabaseAdmin as { rpc?: unknown }).rpc === 'function'
+    );
+    if (hasBetaMaintenance) {
+        try {
+            await (dependencies.recoverBetaCredit
+                ?? (() => recoverBetaApifyCredit(supabaseAdmin)))();
+            await (dependencies.archiveBetaCredit
+                ?? (() => archiveSettledBetaApifyCredit(supabaseAdmin)))();
+        } catch {
+            summary.failed += 1;
+        }
+        try {
+            await (dependencies.refreshBetaCredit
+                ?? (() => refreshBetaApifyCreditSnapshots(supabaseAdmin)))();
+        } catch {
+            // Refresh cannot invalidate a settled/released reservation and is
+            // retried by the next maintenance pass.
+        }
     }
     // The durable audit outbox drains only after provider safety cleanup and reconciliation.
     // A hung audit cannot extend this recovery pass beyond the small fixed budget.

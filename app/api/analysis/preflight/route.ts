@@ -39,6 +39,11 @@ import {
 import { emitPreflightProcessObservation } from '@/lib/observability/preflight-events';
 import { demoResponseHeaders, isDemoEligible } from '@/lib/services/demo-analysis/demo-analysis';
 import { demoAnalysisStore } from '@/lib/services/demo-analysis/store';
+import { supabaseAdmin } from '@/lib/supabase/admin';
+import {
+    bestEffortBetaApifySettlement,
+    settleBetaApifyPreflightCredit,
+} from '@/lib/services/analysis/beta-apify-credit-settlement-runtime';
 
 const IDEMPOTENCY_KEY_PATTERN = /^[A-Za-z0-9._:-]{16,128}$/;
 
@@ -245,6 +250,9 @@ async function handlePOST(
                 ) {
                     try {
                         await preflightStore.blockQueueUnavailable(created.preflightId, user.id);
+                        await bestEffortBetaApifySettlement(() => (
+                            settleBetaApifyPreflightCredit(supabaseAdmin, created.preflightId)
+                        ));
                     } catch {
                         console.error('Preflight queue failure terminalization failed.');
                     }
