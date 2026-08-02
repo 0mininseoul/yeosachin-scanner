@@ -392,19 +392,57 @@ describe('beta-test client', () => {
         expect(container.textContent).not.toContain('같은 대상으로 다시 확인');
     });
 
-    it('requires an explicit exclusion decision before rendering plan admission', async () => {
-        const { calls } = installReadyFlow();
+    it('starts the required free plan immediately after an exclusion decision', async () => {
+        const success = jsonResponse({
+            schemaVersion: 1,
+            requestId: REQUEST_ID,
+            status: 'queued',
+            backgroundProcessing: true,
+        });
+        const { calls } = installReadyFlow([success]);
 
         await enterReadyFlow(container);
 
         expect(container.textContent).toContain('본인 계정은 먼저 제외해주세요');
-        expect(container.textContent).not.toContain('무료 판독 시작하기');
-        await clickButton(container, '제외 없이 계속하기');
+        await clickButton(container, '제외 없이 무료 판독 시작');
         await settleUi();
 
         const exclusion = calls.find(call => call.init.method === 'PATCH');
         expect(JSON.parse(String(exclusion?.init.body))).toEqual({ decision: 'skip' });
-        expect(container.textContent).toContain('무료 판독 시작하기');
+        expect(navigation.push).toHaveBeenCalledWith(`/progress/${REQUEST_ID}`);
+        expect(container.textContent).not.toContain('무료 판독 시작하기');
+        expect(container.textContent).not.toContain('Basic');
+        expect(container.textContent).not.toContain('Standard');
+        expect(container.textContent).not.toContain('Plus');
+        const admission = calls.find(call => call.url.endsWith('/admit'));
+        expect(JSON.parse(String(admission?.init.body))).toEqual({ planId: 'basic' });
+    });
+
+    it('starts the required free plan immediately after saving an excluded account', async () => {
+        const success = jsonResponse({
+            schemaVersion: 1,
+            requestId: REQUEST_ID,
+            status: 'queued',
+            backgroundProcessing: true,
+        });
+        const { calls } = installReadyFlow([success]);
+        await enterReadyFlow(container);
+
+        const excluded = container.querySelector<HTMLInputElement>('#beta-excluded-instagram');
+        expect(excluded).not.toBeNull();
+        setInputValue(excluded!, 'my.account');
+        await clickButton(container, '내 계정 제외하고 무료 판독 시작');
+        await settleUi();
+
+        const exclusion = calls.find(call => call.init.method === 'PATCH');
+        expect(JSON.parse(String(exclusion?.init.body))).toEqual({
+            decision: 'exclude',
+            excludedInstagramId: 'my.account',
+        });
+        expect(navigation.push).toHaveBeenCalledWith(`/progress/${REQUEST_ID}`);
+        expect(calls.filter(call => call.url.endsWith('/admit')).map(call => (
+            JSON.parse(String(call.init.body))
+        ))).toEqual([{ planId: 'basic' }]);
     });
 
     it('polls pending beta admission on the same preflight and navigates after replay', async () => {
@@ -432,9 +470,7 @@ describe('beta-test client', () => {
         });
         const { calls } = installReadyFlow([firstPending, secondPending, success]);
         await enterReadyFlow(container);
-        await clickButton(container, '제외 없이 계속하기');
-
-        await clickButton(container, '무료 판독 시작하기');
+        await clickButton(container, '제외 없이 무료 판독 시작');
         expect(container.textContent).not.toContain(
             '판독 배정을 확인하고 있습니다. 잠시 후 다시 시도해주세요.'
         );
@@ -472,8 +508,7 @@ describe('beta-test client', () => {
         }, 202);
         const { calls } = installReadyFlow([pending]);
         await enterReadyFlow(container);
-        await clickButton(container, '제외 없이 계속하기');
-        await clickButton(container, '무료 판독 시작하기');
+        await clickButton(container, '제외 없이 무료 판독 시작');
 
         const admission = calls.find(call => call.url.endsWith('/admit'));
         expect(admission?.init.signal?.aborted).toBe(false);
@@ -500,8 +535,7 @@ describe('beta-test client', () => {
         }, 202);
         const { calls } = installReadyFlow([pending]);
         await enterReadyFlow(container);
-        await clickButton(container, '제외 없이 계속하기');
-        await clickButton(container, '무료 판독 시작하기');
+        await clickButton(container, '제외 없이 무료 판독 시작');
 
         const admission = calls.find(call => call.url.endsWith('/admit'));
         act(() => root.unmount());
@@ -526,8 +560,7 @@ describe('beta-test client', () => {
         }, 202));
         const { calls } = installReadyFlow(pendingAdmissions);
         await enterReadyFlow(container);
-        await clickButton(container, '제외 없이 계속하기');
-        await clickButton(container, '무료 판독 시작하기');
+        await clickButton(container, '제외 없이 무료 판독 시작');
 
         for (let attempt = 1; attempt < 120; attempt += 1) {
             await act(async () => {
@@ -553,8 +586,7 @@ describe('beta-test client', () => {
         }, 409);
         const { calls } = installReadyFlow([capacity]);
         await enterReadyFlow(container);
-        await clickButton(container, '제외 없이 계속하기');
-        await clickButton(container, '무료 판독 시작하기');
+        await clickButton(container, '제외 없이 무료 판독 시작');
 
         expect(container.textContent).toContain(
             '현재 무료 판독 가능 인원이 모두 찼습니다. 잠시 후 다시 시도해주세요.'
@@ -574,8 +606,7 @@ describe('beta-test client', () => {
         }, 403);
         const { calls } = installReadyFlow([access]);
         await enterReadyFlow(container);
-        await clickButton(container, '제외 없이 계속하기');
-        await clickButton(container, '무료 판독 시작하기');
+        await clickButton(container, '제외 없이 무료 판독 시작');
 
         expect(container.textContent).toContain('베타 테스트 이용 권한을 확인할 수 없습니다.');
         expect(container.textContent).not.toContain('internal access detail');
@@ -595,8 +626,7 @@ describe('beta-test client', () => {
         }, 202);
         const { calls } = installReadyFlow([malformed]);
         await enterReadyFlow(container);
-        await clickButton(container, '제외 없이 계속하기');
-        await clickButton(container, '무료 판독 시작하기');
+        await clickButton(container, '제외 없이 무료 판독 시작');
 
         expect(container.textContent).toContain('판독 시작 응답을 확인할 수 없습니다.');
         expect(button(container, '무료 판독 시작하기').disabled).toBe(false);
@@ -622,9 +652,7 @@ describe('beta-test client', () => {
         });
         const { calls } = installReadyFlow([success]);
         await enterReadyFlow(container);
-        await clickButton(container, '제외 없이 계속하기');
-
-        await clickButton(container, '무료 판독 시작하기');
+        await clickButton(container, '제외 없이 무료 판독 시작');
         await settleUi();
 
         expect(navigation.push).toHaveBeenCalledWith(`/progress/${REQUEST_ID}`);
