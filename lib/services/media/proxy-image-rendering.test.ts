@@ -41,6 +41,7 @@ describe('signed image proxy rendering contract', () => {
 
         expect(source).toContain('feedImageUrls');
         expect(source).toContain('safeResultImageUrl(imageUrl)');
+        expect(source).toContain("src?.startsWith('/api/image-proxy?')");
         expect(source).toMatch(/<Image\b[\s\S]*?\bloading="lazy"[\s\S]*?\/>/);
         expect(source).not.toMatch(/<Image\b[\s\S]*?src=\{imageUrl\}/);
         expect(source).not.toContain('.candidateKey');

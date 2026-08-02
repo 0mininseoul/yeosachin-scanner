@@ -10,10 +10,10 @@ import {
     MIN_SCREENED_CANDIDATES_TO_SHOW,
     nextDriftOffset,
     progressCopyDistance,
-    signedProgressCandidateMedia,
     type ActiveCandidateMedia,
     type ScreenedCandidate,
 } from '@/lib/services/analysis/progress-faces';
+import { safeResultImageUrl } from '@/lib/services/result-local-image';
 
 const TILE_PX = 84;
 
@@ -55,7 +55,20 @@ function CandidateMedia({
     copyIndex: number;
     current: boolean;
 }) {
-    const images = signedProgressCandidateMedia(candidate);
+    /* Heartbeats contain signed, owner-scoped proxy paths. Keep the rendering
+       boundary defensive too: a malformed heartbeat must not turn the browser
+       into a raw Instagram-CDN client, and demo fallback art is not real
+       progress media. */
+    const imageUrls: readonly (string | undefined)[] = [
+        candidate.imageUrl ?? undefined,
+        ...candidate.feedImageUrls,
+    ];
+    const images = imageUrls
+        .map(imageUrl => {
+            const src = safeResultImageUrl(imageUrl);
+            return src?.startsWith('/api/image-proxy?') ? src : undefined;
+        })
+        .filter((src): src is string => src !== undefined);
     return (
         <div className="flex shrink-0 gap-2.5">
             {images.map((src, index) => (
@@ -167,9 +180,15 @@ export function ProgressFaces({
         setCandidates(current => appendScreenedCandidate(current, active));
     }
 
-    const mediaCandidates = candidates.filter(candidate => (
-        signedProgressCandidateMedia(candidate).length > 0
-    ));
+    const mediaCandidates = candidates.filter(candidate => {
+        const imageUrls: readonly (string | undefined)[] = [
+            candidate.imageUrl ?? undefined,
+            ...candidate.feedImageUrls,
+        ];
+        return imageUrls.some(imageUrl => (
+            safeResultImageUrl(imageUrl)?.startsWith('/api/image-proxy?')
+        ));
+    });
     const railRef = useFaceDrift(mediaCandidates.length);
 
     if (mediaCandidates.length < MIN_SCREENED_CANDIDATES_TO_SHOW) return null;
