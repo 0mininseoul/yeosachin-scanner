@@ -75,6 +75,10 @@ const observabilityMigration = readFileSync(new URL(
     '../../../supabase/migrations/20260802100600_add_betatest_pool_observability.sql',
     import.meta.url,
 ), 'utf8');
+const allAuthenticatedAccessMigration = readFileSync(new URL(
+    '../../../supabase/migrations/20260802104141_enable_betatest_all_authenticated_access.sql',
+    import.meta.url,
+), 'utf8');
 const betaSlots = {
     'target-profile': 'primary',
     'relationship-followers': 'tertiary',
@@ -1974,6 +1978,7 @@ describe('beta Apify credit PostgreSQL 16 concurrency', () => {
                 await first.query(migration);
             }
             await first.query(observabilityMigration);
+            await first.query(allAuthenticatedAccessMigration);
             retryExhaustionAfterUpgrade = (await first.query<{
                 channel: string;
                 status: string;
@@ -2018,6 +2023,43 @@ describe('beta Apify credit PostgreSQL 16 concurrency', () => {
                 validated: true,
             });
         });
+
+        it('serializes two authenticated enrollment calls into one durable automatic grant', async () => {
+            const userId = randomUUID();
+            await first.query('INSERT INTO public.users(id) VALUES ($1)', [userId]);
+            await first.query('SELECT public.set_analysis_beta_runtime_gate(TRUE)');
+            await first.query("SELECT public.set_analysis_beta_access_policy('all_authenticated')");
+            try {
+                await Promise.all([first, second].map(client => client.query(
+                    `SELECT pg_catalog.set_config(
+                        'request.jwt.claim.sub', $1, FALSE
+                    )`, [userId]
+                )));
+                await Promise.all([first, second].map(client => client.query('SET ROLE authenticated')));
+                const [firstResult, secondResult] = await Promise.all([
+                    first.query<{ allowed: boolean }>(
+                        'SELECT public.enroll_analysis_beta_authenticated_user() AS allowed'
+                    ),
+                    second.query<{ allowed: boolean }>(
+                        'SELECT public.enroll_analysis_beta_authenticated_user() AS allowed'
+                    ),
+                ]);
+                expect(firstResult.rows).toEqual([{ allowed: true }]);
+                expect(secondResult.rows).toEqual([{ allowed: true }]);
+            } finally {
+                await Promise.all([first, second].map(async client => {
+                    await client.query('RESET ROLE');
+                    await client.query("SELECT pg_catalog.set_config('request.jwt.claim.sub', '', FALSE)");
+                }));
+            }
+            expect((await observer.query<{
+                count: number; enabled: boolean; source: string;
+            }>(`SELECT pg_catalog.count(*)::INTEGER AS count,
+                       pg_catalog.bool_and(enabled) AS enabled,
+                       pg_catalog.min(grant_source) AS source
+                FROM public.analysis_beta_access_grants WHERE user_id=$1`, [userId]
+            )).rows).toEqual([{ count: 1, enabled: true, source: 'automatic' }]);
+        }, 15_000);
 
         it('exposes one aggregate-only pool health snapshot to service_role', async () => {
             const privileges = await first.query<{

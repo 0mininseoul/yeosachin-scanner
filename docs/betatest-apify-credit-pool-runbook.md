@@ -60,6 +60,35 @@ select public.upsert_analysis_beta_access_grant(
 Do not delete an active grant while an allocation is still settling. Verify only the
 caller-facing self-check; never enumerate grants to a client.
 
+## Enrollment policy rollback
+
+The default database policy is `all_authenticated`: any authenticated caller reaching
+the dedicated `/betatest` server path obtains a durable automatic grant only while the
+database runtime gate is on. The application `BETATEST_FREE_POOL_ENABLED=true` flag is
+also still required. The automatic enrollment RPC has no user-id input, accepts no
+email or metadata, and cannot be called by anonymous clients.
+
+To stop automatic enrollment while retaining approved operator grants, use the
+service-role-only policy RPC. This transaction immediately disables automatic rows;
+existing beta mutations continue to use their normal durable grant-row rechecks.
+
+```sql
+select public.set_analysis_beta_access_policy('grant_only');
+```
+
+To restore universal authenticated enrollment after the runtime gate and application
+flag have been reviewed, switch back. A visitor is enrolled at their next dedicated
+beta access; no deployment or queue wait is involved.
+
+```sql
+select public.set_analysis_beta_access_policy('all_authenticated');
+```
+
+An operator grant upsert promotes an automatic row to `operator`, so a valid approved
+grant survives a later `grant_only` rollback. A disabled or expired row encountered
+while `all_authenticated` is active becomes automatic access, because that policy is
+intentionally universal; it is disabled again by `grant_only`.
+
 ## Rollout and rollback
 
 1. Confirm remote migration history read-only, run a migration dry-run with only
@@ -84,6 +113,7 @@ caller-facing self-check; never enumerate grants to a client.
    - `20260802100400_terminalize_betatest_prepare_retry_exhaustion_runtime.sql`
    - `20260802100500_validate_betatest_prepare_retry_exhaustion.sql`
    - `20260802100600_add_betatest_pool_observability.sql`
+   - `20260802104141_enable_betatest_all_authenticated_access.sql`
 2. Verify all seven Secret Manager secret names exist and each reference uses a
    numeric version. This includes ordinary-flow `secondary`, while beta itself uses
    only the exact six aliases above. Never print secret values.

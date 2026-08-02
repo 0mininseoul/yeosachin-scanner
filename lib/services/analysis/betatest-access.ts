@@ -27,3 +27,18 @@ export async function hasBetaTestAccess(client: BetaTestAccessClient): Promise<b
         return false;
     }
 }
+
+/**
+ * Establishes the caller's server-owned betatest grant when the database policy
+ * permits automatic enrollment. The RPC also answers existing operator grants,
+ * so beta routes never create a preflight before the downstream grant fences
+ * can observe a current row.
+ */
+export async function ensureBetaTestAccess(client: BetaTestAccessClient): Promise<boolean> {
+    try {
+        const result = await client.rpc('enroll_analysis_beta_authenticated_user');
+        return result.error === null && result.data === true;
+    } catch {
+        return false;
+    }
+}

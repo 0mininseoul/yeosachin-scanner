@@ -17,7 +17,7 @@ import {
 import {
     BETA_TEST_ACCESS_UNAVAILABLE,
     betaTestFreePoolEnabled,
-    hasBetaTestAccess,
+    ensureBetaTestAccess,
 } from '@/lib/services/analysis/betatest-access';
 
 const IDEMPOTENCY_KEY_PATTERN = /^[A-Za-z0-9._:-]{16,128}$/;
@@ -35,7 +35,7 @@ export async function POST(request: Request): Promise<NextResponse> {
     const supabase = await createClient();
     const { data: { user }, error: authError } = await supabase.auth.getUser();
     if (authError || !user) return response(401, 'UNAUTHORIZED', '로그인이 필요합니다.');
-    if (!betaTestFreePoolEnabled() || !await hasBetaTestAccess(supabase)) {
+    if (!betaTestFreePoolEnabled() || !await ensureBetaTestAccess(supabase)) {
         return response(403, BETA_TEST_ACCESS_UNAVAILABLE, '베타 분석을 사용할 수 없습니다.');
     }
     let body: unknown;
@@ -62,7 +62,7 @@ export async function POST(request: Request): Promise<NextResponse> {
             targetInstagramId: parsed.data.targetInstagramId,
             idempotencyKey,
         });
-        if (!betaTestFreePoolEnabled() || !await hasBetaTestAccess(supabase)) {
+        if (!betaTestFreePoolEnabled() || !await ensureBetaTestAccess(supabase)) {
             await preflightStore.blockBetaPrepareCapacity({
                 preflightId: created.preflightId,
                 userId: user.id,

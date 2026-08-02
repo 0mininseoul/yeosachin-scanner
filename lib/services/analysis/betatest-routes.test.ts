@@ -3,7 +3,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 const mocks = vi.hoisted(() => ({
     createClient: vi.fn(),
     getUser: vi.fn(),
-    hasAccess: vi.fn(),
+    ensureAccess: vi.fn(),
     enabled: vi.fn(),
     enqueuePrepare: vi.fn(),
     store: {
@@ -17,7 +17,7 @@ vi.mock('@/lib/supabase/server', () => ({ createClient: mocks.createClient }));
 vi.mock('@/lib/services/analysis/betatest-access', async importOriginal => ({
     ...(await importOriginal<typeof import('./betatest-access')>()),
     betaTestFreePoolEnabled: mocks.enabled,
-    hasBetaTestAccess: mocks.hasAccess,
+    ensureBetaTestAccess: mocks.ensureAccess,
 }));
 vi.mock('@/lib/services/analysis/preflight', async importOriginal => ({
     ...(await importOriginal<typeof import('./preflight')>()),
@@ -54,7 +54,7 @@ describe('dedicated betatest preflight route', () => {
             id: userId, email: 'owner@example.com', app_metadata: { provider: 'google' },
         } }, error: null });
         mocks.enabled.mockReturnValue(true);
-        mocks.hasAccess.mockResolvedValue(true);
+        mocks.ensureAccess.mockResolvedValue(true);
         mocks.store.createOrReplayBeta.mockResolvedValue({
             preflightId, expiresAt: '2030-07-13T13:00:00.000Z', created: true, status: 'pending',
             prepareGeneration: 1, prepareToken, shouldEnqueue: true,
@@ -70,7 +70,7 @@ describe('dedicated betatest preflight route', () => {
         mocks.enabled.mockReturnValue(false);
         expect((await createBetaPreflight(request())).status).toBe(403);
         mocks.enabled.mockReturnValue(true);
-        mocks.hasAccess.mockResolvedValue(false);
+        mocks.ensureAccess.mockResolvedValue(false);
         expect((await createBetaPreflight(request())).status).toBe(403);
         expect(mocks.store.createOrReplayBeta).not.toHaveBeenCalled();
     });
@@ -81,7 +81,7 @@ describe('dedicated betatest preflight route', () => {
         expect(mocks.store.createOrReplayBeta).toHaveBeenCalledWith(expect.objectContaining({
             userId, targetInstagramId: 'target.name',
         }));
-        expect(mocks.hasAccess).toHaveBeenCalledTimes(2);
+        expect(mocks.ensureAccess).toHaveBeenCalledTimes(2);
         expect(mocks.enqueuePrepare).toHaveBeenCalledWith(
             preflightId, userId, 1, prepareToken, expect.any(Object)
         );
@@ -111,7 +111,7 @@ describe('dedicated betatest preflight route', () => {
     });
 
     it('terminalizes the reserved row if access is revoked between creation and enqueue', async () => {
-        mocks.hasAccess.mockResolvedValueOnce(true).mockResolvedValueOnce(false);
+        mocks.ensureAccess.mockResolvedValueOnce(true).mockResolvedValueOnce(false);
         const response = await createBetaPreflight(request());
         expect(response.status).toBe(403);
         expect(mocks.enqueuePrepare).not.toHaveBeenCalled();

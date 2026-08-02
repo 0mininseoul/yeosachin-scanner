@@ -79,6 +79,10 @@ const migrationUrls = [
     ),
 ];
 const migrations = migrationUrls.map(url => readFileSync(url, 'utf8'));
+const allAuthenticatedAccessMigration = readFileSync(new URL(
+    '../../../supabase/migrations/20260802104141_enable_betatest_all_authenticated_access.sql',
+    import.meta.url
+), 'utf8');
 
 const USER_ID = '10000000-0000-4000-8000-000000000001';
 const PREFLIGHT_ID = '20000000-0000-4000-8000-000000000001';
@@ -1352,6 +1356,7 @@ beforeAll(async () => {
         .rows[0] ?? null;
 
     for (const migration of upgradeMigrations.slice(5)) await db.exec(migration);
+    await db.exec(allAuthenticatedAccessMigration);
     retryExhaustionBackfillUpgrade = (await db.query<{
         channel: string;
         status: string;
@@ -1427,6 +1432,7 @@ beforeEach(async () => {
             observed_at = NULL, health_state = 'unhealthy';
     `);
     await serviceQuery('SELECT public.set_analysis_beta_runtime_gate(TRUE)');
+    await serviceQuery("SELECT public.set_analysis_beta_access_policy('all_authenticated')");
 });
 
 afterAll(async () => {
@@ -1582,6 +1588,138 @@ describe('betatest provider policy/guard migration PGlite', () => {
         expect((await authenticatedQuery<{ allowed: boolean }>(
             USER_ID, 'SELECT public.analysis_beta_has_access() AS allowed'
         )).rows).toEqual([{ allowed: false }]);
+    });
+
+    it('enrolls authenticated users only while the gate and all-authenticated policy are enabled', async () => {
+        await db.query('INSERT INTO public.users(id) VALUES ($1), ($2)', [USER_ID, PREFLIGHT_ID]);
+
+        expect((await authenticatedQuery<{ allowed: boolean }>(
+            USER_ID, 'SELECT public.enroll_analysis_beta_authenticated_user() AS allowed'
+        )).rows).toEqual([{ allowed: true }]);
+        const firstEnrollment = (await db.query<{
+            enabled: boolean; source: string; updated_at: string; audit_hash: string;
+        }>(
+            `SELECT enabled, grant_source AS source, updated_at,
+                    audit_reference_hash AS audit_hash
+             FROM public.analysis_beta_access_grants WHERE user_id=$1`, [USER_ID]
+        )).rows[0];
+        expect(firstEnrollment).toMatchObject({ enabled: true, source: 'automatic' });
+        expect((await authenticatedQuery<{ allowed: boolean }>(
+            USER_ID, 'SELECT public.enroll_analysis_beta_authenticated_user() AS allowed'
+        )).rows).toEqual([{ allowed: true }]);
+        expect((await db.query<{
+            enabled: boolean; source: string; updated_at: string; audit_hash: string;
+        }>(
+            `SELECT enabled, grant_source AS source, updated_at,
+                    audit_reference_hash AS audit_hash
+             FROM public.analysis_beta_access_grants WHERE user_id=$1`, [USER_ID]
+        )).rows[0]).toEqual(firstEnrollment);
+        await expect(createDedicatedBetaPreflight({
+            idempotencyKey: 'automatic-grant-fence-000001',
+        })).resolves.toMatchObject({ created: true });
+        expect((await db.query<{ count: number }>(
+            `SELECT pg_catalog.count(*)::INTEGER AS count
+             FROM public.analysis_beta_access_grants WHERE user_id=$1`, [USER_ID]
+        )).rows).toEqual([{ count: 1 }]);
+
+        await serviceQuery(
+            'SELECT public.upsert_analysis_beta_access_grant($1,FALSE,NULL,$2)',
+            [PREFLIGHT_ID, AUDIT_HASH]
+        );
+        expect((await authenticatedQuery<{ allowed: boolean }>(
+            PREFLIGHT_ID, 'SELECT public.enroll_analysis_beta_authenticated_user() AS allowed'
+        )).rows).toEqual([{ allowed: true }]);
+        const convertedOperator = (await db.query<{
+            enabled: boolean; source: string; audit_hash: string;
+        }>(
+            `SELECT enabled, grant_source AS source, audit_reference_hash AS audit_hash
+             FROM public.analysis_beta_access_grants WHERE user_id=$1`, [PREFLIGHT_ID]
+        )).rows[0];
+        expect(convertedOperator).toMatchObject({ enabled: true, source: 'automatic' });
+        expect(convertedOperator?.audit_hash).not.toBe(AUDIT_HASH);
+
+        await serviceQuery('SELECT public.set_analysis_beta_runtime_gate(FALSE)');
+        await db.query(
+            `UPDATE public.analysis_beta_access_grants
+             SET enabled=FALSE WHERE user_id=$1`, [USER_ID]
+        );
+        expect((await authenticatedQuery<{ allowed: boolean }>(
+            USER_ID, 'SELECT public.enroll_analysis_beta_authenticated_user() AS allowed'
+        )).rows).toEqual([{ allowed: false }]);
+        expect((await db.query<{ enabled: boolean }>(
+            'SELECT enabled FROM public.analysis_beta_access_grants WHERE user_id=$1', [USER_ID]
+        )).rows).toEqual([{ enabled: false }]);
+        expect((await authenticatedQuery<{ allowed: boolean }>(
+            null, 'SELECT public.enroll_analysis_beta_authenticated_user() AS allowed'
+        )).rows).toEqual([{ allowed: false }]);
+    });
+
+    it('rolls back automatic grants but preserves an automatic row promoted by an operator grant', async () => {
+        await db.query('INSERT INTO public.users(id) VALUES ($1), ($2)', [USER_ID, PREFLIGHT_ID]);
+        await authenticatedQuery(
+            USER_ID, 'SELECT public.enroll_analysis_beta_authenticated_user()'
+        );
+        await authenticatedQuery(
+            PREFLIGHT_ID, 'SELECT public.enroll_analysis_beta_authenticated_user()'
+        );
+        await serviceQuery(
+            `SELECT public.upsert_analysis_beta_access_grant(
+                $1,TRUE,NULL,$2
+            )`, [PREFLIGHT_ID, AUDIT_HASH]
+        );
+        await serviceQuery("SELECT public.set_analysis_beta_access_policy('grant_only')");
+
+        expect((await authenticatedQuery<{ allowed: boolean }>(
+            USER_ID, 'SELECT public.analysis_beta_has_access() AS allowed'
+        )).rows).toEqual([{ allowed: false }]);
+        expect((await authenticatedQuery<{ allowed: boolean }>(
+            PREFLIGHT_ID, 'SELECT public.analysis_beta_has_access() AS allowed'
+        )).rows).toEqual([{ allowed: true }]);
+        expect((await authenticatedQuery<{ allowed: boolean }>(
+            USER_ID, 'SELECT public.enroll_analysis_beta_authenticated_user() AS allowed'
+        )).rows).toEqual([{ allowed: false }]);
+        expect((await authenticatedQuery<{ allowed: boolean }>(
+            PREFLIGHT_ID, 'SELECT public.enroll_analysis_beta_authenticated_user() AS allowed'
+        )).rows).toEqual([{ allowed: true }]);
+        expect((await db.query<{ user_id: string; enabled: boolean; source: string }>(
+            `SELECT user_id, enabled, grant_source AS source
+             FROM public.analysis_beta_access_grants
+             ORDER BY user_id`
+        )).rows).toEqual([
+            { user_id: USER_ID, enabled: false, source: 'automatic' },
+            { user_id: PREFLIGHT_ID, enabled: true, source: 'operator' },
+        ]);
+    });
+
+    it('keeps enrollment and policy RPCs non-enumerable and narrowly callable', async () => {
+        const acl = await db.query<{
+            enroll_authenticated: boolean; enroll_anon: boolean;
+            policy_service: boolean; policy_authenticated: boolean;
+            grants_authenticated_select: boolean; grants_anon_insert: boolean;
+            policy_authenticated_select: boolean; policy_anon_update: boolean;
+        }>(`SELECT
+            pg_catalog.has_function_privilege('authenticated',
+                'public.enroll_analysis_beta_authenticated_user()', 'EXECUTE') AS enroll_authenticated,
+            pg_catalog.has_function_privilege('anon',
+                'public.enroll_analysis_beta_authenticated_user()', 'EXECUTE') AS enroll_anon,
+            pg_catalog.has_function_privilege('service_role',
+                'public.set_analysis_beta_access_policy(text)', 'EXECUTE') AS policy_service,
+            pg_catalog.has_function_privilege('authenticated',
+                'public.set_analysis_beta_access_policy(text)', 'EXECUTE') AS policy_authenticated,
+            pg_catalog.has_table_privilege('authenticated',
+                'public.analysis_beta_access_grants', 'SELECT') AS grants_authenticated_select,
+            pg_catalog.has_table_privilege('anon',
+                'public.analysis_beta_access_grants', 'INSERT') AS grants_anon_insert,
+            pg_catalog.has_table_privilege('authenticated',
+                'public.analysis_beta_access_policy', 'SELECT') AS policy_authenticated_select,
+            pg_catalog.has_table_privilege('anon',
+                'public.analysis_beta_access_policy', 'UPDATE') AS policy_anon_update`);
+        expect(acl.rows).toEqual([{
+            enroll_authenticated: true, enroll_anon: false,
+            policy_service: true, policy_authenticated: false,
+            grants_authenticated_select: false, grants_anon_insert: false,
+            policy_authenticated_select: false, policy_anon_update: false,
+        }]);
     });
 
     it('persists one service-only beta generation/token and rejects same-key ordinary dispatch attacks', async () => {
