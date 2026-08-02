@@ -43,6 +43,58 @@ import {
 
 export type ExclusionState = 'undecided' | 'saving' | 'excluded' | 'skipped';
 
+export type AnalysisV2PreflightFlow = 'standard' | 'betatest';
+
+export interface AnalysisV2PreflightFlowConfig {
+    readonly createEndpoint: string;
+    readonly statusEndpoint: (preflightId: string) => string;
+    readonly admitEndpoint?: (preflightId: string) => string;
+    readonly acceptsTestCredentials: boolean;
+}
+
+const STANDARD_PREFLIGHT_FLOW: AnalysisV2PreflightFlowConfig = {
+    createEndpoint: '/api/analysis/preflight',
+    statusEndpoint: preflightId => `/api/analysis/preflight/${encodeURIComponent(preflightId)}`,
+    acceptsTestCredentials: true,
+};
+const BETATEST_PREFLIGHT_FLOW: AnalysisV2PreflightFlowConfig = {
+    createEndpoint: '/api/analysis/betatest/preflight',
+    // The status and exclusion resources are owner-scoped shared state.
+    statusEndpoint: preflightId => `/api/analysis/preflight/${encodeURIComponent(preflightId)}`,
+    admitEndpoint: preflightId => (
+        `/api/analysis/betatest/preflight/${encodeURIComponent(preflightId)}/admit`
+    ),
+    acceptsTestCredentials: false,
+};
+
+export function getAnalysisV2PreflightFlowConfig(
+    flow: AnalysisV2PreflightFlow = 'standard'
+): AnalysisV2PreflightFlowConfig {
+    return flow === 'betatest' ? BETATEST_PREFLIGHT_FLOW : STANDARD_PREFLIGHT_FLOW;
+}
+
+export function betaAdmissionFailureMessage(payload: unknown): string | null {
+    if (!payload || typeof payload !== 'object' || Array.isArray(payload)) return null;
+    const code = Reflect.get(payload, 'code');
+    if (code === 'BETA_CAPACITY_UNAVAILABLE') {
+        return '현재 무료 판독 가능 인원이 모두 찼습니다. 잠시 후 다시 시도해주세요.';
+    }
+    if (code === 'BETA_ADMISSION_PENDING') {
+        return '판독 배정을 확인하고 있습니다. 잠시 후 다시 시도해주세요.';
+    }
+    if (code === 'BETA_ACCESS_UNAVAILABLE') {
+        return '베타 테스트 이용 권한을 확인할 수 없습니다.';
+    }
+    return null;
+}
+
+export function isBetaAdmissionPending(payload: unknown): boolean {
+    return Boolean(payload
+        && typeof payload === 'object'
+        && !Array.isArray(payload)
+        && Reflect.get(payload, 'status') === 'admission_pending');
+}
+
 export function restoreExclusionState(
     current: ExclusionState,
     decision: PreflightExclusionDecisionV1
@@ -254,7 +306,10 @@ export function mergeFreshPlanSnapshot(
     return parsed.success && parsed.data.status === 'ready' ? parsed.data : null;
 }
 
-export function useAnalysisV2Preflight() {
+export function useAnalysisV2Preflight({
+    flow = 'standard',
+}: { flow?: AnalysisV2PreflightFlow } = {}) {
+    const flowConfig = getAnalysisV2PreflightFlowConfig(flow);
     const [targetInstagramId, setTargetInstagramId] = useState<string | null>(null);
     const [preflight, setPreflight] = useState<PreflightStatusV1 | null>(null);
     const [creating, setCreating] = useState(false);
@@ -322,7 +377,7 @@ export function useAnalysisV2Preflight() {
         scope: PreflightRequestScope
     ): Promise<PreflightStatusV1 | null> => {
         const response = await fetch(
-            `/api/analysis/preflight/${encodeURIComponent(preflightId)}`,
+            flowConfig.statusEndpoint(preflightId),
             { cache: 'no-store', signal: scope.signal }
         );
         const payload = await readPayload(response);
@@ -363,7 +418,7 @@ export function useAnalysisV2Preflight() {
             setError(null);
         }
         return parsed.data;
-    }, [trackPreflightOutcome]);
+    }, [flowConfig, trackPreflightOutcome]);
 
     const resumePreflight = useCallback(async (
         preflightId: string,
@@ -419,7 +474,9 @@ export function useAnalysisV2Preflight() {
         preflightStartedAtRef.current = Date.now();
 
         try {
-            const testAdmission = readTestAdmissionCredential(sessionStorage, normalized);
+            const testAdmission = flowConfig.acceptsTestCredentials
+                ? readTestAdmissionCredential(sessionStorage, normalized)
+                : null;
             idempotencyRef.current = getAnalysisStartIdempotency(
                 idempotencyRef.current,
                 normalized,
@@ -434,7 +491,14 @@ export function useAnalysisV2Preflight() {
                 headers.set('X-Analysis-Test-Admission', testAdmission.token);
             }
 
-            const response = await fetch('/api/analysis/preflight', {
+            const response = flow === 'betatest'
+                ? await fetch(flowConfig.createEndpoint, {
+                    method: 'POST',
+                    headers,
+                    body: JSON.stringify({ targetInstagramId: rawTargetInstagramId }),
+                    signal: scope.signal,
+                })
+                : await fetch('/api/analysis/preflight', {
                 method: 'POST',
                 headers,
                 // Preserve the presented value for the server-only exact demo gate.
@@ -486,7 +550,7 @@ export function useAnalysisV2Preflight() {
             scope.finish();
             if (current) setCreating(false);
         }
-    }, [coordinator, trackPreflightAttemptFailure]);
+    }, [coordinator, flow, flowConfig, trackPreflightAttemptFailure]);
 
     const submitExclusion = useCallback(async (rawExcludedInstagramId?: string) => {
         if (!preflight || preflight.status === 'consumed') return false;
@@ -697,6 +761,72 @@ export function useAnalysisV2Preflight() {
         }
     }, [coordinator, preflight]);
 
+    const admitBetaAnalysis = useCallback(async (planId: PlanId) => {
+        if (flow !== 'betatest' || !flowConfig.admitEndpoint) return null;
+        if (!preflight || preflight.status !== 'ready') return null;
+        if (preflight.plans.find(plan => plan.planId === planId)?.selectionState === 'unavailable') {
+            setError('현재 계정 규모에 맞는 플랜을 선택해주세요.');
+            return null;
+        }
+
+        const generation = coordinator.currentGeneration;
+        const scope = coordinator.beginRequest(generation, preflight.preflightId);
+        if (!scope) return null;
+        setStarting(true);
+        setError(null);
+        try {
+            const response = await fetch(flowConfig.admitEndpoint(preflight.preflightId), {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ planId }),
+                signal: scope.signal,
+            });
+            const payload = await readPayload(response);
+            if (!response.ok) {
+                throw new Error(
+                    betaAdmissionFailureMessage(payload)
+                    ?? messageFromPayload(payload, '무료 판독 배정을 완료하지 못했습니다. 잠시 후 다시 시도해주세요.')
+                );
+            }
+            if (isBetaAdmissionPending(payload)) {
+                throw new Error(
+                    betaAdmissionFailureMessage(payload)
+                    ?? '판독 배정을 확인하고 있습니다. 잠시 후 다시 시도해주세요.'
+                );
+            }
+            const requestId = payload && typeof payload === 'object'
+                ? Reflect.get(payload, 'requestId')
+                : null;
+            if (typeof requestId !== 'string' || !UUID_PATTERN.test(requestId)) {
+                throw new Error('판독 시작 응답을 확인할 수 없습니다.');
+            }
+            if (!scope.isCurrent()) return null;
+            if (!analysisStartedTrackedRef.current.has(requestId)) {
+                analysisStartedTrackedRef.current.add(requestId);
+                if (claimAnalysisStart(availableAnalyticsStorage(), requestId, Date.now())) {
+                    trackEvent(EVENTS.ANALYSIS_STARTED, {
+                        request_id: requestId,
+                        plan_id: planId,
+                        preflight_id: preflight.preflightId,
+                    });
+                }
+            }
+            return requestId;
+        } catch (cause) {
+            if (cause instanceof Error && cause.name === 'AbortError') return null;
+            if (scope.isCurrent()) {
+                setError(cause instanceof Error
+                    ? cause.message
+                    : '무료 판독 배정을 완료하지 못했습니다. 잠시 후 다시 시도해주세요.');
+            }
+            return null;
+        } finally {
+            const current = scope.isCurrent();
+            scope.finish();
+            if (current) setStarting(false);
+        }
+    }, [coordinator, flow, flowConfig, preflight]);
+
     const reset = useCallback(() => {
         coordinator.beginLifecycle();
         entitlementScopeRef.current = null;
@@ -779,6 +909,7 @@ export function useAnalysisV2Preflight() {
         refreshPreflight,
         hasTestEntitlement,
         startAnalysis,
+        admitBetaAnalysis,
         reset,
     };
 }

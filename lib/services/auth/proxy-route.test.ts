@@ -58,6 +58,26 @@ describe('authentication proxy redirects', () => {
         );
     });
 
+    it('redirects an anonymous beta-test visitor to the exact internal login return path', async () => {
+        mockAuthenticatedUser(null);
+
+        const response = await proxy(new NextRequest('http://localhost:3000/betatest'));
+
+        expect(response.headers.get('location')).toBe(
+            'http://localhost:3000/login?redirectTo=%2Fbetatest'
+        );
+    });
+
+    it('does not accept an external beta-test return destination after authentication', async () => {
+        mockAuthenticatedUser('123e4567-e89b-42d3-a456-426614174000');
+
+        const response = await proxy(new NextRequest(
+            'http://localhost:3000/login?redirectTo=https%3A%2F%2Fattacker.example%2Fbetatest'
+        ));
+
+        expect(response.headers.get('location')).toBe('http://localhost:3000/analyze');
+    });
+
     it('captures the first landing as an HttpOnly bounded label and preserves it', async () => {
         mockAuthenticatedUser(null);
         const first = await proxy(new NextRequest('https://yeosachin.com/?utm_source=instagram&token=secret'));
