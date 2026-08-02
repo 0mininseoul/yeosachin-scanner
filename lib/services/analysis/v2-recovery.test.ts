@@ -10,6 +10,14 @@ vi.mock('@/lib/supabase/admin', () => ({ supabaseAdmin: {} }));
 
 const requestId = '123e4567-e89b-42d3-a456-426614174000';
 const reservationToken = '223e4567-e89b-42d3-a456-426614174000'; // gitleaks:allow -- UUID fixture
+const emptyBetaRecovery = {
+    betaCreditRecovered: 0,
+    betaCreditArchived: 0,
+    betaCreditRecoveryFailures: 0,
+    betaCreditArchiveFailures: 0,
+    betaCreditRefreshAttempts: 0,
+    betaCreditRefreshFailures: 0,
+} as const;
 
 function job(
     jobKey: string,
@@ -111,6 +119,7 @@ describe('analysis V2 dispatch recovery', () => {
             lookup,
             cleanupTerminalMedia,
         })).resolves.toEqual({
+            ...emptyBetaRecovery,
             scanned: 3,
             dispatched: 2,
             taskPresent: 1,
@@ -245,6 +254,7 @@ describe('analysis V2 dispatch recovery', () => {
                 throw new Error('temporary cleanup failure');
             },
         })).resolves.toEqual({
+            ...emptyBetaRecovery,
             scanned: 0,
             dispatched: 0,
             taskPresent: 0,
@@ -287,6 +297,7 @@ describe('analysis V2 dispatch recovery', () => {
             reconcileProviderUsage,
             cleanupTerminalMedia: vi.fn(async () => undefined),
         })).resolves.toEqual({
+            ...emptyBetaRecovery,
             scanned: 0,
             dispatched: 0,
             taskPresent: 0,
@@ -445,5 +456,67 @@ describe('analysis V2 dispatch recovery', () => {
                 throw new Error('audit service unavailable');
             },
         })).resolves.toMatchObject({ failed: 0 });
+    });
+
+    it('runs provider reconciliation before required beta DB work and advisory refresh', async () => {
+        const events: string[] = [];
+        const dependencies = providerRecovery();
+        dependencies.cleanupProviderRuns.mockImplementation(async () => {
+            events.push('provider-cleanup');
+            return { scanned: 0, settled: 0, failed: 0, unconfirmedStarts: 0, hasMore: false };
+        });
+        dependencies.reconcileProviderUsage.mockImplementation(async () => {
+            events.push('provider-reconcile');
+            return { eligible: 0, reconciled: 0, failed: 0, hasMore: false };
+        });
+        const summary = await recoverAnalysisV2Jobs({
+            ...dependencies,
+            store: store([]),
+            recoverBetaCredit: async () => { events.push('beta-recover'); return 2; },
+            archiveBetaCredit: async () => { events.push('beta-archive'); return 1; },
+            refreshBetaCredit: async () => { events.push('beta-refresh'); },
+        });
+        expect(events).toEqual([
+            'provider-cleanup', 'provider-reconcile',
+            'beta-recover', 'beta-archive', 'beta-refresh',
+        ]);
+        expect(summary).toMatchObject({
+            betaCreditRecovered: 2,
+            betaCreditArchived: 1,
+            betaCreditRefreshAttempts: 1,
+            betaCreditRefreshFailures: 0,
+        });
+    });
+
+    it('archives after recovery failure and reports an isolated refresh failure', async () => {
+        const archiveBetaCredit = vi.fn(async () => 3);
+        const refreshBetaCredit = vi.fn(async () => { throw new Error('refresh'); });
+        const failedRecovery = await recoverAnalysisV2Jobs({
+            ...providerRecovery(),
+            store: store([]),
+            recoverBetaCredit: async () => { throw new Error('recover'); },
+            archiveBetaCredit,
+            refreshBetaCredit,
+        });
+        expect(archiveBetaCredit).toHaveBeenCalledOnce();
+        expect(refreshBetaCredit).not.toHaveBeenCalled();
+        expect(failedRecovery).toMatchObject({
+            betaCreditRecoveryFailures: 1,
+            betaCreditArchived: 3,
+            betaCreditRefreshAttempts: 0,
+        });
+
+        const refreshFailure = await recoverAnalysisV2Jobs({
+            ...providerRecovery(),
+            store: store([]),
+            recoverBetaCredit: async () => 1,
+            archiveBetaCredit: async () => 0,
+            refreshBetaCredit,
+        });
+        expect(refreshFailure).toMatchObject({
+            betaCreditRecovered: 1,
+            betaCreditRefreshAttempts: 1,
+            betaCreditRefreshFailures: 1,
+        });
     });
 });

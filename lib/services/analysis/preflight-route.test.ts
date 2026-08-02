@@ -23,6 +23,8 @@ const mocks = vi.hoisted(() => ({
     insertLandingLead: vi.fn(),
     resolveDispatch: vi.fn(),
     trustedAccessMode: vi.fn(),
+    betaEnabled: vi.fn(),
+    betaAccess: vi.fn(),
     admin: {
         from: vi.fn(),
     },
@@ -36,6 +38,7 @@ const mocks = vi.hoisted(() => ({
     store: {
         createOrReplay: vi.fn(),
         findForOwner: vi.fn(),
+        hasBetaEntryProvenance: vi.fn(),
         reserveDispatch: vi.fn(),
         markDispatched: vi.fn(),
         claim: vi.fn(),
@@ -85,6 +88,11 @@ vi.mock('@/lib/services/analysis/preflight-tasks', async (importOriginal) => {
 });
 vi.mock('@/lib/services/analysis/v2-execution-gate', () => ({
     isAnalysisV2AdmissionAvailable: mocks.admissionAvailable,
+}));
+vi.mock('@/lib/services/analysis/betatest-access', async importOriginal => ({
+    ...(await importOriginal<typeof import('./betatest-access')>()),
+    betaTestFreePoolEnabled: mocks.betaEnabled,
+    hasBetaTestAccess: mocks.betaAccess,
 }));
 vi.mock('@/lib/services/leads/store', () => ({
     insertLandingLead: mocks.insertLandingLead,
@@ -191,6 +199,8 @@ describe('preflight owner routes', () => {
         mocks.insertLandingLead.mockResolvedValue(undefined);
         mocks.resolveDispatch.mockReturnValue({ mode: 'queue', config: taskConfig });
         mocks.trustedAccessMode.mockReturnValue('test_entitlement');
+        mocks.betaEnabled.mockReturnValue(true);
+        mocks.betaAccess.mockResolvedValue(true);
         mocks.store.createOrReplay.mockResolvedValue({
             preflightId,
             expiresAt,
@@ -205,6 +215,7 @@ describe('preflight owner routes', () => {
             readySnapshot: null,
             exclusionDecision: 'pending',
         });
+        mocks.store.hasBetaEntryProvenance.mockResolvedValue(false);
         mocks.store.reserveDispatch.mockResolvedValue({
             shouldEnqueue: true,
             generation: 1,
@@ -253,6 +264,30 @@ describe('preflight owner routes', () => {
         }))).status).toBe(400);
         expect((await createPreflight(postRequest(undefined, 'short'))).status).toBe(400);
         expect(mocks.store.createOrReplay).not.toHaveBeenCalled();
+    });
+
+    it('keeps ordinary preflight isolated from beta body, header, query, and referrer hints', async () => {
+        mocks.trustedAccessMode.mockReturnValue('production');
+        const response = await createPreflight(new Request(
+            'https://example.com/api/analysis/preflight?channel=betatest',
+            {
+                method: 'POST',
+                headers: {
+                    'content-type': 'application/json',
+                    'idempotency-key': 'preflight-key-000000000000',
+                    'x-analysis-beta': 'true',
+                    referer: 'https://example.com/analyze?betatest=true',
+                },
+                body: JSON.stringify({ targetInstagramId: 'target.name' }),
+            }
+        ));
+        expect(response.status).toBe(202);
+        expect(mocks.store.createOrReplay).toHaveBeenCalledWith(
+            expect.objectContaining({ accessMode: 'production' })
+        );
+        expect(mocks.enqueue).toHaveBeenCalledWith(
+            preflightId, 1, expect.any(Object)
+        );
     });
 
     it('blocks new intake without stopping already authenticated workers', async () => {
@@ -510,6 +545,7 @@ describe('preflight owner routes', () => {
         expect(mocks.after).toHaveBeenCalledOnce();
         await mocks.after.mock.calls[0][0]();
         expect(mocks.process).toHaveBeenCalledWith(preflightId, {
+            settleBetaCredit: expect.any(Function),
             observer: expect.any(Function),
         });
         expect(mocks.emit).toHaveBeenCalledWith({
@@ -668,6 +704,30 @@ describe('preflight owner routes', () => {
         expect(mocks.admin.from).not.toHaveBeenCalledWith('earlybird_plan_inventory');
     });
 
+    it('ends polling immediately for a retry-exhausted queue-unavailable block', async () => {
+        mocks.store.findForOwner.mockResolvedValue({
+            preflightId,
+            status: 'blocked',
+            expiresAt,
+            blockedCode: 'QUEUE_UNAVAILABLE',
+            readySnapshot: null,
+            exclusionDecision: 'pending',
+        });
+
+        const response = await getPreflight(new Request('https://example.com'), context());
+
+        expect(response.status).toBe(200);
+        await expect(response.json()).resolves.toEqual({
+            schemaVersion: 1,
+            preflightId,
+            expiresAt,
+            status: 'blocked',
+            exclusionDecision: 'pending',
+            code: 'QUEUE_UNAVAILABLE',
+        });
+        expect(mocks.admin.from).not.toHaveBeenCalledWith('earlybird_plan_inventory');
+    });
+
     it('owner-filters GET and maps expired rows to a bounded 410', async () => {
         expect((await getPreflight(new Request('https://example.com'), context())).status)
             .toBe(200);
@@ -795,6 +855,28 @@ describe('preflight owner routes', () => {
         }), context());
         expect(conflict.status).toBe(409);
         await expect(conflict.json()).resolves.toMatchObject({ code: 'PREFLIGHT_IMMUTABLE' });
+    });
+
+    it('rechecks both env and authenticated DB grant before a beta exclusion mutation', async () => {
+        mocks.store.hasBetaEntryProvenance.mockResolvedValue(true);
+        mocks.betaEnabled.mockReturnValue(false);
+        const disabled = await patchPreflight(new Request('https://example.com', {
+            method: 'PATCH',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ decision: 'skip' }),
+        }), context());
+        expect(disabled.status).toBe(403);
+        expect(mocks.store.setExclusion).not.toHaveBeenCalled();
+
+        mocks.betaEnabled.mockReturnValue(true);
+        mocks.betaAccess.mockResolvedValue(false);
+        const revoked = await patchPreflight(new Request('https://example.com', {
+            method: 'PATCH',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ decision: 'skip' }),
+        }), context());
+        expect(revoked.status).toBe(403);
+        expect(mocks.store.setExclusion).not.toHaveBeenCalled();
     });
 
     it('observes an unexpected exclusion persistence failure without changing its response', async () => {

@@ -4,12 +4,11 @@ import {
     selectApifyApiToken,
     selectAnalysisV2ApifyCredentialSlot,
 } from '@/lib/services/instagram/providers/apify-relationship';
-import {
-    APIFY_CREDENTIAL_SLOTS,
-    type ApifyCredentialSlot,
-} from '@/lib/services/instagram/providers/types';
+import type { ApifyCredentialSlot } from '@/lib/services/instagram/providers/types';
+import { BETA_APIFY_FREE_CREDENTIAL_SLOTS } from './beta-apify-credit-pool';
 
 export const AUTHORIZED_TEST_PROVIDER_POLICY_VERSION = 'authorized-free-e2e-v1' as const;
+export const BETATEST_FREE_POOL_PROVIDER_POLICY_VERSION = 'betatest-free-pool-v1' as const;
 
 export const AUTHORIZED_TEST_PROVIDER_OPERATION_KINDS = [
     'target-profile',
@@ -24,7 +23,33 @@ export const AUTHORIZED_TEST_PROVIDER_OPERATION_KINDS = [
 export type AuthorizedTestProviderOperationKind =
     (typeof AUTHORIZED_TEST_PROVIDER_OPERATION_KINDS)[number];
 
-const credentialSlotSchema = z.enum(APIFY_CREDENTIAL_SLOTS);
+export const BETATEST_PROVIDER_OPERATION_KINDS = [
+    'target-profile',
+    'relationship-followers',
+    'relationship-following',
+    'profile-fallback',
+    'profile-repair',
+    'target-likers',
+    'target-comments',
+    'candidate-likers',
+] as const;
+export type BetaTestProviderOperationKind =
+    (typeof BETATEST_PROVIDER_OPERATION_KINDS)[number];
+export type ProviderPolicyOperationKind =
+    | AuthorizedTestProviderOperationKind
+    | BetaTestProviderOperationKind;
+
+const AUTHORIZED_TEST_APIFY_CREDENTIAL_SLOTS = [
+    'primary',
+    'secondary',
+    'tertiary',
+    'quaternary',
+    'quinary',
+    'senary',
+] as const satisfies readonly ApifyCredentialSlot[];
+
+const credentialSlotSchema = z.enum(AUTHORIZED_TEST_APIFY_CREDENTIAL_SLOTS);
+const betaCredentialSlotSchema = z.enum(BETA_APIFY_FREE_CREDENTIAL_SLOTS);
 const operationSlotsSchema = z.object({
     'target-profile': credentialSlotSchema,
     'relationship-followers': credentialSlotSchema,
@@ -63,6 +88,52 @@ export const authorizedTestProviderExecutionPolicySchema = z.object({
 export type AuthorizedTestProviderExecutionPolicy = z.infer<
     typeof authorizedTestProviderExecutionPolicySchema
 >;
+
+const betaOperationSlotsSchema = z.object({
+    'target-profile': betaCredentialSlotSchema,
+    'relationship-followers': betaCredentialSlotSchema,
+    'relationship-following': betaCredentialSlotSchema,
+    'profile-fallback': betaCredentialSlotSchema,
+    'profile-repair': betaCredentialSlotSchema,
+    'target-likers': betaCredentialSlotSchema,
+    'target-comments': betaCredentialSlotSchema,
+    'candidate-likers': betaCredentialSlotSchema,
+}).strict();
+const betaBudgetUsdSchema = z.number().finite().gt(0).max(1_000).refine(value => (
+    Math.abs(value * 1_000_000_000_000 - Math.round(value * 1_000_000_000_000))
+        < 0.01
+), 'Budget must use no more than 12 decimal places.');
+export const betaOperationBudgetMapSchema = z.object({
+    'target-profile': betaBudgetUsdSchema,
+    'relationship-followers': betaBudgetUsdSchema,
+    'relationship-following': betaBudgetUsdSchema,
+    'profile-fallback': betaBudgetUsdSchema,
+    'profile-repair': betaBudgetUsdSchema,
+    'target-likers': betaBudgetUsdSchema,
+    'target-comments': betaBudgetUsdSchema,
+    'candidate-likers': betaBudgetUsdSchema,
+}).strict();
+export type BetaProviderOperationBudgetMap = z.infer<
+    typeof betaOperationBudgetMapSchema
+>;
+
+/** Frozen request policy emitted only by the beta admission allocator. */
+export const betaTestProviderExecutionPolicySchema = z.object({
+    mode: z.literal('betatest_free_pool'),
+    policyVersion: z.literal(BETATEST_FREE_POOL_PROVIDER_POLICY_VERSION),
+    operationSlots: betaOperationSlotsSchema,
+    operationBudgets: betaOperationBudgetMapSchema,
+}).strict();
+
+export type BetaTestProviderExecutionPolicy = z.infer<
+    typeof betaTestProviderExecutionPolicySchema
+>;
+export const providerExecutionPolicySchema = z.union([
+    authorizedTestProviderExecutionPolicySchema,
+    betaTestProviderExecutionPolicySchema,
+]);
+export type ProviderExecutionPolicy = z.infer<typeof providerExecutionPolicySchema>;
+export const ANALYSIS_BETA_POOL_BUDGET_DRIFT = 'ANALYSIS_BETA_POOL_BUDGET_DRIFT';
 
 const SLOT_ENV_KEYS: Readonly<Record<AuthorizedTestProviderOperationKind, string>> = {
     'target-profile': 'ANALYSIS_V2_AUTHORIZED_TEST_PROFILE_FALLBACK_SLOT',
@@ -167,21 +238,86 @@ export function assertAuthorizedTestProviderCredentialsAvailable(
     return policy;
 }
 
+export function assertProviderExecutionPolicyCredentialsAvailable(
+    rawPolicy: ProviderExecutionPolicy,
+    env: Record<string, string | undefined> = process.env
+): ProviderExecutionPolicy {
+    const policy = providerExecutionPolicySchema.parse(rawPolicy);
+    for (const slot of new Set(Object.values(policy.operationSlots))) {
+        void selectApifyApiToken(env, slot);
+    }
+    return policy;
+}
+
 export function resolveAnalysisV2ApifyCredentialSlot(input: {
     accessMode: PlanAccessMode;
-    policy: AuthorizedTestProviderExecutionPolicy | null;
-    operation: AuthorizedTestProviderOperationKind;
+    policy: ProviderExecutionPolicy | null;
+    operation: ProviderPolicyOperationKind;
     env?: Record<string, string | undefined>;
 }): ApifyCredentialSlot {
     if (input.policy === null) {
         return selectAnalysisV2ApifyCredentialSlot(input.env);
     }
-    if (input.accessMode !== 'test_entitlement') {
+    const policy = providerExecutionPolicySchema.parse(input.policy);
+    if (
+        policy.mode === 'test_operation_split'
+        && input.accessMode !== 'test_entitlement'
+    ) {
         throw new Error('ANALYSIS_V2_AUTHORIZED_TEST_SHARD_SCOPE_ERROR');
     }
-    const policy = assertAuthorizedTestProviderCredentialsAvailable(
-        input.policy,
-        input.env
-    );
-    return policy.operationSlots[input.operation];
+    if (policy.mode === 'betatest_free_pool' && input.accessMode !== 'production') {
+        throw new Error('ANALYSIS_V2_BETATEST_PROVIDER_POLICY_SCOPE_ERROR');
+    }
+    assertProviderExecutionPolicyCredentialsAvailable(policy, input.env);
+    if (policy.mode === 'test_operation_split' && input.operation === 'profile-repair') {
+        // Historical seven-key policies intentionally alias repair to fallback.
+        return policy.operationSlots['profile-fallback'];
+    }
+    if (!(input.operation in policy.operationSlots)) {
+        throw new Error('ANALYSIS_V2_PROVIDER_POLICY_OPERATION_ERROR');
+    }
+    return policy.operationSlots[input.operation as keyof typeof policy.operationSlots];
+}
+
+export function resolveAnalysisV2ApifyProviderBinding(input: {
+    accessMode: PlanAccessMode;
+    policy: ProviderExecutionPolicy | null;
+    operation: ProviderPolicyOperationKind;
+    maxChargeUsd: number;
+    env?: Record<string, string | undefined>;
+}): Readonly<{
+    credentialSlot: ApifyCredentialSlot;
+    frozenFamilyBudgetUsd: number | null;
+}> {
+    const credentialSlot = resolveAnalysisV2ApifyCredentialSlot(input);
+    if (input.policy?.mode !== 'betatest_free_pool') {
+        return Object.freeze({ credentialSlot, frozenFamilyBudgetUsd: null });
+    }
+    const policy = betaTestProviderExecutionPolicySchema.parse(input.policy);
+    const maxChargeUsd = betaBudgetUsdSchema.safeParse(input.maxChargeUsd);
+    if (
+        !maxChargeUsd.success
+        || maxChargeUsd.data > policy.operationBudgets[input.operation] + Number.EPSILON
+    ) {
+        throw new Error(ANALYSIS_BETA_POOL_BUDGET_DRIFT);
+    }
+    return Object.freeze({
+        credentialSlot,
+        frozenFamilyBudgetUsd: policy.operationBudgets[input.operation],
+    });
+}
+
+export function assertBetaProviderExecutionBudgetCatalog(input: {
+    policy: ProviderExecutionPolicy;
+    requiredBudgets: BetaProviderOperationBudgetMap;
+}): ProviderExecutionPolicy {
+    const policy = providerExecutionPolicySchema.parse(input.policy);
+    if (policy.mode !== 'betatest_free_pool') return policy;
+    const required = betaOperationBudgetMapSchema.safeParse(input.requiredBudgets);
+    if (!required.success || BETATEST_PROVIDER_OPERATION_KINDS.some(operation => (
+        required.data[operation] > policy.operationBudgets[operation] + Number.EPSILON
+    ))) {
+        throw new Error(ANALYSIS_BETA_POOL_BUDGET_DRIFT);
+    }
+    return policy;
 }

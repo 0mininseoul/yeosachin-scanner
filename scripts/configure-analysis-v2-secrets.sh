@@ -131,8 +131,8 @@ service_account_project() {
 
 validate_slot() {
   case "$1" in
-    primary|secondary|tertiary|quaternary|quinary|senary) ;;
-    *) die "ANALYSIS_V2_APIFY_API_TOKEN_SLOT must be primary, secondary, tertiary, quaternary, quinary, or senary" ;;
+    primary|secondary|tertiary|quaternary|quinary|senary|septenary) ;;
+    *) die "ANALYSIS_V2_APIFY_API_TOKEN_SLOT must be primary, secondary, tertiary, quaternary, quinary, senary, or septenary" ;;
   esac
 }
 

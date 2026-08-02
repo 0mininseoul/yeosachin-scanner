@@ -3,7 +3,11 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 const mocks = vi.hoisted(() => ({
     getConfig: vi.fn(),
     process: vi.fn(),
+    prepareBeta: vi.fn(),
+    enqueue: vi.fn(),
     processAdmission: vi.fn(),
+    settleBetaCredit: vi.fn(),
+    refreshBetaCredit: vi.fn(),
     verify: vi.fn(),
     emit: vi.fn(),
     observeRoute: vi.fn((
@@ -25,7 +29,11 @@ vi.mock('@/lib/observability/server', () => ({
 }));
 vi.mock('@/lib/services/analysis/preflight', async (importOriginal) => {
     const actual = await importOriginal<typeof import('./preflight')>();
-    return { ...actual, processPreflight: mocks.process };
+    return {
+        ...actual,
+        processPreflight: mocks.process,
+        prepareBetaPreflightDispatch: mocks.prepareBeta,
+    };
 });
 vi.mock('@/lib/services/analysis/fresh-plan-admission', () => ({
     processAnalysisV2FreshAdmission: mocks.processAdmission,
@@ -33,7 +41,18 @@ vi.mock('@/lib/services/analysis/fresh-plan-admission', () => ({
 vi.mock('@/lib/services/analysis/preflight-tasks', () => ({
     getPreflightTasksConfig: mocks.getConfig,
     verifyPreflightTaskAuthorization: mocks.verify,
+    enqueuePreflightTask: mocks.enqueue,
 }));
+vi.mock('@/lib/services/analysis/beta-apify-credit-settlement-runtime', async (importOriginal) => {
+    const actual = await importOriginal<
+        typeof import('./beta-apify-credit-settlement-runtime')
+    >();
+    return {
+        ...actual,
+        settleBetaApifyPreflightCredit: mocks.settleBetaCredit,
+        refreshBetaApifyCreditSnapshots: mocks.refreshBetaCredit,
+    };
+});
 
 import { POST } from '@/app/api/analysis/preflight/worker/route';
 import { PreflightWorkerRetryError } from './preflight';
@@ -49,10 +68,18 @@ const config = {
     serviceAccountEmail: 'preflight-task@example-project.iam.gserviceaccount.com',
 };
 
-function request(body: unknown, authorization = 'Bearer signed') {
+function request(
+    body: unknown,
+    authorization = 'Bearer signed',
+    extraHeaders: Record<string, string> = {}
+) {
     return new Request('https://worker.example.com/api/analysis/preflight/worker', {
         method: 'POST',
-        headers: { authorization, 'Content-Type': 'application/json' },
+        headers: {
+            authorization,
+            'Content-Type': 'application/json',
+            ...extraHeaders,
+        },
         body: JSON.stringify(body),
     });
 }
@@ -63,7 +90,11 @@ describe('preflight worker route', () => {
         mocks.getConfig.mockReturnValue(config);
         mocks.verify.mockResolvedValue(true);
         mocks.process.mockResolvedValue('ready');
+        mocks.prepareBeta.mockResolvedValue('prepared');
+        mocks.enqueue.mockResolvedValue('enqueued');
         mocks.processAdmission.mockResolvedValue('ready');
+        mocks.settleBetaCredit.mockResolvedValue(false);
+        mocks.refreshBetaCredit.mockResolvedValue(undefined);
     });
 
     it('rejects an unverified caller before parsing or claiming work', async () => {
@@ -105,9 +136,12 @@ describe('preflight worker route', () => {
         const response = await POST(request({ preflightId }));
         expect(response.status).toBe(200);
         expect(mocks.verify).toHaveBeenCalledWith('Bearer signed', { config });
-        expect(mocks.process).toHaveBeenCalledWith(preflightId, {
+        expect(mocks.process).toHaveBeenCalledWith(preflightId, expect.objectContaining({
+            betaCreditCoordinator: expect.any(Object),
+            settleBetaCredit: expect.any(Function),
+            refreshBetaCredit: expect.any(Function),
             observer: expect.any(Function),
-        });
+        }));
         await expect(response.json()).resolves.toEqual({ status: 'ready' });
         expect(mocks.emit).toHaveBeenCalledWith({
             event: 'preflight.profile_collected',
@@ -155,9 +189,103 @@ describe('preflight worker route', () => {
                 generation: 3,
                 dispatchGeneration: 2,
                 dispatchToken,
-            }
+            },
+            expect.objectContaining({ betaCreditCoordinator: expect.any(Object) })
         );
         expect(mocks.process).not.toHaveBeenCalled();
+    });
+
+    it('prepares beta credit only with the persisted generation/token fence', async () => {
+        const prepareToken = preflightId.replace(/^1/, '3');
+        const response = await POST(request({
+            preflightId,
+            kind: 'beta_prepare',
+            userId: '223e4567-e89b-42d3-a456-426614174000',
+            prepareGeneration: 2,
+            prepareToken,
+        }));
+        expect(response.status).toBe(200);
+        expect(mocks.prepareBeta).toHaveBeenCalledWith(expect.objectContaining({
+            preflightId,
+            userId: '223e4567-e89b-42d3-a456-426614174000',
+            prepareGeneration: 2,
+            prepareToken,
+            enqueue: expect.any(Function),
+        }));
+        expect(mocks.process).not.toHaveBeenCalled();
+        await expect(response.json()).resolves.toEqual({ status: 'prepared' });
+    });
+
+    it('acknowledges retry-exhausted and stale beta prepare deliveries as noops', async () => {
+        const payload = {
+            preflightId,
+            kind: 'beta_prepare' as const,
+            userId: '223e4567-e89b-42d3-a456-426614174000',
+            prepareGeneration: 2,
+            prepareToken: preflightId.replace(/^1/, '3'),
+        };
+        mocks.prepareBeta.mockResolvedValue('noop');
+
+        const exhausted = await POST(request(payload, 'Bearer signed', {
+            'X-CloudTasks-TaskRetryCount': '6',
+        }));
+        const stale = await POST(request(payload));
+
+        expect(exhausted.status).toBe(200);
+        expect(stale.status).toBe(200);
+        await expect(exhausted.json()).resolves.toEqual({ status: 'noop' });
+        await expect(stale.json()).resolves.toEqual({ status: 'noop' });
+        expect(mocks.process).not.toHaveBeenCalled();
+        expect(mocks.enqueue).not.toHaveBeenCalled();
+    });
+
+    it('passes only a validated Cloud Tasks delivery retry count to beta prepare', async () => {
+        const payload = {
+            preflightId,
+            kind: 'beta_prepare' as const,
+            userId: '223e4567-e89b-42d3-a456-426614174000',
+            prepareGeneration: 2,
+            prepareToken: preflightId.replace(/^1/, '3'),
+        };
+
+        expect((await POST(request(payload, 'Bearer signed', {
+            'X-CloudTasks-TaskRetryCount': '6',
+        }))).status).toBe(200);
+        expect((await POST(request(payload, 'Bearer signed', {
+            'X-CloudTasks-TaskRetryCount': '-1',
+        }))).status).toBe(200);
+
+        expect(mocks.prepareBeta).toHaveBeenNthCalledWith(
+            1,
+            expect.objectContaining({ deliveryRetryCount: 6 })
+        );
+        expect(mocks.prepareBeta).toHaveBeenNthCalledWith(
+            2,
+            expect.objectContaining({ deliveryRetryCount: null })
+        );
+    });
+
+    it('refreshes the exact beta pool only after a fresh-admission block settles credit', async () => {
+        mocks.processAdmission.mockResolvedValue('blocked');
+        mocks.settleBetaCredit.mockResolvedValue(true);
+
+        const response = await POST(request({
+            preflightId,
+            kind: 'fresh_admission',
+            generation: 3,
+            dispatchGeneration: 2,
+            dispatchToken,
+        }));
+
+        expect(response.status).toBe(200);
+        expect(mocks.settleBetaCredit).toHaveBeenCalledWith(
+            expect.anything(), preflightId,
+            { telemetry: expect.objectContaining({ emit: expect.any(Function) }) }
+        );
+        expect(mocks.refreshBetaCredit).toHaveBeenCalledWith(
+            expect.anything(),
+            { telemetry: expect.objectContaining({ emit: expect.any(Function) }) }
+        );
     });
 
     it('rejects an admission task that omits its durable dispatch fence', async () => {

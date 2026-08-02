@@ -1,6 +1,8 @@
 import { describe, expect, it, vi } from 'vitest';
 import {
     PreflightTaskEnqueueError,
+    betaPreflightPrepareTaskId,
+    enqueueBetaPreflightPrepareTask,
     enqueueFreshAdmissionTask,
     enqueuePreflightTask,
     freshAdmissionTaskId,
@@ -13,6 +15,7 @@ import {
 
 const preflightId = '123e4567-e89b-42d3-a456-426614174000';
 const dispatchToken = '123e4567-e89b-42d3-a456-426614174005';
+const prepareToken = preflightId.replace(/0$/, '6');
 const config: PreflightTasksConfig = {
     project: 'example-project',
     location: 'asia-northeast3',
@@ -267,6 +270,37 @@ describe('preflight Cloud Tasks', () => {
                 dispatchGeneration: 2,
                 dispatchToken,
             });
+    });
+
+    it('replays a deterministic beta-prepare task without reserving ordinary dispatch', async () => {
+        const createTask = vi.fn().mockRejectedValue({ code: 6 });
+        const client = {
+            queuePath: vi.fn(() => 'queue-path'),
+            taskPath: vi.fn((_p: string, _l: string, _q: string, task: string) => (
+                `queue-path/tasks/${task}`
+            )),
+            createTask,
+        };
+        const ownerId = '223e4567-e89b-42d3-a456-426614174000';
+        expect(betaPreflightPrepareTaskId(preflightId, 3, prepareToken))
+            .toBe(`preflight-beta-prepare-${preflightId}-g3-t${prepareToken}`);
+        await expect(enqueueBetaPreflightPrepareTask(
+            preflightId, ownerId, 3, prepareToken, { config, client }
+        ))
+            .resolves.toBe('exists');
+        const task = createTask.mock.calls[0][0] as { task: { httpRequest: { body: string } } };
+        expect(JSON.parse(Buffer.from(task.task.httpRequest.body, 'base64').toString()))
+            .toEqual({
+                kind: 'beta_prepare', preflightId, userId: ownerId,
+                prepareGeneration: 3, prepareToken,
+            });
+    });
+
+    it('rejects malformed beta prepare fences before touching Cloud Tasks', async () => {
+        expect(() => betaPreflightPrepareTaskId(preflightId, 0, prepareToken))
+            .toThrow('invalid beta prepare generation');
+        expect(() => betaPreflightPrepareTaskId(preflightId, 1, 'not-a-token'))
+            .toThrow('invalid beta prepare token');
     });
 
     it('accepts only a verified token from the configured service account', async () => {
