@@ -91,3 +91,8 @@ score audit는 결과 확정 이후의 background 작업이다. final score chec
 - rollback은 Vercel admission gate와 Cloud Run worker/recovery/automatic-fulfillment gate를 각각 필요한 범위에서 끈다. 이미 durable admission 상태인 작업은 recovery로 drain하며, 결제 상태를 rollback 수단으로 바꾸지 않는다.
 - R2 capture/purge, provider reconciliation, Gemini quarantine, task delivery fence의 오류는 각각의 durable ledger를 먼저 조사한다. ambiguous provider start에 replacement run을 만들지 않는다.
 - token, DB password, cookie, request/order/user UUID, provider hidden data, prompt/evidence/media URL을 문서·console·telemetry에 기록하지 않는다. server-only secret은 `NEXT_PUBLIC_`에 넣지 않는다. 공유 token은 접근 권한이므로 로그에 남기지 않는다.
+# Betatest free-credit pool
+
+For the dedicated `/betatest` Apify free-credit admission, recovery, alerts, grant
+procedure, rollout, and rollback, see
+[`betatest-apify-credit-pool-runbook.md`](./betatest-apify-credit-pool-runbook.md).

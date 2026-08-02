@@ -7,6 +7,10 @@ import {
 } from './beta-apify-preflight-coordinator';
 import { refreshBetaApifyCreditPool } from './beta-apify-credit-pool';
 import { z } from 'zod';
+import {
+    emitBetaApifyCreditTelemetry,
+    type BetaApifyCreditTelemetry,
+} from './beta-apify-credit-telemetry';
 
 /** Fixed messages only: provider responses and account identities are never logged. */
 export const BETA_APIFY_SETTLEMENT_LOG = 'BETATEST_APIFY_CREDIT_SETTLEMENT_DEFERRED';
@@ -70,25 +74,55 @@ function boundedClient(client: BetaApifyPoolStoreClient): BetaApifyPoolStoreClie
     });
 }
 
-async function targeted(client: BetaApifyPoolStoreClient, name: string, field: string, id: string): Promise<boolean> {
+async function targeted(client: BetaApifyPoolStoreClient, name: string, field: string, id: string): Promise<z.infer<typeof targetedSettlementSchema> | null> {
     const result = await boundedRpc(client, name, { [field]: uuid(id) });
     if (result.error) throw new Error('ANALYSIS_BETA_POOL_PERSISTENCE_ERROR');
     const data = Array.isArray(result.data) && result.data.length === 1
         ? result.data[0]
         : result.data;
-    if (data === null) return false;
-    if (!targetedSettlementSchema.safeParse(data).success) {
+    if (data === null) return null;
+    const parsed = targetedSettlementSchema.safeParse(data);
+    if (!parsed.success) {
         throw new Error('ANALYSIS_BETA_POOL_PERSISTENCE_ERROR');
     }
-    return true;
+    return parsed.data;
 }
 
-export async function settleBetaApifyRequestCredit(client: BetaApifyPoolStoreClient, requestId: string): Promise<boolean> {
-    return targeted(client, 'settle_analysis_beta_apify_request_credit', 'p_request_id', requestId);
+type BetaApifyTelemetryOptions = Readonly<{ telemetry?: BetaApifyCreditTelemetry }>;
+
+async function settle(
+    client: BetaApifyPoolStoreClient,
+    name: string,
+    field: string,
+    id: string,
+    options: BetaApifyTelemetryOptions,
+): Promise<boolean> {
+    const settled = await targeted(client, name, field, id);
+    if (settled) {
+        emitBetaApifyCreditTelemetry(options.telemetry, {
+            event: 'betatest_apify_credit.settlement_completed',
+            severity: 'info',
+            actualUsd: settled.actualUsd,
+            releasedUsd: settled.releasedUsd,
+        });
+    }
+    return settled !== null;
 }
 
-export async function settleBetaApifyPreflightCredit(client: BetaApifyPoolStoreClient, preflightId: string): Promise<boolean> {
-    return targeted(client, 'settle_analysis_beta_apify_preflight_credit', 'p_preflight_id', preflightId);
+export async function settleBetaApifyRequestCredit(
+    client: BetaApifyPoolStoreClient,
+    requestId: string,
+    options: BetaApifyTelemetryOptions = {},
+): Promise<boolean> {
+    return settle(client, 'settle_analysis_beta_apify_request_credit', 'p_request_id', requestId, options);
+}
+
+export async function settleBetaApifyPreflightCredit(
+    client: BetaApifyPoolStoreClient,
+    preflightId: string,
+    options: BetaApifyTelemetryOptions = {},
+): Promise<boolean> {
+    return settle(client, 'settle_analysis_beta_apify_preflight_credit', 'p_preflight_id', preflightId, options);
 }
 
 export async function recoverBetaApifyCredit(client: BetaApifyPoolStoreClient, limit = 100): Promise<number> {
@@ -117,9 +151,11 @@ export async function refreshBetaApifyCreditSnapshots(
         env?: Record<string, string | undefined>;
         now?: () => number;
         clientForSlot?: ReturnType<typeof createServerBetaApifyCreditClientFactory>;
+        telemetry?: BetaApifyCreditTelemetry;
     } = {}
 ): Promise<void> {
     const now = dependencies.now ?? Date.now;
+    const startedAt = now();
     const timeoutMs = 15_000;
     let timer: ReturnType<typeof setTimeout> | undefined;
     const refresh = refreshBetaApifyCreditPool({
@@ -138,10 +174,28 @@ export async function refreshBetaApifyCreditSnapshots(
     ]).finally(() => {
         if (timer) clearTimeout(timer);
     });
-    await createBetaApifyCreditPoolStore(client).upsertSnapshots(refreshed.map(snapshot => ({
-        ...snapshot,
-        healthState: 'healthy' as const,
-    })));
+    try {
+        await createBetaApifyCreditPoolStore(client).upsertSnapshots(refreshed.map(snapshot => ({
+            ...snapshot,
+            healthState: 'healthy' as const,
+        })));
+        emitBetaApifyCreditTelemetry(dependencies.telemetry, {
+            event: 'betatest_apify_credit.refresh_completed',
+            severity: 'info',
+            durationMs: Math.max(0, now() - startedAt),
+            totalEffectiveHeadroomUsd: refreshed.reduce(
+                (total, snapshot) => total + snapshot.effectiveHeadroomUsd, 0
+            ),
+            staleSnapshotCount: 0,
+        });
+    } catch (error) {
+        emitBetaApifyCreditTelemetry(dependencies.telemetry, {
+            event: 'betatest_apify_credit.refresh_failed',
+            severity: 'warn',
+            durationMs: Math.max(0, now() - startedAt),
+        });
+        throw error;
+    }
 }
 
 export async function bestEffortBetaApifySettlement(operation: () => Promise<void>): Promise<boolean> {

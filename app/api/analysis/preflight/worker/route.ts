@@ -141,7 +141,7 @@ async function handlePOST(
                     supabaseAdmin, preflightId
                 ),
                 refreshBetaCredit: () => refreshBetaApifyCreditSnapshots(
-                    supabaseAdmin
+                    supabaseAdmin, { telemetry: operationalLogger }
                 ),
                 observer(observation: PreflightProcessObservation) {
                     if (observation.type === 'failed') profileFailureObserved = true;
@@ -156,7 +156,9 @@ async function handlePOST(
                 );
                 if (processed) {
                     await bestEffortBetaApifyRefresh(() => (
-                        refreshBetaApifyCreditSnapshots(supabaseAdmin)
+                        refreshBetaApifyCreditSnapshots(
+                            supabaseAdmin, { telemetry: operationalLogger }
+                        )
                     ));
                 }
             });

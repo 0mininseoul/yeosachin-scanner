@@ -53,6 +53,14 @@ export const ALLOWED_FIELD_NAMES = [
     'plan_id',
     'amount_krw',
     'webhook_event_type',
+    'credential_slot',
+    'total_effective_headroom_usd',
+    'reservation_usd',
+    'actual_usd',
+    'released_usd',
+    'stale_snapshot_count',
+    'settlement_lag_ms',
+    'active_allocation_count',
 ] as const;
 
 type SanitizedValue = string | number | boolean | null;
@@ -100,6 +108,11 @@ export const OPERATIONAL_EVENT_NAMES = [
     'gemini.stage_completed',
     'gemini.stage_rate_limited',
     'gemini.stage_failed',
+    'betatest_apify_credit.refresh_completed',
+    'betatest_apify_credit.refresh_failed',
+    'betatest_apify_credit.allocation_accepted',
+    'betatest_apify_credit.allocation_rejected',
+    'betatest_apify_credit.settlement_completed',
 ] as const;
 
 export const OPERATIONAL_ERROR_CODES = [
@@ -336,6 +349,9 @@ const REGISTERED_PHASES = new Set<string>(OPERATIONAL_PHASES);
 const REGISTERED_DISPOSITIONS = new Set<string>(OPERATIONAL_DISPOSITIONS);
 const REGISTERED_QUEUE_NAMES = new Set<string>(OPERATIONAL_QUEUE_NAMES);
 const REGISTERED_WEBHOOK_EVENT_TYPES = new Set<string>(OPERATIONAL_WEBHOOK_EVENT_TYPES);
+const REGISTERED_BETA_APIFY_SLOTS = new Set<string>([
+    'primary', 'tertiary', 'quaternary', 'quinary', 'senary', 'septenary',
+]);
 
 const METHODS = new Set([
     'CONNECT',
@@ -499,6 +515,18 @@ function sanitizeField(name: string, value: unknown): SanitizedValue | undefined
             return safeFiniteNumber(value, 0, 1_000_000_000, true);
         case 'webhook_event_type':
             return safeExactRegistryValue(value, REGISTERED_WEBHOOK_EVENT_TYPES);
+        case 'credential_slot':
+            return safeExactRegistryValue(value, REGISTERED_BETA_APIFY_SLOTS);
+        case 'total_effective_headroom_usd':
+        case 'reservation_usd':
+        case 'actual_usd':
+        case 'released_usd':
+            return safeFiniteNumber(value, 0, 100_000_000);
+        case 'stale_snapshot_count':
+        case 'active_allocation_count':
+            return safeFiniteNumber(value, 0, 1_000_000, true);
+        case 'settlement_lag_ms':
+            return safeFiniteNumber(value, 0, 86_400_000);
         default:
             return undefined;
     }

@@ -20,6 +20,10 @@ import {
     getBetaApifyOperationBudgetCatalog,
     getRequiredBetaApifyOperationBudgetCatalog,
 } from './beta-apify-operation-budget';
+import {
+    emitBetaApifyCreditTelemetry,
+    type BetaApifyCreditTelemetry,
+} from './beta-apify-credit-telemetry';
 
 /** Public boundary for a checkout-free beta start. Never forwards provider details. */
 export const BETA_APIFY_PLAN_ADMISSION_ERROR = BETA_APIFY_POOL_CAPACITY_ERROR;
@@ -330,6 +334,7 @@ export async function admitBetaApifyPlan(input: Readonly<{
     maxSnapshotAgeSeconds: number;
     store: BetaApifyPlanAdmissionStore;
     env?: Record<string, string | undefined>;
+    telemetry?: BetaApifyCreditTelemetry;
 }>): Promise<z.infer<typeof resultSchema>> {
     const preflightId = validUuid(input.preflightId);
     const userId = validUuid(input.userId);
@@ -357,17 +362,32 @@ export async function admitBetaApifyPlan(input: Readonly<{
     try { snapshots = await input.store.loadSnapshots(age); } catch (error) {
         throw sanitizedBoundaryError(error);
     }
-    const allocation = planBetaApifyCreditAllocation({
-        effectiveHeadrooms: snapshots,
-        targetProfileSlot: hold.credentialSlot,
-        selectedPlanId,
-        env: input.env,
-    });
+    let allocation;
+    try {
+        allocation = planBetaApifyCreditAllocation({
+            effectiveHeadrooms: snapshots,
+            targetProfileSlot: hold.credentialSlot,
+            selectedPlanId,
+            env: input.env,
+        });
+    } catch (error) {
+        emitBetaApifyCreditTelemetry(input.telemetry, {
+            event: 'betatest_apify_credit.allocation_rejected',
+            severity: 'warn',
+        });
+        throw error;
+    }
     try {
         const result = await input.store.activate({
             preflightId, userId, admissionToken, admissionGeneration, selectedPlanId, maxSnapshotAgeSeconds: age,
             operationSlotMap: allocation.operationSlotMap,
             operationBudgetMap: allocation.operationBudgetMap,
+        });
+        emitBetaApifyCreditTelemetry(input.telemetry, {
+            event: 'betatest_apify_credit.allocation_accepted',
+            severity: 'info',
+            reservationUsd: Object.values(allocation.perSlotReservedUsd)
+                .reduce((total, amount) => total + amount, 0),
         });
         return parsedResult(result);
     } catch (error) {

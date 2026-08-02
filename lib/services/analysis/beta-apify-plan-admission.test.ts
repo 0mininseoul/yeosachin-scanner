@@ -54,6 +54,21 @@ describe('beta Apify plan admission', () => {
         expect(Object.values(input.operationSlotMap)).not.toContain('secondary');
     });
 
+    it('emits only an aggregate allocation success without user or preflight identity', async () => {
+        const emit = vi.fn();
+        const hold = { allocationId: '55555555-5555-4555-8555-555555555555', preflightId: PREFLIGHT_ID, credentialSlot: 'primary' as const, targetProfileBudgetUsd: BETA_APIFY_TARGET_PROFILE_BUDGET_USD };
+        await admitBetaApifyPlan({
+            preflightId: PREFLIGHT_ID, userId: USER_ID, admissionToken: ADMISSION_TOKEN, admissionGeneration: 1, selectedPlanId: 'basic', maxSnapshotAgeSeconds: 300,
+            env: { BETATEST_FREE_POOL_ENABLED: 'true' }, telemetry: { emit },
+            store: { replay: vi.fn().mockResolvedValue(null), loadPreflightHold: vi.fn().mockResolvedValue(hold), loadSnapshots: vi.fn().mockResolvedValue(snapshots()), activate: vi.fn().mockResolvedValue({ requestId: REQUEST_ID, initialJobKey: 'coordinator:bootstrap', allocationId: hold.allocationId, replayed: false }) },
+        });
+        expect(emit).toHaveBeenCalledWith(expect.objectContaining({
+            event: 'betatest_apify_credit.allocation_accepted',
+            fields: expect.objectContaining({ reservation_usd: expect.any(Number) }),
+        }));
+        expect(JSON.stringify(emit.mock.calls)).not.toMatch(new RegExp(`${USER_ID}|${PREFLIGHT_ID}`));
+    });
+
     it('keeps provider/store outages sanitized but distinct from capacity', async () => {
         const secret = 'apify-token-account-raw-payload';
         const error = await admitBetaApifyPlan({

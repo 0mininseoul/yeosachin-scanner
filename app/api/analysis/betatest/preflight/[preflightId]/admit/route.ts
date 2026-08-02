@@ -26,6 +26,7 @@ import {
 } from '@/lib/services/analysis/beta-apify-plan-admission';
 import { createBetaApifyCreditPoolStore } from '@/lib/services/analysis/beta-apify-credit-runtime';
 import { dispatchAnalysisV2Job } from '@/lib/services/analysis/v2-tasks';
+import { operationalLogger } from '@/lib/observability/server';
 
 const idSchema = z.string().uuid().transform(value => value.toLowerCase());
 const bodySchema = z.object({ planId: planIdSchema }).strict();
@@ -162,6 +163,7 @@ export async function POST(request: Request, { params }: RouteContext): Promise<
             selectedPlanId: body.data.planId,
             maxSnapshotAgeSeconds: 300,
             store: { ...poolStore, ...planStore },
+            telemetry: operationalLogger,
         });
         try { await dispatchAnalysisV2Job(result.requestId, result.initialJobKey); } catch {
             return failure(503, 'QUEUE_UNAVAILABLE', '분석 작업을 시작할 수 없습니다.');

@@ -31,6 +31,26 @@ describe('beta Apify terminal settlement runtime', () => {
         ]);
     });
 
+    it('records aggregate refresh and settlement telemetry without changing either result', async () => {
+        const emit = vi.fn();
+        const rpc = vi.fn().mockResolvedValue({ data: {
+            allocationId: id,
+            lifecycleState: 'settled',
+            settledFamilies: 1,
+            heldFamilies: 0,
+            actualUsd: 0.02,
+            releasedUsd: 0.03,
+        }, error: null });
+        await expect(settleBetaApifyRequestCredit({ rpc }, id, { telemetry: { emit } }))
+            .resolves.toBe(true);
+
+        expect(emit).toHaveBeenCalledWith(expect.objectContaining({
+            event: 'betatest_apify_credit.settlement_completed',
+            fields: expect.objectContaining({ actual_usd: 0.02, released_usd: 0.03 }),
+        }));
+        expect(JSON.stringify(emit.mock.calls)).not.toContain(id);
+    });
+
     it('bounds a hanging exact-six read and never starts the snapshot upsert', async () => {
         vi.useFakeTimers();
         const rpc = vi.fn();

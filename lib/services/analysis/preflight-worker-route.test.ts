@@ -281,7 +281,10 @@ describe('preflight worker route', () => {
         expect(mocks.settleBetaCredit).toHaveBeenCalledWith(
             expect.anything(), preflightId
         );
-        expect(mocks.refreshBetaCredit).toHaveBeenCalledWith(expect.anything());
+        expect(mocks.refreshBetaCredit).toHaveBeenCalledWith(
+            expect.anything(),
+            { telemetry: expect.objectContaining({ emit: expect.any(Function) }) }
+        );
     });
 
     it('rejects an admission task that omits its durable dispatch fence', async () => {

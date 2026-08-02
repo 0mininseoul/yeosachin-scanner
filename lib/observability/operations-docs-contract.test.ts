@@ -26,6 +26,37 @@ function dotenvNumber(document: string, key: string): number {
 }
 
 describe('analytics and observability disclosure contract', () => {
+    it('documents bounded betatest Apify pool telemetry, recovery, grants, and rollout', () => {
+        const runbook = source('docs/betatest-apify-credit-pool-runbook.md');
+        const operations = source('docs/analysis-v2-production-operations.md');
+        const normalizedRunbook = runbook.replace(/\s+/g, ' ');
+
+        for (const term of [
+            'refresh success/failure/latency',
+            'total effective headroom',
+            'reservation/actual/released USD',
+            'stale snapshot',
+            'settlement lag',
+            'active allocations',
+            'repeated refresh failure',
+            'negative/overcommitted invariant',
+            'unexpected beta use while the feature is disabled',
+            'frozen maps',
+            'idempotent',
+            'service-role',
+            'migration dry-run',
+            'numeric version',
+            'synthetic',
+            'live canary',
+            'no per-analysis deployment',
+            'runtime reservation',
+        ]) expect(normalizedRunbook).toContain(term);
+
+        expect(runbook).toContain('<USER_UUID_FROM_APPROVED_OUT_OF_BAND_SOURCE>');
+        expect(runbook).not.toMatch(/[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}/i);
+        expect(runbook).toMatch(/secondary[^\n]*(exclude|excluded|invalid)/i);
+        expect(operations).toContain('betatest-apify-credit-pool-runbook.md');
+    });
     it('discloses transient Groble matching and bounded analytics processing actually used', () => {
         const privacy = source('app/privacy/page.tsx');
         const disclosure = privacy.replace(/<[^>]*>/g, ' ').replace(/\s+/g, ' ');
