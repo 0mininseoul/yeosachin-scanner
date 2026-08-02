@@ -195,15 +195,17 @@ export function BetaTestClient() {
 
                         {exclusionDecided && preflight.status === 'ready' && (
                             <Panel className="mt-7 p-5 text-center">
-                                <Eyebrow className="justify-center">베타 테스트 · 무료 판독</Eyebrow>
-                                <h2 className="mt-3 text-[20px] font-extrabold text-fg">
-                                    {automaticAdmission || starting ? '무료 판독을 준비하고 있어요' : '무료 판독을 시작할 수 있어요'}
-                                </h2>
-                                <p className="mt-2 text-[13px] leading-relaxed text-fg-dim">
-                                    {automaticAdmission || starting
-                                        ? '무료 판독 자리를 배정한 뒤 바로 분석을 시작합니다.'
-                                        : '무료 판독을 바로 시작합니다.'}
-                                </p>
+                                <div role="status" aria-live="polite" aria-atomic="true">
+                                    <Eyebrow className="justify-center">베타 테스트 · 무료 판독</Eyebrow>
+                                    <h2 className="mt-3 text-[20px] font-extrabold text-fg">
+                                        {automaticAdmission || starting ? '무료 판독을 준비하고 있어요' : '무료 판독을 시작할 수 있어요'}
+                                    </h2>
+                                    <p className="mt-2 text-[13px] leading-relaxed text-fg-dim">
+                                        {automaticAdmission || starting
+                                            ? '무료 판독 자리를 배정한 뒤 바로 분석을 시작합니다.'
+                                            : '무료 판독을 바로 시작합니다.'}
+                                    </p>
+                                </div>
                                 {error && <p className="mt-4 border-l-2 border-blood pl-3 text-left text-[13px] text-blood-2" role="alert">{error}</p>}
                                 {!automaticAdmission && !starting && (
                                     <div className="mt-5">

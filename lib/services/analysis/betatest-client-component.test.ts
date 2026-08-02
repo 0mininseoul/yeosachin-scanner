@@ -471,6 +471,9 @@ describe('beta-test client', () => {
         const { calls } = installReadyFlow([firstPending, secondPending, success]);
         await enterReadyFlow(container);
         await clickButton(container, '제외 없이 무료 판독 시작');
+        const admissionStatus = container.querySelector('[role="status"]');
+        expect(admissionStatus?.getAttribute('aria-live')).toBe('polite');
+        expect(admissionStatus?.textContent).toContain('무료 판독을 준비하고 있어요');
         expect(container.textContent).not.toContain(
             '판독 배정을 확인하고 있습니다. 잠시 후 다시 시도해주세요.'
         );
