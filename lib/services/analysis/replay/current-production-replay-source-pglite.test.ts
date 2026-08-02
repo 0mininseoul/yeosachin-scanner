@@ -3,7 +3,7 @@ import { PGlite } from '@electric-sql/pglite';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 
 const migration = readFileSync(new URL(
-    '../../../../supabase/migrations/20260801200000_add_current_production_replay_source.sql',
+    '../../../../supabase/migrations/20260802110000_add_current_production_replay_source.sql',
     import.meta.url,
 ), 'utf8');
 const policy = JSON.stringify({
@@ -71,6 +71,7 @@ afterAll(async () => db.close());
 
 async function insertSource(overrides: {
     requestAccess?: string;
+    testEntitlementJtiHash?: string;
     preflightAccess?: string;
     preflightUserId?: string;
     policy?: string;
@@ -91,8 +92,15 @@ async function insertSource(overrides: {
     const retained = `retained.${preflightId.replaceAll('-', '').slice(0, 20)}`;
     await db.query(`
         INSERT INTO public.analysis_requests VALUES
-        ($1, $2, 'completed', '2026-08-01T12:00:00Z', 'v2', 'standard', $3, NULL, $4, $5::JSONB)
-    `, [requestId, userId, overrides.requestAccess ?? 'production', preflightId, exactPolicy]);
+        ($1, $2, 'completed', '2026-08-01T12:00:00Z', 'v2', 'standard', $3, $4, $5, $6::JSONB)
+    `, [
+        requestId,
+        userId,
+        overrides.requestAccess ?? 'production',
+        overrides.testEntitlementJtiHash ?? null,
+        preflightId,
+        exactPolicy,
+    ]);
     await db.query(`
         INSERT INTO public.analysis_preflights VALUES
         ($1, $2, 'consumed', $3, $4, $5::JSONB, $6, $7, $8, $9, $10, 'skip', NULL)
@@ -144,7 +152,7 @@ async function insertSource(overrides: {
         overrides.providerStatus ?? 'succeeded',
         reconciledAt,
     ]);
-    return { requestId };
+    return { requestId, preflightId, orderId };
 }
 
 async function read(requestId: string) {
@@ -186,6 +194,7 @@ describe('read_analysis_v2_current_production_replay_source', () => {
 
     it.each([
         { overrides: { requestAccess: 'test_entitlement' }, label: 'production request' },
+        { overrides: { testEntitlementJtiHash: 'entitlement-hash' }, label: 'non-test entitlement' },
         { overrides: { preflightAccess: 'test_entitlement' }, label: 'production preflight' },
         { overrides: { preflightUserId: crypto.randomUUID() }, label: 'same user' },
         { overrides: { scrubbed: false }, label: 'scrubbed preflight' },
@@ -202,11 +211,149 @@ describe('read_analysis_v2_current_production_replay_source', () => {
     });
 
     it.each([
+        {
+            label: 'incomplete request',
+            mutate: ({ requestId }: { requestId: string }) => db.query(
+                `UPDATE public.analysis_requests SET status = 'processing', completed_at = NULL WHERE id = $1`,
+                [requestId],
+            ),
+        },
+        {
+            label: 'consumed request drift',
+            mutate: ({ preflightId }: { preflightId: string }) => db.query(
+                'UPDATE public.analysis_preflights SET consumed_request_id = $1 WHERE id = $2',
+                [crypto.randomUUID(), preflightId],
+            ),
+        },
+        {
+            label: 'preflight policy drift',
+            mutate: ({ preflightId }: { preflightId: string }) => db.query(
+                `UPDATE public.analysis_preflights SET policy_versions_snapshot =
+                 '{"pipeline":"v2","risk":"risk-policy-v2.5","aiStage":"ai-stage-policy-v2.9","scheduler":"ai-scheduler-v1"}'::JSONB
+                 WHERE id = $1`,
+                [preflightId],
+            ),
+        },
+        {
+            label: 'exclusion drift',
+            mutate: ({ preflightId }: { preflightId: string }) => db.query(
+                `UPDATE public.analysis_preflights SET exclusion_decision = 'exclude', excluded_instagram_id = 'other' WHERE id = $1`,
+                [preflightId],
+            ),
+        },
+        {
+            label: 'payment field identity drift',
+            mutate: ({ orderId }: { orderId: string }) => db.query(
+                'UPDATE public.earlybird_orders SET actual_amount_krw = 9800 WHERE id = $1',
+                [orderId],
+            ),
+        },
+        {
+            label: 'missing paid payment field',
+            mutate: ({ orderId }: { orderId: string }) => db.query(
+                'UPDATE public.earlybird_orders SET paid_at = NULL WHERE id = $1',
+                [orderId],
+            ),
+        },
+        {
+            label: 'unconfirmed seller payment field',
+            mutate: ({ orderId }: { orderId: string }) => db.query(
+                'UPDATE public.earlybird_orders SET seller_reference_confirmed_at = NULL WHERE id = $1',
+                [orderId],
+            ),
+        },
+        {
+            label: 'payment event identity drift',
+            mutate: ({ orderId }: { orderId: string }) => db.query(
+                `UPDATE public.earlybird_webhook_events SET product_id = 'other-product' WHERE order_id = $1`,
+                [orderId],
+            ),
+        },
+        {
+            label: 'payment event amount drift',
+            mutate: ({ orderId }: { orderId: string }) => db.query(
+                'UPDATE public.earlybird_webhook_events SET amount_krw = 9800 WHERE order_id = $1',
+                [orderId],
+            ),
+        },
+        {
+            label: 'duplicate accepted payment event',
+            mutate: ({ orderId }: { orderId: string }) => db.query(
+                `INSERT INTO public.earlybird_webhook_events VALUES
+                 ($1, $2, 'payment.completed', 'accepted', 'payment-1', 'standard-product', 9900)`,
+                [crypto.randomUUID(), orderId],
+            ),
+        },
+    ])('rejects $label', async ({ mutate }) => {
+        const ids = await insertSource();
+        await mutate(ids);
+        await expect(read(ids.requestId)).rejects.toThrow(
+            'ANALYSIS_V2_REPLAY_CURRENT_PRODUCTION_SOURCE_NOT_FOUND',
+        );
+    });
+
+    it.each([
         { overrides: { providerStatus: 'running' }, label: 'non-terminal' },
         { overrides: { reconciled: false }, label: 'unreconciled' },
     ])('rejects $label Apify ledger evidence', async ({ overrides }) => {
         const { requestId } = await insertSource(overrides);
         await expect(read(requestId)).rejects.toThrow(
+            'ANALYSIS_V2_REPLAY_CURRENT_PRODUCTION_PROVIDER_LEDGER_INVALID',
+        );
+    });
+
+    it('rejects a non-Apify ledger row', async () => {
+        const ids = await insertSource();
+        await db.query(
+            `UPDATE public.analysis_v2_provider_runs SET logical_provider = 'coderx' WHERE request_id = $1`,
+            [ids.requestId],
+        );
+        await expect(read(ids.requestId)).rejects.toThrow(
+            'ANALYSIS_V2_REPLAY_CURRENT_PRODUCTION_PROVIDER_LEDGER_INVALID',
+        );
+    });
+
+    it.each([
+        {
+            label: 'zero request runs',
+            mutate: (ids: { requestId: string }) => db.query(
+                'DELETE FROM public.analysis_v2_provider_runs WHERE request_id = $1',
+                [ids.requestId],
+            ),
+        },
+        {
+            label: '129 request runs',
+            mutate: (ids: { requestId: string }) => db.query(`
+                INSERT INTO public.analysis_v2_provider_runs
+                SELECT $1, 'extra-' || value, 'extra-' || value, 'apify',
+                    'apify/instagram-profile-scraper', 'primary', 'succeeded',
+                    'ExtraRequestRun' || value, '2026-08-01T11:00:00Z', 0.01,
+                    '2026-08-01T11:01:00Z'
+                FROM pg_catalog.generate_series(1, 128) AS value
+            `, [ids.requestId]),
+        },
+        {
+            label: 'zero preflight runs',
+            mutate: (ids: { preflightId: string }) => db.query(
+                'DELETE FROM public.analysis_preflight_provider_runs WHERE preflight_id = $1',
+                [ids.preflightId],
+            ),
+        },
+        {
+            label: 'five preflight runs',
+            mutate: (ids: { preflightId: string }) => db.query(`
+                INSERT INTO public.analysis_preflight_provider_runs
+                SELECT $1, 'extra-' || value, 'apify',
+                    'apify/instagram-profile-scraper', 'primary', 'succeeded',
+                    'ExtraPreflightRun' || value, '2026-08-01T11:00:00Z', 0.01,
+                    '2026-08-01T11:01:00Z'
+                FROM pg_catalog.generate_series(1, 4) AS value
+            `, [ids.preflightId]),
+        },
+    ])('rejects provider cardinality outside bounds: $label', async ({ mutate }) => {
+        const ids = await insertSource();
+        await mutate(ids);
+        await expect(read(ids.requestId)).rejects.toThrow(
             'ANALYSIS_V2_REPLAY_CURRENT_PRODUCTION_PROVIDER_LEDGER_INVALID',
         );
     });

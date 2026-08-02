@@ -251,6 +251,41 @@ const bundleSchema = z.union([
 
 export type AnalysisV2ReplayBundle = z.infer<typeof bundleSchema>;
 
+function canonicalReplayJson(value: unknown): string {
+    if (value === null || typeof value !== 'object') {
+        return JSON.stringify(value) ?? 'null';
+    }
+    if (Array.isArray(value)) {
+        return `[${value.map(item => (
+            item === undefined ? 'null' : canonicalReplayJson(item)
+        )).join(',')}]`;
+    }
+    const record = value as Readonly<Record<string, unknown>>;
+    const members = Object.keys(record)
+        .filter(key => record[key] !== undefined)
+        .sort()
+        .map(key => `${JSON.stringify(key)}:${canonicalReplayJson(record[key])}`);
+    return `{${members.join(',')}}`;
+}
+
+/**
+ * Non-PII output proof that two authenticated artifacts carry identical replay semantics.
+ * Capture/request/payment identities and artifact lifecycle metadata are intentionally excluded.
+ */
+export function analysisV2ReplaySemanticInputFingerprint(
+    bundle: AnalysisV2ReplayBundle,
+): string {
+    const canonical = canonicalReplayJson({
+        sourceLineage: bundle.capture.sourceLineage,
+        profiles: bundle.profiles,
+        evidence: bundle.evidence,
+    });
+    return createHash('sha256')
+        .update('analysis-v2-replay-semantic-input-v1\n')
+        .update(canonical)
+        .digest('hex');
+}
+
 export function parseStrongUncertainResolverExperimentBundle(
     value: unknown,
 ): Extract<AnalysisV2ReplayBundle, { schemaVersion: 3 }> {

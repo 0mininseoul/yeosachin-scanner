@@ -2,7 +2,36 @@ import { mkdtemp, readFile, rename, rm, stat, writeFile } from 'node:fs/promises
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { spawnSync } from 'node:child_process';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
+
+const paidAdapterMocks = vi.hoisted(() => ({
+    create: vi.fn(),
+    configurations: new WeakMap<object, {
+        policy: string;
+        featureConcurrency: 3 | 4;
+    }>(),
+}));
+
+vi.mock('../lib/services/analysis/replay/replay-staged-ai-adapter', () => ({
+    createReplayStagedAiAdapter: (
+        policy: string,
+        experiment?: { featureAnalysisConcurrency: 4 },
+    ) => {
+        paidAdapterMocks.create(policy, experiment);
+        const runner = Object.freeze({});
+        paidAdapterMocks.configurations.set(runner, {
+            policy,
+            featureConcurrency: experiment?.featureAnalysisConcurrency ?? 3,
+        });
+        return runner;
+    },
+    lookupReplayStagedAiAdapterPolicy: (runner: object) => (
+        paidAdapterMocks.configurations.get(runner)?.policy
+    ),
+    lookupReplayStagedAiAdapterFeatureConcurrency: (runner: object) => (
+        paidAdapterMocks.configurations.get(runner)?.featureConcurrency
+    ),
+}));
 import {
     createReplayKeyFile,
     writeReplayBundle,
@@ -15,6 +44,7 @@ import packageJson from '../package.json';
 const temporaryPaths: string[] = [];
 
 afterEach(async () => {
+    paidAdapterMocks.create.mockClear();
     await Promise.all(temporaryPaths.splice(0).map(path => (
         rm(path, { recursive: true, force: true })
     )));
@@ -69,6 +99,32 @@ function partialReplayBundle(now: number): AnalysisV2ReplayBundle {
     };
 }
 
+function currentProductionReplayBundle(now: number): AnalysisV2ReplayBundle {
+    const exact = replayBundle(now) as Extract<
+        AnalysisV2ReplayBundle,
+        { schemaVersion: 1 }
+    >;
+    return {
+        ...exact,
+        capture: {
+            ...exact.capture,
+            sourceLineage: {
+                selectedPlanId: 'standard',
+                policyVersions: {
+                    pipeline: 'v2',
+                    aiStage: 'ai-stage-policy-v2.10',
+                    risk: 'risk-policy-v2.5',
+                    scheduler: 'ai-scheduler-v1',
+                },
+            },
+            evaluationPolicy: {
+                capability: 'current-production-standard-v210-risk-v25-scheduler-v1-exact-replay',
+                aiStage: 'ai-stage-policy-v2.10',
+            },
+        },
+    };
+}
+
 async function artifacts(now: number) {
     const directory = await mkdtemp(join(tmpdir(), 'analysis-v2-replay-cli-'));
     temporaryPaths.push(directory);
@@ -91,6 +147,24 @@ async function partialArtifacts(now: number) {
     const keyPath = join(directory, 'bundle.key');
     await createReplayKeyFile(keyPath);
     await writeReplayBundle({ bundle: partialReplayBundle(now), bundlePath, keyPath, now });
+    return { bundlePath, keyPath };
+}
+
+async function currentProductionArtifacts(now: number) {
+    const directory = await mkdtemp(join(
+        tmpdir(),
+        'analysis-v2-replay-current-production-cli-',
+    ));
+    temporaryPaths.push(directory);
+    const bundlePath = join(directory, 'bundle.enc');
+    const keyPath = join(directory, 'bundle.key');
+    await createReplayKeyFile(keyPath);
+    await writeReplayBundle({
+        bundle: currentProductionReplayBundle(now),
+        bundlePath,
+        keyPath,
+        now,
+    });
     return { bundlePath, keyPath };
 }
 
@@ -299,6 +373,75 @@ describe('analysis V2 replay CLI', () => {
             '--feature-concurrency-4', '--confirm-feature-concurrency-4',
             '--bundle=a.enc', '--key=a.key',
         ])).toThrow('ANALYSIS_V2_REPLAY_CURRENT_PRODUCTION_PAID_SCOPE_REQUIRED');
+    });
+
+    it('runs baseline and candidate only from authenticated identical current-production artifacts', async () => {
+        const now = Date.now();
+        const legacy = await artifacts(now);
+        await expect(runReplayCli([
+            '--run', '--paid-ai', '--confirm-paid-ai', '--current-production',
+            `--bundle=${legacy.bundlePath}`, `--key=${legacy.keyPath}`,
+        ])).rejects.toThrow('ANALYSIS_V2_REPLAY_EVALUATION_SOURCE_INELIGIBLE');
+        expect(paidAdapterMocks.create).not.toHaveBeenCalled();
+
+        const baseline = await currentProductionArtifacts(now);
+        const candidate = await currentProductionArtifacts(now);
+        const output: string[] = [];
+        const original = process.stdout.write;
+        process.stdout.write = ((line: string) => {
+            output.push(line);
+            return true;
+        }) as typeof process.stdout.write;
+        try {
+            await runReplayCli([
+                '--run', '--paid-ai', '--confirm-paid-ai',
+                '--current-production',
+                `--bundle=${baseline.bundlePath}`,
+                `--key=${baseline.keyPath}`,
+            ]);
+            await runReplayCli([
+                '--run', '--paid-ai', '--confirm-paid-ai',
+                '--current-production',
+                '--feature-concurrency-4',
+                '--confirm-feature-concurrency-4',
+                `--bundle=${candidate.bundlePath}`,
+                `--key=${candidate.keyPath}`,
+            ]);
+        } finally {
+            process.stdout.write = original;
+        }
+
+        const [baselineReport, candidateReport] = output.map(line => (
+            JSON.parse(line)
+        ));
+        expect(baselineReport).toMatchObject({
+            source_kind: 'current_paid_production',
+            feature_concurrency_experiment: 'baseline',
+            feature_analysis_concurrency: 3,
+            shared_concurrency_cap: 8,
+            semantic_input_fingerprint: expect.stringMatching(/^[a-f0-9]{64}$/),
+        });
+        expect(candidateReport).toMatchObject({
+            source_kind: 'current_paid_production',
+            feature_concurrency_experiment: 'feature-concurrency-4',
+            feature_analysis_concurrency: 4,
+            shared_concurrency_cap: 8,
+        });
+        expect(candidateReport.semantic_input_fingerprint).toBe(
+            baselineReport.semantic_input_fingerprint,
+        );
+        expect(paidAdapterMocks.create).toHaveBeenNthCalledWith(
+            1,
+            'ai-stage-policy-v2.10',
+            undefined,
+        );
+        expect(paidAdapterMocks.create).toHaveBeenNthCalledWith(
+            2,
+            'ai-stage-policy-v2.10',
+            expect.objectContaining({ featureAnalysisConcurrency: 4 }),
+        );
+        await expect(stat(baseline.bundlePath)).rejects.toMatchObject({ code: 'ENOENT' });
+        await expect(stat(candidate.bundlePath)).rejects.toMatchObject({ code: 'ENOENT' });
     });
 
     it('seals historical partial capture and replay behind its explicit scope and v2.9 capability', () => {

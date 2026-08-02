@@ -4,6 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
+    analysisV2ReplaySemanticInputFingerprint,
     createReplayKeyFile,
     createReplayArtifactCreationScope,
     removeExpiredReplayArtifacts,
@@ -79,6 +80,27 @@ async function writeRawEncrypted(bundlePath: string, keyPath: string, value: unk
 }
 
 describe('analysis V2 replay bundle', () => {
+    it('fingerprints canonical semantics independently of artifact/request identity', () => {
+        const original = bundle();
+        const clone = structuredClone(original);
+        clone.createdAt = '2026-08-02T00:00:00.000Z';
+        clone.expiresAt = '2026-08-02T01:00:00.000Z';
+        clone.capture.requestFingerprint = 'b'.repeat(64);
+
+        const originalFingerprint =
+            analysisV2ReplaySemanticInputFingerprint(original);
+        expect(originalFingerprint).toMatch(/^[a-f0-9]{64}$/);
+        expect(analysisV2ReplaySemanticInputFingerprint(clone)).toBe(
+            originalFingerprint,
+        );
+
+        const mutated = structuredClone(clone);
+        mutated.profiles[0]!.bio = 'semantic mutation';
+        expect(analysisV2ReplaySemanticInputFingerprint(mutated)).not.toBe(
+            originalFingerprint,
+        );
+    });
+
     it('keeps exact limits frozen while bounding the measured partial artifact with narrow headroom', () => {
         expect(replayBundleSizeLimits(1)).toEqual({
             maxMediaBytes: 192 * 1024 * 1024,

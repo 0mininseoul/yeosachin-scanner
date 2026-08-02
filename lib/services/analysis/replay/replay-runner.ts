@@ -2,7 +2,10 @@ import type { FeatureAnalysisResult, GenderResolutionResult, GenderTriageResult 
 import { applyGenderResolution } from '@/lib/services/ai/gender-resolution-reconciliation';
 import { aiStagePolicySupports } from '@/lib/services/ai/stage-policy';
 import type { PrivateNameAccountInput } from '@/lib/services/ai/private-name-analysis';
-import type { AnalysisV2ReplayBundle } from './replay-bundle';
+import {
+    analysisV2ReplaySemanticInputFingerprint,
+    type AnalysisV2ReplayBundle,
+} from './replay-bundle';
 import {
     CURRENT_PRODUCTION_STANDARD_V210_EXACT_REPLAY_CAPABILITY,
     HISTORICAL_PARTIAL_AVAILABLE_REPLAY_CAPABILITY,
@@ -111,6 +114,7 @@ export interface AnalysisV2AiReplayReport {
     sourceRiskPolicy: string;
     evaluationAiPolicy: string | null;
     replayAiPolicy: string;
+    semanticInputFingerprint: string;
     fullE2eEvidence: false;
     sourceKind: 'current_paid_production' | 'historical_or_legacy';
     featureConcurrency: {
@@ -434,6 +438,7 @@ function safeLine(report: AnalysisV2AiReplayReport): string {
         source_risk_policy: report.sourceRiskPolicy,
         evaluation_ai_policy: report.evaluationAiPolicy,
         replay_ai_policy: report.replayAiPolicy,
+        semantic_input_fingerprint: report.semanticInputFingerprint,
         full_e2e_evidence: report.fullE2eEvidence,
         source_kind: report.sourceKind,
         feature_concurrency_experiment: report.featureConcurrency.experiment,
@@ -532,6 +537,8 @@ export async function runAnalysisV2AiReplay(input: {
         throw new Error('ANALYSIS_V2_REPLAY_PARTIAL_COVERAGE_INSUFFICIENT');
     }
     assertReplayInput(input.bundle);
+    const semanticInputFingerprint =
+        analysisV2ReplaySemanticInputFingerprint(input.bundle);
     const authenticatedEvaluationPolicy = input.bundle.capture.evaluationPolicy;
     if (
         Boolean(authenticatedEvaluationPolicy) !== Boolean(input.evaluationPolicy)
@@ -918,6 +925,7 @@ export async function runAnalysisV2AiReplay(input: {
         sourceRiskPolicy: input.bundle.capture.sourceLineage.policyVersions.risk,
         evaluationAiPolicy: input.evaluationPolicy?.aiStage ?? null,
         replayAiPolicy,
+        semanticInputFingerprint,
         fullE2eEvidence: false as const,
         sourceKind: currentProductionExact
             ? 'current_paid_production' as const

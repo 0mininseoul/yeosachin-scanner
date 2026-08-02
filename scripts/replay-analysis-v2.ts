@@ -11,6 +11,7 @@ import { installReplayArtifactSignalCleanup } from '../lib/services/analysis/rep
 import { captureAnalysisV2ReplayBundle } from '../lib/services/analysis/replay/replay-capture';
 import { captureHistoricalPartialAvailableReplayBundle, partialAvailableSafeReport } from '../lib/services/analysis/replay/historical-partial-available-capture';
 import {
+    analysisV2ReplaySemanticInputFingerprint,
     createReplayArtifactCreationScope,
     createReplayKeyFile,
     readAuthenticatedReplayBundle,
@@ -377,6 +378,8 @@ async function capture(options: Extract<ReplayCliOptions, { command: 'capture' }
             source_risk_policy: descriptor.sourceLineage.policyVersions.risk,
             evaluation_ai_policy: options.evaluationPolicy?.aiStage ?? null,
             replay_ai_policy: replayAiPolicy,
+            semantic_input_fingerprint:
+                analysisV2ReplaySemanticInputFingerprint(bundle),
             full_e2e_evidence: false,
             ...(historicalPartial ? { not_exact: true, no_media_substitution: true, partial: partialAvailableSafeReport(captured.report!) } : {}),
             profiles: bundle.profiles.length,
