@@ -1,9 +1,11 @@
 import { describe, expect, it, vi } from 'vitest';
 import {
+    BETA_APIFY_PLAN_ACCESS_UNAVAILABLE,
     BETA_APIFY_PLAN_ADMISSION_ERROR,
     BETA_APIFY_PLAN_ADMISSION_INVALID_INPUT,
     BETA_APIFY_PLAN_ADMISSION_INVALID_RESULT,
     BETA_APIFY_PLAN_ADMISSION_PERSISTENCE_ERROR,
+    BETA_APIFY_PLAN_REPLAY_IDENTITY_CONFLICT,
     admitBetaApifyPlan,
     createBetaApifyPlanAdmissionStore,
 } from './beta-apify-plan-admission';
@@ -126,7 +128,6 @@ describe('beta Apify plan admission', () => {
     it.each([
         'ANALYSIS_BETA_POOL_CAPACITY_UNAVAILABLE',
         'ANALYSIS_BETA_POOL_SNAPSHOT_STALE',
-        'ANALYSIS_BETA_ACCESS_UNAVAILABLE',
         'ANALYSIS_BETA_REQUEST_NOT_ELIGIBLE',
         'ANALYSIS_BETA_PREFLIGHT_NOT_ELIGIBLE',
     ])('keeps true domain failure %s in the sanitized capacity category', async code => {
@@ -144,6 +145,39 @@ describe('beta Apify plan admission', () => {
             selectedPlanId: 'basic',
         }).catch((caught: unknown) => caught);
         expect(error).toEqual(new Error(BETA_APIFY_PLAN_ADMISSION_ERROR));
+        expect(String(error)).not.toContain('provider-secret');
+    });
+
+    it('maps the atomic admission access race without leaking database detail', async () => {
+        const store = createBetaApifyPlanAdmissionStore({
+            rpc: vi.fn().mockResolvedValue({
+                data: null,
+                error: {
+                    message: 'ANALYSIS_BETA_ACCESS_UNAVAILABLE provider-secret',
+                },
+            }),
+        });
+
+        const error = await store.activate({
+            preflightId: PREFLIGHT_ID,
+            userId: USER_ID,
+            admissionToken: ADMISSION_TOKEN,
+            admissionGeneration: 1,
+            selectedPlanId: 'basic',
+            maxSnapshotAgeSeconds: 300,
+            operationSlotMap: Object.fromEntries([
+                'target-profile', 'relationship-followers',
+                'relationship-following', 'profile-fallback', 'profile-repair',
+                'target-likers', 'target-comments', 'candidate-likers',
+            ].map(key => [key, 'primary'])) as never,
+            operationBudgetMap: Object.fromEntries([
+                'target-profile', 'relationship-followers',
+                'relationship-following', 'profile-fallback', 'profile-repair',
+                'target-likers', 'target-comments', 'candidate-likers',
+            ].map(key => [key, BETA_APIFY_TARGET_PROFILE_BUDGET_USD])) as never,
+        }).catch((caught: unknown) => caught);
+
+        expect(error).toEqual(new Error(BETA_APIFY_PLAN_ACCESS_UNAVAILABLE));
         expect(String(error)).not.toContain('provider-secret');
     });
 
@@ -176,6 +210,50 @@ describe('beta Apify plan admission', () => {
         const serialized = JSON.stringify(rpc.mock.calls[0]?.[1]);
         expect(serialized).not.toMatch(/account|raw|secret/i);
         expect(serialized).not.toMatch(/apify|https?:\/\//i);
+    });
+
+    it('loads a consumed replay from only owner, preflight, and selected-plan identity', async () => {
+        const stored = {
+            requestId: REQUEST_ID,
+            initialJobKey: 'coordinator:bootstrap',
+            allocationId: '55555555-5555-4555-8555-555555555555',
+            replayed: true,
+        };
+        const rpc = vi.fn().mockResolvedValue({ data: stored, error: null });
+        const store = createBetaApifyPlanAdmissionStore({ rpc });
+
+        await expect(store.replayConsumed({
+            preflightId: PREFLIGHT_ID,
+            userId: USER_ID,
+            selectedPlanId: 'basic',
+        })).resolves.toEqual(stored);
+        expect(rpc).toHaveBeenCalledWith(
+            'load_analysis_v2_betatest_consumed_replay',
+            {
+                p_preflight_id: PREFLIGHT_ID,
+                p_user_id: USER_ID,
+                p_selected_plan_id: 'basic',
+            }
+        );
+    });
+
+    it('preserves only the stable consumed replay plan identity conflict', async () => {
+        const rpc = vi.fn().mockResolvedValue({
+            data: null,
+            error: {
+                message: 'ANALYSIS_BETA_PLAN_REPLAY_IDENTITY_CONFLICT provider-secret',
+            },
+        });
+        const store = createBetaApifyPlanAdmissionStore({ rpc });
+
+        const error = await store.replayConsumed({
+            preflightId: PREFLIGHT_ID,
+            userId: USER_ID,
+            selectedPlanId: 'plus',
+        }).catch((caught: unknown) => caught);
+
+        expect(error).toEqual(new Error(BETA_APIFY_PLAN_REPLAY_IDENTITY_CONFLICT));
+        expect(String(error)).not.toContain('provider-secret');
     });
 
     it('returns an immutable replay before feature config, hold, snapshot, and planning', async () => {

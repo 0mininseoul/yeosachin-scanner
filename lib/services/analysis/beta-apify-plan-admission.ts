@@ -26,6 +26,10 @@ export const BETA_APIFY_PLAN_ADMISSION_ERROR = BETA_APIFY_POOL_CAPACITY_ERROR;
 export const BETA_APIFY_PLAN_ADMISSION_PERSISTENCE_ERROR = BETA_APIFY_POOL_PERSISTENCE_ERROR;
 export const BETA_APIFY_PLAN_ADMISSION_INVALID_INPUT = 'ANALYSIS_BETA_PLAN_ADMISSION_INVALID_INPUT';
 export const BETA_APIFY_PLAN_ADMISSION_INVALID_RESULT = 'ANALYSIS_BETA_PLAN_ADMISSION_INVALID_RESULT';
+export const BETA_APIFY_PLAN_ACCESS_UNAVAILABLE =
+    'ANALYSIS_BETA_PLAN_ACCESS_UNAVAILABLE';
+export const BETA_APIFY_PLAN_REPLAY_IDENTITY_CONFLICT =
+    'ANALYSIS_BETA_PLAN_REPLAY_IDENTITY_CONFLICT';
 
 const UUID = z.string().uuid();
 const planId = z.enum(['basic', 'standard', 'plus']);
@@ -78,6 +82,14 @@ export interface BetaApifyPlanAdmissionStore {
     }>): Promise<z.infer<typeof resultSchema>>;
 }
 
+export interface BetaApifyConsumedReplayStore {
+    replayConsumed(input: Readonly<{
+        preflightId: string;
+        userId: string;
+        selectedPlanId: PlanId;
+    }>): Promise<z.infer<typeof resultSchema> | null>;
+}
+
 function capacityError(): Error {
     return new Error(BETA_APIFY_PLAN_ADMISSION_ERROR);
 }
@@ -90,8 +102,16 @@ function persistenceError(): Error {
     return new Error(BETA_APIFY_PLAN_ADMISSION_PERSISTENCE_ERROR);
 }
 
+function accessError(): Error {
+    return new Error(BETA_APIFY_PLAN_ACCESS_UNAVAILABLE);
+}
+
 function invalidResultError(): Error {
     return new Error(BETA_APIFY_PLAN_ADMISSION_INVALID_RESULT);
+}
+
+function replayIdentityConflictError(): Error {
+    return new Error(BETA_APIFY_PLAN_REPLAY_IDENTITY_CONFLICT);
 }
 
 function validUuid(value: string): string {
@@ -129,11 +149,16 @@ const CAPACITY_FAILURE_CODES = Object.freeze([
     'ANALYSIS_BETA_POOL_SNAPSHOT_INVALID',
     'ANALYSIS_BETA_POOL_SNAPSHOT_STALE',
     'ANALYSIS_BETA_POOL_SNAPSHOT_UNHEALTHY',
-    'ANALYSIS_BETA_ACCESS_UNAVAILABLE',
     'ANALYSIS_BETA_REQUEST_NOT_ELIGIBLE',
     'ANALYSIS_BETA_PREFLIGHT_NOT_ELIGIBLE',
     'ANALYSIS_V2_PREFLIGHT_NOT_FOUND',
 ]);
+
+function knownAccessFailure(error: { message?: string }): boolean {
+    return error.message === 'ANALYSIS_BETA_ACCESS_UNAVAILABLE'
+        || error.message?.startsWith('ANALYSIS_BETA_ACCESS_UNAVAILABLE ') === true
+        || error.message?.startsWith('ANALYSIS_BETA_ACCESS_UNAVAILABLE\n') === true;
+}
 
 function knownCapacityFailure(error: { message?: string }): boolean {
     return typeof error.message === 'string' && CAPACITY_FAILURE_CODES.some(code => (
@@ -141,6 +166,16 @@ function knownCapacityFailure(error: { message?: string }): boolean {
         || error.message?.startsWith(`${code} `)
         || error.message?.startsWith(`${code}\n`)
     ));
+}
+
+function knownReplayIdentityConflict(error: { message?: string }): boolean {
+    return error.message === BETA_APIFY_PLAN_REPLAY_IDENTITY_CONFLICT
+        || error.message?.startsWith(
+            `${BETA_APIFY_PLAN_REPLAY_IDENTITY_CONFLICT} `
+        ) === true
+        || error.message?.startsWith(
+            `${BETA_APIFY_PLAN_REPLAY_IDENTITY_CONFLICT}\n`
+        ) === true;
 }
 
 function assertRuntimeBudgetsFitFrozenCatalog(
@@ -167,6 +202,8 @@ function sanitizedBoundaryError(error: unknown): Error {
         BETA_APIFY_PLAN_ADMISSION_PERSISTENCE_ERROR,
         BETA_APIFY_PLAN_ADMISSION_INVALID_INPUT,
         BETA_APIFY_PLAN_ADMISSION_INVALID_RESULT,
+        BETA_APIFY_PLAN_ACCESS_UNAVAILABLE,
+        BETA_APIFY_PLAN_REPLAY_IDENTITY_CONFLICT,
         BETA_APIFY_RUNTIME_CONFIG_ERROR,
     ].includes(message)) return new Error(message);
     return persistenceError();
@@ -184,10 +221,28 @@ async function rpc(
         throw persistenceError();
     }
     if (response.error) {
+        if (knownAccessFailure(response.error)) throw accessError();
+        if (knownReplayIdentityConflict(response.error)) {
+            throw replayIdentityConflictError();
+        }
         if (knownCapacityFailure(response.error)) throw capacityError();
         throw persistenceError();
     }
     return normalizeResult(response.data);
+}
+
+function consumedIdentityParams(input: {
+    preflightId: string;
+    userId: string;
+    selectedPlanId: PlanId;
+}): Record<string, unknown> {
+    let selectedPlanId: PlanId;
+    try { selectedPlanId = planId.parse(input.selectedPlanId); } catch { throw invalidInputError(); }
+    return {
+        p_preflight_id: validUuid(input.preflightId),
+        p_user_id: validUuid(input.userId),
+        p_selected_plan_id: selectedPlanId,
+    };
 }
 
 function identityParams(input: {
@@ -208,9 +263,23 @@ function identityParams(input: {
     };
 }
 
-export function createBetaApifyPlanAdmissionStore(client: BetaApifyPlanAdmissionStoreClient): Pick<BetaApifyPlanAdmissionStore, 'replay' | 'activate'> {
+export function createBetaApifyPlanAdmissionStore(
+    client: BetaApifyPlanAdmissionStoreClient
+): Pick<BetaApifyPlanAdmissionStore, 'replay' | 'activate'>
+    & BetaApifyConsumedReplayStore {
     return Object.freeze({
-        async replay(input) {
+        async replayConsumed(
+            input: Parameters<BetaApifyConsumedReplayStore['replayConsumed']>[0]
+        ) {
+            const data = await rpc(
+                client,
+                'load_analysis_v2_betatest_consumed_replay',
+                consumedIdentityParams(input)
+            );
+            if (data === null) return null;
+            return parsedResult(data);
+        },
+        async replay(input: Parameters<BetaApifyPlanAdmissionStore['replay']>[0]) {
             const data = await rpc(
                 client,
                 'load_analysis_v2_betatest_plan_replay',
@@ -219,7 +288,7 @@ export function createBetaApifyPlanAdmissionStore(client: BetaApifyPlanAdmission
             if (data === null) return null;
             return parsedResult(data);
         },
-        async activate(input) {
+        async activate(input: Parameters<BetaApifyPlanAdmissionStore['activate']>[0]) {
             const slots = operationSlots.safeParse(input.operationSlotMap);
             const budgets = operationBudgets.safeParse(input.operationBudgetMap);
             if (!slots.success || !budgets.success

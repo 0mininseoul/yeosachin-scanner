@@ -53,6 +53,18 @@ const migrationUrls = [
         '../../../supabase/migrations/20260802090000_settle_betatest_terminal_credit.sql',
         import.meta.url
     ),
+    new URL(
+        '../../../supabase/migrations/20260802100000_harden_betatest_entry_lifecycle.sql',
+        import.meta.url
+    ),
+    new URL(
+        '../../../supabase/migrations/20260802100100_harden_betatest_entry_lifecycle_runtime.sql',
+        import.meta.url
+    ),
+    new URL(
+        '../../../supabase/migrations/20260802100200_validate_betatest_entry_lifecycle.sql',
+        import.meta.url
+    ),
 ];
 const migrations = migrationUrls.map(url => readFileSync(url, 'utf8'));
 
@@ -62,6 +74,8 @@ const REQUEST_ID = '30000000-0000-4000-8000-000000000001';
 const CLAIM_TOKEN = '40000000-0000-4000-8000-000000000001';
 const CLAIM_TOKEN_B = '40000000-0000-4000-8000-000000000002';
 const CLAIM_TOKEN_C = '40000000-0000-4000-8000-000000000003';
+const PREPARE_TOKEN = '41000000-0000-4000-8000-000000000001';
+const PREPARE_CLAIM_TOKEN = '42000000-0000-4000-8000-000000000001';
 const RESERVATION_TOKEN = '50000000-0000-4000-8000-000000000001';
 const DISPATCH_TOKEN = '70000000-0000-4000-8000-000000000001';
 const ADMISSION_TOKEN = '80000000-0000-4000-8000-000000000001';
@@ -259,6 +273,7 @@ CREATE TABLE public.analysis_preflights (
     error_code TEXT,
     access_mode TEXT NOT NULL CHECK (access_mode IN ('production', 'test_entitlement')),
     target_instagram_id TEXT,
+    idempotency_key TEXT,
     target_full_name TEXT,
     target_bio TEXT,
     target_profile_image_url TEXT,
@@ -276,6 +291,7 @@ CREATE TABLE public.analysis_preflights (
     capacity_required_plan_id TEXT,
     required_plan_id TEXT,
     excluded_instagram_id TEXT,
+    exclusion_decided_at TIMESTAMPTZ,
     lease_token UUID,
     lease_expires_at TIMESTAMPTZ,
     admission_status TEXT,
@@ -307,6 +323,9 @@ CREATE TABLE public.analysis_preflights (
     updated_at TIMESTAMPTZ NOT NULL DEFAULT pg_catalog.clock_timestamp(),
     expires_at TIMESTAMPTZ NOT NULL
 );
+CREATE UNIQUE INDEX analysis_preflights_user_idempotency_key_idx
+    ON public.analysis_preflights(user_id, idempotency_key)
+    WHERE idempotency_key IS NOT NULL;
 
 CREATE TABLE public.earlybird_orders (
     id UUID PRIMARY KEY DEFAULT pg_catalog.gen_random_uuid(),
@@ -703,6 +722,85 @@ CREATE FUNCTION public.claim_analysis_v2_preflight_admission(UUID, INTEGER, INTE
 RETURNS TABLE(claimed BOOLEAN, admission_status TEXT, target_instagram_id TEXT)
 LANGUAGE sql SECURITY DEFINER SET search_path = '' AS $$ SELECT FALSE,NULL::TEXT,NULL::TEXT $$;
 
+-- Faithful current overloads are present so the hardening migration can
+-- rename the exact implementations and wrap their public signatures.
+CREATE FUNCTION public.create_or_replay_analysis_v2_preflight(
+    p_user_id UUID, p_email TEXT, p_auth_provider TEXT,
+    p_target_instagram_id TEXT, p_idempotency_key TEXT, p_access_mode TEXT,
+    p_launch_status_snapshot JSONB, p_plan_catalog_snapshot JSONB,
+    p_pricing_version TEXT, p_pricing_snapshot JSONB,
+    p_policy_versions_snapshot JSONB
+)
+RETURNS TABLE(preflight_id UUID, created BOOLEAN, preflight_status TEXT,
+    expires_at TIMESTAMPTZ)
+LANGUAGE plpgsql SECURITY DEFINER SET search_path = '' AS $$
+DECLARE v_preflight public.analysis_preflights%ROWTYPE;
+DECLARE v_now TIMESTAMPTZ := pg_catalog.clock_timestamp();
+BEGIN
+    UPDATE public.analysis_preflights AS stale
+    SET status='expired',updated_at=v_now
+    WHERE stale.user_id=p_user_id
+      AND stale.status<>'consumed'
+      AND stale.expires_at<=v_now;
+    SELECT row.* INTO v_preflight
+    FROM public.analysis_preflights AS row
+    WHERE row.user_id=p_user_id AND row.idempotency_key=p_idempotency_key
+    FOR UPDATE;
+    IF FOUND THEN
+        IF v_preflight.target_instagram_id IS DISTINCT FROM p_target_instagram_id
+           OR v_preflight.access_mode IS DISTINCT FROM p_access_mode THEN
+            RAISE EXCEPTION USING
+                MESSAGE='ANALYSIS_V2_PREFLIGHT_IDEMPOTENCY_CONFLICT', ERRCODE='P0001';
+        END IF;
+        RETURN QUERY SELECT v_preflight.id,FALSE,v_preflight.status,v_preflight.expires_at;
+        RETURN;
+    END IF;
+    PERFORM pg_catalog.pg_advisory_xact_lock(
+        pg_catalog.hashtextextended(
+            'analysis-v2-preflight-global-hourly-budget',0
+        )
+    );
+    INSERT INTO public.analysis_preflights(
+        id,user_id,status,access_mode,target_instagram_id,idempotency_key,
+        exclusion_decision,launch_status_snapshot,plan_catalog_snapshot,
+        pricing_version,pricing_snapshot,policy_versions_snapshot,expires_at
+    ) VALUES(
+        extensions.gen_random_uuid(),p_user_id,'pending',p_access_mode,
+        p_target_instagram_id,p_idempotency_key,'pending',
+        p_launch_status_snapshot,p_plan_catalog_snapshot,p_pricing_version,
+        p_pricing_snapshot,p_policy_versions_snapshot,v_now+INTERVAL '30 minutes'
+    ) RETURNING * INTO v_preflight;
+    RETURN QUERY SELECT v_preflight.id,TRUE,v_preflight.status,v_preflight.expires_at;
+END;
+$$;
+
+CREATE FUNCTION public.reserve_analysis_v2_preflight_dispatch(
+    p_preflight_id UUID,p_user_id UUID,p_dispatch_token UUID
+)
+RETURNS TABLE(should_enqueue BOOLEAN,dispatch_generation INTEGER,
+    reservation_token UUID,preflight_status TEXT)
+LANGUAGE plpgsql SECURITY DEFINER SET search_path = '' AS $$
+DECLARE v_preflight public.analysis_preflights%ROWTYPE;
+BEGIN
+    SELECT row.* INTO v_preflight FROM public.analysis_preflights AS row
+    WHERE row.id=p_preflight_id AND row.user_id=p_user_id FOR UPDATE;
+    IF NOT FOUND OR v_preflight.status IS DISTINCT FROM 'pending' THEN
+        RETURN QUERY SELECT FALSE,COALESCE(v_preflight.dispatch_generation,0),
+            v_preflight.dispatch_token,v_preflight.status;
+        RETURN;
+    END IF;
+    IF v_preflight.dispatch_state='unreserved' THEN
+        UPDATE public.analysis_preflights AS row
+        SET dispatch_generation=row.dispatch_generation+1,
+            dispatch_state='reserved',dispatch_token=p_dispatch_token,
+            dispatch_reserved_at=pg_catalog.clock_timestamp()
+        WHERE row.id=p_preflight_id RETURNING * INTO v_preflight;
+    END IF;
+    RETURN QUERY SELECT TRUE,v_preflight.dispatch_generation,
+        v_preflight.dispatch_token,v_preflight.status;
+END;
+$$;
+
 CREATE FUNCTION public.record_analysis_v2_preflight_admission_failure(
     p_preflight_id UUID, p_admission_generation INTEGER, p_claim_token UUID
 )
@@ -775,6 +873,7 @@ interface PlanAdmissionJson {
 }
 
 let db: PGlite;
+let entryHardeningApplied = false;
 let partialSettlementUpgrade: {
     allocation_state: string;
     active_count: number;
@@ -786,6 +885,23 @@ async function serviceQuery<T>(
     params: unknown[] = []
 ): Promise<Results<T>> {
     await db.exec('SET ROLE service_role');
+    try {
+        return await db.query<T>(sql, params);
+    } finally {
+        await db.exec('RESET ROLE');
+    }
+}
+
+async function authenticatedQuery<T>(
+    userId: string,
+    sql: string,
+    params: unknown[] = []
+): Promise<Results<T>> {
+    await db.query(
+        `SELECT pg_catalog.set_config('request.jwt.claim.sub',$1,FALSE)`,
+        [userId]
+    );
+    await db.exec('SET ROLE authenticated');
     try {
         return await db.query<T>(sql, params);
     } finally {
@@ -828,16 +944,32 @@ function admissionSnapshotPayload() {
 
 async function seedPendingBetaPreflight(): Promise<void> {
     await db.query('INSERT INTO public.users (id) VALUES ($1)', [USER_ID]);
-    await db.query(
-        `INSERT INTO public.analysis_preflights (
-            id, user_id, status, access_mode, target_instagram_id,
-            target_followers_count, target_following_count, expires_at
-         ) VALUES (
-            $1, $2, 'pending', 'production', $3, 120, 140,
-            pg_catalog.clock_timestamp() + INTERVAL '30 minutes'
-         )`,
-        [PREFLIGHT_ID, USER_ID, TARGET]
-    );
+    if (entryHardeningApplied) {
+        await db.query(
+            `INSERT INTO public.analysis_preflights (
+                id, user_id, status, access_mode, target_instagram_id,
+                target_followers_count, target_following_count, expires_at,
+                beta_entry_provenance,beta_prepare_generation,beta_prepare_token,
+                beta_prepare_state,beta_prepare_dispatch_state
+             ) VALUES (
+                $1, $2, 'pending', 'production', $3, 120, 140,
+                pg_catalog.clock_timestamp() + INTERVAL '30 minutes',
+                'betatest_service_v1',1,$4,'reserved','enqueued'
+             )`,
+            [PREFLIGHT_ID, USER_ID, TARGET, PREPARE_TOKEN]
+        );
+    } else {
+        await db.query(
+            `INSERT INTO public.analysis_preflights (
+                id, user_id, status, access_mode, target_instagram_id,
+                target_followers_count, target_following_count, expires_at
+             ) VALUES (
+                $1, $2, 'pending', 'production', $3, 120, 140,
+                pg_catalog.clock_timestamp() + INTERVAL '30 minutes'
+             )`,
+            [PREFLIGHT_ID, USER_ID, TARGET]
+        );
+    }
     await serviceQuery(
         `SELECT public.upsert_analysis_beta_access_grant(
             $1, TRUE, pg_catalog.clock_timestamp() + INTERVAL '1 hour', $2
@@ -848,12 +980,27 @@ async function seedPendingBetaPreflight(): Promise<void> {
         'SELECT public.upsert_analysis_beta_apify_credit_snapshots($1::JSONB)',
         [JSON.stringify(snapshots())]
     );
-    await serviceQuery(
-        `SELECT public.hold_analysis_beta_apify_preflight_credit(
-            $1, $2, 'primary', 0.005200000000, 300
-        )`,
-        [PREFLIGHT_ID, USER_ID]
-    );
+    if (entryHardeningApplied) {
+        await serviceQuery(
+            `SELECT * FROM public.claim_analysis_beta_preflight_prepare(
+                $1,$2,1,$3,$4,300
+            )`,
+            [PREFLIGHT_ID, USER_ID, PREPARE_TOKEN, PREPARE_CLAIM_TOKEN]
+        );
+        await serviceQuery(
+            `SELECT public.prepare_analysis_beta_apify_preflight_credit(
+                $1,$2,1,$3,$4,'primary',0.005200000000,300
+            )`,
+            [PREFLIGHT_ID, USER_ID, PREPARE_TOKEN, PREPARE_CLAIM_TOKEN]
+        );
+    } else {
+        await serviceQuery(
+            `SELECT public.hold_analysis_beta_apify_preflight_credit(
+                $1, $2, 'primary', 0.005200000000, 300
+            )`,
+            [PREFLIGHT_ID, USER_ID]
+        );
+    }
 }
 
 async function seedPendingBetaRequest(): Promise<void> {
@@ -967,6 +1114,18 @@ async function replayBetaPlan(input: {
     return result.rows[0].result;
 }
 
+async function replayConsumedBetaPlan(
+    selectedPlanId: PlanId = 'basic'
+): Promise<PlanAdmissionJson | null> {
+    const result = await serviceQuery<JsonRow<PlanAdmissionJson | null>>(
+        `SELECT public.load_analysis_v2_betatest_consumed_replay(
+            $1, $2, $3
+        ) AS result`,
+        [PREFLIGHT_ID, USER_ID, selectedPlanId]
+    );
+    return result.rows[0].result;
+}
+
 async function activateBeta(
     slots: Record<string, string> = betaSlots,
     budgets: Record<string, number> = betaBudgets
@@ -1055,10 +1214,39 @@ async function reserveFresh(
     return result.rows[0].result;
 }
 
+interface BetaCreateRow {
+    preflight_id: string;
+    created: boolean;
+    preflight_status: string;
+    expires_at: string;
+    prepare_generation: number;
+    prepare_token: string;
+    should_enqueue: boolean;
+}
+
+async function createDedicatedBetaPreflight(input: {
+    idempotencyKey?: string;
+    prepareToken?: string;
+} = {}): Promise<BetaCreateRow> {
+    const result = await serviceQuery<BetaCreateRow>(
+        `SELECT * FROM public.create_or_replay_analysis_v2_betatest_preflight(
+            $1,'owner@example.com','google',$2,$3,
+            '{}'::JSONB,'{}'::JSONB,'test','{}'::JSONB,'{}'::JSONB,$4
+        )`,
+        [
+            USER_ID,
+            TARGET,
+            input.idempotencyKey ?? 'betatest-entry-key-000001',
+            input.prepareToken ?? PREPARE_TOKEN,
+        ]
+    );
+    return result.rows[0];
+}
+
 beforeAll(async () => {
     db = await PGlite.create({ extensions: { pgcrypto } });
     await db.exec(bootstrap);
-    for (const migration of migrations.slice(0, -2)) {
+    for (const migration of migrations.slice(0, -5)) {
         await db.exec(migration);
     }
     await seedPendingBetaRequest();
@@ -1089,9 +1277,10 @@ beforeAll(async () => {
         [allocation.allocationId]
     );
 
-    const upgradeMigrations = migrations.slice(-2);
-    if (upgradeMigrations.length !== 2) throw new Error('missing runtime migrations');
+    const upgradeMigrations = migrations.slice(-5);
+    if (upgradeMigrations.length !== 5) throw new Error('missing runtime migrations');
     for (const migration of upgradeMigrations) await db.exec(migration);
+    entryHardeningApplied = true;
     const upgraded = await db.query<{
         allocation_state: string;
         active_count: number;
@@ -1139,6 +1328,7 @@ beforeEach(async () => {
             billing_cycle_start_at = NULL, billing_cycle_end_at = NULL,
             observed_at = NULL, health_state = 'unhealthy';
     `);
+    await serviceQuery('SELECT public.set_analysis_beta_runtime_gate(TRUE)');
 });
 
 afterAll(async () => {
@@ -1159,6 +1349,9 @@ describe('betatest provider policy/guard migration PGlite', () => {
             '20260802070000_wire_betatest_preflight_credit_runtime.sql',
             '20260802080000_admit_betatest_apify_plan.sql',
             '20260802090000_settle_betatest_terminal_credit.sql',
+            '20260802100000_harden_betatest_entry_lifecycle.sql',
+            '20260802100100_harden_betatest_entry_lifecycle_runtime.sql',
+            '20260802100200_validate_betatest_entry_lifecycle.sql',
         ]);
         const constraint = await db.query<{ validated: boolean }>(
             `SELECT convalidated AS validated
@@ -1171,6 +1364,538 @@ describe('betatest provider policy/guard migration PGlite', () => {
             active_count: 1,
             settled_count: 7,
         });
+    });
+
+    it('installs exact private overload ACLs and bounded pg_proc runtime settings', async () => {
+        const privateAcl = await db.query<{
+            create_private: boolean;
+            hold_private: boolean;
+            dispatch_private: boolean;
+            historical_hold_service: boolean;
+            fenced_prepare_service: boolean;
+        }>(`SELECT
+            pg_catalog.has_function_privilege(
+                'service_role',
+                'public.analysis_v2_create_or_replay_preflight_unfenced_20260802(uuid,text,text,text,text,text,jsonb,jsonb,text,jsonb,jsonb)',
+                'EXECUTE'
+            ) AS create_private,
+            pg_catalog.has_function_privilege(
+                'service_role',
+                'public.hold_analysis_beta_apify_preflight_credit_unfenced_20260802(uuid,uuid,text,numeric,integer)',
+                'EXECUTE'
+            ) AS hold_private,
+            pg_catalog.has_function_privilege(
+                'service_role',
+                'public.reserve_analysis_v2_preflight_dispatch_unfenced_20260802(uuid,uuid,uuid)',
+                'EXECUTE'
+            ) AS dispatch_private,
+            pg_catalog.has_function_privilege(
+                'service_role',
+                'public.hold_analysis_beta_apify_preflight_credit(uuid,uuid,text,numeric,integer)',
+                'EXECUTE'
+            ) AS historical_hold_service,
+            pg_catalog.has_function_privilege(
+                'service_role',
+                'public.prepare_analysis_beta_apify_preflight_credit(uuid,uuid,integer,uuid,uuid,text,numeric,integer)',
+                'EXECUTE'
+            ) AS fenced_prepare_service`);
+        expect(privateAcl.rows).toEqual([{
+            create_private: false,
+            hold_private: false,
+            dispatch_private: false,
+            historical_hold_service: false,
+            fenced_prepare_service: true,
+        }]);
+
+        const settings = await db.query<{ proname: string; proconfig: string[] }>(
+            `SELECT proc.proname, proc.proconfig
+             FROM pg_catalog.pg_proc AS proc
+             JOIN pg_catalog.pg_namespace AS namespace
+               ON namespace.oid=proc.pronamespace
+             WHERE namespace.nspname='public'
+               AND proc.proname IN (
+                    'set_analysis_beta_runtime_gate',
+                    'create_or_replay_analysis_v2_preflight',
+                    'create_or_replay_analysis_v2_betatest_preflight',
+                    'mark_analysis_beta_preflight_prepare_dispatched',
+                    'mark_analysis_beta_preflight_prepare_retry_exhausted',
+                    'claim_analysis_beta_preflight_prepare',
+                    'release_analysis_beta_preflight_prepare_claim',
+                    'hold_analysis_beta_apify_preflight_credit',
+                    'prepare_analysis_beta_apify_preflight_credit',
+                    'block_analysis_beta_preflight_capacity',
+                    'reserve_analysis_v2_preflight_dispatch',
+                    'set_analysis_v2_preflight_exclusion',
+                    'reserve_analysis_preflight_provider_run',
+                    'reserve_analysis_v2_fresh_admission_provider_run',
+                    'load_analysis_v2_betatest_consumed_replay',
+                    'admit_analysis_v2_betatest_plan'
+               )`
+        );
+        expect(settings.rows).toHaveLength(16);
+        for (const row of settings.rows) {
+            expect(row.proconfig).toContain('lock_timeout=5s');
+            expect(row.proconfig).toContain('statement_timeout=2min');
+        }
+    });
+
+    it('combines the disabled operational gate with the active self grant', async () => {
+        await db.query('INSERT INTO public.users(id) VALUES ($1)', [USER_ID]);
+        await serviceQuery(
+            `SELECT public.upsert_analysis_beta_access_grant(
+                $1,TRUE,pg_catalog.clock_timestamp()+INTERVAL '1 hour',$2
+            )`, [USER_ID, AUDIT_HASH]
+        );
+        expect((await authenticatedQuery<{ allowed: boolean }>(
+            USER_ID, 'SELECT public.analysis_beta_has_access() AS allowed'
+        )).rows).toEqual([{ allowed: true }]);
+        await serviceQuery('SELECT public.set_analysis_beta_runtime_gate(FALSE)');
+        expect((await authenticatedQuery<{ allowed: boolean }>(
+            USER_ID, 'SELECT public.analysis_beta_has_access() AS allowed'
+        )).rows).toEqual([{ allowed: false }]);
+        await serviceQuery('SELECT public.set_analysis_beta_runtime_gate(TRUE)');
+        await serviceQuery(
+            `SELECT public.upsert_analysis_beta_access_grant($1,FALSE,NULL,$2)`,
+            [USER_ID, AUDIT_HASH]
+        );
+        expect((await authenticatedQuery<{ allowed: boolean }>(
+            USER_ID, 'SELECT public.analysis_beta_has_access() AS allowed'
+        )).rows).toEqual([{ allowed: false }]);
+    });
+
+    it('persists one service-only beta generation/token and rejects same-key ordinary dispatch attacks', async () => {
+        await db.query('INSERT INTO public.users(id) VALUES ($1)', [USER_ID]);
+        await serviceQuery(
+            `SELECT public.upsert_analysis_beta_access_grant(
+                $1,TRUE,pg_catalog.clock_timestamp()+INTERVAL '1 hour',$2
+            )`, [USER_ID, AUDIT_HASH]
+        );
+        const first = await createDedicatedBetaPreflight();
+        const replay = await createDedicatedBetaPreflight({
+            prepareToken: '41000000-0000-4000-8000-000000000099',
+        });
+        expect(first).toMatchObject({
+            created: true, prepare_generation: 1,
+            prepare_token: PREPARE_TOKEN, should_enqueue: true,
+        });
+        expect(replay).toMatchObject({
+            preflight_id: first.preflight_id, created: false,
+            prepare_generation: 1, prepare_token: PREPARE_TOKEN,
+            should_enqueue: true,
+        });
+        await expect(serviceQuery(
+            `SELECT * FROM public.create_or_replay_analysis_v2_preflight(
+                $1,'owner@example.com','google',$2,$3,'production',
+                '{}'::JSONB,'{}'::JSONB,'test','{}'::JSONB,'{}'::JSONB
+            )`, [USER_ID, TARGET, 'betatest-entry-key-000001']
+        )).rejects.toThrow(/ANALYSIS_V2_PREFLIGHT_IDEMPOTENCY_CONFLICT/);
+        await expect(serviceQuery(
+            `SELECT * FROM public.reserve_analysis_v2_preflight_dispatch($1,$2,$3)`,
+            [first.preflight_id, USER_ID, DISPATCH_TOKEN]
+        )).rejects.toThrow(/ANALYSIS_BETA_PREPARE_REQUIRED/);
+        expect((await db.query<{ count: number }>(
+            `SELECT pg_catalog.count(*)::INTEGER AS count
+             FROM public.analysis_preflights WHERE user_id=$1`, [USER_ID]
+        )).rows).toEqual([{ count: 1 }]);
+    });
+
+    it('rearms only an expired lease or explicitly exhausted delivery and fences the stale task', async () => {
+        await db.query('INSERT INTO public.users(id) VALUES ($1)', [USER_ID]);
+        await serviceQuery(
+            `SELECT public.upsert_analysis_beta_access_grant(
+                $1,TRUE,pg_catalog.clock_timestamp()+INTERVAL '1 hour',$2
+            )`, [USER_ID, AUDIT_HASH]
+        );
+        const first = await createDedicatedBetaPreflight();
+        await serviceQuery(
+            `SELECT public.mark_analysis_beta_preflight_prepare_dispatched(
+                $1,$2,1,$3
+            )`, [first.preflight_id, USER_ID, PREPARE_TOKEN]
+        );
+        await serviceQuery(
+            `SELECT * FROM public.claim_analysis_beta_preflight_prepare(
+                $1,$2,1,$3,$4,300
+            )`, [first.preflight_id, USER_ID, PREPARE_TOKEN, PREPARE_CLAIM_TOKEN]
+        );
+        const retryClaim = '42000000-0000-4000-8000-000000000010';
+        expect((await serviceQuery<{
+            claimed: boolean; prepare_state: string; claim_disposition: string;
+        }>(`SELECT * FROM public.claim_analysis_beta_preflight_prepare(
+                $1,$2,1,$3,$4,300
+            )`, [first.preflight_id, USER_ID, PREPARE_TOKEN, retryClaim])).rows)
+            .toEqual([{
+                claimed: false,
+                prepare_state: 'preparing',
+                claim_disposition: 'busy',
+            }]);
+        expect((await serviceQuery<{ released: boolean }>(
+            `SELECT public.release_analysis_beta_preflight_prepare_claim(
+                $1,$2,1,$3,$4
+            ) AS released`, [
+                first.preflight_id, USER_ID, PREPARE_TOKEN, PREPARE_CLAIM_TOKEN,
+            ]
+        )).rows).toEqual([{ released: true }]);
+        await serviceQuery(
+            `SELECT * FROM public.claim_analysis_beta_preflight_prepare(
+                $1,$2,1,$3,$4,300
+            )`, [first.preflight_id, USER_ID, PREPARE_TOKEN, retryClaim]
+        );
+        await db.query(
+            `UPDATE public.analysis_preflights
+             SET beta_prepare_lease_expires_at=
+                    pg_catalog.clock_timestamp()-INTERVAL '1 second'
+             WHERE id=$1`, [first.preflight_id]
+        );
+        const nextToken = '41000000-0000-4000-8000-000000000010';
+        const rearmed = await createDedicatedBetaPreflight({
+            prepareToken: nextToken,
+        });
+        expect(rearmed).toMatchObject({
+            preflight_id: first.preflight_id,
+            created: false,
+            prepare_generation: 2,
+            prepare_token: nextToken,
+            should_enqueue: true,
+        });
+        expect((await serviceQuery<{ claimed: boolean; prepare_state: string }>(
+            `SELECT * FROM public.claim_analysis_beta_preflight_prepare(
+                $1,$2,1,$3,$4,300
+            )`, [first.preflight_id, USER_ID, PREPARE_TOKEN, PREPARE_CLAIM_TOKEN]
+        )).rows).toEqual([{
+            claimed: false, prepare_state: 'reserved', claim_disposition: 'stale',
+        }]);
+
+        const exhaustedToken = '41000000-0000-4000-8000-000000000020';
+        const exhausted = await createDedicatedBetaPreflight({
+            idempotencyKey: 'betatest-entry-key-000020',
+            prepareToken: exhaustedToken,
+        });
+        await serviceQuery(
+            `SELECT public.mark_analysis_beta_preflight_prepare_dispatched(
+                $1,$2,1,$3
+            )`, [exhausted.preflight_id, USER_ID, exhaustedToken]
+        );
+        expect((await serviceQuery<{ exhausted: boolean }>(
+            `SELECT public.mark_analysis_beta_preflight_prepare_retry_exhausted(
+                $1,$2,1,$3
+            ) AS exhausted`, [exhausted.preflight_id, USER_ID, exhaustedToken]
+        )).rows).toEqual([{ exhausted: true }]);
+        const recoveredToken = '41000000-0000-4000-8000-000000000021';
+        const recovered = await createDedicatedBetaPreflight({
+            idempotencyKey: 'betatest-entry-key-000020',
+            prepareToken: recoveredToken,
+        });
+        expect(recovered).toMatchObject({
+            preflight_id: exhausted.preflight_id,
+            prepare_generation: 2,
+            prepare_token: recoveredToken,
+            should_enqueue: true,
+        });
+    });
+
+    it('terminalizes a queued beta prepare when the gate is disabled before claim', async () => {
+        await db.query('INSERT INTO public.users(id) VALUES ($1)', [USER_ID]);
+        await serviceQuery(
+            `SELECT public.upsert_analysis_beta_access_grant(
+                $1,TRUE,pg_catalog.clock_timestamp()+INTERVAL '1 hour',$2
+            )`, [USER_ID, AUDIT_HASH]
+        );
+        const created = await createDedicatedBetaPreflight();
+        await serviceQuery('SELECT public.set_analysis_beta_runtime_gate(FALSE)');
+        const claim = await serviceQuery<{ claimed: boolean; prepare_state: string }>(
+            `SELECT * FROM public.claim_analysis_beta_preflight_prepare(
+                $1,$2,1,$3,$4,300
+            )`, [created.preflight_id, USER_ID, PREPARE_TOKEN, PREPARE_CLAIM_TOKEN]
+        );
+        expect(claim.rows).toEqual([{
+            claimed: false,
+            prepare_state: 'capacity_blocked',
+            claim_disposition: 'terminal',
+        }]);
+        expect((await db.query<{
+            status: string; error_code: string; channel: string; state: string;
+        }>(`SELECT status,error_code,analysis_entry_channel AS channel,
+                   beta_prepare_state AS state
+            FROM public.analysis_preflights WHERE id=$1`, [created.preflight_id])).rows)
+            .toEqual([{
+                status: 'blocked', error_code: 'BETA_CAPACITY_UNAVAILABLE',
+                channel: 'betatest', state: 'capacity_blocked',
+            }]);
+    });
+
+    it('atomically recovers hold-commit worker crashes and permits ordinary dispatch only after prepared', async () => {
+        await db.query('INSERT INTO public.users(id) VALUES ($1)', [USER_ID]);
+        await serviceQuery(
+            `SELECT public.upsert_analysis_beta_access_grant(
+                $1,TRUE,pg_catalog.clock_timestamp()+INTERVAL '1 hour',$2
+            )`, [USER_ID, AUDIT_HASH]
+        );
+        const created = await createDedicatedBetaPreflight();
+        await db.query(
+            `UPDATE public.analysis_preflights
+             SET target_followers_count=120,target_following_count=140
+             WHERE id=$1`, [created.preflight_id]
+        );
+        await serviceQuery(
+            'SELECT public.upsert_analysis_beta_apify_credit_snapshots($1::JSONB)',
+            [JSON.stringify(snapshots())]
+        );
+        expect((await serviceQuery<{ claimed: boolean; prepare_state: string }>(
+            `SELECT * FROM public.claim_analysis_beta_preflight_prepare(
+                $1,$2,1,$3,$4,300
+            )`, [created.preflight_id, USER_ID, PREPARE_TOKEN, PREPARE_CLAIM_TOKEN]
+        )).rows).toEqual([{
+            claimed: true, prepare_state: 'preparing', claim_disposition: 'claimed',
+        }]);
+        await serviceQuery(
+            `SELECT public.prepare_analysis_beta_apify_preflight_credit(
+                $1,$2,1,$3,$4,'primary',0.005200000000,300
+            )`, [created.preflight_id, USER_ID, PREPARE_TOKEN, PREPARE_CLAIM_TOKEN]
+        );
+        // Simulate a worker dying after the DB commit but before its response.
+        expect((await serviceQuery<{ claimed: boolean; prepare_state: string }>(
+            `SELECT * FROM public.claim_analysis_beta_preflight_prepare(
+                $1,$2,1,$3,$4,300
+            )`, [created.preflight_id, USER_ID, PREPARE_TOKEN, PREPARE_CLAIM_TOKEN]
+        )).rows).toEqual([{
+            claimed: false, prepare_state: 'prepared', claim_disposition: 'terminal',
+        }]);
+        expect((await serviceQuery<{ should_enqueue: boolean }>(
+            `SELECT * FROM public.reserve_analysis_v2_preflight_dispatch($1,$2,$3)`,
+            [created.preflight_id, USER_ID, DISPATCH_TOKEN]
+        )).rows).toEqual([expect.objectContaining({ should_enqueue: true })]);
+    });
+
+    it('persists capacity failure and resolves an ambiguous post-hold block as prepared', async () => {
+        await db.query('INSERT INTO public.users(id) VALUES ($1)', [USER_ID]);
+        await serviceQuery(
+            `SELECT public.upsert_analysis_beta_access_grant(
+                $1,TRUE,pg_catalog.clock_timestamp()+INTERVAL '1 hour',$2
+            )`, [USER_ID, AUDIT_HASH]
+        );
+        const blocked = await createDedicatedBetaPreflight();
+        await serviceQuery(
+            `SELECT * FROM public.claim_analysis_beta_preflight_prepare(
+                $1,$2,1,$3,$4,300
+            )`, [blocked.preflight_id, USER_ID, PREPARE_TOKEN, PREPARE_CLAIM_TOKEN]
+        );
+        expect((await serviceQuery<{ result: string }>(
+            `SELECT public.block_analysis_beta_preflight_capacity(
+                $1,$2,1,$3,$4
+            ) AS result`, [blocked.preflight_id, USER_ID, PREPARE_TOKEN, PREPARE_CLAIM_TOKEN]
+        )).rows).toEqual([{ result: 'blocked' }]);
+
+        const secondKey = 'betatest-entry-key-000002';
+        const secondToken = '41000000-0000-4000-8000-000000000002';
+        const secondClaim = '42000000-0000-4000-8000-000000000002';
+        const prepared = await createDedicatedBetaPreflight({
+            idempotencyKey: secondKey, prepareToken: secondToken,
+        });
+        await db.query(
+            `UPDATE public.analysis_preflights
+             SET target_followers_count=120,target_following_count=140 WHERE id=$1`,
+            [prepared.preflight_id]
+        );
+        await serviceQuery(
+            'SELECT public.upsert_analysis_beta_apify_credit_snapshots($1::JSONB)',
+            [JSON.stringify(snapshots())]
+        );
+        await serviceQuery(
+            `SELECT * FROM public.claim_analysis_beta_preflight_prepare(
+                $1,$2,1,$3,$4,300
+            )`, [prepared.preflight_id, USER_ID, secondToken, secondClaim]
+        );
+        await serviceQuery(
+            `SELECT public.prepare_analysis_beta_apify_preflight_credit(
+                $1,$2,1,$3,$4,'primary',0.005200000000,300
+            )`, [prepared.preflight_id, USER_ID, secondToken, secondClaim]
+        );
+        expect((await serviceQuery<{ result: string }>(
+            `SELECT public.block_analysis_beta_preflight_capacity(
+                $1,$2,1,$3,$4
+            ) AS result`, [prepared.preflight_id, USER_ID, secondToken, secondClaim]
+        )).rows).toEqual([{ result: 'prepared' }]);
+    });
+
+    it('normalizes every historical beta expiry writer into a clean terminal shape', async () => {
+        await db.query('INSERT INTO public.users(id) VALUES($1)', [USER_ID]);
+        await serviceQuery(
+            `SELECT public.upsert_analysis_beta_access_grant(
+                $1,TRUE,pg_catalog.clock_timestamp()+INTERVAL '1 hour',$2
+            )`,
+            [USER_ID, AUDIT_HASH]
+        );
+
+        const pendingPrepareExpiry = await createDedicatedBetaPreflight({
+            idempotencyKey: 'betatest-expiry-prepare-claim-000001',
+        });
+        await db.query(
+            `UPDATE public.analysis_preflights
+             SET expires_at=pg_catalog.clock_timestamp()-INTERVAL '1 second'
+             WHERE id=$1`,
+            [pendingPrepareExpiry.preflight_id]
+        );
+        expect((await serviceQuery<{
+            claimed: boolean;
+            prepare_state: string;
+            claim_disposition: string;
+        }>(`SELECT * FROM public.claim_analysis_beta_preflight_prepare(
+                $1,$2,1,$3,$4,300
+            )`, [
+                pendingPrepareExpiry.preflight_id,
+                USER_ID,
+                pendingPrepareExpiry.prepare_token,
+                '42000000-0000-4000-8000-000000000030',
+            ])).rows).toEqual([{
+            claimed: false,
+            prepare_state: 'expired',
+            claim_disposition: 'terminal',
+        }]);
+
+        const claimedExpiry = await createDedicatedBetaPreflight({
+            idempotencyKey: 'betatest-expiry-claim-000001',
+            prepareToken: '41000000-0000-4000-8000-000000000030',
+        });
+        await db.query(
+            `UPDATE public.analysis_preflights
+             SET expires_at=pg_catalog.clock_timestamp()-INTERVAL '1 second'
+             WHERE id=$1`,
+            [claimedExpiry.preflight_id]
+        );
+        await serviceQuery(
+            `SELECT * FROM public.claim_analysis_v2_preflight($1,$2,300)`,
+            [claimedExpiry.preflight_id, CLAIM_TOKEN]
+        );
+
+        const purgeExpiry = await createDedicatedBetaPreflight({
+            idempotencyKey: 'betatest-expiry-purge-000001',
+            prepareToken: '41000000-0000-4000-8000-000000000031',
+        });
+        const purgeClaim = '42000000-0000-4000-8000-000000000031';
+        await serviceQuery(
+            `SELECT * FROM public.claim_analysis_beta_preflight_prepare(
+                $1,$2,1,$3,$4,300
+            )`,
+            [
+                purgeExpiry.preflight_id,
+                USER_ID,
+                purgeExpiry.prepare_token,
+                purgeClaim,
+            ]
+        );
+        await db.query(
+            `UPDATE public.analysis_preflights
+             SET expires_at=pg_catalog.clock_timestamp()-INTERVAL '1 second'
+             WHERE id=$1`,
+            [purgeExpiry.preflight_id]
+        );
+        await serviceQuery(
+            'SELECT public.purge_expired_analysis_v2_preflights(10)'
+        );
+
+        const createExpiry = await createDedicatedBetaPreflight({
+            idempotencyKey: 'betatest-expiry-create-000001',
+            prepareToken: '41000000-0000-4000-8000-000000000032',
+        });
+        await db.query(
+            `UPDATE public.analysis_preflights
+             SET expires_at=pg_catalog.clock_timestamp()-INTERVAL '1 second'
+             WHERE id=$1`,
+            [createExpiry.preflight_id]
+        );
+        await serviceQuery(
+            `SELECT * FROM public.create_or_replay_analysis_v2_preflight(
+                $1,'owner@example.com','google','ordinary.target',
+                'ordinary-after-stale-beta-000001','production',
+                '{}'::JSONB,'{}'::JSONB,'test','{}'::JSONB,'{}'::JSONB
+            )`,
+            [USER_ID]
+        );
+
+        const stored = await db.query<{
+            id: string;
+            status: string;
+            channel: string;
+            state: string;
+            dispatch: string;
+            lease_token: string | null;
+            lease_expires_at: string | null;
+            retry_exhausted_at: string | null;
+            completed_at: string | null;
+            pii_scrubbed_at: string | null;
+        }>(`SELECT id,status,analysis_entry_channel AS channel,
+                   beta_prepare_state AS state,
+                   beta_prepare_dispatch_state AS dispatch,
+                   beta_prepare_lease_token AS lease_token,
+                   beta_prepare_lease_expires_at AS lease_expires_at,
+                   beta_prepare_retry_exhausted_at AS retry_exhausted_at,
+                   beta_prepare_completed_at AS completed_at,
+                   pii_scrubbed_at
+            FROM public.analysis_preflights
+            WHERE id=ANY($1::UUID[])
+            ORDER BY id`, [[
+                pendingPrepareExpiry.preflight_id,
+                claimedExpiry.preflight_id,
+                purgeExpiry.preflight_id,
+                createExpiry.preflight_id,
+            ]]);
+        expect(stored.rows).toHaveLength(4);
+        for (const row of stored.rows) {
+            expect(row).toMatchObject({
+                status: 'expired',
+                channel: 'betatest',
+                state: 'expired',
+                dispatch: 'completed',
+                lease_token: null,
+                lease_expires_at: null,
+                retry_exhausted_at: null,
+            });
+            expect(row.completed_at).not.toBeNull();
+        }
+        expect(stored.rows.find(row => row.id === purgeExpiry.preflight_id)
+            ?.pii_scrubbed_at).not.toBeNull();
+        expect((await db.query<{ count: number }>(
+            `SELECT pg_catalog.count(*)::INTEGER AS count
+             FROM public.analysis_preflights
+             WHERE idempotency_key='ordinary-after-stale-beta-000001'
+               AND beta_entry_provenance IS NULL`
+        )).rows).toEqual([{ count: 1 }]);
+    });
+
+    it('rejects actually expired initial/fresh leases and still replays an existing authorization after gate-off', async () => {
+        await seedPendingBetaPreflight();
+        await db.query(
+            `UPDATE public.analysis_preflights
+             SET status='processing',lease_token=$2,
+                 lease_expires_at=pg_catalog.clock_timestamp()-INTERVAL '1 second'
+             WHERE id=$1`, [PREFLIGHT_ID, CLAIM_TOKEN]
+        );
+        await expect(reserveInitial()).rejects.toThrow(
+            /ANALYSIS_PREFLIGHT_PROVIDER_RUN_FENCE_MISMATCH/
+        );
+        await db.query(
+            `UPDATE public.analysis_preflights
+             SET status='ready',consumed_request_id=NULL,
+                 admission_status='processing',admission_generation=1,
+                 admission_claim_token=$2,
+                 admission_lease_expires_at=pg_catalog.clock_timestamp()-INTERVAL '1 second'
+             WHERE id=$1`, [PREFLIGHT_ID, CLAIM_TOKEN]
+        );
+        await expect(reserveFresh(1)).rejects.toThrow(
+            /ANALYSIS_PREFLIGHT_PROVIDER_RUN_FENCE_MISMATCH/
+        );
+
+        await db.query(
+            `UPDATE public.analysis_preflights
+             SET status='processing',lease_token=$2,
+                 lease_expires_at=pg_catalog.clock_timestamp()+INTERVAL '5 minutes'
+             WHERE id=$1`, [PREFLIGHT_ID, CLAIM_TOKEN]
+        );
+        const authorization = await reserveInitial();
+        expect(authorization.created).toBe(true);
+        await serviceQuery('SELECT public.set_analysis_beta_runtime_gate(FALSE)');
+        const replay = await reserveInitial();
+        expect(replay).toEqual({ ...authorization, created: false });
     });
 
     it.each(PLAN_IDS)('keeps the %s frozen TS and DB budget catalogs byte-identical', async planId => {
@@ -1281,6 +2006,174 @@ describe('betatest provider policy/guard migration PGlite', () => {
                 (SELECT pg_catalog.count(*)::INTEGER FROM public.analysis_beta_pool_allocations) AS allocations`
         );
         expect(state.rows).toEqual([{ requests: 1, jobs: 1, allocations: 1 }]);
+    });
+
+    it('loads consumed identity without current gate/grant and rejects a different plan', async () => {
+        await seedReadyBetaAdmission('basic');
+        const admitted = await admitBetaPlan();
+        await serviceQuery('SELECT public.set_analysis_beta_runtime_gate(FALSE)');
+        await db.query(
+            `UPDATE public.analysis_beta_access_grants
+             SET enabled=FALSE, expires_at=pg_catalog.clock_timestamp()-INTERVAL '1 second'
+             WHERE user_id=$1`,
+            [USER_ID]
+        );
+
+        await expect(replayConsumedBetaPlan()).resolves.toEqual({
+            ...admitted, replayed: true,
+        });
+        await expect(replayConsumedBetaPlan('plus')).rejects.toThrow(
+            /ANALYSIS_BETA_PLAN_REPLAY_IDENTITY_CONFLICT/
+        );
+    });
+
+    it('rejects fresh admission behind the database gate without partial activation and preserves consumed replay', async () => {
+        await seedReadyBetaAdmission('basic');
+        await serviceQuery('SELECT public.set_analysis_beta_runtime_gate(FALSE)');
+
+        await expect(admitBetaPlan()).rejects.toThrow(
+            /ANALYSIS_BETA_ACCESS_UNAVAILABLE/
+        );
+        expect((await db.query<{
+            requests: number; jobs: number; policies: number;
+            active_allocations: number; active_reservations: number;
+        }>(`SELECT
+                (SELECT pg_catalog.count(*)::INTEGER
+                 FROM public.analysis_requests) AS requests,
+                (SELECT pg_catalog.count(*)::INTEGER
+                 FROM public.analysis_pipeline_jobs) AS jobs,
+                (SELECT pg_catalog.count(*)::INTEGER
+                 FROM public.analysis_v2_provider_execution_policies) AS policies,
+                (SELECT pg_catalog.count(*)::INTEGER
+                 FROM public.analysis_beta_pool_allocations
+                 WHERE lifecycle_state='active') AS active_allocations,
+                (SELECT pg_catalog.count(*)::INTEGER
+                 FROM public.analysis_beta_pool_reservations
+                 WHERE lifecycle_state='active') AS active_reservations`)).rows).toEqual([{
+            requests: 0,
+            jobs: 0,
+            policies: 0,
+            active_allocations: 0,
+            active_reservations: 0,
+        }]);
+
+        await serviceQuery('SELECT public.set_analysis_beta_runtime_gate(TRUE)');
+        const admitted = await admitBetaPlan();
+        await serviceQuery('SELECT public.set_analysis_beta_runtime_gate(FALSE)');
+        await expect(admitBetaPlan()).resolves.toEqual({
+            ...admitted,
+            replayed: true,
+        });
+    });
+
+    it('requires durable beta entry and prepared fences before fresh admission', async () => {
+        await seedReadyBetaAdmission('basic');
+        await db.query(
+            `UPDATE public.analysis_preflights
+             SET beta_entry_provenance=NULL,
+                 beta_prepare_generation=0,
+                 beta_prepare_token=NULL,
+                 beta_prepare_state=NULL,
+                 beta_prepare_dispatch_state=NULL,
+                 beta_prepare_dispatched_at=NULL,
+                 beta_prepare_lease_token=NULL,
+                 beta_prepare_lease_expires_at=NULL,
+                 beta_prepare_completed_at=NULL,
+                 beta_prepare_retry_exhausted_at=NULL
+             WHERE id=$1`,
+            [PREFLIGHT_ID]
+        );
+
+        await expect(admitBetaPlan()).rejects.toThrow(
+            /ANALYSIS_BETA_REQUEST_NOT_ELIGIBLE/
+        );
+        expect((await db.query<{ requests: number; active: number }>(
+            `SELECT
+                (SELECT pg_catalog.count(*)::INTEGER
+                 FROM public.analysis_requests) AS requests,
+                (SELECT pg_catalog.count(*)::INTEGER
+                 FROM public.analysis_beta_pool_allocations
+                 WHERE lifecycle_state='active') AS active`
+        )).rows).toEqual([{ requests: 0, active: 0 }]);
+    });
+
+    it('rechecks gate and active grant inside shared beta exclusion mutation', async () => {
+        await seedPendingBetaPreflight();
+        await db.query(
+            `UPDATE public.analysis_preflights
+             SET exclusion_decision='pending' WHERE id=$1`,
+            [PREFLIGHT_ID]
+        );
+        await serviceQuery('SELECT public.set_analysis_beta_runtime_gate(FALSE)');
+
+        await expect(serviceQuery(
+            `SELECT public.set_analysis_v2_preflight_exclusion(
+                $1,$2,'exclude','candidate.user'
+            )`,
+            [PREFLIGHT_ID, USER_ID]
+        )).rejects.toThrow(/ANALYSIS_BETA_ACCESS_UNAVAILABLE/);
+        await serviceQuery('SELECT public.set_analysis_beta_runtime_gate(TRUE)');
+        await db.query(
+            `UPDATE public.analysis_beta_access_grants
+             SET enabled=FALSE WHERE user_id=$1`,
+            [USER_ID]
+        );
+        await expect(serviceQuery(
+            `SELECT public.set_analysis_v2_preflight_exclusion(
+                $1,$2,'exclude','candidate.user'
+            )`,
+            [PREFLIGHT_ID, USER_ID]
+        )).rejects.toThrow(/ANALYSIS_BETA_ACCESS_UNAVAILABLE/);
+
+        const stored = await db.query<{
+            decision: string;
+            excluded: string | null;
+        }>(
+            `SELECT exclusion_decision AS decision,
+                    excluded_instagram_id AS excluded
+             FROM public.analysis_preflights WHERE id=$1`,
+            [PREFLIGHT_ID]
+        );
+        expect(stored.rows).toEqual([{ decision: 'pending', excluded: null }]);
+    });
+
+    it('does not apply beta gate/grant requirements to an ordinary exclusion mutation', async () => {
+        await db.query('INSERT INTO public.users(id) VALUES($1)', [USER_ID]);
+        await db.query(
+            `INSERT INTO public.analysis_preflights(
+                id,user_id,status,access_mode,target_instagram_id,expires_at,
+                exclusion_decision
+             ) VALUES(
+                $1,$2,'pending','production',$3,
+                pg_catalog.clock_timestamp()+INTERVAL '30 minutes','pending'
+             )`,
+            [PREFLIGHT_ID, USER_ID, TARGET]
+        );
+        await serviceQuery('SELECT public.set_analysis_beta_runtime_gate(FALSE)');
+
+        const mutation = await serviceQuery<{ changed: boolean }>(
+            `SELECT public.set_analysis_v2_preflight_exclusion(
+                $1,$2,'skip',NULL
+            ) AS changed`,
+            [PREFLIGHT_ID, USER_ID]
+        );
+
+        expect(mutation.rows).toEqual([{ changed: true }]);
+    });
+
+    it('returns null before consumption and rejects corrupted consumed job integrity', async () => {
+        await seedReadyBetaAdmission('basic');
+        await expect(replayConsumedBetaPlan()).resolves.toBeNull();
+        const admitted = await admitBetaPlan();
+        await db.query(
+            `UPDATE public.analysis_pipeline_jobs
+             SET input_hash=$2
+             WHERE request_id=$1 AND job_key='coordinator:bootstrap'`,
+            [admitted.requestId, 'f'.repeat(64)]
+        );
+        await expect(replayConsumedBetaPlan()).rejects.toThrow(
+            /ANALYSIS_BETA_ALLOCATION_CONFLICT/
+        );
     });
 
     it('preserves terminal settled replay without requiring a current grant', async () => {
@@ -1499,15 +2392,19 @@ describe('betatest provider policy/guard migration PGlite', () => {
     });
 
     it('keeps both admission RPCs service-only and ordinary access modes unable to opt in', async () => {
-        const privileges = await db.query<{ replay_public: boolean; replay_service: boolean; admit_auth: boolean; admit_service: boolean }>(
+        const privileges = await db.query<{ replay_public: boolean; replay_service: boolean; consumed_auth: boolean; consumed_service: boolean; admit_auth: boolean; admit_service: boolean }>(
             `SELECT
                 pg_catalog.has_function_privilege('public','public.load_analysis_v2_betatest_plan_replay(uuid,uuid,uuid,integer,text)','EXECUTE') AS replay_public,
                 pg_catalog.has_function_privilege('service_role','public.load_analysis_v2_betatest_plan_replay(uuid,uuid,uuid,integer,text)','EXECUTE') AS replay_service,
+                pg_catalog.has_function_privilege('authenticated','public.load_analysis_v2_betatest_consumed_replay(uuid,uuid,text)','EXECUTE') AS consumed_auth,
+                pg_catalog.has_function_privilege('service_role','public.load_analysis_v2_betatest_consumed_replay(uuid,uuid,text)','EXECUTE') AS consumed_service,
                 pg_catalog.has_function_privilege('authenticated','public.admit_analysis_v2_betatest_plan(uuid,uuid,uuid,integer,text,jsonb,jsonb,integer)','EXECUTE') AS admit_auth,
                 pg_catalog.has_function_privilege('service_role','public.admit_analysis_v2_betatest_plan(uuid,uuid,uuid,integer,text,jsonb,jsonb,integer)','EXECUTE') AS admit_service`
         );
         expect(privileges.rows).toEqual([{
-            replay_public: false, replay_service: true, admit_auth: false, admit_service: true,
+            replay_public: false, replay_service: true,
+            consumed_auth: false, consumed_service: true,
+            admit_auth: false, admit_service: true,
         }]);
 
         await db.query(`INSERT INTO public.users(id) VALUES($1)`, [USER_ID]);
@@ -2109,7 +3006,12 @@ describe('betatest provider policy/guard migration PGlite', () => {
             `UPDATE public.analysis_preflights
              SET status = 'ready', lease_token = NULL, lease_expires_at = NULL,
                  admission_status = 'processing', admission_generation = 1,
-                 admission_requested_at = pg_catalog.clock_timestamp(),
+                 admission_requested_at = (
+                    SELECT pg_catalog.max(provider_run.reserved_at)
+                           + INTERVAL '1 microsecond'
+                    FROM public.analysis_preflight_provider_runs AS provider_run
+                    WHERE provider_run.preflight_id = $1
+                 ),
                  admission_claim_token = $2,
                  admission_lease_expires_at = pg_catalog.clock_timestamp() + INTERVAL '5 minutes'
              WHERE id = $1`,
@@ -2523,10 +3425,13 @@ describe('betatest provider policy/guard migration PGlite', () => {
         await db.query(
             `INSERT INTO public.analysis_preflights (
                 id, user_id, status, access_mode, target_instagram_id,
-                target_followers_count, target_following_count, expires_at
+                target_followers_count, target_following_count, expires_at,
+                beta_entry_provenance,beta_prepare_generation,beta_prepare_token,
+                beta_prepare_state,beta_prepare_dispatch_state
              ) VALUES ($1, $2, 'pending', 'production', $3, 120, 140,
-                pg_catalog.clock_timestamp() + INTERVAL '30 minutes')`,
-            [PREFLIGHT_ID, USER_ID, TARGET]
+                pg_catalog.clock_timestamp() + INTERVAL '30 minutes',
+                'betatest_service_v1',1,$4,'reserved','enqueued')`,
+            [PREFLIGHT_ID, USER_ID, TARGET, PREPARE_TOKEN]
         );
         await serviceQuery(
             `SELECT public.upsert_analysis_beta_access_grant(
@@ -2537,6 +3442,11 @@ describe('betatest provider policy/guard migration PGlite', () => {
         await serviceQuery(
             'SELECT public.upsert_analysis_beta_apify_credit_snapshots($1::JSONB)',
             [JSON.stringify(snapshots())]
+        );
+        await serviceQuery(
+            `SELECT * FROM public.claim_analysis_beta_preflight_prepare(
+                $1,$2,1,$3,$4,300
+            )`, [PREFLIGHT_ID, USER_ID, PREPARE_TOKEN, PREPARE_CLAIM_TOKEN]
         );
         const observed = (await db.query<{ observed_at: string }>(
             `SELECT observed_at FROM public.analysis_apify_credit_snapshots
@@ -2556,18 +3466,18 @@ describe('betatest provider policy/guard migration PGlite', () => {
         );
 
         await expect(serviceQuery(
-            `SELECT public.hold_analysis_beta_apify_preflight_credit(
-                $1, $2, 'primary', 0.005200000000, 300
-            )`, [PREFLIGHT_ID, USER_ID]
+            `SELECT public.prepare_analysis_beta_apify_preflight_credit(
+                $1,$2,1,$3,$4,'primary',0.005200000000,300
+            )`, [PREFLIGHT_ID, USER_ID, PREPARE_TOKEN, PREPARE_CLAIM_TOKEN]
         )).rejects.toThrow(/ANALYSIS_BETA_POOL_CAPACITY_UNAVAILABLE/);
         expect((await db.query(
             'SELECT id FROM public.analysis_beta_pool_allocations WHERE preflight_id = $1',
             [PREFLIGHT_ID]
         )).rows).toEqual([]);
         await expect(serviceQuery(
-            `SELECT public.hold_analysis_beta_apify_preflight_credit(
-                $1, $2, 'tertiary', 0.005200000000, 300
-            )`, [PREFLIGHT_ID, USER_ID]
+            `SELECT public.prepare_analysis_beta_apify_preflight_credit(
+                $1,$2,1,$3,$4,'tertiary',0.005200000000,300
+            )`, [PREFLIGHT_ID, USER_ID, PREPARE_TOKEN, PREPARE_CLAIM_TOKEN]
         )).resolves.toBeDefined();
     });
 

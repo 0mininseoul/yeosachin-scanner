@@ -10,6 +10,11 @@ import type { BetaApifyPoolSnapshot } from './beta-apify-credit-runtime';
 
 const preflightId = '123e4567-e89b-42d3-a456-426614174000';
 const userId = '223e4567-e89b-42d3-a456-426614174000';
+const prepareFence = {
+    prepareGeneration: 1,
+    prepareToken: preflightId.replace(/^1/, '4'),
+    claimToken: preflightId.replace(/^1/, '5'),
+} as const;
 const now = new Date('2026-08-02T00:00:00.000Z');
 
 function providerReply() {
@@ -92,7 +97,8 @@ describe('beta preflight credit coordinator', () => {
             now: () => now.getTime(),
         });
 
-        await expect(coordinator.prepare({ preflightId, userId })).resolves.toMatchObject({
+        await expect(coordinator.prepare({ preflightId, userId, ...prepareFence }))
+            .resolves.toMatchObject({
             credentialSlot: 'tertiary',
             existing: false,
         });
@@ -104,11 +110,11 @@ describe('beta preflight credit coordinator', () => {
             expect(client.monthlyUsage).toHaveBeenCalledOnce();
         }
         expect(pool.holdPreflight).toHaveBeenCalledWith(expect.objectContaining({
-            preflightId, userId, credentialSlot: 'tertiary',
+            preflightId, userId, ...prepareFence, credentialSlot: 'tertiary',
         }));
     });
 
-    it('reuses a stored frozen target hold without reading config or calling Apify', async () => {
+    it('atomically promotes a stored frozen target hold without calling Apify', async () => {
         const pool = store();
         pool.loadPreflightHold = vi.fn(async () => ({
             allocationId: '323e4567-e89b-42d3-a456-426614174000',
@@ -120,15 +126,46 @@ describe('beta preflight credit coordinator', () => {
         const coordinator = createBetaApifyPreflightCoordinator({
             store: pool,
             clientForSlot,
-            env: { BETATEST_FREE_POOL_ENABLED: 'not-a-boolean' },
+            env: { BETATEST_FREE_POOL_ENABLED: 'true' },
         });
 
-        await expect(coordinator.prepare({ preflightId, userId })).resolves.toMatchObject({
+        await expect(coordinator.prepare({ preflightId, userId, ...prepareFence }))
+            .resolves.toMatchObject({
             credentialSlot: 'quinary', existing: true,
         });
         expect(clientForSlot).not.toHaveBeenCalled();
         expect(pool.upsertSnapshots).not.toHaveBeenCalled();
+        expect(pool.holdPreflight).toHaveBeenCalledWith(expect.objectContaining({
+            preflightId, userId, ...prepareFence, credentialSlot: 'quinary',
+        }));
+    });
+
+    it.each([
+        ['disabled', { BETATEST_FREE_POOL_ENABLED: 'false' }],
+        ['invalid', { BETATEST_FREE_POOL_ENABLED: 'not-a-boolean' }],
+    ] as const)('fails closed for an existing hold when the worker env gate is %s', async (
+        _label,
+        env
+    ) => {
+        const pool = store();
+        pool.loadPreflightHold = vi.fn(async () => ({
+            allocationId: '323e4567-e89b-42d3-a456-426614174000',
+            preflightId,
+            credentialSlot: 'quinary' as const,
+            targetProfileBudgetUsd: 0.0052,
+        }));
+        const clientForSlot = vi.fn();
+        const coordinator = createBetaApifyPreflightCoordinator({
+            store: pool, clientForSlot, env,
+        });
+
+        await expect(coordinator.reuse(preflightId))
+            .rejects.toEqual(new Error(BETA_APIFY_POOL_CAPACITY_ERROR));
+        await expect(coordinator.prepare({ preflightId, userId, ...prepareFence }))
+            .rejects.toEqual(new Error(BETA_APIFY_POOL_CAPACITY_ERROR));
+        expect(pool.loadPreflightHold).not.toHaveBeenCalled();
         expect(pool.holdPreflight).not.toHaveBeenCalled();
+        expect(clientForSlot).not.toHaveBeenCalled();
     });
 
     it('fails closed without a hold when any exact-six account refresh fails', async () => {
@@ -146,7 +183,7 @@ describe('beta preflight credit coordinator', () => {
             now: () => now.getTime(),
         });
 
-        await expect(coordinator.prepare({ preflightId, userId }))
+        await expect(coordinator.prepare({ preflightId, userId, ...prepareFence }))
             .rejects.toEqual(new Error(BETA_APIFY_POOL_CAPACITY_ERROR));
         expect(pool.upsertSnapshots).not.toHaveBeenCalled();
         expect(pool.holdPreflight).not.toHaveBeenCalled();

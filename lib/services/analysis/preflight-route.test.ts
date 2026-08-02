@@ -23,6 +23,8 @@ const mocks = vi.hoisted(() => ({
     insertLandingLead: vi.fn(),
     resolveDispatch: vi.fn(),
     trustedAccessMode: vi.fn(),
+    betaEnabled: vi.fn(),
+    betaAccess: vi.fn(),
     admin: {
         from: vi.fn(),
     },
@@ -36,6 +38,7 @@ const mocks = vi.hoisted(() => ({
     store: {
         createOrReplay: vi.fn(),
         findForOwner: vi.fn(),
+        hasBetaEntryProvenance: vi.fn(),
         reserveDispatch: vi.fn(),
         markDispatched: vi.fn(),
         claim: vi.fn(),
@@ -85,6 +88,11 @@ vi.mock('@/lib/services/analysis/preflight-tasks', async (importOriginal) => {
 });
 vi.mock('@/lib/services/analysis/v2-execution-gate', () => ({
     isAnalysisV2AdmissionAvailable: mocks.admissionAvailable,
+}));
+vi.mock('@/lib/services/analysis/betatest-access', async importOriginal => ({
+    ...(await importOriginal<typeof import('./betatest-access')>()),
+    betaTestFreePoolEnabled: mocks.betaEnabled,
+    hasBetaTestAccess: mocks.betaAccess,
 }));
 vi.mock('@/lib/services/leads/store', () => ({
     insertLandingLead: mocks.insertLandingLead,
@@ -191,6 +199,8 @@ describe('preflight owner routes', () => {
         mocks.insertLandingLead.mockResolvedValue(undefined);
         mocks.resolveDispatch.mockReturnValue({ mode: 'queue', config: taskConfig });
         mocks.trustedAccessMode.mockReturnValue('test_entitlement');
+        mocks.betaEnabled.mockReturnValue(true);
+        mocks.betaAccess.mockResolvedValue(true);
         mocks.store.createOrReplay.mockResolvedValue({
             preflightId,
             expiresAt,
@@ -205,6 +215,7 @@ describe('preflight owner routes', () => {
             readySnapshot: null,
             exclusionDecision: 'pending',
         });
+        mocks.store.hasBetaEntryProvenance.mockResolvedValue(false);
         mocks.store.reserveDispatch.mockResolvedValue({
             shouldEnqueue: true,
             generation: 1,
@@ -820,6 +831,28 @@ describe('preflight owner routes', () => {
         }), context());
         expect(conflict.status).toBe(409);
         await expect(conflict.json()).resolves.toMatchObject({ code: 'PREFLIGHT_IMMUTABLE' });
+    });
+
+    it('rechecks both env and authenticated DB grant before a beta exclusion mutation', async () => {
+        mocks.store.hasBetaEntryProvenance.mockResolvedValue(true);
+        mocks.betaEnabled.mockReturnValue(false);
+        const disabled = await patchPreflight(new Request('https://example.com', {
+            method: 'PATCH',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ decision: 'skip' }),
+        }), context());
+        expect(disabled.status).toBe(403);
+        expect(mocks.store.setExclusion).not.toHaveBeenCalled();
+
+        mocks.betaEnabled.mockReturnValue(true);
+        mocks.betaAccess.mockResolvedValue(false);
+        const revoked = await patchPreflight(new Request('https://example.com', {
+            method: 'PATCH',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ decision: 'skip' }),
+        }), context());
+        expect(revoked.status).toBe(403);
+        expect(mocks.store.setExclusion).not.toHaveBeenCalled();
     });
 
     it('observes an unexpected exclusion persistence failure without changing its response', async () => {

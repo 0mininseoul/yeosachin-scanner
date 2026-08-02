@@ -284,7 +284,15 @@ export interface BetaApifyCreditPoolStore {
     loadSnapshots(maxSnapshotAgeSeconds: number): Promise<readonly BetaApifyPoolSnapshot[]>;
     /** Service-only retry identity; intentionally excludes user ids and all provider data. */
     loadPreflightHold(preflightId: string): Promise<z.infer<typeof preflightHoldSchema> | null>;
-    holdPreflight(input: { preflightId: string; userId: string; credentialSlot: BetaApifyFreeCredentialSlot; maxSnapshotAgeSeconds: number }): Promise<BetaApifyPoolAllocation>;
+    holdPreflight(input: {
+        preflightId: string;
+        userId: string;
+        prepareGeneration: number;
+        prepareToken: string;
+        claimToken: string;
+        credentialSlot: BetaApifyFreeCredentialSlot;
+        maxSnapshotAgeSeconds: number;
+    }): Promise<BetaApifyPoolAllocation>;
     activateRequest(input: { preflightId: string; requestId: string; userId: string; selectedPlanId: PlanId; operationSlotMap: BetaApifyOperationSlotMap; operationBudgetMap: BetaApifyOperationBudgetMap; maxSnapshotAgeSeconds: number }): Promise<BetaApifyPoolAllocation>;
     settle(allocationId: string, reason: 'request_terminal' | 'preflight_expired' | 'recovery'): Promise<z.infer<typeof settlementSchema>>;
     recover(limit?: number): Promise<readonly z.infer<typeof settlementSchema>[]>;
@@ -349,13 +357,23 @@ export function createBetaApifyCreditPoolStore(client: BetaApifyPoolStoreClient)
             return Object.freeze(parsed.data);
         },
         async holdPreflight(input) {
-            const data = await invoke(client, 'hold_analysis_beta_apify_preflight_credit', {
+            const generation = z.number().int().min(1).max(100).parse(
+                input.prepareGeneration
+            );
+            const data = await invoke(
+                client,
+                'prepare_analysis_beta_apify_preflight_credit',
+                {
                 p_preflight_id: checkedUuid(input.preflightId),
                 p_user_id: checkedUuid(input.userId),
+                p_prepare_generation: generation,
+                p_prepare_token: checkedUuid(input.prepareToken),
+                p_claim_token: checkedUuid(input.claimToken),
                 p_credential_slot: slotSchema.parse(input.credentialSlot),
                 p_target_profile_budget_usd: BETA_APIFY_TARGET_PROFILE_BUDGET_USD,
                 p_max_snapshot_age_seconds: checkedAge(input.maxSnapshotAgeSeconds),
-            });
+                }
+            );
             const parsed = allocationSchema.safeParse(data);
             if (!parsed.success) throw new Error(BETA_APIFY_POOL_PERSISTENCE_ERROR);
             return Object.freeze(parsed.data);

@@ -2,7 +2,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 const mocks = vi.hoisted(() => ({
     createClient: vi.fn(), getUser: vi.fn(), enabled: vi.fn(), hasAccess: vi.fn(),
-    reserve: vi.fn(), admit: vi.fn(), dispatch: vi.fn(),
+    reserve: vi.fn(), admit: vi.fn(), replayConsumed: vi.fn(), dispatch: vi.fn(),
     admin: { from: vi.fn() }, query: { select: vi.fn(), eq: vi.fn(), maybeSingle: vi.fn() },
 }));
 
@@ -17,8 +17,15 @@ vi.mock('@/lib/services/analysis/fresh-plan-admission', () => ({
     markAnalysisV2FreshAdmissionDispatched: vi.fn(),
 }));
 vi.mock('@/lib/services/analysis/beta-apify-plan-admission', () => ({
-    admitBetaApifyPlan: mocks.admit, createBetaApifyPlanAdmissionStore: vi.fn(() => ({})),
+    admitBetaApifyPlan: mocks.admit,
+    createBetaApifyPlanAdmissionStore: vi.fn(() => ({
+        replayConsumed: mocks.replayConsumed,
+    })),
+    BETA_APIFY_PLAN_ACCESS_UNAVAILABLE:
+        'ANALYSIS_BETA_PLAN_ACCESS_UNAVAILABLE',
     BETA_APIFY_PLAN_ADMISSION_ERROR: 'ANALYSIS_BETA_POOL_CAPACITY_UNAVAILABLE',
+    BETA_APIFY_PLAN_REPLAY_IDENTITY_CONFLICT:
+        'ANALYSIS_BETA_PLAN_REPLAY_IDENTITY_CONFLICT',
 }));
 vi.mock('@/lib/services/analysis/beta-apify-credit-runtime', () => ({
     createBetaApifyCreditPoolStore: vi.fn(() => ({})),
@@ -39,6 +46,7 @@ describe('betatest plan admission route', () => {
         mocks.createClient.mockResolvedValue({ auth: { getUser: mocks.getUser }, rpc: vi.fn() });
         mocks.getUser.mockResolvedValue({ data: { user: { id: userId } }, error: null });
         mocks.enabled.mockReturnValue(true); mocks.hasAccess.mockResolvedValue(true);
+        mocks.replayConsumed.mockResolvedValue(null);
         mocks.admin.from.mockReturnValue(mocks.query); mocks.query.select.mockReturnValue(mocks.query);
         mocks.query.eq.mockReturnValue(mocks.query);
         mocks.query.maybeSingle.mockResolvedValue({ data: { id: preflightId, user_id: userId, analysis_entry_channel: 'betatest' }, error: null });
@@ -74,5 +82,92 @@ describe('betatest plan admission route', () => {
         expect(response.status).toBe(202);
         await expect(response.json()).resolves.toEqual(expect.objectContaining({ code: 'BETA_ADMISSION_PENDING' }));
         expect(mocks.admit).not.toHaveBeenCalled();
+    });
+
+    it('replays consumed immutable identity before current gate, grant, owner, or fresh reserve checks', async () => {
+        mocks.enabled.mockReturnValue(false);
+        mocks.hasAccess.mockResolvedValue(false);
+        mocks.replayConsumed.mockResolvedValue({
+            requestId,
+            initialJobKey: 'coordinator:bootstrap',
+            allocationId: '523e4567-e89b-42d3-a456-426614174000',
+            replayed: true,
+        });
+
+        const response = await POST(request(), context);
+
+        expect(response.status).toBe(200);
+        expect(mocks.replayConsumed).toHaveBeenCalledWith({
+            preflightId, userId, selectedPlanId: 'basic',
+        });
+        expect(mocks.enabled).not.toHaveBeenCalled();
+        expect(mocks.hasAccess).not.toHaveBeenCalled();
+        expect(mocks.admin.from).not.toHaveBeenCalled();
+        expect(mocks.reserve).not.toHaveBeenCalled();
+        expect(mocks.admit).not.toHaveBeenCalled();
+        expect(mocks.dispatch).toHaveBeenCalledWith(
+            requestId, 'coordinator:bootstrap'
+        );
+    });
+
+    it('rejects a consumed replay under a different selected plan without fresh reserve', async () => {
+        mocks.replayConsumed.mockRejectedValue(
+            new Error('ANALYSIS_BETA_PLAN_REPLAY_IDENTITY_CONFLICT')
+        );
+
+        const response = await POST(request(), context);
+
+        expect(response.status).toBe(409);
+        await expect(response.json()).resolves.toEqual(expect.objectContaining({
+            code: 'BETA_ADMISSION_IDENTITY_CONFLICT',
+        }));
+        expect(mocks.reserve).not.toHaveBeenCalled();
+        expect(mocks.admit).not.toHaveBeenCalled();
+    });
+
+    it('re-dispatches the same stored request identity after the first queue response is lost', async () => {
+        const replay = {
+            requestId,
+            initialJobKey: 'coordinator:bootstrap' as const,
+            allocationId: '523e4567-e89b-42d3-a456-426614174000',
+            replayed: true,
+        };
+        mocks.replayConsumed
+            .mockResolvedValueOnce(null)
+            .mockResolvedValueOnce(replay);
+        mocks.dispatch
+            .mockRejectedValueOnce(new Error('lost queue response'))
+            .mockResolvedValueOnce('exists');
+
+        const first = await POST(request(), context);
+        const second = await POST(request(), context);
+
+        expect(first.status).toBe(503);
+        expect(second.status).toBe(200);
+        expect(mocks.reserve).toHaveBeenCalledTimes(1);
+        expect(mocks.admit).toHaveBeenCalledTimes(1);
+        expect(mocks.dispatch).toHaveBeenNthCalledWith(
+            1, requestId, 'coordinator:bootstrap'
+        );
+        expect(mocks.dispatch).toHaveBeenNthCalledWith(
+            2, requestId, 'coordinator:bootstrap'
+        );
+        await expect(second.json()).resolves.toEqual(expect.objectContaining({
+            requestId, status: 'queued',
+        }));
+    });
+
+    it('keeps a database gate race on the stable access-denied contract', async () => {
+        mocks.admit.mockRejectedValueOnce(
+            new Error('ANALYSIS_BETA_PLAN_ACCESS_UNAVAILABLE')
+        );
+
+        const response = await POST(request(), context);
+
+        expect(response.status).toBe(403);
+        await expect(response.json()).resolves.toMatchObject({
+            code: 'BETA_ACCESS_UNAVAILABLE',
+        });
+        expect(mocks.dispatch).not.toHaveBeenCalled();
     });
 });

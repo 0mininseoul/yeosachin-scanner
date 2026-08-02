@@ -18,7 +18,9 @@ import {
     getPreflightTasksConfig,
 } from '@/lib/services/analysis/preflight-tasks';
 import {
+    BETA_APIFY_PLAN_ACCESS_UNAVAILABLE,
     BETA_APIFY_PLAN_ADMISSION_ERROR,
+    BETA_APIFY_PLAN_REPLAY_IDENTITY_CONFLICT,
     admitBetaApifyPlan,
     createBetaApifyPlanAdmissionStore,
 } from '@/lib/services/analysis/beta-apify-plan-admission';
@@ -29,6 +31,7 @@ const idSchema = z.string().uuid().transform(value => value.toLowerCase());
 const bodySchema = z.object({ planId: planIdSchema }).strict();
 const BETA_ADMISSION_PENDING = 'BETA_ADMISSION_PENDING';
 const BETA_CAPACITY_UNAVAILABLE = 'BETA_CAPACITY_UNAVAILABLE';
+const BETA_ADMISSION_IDENTITY_CONFLICT = 'BETA_ADMISSION_IDENTITY_CONFLICT';
 
 function failure(status: number, code: string, error: string) {
     return NextResponse.json({ schemaVersion: ANALYSIS_V2_SCHEMA_VERSION, code, error }, { status });
@@ -46,15 +49,48 @@ export async function POST(request: Request, { params }: RouteContext): Promise<
     const supabase = await createClient();
     const { data: { user }, error: authError } = await supabase.auth.getUser();
     if (authError || !user) return failure(401, 'UNAUTHORIZED', '로그인이 필요합니다.');
-    if (!betaTestFreePoolEnabled() || !await hasBetaTestAccess(supabase)) {
-        return failure(403, BETA_TEST_ACCESS_UNAVAILABLE, '베타 분석을 사용할 수 없습니다.');
-    }
     const preflight = idSchema.safeParse((await params).preflightId);
     let rawBody: unknown;
     try { rawBody = await request.json(); } catch { rawBody = null; }
     const body = bodySchema.safeParse(rawBody);
     if (!preflight.success || !body.success) {
         return failure(400, 'INVALID_REQUEST', '요청 형식이 올바르지 않습니다.');
+    }
+    const planStore = createBetaApifyPlanAdmissionStore(supabaseAdmin);
+    try {
+        const replay = await planStore.replayConsumed({
+            preflightId: preflight.data,
+            userId: user.id,
+            selectedPlanId: body.data.planId,
+        });
+        if (replay) {
+            try {
+                await dispatchAnalysisV2Job(replay.requestId, replay.initialJobKey);
+            } catch {
+                return failure(503, 'QUEUE_UNAVAILABLE', '분석 작업을 시작할 수 없습니다.');
+            }
+            return NextResponse.json({
+                schemaVersion: ANALYSIS_V2_SCHEMA_VERSION,
+                requestId: replay.requestId,
+                status: 'queued',
+                backgroundProcessing: true,
+            }, { status: 200 });
+        }
+    } catch (error) {
+        if (
+            error instanceof Error
+            && error.message === BETA_APIFY_PLAN_REPLAY_IDENTITY_CONFLICT
+        ) {
+            return failure(
+                409,
+                BETA_ADMISSION_IDENTITY_CONFLICT,
+                '이미 선택한 베타 플랜과 다릅니다.'
+            );
+        }
+        return failure(503, BETA_ADMISSION_PENDING, '베타 분석을 준비할 수 없습니다.');
+    }
+    if (!betaTestFreePoolEnabled() || !await hasBetaTestAccess(supabase)) {
+        return failure(403, BETA_TEST_ACCESS_UNAVAILABLE, '베타 분석을 사용할 수 없습니다.');
     }
     const owner = await supabaseAdmin
         .from('analysis_preflights')
@@ -125,7 +161,7 @@ export async function POST(request: Request, { params }: RouteContext): Promise<
             admissionGeneration: admission.generation,
             selectedPlanId: body.data.planId,
             maxSnapshotAgeSeconds: 300,
-            store: { ...poolStore, ...createBetaApifyPlanAdmissionStore(supabaseAdmin) },
+            store: { ...poolStore, ...planStore },
         });
         try { await dispatchAnalysisV2Job(result.requestId, result.initialJobKey); } catch {
             return failure(503, 'QUEUE_UNAVAILABLE', '분석 작업을 시작할 수 없습니다.');
@@ -137,6 +173,16 @@ export async function POST(request: Request, { params }: RouteContext): Promise<
             backgroundProcessing: true,
         }, { status: 200 });
     } catch (error) {
+        if (
+            error instanceof Error
+            && error.message === BETA_APIFY_PLAN_ACCESS_UNAVAILABLE
+        ) {
+            return failure(
+                403,
+                BETA_TEST_ACCESS_UNAVAILABLE,
+                '베타 분석을 사용할 수 없습니다.'
+            );
+        }
         if (error instanceof Error && error.message === BETA_APIFY_PLAN_ADMISSION_ERROR) {
             return failure(409, BETA_CAPACITY_UNAVAILABLE, '베타 분석을 준비할 수 없습니다.');
         }

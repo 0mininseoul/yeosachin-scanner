@@ -30,6 +30,9 @@ export interface BetaApifyPreflightCoordinatorStore {
     holdPreflight(input: {
         preflightId: string;
         userId: string;
+        prepareGeneration: number;
+        prepareToken: string;
+        claimToken: string;
         credentialSlot: BetaApifyFreeCredentialSlot;
         maxSnapshotAgeSeconds: number;
     }): Promise<BetaApifyPoolAllocation>;
@@ -40,7 +43,13 @@ export interface BetaApifyPreflightCoordinator {
         allocationId: string;
         credentialSlot: BetaApifyFreeCredentialSlot;
     }>>;
-    prepare(input: { preflightId: string; userId: string }): Promise<Readonly<{
+    prepare(input: {
+        preflightId: string;
+        userId: string;
+        prepareGeneration: number;
+        prepareToken: string;
+        claimToken: string;
+    }): Promise<Readonly<{
         allocationId: string;
         credentialSlot: BetaApifyFreeCredentialSlot;
         existing: boolean;
@@ -81,6 +90,13 @@ export function createBetaApifyPreflightCoordinator(input: {
     const coordinator: BetaApifyPreflightCoordinator = {
         async reuse(preflightId) {
             try {
+                if (!getBetaApifyCreditPoolRuntimeConfig(input.env).enabled) {
+                    throw sanitizedCapacityError();
+                }
+            } catch {
+                throw sanitizedCapacityError();
+            }
+            try {
                 const existing = await input.store.loadPreflightHold(preflightId);
                 if (!existing || !isExactHold(existing) || existing.preflightId.toLowerCase() !== preflightId.toLowerCase()) {
                     throw sanitizedCapacityError();
@@ -93,7 +109,21 @@ export function createBetaApifyPreflightCoordinator(input: {
                 throw sanitizedCapacityError();
             }
         },
-        async prepare({ preflightId, userId }: { preflightId: string; userId: string }) {
+        async prepare({
+            preflightId,
+            userId,
+            prepareGeneration,
+            prepareToken,
+            claimToken,
+        }) {
+            let config;
+            try {
+                config = getBetaApifyCreditPoolRuntimeConfig(input.env);
+            } catch {
+                throw sanitizedCapacityError();
+            }
+            if (!config.enabled) throw sanitizedCapacityError();
+
             let existing: StoredBetaApifyPreflightHold | null;
             try {
                 existing = await input.store.loadPreflightHold(preflightId);
@@ -102,20 +132,25 @@ export function createBetaApifyPreflightCoordinator(input: {
             }
             if (existing) {
                 if (!isExactHold(existing) || existing.preflightId.toLowerCase() !== preflightId.toLowerCase()) throw sanitizedCapacityError();
+                try {
+                    await input.store.holdPreflight({
+                        preflightId,
+                        userId,
+                        prepareGeneration,
+                        prepareToken,
+                        claimToken,
+                        credentialSlot: existing.credentialSlot,
+                        maxSnapshotAgeSeconds: config.maxSnapshotAgeSeconds,
+                    });
+                } catch {
+                    throw sanitizedCapacityError();
+                }
                 return Object.freeze({
                     allocationId: existing.allocationId,
                     credentialSlot: existing.credentialSlot,
                     existing: true,
                 });
             }
-
-            let config;
-            try {
-                config = getBetaApifyCreditPoolRuntimeConfig(input.env);
-            } catch {
-                throw sanitizedCapacityError();
-            }
-            if (!config.enabled) throw sanitizedCapacityError();
 
             try {
                 const observedAt = new Date((input.now ?? Date.now)());
@@ -139,6 +174,9 @@ export function createBetaApifyPreflightCoordinator(input: {
                 const allocation = await input.store.holdPreflight({
                     preflightId,
                     userId,
+                    prepareGeneration,
+                    prepareToken,
+                    claimToken,
                     credentialSlot,
                     maxSnapshotAgeSeconds: config.maxSnapshotAgeSeconds,
                 });

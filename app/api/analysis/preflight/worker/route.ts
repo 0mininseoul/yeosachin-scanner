@@ -35,6 +35,7 @@ import {
     refreshBetaApifyCreditSnapshots,
     settleBetaApifyPreflightCredit,
 } from '@/lib/services/analysis/beta-apify-credit-settlement-runtime';
+import { trustedCloudTasksRetryCount } from '@/lib/services/analysis/pipeline-retry';
 
 const workerRequestSchema = z.union([
     z.object({
@@ -44,6 +45,8 @@ const workerRequestSchema = z.union([
         preflightId: z.string().uuid(),
         kind: z.literal('beta_prepare'),
         userId: z.string().uuid(),
+        prepareGeneration: z.number().int().min(1).max(100),
+        prepareToken: z.string().uuid(),
     }).strict(),
     z.object({
         preflightId: z.string().uuid(),
@@ -121,6 +124,9 @@ async function handlePOST(
             outcome = await prepareBetaPreflightDispatch({
                 preflightId: task.preflightId,
                 userId: task.userId,
+                prepareGeneration: task.prepareGeneration,
+                prepareToken: task.prepareToken,
+                deliveryRetryCount: trustedCloudTasksRetryCount(request.headers, true),
                 coordinator: betaCreditCoordinator,
                 enqueue: (preflightId, generation) => enqueuePreflightTask(
                     preflightId, generation, { config }

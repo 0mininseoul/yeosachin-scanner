@@ -6,7 +6,11 @@ const mocks = vi.hoisted(() => ({
     hasAccess: vi.fn(),
     enabled: vi.fn(),
     enqueuePrepare: vi.fn(),
-    store: { createOrReplay: vi.fn() },
+    store: {
+        createOrReplayBeta: vi.fn(),
+        markBetaPrepareDispatched: vi.fn(),
+        blockBetaPrepareCapacity: vi.fn(),
+    },
 }));
 
 vi.mock('@/lib/supabase/server', () => ({ createClient: mocks.createClient }));
@@ -25,10 +29,14 @@ vi.mock('@/lib/services/analysis/preflight-tasks', () => ({
 }));
 
 import { POST as createBetaPreflight } from '@/app/api/analysis/betatest/preflight/route';
-import { prepareBetaPreflightDispatch } from './preflight';
+import {
+    BetaPreflightAccessUnavailableError,
+    prepareBetaPreflightDispatch,
+} from './preflight';
 
 const userId = '223e4567-e89b-42d3-a456-426614174000';
 const preflightId = '123e4567-e89b-42d3-a456-426614174000';
+const prepareToken = preflightId.replace(/^1/, '3');
 
 function request(body: unknown = { targetInstagramId: 'target.name' }) {
     return new Request('https://example.com/api/analysis/betatest/preflight', {
@@ -47,9 +55,12 @@ describe('dedicated betatest preflight route', () => {
         } }, error: null });
         mocks.enabled.mockReturnValue(true);
         mocks.hasAccess.mockResolvedValue(true);
-        mocks.store.createOrReplay.mockResolvedValue({
+        mocks.store.createOrReplayBeta.mockResolvedValue({
             preflightId, expiresAt: '2030-07-13T13:00:00.000Z', created: true, status: 'pending',
+            prepareGeneration: 1, prepareToken, shouldEnqueue: true,
         });
+        mocks.store.markBetaPrepareDispatched.mockResolvedValue(undefined);
+        mocks.store.blockBetaPrepareCapacity.mockResolvedValue('blocked');
         mocks.enqueuePrepare.mockResolvedValue('enqueued');
     });
 
@@ -61,17 +72,22 @@ describe('dedicated betatest preflight route', () => {
         mocks.enabled.mockReturnValue(true);
         mocks.hasAccess.mockResolvedValue(false);
         expect((await createBetaPreflight(request())).status).toBe(403);
-        expect(mocks.store.createOrReplay).not.toHaveBeenCalled();
+        expect(mocks.store.createOrReplayBeta).not.toHaveBeenCalled();
     });
 
     it('creates a production preflight and enqueues only worker beta preparation', async () => {
         const response = await createBetaPreflight(request());
         expect(response.status).toBe(202);
-        expect(mocks.store.createOrReplay).toHaveBeenCalledWith(expect.objectContaining({
-            userId, targetInstagramId: 'target.name', accessMode: 'production',
+        expect(mocks.store.createOrReplayBeta).toHaveBeenCalledWith(expect.objectContaining({
+            userId, targetInstagramId: 'target.name',
         }));
         expect(mocks.hasAccess).toHaveBeenCalledTimes(2);
-        expect(mocks.enqueuePrepare).toHaveBeenCalledWith(preflightId, userId, expect.any(Object));
+        expect(mocks.enqueuePrepare).toHaveBeenCalledWith(
+            preflightId, userId, 1, prepareToken, expect.any(Object)
+        );
+        expect(mocks.store.markBetaPrepareDispatched).toHaveBeenCalledWith({
+            preflightId, userId, prepareGeneration: 1, prepareToken,
+        });
         await expect(response.json()).resolves.toMatchObject({ preflightId, status: 'pending' });
     });
 
@@ -80,7 +96,42 @@ describe('dedicated betatest preflight route', () => {
             targetInstagramId: 'target.name', accessMode: 'betatest', beta: true,
         }));
         expect(response.status).toBe(400);
-        expect(mocks.store.createOrReplay).not.toHaveBeenCalled();
+        expect(mocks.store.createOrReplayBeta).not.toHaveBeenCalled();
+    });
+
+    it('replays a terminal/prepared row without manufacturing a new prepare task', async () => {
+        mocks.store.createOrReplayBeta.mockResolvedValueOnce({
+            preflightId, expiresAt: '2030-07-13T13:00:00.000Z', created: false,
+            status: 'pending', prepareGeneration: 1, prepareToken, shouldEnqueue: false,
+        });
+        const response = await createBetaPreflight(request());
+        expect(response.status).toBe(200);
+        expect(mocks.enqueuePrepare).not.toHaveBeenCalled();
+        expect(mocks.store.markBetaPrepareDispatched).not.toHaveBeenCalled();
+    });
+
+    it('terminalizes the reserved row if access is revoked between creation and enqueue', async () => {
+        mocks.hasAccess.mockResolvedValueOnce(true).mockResolvedValueOnce(false);
+        const response = await createBetaPreflight(request());
+        expect(response.status).toBe(403);
+        expect(mocks.enqueuePrepare).not.toHaveBeenCalled();
+        expect(mocks.store.blockBetaPrepareCapacity).toHaveBeenCalledWith({
+            preflightId, userId, prepareGeneration: 1, prepareToken, claimToken: null,
+        });
+    });
+
+    it('keeps a database create/revoke race on the stable access-denied contract', async () => {
+        mocks.store.createOrReplayBeta.mockRejectedValueOnce(
+            new BetaPreflightAccessUnavailableError()
+        );
+
+        const response = await createBetaPreflight(request());
+
+        expect(response.status).toBe(403);
+        await expect(response.json()).resolves.toMatchObject({
+            code: 'BETA_ACCESS_UNAVAILABLE',
+        });
+        expect(mocks.enqueuePrepare).not.toHaveBeenCalled();
     });
 });
 
@@ -90,11 +141,21 @@ describe('beta prepare to ordinary dispatch boundary', () => {
         const result = await prepareBetaPreflightDispatch({
             preflightId,
             userId,
+            prepareGeneration: 1,
+            prepareToken,
             coordinator: { prepare: async () => {
                 events.push('hold');
                 return { allocationId: '423e4567-e89b-42d3-a456-426614174000', credentialSlot: 'primary', existing: false };
             }, reuse: vi.fn() },
             store: {
+                claimBetaPrepare: async () => {
+                    events.push('claim');
+                    return {
+                        claimed: true, state: 'preparing',
+                        claimToken: userId,
+                        disposition: 'claimed',
+                    };
+                },
                 reserveDispatch: async () => {
                     events.push('reserve');
                     return { shouldEnqueue: true, generation: 1, reservationToken: '323e4567-e89b-42d3-a456-426614174000', status: 'pending' };
@@ -104,7 +165,7 @@ describe('beta prepare to ordinary dispatch boundary', () => {
             enqueue: async () => { events.push('enqueue'); return 'enqueued'; },
         });
         expect(result).toBe('prepared');
-        expect(events).toEqual(['hold', 'reserve', 'enqueue', 'mark']);
+        expect(events).toEqual(['claim', 'hold', 'reserve', 'enqueue', 'mark']);
     });
 
     it('soft-blocks capacity without reserving or starting a provider', async () => {
@@ -112,11 +173,105 @@ describe('beta prepare to ordinary dispatch boundary', () => {
         const result = await prepareBetaPreflightDispatch({
             preflightId,
             userId,
+            prepareGeneration: 1,
+            prepareToken,
             coordinator: { prepare: async () => { throw new Error('ANALYSIS_BETA_POOL_CAPACITY_UNAVAILABLE'); }, reuse: vi.fn() },
-            store: { reserveDispatch } as never,
+            store: {
+                claimBetaPrepare: async () => ({
+                    claimed: true, state: 'preparing',
+                    claimToken: userId,
+                    disposition: 'claimed',
+                }),
+                blockBetaPrepareCapacity: vi.fn(async () => 'blocked'),
+                reserveDispatch,
+            } as never,
+            enqueue: vi.fn(),
+        });
+        expect(result).toBe('blocked');
+        expect(reserveDispatch).not.toHaveBeenCalled();
+    });
+
+    it('drops a stale generation/token task before refresh or provider access', async () => {
+        const prepare = vi.fn();
+        const result = await prepareBetaPreflightDispatch({
+            preflightId, userId, prepareGeneration: 2, prepareToken,
+            coordinator: { prepare, reuse: vi.fn() },
+            store: {
+                claimBetaPrepare: async () => ({
+                    claimed: false, state: 'reserved', claimToken: null,
+                    disposition: 'stale',
+                }),
+            } as never,
             enqueue: vi.fn(),
         });
         expect(result).toBe('noop');
+        expect(prepare).not.toHaveBeenCalled();
+    });
+
+    it('noops an expired terminal task before selecting any provider client', async () => {
+        const clientForSlot = vi.fn();
+        const prepare = vi.fn(async () => {
+            clientForSlot('primary');
+            throw new Error('expired work must never reach the coordinator');
+        });
+        const reuse = vi.fn();
+        const reserveDispatch = vi.fn();
+        const enqueue = vi.fn();
+
+        const result = await prepareBetaPreflightDispatch({
+            preflightId, userId, prepareGeneration: 1, prepareToken,
+            coordinator: { prepare, reuse },
+            store: {
+                claimBetaPrepare: async () => ({
+                    claimed: false, state: 'expired', claimToken: null,
+                    disposition: 'terminal',
+                }),
+                reserveDispatch,
+            } as never,
+            enqueue,
+        });
+
+        expect(result).toBe('noop');
+        expect(prepare).not.toHaveBeenCalled();
+        expect(reuse).not.toHaveBeenCalled();
+        expect(clientForSlot).not.toHaveBeenCalled();
         expect(reserveDispatch).not.toHaveBeenCalled();
+        expect(enqueue).not.toHaveBeenCalled();
+    });
+
+    it('releases a claim after a transient failure so the next delivery can succeed', async () => {
+        const release = vi.fn(async () => true);
+        await expect(prepareBetaPreflightDispatch({
+            preflightId, userId, prepareGeneration: 1, prepareToken,
+            coordinator: {
+                prepare: async () => { throw new Error('temporary database transport'); },
+                reuse: vi.fn(),
+            },
+            store: {
+                claimBetaPrepare: async () => ({
+                    claimed: true, state: 'preparing', disposition: 'claimed',
+                    claimToken: userId,
+                }),
+                releaseBetaPrepareClaim: release,
+            } as never,
+            enqueue: vi.fn(),
+        })).rejects.toThrow('temporary database transport');
+        expect(release).toHaveBeenCalledOnce();
+    });
+
+    it('keeps an active same-fence lease retryable instead of tombstoning the task', async () => {
+        await expect(prepareBetaPreflightDispatch({
+            preflightId, userId, prepareGeneration: 1, prepareToken,
+            coordinator: { prepare: vi.fn(), reuse: vi.fn() },
+            store: {
+                claimBetaPrepare: async () => ({
+                    claimed: false, state: 'preparing', disposition: 'busy',
+                    claimToken: null,
+                }),
+            } as never,
+            enqueue: vi.fn(),
+        })).rejects.toMatchObject({
+            classification: expect.objectContaining({ retryable: true }),
+        });
     });
 });

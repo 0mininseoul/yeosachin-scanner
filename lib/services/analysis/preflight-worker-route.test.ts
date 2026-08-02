@@ -68,10 +68,18 @@ const config = {
     serviceAccountEmail: 'preflight-task@example-project.iam.gserviceaccount.com',
 };
 
-function request(body: unknown, authorization = 'Bearer signed') {
+function request(
+    body: unknown,
+    authorization = 'Bearer signed',
+    extraHeaders: Record<string, string> = {}
+) {
     return new Request('https://worker.example.com/api/analysis/preflight/worker', {
         method: 'POST',
-        headers: { authorization, 'Content-Type': 'application/json' },
+        headers: {
+            authorization,
+            'Content-Type': 'application/json',
+            ...extraHeaders,
+        },
         body: JSON.stringify(body),
     });
 }
@@ -187,16 +195,51 @@ describe('preflight worker route', () => {
         expect(mocks.process).not.toHaveBeenCalled();
     });
 
-    it('prepares beta credit before ordinary dispatch and treats capacity as a noop', async () => {
-        const response = await POST(request({ preflightId, kind: 'beta_prepare', userId: '223e4567-e89b-42d3-a456-426614174000' }));
+    it('prepares beta credit only with the persisted generation/token fence', async () => {
+        const prepareToken = preflightId.replace(/^1/, '3');
+        const response = await POST(request({
+            preflightId,
+            kind: 'beta_prepare',
+            userId: '223e4567-e89b-42d3-a456-426614174000',
+            prepareGeneration: 2,
+            prepareToken,
+        }));
         expect(response.status).toBe(200);
         expect(mocks.prepareBeta).toHaveBeenCalledWith(expect.objectContaining({
             preflightId,
             userId: '223e4567-e89b-42d3-a456-426614174000',
+            prepareGeneration: 2,
+            prepareToken,
             enqueue: expect.any(Function),
         }));
         expect(mocks.process).not.toHaveBeenCalled();
         await expect(response.json()).resolves.toEqual({ status: 'prepared' });
+    });
+
+    it('passes only a validated Cloud Tasks delivery retry count to beta prepare', async () => {
+        const payload = {
+            preflightId,
+            kind: 'beta_prepare' as const,
+            userId: '223e4567-e89b-42d3-a456-426614174000',
+            prepareGeneration: 2,
+            prepareToken: preflightId.replace(/^1/, '3'),
+        };
+
+        expect((await POST(request(payload, 'Bearer signed', {
+            'X-CloudTasks-TaskRetryCount': '6',
+        }))).status).toBe(200);
+        expect((await POST(request(payload, 'Bearer signed', {
+            'X-CloudTasks-TaskRetryCount': '-1',
+        }))).status).toBe(200);
+
+        expect(mocks.prepareBeta).toHaveBeenNthCalledWith(
+            1,
+            expect.objectContaining({ deliveryRetryCount: 6 })
+        );
+        expect(mocks.prepareBeta).toHaveBeenNthCalledWith(
+            2,
+            expect.objectContaining({ deliveryRetryCount: null })
+        );
     });
 
     it('refreshes the exact beta pool only after a fresh-admission block settles credit', async () => {

@@ -42,6 +42,14 @@ const terminalSettlementMigration = readFileSync(new URL(
     '../../../supabase/migrations/20260802090000_settle_betatest_terminal_credit.sql',
     import.meta.url,
 ), 'utf8');
+const entryHardeningMigrations = [
+    '20260802100000_harden_betatest_entry_lifecycle.sql',
+    '20260802100100_harden_betatest_entry_lifecycle_runtime.sql',
+    '20260802100200_validate_betatest_entry_lifecycle.sql',
+].map(file => readFileSync(new URL(
+    `../../../supabase/migrations/${file}`,
+    import.meta.url,
+), 'utf8'));
 const betaSlots = {
     'target-profile': 'primary',
     'relationship-followers': 'tertiary',
@@ -103,6 +111,16 @@ async function waitUntilBlocked(pid: number): Promise<void> {
         await new Promise(resolve => setTimeout(resolve, 20));
     }
     throw new Error('BETA_APIFY_POSTGRES_LOCK_BARRIER_TIMEOUT');
+}
+
+async function captured<T>(promise: Promise<T>): Promise<{
+    value: T | null;
+    error: unknown;
+}> {
+    return promise.then(
+        value => ({ value, error: null }),
+        error => ({ value: null, error }),
+    );
 }
 
 interface MigrationLockObservation {
@@ -289,6 +307,148 @@ async function admitReadyPlan(input: {
     return admitted.rows[0]!.result;
 }
 
+interface HardenedBetaCreateRow {
+    preflight_id: string;
+    created: boolean;
+    preflight_status: string;
+    prepare_generation: number;
+    prepare_token: string;
+    should_enqueue: boolean;
+}
+
+async function seedHardenedBetaUser(
+    client: Client,
+    userId: string,
+    grantSeconds = 3_600,
+): Promise<void> {
+    await client.query(
+        'INSERT INTO public.users(id) VALUES($1) ON CONFLICT(id) DO NOTHING',
+        [userId],
+    );
+    await client.query(
+        `SELECT public.upsert_analysis_beta_access_grant(
+            $1,TRUE,clock_timestamp()+$2*INTERVAL '1 second',$3
+        )`,
+        [userId, grantSeconds, 'e'.repeat(64)],
+    );
+    await client.query(
+        'SELECT public.upsert_analysis_beta_apify_credit_snapshots($1::jsonb)',
+        [snapshots(100)],
+    );
+}
+
+async function createHardenedBeta(input: {
+    client: Client;
+    userId: string;
+    idempotencyKey: string;
+    prepareToken: string;
+}): Promise<HardenedBetaCreateRow> {
+    const created = await input.client.query<HardenedBetaCreateRow>(
+        `SELECT *
+         FROM public.create_or_replay_analysis_v2_betatest_preflight(
+            $1,'owner@example.com','google','target.user',$2,
+            '{}'::jsonb,'{}'::jsonb,'test','{}'::jsonb,'{}'::jsonb,$3
+         )`,
+        [input.userId, input.idempotencyKey, input.prepareToken],
+    );
+    return created.rows[0]!;
+}
+
+async function claimHardenedBeta(input: {
+    client: Client;
+    userId: string;
+    preflightId: string;
+    prepareToken: string;
+    claimToken: string;
+}): Promise<void> {
+    await input.client.query(
+        `UPDATE public.analysis_preflights
+         SET target_followers_count=120,target_following_count=140
+         WHERE id=$1`,
+        [input.preflightId],
+    );
+    await input.client.query(
+        `SELECT public.mark_analysis_beta_preflight_prepare_dispatched(
+            $1,$2,1,$3
+        )`,
+        [input.preflightId, input.userId, input.prepareToken],
+    );
+    const claim = await input.client.query<{
+        claimed: boolean;
+        claim_disposition: string;
+    }>(
+        `SELECT * FROM public.claim_analysis_beta_preflight_prepare(
+            $1,$2,1,$3,$4,300
+        )`,
+        [
+            input.preflightId,
+            input.userId,
+            input.prepareToken,
+            input.claimToken,
+        ],
+    );
+    expect(claim.rows).toEqual([{
+        claimed: true,
+        prepare_state: 'preparing',
+        claim_disposition: 'claimed',
+    }]);
+}
+
+async function prepareHardenedBeta(input: {
+    client: Client;
+    userId: string;
+    preflightId: string;
+    prepareToken: string;
+    claimToken: string;
+}): Promise<void> {
+    await input.client.query(
+        `SELECT public.prepare_analysis_beta_apify_preflight_credit(
+            $1,$2,1,$3,$4,'primary',0.0052,300
+        )`,
+        [
+            input.preflightId,
+            input.userId,
+            input.prepareToken,
+            input.claimToken,
+        ],
+    );
+}
+
+async function markHardenedBetaReady(input: {
+    client: Client;
+    preflightId: string;
+    admissionToken: string;
+    planId?: PlanId;
+}): Promise<void> {
+    const planId = input.planId ?? 'basic';
+    const snapshot = admissionSnapshotPayload();
+    await input.client.query(
+        `UPDATE public.analysis_apify_credit_snapshots
+         SET monthly_limit_usd=100,monthly_usage_usd=0`,
+    );
+    await input.client.query(
+        `UPDATE public.analysis_preflights
+         SET status='ready',exclusion_decision='skip',target_is_private=FALSE,
+             capacity_required_plan_id='basic',required_plan_id='basic',
+             launch_status_snapshot=$2::jsonb,plan_cards_snapshot=$3::jsonb,
+             pricing_version='earlybird-2026-07-v2',pricing_snapshot=$4::jsonb,
+             policy_versions_snapshot=$5::jsonb,ready_at=clock_timestamp(),
+             admission_status='ready',admission_generation=1,
+             admission_selected_plan_id=$6,admission_token=$7,
+             admission_refreshed_at=clock_timestamp(),updated_at=clock_timestamp()
+         WHERE id=$1`,
+        [
+            input.preflightId,
+            JSON.stringify(snapshot.launch),
+            JSON.stringify(snapshot.cards),
+            JSON.stringify(snapshot.pricing),
+            JSON.stringify(snapshot.policies),
+            planId,
+            input.admissionToken,
+        ],
+    );
+}
+
 async function seedActivatedBetaRequest(client: Client, snapshotLimit = 10): Promise<{
     allocationId: string;
     claimToken: string;
@@ -409,6 +569,438 @@ describe('beta Apify credit PostgreSQL 16 concurrency', () => {
             }
         }
     }, 30_000);
+
+    const testSameUserPrepareCrossing = async () => {
+        await first.query('SELECT public.set_analysis_beta_runtime_gate(TRUE)');
+        const userId = randomUUID();
+        await seedHardenedBetaUser(first, userId);
+        const racer = new Client({ connectionString: databaseUrl });
+        await racer.connect();
+        const secondPid = (await second.query<{ pid: number }>(
+            'SELECT pg_backend_pid() AS pid',
+        )).rows[0]!.pid;
+        const racerPid = (await racer.query<{ pid: number }>(
+            'SELECT pg_backend_pid() AS pid',
+        )).rows[0]!.pid;
+        try {
+            const firstPrepare = {
+                prepareToken: randomUUID(), claimToken: randomUUID(),
+                idempotencyKey: `parallel-prepare-a-${randomUUID()}`,
+            };
+            const secondPrepare = {
+                prepareToken: randomUUID(), claimToken: randomUUID(),
+                idempotencyKey: `parallel-prepare-b-${randomUUID()}`,
+            };
+            const createdA = await createHardenedBeta({
+                client: first, userId, ...firstPrepare,
+            });
+            const createdB = await createHardenedBeta({
+                client: first, userId, ...secondPrepare,
+            });
+            await claimHardenedBeta({
+                client: first,userId,preflightId: createdA.preflight_id,
+                prepareToken: firstPrepare.prepareToken,
+                claimToken: firstPrepare.claimToken,
+            });
+            await claimHardenedBeta({
+                client: first,userId,preflightId: createdB.preflight_id,
+                prepareToken: secondPrepare.prepareToken,
+                claimToken: secondPrepare.claimToken,
+            });
+
+            await first.query('BEGIN');
+            await first.query(
+                `SELECT credential_slot FROM public.analysis_apify_credit_snapshots
+                 WHERE credential_slot='primary' FOR UPDATE`,
+            );
+            const parallelA = prepareHardenedBeta({
+                client: second,userId,preflightId: createdA.preflight_id,
+                prepareToken: firstPrepare.prepareToken,
+                claimToken: firstPrepare.claimToken,
+            });
+            const parallelB = prepareHardenedBeta({
+                client: racer,userId,preflightId: createdB.preflight_id,
+                prepareToken: secondPrepare.prepareToken,
+                claimToken: secondPrepare.claimToken,
+            });
+            await waitUntilBlocked(secondPid);
+            await waitUntilBlocked(racerPid);
+            await first.query('COMMIT');
+            await expect(Promise.all([parallelA, parallelB])).resolves.toEqual([
+                undefined, undefined,
+            ]);
+            expect((await first.query<{ prepared: number; allocations: number }>(
+                `SELECT
+                    (SELECT count(*)::int FROM public.analysis_preflights
+                     WHERE id=ANY($1::uuid[]) AND beta_prepare_state='prepared') AS prepared,
+                    (SELECT count(*)::int FROM public.analysis_beta_pool_allocations
+                     WHERE preflight_id=ANY($1::uuid[])) AS allocations`,
+                [[createdA.preflight_id, createdB.preflight_id]],
+            )).rows).toEqual([{ prepared: 2, allocations: 2 }]);
+
+            const expiring = {
+                prepareToken: randomUUID(), claimToken: randomUUID(),
+                idempotencyKey: `expiring-prepare-${randomUUID()}`,
+            };
+            const createdExpiring = await createHardenedBeta({
+                client: first,userId,...expiring,
+            });
+            await claimHardenedBeta({
+                client: first,userId,preflightId: createdExpiring.preflight_id,
+                prepareToken: expiring.prepareToken,
+                claimToken: expiring.claimToken,
+            });
+            await first.query(
+                `UPDATE public.analysis_preflights
+                 SET beta_prepare_lease_expires_at=clock_timestamp()+INTERVAL '350 milliseconds'
+                 WHERE id=$1`,
+                [createdExpiring.preflight_id],
+            );
+            await first.query('BEGIN');
+            await first.query(
+                `SELECT credential_slot FROM public.analysis_apify_credit_snapshots
+                 WHERE credential_slot='primary' FOR UPDATE`,
+            );
+            const expiredPrepare = captured(prepareHardenedBeta({
+                client: second,userId,preflightId: createdExpiring.preflight_id,
+                prepareToken: expiring.prepareToken,
+                claimToken: expiring.claimToken,
+            }));
+            await waitUntilBlocked(secondPid);
+            await new Promise(resolve => setTimeout(resolve, 500));
+            await first.query('COMMIT');
+            expect(String((await expiredPrepare).error)).toContain(
+                'ANALYSIS_BETA_PREPARE_FENCE_MISMATCH',
+            );
+            expect((await first.query<{
+                state: string; allocations: number; reservations: number;
+            }>(`SELECT preflight.beta_prepare_state AS state,
+                    (SELECT count(*)::int FROM public.analysis_beta_pool_allocations
+                     WHERE preflight_id=preflight.id) AS allocations,
+                    (SELECT count(*)::int
+                     FROM public.analysis_beta_pool_reservations AS reservation
+                     JOIN public.analysis_beta_pool_allocations AS allocation
+                       ON allocation.id=reservation.allocation_id
+                     WHERE allocation.preflight_id=preflight.id) AS reservations
+                 FROM public.analysis_preflights AS preflight WHERE preflight.id=$1`,
+                [createdExpiring.preflight_id],
+            )).rows).toEqual([{
+                state: 'preparing', allocations: 0, reservations: 0,
+            }]);
+        } finally {
+            await first.query('ROLLBACK').catch(() => undefined);
+            await racer.end();
+        }
+    };
+
+    const testBetaCreateGrantExpiryCrossing = async () => {
+        await first.query('SELECT public.set_analysis_beta_runtime_gate(TRUE)');
+        const userId = randomUUID();
+        const idempotencyKey = `advisory-expiry-${randomUUID()}`;
+        await seedHardenedBetaUser(first, userId);
+        await first.query(
+            `UPDATE public.analysis_beta_access_grants
+             SET expires_at=clock_timestamp()+INTERVAL '350 milliseconds'
+             WHERE user_id=$1`,
+            [userId],
+        );
+        const secondPid = (await second.query<{ pid: number }>(
+            'SELECT pg_backend_pid() AS pid',
+        )).rows[0]!.pid;
+        try {
+            await first.query('BEGIN');
+            await first.query(
+                `SELECT pg_catalog.pg_advisory_xact_lock(
+                    pg_catalog.hashtextextended(
+                        'analysis-v2-preflight-global-hourly-budget',0
+                    )
+                )`,
+            );
+            const create = captured(createHardenedBeta({
+                client: second,
+                userId,
+                idempotencyKey,
+                prepareToken: randomUUID(),
+            }));
+            await waitUntilBlocked(secondPid);
+            await new Promise(resolve => setTimeout(resolve, 500));
+            await first.query('COMMIT');
+            expect(String((await create).error)).toContain(
+                'ANALYSIS_BETA_ACCESS_UNAVAILABLE',
+            );
+            expect((await first.query<{
+                rows: number; beta_rows: number; ordinary_rows: number;
+            }>(`SELECT
+                    count(*)::int AS rows,
+                    count(*) FILTER (
+                        WHERE beta_entry_provenance IS NOT NULL
+                    )::int AS beta_rows,
+                    count(*) FILTER (
+                        WHERE beta_entry_provenance IS NULL
+                    )::int AS ordinary_rows
+                 FROM public.analysis_preflights
+                 WHERE user_id=$1 AND idempotency_key=$2`,
+                [userId, idempotencyKey],
+            )).rows).toEqual([{
+                rows: 0, beta_rows: 0, ordinary_rows: 0,
+            }]);
+        } finally {
+            await first.query('ROLLBACK').catch(() => undefined);
+        }
+    };
+
+    const testProviderLeaseExpiryCrossing = async () => {
+        await first.query('SELECT public.set_analysis_beta_runtime_gate(TRUE)');
+        const secondPid = (await second.query<{ pid: number }>(
+            'SELECT pg_backend_pid() AS pid',
+        )).rows[0]!.pid;
+
+        const runProviderExpiry = async (fresh: boolean) => {
+            const userId = randomUUID();
+            const prepareToken = randomUUID();
+            const prepareClaimToken = randomUUID();
+            const providerClaimToken = randomUUID();
+            await seedHardenedBetaUser(first, userId);
+            const created = await createHardenedBeta({
+                client: first,
+                userId,
+                idempotencyKey: `provider-expiry-${fresh ? 'fresh' : 'initial'}-${randomUUID()}`,
+                prepareToken,
+            });
+            await claimHardenedBeta({
+                client: first,userId,preflightId: created.preflight_id,
+                prepareToken,claimToken: prepareClaimToken,
+            });
+            await prepareHardenedBeta({
+                client: first,userId,preflightId: created.preflight_id,
+                prepareToken,claimToken: prepareClaimToken,
+            });
+            if (fresh) {
+                await first.query(
+                    `UPDATE public.analysis_preflights
+                     SET status='ready',consumed_request_id=NULL,
+                         admission_status='processing',admission_generation=1,
+                         admission_claim_token=$2,
+                         admission_requested_at=clock_timestamp(),
+                         admission_lease_expires_at=
+                            clock_timestamp()+INTERVAL '350 milliseconds'
+                     WHERE id=$1`,
+                    [created.preflight_id, providerClaimToken],
+                );
+            } else {
+                await first.query(
+                    `UPDATE public.analysis_preflights
+                     SET status='processing',lease_token=$2,
+                         lease_expires_at=
+                            clock_timestamp()+INTERVAL '350 milliseconds'
+                     WHERE id=$1`,
+                    [created.preflight_id, providerClaimToken],
+                );
+            }
+            await first.query(
+                `INSERT INTO public.analysis_preflight_provider_runs(
+                    preflight_id,operation_key,input_hash,credential_slot,
+                    max_charge_usd,status
+                 ) VALUES($1,'serialization-blocker',$2,'primary',0.0001,'starting')`,
+                [created.preflight_id, '9'.repeat(64)],
+            );
+            await first.query('BEGIN');
+            await first.query(
+                `UPDATE public.analysis_preflight_provider_runs
+                 SET updated_at=clock_timestamp()
+                 WHERE preflight_id=$1 AND operation_key='serialization-blocker'`,
+                [created.preflight_id],
+            );
+            const authorization = captured(second.query(
+                fresh
+                    ? `SELECT public.reserve_analysis_v2_fresh_admission_provider_run(
+                        $1,1,$2,$3,'primary',0.0026
+                       )`
+                    : `SELECT public.reserve_analysis_preflight_provider_run(
+                        $1,$2,$3,'primary',0.0026
+                       )`,
+                [created.preflight_id, providerClaimToken, '8'.repeat(64)],
+            ));
+            await waitUntilBlocked(secondPid);
+            await new Promise(resolve => setTimeout(resolve, 500));
+            await first.query('COMMIT');
+            expect(String((await authorization).error)).toContain(
+                'ANALYSIS_PREFLIGHT_PROVIDER_RUN_FENCE_MISMATCH',
+            );
+            const operationKey = fresh
+                ? 'target-profile-fresh-admission:g1'
+                : 'target-profile-fallback';
+            expect((await first.query<{ count: number }>(
+                `SELECT count(*)::int AS count
+                 FROM public.analysis_preflight_provider_runs
+                 WHERE preflight_id=$1 AND operation_key=$2`,
+                [created.preflight_id, operationKey],
+            )).rows).toEqual([{ count: 0 }]);
+        };
+
+        try {
+            await runProviderExpiry(false);
+            await runProviderExpiry(true);
+        } finally {
+            await first.query('ROLLBACK').catch(() => undefined);
+        }
+    };
+
+    const testAdmissionGateAndExpiryCrossing = async () => {
+        await first.query('SELECT public.set_analysis_beta_runtime_gate(TRUE)');
+        const secondPid = (await second.query<{ pid: number }>(
+            'SELECT pg_backend_pid() AS pid',
+        )).rows[0]!.pid;
+
+        const seedReady = async (userId: string) => {
+            const prepareToken = randomUUID();
+            const prepareClaimToken = randomUUID();
+            const admissionToken = randomUUID();
+            await seedHardenedBetaUser(first, userId);
+            const created = await createHardenedBeta({
+                client: first,
+                userId,
+                idempotencyKey: `admission-race-${randomUUID()}`,
+                prepareToken,
+            });
+            await claimHardenedBeta({
+                client: first,userId,preflightId: created.preflight_id,
+                prepareToken,claimToken: prepareClaimToken,
+            });
+            await prepareHardenedBeta({
+                client: first,userId,preflightId: created.preflight_id,
+                prepareToken,claimToken: prepareClaimToken,
+            });
+            await markHardenedBetaReady({
+                client: first,
+                preflightId: created.preflight_id,
+                admissionToken,
+            });
+            return {
+                userId,
+                preflightId: created.preflight_id,
+                admissionToken,
+            };
+        };
+
+        try {
+            const gated = await seedReady(randomUUID());
+            await first.query('BEGIN');
+            await first.query('SELECT public.set_analysis_beta_runtime_gate(FALSE)');
+            const gateRejected = captured(admitReadyPlan({
+                client: second,
+                userId: gated.userId,
+                preflightId: gated.preflightId,
+                admissionToken: gated.admissionToken,
+            }));
+            await waitUntilBlocked(secondPid);
+            await first.query('COMMIT');
+            expect(String((await gateRejected).error)).toContain(
+                'ANALYSIS_BETA_ACCESS_UNAVAILABLE',
+            );
+            expect((await first.query<{
+                requests: number; jobs: number; policies: number;
+                active_allocations: number; active_reservations: number;
+            }>(`SELECT
+                    (SELECT count(*)::int FROM public.analysis_requests
+                     WHERE preflight_id=$1) AS requests,
+                    (SELECT count(*)::int FROM public.analysis_pipeline_jobs AS job
+                     JOIN public.analysis_requests AS request ON request.id=job.request_id
+                     WHERE request.preflight_id=$1) AS jobs,
+                    (SELECT count(*)::int FROM public.analysis_v2_provider_execution_policies AS policy
+                     JOIN public.analysis_requests AS request ON request.id=policy.request_id
+                     WHERE request.preflight_id=$1) AS policies,
+                    (SELECT count(*)::int FROM public.analysis_beta_pool_allocations
+                     WHERE preflight_id=$1 AND lifecycle_state='active') AS active_allocations,
+                    (SELECT count(*)::int FROM public.analysis_beta_pool_reservations AS reservation
+                     JOIN public.analysis_beta_pool_allocations AS allocation
+                       ON allocation.id=reservation.allocation_id
+                     WHERE allocation.preflight_id=$1
+                       AND reservation.lifecycle_state='active') AS active_reservations`,
+                [gated.preflightId],
+            )).rows).toEqual([{
+                requests: 0,jobs: 0,policies: 0,
+                active_allocations: 0,active_reservations: 0,
+            }]);
+
+            await first.query('SELECT public.set_analysis_beta_runtime_gate(TRUE)');
+            const admitted = await admitReadyPlan({
+                client: first,
+                userId: gated.userId,
+                preflightId: gated.preflightId,
+                admissionToken: gated.admissionToken,
+            });
+            expect(admitted.replayed).toBe(false);
+            await first.query('SELECT public.set_analysis_beta_runtime_gate(FALSE)');
+            await expect(admitReadyPlan({
+                client: second,
+                userId: gated.userId,
+                preflightId: gated.preflightId,
+                admissionToken: gated.admissionToken,
+            })).resolves.toEqual({ ...admitted, replayed: true });
+
+            await first.query('SELECT public.set_analysis_beta_runtime_gate(TRUE)');
+            const expiring = await seedReady(randomUUID());
+            await first.query(
+                `UPDATE public.analysis_beta_access_grants
+                 SET expires_at=clock_timestamp()+INTERVAL '350 milliseconds'
+                 WHERE user_id=$1`,
+                [expiring.userId],
+            );
+            await first.query(
+                `UPDATE public.analysis_preflights
+                 SET expires_at=clock_timestamp()+INTERVAL '350 milliseconds'
+                 WHERE id=$1`,
+                [expiring.preflightId],
+            );
+            await first.query('BEGIN');
+            await first.query(
+                `SELECT credential_slot FROM public.analysis_apify_credit_snapshots
+                 WHERE credential_slot='primary' FOR UPDATE`,
+            );
+            const expiredAdmission = captured(admitReadyPlan({
+                client: second,
+                userId: expiring.userId,
+                preflightId: expiring.preflightId,
+                admissionToken: expiring.admissionToken,
+            }));
+            await waitUntilBlocked(secondPid);
+            await new Promise(resolve => setTimeout(resolve, 500));
+            await first.query('COMMIT');
+            expect(String((await expiredAdmission).error)).toMatch(
+                /ANALYSIS_BETA_(?:ACCESS_UNAVAILABLE|REQUEST_NOT_ELIGIBLE)/,
+            );
+            expect((await first.query<{
+                status: string; lifecycle: string; requests: number;
+                jobs: number; policies: number; active_reservations: number;
+            }>(`SELECT preflight.status,
+                    allocation.lifecycle_state AS lifecycle,
+                    (SELECT count(*)::int FROM public.analysis_requests
+                     WHERE preflight_id=preflight.id) AS requests,
+                    (SELECT count(*)::int FROM public.analysis_pipeline_jobs AS job
+                     JOIN public.analysis_requests AS request ON request.id=job.request_id
+                     WHERE request.preflight_id=preflight.id) AS jobs,
+                    (SELECT count(*)::int FROM public.analysis_v2_provider_execution_policies AS policy
+                     JOIN public.analysis_requests AS request ON request.id=policy.request_id
+                     WHERE request.preflight_id=preflight.id) AS policies,
+                    (SELECT count(*)::int FROM public.analysis_beta_pool_reservations AS reservation
+                     WHERE reservation.allocation_id=allocation.id
+                       AND reservation.lifecycle_state='active') AS active_reservations
+                 FROM public.analysis_preflights AS preflight
+                 JOIN public.analysis_beta_pool_allocations AS allocation
+                   ON allocation.preflight_id=preflight.id
+                 WHERE preflight.id=$1`,
+                [expiring.preflightId],
+            )).rows).toEqual([{
+                status: 'ready',lifecycle: 'preflight_held',requests: 0,
+                jobs: 0,policies: 0,active_reservations: 0,
+            }]);
+        } finally {
+            await first.query('ROLLBACK').catch(() => undefined);
+            await first.query('SELECT public.set_analysis_beta_runtime_gate(TRUE)')
+                .catch(() => undefined);
+        }
+    };
 
     it('sweep skips a same-user expired candidate while a real hold RPC is blocked at snapshots', async () => {
         const userId = randomUUID();
@@ -1315,4 +1907,290 @@ describe('beta Apify credit PostgreSQL 16 concurrency', () => {
         );
         expect(archived.rows).toEqual([{ live: 0, archived: 8 }]);
     }, 15_000);
+
+    describe('hardened beta entry lifecycle', () => {
+        beforeAll(async () => {
+            for (const migration of entryHardeningMigrations) {
+                await first.query(migration);
+            }
+            await first.query('SELECT public.set_analysis_beta_runtime_gate(TRUE)');
+        }, 30_000);
+
+        it('serializes hardened entry, revocation, prepare, block, and provider replay races', async () => {
+
+        const userId = randomUUID();
+        const prepareToken = randomUUID();
+        const alternatePrepareToken = randomUUID();
+        const prepareClaimToken = randomUUID();
+        const providerClaimToken = randomUUID();
+        const idempotencyKey = `beta-concurrency-${randomUUID()}`;
+        const racer = new Client({ connectionString: databaseUrl });
+        await racer.connect();
+
+        interface HardenedCreateRow {
+            preflight_id: string;
+            created: boolean;
+            preflight_status: string;
+            prepare_generation: number;
+            prepare_token: string;
+            should_enqueue: boolean;
+        }
+        const createBeta = (
+            client: Client,
+            token: string,
+            key = idempotencyKey,
+        ) => client.query<HardenedCreateRow>(
+            `SELECT *
+             FROM public.create_or_replay_analysis_v2_betatest_preflight(
+                $1,'owner@example.com','google','target.user',$2,
+                '{}'::jsonb,'{}'::jsonb,'test','{}'::jsonb,'{}'::jsonb,$3
+             )`,
+            [userId, key, token],
+        );
+        const capture = async <T>(promise: Promise<T>): Promise<{
+            value: T | null;
+            error: unknown;
+        }> => promise.then(
+            value => ({ value, error: null }),
+            error => ({ value: null, error }),
+        );
+
+        try {
+            await first.query('INSERT INTO public.users(id) VALUES($1)', [userId]);
+            await first.query(
+                `SELECT public.upsert_analysis_beta_access_grant(
+                    $1,TRUE,clock_timestamp()+INTERVAL '1 hour',$2
+                )`,
+                [userId, 'a'.repeat(64)],
+            );
+            await first.query(
+                'SELECT public.upsert_analysis_beta_apify_credit_snapshots($1::jsonb)',
+                [snapshots(100)],
+            );
+
+            // The first beta call holds the canonical users FOR UPDATE lock.
+            // A second beta replay and an ordinary same-key create both wait;
+            // after commit only the beta identity can survive.
+            await first.query('BEGIN');
+            const created = (await createBeta(first, prepareToken)).rows[0]!;
+            const secondPid = (await second.query<{ pid: number }>(
+                'SELECT pg_backend_pid() AS pid',
+            )).rows[0]!.pid;
+            const racerPid = (await racer.query<{ pid: number }>(
+                'SELECT pg_backend_pid() AS pid',
+            )).rows[0]!.pid;
+            const betaReplay = createBeta(second, alternatePrepareToken);
+            const ordinaryRace = capture(racer.query(
+                `SELECT * FROM public.create_or_replay_analysis_v2_preflight(
+                    $1,'owner@example.com','google','target.user',$2,'production',
+                    '{}'::jsonb,'{}'::jsonb,'test','{}'::jsonb,'{}'::jsonb
+                 )`,
+                [userId, idempotencyKey],
+            ));
+            await waitUntilBlocked(secondPid);
+            await waitUntilBlocked(racerPid);
+            await first.query('COMMIT');
+
+            const replayed = (await betaReplay).rows[0]!;
+            const ordinary = await ordinaryRace;
+            expect(created).toMatchObject({
+                created: true,
+                prepare_generation: 1,
+                prepare_token: prepareToken,
+            });
+            expect(replayed).toMatchObject({
+                preflight_id: created.preflight_id,
+                created: false,
+                prepare_generation: 1,
+                prepare_token: prepareToken,
+            });
+            expect(String(ordinary.error)).toContain(
+                'ANALYSIS_V2_PREFLIGHT_IDEMPOTENCY_CONFLICT'
+            );
+            expect((await first.query<{ count: number }>(
+                `SELECT count(*)::int AS count
+                 FROM public.analysis_preflights
+                 WHERE user_id=$1 AND idempotency_key=$2`,
+                [userId, idempotencyKey],
+            )).rows).toEqual([{ count: 1 }]);
+
+            await first.query(
+                `SELECT public.mark_analysis_beta_preflight_prepare_dispatched(
+                    $1,$2,1,$3
+                )`,
+                [created.preflight_id, userId, prepareToken],
+            );
+            const claim = await first.query<{
+                claimed: boolean;
+                prepare_state: string;
+                claim_disposition: string;
+            }>(
+                `SELECT * FROM public.claim_analysis_beta_preflight_prepare(
+                    $1,$2,1,$3,$4,300
+                )`,
+                [
+                    created.preflight_id,
+                    userId,
+                    prepareToken,
+                    prepareClaimToken,
+                ],
+            );
+            expect(claim.rows).toEqual([{
+                claimed: true,
+                prepare_state: 'preparing',
+                claim_disposition: 'claimed',
+            }]);
+
+            // Keep the atomic hold+promotion uncommitted. Both the capacity
+            // blocker and same-key replay must wait, then converge on prepared.
+            await first.query('BEGIN');
+            await first.query(
+                `SELECT public.prepare_analysis_beta_apify_preflight_credit(
+                    $1,$2,1,$3,$4,'primary',0.0052,300
+                )`,
+                [
+                    created.preflight_id,
+                    userId,
+                    prepareToken,
+                    prepareClaimToken,
+                ],
+            );
+            const blockRace = second.query<{ result: string }>(
+                `SELECT public.block_analysis_beta_preflight_capacity(
+                    $1,$2,1,$3,$4
+                ) AS result`,
+                [
+                    created.preflight_id,
+                    userId,
+                    prepareToken,
+                    prepareClaimToken,
+                ],
+            );
+            const prepareReplay = createBeta(racer, alternatePrepareToken);
+            await waitUntilBlocked(secondPid);
+            await waitUntilBlocked(racerPid);
+            await first.query('COMMIT');
+            expect((await blockRace).rows).toEqual([{ result: 'prepared' }]);
+            expect((await prepareReplay).rows[0]).toMatchObject({
+                preflight_id: created.preflight_id,
+                created: false,
+                prepare_generation: 1,
+                prepare_token: prepareToken,
+                should_enqueue: false,
+            });
+            expect((await first.query<{
+                state: string;
+                allocations: number;
+                reservations: number;
+            }>(
+                `SELECT preflight.beta_prepare_state AS state,
+                    (SELECT count(*)::int
+                     FROM public.analysis_beta_pool_allocations AS allocation
+                     WHERE allocation.preflight_id=preflight.id) AS allocations,
+                    (SELECT count(*)::int
+                     FROM public.analysis_beta_pool_reservations AS reservation
+                     JOIN public.analysis_beta_pool_allocations AS allocation
+                       ON allocation.id=reservation.allocation_id
+                     WHERE allocation.preflight_id=preflight.id) AS reservations
+                 FROM public.analysis_preflights AS preflight
+                 WHERE preflight.id=$1`,
+                [created.preflight_id],
+            )).rows).toEqual([{
+                state: 'prepared', allocations: 1, reservations: 1,
+            }]);
+
+            await first.query(
+                `UPDATE public.analysis_preflights
+                 SET status='processing',lease_token=$2,
+                     lease_expires_at=clock_timestamp()+INTERVAL '5 minutes'
+                 WHERE id=$1`,
+                [created.preflight_id, providerClaimToken],
+            );
+            const providerAuthorization = () => second.query<{
+                result: { created: boolean };
+            }>(
+                `SELECT public.reserve_analysis_preflight_provider_run(
+                    $1,$2,$3,'primary',0.0026
+                ) AS result`,
+                [created.preflight_id, providerClaimToken, 'b'.repeat(64)],
+            );
+
+            // A gate update must conflict with the authorization's FOR SHARE
+            // read. The waiter observes disabled only after the setter commits.
+            await first.query('BEGIN');
+            await first.query('SELECT public.set_analysis_beta_runtime_gate(FALSE)');
+            const gatedAuthorization = capture(providerAuthorization());
+            await waitUntilBlocked(secondPid);
+            await first.query('COMMIT');
+            expect(String((await gatedAuthorization).error)).toContain(
+                'ANALYSIS_BETA_RUNTIME_DISABLED'
+            );
+            await first.query('SELECT public.set_analysis_beta_runtime_gate(TRUE)');
+
+            // Canonical grant revocation takes its row UPDATE lock before the
+            // authorization's FOR SHARE read and cannot race a new spend in.
+            await first.query('BEGIN');
+            await first.query(
+                `SELECT public.upsert_analysis_beta_access_grant(
+                    $1,FALSE,NULL,$2
+                )`,
+                [userId, 'c'.repeat(64)],
+            );
+            const revokedAuthorization = capture(providerAuthorization());
+            await waitUntilBlocked(secondPid);
+            await first.query('COMMIT');
+            expect(String((await revokedAuthorization).error)).toContain(
+                'ANALYSIS_BETA_RUNTIME_DISABLED'
+            );
+            expect((await first.query<{ count: number }>(
+                `SELECT count(*)::int AS count
+                 FROM public.analysis_preflight_provider_runs
+                 WHERE preflight_id=$1`,
+                [created.preflight_id],
+            )).rows).toEqual([{ count: 0 }]);
+
+            await first.query(
+                `SELECT public.upsert_analysis_beta_access_grant(
+                    $1,TRUE,clock_timestamp()+INTERVAL '1 hour',$2
+                )`,
+                [userId, 'd'.repeat(64)],
+            );
+            expect((await providerAuthorization()).rows[0]!.result)
+                .toMatchObject({ created: true });
+            await first.query('SELECT public.set_analysis_beta_runtime_gate(FALSE)');
+            expect((await providerAuthorization()).rows[0]!.result)
+                .toMatchObject({ created: false });
+            expect((await first.query<{ count: number }>(
+                `SELECT count(*)::int AS count
+                 FROM public.analysis_preflight_provider_runs
+                 WHERE preflight_id=$1`,
+                [created.preflight_id],
+            )).rows).toEqual([{ count: 1 }]);
+        } finally {
+            await first.query('ROLLBACK').catch(() => undefined);
+            await racer.end();
+        }
+        }, 30_000);
+
+        it(
+            'serializes same-user prepares and rolls an atomic hold back when its claim expires behind snapshots',
+            testSameUserPrepareCrossing,
+            30_000,
+        );
+        it(
+            'rolls beta create back when its grant expires behind the predecessor advisory barrier',
+            testBetaCreateGrantExpiryCrossing,
+            15_000,
+        );
+        it(
+            'rejects initial and fresh provider authorization after their lease expires behind ledger serialization',
+            testProviderLeaseExpiryCrossing,
+            20_000,
+        );
+        it(
+            'waits for gate-off admission, preserves consumed replay, and rolls activation back after snapshot-barrier expiry',
+            testAdmissionGateAndExpiryCrossing,
+            30_000,
+        );
+    });
 });

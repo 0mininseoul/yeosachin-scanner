@@ -6,6 +6,7 @@ import {
 } from '@/lib/contracts/analysis-v2';
 import {
     acceptedPreflightDto,
+    BetaPreflightAccessUnavailableError,
     type PreflightAuthProvider,
     preflightStore,
 } from '@/lib/services/analysis/preflight';
@@ -54,20 +55,47 @@ export async function POST(request: Request): Promise<NextResponse> {
     if (!config) return response(503, 'QUEUE_UNAVAILABLE', '사전 점검 작업 큐를 사용할 수 없습니다.');
     try {
         // A revoked grant cannot enqueue a mutation after creation either.
-        const created = await preflightStore.createOrReplay({
+        const created = await preflightStore.createOrReplayBeta({
             userId: user.id,
             email,
             authProvider,
             targetInstagramId: parsed.data.targetInstagramId,
             idempotencyKey,
-            accessMode: 'production',
         });
         if (!betaTestFreePoolEnabled() || !await hasBetaTestAccess(supabase)) {
+            await preflightStore.blockBetaPrepareCapacity({
+                preflightId: created.preflightId,
+                userId: user.id,
+                prepareGeneration: created.prepareGeneration,
+                prepareToken: created.prepareToken,
+                claimToken: null,
+            });
             return response(403, BETA_TEST_ACCESS_UNAVAILABLE, '베타 분석을 사용할 수 없습니다.');
         }
-        await enqueueBetaPreflightPrepareTask(created.preflightId, user.id, { config });
+        if (created.shouldEnqueue) {
+            await enqueueBetaPreflightPrepareTask(
+                created.preflightId,
+                user.id,
+                created.prepareGeneration,
+                created.prepareToken,
+                { config }
+            );
+            await preflightStore.markBetaPrepareDispatched({
+                preflightId: created.preflightId,
+                userId: user.id,
+                prepareGeneration: created.prepareGeneration,
+                prepareToken: created.prepareToken,
+            });
+        }
         return NextResponse.json(acceptedPreflightDto(created), { status: created.created ? 202 : 200 });
-    } catch {
+    } catch (error) {
+        if (error instanceof BetaPreflightAccessUnavailableError) {
+            return response(
+                403,
+                BETA_TEST_ACCESS_UNAVAILABLE,
+                '베타 분석을 사용할 수 없습니다.'
+            );
+        }
         return response(503, 'QUEUE_UNAVAILABLE', '사전 점검 작업을 시작할 수 없습니다.');
     }
 }
