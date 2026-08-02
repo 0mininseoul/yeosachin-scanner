@@ -123,7 +123,7 @@ IMMUTABLE
 SECURITY INVOKER
 SET search_path = ''
 AS $$
-    SELECT CASE pg_catalog.mod(pg_catalog.coalesce(p_sort_ordinal, 0), 6)
+    SELECT CASE pg_catalog.mod(COALESCE(p_sort_ordinal, 0), 6)
         WHEN 0 THEN '소개와 피드의 장면이 자연스럽게 이어집니다. 계정이 보여주는 일상의 결이 또렷하네요.'
         WHEN 1 THEN '사진마다 취향의 방향이 꾸준히 드러납니다. 가볍게 훑어도 계정의 분위기가 선명합니다.'
         WHEN 2 THEN '일상 기록과 관심사가 자연스럽게 섞여 있습니다. 피드의 흐름이 한 사람의 리듬으로 읽힙니다.'
