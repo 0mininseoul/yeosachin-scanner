@@ -1,6 +1,8 @@
 -- Atomic beta plan admission and immutable replay. The browser never calls
 -- these functions; only the server-side beta admission boundary may execute
 -- the two narrow public RPCs.
+BEGIN;
+
 SET LOCAL lock_timeout = '5s';
 SET LOCAL statement_timeout = '2min';
 
@@ -672,3 +674,4 @@ COMMENT ON FUNCTION public.load_analysis_v2_betatest_plan_replay(
 COMMENT ON FUNCTION public.admit_analysis_v2_betatest_plan(
     UUID, UUID, UUID, INTEGER, TEXT, JSONB, JSONB, INTEGER
 ) IS 'Atomically consumes one ready beta preflight, activates its frozen eight-family allocation and provider policy, and persists the recoverable bootstrap job.';
+COMMIT;

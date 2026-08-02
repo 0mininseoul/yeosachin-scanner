@@ -1,6 +1,8 @@
 -- Schema-only phase. Keep the ACCESS EXCLUSIVE transaction limited to the
 -- replacement NOT VALID check; row backfill, function DDL, and validation are
 -- committed by later migrations.
+BEGIN;
+
 SET LOCAL lock_timeout = '5s';
 SET LOCAL statement_timeout = '2min';
 
@@ -96,3 +98,4 @@ ALTER TABLE public.analysis_preflights
             )
         )
     ) NOT VALID;
+COMMIT;

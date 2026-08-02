@@ -1,5 +1,7 @@
 -- Worker-facing beta admission contract.  This is deliberately service-role
 -- only: it exposes neither an owner id nor any upstream account metadata.
+BEGIN;
+
 SET LOCAL lock_timeout = '5s';
 SET LOCAL statement_timeout = '2min';
 
@@ -181,3 +183,4 @@ $$;
 REVOKE ALL ON FUNCTION public.claim_analysis_v2_preflight_admission(UUID, INTEGER, INTEGER, UUID, UUID, INTEGER)
     FROM PUBLIC, anon, authenticated, service_role;
 GRANT EXECUTE ON FUNCTION public.claim_analysis_v2_preflight_admission(UUID, INTEGER, INTEGER, UUID, UUID, INTEGER) TO service_role;
+COMMIT;
