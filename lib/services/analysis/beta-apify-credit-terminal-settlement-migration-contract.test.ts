@@ -5,8 +5,8 @@ const migration = readFileSync(new URL(
     '../../../supabase/migrations/20260802090000_settle_betatest_terminal_credit.sql',
     import.meta.url,
 ), 'utf8');
-const latestPurge = readFileSync(new URL(
-    '../../../supabase/migrations/20260731010000_guard_preflight_purge_restricted_references.sql',
+const latestPurgeSchema = readFileSync(new URL(
+    '../../../supabase/migrations/20260731130000_rearm_terminal_unavailable_job_exhaustion.sql',
     import.meta.url,
 ), 'utf8');
 
@@ -22,7 +22,7 @@ describe('terminal betatest credit settlement migration contract', () => {
         expect(migration).toContain('settle_analysis_beta_apify_preflight_credit');
         expect(migration).toContain("allocation.lifecycle_state='settled'");
         expect(migration).toContain('FOR UPDATE OF users SKIP LOCKED');
-        expect(migration).toContain('NOT EXISTS (SELECT 1 FROM public.analysis_beta_pool_allocations allocation WHERE allocation.preflight_id=preflight.id)');
+        expect(migration).toMatch(/NOT EXISTS \([\s\S]*?analysis_beta_pool_allocations AS allocation[\s\S]*?allocation\.preflight_id = preflight\.id/);
         expect(migration).toContain('REVOKE ALL ON FUNCTION public.settle_analysis_beta_apify_request_credit(UUID)');
         expect(migration).toContain('SET search_path = \'\'');
         expect(migration).toContain("SET LOCAL lock_timeout = '5s'");
@@ -34,11 +34,14 @@ describe('terminal betatest credit settlement migration contract', () => {
             'earlybird_orders', 'earlybird_waitlist',
             'earlybird_schema_failure_recoveries',
             'analysis_v2_replay_capture_authorizations',
+            'earlybird_adoption_policy_failure_rearms',
+            'earlybird_terminal_unavailable_exhaustion_rearms',
         ]) {
-            expect(latestPurge).toContain(fence);
             expect(migration).toContain(fence);
         }
-        expect(migration).toContain('analysis_beta_pool_allocations allocation WHERE allocation.preflight_id=preflight.id');
+        expect(latestPurgeSchema).toContain('earlybird_terminal_unavailable_exhaustion_rearms');
+        expect(latestPurgeSchema).toContain('earlybird_adoption_policy_failure_rearms');
+        expect(migration).toMatch(/analysis_beta_pool_allocations AS allocation[\s\S]*?allocation\.preflight_id = preflight\.id/);
         expect(migration).toContain("provider_run.status <> 'rejected'");
     });
 });

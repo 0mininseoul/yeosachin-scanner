@@ -30,7 +30,9 @@ import {
 } from '@/lib/services/media/image-proxy-token';
 import { supabaseAdmin } from '@/lib/supabase/admin';
 import {
-    bestEffortBetaApifySettlement,
+    BETA_APIFY_REFRESH_LOG,
+    BETA_APIFY_SETTLEMENT_LOG,
+    refreshBetaApifyCreditSnapshots,
     settleBetaApifyRequestCredit,
 } from './beta-apify-credit-settlement-runtime';
 
@@ -1287,10 +1289,32 @@ export function paginateAnalysisV2FinalizedSnapshot(input: {
 
 export function createSupabaseAnalysisV2ResultStore(
     client: AnalysisV2ResultSupabaseClient = supabaseAdmin,
-    options: { imageProxySigner?: ImageProxySigner } = {}
+    options: {
+        imageProxySigner?: ImageProxySigner;
+        settleBetaRequest?: (requestId: string) => Promise<boolean>;
+        refreshBetaCredit?: () => Promise<void>;
+    } = {}
 ): AnalysisV2ResultStore {
     const imageProxySigner: ImageProxySigner = options.imageProxySigner
         ?? ((_rawUrl, locator) => createAnalysisV2ResultImageProxyPath(locator) ?? null);
+    const postTerminalBetaCredit = async (requestId: string): Promise<void> => {
+        let processed = false;
+        let settlementFailed = false;
+        try {
+            processed = await (options.settleBetaRequest
+                ?? (id => settleBetaApifyRequestCredit(client, id)))(requestId);
+        } catch {
+            settlementFailed = true;
+            console.error(BETA_APIFY_SETTLEMENT_LOG);
+        }
+        if (!processed && !settlementFailed) return;
+        try {
+            await (options.refreshBetaCredit
+                ?? (() => refreshBetaApifyCreditSnapshots(client)))();
+        } catch {
+            console.error(BETA_APIFY_REFRESH_LOG);
+        }
+    };
     async function checkpoint(
         rpcName: string,
         claimInput: AnalysisV2ResultJobClaim,
@@ -1477,9 +1501,7 @@ export function createSupabaseAnalysisV2ResultStore(
             if (!parsed.success) {
                 throw new Error('ANALYSIS_V2_RESULT_PERSISTENCE_ERROR: invalid finalization result.');
             }
-            await bestEffortBetaApifySettlement(() => (
-                settleBetaApifyRequestCredit(client, claim.requestId)
-            ));
+            await postTerminalBetaCredit(claim.requestId);
             return Object.freeze({
                 finalized: parsed.data.finalized,
                 requestStatus: parsed.data.requestStatus,
@@ -1507,9 +1529,7 @@ export function createSupabaseAnalysisV2ResultStore(
             if (!parsed.success) {
                 throw new Error('ANALYSIS_V2_RESULT_PERSISTENCE_ERROR: invalid failure result.');
             }
-            await bestEffortBetaApifySettlement(() => (
-                settleBetaApifyRequestCredit(client, claim.requestId)
-            ));
+            await postTerminalBetaCredit(claim.requestId);
             return Object.freeze(parsed.data);
         },
 

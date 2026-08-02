@@ -4,6 +4,15 @@ import {
     runPreflightRetention,
 } from './preflight-retention';
 
+const emptyBetaRetention = {
+    betaCreditRecovered: 0,
+    betaCreditArchived: 0,
+    betaCreditRecoveryFailures: 0,
+    betaCreditArchiveFailures: 0,
+    betaCreditRefreshAttempts: 0,
+    betaCreditRefreshFailures: 0,
+} as const;
+
 describe('preflight retention maintenance', () => {
     it('reconciles bounded paid runs before both retention RPCs', async () => {
         const rpc = vi.fn()
@@ -11,6 +20,7 @@ describe('preflight retention maintenance', () => {
             .mockResolvedValueOnce({ data: 12, error: null })
             .mockResolvedValueOnce({ data: 4, error: null });
         await expect(runPreflightRetention({ rpc })).resolves.toEqual({
+            ...emptyBetaRetention,
             providerCosts: { eligible: 0, finalized: 0, failed: 0, hasMore: false },
             expiredPurged: 12,
             terminalScrubbed: 4,
@@ -72,6 +82,7 @@ describe('preflight retention maintenance', () => {
                 }),
             }),
         })).resolves.toEqual({
+            ...emptyBetaRetention,
             providerCosts: { eligible: 1, finalized: 0, failed: 1, hasMore: false },
             expiredPurged: 1,
             terminalScrubbed: 2,
@@ -85,16 +96,48 @@ describe('preflight retention maintenance', () => {
 
     it('keeps safe archive after a best-effort refresh failure', async () => {
         const events: string[] = [];
-        await runPreflightRetention({
+        const summary = await runPreflightRetention({
+            rpc: vi.fn(async name => {
+                events.push(name === 'purge_expired_analysis_v2_preflights'
+                    ? 'purge' : 'scrub');
+                return { data: 0, error: null };
+            }),
+        }, {
+            providerRunStore: {
+                listUnreconciled: vi.fn(async () => []),
+                reconcileUsage: vi.fn(),
+            },
+            recoverBetaCredit: async () => { events.push('recover'); return 1; },
+            refreshBetaCredit: async () => { events.push('refresh'); throw new Error('unavailable'); },
+            archiveBetaCredit: async () => { events.push('archive'); return 1; },
+        });
+        expect(events).toEqual(['purge', 'recover', 'archive', 'scrub', 'refresh']);
+        expect(summary).toMatchObject({
+            betaCreditRecovered: 1,
+            betaCreditArchived: 1,
+            betaCreditRefreshAttempts: 1,
+            betaCreditRefreshFailures: 1,
+        });
+    });
+
+    it('still archives and scrubs when beta recovery fails', async () => {
+        const archiveBetaCredit = vi.fn(async () => 2);
+        const summary = await runPreflightRetention({
             rpc: vi.fn()
                 .mockResolvedValueOnce({ data: [], error: null })
                 .mockResolvedValueOnce({ data: 0, error: null })
                 .mockResolvedValueOnce({ data: 0, error: null }),
         }, {
-            recoverBetaCredit: async () => { events.push('recover'); },
-            refreshBetaCredit: async () => { events.push('refresh'); throw new Error('unavailable'); },
-            archiveBetaCredit: async () => { events.push('archive'); },
+            recoverBetaCredit: async () => { throw new Error('recover'); },
+            archiveBetaCredit,
+            refreshBetaCredit: vi.fn(),
         });
-        expect(events).toEqual(['recover', 'refresh', 'archive']);
+        expect(archiveBetaCredit).toHaveBeenCalledOnce();
+        expect(summary).toMatchObject({
+            terminalScrubbed: 0,
+            betaCreditRecoveryFailures: 1,
+            betaCreditArchived: 2,
+            betaCreditRefreshAttempts: 0,
+        });
     });
 });

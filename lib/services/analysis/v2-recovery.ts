@@ -56,6 +56,12 @@ export interface AnalysisV2RecoverySummary {
     geminiCutoffLeasesReaped: number;
     schedulerOperationsRecovered: number;
     schedulerGeminiLeasesReaped: number;
+    betaCreditRecovered: number;
+    betaCreditArchived: number;
+    betaCreditRecoveryFailures: number;
+    betaCreditArchiveFailures: number;
+    betaCreditRefreshAttempts: number;
+    betaCreditRefreshFailures: number;
 }
 
 type RecoveryLookup = (job: {
@@ -74,7 +80,8 @@ type GeminiCutoffLeaseReaper = () => Promise<number>;
 type SchedulerOperationRecovery = () => Promise<number>;
 type SchedulerGeminiLeaseReaper = () => Promise<number>;
 type ScoreAuditRecovery = () => Promise<void>;
-type BetaCreditMaintenance = () => Promise<void>;
+type BetaCreditMaintenance = () => Promise<number>;
+type BetaCreditRefresh = () => Promise<void>;
 
 type RecoveryOutcome =
     | 'dispatched'
@@ -195,7 +202,7 @@ export async function recoverAnalysisV2Jobs(
         recoverScoreAudits?: ScoreAuditRecovery;
         recoverBetaCredit?: BetaCreditMaintenance;
         archiveBetaCredit?: BetaCreditMaintenance;
-        refreshBetaCredit?: BetaCreditMaintenance;
+        refreshBetaCredit?: BetaCreditRefresh;
         scoreAuditTimeoutMs?: number;
     } = {}
 ): Promise<AnalysisV2RecoverySummary> {
@@ -238,6 +245,12 @@ export async function recoverAnalysisV2Jobs(
         geminiCutoffLeasesReaped: 0,
         schedulerOperationsRecovered: 0,
         schedulerGeminiLeasesReaped: 0,
+        betaCreditRecovered: 0,
+        betaCreditArchived: 0,
+        betaCreditRecoveryFailures: 0,
+        betaCreditArchiveFailures: 0,
+        betaCreditRefreshAttempts: 0,
+        betaCreditRefreshFailures: 0,
     };
     try {
         summary.geminiCutoffAttemptsRecovered = await (
@@ -341,19 +354,27 @@ export async function recoverAnalysisV2Jobs(
     );
     if (hasBetaMaintenance) {
         try {
-            await (dependencies.recoverBetaCredit
+            summary.betaCreditRecovered = await (dependencies.recoverBetaCredit
                 ?? (() => recoverBetaApifyCredit(supabaseAdmin)))();
-            await (dependencies.archiveBetaCredit
+        } catch {
+            summary.failed += 1;
+            summary.betaCreditRecoveryFailures += 1;
+        }
+        try {
+            summary.betaCreditArchived = await (dependencies.archiveBetaCredit
                 ?? (() => archiveSettledBetaApifyCredit(supabaseAdmin)))();
         } catch {
             summary.failed += 1;
+            summary.betaCreditArchiveFailures += 1;
         }
-        try {
-            await (dependencies.refreshBetaCredit
-                ?? (() => refreshBetaApifyCreditSnapshots(supabaseAdmin)))();
-        } catch {
-            // Refresh cannot invalidate a settled/released reservation and is
-            // retried by the next maintenance pass.
+        if (summary.betaCreditRecovered > 0) {
+            summary.betaCreditRefreshAttempts = 1;
+            try {
+                await (dependencies.refreshBetaCredit
+                    ?? (() => refreshBetaApifyCreditSnapshots(supabaseAdmin)))();
+            } catch {
+                summary.betaCreditRefreshFailures = 1;
+            }
         }
     }
     // The durable audit outbox drains only after provider safety cleanup and reconciliation.

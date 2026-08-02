@@ -169,7 +169,10 @@ export function createBetaApifyPreflightCoordinator(input: {
 /** Lazily constructs exactly the free-pool user endpoints; secondary is unrepresentable. */
 export function createServerBetaApifyCreditClientFactory(
     env: Record<string, string | undefined> = process.env,
-    createClient: (token: string) => { user(): ApifyUserCreditClient } = token => new ApifyClient({ token, maxRetries: 0 })
+    createClient: (
+        token: string,
+        options: Readonly<{ maxRetries: 0; timeoutSecs: number }>,
+    ) => { user(): ApifyUserCreditClient } = (token, options) => new ApifyClient({ token, ...options })
 ): (slot: BetaApifyFreeCredentialSlot) => ApifyUserCreditClient {
     const tokenKey: Readonly<Record<BetaApifyFreeCredentialSlot, string>> = Object.freeze({
         primary: 'APIFY_PRIMARY_API_TOKEN',
@@ -188,7 +191,7 @@ export function createServerBetaApifyCreditClientFactory(
             : env[tokenKey[slot]]?.trim());
         if (!token) throw sanitizedCapacityError();
         try {
-            const client = createClient(token).user();
+            const client = createClient(token, { maxRetries: 0, timeoutSecs: 10 }).user();
             clients.set(slot, client);
             return client;
         } catch {

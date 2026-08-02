@@ -59,18 +59,21 @@ function store(): BetaApifyPreflightCoordinatorStore {
 describe('beta preflight credit coordinator', () => {
     it('maps only the six named free-pool token keys to lazy Apify user clients', () => {
         const created: string[] = [];
+        const options: unknown[] = [];
         const factory = createServerBetaApifyCreditClientFactory({
             APIFY_PRIMARY_API_TOKEN: 'p', APIFY_TERTIARY_API_TOKEN: 't',
             APIFY_QUATERNARY_API_TOKEN: 'q4', APIFY_QUINARY_API_TOKEN: 'q5',
             APIFY_SENARY_API_TOKEN: 's', APIFY_SEPTENARY_API_TOKEN: 's7',
             APIFY_SECONDARY_API_TOKEN: 'must-never-be-selected',
-        }, token => {
+        }, (token, option) => {
             created.push(token);
+            options.push(option);
             return { user: () => ({ limits: async () => ({}), monthlyUsage: async () => ({}) }) };
         });
         for (const slot of BETA_APIFY_FREE_CREDENTIAL_SLOTS) factory(slot);
         expect(created).toEqual(['p', 't', 'q4', 'q5', 's', 's7']);
         expect(created).not.toContain('must-never-be-selected');
+        expect(options).toEqual(Array(6).fill({ maxRetries: 0, timeoutSecs: 10 }));
     });
 
     it('refreshes all exact-six accounts before atomically holding the deterministic fitting target slot', async () => {

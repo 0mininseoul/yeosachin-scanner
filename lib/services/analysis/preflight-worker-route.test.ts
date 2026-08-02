@@ -4,6 +4,8 @@ const mocks = vi.hoisted(() => ({
     getConfig: vi.fn(),
     process: vi.fn(),
     processAdmission: vi.fn(),
+    settleBetaCredit: vi.fn(),
+    refreshBetaCredit: vi.fn(),
     verify: vi.fn(),
     emit: vi.fn(),
     observeRoute: vi.fn((
@@ -34,6 +36,16 @@ vi.mock('@/lib/services/analysis/preflight-tasks', () => ({
     getPreflightTasksConfig: mocks.getConfig,
     verifyPreflightTaskAuthorization: mocks.verify,
 }));
+vi.mock('@/lib/services/analysis/beta-apify-credit-settlement-runtime', async (importOriginal) => {
+    const actual = await importOriginal<
+        typeof import('./beta-apify-credit-settlement-runtime')
+    >();
+    return {
+        ...actual,
+        settleBetaApifyPreflightCredit: mocks.settleBetaCredit,
+        refreshBetaApifyCreditSnapshots: mocks.refreshBetaCredit,
+    };
+});
 
 import { POST } from '@/app/api/analysis/preflight/worker/route';
 import { PreflightWorkerRetryError } from './preflight';
@@ -64,6 +76,8 @@ describe('preflight worker route', () => {
         mocks.verify.mockResolvedValue(true);
         mocks.process.mockResolvedValue('ready');
         mocks.processAdmission.mockResolvedValue('ready');
+        mocks.settleBetaCredit.mockResolvedValue(false);
+        mocks.refreshBetaCredit.mockResolvedValue(undefined);
     });
 
     it('rejects an unverified caller before parsing or claiming work', async () => {
@@ -107,6 +121,8 @@ describe('preflight worker route', () => {
         expect(mocks.verify).toHaveBeenCalledWith('Bearer signed', { config });
         expect(mocks.process).toHaveBeenCalledWith(preflightId, expect.objectContaining({
             betaCreditCoordinator: expect.any(Object),
+            settleBetaCredit: expect.any(Function),
+            refreshBetaCredit: expect.any(Function),
             observer: expect.any(Function),
         }));
         await expect(response.json()).resolves.toEqual({ status: 'ready' });
@@ -160,6 +176,25 @@ describe('preflight worker route', () => {
             expect.objectContaining({ betaCreditCoordinator: expect.any(Object) })
         );
         expect(mocks.process).not.toHaveBeenCalled();
+    });
+
+    it('refreshes the exact beta pool only after a fresh-admission block settles credit', async () => {
+        mocks.processAdmission.mockResolvedValue('blocked');
+        mocks.settleBetaCredit.mockResolvedValue(true);
+
+        const response = await POST(request({
+            preflightId,
+            kind: 'fresh_admission',
+            generation: 3,
+            dispatchGeneration: 2,
+            dispatchToken,
+        }));
+
+        expect(response.status).toBe(200);
+        expect(mocks.settleBetaCredit).toHaveBeenCalledWith(
+            expect.anything(), preflightId
+        );
+        expect(mocks.refreshBetaCredit).toHaveBeenCalledWith(expect.anything());
     });
 
     it('rejects an admission task that omits its durable dispatch fence', async () => {

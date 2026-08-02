@@ -259,6 +259,9 @@ CREATE TABLE public.analysis_preflights (
     error_code TEXT,
     access_mode TEXT NOT NULL CHECK (access_mode IN ('production', 'test_entitlement')),
     target_instagram_id TEXT,
+    target_full_name TEXT,
+    target_bio TEXT,
+    target_profile_image_url TEXT,
     exclusion_decision TEXT NOT NULL DEFAULT 'skip',
     worker_attempt_count INTEGER NOT NULL DEFAULT 0,
     plan_catalog_snapshot JSONB NOT NULL DEFAULT '{}'::JSONB,
@@ -298,9 +301,37 @@ CREATE TABLE public.analysis_preflights (
     consumed_request_id UUID,
     consumed_at TIMESTAMPTZ,
     ready_at TIMESTAMPTZ,
+    blocked_at TIMESTAMPTZ,
+    pii_scrubbed_at TIMESTAMPTZ,
     created_at TIMESTAMPTZ NOT NULL DEFAULT pg_catalog.clock_timestamp(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT pg_catalog.clock_timestamp(),
     expires_at TIMESTAMPTZ NOT NULL
+);
+
+CREATE TABLE public.earlybird_orders (
+    id UUID PRIMARY KEY DEFAULT pg_catalog.gen_random_uuid(),
+    preflight_id UUID REFERENCES public.analysis_preflights(id) ON DELETE RESTRICT,
+    status TEXT NOT NULL DEFAULT 'cancelled'
+);
+CREATE TABLE public.earlybird_waitlist (
+    id UUID PRIMARY KEY DEFAULT pg_catalog.gen_random_uuid(),
+    preflight_id UUID REFERENCES public.analysis_preflights(id) ON DELETE RESTRICT
+);
+CREATE TABLE public.earlybird_schema_failure_recoveries (
+    id UUID PRIMARY KEY DEFAULT pg_catalog.gen_random_uuid(),
+    recovery_preflight_id UUID REFERENCES public.analysis_preflights(id) ON DELETE RESTRICT
+);
+CREATE TABLE public.analysis_v2_replay_capture_authorizations (
+    id UUID PRIMARY KEY DEFAULT pg_catalog.gen_random_uuid(),
+    preflight_id UUID REFERENCES public.analysis_preflights(id) ON DELETE RESTRICT
+);
+CREATE TABLE public.earlybird_adoption_policy_failure_rearms (
+    id UUID PRIMARY KEY DEFAULT pg_catalog.gen_random_uuid(),
+    rearmed_preflight_id UUID REFERENCES public.analysis_preflights(id) ON DELETE RESTRICT
+);
+CREATE TABLE public.earlybird_terminal_unavailable_exhaustion_rearms (
+    id UUID PRIMARY KEY DEFAULT pg_catalog.gen_random_uuid(),
+    rearmed_preflight_id UUID REFERENCES public.analysis_preflights(id) ON DELETE RESTRICT
 );
 
 CREATE TABLE public.analysis_pipeline_jobs (
@@ -1094,6 +1125,12 @@ beforeEach(async () => {
         DELETE FROM public.analysis_pipeline_jobs;
         DELETE FROM public.analysis_preflight_provider_runs;
         DELETE FROM public.analysis_beta_access_grants;
+        DELETE FROM public.earlybird_adoption_policy_failure_rearms;
+        DELETE FROM public.earlybird_terminal_unavailable_exhaustion_rearms;
+        DELETE FROM public.analysis_v2_replay_capture_authorizations;
+        DELETE FROM public.earlybird_schema_failure_recoveries;
+        DELETE FROM public.earlybird_waitlist;
+        DELETE FROM public.earlybird_orders;
         DELETE FROM public.analysis_preflights;
         DELETE FROM public.analysis_requests;
         DELETE FROM public.users;
@@ -2985,5 +3022,78 @@ describe('betatest provider policy/guard migration PGlite', () => {
         await db.query(`DELETE FROM public.analysis_pipeline_jobs WHERE request_id = $1`, [REQUEST_ID]);
         await expect(db.query(`DELETE FROM public.analysis_requests WHERE id = $1`, [REQUEST_ID])).resolves.toBeDefined();
         await expect(db.query(`DELETE FROM public.users WHERE id = $1`, [USER_ID])).resolves.toBeDefined();
+    });
+
+    it('targeted request settlement works after grant disable and is idempotent', async () => {
+        await seedPendingBetaRequest();
+        await activateBeta();
+        await db.query(`UPDATE public.analysis_beta_access_grants SET enabled = FALSE WHERE user_id = $1`, [USER_ID]);
+        await db.query(`UPDATE public.analysis_requests SET status = 'completed' WHERE id = $1`, [REQUEST_ID]);
+        const first = await serviceQuery<JsonRow<{ lifecycleState: string; heldFamilies: number }>>(
+            `SELECT public.settle_analysis_beta_apify_request_credit($1) AS result`,
+            [REQUEST_ID],
+        );
+        expect(first.rows[0]!.result).toMatchObject({ lifecycleState: 'settled', heldFamilies: 0 });
+        const replay = await serviceQuery<JsonRow<null>>(
+            `SELECT public.settle_analysis_beta_apify_request_credit($1) AS result`,
+            [REQUEST_ID],
+        );
+        expect(replay.rows[0]!.result).toBeNull();
+    });
+
+    it('targeted preflight settlement handles expiry but no-ops ready and soft admission blocks', async () => {
+        await seedPendingBetaPreflight();
+        await expect(serviceQuery<JsonRow<null>>(
+            `SELECT public.settle_analysis_beta_apify_preflight_credit($1) AS result`,
+            [PREFLIGHT_ID],
+        )).resolves.toMatchObject({ rows: [{ result: null }] });
+        await db.query(`UPDATE public.analysis_preflights SET status = 'expired' WHERE id = $1`, [PREFLIGHT_ID]);
+        const expired = await serviceQuery<JsonRow<{ lifecycleState: string }>>(
+            `SELECT public.settle_analysis_beta_apify_preflight_credit($1) AS result`,
+            [PREFLIGHT_ID],
+        );
+        expect(expired.rows[0]!.result).toMatchObject({ lifecycleState: 'settled' });
+
+        await db.exec(`DELETE FROM public.analysis_beta_pool_reservations; DELETE FROM public.analysis_beta_pool_allocations; DELETE FROM public.analysis_preflight_provider_runs; DELETE FROM public.analysis_beta_access_grants; DELETE FROM public.analysis_preflights; DELETE FROM public.users;`);
+        await seedPendingBetaRequest();
+        await activateBeta();
+        await db.query(`UPDATE public.analysis_preflights SET admission_status = 'blocked' WHERE id = $1`, [PREFLIGHT_ID]);
+        await expect(serviceQuery<JsonRow<null>>(
+            `SELECT public.settle_analysis_beta_apify_preflight_credit($1) AS result`,
+            [PREFLIGHT_ID],
+        )).resolves.toMatchObject({ rows: [{ result: null }] });
+    });
+
+    it('purges unrelated rows while both late rearm FKs and a beta allocation stay fenced', async () => {
+        const ids = [randomUUID(), randomUUID(), randomUUID(), randomUUID()];
+        await db.query(`INSERT INTO public.users(id) VALUES ($1)`, [USER_ID]);
+        for (const [index, id] of ids.entries()) {
+            await db.query(
+                `INSERT INTO public.analysis_preflights(
+                    id,user_id,status,access_mode,target_instagram_id,created_at,
+                    expires_at,pii_scrubbed_at
+                 ) VALUES ($1,$2,'expired','production',$3,
+                    pg_catalog.clock_timestamp()-INTERVAL '2 hours',
+                    pg_catalog.clock_timestamp()-INTERVAL '1 hour',
+                    pg_catalog.clock_timestamp()-INTERVAL '1 hour')`,
+                [id, USER_ID, `retained.${index}`],
+            );
+        }
+        await db.query(`INSERT INTO public.earlybird_adoption_policy_failure_rearms(rearmed_preflight_id) VALUES ($1)`, [ids[0]]);
+        await db.query(`INSERT INTO public.earlybird_terminal_unavailable_exhaustion_rearms(rearmed_preflight_id) VALUES ($1)`, [ids[1]]);
+        await db.query(
+            `INSERT INTO public.analysis_beta_pool_allocations(
+                id,preflight_id,user_id,lifecycle_state,policy_version,expires_at
+             ) VALUES ($1,$2,$3,'preflight_held','betatest-free-pool-v1',
+                pg_catalog.clock_timestamp()+INTERVAL '1 hour')`,
+            [randomUUID(), ids[2], USER_ID],
+        );
+        await expect(serviceQuery(
+            `SELECT public.purge_expired_analysis_v2_preflights(10) AS purged`,
+        )).resolves.toMatchObject({ rows: [{ purged: 1 }] });
+        const remaining = await db.query<{ id: string }>(
+            `SELECT id::TEXT FROM public.analysis_preflights ORDER BY id`,
+        );
+        expect(remaining.rows.map(row => row.id).sort()).toEqual(ids.slice(0, 3).sort());
     });
 });

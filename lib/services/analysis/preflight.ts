@@ -1138,14 +1138,36 @@ export async function processPreflight(
         betaCreditCoordinator?: BetaApifyPreflightCoordinator;
         env?: Record<string, string | undefined>;
         observer?: PreflightProcessObserver;
-        /** Post-terminal only; callers must swallow settlement faults. */
-        settleBetaCredit?: (preflightId: string) => Promise<void>;
+        /** Post-terminal only; true means a beta allocation was processed. */
+        settleBetaCredit?: (preflightId: string) => Promise<boolean>;
+        refreshBetaCredit?: () => Promise<void>;
     } = {}
 ): Promise<'noop' | 'ready' | 'blocked'> {
     const store = dependencies.store ?? preflightStore;
     const providerRuns = dependencies.providerRunStore ?? preflightProviderRunStore;
+    const settleTerminalBetaCredit = async (knownBeta: boolean): Promise<void> => {
+        let processed = false;
+        let settlementFailed = false;
+        try {
+            processed = await dependencies.settleBetaCredit?.(preflightId) ?? false;
+        } catch {
+            settlementFailed = true;
+        }
+        if (processed || (knownBeta && settlementFailed)) {
+            try {
+                await dependencies.refreshBetaCredit?.();
+            } catch {
+                // Refresh is advisory after a durable terminal transition.
+            }
+        }
+    };
     const claim = await store.claim(preflightId);
-    if (!claim) return 'noop';
+    if (!claim) {
+        // The claim RPC itself may have expired or exhausted the row. The
+        // targeted RPC proves whether beta credit actually needs releasing.
+        await settleTerminalBetaCredit(false);
+        return 'noop';
+    }
     const workerStartedAt = Date.now();
     let terminalized = false;
     const baseObservation = {
@@ -1357,12 +1379,9 @@ export async function processPreflight(
         }, claim.workerAttemptCount, error);
     } finally {
         if (terminalized) {
-            try {
-                await dependencies.settleBetaCredit?.(claim.preflightId);
-            } catch {
-                // The terminal state is already durable; maintenance recovery
-                // will retry a conservative beta allocation later.
-            }
+            await settleTerminalBetaCredit(
+                claim.analysisEntryChannel === 'betatest'
+            );
         }
     }
 }

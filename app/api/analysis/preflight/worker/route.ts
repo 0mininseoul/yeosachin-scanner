@@ -28,7 +28,9 @@ import {
     createServerBetaApifyCreditClientFactory,
 } from '@/lib/services/analysis/beta-apify-preflight-coordinator';
 import {
+    bestEffortBetaApifyRefresh,
     bestEffortBetaApifySettlement,
+    refreshBetaApifyCreditSnapshots,
     settleBetaApifyPreflightCredit,
 } from '@/lib/services/analysis/beta-apify-credit-settlement-runtime';
 
@@ -112,9 +114,12 @@ async function handlePOST(
             // until a claimed row identifies itself as the dedicated beta channel.
             outcome = await processPreflight(task.preflightId, {
                 betaCreditCoordinator,
-                settleBetaCredit: preflightId => bestEffortBetaApifySettlement(
-                    () => settleBetaApifyPreflightCredit(supabaseAdmin, preflightId)
-                ).then(() => undefined),
+                settleBetaCredit: preflightId => settleBetaApifyPreflightCredit(
+                    supabaseAdmin, preflightId
+                ),
+                refreshBetaCredit: () => refreshBetaApifyCreditSnapshots(
+                    supabaseAdmin
+                ),
                 observer(observation: PreflightProcessObservation) {
                     if (observation.type === 'failed') profileFailureObserved = true;
                     emitPreflightProcessObservation(context, observation);
@@ -122,9 +127,16 @@ async function handlePOST(
             });
         }
         if (outcome === 'blocked' && isFreshAdmission) {
-            await bestEffortBetaApifySettlement(() => (
-                settleBetaApifyPreflightCredit(supabaseAdmin, task.preflightId)
-            ));
+            await bestEffortBetaApifySettlement(async () => {
+                const processed = await settleBetaApifyPreflightCredit(
+                    supabaseAdmin, task.preflightId
+                );
+                if (processed) {
+                    await bestEffortBetaApifyRefresh(() => (
+                        refreshBetaApifyCreditSnapshots(supabaseAdmin)
+                    ));
+                }
+            });
         }
         const operation = isFreshAdmission ? 'fresh_admission' : 'profile';
         const disposition = outcome === 'noop' ? 'exists' : outcome;

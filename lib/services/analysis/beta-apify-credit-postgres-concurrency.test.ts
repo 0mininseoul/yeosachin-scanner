@@ -289,7 +289,7 @@ async function admitReadyPlan(input: {
     return admitted.rows[0]!.result;
 }
 
-async function seedActivatedBetaRequest(client: Client): Promise<{
+async function seedActivatedBetaRequest(client: Client, snapshotLimit = 10): Promise<{
     allocationId: string;
     claimToken: string;
     requestId: string;
@@ -298,12 +298,17 @@ async function seedActivatedBetaRequest(client: Client): Promise<{
     const preflightId = randomUUID();
     const requestId = randomUUID();
     const claimToken = randomUUID();
-    await seedHold(client, userId, preflightId, 10);
+    await seedHold(client, userId, preflightId, snapshotLimit);
     await client.query(
         `SELECT public.hold_analysis_beta_apify_preflight_credit(
             $1, $2, 'primary', 0.0052, 300
         )`,
         [preflightId, userId],
+    );
+    await client.query(
+        `UPDATE public.analysis_apify_credit_snapshots
+         SET monthly_limit_usd = $1, monthly_usage_usd = 0`,
+        [snapshotLimit],
     );
     await client.query(
         `INSERT INTO public.analysis_requests (
@@ -1045,7 +1050,72 @@ describe('beta Apify credit PostgreSQL 16 concurrency', () => {
         }]);
     });
 
-    it('keeps terminal replay available through settlement and then archives without deadlock', async () => {
+    it('hands terminal request capacity to the next preflight without a provider refresh', async () => {
+        const terminal = await seedActivatedBetaRequest(first, 1000);
+        const nextUserId = randomUUID();
+        const nextPreflightId = randomUUID();
+        await seedHold(first, nextUserId, nextPreflightId, 1000);
+
+        // Exhaust primary against the durable ledger without changing the
+        // observation fence. The next hold must fail until targeted settlement
+        // releases this request's exact target-profile reservation.
+        await first.query(
+            `UPDATE public.analysis_apify_credit_snapshots AS snapshot
+             SET monthly_limit_usd = snapshot.monthly_limit_usd
+                   - capacity.effective_capacity_usd
+             FROM public.analysis_beta_pool_effective_capacity_snapshot() AS capacity
+             WHERE snapshot.credential_slot = 'primary'
+               AND capacity.credential_slot = snapshot.credential_slot`,
+        );
+        const observation = (await first.query<{ observed_at: string }>(
+            `SELECT observed_at::text AS observed_at
+             FROM public.analysis_apify_credit_snapshots
+             WHERE credential_slot = 'primary'`,
+        )).rows[0]!.observed_at;
+        await expect(first.query(
+            `SELECT public.hold_analysis_beta_apify_preflight_credit(
+                $1, $2, 'primary', 0.0052, 300
+            )`,
+            [nextPreflightId, nextUserId],
+        )).rejects.toThrow(/ANALYSIS_BETA_POOL_CAPACITY_UNAVAILABLE/);
+
+        await first.query(
+            `UPDATE public.analysis_requests SET status = 'completed' WHERE id = $1`,
+            [terminal.requestId],
+        );
+        const settled = await first.query<{
+            result: { lifecycleState: string; heldFamilies: number };
+        }>(
+            `SELECT public.settle_analysis_beta_apify_request_credit($1) AS result`,
+            [terminal.requestId],
+        );
+        expect(settled.rows[0]!.result).toMatchObject({
+            lifecycleState: 'settled',
+            heldFamilies: 0,
+        });
+
+        const handedOff = await second.query<{
+            result: { lifecycleState: string };
+        }>(
+            `SELECT public.hold_analysis_beta_apify_preflight_credit(
+                $1, $2, 'primary', 0.0052, 300
+            ) AS result`,
+            [nextPreflightId, nextUserId],
+        );
+        expect(handedOff.rows[0]!.result).toMatchObject({
+            lifecycleState: 'preflight_held',
+        });
+        expect((await first.query<{ observed_at: string; capacity: string }>(
+            `SELECT snapshot.observed_at::text AS observed_at,
+                    capacity.effective_capacity_usd::text AS capacity
+             FROM public.analysis_apify_credit_snapshots AS snapshot
+             JOIN public.analysis_beta_pool_effective_capacity_snapshot() AS capacity
+               ON capacity.credential_slot = snapshot.credential_slot
+             WHERE snapshot.credential_slot = 'primary'`,
+        )).rows).toEqual([{ observed_at: observation, capacity: '0.000000000000' }]);
+    });
+
+    it('keeps replay while targeted settlement races recovery, then archives without deadlock', async () => {
         const userId = randomUUID();
         const preflightId = randomUUID();
         const admissionToken = randomUUID();
@@ -1066,12 +1136,37 @@ describe('beta Apify credit PostgreSQL 16 concurrency', () => {
             `UPDATE public.analysis_requests SET status = 'failed' WHERE id = $1`,
             [admitted.requestId],
         );
-        await first.query(
-            `SELECT public.settle_analysis_beta_apify_credit_allocation(
-                $1, 'request_terminal'
-            )`,
-            [admitted.allocationId],
-        );
+        let settlementTransactionOpen = false;
+        try {
+            await first.query('BEGIN');
+            settlementTransactionOpen = true;
+            const settlement = await first.query<{
+                result: { lifecycleState: string; heldFamilies: number };
+            }>(
+                `SELECT public.settle_analysis_beta_apify_request_credit($1) AS result`,
+                [admitted.requestId],
+            );
+            expect(settlement.rows[0]!.result).toMatchObject({
+                lifecycleState: 'settled',
+                heldFamilies: 0,
+            });
+
+            // Recovery follows the same user-first fence and must skip this
+            // uncommitted targeted settlement instead of double-processing it.
+            const recovery = await second.query<{
+                result: Array<{ allocationId: string }>;
+            }>(
+                `SELECT public.recover_analysis_beta_apify_credit_allocations(100) AS result`,
+            );
+            expect(recovery.rows[0]!.result.map(item => item.allocationId))
+                .not.toContain(admitted.allocationId);
+            await first.query('COMMIT');
+            settlementTransactionOpen = false;
+        } finally {
+            if (settlementTransactionOpen) {
+                await first.query('ROLLBACK').catch(() => undefined);
+            }
+        }
 
         const replay = await first.query<{ result: PlanAdmissionResult }>(
             `SELECT public.load_analysis_v2_betatest_plan_replay(

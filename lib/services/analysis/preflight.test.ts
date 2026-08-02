@@ -91,6 +91,8 @@ describe('betatest preflight credit fence', () => {
         const claimed = claim({ analysisEntryChannel: 'betatest' });
         const store = workerStore(claimed);
         const getProfile = vi.fn();
+        const settleBetaCredit = vi.fn(async () => true);
+        const refreshBetaCredit = vi.fn(async () => undefined);
         await expect(processPreflight(preflightId, {
             store,
             betaCreditCoordinator: {
@@ -98,9 +100,13 @@ describe('betatest preflight credit fence', () => {
                 prepare: async () => { throw new Error('ANALYSIS_BETA_POOL_CAPACITY_UNAVAILABLE'); },
             },
             getProfile,
+            settleBetaCredit,
+            refreshBetaCredit,
         })).resolves.toBe('blocked');
         expect(getProfile).not.toHaveBeenCalled();
         expect(store.finalizeBlocked).toHaveBeenCalledWith(claimed, 'BETA_CAPACITY_UNAVAILABLE');
+        expect(settleBetaCredit).toHaveBeenCalledWith(preflightId);
+        expect(refreshBetaCredit).toHaveBeenCalledOnce();
     });
 });
 
@@ -842,13 +848,31 @@ describe('preflight worker domain', () => {
     it('does nothing when an idempotent worker delivery cannot claim the row', async () => {
         const store = workerStore(null);
         const getProfile = vi.fn();
+        const settleBetaCredit = vi.fn(async () => true);
+        const refreshBetaCredit = vi.fn(async () => undefined);
         await expect(processPreflight(preflightId, {
             store,
             getProfile,
             providerRunStore: providerRunStore(),
+            settleBetaCredit,
+            refreshBetaCredit,
         }))
             .resolves.toBe('noop');
         expect(getProfile).not.toHaveBeenCalled();
+        expect(settleBetaCredit).toHaveBeenCalledWith(preflightId);
+        expect(refreshBetaCredit).toHaveBeenCalledOnce();
+    });
+
+    it('does not refresh a ready/ordinary claim-side no-op', async () => {
+        const settleBetaCredit = vi.fn(async () => false);
+        const refreshBetaCredit = vi.fn(async () => undefined);
+        await expect(processPreflight(preflightId, {
+            store: workerStore(null),
+            settleBetaCredit,
+            refreshBetaCredit,
+        })).resolves.toBe('noop');
+        expect(settleBetaCredit).toHaveBeenCalledOnce();
+        expect(refreshBetaCredit).not.toHaveBeenCalled();
     });
 
     it('blocks an unclassified primary failure without starting paid work', async () => {

@@ -510,6 +510,7 @@ describe('preflight owner routes', () => {
         expect(mocks.after).toHaveBeenCalledOnce();
         await mocks.after.mock.calls[0][0]();
         expect(mocks.process).toHaveBeenCalledWith(preflightId, {
+            settleBetaCredit: expect.any(Function),
             observer: expect.any(Function),
         });
         expect(mocks.emit).toHaveBeenCalledWith({

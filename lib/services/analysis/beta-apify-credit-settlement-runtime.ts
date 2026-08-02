@@ -6,6 +6,7 @@ import {
     createServerBetaApifyCreditClientFactory,
 } from './beta-apify-preflight-coordinator';
 import { refreshBetaApifyCreditPool } from './beta-apify-credit-pool';
+import { z } from 'zod';
 
 /** Fixed messages only: provider responses and account identities are never logged. */
 export const BETA_APIFY_SETTLEMENT_LOG = 'BETATEST_APIFY_CREDIT_SETTLEMENT_DEFERRED';
@@ -18,24 +19,41 @@ function uuid(value: string): string {
     return value.toLowerCase();
 }
 
-async function targeted(client: BetaApifyPoolStoreClient, name: string, field: string, id: string): Promise<void> {
+const targetedSettlementSchema = z.object({
+    allocationId: z.string().uuid(),
+    lifecycleState: z.enum(['preflight_held', 'active', 'settled']),
+    settledFamilies: z.number().int().min(0).max(8),
+    heldFamilies: z.number().int().min(0).max(8),
+    actualUsd: z.number().finite().nonnegative(),
+    releasedUsd: z.number().finite().nonnegative(),
+}).strict();
+
+async function targeted(client: BetaApifyPoolStoreClient, name: string, field: string, id: string): Promise<boolean> {
     const result = await client.rpc(name, { [field]: uuid(id) });
     if (result.error) throw new Error('ANALYSIS_BETA_POOL_PERSISTENCE_ERROR');
+    const data = Array.isArray(result.data) && result.data.length === 1
+        ? result.data[0]
+        : result.data;
+    if (data === null) return false;
+    if (!targetedSettlementSchema.safeParse(data).success) {
+        throw new Error('ANALYSIS_BETA_POOL_PERSISTENCE_ERROR');
+    }
+    return true;
 }
 
-export async function settleBetaApifyRequestCredit(client: BetaApifyPoolStoreClient, requestId: string): Promise<void> {
-    await targeted(client, 'settle_analysis_beta_apify_request_credit', 'p_request_id', requestId);
+export async function settleBetaApifyRequestCredit(client: BetaApifyPoolStoreClient, requestId: string): Promise<boolean> {
+    return targeted(client, 'settle_analysis_beta_apify_request_credit', 'p_request_id', requestId);
 }
 
-export async function settleBetaApifyPreflightCredit(client: BetaApifyPoolStoreClient, preflightId: string): Promise<void> {
-    await targeted(client, 'settle_analysis_beta_apify_preflight_credit', 'p_preflight_id', preflightId);
+export async function settleBetaApifyPreflightCredit(client: BetaApifyPoolStoreClient, preflightId: string): Promise<boolean> {
+    return targeted(client, 'settle_analysis_beta_apify_preflight_credit', 'p_preflight_id', preflightId);
 }
 
-export async function recoverBetaApifyCredit(client: BetaApifyPoolStoreClient, limit = 100): Promise<void> {
-    await createBetaApifyCreditPoolStore(client).recover(limit);
+export async function recoverBetaApifyCredit(client: BetaApifyPoolStoreClient, limit = 100): Promise<number> {
+    return (await createBetaApifyCreditPoolStore(client).recover(limit)).length;
 }
 
-export async function archiveSettledBetaApifyCredit(client: BetaApifyPoolStoreClient, limit = 100): Promise<void> {
+export async function archiveSettledBetaApifyCredit(client: BetaApifyPoolStoreClient, limit = 100): Promise<number> {
     if (!Number.isSafeInteger(limit) || limit < 1 || limit > 1_000) {
         throw new Error('ANALYSIS_BETA_POOL_PERSISTENCE_ERROR');
     }
@@ -46,6 +64,7 @@ export async function archiveSettledBetaApifyCredit(client: BetaApifyPoolStoreCl
     if (result.error || !Number.isSafeInteger(result.data) || Number(result.data) < 0) {
         throw new Error('ANALYSIS_BETA_POOL_PERSISTENCE_ERROR');
     }
+    return Number(result.data);
 }
 
 /** Best-effort only; a failure must never replace a conservative local hold/debit. */
@@ -58,11 +77,24 @@ export async function refreshBetaApifyCreditSnapshots(
     } = {}
 ): Promise<void> {
     const now = dependencies.now ?? Date.now;
-    const refreshed = await refreshBetaApifyCreditPool({
+    const timeoutMs = 15_000;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const refresh = refreshBetaApifyCreditPool({
         clientForSlot: dependencies.clientForSlot
             ?? createServerBetaApifyCreditClientFactory(dependencies.env),
         observedAt: new Date(now()),
     }, { now });
+    const refreshed = await Promise.race([
+        refresh,
+        new Promise<never>((_resolve, reject) => {
+            timer = setTimeout(
+                () => reject(new Error('ANALYSIS_BETA_APIFY_CREDIT_REFRESH_TIMEOUT')),
+                timeoutMs,
+            );
+        }),
+    ]).finally(() => {
+        if (timer) clearTimeout(timer);
+    });
     await createBetaApifyCreditPoolStore(client).upsertSnapshots(refreshed.map(snapshot => ({
         ...snapshot,
         healthState: 'healthy' as const,

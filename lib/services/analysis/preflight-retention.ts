@@ -26,15 +26,21 @@ export interface PreflightRetentionSummary {
     providerCosts: PreflightProviderCostReconciliationResult;
     expiredPurged: number;
     terminalScrubbed: number;
+    betaCreditRecovered: number;
+    betaCreditArchived: number;
+    betaCreditRecoveryFailures: number;
+    betaCreditArchiveFailures: number;
+    betaCreditRefreshAttempts: number;
+    betaCreditRefreshFailures: number;
 }
 
 interface PreflightRetentionDependencies {
     providerRunStore?: PreflightProviderRunReconciliationStore;
     clientForSlot?: (slot: ApifyCredentialSlot) => ReconciliationApifyClient;
     env?: Record<string, string | undefined>;
-    recoverBetaCredit?: () => Promise<void>;
+    recoverBetaCredit?: () => Promise<number>;
     refreshBetaCredit?: () => Promise<void>;
-    archiveBetaCredit?: () => Promise<void>;
+    archiveBetaCredit?: () => Promise<number>;
 }
 
 function boundedCount(value: unknown, maximum: number, operation: string): number {
@@ -80,24 +86,24 @@ export async function runPreflightRetention(
         || dependencies.recoverBetaCredit
         || dependencies.refreshBetaCredit
         || dependencies.archiveBetaCredit;
+    let betaCreditRecovered = 0;
+    let betaCreditArchived = 0;
+    let betaCreditRecoveryFailures = 0;
+    let betaCreditArchiveFailures = 0;
+    let betaCreditRefreshAttempts = 0;
+    let betaCreditRefreshFailures = 0;
     if (maintainBeta) {
         try {
-            await (dependencies.recoverBetaCredit
+            betaCreditRecovered = await (dependencies.recoverBetaCredit
                 ?? (() => recoverBetaApifyCredit(client)))();
         } catch {
-            // A later pass recovers any conservative hold.
+            betaCreditRecoveryFailures = 1;
         }
         try {
-            await (dependencies.refreshBetaCredit
-                ?? (() => refreshBetaApifyCreditSnapshots(client, { env: dependencies.env })))();
-        } catch {
-            // Snapshot refresh is advisory and must not prevent safe archival.
-        }
-        try {
-            await (dependencies.archiveBetaCredit
+            betaCreditArchived = await (dependencies.archiveBetaCredit
                 ?? (() => archiveSettledBetaApifyCredit(client)))();
         } catch {
-            // Retention itself must still scrub unrelated expired preflights.
+            betaCreditArchiveFailures = 1;
         }
     }
     const terminalScrubbed = await runRpc(
@@ -105,5 +111,24 @@ export async function runPreflightRetention(
         'scrub_terminal_analysis_v2_preflights',
         PREFLIGHT_RETENTION_BATCH_LIMIT
     );
-    return { providerCosts, expiredPurged, terminalScrubbed };
+    if (maintainBeta && betaCreditRecovered > 0) {
+        betaCreditRefreshAttempts = 1;
+        try {
+            await (dependencies.refreshBetaCredit
+                ?? (() => refreshBetaApifyCreditSnapshots(client, { env: dependencies.env })))();
+        } catch {
+            betaCreditRefreshFailures = 1;
+        }
+    }
+    return {
+        providerCosts,
+        expiredPurged,
+        terminalScrubbed,
+        betaCreditRecovered,
+        betaCreditArchived,
+        betaCreditRecoveryFailures,
+        betaCreditArchiveFailures,
+        betaCreditRefreshAttempts,
+        betaCreditRefreshFailures,
+    };
 }
