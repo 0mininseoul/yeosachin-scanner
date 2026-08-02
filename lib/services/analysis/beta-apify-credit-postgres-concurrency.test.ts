@@ -76,7 +76,7 @@ const observabilityMigration = readFileSync(new URL(
     import.meta.url,
 ), 'utf8');
 const allAuthenticatedAccessMigration = readFileSync(new URL(
-    '../../../supabase/migrations/20260802104141_enable_betatest_all_authenticated_access.sql',
+    '../../../supabase/migrations/20260802110348_enable_betatest_all_authenticated_access.sql',
     import.meta.url,
 ), 'utf8');
 const betaSlots = {
@@ -2029,27 +2029,32 @@ describe('beta Apify credit PostgreSQL 16 concurrency', () => {
             await first.query('INSERT INTO public.users(id) VALUES ($1)', [userId]);
             await first.query('SELECT public.set_analysis_beta_runtime_gate(TRUE)');
             await first.query("SELECT public.set_analysis_beta_access_policy('all_authenticated')");
+            const secondPid = (await second.query<{ pid: number }>(
+                'SELECT pg_backend_pid() AS pid'
+            )).rows[0]!.pid;
             try {
-                await Promise.all([first, second].map(client => client.query(
-                    `SELECT pg_catalog.set_config(
-                        'request.jwt.claim.sub', $1, FALSE
-                    )`, [userId]
-                )));
-                await Promise.all([first, second].map(client => client.query('SET ROLE authenticated')));
-                const [firstResult, secondResult] = await Promise.all([
-                    first.query<{ allowed: boolean }>(
-                        'SELECT public.enroll_analysis_beta_authenticated_user() AS allowed'
-                    ),
-                    second.query<{ allowed: boolean }>(
-                        'SELECT public.enroll_analysis_beta_authenticated_user() AS allowed'
-                    ),
-                ]);
+                await Promise.all([first, second].map(client => client.query('SET ROLE service_role')));
+                await first.query('BEGIN');
+                await first.query(`SELECT pg_catalog.pg_advisory_xact_lock(
+                    pg_catalog.hashtextextended(
+                        'analysis-beta-grant:' || pg_catalog.lower($1::TEXT), 0
+                    )
+                )`, [userId]);
+                const secondEnrollment = second.query<{ allowed: boolean }>(
+                    'SELECT public.enroll_analysis_beta_user($1) AS allowed', [userId]
+                );
+                await waitUntilBlocked(secondPid);
+                const firstResult = await first.query<{ allowed: boolean }>(
+                    'SELECT public.enroll_analysis_beta_user($1) AS allowed', [userId]
+                );
+                await first.query('COMMIT');
+                const secondResult = await secondEnrollment;
                 expect(firstResult.rows).toEqual([{ allowed: true }]);
                 expect(secondResult.rows).toEqual([{ allowed: true }]);
             } finally {
+                await first.query('ROLLBACK').catch(() => undefined);
                 await Promise.all([first, second].map(async client => {
                     await client.query('RESET ROLE');
-                    await client.query("SELECT pg_catalog.set_config('request.jwt.claim.sub', '', FALSE)");
                 }));
             }
             expect((await observer.query<{
@@ -2060,6 +2065,59 @@ describe('beta Apify credit PostgreSQL 16 concurrency', () => {
                 FROM public.analysis_beta_access_grants WHERE user_id=$1`, [userId]
             )).rows).toEqual([{ count: 1, enabled: true, source: 'automatic' }]);
         }, 15_000);
+
+        it('serializes enrollment behind gate-off and grant-only rollback barriers', async () => {
+            const gateUserId = randomUUID();
+            const rollbackUserId = randomUUID();
+            await first.query('INSERT INTO public.users(id) VALUES ($1), ($2)', [gateUserId, rollbackUserId]);
+            await first.query('SELECT public.set_analysis_beta_runtime_gate(TRUE)');
+            await first.query("SELECT public.set_analysis_beta_access_policy('all_authenticated')");
+            const secondPid = (await second.query<{ pid: number }>(
+                'SELECT pg_backend_pid() AS pid'
+            )).rows[0]!.pid;
+            try {
+                await second.query('SET ROLE service_role');
+
+                await first.query('BEGIN');
+                await first.query(`SELECT singleton FROM public.analysis_beta_runtime_gate
+                    WHERE singleton=TRUE FOR UPDATE`);
+                const blockedGateEnrollment = second.query<{ allowed: boolean }>(
+                    'SELECT public.enroll_analysis_beta_user($1) AS allowed', [gateUserId]
+                );
+                await waitUntilBlocked(secondPid);
+                await first.query(`UPDATE public.analysis_beta_runtime_gate
+                    SET enabled=FALSE, generation=generation+1, updated_at=clock_timestamp()
+                    WHERE singleton=TRUE`);
+                await first.query('COMMIT');
+                expect((await blockedGateEnrollment).rows).toEqual([{ allowed: false }]);
+                expect((await observer.query<{ count: number }>(
+                    `SELECT count(*)::INTEGER AS count FROM public.analysis_beta_access_grants
+                     WHERE user_id=$1`, [gateUserId]
+                )).rows).toEqual([{ count: 0 }]);
+
+                await first.query('SELECT public.set_analysis_beta_runtime_gate(TRUE)');
+                await first.query('SELECT public.enroll_analysis_beta_user($1)', [rollbackUserId]);
+                await first.query('BEGIN');
+                await first.query(`SELECT singleton FROM public.analysis_beta_access_policy
+                    WHERE singleton=TRUE FOR UPDATE`);
+                const blockedRollbackEnrollment = second.query<{ allowed: boolean }>(
+                    'SELECT public.enroll_analysis_beta_user($1) AS allowed', [rollbackUserId]
+                );
+                await waitUntilBlocked(secondPid);
+                await first.query("SELECT public.set_analysis_beta_access_policy('grant_only')");
+                await first.query('COMMIT');
+                expect((await blockedRollbackEnrollment).rows).toEqual([{ allowed: false }]);
+                expect((await observer.query<{ enabled: boolean; source: string }>(
+                    `SELECT enabled, grant_source AS source
+                     FROM public.analysis_beta_access_grants WHERE user_id=$1`, [rollbackUserId]
+                )).rows).toEqual([{ enabled: false, source: 'automatic' }]);
+            } finally {
+                await first.query('ROLLBACK').catch(() => undefined);
+                await second.query('RESET ROLE');
+                await first.query('SELECT public.set_analysis_beta_runtime_gate(TRUE)');
+                await first.query("SELECT public.set_analysis_beta_access_policy('all_authenticated')");
+            }
+        }, 20_000);
 
         it('exposes one aggregate-only pool health snapshot to service_role', async () => {
             const privileges = await first.query<{

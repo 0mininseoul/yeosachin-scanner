@@ -2,7 +2,7 @@ import { existsSync, readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
 
 const migrationUrl = new URL(
-    '../../../supabase/migrations/20260802104141_enable_betatest_all_authenticated_access.sql',
+    '../../../supabase/migrations/20260802110348_enable_betatest_all_authenticated_access.sql',
     import.meta.url
 );
 const migration = existsSync(migrationUrl) ? readFileSync(migrationUrl, 'utf8') : '';
@@ -32,7 +32,7 @@ describe('all-authenticated betatest access migration', () => {
     });
 
     it('keeps enrollment caller-bound and policies/operator grants service-only', () => {
-        const enroll = body('enroll_analysis_beta_authenticated_user()');
+        const enroll = body('enroll_analysis_beta_user(');
         const policy = body('set_analysis_beta_access_policy(');
         const operatorGrant = body('upsert_analysis_beta_access_grant(');
         for (const functionBody of [enroll, policy, operatorGrant]) {
@@ -41,16 +41,15 @@ describe('all-authenticated betatest access migration', () => {
             expect(functionBody).toContain("SET lock_timeout = '5s'");
             expect(functionBody).toContain("SET statement_timeout = '2min'");
         }
-        expect(enroll).toContain('auth.uid()');
-        expect(enroll).not.toContain('p_user_id');
+        expect(enroll).toContain('p_user_id UUID');
         expect(enroll).toContain('analysis_beta_runtime_gate');
         expect(enroll).toContain('analysis_beta_access_policy');
-        expect(enroll).toContain("grant_source = 'automatic'");
-        expect(enroll).toContain('audit_reference_hash = pg_catalog.encode(extensions.digest(');
-        expect(policy).toContain("grant_source = 'automatic'");
-        expect(operatorGrant).toContain("grant_source = 'operator'");
-        expect(migration).toMatch(/GRANT EXECUTE ON FUNCTION public\.enroll_analysis_beta_authenticated_user\(\)\s*TO authenticated/);
-        expect(migration).not.toMatch(/GRANT EXECUTE ON FUNCTION public\.enroll_analysis_beta_authenticated_user\(\)[\s\S]*?TO service_role/);
+        expect(enroll).toMatch(/grant_source\s*=\s*'automatic'/);
+        expect(enroll).toMatch(/audit_reference_hash\s*=\s*pg_catalog\.encode\(extensions\.digest\(/);
+        expect(policy).toMatch(/grant_source\s*=\s*'automatic'/);
+        expect(operatorGrant).toMatch(/grant_source\s*=\s*'operator'/);
+        expect(migration).toMatch(/GRANT EXECUTE ON FUNCTION public\.enroll_analysis_beta_user\(UUID\) TO service_role/);
+        expect(enroll).not.toContain('TO authenticated');
         expect(migration).toMatch(/GRANT EXECUTE ON FUNCTION public\.set_analysis_beta_access_policy\(TEXT\)\s*TO service_role/);
         expect(policy).not.toContain('TO authenticated');
     });
@@ -58,7 +57,7 @@ describe('all-authenticated betatest access migration', () => {
     it('keeps automatic enrollment out of the ordinary analysis entry route', () => {
         expect(ordinaryPreflightRoute).not.toContain('ensureBetaTestAccess');
         expect(ordinaryPreflightRoute).not.toContain(
-            'enroll_analysis_beta_authenticated_user'
+            'enroll_analysis_beta_user'
         );
     });
 });

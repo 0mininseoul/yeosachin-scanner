@@ -11,9 +11,11 @@ const mocks = vi.hoisted(() => ({
         markBetaPrepareDispatched: vi.fn(),
         blockBetaPrepareCapacity: vi.fn(),
     },
+    admin: { rpc: vi.fn() },
 }));
 
 vi.mock('@/lib/supabase/server', () => ({ createClient: mocks.createClient }));
+vi.mock('@/lib/supabase/admin', () => ({ supabaseAdmin: mocks.admin }));
 vi.mock('@/lib/services/analysis/betatest-access', async importOriginal => ({
     ...(await importOriginal<typeof import('./betatest-access')>()),
     betaTestFreePoolEnabled: mocks.enabled,
@@ -69,6 +71,7 @@ describe('dedicated betatest preflight route', () => {
         expect((await createBetaPreflight(request())).status).toBe(401);
         mocks.enabled.mockReturnValue(false);
         expect((await createBetaPreflight(request())).status).toBe(403);
+        expect(mocks.ensureAccess).not.toHaveBeenCalled();
         mocks.enabled.mockReturnValue(true);
         mocks.ensureAccess.mockResolvedValue(false);
         expect((await createBetaPreflight(request())).status).toBe(403);
@@ -82,6 +85,7 @@ describe('dedicated betatest preflight route', () => {
             userId, targetInstagramId: 'target.name',
         }));
         expect(mocks.ensureAccess).toHaveBeenCalledTimes(2);
+        expect(mocks.ensureAccess).toHaveBeenCalledWith(mocks.admin, userId);
         expect(mocks.enqueuePrepare).toHaveBeenCalledWith(
             preflightId, userId, 1, prepareToken, expect.any(Object)
         );

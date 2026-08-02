@@ -75,6 +75,11 @@ describe('betatest plan admission route', () => {
         expect(mocks.admit).not.toHaveBeenCalled();
     });
 
+    it('uses the service-only client with the authenticated user id for every fresh beta check', async () => {
+        await POST(request(), context);
+        expect(mocks.ensureAccess).toHaveBeenCalledWith(mocks.admin, userId);
+    });
+
     it('admits without checkout or test-entitlement credentials and returns normal request id', async () => {
         const response = await POST(request(), context);
         expect(response.status).toBe(200);

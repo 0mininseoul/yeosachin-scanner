@@ -1,5 +1,6 @@
 import { NextResponse } from 'next/server';
 import { createClient } from '@/lib/supabase/server';
+import { supabaseAdmin } from '@/lib/supabase/admin';
 import {
     ANALYSIS_V2_SCHEMA_VERSION,
     preflightRequestV1Schema,
@@ -35,7 +36,7 @@ export async function POST(request: Request): Promise<NextResponse> {
     const supabase = await createClient();
     const { data: { user }, error: authError } = await supabase.auth.getUser();
     if (authError || !user) return response(401, 'UNAUTHORIZED', '로그인이 필요합니다.');
-    if (!betaTestFreePoolEnabled() || !await ensureBetaTestAccess(supabase)) {
+    if (!betaTestFreePoolEnabled() || !await ensureBetaTestAccess(supabaseAdmin, user.id)) {
         return response(403, BETA_TEST_ACCESS_UNAVAILABLE, '베타 분석을 사용할 수 없습니다.');
     }
     let body: unknown;
@@ -62,7 +63,7 @@ export async function POST(request: Request): Promise<NextResponse> {
             targetInstagramId: parsed.data.targetInstagramId,
             idempotencyKey,
         });
-        if (!betaTestFreePoolEnabled() || !await ensureBetaTestAccess(supabase)) {
+        if (!betaTestFreePoolEnabled() || !await ensureBetaTestAccess(supabaseAdmin, user.id)) {
             await preflightStore.blockBetaPrepareCapacity({
                 preflightId: created.preflightId,
                 userId: user.id,

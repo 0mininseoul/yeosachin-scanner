@@ -35,26 +35,27 @@ describe('betatest access boundary', () => {
         })).resolves.toBe(false);
     });
 
-    it('uses the authenticated enrollment boundary before beta-only work and fails closed', async () => {
+    it('uses the service-only enrollment boundary with the server-authenticated user id', async () => {
+        const userId = '223e4567-e89b-42d3-a456-426614174000';
         const calls: Array<{ name: string; params?: unknown }> = [];
         await expect(ensureBetaTestAccess({
             rpc: async (name, params) => {
                 calls.push({ name, params });
                 return { data: true, error: null };
             },
-        })).resolves.toBe(true);
+        }, userId)).resolves.toBe(true);
         expect(calls).toEqual([
-            { name: 'enroll_analysis_beta_authenticated_user', params: undefined },
+            { name: 'enroll_analysis_beta_user', params: { p_user_id: userId } },
         ]);
 
         await expect(ensureBetaTestAccess({
             rpc: async () => ({ data: false, error: null }),
-        })).resolves.toBe(false);
+        }, userId)).resolves.toBe(false);
         await expect(ensureBetaTestAccess({
             rpc: async () => ({ data: { allowed: true }, error: null }),
-        })).resolves.toBe(false);
+        }, userId)).resolves.toBe(false);
         await expect(ensureBetaTestAccess({
             rpc: async () => { throw new Error('transport'); },
-        })).resolves.toBe(false);
+        }, userId)).resolves.toBe(false);
     });
 });

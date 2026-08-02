@@ -1,6 +1,7 @@
 import { redirect } from 'next/navigation';
 import { BetaTestClient } from './betatest-client';
 import { createClient } from '@/lib/supabase/server';
+import { supabaseAdmin } from '@/lib/supabase/admin';
 import {
     betaTestFreePoolEnabled,
     ensureBetaTestAccess,
@@ -26,7 +27,7 @@ export default async function BetaTestPage() {
         redirect('/login?redirectTo=%2Fbetatest');
     }
 
-    if (!betaTestFreePoolEnabled() || !await ensureBetaTestAccess(supabase)) {
+    if (!betaTestFreePoolEnabled() || !await ensureBetaTestAccess(supabaseAdmin, user.id)) {
         return unavailablePage();
     }
 

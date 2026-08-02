@@ -1,10 +1,10 @@
 /**
  * Minimal authenticated-user boundary for the dedicated betatest routes.
- * The database function deliberately returns only a boolean and is never
- * invoked through service-role credentials.
+ * The authenticated self-check returns only a boolean. Dedicated beta routes
+ * use the separately named service-owned enrollment RPC after server auth.
  */
 export interface BetaTestAccessClient {
-    rpc(name: string, params?: Record<string, never>): PromiseLike<{
+    rpc(name: string, params?: Record<string, unknown>): PromiseLike<{
         data: unknown;
         error: { message?: string } | null;
     }>;
@@ -34,9 +34,14 @@ export async function hasBetaTestAccess(client: BetaTestAccessClient): Promise<b
  * so beta routes never create a preflight before the downstream grant fences
  * can observe a current row.
  */
-export async function ensureBetaTestAccess(client: BetaTestAccessClient): Promise<boolean> {
+export async function ensureBetaTestAccess(
+    client: BetaTestAccessClient,
+    userId: string
+): Promise<boolean> {
     try {
-        const result = await client.rpc('enroll_analysis_beta_authenticated_user');
+        const result = await client.rpc('enroll_analysis_beta_user', {
+            p_user_id: userId,
+        });
         return result.error === null && result.data === true;
     } catch {
         return false;

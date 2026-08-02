@@ -65,8 +65,9 @@ caller-facing self-check; never enumerate grants to a client.
 The default database policy is `all_authenticated`: any authenticated caller reaching
 the dedicated `/betatest` server path obtains a durable automatic grant only while the
 database runtime gate is on. The application `BETATEST_FREE_POOL_ENABLED=true` flag is
-also still required. The automatic enrollment RPC has no user-id input, accepts no
-email or metadata, and cannot be called by anonymous clients.
+also still required. The automatic enrollment RPC is service-role-only; dedicated
+server handlers authenticate the request first and pass only that server-verified
+user id. It accepts no email or metadata and cannot be called by browser clients.
 
 To stop automatic enrollment while retaining approved operator grants, use the
 service-role-only policy RPC. This transaction immediately disables automatic rows;
@@ -113,7 +114,7 @@ intentionally universal; it is disabled again by `grant_only`.
    - `20260802100400_terminalize_betatest_prepare_retry_exhaustion_runtime.sql`
    - `20260802100500_validate_betatest_prepare_retry_exhaustion.sql`
    - `20260802100600_add_betatest_pool_observability.sql`
-   - `20260802104141_enable_betatest_all_authenticated_access.sql`
+   - `20260802110348_enable_betatest_all_authenticated_access.sql`
 2. Verify all seven Secret Manager secret names exist and each reference uses a
    numeric version. This includes ordinary-flow `secondary`, while beta itself uses
    only the exact six aliases above. Never print secret values.

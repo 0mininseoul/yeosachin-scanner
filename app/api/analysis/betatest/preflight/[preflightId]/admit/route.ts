@@ -100,7 +100,7 @@ export async function POST(request: Request, { params }: RouteContext): Promise<
     } catch {
         return failure(503, BETA_ADMISSION_PENDING, '베타 분석을 준비할 수 없습니다.');
     }
-    if (!betaTestFreePoolEnabled() || !await ensureBetaTestAccess(supabase)) {
+    if (!betaTestFreePoolEnabled() || !await ensureBetaTestAccess(supabaseAdmin, user.id)) {
         return failure(403, BETA_TEST_ACCESS_UNAVAILABLE, '베타 분석을 사용할 수 없습니다.');
     }
     const owner = await supabaseAdmin
@@ -117,7 +117,7 @@ export async function POST(request: Request, { params }: RouteContext): Promise<
     try {
         // Recheck immediately before each mutation boundary; database RPCs
         // repeat the grant/channel checks transactionally for TOCTOU safety.
-        if (!betaTestFreePoolEnabled() || !await ensureBetaTestAccess(supabase)) {
+        if (!betaTestFreePoolEnabled() || !await ensureBetaTestAccess(supabaseAdmin, user.id)) {
             return failure(403, BETA_TEST_ACCESS_UNAVAILABLE, '베타 분석을 사용할 수 없습니다.');
         }
         const admission = await reserveAnalysisV2FreshAdmission(supabaseAdmin, {
@@ -130,7 +130,7 @@ export async function POST(request: Request, { params }: RouteContext): Promise<
             if (admission.shouldEnqueue && admission.dispatchToken) {
                 const config = getPreflightTasksConfig();
                 if (!config) return failure(503, BETA_ADMISSION_PENDING, '베타 분석을 준비할 수 없습니다.');
-                if (!betaTestFreePoolEnabled() || !await ensureBetaTestAccess(supabase)) {
+                if (!betaTestFreePoolEnabled() || !await ensureBetaTestAccess(supabaseAdmin, user.id)) {
                     return failure(403, BETA_TEST_ACCESS_UNAVAILABLE, '베타 분석을 사용할 수 없습니다.');
                 }
                 await enqueueFreshAdmissionTask(
@@ -140,7 +140,7 @@ export async function POST(request: Request, { params }: RouteContext): Promise<
                     admission.dispatchToken,
                     { config }
                 );
-                if (!betaTestFreePoolEnabled() || !await ensureBetaTestAccess(supabase)) {
+                if (!betaTestFreePoolEnabled() || !await ensureBetaTestAccess(supabaseAdmin, user.id)) {
                     return failure(403, BETA_TEST_ACCESS_UNAVAILABLE, '베타 분석을 사용할 수 없습니다.');
                 }
                 await markAnalysisV2FreshAdmissionDispatched(supabaseAdmin, {
@@ -161,7 +161,7 @@ export async function POST(request: Request, { params }: RouteContext): Promise<
         if (admission.state === 'blocked' || !admission.selectedPlanAllowed) {
             return failure(409, BETA_ADMISSION_PENDING, '베타 분석을 준비할 수 없습니다.');
         }
-        if (!betaTestFreePoolEnabled() || !await ensureBetaTestAccess(supabase)) {
+        if (!betaTestFreePoolEnabled() || !await ensureBetaTestAccess(supabaseAdmin, user.id)) {
             return failure(403, BETA_TEST_ACCESS_UNAVAILABLE, '베타 분석을 사용할 수 없습니다.');
         }
         const poolStore = createBetaApifyCreditPoolStore(supabaseAdmin);

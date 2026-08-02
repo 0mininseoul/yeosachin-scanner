@@ -7,9 +7,11 @@ const mocks = vi.hoisted(() => ({
     enabled: vi.fn(),
     ensureAccess: vi.fn(),
     redirect: vi.fn(),
+    admin: { rpc: vi.fn() },
 }));
 
 vi.mock('@/lib/supabase/server', () => ({ createClient: mocks.createClient }));
+vi.mock('@/lib/supabase/admin', () => ({ supabaseAdmin: mocks.admin }));
 vi.mock('@/lib/services/analysis/betatest-access', () => ({
     betaTestFreePoolEnabled: mocks.enabled,
     ensureBetaTestAccess: mocks.ensureAccess,
@@ -64,6 +66,6 @@ describe('beta-test entry page', () => {
 
         expect(markup).toContain('id="beta-target-instagram"');
         expect(markup).toContain('무료 판독 가능 여부 확인');
-        expect(mocks.ensureAccess).toHaveBeenCalledWith(expect.objectContaining({ auth: expect.any(Object) }));
+        expect(mocks.ensureAccess).toHaveBeenCalledWith(mocks.admin, '123e4567-e89b-42d3-a456-426614174000');
     });
 });
