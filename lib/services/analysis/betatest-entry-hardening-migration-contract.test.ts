@@ -130,8 +130,12 @@ describe('betatest entry lifecycle hardening migration', () => {
         expect(exclusion).toContain('analysis_beta_runtime_gate');
         expect(exclusion).toContain('analysis_beta_access_grants');
         expect(migration).toContain("SET search_path = ''");
-        expect(migration).toContain("SET LOCAL lock_timeout = '5s'");
-        expect(migration).toContain("SET LOCAL statement_timeout = '2min'");
+        expect(migration).toContain(
+            "PERFORM pg_catalog.set_config('lock_timeout', '5s', true);"
+        );
+        expect(migration).toContain(
+            "PERFORM pg_catalog.set_config('statement_timeout', '2min', true);"
+        );
         expect(migration).toMatch(/REVOKE ALL ON FUNCTION public\.set_analysis_v2_preflight_exclusion/);
     });
 

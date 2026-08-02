@@ -1,8 +1,12 @@
 -- Runtime/backfill phase for the betatest entry lifecycle. The short schema
 -- migration has already committed its table locks; validation follows in a
 -- separate migration after these normalizers and fenced functions exist.
-SET LOCAL lock_timeout = '5s';
-SET LOCAL statement_timeout = '2min';
+DO $migration_transaction_fence$
+BEGIN
+    PERFORM pg_catalog.set_config('lock_timeout', '5s', true);
+    PERFORM pg_catalog.set_config('statement_timeout', '2min', true);
+END;
+$migration_transaction_fence$;
 
 CREATE OR REPLACE FUNCTION public.set_analysis_beta_runtime_gate(
     p_enabled BOOLEAN
