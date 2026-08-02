@@ -1,6 +1,16 @@
 import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
 
+const appliedMigrationFiles = [
+    '20260802010000_add_betatest_apify_credit_pool.sql',
+    '20260802010100_validate_betatest_entry_channel_constraints.sql',
+    '20260802020000_add_betatest_apify_credit_reservations.sql',
+    '20260802030000_bind_betatest_provider_policy.sql',
+    '20260802030100_validate_betatest_provider_policy.sql',
+    '20260802040000_settle_betatest_apify_credit_reservations.sql',
+    '20260802050000_harden_betatest_apify_credit_capacity.sql',
+] as const;
+
 const pendingMigrationFiles = [
     '20260802060000_expose_betatest_frozen_provider_budgets.sql',
     '20260802070000_wire_betatest_preflight_credit_runtime.sql',
@@ -26,6 +36,13 @@ const statementTimeout =
 
 function executableSql(sql: string): string {
     return sql.replace(/^\s*--.*$/gm, '').trim();
+}
+
+function readMigration(file: string): string {
+    return readFileSync(
+        new URL(`../../../supabase/migrations/${file}`, import.meta.url),
+        'utf8'
+    );
 }
 
 function migrationFenceViolations(file: string, source: string): string[] {
@@ -81,7 +98,17 @@ ${fenceEnd}
 SELECT 1;`;
 }
 
-describe('pending betatest migration transaction fences', () => {
+describe('betatest migration CLI batch contract', () => {
+    it.each(appliedMigrationFiles)(
+        '%s preserves the immutable CLI-owned transaction boundary',
+        file => {
+            const sql = executableSql(readMigration(file));
+
+            expect(sql, `${file} must not control the CLI transaction`)
+                .not.toMatch(/^\s*(?:BEGIN|COMMIT|ROLLBACK)\s*;/im);
+        }
+    );
+
     it('covers exactly the eleven migrations that are not remotely applied', () => {
         expect(pendingMigrationFiles).toEqual([
             '20260802060000_expose_betatest_frozen_provider_budgets.sql',
@@ -101,12 +128,7 @@ describe('pending betatest migration transaction fences', () => {
     it.each(pendingMigrationFiles)(
         '%s keeps timeout and lock setup inside the leading DO statement',
         file => {
-            const migration = readFileSync(
-                new URL(`../../../supabase/migrations/${file}`, import.meta.url),
-                'utf8'
-            );
-
-            expect(migrationFenceViolations(file, migration)).toEqual([]);
+            expect(migrationFenceViolations(file, readMigration(file))).toEqual([]);
         }
     );
 
