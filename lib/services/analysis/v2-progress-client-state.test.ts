@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import type { ProgressEventV1 } from '@/lib/contracts/analysis-v2';
 import {
     mergeProgressEvents,
+    preferredProgressNarration,
     shouldApplyProgressRevision,
 } from './v2-progress-client-state';
 
@@ -44,5 +45,12 @@ describe('V2 progress client state', () => {
         expect(mergeProgressEvents([], [event(1), event(2), event(3)], 2)
             .map(item => item.seq)).toEqual([2, 3]);
         expect(mergeProgressEvents([], [event(1)], 0)).toEqual([]);
+    });
+
+    it('keeps the current snapshot narration ahead of an older event', () => {
+        expect(preferredProgressNarration(
+            '@a*** · 맞팔 계정을 판독하고 있습니다.',
+            [event(1)]
+        )).toBe('@a*** · 맞팔 계정을 판독하고 있습니다.');
     });
 });

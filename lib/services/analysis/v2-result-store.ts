@@ -26,6 +26,7 @@ import {
 import {
     canonicalizeImageProxyUrl,
     createAnalysisV2ResultImageProxyPath,
+    createImageProxyPath,
     type AnalysisV2ResultImageLocator,
 } from '@/lib/services/media/image-proxy-token';
 import { supabaseAdmin } from '@/lib/supabase/admin';
@@ -1102,6 +1103,22 @@ type ImageProxySigner = (
     locator: AnalysisV2ResultImageLocator
 ) => string | null;
 
+function defaultOwnerResultImageProxyPath(
+    rawUrl: string | null,
+    locator: AnalysisV2ResultImageLocator,
+): string | null {
+    /* When the durable R2 capture capability is intentionally disabled, result
+       rows still contain only server-side raw URLs. Give the owner the same
+       short-lived opaque proxy used by live progress instead of issuing a
+       retained-image locator that can only resolve to the placeholder. */
+    if (process.env.ANALYSIS_V2_RESULT_IMAGES_ENABLED?.trim() !== 'true') {
+        return createImageProxyPath(rawUrl)
+            ?? createAnalysisV2ResultImageProxyPath(locator)
+            ?? null;
+    }
+    return createAnalysisV2ResultImageProxyPath(locator) ?? null;
+}
+
 function publicImagePath(
     rawUrl: string | null,
     signer: ImageProxySigner,
@@ -1297,7 +1314,7 @@ export function createSupabaseAnalysisV2ResultStore(
     } = {}
 ): AnalysisV2ResultStore {
     const imageProxySigner: ImageProxySigner = options.imageProxySigner
-        ?? ((_rawUrl, locator) => createAnalysisV2ResultImageProxyPath(locator) ?? null);
+        ?? defaultOwnerResultImageProxyPath;
     const postTerminalBetaCredit = async (requestId: string): Promise<void> => {
         let processed = false;
         let settlementFailed = false;

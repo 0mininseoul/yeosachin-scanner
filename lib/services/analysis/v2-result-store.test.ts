@@ -764,6 +764,27 @@ describe('analysis V2 result finalization and loading', () => {
         }
     });
 
+    it('uses the generic signed proxy while retained result-image capture is disabled', async () => {
+        const previousSecret = process.env.IMAGE_PROXY_SIGNING_SECRET;
+        const previousCapture = process.env.ANALYSIS_V2_RESULT_IMAGES_ENABLED;
+        process.env.IMAGE_PROXY_SIGNING_SECRET =
+            'result-image-secret-that-is-longer-than-thirty-two-characters';
+        process.env.ANALYSIS_V2_RESULT_IMAGES_ENABLED = 'false';
+        const fake = rpcClient({ data: rawSnapshot(1), error: null });
+
+        try {
+            const snapshot = await createSupabaseAnalysisV2ResultStore(fake.client)
+                .loadSnapshot({ requestId, userId });
+            expect(snapshot?.summary.targetProfileImage).toMatch(/^\/api\/image-proxy\?token=/);
+            expect(snapshot?.summary.targetProfileImage).not.toContain('cdninstagram.com');
+        } finally {
+            if (previousSecret === undefined) delete process.env.IMAGE_PROXY_SIGNING_SECRET;
+            else process.env.IMAGE_PROXY_SIGNING_SECRET = previousSecret;
+            if (previousCapture === undefined) delete process.env.ANALYSIS_V2_RESULT_IMAGES_ENABLED;
+            else process.env.ANALYSIS_V2_RESULT_IMAGES_ENABLED = previousCapture;
+        }
+    });
+
     it('loads only owner-scoped snapshots and signs every raw image on every read', async () => {
         const snapshot = rawSnapshot(2);
         const fake = rpcClient(

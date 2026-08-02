@@ -44,6 +44,7 @@ import {
     type AnalysisV2ProfileFetchCheckpointStore,
     type AnalysisV2ProfileFetchResume,
 } from './v2-profile-fetch-store';
+import { selectAnalysisV2ProgressCandidateMedia } from './progress-candidate-media';
 import {
     runAnalysisV2ProfileRepair,
     profileRepairIdentity,
@@ -567,8 +568,16 @@ async function durableProfiles(input: {
     request: AnalysisV2CollectionRequestContext;
     usernames: readonly string[];
     onProfileStart?: (username: string) => Promise<void>;
+    onProfileResolved?: (profile: InstagramProfile) => Promise<void>;
 }): Promise<AnalysisV2ProfileFetchResume> {
-    const { dependencies, claim, request, usernames, onProfileStart } = input;
+    const {
+        dependencies,
+        claim,
+        request,
+        usernames,
+        onProfileStart,
+        onProfileResolved,
+    } = input;
     const identity = profileIdentity(claim);
     let resume = await dependencies.profileCheckpointStore.load(identity);
     if (
@@ -628,6 +637,7 @@ async function durableProfiles(input: {
         await dependencies.getProfilesBatchV2(usernames, {
         requestId: claim.requestId,
         onProfileStart,
+        onProfileResolved,
         providerRun: mutableProviderRun,
         ...(resume ? {
             resume: {
@@ -1051,6 +1061,16 @@ export function createAnalysisV2ProfileFetchExecutor(
             request,
             usernames,
             onProfileStart: context.reportActiveProfile,
+            onProfileResolved: async (profile) => {
+                if (profile.isPrivate || !context.reportActiveProfile) return;
+                let preview;
+                try {
+                    preview = selectAnalysisV2ProgressCandidateMedia(profile);
+                } catch {
+                    preview = undefined;
+                }
+                await context.reportActiveProfile(profile.username, preview);
+            },
         });
         const repaired = await repairProfileBatch({
             dependencies,

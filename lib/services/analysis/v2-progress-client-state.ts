@@ -25,3 +25,16 @@ export function mergeProgressEvents(
         .sort((left, right) => left.seq - right.seq)
         .slice(-limit);
 }
+
+/**
+ * The snapshot describes work that is happening now, while the event stream is
+ * historical. Rendering an old event ahead of a current active-profile message
+ * makes a live screen appear stuck between polls.
+ */
+export function preferredProgressNarration(
+    progressStep: string | null,
+    events: readonly ProgressEventV1[],
+): string | null {
+    if (progressStep) return progressStep;
+    return events.length > 0 ? events.at(-1)?.copyCode ?? null : null;
+}

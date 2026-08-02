@@ -99,8 +99,8 @@ export interface ScrapeRequestOptions {
     onTelemetry?: ScraperTelemetryHook;
     /** Internal UX heartbeat emitted only when work for an exact profile starts. */
     onProfileStart?(username: string): void | Promise<void>;
-    /** Internal PII-free progress signal emitted after a primary profile is resolved. */
-    onProfileResolved?(): void | Promise<void>;
+    /** Internal-only profile handoff for a presentation heartbeat after collection. */
+    onProfileResolved?(profile: InstagramProfile): void | Promise<void>;
     providerRun?: ProviderRunCheckpoint;
 }
 
@@ -181,7 +181,7 @@ export interface ProviderCallContext
     /** Source declared count paired with the adopted-only allowance above. */
     adoptedRelationshipSourceDeclaredCount?: number;
     onProfileStart?(username: string): void | Promise<void>;
-    onProfileResolved?(): void | Promise<void>;
+    onProfileResolved?(profile: InstagramProfile): void | Promise<void>;
     recordUsage(delta: ProviderUsageDelta): void;
 }
 

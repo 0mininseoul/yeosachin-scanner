@@ -7,6 +7,7 @@ import {
     MAX_SCREENED_CANDIDATES,
     nextDriftOffset,
     progressCopyDistance,
+    signedProgressCandidateMedia,
     type ScreenedCandidate,
 } from './progress-faces';
 
@@ -20,6 +21,16 @@ function candidate(n: number): ScreenedCandidate {
 }
 
 describe('screened candidate accumulation', () => {
+    it('exposes only signed proxy media for the progress rail', () => {
+        expect(signedProgressCandidateMedia({
+            imageUrl: 'https://cdn.example/profile.jpg',
+            feedImageUrls: [
+                '/api/image-proxy?token=feed',
+                '/demo-avatars/demo-v3-female-001.webp',
+            ],
+        })).toEqual(['/api/image-proxy?token=feed']);
+    });
+
     it('adds an active candidate as one profile-plus-feed bundle', () => {
         const next = appendScreenedCandidate([], {
             maskedUsername: 'a***',
