@@ -185,6 +185,18 @@ async function reportProfileStart(
     }
 }
 
+async function reportProfileResolved(
+    context: ProviderCallContext | undefined,
+    profile: InstagramProfile,
+): Promise<void> {
+    try {
+        await context?.onProfileResolved?.(profile);
+    } catch (error) {
+        if (isProgressPersistenceError(error)) throw error;
+        throw new Error('ANALYSIS_PERSISTENCE_ERROR: profile work progress failed.');
+    }
+}
+
 function profileRunPending(message: string): Error {
     return new Error(`SCRAPING_RUN_PENDING_ERROR: ${message}`);
 }
@@ -1264,6 +1276,11 @@ export function makeApifyProvider(deps: ApifyProviderDeps = {}): ScraperProvider
         const collected = await collectProfilesBatch(usernames, batchSize, context);
         const latencyMs = profileAttemptLatency(startedAt);
         const results = buildApifyProfileAttemptResults(usernames, collected, latencyMs);
+        for (const result of results) {
+            if (result.outcome.status === 'success' && 'profile' in result) {
+                await reportProfileResolved(context, result.profile);
+            }
+        }
         context?.recordUsage({
             result_count: results.filter(result => result.outcome.status === 'success').length,
         });
