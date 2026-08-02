@@ -26,19 +26,28 @@ function executableSql(sql: string): string {
     return sql.replace(/^\s*--.*$/gm, '').trim();
 }
 
-describe('betatest migration transaction boundaries', () => {
-    it.each(migrationFiles)('%s is self-transactional for Supabase CLI execution', file => {
+describe('betatest migration CLI batch contract', () => {
+    it.each(migrationFiles)('%s leaves the CLI-owned batch open through history insertion', file => {
         const sql = executableSql(readFileSync(
             new URL(`../../../supabase/migrations/${file}`, import.meta.url),
             'utf8',
         ));
-        const begin = sql.match(/^BEGIN\s*;/);
-        const transactionScopedStatement = sql.match(/\b(?:SET\s+LOCAL|LOCK\s+TABLE)\b/);
 
-        expect(begin, `${file} must start its executable SQL with BEGIN`).not.toBeNull();
-        expect(transactionScopedStatement, `${file} must contain SET LOCAL or LOCK TABLE`)
-            .not.toBeNull();
-        expect(begin!.index).toBeLessThan(transactionScopedStatement!.index!);
-        expect(sql, `${file} must commit as its final executable statement`).toMatch(/COMMIT\s*;$/);
+        expect(sql, `${file} must not commit before the CLI history insert`)
+            .not.toMatch(/^BEGIN\s*;/);
+        expect(sql, `${file} must leave the batch-owned transaction open`)
+            .not.toMatch(/COMMIT\s*;$/);
+    });
+
+    it('takes the frozen-budget apply fence inside a DO block', () => {
+        const sql = executableSql(readFileSync(new URL(
+            '../../../supabase/migrations/20260802060000_expose_betatest_frozen_provider_budgets.sql',
+            import.meta.url,
+        ), 'utf8'));
+
+        expect(sql).not.toMatch(/^LOCK TABLE public\.analysis_beta_pool_allocations/m);
+        expect(sql).toMatch(
+            /DO \$\$\s*BEGIN\s*EXECUTE 'LOCK TABLE public\.analysis_beta_pool_allocations IN EXCLUSIVE MODE';\s*END;\s*\$\$;/
+        );
     });
 });

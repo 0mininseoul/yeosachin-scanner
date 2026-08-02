@@ -2,8 +2,6 @@
 -- (Task 2B1). Provider-run enforcement and terminal settlement deliberately
 -- remain in the following migration slice.
 
-BEGIN;
-
 SET LOCAL lock_timeout = '5s';
 SET LOCAL statement_timeout = '2min';
 
@@ -1073,4 +1071,3 @@ COMMENT ON FUNCTION public.activate_analysis_beta_apify_request_credit(
     UUID, UUID, UUID, TEXT, JSONB, JSONB, INTEGER
 ) IS
     'Atomically rechecks incremental seven-operation headroom and freezes one exact eight-operation beta policy before request dispatch.';
-COMMIT;

@@ -1,8 +1,6 @@
 -- Aggregate-only operational visibility for the betatest Apify credit pool.
 -- No row identity, user/request/preflight ID, provider account identity, or
 -- credential detail crosses this service-role boundary.
-BEGIN;
-
 SET LOCAL lock_timeout = '5s';
 SET LOCAL statement_timeout = '2min';
 
@@ -143,4 +141,3 @@ GRANT EXECUTE ON FUNCTION public.load_analysis_beta_apify_pool_observability(INT
 
 COMMENT ON FUNCTION public.load_analysis_beta_apify_pool_observability(INTEGER) IS
     'Service-only aggregate betatest pool health. Returns no row, user, provider-account, or credential identity.';
-COMMIT;

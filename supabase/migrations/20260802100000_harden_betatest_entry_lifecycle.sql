@@ -2,8 +2,6 @@
 -- fencing, and the operational database gate. Expensive backfill, runtime
 -- functions, and validation are intentionally committed in later migrations
 -- so analysis_preflights is not held ACCESS EXCLUSIVE across function DDL.
-BEGIN;
-
 SET LOCAL lock_timeout = '5s';
 SET LOCAL statement_timeout = '2min';
 
@@ -125,4 +123,3 @@ COMMENT ON COLUMN public.analysis_preflights.beta_entry_provenance IS
     'Service-only durable betatest origin; never accepted from request body, header, query, or referrer.';
 COMMENT ON COLUMN public.analysis_preflights.beta_prepare_token IS
     'Opaque persisted task fence. It is unrelated to any provider token.';
-COMMIT;

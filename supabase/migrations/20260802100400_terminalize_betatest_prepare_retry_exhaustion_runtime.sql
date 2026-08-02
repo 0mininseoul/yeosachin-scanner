@@ -1,8 +1,6 @@
 -- Convert beta prepare delivery exhaustion from a pending tombstone into a
 -- public terminal result after the short schema-only constraint swap commits.
 -- This phase takes row-level locks only; validation remains separate.
-BEGIN;
-
 SET LOCAL lock_timeout = '5s';
 SET LOCAL statement_timeout = '2min';
 
@@ -358,4 +356,3 @@ WHERE preflight.beta_entry_provenance IS NOT NULL
   AND preflight.beta_prepare_state = 'reserved'
   AND preflight.beta_prepare_dispatch_state = 'completed'
   AND preflight.beta_prepare_retry_exhausted_at IS NOT NULL;
-COMMIT;

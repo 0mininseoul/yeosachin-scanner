@@ -1,8 +1,6 @@
 -- Runtime/backfill phase for the betatest entry lifecycle. The short schema
 -- migration has already committed its table locks; validation follows in a
 -- separate migration after these normalizers and fenced functions exist.
-BEGIN;
-
 SET LOCAL lock_timeout = '5s';
 SET LOCAL statement_timeout = '2min';
 
@@ -1380,4 +1378,3 @@ GRANT EXECUTE ON FUNCTION public.admit_analysis_v2_betatest_plan(
 COMMENT ON FUNCTION public.admit_analysis_v2_betatest_plan(
     UUID, UUID, UUID, INTEGER, TEXT, JSONB, JSONB, INTEGER
 ) IS 'Atomically gates and consumes one prepared beta preflight while preserving integrity-validated consumed replay.';
-COMMIT;

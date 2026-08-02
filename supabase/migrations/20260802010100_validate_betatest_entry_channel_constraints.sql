@@ -3,8 +3,6 @@
 -- New writes were already protected by the NOT VALID constraints; these scans
 -- establish validation for the rows that predated the columns.
 
-BEGIN;
-
 SET LOCAL lock_timeout = '5s';
 SET LOCAL statement_timeout = '2min';
 
@@ -18,4 +16,3 @@ ALTER TABLE public.analysis_requests
     VALIDATE CONSTRAINT analysis_requests_entry_channel_check;
 ALTER TABLE public.analysis_requests
     VALIDATE CONSTRAINT analysis_requests_entry_channel_access_check;
-COMMIT;

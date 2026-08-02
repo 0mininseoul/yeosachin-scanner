@@ -1,8 +1,6 @@
 -- Task 2B3 forward correction.  Capacity is always evaluated from one MVCC
 -- statement: an archive transaction moves a debit live -> archive atomically,
 -- so this aggregate observes either representation and never a gap.
-BEGIN;
-
 SET LOCAL lock_timeout = '5s';
 SET LOCAL statement_timeout = '2min';
 
@@ -289,4 +287,3 @@ BEGIN
 END; $$;
 REVOKE ALL ON FUNCTION public.archive_settled_analysis_beta_apify_credit_allocations(INTEGER) FROM PUBLIC, anon, authenticated, service_role;
 GRANT EXECUTE ON FUNCTION public.archive_settled_analysis_beta_apify_credit_allocations(INTEGER) TO service_role;
-COMMIT;
