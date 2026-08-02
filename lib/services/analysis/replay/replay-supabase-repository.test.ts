@@ -1,5 +1,10 @@
 import { describe, expect, it, vi } from 'vitest';
-import { loadReplayCaptureDescriptor, type ReplaySourceRpcClient } from './replay-supabase-repository';
+import {
+    loadCurrentProductionReplayCaptureDescriptor,
+    loadReplayCaptureDescriptor,
+    type CurrentProductionReplaySourceRpcClient,
+    type ReplaySourceRpcClient,
+} from './replay-supabase-repository';
 
 const requestId = '10000000-0000-4000-8000-000000000001';
 const preflightId = '20000000-0000-4000-8000-000000000001';
@@ -28,6 +33,59 @@ function source() {
 }
 
 describe('replay capture read-only repository', () => {
+    it('loads current production from the UUID RPC without a target object', async () => {
+        const run = {
+            actorId: 'apify/instagram-profile-scraper',
+            credentialSlot: 'primary',
+            runId: 'CurrentRun1',
+            status: 'succeeded',
+            operationKey: 'target-profile-fallback',
+        } as const;
+        const rpc = vi.fn().mockResolvedValue({
+            data: {
+                requestId,
+                preflightId,
+                targetUsername: `replay_${'a'.repeat(23)}`,
+                selectedPlanId: 'standard',
+                policyVersions: {
+                    pipeline: 'v2',
+                    risk: 'risk-policy-v2.5',
+                    aiStage: 'ai-stage-policy-v2.10',
+                    scheduler: 'ai-scheduler-v1',
+                },
+                preflightRuns: [run],
+                providerRuns: [{
+                    ...run,
+                    runId: 'CurrentRun2',
+                    operationKey: `profile-fallback:${'a'.repeat(64)}`,
+                }],
+            },
+            error: null,
+        });
+        const descriptor = await loadCurrentProductionReplayCaptureDescriptor(
+            { rpc } satisfies CurrentProductionReplaySourceRpcClient,
+            requestId,
+        );
+
+        expect(rpc).toHaveBeenCalledWith(
+            'read_analysis_v2_current_production_replay_source',
+            { p_request_id: requestId },
+        );
+        expect(descriptor).toMatchObject({
+            requestId,
+            targetResolution: 'provider_ledger',
+            sourceKind: 'current_paid_production',
+            sourceLineage: {
+                selectedPlanId: 'standard',
+                policyVersions: {
+                    risk: 'risk-policy-v2.5',
+                    aiStage: 'ai-stage-policy-v2.10',
+                },
+            },
+        });
+        expect(descriptor).not.toHaveProperty('target');
+    });
+
     it('uses only the narrow service RPC and returns a one-way request fingerprint', async () => {
         const rpc = vi.fn().mockResolvedValue({ data: source(), error: null });
         const descriptor = await loadReplayCaptureDescriptor(

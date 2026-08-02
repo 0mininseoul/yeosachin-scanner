@@ -35,6 +35,13 @@ const standardV29PolicySchema = z.object({
     scheduler: z.literal('ai-scheduler-v1'),
 }).strict();
 
+const standardV210RiskV25PolicySchema = z.object({
+    pipeline,
+    aiStage: z.literal(AI_STAGE_POLICY_V210_VERSION),
+    risk: z.literal('risk-policy-v2.5'),
+    scheduler: z.literal('ai-scheduler-v1'),
+}).strict();
+
 /**
  * Source lineage is deliberately exact. Historical v2.7 snapshots predate the
  * scheduler key, so that key is optional only for v2.7. v2.8 starts after the
@@ -52,6 +59,10 @@ export const replaySourceLineageSchema = z.union([
     z.object({
         selectedPlanId: z.literal('standard'),
         policyVersions: standardV29PolicySchema,
+    }).strict(),
+    z.object({
+        selectedPlanId: z.literal('standard'),
+        policyVersions: standardV210RiskV25PolicySchema,
     }).strict(),
     z.object({
         selectedPlanId: z.literal('plus'),
@@ -78,6 +89,9 @@ export const HISTORICAL_PARTIAL_AVAILABLE_REPLAY_CAPABILITY =
 /** Distinct non-exact historical evaluation fence for the v2.10 successor. */
 export const HISTORICAL_PARTIAL_AVAILABLE_REPLAY_V210_CAPABILITY =
     'historical-partial-available-standard-v27-risk-v23-to-ai-v210' as const;
+/** Exact, paid production Standard source. It is never inferred from moving latest policy. */
+export const CURRENT_PRODUCTION_STANDARD_V210_EXACT_REPLAY_CAPABILITY =
+    'current-production-standard-v210-risk-v25-scheduler-v1-exact-replay' as const;
 const currentEvaluationPolicySchema = z.object({
     capability: z.literal(REPLAY_V29_CROSS_POLICY_EVALUATION_CAPABILITY),
     aiStage: z.literal(AI_STAGE_POLICY_V29_VERSION),
@@ -98,12 +112,17 @@ const historicalPartialAvailableV210EvaluationPolicySchema = z.object({
     capability: z.literal(HISTORICAL_PARTIAL_AVAILABLE_REPLAY_V210_CAPABILITY),
     aiStage: z.literal(AI_STAGE_POLICY_V210_VERSION),
 }).strict();
+const currentProductionStandardV210EvaluationPolicySchema = z.object({
+    capability: z.literal(CURRENT_PRODUCTION_STANDARD_V210_EXACT_REPLAY_CAPABILITY),
+    aiStage: z.literal(AI_STAGE_POLICY_V210_VERSION),
+}).strict();
 export const replayEvaluationPolicySchema = z.union([
     currentEvaluationPolicySchema,
     historicalOfficialE2EEvaluationPolicySchema,
     historicalOfficialE2EV210EvaluationPolicySchema,
     historicalPartialAvailableEvaluationPolicySchema,
     historicalPartialAvailableV210EvaluationPolicySchema,
+    currentProductionStandardV210EvaluationPolicySchema,
 ]);
 export type ReplayEvaluationPolicy = z.infer<typeof replayEvaluationPolicySchema>;
 
@@ -128,6 +147,7 @@ export function replayAiStagePolicyVersion(
         version === AI_STAGE_POLICY_V27_VERSION
         || version === AI_STAGE_POLICY_V28_VERSION
         || version === AI_STAGE_POLICY_V29_VERSION
+        || version === AI_STAGE_POLICY_V210_VERSION
     ) {
         return version;
     }
@@ -144,6 +164,22 @@ export function resolveReplayAiStagePolicyVersion(
         throw new Error('ANALYSIS_V2_REPLAY_EVALUATION_POLICY_UNSUPPORTED');
     }
     const policy = lineage.policyVersions;
+    if (
+        parsed.data.capability
+            === CURRENT_PRODUCTION_STANDARD_V210_EXACT_REPLAY_CAPABILITY
+    ) {
+        if (
+            lineage.selectedPlanId !== 'standard'
+            || policy.pipeline !== 'v2'
+            || policy.risk !== 'risk-policy-v2.5'
+            || policy.aiStage !== AI_STAGE_POLICY_V210_VERSION
+            || !('scheduler' in policy)
+            || policy.scheduler !== 'ai-scheduler-v1'
+        ) {
+            throw new Error('ANALYSIS_V2_REPLAY_EVALUATION_SOURCE_INELIGIBLE');
+        }
+        return parsed.data.aiStage;
+    }
     // The historical v2.7/risk-v2.3 snapshot predates risk/scheduler telemetry;
     // that missing telemetry does not change the replayed AI semantics.
     if (

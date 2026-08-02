@@ -39,10 +39,12 @@ vi.mock('@/lib/services/ai/v2-staged-analysis', async importOriginal => {
 import { runAnalysisV2AiReplay, type ReplayAiRunner } from './replay-runner';
 import { createReplayStagedAiAdapter } from './replay-staged-ai-adapter';
 import {
+    CURRENT_PRODUCTION_STANDARD_V210_EXACT_REPLAY_CAPABILITY,
     HISTORICAL_OFFICIAL_E2E_REPLAY_V210_CAPABILITY,
     REPLAY_V29_CROSS_POLICY_EVALUATION_CAPABILITY,
     type ReplayEvaluationPolicy,
 } from './replay-source-lineage';
+import { parseFeatureConcurrencyExperimentCliCapability } from './feature-concurrency-experiment-capability';
 
 const v28Bundle = {
     schemaVersion: 1 as const,
@@ -126,6 +128,29 @@ const historicalV210Bundle = {
     },
 };
 
+const currentProductionEvaluation = {
+    capability: CURRENT_PRODUCTION_STANDARD_V210_EXACT_REPLAY_CAPABILITY,
+    aiStage: 'ai-stage-policy-v2.10',
+} as const satisfies ReplayEvaluationPolicy;
+
+const currentProductionBundle = {
+    ...v28Bundle,
+    capture: {
+        ...v28Bundle.capture,
+        sourceLineage: {
+            selectedPlanId: 'standard' as const,
+            policyVersions: {
+                pipeline: 'v2' as const,
+                risk: 'risk-policy-v2.5' as const,
+                aiStage: 'ai-stage-policy-v2.10' as const,
+                scheduler: 'ai-scheduler-v1' as const,
+            },
+        },
+        evaluationPolicy: currentProductionEvaluation,
+    },
+    profiles: [],
+};
+
 describe('replay staged AI runner policy capability', () => {
     beforeEach(() => {
         vi.clearAllMocks();
@@ -169,6 +194,75 @@ describe('replay staged AI runner policy capability', () => {
         routingReason: 'conserve_female_recall' as const,
         analyzedSelectionIds: ['m1'],
         v29AccountContext: accountContext,
+    });
+
+    it('labels baseline 3 and current-production experiment 4 with shared cap 8', async () => {
+        const baselineLines: string[] = [];
+        const baseline = await runAnalysisV2AiReplay({
+            bundle: currentProductionBundle,
+            runner: createReplayStagedAiAdapter('ai-stage-policy-v2.10'),
+            mode: 'paid-ai',
+            paidAiOptIn: true,
+            evaluationPolicy: currentProductionEvaluation,
+            write: line => baselineLines.push(line),
+        });
+        const capability = parseFeatureConcurrencyExperimentCliCapability([
+            '--run', '--paid-ai', '--confirm-paid-ai', '--current-production',
+            '--feature-concurrency-4', '--confirm-feature-concurrency-4',
+        ])!;
+        const experimentLines: string[] = [];
+        const experiment = await runAnalysisV2AiReplay({
+            bundle: currentProductionBundle,
+            runner: createReplayStagedAiAdapter('ai-stage-policy-v2.10', {
+                featureAnalysisConcurrency: 4,
+                featureConcurrencyExperimentCapability: capability,
+            }),
+            mode: 'paid-ai',
+            paidAiOptIn: true,
+            evaluationPolicy: currentProductionEvaluation,
+            featureConcurrencyExperimentCapability: capability,
+            write: line => experimentLines.push(line),
+        });
+
+        expect(baseline).toMatchObject({
+            sourceKind: 'current_paid_production',
+            featureConcurrency: {
+                experiment: 'baseline', featureAnalysis: 3, sharedCap: 8,
+            },
+        });
+        expect(experiment.featureConcurrency).toEqual({
+            experiment: 'feature-concurrency-4', featureAnalysis: 4, sharedCap: 8,
+        });
+        expect(JSON.parse(baselineLines[0]!)).toMatchObject({
+            source_kind: 'current_paid_production',
+            feature_concurrency_experiment: 'baseline',
+            feature_analysis_concurrency: 3,
+            shared_concurrency_cap: 8,
+        });
+        expect(JSON.parse(experimentLines[0]!)).toMatchObject({
+            feature_concurrency_experiment: 'feature-concurrency-4',
+            feature_analysis_concurrency: 4,
+            shared_concurrency_cap: 8,
+        });
+    });
+
+    it('rejects the experiment capability outside authenticated current production', async () => {
+        const capability = parseFeatureConcurrencyExperimentCliCapability([
+            '--run', '--paid-ai', '--confirm-paid-ai', '--current-production',
+            '--feature-concurrency-4', '--confirm-feature-concurrency-4',
+        ])!;
+        await expect(runAnalysisV2AiReplay({
+            bundle: historicalV210Bundle,
+            runner: createReplayStagedAiAdapter('ai-stage-policy-v2.10', {
+                featureAnalysisConcurrency: 4,
+                featureConcurrencyExperimentCapability: capability,
+            }),
+            mode: 'paid-ai',
+            paidAiOptIn: true,
+            evaluationPolicy: historicalV210Evaluation,
+            featureConcurrencyExperimentCapability: capability,
+        })).rejects.toThrow('ANALYSIS_V2_REPLAY_FEATURE_CONCURRENCY_SCOPE_REQUIRED');
+        expect(ai.genderTriageMicrobatch).not.toHaveBeenCalled();
     });
 
     async function runV29Triage(result: ReturnType<typeof highFemale>, profile = {}) {

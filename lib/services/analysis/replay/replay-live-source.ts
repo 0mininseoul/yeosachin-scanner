@@ -21,6 +21,7 @@ import type { AnalysisV2ReplayBundle } from './replay-bundle';
 import type { HistoricalPartialSourceProfile } from './historical-partial-available-capture';
 import { readCompletedApifyDatasetOnce, type ReplayReadonlyApifyClient } from './replay-readonly-apify';
 import type {
+    CurrentProductionReplayCaptureDescriptor,
     HistoricalOfficialE2EReplayCaptureDescriptor,
     ReplayCaptureDescriptor,
 } from './replay-supabase-repository';
@@ -157,9 +158,13 @@ function postIdFromUrl(value: string): string {
     return parsed[1];
 }
 
-function isHistoricalDescriptor(
-    descriptor: ReplayCaptureDescriptor | HistoricalOfficialE2EReplayCaptureDescriptor,
-): descriptor is HistoricalOfficialE2EReplayCaptureDescriptor {
+type ProviderLedgerReplayDescriptor =
+    | HistoricalOfficialE2EReplayCaptureDescriptor
+    | CurrentProductionReplayCaptureDescriptor;
+
+function isProviderLedgerDescriptor(
+    descriptor: ReplayCaptureDescriptor | ProviderLedgerReplayDescriptor,
+): descriptor is ProviderLedgerReplayDescriptor {
     return 'targetResolution' in descriptor
         && descriptor.targetResolution === 'provider_ledger';
 }
@@ -187,13 +192,13 @@ function historicalAuthoritativeTargetProfileRuns(runs: readonly Run[]): readonl
 }
 
 export async function loadReplaySourceFromExistingRuns(input: {
-    descriptor: ReplayCaptureDescriptor | HistoricalOfficialE2EReplayCaptureDescriptor;
+    descriptor: ReplayCaptureDescriptor | ProviderLedgerReplayDescriptor;
     clientForSlot(slot: string): ReplayReadonlyApifyClient;
     /** Partial audit only: preserve unavailable public source members as terminals. */
     allowHistoricalPartialAvailable?: boolean;
 }): Promise<{ profiles: AnalysisV2CheckpointProfile[]; evidence: AnalysisV2ReplayBundle['evidence']; providerRuns: Run[]; historicalPartialProfiles: HistoricalPartialSourceProfile[] }> {
-    const historical = isHistoricalDescriptor(input.descriptor);
-    const preflightRuns = historical
+    const providerLedgerTarget = isProviderLedgerDescriptor(input.descriptor);
+    const preflightRuns = providerLedgerTarget
         ? historicalAuthoritativeTargetProfileRuns(input.descriptor.preflightRuns)
         : input.descriptor.preflightRuns;
     const allRuns = [...preflightRuns, ...input.descriptor.providerRuns];
@@ -308,7 +313,7 @@ export async function loadReplaySourceFromExistingRuns(input: {
             profiles.set(username, attempt.profile);
         }
     }
-    const targetUsername = historical
+    const targetUsername = providerLedgerTarget
         ? replayTargetUsernameFromProviderLedger(datasets)
         : input.descriptor.targetUsername;
     const targetProfile = profiles.get(targetUsername);

@@ -1,10 +1,16 @@
 import { describe, expect, it, vi } from 'vitest';
 import type { FeatureAnalysisResult } from '@/lib/services/ai/v2-staged-analysis';
 const testRunnerPolicies = vi.hoisted(() => new WeakMap<object, string>());
+const testRunnerFeatureConcurrency = vi.hoisted(
+    () => new WeakMap<object, 3 | 4>(),
+);
 
 vi.mock('./replay-staged-ai-adapter', () => ({
     lookupReplayStagedAiAdapterPolicy: (runner: object) => (
         testRunnerPolicies.get(runner)
+    ),
+    lookupReplayStagedAiAdapterFeatureConcurrency: (runner: object) => (
+        testRunnerFeatureConcurrency.get(runner)
     ),
 }));
 
@@ -20,18 +26,21 @@ import { parseReplayCliArgs } from '../../../../scripts/replay-analysis-v2';
 function v27Runner(operations: ReplayAiRunner): ReplayAiRunner {
     const runner = Object.freeze({ ...operations });
     testRunnerPolicies.set(runner, 'ai-stage-policy-v2.7');
+    testRunnerFeatureConcurrency.set(runner, 3);
     return runner;
 }
 
 function v29Runner(operations: ReplayAiRunner): ReplayAiRunner {
     const runner = Object.freeze({ ...operations });
     testRunnerPolicies.set(runner, 'ai-stage-policy-v2.9');
+    testRunnerFeatureConcurrency.set(runner, 3);
     return runner;
 }
 
 function v210Runner(operations: ReplayAiRunner): ReplayAiRunner {
     const runner = Object.freeze({ ...operations });
     testRunnerPolicies.set(runner, 'ai-stage-policy-v2.10');
+    testRunnerFeatureConcurrency.set(runner, 3);
     return runner;
 }
 

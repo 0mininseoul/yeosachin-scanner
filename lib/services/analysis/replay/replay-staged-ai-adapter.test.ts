@@ -30,10 +30,69 @@ vi.mock('@/lib/services/ai/v2-staged-analysis', () => ({
     genderTriageMicrobatch: mocks.genderTriageMicrobatch,
 }));
 
-import { createReplayStagedAiAdapter } from './replay-staged-ai-adapter';
+import {
+    createReplayStagedAiAdapter,
+    lookupReplayStagedAiAdapterFeatureConcurrency,
+} from './replay-staged-ai-adapter';
+import { parseFeatureConcurrencyExperimentCliCapability } from './feature-concurrency-experiment-capability';
 
 describe('replay staged AI adapter telemetry', () => {
     beforeEach(() => vi.clearAllMocks());
+
+    it('keeps baseline at 3 and changes only replay feature concurrency to 4', async () => {
+        mocks.createFeatureAnalysisResultIdentity.mockReturnValue({
+            operationKey: 'feature:identity',
+        });
+        const input = (ordinal: number) => ({
+            ordinal,
+            bio: null,
+            media: [],
+            captions: [],
+            triage: {} as never,
+        });
+        const observe = async (
+            adapter: ReturnType<typeof createReplayStagedAiAdapter>,
+        ) => {
+            let active = 0;
+            let maximum = 0;
+            mocks.featureAnalysis.mockImplementation(async () => {
+                active++;
+                maximum = Math.max(maximum, active);
+                await new Promise(resolve => setTimeout(resolve, 5));
+                active--;
+                return { finalGenderDecision: 'unresolved' };
+            });
+            await Promise.all(Array.from(
+                { length: 8 },
+                (_, index) => adapter.feature!(input(index + 1)),
+            ));
+            const semanticInputs = mocks.featureAnalysis.mock.calls.map(
+                call => call[0],
+            );
+            mocks.featureAnalysis.mockClear();
+            return { maximum, semanticInputs };
+        };
+
+        const baseline = createReplayStagedAiAdapter('ai-stage-policy-v2.10');
+        const baselineObserved = await observe(baseline);
+        const capability = parseFeatureConcurrencyExperimentCliCapability([
+            '--run', '--paid-ai', '--confirm-paid-ai', '--current-production',
+            '--feature-concurrency-4', '--confirm-feature-concurrency-4',
+        ])!;
+        const experiment = createReplayStagedAiAdapter(
+            'ai-stage-policy-v2.10',
+            { featureAnalysisConcurrency: 4, featureConcurrencyExperimentCapability: capability },
+        );
+        const experimentObserved = await observe(experiment);
+
+        expect(lookupReplayStagedAiAdapterFeatureConcurrency(baseline)).toBe(3);
+        expect(lookupReplayStagedAiAdapterFeatureConcurrency(experiment)).toBe(4);
+        expect(baselineObserved.maximum).toBe(3);
+        expect(experimentObserved.maximum).toBe(4);
+        expect(experimentObserved.semanticInputs).toEqual(
+            baselineObserved.semanticInputs,
+        );
+    });
 
     it('sums retries and per-attempt latency across private-name chunks', async () => {
         mocks.privateNames.mockImplementation(async (

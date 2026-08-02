@@ -27,9 +27,14 @@ import type {
     ReplayTriageInput,
 } from './replay-runner';
 import type { ReplaySupportedAiStagePolicyVersion } from './replay-source-lineage';
+import {
+    isFeatureConcurrencyExperimentCliCapability,
+    type FeatureConcurrencyExperimentCliCapability,
+} from './feature-concurrency-experiment-capability';
 
 interface IssuedReplayRunner {
     policyVersion: ReplaySupportedAiStagePolicyVersion;
+    featureAnalysisConcurrency: 3 | 4;
     triage: ReplayAiRunner['triage'];
     feature: ReplayAiRunner['feature'];
     privateNames: ReplayAiRunner['privateNames'];
@@ -54,6 +59,17 @@ export function lookupReplayStagedAiAdapterPolicy(
         return undefined;
     }
     return issued.policyVersion;
+}
+
+/** Non-issuing lookup used to bind baseline/experiment reporting to the adapter. */
+export function lookupReplayStagedAiAdapterFeatureConcurrency(
+    runner: ReplayAiRunner,
+): 3 | 4 | undefined {
+    const issued = issuedReplayRunners.get(runner);
+    return issued
+        && lookupReplayStagedAiAdapterPolicy(runner) === issued.policyVersion
+        ? issued.featureAnalysisConcurrency
+        : undefined;
 }
 
 interface InvocationTelemetry {
@@ -182,7 +198,25 @@ function createSemaphore(limit: number) {
 /** Stateless paid-AI adapter. It imports no Supabase, provider, R2, job, result, or archive module. */
 export function createReplayStagedAiAdapter(
     aiStagePolicyVersion: ReplaySupportedAiStagePolicyVersion,
+    experiment?: Readonly<{
+        featureAnalysisConcurrency: 4;
+        featureConcurrencyExperimentCapability:
+            FeatureConcurrencyExperimentCliCapability;
+    }>,
 ): ReplayAiRunner {
+    if (
+        experiment !== undefined
+        && (
+            experiment.featureAnalysisConcurrency !== 4
+            || !isFeatureConcurrencyExperimentCliCapability(
+                experiment.featureConcurrencyExperimentCapability,
+            )
+        )
+    ) {
+        throw new Error(
+            'ANALYSIS_V2_REPLAY_FEATURE_CONCURRENCY_AUTHORIZATION_REQUIRED',
+        );
+    }
     const requestId = randomUUID();
     const replayCapability = issueReplayStatelessCapability();
     const supportsGenderTriageMicrobatch = aiStagePolicySupports(
@@ -191,7 +225,8 @@ export function createReplayStagedAiAdapter(
     );
     const runFeature = supportsGenderTriageMicrobatch
         ? createSemaphore(
-            ANALYSIS_V2_SCHEDULER_V1_POLICY.featureAnalysisConcurrency,
+            experiment?.featureAnalysisConcurrency
+                ?? ANALYSIS_V2_SCHEDULER_V1_POLICY.featureAnalysisConcurrency,
         )
         : async <T>(task: () => Promise<T>) => task();
     type PendingTriage = {
@@ -356,6 +391,8 @@ export function createReplayStagedAiAdapter(
     Object.freeze(runner);
     issuedReplayRunners.set(runner, {
         policyVersion: aiStagePolicyVersion,
+        featureAnalysisConcurrency: experiment?.featureAnalysisConcurrency
+            ?? ANALYSIS_V2_SCHEDULER_V1_POLICY.featureAnalysisConcurrency,
         triage: runner.triage,
         feature: runner.feature,
         privateNames: runner.privateNames,
