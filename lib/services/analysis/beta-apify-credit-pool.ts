@@ -20,6 +20,7 @@ export const BETA_APIFY_CREDIT_REFRESH_ERROR =
     'ANALYSIS_BETA_APIFY_CREDIT_REFRESH_ERROR';
 
 const MAX_OBSERVED_AT_FUTURE_SKEW_MS = 60_000;
+const BETA_APIFY_CREDIT_USD_DECIMAL_PLACES = 12;
 
 export interface ApifyUserCreditClient {
     limits(): Promise<unknown>;
@@ -76,6 +77,70 @@ function requireNonNegativeFinite(value: unknown): number {
         throw new Error(BETA_APIFY_CREDIT_INPUT_ERROR);
     }
     return value;
+}
+
+function incrementDecimalInteger(value: string): string {
+    const digits = value.split('');
+    let carry = 1;
+
+    for (let index = digits.length - 1; index >= 0 && carry; index -= 1) {
+        const next = digits[index].charCodeAt(0) - 48 + carry;
+        digits[index] = String(next % 10);
+        carry = next >= 10 ? 1 : 0;
+    }
+
+    return carry ? `1${digits.join('')}` : digits.join('');
+}
+
+function normalizeBetaApifyCreditUsd(
+    value: number,
+    direction: 'down' | 'up'
+): number {
+    const decimalMatch = /^(\d+)(?:\.(\d+))?(?:e([+-]?\d+))?$/i.exec(
+        value.toString()
+    );
+    if (!decimalMatch) {
+        throw new Error(BETA_APIFY_CREDIT_INPUT_ERROR);
+    }
+
+    const [, wholePart, fractionalPart = '', exponentPart] = decimalMatch;
+    const decimalPlaces = fractionalPart.length - Number(exponentPart ?? 0);
+    if (decimalPlaces <= BETA_APIFY_CREDIT_USD_DECIMAL_PLACES) {
+        return value;
+    }
+
+    const unscaledDigits = `${wholePart}${fractionalPart}`.replace(
+        /^0+/,
+        ''
+    ) || '0';
+    const discardedDigitsCount = decimalPlaces
+        - BETA_APIFY_CREDIT_USD_DECIMAL_PLACES;
+    const retainedDigitsCount = Math.max(
+        0,
+        unscaledDigits.length - discardedDigitsCount
+    );
+    let normalizedDigits = retainedDigitsCount === 0
+        ? '0'
+        : unscaledDigits.slice(0, retainedDigitsCount);
+    const discardedDigits = unscaledDigits.slice(retainedDigitsCount);
+
+    if (direction === 'up' && /[1-9]/.test(discardedDigits)) {
+        normalizedDigits = incrementDecimalInteger(normalizedDigits);
+    }
+    const decimal = normalizedDigits.length <= BETA_APIFY_CREDIT_USD_DECIMAL_PLACES
+        ? `0.${'0'.repeat(
+            BETA_APIFY_CREDIT_USD_DECIMAL_PLACES - normalizedDigits.length
+        )}${normalizedDigits}`
+        : `${normalizedDigits.slice(
+            0,
+            -BETA_APIFY_CREDIT_USD_DECIMAL_PLACES
+        )}.${normalizedDigits.slice(-BETA_APIFY_CREDIT_USD_DECIMAL_PLACES)}`;
+    const normalizedValue = Number(decimal);
+
+    if (!Number.isFinite(normalizedValue) || normalizedValue < 0) {
+        throw new Error(BETA_APIFY_CREDIT_INPUT_ERROR);
+    }
+    return normalizedValue;
 }
 
 function requireTimestamp(value: unknown): string {
@@ -135,8 +200,9 @@ export async function readBetaApifyAccountCredit(input: {
         const limitsCycle = requireRecord(limits.monthlyUsageCycle);
         const usageCycle = requireRecord(monthlyUsage.usageCycle);
 
-        const monthlyLimitUsd = requireNonNegativeFinite(
-            limitFields.maxMonthlyUsageUsd
+        const monthlyLimitUsd = normalizeBetaApifyCreditUsd(
+            requireNonNegativeFinite(limitFields.maxMonthlyUsageUsd),
+            'down'
         );
         const limitsCurrentUsageUsd = requireNonNegativeFinite(
             currentUsage.monthlyUsageUsd
@@ -144,9 +210,9 @@ export async function readBetaApifyAccountCredit(input: {
         const detailedMonthlyUsageUsd = requireNonNegativeFinite(
             monthlyUsage.totalUsageCreditsUsdAfterVolumeDiscount
         );
-        const monthlyUsageUsd = Math.max(
-            limitsCurrentUsageUsd,
-            detailedMonthlyUsageUsd
+        const monthlyUsageUsd = normalizeBetaApifyCreditUsd(
+            Math.max(limitsCurrentUsageUsd, detailedMonthlyUsageUsd),
+            'up'
         );
         const limitsCycleStartAt = requireTimestamp(limitsCycle.startAt);
         const limitsCycleEndAt = requireTimestamp(limitsCycle.endAt);

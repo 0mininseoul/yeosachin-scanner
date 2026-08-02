@@ -133,6 +133,53 @@ describe('beta Apify credit pool primitives', () => {
         expect(reading.monthlyUsageUsd).toBe(expectedUsageUsd);
     });
 
+    it('rounds provider credit values to the database precision without increasing headroom', async () => {
+        const reading = await readBetaApifyAccountCredit({
+            credentialSlot: 'primary',
+            client: clientWith(
+                rawLimits(
+                    7.123456789012987,
+                    new Date(CYCLE_START),
+                    new Date(CYCLE_END),
+                    1.000000000000001
+                ),
+                rawMonthlyUsage(1.000000000000002)
+            ),
+            observedAt: OBSERVED_AT,
+        }, TEST_CLOCK);
+
+        expect(reading.monthlyLimitUsd).toBe(7.123456789012);
+        expect(reading.monthlyUsageUsd).toBe(1.000000000001);
+        expect(calculateBetaApifyEffectiveHeadroom({
+            monthlyLimitUsd: reading.monthlyLimitUsd,
+            monthlyUsageUsd: reading.monthlyUsageUsd,
+            activeReservationsUsd: 0,
+            localPostSnapshotDebitUsd: 0,
+        })).toBe(6.123456789011);
+    });
+
+    it('returns conservative database-safe credit snapshots from a pool refresh', async () => {
+        const readings = await refreshBetaApifyCreditPool({
+            clientForSlot: () => clientWith(
+                rawLimits(
+                    7.123456789012987,
+                    new Date(CYCLE_START),
+                    new Date(CYCLE_END),
+                    1.000000000000001
+                ),
+                rawMonthlyUsage(1.000000000000002)
+            ),
+            observedAt: OBSERVED_AT,
+        }, TEST_CLOCK);
+
+        expect(readings).toHaveLength(BETA_APIFY_FREE_CREDENTIAL_SLOTS.length);
+        for (const reading of readings) {
+            expect(reading.monthlyLimitUsd).toBe(7.123456789012);
+            expect(reading.monthlyUsageUsd).toBe(1.000000000001);
+            expect(reading.effectiveHeadroomUsd).toBe(6.123456789011);
+        }
+    });
+
     it.each([
         ['negative limit', rawLimits(-0.01), rawMonthlyUsage()],
         ['infinite limit', rawLimits(Number.POSITIVE_INFINITY), rawMonthlyUsage()],
