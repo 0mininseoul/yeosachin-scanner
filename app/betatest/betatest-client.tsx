@@ -33,6 +33,8 @@ export function BetaTestClient() {
     } = useAnalysisV2Preflight({ flow: 'betatest' });
 
     const exclusionDecided = exclusionState === 'excluded' || exclusionState === 'skipped';
+    const capacityUnavailable = preflight?.status === 'blocked'
+        && preflight.code === 'BETA_CAPACITY_UNAVAILABLE';
     const effectivePlan = preflight?.status === 'ready'
         ? selectedPlan ?? preflight.requiredPlan
         : null;
@@ -51,6 +53,12 @@ export function BetaTestClient() {
         setInstagramId('');
         setExcludedInstagramId('');
         setSelectedPlan(null);
+    };
+    const retrySameTarget = async () => {
+        reset();
+        setExcludedInstagramId('');
+        setSelectedPlan(null);
+        await startPreflight(instagramId);
     };
 
     return (
@@ -101,10 +109,22 @@ export function BetaTestClient() {
                     </>
                 ) : preflight.status === 'blocked' ? (
                     <CaseCard bracket="var(--color-blood)" className="p-7 text-center">
-                        <Eyebrow className="justify-center">사전 점검 중단</Eyebrow>
-                        <h1 className="mt-4 text-[22px] font-extrabold text-fg">판독 대상을 확인해주세요</h1>
+                        <Eyebrow className="justify-center">
+                            {capacityUnavailable ? '무료 판독 대기' : '사전 점검 중단'}
+                        </Eyebrow>
+                        <h1 className="mt-4 text-[22px] font-extrabold text-fg">
+                            {capacityUnavailable ? '무료 판독 자리를 다시 확인해주세요' : '판독 대상을 확인해주세요'}
+                        </h1>
                         <p className="mt-3 text-[13px] leading-relaxed text-fg-dim">{error ?? '현재 이 계정은 판독할 수 없습니다.'}</p>
-                        <div className="mt-7"><PrimaryButton onClick={startOver}>다른 계정 확인하기</PrimaryButton></div>
+                        <div className="mt-7">
+                            {capacityUnavailable ? (
+                                <PrimaryButton onClick={() => void retrySameTarget()} disabled={creating}>
+                                    {creating ? '다시 확인 중…' : '같은 대상으로 다시 확인'}
+                                </PrimaryButton>
+                            ) : (
+                                <PrimaryButton onClick={startOver}>다른 계정 확인하기</PrimaryButton>
+                            )}
+                        </div>
                     </CaseCard>
                 ) : (
                     <>

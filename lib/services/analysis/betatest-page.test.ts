@@ -1,4 +1,3 @@
-import { createElement } from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
@@ -15,9 +14,9 @@ vi.mock('@/lib/services/analysis/betatest-access', () => ({
     betaTestFreePoolEnabled: mocks.enabled,
     hasBetaTestAccess: mocks.hasAccess,
 }));
-vi.mock('next/navigation', () => ({ redirect: mocks.redirect }));
-vi.mock('@/app/betatest/betatest-client', () => ({
-    BetaTestClient: () => createElement('div', { 'data-testid': 'betatest-form' }),
+vi.mock('next/navigation', () => ({
+    redirect: mocks.redirect,
+    useRouter: () => ({ push: vi.fn() }),
 }));
 
 import BetaTestPage from '@/app/betatest/page';
@@ -47,7 +46,7 @@ describe('beta-test entry page', () => {
         const markup = renderToStaticMarkup(await BetaTestPage());
 
         expect(markup).toContain('베타 테스트를 이용할 수 없습니다.');
-        expect(markup).not.toContain('data-testid="betatest-form"');
+        expect(markup).not.toContain('id="beta-target-instagram"');
         expect(mocks.hasAccess).not.toHaveBeenCalled();
     });
 
@@ -57,13 +56,14 @@ describe('beta-test entry page', () => {
         const markup = renderToStaticMarkup(await BetaTestPage());
 
         expect(markup).toContain('베타 테스트를 이용할 수 없습니다.');
-        expect(markup).not.toContain('data-testid="betatest-form"');
+        expect(markup).not.toContain('id="beta-target-instagram"');
     });
 
     it('renders the checkout-free form only after the enabled self-grant check passes', async () => {
         const markup = renderToStaticMarkup(await BetaTestPage());
 
-        expect(markup).toContain('data-testid="betatest-form"');
+        expect(markup).toContain('id="beta-target-instagram"');
+        expect(markup).toContain('무료 판독 가능 여부 확인');
         expect(mocks.hasAccess).toHaveBeenCalledWith(expect.objectContaining({ auth: expect.any(Object) }));
     });
 });
