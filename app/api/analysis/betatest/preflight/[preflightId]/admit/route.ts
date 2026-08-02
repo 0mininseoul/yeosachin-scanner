@@ -24,7 +24,10 @@ import {
     admitBetaApifyPlan,
     createBetaApifyPlanAdmissionStore,
 } from '@/lib/services/analysis/beta-apify-plan-admission';
-import { createBetaApifyCreditPoolStore } from '@/lib/services/analysis/beta-apify-credit-runtime';
+import {
+    createBetaApifyCreditPoolStore,
+    getBetaApifyCreditPoolRuntimeConfig,
+} from '@/lib/services/analysis/beta-apify-credit-runtime';
 import { dispatchAnalysisV2Job } from '@/lib/services/analysis/v2-tasks';
 import { operationalLogger } from '@/lib/observability/server';
 
@@ -88,6 +91,13 @@ export async function POST(request: Request, { params }: RouteContext): Promise<
                 '이미 선택한 베타 플랜과 다릅니다.'
             );
         }
+        return failure(503, BETA_ADMISSION_PENDING, '베타 분석을 준비할 수 없습니다.');
+    }
+    let maxSnapshotAgeSeconds: number;
+    try {
+        maxSnapshotAgeSeconds = getBetaApifyCreditPoolRuntimeConfig()
+            .maxSnapshotAgeSeconds;
+    } catch {
         return failure(503, BETA_ADMISSION_PENDING, '베타 분석을 준비할 수 없습니다.');
     }
     if (!betaTestFreePoolEnabled() || !await hasBetaTestAccess(supabase)) {
@@ -161,7 +171,7 @@ export async function POST(request: Request, { params }: RouteContext): Promise<
             admissionToken: admission.admissionToken,
             admissionGeneration: admission.generation,
             selectedPlanId: body.data.planId,
-            maxSnapshotAgeSeconds: 300,
+            maxSnapshotAgeSeconds,
             store: { ...poolStore, ...planStore },
             telemetry: operationalLogger,
         });

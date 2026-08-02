@@ -3,6 +3,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 const mocks = vi.hoisted(() => ({
     createClient: vi.fn(), getUser: vi.fn(), enabled: vi.fn(), hasAccess: vi.fn(),
     reserve: vi.fn(), admit: vi.fn(), replayConsumed: vi.fn(), dispatch: vi.fn(),
+    runtimeConfig: vi.fn(),
     admin: { from: vi.fn() }, query: { select: vi.fn(), eq: vi.fn(), maybeSingle: vi.fn() },
 }));
 
@@ -29,6 +30,7 @@ vi.mock('@/lib/services/analysis/beta-apify-plan-admission', () => ({
 }));
 vi.mock('@/lib/services/analysis/beta-apify-credit-runtime', () => ({
     createBetaApifyCreditPoolStore: vi.fn(() => ({})),
+    getBetaApifyCreditPoolRuntimeConfig: mocks.runtimeConfig,
 }));
 vi.mock('@/lib/services/analysis/v2-tasks', () => ({ dispatchAnalysisV2Job: mocks.dispatch }));
 
@@ -46,6 +48,11 @@ describe('betatest plan admission route', () => {
         mocks.createClient.mockResolvedValue({ auth: { getUser: mocks.getUser }, rpc: vi.fn() });
         mocks.getUser.mockResolvedValue({ data: { user: { id: userId } }, error: null });
         mocks.enabled.mockReturnValue(true); mocks.hasAccess.mockResolvedValue(true);
+        mocks.runtimeConfig.mockReturnValue({
+            enabled: true,
+            maxSnapshotAgeSeconds: 300,
+            refreshIntervalSeconds: 60,
+        });
         mocks.replayConsumed.mockResolvedValue(null);
         mocks.admin.from.mockReturnValue(mocks.query); mocks.query.select.mockReturnValue(mocks.query);
         mocks.query.eq.mockReturnValue(mocks.query);
@@ -74,6 +81,37 @@ describe('betatest plan admission route', () => {
         expect(mocks.admit).toHaveBeenCalledWith(expect.objectContaining({ preflightId, userId, selectedPlanId: 'basic' }));
         expect(mocks.dispatch).toHaveBeenCalledWith(requestId, 'coordinator:bootstrap');
         await expect(response.json()).resolves.toEqual(expect.objectContaining({ requestId, status: 'queued' }));
+    });
+
+    it('passes the configured non-default snapshot age to the final admission fence', async () => {
+        mocks.runtimeConfig.mockReturnValue({
+            enabled: true,
+            maxSnapshotAgeSeconds: 127,
+            refreshIntervalSeconds: 60,
+        });
+
+        const response = await POST(request(), context);
+
+        expect(response.status).toBe(200);
+        expect(mocks.admit).toHaveBeenCalledWith(expect.objectContaining({
+            maxSnapshotAgeSeconds: 127,
+        }));
+    });
+
+    it('fails closed before mutation when the shared pool config is invalid', async () => {
+        mocks.runtimeConfig.mockImplementation(() => {
+            throw new Error('invalid config containing deployment detail');
+        });
+
+        const response = await POST(request(), context);
+
+        expect(response.status).toBe(503);
+        await expect(response.json()).resolves.toMatchObject({
+            code: 'BETA_ADMISSION_PENDING',
+        });
+        expect(mocks.reserve).not.toHaveBeenCalled();
+        expect(mocks.admit).not.toHaveBeenCalled();
+        expect(mocks.dispatch).not.toHaveBeenCalled();
     });
 
     it('returns a stable pending response without trying to admit a request', async () => {
