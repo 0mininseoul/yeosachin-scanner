@@ -62,7 +62,7 @@ describe('betatest provider policy/guard migration contract', () => {
         expect(migration).toContain('NOT VALID');
         expect(migration).not.toContain('VALIDATE CONSTRAINT');
         expect(validationMigration.trim()).toMatch(
-            /^SET LOCAL lock_timeout[\s\S]*ALTER TABLE public\.analysis_v2_provider_execution_policies[\s\S]*VALIDATE CONSTRAINT[\s\S]*;$/
+            /^BEGIN;\s*SET LOCAL lock_timeout[\s\S]*ALTER TABLE public\.analysis_v2_provider_execution_policies[\s\S]*VALIDATE CONSTRAINT[\s\S]*COMMIT;$/
         );
         expect(validationMigration).not.toMatch(
             /CREATE|DROP|ADD CONSTRAINT|CREATE OR REPLACE|UPDATE|INSERT|DELETE/
