@@ -208,6 +208,87 @@ describe('beta prepare to ordinary dispatch boundary', () => {
         expect(prepare).not.toHaveBeenCalled();
     });
 
+    it('noops retry-exhausted terminal work before any provider or dispatch network', async () => {
+        const prepare = vi.fn();
+        const reuse = vi.fn();
+        const reserveDispatch = vi.fn();
+        const enqueue = vi.fn();
+
+        const result = await prepareBetaPreflightDispatch({
+            preflightId, userId, prepareGeneration: 1, prepareToken,
+            coordinator: { prepare, reuse },
+            store: {
+                claimBetaPrepare: async () => ({
+                    claimed: false, state: 'retry_exhausted', claimToken: null,
+                    disposition: 'terminal',
+                }),
+                reserveDispatch,
+            } as never,
+            enqueue,
+        });
+
+        expect(result).toBe('noop');
+        expect(prepare).not.toHaveBeenCalled();
+        expect(reuse).not.toHaveBeenCalled();
+        expect(reserveDispatch).not.toHaveBeenCalled();
+        expect(enqueue).not.toHaveBeenCalled();
+    });
+
+    it('acknowledges the retry ceiling after its atomic terminal transition', async () => {
+        const markBetaPrepareRetryExhausted = vi.fn(async () => true);
+        const claimBetaPrepare = vi.fn();
+        const prepare = vi.fn();
+        const reserveDispatch = vi.fn();
+        const enqueue = vi.fn();
+
+        await expect(prepareBetaPreflightDispatch({
+            preflightId, userId, prepareGeneration: 1, prepareToken,
+            deliveryRetryCount: 6,
+            coordinator: { prepare, reuse: vi.fn() },
+            store: {
+                markBetaPrepareRetryExhausted,
+                claimBetaPrepare,
+                reserveDispatch,
+            } as never,
+            enqueue,
+        })).resolves.toBe('noop');
+
+        expect(markBetaPrepareRetryExhausted).toHaveBeenCalledOnce();
+        expect(claimBetaPrepare).not.toHaveBeenCalled();
+        expect(prepare).not.toHaveBeenCalled();
+        expect(reserveDispatch).not.toHaveBeenCalled();
+        expect(enqueue).not.toHaveBeenCalled();
+    });
+
+    it('noops when retry exhaustion wins a capacity-block race', async () => {
+        const reserveDispatch = vi.fn(() => {
+            throw new Error('terminal work must never reserve dispatch');
+        });
+        const enqueue = vi.fn();
+
+        await expect(prepareBetaPreflightDispatch({
+            preflightId, userId, prepareGeneration: 1, prepareToken,
+            coordinator: {
+                prepare: async () => {
+                    throw new Error('ANALYSIS_BETA_POOL_CAPACITY_UNAVAILABLE');
+                },
+                reuse: vi.fn(),
+            },
+            store: {
+                claimBetaPrepare: async () => ({
+                    claimed: true, state: 'preparing', claimToken: userId,
+                    disposition: 'claimed',
+                }),
+                blockBetaPrepareCapacity: vi.fn(async () => 'retry_exhausted'),
+                reserveDispatch,
+            } as never,
+            enqueue,
+        })).resolves.toBe('noop');
+
+        expect(reserveDispatch).not.toHaveBeenCalled();
+        expect(enqueue).not.toHaveBeenCalled();
+    });
+
     it('noops an expired terminal task before selecting any provider client', async () => {
         const clientForSlot = vi.fn();
         const prepare = vi.fn(async () => {

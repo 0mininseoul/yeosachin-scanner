@@ -704,6 +704,30 @@ describe('preflight owner routes', () => {
         expect(mocks.admin.from).not.toHaveBeenCalledWith('earlybird_plan_inventory');
     });
 
+    it('ends polling immediately for a retry-exhausted queue-unavailable block', async () => {
+        mocks.store.findForOwner.mockResolvedValue({
+            preflightId,
+            status: 'blocked',
+            expiresAt,
+            blockedCode: 'QUEUE_UNAVAILABLE',
+            readySnapshot: null,
+            exclusionDecision: 'pending',
+        });
+
+        const response = await getPreflight(new Request('https://example.com'), context());
+
+        expect(response.status).toBe(200);
+        await expect(response.json()).resolves.toEqual({
+            schemaVersion: 1,
+            preflightId,
+            expiresAt,
+            status: 'blocked',
+            exclusionDecision: 'pending',
+            code: 'QUEUE_UNAVAILABLE',
+        });
+        expect(mocks.admin.from).not.toHaveBeenCalledWith('earlybird_plan_inventory');
+    });
+
     it('owner-filters GET and maps expired rows to a bounded 410', async () => {
         expect((await getPreflight(new Request('https://example.com'), context())).status)
             .toBe(200);

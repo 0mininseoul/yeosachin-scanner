@@ -690,6 +690,59 @@ describe('preflight persistence adapter', () => {
         });
     });
 
+    it('parses retry exhaustion as terminal across claim, block, and release', async () => {
+        const rpc = vi.fn(async (name: string) => {
+            if (name === PREFLIGHT_DATABASE_NAMES.claimBetaPrepareRpc) {
+                return {
+                    data: [{
+                        claimed: false,
+                        prepare_state: 'retry_exhausted',
+                        claim_disposition: 'terminal',
+                    }],
+                    error: null,
+                };
+            }
+            if (name === PREFLIGHT_DATABASE_NAMES.blockBetaPrepareCapacityRpc) {
+                return { data: 'retry_exhausted', error: null };
+            }
+            if (name === PREFLIGHT_DATABASE_NAMES.releaseBetaPrepareClaimRpc) {
+                return { data: false, error: null };
+            }
+            throw new Error(`unexpected rpc: ${name}`);
+        });
+        const store = createSupabasePreflightStore({
+            rpc,
+            from: vi.fn() as never,
+        });
+        const prepareToken = preflightId.replace(/^1/, '4');
+
+        await expect(store.claimBetaPrepare({
+            preflightId,
+            userId,
+            prepareGeneration: 1,
+            prepareToken,
+        })).resolves.toEqual({
+            claimed: false,
+            state: 'retry_exhausted',
+            claimToken: null,
+            disposition: 'terminal',
+        });
+        await expect(store.blockBetaPrepareCapacity({
+            preflightId,
+            userId,
+            prepareGeneration: 1,
+            prepareToken,
+            claimToken: null,
+        })).resolves.toBe('retry_exhausted');
+        await expect(store.releaseBetaPrepareClaim({
+            preflightId,
+            userId,
+            prepareGeneration: 1,
+            prepareToken,
+            claimToken: userId,
+        })).resolves.toBe(false);
+    });
+
     it('maps a database beta access race to one sanitized typed error', async () => {
         const store = createSupabasePreflightStore({
             rpc: vi.fn(async () => ({
@@ -1322,6 +1375,36 @@ describe('preflight worker domain', () => {
 });
 
 describe('preflight public mapping', () => {
+    it('returns retry exhaustion immediately as a queue-unavailable block', () => {
+        expect(publicPreflightStatusDto({
+            preflightId,
+            status: 'blocked',
+            expiresAt,
+            blockedCode: 'QUEUE_UNAVAILABLE',
+            readySnapshot: null,
+            exclusionDecision: 'pending',
+        })).toEqual({
+            schemaVersion: 1,
+            preflightId,
+            expiresAt,
+            status: 'blocked',
+            exclusionDecision: 'pending',
+            code: 'QUEUE_UNAVAILABLE',
+        });
+    });
+
+    it('uses the terminal expiry boundary if a queue block ages out before GET', () => {
+        expect(() => publicPreflightStatusDto({
+            preflightId,
+            status: 'blocked',
+            expiresAt: '2026-07-13T12:00:00.000Z',
+            blockedCode: 'QUEUE_UNAVAILABLE',
+            readySnapshot: null,
+            exclusionDecision: 'pending',
+        }, {}, () => undefined, Date.parse('2026-07-13T12:00:00.001Z')))
+            .toThrow('PREFLIGHT_EXPIRED');
+    });
+
     it('returns a signed proxy path and never the stored raw CDN URL', () => {
         const snapshot = buildReadyPreflightSnapshot(
             profile(),

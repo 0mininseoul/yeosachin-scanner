@@ -153,6 +153,7 @@ export type BetaPrepareState =
     | 'preparing'
     | 'prepared'
     | 'capacity_blocked'
+    | 'retry_exhausted'
     | 'expired'
     | 'missing';
 
@@ -428,7 +429,7 @@ export interface BetaPreflightPrepareStore {
         prepareGeneration: number;
         prepareToken: string;
         claimToken: string | null;
-    }): Promise<'blocked' | 'prepared' | 'expired'>;
+    }): Promise<'blocked' | 'prepared' | 'retry_exhausted' | 'expired'>;
     reserveDispatch: PreflightStore['reserveDispatch'];
     markDispatched: PreflightStore['markDispatched'];
 }
@@ -908,8 +909,8 @@ export function createSupabasePreflightStore(
             if (error) throwRpcError(error, 'beta prepare claim');
             const row = rpcRow(data, 'beta prepare claim');
             const state = z.enum([
-                'reserved', 'preparing', 'prepared', 'capacity_blocked', 'expired',
-                'missing',
+                'reserved', 'preparing', 'prepared', 'capacity_blocked',
+                'retry_exhausted', 'expired', 'missing',
             ]).safeParse(row?.prepare_state);
             const disposition = z.enum([
                 'claimed', 'stale', 'busy', 'terminal', 'missing', 'exhausted',
@@ -966,7 +967,12 @@ export function createSupabasePreflightStore(
                 }
             );
             if (error) throwRpcError(error, 'beta prepare capacity block');
-            if (data !== 'blocked' && data !== 'prepared' && data !== 'expired') {
+            if (
+                data !== 'blocked'
+                && data !== 'prepared'
+                && data !== 'retry_exhausted'
+                && data !== 'expired'
+            ) {
                 throw new Error('PREFLIGHT_PERSISTENCE_ERROR: invalid beta capacity block.');
             }
             return data;
@@ -1430,7 +1436,9 @@ export async function prepareBetaPreflightDispatch(input: {
     });
     if (!claim.claimed) {
         if (claim.state === 'capacity_blocked') return 'blocked';
-        if (claim.state === 'expired') return 'noop';
+        if (claim.state === 'retry_exhausted' || claim.state === 'expired') {
+            return 'noop';
+        }
         if (claim.disposition === 'busy') {
             throw new PreflightWorkerRetryError({
                 category: 'persistence', retryable: true, httpStatus: null,
@@ -1461,7 +1469,9 @@ export async function prepareBetaPreflightDispatch(input: {
                 claimToken: claim.claimToken,
             });
             if (resolution === 'blocked') return 'blocked';
-            if (resolution === 'expired') return 'noop';
+            if (resolution === 'retry_exhausted' || resolution === 'expired') {
+                return 'noop';
+            }
         } else {
             if (claim.claimToken) {
                 try {

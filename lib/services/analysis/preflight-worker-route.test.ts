@@ -216,6 +216,29 @@ describe('preflight worker route', () => {
         await expect(response.json()).resolves.toEqual({ status: 'prepared' });
     });
 
+    it('acknowledges retry-exhausted and stale beta prepare deliveries as noops', async () => {
+        const payload = {
+            preflightId,
+            kind: 'beta_prepare' as const,
+            userId: '223e4567-e89b-42d3-a456-426614174000',
+            prepareGeneration: 2,
+            prepareToken: preflightId.replace(/^1/, '3'),
+        };
+        mocks.prepareBeta.mockResolvedValue('noop');
+
+        const exhausted = await POST(request(payload, 'Bearer signed', {
+            'X-CloudTasks-TaskRetryCount': '6',
+        }));
+        const stale = await POST(request(payload));
+
+        expect(exhausted.status).toBe(200);
+        expect(stale.status).toBe(200);
+        await expect(exhausted.json()).resolves.toEqual({ status: 'noop' });
+        await expect(stale.json()).resolves.toEqual({ status: 'noop' });
+        expect(mocks.process).not.toHaveBeenCalled();
+        expect(mocks.enqueue).not.toHaveBeenCalled();
+    });
+
     it('passes only a validated Cloud Tasks delivery retry count to beta prepare', async () => {
         const payload = {
             preflightId,

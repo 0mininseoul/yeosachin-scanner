@@ -173,11 +173,13 @@ interface ApiErrorPayload {
 
 class AnalyticsRequestError extends Error {
     readonly code: string;
+    readonly terminal: boolean;
 
-    constructor(message: string, code: string) {
+    constructor(message: string, code: string, terminal = false) {
         super(message);
         this.name = 'AnalyticsRequestError';
         this.code = code;
+        this.terminal = terminal;
     }
 }
 
@@ -414,9 +416,13 @@ export function useAnalysisV2Preflight({
         analyticsEligibleRef.current = response.headers.get('x-analytics-eligible') !== '0';
         setAnalyticsEligible(analyticsEligibleRef.current);
         if (!response.ok) {
+            const responseCode = payload && typeof payload === 'object' && !Array.isArray(payload)
+                ? Reflect.get(payload, 'code')
+                : null;
             throw new AnalyticsRequestError(
                 messageFromPayload(payload, '사전 점검 상태를 확인할 수 없습니다.'),
                 safeAnalyticsHttpErrorCode(response.status, payload),
+                response.status === 410 && responseCode === 'PREFLIGHT_EXPIRED',
             );
         }
         const parsed = preflightStatusV1Schema.safeParse(payload);
@@ -905,7 +911,17 @@ export function useAnalysisV2Preflight({
             } catch (cause) {
                 if (scope.isCurrent()) {
                     setError(cause instanceof Error ? cause.message : '사전 점검 상태를 확인할 수 없습니다.');
-                    schedule();
+                    if (cause instanceof AnalyticsRequestError && cause.terminal) {
+                        coordinator.beginLifecycle();
+                        idempotencyRef.current = null;
+                        preflightStartedAtRef.current = null;
+                        setPreflight(null);
+                        setExclusionState('undecided');
+                        setCreating(false);
+                        setStarting(false);
+                    } else {
+                        schedule();
+                    }
                 }
             } finally {
                 if (activeScope === scope) activeScope = null;

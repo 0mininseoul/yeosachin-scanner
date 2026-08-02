@@ -16,6 +16,24 @@ let containerStarted = false;
 let first: Client;
 let second: Client;
 let observer: Client;
+let retryExhaustionBeforeUpgrade: {
+    channel: string;
+    status: string;
+    error_code: string | null;
+    state: string;
+    retry_recorded: boolean;
+} | null = null;
+let retryExhaustionAfterUpgrade: {
+    channel: string;
+    status: string;
+    error_code: string | null;
+    state: string;
+    dispatch: string;
+    blocked_recorded: boolean;
+    completed_recorded: boolean;
+    retry_recorded: boolean;
+    validated: boolean;
+} | null = null;
 
 const migrationFiles = [
     '20260802010000_add_betatest_apify_credit_pool.sql',
@@ -46,6 +64,9 @@ const entryHardeningMigrations = [
     '20260802100000_harden_betatest_entry_lifecycle.sql',
     '20260802100100_harden_betatest_entry_lifecycle_runtime.sql',
     '20260802100200_validate_betatest_entry_lifecycle.sql',
+    '20260802100300_allow_betatest_prepare_retry_exhaustion_terminal_state.sql',
+    '20260802100400_terminalize_betatest_prepare_retry_exhaustion_runtime.sql',
+    '20260802100500_validate_betatest_prepare_retry_exhaustion.sql',
 ].map(file => readFileSync(new URL(
     `../../../supabase/migrations/${file}`,
     import.meta.url,
@@ -1910,11 +1931,240 @@ describe('beta Apify credit PostgreSQL 16 concurrency', () => {
 
     describe('hardened beta entry lifecycle', () => {
         beforeAll(async () => {
-            for (const migration of entryHardeningMigrations) {
+            for (const migration of entryHardeningMigrations.slice(0, 3)) {
                 await first.query(migration);
             }
             await first.query('SELECT public.set_analysis_beta_runtime_gate(TRUE)');
+            const backfillUserId = randomUUID();
+            const backfillToken = randomUUID();
+            await seedHardenedBetaUser(first, backfillUserId);
+            const backfillCreated = await createHardenedBeta({
+                client: first,
+                userId: backfillUserId,
+                idempotencyKey: `retry-backfill-${randomUUID()}`,
+                prepareToken: backfillToken,
+            });
+            await first.query(
+                `SELECT public.mark_analysis_beta_preflight_prepare_dispatched(
+                    $1,$2,1,$3
+                )`, [backfillCreated.preflight_id, backfillUserId, backfillToken],
+            );
+            await first.query(
+                `SELECT public.mark_analysis_beta_preflight_prepare_retry_exhausted(
+                    $1,$2,1,$3
+                )`, [backfillCreated.preflight_id, backfillUserId, backfillToken],
+            );
+            retryExhaustionBeforeUpgrade = (await first.query<{
+                channel: string;
+                status: string;
+                error_code: string | null;
+                state: string;
+                retry_recorded: boolean;
+            }>(`SELECT analysis_entry_channel AS channel,status,error_code,
+                       beta_prepare_state AS state,
+                       (beta_prepare_retry_exhausted_at IS NOT NULL) AS retry_recorded
+                FROM public.analysis_preflights WHERE id=$1`,
+            [backfillCreated.preflight_id])).rows[0] ?? null;
+
+            for (const migration of entryHardeningMigrations.slice(3)) {
+                await first.query(migration);
+            }
+            retryExhaustionAfterUpgrade = (await first.query<{
+                channel: string;
+                status: string;
+                error_code: string | null;
+                state: string;
+                dispatch: string;
+                blocked_recorded: boolean;
+                completed_recorded: boolean;
+                retry_recorded: boolean;
+                validated: boolean;
+            }>(`SELECT preflight.analysis_entry_channel AS channel,preflight.status,
+                       preflight.error_code,preflight.beta_prepare_state AS state,
+                       preflight.beta_prepare_dispatch_state AS dispatch,
+                       (preflight.blocked_at IS NOT NULL) AS blocked_recorded,
+                       (preflight.beta_prepare_completed_at IS NOT NULL) AS completed_recorded,
+                       (preflight.beta_prepare_retry_exhausted_at IS NOT NULL) AS retry_recorded,
+                       constraint_row.convalidated AS validated
+                FROM public.analysis_preflights AS preflight
+                CROSS JOIN pg_catalog.pg_constraint AS constraint_row
+                WHERE preflight.id=$1
+                  AND constraint_row.conname='analysis_preflights_beta_prepare_shape_check'`,
+            [backfillCreated.preflight_id])).rows[0] ?? null;
         }, 30_000);
+
+        it('backfills the historical pending retry tombstone before validating', () => {
+            expect(retryExhaustionBeforeUpgrade).toEqual({
+                channel: 'standard',
+                status: 'pending',
+                error_code: null,
+                state: 'reserved',
+                retry_recorded: true,
+            });
+            expect(retryExhaustionAfterUpgrade).toEqual({
+                channel: 'betatest',
+                status: 'blocked',
+                error_code: 'QUEUE_UNAVAILABLE',
+                state: 'retry_exhausted',
+                dispatch: 'completed',
+                blocked_recorded: true,
+                completed_recorded: true,
+                retry_recorded: true,
+                validated: true,
+            });
+        });
+
+        it('terminalizes the retry ceiling and requires a new idempotency key', async () => {
+            await first.query('SELECT public.set_analysis_beta_runtime_gate(TRUE)');
+            const userId = randomUUID();
+            const prepareToken = randomUUID();
+            const alternateToken = randomUUID();
+            const idempotencyKey = `retry-terminal-${randomUUID()}`;
+            await seedHardenedBetaUser(first, userId);
+            const created = await createHardenedBeta({
+                client: first, userId, idempotencyKey, prepareToken,
+            });
+            await first.query(
+                `SELECT public.mark_analysis_beta_preflight_prepare_dispatched(
+                    $1,$2,1,$3
+                )`, [created.preflight_id, userId, prepareToken],
+            );
+            expect((await first.query<{ exhausted: boolean }>(
+                `SELECT public.mark_analysis_beta_preflight_prepare_retry_exhausted(
+                    $1,$2,1,$3
+                ) AS exhausted`, [created.preflight_id, userId, prepareToken],
+            )).rows).toEqual([{ exhausted: true }]);
+
+            const replay = await createHardenedBeta({
+                client: first, userId, idempotencyKey, prepareToken: alternateToken,
+            });
+            expect(replay).toMatchObject({
+                preflight_id: created.preflight_id,
+                created: false,
+                preflight_status: 'blocked',
+                prepare_generation: 1,
+                prepare_token: prepareToken,
+                should_enqueue: false,
+            });
+            expect((await first.query<{
+                claimed: boolean;
+                prepare_state: string;
+                claim_disposition: string;
+            }>(`SELECT * FROM public.claim_analysis_beta_preflight_prepare(
+                    $1,$2,1,$3,$4,300
+                )`, [created.preflight_id, userId, prepareToken, randomUUID()])).rows)
+                .toEqual([{
+                    claimed: false,
+                    prepare_state: 'retry_exhausted',
+                    claim_disposition: 'terminal',
+                }]);
+            expect((await first.query<{ result: string }>(
+                `SELECT public.block_analysis_beta_preflight_capacity(
+                    $1,$2,1,$3,NULL
+                ) AS result`, [created.preflight_id, userId, prepareToken],
+            )).rows).toEqual([{ result: 'retry_exhausted' }]);
+
+            const retried = await createHardenedBeta({
+                client: first,
+                userId,
+                idempotencyKey: `retry-new-key-${randomUUID()}`,
+                prepareToken: alternateToken,
+            });
+            expect(retried).toMatchObject({
+                created: true,
+                preflight_status: 'pending',
+                prepare_generation: 1,
+                prepare_token: alternateToken,
+                should_enqueue: true,
+            });
+            expect(retried.preflight_id).not.toBe(created.preflight_id);
+
+            await first.query(
+                `UPDATE public.analysis_preflights
+                 SET expires_at=clock_timestamp()-INTERVAL '1 second'
+                 WHERE id=$1`, [created.preflight_id],
+            );
+            await first.query('SELECT public.purge_expired_analysis_v2_preflights(10)');
+            expect((await first.query<{
+                status: string;
+                state: string;
+                error_code: string | null;
+                retry_exhausted_at: string | null;
+            }>(`SELECT status,beta_prepare_state AS state,error_code,
+                       beta_prepare_retry_exhausted_at AS retry_exhausted_at
+                FROM public.analysis_preflights WHERE id=$1`,
+            [created.preflight_id])).rows).toEqual([{
+                status: 'expired',
+                state: 'expired',
+                error_code: null,
+                retry_exhausted_at: null,
+            }]);
+        });
+
+        it('re-samples expiry after waiting on the preflight row lock', async () => {
+            await first.query('SELECT public.set_analysis_beta_runtime_gate(TRUE)');
+            const userId = randomUUID();
+            const prepareToken = randomUUID();
+            await seedHardenedBetaUser(first, userId);
+            const created = await createHardenedBeta({
+                client: first,
+                userId,
+                idempotencyKey: `retry-lock-expiry-${randomUUID()}`,
+                prepareToken,
+            });
+            await first.query(
+                `SELECT public.mark_analysis_beta_preflight_prepare_dispatched(
+                    $1,$2,1,$3
+                )`, [created.preflight_id, userId, prepareToken],
+            );
+            await first.query(
+                `UPDATE public.analysis_preflights
+                 SET expires_at=clock_timestamp()+INTERVAL '350 milliseconds'
+                 WHERE id=$1`, [created.preflight_id],
+            );
+            const secondPid = (await second.query<{ pid: number }>(
+                'SELECT pg_backend_pid() AS pid',
+            )).rows[0]!.pid;
+            let transactionOpen = false;
+            try {
+                await first.query('BEGIN');
+                transactionOpen = true;
+                await first.query(
+                    'SELECT id FROM public.analysis_preflights WHERE id=$1 FOR UPDATE',
+                    [created.preflight_id],
+                );
+                const exhausted = second.query<{ exhausted: boolean }>(
+                    `SELECT public.mark_analysis_beta_preflight_prepare_retry_exhausted(
+                        $1,$2,1,$3
+                    ) AS exhausted`, [created.preflight_id, userId, prepareToken],
+                );
+                await waitUntilBlocked(secondPid);
+                await new Promise(resolve => setTimeout(resolve, 500));
+                await first.query('COMMIT');
+                transactionOpen = false;
+
+                expect((await exhausted).rows).toEqual([{ exhausted: true }]);
+            } finally {
+                if (transactionOpen) await first.query('ROLLBACK').catch(() => undefined);
+            }
+            expect((await first.query<{
+                status: string;
+                channel: string;
+                state: string;
+                error_code: string | null;
+                retry_exhausted_at: string | null;
+            }>(`SELECT status,analysis_entry_channel AS channel,
+                       beta_prepare_state AS state,error_code,
+                       beta_prepare_retry_exhausted_at AS retry_exhausted_at
+                FROM public.analysis_preflights WHERE id=$1`,
+            [created.preflight_id])).rows).toEqual([{
+                status: 'expired',
+                channel: 'betatest',
+                state: 'expired',
+                error_code: null,
+                retry_exhausted_at: null,
+            }]);
+        }, 15_000);
 
         it('serializes hardened entry, revocation, prepare, block, and provider replay races', async () => {
 

@@ -297,6 +297,59 @@ describe('beta-test client', () => {
         expect(secondKey).toBe('bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb');
     });
 
+    it('consumes an expired terminal poll once and retries with a new preflight key', async () => {
+        vi.useFakeTimers();
+        vi.spyOn(globalThis.crypto, 'randomUUID')
+            .mockReturnValueOnce('aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa')
+            .mockReturnValueOnce('bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb');
+        const creates: RequestInit[] = [];
+        let expiredStatusReads = 0;
+        vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+            const url = requestUrl(input);
+            if (url === '/api/analysis/betatest/preflight' && init?.method === 'POST') {
+                creates.push(init);
+                const preflightId = creates.length === 1 ? PREFLIGHT_ONE : PREFLIGHT_TWO;
+                return jsonResponse(accepted(preflightId), 202);
+            }
+            if (url === `/api/analysis/preflight/${PREFLIGHT_ONE}`) {
+                expiredStatusReads += 1;
+                return jsonResponse({
+                    schemaVersion: 1,
+                    code: 'PREFLIGHT_EXPIRED',
+                    error: '사전 점검 요청이 만료되었습니다.',
+                }, 410);
+            }
+            if (url === `/api/analysis/preflight/${PREFLIGHT_TWO}`) {
+                return jsonResponse(queueBlocked(PREFLIGHT_TWO));
+            }
+            throw new Error(`unexpected request: ${init?.method ?? 'GET'} ${url}`);
+        }));
+
+        const target = container.querySelector<HTMLInputElement>('#beta-target-instagram');
+        expect(target).not.toBeNull();
+        setInputValue(target!, 'expiry.target');
+        await clickButton(container, '무료 판독 가능 여부 확인');
+        await settleUi();
+        await act(async () => {
+            await vi.advanceTimersByTimeAsync(5_000);
+            for (let index = 0; index < 6; index += 1) await Promise.resolve();
+        });
+
+        expect(expiredStatusReads).toBe(1);
+        expect(container.textContent).toContain('사전 점검 요청이 만료되었습니다.');
+        expect(container.querySelector<HTMLInputElement>('#beta-target-instagram')?.value)
+            .toBe('expiry.target');
+
+        await clickButton(container, '무료 판독 가능 여부 확인');
+        await settleUi();
+
+        expect(creates).toHaveLength(2);
+        const firstKey = new Headers(creates[0].headers).get('idempotency-key');
+        const secondKey = new Headers(creates[1].headers).get('idempotency-key');
+        expect(firstKey).toBe('aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa');
+        expect(secondKey).toBe('bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb');
+    });
+
     it('shows a dedicated access message without presenting capacity retry state', async () => {
         vi.stubGlobal('fetch', vi.fn(async () => jsonResponse({
             schemaVersion: 1,

@@ -65,6 +65,18 @@ const migrationUrls = [
         '../../../supabase/migrations/20260802100200_validate_betatest_entry_lifecycle.sql',
         import.meta.url
     ),
+    new URL(
+        '../../../supabase/migrations/20260802100300_allow_betatest_prepare_retry_exhaustion_terminal_state.sql',
+        import.meta.url
+    ),
+    new URL(
+        '../../../supabase/migrations/20260802100400_terminalize_betatest_prepare_retry_exhaustion_runtime.sql',
+        import.meta.url
+    ),
+    new URL(
+        '../../../supabase/migrations/20260802100500_validate_betatest_prepare_retry_exhaustion.sql',
+        import.meta.url
+    ),
 ];
 const migrations = migrationUrls.map(url => readFileSync(url, 'utf8'));
 
@@ -879,6 +891,26 @@ let partialSettlementUpgrade: {
     active_count: number;
     settled_count: number;
 } | null = null;
+let retryExhaustionBeforeUpgrade: {
+    channel: string;
+    status: string;
+    error_code: string | null;
+    state: string;
+    retry_recorded: boolean;
+} | null = null;
+let retryExhaustionBackfillUpgrade: {
+    channel: string;
+    status: string;
+    error_code: string | null;
+    state: string;
+    dispatch: string;
+    lease_token: string | null;
+    lease_expires_at: string | null;
+    blocked_recorded: boolean;
+    completed_recorded: boolean;
+    retry_recorded: boolean;
+    constraint_validated: boolean;
+} | null = null;
 
 async function serviceQuery<T>(
     sql: string,
@@ -1246,7 +1278,7 @@ async function createDedicatedBetaPreflight(input: {
 beforeAll(async () => {
     db = await PGlite.create({ extensions: { pgcrypto } });
     await db.exec(bootstrap);
-    for (const migration of migrations.slice(0, -5)) {
+    for (const migration of migrations.slice(0, -8)) {
         await db.exec(migration);
     }
     await seedPendingBetaRequest();
@@ -1277,9 +1309,74 @@ beforeAll(async () => {
         [allocation.allocationId]
     );
 
-    const upgradeMigrations = migrations.slice(-5);
-    if (upgradeMigrations.length !== 5) throw new Error('missing runtime migrations');
-    for (const migration of upgradeMigrations) await db.exec(migration);
+    const upgradeMigrations = migrations.slice(-8);
+    if (upgradeMigrations.length !== 8) throw new Error('missing runtime migrations');
+    for (const migration of upgradeMigrations.slice(0, 5)) await db.exec(migration);
+
+    const backfillUserId = '10000000-0000-4000-8000-000000000099';
+    const backfillPrepareToken = '41000000-0000-4000-8000-000000000099';
+    await db.query('INSERT INTO public.users(id) VALUES ($1)', [backfillUserId]);
+    await serviceQuery('SELECT public.set_analysis_beta_runtime_gate(TRUE)');
+    await serviceQuery(
+        `SELECT public.upsert_analysis_beta_access_grant(
+            $1,TRUE,pg_catalog.clock_timestamp()+INTERVAL '1 hour',$2
+        )`, [backfillUserId, AUDIT_HASH]
+    );
+    const backfillCreated = (await serviceQuery<BetaCreateRow>(
+        `SELECT * FROM public.create_or_replay_analysis_v2_betatest_preflight(
+            $1,'backfill@example.com','google','backfill.target',$2,
+            '{}'::JSONB,'{}'::JSONB,'test','{}'::JSONB,'{}'::JSONB,$3
+        )`, [backfillUserId, 'betatest-backfill-key-000001', backfillPrepareToken]
+    )).rows[0];
+    await serviceQuery(
+        `SELECT public.mark_analysis_beta_preflight_prepare_dispatched(
+            $1,$2,1,$3
+        )`, [backfillCreated.preflight_id, backfillUserId, backfillPrepareToken]
+    );
+    await serviceQuery(
+        `SELECT public.mark_analysis_beta_preflight_prepare_retry_exhausted(
+            $1,$2,1,$3
+        )`, [backfillCreated.preflight_id, backfillUserId, backfillPrepareToken]
+    );
+    retryExhaustionBeforeUpgrade = (await db.query<{
+        channel: string;
+        status: string;
+        error_code: string | null;
+        state: string;
+        retry_recorded: boolean;
+    }>(`SELECT analysis_entry_channel AS channel,status,error_code,
+               beta_prepare_state AS state,
+               (beta_prepare_retry_exhausted_at IS NOT NULL) AS retry_recorded
+        FROM public.analysis_preflights WHERE id=$1`, [backfillCreated.preflight_id]))
+        .rows[0] ?? null;
+
+    for (const migration of upgradeMigrations.slice(5)) await db.exec(migration);
+    retryExhaustionBackfillUpgrade = (await db.query<{
+        channel: string;
+        status: string;
+        error_code: string | null;
+        state: string;
+        dispatch: string;
+        lease_token: string | null;
+        lease_expires_at: string | null;
+        blocked_recorded: boolean;
+        completed_recorded: boolean;
+        retry_recorded: boolean;
+        constraint_validated: boolean;
+    }>(`SELECT preflight.analysis_entry_channel AS channel,preflight.status,
+               preflight.error_code,preflight.beta_prepare_state AS state,
+               preflight.beta_prepare_dispatch_state AS dispatch,
+               preflight.beta_prepare_lease_token AS lease_token,
+               preflight.beta_prepare_lease_expires_at AS lease_expires_at,
+               (preflight.blocked_at IS NOT NULL) AS blocked_recorded,
+               (preflight.beta_prepare_completed_at IS NOT NULL) AS completed_recorded,
+               (preflight.beta_prepare_retry_exhausted_at IS NOT NULL) AS retry_recorded,
+               constraint_row.convalidated AS constraint_validated
+        FROM public.analysis_preflights AS preflight
+        CROSS JOIN pg_catalog.pg_constraint AS constraint_row
+        WHERE preflight.id=$1
+          AND constraint_row.conname='analysis_preflights_beta_prepare_shape_check'`,
+    [backfillCreated.preflight_id])).rows[0] ?? null;
     entryHardeningApplied = true;
     const upgraded = await db.query<{
         allocation_state: string;
@@ -1352,6 +1449,9 @@ describe('betatest provider policy/guard migration PGlite', () => {
             '20260802100000_harden_betatest_entry_lifecycle.sql',
             '20260802100100_harden_betatest_entry_lifecycle_runtime.sql',
             '20260802100200_validate_betatest_entry_lifecycle.sql',
+            '20260802100300_allow_betatest_prepare_retry_exhaustion_terminal_state.sql',
+            '20260802100400_terminalize_betatest_prepare_retry_exhaustion_runtime.sql',
+            '20260802100500_validate_betatest_prepare_retry_exhaustion.sql',
         ]);
         const constraint = await db.query<{ validated: boolean }>(
             `SELECT convalidated AS validated
@@ -1363,6 +1463,26 @@ describe('betatest provider policy/guard migration PGlite', () => {
             allocation_state: 'active',
             active_count: 1,
             settled_count: 7,
+        });
+        expect(retryExhaustionBeforeUpgrade).toEqual({
+            channel: 'standard',
+            status: 'pending',
+            error_code: null,
+            state: 'reserved',
+            retry_recorded: true,
+        });
+        expect(retryExhaustionBackfillUpgrade).toEqual({
+            channel: 'betatest',
+            status: 'blocked',
+            error_code: 'QUEUE_UNAVAILABLE',
+            state: 'retry_exhausted',
+            dispatch: 'completed',
+            lease_token: null,
+            lease_expires_at: null,
+            blocked_recorded: true,
+            completed_recorded: true,
+            retry_recorded: true,
+            constraint_validated: true,
         });
     });
 
@@ -1499,7 +1619,7 @@ describe('betatest provider policy/guard migration PGlite', () => {
         )).rows).toEqual([{ count: 1 }]);
     });
 
-    it('rearms only an expired lease or explicitly exhausted delivery and fences the stale task', async () => {
+    it('rearms an expired lease but terminalizes exhausted delivery until a new key is used', async () => {
         await db.query('INSERT INTO public.users(id) VALUES ($1)', [USER_ID]);
         await serviceQuery(
             `SELECT public.upsert_analysis_beta_access_grant(
@@ -1580,6 +1700,39 @@ describe('betatest provider policy/guard migration PGlite', () => {
                 $1,$2,1,$3
             ) AS exhausted`, [exhausted.preflight_id, USER_ID, exhaustedToken]
         )).rows).toEqual([{ exhausted: true }]);
+
+        const terminal = await db.query<{
+            channel: string;
+            status: string;
+            error_code: string;
+            state: string;
+            dispatch: string;
+            lease_token: string | null;
+            lease_expires_at: string | null;
+            blocked_at: string | null;
+            completed_at: string | null;
+            retry_exhausted_at: string | null;
+        }>(`SELECT analysis_entry_channel AS channel,status,error_code,
+                   beta_prepare_state AS state,
+                   beta_prepare_dispatch_state AS dispatch,
+                   beta_prepare_lease_token AS lease_token,
+                   beta_prepare_lease_expires_at AS lease_expires_at,
+                   blocked_at,beta_prepare_completed_at AS completed_at,
+                   beta_prepare_retry_exhausted_at AS retry_exhausted_at
+            FROM public.analysis_preflights WHERE id=$1`, [exhausted.preflight_id]);
+        expect(terminal.rows[0]).toMatchObject({
+            channel: 'betatest',
+            status: 'blocked',
+            error_code: 'QUEUE_UNAVAILABLE',
+            state: 'retry_exhausted',
+            dispatch: 'completed',
+            lease_token: null,
+            lease_expires_at: null,
+        });
+        expect(terminal.rows[0]?.blocked_at).not.toBeNull();
+        expect(terminal.rows[0]?.completed_at).not.toBeNull();
+        expect(terminal.rows[0]?.retry_exhausted_at).not.toBeNull();
+
         const recoveredToken = '41000000-0000-4000-8000-000000000021';
         const recovered = await createDedicatedBetaPreflight({
             idempotencyKey: 'betatest-entry-key-000020',
@@ -1587,10 +1740,139 @@ describe('betatest provider policy/guard migration PGlite', () => {
         });
         expect(recovered).toMatchObject({
             preflight_id: exhausted.preflight_id,
-            prepare_generation: 2,
+            created: false,
+            preflight_status: 'blocked',
+            prepare_generation: 1,
+            prepare_token: exhaustedToken,
+            should_enqueue: false,
+        });
+
+        expect((await serviceQuery<{
+            claimed: boolean; prepare_state: string; claim_disposition: string;
+        }>(`SELECT * FROM public.claim_analysis_beta_preflight_prepare(
+                $1,$2,1,$3,$4,300
+            )`, [
+                exhausted.preflight_id, USER_ID, exhaustedToken, PREPARE_CLAIM_TOKEN,
+            ])).rows).toEqual([{
+            claimed: false,
+            prepare_state: 'retry_exhausted',
+            claim_disposition: 'terminal',
+        }]);
+        expect((await serviceQuery<{ result: string }>(
+            `SELECT public.block_analysis_beta_preflight_capacity(
+                $1,$2,1,$3,NULL
+            ) AS result`, [exhausted.preflight_id, USER_ID, exhaustedToken]
+        )).rows).toEqual([{ result: 'retry_exhausted' }]);
+        expect((await serviceQuery<{ released: boolean }>(
+            `SELECT public.release_analysis_beta_preflight_prepare_claim(
+                $1,$2,1,$3,$4
+            ) AS released`, [
+                exhausted.preflight_id, USER_ID, exhaustedToken, PREPARE_CLAIM_TOKEN,
+            ]
+        )).rows).toEqual([{ released: false }]);
+
+        const retried = await createDedicatedBetaPreflight({
+            idempotencyKey: 'betatest-entry-key-000021',
+            prepareToken: recoveredToken,
+        });
+        expect(retried).toMatchObject({
+            created: true,
+            preflight_status: 'pending',
+            prepare_generation: 1,
             prepare_token: recoveredToken,
             should_enqueue: true,
         });
+        expect(retried.preflight_id).not.toBe(exhausted.preflight_id);
+
+        await db.query(
+            `UPDATE public.analysis_preflights
+             SET expires_at=pg_catalog.clock_timestamp()-INTERVAL '1 second'
+             WHERE id=$1`, [exhausted.preflight_id]
+        );
+        await serviceQuery('SELECT public.purge_expired_analysis_v2_preflights(10)');
+        expect((await db.query<{
+            status: string;
+            channel: string;
+            state: string;
+            dispatch: string;
+            error_code: string | null;
+            blocked_at: string | null;
+            retry_exhausted_at: string | null;
+        }>(`SELECT status,analysis_entry_channel AS channel,
+                   beta_prepare_state AS state,
+                   beta_prepare_dispatch_state AS dispatch,error_code,blocked_at,
+                   beta_prepare_retry_exhausted_at AS retry_exhausted_at
+            FROM public.analysis_preflights WHERE id=$1`, [exhausted.preflight_id])).rows)
+            .toEqual([{
+                status: 'expired',
+                channel: 'betatest',
+                state: 'expired',
+                dispatch: 'completed',
+                error_code: null,
+                blocked_at: null,
+                retry_exhausted_at: null,
+            }]);
+    });
+
+    it('expires a retry-ceiling delivery that arrives after the preflight TTL', async () => {
+        await db.query('INSERT INTO public.users(id) VALUES ($1)', [USER_ID]);
+        await serviceQuery(
+            `SELECT public.upsert_analysis_beta_access_grant(
+                $1,TRUE,pg_catalog.clock_timestamp()+INTERVAL '1 hour',$2
+            )`, [USER_ID, AUDIT_HASH]
+        );
+        const created = await createDedicatedBetaPreflight({
+            idempotencyKey: 'betatest-expired-retry-key-000001',
+        });
+        await serviceQuery(
+            `SELECT public.mark_analysis_beta_preflight_prepare_dispatched(
+                $1,$2,1,$3
+            )`, [created.preflight_id, USER_ID, PREPARE_TOKEN]
+        );
+        await db.query(
+            `UPDATE public.analysis_preflights
+             SET expires_at=pg_catalog.clock_timestamp()-INTERVAL '1 second'
+             WHERE id=$1`, [created.preflight_id]
+        );
+
+        expect((await serviceQuery<{ exhausted: boolean }>(
+            `SELECT public.mark_analysis_beta_preflight_prepare_retry_exhausted(
+                $1,$2,1,$3
+            ) AS exhausted`, [created.preflight_id, USER_ID, PREPARE_TOKEN]
+        )).rows).toEqual([{ exhausted: true }]);
+        expect((await db.query<{
+            status: string;
+            channel: string;
+            state: string;
+            dispatch: string;
+            error_code: string | null;
+            blocked_at: string | null;
+            retry_exhausted_at: string | null;
+        }>(`SELECT status,analysis_entry_channel AS channel,
+                   beta_prepare_state AS state,
+                   beta_prepare_dispatch_state AS dispatch,error_code,blocked_at,
+                   beta_prepare_retry_exhausted_at AS retry_exhausted_at
+            FROM public.analysis_preflights WHERE id=$1`, [created.preflight_id])).rows)
+            .toEqual([{
+                status: 'expired',
+                channel: 'betatest',
+                state: 'expired',
+                dispatch: 'completed',
+                error_code: null,
+                blocked_at: null,
+                retry_exhausted_at: null,
+            }]);
+        expect((await serviceQuery<{
+            claimed: boolean; prepare_state: string; claim_disposition: string;
+        }>(`SELECT * FROM public.claim_analysis_beta_preflight_prepare(
+                $1,$2,1,$3,$4,300
+            )`, [
+                created.preflight_id, USER_ID, PREPARE_TOKEN, PREPARE_CLAIM_TOKEN,
+            ])).rows).toEqual([{
+            claimed: false,
+            prepare_state: 'expired',
+            claim_disposition: 'terminal',
+        }]);
     });
 
     it('terminalizes a queued beta prepare when the gate is disabled before claim', async () => {
