@@ -6,6 +6,8 @@
 -- not enough: an observation at the same time may have been read before the
 -- provider incorporated the charge.
 
+BEGIN;
+
 SET LOCAL lock_timeout = '5s';
 SET LOCAL statement_timeout = '2min';
 
@@ -577,3 +579,4 @@ END; $$;
 REVOKE ALL ON FUNCTION public.archive_settled_analysis_beta_apify_credit_allocations(INTEGER)
  FROM PUBLIC, anon, authenticated, service_role;
 GRANT EXECUTE ON FUNCTION public.archive_settled_analysis_beta_apify_credit_allocations(INTEGER) TO service_role;
+COMMIT;

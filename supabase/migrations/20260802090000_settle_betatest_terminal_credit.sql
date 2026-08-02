@@ -1,6 +1,8 @@
 -- Terminal beta-credit settlement is deliberately a post-commit worker action.
 -- Do not call it from request/preflight terminal triggers: admission and terminal
 -- transactions have different ownership and combining them would invert locks.
+BEGIN;
+
 SET LOCAL lock_timeout = '5s';
 SET LOCAL statement_timeout = '2min';
 
@@ -254,3 +256,4 @@ ALTER FUNCTION public.recover_analysis_beta_apify_credit_allocations(INTEGER)
     SET lock_timeout TO '1s';
 ALTER FUNCTION public.recover_analysis_beta_apify_credit_allocations(INTEGER)
     SET statement_timeout TO '5s';
+COMMIT;

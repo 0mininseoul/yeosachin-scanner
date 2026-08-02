@@ -1,5 +1,7 @@
 -- Bind the durable betatest allocation to the immutable provider policy and
 -- fence every provider-reservation entry point to that allocation.
+BEGIN;
+
 SET LOCAL lock_timeout = '5s';
 SET LOCAL statement_timeout = '2min';
 
@@ -539,3 +541,4 @@ END;
 $$;
 REVOKE ALL ON FUNCTION public.load_analysis_v2_collection_context_with_policy(UUID,TEXT,UUID,TEXT) FROM PUBLIC, anon, authenticated, service_role;
 GRANT EXECUTE ON FUNCTION public.load_analysis_v2_collection_context_with_policy(UUID,TEXT,UUID,TEXT) TO service_role;
+COMMIT;

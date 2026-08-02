@@ -6,6 +6,8 @@
 -- policy, and settlement state are intentionally introduced by their own later
 -- Task 2B migration so this foundation keeps a bounded lock transaction.
 
+BEGIN;
+
 SET LOCAL lock_timeout = '5s';
 SET LOCAL statement_timeout = '2min';
 
@@ -721,3 +723,4 @@ COMMENT ON COLUMN public.analysis_preflights.analysis_entry_channel IS
     'Server-persisted entry channel; betatest is authority only when paired with a current service-owned access grant.';
 COMMENT ON COLUMN public.analysis_requests.analysis_entry_channel IS
     'Immutable-at-admission entry channel snapshot; it does not widen the production/test_entitlement access-mode domain.';
+COMMIT;
