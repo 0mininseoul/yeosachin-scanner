@@ -1128,6 +1128,48 @@ export function fallbackCallContext(
     };
 }
 
+/**
+ * Dedicated beta worker boundary. A preflight begins as standard; only the
+ * coordinator's atomic hold may flip its persisted entry channel. Ordinary
+ * dispatch is strictly later, so replay/crash cannot start a provider without
+ * the durable hold.
+ */
+export async function prepareBetaPreflightDispatch(input: {
+    preflightId: string;
+    userId: string;
+    coordinator: BetaApifyPreflightCoordinator;
+    store?: Pick<PreflightStore, 'reserveDispatch' | 'markDispatched'>;
+    enqueue: (preflightId: string, generation: number) => Promise<'enqueued' | 'exists'>;
+}): Promise<'prepared' | 'noop'> {
+    const store = input.store ?? preflightStore;
+    try {
+        await input.coordinator.prepare({
+            preflightId: input.preflightId,
+            userId: input.userId,
+        });
+    } catch (error) {
+        // A capacity/refresh failure is a soft admission block. It must never
+        // reserve normal dispatch or start a provider.
+        if (error instanceof Error && error.message === BETA_APIFY_POOL_CAPACITY_ERROR) {
+            return 'noop';
+        }
+        throw error;
+    }
+    const reservation = await store.reserveDispatch(input.preflightId, input.userId);
+    if (!reservation.shouldEnqueue) return 'prepared';
+    if (!reservation.reservationToken) {
+        throw new Error('PREFLIGHT_PERSISTENCE_ERROR: beta dispatch token is missing.');
+    }
+    await input.enqueue(input.preflightId, reservation.generation);
+    await store.markDispatched({
+        preflightId: input.preflightId,
+        userId: input.userId,
+        generation: reservation.generation,
+        reservationToken: reservation.reservationToken,
+    });
+    return 'prepared';
+}
+
 export async function processPreflight(
     preflightId: string,
     dependencies: {

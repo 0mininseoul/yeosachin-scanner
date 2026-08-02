@@ -3,6 +3,8 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 const mocks = vi.hoisted(() => ({
     getConfig: vi.fn(),
     process: vi.fn(),
+    prepareBeta: vi.fn(),
+    enqueue: vi.fn(),
     processAdmission: vi.fn(),
     settleBetaCredit: vi.fn(),
     refreshBetaCredit: vi.fn(),
@@ -27,7 +29,11 @@ vi.mock('@/lib/observability/server', () => ({
 }));
 vi.mock('@/lib/services/analysis/preflight', async (importOriginal) => {
     const actual = await importOriginal<typeof import('./preflight')>();
-    return { ...actual, processPreflight: mocks.process };
+    return {
+        ...actual,
+        processPreflight: mocks.process,
+        prepareBetaPreflightDispatch: mocks.prepareBeta,
+    };
 });
 vi.mock('@/lib/services/analysis/fresh-plan-admission', () => ({
     processAnalysisV2FreshAdmission: mocks.processAdmission,
@@ -35,6 +41,7 @@ vi.mock('@/lib/services/analysis/fresh-plan-admission', () => ({
 vi.mock('@/lib/services/analysis/preflight-tasks', () => ({
     getPreflightTasksConfig: mocks.getConfig,
     verifyPreflightTaskAuthorization: mocks.verify,
+    enqueuePreflightTask: mocks.enqueue,
 }));
 vi.mock('@/lib/services/analysis/beta-apify-credit-settlement-runtime', async (importOriginal) => {
     const actual = await importOriginal<
@@ -75,6 +82,8 @@ describe('preflight worker route', () => {
         mocks.getConfig.mockReturnValue(config);
         mocks.verify.mockResolvedValue(true);
         mocks.process.mockResolvedValue('ready');
+        mocks.prepareBeta.mockResolvedValue('prepared');
+        mocks.enqueue.mockResolvedValue('enqueued');
         mocks.processAdmission.mockResolvedValue('ready');
         mocks.settleBetaCredit.mockResolvedValue(false);
         mocks.refreshBetaCredit.mockResolvedValue(undefined);
@@ -176,6 +185,18 @@ describe('preflight worker route', () => {
             expect.objectContaining({ betaCreditCoordinator: expect.any(Object) })
         );
         expect(mocks.process).not.toHaveBeenCalled();
+    });
+
+    it('prepares beta credit before ordinary dispatch and treats capacity as a noop', async () => {
+        const response = await POST(request({ preflightId, kind: 'beta_prepare', userId: '223e4567-e89b-42d3-a456-426614174000' }));
+        expect(response.status).toBe(200);
+        expect(mocks.prepareBeta).toHaveBeenCalledWith(expect.objectContaining({
+            preflightId,
+            userId: '223e4567-e89b-42d3-a456-426614174000',
+            enqueue: expect.any(Function),
+        }));
+        expect(mocks.process).not.toHaveBeenCalled();
+        await expect(response.json()).resolves.toEqual({ status: 'prepared' });
     });
 
     it('refreshes the exact beta pool only after a fresh-admission block settles credit', async () => {

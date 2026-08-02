@@ -255,6 +255,30 @@ describe('preflight owner routes', () => {
         expect(mocks.store.createOrReplay).not.toHaveBeenCalled();
     });
 
+    it('keeps ordinary preflight isolated from beta body, header, query, and referrer hints', async () => {
+        mocks.trustedAccessMode.mockReturnValue('production');
+        const response = await createPreflight(new Request(
+            'https://example.com/api/analysis/preflight?channel=betatest',
+            {
+                method: 'POST',
+                headers: {
+                    'content-type': 'application/json',
+                    'idempotency-key': 'preflight-key-000000000000',
+                    'x-analysis-beta': 'true',
+                    referer: 'https://example.com/analyze?betatest=true',
+                },
+                body: JSON.stringify({ targetInstagramId: 'target.name' }),
+            }
+        ));
+        expect(response.status).toBe(202);
+        expect(mocks.store.createOrReplay).toHaveBeenCalledWith(
+            expect.objectContaining({ accessMode: 'production' })
+        );
+        expect(mocks.enqueue).toHaveBeenCalledWith(
+            preflightId, 1, expect.any(Object)
+        );
+    });
+
     it('blocks new intake without stopping already authenticated workers', async () => {
         mocks.admissionAvailable.mockReturnValue(false);
         const response = await createPreflight(postRequest());

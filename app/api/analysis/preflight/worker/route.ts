@@ -2,6 +2,7 @@ import { NextResponse } from 'next/server';
 import { z } from 'zod';
 import {
     classifyPreflightWorkerFailure,
+    prepareBetaPreflightDispatch,
     processPreflight,
     type PreflightProcessObservation,
 } from '@/lib/services/analysis/preflight';
@@ -9,6 +10,7 @@ import { processAnalysisV2FreshAdmission } from '@/lib/services/analysis/fresh-p
 import { supabaseAdmin } from '@/lib/supabase/admin';
 import {
     getPreflightTasksConfig,
+    enqueuePreflightTask,
     verifyPreflightTaskAuthorization,
 } from '@/lib/services/analysis/preflight-tasks';
 import {
@@ -37,6 +39,11 @@ import {
 const workerRequestSchema = z.union([
     z.object({
         preflightId: z.string().uuid(),
+    }).strict(),
+    z.object({
+        preflightId: z.string().uuid(),
+        kind: z.literal('beta_prepare'),
+        userId: z.string().uuid(),
     }).strict(),
     z.object({
         preflightId: z.string().uuid(),
@@ -94,21 +101,31 @@ async function handlePOST(
     }
 
     const task = parsed.data;
-    const isFreshAdmission = 'kind' in task;
+    const isFreshAdmission = 'kind' in task && task.kind === 'fresh_admission';
+    const isBetaPrepare = 'kind' in task && task.kind === 'beta_prepare';
     const betaCreditCoordinator = createBetaApifyPreflightCoordinator({
         store: createBetaApifyCreditPoolStore(supabaseAdmin),
         clientForSlot: createServerBetaApifyCreditClientFactory(),
     });
     let profileFailureObserved = false;
     try {
-        let outcome: 'noop' | 'ready' | 'blocked';
-        if ('kind' in task) {
+        let outcome: 'noop' | 'ready' | 'blocked' | 'prepared';
+        if (isFreshAdmission) {
             outcome = await processAnalysisV2FreshAdmission(supabaseAdmin, {
                 preflightId: task.preflightId,
                 generation: task.generation,
                 dispatchGeneration: task.dispatchGeneration,
                 dispatchToken: task.dispatchToken,
             }, { betaCreditCoordinator });
+        } else if (isBetaPrepare) {
+            outcome = await prepareBetaPreflightDispatch({
+                preflightId: task.preflightId,
+                userId: task.userId,
+                coordinator: betaCreditCoordinator,
+                enqueue: (preflightId, generation) => enqueuePreflightTask(
+                    preflightId, generation, { config }
+                ),
+            });
         } else {
             // Construction is server-only and lazy: no token is read and no network starts
             // until a claimed row identifies itself as the dedicated beta channel.
@@ -138,7 +155,9 @@ async function handlePOST(
                 }
             });
         }
-        const operation = isFreshAdmission ? 'fresh_admission' : 'profile';
+        const operation = isFreshAdmission
+            ? 'fresh_admission'
+            : isBetaPrepare ? 'beta_prepare' : 'profile';
         const disposition = outcome === 'noop' ? 'exists' : outcome;
         if (isFreshAdmission || outcome === 'noop') {
             operationalLogger.emit({
@@ -170,7 +189,9 @@ async function handlePOST(
                 fields: {
                     ...context,
                     preflight_id: task.preflightId,
-                    operation: isFreshAdmission ? 'fresh_admission' : 'profile',
+                    operation: isFreshAdmission
+                        ? 'fresh_admission'
+                        : isBetaPrepare ? 'beta_prepare' : 'profile',
                     disposition: 'failed',
                     retryable: failure.retryable,
                     ...(failure.httpStatus === null ? {} : { status: failure.httpStatus }),

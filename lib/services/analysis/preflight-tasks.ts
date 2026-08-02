@@ -199,6 +199,13 @@ export function freshAdmissionTaskId(
     return `preflight-admission-${preflightId.toLowerCase()}-g${generation}-d${dispatchGeneration}`;
 }
 
+export function betaPreflightPrepareTaskId(preflightId: string): string {
+    if (!UUID_PATTERN.test(preflightId)) {
+        throw new Error('PREFLIGHT_TASKS_CONFIG_ERROR: invalid preflight id.');
+    }
+    return `preflight-beta-prepare-${preflightId.toLowerCase()}`;
+}
+
 function isAlreadyExists(error: unknown): boolean {
     if (!error || typeof error !== 'object') return false;
     const value = error as { code?: unknown; message?: unknown };
@@ -289,6 +296,42 @@ export async function enqueuePreflightTask(
         }
     }
     throw new PreflightTaskEnqueueError('replayable');
+}
+
+/**
+ * This task intentionally precedes ordinary dispatch. Its worker performs the
+ * exact-six refresh and atomic beta hold before it may reserve normal work.
+ */
+export async function enqueueBetaPreflightPrepareTask(
+    preflightId: string,
+    userId: string,
+    options: {
+        config?: PreflightTasksConfig;
+        client?: CloudTasksClientLike;
+    } = {}
+): Promise<'enqueued' | 'exists'> {
+    if (!UUID_PATTERN.test(userId)) {
+        throw new Error('PREFLIGHT_TASKS_CONFIG_ERROR: invalid beta owner id.');
+    }
+    const config = options.config ?? getPreflightTasksConfig();
+    if (!config) throw new Error('PREFLIGHT_TASKS_CONFIG_ERROR: queue is not configured.');
+    const client = options.client ?? await getSharedTasksClient(config);
+    const taskId = betaPreflightPrepareTaskId(preflightId);
+    const parent = client.queuePath(config.project, config.location, config.queue);
+    const name = client.taskPath(config.project, config.location, config.queue, taskId);
+    try {
+        await client.createTask(taskRequest({
+            kind: 'beta_prepare',
+            preflightId: preflightId.toLowerCase(),
+            userId: userId.toLowerCase(),
+        }, name, parent, config));
+        return 'enqueued';
+    } catch (error) {
+        if (isAlreadyExists(error)) return 'exists';
+        throw new PreflightTaskEnqueueError(
+            isTerminalCreateFailure(error) ? 'terminal' : 'replayable'
+        );
+    }
 }
 
 export async function enqueueFreshAdmissionTask(

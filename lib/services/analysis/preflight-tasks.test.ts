@@ -1,6 +1,8 @@
 import { describe, expect, it, vi } from 'vitest';
 import {
     PreflightTaskEnqueueError,
+    betaPreflightPrepareTaskId,
+    enqueueBetaPreflightPrepareTask,
     enqueueFreshAdmissionTask,
     enqueuePreflightTask,
     freshAdmissionTaskId,
@@ -267,6 +269,25 @@ describe('preflight Cloud Tasks', () => {
                 dispatchGeneration: 2,
                 dispatchToken,
             });
+    });
+
+    it('replays a deterministic beta-prepare task without reserving ordinary dispatch', async () => {
+        const createTask = vi.fn().mockRejectedValue({ code: 6 });
+        const client = {
+            queuePath: vi.fn(() => 'queue-path'),
+            taskPath: vi.fn((_p: string, _l: string, _q: string, task: string) => (
+                `queue-path/tasks/${task}`
+            )),
+            createTask,
+        };
+        const ownerId = '223e4567-e89b-42d3-a456-426614174000';
+        expect(betaPreflightPrepareTaskId(preflightId))
+            .toBe(`preflight-beta-prepare-${preflightId}`);
+        await expect(enqueueBetaPreflightPrepareTask(preflightId, ownerId, { config, client }))
+            .resolves.toBe('exists');
+        const task = createTask.mock.calls[0][0] as { task: { httpRequest: { body: string } } };
+        expect(JSON.parse(Buffer.from(task.task.httpRequest.body, 'base64').toString()))
+            .toEqual({ kind: 'beta_prepare', preflightId, userId: ownerId });
     });
 
     it('accepts only a verified token from the configured service account', async () => {
