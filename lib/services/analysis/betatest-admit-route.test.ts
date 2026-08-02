@@ -1,7 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 const mocks = vi.hoisted(() => ({
-    createClient: vi.fn(), getUser: vi.fn(), enabled: vi.fn(), hasAccess: vi.fn(),
+    createClient: vi.fn(), getUser: vi.fn(), enabled: vi.fn(), ensureAccess: vi.fn(),
     reserve: vi.fn(), admit: vi.fn(), replayConsumed: vi.fn(), dispatch: vi.fn(),
     runtimeConfig: vi.fn(),
     admin: { from: vi.fn() }, query: { select: vi.fn(), eq: vi.fn(), maybeSingle: vi.fn() },
@@ -10,7 +10,7 @@ const mocks = vi.hoisted(() => ({
 vi.mock('@/lib/supabase/server', () => ({ createClient: mocks.createClient }));
 vi.mock('@/lib/supabase/admin', () => ({ supabaseAdmin: mocks.admin }));
 vi.mock('@/lib/services/analysis/betatest-access', () => ({
-    betaTestFreePoolEnabled: mocks.enabled, hasBetaTestAccess: mocks.hasAccess,
+    betaTestFreePoolEnabled: mocks.enabled, ensureBetaTestAccess: mocks.ensureAccess,
     BETA_TEST_ACCESS_UNAVAILABLE: 'BETA_ACCESS_UNAVAILABLE',
 }));
 vi.mock('@/lib/services/analysis/fresh-plan-admission', () => ({
@@ -33,6 +33,9 @@ vi.mock('@/lib/services/analysis/beta-apify-credit-runtime', () => ({
     getBetaApifyCreditPoolRuntimeConfig: mocks.runtimeConfig,
 }));
 vi.mock('@/lib/services/analysis/v2-tasks', () => ({ dispatchAnalysisV2Job: mocks.dispatch }));
+vi.mock('@/lib/observability/server', () => ({
+    operationalLogger: { emit: vi.fn() },
+}));
 
 import { POST } from '@/app/api/analysis/betatest/preflight/[preflightId]/admit/route';
 
@@ -47,7 +50,7 @@ describe('betatest plan admission route', () => {
         vi.clearAllMocks();
         mocks.createClient.mockResolvedValue({ auth: { getUser: mocks.getUser }, rpc: vi.fn() });
         mocks.getUser.mockResolvedValue({ data: { user: { id: userId } }, error: null });
-        mocks.enabled.mockReturnValue(true); mocks.hasAccess.mockResolvedValue(true);
+        mocks.enabled.mockReturnValue(true); mocks.ensureAccess.mockResolvedValue(true);
         mocks.runtimeConfig.mockReturnValue({
             enabled: true,
             maxSnapshotAgeSeconds: 300,
@@ -63,13 +66,18 @@ describe('betatest plan admission route', () => {
     });
 
     it('rechecks flag, grant, ownership, and beta channel before admission mutations', async () => {
-        mocks.hasAccess.mockResolvedValue(false);
+        mocks.ensureAccess.mockResolvedValue(false);
         expect((await POST(request(), context)).status).toBe(403);
         expect(mocks.reserve).not.toHaveBeenCalled();
-        mocks.hasAccess.mockResolvedValue(true);
+        mocks.ensureAccess.mockResolvedValue(true);
         mocks.query.maybeSingle.mockResolvedValue({ data: { id: preflightId, user_id: userId, analysis_entry_channel: 'standard' }, error: null });
         expect((await POST(request(), context)).status).toBe(403);
         expect(mocks.admit).not.toHaveBeenCalled();
+    });
+
+    it('uses the service-only client with the authenticated user id for every fresh beta check', async () => {
+        await POST(request(), context);
+        expect(mocks.ensureAccess).toHaveBeenCalledWith(mocks.admin, userId);
     });
 
     it('admits without checkout or test-entitlement credentials and returns normal request id', async () => {
@@ -124,7 +132,7 @@ describe('betatest plan admission route', () => {
 
     it('replays consumed immutable identity before current gate, grant, owner, or fresh reserve checks', async () => {
         mocks.enabled.mockReturnValue(false);
-        mocks.hasAccess.mockResolvedValue(false);
+        mocks.ensureAccess.mockResolvedValue(false);
         mocks.replayConsumed.mockResolvedValue({
             requestId,
             initialJobKey: 'coordinator:bootstrap',
@@ -139,7 +147,7 @@ describe('betatest plan admission route', () => {
             preflightId, userId, selectedPlanId: 'basic',
         });
         expect(mocks.enabled).not.toHaveBeenCalled();
-        expect(mocks.hasAccess).not.toHaveBeenCalled();
+        expect(mocks.ensureAccess).not.toHaveBeenCalled();
         expect(mocks.admin.from).not.toHaveBeenCalled();
         expect(mocks.reserve).not.toHaveBeenCalled();
         expect(mocks.admit).not.toHaveBeenCalled();

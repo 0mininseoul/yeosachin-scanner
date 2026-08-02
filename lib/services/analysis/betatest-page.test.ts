@@ -5,14 +5,16 @@ const mocks = vi.hoisted(() => ({
     createClient: vi.fn(),
     getUser: vi.fn(),
     enabled: vi.fn(),
-    hasAccess: vi.fn(),
+    ensureAccess: vi.fn(),
     redirect: vi.fn(),
+    admin: { rpc: vi.fn() },
 }));
 
 vi.mock('@/lib/supabase/server', () => ({ createClient: mocks.createClient }));
+vi.mock('@/lib/supabase/admin', () => ({ supabaseAdmin: mocks.admin }));
 vi.mock('@/lib/services/analysis/betatest-access', () => ({
     betaTestFreePoolEnabled: mocks.enabled,
-    hasBetaTestAccess: mocks.hasAccess,
+    ensureBetaTestAccess: mocks.ensureAccess,
 }));
 vi.mock('next/navigation', () => ({
     redirect: mocks.redirect,
@@ -30,7 +32,7 @@ describe('beta-test entry page', () => {
             error: null,
         });
         mocks.enabled.mockReturnValue(true);
-        mocks.hasAccess.mockResolvedValue(true);
+        mocks.ensureAccess.mockResolvedValue(true);
     });
 
     it('redirects an unauthenticated visitor to the exact safe beta-test return path', async () => {
@@ -47,11 +49,11 @@ describe('beta-test entry page', () => {
 
         expect(markup).toContain('베타 테스트를 이용할 수 없습니다.');
         expect(markup).not.toContain('id="beta-target-instagram"');
-        expect(mocks.hasAccess).not.toHaveBeenCalled();
+        expect(mocks.ensureAccess).not.toHaveBeenCalled();
     });
 
     it('does not render an analysis form for an authenticated user without a self-grant', async () => {
-        mocks.hasAccess.mockResolvedValue(false);
+        mocks.ensureAccess.mockResolvedValue(false);
 
         const markup = renderToStaticMarkup(await BetaTestPage());
 
@@ -64,6 +66,6 @@ describe('beta-test entry page', () => {
 
         expect(markup).toContain('id="beta-target-instagram"');
         expect(markup).toContain('무료 판독 가능 여부 확인');
-        expect(mocks.hasAccess).toHaveBeenCalledWith(expect.objectContaining({ auth: expect.any(Object) }));
+        expect(mocks.ensureAccess).toHaveBeenCalledWith(mocks.admin, '123e4567-e89b-42d3-a456-426614174000');
     });
 });
