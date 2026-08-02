@@ -23,4 +23,9 @@ describe('v2.11 AI stage policy migration contract', () => {
         expect(migration).toContain('analysis_v2_v211_safe_overview_fallback');
         expect(migration).toContain('ANALYSIS_V2_V211_FINALIZER_WRAPPER_DRIFT');
     });
+
+    it('uses SQL COALESCE syntax compatible with PostgreSQL 17 in the fallback', () => {
+        expect(migration).toContain('COALESCE(p_sort_ordinal, 0)');
+        expect(migration).not.toMatch(/pg_catalog\.coalesce\s*\(/i);
+    });
 });
