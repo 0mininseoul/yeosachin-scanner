@@ -89,6 +89,7 @@ import {
     type AnalysisV2OfficialExclusionReason,
 } from './v2-official-account-screening';
 import { v29FeatureAdmission } from './v2-v29-feature-admission';
+import { v211FeatureAdmission } from './v2-v211-feature-admission';
 import { v29GenderResolverAdmission } from './v2-v29-gender-resolver-admission';
 import { selectAnalysisV2GenderResolverMedia } from './v2-gender-resolver-media-policy';
 import { selectAnalysisV2ProgressCandidateMedia } from './progress-candidate-media';
@@ -956,7 +957,7 @@ function publicFeatureRow(
     }
     const classification = outcome.status;
     const posts = analyzedPosts(outcome);
-    // The v2.9/v2.10 admission marker records an actual triage-only stop,
+    // The v2.9-v2.11 admission marker records an actual triage-only stop,
     // rather than the earlier routing decision. A resolver-eligible candidate
     // may carry a non-eligible initial admission but still complete feature
     // analysis concurrently; tagging that completed row as pre-feature makes
@@ -973,6 +974,7 @@ function publicFeatureRow(
     const preFeaturePolicyVersion = (
         outcome.aiStagePolicyVersion === 'ai-stage-policy-v2.9'
         || outcome.aiStagePolicyVersion === 'ai-stage-policy-v2.10'
+        || outcome.aiStagePolicyVersion === 'ai-stage-policy-v2.11'
     ) && preFeatureAdmission !== null
         ? outcome.aiStagePolicyVersion
         : null;
@@ -1494,7 +1496,12 @@ export function createAnalysisV2AiScoringExecutorRegistry(
                         aiFence.aiStagePolicyVersion,
                         'genderTriageMicrobatchV29',
                     )
-                        ? v29FeatureAdmission(gender.result, profile)
+                        ? policySupports(
+                            aiFence.aiStagePolicyVersion,
+                            'genderSummaryQualityV211',
+                        )
+                            ? v211FeatureAdmission(gender.result, profile)
+                            : v29FeatureAdmission(gender.result, profile)
                         : null;
                     const triageAttempted = new Set(policy.triage.selectionIds);
                     const featureRemainder = policy.feature.media.filter(media => (

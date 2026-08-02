@@ -48,12 +48,19 @@ export const AI_STAGE_POLICY_V29_VERSION = 'ai-stage-policy-v2.9';
  * semantics. Historical v2.9 requests deliberately remain on their original bytes.
  */
 export const AI_STAGE_POLICY_V210_VERSION = 'ai-stage-policy-v2.10';
+/**
+ * v2.11 is the forward-only quality successor to v2.10. It preserves the
+ * scheduler contract while widening non-official gender follow-up and using
+ * decisive, evidence-led public summary copy.
+ */
+export const AI_STAGE_POLICY_V211_VERSION = 'ai-stage-policy-v2.11';
 export const SUPPORTED_AI_STAGE_POLICY_VERSIONS = Object.freeze([
     AI_STAGE_POLICY_VERSION,
     AI_STAGE_POLICY_LATEST_VERSION,
     AI_STAGE_POLICY_V28_VERSION,
     AI_STAGE_POLICY_V29_VERSION,
     AI_STAGE_POLICY_V210_VERSION,
+    AI_STAGE_POLICY_V211_VERSION,
 ] as const);
 export type AiStagePolicyVersion = typeof SUPPORTED_AI_STAGE_POLICY_VERSIONS[number];
 export const AI_CONCURRENCY_ENFORCEMENT_SCOPE = 'deployment' as const;
@@ -196,12 +203,25 @@ const AI_STAGE_POLICIES_V210 = Object.freeze({
     ...AI_STAGE_POLICIES_V29,
 } satisfies Record<AiStageName, Readonly<AiStagePolicy>>);
 
+const AI_STAGE_POLICIES_V211 = Object.freeze({
+    ...AI_STAGE_POLICIES_V210,
+    genderTriage: Object.freeze({
+        ...AI_STAGE_POLICIES_V210.genderTriage,
+        promptVersion: 'gender-triage-microbatch-v2',
+    }),
+    featureAnalysis: Object.freeze({
+        ...AI_STAGE_POLICIES_V210.featureAnalysis,
+        promptVersion: 'feature-analysis-v5',
+    }),
+} satisfies Record<AiStageName, Readonly<AiStagePolicy>>);
+
 export const AI_STAGE_POLICY_REGISTRY = Object.freeze({
     [AI_STAGE_POLICY_VERSION]: AI_STAGE_POLICIES,
     [AI_STAGE_POLICY_LATEST_VERSION]: AI_STAGE_POLICIES_V27,
     [AI_STAGE_POLICY_V28_VERSION]: AI_STAGE_POLICIES_V28,
     [AI_STAGE_POLICY_V29_VERSION]: AI_STAGE_POLICIES_V29,
     [AI_STAGE_POLICY_V210_VERSION]: AI_STAGE_POLICIES_V210,
+    [AI_STAGE_POLICY_V211_VERSION]: AI_STAGE_POLICIES_V211,
 });
 
 export type AiStagePolicyCapability =
@@ -211,7 +231,8 @@ export type AiStagePolicyCapability =
     | 'inputQualityV28'
     | 'genderTriageMicrobatchV29'
     /** Safe v2.8 public-copy contracts, restored for the v2.10 successor only. */
-    | 'safePublicPresentationV28';
+    | 'safePublicPresentationV28'
+    | 'genderSummaryQualityV211';
 
 const AI_STAGE_POLICY_CAPABILITIES: Readonly<Record<
     AiStagePolicyVersion,
@@ -244,6 +265,15 @@ const AI_STAGE_POLICY_CAPABILITIES: Readonly<Record<
         'inputQualityV28',
         'genderTriageMicrobatchV29',
         'safePublicPresentationV28',
+    ]),
+    [AI_STAGE_POLICY_V211_VERSION]: new Set<AiStagePolicyCapability>([
+        'durableGeminiLease',
+        'genderResolution',
+        'partialMediaCoverage',
+        'inputQualityV28',
+        'genderTriageMicrobatchV29',
+        'safePublicPresentationV28',
+        'genderSummaryQualityV211',
     ]),
 });
 
@@ -297,11 +327,13 @@ export function selectAiStagePolicyVersion({
     rolloutMode,
     narrativeV28RolloutMode,
     microbatchV29RolloutMode,
+    genderSummaryQualityV211RolloutMode,
     accessMode,
 }: {
     rolloutMode: string | undefined;
     narrativeV28RolloutMode?: string | undefined;
     microbatchV29RolloutMode?: string | undefined;
+    genderSummaryQualityV211RolloutMode?: string | undefined;
     accessMode: AiStagePolicyAccessMode;
 }): AiStagePolicyVersion {
     const v27Eligible = rolloutMode === 'production'
@@ -316,6 +348,14 @@ export function selectAiStagePolicyVersion({
             microbatchV29RolloutMode === 'test_entitlement'
             && accessMode === 'test_entitlement'
         );
+    const v211Eligible = genderSummaryQualityV211RolloutMode === 'production'
+        || (
+            genderSummaryQualityV211RolloutMode === 'test_entitlement'
+            && accessMode === 'test_entitlement'
+        );
+    if (v27Eligible && v28Eligible && v29Eligible && v211Eligible) {
+        return AI_STAGE_POLICY_V211_VERSION;
+    }
     if (v27Eligible && v28Eligible && v29Eligible) {
         return AI_STAGE_POLICY_V210_VERSION;
     }

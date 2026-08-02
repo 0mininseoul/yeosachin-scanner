@@ -7,6 +7,7 @@ import {
     AI_STAGE_POLICY_V28_VERSION,
     AI_STAGE_POLICY_V29_VERSION,
     AI_STAGE_POLICY_V210_VERSION,
+    AI_STAGE_POLICY_V211_VERSION,
     AI_STAGE_POLICY_REGISTRY,
     AI_STAGE_POLICY_VERSION,
     SUPPORTED_AI_STAGE_POLICY_VERSIONS,
@@ -181,6 +182,7 @@ describe('V2 AI stage policy', () => {
             'ai-stage-policy-v2.8',
             'ai-stage-policy-v2.9',
             'ai-stage-policy-v2.10',
+            'ai-stage-policy-v2.11',
         ]);
         expect(AI_STAGE_POLICY_VERSION).toBe('ai-stage-policy-v2.6');
         expect(AI_STAGE_POLICY_LATEST_VERSION).toBe('ai-stage-policy-v2.7');
@@ -204,6 +206,7 @@ describe('V2 AI stage policy', () => {
             'ai-stage-policy-v2.8',
             'ai-stage-policy-v2.9',
             'ai-stage-policy-v2.10',
+            'ai-stage-policy-v2.11',
         ]);
         expect(Object.isFrozen(AI_STAGE_POLICY_REGISTRY['ai-stage-policy-v2.8'])).toBe(true);
         expect(getAiStagePolicy('ai-stage-policy-v2.8', 'featureAnalysis')).toMatchObject({
@@ -254,6 +257,7 @@ describe('V2 AI stage policy', () => {
             'ai-stage-policy-v2.8',
             'ai-stage-policy-v2.9',
             'ai-stage-policy-v2.10',
+            'ai-stage-policy-v2.11',
         ]);
         expect(AI_STAGE_POLICY_REGISTRY[AI_STAGE_POLICY_V210_VERSION])
             .toEqual(AI_STAGE_POLICY_REGISTRY[AI_STAGE_POLICY_V29_VERSION]);
@@ -266,6 +270,23 @@ describe('V2 AI stage policy', () => {
         // v2.9 shipped without this final presentation inheritance. It must remain replayable.
         expect(aiStagePolicySupports(AI_STAGE_POLICY_V29_VERSION, 'safePublicPresentationV28'))
             .toBe(false);
+    });
+
+    it('adds v2.11 as an immutable quality successor that is rollout-gated', () => {
+        expect(AI_STAGE_POLICY_V211_VERSION).toBe('ai-stage-policy-v2.11');
+        expect(getAiStagePolicy(AI_STAGE_POLICY_V211_VERSION, 'genderTriage'))
+            .toMatchObject({ promptVersion: 'gender-triage-microbatch-v2' });
+        expect(getAiStagePolicy(AI_STAGE_POLICY_V211_VERSION, 'featureAnalysis'))
+            .toMatchObject({ promptVersion: 'feature-analysis-v5' });
+        expect(aiStagePolicySupports(AI_STAGE_POLICY_V211_VERSION, 'genderSummaryQualityV211'))
+            .toBe(true);
+        expect(selectAiStagePolicyVersion({
+            rolloutMode: 'production',
+            narrativeV28RolloutMode: 'production',
+            microbatchV29RolloutMode: 'production',
+            genderSummaryQualityV211RolloutMode: 'production',
+            accessMode: 'production',
+        })).toBe(AI_STAGE_POLICY_V211_VERSION);
     });
 
     it('lowers only v2.7 scheduling concurrency for rate-limited early stages', () => {
@@ -315,6 +336,8 @@ describe('V2 AI stage policy', () => {
             .toBe('ai-stage-policy-v2.9');
         expect(assertSupportedAiStagePolicyVersion('ai-stage-policy-v2.10'))
             .toBe('ai-stage-policy-v2.10');
+        expect(assertSupportedAiStagePolicyVersion('ai-stage-policy-v2.11'))
+            .toBe('ai-stage-policy-v2.11');
         expect(() => assertSupportedAiStagePolicyVersion('ai-stage-policy-v9'))
             .toThrow('Unsupported AI stage policy version');
         expect(Object.isFrozen(AI_STAGE_POLICY_REGISTRY)).toBe(true);
