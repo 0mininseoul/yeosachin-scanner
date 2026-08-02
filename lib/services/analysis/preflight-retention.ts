@@ -24,6 +24,7 @@ interface RetentionRpcClient {
 
 export interface PreflightRetentionSummary {
     providerCosts: PreflightProviderCostReconciliationResult;
+    providerCostReconciliationFailures: number;
     expiredPurged: number;
     terminalScrubbed: number;
     betaCreditRecovered: number;
@@ -66,15 +67,28 @@ export async function runPreflightRetention(
     client: RetentionRpcClient = supabaseAdmin,
     dependencies: PreflightRetentionDependencies = {}
 ): Promise<PreflightRetentionSummary> {
-    const providerCosts = await reconcileSettledPreflightProviderCosts(
-        dependencies.providerRunStore ?? createPreflightProviderRunStore(client),
-        {
-            ...(dependencies.clientForSlot
-                ? { clientForSlot: dependencies.clientForSlot }
-                : {}),
-            ...(dependencies.env ? { env: dependencies.env } : {}),
-        }
-    );
+    let providerCosts: PreflightProviderCostReconciliationResult = Object.freeze({
+        eligible: 0,
+        finalized: 0,
+        failed: 0,
+        hasMore: false,
+    });
+    let providerCostReconciliationFailures = 0;
+    try {
+        providerCosts = await reconcileSettledPreflightProviderCosts(
+            dependencies.providerRunStore ?? createPreflightProviderRunStore(client),
+            {
+                ...(dependencies.clientForSlot
+                    ? { clientForSlot: dependencies.clientForSlot }
+                    : {}),
+                ...(dependencies.env ? { env: dependencies.env } : {}),
+            }
+        );
+    } catch {
+        // The SQL purge fence remains authoritative. A provider list failure
+        // is retried later and cannot starve beta settlement or PII retention.
+        providerCostReconciliationFailures = 1;
+    }
     const expiredPurged = await runRpc(
         client,
         'purge_expired_analysis_v2_preflights',
@@ -122,6 +136,7 @@ export async function runPreflightRetention(
     }
     return {
         providerCosts,
+        providerCostReconciliationFailures,
         expiredPurged,
         terminalScrubbed,
         betaCreditRecovered,

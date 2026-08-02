@@ -11,6 +11,12 @@ import { z } from 'zod';
 /** Fixed messages only: provider responses and account identities are never logged. */
 export const BETA_APIFY_SETTLEMENT_LOG = 'BETATEST_APIFY_CREDIT_SETTLEMENT_DEFERRED';
 export const BETA_APIFY_REFRESH_LOG = 'BETATEST_APIFY_CREDIT_REFRESH_DEFERRED';
+const BETA_APIFY_MAINTENANCE_RPC_TIMEOUT_MS = 5_000;
+
+type PoolRpcResult = Awaited<ReturnType<BetaApifyPoolStoreClient['rpc']>>;
+type AbortablePoolRpc = ReturnType<BetaApifyPoolStoreClient['rpc']> & {
+    abortSignal?: (signal: AbortSignal) => PromiseLike<PoolRpcResult>;
+};
 
 function uuid(value: string): string {
     if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(value)) {
@@ -28,8 +34,44 @@ const targetedSettlementSchema = z.object({
     releasedUsd: z.number().finite().nonnegative(),
 }).strict();
 
+async function boundedRpc(
+    client: BetaApifyPoolStoreClient,
+    name: string,
+    params: Record<string, unknown>,
+): Promise<PoolRpcResult> {
+    const controller = new AbortController();
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+        const invocation = client.rpc(name, params) as AbortablePoolRpc;
+        const pending = typeof invocation.abortSignal === 'function'
+            ? invocation.abortSignal(controller.signal)
+            : invocation;
+        return await Promise.race([
+            Promise.resolve(pending),
+            new Promise<never>((_resolve, reject) => {
+                timer = setTimeout(() => {
+                    controller.abort();
+                    reject(new Error('ANALYSIS_BETA_POOL_PERSISTENCE_ERROR'));
+                }, BETA_APIFY_MAINTENANCE_RPC_TIMEOUT_MS);
+            }),
+        ]);
+    } catch {
+        throw new Error('ANALYSIS_BETA_POOL_PERSISTENCE_ERROR');
+    } finally {
+        if (timer) clearTimeout(timer);
+    }
+}
+
+function boundedClient(client: BetaApifyPoolStoreClient): BetaApifyPoolStoreClient {
+    return Object.freeze({
+        rpc: (name: string, params: Record<string, unknown>) => (
+            boundedRpc(client, name, params)
+        ),
+    });
+}
+
 async function targeted(client: BetaApifyPoolStoreClient, name: string, field: string, id: string): Promise<boolean> {
-    const result = await client.rpc(name, { [field]: uuid(id) });
+    const result = await boundedRpc(client, name, { [field]: uuid(id) });
     if (result.error) throw new Error('ANALYSIS_BETA_POOL_PERSISTENCE_ERROR');
     const data = Array.isArray(result.data) && result.data.length === 1
         ? result.data[0]
@@ -50,14 +92,15 @@ export async function settleBetaApifyPreflightCredit(client: BetaApifyPoolStoreC
 }
 
 export async function recoverBetaApifyCredit(client: BetaApifyPoolStoreClient, limit = 100): Promise<number> {
-    return (await createBetaApifyCreditPoolStore(client).recover(limit)).length;
+    return (await createBetaApifyCreditPoolStore(boundedClient(client)).recover(limit)).length;
 }
 
 export async function archiveSettledBetaApifyCredit(client: BetaApifyPoolStoreClient, limit = 100): Promise<number> {
     if (!Number.isSafeInteger(limit) || limit < 1 || limit > 1_000) {
         throw new Error('ANALYSIS_BETA_POOL_PERSISTENCE_ERROR');
     }
-    const result = await client.rpc(
+    const result = await boundedRpc(
+        client,
         'archive_fully_settled_analysis_beta_apify_credit_allocations',
         { p_limit: limit },
     );

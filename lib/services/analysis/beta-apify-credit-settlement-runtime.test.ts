@@ -1,7 +1,9 @@
 import { describe, expect, it, vi } from 'vitest';
 import {
     BETA_APIFY_SETTLEMENT_LOG,
+    archiveSettledBetaApifyCredit,
     bestEffortBetaApifySettlement,
+    recoverBetaApifyCredit,
     settleBetaApifyPreflightCredit,
     settleBetaApifyRequestCredit,
     refreshBetaApifyCreditSnapshots,
@@ -58,6 +60,69 @@ describe('beta Apify terminal settlement runtime', () => {
         await rejected;
         expect(rpc).not.toHaveBeenCalled();
         vi.useRealTimers();
+    });
+
+    it('aborts every hanging maintenance RPC and exposes only a sanitized timeout', async () => {
+        vi.useFakeTimers();
+        const signals: AbortSignal[] = [];
+        const rejectLate: Array<(reason?: unknown) => void> = [];
+        const unhandled: unknown[] = [];
+        const onUnhandled = (reason: unknown) => { unhandled.push(reason); };
+        process.on('unhandledRejection', onUnhandled);
+        const rpc = vi.fn(() => {
+            const pending = new Promise<{
+                data: unknown;
+                error: null | { message?: string };
+            }>((_resolve, reject) => { rejectLate.push(reject); }) as Promise<{
+                data: unknown;
+                error: null | { message?: string };
+            }> & {
+                abortSignal(signal: AbortSignal): PromiseLike<{
+                    data: unknown;
+                    error: null | { message?: string };
+                }>;
+            };
+            pending.abortSignal = (signal: AbortSignal) => {
+                signals.push(signal);
+                return pending;
+            };
+            return pending;
+        });
+        try {
+            const operations = [
+                settleBetaApifyRequestCredit({ rpc }, id),
+                recoverBetaApifyCredit({ rpc }),
+                archiveSettledBetaApifyCredit({ rpc }),
+            ];
+            const failures = operations.map(operation => (
+                expect(operation).rejects.toThrow('ANALYSIS_BETA_POOL_PERSISTENCE_ERROR')
+            ));
+
+            await vi.advanceTimersByTimeAsync(5_000);
+            await Promise.all(failures);
+            expect(signals).toHaveLength(3);
+            expect(signals.every(signal => signal.aborted)).toBe(true);
+
+            // A transport may reject after the caller-side timeout. Promise.race
+            // must retain a rejection handler so no provider payload escapes as
+            // an unhandled rejection.
+            vi.useRealTimers();
+            rejectLate.forEach(reject => reject(new Error('late provider secret')));
+            await new Promise(resolve => setTimeout(resolve, 0));
+            expect(unhandled).toEqual([]);
+        } finally {
+            process.off('unhandledRejection', onUnhandled);
+            vi.useRealTimers();
+        }
+    });
+
+    it('redacts a database lock-timeout payload at the targeted boundary', async () => {
+        const rpc = vi.fn(async () => ({
+            data: null,
+            error: { message: 'canceling statement due to lock timeout raw-row-id' },
+        }));
+        await expect(settleBetaApifyRequestCredit({ rpc }, id))
+            .rejects.toThrow('ANALYSIS_BETA_POOL_PERSISTENCE_ERROR');
     });
 
     it('swallows a post-commit settlement fault with a fixed redacted log', async () => {

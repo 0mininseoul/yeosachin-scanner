@@ -11,6 +11,9 @@ RETURNS JSONB
 LANGUAGE plpgsql
 SECURITY DEFINER
 SET search_path = ''
+SET lock_timeout = '1s'
+-- A caller-side abort also bounds the already-started top-level statement.
+SET statement_timeout = '5s'
 AS $$
 DECLARE v_now TIMESTAMP WITH TIME ZONE := pg_catalog.clock_timestamp();
 DECLARE v_allocation public.analysis_beta_pool_allocations%ROWTYPE;
@@ -64,7 +67,8 @@ REVOKE ALL ON FUNCTION public.settle_analysis_beta_apify_credit_allocation(UUID,
 GRANT EXECUTE ON FUNCTION public.settle_analysis_beta_apify_credit_allocation(UUID,TEXT) TO service_role;
 
 CREATE OR REPLACE FUNCTION public.settle_analysis_beta_apify_request_credit(p_request_id UUID)
-RETURNS JSONB LANGUAGE plpgsql SECURITY DEFINER SET search_path = '' AS $$
+RETURNS JSONB LANGUAGE plpgsql SECURITY DEFINER SET search_path = ''
+SET lock_timeout = '1s' SET statement_timeout = '5s' AS $$
 DECLARE v_id UUID; BEGIN
  IF p_request_id IS NULL THEN RAISE EXCEPTION USING MESSAGE='ANALYSIS_BETA_SETTLEMENT_INVALID', ERRCODE='P0001'; END IF;
  -- Plain identity read; canonical primitive owns all lifecycle locks.
@@ -74,7 +78,8 @@ DECLARE v_id UUID; BEGIN
  RETURN public.settle_analysis_beta_apify_credit_allocation(v_id,'request_terminal');
 END; $$;
 CREATE OR REPLACE FUNCTION public.settle_analysis_beta_apify_preflight_credit(p_preflight_id UUID)
-RETURNS JSONB LANGUAGE plpgsql SECURITY DEFINER SET search_path = '' AS $$
+RETURNS JSONB LANGUAGE plpgsql SECURITY DEFINER SET search_path = ''
+SET lock_timeout = '1s' SET statement_timeout = '5s' AS $$
 DECLARE v_id UUID; BEGIN
  IF p_preflight_id IS NULL THEN RAISE EXCEPTION USING MESSAGE='ANALYSIS_BETA_SETTLEMENT_INVALID', ERRCODE='P0001'; END IF;
  -- Ready/consumed and soft admission blocks do not meet this terminal predicate.
@@ -92,7 +97,8 @@ GRANT EXECUTE ON FUNCTION public.settle_analysis_beta_apify_preflight_credit(UUI
 -- Automatic retention only archives fully-settled allocations.  Ambiguous starts
 -- remain recoverable holds until provider reconciliation can prove their charge.
 CREATE OR REPLACE FUNCTION public.archive_fully_settled_analysis_beta_apify_credit_allocations(p_limit INTEGER DEFAULT 100)
-RETURNS INTEGER LANGUAGE plpgsql SECURITY DEFINER SET search_path = '' AS $$
+RETURNS INTEGER LANGUAGE plpgsql SECURITY DEFINER SET search_path = ''
+SET lock_timeout = '1s' SET statement_timeout = '5s' AS $$
 DECLARE v_id UUID; DECLARE v_count INTEGER:=0; BEGIN
  IF p_limit IS NULL OR p_limit NOT BETWEEN 1 AND 1000 THEN RAISE EXCEPTION USING MESSAGE='ANALYSIS_BETA_SETTLEMENT_INVALID', ERRCODE='P0001'; END IF;
  FOR v_id IN SELECT allocation.id FROM public.analysis_beta_pool_allocations allocation JOIN public.users users ON users.id=allocation.user_id
@@ -122,7 +128,9 @@ END; $$;
 REVOKE ALL ON FUNCTION public.archive_fully_settled_analysis_beta_apify_credit_allocations(INTEGER) FROM PUBLIC, anon, authenticated, service_role;
 GRANT EXECUTE ON FUNCTION public.archive_fully_settled_analysis_beta_apify_credit_allocations(INTEGER) TO service_role;
 CREATE OR REPLACE FUNCTION public.archive_settled_analysis_beta_apify_credit_allocations(p_limit INTEGER DEFAULT 100)
-RETURNS INTEGER LANGUAGE sql SECURITY DEFINER SET search_path = '' AS $$ SELECT public.archive_fully_settled_analysis_beta_apify_credit_allocations(p_limit) $$;
+RETURNS INTEGER LANGUAGE sql SECURITY DEFINER SET search_path = ''
+SET lock_timeout = '1s' SET statement_timeout = '5s'
+AS $$ SELECT public.archive_fully_settled_analysis_beta_apify_credit_allocations(p_limit) $$;
 REVOKE ALL ON FUNCTION public.archive_settled_analysis_beta_apify_credit_allocations(INTEGER) FROM PUBLIC, anon, authenticated, service_role;
 GRANT EXECUTE ON FUNCTION public.archive_settled_analysis_beta_apify_credit_allocations(INTEGER) TO service_role;
 
@@ -134,6 +142,8 @@ RETURNS INTEGER
 LANGUAGE plpgsql
 SECURITY DEFINER
 SET search_path = ''
+SET lock_timeout = '1s'
+SET statement_timeout = '5s'
 AS $$
 DECLARE
     v_scrubbed_count INTEGER;
@@ -237,3 +247,10 @@ END;
 $$;
 REVOKE ALL ON FUNCTION public.purge_expired_analysis_v2_preflights(INTEGER) FROM PUBLIC, anon, authenticated, service_role;
 GRANT EXECUTE ON FUNCTION public.purge_expired_analysis_v2_preflights(INTEGER) TO service_role;
+
+-- Recovery is defined by Task 2B3 and remains the live implementation. Attach
+-- invocation-time bounds here as part of the terminal handoff correction.
+ALTER FUNCTION public.recover_analysis_beta_apify_credit_allocations(INTEGER)
+    SET lock_timeout TO '1s';
+ALTER FUNCTION public.recover_analysis_beta_apify_credit_allocations(INTEGER)
+    SET statement_timeout TO '5s';

@@ -5,6 +5,7 @@ import {
 } from './preflight-retention';
 
 const emptyBetaRetention = {
+    providerCostReconciliationFailures: 0,
     betaCreditRecovered: 0,
     betaCreditArchived: 0,
     betaCreditRecoveryFailures: 0,
@@ -38,16 +39,50 @@ describe('preflight retention maintenance', () => {
         ]);
     });
 
-    it('fails closed on an RPC error or an impossible count', async () => {
-        await expect(runPreflightRetention({
-            rpc: vi.fn().mockResolvedValue({ data: null, error: { message: 'no' } }),
-        })).rejects.toThrow('PREFLIGHT_PROVIDER_RUN_PERSISTENCE_ERROR');
-
+    it('fails closed on an impossible purge count', async () => {
         await expect(runPreflightRetention({
             rpc: vi.fn()
                 .mockResolvedValueOnce({ data: [], error: null })
                 .mockResolvedValueOnce({ data: 9999, error: null }),
         })).rejects.toThrow('invalid purge_expired_analysis_v2_preflights result');
+    });
+
+    it('isolates a provider list failure and still runs purge, beta maintenance, and scrub in order', async () => {
+        const events: string[] = [];
+        const rpc = vi.fn(async name => {
+            if (name === 'list_analysis_preflight_unreconciled_provider_runs') {
+                events.push('provider');
+                return { data: null, error: { message: 'provider list unavailable' } };
+            }
+            if (name === 'purge_expired_analysis_v2_preflights') {
+                events.push('purge');
+                return { data: 3, error: null };
+            }
+            events.push('scrub');
+            return { data: 2, error: null };
+        });
+
+        const summary = await runPreflightRetention({ rpc }, {
+            recoverBetaCredit: async () => { events.push('recover'); return 1; },
+            archiveBetaCredit: async () => { events.push('archive'); return 4; },
+            refreshBetaCredit: async () => { events.push('refresh'); },
+        });
+
+        expect(events).toEqual([
+            'provider', 'purge', 'recover', 'archive', 'scrub', 'refresh',
+        ]);
+        expect(summary).toEqual({
+            providerCosts: { eligible: 0, finalized: 0, failed: 0, hasMore: false },
+            providerCostReconciliationFailures: 1,
+            expiredPurged: 3,
+            terminalScrubbed: 2,
+            betaCreditRecovered: 1,
+            betaCreditArchived: 4,
+            betaCreditRecoveryFailures: 0,
+            betaCreditArchiveFailures: 0,
+            betaCreditRefreshAttempts: 1,
+            betaCreditRefreshFailures: 0,
+        });
     });
 
     it('reports a failed cost read while retention safely proceeds behind the SQL delete fence', async () => {

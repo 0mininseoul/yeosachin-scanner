@@ -638,6 +638,110 @@ describe('beta Apify credit PostgreSQL 16 concurrency', () => {
         await first.query(terminalSettlementMigration);
     }, 30_000);
 
+    it('enforces invocation lock bounds and leaves a timed-out settlement conservative', async () => {
+        const boundedFunctions = [
+            'settle_analysis_beta_apify_credit_allocation',
+            'settle_analysis_beta_apify_request_credit',
+            'settle_analysis_beta_apify_preflight_credit',
+            'recover_analysis_beta_apify_credit_allocations',
+            'archive_fully_settled_analysis_beta_apify_credit_allocations',
+            'archive_settled_analysis_beta_apify_credit_allocations',
+            'purge_expired_analysis_v2_preflights',
+        ];
+        const settings = await first.query<{
+            proname: string;
+            proconfig: string[];
+        }>(
+            `SELECT procedure.proname, procedure.proconfig
+             FROM pg_catalog.pg_proc AS procedure
+             JOIN pg_catalog.pg_namespace AS namespace
+               ON namespace.oid = procedure.pronamespace
+             WHERE namespace.nspname = 'public'
+               AND procedure.proname = ANY($1::text[])
+             ORDER BY procedure.proname`,
+            [boundedFunctions],
+        );
+        expect(settings.rows).toHaveLength(boundedFunctions.length);
+        for (const setting of settings.rows) {
+            expect(setting.proconfig).toEqual(expect.arrayContaining([
+                'lock_timeout=1s',
+                'statement_timeout=5s',
+            ]));
+        }
+
+        const seeded = await seedActivatedBetaRequest(first, 1000);
+        await first.query(
+            `UPDATE public.analysis_requests SET status = 'completed' WHERE id = $1`,
+            [seeded.requestId],
+        );
+        const preflightId = (await first.query<{ preflight_id: string }>(
+            `SELECT preflight_id::text AS preflight_id
+             FROM public.analysis_beta_pool_allocations WHERE id = $1`,
+            [seeded.allocationId],
+        )).rows[0]!.preflight_id;
+
+        let blockerOpen = false;
+        let settlement: Promise<unknown> | null = null;
+        try {
+            await observer.query('BEGIN');
+            blockerOpen = true;
+            await observer.query(
+                `SELECT id FROM public.analysis_preflights WHERE id = $1 FOR UPDATE`,
+                [preflightId],
+            );
+            const settlementPid = (await second.query<{ pid: number }>(
+                'SELECT pg_backend_pid() AS pid',
+            )).rows[0]!.pid;
+            const startedAt = Date.now();
+            settlement = second.query(
+                `SELECT public.settle_analysis_beta_apify_request_credit($1)`,
+                [seeded.requestId],
+            );
+            void settlement.catch(() => undefined);
+            await waitUntilBlocked(settlementPid);
+            await expect(settlement).rejects.toMatchObject({ code: '55P03' });
+            const elapsedMs = Date.now() - startedAt;
+            expect(elapsedMs).toBeGreaterThanOrEqual(750);
+            expect(elapsedMs).toBeLessThan(3_000);
+
+            const conservative = await first.query<{
+                allocation_state: string;
+                active_families: number;
+            }>(
+                `SELECT allocation.lifecycle_state AS allocation_state,
+                        count(*) FILTER (
+                            WHERE reservation.lifecycle_state = 'active'
+                        )::int AS active_families
+                 FROM public.analysis_beta_pool_allocations AS allocation
+                 JOIN public.analysis_beta_pool_reservations AS reservation
+                   ON reservation.allocation_id = allocation.id
+                 WHERE allocation.id = $1
+                 GROUP BY allocation.id`,
+                [seeded.allocationId],
+            );
+            expect(conservative.rows).toEqual([{
+                allocation_state: 'active',
+                active_families: 8,
+            }]);
+            await observer.query('ROLLBACK');
+            blockerOpen = false;
+        } finally {
+            if (settlement) await settlement.catch(() => undefined);
+            if (blockerOpen) await observer.query('ROLLBACK').catch(() => undefined);
+        }
+
+        const retried = await second.query<{
+            result: { lifecycleState: string; heldFamilies: number };
+        }>(
+            `SELECT public.settle_analysis_beta_apify_request_credit($1) AS result`,
+            [seeded.requestId],
+        );
+        expect(retried.rows[0]!.result).toMatchObject({
+            lifecycleState: 'settled',
+            heldFamilies: 0,
+        });
+    }, 15_000);
+
     it('samples database time after the grant barrier and rejects an admission that crosses two minutes', async () => {
         const userId = randomUUID();
         const preflightId = randomUUID();

@@ -9,6 +9,18 @@ const latestPurgeSchema = readFileSync(new URL(
     '../../../supabase/migrations/20260731130000_rearm_terminal_unavailable_job_exhaustion.sql',
     import.meta.url,
 ), 'utf8');
+const settlementRuntime = readFileSync(new URL(
+    './beta-apify-credit-settlement-runtime.ts',
+    import.meta.url,
+), 'utf8');
+
+function functionHeader(name: string): string {
+    const start = migration.indexOf(`FUNCTION public.${name}`);
+    const end = migration.indexOf('AS $$', start);
+    expect(start).toBeGreaterThanOrEqual(0);
+    expect(end).toBeGreaterThan(start);
+    return migration.slice(start, end);
+}
 
 describe('terminal betatest credit settlement migration contract', () => {
     it('keeps rejected runs zero-cost while retaining unresolved starts', () => {
@@ -27,6 +39,29 @@ describe('terminal betatest credit settlement migration contract', () => {
         expect(migration).toContain('SET search_path = \'\'');
         expect(migration).toContain("SET LOCAL lock_timeout = '5s'");
         expect(migration).toContain("SET LOCAL statement_timeout = '2min'");
+    });
+
+    it('bounds invocation-time locks and independently aborts slow application RPCs', () => {
+        for (const name of [
+            'settle_analysis_beta_apify_credit_allocation',
+            'settle_analysis_beta_apify_request_credit',
+            'settle_analysis_beta_apify_preflight_credit',
+            'archive_fully_settled_analysis_beta_apify_credit_allocations',
+            'archive_settled_analysis_beta_apify_credit_allocations',
+            'purge_expired_analysis_v2_preflights',
+        ]) {
+            expect(functionHeader(name)).toContain("SET lock_timeout = '1s'");
+            expect(functionHeader(name)).toContain("SET statement_timeout = '5s'");
+        }
+        expect(migration).toMatch(
+            /ALTER FUNCTION public\.recover_analysis_beta_apify_credit_allocations\(INTEGER\)[\s\S]*?SET lock_timeout TO '1s'/,
+        );
+        expect(migration).toMatch(
+            /ALTER FUNCTION public\.recover_analysis_beta_apify_credit_allocations\(INTEGER\)[\s\S]*?SET statement_timeout TO '5s'/,
+        );
+        expect(settlementRuntime).toContain('new AbortController()');
+        expect(settlementRuntime).toContain('BETA_APIFY_MAINTENANCE_RPC_TIMEOUT_MS = 5_000');
+        expect(settlementRuntime).toContain('controller.abort()');
     });
 
     it('retains every latest purge fence apart from the intentional beta/rejected additions', () => {
