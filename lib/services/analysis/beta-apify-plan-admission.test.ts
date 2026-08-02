@@ -69,6 +69,26 @@ describe('beta Apify plan admission', () => {
         expect(JSON.stringify(emit.mock.calls)).not.toMatch(new RegExp(`${USER_ID}|${PREFLIGHT_ID}`));
     });
 
+    it('does not double-count an authoritative activate replay as allocation success', async () => {
+        const emit = vi.fn();
+        const hold = { allocationId: '55555555-5555-4555-8555-555555555555', preflightId: PREFLIGHT_ID, credentialSlot: 'primary' as const, targetProfileBudgetUsd: BETA_APIFY_TARGET_PROFILE_BUDGET_USD };
+        await expect(admitBetaApifyPlan({
+            preflightId: PREFLIGHT_ID, userId: USER_ID, admissionToken: ADMISSION_TOKEN,
+            admissionGeneration: 1, selectedPlanId: 'basic', maxSnapshotAgeSeconds: 300,
+            env: { BETATEST_FREE_POOL_ENABLED: 'true' }, telemetry: { emit },
+            store: {
+                replay: vi.fn().mockResolvedValue(null),
+                loadPreflightHold: vi.fn().mockResolvedValue(hold),
+                loadSnapshots: vi.fn().mockResolvedValue(snapshots()),
+                activate: vi.fn().mockResolvedValue({
+                    requestId: REQUEST_ID, initialJobKey: 'coordinator:bootstrap',
+                    allocationId: hold.allocationId, replayed: true,
+                }),
+            },
+        })).resolves.toMatchObject({ replayed: true });
+        expect(emit).not.toHaveBeenCalled();
+    });
+
     it('keeps provider/store outages sanitized but distinct from capacity', async () => {
         const secret = 'apify-token-account-raw-payload';
         const error = await admitBetaApifyPlan({
@@ -294,10 +314,12 @@ describe('beta Apify plan admission', () => {
             allocationId: '55555555-5555-4555-8555-555555555555', replayed: true,
         };
         const replay = vi.fn().mockResolvedValueOnce(null).mockResolvedValueOnce(stored);
+        const emit = vi.fn();
         await expect(admitBetaApifyPlan({
             preflightId: PREFLIGHT_ID, userId: USER_ID, admissionToken: ADMISSION_TOKEN,
             admissionGeneration: 1, selectedPlanId: 'basic', maxSnapshotAgeSeconds: 300,
             env: { BETATEST_FREE_POOL_ENABLED: 'true' },
+            telemetry: { emit },
             store: {
                 replay,
                 loadPreflightHold: vi.fn().mockResolvedValue({
@@ -309,7 +331,41 @@ describe('beta Apify plan admission', () => {
             },
         })).resolves.toEqual(stored);
         expect(replay).toHaveBeenCalledTimes(2);
+        expect(emit).not.toHaveBeenCalled();
     });
+
+    it.each(['snapshot', 'activation'] as const)(
+        'emits exactly one final allocation rejection for a %s capacity failure',
+        async boundary => {
+            const emit = vi.fn();
+            const hold = {
+                allocationId: '55555555-5555-4555-8555-555555555555',
+                preflightId: PREFLIGHT_ID, credentialSlot: 'primary' as const,
+                targetProfileBudgetUsd: BETA_APIFY_TARGET_PROFILE_BUDGET_USD,
+            };
+            const loadSnapshots = boundary === 'snapshot'
+                ? vi.fn().mockRejectedValue(new Error(BETA_APIFY_PLAN_ADMISSION_ERROR))
+                : vi.fn().mockResolvedValue(snapshots());
+            const activate = boundary === 'activation'
+                ? vi.fn().mockRejectedValue(new Error(BETA_APIFY_PLAN_ADMISSION_ERROR))
+                : vi.fn();
+            await expect(admitBetaApifyPlan({
+                preflightId: PREFLIGHT_ID, userId: USER_ID,
+                admissionToken: ADMISSION_TOKEN, admissionGeneration: 1,
+                selectedPlanId: 'basic', maxSnapshotAgeSeconds: 300,
+                env: { BETATEST_FREE_POOL_ENABLED: 'true' }, telemetry: { emit },
+                store: {
+                    replay: vi.fn().mockResolvedValue(null),
+                    loadPreflightHold: vi.fn().mockResolvedValue(hold),
+                    loadSnapshots, activate,
+                },
+            })).rejects.toThrow(BETA_APIFY_PLAN_ADMISSION_ERROR);
+            expect(emit).toHaveBeenCalledTimes(1);
+            expect(emit).toHaveBeenCalledWith(expect.objectContaining({
+                event: 'betatest_apify_credit.allocation_rejected',
+            }));
+        }
+    );
 
     it('preserves invalid-input, runtime-config, persistence, and malformed-result categories', async () => {
         const noCalls = { replay: vi.fn(), loadPreflightHold: vi.fn(), loadSnapshots: vi.fn(), activate: vi.fn() };

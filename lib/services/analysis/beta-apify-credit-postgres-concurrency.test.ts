@@ -71,6 +71,10 @@ const entryHardeningMigrations = [
     `../../../supabase/migrations/${file}`,
     import.meta.url,
 ), 'utf8'));
+const observabilityMigration = readFileSync(new URL(
+    '../../../supabase/migrations/20260802100600_add_betatest_pool_observability.sql',
+    import.meta.url,
+), 'utf8');
 const betaSlots = {
     'target-profile': 'primary',
     'relationship-followers': 'tertiary',
@@ -1969,6 +1973,7 @@ describe('beta Apify credit PostgreSQL 16 concurrency', () => {
             for (const migration of entryHardeningMigrations.slice(3)) {
                 await first.query(migration);
             }
+            await first.query(observabilityMigration);
             retryExhaustionAfterUpgrade = (await first.query<{
                 channel: string;
                 status: string;
@@ -2012,6 +2017,60 @@ describe('beta Apify credit PostgreSQL 16 concurrency', () => {
                 retry_recorded: true,
                 validated: true,
             });
+        });
+
+        it('exposes one aggregate-only pool health snapshot to service_role', async () => {
+            const privileges = await first.query<{
+                role_name: string;
+                allowed: boolean;
+            }>(`SELECT role_name,
+                       pg_catalog.has_function_privilege(
+                           role_name,
+                           'public.load_analysis_beta_apify_pool_observability(integer)',
+                           'EXECUTE'
+                       ) AS allowed
+                FROM (VALUES ('anon'), ('authenticated'), ('service_role'))
+                     AS roles(role_name)
+                ORDER BY role_name`);
+            expect(privileges.rows).toEqual([
+                { role_name: 'anon', allowed: false },
+                { role_name: 'authenticated', allowed: false },
+                { role_name: 'service_role', allowed: true },
+            ]);
+
+            let roleSet = false;
+            try {
+                await first.query('SET ROLE service_role');
+                roleSet = true;
+                const aggregate = await first.query<{
+                    result: Record<string, unknown>;
+                }>(`SELECT public.load_analysis_beta_apify_pool_observability(300)
+                           AS result`);
+                const result = aggregate.rows[0]!.result;
+                expect(Object.keys(result).sort()).toEqual([
+                    'activeAllocationCount',
+                    'observedAt',
+                    'overcommittedSlotCount',
+                    'runtimeEnabled',
+                    'schemaVersion',
+                    'settlementLagMs',
+                    'staleSnapshotCount',
+                    'totalEffectiveHeadroomUsd',
+                ]);
+                expect(result).toMatchObject({
+                    schemaVersion: 1,
+                    runtimeEnabled: true,
+                });
+                expect(result.staleSnapshotCount).toEqual(expect.any(Number));
+                expect(Number(result.staleSnapshotCount)).toBeLessThanOrEqual(6);
+                expect(result.overcommittedSlotCount).toEqual(expect.any(Number));
+                expect(Number(result.overcommittedSlotCount)).toBeLessThanOrEqual(6);
+                expect(JSON.stringify(result)).not.toMatch(
+                    /(?:user|request|preflight|account|credential|provider).*id/i
+                );
+            } finally {
+                if (roleSet) await first.query('RESET ROLE');
+            }
         });
 
         it('terminalizes the retry ceiling and requires a new idempotency key', async () => {

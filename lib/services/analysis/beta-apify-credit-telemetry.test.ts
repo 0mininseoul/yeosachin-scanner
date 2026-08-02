@@ -50,6 +50,7 @@ describe('beta Apify credit telemetry boundary', () => {
             actualUsd: -1,
             releasedUsd: Number.POSITIVE_INFINITY,
             settlementLagMs: -1,
+            staleSnapshotCount: 7,
         });
 
         const input = emit.mock.calls[0]?.[0];
@@ -60,6 +61,10 @@ describe('beta Apify credit telemetry boundary', () => {
         });
         expect(sanitizeOperationalEvent(input).fields).not.toHaveProperty('credential_slot');
         expect(sanitizeOperationalEvent(input).fields).not.toHaveProperty('reservation_usd');
+        expect(sanitizeOperationalEvent({
+            event: 'betatest_apify_credit.pool_health_observed',
+            severity: 'warn', fields: { stale_snapshot_count: 7 },
+        }).fields).not.toHaveProperty('stale_snapshot_count');
     });
 
     it('never lets telemetry failure change the caller outcome', () => {
@@ -71,5 +76,23 @@ describe('beta Apify credit telemetry boundary', () => {
             actualUsd: 0.1,
             releasedUsd: 0.2,
         })).not.toThrow();
+    });
+
+    it('keeps multi-day settlement lag visible and bounds invariant counts', () => {
+        const emit = vi.fn();
+        emitBetaApifyCreditTelemetry({ emit }, {
+            event: 'betatest_apify_credit.pool_health_observed',
+            severity: 'warn',
+            settlementLagMs: 7 * 24 * 60 * 60 * 1_000,
+            overcommittedSlotCount: 1,
+            runtimeEnabled: false,
+        });
+        expect(emit).toHaveBeenCalledWith(expect.objectContaining({
+            fields: {
+                settlement_lag_ms: 604_800_000,
+                overcommitted_slot_count: 1,
+                runtime_enabled: false,
+            },
+        }));
     });
 });

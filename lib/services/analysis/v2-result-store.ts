@@ -29,6 +29,7 @@ import {
     type AnalysisV2ResultImageLocator,
 } from '@/lib/services/media/image-proxy-token';
 import { supabaseAdmin } from '@/lib/supabase/admin';
+import { operationalLogger } from '@/lib/observability/server';
 import {
     BETA_APIFY_REFRESH_LOG,
     BETA_APIFY_SETTLEMENT_LOG,
@@ -1302,7 +1303,9 @@ export function createSupabaseAnalysisV2ResultStore(
         let settlementFailed = false;
         try {
             processed = await (options.settleBetaRequest
-                ?? (id => settleBetaApifyRequestCredit(client, id)))(requestId);
+                ?? (id => settleBetaApifyRequestCredit(
+                    client, id, { telemetry: operationalLogger }
+                )))(requestId);
         } catch {
             settlementFailed = true;
             console.error(BETA_APIFY_SETTLEMENT_LOG);
@@ -1310,7 +1313,9 @@ export function createSupabaseAnalysisV2ResultStore(
         if (!processed && !settlementFailed) return;
         try {
             await (options.refreshBetaCredit
-                ?? (() => refreshBetaApifyCreditSnapshots(client)))();
+                ?? (() => refreshBetaApifyCreditSnapshots(
+                    client, { telemetry: operationalLogger }
+                )))();
         } catch {
             console.error(BETA_APIFY_REFRESH_LOG);
         }

@@ -29,11 +29,13 @@ import {
 } from './v2-ai-scheduler-operation-store';
 import { recoverQueuedAnalysisScoreAudits } from './score-audit';
 import { supabaseAdmin } from '@/lib/supabase/admin';
+import { operationalLogger } from '@/lib/observability/server';
 import {
     archiveSettledBetaApifyCredit,
     recoverBetaApifyCredit,
     refreshBetaApifyCreditSnapshots,
 } from './beta-apify-credit-settlement-runtime';
+import { getBetaApifyCreditPoolRuntimeConfig } from './beta-apify-credit-runtime';
 
 export const ANALYSIS_V2_RECOVERY_MAX_JOBS = 100;
 export const ANALYSIS_V2_RECOVERY_CONCURRENCY = 10;
@@ -82,6 +84,27 @@ type SchedulerGeminiLeaseReaper = () => Promise<number>;
 type ScoreAuditRecovery = () => Promise<void>;
 type BetaCreditMaintenance = () => Promise<number>;
 type BetaCreditRefresh = () => Promise<void>;
+
+function betaPoolSnapshotAge(
+    env: Record<string, string | undefined> | undefined,
+): number | undefined {
+    try {
+        return getBetaApifyCreditPoolRuntimeConfig(env).maxSnapshotAgeSeconds;
+    } catch {
+        // Invalid admission configuration must not suppress terminal settlement.
+        return undefined;
+    }
+}
+
+function betaRecoveryObservability(
+    env: Record<string, string | undefined> | undefined,
+) {
+    const maxSnapshotAgeSeconds = betaPoolSnapshotAge(env);
+    return {
+        telemetry: operationalLogger,
+        ...(maxSnapshotAgeSeconds === undefined ? {} : { maxSnapshotAgeSeconds }),
+    };
+}
 
 type RecoveryOutcome =
     | 'dispatched'
@@ -203,6 +226,7 @@ export async function recoverAnalysisV2Jobs(
         recoverBetaCredit?: BetaCreditMaintenance;
         archiveBetaCredit?: BetaCreditMaintenance;
         refreshBetaCredit?: BetaCreditRefresh;
+        env?: Record<string, string | undefined>;
         scoreAuditTimeoutMs?: number;
     } = {}
 ): Promise<AnalysisV2RecoverySummary> {
@@ -355,7 +379,11 @@ export async function recoverAnalysisV2Jobs(
     if (hasBetaMaintenance) {
         try {
             summary.betaCreditRecovered = await (dependencies.recoverBetaCredit
-                ?? (() => recoverBetaApifyCredit(supabaseAdmin)))();
+                ?? (() => recoverBetaApifyCredit(
+                    supabaseAdmin,
+                    100,
+                    betaRecoveryObservability(dependencies.env),
+                )))();
         } catch {
             summary.failed += 1;
             summary.betaCreditRecoveryFailures += 1;
@@ -371,7 +399,10 @@ export async function recoverAnalysisV2Jobs(
             summary.betaCreditRefreshAttempts = 1;
             try {
                 await (dependencies.refreshBetaCredit
-                    ?? (() => refreshBetaApifyCreditSnapshots(supabaseAdmin)))();
+                    ?? (() => refreshBetaApifyCreditSnapshots(supabaseAdmin, {
+                        env: dependencies.env,
+                        telemetry: operationalLogger,
+                    })))();
             } catch {
                 summary.betaCreditRefreshFailures = 1;
             }

@@ -350,16 +350,26 @@ export async function admitBetaApifyPlan(input: Readonly<{
     }
     if (existing) return parsedResult(existing);
 
+    const emitRejected = () => emitBetaApifyCreditTelemetry(input.telemetry, {
+        event: 'betatest_apify_credit.allocation_rejected',
+        severity: 'warn',
+    });
+
     const config = getBetaApifyCreditPoolRuntimeConfig(input.env);
     if (!config.enabled) throw new Error(BETA_APIFY_RUNTIME_CONFIG_ERROR);
     assertRuntimeBudgetsFitFrozenCatalog(selectedPlanId, input.env);
     let hold: Awaited<ReturnType<BetaApifyPlanAdmissionStore['loadPreflightHold']>>;
     try { hold = await input.store.loadPreflightHold(preflightId); } catch (error) {
+        emitRejected();
         throw sanitizedBoundaryError(error);
     }
-    if (!exactHold(hold, preflightId)) throw capacityError();
+    if (!exactHold(hold, preflightId)) {
+        emitRejected();
+        throw capacityError();
+    }
     let snapshots: readonly BetaApifyPoolSnapshot[];
     try { snapshots = await input.store.loadSnapshots(age); } catch (error) {
+        emitRejected();
         throw sanitizedBoundaryError(error);
     }
     let allocation;
@@ -371,10 +381,7 @@ export async function admitBetaApifyPlan(input: Readonly<{
             env: input.env,
         });
     } catch (error) {
-        emitBetaApifyCreditTelemetry(input.telemetry, {
-            event: 'betatest_apify_credit.allocation_rejected',
-            severity: 'warn',
-        });
+        emitRejected();
         throw error;
     }
     try {
@@ -383,19 +390,24 @@ export async function admitBetaApifyPlan(input: Readonly<{
             operationSlotMap: allocation.operationSlotMap,
             operationBudgetMap: allocation.operationBudgetMap,
         });
-        emitBetaApifyCreditTelemetry(input.telemetry, {
-            event: 'betatest_apify_credit.allocation_accepted',
-            severity: 'info',
-            reservationUsd: Object.values(allocation.perSlotReservedUsd)
-                .reduce((total, amount) => total + amount, 0),
-        });
-        return parsedResult(result);
+        const parsed = parsedResult(result);
+        if (!parsed.replayed) {
+            emitBetaApifyCreditTelemetry(input.telemetry, {
+                event: 'betatest_apify_credit.allocation_accepted',
+                severity: 'info',
+                reservationUsd: Object.values(allocation.perSlotReservedUsd)
+                    .reduce((total, amount) => total + amount, 0),
+            });
+        }
+        return parsed;
     } catch (error) {
         let raced: z.infer<typeof resultSchema> | null;
         try { raced = await input.store.replay(identity); } catch (replayError) {
+            emitRejected();
             throw sanitizedBoundaryError(replayError);
         }
         if (raced) return parsedResult(raced);
+        emitRejected();
         throw sanitizedBoundaryError(error);
     }
 }

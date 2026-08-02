@@ -1,4 +1,5 @@
 import { supabaseAdmin } from '@/lib/supabase/admin';
+import { operationalLogger } from '@/lib/observability/server';
 import type { ApifyCredentialSlot } from '@/lib/services/instagram/providers/types';
 import {
     createPreflightProviderRunStore,
@@ -12,6 +13,7 @@ import {
     recoverBetaApifyCredit,
     refreshBetaApifyCreditSnapshots,
 } from './beta-apify-credit-settlement-runtime';
+import { getBetaApifyCreditPoolRuntimeConfig } from './beta-apify-credit-runtime';
 
 export const PREFLIGHT_RETENTION_BATCH_LIMIT = 250;
 
@@ -42,6 +44,27 @@ interface PreflightRetentionDependencies {
     recoverBetaCredit?: () => Promise<number>;
     refreshBetaCredit?: () => Promise<void>;
     archiveBetaCredit?: () => Promise<number>;
+}
+
+function betaPoolSnapshotAge(
+    env: Record<string, string | undefined> | undefined,
+): number | undefined {
+    try {
+        return getBetaApifyCreditPoolRuntimeConfig(env).maxSnapshotAgeSeconds;
+    } catch {
+        // Invalid admission configuration must not suppress terminal settlement.
+        return undefined;
+    }
+}
+
+function betaRecoveryObservability(
+    env: Record<string, string | undefined> | undefined,
+) {
+    const maxSnapshotAgeSeconds = betaPoolSnapshotAge(env);
+    return {
+        telemetry: operationalLogger,
+        ...(maxSnapshotAgeSeconds === undefined ? {} : { maxSnapshotAgeSeconds }),
+    };
 }
 
 function boundedCount(value: unknown, maximum: number, operation: string): number {
@@ -109,7 +132,11 @@ export async function runPreflightRetention(
     if (maintainBeta) {
         try {
             betaCreditRecovered = await (dependencies.recoverBetaCredit
-                ?? (() => recoverBetaApifyCredit(client)))();
+                ?? (() => recoverBetaApifyCredit(
+                    client,
+                    100,
+                    betaRecoveryObservability(dependencies.env),
+                )))();
         } catch {
             betaCreditRecoveryFailures = 1;
         }
@@ -129,7 +156,10 @@ export async function runPreflightRetention(
         betaCreditRefreshAttempts = 1;
         try {
             await (dependencies.refreshBetaCredit
-                ?? (() => refreshBetaApifyCreditSnapshots(client, { env: dependencies.env })))();
+                ?? (() => refreshBetaApifyCreditSnapshots(client, {
+                    env: dependencies.env,
+                    telemetry: operationalLogger,
+                })))();
         } catch {
             betaCreditRefreshFailures = 1;
         }

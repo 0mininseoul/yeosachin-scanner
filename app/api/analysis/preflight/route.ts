@@ -251,7 +251,10 @@ async function handlePOST(
                     try {
                         await preflightStore.blockQueueUnavailable(created.preflightId, user.id);
                         await bestEffortBetaApifySettlement(() => (
-                            settleBetaApifyPreflightCredit(supabaseAdmin, created.preflightId)
+                            settleBetaApifyPreflightCredit(
+                                supabaseAdmin, created.preflightId,
+                                { telemetry: operationalLogger }
+                            )
                         ).then(() => undefined));
                     } catch {
                         console.error('Preflight queue failure terminalization failed.');
@@ -289,7 +292,10 @@ async function handlePOST(
                 try {
                     await processPreflight(created.preflightId, {
                         settleBetaCredit: preflightId => (
-                            settleBetaApifyPreflightCredit(supabaseAdmin, preflightId)
+                            settleBetaApifyPreflightCredit(
+                                supabaseAdmin, preflightId,
+                                { telemetry: operationalLogger }
+                            )
                         ),
                         observer(observation: PreflightProcessObservation) {
                             if (observation.type === 'failed') failureObserved = true;

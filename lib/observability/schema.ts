@@ -61,6 +61,8 @@ export const ALLOWED_FIELD_NAMES = [
     'stale_snapshot_count',
     'settlement_lag_ms',
     'active_allocation_count',
+    'overcommitted_slot_count',
+    'runtime_enabled',
 ] as const;
 
 type SanitizedValue = string | number | boolean | null;
@@ -113,6 +115,7 @@ export const OPERATIONAL_EVENT_NAMES = [
     'betatest_apify_credit.allocation_accepted',
     'betatest_apify_credit.allocation_rejected',
     'betatest_apify_credit.settlement_completed',
+    'betatest_apify_credit.pool_health_observed',
 ] as const;
 
 export const OPERATIONAL_ERROR_CODES = [
@@ -523,10 +526,15 @@ function sanitizeField(name: string, value: unknown): SanitizedValue | undefined
         case 'released_usd':
             return safeFiniteNumber(value, 0, 100_000_000);
         case 'stale_snapshot_count':
+            return safeFiniteNumber(value, 0, 6, true);
         case 'active_allocation_count':
             return safeFiniteNumber(value, 0, 1_000_000, true);
+        case 'overcommitted_slot_count':
+            return safeFiniteNumber(value, 0, 6, true);
+        case 'runtime_enabled':
+            return typeof value === 'boolean' ? value : undefined;
         case 'settlement_lag_ms':
-            return safeFiniteNumber(value, 0, 86_400_000);
+            return safeFiniteNumber(value, 0, 31_536_000_000);
         default:
             return undefined;
     }

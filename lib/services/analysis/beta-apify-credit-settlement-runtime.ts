@@ -11,6 +11,7 @@ import {
     emitBetaApifyCreditTelemetry,
     type BetaApifyCreditTelemetry,
 } from './beta-apify-credit-telemetry';
+import { observeBetaApifyPoolHealth } from './beta-apify-pool-observability';
 
 /** Fixed messages only: provider responses and account identities are never logged. */
 export const BETA_APIFY_SETTLEMENT_LOG = 'BETATEST_APIFY_CREDIT_SETTLEMENT_DEFERRED';
@@ -125,8 +126,32 @@ export async function settleBetaApifyPreflightCredit(
     return settle(client, 'settle_analysis_beta_apify_preflight_credit', 'p_preflight_id', preflightId, options);
 }
 
-export async function recoverBetaApifyCredit(client: BetaApifyPoolStoreClient, limit = 100): Promise<number> {
-    return (await createBetaApifyCreditPoolStore(boundedClient(client)).recover(limit)).length;
+export async function recoverBetaApifyCredit(
+    client: BetaApifyPoolStoreClient,
+    limit = 100,
+    options: BetaApifyTelemetryOptions & Readonly<{
+        maxSnapshotAgeSeconds?: number;
+    }> = {},
+): Promise<number> {
+    const settlements = await createBetaApifyCreditPoolStore(
+        boundedClient(client)
+    ).recover(limit);
+    for (const settlement of settlements) {
+        emitBetaApifyCreditTelemetry(options.telemetry, {
+            event: 'betatest_apify_credit.settlement_completed',
+            severity: 'info',
+            actualUsd: settlement.actualUsd,
+            releasedUsd: settlement.releasedUsd,
+        });
+    }
+    if (options.telemetry) {
+        await observeBetaApifyPoolHealth(
+            boundedClient(client),
+            options.telemetry,
+            options.maxSnapshotAgeSeconds ?? 300,
+        );
+    }
+    return settlements.length;
 }
 
 export async function archiveSettledBetaApifyCredit(client: BetaApifyPoolStoreClient, limit = 100): Promise<number> {
@@ -158,32 +183,37 @@ export async function refreshBetaApifyCreditSnapshots(
     const startedAt = now();
     const timeoutMs = 15_000;
     let timer: ReturnType<typeof setTimeout> | undefined;
-    const refresh = refreshBetaApifyCreditPool({
-        clientForSlot: dependencies.clientForSlot
-            ?? createServerBetaApifyCreditClientFactory(dependencies.env),
-        observedAt: new Date(now()),
-    }, { now });
-    const refreshed = await Promise.race([
-        refresh,
-        new Promise<never>((_resolve, reject) => {
-            timer = setTimeout(
-                () => reject(new Error('ANALYSIS_BETA_APIFY_CREDIT_REFRESH_TIMEOUT')),
-                timeoutMs,
-            );
-        }),
-    ]).finally(() => {
-        if (timer) clearTimeout(timer);
-    });
     try {
-        await createBetaApifyCreditPoolStore(client).upsertSnapshots(refreshed.map(snapshot => ({
-            ...snapshot,
-            healthState: 'healthy' as const,
-        })));
+        const refresh = refreshBetaApifyCreditPool({
+            clientForSlot: dependencies.clientForSlot
+                ?? createServerBetaApifyCreditClientFactory(dependencies.env),
+            observedAt: new Date(now()),
+        }, { now });
+        const refreshed = await Promise.race([
+            refresh,
+            new Promise<never>((_resolve, reject) => {
+                timer = setTimeout(
+                    () => reject(new Error('ANALYSIS_BETA_APIFY_CREDIT_REFRESH_TIMEOUT')),
+                    timeoutMs,
+                );
+            }),
+        ]);
+        const persisted = await createBetaApifyCreditPoolStore(client)
+            .upsertSnapshots(refreshed.map(snapshot => ({
+                credentialSlot: snapshot.credentialSlot,
+                monthlyLimitUsd: snapshot.monthlyLimitUsd,
+                monthlyUsageUsd: snapshot.monthlyUsageUsd,
+                billingCycleStartAt: snapshot.billingCycleStartAt,
+                billingCycleEndAt: snapshot.billingCycleEndAt,
+                observedAt: snapshot.observedAt,
+                healthState: 'healthy' as const,
+                effectiveHeadroomUsd: snapshot.effectiveHeadroomUsd,
+            })));
         emitBetaApifyCreditTelemetry(dependencies.telemetry, {
             event: 'betatest_apify_credit.refresh_completed',
             severity: 'info',
             durationMs: Math.max(0, now() - startedAt),
-            totalEffectiveHeadroomUsd: refreshed.reduce(
+            totalEffectiveHeadroomUsd: persisted.reduce(
                 (total, snapshot) => total + snapshot.effectiveHeadroomUsd, 0
             ),
             staleSnapshotCount: 0,
@@ -195,6 +225,8 @@ export async function refreshBetaApifyCreditSnapshots(
             durationMs: Math.max(0, now() - startedAt),
         });
         throw error;
+    } finally {
+        if (timer) clearTimeout(timer);
     }
 }
 

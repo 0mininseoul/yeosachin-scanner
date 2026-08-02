@@ -138,7 +138,7 @@ async function handlePOST(
             outcome = await processPreflight(task.preflightId, {
                 betaCreditCoordinator,
                 settleBetaCredit: preflightId => settleBetaApifyPreflightCredit(
-                    supabaseAdmin, preflightId
+                    supabaseAdmin, preflightId, { telemetry: operationalLogger }
                 ),
                 refreshBetaCredit: () => refreshBetaApifyCreditSnapshots(
                     supabaseAdmin, { telemetry: operationalLogger }
@@ -152,7 +152,8 @@ async function handlePOST(
         if (outcome === 'blocked' && isFreshAdmission) {
             await bestEffortBetaApifySettlement(async () => {
                 const processed = await settleBetaApifyPreflightCredit(
-                    supabaseAdmin, task.preflightId
+                    supabaseAdmin, task.preflightId,
+                    { telemetry: operationalLogger }
                 );
                 if (processed) {
                     await bestEffortBetaApifyRefresh(() => (

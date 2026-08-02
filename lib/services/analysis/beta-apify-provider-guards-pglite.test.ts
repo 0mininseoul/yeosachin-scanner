@@ -253,6 +253,7 @@ CREATE TABLE public.analysis_requests (
     target_instagram_id TEXT NOT NULL,
     excluded_instagram_id TEXT,
     status TEXT NOT NULL DEFAULT 'pending',
+    completed_at TIMESTAMP WITH TIME ZONE,
     background_processing BOOLEAN NOT NULL DEFAULT FALSE,
     pipeline_version TEXT,
     preflight_id UUID,

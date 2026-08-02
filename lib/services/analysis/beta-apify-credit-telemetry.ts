@@ -10,6 +10,7 @@ export const BETA_APIFY_CREDIT_TELEMETRY_EVENTS = Object.freeze([
     'betatest_apify_credit.allocation_accepted',
     'betatest_apify_credit.allocation_rejected',
     'betatest_apify_credit.settlement_completed',
+    'betatest_apify_credit.pool_health_observed',
 ] as const);
 
 type BetaApifyCreditTelemetryEvent = typeof BETA_APIFY_CREDIT_TELEMETRY_EVENTS[number];
@@ -19,7 +20,7 @@ export interface BetaApifyCreditTelemetry {
     emit(input: Readonly<{
         event: BetaApifyCreditTelemetryEvent;
         severity: Severity;
-        fields: Record<string, number | string>;
+        fields: Record<string, number | string | boolean>;
     }>): void;
 }
 
@@ -35,10 +36,13 @@ export interface BetaApifyCreditTelemetryInput {
     readonly staleSnapshotCount?: number;
     readonly settlementLagMs?: number;
     readonly activeAllocationCount?: number;
+    readonly overcommittedSlotCount?: number;
+    readonly runtimeEnabled?: boolean;
 }
 
 const MAX_USD = 100_000_000;
 const MAX_DURATION_MS = 86_400_000;
+const MAX_SETTLEMENT_LAG_MS = 31_536_000_000;
 const MAX_COUNT = 1_000_000;
 
 function finite(value: unknown, maximum: number, integer = false): number | undefined {
@@ -61,7 +65,7 @@ export function emitBetaApifyCreditTelemetry(
     input: BetaApifyCreditTelemetryInput,
 ): void {
     if (!telemetry) return;
-    const fields: Record<string, number | string> = {};
+    const fields: Record<string, number | string | boolean> = {};
     if (isBetaApifyFreeCredentialSlot(input.credentialSlot)) {
         fields.credential_slot = input.credentialSlot;
     }
@@ -71,13 +75,17 @@ export function emitBetaApifyCreditTelemetry(
         ['reservation_usd', input.reservationUsd, MAX_USD],
         ['actual_usd', input.actualUsd, MAX_USD],
         ['released_usd', input.releasedUsd, MAX_USD],
-        ['stale_snapshot_count', input.staleSnapshotCount, MAX_COUNT, true],
-        ['settlement_lag_ms', input.settlementLagMs, MAX_DURATION_MS],
+        ['stale_snapshot_count', input.staleSnapshotCount, 6, true],
+        ['settlement_lag_ms', input.settlementLagMs, MAX_SETTLEMENT_LAG_MS],
         ['active_allocation_count', input.activeAllocationCount, MAX_COUNT, true],
+        ['overcommitted_slot_count', input.overcommittedSlotCount, 6, true],
     ];
     for (const [key, value, maximum, integer] of values) {
         const safe = finite(value, maximum, integer);
         if (safe !== undefined) fields[key] = safe;
+    }
+    if (typeof input.runtimeEnabled === 'boolean') {
+        fields.runtime_enabled = input.runtimeEnabled;
     }
     try {
         telemetry.emit({ event: input.event, severity: input.severity, fields });

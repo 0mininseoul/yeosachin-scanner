@@ -311,7 +311,7 @@ function checkedAge(value: number): number {
     return value;
 }
 
-async function invoke(client: BetaApifyPoolStoreClient, name: string, params: Record<string, unknown>): Promise<unknown> {
+async function invokeRaw(client: BetaApifyPoolStoreClient, name: string, params: Record<string, unknown>): Promise<unknown> {
     let result: Awaited<ReturnType<BetaApifyPoolStoreClient['rpc']>>;
     try {
         result = await client.rpc(name, params);
@@ -320,7 +320,11 @@ async function invoke(client: BetaApifyPoolStoreClient, name: string, params: Re
     }
     const { data, error } = result;
     if (error) persistenceFailure(error);
-    return normalizedRpcData(data);
+    return data;
+}
+
+async function invoke(client: BetaApifyPoolStoreClient, name: string, params: Record<string, unknown>): Promise<unknown> {
+    return normalizedRpcData(await invokeRaw(client, name, params));
 }
 
 export function createBetaApifyCreditPoolStore(client: BetaApifyPoolStoreClient): BetaApifyCreditPoolStore {
@@ -408,7 +412,10 @@ export function createBetaApifyCreditPoolStore(client: BetaApifyPoolStoreClient)
             return Object.freeze(parsed.data);
         },
         async recover(limit = 100) {
-            const data = await invoke(client, 'recover_analysis_beta_apify_credit_allocations', {
+            // The RPC's JSONB value is itself an array. Do not apply the generic
+            // one-row unwrapping heuristic or a single recovered allocation
+            // would be mistaken for a scalar object and discarded.
+            const data = await invokeRaw(client, 'recover_analysis_beta_apify_credit_allocations', {
                 p_limit: z.number().int().min(1).max(1000).parse(limit),
             });
             const parsed = z.array(settlementSchema).safeParse(data);

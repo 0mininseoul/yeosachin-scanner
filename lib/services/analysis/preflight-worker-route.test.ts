@@ -279,7 +279,8 @@ describe('preflight worker route', () => {
 
         expect(response.status).toBe(200);
         expect(mocks.settleBetaCredit).toHaveBeenCalledWith(
-            expect.anything(), preflightId
+            expect.anything(), preflightId,
+            { telemetry: expect.objectContaining({ emit: expect.any(Function) }) }
         );
         expect(mocks.refreshBetaCredit).toHaveBeenCalledWith(
             expect.anything(),
