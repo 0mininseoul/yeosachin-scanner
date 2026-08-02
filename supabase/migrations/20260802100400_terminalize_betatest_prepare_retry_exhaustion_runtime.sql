@@ -1,10 +1,12 @@
 -- Convert beta prepare delivery exhaustion from a pending tombstone into a
 -- public terminal result after the short schema-only constraint swap commits.
 -- This phase takes row-level locks only; validation remains separate.
-BEGIN;
-
-SET LOCAL lock_timeout = '5s';
-SET LOCAL statement_timeout = '2min';
+DO $migration_transaction_fence$
+BEGIN
+    PERFORM pg_catalog.set_config('lock_timeout', '5s', true);
+    PERFORM pg_catalog.set_config('statement_timeout', '2min', true);
+END;
+$migration_transaction_fence$;
 
 CREATE OR REPLACE FUNCTION public.mark_analysis_beta_preflight_prepare_retry_exhausted(
     p_preflight_id UUID,p_user_id UUID,p_prepare_generation INTEGER,
@@ -358,4 +360,3 @@ WHERE preflight.beta_entry_provenance IS NOT NULL
   AND preflight.beta_prepare_state = 'reserved'
   AND preflight.beta_prepare_dispatch_state = 'completed'
   AND preflight.beta_prepare_retry_exhausted_at IS NOT NULL;
-COMMIT;

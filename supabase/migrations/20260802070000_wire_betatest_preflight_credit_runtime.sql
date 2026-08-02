@@ -1,9 +1,11 @@
 -- Worker-facing beta admission contract.  This is deliberately service-role
 -- only: it exposes neither an owner id nor any upstream account metadata.
-BEGIN;
-
-SET LOCAL lock_timeout = '5s';
-SET LOCAL statement_timeout = '2min';
+DO $migration_transaction_fence$
+BEGIN
+    PERFORM pg_catalog.set_config('lock_timeout', '5s', true);
+    PERFORM pg_catalog.set_config('statement_timeout', '2min', true);
+END;
+$migration_transaction_fence$;
 
 ALTER TABLE public.analysis_preflights
     DROP CONSTRAINT IF EXISTS analysis_preflights_error_code_check;
@@ -183,4 +185,3 @@ $$;
 REVOKE ALL ON FUNCTION public.claim_analysis_v2_preflight_admission(UUID, INTEGER, INTEGER, UUID, UUID, INTEGER)
     FROM PUBLIC, anon, authenticated, service_role;
 GRANT EXECUTE ON FUNCTION public.claim_analysis_v2_preflight_admission(UUID, INTEGER, INTEGER, UUID, UUID, INTEGER) TO service_role;
-COMMIT;

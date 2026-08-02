@@ -22,6 +22,11 @@ describe('betatest frozen provider budget context migration', () => {
     it('takes the canonical allocation apply fence before any trigger or child repair lock', () => {
         const lock = 'LOCK TABLE public.analysis_beta_pool_allocations IN EXCLUSIVE MODE;';
         const lockIndex = migration.indexOf(lock);
+        const fenceIndex = migration.indexOf('DO $migration_transaction_fence$');
+        const timeoutIndex = migration.indexOf(
+            "PERFORM pg_catalog.set_config('statement_timeout', '2min', true);"
+        );
+        const fenceEndIndex = migration.indexOf('$migration_transaction_fence$;');
         const functionIndex = migration.indexOf(
             'CREATE OR REPLACE FUNCTION public.activate_analysis_beta_pool_reservations()'
         );
@@ -32,9 +37,10 @@ describe('betatest frozen provider budget context migration', () => {
             '\nUPDATE public.analysis_beta_pool_reservations AS reservation\n'
         );
 
-        expect(lockIndex).toBeGreaterThan(
-            migration.indexOf("SET LOCAL statement_timeout = '2min';")
-        );
+        expect(fenceIndex).toBeGreaterThanOrEqual(0);
+        expect(timeoutIndex).toBeGreaterThan(fenceIndex);
+        expect(lockIndex).toBeGreaterThan(timeoutIndex);
+        expect(lockIndex).toBeLessThan(fenceEndIndex);
         expect(lockIndex).toBeLessThan(functionIndex);
         expect(lockIndex).toBeLessThan(triggerIndex);
         expect(lockIndex).toBeLessThan(childRepairIndex);

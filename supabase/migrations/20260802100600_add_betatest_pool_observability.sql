@@ -1,10 +1,12 @@
 -- Aggregate-only operational visibility for the betatest Apify credit pool.
 -- No row identity, user/request/preflight ID, provider account identity, or
 -- credential detail crosses this service-role boundary.
-BEGIN;
-
-SET LOCAL lock_timeout = '5s';
-SET LOCAL statement_timeout = '2min';
+DO $migration_transaction_fence$
+BEGIN
+    PERFORM pg_catalog.set_config('lock_timeout', '5s', true);
+    PERFORM pg_catalog.set_config('statement_timeout', '2min', true);
+END;
+$migration_transaction_fence$;
 
 CREATE INDEX IF NOT EXISTS idx_analysis_beta_pool_allocations_observability
     ON public.analysis_beta_pool_allocations(lifecycle_state, updated_at)
@@ -143,4 +145,3 @@ GRANT EXECUTE ON FUNCTION public.load_analysis_beta_apify_pool_observability(INT
 
 COMMENT ON FUNCTION public.load_analysis_beta_apify_pool_observability(INTEGER) IS
     'Service-only aggregate betatest pool health. Returns no row, user, provider-account, or credential identity.';
-COMMIT;

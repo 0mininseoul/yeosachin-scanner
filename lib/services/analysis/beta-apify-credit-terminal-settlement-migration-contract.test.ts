@@ -37,8 +37,12 @@ describe('terminal betatest credit settlement migration contract', () => {
         expect(migration).toMatch(/NOT EXISTS \([\s\S]*?analysis_beta_pool_allocations AS allocation[\s\S]*?allocation\.preflight_id = preflight\.id/);
         expect(migration).toContain('REVOKE ALL ON FUNCTION public.settle_analysis_beta_apify_request_credit(UUID)');
         expect(migration).toContain('SET search_path = \'\'');
-        expect(migration).toContain("SET LOCAL lock_timeout = '5s'");
-        expect(migration).toContain("SET LOCAL statement_timeout = '2min'");
+        expect(migration).toContain(
+            "PERFORM pg_catalog.set_config('lock_timeout', '5s', true);"
+        );
+        expect(migration).toContain(
+            "PERFORM pg_catalog.set_config('statement_timeout', '2min', true);"
+        );
     });
 
     it('bounds invocation-time locks and independently aborts slow application RPCs', () => {

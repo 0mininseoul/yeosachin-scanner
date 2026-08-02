@@ -2,10 +2,12 @@
 -- fencing, and the operational database gate. Expensive backfill, runtime
 -- functions, and validation are intentionally committed in later migrations
 -- so analysis_preflights is not held ACCESS EXCLUSIVE across function DDL.
-BEGIN;
-
-SET LOCAL lock_timeout = '5s';
-SET LOCAL statement_timeout = '2min';
+DO $migration_transaction_fence$
+BEGIN
+    PERFORM pg_catalog.set_config('lock_timeout', '5s', true);
+    PERFORM pg_catalog.set_config('statement_timeout', '2min', true);
+END;
+$migration_transaction_fence$;
 
 CREATE TABLE public.analysis_beta_runtime_gate (
     singleton BOOLEAN PRIMARY KEY DEFAULT TRUE CHECK (singleton),
@@ -125,4 +127,3 @@ COMMENT ON COLUMN public.analysis_preflights.beta_entry_provenance IS
     'Service-only durable betatest origin; never accepted from request body, header, query, or referrer.';
 COMMENT ON COLUMN public.analysis_preflights.beta_prepare_token IS
     'Opaque persisted task fence. It is unrelated to any provider token.';
-COMMIT;
