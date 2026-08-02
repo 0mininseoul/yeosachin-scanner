@@ -199,6 +199,28 @@ export function freshAdmissionTaskId(
     return `preflight-admission-${preflightId.toLowerCase()}-g${generation}-d${dispatchGeneration}`;
 }
 
+export function betaPreflightPrepareTaskId(
+    preflightId: string,
+    prepareGeneration: number,
+    prepareToken: string
+): string {
+    if (!UUID_PATTERN.test(preflightId)) {
+        throw new Error('PREFLIGHT_TASKS_CONFIG_ERROR: invalid preflight id.');
+    }
+    if (
+        !Number.isSafeInteger(prepareGeneration)
+        || prepareGeneration < 1
+        || prepareGeneration > 100
+    ) {
+        throw new Error('PREFLIGHT_TASKS_CONFIG_ERROR: invalid beta prepare generation.');
+    }
+    if (!UUID_PATTERN.test(prepareToken)) {
+        throw new Error('PREFLIGHT_TASKS_CONFIG_ERROR: invalid beta prepare token.');
+    }
+    return `preflight-beta-prepare-${preflightId.toLowerCase()}-g${prepareGeneration}`
+        + `-t${prepareToken.toLowerCase()}`;
+}
+
 function isAlreadyExists(error: unknown): boolean {
     if (!error || typeof error !== 'object') return false;
     const value = error as { code?: unknown; message?: unknown };
@@ -284,6 +306,55 @@ export async function enqueuePreflightTask(
             }
             if (attempt === 1) {
                 // Do not terminalize retryable or outcome-ambiguous failures.
+                throw new PreflightTaskEnqueueError('replayable');
+            }
+        }
+    }
+    throw new PreflightTaskEnqueueError('replayable');
+}
+
+/**
+ * This task intentionally precedes ordinary dispatch. Its worker performs the
+ * exact-six refresh and atomic beta hold before it may reserve normal work.
+ */
+export async function enqueueBetaPreflightPrepareTask(
+    preflightId: string,
+    userId: string,
+    prepareGeneration: number,
+    prepareToken: string,
+    options: {
+        config?: PreflightTasksConfig;
+        client?: CloudTasksClientLike;
+    } = {}
+): Promise<'enqueued' | 'exists'> {
+    if (!UUID_PATTERN.test(userId)) {
+        throw new Error('PREFLIGHT_TASKS_CONFIG_ERROR: invalid beta owner id.');
+    }
+    const config = options.config ?? getPreflightTasksConfig();
+    if (!config) throw new Error('PREFLIGHT_TASKS_CONFIG_ERROR: queue is not configured.');
+    const client = options.client ?? await getSharedTasksClient(config);
+    const taskId = betaPreflightPrepareTaskId(
+        preflightId, prepareGeneration, prepareToken
+    );
+    const parent = client.queuePath(config.project, config.location, config.queue);
+    const name = client.taskPath(config.project, config.location, config.queue, taskId);
+    const request = taskRequest({
+        kind: 'beta_prepare',
+        preflightId: preflightId.toLowerCase(),
+        userId: userId.toLowerCase(),
+        prepareGeneration,
+        prepareToken: prepareToken.toLowerCase(),
+    }, name, parent, config);
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+        try {
+            await client.createTask(request);
+            return 'enqueued';
+        } catch (error) {
+            if (isAlreadyExists(error)) return 'exists';
+            if (attempt === 0 && isTerminalCreateFailure(error)) {
+                throw new PreflightTaskEnqueueError('terminal');
+            }
+            if (attempt === 1) {
                 throw new PreflightTaskEnqueueError('replayable');
             }
         }

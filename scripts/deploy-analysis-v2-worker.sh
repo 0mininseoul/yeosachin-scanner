@@ -29,6 +29,7 @@ readonly -a APIFY_TOKEN_SLOTS=(
   quaternary
   quinary
   senary
+  septenary
 )
 
 mode="apply"
@@ -219,6 +220,10 @@ validate_location() {
 validate_service() {
   [[ "$1" =~ ^[a-z]([a-z0-9-]{0,47}[a-z0-9])?$ ]] \
     || die "ANALYSIS_V2_TASKS_CLOUD_RUN_SERVICE is invalid"
+  case "$1" in
+    analysis-worker|analysis-worker-secondary-e2e) ;;
+    *) die "ANALYSIS_V2_TASKS_CLOUD_RUN_SERVICE must be analysis-worker or analysis-worker-secondary-e2e" ;;
+  esac
 }
 
 validate_queue() {
@@ -246,7 +251,7 @@ validate_slot() {
   for allowed in "${APIFY_TOKEN_SLOTS[@]}"; do
     [[ "$1" != "$allowed" ]] || return 0
   done
-  die "ANALYSIS_V2_APIFY_API_TOKEN_SLOT must be primary, secondary, tertiary, quaternary, quinary, or senary"
+  die "ANALYSIS_V2_APIFY_API_TOKEN_SLOT must be primary, secondary, tertiary, quaternary, quinary, senary, or septenary"
 }
 
 validate_numeric_version() {
@@ -307,8 +312,8 @@ parse_prune_apify_secret_refs() {
   [[ -n "$raw" ]] || return 0
   prune_apify_secret_refs_enabled="true"
   IFS=',' read -r -a slots <<<"$raw"
-  ((${#slots[@]} > 0 && ${#slots[@]} <= 5)) \
-    || die "--prune-apify-secret-refs requires one through five exact non-primary slots"
+  ((${#slots[@]} > 0 && ${#slots[@]} <= 6)) \
+    || die "--prune-apify-secret-refs requires one through six exact non-primary slots"
   for slot in "${slots[@]}"; do
     [[ -n "$slot" && "$slot" != "primary" ]] \
       || die "--prune-apify-secret-refs must not include the selected primary slot"
@@ -337,8 +342,8 @@ parse_clear_apify_secret_ref_prune_fence() {
   [[ -n "$raw" ]] || return 0
   clear_apify_secret_ref_prune_fence_enabled="true"
   IFS=',' read -r -a slots <<<"$raw"
-  ((${#slots[@]} > 0 && ${#slots[@]} <= 5)) \
-    || die "--clear-apify-secret-ref-prune-fence requires one through five exact non-primary slots"
+  ((${#slots[@]} > 0 && ${#slots[@]} <= 6)) \
+    || die "--clear-apify-secret-ref-prune-fence requires one through six exact non-primary slots"
   for slot in "${slots[@]}"; do
     [[ -n "$slot" && "$slot" != "primary" ]] \
       || die "--clear-apify-secret-ref-prune-fence must contain only non-primary slots"
@@ -376,6 +381,15 @@ validate_positive_integer_range() {
   [[ "$value" =~ ^[0-9]+$ ]] \
     && ((10#$value >= min && 10#$value <= max)) \
     || die "$label must be an integer from $min through $max"
+}
+
+validate_beta_free_pool_controls() {
+  [[ "$beta_free_pool_enabled" == "true" || "$beta_free_pool_enabled" == "false" ]] \
+    || die "BETATEST_FREE_POOL_ENABLED must be true or false"
+  validate_positive_integer_range "$beta_free_pool_max_snapshot_age_seconds" 1 900 \
+    "BETATEST_FREE_POOL_MAX_SNAPSHOT_AGE_SECONDS"
+  validate_positive_integer_range "$beta_free_pool_refresh_interval_seconds" 1 900 \
+    "BETATEST_FREE_POOL_REFRESH_INTERVAL_SECONDS"
 }
 
 validate_runtime_tuning() {
@@ -560,6 +574,9 @@ service_runtime_config_matches() {
     --arg identity_hmac_version "$preflight_identity_hmac_secret_version" \
     --arg result_images_enabled "$result_images_enabled" \
     --arg automatic_fulfillment_enabled "$automatic_fulfillment_enabled" \
+    --arg beta_free_pool_enabled "$beta_free_pool_enabled" \
+    --arg beta_free_pool_max_snapshot_age_seconds "$beta_free_pool_max_snapshot_age_seconds" \
+    --arg beta_free_pool_refresh_interval_seconds "$beta_free_pool_refresh_interval_seconds" \
     --arg result_image_r2_endpoint "$result_image_r2_endpoint" \
     --arg result_image_r2_bucket "$result_image_r2_bucket" \
     --arg r2_access_key_id_secret "$R2_ACCESS_KEY_ID_SECRET_ID" \
@@ -584,7 +601,8 @@ service_runtime_config_matches() {
         {env: "APIFY_TERTIARY_API_TOKEN", secret: "ai-baram-v2-apify-tertiary"},
         {env: "APIFY_QUATERNARY_API_TOKEN", secret: "ai-baram-v2-apify-quaternary"},
         {env: "APIFY_QUINARY_API_TOKEN", secret: "ai-baram-v2-apify-quinary"},
-        {env: "APIFY_SENARY_API_TOKEN", secret: "ai-baram-v2-apify-senary"}
+        {env: "APIFY_SENARY_API_TOKEN", secret: "ai-baram-v2-apify-senary"},
+        {env: "APIFY_SEPTENARY_API_TOKEN", secret: "ai-baram-v2-apify-septenary"}
       ];
       def apify_env_names: [apify_specs[].env];
       def apify_refs:
@@ -654,6 +672,9 @@ service_runtime_config_matches() {
         and value("SELFHOSTED_PROFILE_GLOBAL_MIN_INTERVAL_MS") == [$selfhosted_global_interval]
         and value("SELFHOSTED_PROFILE_GLOBAL_RESPONSE_GUARD_MS") == [$selfhosted_response_guard]
         and value("EARLYBIRD_AUTOMATIC_FULFILLMENT_ENABLED") == [$automatic_fulfillment_enabled]
+        and value("BETATEST_FREE_POOL_ENABLED") == [$beta_free_pool_enabled]
+        and value("BETATEST_FREE_POOL_MAX_SNAPSHOT_AGE_SECONDS") == [$beta_free_pool_max_snapshot_age_seconds]
+        and value("BETATEST_FREE_POOL_REFRESH_INTERVAL_SECONDS") == [$beta_free_pool_refresh_interval_seconds]
         and secret_ref("SUPABASE_SERVICE_ROLE_KEY"; $supabase_secret; $supabase_version)
         and secret_ref($apify_env_key; $apify_secret; $apify_version)
         and secret_ref("IMAGE_PROXY_SIGNING_SECRET"; $image_secret; $image_version)
@@ -661,7 +682,7 @@ service_runtime_config_matches() {
         and result_image_config_matches
         and (apify_refs == ($expected_apify_refs | sort_by(.env)))
         and (apify_refs | length) >= 1
-        and (apify_refs | length) <= 6
+        and (apify_refs | length) <= 7
         and ([env[]
           | select(.name as $name | apify_env_names | index($name))
           | select(has("value"))] | length) == 0
@@ -770,7 +791,8 @@ service_has_forbidden_plaintext_credential() {
       "APIFY_TERTIARY_API_TOKEN",
       "APIFY_QUATERNARY_API_TOKEN",
       "APIFY_QUINARY_API_TOKEN",
-      "APIFY_SENARY_API_TOKEN"
+      "APIFY_SENARY_API_TOKEN",
+      "APIFY_SEPTENARY_API_TOKEN"
     ];
     [containers[]?.env[]?
       | select(
@@ -828,7 +850,8 @@ apify_identity_for_existing_config() {
         {slot: "tertiary", env: "APIFY_TERTIARY_API_TOKEN", secret: "ai-baram-v2-apify-tertiary"},
         {slot: "quaternary", env: "APIFY_QUATERNARY_API_TOKEN", secret: "ai-baram-v2-apify-quaternary"},
         {slot: "quinary", env: "APIFY_QUINARY_API_TOKEN", secret: "ai-baram-v2-apify-quinary"},
-        {slot: "senary", env: "APIFY_SENARY_API_TOKEN", secret: "ai-baram-v2-apify-senary"}
+        {slot: "senary", env: "APIFY_SENARY_API_TOKEN", secret: "ai-baram-v2-apify-senary"},
+        {slot: "septenary", env: "APIFY_SEPTENARY_API_TOKEN", secret: "ai-baram-v2-apify-septenary"}
       ];
       [env[] | select(.name | test("^APIFY_.*_API_TOKEN$"))] as $entries
       | [$entries[].name] as $names
@@ -839,7 +862,7 @@ apify_identity_for_existing_config() {
       | [$entries[] | select(.name == ($runtime_specs[0].env // ""))]
           as $runtime_refs
       | if (containers | length) != 1 then error("invalid container count")
-        elif ($entries | length) < 1 or ($entries | length) > 6
+        elif ($entries | length) < 1 or ($entries | length) > 7
           then error("invalid Apify ref count")
         elif ($names | length) != ($names | unique | length)
           then error("duplicate Apify ref")
@@ -1135,7 +1158,8 @@ prepare_apify_secret_assignments() {
           {slot: "tertiary", env: "APIFY_TERTIARY_API_TOKEN", secret: "ai-baram-v2-apify-tertiary"},
           {slot: "quaternary", env: "APIFY_QUATERNARY_API_TOKEN", secret: "ai-baram-v2-apify-quaternary"},
           {slot: "quinary", env: "APIFY_QUINARY_API_TOKEN", secret: "ai-baram-v2-apify-quinary"},
-          {slot: "senary", env: "APIFY_SENARY_API_TOKEN", secret: "ai-baram-v2-apify-senary"}
+          {slot: "senary", env: "APIFY_SENARY_API_TOKEN", secret: "ai-baram-v2-apify-senary"},
+          {slot: "septenary", env: "APIFY_SEPTENARY_API_TOKEN", secret: "ai-baram-v2-apify-septenary"}
         ];
         def entries($name): [env[] | select(.name == $name)];
         if (specs | all(entries(.env) | length <= 1)) then
@@ -1201,6 +1225,35 @@ prepare_apify_secret_assignments() {
   apify_secret_assignments="$(jq -r '
       map("\(.env)=\(.secret):\(.version)") | join(",")
     ' <<<"$expected_apify_secret_refs_json")"
+}
+
+require_canonical_apify_secret_inventory() {
+  # Canonical normal/recovery revisions carry the complete slot inventory before
+  # either beta or runtime gates can be enabled. Explicit prune/fence commands
+  # retain their historical narrow inventory contract. The only other allowed
+  # service is the separately validated, execution-disabled E2E fixture.
+  [[ "$ANALYSIS_V2_TASKS_CLOUD_RUN_SERVICE" == "analysis-worker" ]] || return 0
+  [[ "$prune_apify_secret_refs_enabled" != "true" ]] || return 0
+  [[ "$clear_apify_secret_ref_prune_fence_enabled" != "true" ]] || return 0
+  jq -ne --argjson refs "$expected_apify_secret_refs_json" '
+    def specs: [
+      {env: "APIFY_PRIMARY_API_TOKEN", secret: "ai-baram-v2-apify-primary"},
+      {env: "APIFY_SECONDARY_API_TOKEN", secret: "ai-baram-v2-apify-secondary"},
+      {env: "APIFY_TERTIARY_API_TOKEN", secret: "ai-baram-v2-apify-tertiary"},
+      {env: "APIFY_QUATERNARY_API_TOKEN", secret: "ai-baram-v2-apify-quaternary"},
+      {env: "APIFY_QUINARY_API_TOKEN", secret: "ai-baram-v2-apify-quinary"},
+      {env: "APIFY_SENARY_API_TOKEN", secret: "ai-baram-v2-apify-senary"},
+      {env: "APIFY_SEPTENARY_API_TOKEN", secret: "ai-baram-v2-apify-septenary"}
+    ];
+    ($refs | length) == (specs | length)
+      and ($refs | all(
+        . as $ref
+        | ($ref.version | test("^[1-9][0-9]*$"))
+        and (specs | any(.env == $ref.env and .secret == $ref.secret))
+      ))
+      and ([ $refs[].env ] | sort) == ([ specs[].env ] | sort)
+  ' >/dev/null \
+    || die "canonical analysis-worker requires exactly all seven Apify Secret Manager refs"
 }
 
 call_apify_prune_fence_rpc() {
@@ -1547,6 +1600,9 @@ worker_endpoint_env_matches() {
     --arg worker_enabled "$worker_enabled" \
     --arg recovery_enabled "$recovery_enabled" \
     --arg automatic_fulfillment_enabled "$automatic_fulfillment_enabled" \
+    --arg beta_free_pool_enabled "$beta_free_pool_enabled" \
+    --arg beta_free_pool_max_snapshot_age_seconds "$beta_free_pool_max_snapshot_age_seconds" \
+    --arg beta_free_pool_refresh_interval_seconds "$beta_free_pool_refresh_interval_seconds" \
     --arg result_images_enabled "$result_images_enabled" \
     --arg result_image_r2_endpoint "$result_image_r2_endpoint" \
     --arg result_image_r2_bucket "$result_image_r2_bucket" '
@@ -1574,6 +1630,9 @@ worker_endpoint_env_matches() {
         and value("ANALYSIS_V2_WORKER_ENABLED") == [$worker_enabled]
         and value("ANALYSIS_V2_RECOVERY_ENABLED") == [$recovery_enabled]
         and value("EARLYBIRD_AUTOMATIC_FULFILLMENT_ENABLED") == [$automatic_fulfillment_enabled]
+        and value("BETATEST_FREE_POOL_ENABLED") == [$beta_free_pool_enabled]
+        and value("BETATEST_FREE_POOL_MAX_SNAPSHOT_AGE_SECONDS") == [$beta_free_pool_max_snapshot_age_seconds]
+        and value("BETATEST_FREE_POOL_REFRESH_INTERVAL_SECONDS") == [$beta_free_pool_refresh_interval_seconds]
         and value("ANALYSIS_V2_ADMISSION_ENABLED") == []
         and value("ANALYSIS_V2_WORKER_EXECUTION_ENABLED") == []
         and value("ANALYSIS_V2_TASKS_PROJECT") == [$project]
@@ -1639,7 +1698,7 @@ ensure_worker_endpoint_env() {
     "${staging_args[@]}" \
     "--revision-suffix=$final_revision_suffix" \
     "--update-labels=$PROVENANCE_LABEL_KEY=$source_commit_sha" \
-    "--update-env-vars=ANALYSIS_V2_TASKS_ENABLED=true,ANALYSIS_V2_WORKER_ENABLED=$worker_enabled,ANALYSIS_V2_RECOVERY_ENABLED=$recovery_enabled,EARLYBIRD_AUTOMATIC_FULFILLMENT_ENABLED=$automatic_fulfillment_enabled,ANALYSIS_V2_TASKS_PROJECT=$ANALYSIS_V2_TASKS_PROJECT,ANALYSIS_V2_TASKS_LOCATION=$ANALYSIS_V2_TASKS_LOCATION,ANALYSIS_V2_TASKS_QUEUE=$ANALYSIS_V2_TASKS_QUEUE,ANALYSIS_V2_TASKS_SERVICE_ACCOUNT_EMAIL=$ANALYSIS_V2_TASKS_SERVICE_ACCOUNT_EMAIL,ANALYSIS_V2_TASKS_CALLER_AUTH_MODE=adc,ANALYSIS_V2_APIFY_API_TOKEN_SLOT=$ANALYSIS_V2_APIFY_API_TOKEN_SLOT,ANALYSIS_V2_TASKS_TARGET_URL=$origin/api/analysis/v2/worker,ANALYSIS_V2_TASKS_OIDC_AUDIENCE=$origin,PREFLIGHT_TASKS_ENABLED=true,PREFLIGHT_TASKS_PROJECT=$ANALYSIS_V2_TASKS_PROJECT,PREFLIGHT_TASKS_LOCATION=$ANALYSIS_V2_TASKS_LOCATION,PREFLIGHT_TASKS_QUEUE=$preflight_queue,PREFLIGHT_TASKS_SERVICE_ACCOUNT_EMAIL=$ANALYSIS_V2_TASKS_SERVICE_ACCOUNT_EMAIL,PREFLIGHT_TASKS_CALLER_AUTH_MODE=adc,PREFLIGHT_TASKS_TARGET_URL=$origin/api/analysis/preflight/worker,PREFLIGHT_TASKS_OIDC_AUDIENCE=$origin,PREFLIGHT_LOCAL_AFTER_ENABLED=false,ANALYSIS_V2_MAINTENANCE_SERVICE_ACCOUNT_EMAIL=$ANALYSIS_V2_MAINTENANCE_SERVICE_ACCOUNT_EMAIL,ANALYSIS_V2_MAINTENANCE_OIDC_AUDIENCE=$origin,$result_image_env_assignments" \
+    "--update-env-vars=ANALYSIS_V2_TASKS_ENABLED=true,ANALYSIS_V2_WORKER_ENABLED=$worker_enabled,ANALYSIS_V2_RECOVERY_ENABLED=$recovery_enabled,EARLYBIRD_AUTOMATIC_FULFILLMENT_ENABLED=$automatic_fulfillment_enabled,BETATEST_FREE_POOL_ENABLED=$beta_free_pool_enabled,BETATEST_FREE_POOL_MAX_SNAPSHOT_AGE_SECONDS=$beta_free_pool_max_snapshot_age_seconds,BETATEST_FREE_POOL_REFRESH_INTERVAL_SECONDS=$beta_free_pool_refresh_interval_seconds,ANALYSIS_V2_TASKS_PROJECT=$ANALYSIS_V2_TASKS_PROJECT,ANALYSIS_V2_TASKS_LOCATION=$ANALYSIS_V2_TASKS_LOCATION,ANALYSIS_V2_TASKS_QUEUE=$ANALYSIS_V2_TASKS_QUEUE,ANALYSIS_V2_TASKS_SERVICE_ACCOUNT_EMAIL=$ANALYSIS_V2_TASKS_SERVICE_ACCOUNT_EMAIL,ANALYSIS_V2_TASKS_CALLER_AUTH_MODE=adc,ANALYSIS_V2_APIFY_API_TOKEN_SLOT=$ANALYSIS_V2_APIFY_API_TOKEN_SLOT,ANALYSIS_V2_TASKS_TARGET_URL=$origin/api/analysis/v2/worker,ANALYSIS_V2_TASKS_OIDC_AUDIENCE=$origin,PREFLIGHT_TASKS_ENABLED=true,PREFLIGHT_TASKS_PROJECT=$ANALYSIS_V2_TASKS_PROJECT,PREFLIGHT_TASKS_LOCATION=$ANALYSIS_V2_TASKS_LOCATION,PREFLIGHT_TASKS_QUEUE=$preflight_queue,PREFLIGHT_TASKS_SERVICE_ACCOUNT_EMAIL=$ANALYSIS_V2_TASKS_SERVICE_ACCOUNT_EMAIL,PREFLIGHT_TASKS_CALLER_AUTH_MODE=adc,PREFLIGHT_TASKS_TARGET_URL=$origin/api/analysis/preflight/worker,PREFLIGHT_TASKS_OIDC_AUDIENCE=$origin,PREFLIGHT_LOCAL_AFTER_ENABLED=false,ANALYSIS_V2_MAINTENANCE_SERVICE_ACCOUNT_EMAIL=$ANALYSIS_V2_MAINTENANCE_SERVICE_ACCOUNT_EMAIL,ANALYSIS_V2_MAINTENANCE_OIDC_AUDIENCE=$origin,$result_image_env_assignments" \
     "--remove-env-vars=$remove_env_vars" \
     --quiet
 
@@ -1846,7 +1905,7 @@ build_deploy_args() {
   if [[ -n "$worker_env_deploy_file" ]]; then
     deploy_args+=("--env-vars-file=$worker_env_deploy_file")
   else
-    deploy_args+=("--update-env-vars=ANALYSIS_V2_MEDIA_ARTIFACT_BUCKET=$ANALYSIS_V2_MEDIA_ARTIFACT_BUCKET,ANALYSIS_V2_APIFY_API_TOKEN_SLOT=$ANALYSIS_V2_APIFY_API_TOKEN_SLOT,EARLYBIRD_AUTOMATIC_FULFILLMENT_ENABLED=$automatic_fulfillment_enabled,$result_image_env_assignments")
+    deploy_args+=("--update-env-vars=ANALYSIS_V2_MEDIA_ARTIFACT_BUCKET=$ANALYSIS_V2_MEDIA_ARTIFACT_BUCKET,ANALYSIS_V2_APIFY_API_TOKEN_SLOT=$ANALYSIS_V2_APIFY_API_TOKEN_SLOT,EARLYBIRD_AUTOMATIC_FULFILLMENT_ENABLED=$automatic_fulfillment_enabled,BETATEST_FREE_POOL_ENABLED=$beta_free_pool_enabled,BETATEST_FREE_POOL_MAX_SNAPSHOT_AGE_SECONDS=$beta_free_pool_max_snapshot_age_seconds,BETATEST_FREE_POOL_REFRESH_INTERVAL_SECONDS=$beta_free_pool_refresh_interval_seconds,$result_image_env_assignments")
   fi
   if [[ "$initial_deployment" != "true" ]]; then
     deploy_args+=('--no-traffic')
@@ -1912,6 +1971,7 @@ deploy_or_verify_service() {
     fi
     verify_existing_service_secret_identity "$config" "$known_good_config"
     prepare_apify_secret_assignments "$config"
+    require_canonical_apify_secret_inventory
     verify_apify_secret_ref_prune_readiness
   else
     lookup_status="$?"
@@ -1920,6 +1980,7 @@ deploy_or_verify_service() {
         || die "--prune-apify-secret-refs requires an existing Cloud Run service"
       initial_deployment="true"
       prepare_apify_secret_assignments
+      require_canonical_apify_secret_inventory
     else
       die "Cloud Run worker lookup failed; refusing to infer a first deployment"
     fi
@@ -2494,6 +2555,9 @@ readonly worker_timeout_seconds="${ANALYSIS_V2_WORKER_TIMEOUT_SECONDS:-$DEFAULT_
 readonly worker_enabled="${ANALYSIS_V2_WORKER_ENABLED:-false}"
 readonly recovery_enabled="${ANALYSIS_V2_RECOVERY_ENABLED:-false}"
 readonly automatic_fulfillment_enabled="${EARLYBIRD_AUTOMATIC_FULFILLMENT_ENABLED:-false}"
+readonly beta_free_pool_enabled="${BETATEST_FREE_POOL_ENABLED:-false}"
+readonly beta_free_pool_max_snapshot_age_seconds="${BETATEST_FREE_POOL_MAX_SNAPSHOT_AGE_SECONDS:-300}"
+readonly beta_free_pool_refresh_interval_seconds="${BETATEST_FREE_POOL_REFRESH_INTERVAL_SECONDS:-60}"
 readonly result_images_enabled="${ANALYSIS_V2_RESULT_IMAGES_ENABLED:-false}"
 readonly result_image_r2_endpoint="${ANALYSIS_V2_RESULT_IMAGE_R2_ENDPOINT:-}"
 readonly result_image_r2_bucket="${ANALYSIS_V2_RESULT_IMAGE_R2_BUCKET:-}"
@@ -2594,9 +2658,16 @@ fi
   || die "ANALYSIS_V2_RECOVERY_ENABLED must be true or false"
 [[ "$automatic_fulfillment_enabled" == "true" || "$automatic_fulfillment_enabled" == "false" ]] \
   || die "EARLYBIRD_AUTOMATIC_FULFILLMENT_ENABLED must be true or false"
+validate_beta_free_pool_controls
 if [[ "$ANALYSIS_V2_TASKS_CLOUD_RUN_SERVICE" == "analysis-worker-secondary-e2e" ]]; then
+  [[ "$worker_enabled" == "false" ]] \
+    || die "ANALYSIS_V2_WORKER_ENABLED must be false on analysis-worker-secondary-e2e"
+  [[ "$recovery_enabled" == "false" ]] \
+    || die "ANALYSIS_V2_RECOVERY_ENABLED must be false on analysis-worker-secondary-e2e"
   [[ "$automatic_fulfillment_enabled" == "false" ]] \
     || die "EARLYBIRD_AUTOMATIC_FULFILLMENT_ENABLED must be false on analysis-worker-secondary-e2e"
+  [[ "$beta_free_pool_enabled" == "false" ]] \
+    || die "BETATEST_FREE_POOL_ENABLED must be false on analysis-worker-secondary-e2e"
 elif [[ "$automatic_fulfillment_enabled" == "true" ]]; then
   [[ "$ANALYSIS_V2_TASKS_CLOUD_RUN_SERVICE" == "analysis-worker" ]] \
     || die "EARLYBIRD_AUTOMATIC_FULFILLMENT_ENABLED may be true only on canonical analysis-worker"
@@ -2669,6 +2740,15 @@ if [[ -n "$worker_env_file" ]]; then
   env_json_value_equals "$runtime_env_json" SELFHOSTED_PROFILE_GLOBAL_RESPONSE_GUARD_MS \
     "$SELFHOSTED_PROFILE_GLOBAL_RESPONSE_GUARD_MS" \
     || die "runtime env file must set SELFHOSTED_PROFILE_GLOBAL_RESPONSE_GUARD_MS=100"
+  env_json_value_equals "$runtime_env_json" BETATEST_FREE_POOL_ENABLED \
+    "$beta_free_pool_enabled" \
+    || die "runtime env file must set the exact BETATEST_FREE_POOL_ENABLED"
+  env_json_value_equals "$runtime_env_json" BETATEST_FREE_POOL_MAX_SNAPSHOT_AGE_SECONDS \
+    "$beta_free_pool_max_snapshot_age_seconds" \
+    || die "runtime env file must set the exact BETATEST_FREE_POOL_MAX_SNAPSHOT_AGE_SECONDS"
+  env_json_value_equals "$runtime_env_json" BETATEST_FREE_POOL_REFRESH_INTERVAL_SECONDS \
+    "$beta_free_pool_refresh_interval_seconds" \
+    || die "runtime env file must set the exact BETATEST_FREE_POOL_REFRESH_INTERVAL_SECONDS"
   runtime_env_json="$(jq -c \
     --arg enabled "$result_images_enabled" \
     --arg automatic_fulfillment_enabled "$automatic_fulfillment_enabled" \

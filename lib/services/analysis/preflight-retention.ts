@@ -1,4 +1,5 @@
 import { supabaseAdmin } from '@/lib/supabase/admin';
+import { operationalLogger } from '@/lib/observability/server';
 import type { ApifyCredentialSlot } from '@/lib/services/instagram/providers/types';
 import {
     createPreflightProviderRunStore,
@@ -7,6 +8,12 @@ import {
     type PreflightProviderRunReconciliationStore,
     type ReconciliationApifyClient,
 } from './preflight-provider-run';
+import {
+    archiveSettledBetaApifyCredit,
+    recoverBetaApifyCredit,
+    refreshBetaApifyCreditSnapshots,
+} from './beta-apify-credit-settlement-runtime';
+import { getBetaApifyCreditPoolRuntimeConfig } from './beta-apify-credit-runtime';
 
 export const PREFLIGHT_RETENTION_BATCH_LIMIT = 250;
 
@@ -19,14 +26,45 @@ interface RetentionRpcClient {
 
 export interface PreflightRetentionSummary {
     providerCosts: PreflightProviderCostReconciliationResult;
+    providerCostReconciliationFailures: number;
     expiredPurged: number;
     terminalScrubbed: number;
+    betaCreditRecovered: number;
+    betaCreditArchived: number;
+    betaCreditRecoveryFailures: number;
+    betaCreditArchiveFailures: number;
+    betaCreditRefreshAttempts: number;
+    betaCreditRefreshFailures: number;
 }
 
 interface PreflightRetentionDependencies {
     providerRunStore?: PreflightProviderRunReconciliationStore;
     clientForSlot?: (slot: ApifyCredentialSlot) => ReconciliationApifyClient;
     env?: Record<string, string | undefined>;
+    recoverBetaCredit?: () => Promise<number>;
+    refreshBetaCredit?: () => Promise<void>;
+    archiveBetaCredit?: () => Promise<number>;
+}
+
+function betaPoolSnapshotAge(
+    env: Record<string, string | undefined> | undefined,
+): number | undefined {
+    try {
+        return getBetaApifyCreditPoolRuntimeConfig(env).maxSnapshotAgeSeconds;
+    } catch {
+        // Invalid admission configuration must not suppress terminal settlement.
+        return undefined;
+    }
+}
+
+function betaRecoveryObservability(
+    env: Record<string, string | undefined> | undefined,
+) {
+    const maxSnapshotAgeSeconds = betaPoolSnapshotAge(env);
+    return {
+        telemetry: operationalLogger,
+        ...(maxSnapshotAgeSeconds === undefined ? {} : { maxSnapshotAgeSeconds }),
+    };
 }
 
 function boundedCount(value: unknown, maximum: number, operation: string): number {
@@ -52,24 +90,90 @@ export async function runPreflightRetention(
     client: RetentionRpcClient = supabaseAdmin,
     dependencies: PreflightRetentionDependencies = {}
 ): Promise<PreflightRetentionSummary> {
-    const providerCosts = await reconcileSettledPreflightProviderCosts(
-        dependencies.providerRunStore ?? createPreflightProviderRunStore(client),
-        {
-            ...(dependencies.clientForSlot
-                ? { clientForSlot: dependencies.clientForSlot }
-                : {}),
-            ...(dependencies.env ? { env: dependencies.env } : {}),
-        }
-    );
+    let providerCosts: PreflightProviderCostReconciliationResult = Object.freeze({
+        eligible: 0,
+        finalized: 0,
+        failed: 0,
+        hasMore: false,
+    });
+    let providerCostReconciliationFailures = 0;
+    try {
+        providerCosts = await reconcileSettledPreflightProviderCosts(
+            dependencies.providerRunStore ?? createPreflightProviderRunStore(client),
+            {
+                ...(dependencies.clientForSlot
+                    ? { clientForSlot: dependencies.clientForSlot }
+                    : {}),
+                ...(dependencies.env ? { env: dependencies.env } : {}),
+            }
+        );
+    } catch {
+        // The SQL purge fence remains authoritative. A provider list failure
+        // is retried later and cannot starve beta settlement or PII retention.
+        providerCostReconciliationFailures = 1;
+    }
     const expiredPurged = await runRpc(
         client,
         'purge_expired_analysis_v2_preflights',
         PREFLIGHT_RETENTION_BATCH_LIMIT * 2
     );
+    // Expiry may make held target-profile reservations terminal.  These steps
+    // remain independent of the feature flag and a refresh never releases data.
+    const maintainBeta = client === supabaseAdmin
+        || dependencies.recoverBetaCredit
+        || dependencies.refreshBetaCredit
+        || dependencies.archiveBetaCredit;
+    let betaCreditRecovered = 0;
+    let betaCreditArchived = 0;
+    let betaCreditRecoveryFailures = 0;
+    let betaCreditArchiveFailures = 0;
+    let betaCreditRefreshAttempts = 0;
+    let betaCreditRefreshFailures = 0;
+    if (maintainBeta) {
+        try {
+            betaCreditRecovered = await (dependencies.recoverBetaCredit
+                ?? (() => recoverBetaApifyCredit(
+                    client,
+                    100,
+                    betaRecoveryObservability(dependencies.env),
+                )))();
+        } catch {
+            betaCreditRecoveryFailures = 1;
+        }
+        try {
+            betaCreditArchived = await (dependencies.archiveBetaCredit
+                ?? (() => archiveSettledBetaApifyCredit(client)))();
+        } catch {
+            betaCreditArchiveFailures = 1;
+        }
+    }
     const terminalScrubbed = await runRpc(
         client,
         'scrub_terminal_analysis_v2_preflights',
         PREFLIGHT_RETENTION_BATCH_LIMIT
     );
-    return { providerCosts, expiredPurged, terminalScrubbed };
+    if (maintainBeta && betaCreditRecovered > 0) {
+        betaCreditRefreshAttempts = 1;
+        try {
+            await (dependencies.refreshBetaCredit
+                ?? (() => refreshBetaApifyCreditSnapshots(client, {
+                    env: dependencies.env,
+                    telemetry: operationalLogger,
+                })))();
+        } catch {
+            betaCreditRefreshFailures = 1;
+        }
+    }
+    return {
+        providerCosts,
+        providerCostReconciliationFailures,
+        expiredPurged,
+        terminalScrubbed,
+        betaCreditRecovered,
+        betaCreditArchived,
+        betaCreditRecoveryFailures,
+        betaCreditArchiveFailures,
+        betaCreditRefreshAttempts,
+        betaCreditRefreshFailures,
+    };
 }

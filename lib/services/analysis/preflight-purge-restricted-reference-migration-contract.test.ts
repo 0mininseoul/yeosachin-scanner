@@ -2,7 +2,11 @@ import { readdirSync, readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
 
-const MIGRATION_NAME = '20260731010000_guard_preflight_purge_restricted_references.sql';
+// The terminal beta settlement rollout intentionally replaced retention so it
+// can settle/recover beta allocations before deleting eligible tombstones.
+// Append-only migration history therefore makes 0900 the canonical latest
+// definition while retaining every restricted-reference fence added in 0731.
+const MIGRATION_NAME = '20260802090000_settle_betatest_terminal_credit.sql';
 const migrationsDirectory = fileURLToPath(
     new URL('../../../supabase/migrations/', import.meta.url)
 );
@@ -40,8 +44,8 @@ describe('preflight purge restricted reference migration contract', () => {
     });
 
     it('keeps the commercial checkout exemption on the scrub path', () => {
-        expect(migration).toContain(
-            "earlybird_order.status IN (\n                    'payment_pending', 'cancelled', 'paid', 'analysis_in_progress', 'completed'\n                )"
+        expect(functionDefinition('purge_expired_analysis_v2_preflights')).toMatch(
+            /earlybird_order\.status IN\s*\(\s*'payment_pending',\s*'cancelled',\s*'paid',\s*'analysis_in_progress',\s*'completed'\s*\)/
         );
     });
 

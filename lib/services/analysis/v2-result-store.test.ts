@@ -664,6 +664,10 @@ describe('analysis V2 result finalization and loading', () => {
             summary: { targetProfileImage: '/api/image-proxy?signed=1' },
         });
         expect(fake.rpc.mock.calls[0]![1].p_target_profile_image_url).toBe(canonicalImageUrl);
+        expect(fake.rpc.mock.calls[1]).toEqual([
+            'settle_analysis_beta_apify_request_credit',
+            { p_request_id: requestId },
+        ]);
         expect(signer).toHaveBeenCalledWith(canonicalImageUrl, {
             requestId,
             kind: 'target',
@@ -705,6 +709,27 @@ describe('analysis V2 result finalization and loading', () => {
                 p_image_expected_rows: 3,
             }
         );
+    });
+
+    it('keeps a completed result durable when post-terminal refresh fails', async () => {
+        const fake = rpcClient({
+            data: { finalized: true, requestStatus: 'completed', summary: rawSummary() },
+            error: null,
+        });
+        const settleBetaRequest = vi.fn(async () => true);
+        const refreshBetaCredit = vi.fn(async () => { throw new Error('provider secret'); });
+        const log = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+        await expect(createSupabaseAnalysisV2ResultStore(fake.client, {
+            settleBetaRequest,
+            refreshBetaCredit,
+            imageProxySigner: () => '/api/image-proxy?signed=1',
+        }).finalize({
+            ...claim('coordinator:finalize'), targetProfileImageUrl: null,
+        })).resolves.toMatchObject({ requestStatus: 'completed' });
+        expect(settleBetaRequest).toHaveBeenCalledWith(requestId);
+        expect(refreshBetaCredit).toHaveBeenCalledOnce();
+        expect(log.mock.calls.flat().join(' ')).not.toContain('secret');
+        log.mockRestore();
     });
 
     it('returns a compact opaque result image path even when the stored CDN URL is long', async () => {
@@ -886,5 +911,24 @@ describe('analysis V2 result finalization and loading', () => {
             p_job_input_hash: hashA,
             p_error_code: 'ANALYSIS_FAILED',
         });
+    });
+
+    it('keeps a failed result durable and still attempts refresh after settlement rejects', async () => {
+        const fake = rpcClient({
+            data: { finalized: true, requestStatus: 'failed' }, error: null,
+        });
+        const settleBetaRequest = vi.fn(async () => { throw new Error('database payload'); });
+        const refreshBetaCredit = vi.fn(async () => { throw new Error('provider payload'); });
+        const log = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+        await expect(createSupabaseAnalysisV2ResultStore(fake.client, {
+            settleBetaRequest,
+            refreshBetaCredit,
+        }).fail({
+            ...claim('track:interaction:target'), errorCode: 'ANALYSIS_FAILED',
+        })).resolves.toEqual({ finalized: true, requestStatus: 'failed' });
+        expect(refreshBetaCredit).toHaveBeenCalledOnce();
+        expect(log).toHaveBeenCalledTimes(2);
+        expect(log.mock.calls.flat().join(' ')).not.toMatch(/database|provider payload/);
+        log.mockRestore();
     });
 });

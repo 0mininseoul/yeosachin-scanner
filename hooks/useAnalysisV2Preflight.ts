@@ -43,6 +43,87 @@ import {
 
 export type ExclusionState = 'undecided' | 'saving' | 'excluded' | 'skipped';
 
+export type AnalysisV2PreflightFlow = 'standard' | 'betatest';
+
+export interface AnalysisV2PreflightFlowConfig {
+    readonly createEndpoint: string;
+    readonly statusEndpoint: (preflightId: string) => string;
+    readonly admitEndpoint?: (preflightId: string) => string;
+    readonly acceptsTestCredentials: boolean;
+}
+
+const STANDARD_PREFLIGHT_FLOW: AnalysisV2PreflightFlowConfig = {
+    createEndpoint: '/api/analysis/preflight',
+    statusEndpoint: preflightId => `/api/analysis/preflight/${encodeURIComponent(preflightId)}`,
+    acceptsTestCredentials: true,
+};
+const BETATEST_PREFLIGHT_FLOW: AnalysisV2PreflightFlowConfig = {
+    createEndpoint: '/api/analysis/betatest/preflight',
+    // The status and exclusion resources are owner-scoped shared state.
+    statusEndpoint: preflightId => `/api/analysis/preflight/${encodeURIComponent(preflightId)}`,
+    admitEndpoint: preflightId => (
+        `/api/analysis/betatest/preflight/${encodeURIComponent(preflightId)}/admit`
+    ),
+    acceptsTestCredentials: false,
+};
+
+export function getAnalysisV2PreflightFlowConfig(
+    flow: AnalysisV2PreflightFlow = 'standard'
+): AnalysisV2PreflightFlowConfig {
+    return flow === 'betatest' ? BETATEST_PREFLIGHT_FLOW : STANDARD_PREFLIGHT_FLOW;
+}
+
+export function betaAdmissionFailureMessage(payload: unknown): string | null {
+    if (!payload || typeof payload !== 'object' || Array.isArray(payload)) return null;
+    const code = Reflect.get(payload, 'code');
+    if (code === 'BETA_CAPACITY_UNAVAILABLE') {
+        return '현재 무료 판독 가능 인원이 모두 찼습니다. 잠시 후 다시 시도해주세요.';
+    }
+    if (code === 'BETA_ADMISSION_PENDING') {
+        return '판독 배정을 확인하고 있습니다. 잠시 후 다시 시도해주세요.';
+    }
+    if (code === 'BETA_ACCESS_UNAVAILABLE') {
+        return '베타 테스트 이용 권한을 확인할 수 없습니다.';
+    }
+    return null;
+}
+
+export function isBetaAdmissionPending(
+    payload: unknown,
+): payload is Record<PropertyKey, unknown> {
+    return Boolean(
+        payload
+        && typeof payload === 'object'
+        && !Array.isArray(payload)
+        && Reflect.get(payload, 'status') === 'admission_pending'
+    );
+}
+
+const BETA_ADMISSION_MAX_POLL_ATTEMPTS = 120;
+
+function betaAdmissionRetryAfterMs(
+    payload: unknown,
+    expectedPreflightId: string,
+): number | null {
+    if (!isBetaAdmissionPending(payload)) return null;
+    const code = Reflect.get(payload, 'code');
+    const schemaVersion = Reflect.get(payload, 'schemaVersion');
+    const preflightId = Reflect.get(payload, 'preflightId');
+    const retryAfterMs = Reflect.get(payload, 'retryAfterMs');
+    if (
+        code !== 'BETA_ADMISSION_PENDING'
+        || schemaVersion !== 1
+        || preflightId !== expectedPreflightId
+        || typeof retryAfterMs !== 'number'
+        || !Number.isInteger(retryAfterMs)
+        || retryAfterMs < 250
+        || retryAfterMs > 30_000
+    ) {
+        return null;
+    }
+    return retryAfterMs;
+}
+
 export function restoreExclusionState(
     current: ExclusionState,
     decision: PreflightExclusionDecisionV1
@@ -92,11 +173,13 @@ interface ApiErrorPayload {
 
 class AnalyticsRequestError extends Error {
     readonly code: string;
+    readonly terminal: boolean;
 
-    constructor(message: string, code: string) {
+    constructor(message: string, code: string, terminal = false) {
         super(message);
         this.name = 'AnalyticsRequestError';
         this.code = code;
+        this.terminal = terminal;
     }
 }
 
@@ -106,6 +189,7 @@ const BLOCKED_PREFLIGHT_COPY: Readonly<Record<string, string>> = {
     TARGET_UNSUPPORTED: '현재 판독할 수 없는 계정입니다.',
     OVER_PLUS_CAPACITY: '현재 제공하는 플랜 범위를 넘어서 판독할 수 없습니다.',
     QUEUE_UNAVAILABLE: '사전 점검 작업이 지연되고 있습니다. 잠시 후 다시 시도해주세요.',
+    BETA_CAPACITY_UNAVAILABLE: '현재 무료 판독 가능 인원이 모두 찼습니다. 잠시 후 다시 시도해주세요.',
     ANALYSIS_FAILED: '사전 점검을 완료하지 못했습니다.',
 };
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
@@ -254,7 +338,10 @@ export function mergeFreshPlanSnapshot(
     return parsed.success && parsed.data.status === 'ready' ? parsed.data : null;
 }
 
-export function useAnalysisV2Preflight() {
+export function useAnalysisV2Preflight({
+    flow = 'standard',
+}: { flow?: AnalysisV2PreflightFlow } = {}) {
+    const flowConfig = getAnalysisV2PreflightFlowConfig(flow);
     const [targetInstagramId, setTargetInstagramId] = useState<string | null>(null);
     const [preflight, setPreflight] = useState<PreflightStatusV1 | null>(null);
     const [creating, setCreating] = useState(false);
@@ -322,16 +409,20 @@ export function useAnalysisV2Preflight() {
         scope: PreflightRequestScope
     ): Promise<PreflightStatusV1 | null> => {
         const response = await fetch(
-            `/api/analysis/preflight/${encodeURIComponent(preflightId)}`,
+            flowConfig.statusEndpoint(preflightId),
             { cache: 'no-store', signal: scope.signal }
         );
         const payload = await readPayload(response);
         analyticsEligibleRef.current = response.headers.get('x-analytics-eligible') !== '0';
         setAnalyticsEligible(analyticsEligibleRef.current);
         if (!response.ok) {
+            const responseCode = payload && typeof payload === 'object' && !Array.isArray(payload)
+                ? Reflect.get(payload, 'code')
+                : null;
             throw new AnalyticsRequestError(
                 messageFromPayload(payload, '사전 점검 상태를 확인할 수 없습니다.'),
                 safeAnalyticsHttpErrorCode(response.status, payload),
+                response.status === 410 && responseCode === 'PREFLIGHT_EXPIRED',
             );
         }
         const parsed = preflightStatusV1Schema.safeParse(payload);
@@ -363,7 +454,7 @@ export function useAnalysisV2Preflight() {
             setError(null);
         }
         return parsed.data;
-    }, [trackPreflightOutcome]);
+    }, [flowConfig, trackPreflightOutcome]);
 
     const resumePreflight = useCallback(async (
         preflightId: string,
@@ -419,7 +510,9 @@ export function useAnalysisV2Preflight() {
         preflightStartedAtRef.current = Date.now();
 
         try {
-            const testAdmission = readTestAdmissionCredential(sessionStorage, normalized);
+            const testAdmission = flowConfig.acceptsTestCredentials
+                ? readTestAdmissionCredential(sessionStorage, normalized)
+                : null;
             idempotencyRef.current = getAnalysisStartIdempotency(
                 idempotencyRef.current,
                 normalized,
@@ -434,7 +527,14 @@ export function useAnalysisV2Preflight() {
                 headers.set('X-Analysis-Test-Admission', testAdmission.token);
             }
 
-            const response = await fetch('/api/analysis/preflight', {
+            const response = flow === 'betatest'
+                ? await fetch(flowConfig.createEndpoint, {
+                    method: 'POST',
+                    headers,
+                    body: JSON.stringify({ targetInstagramId: rawTargetInstagramId }),
+                    signal: scope.signal,
+                })
+                : await fetch('/api/analysis/preflight', {
                 method: 'POST',
                 headers,
                 // Preserve the presented value for the server-only exact demo gate.
@@ -447,7 +547,8 @@ export function useAnalysisV2Preflight() {
             setAnalyticsEligible(analyticsEligibleRef.current);
             if (!response.ok) {
                 throw new AnalyticsRequestError(
-                    messageFromPayload(payload, '사전 점검을 시작할 수 없습니다.'),
+                    (flow === 'betatest' ? betaAdmissionFailureMessage(payload) : null)
+                    ?? messageFromPayload(payload, '사전 점검을 시작할 수 없습니다.'),
                     safeAnalyticsHttpErrorCode(response.status, payload),
                 );
             }
@@ -486,7 +587,7 @@ export function useAnalysisV2Preflight() {
             scope.finish();
             if (current) setCreating(false);
         }
-    }, [coordinator, trackPreflightAttemptFailure]);
+    }, [coordinator, flow, flowConfig, trackPreflightAttemptFailure]);
 
     const submitExclusion = useCallback(async (rawExcludedInstagramId?: string) => {
         if (!preflight || preflight.status === 'consumed') return false;
@@ -697,6 +798,80 @@ export function useAnalysisV2Preflight() {
         }
     }, [coordinator, preflight]);
 
+    const admitBetaAnalysis = useCallback(async (planId: PlanId) => {
+        if (flow !== 'betatest' || !flowConfig.admitEndpoint) return null;
+        if (!preflight || preflight.status !== 'ready') return null;
+        if (preflight.plans.find(plan => plan.planId === planId)?.selectionState === 'unavailable') {
+            setError('현재 계정 규모에 맞는 플랜을 선택해주세요.');
+            return null;
+        }
+
+        const generation = coordinator.currentGeneration;
+        const scope = coordinator.beginRequest(generation, preflight.preflightId);
+        if (!scope) return null;
+        setStarting(true);
+        setError(null);
+        try {
+            for (let attempt = 0; attempt < BETA_ADMISSION_MAX_POLL_ATTEMPTS; attempt += 1) {
+                const response = await fetch(flowConfig.admitEndpoint(preflight.preflightId), {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ planId }),
+                    signal: scope.signal,
+                });
+                const payload = await readPayload(response);
+                if (!scope.isCurrent()) return null;
+                if (!response.ok) {
+                    throw new Error(
+                        betaAdmissionFailureMessage(payload)
+                        ?? messageFromPayload(payload, '무료 판독 배정을 완료하지 못했습니다. 잠시 후 다시 시도해주세요.')
+                    );
+                }
+                const retryAfterMs = betaAdmissionRetryAfterMs(
+                    payload,
+                    preflight.preflightId,
+                );
+                if (retryAfterMs !== null) {
+                    if (attempt + 1 < BETA_ADMISSION_MAX_POLL_ATTEMPTS) {
+                        await waitForRetry(retryAfterMs, scope.signal);
+                        if (!scope.isCurrent()) return null;
+                    }
+                    continue;
+                }
+                const requestId = payload && typeof payload === 'object'
+                    ? Reflect.get(payload, 'requestId')
+                    : null;
+                if (typeof requestId !== 'string' || !UUID_PATTERN.test(requestId)) {
+                    throw new Error('판독 시작 응답을 확인할 수 없습니다.');
+                }
+                if (!analysisStartedTrackedRef.current.has(requestId)) {
+                    analysisStartedTrackedRef.current.add(requestId);
+                    if (claimAnalysisStart(availableAnalyticsStorage(), requestId, Date.now())) {
+                        trackEvent(EVENTS.ANALYSIS_STARTED, {
+                            request_id: requestId,
+                            plan_id: planId,
+                            preflight_id: preflight.preflightId,
+                        });
+                    }
+                }
+                return requestId;
+            }
+            throw new Error('무료 판독 배정을 확인하는 데 시간이 걸리고 있습니다. 다시 시도해주세요.');
+        } catch (cause) {
+            if (cause instanceof Error && cause.name === 'AbortError') return null;
+            if (scope.isCurrent()) {
+                setError(cause instanceof Error
+                    ? cause.message
+                    : '무료 판독 배정을 완료하지 못했습니다. 잠시 후 다시 시도해주세요.');
+            }
+            return null;
+        } finally {
+            const current = scope.isCurrent();
+            scope.finish();
+            if (current) setStarting(false);
+        }
+    }, [coordinator, flow, flowConfig, preflight]);
+
     const reset = useCallback(() => {
         coordinator.beginLifecycle();
         entitlementScopeRef.current = null;
@@ -736,7 +911,17 @@ export function useAnalysisV2Preflight() {
             } catch (cause) {
                 if (scope.isCurrent()) {
                     setError(cause instanceof Error ? cause.message : '사전 점검 상태를 확인할 수 없습니다.');
-                    schedule();
+                    if (cause instanceof AnalyticsRequestError && cause.terminal) {
+                        coordinator.beginLifecycle();
+                        idempotencyRef.current = null;
+                        preflightStartedAtRef.current = null;
+                        setPreflight(null);
+                        setExclusionState('undecided');
+                        setCreating(false);
+                        setStarting(false);
+                    } else {
+                        schedule();
+                    }
                 }
             } finally {
                 if (activeScope === scope) activeScope = null;
@@ -779,6 +964,7 @@ export function useAnalysisV2Preflight() {
         refreshPreflight,
         hasTestEntitlement,
         startAnalysis,
+        admitBetaAnalysis,
         reset,
     };
 }

@@ -33,6 +33,20 @@ if (!senaryHelperMigration) {
     throw new Error('senary credential helper migration is missing');
 }
 
+const betaFoundationMigration = readFileSync(
+    new URL(
+        '../../../supabase/migrations/20260802010000_add_betatest_apify_credit_pool.sql',
+        import.meta.url
+    ),
+    'utf8'
+);
+const septenaryHelperMigration = betaFoundationMigration.match(
+    /CREATE OR REPLACE FUNCTION public\.analysis_v2_valid_apify_credential_slot\([\s\S]*?\n\$\$;/
+)?.[0] ?? '';
+const pinnedLegacyPolicyValidatorMigration = betaFoundationMigration.match(
+    /CREATE OR REPLACE FUNCTION public\.analysis_v2_valid_test_operation_slot_map\([\s\S]*?\n\$\$;/
+)?.[0] ?? '';
+
 const USER_ID = '10000000-0000-4000-8000-000000000001';
 const OTHER_USER_ID = '10000000-0000-4000-8000-000000000002';
 const REQUEST_ID = '20000000-0000-4000-8000-000000000001';
@@ -359,6 +373,10 @@ describe('authorized test provider policy migration PGlite contract', () => {
         await db.exec(migration);
         await db.exec(profileRepairPolicyMigration);
         await db.exec(senaryHelperMigration);
+        await db.exec(septenaryHelperMigration);
+        if (pinnedLegacyPolicyValidatorMigration !== '') {
+            await db.exec(pinnedLegacyPolicyValidatorMigration);
+        }
     }, 30_000);
 
     beforeEach(async () => {
@@ -412,6 +430,40 @@ describe('authorized test provider policy migration PGlite contract', () => {
             [REQUEST_ID]
         );
         expect(consumeCount.rows).toEqual([{ consume_count: 2 }]);
+    });
+
+    it('keeps the full-history legacy policy on senary while rejecting septenary', async () => {
+        expect(pinnedLegacyPolicyValidatorMigration).not.toBe('');
+        const senaryMap = {
+            ...operationSlots,
+            'target-comments': 'senary',
+        };
+        const septenaryMap = {
+            ...operationSlots,
+            'target-comments': 'septenary',
+        };
+        const result = await db.query<{
+            senary_valid: boolean;
+            septenary_valid: boolean;
+            general_septenary_valid: boolean;
+        }>(
+            `SELECT
+                public.analysis_v2_valid_test_operation_slot_map(
+                    $1::JSONB
+                ) AS senary_valid,
+                public.analysis_v2_valid_test_operation_slot_map(
+                    $2::JSONB
+                ) AS septenary_valid,
+                public.analysis_v2_valid_apify_credential_slot(
+                    'septenary'
+                ) AS general_septenary_valid`,
+            [JSON.stringify(senaryMap), JSON.stringify(septenaryMap)]
+        );
+        expect(result.rows).toEqual([{
+            senary_valid: true,
+            septenary_valid: false,
+            general_septenary_valid: true,
+        }]);
     });
 
     it('rejects owner, target, JTI, changed-map, and production scope mismatches atomically', async () => {

@@ -25,6 +25,11 @@ import { insertLandingLead } from '@/lib/services/leads/store';
 import { demoPreflightLifecycle, demoReadyPreflight, demoResponseHeaders, isDemoOperator } from '@/lib/services/demo-analysis/demo-analysis';
 import { demoAnalysisStore } from '@/lib/services/demo-analysis/store';
 import { loadDemoFixtureForVersion } from '@/lib/services/demo-analysis/fixture-store';
+import {
+    BETA_TEST_ACCESS_UNAVAILABLE,
+    betaTestFreePoolEnabled,
+    hasBetaTestAccess,
+} from '@/lib/services/analysis/betatest-access';
 
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
@@ -44,10 +49,10 @@ function demoErrorResponse(status: number, code: string, message: string): NextR
     }, { status, headers: demoResponseHeaders() });
 }
 
-async function authenticatedUser() {
+async function authenticatedSession() {
     const supabase = await createClient();
     const { data: { user }, error } = await supabase.auth.getUser();
-    return error || !user ? null : user;
+    return error || !user ? null : { user, supabase };
 }
 
 function captureExcludedLandingLead(
@@ -117,8 +122,9 @@ async function handleGET(
 ) {
     let demoRecognized = false;
     try {
-        const user = await authenticatedUser();
-        if (!user) return errorResponse(401, 'UNAUTHORIZED', '로그인이 필요합니다.');
+        const session = await authenticatedSession();
+        if (!session) return errorResponse(401, 'UNAUTHORIZED', '로그인이 필요합니다.');
+        const { user } = session;
         const { preflightId } = await params;
         if (!UUID_PATTERN.test(preflightId)) {
             return errorResponse(400, 'INVALID_REQUEST', '사전 점검 식별자가 올바르지 않습니다.');
@@ -205,8 +211,9 @@ async function handlePATCH(
     let observedUserId: string | undefined;
     let observedPreflightId: string | undefined;
     try {
-        const user = await authenticatedUser();
-        if (!user) return errorResponse(401, 'UNAUTHORIZED', '로그인이 필요합니다.');
+        const session = await authenticatedSession();
+        if (!session) return errorResponse(401, 'UNAUTHORIZED', '로그인이 필요합니다.');
+        const { user, supabase } = session;
         observedUserId = user.id;
         const { preflightId } = await params;
         if (!UUID_PATTERN.test(preflightId)) {
@@ -244,6 +251,20 @@ async function handlePATCH(
         const parsed = preflightExclusionRequestV1Schema.safeParse(body);
         if (!parsed.success) {
             return errorResponse(400, 'INVALID_EXCLUSION', '제외 계정 입력을 확인해주세요.');
+        }
+
+        if (
+            await preflightStore.hasBetaEntryProvenance(preflightId, user.id)
+            && (
+                !betaTestFreePoolEnabled()
+                || !await hasBetaTestAccess(supabase)
+            )
+        ) {
+            return errorResponse(
+                403,
+                BETA_TEST_ACCESS_UNAVAILABLE,
+                '베타 분석을 사용할 수 없습니다.'
+            );
         }
 
         await preflightStore.setExclusion({

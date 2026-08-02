@@ -9,6 +9,8 @@ import { reconcileSettledAnalysisProviderCosts } from '@/lib/services/analysis/p
 import {
     loadAnalysisV2OperationalObservability,
 } from '@/lib/services/analysis/v2-operational-observability';
+import { loadBetaApifyPoolObservability } from '@/lib/services/analysis/beta-apify-pool-observability';
+import { getBetaApifyCreditPoolRuntimeConfig } from '@/lib/services/analysis/beta-apify-credit-runtime';
 
 const MAX_EVENT_ROWS = 500;
 const SAFE_OPERATIONAL_ERROR_CODES = new Set([
@@ -32,7 +34,27 @@ export async function GET(request: Request) {
         return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
     }
 
-    const requestId = new URL(request.url).searchParams.get('requestId');
+    const searchParams = new URL(request.url).searchParams;
+    const scope = searchParams.get('scope');
+    if (scope === 'betatest-pool') {
+        try {
+            const { maxSnapshotAgeSeconds } = getBetaApifyCreditPoolRuntimeConfig();
+            const pool = await loadBetaApifyPoolObservability(
+                supabaseAdmin, maxSnapshotAgeSeconds
+            );
+            return NextResponse.json({ success: true, scope, pool });
+        } catch {
+            console.error('[analysis.observability] betatest pool query failed', {
+                scope: 'betatest-pool',
+                errorCode: 'OBSERVABILITY_QUERY_FAILED',
+            });
+            return NextResponse.json(
+                { error: 'Failed to get analysis observability.' },
+                { status: 500 }
+            );
+        }
+    }
+    const requestId = searchParams.get('requestId');
     if (!isValidAnalysisRequestId(requestId)) {
         return NextResponse.json({ error: 'Valid requestId required' }, { status: 400 });
     }

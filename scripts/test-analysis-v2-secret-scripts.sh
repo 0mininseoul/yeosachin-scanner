@@ -205,12 +205,16 @@ GOOGLE_CLOUD_LOCATION=global
 ANALYSIS_V2_MEDIA_ARTIFACT_BUCKET=test-project-analysis-v2-media
 ANALYSIS_V2_APIFY_API_TOKEN_SLOT=quinary
 ANALYSIS_V2_AUTHORIZED_TEST_SHARDING_ENABLED=false
+BETATEST_FREE_POOL_ENABLED=false
+BETATEST_FREE_POOL_MAX_SNAPSHOT_AGE_SECONDS=300
+BETATEST_FREE_POOL_REFRESH_INTERVAL_SECONDS=60
 SELFHOSTED_PROFILE_GLOBAL_GATE_ENABLED=true
 SELFHOSTED_PROFILE_GLOBAL_MIN_INTERVAL_MS=750
 SELFHOSTED_PROFILE_GLOBAL_RESPONSE_GUARD_MS=100
 SUPABASE_SERVICE_ROLE_KEY=SUPABASE_SECRET_SENTINEL_0123456789
 APIFY_QUINARY_API_TOKEN=APIFY_QUINARY_SECRET_SENTINEL_0123456789
 APIFY_SENARY_API_TOKEN=APIFY_SENARY_SECRET_SENTINEL_0123456789
+APIFY_SEPTENARY_API_TOKEN=APIFY_SEPTENARY_SECRET_SENTINEL_0123456789
 IMAGE_PROXY_SIGNING_SECRET=IMAGE_SIGNING_SECRET_SENTINEL_01234567890123456789
 ANALYSIS_V2_PREFLIGHT_IDENTITY_HMAC_SECRET=ERERERERERERERERERERERERERERERERERERERERERE
 EOF
@@ -264,6 +268,17 @@ assert_contains "$temp_dir/senary-dry-run.out" \
   "would stream allowlisted APIFY_SENARY_API_TOKEN directly"
 assert_not_contains "$temp_dir/senary-dry-run.out" \
   "APIFY_SENARY_SECRET_SENTINEL_0123456789"
+
+env "${secret_env[@]}" \
+  'ANALYSIS_V2_APIFY_API_TOKEN_SLOT=septenary' \
+  bash "$script_dir/configure-analysis-v2-secrets.sh" --dry-run \
+  >"$temp_dir/septenary-dry-run.out"
+assert_contains "$temp_dir/septenary-dry-run.out" \
+  "gcloud secrets create ai-baram-v2-apify-septenary"
+assert_contains "$temp_dir/septenary-dry-run.out" \
+  "would stream allowlisted APIFY_SEPTENARY_API_TOKEN directly"
+assert_not_contains "$temp_dir/septenary-dry-run.out" \
+  "APIFY_SEPTENARY_SECRET_SENTINEL_0123456789"
 
 mkdir -p "$temp_dir/recovery-state"
 recovery_env=(
@@ -548,6 +563,25 @@ assert_contains "$temp_dir/generated/analysis-v2-runtime.yaml" \
   'ANALYSIS_V2_APIFY_API_TOKEN_SLOT: "senary"'
 assert_contains "$temp_dir/generated/analysis-v2-runtime.yaml" \
   'ANALYSIS_V2_AUTHORIZED_TEST_SHARDING_ENABLED: "false"'
+for beta_runtime_control in \
+  'BETATEST_FREE_POOL_ENABLED: "false"' \
+  'BETATEST_FREE_POOL_MAX_SNAPSHOT_AGE_SECONDS: "300"' \
+  'BETATEST_FREE_POOL_REFRESH_INTERVAL_SECONDS: "60"'; do
+  assert_contains "$temp_dir/generated/analysis-v2-runtime.yaml" \
+    "$beta_runtime_control"
+done
+
+sed 's/^ANALYSIS_V2_APIFY_API_TOKEN_SLOT=.*/ANALYSIS_V2_APIFY_API_TOKEN_SLOT=septenary/' \
+  "$temp_dir/source.env" >"$temp_dir/septenary-manifest.env"
+env \
+  "PATH=$PATH" \
+  "ANALYSIS_V2_MANIFEST_SOURCE_ENV_FILE=$temp_dir/septenary-manifest.env" \
+  "ANALYSIS_V2_ENV_OUTPUT_DIR=$temp_dir/generated" \
+  "ANALYSIS_V2_WORKER_SOURCE_DIR=$repo_dir" \
+  bash "$script_dir/generate-analysis-v2-env-files.sh" \
+  >"$temp_dir/septenary-generator.out"
+assert_contains "$temp_dir/generated/analysis-v2-runtime.yaml" \
+  'ANALYSIS_V2_APIFY_API_TOKEN_SLOT: "septenary"'
 
 sed 's/^ANALYSIS_V2_AUTHORIZED_TEST_SHARDING_ENABLED=.*/ANALYSIS_V2_AUTHORIZED_TEST_SHARDING_ENABLED=true/' \
   "$temp_dir/senary-manifest.env" >"$temp_dir/sharding-enabled-manifest.env"
@@ -579,6 +613,9 @@ runtime_keys="$(sed -n 's/^\([A-Z0-9_]*\):.*/\1/p' "$runtime_file" | sort)"
 expected_runtime_keys="$(printf '%s\n' \
   ANALYSIS_V2_APIFY_API_TOKEN_SLOT \
   ANALYSIS_V2_AUTHORIZED_TEST_SHARDING_ENABLED \
+  BETATEST_FREE_POOL_ENABLED \
+  BETATEST_FREE_POOL_MAX_SNAPSHOT_AGE_SECONDS \
+  BETATEST_FREE_POOL_REFRESH_INTERVAL_SECONDS \
   ANALYSIS_V2_MEDIA_ARTIFACT_BUCKET \
   GOOGLE_CLOUD_LOCATION \
   GOOGLE_CLOUD_PROJECT \
@@ -596,13 +633,19 @@ expected_runtime_keys="$(printf '%s\n' \
 
 manifest_gate_keys=(
   ANALYSIS_V2_AUTHORIZED_TEST_SHARDING_ENABLED
+  BETATEST_FREE_POOL_ENABLED
+  BETATEST_FREE_POOL_MAX_SNAPSHOT_AGE_SECONDS
+  BETATEST_FREE_POOL_REFRESH_INTERVAL_SECONDS
   SELFHOSTED_PROFILE_GLOBAL_GATE_ENABLED
   SELFHOSTED_PROFILE_GLOBAL_MIN_INTERVAL_MS
   SELFHOSTED_PROFILE_GLOBAL_RESPONSE_GUARD_MS
 )
-manifest_gate_wrong_values=(enabled false 749 101)
+manifest_gate_wrong_values=(enabled enabled 901 0 false 749 101)
 manifest_gate_wrong_errors=(
   "ANALYSIS_V2_AUTHORIZED_TEST_SHARDING_ENABLED must be true or false"
+  "BETATEST_FREE_POOL_ENABLED must be true or false"
+  "BETATEST_FREE_POOL_MAX_SNAPSHOT_AGE_SECONDS must be an integer from 1 through 900"
+  "BETATEST_FREE_POOL_REFRESH_INTERVAL_SECONDS must be an integer from 1 through 900"
   "SELFHOSTED_PROFILE_GLOBAL_GATE_ENABLED must be true"
   "SELFHOSTED_PROFILE_GLOBAL_MIN_INTERVAL_MS must be 750"
   "SELFHOSTED_PROFILE_GLOBAL_RESPONSE_GUARD_MS must be 100"
@@ -649,6 +692,7 @@ expected_build_keys="$(printf '%s\n' \
 for sentinel in \
   SUPABASE_SECRET_SENTINEL_0123456789 \
   APIFY_QUINARY_SECRET_SENTINEL_0123456789 \
+  APIFY_SEPTENARY_SECRET_SENTINEL_0123456789 \
   IMAGE_SIGNING_SECRET_SENTINEL_01234567890123456789 \
   ERERERERERERERERERERERERERERERERERERERERERE; do
   assert_not_contains "$runtime_file" "$sentinel"
@@ -669,5 +713,15 @@ if env \
 fi
 assert_contains "$temp_dir/generator-source-boundary.out" \
   "ANALYSIS_V2_MANIFEST_SOURCE_ENV_FILE must be outside ANALYSIS_V2_WORKER_SOURCE_DIR"
+
+for expected_default in \
+  'BETATEST_FREE_POOL_ENABLED=false' \
+  'BETATEST_FREE_POOL_MAX_SNAPSHOT_AGE_SECONDS=300' \
+  'BETATEST_FREE_POOL_REFRESH_INTERVAL_SECONDS=60'; do
+  assert_contains "$repo_dir/.env.example" "$expected_default"
+done
+if LC_ALL=C grep -Eq '^NEXT_PUBLIC_.*BETATEST_FREE_POOL' "$repo_dir/.env.example"; then
+  fail "beta free-pool runtime controls must remain server-only"
+fi
 
 printf 'Analysis V2 Secret Manager and manifest generator tests passed\n'

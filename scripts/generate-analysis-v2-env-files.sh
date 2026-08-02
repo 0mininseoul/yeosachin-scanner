@@ -24,6 +24,9 @@ Required source dotenv keys:
   ANALYSIS_V2_MEDIA_ARTIFACT_BUCKET
   ANALYSIS_V2_APIFY_API_TOKEN_SLOT
   ANALYSIS_V2_AUTHORIZED_TEST_SHARDING_ENABLED=true|false
+  BETATEST_FREE_POOL_ENABLED=true|false
+  BETATEST_FREE_POOL_MAX_SNAPSHOT_AGE_SECONDS=1..900
+  BETATEST_FREE_POOL_REFRESH_INTERVAL_SECONDS=1..900
   SELFHOSTED_PROFILE_GLOBAL_GATE_ENABLED=true
   SELFHOSTED_PROFILE_GLOBAL_MIN_INTERVAL_MS=750
   SELFHOSTED_PROFILE_GLOBAL_RESPONSE_GUARD_MS=100
@@ -123,6 +126,13 @@ const slot = required('ANALYSIS_V2_APIFY_API_TOKEN_SLOT');
 const authorizedTestShardingEnabled = required(
   'ANALYSIS_V2_AUTHORIZED_TEST_SHARDING_ENABLED',
 );
+const betaFreePoolEnabled = required('BETATEST_FREE_POOL_ENABLED');
+const betaFreePoolMaxSnapshotAgeSeconds = required(
+  'BETATEST_FREE_POOL_MAX_SNAPSHOT_AGE_SECONDS',
+);
+const betaFreePoolRefreshIntervalSeconds = required(
+  'BETATEST_FREE_POOL_REFRESH_INTERVAL_SECONDS',
+);
 const globalGateEnabled = required('SELFHOSTED_PROFILE_GLOBAL_GATE_ENABLED');
 const globalMinIntervalMs = required('SELFHOSTED_PROFILE_GLOBAL_MIN_INTERVAL_MS');
 const globalResponseGuardMs = required('SELFHOSTED_PROFILE_GLOBAL_RESPONSE_GUARD_MS');
@@ -139,11 +149,22 @@ if (location !== 'global') {
 if (!/^[a-z0-9]([a-z0-9-]{1,61}[a-z0-9])$/.test(bucket)) {
   throw new Error('ANALYSIS_V2_MEDIA_ARTIFACT_BUCKET is invalid');
 }
-if (!['primary', 'secondary', 'tertiary', 'quaternary', 'quinary', 'senary'].includes(slot)) {
+if (!['primary', 'secondary', 'tertiary', 'quaternary', 'quinary', 'senary', 'septenary'].includes(slot)) {
   throw new Error('ANALYSIS_V2_APIFY_API_TOKEN_SLOT must be explicit and valid');
 }
 if (!['true', 'false'].includes(authorizedTestShardingEnabled)) {
   throw new Error('ANALYSIS_V2_AUTHORIZED_TEST_SHARDING_ENABLED must be true or false');
+}
+if (!['true', 'false'].includes(betaFreePoolEnabled)) {
+  throw new Error('BETATEST_FREE_POOL_ENABLED must be true or false');
+}
+for (const [name, value] of [
+  ['BETATEST_FREE_POOL_MAX_SNAPSHOT_AGE_SECONDS', betaFreePoolMaxSnapshotAgeSeconds],
+  ['BETATEST_FREE_POOL_REFRESH_INTERVAL_SECONDS', betaFreePoolRefreshIntervalSeconds],
+]) {
+  if (!/^[1-9][0-9]*$/.test(value) || Number(value) > 900) {
+    throw new Error(`${name} must be an integer from 1 through 900`);
+  }
 }
 if (globalGateEnabled !== 'true') {
   throw new Error('SELFHOSTED_PROFILE_GLOBAL_GATE_ENABLED must be true');
@@ -162,6 +183,9 @@ const runtime = {
   ANALYSIS_V2_MEDIA_ARTIFACT_BUCKET: bucket,
   ANALYSIS_V2_APIFY_API_TOKEN_SLOT: slot,
   ANALYSIS_V2_AUTHORIZED_TEST_SHARDING_ENABLED: authorizedTestShardingEnabled,
+  BETATEST_FREE_POOL_ENABLED: betaFreePoolEnabled,
+  BETATEST_FREE_POOL_MAX_SNAPSHOT_AGE_SECONDS: betaFreePoolMaxSnapshotAgeSeconds,
+  BETATEST_FREE_POOL_REFRESH_INTERVAL_SECONDS: betaFreePoolRefreshIntervalSeconds,
   SELFHOSTED_PROFILE_GLOBAL_GATE_ENABLED: globalGateEnabled,
   SELFHOSTED_PROFILE_GLOBAL_MIN_INTERVAL_MS: globalMinIntervalMs,
   SELFHOSTED_PROFILE_GLOBAL_RESPONSE_GUARD_MS: globalResponseGuardMs,

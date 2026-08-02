@@ -8,6 +8,7 @@ import { AI_STAGE_POLICY_LATEST_VERSION } from '@/lib/services/ai/stage-policy';
 import { AI_SCHEDULER_POLICY_ID } from '@/lib/services/ai/scheduler-policy';
 
 import {
+    BetaPreflightAccessUnavailableError,
     PREFLIGHT_DATABASE_NAMES,
     PreflightImmutableError,
     PreflightLeaseBusyError,
@@ -29,6 +30,7 @@ import type {
 } from './preflight-provider-run';
 import { preflightTargetInputHash } from './preflight-identity';
 import { PREFLIGHT_PROVIDER_DEADLINE_MS } from './preflight-runtime-policy';
+import type { BetaApifyPreflightCoordinator } from './beta-apify-preflight-coordinator';
 
 const preflightId = '123e4567-e89b-42d3-a456-426614174000';
 const userId = '223e4567-e89b-42d3-a456-426614174000';
@@ -39,6 +41,77 @@ const preflightIdentitySecret = Buffer.alloc(32, 14).toString('base64url');
 const imageProxySigningSecret = Buffer.alloc(32, 15).toString('base64url');
 const preflightInputHash = preflightTargetInputHash('target.name', {
     ANALYSIS_V2_PREFLIGHT_IDENTITY_HMAC_SECRET: preflightIdentitySecret,
+});
+
+describe('betatest preflight credit fence', () => {
+    it.each(['production', 'test_entitlement'] as const)(
+        'never persists the beta capacity code for a %s channel error',
+        async accessMode => {
+            const claimed = claim({ accessMode, analysisEntryChannel: 'standard' });
+            const store = workerStore(claimed);
+            await expect(processPreflight(preflightId, {
+                store,
+                providerRunStore: providerRunStore(),
+                getProfile: async () => { throw new Error('ANALYSIS_BETA_POOL_CAPACITY_UNAVAILABLE'); },
+            })).resolves.toBe('blocked');
+            expect(store.finalizeBlocked).toHaveBeenCalledWith(claimed, 'ANALYSIS_FAILED');
+        }
+    );
+
+    it('reuses the already prepared frozen beta hold before profile/provider work', async () => {
+        const events: string[] = [];
+        const coordinator: BetaApifyPreflightCoordinator = {
+            reuse: vi.fn(async () => {
+                events.push('hold');
+                return {
+                    allocationId: '423e4567-e89b-42d3-a456-426614174000',
+                    credentialSlot: 'septenary' as const,
+                };
+            }),
+            prepare: vi.fn(async () => { throw new Error('unexpected prepare'); }),
+        };
+        const claimed = claim({ analysisEntryChannel: 'betatest' });
+        const store = workerStore(claimed);
+        const primary = vi.fn(async () => {
+            events.push('profile');
+            return profile();
+        });
+
+        const outcome = await processPreflight(preflightId, {
+            store,
+            betaCreditCoordinator: coordinator,
+            getProfile: primary,
+            providerRunStore: providerRunStore(),
+        });
+
+        expect(events[0]).toBe('hold');
+        expect(events).toContain('profile');
+        expect(primary).toHaveBeenCalled();
+        expect(store.finalizeReady).toHaveBeenCalled();
+        expect(outcome).toBe('ready');
+    });
+
+    it('blocks beta capacity before profile collection and releases the claim', async () => {
+        const claimed = claim({ analysisEntryChannel: 'betatest' });
+        const store = workerStore(claimed);
+        const getProfile = vi.fn();
+        const settleBetaCredit = vi.fn(async () => true);
+        const refreshBetaCredit = vi.fn(async () => undefined);
+        await expect(processPreflight(preflightId, {
+            store,
+            betaCreditCoordinator: {
+                reuse: async () => { throw new Error('ANALYSIS_BETA_POOL_CAPACITY_UNAVAILABLE'); },
+                prepare: async () => { throw new Error('ANALYSIS_BETA_POOL_CAPACITY_UNAVAILABLE'); },
+            },
+            getProfile,
+            settleBetaCredit,
+            refreshBetaCredit,
+        })).resolves.toBe('blocked');
+        expect(getProfile).not.toHaveBeenCalled();
+        expect(store.finalizeBlocked).toHaveBeenCalledWith(claimed, 'BETA_CAPACITY_UNAVAILABLE');
+        expect(settleBetaCredit).toHaveBeenCalledWith(preflightId);
+        expect(refreshBetaCredit).toHaveBeenCalledOnce();
+    });
 });
 
 beforeAll(() => {
@@ -521,6 +594,175 @@ describe('preflight persistence adapter', () => {
         });
     });
 
+    it('persists and validates the dedicated beta prepare lifecycle fence', async () => {
+        const prepareToken = preflightId.replace(/^1/, '4');
+        const rpc = vi.fn(async (...args: [string, Record<string, unknown>?]) => {
+            if (args[0] === PREFLIGHT_DATABASE_NAMES.createOrReplayBetaRpc) {
+                return { data: [{
+                    preflight_id: preflightId,
+                    expires_at: expiresAt,
+                    created: true,
+                    preflight_status: 'pending',
+                    prepare_generation: 2,
+                    prepare_token: prepareToken,
+                    should_enqueue: true,
+                }], error: null };
+            }
+            if (args[0] === PREFLIGHT_DATABASE_NAMES.claimBetaPrepareRpc) {
+                return { data: [{
+                    claimed: true,
+                    prepare_state: 'preparing',
+                    claim_disposition: 'claimed',
+                }], error: null };
+            }
+            if (args[0] === PREFLIGHT_DATABASE_NAMES.blockBetaPrepareCapacityRpc) {
+                return { data: 'blocked', error: null };
+            }
+            return { data: true, error: null };
+        });
+        const store = createSupabasePreflightStore({ rpc, from: vi.fn() as never });
+        const created = await store.createOrReplayBeta({
+            userId,
+            email: 'owner@example.com',
+            authProvider: 'google',
+            targetInstagramId: 'target.name',
+            idempotencyKey: 'betatest-entry-key-000001',
+        });
+        expect(created).toEqual({
+            preflightId, expiresAt, created: true, status: 'pending',
+            prepareGeneration: 2, prepareToken, shouldEnqueue: true,
+        });
+        expect(rpc).toHaveBeenNthCalledWith(
+            1,
+            PREFLIGHT_DATABASE_NAMES.createOrReplayBetaRpc,
+            expect.objectContaining({
+                p_user_id: userId,
+                p_beta_prepare_token: expect.stringMatching(/^[0-9a-f-]{36}$/),
+            })
+        );
+        await store.markBetaPrepareDispatched({
+            preflightId, userId, prepareGeneration: 2, prepareToken,
+        });
+        const claim = await store.claimBetaPrepare({
+            preflightId, userId, prepareGeneration: 2, prepareToken,
+        });
+        expect(claim).toMatchObject({
+            claimed: true, state: 'preparing',
+            claimToken: expect.stringMatching(/^[0-9a-f-]{36}$/),
+            disposition: 'claimed',
+        });
+        await expect(store.blockBetaPrepareCapacity({
+            preflightId, userId, prepareGeneration: 2, prepareToken,
+            claimToken: claim.claimToken,
+        })).resolves.toBe('blocked');
+        expect(rpc.mock.calls.map(call => call[0])).toEqual([
+            PREFLIGHT_DATABASE_NAMES.createOrReplayBetaRpc,
+            PREFLIGHT_DATABASE_NAMES.markBetaPrepareDispatchedRpc,
+            PREFLIGHT_DATABASE_NAMES.claimBetaPrepareRpc,
+            PREFLIGHT_DATABASE_NAMES.blockBetaPrepareCapacityRpc,
+        ]);
+    });
+
+    it('parses an expired beta prepare claim as a terminal no-claim result', async () => {
+        const rpc = vi.fn(async () => ({
+            data: [{
+                claimed: false,
+                prepare_state: 'expired',
+                claim_disposition: 'terminal',
+            }],
+            error: null,
+        }));
+        const store = createSupabasePreflightStore({
+            rpc,
+            from: vi.fn() as never,
+        });
+
+        await expect(store.claimBetaPrepare({
+            preflightId,
+            userId,
+            prepareGeneration: 1,
+            prepareToken: preflightId.replace(/^1/, '4'),
+        })).resolves.toEqual({
+            claimed: false,
+            state: 'expired',
+            claimToken: null,
+            disposition: 'terminal',
+        });
+    });
+
+    it('parses retry exhaustion as terminal across claim, block, and release', async () => {
+        const rpc = vi.fn(async (name: string) => {
+            if (name === PREFLIGHT_DATABASE_NAMES.claimBetaPrepareRpc) {
+                return {
+                    data: [{
+                        claimed: false,
+                        prepare_state: 'retry_exhausted',
+                        claim_disposition: 'terminal',
+                    }],
+                    error: null,
+                };
+            }
+            if (name === PREFLIGHT_DATABASE_NAMES.blockBetaPrepareCapacityRpc) {
+                return { data: 'retry_exhausted', error: null };
+            }
+            if (name === PREFLIGHT_DATABASE_NAMES.releaseBetaPrepareClaimRpc) {
+                return { data: false, error: null };
+            }
+            throw new Error(`unexpected rpc: ${name}`);
+        });
+        const store = createSupabasePreflightStore({
+            rpc,
+            from: vi.fn() as never,
+        });
+        const prepareToken = preflightId.replace(/^1/, '4');
+
+        await expect(store.claimBetaPrepare({
+            preflightId,
+            userId,
+            prepareGeneration: 1,
+            prepareToken,
+        })).resolves.toEqual({
+            claimed: false,
+            state: 'retry_exhausted',
+            claimToken: null,
+            disposition: 'terminal',
+        });
+        await expect(store.blockBetaPrepareCapacity({
+            preflightId,
+            userId,
+            prepareGeneration: 1,
+            prepareToken,
+            claimToken: null,
+        })).resolves.toBe('retry_exhausted');
+        await expect(store.releaseBetaPrepareClaim({
+            preflightId,
+            userId,
+            prepareGeneration: 1,
+            prepareToken,
+            claimToken: userId,
+        })).resolves.toBe(false);
+    });
+
+    it('maps a database beta access race to one sanitized typed error', async () => {
+        const store = createSupabasePreflightStore({
+            rpc: vi.fn(async () => ({
+                data: null,
+                error: {
+                    message: 'ANALYSIS_BETA_ACCESS_UNAVAILABLE provider-detail',
+                },
+            })),
+            from: vi.fn() as never,
+        });
+
+        await expect(store.createOrReplayBeta({
+            userId,
+            email: 'owner@example.com',
+            authProvider: 'google',
+            targetInstagramId: 'target.name',
+            idempotencyKey: 'betatest-access-race-000001',
+        })).rejects.toEqual(new BetaPreflightAccessUnavailableError());
+    });
+
     it('keeps an active-lease duplicate delivery retryable instead of acknowledging it', async () => {
         const store = createSupabasePreflightStore({
             rpc: vi.fn(async () => ({
@@ -779,13 +1021,31 @@ describe('preflight worker domain', () => {
     it('does nothing when an idempotent worker delivery cannot claim the row', async () => {
         const store = workerStore(null);
         const getProfile = vi.fn();
+        const settleBetaCredit = vi.fn(async () => true);
+        const refreshBetaCredit = vi.fn(async () => undefined);
         await expect(processPreflight(preflightId, {
             store,
             getProfile,
             providerRunStore: providerRunStore(),
+            settleBetaCredit,
+            refreshBetaCredit,
         }))
             .resolves.toBe('noop');
         expect(getProfile).not.toHaveBeenCalled();
+        expect(settleBetaCredit).toHaveBeenCalledWith(preflightId);
+        expect(refreshBetaCredit).toHaveBeenCalledOnce();
+    });
+
+    it('does not refresh a ready/ordinary claim-side no-op', async () => {
+        const settleBetaCredit = vi.fn(async () => false);
+        const refreshBetaCredit = vi.fn(async () => undefined);
+        await expect(processPreflight(preflightId, {
+            store: workerStore(null),
+            settleBetaCredit,
+            refreshBetaCredit,
+        })).resolves.toBe('noop');
+        expect(settleBetaCredit).toHaveBeenCalledOnce();
+        expect(refreshBetaCredit).not.toHaveBeenCalled();
     });
 
     it('blocks an unclassified primary failure without starting paid work', async () => {
@@ -1115,6 +1375,36 @@ describe('preflight worker domain', () => {
 });
 
 describe('preflight public mapping', () => {
+    it('returns retry exhaustion immediately as a queue-unavailable block', () => {
+        expect(publicPreflightStatusDto({
+            preflightId,
+            status: 'blocked',
+            expiresAt,
+            blockedCode: 'QUEUE_UNAVAILABLE',
+            readySnapshot: null,
+            exclusionDecision: 'pending',
+        })).toEqual({
+            schemaVersion: 1,
+            preflightId,
+            expiresAt,
+            status: 'blocked',
+            exclusionDecision: 'pending',
+            code: 'QUEUE_UNAVAILABLE',
+        });
+    });
+
+    it('uses the terminal expiry boundary if a queue block ages out before GET', () => {
+        expect(() => publicPreflightStatusDto({
+            preflightId,
+            status: 'blocked',
+            expiresAt: '2026-07-13T12:00:00.000Z',
+            blockedCode: 'QUEUE_UNAVAILABLE',
+            readySnapshot: null,
+            exclusionDecision: 'pending',
+        }, {}, () => undefined, Date.parse('2026-07-13T12:00:00.001Z')))
+            .toThrow('PREFLIGHT_EXPIRED');
+    });
+
     it('returns a signed proxy path and never the stored raw CDN URL', () => {
         const snapshot = buildReadyPreflightSnapshot(
             profile(),

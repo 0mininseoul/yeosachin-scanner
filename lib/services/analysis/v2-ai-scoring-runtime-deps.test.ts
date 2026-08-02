@@ -4,6 +4,7 @@ import {
     type AnalysisV2ProfileFetchResume,
 } from './v2-profile-fetch-store';
 import type { AnalysisV2ProviderRunStore } from './v2-provider-run-store';
+import type { ProviderExecutionPolicy } from './authorized-test-provider-policy';
 import { AnalysisImagePreparationError } from '@/lib/services/ai/image-preprocessing';
 import {
     ANALYSIS_V2_PROFILE_CONSUMER_DATABASE_NAMES,
@@ -147,13 +148,15 @@ const authorizedProviderPolicy = {
     },
 } as const;
 
-function reverseLikeContext(policy: typeof authorizedProviderPolicy | null = null) {
+function reverseLikeContext(policy: ProviderExecutionPolicy | null = null) {
     return {
         load: vi.fn(async () => ({
             requestId,
             targetUsername: 'target.account',
             excludedUsername: null,
-            accessMode: policy ? 'test_entitlement' as const : 'production' as const,
+            accessMode: policy?.mode === 'test_operation_split'
+                ? 'test_entitlement' as const
+                : 'production' as const,
             providerExecutionPolicy: policy,
             planId: 'basic' as const,
             followersDeclaredCount: 1,
@@ -303,6 +306,63 @@ describe('analysis V2 production profile consumer', () => {
 });
 
 describe('analysis V2 reverse-like production collector', () => {
+    it('rejects a beta reverse-like charge above its frozen budget before reserve or provider I/O', async () => {
+        const bindAdapterCheckpoint = vi.fn();
+        const getPostLikers = vi.fn();
+        const betaPolicy = {
+            mode: 'betatest_free_pool',
+            policyVersion: 'betatest-free-pool-v1',
+            operationSlots: {
+                'target-profile': 'primary',
+                'relationship-followers': 'tertiary',
+                'relationship-following': 'quaternary',
+                'profile-fallback': 'quinary',
+                'profile-repair': 'senary',
+                'target-likers': 'septenary',
+                'target-comments': 'primary',
+                'candidate-likers': 'tertiary',
+            },
+            operationBudgets: {
+                'target-profile': 0.0052,
+                'relationship-followers': 1,
+                'relationship-following': 1,
+                'profile-fallback': 1,
+                'profile-repair': 1,
+                'target-likers': 1,
+                'target-comments': 1,
+                'candidate-likers': 0.3,
+            },
+        } as const;
+        const collector = createAnalysisV2ReverseLikeCollector({
+            providerRunStore: { bindAdapterCheckpoint } as unknown as AnalysisV2ProviderRunStore,
+            contextStore: reverseLikeContext(betaPolicy),
+            adapter: { getPostLikers, getPostComments: vi.fn() },
+            env: {
+                APIFY_PRIMARY_API_TOKEN: 'primary-test-token',
+                APIFY_TERTIARY_API_TOKEN: 'tertiary-test-token',
+                APIFY_QUATERNARY_API_TOKEN: 'quaternary-test-token',
+                APIFY_QUINARY_API_TOKEN: 'quinary-test-token',
+                APIFY_SENARY_API_TOKEN: 'senary-test-token',
+                APIFY_SEPTENARY_API_TOKEN: 'septenary-test-token',
+            },
+        });
+
+        await expect(collector.collect({
+            requestId,
+            jobKey: 'track:reverse-likes:collect',
+            claimToken,
+            jobInputHash: consumerInputHash,
+            targetUsername: 'target.account',
+            candidates: [
+                { candidateId: 'candidate:a', postUrl: 'https://instagram.com/p/A/', declaredLikesCount: 1 },
+                { candidateId: 'candidate:b', postUrl: 'https://instagram.com/p/B/', declaredLikesCount: 1 },
+            ],
+            limitPerPost: 100,
+        })).rejects.toThrow('ANALYSIS_BETA_POOL_BUDGET_DRIFT');
+        expect(bindAdapterCheckpoint).not.toHaveBeenCalled();
+        expect(getPostLikers).not.toHaveBeenCalled();
+    });
+
     it('uses one durable provider operation for at most ten posts and keeps per-post attribution', async () => {
         const bindAdapterCheckpoint = vi.fn(async (input: unknown) => {
             void input;

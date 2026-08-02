@@ -67,6 +67,11 @@ import {
     type PreflightProviderRunStore,
 } from './preflight-provider-run';
 import { preflightTargetInputHash } from './preflight-identity';
+import {
+    BETA_APIFY_POOL_CAPACITY_ERROR,
+    type BetaApifyPreflightCoordinator,
+} from './beta-apify-preflight-coordinator';
+import { shouldAbortPipelineBeforeExecution } from './pipeline-retry';
 
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const ISO_TIMESTAMP_PATTERN = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})$/;
@@ -74,6 +79,13 @@ const ISO_TIMESTAMP_PATTERN = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:
 export const PREFLIGHT_DATABASE_NAMES = Object.freeze({
     table: 'analysis_preflights',
     createOrReplayRpc: 'create_or_replay_analysis_v2_preflight',
+    createOrReplayBetaRpc: 'create_or_replay_analysis_v2_betatest_preflight',
+    markBetaPrepareDispatchedRpc: 'mark_analysis_beta_preflight_prepare_dispatched',
+    markBetaPrepareRetryExhaustedRpc:
+        'mark_analysis_beta_preflight_prepare_retry_exhausted',
+    claimBetaPrepareRpc: 'claim_analysis_beta_preflight_prepare',
+    releaseBetaPrepareClaimRpc: 'release_analysis_beta_preflight_prepare_claim',
+    blockBetaPrepareCapacityRpc: 'block_analysis_beta_preflight_capacity',
     claimRpc: 'claim_analysis_v2_preflight',
     reserveDispatchRpc: 'reserve_analysis_v2_preflight_dispatch',
     markDispatchedRpc: 'mark_analysis_v2_preflight_dispatched',
@@ -129,12 +141,37 @@ export interface CreatedPreflight {
     status: 'pending' | 'processing' | 'ready' | 'blocked' | 'expired' | 'consumed';
 }
 
+export interface CreatedBetaPreflight extends CreatedPreflight {
+    prepareGeneration: number;
+    prepareToken: string;
+    deliveryRetryCount?: number | null;
+    shouldEnqueue: boolean;
+}
+
+export type BetaPrepareState =
+    | 'reserved'
+    | 'preparing'
+    | 'prepared'
+    | 'capacity_blocked'
+    | 'retry_exhausted'
+    | 'expired'
+    | 'missing';
+
+export interface BetaPrepareClaim {
+    claimed: boolean;
+    state: BetaPrepareState;
+    claimToken: string | null;
+    disposition: 'claimed' | 'stale' | 'busy' | 'terminal' | 'missing' | 'exhausted';
+}
+
 export interface ClaimedPreflight {
     preflightId: string;
     claimToken: string;
     userId: string;
     targetInstagramId: string;
     accessMode: PlanAccessMode;
+    /** Set only by the database claim contract; public creation remains standard-only. */
+    analysisEntryChannel?: 'standard' | 'betatest';
     workerAttemptCount: number;
     catalogSnapshot: PreflightCatalogSnapshot;
 }
@@ -353,6 +390,54 @@ export interface PreflightStore {
     }): Promise<void>;
 }
 
+export interface BetaPreflightEntryStore {
+    createOrReplayBeta(
+        input: Omit<CreatePreflightInput, 'accessMode'>
+    ): Promise<CreatedBetaPreflight>;
+    markBetaPrepareDispatched(input: {
+        preflightId: string;
+        userId: string;
+        prepareGeneration: number;
+        prepareToken: string;
+    }): Promise<void>;
+    hasBetaEntryProvenance(preflightId: string, userId: string): Promise<boolean>;
+}
+
+export interface BetaPreflightPrepareStore {
+    claimBetaPrepare(input: {
+        preflightId: string;
+        userId: string;
+        prepareGeneration: number;
+        prepareToken: string;
+    }): Promise<BetaPrepareClaim>;
+    markBetaPrepareRetryExhausted(input: {
+        preflightId: string;
+        userId: string;
+        prepareGeneration: number;
+        prepareToken: string;
+    }): Promise<boolean>;
+    releaseBetaPrepareClaim(input: {
+        preflightId: string;
+        userId: string;
+        prepareGeneration: number;
+        prepareToken: string;
+        claimToken: string;
+    }): Promise<boolean>;
+    blockBetaPrepareCapacity(input: {
+        preflightId: string;
+        userId: string;
+        prepareGeneration: number;
+        prepareToken: string;
+        claimToken: string | null;
+    }): Promise<'blocked' | 'prepared' | 'retry_exhausted' | 'expired'>;
+    reserveDispatch: PreflightStore['reserveDispatch'];
+    markDispatched: PreflightStore['markDispatched'];
+}
+
+export type SupabasePreflightStore = PreflightStore
+    & BetaPreflightEntryStore
+    & BetaPreflightPrepareStore;
+
 interface RpcError {
     code?: string;
     message?: string;
@@ -385,6 +470,13 @@ export class PreflightRateLimitedError extends Error {
     constructor() {
         super('PREFLIGHT_RATE_LIMITED');
         this.name = 'PreflightRateLimitedError';
+    }
+}
+
+export class BetaPreflightAccessUnavailableError extends Error {
+    constructor() {
+        super('BETA_PREFLIGHT_ACCESS_UNAVAILABLE');
+        this.name = 'BetaPreflightAccessUnavailableError';
     }
 }
 
@@ -505,6 +597,13 @@ function safeRpcCode(error: RpcError): string {
 }
 
 function throwRpcError(error: RpcError, operation: string): never {
+    if (
+        error.message === 'ANALYSIS_BETA_ACCESS_UNAVAILABLE'
+        || error.message?.startsWith('ANALYSIS_BETA_ACCESS_UNAVAILABLE ') === true
+        || error.message?.startsWith('ANALYSIS_BETA_ACCESS_UNAVAILABLE\n') === true
+    ) {
+        throw new BetaPreflightAccessUnavailableError();
+    }
     if (
         error.message === 'PREFLIGHT_IDEMPOTENCY_CONFLICT'
         || error.message === 'ANALYSIS_V2_PREFLIGHT_IDEMPOTENCY_CONFLICT'
@@ -672,7 +771,7 @@ function storedPreflightFromRow(row: Record<string, unknown>): StoredPreflight {
 
 export function createSupabasePreflightStore(
     client: PreflightSupabaseClient
-): PreflightStore {
+): SupabasePreflightStore {
     return {
         async createOrReplay(input) {
             const { data, error } = await client.rpc(PREFLIGHT_DATABASE_NAMES.createOrReplayRpc, {
@@ -712,6 +811,173 @@ export function createSupabasePreflightStore(
             };
         },
 
+        async createOrReplayBeta(input) {
+            const proposedPrepareToken = randomUUID();
+            const { data, error } = await client.rpc(
+                PREFLIGHT_DATABASE_NAMES.createOrReplayBetaRpc,
+                {
+                    p_user_id: input.userId,
+                    p_email: input.email,
+                    p_auth_provider: input.authProvider,
+                    p_target_instagram_id: input.targetInstagramId,
+                    p_idempotency_key: input.idempotencyKey,
+                    p_launch_status_snapshot: launchStatusSnapshot(),
+                    p_plan_catalog_snapshot: planCatalogSnapshot(),
+                    p_pricing_version: PLAN_PRICING_VERSION,
+                    p_pricing_snapshot: pricingSnapshot(),
+                    p_policy_versions_snapshot: preflightPolicyVersions('production'),
+                    p_beta_prepare_token: proposedPrepareToken,
+                }
+            );
+            if (error) throwRpcError(error, 'beta create');
+            const row = rpcRow(data, 'beta create');
+            const status = row?.preflight_status;
+            if (
+                !row
+                || typeof row.created !== 'boolean'
+                || typeof row.should_enqueue !== 'boolean'
+                || !Number.isSafeInteger(row.prepare_generation)
+                || (row.prepare_generation as number) < 1
+                || (row.prepare_generation as number) > 100
+                || ![
+                    'pending', 'processing', 'ready', 'blocked', 'expired', 'consumed',
+                ].includes(String(status))
+            ) {
+                throw new Error('PREFLIGHT_PERSISTENCE_ERROR: invalid beta create result.');
+            }
+            return {
+                preflightId: requiredUuid(row.preflight_id, 'preflight id'),
+                expiresAt: requiredTimestamp(row.expires_at),
+                created: row.created,
+                status: status as CreatedPreflight['status'],
+                prepareGeneration: row.prepare_generation as number,
+                prepareToken: requiredUuid(row.prepare_token, 'beta prepare token'),
+                shouldEnqueue: row.should_enqueue,
+            };
+        },
+
+        async markBetaPrepareDispatched(input) {
+            const { data, error } = await client.rpc(
+                PREFLIGHT_DATABASE_NAMES.markBetaPrepareDispatchedRpc,
+                {
+                    p_preflight_id: input.preflightId,
+                    p_user_id: input.userId,
+                    p_prepare_generation: input.prepareGeneration,
+                    p_prepare_token: input.prepareToken,
+                }
+            );
+            if (error) throwRpcError(error, 'beta prepare dispatch mark');
+            if (typeof data !== 'boolean') {
+                throw new Error(
+                    'PREFLIGHT_PERSISTENCE_ERROR: invalid beta prepare dispatch mark.'
+                );
+            }
+        },
+
+        async markBetaPrepareRetryExhausted(input) {
+            const { data, error } = await client.rpc(
+                PREFLIGHT_DATABASE_NAMES.markBetaPrepareRetryExhaustedRpc,
+                {
+                    p_preflight_id: input.preflightId,
+                    p_user_id: input.userId,
+                    p_prepare_generation: input.prepareGeneration,
+                    p_prepare_token: input.prepareToken,
+                }
+            );
+            if (error) throwRpcError(error, 'beta prepare retry exhaustion');
+            if (typeof data !== 'boolean') {
+                throw new Error(
+                    'PREFLIGHT_PERSISTENCE_ERROR: invalid beta retry exhaustion result.'
+                );
+            }
+            return data;
+        },
+
+        async claimBetaPrepare(input) {
+            const claimToken = randomUUID();
+            const { data, error } = await client.rpc(
+                PREFLIGHT_DATABASE_NAMES.claimBetaPrepareRpc,
+                {
+                    p_preflight_id: input.preflightId,
+                    p_user_id: input.userId,
+                    p_prepare_generation: input.prepareGeneration,
+                    p_prepare_token: input.prepareToken,
+                    p_claim_token: claimToken,
+                    p_lease_seconds: PREFLIGHT_WORKER_LEASE_SECONDS,
+                }
+            );
+            if (error) throwRpcError(error, 'beta prepare claim');
+            const row = rpcRow(data, 'beta prepare claim');
+            const state = z.enum([
+                'reserved', 'preparing', 'prepared', 'capacity_blocked',
+                'retry_exhausted', 'expired', 'missing',
+            ]).safeParse(row?.prepare_state);
+            const disposition = z.enum([
+                'claimed', 'stale', 'busy', 'terminal', 'missing', 'exhausted',
+            ]).safeParse(row?.claim_disposition);
+            if (
+                !row
+                || typeof row.claimed !== 'boolean'
+                || !state.success
+                || !disposition.success
+            ) {
+                throw new Error('PREFLIGHT_PERSISTENCE_ERROR: invalid beta prepare claim.');
+            }
+            if (
+                row.claimed
+                && (state.data !== 'preparing' || disposition.data !== 'claimed')
+            ) {
+                throw new Error('PREFLIGHT_PERSISTENCE_ERROR: invalid beta prepare claim.');
+            }
+            return {
+                claimed: row.claimed,
+                state: state.data,
+                claimToken: row.claimed ? claimToken : null,
+                disposition: disposition.data,
+            };
+        },
+
+        async releaseBetaPrepareClaim(input) {
+            const { data, error } = await client.rpc(
+                PREFLIGHT_DATABASE_NAMES.releaseBetaPrepareClaimRpc,
+                {
+                    p_preflight_id: input.preflightId,
+                    p_user_id: input.userId,
+                    p_prepare_generation: input.prepareGeneration,
+                    p_prepare_token: input.prepareToken,
+                    p_claim_token: input.claimToken,
+                }
+            );
+            if (error) throwRpcError(error, 'beta prepare claim release');
+            if (typeof data !== 'boolean') {
+                throw new Error('PREFLIGHT_PERSISTENCE_ERROR: invalid beta claim release.');
+            }
+            return data;
+        },
+
+        async blockBetaPrepareCapacity(input) {
+            const { data, error } = await client.rpc(
+                PREFLIGHT_DATABASE_NAMES.blockBetaPrepareCapacityRpc,
+                {
+                    p_preflight_id: input.preflightId,
+                    p_user_id: input.userId,
+                    p_prepare_generation: input.prepareGeneration,
+                    p_prepare_token: input.prepareToken,
+                    p_claim_token: input.claimToken,
+                }
+            );
+            if (error) throwRpcError(error, 'beta prepare capacity block');
+            if (
+                data !== 'blocked'
+                && data !== 'prepared'
+                && data !== 'retry_exhausted'
+                && data !== 'expired'
+            ) {
+                throw new Error('PREFLIGHT_PERSISTENCE_ERROR: invalid beta capacity block.');
+            }
+            return data;
+        },
+
         async findForOwner(preflightId, userId) {
             const query = client.from(PREFLIGHT_DATABASE_NAMES.table);
             const { data, error } = await query
@@ -742,6 +1008,20 @@ export function createSupabasePreflightStore(
             if (error) throwRpcError(error, 'read');
             const row = rpcRow(data, 'read');
             return row ? storedPreflightFromRow(row) : null;
+        },
+
+        async hasBetaEntryProvenance(preflightId, userId) {
+            const query = client.from(PREFLIGHT_DATABASE_NAMES.table);
+            const { data, error } = await query
+                .select('beta_entry_provenance')
+                .eq('id', preflightId)
+                .eq('user_id', userId)
+                .maybeSingle();
+            if (error) throwRpcError(error, 'beta provenance read');
+            const row = rpcRow(data, 'beta provenance read');
+            if (!row) return false;
+            return row.beta_entry_provenance === 'betatest_service_v1'
+                || row.beta_entry_provenance === 'legacy_betatest_v1';
         },
 
         async reserveDispatch(preflightId, userId) {
@@ -827,6 +1107,9 @@ export function createSupabasePreflightStore(
                 userId: requiredUuid(row.user_id, 'user id'),
                 targetInstagramId: requiredUsername(row.target_instagram_id),
                 accessMode: requiredAccessMode(row.access_mode),
+                analysisEntryChannel: row.analysis_entry_channel === undefined
+                    ? 'standard'
+                    : z.enum(['standard', 'betatest']).parse(row.analysis_entry_channel),
                 workerAttemptCount: requiredWorkerAttemptCount(row.worker_attempt_count),
                 catalogSnapshot: {
                     plans: planCatalogSnapshotSchema.parse(row.plan_catalog_snapshot),
@@ -1119,6 +1402,108 @@ export function fallbackCallContext(
     };
 }
 
+/**
+ * Dedicated beta worker boundary. A preflight begins as standard; only the
+ * coordinator's atomic hold may flip its persisted entry channel. Ordinary
+ * dispatch is strictly later, so replay/crash cannot start a provider without
+ * the durable hold.
+ */
+export async function prepareBetaPreflightDispatch(input: {
+    preflightId: string;
+    userId: string;
+    prepareGeneration: number;
+    prepareToken: string;
+    deliveryRetryCount?: number | null;
+    coordinator: BetaApifyPreflightCoordinator;
+    store?: BetaPreflightPrepareStore;
+    enqueue: (preflightId: string, generation: number) => Promise<'enqueued' | 'exists'>;
+}): Promise<'prepared' | 'blocked' | 'noop'> {
+    const store = input.store ?? preflightStore;
+    if (shouldAbortPipelineBeforeExecution(input.deliveryRetryCount ?? null)) {
+        const exhausted = await store.markBetaPrepareRetryExhausted({
+            preflightId: input.preflightId,
+            userId: input.userId,
+            prepareGeneration: input.prepareGeneration,
+            prepareToken: input.prepareToken,
+        });
+        if (exhausted) return 'noop';
+    }
+    const claim = await store.claimBetaPrepare({
+        preflightId: input.preflightId,
+        userId: input.userId,
+        prepareGeneration: input.prepareGeneration,
+        prepareToken: input.prepareToken,
+    });
+    if (!claim.claimed) {
+        if (claim.state === 'capacity_blocked') return 'blocked';
+        if (claim.state === 'retry_exhausted' || claim.state === 'expired') {
+            return 'noop';
+        }
+        if (claim.disposition === 'busy') {
+            throw new PreflightWorkerRetryError({
+                category: 'persistence', retryable: true, httpStatus: null,
+            }, null);
+        }
+        if (claim.state !== 'prepared') return 'noop';
+    }
+    try {
+        if (claim.claimed) {
+            if (!claim.claimToken) {
+                throw new Error('PREFLIGHT_PERSISTENCE_ERROR: beta claim token is missing.');
+            }
+            await input.coordinator.prepare({
+                preflightId: input.preflightId,
+                userId: input.userId,
+                prepareGeneration: input.prepareGeneration,
+                prepareToken: input.prepareToken,
+                claimToken: claim.claimToken,
+            });
+        }
+    } catch (error) {
+        if (error instanceof Error && error.message === BETA_APIFY_POOL_CAPACITY_ERROR) {
+            const resolution = await store.blockBetaPrepareCapacity({
+                preflightId: input.preflightId,
+                userId: input.userId,
+                prepareGeneration: input.prepareGeneration,
+                prepareToken: input.prepareToken,
+                claimToken: claim.claimToken,
+            });
+            if (resolution === 'blocked') return 'blocked';
+            if (resolution === 'retry_exhausted' || resolution === 'expired') {
+                return 'noop';
+            }
+        } else {
+            if (claim.claimToken) {
+                try {
+                    await store.releaseBetaPrepareClaim({
+                        preflightId: input.preflightId,
+                        userId: input.userId,
+                        prepareGeneration: input.prepareGeneration,
+                        prepareToken: input.prepareToken,
+                        claimToken: claim.claimToken,
+                    });
+                } catch {
+                    // The bounded DB lease remains the recovery fence.
+                }
+            }
+            throw error;
+        }
+    }
+    const reservation = await store.reserveDispatch(input.preflightId, input.userId);
+    if (!reservation.shouldEnqueue) return 'prepared';
+    if (!reservation.reservationToken) {
+        throw new Error('PREFLIGHT_PERSISTENCE_ERROR: beta dispatch token is missing.');
+    }
+    await input.enqueue(input.preflightId, reservation.generation);
+    await store.markDispatched({
+        preflightId: input.preflightId,
+        userId: input.userId,
+        generation: reservation.generation,
+        reservationToken: reservation.reservationToken,
+    });
+    return 'prepared';
+}
+
 export async function processPreflight(
     preflightId: string,
     dependencies: {
@@ -1126,14 +1511,39 @@ export async function processPreflight(
         getProfile?: typeof getSelfHostedProfileSummary;
         getFallbackProfile?: typeof getApifyProfileSummary;
         providerRunStore?: PreflightProviderRunStore;
+        betaCreditCoordinator?: BetaApifyPreflightCoordinator;
         env?: Record<string, string | undefined>;
         observer?: PreflightProcessObserver;
+        /** Post-terminal only; true means a beta allocation was processed. */
+        settleBetaCredit?: (preflightId: string) => Promise<boolean>;
+        refreshBetaCredit?: () => Promise<void>;
     } = {}
 ): Promise<'noop' | 'ready' | 'blocked'> {
     const store = dependencies.store ?? preflightStore;
     const providerRuns = dependencies.providerRunStore ?? preflightProviderRunStore;
+    const settleTerminalBetaCredit = async (knownBeta: boolean): Promise<void> => {
+        let processed = false;
+        let settlementFailed = false;
+        try {
+            processed = await dependencies.settleBetaCredit?.(preflightId) ?? false;
+        } catch {
+            settlementFailed = true;
+        }
+        if (processed || (knownBeta && settlementFailed)) {
+            try {
+                await dependencies.refreshBetaCredit?.();
+            } catch {
+                // Refresh is advisory after a durable terminal transition.
+            }
+        }
+    };
     const claim = await store.claim(preflightId);
-    if (!claim) return 'noop';
+    if (!claim) {
+        // The claim RPC itself may have expired or exhausted the row. The
+        // targeted RPC proves whether beta credit actually needs releasing.
+        await settleTerminalBetaCredit(false);
+        return 'noop';
+    }
     const workerStartedAt = Date.now();
     let terminalized = false;
     const baseObservation = {
@@ -1146,6 +1556,13 @@ export async function processPreflight(
         'followersCount' | 'followingCount'
     > = {};
     try {
+        const isBetatest = claim.analysisEntryChannel === 'betatest';
+        const betaHold = isBetatest
+            ? await dependencies.betaCreditCoordinator?.reuse(claim.preflightId)
+            : undefined;
+        if (isBetatest && !betaHold) {
+            throw new Error(BETA_APIFY_POOL_CAPACITY_ERROR);
+        }
         const inputHash = preflightTargetInputHash(
             claim.targetInstagramId,
             dependencies.env ?? process.env
@@ -1158,6 +1575,12 @@ export async function processPreflight(
 
         let profile: InstagramProfile | null;
         if (existingRun) {
+            if (
+                betaHold
+                && existingRun.credentialSlot !== betaHold.credentialSlot
+            ) {
+                throw new Error(BETA_APIFY_POOL_CAPACITY_ERROR);
+            }
             if (
                 ['starting', 'rejected', 'failed', 'aborted', 'timed_out']
                     .includes(existingRun.status)
@@ -1179,7 +1602,9 @@ export async function processPreflight(
                 store: providerRuns,
                 claim,
                 inputHash,
-                identity: preflightProviderIdentity(existingRun.credentialSlot),
+                identity: preflightProviderIdentity(
+                    betaHold?.credentialSlot ?? existingRun.credentialSlot
+                ),
             });
             profile = await (dependencies.getFallbackProfile ?? getApifyProfileSummary)(
                 claim.targetInstagramId,
@@ -1205,7 +1630,8 @@ export async function processPreflight(
                     existingRun: false,
                 });
                 const identity = preflightProviderIdentity(
-                    selectAnalysisV2ApifyCredentialSlot(dependencies.env)
+                    betaHold?.credentialSlot
+                    ?? selectAnalysisV2ApifyCredentialSlot(dependencies.env)
                 );
                 const bound = await bindPreflightProviderRunCheckpoint({
                     store: providerRuns,
@@ -1270,6 +1696,20 @@ export async function processPreflight(
         });
         return 'ready';
     } catch (error) {
+        if (
+            !terminalized
+            && claim.analysisEntryChannel === 'betatest'
+            && error instanceof Error
+            && error.message === BETA_APIFY_POOL_CAPACITY_ERROR
+        ) {
+            await store.finalizeBlocked(claim, 'BETA_CAPACITY_UNAVAILABLE');
+            terminalized = true;
+            notifyPreflightObserver(dependencies.observer, {
+                type: 'completed', outcome: 'blocked', ...baseObservation,
+                ...profileObservation, errorCode: 'BETA_CAPACITY_UNAVAILABLE',
+            });
+            return 'blocked';
+        }
         const failure = classifyPreflightError(error);
         if (!terminalized && !failure.retryable) {
             try {
@@ -1310,6 +1750,12 @@ export async function processPreflight(
             retryable: true,
             httpStatus: retryFailure.httpStatus,
         }, claim.workerAttemptCount, error);
+    } finally {
+        if (terminalized) {
+            await settleTerminalBetaCredit(
+                claim.analysisEntryChannel === 'betatest'
+            );
+        }
     }
 }
 

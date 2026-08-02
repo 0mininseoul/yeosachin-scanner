@@ -173,6 +173,7 @@ describe('analysis observability admin route', () => {
         errorSpy.mockRestore();
         warnSpy.mockRestore();
         delete process.env.ADMIN_API_KEY;
+        delete process.env.BETATEST_FREE_POOL_MAX_SNAPSHOT_AGE_SECONDS;
     });
 
     it('requires the admin bearer token', async () => {
@@ -187,6 +188,51 @@ describe('analysis observability admin route', () => {
         expect(response.status).toBe(400);
         expect(mocks.rpc).not.toHaveBeenCalled();
         expect(mocks.from).not.toHaveBeenCalled();
+    });
+
+    it('returns a distinct aggregate-only betatest pool scope without a request ID', async () => {
+        mocks.rpc.mockResolvedValue({ data: {
+            schemaVersion: 1,
+            observedAt: timestamp,
+            runtimeEnabled: false,
+            totalEffectiveHeadroomUsd: 4.25,
+            staleSnapshotCount: 0,
+            activeAllocationCount: 2,
+            settlementLagMs: 12_000,
+            overcommittedSlotCount: 0,
+        }, error: null });
+
+        const response = await GET(request('scope=betatest-pool'));
+
+        expect(response.status).toBe(200);
+        await expect(response.json()).resolves.toEqual({
+            success: true,
+            scope: 'betatest-pool',
+            pool: {
+                schemaVersion: 1,
+                observedAt: timestamp,
+                runtimeEnabled: false,
+                totalEffectiveHeadroomUsd: 4.25,
+                staleSnapshotCount: 0,
+                activeAllocationCount: 2,
+                settlementLagMs: 12_000,
+                overcommittedSlotCount: 0,
+            },
+        });
+        expect(mocks.rpc).toHaveBeenCalledWith(
+            'load_analysis_beta_apify_pool_observability',
+            { p_max_age_seconds: 300 }
+        );
+        expect(mocks.reconcileProviderCosts).not.toHaveBeenCalled();
+        expect(mocks.from).not.toHaveBeenCalled();
+    });
+
+    it('fails the pool scope closed on malformed shared snapshot-age config', async () => {
+        process.env.BETATEST_FREE_POOL_MAX_SNAPSHOT_AGE_SECONDS = 'not-an-integer';
+        const response = await GET(request('scope=betatest-pool'));
+        expect(response.status).toBe(500);
+        expect(mocks.rpc).not.toHaveBeenCalled();
+        expect(errorSpy.mock.calls.flat().join(' ')).not.toContain('not-an-integer');
     });
 
     it('returns the strict PII-free V2 rollup before any V1 query or reconciliation', async () => {

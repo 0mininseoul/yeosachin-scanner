@@ -134,6 +134,7 @@ export const analysisV2ErrorCodeSchema = z.enum([
     'QUEUE_UNAVAILABLE',
     'AI_RATE_LIMITED',
     'AI_AMBIGUOUS_RESULT',
+    'BETA_CAPACITY_UNAVAILABLE',
     'ANALYSIS_FAILED',
 ]);
 

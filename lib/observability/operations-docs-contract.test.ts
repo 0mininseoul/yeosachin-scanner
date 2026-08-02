@@ -26,6 +26,49 @@ function dotenvNumber(document: string, key: string): number {
 }
 
 describe('analytics and observability disclosure contract', () => {
+    it('documents bounded betatest Apify pool telemetry, recovery, grants, and rollout', () => {
+        const runbook = source('docs/betatest-apify-credit-pool-runbook.md');
+        const operations = source('docs/analysis-v2-production-operations.md');
+        const normalizedRunbook = runbook.replace(/\s+/g, ' ');
+
+        for (const term of [
+            'refresh success/failure/latency',
+            'total effective headroom',
+            'reservation/actual/released USD',
+            'stale snapshot',
+            'settlement lag',
+            'active allocations',
+            'repeated refresh failure',
+            'negative/overcommitted invariant',
+            'unexpected beta use while the feature is disabled',
+            'frozen maps',
+            'idempotent',
+            'service-role',
+            'migration dry-run',
+            'numeric version',
+            'synthetic',
+            'live canary',
+            'no per-analysis deployment',
+            'runtime reservation',
+        ]) expect(normalizedRunbook).toContain(term);
+
+        expect(runbook).toContain('<USER_UUID_FROM_APPROVED_OUT_OF_BAND_SOURCE>');
+        expect(runbook).toContain('<AUDIT_REFERENCE_SHA256_64_LOWERCASE_HEX>');
+        expect(runbook).toContain('upsert_analysis_beta_access_grant');
+        expect(runbook).toContain('audit_reference_hash');
+        expect(runbook).not.toContain('insert into public.analysis_beta_access_grants');
+        expect(runbook).not.toMatch(/[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}/i);
+        expect(runbook).toMatch(/secondary[^\n]*(exclude|excluded|invalid)/i);
+        expect(operations).toContain('betatest-apify-credit-pool-runbook.md');
+        for (const migration of [
+            '20260802010000', '20260802010100', '20260802020000',
+            '20260802030000', '20260802030100', '20260802040000',
+            '20260802050000', '20260802060000', '20260802070000',
+            '20260802080000', '20260802090000', '20260802100000',
+            '20260802100100', '20260802100200', '20260802100300',
+            '20260802100400', '20260802100500', '20260802100600',
+        ]) expect(runbook).toContain(migration);
+    });
     it('discloses transient Groble matching and bounded analytics processing actually used', () => {
         const privacy = source('app/privacy/page.tsx');
         const disclosure = privacy.replace(/<[^>]*>/g, ' ').replace(/\s+/g, ' ');
