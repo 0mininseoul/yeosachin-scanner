@@ -220,6 +220,10 @@ validate_location() {
 validate_service() {
   [[ "$1" =~ ^[a-z]([a-z0-9-]{0,47}[a-z0-9])?$ ]] \
     || die "ANALYSIS_V2_TASKS_CLOUD_RUN_SERVICE is invalid"
+  case "$1" in
+    analysis-worker|analysis-worker-secondary-e2e) ;;
+    *) die "ANALYSIS_V2_TASKS_CLOUD_RUN_SERVICE must be analysis-worker or analysis-worker-secondary-e2e" ;;
+  esac
 }
 
 validate_queue() {
@@ -1226,8 +1230,8 @@ prepare_apify_secret_assignments() {
 require_canonical_apify_secret_inventory() {
   # Canonical normal/recovery revisions carry the complete slot inventory before
   # either beta or runtime gates can be enabled. Explicit prune/fence commands
-  # retain their historical narrow inventory contract, and the isolated E2E
-  # service has no canonical production traffic.
+  # retain their historical narrow inventory contract. The only other allowed
+  # service is the separately validated, execution-disabled E2E fixture.
   [[ "$ANALYSIS_V2_TASKS_CLOUD_RUN_SERVICE" == "analysis-worker" ]] || return 0
   [[ "$prune_apify_secret_refs_enabled" != "true" ]] || return 0
   [[ "$clear_apify_secret_ref_prune_fence_enabled" != "true" ]] || return 0
@@ -2656,8 +2660,14 @@ fi
   || die "EARLYBIRD_AUTOMATIC_FULFILLMENT_ENABLED must be true or false"
 validate_beta_free_pool_controls
 if [[ "$ANALYSIS_V2_TASKS_CLOUD_RUN_SERVICE" == "analysis-worker-secondary-e2e" ]]; then
+  [[ "$worker_enabled" == "false" ]] \
+    || die "ANALYSIS_V2_WORKER_ENABLED must be false on analysis-worker-secondary-e2e"
+  [[ "$recovery_enabled" == "false" ]] \
+    || die "ANALYSIS_V2_RECOVERY_ENABLED must be false on analysis-worker-secondary-e2e"
   [[ "$automatic_fulfillment_enabled" == "false" ]] \
     || die "EARLYBIRD_AUTOMATIC_FULFILLMENT_ENABLED must be false on analysis-worker-secondary-e2e"
+  [[ "$beta_free_pool_enabled" == "false" ]] \
+    || die "BETATEST_FREE_POOL_ENABLED must be false on analysis-worker-secondary-e2e"
 elif [[ "$automatic_fulfillment_enabled" == "true" ]]; then
   [[ "$ANALYSIS_V2_TASKS_CLOUD_RUN_SERVICE" == "analysis-worker" ]] \
     || die "EARLYBIRD_AUTOMATIC_FULFILLMENT_ENABLED may be true only on canonical analysis-worker"

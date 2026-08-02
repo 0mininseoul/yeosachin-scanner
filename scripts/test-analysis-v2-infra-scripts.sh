@@ -803,7 +803,7 @@ case "$command_line" in
   "run services list"*)
     [[ "$command_line" == *"--project=test-project"* \
       && "$command_line" == *"--region=asia-northeast3"* \
-      && "$command_line" == *"--filter=metadata.name=analysis-worker"* \
+      && "$command_line" == *"--filter=metadata.name=${ANALYSIS_V2_TASKS_CLOUD_RUN_SERVICE:-analysis-worker}"* \
       && "$command_line" == *"--format=json"* ]] || exit 98
     if [[ "$state" == "service_list_failure" ]]; then
       printf 'PERMISSION_DENIED SECRET_SERVICE_LOOKUP_SENTINEL_MUST_NOT_BE_PRINTED\n' >&2
@@ -811,9 +811,11 @@ case "$command_line" in
     elif [[ "$state" == "service_list_invalid_json" ]]; then
       printf '{not-json\n'
     elif [[ "$state" == "service_list_duplicate" ]]; then
-      printf '[{"metadata":{"name":"analysis-worker"}},{"metadata":{"name":"analysis-worker"}}]\n'
+      jq -nc --arg service "${ANALYSIS_V2_TASKS_CLOUD_RUN_SERVICE:-analysis-worker}" \
+        '[{metadata: {name: $service}}, {metadata: {name: $service}}]'
     elif [[ "$infra_ready" == "true" ]]; then
-      printf '[{"metadata":{"name":"analysis-worker"}}]\n'
+      jq -nc --arg service "${ANALYSIS_V2_TASKS_CLOUD_RUN_SERVICE:-analysis-worker}" \
+        '[{metadata: {name: $service}}]'
     else
       printf '[]\n'
     fi
@@ -1699,6 +1701,61 @@ if env "${common_env[@]}" \
 fi
 assert_contains "$temp_dir/worker-secondary-e2e-automatic-fulfillment.out" \
   "EARLYBIRD_AUTOMATIC_FULFILLMENT_ENABLED must be false on analysis-worker-secondary-e2e"
+
+# A service-name override must never turn a production-routable worker into a
+# noncanonical inventory bypass, regardless of whether beta is enabled.
+for arbitrary_service_beta_enabled in false true; do
+  if env "${common_env[@]}" \
+    'FAKE_GCLOUD_STATE=ready' \
+    'ANALYSIS_V2_TASKS_CLOUD_RUN_SERVICE=analysis-worker-unreviewed' \
+    "BETATEST_FREE_POOL_ENABLED=$arbitrary_service_beta_enabled" \
+    bash "$script_dir/deploy-analysis-v2-worker.sh" --dry-run \
+    >"$temp_dir/worker-unreviewed-service-beta-$arbitrary_service_beta_enabled.out" 2>&1; then
+    fail "unreviewed Cloud Run service was accepted with beta=$arbitrary_service_beta_enabled"
+  fi
+  assert_contains \
+    "$temp_dir/worker-unreviewed-service-beta-$arbitrary_service_beta_enabled.out" \
+    'ANALYSIS_V2_TASKS_CLOUD_RUN_SERVICE must be analysis-worker or analysis-worker-secondary-e2e'
+done
+
+# The exact secondary E2E service is an execution-disabled fixture, never a
+# beta/free-pool or recovery path. A compliant isolated invocation remains
+# available for the existing E2E contract.
+env "${common_env[@]}" \
+  'FAKE_GCLOUD_STATE=ready' \
+  'ANALYSIS_V2_TASKS_CLOUD_RUN_SERVICE=analysis-worker-secondary-e2e' \
+  'BETATEST_FREE_POOL_ENABLED=false' \
+  bash "$script_dir/deploy-analysis-v2-worker.sh" --dry-run \
+  >"$temp_dir/worker-secondary-e2e-isolated.out"
+assert_contains "$temp_dir/worker-secondary-e2e-isolated.out" \
+  'gcloud run deploy analysis-worker-secondary-e2e'
+
+for secondary_e2e_unsafe_override in \
+  'ANALYSIS_V2_WORKER_ENABLED=true' \
+  'ANALYSIS_V2_RECOVERY_ENABLED=true' \
+  'BETATEST_FREE_POOL_ENABLED=true'; do
+  case "$secondary_e2e_unsafe_override" in
+    ANALYSIS_V2_WORKER_ENABLED=*)
+      secondary_e2e_expected_error='ANALYSIS_V2_WORKER_ENABLED must be false on analysis-worker-secondary-e2e'
+      ;;
+    ANALYSIS_V2_RECOVERY_ENABLED=*)
+      secondary_e2e_expected_error='ANALYSIS_V2_RECOVERY_ENABLED must be false on analysis-worker-secondary-e2e'
+      ;;
+    BETATEST_FREE_POOL_ENABLED=*)
+      secondary_e2e_expected_error='BETATEST_FREE_POOL_ENABLED must be false on analysis-worker-secondary-e2e'
+      ;;
+  esac
+  if env "${common_env[@]}" \
+    'FAKE_GCLOUD_STATE=ready' \
+    'ANALYSIS_V2_TASKS_CLOUD_RUN_SERVICE=analysis-worker-secondary-e2e' \
+    "$secondary_e2e_unsafe_override" \
+    bash "$script_dir/deploy-analysis-v2-worker.sh" --dry-run \
+    >"$temp_dir/worker-secondary-e2e-unsafe.out" 2>&1; then
+    fail "secondary E2E worker accepted unsafe override: $secondary_e2e_unsafe_override"
+  fi
+  assert_contains "$temp_dir/worker-secondary-e2e-unsafe.out" \
+    "$secondary_e2e_expected_error"
+done
 
 env "${common_env[@]}" \
   'FAKE_GCLOUD_STATE=ready' \
