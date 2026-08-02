@@ -10,6 +10,7 @@ import {
 import { BETA_APIFY_TARGET_PROFILE_BUDGET_USD } from './beta-apify-credit-runtime';
 import { BETA_APIFY_RUNTIME_CONFIG_ERROR } from './beta-apify-credit-runtime';
 import { BETA_APIFY_FREE_CREDENTIAL_SLOTS } from './beta-apify-credit-pool';
+import { ANALYSIS_BETA_POOL_BUDGET_DRIFT } from './authorized-test-provider-policy';
 
 const USER_ID = '11111111-1111-4111-8111-111111111111';
 const PREFLIGHT_ID = '22222222-2222-4222-8222-222222222222';
@@ -59,6 +60,91 @@ describe('beta Apify plan admission', () => {
         }).catch((caught: unknown) => caught);
         expect(error).toEqual(new Error(BETA_APIFY_PLAN_ADMISSION_PERSISTENCE_ERROR));
         expect(String(error)).not.toContain(secret);
+    });
+
+    it('rejects runtime cost drift above the frozen catalog before any request activation', async () => {
+        const allocationId = '55555555-5555-4555-8555-555555555555';
+        const loadPreflightHold = vi.fn().mockResolvedValue({
+            allocationId,
+            preflightId: PREFLIGHT_ID,
+            credentialSlot: 'primary',
+            targetProfileBudgetUsd: BETA_APIFY_TARGET_PROFILE_BUDGET_USD,
+        });
+        const loadSnapshots = vi.fn().mockResolvedValue(snapshots());
+        const activate = vi.fn().mockResolvedValue({
+            requestId: REQUEST_ID,
+            initialJobKey: 'coordinator:bootstrap',
+            allocationId,
+            replayed: false,
+        });
+        await expect(admitBetaApifyPlan({
+            preflightId: PREFLIGHT_ID,
+            userId: USER_ID,
+            admissionToken: ADMISSION_TOKEN,
+            admissionGeneration: 1,
+            selectedPlanId: 'basic',
+            maxSnapshotAgeSeconds: 300,
+            env: {
+                BETATEST_FREE_POOL_ENABLED: 'true',
+                APIFY_PROFILE_ESTIMATED_COST_PER_RESULT_USD: '0.005',
+                APIFY_RELATIONSHIP_ESTIMATED_COST_PER_RESULT_USD: '0.002',
+                APIFY_RELATIONSHIP_MAX_ESTIMATED_COST_USD_PER_OPERATION: '10',
+            },
+            store: {
+                replay: vi.fn().mockResolvedValue(null),
+                loadPreflightHold,
+                loadSnapshots,
+                activate,
+            },
+        })).rejects.toThrow(ANALYSIS_BETA_POOL_BUDGET_DRIFT);
+        expect(loadPreflightHold).not.toHaveBeenCalled();
+        expect(loadSnapshots).not.toHaveBeenCalled();
+        expect(activate).not.toHaveBeenCalled();
+    });
+
+    it.each([
+        'ANALYSIS_BETA_ALLOCATION_CONFLICT',
+        'ANALYSIS_BETA_PROVIDER_POLICY_CONFLICT',
+        'ANALYSIS_BETA_ALLOCATION_INVALID',
+    ])('classifies stored integrity failure %s as persistence without leaking details', async code => {
+        const raw = `${code} apify-account-secret`;
+        const store = createBetaApifyPlanAdmissionStore({
+            rpc: vi.fn().mockResolvedValue({ data: null, error: { message: raw } }),
+        });
+        const error = await store.replay({
+            preflightId: PREFLIGHT_ID,
+            userId: USER_ID,
+            admissionToken: ADMISSION_TOKEN,
+            admissionGeneration: 1,
+            selectedPlanId: 'basic',
+        }).catch((caught: unknown) => caught);
+        expect(error).toEqual(new Error(BETA_APIFY_PLAN_ADMISSION_PERSISTENCE_ERROR));
+        expect(String(error)).not.toContain(raw);
+        expect(String(error)).not.toContain('apify-account-secret');
+    });
+
+    it.each([
+        'ANALYSIS_BETA_POOL_CAPACITY_UNAVAILABLE',
+        'ANALYSIS_BETA_POOL_SNAPSHOT_STALE',
+        'ANALYSIS_BETA_ACCESS_UNAVAILABLE',
+        'ANALYSIS_BETA_REQUEST_NOT_ELIGIBLE',
+        'ANALYSIS_BETA_PREFLIGHT_NOT_ELIGIBLE',
+    ])('keeps true domain failure %s in the sanitized capacity category', async code => {
+        const store = createBetaApifyPlanAdmissionStore({
+            rpc: vi.fn().mockResolvedValue({
+                data: null,
+                error: { message: `${code} provider-secret` },
+            }),
+        });
+        const error = await store.replay({
+            preflightId: PREFLIGHT_ID,
+            userId: USER_ID,
+            admissionToken: ADMISSION_TOKEN,
+            admissionGeneration: 1,
+            selectedPlanId: 'basic',
+        }).catch((caught: unknown) => caught);
+        expect(error).toEqual(new Error(BETA_APIFY_PLAN_ADMISSION_ERROR));
+        expect(String(error)).not.toContain('provider-secret');
     });
 
     it('serializes a narrow sanitized RPC input and rejects malformed/replayed output', async () => {

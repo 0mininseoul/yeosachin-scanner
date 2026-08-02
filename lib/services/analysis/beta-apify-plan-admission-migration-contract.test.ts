@@ -70,6 +70,10 @@ describe('beta plan-admission migration contract', () => {
         expect(replay).toContain("v_job.kind IS DISTINCT FROM 'bootstrap'");
         expect(replay).toContain("v_policy.mode IS DISTINCT FROM 'betatest_free_pool'");
         expect(replay).toContain('v_reservation_count <> 8');
+        expect(replay).toContain('v_active_reservation_count < 1');
+        expect(replay).toContain(
+            "reservation.lifecycle_state NOT IN ('active', 'settled')"
+        );
         expect(replay).not.toContain('analysis_beta_access_grants');
         expect(replay).not.toContain('p_operation_slot_map');
         expect(replay).not.toContain('p_operation_budget_map');
@@ -94,12 +98,28 @@ describe('beta plan-admission migration contract', () => {
             'WHERE grant_row.user_id = p_user_id\n    FOR UPDATE'
         );
         const sampledNow = admission.indexOf('v_now := pg_catalog.clock_timestamp();');
+        const activation = admission.lastIndexOf(
+            'v_activation := public.activate_analysis_beta_apify_request_credit('
+        );
+        const postActivationNow = admission.indexOf(
+            'v_now := pg_catalog.clock_timestamp();',
+            sampledNow + 1
+        );
+        const postActivationFence = admission.slice(postActivationNow);
         expect(user).toBeGreaterThan(-1);
         expect(preflight).toBeGreaterThan(user);
         expect(allocation).toBeGreaterThan(preflight);
         expect(targetReservation).toBeGreaterThan(allocation);
         expect(grant).toBeGreaterThan(targetReservation);
         expect(sampledNow).toBeGreaterThan(grant);
+        expect(activation).toBeGreaterThan(sampledNow);
+        expect(postActivationNow).toBeGreaterThan(activation);
+        expect(postActivationFence).toContain(
+            "v_preflight.admission_refreshed_at < v_now - INTERVAL '2 minutes'"
+        );
+        expect(postActivationFence).toContain(
+            "v_preflight.admission_refreshed_at > v_now + INTERVAL '30 seconds'"
+        );
         expect(migration).not.toContain('CREATE OR REPLACE FUNCTION public.consume_analysis_v2_test_entitlement');
     });
 });

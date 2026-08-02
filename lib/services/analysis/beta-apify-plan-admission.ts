@@ -13,6 +13,13 @@ import {
     type BetaApifyPoolSnapshot,
 } from './beta-apify-credit-runtime';
 import type { BetaApifyFreeCredentialSlot } from './beta-apify-credit-pool';
+import {
+    ANALYSIS_BETA_POOL_BUDGET_DRIFT,
+} from './authorized-test-provider-policy';
+import {
+    getBetaApifyOperationBudgetCatalog,
+    getRequiredBetaApifyOperationBudgetCatalog,
+} from './beta-apify-operation-budget';
 
 /** Public boundary for a checkout-free beta start. Never forwards provider details. */
 export const BETA_APIFY_PLAN_ADMISSION_ERROR = BETA_APIFY_POOL_CAPACITY_ERROR;
@@ -115,8 +122,42 @@ function parsedResult(data: unknown): z.infer<typeof resultSchema> {
  * Narrow service-role adapter. Inputs are frozen aliases, maps, and aggregate USD
  * budgets only; no provider token or account identity reaches the database.
  */
+const CAPACITY_FAILURE_CODES = Object.freeze([
+    'ANALYSIS_BETA_POOL_CAPACITY_UNAVAILABLE',
+    'ANALYSIS_BETA_POOL_SNAPSHOT_CONFLICT',
+    'ANALYSIS_BETA_POOL_SNAPSHOT_INCOMPLETE',
+    'ANALYSIS_BETA_POOL_SNAPSHOT_INVALID',
+    'ANALYSIS_BETA_POOL_SNAPSHOT_STALE',
+    'ANALYSIS_BETA_POOL_SNAPSHOT_UNHEALTHY',
+    'ANALYSIS_BETA_ACCESS_UNAVAILABLE',
+    'ANALYSIS_BETA_REQUEST_NOT_ELIGIBLE',
+    'ANALYSIS_BETA_PREFLIGHT_NOT_ELIGIBLE',
+    'ANALYSIS_V2_PREFLIGHT_NOT_FOUND',
+]);
+
 function knownCapacityFailure(error: { message?: string }): boolean {
-    return typeof error.message === 'string' && /^(?:ANALYSIS_BETA_(?:POOL_|ALLOCATION_|ACCESS_|REQUEST_|PROVIDER_POLICY_)|ANALYSIS_V2_PREFLIGHT_)/.test(error.message);
+    return typeof error.message === 'string' && CAPACITY_FAILURE_CODES.some(code => (
+        error.message === code
+        || error.message?.startsWith(`${code} `)
+        || error.message?.startsWith(`${code}\n`)
+    ));
+}
+
+function assertRuntimeBudgetsFitFrozenCatalog(
+    selectedPlanId: PlanId,
+    env?: Record<string, string | undefined>
+): void {
+    try {
+        const required = getRequiredBetaApifyOperationBudgetCatalog(selectedPlanId, env);
+        const frozen = getBetaApifyOperationBudgetCatalog(selectedPlanId);
+        if (BETA_APIFY_OPERATION_FAMILIES.some(operation => (
+            required[operation] > frozen[operation]
+        ))) {
+            throw new Error(ANALYSIS_BETA_POOL_BUDGET_DRIFT);
+        }
+    } catch {
+        throw new Error(ANALYSIS_BETA_POOL_BUDGET_DRIFT);
+    }
 }
 
 function sanitizedBoundaryError(error: unknown): Error {
@@ -237,6 +278,7 @@ export async function admitBetaApifyPlan(input: Readonly<{
 
     const config = getBetaApifyCreditPoolRuntimeConfig(input.env);
     if (!config.enabled) throw new Error(BETA_APIFY_RUNTIME_CONFIG_ERROR);
+    assertRuntimeBudgetsFitFrozenCatalog(selectedPlanId, input.env);
     let hold: Awaited<ReturnType<BetaApifyPlanAdmissionStore['loadPreflightHold']>>;
     try { hold = await input.store.loadPreflightHold(preflightId); } catch (error) {
         throw sanitizedBoundaryError(error);

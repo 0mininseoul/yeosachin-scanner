@@ -690,6 +690,81 @@ describe('beta Apify credit PostgreSQL 16 concurrency', () => {
         expect(durable.rows).toEqual([{ requests: 0, jobs: 0, state: 'preflight_held' }]);
     }, 15_000);
 
+    it('rechecks freshness after the snapshot barrier and rolls back post-check admission work', async () => {
+        const userId = randomUUID();
+        const preflightId = randomUUID();
+        const admissionToken = randomUUID();
+        await seedReadyAdmission({
+            client: first,
+            userId,
+            preflightId,
+            admissionToken,
+            refreshedAgeSeconds: 118,
+        });
+
+        let snapshotLockOpen = false;
+        let admission: Promise<PlanAdmissionResult> | null = null;
+        try {
+            await observer.query('BEGIN');
+            snapshotLockOpen = true;
+            await observer.query(
+                `SELECT credential_slot FROM public.analysis_apify_credit_snapshots
+                 WHERE credential_slot = 'primary' FOR UPDATE`,
+            );
+            const admissionPid = (await first.query<{ pid: number }>(
+                'SELECT pg_backend_pid() AS pid',
+            )).rows[0]!.pid;
+            admission = admitReadyPlan({
+                client: first,
+                userId,
+                preflightId,
+                admissionToken,
+            });
+            void admission.catch(() => undefined);
+            await waitUntilBlocked(admissionPid);
+
+            // Request/job rows have been staged in the blocked transaction,
+            // but the admission becomes stale before snapshot activation ends.
+            await new Promise(resolve => setTimeout(resolve, 2_500));
+            await observer.query('COMMIT');
+            snapshotLockOpen = false;
+            await expect(admission).rejects.toThrow(/ANALYSIS_BETA_REQUEST_NOT_ELIGIBLE/);
+        } finally {
+            if (snapshotLockOpen) await observer.query('ROLLBACK').catch(() => undefined);
+            if (admission) await admission.catch(() => undefined);
+        }
+
+        const durable = await first.query<{
+            requests: number;
+            jobs: number;
+            policies: number;
+            lifecycle: string;
+            reservations: number;
+        }>(
+            `SELECT
+                (SELECT count(*)::int FROM public.analysis_requests WHERE preflight_id=$1) AS requests,
+                (SELECT count(*)::int FROM public.analysis_pipeline_jobs AS job
+                 JOIN public.analysis_requests AS request ON request.id=job.request_id
+                 WHERE request.preflight_id=$1) AS jobs,
+                (SELECT count(*)::int FROM public.analysis_v2_provider_execution_policies AS policy
+                 JOIN public.analysis_requests AS request ON request.id=policy.request_id
+                 WHERE request.preflight_id=$1) AS policies,
+                allocation.lifecycle_state AS lifecycle,
+                (SELECT count(*)::int FROM public.analysis_beta_pool_reservations AS reservation
+                 WHERE reservation.allocation_id=allocation.id) AS reservations
+             FROM public.analysis_beta_pool_allocations AS allocation
+             WHERE allocation.preflight_id=$1`,
+            [preflightId],
+        );
+        expect(durable.rows).toEqual([{
+            requests: 0,
+            jobs: 0,
+            policies: 0,
+            lifecycle: 'preflight_held',
+            reservations: 1,
+        }]);
+    }, 15_000);
+
     it('turns concurrent calls for one preflight into one admission plus immutable replay', async () => {
         const userId = randomUUID();
         const preflightId = randomUUID();
@@ -749,6 +824,81 @@ describe('beta Apify credit PostgreSQL 16 concurrency', () => {
             [preflightId],
         );
         expect(counts.rows).toEqual([{ requests: 1, jobs: 1, policies: 1 }]);
+    });
+
+    it('replays one active plus seven settled families after partial terminal settlement', async () => {
+        const userId = randomUUID();
+        const preflightId = randomUUID();
+        const admissionToken = randomUUID();
+        await seedReadyAdmission({
+            client: first,
+            userId,
+            preflightId,
+            admissionToken,
+            snapshotLimit: 100,
+        });
+        const admitted = await admitReadyPlan({
+            client: first,
+            userId,
+            preflightId,
+            admissionToken,
+        });
+        await first.query(
+            `INSERT INTO public.analysis_v2_provider_runs (
+                request_id, job_key, operation_key, input_hash, job_claim_token,
+                reservation_token, logical_provider, actor_id, credential_slot,
+                max_charge_usd, status
+             ) SELECT $1, 'coordinator:bootstrap', $2, job.input_hash, $3,
+                $4, 'apify', 'actor/test', 'tertiary', 0.68, 'starting'
+             FROM public.analysis_pipeline_jobs AS job
+             WHERE job.request_id=$1 AND job.job_key='coordinator:bootstrap'`,
+            [
+                admitted.requestId,
+                `relationship-followers:${'c'.repeat(64)}`,
+                randomUUID(),
+                randomUUID(),
+            ],
+        );
+        await first.query(
+            `UPDATE public.analysis_requests SET status='failed' WHERE id=$1`,
+            [admitted.requestId],
+        );
+        const partial = await first.query<{
+            result: { lifecycleState: string; heldFamilies: number };
+        }>(
+            `SELECT public.settle_analysis_beta_apify_credit_allocation(
+                $1, 'request_terminal'
+            ) AS result`,
+            [admitted.allocationId],
+        );
+        expect(partial.rows[0]!.result).toMatchObject({
+            lifecycleState: 'active',
+            heldFamilies: 1,
+        });
+
+        const replay = await first.query<{ result: PlanAdmissionResult }>(
+            `SELECT public.load_analysis_v2_betatest_plan_replay(
+                $1, $2, $3, 1, 'basic'
+            ) AS result`,
+            [preflightId, userId, admissionToken],
+        );
+        expect(replay.rows[0]!.result).toMatchObject({
+            requestId: admitted.requestId,
+            allocationId: admitted.allocationId,
+            replayed: true,
+        });
+        const states = await first.query<{ state: string; count: number }>(
+            `SELECT lifecycle_state AS state, count(*)::int AS count
+             FROM public.analysis_beta_pool_reservations
+             WHERE allocation_id=$1
+             GROUP BY lifecycle_state
+             ORDER BY lifecycle_state`,
+            [admitted.allocationId],
+        );
+        expect(states.rows).toEqual([
+            { state: 'active', count: 1 },
+            { state: 'settled', count: 7 },
+        ]);
     });
 
     it('serializes separate admissions for one user and leaves the loser recoverable', async () => {

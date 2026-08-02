@@ -1253,6 +1253,75 @@ describe('betatest provider policy/guard migration PGlite', () => {
         await expect(replayBetaPlan()).resolves.toEqual({ ...admitted, replayed: true });
     });
 
+    it('replays a partially settled terminal allocation with one ambiguous family still active', async () => {
+        await seedReadyBetaAdmission('basic');
+        const admitted = await admitBetaPlan();
+        await db.query(
+            `INSERT INTO public.analysis_v2_provider_runs (
+                request_id, job_key, operation_key, input_hash, job_claim_token,
+                reservation_token, logical_provider, actor_id, credential_slot,
+                max_charge_usd, status
+             ) SELECT $1, 'coordinator:bootstrap', $2, job.input_hash, $3,
+                $4, 'apify', 'actor/test', 'tertiary', 0.68, 'starting'
+             FROM public.analysis_pipeline_jobs AS job
+             WHERE job.request_id=$1 AND job.job_key='coordinator:bootstrap'`,
+            [
+                admitted.requestId,
+                `relationship-followers:${DIGEST}`,
+                CLAIM_TOKEN,
+                RESERVATION_TOKEN,
+            ]
+        );
+        await db.query(
+            `UPDATE public.analysis_requests SET status='failed' WHERE id=$1`,
+            [admitted.requestId]
+        );
+        const partial = await serviceQuery<JsonRow<{
+            lifecycleState: string;
+            heldFamilies: number;
+        }>>(
+            `SELECT public.settle_analysis_beta_apify_credit_allocation(
+                $1, 'request_terminal'
+            ) AS result`,
+            [admitted.allocationId]
+        );
+        expect(partial.rows[0].result).toMatchObject({
+            lifecycleState: 'active',
+            heldFamilies: 1,
+        });
+        const familyStates = await db.query<{ state: string; count: number }>(
+            `SELECT lifecycle_state AS state, pg_catalog.count(*)::INTEGER AS count
+             FROM public.analysis_beta_pool_reservations
+             WHERE allocation_id=$1
+             GROUP BY lifecycle_state
+             ORDER BY lifecycle_state`,
+            [admitted.allocationId]
+        );
+        expect(familyStates.rows).toEqual([
+            { state: 'active', count: 1 },
+            { state: 'settled', count: 7 },
+        ]);
+        await expect(replayBetaPlan()).resolves.toEqual({
+            ...admitted,
+            replayed: true,
+        });
+    });
+
+    it('rejects an active allocation corrupted to have no active reservation family', async () => {
+        await seedReadyBetaAdmission('basic');
+        await admitBetaPlan();
+        await db.query(
+            `UPDATE public.analysis_beta_pool_reservations
+             SET lifecycle_state='settled', actual_usd=0,
+                 released_usd=reserved_usd,
+                 settled_at=pg_catalog.clock_timestamp(),
+                 settlement_reason='request_terminal'`
+        );
+        await expect(replayBetaPlan()).rejects.toThrow(
+            /ANALYSIS_BETA_ALLOCATION_CONFLICT/
+        );
+    });
+
     it('rejects corrupt provider policy, bootstrap job, and reservation integrity on replay', async () => {
         await seedReadyBetaAdmission('basic');
         const admitted = await admitBetaPlan();

@@ -47,6 +47,7 @@ DECLARE
     v_expected_input_hash TEXT;
     v_expected_scope JSONB;
     v_reservation_count INTEGER;
+    v_active_reservation_count INTEGER;
     v_reservation_drift BOOLEAN;
 BEGIN
     IF p_preflight_id IS NULL
@@ -175,6 +176,9 @@ BEGIN
     );
 
     SELECT pg_catalog.count(*)::INTEGER,
+           pg_catalog.count(*) FILTER (
+               WHERE reservation.lifecycle_state = 'active'
+           )::INTEGER,
            COALESCE(pg_catalog.bool_or(
                v_allocation.operation_slot_map->>reservation.operation_family
                     IS DISTINCT FROM reservation.credential_slot
@@ -183,14 +187,14 @@ BEGIN
                     IS DISTINCT FROM reservation.reserved_usd
                OR (
                     v_allocation.lifecycle_state = 'active'
-                    AND reservation.lifecycle_state <> 'active'
+                    AND reservation.lifecycle_state NOT IN ('active', 'settled')
                )
                OR (
                     v_allocation.lifecycle_state = 'settled'
                     AND reservation.lifecycle_state <> 'settled'
                )
            ), FALSE)
-    INTO v_reservation_count, v_reservation_drift
+    INTO v_reservation_count, v_active_reservation_count, v_reservation_drift
     FROM public.analysis_beta_pool_reservations AS reservation
     WHERE reservation.allocation_id = v_allocation.id;
 
@@ -247,6 +251,10 @@ BEGIN
                 v_allocation.operation_slot_map
             )
        OR v_reservation_count <> 8
+       OR (
+            v_allocation.lifecycle_state = 'active'
+            AND v_active_reservation_count < 1
+       )
        OR v_reservation_drift THEN
         RAISE EXCEPTION USING
             MESSAGE = 'ANALYSIS_BETA_ALLOCATION_CONFLICT', ERRCODE = 'P0001';
@@ -607,6 +615,17 @@ BEGIN
        OR (v_activation->>'requestId')::UUID IS DISTINCT FROM v_request_id THEN
         RAISE EXCEPTION USING
             MESSAGE = 'ANALYSIS_BETA_ALLOCATION_CONFLICT', ERRCODE = 'P0001';
+    END IF;
+
+    -- Activation may wait behind any of the six authoritative snapshot rows.
+    -- Re-sample database time after that barrier so staged request/job/policy
+    -- work rolls back when admission freshness expires while waiting.
+    v_now := pg_catalog.clock_timestamp();
+    IF v_preflight.admission_refreshed_at IS NULL
+       OR v_preflight.admission_refreshed_at < v_now - INTERVAL '2 minutes'
+       OR v_preflight.admission_refreshed_at > v_now + INTERVAL '30 seconds' THEN
+        RAISE EXCEPTION USING
+            MESSAGE = 'ANALYSIS_BETA_REQUEST_NOT_ELIGIBLE', ERRCODE = 'P0001';
     END IF;
 
     v_replay := public.analysis_v2_betatest_plan_replay_internal(
