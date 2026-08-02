@@ -20,7 +20,7 @@ function contextFunction(): string {
 
 describe('betatest frozen provider budget context migration', () => {
     it('takes the canonical allocation apply fence before any trigger or child repair lock', () => {
-        const lock = 'LOCK TABLE public.analysis_beta_pool_allocations IN EXCLUSIVE MODE;';
+        const lock = "EXECUTE 'LOCK TABLE public.analysis_beta_pool_allocations IN EXCLUSIVE MODE';";
         const lockIndex = migration.indexOf(lock);
         const functionIndex = migration.indexOf(
             'CREATE OR REPLACE FUNCTION public.activate_analysis_beta_pool_reservations()'
@@ -32,6 +32,7 @@ describe('betatest frozen provider budget context migration', () => {
             '\nUPDATE public.analysis_beta_pool_reservations AS reservation\n'
         );
 
+        expect(migration).toContain(`DO $$\nBEGIN\n    ${lock}\nEND;\n$$;`);
         expect(lockIndex).toBeGreaterThan(
             migration.indexOf("SET LOCAL statement_timeout = '2min';")
         );

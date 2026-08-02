@@ -10,7 +10,11 @@ SET LOCAL statement_timeout = '2min';
 -- or any child repair can acquire a conflicting table lock. Concurrent
 -- activation/settlement finishes first or this migration fails within the
 -- existing five-second lock timeout; no child-first lock cycle is possible.
-LOCK TABLE public.analysis_beta_pool_allocations IN EXCLUSIVE MODE;
+DO $$
+BEGIN
+    EXECUTE 'LOCK TABLE public.analysis_beta_pool_allocations IN EXCLUSIVE MODE';
+END;
+$$;
 
 -- Terminal settlement deliberately decoupled allocation and reservation
 -- lifecycles. Keep activation atomic by explicitly promoting the eight child
