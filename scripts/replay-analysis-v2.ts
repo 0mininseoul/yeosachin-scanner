@@ -21,6 +21,7 @@ import {
 } from '../lib/services/analysis/replay/replay-bundle';
 import { createReplayReadonlyApifyClient, loadReplaySourceFromExistingRuns } from '../lib/services/analysis/replay/replay-live-source';
 import {
+    CURRENT_PRODUCTION_STANDARD_V210_EXACT_REPLAY_CAPABILITY,
     HISTORICAL_OFFICIAL_E2E_REPLAY_CAPABILITY,
     HISTORICAL_OFFICIAL_E2E_REPLAY_V210_CAPABILITY,
     HISTORICAL_PARTIAL_AVAILABLE_REPLAY_CAPABILITY,
@@ -30,8 +31,10 @@ import {
     type ReplayEvaluationPolicy,
 } from '../lib/services/analysis/replay/replay-source-lineage';
 import {
+    loadCurrentProductionReplayCaptureDescriptor,
     loadHistoricalOfficialE2EReplayCaptureDescriptor,
     loadReplayCaptureDescriptor,
+    type CurrentProductionReplaySourceRpcClient,
     type HistoricalOfficialE2EReplaySourceRpcClient,
     type ReplaySourceRpcClient,
 } from '../lib/services/analysis/replay/replay-supabase-repository';
@@ -39,12 +42,17 @@ import {
     parseDiagnosticPartialCoverageCliCapability,
     type DiagnosticPartialCoverageCliCapability,
 } from '../lib/services/analysis/replay/diagnostic-partial-coverage-capability';
+import {
+    parseFeatureConcurrencyExperimentCliCapability,
+    type FeatureConcurrencyExperimentCliCapability,
+} from '../lib/services/analysis/replay/feature-concurrency-experiment-capability';
 
 type ReplayCliOptions =
     | { command: 'capture'; target: string; requestId?: string; bundlePath: string; keyPath: string; evaluationPolicy?: ReplayEvaluationPolicy; historicalOfficialE2E?: false }
     | { command: 'capture'; historicalOfficialE2E: true; requestId: string; bundlePath: string; keyPath: string; evaluationPolicy: ReplayEvaluationPolicy }
     | { command: 'capture'; historicalPartialAvailable: true; requestId: string; bundlePath: string; keyPath: string; evaluationPolicy: ReplayEvaluationPolicy }
-    | { command: 'run'; mode: 'dry-run' | 'paid-ai'; bundlePath: string; keyPath: string; evaluationPolicy?: ReplayEvaluationPolicy; historicalOfficialE2E?: true; historicalPartialAvailable?: true; diagnosticPartialCoverageCapability?: DiagnosticPartialCoverageCliCapability }
+    | { command: 'capture'; currentProduction: true; requestId: string; bundlePath: string; keyPath: string; evaluationPolicy: ReplayEvaluationPolicy }
+    | { command: 'run'; mode: 'dry-run' | 'paid-ai'; bundlePath: string; keyPath: string; evaluationPolicy?: ReplayEvaluationPolicy; historicalOfficialE2E?: true; historicalPartialAvailable?: true; currentProduction?: true; diagnosticPartialCoverageCapability?: DiagnosticPartialCoverageCliCapability; featureConcurrencyExperimentCapability?: FeatureConcurrencyExperimentCliCapability }
     | { command: 'cleanup'; bundlePath: string; keyPath: string };
 
 function values(args: readonly string[]): Map<string, string> {
@@ -66,8 +74,11 @@ const VALUELESS_FLAGS = new Set([
     '--confirm-paid-ai',
     '--historical-official-e2e',
     '--historical-partial-available',
+    '--current-production',
     '--allow-low-partial-coverage',
     '--confirm-low-partial-coverage',
+    '--feature-concurrency-4',
+    '--confirm-feature-concurrency-4',
 ]);
 
 function evaluationPolicy(value: string | undefined, historicalOfficialE2E = false, historicalPartialAvailable = false): ReplayEvaluationPolicy | undefined {
@@ -132,7 +143,24 @@ export function parseReplayCliArgs(args: readonly string[]): ReplayCliOptions {
     if (parsed.has('--capture')) {
         const historicalOfficialE2E = parsed.has('--historical-official-e2e');
         const historicalPartialAvailable = parsed.has('--historical-partial-available');
-        if (historicalOfficialE2E && historicalPartialAvailable) throw new Error('ANALYSIS_V2_REPLAY_CLI_USAGE');
+        const currentProduction = parsed.has('--current-production');
+        if ([historicalOfficialE2E, historicalPartialAvailable, currentProduction].filter(Boolean).length > 1) throw new Error('ANALYSIS_V2_REPLAY_CLI_USAGE');
+        if (currentProduction) {
+            const allowed = new Set(['--capture', '--current-production', '--request-id', '--bundle', '--key']);
+            const requestId = parsed.get('--request-id')?.trim();
+            if (!requestId || [...parsed.keys()].some(key => !allowed.has(key))) throw new Error('ANALYSIS_V2_REPLAY_CLI_USAGE');
+            return {
+                command: 'capture',
+                currentProduction: true,
+                requestId,
+                bundlePath,
+                keyPath,
+                evaluationPolicy: {
+                    capability: CURRENT_PRODUCTION_STANDARD_V210_EXACT_REPLAY_CAPABILITY,
+                    aiStage: AI_STAGE_POLICY_V210_VERSION,
+                },
+            };
+        }
         if (historicalPartialAvailable) {
             const allowed = new Set(['--capture', '--historical-partial-available', '--request-id', '--evaluation-ai-policy', '--bundle', '--key']);
             const requestId = parsed.get('--request-id')?.trim();
@@ -165,15 +193,26 @@ export function parseReplayCliArgs(args: readonly string[]): ReplayCliOptions {
     if (paid !== confirmed || (paid && parsed.has('--dry-run'))) throw new Error('ANALYSIS_V2_REPLAY_PAID_AI_DOUBLE_CONFIRM_REQUIRED');
     const historicalOfficialE2E = parsed.has('--historical-official-e2e');
     const historicalPartialAvailable = parsed.has('--historical-partial-available');
-    if (historicalOfficialE2E && historicalPartialAvailable) throw new Error('ANALYSIS_V2_REPLAY_CLI_USAGE');
-    const allowed = new Set(['--run', '--dry-run', '--paid-ai', '--confirm-paid-ai', '--historical-official-e2e', '--historical-partial-available', '--allow-low-partial-coverage', '--confirm-low-partial-coverage', '--bundle', '--key', '--evaluation-ai-policy']);
+    const currentProduction = parsed.has('--current-production');
+    if ([historicalOfficialE2E, historicalPartialAvailable, currentProduction].filter(Boolean).length > 1) throw new Error('ANALYSIS_V2_REPLAY_CLI_USAGE');
+    const allowed = new Set(['--run', '--dry-run', '--paid-ai', '--confirm-paid-ai', '--historical-official-e2e', '--historical-partial-available', '--current-production', '--allow-low-partial-coverage', '--confirm-low-partial-coverage', '--feature-concurrency-4', '--confirm-feature-concurrency-4', '--bundle', '--key', '--evaluation-ai-policy']);
     if ([...parsed.keys()].some(key => !allowed.has(key))) throw new Error('ANALYSIS_V2_REPLAY_CLI_USAGE');
-    const evaluation = evaluationPolicy(parsed.get('--evaluation-ai-policy'), historicalOfficialE2E, historicalPartialAvailable);
+    if (currentProduction && (parsed.has('--evaluation-ai-policy') || !paid)) {
+        throw new Error('ANALYSIS_V2_REPLAY_CURRENT_PRODUCTION_PAID_SCOPE_REQUIRED');
+    }
+    const evaluation = currentProduction
+        ? {
+            capability: CURRENT_PRODUCTION_STANDARD_V210_EXACT_REPLAY_CAPABILITY,
+            aiStage: AI_STAGE_POLICY_V210_VERSION,
+        } as const
+        : evaluationPolicy(parsed.get('--evaluation-ai-policy'), historicalOfficialE2E, historicalPartialAvailable);
     if (historicalOfficialE2E && (!paid || !evaluation)) throw new Error('ANALYSIS_V2_REPLAY_HISTORICAL_E2E_CAPABILITY_REQUIRED');
     if (historicalPartialAvailable && !evaluation) throw new Error('ANALYSIS_V2_REPLAY_PARTIAL_CAPABILITY_REQUIRED');
     const diagnosticPartialCoverageCapability =
         parseDiagnosticPartialCoverageCliCapability(args);
-    return { command: 'run', mode: paid ? 'paid-ai' : 'dry-run', bundlePath, keyPath, ...(historicalOfficialE2E ? { historicalOfficialE2E: true } : {}), ...(historicalPartialAvailable ? { historicalPartialAvailable: true } : {}), ...(diagnosticPartialCoverageCapability ? { diagnosticPartialCoverageCapability } : {}), ...(evaluation ? { evaluationPolicy: evaluation } : {}) };
+    const featureConcurrencyExperimentCapability =
+        parseFeatureConcurrencyExperimentCliCapability(args);
+    return { command: 'run', mode: paid ? 'paid-ai' : 'dry-run', bundlePath, keyPath, ...(historicalOfficialE2E ? { historicalOfficialE2E: true } : {}), ...(historicalPartialAvailable ? { historicalPartialAvailable: true } : {}), ...(currentProduction ? { currentProduction: true } : {}), ...(diagnosticPartialCoverageCapability ? { diagnosticPartialCoverageCapability } : {}), ...(featureConcurrencyExperimentCapability ? { featureConcurrencyExperimentCapability } : {}), ...(evaluation ? { evaluationPolicy: evaluation } : {}) };
 }
 
 function requiredEnvironment(name: string): string {
@@ -187,12 +226,18 @@ const SERVER_ONLY_RUNTIME_MESSAGE =
 
 export async function createPaidReplayRunner(
     replayAiPolicy: ReturnType<typeof resolveReplayAiStagePolicyVersion>,
+    featureConcurrencyExperimentCapability?: FeatureConcurrencyExperimentCliCapability,
 ) {
     try {
         const adapter = await import(
             '../lib/services/analysis/replay/replay-staged-ai-adapter'
         );
-        return adapter.createReplayStagedAiAdapter(replayAiPolicy);
+        return adapter.createReplayStagedAiAdapter(
+            replayAiPolicy,
+            featureConcurrencyExperimentCapability
+                ? { featureAnalysisConcurrency: 4, featureConcurrencyExperimentCapability }
+                : undefined,
+        );
     } catch (error) {
         if (error instanceof Error && error.message === SERVER_ONLY_RUNTIME_MESSAGE) {
             throw new Error('ANALYSIS_V2_REPLAY_SERVER_RUNTIME_REQUIRED');
@@ -254,7 +299,13 @@ async function capture(options: Extract<ReplayCliOptions, { command: 'capture' }
         const supabase = createClient(requiredEnvironment('NEXT_PUBLIC_SUPABASE_URL'), serviceKey, { auth: { autoRefreshToken: false, persistSession: false } });
         const historicalOfficial = 'historicalOfficialE2E' in options && options.historicalOfficialE2E === true;
         const historicalPartial = 'historicalPartialAvailable' in options && options.historicalPartialAvailable === true;
-        const descriptor = historicalOfficial || historicalPartial
+        const currentProduction = 'currentProduction' in options && options.currentProduction === true;
+        const descriptor = currentProduction
+            ? await loadCurrentProductionReplayCaptureDescriptor(
+                supabase as unknown as CurrentProductionReplaySourceRpcClient,
+                options.requestId!,
+            )
+            : historicalOfficial || historicalPartial
             ? await loadHistoricalOfficialE2EReplayCaptureDescriptor(
                 supabase as unknown as HistoricalOfficialE2EReplaySourceRpcClient,
                 options.requestId!,
@@ -315,6 +366,11 @@ async function capture(options: Extract<ReplayCliOptions, { command: 'capture' }
             ...(historicalPartial
                 ? { benchmark_scope: 'ai-only-historical-partial-available' }
                 : { benchmark_scope: 'ai-only-exact-replay' }),
+            source_kind: currentProduction
+                ? 'current_paid_production'
+                : historicalOfficial || historicalPartial
+                    ? 'historical_official'
+                    : 'legacy_selector',
             source_plan: descriptor.sourceLineage.selectedPlanId,
             source_pipeline: descriptor.sourceLineage.policyVersions.pipeline,
             source_ai_policy: descriptor.sourceLineage.policyVersions.aiStage,
@@ -377,7 +433,10 @@ export async function runReplayCli(
             options.evaluationPolicy,
         );
         const runner = options.mode === 'paid-ai'
-            ? await createPaidReplayRunner(replayAiPolicy)
+            ? await createPaidReplayRunner(
+                replayAiPolicy,
+                options.featureConcurrencyExperimentCapability,
+            )
             : {};
         const { runAnalysisV2AiReplay } = await import('../lib/services/analysis/replay/replay-runner');
         await runAnalysisV2AiReplay({
@@ -389,6 +448,12 @@ export async function runReplayCli(
                 ? {
                     diagnosticPartialCoverageCapability:
                         options.diagnosticPartialCoverageCapability,
+                }
+                : {}),
+            ...(options.featureConcurrencyExperimentCapability
+                ? {
+                    featureConcurrencyExperimentCapability:
+                        options.featureConcurrencyExperimentCapability,
                 }
                 : {}),
             ...(options.evaluationPolicy

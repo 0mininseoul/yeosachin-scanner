@@ -4,6 +4,7 @@ import { aiStagePolicySupports } from '@/lib/services/ai/stage-policy';
 import type { PrivateNameAccountInput } from '@/lib/services/ai/private-name-analysis';
 import type { AnalysisV2ReplayBundle } from './replay-bundle';
 import {
+    CURRENT_PRODUCTION_STANDARD_V210_EXACT_REPLAY_CAPABILITY,
     HISTORICAL_PARTIAL_AVAILABLE_REPLAY_CAPABILITY,
     HISTORICAL_PARTIAL_AVAILABLE_REPLAY_V210_CAPABILITY,
     resolveReplayAiStagePolicyVersion,
@@ -17,6 +18,11 @@ import {
     isDiagnosticPartialCoverageCliCapability,
     type DiagnosticPartialCoverageCliCapability,
 } from './diagnostic-partial-coverage-capability';
+import {
+    isFeatureConcurrencyExperimentCliCapability,
+    type FeatureConcurrencyExperimentCliCapability,
+} from './feature-concurrency-experiment-capability';
+import { ANALYSIS_V2_SCHEDULER_V1_POLICY } from '../v2-ai-scheduler-runtime';
 
 export type ReplayMode = 'dry-run' | 'paid-ai';
 export type ReplayOutcome = 'ok' | 'rate_limited' | 'retry_exhausted' | 'rejected' | 'failed' | 'capacity_skipped';
@@ -69,11 +75,20 @@ export interface ReplayAiRunner {
 async function assertReplayAiRunnerPolicy(
     runner: ReplayAiRunner | undefined,
     expected: ReturnType<typeof resolveReplayAiStagePolicyVersion>,
+    expectedFeatureConcurrency: 3 | 4,
 ): Promise<ReplayAiRunner> {
-    const { lookupReplayStagedAiAdapterPolicy } = await import(
+    const {
+        lookupReplayStagedAiAdapterFeatureConcurrency,
+        lookupReplayStagedAiAdapterPolicy,
+    } = await import(
         './replay-staged-ai-adapter'
     );
-    if (!runner || lookupReplayStagedAiAdapterPolicy(runner) !== expected) {
+    if (
+        !runner
+        || lookupReplayStagedAiAdapterPolicy(runner) !== expected
+        || lookupReplayStagedAiAdapterFeatureConcurrency(runner)
+            !== expectedFeatureConcurrency
+    ) {
         throw new Error('ANALYSIS_V2_REPLAY_AI_RUNNER_POLICY_MISMATCH');
     }
     return runner;
@@ -97,6 +112,12 @@ export interface AnalysisV2AiReplayReport {
     evaluationAiPolicy: string | null;
     replayAiPolicy: string;
     fullE2eEvidence: false;
+    sourceKind: 'current_paid_production' | 'historical_or_legacy';
+    featureConcurrency: {
+        experiment: 'baseline' | 'feature-concurrency-4';
+        featureAnalysis: 3 | 4;
+        sharedCap: 8;
+    };
     notExact?: true;
     noMediaSubstitution?: true;
     diagnosticCoverageOverride?: {
@@ -414,6 +435,10 @@ function safeLine(report: AnalysisV2AiReplayReport): string {
         evaluation_ai_policy: report.evaluationAiPolicy,
         replay_ai_policy: report.replayAiPolicy,
         full_e2e_evidence: report.fullE2eEvidence,
+        source_kind: report.sourceKind,
+        feature_concurrency_experiment: report.featureConcurrency.experiment,
+        feature_analysis_concurrency: report.featureConcurrency.featureAnalysis,
+        shared_concurrency_cap: report.featureConcurrency.sharedCap,
         ...(report.notExact ? { not_exact: true, no_media_substitution: true } : {}),
         ...(report.diagnosticCoverageOverride ? {
             diagnostic_partial_coverage_override: {
@@ -451,6 +476,8 @@ export async function runAnalysisV2AiReplay(input: {
     paidAiOptIn?: boolean;
     diagnosticPartialCoverageCapability?:
         DiagnosticPartialCoverageCliCapability;
+    featureConcurrencyExperimentCapability?:
+        FeatureConcurrencyExperimentCliCapability;
     evaluationPolicy?: ReplayEvaluationPolicy;
     write?: (line: string) => void;
     /** Bounded post-abort telemetry bookkeeping only; it never grants resolver wait time. */
@@ -523,6 +550,25 @@ export async function runAnalysisV2AiReplay(input: {
         input.bundle.capture.sourceLineage,
         input.evaluationPolicy,
     );
+    const currentProductionExact = authenticatedEvaluationPolicy?.capability
+        === CURRENT_PRODUCTION_STANDARD_V210_EXACT_REPLAY_CAPABILITY;
+    const featureConcurrencyExperiment =
+        input.featureConcurrencyExperimentCapability !== undefined;
+    if (
+        featureConcurrencyExperiment
+        && (
+            !isFeatureConcurrencyExperimentCliCapability(
+                input.featureConcurrencyExperimentCapability,
+            )
+            || input.mode !== 'paid-ai'
+            || input.bundle.schemaVersion !== 1
+            || !currentProductionExact
+        )
+    ) {
+        throw new Error('ANALYSIS_V2_REPLAY_FEATURE_CONCURRENCY_SCOPE_REQUIRED');
+    }
+    const featureAnalysisConcurrency: 3 | 4 =
+        featureConcurrencyExperiment ? 4 : 3;
     const supportsGenderTriageMicrobatch = aiStagePolicySupports(
         replayAiPolicy,
         'genderTriageMicrobatchV29',
@@ -531,7 +577,11 @@ export async function runAnalysisV2AiReplay(input: {
         throw new Error('ANALYSIS_V2_REPLAY_PAID_AI_OPT_IN_REQUIRED');
     }
     const paidRunner = input.mode === 'paid-ai'
-        ? await assertReplayAiRunnerPolicy(input.runner, replayAiPolicy)
+        ? await assertReplayAiRunnerPolicy(
+            input.runner,
+            replayAiPolicy,
+            featureAnalysisConcurrency,
+        )
         : undefined;
     const cutoffBookkeepingMs = input.resolverCutoffMs ?? 25;
     if (
@@ -869,6 +919,16 @@ export async function runAnalysisV2AiReplay(input: {
         evaluationAiPolicy: input.evaluationPolicy?.aiStage ?? null,
         replayAiPolicy,
         fullE2eEvidence: false as const,
+        sourceKind: currentProductionExact
+            ? 'current_paid_production' as const
+            : 'historical_or_legacy' as const,
+        featureConcurrency: {
+            experiment: featureConcurrencyExperiment
+                ? 'feature-concurrency-4' as const
+                : 'baseline' as const,
+            featureAnalysis: featureAnalysisConcurrency,
+            sharedCap: ANALYSIS_V2_SCHEDULER_V1_POLICY.sharedConcurrency,
+        },
         ...(input.bundle.schemaVersion === 2 ? { notExact: true as const, noMediaSubstitution: true as const } : {}),
         ...(diagnosticPartialCoverageAuthorized && paidPartialCoverage ? {
             diagnosticCoverageOverride: {

@@ -4,7 +4,10 @@ import { APIFY_COMMENTS_ACTOR_ID, APIFY_LIKERS_ACTOR_ID } from '@/lib/services/i
 import { REPLACEMENT_PROFILE_ACTOR } from '@/lib/services/instagram/providers/apify-profile-details';
 import { loadReplaySourceFromExistingRuns } from './replay-live-source';
 import type { ReplayReadonlyApifyClient } from './replay-readonly-apify';
-import type { ReplayCaptureDescriptor } from './replay-supabase-repository';
+import type {
+    CurrentProductionReplayCaptureDescriptor,
+    ReplayCaptureDescriptor,
+} from './replay-supabase-repository';
 
 function posts(prefix: string) {
     return Array.from({ length: 8 }, (_, index) => ({
@@ -201,6 +204,32 @@ describe('live replay source mapping', () => {
 
         await expect(loadReplaySourceFromExistingRuns({
             descriptor,
+            clientForSlot: () => client,
+        })).resolves.toMatchObject({
+            profiles: [expect.objectContaining({ username: 'private_candidate' })],
+        });
+
+        const currentDescriptor: CurrentProductionReplayCaptureDescriptor = {
+            requestId: descriptor.requestId,
+            preflightId: descriptor.preflightId,
+            requestFingerprint: descriptor.requestFingerprint,
+            targetUsername: descriptor.targetUsername,
+            targetResolution: descriptor.targetResolution,
+            preflightRuns: descriptor.preflightRuns,
+            providerRuns: descriptor.providerRuns,
+            sourceKind: 'current_paid_production',
+            sourceLineage: {
+                selectedPlanId: 'standard',
+                policyVersions: {
+                    pipeline: 'v2',
+                    risk: 'risk-policy-v2.5',
+                    aiStage: 'ai-stage-policy-v2.10',
+                    scheduler: 'ai-scheduler-v1',
+                },
+            },
+        };
+        await expect(loadReplaySourceFromExistingRuns({
+            descriptor: currentDescriptor,
             clientForSlot: () => client,
         })).resolves.toMatchObject({
             profiles: [expect.objectContaining({ username: 'private_candidate' })],

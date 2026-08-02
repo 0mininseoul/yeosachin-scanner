@@ -21,6 +21,13 @@ export interface HistoricalOfficialE2EReplaySourceRpcClient {
     }): PromiseLike<RpcResult>;
 }
 
+/** UUID-only, service-role RPC for a scrubbed, paid current-production source. */
+export interface CurrentProductionReplaySourceRpcClient {
+    rpc(name: 'read_analysis_v2_current_production_replay_source', params: {
+        p_request_id: string;
+    }): PromiseLike<RpcResult>;
+}
+
 const run = z.object({
     actorId: z.string().min(3).max(200),
     credentialSlot: z.string().regex(/^(?:primary|secondary|tertiary|quaternary|quinary|senary)$/),
@@ -59,6 +66,21 @@ const historicalOfficialE2ESource = source.extend({
     }).strict(),
 }).strict();
 
+const currentProductionSource = z.object({
+    requestId: z.string().uuid(),
+    preflightId: z.string().uuid(),
+    targetUsername: z.string().regex(/^replay_[a-f0-9]{23}$/),
+    selectedPlanId: z.literal('standard'),
+    policyVersions: z.object({
+        pipeline: z.literal('v2'),
+        risk: z.literal('risk-policy-v2.5'),
+        aiStage: z.literal('ai-stage-policy-v2.10'),
+        scheduler: z.literal('ai-scheduler-v1'),
+    }).strict(),
+    preflightRuns: z.array(run).min(1).max(4),
+    providerRuns: z.array(run).min(1).max(128),
+}).strict();
+
 export type ReplayCaptureDescriptor = Omit<
     z.infer<typeof source>,
     'selectedPlanId' | 'policyVersions'
@@ -70,6 +92,15 @@ export type ReplayCaptureDescriptor = Omit<
 /** Historical descriptors deliberately carry no stored target identifier. */
 export type HistoricalOfficialE2EReplayCaptureDescriptor = ReplayCaptureDescriptor & {
     targetResolution: 'provider_ledger';
+};
+
+/** Current production descriptors contain no retained target profile or identifier. */
+export type CurrentProductionReplayCaptureDescriptor = Omit<
+    ReplayCaptureDescriptor,
+    'target'
+> & {
+    targetResolution: 'provider_ledger';
+    sourceKind: 'current_paid_production';
 };
 
 function normalizedTarget(value: string): string {
@@ -160,5 +191,46 @@ export async function loadHistoricalOfficialE2EReplayCaptureDescriptor(
             .update(`analysis-v2-replay-request-v1\n${parsed.requestId}`)
             .digest('hex'),
         targetResolution: 'provider_ledger',
+    };
+}
+
+/**
+ * Loads an exact paid production source without accepting or returning its stored target.
+ * The opaque target handle is resolved only from the authenticated provider ledger datasets.
+ */
+export async function loadCurrentProductionReplayCaptureDescriptor(
+    client: CurrentProductionReplaySourceRpcClient,
+    requestId: string,
+): Promise<CurrentProductionReplayCaptureDescriptor> {
+    const exactRequestId = z.string().uuid().parse(requestId);
+    const result = await client.rpc(
+        'read_analysis_v2_current_production_replay_source',
+        { p_request_id: exactRequestId },
+    );
+    if (result.error) throw new Error('ANALYSIS_V2_REPLAY_EXACT_SOURCE_UNAVAILABLE');
+    const parsedResult = currentProductionSource.safeParse(result.data);
+    if (!parsedResult.success || parsedResult.data.requestId !== exactRequestId) {
+        throw new Error('ANALYSIS_V2_REPLAY_READ_ONLY_SOURCE_INVALID');
+    }
+    const parsed = parsedResult.data;
+    const lineageResult = replaySourceLineageSchema.safeParse({
+        selectedPlanId: parsed.selectedPlanId,
+        policyVersions: parsed.policyVersions,
+    });
+    if (!lineageResult.success) {
+        throw new Error('ANALYSIS_V2_REPLAY_READ_ONLY_SOURCE_INVALID');
+    }
+    return {
+        requestId: parsed.requestId,
+        preflightId: parsed.preflightId,
+        targetUsername: parsed.targetUsername,
+        preflightRuns: parsed.preflightRuns,
+        providerRuns: parsed.providerRuns,
+        sourceLineage: lineageResult.data,
+        requestFingerprint: createHash('sha256')
+            .update(`analysis-v2-replay-request-v1\n${parsed.requestId}`)
+            .digest('hex'),
+        targetResolution: 'provider_ledger',
+        sourceKind: 'current_paid_production',
     };
 }

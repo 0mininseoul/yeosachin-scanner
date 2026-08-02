@@ -234,6 +234,73 @@ describe('analysis V2 replay CLI', () => {
             .toThrow('ANALYSIS_V2_REPLAY_EVALUATION_POLICY_UNSUPPORTED');
     });
 
+    it('selects current production by UUID only and never accepts a target username', () => {
+        const capture = parseReplayCliArgs([
+            '--capture', '--current-production',
+            '--request-id=10000000-0000-4000-8000-000000000001',
+            '--bundle=a.enc', '--key=a.key',
+        ]);
+        expect(capture).toMatchObject({
+            command: 'capture',
+            currentProduction: true,
+            requestId: '10000000-0000-4000-8000-000000000001',
+            evaluationPolicy: {
+                capability: 'current-production-standard-v210-risk-v25-scheduler-v1-exact-replay',
+                aiStage: 'ai-stage-policy-v2.10',
+            },
+        });
+        expect(capture).not.toHaveProperty('target');
+        expect(() => parseReplayCliArgs([
+            '--capture', '--current-production', '--target=ambient_target',
+            '--request-id=10000000-0000-4000-8000-000000000001',
+            '--bundle=a.enc', '--key=a.key',
+        ])).toThrow('ANALYSIS_V2_REPLAY_CLI_USAGE');
+        expect(() => parseReplayCliArgs([
+            '--capture', '--current-production',
+            '--request-id=10000000-0000-4000-8000-000000000001',
+            '--evaluation-ai-policy=ai-stage-policy-v2.10',
+            '--bundle=a.enc', '--key=a.key',
+        ])).toThrow('ANALYSIS_V2_REPLAY_CLI_USAGE');
+    });
+
+    it('double-confirms concurrency 4 only for paid current-production runs', () => {
+        const base = [
+            '--run', '--paid-ai', '--confirm-paid-ai', '--current-production',
+            '--bundle=a.enc', '--key=a.key',
+        ];
+        expect(parseReplayCliArgs(base)).toMatchObject({
+            command: 'run',
+            mode: 'paid-ai',
+            currentProduction: true,
+        });
+        expect(parseReplayCliArgs([
+            ...base,
+            '--feature-concurrency-4',
+            '--confirm-feature-concurrency-4',
+        ])).toMatchObject({
+            command: 'run',
+            mode: 'paid-ai',
+            currentProduction: true,
+            featureConcurrencyExperimentCapability: expect.any(Object),
+        });
+        expect(() => parseReplayCliArgs([
+            ...base,
+            '--feature-concurrency-4',
+        ])).toThrow(
+            'ANALYSIS_V2_REPLAY_FEATURE_CONCURRENCY_DOUBLE_CONFIRM_REQUIRED',
+        );
+        expect(() => parseReplayCliArgs([
+            ...base.filter(arg => arg !== '--current-production'),
+            '--feature-concurrency-4',
+            '--confirm-feature-concurrency-4',
+        ])).toThrow('ANALYSIS_V2_REPLAY_FEATURE_CONCURRENCY_SCOPE_REQUIRED');
+        expect(() => parseReplayCliArgs([
+            '--run', '--dry-run', '--current-production',
+            '--feature-concurrency-4', '--confirm-feature-concurrency-4',
+            '--bundle=a.enc', '--key=a.key',
+        ])).toThrow('ANALYSIS_V2_REPLAY_CURRENT_PRODUCTION_PAID_SCOPE_REQUIRED');
+    });
+
     it('seals historical partial capture and replay behind its explicit scope and v2.9 capability', () => {
         expect(parseReplayCliArgs([
             '--capture', '--historical-partial-available',
