@@ -33,12 +33,8 @@ function body(name: string): string {
 
 describe('betatest prepare retry exhaustion terminal migration', () => {
     it('replaces the shape check briefly and validates it separately', () => {
-        expect(schemaMigration).toContain(
-            "PERFORM pg_catalog.set_config('lock_timeout', '5s', true);"
-        );
-        expect(schemaMigration).toContain(
-            "PERFORM pg_catalog.set_config('statement_timeout', '2min', true);"
-        );
+        expect(schemaMigration).toContain("SET LOCAL lock_timeout = '5s'");
+        expect(schemaMigration).toContain("SET LOCAL statement_timeout = '2min'");
         expect(schemaMigration).toMatch(
             /DROP CONSTRAINT analysis_preflights_beta_prepare_shape_check/
         );

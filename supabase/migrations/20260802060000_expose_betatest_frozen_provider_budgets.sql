@@ -2,17 +2,19 @@
 -- the service-owned collection context. The complete predecessor claim fence
 -- is recreated here so the additional allocation checks cannot bypass request,
 -- preflight, job, lease, or provider-policy identity validation.
+
+SET LOCAL lock_timeout = '5s';
+SET LOCAL statement_timeout = '2min';
+
 -- Canonical apply fence: take the allocation relation before CREATE TRIGGER
 -- or any child repair can acquire a conflicting table lock. Concurrent
 -- activation/settlement finishes first or this migration fails within the
 -- existing five-second lock timeout; no child-first lock cycle is possible.
-DO $migration_transaction_fence$
+DO $$
 BEGIN
-    PERFORM pg_catalog.set_config('lock_timeout', '5s', true);
-    PERFORM pg_catalog.set_config('statement_timeout', '2min', true);
-    LOCK TABLE public.analysis_beta_pool_allocations IN EXCLUSIVE MODE;
+    EXECUTE 'LOCK TABLE public.analysis_beta_pool_allocations IN EXCLUSIVE MODE';
 END;
-$migration_transaction_fence$;
+$$;
 
 -- Terminal settlement deliberately decoupled allocation and reservation
 -- lifecycles. Keep activation atomic by explicitly promoting the eight child

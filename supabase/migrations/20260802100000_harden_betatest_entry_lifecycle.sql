@@ -2,12 +2,8 @@
 -- fencing, and the operational database gate. Expensive backfill, runtime
 -- functions, and validation are intentionally committed in later migrations
 -- so analysis_preflights is not held ACCESS EXCLUSIVE across function DDL.
-DO $migration_transaction_fence$
-BEGIN
-    PERFORM pg_catalog.set_config('lock_timeout', '5s', true);
-    PERFORM pg_catalog.set_config('statement_timeout', '2min', true);
-END;
-$migration_transaction_fence$;
+SET LOCAL lock_timeout = '5s';
+SET LOCAL statement_timeout = '2min';
 
 CREATE TABLE public.analysis_beta_runtime_gate (
     singleton BOOLEAN PRIMARY KEY DEFAULT TRUE CHECK (singleton),

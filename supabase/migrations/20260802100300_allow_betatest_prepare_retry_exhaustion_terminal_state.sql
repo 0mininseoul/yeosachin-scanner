@@ -1,12 +1,8 @@
 -- Schema-only phase. Keep the ACCESS EXCLUSIVE transaction limited to the
 -- replacement NOT VALID check; row backfill, function DDL, and validation are
 -- committed by later migrations.
-DO $migration_transaction_fence$
-BEGIN
-    PERFORM pg_catalog.set_config('lock_timeout', '5s', true);
-    PERFORM pg_catalog.set_config('statement_timeout', '2min', true);
-END;
-$migration_transaction_fence$;
+SET LOCAL lock_timeout = '5s';
+SET LOCAL statement_timeout = '2min';
 
 ALTER TABLE public.analysis_preflights
     DROP CONSTRAINT analysis_preflights_beta_prepare_shape_check,

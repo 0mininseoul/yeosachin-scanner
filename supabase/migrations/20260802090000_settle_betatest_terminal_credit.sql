@@ -1,12 +1,8 @@
 -- Terminal beta-credit settlement is deliberately a post-commit worker action.
 -- Do not call it from request/preflight terminal triggers: admission and terminal
 -- transactions have different ownership and combining them would invert locks.
-DO $migration_transaction_fence$
-BEGIN
-    PERFORM pg_catalog.set_config('lock_timeout', '5s', true);
-    PERFORM pg_catalog.set_config('statement_timeout', '2min', true);
-END;
-$migration_transaction_fence$;
+SET LOCAL lock_timeout = '5s';
+SET LOCAL statement_timeout = '2min';
 
 CREATE OR REPLACE FUNCTION public.settle_analysis_beta_apify_credit_allocation(
     p_allocation_id UUID, p_reason TEXT
