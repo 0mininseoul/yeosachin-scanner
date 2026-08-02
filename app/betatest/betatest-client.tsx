@@ -2,7 +2,6 @@
 
 import { useState } from 'react';
 import { useRouter } from 'next/navigation';
-import type { PlanId } from '@/lib/domain/analysis/plan-catalog';
 import { useAnalysisV2Preflight } from '@/hooks/useAnalysisV2Preflight';
 import {
     BrandMark,
@@ -18,7 +17,7 @@ export function BetaTestClient() {
     const router = useRouter();
     const [instagramId, setInstagramId] = useState('');
     const [excludedInstagramId, setExcludedInstagramId] = useState('');
-    const [selectedPlan, setSelectedPlan] = useState<PlanId | null>(null);
+    const [automaticAdmission, setAutomaticAdmission] = useState(false);
     const {
         preflight,
         creating,
@@ -38,29 +37,44 @@ export function BetaTestClient() {
     const queueUnavailable = preflight?.status === 'blocked'
         && preflight.code === 'QUEUE_UNAVAILABLE';
     const retryableBetaPreparation = capacityUnavailable || queueUnavailable;
-    const effectivePlan = preflight?.status === 'ready'
-        ? selectedPlan ?? preflight.requiredPlan
+    const requiredPlan = preflight?.status === 'ready'
+        ? preflight.requiredPlan
         : null;
 
     const start = async () => {
         const accepted = await startPreflight(instagramId);
-        if (accepted) setSelectedPlan(null);
+        if (accepted) setAutomaticAdmission(false);
     };
-    const admit = async () => {
-        if (!effectivePlan) return;
-        const requestId = await admitBetaAnalysis(effectivePlan);
-        if (requestId) router.push(`/progress/${encodeURIComponent(requestId)}`);
+    const admitRequiredPlan = async () => {
+        if (!requiredPlan) return false;
+        setAutomaticAdmission(true);
+        const requestId = await admitBetaAnalysis(requiredPlan);
+        if (requestId) {
+            router.push(`/progress/${encodeURIComponent(requestId)}`);
+            return true;
+        }
+        setAutomaticAdmission(false);
+        return false;
+    };
+    const decideExclusionAndAdmit = async (rawExcludedInstagramId?: string) => {
+        setAutomaticAdmission(true);
+        const saved = await submitExclusion(rawExcludedInstagramId);
+        if (!saved) {
+            setAutomaticAdmission(false);
+            return;
+        }
+        await admitRequiredPlan();
     };
     const startOver = () => {
         reset();
         setInstagramId('');
         setExcludedInstagramId('');
-        setSelectedPlan(null);
+        setAutomaticAdmission(false);
     };
     const retrySameTarget = async () => {
         reset();
         setExcludedInstagramId('');
-        setSelectedPlan(null);
+        setAutomaticAdmission(false);
         await startPreflight(instagramId);
     };
 
@@ -169,43 +183,38 @@ export function BetaTestClient() {
                                 />
                                 {error && <p className="mt-4 border-l-2 border-blood pl-3 text-[13px] text-blood-2" role="alert">{error}</p>}
                                 <div className="mt-5 space-y-2.5">
-                                    <PrimaryButton onClick={() => void submitExclusion(excludedInstagramId)} disabled={!excludedInstagramId.trim() || exclusionState === 'saving'}>
-                                        {exclusionState === 'saving' ? '제외 계정 저장 중…' : '내 계정 제외하기'}
+                                    <PrimaryButton onClick={() => void decideExclusionAndAdmit(excludedInstagramId)} disabled={!excludedInstagramId.trim() || exclusionState === 'saving' || automaticAdmission}>
+                                        {exclusionState === 'saving' || automaticAdmission ? '무료 판독 준비 중…' : '내 계정 제외하고 무료 판독 시작'}
                                     </PrimaryButton>
-                                    <button type="button" onClick={() => void submitExclusion()} disabled={exclusionState === 'saving'} className="w-full py-2 text-[13px] text-fg-dim underline underline-offset-4 hover:text-fg">
-                                        제외 없이 계속하기
+                                    <button type="button" onClick={() => void decideExclusionAndAdmit()} disabled={exclusionState === 'saving' || automaticAdmission} className="w-full py-2 text-[13px] text-fg-dim underline underline-offset-4 hover:text-fg disabled:cursor-not-allowed disabled:opacity-50">
+                                        제외 없이 무료 판독 시작
                                     </button>
                                 </div>
                             </Panel>
                         )}
 
                         {exclusionDecided && preflight.status === 'ready' && (
-                            <>
-                                <div className="mt-7 space-y-2.5">
-                                    {preflight.plans.map(plan => {
-                                        const selectable = plan.selectionState !== 'unavailable';
-                                        const selected = effectivePlan === plan.planId;
-                                        return (
-                                            <button
-                                                key={plan.planId}
-                                                type="button"
-                                                disabled={!selectable}
-                                                onClick={() => setSelectedPlan(plan.planId)}
-                                                className={`w-full border p-4 text-left ${selected ? 'border-blood bg-blood/5' : 'border-line'} ${selectable ? 'hover:border-fg-dim' : 'cursor-not-allowed opacity-45'}`}
-                                            >
-                                                <span className="text-[15px] font-bold text-fg">{plan.planId === 'basic' ? 'Basic' : plan.planId === 'standard' ? 'Standard' : 'Plus'}</span>
-                                                <span className="mt-1 block text-[12px] text-fg-dim">맞팔 관계를 최대 {plan.detailedMutualLimit.toLocaleString('ko-KR')}명까지 확인</span>
-                                            </button>
-                                        );
-                                    })}
+                            <Panel className="mt-7 p-5 text-center">
+                                <div role="status" aria-live="polite" aria-atomic="true">
+                                    <Eyebrow className="justify-center">베타 테스트 · 무료 판독</Eyebrow>
+                                    <h2 className="mt-3 text-[20px] font-extrabold text-fg">
+                                        {automaticAdmission || starting ? '무료 판독을 준비하고 있어요' : '무료 판독을 시작할 수 있어요'}
+                                    </h2>
+                                    <p className="mt-2 text-[13px] leading-relaxed text-fg-dim">
+                                        {automaticAdmission || starting
+                                            ? '무료 판독 자리를 배정한 뒤 바로 분석을 시작합니다.'
+                                            : '무료 판독을 바로 시작합니다.'}
+                                    </p>
                                 </div>
-                                {error && <p className="mt-4 border-l-2 border-blood pl-3 text-[13px] text-blood-2" role="alert">{error}</p>}
-                                <div className="mt-5">
-                                    <PrimaryButton onClick={() => void admit()} disabled={!effectivePlan || starting}>
-                                        {starting ? '무료 판독 배정 중…' : error?.includes('무료 판독 가능 인원이') ? '무료 판독 다시 시도' : '무료 판독 시작하기'}
-                                    </PrimaryButton>
-                                </div>
-                            </>
+                                {error && <p className="mt-4 border-l-2 border-blood pl-3 text-left text-[13px] text-blood-2" role="alert">{error}</p>}
+                                {!automaticAdmission && !starting && (
+                                    <div className="mt-5">
+                                        <PrimaryButton onClick={() => void admitRequiredPlan()} disabled={!requiredPlan}>
+                                            {error?.includes('무료 판독 가능 인원이') ? '무료 판독 다시 시도' : '무료 판독 시작하기'}
+                                        </PrimaryButton>
+                                    </div>
+                                )}
+                            </Panel>
                         )}
                     </>
                 )}
