@@ -252,8 +252,24 @@ BEGIN
             )
        OR v_reservation_count <> 8
        OR (
-            v_allocation.lifecycle_state = 'active'
-            AND v_active_reservation_count < 1
+            v_request.status IN ('pending', 'processing')
+            AND (
+                v_allocation.lifecycle_state <> 'active'
+                OR v_active_reservation_count <> 8
+            )
+       )
+       OR (
+            v_request.status IN ('completed', 'failed')
+            AND NOT (
+                (
+                    v_allocation.lifecycle_state = 'active'
+                    AND v_active_reservation_count BETWEEN 1 AND 8
+                )
+                OR (
+                    v_allocation.lifecycle_state = 'settled'
+                    AND v_active_reservation_count = 0
+                )
+            )
        )
        OR v_reservation_drift THEN
         RAISE EXCEPTION USING

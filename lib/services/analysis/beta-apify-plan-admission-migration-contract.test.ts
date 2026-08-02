@@ -70,7 +70,11 @@ describe('beta plan-admission migration contract', () => {
         expect(replay).toContain("v_job.kind IS DISTINCT FROM 'bootstrap'");
         expect(replay).toContain("v_policy.mode IS DISTINCT FROM 'betatest_free_pool'");
         expect(replay).toContain('v_reservation_count <> 8');
-        expect(replay).toContain('v_active_reservation_count < 1');
+        expect(replay).toContain("v_request.status IN ('pending', 'processing')");
+        expect(replay).toContain('v_active_reservation_count <> 8');
+        expect(replay).toContain("v_request.status IN ('completed', 'failed')");
+        expect(replay).toContain('v_active_reservation_count BETWEEN 1 AND 8');
+        expect(replay).toContain('v_active_reservation_count = 0');
         expect(replay).toContain(
             "reservation.lifecycle_state NOT IN ('active', 'settled')"
         );

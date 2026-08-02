@@ -1322,6 +1322,47 @@ describe('betatest provider policy/guard migration PGlite', () => {
         );
     });
 
+    it('rejects mixed active and settled reservation families for a nonterminal request', async () => {
+        await seedReadyBetaAdmission('basic');
+        const admitted = await admitBetaPlan();
+        await db.query(
+            `UPDATE public.analysis_beta_pool_reservations
+             SET lifecycle_state='settled', actual_usd=0,
+                 released_usd=reserved_usd,
+                 settled_at=pg_catalog.clock_timestamp(),
+                 settlement_reason='request_terminal'
+             WHERE allocation_id=$1 AND operation_family='target-comments'`,
+            [admitted.allocationId]
+        );
+        await expect(replayBetaPlan()).rejects.toThrow(
+            /ANALYSIS_BETA_ALLOCATION_CONFLICT/
+        );
+    });
+
+    it('rejects a settled allocation attached to a nonterminal request', async () => {
+        await seedReadyBetaAdmission('basic');
+        const admitted = await admitBetaPlan();
+        await db.query(
+            `UPDATE public.analysis_beta_pool_reservations
+             SET lifecycle_state='settled', actual_usd=0,
+                 released_usd=reserved_usd,
+                 settled_at=pg_catalog.clock_timestamp(),
+                 settlement_reason='request_terminal'
+             WHERE allocation_id=$1`,
+            [admitted.allocationId]
+        );
+        await db.query(
+            `UPDATE public.analysis_beta_pool_allocations
+             SET lifecycle_state='settled', settled_at=pg_catalog.clock_timestamp(),
+                 settlement_reason='request_terminal', updated_at=pg_catalog.clock_timestamp()
+             WHERE id=$1`,
+            [admitted.allocationId]
+        );
+        await expect(replayBetaPlan()).rejects.toThrow(
+            /ANALYSIS_BETA_ALLOCATION_CONFLICT/
+        );
+    });
+
     it('rejects corrupt provider policy, bootstrap job, and reservation integrity on replay', async () => {
         await seedReadyBetaAdmission('basic');
         const admitted = await admitBetaPlan();
