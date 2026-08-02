@@ -88,11 +88,40 @@ export function betaAdmissionFailureMessage(payload: unknown): string | null {
     return null;
 }
 
-export function isBetaAdmissionPending(payload: unknown): boolean {
-    return Boolean(payload
+export function isBetaAdmissionPending(
+    payload: unknown,
+): payload is Record<PropertyKey, unknown> {
+    return Boolean(
+        payload
         && typeof payload === 'object'
         && !Array.isArray(payload)
-        && Reflect.get(payload, 'status') === 'admission_pending');
+        && Reflect.get(payload, 'status') === 'admission_pending'
+    );
+}
+
+const BETA_ADMISSION_MAX_POLL_ATTEMPTS = 120;
+
+function betaAdmissionRetryAfterMs(
+    payload: unknown,
+    expectedPreflightId: string,
+): number | null {
+    if (!isBetaAdmissionPending(payload)) return null;
+    const code = Reflect.get(payload, 'code');
+    const schemaVersion = Reflect.get(payload, 'schemaVersion');
+    const preflightId = Reflect.get(payload, 'preflightId');
+    const retryAfterMs = Reflect.get(payload, 'retryAfterMs');
+    if (
+        code !== 'BETA_ADMISSION_PENDING'
+        || schemaVersion !== 1
+        || preflightId !== expectedPreflightId
+        || typeof retryAfterMs !== 'number'
+        || !Number.isInteger(retryAfterMs)
+        || retryAfterMs < 250
+        || retryAfterMs > 30_000
+    ) {
+        return null;
+    }
+    return retryAfterMs;
 }
 
 export function restoreExclusionState(
@@ -777,43 +806,51 @@ export function useAnalysisV2Preflight({
         setStarting(true);
         setError(null);
         try {
-            const response = await fetch(flowConfig.admitEndpoint(preflight.preflightId), {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ planId }),
-                signal: scope.signal,
-            });
-            const payload = await readPayload(response);
-            if (!response.ok) {
-                throw new Error(
-                    betaAdmissionFailureMessage(payload)
-                    ?? messageFromPayload(payload, '무료 판독 배정을 완료하지 못했습니다. 잠시 후 다시 시도해주세요.')
-                );
-            }
-            if (isBetaAdmissionPending(payload)) {
-                throw new Error(
-                    betaAdmissionFailureMessage(payload)
-                    ?? '판독 배정을 확인하고 있습니다. 잠시 후 다시 시도해주세요.'
-                );
-            }
-            const requestId = payload && typeof payload === 'object'
-                ? Reflect.get(payload, 'requestId')
-                : null;
-            if (typeof requestId !== 'string' || !UUID_PATTERN.test(requestId)) {
-                throw new Error('판독 시작 응답을 확인할 수 없습니다.');
-            }
-            if (!scope.isCurrent()) return null;
-            if (!analysisStartedTrackedRef.current.has(requestId)) {
-                analysisStartedTrackedRef.current.add(requestId);
-                if (claimAnalysisStart(availableAnalyticsStorage(), requestId, Date.now())) {
-                    trackEvent(EVENTS.ANALYSIS_STARTED, {
-                        request_id: requestId,
-                        plan_id: planId,
-                        preflight_id: preflight.preflightId,
-                    });
+            for (let attempt = 0; attempt < BETA_ADMISSION_MAX_POLL_ATTEMPTS; attempt += 1) {
+                const response = await fetch(flowConfig.admitEndpoint(preflight.preflightId), {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ planId }),
+                    signal: scope.signal,
+                });
+                const payload = await readPayload(response);
+                if (!scope.isCurrent()) return null;
+                if (!response.ok) {
+                    throw new Error(
+                        betaAdmissionFailureMessage(payload)
+                        ?? messageFromPayload(payload, '무료 판독 배정을 완료하지 못했습니다. 잠시 후 다시 시도해주세요.')
+                    );
                 }
+                const retryAfterMs = betaAdmissionRetryAfterMs(
+                    payload,
+                    preflight.preflightId,
+                );
+                if (retryAfterMs !== null) {
+                    if (attempt + 1 < BETA_ADMISSION_MAX_POLL_ATTEMPTS) {
+                        await waitForRetry(retryAfterMs, scope.signal);
+                        if (!scope.isCurrent()) return null;
+                    }
+                    continue;
+                }
+                const requestId = payload && typeof payload === 'object'
+                    ? Reflect.get(payload, 'requestId')
+                    : null;
+                if (typeof requestId !== 'string' || !UUID_PATTERN.test(requestId)) {
+                    throw new Error('판독 시작 응답을 확인할 수 없습니다.');
+                }
+                if (!analysisStartedTrackedRef.current.has(requestId)) {
+                    analysisStartedTrackedRef.current.add(requestId);
+                    if (claimAnalysisStart(availableAnalyticsStorage(), requestId, Date.now())) {
+                        trackEvent(EVENTS.ANALYSIS_STARTED, {
+                            request_id: requestId,
+                            plan_id: planId,
+                            preflight_id: preflight.preflightId,
+                        });
+                    }
+                }
+                return requestId;
             }
-            return requestId;
+            throw new Error('무료 판독 배정을 확인하는 데 시간이 걸리고 있습니다. 다시 시도해주세요.');
         } catch (cause) {
             if (cause instanceof Error && cause.name === 'AbortError') return null;
             if (scope.isCurrent()) {

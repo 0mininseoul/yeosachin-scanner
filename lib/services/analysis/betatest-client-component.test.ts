@@ -82,6 +82,17 @@ function capacityBlocked(preflightId: string) {
     } as const;
 }
 
+function queueBlocked(preflightId: string) {
+    return {
+        schemaVersion: 1,
+        preflightId,
+        expiresAt: EXPIRES_AT,
+        status: 'blocked',
+        exclusionDecision: 'pending',
+        code: 'QUEUE_UNAVAILABLE',
+    } as const;
+}
+
 function ready(preflightId: string) {
     return {
         schemaVersion: 1,
@@ -180,6 +191,7 @@ async function enterReadyFlow(container: HTMLElement) {
 describe('beta-test client', () => {
     let container: HTMLDivElement;
     let root: Root;
+    let mounted: boolean;
 
     beforeEach(() => {
         navigation.push.mockReset();
@@ -187,12 +199,14 @@ describe('beta-test client', () => {
         container = document.createElement('div');
         document.body.append(container);
         root = createRoot(container);
+        mounted = true;
         act(() => root.render(createElement(BetaTestClient)));
     });
 
     afterEach(() => {
-        act(() => root.unmount());
+        if (mounted) act(() => root.unmount());
         container.remove();
+        vi.useRealTimers();
         vi.unstubAllGlobals();
         vi.restoreAllMocks();
     });
@@ -238,6 +252,45 @@ describe('beta-test client', () => {
 
         expect(creates).toHaveLength(2);
         expect(JSON.parse(String(creates[1].body))).toEqual({ targetInstagramId: 'same.target' });
+        const firstKey = new Headers(creates[0].headers).get('idempotency-key');
+        const secondKey = new Headers(creates[1].headers).get('idempotency-key');
+        expect(firstKey).toBe('aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa');
+        expect(secondKey).toBe('bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb');
+    });
+
+    it('retries a queue-unavailable beta preparation on the same target with a new preflight key', async () => {
+        vi.spyOn(globalThis.crypto, 'randomUUID')
+            .mockReturnValueOnce('aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa')
+            .mockReturnValueOnce('bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb');
+        const creates: RequestInit[] = [];
+        vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+            const url = requestUrl(input);
+            if (url === '/api/analysis/betatest/preflight' && init?.method === 'POST') {
+                creates.push(init);
+                const preflightId = creates.length === 1 ? PREFLIGHT_ONE : PREFLIGHT_TWO;
+                return jsonResponse(accepted(preflightId), 202);
+            }
+            if (url === `/api/analysis/preflight/${PREFLIGHT_ONE}`) {
+                return jsonResponse(queueBlocked(PREFLIGHT_ONE));
+            }
+            if (url === `/api/analysis/preflight/${PREFLIGHT_TWO}`) {
+                return jsonResponse(queueBlocked(PREFLIGHT_TWO));
+            }
+            throw new Error(`unexpected request: ${init?.method ?? 'GET'} ${url}`);
+        }));
+
+        const target = container.querySelector<HTMLInputElement>('#beta-target-instagram');
+        expect(target).not.toBeNull();
+        setInputValue(target!, 'queue.target');
+        await clickButton(container, '무료 판독 가능 여부 확인');
+        await settleUi();
+
+        expect(container.textContent).toContain('사전 점검 작업이 지연되고 있습니다. 잠시 후 다시 시도해주세요.');
+        await clickButton(container, '같은 대상으로 준비 다시 확인');
+        await settleUi();
+
+        expect(creates).toHaveLength(2);
+        expect(JSON.parse(String(creates[1].body))).toEqual({ targetInstagramId: 'queue.target' });
         const firstKey = new Headers(creates[0].headers).get('idempotency-key');
         const secondKey = new Headers(creates[1].headers).get('idempotency-key');
         expect(firstKey).toBe('aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa');
@@ -301,41 +354,51 @@ describe('beta-test client', () => {
         expect(container.textContent).toContain('무료 판독 시작하기');
     });
 
-    it('keeps pending and capacity admission retries on the same preflight', async () => {
-        const pending = jsonResponse({
+    it('polls pending beta admission on the same preflight and navigates after replay', async () => {
+        vi.useFakeTimers();
+        const setItem = vi.spyOn(Storage.prototype, 'setItem');
+        const firstPending = jsonResponse({
             schemaVersion: 1,
             preflightId: PREFLIGHT_ONE,
             code: 'BETA_ADMISSION_PENDING',
             status: 'admission_pending',
-            retryAfterMs: 1_000,
+            retryAfterMs: 250,
         }, 202);
-        const capacity = jsonResponse({
+        const secondPending = jsonResponse({
             schemaVersion: 1,
-            code: 'BETA_CAPACITY_UNAVAILABLE',
-            error: '베타 분석을 준비할 수 없습니다.',
-        }, 409);
+            preflightId: PREFLIGHT_ONE,
+            code: 'BETA_ADMISSION_PENDING',
+            status: 'admission_pending',
+            retryAfterMs: 250,
+        }, 202);
         const success = jsonResponse({
             schemaVersion: 1,
             requestId: REQUEST_ID,
             status: 'queued',
             backgroundProcessing: true,
         });
-        const { calls } = installReadyFlow([pending, capacity, success]);
+        const { calls } = installReadyFlow([firstPending, secondPending, success]);
         await enterReadyFlow(container);
         await clickButton(container, '제외 없이 계속하기');
 
         await clickButton(container, '무료 판독 시작하기');
-        expect(container.textContent).toContain(
+        expect(container.textContent).not.toContain(
             '판독 배정을 확인하고 있습니다. 잠시 후 다시 시도해주세요.'
         );
-        await clickButton(container, '무료 판독 시작하기');
+        expect(navigation.push).not.toHaveBeenCalled();
 
-        expect(container.textContent).toContain(
-            '현재 무료 판독 가능 인원이 모두 찼습니다. 잠시 후 다시 시도해주세요.'
-        );
-        expect(container.textContent).toContain('무료 판독 다시 시도');
-        await clickButton(container, '무료 판독 다시 시도');
+        await act(async () => {
+            await vi.advanceTimersByTimeAsync(250);
+        });
+        await act(async () => {
+            await vi.advanceTimersByTimeAsync(250);
+        });
+
         expect(navigation.push).toHaveBeenCalledWith(`/progress/${REQUEST_ID}`);
+        expect(navigation.push).toHaveBeenCalledTimes(1);
+        expect(setItem.mock.calls.filter(([key]) => (
+            key === `amplitude:analysis_started:${REQUEST_ID}`
+        ))).toHaveLength(1);
         const admissionCalls = calls.filter(call => call.url.endsWith('/admit'));
         expect(admissionCalls).toHaveLength(3);
         expect(new Set(admissionCalls.map(call => call.url))).toEqual(new Set([
@@ -343,6 +406,151 @@ describe('beta-test client', () => {
         ]));
         expect(admissionCalls.map(call => JSON.parse(String(call.init.body))))
             .toEqual([{ planId: 'basic' }, { planId: 'basic' }, { planId: 'basic' }]);
+    });
+
+    it('aborts pending beta admission polling when the lifecycle is reset', async () => {
+        vi.useFakeTimers();
+        const pending = jsonResponse({
+            schemaVersion: 1,
+            preflightId: PREFLIGHT_ONE,
+            code: 'BETA_ADMISSION_PENDING',
+            status: 'admission_pending',
+            retryAfterMs: 250,
+        }, 202);
+        const { calls } = installReadyFlow([pending]);
+        await enterReadyFlow(container);
+        await clickButton(container, '제외 없이 계속하기');
+        await clickButton(container, '무료 판독 시작하기');
+
+        const admission = calls.find(call => call.url.endsWith('/admit'));
+        expect(admission?.init.signal?.aborted).toBe(false);
+
+        await clickButton(container, '대상 변경');
+        expect(admission?.init.signal?.aborted).toBe(true);
+
+        await act(async () => {
+            await vi.advanceTimersByTimeAsync(1_000);
+        });
+        expect(calls.filter(call => call.url.endsWith('/admit'))).toHaveLength(1);
+        expect(navigation.push).not.toHaveBeenCalled();
+        expect(container.textContent).not.toContain('판독 배정을 확인하고 있습니다.');
+    });
+
+    it('aborts pending beta admission polling on unmount without a late navigation', async () => {
+        vi.useFakeTimers();
+        const pending = jsonResponse({
+            schemaVersion: 1,
+            preflightId: PREFLIGHT_ONE,
+            code: 'BETA_ADMISSION_PENDING',
+            status: 'admission_pending',
+            retryAfterMs: 250,
+        }, 202);
+        const { calls } = installReadyFlow([pending]);
+        await enterReadyFlow(container);
+        await clickButton(container, '제외 없이 계속하기');
+        await clickButton(container, '무료 판독 시작하기');
+
+        const admission = calls.find(call => call.url.endsWith('/admit'));
+        act(() => root.unmount());
+        mounted = false;
+        expect(admission?.init.signal?.aborted).toBe(true);
+
+        await act(async () => {
+            await vi.advanceTimersByTimeAsync(1_000);
+        });
+        expect(calls.filter(call => call.url.endsWith('/admit'))).toHaveLength(1);
+        expect(navigation.push).not.toHaveBeenCalled();
+    });
+
+    it('bounds pending beta admission polling and leaves the same preflight retryable', async () => {
+        vi.useFakeTimers();
+        const pendingAdmissions = Array.from({ length: 120 }, () => jsonResponse({
+            schemaVersion: 1,
+            preflightId: PREFLIGHT_ONE,
+            code: 'BETA_ADMISSION_PENDING',
+            status: 'admission_pending',
+            retryAfterMs: 250,
+        }, 202));
+        const { calls } = installReadyFlow(pendingAdmissions);
+        await enterReadyFlow(container);
+        await clickButton(container, '제외 없이 계속하기');
+        await clickButton(container, '무료 판독 시작하기');
+
+        for (let attempt = 1; attempt < 120; attempt += 1) {
+            await act(async () => {
+                await vi.advanceTimersByTimeAsync(250);
+            });
+        }
+
+        expect(calls.filter(call => call.url.endsWith('/admit'))).toHaveLength(120);
+        expect(calls.filter(call => call.url === '/api/analysis/betatest/preflight'))
+            .toHaveLength(1);
+        expect(container.textContent).toContain(
+            '무료 판독 배정을 확인하는 데 시간이 걸리고 있습니다. 다시 시도해주세요.'
+        );
+        expect(button(container, '무료 판독 시작하기').disabled).toBe(false);
+        expect(navigation.push).not.toHaveBeenCalled();
+    });
+
+    it('keeps a capacity rejection on the same preflight for a manual retry', async () => {
+        const capacity = jsonResponse({
+            schemaVersion: 1,
+            code: 'BETA_CAPACITY_UNAVAILABLE',
+            error: '베타 분석을 준비할 수 없습니다.',
+        }, 409);
+        const { calls } = installReadyFlow([capacity]);
+        await enterReadyFlow(container);
+        await clickButton(container, '제외 없이 계속하기');
+        await clickButton(container, '무료 판독 시작하기');
+
+        expect(container.textContent).toContain(
+            '현재 무료 판독 가능 인원이 모두 찼습니다. 잠시 후 다시 시도해주세요.'
+        );
+        expect(button(container, '무료 판독 다시 시도').disabled).toBe(false);
+        expect(calls.filter(call => call.url.endsWith('/admit'))).toHaveLength(1);
+        expect(calls.filter(call => call.url === '/api/analysis/betatest/preflight'))
+            .toHaveLength(1);
+        expect(navigation.push).not.toHaveBeenCalled();
+    });
+
+    it('keeps an access rejection on the same preflight with safe manual retry copy', async () => {
+        const access = jsonResponse({
+            schemaVersion: 1,
+            code: 'BETA_ACCESS_UNAVAILABLE',
+            error: 'internal access detail',
+        }, 403);
+        const { calls } = installReadyFlow([access]);
+        await enterReadyFlow(container);
+        await clickButton(container, '제외 없이 계속하기');
+        await clickButton(container, '무료 판독 시작하기');
+
+        expect(container.textContent).toContain('베타 테스트 이용 권한을 확인할 수 없습니다.');
+        expect(container.textContent).not.toContain('internal access detail');
+        expect(button(container, '무료 판독 시작하기').disabled).toBe(false);
+        expect(calls.filter(call => call.url.endsWith('/admit'))).toHaveLength(1);
+        expect(calls.filter(call => call.url === '/api/analysis/betatest/preflight'))
+            .toHaveLength(1);
+        expect(navigation.push).not.toHaveBeenCalled();
+    });
+
+    it('treats a malformed pending admission as a safe manual retry error', async () => {
+        const malformed = jsonResponse({
+            schemaVersion: 1,
+            preflightId: PREFLIGHT_ONE,
+            code: 'BETA_ADMISSION_PENDING',
+            status: 'admission_pending',
+        }, 202);
+        const { calls } = installReadyFlow([malformed]);
+        await enterReadyFlow(container);
+        await clickButton(container, '제외 없이 계속하기');
+        await clickButton(container, '무료 판독 시작하기');
+
+        expect(container.textContent).toContain('판독 시작 응답을 확인할 수 없습니다.');
+        expect(button(container, '무료 판독 시작하기').disabled).toBe(false);
+        expect(calls.filter(call => call.url.endsWith('/admit'))).toHaveLength(1);
+        expect(calls.filter(call => call.url === '/api/analysis/betatest/preflight'))
+            .toHaveLength(1);
+        expect(navigation.push).not.toHaveBeenCalled();
     });
 
     it('routes a successful beta request to normal progress without consuming credentials or commerce APIs', async () => {
