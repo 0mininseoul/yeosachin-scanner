@@ -7,6 +7,7 @@ import type { AnalysisV2ProviderRunStore } from './v2-provider-run-store';
 import type { ProviderExecutionPolicy } from './authorized-test-provider-policy';
 import type { AnalysisV2SelfHostedAuthRunReceipt } from './v2-selfhosted-auth-run-store';
 import { AnalysisImagePreparationError } from '@/lib/services/ai/image-preprocessing';
+import { SelfHostedAuthWorkerError } from '@/lib/services/instagram/providers/selfhosted-auth/client';
 import {
     ANALYSIS_V2_PROFILE_CONSUMER_DATABASE_NAMES,
     createAnalysisV2MediaNormalizer,
@@ -521,8 +522,58 @@ describe('analysis V2 reverse-like production collector', () => {
         expect(bindAdapterCheckpoint).not.toHaveBeenCalled();
         expect(checkpoint).toHaveBeenCalledOnce();
         expect(getPostLikers).toHaveBeenCalledOnce();
+        expect(getPostLikers.mock.calls[0]![2]).toMatchObject({
+            selfHostedAuthIdentity: {
+                operationKey: expect.stringMatching(/^candidate-likers:[a-f0-9]{64}$/),
+                inputHash: expect.stringMatching(/^[a-f0-9]{64}$/),
+            },
+        });
         expect(result.operationKey).toMatch(/^candidate-likers:[a-f0-9]{64}$/);
         expect(result.results).toEqual([{ candidateId: 'candidate:a', status: 'observed' }]);
+    });
+
+    it('never falls back when the authenticated worker rejects a schema-invalid response', async () => {
+        const apifyLikers = vi.fn();
+        const selfHostedLikers = vi.fn(async () => {
+            throw new SelfHostedAuthWorkerError('invalid_response', false, 200);
+        });
+        const collector = createAnalysisV2ReverseLikeCollector({
+            providerRunStore: {
+                load: vi.fn(async () => null),
+                bindAdapterCheckpoint: vi.fn(),
+            } as unknown as AnalysisV2ProviderRunStore,
+            selfHostedAuthRunStore: {
+                load: vi.fn(async () => null),
+                checkpoint: vi.fn(),
+            },
+            contextStore: reverseLikeContext(),
+            adapter: { getPostLikers: apifyLikers, getPostComments: vi.fn() },
+            selfHostedAuthAdapter: {
+                getPostLikers: selfHostedLikers,
+                getPostComments: vi.fn(),
+            },
+            env: {
+                SELFHOSTED_AUTH_ENABLED: 'true',
+                SCRAPER_LIKERS: 'selfhosted_auth',
+                SCRAPER_FALLBACK: 'true',
+            },
+        });
+
+        await expect(collector.collect({
+            requestId,
+            jobKey: 'track:reverse-likes:collect',
+            claimToken,
+            jobInputHash: consumerInputHash,
+            targetUsername: 'target.account',
+            candidates: [{
+                candidateId: 'candidate:a',
+                postUrl: 'https://instagram.com/p/POST_A/',
+                declaredLikesCount: 1,
+            }],
+            limitPerPost: 100,
+        })).rejects.toMatchObject({ code: 'invalid_response' });
+        expect(selfHostedLikers).toHaveBeenCalledOnce();
+        expect(apifyLikers).not.toHaveBeenCalled();
     });
 
     it('fails closed instead of turning an out-of-scope 109-of-114 sample into absence', async () => {

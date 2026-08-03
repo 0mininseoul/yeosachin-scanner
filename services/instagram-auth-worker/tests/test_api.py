@@ -12,7 +12,7 @@ class FakeService:
     def __init__(self, error=None):
         self.error = error
 
-    async def relationship(self, side, username, limit):
+    async def relationship(self, side, username, limit, operation_key, input_hash):
         if self.error:
             raise self.error
         return {
@@ -22,11 +22,17 @@ class FakeService:
             'items': [],
         }
 
-    async def likers(self, post_urls, limit_per_post):
-        return await self.relationship('likers', 'unused', limit_per_post)
+    async def likers(self, post_urls, limit_per_post, operation_key, input_hash):
+        return await self.relationship('likers', 'unused', limit_per_post, operation_key, input_hash)
 
-    async def comments(self, post_urls, limit_per_post):
-        return await self.relationship('comments', 'unused', limit_per_post)
+    async def comments(self, post_urls, limit_per_post, operation_key, input_hash):
+        return await self.relationship('comments', 'unused', limit_per_post, operation_key, input_hash)
+
+
+VALID_OPERATION = {
+    'operationKey': f"relationship-followers:{'a' * 64}",
+    'inputHash': 'a' * 64,
+}
 
 
 class WorkerApiTest(unittest.TestCase):
@@ -39,6 +45,7 @@ class WorkerApiTest(unittest.TestCase):
         unauthorized = client.post('/v1/relationships/followers', json={
             'username': 'target.user',
             'limit': 1,
+            **VALID_OPERATION,
         })
         self.assertEqual(unauthorized.status_code, 401)
         self.assertEqual(unauthorized.json(), {
@@ -50,7 +57,7 @@ class WorkerApiTest(unittest.TestCase):
         authorized = client.post(
             '/v1/relationships/followers',
             headers={'authorization': f"Bearer {'x' * 32}"},
-            json={'username': 'target.user', 'limit': 1},
+            json={'username': 'target.user', 'limit': 1, **VALID_OPERATION},
         )
         self.assertEqual(authorized.status_code, 200)
 
@@ -69,6 +76,7 @@ class WorkerApiTest(unittest.TestCase):
                 response = client.post('/v1/relationships/following', json={
                     'username': 'target.user',
                     'limit': 1,
+                    **VALID_OPERATION,
                 })
                 self.assertEqual(response.status_code, status)
                 self.assertEqual(response.json()['code'], code)
@@ -81,6 +89,7 @@ class WorkerApiTest(unittest.TestCase):
             'username': 'INVALID USERNAME',
             'limit': 1,
             'sessionid': 'must-not-be-accepted',
+            **VALID_OPERATION,
         })
         self.assertEqual(response.status_code, 400)
         self.assertEqual(response.json(), {
@@ -97,12 +106,28 @@ class WorkerApiTest(unittest.TestCase):
         response = client.post('/v1/relationships/followers', json={
             'username': 'target.user',
             'limit': 1,
+            **VALID_OPERATION,
         })
         self.assertEqual(response.status_code, 502)
         self.assertEqual(response.json(), {
             'schemaVersion': 1,
             'code': 'upstream_error',
             'retryable': True,
+        })
+
+    def test_requires_stable_operation_key_and_sha256_input_hash(self):
+        client = TestClient(create_app(FakeService()))
+        response = client.post('/v1/relationships/followers', json={
+            'username': 'target.user',
+            'limit': 1,
+            'operationKey': 'short',
+            'inputHash': 'not-a-hash',
+        })
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(response.json(), {
+            'schemaVersion': 1,
+            'code': 'invalid_request',
+            'retryable': False,
         })
 
 

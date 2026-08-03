@@ -32,6 +32,8 @@ class FakeGateway:
 
 
 class InstagramAuthServiceTest(unittest.IsolatedAsyncioTestCase):
+    OPERATION_KEY = 'operation-key-001'
+    INPUT_HASH = 'a' * 64
     def service(self, gateway):
         return InstagramAuthService(
             gateway=gateway,
@@ -42,7 +44,7 @@ class InstagramAuthServiceTest(unittest.IsolatedAsyncioTestCase):
 
     async def test_returns_versioned_items_without_session_state(self):
         response = await self.service(FakeGateway()).relationship(
-            'followers', 'target.user', 1200
+            'followers', 'target.user', 1200, self.OPERATION_KEY, self.INPUT_HASH
         )
         self.assertEqual(response, {
             'schemaVersion': 1,
@@ -67,17 +69,21 @@ class InstagramAuthServiceTest(unittest.IsolatedAsyncioTestCase):
             service = self.service(gateway)
 
             with self.assertRaises(error_type):
-                await service.relationship('followers', 'target.user', 1)
+                await service.relationship(
+                    'followers', 'target.user', 1, 'operation-key-002', 'b' * 64
+                )
             gateway.relationship_error = None
             with self.assertRaises(Exception) as caught:
-                await service.relationship('followers', 'target.user', 1)
+                await service.relationship(
+                    'followers', 'target.user', 1, self.OPERATION_KEY, self.INPUT_HASH
+                )
             self.assertEqual(caught.exception.code, expected_code)
 
     async def test_rejects_non_instagram_post_urls_before_calling_the_gateway(self):
         with self.assertRaises(ValueError):
             await self.service(FakeGateway()).likers([
                 'https://example.test/p/not-an-instagram-post/',
-            ], 1)
+            ], 1, self.OPERATION_KEY, self.INPUT_HASH)
 
 
 if __name__ == '__main__':

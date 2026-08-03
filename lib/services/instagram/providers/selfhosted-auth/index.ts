@@ -7,6 +7,7 @@ import type {
 import {
     createSelfHostedAuthWorkerClient,
     type SelfHostedAuthWorkerClient,
+    type SelfHostedAuthWorkerRequestOptions,
 } from './client';
 
 interface SelfHostedAuthDependencies {
@@ -19,6 +20,20 @@ function clientResolver(dependencies: SelfHostedAuthDependencies) {
     return (): SelfHostedAuthWorkerClient => {
         resolved ??= createSelfHostedAuthWorkerClient({ env: dependencies.env });
         return resolved;
+    };
+}
+
+function workerRequestOptions(
+    context: ProviderCallContext | undefined
+): SelfHostedAuthWorkerRequestOptions {
+    const identity = context?.selfHostedAuthIdentity;
+    if (!identity) {
+        throw new Error('ANALYSIS_V2_SELFHOSTED_AUTH_IDENTITY_MISSING');
+    }
+    return {
+        operationKey: identity.operationKey,
+        inputHash: identity.inputHash,
+        signal: context?.startCancellationSignal,
     };
 }
 
@@ -51,7 +66,12 @@ export function makeSelfHostedAuthProvider(
         limit: number,
         context?: ProviderCallContext
     ) => {
-        const response = await client().getRelationship(side, username, limit);
+        const response = await client().getRelationship(
+            side,
+            username,
+            limit,
+            workerRequestOptions(context)
+        );
         const usernames = response.items.map(item => item.username);
         if (new Set(usernames).size !== usernames.length) {
             throw new Error('SCRAPING_SCHEMA_ERROR: selfhosted_auth returned duplicate usernames.');
@@ -77,12 +97,20 @@ export function makeSelfHostedAuthInteractionAdapter(
     const client = clientResolver(dependencies);
     return {
         async getPostLikers(postUrls, limitPerPost, context) {
-            const response = await client().getPostLikers(postUrls, limitPerPost);
+            const response = await client().getPostLikers(
+                postUrls,
+                limitPerPost,
+                workerRequestOptions(context)
+            );
             await recordSuccessfulRun(context, response);
             return response.items;
         },
         async getPostComments(postUrls, limitPerPost, context) {
-            const response = await client().getPostComments(postUrls, limitPerPost);
+            const response = await client().getPostComments(
+                postUrls,
+                limitPerPost,
+                workerRequestOptions(context)
+            );
             await recordSuccessfulRun(context, response);
             return response.items;
         },

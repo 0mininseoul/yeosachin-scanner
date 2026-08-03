@@ -343,6 +343,7 @@ async function runAttempt<T>(
         onProfileStart: options?.onProfileStart,
         onProfileResolved: options?.onProfileResolved,
         onSelfHostedAuthRunFinished: options?.onSelfHostedAuthRunFinished,
+        selfHostedAuthIdentity: options?.selfHostedAuthIdentity,
         onCostRunStarted: options?.providerRun?.onCostRunStarted,
         onCostRunFinished: options?.providerRun?.onCostRunFinished,
         recordUsage: (delta) => addUsage(usage, delta),

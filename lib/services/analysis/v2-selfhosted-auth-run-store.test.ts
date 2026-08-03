@@ -3,6 +3,7 @@ import {
     ANALYSIS_V2_SELFHOSTED_AUTH_RUN_LOAD_RPC,
     ANALYSIS_V2_SELFHOSTED_AUTH_RUN_RPC,
     analysisV2SelfHostedAuthRunStore,
+    createAnalysisV2SelfHostedAuthWorkerIdentity,
     createAnalysisV2SelfHostedAuthRunStore,
     type AnalysisV2SelfHostedAuthRunSupabaseClient,
 } from './v2-selfhosted-auth-run-store';
@@ -20,6 +21,20 @@ const input = {
 };
 
 describe('analysis V2 selfhosted auth run receipt store', () => {
+    it('scopes worker idempotency to one request while remaining stable for its retries', () => {
+        const first = createAnalysisV2SelfHostedAuthWorkerIdentity(input);
+        const retry = createAnalysisV2SelfHostedAuthWorkerIdentity(input);
+        const independent = createAnalysisV2SelfHostedAuthWorkerIdentity({
+            ...input,
+            requestId: '6d16de3e-5160-48bc-8b39-a09568550d53',
+        });
+
+        expect(first).toEqual(retry);
+        expect(first.inputHash).toBe(input.inputHash);
+        expect(first.operationKey).toMatch(/^relationship-followers:[a-f0-9]{64}$/);
+        expect(independent.operationKey).not.toBe(first.operationKey);
+    });
+
     it('exports the default receipt store as a checkpoint-capable instance', () => {
         expect(analysisV2SelfHostedAuthRunStore).toMatchObject({
             checkpoint: expect.any(Function),

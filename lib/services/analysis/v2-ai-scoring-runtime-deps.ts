@@ -14,7 +14,10 @@ import type {
     SelfHostedAuthRunReceipt,
 } from '@/lib/services/instagram/providers/types';
 import { selfHostedAuthInteractionAdapter } from '@/lib/services/instagram/providers/selfhosted-auth';
-import { parseSelfHostedAuthLikerItems } from '@/lib/services/instagram/providers/selfhosted-auth/client';
+import {
+    isSelfHostedAuthFallbackEligible,
+    parseSelfHostedAuthLikerItems,
+} from '@/lib/services/instagram/providers/selfhosted-auth/client';
 import { getInteractionScraperConfig } from '@/lib/services/instagram/config';
 import { supabaseAdmin } from '@/lib/supabase/admin';
 import {
@@ -55,6 +58,7 @@ import {
 } from './v2-apify-operation-costs';
 import {
     analysisV2SelfHostedAuthRunStore,
+    createAnalysisV2SelfHostedAuthWorkerIdentity,
     type AnalysisV2SelfHostedAuthRunStore,
 } from './v2-selfhosted-auth-run-store';
 export {
@@ -484,6 +488,12 @@ export function createAnalysisV2ReverseLikeCollector(input: {
                     REVERSE_LIKE_LIMIT,
                     {
                         recordUsage: () => undefined,
+                        selfHostedAuthIdentity: createAnalysisV2SelfHostedAuthWorkerIdentity({
+                            requestId: claim.requestId,
+                            jobKey: claim.jobKey,
+                            operationKey,
+                            inputHash,
+                        }),
                         onSelfHostedAuthRunFinished: run => {
                             receiptHolder.current = run;
                         },
@@ -520,7 +530,9 @@ export function createAnalysisV2ReverseLikeCollector(input: {
                     try {
                         collected = await executeSelfHostedAuth();
                     } catch (error) {
-                        if (!scraperConfig.fallback) throw error;
+                        if (!scraperConfig.fallback || !isSelfHostedAuthFallbackEligible(error)) {
+                            throw error;
+                        }
                         collected = await executeApify();
                     }
                 }

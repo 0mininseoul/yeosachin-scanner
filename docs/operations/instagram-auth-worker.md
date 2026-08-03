@@ -21,7 +21,7 @@ SCRAPER_COMMENTS=apify
 
 ## Deploy preflight
 
-Create the session-settings secret through the approved Secret Manager workflow before deploying. The deployment script needs only its secret ID and an immutable positive numeric version; it never reads a secret payload. Do not use `latest`, pass session settings on a command line, or add them to an environment file.
+Create the session-settings secret through the approved Secret Manager workflow and a dedicated, private GCS bucket for the worker's durable operation ledger and account-safety state before deploying. The deployment script needs only the secret ID and immutable positive numeric version; it never reads a secret payload. Do not use `latest`, pass session settings on a command line, or add them to an environment file. Bucket identifiers and object paths are operational metadata, but session settings, account cookies, request bodies, and stored state must never be included in shell commands or logs.
 
 Set these deployment-time values in the operator shell or its approved secret-free deployment configuration:
 
@@ -33,9 +33,14 @@ INSTAGRAM_AUTH_WORKER_NETWORK=instagram-egress
 INSTAGRAM_AUTH_WORKER_SUBNET=instagram-egress-seoul
 INSTAGRAM_AUTH_WORKER_SESSION_SECRET_ID=instagram-auth-session-settings
 INSTAGRAM_AUTH_WORKER_SESSION_SECRET_VERSION=7
+INSTAGRAM_AUTH_WORKER_DURABLE_STORE_BUCKET=instagram-auth-worker-state-your-unique-suffix
+# Optional; defaults to instagram-auth-worker.
+INSTAGRAM_AUTH_WORKER_DURABLE_STORE_PREFIX=instagram-auth-worker
 ```
 
 `INSTAGRAM_AUTH_WORKER_CALLER_SERVICE_ACCOUNT_EMAIL` must be the runtime identity that obtains the Google ID token in the application process. It receives service-level `roles/run.invoker`; no public principal is granted access.
+
+The durable-store bucket must be dedicated to this worker and use uniform bucket-level access and public-access prevention. The deployment script grants only `roles/storage.objectUser` at that bucket scope to `INSTAGRAM_AUTH_WORKER_RUNTIME_SERVICE_ACCOUNT_EMAIL`, which is the minimum predefined object role required to read, create, replace, and remove the worker's ledger and account-safety objects. Do not grant it Storage project roles, bucket-admin roles, or access to any other bucket. The operator/deployer may retain separate administrative access for audited recovery, but must not use the worker runtime identity for that access.
 
 The named network and Seoul-region subnet must already use Cloud NAT manual allocation with one reserved static outbound IPv4 address. The deploy script routes all worker egress through that Direct VPC path. Do not canary an authenticated session from Cloud Run's default dynamic outbound IP pool.
 
@@ -45,9 +50,17 @@ Review the planned mutation first:
 bash scripts/deploy-instagram-auth-worker.sh --dry-run
 ```
 
-The fixed service settings are Seoul (`asia-northeast3`), `min-instances=1`, `max-instances=1`, request `concurrency=5`, and `timeout=300s`. Keeping one warm instance preserves the in-memory cooldown/quarantine across idle periods; infrastructure restarts can still reset it, so an Instagram challenge or authentication failure also requires the application kill switch to remain off until operator review. The script source-deploys the worker, injects `IG_SESSION_SETTINGS_BASE64` only with `--set-secrets=<secret-id>:<numeric-version>`, disables unauthenticated access, routes all egress through the required VPC/subnet, and grants the caller runtime account `roles/run.invoker`. It does not retrieve, echo, or write secret payloads.
+The fixed service settings are Seoul (`asia-northeast3`), `min-instances=1`, `max-instances=1`, request `concurrency=5`, and `timeout=300s`. Keeping one warm instance preserves the in-memory cooldown/quarantine across idle periods. The script source-deploys the worker, injects `IG_SESSION_SETTINGS_BASE64` only with `--set-secrets=<secret-id>:<numeric-version>`, injects the non-secret `IG_DURABLE_STORE_BUCKET` and prefix, disables unauthenticated access, routes all egress through the required VPC/subnet, grants the worker runtime account the bucket-scoped durable-store object role, and grants the caller runtime account `roles/run.invoker`. It does not retrieve, echo, or write secret payloads.
 
-After review, run the same script without `--dry-run`. This repository's automation does not deploy external resources on its own. For later worker revisions, close `SELFHOSTED_AUTH_ENABLED`, drain in-flight requests, deploy and verify the single revision, and only then reopen the kill switch; revision overlap must never be used as account-operation concurrency.
+After review, run the same script without `--dry-run`. This repository's automation does not deploy external resources on its own. For later worker revisions, close `SELFHOSTED_AUTH_ENABLED`, wait for all active calls to finish or reach their caller timeout, confirm no durable ledger entry remains `pending`, deploy and verify the single revision, and only then reopen the kill switch; revision overlap must never be used as account-operation concurrency.
+
+## Durable-state incidents and recovery
+
+The GCS store is authoritative across Cloud Run restarts. In production, a missing, malformed, unreadable, or unwritable durable-store configuration is fail-closed: do not enable the application kill switch and do not bypass it with an in-memory fallback.
+
+An operation left `pending`, or whose result is ambiguous after a timeout, process interruption, or GCS error, must be treated as potentially executed. Do not automatically replay it, delete its ledger object, or infer success from a missing response. Keep `SELFHOSTED_AUTH_ENABLED=false`, inspect the durable ledger and the relevant Instagram-visible outcome using an approved operator workflow, then explicitly record the recovered terminal result before allowing a retry. If the operation cannot be resolved, leave it blocked and escalate; a new operation ID must not be used to evade that decision.
+
+An `instagram_challenge` or `authentication_failed` state is a permanent account quarantine. Never auto-clear, auto-retry, or delete that quarantine object. Close the kill switch, drain requests, investigate and repair the account/session outside the worker, then have an authorized operator explicitly perform the documented recovery that replaces the session settings and clears the matching durable quarantine only after verification. Redeploy and validate the single worker revision while the switch remains off; reopen it only after the operator records the recovery decision.
 
 ## Application enablement
 
@@ -68,7 +81,7 @@ SCRAPER_FALLBACK=true
 
 Do not use bearer mode in production. It is a local-development compatibility path, not the Cloud Run authorization mechanism.
 
-Apply `20260803140000_add_authenticated_selfhosted_scraper_receipts.sql` through the repository's reviewed migration workflow before enabling the selectors. Start with a low-volume canary. Suspension risk cannot be eliminated; rate-limit responses trigger a cooldown, while challenges and authentication failures quarantine the account process and should trigger rollback.
+Apply `20260803140000_add_authenticated_selfhosted_scraper_receipts.sql` through the repository's reviewed migration workflow before enabling the selectors. Start with a low-volume canary. Suspension risk cannot be eliminated; rate-limit responses trigger a durable cooldown, while challenges and authentication failures create a durable account quarantine and require the explicit recovery procedure above.
 
 ## Roll back to Apify
 
@@ -82,4 +95,4 @@ SCRAPER_LIKERS=apify
 SCRAPER_COMMENTS=apify
 ```
 
-This takes effect without reading or rotating the worker session secret. Leave the Cloud Run service private; do not make it public during rollback. Investigate the failure before re-enabling the kill switch.
+This takes effect without reading or rotating the worker session secret. Leave the Cloud Run service private; do not make it public during rollback. Wait for in-flight calls to settle, inspect unresolved durable ledger entries and any account quarantine, and investigate the failure before an explicit operator decision to re-enable the kill switch.

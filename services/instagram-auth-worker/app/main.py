@@ -8,10 +8,13 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict, Field, HttpUrl
 
 from .config import WorkerConfig
+from .durable import GcsDurableStore, DurableStoreError
 from .gate import AdmissionGate, QueueFullError, QueueTimeoutError
 from .gateway import create_instagrapi_gateway
-from .safety import AccountQuarantinedError, AccountSafetyCircuit
+from .safety import AccountQuarantinedError, AccountSafetyCircuit, SafetyStateUnavailableError
 from .service import (
+    IdempotencyConflictError,
+    IdempotencyPendingError,
     InstagramAuthenticationError,
     InstagramAuthService,
     InstagramChallengeError,
@@ -23,13 +26,22 @@ class WorkerAuthorizationError(RuntimeError):
     pass
 
 
-class RelationshipRequest(BaseModel):
+class OperationRequest(BaseModel):
     model_config = ConfigDict(extra='forbid', strict=True)
+    operationKey: str = Field(
+        min_length=67,
+        max_length=129,
+        pattern=r'^[a-z][a-z0-9-]{1,63}:[a-f0-9]{64}$',
+    )
+    inputHash: str = Field(pattern=r'^[a-f0-9]{64}$')
+
+
+class RelationshipRequest(OperationRequest):
     username: str = Field(pattern=r'^[a-z0-9._]{1,30}$')
     limit: int = Field(ge=1, le=1_200)
 
 
-class InteractionRequest(BaseModel):
+class InteractionRequest(OperationRequest):
     model_config = ConfigDict(extra='forbid', strict=True)
     postUrls: list[HttpUrl] = Field(min_length=1, max_length=10)
     limitPerPost: int = Field(ge=1, le=150)
@@ -63,13 +75,19 @@ def create_app(
             yield
             return
         config = WorkerConfig.from_env()
+        durable_store = GcsDurableStore(
+            config.durable_store_bucket, config.durable_store_prefix,
+        )
         application.state.instagram_service = InstagramAuthService(
             gateway=create_instagrapi_gateway(config.session_settings),
             gate=AdmissionGate(
                 max_in_flight=config.max_in_flight,
                 queue_timeout_seconds=config.queue_timeout_seconds,
             ),
-            safety=AccountSafetyCircuit(config.rate_limit_cooldown_seconds),
+            safety=AccountSafetyCircuit(
+                config.rate_limit_cooldown_seconds, store=durable_store,
+            ),
+            ledger_store=durable_store,
         )
         application.state.local_bearer_token = config.local_bearer_token
         yield
@@ -110,9 +128,27 @@ def create_app(
     async def account_quarantined(_request: Request, error: AccountQuarantinedError):
         return strict_error(423, error.code, False, error.retry_after_seconds)
 
+    @application.exception_handler(SafetyStateUnavailableError)
+    @application.exception_handler(DurableStoreError)
+    async def durable_state_unavailable(_request: Request, _error: RuntimeError):
+        return strict_error(503, 'durable_state_unavailable', True, 30)
+
+    @application.exception_handler(IdempotencyPendingError)
+    async def idempotency_pending(_request: Request, _error: IdempotencyPendingError):
+        return strict_error(409, 'idempotency_pending', False)
+
+    @application.exception_handler(IdempotencyConflictError)
+    async def idempotency_conflict(_request: Request, _error: IdempotencyConflictError):
+        return strict_error(409, 'idempotency_key_reused', False)
+
     @application.exception_handler(InstagramRateLimitedError)
     async def instagram_rate_limited(_request: Request, _error: InstagramRateLimitedError):
-        return strict_error(429, 'instagram_rate_limited', True, 900)
+        return strict_error(
+            429,
+            'instagram_rate_limited',
+            True,
+            getattr(_error, 'retry_after_seconds', None),
+        )
 
     @application.exception_handler(InstagramChallengeError)
     async def instagram_challenge(_request: Request, _error: InstagramChallengeError):
@@ -150,17 +186,25 @@ def create_app(
 
     @application.post('/v1/relationships/followers', dependencies=[Depends(authorize)])
     async def followers(payload: RelationshipRequest, request: Request):
-        return await service(request).relationship('followers', payload.username, payload.limit)
+        return await service(request).relationship(
+            'followers', payload.username, payload.limit,
+            payload.operationKey, payload.inputHash,
+        )
 
     @application.post('/v1/relationships/following', dependencies=[Depends(authorize)])
     async def following(payload: RelationshipRequest, request: Request):
-        return await service(request).relationship('following', payload.username, payload.limit)
+        return await service(request).relationship(
+            'following', payload.username, payload.limit,
+            payload.operationKey, payload.inputHash,
+        )
 
     @application.post('/v1/interactions/likers', dependencies=[Depends(authorize)])
     async def likers(payload: InteractionRequest, request: Request):
         return await service(request).likers(
             [str(value) for value in payload.postUrls],
             payload.limitPerPost,
+            payload.operationKey,
+            payload.inputHash,
         )
 
     @application.post('/v1/interactions/comments', dependencies=[Depends(authorize)])
@@ -170,6 +214,8 @@ def create_app(
         return await service(request).comments(
             [str(value) for value in payload.postUrls],
             payload.limitPerPost,
+            payload.operationKey,
+            payload.inputHash,
         )
 
     return application

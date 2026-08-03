@@ -25,6 +25,7 @@ import type {
 import type { AnalysisV2ProviderRunAdoptionStore } from './v2-provider-run-adoption-store';
 import type { AnalysisV2TargetProfileReuseStore } from './v2-target-profile-reuse';
 import type { AnalysisV2SelfHostedAuthRunReceipt } from './v2-selfhosted-auth-run-store';
+import { SelfHostedAuthWorkerError } from '@/lib/services/instagram/providers/selfhosted-auth/client';
 import {
     AnalysisV2CollectionContextFenceError,
     type AnalysisV2CollectionRequestContext,
@@ -931,6 +932,16 @@ describe('analysis V2 concrete collection executors', () => {
         expect(providers.bindAdapterCheckpoint).not.toHaveBeenCalled();
         expect(receiptStore.checkpoint).toHaveBeenCalledTimes(2);
         expect(getter).toHaveBeenCalledTimes(2);
+        expect(getter.mock.calls.map(call => call[2]?.selfHostedAuthIdentity)).toEqual(expect.arrayContaining([
+            expect.objectContaining({
+                operationKey: expect.stringMatching(/^relationship-followers:[a-f0-9]{64}$/),
+                inputHash: expect.stringMatching(/^[a-f0-9]{64}$/),
+            }),
+            expect.objectContaining({
+                operationKey: expect.stringMatching(/^relationship-following:[a-f0-9]{64}$/),
+                inputHash: expect.stringMatching(/^[a-f0-9]{64}$/),
+            }),
+        ]));
         expect(checkpointRelationshipSide).toHaveBeenCalledTimes(4);
         expect(checkpointRelationshipSide).toHaveBeenCalledWith(expect.objectContaining({
             source: expect.objectContaining({ provider: 'selfhosted_auth' }),
@@ -948,7 +959,7 @@ describe('analysis V2 concrete collection executors', () => {
             options?: ScrapeRequestOptions
         ) => {
             if (options?.provider === 'selfhosted_auth') {
-                throw new Error('SELFHOSTED_AUTH_WORKER_ERROR: queue_timeout');
+                throw new SelfHostedAuthWorkerError('queue_timeout', true, 503);
             }
             return rows;
         });
@@ -1637,6 +1648,18 @@ describe('analysis V2 concrete collection executors', () => {
         expect(checkpointReceipt).toHaveBeenCalledTimes(2);
         expect(getPostLikers).toHaveBeenCalledOnce();
         expect(getPostComments).toHaveBeenCalledOnce();
+        expect(getPostLikers.mock.calls[0]![2]).toMatchObject({
+            selfHostedAuthIdentity: {
+                operationKey: expect.stringMatching(/^target-likers:[a-f0-9]{64}$/),
+                inputHash: expect.stringMatching(/^[a-f0-9]{64}$/),
+            },
+        });
+        expect(getPostComments.mock.calls[0]![2]).toMatchObject({
+            selfHostedAuthIdentity: {
+                operationKey: expect.stringMatching(/^target-comments:[a-f0-9]{64}$/),
+                inputHash: expect.stringMatching(/^[a-f0-9]{64}$/),
+            },
+        });
         const saved = checkpointTargetEvidence.mock.calls[0]![0];
         if (saved.likerSource.status !== 'collected' || saved.commentSource.status !== 'collected') {
             throw new Error('expected collected target evidence');

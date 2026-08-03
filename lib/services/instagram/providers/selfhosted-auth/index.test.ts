@@ -15,11 +15,16 @@ const metadata = {
 function context() {
     const recordUsage = vi.fn();
     const onSelfHostedAuthRunFinished = vi.fn();
+    const value: ProviderCallContext = {
+        recordUsage,
+        onSelfHostedAuthRunFinished,
+        selfHostedAuthIdentity: {
+            operationKey: `relationship-followers:${'a'.repeat(64)}`,
+            inputHash: 'b'.repeat(64),
+        },
+    };
     return {
-        value: {
-            recordUsage,
-            onSelfHostedAuthRunFinished,
-        } satisfies ProviderCallContext,
+        value,
         recordUsage,
         onSelfHostedAuthRunFinished,
     };
@@ -37,13 +42,20 @@ describe('authenticated self-hosted relationship provider', () => {
         } as unknown as SelfHostedAuthWorkerClient;
         const provider = makeSelfHostedAuthProvider({ client });
         const observed = context();
+        const controller = new AbortController();
+        observed.value.startCancellationSignal = controller.signal;
 
         await expect(provider.getFollowers?.('target.user', 1200, observed.value))
             .resolves.toEqual(items);
         expect(client.getRelationship).toHaveBeenCalledWith(
             'followers',
             'target.user',
-            1200
+            1200,
+            expect.objectContaining({
+                operationKey: `relationship-followers:${'a'.repeat(64)}`,
+                inputHash: 'b'.repeat(64),
+                signal: controller.signal,
+            })
         );
         expect(observed.recordUsage).toHaveBeenCalledWith({
             request_count: 1,
@@ -60,6 +72,20 @@ describe('authenticated self-hosted relationship provider', () => {
         expect(provider.name).toBe('selfhosted_auth');
         expect(provider.paid).toBe(false);
         expect(provider.getProfile).toBeUndefined();
+    });
+});
+
+describe('authenticated self-hosted identity boundary', () => {
+    it('fails closed when a generic provider call has no durable operation identity', async () => {
+        const client = {
+            getRelationship: vi.fn(),
+        } as unknown as SelfHostedAuthWorkerClient;
+        const provider = makeSelfHostedAuthProvider({ client });
+
+        await expect(provider.getFollowers?.('target.user', 1, {
+            recordUsage: () => undefined,
+        })).rejects.toThrow('ANALYSIS_V2_SELFHOSTED_AUTH_IDENTITY_MISSING');
+        expect(client.getRelationship).not.toHaveBeenCalled();
     });
 });
 
@@ -88,6 +114,10 @@ describe('authenticated self-hosted interaction adapter', () => {
         const adapter = makeSelfHostedAuthInteractionAdapter({ client });
 
         const likerContext = context();
+        likerContext.value.selfHostedAuthIdentity = {
+            operationKey: `target-likers:${'c'.repeat(64)}`,
+            inputHash: 'd'.repeat(64),
+        };
         await expect(adapter.getPostLikers(
             [liker.postUrl],
             150,
@@ -96,6 +126,10 @@ describe('authenticated self-hosted interaction adapter', () => {
         expect(likerContext.onSelfHostedAuthRunFinished).toHaveBeenCalledOnce();
 
         const commentContext = context();
+        commentContext.value.selfHostedAuthIdentity = {
+            operationKey: `target-comments:${'e'.repeat(64)}`,
+            inputHash: 'f'.repeat(64),
+        };
         await expect(adapter.getPostComments(
             [comment.postUrl],
             15,

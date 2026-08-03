@@ -108,6 +108,8 @@ export interface ScrapeRequestOptions {
     /** Internal-only profile handoff for a presentation heartbeat after collection. */
     onProfileResolved?(profile: InstagramProfile): void | Promise<void>;
     onSelfHostedAuthRunFinished?(receipt: SelfHostedAuthRunReceipt): void | Promise<void>;
+    /** Required for `selfhosted_auth`; callers must forward a V2-derived identity verbatim. */
+    selfHostedAuthIdentity?: SelfHostedAuthOperationIdentity;
     providerRun?: ProviderRunCheckpoint;
 }
 
@@ -115,6 +117,12 @@ export interface SelfHostedAuthRunReceipt {
     provider: 'selfhosted_auth';
     runId: string;
     accountSlot: 'primary';
+}
+
+/** Stable V2 identity forwarded verbatim to the authenticated worker for one operation. */
+export interface SelfHostedAuthOperationIdentity {
+    operationKey: string;
+    inputHash: string;
 }
 
 /** Durable hand-off for paid provider runs that may outlive one serverless invocation. */
@@ -196,6 +204,8 @@ export interface ProviderCallContext
     onProfileStart?(username: string): void | Promise<void>;
     onProfileResolved?(profile: InstagramProfile): void | Promise<void>;
     onSelfHostedAuthRunFinished?(receipt: SelfHostedAuthRunReceipt): void | Promise<void>;
+    /** Required for authenticated worker calls; never derive a content-only replacement. */
+    selfHostedAuthIdentity?: SelfHostedAuthOperationIdentity;
     recordUsage(delta: ProviderUsageDelta): void;
 }
 

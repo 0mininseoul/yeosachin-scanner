@@ -21,10 +21,13 @@ class WorkerConfigTest(unittest.TestCase):
 
         config = WorkerConfig.from_env({
             'IG_SESSION_SETTINGS_BASE64': encoded_settings(),
+            'IG_DURABLE_STORE_BUCKET': 'worker-state-bucket',
         })
         self.assertEqual(config.max_in_flight, 5)
         self.assertEqual(config.queue_timeout_seconds, 240)
         self.assertEqual(config.rate_limit_cooldown_seconds, 900)
+        self.assertEqual(config.durable_store_bucket, 'worker-state-bucket')
+        self.assertEqual(config.durable_store_prefix, 'instagram-auth-worker')
         self.assertEqual(config.session_settings['authorization_data']['sessionid'], 'session-value')
 
     def test_rejects_password_material_and_invalid_operational_bounds(self):
@@ -42,6 +45,12 @@ class WorkerConfigTest(unittest.TestCase):
                     'IG_SESSION_SETTINGS_BASE64': encoded_settings(),
                     key: value,
                 })
+
+    def test_requires_gcs_durable_store_for_non_test_configuration(self):
+        with self.assertRaises(ValueError):
+            WorkerConfig.from_env({
+                'IG_SESSION_SETTINGS_BASE64': encoded_settings(),
+            })
 
 
 if __name__ == '__main__':

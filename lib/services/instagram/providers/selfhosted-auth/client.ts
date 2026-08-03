@@ -8,6 +8,8 @@ import type { InstagramFollower } from '@/lib/types/instagram';
 
 const USERNAME_PATTERN = /^[a-z0-9._]{1,30}$/;
 const RUN_ID_PATTERN = /^[A-Za-z0-9]{8,64}$/;
+const OPERATION_KEY_PATTERN = /^[a-z][a-z0-9-]{1,63}:[a-f0-9]{64}$/;
+const INPUT_HASH_PATTERN = /^[a-f0-9]{64}$/;
 const LOCAL_HOSTS = new Set(['127.0.0.1', 'localhost', '::1']);
 
 const followerSchema = z.object({
@@ -64,6 +66,9 @@ const errorSchema = z.object({
         'invalid_request',
         'instagram_challenge',
         'instagram_rate_limited',
+        'durable_state_unavailable',
+        'idempotency_key_reused',
+        'idempotency_pending',
         'queue_full',
         'queue_timeout',
         'upstream_error',
@@ -96,7 +101,8 @@ export type SelfHostedAuthWorkerErrorCode =
     | z.infer<typeof errorSchema>['code']
     | 'invalid_response'
     | 'request_timeout'
-    | 'transport_error';
+    | 'transport_error'
+    | 'request_cancelled';
 
 export class SelfHostedAuthWorkerError extends Error {
     constructor(
@@ -108,6 +114,24 @@ export class SelfHostedAuthWorkerError extends Error {
         super(`SELFHOSTED_AUTH_WORKER_ERROR: ${code}`);
         this.name = 'SelfHostedAuthWorkerError';
     }
+}
+
+const FALLBACK_ELIGIBLE_WORKER_CODES = new Set<SelfHostedAuthWorkerErrorCode>([
+    'transport_error',
+    'request_timeout',
+    'queue_full',
+    'queue_timeout',
+    'upstream_error',
+    'instagram_rate_limited',
+    'instagram_challenge',
+    'authentication_failed',
+    'account_quarantined',
+]);
+
+/** Only worker availability/account-state failures may enter the paid fallback path. */
+export function isSelfHostedAuthFallbackEligible(error: unknown): boolean {
+    return error instanceof SelfHostedAuthWorkerError
+        && FALLBACK_ELIGIBLE_WORKER_CODES.has(error.code);
 }
 
 export type SelfHostedAuthWorkerConfig = {
@@ -215,16 +239,26 @@ export interface SelfHostedAuthWorkerClient {
     getRelationship(
         side: 'followers' | 'following',
         username: string,
-        limit: number
+        limit: number,
+        options: SelfHostedAuthWorkerRequestOptions
     ): Promise<WorkerResponse<InstagramFollower>>;
     getPostLikers(
         postUrls: readonly string[],
-        limitPerPost: number
+        limitPerPost: number,
+        options: SelfHostedAuthWorkerRequestOptions
     ): Promise<WorkerResponse<ApifyPostLiker>>;
     getPostComments(
         postUrls: readonly string[],
-        limitPerPost: number
+        limitPerPost: number,
+        options: SelfHostedAuthWorkerRequestOptions
     ): Promise<WorkerResponse<ApifyPostComment>>;
+}
+
+export interface SelfHostedAuthWorkerRequestOptions {
+    operationKey: string;
+    inputHash: string;
+    /** Cancels only this Node wait; the worker shields an already-started Instagram operation. */
+    signal?: AbortSignal;
 }
 
 export interface SelfHostedAuthWorkerClientDependencies {
@@ -292,6 +326,18 @@ function validatedPostUrls(values: readonly string[]): string[] {
     return canonical;
 }
 
+function validatedRequestIdentity(
+    options: SelfHostedAuthWorkerRequestOptions
+): Pick<SelfHostedAuthWorkerRequestOptions, 'operationKey' | 'inputHash'> {
+    if (
+        !OPERATION_KEY_PATTERN.test(options.operationKey)
+        || !INPUT_HASH_PATTERN.test(options.inputHash)
+    ) {
+        throw new Error('ANALYSIS_V2_SELFHOSTED_AUTH_IDENTITY_MISSING');
+    }
+    return { operationKey: options.operationKey, inputHash: options.inputHash };
+}
+
 export function createSelfHostedAuthWorkerClient(
     dependencies: SelfHostedAuthWorkerClientDependencies = {}
 ): SelfHostedAuthWorkerClient {
@@ -303,14 +349,23 @@ export function createSelfHostedAuthWorkerClient(
     const request = async <T>(
         pathname: string,
         body: Record<string, unknown>,
-        schema: z.ZodType<WorkerResponse<T>>
+        schema: z.ZodType<WorkerResponse<T>>,
+        options: SelfHostedAuthWorkerRequestOptions
     ): Promise<WorkerResponse<T>> => {
         const controller = new AbortController();
         const timeout = setTimeout(() => controller.abort(), config.timeoutMs);
+        const onCallerAbort = () => controller.abort();
+        options.signal?.addEventListener('abort', onCallerAbort, { once: true });
         try {
+            if (options.signal?.aborted) {
+                throw new SelfHostedAuthWorkerError('request_cancelled', false, null);
+            }
             const authorization = config.authMode === 'bearer'
                 ? `Bearer ${config.bearerToken}`
                 : await oidcHeader(config.audience);
+            if (options.signal?.aborted) {
+                throw new SelfHostedAuthWorkerError('request_cancelled', false, null);
+            }
             const response = await fetchImpl(`${config.baseUrl}${pathname}`, {
                 method: 'POST',
                 headers: {
@@ -345,41 +400,57 @@ export function createSelfHostedAuthWorkerClient(
             return parsed.data;
         } catch (error) {
             if (error instanceof SelfHostedAuthWorkerError) throw error;
+            if (options.signal?.aborted) {
+                throw new SelfHostedAuthWorkerError('request_cancelled', false, null);
+            }
             if (error instanceof Error && error.name === 'AbortError') {
                 throw new SelfHostedAuthWorkerError('request_timeout', true, null);
             }
             throw new SelfHostedAuthWorkerError('transport_error', true, null);
         } finally {
             clearTimeout(timeout);
+            options.signal?.removeEventListener('abort', onCallerAbort);
         }
     };
 
     return {
-        getRelationship(side, username, limit) {
+        getRelationship(side, username, limit, options) {
+            const identity = validatedRequestIdentity(options);
             return request(
                 `/v1/relationships/${side}`,
-                { username: validatedUsername(username), limit: validatedLimit(limit, 1_200, 'limit') },
-                relationshipResponseSchema
+                {
+                    ...identity,
+                    username: validatedUsername(username),
+                    limit: validatedLimit(limit, 1_200, 'limit'),
+                },
+                relationshipResponseSchema,
+                options
             );
         },
-        getPostLikers(postUrls, limitPerPost) {
+        getPostLikers(postUrls, limitPerPost, options) {
+            const identity = validatedRequestIdentity(options);
             return request(
                 '/v1/interactions/likers',
                 {
+                    ...identity,
                     postUrls: validatedPostUrls(postUrls),
                     limitPerPost: validatedLimit(limitPerPost, 150, 'limitPerPost'),
                 },
-                likerResponseSchema
+                likerResponseSchema,
+                options
             );
         },
-        getPostComments(postUrls, limitPerPost) {
+        getPostComments(postUrls, limitPerPost, options) {
+            const identity = validatedRequestIdentity(options);
             return request(
                 '/v1/interactions/comments',
                 {
+                    ...identity,
                     postUrls: validatedPostUrls(postUrls),
                     limitPerPost: validatedLimit(limitPerPost, 15, 'limitPerPost'),
                 },
-                commentResponseSchema
+                commentResponseSchema,
+                options
             );
         },
     };

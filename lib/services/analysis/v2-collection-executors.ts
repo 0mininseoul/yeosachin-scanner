@@ -19,6 +19,7 @@ import {
 } from '@/lib/services/instagram/providers/apify-relationship';
 import { selfHostedAuthInteractionAdapter } from '@/lib/services/instagram/providers/selfhosted-auth';
 import {
+    isSelfHostedAuthFallbackEligible,
     parseSelfHostedAuthCommentItems,
     parseSelfHostedAuthLikerItems,
     parseSelfHostedAuthRelationshipItems,
@@ -117,6 +118,7 @@ import {
 } from './authorized-test-provider-policy';
 import {
     analysisV2SelfHostedAuthRunStore,
+    createAnalysisV2SelfHostedAuthWorkerIdentity,
     type AnalysisV2SelfHostedAuthRunStore,
 } from './v2-selfhosted-auth-run-store';
 
@@ -528,6 +530,12 @@ export function createAnalysisV2RelationshipsExecutor(
                     fallback: false,
                     expectedResultCount: declaredCount,
                     requestId: claim.requestId,
+                    selfHostedAuthIdentity: createAnalysisV2SelfHostedAuthWorkerIdentity({
+                        requestId: claim.requestId,
+                        jobKey: claim.jobKey,
+                        operationKey,
+                        inputHash: providerInputHash,
+                    }),
                     onSelfHostedAuthRunFinished: run => {
                         workerReceipt.current = run;
                     },
@@ -574,7 +582,9 @@ export function createAnalysisV2RelationshipsExecutor(
                     try {
                         completed = await executeSelfHostedAuth();
                     } catch (error) {
-                        if (!scraperConfig.fallback) throw error;
+                        if (!scraperConfig.fallback || !isSelfHostedAuthFallbackEligible(error)) {
+                            throw error;
+                        }
                         completed = await executeApifyWithReplacement();
                     }
                 }
@@ -1058,6 +1068,12 @@ async function collectedTargetSource(input: {
         const receiptHolder: { current: SelfHostedAuthRunReceipt | null } = { current: null };
         const context: ProviderCallContext = {
             startCancellationSignal: input.startCancellationSignal,
+            selfHostedAuthIdentity: createAnalysisV2SelfHostedAuthWorkerIdentity({
+                requestId: input.claim.requestId,
+                jobKey: input.claim.jobKey,
+                operationKey,
+                inputHash,
+            }),
             recordUsage: () => undefined,
             onSelfHostedAuthRunFinished: async run => {
                 receiptHolder.current = run;
@@ -1109,7 +1125,9 @@ async function collectedTargetSource(input: {
     try {
         return await executeSelfHostedAuth();
     } catch (error) {
-        if (!input.scraperConfig.fallback) throw error;
+        if (!input.scraperConfig.fallback || !isSelfHostedAuthFallbackEligible(error)) {
+            throw error;
+        }
         return executeApify();
     }
 }

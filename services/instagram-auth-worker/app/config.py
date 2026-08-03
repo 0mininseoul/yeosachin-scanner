@@ -58,6 +58,8 @@ class WorkerConfig:
     max_in_flight: int
     queue_timeout_seconds: int
     rate_limit_cooldown_seconds: int
+    durable_store_bucket: str
+    durable_store_prefix: str
     local_bearer_token: str | None
 
     @classmethod
@@ -66,6 +68,22 @@ class WorkerConfig:
         token = env.get('WORKER_LOCAL_BEARER_TOKEN')
         if token is not None and not 32 <= len(token) <= 512:
             raise ValueError('WORKER_LOCAL_BEARER_TOKEN must contain 32 to 512 characters')
+        durable_store_bucket = env.get('IG_DURABLE_STORE_BUCKET')
+        if (
+            not durable_store_bucket
+            or len(durable_store_bucket) > 222
+            or not all(char.islower() or char.isdigit() or char in '._-' for char in durable_store_bucket)
+        ):
+            raise ValueError('IG_DURABLE_STORE_BUCKET is required and invalid')
+        durable_store_prefix = env.get('IG_DURABLE_STORE_PREFIX', 'instagram-auth-worker')
+        if (
+            not 1 <= len(durable_store_prefix) <= 160
+            or durable_store_prefix.startswith('/')
+            or durable_store_prefix.endswith('/')
+            or '..' in durable_store_prefix.split('/')
+            or not all(char.isalnum() or char in '._-/' for char in durable_store_prefix)
+        ):
+            raise ValueError('IG_DURABLE_STORE_PREFIX is invalid')
         return cls(
             session_settings=_session_settings(env.get('IG_SESSION_SETTINGS_BASE64')),
             max_in_flight=_bounded_integer(env, 'IG_MAX_IN_FLIGHT', 5, 1, 5),
@@ -75,5 +93,7 @@ class WorkerConfig:
             rate_limit_cooldown_seconds=_bounded_integer(
                 env, 'IG_RATE_LIMIT_COOLDOWN_SECONDS', 900, 60, 86_400
             ),
+            durable_store_bucket=durable_store_bucket,
+            durable_store_prefix=durable_store_prefix,
             local_bearer_token=token,
         )

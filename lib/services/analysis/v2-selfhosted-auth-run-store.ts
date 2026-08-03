@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import { supabaseAdmin } from '@/lib/supabase/admin';
 
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
@@ -85,6 +86,37 @@ function operationMatchesJob(jobKey: string, operationKey: string): boolean {
         return /^candidate-likers:[0-9a-f]{64}$/.test(operationKey);
     }
     return false;
+}
+
+/**
+ * Scopes the worker-side idempotency ledger to one durable V2 job. The database
+ * operation key intentionally remains content-addressed, but forwarding it
+ * verbatim would make independent analysis requests share a GCS result forever.
+ */
+export function createAnalysisV2SelfHostedAuthWorkerIdentity(input: {
+    requestId: string;
+    jobKey: string;
+    operationKey: string;
+    inputHash: string;
+}): { operationKey: string; inputHash: string } {
+    if (
+        !UUID_PATTERN.test(input.requestId)
+        || !JOB_KEY_PATTERN.test(input.jobKey)
+        || !OPERATION_KEY_PATTERN.test(input.operationKey)
+        || !SHA256_PATTERN.test(input.inputHash)
+        || !operationMatchesJob(input.jobKey, input.operationKey)
+    ) {
+        validationError();
+    }
+    const kind = input.operationKey.slice(0, input.operationKey.indexOf(':'));
+    const digest = createHash('sha256').update([
+        'analysis-v2-selfhosted-auth-worker-operation-v1',
+        input.requestId.toLowerCase(),
+        input.jobKey,
+        input.operationKey,
+        input.inputHash,
+    ].join('\n'), 'utf8').digest('hex');
+    return { operationKey: `${kind}:${digest}`, inputHash: input.inputHash };
 }
 
 function maximumItems(operationKey: string): number {

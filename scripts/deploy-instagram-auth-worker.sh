@@ -8,6 +8,8 @@ readonly DEFAULT_TIMEOUT_SECONDS="300"
 readonly DEFAULT_CONCURRENCY="5"
 readonly DEFAULT_MAX_INSTANCES="1"
 readonly DEFAULT_MIN_INSTANCES="1"
+readonly DEFAULT_DURABLE_STORE_PREFIX="instagram-auth-worker"
+readonly DURABLE_STORE_OBJECT_ROLE="roles/storage.objectUser"
 
 mode="apply"
 
@@ -24,6 +26,7 @@ Required environment variables:
   INSTAGRAM_AUTH_WORKER_RUNTIME_SERVICE_ACCOUNT_EMAIL
   INSTAGRAM_AUTH_WORKER_CALLER_SERVICE_ACCOUNT_EMAIL
   INSTAGRAM_AUTH_WORKER_SESSION_SECRET_VERSION
+  INSTAGRAM_AUTH_WORKER_DURABLE_STORE_BUCKET
   INSTAGRAM_AUTH_WORKER_NETWORK
   INSTAGRAM_AUTH_WORKER_SUBNET
 
@@ -31,10 +34,13 @@ Optional environment variables:
   INSTAGRAM_AUTH_WORKER_REGION                 Defaults to asia-northeast3; fixed.
   INSTAGRAM_AUTH_WORKER_SERVICE                Defaults to instagram-auth-worker; fixed.
   INSTAGRAM_AUTH_WORKER_SESSION_SECRET_ID      Defaults to instagram-auth-session-settings.
+  INSTAGRAM_AUTH_WORKER_DURABLE_STORE_PREFIX   Defaults to instagram-auth-worker.
 
 The service always has exactly one warm instance, request concurrency 5, a
 300-second timeout, and unauthenticated access disabled. The caller runtime service
-account is granted roles/run.invoker on this service.
+account is granted roles/run.invoker on this service. The worker runtime service
+account is granted bucket-scoped roles/storage.objectUser only on the configured
+durable-state bucket. This script never reads or prints secret payloads.
 EOF
 }
 
@@ -77,6 +83,21 @@ validate_network_name() {
     || die "$label is invalid"
 }
 
+validate_bucket_name() {
+  local bucket="$1"
+  [[ "$bucket" =~ ^[a-z0-9][a-z0-9._-]{1,61}[a-z0-9]$ ]] \
+    || die "INSTAGRAM_AUTH_WORKER_DURABLE_STORE_BUCKET is invalid"
+  [[ "$bucket" != *..* && "$bucket" != *goog* ]] \
+    || die "INSTAGRAM_AUTH_WORKER_DURABLE_STORE_BUCKET is invalid"
+  [[ ! "$bucket" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]] \
+    || die "INSTAGRAM_AUTH_WORKER_DURABLE_STORE_BUCKET is invalid"
+}
+
+validate_durable_store_prefix() {
+  [[ "$1" =~ ^[A-Za-z0-9][A-Za-z0-9._/-]{0,127}$ ]] \
+    || die "INSTAGRAM_AUTH_WORKER_DURABLE_STORE_PREFIX is invalid"
+}
+
 print_command() {
   local argument
   printf '[dry-run]'
@@ -110,6 +131,7 @@ required_env INSTAGRAM_AUTH_WORKER_PROJECT
 required_env INSTAGRAM_AUTH_WORKER_RUNTIME_SERVICE_ACCOUNT_EMAIL
 required_env INSTAGRAM_AUTH_WORKER_CALLER_SERVICE_ACCOUNT_EMAIL
 required_env INSTAGRAM_AUTH_WORKER_SESSION_SECRET_VERSION
+required_env INSTAGRAM_AUTH_WORKER_DURABLE_STORE_BUCKET
 required_env INSTAGRAM_AUTH_WORKER_NETWORK
 required_env INSTAGRAM_AUTH_WORKER_SUBNET
 
@@ -120,6 +142,8 @@ runtime_service_account="$INSTAGRAM_AUTH_WORKER_RUNTIME_SERVICE_ACCOUNT_EMAIL"
 caller_service_account="$INSTAGRAM_AUTH_WORKER_CALLER_SERVICE_ACCOUNT_EMAIL"
 session_secret_id="${INSTAGRAM_AUTH_WORKER_SESSION_SECRET_ID:-$DEFAULT_SESSION_SECRET_ID}"
 session_secret_version="$INSTAGRAM_AUTH_WORKER_SESSION_SECRET_VERSION"
+durable_store_bucket="$INSTAGRAM_AUTH_WORKER_DURABLE_STORE_BUCKET"
+durable_store_prefix="${INSTAGRAM_AUTH_WORKER_DURABLE_STORE_PREFIX:-$DEFAULT_DURABLE_STORE_PREFIX}"
 network="$INSTAGRAM_AUTH_WORKER_NETWORK"
 subnet="$INSTAGRAM_AUTH_WORKER_SUBNET"
 repo_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -136,10 +160,18 @@ validate_service_account_email "$caller_service_account" \
   "INSTAGRAM_AUTH_WORKER_CALLER_SERVICE_ACCOUNT_EMAIL"
 validate_secret_id "$session_secret_id"
 validate_secret_version "$session_secret_version"
+validate_bucket_name "$durable_store_bucket"
+validate_durable_store_prefix "$durable_store_prefix"
 validate_network_name "$network" "INSTAGRAM_AUTH_WORKER_NETWORK"
 validate_network_name "$subnet" "INSTAGRAM_AUTH_WORKER_SUBNET"
 [[ -f "$source_dir/requirements.txt" && -f "$source_dir/app/main.py" ]] \
   || die "instagram authenticated worker source is incomplete"
+
+run_mutation gcloud storage buckets add-iam-policy-binding "gs://$durable_store_bucket" \
+  "--project=$project" \
+  "--member=serviceAccount:$runtime_service_account" \
+  "--role=$DURABLE_STORE_OBJECT_ROLE" \
+  --quiet
 
 run_mutation gcloud run deploy "$service" \
   "--project=$project" \
@@ -157,7 +189,7 @@ run_mutation gcloud run deploy "$service" \
   "--network=$network" \
   "--subnet=$subnet" \
   "--vpc-egress=all-traffic" \
-  "--set-env-vars=IG_MAX_IN_FLIGHT=5,IG_QUEUE_TIMEOUT_SECONDS=240,IG_RATE_LIMIT_COOLDOWN_SECONDS=900" \
+  "--set-env-vars=IG_MAX_IN_FLIGHT=5,IG_QUEUE_TIMEOUT_SECONDS=240,IG_RATE_LIMIT_COOLDOWN_SECONDS=900,IG_DURABLE_STORE_BUCKET=$durable_store_bucket,IG_DURABLE_STORE_PREFIX=$durable_store_prefix" \
   "--set-secrets=IG_SESSION_SETTINGS_BASE64=$session_secret_id:$session_secret_version" \
   --quiet
 

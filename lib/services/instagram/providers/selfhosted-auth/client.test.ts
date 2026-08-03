@@ -3,6 +3,7 @@ import {
     SelfHostedAuthWorkerError,
     createSelfHostedAuthWorkerClient,
     getSelfHostedAuthWorkerConfig,
+    isSelfHostedAuthFallbackEligible,
     type SelfHostedAuthWorkerConfig,
 } from './client';
 
@@ -17,6 +18,10 @@ const relationshipResponse = {
         isPrivate: false,
         isVerified: false,
     }],
+};
+const identity = {
+    operationKey: `relationship-followers:${'a'.repeat(64)}`,
+    inputHash: 'b'.repeat(64),
 };
 
 describe('authenticated self-hosted worker config', () => {
@@ -89,7 +94,7 @@ describe('authenticated self-hosted worker client', () => {
             getAuthorizationHeader,
         });
 
-        await expect(client.getRelationship('followers', 'target.user', 1200))
+        await expect(client.getRelationship('followers', 'target.user', 1200, identity))
             .resolves.toEqual(relationshipResponse);
         expect(getAuthorizationHeader).toHaveBeenCalledWith('https://worker.example');
         expect(fetch).toHaveBeenCalledWith(
@@ -97,7 +102,11 @@ describe('authenticated self-hosted worker client', () => {
             expect.objectContaining({
                 method: 'POST',
                 headers: expect.objectContaining({ authorization: 'Bearer oidc-token' }),
-                body: JSON.stringify({ username: 'target.user', limit: 1200 }),
+                body: JSON.stringify({
+                    ...identity,
+                    username: 'target.user',
+                    limit: 1200,
+                }),
             })
         );
     });
@@ -113,8 +122,76 @@ describe('authenticated self-hosted worker client', () => {
             getAuthorizationHeader: async () => 'Bearer token',
         });
 
-        await expect(client.getRelationship('followers', 'target.user', 1))
+        await expect(client.getRelationship('followers', 'target.user', 1, identity))
             .rejects.toMatchObject({ code: 'invalid_response', retryable: false });
+    });
+
+    it('keeps caller cancellation distinct from the client timeout', async () => {
+        const controller = new AbortController();
+        const fetch = vi.fn(async (_url: URL | RequestInfo, init?: RequestInit) => {
+            return new Promise<Response>((_resolve, reject) => {
+                init?.signal?.addEventListener('abort', () => {
+                    reject(new DOMException('Aborted', 'AbortError'));
+                }, { once: true });
+            });
+        });
+        const client = createSelfHostedAuthWorkerClient({
+            config,
+            fetch,
+            getAuthorizationHeader: async () => 'Bearer token',
+        });
+        const pending = client.getRelationship('followers', 'target.user', 1, {
+            ...identity,
+            signal: controller.signal,
+        });
+        controller.abort();
+
+        await expect(pending).rejects.toMatchObject({
+            code: 'request_cancelled',
+            retryable: false,
+        });
+    });
+
+    it('sends the supplied V2 identity for interaction requests without deriving a content key', async () => {
+        const response = {
+            schemaVersion: 1,
+            runId: relationshipResponse.runId,
+            accountSlot: 'primary',
+            items: [{
+                postUrl: 'https://www.instagram.com/p/Abc123/',
+                id: '1',
+                username: 'target.user',
+                profilePicUrl: 'https://cdn.example/liker.jpg',
+                isPrivate: false,
+                isVerified: false,
+                totalLikes: 1,
+            }],
+        };
+        const fetch = vi.fn(async () => new Response(JSON.stringify(response), { status: 200 }));
+        const client = createSelfHostedAuthWorkerClient({
+            config,
+            fetch,
+            getAuthorizationHeader: async () => 'Bearer token',
+        });
+        const operationKey = `candidate-likers:${'c'.repeat(64)}`;
+        const inputHash = 'd'.repeat(64);
+
+        await expect(client.getPostLikers(
+            ['https://instagram.com/p/Abc123/'],
+            1,
+            { operationKey, inputHash }
+        )).resolves.toEqual(response);
+        expect(fetch).toHaveBeenCalledWith(
+            'https://worker.example/v1/interactions/likers',
+            expect.objectContaining({
+                body: JSON.stringify({
+                    operationKey,
+                    inputHash,
+                    postUrls: ['https://www.instagram.com/p/Abc123/'],
+                    limitPerPost: 1,
+                }),
+            })
+        );
     });
 
     it('classifies queue-full and quarantined responses for deterministic Apify fallback', async () => {
@@ -133,11 +210,89 @@ describe('authenticated self-hosted worker client', () => {
                 getAuthorizationHeader: async () => 'Bearer token',
             });
 
-            const error = await client.getRelationship('following', 'target.user', 1)
+            const error = await client.getRelationship('following', 'target.user', 1, {
+                ...identity,
+                operationKey: `relationship-following:${'a'.repeat(64)}`,
+            })
                 .catch(caught => caught);
             expect(error).toBeInstanceOf(SelfHostedAuthWorkerError);
             expect(error).toMatchObject({ code, retryable, status });
         }
+    });
+
+    it('allows only explicit worker availability and account-state classes to fall back', () => {
+        for (const code of [
+            'transport_error',
+            'request_timeout',
+            'queue_full',
+            'queue_timeout',
+            'upstream_error',
+            'instagram_rate_limited',
+            'instagram_challenge',
+            'authentication_failed',
+            'account_quarantined',
+        ] as const) {
+            expect(isSelfHostedAuthFallbackEligible(
+                new SelfHostedAuthWorkerError(code, true, null)
+            )).toBe(true);
+        }
+        expect(isSelfHostedAuthFallbackEligible(
+            new SelfHostedAuthWorkerError('invalid_response', false, 200)
+        )).toBe(false);
+        expect(isSelfHostedAuthFallbackEligible(
+            new SelfHostedAuthWorkerError('request_cancelled', false, null)
+        )).toBe(false);
+        expect(isSelfHostedAuthFallbackEligible(
+            new SelfHostedAuthWorkerError('idempotency_pending', false, 409)
+        )).toBe(false);
+        expect(isSelfHostedAuthFallbackEligible(
+            new SelfHostedAuthWorkerError('idempotency_key_reused', false, 409)
+        )).toBe(false);
+        expect(isSelfHostedAuthFallbackEligible(
+            new Error('ANALYSIS_V2_PROVIDER_RUN_FENCE_MISMATCH')
+        )).toBe(false);
+        expect(isSelfHostedAuthFallbackEligible(
+            new Error('SCRAPING_RUN_PENDING_ERROR: retry persisted run')
+        )).toBe(false);
+    });
+
+    it('surfaces durable worker idempotency ambiguity without permitting fallback', async () => {
+        const fetch = vi.fn(async () => new Response(JSON.stringify({
+            schemaVersion: 1,
+            code: 'idempotency_pending',
+            retryable: false,
+        }), { status: 409 }));
+        const client = createSelfHostedAuthWorkerClient({
+            config,
+            fetch,
+            getAuthorizationHeader: async () => 'Bearer token',
+        });
+
+        await expect(client.getRelationship('followers', 'target.user', 1, identity))
+            .rejects.toMatchObject({ code: 'idempotency_pending', retryable: false, status: 409 });
+    });
+
+    it('parses durable-state outages but keeps them fail-closed outside paid fallback', async () => {
+        const fetch = vi.fn(async () => new Response(JSON.stringify({
+            schemaVersion: 1,
+            code: 'durable_state_unavailable',
+            retryable: true,
+            retryAfterSeconds: 30,
+        }), { status: 503 }));
+        const client = createSelfHostedAuthWorkerClient({
+            config,
+            fetch,
+            getAuthorizationHeader: async () => 'Bearer token',
+        });
+
+        const error = await client.getRelationship('followers', 'target.user', 1, identity)
+            .then(() => null, value => value);
+        expect(error).toMatchObject({
+            code: 'durable_state_unavailable',
+            retryable: true,
+            status: 503,
+        });
+        expect(isSelfHostedAuthFallbackEligible(error)).toBe(false);
     });
 
     it('rejects interaction URLs that collide after canonicalization before network I/O', async () => {
@@ -151,7 +306,10 @@ describe('authenticated self-hosted worker client', () => {
         expect(() => client.getPostLikers([
             'https://instagram.com/reel/SameCode/',
             'https://www.instagram.com/reels/SameCode/',
-        ], 10)).toThrow('post URLs are invalid');
+        ], 10, {
+            operationKey: `target-likers:${'a'.repeat(64)}`,
+            inputHash: 'b'.repeat(64),
+        })).toThrow('post URLs are invalid');
         expect(fetch).not.toHaveBeenCalled();
     });
 });
