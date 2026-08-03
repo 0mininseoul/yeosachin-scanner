@@ -31,14 +31,19 @@ Required source dotenv keys:
   SELFHOSTED_PROFILE_GLOBAL_MIN_INTERVAL_MS=750
   SELFHOSTED_PROFILE_GLOBAL_RESPONSE_GUARD_MS=100
   SELFHOSTED_AUTH_ENABLED=true|false
-  SELFHOSTED_AUTH_WORKER_URL=https://private-worker-origin
-  SELFHOSTED_AUTH_WORKER_OIDC_AUDIENCE=https://private-worker-origin
-  SELFHOSTED_AUTH_WORKER_TIMEOUT_MS=1000..300000
   SCRAPER_FOLLOWERS=apify|selfhosted_auth
   SCRAPER_FOLLOWING=apify|selfhosted_auth
   SCRAPER_LIKERS=apify|selfhosted_auth
   SCRAPER_COMMENTS=apify|selfhosted_auth
   SCRAPER_FALLBACK=true|false
+
+Required only when all four SCRAPER_* selectors above use selfhosted_auth:
+  SELFHOSTED_AUTH_WORKER_URL=https://private-worker-origin
+  SELFHOSTED_AUTH_WORKER_OIDC_AUDIENCE=https://private-worker-origin
+  SELFHOSTED_AUTH_WORKER_TIMEOUT_MS=1000..300000
+
+For an all-Apify rollback, set SELFHOSTED_AUTH_ENABLED=false and omit the
+worker URL, audience, and timeout keys.
 
 Generated files:
   analysis-v2-runtime.yaml  Non-secret worker runtime manifest.
