@@ -6,8 +6,14 @@ import type {
 
 export type Capability = 'profile' | 'profilesBatch' | 'followers' | 'following';
 
-export type ProviderName = 'apify' | 'coderx' | 'flashapi' | 'rapidapi' | 'selfhosted';
-export type InteractionProviderName = 'apify' | 'disabled';
+export type ProviderName =
+    | 'apify'
+    | 'coderx'
+    | 'flashapi'
+    | 'rapidapi'
+    | 'selfhosted'
+    | 'selfhosted_auth';
+export type InteractionProviderName = 'apify' | 'selfhosted_auth' | 'disabled';
 export const APIFY_CREDENTIAL_SLOTS = [
     'primary',
     'secondary',
@@ -101,7 +107,14 @@ export interface ScrapeRequestOptions {
     onProfileStart?(username: string): void | Promise<void>;
     /** Internal-only profile handoff for a presentation heartbeat after collection. */
     onProfileResolved?(profile: InstagramProfile): void | Promise<void>;
+    onSelfHostedAuthRunFinished?(receipt: SelfHostedAuthRunReceipt): void | Promise<void>;
     providerRun?: ProviderRunCheckpoint;
+}
+
+export interface SelfHostedAuthRunReceipt {
+    provider: 'selfhosted_auth';
+    runId: string;
+    accountSlot: 'primary';
 }
 
 /** Durable hand-off for paid provider runs that may outlive one serverless invocation. */
@@ -182,6 +195,7 @@ export interface ProviderCallContext
     adoptedRelationshipSourceDeclaredCount?: number;
     onProfileStart?(username: string): void | Promise<void>;
     onProfileResolved?(profile: InstagramProfile): void | Promise<void>;
+    onSelfHostedAuthRunFinished?(receipt: SelfHostedAuthRunReceipt): void | Promise<void>;
     recordUsage(delta: ProviderUsageDelta): void;
 }
 

@@ -9,7 +9,13 @@ import {
     apifyInteractionAdapter,
     type ApifyInteractionAdapter,
 } from '@/lib/services/instagram/providers/apify-interactions';
-import type { ProviderCallContext } from '@/lib/services/instagram/providers/types';
+import type {
+    ProviderCallContext,
+    SelfHostedAuthRunReceipt,
+} from '@/lib/services/instagram/providers/types';
+import { selfHostedAuthInteractionAdapter } from '@/lib/services/instagram/providers/selfhosted-auth';
+import { parseSelfHostedAuthLikerItems } from '@/lib/services/instagram/providers/selfhosted-auth/client';
+import { getInteractionScraperConfig } from '@/lib/services/instagram/config';
 import { supabaseAdmin } from '@/lib/supabase/admin';
 import {
     analysisV2ProfileFetchResumeSchema,
@@ -47,6 +53,10 @@ import {
     ANALYSIS_V2_REVERSE_LIKE_LIMIT as REVERSE_LIKE_LIMIT,
     reverseLikeMaximumCharge,
 } from './v2-apify-operation-costs';
+import {
+    analysisV2SelfHostedAuthRunStore,
+    type AnalysisV2SelfHostedAuthRunStore,
+} from './v2-selfhosted-auth-run-store';
 export {
     ANALYSIS_V2_MAX_REVERSE_CANDIDATES as MAX_REVERSE_CANDIDATES,
     ANALYSIS_V2_REVERSE_LIKE_LIMIT as REVERSE_LIKE_LIMIT,
@@ -339,12 +349,17 @@ function providerContext(
 
 export function createAnalysisV2ReverseLikeCollector(input: {
     adapter?: ApifyInteractionAdapter;
+    selfHostedAuthAdapter?: ApifyInteractionAdapter;
     providerRunStore?: AnalysisV2ProviderRunStore;
+    selfHostedAuthRunStore?: AnalysisV2SelfHostedAuthRunStore;
     contextStore?: AnalysisV2CollectionRequestContextStore;
     env?: Record<string, string | undefined>;
 } = {}): AnalysisV2ReverseLikeCollector {
     const adapter = input.adapter ?? apifyInteractionAdapter;
+    const authenticatedAdapter = input.selfHostedAuthAdapter ?? selfHostedAuthInteractionAdapter;
     const providerRunStore = input.providerRunStore ?? analysisV2ProviderRunStore;
+    const selfHostedAuthRunStore = input.selfHostedAuthRunStore
+        ?? analysisV2SelfHostedAuthRunStore;
     const contextStore = input.contextStore ?? analysisV2CollectionRequestContextStore;
     const env = input.env ?? process.env;
     return {
@@ -384,7 +399,7 @@ export function createAnalysisV2ReverseLikeCollector(input: {
             ) {
                 throw new Error('ANALYSIS_V2_REVERSE_LIKE_SCOPE_MISMATCH');
             }
-            const canonicalInput = [
+            const apifyCanonicalInput = [
                 'candidate-likers-v3',
                 targetUsername,
                 String(REVERSE_LIKE_LIMIT),
@@ -395,40 +410,124 @@ export function createAnalysisV2ReverseLikeCollector(input: {
                     String(row.declaredLikesCountKnown),
                 ]),
             ].map(lengthPrefixed).join('\n');
-            const operationKey = createAnalysisV2ProviderOperationKey(
-                'candidate-likers',
-                canonicalInput
-            );
-            const maxChargeUsd = reverseLikeMaximumCharge(candidates.length, env);
-            const providerBinding = resolveAnalysisV2ApifyProviderBinding({
-                accessMode: requestContext.accessMode,
-                policy: requestContext.providerExecutionPolicy,
-                operation: 'candidate-likers',
-                maxChargeUsd,
-                env,
-            });
-            const binding = await providerRunStore.bindAdapterCheckpoint({
-                ...claim,
-                operationKey,
-                inputHash: createAnalysisV2ProviderInputHash(canonicalInput),
-                logicalProvider: 'apify',
-                actorId: APIFY_LIKERS_ACTOR_ID,
-                credentialSlot: providerBinding.credentialSlot,
-                maxChargeUsd,
-            });
-            const likers = await adapter.getPostLikers(
-                candidates.map(row => row.postUrl),
-                REVERSE_LIKE_LIMIT,
-                providerContext(binding.checkpoint)
-            );
-            const stored = await providerRunStore.load({
-                requestId: claim.requestId,
-                jobKey: claim.jobKey,
-                operationKey,
-            });
-            if (!stored || stored.status !== 'succeeded' || !stored.runId) {
-                throw new Error('ANALYSIS_V2_REVERSE_LIKE_PROVIDER_RUN_NOT_SUCCEEDED');
+            const executeApify = async () => {
+                const operationKey = createAnalysisV2ProviderOperationKey(
+                    'candidate-likers',
+                    apifyCanonicalInput
+                );
+                const maxChargeUsd = reverseLikeMaximumCharge(candidates.length, env);
+                const providerBinding = resolveAnalysisV2ApifyProviderBinding({
+                    accessMode: requestContext.accessMode,
+                    policy: requestContext.providerExecutionPolicy,
+                    operation: 'candidate-likers',
+                    maxChargeUsd,
+                    env,
+                });
+                const binding = await providerRunStore.bindAdapterCheckpoint({
+                    ...claim,
+                    operationKey,
+                    inputHash: createAnalysisV2ProviderInputHash(apifyCanonicalInput),
+                    logicalProvider: 'apify',
+                    actorId: APIFY_LIKERS_ACTOR_ID,
+                    credentialSlot: providerBinding.credentialSlot,
+                    maxChargeUsd,
+                });
+                const likers = await adapter.getPostLikers(
+                    candidates.map(row => row.postUrl),
+                    REVERSE_LIKE_LIMIT,
+                    providerContext(binding.checkpoint)
+                );
+                const stored = await providerRunStore.load({
+                    requestId: claim.requestId,
+                    jobKey: claim.jobKey,
+                    operationKey,
+                });
+                if (!stored || stored.status !== 'succeeded' || !stored.runId) {
+                    throw new Error('ANALYSIS_V2_REVERSE_LIKE_PROVIDER_RUN_NOT_SUCCEEDED');
+                }
+                return { operationKey, likers };
+            };
+            const executeSelfHostedAuth = async () => {
+                const canonicalInput = [
+                    'candidate-likers-v3',
+                    targetUsername,
+                    String(REVERSE_LIKE_LIMIT),
+                    ...candidates.flatMap(row => [
+                        row.candidateId,
+                        row.postUrl,
+                        String(row.declaredLikesCount),
+                        String(row.declaredLikesCountKnown),
+                    ]),
+                    'selfhosted-auth-v1',
+                ].map(lengthPrefixed).join('\n');
+                const operationKey = createAnalysisV2ProviderOperationKey(
+                    'candidate-likers',
+                    canonicalInput
+                );
+                const inputHash = createAnalysisV2ProviderInputHash(canonicalInput);
+                const cached = await selfHostedAuthRunStore.load({
+                    ...claim,
+                    operationKey,
+                    inputHash,
+                });
+                if (cached) {
+                    return {
+                        operationKey,
+                        likers: parseSelfHostedAuthLikerItems(cached.items),
+                    };
+                }
+                const receiptHolder: { current: SelfHostedAuthRunReceipt | null } = {
+                    current: null,
+                };
+                const likers = await authenticatedAdapter.getPostLikers(
+                    candidates.map(row => row.postUrl),
+                    REVERSE_LIKE_LIMIT,
+                    {
+                        recordUsage: () => undefined,
+                        onSelfHostedAuthRunFinished: run => {
+                            receiptHolder.current = run;
+                        },
+                    }
+                );
+                if (receiptHolder.current === null) {
+                    throw new Error('ANALYSIS_V2_SELFHOSTED_AUTH_RECEIPT_MISSING');
+                }
+                await selfHostedAuthRunStore.checkpoint({
+                    ...claim,
+                    operationKey,
+                    inputHash,
+                    runId: receiptHolder.current.runId,
+                    accountSlot: receiptHolder.current.accountSlot,
+                    items: likers.map(row => ({ ...row })),
+                });
+                return { operationKey, likers };
+            };
+            const scraperConfig = getInteractionScraperConfig(env);
+            let collected: Awaited<ReturnType<typeof executeApify>>
+                | Awaited<ReturnType<typeof executeSelfHostedAuth>>;
+            if (scraperConfig.likers === 'selfhosted_auth') {
+                const existingFallback = await providerRunStore.load({
+                    requestId: claim.requestId,
+                    jobKey: claim.jobKey,
+                    operationKey: createAnalysisV2ProviderOperationKey(
+                        'candidate-likers',
+                        apifyCanonicalInput
+                    ),
+                });
+                if (existingFallback) {
+                    collected = await executeApify();
+                } else {
+                    try {
+                        collected = await executeSelfHostedAuth();
+                    } catch (error) {
+                        if (!scraperConfig.fallback) throw error;
+                        collected = await executeApify();
+                    }
+                }
+            } else {
+                collected = await executeApify();
             }
+            const { operationKey, likers } = collected;
             const candidateByUrl = new Map(candidates.map(row => [row.postUrl, row]));
             const usernamesByCandidate = new Map(candidates.map(row => [
                 row.candidateId,

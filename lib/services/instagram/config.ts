@@ -13,6 +13,12 @@ export interface ScraperConfig {
     fallback: boolean;
 }
 
+export interface InteractionScraperConfig {
+    likers: Exclude<InteractionProviderName, 'disabled'>;
+    comments: Exclude<InteractionProviderName, 'disabled'>;
+    fallback: boolean;
+}
+
 /** 기능별 생산 기본 프로바이더. */
 export const DEFAULT_PROVIDERS: Record<Capability, ProviderName> = {
     profile: 'selfhosted',
@@ -27,14 +33,27 @@ export const AUTOMATIC_FALLBACK: Partial<
 > = {
     profile: { selfhosted: 'apify' },
     profilesBatch: { selfhosted: 'apify' },
+    followers: { selfhosted_auth: 'apify' },
+    following: { selfhosted_auth: 'apify' },
 };
 
 export const VALID_PROVIDERS: Record<Capability, readonly ProviderName[]> = {
     profile: ['apify', 'selfhosted'],
     profilesBatch: ['apify', 'selfhosted'],
-    followers: ['flashapi', 'apify', 'coderx'],
-    following: ['flashapi', 'apify', 'coderx', 'rapidapi'],
+    followers: ['flashapi', 'apify', 'coderx', 'selfhosted_auth'],
+    following: ['flashapi', 'apify', 'coderx', 'rapidapi', 'selfhosted_auth'],
 };
+
+export function isSelfHostedAuthEnabled(
+    env: Record<string, string | undefined> = process.env
+): boolean {
+    const raw = env.SELFHOSTED_AUTH_ENABLED;
+    if (raw === undefined || raw === 'false') return false;
+    if (raw === 'true') return true;
+    throw new Error(
+        'SCRAPING_CONFIG_ERROR: SELFHOSTED_AUTH_ENABLED must be true or false.'
+    );
+}
 
 function pick(capability: Capability, raw: string | undefined): ProviderName {
     if (raw === undefined) return DEFAULT_PROVIDERS[capability];
@@ -50,6 +69,18 @@ function booleanSetting(raw: string | undefined): boolean {
     if (raw === 'true') return true;
     if (raw === 'false') return false;
     throw new Error('SCRAPING_CONFIG_ERROR: SCRAPER_FALLBACK은 true 또는 false여야 합니다.');
+}
+
+function interactionProviderSetting(
+    capability: 'likers' | 'comments',
+    raw: string | undefined
+): Exclude<InteractionProviderName, 'disabled'> {
+    if (raw === undefined) return 'apify';
+    const value = raw.trim();
+    if (value === 'apify' || value === 'selfhosted_auth') return value;
+    throw new Error(
+        `SCRAPING_CONFIG_ERROR: '${raw}'는 '${capability}'에 사용할 수 없습니다.`
+    );
 }
 
 export function isProviderAllowed(capability: Capability, value: unknown): value is ProviderName {
@@ -90,7 +121,7 @@ export function parseScraperProviderSelection(raw: unknown): ScraperProviderSele
     for (const capability of ['likers', 'comments'] as const) {
         const value = input[capability];
         if (value === undefined) continue;
-        if (value !== 'apify' && value !== 'disabled') {
+        if (value !== 'apify' && value !== 'selfhosted_auth' && value !== 'disabled') {
             throw new Error(
                 `SCRAPING_CONFIG_ERROR: '${String(value)}'는 '${capability}'에 사용할 수 없습니다.`
             );
@@ -109,11 +140,40 @@ export function parseScraperProviderSelection(raw: unknown): ScraperProviderSele
 export function getScraperConfig(
     env: Record<string, string | undefined> = process.env
 ): ScraperConfig {
-    return {
+    const selfHostedAuthEnabled = isSelfHostedAuthEnabled(env);
+    const parsed = {
         profile: pick('profile', env.SCRAPER_PROFILE),
         profilesBatch: pick('profilesBatch', env.SCRAPER_PROFILES_BATCH),
         followers: pick('followers', env.SCRAPER_FOLLOWERS),
         following: pick('following', env.SCRAPER_FOLLOWING),
         fallback: booleanSetting(env.SCRAPER_FALLBACK),
     };
+    if (
+        !selfHostedAuthEnabled
+        && (parsed.followers === 'selfhosted_auth' || parsed.following === 'selfhosted_auth')
+    ) {
+        throw new Error(
+            'SCRAPING_CONFIG_ERROR: SELFHOSTED_AUTH_ENABLED must be true before selecting selfhosted_auth.'
+        );
+    }
+    return parsed;
+}
+
+export function getInteractionScraperConfig(
+    env: Record<string, string | undefined> = process.env
+): InteractionScraperConfig {
+    const parsed: InteractionScraperConfig = {
+        likers: interactionProviderSetting('likers', env.SCRAPER_LIKERS),
+        comments: interactionProviderSetting('comments', env.SCRAPER_COMMENTS),
+        fallback: booleanSetting(env.SCRAPER_FALLBACK),
+    };
+    if (
+        !isSelfHostedAuthEnabled(env)
+        && (parsed.likers === 'selfhosted_auth' || parsed.comments === 'selfhosted_auth')
+    ) {
+        throw new Error(
+            'SCRAPING_CONFIG_ERROR: SELFHOSTED_AUTH_ENABLED must be true before selecting selfhosted_auth.'
+        );
+    }
+    return parsed;
 }

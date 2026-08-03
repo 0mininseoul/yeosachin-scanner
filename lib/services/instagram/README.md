@@ -1,6 +1,6 @@
 # Instagram provider operations
 
-This module collects public Instagram data through direct public profile reads or documented, API-key-authenticated vendor APIs. It does not use Instagram login cookies, account pools, proxy rotation, stealth, or access-control evasion.
+This module collects public Instagram data through direct public profile reads, documented API-key-authenticated vendor APIs, or the separately gated single-account authenticated worker described below. It does not use account pools, proxy rotation, stealth, or access-control evasion.
 
 ## Production routing
 
@@ -8,12 +8,22 @@ This module collects public Instagram data through direct public profile reads o
 |---|---|---|---|
 | `profile` | `selfhosted` | `selfhosted`, `apify` | `selfhosted -> apify` |
 | `profilesBatch` | `selfhosted` | `selfhosted`, `apify` | `selfhosted -> apify` |
-| `followers` | `apify` | `apify`, `flashapi`, `coderx` | none |
-| `following` | `apify` | `apify`, `flashapi`, `coderx`, `rapidapi` | none |
+| `followers` | `apify` | `apify`, `flashapi`, `coderx`, `selfhosted_auth` | `selfhosted_auth -> apify` |
+| `following` | `apify` | `apify`, `flashapi`, `coderx`, `rapidapi`, `selfhosted_auth` | `selfhosted_auth -> apify` |
+| `likers` | `apify` | `apify`, `selfhosted_auth` | `selfhosted_auth -> apify` |
+| `comments` | `apify` | `apify`, `selfhosted_auth` | `selfhosted_auth -> apify` |
 
-Only `profile` and `profilesBatch` make one automatic fallback attempt. Relationship operations have no automatic fallback: a failed or incomplete Apify result rejects the operation instead of silently switching vendors. FlashAPI, CoderX, and the deprecated Stable RapidAPI adapter are explicit operator choices only. `selfhosted` supports direct public profile and profile-batch reads; it has no relationship-list implementation.
+`profile` and `profilesBatch` make one `selfhosted -> apify` fallback attempt. When and only when `selfhosted_auth` is explicitly selected, a failed authenticated relationship or interaction operation may make one fallback attempt through the existing durable Apify path. An Apify failure never switches to another provider, and a retry resumes any already-created Apify fallback identity before touching the authenticated account again. FlashAPI, CoderX, and the deprecated Stable RapidAPI adapter are explicit operator choices only. `selfhosted` supports direct public profile and profile-batch reads; it has no relationship-list implementation.
 
-Unset `SCRAPER_*` values use the production defaults above. Explicit invalid provider or fallback values fail closed before a paid call. `SCRAPER_FALLBACK=false` disables the profile fallback; it does not add or change a relationship fallback.
+Unset `SCRAPER_*` values use the production defaults above. Explicit invalid provider or fallback values fail closed before a paid call. `SCRAPER_FALLBACK=false` disables both the profile fallback and the opt-in `selfhosted_auth -> apify` fallback.
+
+## Opt-in authenticated worker
+
+`selfhosted_auth` is a separately deployed, single-account Cloud Run worker for the explicitly selected relationship and interaction capabilities. It is disabled by default: `SELFHOSTED_AUTH_ENABLED=false` means the application does not construct a worker client or send a request. The application calls the worker with a Google ID token for `SELFHOSTED_AUTH_WORKER_OIDC_AUDIENCE`; its Cloud Run service IAM allows only the configured caller runtime service account, never unauthenticated access. The worker endpoint must be an HTTPS origin and its client timeout is bounded to 1,000–300,000 ms (default 240,000 ms). Cloud Run accepts at most five in-flight requests in one instance, while the worker serializes actual Instagram account operations to exactly one at a time.
+
+This path reduces vendor spend but cannot make Instagram suspension risk zero. A rate-limit signal opens a process cooldown, and challenge or authentication failures quarantine the account until an operator restart/recovery; the application can then use the durable Apify fallback when enabled. Use only the designated disposable account and keep the kill switch closed until a canary is reviewed.
+
+The worker session settings are a pinned Secret Manager version injected only into the worker as `IG_SESSION_SETTINGS_BASE64`; do not put that value in application environment files, commands, logs, or diagnostics. The deployment contract and rollback procedure are in [`docs/operations/instagram-auth-worker.md`](../../../docs/operations/instagram-auth-worker.md).
 
 ## Vendor contracts
 
@@ -68,10 +78,10 @@ The self-hosted path is an unauthenticated `web_profile_info` request, not brows
 
 - Target comments: official `apify/instagram-comment-scraper`, at most 6 URLs and 15 top-level comments per URL; replies are forced off.
 - Post likers: community `datadoping/instagram-likes-scraper`, 150 per target post across the newest four posts and 100 for one newest candidate post. The paid follow-up is capped at the ten observed women with the highest intermediate score.
-- Neither Actor receives an Instagram login, cookie, or session ID.
+- Neither Apify Actor receives an Instagram login, cookie, or session ID. The opt-in `selfhosted_auth` worker instead reads one persisted session setting from its private Secret Manager injection.
 - Only liker/comment rows matching an already-classified public female mutual are persisted. Unrelated usernames are discarded in memory.
 - A positive match is evidence; absence from a truncated result is unknown. Coverage and raw counts remain server-internal and influence ranking without being exposed on result pages.
-- Per-request admin selection accepts `likers` and `comments` as `apify` or `disabled`; there is no automatic paid fallback.
+- Per-request admin selection accepts `likers` and `comments` as `apify`, `selfhosted_auth`, or `disabled`. The V2 production route is selected by `SCRAPER_LIKERS` and `SCRAPER_COMMENTS`; only an explicitly selected `selfhosted_auth` path can fall back to Apify.
 - Every interaction batch stores a `running` reservation before the paid Actor starts. A process interruption is finalized as failed on resume instead of rerunning the same charge; the result exposes the resulting low coverage.
 
 ### Manual providers

@@ -31,7 +31,8 @@ export type AnalysisV2DetailedMutualLimit =
 export type AnalysisV2RelationshipSide = 'followers' | 'following';
 export type AnalysisV2RelationshipProvider =
     | 'apify'
-    | 'coderx';
+    | 'coderx'
+    | 'selfhosted_auth';
 export type AnalysisV2TargetEvidenceSignal =
     | 'target_post_like'
     | 'target_post_comment';
@@ -120,14 +121,14 @@ export interface AnalysisV2RelationshipStagingSnapshot {
     detailedMutualLimit: AnalysisV2DetailedMutualLimit;
     manifest: AnalysisV2RelationshipDagManifest;
     followers: AnalysisV2RelationshipSideManifest & {
-        provider: 'apify' | null;
+        provider: Extract<AnalysisV2RelationshipProvider, 'apify' | 'selfhosted_auth'> | null;
         providerRunId: string | null;
         providerOperationKey: string | null;
         providerCredentialSlot: ApifyCredentialSlot | null;
         rows: AnalysisV2CanonicalRelationshipRow[];
     };
     following: AnalysisV2RelationshipSideManifest & {
-        provider: 'apify' | null;
+        provider: Extract<AnalysisV2RelationshipProvider, 'apify' | 'selfhosted_auth'> | null;
         providerRunId: string | null;
         providerOperationKey: string | null;
         providerCredentialSlot: ApifyCredentialSlot | null;
@@ -220,7 +221,7 @@ export type AnalysisV2RelationshipSideSourceInput =
     | {
         status: 'collected';
         inputHash: string;
-        provider: 'apify';
+        provider: Extract<AnalysisV2RelationshipProvider, 'apify' | 'selfhosted_auth'>;
         providerRunId: string;
         providerOperationKey: string;
     }
@@ -382,7 +383,7 @@ const mutualRowSchema = canonicalRelationshipRowSchema.extend({
 }).strict();
 
 const relationshipStagingSideSchema = relationshipSideManifestSchema.extend({
-    provider: z.literal('apify').nullable(),
+    provider: z.enum(['apify', 'selfhosted_auth']).nullable(),
     providerRunId: z.string().regex(PROVIDER_RUN_ID_PATTERN).nullable(),
     providerOperationKey: z.string().max(128).nullable(),
     providerCredentialSlot: z.enum(APIFY_CREDENTIAL_SLOTS).nullable(),
@@ -393,7 +394,7 @@ const relationshipSideSourceInputSchema = z.discriminatedUnion('status', [
     z.object({
         status: z.literal('collected'),
         inputHash: z.string().regex(SHA256_PATTERN),
-        provider: z.literal('apify'),
+        provider: z.enum(['apify', 'selfhosted_auth']),
         providerRunId: z.string().regex(PROVIDER_RUN_ID_PATTERN),
         providerOperationKey: z.string().max(128),
     }).strict(),
@@ -451,7 +452,7 @@ const targetEvidenceCoverageSchema = z.object({
 const canonicalTargetEvidenceSourceSchema = z.object({
     status: z.enum(['collected', 'not_applicable']),
     inputHash: z.string().regex(SHA256_PATTERN),
-    provider: z.enum(['apify', 'coderx']).nullable(),
+    provider: z.enum(['apify', 'coderx', 'selfhosted_auth']).nullable(),
     providerRunId: z.string().regex(PROVIDER_RUN_ID_PATTERN).nullable(),
     providerOperationKey: z.string().max(87).nullable(),
     providerCredentialSlot: z.enum(APIFY_CREDENTIAL_SLOTS).nullable(),
@@ -747,7 +748,7 @@ export function canonicalizeAnalysisV2TargetEvidenceRows(input: {
 const collectedTargetEvidenceSourceInputSchema = z.object({
     status: z.literal('collected'),
     inputHash: z.string().regex(SHA256_PATTERN),
-    provider: z.enum(['apify', 'coderx']),
+    provider: z.enum(['apify', 'coderx', 'selfhosted_auth']),
     providerRunId: z.string().regex(PROVIDER_RUN_ID_PATTERN),
     providerOperationKey: z.string().max(87),
     providerCredentialSlot: z.enum(APIFY_CREDENTIAL_SLOTS),
@@ -1041,7 +1042,7 @@ function assertRelationshipSnapshotIntegrity(
         } else {
             if (
                 staged.declaredCount === 0
-                || staged.provider !== 'apify'
+                || (staged.provider !== 'apify' && staged.provider !== 'selfhosted_auth')
                 || staged.providerRunId === null
                 || staged.providerOperationKey === null
                 || staged.providerCredentialSlot === null

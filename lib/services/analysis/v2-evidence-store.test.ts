@@ -160,6 +160,27 @@ describe('analysis V2 evidence store', () => {
         })).toMatchObject({ providerCredentialSlot: 'quaternary' });
     });
 
+    it('preserves a separate selfhosted_auth receipt as target evidence provenance', () => {
+        expect(canonicalizeAnalysisV2TargetEvidenceSource('target_post_like', {
+            status: 'collected',
+            inputHash,
+            provider: 'selfhosted_auth',
+            providerRunId: '0123456789abcdef0123456789abcdef',
+            providerOperationKey: `target-likers:${'6'.repeat(64)}`,
+            providerCredentialSlot: 'primary',
+            coverage: [{
+                postId: 'post-1',
+                declaredCount: 1,
+                returnedCount: 1,
+                requestedLimit: 150,
+            }],
+        })).toMatchObject({
+            provider: 'selfhosted_auth',
+            providerRunId: '0123456789abcdef0123456789abcdef',
+            providerCredentialSlot: 'primary',
+        });
+    });
+
     it('preserves all 1200 mutuals while limiting only detailed public screening to 900', () => {
         const followers = relationshipRows(1_200);
         const following = [...followers].reverse();
@@ -344,6 +365,37 @@ describe('analysis V2 evidence store', () => {
                         profile_pic_url: null,
                     },
                 ],
+            })
+        );
+    });
+
+    it('checkpoints selfhosted_auth relationship provenance without using a paid slot', async () => {
+        const rows = relationshipRows(1);
+        const { rpc, client } = rpcClient();
+        rpc.mockResolvedValueOnce({ data: sideResponse('followers', rows), error: null });
+        const store = createAnalysisV2EvidenceStore(client);
+
+        await expect(store.checkpointRelationshipSide({
+            requestId,
+            jobKey: relationshipJobKey,
+            claimToken,
+            jobInputHash,
+            side: 'followers',
+            declaredCount: 1,
+            source: {
+                status: 'collected',
+                inputHash,
+                provider: 'selfhosted_auth',
+                providerRunId: '0123456789abcdef0123456789abcdef',
+                providerOperationKey: validOperationKey('followers'),
+            },
+            rows,
+        })).resolves.toEqual(sideResponse('followers', rows));
+        expect(rpc).toHaveBeenCalledWith(
+            ANALYSIS_V2_EVIDENCE_DATABASE_NAMES.checkpointRelationshipSideRpc,
+            expect.objectContaining({
+                p_provider: 'selfhosted_auth',
+                p_provider_run_id: '0123456789abcdef0123456789abcdef',
             })
         );
     });

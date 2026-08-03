@@ -55,6 +55,32 @@ describe('라우팅', () => {
         expect(flash).not.toHaveBeenCalled();
     });
 
+    it('kill switch가 꺼진 request override는 provider 호출과 Apify 폴백 전에 거부한다', async () => {
+        const selfhostedAuth = vi.fn().mockRejectedValue(new Error('must not run'));
+        const apify = vi.fn().mockResolvedValue([]);
+        __setProvidersForTest(
+            {
+                SCRAPER_FOLLOWERS: 'apify',
+                SCRAPER_FALLBACK: 'true',
+                SELFHOSTED_AUTH_ENABLED: 'false',
+            },
+            {
+                selfhosted_auth: providerWith({
+                    name: 'selfhosted_auth',
+                    getFollowers: selfhostedAuth,
+                }),
+                apify: providerWith({ name: 'apify', getFollowers: apify }),
+            }
+        );
+
+        await expect(getFollowers('x', 1, {
+            provider: 'selfhosted_auth',
+            fallback: true,
+        })).rejects.toThrow('SELFHOSTED_AUTH_ENABLED');
+        expect(selfhostedAuth).not.toHaveBeenCalled();
+        expect(apify).not.toHaveBeenCalled();
+    });
+
     it('forwards the internal paid-start cancellation fence to the provider context', async () => {
         const apify = vi.fn().mockResolvedValue([]);
         const controller = new AbortController();

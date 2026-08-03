@@ -1,6 +1,11 @@
 import { createHash } from 'node:crypto';
 import { getAnalysisPlan } from '@/lib/domain/analysis/plan-catalog';
-import type { ProfileAttemptResult, ProviderCallContext, ProviderRunCheckpoint } from '@/lib/services/instagram/providers/types';
+import type {
+    ProfileAttemptResult,
+    ProviderCallContext,
+    ProviderRunCheckpoint,
+    SelfHostedAuthRunReceipt,
+} from '@/lib/services/instagram/providers/types';
 import {
     APIFY_COMMENTS_ACTOR_ID,
     APIFY_LIKERS_ACTOR_ID,
@@ -12,6 +17,12 @@ import {
 import {
     isApifyQueuedStartCancellation,
 } from '@/lib/services/instagram/providers/apify-relationship';
+import { selfHostedAuthInteractionAdapter } from '@/lib/services/instagram/providers/selfhosted-auth';
+import {
+    parseSelfHostedAuthCommentItems,
+    parseSelfHostedAuthLikerItems,
+    parseSelfHostedAuthRelationshipItems,
+} from '@/lib/services/instagram/providers/selfhosted-auth/client';
 import { APIFY_RELATIONSHIP_ACTOR_ID } from '@/lib/services/instagram/providers/apify';
 import { REPLACEMENT_PROFILE_ACTOR } from '@/lib/services/instagram/providers/apify-profile-details';
 import {
@@ -20,6 +31,11 @@ import {
     getProfilesBatchV2,
     type ProfilesBatchV2AttemptSnapshot,
 } from '@/lib/services/instagram/scraper';
+import {
+    getInteractionScraperConfig,
+    getScraperConfig,
+    type InteractionScraperConfig,
+} from '@/lib/services/instagram/config';
 import type { InstagramFollower, InstagramPost, InstagramProfile } from '@/lib/types/instagram';
 import { instagramPostUrl, selectRecentInteractionPosts } from './interaction-posts';
 import {
@@ -99,6 +115,10 @@ import {
     resolveAnalysisV2ApifyProviderBinding,
     type ProviderPolicyOperationKind,
 } from './authorized-test-provider-policy';
+import {
+    analysisV2SelfHostedAuthRunStore,
+    type AnalysisV2SelfHostedAuthRunStore,
+} from './v2-selfhosted-auth-run-store';
 
 const PROFILE_ACTOR_ID = 'apify/instagram-profile-scraper';
 
@@ -112,12 +132,14 @@ export interface AnalysisV2CollectionExecutorDependencies {
     profileCheckpointStore?: AnalysisV2ProfileFetchCheckpointStore;
     providerRunStore?: AnalysisV2ProviderRunStore;
     providerRunAdoptionStore?: AnalysisV2ProviderRunAdoptionStore;
+    selfHostedAuthRunStore?: AnalysisV2SelfHostedAuthRunStore;
     targetProfileReuseStore?: AnalysisV2TargetProfileReuseStore;
     getFollowers?: RelationshipGetter;
     getFollowing?: RelationshipGetter;
     getProfilesBatchV2?: ProfileBatchFetcher;
     runProfileRepair?: ProfileRepairRunner;
     interactionAdapter?: ApifyInteractionAdapter;
+    selfHostedAuthInteractionAdapter?: ApifyInteractionAdapter;
     env?: Record<string, string | undefined>;
 }
 
@@ -127,12 +149,14 @@ interface ResolvedDependencies {
     profileCheckpointStore: AnalysisV2ProfileFetchCheckpointStore;
     providerRunStore: AnalysisV2ProviderRunStore;
     providerRunAdoptionStore: AnalysisV2ProviderRunAdoptionStore | null;
+    selfHostedAuthRunStore: AnalysisV2SelfHostedAuthRunStore;
     targetProfileReuseStore: AnalysisV2TargetProfileReuseStore;
     getFollowers: RelationshipGetter;
     getFollowing: RelationshipGetter;
     getProfilesBatchV2: ProfileBatchFetcher;
     runProfileRepair: ProfileRepairRunner;
     interactionAdapter: ApifyInteractionAdapter;
+    selfHostedAuthInteractionAdapter: ApifyInteractionAdapter;
     env: Record<string, string | undefined>;
 }
 
@@ -145,6 +169,8 @@ function deps(input: AnalysisV2CollectionExecutorDependencies): ResolvedDependen
         providerRunStore: input.providerRunStore ?? analysisV2ProviderRunStore,
         providerRunAdoptionStore: input.providerRunAdoptionStore
             ?? (input.providerRunStore ? null : analysisV2ProviderRunAdoptionStore),
+        selfHostedAuthRunStore:
+            input.selfHostedAuthRunStore ?? analysisV2SelfHostedAuthRunStore,
         targetProfileReuseStore:
             input.targetProfileReuseStore ?? analysisV2TargetProfileReuseStore,
         getFollowers: input.getFollowers ?? getFollowers,
@@ -152,6 +178,8 @@ function deps(input: AnalysisV2CollectionExecutorDependencies): ResolvedDependen
         getProfilesBatchV2: input.getProfilesBatchV2 ?? getProfilesBatchV2,
         runProfileRepair: input.runProfileRepair ?? runAnalysisV2ProfileRepair,
         interactionAdapter: input.interactionAdapter ?? apifyInteractionAdapter,
+        selfHostedAuthInteractionAdapter:
+            input.selfHostedAuthInteractionAdapter ?? selfHostedAuthInteractionAdapter,
         env: input.env ?? process.env,
     };
 }
@@ -306,7 +334,7 @@ function relationshipRows(rows: readonly InstagramFollower[]): AnalysisV2Relatio
     }));
 }
 
-function canonicalRelationshipIdentity(input: {
+function canonicalApifyRelationshipIdentity(input: {
     side: 'followers' | 'following';
     targetUsername: string;
     declaredCount: number;
@@ -319,6 +347,22 @@ function canonicalRelationshipIdentity(input: {
         String(input.declaredCount),
         input.planId,
         'apify-no-cookie',
+    ]);
+}
+
+function canonicalSelfHostedAuthRelationshipIdentity(input: {
+    side: 'followers' | 'following';
+    targetUsername: string;
+    declaredCount: number;
+    planId: string;
+}): string {
+    return canonicalProviderInput([
+        'relationship-v2',
+        input.side,
+        input.targetUsername,
+        String(input.declaredCount),
+        input.planId,
+        'selfhosted-auth-v1',
     ]);
 }
 
@@ -355,6 +399,7 @@ export function createAnalysisV2RelationshipsExecutor(
         const claim = collectionClaim(context);
         const request = await dependencies.requestContextStore.load(claim);
         assertScopeMatchesState(request, context.state);
+        const scraperConfig = getScraperConfig(dependencies.env);
 
         const collect = async (
             side: 'followers' | 'following',
@@ -375,7 +420,7 @@ export function createAnalysisV2RelationshipsExecutor(
                     rows: [],
                 });
             }
-            const canonicalInput = canonicalRelationshipIdentity({
+            const apifyCanonicalInput = canonicalApifyRelationshipIdentity({
                 side,
                 targetUsername: request.targetUsername,
                 declaredCount,
@@ -387,7 +432,7 @@ export function createAnalysisV2RelationshipsExecutor(
             const getter = side === 'followers'
                 ? dependencies.getFollowers
                 : dependencies.getFollowing;
-            const execute = async (providerInput: string) => {
+            const executeApify = async (providerInput: string) => {
                 const operationKey = createAnalysisV2ProviderOperationKey(
                     operation,
                     providerInput
@@ -424,30 +469,117 @@ export function createAnalysisV2RelationshipsExecutor(
                         operationKey,
                     }
                 );
-                return { inputHash, operationKey, rows, run };
+                return { provider: 'apify' as const, inputHash, operationKey, rows, run };
+            };
+            const executeApifyWithReplacement = async () => {
+                const initialOperationKey = createAnalysisV2ProviderOperationKey(
+                    operation,
+                    apifyCanonicalInput
+                );
+                try {
+                    return await executeApify(apifyCanonicalInput);
+                } catch (error) {
+                    if (!isRelationshipIncompleteError(error)) throw error;
+                    // Some Actors report SUCCEEDED while publishing a partial Dataset. Prove the
+                    // first charge is terminal and reconciled before opening one fixed replacement
+                    // identity; worker retries then reuse these two rows instead of buying a third.
+                    const initialRun = await dependencies.providerRunStore.load({
+                        requestId: claim.requestId,
+                        jobKey: claim.jobKey,
+                        operationKey: initialOperationKey,
+                    });
+                    if (!isReconciledSucceededRun(initialRun)) throw error;
+                    return executeApify(
+                        relationshipIncompleteReplacementIdentity(apifyCanonicalInput)
+                    );
+                }
+            };
+            const executeSelfHostedAuth = async () => {
+                const providerInput = canonicalSelfHostedAuthRelationshipIdentity({
+                    side,
+                    targetUsername: request.targetUsername,
+                    declaredCount,
+                    planId: request.planId,
+                });
+                const operationKey = createAnalysisV2ProviderOperationKey(
+                    operation,
+                    providerInput
+                );
+                const providerInputHash = createAnalysisV2ProviderInputHash(providerInput);
+                const cached = await dependencies.selfHostedAuthRunStore.load({
+                    ...claim,
+                    operationKey,
+                    inputHash: providerInputHash,
+                });
+                if (cached) {
+                    return {
+                        provider: 'selfhosted_auth' as const,
+                        inputHash: providerInputHash,
+                        operationKey,
+                        rows: parseSelfHostedAuthRelationshipItems(cached.items),
+                        run: cached,
+                    };
+                }
+                const workerReceipt: { current: SelfHostedAuthRunReceipt | null } = {
+                    current: null,
+                };
+                const rows = await getter(request.targetUsername, declaredCount, {
+                    provider: 'selfhosted_auth',
+                    fallback: false,
+                    expectedResultCount: declaredCount,
+                    requestId: claim.requestId,
+                    onSelfHostedAuthRunFinished: run => {
+                        workerReceipt.current = run;
+                    },
+                });
+                if (workerReceipt.current === null) {
+                    throw new Error('ANALYSIS_V2_SELFHOSTED_AUTH_RECEIPT_MISSING');
+                }
+                const receipt = await dependencies.selfHostedAuthRunStore.checkpoint({
+                    ...claim,
+                    operationKey,
+                    inputHash: providerInputHash,
+                    runId: workerReceipt.current.runId,
+                    accountSlot: workerReceipt.current.accountSlot,
+                    items: rows.map(row => ({ ...row })),
+                });
+                return {
+                    provider: 'selfhosted_auth' as const,
+                    inputHash: providerInputHash,
+                    operationKey,
+                    rows,
+                    run: receipt,
+                };
             };
 
-            const initialOperationKey = createAnalysisV2ProviderOperationKey(
-                operation,
-                canonicalInput
-            );
-            let completed: Awaited<ReturnType<typeof execute>>;
-            try {
-                completed = await execute(canonicalInput);
-            } catch (error) {
-                if (!isRelationshipIncompleteError(error)) throw error;
-                // Some Actors report SUCCEEDED while publishing a partial Dataset. Prove the
-                // first charge is terminal and reconciled before opening one fixed replacement
-                // identity; worker retries then reuse these two rows instead of buying a third.
-                const initialRun = await dependencies.providerRunStore.load({
+            const selectedProvider = side === 'followers'
+                ? scraperConfig.followers
+                : scraperConfig.following;
+            let completed: Awaited<ReturnType<typeof executeApifyWithReplacement>>
+                | Awaited<ReturnType<typeof executeSelfHostedAuth>>;
+            if (selectedProvider === 'selfhosted_auth') {
+                // Once a paid fallback identity exists, retries must resume that exact run and
+                // must not spend another authenticated-account request first.
+                const existingFallback = await dependencies.providerRunStore.load({
                     requestId: claim.requestId,
                     jobKey: claim.jobKey,
-                    operationKey: initialOperationKey,
+                    operationKey: createAnalysisV2ProviderOperationKey(
+                        operation,
+                        apifyCanonicalInput
+                    ),
                 });
-                if (!isReconciledSucceededRun(initialRun)) throw error;
-                completed = await execute(
-                    relationshipIncompleteReplacementIdentity(canonicalInput)
-                );
+                if (existingFallback) {
+                    completed = await executeApifyWithReplacement();
+                } else {
+                    try {
+                        completed = await executeSelfHostedAuth();
+                    } catch (error) {
+                        if (!scraperConfig.fallback) throw error;
+                        completed = await executeApifyWithReplacement();
+                    }
+                }
+            } else {
+                completed = await executeApifyWithReplacement();
             }
             return dependencies.evidenceStore.checkpointRelationshipSide({
                 ...claim,
@@ -456,7 +588,7 @@ export function createAnalysisV2RelationshipsExecutor(
                 source: {
                     status: 'collected',
                     inputHash: completed.inputHash,
-                    provider: 'apify',
+                    provider: completed.provider,
                     providerRunId: completed.run.runId,
                     providerOperationKey: completed.operationKey,
                 },
@@ -828,63 +960,158 @@ async function collectedTargetSource(input: {
     targetUsername: string;
     kind: 'likers' | 'comments';
     posts: readonly InstagramPost[];
+    scraperConfig: InteractionScraperConfig;
     startCancellationSignal: AbortSignal;
 }) {
     const limitPerPost = input.kind === 'likers' ? TARGET_LIKER_LIMIT : TARGET_COMMENT_LIMIT;
     const postUrls = input.posts.map(instagramPostUrl);
-    const canonicalInput = canonicalProviderInput([
+    const apifyCanonicalInput = canonicalProviderInput([
         `target-${input.kind}-v2`,
         input.targetUsername,
         String(limitPerPost),
         ...postUrls,
     ]);
-    const operationKey = createAnalysisV2ProviderOperationKey(
-        input.kind === 'likers' ? 'target-likers' : 'target-comments',
-        canonicalInput
-    );
-    const inputHash = createAnalysisV2ProviderInputHash(canonicalInput);
-    const binding = await bindApifyRun({
-        dependencies: input.dependencies,
-        claim: input.claim,
-        request: input.request,
-        operation: input.kind === 'likers' ? 'target-likers' : 'target-comments',
-        operationKey,
-        inputHash,
-        actorId: input.kind === 'likers' ? APIFY_LIKERS_ACTOR_ID : APIFY_COMMENTS_ACTOR_ID,
-        maxChargeUsd: interactionMaximumCharge(
-            input.kind,
-            postUrls.length,
-            limitPerPost,
-            input.dependencies.env
-        ),
-    });
-    let rows: Awaited<ReturnType<ApifyInteractionAdapter['getPostLikers']>>
-        | Awaited<ReturnType<ApifyInteractionAdapter['getPostComments']>>;
-    try {
-        rows = input.kind === 'likers'
-            ? await input.dependencies.interactionAdapter.getPostLikers(
-                postUrls,
-                limitPerPost,
-                interactionContext(binding.checkpoint, input.startCancellationSignal)
-            )
-            : await input.dependencies.interactionAdapter.getPostComments(
-                postUrls,
-                limitPerPost,
-                interactionContext(binding.checkpoint, input.startCancellationSignal)
-            );
-    } catch (error) {
-        if (binding.evidenceRun) throw adoptionDatasetUnavailable(error);
-        throw error;
-    }
-    const run = binding.evidenceRun ?? await requireSucceededRun(
-        input.dependencies.providerRunStore,
-        {
-            requestId: input.claim.requestId,
-            jobKey: input.claim.jobKey,
+    const operation = input.kind === 'likers' ? 'target-likers' : 'target-comments';
+    const executeApify = async () => {
+        const operationKey = createAnalysisV2ProviderOperationKey(
+            operation,
+            apifyCanonicalInput
+        );
+        const inputHash = createAnalysisV2ProviderInputHash(apifyCanonicalInput);
+        const binding = await bindApifyRun({
+            dependencies: input.dependencies,
+            claim: input.claim,
+            request: input.request,
+            operation,
             operationKey,
+            inputHash,
+            actorId: input.kind === 'likers' ? APIFY_LIKERS_ACTOR_ID : APIFY_COMMENTS_ACTOR_ID,
+            maxChargeUsd: interactionMaximumCharge(
+                input.kind,
+                postUrls.length,
+                limitPerPost,
+                input.dependencies.env
+            ),
+        });
+        let rows: Awaited<ReturnType<ApifyInteractionAdapter['getPostLikers']>>
+            | Awaited<ReturnType<ApifyInteractionAdapter['getPostComments']>>;
+        try {
+            rows = input.kind === 'likers'
+                ? await input.dependencies.interactionAdapter.getPostLikers(
+                    postUrls,
+                    limitPerPost,
+                    interactionContext(binding.checkpoint, input.startCancellationSignal)
+                )
+                : await input.dependencies.interactionAdapter.getPostComments(
+                    postUrls,
+                    limitPerPost,
+                    interactionContext(binding.checkpoint, input.startCancellationSignal)
+                );
+        } catch (error) {
+            if (binding.evidenceRun) throw adoptionDatasetUnavailable(error);
+            throw error;
         }
-    );
-    return { rows, run, operationKey, inputHash };
+        const run = binding.evidenceRun ?? await requireSucceededRun(
+            input.dependencies.providerRunStore,
+            {
+                requestId: input.claim.requestId,
+                jobKey: input.claim.jobKey,
+                operationKey,
+            }
+        );
+        return {
+            rows,
+            provider: 'apify' as const,
+            providerRunId: run.runId,
+            providerCredentialSlot: run.credentialSlot,
+            operationKey,
+            inputHash,
+        };
+    };
+    const executeSelfHostedAuth = async () => {
+        const canonicalInput = canonicalProviderInput([
+            `target-${input.kind}-v2`,
+            input.targetUsername,
+            String(limitPerPost),
+            ...postUrls,
+            'selfhosted-auth-v1',
+        ]);
+        const operationKey = createAnalysisV2ProviderOperationKey(operation, canonicalInput);
+        const inputHash = createAnalysisV2ProviderInputHash(canonicalInput);
+        const cached = await input.dependencies.selfHostedAuthRunStore.load({
+            ...input.claim,
+            operationKey,
+            inputHash,
+        });
+        if (cached) {
+            return {
+                rows: input.kind === 'likers'
+                    ? parseSelfHostedAuthLikerItems(cached.items)
+                    : parseSelfHostedAuthCommentItems(cached.items),
+                provider: 'selfhosted_auth' as const,
+                providerRunId: cached.runId,
+                providerCredentialSlot: cached.accountSlot,
+                operationKey,
+                inputHash,
+            };
+        }
+        const receiptHolder: { current: SelfHostedAuthRunReceipt | null } = { current: null };
+        const context: ProviderCallContext = {
+            startCancellationSignal: input.startCancellationSignal,
+            recordUsage: () => undefined,
+            onSelfHostedAuthRunFinished: async run => {
+                receiptHolder.current = run;
+            },
+        };
+        const rows = input.kind === 'likers'
+            ? await input.dependencies.selfHostedAuthInteractionAdapter.getPostLikers(
+                postUrls,
+                limitPerPost,
+                context
+            )
+            : await input.dependencies.selfHostedAuthInteractionAdapter.getPostComments(
+                postUrls,
+                limitPerPost,
+                context
+            );
+        if (receiptHolder.current === null) {
+            throw new Error('ANALYSIS_V2_SELFHOSTED_AUTH_RECEIPT_MISSING');
+        }
+        const receipt = await input.dependencies.selfHostedAuthRunStore.checkpoint({
+            ...input.claim,
+            operationKey,
+            inputHash,
+            runId: receiptHolder.current.runId,
+            accountSlot: receiptHolder.current.accountSlot,
+            items: rows.map(row => ({ ...row })),
+        });
+        return {
+            rows,
+            provider: 'selfhosted_auth' as const,
+            providerRunId: receipt.runId,
+            providerCredentialSlot: receipt.accountSlot,
+            operationKey,
+            inputHash,
+        };
+    };
+
+    const selectedProvider = input.kind === 'likers'
+        ? input.scraperConfig.likers
+        : input.scraperConfig.comments;
+    if (selectedProvider !== 'selfhosted_auth') return executeApify();
+
+    const existingFallback = await input.dependencies.providerRunStore.load({
+        requestId: input.claim.requestId,
+        jobKey: input.claim.jobKey,
+        operationKey: createAnalysisV2ProviderOperationKey(operation, apifyCanonicalInput),
+    });
+    if (existingFallback) return executeApify();
+    try {
+        return await executeSelfHostedAuth();
+    } catch (error) {
+        if (!input.scraperConfig.fallback) throw error;
+        return executeApify();
+    }
 }
 
 export function createAnalysisV2TargetEvidenceExecutor(
@@ -895,6 +1122,7 @@ export function createAnalysisV2TargetEvidenceExecutor(
         const claim = collectionClaim(context);
         const request = await dependencies.requestContextStore.load(claim);
         assertScopeMatchesState(request, context.state);
+        const scraperConfig = getInteractionScraperConfig(dependencies.env);
         const targetResume = await durableProfiles({
             dependencies,
             claim,
@@ -934,6 +1162,7 @@ export function createAnalysisV2TargetEvidenceExecutor(
                     targetUsername: request.targetUsername,
                     kind: 'likers',
                     posts: likerPosts,
+                    scraperConfig,
                     startCancellationSignal: signal,
                 }),
                 signal => collectedTargetSource({
@@ -943,6 +1172,7 @@ export function createAnalysisV2TargetEvidenceExecutor(
                     targetUsername: request.targetUsername,
                     kind: 'comments',
                     posts: commentPosts,
+                    scraperConfig,
                     startCancellationSignal: signal,
                 }),
             ] as const);
@@ -961,19 +1191,19 @@ export function createAnalysisV2TargetEvidenceExecutor(
             likerSource = {
                 status: 'collected',
                 inputHash: likers.inputHash,
-                provider: 'apify',
-                providerRunId: likers.run.runId,
+                provider: likers.provider,
+                providerRunId: likers.providerRunId,
                 providerOperationKey: likers.operationKey,
-                providerCredentialSlot: likers.run.credentialSlot,
+                providerCredentialSlot: likers.providerCredentialSlot,
                 coverage: raw.likerCoverage,
             };
             commentSource = {
                 status: 'collected',
                 inputHash: comments.inputHash,
-                provider: 'apify',
-                providerRunId: comments.run.runId,
+                provider: comments.provider,
+                providerRunId: comments.providerRunId,
                 providerOperationKey: comments.operationKey,
-                providerCredentialSlot: comments.run.credentialSlot,
+                providerCredentialSlot: comments.providerCredentialSlot,
                 coverage: raw.commentCoverage,
             };
         }
