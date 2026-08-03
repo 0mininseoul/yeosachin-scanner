@@ -73,4 +73,26 @@ describe('v2.11 result revision reader migration contract', () => {
         expect(sql).toContain('v_source := public.read_analysis_v2_test_entitlement_v211_text_only_source(p_request_id);');
         expect(sql).toContain("NOTIFY pgrst, 'reload schema';");
     });
+
+    it('aligns the revision snapshot bio constraint with the base multiline-bio rule only', async () => {
+        const sql = await readFile(textOnlyImmutableOrderMigration, 'utf8');
+        expect(sql).toContain(
+            'DROP CONSTRAINT analysis_v2_revision_female_text_check;',
+        );
+        expect(sql).toContain(
+            'ADD CONSTRAINT analysis_v2_revision_female_text_check CHECK (',
+        );
+        expect(sql).toContain(
+            "pg_catalog.chr(10) || pg_catalog.chr(13),\n                ''",
+        );
+        expect(sql).toContain(
+            ") !~ '[[:cntrl:]]'",
+        );
+        expect(sql).toContain(
+            "full_name IS NULL OR (pg_catalog.char_length(full_name) BETWEEN 1 AND 200 AND full_name !~ '[[:cntrl:]]')",
+        );
+        expect(sql).toContain(
+            'public.analysis_v2_result_valid_public_copy(one_line_overview, 180)',
+        );
+    });
 });
