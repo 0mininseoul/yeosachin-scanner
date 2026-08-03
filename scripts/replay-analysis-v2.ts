@@ -537,6 +537,19 @@ export async function runReplayCli(
         if (authenticated.expired) {
             throw new Error('ANALYSIS_V2_REPLAY_BUNDLE_EXPIRED');
         }
+        if (options.legacySecondary) {
+            const legacy = authenticated.bundle.capture.legacySecondary;
+            if (
+                authenticated.bundle.schemaVersion !== 1
+                || authenticated.bundle.capture.evaluationPolicy?.capability
+                    !== TEST_ENTITLEMENT_STANDARD_V211_LEGACY_SECONDARY_REPLAY_CAPABILITY
+                || !legacy
+                || !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(legacy.requestId)
+                || !/^[a-f0-9]{64}$/.test(legacy.sourceFingerprint)
+                || !Number.isInteger(legacy.currentRevision)
+                || !Array.isArray(legacy.originalFemaleRows)
+            ) throw new Error('ANALYSIS_V2_REPLAY_LEGACY_SECONDARY_ARTIFACT_INVALID');
+        }
         const partialArtifact = authenticated.bundle.schemaVersion === 2;
         if (partialArtifact !== Boolean(options.historicalPartialAvailable)) {
             throw new Error('ANALYSIS_V2_REPLAY_ARTIFACT_SCOPE_MISMATCH');

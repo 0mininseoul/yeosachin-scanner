@@ -426,6 +426,11 @@ BEGIN
     IF v_source_fingerprint IS NULL OR v_source_fingerprint IS DISTINCT FROM p_source_fingerprint THEN
         RAISE EXCEPTION USING MESSAGE = 'ANALYSIS_V2_V211_REVISION_SOURCE_DRIFT', ERRCODE = 'P0001';
     END IF;
+    v_payload_hash := pg_catalog.encode(extensions.digest(pg_catalog.convert_to(
+        pg_catalog.concat_ws(E'\n', 'analysis-v2-v211-revision-payload:v1',
+            p_request_id::TEXT, p_source_fingerprint, p_semantic_input_fingerprint,
+            p_male_count::TEXT, p_female_count::TEXT, p_unknown_count::TEXT,
+            p_female_rows::TEXT), 'UTF8'), 'sha256'), 'hex');
 
     SELECT revision.* INTO v_existing
     FROM public.analysis_v2_result_revisions AS revision
@@ -435,7 +440,8 @@ BEGIN
            OR v_existing.semantic_input_fingerprint IS DISTINCT FROM p_semantic_input_fingerprint
            OR v_existing.male_count IS DISTINCT FROM p_male_count
            OR v_existing.female_count IS DISTINCT FROM p_female_count
-           OR v_existing.unknown_count IS DISTINCT FROM p_unknown_count THEN
+           OR v_existing.unknown_count IS DISTINCT FROM p_unknown_count
+           OR v_existing.payload_hash IS DISTINCT FROM v_payload_hash THEN
             RAISE EXCEPTION USING MESSAGE = 'ANALYSIS_V2_V211_REVISION_IDEMPOTENCY_CONFLICT', ERRCODE = 'P0001';
         END IF;
         RETURN pg_catalog.jsonb_build_object(
@@ -504,11 +510,6 @@ BEGIN
         RAISE EXCEPTION USING MESSAGE = 'ANALYSIS_V2_V211_REVISION_ROW_ORDER_DRIFT', ERRCODE = 'P0001';
     END IF;
 
-    v_payload_hash := pg_catalog.encode(extensions.digest(pg_catalog.convert_to(
-        pg_catalog.concat_ws(E'\n', 'analysis-v2-v211-revision-payload:v1',
-            p_request_id::TEXT, p_source_fingerprint, p_semantic_input_fingerprint,
-            p_male_count::TEXT, p_female_count::TEXT, p_unknown_count::TEXT,
-            p_female_rows::TEXT), 'UTF8'), 'sha256'), 'hex');
     IF v_current.revision_id IS NOT NULL THEN
         UPDATE public.analysis_v2_result_revisions SET state = 'superseded'
         WHERE revision_id = v_current.revision_id;

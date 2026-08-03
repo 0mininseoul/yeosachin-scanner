@@ -33,6 +33,12 @@ describe('v2.11 legacy-secondary preview', () => {
         expect(() => createV211LegacySecondaryPreview({ requestId, bundle: invalid, semanticInputFingerprint: 'c'.repeat(64), accountOutputs: [{ ordinal: 1, finalClassification: 'verified_female', classificationSource: 'feature', featureOverview: 'new' }] })).toThrow('ANALYSIS_V2_V211_PREVIEW_NEW_FEMALE_METADATA_UNAVAILABLE');
     });
 
+    it('binds the explicit request to the sealed capture metadata and rejects malformed previews', () => {
+        expect(() => createV211LegacySecondaryPreview({ requestId: '20000000-0000-4000-8000-000000000001', bundle, semanticInputFingerprint: 'c'.repeat(64), accountOutputs: [{ ordinal: 1, finalClassification: 'verified_female', classificationSource: 'feature', featureOverview: 'v2.11 요약' }] })).toThrow('ANALYSIS_V2_V211_PREVIEW_SCOPE_INVALID');
+        const preview = createV211LegacySecondaryPreview({ requestId, bundle, semanticInputFingerprint: 'c'.repeat(64), accountOutputs: [{ ordinal: 1, finalClassification: 'verified_female', classificationSource: 'feature', featureOverview: 'v2.11 요약' }] });
+        expect(() => verifyV211LegacySecondaryPreview({ ...preview, counts: { ...preview.counts, female: 2 } })).toThrow('ANALYSIS_V2_V211_PREVIEW_INVALID');
+    });
+
     it('passes only the sealed preview fields to the atomic revision RPC', async () => {
         const preview = createV211LegacySecondaryPreview({ requestId, bundle, semanticInputFingerprint: 'c'.repeat(64), accountOutputs: [{ ordinal: 1, finalClassification: 'verified_female', classificationSource: 'feature', featureOverview: 'v2.11 요약' }] });
         const rpc = async (_name: string, params: Record<string, unknown>) => ({ data: params, error: null });
