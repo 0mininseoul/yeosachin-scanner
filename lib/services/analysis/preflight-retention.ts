@@ -152,7 +152,7 @@ export async function runPreflightRetention(
         'scrub_terminal_analysis_v2_preflights',
         PREFLIGHT_RETENTION_BATCH_LIMIT
     );
-    if (maintainBeta && betaCreditRecovered > 0) {
+    if (maintainBeta) {
         betaCreditRefreshAttempts = 1;
         try {
             await (dependencies.refreshBetaCredit
