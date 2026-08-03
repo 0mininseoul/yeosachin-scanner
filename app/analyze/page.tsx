@@ -36,7 +36,7 @@ import {
     signOutAndClearPendingAnalysisTarget,
     storePendingAnalysisTarget,
 } from '@/lib/services/pending-analysis-target';
-import { EVENTS, trackEvent } from '@/lib/services/analytics';
+import { EVENTS, flushAnalytics, trackEvent } from '@/lib/services/analytics';
 import {
     availableAnalyticsStorage,
     tryClaimAnalyticsEvent,
@@ -411,6 +411,7 @@ const DISCLOSURE_ACCEPTED = true;
                 && 'nextUrl' in payload
                 && typeof payload.nextUrl === 'string'
                 && /^\/progress\/[0-9a-f-]{36}$/i.test(payload.nextUrl)) {
+                await flushAnalytics();
                 window.location.assign(payload.nextUrl);
                 return;
             }
@@ -422,6 +423,7 @@ const DISCLOSURE_ACCEPTED = true;
                 return;
             }
             if (analyticsEligible) trackEvent(EVENTS.CHECKOUT_REDIRECTED, analyticsProperties);
+            if (analyticsEligible) await flushAnalytics();
             window.location.assign(payload.checkoutUrl);
         } catch {
             setError('요청을 처리하지 못했습니다. 잠시 후 다시 시도해주세요.');

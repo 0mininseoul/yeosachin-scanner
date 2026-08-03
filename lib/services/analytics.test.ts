@@ -8,6 +8,7 @@ import { SessionReplay } from '@amplitude/session-replay-browser/lib/cjs/session
 import { getPageUrl, maskAttributeFn } from '@amplitude/session-replay-browser/lib/cjs/helpers.js';
 
 const amplitudeMocks = vi.hoisted(() => ({
+    flush: vi.fn(),
     getUserId: vi.fn(),
     initAll: vi.fn(),
     moduleLoads: 0,
@@ -88,6 +89,7 @@ function enableReplayBrowser({
 describe('Amplitude analytics adapter', () => {
     beforeEach(() => {
         vi.resetModules();
+        amplitudeMocks.flush.mockReset().mockReturnValue({ promise: Promise.resolve() });
         amplitudeMocks.getUserId.mockReset().mockReturnValue(VALID_USER_ID);
         amplitudeMocks.initAll.mockReset();
         amplitudeMocks.initAll.mockResolvedValue(undefined);
@@ -1378,6 +1380,60 @@ describe('Amplitude analytics adapter', () => {
         expect(amplitudeMocks.moduleLoads).toBe(0);
         expect(amplitudeMocks.initAll).not.toHaveBeenCalled();
         expect(amplitudeMocks.track).not.toHaveBeenCalled();
+    });
+
+    it('flushes initialized analytics at a navigation boundary without bypassing identity readiness', async () => {
+        enableBrowser();
+        const analytics = await loadAnalytics();
+
+        await analytics.initAmplitude(VALID_USER_ID);
+        await analytics.flushAnalytics();
+        expect(amplitudeMocks.flush).not.toHaveBeenCalled();
+
+        analytics.markAnalyticsIdentityReady();
+        analytics.trackEvent(analytics.EVENTS.CHECKOUT_REDIRECTED, {
+            plan_id: 'standard',
+            amount_krw: 9900,
+        });
+        await analytics.flushAnalytics();
+
+        expect(amplitudeMocks.flush).toHaveBeenCalledTimes(1);
+    });
+
+    it('bounds a hanging SDK flush so checkout navigation is never held indefinitely', async () => {
+        enableBrowser();
+        amplitudeMocks.flush.mockReturnValue({ promise: new Promise<void>(() => undefined) });
+        const analytics = await loadAnalytics();
+
+        await analytics.initAmplitude(VALID_USER_ID);
+        analytics.markAnalyticsIdentityReady();
+        vi.useFakeTimers();
+        const pendingFlush = analytics.flushAnalytics();
+
+        await vi.advanceTimersByTimeAsync(500);
+        await expect(pendingFlush).resolves.toBeUndefined();
+        expect(amplitudeMocks.flush).toHaveBeenCalledTimes(1);
+    });
+
+    it('absorbs a late SDK flush rejection after the bounded wait returns', async () => {
+        enableBrowser();
+        let rejectFlush!: (reason?: unknown) => void;
+        amplitudeMocks.flush.mockReturnValue({
+            promise: new Promise<void>((_resolve, reject) => {
+                rejectFlush = reject;
+            }),
+        });
+        const analytics = await loadAnalytics();
+
+        await analytics.initAmplitude(VALID_USER_ID);
+        analytics.markAnalyticsIdentityReady();
+        vi.useFakeTimers();
+        const pendingFlush = analytics.flushAnalytics();
+
+        await vi.advanceTimersByTimeAsync(500);
+        await expect(pendingFlush).resolves.toBeUndefined();
+        rejectFlush(new Error('late transport failure'));
+        await Promise.resolve();
     });
 
     it('never loads Unified on the server or with a missing key', async () => {

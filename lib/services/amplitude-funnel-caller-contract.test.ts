@@ -46,7 +46,10 @@ describe('Amplitude product funnel caller contract', () => {
             /trackEvent\(EVENTS\.CHECKOUT_STARTED[\s\S]*?fetch\([\s\S]*?'\/api\/earlybird\/checkout'/,
         );
         expect(analyze).toMatch(
-            /isSafeGrobleCheckoutUrl\(payload\.checkoutUrl\)[\s\S]*?trackEvent\(EVENTS\.CHECKOUT_REDIRECTED[\s\S]*?window\.location\.assign\(payload\.checkoutUrl\)/,
+            /isSafeGrobleCheckoutUrl\(payload\.checkoutUrl\)[\s\S]*?trackEvent\(EVENTS\.CHECKOUT_REDIRECTED[\s\S]*?await flushAnalytics\(\)[\s\S]*?window\.location\.assign\(payload\.checkoutUrl\)/,
+        );
+        expect(analyze).toMatch(
+            /payload\.nextUrl[\s\S]*?await flushAnalytics\(\)[\s\S]*?window\.location\.assign\(payload\.nextUrl\)/,
         );
     });
 
@@ -78,6 +81,13 @@ describe('Amplitude product funnel caller contract', () => {
         expect(effect).toContain('order_id: order.orderId');
         expect(effect).toContain('status: order.systemStatus');
         expect(effect).not.toMatch(/targetInstagramId|email|phone|buyer|groble/i);
+    });
+
+    it('flushes status and payment analytics before the automatic fulfillment bridge navigates', () => {
+        const status = source('app/earlybird/earlybird-status.tsx');
+        expect(status).toMatch(
+            /trackEvent\(EVENTS\.PAYMENT_CONFIRMED_VIEWED[\s\S]*?\}, \[order\]\);[\s\S]*?flushAnalytics\(\)[\s\S]*?router\.replace\(nextUrl\)/,
+        );
     });
 
     it('does not create a Plus plan-view or waitlist analytics event', () => {
