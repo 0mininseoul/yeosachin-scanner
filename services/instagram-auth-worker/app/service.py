@@ -1,3 +1,4 @@
+import json
 import re
 import secrets
 from collections.abc import Callable
@@ -90,6 +91,8 @@ class InstagramGateway(Protocol):
     def relationship(self, side: str, username: str, limit: int) -> list[dict[str, Any]]: ...
     def likers(self, post_urls: list[str], limit_per_post: int) -> list[dict[str, Any]]: ...
     def comments(self, post_urls: list[str], limit_per_post: int) -> list[dict[str, Any]]: ...
+    def profile(self, username: str, media_limit: int) -> dict[str, Any]: ...
+    def profiles(self, usernames: list[str], media_limit: int) -> list[dict[str, Any]]: ...
 
 
 class InstagramAuthService:
@@ -154,6 +157,7 @@ class InstagramAuthService:
         operation: Callable[[], list[dict[str, Any]]],
         operation_key: str,
         input_hash: str,
+        max_response_bytes: int | None = None,
     ) -> dict[str, Any]:
         cached = self._existing_response(operation_key, input_hash)
         if cached is not None:
@@ -196,6 +200,15 @@ class InstagramAuthService:
                     'accountSlot': 'primary',
                     'items': items,
                 }
+                if max_response_bytes is not None:
+                    try:
+                        response_bytes = len(json.dumps(
+                            response, ensure_ascii=False, separators=(',', ':'),
+                        ).encode('utf-8'))
+                    except (TypeError, ValueError) as error:
+                        raise WorkerSchemaError('worker response is not JSON-safe') from error
+                    if response_bytes > max_response_bytes:
+                        raise WorkerSchemaError('worker response exceeds the durable limit')
                 # A failed completion leaves the operation outcome ambiguous. Keep
                 # the global lock so another revision cannot repeat it automatically.
                 release_lock = False
@@ -238,4 +251,50 @@ class InstagramAuthService:
         validated_limit = validate_interaction_limit(limit_per_post, 15)
         return await self._run(
             lambda: self._gateway.comments(normalized_post_urls, validated_limit), operation_key, input_hash
+        )
+
+    @staticmethod
+    def _profile_usernames(usernames: list[str], maximum: int) -> list[str]:
+        if not isinstance(usernames, list) or not 1 <= len(usernames) <= maximum:
+            raise ValueError('invalid profile usernames')
+        normalized = [username.strip().removeprefix('@').lower() if isinstance(username, str) else ''
+                      for username in usernames]
+        if any(not USERNAME_PATTERN.fullmatch(username) for username in normalized):
+            raise ValueError('invalid username')
+        if len(set(normalized)) != len(normalized):
+            raise ValueError('duplicate usernames')
+        return normalized
+
+    @staticmethod
+    def _profile_media_limit(media_limit: int) -> int:
+        if (
+            not isinstance(media_limit, int)
+            or isinstance(media_limit, bool)
+            or not 1 <= media_limit <= 10
+        ):
+            raise ValueError('invalid profile media limit')
+        return media_limit
+
+    async def profile(
+        self, username: str, media_limit: int, operation_key: str, input_hash: str,
+    ) -> dict[str, Any]:
+        normalized = self._profile_usernames([username], 1)[0]
+        validated_limit = self._profile_media_limit(media_limit)
+        return await self._run(
+            lambda: [self._gateway.profile(normalized, validated_limit)],
+            operation_key,
+            input_hash,
+            max_response_bytes=4 * 1024 * 1024,
+        )
+
+    async def profiles(
+        self, usernames: list[str], media_limit: int, operation_key: str, input_hash: str,
+    ) -> dict[str, Any]:
+        normalized = self._profile_usernames(usernames, 30)
+        validated_limit = self._profile_media_limit(media_limit)
+        return await self._run(
+            lambda: self._gateway.profiles(normalized, validated_limit),
+            operation_key,
+            input_hash,
+            max_response_bytes=4 * 1024 * 1024,
         )

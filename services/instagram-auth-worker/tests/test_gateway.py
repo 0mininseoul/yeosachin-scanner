@@ -51,6 +51,120 @@ class FakeClient:
 
 
 class InstagrapiGatewayTest(unittest.TestCase):
+    def test_maps_a_public_profile_and_newest_posts_without_provider_payloads(self):
+        class ProfileClient(FakeClient):
+            def user_info_by_username(self, username):
+                self.profile_username = username
+                return SimpleNamespace(
+                    pk='123', username=username, full_name='Target User',
+                    biography='A short bio', profile_pic_url='https://cdn.example/avatar.jpg',
+                    follower_count=12, following_count=3, media_count=1,
+                    is_private=False, is_verified=True,
+                )
+
+            def user_medias(self, user_id, amount):
+                self.profile_media_args = (user_id, amount)
+                return [SimpleNamespace(
+                    pk='post-1', code='Abc123', taken_at=datetime(2026, 8, 3, tzinfo=timezone.utc),
+                    media_type=8, product_type=None, caption_text='Caption',
+                    image_versions2=SimpleNamespace(candidates=[SimpleNamespace(
+                        url='https://cdn.example/image.jpg',
+                    )]),
+                    thumbnail_url='https://cdn.example/thumb.jpg', video_url=None,
+                    like_count=7, comment_count=2, usertags=[],
+                    resources=[
+                        SimpleNamespace(pk='child-1', media_type=1,
+                                        thumbnail_url='https://cdn.example/child.jpg', video_url=None,
+                                        usertags=[]),
+                    ],
+                )]
+
+        client = ProfileClient()
+        self.assertEqual(InstagrapiGateway(client).profile('target.user', 10), {
+            'username': 'target.user',
+            'fullName': 'Target User',
+            'bio': 'A short bio',
+            'profilePicUrl': 'https://cdn.example/avatar.jpg',
+            'followersCount': 12,
+            'followingCount': 3,
+            'postsCount': 1,
+            'isPrivate': False,
+            'isVerified': True,
+            'latestPosts': [{
+                'id': 'post-1', 'shortCode': 'Abc123', 'caption': 'Caption',
+                'imageUrl': 'https://cdn.example/image.jpg',
+                'thumbnailUrl': 'https://cdn.example/thumb.jpg', 'type': 'carousel',
+                'mediaItems': [{
+                    'id': 'child-1', 'type': 'image',
+                    'thumbnailUrl': 'https://cdn.example/child.jpg',
+                }],
+                'declaredMediaCount': 1, 'childrenComplete': True,
+                'likesCount': 7, 'commentsCount': 2,
+                'timestamp': '2026-08-03T00:00:00+00:00',
+                'taggedUsers': [], 'mentionedUsers': [],
+            }],
+        })
+        self.assertEqual(client.profile_username, 'target.user')
+        self.assertEqual(client.profile_media_args, ('123', 10))
+
+    def test_private_profile_returns_its_summary_without_requesting_media(self):
+        class PrivateProfileClient(FakeClient):
+            def user_info_by_username(self, username):
+                return SimpleNamespace(
+                    pk='123', username=username, full_name='', biography='', profile_pic_url='',
+                    follower_count=12, following_count=3, media_count=9,
+                    is_private=True, is_verified=False,
+                )
+
+            def user_medias(self, user_id, amount):
+                raise AssertionError('private profile media must not be requested')
+
+        result = InstagrapiGateway(PrivateProfileClient()).profile('target.user', 10)
+        self.assertTrue(result['isPrivate'])
+        self.assertNotIn('latestPosts', result)
+
+    def test_public_profile_with_posts_fails_closed_when_media_is_unusable(self):
+        class EmptyMediaClient(FakeClient):
+            def user_info_by_username(self, username):
+                return SimpleNamespace(
+                    pk='123', username=username, full_name='', biography='', profile_pic_url='',
+                    follower_count=12, following_count=3, media_count=1,
+                    is_private=False, is_verified=False,
+                )
+
+            def user_medias(self, user_id, amount):
+                return []
+
+        with self.assertRaises(WorkerSchemaError):
+            InstagrapiGateway(EmptyMediaClient()).profile('target.user', 10)
+
+    def test_profile_batch_preserves_each_known_not_found_username(self):
+        UserNotFound = type('UserNotFound', (RuntimeError,), {})
+
+        class BatchClient(FakeClient):
+            def user_info_by_username(self, username):
+                if username == 'missing.user':
+                    raise UserNotFound()
+                return SimpleNamespace(
+                    pk='123', username=username, full_name='', biography='', profile_pic_url='',
+                    follower_count=0, following_count=0, media_count=0,
+                    is_private=False, is_verified=False,
+                )
+
+            def user_medias(self, user_id, amount):
+                return []
+
+        self.assertEqual(InstagrapiGateway(BatchClient()).profiles(
+            ['target.user', 'missing.user'], 1,
+        ), [
+            {'username': 'target.user', 'status': 'available', 'profile': {
+                'username': 'target.user', 'followersCount': 0, 'followingCount': 0,
+                'postsCount': 0, 'isPrivate': False, 'isVerified': False,
+                'latestPosts': [],
+            }},
+            {'username': 'missing.user', 'status': 'not_found'},
+        ])
+
     def test_configures_a_bounded_delay_between_private_api_requests(self):
         client = SimpleNamespace(delay_range=None, set_settings=lambda settings: None)
         module = SimpleNamespace(Client=lambda: client)

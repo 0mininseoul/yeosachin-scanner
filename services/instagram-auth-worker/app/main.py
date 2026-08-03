@@ -1,4 +1,5 @@
 import hmac
+import re
 from contextlib import asynccontextmanager
 from typing import Any
 
@@ -46,6 +47,16 @@ class InteractionRequest(OperationRequest):
     model_config = ConfigDict(extra='forbid', strict=True)
     postUrls: list[HttpUrl] = Field(min_length=1, max_length=10)
     limitPerPost: int = Field(ge=1, le=150)
+
+
+class ProfileRequest(OperationRequest):
+    username: str = Field(pattern=r'^[a-z0-9._]{1,30}$')
+    mediaLimit: int = Field(ge=1, le=10)
+
+
+class ProfileBatchRequest(OperationRequest):
+    usernames: list[str] = Field(min_length=1, max_length=30)
+    mediaLimit: int = Field(ge=1, le=10)
 
 
 def error_payload(
@@ -227,6 +238,22 @@ def create_app(
             payload.limitPerPost,
             payload.operationKey,
             payload.inputHash,
+        )
+
+    @application.post('/v1/profiles/profile', dependencies=[Depends(authorize)])
+    async def profile(payload: ProfileRequest, request: Request):
+        return await service(request).profile(
+            payload.username, payload.mediaLimit, payload.operationKey, payload.inputHash,
+        )
+
+    @application.post('/v1/profiles', dependencies=[Depends(authorize)])
+    async def profiles(payload: ProfileBatchRequest, request: Request):
+        if any(not re.fullmatch(r'[a-z0-9._]{1,30}', username) for username in payload.usernames):
+            raise ValueError('invalid username')
+        if len(set(payload.usernames)) != len(payload.usernames):
+            raise ValueError('duplicate usernames')
+        return await service(request).profiles(
+            payload.usernames, payload.mediaLimit, payload.operationKey, payload.inputHash,
         )
 
     return application
