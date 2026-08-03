@@ -83,10 +83,14 @@ SCRAPER_FOLLOWERS=selfhosted_auth
 SCRAPER_FOLLOWING=selfhosted_auth
 SCRAPER_LIKERS=selfhosted_auth
 SCRAPER_COMMENTS=selfhosted_auth
-SCRAPER_FALLBACK=true
+SCRAPER_FALLBACK=false
 ```
 
 Do not use bearer mode in production. It is a local-development compatibility path, not the Cloud Run authorization mechanism.
+
+Analysis V2 treats the four paid collection selectors as one route: `followers`, `following`, `likers`, and `comments` must all be `selfhosted_auth` or all be `apify`. Mixed values are rejected before collection. With `selfhosted_auth`, `SCRAPER_FALLBACK=false` is required and an authenticated-worker error fails the paid request without creating an Apify run. That route requires the worker URL, matching OIDC audience, 1,000–300,000 ms timeout, and enabled `SELFHOSTED_AUTH_ENABLED` kill switch in the generated non-secret runtime manifest. An all-Apify rollback instead requires `SELFHOSTED_AUTH_ENABLED=false` and does not require worker URL, audience, or timeout configuration.
+
+Beta requests carrying `providerExecutionPolicy.mode=betatest_free_pool` are separate: relationship and interaction calls always use their request-frozen free Apify slots and budgets regardless of these global paid selectors. Their existing selfhosted profile primary may still use the frozen free Apify profile fallback.
 
 Apply `20260803140000_add_authenticated_selfhosted_scraper_receipts.sql` through the repository's reviewed migration workflow before enabling the selectors. Start with a low-volume canary. Suspension risk cannot be eliminated; rate-limit responses trigger a durable cooldown, while challenges and authentication failures create a durable account quarantine and require the explicit recovery procedure above.
 
@@ -100,6 +104,7 @@ SCRAPER_FOLLOWERS=apify
 SCRAPER_FOLLOWING=apify
 SCRAPER_LIKERS=apify
 SCRAPER_COMMENTS=apify
+SCRAPER_FALLBACK=true
 ```
 
 This takes effect without reading or rotating the worker session secret. Leave the Cloud Run service private; do not make it public during rollback. Wait for in-flight calls to settle, inspect unresolved durable ledger entries and any account quarantine, and investigate the failure before an explicit operator decision to re-enable the kill switch.

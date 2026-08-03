@@ -211,6 +211,15 @@ BETATEST_FREE_POOL_REFRESH_INTERVAL_SECONDS=60
 SELFHOSTED_PROFILE_GLOBAL_GATE_ENABLED=true
 SELFHOSTED_PROFILE_GLOBAL_MIN_INTERVAL_MS=750
 SELFHOSTED_PROFILE_GLOBAL_RESPONSE_GUARD_MS=100
+SELFHOSTED_AUTH_ENABLED=true
+SELFHOSTED_AUTH_WORKER_URL=https://instagram-auth-worker.example.run.app
+SELFHOSTED_AUTH_WORKER_OIDC_AUDIENCE=https://instagram-auth-worker.example.run.app
+SELFHOSTED_AUTH_WORKER_TIMEOUT_MS=240000
+SCRAPER_FOLLOWERS=selfhosted_auth
+SCRAPER_FOLLOWING=selfhosted_auth
+SCRAPER_LIKERS=selfhosted_auth
+SCRAPER_COMMENTS=selfhosted_auth
+SCRAPER_FALLBACK=false
 SUPABASE_SERVICE_ROLE_KEY=SUPABASE_SECRET_SENTINEL_0123456789
 APIFY_QUINARY_API_TOKEN=APIFY_QUINARY_SECRET_SENTINEL_0123456789
 APIFY_SENARY_API_TOKEN=APIFY_SENARY_SECRET_SENTINEL_0123456789
@@ -621,15 +630,71 @@ expected_runtime_keys="$(printf '%s\n' \
   GOOGLE_CLOUD_PROJECT \
   NEXT_PUBLIC_SUPABASE_URL \
   SCRAPER_FALLBACK \
+  SCRAPER_COMMENTS \
   SCRAPER_FOLLOWERS \
   SCRAPER_FOLLOWING \
+  SCRAPER_LIKERS \
   SCRAPER_PROFILE \
   SCRAPER_PROFILES_BATCH \
+  SELFHOSTED_AUTH_ENABLED \
+  SELFHOSTED_AUTH_WORKER_OIDC_AUDIENCE \
+  SELFHOSTED_AUTH_WORKER_TIMEOUT_MS \
+  SELFHOSTED_AUTH_WORKER_URL \
   SELFHOSTED_PROFILE_GLOBAL_GATE_ENABLED \
   SELFHOSTED_PROFILE_GLOBAL_MIN_INTERVAL_MS \
   SELFHOSTED_PROFILE_GLOBAL_RESPONSE_GUARD_MS | sort)"
 [[ "$runtime_keys" == "$expected_runtime_keys" ]] \
   || fail "generated runtime manifest key allowlist drifted"
+assert_contains "$runtime_file" 'SCRAPER_FOLLOWERS: "selfhosted_auth"'
+assert_contains "$runtime_file" 'SCRAPER_FOLLOWING: "selfhosted_auth"'
+assert_contains "$runtime_file" 'SCRAPER_LIKERS: "selfhosted_auth"'
+assert_contains "$runtime_file" 'SCRAPER_COMMENTS: "selfhosted_auth"'
+assert_contains "$runtime_file" 'SCRAPER_FALLBACK: "false"'
+
+sed \
+  -e 's/^SCRAPER_FOLLOWERS=.*/SCRAPER_FOLLOWERS=apify/' \
+  -e 's/^SCRAPER_FOLLOWING=.*/SCRAPER_FOLLOWING=apify/' \
+  -e 's/^SCRAPER_LIKERS=.*/SCRAPER_LIKERS=apify/' \
+  -e 's/^SCRAPER_COMMENTS=.*/SCRAPER_COMMENTS=apify/' \
+  -e 's/^SCRAPER_FALLBACK=.*/SCRAPER_FALLBACK=true/' \
+  -e 's/^SELFHOSTED_AUTH_ENABLED=.*/SELFHOSTED_AUTH_ENABLED=false/' \
+  "$temp_dir/source.env" >"$temp_dir/apify-rollback-manifest.env"
+env \
+  "PATH=$PATH" \
+  "ANALYSIS_V2_MANIFEST_SOURCE_ENV_FILE=$temp_dir/apify-rollback-manifest.env" \
+  "ANALYSIS_V2_ENV_OUTPUT_DIR=$temp_dir/generated" \
+  "ANALYSIS_V2_WORKER_SOURCE_DIR=$repo_dir" \
+  bash "$script_dir/generate-analysis-v2-env-files.sh" \
+  >"$temp_dir/apify-rollback-generator.out"
+assert_contains "$runtime_file" 'SCRAPER_FOLLOWERS: "apify"'
+assert_contains "$runtime_file" 'SCRAPER_LIKERS: "apify"'
+assert_contains "$runtime_file" 'SCRAPER_FALLBACK: "true"'
+
+sed \
+  -e 's/^SELFHOSTED_AUTH_ENABLED=.*/SELFHOSTED_AUTH_ENABLED=false/' \
+  -e '/^SELFHOSTED_AUTH_WORKER_URL=/d' \
+  -e '/^SELFHOSTED_AUTH_WORKER_OIDC_AUDIENCE=/d' \
+  -e '/^SELFHOSTED_AUTH_WORKER_TIMEOUT_MS=/d' \
+  "$temp_dir/apify-rollback-manifest.env" >"$temp_dir/apify-no-auth-manifest.env"
+env \
+  "PATH=$PATH" \
+  "ANALYSIS_V2_MANIFEST_SOURCE_ENV_FILE=$temp_dir/apify-no-auth-manifest.env" \
+  "ANALYSIS_V2_ENV_OUTPUT_DIR=$temp_dir/generated" \
+  "ANALYSIS_V2_WORKER_SOURCE_DIR=$repo_dir" \
+  bash "$script_dir/generate-analysis-v2-env-files.sh" \
+  >"$temp_dir/apify-no-auth-generator.out"
+assert_contains "$runtime_file" 'SELFHOSTED_AUTH_ENABLED: "false"'
+assert_not_contains "$runtime_file" 'SELFHOSTED_AUTH_WORKER_URL:'
+assert_not_contains "$runtime_file" 'SELFHOSTED_AUTH_WORKER_OIDC_AUDIENCE:'
+assert_not_contains "$runtime_file" 'SELFHOSTED_AUTH_WORKER_TIMEOUT_MS:'
+
+env \
+  "PATH=$PATH" \
+  "ANALYSIS_V2_MANIFEST_SOURCE_ENV_FILE=$temp_dir/source.env" \
+  "ANALYSIS_V2_ENV_OUTPUT_DIR=$temp_dir/generated" \
+  "ANALYSIS_V2_WORKER_SOURCE_DIR=$repo_dir" \
+  bash "$script_dir/generate-analysis-v2-env-files.sh" \
+  >"$temp_dir/auth-generator-restored.out"
 
 manifest_gate_keys=(
   ANALYSIS_V2_AUTHORIZED_TEST_SHARDING_ENABLED

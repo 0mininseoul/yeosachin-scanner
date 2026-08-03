@@ -365,6 +365,80 @@ describe('analysis V2 reverse-like production collector', () => {
         expect(getPostLikers).not.toHaveBeenCalled();
     });
 
+    it('pins beta reverse likes to its free Apify binding despite selfhosted_auth selectors', async () => {
+        const policy = {
+            mode: 'betatest_free_pool',
+            policyVersion: 'betatest-free-pool-v1',
+            operationSlots: {
+                'target-profile': 'primary',
+                'relationship-followers': 'tertiary',
+                'relationship-following': 'quaternary',
+                'profile-fallback': 'quinary',
+                'profile-repair': 'senary',
+                'target-likers': 'septenary',
+                'target-comments': 'primary',
+                'candidate-likers': 'tertiary',
+            },
+            operationBudgets: {
+                'target-profile': 1,
+                'relationship-followers': 1,
+                'relationship-following': 1,
+                'profile-fallback': 1,
+                'profile-repair': 1,
+                'target-likers': 1,
+                'target-comments': 1,
+                'candidate-likers': 1,
+            },
+        } as const;
+        const bindAdapterCheckpoint = vi.fn(async () => ({ stored: null, checkpoint: {} }));
+        const apifyLikers = vi.fn(async () => []);
+        const selfHostedLikers = vi.fn(() => { throw new Error('beta must not call selfhosted'); });
+        const collector = createAnalysisV2ReverseLikeCollector({
+            providerRunStore: {
+                bindAdapterCheckpoint,
+                load: vi.fn(async () => null),
+            } as unknown as AnalysisV2ProviderRunStore,
+            selfHostedAuthRunStore: {
+                load: vi.fn(() => { throw new Error('beta must not load selfhosted receipt'); }),
+                checkpoint: vi.fn(),
+            },
+            contextStore: reverseLikeContext(policy),
+            adapter: { getPostLikers: apifyLikers, getPostComments: vi.fn() },
+            selfHostedAuthAdapter: { getPostLikers: selfHostedLikers, getPostComments: vi.fn() },
+            env: {
+                SELFHOSTED_AUTH_ENABLED: 'true',
+                SCRAPER_LIKERS: 'selfhosted_auth',
+                SCRAPER_FALLBACK: 'false',
+                APIFY_PRIMARY_API_TOKEN: 'primary-test-token',
+                APIFY_TERTIARY_API_TOKEN: 'tertiary-test-token',
+                APIFY_QUATERNARY_API_TOKEN: 'quaternary-test-token',
+                APIFY_QUINARY_API_TOKEN: 'quinary-test-token',
+                APIFY_SENARY_API_TOKEN: 'senary-test-token',
+                APIFY_SEPTENARY_API_TOKEN: 'septenary-test-token',
+            },
+        });
+
+        await expect(collector.collect({
+            requestId,
+            jobKey: 'track:reverse-likes:collect',
+            claimToken,
+            jobInputHash: consumerInputHash,
+            targetUsername: 'target.account',
+            candidates: [{
+                candidateId: 'candidate:a',
+                postUrl: 'https://instagram.com/p/POST_A/',
+                declaredLikesCount: 1,
+            }],
+            limitPerPost: 100,
+        })).rejects.toThrow('ANALYSIS_V2_REVERSE_LIKE_PROVIDER_RUN_NOT_SUCCEEDED');
+
+        expect(apifyLikers).toHaveBeenCalledOnce();
+        expect(selfHostedLikers).not.toHaveBeenCalled();
+        expect(bindAdapterCheckpoint).toHaveBeenCalledWith(expect.objectContaining({
+            credentialSlot: 'tertiary',
+        }));
+    });
+
     it('uses one durable provider operation for at most ten posts and keeps per-post attribution', async () => {
         const bindAdapterCheckpoint = vi.fn(async (input: unknown) => {
             void input;

@@ -30,6 +30,20 @@ Required source dotenv keys:
   SELFHOSTED_PROFILE_GLOBAL_GATE_ENABLED=true
   SELFHOSTED_PROFILE_GLOBAL_MIN_INTERVAL_MS=750
   SELFHOSTED_PROFILE_GLOBAL_RESPONSE_GUARD_MS=100
+  SELFHOSTED_AUTH_ENABLED=true|false
+  SCRAPER_FOLLOWERS=apify|selfhosted_auth
+  SCRAPER_FOLLOWING=apify|selfhosted_auth
+  SCRAPER_LIKERS=apify|selfhosted_auth
+  SCRAPER_COMMENTS=apify|selfhosted_auth
+  SCRAPER_FALLBACK=true|false
+
+Required only when all four SCRAPER_* selectors above use selfhosted_auth:
+  SELFHOSTED_AUTH_WORKER_URL=https://private-worker-origin
+  SELFHOSTED_AUTH_WORKER_OIDC_AUDIENCE=https://private-worker-origin
+  SELFHOSTED_AUTH_WORKER_TIMEOUT_MS=1000..300000
+
+For an all-Apify rollback, set SELFHOSTED_AUTH_ENABLED=false and omit the
+worker URL, audience, and timeout keys.
 
 Generated files:
   analysis-v2-runtime.yaml  Non-secret worker runtime manifest.
@@ -136,6 +150,12 @@ const betaFreePoolRefreshIntervalSeconds = required(
 const globalGateEnabled = required('SELFHOSTED_PROFILE_GLOBAL_GATE_ENABLED');
 const globalMinIntervalMs = required('SELFHOSTED_PROFILE_GLOBAL_MIN_INTERVAL_MS');
 const globalResponseGuardMs = required('SELFHOSTED_PROFILE_GLOBAL_RESPONSE_GUARD_MS');
+const selfHostedAuthEnabled = required('SELFHOSTED_AUTH_ENABLED');
+const scraperFollowers = required('SCRAPER_FOLLOWERS');
+const scraperFollowing = required('SCRAPER_FOLLOWING');
+const scraperLikers = required('SCRAPER_LIKERS');
+const scraperComments = required('SCRAPER_COMMENTS');
+const scraperFallback = required('SCRAPER_FALLBACK');
 
 if (!/^https:\/\/[a-z0-9-]+\.supabase\.co\/?$/i.test(supabaseUrl)) {
   throw new Error('NEXT_PUBLIC_SUPABASE_URL must be an HTTPS Supabase project URL');
@@ -175,6 +195,63 @@ if (globalMinIntervalMs !== '750') {
 if (globalResponseGuardMs !== '100') {
   throw new Error('SELFHOSTED_PROFILE_GLOBAL_RESPONSE_GUARD_MS must be 100');
 }
+if (!['true', 'false'].includes(selfHostedAuthEnabled)) {
+  throw new Error('SELFHOSTED_AUTH_ENABLED must be true or false');
+}
+const privateHttpsOrigin = (value, name) => {
+  let parsed;
+  try { parsed = new URL(value); } catch {
+    throw new Error(`${name} must be a private HTTPS origin`);
+  }
+  if (parsed.protocol !== 'https:' || parsed.username || parsed.password
+    || parsed.search || parsed.hash || (parsed.pathname !== '' && parsed.pathname !== '/')) {
+    throw new Error(`${name} must be a private HTTPS origin`);
+  }
+  return parsed.origin;
+};
+const paidCollectionProviders = [
+  scraperFollowers,
+  scraperFollowing,
+  scraperLikers,
+  scraperComments,
+];
+if (!paidCollectionProviders.every(value => value === 'apify')
+  && !paidCollectionProviders.every(value => value === 'selfhosted_auth')) {
+  throw new Error('SCRAPER_FOLLOWERS, SCRAPER_FOLLOWING, SCRAPER_LIKERS, and SCRAPER_COMMENTS must select one paid provider');
+}
+if (!['true', 'false'].includes(scraperFallback)) {
+  throw new Error('SCRAPER_FALLBACK must be true or false');
+}
+if (scraperFollowers === 'selfhosted_auth' && scraperFallback !== 'false') {
+  throw new Error('SCRAPER_FALLBACK must be false for selfhosted_auth paid collection');
+}
+let selfHostedAuthWorker: Record<string, string> = {};
+if (scraperFollowers === 'selfhosted_auth') {
+  if (selfHostedAuthEnabled !== 'true') {
+    throw new Error('SELFHOSTED_AUTH_ENABLED must be true for selfhosted_auth paid collection');
+  }
+  const workerOrigin = privateHttpsOrigin(
+    required('SELFHOSTED_AUTH_WORKER_URL'),
+    'SELFHOSTED_AUTH_WORKER_URL'
+  );
+  if (privateHttpsOrigin(
+    required('SELFHOSTED_AUTH_WORKER_OIDC_AUDIENCE'),
+    'SELFHOSTED_AUTH_WORKER_OIDC_AUDIENCE'
+  ) !== workerOrigin) {
+    throw new Error('SELFHOSTED_AUTH_WORKER_OIDC_AUDIENCE must match SELFHOSTED_AUTH_WORKER_URL');
+  }
+  const timeout = required('SELFHOSTED_AUTH_WORKER_TIMEOUT_MS');
+  if (!/^[1-9][0-9]*$/.test(timeout) || Number(timeout) < 1000 || Number(timeout) > 300000) {
+    throw new Error('SELFHOSTED_AUTH_WORKER_TIMEOUT_MS must be an integer from 1000 through 300000');
+  }
+  selfHostedAuthWorker = {
+    SELFHOSTED_AUTH_WORKER_URL: workerOrigin,
+    SELFHOSTED_AUTH_WORKER_OIDC_AUDIENCE: workerOrigin,
+    SELFHOSTED_AUTH_WORKER_TIMEOUT_MS: timeout,
+  };
+} else if (selfHostedAuthEnabled !== 'false') {
+  throw new Error('SELFHOSTED_AUTH_ENABLED must be false for Apify paid collection');
+}
 
 const runtime = {
   NEXT_PUBLIC_SUPABASE_URL: supabaseUrl,
@@ -189,11 +266,15 @@ const runtime = {
   SELFHOSTED_PROFILE_GLOBAL_GATE_ENABLED: globalGateEnabled,
   SELFHOSTED_PROFILE_GLOBAL_MIN_INTERVAL_MS: globalMinIntervalMs,
   SELFHOSTED_PROFILE_GLOBAL_RESPONSE_GUARD_MS: globalResponseGuardMs,
+  SELFHOSTED_AUTH_ENABLED: selfHostedAuthEnabled,
+  ...selfHostedAuthWorker,
   SCRAPER_PROFILE: 'selfhosted',
   SCRAPER_PROFILES_BATCH: 'selfhosted',
-  SCRAPER_FOLLOWERS: 'apify',
-  SCRAPER_FOLLOWING: 'apify',
-  SCRAPER_FALLBACK: 'true',
+  SCRAPER_FOLLOWERS: scraperFollowers,
+  SCRAPER_FOLLOWING: scraperFollowing,
+  SCRAPER_LIKERS: scraperLikers,
+  SCRAPER_COMMENTS: scraperComments,
+  SCRAPER_FALLBACK: scraperFallback,
 };
 
 const build = {

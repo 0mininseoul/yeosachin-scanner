@@ -72,6 +72,41 @@ afterEach(() => {
 });
 
 describe('getProfilesBatchV2', () => {
+    it('does not start the Apify profile fallback when a paid authenticated route disables it', async () => {
+        const primary = vi.fn(async (usernames: string[]) => usernames.map(username =>
+            failedProfileAttempt({
+                requestedUsername: username,
+                source: 'selfhosted',
+                error: new Error('selfhosted unavailable'),
+                requestCount: 1,
+                latencyMs: 1,
+            })
+        ));
+        const fallback = vi.fn(async () => [profile('alice')]);
+        __setProvidersForTest({}, {
+            selfhosted: provider({
+                name: 'selfhosted',
+                paid: false,
+                getProfilesBatchOutcomes: primary,
+            }),
+            apify: provider({
+                name: 'apify',
+                paid: true,
+                getProfilesBatch: fallback,
+            }),
+        });
+
+        const result = await getProfilesBatchV2(['alice'], {
+            allowApifyFallback: false,
+            persistAttemptOutcomes: async () => undefined,
+        });
+
+        expect(primary).toHaveBeenCalledOnce();
+        expect(fallback).not.toHaveBeenCalled();
+        expect(result.fallbackResults).toEqual([]);
+        expect(result.results[0]?.outcome.source).toBe('selfhosted');
+    });
+
     it('preserves reject, null, and schema failures then sends only unresolved usernames once', async () => {
         const fetchUser = vi.fn(async (username: string) => {
             if (username === 'alice') return rawUser('alice');

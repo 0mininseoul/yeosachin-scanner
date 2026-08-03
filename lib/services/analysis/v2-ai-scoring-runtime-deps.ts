@@ -14,10 +14,7 @@ import type {
     SelfHostedAuthRunReceipt,
 } from '@/lib/services/instagram/providers/types';
 import { selfHostedAuthInteractionAdapter } from '@/lib/services/instagram/providers/selfhosted-auth';
-import {
-    isSelfHostedAuthFallbackEligible,
-    parseSelfHostedAuthLikerItems,
-} from '@/lib/services/instagram/providers/selfhosted-auth/client';
+import { parseSelfHostedAuthLikerItems } from '@/lib/services/instagram/providers/selfhosted-auth/client';
 import { getInteractionScraperConfig } from '@/lib/services/instagram/config';
 import { supabaseAdmin } from '@/lib/supabase/admin';
 import {
@@ -512,30 +509,12 @@ export function createAnalysisV2ReverseLikeCollector(input: {
                 });
                 return { operationKey, likers };
             };
-            const scraperConfig = getInteractionScraperConfig(env);
             let collected: Awaited<ReturnType<typeof executeApify>>
                 | Awaited<ReturnType<typeof executeSelfHostedAuth>>;
-            if (scraperConfig.likers === 'selfhosted_auth') {
-                const existingFallback = await providerRunStore.load({
-                    requestId: claim.requestId,
-                    jobKey: claim.jobKey,
-                    operationKey: createAnalysisV2ProviderOperationKey(
-                        'candidate-likers',
-                        apifyCanonicalInput
-                    ),
-                });
-                if (existingFallback) {
-                    collected = await executeApify();
-                } else {
-                    try {
-                        collected = await executeSelfHostedAuth();
-                    } catch (error) {
-                        if (!scraperConfig.fallback || !isSelfHostedAuthFallbackEligible(error)) {
-                            throw error;
-                        }
-                        collected = await executeApify();
-                    }
-                }
+            if (requestContext.providerExecutionPolicy?.mode === 'betatest_free_pool') {
+                collected = await executeApify();
+            } else if (getInteractionScraperConfig(env).likers === 'selfhosted_auth') {
+                collected = await executeSelfHostedAuth();
             } else {
                 collected = await executeApify();
             }

@@ -923,6 +923,8 @@ describe('analysis V2 concrete collection executors', () => {
             env: {
                 SCRAPER_FOLLOWERS: 'selfhosted_auth',
                 SCRAPER_FOLLOWING: 'selfhosted_auth',
+                SCRAPER_LIKERS: 'selfhosted_auth',
+                SCRAPER_COMMENTS: 'selfhosted_auth',
                 SELFHOSTED_AUTH_ENABLED: 'true',
             },
         });
@@ -948,7 +950,45 @@ describe('analysis V2 concrete collection executors', () => {
         }));
     });
 
-    it('falls back from selfhosted_auth to the unchanged durable Apify relationship path', async () => {
+    it('does not spend Apify after a paid selfhosted_auth relationship failure', async () => {
+        const getter = vi.fn(async (
+            _username: string,
+            _limit?: number,
+            options?: ScrapeRequestOptions
+        ) => {
+            if (options?.provider === 'selfhosted_auth') {
+                throw new SelfHostedAuthWorkerError('queue_timeout', true, 503);
+            }
+            throw new Error('paid selfhosted_auth must not call Apify');
+        });
+        const providers = providerStore();
+        const executor = createAnalysisV2RelationshipsExecutor({
+            requestContextStore: contextStore(requestContext()),
+            providerRunStore: providers.value,
+            selfHostedAuthRunStore: {
+                load: vi.fn(async () => null),
+                checkpoint: vi.fn(),
+            },
+            getFollowers: getter,
+            getFollowing: getter,
+            evidenceStore: {} as AnalysisV2EvidenceStore,
+            env: {
+                SCRAPER_FOLLOWERS: 'selfhosted_auth',
+                SCRAPER_FOLLOWING: 'selfhosted_auth',
+                SCRAPER_LIKERS: 'selfhosted_auth',
+                SCRAPER_COMMENTS: 'selfhosted_auth',
+                SCRAPER_FALLBACK: 'true',
+                SELFHOSTED_AUTH_ENABLED: 'true',
+            },
+        });
+
+        await expect(executor(stageContext('relationships', state())))
+            .rejects.toThrow('SELFHOSTED_AUTH_WORKER_ERROR: queue_timeout');
+        expect(getter.mock.calls.filter(call => call[2]?.provider === 'apify')).toHaveLength(0);
+        expect(providers.bindAdapterCheckpoint).not.toHaveBeenCalled();
+    });
+
+    it('pins beta relationships to free Apify despite selfhosted_auth global selectors', async () => {
         const rows = [
             { username: 'alice', isPrivate: false, isVerified: false },
             { username: 'bob', isPrivate: false, isVerified: false },
@@ -975,7 +1015,16 @@ describe('analysis V2 concrete collection executors', () => {
             resultHash,
         }));
         const executor = createAnalysisV2RelationshipsExecutor({
-            requestContextStore: contextStore(requestContext()),
+            requestContextStore: contextStore(requestContext({
+                providerExecutionPolicy: {
+                    ...betaProviderPolicy,
+                    operationBudgets: {
+                        ...betaProviderPolicy.operationBudgets,
+                        'relationship-followers': 1,
+                        'relationship-following': 1,
+                    },
+                },
+            })),
             providerRunStore: providers.value,
             selfHostedAuthRunStore: {
                 load: vi.fn(async () => null),
@@ -1004,6 +1053,7 @@ describe('analysis V2 concrete collection executors', () => {
                 })),
             } as unknown as AnalysisV2EvidenceStore,
             env: {
+                ...betaProviderEnv,
                 SCRAPER_FOLLOWERS: 'selfhosted_auth',
                 SCRAPER_FOLLOWING: 'selfhosted_auth',
                 SCRAPER_FALLBACK: 'true',
@@ -1013,7 +1063,7 @@ describe('analysis V2 concrete collection executors', () => {
 
         await expect(executor(stageContext('relationships', state()))).resolves.toBeDefined();
         expect(getter.mock.calls.filter(call => call[2]?.provider === 'selfhosted_auth'))
-            .toHaveLength(2);
+            .toHaveLength(0);
         expect(getter.mock.calls.filter(call => call[2]?.provider === 'apify'))
             .toHaveLength(2);
         expect(providers.bindAdapterCheckpoint).toHaveBeenCalledTimes(2);
@@ -1122,6 +1172,45 @@ describe('analysis V2 concrete collection executors', () => {
         expect(getFollowersMock).toHaveBeenCalledOnce();
         expect(getFollowingMock).toHaveBeenCalledOnce();
         expect(providers.bindAdapterCheckpoint).toHaveBeenCalledTimes(2);
+    });
+
+    it('does not open an Apify replacement for a reconciled legacy run in paid selfhosted_auth mode', async () => {
+        const providers = providerStore();
+        const incomplete = new Error(
+            'SCRAPING_INCOMPLETE_ERROR: legacy relationship dataset is incomplete.'
+        );
+        providers.load.mockResolvedValue({
+            status: 'succeeded',
+            runId: 'LEGACYRUN123',
+            actualUsageUsd: 0.01,
+            usageReconciledAt: capturedAt,
+        } as unknown as StoredAnalysisV2ProviderRun);
+        const getter = vi.fn(async (): Promise<InstagramFollower[]> => { throw incomplete; });
+        const executor = createAnalysisV2RelationshipsExecutor({
+            requestContextStore: contextStore(requestContext()),
+            providerRunStore: providers.value,
+            getFollowers: getter,
+            getFollowing: getter,
+            evidenceStore: {
+                checkpointRelationshipSide: vi.fn(),
+                freezeRelationships: vi.fn(),
+            } as unknown as AnalysisV2EvidenceStore,
+            env: {
+                SELFHOSTED_AUTH_ENABLED: 'true',
+                SCRAPER_FOLLOWERS: 'selfhosted_auth',
+                SCRAPER_FOLLOWING: 'selfhosted_auth',
+                SCRAPER_LIKERS: 'selfhosted_auth',
+                SCRAPER_COMMENTS: 'selfhosted_auth',
+                SCRAPER_FALLBACK: 'false',
+            },
+        });
+
+        await expect(executor(stageContext('relationships', state()))).rejects.toBe(incomplete);
+        expect(providers.bindAdapterCheckpoint).toHaveBeenCalledTimes(2);
+        expect(providers.bindAdapterCheckpoint.mock.calls.every(([input]) => (
+            input.operationKey.startsWith('relationship-followers:')
+            || input.operationKey.startsWith('relationship-following:')
+        ))).toBe(true);
     });
 
     it('bounds repeated incomplete relationship retries to the same two operation identities', async () => {
@@ -1636,6 +1725,8 @@ describe('analysis V2 concrete collection executors', () => {
             getProfilesBatchV2: vi.fn(),
             env: {
                 SELFHOSTED_AUTH_ENABLED: 'true',
+                SCRAPER_FOLLOWERS: 'selfhosted_auth',
+                SCRAPER_FOLLOWING: 'selfhosted_auth',
                 SCRAPER_LIKERS: 'selfhosted_auth',
                 SCRAPER_COMMENTS: 'selfhosted_auth',
                 SCRAPER_FALLBACK: 'false',
@@ -2725,6 +2816,40 @@ describe('analysis V2 concrete collection executors', () => {
 
         await expect(profileBatchResultHashOf(resume))
             .resolves.toBe(await profileBatchResultHashOf(resume));
+    });
+
+    it('never binds an Apify profile fallback or repair for paid selfhosted_auth', async () => {
+        const usernames = Array.from({ length: 10 }, (_, index) => `user${index}`);
+        const failed = usernames.slice(-2);
+        const topology = createAnalysisV2CollectionTopology('profiles', usernames);
+        const store = inMemoryProfileStore(
+            completedFallbackResume(usernames, failed.map(username => incompleteFailure(username)))
+        );
+        const runProfileRepair = repairRunner(repairSuccess);
+        const runs = providerStore();
+
+        await expect(createAnalysisV2ProfileFetchExecutor({
+            requestContextStore: contextStore(requestContext()),
+            evidenceStore: relationshipEvidence(usernames),
+            profileCheckpointStore: store.store,
+            runProfileRepair,
+            providerRunStore: runs.value,
+            env: {
+                SELFHOSTED_AUTH_ENABLED: 'true',
+                SCRAPER_FOLLOWERS: 'selfhosted_auth',
+                SCRAPER_FOLLOWING: 'selfhosted_auth',
+                SCRAPER_LIKERS: 'selfhosted_auth',
+                SCRAPER_COMMENTS: 'selfhosted_auth',
+                SCRAPER_FALLBACK: 'false',
+            },
+        })(stageContext(
+            'profile_fetch',
+            state({ relationships: relationshipManifest(topology) }),
+            0
+        ))).rejects.toThrow('ANALYSIS_V2_PROFILE_EVIDENCE_INCOMPLETE');
+
+        expect(runProfileRepair).not.toHaveBeenCalled();
+        expect(runs.bindAdapterCheckpoint).not.toHaveBeenCalled();
     });
 
     it('repairs a below-gate batch and passes once the repair succeeds', async () => {
