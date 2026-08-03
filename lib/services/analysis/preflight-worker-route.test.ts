@@ -170,6 +170,42 @@ describe('preflight worker route', () => {
                 disposition: 'ready',
             }),
         });
+        expect(mocks.emit.mock.calls.filter(([entry]) => (
+            entry as { event?: string }).event === 'preflight.profile_collected'
+        )).toHaveLength(1);
+        expect(mocks.emit.mock.calls.filter(([entry]) => (
+            entry as { event?: string }).event === 'preflight.completed'
+        )).toHaveLength(1);
+        expect(mocks.observeRoute).toHaveBeenCalledWith(
+            expect.any(Request),
+            '/api/analysis/preflight/worker',
+            expect.any(Function),
+            { flush: 'await' },
+        );
+    });
+
+    it('records one completed terminal event for a business-blocked profile', async () => {
+        mocks.process.mockImplementation(async (_id, dependencies) => {
+            dependencies?.observer?.({
+                type: 'completed',
+                outcome: 'blocked',
+                preflightId,
+                userId: '223e4567-e89b-42d3-a456-426614174000',
+                targetInstagramId: 'target.name',
+                errorCode: 'TARGET_PRIVATE',
+            });
+            return 'blocked';
+        });
+
+        const response = await POST(request({ preflightId }));
+
+        expect(response.status).toBe(200);
+        expect(mocks.emit.mock.calls.filter(([entry]) => (
+            entry as { event?: string }).event === 'preflight.completed'
+        )).toHaveLength(1);
+        expect(mocks.emit.mock.calls.filter(([entry]) => (
+            entry as { event?: string }).event === 'preflight.failed'
+        )).toHaveLength(0);
     });
 
     it('runs a fenced fresh-admission generation in the same durable Cloud Run worker', async () => {
@@ -384,5 +420,30 @@ describe('preflight worker route', () => {
         });
         expect(record).not.toContain('target.name');
         expect(record).not.toContain('provider-secret');
+    });
+
+    it('does not duplicate a non-retryable terminal profile failure observed by the domain worker', async () => {
+        const log = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+        mocks.process.mockImplementation(async (_id, dependencies) => {
+            dependencies?.observer?.({
+                type: 'failed',
+                preflightId,
+                userId: '223e4567-e89b-42d3-a456-426614174000',
+                targetInstagramId: 'target.name',
+                category: 'provider',
+                retryable: false,
+                httpStatus: null,
+                workerAttemptCount: 1,
+            });
+            throw new Error('provider rejected');
+        });
+
+        const response = await POST(request({ preflightId }));
+
+        expect(response.status).toBe(500);
+        expect(mocks.emit.mock.calls.filter(([entry]) => (
+            entry as { event?: string }).event === 'preflight.failed'
+        )).toHaveLength(1);
+        expect(log).toHaveBeenCalledOnce();
     });
 });

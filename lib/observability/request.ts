@@ -38,6 +38,14 @@ export interface OperationalRequestContext {
     method: string;
 }
 
+export interface ObserveRouteOptions {
+    /**
+     * Durable workers must finish draining buffered telemetry before Cloud Tasks
+     * observes the HTTP acknowledgement. Interactive routes retain deferred flushes.
+     */
+    flush?: 'defer' | 'await';
+}
+
 function incomingRequestId(request: Request): string | undefined {
     const candidate = request.headers.get('x-request-id')?.trim();
     return candidate && UUID_PATTERN.test(candidate) ? candidate.toLowerCase() : undefined;
@@ -119,6 +127,7 @@ export async function observeRoute<T extends Response>(
     request: Request,
     route: string,
     operation: (context: OperationalRequestContext) => Promise<T>,
+    options: ObserveRouteOptions = {},
 ): Promise<T> {
     const context = requestContext(request, route);
     const startedAt = performance.now();
@@ -159,6 +168,12 @@ export async function observeRoute<T extends Response>(
         }
         throw error;
     } finally {
-        if (!suppressObservation) scheduleOperationalFlush();
+        if (!suppressObservation) {
+            if (options.flush === 'await') {
+                await bestEffortFlush();
+            } else {
+                scheduleOperationalFlush();
+            }
+        }
     }
 }
