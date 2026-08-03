@@ -24,6 +24,8 @@ export const COST_OPTIMIZED_MAX_ANALYSIS_POST_IMAGES = 2;
 export const COST_OPTIMIZED_MAX_ANALYSIS_IMAGE_DIMENSION = 384;
 export const MAX_IMAGE_DOWNLOAD_BYTES = 8 * 1024 * 1024;
 export const IMAGE_DOWNLOAD_TIMEOUT_MS = 5_000;
+/** Bounds queue acquisition, download fallback, and native decode for replay capture. */
+export const SELECTED_MEDIA_NORMALIZATION_TIMEOUT_MS = 15_000;
 
 export const MAX_DECODED_IMAGE_PIXELS = 16_000_000;
 
@@ -207,6 +209,7 @@ export interface AnalysisV2SelectedMediaNormalizerDependencies {
     downloadFallback?: (url: string) => Promise<Buffer>;
     normalize?: (bytes: Buffer) => Promise<Buffer>;
     withSlot?: <T>(task: () => Promise<T>) => Promise<T>;
+    timeoutMs?: number;
 }
 
 /** Exact V2 selected-media normalizer shared by production and offline replay capture. */
@@ -218,7 +221,15 @@ export function createAnalysisV2SelectedMediaNormalizer(
         ?? (input.download ? null : (url: string) => downloadImageBytesViaTrustedProxy(url));
     const normalize = input.normalize ?? (bytes => normalizeImageToJpeg(bytes));
     const withSlot = input.withSlot ?? runWithImagePreparationSlot;
-    return async media => withSlot(async () => {
+    const timeoutMs = input.timeoutMs ?? SELECTED_MEDIA_NORMALIZATION_TIMEOUT_MS;
+    if (!Number.isInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > 60_000) {
+        throw new Error('ANALYSIS_IMAGE_PREPARATION_TIMEOUT_INVALID');
+    }
+    return async media => {
+        let timer: ReturnType<typeof setTimeout> | undefined;
+        try {
+            return await Promise.race([
+                withSlot(async () => {
         if (!media.selectionId.trim() || !media.imageUrl.trim()) {
             throw new AnalysisImagePreparationError('invalid_source', 'permanent');
         }
@@ -239,8 +250,18 @@ export function createAnalysisV2SelectedMediaNormalizer(
         try { normalized = await normalize(downloaded); }
         catch (error) { throw classifyAnalysisImagePreparationError(error, 'decode'); }
         if (!normalized.length) throw new AnalysisImagePreparationError('empty_output', 'permanent');
-        return normalized;
-    });
+                    return normalized;
+                }),
+                new Promise<Buffer>((_, reject) => {
+                    timer = setTimeout(() => reject(new AnalysisImagePreparationError(
+                        'timeout', 'transient',
+                    )), timeoutMs);
+                }),
+            ]);
+        } finally {
+            if (timer) clearTimeout(timer);
+        }
+    };
 }
 
 function normalizedUrl(url: string | undefined): string | null {
