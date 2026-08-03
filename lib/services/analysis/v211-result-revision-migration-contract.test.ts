@@ -5,6 +5,10 @@ const migration = new URL(
     '../../../supabase/migrations/20260803150000_analysis_v2_v211_result_revisions.sql',
     import.meta.url,
 );
+const textOnlyRpcRenameMigration = new URL(
+    '../../../supabase/migrations/20260803180000_v211_text_only_source_rpc_short_name.sql',
+    import.meta.url,
+);
 
 describe('v2.11 result revision reader migration contract', () => {
     it('preserves request_id for snapshot/page predicates after replacing the base relation', async () => {
@@ -34,5 +38,25 @@ describe('v2.11 result revision reader migration contract', () => {
         const sql = await readFile(migration, 'utf8');
         expect(sql).toContain('OR v_existing.payload_hash IS DISTINCT FROM v_payload_hash THEN');
         expect(sql).toContain("'analysis-v2-v211-revision-payload:v1'");
+    });
+
+    it('renames the PostgreSQL-truncated text-only source RPC and reloads PostgREST', async () => {
+        const sql = await readFile(textOnlyRpcRenameMigration, 'utf8');
+        expect(sql).toContain(
+            'ALTER FUNCTION public.read_analysis_v2_test_entitlement_v211_legacy_secondary_text_on(UUID)',
+        );
+        expect(sql).toContain(
+            'RENAME TO read_analysis_v2_test_entitlement_v211_text_only_source;',
+        );
+        expect(sql).toContain(
+            'REVOKE ALL ON FUNCTION public.read_analysis_v2_test_entitlement_v211_text_only_source(UUID)',
+        );
+        expect(sql).toContain(
+            'GRANT EXECUTE ON FUNCTION public.read_analysis_v2_test_entitlement_v211_text_only_source(UUID)\n    TO service_role;',
+        );
+        expect(sql).toContain(
+            'v_source := public.read_analysis_v2_test_entitlement_v211_text_only_source(p_request_id);',
+        );
+        expect(sql).toContain("NOTIFY pgrst, 'reload schema';");
     });
 });

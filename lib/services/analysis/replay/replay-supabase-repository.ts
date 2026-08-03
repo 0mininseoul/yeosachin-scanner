@@ -42,7 +42,7 @@ export interface TestEntitlementLegacySecondaryReplaySourceRpcClient {
     }): PromiseLike<RpcResult>;
 }
 export interface TestEntitlementLegacySecondaryTextOnlyReplaySourceRpcClient {
-    rpc(name: 'read_analysis_v2_test_entitlement_v211_legacy_secondary_text_only_source', params: { p_request_id: string }): PromiseLike<RpcResult>;
+    rpc(name: 'read_analysis_v2_test_entitlement_v211_text_only_source', params: { p_request_id: string }): PromiseLike<RpcResult>;
 }
 
 const run = z.object({
@@ -397,7 +397,7 @@ export async function loadTestEntitlementLegacySecondaryTextOnlyReplayCaptureDes
     client: TestEntitlementLegacySecondaryTextOnlyReplaySourceRpcClient, requestId: string,
 ): Promise<TestEntitlementLegacySecondaryTextOnlyReplayCaptureDescriptor> {
     const exactRequestId = z.string().uuid().parse(requestId);
-    const result = await client.rpc('read_analysis_v2_test_entitlement_v211_legacy_secondary_text_only_source', { p_request_id: exactRequestId });
+    const result = await client.rpc('read_analysis_v2_test_entitlement_v211_text_only_source', { p_request_id: exactRequestId });
     if (result.error) throw new Error('ANALYSIS_V2_REPLAY_EXACT_SOURCE_UNAVAILABLE');
     const parsedResult = testEntitlementLegacySecondaryTextOnlySource.safeParse(result.data);
     if (!parsedResult.success || parsedResult.data.requestId !== exactRequestId) throw new Error('ANALYSIS_V2_REPLAY_READ_ONLY_SOURCE_INVALID');

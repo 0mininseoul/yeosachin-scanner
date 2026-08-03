@@ -62,7 +62,7 @@ describe('replay capture read-only repository', () => {
             requestId,
         );
         expect(rpc).toHaveBeenCalledWith(
-            'read_analysis_v2_test_entitlement_v211_legacy_secondary_text_only_source',
+            'read_analysis_v2_test_entitlement_v211_text_only_source',
             { p_request_id: requestId },
         );
         expect(descriptor).toMatchObject({
