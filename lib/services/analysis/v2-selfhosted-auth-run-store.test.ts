@@ -35,6 +35,19 @@ describe('analysis V2 selfhosted auth run receipt store', () => {
         expect(independent.operationKey).not.toBe(first.operationKey);
     });
 
+    it('derives a V2-scoped identity for a bounded profile batch without changing checkpoint sources', () => {
+        const identity = createAnalysisV2SelfHostedAuthWorkerIdentity({
+            ...input,
+            jobKey: 'track:profiles:batch:0',
+            operationKey: `target-profile:${'e'.repeat(64)}`,
+        });
+
+        expect(identity).toEqual({
+            inputHash: input.inputHash,
+            operationKey: expect.stringMatching(/^target-profile:[a-f0-9]{64}$/),
+        });
+    });
+
     it('exports the default receipt store as a checkpoint-capable instance', () => {
         expect(analysisV2SelfHostedAuthRunStore).toMatchObject({
             checkpoint: expect.any(Function),

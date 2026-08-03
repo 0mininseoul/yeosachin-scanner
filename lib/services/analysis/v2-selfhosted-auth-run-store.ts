@@ -4,7 +4,7 @@ import { supabaseAdmin } from '@/lib/supabase/admin';
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const JOB_KEY_PATTERN = /^[a-z0-9][a-z0-9:._-]{0,159}$/;
 const SHA256_PATTERN = /^[0-9a-f]{64}$/;
-const OPERATION_KEY_PATTERN = /^(?:relationship-(?:followers|following)|target-(?:likers|comments)|candidate-likers):[0-9a-f]{64}$/;
+const OPERATION_KEY_PATTERN = /^(?:relationship-(?:followers|following)|target-(?:profile|likers|comments)|candidate-likers):[0-9a-f]{64}$/;
 const RUN_ID_PATTERN = /^[0-9a-f]{32}$/;
 const MAX_CACHED_ITEMS_BYTES = 4 * 1024 * 1024;
 
@@ -80,7 +80,10 @@ function operationMatchesJob(jobKey: string, operationKey: string): boolean {
         return /^relationship-(?:followers|following):[0-9a-f]{64}$/.test(operationKey);
     }
     if (jobKey === 'track:target-evidence:collect') {
-        return /^target-(?:likers|comments):[0-9a-f]{64}$/.test(operationKey);
+        return /^target-(?:profile|likers|comments):[0-9a-f]{64}$/.test(operationKey);
+    }
+    if (/^track:profiles:batch:\d+$/.test(jobKey)) {
+        return /^target-profile:[0-9a-f]{64}$/.test(operationKey);
     }
     if (jobKey === 'track:reverse-likes:collect') {
         return /^candidate-likers:[0-9a-f]{64}$/.test(operationKey);
@@ -122,6 +125,7 @@ export function createAnalysisV2SelfHostedAuthWorkerIdentity(input: {
 function maximumItems(operationKey: string): number {
     if (operationKey.startsWith('relationship-')) return 1_200;
     if (operationKey === '' || !OPERATION_KEY_PATTERN.test(operationKey)) return 0;
+    if (operationKey.startsWith('target-profile:')) return 1;
     if (operationKey.startsWith('target-comments:')) return 150;
     return 1_500;
 }

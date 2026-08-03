@@ -2312,6 +2312,63 @@ describe('analysis V2 concrete collection executors', () => {
         expect(reusable.load).not.toHaveBeenCalled();
     });
 
+    it('routes a paid authenticated candidate profile batch to the worker without an Apify binding', async () => {
+        const usernames = ['alice'];
+        const topology = createAnalysisV2CollectionTopology('profiles', usernames);
+        const profileStore = inMemoryProfileStore(null);
+        const providers = providerStore();
+        const fetcher = vi.fn(async (
+            requested: readonly string[],
+            options: Parameters<typeof import('@/lib/services/instagram/scraper').getProfilesBatchV2>[1]
+        ) => {
+            expect(requested).toEqual(usernames);
+            expect(options).toMatchObject({
+                primaryProvider: 'selfhosted_auth',
+                allowApifyFallback: false,
+                selfHostedAuthIdentity: {
+                    operationKey: expect.stringMatching(/^target-profile:[a-f0-9]{64}$/),
+                    inputHash: expect.stringMatching(/^[a-f0-9]{64}$/),
+                },
+            });
+            const primary = [success('alice')] as ProfileAttemptResult[];
+            await options.persistAttemptOutcomes({
+                attempt: 'primary',
+                source: 'selfhosted',
+                requestedUsernames: requested,
+                results: primary,
+            });
+            return {
+                results: primary,
+                profiles: [profile('alice')],
+                primaryResults: primary,
+                fallbackResults: [],
+                frozenUnresolvedUsernames: [],
+            };
+        });
+
+        await createAnalysisV2ProfileFetchExecutor({
+            requestContextStore: contextStore(requestContext()),
+            profileCheckpointStore: profileStore.store,
+            providerRunStore: providers.value,
+            evidenceStore: relationshipEvidence(usernames),
+            getProfilesBatchV2: fetcher as unknown as typeof import('@/lib/services/instagram/scraper').getProfilesBatchV2,
+            env: {
+                SELFHOSTED_AUTH_ENABLED: 'true',
+                SCRAPER_FOLLOWERS: 'selfhosted_auth',
+                SCRAPER_FOLLOWING: 'selfhosted_auth',
+                SCRAPER_LIKERS: 'selfhosted_auth',
+                SCRAPER_COMMENTS: 'selfhosted_auth',
+            },
+        })(stageContext(
+            'profile_fetch',
+            state({ relationships: relationshipManifest(topology) }),
+            0
+        ));
+
+        expect(fetcher).toHaveBeenCalledOnce();
+        expect(providers.bindAdapterCheckpoint).not.toHaveBeenCalled();
+    });
+
     it('persists all primary outcomes before binding and freezes exactly unresolved fallback input', async () => {
         const usernames = ['alice', 'bob'];
         const topology = createAnalysisV2CollectionTopology('profiles', usernames);

@@ -31,7 +31,20 @@ AUTH_EXCEPTIONS = {
     'LoginRequired',
     'TwoFactorRequired',
 }
+NOT_FOUND_EXCEPTIONS = {
+    'UserNotFound',
+    'UserNotFoundError',
+    'UsernameNotFound',
+}
 USERNAME_PATTERN = re.compile(r'^[a-z0-9._]{1,30}$')
+POST_SHORTCODE_PATTERN = re.compile(r'^[A-Za-z0-9_-]{1,64}$')
+MAX_URL_LENGTH = 2_048
+MAX_FULL_NAME_LENGTH = 150
+MAX_BIO_LENGTH = 2_000
+MAX_CAPTION_LENGTH = 2_200
+MAX_IDENTIFIER_LENGTH = 255
+MAX_MEDIA_CHILDREN = 10
+MAX_COUNT = 2_000_000_000
 
 
 def _translate(error: Exception) -> Exception:
@@ -69,6 +82,73 @@ def _identifier(value: Any, field: str) -> str:
     if not result:
         raise _schema_error(field)
     return result
+
+
+def _bounded_identifier(value: Any, field: str, maximum: int = MAX_IDENTIFIER_LENGTH) -> str:
+    result = _identifier(value, field)
+    if len(result) > maximum:
+        raise _schema_error(field)
+    return result
+
+
+def _bounded_optional_string(value: Any, field: str, maximum: int) -> str | None:
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        raise _schema_error(field)
+    result = value.strip()
+    if not result:
+        return None
+    utf16_units = 0
+    bounded: list[str] = []
+    for character in result:
+        character_units = 2 if ord(character) > 0xFFFF else 1
+        if utf16_units + character_units > maximum:
+            break
+        bounded.append(character)
+        utf16_units += character_units
+    return ''.join(bounded)
+
+
+def _https_url(value: Any, field: str, required: bool = False) -> str | None:
+    if value is None or value == '':
+        if required:
+            raise _schema_error(field)
+        return None
+    if not isinstance(value, (str, AnyUrl)):
+        raise _schema_error(field)
+    result = str(value).strip()
+    if not result:
+        if required:
+            raise _schema_error(field)
+        return None
+    if len(result) > MAX_URL_LENGTH:
+        raise _schema_error(field)
+    try:
+        parsed = urlsplit(result)
+    except ValueError as error:
+        raise _schema_error(field) from error
+    if (
+        parsed.scheme != 'https'
+        or not parsed.hostname
+        or parsed.username is not None
+        or parsed.password is not None
+    ):
+        raise _schema_error(field)
+    return result
+
+
+def _nonnegative_count(value: Any, field: str) -> int:
+    if isinstance(value, bool) or not isinstance(value, int) or not 0 <= value <= MAX_COUNT:
+        raise _schema_error(field)
+    return value
+
+
+def _post_count(value: Any, field: str, counts_hidden: bool) -> tuple[int, bool]:
+    if value is None:
+        return 0, True
+    count = _nonnegative_count(value, field)
+    return (0, True) if counts_hidden else (count, False)
 
 
 def _collection(value: Any, field: str) -> list[Any]:
@@ -113,14 +193,14 @@ def _user_row(value: Any) -> dict[str, Any]:
     return row
 
 
-def _timestamp(value: Any) -> str:
+def _timestamp(value: Any, field: str = 'timestamp') -> str:
     if not isinstance(value, datetime) or value.tzinfo is None:
-        raise _schema_error('comment timestamp')
+        raise _schema_error(field)
     try:
         if value.utcoffset() is None:
-            raise _schema_error('comment timestamp')
+            raise _schema_error(field)
     except (TypeError, ValueError) as error:
-        raise _schema_error('comment timestamp') from error
+        raise _schema_error(field) from error
     return value.isoformat()
 
 
@@ -220,6 +300,200 @@ class InstagrapiGateway:
                             raise _schema_error('comment like count')
                         row['likesCount'] = likes_count
                     result.append(row)
+            return result
+
+        return self._call(collect)
+
+    @staticmethod
+    def _media_type(value: Any, field: str, product_type: Any = None) -> str:
+        if isinstance(value, bool) or not isinstance(value, int):
+            raise _schema_error(field)
+        if product_type is not None and not isinstance(product_type, str):
+            raise _schema_error('media product type')
+        if value == 1:
+            return 'image'
+        if value == 2:
+            return 'reel' if (product_type or '').lower() in {'clips', 'reels'} else 'video'
+        if value == 8:
+            return 'carousel'
+        raise _schema_error(field)
+
+    @staticmethod
+    def _image_url(value: Any) -> str | None:
+        images = _value(value, 'image_versions2')
+        if images is None:
+            return None
+        candidates = _value(images, 'candidates')
+        if not isinstance(candidates, (list, tuple)):
+            raise _schema_error('media image candidates')
+        if not candidates:
+            return None
+        return _https_url(_value(candidates[0], 'url'), 'media image URL', required=True)
+
+    @staticmethod
+    def _tagged_usernames(value: Any) -> list[str]:
+        if value is None:
+            return []
+        if not isinstance(value, (list, tuple)):
+            raise _schema_error('media user tags')
+        usernames: list[str] = []
+        for tag in value:
+            username = _required_string(_value(_value(tag, 'user'), 'username'), 'tagged username').lower()
+            if not USERNAME_PATTERN.fullmatch(username):
+                raise _schema_error('tagged username')
+            usernames.append(username)
+        return list(dict.fromkeys(usernames))
+
+    @staticmethod
+    def _mentioned_usernames(caption: str | None) -> list[str]:
+        if not caption:
+            return []
+        return list(dict.fromkeys(
+            match.group(1).lower()
+            for match in re.finditer(r'(?<![A-Za-z0-9._])@([A-Za-z0-9._]{1,30})', caption)
+            if USERNAME_PATTERN.fullmatch(match.group(1).lower())
+        ))
+
+    def _media_item(self, value: Any) -> dict[str, Any]:
+        kind = self._media_type(_value(value, 'media_type'), 'carousel media type')
+        if kind == 'carousel':
+            raise _schema_error('nested carousel media type')
+        thumbnail_url = _https_url(_value(value, 'thumbnail_url'), 'carousel thumbnail URL')
+        video_url = _https_url(_value(value, 'video_url'), 'carousel video URL')
+        if thumbnail_url is None and video_url is None:
+            raise _schema_error('carousel display URL')
+        row: dict[str, Any] = {
+            'id': _bounded_identifier(_value(value, 'pk'), 'carousel media id'),
+            'type': kind,
+        }
+        if thumbnail_url is not None:
+            row['thumbnailUrl'] = thumbnail_url
+        if video_url is not None:
+            row['videoUrl'] = video_url
+        return row
+
+    def _post_row(self, value: Any) -> dict[str, Any]:
+        kind = self._media_type(
+            _value(value, 'media_type'), 'media type', _value(value, 'product_type'),
+        )
+        caption = _bounded_optional_string(_value(value, 'caption_text'), 'media caption', MAX_CAPTION_LENGTH)
+        image_url = self._image_url(value)
+        thumbnail_url = _https_url(_value(value, 'thumbnail_url'), 'media thumbnail URL')
+        video_url = _https_url(_value(value, 'video_url'), 'media video URL')
+        counts_disabled = _value(value, 'like_and_view_counts_disabled', False)
+        if not isinstance(counts_disabled, bool):
+            raise _schema_error('media count visibility')
+        likes_count, likes_count_hidden = _post_count(
+            _value(value, 'like_count'), 'media like count', counts_disabled,
+        )
+        comments_count, comments_count_hidden = _post_count(
+            _value(value, 'comment_count'), 'media comment count', counts_disabled,
+        )
+        row: dict[str, Any] = {
+            'id': _bounded_identifier(_value(value, 'pk'), 'media id'),
+            'shortCode': _bounded_identifier(_value(value, 'code'), 'media shortcode', 64),
+            'type': kind,
+            'likesCount': likes_count,
+            'commentsCount': comments_count,
+            'timestamp': _timestamp(_value(value, 'taken_at'), 'media timestamp'),
+            'taggedUsers': self._tagged_usernames(_value(value, 'usertags')),
+            'mentionedUsers': self._mentioned_usernames(caption),
+        }
+        if not POST_SHORTCODE_PATTERN.fullmatch(row['shortCode']):
+            raise _schema_error('media shortcode')
+        if caption is not None:
+            row['caption'] = caption
+        if likes_count_hidden:
+            row['likesCountHidden'] = True
+        if comments_count_hidden:
+            row['commentsCountHidden'] = True
+        if image_url is not None:
+            row['imageUrl'] = image_url
+        if thumbnail_url is not None:
+            row['thumbnailUrl'] = thumbnail_url
+        if video_url is not None:
+            row['videoUrl'] = video_url
+        if kind == 'carousel':
+            resources = _collection(_value(value, 'resources'), 'carousel resources')
+            if not 1 <= len(resources) <= MAX_MEDIA_CHILDREN:
+                raise _schema_error('carousel resources')
+            row['mediaItems'] = [self._media_item(resource) for resource in resources]
+            row['declaredMediaCount'] = len(resources)
+            row['childrenComplete'] = True
+            if image_url is None and thumbnail_url is None and video_url is None:
+                first_child = row['mediaItems'][0]
+                for field in ('thumbnailUrl', 'videoUrl'):
+                    if field in first_child:
+                        row['thumbnailUrl'] = first_child[field]
+                        break
+        if not any(field in row for field in ('imageUrl', 'thumbnailUrl', 'videoUrl')):
+            raise _schema_error('media display URL')
+        return row
+
+    def _profile_row(self, value: Any, requested_username: str, media_limit: int) -> dict[str, Any]:
+        username = _required_string(_value(value, 'username'), 'profile username').lower()
+        if not USERNAME_PATTERN.fullmatch(username) or username != requested_username:
+            raise _schema_error('profile username')
+        is_private = _value(value, 'is_private')
+        is_verified = _value(value, 'is_verified')
+        if not isinstance(is_private, bool) or not isinstance(is_verified, bool):
+            raise _schema_error('profile flags')
+        user_id = _bounded_identifier(_value(value, 'pk'), 'profile user id')
+        row: dict[str, Any] = {
+            'username': username,
+            'followersCount': _nonnegative_count(_value(value, 'follower_count'), 'profile follower count'),
+            'followingCount': _nonnegative_count(_value(value, 'following_count'), 'profile following count'),
+            'postsCount': _nonnegative_count(_value(value, 'media_count'), 'profile media count'),
+            'isPrivate': is_private,
+            'isVerified': is_verified,
+        }
+        full_name = _bounded_optional_string(_value(value, 'full_name'), 'profile full name', MAX_FULL_NAME_LENGTH)
+        bio = _bounded_optional_string(_value(value, 'biography'), 'profile biography', MAX_BIO_LENGTH)
+        profile_pic_url = _https_url(_value(value, 'profile_pic_url'), 'profile image URL')
+        if full_name is not None:
+            row['fullName'] = full_name
+        if bio is not None:
+            row['bio'] = bio
+        if profile_pic_url is not None:
+            row['profilePicUrl'] = profile_pic_url
+        if is_private:
+            return row
+        if media_limit == 0:
+            row['latestPosts'] = []
+            return row
+        media = _collection(self._client.user_medias(user_id, amount=media_limit), 'profile media')[:media_limit]
+        if row['postsCount'] > 0 and not media:
+            raise _schema_error('profile media')
+        row['latestPosts'] = [self._post_row(item) for item in media]
+        return row
+
+    def profile(self, username: str, media_limit: int) -> dict[str, Any] | None:
+        def collect():
+            try:
+                return self._profile_row(
+                    self._client.user_info_by_username(username), username, media_limit,
+                )
+            except Exception as error:
+                if type(error).__name__ in NOT_FOUND_EXCEPTIONS:
+                    return None
+                raise
+
+        return self._call(collect)
+
+    def profiles(self, usernames: list[str], media_limit: int) -> list[dict[str, Any]]:
+        def collect():
+            result: list[dict[str, Any]] = []
+            for username in usernames:
+                try:
+                    profile = self._profile_row(
+                        self._client.user_info_by_username(username), username, media_limit,
+                    )
+                except Exception as error:
+                    if type(error).__name__ in NOT_FOUND_EXCEPTIONS:
+                        result.append({'username': username, 'status': 'not_found'})
+                        continue
+                    raise
+                result.append({'username': username, 'status': 'available', 'profile': profile})
             return result
 
         return self._call(collect)

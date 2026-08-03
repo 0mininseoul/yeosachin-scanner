@@ -6,6 +6,7 @@ from app.service import (
     InstagramAuthService,
     InstagramChallengeError,
     InstagramRateLimitedError,
+    WorkerSchemaError,
 )
 
 
@@ -29,6 +30,22 @@ class FakeGateway:
 
     def comments(self, post_urls, limit_per_post):
         return []
+
+    def profile(self, username, media_limit):
+        self.profile_args = (username, media_limit)
+        return {
+            'username': username,
+            'followersCount': 12,
+            'followingCount': 3,
+            'postsCount': 0,
+            'isPrivate': False,
+            'isVerified': False,
+            'latestPosts': [],
+        }
+
+    def profiles(self, usernames, media_limit):
+        self.profiles_args = (usernames, media_limit)
+        return [{'username': username, 'status': 'not_found'} for username in usernames]
 
 
 class InstagramAuthServiceTest(unittest.IsolatedAsyncioTestCase):
@@ -84,6 +101,68 @@ class InstagramAuthServiceTest(unittest.IsolatedAsyncioTestCase):
             await self.service(FakeGateway()).likers([
                 'https://example.test/p/not-an-instagram-post/',
             ], 1, self.OPERATION_KEY, self.INPUT_HASH)
+
+    async def test_profile_uses_the_durable_execution_path_with_a_bounded_media_limit(self):
+        gateway = FakeGateway()
+        response = await self.service(gateway).profile(
+            'Target.User', 10, self.OPERATION_KEY, self.INPUT_HASH,
+        )
+        self.assertEqual(gateway.profile_args, ('target.user', 10))
+        self.assertEqual(response['items'], [{
+            'username': 'target.user',
+            'followersCount': 12,
+            'followingCount': 3,
+            'postsCount': 0,
+            'isPrivate': False,
+            'isVerified': False,
+            'latestPosts': [],
+        }])
+        with self.assertRaises(ValueError):
+            await self.service(FakeGateway()).profile(
+                'target.user', 11, 'operation-key-003', 'c' * 64,
+            )
+
+    async def test_profile_allows_zero_media_limit_for_summary_only_requests(self):
+        gateway = FakeGateway()
+        await self.service(gateway).profile(
+            'target.user', 0, 'operation-key-003a', 'c' * 64,
+        )
+        self.assertEqual(gateway.profile_args, ('target.user', 0))
+
+    async def test_single_profile_not_found_becomes_an_empty_versioned_envelope(self):
+        class MissingProfileGateway(FakeGateway):
+            def profile(self, username, media_limit):
+                return None
+
+        response = await self.service(MissingProfileGateway()).profile(
+            'missing.user', 0, 'operation-key-003b', 'c' * 64,
+        )
+        self.assertEqual(response['items'], [])
+
+    async def test_profile_batch_normalizes_usernames_and_keeps_not_found_rows(self):
+        gateway = FakeGateway()
+        response = await self.service(gateway).profiles(
+            ['Target.User', 'missing.user'], 1, 'operation-key-004', 'd' * 64,
+        )
+        self.assertEqual(gateway.profiles_args, (['target.user', 'missing.user'], 1))
+        self.assertEqual(response['items'], [
+            {'username': 'target.user', 'status': 'not_found'},
+            {'username': 'missing.user', 'status': 'not_found'},
+        ])
+        with self.assertRaises(ValueError):
+            await self.service(FakeGateway()).profiles(
+                ['target.user', 'target.user'], 1, 'operation-key-005', 'e' * 64,
+            )
+
+    async def test_profile_response_over_the_durable_limit_fails_closed_before_caching(self):
+        class OversizedGateway(FakeGateway):
+            def profile(self, username, media_limit):
+                return {'username': username, 'payload': 'x' * (4 * 1024 * 1024)}
+
+        with self.assertRaises(WorkerSchemaError):
+            await self.service(OversizedGateway()).profile(
+                'target.user', 1, 'operation-key-006', 'f' * 64,
+            )
 
 
 if __name__ == '__main__':

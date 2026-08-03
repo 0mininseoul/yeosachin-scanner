@@ -33,6 +33,35 @@ class FakeService:
     async def comments(self, post_urls, limit_per_post, operation_key, input_hash):
         return await self.relationship('comments', 'unused', limit_per_post, operation_key, input_hash)
 
+    async def profile(self, username, media_limit, operation_key, input_hash):
+        if self.error:
+            raise self.error
+        return {
+            'schemaVersion': 1,
+            'runId': '0123456789abcdef0123456789abcdef',
+            'accountSlot': 'primary',
+            'items': [{
+                'username': username,
+                'followersCount': 12,
+                'followingCount': 3,
+                'postsCount': 1,
+                'isPrivate': False,
+                'isVerified': False,
+                'latestPosts': [],
+            }],
+        }
+
+    async def profiles(self, usernames, media_limit, operation_key, input_hash):
+        return {
+            'schemaVersion': 1,
+            'runId': '0123456789abcdef0123456789abcdef',
+            'accountSlot': 'primary',
+            'items': [
+                {'username': username, 'status': 'not_found'}
+                for username in usernames
+            ],
+        }
+
 
 VALID_OPERATION = {
     'operationKey': f"relationship-followers:{'a' * 64}",
@@ -136,6 +165,65 @@ class WorkerApiTest(unittest.TestCase):
             'code': 'invalid_request',
             'retryable': False,
         })
+
+    def test_profile_endpoint_requires_a_strict_single_target_contract(self):
+        client = TestClient(create_app(FakeService()))
+        response = client.post('/v1/profiles/profile', json={
+            'username': 'target.user',
+            'mediaLimit': 10,
+            **VALID_OPERATION,
+        })
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()['items'][0]['username'], 'target.user')
+
+        invalid = client.post('/v1/profiles/profile', json={
+            'username': 'target.user',
+            'mediaLimit': 11,
+            'batchUsernames': ['other.user'],
+            **VALID_OPERATION,
+        })
+        self.assertEqual(invalid.status_code, 400)
+        self.assertEqual(invalid.json(), {
+            'schemaVersion': 1,
+            'code': 'invalid_request',
+            'retryable': False,
+        })
+
+    def test_profile_endpoints_accept_zero_media_limit_for_summary_only_requests(self):
+        client = TestClient(create_app(FakeService()))
+        response = client.post('/v1/profiles/profile', json={
+            'username': 'target.user',
+            'mediaLimit': 0,
+            **VALID_OPERATION,
+        })
+        self.assertEqual(response.status_code, 200)
+
+        batch = client.post('/v1/profiles', json={
+            'usernames': ['target.user'],
+            'mediaLimit': 0,
+            **VALID_OPERATION,
+        })
+        self.assertEqual(batch.status_code, 200)
+
+    def test_profile_batch_returns_explicit_not_found_rows_and_rejects_duplicates(self):
+        client = TestClient(create_app(FakeService()))
+        response = client.post('/v1/profiles', json={
+            'usernames': ['missing.user', 'other.user'],
+            'mediaLimit': 1,
+            **VALID_OPERATION,
+        })
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()['items'], [
+            {'username': 'missing.user', 'status': 'not_found'},
+            {'username': 'other.user', 'status': 'not_found'},
+        ])
+
+        duplicate = client.post('/v1/profiles', json={
+            'usernames': ['other.user', 'other.user'],
+            'mediaLimit': 1,
+            **VALID_OPERATION,
+        })
+        self.assertEqual(duplicate.status_code, 400)
 
 
 if __name__ == '__main__':

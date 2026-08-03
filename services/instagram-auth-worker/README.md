@@ -1,6 +1,27 @@
 # Authenticated Instagram worker
 
-Single-account FastAPI worker for the authenticated self-hosted scraper. It exposes only the relationship and interaction endpoints consumed by `selfhosted-auth/client.ts`; interactive API documentation is deliberately disabled.
+Single-account FastAPI worker for the authenticated self-hosted scraper. It exposes relationship, interaction, and bounded profile endpoints; interactive API documentation is deliberately disabled.
+
+## Profile API contract
+
+Every profile request requires the same strict JSON identity as the existing worker calls:
+
+```json
+{
+  "operationKey": "profile-target:<64 lowercase hex characters>",
+  "inputHash": "<64 lowercase hex characters>",
+  "mediaLimit": 10
+}
+```
+
+`mediaLimit` is an integer from `0` to `10`; `0` returns the profile summary only and never requests profile media. Usernames must be lowercase Instagram usernames (`[a-z0-9._]{1,30}`), and extra request fields are rejected. The service normalizes the accepted username deterministically before invoking Instagram.
+
+- `POST /v1/profiles/profile` adds one `username` and returns the standard versioned worker envelope with one profile entry, or `items: []` when Instagram reports that username as not found.
+- `POST /v1/profiles` adds `usernames`, an ordered unique array of 1–30 usernames. Its standard envelope has one entry per requested username, in request order: either `{ "username": "…", "status": "available", "profile": { … } }` or `{ "username": "…", "status": "not_found" }`. Only the provider's known user-not-found result becomes `not_found`; other upstream failures retain the normal sanitized error behavior.
+
+The summary contains `username`, `followersCount`, `followingCount`, `postsCount`, `isPrivate`, and `isVerified`, plus bounded `fullName`, `bio`, and `profilePicUrl` when present. A public summary includes `latestPosts` (up to `mediaLimit` newest posts). A post supplies its bounded ID/shortcode, timestamp, caption, media type, display URLs, counts, tags/mentions, and carousel children when applicable. All returned URLs must be HTTPS and no raw provider objects, cookie data, or session material are returned.
+
+Private profiles are valid `available` summaries with `isPrivate: true`, but deliberately omit media. For public profiles claiming posts, an empty or malformed media result is a fail-closed `worker_schema_error`. The profile response is limited to 4 MiB before it enters the durable idempotency ledger; excessive or non-JSON-safe output also fails closed. This bounded single-account batch avoids ambiguous missing rows while staying within the durable response limit.
 
 ## Required configuration
 
