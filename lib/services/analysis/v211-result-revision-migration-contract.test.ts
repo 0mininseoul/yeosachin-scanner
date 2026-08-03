@@ -9,6 +9,10 @@ const textOnlyRpcRenameMigration = new URL(
     '../../../supabase/migrations/20260803180000_v211_text_only_source_rpc_short_name.sql',
     import.meta.url,
 );
+const textOnlyImmutableOrderMigration = new URL(
+    '../../../supabase/migrations/20260803190000_v211_text_only_immutable_row_order.sql',
+    import.meta.url,
+);
 
 describe('v2.11 result revision reader migration contract', () => {
     it('preserves request_id for snapshot/page predicates after replacing the base relation', async () => {
@@ -57,6 +61,16 @@ describe('v2.11 result revision reader migration contract', () => {
         expect(sql).toContain(
             'v_source := public.read_analysis_v2_test_entitlement_v211_text_only_source(p_request_id);',
         );
+        expect(sql).toContain("NOTIFY pgrst, 'reload schema';");
+    });
+
+    it('compares text-only immutable rows in the published sort order, not candidate-id order', async () => {
+        const sql = await readFile(textOnlyImmutableOrderMigration, 'utf8');
+        const canonicalOrder = "ORDER BY (item.value->>'sortOrdinal')::INTEGER, item.value->>'candidateId'";
+        expect(sql.match(new RegExp(canonicalOrder.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'g'))).toHaveLength(2);
+        expect(sql).toContain('ANALYSIS_V2_V211_TEXT_ONLY_COUNT_DRIFT');
+        expect(sql).toContain('ANALYSIS_V2_V211_TEXT_ONLY_IMMUTABLE_ROW_DRIFT');
+        expect(sql).toContain('v_source := public.read_analysis_v2_test_entitlement_v211_text_only_source(p_request_id);');
         expect(sql).toContain("NOTIFY pgrst, 'reload schema';");
     });
 });
