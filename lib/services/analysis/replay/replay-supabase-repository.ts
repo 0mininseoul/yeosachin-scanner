@@ -41,6 +41,9 @@ export interface TestEntitlementLegacySecondaryReplaySourceRpcClient {
         p_request_id: string;
     }): PromiseLike<RpcResult>;
 }
+export interface TestEntitlementLegacySecondaryTextOnlyReplaySourceRpcClient {
+    rpc(name: 'read_analysis_v2_test_entitlement_v211_legacy_secondary_text_only_source', params: { p_request_id: string }): PromiseLike<RpcResult>;
+}
 
 const run = z.object({
     actorId: z.string().min(3).max(200),
@@ -130,6 +133,9 @@ const testEntitlementLegacySecondarySource = currentProductionSource.extend({
     currentRevision: z.number().int().min(0).max(999),
     originalFemaleRows: z.array(originalFemaleRow).max(900),
 }).strict();
+const testEntitlementLegacySecondaryTextOnlySource = testEntitlementLegacySecondarySource.extend({
+    canonicalCounts: z.object({ male: z.number().int().nonnegative(), female: z.number().int().nonnegative(), unknown: z.number().int().nonnegative() }).strict(),
+}).strict();
 
 export type ReplayCaptureDescriptor = Omit<
     z.infer<typeof source>,
@@ -172,6 +178,10 @@ export type TestEntitlementLegacySecondaryReplayCaptureDescriptor = Omit<
     sourceFingerprint: string;
     currentRevision: number;
     originalFemaleRows: readonly z.infer<typeof originalFemaleRow>[];
+};
+export type TestEntitlementLegacySecondaryTextOnlyReplayCaptureDescriptor = Omit<TestEntitlementLegacySecondaryReplayCaptureDescriptor, 'sourceKind'> & {
+    sourceKind: 'test_entitlement_v211_legacy_secondary_text_only';
+    canonicalCounts: { male: number; female: number; unknown: number };
 };
 
 function normalizedTarget(value: string): string {
@@ -381,4 +391,17 @@ export async function loadTestEntitlementLegacySecondaryReplayCaptureDescriptor(
         currentRevision: parsed.currentRevision,
         originalFemaleRows: parsed.originalFemaleRows,
     };
+}
+
+export async function loadTestEntitlementLegacySecondaryTextOnlyReplayCaptureDescriptor(
+    client: TestEntitlementLegacySecondaryTextOnlyReplaySourceRpcClient, requestId: string,
+): Promise<TestEntitlementLegacySecondaryTextOnlyReplayCaptureDescriptor> {
+    const exactRequestId = z.string().uuid().parse(requestId);
+    const result = await client.rpc('read_analysis_v2_test_entitlement_v211_legacy_secondary_text_only_source', { p_request_id: exactRequestId });
+    if (result.error) throw new Error('ANALYSIS_V2_REPLAY_EXACT_SOURCE_UNAVAILABLE');
+    const parsedResult = testEntitlementLegacySecondaryTextOnlySource.safeParse(result.data);
+    if (!parsedResult.success || parsedResult.data.requestId !== exactRequestId) throw new Error('ANALYSIS_V2_REPLAY_READ_ONLY_SOURCE_INVALID');
+    const parsed = parsedResult.data;
+    if (parsed.canonicalCounts.male + parsed.canonicalCounts.female + parsed.canonicalCounts.unknown !== parsed.originalFemaleRows.length + parsed.canonicalCounts.male + parsed.canonicalCounts.unknown) throw new Error('ANALYSIS_V2_REPLAY_READ_ONLY_SOURCE_INVALID');
+    return { ...(await loadTestEntitlementLegacySecondaryReplayCaptureDescriptor({ rpc: async () => ({ data: parsed, error: null }) }, exactRequestId)), sourceKind: 'test_entitlement_v211_legacy_secondary_text_only', canonicalCounts: parsed.canonicalCounts };
 }
