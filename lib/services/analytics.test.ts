@@ -1387,7 +1387,10 @@ describe('Amplitude analytics adapter', () => {
         const analytics = await loadAnalytics();
 
         await analytics.initAmplitude(VALID_USER_ID);
-        await analytics.flushAnalytics();
+        vi.useFakeTimers();
+        const pendingIdentityFlush = analytics.flushAnalytics();
+        await vi.advanceTimersByTimeAsync(500);
+        await pendingIdentityFlush;
         expect(amplitudeMocks.flush).not.toHaveBeenCalled();
 
         analytics.markAnalyticsIdentityReady();
@@ -1397,6 +1400,29 @@ describe('Amplitude analytics adapter', () => {
         });
         await analytics.flushAnalytics();
 
+        expect(amplitudeMocks.flush).toHaveBeenCalledTimes(1);
+    });
+
+    it('waits briefly for an in-flight identity initialization before flushing', async () => {
+        enableBrowser();
+        let resolveInitialization!: () => void;
+        amplitudeMocks.initAll.mockImplementationOnce(() => new Promise<void>((resolve) => {
+            resolveInitialization = resolve;
+        }));
+        const analytics = await loadAnalytics();
+        const initialization = analytics.initAmplitude(VALID_USER_ID);
+        await vi.waitFor(() => expect(amplitudeMocks.initAll).toHaveBeenCalledTimes(1));
+
+        vi.useFakeTimers();
+        const pendingFlush = analytics.flushAnalytics();
+        await vi.advanceTimersByTimeAsync(25);
+        expect(amplitudeMocks.flush).not.toHaveBeenCalled();
+
+        resolveInitialization();
+        await initialization;
+        analytics.markAnalyticsIdentityReady();
+        await vi.advanceTimersByTimeAsync(25);
+        await expect(pendingFlush).resolves.toBeUndefined();
         expect(amplitudeMocks.flush).toHaveBeenCalledTimes(1);
     });
 

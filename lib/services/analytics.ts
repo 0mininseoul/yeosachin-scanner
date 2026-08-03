@@ -65,6 +65,7 @@ const MAX_QUEUED_EVENTS = 50;
 // Unified SDK's asynchronous timeline reaches its transport. Keep this best-effort wait
 // short enough that it cannot add a material delay to the product flow.
 const ANALYTICS_FLUSH_TIMEOUT_MS = 500;
+const ANALYTICS_IDENTITY_WAIT_INTERVAL_MS = 25;
 const SESSION_REPLAY_MAX_SAMPLE_RATE = 1;
 const SESSION_REPLAY_SAFE_PATHS = new Set([
     '/',
@@ -464,6 +465,38 @@ function flushQueue(): void {
     }
 }
 
+function waitForAnalyticsIdentity(deadline: number): Promise<boolean> {
+    if (identityReady) return Promise.resolve(true);
+    if (identityDeliveryBlocked || (!initializedSdk && !initializationPromise)) {
+        return Promise.resolve(false);
+    }
+
+    return new Promise(resolve => {
+        let timeout: ReturnType<typeof setTimeout> | undefined;
+        const poll = () => {
+            if (identityReady) {
+                if (timeout !== undefined) clearTimeout(timeout);
+                resolve(true);
+                return;
+            }
+            if (
+                identityDeliveryBlocked
+                || (!initializedSdk && !initializationPromise)
+                || Date.now() >= deadline
+            ) {
+                if (timeout !== undefined) clearTimeout(timeout);
+                resolve(false);
+                return;
+            }
+            timeout = setTimeout(poll, Math.min(
+                ANALYTICS_IDENTITY_WAIT_INTERVAL_MS,
+                Math.max(1, deadline - Date.now()),
+            ));
+        };
+        poll();
+    });
+}
+
 function enqueue(eventName: AnalyticsEvent, properties: AnalyticsProperties): void {
     if (queuedEvents.length === MAX_QUEUED_EVENTS) queuedEvents.shift();
     queuedEvents.push({ eventName, identityRevision, properties });
@@ -801,6 +834,10 @@ export function trackEvent(
  * The timeout prevents analytics from holding up checkout/result navigation.
  */
 export async function flushAnalytics(): Promise<void> {
+    if (!configuredApiKey() || identityDeliveryBlocked) return;
+
+    const deadline = Date.now() + ANALYTICS_FLUSH_TIMEOUT_MS;
+    if (!identityReady && !await waitForAnalyticsIdentity(deadline)) return;
     if (!initializedSdk || !identityReady || identityDeliveryBlocked) return;
 
     let timeout: ReturnType<typeof setTimeout> | undefined;
@@ -810,10 +847,11 @@ export async function flushAnalytics(): Promise<void> {
         const sdkFlushPromise = flushResult?.promise
             ? Promise.resolve(flushResult.promise).catch(() => undefined)
             : Promise.resolve();
+        const remaining = Math.max(1, deadline - Date.now());
         await Promise.race([
             sdkFlushPromise,
             new Promise<void>(resolve => {
-                timeout = setTimeout(resolve, ANALYTICS_FLUSH_TIMEOUT_MS);
+                timeout = setTimeout(resolve, remaining);
             }),
         ]);
     } catch {
