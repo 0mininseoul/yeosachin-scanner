@@ -19,6 +19,15 @@ describe('v2.11 result revision reader migration contract', () => {
         const sql = await readFile(migration, 'utf8');
         expect(sql).toContain('FROM public.analysis_v2_effective_female_results(p_request_id) AS female\\n        WHERE female.candidate_id = p_candidate_id;');
         expect(sql).toContain('ANALYSIS_V2_V211_REVISION_IMAGE_QUERY_DRIFT');
+        expect(sql).toContain("'public.load_analysis_v2_result_image_url(uuid,uuid,text,text)'::pg_catalog.regprocedure");
+        expect(sql).not.toContain("'public.load_analysis_v2_result_image_url(uuid,text,text)'::pg_catalog.regprocedure");
+    });
+
+    it('uses transaction-independent session timeouts for the migration entrypoint', async () => {
+        const sql = await readFile(migration, 'utf8');
+        expect(sql).toContain("SET lock_timeout = '5s';");
+        expect(sql).toContain("SET statement_timeout = '2min';");
+        expect(sql).not.toContain('SET LOCAL lock_timeout');
     });
 
     it('requires byte-identical female rows on an idempotency-key replay', async () => {

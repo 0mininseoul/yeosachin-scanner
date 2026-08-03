@@ -1,7 +1,9 @@
 -- Sealed maintenance path for one class of completed test-entitlement runs.
 -- It never mutates an immutable request policy snapshot or the original finalized rows.
-SET LOCAL lock_timeout = '5s';
-SET LOCAL statement_timeout = '2min';
+-- Supabase may invoke this file outside an explicit transaction.  SET (rather
+-- than SET LOCAL) applies the bounds without a warning in that mode.
+SET lock_timeout = '5s';
+SET statement_timeout = '2min';
 
 CREATE FUNCTION public.analysis_v2_v211_maintenance_source_fingerprint(
     p_request_id UUID
@@ -609,7 +611,7 @@ BEGIN
     );
 
     SELECT pg_catalog.pg_get_functiondef(
-        'public.load_analysis_v2_result_image_url(uuid,text,text)'::pg_catalog.regprocedure
+        'public.load_analysis_v2_result_image_url(uuid,uuid,text,text)'::pg_catalog.regprocedure
     ) INTO v_definition;
     IF pg_catalog.strpos(v_definition, 'FROM public.analysis_v2_female_results AS female') = 0 THEN
         RAISE EXCEPTION USING MESSAGE = 'ANALYSIS_V2_V211_REVISION_IMAGE_READER_DRIFT', ERRCODE = 'P0001';
