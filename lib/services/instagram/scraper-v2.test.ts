@@ -72,6 +72,23 @@ afterEach(() => {
 });
 
 describe('getProfilesBatchV2', () => {
+    it('rejects an authenticated primary when an Apify fallback is requested', async () => {
+        __setProvidersForTest({ SELFHOSTED_AUTH_ENABLED: 'true' }, {
+            selfhosted_auth: provider({ name: 'selfhosted_auth', paid: false }),
+            apify: provider({ name: 'apify', paid: true }),
+        });
+
+        await expect(getProfilesBatchV2(['alice'], {
+            primaryProvider: 'selfhosted_auth',
+            allowApifyFallback: true,
+            selfHostedAuthIdentity: {
+                operationKey: `target-profile:${'a'.repeat(64)}`,
+                inputHash: 'b'.repeat(64),
+            },
+            persistAttemptOutcomes: async () => undefined,
+        })).rejects.toThrow('selfhosted_auth profile collection cannot bind an Apify fallback');
+    });
+
     it('uses authenticated profiles as the paid-route primary without binding Apify fallback', async () => {
         const primary = vi.fn(async (usernames: string[]) => usernames.map(username =>
             failedProfileAttempt({

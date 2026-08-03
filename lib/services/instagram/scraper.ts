@@ -847,6 +847,11 @@ export async function getProfilesBatchV2(
             'SCRAPING_CONFIG_ERROR: V2 profiles require a free primary and paid Apify fallback.'
         );
     }
+    if (primaryProvider === 'selfhosted_auth' && allowApifyFallback) {
+        throw new Error(
+            'SCRAPING_CONFIG_ERROR: selfhosted_auth profile collection cannot bind an Apify fallback.'
+        );
+    }
     if (options.providerRun?.logicalProvider && options.providerRun.logicalProvider !== 'apify') {
         throw new Error('SCRAPING_CONFIG_ERROR: V2 profile fallback can only resume Apify.');
     }
