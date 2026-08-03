@@ -16,7 +16,7 @@ function optionalSource(relativePath: string): string {
 describe('Amplitude caller privacy contract', () => {
     it('uses canonical event constants and snake_case properties only', () => {
         const callers = [
-            source('app/page.tsx'),
+            source('components/landing-page.tsx'),
             source('app/result/[requestId]/page.tsx'),
             source('app/share/[token]/page.tsx'),
             source('components/auth-buttons.tsx'),
@@ -33,7 +33,7 @@ describe('Amplitude caller privacy contract', () => {
     });
 
     it('never places the raw target in an analyze URL', () => {
-        const landing = source('app/page.tsx');
+        const landing = source('components/landing-page.tsx');
         const analyze = source('app/analyze/page.tsx');
 
         expect(landing).not.toMatch(/\/analyze\?[^'"`]*target=/);

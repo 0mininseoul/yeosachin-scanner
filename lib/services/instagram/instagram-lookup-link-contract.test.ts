@@ -6,7 +6,7 @@ const componentPath = join(process.cwd(), 'components/instagram-lookup-link.tsx'
 const componentSource = existsSync(componentPath)
     ? readFileSync(componentPath, 'utf8').replace(/\s+/g, ' ')
     : '';
-const landingSource = readFileSync(join(process.cwd(), 'app/page.tsx'), 'utf8');
+const landingSource = readFileSync(join(process.cwd(), 'components/landing-page.tsx'), 'utf8');
 const analyzeSource = readFileSync(join(process.cwd(), 'app/analyze/page.tsx'), 'utf8');
 
 describe('Instagram account lookup handoff', () => {

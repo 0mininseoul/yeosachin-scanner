@@ -8,7 +8,7 @@ function source(relativePath: string): string {
 describe('Amplitude product funnel caller contract', () => {
     it('wires every authoritative funnel boundary without raw identity properties', () => {
         const callers = [
-            source('app/page.tsx'),
+            source('components/landing-page.tsx'),
             source('app/analyze/page.tsx'),
             source('app/earlybird/earlybird-status.tsx'),
             source('app/progress/[requestId]/page.tsx'),

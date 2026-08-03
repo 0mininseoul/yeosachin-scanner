@@ -183,7 +183,7 @@ describe('definitive disguised-friend guide', () => {
 describe('landing page guide link and locked copy regression', () => {
     it('adds one guide link without weakening any fixed landing copy group', async () => {
         const source = await readFile(
-            new URL('../../../app/page.tsx', import.meta.url),
+            new URL('../../../components/landing-page.tsx', import.meta.url),
             'utf8',
         );
 
