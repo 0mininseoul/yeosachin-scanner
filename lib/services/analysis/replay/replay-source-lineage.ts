@@ -92,6 +92,9 @@ export const HISTORICAL_PARTIAL_AVAILABLE_REPLAY_V210_CAPABILITY =
 /** Exact, paid production Standard source. It is never inferred from moving latest policy. */
 export const CURRENT_PRODUCTION_STANDARD_V210_EXACT_REPLAY_CAPABILITY =
     'current-production-standard-v210-risk-v25-scheduler-v1-exact-replay' as const;
+/** Exact completed betatest free-pool source; it is not a paid-production alias. */
+export const BETATEST_FREE_POOL_STANDARD_V210_EXACT_REPLAY_CAPABILITY =
+    'betatest-free-pool-standard-v210-risk-v25-scheduler-v1-exact-replay' as const;
 const currentEvaluationPolicySchema = z.object({
     capability: z.literal(REPLAY_V29_CROSS_POLICY_EVALUATION_CAPABILITY),
     aiStage: z.literal(AI_STAGE_POLICY_V29_VERSION),
@@ -116,6 +119,10 @@ const currentProductionStandardV210EvaluationPolicySchema = z.object({
     capability: z.literal(CURRENT_PRODUCTION_STANDARD_V210_EXACT_REPLAY_CAPABILITY),
     aiStage: z.literal(AI_STAGE_POLICY_V210_VERSION),
 }).strict();
+const betatestFreePoolStandardV210EvaluationPolicySchema = z.object({
+    capability: z.literal(BETATEST_FREE_POOL_STANDARD_V210_EXACT_REPLAY_CAPABILITY),
+    aiStage: z.literal(AI_STAGE_POLICY_V210_VERSION),
+}).strict();
 export const replayEvaluationPolicySchema = z.union([
     currentEvaluationPolicySchema,
     historicalOfficialE2EEvaluationPolicySchema,
@@ -123,6 +130,7 @@ export const replayEvaluationPolicySchema = z.union([
     historicalPartialAvailableEvaluationPolicySchema,
     historicalPartialAvailableV210EvaluationPolicySchema,
     currentProductionStandardV210EvaluationPolicySchema,
+    betatestFreePoolStandardV210EvaluationPolicySchema,
 ]);
 export type ReplayEvaluationPolicy = z.infer<typeof replayEvaluationPolicySchema>;
 
@@ -167,6 +175,8 @@ export function resolveReplayAiStagePolicyVersion(
     if (
         parsed.data.capability
             === CURRENT_PRODUCTION_STANDARD_V210_EXACT_REPLAY_CAPABILITY
+        || parsed.data.capability
+            === BETATEST_FREE_POOL_STANDARD_V210_EXACT_REPLAY_CAPABILITY
     ) {
         if (
             lineage.selectedPlanId !== 'standard'

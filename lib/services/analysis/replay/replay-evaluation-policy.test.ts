@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import {
+    BETATEST_FREE_POOL_STANDARD_V210_EXACT_REPLAY_CAPABILITY,
     CURRENT_PRODUCTION_STANDARD_V210_EXACT_REPLAY_CAPABILITY,
     HISTORICAL_OFFICIAL_E2E_REPLAY_CAPABILITY,
     HISTORICAL_OFFICIAL_E2E_REPLAY_V210_CAPABILITY,
@@ -62,6 +63,26 @@ describe('replay cross-policy evaluation capability', () => {
             standard('ai-stage-policy-v2.9'),
             currentEvaluation,
         )).toThrow('ANALYSIS_V2_REPLAY_EVALUATION_SOURCE_INELIGIBLE');
+    });
+
+    it('keeps beta-free-pool v2.10 capability distinct and rejects the moving v2.11 policy', () => {
+        const beta = {
+            selectedPlanId: 'standard' as const,
+            policyVersions: {
+                pipeline: 'v2' as const, risk: 'risk-policy-v2.5' as const,
+                aiStage: 'ai-stage-policy-v2.10' as const,
+                scheduler: 'ai-scheduler-v1' as const,
+            },
+        } satisfies ReplaySourceLineage;
+        const capability = {
+            capability: BETATEST_FREE_POOL_STANDARD_V210_EXACT_REPLAY_CAPABILITY,
+            aiStage: 'ai-stage-policy-v2.10' as const,
+        } satisfies ReplayEvaluationPolicy;
+        expect(resolveReplayAiStagePolicyVersion(beta, capability)).toBe('ai-stage-policy-v2.10');
+        expect(replayEvaluationPolicySchema.safeParse({
+            capability: BETATEST_FREE_POOL_STANDARD_V210_EXACT_REPLAY_CAPABILITY,
+            aiStage: 'ai-stage-policy-v2.11',
+        }).success).toBe(false);
     });
 
     it('admits only the exact historical v2.7/risk-v2.3 source without synthetic scheduler state', () => {

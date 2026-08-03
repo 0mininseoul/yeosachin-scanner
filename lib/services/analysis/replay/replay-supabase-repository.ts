@@ -28,6 +28,13 @@ export interface CurrentProductionReplaySourceRpcClient {
     }): PromiseLike<RpcResult>;
 }
 
+/** UUID-only, service-role RPC for one completed betatest free-pool source. */
+export interface BetatestFreePoolReplaySourceRpcClient {
+    rpc(name: 'read_analysis_v2_betatest_free_pool_replay_source', params: {
+        p_request_id: string;
+    }): PromiseLike<RpcResult>;
+}
+
 const run = z.object({
     actorId: z.string().min(3).max(200),
     credentialSlot: z.string().regex(/^(?:primary|secondary|tertiary|quaternary|quinary|senary)$/),
@@ -81,6 +88,15 @@ const currentProductionSource = z.object({
     providerRuns: z.array(run).min(1).max(128),
 }).strict();
 
+const betatestFreePoolSource = currentProductionSource.extend({
+    preflightRuns: z.array(run.extend({
+        credentialSlot: z.string().regex(/^(?:primary|tertiary|quaternary|quinary|senary|septenary)$/),
+    })).min(1).max(4),
+    providerRuns: z.array(run.extend({
+        credentialSlot: z.string().regex(/^(?:primary|tertiary|quaternary|quinary|senary|septenary)$/),
+    })).min(1).max(128),
+}).strict();
+
 export type ReplayCaptureDescriptor = Omit<
     z.infer<typeof source>,
     'selectedPlanId' | 'policyVersions'
@@ -101,6 +117,15 @@ export type CurrentProductionReplayCaptureDescriptor = Omit<
 > & {
     targetResolution: 'provider_ledger';
     sourceKind: 'current_paid_production';
+};
+
+/** The opaque target is resolved only from completed, bounded beta-free ledgers. */
+export type BetatestFreePoolReplayCaptureDescriptor = Omit<
+    ReplayCaptureDescriptor,
+    'target'
+> & {
+    targetResolution: 'provider_ledger';
+    sourceKind: 'betatest_free_pool';
 };
 
 function normalizedTarget(value: string): string {
@@ -232,5 +257,42 @@ export async function loadCurrentProductionReplayCaptureDescriptor(
             .digest('hex'),
         targetResolution: 'provider_ledger',
         sourceKind: 'current_paid_production',
+    };
+}
+
+export async function loadBetatestFreePoolReplayCaptureDescriptor(
+    client: BetatestFreePoolReplaySourceRpcClient,
+    requestId: string,
+): Promise<BetatestFreePoolReplayCaptureDescriptor> {
+    const exactRequestId = z.string().uuid().parse(requestId);
+    const result = await client.rpc(
+        'read_analysis_v2_betatest_free_pool_replay_source',
+        { p_request_id: exactRequestId },
+    );
+    if (result.error) throw new Error('ANALYSIS_V2_REPLAY_EXACT_SOURCE_UNAVAILABLE');
+    const parsedResult = betatestFreePoolSource.safeParse(result.data);
+    if (!parsedResult.success || parsedResult.data.requestId !== exactRequestId) {
+        throw new Error('ANALYSIS_V2_REPLAY_READ_ONLY_SOURCE_INVALID');
+    }
+    const parsed = parsedResult.data;
+    const lineageResult = replaySourceLineageSchema.safeParse({
+        selectedPlanId: parsed.selectedPlanId,
+        policyVersions: parsed.policyVersions,
+    });
+    if (!lineageResult.success) {
+        throw new Error('ANALYSIS_V2_REPLAY_READ_ONLY_SOURCE_INVALID');
+    }
+    return {
+        requestId: parsed.requestId,
+        preflightId: parsed.preflightId,
+        targetUsername: parsed.targetUsername,
+        preflightRuns: parsed.preflightRuns,
+        providerRuns: parsed.providerRuns,
+        sourceLineage: lineageResult.data,
+        requestFingerprint: createHash('sha256')
+            .update(`analysis-v2-replay-request-v1\n${parsed.requestId}`)
+            .digest('hex'),
+        targetResolution: 'provider_ledger',
+        sourceKind: 'betatest_free_pool',
     };
 }
