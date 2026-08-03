@@ -134,10 +134,10 @@ describe('analytics and observability disclosure contract', () => {
         }
         expect(operations).toContain('Yeosachin Operational Health');
         expect(operations).toContain('3개 모니터');
-        expect(operations).toContain('fields.environment == "production"');
-        expect(operations).toContain('fields.event in (');
-        expect(operations).toContain('fields.user_id');
-        expect(operations).toContain('fields.preflight_id');
+        expect(operations).toContain("['fields.environment'] == \"production\"");
+        expect(operations).toContain("['fields.event'] in (");
+        expect(operations).toContain("['fields.user_id']");
+        expect(operations).toContain("['fields.preflight_id']");
         expect(operations).toMatch(/Vercel lifecycle[^\n]*Axiom/);
         expect(operations).toMatch(/Cloud Run preflight worker[^\n]*Axiom transport[^\n]*stdout[^\n]*Cloud Logging/);
         expect(operations).toContain('resource.type="cloud_run_revision"');
@@ -149,8 +149,8 @@ describe('analytics and observability disclosure contract', () => {
         expect(operations).toContain('preflight_id + event + attempt');
         expect(operations).toMatch(/correlation field[^\n]*제한된 시간 창/);
         expect(operations).toMatch(/영속 exactly-once[^\n]*(보장하지|보장하지 않는다)/);
-        expect(operations).not.toMatch(/^\| where environment ==/m);
-        expect(operations).not.toMatch(/^\| where event (?:==|in)/m);
+        expect(operations).not.toMatch(/^\| where (?:fields\.)?environment ==/m);
+        expect(operations).not.toMatch(/^\| where (?:fields\.)?event (?:==|in)/m);
         expect(operations).toMatch(/notifier[^\n]*(없|미구성)[^\n]*(비활성|disabled)/i);
         expect(operations).toMatch(/토큰 회전/);
         expect(operations).toMatch(/즉시[^\n]*(ingest|인제스트)[^\n]*(중단|차단)/i);
@@ -242,6 +242,9 @@ describe('analytics and observability disclosure contract', () => {
         );
         expect(operations).toMatch(
             /click·scroll interaction[^\n]*batching[^\n]*network[^\n]*console[^\n]*performance[^\n]*document title[^\n]*끈다/i
+        );
+        expect(operations).toMatch(
+            /클릭·스크롤 행동 관찰[^\n]*Session Replay interaction[^\n]*일반 autocapture[^\n]*(우회|켜지 않)/i
         );
         expect(operations).toMatch(
             /(고객|사용자 입력)[^\n]*(이메일|email)[^\n]*(연락처|contact)[^\n]*(replay|event)[^\n]*(보내지 않|전송하지 않)/i

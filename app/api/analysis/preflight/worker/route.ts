@@ -220,5 +220,6 @@ export async function POST(request: Request): Promise<NextResponse> {
         request,
         '/api/analysis/preflight/worker',
         context => handlePOST(request, context),
+        { flush: 'await' },
     );
 }

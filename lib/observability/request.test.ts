@@ -220,6 +220,30 @@ describe('requestContext', () => {
     });
 });
 
+describe('observeRoute flush mode', () => {
+    it('awaits the bounded flush instead of deferring it when a durable worker requests it', async () => {
+        const request = new Request('https://example.com/api/worker', { method: 'POST' });
+        let releaseFlush: (() => void) | undefined;
+        observabilityMocks.flush.mockReturnValue(new Promise<void>(resolve => {
+            releaseFlush = resolve;
+        }));
+
+        const responsePromise = observeRoute(
+            request,
+            '/api/worker',
+            async () => new Response(null, { status: 200 }),
+            { flush: 'await' },
+        );
+
+        await Promise.resolve();
+        expect(observabilityMocks.flush).toHaveBeenCalledOnce();
+        expect(observabilityMocks.afterTask).not.toHaveBeenCalled();
+
+        releaseFlush?.();
+        await expect(responsePromise).resolves.toHaveProperty('status', 200);
+    });
+});
+
 describe('observeRoute', () => {
     it('skips completion observation and scheduled flushing for a server-marked response', async () => {
         const response = new Response(null, { status: 202 });

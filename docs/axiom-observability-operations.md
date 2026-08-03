@@ -33,7 +33,7 @@ AXIOM_ORG_ID=<UI에서 확인한 실제 조직 ID>
 
 - 로컬: 무해한 합성 이벤트 한 건으로 ingest가 되고 데이터셋 조회·관리 권한은 거부되는지 확인한다.
 - Vercel Preview: 위 세 변수만 Preview에 추가하고 대표 시나리오 및 금지 필드 검사를 완료한다.
-- Production: Preview 검증과 개인정보 검토가 끝난 동일한 데이터셋·권한 구성을 Production에 추가한다. 운영 데이터는 항상 `fields.environment == "production"`으로 필터링한다.
+- Production: Preview 검증과 개인정보 검토가 끝난 동일한 데이터셋·권한 구성을 Production에 추가한다. 현재 데이터셋은 중첩 객체가 아니라 평탄화된 dotted key로 저장되므로 APL에서는 항상 `['fields.environment'] == "production"`으로 필터링한다.
 - 변수 누락이나 Axiom 전송 실패가 서비스 응답을 실패시키지 않는지도 확인한다.
 
 ## 3. 안전한 이벤트와 필드
@@ -86,11 +86,11 @@ Cloud Tasks 재시도로 terminal 이벤트는 attempt 단위 at-least-once로 �
 
 ```apl
 ['yeosachin-logs']
-| where fields.environment == "preview"
+| where ['fields.environment'] == "preview"
 | where _time > ago(24h)
-| project _time, fields.event, fields.severity, fields.route, fields.status,
-    fields.duration_ms, fields.provider, fields.operation, fields.phase,
-    fields.disposition, fields.error_code
+| project _time, ['fields.event'], ['fields.severity'], ['fields.route'], ['fields.status'],
+    ['fields.duration_ms'], ['fields.provider'], ['fields.operation'], ['fields.phase'],
+    ['fields.disposition'], ['fields.error_code']
 | limit 200
 ```
 
@@ -105,7 +105,7 @@ Cloud Tasks 재시도로 terminal 이벤트는 attempt 단위 at-least-once로 �
 
 ## 5. 대시보드
 
-Axiom UI에서 `Yeosachin Operational Health`를 만들고 모든 요소에 `fields.environment` 변수를 적용한다. 운영 기본값은 `production`, Preview 검증 시에만 `preview`로 바꾼다. 패널의 이벤트·차원 필터는 모두 `fields.event`, `fields.status`, `fields.duration_ms` 같은 중첩 필드를 사용한다.
+Axiom UI에서 `Yeosachin Operational Health`를 만들고 모든 요소에 `['fields.environment']` 변수를 적용한다. 운영 기본값은 `production`, Preview 검증 시에만 `preview`로 바꾼다. 현재 평탄화된 데이터셋에서는 패널의 이벤트·차원 필터도 `['fields.event']`, `['fields.status']`, `['fields.duration_ms']`처럼 bracket-quoted dotted key를 사용한다.
 
 - Route health: 요청 수, 4xx·5xx 비율, `duration_ms` p50·p90
 - Preflight: 요청·완료·실패 수, 오류 코드, 플랜별 지연
@@ -134,18 +134,18 @@ Axiom UI에서 `Yeosachin Operational Health`를 만들고 모든 요소에 `fie
 
 ```apl
 ['yeosachin-logs']
-| where fields.environment == "production"
-| where fields.event in (
+| where ['fields.environment'] == "production"
+| where ['fields.event'] in (
     "preflight.requested", "preflight.completed", "preflight.exclusion_decided",
     "earlybird.checkout_created", "earlybird.waitlist_created",
     "groble.webhook_finalized", "analysis_v2.fresh_admission_enqueued",
     "analysis_v2.request_queued", "analysis_v2.worker_completed",
     "analysis_v2.worker_retry", "analysis_v2.worker_failed", "analysis_v2.result_viewed"
 )
-| project _time, fields.event, fields.severity, fields.disposition,
-    fields.error_code, fields.request_id, fields.user_id, fields.preflight_id,
-    fields.order_id, fields.analysis_request_id, fields.job_key, fields.plan_id,
-    fields.status, fields.duration_ms
+| project _time, ['fields.event'], ['fields.severity'], ['fields.disposition'],
+    ['fields.error_code'], ['fields.request_id'], ['fields.user_id'], ['fields.preflight_id'],
+    ['fields.order_id'], ['fields.analysis_request_id'], ['fields.job_key'], ['fields.plan_id'],
+    ['fields.status'], ['fields.duration_ms']
 | order by _time asc
 ```
 
@@ -155,7 +155,7 @@ Vercel에서 같은 시점의 상세 요청을 볼 때는 Axiom 이벤트의 `re
 
 ## 7. 출시 모니터
 
-Personal 요금제의 3개 모니터 제한 안에서 다음 세 개의 결합 모니터만 먼저 만든다. 모든 쿼리는 `fields.environment == "production"`을 강제하고 `fields.event`, `fields.disposition`, `fields.error_code`, `fields.status`로 조건을 작성해 테스트·Preview 이벤트를 제외한다.
+Personal 요금제의 3개 모니터 제한 안에서 다음 세 개의 결합 모니터만 먼저 만든다. 모든 쿼리는 `['fields.environment'] == "production"`을 강제하고 `['fields.event']`, `['fields.disposition']`, `['fields.error_code']`, `['fields.status']`로 조건을 작성해 테스트·Preview 이벤트를 제외한다.
 
 - `Launch / Payment health`: Groble route 5xx 또는 `unmatched`, `ambiguous_buyer`, `mismatch`, `overflow_refund_required`, `cancel_requested`, `cancel_*`, `late_cancelled_payment` 조건이 한 건 이상 발생
 - `Launch / Analysis terminal health`: terminal analysis/V2 worker failure 또는 timeout이 한 건 이상 발생

@@ -31,7 +31,7 @@ describe('Amplitude replay privacy contract', () => {
     it('uses bounded Vercel sampling with a fail-closed upstream capture veto', () => {
         const analytics = source('lib/services/analytics.ts');
 
-        expect(analytics).toContain("NEXT_PUBLIC_VERCEL_ENV === 'production'");
+        expect(analytics).toContain("process.env.NODE_ENV === 'production'");
         expect(analytics).toContain("NEXT_PUBLIC_AMPLITUDE_SESSION_REPLAY_ENABLED !== 'true'");
         expect(analytics).toContain('SESSION_REPLAY_MAX_SAMPLE_RATE = 1');
         expect(analytics).toContain("/^(?:0\\.(?:0[1-9]|1|10)|1)$/.test(rawSampleRate)");

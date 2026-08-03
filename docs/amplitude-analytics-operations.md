@@ -13,12 +13,12 @@ Amplitude는 클라이언트 제품 퍼널을 보는 보조 분석 도구다. �
 - 최상위 client provider가 `@amplitude/unified`의 `initAll`을 생명주기 동안 한 번만 초기화한다. key 누락이나 SDK 실패는 제품 흐름을 중단하지 않는다.
 - 인증 전에는 익명 상태를 사용하고, 인증 후 Amplitude user ID는 Supabase UUID만 사용한다. 이메일, 전화번호, 인스타그램 아이디를 ID나 user property로 설정하지 않는다.
 - Analytics는 클라이언트에서만 전송한다. Groble webhook 등 서버 요청에서 Amplitude 이벤트를 보내지 않는다.
-- Analytics 자동 수집은 세션 경계를 포함해 전부 끈다. page URL·view, form·element·frustration interaction, file download, network, web vitals·performance, attribution은 수집하지 않고 닫힌 allowlist의 명시 이벤트만 전송한다.
-- Session Replay는 Production(`NEXT_PUBLIC_VERCEL_ENV=production`)에서 `NEXT_PUBLIC_AMPLITUDE_SESSION_REPLAY_ENABLED=true`이고 경로·개인정보 조건도 통과할 때만 후보가 된다. 현재 승인된 Production beta 운영값은 `NEXT_PUBLIC_AMPLITUDE_SESSION_REPLAY_SAMPLE_RATE=1`(100%)이며, 허용 핵심 경로의 모든 세션을 검증할 수 있다. 런타임은 형식이 맞는 `0.01`(1%)부터 `0.10`(10%)까지와 정확한 `1`(100%)만 지원하며, 형식 오류 또는 범위 밖 값은 fail-closed `sampleRate: 0`으로 비활성화한다.
+- Analytics 자동 수집은 세션 경계를 포함해 전부 끈다. page URL·view, form·element·frustration interaction, file download, network, web vitals·performance, attribution은 수집하지 않고 닫힌 allowlist의 명시 이벤트만 전송한다. 허용 핵심 경로에서 사용자의 클릭·스크롤 행동 관찰은 URL 정규화·마스킹을 적용한 Session Replay interaction이 맡는다. 일반 autocapture는 이 속성 allowlist를 우회할 수 있으므로 별도 안전 계약이 생기기 전까지 켜지 않는다.
+- Session Replay는 Next Production build(`NODE_ENV=production`)에서 `NEXT_PUBLIC_AMPLITUDE_SESSION_REPLAY_ENABLED=true`이고 경로·개인정보 조건도 통과할 때만 후보가 된다. 별도의 `NEXT_PUBLIC_VERCEL_ENV` 설정은 요구하지 않는다. 현재 승인된 Production beta 운영값은 `NEXT_PUBLIC_AMPLITUDE_SESSION_REPLAY_SAMPLE_RATE=1`(100%)이며, 허용 핵심 경로의 모든 세션을 검증할 수 있다. 런타임은 형식이 맞는 `0.01`(1%)부터 `0.10`(10%)까지와 정확한 `1`(100%)만 지원하며, 형식 오류 또는 범위 밖 값은 fail-closed `sampleRate: 0`으로 비활성화한다.
 
 ## 2. 개인정보 경계
 
-SDK localStorage 캐시의 remote config는 실시간 승인으로 취급하지 않고 거부한다. SDK 타임아웃과 캐시 거부는 joined config의 `captureEnabled: false`로 Replay 수집을 비활성화한다.
+SDK localStorage 캐시의 remote config는 실시간 승인으로 취급하지 않고 초기화 전에 제거한다. SDK 타임아웃과 캐시 거부는 joined config의 `captureEnabled: false`로 Replay 수집을 비활성화한다.
 
 Session Replay 허용 경로 템플릿은 `/`, `/privacy`, `/terms`, `/login`, `/analyze`, `/earlybird`, `/mypage`, `/progress/:requestId`, `/result/:requestId`, `/share/:token`이다. 허용 경로의 query·hash와 동적 request ID·share token은 local UGC filter rule이 Replay meta와 batched click·scroll interaction을 영속화하기 전에 식별자와 query가 없는 정적 경로 템플릿으로 치환한다. 알 수 없는 경로와 admin·API 경로는 allowlist 밖에서 fail-closed로 Replay를 중지하며, 중지된 세션은 새 페이지/세션 전까지 다시 시작하지 않는다.
 
