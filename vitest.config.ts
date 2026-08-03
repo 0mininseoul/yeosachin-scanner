@@ -7,6 +7,9 @@ export default defineConfig({
         include: ['lib/**/*.test.ts', 'scripts/**/*.test.ts'],
         // Bound concurrent PGlite/WASM startups to avoid resource contention.
         maxWorkers: 4,
+        // Full CI runs can briefly queue PGlite/WASM startup behind the same bounded workers.
+        // Keep the default test budget above that transient queue without changing test logic.
+        testTimeout: 15_000,
     },
     resolve: {
         alias: {
