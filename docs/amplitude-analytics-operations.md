@@ -20,7 +20,7 @@ Amplitude는 클라이언트 제품 퍼널을 보는 보조 분석 도구다. �
 
 SDK localStorage 캐시의 remote config는 실시간 승인으로 취급하지 않고 초기화 전에 제거한다. SDK 타임아웃과 캐시 거부는 joined config의 `captureEnabled: false`로 Replay 수집을 비활성화한다.
 
-Session Replay 허용 경로 템플릿은 `/`, `/privacy`, `/terms`, `/login`, `/analyze`, `/earlybird`, `/mypage`, `/progress/:requestId`, `/result/:requestId`, `/share/:token`이다. 허용 경로의 query·hash와 동적 request ID·share token은 local UGC filter rule이 Replay meta와 batched click·scroll interaction을 영속화하기 전에 식별자와 query가 없는 정적 경로 템플릿으로 치환한다. 알 수 없는 경로와 admin·API 경로는 allowlist 밖에서 fail-closed로 Replay를 중지하며, 중지된 세션은 새 페이지/세션 전까지 다시 시작하지 않는다.
+Session Replay 허용 경로 템플릿은 `/`, `/privacy`, `/terms`, `/login`, `/analyze`, `/betatest`, `/earlybird`, `/mypage`, `/progress/:requestId`, `/result/:requestId`, `/share/:token`이다. 허용 경로의 query·hash와 동적 request ID·share token은 local UGC filter rule이 Replay meta와 batched click·scroll interaction을 영속화하기 전에 식별자와 query가 없는 정적 경로 템플릿으로 치환한다. 알 수 없는 경로와 admin·API 경로는 allowlist 밖에서 fail-closed로 Replay를 중지하며, 중지된 세션은 새 페이지/세션 전까지 다시 시작하지 않는다.
 
 DNT 또는 GPC(Global Privacy Control) opt-out이면 fail-closed로 `sampleRate: 0`, `capture_enabled: false`로 Replay를 차단한다. Vercel의 enable·sample 환경변수가 rollout 활성화와 표본율을 권위 있게 결정한다. 신뢰한 Amplitude remote config는 `capture_enabled: true`인지 확인하는 emergency veto로만 사용하며, upstream `sample_rate`와 다른 설정은 적용하거나 전달하지 않는다. Amplitude가 `capture_enabled: false`를 반환하면 Replay를 차단하고, remote config 응답 오류·실패·형식 오류도 fail-closed `sampleRate: 0`으로 처리한다. Replay의 click·scroll interaction은 batching을 켜서 수집하지만 network·console·performance·document title 수집은 끈다. 일반 Analytics autocapture도 page URL·view, form·element·frustration interaction을 포함해 계속 끈 상태다.
 
@@ -59,7 +59,7 @@ Replay는 conservative 기본 수준으로 모든 text와 input을 마스킹하�
 
 ## 5. Live 검증
 
-- Production beta 검증에서는 100% sampling이므로 허용 핵심 경로를 통과한 한 세션에서 Replay 수신을 확인한다. `/`, `/privacy`, `/terms`, `/login`, `/analyze`, `/earlybird`, `/mypage`, `/progress/:requestId`, `/result/:requestId`, `/share/:token`을 각각 검증한다.
+- Production beta 검증에서는 100% sampling이므로 허용 핵심 경로를 통과한 한 세션에서 Replay 수신을 확인한다. `/`, `/privacy`, `/terms`, `/login`, `/analyze`, `/betatest`, `/earlybird`, `/mypage`, `/progress/:requestId`, `/result/:requestId`, `/share/:token`을 각각 검증한다.
 - Amplitude User Lookup 또는 Debugger에서 이벤트 순서와 Supabase UUID identity를 확인한다. 익명 이벤트가 인증 후 잘못된 이메일·전화번호 identity에 연결되지 않았는지 확인한다.
 - 결제 완료 fixture 또는 실제 검증 결제는 고객 화면이 `paid`를 읽은 뒤 `payment_confirmed_viewed`를 한 번만 보내는지 확인한다. 중복 새로고침은 dedupe 계약과 비교한다.
 - 각 이벤트 상세의 properties 탭에서 schema에 없는 값이 제거되는지 확인한다.
