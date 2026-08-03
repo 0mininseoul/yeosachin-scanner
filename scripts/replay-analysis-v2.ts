@@ -275,7 +275,13 @@ export async function createPaidReplayRunner(
 }
 
 function tokenForSlot(slot: string): string {
-    const key = slot === 'primary' ? 'APIFY_API_TOKEN' : `APIFY_${slot.toUpperCase()}_API_TOKEN`;
+    const allowed = new Set([
+        'primary', 'tertiary', 'quaternary', 'quinary', 'senary', 'septenary',
+    ]);
+    if (!allowed.has(slot)) {
+        throw new Error('ANALYSIS_V2_REPLAY_APIFY_CREDENTIAL_SLOT_FORBIDDEN');
+    }
+    const key = `APIFY_${slot.toUpperCase()}_API_TOKEN`;
     return requiredEnvironment(key);
 }
 

@@ -35,9 +35,16 @@ export interface BetatestFreePoolReplaySourceRpcClient {
     }): PromiseLike<RpcResult>;
 }
 
+/** UUID-only, service-role reader for the sealed test-entitlement maintenance source. */
+export interface TestEntitlementMaintenanceReplaySourceRpcClient {
+    rpc(name: 'read_analysis_v2_test_entitlement_v211_maintenance_source', params: {
+        p_request_id: string;
+    }): PromiseLike<RpcResult>;
+}
+
 const run = z.object({
     actorId: z.string().min(3).max(200),
-    credentialSlot: z.string().regex(/^(?:primary|secondary|tertiary|quaternary|quinary|senary)$/),
+    credentialSlot: z.string().regex(/^(?:primary|secondary|tertiary|quaternary|quinary|senary|septenary)$/),
     runId: z.string().regex(/^[A-Za-z0-9]{8,64}$/),
     status: z.literal('succeeded'),
     operationKey: z.string().min(1).max(100),
@@ -97,6 +104,16 @@ const betatestFreePoolSource = currentProductionSource.extend({
     })).min(1).max(128),
 }).strict();
 
+const testEntitlementMaintenanceSource = currentProductionSource.extend({
+    preflightRuns: z.array(run.extend({
+        credentialSlot: z.string().regex(/^(?:primary|tertiary|quaternary|quinary|senary|septenary)$/),
+    })).min(1).max(4),
+    providerRuns: z.array(run.extend({
+        credentialSlot: z.string().regex(/^(?:primary|tertiary|quaternary|quinary|senary|septenary)$/),
+    })).min(1).max(128),
+    sourceFingerprint: z.string().regex(/^[a-f0-9]{64}$/),
+}).strict();
+
 export type ReplayCaptureDescriptor = Omit<
     z.infer<typeof source>,
     'selectedPlanId' | 'policyVersions'
@@ -126,6 +143,16 @@ export type BetatestFreePoolReplayCaptureDescriptor = Omit<
 > & {
     targetResolution: 'provider_ledger';
     sourceKind: 'betatest_free_pool';
+};
+
+/** Immutable v2.10 source, explicitly evaluated under the v2.11 maintenance policy. */
+export type TestEntitlementMaintenanceReplayCaptureDescriptor = Omit<
+    ReplayCaptureDescriptor,
+    'target'
+> & {
+    targetResolution: 'provider_ledger';
+    sourceKind: 'test_entitlement_v211_maintenance';
+    sourceFingerprint: string;
 };
 
 function normalizedTarget(value: string): string {
@@ -294,5 +321,43 @@ export async function loadBetatestFreePoolReplayCaptureDescriptor(
             .digest('hex'),
         targetResolution: 'provider_ledger',
         sourceKind: 'betatest_free_pool',
+    };
+}
+
+export async function loadTestEntitlementMaintenanceReplayCaptureDescriptor(
+    client: TestEntitlementMaintenanceReplaySourceRpcClient,
+    requestId: string,
+): Promise<TestEntitlementMaintenanceReplayCaptureDescriptor> {
+    const exactRequestId = z.string().uuid().parse(requestId);
+    const result = await client.rpc(
+        'read_analysis_v2_test_entitlement_v211_maintenance_source',
+        { p_request_id: exactRequestId },
+    );
+    if (result.error) throw new Error('ANALYSIS_V2_REPLAY_EXACT_SOURCE_UNAVAILABLE');
+    const parsedResult = testEntitlementMaintenanceSource.safeParse(result.data);
+    if (!parsedResult.success || parsedResult.data.requestId !== exactRequestId) {
+        throw new Error('ANALYSIS_V2_REPLAY_READ_ONLY_SOURCE_INVALID');
+    }
+    const parsed = parsedResult.data;
+    const lineageResult = replaySourceLineageSchema.safeParse({
+        selectedPlanId: parsed.selectedPlanId,
+        policyVersions: parsed.policyVersions,
+    });
+    if (!lineageResult.success) {
+        throw new Error('ANALYSIS_V2_REPLAY_READ_ONLY_SOURCE_INVALID');
+    }
+    return {
+        requestId: parsed.requestId,
+        preflightId: parsed.preflightId,
+        targetUsername: parsed.targetUsername,
+        preflightRuns: parsed.preflightRuns,
+        providerRuns: parsed.providerRuns,
+        sourceLineage: lineageResult.data,
+        requestFingerprint: createHash('sha256')
+            .update(`analysis-v2-replay-request-v1\n${parsed.requestId}`)
+            .digest('hex'),
+        targetResolution: 'provider_ledger',
+        sourceKind: 'test_entitlement_v211_maintenance',
+        sourceFingerprint: parsed.sourceFingerprint,
     };
 }

@@ -9,12 +9,14 @@ import {
 import {
     BETATEST_FREE_POOL_STANDARD_V210_EXACT_REPLAY_CAPABILITY,
     CURRENT_PRODUCTION_STANDARD_V210_EXACT_REPLAY_CAPABILITY,
+    TEST_ENTITLEMENT_STANDARD_V211_MAINTENANCE_REPLAY_CAPABILITY,
     HISTORICAL_PARTIAL_AVAILABLE_REPLAY_CAPABILITY,
     HISTORICAL_PARTIAL_AVAILABLE_REPLAY_V210_CAPABILITY,
     resolveReplayAiStagePolicyVersion,
     type ReplayEvaluationPolicy,
 } from './replay-source-lineage';
 import { v29FeatureAdmission } from '../v2-v29-feature-admission';
+import { v211FeatureAdmission } from '../v2-v211-feature-admission';
 import { v29GenderResolverAdmission } from '../v2-v29-gender-resolver-admission';
 import { selectAnalysisV2GenderResolverMedia } from '../v2-gender-resolver-media-policy';
 import { historicalPartialBundleInvariantIssues, historicalPartialPaidCoverage } from './historical-partial-available-artifact';
@@ -117,7 +119,7 @@ export interface AnalysisV2AiReplayReport {
     replayAiPolicy: string;
     semanticInputFingerprint: string;
     fullE2eEvidence: false;
-    sourceKind: 'current_paid_production' | 'betatest_free_pool' | 'historical_or_legacy';
+    sourceKind: 'current_paid_production' | 'betatest_free_pool' | 'test_entitlement_v211_maintenance' | 'historical_or_legacy';
     featureConcurrency: {
         experiment: 'baseline' | 'feature-concurrency-4';
         featureAnalysis: 3 | 4;
@@ -713,7 +715,11 @@ export async function runAnalysisV2AiReplay(input: {
                 return;
             }
             const featureAdmitted = !supportsGenderTriageMicrobatch
-                || v29FeatureAdmission(triage, profile) === 'eligible';
+                || (
+                    aiStagePolicySupports(replayAiPolicy, 'genderSummaryQualityV211')
+                        ? v211FeatureAdmission(triage, profile)
+                        : v29FeatureAdmission(triage, profile)
+                ) === 'eligible';
             const featurePromise = featureAdmitted ? runner.feature?.({
                 ordinal: profile.ordinal,
                 bio: profile.bio ?? null,
@@ -938,6 +944,9 @@ export async function runAnalysisV2AiReplay(input: {
             ? 'current_paid_production' as const
             : experimentScope === 'betatest-free-pool'
                 ? 'betatest_free_pool' as const
+                : authenticatedEvaluationPolicy?.capability
+                    === TEST_ENTITLEMENT_STANDARD_V211_MAINTENANCE_REPLAY_CAPABILITY
+                    ? 'test_entitlement_v211_maintenance' as const
                 : 'historical_or_legacy' as const,
         featureConcurrency: {
             experiment: featureConcurrencyExperiment

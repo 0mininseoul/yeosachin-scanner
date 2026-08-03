@@ -3,6 +3,7 @@ import {
     AI_STAGE_POLICY_V28_VERSION,
     AI_STAGE_POLICY_V29_VERSION,
     AI_STAGE_POLICY_V210_VERSION,
+    AI_STAGE_POLICY_V211_VERSION,
     type AiStagePolicyVersion,
 } from '@/lib/services/ai/stage-policy';
 
@@ -95,6 +96,9 @@ export const CURRENT_PRODUCTION_STANDARD_V210_EXACT_REPLAY_CAPABILITY =
 /** Exact completed betatest free-pool source; it is not a paid-production alias. */
 export const BETATEST_FREE_POOL_STANDARD_V210_EXACT_REPLAY_CAPABILITY =
     'betatest-free-pool-standard-v210-risk-v25-scheduler-v1-exact-replay' as const;
+/** A narrow maintenance-only v2.10-source → v2.11-evaluation fence. */
+export const TEST_ENTITLEMENT_STANDARD_V211_MAINTENANCE_REPLAY_CAPABILITY =
+    'test-entitlement-standard-v210-risk-v25-scheduler-v1-to-ai-v211-maintenance' as const;
 const currentEvaluationPolicySchema = z.object({
     capability: z.literal(REPLAY_V29_CROSS_POLICY_EVALUATION_CAPABILITY),
     aiStage: z.literal(AI_STAGE_POLICY_V29_VERSION),
@@ -123,6 +127,10 @@ const betatestFreePoolStandardV210EvaluationPolicySchema = z.object({
     capability: z.literal(BETATEST_FREE_POOL_STANDARD_V210_EXACT_REPLAY_CAPABILITY),
     aiStage: z.literal(AI_STAGE_POLICY_V210_VERSION),
 }).strict();
+const testEntitlementStandardV211MaintenanceEvaluationPolicySchema = z.object({
+    capability: z.literal(TEST_ENTITLEMENT_STANDARD_V211_MAINTENANCE_REPLAY_CAPABILITY),
+    aiStage: z.literal(AI_STAGE_POLICY_V211_VERSION),
+}).strict();
 export const replayEvaluationPolicySchema = z.union([
     currentEvaluationPolicySchema,
     historicalOfficialE2EEvaluationPolicySchema,
@@ -131,6 +139,7 @@ export const replayEvaluationPolicySchema = z.union([
     historicalPartialAvailableV210EvaluationPolicySchema,
     currentProductionStandardV210EvaluationPolicySchema,
     betatestFreePoolStandardV210EvaluationPolicySchema,
+    testEntitlementStandardV211MaintenanceEvaluationPolicySchema,
 ]);
 export type ReplayEvaluationPolicy = z.infer<typeof replayEvaluationPolicySchema>;
 
@@ -140,6 +149,7 @@ export type ReplaySupportedAiStagePolicyVersion = Extract<
     | typeof AI_STAGE_POLICY_V28_VERSION
     | typeof AI_STAGE_POLICY_V29_VERSION
     | typeof AI_STAGE_POLICY_V210_VERSION
+    | typeof AI_STAGE_POLICY_V211_VERSION
 >;
 
 /**
@@ -189,6 +199,22 @@ export function resolveReplayAiStagePolicyVersion(
             throw new Error('ANALYSIS_V2_REPLAY_EVALUATION_SOURCE_INELIGIBLE');
         }
         return parsed.data.aiStage;
+    }
+    if (
+        parsed.data.capability
+            === TEST_ENTITLEMENT_STANDARD_V211_MAINTENANCE_REPLAY_CAPABILITY
+    ) {
+        if (
+            lineage.selectedPlanId !== 'standard'
+            || policy.pipeline !== 'v2'
+            || policy.risk !== 'risk-policy-v2.5'
+            || policy.aiStage !== AI_STAGE_POLICY_V210_VERSION
+            || !('scheduler' in policy)
+            || policy.scheduler !== 'ai-scheduler-v1'
+        ) {
+            throw new Error('ANALYSIS_V2_REPLAY_EVALUATION_SOURCE_INELIGIBLE');
+        }
+        return AI_STAGE_POLICY_V211_VERSION;
     }
     // The historical v2.7/risk-v2.3 snapshot predates risk/scheduler telemetry;
     // that missing telemetry does not change the replayed AI semantics.
