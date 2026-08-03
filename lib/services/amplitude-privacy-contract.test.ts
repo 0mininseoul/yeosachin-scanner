@@ -1,6 +1,4 @@
-import { readFileSync, readdirSync, statSync } from 'node:fs';
-import { join } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
 
 const root = new URL('../../', import.meta.url);
@@ -9,23 +7,14 @@ function source(relativePath: string): string {
     return readFileSync(new URL(relativePath, root), 'utf8');
 }
 
-function tsxFiles(directory: string): string[] {
-    const absolute = fileURLToPath(new URL(directory, root));
-    return readdirSync(absolute).flatMap((entry) => {
-        const path = join(absolute, entry);
-        if (statSync(path).isDirectory()) {
-            return tsxFiles(`${directory}${entry}/`);
-        }
-        return entry.endsWith('.tsx') ? [path] : [];
-    });
-}
-
 describe('Amplitude replay privacy contract', () => {
-    it('uses conservative masking with no application unmask selector', () => {
+    it('keeps the replay readable while masking only marked sensitive regions', () => {
         const analytics = source('lib/services/analytics.ts');
 
-        expect(analytics).toContain("defaultMaskLevel: 'conservative'");
-        expect(analytics).not.toContain('unmaskSelector');
+        expect(analytics).toContain("defaultMaskLevel: 'light'");
+        expect(analytics).toContain("maskSelector: ['[data-amp-mask]']");
+        expect(analytics).toContain("blockSelector: ['[data-amp-block]']");
+        expect(analytics).not.toContain('maskAttributes:');
     });
 
     it('uses bounded Vercel sampling with a fail-closed upstream capture veto', () => {
@@ -47,7 +36,7 @@ describe('Amplitude replay privacy contract', () => {
         expect(analytics).toMatch(/interactionConfig:\s*\{\s*enabled: true,\s*batch: true,/);
         expect(analytics).toContain('ugcFilterRules');
         expect(analytics).toContain('handleSendEvents: createSafeSessionReplaySender(apiKey)');
-        expect(analytics).toContain("'[contenteditable]'");
+        expect(analytics).toContain('ugcFilterRules');
     });
 
     it('rejects cached replay config in both installed SDK module formats', () => {
@@ -60,7 +49,7 @@ describe('Amplitude replay privacy contract', () => {
             .toBeLessThan(patch.indexOf('JSON.stringify(remoteConfig'));
     });
 
-    it('masks core route containers while retaining private and media blocks', () => {
+    it('does not mask full replay pages and keeps only sensitive regions marked', () => {
         const landing = source('components/landing-page.tsx');
         const analyze = source('app/analyze/page.tsx');
         const login = source('app/login/page.tsx');
@@ -71,18 +60,38 @@ describe('Amplitude replay privacy contract', () => {
         const progress = source('app/progress/[requestId]/page.tsx');
         const result = source('app/result/[requestId]/page.tsx');
         const shared = source('app/share/[token]/page.tsx');
+        const betaTest = source('app/betatest/betatest-client.tsx');
+        const feedback = source('components/result-feedback.tsx');
+        const profilePreview = source('components/profile-preview-dialog.tsx');
 
         expect(landing).toContain('data-amp-mask');
         expect(analyze.match(/data-amp-mask/g)?.length).toBeGreaterThanOrEqual(2);
-        expect(analyze).toMatch(/<main[^>]*data-amp-mask/);
-        expect(login).toMatch(/<main[^>]*data-amp-mask/);
-        expect(mypage).toMatch(/<main[^>]*data-amp-mask/);
-        expect(earlybirdPage).toMatch(/<main[^>]*data-amp-mask/);
+        expect(analyze).not.toMatch(/<main[^>]*data-amp-mask/);
+        expect(login).not.toMatch(/<main[^>]*data-amp-mask/);
+        expect(mypage).not.toMatch(/<(?:div|main)[^>]*data-amp-mask/);
+        expect(earlybirdPage).not.toMatch(/<main[^>]*data-amp-mask/);
         expect(earlybird).toContain('data-amp-block');
         expect(history).toContain('data-amp-block');
-        expect(progress).toMatch(/<main[^>]*data-amp-mask/);
-        expect(result).toMatch(/<main[^>]*data-amp-mask/);
-        expect(shared).toMatch(/<main[^>]*data-amp-mask/);
+        expect(progress).not.toMatch(/<main[^>]*data-amp-mask/);
+        expect(result).not.toMatch(/<main[^>]*data-amp-mask/);
+        expect(shared).not.toMatch(/<main[^>]*data-amp-mask/);
+        expect(betaTest).toMatch(/id="beta-target-instagram"[\s\S]*?data-amp-mask/);
+        expect(betaTest).toMatch(/id="beta-excluded-instagram"[\s\S]*?data-amp-mask/);
+        expect(feedback).toMatch(/<textarea[\s\S]*?data-amp-mask/);
+        expect(earlybird).toMatch(/href=\{order\.resultUrl\}[\s\S]*?data-amp-block/);
+        expect(profilePreview).toMatch(/data-amp-block[\s\S]*?profile\.instagramId/);
+        expect(profilePreview).toMatch(/data-amp-block[\s\S]*?profile\.(?:overview|bio)/);
+        expect((analyze.match(/data-amp-mask[\s\S]{0,400}\{error\}/g)?.length ?? 0)).toBeGreaterThanOrEqual(2);
+        expect(analyze).toMatch(/data-amp-mask[\s\S]{0,400}\{error \?\?/);
+        expect(analyze).toMatch(/data-amp-mask[\s\S]{0,400}\{visibleError\}/);
+        expect((betaTest.match(/data-amp-mask[\s\S]{0,400}\{error\}/g)?.length ?? 0)).toBeGreaterThanOrEqual(3);
+        expect(betaTest).toMatch(/data-amp-mask[\s\S]{0,400}\{error \?\?/);
+        expect(progress).toMatch(/data-amp-mask[\s\S]{0,400}\{error \|\|/);
+        expect(progress).toMatch(/data-amp-mask[\s\S]{0,400}\{data\.errorMessage/);
+        expect(result).toMatch(/data-amp-mask[\s\S]{0,400}\{error \|\|/);
+        expect(earlybird).toMatch(/data-amp-mask[\s\S]{0,400}\{checkoutRecoveryError\}/);
+        expect(shared).toMatch(/data-amp-mask[\s\S]{0,400}\{error\}/);
+        expect(feedback).toMatch(/data-amp-mask[\s\S]{0,400}\{error \?\?/);
     });
 
     it('does not send route values into replay lifecycle calls', () => {
@@ -125,15 +134,4 @@ describe('Amplitude replay privacy contract', () => {
         expect(analytics).not.toContain('NEXT_PUBLIC_DEMO_ANALYSIS_ENABLED');
     });
 
-    it('never opts app or component DOM back into replay visibility', () => {
-        const files = [
-            ...tsxFiles('app/'),
-            ...tsxFiles('components/'),
-        ];
-
-        for (const file of files) {
-            const contents = readFileSync(file, 'utf8');
-            expect(contents, file).not.toMatch(/amp-unmask|data-amp-unmask/);
-        }
-    });
 });

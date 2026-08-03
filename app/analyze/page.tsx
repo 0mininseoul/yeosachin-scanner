@@ -491,7 +491,7 @@ const DISCLOSURE_ACCEPTED = true;
                 ) : undefined}
             />
 
-            <main data-amp-mask className="mx-auto max-w-[500px] px-5 pb-16 pt-7">
+            <main className="mx-auto max-w-[500px] px-5 pb-16 pt-7">
                 {!preflight ? (
                     <>
                         <Eyebrow>판독 의뢰서 · 대상 지정</Eyebrow>
@@ -533,7 +533,7 @@ const DISCLOSURE_ACCEPTED = true;
                                 <span className="font-semibold text-amber">공개 계정</span>만 판독 가능합니다.
                             </p>
                             {error && (
-                                <p className="mt-4 border-l-2 border-blood pl-3 text-[13px] leading-relaxed text-blood-2" role="alert">
+                                <p data-amp-mask className="mt-4 border-l-2 border-blood pl-3 text-[13px] leading-relaxed text-blood-2" role="alert">
                                     {error}
                                 </p>
                             )}
@@ -551,7 +551,7 @@ const DISCLOSURE_ACCEPTED = true;
                     <CaseCard bracket="var(--color-blood)" className="p-7 text-center">
                         <Eyebrow className="justify-center">사전 점검 중단</Eyebrow>
                         <h1 className="mt-4 text-[22px] font-extrabold text-fg">판독 대상을 확인해주세요</h1>
-                        <p className="mt-3 text-[13px] leading-relaxed text-fg-dim">
+                        <p data-amp-mask className="mt-3 text-[13px] leading-relaxed text-fg-dim">
                             {error ?? '현재 이 계정은 판독할 수 없습니다.'}
                         </p>
                         <div className="mt-7">
@@ -609,7 +609,7 @@ const DISCLOSURE_ACCEPTED = true;
                                     />
                                 </div>
                                 {error && (
-                                    <p className="mt-4 border-l-2 border-blood pl-3 text-[13px] leading-relaxed text-blood-2" role="alert">
+                                    <p data-amp-mask className="mt-4 border-l-2 border-blood pl-3 text-[13px] leading-relaxed text-blood-2" role="alert">
                                         {error}
                                     </p>
                                 )}
@@ -844,6 +844,7 @@ const DISCLOSURE_ACCEPTED = true;
                                     {visibleError && (
                                         <div
                                             id="checkout-recovery-message"
+                                            data-amp-mask
                                             className="mt-4 border border-blood/45 bg-blood/10 px-3 py-2.5 text-[13px] text-blood"
                                             role="alert"
                                         >
