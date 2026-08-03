@@ -123,6 +123,104 @@ class InstagrapiGatewayTest(unittest.TestCase):
         self.assertTrue(result['isPrivate'])
         self.assertNotIn('latestPosts', result)
 
+    def test_zero_media_limit_returns_public_summary_without_requesting_media(self):
+        class SummaryOnlyClient(FakeClient):
+            def user_info_by_username(self, username):
+                return SimpleNamespace(
+                    pk='123', username=username, full_name='', biography='', profile_pic_url='',
+                    follower_count=12, following_count=3, media_count=9,
+                    is_private=False, is_verified=False,
+                )
+
+            def user_medias(self, user_id, amount):
+                raise AssertionError('summary-only profile must not request media')
+
+        self.assertEqual(InstagrapiGateway(SummaryOnlyClient()).profile('target.user', 0), {
+            'username': 'target.user', 'followersCount': 12, 'followingCount': 3,
+            'postsCount': 9, 'isPrivate': False, 'isVerified': False,
+            'latestPosts': [],
+        })
+
+    def test_profile_maps_hidden_post_counts_to_zero_with_explicit_flags(self):
+        class HiddenCountClient(FakeClient):
+            def user_info_by_username(self, username):
+                return SimpleNamespace(
+                    pk='123', username=username, full_name='', biography='', profile_pic_url='',
+                    follower_count=12, following_count=3, media_count=1,
+                    is_private=False, is_verified=False,
+                )
+
+            def user_medias(self, user_id, amount):
+                return [SimpleNamespace(
+                    pk='post-1', code='Abc123', taken_at=datetime(2026, 8, 3, tzinfo=timezone.utc),
+                    media_type=1, product_type=None, caption_text='',
+                    image_versions2=SimpleNamespace(candidates=[SimpleNamespace(
+                        url='https://cdn.example/image.jpg',
+                    )]),
+                    thumbnail_url=None, video_url=None,
+                    like_count=7, comment_count=2, like_and_view_counts_disabled=True,
+                    usertags=[], resources=[],
+                )]
+
+        [post] = InstagrapiGateway(HiddenCountClient()).profile(
+            'target.user', 1,
+        )['latestPosts']
+        self.assertEqual(post['likesCount'], 0)
+        self.assertEqual(post['commentsCount'], 0)
+        self.assertTrue(post['likesCountHidden'])
+        self.assertTrue(post['commentsCountHidden'])
+
+    def test_profile_marks_none_post_counts_as_hidden(self):
+        class NoneCountClient(FakeClient):
+            def user_info_by_username(self, username):
+                return SimpleNamespace(
+                    pk='123', username=username, full_name='', biography='', profile_pic_url='',
+                    follower_count=12, following_count=3, media_count=1,
+                    is_private=False, is_verified=False,
+                )
+
+            def user_medias(self, user_id, amount):
+                return [SimpleNamespace(
+                    pk='post-1', code='Abc123', taken_at=datetime(2026, 8, 3, tzinfo=timezone.utc),
+                    media_type=1, product_type=None, caption_text='',
+                    image_versions2=SimpleNamespace(candidates=[SimpleNamespace(
+                        url='https://cdn.example/image.jpg',
+                    )]),
+                    thumbnail_url=None, video_url=None,
+                    like_count=None, comment_count=None, like_and_view_counts_disabled=False,
+                    usertags=[], resources=[],
+                )]
+
+        [post] = InstagrapiGateway(NoneCountClient()).profile('target.user', 1)['latestPosts']
+        self.assertEqual(post['likesCount'], 0)
+        self.assertEqual(post['commentsCount'], 0)
+        self.assertTrue(post['likesCountHidden'])
+        self.assertTrue(post['commentsCountHidden'])
+
+    def test_profile_uses_checkpoint_count_and_full_name_bounds(self):
+        class BoundClient(FakeClient):
+            def user_info_by_username(self, username):
+                return SimpleNamespace(
+                    pk='123', username=username, full_name='A' * 151, biography='', profile_pic_url='',
+                    follower_count=2_000_000_000, following_count=0, media_count=0,
+                    is_private=False, is_verified=False,
+                )
+
+            def user_medias(self, user_id, amount):
+                return []
+
+        profile = InstagrapiGateway(BoundClient()).profile('target.user', 1)
+        self.assertEqual(profile['fullName'], 'A' * 150)
+
+        class TooLargeCountClient(BoundClient):
+            def user_info_by_username(self, username):
+                profile = super().user_info_by_username(username)
+                profile.follower_count = 2_000_000_001
+                return profile
+
+        with self.assertRaises(WorkerSchemaError):
+            InstagrapiGateway(TooLargeCountClient()).profile('target.user', 1)
+
     def test_public_profile_with_posts_fails_closed_when_media_is_unusable(self):
         class EmptyMediaClient(FakeClient):
             def user_info_by_username(self, username):

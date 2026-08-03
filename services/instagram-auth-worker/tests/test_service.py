@@ -122,6 +122,13 @@ class InstagramAuthServiceTest(unittest.IsolatedAsyncioTestCase):
                 'target.user', 11, 'operation-key-003', 'c' * 64,
             )
 
+    async def test_profile_allows_zero_media_limit_for_summary_only_requests(self):
+        gateway = FakeGateway()
+        await self.service(gateway).profile(
+            'target.user', 0, 'operation-key-003a', 'c' * 64,
+        )
+        self.assertEqual(gateway.profile_args, ('target.user', 0))
+
     async def test_profile_batch_normalizes_usernames_and_keeps_not_found_rows(self):
         gateway = FakeGateway()
         response = await self.service(gateway).profiles(

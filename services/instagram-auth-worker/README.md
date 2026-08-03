@@ -14,7 +14,7 @@ Every profile request requires the same strict JSON identity as the existing wor
 }
 ```
 
-`mediaLimit` is an integer from `1` to `10`. Usernames must be lowercase Instagram usernames (`[a-z0-9._]{1,30}`), and extra request fields are rejected. The service normalizes the accepted username deterministically before invoking Instagram.
+`mediaLimit` is an integer from `0` to `10`; `0` returns the profile summary only and never requests profile media. Usernames must be lowercase Instagram usernames (`[a-z0-9._]{1,30}`), and extra request fields are rejected. The service normalizes the accepted username deterministically before invoking Instagram.
 
 - `POST /v1/profiles/profile` adds one `username` and returns the standard versioned worker envelope with exactly one `items` entry: an Instagram profile summary.
 - `POST /v1/profiles` adds `usernames`, an ordered unique array of 1–30 usernames. Its standard envelope has one entry per requested username, in request order: either `{ "username": "…", "status": "available", "profile": { … } }` or `{ "username": "…", "status": "not_found" }`. Only the provider's known user-not-found result becomes `not_found`; other upstream failures retain the normal sanitized error behavior.

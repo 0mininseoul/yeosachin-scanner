@@ -270,7 +270,7 @@ class InstagramAuthService:
         if (
             not isinstance(media_limit, int)
             or isinstance(media_limit, bool)
-            or not 1 <= media_limit <= 10
+            or not 0 <= media_limit <= 10
         ):
             raise ValueError('invalid profile media limit')
         return media_limit

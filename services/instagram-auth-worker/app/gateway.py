@@ -39,12 +39,12 @@ NOT_FOUND_EXCEPTIONS = {
 USERNAME_PATTERN = re.compile(r'^[a-z0-9._]{1,30}$')
 POST_SHORTCODE_PATTERN = re.compile(r'^[A-Za-z0-9_-]{1,64}$')
 MAX_URL_LENGTH = 2_048
-MAX_FULL_NAME_LENGTH = 200
+MAX_FULL_NAME_LENGTH = 150
 MAX_BIO_LENGTH = 2_000
 MAX_CAPTION_LENGTH = 2_200
 MAX_IDENTIFIER_LENGTH = 255
 MAX_MEDIA_CHILDREN = 10
-MAX_COUNT = 9_007_199_254_740_991
+MAX_COUNT = 2_000_000_000
 
 
 def _translate(error: Exception) -> Exception:
@@ -142,6 +142,13 @@ def _nonnegative_count(value: Any, field: str) -> int:
     if isinstance(value, bool) or not isinstance(value, int) or not 0 <= value <= MAX_COUNT:
         raise _schema_error(field)
     return value
+
+
+def _post_count(value: Any, field: str, counts_hidden: bool) -> tuple[int, bool]:
+    if value is None:
+        return 0, True
+    count = _nonnegative_count(value, field)
+    return (0, True) if counts_hidden else (count, False)
 
 
 def _collection(value: Any, field: str) -> list[Any]:
@@ -373,12 +380,21 @@ class InstagrapiGateway:
         image_url = self._image_url(value)
         thumbnail_url = _https_url(_value(value, 'thumbnail_url'), 'media thumbnail URL')
         video_url = _https_url(_value(value, 'video_url'), 'media video URL')
+        counts_disabled = _value(value, 'like_and_view_counts_disabled', False)
+        if not isinstance(counts_disabled, bool):
+            raise _schema_error('media count visibility')
+        likes_count, likes_count_hidden = _post_count(
+            _value(value, 'like_count'), 'media like count', counts_disabled,
+        )
+        comments_count, comments_count_hidden = _post_count(
+            _value(value, 'comment_count'), 'media comment count', counts_disabled,
+        )
         row: dict[str, Any] = {
             'id': _bounded_identifier(_value(value, 'pk'), 'media id'),
             'shortCode': _bounded_identifier(_value(value, 'code'), 'media shortcode', 64),
             'type': kind,
-            'likesCount': _nonnegative_count(_value(value, 'like_count'), 'media like count'),
-            'commentsCount': _nonnegative_count(_value(value, 'comment_count'), 'media comment count'),
+            'likesCount': likes_count,
+            'commentsCount': comments_count,
             'timestamp': _timestamp(_value(value, 'taken_at'), 'media timestamp'),
             'taggedUsers': self._tagged_usernames(_value(value, 'usertags')),
             'mentionedUsers': self._mentioned_usernames(caption),
@@ -387,6 +403,10 @@ class InstagrapiGateway:
             raise _schema_error('media shortcode')
         if caption is not None:
             row['caption'] = caption
+        if likes_count_hidden:
+            row['likesCountHidden'] = True
+        if comments_count_hidden:
+            row['commentsCountHidden'] = True
         if image_url is not None:
             row['imageUrl'] = image_url
         if thumbnail_url is not None:
@@ -437,6 +457,9 @@ class InstagrapiGateway:
         if profile_pic_url is not None:
             row['profilePicUrl'] = profile_pic_url
         if is_private:
+            return row
+        if media_limit == 0:
+            row['latestPosts'] = []
             return row
         media = _collection(self._client.user_medias(user_id, amount=media_limit), 'profile media')[:media_limit]
         if row['postsCount'] > 0 and not media:

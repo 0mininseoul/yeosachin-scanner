@@ -51,12 +51,12 @@ class InteractionRequest(OperationRequest):
 
 class ProfileRequest(OperationRequest):
     username: str = Field(pattern=r'^[a-z0-9._]{1,30}$')
-    mediaLimit: int = Field(ge=1, le=10)
+    mediaLimit: int = Field(ge=0, le=10)
 
 
 class ProfileBatchRequest(OperationRequest):
     usernames: list[str] = Field(min_length=1, max_length=30)
-    mediaLimit: int = Field(ge=1, le=10)
+    mediaLimit: int = Field(ge=0, le=10)
 
 
 def error_payload(

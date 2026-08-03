@@ -189,6 +189,22 @@ class WorkerApiTest(unittest.TestCase):
             'retryable': False,
         })
 
+    def test_profile_endpoints_accept_zero_media_limit_for_summary_only_requests(self):
+        client = TestClient(create_app(FakeService()))
+        response = client.post('/v1/profiles/profile', json={
+            'username': 'target.user',
+            'mediaLimit': 0,
+            **VALID_OPERATION,
+        })
+        self.assertEqual(response.status_code, 200)
+
+        batch = client.post('/v1/profiles', json={
+            'usernames': ['target.user'],
+            'mediaLimit': 0,
+            **VALID_OPERATION,
+        })
+        self.assertEqual(batch.status_code, 200)
+
     def test_profile_batch_returns_explicit_not_found_rows_and_rejects_duplicates(self):
         client = TestClient(create_app(FakeService()))
         response = client.post('/v1/profiles', json={
