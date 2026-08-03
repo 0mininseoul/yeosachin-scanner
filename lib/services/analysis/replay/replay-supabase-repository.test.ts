@@ -2,10 +2,12 @@ import { describe, expect, it, vi } from 'vitest';
 import {
     loadCurrentProductionReplayCaptureDescriptor,
     loadBetatestFreePoolReplayCaptureDescriptor,
+    loadTestEntitlementLegacySecondaryTextOnlyReplayCaptureDescriptor,
     type BetatestFreePoolReplaySourceRpcClient,
     loadReplayCaptureDescriptor,
     type CurrentProductionReplaySourceRpcClient,
     type ReplaySourceRpcClient,
+    type TestEntitlementLegacySecondaryTextOnlyReplaySourceRpcClient,
 } from './replay-supabase-repository';
 
 const requestId = '10000000-0000-4000-8000-000000000001';
@@ -35,6 +37,60 @@ function source() {
 }
 
 describe('replay capture read-only repository', () => {
+    it('loads the dedicated secondary text-only reader with immutable canonical counts', async () => {
+        const run = {
+            actorId: 'apify/instagram-profile-scraper', credentialSlot: 'secondary',
+            runId: 'LegacyRun1', status: 'succeeded', operationKey: 'target-profile-fallback',
+        } as const;
+        const rpc = vi.fn().mockResolvedValue({
+            data: {
+                requestId, preflightId, targetUsername: `replay_${'a'.repeat(23)}`,
+                selectedPlanId: 'standard',
+                policyVersions: { pipeline: 'v2', risk: 'risk-policy-v2.5', aiStage: 'ai-stage-policy-v2.10', scheduler: 'ai-scheduler-v1' },
+                preflightRuns: [run], providerRuns: [{ ...run, runId: 'LegacyRun2', operationKey: `profile-fallback:${'a'.repeat(64)}` }],
+                sourceFingerprint: 'b'.repeat(64), currentRevision: 0,
+                originalFemaleRows: [{
+                    candidateId: 'candidate:one', sortOrdinal: 1, instagramId: 'female_one', fullName: null,
+                    profileImageUrl: null, bio: null, displayScore: 7, riskBand: 'normal', featuredRank: null,
+                    recentMutualRank: null, analysisDepth: 'features', oneLineOverview: '기존 요약', highRiskNarrative: null,
+                }],
+                canonicalCounts: { male: 3, female: 1, unknown: 2 },
+            }, error: null,
+        });
+        const descriptor = await loadTestEntitlementLegacySecondaryTextOnlyReplayCaptureDescriptor(
+            { rpc } satisfies TestEntitlementLegacySecondaryTextOnlyReplaySourceRpcClient,
+            requestId,
+        );
+        expect(rpc).toHaveBeenCalledWith(
+            'read_analysis_v2_test_entitlement_v211_text_only_source',
+            { p_request_id: requestId },
+        );
+        expect(descriptor).toMatchObject({
+            sourceKind: 'test_entitlement_v211_legacy_secondary_text_only',
+            canonicalCounts: { male: 3, female: 1, unknown: 2 },
+            targetResolution: 'provider_ledger',
+        });
+    });
+
+    it('rejects a text-only source whose canonical female count cannot bind every immutable female row', async () => {
+        const data = {
+            requestId, preflightId, targetUsername: `replay_${'a'.repeat(23)}`,
+            selectedPlanId: 'standard',
+            policyVersions: { pipeline: 'v2', risk: 'risk-policy-v2.5', aiStage: 'ai-stage-policy-v2.10', scheduler: 'ai-scheduler-v1' },
+            preflightRuns: [{ actorId: 'apify/instagram-profile-scraper', credentialSlot: 'secondary', runId: 'LegacyRun1', status: 'succeeded', operationKey: 'target-profile-fallback' }],
+            providerRuns: [{ actorId: 'apify/instagram-profile-scraper', credentialSlot: 'secondary', runId: 'LegacyRun2', status: 'succeeded', operationKey: `profile-fallback:${'a'.repeat(64)}` }],
+            sourceFingerprint: 'b'.repeat(64), currentRevision: 0,
+            originalFemaleRows: [{ candidateId: 'candidate:one', sortOrdinal: 1, instagramId: 'female_one', fullName: null, profileImageUrl: null, bio: null, displayScore: 7, riskBand: 'normal', featuredRank: null, recentMutualRank: null, analysisDepth: 'features', oneLineOverview: '기존 요약', highRiskNarrative: null }],
+            canonicalCounts: { male: 3, female: 2, unknown: 2 },
+        };
+        const client = {
+            rpc: vi.fn().mockResolvedValue({ data, error: null }),
+        } satisfies TestEntitlementLegacySecondaryTextOnlyReplaySourceRpcClient;
+        await expect(loadTestEntitlementLegacySecondaryTextOnlyReplayCaptureDescriptor(
+            client, requestId,
+        )).rejects.toThrow('ANALYSIS_V2_REPLAY_READ_ONLY_SOURCE_INVALID');
+    });
+
     it('loads exact beta-free-pool source only through its UUID RPC', async () => {
         const run = {
             actorId: 'apify/instagram-profile-scraper', credentialSlot: 'tertiary',

@@ -15,6 +15,13 @@ import {
     type ReplaySourceLineage,
 } from './replay-source-lineage';
 import { aiStagePolicySupports } from '@/lib/services/ai/stage-policy';
+import { TEST_ENTITLEMENT_STANDARD_V211_LEGACY_SECONDARY_TEXT_ONLY_REPLAY_CAPABILITY } from './replay-source-lineage';
+
+/**
+ * Account-level text-only maintenance updates only feature copy. Retain at most
+ * the profile plus one current feed image, never the full feature-media set.
+ */
+const TEXT_ONLY_MAX_TRIAGE_MEDIA = 2;
 
 export interface ReplayCaptureSelector { targetUsername: string; }
 export interface ReplayCompletedRequest {
@@ -73,6 +80,22 @@ export async function captureAnalysisV2ReplayBundle(input: {
     repository: ReplayCaptureRepository;
     normalizeMedia: (media: SelectedAnalysisMedia) => Promise<Buffer>;
     evaluationPolicy?: ReplayEvaluationPolicy;
+    /** Sealed source metadata for the one v2.11 legacy-secondary maintenance capability. */
+    legacySecondary?: {
+        requestId: string;
+        sourceFingerprint: string;
+        currentRevision: number;
+        originalFemaleRows: readonly {
+            candidateId: string; sortOrdinal: number; instagramId: string;
+            fullName: string | null; profileImageUrl: string | null; bio: string | null;
+            displayScore: number; riskBand: 'normal' | 'caution' | 'high_risk';
+            featuredRank: number | null; recentMutualRank: number | null;
+            analysisDepth: 'features' | 'narrative'; oneLineOverview: string;
+            highRiskNarrative: readonly [string, string] | null;
+        }[];
+        /** Canonical published counts, immutable in account-level text-only maintenance. */
+        textOnly?: { canonicalCounts: { male: number; female: number; unknown: number } };
+    };
     now?: number;
 }): Promise<AnalysisV2ReplayBundle> {
     const targetUsername = normalizedUsername(input.selector.targetUsername);
@@ -86,6 +109,8 @@ export async function captureAnalysisV2ReplayBundle(input: {
         fail('ANALYSIS_V2_REPLAY_REQUEST_INELIGIBLE');
     }
     resolveReplayAiStagePolicyVersion(request.sourceLineage, input.evaluationPolicy);
+    const textOnly = input.evaluationPolicy?.capability
+        === TEST_ENTITLEMENT_STANDARD_V211_LEGACY_SECONDARY_TEXT_ONLY_REPLAY_CAPABILITY;
     const carouselDiversity = aiStagePolicySupports(
         request.sourceLineage.policyVersions.aiStage as Parameters<typeof aiStagePolicySupports>[0],
         'inputQualityV28',
@@ -93,38 +118,50 @@ export async function captureAnalysisV2ReplayBundle(input: {
     const source = await input.repository.loadReplaySource(request);
     const profiles: AnalysisV2ReplayBundle['profiles'] = [];
     for (const [index, profile] of source.profiles.entries()) {
-        if (!profile.isPrivate && (profile.latestPosts?.length ?? 0) < Math.min(profile.postsCount, MAX_RECENT_POSTS)) {
+        if (!textOnly && !profile.isPrivate && (profile.latestPosts?.length ?? 0) < Math.min(profile.postsCount, MAX_RECENT_POSTS)) {
             fail('ANALYSIS_V2_REPLAY_MEDIA_STRUCTURAL_INCOMPLETE');
         }
         const policy = profile.isPrivate ? null : selectAnalysisMedia({
             profile: profile.profilePicUrl ? { id: profile.username, imageUrl: profile.profilePicUrl } : undefined,
             posts: profile.latestPosts ?? [],
         }, carouselDiversity ? { carouselDiversity: true } : undefined);
-        if (policy?.carouselCoverage.incompletePostIds.length) fail('ANALYSIS_V2_REPLAY_MEDIA_STRUCTURAL_INCOMPLETE');
+        if (!textOnly && policy?.carouselCoverage.incompletePostIds.length) fail('ANALYSIS_V2_REPLAY_MEDIA_STRUCTURAL_INCOMPLETE');
+        const triageMedia = textOnly
+            ? (policy?.triage.media ?? []).slice(0, TEXT_ONLY_MAX_TRIAGE_MEDIA)
+            : policy?.triage.media ?? [];
         const triageNormalized = await normalizeAnalysisV2MediaSelections(
-            policy?.triage.media ?? [],
+            triageMedia,
             input.normalizeMedia,
             request.sourceLineage.policyVersions.aiStage,
         );
         if (
-            (!profile.isPrivate && !isAnalysisV2PartialMediaCoverageAllowed(triageNormalized.coverage))
+            (!textOnly && !profile.isPrivate && !isAnalysisV2PartialMediaCoverageAllowed(triageNormalized.coverage))
             || triageNormalized.media.some(item => !jpeg(triageNormalized.bytes.get(item.selectionId)!))
         ) {
             fail('ANALYSIS_V2_REPLAY_MEDIA_INVALID');
         }
-        const triageIds = new Set(policy?.triage.selectionIds ?? []);
-        const featureRemainder = (policy?.feature.media ?? []).filter(media => !triageIds.has(media.selectionId));
-        const remainderNormalized = await normalizeAnalysisV2MediaSelections(
-            featureRemainder,
-            input.normalizeMedia,
-            request.sourceLineage.policyVersions.aiStage,
-        );
-        const normalized = mergeNormalizedMedia(policy?.feature.media ?? [], [triageNormalized, remainderNormalized]);
+        const normalized = textOnly
+            ? mergeNormalizedMedia(triageMedia, [triageNormalized])
+            : await (async () => {
+                const triageIds = new Set(policy?.triage.selectionIds ?? []);
+                const featureRemainder = (policy?.feature.media ?? []).filter(media => !triageIds.has(media.selectionId));
+                const remainderNormalized = await normalizeAnalysisV2MediaSelections(
+                    featureRemainder,
+                    input.normalizeMedia,
+                    request.sourceLineage.policyVersions.aiStage,
+                );
+                return mergeNormalizedMedia(policy?.feature.media ?? [], [triageNormalized, remainderNormalized]);
+            })();
         if (
-            (!profile.isPrivate && !isAnalysisV2PartialMediaCoverageAllowed(normalized.coverage))
+            (!textOnly && !profile.isPrivate && !isAnalysisV2PartialMediaCoverageAllowed(normalized.coverage))
             || normalized.media.some(item => !jpeg(item.bytes))
         ) fail('ANALYSIS_V2_REPLAY_MEDIA_INVALID');
         const normalizedSelectionIds = new Set(normalized.media.map(item => item.selectionId));
+        const retainedTriageSelectionIds = textOnly
+            ? triageMedia.map(media => media.selectionId)
+                .filter(id => normalizedSelectionIds.has(id))
+            : (policy?.triage.selectionIds ?? [])
+                .filter(id => normalizedSelectionIds.has(id));
         profiles.push({
             ordinal: index + 1,
             isPrivate: profile.isPrivate,
@@ -141,12 +178,16 @@ export async function captureAnalysisV2ReplayBundle(input: {
                     : null,
                 jpegBase64: media.bytes.toString('base64'),
             })),
-            triageSelectionIds: (policy?.triage.selectionIds ?? []).filter(id => normalizedSelectionIds.has(id)),
-            featureSelectionIds: (policy?.feature.selectionIds ?? []).filter(id => normalizedSelectionIds.has(id)),
+            triageSelectionIds: retainedTriageSelectionIds,
+            featureSelectionIds: textOnly
+                ? retainedTriageSelectionIds
+                : (policy?.feature.selectionIds ?? []).filter(id => normalizedSelectionIds.has(id)),
             // Production passes the complete normalized feature set to the resolver;
             // the resolver applies its own current projection/media limit.
-            resolverSelectionIds: (policy?.feature.selectionIds ?? []).filter(id => normalizedSelectionIds.has(id)),
-            captions: policy ? buildCarouselCaptionPolicy({
+            resolverSelectionIds: textOnly
+                ? retainedTriageSelectionIds
+                : (policy?.feature.selectionIds ?? []).filter(id => normalizedSelectionIds.has(id)),
+            captions: !textOnly && policy ? buildCarouselCaptionPolicy({
                 targetUsername: profile.username,
                 profile,
                 featureSelections: policy.feature.media,
@@ -167,11 +208,12 @@ export async function captureAnalysisV2ReplayBundle(input: {
         capture: {
             requestFingerprint: request.requestFingerprint,
             ...(input.evaluationPolicy ? { evaluationPolicy: input.evaluationPolicy } : {}),
+            ...(input.legacySecondary ? { legacySecondary: input.legacySecondary } : {}),
             sourceLineage: request.sourceLineage,
         },
         profiles,
         evidence: source.evidence,
-    };
+    } as Extract<AnalysisV2ReplayBundle, { schemaVersion: 1 }>;
 }
 
 /** PII-free capture selector fingerprint for safe CLI metrics. */

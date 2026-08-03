@@ -257,7 +257,10 @@ export function createReplayStagedAiAdapter(
             }));
             const invocation = await invoke(async state => {
                 const identity =
-                    createGenderTriageMicrobatchResultIdentity(accounts);
+                    createGenderTriageMicrobatchResultIdentity(
+                        accounts,
+                        aiStagePolicyVersion,
+                    );
                 return genderTriageMicrobatch(
                     accounts,
                     statelessAudit(requestId, identity, state),
@@ -301,7 +304,10 @@ export function createReplayStagedAiAdapter(
                 ? { accountProfile: input.accountProfile }
                 : {}),
         };
-        const accountId = createGenderTriageMicrobatchAccountId(aiInput);
+        const accountId = createGenderTriageMicrobatchAccountId(
+            aiInput,
+            aiStagePolicyVersion,
+        );
         return new Promise<ReplayInvocation<GenderTriageResult>>(resolve => {
             const existing = pendingTriage.get(accountId);
             if (existing) {
