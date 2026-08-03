@@ -8,6 +8,7 @@ const mocks = vi.hoisted(() => ({
     ensureAccess: vi.fn(),
     redirect: vi.fn(),
     admin: { rpc: vi.fn() },
+    authButtons: vi.fn(() => 'AUTH_BUTTONS'),
 }));
 
 vi.mock('@/lib/supabase/server', () => ({ createClient: mocks.createClient }));
@@ -16,6 +17,7 @@ vi.mock('@/lib/services/analysis/betatest-access', () => ({
     betaTestFreePoolEnabled: mocks.enabled,
     ensureBetaTestAccess: mocks.ensureAccess,
 }));
+vi.mock('@/components/auth-buttons', () => ({ AuthButtons: mocks.authButtons }));
 vi.mock('next/navigation', () => ({
     redirect: mocks.redirect,
     useRouter: () => ({ push: vi.fn() }),
@@ -35,11 +37,20 @@ describe('beta-test entry page', () => {
         mocks.ensureAccess.mockResolvedValue(true);
     });
 
-    it('redirects an unauthenticated visitor to the exact safe beta-test return path', async () => {
+    it('renders the public beta landing and keeps Kakao OAuth on the beta return path for an unauthenticated visitor', async () => {
         mocks.getUser.mockResolvedValueOnce({ data: { user: null }, error: null });
-        mocks.redirect.mockImplementation((path: string) => { throw new Error(path); });
 
-        await expect(BetaTestPage()).rejects.toThrow('/login?redirectTo=%2Fbetatest');
+        const markup = renderToStaticMarkup(await BetaTestPage());
+
+        expect(markup).toContain('무료 베타 판독을');
+        expect(markup).toContain('시작하세요');
+        expect(markup).toContain('AUTH_BUTTONS');
+        expect(mocks.authButtons).toHaveBeenCalledWith(
+            expect.objectContaining({ redirectTo: '/betatest' }),
+            undefined,
+        );
+        expect(mocks.enabled).not.toHaveBeenCalled();
+        expect(mocks.ensureAccess).not.toHaveBeenCalled();
     });
 
     it('does not render an analysis form when the feature is disabled', async () => {
