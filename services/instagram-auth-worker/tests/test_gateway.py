@@ -263,6 +263,17 @@ class InstagrapiGatewayTest(unittest.TestCase):
             {'username': 'missing.user', 'status': 'not_found'},
         ])
 
+    def test_single_profile_maps_known_user_not_found_to_no_profile(self):
+        UserNotFound = type('UserNotFound', (RuntimeError,), {})
+
+        class MissingProfileClient(FakeClient):
+            def user_info_by_username(self, username):
+                raise UserNotFound()
+
+        self.assertIsNone(
+            InstagrapiGateway(MissingProfileClient()).profile('missing.user', 0)
+        )
+
     def test_configures_a_bounded_delay_between_private_api_requests(self):
         client = SimpleNamespace(delay_range=None, set_settings=lambda settings: None)
         module = SimpleNamespace(Client=lambda: client)

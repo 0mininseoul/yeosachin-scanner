@@ -91,7 +91,7 @@ class InstagramGateway(Protocol):
     def relationship(self, side: str, username: str, limit: int) -> list[dict[str, Any]]: ...
     def likers(self, post_urls: list[str], limit_per_post: int) -> list[dict[str, Any]]: ...
     def comments(self, post_urls: list[str], limit_per_post: int) -> list[dict[str, Any]]: ...
-    def profile(self, username: str, media_limit: int) -> dict[str, Any]: ...
+    def profile(self, username: str, media_limit: int) -> dict[str, Any] | None: ...
     def profiles(self, usernames: list[str], media_limit: int) -> list[dict[str, Any]]: ...
 
 
@@ -280,8 +280,13 @@ class InstagramAuthService:
     ) -> dict[str, Any]:
         normalized = self._profile_usernames([username], 1)[0]
         validated_limit = self._profile_media_limit(media_limit)
+
+        def collect() -> list[dict[str, Any]]:
+            result = self._gateway.profile(normalized, validated_limit)
+            return [] if result is None else [result]
+
         return await self._run(
-            lambda: [self._gateway.profile(normalized, validated_limit)],
+            collect,
             operation_key,
             input_hash,
             max_response_bytes=4 * 1024 * 1024,

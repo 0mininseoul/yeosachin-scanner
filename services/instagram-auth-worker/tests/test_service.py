@@ -129,6 +129,16 @@ class InstagramAuthServiceTest(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(gateway.profile_args, ('target.user', 0))
 
+    async def test_single_profile_not_found_becomes_an_empty_versioned_envelope(self):
+        class MissingProfileGateway(FakeGateway):
+            def profile(self, username, media_limit):
+                return None
+
+        response = await self.service(MissingProfileGateway()).profile(
+            'missing.user', 0, 'operation-key-003b', 'c' * 64,
+        )
+        self.assertEqual(response['items'], [])
+
     async def test_profile_batch_normalizes_usernames_and_keeps_not_found_rows(self):
         gateway = FakeGateway()
         response = await self.service(gateway).profiles(

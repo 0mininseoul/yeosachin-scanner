@@ -467,10 +467,18 @@ class InstagrapiGateway:
         row['latestPosts'] = [self._post_row(item) for item in media]
         return row
 
-    def profile(self, username: str, media_limit: int) -> dict[str, Any]:
-        return self._call(lambda: self._profile_row(
-            self._client.user_info_by_username(username), username, media_limit,
-        ))
+    def profile(self, username: str, media_limit: int) -> dict[str, Any] | None:
+        def collect():
+            try:
+                return self._profile_row(
+                    self._client.user_info_by_username(username), username, media_limit,
+                )
+            except Exception as error:
+                if type(error).__name__ in NOT_FOUND_EXCEPTIONS:
+                    return None
+                raise
+
+        return self._call(collect)
 
     def profiles(self, usernames: list[str], media_limit: int) -> list[dict[str, Any]]:
         def collect():
