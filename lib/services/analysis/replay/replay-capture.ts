@@ -17,6 +17,12 @@ import {
 import { aiStagePolicySupports } from '@/lib/services/ai/stage-policy';
 import { TEST_ENTITLEMENT_STANDARD_V211_LEGACY_SECONDARY_TEXT_ONLY_REPLAY_CAPABILITY } from './replay-source-lineage';
 
+/**
+ * Account-level text-only maintenance updates only feature copy. Retain at most
+ * the profile plus one current feed image, never the full feature-media set.
+ */
+const TEXT_ONLY_MAX_TRIAGE_MEDIA = 2;
+
 export interface ReplayCaptureSelector { targetUsername: string; }
 export interface ReplayCompletedRequest {
     requestFingerprint: string;
@@ -120,8 +126,11 @@ export async function captureAnalysisV2ReplayBundle(input: {
             posts: profile.latestPosts ?? [],
         }, carouselDiversity ? { carouselDiversity: true } : undefined);
         if (!textOnly && policy?.carouselCoverage.incompletePostIds.length) fail('ANALYSIS_V2_REPLAY_MEDIA_STRUCTURAL_INCOMPLETE');
+        const triageMedia = textOnly
+            ? (policy?.triage.media ?? []).slice(0, TEXT_ONLY_MAX_TRIAGE_MEDIA)
+            : policy?.triage.media ?? [];
         const triageNormalized = await normalizeAnalysisV2MediaSelections(
-            policy?.triage.media ?? [],
+            triageMedia,
             input.normalizeMedia,
             request.sourceLineage.policyVersions.aiStage,
         );
@@ -131,19 +140,28 @@ export async function captureAnalysisV2ReplayBundle(input: {
         ) {
             fail('ANALYSIS_V2_REPLAY_MEDIA_INVALID');
         }
-        const triageIds = new Set(policy?.triage.selectionIds ?? []);
-        const featureRemainder = (policy?.feature.media ?? []).filter(media => !triageIds.has(media.selectionId));
-        const remainderNormalized = await normalizeAnalysisV2MediaSelections(
-            featureRemainder,
-            input.normalizeMedia,
-            request.sourceLineage.policyVersions.aiStage,
-        );
-        const normalized = mergeNormalizedMedia(policy?.feature.media ?? [], [triageNormalized, remainderNormalized]);
+        const normalized = textOnly
+            ? mergeNormalizedMedia(triageMedia, [triageNormalized])
+            : await (async () => {
+                const triageIds = new Set(policy?.triage.selectionIds ?? []);
+                const featureRemainder = (policy?.feature.media ?? []).filter(media => !triageIds.has(media.selectionId));
+                const remainderNormalized = await normalizeAnalysisV2MediaSelections(
+                    featureRemainder,
+                    input.normalizeMedia,
+                    request.sourceLineage.policyVersions.aiStage,
+                );
+                return mergeNormalizedMedia(policy?.feature.media ?? [], [triageNormalized, remainderNormalized]);
+            })();
         if (
             (!textOnly && !profile.isPrivate && !isAnalysisV2PartialMediaCoverageAllowed(normalized.coverage))
             || normalized.media.some(item => !jpeg(item.bytes))
         ) fail('ANALYSIS_V2_REPLAY_MEDIA_INVALID');
         const normalizedSelectionIds = new Set(normalized.media.map(item => item.selectionId));
+        const retainedTriageSelectionIds = textOnly
+            ? triageMedia.map(media => media.selectionId)
+                .filter(id => normalizedSelectionIds.has(id))
+            : (policy?.triage.selectionIds ?? [])
+                .filter(id => normalizedSelectionIds.has(id));
         profiles.push({
             ordinal: index + 1,
             isPrivate: profile.isPrivate,
@@ -160,12 +178,16 @@ export async function captureAnalysisV2ReplayBundle(input: {
                     : null,
                 jpegBase64: media.bytes.toString('base64'),
             })),
-            triageSelectionIds: (policy?.triage.selectionIds ?? []).filter(id => normalizedSelectionIds.has(id)),
-            featureSelectionIds: (policy?.feature.selectionIds ?? []).filter(id => normalizedSelectionIds.has(id)),
+            triageSelectionIds: retainedTriageSelectionIds,
+            featureSelectionIds: textOnly
+                ? retainedTriageSelectionIds
+                : (policy?.feature.selectionIds ?? []).filter(id => normalizedSelectionIds.has(id)),
             // Production passes the complete normalized feature set to the resolver;
             // the resolver applies its own current projection/media limit.
-            resolverSelectionIds: (policy?.feature.selectionIds ?? []).filter(id => normalizedSelectionIds.has(id)),
-            captions: policy ? buildCarouselCaptionPolicy({
+            resolverSelectionIds: textOnly
+                ? retainedTriageSelectionIds
+                : (policy?.feature.selectionIds ?? []).filter(id => normalizedSelectionIds.has(id)),
+            captions: !textOnly && policy ? buildCarouselCaptionPolicy({
                 targetUsername: profile.username,
                 profile,
                 featureSelections: policy.feature.media,

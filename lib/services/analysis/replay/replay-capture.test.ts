@@ -58,6 +58,53 @@ describe('analysis V2 replay capture', () => {
         expect(bundle.capture.legacySecondary?.textOnly).toEqual({ canonicalCounts: { male: 0, female: 1, unknown: 0 } });
     });
 
+    it('caps text-only account media to the retained triage subset and never normalizes the feature remainder', async () => {
+        const sourceLineage = {
+            selectedPlanId: 'standard' as const,
+            policyVersions: {
+                pipeline: 'v2' as const, aiStage: 'ai-stage-policy-v2.10' as const,
+                risk: 'risk-policy-v2.5' as const, scheduler: 'ai-scheduler-v1' as const,
+            },
+        };
+        const richProfile = {
+            ...profile, username: 'female_one', postsCount: 8,
+            latestPosts: Array.from({ length: 8 }, (_, index) => ({
+                ...profile.latestPosts[0], id: `post-${index}`, shortCode: `post-${index}`,
+                imageUrl: `https://cdninstagram.com/post-${index}.jpg`,
+                timestamp: `2026-07-${String(27 - index).padStart(2, '0')}T00:00:00.000Z`,
+            })),
+        };
+        const normalizeMedia = vi.fn(async () => Buffer.from([0xff, 0xd8, 0xff, 0xd9]));
+        const bundle = await captureAnalysisV2ReplayBundle({
+            selector: { targetUsername: 'target' },
+            repository: {
+                findCompletedReplaySourceExact: async () => ({
+                    requestFingerprint: 'f'.repeat(64), sourceLineage, completed: true,
+                }),
+                loadReplaySource: async () => ({ profiles: [richProfile], evidence: { relationship: [], targetInteractions: [], reverseInteractions: [] }, providerRuns: [] }),
+            },
+            normalizeMedia,
+            evaluationPolicy: {
+                capability: 'test-entitlement-standard-v210-risk-v25-scheduler-v1-to-ai-v211-legacy-secondary-account-text-only',
+                aiStage: 'ai-stage-policy-v2.11',
+            },
+            legacySecondary: {
+                requestId: '10000000-0000-4000-8000-000000000001', sourceFingerprint: 'f'.repeat(64), currentRevision: 0,
+                originalFemaleRows: [{ candidateId: 'candidate:one', sortOrdinal: 1, instagramId: 'female_one', fullName: null, profileImageUrl: null, bio: null, displayScore: 7, riskBand: 'normal', featuredRank: null, recentMutualRank: null, analysisDepth: 'features', oneLineOverview: '기존 요약', highRiskNarrative: null }],
+                textOnly: { canonicalCounts: { male: 0, female: 1, unknown: 0 } },
+            },
+        });
+        const captured = bundle.profiles[0]!;
+        expect(normalizeMedia).toHaveBeenCalledTimes(2);
+        expect(captured.media).toHaveLength(2);
+        expect(captured.coverage).toMatchObject({ selectedCount: 2, normalizedCount: 2, failures: [] });
+        const retainedIds = captured.media.map(media => media.selectionId);
+        expect(captured.triageSelectionIds).toEqual(retainedIds);
+        expect(captured.featureSelectionIds).toEqual(retainedIds);
+        expect(captured.resolverSelectionIds).toEqual(retainedIds);
+        expect(captured.captions).toEqual([]);
+    });
+
     it('requires an exact completed Standard V2 request and canonical current media selection with no missing JPEG', async () => {
         const normalize = vi.fn(async () => Buffer.from([0xff, 0xd8, 0xff, 0xd9]));
         const bundle = await captureAnalysisV2ReplayBundle({
