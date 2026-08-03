@@ -1,6 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import {
     AUTOMATIC_FALLBACK,
+    getInteractionScraperConfig,
     getScraperConfig,
     DEFAULT_PROVIDERS,
     parseScraperProviderSelection,
@@ -44,8 +45,8 @@ describe('getScraperConfig', () => {
     });
 
     it('relationship에는 자동 폴백을 두지 않고 프로필만 Apify로 폴백한다', () => {
-        expect(AUTOMATIC_FALLBACK.followers).toBeUndefined();
-        expect(AUTOMATIC_FALLBACK.following).toBeUndefined();
+        expect(AUTOMATIC_FALLBACK.followers).toEqual({ selfhosted_auth: 'apify' });
+        expect(AUTOMATIC_FALLBACK.following).toEqual({ selfhosted_auth: 'apify' });
         expect(AUTOMATIC_FALLBACK.profile).toEqual({ selfhosted: 'apify' });
         expect(AUTOMATIC_FALLBACK.profilesBatch).toEqual({ selfhosted: 'apify' });
     });
@@ -54,6 +55,13 @@ describe('getScraperConfig', () => {
         expect(parseScraperProviderSelection({ followers: 'coderx', fallback: false })).toEqual({
             followers: 'coderx',
             fallback: false,
+        });
+        expect(parseScraperProviderSelection({
+            followers: 'selfhosted_auth',
+            following: 'selfhosted_auth',
+        })).toEqual({
+            followers: 'selfhosted_auth',
+            following: 'selfhosted_auth',
         });
         expect(() => parseScraperProviderSelection({ followers: 'selfhosted' })).toThrow();
         expect(() => parseScraperProviderSelection({ typo: 'flashapi' })).toThrow('typo');
@@ -64,7 +72,68 @@ describe('getScraperConfig', () => {
             likers: 'apify',
             comments: 'disabled',
         })).toEqual({ likers: 'apify', comments: 'disabled' });
+        expect(parseScraperProviderSelection({
+            likers: 'selfhosted_auth',
+            comments: 'selfhosted_auth',
+        })).toEqual({
+            likers: 'selfhosted_auth',
+            comments: 'selfhosted_auth',
+        });
         expect(() => parseScraperProviderSelection({ likers: 'selfhosted' }))
             .toThrow('likers');
+    });
+
+    it('authenticated provider는 기본 OFF이고 명시적 kill switch가 켜져야 선택한다', () => {
+        expect(() => getScraperConfig({
+            SCRAPER_FOLLOWERS: 'selfhosted_auth',
+        })).toThrow('SELFHOSTED_AUTH_ENABLED');
+        expect(() => getScraperConfig({
+            SCRAPER_FOLLOWERS: 'selfhosted_auth',
+            SELFHOSTED_AUTH_ENABLED: 'false',
+        })).toThrow('SELFHOSTED_AUTH_ENABLED');
+        expect(getScraperConfig({
+            SCRAPER_FOLLOWERS: 'selfhosted_auth',
+            SCRAPER_FOLLOWING: 'selfhosted_auth',
+            SELFHOSTED_AUTH_ENABLED: 'true',
+        })).toMatchObject({
+            followers: 'selfhosted_auth',
+            following: 'selfhosted_auth',
+        });
+        expect(() => getScraperConfig({
+            SELFHOSTED_AUTH_ENABLED: 'yes',
+        })).toThrow('SELFHOSTED_AUTH_ENABLED');
+    });
+});
+
+describe('getInteractionScraperConfig', () => {
+    it('defaults interactions to the existing Apify path', () => {
+        expect(getInteractionScraperConfig({})).toEqual({
+            likers: 'apify',
+            comments: 'apify',
+            fallback: true,
+        });
+    });
+
+    it('requires the authenticated-provider kill switch for either interaction source', () => {
+        expect(() => getInteractionScraperConfig({
+            SCRAPER_LIKERS: 'selfhosted_auth',
+        })).toThrow('SELFHOSTED_AUTH_ENABLED');
+        expect(getInteractionScraperConfig({
+            SELFHOSTED_AUTH_ENABLED: 'true',
+            SCRAPER_LIKERS: 'selfhosted_auth',
+            SCRAPER_COMMENTS: 'selfhosted_auth',
+            SCRAPER_FALLBACK: 'false',
+        })).toEqual({
+            likers: 'selfhosted_auth',
+            comments: 'selfhosted_auth',
+            fallback: false,
+        });
+    });
+
+    it('rejects disabled and malformed interaction providers in the executable env path', () => {
+        expect(() => getInteractionScraperConfig({ SCRAPER_LIKERS: 'disabled' }))
+            .toThrow('SCRAPING_CONFIG_ERROR');
+        expect(() => getInteractionScraperConfig({ SCRAPER_COMMENTS: 'selfhosted' }))
+            .toThrow('SCRAPING_CONFIG_ERROR');
     });
 });

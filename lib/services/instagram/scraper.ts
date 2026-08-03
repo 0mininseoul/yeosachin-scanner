@@ -31,6 +31,7 @@ import {
     AUTOMATIC_FALLBACK,
     getScraperConfig,
     isProviderAllowed,
+    isSelfHostedAuthEnabled,
     type ScraperConfig,
 } from './config';
 import { apifyProvider } from './providers/apify';
@@ -39,6 +40,7 @@ import { coderXProvider } from './providers/coderx';
 import { flashApiProvider } from './providers/flashapi';
 import { rapidApiProvider } from './providers/rapidapi';
 import { selfHostedProvider } from './providers/selfhosted';
+import { selfHostedAuthProvider } from './providers/selfhosted-auth';
 import { isInstagramUsername } from './username';
 import {
     minimumCompleteRelationshipCount,
@@ -53,6 +55,7 @@ let providers: Record<ProviderName, ScraperProvider> = {
     flashapi: flashApiProvider,
     rapidapi: rapidApiProvider,
     selfhosted: selfHostedProvider,
+    selfhosted_auth: selfHostedAuthProvider,
 };
 let configOverride: Record<string, string | undefined> | null = null;
 
@@ -339,6 +342,8 @@ async function runAttempt<T>(
         onRunStarted: options?.providerRun?.onRunStarted,
         onProfileStart: options?.onProfileStart,
         onProfileResolved: options?.onProfileResolved,
+        onSelfHostedAuthRunFinished: options?.onSelfHostedAuthRunFinished,
+        selfHostedAuthIdentity: options?.selfHostedAuthIdentity,
         onCostRunStarted: options?.providerRun?.onCostRunStarted,
         onCostRunFinished: options?.providerRun?.onCostRunFinished,
         recordUsage: (delta) => addUsage(usage, delta),
@@ -642,6 +647,14 @@ function selectedProvider(
     if (!isProviderAllowed(capability, options.provider)) {
         throw new Error(
             `SCRAPING_CONFIG_ERROR: '${options.provider}'는 '${capability}'에 사용할 수 없습니다.`
+        );
+    }
+    if (
+        options.provider === 'selfhosted_auth'
+        && !isSelfHostedAuthEnabled(configOverride ?? process.env)
+    ) {
+        throw new Error(
+            'SCRAPING_CONFIG_ERROR: SELFHOSTED_AUTH_ENABLED must be true before selecting selfhosted_auth.'
         );
     }
     return options.provider;
@@ -1007,5 +1020,6 @@ export function __resetProvidersForTest(): void {
         flashapi: flashApiProvider,
         rapidapi: rapidApiProvider,
         selfhosted: selfHostedProvider,
+        selfhosted_auth: selfHostedAuthProvider,
     };
 }

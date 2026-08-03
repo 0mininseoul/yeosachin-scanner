@@ -24,6 +24,8 @@ import type {
 } from './v2-provider-run-store';
 import type { AnalysisV2ProviderRunAdoptionStore } from './v2-provider-run-adoption-store';
 import type { AnalysisV2TargetProfileReuseStore } from './v2-target-profile-reuse';
+import type { AnalysisV2SelfHostedAuthRunReceipt } from './v2-selfhosted-auth-run-store';
+import { SelfHostedAuthWorkerError } from '@/lib/services/instagram/providers/selfhosted-auth/client';
 import {
     AnalysisV2CollectionContextFenceError,
     type AnalysisV2CollectionRequestContext,
@@ -844,6 +846,182 @@ describe('analysis V2 concrete collection executors', () => {
         expect(followerOptions).not.toHaveProperty('session');
     });
 
+    it('reuses one cached selfhosted_auth result per relationship side without paid runs', async () => {
+        const rows = [
+            { username: 'alice', isPrivate: false, isVerified: false },
+            { username: 'bob', isPrivate: false, isVerified: false },
+        ];
+        const receipts = new Map<string, AnalysisV2SelfHostedAuthRunReceipt>();
+        const receiptStore = {
+            load: vi.fn(async (value) => receipts.get(value.operationKey) ?? null),
+            checkpoint: vi.fn(async (value) => {
+                const receipt = {
+                schemaVersion: 1 as const,
+                provider: 'selfhosted_auth' as const,
+                ...value,
+                };
+                receipts.set(value.operationKey, receipt);
+                return receipt;
+            }),
+        };
+        const getter = vi.fn(async (
+            _username: string,
+            _limit?: number,
+            options?: ScrapeRequestOptions
+        ) => {
+            expect(options).toMatchObject({
+                provider: 'selfhosted_auth',
+                fallback: false,
+                expectedResultCount: 2,
+            });
+            await options?.onSelfHostedAuthRunFinished?.({
+                provider: 'selfhosted_auth',
+                runId: options === undefined
+                    ? 'unreachable'
+                    : `0123456789abcdef0123456789abcde${getter.mock.calls.length}`,
+                accountSlot: 'primary',
+            });
+            return rows;
+        });
+        const checkpointRelationshipSide = vi.fn(async (value) => ({
+            side: value.side,
+            sourceStatus: value.source.status,
+            revision: 1,
+            declaredCount: value.declaredCount,
+            collectedCount: value.rows.length,
+            coverageBps: 10_000,
+            inputHash: value.source.inputHash,
+            resultHash,
+        }));
+        const providers = providerStore();
+        const executor = createAnalysisV2RelationshipsExecutor({
+            requestContextStore: contextStore(requestContext()),
+            providerRunStore: providers.value,
+            selfHostedAuthRunStore: receiptStore,
+            getFollowers: getter,
+            getFollowing: getter,
+            evidenceStore: {
+                checkpointRelationshipSide,
+                freezeRelationships: vi.fn(async () => ({
+                    revision: 1,
+                    resultHash,
+                    exclusionDecisionHash: 'f'.repeat(64),
+                    followersResultHash: resultHash,
+                    followingResultHash: resultHash,
+                    mutualCount: 2,
+                    publicCount: 2,
+                    privateCount: 0,
+                    detailedPublicCount: 2,
+                    unscreenedPublicCount: 0,
+                })),
+                loadRelationshipStaging: vi.fn(async () => ({
+                    excludedUsername: 'girlfriend',
+                    detailedPublicUsernames: ['alice', 'bob'],
+                    privateMutualUsernames: [],
+                })),
+            } as unknown as AnalysisV2EvidenceStore,
+            env: {
+                SCRAPER_FOLLOWERS: 'selfhosted_auth',
+                SCRAPER_FOLLOWING: 'selfhosted_auth',
+                SELFHOSTED_AUTH_ENABLED: 'true',
+            },
+        });
+
+        await expect(executor(stageContext('relationships', state()))).resolves.toBeDefined();
+        await expect(executor(stageContext('relationships', state()))).resolves.toBeDefined();
+        expect(providers.bindAdapterCheckpoint).not.toHaveBeenCalled();
+        expect(receiptStore.checkpoint).toHaveBeenCalledTimes(2);
+        expect(getter).toHaveBeenCalledTimes(2);
+        expect(getter.mock.calls.map(call => call[2]?.selfHostedAuthIdentity)).toEqual(expect.arrayContaining([
+            expect.objectContaining({
+                operationKey: expect.stringMatching(/^relationship-followers:[a-f0-9]{64}$/),
+                inputHash: expect.stringMatching(/^[a-f0-9]{64}$/),
+            }),
+            expect.objectContaining({
+                operationKey: expect.stringMatching(/^relationship-following:[a-f0-9]{64}$/),
+                inputHash: expect.stringMatching(/^[a-f0-9]{64}$/),
+            }),
+        ]));
+        expect(checkpointRelationshipSide).toHaveBeenCalledTimes(4);
+        expect(checkpointRelationshipSide).toHaveBeenCalledWith(expect.objectContaining({
+            source: expect.objectContaining({ provider: 'selfhosted_auth' }),
+        }));
+    });
+
+    it('falls back from selfhosted_auth to the unchanged durable Apify relationship path', async () => {
+        const rows = [
+            { username: 'alice', isPrivate: false, isVerified: false },
+            { username: 'bob', isPrivate: false, isVerified: false },
+        ];
+        const getter = vi.fn(async (
+            _username: string,
+            _limit?: number,
+            options?: ScrapeRequestOptions
+        ) => {
+            if (options?.provider === 'selfhosted_auth') {
+                throw new SelfHostedAuthWorkerError('queue_timeout', true, 503);
+            }
+            return rows;
+        });
+        const providers = providerStore();
+        const checkpointRelationshipSide = vi.fn(async (value) => ({
+            side: value.side,
+            sourceStatus: value.source.status,
+            revision: 1,
+            declaredCount: value.declaredCount,
+            collectedCount: value.rows.length,
+            coverageBps: 10_000,
+            inputHash: value.source.inputHash,
+            resultHash,
+        }));
+        const executor = createAnalysisV2RelationshipsExecutor({
+            requestContextStore: contextStore(requestContext()),
+            providerRunStore: providers.value,
+            selfHostedAuthRunStore: {
+                load: vi.fn(async () => null),
+                checkpoint: vi.fn(),
+            },
+            getFollowers: getter,
+            getFollowing: getter,
+            evidenceStore: {
+                checkpointRelationshipSide,
+                freezeRelationships: vi.fn(async () => ({
+                    revision: 1,
+                    resultHash,
+                    exclusionDecisionHash: 'f'.repeat(64),
+                    followersResultHash: resultHash,
+                    followingResultHash: resultHash,
+                    mutualCount: 2,
+                    publicCount: 2,
+                    privateCount: 0,
+                    detailedPublicCount: 2,
+                    unscreenedPublicCount: 0,
+                })),
+                loadRelationshipStaging: vi.fn(async () => ({
+                    excludedUsername: 'girlfriend',
+                    detailedPublicUsernames: ['alice', 'bob'],
+                    privateMutualUsernames: [],
+                })),
+            } as unknown as AnalysisV2EvidenceStore,
+            env: {
+                SCRAPER_FOLLOWERS: 'selfhosted_auth',
+                SCRAPER_FOLLOWING: 'selfhosted_auth',
+                SCRAPER_FALLBACK: 'true',
+                SELFHOSTED_AUTH_ENABLED: 'true',
+            },
+        });
+
+        await expect(executor(stageContext('relationships', state()))).resolves.toBeDefined();
+        expect(getter.mock.calls.filter(call => call[2]?.provider === 'selfhosted_auth'))
+            .toHaveLength(2);
+        expect(getter.mock.calls.filter(call => call[2]?.provider === 'apify'))
+            .toHaveLength(2);
+        expect(providers.bindAdapterCheckpoint).toHaveBeenCalledTimes(2);
+        expect(checkpointRelationshipSide).toHaveBeenCalledWith(expect.objectContaining({
+            source: expect.objectContaining({ provider: 'apify' }),
+        }));
+    });
+
     it('starts one ledgered replacement only after a succeeded relationship run is incomplete', async () => {
         const rows = [{ username: 'alice', isPrivate: false, isVerified: false }];
         const providers = providerStore();
@@ -1378,6 +1556,124 @@ describe('analysis V2 concrete collection executors', () => {
         ]));
         expect(byOperation.get('target-likers')).toBe('quaternary');
         expect(byOperation.get('target-comments')).toBe('tertiary');
+    });
+
+    it('collects target interactions through selfhosted_auth without reserving paid runs', async () => {
+        const target = profile('target', [post(0)]);
+        const profileStore = inMemoryProfileStore({
+            ...completedResume(['target'], [{ ...success('target'), profile: target }]),
+            jobKey: 'track:target-evidence:collect',
+        });
+        const providers = providerStore();
+        const receiptCache = new Map<string, AnalysisV2SelfHostedAuthRunReceipt>();
+        const checkpointReceipt = vi.fn(async (receipt) => {
+            const stored = {
+                schemaVersion: 1 as const,
+                provider: 'selfhosted_auth' as const,
+                operationKey: receipt.operationKey,
+                inputHash: receipt.inputHash,
+                runId: receipt.runId,
+                accountSlot: 'primary' as const,
+                items: receipt.items,
+            };
+            receiptCache.set(receipt.operationKey, stored);
+            return stored;
+        });
+        const getPostLikers = vi.fn(async (urls: string[], _limit: number, context) => {
+            await context?.onSelfHostedAuthRunFinished?.({
+                provider: 'selfhosted_auth',
+                runId: '11111111111111111111111111111111',
+                accountSlot: 'primary',
+            });
+            return [{
+                postUrl: urls[0]!,
+                id: 'like-0',
+                username: 'woman_0',
+                profilePicUrl: 'https://images.example/woman-0.jpg',
+                isPrivate: false,
+                isVerified: false,
+                totalLikes: 1,
+            }];
+        });
+        const getPostComments = vi.fn(async (urls: string[], _limit: number, context) => {
+            await context?.onSelfHostedAuthRunFinished?.({
+                provider: 'selfhosted_auth',
+                runId: '22222222222222222222222222222222',
+                accountSlot: 'primary',
+            });
+            return [{
+                postUrl: urls[0]!,
+                id: 'comment-0',
+                text: 'comment 0',
+                ownerUsername: 'commenter_0',
+                timestamp: capturedAt,
+            }];
+        });
+        const checkpointTargetEvidence = vi.fn(async (
+            value: AnalysisV2TargetEvidenceCheckpointInput
+        ) => ({
+            revision: 1,
+            resultHash,
+            inputHash: value.inputHash,
+            interactorCount: value.rows.length,
+            likerCount: 1,
+            commentCount: 1,
+        }));
+        const executor = createAnalysisV2TargetEvidenceExecutor({
+            requestContextStore: contextStore(requestContext()),
+            profileCheckpointStore: profileStore.store,
+            providerRunStore: providers.value,
+            selfHostedAuthRunStore: {
+                load: vi.fn(async value => receiptCache.get(value.operationKey) ?? null),
+                checkpoint: checkpointReceipt,
+            },
+            selfHostedAuthInteractionAdapter: { getPostLikers, getPostComments },
+            interactionAdapter: {
+                getPostLikers: vi.fn(() => { throw new Error('unexpected Apify liker call'); }),
+                getPostComments: vi.fn(() => { throw new Error('unexpected Apify comment call'); }),
+            },
+            evidenceStore: { checkpointTargetEvidence } as unknown as AnalysisV2EvidenceStore,
+            getProfilesBatchV2: vi.fn(),
+            env: {
+                SELFHOSTED_AUTH_ENABLED: 'true',
+                SCRAPER_LIKERS: 'selfhosted_auth',
+                SCRAPER_COMMENTS: 'selfhosted_auth',
+                SCRAPER_FALLBACK: 'false',
+            },
+        });
+        await executor(stageContext('target_evidence', state()));
+        await executor(stageContext('target_evidence', state()));
+
+        expect(providers.bindAdapterCheckpoint).not.toHaveBeenCalled();
+        expect(checkpointReceipt).toHaveBeenCalledTimes(2);
+        expect(getPostLikers).toHaveBeenCalledOnce();
+        expect(getPostComments).toHaveBeenCalledOnce();
+        expect(getPostLikers.mock.calls[0]![2]).toMatchObject({
+            selfHostedAuthIdentity: {
+                operationKey: expect.stringMatching(/^target-likers:[a-f0-9]{64}$/),
+                inputHash: expect.stringMatching(/^[a-f0-9]{64}$/),
+            },
+        });
+        expect(getPostComments.mock.calls[0]![2]).toMatchObject({
+            selfHostedAuthIdentity: {
+                operationKey: expect.stringMatching(/^target-comments:[a-f0-9]{64}$/),
+                inputHash: expect.stringMatching(/^[a-f0-9]{64}$/),
+            },
+        });
+        const saved = checkpointTargetEvidence.mock.calls[0]![0];
+        if (saved.likerSource.status !== 'collected' || saved.commentSource.status !== 'collected') {
+            throw new Error('expected collected target evidence');
+        }
+        expect(saved.likerSource).toMatchObject({
+            provider: 'selfhosted_auth',
+            providerRunId: '11111111111111111111111111111111',
+            providerCredentialSlot: 'primary',
+        });
+        expect(saved.commentSource).toMatchObject({
+            provider: 'selfhosted_auth',
+            providerRunId: '22222222222222222222222222222222',
+            providerCredentialSlot: 'primary',
+        });
     });
 
     it('waits for both target interaction branches and rethrows the first failure by input order', async () => {
