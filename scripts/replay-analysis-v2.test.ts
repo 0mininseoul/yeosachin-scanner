@@ -196,6 +196,33 @@ async function betatestFreePoolArtifacts(now: number) {
 }
 
 describe('analysis V2 replay CLI', () => {
+    it('requires the dedicated text-only capability flag and paid-AI double confirmation', () => {
+        expect(parseReplayCliArgs([
+            '--capture', '--legacy-secondary-text-only',
+            '--request-id=10000000-0000-4000-8000-000000000001',
+            '--bundle=a.enc', '--key=a.key',
+        ])).toMatchObject({
+            command: 'capture', legacySecondaryTextOnly: true,
+            evaluationPolicy: {
+                capability: 'test-entitlement-standard-v210-risk-v25-scheduler-v1-to-ai-v211-legacy-secondary-account-text-only',
+                aiStage: 'ai-stage-policy-v2.11',
+            },
+        });
+        expect(parseReplayCliArgs([
+            '--run', '--paid-ai', '--confirm-paid-ai', '--legacy-secondary-text-only',
+            '--bundle=a.enc', '--key=a.key', '--preview=a.preview',
+        ])).toMatchObject({ command: 'run', mode: 'paid-ai', legacySecondaryTextOnly: true });
+        expect(() => parseReplayCliArgs([
+            '--run', '--legacy-secondary-text-only', '--bundle=a.enc', '--key=a.key', '--preview=a.preview',
+        ])).toThrow('ANALYSIS_V2_REPLAY_LEGACY_SECONDARY_TEXT_ONLY_PAID_SCOPE_REQUIRED');
+        expect(() => parseReplayCliArgs([
+            '--run', '--paid-ai', '--legacy-secondary-text-only', '--bundle=a.enc', '--key=a.key', '--preview=a.preview',
+        ])).toThrow('ANALYSIS_V2_REPLAY_PAID_AI_DOUBLE_CONFIRM_REQUIRED');
+        expect(parseReplayCliArgs([
+            '--apply', '--confirm-apply', '--legacy-secondary-text-only', '--preview=a.preview',
+        ])).toMatchObject({ command: 'apply', legacySecondaryTextOnly: true });
+    });
+
     it('runs the canonical replay command under the React server condition', () => {
         expect(packageJson.scripts['replay:analysis-v2']).toBe(
             'tsx --conditions=react-server --env-file=.env.local scripts/replay-analysis-v2.ts',

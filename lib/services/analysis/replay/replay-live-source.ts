@@ -23,6 +23,8 @@ import { readCompletedApifyDatasetOnce, type ReplayReadonlyApifyClient } from '.
 import type {
     CurrentProductionReplayCaptureDescriptor,
     BetatestFreePoolReplayCaptureDescriptor,
+    TestEntitlementLegacySecondaryReplayCaptureDescriptor,
+    TestEntitlementLegacySecondaryTextOnlyReplayCaptureDescriptor,
     HistoricalOfficialE2EReplayCaptureDescriptor,
     ReplayCaptureDescriptor,
 } from './replay-supabase-repository';
@@ -162,7 +164,9 @@ function postIdFromUrl(value: string): string {
 type ProviderLedgerReplayDescriptor =
     | HistoricalOfficialE2EReplayCaptureDescriptor
     | CurrentProductionReplayCaptureDescriptor
-    | BetatestFreePoolReplayCaptureDescriptor;
+    | BetatestFreePoolReplayCaptureDescriptor
+    | TestEntitlementLegacySecondaryReplayCaptureDescriptor
+    | TestEntitlementLegacySecondaryTextOnlyReplayCaptureDescriptor;
 
 function isProviderLedgerDescriptor(
     descriptor: ReplayCaptureDescriptor | ProviderLedgerReplayDescriptor,

@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from 'vitest';
 import sharp from 'sharp';
 import {
     AnalysisImagePreparationError,
+    createAnalysisV2SelectedMediaNormalizer,
     downloadImageBytes,
     downloadImageBytesViaTrustedProxy,
     COST_OPTIMIZED_MAX_ANALYSIS_IMAGE_DIMENSION,
@@ -63,6 +64,18 @@ describe('selectAnalysisImageCandidates', () => {
 });
 
 describe('prepareAnalysisImages', () => {
+    it('bounds a stalled selected-media normalizer, including semaphore acquisition', async () => {
+        const normalize = createAnalysisV2SelectedMediaNormalizer({
+            timeoutMs: 5,
+            withSlot: async <T>() => await new Promise<T>(() => undefined),
+        });
+        await expect(normalize({
+            selectionId: 'selected:1', role: 'profile', imageUrl: 'https://example.com/a.jpg',
+        })).rejects.toMatchObject({
+            reason: 'timeout', disposition: 'transient',
+        });
+    });
+
     it('loads only selected images concurrently and keeps deterministic order', async () => {
         const loadImage = vi.fn(async (url: string) => {
             await new Promise(resolve => setTimeout(resolve, url.includes('profile') ? 10 : 1));

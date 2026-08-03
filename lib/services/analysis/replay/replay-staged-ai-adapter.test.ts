@@ -238,6 +238,30 @@ describe('replay staged AI adapter telemetry', () => {
         );
     });
 
+    it('pins v2.11 into every microbatch identity before the stateless call', async () => {
+        const accountId = `account:${'a'.repeat(64)}`;
+        mocks.createGenderTriageMicrobatchAccountId.mockReturnValue(accountId);
+        mocks.createGenderTriageMicrobatchResultIdentity.mockReturnValue({
+            operationKey: 'gender-triage:batch-identity',
+        });
+        mocks.genderTriageMicrobatch.mockResolvedValue([{
+            accountId,
+            source: 'checkpoint',
+            result: { assessment: {}, routingDecision: 'route_to_feature_analysis' },
+        }]);
+
+        const result = await createReplayStagedAiAdapter('ai-stage-policy-v2.11')
+            .triage?.({ ordinal: 1, media: [] });
+
+        expect(result).toMatchObject({ outcome: 'ok', value: expect.any(Object) });
+        expect(mocks.createGenderTriageMicrobatchAccountId).toHaveBeenCalledWith(
+            { media: [] }, 'ai-stage-policy-v2.11',
+        );
+        expect(mocks.createGenderTriageMicrobatchResultIdentity).toHaveBeenCalledWith(
+            [{ accountId, input: { media: [] } }], 'ai-stage-policy-v2.11',
+        );
+    });
+
     it('plans stable paired v2.9 calls with an odd tail and maps reversed responses by opaque ID', async () => {
         const ids = new Map([
             ['profile:1', `account:${'e'.repeat(64)}`],
