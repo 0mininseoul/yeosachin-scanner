@@ -58,13 +58,22 @@ describe('authentication proxy redirects', () => {
         );
     });
 
-    it('redirects an anonymous beta-test visitor to the exact internal login return path', async () => {
+    it('keeps the beta-test landing public for an anonymous visitor', async () => {
         mockAuthenticatedUser(null);
 
         const response = await proxy(new NextRequest('http://localhost:3000/betatest'));
 
+        expect(response.status).toBe(200);
+        expect(response.headers.get('location')).toBeNull();
+    });
+
+    it.each(['/analyze', '/progress/example', '/result/example', '/earlybird'])('continues to protect %s for anonymous visitors', async path => {
+        mockAuthenticatedUser(null);
+
+        const response = await proxy(new NextRequest(`http://localhost:3000${path}`));
+
         expect(response.headers.get('location')).toBe(
-            'http://localhost:3000/login?redirectTo=%2Fbetatest'
+            `http://localhost:3000/login?redirectTo=${encodeURIComponent(path)}`
         );
     });
 
