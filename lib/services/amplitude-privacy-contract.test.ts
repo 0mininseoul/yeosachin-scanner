@@ -61,7 +61,7 @@ describe('Amplitude replay privacy contract', () => {
     });
 
     it('masks core route containers while retaining private and media blocks', () => {
-        const landing = source('app/page.tsx');
+        const landing = source('components/landing-page.tsx');
         const analyze = source('app/analyze/page.tsx');
         const login = source('app/login/page.tsx');
         const mypage = source('app/mypage/page.tsx');

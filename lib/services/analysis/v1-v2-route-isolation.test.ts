@@ -8,11 +8,13 @@ function source(relativePath: string): string {
 
 describe('V1 route isolation from durable V2 requests', () => {
     it('routes every public intake through preflight instead of the legacy start endpoint', () => {
-        const landingPage = source('app/page.tsx');
+        const landingPage = source('components/landing-page.tsx');
+        const landingEntry = source('app/page.tsx');
         const analyzePage = source('app/analyze/page.tsx');
         const preflightHook = source('hooks/useAnalysisV2Preflight.ts');
 
         expect(landingPage).not.toContain("fetch('/api/analysis/start'");
+        expect(landingEntry).toContain("import LandingPage from '@/components/landing-page'");
         expect(analyzePage).not.toContain("fetch('/api/analysis/start'");
         expect(preflightHook).toContain("fetch('/api/analysis/preflight'");
         expect(preflightHook).toContain("method: 'PATCH'");
@@ -21,11 +23,18 @@ describe('V1 route isolation from durable V2 requests', () => {
     });
 
     it('preserves landing autostart through authentication and renders server plan limits', () => {
-        const landingPage = source('app/page.tsx');
+        const landingPage = source('components/landing-page.tsx');
+        const landingEntry = source('app/page.tsx');
         const analyzePage = source('app/analyze/page.tsx');
         const proxy = source('proxy.ts');
 
-        expect(landingPage).toContain('redirectTo="/analyze?autostart=1"');
+        expect(landingEntry).toContain('<LandingPage />');
+        expect(landingPage).toContain("loginRedirectTo = '/analyze?autostart=1'");
+        expect(landingPage).toContain('redirectTo={loginRedirectTo}');
+        expect(landingPage).toContain('국내 유일 위장여사친 판독 서비스');
+        expect(landingPage).toContain('내 남친이 맞팔 중인 여자들,');
+        expect(landingPage).toContain('누가 제일 위험할까?');
+        expect(landingPage).toContain('지금 바로 위장 여사친 확인하기');
         expect(proxy).toContain('request.nextUrl.search');
         expect(proxy).toContain("request.nextUrl.searchParams.get('redirectTo')");
         expect(proxy).toContain('appRedirectUrlForRequest(');

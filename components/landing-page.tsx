@@ -1,0 +1,398 @@
+'use client';
+
+/* ============================================================================
+ * ⚠️ 랜딩 마케팅 카피 = 프론트엔드 소관 (확정 문구). — CLAUDE.md Project Rules #4
+ * 히어로 헤드라인/서브·미세문구, 판독 절차 STEP, '왜 AI 판독인가' 신뢰 블록,
+ * 신뢰 스트립, 하단 CTA 헤드라인/서브/버튼 등을 백엔드·기능 작업 중에
+ * 임의로 수정하거나 순화하지 마세요. 기능(로직·props)만 추가하고 문구는 그대로.
+ * 변경이 꼭 필요하면 사용자에게 먼저 확인할 것. (과거 순화 덮어쓰기 사례 있음)
+ * ============================================================================ */
+
+import { useCallback, useEffect, useRef, useState } from 'react';
+import { useRouter } from 'next/navigation';
+import Link from 'next/link';
+import { motion, useReducedMotion } from 'framer-motion';
+import { trackEvent, EVENTS } from '@/lib/services/analytics';
+import {
+  availableAnalyticsStorage,
+  landingViewEventKey,
+  readAttribution,
+  tryClaimAnalyticsEvent,
+} from '@/lib/services/analytics-funnel';
+import {
+  clearPendingAnalysisTarget,
+  storePendingAnalysisTarget,
+} from '@/lib/services/pending-analysis-target';
+import { reportLandingLead } from '@/lib/services/landing-lead';
+import { useAuth } from '@/hooks/useAuth';
+import { LoginModal } from '@/components/login-modal';
+import {
+  TopBar,
+  BrandMark,
+  Eyebrow,
+  CaseCard,
+  PrimaryButton,
+} from '@/components/case-ui';
+import { LandingSignatureCard } from '@/components/landing-signature-card';
+import { LandingOverture, useOverture } from '@/components/landing-overture';
+import { LandingReviews } from '@/components/landing-reviews';
+import { InstagramLookupLink } from '@/components/instagram-lookup-link';
+import { JsonLd } from '@/components/seo/json-ld';
+import { HOMEPAGE_JSON_LD } from '@/lib/services/seo/discovery';
+
+const STEPS = [
+  {
+    n: '01',
+    title: '아이디 하나면 충분',
+    body: ['남자친구 인스타그램 아이디만 넣으세요.', '나머지는 AI가 알아서 전부 파 드립니다.'],
+  },
+  {
+    n: '02',
+    title: '직접 못 찾는 것까지 판독',
+    body: ['맞팔 수백 명의 성별을 식별해 이성만 추려내고,', '상호작용·친밀도·프로필 분위기까지 5개 축으로 교차 분석합니다.'],
+  },
+  {
+    n: '03',
+    title: '위협 등급 리포트',
+    body: ['위장 여사친 후보를 위험도 순으로 정렬하고,', '위장여사친들의 정체를 구체적 근거 기반으로 전부 보여드립니다.'],
+  },
+];
+
+// 신뢰 블록 — "직접은 불가능, AI만 가능"을 강조 (자극적 톤)
+const TRUST = [
+  { title: '맞팔 전수조사', body: '수백 명을 일일이 볼 순 없죠. AI가 한 명도 빠짐없이 훑습니다.' },
+  { title: '여사친들만 선별', body: '성별을 식별해 위장 여사친 후보만 골라냅니다.' },
+  { title: '상호작용 추적', body: '좋아요·댓글·태그·멘션·친밀도까지 정밀 분석합니다.' },
+  { title: '상대방은 절대 모름', body: '조회 흔적도, 알림도 남지 않습니다.' },
+];
+
+export default function LandingPage({
+  loginRedirectTo = '/analyze?autostart=1',
+}: {
+  loginRedirectTo?: string;
+}) {
+  const router = useRouter();
+  const { user } = useAuth();
+  const reduce = useReducedMotion();
+
+  const inputRef = useRef<HTMLInputElement>(null);
+  const [igId, setIgId] = useState('');
+  const [starting, setStarting] = useState(false);
+  const [heroError, setHeroError] = useState<string | null>(null);
+  const [loginOpen, setLoginOpen] = useState(false);
+
+  useEffect(() => {
+    if (!tryClaimAnalyticsEvent(availableAnalyticsStorage(), landingViewEventKey())) return;
+    trackEvent(EVENTS.LANDING_VIEWED, readAttribution(window.location.search));
+  }, []);
+
+  const closeLogin = useCallback(() => {
+    try {
+      clearPendingAnalysisTarget(sessionStorage);
+    } catch {
+      /* ignore */
+    }
+    setLoginOpen(false);
+  }, []);
+
+  const handleStart = async () => {
+    const id = igId.replace(/@/g, '').trim();
+    if (!id) {
+      setHeroError('남자친구의 인스타그램 아이디를 입력해주세요.');
+      inputRef.current?.focus();
+      return;
+    }
+    let targetStored = false;
+    try {
+      targetStored = storePendingAnalysisTarget(sessionStorage, id);
+    } catch {
+      targetStored = false;
+    }
+    if (!targetStored) {
+      setHeroError('판독 화면을 열 수 없습니다.');
+      return;
+    }
+
+    trackEvent(EVENTS.TARGET_SUBMITTED, {
+      stage: user ? 'authenticated' : 'anonymous',
+    });
+
+    if (!user) {
+      reportLandingLead({ instagramId: id, rawInput: igId, search: window.location.search });
+      setLoginOpen(true);
+      return;
+    }
+
+    try {
+      setStarting(true);
+      setHeroError(null);
+      router.push('/analyze?autostart=1');
+    } catch (err) {
+      console.error('Failed to continue analysis:', err);
+      setHeroError('판독 화면을 열 수 없습니다.');
+      setStarting(false);
+    }
+  };
+
+  const focusInput = () => {
+    inputRef.current?.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    window.setTimeout(() => inputRef.current?.focus(), 420);
+  };
+
+  const EASE: [number, number, number, number] = [0.2, 0.8, 0.2, 1];
+  const overturePlaying = useOverture();
+
+  return (
+    /* The overture is a sibling of the animated root, never a child: the page-in
+       animation applies a transform, and a transformed ancestor becomes the
+       containing block for position: fixed, which pinned the overture to the
+       full document height and centred its text ~1500px below the fold. */
+    <>
+    <JsonLd data={HOMEPAGE_JSON_LD} />
+    {overturePlaying && <LandingOverture />}
+    <div className={`min-h-dvh ${overturePlaying ? 'overture-page-in' : ''}`}>
+      <TopBar
+        right={
+          user ? (
+            <>
+              <button
+                onClick={() => router.push('/mypage')}
+                className="text-[13px] font-medium text-fg-dim transition-colors hover:text-fg"
+              >
+                보관함
+              </button>
+              <button
+                onClick={() => router.push('/analyze')}
+                className="border border-blood bg-blood px-3.5 py-1.5 text-[13px] font-bold text-white transition-colors hover:bg-blood-2"
+              >
+                판독 시작
+              </button>
+            </>
+          ) : (
+            <button
+              onClick={() => setLoginOpen(true)}
+              className="border border-blood bg-blood px-3.5 py-1.5 text-[13px] font-bold text-white transition-colors hover:bg-blood-2"
+            >
+              로그인
+            </button>
+          )
+        }
+      />
+      <main className="mx-auto max-w-[460px] px-5">
+        {/* ---------- HERO ---------- */}
+        <section className="pb-14 pt-7">
+          <motion.div
+            initial={reduce ? false : { opacity: 0, y: 16 }}
+            animate={{ opacity: 1, y: 0 }}
+            transition={{ duration: 0.55, ease: EASE }}
+          >
+            <div className="mb-5">
+              <Eyebrow>국내 유일 위장여사친 판독 서비스</Eyebrow>
+            </div>
+
+            <h1 className="text-[30px] font-bold leading-[1.18] tracking-[-0.02em] text-fg sm:text-[34px] sm:leading-[1.14]">
+              내 남친이 맞팔 중인 여자들,
+              <br />
+              <span className="text-blood">누가 제일 위험할까?</span>
+            </h1>
+            <p className="mt-4 text-[15px] leading-relaxed text-fg-dim">
+              &quot;그냥 친구야&quot;라는 말, AI가 팩트 체크해드립니다.
+            </p>
+          </motion.div>
+
+          {/* input + submit — 서브카피 바로 아래(액션 우선). 도감 카드는 그 아래에서 결과 미리보기 */}
+          {/* The helper is a footnote of the field, not a step between the field
+              and the CTA — it answers a question the visitor has while filling the
+              input. Uniform space-y plus the link's 40px tap target made all three
+              read as equal rows, so the spacing is set per element instead. */}
+          <div className="mt-7">
+            <div className="relative" data-amp-mask>
+              <span className="pointer-events-none absolute left-4 top-1/2 -translate-y-1/2 text-fg-dim">@</span>
+              <input
+                id="ig-hero"
+                ref={inputRef}
+                type="text"
+                value={igId}
+                onChange={(e) => {
+                  setIgId(e.target.value);
+                  if (heroError) setHeroError(null);
+                }}
+                onKeyDown={(e) => e.key === 'Enter' && !starting && handleStart()}
+                placeholder="남자친구 인스타그램 아이디"
+                autoCapitalize="none"
+                autoCorrect="off"
+                spellCheck={false}
+                aria-label="남자친구 인스타그램 아이디"
+                className="w-full border border-line bg-ink-2 py-4 pl-9 pr-4 text-[15px] text-fg placeholder-fg-mute transition-colors focus:border-blood focus:outline-none"
+              />
+            </div>
+            <InstagramLookupLink />
+            {heroError && <p className="mt-1 px-1 text-[12px] text-blood">{heroError}</p>}
+            <div className="mt-3">
+            <PrimaryButton onClick={handleStart} size="lg" disabled={starting}>
+              {starting ? (
+                <>
+                  <span className="h-4 w-4 animate-spin rounded-full border-2 border-current border-t-transparent" />
+                  판독 요청 중…
+                </>
+              ) : (
+                <>
+                  지금 바로 확인하기
+                  <span aria-hidden className="transition-transform group-hover:translate-x-0.5">
+                    →
+                  </span>
+                </>
+              )}
+            </PrimaryButton>
+            </div>
+            <p className="mt-2.5 text-center text-[12px] text-fg-mute">
+              판독 결과는 상대방에게 절대 통보되지 않습니다.
+            </p>
+          </div>
+
+          {/* signature: live dossier readout */}
+          <motion.div
+            initial={reduce ? false : { opacity: 0, scale: 0.98 }}
+            animate={{ opacity: 1, scale: 1 }}
+            transition={{ delay: reduce ? 0 : 0.25, duration: 0.5, ease: EASE }}
+            className="mt-10"
+          >
+            <LandingSignatureCard />
+          </motion.div>
+        </section>
+
+        {/* ---------- assurance strip ---------- */}
+        <div className="-mx-5 overflow-hidden border-y border-line bg-ink-2 py-2.5">
+          <div className="anim-marquee flex w-max whitespace-nowrap">
+            {[0, 1].map((k) => (
+              <div key={k} className="flex items-center" aria-hidden={k === 1}>
+                {['상대방 통보 없음', '비밀 보장 100%', '아이디 하나면 끝', '5분이면 결과 완료'].map((t) => (
+                  <span key={t} className="flex items-center px-6 text-[12px] font-medium tracking-[0.08em] text-fg-dim">
+                    <span className="mr-6 h-1 w-1 bg-blood" />
+                    {t}
+                  </span>
+                ))}
+              </div>
+            ))}
+          </div>
+        </div>
+
+        {/* ---------- process ---------- */}
+        <section className="py-16">
+          <Eyebrow>판독 절차</Eyebrow>
+          <h2 className="mt-3 text-[24px] font-extrabold tracking-tight text-fg">3단계로 끝나는 판독</h2>
+
+          {/* A numbered sequence is already a strong enough structure; wrapping
+              each step in its own card only flattens the page. */}
+          <div className="mt-8">
+            {STEPS.map((s) => (
+              <div key={s.n} className="flex items-start gap-4 border-t border-line py-5">
+                <span className="num text-[26px] font-black leading-none text-blood/85">{s.n}</span>
+                <div className="pt-0.5">
+                  <h3 className="text-[16px] font-bold text-fg">{s.title}</h3>
+                  <p className="mt-1.5 text-[13px] leading-relaxed text-fg-dim">
+                    {s.body.map((line, i) => (
+                      <span key={i} className="block">
+                        {line}
+                      </span>
+                    ))}
+                  </p>
+                </div>
+              </div>
+            ))}
+          </div>
+        </section>
+
+        {/* ---------- why AI (trust) ---------- */}
+        <section className="pb-16">
+          <Eyebrow>왜 AI 판독인가</Eyebrow>
+          <h2 className="mt-3 text-[24px] font-extrabold leading-snug tracking-tight text-fg">
+            직접 뒤지는 건 <span className="text-blood">불가능</span>합니다
+          </h2>
+          <p className="mt-2 text-[13px] leading-relaxed text-fg-dim">
+            밤새 프로필을 눌러봐도 못 찾는 걸, AI는 5분이면 끝냅니다.
+          </p>
+
+          {/* Parallel items in a grid are already separated by their columns.
+              A top hairline gives the block a regular spine — vertical rails
+              would end at four different heights and fight the grid. */}
+          <div className="mt-8 grid grid-cols-2 gap-x-5 gap-y-7">
+            {TRUST.map((t, i) => (
+              <div key={i} className="border-t border-line pt-3.5">
+                <BrandMark size={16} className="text-blood" />
+                <h3 className="mt-2.5 text-[14px] font-bold text-fg">{t.title}</h3>
+                <p className="mt-1.5 text-[12px] leading-relaxed text-fg-dim">{t.body}</p>
+              </div>
+            ))}
+          </div>
+        </section>
+
+        {/* ---------- reviews ---------- */}
+        <section className="pb-16">
+          <Eyebrow>열람 후기</Eyebrow>
+          <h2 className="mt-3 text-[24px] font-extrabold tracking-tight text-fg">이미 많은 분들이 확인했어요</h2>
+
+          <div className="mt-8">
+            <LandingReviews />
+          </div>
+        </section>
+
+        {/* ---------- bottom CTA ---------- */}
+        <section className="pb-16">
+          <CaseCard bracket="var(--color-blood)" className="px-5 py-10 text-center">
+            <Eyebrow className="justify-center">AI 정밀 판독</Eyebrow>
+            <h2 className="mt-4 text-[23px] font-extrabold leading-tight tracking-tight text-fg sm:text-[28px]">
+              남자친구가 알려주지 않는 진실
+            </h2>
+            <p className="mt-3.5 text-[14px] leading-relaxed text-fg-dim">
+              불안해하며 시간 낭비하지 마세요.
+              <br />
+              AI가 5분 안에 진실을 파헤쳐 드립니다.
+            </p>
+            <div className="mt-7">
+              <PrimaryButton onClick={focusInput} size="lg">
+                지금 바로 위장 여사친 확인하기
+              </PrimaryButton>
+            </div>
+          </CaseCard>
+        </section>
+
+        {/* ---------- footer ---------- */}
+        <footer className="border-t border-line py-7">
+          <div className="mb-2.5">
+            <span className="eyebrow">위장여사친 판독기</span>
+          </div>
+          <p className="text-[12px] leading-relaxed text-fg-mute">
+            본 서비스는 AI 기술로 공개된 정보를 분석합니다.
+            <br />
+            판독 결과는 100% 정확성을 보장하지 않으며, 재미 목적으로만 이용해 주세요.
+          </p>
+          <div className="mt-5 flex flex-wrap gap-x-5 gap-y-2 text-[12px] text-fg-dim">
+            <Link href="/guide/wijang-yeosachin" className="transition-colors hover:text-fg">
+              위장여사친 구분법
+            </Link>
+            <Link href="/terms" className="transition-colors hover:text-fg">
+              이용약관
+            </Link>
+            <Link href="/privacy" className="transition-colors hover:text-fg">
+              개인정보처리방침
+            </Link>
+            <a href="mailto:contact@ascentum.co.kr" className="transition-colors hover:text-fg">
+              contact@ascentum.co.kr
+            </a>
+          </div>
+          <p className="mt-5 text-[8.5px] leading-relaxed tracking-tight text-fg-mute">
+            Company: Ascentum · BRN: 478-59-01063 · Representative: Youngmin Park
+          </p>
+        </footer>
+      </main>
+
+      <LoginModal
+        open={loginOpen}
+        onClose={closeLogin}
+        redirectTo={loginRedirectTo}
+      />
+    </div>
+    </>
+  );
+}
