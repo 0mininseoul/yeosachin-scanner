@@ -40,8 +40,8 @@ export const AUTOMATIC_FALLBACK: Partial<
 };
 
 export const VALID_PROVIDERS: Record<Capability, readonly ProviderName[]> = {
-    profile: ['apify', 'selfhosted'],
-    profilesBatch: ['apify', 'selfhosted'],
+    profile: ['apify', 'selfhosted', 'selfhosted_auth'],
+    profilesBatch: ['apify', 'selfhosted', 'selfhosted_auth'],
     followers: ['flashapi', 'apify', 'coderx', 'selfhosted_auth'],
     following: ['flashapi', 'apify', 'coderx', 'rapidapi', 'selfhosted_auth'],
 };
@@ -152,7 +152,12 @@ export function getScraperConfig(
     };
     if (
         !selfHostedAuthEnabled
-        && (parsed.followers === 'selfhosted_auth' || parsed.following === 'selfhosted_auth')
+        && (
+            parsed.profile === 'selfhosted_auth'
+            || parsed.profilesBatch === 'selfhosted_auth'
+            || parsed.followers === 'selfhosted_auth'
+            || parsed.following === 'selfhosted_auth'
+        )
     ) {
         throw new Error(
             'SCRAPING_CONFIG_ERROR: SELFHOSTED_AUTH_ENABLED must be true before selecting selfhosted_auth.'

@@ -71,7 +71,103 @@ describe('authenticated self-hosted relationship provider', () => {
         });
         expect(provider.name).toBe('selfhosted_auth');
         expect(provider.paid).toBe(false);
-        expect(provider.getProfile).toBeUndefined();
+        expect(provider.getProfile).toEqual(expect.any(Function));
+    });
+});
+
+describe('authenticated self-hosted profile provider', () => {
+    it('maps batch not-found rows into checkpoint-compatible unavailable outcomes', async () => {
+        const profile = {
+            username: 'available.user',
+            followersCount: 12,
+            followingCount: 3,
+            postsCount: 1,
+            isPrivate: false,
+            isVerified: false,
+            latestPosts: [{
+                id: 'post-1', shortCode: 'Abc123', type: 'image',
+                likesCount: 0, commentsCount: 0,
+                timestamp: '2026-08-03T00:00:00.000Z',
+                taggedUsers: [], mentionedUsers: [],
+            }],
+        };
+        const client = {
+            getProfilesBatch: vi.fn(async () => ({
+                ...metadata,
+                items: [
+                    { username: 'available.user', status: 'available', profile },
+                    { username: 'missing.user', status: 'not_found' },
+                ],
+            })),
+        } as unknown as SelfHostedAuthWorkerClient;
+        const provider = makeSelfHostedAuthProvider({ client });
+        const observed = context();
+        observed.value.selfHostedAuthIdentity = {
+            operationKey: `target-profile:${'c'.repeat(64)}`,
+            inputHash: 'd'.repeat(64),
+        };
+
+        const results = await provider.getProfilesBatchOutcomes?.(
+            ['Available.User', 'missing.user'],
+            2,
+            observed.value
+        );
+
+        expect(results).toEqual([
+            expect.objectContaining({
+                profile,
+                outcome: expect.objectContaining({
+                    requestedUsername: 'available.user',
+                    status: 'success',
+                    // Profile checkpoints retain their established free-source enum.
+                    source: 'selfhosted',
+                }),
+            }),
+            expect.objectContaining({
+                outcome: expect.objectContaining({
+                    requestedUsername: 'missing.user',
+                    status: 'unavailable',
+                    failureCategory: 'not_found',
+                    source: 'selfhosted',
+                }),
+            }),
+        ]);
+        expect(client.getProfilesBatch).toHaveBeenCalledWith(
+            ['available.user', 'missing.user'],
+            10,
+            expect.objectContaining({ operationKey: `target-profile:${'c'.repeat(64)}` })
+        );
+        expect(observed.recordUsage).toHaveBeenCalledWith({
+            request_count: 1,
+            result_count: 2,
+            raw_result_count: 2,
+            unique_result_count: 2,
+            estimated_cost_usd: 0,
+        });
+        expect(observed.onSelfHostedAuthRunFinished).toHaveBeenCalledWith({
+            provider: 'selfhosted_auth', runId: metadata.runId, accountSlot: 'primary',
+        });
+    });
+
+    it('fails closed when the worker omits a requested profile outcome', async () => {
+        const client = {
+            getProfilesBatch: vi.fn(async () => ({
+                ...metadata,
+                items: [{ username: 'available.user', status: 'not_found' }],
+            })),
+        } as unknown as SelfHostedAuthWorkerClient;
+        const provider = makeSelfHostedAuthProvider({ client });
+        const observed = context();
+        observed.value.selfHostedAuthIdentity = {
+            operationKey: `target-profile:${'c'.repeat(64)}`,
+            inputHash: 'd'.repeat(64),
+        };
+
+        await expect(provider.getProfilesBatchOutcomes?.(
+            ['available.user', 'missing.user'],
+            2,
+            observed.value
+        )).rejects.toThrow('SCRAPING_SCHEMA_ERROR');
     });
 });
 

@@ -4,7 +4,12 @@ import type {
     ApifyPostComment,
     ApifyPostLiker,
 } from '../apify-interactions';
-import type { InstagramFollower } from '@/lib/types/instagram';
+import type {
+    InstagramFollower,
+    InstagramPost,
+    InstagramPostMediaItem,
+    InstagramProfile,
+} from '@/lib/types/instagram';
 
 const USERNAME_PATTERN = /^[a-z0-9._]{1,30}$/;
 const RUN_ID_PATTERN = /^[A-Za-z0-9]{8,64}$/;
@@ -46,6 +51,68 @@ const relationshipItemsSchema = z.array(followerSchema).max(1_200);
 const likerItemsSchema = z.array(likerSchema).max(1_500);
 const commentItemsSchema = z.array(commentSchema).max(150);
 
+const mediaItemSchema: z.ZodType<InstagramPostMediaItem> = z.object({
+    id: z.string().min(1).max(255).optional(),
+    type: z.enum(['image', 'video', 'reel']),
+    caption: z.string().max(2_200).optional(),
+    imageUrl: z.string().url().max(2_048).startsWith('https://').optional(),
+    thumbnailUrl: z.string().url().max(2_048).startsWith('https://').optional(),
+    videoUrl: z.string().url().max(2_048).startsWith('https://').optional(),
+}).strict();
+
+const postSchema: z.ZodType<InstagramPost> = z.object({
+    id: z.string().min(1).max(255),
+    shortCode: z.string().min(1).max(255).regex(/^[A-Za-z0-9_-]+$/),
+    caption: z.string().max(2_200).optional(),
+    imageUrl: z.string().url().max(2_048).startsWith('https://').optional(),
+    thumbnailUrl: z.string().url().max(2_048).startsWith('https://').optional(),
+    videoUrl: z.string().url().max(2_048).startsWith('https://').optional(),
+    type: z.enum(['image', 'video', 'carousel', 'reel']),
+    mediaItems: z.array(mediaItemSchema).max(10).optional(),
+    declaredMediaCount: z.number().int().positive().max(10).optional(),
+    childrenComplete: z.boolean().optional(),
+    likesCount: z.number().int().nonnegative().max(2_000_000_000),
+    commentsCount: z.number().int().nonnegative().max(2_000_000_000),
+    likesCountHidden: z.literal(true).optional(),
+    commentsCountHidden: z.literal(true).optional(),
+    timestamp: z.string().datetime({ offset: true }),
+    taggedUsers: z.array(z.string().regex(USERNAME_PATTERN)).max(100),
+    mentionedUsers: z.array(z.string().regex(USERNAME_PATTERN)).max(100),
+}).strict();
+
+const profileBaseSchema = z.object({
+    username: z.string().regex(USERNAME_PATTERN),
+    fullName: z.string().max(150).optional(),
+    bio: z.string().max(2_000).optional(),
+    profilePicUrl: z.string().url().max(2_048).startsWith('https://').optional(),
+    followersCount: z.number().int().nonnegative().max(2_000_000_000),
+    followingCount: z.number().int().nonnegative().max(2_000_000_000),
+    postsCount: z.number().int().nonnegative().max(2_000_000_000),
+    isVerified: z.boolean(),
+});
+
+const profileSchema: z.ZodType<InstagramProfile> = z.discriminatedUnion('isPrivate', [
+    profileBaseSchema.extend({
+        isPrivate: z.literal(false),
+        latestPosts: z.array(postSchema).max(10),
+    }).strict(),
+    profileBaseSchema.extend({
+        isPrivate: z.literal(true),
+    }).strict(),
+]);
+
+const profileBatchItemSchema = z.discriminatedUnion('status', [
+    z.object({
+        username: z.string().regex(USERNAME_PATTERN),
+        status: z.literal('available'),
+        profile: profileSchema,
+    }).strict(),
+    z.object({
+        username: z.string().regex(USERNAME_PATTERN),
+        status: z.literal('not_found'),
+    }).strict(),
+]);
+
 function responseSchema<T extends z.ZodType>(item: T, maximumItems: number) {
     return z.object({
         schemaVersion: z.literal(1),
@@ -58,6 +125,8 @@ function responseSchema<T extends z.ZodType>(item: T, maximumItems: number) {
 const relationshipResponseSchema = responseSchema(followerSchema, 1_200);
 const likerResponseSchema = responseSchema(likerSchema, 1_500);
 const commentResponseSchema = responseSchema(commentSchema, 150);
+const profileResponseSchema = responseSchema(profileSchema, 1);
+const profileBatchResponseSchema = responseSchema(profileBatchItemSchema, 30);
 const standardErrorSchema = z.object({
     schemaVersion: z.literal(1),
     code: z.enum([
@@ -264,7 +333,19 @@ type WorkerResponse<T> = {
     items: T[];
 };
 
+export type SelfHostedAuthProfileBatchItem = z.infer<typeof profileBatchItemSchema>;
+
 export interface SelfHostedAuthWorkerClient {
+    getProfile(
+        username: string,
+        mediaLimit: number,
+        options: SelfHostedAuthWorkerRequestOptions
+    ): Promise<WorkerResponse<InstagramProfile>>;
+    getProfilesBatch(
+        usernames: readonly string[],
+        mediaLimit: number,
+        options: SelfHostedAuthWorkerRequestOptions
+    ): Promise<WorkerResponse<SelfHostedAuthProfileBatchItem>>;
     getRelationship(
         side: 'followers' | 'following',
         username: string,
@@ -353,6 +434,24 @@ function validatedPostUrls(values: readonly string[]): string[] {
         throw new Error('SCRAPING_CONFIG_ERROR: authenticated scraper post URLs are invalid.');
     }
     return canonical;
+}
+
+function validatedUsernames(values: readonly string[]): string[] {
+    if (values.length < 1 || values.length > 30) {
+        throw new Error('SCRAPING_CONFIG_ERROR: authenticated scraper usernames are invalid.');
+    }
+    const usernames = values.map(validatedUsername);
+    if (new Set(usernames).size !== usernames.length) {
+        throw new Error('SCRAPING_CONFIG_ERROR: authenticated scraper usernames are invalid.');
+    }
+    return usernames;
+}
+
+function validatedMediaLimit(value: number): number {
+    if (!Number.isSafeInteger(value) || value < 0 || value > 10) {
+        throw new Error('SCRAPING_CONFIG_ERROR: authenticated scraper mediaLimit is out of range.');
+    }
+    return value;
 }
 
 function validatedRequestIdentity(
@@ -445,6 +544,32 @@ export function createSelfHostedAuthWorkerClient(
     };
 
     return {
+        getProfile(username, mediaLimit, options) {
+            const identity = validatedRequestIdentity(options);
+            return request(
+                '/v1/profiles/profile',
+                {
+                    ...identity,
+                    username: validatedUsername(username),
+                    mediaLimit: validatedMediaLimit(mediaLimit),
+                },
+                profileResponseSchema,
+                options
+            );
+        },
+        getProfilesBatch(usernames, mediaLimit, options) {
+            const identity = validatedRequestIdentity(options);
+            return request(
+                '/v1/profiles',
+                {
+                    ...identity,
+                    usernames: validatedUsernames(usernames),
+                    mediaLimit: validatedMediaLimit(mediaLimit),
+                },
+                profileBatchResponseSchema,
+                options
+            );
+        },
         getRelationship(side, username, limit, options) {
             const identity = validatedRequestIdentity(options);
             return request(

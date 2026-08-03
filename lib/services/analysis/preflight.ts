@@ -1,4 +1,4 @@
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { z } from 'zod';
 import { supabaseAdmin } from '@/lib/supabase/admin';
 import {
@@ -43,6 +43,8 @@ import {
 } from './test-entitlement';
 import { getSelfHostedProfileSummary } from '@/lib/services/instagram/providers/selfhosted';
 import { getApifyProfileSummary } from '@/lib/services/instagram/providers/apify';
+import { selfHostedAuthProvider } from '@/lib/services/instagram/providers/selfhosted-auth';
+import { getAnalysisV2PaidCollectionProvider } from '@/lib/services/instagram/config';
 import { selectAnalysisV2ApifyCredentialSlot } from '@/lib/services/instagram/providers/apify-relationship';
 import {
     classifyWebProfileFailure,
@@ -55,6 +57,7 @@ import {
 } from '@/lib/services/media/image-proxy-token';
 import type { InstagramProfile } from '@/lib/types/instagram';
 import type { ProviderRunCheckpoint } from '@/lib/services/instagram/providers/types';
+import type { ProviderCallContext } from '@/lib/services/instagram/providers/types';
 import {
     PREFLIGHT_PROVIDER_DEADLINE_MS,
     PREFLIGHT_WORKER_LEASE_SECONDS,
@@ -1281,6 +1284,21 @@ export interface ClassifiedPreflightError {
     paidFallbackEligible: boolean;
 }
 
+function preflightSelfHostedAuthIdentity(input: {
+    preflightId: string;
+    inputHash: string;
+}): NonNullable<ProviderCallContext['selfHostedAuthIdentity']> {
+    const digest = createHash('sha256').update([
+        'analysis-v2-preflight-selfhosted-auth-profile-v1',
+        input.preflightId.toLowerCase(),
+        input.inputHash,
+    ].join('\n'), 'utf8').digest('hex');
+    return {
+        operationKey: `target-profile:${digest}`,
+        inputHash: input.inputHash,
+    };
+}
+
 const PREFLIGHT_FALLBACK_MAX_WAIT_SECONDS = 75;
 
 export function classifyPreflightError(error: unknown): ClassifiedPreflightError {
@@ -1511,6 +1529,10 @@ export async function processPreflight(
     dependencies: {
         store?: PreflightStore;
         getProfile?: typeof getSelfHostedProfileSummary;
+        getAuthenticatedProfile?: (
+            username: string,
+            context: ProviderCallContext
+        ) => Promise<InstagramProfile | null>;
         getFallbackProfile?: typeof getApifyProfileSummary;
         providerRunStore?: PreflightProviderRunStore;
         betaCreditCoordinator?: BetaApifyPreflightCoordinator;
@@ -1559,6 +1581,8 @@ export async function processPreflight(
     > = {};
     try {
         const isBetatest = claim.analysisEntryChannel === 'betatest';
+        const useAuthenticatedProfile = !isBetatest
+            && getAnalysisV2PaidCollectionProvider(dependencies.env) === 'selfhosted_auth';
         const betaHold = isBetatest
             ? await dependencies.betaCreditCoordinator?.reuse(claim.preflightId)
             : undefined;
@@ -1612,6 +1636,35 @@ export async function processPreflight(
                 claim.targetInstagramId,
                 fallbackCallContext(bound.checkpoint, workerStartedAt)
             );
+        } else if (isBetatest) {
+            const identity = preflightProviderIdentity(
+                betaHold?.credentialSlot
+                ?? selectAnalysisV2ApifyCredentialSlot(dependencies.env)
+            );
+            const bound = await bindPreflightProviderRunCheckpoint({
+                store: providerRuns,
+                claim,
+                inputHash,
+                identity,
+            });
+            profile = await (dependencies.getFallbackProfile ?? getApifyProfileSummary)(
+                claim.targetInstagramId,
+                fallbackCallContext(bound.checkpoint, workerStartedAt)
+            );
+        } else if (useAuthenticatedProfile) {
+            const authenticatedProvider = dependencies.getAuthenticatedProfile
+                ?? selfHostedAuthProvider.getProfileSummary;
+            if (!authenticatedProvider) {
+                throw new Error('SCRAPING_CONFIG_ERROR: authenticated profile summary is unavailable.');
+            }
+            profile = await authenticatedProvider(claim.targetInstagramId, {
+                selfHostedAuthIdentity: preflightSelfHostedAuthIdentity({
+                    preflightId: claim.preflightId,
+                    inputHash,
+                }),
+                recordUsage: () => undefined,
+            });
+            if (profile) assertMatchingProfile(profile, claim.targetInstagramId);
         } else {
             assertPreflightRuntimePolicy(dependencies.env);
             try {

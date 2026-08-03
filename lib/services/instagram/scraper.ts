@@ -19,6 +19,7 @@ import type {
     ScraperProvider,
     ScraperTelemetryEvent,
     ScraperTelemetryHook,
+    SelfHostedAuthOperationIdentity,
 } from './providers/types';
 import {
     failedProfileAttempt,
@@ -86,6 +87,10 @@ export interface ProfilesBatchV2Options {
     onProfileResolved?: ScrapeRequestOptions['onProfileResolved'];
     /** Paid selfhosted-auth collection disables the otherwise durable Apify fallback. */
     allowApifyFallback?: boolean;
+    /** V2 selects authenticated profile collection only for the authenticated paid route. */
+    primaryProvider?: Extract<ProviderName, 'selfhosted' | 'selfhosted_auth'>;
+    /** Required by the authenticated profile worker; forwarded unchanged to its durable ledger. */
+    selfHostedAuthIdentity?: SelfHostedAuthOperationIdentity;
     resume?: ProfilesBatchV2Resume;
     persistAttemptOutcomes(snapshot: ProfilesBatchV2AttemptSnapshot): Promise<void>;
 }
@@ -825,20 +830,21 @@ export async function getProfilesBatchV2(
     }
     const requestedUsernames = Object.freeze(canonicalV2ProfileUsernames(usernames));
     const allowApifyFallback = options.allowApifyFallback ?? true;
+    const primaryProvider = options.primaryProvider ?? 'selfhosted';
     const onTelemetry = v2TelemetryHook(options);
     let candidateFailureEvents = 0;
-    const primary = providers.selfhosted;
+    const primary = providers[primaryProvider];
     const fallback = providers.apify;
     if (
         !primary
-        || primary.name !== 'selfhosted'
+        || primary.name !== primaryProvider
         || primary.paid !== false
         || !fallback
         || fallback.name !== 'apify'
         || fallback.paid !== true
     ) {
         throw new Error(
-            'SCRAPING_CONFIG_ERROR: V2 profiles require free selfhosted primary and paid Apify fallback.'
+            'SCRAPING_CONFIG_ERROR: V2 profiles require a free primary and paid Apify fallback.'
         );
     }
     if (options.providerRun?.logicalProvider && options.providerRun.logicalProvider !== 'apify') {
@@ -889,6 +895,7 @@ export async function getProfilesBatchV2(
                 onTelemetry,
                 onProfileStart: options.onProfileStart,
                 onProfileResolved: options.onProfileResolved,
+                selfHostedAuthIdentity: options.selfHostedAuthIdentity,
             }
         );
         if (primaryAttempt.paidRunBarrierError) throw primaryAttempt.paidRunBarrierError;

@@ -104,6 +104,22 @@ describe('getScraperConfig', () => {
             SELFHOSTED_AUTH_ENABLED: 'yes',
         })).toThrow('SELFHOSTED_AUTH_ENABLED');
     });
+
+    it('permits authenticated profiles only behind the authenticated-worker kill switch', () => {
+        expect(() => getScraperConfig({
+            SCRAPER_PROFILE: 'selfhosted_auth',
+        })).toThrow('SELFHOSTED_AUTH_ENABLED');
+        expect(getScraperConfig({
+            SELFHOSTED_AUTH_ENABLED: 'true',
+            SCRAPER_PROFILE: 'selfhosted_auth',
+            SCRAPER_PROFILES_BATCH: 'selfhosted_auth',
+        })).toMatchObject({
+            profile: 'selfhosted_auth',
+            profilesBatch: 'selfhosted_auth',
+        });
+        expect(AUTOMATIC_FALLBACK.profile?.selfhosted_auth).toBeUndefined();
+        expect(AUTOMATIC_FALLBACK.profilesBatch?.selfhosted_auth).toBeUndefined();
+    });
 });
 
 describe('getInteractionScraperConfig', () => {

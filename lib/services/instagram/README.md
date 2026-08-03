@@ -6,20 +6,20 @@ This module collects public Instagram data through direct public profile reads, 
 
 | Capability | Default | Allowed operators | Automatic fallback |
 |---|---|---|---|
-| `profile` | `selfhosted` | `selfhosted`, `apify` | `selfhosted -> apify` |
-| `profilesBatch` | `selfhosted` | `selfhosted`, `apify` | `selfhosted -> apify` |
+| `profile` | `selfhosted` | `selfhosted`, `selfhosted_auth`, `apify` | `selfhosted -> apify` |
+| `profilesBatch` | `selfhosted` | `selfhosted`, `selfhosted_auth`, `apify` | `selfhosted -> apify` |
 | `followers` | `apify` | `apify`, `flashapi`, `coderx`, `selfhosted_auth` | `selfhosted_auth -> apify` |
 | `following` | `apify` | `apify`, `flashapi`, `coderx`, `rapidapi`, `selfhosted_auth` | `selfhosted_auth -> apify` |
 | `likers` | `apify` | `apify`, `selfhosted_auth` | `selfhosted_auth -> apify` |
 | `comments` | `apify` | `apify`, `selfhosted_auth` | `selfhosted_auth -> apify` |
 
-`profile` and `profilesBatch` make one `selfhosted -> apify` fallback attempt by default. Analysis V2 paid collection overrides that fallback to off whenever all four paid selectors use `selfhosted_auth`, so a paid authenticated-worker failure never consumes Apify. Beta requests with the frozen free-pool policy retain their Apify fallback and pinned free credential slots. An Apify failure never switches to another provider. FlashAPI, CoderX, and the deprecated Stable RapidAPI adapter are explicit operator choices only. `selfhosted` supports direct public profile and profile-batch reads; it has no relationship-list implementation.
+`profile` and `profilesBatch` make one `selfhosted -> apify` fallback attempt by default. `selfhosted_auth` profile selections never have an automatic Apify fallback. Analysis V2 uses authenticated profile summary/batches whenever its paid collection route is `selfhosted_auth`, so a paid authenticated-worker failure never consumes Apify; profile checkpoint rows keep their existing `selfhosted` source label for database compatibility. Beta requests remain Apify-only for preflight and retain their frozen free-pool routing. An Apify failure never switches to another provider. FlashAPI, CoderX, and the deprecated Stable RapidAPI adapter are explicit operator choices only. `selfhosted` supports direct public profile and profile-batch reads; it has no relationship-list implementation.
 
 Unset `SCRAPER_*` values use the production defaults above. Explicit invalid provider or fallback values fail closed before a paid call. `SCRAPER_FALLBACK=false` disables both the profile fallback and the opt-in `selfhosted_auth -> apify` fallback.
 
 ## Opt-in authenticated worker
 
-`selfhosted_auth` is a separately deployed, single-account Cloud Run worker for the explicitly selected relationship and interaction capabilities. It is disabled by default: `SELFHOSTED_AUTH_ENABLED=false` means the application does not construct a worker client or send a request. The application calls the worker with a Google ID token for `SELFHOSTED_AUTH_WORKER_OIDC_AUDIENCE`; its Cloud Run service IAM allows only the configured caller runtime service account, never unauthenticated access. The worker endpoint must be an HTTPS origin and its client timeout is bounded to 1,000–300,000 ms (default 240,000 ms). Cloud Run accepts at most five in-flight requests in one instance, while the worker serializes actual Instagram account operations to exactly one at a time.
+`selfhosted_auth` is a separately deployed, single-account Cloud Run worker for the explicitly selected profile, relationship, and interaction capabilities. Its profile API provides an authenticated summary/full profile request and a bounded 30-username batch, with explicit `not_found` batch outcomes. It is disabled by default: `SELFHOSTED_AUTH_ENABLED=false` means the application does not construct a worker client or send a request. The application calls the worker with a Google ID token for `SELFHOSTED_AUTH_WORKER_OIDC_AUDIENCE`; its Cloud Run service IAM allows only the configured caller runtime service account, never unauthenticated access. The worker endpoint must be an HTTPS origin and its client timeout is bounded to 1,000–300,000 ms (default 240,000 ms). Cloud Run accepts at most five in-flight requests in one instance, while the worker serializes actual Instagram account operations to exactly one at a time.
 
 This path reduces vendor spend but cannot make Instagram suspension risk zero. A rate-limit signal opens a process cooldown, and challenge or authentication failures quarantine the account until an operator restart/recovery; the application can then use the durable Apify fallback when enabled. Use only the designated disposable account and keep the kill switch closed until a canary is reviewed.
 

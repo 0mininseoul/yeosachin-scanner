@@ -72,6 +72,49 @@ afterEach(() => {
 });
 
 describe('getProfilesBatchV2', () => {
+    it('uses authenticated profiles as the paid-route primary without binding Apify fallback', async () => {
+        const primary = vi.fn(async (usernames: string[]) => usernames.map(username =>
+            failedProfileAttempt({
+                requestedUsername: username,
+                source: 'selfhosted',
+                error: new Error('authenticated profile unavailable'),
+                requestCount: 1,
+                latencyMs: 1,
+            })
+        ));
+        const fallback = vi.fn();
+        __setProvidersForTest({ SELFHOSTED_AUTH_ENABLED: 'true' }, {
+            selfhosted_auth: provider({
+                name: 'selfhosted_auth',
+                paid: false,
+                getProfilesBatchOutcomes: primary,
+            }),
+            apify: provider({ name: 'apify', paid: true, getProfilesBatch: fallback }),
+        });
+
+        await getProfilesBatchV2(['alice'], {
+            primaryProvider: 'selfhosted_auth',
+            allowApifyFallback: false,
+            selfHostedAuthIdentity: {
+                operationKey: `target-profile:${'a'.repeat(64)}`,
+                inputHash: 'b'.repeat(64),
+            },
+            persistAttemptOutcomes: async () => undefined,
+        });
+
+        expect(primary).toHaveBeenCalledWith(
+            ['alice'],
+            1,
+            expect.objectContaining({
+                selfHostedAuthIdentity: {
+                    operationKey: `target-profile:${'a'.repeat(64)}`,
+                    inputHash: 'b'.repeat(64),
+                },
+            })
+        );
+        expect(fallback).not.toHaveBeenCalled();
+    });
+
     it('does not start the Apify profile fallback when a paid authenticated route disables it', async () => {
         const primary = vi.fn(async (usernames: string[]) => usernames.map(username =>
             failedProfileAttempt({

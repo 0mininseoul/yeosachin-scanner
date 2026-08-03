@@ -194,6 +194,123 @@ describe('authenticated self-hosted worker client', () => {
         );
     });
 
+    it('sends the bounded authenticated profile-batch contract and rejects unknown profile fields', async () => {
+        const profile = {
+            username: 'target.user',
+            fullName: 'Target User',
+            bio: 'bio',
+            profilePicUrl: 'https://cdn.example/avatar.jpg',
+            followersCount: 12,
+            followingCount: 3,
+            postsCount: 1,
+            isPrivate: false,
+            isVerified: true,
+            latestPosts: [{
+                id: 'post-1',
+                shortCode: 'Abc123',
+                type: 'image',
+                likesCount: 7,
+                commentsCount: 2,
+                likesCountHidden: true,
+                commentsCountHidden: true,
+                timestamp: '2026-08-03T00:00:00.000Z',
+                taggedUsers: [],
+                mentionedUsers: [],
+            }],
+        };
+        const response = {
+            schemaVersion: 1,
+            runId: relationshipResponse.runId,
+            accountSlot: 'primary',
+            items: [
+                { username: 'target.user', status: 'available', profile },
+                { username: 'missing.user', status: 'not_found' },
+            ],
+        };
+        const fetch = vi.fn(async () => new Response(JSON.stringify(response), { status: 200 }));
+        const client = createSelfHostedAuthWorkerClient({
+            config,
+            fetch,
+            getAuthorizationHeader: async () => 'Bearer token',
+        });
+        const operationKey = `profiles:${'c'.repeat(64)}`;
+
+        await expect(client.getProfilesBatch(
+            ['Target.User', 'missing.user'],
+            10,
+            { operationKey, inputHash: 'd'.repeat(64) }
+        )).resolves.toEqual(response);
+        expect(fetch).toHaveBeenCalledWith(
+            'https://worker.example/v1/profiles',
+            expect.objectContaining({
+                body: JSON.stringify({
+                    operationKey,
+                    inputHash: 'd'.repeat(64),
+                    usernames: ['target.user', 'missing.user'],
+                    mediaLimit: 10,
+                }),
+            })
+        );
+
+        const malformed = createSelfHostedAuthWorkerClient({
+            config,
+            fetch: async () => new Response(JSON.stringify({
+                ...response,
+                items: [{
+                    username: 'target.user',
+                    status: 'available',
+                    profile: { ...profile, unexpected: true },
+                }],
+            }), { status: 200 }),
+            getAuthorizationHeader: async () => 'Bearer token',
+        });
+        await expect(malformed.getProfilesBatch(
+            ['target.user'],
+            10,
+            { operationKey, inputHash: 'd'.repeat(64) }
+        )).rejects.toMatchObject({ code: 'invalid_response', retryable: false });
+    });
+
+    it('permits a summary-only authenticated profile request without collecting media', async () => {
+        const profile = {
+            username: 'target.user',
+            followersCount: 12,
+            followingCount: 3,
+            postsCount: 1,
+            isPrivate: false,
+            isVerified: false,
+            latestPosts: [],
+        };
+        const fetch = vi.fn(async () => new Response(JSON.stringify({
+            schemaVersion: 1,
+            runId: relationshipResponse.runId,
+            accountSlot: 'primary',
+            items: [profile],
+        }), { status: 200 }));
+        const client = createSelfHostedAuthWorkerClient({
+            config,
+            fetch,
+            getAuthorizationHeader: async () => 'Bearer token',
+        });
+
+        await expect(client.getProfile(
+            'target.user',
+            0,
+            { operationKey: `target-profile:${'e'.repeat(64)}`, inputHash: 'f'.repeat(64) }
+        )).resolves.toMatchObject({ items: [profile] });
+        expect(fetch).toHaveBeenCalledWith(
+            'https://worker.example/v1/profiles/profile',
+            expect.objectContaining({
+                body: JSON.stringify({
+                    operationKey: `target-profile:${'e'.repeat(64)}`,
+                    inputHash: 'f'.repeat(64),
+                    username: 'target.user',
+                    mediaLimit: 0,
+                }),
+            })
+        );
+    });
+
     it('classifies queue-full and quarantined responses for deterministic Apify fallback', async () => {
         for (const [status, code, retryable] of [
             [429, 'queue_full', true],

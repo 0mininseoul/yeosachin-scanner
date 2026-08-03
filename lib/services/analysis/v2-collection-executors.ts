@@ -711,6 +711,26 @@ function profileFallbackIdentity(usernames: readonly string[]): string {
     return canonicalProviderInput(['profile-fallback-v2', ...usernames]);
 }
 
+function selfHostedAuthProfileIdentity(
+    claim: AnalysisV2CollectionJobClaim,
+    usernames: readonly string[]
+) {
+    const operation = 'target-profile';
+    const providerInput = canonicalProviderInput([
+        'selfhosted-auth-profile-v1',
+        claim.jobInputHash,
+        ...usernames,
+    ]);
+    const operationKey = createAnalysisV2ProviderOperationKey(operation, providerInput);
+    const inputHash = createAnalysisV2ProviderInputHash(providerInput);
+    return createAnalysisV2SelfHostedAuthWorkerIdentity({
+        requestId: claim.requestId,
+        jobKey: claim.jobKey,
+        operationKey,
+        inputHash,
+    });
+}
+
 async function durableProfiles(input: {
     dependencies: ResolvedDependencies;
     claim: AnalysisV2CollectionJobClaim;
@@ -729,6 +749,8 @@ async function durableProfiles(input: {
     } = input;
     const allowApifyFallback = isBetaFreePoolRequest(request)
         || collectionProviderForRequest(request, dependencies) === 'apify';
+    const authenticatedProfiles = !isBetaFreePoolRequest(request)
+        && collectionProviderForRequest(request, dependencies) === 'selfhosted_auth';
     const identity = profileIdentity(claim);
     let resume = await dependencies.profileCheckpointStore.load(identity);
     if (
@@ -789,6 +811,10 @@ async function durableProfiles(input: {
         await dependencies.getProfilesBatchV2(usernames, {
         requestId: claim.requestId,
         allowApifyFallback,
+        primaryProvider: authenticatedProfiles ? 'selfhosted_auth' : 'selfhosted',
+        ...(authenticatedProfiles ? {
+            selfHostedAuthIdentity: selfHostedAuthProfileIdentity(claim, usernames),
+        } : {}),
         onProfileStart,
         onProfileResolved,
         providerRun: mutableProviderRun,

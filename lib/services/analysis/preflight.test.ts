@@ -58,7 +58,7 @@ describe('betatest preflight credit fence', () => {
         }
     );
 
-    it('reuses the already prepared frozen beta hold before profile/provider work', async () => {
+    it('reuses the already prepared frozen beta hold before Apify-only profile work', async () => {
         const events: string[] = [];
         const coordinator: BetaApifyPreflightCoordinator = {
             reuse: vi.fn(async () => {
@@ -72,7 +72,7 @@ describe('betatest preflight credit fence', () => {
         };
         const claimed = claim({ analysisEntryChannel: 'betatest' });
         const store = workerStore(claimed);
-        const primary = vi.fn(async () => {
+        const apifyProfile = vi.fn(async () => {
             events.push('profile');
             return profile();
         });
@@ -80,13 +80,14 @@ describe('betatest preflight credit fence', () => {
         const outcome = await processPreflight(preflightId, {
             store,
             betaCreditCoordinator: coordinator,
-            getProfile: primary,
+            getProfile: vi.fn(() => { throw new Error('beta must not use public selfhosted'); }),
+            getFallbackProfile: apifyProfile,
             providerRunStore: providerRunStore(),
         });
 
         expect(events[0]).toBe('hold');
         expect(events).toContain('profile');
-        expect(primary).toHaveBeenCalled();
+        expect(apifyProfile).toHaveBeenCalled();
         expect(store.finalizeReady).toHaveBeenCalled();
         expect(outcome).toBe('ready');
     });
