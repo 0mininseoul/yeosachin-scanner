@@ -42,9 +42,6 @@ CREATE TABLE public.analysis_v2_selfhosted_auth_runs (
     )
 );
 
-CREATE INDEX idx_analysis_v2_selfhosted_auth_runs_request_job
-    ON public.analysis_v2_selfhosted_auth_runs(request_id, job_key, operation_key);
-
 COMMENT ON TABLE public.analysis_v2_selfhosted_auth_runs IS
     'RPC-only authenticated self-hosted scraper receipts and bounded public-result cache. This is not a paid-provider ledger.';
 
@@ -125,11 +122,11 @@ BEGIN
        OR p_run_id !~ '^[0-9a-f]{32}$'
        OR p_account_slot <> 'primary'
        OR pg_catalog.jsonb_typeof(p_items) <> 'array'
-       OR pg_catalog.jsonb_array_length(p_items) > CASE
+       OR pg_catalog.jsonb_array_length(p_items) > (CASE
             WHEN p_operation_key ~ '^relationship-' THEN 1200
             WHEN p_operation_key ~ '^target-comments:' THEN 150
             ELSE 1500
-       END
+       END)
        OR pg_catalog.octet_length(p_items::TEXT) > 4194304
        OR EXISTS (
             SELECT 1
@@ -195,7 +192,35 @@ BEGIN
         ) VALUES (
             p_request_id, p_job_key, p_operation_key, p_input_hash,
             p_claim_token, p_run_id, p_account_slot, p_items
-        ) RETURNING * INTO v_receipt;
+        ) ON CONFLICT DO NOTHING
+        RETURNING * INTO v_receipt;
+
+        -- A retry with the same claim may race between the initial SELECT and
+        -- INSERT. Treat the winner's identical receipt as an idempotent replay;
+        -- a run_id collision on a different operation remains a hard conflict.
+        IF NOT FOUND THEN
+            SELECT receipt.* INTO v_receipt
+            FROM public.analysis_v2_selfhosted_auth_runs AS receipt
+            WHERE receipt.request_id = p_request_id
+              AND receipt.job_key = p_job_key
+              AND receipt.operation_key = p_operation_key
+            FOR UPDATE;
+            IF NOT FOUND
+               OR v_receipt.input_hash IS DISTINCT FROM p_input_hash
+               OR v_receipt.run_id IS DISTINCT FROM p_run_id
+               OR v_receipt.account_slot IS DISTINCT FROM p_account_slot
+               OR v_receipt.items IS DISTINCT FROM p_items THEN
+                RAISE EXCEPTION USING
+                    MESSAGE = 'ANALYSIS_V2_SELFHOSTED_AUTH_RUN_CONFLICT', ERRCODE = 'P0001';
+            END IF;
+            UPDATE public.analysis_v2_selfhosted_auth_runs AS receipt
+            SET job_claim_token = p_claim_token,
+                updated_at = pg_catalog.clock_timestamp()
+            WHERE receipt.request_id = p_request_id
+              AND receipt.job_key = p_job_key
+              AND receipt.operation_key = p_operation_key
+            RETURNING receipt.* INTO v_receipt;
+        END IF;
     END IF;
 
     RETURN public.analysis_v2_selfhosted_auth_run_json(v_receipt);
