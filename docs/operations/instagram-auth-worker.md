@@ -88,7 +88,7 @@ SCRAPER_FALLBACK=false
 
 Do not use bearer mode in production. It is a local-development compatibility path, not the Cloud Run authorization mechanism.
 
-Analysis V2 treats the four paid collection selectors as one route: `followers`, `following`, `likers`, and `comments` must all be `selfhosted_auth` or all be `apify`. Mixed values are rejected before collection. With `selfhosted_auth`, `SCRAPER_FALLBACK=false` is required and an authenticated-worker error fails the paid request without creating an Apify run. The worker URL, matching OIDC audience, 1,000–300,000 ms timeout, and `SELFHOSTED_AUTH_ENABLED` kill switch are required non-secret values in the generated V2 runtime manifest.
+Analysis V2 treats the four paid collection selectors as one route: `followers`, `following`, `likers`, and `comments` must all be `selfhosted_auth` or all be `apify`. Mixed values are rejected before collection. With `selfhosted_auth`, `SCRAPER_FALLBACK=false` is required and an authenticated-worker error fails the paid request without creating an Apify run. That route requires the worker URL, matching OIDC audience, 1,000–300,000 ms timeout, and enabled `SELFHOSTED_AUTH_ENABLED` kill switch in the generated non-secret runtime manifest. An all-Apify rollback instead requires `SELFHOSTED_AUTH_ENABLED=false` and does not require worker URL, audience, or timeout configuration.
 
 Beta requests carrying `providerExecutionPolicy.mode=betatest_free_pool` are separate: relationship and interaction calls always use their request-frozen free Apify slots and budgets regardless of these global paid selectors. Their existing selfhosted profile primary may still use the frozen free Apify profile fallback.
 

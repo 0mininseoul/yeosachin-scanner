@@ -146,9 +146,6 @@ const globalGateEnabled = required('SELFHOSTED_PROFILE_GLOBAL_GATE_ENABLED');
 const globalMinIntervalMs = required('SELFHOSTED_PROFILE_GLOBAL_MIN_INTERVAL_MS');
 const globalResponseGuardMs = required('SELFHOSTED_PROFILE_GLOBAL_RESPONSE_GUARD_MS');
 const selfHostedAuthEnabled = required('SELFHOSTED_AUTH_ENABLED');
-const selfHostedAuthWorkerUrl = required('SELFHOSTED_AUTH_WORKER_URL');
-const selfHostedAuthWorkerAudience = required('SELFHOSTED_AUTH_WORKER_OIDC_AUDIENCE');
-const selfHostedAuthWorkerTimeoutMs = required('SELFHOSTED_AUTH_WORKER_TIMEOUT_MS');
 const scraperFollowers = required('SCRAPER_FOLLOWERS');
 const scraperFollowing = required('SCRAPER_FOLLOWING');
 const scraperLikers = required('SCRAPER_LIKERS');
@@ -207,15 +204,6 @@ const privateHttpsOrigin = (value, name) => {
   }
   return parsed.origin;
 };
-const workerOrigin = privateHttpsOrigin(selfHostedAuthWorkerUrl, 'SELFHOSTED_AUTH_WORKER_URL');
-if (privateHttpsOrigin(selfHostedAuthWorkerAudience, 'SELFHOSTED_AUTH_WORKER_OIDC_AUDIENCE') !== workerOrigin) {
-  throw new Error('SELFHOSTED_AUTH_WORKER_OIDC_AUDIENCE must match SELFHOSTED_AUTH_WORKER_URL');
-}
-if (!/^[1-9][0-9]*$/.test(selfHostedAuthWorkerTimeoutMs)
-  || Number(selfHostedAuthWorkerTimeoutMs) < 1000
-  || Number(selfHostedAuthWorkerTimeoutMs) > 300000) {
-  throw new Error('SELFHOSTED_AUTH_WORKER_TIMEOUT_MS must be an integer from 1000 through 300000');
-}
 const paidCollectionProviders = [
   scraperFollowers,
   scraperFollowing,
@@ -232,6 +220,33 @@ if (!['true', 'false'].includes(scraperFallback)) {
 if (scraperFollowers === 'selfhosted_auth' && scraperFallback !== 'false') {
   throw new Error('SCRAPER_FALLBACK must be false for selfhosted_auth paid collection');
 }
+let selfHostedAuthWorker: Record<string, string> = {};
+if (scraperFollowers === 'selfhosted_auth') {
+  if (selfHostedAuthEnabled !== 'true') {
+    throw new Error('SELFHOSTED_AUTH_ENABLED must be true for selfhosted_auth paid collection');
+  }
+  const workerOrigin = privateHttpsOrigin(
+    required('SELFHOSTED_AUTH_WORKER_URL'),
+    'SELFHOSTED_AUTH_WORKER_URL'
+  );
+  if (privateHttpsOrigin(
+    required('SELFHOSTED_AUTH_WORKER_OIDC_AUDIENCE'),
+    'SELFHOSTED_AUTH_WORKER_OIDC_AUDIENCE'
+  ) !== workerOrigin) {
+    throw new Error('SELFHOSTED_AUTH_WORKER_OIDC_AUDIENCE must match SELFHOSTED_AUTH_WORKER_URL');
+  }
+  const timeout = required('SELFHOSTED_AUTH_WORKER_TIMEOUT_MS');
+  if (!/^[1-9][0-9]*$/.test(timeout) || Number(timeout) < 1000 || Number(timeout) > 300000) {
+    throw new Error('SELFHOSTED_AUTH_WORKER_TIMEOUT_MS must be an integer from 1000 through 300000');
+  }
+  selfHostedAuthWorker = {
+    SELFHOSTED_AUTH_WORKER_URL: workerOrigin,
+    SELFHOSTED_AUTH_WORKER_OIDC_AUDIENCE: workerOrigin,
+    SELFHOSTED_AUTH_WORKER_TIMEOUT_MS: timeout,
+  };
+} else if (selfHostedAuthEnabled !== 'false') {
+  throw new Error('SELFHOSTED_AUTH_ENABLED must be false for Apify paid collection');
+}
 
 const runtime = {
   NEXT_PUBLIC_SUPABASE_URL: supabaseUrl,
@@ -247,9 +262,7 @@ const runtime = {
   SELFHOSTED_PROFILE_GLOBAL_MIN_INTERVAL_MS: globalMinIntervalMs,
   SELFHOSTED_PROFILE_GLOBAL_RESPONSE_GUARD_MS: globalResponseGuardMs,
   SELFHOSTED_AUTH_ENABLED: selfHostedAuthEnabled,
-  SELFHOSTED_AUTH_WORKER_URL: workerOrigin,
-  SELFHOSTED_AUTH_WORKER_OIDC_AUDIENCE: workerOrigin,
-  SELFHOSTED_AUTH_WORKER_TIMEOUT_MS: selfHostedAuthWorkerTimeoutMs,
+  ...selfHostedAuthWorker,
   SCRAPER_PROFILE: 'selfhosted',
   SCRAPER_PROFILES_BATCH: 'selfhosted',
   SCRAPER_FOLLOWERS: scraperFollowers,

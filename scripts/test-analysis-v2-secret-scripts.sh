@@ -657,6 +657,7 @@ sed \
   -e 's/^SCRAPER_LIKERS=.*/SCRAPER_LIKERS=apify/' \
   -e 's/^SCRAPER_COMMENTS=.*/SCRAPER_COMMENTS=apify/' \
   -e 's/^SCRAPER_FALLBACK=.*/SCRAPER_FALLBACK=true/' \
+  -e 's/^SELFHOSTED_AUTH_ENABLED=.*/SELFHOSTED_AUTH_ENABLED=false/' \
   "$temp_dir/source.env" >"$temp_dir/apify-rollback-manifest.env"
 env \
   "PATH=$PATH" \
@@ -668,6 +669,24 @@ env \
 assert_contains "$runtime_file" 'SCRAPER_FOLLOWERS: "apify"'
 assert_contains "$runtime_file" 'SCRAPER_LIKERS: "apify"'
 assert_contains "$runtime_file" 'SCRAPER_FALLBACK: "true"'
+
+sed \
+  -e 's/^SELFHOSTED_AUTH_ENABLED=.*/SELFHOSTED_AUTH_ENABLED=false/' \
+  -e '/^SELFHOSTED_AUTH_WORKER_URL=/d' \
+  -e '/^SELFHOSTED_AUTH_WORKER_OIDC_AUDIENCE=/d' \
+  -e '/^SELFHOSTED_AUTH_WORKER_TIMEOUT_MS=/d' \
+  "$temp_dir/apify-rollback-manifest.env" >"$temp_dir/apify-no-auth-manifest.env"
+env \
+  "PATH=$PATH" \
+  "ANALYSIS_V2_MANIFEST_SOURCE_ENV_FILE=$temp_dir/apify-no-auth-manifest.env" \
+  "ANALYSIS_V2_ENV_OUTPUT_DIR=$temp_dir/generated" \
+  "ANALYSIS_V2_WORKER_SOURCE_DIR=$repo_dir" \
+  bash "$script_dir/generate-analysis-v2-env-files.sh" \
+  >"$temp_dir/apify-no-auth-generator.out"
+assert_contains "$runtime_file" 'SELFHOSTED_AUTH_ENABLED: "false"'
+assert_not_contains "$runtime_file" 'SELFHOSTED_AUTH_WORKER_URL:'
+assert_not_contains "$runtime_file" 'SELFHOSTED_AUTH_WORKER_OIDC_AUDIENCE:'
+assert_not_contains "$runtime_file" 'SELFHOSTED_AUTH_WORKER_TIMEOUT_MS:'
 
 env \
   "PATH=$PATH" \

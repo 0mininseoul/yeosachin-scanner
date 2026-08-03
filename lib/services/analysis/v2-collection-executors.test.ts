@@ -2779,6 +2779,40 @@ describe('analysis V2 concrete collection executors', () => {
             .resolves.toBe(await profileBatchResultHashOf(resume));
     });
 
+    it('never binds an Apify profile fallback or repair for paid selfhosted_auth', async () => {
+        const usernames = Array.from({ length: 10 }, (_, index) => `user${index}`);
+        const failed = usernames.slice(-2);
+        const topology = createAnalysisV2CollectionTopology('profiles', usernames);
+        const store = inMemoryProfileStore(
+            completedFallbackResume(usernames, failed.map(username => incompleteFailure(username)))
+        );
+        const runProfileRepair = repairRunner(repairSuccess);
+        const runs = providerStore();
+
+        await expect(createAnalysisV2ProfileFetchExecutor({
+            requestContextStore: contextStore(requestContext()),
+            evidenceStore: relationshipEvidence(usernames),
+            profileCheckpointStore: store.store,
+            runProfileRepair,
+            providerRunStore: runs.value,
+            env: {
+                SELFHOSTED_AUTH_ENABLED: 'true',
+                SCRAPER_FOLLOWERS: 'selfhosted_auth',
+                SCRAPER_FOLLOWING: 'selfhosted_auth',
+                SCRAPER_LIKERS: 'selfhosted_auth',
+                SCRAPER_COMMENTS: 'selfhosted_auth',
+                SCRAPER_FALLBACK: 'false',
+            },
+        })(stageContext(
+            'profile_fetch',
+            state({ relationships: relationshipManifest(topology) }),
+            0
+        ))).rejects.toThrow('ANALYSIS_V2_PROFILE_EVIDENCE_INCOMPLETE');
+
+        expect(runProfileRepair).not.toHaveBeenCalled();
+        expect(runs.bindAdapterCheckpoint).not.toHaveBeenCalled();
+    });
+
     it('repairs a below-gate batch and passes once the repair succeeds', async () => {
         const usernames = Array.from({ length: 10 }, (_, index) => `user${index}`);
         const failed = usernames.slice(-2);

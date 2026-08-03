@@ -803,7 +803,9 @@ async function durableProfiles(input: {
                     requestedUsernames: snapshot.requestedUsernames,
                     results: checkpointAttemptResults(snapshot.results),
                 });
-                await bindFallback(resume.frozenUnresolvedUsernames);
+                if (allowApifyFallback) {
+                    await bindFallback(resume.frozenUnresolvedUsernames);
+                }
                 return;
             }
             resume = await dependencies.profileCheckpointStore.checkpointFallback({
@@ -837,6 +839,10 @@ async function repairProfileBatch(input: {
     resume: AnalysisV2ProfileFetchResume;
 }): Promise<AnalysisV2ProfileFetchResume> {
     const { dependencies, claim, request, usernames, resume } = input;
+    if (!isBetaFreePoolRequest(request)
+        && collectionProviderForRequest(request, dependencies) === 'selfhosted_auth') {
+        return resume;
+    }
     // A completed repair is terminal for the batch. This short-circuit mirrors durableProfiles'
     // fallback guard so a retried job never starts a second paid repair run.
     if (resume.repairCapturedAt !== null) return resume;
