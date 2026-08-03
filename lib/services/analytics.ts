@@ -61,6 +61,11 @@ type PropertyValidator = (value: unknown) => AnalyticsScalar | undefined;
 const API_KEY_PATTERN = /^[0-9a-f]{32}$/i;
 const CANONICAL_UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const MAX_QUEUED_EVENTS = 50;
+// Navigation to an external checkout/result page can unload the document before the
+// Unified SDK's asynchronous timeline reaches its transport. Keep this best-effort wait
+// short enough that it cannot add a material delay to the product flow.
+const ANALYTICS_FLUSH_TIMEOUT_MS = 500;
+const ANALYTICS_IDENTITY_WAIT_INTERVAL_MS = 25;
 const SESSION_REPLAY_MAX_SAMPLE_RATE = 1;
 const SESSION_REPLAY_SAFE_PATHS = new Set([
     '/',
@@ -460,6 +465,38 @@ function flushQueue(): void {
     }
 }
 
+function waitForAnalyticsIdentity(deadline: number): Promise<boolean> {
+    if (identityReady) return Promise.resolve(true);
+    if (identityDeliveryBlocked || (!initializedSdk && !initializationPromise)) {
+        return Promise.resolve(false);
+    }
+
+    return new Promise(resolve => {
+        let timeout: ReturnType<typeof setTimeout> | undefined;
+        const poll = () => {
+            if (identityReady) {
+                if (timeout !== undefined) clearTimeout(timeout);
+                resolve(true);
+                return;
+            }
+            if (
+                identityDeliveryBlocked
+                || (!initializedSdk && !initializationPromise)
+                || Date.now() >= deadline
+            ) {
+                if (timeout !== undefined) clearTimeout(timeout);
+                resolve(false);
+                return;
+            }
+            timeout = setTimeout(poll, Math.min(
+                ANALYTICS_IDENTITY_WAIT_INTERVAL_MS,
+                Math.max(1, deadline - Date.now()),
+            ));
+        };
+        poll();
+    });
+}
+
 function enqueue(eventName: AnalyticsEvent, properties: AnalyticsProperties): void {
     if (queuedEvents.length === MAX_QUEUED_EVENTS) queuedEvents.shift();
     queuedEvents.push({ eventName, identityRevision, properties });
@@ -786,6 +823,41 @@ export function trackEvent(
         }
     } catch {
         // Validation and analytics must never interrupt the product flow.
+    }
+}
+
+/**
+ * Best-effort drain of the initialized SDK before a document-unloading navigation.
+ *
+ * This deliberately preserves the identity fence: events are never flushed while the
+ * SDK is unavailable, identity has not been resolved, or delivery has been blocked.
+ * The timeout prevents analytics from holding up checkout/result navigation.
+ */
+export async function flushAnalytics(): Promise<void> {
+    if (!configuredApiKey() || identityDeliveryBlocked) return;
+
+    const deadline = Date.now() + ANALYTICS_FLUSH_TIMEOUT_MS;
+    if (!identityReady && !await waitForAnalyticsIdentity(deadline)) return;
+    if (!initializedSdk || !identityReady || identityDeliveryBlocked) return;
+
+    let timeout: ReturnType<typeof setTimeout> | undefined;
+    try {
+        flushQueue();
+        const flushResult = initializedSdk.flush();
+        const sdkFlushPromise = flushResult?.promise
+            ? Promise.resolve(flushResult.promise).catch(() => undefined)
+            : Promise.resolve();
+        const remaining = Math.max(1, deadline - Date.now());
+        await Promise.race([
+            sdkFlushPromise,
+            new Promise<void>(resolve => {
+                timeout = setTimeout(resolve, remaining);
+            }),
+        ]);
+    } catch {
+        // Analytics delivery is best-effort and must never block the product flow.
+    } finally {
+        if (timeout !== undefined) clearTimeout(timeout);
     }
 }
 

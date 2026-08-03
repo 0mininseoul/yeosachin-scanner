@@ -5,7 +5,7 @@ import { useRouter } from 'next/navigation';
 import { useEffect, useRef, useState } from 'react';
 import { BrandMark, CaseCard, Eyebrow, PrimaryButton } from '@/components/case-ui';
 import type { EarlybirdOrderStatusDto } from '@/lib/services/earlybird/order-status';
-import { EVENTS, trackEvent } from '@/lib/services/analytics';
+import { EVENTS, flushAnalytics, trackEvent } from '@/lib/services/analytics';
 import {
     availableAnalyticsStorage,
     tryClaimAnalyticsEvent,
@@ -44,17 +44,6 @@ export function EarlybirdStatus({ order }: { order: EarlybirdOrderStatusDto }) {
         shouldAutomaticallyRedirectEarlybirdStatus(order);
 
     useEffect(() => {
-        if (!isAutomaticFulfillmentBridge) return;
-        const nextUrl = order.resultUrl ?? order.progressUrl;
-        if (nextUrl) {
-            router.replace(nextUrl);
-            return;
-        }
-        const timer = window.setTimeout(() => router.refresh(), 1_500);
-        return () => window.clearTimeout(timer);
-    }, [isAutomaticFulfillmentBridge, order.progressUrl, order.resultUrl, router]);
-
-    useEffect(() => {
         if (!shouldRefreshPaymentPendingStatus) return;
         return scheduleEarlybirdStatusSnapshotRefresh(() => router.refresh());
     }, [router, shouldRefreshPaymentPendingStatus]);
@@ -90,6 +79,22 @@ export function EarlybirdStatus({ order }: { order: EarlybirdOrderStatusDto }) {
             }
         }
     }, [order]);
+
+    useEffect(() => {
+        if (!isAutomaticFulfillmentBridge) return;
+        const nextUrl = order.resultUrl ?? order.progressUrl;
+        if (nextUrl) {
+            let active = true;
+            void flushAnalytics().finally(() => {
+                if (active) router.replace(nextUrl);
+            });
+            return () => {
+                active = false;
+            };
+        }
+        const timer = window.setTimeout(() => router.refresh(), 1_500);
+        return () => window.clearTimeout(timer);
+    }, [isAutomaticFulfillmentBridge, order.progressUrl, order.resultUrl, router]);
 
     const handleCheckoutRecovery = async () => {
         setCheckoutRecoveryError(null);
