@@ -39,6 +39,12 @@ const autoStartCheckoutMigration = migration(
 const pricingV3Migration = migration(
     '20260803200000_update_earlybird_pricing_v3.sql'
 );
+const refundedMigration = migration(
+    '20260803193000_finalize_groble_refunded_webhooks.sql'
+);
+const refundBeforeCompletionMigration = migration(
+    '20260803203000_reconcile_refund_before_groble_completion.sql'
+);
 
 const bootstrap = `
 CREATE ROLE anon NOLOGIN;
@@ -200,6 +206,14 @@ async function createPricingV3Database(): Promise<PGlite> {
     return db;
 }
 
+async function createRefundBeforeCompletionDatabase(): Promise<PGlite> {
+    const db = await createReconciliationDatabase();
+    await db.exec(pricingV3Migration);
+    await db.exec(refundedMigration);
+    await db.exec(refundBeforeCompletionMigration);
+    return db;
+}
+
 async function asService<T>(
     db: PGlite,
     sql: string,
@@ -336,7 +350,8 @@ async function finalize(
     seed: Seed,
     planId: PaidPlanId,
     index: number,
-    paidAmount: number
+    paidAmount: number,
+    paymentId = `pricing_payment_${index}`
 ): Promise<FinalizeRow> {
     const result = await asService<FinalizeRow>(
         db,
@@ -347,7 +362,7 @@ async function finalize(
         [
             `pricing_event_${index}`,
             `pricing_idem_${index}`,
-            `pricing_payment_${index}`,
+            paymentId,
             seed.email,
             seed.phone,
             seed.rawPhone,
@@ -430,6 +445,32 @@ async function finalizeLegacy(
     return result.rows[0];
 }
 
+async function refundBeforeCompletion(
+    db: PGlite,
+    paymentId: string,
+    index: number,
+    paidAmount: number,
+    partialRefund = false
+): Promise<FinalizeRow> {
+    const result = await asService<FinalizeRow>(
+        db,
+        `SELECT * FROM public.finalize_earlybird_groble_refund(
+            $1, $2, 'payment.refunded', pg_catalog.clock_timestamp(),
+            $3, $4, $5, $6, $7, pg_catalog.clock_timestamp()
+        )`,
+        [
+            `refund_before_event_${index}`,
+            `refund_before_idem_${index}`,
+            paymentId,
+            BASIC_PRODUCT_ID,
+            paidAmount,
+            partialRefund ? Math.max(1, paidAmount - 1) : paidAmount,
+            partialRefund,
+        ]
+    );
+    return result.rows[0];
+}
+
 async function reconcileNoSale(
     db: PGlite,
     orderId: string,
@@ -506,6 +547,86 @@ describe('earlybird pricing v3 database behavior', () => {
         }>('SELECT pricing_version, expected_amount_krw FROM public.earlybird_orders')).rows).toEqual([
             { pricing_version: V2, expected_amount_krw: 6_900 },
         ]);
+    }, 30_000);
+});
+
+describe('Groble refund-before-completion reconciliation', () => {
+    it('keeps a full-refund-before-completion order terminally refunded and makes its replay safe', async () => {
+        const db = await createRefundBeforeCompletionDatabase();
+        const preflight = await seedPreflight(db, 930, 'basic', V3);
+        const order = await checkout(db, preflight, 'basic', V3, undefined, {
+            version: AUTO_START_DISCLOSURE_VERSION,
+            text: AUTO_START_DISCLOSURE_TEXT,
+        });
+        const paymentId = 'refund_before_completion_930';
+
+        await expect(refundBeforeCompletion(db, paymentId, 930, 990)).resolves.toMatchObject({
+            disposition: 'refund_unmatched', order_id: null, status: null,
+        });
+        await expect(finalize(db, preflight, 'basic', 930, 990, paymentId)).resolves.toMatchObject({
+            disposition: 'refunded', order_id: order.order_id, status: 'refunded',
+        });
+        await expect(refundBeforeCompletion(db, paymentId, 930, 990)).resolves.toMatchObject({
+            disposition: 'refund_duplicate_event', order_id: order.order_id, status: 'refunded',
+        });
+
+        expect((await db.query<{ status: string; payment_id: string }>(
+            'SELECT status, payment_id FROM public.earlybird_orders WHERE id = $1',
+            [order.order_id]
+        )).rows).toEqual([{ status: 'refunded', payment_id: paymentId }]);
+        await expect(db.query<{ count: number }>(
+            `SELECT COUNT(*)::INTEGER AS count
+             FROM public.earlybird_orders
+             WHERE id = $1 AND status IN ('paid', 'analysis_in_progress', 'completed')`,
+            [order.order_id]
+        )).resolves.toMatchObject({ rows: [{ count: 0 }] });
+        expect((await db.query<{ disposition: string; order_id: string }>(
+            `SELECT disposition, order_id FROM public.earlybird_webhook_events
+             WHERE event_id = 'refund_before_event_930'`
+        )).rows).toEqual([{ disposition: 'refunded', order_id: order.order_id }]);
+    }, 30_000);
+
+    it('does not turn a partial-refund-before-completion into a terminal refund', async () => {
+        const db = await createRefundBeforeCompletionDatabase();
+        const preflight = await seedPreflight(db, 931, 'basic', V3);
+        const order = await checkout(db, preflight, 'basic', V3, undefined, {
+            version: AUTO_START_DISCLOSURE_VERSION,
+            text: AUTO_START_DISCLOSURE_TEXT,
+        });
+        const paymentId = 'partial_before_completion_931';
+
+        await expect(refundBeforeCompletion(db, paymentId, 931, 990, true)).resolves.toMatchObject({
+            disposition: 'refund_unmatched', order_id: null, status: null,
+        });
+        await expect(finalize(db, preflight, 'basic', 931, 990, paymentId)).resolves.toMatchObject({
+            disposition: 'accepted', order_id: order.order_id, status: 'paid',
+        });
+        await expect(db.query<{ status: string }>(
+            'SELECT status FROM public.earlybird_orders WHERE id = $1', [order.order_id]
+        )).resolves.toMatchObject({ rows: [{ status: 'paid' }] });
+    }, 30_000);
+
+    it('applies the same full-refund fence through the seller-reference completion entry point', async () => {
+        const db = await createRefundBeforeCompletionDatabase();
+        const preflight = await seedPreflight(db, 932, 'basic', V3);
+        const order = await checkout(db, preflight, 'basic', V3, undefined, {
+            version: AUTO_START_DISCLOSURE_VERSION,
+            text: AUTO_START_DISCLOSURE_TEXT,
+        });
+        const sellerReference = await issueSellerReference(db, order.order_id);
+        const paymentId = 'reference_refund_before_completion_932';
+
+        await refundBeforeCompletion(db, paymentId, 932, 990);
+        await expect(finalizeByReference(
+            db,
+            preflight,
+            'basic',
+            932,
+            sellerReference,
+            { paymentId, amount: 990 }
+        )).resolves.toMatchObject({
+            disposition: 'refunded', order_id: order.order_id, status: 'refunded',
+        });
     }, 30_000);
 });
 
