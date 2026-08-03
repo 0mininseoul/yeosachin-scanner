@@ -4,6 +4,7 @@ import {
     parseGrobleEventEnvelope,
     parseGroblePaymentCancelRequestedEvent,
     parseGroblePaymentCompletedEvent,
+    parseGroblePaymentRefundedEvent,
     verifyGrobleWebhookSignature,
 } from './webhook';
 
@@ -76,6 +77,27 @@ function cancelRequestedPayload(overrides: Record<string, unknown> = {}) {
                 cancelRequest: {
                     requestedBy: 'BUYER',
                     requestedAt: '2026-07-18T09:00:00+09:00',
+                },
+                ...overrides,
+            },
+        },
+    };
+}
+
+function refundedPayload(overrides: Record<string, unknown> = {}) {
+    const completed = paymentPayload();
+    return {
+        ...completed,
+        type: 'payment.refunded',
+        data: {
+            object: {
+                ...completed.data.object,
+                refund: {
+                    amount: 14_900,
+                    currency: 'KRW',
+                    partialRefund: false,
+                    cancelledBy: 'BUYER',
+                    refundedAt: '2026-07-18T09:00:00+09:00',
                 },
                 ...overrides,
             },
@@ -435,5 +457,69 @@ describe('Groble payment.cancel_requested parser', () => {
         });
 
         expect(() => parseGroblePaymentCancelRequestedEvent(JSON.stringify(event))).toThrow();
+    });
+});
+
+describe('Groble payment.refunded parser', () => {
+    it('projects full-refund evidence without retaining the refund reason', () => {
+        const event = refundedPayload({
+            refund: {
+                amount: 14_900,
+                currency: 'KRW',
+                partialRefund: false,
+                cancelledBy: 'ADMIN',
+                reason: 'private refund reason',
+                refundedAt: '2026-07-18T09:00:00+09:00',
+            },
+        });
+
+        expect(parseGroblePaymentRefundedEvent(JSON.stringify(event))).toEqual({
+            eventId: 'evt_test_a1b2c3d4e5f60718293a4b5c',
+            occurredAt: '2026-07-17T21:00:00+09:00',
+            paymentId: 'merchant_0001',
+            productId: 'basic_product-01',
+            amountKrw: 14_900,
+            refundAmountKrw: 14_900,
+            partialRefund: false,
+            refundedAt: '2026-07-18T09:00:00+09:00',
+        });
+    });
+
+    it('accepts a documented partial-refund event without treating it as complete', () => {
+        const event = refundedPayload({
+            refund: {
+                amount: 3_000,
+                currency: 'KRW',
+                partialRefund: true,
+                cancelledBy: 'SELLER',
+                refundedAt: '2026-07-18T09:00:00+09:00',
+            },
+        });
+
+        expect(parseGroblePaymentRefundedEvent(JSON.stringify(event))).toMatchObject({
+            refundAmountKrw: 3_000,
+            partialRefund: true,
+        });
+    });
+
+    it.each([
+        { partialRefund: false, amount: -1 },
+        { partialRefund: 'false', amount: 14_900 },
+        { partialRefund: false, currency: 'USD', amount: 14_900 },
+        { partialRefund: false, cancelledBy: 'SYSTEM', amount: 14_900 },
+    ])('rejects malformed refund evidence %#', refund => {
+        const malformedRefund: Record<string, unknown> = refund;
+        const event = refundedPayload({
+            refund: {
+                amount: 14_900,
+                currency: 'KRW',
+                partialRefund: false,
+                cancelledBy: 'BUYER',
+                refundedAt: '2026-07-18T09:00:00+09:00',
+                ...malformedRefund,
+            },
+        });
+
+        expect(() => parseGroblePaymentRefundedEvent(JSON.stringify(event))).toThrow();
     });
 });

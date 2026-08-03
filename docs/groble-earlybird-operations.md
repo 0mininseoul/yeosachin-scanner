@@ -6,15 +6,15 @@
 
 | 설정 | Basic | Standard |
 |---|---|---|
-| 기준가 | 13,900원 | 19,900원 |
-| 얼리버드 결제액 | 6,900원 | 9,900원 |
-| 표시 할인율 | 50% | 50% |
+| 기준가 | 3,990원 | 7,990원 |
+| 얼리버드 결제액 | 990원 | 1,990원 |
+| 표시 할인율 | 72% | 72% |
 | 진입 페이지 | `https://yeosachin.com/analyze?plan=basic` | `https://yeosachin.com/analyze?plan=standard` |
 | 이동 페이지 | `https://yeosachin.com/earlybird?plan=basic` | `https://yeosachin.com/earlybird?plan=standard` |
 | 이동 버튼 문구 | `사전 구매 현황 확인` | `사전 구매 현황 확인` |
 | Groble 상품 재고 | 10건 유지 | 10건 유지 |
 
-Webhook URL은 `https://yeosachin.com/api/webhooks/groble`이며 `payment.completed`와 `payment.cancel_requested`를 구독한다.
+Webhook URL은 `https://yeosachin.com/api/webhooks/groble`이며 `payment.completed`, `payment.cancel_requested`, `payment.refunded`를 구독한다.
 
 Groble의 현재 공식 가이드를 기준으로 결제창 주소는 `https://groble.im/payment/{결제창 주소}` 형식을 사용한다. 진입 페이지는 결제창을 닫거나 뒤로 갈 때 돌아오는 판매 페이지이고, 이동 페이지는 완료 화면 버튼의 목적지일 뿐 결제 증명이 아니다.
 
@@ -41,7 +41,7 @@ GROBLE_WEBHOOK_PREVIOUS_SECRET=<키 교체 기간에만 이전 secret>
 
 이 문서는 순서만 정의한다. 사용자 승인 전에는 아래 배포와 실제 결제를 수행하지 않는다.
 
-1. Groble의 기존 두 상품이 Basic 6,900원/Standard 9,900원이고 상품별 재고가 10건인지 읽기 전용으로 다시 확인한다. 가격은 소유자가 이미 직접 변경했으므로 자동화나 이 저장소에서 수정하지 않는다.
+1. Groble의 기존 두 상품이 Basic 990원/Standard 1,990원이고 상품별 재고가 10건인지 읽기 전용으로 다시 확인한다. 가격은 소유자가 이미 직접 변경했으므로 자동화나 이 저장소에서 수정하지 않는다.
 2. 운영 환경의 다섯 가지 필수 서버 전용 값과, 필요한 경우 이전 webhook secret을 비밀 관리 시스템에 설정한다.
 3. `20260717140000_add_groble_earlybird_presale.sql` forward migration을 먼저 적용한다.
 4. checkout 쓰기를 제한한 maintenance window에서 아래 전화번호 매칭 migration 게이트를 통과한 뒤 6개 파일을 순서대로 적용한다.
@@ -51,6 +51,8 @@ GROBLE_WEBHOOK_PREVIOUS_SECRET=<키 교체 기간에만 이전 secret>
 8. 승인된 별도 점검 창에서 서명 검증, 멱등 재전송, Basic/Standard 상태 복원을 확인한다.
 
 가격 v2 배포에서는 `20260724230000_update_earlybird_pricing_v2.sql`을 애플리케이션보다 먼저 적용한다. 이 expand migration은 롤링 배포 동안 기존 v1 인스턴스의 정확한 v1 checkout만 허용한다. 새 v2 코드가 아직 주문이 없는 v1 preflight를 받으면 `EARLYBIRD_PRICING_REFRESH_REQUIRED`로 명시적으로 다시 점검하게 한다. 이미 발급된 v1 `payment_pending` 주문은 같은 주문과 결제창을 재사용하며 `pricing_version`과 `expected_amount_krw`를 바꾸지 않는다. `paid`/`cancelled` 주문과 webhook 감사 이력도 백필하거나 수정하지 않는다.
+
+가격 v3 배포에서는 `20260803200000_update_earlybird_pricing_v3.sql`을 애플리케이션보다 먼저 적용한다. 새 v3 checkout은 Basic 990원/Standard 1,990원을 immutable snapshot으로 기록한다. 기존 v1/v2 `payment_pending` 주문은 같은 주문과 결제창을 재사용하며 금액·버전을 바꾸지 않는다. 아직 주문이 없는 v1/v2 preflight는 `EARLYBIRD_PRICING_REFRESH_REQUIRED`로 새 snapshot을 받는다.
 
 배포 후 실제 결제를 만들지 않고 Basic/Standard checkout 응답의 `https://groble.im/payment/...` 링크가 안전한 seller reference를 포함하는지만 읽기 전용 회귀 검증한다. Groble 대시보드나 상품 설정은 이 검증에서 변경하지 않는다.
 
@@ -155,7 +157,7 @@ ORDER BY query_start;
 ## 결제 확정과 수량 운영
 
 - 성공 화면 진입이나 프론트 숫자로 접수 확정하지 않는다.
-- 공식 raw-body HMAC과 ±5분 timestamp를 통과한 `payment.completed`만 접수를 확정하며, `payment.cancel_requested`는 환불 검토 상태로만 전환한다.
+- 공식 raw-body HMAC과 ±5분 timestamp를 통과한 `payment.completed`만 결제를 확정한다. `payment.cancel_requested`는 환불 검토 상태로만 전환하고, 동일 `merchantUid`의 `payment.refunded`가 최종 환불·접근 철회 신호다. 부분 환불(`partialRefund=true`)은 감사 기록만 남기며 전체 환불 상태로 전환하지 않는다.
 - `verified_kakao_phone` 주문의 결제 완료는 checkout 시점의 불변 정규화 전화번호 snapshot으로만 매칭한다. 사용자 프로필 전화번호가 이후 바뀌어도 주문 snapshot은 바뀌지 않으며 이메일로 fallback하지 않는다. 이메일 매칭은 migration 전에 생성된 `legacy_email` 주문에만 허용한다.
 - 같은 사용자·상품·금액에 해당하는 미결제 `legacy_email` 취소 주문이 여러 건이면 최신 주문을 임의로 고르지 않고 `ambiguous_buyer`로 격리한다.
 - Groble 구매자의 정규화 전화번호와 소문자 이메일은 signed webhook transaction의 전화번호 우선·이메일 fallback 매칭 RPC 입력으로만 일시 처리한다. raw 전화번호·표시 이름은 RPC에 전달하지 않고, 이메일·전화번호·표시 이름을 주문·웹훅 이벤트에 영속 저장하지 않으며 브라우저 응답·Amplitude·Axiom에 전송하지 않는다. 카드 정보와 원본 payload도 저장하지 않는다.
@@ -178,7 +180,7 @@ ORDER BY query_start;
 - 채널 표시 수량과 가격의 정본은 [운영 원가 문서의 Groble 얼리버드 가격](./operations-cost-model.md#groble-얼리버드-가격)과 함께 확인한다.
 - Groble 상품 재고와 서버 inventory를 동시에 유지한다.
 - 이미 결제된 11번째 예외는 `overflow_refund_required`로 분리된다. 운영자는 이 상태를 환불 처리 대상으로 확인하고, 실제 조치는 승인된 Groble 운영 절차를 따른다.
-- 구매자 취소 요청은 `refund_pending`으로 표시한다. 최종 `cancelled`/`refunded` 전환은 서비스 역할 전용 RPC를 사용하는 운영 절차에서만 수행한다.
+- 구매자 취소 요청은 `refund_pending`으로 표시한다. 서명된 `payment.refunded` 전체 환불은 서비스 역할 전용 RPC로 해당 `merchantUid`의 기존 주문만 `refunded`로 종결한다.
 - 취소 요청 webhook이 결제 완료 webhook보다 먼저 도착해도 후속 결제를 판매로 확정하거나 수량에 포함하지 않고 `refund_pending`으로 재조정한다.
 - 취소된 주문의 결제가 뒤늦게 도착했을 때 실결제액이 `0원 이상`이고 checkout snapshot의 예상 금액 이하라면 쿠폰 할인 결제를 포함해 원래 주문에 `late_cancelled_payment`로 귀속하고 `refund_pending`으로 격리한다. 예상 금액 초과, 다른 상품, 복수 후보는 귀속하지 않으며 판매 수량에도 포함하지 않는다.
 - 결제 확정은 `analysis_requests`를 만들거나 Cloud Tasks/V2 자동 분석을 시작하지 않는다.

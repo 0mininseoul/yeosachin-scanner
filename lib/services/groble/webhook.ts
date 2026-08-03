@@ -74,6 +74,34 @@ const paymentCancelRequestedSchema = z.object({
     }),
 });
 
+const paymentRefundedSchema = z.object({
+    id: eventIdentifier,
+    type: z.literal('payment.refunded'),
+    version: z.string().trim().min(1).max(64),
+    occurredAt: isoTimestamp,
+    data: z.object({
+        object: z.object({
+            merchantUid: boundedIdentifier,
+            content: z.object({
+                id: boundedIdentifier,
+                paymentType: z.literal('ONE_TIME'),
+                inputMode: z.enum(['PAYMENT_WINDOW', 'NORMAL', 'SIMPLE']),
+            }),
+            pricing: z.object({
+                currency: z.literal('KRW'),
+                finalAmount: z.number().int().min(0).max(1_000_000_000),
+            }),
+            refund: z.object({
+                amount: z.number().int().min(0).max(1_000_000_000),
+                currency: z.literal('KRW'),
+                partialRefund: z.boolean(),
+                cancelledBy: z.enum(['BUYER', 'SELLER', 'ADMIN']),
+                refundedAt: isoTimestamp,
+            }),
+        }),
+    }),
+});
+
 const eventEnvelopeSchema = z.object({
     id: eventIdentifier,
     type: z.string().trim().min(1).max(64),
@@ -108,6 +136,17 @@ export interface GroblePaymentCancelRequestedEvent {
     productId: string;
     amountKrw: number;
     requestedAt: string;
+}
+
+export interface GroblePaymentRefundedEvent {
+    eventId: string;
+    occurredAt: string;
+    paymentId: string;
+    productId: string;
+    amountKrw: number;
+    refundAmountKrw: number;
+    partialRefund: boolean;
+    refundedAt: string;
 }
 
 export interface GrobleEventEnvelope {
@@ -189,6 +228,25 @@ export function parseGroblePaymentCancelRequestedEvent(
         productId: cancellation.content.id,
         amountKrw: cancellation.pricing.finalAmount,
         requestedAt: cancellation.cancelRequest.requestedAt,
+    });
+}
+
+export function parseGroblePaymentRefundedEvent(
+    rawBody: string
+): GroblePaymentRefundedEvent {
+    const parsedJson: unknown = JSON.parse(rawBody);
+    const event = paymentRefundedSchema.parse(parsedJson);
+    const payment = event.data.object;
+
+    return Object.freeze({
+        eventId: event.id,
+        occurredAt: event.occurredAt,
+        paymentId: payment.merchantUid,
+        productId: payment.content.id,
+        amountKrw: payment.pricing.finalAmount,
+        refundAmountKrw: payment.refund.amount,
+        partialRefund: payment.refund.partialRefund,
+        refundedAt: payment.refund.refundedAt,
     });
 }
 

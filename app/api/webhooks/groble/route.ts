@@ -13,6 +13,7 @@ import {
     parseGrobleEventEnvelope,
     parseGroblePaymentCancelRequestedEvent,
     parseGroblePaymentCompletedEvent,
+    parseGroblePaymentRefundedEvent,
     verifyGrobleWebhookSignature,
 } from '@/lib/services/groble/webhook';
 import {
@@ -39,6 +40,11 @@ const finalizationResultSchema = z.array(z.object({
         'cancel_mismatch',
         'cancel_before_payment',
         'late_cancelled_payment',
+        'refunded',
+        'refund_duplicate_event',
+        'refund_unmatched',
+        'refund_mismatch',
+        'partial_refund_recorded',
     ]),
     order_id: z.string().uuid().nullable(),
     status: z.string().nullable(),
@@ -52,7 +58,11 @@ function response(status: number, body: Record<string, unknown>): NextResponse {
     });
 }
 
-type WebhookEventType = 'payment.completed' | 'payment.cancel_requested' | 'other';
+type WebhookEventType =
+    | 'payment.completed'
+    | 'payment.cancel_requested'
+    | 'payment.refunded'
+    | 'other';
 
 interface WebhookLogState {
     webhookEventType?: WebhookEventType;
@@ -62,7 +72,9 @@ interface WebhookLogState {
 }
 
 function safeWebhookEventType(value: string): WebhookEventType {
-    return value === 'payment.completed' || value === 'payment.cancel_requested'
+    return value === 'payment.completed'
+        || value === 'payment.cancel_requested'
+        || value === 'payment.refunded'
         ? value
         : 'other';
 }
@@ -203,7 +215,8 @@ async function handlePOST(
         },
     });
     if (envelope.type !== 'payment.completed'
-        && envelope.type !== 'payment.cancel_requested') {
+        && envelope.type !== 'payment.cancel_requested'
+        && envelope.type !== 'payment.refunded') {
         return response(200, { received: true, disposition: 'ignored' });
     }
 
@@ -282,7 +295,7 @@ async function handlePOST(
                 state,
             );
         }
-    } else {
+    } else if (envelope.type === 'payment.cancel_requested') {
         let cancellation;
         try {
             cancellation = parseGroblePaymentCancelRequestedEvent(rawBody);
@@ -311,6 +324,47 @@ async function handlePOST(
                     p_product_id: cancellation.productId,
                     p_amount_krw: cancellation.amountKrw,
                     p_requested_at: cancellation.requestedAt,
+                }
+            );
+        } catch {
+            return reject(
+                500,
+                { received: false, code: 'PERSISTENCE_FAILED' },
+                'INTERNAL_ERROR',
+                state,
+            );
+        }
+    } else {
+        let refund;
+        try {
+            refund = parseGroblePaymentRefundedEvent(rawBody);
+        } catch {
+            return reject(
+                400,
+                { received: false, code: 'INVALID_PAYMENT_PAYLOAD' },
+                'VALIDATION_ERROR',
+                state,
+            );
+        }
+        state = {
+            ...state,
+            planId: planForProduct(refund.productId, config),
+            amountKrw: refund.amountKrw,
+        };
+        try {
+            persistence = await supabaseAdmin.rpc(
+                'finalize_earlybird_groble_refund',
+                {
+                    p_event_id: refund.eventId,
+                    p_idempotency_key: idempotencyKey,
+                    p_event_type: 'payment.refunded',
+                    p_occurred_at: refund.occurredAt,
+                    p_payment_id: refund.paymentId,
+                    p_product_id: refund.productId,
+                    p_amount_krw: refund.amountKrw,
+                    p_refund_amount_krw: refund.refundAmountKrw,
+                    p_partial_refund: refund.partialRefund,
+                    p_refunded_at: refund.refundedAt,
                 }
             );
         } catch {

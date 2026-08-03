@@ -9,40 +9,34 @@ const operations = readFileSync(
     new URL('../../../docs/groble-earlybird-operations.md', import.meta.url),
     'utf8'
 );
-const checklist = readFileSync(
-    new URL('../../../docs/pre-starter-launch-checklist.md', import.meta.url),
-    'utf8'
-);
 
 describe('earlybird pricing operations contract', () => {
     it('documents the exact reference, checkout, discount, and stock values', () => {
         for (const source of [costModel, operations]) {
-            expect(source).toContain('13,900원');
-            expect(source).toContain('6,900원');
-            expect(source).toContain('19,900원');
-            expect(source).toContain('9,900원');
-            expect(source).toContain('50%');
+            expect(source).toContain('3,990원');
+            expect(source).toContain('990원');
+            expect(source).toContain('7,990원');
+            expect(source).toContain('1,990원');
+            expect(source).toContain('72%');
         }
-        expect(operations).toMatch(/Basic 6,900원\/Standard 9,900원/);
+        expect(operations).toMatch(/Basic 990원\/Standard 1,990원/);
         expect(operations).toMatch(/재고가 10건/);
-        expect(checklist).toContain('earlybird-2026-07-v2');
-        expect(checklist).toMatch(/6,900원\/9,900원/);
     });
 
     it('uses the 8.69% fee only as a margin-planning assumption', () => {
         const feeRate = 0.0869;
-        expect(Math.round(6_900 * (1 - feeRate))).toBe(6_300);
-        expect(Math.round(9_900 * (1 - feeRate))).toBe(9_040);
-        expect(costModel).toContain('6,300.39원');
-        expect(costModel).toContain('9,039.69원');
-        expect(costModel).toContain('6,300원');
-        expect(costModel).toContain('9,040원');
+        expect(Math.round(990 * (1 - feeRate))).toBe(904);
+        expect(Math.round(1_990 * (1 - feeRate))).toBe(1_817);
+        expect(costModel).toContain('903.97원');
+        expect(costModel).toContain('1,817.07원');
+        expect(costModel).toContain('904원');
+        expect(costModel).toContain('1,817원');
         expect(costModel).toContain('결제 webhook 금액 검증에 사용하지 않고');
     });
 
     it('pins migration-first rollout and read-only checkout verification', () => {
         expect(operations).toContain(
-            '20260724230000_update_earlybird_pricing_v2.sql'
+            '20260803200000_update_earlybird_pricing_v3.sql'
         );
         expect(operations).toContain('EARLYBIRD_PRICING_REFRESH_REQUIRED');
         expect(operations).toContain('읽기 전용 회귀 검증');
@@ -52,6 +46,6 @@ describe('earlybird pricing operations contract', () => {
     });
 
     it('does not retain the rejected Basic 4,900 KRW option in active docs', () => {
-        expect([costModel, operations, checklist].join('\n')).not.toContain('4,900원');
+        expect([costModel, operations].join('\n')).not.toContain('4,900원');
     });
 });

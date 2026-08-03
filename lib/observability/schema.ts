@@ -325,11 +325,17 @@ export const OPERATIONAL_DISPOSITIONS = [
     'late_cancelled_payment',
     'ambiguous_buyer',
     'overflow_refund_required',
+    'refunded',
+    'refund_duplicate_event',
+    'refund_unmatched',
+    'refund_mismatch',
+    'partial_refund_recorded',
 ] as const;
 
 export const OPERATIONAL_WEBHOOK_EVENT_TYPES = [
     'payment.completed',
     'payment.cancel_requested',
+    'payment.refunded',
     'other',
 ] as const;
 

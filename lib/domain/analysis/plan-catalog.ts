@@ -23,7 +23,7 @@ export interface PlanEligibilityOptions {
     catalog?: PlanEligibilityCatalog;
 }
 
-export const PLAN_PRICING_VERSION = 'earlybird-2026-07-v2' as const;
+export const PLAN_PRICING_VERSION = 'earlybird-2026-08-v3' as const;
 
 export type DeferredKrwPrice = Readonly<{
     currency: 'KRW';
@@ -68,7 +68,7 @@ export const ANALYSIS_PLAN_CATALOG = Object.freeze({
         relationshipCapacity: Object.freeze({ followers: 400, following: 400 }),
         detailedMutualLimit: 300,
         pricingVersion: PLAN_PRICING_VERSION,
-        price: quotedKrwPrice(6_900),
+        price: quotedKrwPrice(990),
     }),
     standard: Object.freeze({
         id: 'standard',
@@ -76,7 +76,7 @@ export const ANALYSIS_PLAN_CATALOG = Object.freeze({
         relationshipCapacity: Object.freeze({ followers: 800, following: 800 }),
         detailedMutualLimit: 600,
         pricingVersion: PLAN_PRICING_VERSION,
-        price: quotedKrwPrice(9_900),
+        price: quotedKrwPrice(1_990),
     }),
     plus: Object.freeze({
         id: 'plus',

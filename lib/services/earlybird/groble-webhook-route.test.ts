@@ -70,6 +70,28 @@ function payload(overrides: Record<string, unknown> = {}) {
     };
 }
 
+function refundedPayload(overrides: Record<string, unknown> = {}) {
+    const completed = payload();
+    return {
+        ...completed,
+        id: 'evt_refund_a1b2c3d4e5f60718293a4b5c',
+        type: 'payment.refunded',
+        data: {
+            object: {
+                ...completed.data.object,
+                refund: {
+                    amount: 14_900,
+                    currency: 'KRW',
+                    partialRefund: false,
+                    cancelledBy: 'BUYER',
+                    refundedAt: '2026-07-18T09:00:00+09:00',
+                },
+                ...overrides,
+            },
+        },
+    };
+}
+
 function request(body: string, options: {
     contentType?: string;
     secret?: string;
@@ -278,11 +300,70 @@ describe('signed Groble webhook route', () => {
         );
     });
 
+    it('finalizes a signed full refund by the original merchant UID', async () => {
+        mocks.rpc.mockResolvedValue({
+            data: [{
+                disposition: 'refunded',
+                order_id: '123e4567-e89b-42d3-a456-426614174000',
+                status: 'refunded',
+                plan_sequence: 1,
+            }],
+            error: null,
+        });
+
+        const response = await POST(request(JSON.stringify(refundedPayload())));
+
+        expect(response.status).toBe(200);
+        await expect(response.json()).resolves.toEqual({
+            received: true,
+            disposition: 'refunded',
+        });
+        expect(mocks.rpc).toHaveBeenCalledWith(
+            'finalize_earlybird_groble_refund',
+            {
+                p_event_id: 'evt_refund_a1b2c3d4e5f60718293a4b5c',
+                p_idempotency_key: 'delivery_0001',
+                p_event_type: 'payment.refunded',
+                p_occurred_at: '2026-07-17T21:00:00+09:00',
+                p_payment_id: 'merchant_0001',
+                p_product_id: 'basic_product-01',
+                p_amount_krw: 14_900,
+                p_refund_amount_krw: 14_900,
+                p_partial_refund: false,
+                p_refunded_at: '2026-07-18T09:00:00+09:00',
+            }
+        );
+        expect(JSON.stringify({
+            logs: mocks.emit.mock.calls,
+        })).not.toMatch(/merchant_0001|basic_product-01|delivery_0001|evt_refund_/);
+    });
+
     it('acknowledges a signed unsupported event without mutating payment state', async () => {
         const body = JSON.stringify({ ...payload(), type: 'payment.purchased' });
         const response = await POST(request(body));
         expect(response.status).toBe(200);
         await expect(response.json()).resolves.toEqual({ received: true, disposition: 'ignored' });
+        expect(mocks.rpc).not.toHaveBeenCalled();
+    });
+
+    it('acknowledges the official subscription refund event as ignored', async () => {
+        const body = JSON.stringify({
+            ...refundedPayload({
+                content: {
+                    ...payload().data.object.content,
+                    paymentType: 'SUBSCRIPTION',
+                },
+            }),
+            type: 'subscription_payment.refunded',
+        });
+
+        const response = await POST(request(body));
+
+        expect(response.status).toBe(200);
+        await expect(response.json()).resolves.toEqual({
+            received: true,
+            disposition: 'ignored',
+        });
         expect(mocks.rpc).not.toHaveBeenCalled();
     });
 

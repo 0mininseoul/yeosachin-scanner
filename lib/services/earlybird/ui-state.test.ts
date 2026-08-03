@@ -152,15 +152,15 @@ describe('earlybird analyze UI state', () => {
 
     it('presents reference, earlybird, and waitlist pricing without invented wording', () => {
         expect(buildEarlybirdPlanPresentation('basic')).toEqual({
-            referencePriceLabel: '13,900원',
-            priceLabel: '6,900원',
-            discountLabel: '50%',
+            referencePriceLabel: '3,990원',
+            priceLabel: '990원',
+            discountLabel: '72% OFF',
             actionLabel: '지금 분석하기',
         });
         expect(buildEarlybirdPlanPresentation('standard')).toMatchObject({
-            referencePriceLabel: '19,900원',
-            priceLabel: '9,900원',
-            discountLabel: '50%',
+            referencePriceLabel: '7,990원',
+            priceLabel: '1,990원',
+            discountLabel: '72% OFF',
         });
         expect(buildEarlybirdPlanPresentation('plus')).toEqual({
             referencePriceLabel: null,
@@ -230,6 +230,7 @@ describe('earlybird analyze UI state', () => {
         expect(source).not.toContain('disclosureAccepted}');
         expect(source).not.toContain('setDisclosureAccepted');
         expect(source).not.toContain('disclosureModalOpen');
+        expect(source).not.toContain('{presentation.discountLabel}↓');
     });
 
     it('orders the plan card ternary so the sold-out copy branch precedes the not-yet-open branch', () => {
@@ -396,9 +397,9 @@ describe('earlybird analyze UI state', () => {
         }
     });
 
-    it('emits zero pricing events for stale v1 and current 6,900/9,900 prices for fresh v2', () => {
+    it('emits zero pricing events for stale v1 and current 990/1,990 prices for fresh v3', () => {
         const stale = readyPreflight('earlybird-2026-07-v1', 14_900, 19_900);
-        const fresh = readyPreflight('earlybird-2026-07-v2', 6_900, 9_900);
+        const fresh = readyPreflight('earlybird-2026-08-v3', 990, 1_990);
         const emit = vi.fn();
 
         for (const event of [
@@ -416,8 +417,8 @@ describe('earlybird analyze UI state', () => {
         expect(emit).not.toHaveBeenCalled();
 
         for (const [planId, amountKrw] of [
-            ['basic', 6_900],
-            ['standard', 9_900],
+            ['basic', 990],
+            ['standard', 1_990],
         ] as const) {
             for (const event of [
                 'plan_viewed',
