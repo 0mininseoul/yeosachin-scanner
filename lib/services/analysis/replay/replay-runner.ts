@@ -1,5 +1,5 @@
 import type { FeatureAnalysisResult, GenderResolutionResult, GenderTriageResult } from '@/lib/services/ai/v2-staged-analysis';
-import { applyGenderResolution } from '@/lib/services/ai/gender-resolution-reconciliation';
+import { applyGenderResolution, type GenderBaselineClassification } from '@/lib/services/ai/gender-resolution-reconciliation';
 import { aiStagePolicySupports } from '@/lib/services/ai/stage-policy';
 import type { PrivateNameAccountInput } from '@/lib/services/ai/private-name-analysis';
 import {
@@ -9,7 +9,7 @@ import {
 import {
     BETATEST_FREE_POOL_STANDARD_V210_EXACT_REPLAY_CAPABILITY,
     CURRENT_PRODUCTION_STANDARD_V210_EXACT_REPLAY_CAPABILITY,
-    TEST_ENTITLEMENT_STANDARD_V211_MAINTENANCE_REPLAY_CAPABILITY,
+    TEST_ENTITLEMENT_STANDARD_V211_LEGACY_SECONDARY_REPLAY_CAPABILITY,
     HISTORICAL_PARTIAL_AVAILABLE_REPLAY_CAPABILITY,
     HISTORICAL_PARTIAL_AVAILABLE_REPLAY_V210_CAPABILITY,
     resolveReplayAiStagePolicyVersion,
@@ -119,7 +119,7 @@ export interface AnalysisV2AiReplayReport {
     replayAiPolicy: string;
     semanticInputFingerprint: string;
     fullE2eEvidence: false;
-    sourceKind: 'current_paid_production' | 'betatest_free_pool' | 'test_entitlement_v211_maintenance' | 'historical_or_legacy';
+    sourceKind: 'current_paid_production' | 'betatest_free_pool' | 'test_entitlement_v211_legacy_secondary' | 'historical_or_legacy';
     featureConcurrency: {
         experiment: 'baseline' | 'feature-concurrency-4';
         featureAnalysis: 3 | 4;
@@ -163,6 +163,15 @@ export interface AnalysisV2AiReplayReport {
         };
     };
     totalElapsedMs: number;
+    /** Kept out of stdout; a sealed legacy-secondary preview consumes this only in-process. */
+    accountOutputs: readonly ReplayAccountAiOutput[];
+}
+
+export interface ReplayAccountAiOutput {
+    ordinal: number;
+    finalClassification: GenderBaselineClassification;
+    classificationSource: 'triage' | 'feature' | 'gender_resolution' | 'unknown' | 'unavailable';
+    featureOverview: string | null;
 }
 
 type ReplayBaselineClassification =
@@ -188,6 +197,7 @@ interface TrackedResolver {
 }
 
 interface PreparedPublicReplay {
+    ordinal: number;
     baseline: ReplayBaselineClassification;
     triage: GenderTriageResult;
     feature?: ReplayInvocation<FeatureAnalysisResult>;
@@ -636,6 +646,7 @@ export async function runAnalysisV2AiReplay(input: {
             capacitySkipped: 0,
         },
     };
+    const accountOutputs: ReplayAccountAiOutput[] = [];
     if (input.mode === 'paid-ai') {
         const runner = paidRunner!;
         const publicProfiles = input.bundle.profiles.filter(
@@ -712,6 +723,12 @@ export async function runAnalysisV2AiReplay(input: {
             }
             if (triage.routingDecision === 'exclude_high_confidence_male') {
                 gender.male++;
+                accountOutputs.push({
+                    ordinal: profile.ordinal,
+                    finalClassification: 'verified_non_female',
+                    classificationSource: 'triage',
+                    featureOverview: null,
+                });
                 return;
             }
             const featureAdmitted = !supportsGenderTriageMicrobatch
@@ -740,6 +757,12 @@ export async function runAnalysisV2AiReplay(input: {
                 );
             if (!featureAdmitted && !eligible) {
                 gender.unknown++;
+                accountOutputs.push({
+                    ordinal: profile.ordinal,
+                    finalClassification: 'unresolved',
+                    classificationSource: 'unknown',
+                    featureOverview: null,
+                });
                 return;
             }
             const abort = new AbortController();
@@ -811,6 +834,7 @@ export async function runAnalysisV2AiReplay(input: {
                             : 'unresolved';
             }
             prepared.push({
+                ordinal: profile.ordinal,
                 baseline,
                 triage,
                 feature,
@@ -834,6 +858,12 @@ export async function runAnalysisV2AiReplay(input: {
                 collect(stages.genderTriage, durations.genderTriage, triage);
                 if (triage.outcome !== 'ok' || !triage.value) {
                     gender.unknown++;
+                    accountOutputs.push({
+                        ordinal: profile.ordinal,
+                        finalClassification: 'analysis_unavailable',
+                        classificationSource: 'unknown',
+                        featureOverview: null,
+                    });
                     return;
                 }
                 await processTriageResult(profile, triage.value);
@@ -920,11 +950,21 @@ export async function runAnalysisV2AiReplay(input: {
                     resolver.outcomes.reconciliationInconclusive++;
                 }
             }
+            accountOutputs.push({
+                ordinal: outcome.ordinal,
+                finalClassification: reconciliation.finalClassification,
+                classificationSource: reconciliation.classificationSource,
+                featureOverview: reconciliation.finalClassification === 'verified_female'
+                    ? outcome.feature?.value?.features.oneLineOverview ?? null
+                    : null,
+            });
             if (reconciliation.finalClassification === 'verified_female') gender.female++;
             else if (reconciliation.finalClassification === 'verified_non_female') gender.male++;
             else gender.unknown++;
         }));
     }
+    // Stable ordinal order is required before a preview can be sealed.
+    accountOutputs.sort((left, right) => left.ordinal - right.ordinal);
     const total = gender.male + gender.female + gender.unknown;
     gender.unknownRate = total ? Number((gender.unknown / total).toFixed(4)) : 0;
     for (const name of names) finalize(stages[name], durations[name]);
@@ -945,8 +985,8 @@ export async function runAnalysisV2AiReplay(input: {
             : experimentScope === 'betatest-free-pool'
                 ? 'betatest_free_pool' as const
                 : authenticatedEvaluationPolicy?.capability
-                    === TEST_ENTITLEMENT_STANDARD_V211_MAINTENANCE_REPLAY_CAPABILITY
-                    ? 'test_entitlement_v211_maintenance' as const
+                    === TEST_ENTITLEMENT_STANDARD_V211_LEGACY_SECONDARY_REPLAY_CAPABILITY
+                    ? 'test_entitlement_v211_legacy_secondary' as const
                 : 'historical_or_legacy' as const,
         featureConcurrency: {
             experiment: featureConcurrencyExperiment
@@ -971,6 +1011,7 @@ export async function runAnalysisV2AiReplay(input: {
         gender,
         resolver,
         totalElapsedMs: Math.round(performance.now() - replayStarted),
+        accountOutputs,
     };
     input.write?.(safeLine(report));
     return report;

@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import {
     BETATEST_FREE_POOL_STANDARD_V210_EXACT_REPLAY_CAPABILITY,
     CURRENT_PRODUCTION_STANDARD_V210_EXACT_REPLAY_CAPABILITY,
-    TEST_ENTITLEMENT_STANDARD_V211_MAINTENANCE_REPLAY_CAPABILITY,
+    TEST_ENTITLEMENT_STANDARD_V211_LEGACY_SECONDARY_REPLAY_CAPABILITY,
     HISTORICAL_OFFICIAL_E2E_REPLAY_CAPABILITY,
     HISTORICAL_OFFICIAL_E2E_REPLAY_V210_CAPABILITY,
     REPLAY_V29_CROSS_POLICY_EVALUATION_CAPABILITY,
@@ -97,7 +97,7 @@ describe('replay cross-policy evaluation capability', () => {
             },
         } satisfies ReplaySourceLineage;
         const maintenance = {
-            capability: TEST_ENTITLEMENT_STANDARD_V211_MAINTENANCE_REPLAY_CAPABILITY,
+            capability: TEST_ENTITLEMENT_STANDARD_V211_LEGACY_SECONDARY_REPLAY_CAPABILITY,
             aiStage: 'ai-stage-policy-v2.11' as const,
         } satisfies ReplayEvaluationPolicy;
         expect(resolveReplayAiStagePolicyVersion(source, maintenance))

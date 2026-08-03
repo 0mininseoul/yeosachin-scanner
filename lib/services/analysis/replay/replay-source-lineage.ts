@@ -97,8 +97,8 @@ export const CURRENT_PRODUCTION_STANDARD_V210_EXACT_REPLAY_CAPABILITY =
 export const BETATEST_FREE_POOL_STANDARD_V210_EXACT_REPLAY_CAPABILITY =
     'betatest-free-pool-standard-v210-risk-v25-scheduler-v1-exact-replay' as const;
 /** A narrow maintenance-only v2.10-source → v2.11-evaluation fence. */
-export const TEST_ENTITLEMENT_STANDARD_V211_MAINTENANCE_REPLAY_CAPABILITY =
-    'test-entitlement-standard-v210-risk-v25-scheduler-v1-to-ai-v211-maintenance' as const;
+export const TEST_ENTITLEMENT_STANDARD_V211_LEGACY_SECONDARY_REPLAY_CAPABILITY =
+    'test-entitlement-standard-v210-risk-v25-scheduler-v1-to-ai-v211-legacy-secondary' as const;
 const currentEvaluationPolicySchema = z.object({
     capability: z.literal(REPLAY_V29_CROSS_POLICY_EVALUATION_CAPABILITY),
     aiStage: z.literal(AI_STAGE_POLICY_V29_VERSION),
@@ -127,8 +127,8 @@ const betatestFreePoolStandardV210EvaluationPolicySchema = z.object({
     capability: z.literal(BETATEST_FREE_POOL_STANDARD_V210_EXACT_REPLAY_CAPABILITY),
     aiStage: z.literal(AI_STAGE_POLICY_V210_VERSION),
 }).strict();
-const testEntitlementStandardV211MaintenanceEvaluationPolicySchema = z.object({
-    capability: z.literal(TEST_ENTITLEMENT_STANDARD_V211_MAINTENANCE_REPLAY_CAPABILITY),
+const testEntitlementStandardV211LegacySecondaryEvaluationPolicySchema = z.object({
+    capability: z.literal(TEST_ENTITLEMENT_STANDARD_V211_LEGACY_SECONDARY_REPLAY_CAPABILITY),
     aiStage: z.literal(AI_STAGE_POLICY_V211_VERSION),
 }).strict();
 export const replayEvaluationPolicySchema = z.union([
@@ -139,7 +139,7 @@ export const replayEvaluationPolicySchema = z.union([
     historicalPartialAvailableV210EvaluationPolicySchema,
     currentProductionStandardV210EvaluationPolicySchema,
     betatestFreePoolStandardV210EvaluationPolicySchema,
-    testEntitlementStandardV211MaintenanceEvaluationPolicySchema,
+    testEntitlementStandardV211LegacySecondaryEvaluationPolicySchema,
 ]);
 export type ReplayEvaluationPolicy = z.infer<typeof replayEvaluationPolicySchema>;
 
@@ -202,7 +202,7 @@ export function resolveReplayAiStagePolicyVersion(
     }
     if (
         parsed.data.capability
-            === TEST_ENTITLEMENT_STANDARD_V211_MAINTENANCE_REPLAY_CAPABILITY
+            === TEST_ENTITLEMENT_STANDARD_V211_LEGACY_SECONDARY_REPLAY_CAPABILITY
     ) {
         if (
             lineage.selectedPlanId !== 'standard'

@@ -15,6 +15,7 @@ import { z } from 'zod';
 import {
     HISTORICAL_PARTIAL_AVAILABLE_REPLAY_CAPABILITY,
     HISTORICAL_PARTIAL_AVAILABLE_REPLAY_V210_CAPABILITY,
+    TEST_ENTITLEMENT_STANDARD_V211_LEGACY_SECONDARY_REPLAY_CAPABILITY,
     replayEvaluationPolicySchema,
     replaySourceLineageSchema,
 } from './replay-source-lineage';
@@ -49,6 +50,27 @@ const canonicalMediaSchema = z.object({
     caption: z.string().max(5_000).nullable().optional(),
     jpegBase64: jpegBase64Schema,
 }).strict();
+const legacySecondaryFemaleRowSchema = z.object({
+    candidateId: z.string().regex(/^[A-Za-z0-9._:-]{1,128}$/),
+    sortOrdinal: z.number().int().min(1).max(900),
+    instagramId: usernameSchema,
+    fullName: z.string().max(200).nullable(),
+    profileImageUrl: z.string().max(8_192).nullable(),
+    bio: z.string().max(2_200).nullable(),
+    displayScore: z.number().min(1).max(10),
+    riskBand: z.enum(['normal', 'caution', 'high_risk']),
+    featuredRank: z.number().int().min(1).max(15).nullable(),
+    recentMutualRank: z.number().int().min(1).max(10).nullable(),
+    analysisDepth: z.enum(['features', 'narrative']),
+    oneLineOverview: z.string().min(1).max(180),
+    highRiskNarrative: z.tuple([z.string().min(1).max(180), z.string().min(1).max(180)]).nullable(),
+}).strict();
+const legacySecondaryCaptureSchema = z.object({
+    requestId: z.string().uuid(),
+    sourceFingerprint: z.string().regex(/^[a-f0-9]{64}$/),
+    currentRevision: z.number().int().min(0).max(999),
+    originalFemaleRows: z.array(legacySecondaryFemaleRowSchema).max(900),
+}).strict();
 const baseBundleSchema = z.object({
     schemaVersion: z.literal(1),
     createdAt: z.string().datetime({ offset: true }),
@@ -57,6 +79,7 @@ const baseBundleSchema = z.object({
         requestFingerprint: z.string().regex(/^[a-f0-9]{64}$/),
         sourceLineage: replaySourceLineageSchema,
         evaluationPolicy: replayEvaluationPolicySchema.optional(),
+        legacySecondary: legacySecondaryCaptureSchema.optional(),
     }).strict(),
     profiles: z.array(z.object({
         ordinal: z.number().int().positive(),
@@ -118,6 +141,11 @@ const exactBundleSchema = baseBundleSchema.superRefine((value, context) => {
         || value.capture.evaluationPolicy?.capability === HISTORICAL_PARTIAL_AVAILABLE_REPLAY_V210_CAPABILITY
     ) {
         context.addIssue({ code: 'custom', path: ['capture', 'evaluationPolicy'], message: 'Partial capability cannot authenticate an exact artifact.' });
+    }
+    const legacySecondary = value.capture.evaluationPolicy?.capability
+        === TEST_ENTITLEMENT_STANDARD_V211_LEGACY_SECONDARY_REPLAY_CAPABILITY;
+    if (legacySecondary !== Boolean(value.capture.legacySecondary)) {
+        context.addIssue({ code: 'custom', path: ['capture', 'legacySecondary'], message: 'Legacy-secondary metadata must be present only for its exact capability.' });
     }
 });
 

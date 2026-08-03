@@ -62,7 +62,7 @@ REVOKE ALL ON FUNCTION public.analysis_v2_v211_maintenance_source_fingerprint(UU
 FROM PUBLIC, anon, authenticated, service_role;
 
 -- The reader returns only opaque target material and immutable provider descriptors.
-CREATE FUNCTION public.read_analysis_v2_test_entitlement_v211_maintenance_source(
+CREATE FUNCTION public.read_analysis_v2_test_entitlement_v211_legacy_secondary_source(
     p_request_id UUID
 )
 RETURNS JSONB
@@ -136,7 +136,7 @@ BEGIN
             OR provider_run.actual_usage_usd IS NULL
             OR provider_run.usage_reconciled_at IS NULL
             OR provider_run.credential_slot NOT IN (
-                'primary', 'tertiary', 'quaternary', 'quinary', 'senary', 'septenary'
+            'secondary'
             ))
     ) OR EXISTS (
         SELECT 1 FROM public.analysis_preflight_provider_runs AS provider_run
@@ -148,7 +148,7 @@ BEGIN
             OR provider_run.actual_usage_usd IS NULL
             OR provider_run.usage_reconciled_at IS NULL
             OR provider_run.credential_slot NOT IN (
-                'primary', 'tertiary', 'quaternary', 'quinary', 'senary', 'septenary'
+            'secondary'
             ))
     ) THEN
         RAISE EXCEPTION USING MESSAGE = 'ANALYSIS_V2_V211_MAINTENANCE_PROVIDER_LEDGER_INVALID', ERRCODE = 'P0001';
@@ -173,14 +173,40 @@ BEGIN
         'policyVersions', v_request.policy_versions_snapshot,
         'preflightRuns', v_preflight_runs,
         'providerRuns', v_provider_runs,
+        'originalFemaleRows', COALESCE((
+            SELECT pg_catalog.jsonb_agg(pg_catalog.jsonb_build_object(
+                'candidateId', female.candidate_id,
+                'sortOrdinal', female.sort_ordinal,
+                'instagramId', female.instagram_id,
+                'fullName', female.full_name,
+                'profileImageUrl', female.profile_image_url,
+                'bio', female.bio,
+                'displayScore', female.display_score,
+                'riskBand', female.risk_band,
+                'featuredRank', female.featured_rank,
+                'recentMutualRank', female.recent_mutual_rank,
+                'analysisDepth', female.analysis_depth,
+                'oneLineOverview', female.one_line_overview,
+                'highRiskNarrative', CASE WHEN female.narrative_line_one IS NULL THEN NULL
+                    ELSE pg_catalog.jsonb_build_array(female.narrative_line_one, female.narrative_line_two)
+                END
+            ) ORDER BY female.sort_ordinal, female.candidate_id)
+            FROM public.analysis_v2_female_results AS female
+            WHERE female.request_id = v_request.id
+        ), '[]'::JSONB),
+        'currentRevision', COALESCE((
+            SELECT revision.revision_number
+            FROM public.analysis_v2_result_revisions AS revision
+            WHERE revision.request_id = v_request.id AND revision.state = 'published'
+        ), 0),
         'sourceFingerprint', public.analysis_v2_v211_maintenance_source_fingerprint(v_request.id)
     );
 END;
 $$;
 
-REVOKE ALL ON FUNCTION public.read_analysis_v2_test_entitlement_v211_maintenance_source(UUID)
+REVOKE ALL ON FUNCTION public.read_analysis_v2_test_entitlement_v211_legacy_secondary_source(UUID)
 FROM PUBLIC, anon, authenticated, service_role;
-GRANT EXECUTE ON FUNCTION public.read_analysis_v2_test_entitlement_v211_maintenance_source(UUID)
+GRANT EXECUTE ON FUNCTION public.read_analysis_v2_test_entitlement_v211_legacy_secondary_source(UUID)
 TO service_role;
 
 CREATE TABLE public.analysis_v2_result_revisions (

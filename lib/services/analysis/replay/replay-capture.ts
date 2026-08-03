@@ -73,6 +73,20 @@ export async function captureAnalysisV2ReplayBundle(input: {
     repository: ReplayCaptureRepository;
     normalizeMedia: (media: SelectedAnalysisMedia) => Promise<Buffer>;
     evaluationPolicy?: ReplayEvaluationPolicy;
+    /** Sealed source metadata for the one v2.11 legacy-secondary maintenance capability. */
+    legacySecondary?: {
+        requestId: string;
+        sourceFingerprint: string;
+        currentRevision: number;
+        originalFemaleRows: readonly {
+            candidateId: string; sortOrdinal: number; instagramId: string;
+            fullName: string | null; profileImageUrl: string | null; bio: string | null;
+            displayScore: number; riskBand: 'normal' | 'caution' | 'high_risk';
+            featuredRank: number | null; recentMutualRank: number | null;
+            analysisDepth: 'features' | 'narrative'; oneLineOverview: string;
+            highRiskNarrative: readonly [string, string] | null;
+        }[];
+    };
     now?: number;
 }): Promise<AnalysisV2ReplayBundle> {
     const targetUsername = normalizedUsername(input.selector.targetUsername);
@@ -167,11 +181,12 @@ export async function captureAnalysisV2ReplayBundle(input: {
         capture: {
             requestFingerprint: request.requestFingerprint,
             ...(input.evaluationPolicy ? { evaluationPolicy: input.evaluationPolicy } : {}),
+            ...(input.legacySecondary ? { legacySecondary: input.legacySecondary } : {}),
             sourceLineage: request.sourceLineage,
         },
         profiles,
         evidence: source.evidence,
-    };
+    } as Extract<AnalysisV2ReplayBundle, { schemaVersion: 1 }>;
 }
 
 /** PII-free capture selector fingerprint for safe CLI metrics. */

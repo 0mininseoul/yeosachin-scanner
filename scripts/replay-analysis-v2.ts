@@ -1,10 +1,11 @@
-import { stat } from 'node:fs/promises';
+import { readFile, stat, writeFile } from 'node:fs/promises';
 import { dirname, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { createClient } from '@supabase/supabase-js';
 import { createAnalysisV2SelectedMediaNormalizer } from '../lib/services/ai/image-preprocessing';
 import {
     AI_STAGE_POLICY_V210_VERSION,
+    AI_STAGE_POLICY_V211_VERSION,
     AI_STAGE_POLICY_V29_VERSION,
 } from '../lib/services/ai/stage-policy';
 import { installReplayArtifactSignalCleanup } from '../lib/services/analysis/replay/replay-artifact-lifecycle';
@@ -24,6 +25,7 @@ import { createReplayReadonlyApifyClient, loadReplaySourceFromExistingRuns } fro
 import {
     CURRENT_PRODUCTION_STANDARD_V210_EXACT_REPLAY_CAPABILITY,
     BETATEST_FREE_POOL_STANDARD_V210_EXACT_REPLAY_CAPABILITY,
+    TEST_ENTITLEMENT_STANDARD_V211_LEGACY_SECONDARY_REPLAY_CAPABILITY,
     HISTORICAL_OFFICIAL_E2E_REPLAY_CAPABILITY,
     HISTORICAL_OFFICIAL_E2E_REPLAY_V210_CAPABILITY,
     HISTORICAL_PARTIAL_AVAILABLE_REPLAY_CAPABILITY,
@@ -35,7 +37,9 @@ import {
 import {
     loadCurrentProductionReplayCaptureDescriptor,
     loadBetatestFreePoolReplayCaptureDescriptor,
+    loadTestEntitlementLegacySecondaryReplayCaptureDescriptor,
     type BetatestFreePoolReplaySourceRpcClient,
+    type TestEntitlementLegacySecondaryReplaySourceRpcClient,
     loadHistoricalOfficialE2EReplayCaptureDescriptor,
     loadReplayCaptureDescriptor,
     type CurrentProductionReplaySourceRpcClient,
@@ -50,6 +54,7 @@ import {
     parseFeatureConcurrencyExperimentCliCapability,
     type FeatureConcurrencyExperimentCliCapability,
 } from '../lib/services/analysis/replay/feature-concurrency-experiment-capability';
+import { applyV211LegacySecondaryPreview, createV211LegacySecondaryPreview, verifyV211LegacySecondaryPreview } from '../lib/services/analysis/replay/v211-legacy-secondary-preview';
 
 type ReplayCliOptions =
     | { command: 'capture'; target: string; requestId?: string; bundlePath: string; keyPath: string; evaluationPolicy?: ReplayEvaluationPolicy; historicalOfficialE2E?: false }
@@ -57,7 +62,9 @@ type ReplayCliOptions =
     | { command: 'capture'; historicalPartialAvailable: true; requestId: string; bundlePath: string; keyPath: string; evaluationPolicy: ReplayEvaluationPolicy }
     | { command: 'capture'; currentProduction: true; requestId: string; bundlePath: string; keyPath: string; evaluationPolicy: ReplayEvaluationPolicy }
     | { command: 'capture'; betatestFreePool: true; requestId: string; bundlePath: string; keyPath: string; evaluationPolicy: ReplayEvaluationPolicy }
-    | { command: 'run'; mode: 'dry-run' | 'paid-ai'; bundlePath: string; keyPath: string; evaluationPolicy?: ReplayEvaluationPolicy; historicalOfficialE2E?: true; historicalPartialAvailable?: true; currentProduction?: true; betatestFreePool?: true; diagnosticPartialCoverageCapability?: DiagnosticPartialCoverageCliCapability; featureConcurrencyExperimentCapability?: FeatureConcurrencyExperimentCliCapability }
+    | { command: 'capture'; legacySecondary: true; requestId: string; bundlePath: string; keyPath: string; evaluationPolicy: ReplayEvaluationPolicy }
+    | { command: 'run'; mode: 'dry-run' | 'paid-ai'; bundlePath: string; keyPath: string; previewPath?: string; evaluationPolicy?: ReplayEvaluationPolicy; historicalOfficialE2E?: true; historicalPartialAvailable?: true; currentProduction?: true; betatestFreePool?: true; legacySecondary?: true; diagnosticPartialCoverageCapability?: DiagnosticPartialCoverageCliCapability; featureConcurrencyExperimentCapability?: FeatureConcurrencyExperimentCliCapability }
+    | { command: 'apply'; previewPath: string }
     | { command: 'cleanup'; bundlePath: string; keyPath: string };
 
 function values(args: readonly string[]): Map<string, string> {
@@ -81,10 +88,13 @@ const VALUELESS_FLAGS = new Set([
     '--historical-partial-available',
     '--current-production',
     '--betatest-free-pool',
+    '--legacy-secondary',
     '--allow-low-partial-coverage',
     '--confirm-low-partial-coverage',
     '--feature-concurrency-4',
     '--confirm-feature-concurrency-4',
+    '--apply',
+    '--confirm-apply',
 ]);
 
 function evaluationPolicy(value: string | undefined, historicalOfficialE2E = false, historicalPartialAvailable = false): ReplayEvaluationPolicy | undefined {
@@ -125,6 +135,11 @@ export function parseReplayCliArgs(args: readonly string[]): ReplayCliOptions {
     if ([...parsed].some(([key, value]) => VALUELESS_FLAGS.has(key) && value !== '')) {
         throw new Error('ANALYSIS_V2_REPLAY_CLI_USAGE');
     }
+    if (parsed.has('--apply')) {
+        const previewPath = parsed.get('--preview')?.trim();
+        if (!previewPath || !parsed.has('--confirm-apply') || parsed.size !== 3) throw new Error('ANALYSIS_V2_V211_APPLY_CONFIRMATION_REQUIRED');
+        return { command: 'apply', previewPath };
+    }
     const bundlePath = parsed.get('--bundle')?.trim();
     const keyPath = parsed.get('--key')?.trim();
     if (!bundlePath || !keyPath) throw new Error('ANALYSIS_V2_REPLAY_CLI_USAGE');
@@ -151,7 +166,20 @@ export function parseReplayCliArgs(args: readonly string[]): ReplayCliOptions {
         const historicalPartialAvailable = parsed.has('--historical-partial-available');
         const currentProduction = parsed.has('--current-production');
         const betatestFreePool = parsed.has('--betatest-free-pool');
-        if ([historicalOfficialE2E, historicalPartialAvailable, currentProduction, betatestFreePool].filter(Boolean).length > 1) throw new Error('ANALYSIS_V2_REPLAY_CLI_USAGE');
+        const legacySecondary = parsed.has('--legacy-secondary');
+        if ([historicalOfficialE2E, historicalPartialAvailable, currentProduction, betatestFreePool, legacySecondary].filter(Boolean).length > 1) throw new Error('ANALYSIS_V2_REPLAY_CLI_USAGE');
+        if (legacySecondary) {
+            const allowed = new Set(['--capture', '--legacy-secondary', '--request-id', '--bundle', '--key']);
+            const requestId = parsed.get('--request-id')?.trim();
+            if (!requestId || [...parsed.keys()].some(key => !allowed.has(key))) throw new Error('ANALYSIS_V2_REPLAY_CLI_USAGE');
+            return {
+                command: 'capture', legacySecondary: true, requestId, bundlePath, keyPath,
+                evaluationPolicy: {
+                    capability: TEST_ENTITLEMENT_STANDARD_V211_LEGACY_SECONDARY_REPLAY_CAPABILITY,
+                    aiStage: AI_STAGE_POLICY_V211_VERSION,
+                },
+            };
+        }
         if (betatestFreePool) {
             const allowed = new Set(['--capture', '--betatest-free-pool', '--request-id', '--bundle', '--key']);
             const requestId = parsed.get('--request-id')?.trim();
@@ -214,14 +242,22 @@ export function parseReplayCliArgs(args: readonly string[]): ReplayCliOptions {
     const historicalPartialAvailable = parsed.has('--historical-partial-available');
     const currentProduction = parsed.has('--current-production');
     const betatestFreePool = parsed.has('--betatest-free-pool');
-    if ([historicalOfficialE2E, historicalPartialAvailable, currentProduction, betatestFreePool].filter(Boolean).length > 1) throw new Error('ANALYSIS_V2_REPLAY_CLI_USAGE');
-    const allowed = new Set(['--run', '--dry-run', '--paid-ai', '--confirm-paid-ai', '--historical-official-e2e', '--historical-partial-available', '--current-production', '--betatest-free-pool', '--allow-low-partial-coverage', '--confirm-low-partial-coverage', '--feature-concurrency-4', '--confirm-feature-concurrency-4', '--bundle', '--key', '--evaluation-ai-policy']);
+    const legacySecondary = parsed.has('--legacy-secondary');
+    if ([historicalOfficialE2E, historicalPartialAvailable, currentProduction, betatestFreePool, legacySecondary].filter(Boolean).length > 1) throw new Error('ANALYSIS_V2_REPLAY_CLI_USAGE');
+    const allowed = new Set(['--run', '--dry-run', '--paid-ai', '--confirm-paid-ai', '--historical-official-e2e', '--historical-partial-available', '--current-production', '--betatest-free-pool', '--legacy-secondary', '--allow-low-partial-coverage', '--confirm-low-partial-coverage', '--feature-concurrency-4', '--confirm-feature-concurrency-4', '--bundle', '--key', '--preview', '--evaluation-ai-policy']);
     if ([...parsed.keys()].some(key => !allowed.has(key))) throw new Error('ANALYSIS_V2_REPLAY_CLI_USAGE');
     if (currentProduction && (parsed.has('--evaluation-ai-policy') || !paid)) {
         throw new Error('ANALYSIS_V2_REPLAY_CURRENT_PRODUCTION_PAID_SCOPE_REQUIRED');
     }
     if (betatestFreePool && (parsed.has('--evaluation-ai-policy') || !paid)) {
         throw new Error('ANALYSIS_V2_REPLAY_BETATEST_FREE_POOL_PAID_SCOPE_REQUIRED');
+    }
+    if (legacySecondary && (parsed.has('--evaluation-ai-policy') || !paid)) {
+        throw new Error('ANALYSIS_V2_REPLAY_LEGACY_SECONDARY_PAID_SCOPE_REQUIRED');
+    }
+    const previewPath = parsed.get('--preview')?.trim();
+    if (legacySecondary !== Boolean(previewPath)) {
+        throw new Error('ANALYSIS_V2_REPLAY_LEGACY_SECONDARY_PREVIEW_REQUIRED');
     }
     const evaluation = currentProduction
         ? {
@@ -233,6 +269,11 @@ export function parseReplayCliArgs(args: readonly string[]): ReplayCliOptions {
                 capability: BETATEST_FREE_POOL_STANDARD_V210_EXACT_REPLAY_CAPABILITY,
                 aiStage: AI_STAGE_POLICY_V210_VERSION,
             } as const
+        : legacySecondary
+            ? {
+                capability: TEST_ENTITLEMENT_STANDARD_V211_LEGACY_SECONDARY_REPLAY_CAPABILITY,
+                aiStage: AI_STAGE_POLICY_V211_VERSION,
+            } as const
         : evaluationPolicy(parsed.get('--evaluation-ai-policy'), historicalOfficialE2E, historicalPartialAvailable);
     if (historicalOfficialE2E && (!paid || !evaluation)) throw new Error('ANALYSIS_V2_REPLAY_HISTORICAL_E2E_CAPABILITY_REQUIRED');
     if (historicalPartialAvailable && !evaluation) throw new Error('ANALYSIS_V2_REPLAY_PARTIAL_CAPABILITY_REQUIRED');
@@ -240,7 +281,7 @@ export function parseReplayCliArgs(args: readonly string[]): ReplayCliOptions {
         parseDiagnosticPartialCoverageCliCapability(args);
     const featureConcurrencyExperimentCapability =
         parseFeatureConcurrencyExperimentCliCapability(args);
-    return { command: 'run', mode: paid ? 'paid-ai' : 'dry-run', bundlePath, keyPath, ...(historicalOfficialE2E ? { historicalOfficialE2E: true } : {}), ...(historicalPartialAvailable ? { historicalPartialAvailable: true } : {}), ...(currentProduction ? { currentProduction: true } : {}), ...(betatestFreePool ? { betatestFreePool: true } : {}), ...(diagnosticPartialCoverageCapability ? { diagnosticPartialCoverageCapability } : {}), ...(featureConcurrencyExperimentCapability ? { featureConcurrencyExperimentCapability } : {}), ...(evaluation ? { evaluationPolicy: evaluation } : {}) };
+    return { command: 'run', mode: paid ? 'paid-ai' : 'dry-run', bundlePath, keyPath, ...(previewPath ? { previewPath } : {}), ...(historicalOfficialE2E ? { historicalOfficialE2E: true } : {}), ...(historicalPartialAvailable ? { historicalPartialAvailable: true } : {}), ...(currentProduction ? { currentProduction: true } : {}), ...(betatestFreePool ? { betatestFreePool: true } : {}), ...(legacySecondary ? { legacySecondary: true } : {}), ...(diagnosticPartialCoverageCapability ? { diagnosticPartialCoverageCapability } : {}), ...(featureConcurrencyExperimentCapability ? { featureConcurrencyExperimentCapability } : {}), ...(evaluation ? { evaluationPolicy: evaluation } : {}) };
 }
 
 function requiredEnvironment(name: string): string {
@@ -274,10 +315,11 @@ export async function createPaidReplayRunner(
     }
 }
 
-function tokenForSlot(slot: string): string {
+function tokenForSlot(slot: string, legacySecondary = false): string {
     const allowed = new Set([
         'primary', 'tertiary', 'quaternary', 'quinary', 'senary', 'septenary',
     ]);
+    if (legacySecondary) allowed.add('secondary');
     if (!allowed.has(slot)) {
         throw new Error('ANALYSIS_V2_REPLAY_APIFY_CREDENTIAL_SLOT_FORBIDDEN');
     }
@@ -335,7 +377,13 @@ async function capture(options: Extract<ReplayCliOptions, { command: 'capture' }
         const historicalPartial = 'historicalPartialAvailable' in options && options.historicalPartialAvailable === true;
         const currentProduction = 'currentProduction' in options && options.currentProduction === true;
         const betatestFreePool = 'betatestFreePool' in options && options.betatestFreePool === true;
-        const descriptor = betatestFreePool
+        const legacySecondary = 'legacySecondary' in options && options.legacySecondary === true;
+        const descriptor = legacySecondary
+            ? await loadTestEntitlementLegacySecondaryReplayCaptureDescriptor(
+                supabase as unknown as TestEntitlementLegacySecondaryReplaySourceRpcClient,
+                options.requestId!,
+            )
+            : betatestFreePool
             ? await loadBetatestFreePoolReplayCaptureDescriptor(
                 supabase as unknown as BetatestFreePoolReplaySourceRpcClient,
                 options.requestId!,
@@ -361,7 +409,7 @@ async function capture(options: Extract<ReplayCliOptions, { command: 'capture' }
         const clients = new Map<string, ReturnType<typeof createReplayReadonlyApifyClient>>();
         const source = await loadReplaySourceFromExistingRuns({ descriptor, ...(historicalPartial ? { allowHistoricalPartialAvailable: true } : {}), clientForSlot: slot => {
             const existing = clients.get(slot); if (existing) return existing;
-            const created = createReplayReadonlyApifyClient(tokenForSlot(slot)); clients.set(slot, created); return created;
+            const created = createReplayReadonlyApifyClient(tokenForSlot(slot, legacySecondary)); clients.set(slot, created); return created;
         } });
         const captured = historicalPartial
             ? await captureHistoricalPartialAvailableReplayBundle({
@@ -388,6 +436,14 @@ async function capture(options: Extract<ReplayCliOptions, { command: 'capture' }
             ...(options.evaluationPolicy
                 ? { evaluationPolicy: options.evaluationPolicy }
                 : {}),
+            ...(legacySecondary && 'originalFemaleRows' in descriptor
+                ? { legacySecondary: {
+                    requestId: descriptor.requestId,
+                    sourceFingerprint: descriptor.sourceFingerprint,
+                    currentRevision: descriptor.currentRevision,
+                    originalFemaleRows: descriptor.originalFemaleRows,
+                } }
+                : {}),
         }), report: undefined };
         const bundle = captured.bundle;
         ownership.ownedKey = await createReplayKeyFile(options.keyPath, {
@@ -406,7 +462,9 @@ async function capture(options: Extract<ReplayCliOptions, { command: 'capture' }
             ...(historicalPartial
                 ? { benchmark_scope: 'ai-only-historical-partial-available' }
                 : { benchmark_scope: 'ai-only-exact-replay' }),
-            source_kind: betatestFreePool
+            source_kind: legacySecondary
+                ? 'test_entitlement_v211_legacy_secondary'
+                : betatestFreePool
                 ? 'betatest_free_pool'
                 : currentProduction
                 ? 'current_paid_production'
@@ -445,6 +503,17 @@ export async function runReplayCli(
     } = {},
 ): Promise<{ exitCode: 0 | 1 }> {
     const options = parseReplayCliArgs(args);
+    if (options.command === 'apply') {
+        const raw = await readFile(options.previewPath, 'utf8');
+        const preview = verifyV211LegacySecondaryPreview(JSON.parse(raw));
+        const serviceKey = requiredEnvironment('SUPABASE_SERVICE_ROLE_KEY');
+        if (serviceKey.startsWith('sb_publishable_') || serviceKey === process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY?.trim()) throw new Error('ANALYSIS_V2_REPLAY_CONFIGURATION_INVALID');
+        const supabase = createClient(requiredEnvironment('NEXT_PUBLIC_SUPABASE_URL'), serviceKey, { auth: { autoRefreshToken: false, persistSession: false } });
+        const result = await applyV211LegacySecondaryPreview(supabase as never, preview) as { revisionNumber?: number; payloadHash?: string; idempotent?: boolean } | null;
+        if (!result || !Number.isInteger(result.revisionNumber) || !/^[a-f0-9]{64}$/.test(result.payloadHash ?? '') || typeof result.idempotent !== 'boolean') throw new Error('ANALYSIS_V2_V211_REVISION_APPLY_INVALID');
+        process.stdout.write(`${JSON.stringify({ status: 'ok', command: 'apply', revision_number: result.revisionNumber, payload_hash: result.payloadHash, idempotent: result.idempotent })}\n`);
+        return { exitCode: 0 };
+    }
     if (options.command === 'cleanup') { await removeReplayArtifacts(options); process.stdout.write(`${JSON.stringify({ status: 'ok', command: 'cleanup', removed: 2 })}\n`); return { exitCode: 0 }; }
     if (options.command === 'capture') { await capture(options); return { exitCode: 0 }; }
     const ownership: Parameters<typeof removeOwnedReplayArtifacts>[0] = {
@@ -483,7 +552,7 @@ export async function runReplayCli(
             )
             : {};
         const { runAnalysisV2AiReplay } = await import('../lib/services/analysis/replay/replay-runner');
-        await runAnalysisV2AiReplay({
+        const report = await runAnalysisV2AiReplay({
             bundle: authenticated.bundle,
             runner,
             mode: options.mode,
@@ -505,6 +574,21 @@ export async function runReplayCli(
                 : {}),
             write: line => process.stdout.write(`${line}\n`),
         });
+        if (options.legacySecondary) {
+            const preview = createV211LegacySecondaryPreview({
+                requestId: authenticated.bundle.capture.legacySecondary!.requestId,
+                bundle: authenticated.bundle,
+                accountOutputs: report.accountOutputs,
+                semanticInputFingerprint: report.semanticInputFingerprint,
+            });
+            await writeFile(options.previewPath!, `${JSON.stringify(preview)}\n`, {
+                encoding: 'utf8', mode: 0o600, flag: 'wx',
+            });
+            process.stdout.write(`${JSON.stringify({
+                status: 'ok', command: 'preview', source_kind: report.sourceKind,
+                preview_hash: preview.previewHash, counts: preview.counts,
+            })}\n`);
+        }
         return { exitCode: 0 };
     } finally {
         uninstallSignals();
