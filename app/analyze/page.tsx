@@ -780,7 +780,7 @@ const DISCLOSURE_ACCEPTED = true;
                                                             </span>
                                                             {presentation.discountLabel && (
                                                                 <span className="self-center border border-blood bg-blood/10 px-2 py-[3px] text-[13px] font-extrabold leading-none text-blood">
-                                                                    {presentation.discountLabel}↓
+                                                                    {presentation.discountLabel}
                                                                 </span>
                                                             )}
                                                         </div>

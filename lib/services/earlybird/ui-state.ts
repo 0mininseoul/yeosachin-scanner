@@ -339,7 +339,7 @@ export function buildEarlybirdPlanPresentation(planId: PlanId) {
     return Object.freeze({
         referencePriceLabel: formatKrw(plan.referenceAmountKrw),
         priceLabel: formatKrw(plan.earlybirdAmountKrw),
-        discountLabel: `${plan.displayDiscountPercent}%`,
+        discountLabel: `${plan.displayDiscountPercent}% OFF`,
         actionLabel: '지금 분석하기',
     });
 }

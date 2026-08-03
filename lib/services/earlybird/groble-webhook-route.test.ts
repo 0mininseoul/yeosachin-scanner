@@ -346,6 +346,27 @@ describe('signed Groble webhook route', () => {
         expect(mocks.rpc).not.toHaveBeenCalled();
     });
 
+    it('acknowledges the official subscription refund event as ignored', async () => {
+        const body = JSON.stringify({
+            ...refundedPayload({
+                content: {
+                    ...payload().data.object.content,
+                    paymentType: 'SUBSCRIPTION',
+                },
+            }),
+            type: 'subscription_payment.refunded',
+        });
+
+        const response = await POST(request(body));
+
+        expect(response.status).toBe(200);
+        await expect(response.json()).resolves.toEqual({
+            received: true,
+            disposition: 'ignored',
+        });
+        expect(mocks.rpc).not.toHaveBeenCalled();
+    });
+
     it('matches with normalized contact inputs without forwarding raw buyer evidence', async () => {
         const body = JSON.stringify(payload({
             buyer: {

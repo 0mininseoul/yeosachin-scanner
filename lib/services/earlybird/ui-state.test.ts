@@ -154,13 +154,13 @@ describe('earlybird analyze UI state', () => {
         expect(buildEarlybirdPlanPresentation('basic')).toEqual({
             referencePriceLabel: '3,990원',
             priceLabel: '990원',
-            discountLabel: '72%',
+            discountLabel: '72% OFF',
             actionLabel: '지금 분석하기',
         });
         expect(buildEarlybirdPlanPresentation('standard')).toMatchObject({
             referencePriceLabel: '7,990원',
             priceLabel: '1,990원',
-            discountLabel: '72%',
+            discountLabel: '72% OFF',
         });
         expect(buildEarlybirdPlanPresentation('plus')).toEqual({
             referencePriceLabel: null,
@@ -230,6 +230,7 @@ describe('earlybird analyze UI state', () => {
         expect(source).not.toContain('disclosureAccepted}');
         expect(source).not.toContain('setDisclosureAccepted');
         expect(source).not.toContain('disclosureModalOpen');
+        expect(source).not.toContain('{presentation.discountLabel}↓');
     });
 
     it('orders the plan card ternary so the sold-out copy branch precedes the not-yet-open branch', () => {
