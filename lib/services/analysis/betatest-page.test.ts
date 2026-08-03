@@ -9,6 +9,7 @@ const mocks = vi.hoisted(() => ({
     redirect: vi.fn(),
     admin: { rpc: vi.fn() },
     authButtons: vi.fn(() => 'AUTH_BUTTONS'),
+    landingPage: vi.fn(() => 'SHARED_LANDING'),
 }));
 
 vi.mock('@/lib/supabase/server', () => ({ createClient: mocks.createClient }));
@@ -18,6 +19,7 @@ vi.mock('@/lib/services/analysis/betatest-access', () => ({
     ensureBetaTestAccess: mocks.ensureAccess,
 }));
 vi.mock('@/components/auth-buttons', () => ({ AuthButtons: mocks.authButtons }));
+vi.mock('@/components/landing-page', () => ({ default: mocks.landingPage }));
 vi.mock('next/navigation', () => ({
     redirect: mocks.redirect,
     useRouter: () => ({ push: vi.fn() }),
@@ -37,16 +39,14 @@ describe('beta-test entry page', () => {
         mocks.ensureAccess.mockResolvedValue(true);
     });
 
-    it('renders the public beta landing and keeps Kakao OAuth on the beta return path for an unauthenticated visitor', async () => {
+    it('renders the shared homepage landing with a beta OAuth return path for an unauthenticated visitor', async () => {
         mocks.getUser.mockResolvedValueOnce({ data: { user: null }, error: null });
 
         const markup = renderToStaticMarkup(await BetaTestPage());
 
-        expect(markup).toContain('무료 베타 판독을');
-        expect(markup).toContain('시작하세요');
-        expect(markup).toContain('AUTH_BUTTONS');
-        expect(mocks.authButtons).toHaveBeenCalledWith(
-            expect.objectContaining({ redirectTo: '/betatest' }),
+        expect(markup).toContain('SHARED_LANDING');
+        expect(mocks.landingPage).toHaveBeenCalledWith(
+            expect.objectContaining({ loginRedirectTo: '/betatest' }),
             undefined,
         );
         expect(mocks.enabled).not.toHaveBeenCalled();

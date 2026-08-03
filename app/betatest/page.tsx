@@ -1,5 +1,5 @@
 import { BetaTestClient } from './betatest-client';
-import { BetaTestLanding } from './betatest-landing';
+import LandingPage from '@/components/landing-page';
 import { createClient } from '@/lib/supabase/server';
 import { supabaseAdmin } from '@/lib/supabase/admin';
 import {
@@ -24,7 +24,7 @@ export default async function BetaTestPage() {
     const supabase = await createClient();
     const { data: { user }, error } = await supabase.auth.getUser();
     if (error || !user) {
-        return <BetaTestLanding />;
+        return <LandingPage loginRedirectTo="/betatest" />;
     }
 
     if (!betaTestFreePoolEnabled() || !await ensureBetaTestAccess(supabaseAdmin, user.id)) {
