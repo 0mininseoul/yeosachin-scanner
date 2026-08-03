@@ -296,7 +296,7 @@ FROM PUBLIC, anon, authenticated, service_role;
 
 CREATE FUNCTION public.analysis_v2_effective_female_results(p_request_id UUID)
 RETURNS TABLE (
-    candidate_id VARCHAR, sort_ordinal SMALLINT, instagram_id VARCHAR, full_name VARCHAR,
+    request_id UUID, candidate_id VARCHAR, sort_ordinal SMALLINT, instagram_id VARCHAR, full_name VARCHAR,
     profile_image_url TEXT, bio VARCHAR, display_score NUMERIC, risk_band VARCHAR,
     featured_rank SMALLINT, recent_mutual_rank SMALLINT, analysis_depth VARCHAR,
     one_line_overview VARCHAR, narrative_line_one VARCHAR, narrative_line_two VARCHAR
@@ -312,14 +312,14 @@ BEGIN
     FROM public.analysis_v2_result_revisions AS revision
     WHERE revision.request_id = p_request_id AND revision.state = 'published';
     IF v_revision_id IS NULL THEN
-        RETURN QUERY SELECT female.candidate_id, female.sort_ordinal, female.instagram_id,
+        RETURN QUERY SELECT p_request_id, female.candidate_id, female.sort_ordinal, female.instagram_id,
             female.full_name, female.profile_image_url, female.bio, female.display_score,
             female.risk_band, female.featured_rank, female.recent_mutual_rank,
             female.analysis_depth, female.one_line_overview, female.narrative_line_one,
             female.narrative_line_two
         FROM public.analysis_v2_female_results AS female WHERE female.request_id = p_request_id;
     ELSE
-        RETURN QUERY SELECT female.candidate_id, female.sort_ordinal, female.instagram_id,
+        RETURN QUERY SELECT p_request_id, female.candidate_id, female.sort_ordinal, female.instagram_id,
             female.full_name, female.profile_image_url, female.bio, female.display_score,
             female.risk_band, female.featured_rank, female.recent_mutual_rank,
             female.analysis_depth, female.one_line_overview, female.narrative_line_one,
