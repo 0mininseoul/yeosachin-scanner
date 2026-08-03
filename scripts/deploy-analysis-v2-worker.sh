@@ -1775,6 +1775,32 @@ env_json_value_equals() {
     <<<"$env_json" >/dev/null
 }
 
+validate_paid_collection_runtime_contract() {
+  local env_json="$1"
+  jq -e '
+    .SELFHOSTED_AUTH_ENABLED as $enabled
+    | .SELFHOSTED_AUTH_WORKER_URL as $url
+    | .SELFHOSTED_AUTH_WORKER_OIDC_AUDIENCE as $audience
+    | .SELFHOSTED_AUTH_WORKER_TIMEOUT_MS as $timeout
+    | [$url, $audience] | all(type == "string" and test("^https://[^/?#]+$"))
+    and ($url == $audience)
+    and ($enabled == "true" or $enabled == "false")
+    and ($timeout | type == "string" and test("^[1-9][0-9]*$")
+      and (tonumber >= 1000 and tonumber <= 300000))
+  ' <<<"$env_json" >/dev/null \
+    || die "runtime env file must set a private HTTPS selfhosted-auth worker URL, matching OIDC audience, bounded timeout, and kill switch"
+  jq -e '
+    [.SCRAPER_FOLLOWERS, .SCRAPER_FOLLOWING, .SCRAPER_LIKERS, .SCRAPER_COMMENTS] as $providers
+    | ($providers | all(. == "apify")) or ($providers | all(. == "selfhosted_auth"))
+  ' <<<"$env_json" >/dev/null \
+    || die "runtime env file must select one paid provider across followers, following, likers, and comments"
+  jq -e '
+    if .SCRAPER_FOLLOWERS == "selfhosted_auth" then .SCRAPER_FALLBACK == "false"
+    else (.SCRAPER_FALLBACK == "true" or .SCRAPER_FALLBACK == "false") end
+  ' <<<"$env_json" >/dev/null \
+    || die "runtime env file must keep SCRAPER_FALLBACK=false for selfhosted_auth"
+}
+
 validate_runtime_env_keys() {
   local env_json="$1"
   local key
@@ -2749,6 +2775,7 @@ if [[ -n "$worker_env_file" ]]; then
   env_json_value_equals "$runtime_env_json" BETATEST_FREE_POOL_REFRESH_INTERVAL_SECONDS \
     "$beta_free_pool_refresh_interval_seconds" \
     || die "runtime env file must set the exact BETATEST_FREE_POOL_REFRESH_INTERVAL_SECONDS"
+  validate_paid_collection_runtime_contract "$runtime_env_json"
   runtime_env_json="$(jq -c \
     --arg enabled "$result_images_enabled" \
     --arg automatic_fulfillment_enabled "$automatic_fulfillment_enabled" \

@@ -19,7 +19,6 @@ import {
 } from '@/lib/services/instagram/providers/apify-relationship';
 import { selfHostedAuthInteractionAdapter } from '@/lib/services/instagram/providers/selfhosted-auth';
 import {
-    isSelfHostedAuthFallbackEligible,
     parseSelfHostedAuthCommentItems,
     parseSelfHostedAuthLikerItems,
     parseSelfHostedAuthRelationshipItems,
@@ -33,9 +32,7 @@ import {
     type ProfilesBatchV2AttemptSnapshot,
 } from '@/lib/services/instagram/scraper';
 import {
-    getInteractionScraperConfig,
-    getScraperConfig,
-    type InteractionScraperConfig,
+    getAnalysisV2PaidCollectionProvider,
 } from '@/lib/services/instagram/config';
 import type { InstagramFollower, InstagramPost, InstagramProfile } from '@/lib/types/instagram';
 import { instagramPostUrl, selectRecentInteractionPosts } from './interaction-posts';
@@ -224,6 +221,19 @@ function collectionClaim(context: {
     };
 }
 
+function isBetaFreePoolRequest(request: AnalysisV2CollectionRequestContext): boolean {
+    return request.providerExecutionPolicy?.mode === 'betatest_free_pool';
+}
+
+function collectionProviderForRequest(
+    request: AnalysisV2CollectionRequestContext,
+    dependencies: ResolvedDependencies
+): 'apify' | 'selfhosted_auth' {
+    return isBetaFreePoolRequest(request)
+        ? 'apify'
+        : getAnalysisV2PaidCollectionProvider(dependencies.env);
+}
+
 function profileIdentity(claim: AnalysisV2CollectionJobClaim): AnalysisV2ProfileFetchCheckpointIdentity {
     return { ...claim };
 }
@@ -401,7 +411,7 @@ export function createAnalysisV2RelationshipsExecutor(
         const claim = collectionClaim(context);
         const request = await dependencies.requestContextStore.load(claim);
         assertScopeMatchesState(request, context.state);
-        const scraperConfig = getScraperConfig(dependencies.env);
+        const collectionProvider = collectionProviderForRequest(request, dependencies);
 
         const collect = async (
             side: 'followers' | 'following',
@@ -560,9 +570,7 @@ export function createAnalysisV2RelationshipsExecutor(
                 };
             };
 
-            const selectedProvider = side === 'followers'
-                ? scraperConfig.followers
-                : scraperConfig.following;
+            const selectedProvider = collectionProvider;
             let completed: Awaited<ReturnType<typeof executeApifyWithReplacement>>
                 | Awaited<ReturnType<typeof executeSelfHostedAuth>>;
             if (selectedProvider === 'selfhosted_auth') {
@@ -582,10 +590,7 @@ export function createAnalysisV2RelationshipsExecutor(
                     try {
                         completed = await executeSelfHostedAuth();
                     } catch (error) {
-                        if (!scraperConfig.fallback || !isSelfHostedAuthFallbackEligible(error)) {
-                            throw error;
-                        }
-                        completed = await executeApifyWithReplacement();
+                        throw error;
                     }
                 }
             } else {
@@ -720,11 +725,14 @@ async function durableProfiles(input: {
         onProfileStart,
         onProfileResolved,
     } = input;
+    const allowApifyFallback = isBetaFreePoolRequest(request)
+        || collectionProviderForRequest(request, dependencies) === 'apify';
     const identity = profileIdentity(claim);
     let resume = await dependencies.profileCheckpointStore.load(identity);
     if (
         resume
-        && (resume.frozenUnresolvedUsernames.length === 0 || resume.fallbackCapturedAt !== null)
+        && (!allowApifyFallback || resume.frozenUnresolvedUsernames.length === 0
+            || resume.fallbackCapturedAt !== null)
     ) return resume;
 
     const mutableProviderRun: ProviderRunCheckpoint = {};
@@ -773,11 +781,12 @@ async function durableProfiles(input: {
         adoptedFallback = binding.evidenceRun !== null;
     };
 
-    if (resume) await bindFallback(resume.frozenUnresolvedUsernames);
+    if (resume && allowApifyFallback) await bindFallback(resume.frozenUnresolvedUsernames);
 
     try {
         await dependencies.getProfilesBatchV2(usernames, {
         requestId: claim.requestId,
+        allowApifyFallback,
         onProfileStart,
         onProfileResolved,
         providerRun: mutableProviderRun,
@@ -970,7 +979,7 @@ async function collectedTargetSource(input: {
     targetUsername: string;
     kind: 'likers' | 'comments';
     posts: readonly InstagramPost[];
-    scraperConfig: InteractionScraperConfig;
+    collectionProvider: 'apify' | 'selfhosted_auth';
     startCancellationSignal: AbortSignal;
 }) {
     const limitPerPost = input.kind === 'likers' ? TARGET_LIKER_LIMIT : TARGET_COMMENT_LIMIT;
@@ -1111,9 +1120,7 @@ async function collectedTargetSource(input: {
         };
     };
 
-    const selectedProvider = input.kind === 'likers'
-        ? input.scraperConfig.likers
-        : input.scraperConfig.comments;
+    const selectedProvider = input.collectionProvider;
     if (selectedProvider !== 'selfhosted_auth') return executeApify();
 
     const existingFallback = await input.dependencies.providerRunStore.load({
@@ -1125,10 +1132,7 @@ async function collectedTargetSource(input: {
     try {
         return await executeSelfHostedAuth();
     } catch (error) {
-        if (!input.scraperConfig.fallback || !isSelfHostedAuthFallbackEligible(error)) {
-            throw error;
-        }
-        return executeApify();
+        throw error;
     }
 }
 
@@ -1140,7 +1144,7 @@ export function createAnalysisV2TargetEvidenceExecutor(
         const claim = collectionClaim(context);
         const request = await dependencies.requestContextStore.load(claim);
         assertScopeMatchesState(request, context.state);
-        const scraperConfig = getInteractionScraperConfig(dependencies.env);
+        const collectionProvider = collectionProviderForRequest(request, dependencies);
         const targetResume = await durableProfiles({
             dependencies,
             claim,
@@ -1180,7 +1184,7 @@ export function createAnalysisV2TargetEvidenceExecutor(
                     targetUsername: request.targetUsername,
                     kind: 'likers',
                     posts: likerPosts,
-                    scraperConfig,
+            collectionProvider,
                     startCancellationSignal: signal,
                 }),
                 signal => collectedTargetSource({
@@ -1190,7 +1194,7 @@ export function createAnalysisV2TargetEvidenceExecutor(
                     targetUsername: request.targetUsername,
                     kind: 'comments',
                     posts: commentPosts,
-                    scraperConfig,
+                    collectionProvider,
                     startCancellationSignal: signal,
                 }),
             ] as const);

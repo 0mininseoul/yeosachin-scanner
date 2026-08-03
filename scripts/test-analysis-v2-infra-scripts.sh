@@ -1539,6 +1539,15 @@ BETATEST_FREE_POOL_REFRESH_INTERVAL_SECONDS="60"
 SELFHOSTED_PROFILE_GLOBAL_GATE_ENABLED="true"
 SELFHOSTED_PROFILE_GLOBAL_MIN_INTERVAL_MS="750"
 SELFHOSTED_PROFILE_GLOBAL_RESPONSE_GUARD_MS="100"
+SELFHOSTED_AUTH_ENABLED="true"
+SELFHOSTED_AUTH_WORKER_URL="https://instagram-auth-worker.example.run.app"
+SELFHOSTED_AUTH_WORKER_OIDC_AUDIENCE="https://instagram-auth-worker.example.run.app"
+SELFHOSTED_AUTH_WORKER_TIMEOUT_MS="240000"
+SCRAPER_FOLLOWERS="selfhosted_auth"
+SCRAPER_FOLLOWING="selfhosted_auth"
+SCRAPER_LIKERS="selfhosted_auth"
+SCRAPER_COMMENTS="selfhosted_auth"
+SCRAPER_FALLBACK="false"
 EOF
 
 cat >"$temp_dir/runtime-provider-secret.env" <<'EOF'
@@ -3998,6 +4007,17 @@ if env "${common_env[@]}" 'FAKE_GCLOUD_STATE=prerequisites_ready' \
 fi
 assert_contains "$temp_dir/runtime-wrong-slot.out" \
   "runtime env file must set the exact selected ANALYSIS_V2_APIFY_API_TOKEN_SLOT"
+
+sed 's/^SCRAPER_FALLBACK=.*/SCRAPER_FALLBACK="true"/' \
+  "$temp_dir/runtime.env" >"$temp_dir/runtime-auth-fallback.env"
+if env "${common_env[@]}" 'FAKE_GCLOUD_STATE=prerequisites_ready' \
+  "ANALYSIS_V2_WORKER_ENV_VARS_FILE=$temp_dir/runtime-auth-fallback.env" \
+  bash "$script_dir/deploy-analysis-v2-worker.sh" --dry-run \
+  >"$temp_dir/runtime-auth-fallback.out" 2>&1; then
+  fail "runtime manifest accepted selfhosted_auth with Apify fallback enabled"
+fi
+assert_contains "$temp_dir/runtime-auth-fallback.out" \
+  "runtime env file must keep SCRAPER_FALLBACK=false for selfhosted_auth"
 
 if env "${common_env[@]}" 'FAKE_GCLOUD_STATE=prerequisites_ready' \
   "ANALYSIS_V2_WORKER_ENV_VARS_FILE=$temp_dir/runtime.env" \

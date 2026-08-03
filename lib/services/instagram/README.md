@@ -13,7 +13,7 @@ This module collects public Instagram data through direct public profile reads, 
 | `likers` | `apify` | `apify`, `selfhosted_auth` | `selfhosted_auth -> apify` |
 | `comments` | `apify` | `apify`, `selfhosted_auth` | `selfhosted_auth -> apify` |
 
-`profile` and `profilesBatch` make one `selfhosted -> apify` fallback attempt. When and only when `selfhosted_auth` is explicitly selected, a failed authenticated relationship or interaction operation may make one fallback attempt through the existing durable Apify path. An Apify failure never switches to another provider, and a retry resumes any already-created Apify fallback identity before touching the authenticated account again. FlashAPI, CoderX, and the deprecated Stable RapidAPI adapter are explicit operator choices only. `selfhosted` supports direct public profile and profile-batch reads; it has no relationship-list implementation.
+`profile` and `profilesBatch` make one `selfhosted -> apify` fallback attempt by default. Analysis V2 paid collection overrides that fallback to off whenever all four paid selectors use `selfhosted_auth`, so a paid authenticated-worker failure never consumes Apify. Beta requests with the frozen free-pool policy retain their Apify fallback and pinned free credential slots. An Apify failure never switches to another provider. FlashAPI, CoderX, and the deprecated Stable RapidAPI adapter are explicit operator choices only. `selfhosted` supports direct public profile and profile-batch reads; it has no relationship-list implementation.
 
 Unset `SCRAPER_*` values use the production defaults above. Explicit invalid provider or fallback values fail closed before a paid call. `SCRAPER_FALLBACK=false` disables both the profile fallback and the opt-in `selfhosted_auth -> apify` fallback.
 
@@ -81,7 +81,7 @@ The self-hosted path is an unauthenticated `web_profile_info` request, not brows
 - Neither Apify Actor receives an Instagram login, cookie, or session ID. The opt-in `selfhosted_auth` worker instead reads one persisted session setting from its private Secret Manager injection.
 - Only liker/comment rows matching an already-classified public female mutual are persisted. Unrelated usernames are discarded in memory.
 - A positive match is evidence; absence from a truncated result is unknown. Coverage and raw counts remain server-internal and influence ranking without being exposed on result pages.
-- Per-request admin selection accepts `likers` and `comments` as `apify`, `selfhosted_auth`, or `disabled`. The V2 production route is selected by `SCRAPER_LIKERS` and `SCRAPER_COMMENTS`; only an explicitly selected `selfhosted_auth` path can fall back to Apify.
+- Per-request admin selection accepts `likers` and `comments` as `apify`, `selfhosted_auth`, or `disabled`. The V2 paid route requires all four relationship/interaction selectors to choose the same `apify` or `selfhosted_auth` provider; the frozen beta free-pool policy always overrides them to Apify.
 - Every interaction batch stores a `running` reservation before the paid Actor starts. A process interruption is finalized as failed on resume instead of rerunning the same charge; the result exposes the resulting low coverage.
 
 ### Manual providers

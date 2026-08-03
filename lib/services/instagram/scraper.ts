@@ -84,6 +84,8 @@ export interface ProfilesBatchV2Options {
     providerRun?: ScrapeRequestOptions['providerRun'];
     onProfileStart?: ScrapeRequestOptions['onProfileStart'];
     onProfileResolved?: ScrapeRequestOptions['onProfileResolved'];
+    /** Paid selfhosted-auth collection disables the otherwise durable Apify fallback. */
+    allowApifyFallback?: boolean;
     resume?: ProfilesBatchV2Resume;
     persistAttemptOutcomes(snapshot: ProfilesBatchV2AttemptSnapshot): Promise<void>;
 }
@@ -822,6 +824,7 @@ export async function getProfilesBatchV2(
         throw new Error('SCRAPING_CONFIG_ERROR: V2 profile persistence callback is required.');
     }
     const requestedUsernames = Object.freeze(canonicalV2ProfileUsernames(usernames));
+    const allowApifyFallback = options.allowApifyFallback ?? true;
     const onTelemetry = v2TelemetryHook(options);
     let candidateFailureEvents = 0;
     const primary = providers.selfhosted;
@@ -909,7 +912,7 @@ export async function getProfilesBatchV2(
     }
 
     let fallbackResults: readonly ProfileAttemptResult[] = Object.freeze([]);
-    if (frozenUnresolvedUsernames.length > 0) {
+    if (allowApifyFallback && frozenUnresolvedUsernames.length > 0) {
         if (
             !options.providerRun
             || (
@@ -961,12 +964,12 @@ export async function getProfilesBatchV2(
     const finalResults = immutableAttemptResults(primaryResults.map((primaryResult) => {
         if (primaryResult.outcome.status === 'success') return primaryResult;
         const fallbackResult = fallbackByUsername.get(primaryResult.outcome.requestedUsername);
-        if (!fallbackResult) {
+        if (!fallbackResult && allowApifyFallback) {
             throw new Error(
                 'PROFILE_FETCH_OUTCOME_ERROR: unresolved username has no fallback result.'
             );
         }
-        return fallbackResult;
+        return fallbackResult ?? primaryResult;
     }));
     summarizeProfileFetchOutcomes(
         requestedUsernames,

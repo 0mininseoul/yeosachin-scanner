@@ -4,6 +4,7 @@ import {
     getInteractionScraperConfig,
     getScraperConfig,
     DEFAULT_PROVIDERS,
+    getAnalysisV2PaidCollectionProvider,
     parseScraperProviderSelection,
 } from './config';
 
@@ -135,5 +136,23 @@ describe('getInteractionScraperConfig', () => {
             .toThrow('SCRAPING_CONFIG_ERROR');
         expect(() => getInteractionScraperConfig({ SCRAPER_COMMENTS: 'selfhosted' }))
             .toThrow('SCRAPING_CONFIG_ERROR');
+    });
+});
+
+describe('getAnalysisV2PaidCollectionProvider', () => {
+    it('requires all paid collection selectors to choose the same provider', () => {
+        const auth = {
+            SELFHOSTED_AUTH_ENABLED: 'true',
+            SCRAPER_FOLLOWERS: 'selfhosted_auth',
+            SCRAPER_FOLLOWING: 'selfhosted_auth',
+            SCRAPER_LIKERS: 'selfhosted_auth',
+            SCRAPER_COMMENTS: 'selfhosted_auth',
+        } as const;
+        expect(getAnalysisV2PaidCollectionProvider(auth)).toBe('selfhosted_auth');
+        expect(getAnalysisV2PaidCollectionProvider({})).toBe('apify');
+        expect(() => getAnalysisV2PaidCollectionProvider({
+            ...auth,
+            SCRAPER_COMMENTS: 'apify',
+        })).toThrow('paid collection selectors');
     });
 });

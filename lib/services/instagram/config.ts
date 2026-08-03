@@ -19,6 +19,8 @@ export interface InteractionScraperConfig {
     fallback: boolean;
 }
 
+export type AnalysisV2PaidCollectionProvider = 'apify' | 'selfhosted_auth';
+
 /** 기능별 생산 기본 프로바이더. */
 export const DEFAULT_PROVIDERS: Record<Capability, ProviderName> = {
     profile: 'selfhosted',
@@ -176,4 +178,26 @@ export function getInteractionScraperConfig(
         );
     }
     return parsed;
+}
+
+/**
+ * Paid V2 collection is a single route: the four relationship/interaction selectors may not
+ * mix Apify and authenticated-worker providers within one request.
+ */
+export function getAnalysisV2PaidCollectionProvider(
+    env: Record<string, string | undefined> = process.env
+): AnalysisV2PaidCollectionProvider {
+    const relationships = getScraperConfig(env);
+    const interactions = getInteractionScraperConfig(env);
+    const selected = [
+        relationships.followers,
+        relationships.following,
+        interactions.likers,
+        interactions.comments,
+    ];
+    if (selected.every(provider => provider === 'apify')) return 'apify';
+    if (selected.every(provider => provider === 'selfhosted_auth')) return 'selfhosted_auth';
+    throw new Error(
+        'SCRAPING_CONFIG_ERROR: Analysis V2 paid collection selectors must all be apify or selfhosted_auth.'
+    );
 }
