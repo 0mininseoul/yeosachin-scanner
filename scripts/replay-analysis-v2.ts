@@ -343,13 +343,18 @@ export async function createPaidReplayRunner(
     }
 }
 
-function tokenForSlot(slot: string, legacySecondary = false): string {
+export function tokenForSlot(slot: string, legacySecondary = false): string {
     const allowed = new Set([
         'primary', 'tertiary', 'quaternary', 'quinary', 'senary', 'septenary',
     ]);
     if (legacySecondary) allowed.add('secondary');
     if (!allowed.has(slot)) {
         throw new Error('ANALYSIS_V2_REPLAY_APIFY_CREDENTIAL_SLOT_FORBIDDEN');
+    }
+    if (slot === 'primary') {
+        return process.env.APIFY_PRIMARY_API_TOKEN?.trim()
+            || process.env.APIFY_API_TOKEN?.trim()
+            || requiredEnvironment('APIFY_PRIMARY_API_TOKEN');
     }
     const key = `APIFY_${slot.toUpperCase()}_API_TOKEN`;
     return requiredEnvironment(key);

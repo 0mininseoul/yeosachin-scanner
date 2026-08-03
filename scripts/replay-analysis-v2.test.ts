@@ -37,7 +37,7 @@ import {
     writeReplayBundle,
     type AnalysisV2ReplayBundle,
 } from '../lib/services/analysis/replay/replay-bundle';
-import { parseReplayCliArgs, runReplayCli } from './replay-analysis-v2';
+import { parseReplayCliArgs, runReplayCli, tokenForSlot } from './replay-analysis-v2';
 import { historicalPartialSourceUniverseDigest } from '../lib/services/analysis/replay/historical-partial-available-artifact';
 import packageJson from '../package.json';
 
@@ -45,6 +45,7 @@ const temporaryPaths: string[] = [];
 
 afterEach(async () => {
     paidAdapterMocks.create.mockClear();
+    vi.unstubAllEnvs();
     await Promise.all(temporaryPaths.splice(0).map(path => (
         rm(path, { recursive: true, force: true })
     )));
@@ -196,6 +197,19 @@ async function betatestFreePoolArtifacts(now: number) {
 }
 
 describe('analysis V2 replay CLI', () => {
+    it('uses the legacy primary token alias without allowing secondary outside its sealed scope', () => {
+        vi.stubEnv('APIFY_PRIMARY_API_TOKEN', '');
+        vi.stubEnv('APIFY_API_TOKEN', 'legacy-primary-token');
+        vi.stubEnv('APIFY_SECONDARY_API_TOKEN', 'secondary-token');
+        expect(tokenForSlot('primary')).toBe('legacy-primary-token');
+        vi.stubEnv('APIFY_PRIMARY_API_TOKEN', 'named-primary-token');
+        expect(tokenForSlot('primary')).toBe('named-primary-token');
+        expect(() => tokenForSlot('secondary')).toThrow(
+            'ANALYSIS_V2_REPLAY_APIFY_CREDENTIAL_SLOT_FORBIDDEN',
+        );
+        expect(tokenForSlot('secondary', true)).toBe('secondary-token');
+    });
+
     it('requires the dedicated text-only capability flag and paid-AI double confirmation', () => {
         expect(parseReplayCliArgs([
             '--capture', '--legacy-secondary-text-only',
