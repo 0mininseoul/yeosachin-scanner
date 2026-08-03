@@ -58,7 +58,7 @@ function responseSchema<T extends z.ZodType>(item: T, maximumItems: number) {
 const relationshipResponseSchema = responseSchema(followerSchema, 1_200);
 const likerResponseSchema = responseSchema(likerSchema, 1_500);
 const commentResponseSchema = responseSchema(commentSchema, 150);
-const errorSchema = z.object({
+const standardErrorSchema = z.object({
     schemaVersion: z.literal(1),
     code: z.enum([
         'account_quarantined',
@@ -76,6 +76,35 @@ const errorSchema = z.object({
     retryable: z.boolean(),
     retryAfterSeconds: z.number().int().positive().max(86_400).optional(),
 }).strict();
+
+// These durable worker states have fixed HTTP and payload semantics. They must
+// never be treated as a transient provider outage by the paid fallback path.
+const errorSchema = z.discriminatedUnion('code', [
+    standardErrorSchema,
+    z.object({
+        schemaVersion: z.literal(1),
+        code: z.literal('account_operation_locked'),
+        retryable: z.literal(false),
+    }).strict(),
+    z.object({
+        schemaVersion: z.literal(1),
+        code: z.literal('worker_schema_error'),
+        retryable: z.literal(false),
+    }).strict(),
+]);
+
+const STRICT_ERROR_STATUS: Partial<Record<z.infer<typeof errorSchema>['code'], number>> = {
+    account_operation_locked: 423,
+    worker_schema_error: 502,
+};
+
+function hasStrictErrorStatus(
+    error: z.infer<typeof errorSchema>,
+    status: number
+): boolean {
+    const expected = STRICT_ERROR_STATUS[error.code];
+    return expected === undefined || expected === status;
+}
 
 function parseCachedItems<T>(schema: z.ZodType<T[]>, raw: unknown): T[] {
     const parsed = schema.safeParse(raw);
@@ -379,7 +408,7 @@ export function createSelfHostedAuthWorkerClient(
             const raw: unknown = await response.json().catch(() => null);
             if (!response.ok) {
                 const parsed = errorSchema.safeParse(raw);
-                if (!parsed.success) {
+                if (!parsed.success || !hasStrictErrorStatus(parsed.data, response.status)) {
                     throw new SelfHostedAuthWorkerError(
                         'invalid_response',
                         false,
@@ -390,7 +419,9 @@ export function createSelfHostedAuthWorkerClient(
                     parsed.data.code,
                     parsed.data.retryable,
                     response.status,
-                    parsed.data.retryAfterSeconds
+                    'retryAfterSeconds' in parsed.data
+                        ? parsed.data.retryAfterSeconds
+                        : undefined
                 );
             }
             const parsed = schema.safeParse(raw);

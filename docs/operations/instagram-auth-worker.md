@@ -31,6 +31,9 @@ INSTAGRAM_AUTH_WORKER_RUNTIME_SERVICE_ACCOUNT_EMAIL=instagram-auth-worker@your-p
 INSTAGRAM_AUTH_WORKER_CALLER_SERVICE_ACCOUNT_EMAIL=analysis-worker@your-project-id.iam.gserviceaccount.com
 INSTAGRAM_AUTH_WORKER_NETWORK=instagram-egress
 INSTAGRAM_AUTH_WORKER_SUBNET=instagram-egress-seoul
+INSTAGRAM_AUTH_WORKER_NAT_ROUTER=instagram-egress-router
+INSTAGRAM_AUTH_WORKER_NAT_CONFIG=instagram-egress-nat
+INSTAGRAM_AUTH_WORKER_NAT_STATIC_IP=instagram-egress-ip
 INSTAGRAM_AUTH_WORKER_SESSION_SECRET_ID=instagram-auth-session-settings
 INSTAGRAM_AUTH_WORKER_SESSION_SECRET_VERSION=7
 INSTAGRAM_AUTH_WORKER_DURABLE_STORE_BUCKET=instagram-auth-worker-state-your-unique-suffix
@@ -42,7 +45,7 @@ INSTAGRAM_AUTH_WORKER_DURABLE_STORE_PREFIX=instagram-auth-worker
 
 The durable-store bucket must be dedicated to this worker and use uniform bucket-level access and public-access prevention. The deployment script grants only `roles/storage.objectUser` at that bucket scope to `INSTAGRAM_AUTH_WORKER_RUNTIME_SERVICE_ACCOUNT_EMAIL`, which is the minimum predefined object role required to read, create, replace, and remove the worker's ledger and account-safety objects. Do not grant it Storage project roles, bucket-admin roles, or access to any other bucket. The operator/deployer may retain separate administrative access for audited recovery, but must not use the worker runtime identity for that access.
 
-The named network and Seoul-region subnet must already use Cloud NAT manual allocation with one reserved static outbound IPv4 address. The deploy script routes all worker egress through that Direct VPC path. Do not canary an authenticated session from Cloud Run's default dynamic outbound IP pool.
+The named network and Seoul-region subnet must already use the named Cloud NAT router and NAT configuration. They must use `MANUAL_ONLY` allocation with exactly one configured NAT IP: the named, regional `EXTERNAL` reserved static address. The NAT configuration must explicitly use `LIST_OF_SUBNETWORKS` and include `INSTAGRAM_AUTH_WORKER_SUBNET`. The deploy script routes all worker egress through that Direct VPC path. Do not canary an authenticated session from Cloud Run's default dynamic outbound IP pool.
 
 Review the planned mutation first:
 
@@ -50,7 +53,9 @@ Review the planned mutation first:
 bash scripts/deploy-instagram-auth-worker.sh --dry-run
 ```
 
-The fixed service settings are Seoul (`asia-northeast3`), `min-instances=1`, `max-instances=1`, request `concurrency=5`, and `timeout=300s`. Keeping one warm instance preserves the in-memory cooldown/quarantine across idle periods. The script source-deploys the worker, injects `IG_SESSION_SETTINGS_BASE64` only with `--set-secrets=<secret-id>:<numeric-version>`, injects the non-secret `IG_DURABLE_STORE_BUCKET` and prefix, disables unauthenticated access, routes all egress through the required VPC/subnet, grants the worker runtime account the bucket-scoped durable-store object role, and grants the caller runtime account `roles/run.invoker`. It does not retrieve, echo, or write secret payloads.
+`--dry-run` still executes read-only Compute Engine `describe` calls before it prints any mutations. It fails closed unless the router and subnet both resolve to the configured project/network/region, the NAT has `MANUAL_ONLY` allocation and exactly one IP, that IP is the named regional reserved address, and the NAT explicitly includes the configured subnet. It does not deploy or change resources in dry-run mode.
+
+The fixed service settings are Seoul (`asia-northeast3`), `min-instances=1`, `max-instances=1`, request `concurrency=5`, and `timeout=300s`. Keeping one warm instance preserves the in-memory cooldown/quarantine across idle periods. The script source-deploys the worker, injects `IG_SESSION_SETTINGS_BASE64` only with `--set-secrets=<secret-id>:<numeric-version>`, injects the non-secret `IG_DURABLE_STORE_BUCKET` and prefix, disables unauthenticated access, routes all egress through the required VPC/subnet, grants the worker runtime account the bucket-scoped durable-store object role and `roles/secretmanager.secretAccessor` only on the configured session secret, and grants the caller runtime account `roles/run.invoker`. It does not retrieve, echo, or write secret payloads.
 
 After review, run the same script without `--dry-run`. This repository's automation does not deploy external resources on its own. For later worker revisions, close `SELFHOSTED_AUTH_ENABLED`, wait for all active calls to finish or reach their caller timeout, confirm no durable ledger entry remains `pending`, deploy and verify the single revision, and only then reopen the kill switch; revision overlap must never be used as account-operation concurrency.
 
@@ -59,6 +64,8 @@ After review, run the same script without `--dry-run`. This repository's automat
 The GCS store is authoritative across Cloud Run restarts. In production, a missing, malformed, unreadable, or unwritable durable-store configuration is fail-closed: do not enable the application kill switch and do not bypass it with an in-memory fallback.
 
 An operation left `pending`, or whose result is ambiguous after a timeout, process interruption, or GCS error, must be treated as potentially executed. Do not automatically replay it, delete its ledger object, or infer success from a missing response. Keep `SELFHOSTED_AUTH_ENABLED=false`, inspect the durable ledger and the relevant Instagram-visible outcome using an approved operator workflow, then explicitly record the recovered terminal result before allowing a retry. If the operation cannot be resolved, leave it blocked and escalate; a new operation ID must not be used to evade that decision.
+
+`account_operation_locked` means the durable global account-operation mutex is held, including when another revision owns it or a previous release failed. It is fail-closed: do not retry around it, deploy another revision to bypass it, or delete its object merely to restore traffic. Keep `SELFHOSTED_AUTH_ENABLED=false`, drain and verify that no invocation can still be running on any revision, then resolve the owner operation as above. Only after recording that result and verifying the mutex is stale may an authorized operator clear the durable mutex through the approved audited recovery procedure. If ownership or outcome cannot be proven, leave the mutex in place and escalate.
 
 An `instagram_challenge` or `authentication_failed` state is a permanent account quarantine. Never auto-clear, auto-retry, or delete that quarantine object. Close the kill switch, drain requests, investigate and repair the account/session outside the worker, then have an authorized operator explicitly perform the documented recovery that replaces the session settings and clears the matching durable quarantine only after verification. Redeploy and validate the single worker revision while the switch remains off; reopen it only after the operator records the recovery decision.
 

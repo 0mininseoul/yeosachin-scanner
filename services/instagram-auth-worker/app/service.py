@@ -5,6 +5,7 @@ from typing import Any, Protocol
 from urllib.parse import urlsplit
 
 from .durable import (
+    AccountOperationLock,
     DurableRecord,
     DurableStore,
     DurableStoreConflict,
@@ -29,6 +30,10 @@ class InstagramChallengeError(RuntimeError):
 
 class InstagramAuthenticationError(RuntimeError):
     pass
+
+
+class WorkerSchemaError(RuntimeError):
+    """Instagrapi returned data that cannot satisfy the worker contract."""
 
 
 class IdempotencyPendingError(RuntimeError):
@@ -95,11 +100,13 @@ class InstagramAuthService:
         safety: AccountSafetyCircuit,
         ledger_store: DurableStore | None = None,
         run_id: Callable[[], str] = lambda: secrets.token_hex(16),
+        operation_lock: AccountOperationLock | None = None,
     ):
         self._gateway = gateway
         self._gate = gate
         self._safety = safety
         self._ledger_store = ledger_store or InMemoryDurableStore()
+        self._operation_lock = operation_lock or AccountOperationLock(self._ledger_store)
         self._run_id = run_id
 
     def _operation_key(self, operation_key: str) -> str:
@@ -155,32 +162,49 @@ class InstagramAuthService:
 
         def guarded_operation() -> dict[str, Any]:
             self._safety.assert_available()
-            reservation = self._reserve(operation_key, input_hash)
-            if isinstance(reservation, dict):
-                return reservation
+            lock_record = self._operation_lock.acquire(operation_key)
+            release_lock = True
             try:
-                items = operation()
-            except InstagramRateLimitedError:
-                self._safety.record_rate_limit()
-                # The HTTP contract must reflect the configured/remaining durable
-                # cooldown, not a hard-coded default.
-                error = InstagramRateLimitedError()
-                error.retry_after_seconds = self._safety.rate_limit_retry_after_seconds()
-                raise error
-            except InstagramChallengeError:
-                self._safety.record_challenge()
-                raise
-            except InstagramAuthenticationError:
-                self._safety.record_authentication_failure()
-                raise
-            response = {
-                'schemaVersion': 1,
-                'runId': self._run_id(),
-                'accountSlot': 'primary',
-                'items': items,
-            }
-            self._complete(reservation, response)
-            return response
+                reservation = self._reserve(operation_key, input_hash)
+                if isinstance(reservation, dict):
+                    return reservation
+                try:
+                    items = operation()
+                except InstagramRateLimitedError:
+                    # Do not release after an operation until its rate-limit state is
+                    # safely durable; otherwise another revision could immediately use
+                    # the account after a known throttle response.
+                    release_lock = False
+                    self._safety.record_rate_limit()
+                    release_lock = True
+                    error = InstagramRateLimitedError()
+                    error.retry_after_seconds = self._safety.rate_limit_retry_after_seconds()
+                    raise error
+                except InstagramChallengeError:
+                    release_lock = False
+                    self._safety.record_challenge()
+                    release_lock = True
+                    raise
+                except InstagramAuthenticationError:
+                    release_lock = False
+                    self._safety.record_authentication_failure()
+                    release_lock = True
+                    raise
+                response = {
+                    'schemaVersion': 1,
+                    'runId': self._run_id(),
+                    'accountSlot': 'primary',
+                    'items': items,
+                }
+                # A failed completion leaves the operation outcome ambiguous. Keep
+                # the global lock so another revision cannot repeat it automatically.
+                release_lock = False
+                self._complete(reservation, response)
+                release_lock = True
+                return response
+            finally:
+                if release_lock:
+                    self._operation_lock.release(lock_record, operation_key)
 
         return await self._gate.run(guarded_operation)
 

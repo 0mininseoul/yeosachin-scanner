@@ -295,6 +295,87 @@ describe('authenticated self-hosted worker client', () => {
         expect(isSelfHostedAuthFallbackEligible(error)).toBe(false);
     });
 
+    it('strictly preserves permanent account-operation locks and excludes them from fallback', async () => {
+        const fetch = vi.fn(async () => new Response(JSON.stringify({
+            schemaVersion: 1,
+            code: 'account_operation_locked',
+            retryable: false,
+        }), { status: 423 }));
+        const client = createSelfHostedAuthWorkerClient({
+            config,
+            fetch,
+            getAuthorizationHeader: async () => 'Bearer token',
+        });
+
+        const error = await client.getRelationship('followers', 'target.user', 1, identity)
+            .then(() => null, value => value);
+        expect(error).toMatchObject({
+            code: 'account_operation_locked',
+            retryable: false,
+            status: 423,
+        });
+        expect(isSelfHostedAuthFallbackEligible(error)).toBe(false);
+    });
+
+    it('strictly preserves worker schema failures and excludes them from fallback', async () => {
+        const fetch = vi.fn(async () => new Response(JSON.stringify({
+            schemaVersion: 1,
+            code: 'worker_schema_error',
+            retryable: false,
+        }), { status: 502 }));
+        const client = createSelfHostedAuthWorkerClient({
+            config,
+            fetch,
+            getAuthorizationHeader: async () => 'Bearer token',
+        });
+
+        const error = await client.getRelationship('followers', 'target.user', 1, identity)
+            .then(() => null, value => value);
+        expect(error).toMatchObject({
+            code: 'worker_schema_error',
+            retryable: false,
+            status: 502,
+        });
+        expect(isSelfHostedAuthFallbackEligible(error)).toBe(false);
+    });
+
+    it('rejects malformed fixed worker-error contracts rather than loosening fallback', async () => {
+        for (const [status, payload] of [
+            [423, {
+                schemaVersion: 1,
+                code: 'account_operation_locked',
+                retryable: true,
+            }],
+            [502, {
+                schemaVersion: 1,
+                code: 'worker_schema_error',
+                retryable: false,
+                retryAfterSeconds: 30,
+            }],
+            [503, {
+                schemaVersion: 1,
+                code: 'worker_schema_error',
+                retryable: false,
+            }],
+        ] as const) {
+            const fetch = vi.fn(async () => new Response(JSON.stringify(payload), { status }));
+            const client = createSelfHostedAuthWorkerClient({
+                config,
+                fetch,
+                getAuthorizationHeader: async () => 'Bearer token',
+            });
+
+            const error = await client.getRelationship('followers', 'target.user', 1, identity)
+                .then(() => null, value => value);
+            expect(error).toMatchObject({
+                code: 'invalid_response',
+                retryable: false,
+                status,
+            });
+            expect(isSelfHostedAuthFallbackEligible(error)).toBe(false);
+        }
+    });
+
     it('rejects interaction URLs that collide after canonicalization before network I/O', async () => {
         const fetch = vi.fn();
         const client = createSelfHostedAuthWorkerClient({

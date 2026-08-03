@@ -5,7 +5,7 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 from app.gateway import InstagrapiGateway, create_instagrapi_gateway
-from app.service import InstagramRateLimitedError
+from app.service import InstagramRateLimitedError, WorkerSchemaError
 
 
 def user(pk, username):
@@ -140,7 +140,7 @@ class InstagrapiGatewayTest(unittest.TestCase):
                     is_verified=False,
                 )]
 
-        with self.assertRaises(RuntimeError):
+        with self.assertRaises(WorkerSchemaError):
             InstagrapiGateway(InvalidImageClient()).likers(
                 ['https://www.instagram.com/p/Abc123/'],
                 150,
@@ -161,6 +161,43 @@ class InstagrapiGatewayTest(unittest.TestCase):
             15,
         )
         self.assertLessEqual(len(comment['text'].encode('utf-16-le')) // 2, 1_000)
+
+    def test_malformed_gateway_records_raise_the_worker_schema_error(self):
+        post_url = 'https://www.instagram.com/p/Abc123/'
+
+        cases = []
+
+        class InvalidUsernameClient(FakeClient):
+            def user_followers(self, user_id, amount):
+                return {'1': user(1, 'invalid username')}
+        cases.append(lambda: InstagrapiGateway(InvalidUsernameClient()).relationship(
+            'followers', 'target.user', 1,
+        ))
+
+        class InvalidImageClient(FakeClient):
+            def user_followers(self, user_id, amount):
+                row = user(1, 'one.user')
+                row.profile_pic_url = 'http://cdn.example/avatar.jpg'
+                return {'1': row}
+        cases.append(lambda: InstagrapiGateway(InvalidImageClient()).relationship(
+            'followers', 'target.user', 1,
+        ))
+
+        class InvalidCommentClient(FakeClient):
+            def media_comments(self, media_pk, amount):
+                return [SimpleNamespace(
+                    pk=99,
+                    text='hello',
+                    user=user(1, 'one.user'),
+                    created_at_utc='not-a-datetime',
+                    like_count=2,
+                )]
+        cases.append(lambda: InstagrapiGateway(InvalidCommentClient()).comments([post_url], 1))
+
+        for malformed_call in cases:
+            with self.subTest(malformed_call=malformed_call):
+                with self.assertRaises(WorkerSchemaError):
+                    malformed_call()
 
 
 if __name__ == '__main__':

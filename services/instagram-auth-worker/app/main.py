@@ -8,7 +8,7 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict, Field, HttpUrl
 
 from .config import WorkerConfig
-from .durable import GcsDurableStore, DurableStoreError
+from .durable import AccountOperationLockedError, GcsDurableStore, DurableStoreError
 from .gate import AdmissionGate, QueueFullError, QueueTimeoutError
 from .gateway import create_instagrapi_gateway
 from .safety import AccountQuarantinedError, AccountSafetyCircuit, SafetyStateUnavailableError
@@ -19,6 +19,7 @@ from .service import (
     InstagramAuthService,
     InstagramChallengeError,
     InstagramRateLimitedError,
+    WorkerSchemaError,
 )
 
 
@@ -124,6 +125,12 @@ def create_app(
     async def queue_timeout(_request: Request, _error: QueueTimeoutError):
         return strict_error(503, 'queue_timeout', True, 30)
 
+    @application.exception_handler(AccountOperationLockedError)
+    async def account_operation_locked(
+        _request: Request, _error: AccountOperationLockedError,
+    ):
+        return strict_error(423, 'account_operation_locked', False)
+
     @application.exception_handler(AccountQuarantinedError)
     async def account_quarantined(_request: Request, error: AccountQuarantinedError):
         return strict_error(423, error.code, False, error.retry_after_seconds)
@@ -157,6 +164,10 @@ def create_app(
     @application.exception_handler(InstagramAuthenticationError)
     async def instagram_auth(_request: Request, _error: InstagramAuthenticationError):
         return strict_error(423, 'authentication_failed', False)
+
+    @application.exception_handler(WorkerSchemaError)
+    async def worker_schema_error(_request: Request, _error: WorkerSchemaError):
+        return strict_error(502, 'worker_schema_error', False)
 
     @application.exception_handler(WorkerAuthorizationError)
     async def worker_auth(_request: Request, _error: WorkerAuthorizationError):

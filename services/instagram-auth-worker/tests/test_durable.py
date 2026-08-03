@@ -1,6 +1,13 @@
 import unittest
+import asyncio
+import threading
 
-from app.durable import DurableStoreError, InMemoryDurableStore
+from app.durable import (
+    AccountOperationLock,
+    AccountOperationLockedError,
+    DurableStoreError,
+    InMemoryDurableStore,
+)
 from app.gate import AdmissionGate
 from app.safety import AccountSafetyCircuit
 from app.service import (
@@ -127,3 +134,101 @@ class DurableWorkerTest(unittest.IsolatedAsyncioTestCase):
             )
         self.assertEqual(caught.exception.code, 'instagram_challenge')
         self.assertEqual(gateway.calls, 0)
+
+    async def test_durable_global_lock_rejects_another_revision_before_pending_receipt(self):
+        class BlockingGateway(CountingGateway):
+            def __init__(self):
+                super().__init__()
+                self.started = threading.Event()
+                self.release = threading.Event()
+
+            def relationship(self, side, username, limit):
+                self.calls += 1
+                self.started.set()
+                self.release.wait()
+                return [{'username': username}]
+
+        store = InMemoryDurableStore()
+        first_gateway = BlockingGateway()
+        second_gateway = CountingGateway()
+        first = self.make_service(first_gateway, store)
+        second = self.make_service(second_gateway, store)
+        running = asyncio.create_task(first.relationship(
+            'followers', 'target.user', 1, 'operation-one', 'a' * 64,
+        ))
+        await asyncio.to_thread(first_gateway.started.wait)
+
+        with self.assertRaises(AccountOperationLockedError):
+            await second.relationship(
+                'followers', 'target.user', 1, 'operation-two', 'b' * 64,
+            )
+        self.assertIsNone(store.read('operations/operation-two'))
+        self.assertEqual(second_gateway.calls, 0)
+
+        first_gateway.release.set()
+        await running
+
+    async def test_cancelled_caller_keeps_durable_lock_until_sync_operation_finishes(self):
+        class BlockingGateway(CountingGateway):
+            def __init__(self):
+                super().__init__()
+                self.started = threading.Event()
+                self.release = threading.Event()
+
+            def relationship(self, side, username, limit):
+                self.calls += 1
+                self.started.set()
+                self.release.wait()
+                return [{'username': username}]
+
+        store = InMemoryDurableStore()
+        first_gateway = BlockingGateway()
+        first = self.make_service(first_gateway, store)
+        second = self.make_service(CountingGateway(), store)
+        running = asyncio.create_task(first.relationship(
+            'followers', 'target.user', 1, 'operation-one', 'a' * 64,
+        ))
+        await asyncio.to_thread(first_gateway.started.wait)
+        running.cancel()
+
+        with self.assertRaises(AccountOperationLockedError):
+            await second.relationship(
+                'followers', 'target.user', 1, 'operation-two', 'b' * 64,
+            )
+        self.assertFalse(running.done())
+
+        first_gateway.release.set()
+        with self.assertRaises(asyncio.CancelledError):
+            await running
+        self.assertEqual(
+            (await second.relationship(
+                'followers', 'target.user', 1, 'operation-two', 'b' * 64,
+            ))['items'],
+            [{'username': 'target.user'}],
+        )
+
+
+class AccountOperationLockTest(unittest.TestCase):
+    def test_only_the_recorded_owner_can_release_the_durable_lock(self):
+        store = InMemoryDurableStore()
+        lock = AccountOperationLock(store)
+        held = lock.acquire('operation-one')
+
+        with self.assertRaises(DurableStoreError):
+            lock.release(held, 'operation-two')
+        self.assertTrue(lock.is_locked())
+
+        lock.release(held, 'operation-one')
+        self.assertFalse(lock.is_locked())
+
+    def test_release_failure_leaves_the_lock_held_for_operator_recovery(self):
+        class DeleteFailureStore(InMemoryDurableStore):
+            def delete(self, record):
+                raise DurableStoreError('simulated delete outage')
+
+        lock = AccountOperationLock(DeleteFailureStore())
+        held = lock.acquire('operation-one')
+
+        with self.assertRaises(DurableStoreError):
+            lock.release(held, 'operation-one')
+        self.assertTrue(lock.is_locked())

@@ -5,7 +5,12 @@ from fastapi.testclient import TestClient
 from app.gate import QueueFullError, QueueTimeoutError
 from app.main import create_app
 from app.safety import AccountQuarantinedError
-from app.service import InstagramChallengeError, InstagramRateLimitedError
+from app.durable import AccountOperationLockedError
+from app.service import (
+    InstagramChallengeError,
+    InstagramRateLimitedError,
+    WorkerSchemaError,
+)
 
 
 class FakeService:
@@ -69,6 +74,8 @@ class WorkerApiTest(unittest.TestCase):
              'instagram_rate_limited', False),
             (InstagramRateLimitedError(), 429, 'instagram_rate_limited', True),
             (InstagramChallengeError(), 423, 'instagram_challenge', False),
+            (AccountOperationLockedError(), 423, 'account_operation_locked', False),
+            (WorkerSchemaError(), 502, 'worker_schema_error', False),
         ]
         for error, status, code, retryable in cases:
             with self.subTest(code=code, status=status):
