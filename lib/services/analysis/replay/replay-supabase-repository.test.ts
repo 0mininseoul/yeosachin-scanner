@@ -1,6 +1,8 @@
 import { describe, expect, it, vi } from 'vitest';
 import {
     loadCurrentProductionReplayCaptureDescriptor,
+    loadBetatestFreePoolReplayCaptureDescriptor,
+    type BetatestFreePoolReplaySourceRpcClient,
     loadReplayCaptureDescriptor,
     type CurrentProductionReplaySourceRpcClient,
     type ReplaySourceRpcClient,
@@ -33,6 +35,46 @@ function source() {
 }
 
 describe('replay capture read-only repository', () => {
+    it('loads exact beta-free-pool source only through its UUID RPC', async () => {
+        const run = {
+            actorId: 'apify/instagram-profile-scraper', credentialSlot: 'tertiary',
+            runId: 'BetaRun1', status: 'succeeded', operationKey: 'target-profile-fallback',
+        } as const;
+        const rpc = vi.fn().mockResolvedValue({
+            data: {
+                requestId, preflightId, targetUsername: `replay_${'b'.repeat(23)}`,
+                selectedPlanId: 'standard',
+                policyVersions: { pipeline: 'v2', risk: 'risk-policy-v2.5', aiStage: 'ai-stage-policy-v2.10', scheduler: 'ai-scheduler-v1' },
+                preflightRuns: [run], providerRuns: [{ ...run, runId: 'BetaRun2', operationKey: `profile-fallback:${'a'.repeat(64)}` }],
+            }, error: null,
+        });
+        const descriptor = await loadBetatestFreePoolReplayCaptureDescriptor(
+            { rpc } satisfies BetatestFreePoolReplaySourceRpcClient, requestId,
+        );
+        expect(rpc).toHaveBeenCalledWith('read_analysis_v2_betatest_free_pool_replay_source', { p_request_id: requestId });
+        expect(descriptor).toMatchObject({ sourceKind: 'betatest_free_pool', targetResolution: 'provider_ledger' });
+        expect(descriptor).not.toHaveProperty('target');
+    });
+
+    it('rejects beta sources that try the explicitly forbidden secondary slot', async () => {
+        await expect(loadBetatestFreePoolReplayCaptureDescriptor({
+            rpc: vi.fn().mockResolvedValue({
+                data: {
+                    requestId, preflightId, targetUsername: `replay_${'b'.repeat(23)}`,
+                    selectedPlanId: 'standard',
+                    policyVersions: { pipeline: 'v2', risk: 'risk-policy-v2.5', aiStage: 'ai-stage-policy-v2.10', scheduler: 'ai-scheduler-v1' },
+                    preflightRuns: [{
+                        actorId: 'apify/instagram-profile-scraper', credentialSlot: 'secondary',
+                        runId: 'BetaRun1', status: 'succeeded', operationKey: 'target-profile-fallback',
+                    }], providerRuns: [{
+                        actorId: 'apify/instagram-profile-scraper', credentialSlot: 'secondary',
+                        runId: 'BetaRun2', status: 'succeeded', operationKey: `profile-fallback:${'a'.repeat(64)}`,
+                    }],
+                }, error: null,
+            }),
+        } satisfies BetatestFreePoolReplaySourceRpcClient, requestId)).rejects.toThrow('ANALYSIS_V2_REPLAY_READ_ONLY_SOURCE_INVALID');
+    });
+
     it('loads current production from the UUID RPC without a target object', async () => {
         const run = {
             actorId: 'apify/instagram-profile-scraper',

@@ -5,6 +5,7 @@ const parsedFeatureConcurrencyExperimentCapabilities = new WeakSet<object>();
 
 export type FeatureConcurrencyExperimentCliCapability = Readonly<{
     [featureConcurrencyExperimentCapabilityBrand]: true;
+    scope: 'current-production' | 'betatest-free-pool';
 }>;
 
 /** Issues the replay-only experiment capability after both paid-run confirmations. */
@@ -27,7 +28,8 @@ export function parseFeatureConcurrencyExperimentCliCapability(
         !args.includes('--run')
         || !args.includes('--paid-ai')
         || !args.includes('--confirm-paid-ai')
-        || !args.includes('--current-production')
+        || (!args.includes('--current-production') && !args.includes('--betatest-free-pool'))
+        || (args.includes('--current-production') && args.includes('--betatest-free-pool'))
     ) {
         throw new Error(
             'ANALYSIS_V2_REPLAY_FEATURE_CONCURRENCY_SCOPE_REQUIRED',
@@ -35,6 +37,9 @@ export function parseFeatureConcurrencyExperimentCliCapability(
     }
     const capability = Object.freeze({
         [featureConcurrencyExperimentCapabilityBrand]: true as const,
+        scope: args.includes('--betatest-free-pool')
+            ? 'betatest-free-pool' as const
+            : 'current-production' as const,
     });
     parsedFeatureConcurrencyExperimentCapabilities.add(capability);
     return capability;

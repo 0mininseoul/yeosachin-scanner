@@ -7,6 +7,7 @@ import {
     type AnalysisV2ReplayBundle,
 } from './replay-bundle';
 import {
+    BETATEST_FREE_POOL_STANDARD_V210_EXACT_REPLAY_CAPABILITY,
     CURRENT_PRODUCTION_STANDARD_V210_EXACT_REPLAY_CAPABILITY,
     HISTORICAL_PARTIAL_AVAILABLE_REPLAY_CAPABILITY,
     HISTORICAL_PARTIAL_AVAILABLE_REPLAY_V210_CAPABILITY,
@@ -116,7 +117,7 @@ export interface AnalysisV2AiReplayReport {
     replayAiPolicy: string;
     semanticInputFingerprint: string;
     fullE2eEvidence: false;
-    sourceKind: 'current_paid_production' | 'historical_or_legacy';
+    sourceKind: 'current_paid_production' | 'betatest_free_pool' | 'historical_or_legacy';
     featureConcurrency: {
         experiment: 'baseline' | 'feature-concurrency-4';
         featureAnalysis: 3 | 4;
@@ -557,8 +558,13 @@ export async function runAnalysisV2AiReplay(input: {
         input.bundle.capture.sourceLineage,
         input.evaluationPolicy,
     );
-    const currentProductionExact = authenticatedEvaluationPolicy?.capability
-        === CURRENT_PRODUCTION_STANDARD_V210_EXACT_REPLAY_CAPABILITY;
+    const experimentScope = authenticatedEvaluationPolicy?.capability
+        === CURRENT_PRODUCTION_STANDARD_V210_EXACT_REPLAY_CAPABILITY
+        ? 'current-production'
+        : authenticatedEvaluationPolicy?.capability
+            === BETATEST_FREE_POOL_STANDARD_V210_EXACT_REPLAY_CAPABILITY
+            ? 'betatest-free-pool'
+            : undefined;
     const featureConcurrencyExperiment =
         input.featureConcurrencyExperimentCapability !== undefined;
     if (
@@ -569,7 +575,8 @@ export async function runAnalysisV2AiReplay(input: {
             )
             || input.mode !== 'paid-ai'
             || input.bundle.schemaVersion !== 1
-            || !currentProductionExact
+            || !experimentScope
+            || input.featureConcurrencyExperimentCapability.scope !== experimentScope
         )
     ) {
         throw new Error('ANALYSIS_V2_REPLAY_FEATURE_CONCURRENCY_SCOPE_REQUIRED');
@@ -927,9 +934,11 @@ export async function runAnalysisV2AiReplay(input: {
         replayAiPolicy,
         semanticInputFingerprint,
         fullE2eEvidence: false as const,
-        sourceKind: currentProductionExact
+        sourceKind: experimentScope === 'current-production'
             ? 'current_paid_production' as const
-            : 'historical_or_legacy' as const,
+            : experimentScope === 'betatest-free-pool'
+                ? 'betatest_free_pool' as const
+                : 'historical_or_legacy' as const,
         featureConcurrency: {
             experiment: featureConcurrencyExperiment
                 ? 'feature-concurrency-4' as const

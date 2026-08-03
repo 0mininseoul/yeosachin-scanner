@@ -125,6 +125,23 @@ function currentProductionReplayBundle(now: number): AnalysisV2ReplayBundle {
     };
 }
 
+function betatestFreePoolReplayBundle(now: number): AnalysisV2ReplayBundle {
+    const exact = currentProductionReplayBundle(now) as Extract<
+        AnalysisV2ReplayBundle,
+        { schemaVersion: 1 }
+    >;
+    return {
+        ...exact,
+        capture: {
+            ...exact.capture,
+            evaluationPolicy: {
+                capability: 'betatest-free-pool-standard-v210-risk-v25-scheduler-v1-exact-replay',
+                aiStage: 'ai-stage-policy-v2.10',
+            },
+        },
+    };
+}
+
 async function artifacts(now: number) {
     const directory = await mkdtemp(join(tmpdir(), 'analysis-v2-replay-cli-'));
     temporaryPaths.push(directory);
@@ -165,6 +182,16 @@ async function currentProductionArtifacts(now: number) {
         keyPath,
         now,
     });
+    return { bundlePath, keyPath };
+}
+
+async function betatestFreePoolArtifacts(now: number) {
+    const directory = await mkdtemp(join(tmpdir(), 'analysis-v2-replay-betatest-free-pool-cli-'));
+    temporaryPaths.push(directory);
+    const bundlePath = join(directory, 'bundle.enc');
+    const keyPath = join(directory, 'bundle.key');
+    await createReplayKeyFile(keyPath);
+    await writeReplayBundle({ bundle: betatestFreePoolReplayBundle(now), bundlePath, keyPath, now });
     return { bundlePath, keyPath };
 }
 
@@ -337,6 +364,29 @@ describe('analysis V2 replay CLI', () => {
         ])).toThrow('ANALYSIS_V2_REPLAY_CLI_USAGE');
     });
 
+    it('seals betatest free-pool capture and paid run to a UUID-only exact scope', () => {
+        const capture = parseReplayCliArgs([
+            '--capture', '--betatest-free-pool',
+            '--request-id=10000000-0000-4000-8000-000000000001',
+            '--bundle=a.enc', '--key=a.key',
+        ]);
+        expect(capture).toMatchObject({
+            command: 'capture', betatestFreePool: true,
+            evaluationPolicy: {
+                capability: 'betatest-free-pool-standard-v210-risk-v25-scheduler-v1-exact-replay',
+                aiStage: 'ai-stage-policy-v2.10',
+            },
+        });
+        expect(() => parseReplayCliArgs([
+            '--capture', '--betatest-free-pool', '--target=ambient_target',
+            '--request-id=10000000-0000-4000-8000-000000000001',
+            '--bundle=a.enc', '--key=a.key',
+        ])).toThrow('ANALYSIS_V2_REPLAY_CLI_USAGE');
+        expect(() => parseReplayCliArgs([
+            '--run', '--dry-run', '--betatest-free-pool', '--bundle=a.enc', '--key=a.key',
+        ])).toThrow('ANALYSIS_V2_REPLAY_BETATEST_FREE_POOL_PAID_SCOPE_REQUIRED');
+    });
+
     it('double-confirms concurrency 4 only for paid current-production runs', () => {
         const base = [
             '--run', '--paid-ai', '--confirm-paid-ai', '--current-production',
@@ -373,6 +423,23 @@ describe('analysis V2 replay CLI', () => {
             '--feature-concurrency-4', '--confirm-feature-concurrency-4',
             '--bundle=a.enc', '--key=a.key',
         ])).toThrow('ANALYSIS_V2_REPLAY_CURRENT_PRODUCTION_PAID_SCOPE_REQUIRED');
+    });
+
+    it('permits concurrency 4 for the separately authenticated betatest free-pool scope', async () => {
+        const args = [
+            '--run', '--paid-ai', '--confirm-paid-ai', '--betatest-free-pool',
+            '--feature-concurrency-4', '--confirm-feature-concurrency-4',
+            '--bundle=a.enc', '--key=a.key',
+        ];
+        expect(parseReplayCliArgs(args)).toMatchObject({
+            command: 'run', betatestFreePool: true,
+            featureConcurrencyExperimentCapability: { scope: 'betatest-free-pool' },
+        });
+        const artifacts = await betatestFreePoolArtifacts(Date.now());
+        await expect(runReplayCli([
+            ...args.filter(arg => !arg.startsWith('--bundle=') && !arg.startsWith('--key=')),
+            `--bundle=${artifacts.bundlePath}`, `--key=${artifacts.keyPath}`,
+        ])).resolves.toEqual({ exitCode: 0 });
     });
 
     it('runs baseline and candidate only from authenticated identical current-production artifacts', async () => {

@@ -22,6 +22,7 @@ import type { HistoricalPartialSourceProfile } from './historical-partial-availa
 import { readCompletedApifyDatasetOnce, type ReplayReadonlyApifyClient } from './replay-readonly-apify';
 import type {
     CurrentProductionReplayCaptureDescriptor,
+    BetatestFreePoolReplayCaptureDescriptor,
     HistoricalOfficialE2EReplayCaptureDescriptor,
     ReplayCaptureDescriptor,
 } from './replay-supabase-repository';
@@ -160,7 +161,8 @@ function postIdFromUrl(value: string): string {
 
 type ProviderLedgerReplayDescriptor =
     | HistoricalOfficialE2EReplayCaptureDescriptor
-    | CurrentProductionReplayCaptureDescriptor;
+    | CurrentProductionReplayCaptureDescriptor
+    | BetatestFreePoolReplayCaptureDescriptor;
 
 function isProviderLedgerDescriptor(
     descriptor: ReplayCaptureDescriptor | ProviderLedgerReplayDescriptor,
