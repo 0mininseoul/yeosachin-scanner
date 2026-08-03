@@ -44,6 +44,13 @@ function v210Runner(operations: ReplayAiRunner): ReplayAiRunner {
     return runner;
 }
 
+function v211Runner(operations: ReplayAiRunner): ReplayAiRunner {
+    const runner = Object.freeze({ ...operations });
+    testRunnerPolicies.set(runner, 'ai-stage-policy-v2.11');
+    testRunnerFeatureConcurrency.set(runner, 3);
+    return runner;
+}
+
 function diagnosticPartialCoverageCapability(
     aiStagePolicy: 'ai-stage-policy-v2.9' | 'ai-stage-policy-v2.10' =
         'ai-stage-policy-v2.9',
@@ -93,6 +100,61 @@ const bundle = {
 };
 
 describe('AI-only replay runner', () => {
+    it('text-only maintenance skips retained public accounts without usable triage media and emits only the analyzed subset', async () => {
+        const textOnly = {
+            ...bundle,
+            capture: {
+                ...bundle.capture,
+                sourceLineage: {
+                    selectedPlanId: 'standard' as const,
+                    policyVersions: {
+                        pipeline: 'v2' as const,
+                        aiStage: 'ai-stage-policy-v2.10' as const,
+                        risk: 'risk-policy-v2.5' as const,
+                        scheduler: 'ai-scheduler-v1' as const,
+                    },
+                },
+                evaluationPolicy: {
+                    capability: 'test-entitlement-standard-v210-risk-v25-scheduler-v1-to-ai-v211-legacy-secondary-account-text-only' as const,
+                    aiStage: 'ai-stage-policy-v2.11' as const,
+                },
+                legacySecondary: {
+                    requestId: '10000000-0000-4000-8000-000000000001',
+                    sourceFingerprint: 'b'.repeat(64), currentRevision: 0,
+                    originalFemaleRows: [{
+                        candidateId: 'candidate:one', sortOrdinal: 1, instagramId: 'public', fullName: null,
+                        profileImageUrl: null, bio: null, displayScore: 7, riskBand: 'normal' as const,
+                        featuredRank: null, recentMutualRank: null, analysisDepth: 'features' as const,
+                        oneLineOverview: '기존 요약', highRiskNarrative: null,
+                    }],
+                    textOnly: { canonicalCounts: { male: 1, female: 1, unknown: 0 } },
+                },
+            },
+            profiles: [
+                { ...bundle.profiles[0], ordinal: 1, username: 'no_media', media: [], triageSelectionIds: [], featureSelectionIds: [], resolverSelectionIds: [], captions: [], coverage: { selectedCount: 0, normalizedCount: 0, failures: [] } },
+                { ...bundle.profiles[0], ordinal: 2, username: 'public' },
+            ],
+        } satisfies AnalysisV2ReplayBundle;
+        const triage = vi.fn(async () => ({
+            outcome: 'ok' as const,
+            value: {
+                assessment: { inferredGender: 'male' as const, confidence: 'high' as const, ownerConsistency: 'same_person' as const, evidenceSelectionIds: ['m1'] },
+                routingDecision: 'exclude_high_confidence_male' as const,
+                routingReason: 'high_confidence_same_owner_male' as const,
+                analyzedSelectionIds: ['m1'], v29AccountContext: 'personal' as const,
+            }, attempts: 1, retries: 0, elapsedMs: 1,
+        }));
+        const report = await runAnalysisV2AiReplay({
+            bundle: textOnly, runner: v211Runner({ triage }), mode: 'paid-ai',
+            paidAiOptIn: true, evaluationPolicy: textOnly.capture.evaluationPolicy,
+        });
+        expect(triage).toHaveBeenCalledOnce();
+        expect(report.sourceKind).toBe('test_entitlement_v211_legacy_secondary_text_only');
+        expect(report.accountOutputs).toEqual([{
+            ordinal: 2, finalClassification: 'verified_non_female',
+            classificationSource: 'triage', featureOverview: null,
+        }]);
+    });
     it.each([
         {
             expected: 'ready_high_confirmed',

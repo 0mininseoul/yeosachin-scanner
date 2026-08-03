@@ -15,6 +15,7 @@ import {
     type ReplaySourceLineage,
 } from './replay-source-lineage';
 import { aiStagePolicySupports } from '@/lib/services/ai/stage-policy';
+import { TEST_ENTITLEMENT_STANDARD_V211_LEGACY_SECONDARY_TEXT_ONLY_REPLAY_CAPABILITY } from './replay-source-lineage';
 
 export interface ReplayCaptureSelector { targetUsername: string; }
 export interface ReplayCompletedRequest {
@@ -86,6 +87,8 @@ export async function captureAnalysisV2ReplayBundle(input: {
             analysisDepth: 'features' | 'narrative'; oneLineOverview: string;
             highRiskNarrative: readonly [string, string] | null;
         }[];
+        /** Canonical published counts, immutable in account-level text-only maintenance. */
+        textOnly?: { canonicalCounts: { male: number; female: number; unknown: number } };
     };
     now?: number;
 }): Promise<AnalysisV2ReplayBundle> {
@@ -100,6 +103,8 @@ export async function captureAnalysisV2ReplayBundle(input: {
         fail('ANALYSIS_V2_REPLAY_REQUEST_INELIGIBLE');
     }
     resolveReplayAiStagePolicyVersion(request.sourceLineage, input.evaluationPolicy);
+    const textOnly = input.evaluationPolicy?.capability
+        === TEST_ENTITLEMENT_STANDARD_V211_LEGACY_SECONDARY_TEXT_ONLY_REPLAY_CAPABILITY;
     const carouselDiversity = aiStagePolicySupports(
         request.sourceLineage.policyVersions.aiStage as Parameters<typeof aiStagePolicySupports>[0],
         'inputQualityV28',
@@ -107,21 +112,21 @@ export async function captureAnalysisV2ReplayBundle(input: {
     const source = await input.repository.loadReplaySource(request);
     const profiles: AnalysisV2ReplayBundle['profiles'] = [];
     for (const [index, profile] of source.profiles.entries()) {
-        if (!profile.isPrivate && (profile.latestPosts?.length ?? 0) < Math.min(profile.postsCount, MAX_RECENT_POSTS)) {
+        if (!textOnly && !profile.isPrivate && (profile.latestPosts?.length ?? 0) < Math.min(profile.postsCount, MAX_RECENT_POSTS)) {
             fail('ANALYSIS_V2_REPLAY_MEDIA_STRUCTURAL_INCOMPLETE');
         }
         const policy = profile.isPrivate ? null : selectAnalysisMedia({
             profile: profile.profilePicUrl ? { id: profile.username, imageUrl: profile.profilePicUrl } : undefined,
             posts: profile.latestPosts ?? [],
         }, carouselDiversity ? { carouselDiversity: true } : undefined);
-        if (policy?.carouselCoverage.incompletePostIds.length) fail('ANALYSIS_V2_REPLAY_MEDIA_STRUCTURAL_INCOMPLETE');
+        if (!textOnly && policy?.carouselCoverage.incompletePostIds.length) fail('ANALYSIS_V2_REPLAY_MEDIA_STRUCTURAL_INCOMPLETE');
         const triageNormalized = await normalizeAnalysisV2MediaSelections(
             policy?.triage.media ?? [],
             input.normalizeMedia,
             request.sourceLineage.policyVersions.aiStage,
         );
         if (
-            (!profile.isPrivate && !isAnalysisV2PartialMediaCoverageAllowed(triageNormalized.coverage))
+            (!textOnly && !profile.isPrivate && !isAnalysisV2PartialMediaCoverageAllowed(triageNormalized.coverage))
             || triageNormalized.media.some(item => !jpeg(triageNormalized.bytes.get(item.selectionId)!))
         ) {
             fail('ANALYSIS_V2_REPLAY_MEDIA_INVALID');
@@ -135,7 +140,7 @@ export async function captureAnalysisV2ReplayBundle(input: {
         );
         const normalized = mergeNormalizedMedia(policy?.feature.media ?? [], [triageNormalized, remainderNormalized]);
         if (
-            (!profile.isPrivate && !isAnalysisV2PartialMediaCoverageAllowed(normalized.coverage))
+            (!textOnly && !profile.isPrivate && !isAnalysisV2PartialMediaCoverageAllowed(normalized.coverage))
             || normalized.media.some(item => !jpeg(item.bytes))
         ) fail('ANALYSIS_V2_REPLAY_MEDIA_INVALID');
         const normalizedSelectionIds = new Set(normalized.media.map(item => item.selectionId));

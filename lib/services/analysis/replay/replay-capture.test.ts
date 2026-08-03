@@ -19,6 +19,45 @@ const profile = {
 };
 
 describe('analysis V2 replay capture', () => {
+    it('permits a retained public no-media account only for the sealed legacy-secondary text-only capability', async () => {
+        const sourceLineage = {
+            selectedPlanId: 'standard' as const,
+            policyVersions: {
+                pipeline: 'v2' as const, aiStage: 'ai-stage-policy-v2.10' as const,
+                risk: 'risk-policy-v2.5' as const, scheduler: 'ai-scheduler-v1' as const,
+            },
+        };
+        const noMedia = {
+            ...profile, username: 'female_one', postsCount: 7,
+            profilePicUrl: undefined, latestPosts: [],
+        };
+        const bundle = await captureAnalysisV2ReplayBundle({
+            selector: { targetUsername: 'target' },
+            repository: {
+                findCompletedReplaySourceExact: async () => ({
+                    requestFingerprint: 'e'.repeat(64), sourceLineage, completed: true,
+                }),
+                loadReplaySource: async () => ({ profiles: [noMedia], evidence: { relationship: [], targetInteractions: [], reverseInteractions: [] }, providerRuns: [] }),
+            },
+            normalizeMedia: async () => Buffer.from([0xff, 0xd8, 0xff, 0xd9]),
+            evaluationPolicy: {
+                capability: 'test-entitlement-standard-v210-risk-v25-scheduler-v1-to-ai-v211-legacy-secondary-account-text-only',
+                aiStage: 'ai-stage-policy-v2.11',
+            },
+            legacySecondary: {
+                requestId: '10000000-0000-4000-8000-000000000001', sourceFingerprint: 'f'.repeat(64), currentRevision: 0,
+                originalFemaleRows: [{
+                    candidateId: 'candidate:one', sortOrdinal: 1, instagramId: 'female_one', fullName: null,
+                    profileImageUrl: null, bio: null, displayScore: 7, riskBand: 'normal', featuredRank: null,
+                    recentMutualRank: null, analysisDepth: 'features', oneLineOverview: '기존 요약', highRiskNarrative: null,
+                }],
+                textOnly: { canonicalCounts: { male: 0, female: 1, unknown: 0 } },
+            },
+        });
+        expect(bundle.profiles[0]).toMatchObject({ media: [], triageSelectionIds: [], coverage: { selectedCount: 0, normalizedCount: 0 } });
+        expect(bundle.capture.legacySecondary?.textOnly).toEqual({ canonicalCounts: { male: 0, female: 1, unknown: 0 } });
+    });
+
     it('requires an exact completed Standard V2 request and canonical current media selection with no missing JPEG', async () => {
         const normalize = vi.fn(async () => Buffer.from([0xff, 0xd8, 0xff, 0xd9]));
         const bundle = await captureAnalysisV2ReplayBundle({

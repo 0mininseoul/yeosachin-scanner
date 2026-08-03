@@ -24,6 +24,7 @@ import type {
     CurrentProductionReplayCaptureDescriptor,
     BetatestFreePoolReplayCaptureDescriptor,
     TestEntitlementLegacySecondaryReplayCaptureDescriptor,
+    TestEntitlementLegacySecondaryTextOnlyReplayCaptureDescriptor,
     HistoricalOfficialE2EReplayCaptureDescriptor,
     ReplayCaptureDescriptor,
 } from './replay-supabase-repository';
@@ -164,7 +165,8 @@ type ProviderLedgerReplayDescriptor =
     | HistoricalOfficialE2EReplayCaptureDescriptor
     | CurrentProductionReplayCaptureDescriptor
     | BetatestFreePoolReplayCaptureDescriptor
-    | TestEntitlementLegacySecondaryReplayCaptureDescriptor;
+    | TestEntitlementLegacySecondaryReplayCaptureDescriptor
+    | TestEntitlementLegacySecondaryTextOnlyReplayCaptureDescriptor;
 
 function isProviderLedgerDescriptor(
     descriptor: ReplayCaptureDescriptor | ProviderLedgerReplayDescriptor,

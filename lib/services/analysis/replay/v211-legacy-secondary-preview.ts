@@ -2,7 +2,10 @@ import { createHash } from 'node:crypto';
 import { z } from 'zod';
 import type { AnalysisV2ReplayBundle } from './replay-bundle';
 import type { ReplayAccountAiOutput } from './replay-runner';
-import { TEST_ENTITLEMENT_STANDARD_V211_LEGACY_SECONDARY_REPLAY_CAPABILITY } from './replay-source-lineage';
+import {
+    TEST_ENTITLEMENT_STANDARD_V211_LEGACY_SECONDARY_REPLAY_CAPABILITY,
+    TEST_ENTITLEMENT_STANDARD_V211_LEGACY_SECONDARY_TEXT_ONLY_REPLAY_CAPABILITY,
+} from './replay-source-lineage';
 
 export interface V211LegacySecondaryPreview {
     schemaVersion: 1;
@@ -10,6 +13,8 @@ export interface V211LegacySecondaryPreview {
     sourceFingerprint: string;
     semanticInputFingerprint: string;
     expectedCurrentRevision: number;
+    /** Only the account-level text-only capability may set this marker. */
+    textOnly?: true;
     idempotencyKey: string;
     counts: { male: number; female: number; unknown: number };
     femaleRows: readonly Record<string, unknown>[];
@@ -35,10 +40,13 @@ const femaleRowSchema = z.object({
 const previewSchema = z.object({
     schemaVersion: z.literal(1), requestId: z.string().uuid(), sourceFingerprint: z.string().regex(/^[a-f0-9]{64}$/),
     semanticInputFingerprint: z.string().regex(/^[a-f0-9]{64}$/), expectedCurrentRevision: z.number().int().min(0).max(999),
-    idempotencyKey: z.string().regex(/^[a-f0-9]{64}$/), counts: z.object({ male: z.number().int().min(0), female: z.number().int().min(0), unknown: z.number().int().min(0) }).strict(),
+    idempotencyKey: z.string().regex(/^[a-f0-9]{64}$/), textOnly: z.literal(true).optional(), counts: z.object({ male: z.number().int().min(0), female: z.number().int().min(0), unknown: z.number().int().min(0) }).strict(),
     femaleRows: z.array(femaleRowSchema).max(900), accounts: z.array(accountOutputSchema).max(900), previewHash: z.string().regex(/^[a-f0-9]{64}$/),
 }).strict().superRefine((value, context) => {
-    if (value.counts.female !== value.femaleRows.length || value.counts.male + value.counts.female + value.counts.unknown !== value.accounts.length) context.addIssue({ code: 'custom', message: 'Preview counts do not match rows.' });
+    if (
+        value.counts.female !== value.femaleRows.length
+        || (!value.textOnly && value.counts.male + value.counts.female + value.counts.unknown !== value.accounts.length)
+    ) context.addIssue({ code: 'custom', message: 'Preview counts do not match rows.' });
 });
 
 function canonical(value: unknown): string {
@@ -54,8 +62,8 @@ function hash(value: unknown): string {
 }
 
 /**
- * Produces the only applyable v2.11 payload. It never invents score metadata:
- * a newly classified female without a previously finalized row fails preview.
+ * Produces the only applyable v2.11 payload. The exact path never invents score
+ * metadata; the text-only path preserves every finalized row and canonical count.
  */
 export function createV211LegacySecondaryPreview(input: {
     requestId: string;
@@ -64,21 +72,31 @@ export function createV211LegacySecondaryPreview(input: {
     semanticInputFingerprint: string;
 }): V211LegacySecondaryPreview {
     const capture = input.bundle.capture;
+    const textOnly = capture.evaluationPolicy?.capability
+        === TEST_ENTITLEMENT_STANDARD_V211_LEGACY_SECONDARY_TEXT_ONLY_REPLAY_CAPABILITY;
     if (
         input.bundle.schemaVersion !== 1
-        || capture.evaluationPolicy?.capability
-            !== TEST_ENTITLEMENT_STANDARD_V211_LEGACY_SECONDARY_REPLAY_CAPABILITY
+        || (
+            capture.evaluationPolicy?.capability
+                !== TEST_ENTITLEMENT_STANDARD_V211_LEGACY_SECONDARY_REPLAY_CAPABILITY
+            && !textOnly
+        )
         || !capture.legacySecondary
         || input.requestId !== capture.legacySecondary.requestId
         || !/^[0-9a-f-]{36}$/i.test(input.requestId)
         || !/^[a-f0-9]{64}$/.test(input.semanticInputFingerprint)
     ) throw new Error('ANALYSIS_V2_V211_PREVIEW_SCOPE_INVALID');
     const publicProfiles = input.bundle.profiles.filter(profile => !profile.isPrivate);
+    const outputProfiles = textOnly
+        ? publicProfiles.filter(profile => profile.triageSelectionIds.some(id => (
+            profile.media.some(media => media.selectionId === id)
+        )))
+        : publicProfiles;
     const outputByOrdinal = new Map(input.accountOutputs.map(output => [output.ordinal, output]));
     if (
         outputByOrdinal.size !== input.accountOutputs.length
-        || outputByOrdinal.size !== publicProfiles.length
-        || publicProfiles.some(profile => !outputByOrdinal.has(profile.ordinal))
+        || outputByOrdinal.size !== outputProfiles.length
+        || outputProfiles.some(profile => !outputByOrdinal.has(profile.ordinal))
     ) throw new Error('ANALYSIS_V2_V211_PREVIEW_ACCOUNT_OUTPUT_INCOMPLETE');
     const originalByInstagram = new Map(
         capture.legacySecondary.originalFemaleRows.map(row => [row.instagramId, row]),
@@ -86,7 +104,16 @@ export function createV211LegacySecondaryPreview(input: {
     if (originalByInstagram.size !== capture.legacySecondary.originalFemaleRows.length) {
         throw new Error('ANALYSIS_V2_V211_PREVIEW_SOURCE_DRIFT');
     }
-    const femaleRows = publicProfiles.flatMap(profile => {
+    const femaleRows = textOnly
+        ? capture.legacySecondary.originalFemaleRows.map(original => {
+            const profile = publicProfiles.find(item => item.username === original.instagramId);
+            const overview = profile
+                ? outputByOrdinal.get(profile.ordinal)?.featureOverview
+                : null;
+            // All score/rank/narrative fields come from the immutable original row.
+            return { ...original, ...(overview ? { oneLineOverview: overview } : {}) };
+        })
+        : publicProfiles.flatMap(profile => {
         const output = outputByOrdinal.get(profile.ordinal)!;
         if (output.finalClassification !== 'verified_female') return [];
         const original = originalByInstagram.get(profile.username);
@@ -110,13 +137,16 @@ export function createV211LegacySecondaryPreview(input: {
         right.displayScore - left.displayScore
         || left.candidateId.localeCompare(right.candidateId)
     )).map((row, index) => ({ ...row, sortOrdinal: index + 1 }));
-    const counts = input.accountOutputs.reduce((total, output) => {
+    const calculatedCounts = input.accountOutputs.reduce((total, output) => {
         if (output.finalClassification === 'verified_female') total.female++;
         else if (output.finalClassification === 'verified_non_female') total.male++;
         else total.unknown++;
         return total;
     }, { male: 0, female: 0, unknown: 0 });
-    if (counts.female !== femaleRows.length) {
+    const counts = textOnly
+        ? capture.legacySecondary.textOnly?.canonicalCounts
+        : calculatedCounts;
+    if (!counts || counts.female !== femaleRows.length) {
         throw new Error('ANALYSIS_V2_V211_PREVIEW_GENDER_ROW_DRIFT');
     }
     const unsigned = {
@@ -125,6 +155,7 @@ export function createV211LegacySecondaryPreview(input: {
         sourceFingerprint: capture.legacySecondary.sourceFingerprint,
         semanticInputFingerprint: input.semanticInputFingerprint,
         expectedCurrentRevision: capture.legacySecondary.currentRevision,
+        ...(textOnly ? { textOnly: true as const } : {}),
         counts,
         femaleRows,
         accounts: [...input.accountOutputs].sort((left, right) => left.ordinal - right.ordinal),
@@ -154,7 +185,7 @@ export function verifyV211LegacySecondaryPreview(value: unknown): V211LegacySeco
 }
 
 export interface V211LegacySecondaryRevisionRpcClient {
-    rpc(name: 'apply_analysis_v2_v211_result_revision', params: {
+    rpc(name: 'apply_analysis_v2_v211_result_revision' | 'apply_analysis_v2_v211_legacy_secondary_text_only_revision', params: {
         p_request_id: string; p_source_fingerprint: string;
         p_semantic_input_fingerprint: string; p_idempotency_key: string;
         p_expected_current_revision: number; p_male_count: number;
@@ -168,7 +199,10 @@ export async function applyV211LegacySecondaryPreview(
     previewValue: unknown,
 ): Promise<unknown> {
     const preview = verifyV211LegacySecondaryPreview(previewValue);
-    const result = await client.rpc('apply_analysis_v2_v211_result_revision', {
+    const result = await client.rpc(
+        preview.textOnly
+            ? 'apply_analysis_v2_v211_legacy_secondary_text_only_revision'
+            : 'apply_analysis_v2_v211_result_revision', {
         p_request_id: preview.requestId,
         p_source_fingerprint: preview.sourceFingerprint,
         p_semantic_input_fingerprint: preview.semanticInputFingerprint,

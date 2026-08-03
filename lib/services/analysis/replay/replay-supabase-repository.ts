@@ -402,6 +402,18 @@ export async function loadTestEntitlementLegacySecondaryTextOnlyReplayCaptureDes
     const parsedResult = testEntitlementLegacySecondaryTextOnlySource.safeParse(result.data);
     if (!parsedResult.success || parsedResult.data.requestId !== exactRequestId) throw new Error('ANALYSIS_V2_REPLAY_READ_ONLY_SOURCE_INVALID');
     const parsed = parsedResult.data;
-    if (parsed.canonicalCounts.male + parsed.canonicalCounts.female + parsed.canonicalCounts.unknown !== parsed.originalFemaleRows.length + parsed.canonicalCounts.male + parsed.canonicalCounts.unknown) throw new Error('ANALYSIS_V2_REPLAY_READ_ONLY_SOURCE_INVALID');
-    return { ...(await loadTestEntitlementLegacySecondaryReplayCaptureDescriptor({ rpc: async () => ({ data: parsed, error: null }) }, exactRequestId)), sourceKind: 'test_entitlement_v211_legacy_secondary_text_only', canonicalCounts: parsed.canonicalCounts };
+    // The STABLE source RPC already proves male+female+unknown against the published
+    // screened total. This loader independently binds the immutable female-row array.
+    if (parsed.canonicalCounts.female !== parsed.originalFemaleRows.length) {
+        throw new Error('ANALYSIS_V2_REPLAY_READ_ONLY_SOURCE_INVALID');
+    }
+    const { canonicalCounts, ...legacySource } = parsed;
+    return {
+        ...(await loadTestEntitlementLegacySecondaryReplayCaptureDescriptor(
+            { rpc: async () => ({ data: legacySource, error: null }) },
+            exactRequestId,
+        )),
+        sourceKind: 'test_entitlement_v211_legacy_secondary_text_only',
+        canonicalCounts,
+    };
 }

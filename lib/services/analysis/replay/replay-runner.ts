@@ -10,6 +10,7 @@ import {
     BETATEST_FREE_POOL_STANDARD_V210_EXACT_REPLAY_CAPABILITY,
     CURRENT_PRODUCTION_STANDARD_V210_EXACT_REPLAY_CAPABILITY,
     TEST_ENTITLEMENT_STANDARD_V211_LEGACY_SECONDARY_REPLAY_CAPABILITY,
+    TEST_ENTITLEMENT_STANDARD_V211_LEGACY_SECONDARY_TEXT_ONLY_REPLAY_CAPABILITY,
     HISTORICAL_PARTIAL_AVAILABLE_REPLAY_CAPABILITY,
     HISTORICAL_PARTIAL_AVAILABLE_REPLAY_V210_CAPABILITY,
     resolveReplayAiStagePolicyVersion,
@@ -119,7 +120,7 @@ export interface AnalysisV2AiReplayReport {
     replayAiPolicy: string;
     semanticInputFingerprint: string;
     fullE2eEvidence: false;
-    sourceKind: 'current_paid_production' | 'betatest_free_pool' | 'test_entitlement_v211_legacy_secondary' | 'historical_or_legacy';
+    sourceKind: 'current_paid_production' | 'betatest_free_pool' | 'test_entitlement_v211_legacy_secondary' | 'test_entitlement_v211_legacy_secondary_text_only' | 'historical_or_legacy';
     featureConcurrency: {
         experiment: 'baseline' | 'feature-concurrency-4';
         featureAnalysis: 3 | 4;
@@ -364,6 +365,10 @@ function finalize(stage: ReplayStageMetrics, durations: number[]): void {
 }
 
 function assertReplayInput(bundle: AnalysisV2ReplayBundle): void {
+    const textOnly = bundle.schemaVersion === 1
+        && bundle.capture.evaluationPolicy?.capability
+            === TEST_ENTITLEMENT_STANDARD_V211_LEGACY_SECONDARY_TEXT_ONLY_REPLAY_CAPABILITY
+        && Boolean(bundle.capture.legacySecondary?.textOnly);
     const ordinals = new Set<number>();
     const usernames = new Set<string>();
     for (const profile of bundle.profiles) {
@@ -389,8 +394,7 @@ function assertReplayInput(bundle: AnalysisV2ReplayBundle): void {
         }
         const featureIds = new Set(profile.featureSelectionIds);
         const invalidPublic = !profile.isPrivate && (
-            !profile.media.length
-            || !profile.triageSelectionIds.length
+            (!textOnly && (!profile.media.length || !profile.triageSelectionIds.length))
             || new Set(profile.triageSelectionIds).size !== profile.triageSelectionIds.length
             || featureIds.size !== profile.featureSelectionIds.length
             || new Set(profile.resolverSelectionIds).size !== profile.resolverSelectionIds.length
@@ -413,7 +417,7 @@ function assertReplayInput(bundle: AnalysisV2ReplayBundle): void {
             || profile.coverage.normalizedCount !== profile.media.length
             || failureIds.size !== profile.coverage.failures.length
             || [...failureIds].some(id => ids.has(id))
-            || (!profile.isPrivate && (
+            || (!textOnly && !profile.isPrivate && (
                 profile.coverage.normalizedCount < 1
                 || profile.coverage.failures.length * 5 > profile.coverage.selectedCount
             ));
@@ -649,9 +653,15 @@ export async function runAnalysisV2AiReplay(input: {
     const accountOutputs: ReplayAccountAiOutput[] = [];
     if (input.mode === 'paid-ai') {
         const runner = paidRunner!;
-        const publicProfiles = input.bundle.profiles.filter(
-            profile => !profile.isPrivate,
-        );
+        const textOnly = input.bundle.schemaVersion === 1
+            && input.bundle.capture.evaluationPolicy?.capability
+                === TEST_ENTITLEMENT_STANDARD_V211_LEGACY_SECONDARY_TEXT_ONLY_REPLAY_CAPABILITY;
+        // The text-only capability intentionally retains the source universe even
+        // when old public media is unavailable. Those accounts must not enter AI.
+        const publicProfiles = input.bundle.profiles.filter(profile => (
+            !profile.isPrivate
+            && (!textOnly || mediaFor(profile, profile.triageSelectionIds).length > 0)
+        ));
         if (
             supportsGenderTriageMicrobatch
             && publicProfiles.some(profile => (
@@ -987,6 +997,9 @@ export async function runAnalysisV2AiReplay(input: {
                 : authenticatedEvaluationPolicy?.capability
                     === TEST_ENTITLEMENT_STANDARD_V211_LEGACY_SECONDARY_REPLAY_CAPABILITY
                     ? 'test_entitlement_v211_legacy_secondary' as const
+                : authenticatedEvaluationPolicy?.capability
+                    === TEST_ENTITLEMENT_STANDARD_V211_LEGACY_SECONDARY_TEXT_ONLY_REPLAY_CAPABILITY
+                    ? 'test_entitlement_v211_legacy_secondary_text_only' as const
                 : 'historical_or_legacy' as const,
         featureConcurrency: {
             experiment: featureConcurrencyExperiment

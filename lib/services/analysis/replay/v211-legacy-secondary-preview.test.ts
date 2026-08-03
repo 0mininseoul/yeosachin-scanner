@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { applyV211LegacySecondaryPreview, createV211LegacySecondaryPreview, verifyV211LegacySecondaryPreview } from './v211-legacy-secondary-preview';
 import type { AnalysisV2ReplayBundle } from './replay-bundle';
 
@@ -45,5 +45,42 @@ describe('v2.11 legacy-secondary preview', () => {
         await expect(applyV211LegacySecondaryPreview({ rpc } as never, preview)).resolves.toMatchObject({
             p_expected_current_revision: 0, p_female_count: 1, p_source_fingerprint: 'b'.repeat(64),
         });
+    });
+
+    it('text-only preview preserves canonical counts and every original row while merging only matching feature overviews', async () => {
+        const textOnly = {
+            ...bundle,
+            capture: {
+                ...bundle.capture,
+                evaluationPolicy: {
+                    capability: 'test-entitlement-standard-v210-risk-v25-scheduler-v1-to-ai-v211-legacy-secondary-account-text-only',
+                    aiStage: 'ai-stage-policy-v2.11',
+                },
+                legacySecondary: {
+                    ...bundle.capture.legacySecondary,
+                    textOnly: { canonicalCounts: { male: 9, female: 1, unknown: 4 } },
+                },
+            },
+            profiles: [
+                { ...bundle.profiles[0], ordinal: 1, username: 'no_media', media: [], triageSelectionIds: [], featureSelectionIds: [], resolverSelectionIds: [], captions: [], coverage: { selectedCount: 0, normalizedCount: 0, failures: [] } },
+                { ...bundle.profiles[0], ordinal: 2 },
+            ],
+        } satisfies AnalysisV2ReplayBundle;
+        const preview = createV211LegacySecondaryPreview({
+            requestId, bundle: textOnly, semanticInputFingerprint: 'c'.repeat(64),
+            accountOutputs: [{ ordinal: 2, finalClassification: 'verified_female', classificationSource: 'feature', featureOverview: '새 v2.11 요약' }],
+        });
+        expect(preview.textOnly).toBe(true);
+        expect(preview.counts).toEqual({ male: 9, female: 1, unknown: 4 });
+        expect(preview.femaleRows).toEqual([expect.objectContaining({
+            candidateId: 'candidate:one', sortOrdinal: 1, displayScore: 7.5,
+            highRiskNarrative: ['첫 문장', '둘째 문장'], oneLineOverview: '새 v2.11 요약',
+        })]);
+        const rpc = vi.fn(async (_name: string, params: Record<string, unknown>) => ({ data: params, error: null }));
+        await applyV211LegacySecondaryPreview({ rpc } as never, preview);
+        expect(rpc).toHaveBeenCalledWith(
+            'apply_analysis_v2_v211_legacy_secondary_text_only_revision',
+            expect.objectContaining({ p_male_count: 9, p_female_count: 1, p_unknown_count: 4 }),
+        );
     });
 });

@@ -16,6 +16,7 @@ import {
     HISTORICAL_PARTIAL_AVAILABLE_REPLAY_CAPABILITY,
     HISTORICAL_PARTIAL_AVAILABLE_REPLAY_V210_CAPABILITY,
     TEST_ENTITLEMENT_STANDARD_V211_LEGACY_SECONDARY_REPLAY_CAPABILITY,
+    TEST_ENTITLEMENT_STANDARD_V211_LEGACY_SECONDARY_TEXT_ONLY_REPLAY_CAPABILITY,
     replayEvaluationPolicySchema,
     replaySourceLineageSchema,
 } from './replay-source-lineage';
@@ -70,6 +71,14 @@ const legacySecondaryCaptureSchema = z.object({
     sourceFingerprint: z.string().regex(/^[a-f0-9]{64}$/),
     currentRevision: z.number().int().min(0).max(999),
     originalFemaleRows: z.array(legacySecondaryFemaleRowSchema).max(900),
+    /** Present only for the deliberately partial account-level text-only revision. */
+    textOnly: z.object({
+        canonicalCounts: z.object({
+            male: z.number().int().min(0),
+            female: z.number().int().min(0),
+            unknown: z.number().int().min(0),
+        }).strict(),
+    }).strict().optional(),
 }).strict();
 const baseBundleSchema = z.object({
     schemaVersion: z.literal(1),
@@ -142,10 +151,25 @@ const exactBundleSchema = baseBundleSchema.superRefine((value, context) => {
     ) {
         context.addIssue({ code: 'custom', path: ['capture', 'evaluationPolicy'], message: 'Partial capability cannot authenticate an exact artifact.' });
     }
-    const legacySecondary = value.capture.evaluationPolicy?.capability
-        === TEST_ENTITLEMENT_STANDARD_V211_LEGACY_SECONDARY_REPLAY_CAPABILITY;
+    const capability = value.capture.evaluationPolicy?.capability;
+    const legacySecondary = capability
+        === TEST_ENTITLEMENT_STANDARD_V211_LEGACY_SECONDARY_REPLAY_CAPABILITY
+        || capability
+            === TEST_ENTITLEMENT_STANDARD_V211_LEGACY_SECONDARY_TEXT_ONLY_REPLAY_CAPABILITY;
     if (legacySecondary !== Boolean(value.capture.legacySecondary)) {
         context.addIssue({ code: 'custom', path: ['capture', 'legacySecondary'], message: 'Legacy-secondary metadata must be present only for its exact capability.' });
+    }
+    const textOnly = capability
+        === TEST_ENTITLEMENT_STANDARD_V211_LEGACY_SECONDARY_TEXT_ONLY_REPLAY_CAPABILITY;
+    if (textOnly !== Boolean(value.capture.legacySecondary?.textOnly)) {
+        context.addIssue({ code: 'custom', path: ['capture', 'legacySecondary', 'textOnly'], message: 'Text-only metadata must be present only for its exact capability.' });
+    }
+    if (
+        textOnly
+        && value.capture.legacySecondary!.textOnly!.canonicalCounts.female
+            !== value.capture.legacySecondary!.originalFemaleRows.length
+    ) {
+        context.addIssue({ code: 'custom', path: ['capture', 'legacySecondary', 'textOnly'], message: 'Text-only canonical female count must match immutable rows.' });
     }
 });
 
