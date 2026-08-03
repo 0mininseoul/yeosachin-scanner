@@ -4,6 +4,8 @@ from datetime import datetime, timezone
 from types import SimpleNamespace
 from unittest.mock import patch
 
+from pydantic import HttpUrl
+
 from app.gateway import InstagrapiGateway, create_instagrapi_gateway
 from app.service import InstagramRateLimitedError, WorkerSchemaError
 
@@ -79,6 +81,31 @@ class InstagrapiGatewayTest(unittest.TestCase):
             },
         ])
         self.assertEqual(client.relationship_args, ('followers', '123', 2))
+
+    def test_accepts_instagrapi_pydantic_url(self):
+        class UserShortLikeClient(FakeClient):
+            def user_followers(self, user_id, amount):
+                return {'1': SimpleNamespace(
+                    pk=1,
+                    username='one.user',
+                    full_name='One User',
+                    profile_pic_url=HttpUrl('https://cdn.example/avatar.jpg'),
+                    is_private=False,
+                    is_verified=False,
+                )}
+
+        self.assertEqual(
+            InstagrapiGateway(UserShortLikeClient()).relationship(
+                'followers', 'target.user', 1,
+            ),
+            [{
+                'username': 'one.user',
+                'fullName': 'One User',
+                'profilePicUrl': 'https://cdn.example/avatar.jpg',
+                'isPrivate': False,
+                'isVerified': False,
+            }],
+        )
 
     def test_maps_likers_and_comments_to_the_existing_node_contract(self):
         gateway = InstagrapiGateway(FakeClient())
