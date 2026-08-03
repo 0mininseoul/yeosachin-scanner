@@ -43,11 +43,11 @@ export default async function MyPage() {
     const analyses = [...demoAnalyses, ...productionAnalyses].sort((left, right) => (right.createdAt ?? '').localeCompare(left.createdAt ?? ''));
 
     return (
-        <div data-amp-mask className="min-h-dvh">
+        <div className="min-h-dvh">
             <TopBar
                 right={
                     <>
-                        <span className="hidden max-w-[140px] truncate text-[12px] text-fg-mute sm:inline">
+                        <span data-amp-mask className="hidden max-w-[140px] truncate text-[12px] text-fg-mute sm:inline">
                             {user.email}
                         </span>
                         <LogoutButton />
@@ -55,7 +55,7 @@ export default async function MyPage() {
                 }
             />
 
-            <main data-amp-mask className="mx-auto max-w-[480px] px-5 pt-7">
+            <main className="mx-auto max-w-[480px] px-5 pt-7">
                 <Eyebrow>판독 기록</Eyebrow>
                 <h1 className="mt-3 text-[26px] font-extrabold tracking-tight text-fg">보관함</h1>
                 <p className="mt-2 text-[13px] text-fg-dim">지난 판독 기록을 확인하고 관리하세요.</p>

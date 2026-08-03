@@ -202,37 +202,9 @@ describe('Amplitude analytics adapter', () => {
             sessionReplay: {
                 sampleRate: 0,
                     privacyConfig: {
-                        defaultMaskLevel: 'conservative',
-                        maskAttributes: [
-                            'href',
-                            'src',
-                            'alt',
-                            'title',
-                            'aria-label',
-                            'value',
-                            'placeholder',
-                        ],
-                        maskSelector: [
-                            '.amp-mask',
-                            '[data-amp-mask]',
-                            'form',
-                            'input',
-                            'textarea',
-                            'select',
-                            'option',
-                            '[contenteditable]',
-                        ],
-                        blockSelector: [
-                            '.amp-block',
-                            '[data-amp-block]',
-                            '[data-amp-sensitive]',
-                            '[data-amp-private]',
-                            'img',
-                            'video',
-                            'audio',
-                            'canvas',
-                            'svg',
-                        ],
+                        defaultMaskLevel: 'light',
+                        maskSelector: ['[data-amp-mask]'],
+                        blockSelector: ['[data-amp-block]'],
                     },
                     interactionConfig: {
                         enabled: true,
@@ -556,8 +528,9 @@ describe('Amplitude analytics adapter', () => {
         expect(joinedConfig.captureEnabled).toBe(false);
         expect(joinedConfig.loggingConfig).toBeUndefined();
         expect(joinedConfig.privacyConfig).toMatchObject({
-            defaultMaskLevel: 'conservative',
-            maskSelector: expect.arrayContaining(['form', '[data-amp-mask]']),
+            defaultMaskLevel: 'light',
+            maskSelector: ['[data-amp-mask]'],
+            blockSelector: ['[data-amp-block]'],
         });
         expect(joinedConfig.privacyConfig?.unmaskSelector).not.toContain('*');
     });
@@ -616,15 +589,9 @@ describe('Amplitude analytics adapter', () => {
                     sr_sampling_config: { capture_enabled: true, sample_rate: 1 },
                     sr_interaction_config: { enabled: true, batch: true },
                     sr_privacy_config: {
-                        maskAttributes: [
-                            'href',
-                            'src',
-                            'alt',
-                            'title',
-                            'aria-label',
-                            'value',
-                            'placeholder',
-                        ],
+                        defaultMaskLevel: 'light',
+                        maskSelector: ['[data-amp-mask]'],
+                        blockSelector: ['[data-amp-block]'],
                     },
                 },
             },
@@ -661,9 +628,7 @@ describe('Amplitude analytics adapter', () => {
             expect(options.sessionReplay.sampleRate).toBe(0.1);
             expect(options.sessionReplay.interactionConfig).toMatchObject({ enabled: true, batch: true });
             expect(options.sessionReplay.interactionConfig.ugcFilterRules).not.toHaveLength(0);
-            expect(options.sessionReplay.privacyConfig.maskSelector).toEqual(
-                expect.arrayContaining(['form', 'input', 'textarea', 'select', 'option', '[contenteditable]']),
-            );
+            expect(options.sessionReplay.privacyConfig.maskSelector).toEqual(['[data-amp-mask]']);
         },
     );
 
@@ -1113,15 +1078,15 @@ describe('Amplitude analytics adapter', () => {
         expect(JSON.stringify(replayFetch.mock.calls)).not.toContain('Cookie');
     });
 
-    it('masks configured sensitive attributes before the replay SDK serializes them', async () => {
+    it('does not globally mask common attributes before the replay SDK serializes them', async () => {
         enableReplayBrowser();
         const analytics = await loadReplayAnalytics();
         await analytics.initAmplitude(null);
         const options = amplitudeMocks.initAll.mock.calls[0][1] as {
             sessionReplay: {
                 privacyConfig: {
-                    defaultMaskLevel: 'conservative';
-                    maskAttributes: string[];
+                    defaultMaskLevel: 'light';
+                    maskAttributes?: string[];
                 };
             };
         };
@@ -1130,7 +1095,6 @@ describe('Amplitude analytics adapter', () => {
             () => 'https://production-alias.example/analyze',
         );
         const genericElement = { closest: () => null, tagName: 'A' } as unknown as HTMLElement;
-        const inputElement = { closest: () => null, tagName: 'INPUT' } as unknown as HTMLElement;
         const rawAttributes = {
             href: 'https://private.example/target',
             src: 'https://private.example/avatar.jpg',
@@ -1143,28 +1107,19 @@ describe('Amplitude analytics adapter', () => {
         const serializedAttributes = Object.fromEntries(
             Object.entries(rawAttributes).map(([key, value]) => [
                 key,
-                attributeMask(key, value, key === 'value' || key === 'placeholder' ? inputElement : genericElement),
+                attributeMask(key, value, genericElement),
             ]),
         );
 
-        expect(options.sessionReplay.privacyConfig.defaultMaskLevel).toBe('conservative');
-        expect(options.sessionReplay.privacyConfig.maskAttributes).toEqual(
-            expect.arrayContaining(Object.keys(rawAttributes)),
-        );
-        expect(JSON.stringify(serializedAttributes)).not.toContain('private.example');
-        expect(JSON.stringify(serializedAttributes)).not.toContain('private profile photo');
-        expect(JSON.stringify(serializedAttributes)).not.toContain('private tooltip');
-        expect(JSON.stringify(serializedAttributes)).not.toContain('private control');
-        expect(JSON.stringify(serializedAttributes)).not.toContain('private input value');
-        expect(JSON.stringify(serializedAttributes)).not.toContain('private input hint');
+        expect(options.sessionReplay.privacyConfig.defaultMaskLevel).toBe('light');
+        expect(options.sessionReplay.privacyConfig.maskAttributes).toBeUndefined();
+        expect(serializedAttributes).toEqual(rawAttributes);
     });
 
-    it('forwards supported privacy settings through the installed session replay adapter', async () => {
-        const maskAttributes = ['href', 'value'];
+    it('forwards the installed SDK least restrictive privacy level through the replay adapter', async () => {
         const plugin = new SessionReplayPlugin({
             privacyConfig: {
-                defaultMaskLevel: 'conservative',
-                maskAttributes,
+                defaultMaskLevel: 'light',
             },
         } as never);
         const init = vi.fn().mockReturnValue({ promise: Promise.resolve() });
@@ -1185,10 +1140,10 @@ describe('Amplitude analytics adapter', () => {
         const receivedOptions = init.mock.calls[0]?.[1] as {
             privacyConfig?: { defaultMaskLevel?: string };
         };
-        expect(receivedOptions.privacyConfig?.defaultMaskLevel).toBe('conservative');
+        expect(receivedOptions.privacyConfig?.defaultMaskLevel).toBe('light');
     });
 
-    it('delivers configured attribute masking through the initial joined replay config', async () => {
+    it('delivers narrow marked-region masking through the initial joined replay config', async () => {
         enableReplayBrowser();
         const analytics = await loadReplayAnalytics();
 
@@ -1202,7 +1157,7 @@ describe('Amplitude analytics adapter', () => {
                     url: string;
                 }) => Promise<Response>;
                 privacyConfig: {
-                    defaultMaskLevel: 'conservative';
+                    defaultMaskLevel: 'light';
                     maskSelector: string[];
                 };
             };
@@ -1232,21 +1187,18 @@ describe('Amplitude analytics adapter', () => {
         const generator = new SessionReplayJoinedConfigGenerator(remoteClient as never, localConfig);
         const { joinedConfig } = await generator.generateJoinedConfig();
 
-        expect(joinedConfig.privacyConfig?.maskAttributes).toEqual([
-            'href',
-            'src',
-            'alt',
-            'title',
-            'aria-label',
-            'value',
-            'placeholder',
-        ]);
+        expect(joinedConfig.privacyConfig).toMatchObject({
+            defaultMaskLevel: 'light',
+            maskSelector: ['[data-amp-mask]'],
+            blockSelector: ['[data-amp-block]'],
+        });
+        expect(joinedConfig.privacyConfig?.maskAttributes).toBeUndefined();
         const attributeMask = maskAttributeFn(
             joinedConfig.privacyConfig ?? {},
             () => 'https://production-alias.example/analyze',
         );
         const element = { closest: () => null, tagName: 'A' } as unknown as HTMLElement;
-        expect(attributeMask('href', 'https://private.example/target', element)).not.toContain('private.example');
+        expect(attributeMask('href', 'https://private.example/target', element)).toBe('https://private.example/target');
     });
 
     it('uploads an exact interaction batch through the replay transport', async () => {

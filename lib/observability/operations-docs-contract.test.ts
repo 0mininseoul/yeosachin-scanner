@@ -88,8 +88,8 @@ describe('analytics and observability disclosure contract', () => {
         );
         expect(disclosure).toMatch(/카드[^<]*?원문 웹훅[^<]*?보관하지/);
         expect(disclosure).toMatch(/Amplitude[^<]*?이용 통계[^<]*?Session Replay[^<]*?활성화된 경우/);
-        expect(disclosure).toMatch(/공개 페이지[^<]*?마스킹된 화면 구조/);
-        expect(disclosure).toMatch(/로그인[^<]*?분석[^<]*?결제[^<]*?결과[^<]*?차단/);
+        expect(disclosure).toMatch(/허용된 서비스 화면[^<]*?(일반 UI|화면)/);
+        expect(disclosure).toMatch(/입력값[^<]*?식별 정보[^<]*?(마스킹|차단)/);
         expect(disclosure).toMatch(/구매자[^<]*?연락처[^<]*?댓글[^<]*?소개글[^<]*?캡션[^<]*?(이미지|미디어) URL[^<]*?제외/);
         expect(disclosure).toMatch(/리에종\(그로블\)[^<]*?통신판매중개/);
         expect(disclosure).not.toContain('주식회사 리에종');
@@ -250,12 +250,10 @@ describe('analytics and observability disclosure contract', () => {
             /(고객|사용자 입력)[^\n]*(이메일|email)[^\n]*(연락처|contact)[^\n]*(replay|event)[^\n]*(보내지 않|전송하지 않)/i
         );
         expect(operations).toMatch(
-            /conservative[^\n]*text[^\n]*input[^\n]*(마스킹|mask)/i
+            /light[^\n]*(일반|static)[^\n]*(text|텍스트|media|미디어)[^\n]*(보이|표시)/i
         );
-        expect(operations).toMatch(/unmask selector[^\n]*(두지 않|없)/i);
-        for (const attribute of ['href', 'src', 'alt', 'title', 'aria-label', 'value', 'placeholder']) {
-            expect(operations).toContain(attribute);
-        }
+        expect(operations).toContain('[data-amp-mask]');
+        expect(operations).toContain('[data-amp-block]');
         expect(operations).not.toContain('contact@ascentum.co.kr');
         expect(operations).not.toContain('mailto:');
         expect(operations).toMatch(/DNT[^\n]*(GPC|Global Privacy Control)|(GPC|Global Privacy Control)[^\n]*DNT/);
@@ -266,13 +264,7 @@ describe('analytics and observability disclosure contract', () => {
         expect(operations).toMatch(/(캐시|cache)[^\n]*(거부|무시|적용하지 않)/i);
         expect(operations).toMatch(/(캐시|cache)[^\n]*(타임아웃|timeout)[^\n]*captureEnabled[^\n]*false/i);
         expect(operations).not.toMatch(/(타임아웃|timeout)[^\n]*sampleRate[^\n]*0/i);
-        for (const selector of ['form', 'input', 'select', 'textarea', 'option', 'contenteditable']) {
-            expect(operations).toContain(selector);
-        }
         expect(operations).toMatch(/(마스킹|mask)/i);
-        for (const selector of ['img', 'video', 'audio', 'canvas', 'svg']) {
-            expect(operations).toContain(selector);
-        }
         expect(operations).toMatch(/(차단|block)/i);
         for (const excludedValue of ['인스타그램', '이름', 'bio', '댓글', 'caption', '이미지', '미디어', '결제 연락처']) {
             expect(operations).toContain(excludedValue);

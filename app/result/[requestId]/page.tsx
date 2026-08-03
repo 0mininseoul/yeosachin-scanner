@@ -727,7 +727,7 @@ export default function ResultPage({ params }: PageProps) {
                     <h1 className="mt-4 text-[21px] font-extrabold tracking-tight text-fg">
                         판독 결과를 열지 못했습니다
                     </h1>
-                    <p className="mt-3 text-[13px] leading-relaxed text-fg-dim" role="alert">
+                    <p data-amp-mask className="mt-3 text-[13px] leading-relaxed text-fg-dim" role="alert">
                         {error || '판독 결과를 찾을 수 없습니다.'}
                     </p>
                     <div className="mt-7">
@@ -786,7 +786,7 @@ export default function ResultPage({ params }: PageProps) {
                 }
             />
 
-            <main data-amp-mask className="mx-auto max-w-[480px] px-5 pt-7">
+            <main className="mx-auto max-w-[480px] px-5 pt-7">
                 {/* case header */}
                 {/* The share control belongs to the report, not to the app chrome:
                     in the top bar it read as a site-level menu item rather than
@@ -820,7 +820,7 @@ export default function ResultPage({ params }: PageProps) {
                         {/* Profile lockup: the page needs a subject before it states
                             a number, and the handle confirms which account that
                             display name belongs to. */}
-                        <div className="reveal mt-5 flex items-start gap-3" style={{ animationDelay: '80ms' }}>
+                        <div data-amp-block className="reveal mt-5 flex items-start gap-3" style={{ animationDelay: '80ms' }}>
                             <div className="relative h-11 w-11 shrink-0 overflow-hidden border border-line-2 bg-panel">
                                 <ProfileImage src={summary.targetProfileImage} variant="person" />
                             </div>
@@ -968,25 +968,26 @@ export default function ResultPage({ params }: PageProps) {
                     ) : (
                         <div className="mt-5">
                             {femaleAccounts.map((account, i) => (
-                                <SuspectRow
-                                    key={account.instagramId}
-                                    account={account}
-                                    rank={
-                                        pageNavigation.public.pageIndex
-                                        * OWNER_RESULT_PAGE_SIZE
-                                        + i
-                                        + 1
-                                    }
-                                    avatar={<ProfileImage src={account.profileImage} variant="person" />}
-                                    externalProfileLinks={externalProfileLinks}
-                                    onPreview={!externalProfileLinks ? () => setProfilePreview({
-                                        instagramId: account.instagramId,
-                                        fullName: account.fullName,
-                                        profileImage: account.profileImage,
-                                        bio: account.bio,
-                                        overview: account.oneLineOverview,
-                                    }) : undefined}
-                                />
+                                <div data-amp-block key={account.instagramId}>
+                                    <SuspectRow
+                                        account={account}
+                                        rank={
+                                            pageNavigation.public.pageIndex
+                                            * OWNER_RESULT_PAGE_SIZE
+                                            + i
+                                            + 1
+                                        }
+                                        avatar={<ProfileImage src={account.profileImage} variant="person" />}
+                                        externalProfileLinks={externalProfileLinks}
+                                        onPreview={!externalProfileLinks ? () => setProfilePreview({
+                                            instagramId: account.instagramId,
+                                            fullName: account.fullName,
+                                            profileImage: account.profileImage,
+                                            bio: account.bio,
+                                            overview: account.oneLineOverview,
+                                        }) : undefined}
+                                    />
+                                </div>
                             ))}
                         </div>
                     )}
@@ -1016,6 +1017,7 @@ export default function ResultPage({ params }: PageProps) {
                         <div className="mt-5">
                             {privateAccounts.map((account) => (
                                 <div
+                                    data-amp-block
                                     key={account.instagramId}
                                     className="flex items-center gap-3.5 border-b border-line py-3.5"
                                 >

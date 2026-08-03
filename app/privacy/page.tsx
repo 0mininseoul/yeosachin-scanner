@@ -147,7 +147,7 @@ export default function PrivacyPage() {
                                 <tr><Td>Kakao Corp.</Td><Td>카카오 소셜 로그인 인증</Td></tr>
                                 <tr><Td>Apify Technologies s.r.o.</Td><Td>인스타그램 공개 정보 수집 처리</Td></tr>
                                 <tr><Td>Plus Five Five, Inc. (Resend)</Td><Td>이메일 발송</Td></tr>
-                                <tr><Td>Amplitude, Inc.</Td><Td>서비스 이용 통계·전환 및 허용된 공개 페이지의 Session Replay 분석</Td></tr>
+                                <tr><Td>Amplitude, Inc.</Td><Td>서비스 이용 통계·전환 및 허용된 서비스 화면의 Session Replay 분석</Td></tr>
                                 <tr><Td>Axiom, Inc.</Td><Td>서버 운영 로그의 수집·보관 및 장애 탐지·진단</Td></tr>
                             </tbody>
                         </table>
@@ -162,10 +162,9 @@ export default function PrivacyPage() {
                         제외합니다. 그로블 구매자 연락처는 DB에 영속 저장하지 않고, 고객용 API 응답, Amplitude 및 Axiom에 전송하지 않습니다.
                     </p>
                     <p className="mt-2 text-[12px] text-fg-mute">
-                        Amplitude는 허용된 서비스 이용 통계 이벤트와 속성을 처리합니다. 프로덕션에서 별도 설정으로 Session Replay가 활성화된 경우에는 쿼리·해시가 없는
-                        공개 페이지(홈, 개인정보 처리방침, 이용약관)에 한해 표본 세션의 마스킹된 화면 구조·변경 내역과 세션·기기 기술정보를 수집할 수 있습니다.
-                        로그인·분석·결제·보관함·진행·결과·공유·관리자 페이지를 포함한 그 밖의 경로는 수집 대상에서 차단하며, 입력 폼과 이미지·영상 등 미디어는
-                        마스킹하거나 차단합니다. 인스타그램 계정 아이디, 이메일·전화번호, 프로필·소셜 콘텐츠는 Amplitude에 전송하지 않습니다.
+                        Amplitude는 허용된 서비스 이용 통계 이벤트와 속성을 처리합니다. 프로덕션에서 별도 설정으로 Session Replay가 활성화된 경우에는 허용된 서비스 화면에서
+                        표본 세션의 일반 UI·화면 변경 내역과 세션·기기 기술정보를 수집할 수 있습니다. 쿼리·해시와 동적 식별자는 정적 경로로 치환하며, 입력값·이메일·전화번호와
+                        인스타그램 식별 정보, 프로필·소셜 콘텐츠처럼 보호가 필요한 영역은 마스킹하거나 차단합니다. 관리자·API 등 허용되지 않은 경로는 수집 대상에서 차단합니다.
                     </p>
 
                     <H>제5조 (개인정보의 국외 이전 및 해외 사업자 처리)</H>
@@ -214,9 +213,9 @@ export default function PrivacyPage() {
                                 </tr>
                                 <tr>
                                     <Td>Amplitude, Inc.</Td><Td>미국(US endpoint)</Td>
-                                    <Td>가명 Supabase UUID, 이용 이벤트·플랜·구간화된 수치, 허용된 공개 페이지의 마스킹된 화면 구조·변경 내역, 쿼리·해시가 없는 공개 페이지 URL, 가명 세션·기기 식별자 및 브라우저·화면 기술정보</Td>
+                                    <Td>가명 Supabase UUID, 이용 이벤트·플랜·구간화된 수치, 허용된 서비스 화면의 일반 UI·변경 내역(입력값·식별·프로필·UGC 보호 영역 제외), 정적 경로 템플릿, 가명 세션·기기 식별자 및 브라우저·화면 기술정보</Td>
                                     <Td>서비스 이용 이벤트 발생 시 및 프로덕션에서 Session Replay가 활성화된 표본 세션 이용 시 암호화 전송</Td>
-                                    <Td>제품 이용 통계·전환 분석, 허용된 공개 페이지의 이용 흐름·오류 진단</Td>
+                                    <Td>제품 이용 통계·전환 분석, 허용된 서비스 화면의 이용 흐름·오류 진단</Td>
                                     <Td>Amplitude 프로젝트 보관 설정·계약 기간 및 삭제 요청 시까지</Td><Td>브라우저 차단·처리정지 요청 가능, 핵심 판독은 가능하나 통계에서 제외</Td>
                                 </tr>
                                 <tr>

@@ -169,6 +169,7 @@ export function EarlybirdStatus({ order }: { order: EarlybirdOrderStatusDto }) {
             {order.resultUrl ? (
                 <Link
                     href={order.resultUrl}
+                    data-amp-block
                     className="mt-5 flex w-full items-center justify-center bg-blood px-5 py-4 text-[14px] font-bold text-white transition-opacity hover:opacity-90"
                 >
                     판독 결과 확인하기
@@ -184,6 +185,7 @@ export function EarlybirdStatus({ order }: { order: EarlybirdOrderStatusDto }) {
                     </PrimaryButton>
                     {checkoutRecoveryError && (
                         <p
+                            data-amp-mask
                             className="mt-3 text-center text-[12px] leading-relaxed text-blood"
                             role="alert"
                         >

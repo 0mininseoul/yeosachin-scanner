@@ -81,7 +81,7 @@ export function BetaTestClient() {
     return (
         <div className="min-h-dvh">
             <TopBar right={<BrandMark />} />
-            <main data-amp-mask className="mx-auto max-w-[500px] px-5 pb-16 pt-7">
+            <main className="mx-auto max-w-[500px] px-5 pb-16 pt-7">
                 {!preflight ? (
                     <>
                         <Eyebrow>베타 테스트 · 대상 지정</Eyebrow>
@@ -99,6 +99,7 @@ export function BetaTestClient() {
                                 <span className="pointer-events-none absolute left-4 top-1/2 -translate-y-1/2 text-fg-dim">@</span>
                                 <input
                                     id="beta-target-instagram"
+                                    data-amp-mask
                                     type="text"
                                     value={instagramId}
                                     onChange={event => {
@@ -116,7 +117,7 @@ export function BetaTestClient() {
                                 />
                             </div>
                             <InstagramLookupLink />
-                            {error && <p className="mt-4 border-l-2 border-blood pl-3 text-[13px] text-blood-2" role="alert">{error}</p>}
+                            {error && <p data-amp-mask className="mt-4 border-l-2 border-blood pl-3 text-[13px] text-blood-2" role="alert">{error}</p>}
                             <div className="mt-5">
                                 <PrimaryButton onClick={() => void start()} disabled={!instagramId.trim() || creating}>
                                     {creating ? '계정 확인 중…' : '무료 판독 가능 여부 확인'}
@@ -138,7 +139,7 @@ export function BetaTestClient() {
                                     ? '무료 판독 준비를 다시 확인해주세요'
                                     : '판독 대상을 확인해주세요'}
                         </h1>
-                        <p className="mt-3 text-[13px] leading-relaxed text-fg-dim">{error ?? '현재 이 계정은 판독할 수 없습니다.'}</p>
+                        <p data-amp-mask className="mt-3 text-[13px] leading-relaxed text-fg-dim">{error ?? '현재 이 계정은 판독할 수 없습니다.'}</p>
                         <div className="mt-7">
                             {retryableBetaPreparation ? (
                                 <PrimaryButton onClick={() => void retrySameTarget()} disabled={creating}>
@@ -172,6 +173,7 @@ export function BetaTestClient() {
                                 <label htmlFor="beta-excluded-instagram" className="eyebrow mb-3 block">본인 인스타그램 아이디</label>
                                 <input
                                     id="beta-excluded-instagram"
+                                    data-amp-mask
                                     type="text"
                                     value={excludedInstagramId}
                                     onChange={event => setExcludedInstagramId(event.target.value)}
@@ -181,7 +183,7 @@ export function BetaTestClient() {
                                     spellCheck={false}
                                     className="w-full border border-line bg-ink px-4 py-3.5 text-[15px] text-fg placeholder-fg-mute focus:border-blood focus:outline-none"
                                 />
-                                {error && <p className="mt-4 border-l-2 border-blood pl-3 text-[13px] text-blood-2" role="alert">{error}</p>}
+                                {error && <p data-amp-mask className="mt-4 border-l-2 border-blood pl-3 text-[13px] text-blood-2" role="alert">{error}</p>}
                                 <div className="mt-5 space-y-2.5">
                                     <PrimaryButton onClick={() => void decideExclusionAndAdmit(excludedInstagramId)} disabled={!excludedInstagramId.trim() || exclusionState === 'saving' || automaticAdmission}>
                                         {exclusionState === 'saving' || automaticAdmission ? '무료 판독 준비 중…' : '내 계정 제외하고 무료 판독 시작'}
@@ -206,7 +208,7 @@ export function BetaTestClient() {
                                             : '무료 판독을 바로 시작합니다.'}
                                     </p>
                                 </div>
-                                {error && <p className="mt-4 border-l-2 border-blood pl-3 text-left text-[13px] text-blood-2" role="alert">{error}</p>}
+                                {error && <p data-amp-mask className="mt-4 border-l-2 border-blood pl-3 text-left text-[13px] text-blood-2" role="alert">{error}</p>}
                                 {!automaticAdmission && !starting && (
                                     <div className="mt-5">
                                         <PrimaryButton onClick={() => void admitRequiredPlan()} disabled={!requiredPlan}>

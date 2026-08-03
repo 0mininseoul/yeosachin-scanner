@@ -74,7 +74,7 @@ export function ProfilePreviewDialog({
                 aria-labelledby="profile-preview-title"
                 tabIndex={-1}
             >
-                <div className="flex items-start gap-3">
+                <div data-amp-block className="flex items-start gap-3">
                     {avatar && <div className="relative h-12 w-12 shrink-0 overflow-hidden border border-line bg-panel">{avatar}</div>}
                     <div className="min-w-0 flex-1">
                         <p id="profile-preview-title" className="truncate text-[15px] font-bold text-fg">@{profile.instagramId}</p>
@@ -83,7 +83,7 @@ export function ProfilePreviewDialog({
                     <button ref={closeButtonRef} type="button" onClick={onClose} aria-label="프로필 정보 닫기" className="text-[12px] font-bold text-fg-dim hover:text-fg">닫기</button>
                 </div>
                 {(profile.bio || profile.overview) && (
-                    <p className="mt-4 text-[12px] leading-relaxed text-fg-dim">{profile.overview || profile.bio}</p>
+                    <p data-amp-block className="mt-4 text-[12px] leading-relaxed text-fg-dim">{profile.overview || profile.bio}</p>
                 )}
             </div>
         </div>

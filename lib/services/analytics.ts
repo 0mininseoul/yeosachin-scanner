@@ -111,36 +111,14 @@ const SESSION_REPLAY_UGC_FILTER_RULES: readonly ReplayUgcFilterRule[] = [
     { selector: 'http://*/', replacement: '/' },
     { selector: 'https://*/', replacement: '/' },
 ];
-const SESSION_REPLAY_MASK_SELECTORS = [
-    '.amp-mask',
-    '[data-amp-mask]',
-    'form',
-    'input',
-    'textarea',
-    'select',
-    'option',
-    '[contenteditable]',
-] as const;
-const SESSION_REPLAY_MASK_ATTRIBUTES = [
-    'href',
-    'src',
-    'alt',
-    'title',
-    'aria-label',
-    'value',
-    'placeholder',
-] as const;
-const SESSION_REPLAY_BLOCK_SELECTORS = [
-    '.amp-block',
-    '[data-amp-block]',
-    '[data-amp-sensitive]',
-    '[data-amp-private]',
-    'img',
-    'video',
-    'audio',
-    'canvas',
-    'svg',
-] as const;
+// `light` is the least restrictive privacy level supported by the installed SDK. It leaves
+// ordinary page text and media visible while retaining the SDK's built-in handling for
+// sensitive input types. Application markers are reserved for the few dynamic identity areas.
+const SESSION_REPLAY_PRIVACY_CONFIG = {
+    defaultMaskLevel: 'light',
+    maskSelector: ['[data-amp-mask]'],
+    blockSelector: ['[data-amp-block]'],
+} as const;
 const SESSION_REPLAY_TRACK_TYPES = new Set(['replay', 'interaction']);
 
 const APPROVED_EVENTS = new Set<AnalyticsEvent>(Object.values(EVENTS));
@@ -392,12 +370,7 @@ function replayRemoteConfig(sampling: ReplaySamplingConfig) {
                     capture_enabled: sampling.captureEnabled,
                 },
                 ...(sampling.captureEnabled ? {
-                    // The installed Unified adapter strips maskAttributes from its local options.
-                    // The Session Replay joined-config path merges this deterministic remote field
-                    // into the actual rrweb runtime before any recording begins.
-                    sr_privacy_config: {
-                        maskAttributes: [...SESSION_REPLAY_MASK_ATTRIBUTES],
-                    },
+                    sr_privacy_config: { ...SESSION_REPLAY_PRIVACY_CONFIG },
                     sr_interaction_config: { enabled: true, batch: true },
                 } : {}),
             },
@@ -766,10 +739,9 @@ export function initAmplitude(resolvedUserId: string | null): Promise<boolean> {
                 sessionReplay: {
                     sampleRate: replaySampling.sampleRate,
                     privacyConfig: {
-                        defaultMaskLevel: 'conservative',
-                        maskSelector: [...SESSION_REPLAY_MASK_SELECTORS],
-                        maskAttributes: [...SESSION_REPLAY_MASK_ATTRIBUTES],
-                        blockSelector: [...SESSION_REPLAY_BLOCK_SELECTORS],
+                        ...SESSION_REPLAY_PRIVACY_CONFIG,
+                        maskSelector: [...SESSION_REPLAY_PRIVACY_CONFIG.maskSelector],
+                        blockSelector: [...SESSION_REPLAY_PRIVACY_CONFIG.blockSelector],
                     },
                     interactionConfig: {
                         enabled: true,
