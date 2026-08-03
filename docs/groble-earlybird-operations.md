@@ -14,7 +14,7 @@
 | 이동 버튼 문구 | `사전 구매 현황 확인` | `사전 구매 현황 확인` |
 | Groble 상품 재고 | 10건 유지 | 10건 유지 |
 
-Webhook URL은 `https://yeosachin.com/api/webhooks/groble`이며 `payment.completed`와 `payment.cancel_requested`를 구독한다.
+Webhook URL은 `https://yeosachin.com/api/webhooks/groble`이며 `payment.completed`, `payment.cancel_requested`, `payment.refunded`를 구독한다.
 
 Groble의 현재 공식 가이드를 기준으로 결제창 주소는 `https://groble.im/payment/{결제창 주소}` 형식을 사용한다. 진입 페이지는 결제창을 닫거나 뒤로 갈 때 돌아오는 판매 페이지이고, 이동 페이지는 완료 화면 버튼의 목적지일 뿐 결제 증명이 아니다.
 
@@ -155,7 +155,7 @@ ORDER BY query_start;
 ## 결제 확정과 수량 운영
 
 - 성공 화면 진입이나 프론트 숫자로 접수 확정하지 않는다.
-- 공식 raw-body HMAC과 ±5분 timestamp를 통과한 `payment.completed`만 접수를 확정하며, `payment.cancel_requested`는 환불 검토 상태로만 전환한다.
+- 공식 raw-body HMAC과 ±5분 timestamp를 통과한 `payment.completed`만 결제를 확정한다. `payment.cancel_requested`는 환불 검토 상태로만 전환하고, 동일 `merchantUid`의 `payment.refunded`가 최종 환불·접근 철회 신호다. 부분 환불(`partialRefund=true`)은 감사 기록만 남기며 전체 환불 상태로 전환하지 않는다.
 - `verified_kakao_phone` 주문의 결제 완료는 checkout 시점의 불변 정규화 전화번호 snapshot으로만 매칭한다. 사용자 프로필 전화번호가 이후 바뀌어도 주문 snapshot은 바뀌지 않으며 이메일로 fallback하지 않는다. 이메일 매칭은 migration 전에 생성된 `legacy_email` 주문에만 허용한다.
 - 같은 사용자·상품·금액에 해당하는 미결제 `legacy_email` 취소 주문이 여러 건이면 최신 주문을 임의로 고르지 않고 `ambiguous_buyer`로 격리한다.
 - Groble 구매자의 정규화 전화번호와 소문자 이메일은 signed webhook transaction의 전화번호 우선·이메일 fallback 매칭 RPC 입력으로만 일시 처리한다. raw 전화번호·표시 이름은 RPC에 전달하지 않고, 이메일·전화번호·표시 이름을 주문·웹훅 이벤트에 영속 저장하지 않으며 브라우저 응답·Amplitude·Axiom에 전송하지 않는다. 카드 정보와 원본 payload도 저장하지 않는다.
@@ -178,7 +178,7 @@ ORDER BY query_start;
 - 채널 표시 수량과 가격의 정본은 [운영 원가 문서의 Groble 얼리버드 가격](./operations-cost-model.md#groble-얼리버드-가격)과 함께 확인한다.
 - Groble 상품 재고와 서버 inventory를 동시에 유지한다.
 - 이미 결제된 11번째 예외는 `overflow_refund_required`로 분리된다. 운영자는 이 상태를 환불 처리 대상으로 확인하고, 실제 조치는 승인된 Groble 운영 절차를 따른다.
-- 구매자 취소 요청은 `refund_pending`으로 표시한다. 최종 `cancelled`/`refunded` 전환은 서비스 역할 전용 RPC를 사용하는 운영 절차에서만 수행한다.
+- 구매자 취소 요청은 `refund_pending`으로 표시한다. 서명된 `payment.refunded` 전체 환불은 서비스 역할 전용 RPC로 해당 `merchantUid`의 기존 주문만 `refunded`로 종결한다.
 - 취소 요청 webhook이 결제 완료 webhook보다 먼저 도착해도 후속 결제를 판매로 확정하거나 수량에 포함하지 않고 `refund_pending`으로 재조정한다.
 - 취소된 주문의 결제가 뒤늦게 도착했을 때 실결제액이 `0원 이상`이고 checkout snapshot의 예상 금액 이하라면 쿠폰 할인 결제를 포함해 원래 주문에 `late_cancelled_payment`로 귀속하고 `refund_pending`으로 격리한다. 예상 금액 초과, 다른 상품, 복수 후보는 귀속하지 않으며 판매 수량에도 포함하지 않는다.
 - 결제 확정은 `analysis_requests`를 만들거나 Cloud Tasks/V2 자동 분석을 시작하지 않는다.

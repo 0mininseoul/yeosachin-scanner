@@ -44,6 +44,14 @@ describe('business operational event contract', () => {
                 disposition: 'cancel_mismatch',
             },
         });
+        const refunded = sanitizeOperationalEvent({
+            event: 'groble.webhook_finalized',
+            severity: 'info',
+            fields: {
+                webhook_event_type: 'payment.refunded',
+                disposition: 'refunded',
+            },
+        });
         const unknown = sanitizeOperationalEvent({
             event: 'groble.webhook_finalized',
             severity: 'warn',
@@ -60,6 +68,10 @@ describe('business operational event contract', () => {
         expect(cancellation.fields).toMatchObject({
             webhook_event_type: 'payment.cancel_requested',
             disposition: 'cancel_mismatch',
+        });
+        expect(refunded.fields).toMatchObject({
+            webhook_event_type: 'payment.refunded',
+            disposition: 'refunded',
         });
         expect(unknown.fields).not.toHaveProperty('webhook_event_type');
         expect(unknown.fields).not.toHaveProperty('disposition');
