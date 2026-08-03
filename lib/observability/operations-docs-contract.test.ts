@@ -244,6 +244,9 @@ describe('analytics and observability disclosure contract', () => {
             /click·scroll interaction[^\n]*batching[^\n]*network[^\n]*console[^\n]*performance[^\n]*document title[^\n]*끈다/i
         );
         expect(operations).toMatch(
+            /클릭·스크롤 행동 관찰[^\n]*Session Replay interaction[^\n]*일반 autocapture[^\n]*(우회|켜지 않)/i
+        );
+        expect(operations).toMatch(
             /(고객|사용자 입력)[^\n]*(이메일|email)[^\n]*(연락처|contact)[^\n]*(replay|event)[^\n]*(보내지 않|전송하지 않)/i
         );
         expect(operations).toMatch(

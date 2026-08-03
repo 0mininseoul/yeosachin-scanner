@@ -298,6 +298,26 @@ function configuredApiKey(): string | null {
     return apiKey;
 }
 
+function replayRemoteConfigCacheKey(apiKey: string): string {
+    // This is the key used by the installed @amplitude/analytics-core RemoteConfigClient.
+    // Keeping the derivation here avoids depending on an SDK-internal export at runtime.
+    return `AMP_remote_config_${apiKey.slice(0, 10)}`;
+}
+
+/**
+ * The installed RemoteConfigClient falls back to a recent localStorage value after its
+ * network timeout. Replay requires a live, trusted approval, so discard that cache before
+ * SDK initialization. Storage can be unavailable in private/restricted browser contexts.
+ */
+function clearSessionReplayRemoteConfigCache(apiKey: string): void {
+    if (typeof window === 'undefined') return;
+    try {
+        window.localStorage?.removeItem(replayRemoteConfigCacheKey(apiKey));
+    } catch {
+        // Storage availability must not affect analytics or product behavior.
+    }
+}
+
 function currentReplayLocation(): ReplayLocation | null {
     if (typeof window === 'undefined') return null;
     const location = window.location;
@@ -362,6 +382,12 @@ function replayRemoteConfig(sampling: ReplaySamplingConfig) {
                     capture_enabled: sampling.captureEnabled,
                 },
                 ...(sampling.captureEnabled ? {
+                    // The installed Unified adapter strips maskAttributes from its local options.
+                    // The Session Replay joined-config path merges this deterministic remote field
+                    // into the actual rrweb runtime before any recording begins.
+                    sr_privacy_config: {
+                        maskAttributes: [...SESSION_REPLAY_MASK_ATTRIBUTES],
+                    },
                     sr_interaction_config: { enabled: true, batch: true },
                 } : {}),
             },
@@ -676,6 +702,7 @@ export function initAmplitude(resolvedUserId: string | null): Promise<boolean> {
         try {
             const sdk = await loadUnifiedSdk();
             const replaySampling = configuredReplaySampling();
+            clearSessionReplayRemoteConfigCache(apiKey);
             await sdk.initAll(apiKey, {
                 analytics: {
                     autocapture: {

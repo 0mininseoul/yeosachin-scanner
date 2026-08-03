@@ -429,6 +429,7 @@ describe('Amplitude analytics adapter', () => {
         const deterministicConfig = await deterministicResponse.json() as {
             configs: { sessionReplay: Record<string, unknown> };
         };
+        expect(deterministicConfig.configs.sessionReplay.sr_privacy_config).toBeUndefined();
         const remoteClient = {
             subscribe: vi.fn((
                 _key: string | undefined,
@@ -487,6 +488,7 @@ describe('Amplitude analytics adapter', () => {
             removeItem: (key: string) => storage.delete(key),
             setItem: (key: string, value: string) => storage.set(key, value),
         });
+        Object.assign(window, { localStorage: globalThis.localStorage });
         vi.stubGlobal('document', {
             createDocumentFragment: () => ({ querySelector: vi.fn() }),
         });
@@ -611,6 +613,17 @@ describe('Amplitude analytics adapter', () => {
                 sessionReplay: {
                     sr_sampling_config: { capture_enabled: true, sample_rate: 1 },
                     sr_interaction_config: { enabled: true, batch: true },
+                    sr_privacy_config: {
+                        maskAttributes: [
+                            'href',
+                            'src',
+                            'alt',
+                            'title',
+                            'aria-label',
+                            'value',
+                            'placeholder',
+                        ],
+                    },
                 },
             },
         });
@@ -1143,7 +1156,7 @@ describe('Amplitude analytics adapter', () => {
         expect(JSON.stringify(serializedAttributes)).not.toContain('private input hint');
     });
 
-    it('forwards configured attribute masking through the installed session replay adapter', async () => {
+    it('does not rely on the installed session replay adapter to forward attribute masking', async () => {
         const maskAttributes = ['href', 'value'];
         const plugin = new SessionReplayPlugin({
             privacyConfig: {
@@ -1169,7 +1182,68 @@ describe('Amplitude analytics adapter', () => {
         const receivedOptions = init.mock.calls[0]?.[1] as {
             privacyConfig?: { maskAttributes?: string[] };
         };
-        expect(receivedOptions.privacyConfig?.maskAttributes).toEqual(maskAttributes);
+        expect(receivedOptions.privacyConfig?.maskAttributes).toBeUndefined();
+    });
+
+    it('delivers configured attribute masking through the initial joined replay config', async () => {
+        enableReplayBrowser();
+        const analytics = await loadReplayAnalytics();
+
+        await analytics.initAmplitude(null);
+
+        const options = amplitudeMocks.initAll.mock.calls[0][1] as {
+            sessionReplay: {
+                handleFetchConfig: (request: {
+                    headers: Record<string, string>;
+                    method: 'GET';
+                    url: string;
+                }) => Promise<Response>;
+                privacyConfig: {
+                    defaultMaskLevel: 'conservative';
+                    maskSelector: string[];
+                };
+            };
+        };
+        vi.stubGlobal('document', {
+            createDocumentFragment: () => ({ querySelector: vi.fn() }),
+        });
+        const response = await options.sessionReplay.handleFetchConfig({
+            headers: {},
+            method: 'GET',
+            url: `https://sr-client-cfg.amplitude.com/config/${API_KEY}?config_group=browser`,
+        });
+        const payload = await response.json() as {
+            configs: { sessionReplay: Record<string, unknown> };
+        };
+        const remoteClient = {
+            subscribe: vi.fn((
+                _key: string | undefined,
+                _deliveryMode: unknown,
+                callback: (config: Record<string, unknown>, source: 'remote', lastFetch: Date) => void,
+            ) => {
+                callback(payload.configs.sessionReplay, 'remote', new Date());
+                return 'safe-config-subscription';
+            }),
+        };
+        const localConfig = new SessionReplayLocalConfig(API_KEY, options.sessionReplay as never);
+        const generator = new SessionReplayJoinedConfigGenerator(remoteClient as never, localConfig);
+        const { joinedConfig } = await generator.generateJoinedConfig();
+
+        expect(joinedConfig.privacyConfig?.maskAttributes).toEqual([
+            'href',
+            'src',
+            'alt',
+            'title',
+            'aria-label',
+            'value',
+            'placeholder',
+        ]);
+        const attributeMask = maskAttributeFn(
+            joinedConfig.privacyConfig ?? {},
+            () => 'https://production-alias.example/analyze',
+        );
+        const element = { closest: () => null, tagName: 'A' } as unknown as HTMLElement;
+        expect(attributeMask('href', 'https://private.example/target', element)).not.toContain('private.example');
     });
 
     it('uploads an exact interaction batch through the replay transport', async () => {
