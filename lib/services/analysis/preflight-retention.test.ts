@@ -155,6 +155,28 @@ describe('preflight retention maintenance', () => {
         });
     });
 
+    it('refreshes all beta credit snapshots during an idle retention cycle', async () => {
+        const refreshBetaCredit = vi.fn(async () => undefined);
+        const summary = await runPreflightRetention({
+            rpc: vi.fn(async () => ({ data: 0, error: null })),
+        }, {
+            providerRunStore: {
+                listUnreconciled: vi.fn(async () => []),
+                reconcileUsage: vi.fn(),
+            },
+            recoverBetaCredit: async () => 0,
+            archiveBetaCredit: async () => 0,
+            refreshBetaCredit,
+        });
+
+        expect(refreshBetaCredit).toHaveBeenCalledOnce();
+        expect(summary).toMatchObject({
+            betaCreditRecovered: 0,
+            betaCreditRefreshAttempts: 1,
+            betaCreditRefreshFailures: 0,
+        });
+    });
+
     it('still archives and scrubs when beta recovery fails', async () => {
         const archiveBetaCredit = vi.fn(async () => 2);
         const summary = await runPreflightRetention({
@@ -172,7 +194,7 @@ describe('preflight retention maintenance', () => {
             terminalScrubbed: 0,
             betaCreditRecoveryFailures: 1,
             betaCreditArchived: 2,
-            betaCreditRefreshAttempts: 0,
+            betaCreditRefreshAttempts: 1,
         });
     });
 });
