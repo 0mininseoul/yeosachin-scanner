@@ -336,13 +336,10 @@ export function buildEarlybirdPlanPresentation(planId: PlanId) {
             actionLabel: 'Plus 대기 신청하기',
         });
     }
-    const discountRate = Math.round(
-        (1 - plan.earlybirdAmountKrw / plan.referenceAmountKrw) * 100
-    );
     return Object.freeze({
         referencePriceLabel: formatKrw(plan.referenceAmountKrw),
         priceLabel: formatKrw(plan.earlybirdAmountKrw),
-        discountLabel: `${discountRate}%`,
+        discountLabel: `${plan.displayDiscountPercent}%`,
         actionLabel: '지금 분석하기',
     });
 }

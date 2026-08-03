@@ -19,7 +19,7 @@ const PREFLIGHT_ONE = '123e4567-e89b-42d3-a456-426614174000';
 const PREFLIGHT_TWO = '223e4567-e89b-42d3-a456-426614174000';
 const REQUEST_ID = '323e4567-e89b-42d3-a456-426614174000';
 const EXPIRES_AT = '2030-08-02T12:00:00.000Z';
-const PRICING_VERSION = 'earlybird-2026-07-v2';
+const PRICING_VERSION = 'earlybird-2026-08-v3';
 
 const PLANS = [
     {
@@ -30,7 +30,7 @@ const PLANS = [
         selectionState: 'required',
         unavailableReason: null,
         pricingVersion: PRICING_VERSION,
-        price: { status: 'quoted', currency: 'KRW', amountKrw: 6_900 },
+        price: { status: 'quoted', currency: 'KRW', amountKrw: 990 },
     },
     {
         planId: 'standard',
@@ -40,7 +40,7 @@ const PLANS = [
         selectionState: 'available_upgrade',
         unavailableReason: null,
         pricingVersion: PRICING_VERSION,
-        price: { status: 'quoted', currency: 'KRW', amountKrw: 9_900 },
+        price: { status: 'quoted', currency: 'KRW', amountKrw: 1_990 },
     },
     {
         planId: 'plus',
