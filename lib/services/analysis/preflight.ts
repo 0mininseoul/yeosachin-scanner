@@ -1600,7 +1600,7 @@ export async function processPreflight(
         });
 
         let profile: InstagramProfile | null;
-        if (existingRun) {
+        if (existingRun && !useAuthenticatedProfile) {
             if (
                 betaHold
                 && existingRun.credentialSlot !== betaHold.credentialSlot

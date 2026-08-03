@@ -110,6 +110,56 @@ describe('preflight free-provider boundary', () => {
         expect(runs.reserve).not.toHaveBeenCalled();
     });
 
+    it('does not resume a legacy Apify run when the current paid route uses authenticated profiles', async () => {
+        const getAuthenticatedProfile = vi.fn(async () => ({
+            username: 'target.name',
+            followersCount: 350,
+            followingCount: 300,
+            postsCount: 1,
+            isPrivate: false,
+            isVerified: false,
+            latestPosts: [],
+        }));
+        const getFallbackProfile = vi.fn();
+        const runs = providerRunStore();
+        vi.mocked(runs.load).mockResolvedValue({
+            preflightId,
+            operationKey: 'target-profile-fallback',
+            inputHash: 'a'.repeat(64),
+            logicalProvider: 'apify',
+            actorId: 'apify/instagram-profile-scraper',
+            credentialSlot: 'primary',
+            maxChargeUsd: 0.0026,
+            status: 'running',
+            runId: 'LegacyApifyRun123',
+            actualUsageUsd: null,
+            reservedAt: '2026-08-03T00:00:00.000Z',
+            runStartedAt: '2026-08-03T00:00:00.000Z',
+            terminalizedAt: null,
+            usageReconciledAt: null,
+        } as never);
+
+        await expect(processPreflight(preflightId, {
+            store: store(),
+            getAuthenticatedProfile,
+            getFallbackProfile,
+            providerRunStore: runs,
+            env: {
+                ANALYSIS_V2_PREFLIGHT_IDENTITY_HMAC_SECRET:
+                    Buffer.alloc(32, 23).toString('base64url'),
+                SELFHOSTED_AUTH_ENABLED: 'true',
+                SCRAPER_FOLLOWERS: 'selfhosted_auth',
+                SCRAPER_FOLLOWING: 'selfhosted_auth',
+                SCRAPER_LIKERS: 'selfhosted_auth',
+                SCRAPER_COMMENTS: 'selfhosted_auth',
+            },
+        })).resolves.toBe('ready');
+
+        expect(getAuthenticatedProfile).toHaveBeenCalledOnce();
+        expect(getFallbackProfile).not.toHaveBeenCalled();
+        expect(runs.checkpointStarted).not.toHaveBeenCalled();
+    });
+
     it('keeps count-only self-hosted as primary and does not pay on primary success', async () => {
         const source = readFileSync(new URL('./preflight.ts', import.meta.url), 'utf8');
         expect(source).toContain(
