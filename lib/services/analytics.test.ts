@@ -82,7 +82,7 @@ function enableReplayBrowser({
     vi.stubEnv('NEXT_PUBLIC_AMPLITUDE_API_KEY', API_KEY);
     vi.stubEnv('NEXT_PUBLIC_AMPLITUDE_SESSION_REPLAY_ENABLED', 'true');
     vi.stubEnv('NEXT_PUBLIC_AMPLITUDE_SESSION_REPLAY_SAMPLE_RATE', '0.1');
-    vi.stubEnv('NEXT_PUBLIC_VERCEL_ENV', 'production');
+    vi.stubEnv('NODE_ENV', 'production');
 }
 
 describe('Amplitude analytics adapter', () => {
@@ -790,11 +790,9 @@ describe('Amplitude analytics adapter', () => {
         expect(options.sessionReplay.sampleRate).toBe(0);
     });
 
-    it.each(['', 'preview', 'development'])('never enables replay without the exact public production discriminator %j', async (publicEnvironment) => {
+    it.each(['', 'test', 'development'])('never enables replay outside a production build %j', async (nodeEnv) => {
         enableReplayBrowser();
-        vi.stubEnv('NEXT_PUBLIC_VERCEL_ENV', publicEnvironment);
-        vi.stubEnv('NODE_ENV', 'production');
-        vi.stubEnv('VERCEL_ENV', 'production');
+        vi.stubEnv('NODE_ENV', nodeEnv);
         const { initAmplitude } = await loadReplayAnalytics();
 
         await initAmplitude(null);
@@ -818,7 +816,7 @@ describe('Amplitude analytics adapter', () => {
         globalPrivacyControl,
     ) => {
         enableReplayBrowser({ doNotTrack, globalPrivacyControl });
-        vi.stubEnv('NEXT_PUBLIC_VERCEL_ENV', nodeEnv);
+        vi.stubEnv('NODE_ENV', nodeEnv);
         vi.stubEnv('NEXT_PUBLIC_AMPLITUDE_SESSION_REPLAY_ENABLED', enabled);
         vi.stubEnv('NEXT_PUBLIC_AMPLITUDE_SESSION_REPLAY_SAMPLE_RATE', sampleRate);
         const { initAmplitude } = await loadReplayAnalytics();

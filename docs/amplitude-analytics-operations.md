@@ -14,7 +14,7 @@ Amplitude는 클라이언트 제품 퍼널을 보는 보조 분석 도구다. �
 - 인증 전에는 익명 상태를 사용하고, 인증 후 Amplitude user ID는 Supabase UUID만 사용한다. 이메일, 전화번호, 인스타그램 아이디를 ID나 user property로 설정하지 않는다.
 - Analytics는 클라이언트에서만 전송한다. Groble webhook 등 서버 요청에서 Amplitude 이벤트를 보내지 않는다.
 - Analytics 자동 수집은 세션 경계를 포함해 전부 끈다. page URL·view, form·element·frustration interaction, file download, network, web vitals·performance, attribution은 수집하지 않고 닫힌 allowlist의 명시 이벤트만 전송한다. 허용 핵심 경로에서 사용자의 클릭·스크롤 행동 관찰은 URL 정규화·마스킹을 적용한 Session Replay interaction이 맡는다. 일반 autocapture는 이 속성 allowlist를 우회할 수 있으므로 별도 안전 계약이 생기기 전까지 켜지 않는다.
-- Session Replay는 Production(`NEXT_PUBLIC_VERCEL_ENV=production`)에서 `NEXT_PUBLIC_AMPLITUDE_SESSION_REPLAY_ENABLED=true`이고 경로·개인정보 조건도 통과할 때만 후보가 된다. 현재 승인된 Production beta 운영값은 `NEXT_PUBLIC_AMPLITUDE_SESSION_REPLAY_SAMPLE_RATE=1`(100%)이며, 허용 핵심 경로의 모든 세션을 검증할 수 있다. 런타임은 형식이 맞는 `0.01`(1%)부터 `0.10`(10%)까지와 정확한 `1`(100%)만 지원하며, 형식 오류 또는 범위 밖 값은 fail-closed `sampleRate: 0`으로 비활성화한다.
+- Session Replay는 Next Production build(`NODE_ENV=production`)에서 `NEXT_PUBLIC_AMPLITUDE_SESSION_REPLAY_ENABLED=true`이고 경로·개인정보 조건도 통과할 때만 후보가 된다. 별도의 `NEXT_PUBLIC_VERCEL_ENV` 설정은 요구하지 않는다. 현재 승인된 Production beta 운영값은 `NEXT_PUBLIC_AMPLITUDE_SESSION_REPLAY_SAMPLE_RATE=1`(100%)이며, 허용 핵심 경로의 모든 세션을 검증할 수 있다. 런타임은 형식이 맞는 `0.01`(1%)부터 `0.10`(10%)까지와 정확한 `1`(100%)만 지원하며, 형식 오류 또는 범위 밖 값은 fail-closed `sampleRate: 0`으로 비활성화한다.
 
 ## 2. 개인정보 경계
 

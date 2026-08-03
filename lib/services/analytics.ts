@@ -347,7 +347,9 @@ function hasReplayPrivacyOptOut(): boolean {
 }
 
 function isReplayProductionEnvironment(): boolean {
-    return process.env.NEXT_PUBLIC_VERCEL_ENV === 'production';
+    // Next replaces NODE_ENV at build time, so this remains client-safe without requiring a
+    // separately provisioned NEXT_PUBLIC_VERCEL_ENV variable in Vercel.
+    return process.env.NODE_ENV === 'production';
 }
 
 function configuredReplaySampling(): ReplaySamplingConfig {
