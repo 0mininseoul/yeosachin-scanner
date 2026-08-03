@@ -1154,7 +1154,7 @@ describe('Amplitude analytics adapter', () => {
         expect(JSON.stringify(serializedAttributes)).not.toContain('private input hint');
     });
 
-    it('does not rely on the installed session replay adapter to forward attribute masking', async () => {
+    it('forwards supported privacy settings through the installed session replay adapter', async () => {
         const maskAttributes = ['href', 'value'];
         const plugin = new SessionReplayPlugin({
             privacyConfig: {
@@ -1178,9 +1178,9 @@ describe('Amplitude analytics adapter', () => {
         } as never, {} as never);
 
         const receivedOptions = init.mock.calls[0]?.[1] as {
-            privacyConfig?: { maskAttributes?: string[] };
+            privacyConfig?: { defaultMaskLevel?: string };
         };
-        expect(receivedOptions.privacyConfig?.maskAttributes).toBeUndefined();
+        expect(receivedOptions.privacyConfig?.defaultMaskLevel).toBe('conservative');
     });
 
     it('delivers configured attribute masking through the initial joined replay config', async () => {
