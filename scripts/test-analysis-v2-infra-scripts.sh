@@ -4019,6 +4019,19 @@ fi
 assert_contains "$temp_dir/runtime-auth-fallback.out" \
   "runtime env file must keep SCRAPER_FALLBACK=false for selfhosted_auth"
 
+sed \
+  -e 's|^SELFHOSTED_AUTH_WORKER_URL=.*|SELFHOSTED_AUTH_WORKER_URL="https://user:pass@instagram-auth-worker.example.run.app"|' \
+  -e 's|^SELFHOSTED_AUTH_WORKER_OIDC_AUDIENCE=.*|SELFHOSTED_AUTH_WORKER_OIDC_AUDIENCE="https://user:pass@instagram-auth-worker.example.run.app"|' \
+  "$temp_dir/runtime.env" >"$temp_dir/runtime-auth-userinfo.env"
+if env "${common_env[@]}" 'FAKE_GCLOUD_STATE=prerequisites_ready' \
+  "ANALYSIS_V2_WORKER_ENV_VARS_FILE=$temp_dir/runtime-auth-userinfo.env" \
+  bash "$script_dir/deploy-analysis-v2-worker.sh" --dry-run \
+  >"$temp_dir/runtime-auth-userinfo.out" 2>&1; then
+  fail "runtime manifest accepted userinfo in selfhosted-auth worker URL"
+fi
+assert_contains "$temp_dir/runtime-auth-userinfo.out" \
+  "runtime env file must set a private HTTPS selfhosted-auth worker URL"
+
 if env "${common_env[@]}" 'FAKE_GCLOUD_STATE=prerequisites_ready' \
   "ANALYSIS_V2_WORKER_ENV_VARS_FILE=$temp_dir/runtime.env" \
   "ANALYSIS_V2_WORKER_BUILD_ENV_VARS_FILE=$temp_dir/build-secret.yaml" \

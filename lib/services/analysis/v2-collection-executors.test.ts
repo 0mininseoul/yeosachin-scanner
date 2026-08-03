@@ -1174,6 +1174,45 @@ describe('analysis V2 concrete collection executors', () => {
         expect(providers.bindAdapterCheckpoint).toHaveBeenCalledTimes(2);
     });
 
+    it('does not open an Apify replacement for a reconciled legacy run in paid selfhosted_auth mode', async () => {
+        const providers = providerStore();
+        const incomplete = new Error(
+            'SCRAPING_INCOMPLETE_ERROR: legacy relationship dataset is incomplete.'
+        );
+        providers.load.mockResolvedValue({
+            status: 'succeeded',
+            runId: 'LEGACYRUN123',
+            actualUsageUsd: 0.01,
+            usageReconciledAt: capturedAt,
+        } as unknown as StoredAnalysisV2ProviderRun);
+        const getter = vi.fn(async (): Promise<InstagramFollower[]> => { throw incomplete; });
+        const executor = createAnalysisV2RelationshipsExecutor({
+            requestContextStore: contextStore(requestContext()),
+            providerRunStore: providers.value,
+            getFollowers: getter,
+            getFollowing: getter,
+            evidenceStore: {
+                checkpointRelationshipSide: vi.fn(),
+                freezeRelationships: vi.fn(),
+            } as unknown as AnalysisV2EvidenceStore,
+            env: {
+                SELFHOSTED_AUTH_ENABLED: 'true',
+                SCRAPER_FOLLOWERS: 'selfhosted_auth',
+                SCRAPER_FOLLOWING: 'selfhosted_auth',
+                SCRAPER_LIKERS: 'selfhosted_auth',
+                SCRAPER_COMMENTS: 'selfhosted_auth',
+                SCRAPER_FALLBACK: 'false',
+            },
+        });
+
+        await expect(executor(stageContext('relationships', state()))).rejects.toBe(incomplete);
+        expect(providers.bindAdapterCheckpoint).toHaveBeenCalledTimes(2);
+        expect(providers.bindAdapterCheckpoint.mock.calls.every(([input]) => (
+            input.operationKey.startsWith('relationship-followers:')
+            || input.operationKey.startsWith('relationship-following:')
+        ))).toBe(true);
+    });
+
     it('bounds repeated incomplete relationship retries to the same two operation identities', async () => {
         const rows = [{ username: 'alice', isPrivate: false, isVerified: false }];
         const providers = providerStore();

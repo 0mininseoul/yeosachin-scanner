@@ -585,7 +585,9 @@ export function createAnalysisV2RelationshipsExecutor(
                     ),
                 });
                 if (existingFallback) {
-                    completed = await executeApifyWithReplacement();
+                    // A pre-cutover Apify ledger is resumable, but paid authenticated mode
+                    // must never purchase the incomplete-dataset replacement Actor.
+                    completed = await executeApify(apifyCanonicalInput);
                 } else {
                     try {
                         completed = await executeSelfHostedAuth();

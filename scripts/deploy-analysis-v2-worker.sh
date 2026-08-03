@@ -1794,7 +1794,7 @@ validate_paid_collection_runtime_contract() {
       | .SELFHOSTED_AUTH_WORKER_OIDC_AUDIENCE as $audience
       | .SELFHOSTED_AUTH_WORKER_TIMEOUT_MS as $timeout
       | ($enabled == "true")
-      and ([$url, $audience] | all(type == "string" and test("^https://[^/?#]+$")))
+      and ([$url, $audience] | all(type == "string" and test("^https://[^/?#@]+$")))
       and ($url == $audience)
       and ($timeout | type == "string" and test("^[1-9][0-9]*$")
         and (tonumber >= 1000 and tonumber <= 300000))
