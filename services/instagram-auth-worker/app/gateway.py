@@ -3,6 +3,8 @@ import re
 from typing import Any
 from urllib.parse import urlsplit
 
+from pydantic import AnyUrl
+
 from .service import (
     InstagramAuthenticationError,
     InstagramChallengeError,
@@ -94,10 +96,10 @@ def _user_row(value: Any) -> dict[str, Any]:
     raw_profile_pic_url = _value(value, 'profile_pic_url', '')
     if raw_full_name is not None and not isinstance(raw_full_name, str):
         raise _schema_error('full name')
-    if raw_profile_pic_url is not None and not isinstance(raw_profile_pic_url, str):
+    if raw_profile_pic_url is not None and not isinstance(raw_profile_pic_url, (str, AnyUrl)):
         raise _schema_error('profile image URL')
     full_name = (raw_full_name or '').strip()
-    profile_pic_url = (raw_profile_pic_url or '').strip()
+    profile_pic_url = str(raw_profile_pic_url).strip() if raw_profile_pic_url else ''
     if full_name:
         row['fullName'] = full_name
     if profile_pic_url:
