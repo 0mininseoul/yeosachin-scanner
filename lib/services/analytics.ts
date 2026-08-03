@@ -68,6 +68,7 @@ const SESSION_REPLAY_SAFE_PATHS = new Set([
     '/terms',
     '/login',
     '/analyze',
+    '/betatest',
     '/earlybird',
     '/mypage',
 ]);
@@ -94,6 +95,8 @@ const SESSION_REPLAY_UGC_FILTER_RULES: readonly ReplayUgcFilterRule[] = [
     { selector: 'https://*/login*', replacement: '/login' },
     { selector: 'http://*/analyze*', replacement: '/analyze' },
     { selector: 'https://*/analyze*', replacement: '/analyze' },
+    { selector: 'http://*/betatest*', replacement: '/betatest' },
+    { selector: 'https://*/betatest*', replacement: '/betatest' },
     { selector: 'http://*/earlybird*', replacement: '/earlybird' },
     { selector: 'https://*/earlybird*', replacement: '/earlybird' },
     { selector: 'http://*/mypage*', replacement: '/mypage' },
