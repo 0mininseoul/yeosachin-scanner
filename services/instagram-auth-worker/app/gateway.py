@@ -263,6 +263,18 @@ class InstagrapiGateway:
                         'private GraphQL relationship users',
                     ))
 
+            # Some large-list accounts expose a slightly different remainder
+            # through the authenticated public GraphQL surface. Use it only
+            # after the private paths are still short; the completeness gate
+            # remains authoritative and no synthetic rows are accepted.
+            if side == 'followers' and len(users) < limit:
+                public_graphql = getattr(self._client, 'user_followers_gql', None)
+                if callable(public_graphql):
+                    users.extend(_collection(
+                        public_graphql(user_id, amount=limit),
+                        'public GraphQL relationship users',
+                    ))
+
             unique_users: list[Any] = []
             seen_ids: set[str] = set()
             for value in users:
