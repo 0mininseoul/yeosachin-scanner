@@ -27,7 +27,7 @@ const languageOptions = {
 };
 
 describe("ESLint transitive minimatch compatibility", () => {
-  it("pins every installed minimatch major to the patched brace-expansion release", () => {
+  it("keeps each installed minimatch major on a compatible brace-expansion release", () => {
     const eslintRequire = createRequire(runtimeRequire.resolve("eslint"));
     const minimatch3PackageJson = eslintRequire.resolve("minimatch/package.json");
     const minimatch3Require = createRequire(minimatch3PackageJson);
@@ -56,17 +56,17 @@ describe("ESLint transitive minimatch compatibility", () => {
     );
 
     expect(readPackageVersion(minimatch3PackageJson)).toBe("3.1.5");
-    expect(readPackageVersion(minimatch3BraceExpansionPackageJson)).toBe("5.0.8");
+    expect(readPackageVersion(minimatch3BraceExpansionPackageJson)).toBe("1.1.18");
     const expandBrace = minimatch3Require("brace-expansion") as (
       pattern: string,
     ) => string[];
     expect(expandBrace("x{1,2}y")).toEqual(["x1y", "x2y"]);
 
     expect(readPackageVersion(minimatch9PackageJson)).toBe("9.0.9");
-    expect(readPackageVersion(minimatch9BraceExpansionPackageJson)).toBe("5.0.8");
+    expect(readPackageVersion(minimatch9BraceExpansionPackageJson)).toBe("2.1.4");
 
     expect(readPackageVersion(minimatch10PackageJson)).toBe("10.2.5");
-    expect(readPackageVersion(minimatch10BraceExpansionPackageJson)).toBe("5.0.8");
+    expect(readPackageVersion(minimatch10BraceExpansionPackageJson)).toBe("5.0.9");
   });
 
   it("keeps eslint-plugin-react custom component patterns callable", () => {

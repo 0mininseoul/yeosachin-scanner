@@ -1284,7 +1284,7 @@ export interface ClassifiedPreflightError {
     paidFallbackEligible: boolean;
 }
 
-function preflightSelfHostedAuthIdentity(input: {
+export function preflightSelfHostedAuthIdentity(input: {
     preflightId: string;
     inputHash: string;
 }): NonNullable<ProviderCallContext['selfHostedAuthIdentity']> {

@@ -474,6 +474,59 @@ describe('durable fresh V2 admission worker', () => {
         );
     });
 
+    it('starts paid fresh admission with the authenticated profile provider', async () => {
+        const { client } = clientWith(async (name) => {
+            if (name === ANALYSIS_V2_FRESH_ADMISSION_DATABASE_NAMES.claimRpc) {
+                return {
+                    data: [{
+                        claimed: true,
+                        admission_status: 'processing',
+                        target_instagram_id: 'target.account',
+                    }],
+                    error: null,
+                };
+            }
+            if (name === ANALYSIS_V2_FRESH_ADMISSION_DATABASE_NAMES.completeRpc) {
+                return {
+                    data: [{ admission_status: 'ready', admission_error_code: null }],
+                    error: null,
+                };
+            }
+            throw new Error(`unexpected RPC ${name}`);
+        });
+        const getProfile = vi.fn();
+        const getFallbackProfile = vi.fn();
+        const getAuthenticatedProfile = vi.fn().mockResolvedValue(profile());
+        const env = {
+            ...FRESH_ENV,
+            SELFHOSTED_AUTH_ENABLED: 'true',
+            SCRAPER_FOLLOWERS: 'selfhosted_auth',
+            SCRAPER_FOLLOWING: 'selfhosted_auth',
+            SCRAPER_LIKERS: 'selfhosted_auth',
+            SCRAPER_COMMENTS: 'selfhosted_auth',
+        };
+
+        await expect(processAnalysisV2FreshAdmission(client, workerInput(), {
+            getProfile,
+            getAuthenticatedProfile,
+            getFallbackProfile,
+            env,
+            createClaimToken: () => CLAIM_TOKEN,
+        })).resolves.toBe('ready');
+
+        expect(getAuthenticatedProfile).toHaveBeenCalledWith(
+            'target.account',
+            expect.objectContaining({
+                selfHostedAuthIdentity: {
+                    operationKey: expect.stringMatching(/^target-profile:[0-9a-f]{64}$/),
+                    inputHash: expect.stringMatching(/^[0-9a-f]{64}$/),
+                },
+            })
+        );
+        expect(getProfile).not.toHaveBeenCalled();
+        expect(getFallbackProfile).not.toHaveBeenCalled();
+    });
+
     it.each([
         ['missing', null, 'ANALYSIS_V2_TARGET_NOT_FOUND'],
         ['private', profile({ isPrivate: true }), 'ANALYSIS_V2_TARGET_PRIVATE'],

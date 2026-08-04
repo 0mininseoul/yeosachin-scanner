@@ -44,17 +44,27 @@ Groble 결제 건당 수수료 가정은 실제 운영 조건인 **8.69%**다. �
 
 ## V2 과금 경로
 
-결제 전 대상 프로필 사전 점검은 로그인 없는 자체 summary 수집을 먼저 시도한다. 대상 없음이 자체 수집에서 명시적으로 확인되면 유료 fallback을 실행하지 않는다. 분류된 자체 provider 실패일 때만 최초 preflight operation과 각 fresh-admission generation이 각각 Apify profile fallback 1회를 허용한다. fresh-admission fallback은 최신 게시물 parser가 최대 10건까지 검증한 bounded full-profile snapshot/schema를 통과한 뒤만 해당 run을 schema v1으로 표시한다. 각 실행 전 별도의 원장 행을 예약하고 `maxTotalChargeUsd=$0.0026`을 고정하며, 같은 operation/generation의 retry는 저장된 run ID만 재개한다. 최초 실행과 fresh generation 1회가 모두 fallback하면 합산 상한은 `$0.0052`다. Instagram 로그인 쿠키나 세션은 전달하지 않는다.
+### 2026-08-04 유료 selfhosted_auth 전환
 
-1. 대상/공개 맞팔 프로필은 로그인 없는 자체 수집기를 먼저 사용한다.
-2. 자체 수집의 username별 terminal 결과를 먼저 저장하고, **그 스냅샷에서 정확히 unresolved인 username만** Apify profile fallback 입력으로 고정한다. target-evidence는 현재 consumed preflight의 같은 target/generation에 schema-v1 표시된 fresh run이 있으면 그 dataset을 1회 재해석한다. 이 경우 새 Actor나 `analysis_v2_provider_runs` 행을 만들지 않고 비용은 preflight에만 귀속한다. 표시된 run이 없으면 기존 bound fallback을 실행한다.
-3. followers/following은 Apify 관계 Actor로 수집하고, 각 방향에서 선언 수의 99% 고유 커버리지를 만족하지 못하면 결과를 만들지 않는다.
+프로덕션 유료 V2는 공개 `selfhosted` 프로필 수집을 시작 단계에서 제거하고, 대상 프로필 preflight와 checkout-time `fresh_admission`부터 지정 버너 계정의 `selfhosted_auth`를 사용한다. 대상 full profile·피드, 후보 프로필 batch, followers/following, liker/comment 수집도 유료 provider selector가 `selfhosted_auth`인 경우 같은 인증 worker를 사용한다. 인증 worker 실패는 bounded retry/failure-budget 경로로만 처리하고 Apify profile fallback을 열지 않는다.
+
+베타 경로는 기존 무료 Apify-only 정책을 유지한다. 공개 `selfhosted`와 Apify profile fallback 코드는 레거시 복구·명시적 운영 경로로 보존한다. 따라서 이번 전환은 기존 로직 삭제가 아니라 유료 V2의 첫 프로필 수집 경로를 인증 worker로 바꾼 것이다.
+
+정상적인 유료 selfhosted_auth 경로에서는 profile-summary Apify Actor가 실행되지 않으므로 유료 요청의 해당 외부 Actor 비용은 `$0`이다. 이는 전체 서비스 원가가 0원이라는 뜻이 아니다. 인증 worker의 Cloud Run/계정 운영비, Gemini, Cloud Tasks 등은 계속 `C_gcp`, `C_gemini` 및 별도 운영비로 대사한다. 기존 공개 profile 실패 fallback의 보수적 상한은 최초 preflight `$0.0026`, fresh generation 1회까지 `$0.0052`였으며, 이 비용을 유료 auth 정상 경로에서 회피한다.
+
+### 기존 Apify profile fallback 원장 (레거시/복구 호환)
+
+공개 selfhosted 경로에서 대상 없음이 명시적으로 확인되면 유료 fallback을 실행하지 않는다. 분류된 공개 provider 실패일 때만 최초 preflight operation과 각 fresh-admission generation이 각각 Apify profile fallback 1회를 허용한다. fresh-admission fallback은 최신 게시물 parser가 최대 10건까지 검증한 bounded full-profile snapshot/schema를 통과한 뒤만 해당 run을 schema v1으로 표시한다. 각 실행 전 별도의 원장 행을 예약하고 `maxTotalChargeUsd=$0.0026`을 고정하며, 같은 operation/generation의 retry는 저장된 run ID만 재개한다. 최초 실행과 fresh generation 1회가 모두 fallback하면 합산 상한은 `$0.0052`다. 이 레거시 경로에는 Instagram 로그인 쿠키나 세션을 전달하지 않는다.
+
+1. 유료 selfhosted_auth 경로의 대상/후보 프로필은 인증 worker에서 수집하고, public fallback dataset을 섞지 않는다.
+2. 유료 provider가 Apify인 별도 전환을 선택한 경우에만 기존 profile-summary 원장과 exact unresolved fallback 규칙을 적용한다. target-evidence는 현재 consumed preflight의 같은 target/generation에 schema-v1 표시된 fresh run이 있으면 그 dataset을 1회 재해석한다.
+3. followers/following은 유료 provider selector가 `selfhosted_auth`이면 인증 worker로, `apify`이면 Apify 관계 Actor로 수집하며, 각 방향에서 선언 수의 99% 고유 커버리지를 만족하지 못하면 결과를 만들지 않는다.
 4. 대상 상호작용은 최신 게시물 중 liker 최대 `4 x 150 = 600`, comment 최대 `6 x 15 = 90`을 수집한다.
 5. 역방향 좋아요는 예비점수 상위 후보 `K<=10`의 최신 게시물 1개에서 후보당 최대 100명을 수집한다.
 6. 역방향 대상 계정이 반환 목록에 있으면 양의 관측이다. 대상이 없더라도 게시물 전체 liker 수가 100 이하이고 고유 반환 수가 그 전체 수를 덮을 때만 부재를 확정한다. 예를 들어 `100/114`나 `109/114`는 부재가 아니라 `not_collected`다.
 7. Gemini는 성별 triage, 라우팅된 여성 feature 분석, shortlist partner-safety, 대표 고위험 narrative로 나뉜다. 영구 미디어 부분 실패나 구조적 snapshot 누락은 부정 근거로 쓰지 않는다.
 
-자체 프로필 시작은 production에서 Supabase singleton RPC를 통해 Vercel과 모든 Cloud Run instance를 합쳐 예약한다. 기본 750ms 간격에 100ms response guard를 더한 유효 slot은 850ms다. 237건은 첫 시작부터 마지막 시작까지 200.6초, 운영 예산상 약 201초가 필요하며 response tail은 별도다. admission 예약은 최대 500ms, full-profile 예약은 최대 60초만 기다리고 RPC 자체는 750ms에 hard timeout된다. 300ms process-local gate와 circuit은 defense in depth로 유지한다. coordination 실패나 response guard 초과는 Instagram 요청 전에 fail-closed 되고 기존 fallback 정책이 다음 경로를 결정하므로, 직접 수집 요청 수는 늘지 않지만 fallback 비용 가능성은 남는다. 이 제한은 burst를 줄일 뿐 Instagram의 로그인 없는 요청 수락을 보장하지 않는다.
+자체 프로필 시작은 production에서 Supabase singleton RPC를 통해 Vercel과 모든 Cloud Run instance를 합쳐 예약한다. 기본 750ms 간격에 100ms response guard를 더한 유효 slot은 850ms다. 237건은 첫 시작부터 마지막 시작까지 200.6초, 운영 예산상 약 201초가 필요하며 response tail은 별도다. admission 예약은 최대 500ms, full-profile 예약은 최대 60초만 기다리고 RPC 자체는 750ms에 hard timeout된다. 300ms process-local gate와 circuit은 defense in depth로 유지한다. coordination 실패나 response guard 초과는 Instagram 요청 전에 fail-closed 되고, 레거시 공개 경로에서는 기존 fallback 정책이 다음 경로를 결정한다. 유료 selfhosted_auth 경로에서는 인증 worker 재시도/실패 예산이 다음 경로이며 Apify profile fallback은 시작하지 않는다. 이 제한은 burst를 줄일 뿐 Instagram의 로그인 없는 요청 수락을 보장하지 않는다.
 
 FlashAPI, CoderX, Stable RapidAPI는 V2 production DAG에 포함하지 않는다.
 
@@ -129,6 +139,8 @@ C_total   = C_provider + C_gemini + C_gcp
 ```
 
 GCP `$300` credit은 현금 청구 시점을 늦출 뿐 `C_gemini`와 `C_gcp`의 경제원가를 0으로 만들지 않는다. Apify 비용에는 적용되지 않는다.
+
+유료 selfhosted_auth 정상 경로에서는 profile-summary에 대해 `P=0`, `B=0`이며, 관계·상호작용도 인증 provider가 처리하는 경우 해당 Apify 행이 0이다. 따라서 위 식의 외부 vendor 비용이 0으로 보이더라도 인증 worker의 Cloud Run/계정 운영비와 Gemini 비용까지 포함한 `C_total`은 별도로 측정해야 한다. 이 등식은 베타/레거시 또는 유료 Apify 전환의 원장에도 그대로 적용한다.
 
 Gemini 유료 생성은 revision이나 instance 수와 무관하게 데이터베이스의 고정된 8개
 lease slot을 먼저 확보한 뒤에만 시작한다. lease는 240초이고 Gemini SDK 요청은 210초
