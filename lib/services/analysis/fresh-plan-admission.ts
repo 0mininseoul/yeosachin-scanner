@@ -1,7 +1,9 @@
 import { randomUUID } from 'node:crypto';
 import { z } from 'zod';
 import { PLAN_IDS, type PlanId } from '@/lib/domain/analysis/plan-catalog';
+import { getAnalysisV2PaidCollectionProvider } from '@/lib/services/instagram/config';
 import { getSelfHostedAdmissionProfileSummary } from '@/lib/services/instagram/providers/selfhosted';
+import { selfHostedAuthProvider } from '@/lib/services/instagram/providers/selfhosted-auth';
 import { getApifyProfile } from '@/lib/services/instagram/providers/apify';
 import { selectAnalysisV2ApifyCredentialSlot } from '@/lib/services/instagram/providers/apify-relationship';
 import {
@@ -13,6 +15,7 @@ import {
     classifyPreflightError,
     fallbackCallContext,
     logPreflightProfileFallbackEntry,
+    preflightSelfHostedAuthIdentity,
 } from './preflight';
 import {
     bindPreflightProviderRunCheckpoint,
@@ -242,6 +245,9 @@ interface ClaimedAnalysisV2FreshAdmission {
 
 export type AnalysisV2FreshProfileFetcher = typeof getSelfHostedAdmissionProfileSummary;
 export type AnalysisV2FreshFallbackProfileFetcher = typeof getApifyProfile;
+export type AnalysisV2FreshAuthenticatedProfileFetcher = NonNullable<
+    typeof selfHostedAuthProvider.getProfileSummary
+>;
 
 export class AnalysisV2FreshAdmissionError extends Error {
     readonly code: AnalysisV2FreshAdmissionErrorCode;
@@ -604,6 +610,7 @@ export async function processAnalysisV2FreshAdmission(
     },
     dependencies: {
         getProfile?: AnalysisV2FreshProfileFetcher;
+        getAuthenticatedProfile?: AnalysisV2FreshAuthenticatedProfileFetcher;
         getFallbackProfile?: AnalysisV2FreshFallbackProfileFetcher;
         providerRunStore?: FreshAdmissionProviderRunStore;
         env?: Record<string, string | undefined>;
@@ -664,13 +671,38 @@ export async function processAnalysisV2FreshAdmission(
         }
         let profile: Awaited<ReturnType<AnalysisV2FreshProfileFetcher>>;
         let reusableProfileInputHash: string | null = null;
+        let useAuthenticatedProfile = false;
         try {
-            assertPreflightRuntimePolicy(dependencies.env);
-            profile = await (
-                dependencies.getProfile ?? getSelfHostedAdmissionProfileSummary
-            )(claim.targetInstagramId, {
-                invocationDeadlineAtMs: workerStartedAt + PREFLIGHT_PROVIDER_DEADLINE_MS,
-            });
+            useAuthenticatedProfile = claim.analysisEntryChannel !== 'betatest'
+                && getAnalysisV2PaidCollectionProvider(dependencies.env) === 'selfhosted_auth';
+            if (useAuthenticatedProfile) {
+                const authenticatedProvider = dependencies.getAuthenticatedProfile
+                    ?? selfHostedAuthProvider.getProfileSummary;
+                if (!authenticatedProvider) {
+                    throw new Error(
+                        'SCRAPING_CONFIG_ERROR: authenticated profile summary is unavailable.'
+                    );
+                }
+                const inputHash = preflightTargetInputHash(
+                    claim.targetInstagramId,
+                    dependencies.env
+                );
+                profile = await authenticatedProvider(claim.targetInstagramId, {
+                    selfHostedAuthIdentity: preflightSelfHostedAuthIdentity({
+                        preflightId: claim.preflightId,
+                        inputHash,
+                    }),
+                    invocationDeadlineAtMs: workerStartedAt + PREFLIGHT_PROVIDER_DEADLINE_MS,
+                    recordUsage: () => undefined,
+                });
+            } else {
+                assertPreflightRuntimePolicy(dependencies.env);
+                profile = await (
+                    dependencies.getProfile ?? getSelfHostedAdmissionProfileSummary
+                )(claim.targetInstagramId, {
+                    invocationDeadlineAtMs: workerStartedAt + PREFLIGHT_PROVIDER_DEADLINE_MS,
+                });
+            }
             if (
                 profile
                 && profile.username.trim().toLowerCase() !== claim.targetInstagramId
@@ -683,7 +715,7 @@ export async function processAnalysisV2FreshAdmission(
             }
         } catch (primaryError) {
             const primaryFailure = classifyPreflightError(primaryError);
-            if (!primaryFailure.paidFallbackEligible) {
+            if (useAuthenticatedProfile || !primaryFailure.paidFallbackEligible) {
                 return await settleFailure(primaryError);
             }
             try {
