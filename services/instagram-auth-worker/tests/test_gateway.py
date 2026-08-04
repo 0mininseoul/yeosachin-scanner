@@ -435,6 +435,27 @@ class InstagrapiGatewayTest(unittest.TestCase):
         self.assertEqual([row['username'] for row in result], ['one.user', 'two.user'])
         self.assertEqual(client.private_graphql_args, ('123', 2))
 
+    def test_tops_up_still_incomplete_followers_with_public_graphql(self):
+        class PartialFollowersClient(FakeClient):
+            def user_followers(self, user_id, amount):
+                return {'1': user(1, 'one.user')}
+
+            def user_followers_private_gql(self, user_id, amount):
+                return [user(2, 'two.user')]
+
+            def user_followers_gql(self, user_id, amount):
+                self.public_graphql_args = (user_id, amount)
+                return [user(3, 'three.user')]
+
+        client = PartialFollowersClient()
+        result = InstagrapiGateway(client).relationship('followers', 'target.user', 3)
+
+        self.assertEqual(
+            [row['username'] for row in result],
+            ['one.user', 'two.user', 'three.user'],
+        )
+        self.assertEqual(client.public_graphql_args, ('123', 3))
+
     def test_keeps_following_on_the_existing_mobile_path(self):
         class FollowingClient(FakeClient):
             def user_followers_private_gql(self, user_id, amount):
