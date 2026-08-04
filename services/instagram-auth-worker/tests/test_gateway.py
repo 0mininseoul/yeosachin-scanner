@@ -500,16 +500,21 @@ class InstagrapiGatewayTest(unittest.TestCase):
 
             def user_followers_private_gql(self, user_id, amount):
                 self.private_calls += 1
-                return [user(2 if self.private_calls == 1 else 3, 'two.user' if self.private_calls == 1 else 'three.user')]
+                values = {
+                    1: user(2, 'two.user'),
+                    2: user(3, 'three.user'),
+                    3: user(4, 'four.user'),
+                }
+                return [values[self.private_calls]]
 
         client = RetryClient()
-        result = InstagrapiGateway(client).relationship('followers', 'target.user', 3)
+        result = InstagrapiGateway(client).relationship('followers', 'target.user', 4)
 
         self.assertEqual(
             [row['username'] for row in result],
-            ['one.user', 'two.user', 'three.user'],
+            ['one.user', 'two.user', 'three.user', 'four.user'],
         )
-        self.assertEqual(client.private_calls, 2)
+        self.assertEqual(client.private_calls, 3)
 
     def test_keeps_following_on_the_existing_mobile_path(self):
         class FollowingClient(FakeClient):
