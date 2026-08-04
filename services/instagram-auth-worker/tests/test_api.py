@@ -14,8 +14,9 @@ from app.service import (
 
 
 class FakeService:
-    def __init__(self, error=None):
+    def __init__(self, error=None, profile_items=None):
         self.error = error
+        self.profile_items = profile_items
 
     async def relationship(self, side, username, limit, operation_key, input_hash):
         if self.error:
@@ -56,9 +57,8 @@ class FakeService:
             'schemaVersion': 1,
             'runId': '0123456789abcdef0123456789abcdef',
             'accountSlot': 'primary',
-            'items': [
-                {'username': username, 'status': 'not_found'}
-                for username in usernames
+            'items': self.profile_items if self.profile_items is not None else [
+                {'username': username, 'status': 'not_found'} for username in usernames
             ],
         }
 
@@ -224,6 +224,22 @@ class WorkerApiTest(unittest.TestCase):
             **VALID_OPERATION,
         })
         self.assertEqual(duplicate.status_code, 400)
+
+    def test_profile_batch_preserves_per_username_schema_failures(self):
+        client = TestClient(create_app(FakeService(profile_items=[
+            {'username': 'target.user', 'status': 'not_found'},
+            {'username': 'broken.user', 'status': 'failed', 'failureCategory': 'schema'},
+        ])))
+        response = client.post('/v1/profiles', json={
+            'usernames': ['target.user', 'broken.user'],
+            'mediaLimit': 10,
+            **VALID_OPERATION,
+        })
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()['items'], [
+            {'username': 'target.user', 'status': 'not_found'},
+            {'username': 'broken.user', 'status': 'failed', 'failureCategory': 'schema'},
+        ])
 
 
 if __name__ == '__main__':

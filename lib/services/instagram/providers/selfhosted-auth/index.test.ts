@@ -97,6 +97,7 @@ describe('authenticated self-hosted profile provider', () => {
                 items: [
                     { username: 'available.user', status: 'available', profile },
                     { username: 'missing.user', status: 'not_found' },
+                    { username: 'broken.user', status: 'failed', failureCategory: 'schema' },
                 ],
             })),
         } as unknown as SelfHostedAuthWorkerClient;
@@ -108,8 +109,8 @@ describe('authenticated self-hosted profile provider', () => {
         };
 
         const results = await provider.getProfilesBatchOutcomes?.(
-            ['Available.User', 'missing.user'],
-            2,
+            ['Available.User', 'missing.user', 'broken.user'],
+            3,
             observed.value
         );
 
@@ -131,17 +132,25 @@ describe('authenticated self-hosted profile provider', () => {
                     source: 'selfhosted',
                 }),
             }),
+            expect.objectContaining({
+                outcome: expect.objectContaining({
+                    requestedUsername: 'broken.user',
+                    status: 'failed',
+                    failureCategory: 'schema',
+                    source: 'selfhosted',
+                }),
+            }),
         ]);
         expect(client.getProfilesBatch).toHaveBeenCalledWith(
-            ['available.user', 'missing.user'],
+            ['available.user', 'missing.user', 'broken.user'],
             10,
             expect.objectContaining({ operationKey: `target-profile:${'c'.repeat(64)}` })
         );
         expect(observed.recordUsage).toHaveBeenCalledWith({
             request_count: 1,
-            result_count: 2,
-            raw_result_count: 2,
-            unique_result_count: 2,
+            result_count: 3,
+            raw_result_count: 3,
+            unique_result_count: 3,
             estimated_cost_usd: 0,
         });
         expect(observed.onSelfHostedAuthRunFinished).toHaveBeenCalledWith({

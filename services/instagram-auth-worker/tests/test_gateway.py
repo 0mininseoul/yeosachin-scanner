@@ -263,6 +263,56 @@ class InstagrapiGatewayTest(unittest.TestCase):
             {'username': 'missing.user', 'status': 'not_found'},
         ])
 
+    def test_profile_batch_keeps_schema_failures_per_username_without_fabricating_profiles(self):
+        class BatchClient(FakeClient):
+            def user_info_by_username(self, username):
+                return SimpleNamespace(
+                    pk='broken-pk' if username == 'broken.user' else 'target-pk',
+                    username=username, full_name='', biography='', profile_pic_url='',
+                    follower_count=0, following_count=0,
+                    media_count=1 if username == 'broken.user' else 0,
+                    is_private=False, is_verified=False,
+                )
+
+            def user_medias(self, user_id, amount):
+                if user_id == 'broken-pk' and amount == 1:
+                    raise WorkerSchemaError('invalid profile media')
+                return []
+
+        self.assertEqual(InstagrapiGateway(BatchClient()).profiles(
+            ['target.user', 'broken.user'], 1,
+        ), [
+            {'username': 'target.user', 'status': 'available', 'profile': {
+                'username': 'target.user', 'followersCount': 0, 'followingCount': 0,
+                'postsCount': 0, 'isPrivate': False, 'isVerified': False,
+                'latestPosts': [],
+            }},
+            {
+                'username': 'broken.user',
+                'status': 'failed',
+                'failureCategory': 'schema',
+            },
+        ])
+
+    def test_profile_batch_still_aborts_on_unexpected_upstream_errors(self):
+        class UnexpectedClient(FakeClient):
+            def user_info_by_username(self, username):
+                if username == 'broken.user':
+                    raise RuntimeError('provider unavailable')
+                return SimpleNamespace(
+                    pk='123', username=username, full_name='', biography='', profile_pic_url='',
+                    follower_count=0, following_count=0, media_count=0,
+                    is_private=False, is_verified=False,
+                )
+
+            def user_medias(self, user_id, amount):
+                return []
+
+        with self.assertRaises(RuntimeError):
+            InstagrapiGateway(UnexpectedClient()).profiles(
+                ['target.user', 'broken.user'], 1,
+            )
+
     def test_single_profile_maps_known_user_not_found_to_no_profile(self):
         UserNotFound = type('UserNotFound', (RuntimeError,), {})
 

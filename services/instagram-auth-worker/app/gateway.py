@@ -492,6 +492,16 @@ class InstagrapiGateway:
                     if type(error).__name__ in NOT_FOUND_EXCEPTIONS:
                         result.append({'username': username, 'status': 'not_found'})
                         continue
+                    if isinstance(error, WorkerSchemaError):
+                        # A malformed provider object is scoped to this candidate. Keep
+                        # the failure explicit so callers can apply their per-username
+                        # retry/coverage policy without fabricating profile evidence.
+                        result.append({
+                            'username': username,
+                            'status': 'failed',
+                            'failureCategory': 'schema',
+                        })
+                        continue
                     raise
                 result.append({'username': username, 'status': 'available', 'profile': profile})
             return result

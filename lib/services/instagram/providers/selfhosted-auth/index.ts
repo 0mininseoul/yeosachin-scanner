@@ -7,6 +7,7 @@ import type {
 } from '../types';
 import type { InstagramProfile } from '@/lib/types/instagram';
 import {
+    failedProfileAttempt,
     isSuccessfulProfileAttempt,
     profileAttemptLatency,
     successfulProfileAttempt,
@@ -183,6 +184,18 @@ export function makeSelfHostedAuthProvider(
                     source: 'selfhosted',
                     reason: 'not_found',
                     httpStatus: 404,
+                    requestCount: 1,
+                    latencyMs,
+                }));
+                continue;
+            }
+            if (item.status === 'failed') {
+                results.push(failedProfileAttempt({
+                    requestedUsername: username,
+                    source: 'selfhosted',
+                    // Preserve the bounded failure category without exposing any
+                    // provider exception detail to the durable profile outcome.
+                    error: new Error('SCRAPING_SCHEMA_ERROR: profile batch item'),
                     requestCount: 1,
                     latencyMs,
                 }));
