@@ -5,6 +5,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 const mocks = vi.hoisted(() => ({
     createServerClient: vi.fn(),
     from: vi.fn(),
+    rpc: vi.fn(),
 }));
 
 function queryBuilder(data: unknown) {
@@ -26,7 +27,7 @@ vi.mock('@/lib/supabase/server', () => ({
     createClient: mocks.createServerClient,
 }));
 vi.mock('@/lib/supabase/admin', () => ({
-    supabaseAdmin: { from: mocks.from },
+    supabaseAdmin: { from: mocks.from, rpc: mocks.rpc },
 }));
 vi.mock('next/navigation', () => ({
     redirect: vi.fn(),
@@ -83,10 +84,9 @@ describe('earlybird status page', () => {
             result_request_id: null,
             created_at: '2026-07-17T11:59:00.000Z',
         });
-        const fulfillmentQuery = queryBuilder(null);
+        mocks.rpc.mockResolvedValue({ data: null, error: null });
         mocks.from.mockImplementation((table: string) => {
             if (table === 'earlybird_orders') return orderQuery;
-            if (table === 'earlybird_fulfillments') return fulfillmentQuery;
             throw new Error(`unexpected table: ${table}`);
         });
     });

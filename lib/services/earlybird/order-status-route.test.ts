@@ -4,9 +4,9 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 const mocks = vi.hoisted(() => ({
     createServerClient: vi.fn(),
     from: vi.fn(),
+    rpc: vi.fn(),
     orderQuery: null as ReturnType<typeof queryBuilder> | null,
     resultQuery: null as ReturnType<typeof queryBuilder> | null,
-    fulfillmentQuery: null as ReturnType<typeof queryBuilder> | null,
 }));
 
 function queryBuilder(data: unknown) {
@@ -28,7 +28,7 @@ vi.mock('@/lib/supabase/server', () => ({
     createClient: mocks.createServerClient,
 }));
 vi.mock('@/lib/supabase/admin', () => ({
-    supabaseAdmin: { from: mocks.from },
+    supabaseAdmin: { from: mocks.from, rpc: mocks.rpc },
 }));
 
 import { GET } from '@/app/api/earlybird/orders/latest/route';
@@ -66,11 +66,16 @@ function installQueries(
 ) {
     mocks.orderQuery = queryBuilder(order);
     mocks.resultQuery = queryBuilder(result);
-    mocks.fulfillmentQuery = queryBuilder(fulfillment);
+    mocks.rpc.mockResolvedValue({
+        data: typeof fulfillment === 'object' && fulfillment !== null
+            && 'status' in fulfillment
+            ? (fulfillment as { status: unknown }).status
+            : null,
+        error: null,
+    });
     mocks.from.mockImplementation((table: string) => {
         if (table === 'earlybird_orders') return mocks.orderQuery;
         if (table === 'analysis_requests') return mocks.resultQuery;
-        if (table === 'earlybird_fulfillments') return mocks.fulfillmentQuery;
         throw new Error(`unexpected table: ${table}`);
     });
 }
@@ -243,6 +248,21 @@ describe('earlybird owner order status route', () => {
             },
         });
         expect(JSON.stringify(body)).not.toContain('manual_review');
+    });
+
+    it('uses the service-only fulfillment RPC instead of reading the private table', async () => {
+        installQueries(orderRow({
+            status: 'analysis_in_progress',
+            result_request_id: RESULT_ID,
+        }));
+
+        await GET(new Request('https://example.com/api/earlybird/orders/latest'));
+
+        expect(mocks.rpc).toHaveBeenCalledWith(
+            'load_earlybird_fulfillment_status',
+            { p_order_id: ORDER_ID }
+        );
+        expect(mocks.from).not.toHaveBeenCalledWith('earlybird_fulfillments');
     });
 
     it('restores the same server order after refresh and protects the status page path', async () => {

@@ -36,16 +36,14 @@ const resultRowSchema = z.object({
     status: z.literal('completed'),
 });
 
-const fulfillmentStatusRowSchema = z.object({
-    status: z.enum([
-        'awaiting_operator',
-        'admission_pending',
-        'analysis_in_progress',
-        'completed',
-        'retryable_failure',
-        'manual_review',
-    ]),
-});
+const fulfillmentStatusSchema = z.enum([
+    'awaiting_operator',
+    'admission_pending',
+    'analysis_in_progress',
+    'completed',
+    'retryable_failure',
+    'manual_review',
+]);
 
 const DISPLAY_STATUS: Readonly<Record<EarlybirdOrderSystemStatus, string>> = {
     payment_pending: '결제 확인',
@@ -109,20 +107,19 @@ export async function loadLatestEarlybirdOrder(
 
     let requiresSupport = false;
     if (order.status === 'paid' || order.status === 'analysis_in_progress') {
-        const fulfillment = await supabaseAdmin
-            .from('earlybird_fulfillments')
-            .select('status')
-            .eq('order_id', order.id)
-            .maybeSingle();
+        const fulfillment = await supabaseAdmin.rpc(
+            'load_earlybird_fulfillment_status',
+            { p_order_id: order.id }
+        );
         // A fulfillment-state lookup must never leave a paid customer in an
         // infinite return-page refresh. The fallback is deliberately generic:
         // no internal failure state reaches the owner-facing DTO.
         if (fulfillment.error) {
             requiresSupport = true;
         } else {
-            requiresSupport = fulfillmentStatusRowSchema.safeParse(
+            requiresSupport = fulfillmentStatusSchema.safeParse(
                 fulfillment.data
-            ).data?.status === 'manual_review';
+            ).data === 'manual_review';
         }
     }
 
