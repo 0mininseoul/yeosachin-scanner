@@ -15,8 +15,9 @@ usage() {
   cat <<'EOF'
 Usage: scripts/configure-analysis-v2-media-bucket.sh [--dry-run | --check] [--reconcile-iam]
 
-Creates or verifies the private, short-lived V2 media artifact bucket and its
-least-privilege worker IAM binding.
+Creates or verifies the private V2 media bucket and its least-privilege worker
+IAM binding. Short-lived job artifacts and normalized AI-input archives use
+separate lifecycle prefixes.
 
 Apply scripts in this order:
   1. scripts/configure-analysis-v2-worker-identity.sh
@@ -38,9 +39,10 @@ Optional environment variable:
 
 The bucket is deliberately restricted to asia-northeast3. The script enforces
 uniform bucket-level access, public access prevention, disabled soft delete and
-Object Versioning, and one unconditional Age=1 Delete lifecycle rule. The
-worker receives only storage.objects.create/get/delete through a bucket-scoped
-custom-role binding. No credential keys are created or printed.
+Object Versioning, an Age=1 Delete rule for analysis-v2/, and an Age=30 Delete
+rule for analysis-v2-retained/. The worker receives only storage.objects.create/
+get/delete through a bucket-scoped custom-role binding. No credential keys are
+created or printed.
 
 Options:
   --dry-run  Run read-only preflight checks and print required mutations.
@@ -236,17 +238,26 @@ bucket_security_matches() {
       and (.retentionPolicy? == null)
       and (.defaultEventBasedHold // false) == false
       and ((.softDeletePolicy.retentionDurationSeconds // "0") | tonumber) == 0
-      and ((.lifecycle.rule // []) | length) == 1
-      and .lifecycle.rule[0].action.type == "Delete"
-      and (.lifecycle.rule[0].condition.age | tonumber) == 1
-      and ((.lifecycle.rule[0].condition | keys | sort) == ["age"])' \
+      and ((.lifecycle.rule // []) | length) == 2
+      and ([.lifecycle.rule[] | select(
+        .action.type == "Delete"
+        and (.condition.age | tonumber) == 1
+        and .condition.matchesPrefix == ["analysis-v2/"]
+        and ((.condition | keys | sort) == ["age", "matchesPrefix"])
+      )] | length) == 1
+      and ([.lifecycle.rule[] | select(
+        .action.type == "Delete"
+        and (.condition.age | tonumber) == 30
+        and .condition.matchesPrefix == ["analysis-v2-retained/"]
+        and ((.condition | keys | sort) == ["age", "matchesPrefix"])
+      )] | length) == 1' \
     <<<"$config" >/dev/null
 }
 
 write_lifecycle_file() {
   lifecycle_file="$(mktemp "${TMPDIR:-/tmp}/analysis-v2-lifecycle.XXXXXX")"
   printf '%s\n' \
-    '{"rule":[{"action":{"type":"Delete"},"condition":{"age":1}}]}' \
+    '{"rule":[{"action":{"type":"Delete"},"condition":{"age":1,"matchesPrefix":["analysis-v2/"]}},{"action":{"type":"Delete"},"condition":{"age":30,"matchesPrefix":["analysis-v2-retained/"]}}]}' \
     >"$lifecycle_file"
 }
 

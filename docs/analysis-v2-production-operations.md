@@ -71,6 +71,17 @@ Gemini generation은 process-local semaphore가 아니라 DB-global lease가 정
 
 ## 결과 확정, 이미지, 공유, 피드백
 
+Analysis V2가 Gemini 입력으로 실제 사용한 normalized JPEG는 private GCS의
+`analysis-v2-retained/` opaque prefix에 30일 보관한다. 범위는 triage 입력,
+feature/partner-contact source에서 앞 단계와 중복되지 않는 remainder, 실제 Gemini에
+전달되는 generated contact-sheet JPEG이며, 이 bundle들의 합집합이 source media와 실제
+AI 이미지 입력 전체를 이룬다. raw Apify dataset 전체, 원본 URL, username,
+request UUID, selection ID 원문은 장기 object path나 metadata에 저장하지 않는다. 기존
+`analysis-v2/` job artifact는 계속 Age=1이며 30일 archive와 수명주기를 섞지 않는다.
+archive write가 실패하면 해당 AI stage는 checkpoint를 만들지 않고 sanitized storage 오류로
+종료한다([`lib/services/analysis/v2-source-media-archive.ts`](../lib/services/analysis/v2-source-media-archive.ts),
+[`scripts/configure-analysis-v2-media-bucket.sh`](../scripts/configure-analysis-v2-media-bucket.sh)).
+
 finalize는 DAG readiness를 확인해 immutable V2 result summary/page를 만든다. terminal failure는 소유자 library에서 숨긴다. 이 경계는 [`20260726035347_hide_failed_analysis_owner_history.sql`](../supabase/migrations/20260726035347_hide_failed_analysis_owner_history.sql), [`lib/services/analysis/owner-history.ts`](../lib/services/analysis/owner-history.ts)에 있다.
 
 결과 이미지의 정상 경로는 result 시점 capture → normalized WebP → R2 object metadata → owner/share resolver다. terminal media는 recovery와 purge가 정리한다([`20260724123500_add_analysis_v2_result_image_objects.sql`](../supabase/migrations/20260724123500_add_analysis_v2_result_image_objects.sql), [`lib/services/media/result-image-capture.ts`](../lib/services/media/result-image-capture.ts), [`lib/services/media/result-image-purge.ts`](../lib/services/media/result-image-purge.ts)). R2 read 실패는 결과를 실패시키지 않고 placeholder/텍스트 fallback을 사용한다.

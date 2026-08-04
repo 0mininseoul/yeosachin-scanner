@@ -72,6 +72,10 @@ import type {
     AnalysisV2MediaArtifactStore,
     AnalysisV2NormalizedMediaBundleItem,
 } from './v2-media-artifact-store';
+import {
+    analysisV2SourceMediaArchiveId,
+    type AnalysisV2SourceMediaArchiveStore,
+} from './v2-source-media-archive';
 import type {
     AnalysisV2StageExecutorContext,
     AnalysisV2StageExecutorRegistry,
@@ -516,6 +520,8 @@ export interface AnalysisV2AiScoringExecutorDependencies {
         }): Promise<unknown>;
     };
     mediaStore: AnalysisV2MediaArtifactStore;
+    /** Required archive for every normalized image set actually passed to V2 AI. */
+    sourceMediaArchive: AnalysisV2SourceMediaArchiveStore;
     ai: AnalysisV2AiStageRuntime;
     reverseLikes: AnalysisV2ReverseLikeCollector;
     normalizeMedia(media: SelectedAnalysisMedia): Promise<Buffer>;
@@ -674,6 +680,16 @@ async function runBounded<T, R>(
     await Promise.all(Array.from({ length: Math.min(concurrency, values.length) }, worker));
     if (failed) throw firstError;
     return results;
+}
+
+async function awaitArchivedAi<T>(
+    ai: Promise<T>,
+    archive: Promise<void>,
+): Promise<T> {
+    const [aiResult, archiveResult] = await Promise.allSettled([ai, archive]);
+    if (archiveResult.status === 'rejected') throw archiveResult.reason;
+    if (aiResult.status === 'rejected') throw aiResult.reason;
+    return aiResult.value;
 }
 
 function mediaPolicy(
@@ -1449,12 +1465,29 @@ export function createAnalysisV2AiScoringExecutorRegistry(
                             mediaBundlePersisted: false,
                         };
                     }
+                    const triageArchive = dependencies.sourceMediaArchive.persistBundle({
+                        requestId: context.claim.requestId,
+                        archiveId: analysisV2SourceMediaArchiveId({
+                            candidateId,
+                            stage: 'triage',
+                        }),
+                        media: triageNormalized.media.map(media => {
+                            const normalizedJpeg = triageNormalized.bytes.get(media.selectionId);
+                            if (!normalizedJpeg) {
+                                throw new Error('ANALYSIS_V2_MEDIA_SELECTION_DRIFT');
+                            }
+                            return { selectionId: media.selectionId, normalizedJpeg };
+                        }),
+                    });
                     let gender: Awaited<ReturnType<AnalysisV2AiStageRuntime['gender']>>;
                     try {
-                        gender = await dependencies.ai.gender({
-                            media: triageNormalized.media,
-                            ...(profileEvidence ? { accountProfile: profileEvidence } : {}),
-                        }, aiFence);
+                        gender = await awaitArchivedAi(
+                            dependencies.ai.gender({
+                                media: triageNormalized.media,
+                                ...(profileEvidence ? { accountProfile: profileEvidence } : {}),
+                            }, aiFence),
+                            triageArchive,
+                        );
                     } catch (error) {
                         if (isAnalysisV2AiDeterministicFallbackError(error)) {
                             return analysisUnavailableOutcome(
@@ -1620,13 +1653,33 @@ export function createAnalysisV2AiScoringExecutorRegistry(
                             v29FeatureAdmission: v29Admission,
                         };
                     }
-                    const featureTask = dependencies.ai.features({
-                        triage: gender.result,
-                        bio: item.profile.bio ?? null,
-                        media: normalized.media,
-                        captions,
-                        ...(profileEvidence ? { accountProfile: profileEvidence } : {}),
-                    }, aiFence);
+                    const featureRemainderBundle = remainderNormalized.media.map(media => {
+                        const normalizedJpeg = remainderNormalized.bytes.get(media.selectionId);
+                        if (!normalizedJpeg) {
+                            throw new Error('ANALYSIS_V2_MEDIA_SELECTION_DRIFT');
+                        }
+                        return { selectionId: media.selectionId, normalizedJpeg };
+                    });
+                    const featureArchive = featureRemainderBundle.length > 0
+                        ? dependencies.sourceMediaArchive.persistBundle({
+                            requestId: context.claim.requestId,
+                            archiveId: analysisV2SourceMediaArchiveId({
+                                candidateId,
+                                stage: 'feature_remainder',
+                            }),
+                            media: featureRemainderBundle,
+                        })
+                        : Promise.resolve();
+                    const featureTask = awaitArchivedAi(
+                        dependencies.ai.features({
+                            triage: gender.result,
+                            bio: item.profile.bio ?? null,
+                            media: normalized.media,
+                            captions,
+                            ...(profileEvidence ? { accountProfile: profileEvidence } : {}),
+                        }, aiFence),
+                        featureArchive,
+                    );
                     let features: Awaited<ReturnType<AnalysisV2AiStageRuntime['features']>>;
                     try {
                         features = await featureTask;
@@ -2251,14 +2304,27 @@ export function createAnalysisV2AiScoringExecutorRegistry(
                     dependencies.normalizeMedia
                 );
                 const contactSheetCoverageComplete = normalized.coverage.failures.length === 0;
+                const previouslyArchived = new Set(outcome.normalizedSelectionIds);
+                const contactBundleMedia = contactSheetCoverageComplete
+                    ? normalized.media.filter(media => (
+                        !previouslyArchived.has(media.selectionId)
+                    )).map(media => {
+                        const normalizedJpeg = normalized.bytes.get(media.selectionId);
+                        if (!normalizedJpeg) {
+                            throw new Error('ANALYSIS_V2_PARTNER_MEDIA_SELECTION_DRIFT');
+                        }
+                        return { selectionId: media.selectionId, normalizedJpeg };
+                    })
+                    : [];
                 const contactSheet = contactSheetCoverageComplete && normalized.media.length > 0
                     ? await createContactSheet(normalized.media.map(media => ({
-                        selectionId: media.selectionId,
-                        normalizedJpegBase64: media.normalizedJpegBase64,
-                    })))
+                            selectionId: media.selectionId,
+                            normalizedJpegBase64: media.normalizedJpegBase64,
+                        })))
                     : null;
+                const persistenceTasks: Promise<unknown>[] = [];
                 if (contactSheet) {
-                    await dependencies.mediaStore.persistBundle({
+                    persistenceTasks.push(dependencies.mediaStore.persistBundle({
                         requestId: context.claim.requestId,
                         jobKey: context.claim.jobKey,
                         claimToken: context.claim.claimToken,
@@ -2270,7 +2336,7 @@ export function createAnalysisV2AiScoringExecutorRegistry(
                             }
                             return { selectionId, normalizedJpeg };
                         }),
-                    });
+                    }));
                 }
                 const normalizedSelectionIds = new Set(
                     normalized.media.map(media => media.selectionId)
@@ -2282,11 +2348,41 @@ export function createAnalysisV2AiScoringExecutorRegistry(
                         && contactSheetSelectionIds.has(caption.selectionId)
                     ))
                     : [];
-                const analyzed = await dependencies.ai.partnerSafety({
-                    feature: outcome.feature,
-                    contactSheet,
-                    partnerCaptions,
-                }, aiJobFence(context));
+                if (contactBundleMedia.length > 0) {
+                    persistenceTasks.push(dependencies.sourceMediaArchive.persistBundle({
+                        requestId: context.claim.requestId,
+                        archiveId: analysisV2SourceMediaArchiveId({
+                            candidateId: candidate.candidateId,
+                            stage: 'partner_contact_remainder',
+                        }),
+                        media: contactBundleMedia,
+                    }));
+                }
+                if (contactSheet) {
+                    persistenceTasks.push(dependencies.sourceMediaArchive.persistBundle({
+                        requestId: context.claim.requestId,
+                        archiveId: analysisV2SourceMediaArchiveId({
+                            candidateId: candidate.candidateId,
+                            stage: 'partner_contact_sheet',
+                        }),
+                        media: [{
+                            selectionId: contactSheet.selectionId,
+                            normalizedJpeg: Buffer.from(
+                                contactSheet.normalizedJpegBase64,
+                                'base64',
+                            ),
+                        }],
+                    }));
+                }
+                const persistence = Promise.all(persistenceTasks).then(() => undefined);
+                const analyzed = await awaitArchivedAi(
+                    dependencies.ai.partnerSafety({
+                        feature: outcome.feature,
+                        contactSheet,
+                        partnerCaptions,
+                    }, aiJobFence(context)),
+                    persistence,
+                );
                 return {
                     candidateId: candidate.candidateId,
                     shortlistRank: candidate.verificationShortlistRank!,

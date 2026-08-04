@@ -38,6 +38,10 @@ import {
     type AnalysisV2AiStageRuntime,
 } from './v2-ai-stage-runtime';
 import type { AnalysisV2MediaArtifactStore } from './v2-media-artifact-store';
+import {
+    analysisV2SourceMediaArchiveId,
+    type AnalysisV2SourceMediaArchiveStore,
+} from './v2-source-media-archive';
 import type { AnalysisV2DagState } from './v2-dag-planner';
 import { AnalysisV2AiResultRateLimitExhaustedError } from './v2-ai-result-store';
 import {
@@ -537,6 +541,10 @@ function dependencies(
             loadBundle: vi.fn(async () => null),
             cleanupTerminal: vi.fn(async () => ({ claimed: 0, deleted: 0, failed: 0 })),
         },
+        sourceMediaArchive: {
+            persistBundle: vi.fn(async () => undefined),
+            loadBundle: vi.fn(async () => null),
+        },
         ai: {
             gender: vi.fn(async (input: Parameters<AnalysisV2AiStageRuntime['gender']>[0]) => ({
                 result: triage(input.media.map(row => row.selectionId)),
@@ -754,6 +762,15 @@ describe('V2 AI and scoring executors', () => {
             null, null, 'profile_fetch',
         ]);
         expect(deps.ai.features).toHaveBeenCalledTimes(1);
+        expect(deps.sourceMediaArchive.persistBundle).toHaveBeenCalledTimes(2);
+        expect(deps.sourceMediaArchive.persistBundle).toHaveBeenCalledWith(
+            expect.objectContaining({
+                archiveId: analysisV2SourceMediaArchiveId({
+                    candidateId: analysisV2CandidateId('male.account'),
+                    stage: 'triage',
+                }),
+            })
+        );
         expect(deps.mediaStore.persistBundle).toHaveBeenCalledTimes(1);
         expect(deps.mediaStore.persistBundle).toHaveBeenCalledWith(expect.objectContaining({
             bundleId: analysisV2CandidateBundleId(analysisV2CandidateId('unknown.account')),
@@ -762,6 +779,55 @@ describe('V2 AI and scoring executors', () => {
         expect(featureCheckpoint.mock.calls[0][0].rows.map(row => row.classification)).toEqual([
             'verified_non_female', 'verified_female', 'unavailable',
         ]);
+    });
+
+    it('fails closed before checkpointing when a required source-media archive write fails', async () => {
+        const memoryState = memory();
+        const account = profile('archive.failure');
+        const deps = dependencies(memoryState, {
+            profileBatches: {
+                loadExactBatch: vi.fn(async () => ({
+                    requestedUsernames: [account.username],
+                    results: [{
+                        username: account.username,
+                        status: 'success' as const,
+                        profile: account,
+                    }],
+                })),
+            },
+            sourceMediaArchive: {
+                persistBundle: vi.fn(async () => {
+                    throw new Error('ANALYSIS_V2_SOURCE_MEDIA_ARCHIVE_OBJECT_ERROR');
+                }),
+                loadBundle: vi.fn(async () => null),
+            },
+        });
+
+        await expect(createAnalysisV2AiScoringExecutorRegistry(deps).profile_ai!(
+            context('profile_ai', {
+                jobKey: 'track:profile-ai:batch:0',
+                batch: 0,
+                state: state({
+                    relationships: {
+                        ...state().relationships!,
+                        profileBatches: [{
+                            batch: 0,
+                            itemCount: 1,
+                            inputHash: digest('profile-topology'),
+                        }],
+                    },
+                    profileFetchBatches: [{
+                        batch: 0,
+                        itemCount: 1,
+                        producerInputHash: digest('profile-producer'),
+                        revision: 1,
+                        resultHash: digest('profile-result'),
+                    }],
+                }),
+            })
+        )).rejects.toThrow('ANALYSIS_V2_SOURCE_MEDIA_ARCHIVE_OBJECT_ERROR');
+        expect(deps.resultStore.checkpointFeatureBatch).not.toHaveBeenCalled();
+        expect(memoryState.outcomes).toEqual([]);
     });
 
     it('uses v2.8 profile evidence and records privacy-safe media/official provenance without extra normalization', async () => {
@@ -3313,16 +3379,39 @@ describe('V2 AI and scoring executors', () => {
                 excludedUsername: null,
             }),
         };
+        const contactSheetJpeg = Buffer.from([0xff, 0xd8, 0x55, 0xff, 0xd9]);
         const createContactSheet = vi.fn(async (
             sources: readonly { selectionId: string; normalizedJpegBase64: string }[]
         ) => ({
             selectionId: `contact-sheet:${digest(sources.map(row => row.selectionId).join('|'))}`,
-            normalizedJpegBase64: Buffer.from('sheet').toString('base64'),
+            normalizedJpegBase64: contactSheetJpeg.toString('base64'),
             sourceSelectionIds: sources.map(row => row.selectionId),
             width: 768,
             height: 960,
         }));
-        const deps = dependencies(memoryState, { createContactSheet });
+        const archiveReleases: Array<() => void> = [];
+        const sourceMediaArchive: AnalysisV2SourceMediaArchiveStore = {
+            persistBundle: vi.fn(async input => {
+                void input;
+                await new Promise<void>(resolve => archiveReleases.push(resolve));
+            }),
+            loadBundle: vi.fn(async () => null),
+        };
+        const deps = dependencies(memoryState, { createContactSheet, sourceMediaArchive });
+        const artifactReleases: Array<() => void> = [];
+        deps.mediaStore.persistBundle = vi.fn(async input => {
+            await new Promise<void>(resolve => artifactReleases.push(resolve));
+            return {
+                requestId: input.requestId,
+                artifactKey: digest(input.bundleId),
+                artifactKind: 'media_bundle' as const,
+                contentSha256: digest('partner-bundle'),
+                contentType: 'application/octet-stream' as const,
+                objectName: 'object',
+                objectGeneration: '1',
+                byteSize: 4,
+            };
+        });
         deps.ai.partnerSafety = vi.fn(async input => {
             const contactSheet = input.contactSheet!;
             return {
@@ -3347,9 +3436,15 @@ describe('V2 AI and scoring executors', () => {
             };
         });
 
-        await createAnalysisV2AiScoringExecutorRegistry(deps).partner_safety!(
+        const execution = createAnalysisV2AiScoringExecutorRegistry(deps).partner_safety!(
             context('partner_safety')
         );
+        await vi.waitFor(() => expect(deps.ai.partnerSafety).toHaveBeenCalledOnce());
+        expect(sourceMediaArchive.persistBundle).toHaveBeenCalledTimes(2);
+        expect(deps.mediaStore.persistBundle).toHaveBeenCalledOnce();
+        artifactReleases.forEach(release => release());
+        archiveReleases.forEach(release => release());
+        await execution;
 
         expect(deps.ai.partnerSafety).toHaveBeenCalledOnce();
         expect(deps.targetProfiles.loadTargetProfile).toHaveBeenCalledOnce();
@@ -3369,6 +3464,54 @@ describe('V2 AI and scoring executors', () => {
                 selectionId => expect.objectContaining({ selectionId })
             )),
         }));
+        expect(deps.sourceMediaArchive.persistBundle).toHaveBeenCalledWith(
+            expect.objectContaining({
+                archiveId: analysisV2SourceMediaArchiveId({
+                    candidateId: candidate.candidateId,
+                    stage: 'partner_contact_remainder',
+                }),
+                media: expect.arrayContaining(partnerInput.contactSheet!.sourceSelectionIds.map(
+                    selectionId => expect.objectContaining({ selectionId })
+                )),
+            })
+        );
+        expect(deps.sourceMediaArchive.persistBundle).toHaveBeenCalledWith(
+            expect.objectContaining({
+                archiveId: analysisV2SourceMediaArchiveId({
+                    candidateId: candidate.candidateId,
+                    stage: 'partner_contact_sheet',
+                }),
+                media: [{
+                    selectionId: partnerInput.contactSheet!.selectionId,
+                    normalizedJpeg: contactSheetJpeg,
+                }],
+            })
+        );
+        const remainderCall = vi.mocked(sourceMediaArchive.persistBundle).mock.calls.find(
+            ([input]) => input.archiveId === analysisV2SourceMediaArchiveId({
+                candidateId: candidate.candidateId,
+                stage: 'partner_contact_remainder',
+            })
+        );
+        const remainderSelectionIds = remainderCall?.[0].media.map(
+            media => media.selectionId
+        ) ?? [];
+        const remainderIds = new Set(remainderSelectionIds);
+        expect(remainderSelectionIds).toHaveLength(remainderIds.size);
+        expect([...remainderIds].some(id => candidate.normalizedSelectionIds.includes(id)))
+            .toBe(false);
+        expect([...remainderIds].every(id => (
+            partnerInput.contactSheet!.sourceSelectionIds.includes(id)
+        ))).toBe(true);
+        expect(partnerInput.contactSheet!.sourceSelectionIds.every(id => (
+            candidate.normalizedSelectionIds.includes(id) || remainderIds.has(id)
+        ))).toBe(true);
+        const contactIds = new Set(partnerInput.contactSheet!.sourceSelectionIds);
+        const exactCoveredContactIds = new Set([
+            ...candidate.normalizedSelectionIds.filter(id => contactIds.has(id)),
+            ...remainderIds,
+        ]);
+        expect([...exactCoveredContactIds].sort()).toEqual([...contactIds].sort());
         expect(vi.mocked(deps.resultStore.checkpointPartnerSafety).mock.calls[0]![0].rows[0])
             .toMatchObject({
                 source: 'gemini',
@@ -3376,6 +3519,71 @@ describe('V2 AI and scoring executors', () => {
                 evidenceSelectionIds: [partnerInput.contactSheet!.sourceSelectionIds[0]],
             });
     });
+
+    it.each([
+        ['retained archive', 'ANALYSIS_V2_SOURCE_MEDIA_ARCHIVE_OBJECT_ERROR'],
+        ['short-lived artifact', 'ANALYSIS_V2_MEDIA_ARTIFACT_OBJECT_ERROR'],
+    ] as const)(
+        'runs partner AI concurrently but refuses its checkpoint when %s persistence fails',
+        async (failureTarget, failureCode) => {
+        const memoryState = memory();
+        const candidate = completeCarouselOutcome('archive.failure');
+        memoryState.outcomes = [candidate];
+        memoryState.screening = {
+            revision: 1,
+            resultHash: digest('screening-partner-archive-failure'),
+            shortlistHash: digest('shortlist-partner-archive-failure'),
+            candidates: calculateV2PreliminaryScores({
+                candidates: [{
+                    candidateId: candidate.candidateId,
+                    username: candidate.instagramId,
+                    appearanceGrade: 3,
+                    exposureScore: 1,
+                    accountContext: 'personal',
+                    hasWeakPartnerEvidence: false,
+                    hasStrongPartnerEvidence: false,
+                    uniqueTargetPostsLikedByCandidate: 0,
+                    boundedCandidateCommentsOnTarget: 0,
+                    hasCandidateToTargetTagOrCaptionMention: false,
+                    hasTargetToCandidateTagOrCaptionMention: false,
+                }],
+                orderedMutualUsernames: [candidate.instagramId],
+                excludedUsername: null,
+            }),
+        };
+        const deps = dependencies(memoryState, {
+            createContactSheet: vi.fn(async (
+                sources: readonly { selectionId: string; normalizedJpegBase64: string }[]
+            ) => ({
+                selectionId: `contact-sheet:${digest('archive-failure')}`,
+                normalizedJpegBase64: Buffer.from([
+                    0xff, 0xd8, 0x66, 0xff, 0xd9,
+                ]).toString('base64'),
+                sourceSelectionIds: sources.map(source => source.selectionId),
+                width: 768,
+                height: 960,
+            })),
+            sourceMediaArchive: {
+                persistBundle: vi.fn(async () => {
+                    if (failureTarget === 'retained archive') throw new Error(failureCode);
+                }),
+                loadBundle: vi.fn(async () => null),
+            },
+        });
+        if (failureTarget === 'short-lived artifact') {
+            deps.mediaStore.persistBundle = vi.fn(async () => {
+                throw new Error(failureCode);
+            });
+        }
+
+        await expect(createAnalysisV2AiScoringExecutorRegistry(deps).partner_safety!(
+            context('partner_safety')
+        )).rejects.toThrow(failureCode);
+        expect(deps.ai.partnerSafety).toHaveBeenCalledOnce();
+        expect(deps.resultStore.checkpointPartnerSafety).not.toHaveBeenCalled();
+        expect(memoryState.partner).toBeNull();
+        }
+    );
 
     it('never treats a partially prepared carousel contact sheet as partner absence', async () => {
         const memoryState = memory();

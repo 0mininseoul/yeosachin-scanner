@@ -541,6 +541,51 @@ describe('analysis V2 media artifact orchestration', () => {
 });
 
 describe('Google Cloud private media object adapter', () => {
+    it('creates or verifies a fixed opaque retained bundle and reads its current generation', async () => {
+        const bytes = serializeAnalysisV2MediaBundle([
+            { selectionId: 'profile:opaque', normalizedJpeg: jpeg },
+        ]);
+        const contentSha256 = contentHash(bytes);
+        const objectName = `analysis-v2-retained/${'a'.repeat(64)}/${'b'.repeat(64)}.bin`;
+        const metadata = {
+            name: objectName,
+            generation: '1234567890123456',
+            size: String(bytes.length),
+            contentType: 'application/octet-stream',
+        };
+        let created = false;
+        const request = vi.fn(async (options: { method: string; responseType?: string }) => {
+            if (options.method === 'POST') {
+                if (created) throw Object.assign(new Error('precondition'), { code: 412 });
+                created = true;
+                return { data: metadata };
+            }
+            if (options.responseType === 'arraybuffer') return { data: bytes };
+            return { data: metadata };
+        });
+        const client = createGoogleCloudPrivateMediaObjectClient({
+            bucketName: 'private-artifacts-1',
+            requester: { request } as GoogleCloudStorageAuthorizedRequester,
+        });
+
+        await expect(client.createRetained({
+            objectName,
+            bytes,
+            contentSha256,
+            contentType: 'application/octet-stream',
+        })).resolves.toEqual({ created: true, generation: metadata.generation });
+        await expect(client.createRetained({
+            objectName,
+            bytes,
+            contentSha256,
+            contentType: 'application/octet-stream',
+        })).resolves.toEqual({ created: false, generation: metadata.generation });
+        await expect(client.readRetained({
+            objectName,
+            maximumBytes: 32 * 1024 * 1024,
+        })).resolves.toEqual(bytes);
+    });
+
     it('creates once with a generation precondition and reads/deletes that generation', async () => {
         const artifactKey = 'a'.repeat(64);
         const contentSha256 = contentHash(jpeg);
