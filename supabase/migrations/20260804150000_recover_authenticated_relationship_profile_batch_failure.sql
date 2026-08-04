@@ -100,6 +100,14 @@ BEGIN
                       AND auth_run.job_key = 'track:relationships:collect'
                       AND auth_run.operation_key ~ '^relationship-(followers|following):[0-9a-f]{64}$'
                       AND auth_run.account_slot = 'primary'
+                      AND EXISTS (
+                          SELECT 1
+                          FROM public.analysis_v2_failure_receipts AS auth_receipt
+                          WHERE auth_receipt.request_id = auth_run.request_id
+                            AND auth_receipt.failed_job_key = auth_run.job_key
+                            AND auth_receipt.failed_claim_token = auth_run.job_claim_token
+                            AND auth_receipt.error_code = 'SCRAPING_INCOMPLETE_ERROR'
+                      )
                       AND pg_catalog.jsonb_typeof(auth_run.items) = 'array'
                       AND pg_catalog.jsonb_array_length(auth_run.items) > 0
                       AND NOT EXISTS (

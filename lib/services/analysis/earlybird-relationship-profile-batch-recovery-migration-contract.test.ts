@@ -40,6 +40,7 @@ describe('authenticated relationship/profile-batch earlybird recovery migration'
             "relationship-(followers|following):[0-9a-f]{64}"
         );
         expect(migration).toContain("auth_run.account_slot = 'primary'");
+        expect(migration).toContain('auth_receipt.failed_claim_token = auth_run.job_claim_token');
         expect(migration).toContain('jsonb_array_elements(auth_run.items)');
         expect(migration).toContain('analysis_v2_relationship_sides');
         expect(migration).toContain("side.job_key = 'track:relationships:collect'");
