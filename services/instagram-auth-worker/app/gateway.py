@@ -323,6 +323,7 @@ class InstagrapiGateway:
             method = self._client.user_followers if side == 'followers' \
                 else self._client.user_following
             users = _collection(method(user_id, amount=limit), 'relationship users')
+            private_graphql = None
 
             # Instagrapi's private-mobile followers endpoint can terminate a
             # paginated response early even when the account's declared count
@@ -356,6 +357,21 @@ class InstagrapiGateway:
                 users.extend(_private_graphql_followers_large_list(
                     self._client, user_id, limit,
                 ))
+
+            # The authenticated list surface can return a different partial
+            # window on a subsequent request. One bounded retry lets the
+            # existing dedupe/coverage gate union that window without turning
+            # a single analysis into an unbounded scraper loop.
+            if callable(private_graphql):
+                unique_ids = {
+                    _identifier(_value(value, 'pk'), 'user id')
+                    for value in users
+                }
+                if len(unique_ids) < limit:
+                    users.extend(_collection(
+                        private_graphql(user_id, amount=limit),
+                        'private GraphQL retry relationship users',
+                    ))
 
             unique_users: list[Any] = []
             seen_ids: set[str] = set()
