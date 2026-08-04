@@ -490,6 +490,27 @@ class InstagrapiGatewayTest(unittest.TestCase):
         self.assertFalse(client.large_list_request['variables']['skip_big_list'])
         self.assertFalse(client.large_list_request['variables']['skip_has_more'])
 
+    def test_retries_private_graphql_once_when_the_union_is_still_short(self):
+        class RetryClient(FakeClient):
+            def __init__(self):
+                self.private_calls = 0
+
+            def user_followers(self, user_id, amount):
+                return {'1': user(1, 'one.user')}
+
+            def user_followers_private_gql(self, user_id, amount):
+                self.private_calls += 1
+                return [user(2 if self.private_calls == 1 else 3, 'two.user' if self.private_calls == 1 else 'three.user')]
+
+        client = RetryClient()
+        result = InstagrapiGateway(client).relationship('followers', 'target.user', 3)
+
+        self.assertEqual(
+            [row['username'] for row in result],
+            ['one.user', 'two.user', 'three.user'],
+        )
+        self.assertEqual(client.private_calls, 2)
+
     def test_keeps_following_on_the_existing_mobile_path(self):
         class FollowingClient(FakeClient):
             def user_followers_private_gql(self, user_id, amount):
