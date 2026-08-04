@@ -245,8 +245,35 @@ class InstagrapiGateway:
             _identifier(user_id, 'user id')
             method = self._client.user_followers if side == 'followers' \
                 else self._client.user_following
-            users = method(user_id, amount=limit)
-            return [_user_row(value) for value in _collection(users, 'relationship users')[:limit]]
+            users = _collection(method(user_id, amount=limit), 'relationship users')
+
+            # Instagrapi's private-mobile followers endpoint can terminate a
+            # paginated response early even when the account's declared count
+            # is larger. The private GraphQL helper uses the same authenticated
+            # session and cursor family, so use it only to top up an incomplete
+            # mobile result. The downstream completeness gate still remains the
+            # final authority; never pad or accept missing rows here.
+            if side == 'followers' and len(users) < limit:
+                private_graphql = getattr(
+                    self._client, 'user_followers_private_gql', None
+                )
+                if callable(private_graphql):
+                    users.extend(_collection(
+                        private_graphql(user_id, amount=limit),
+                        'private GraphQL relationship users',
+                    ))
+
+            unique_users: list[Any] = []
+            seen_ids: set[str] = set()
+            for value in users:
+                identifier = _identifier(_value(value, 'pk'), 'user id')
+                if identifier in seen_ids:
+                    continue
+                seen_ids.add(identifier)
+                unique_users.append(value)
+                if len(unique_users) >= limit:
+                    break
+            return [_user_row(value) for value in unique_users]
 
         return self._call(collect)
 
