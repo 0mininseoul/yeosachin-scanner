@@ -419,6 +419,32 @@ class InstagrapiGatewayTest(unittest.TestCase):
         ])
         self.assertEqual(client.relationship_args, ('followers', '123', 2))
 
+    def test_tops_up_an_incomplete_mobile_followers_page_with_private_graphql(self):
+        class PartialFollowersClient(FakeClient):
+            def user_followers(self, user_id, amount):
+                self.relationship_args = ('followers', user_id, amount)
+                return {'1': user(1, 'one.user')}
+
+            def user_followers_private_gql(self, user_id, amount):
+                self.private_graphql_args = (user_id, amount)
+                return [user(2, 'two.user')]
+
+        client = PartialFollowersClient()
+        result = InstagrapiGateway(client).relationship('followers', 'target.user', 2)
+
+        self.assertEqual([row['username'] for row in result], ['one.user', 'two.user'])
+        self.assertEqual(client.private_graphql_args, ('123', 2))
+
+    def test_keeps_following_on_the_existing_mobile_path(self):
+        class FollowingClient(FakeClient):
+            def user_followers_private_gql(self, user_id, amount):
+                raise AssertionError('private followers GraphQL must not run for following')
+
+        client = FollowingClient()
+        result = InstagrapiGateway(client).relationship('following', 'target.user', 1)
+
+        self.assertEqual([row['username'] for row in result], ['two.user'])
+
     def test_accepts_instagrapi_pydantic_url(self):
         class UserShortLikeClient(FakeClient):
             def user_followers(self, user_id, amount):
