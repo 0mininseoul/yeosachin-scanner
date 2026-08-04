@@ -312,6 +312,51 @@ describe('authenticated self-hosted worker client', () => {
         );
     });
 
+    it('accepts the supported twenty-item carousel contract', async () => {
+        const profile = {
+            username: 'target.user',
+            followersCount: 12,
+            followingCount: 3,
+            postsCount: 1,
+            isPrivate: false,
+            isVerified: false,
+            latestPosts: [{
+                id: 'carousel-20',
+                shortCode: 'Carousel20',
+                type: 'carousel',
+                mediaItems: Array.from({ length: 20 }, (_, index) => ({
+                    id: `child-${index}`,
+                    type: 'image',
+                    thumbnailUrl: `https://cdn.example/child-${index}.jpg`,
+                })),
+                declaredMediaCount: 20,
+                childrenComplete: true,
+                likesCount: 0,
+                commentsCount: 0,
+                timestamp: '2026-08-03T00:00:00.000Z',
+                taggedUsers: [],
+                mentionedUsers: [],
+            }],
+        };
+        const response = {
+            schemaVersion: 1,
+            runId: relationshipResponse.runId,
+            accountSlot: 'primary',
+            items: [profile],
+        };
+        const client = createSelfHostedAuthWorkerClient({
+            config,
+            fetch: async () => new Response(JSON.stringify(response), { status: 200 }),
+            getAuthorizationHeader: async () => 'Bearer token',
+        });
+
+        await expect(client.getProfile(
+            'target.user',
+            10,
+            { operationKey: `target-profile:${'c'.repeat(64)}`, inputHash: 'a'.repeat(64) }
+        )).resolves.toEqual(response);
+    });
+
     it('classifies queue-full and quarantined responses for deterministic Apify fallback', async () => {
         for (const [status, code, retryable] of [
             [429, 'queue_full', true],

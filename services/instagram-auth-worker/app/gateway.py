@@ -43,7 +43,10 @@ MAX_FULL_NAME_LENGTH = 150
 MAX_BIO_LENGTH = 2_000
 MAX_CAPTION_LENGTH = 2_200
 MAX_IDENTIFIER_LENGTH = 255
-MAX_MEDIA_CHILDREN = 10
+# Instagram carousels support up to twenty children.  Keep this aligned with
+# the downstream profile/media policy; a twenty-slide carousel is a valid
+# post, not a malformed provider response.
+MAX_MEDIA_CHILDREN = 20
 MAX_COUNT = 2_000_000_000
 
 
