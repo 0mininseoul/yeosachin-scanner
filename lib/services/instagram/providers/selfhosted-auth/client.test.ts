@@ -225,6 +225,7 @@ describe('authenticated self-hosted worker client', () => {
             items: [
                 { username: 'target.user', status: 'available', profile },
                 { username: 'missing.user', status: 'not_found' },
+                { username: 'broken.user', status: 'failed', failureCategory: 'schema' },
             ],
         };
         const fetch = vi.fn(async () => new Response(JSON.stringify(response), { status: 200 }));
@@ -236,7 +237,7 @@ describe('authenticated self-hosted worker client', () => {
         const operationKey = `profiles:${'c'.repeat(64)}`;
 
         await expect(client.getProfilesBatch(
-            ['Target.User', 'missing.user'],
+            ['Target.User', 'missing.user', 'broken.user'],
             10,
             { operationKey, inputHash: 'd'.repeat(64) }
         )).resolves.toEqual(response);
@@ -246,7 +247,7 @@ describe('authenticated self-hosted worker client', () => {
                 body: JSON.stringify({
                     operationKey,
                     inputHash: 'd'.repeat(64),
-                    usernames: ['target.user', 'missing.user'],
+                    usernames: ['target.user', 'missing.user', 'broken.user'],
                     mediaLimit: 10,
                 }),
             })

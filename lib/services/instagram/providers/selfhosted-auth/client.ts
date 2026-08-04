@@ -111,6 +111,11 @@ const profileBatchItemSchema = z.discriminatedUnion('status', [
         username: z.string().regex(USERNAME_PATTERN),
         status: z.literal('not_found'),
     }).strict(),
+    z.object({
+        username: z.string().regex(USERNAME_PATTERN),
+        status: z.literal('failed'),
+        failureCategory: z.literal('schema'),
+    }).strict(),
 ]);
 
 function responseSchema<T extends z.ZodType>(item: T, maximumItems: number) {
