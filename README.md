@@ -193,14 +193,14 @@ ai-baram-detector/
 
 ### Instagram 수집 라우팅
 
-- 결제 전 대상 프로필 preflight는 로그인 없는 자체 summary 수집이 기본입니다. 분류된 자체 provider 실패일 때만 Apify profile-summary Actor를 preflight당 최대 1회, `maxTotalChargeUsd=$0.0026`로 fallback합니다.
-- 이 fallback은 Actor 시작 전 원장을 예약하고, retry 시 새 run을 만들지 않고 저장된 같은 run ID를 재개합니다. provider가 제공한 `finishedAt`이 인증 재조회 시점 기준 최소 30초 이상 지난 경우에만 실제액을 정산하며, 30초 미만은 미정산으로 남겨 다시 조회합니다. preflight가 만료·이탈해도 정산 전 원장을 유지합니다.
-- 공개 프로필과 프로필 배치는 로그인 없는 직접 수집이 기본이며, 실패 시 Apify를 한 번만 호출합니다.
+- 유료 V2의 대상 프로필 preflight와 checkout-time `fresh_admission`은 처음부터 지정 버너 계정의 `selfhosted_auth` summary를 사용합니다. 대상 full profile·피드와 후보 프로필 batch도 같은 인증 경로를 사용하며, 인증 실패 뒤에는 Apify profile fallback을 열지 않습니다.
+- 레거시 공개 경로의 Apify fallback은 Actor 시작 전 원장을 예약하고, retry 시 새 run을 만들지 않고 저장된 같은 run ID를 재개합니다. provider가 제공한 `finishedAt`이 인증 재조회 시점 기준 최소 30초 이상 지난 경우에만 실제액을 정산하며, 30초 미만은 미정산으로 남겨 다시 조회합니다. preflight가 만료·이탈해도 정산 전 원장을 유지합니다.
+- 베타 경로는 기존 무료 Apify-only 정책을 유지하고, 공개 `selfhosted` 및 Apify fallback은 레거시/명시적 운영 경로로 보존합니다.
 - Apify terminal 직후 비용과 dataset count는 임시값일 수 있어 결과 처리는 지연하지 않고 30초 뒤 같은 run을 재조회합니다. 비용은 인증된 `usageTotalUsd`만 확정하며, 유료 run을 다시 시작하지 않습니다.
 - 체크포인트가 있는 유료 프로필 batch는 스키마가 유효한 결과에서 확인 불가 계정 최대 1개만 제외합니다. 여러 계정 누락, 요청 외 username과 중복은 항상 실패 처리하며, 체크포인트 없는 일반 호출은 95% 완전성 기준을 유지합니다.
-- 팔로워와 팔로잉은 Apify Scraping Solutions가 기본입니다. 대상 프로필의 선언 수와 플랜 상한으로 계산한 예상치의 99% 미만이면 자동 폴백 없이 실패합니다.
-- Instagram 로그인 쿠키, 세션 계정, 계정 풀은 사용하지 않습니다.
-- 댓글은 Apify 공식 Actor, liker는 DataDoping no-cookie Actor를 사용합니다. 관리자는 요청별 `comments`/`likers`를 `apify` 또는 `disabled`로 선택할 수 있습니다.
+- 유료 V2에서 followers/following은 선택된 단일 provider를 사용합니다(`selfhosted_auth` 전환 시 인증 worker, `apify` 전환 시 Apify Scraping Solutions). 대상 프로필의 선언 수와 플랜 상한으로 계산한 예상치의 99% 미만이면 자동 폴백 없이 실패합니다. 베타/레거시 기본값은 기존 Apify 정책을 유지합니다.
+- Apify Actor에는 Instagram 로그인 쿠키나 세션을 전달하지 않습니다. 유료 selfhosted_auth 경로는 별도 Cloud Run worker의 단일 버너 계정 세션을 사용하며, 계정 풀이나 자동 계정 회전은 하지 않습니다.
+- 유료 V2의 댓글/liker도 followers/following과 같은 provider 선택을 따릅니다. `selfhosted_auth` 전환에서는 인증 worker를 사용하고, `apify` 전환에서는 Apify 공식/DataDoping no-cookie Actor를 사용합니다. 베타/레거시 기본값은 Apify이며, 관리자는 요청별 `comments`/`likers`를 `apify`, `selfhosted_auth` 또는 `disabled`로 선택할 수 있습니다.
 - FlashAPI, CoderX, Stable RapidAPI 어댑터는 관리자가 명시적으로 선택할 때만 사용하며 관계 목록의 자동 폴백에 포함되지 않습니다.
 - `POST /api/analysis/start`의 `scraperOptions`는 `ADMIN_API_KEY` Bearer 인증을 통과한 요청만 허용하며, 선택값은 해당 분석 요청에 저장됩니다.
 
