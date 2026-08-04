@@ -62,6 +62,8 @@ def _translate(error: Exception) -> Exception:
 
 
 def _value(value: Any, name: str, default: Any = None) -> Any:
+    if isinstance(value, dict):
+        return value.get(name, default)
     return getattr(value, name, default)
 
 
@@ -160,6 +162,81 @@ def _collection(value: Any, field: str) -> list[Any]:
     if isinstance(value, (list, tuple)):
         return list(value)
     raise _schema_error(field)
+
+
+def _private_graphql_followers_large_list(
+    client: Any,
+    user_id: str,
+    limit: int,
+) -> list[Any]:
+    """Fetch the remaining large-list pages without fabricating rows.
+
+    Instagrapi's public helper intentionally sets ``skip_big_list`` and
+    ``skip_has_more`` for the normal follow-list UI.  Some accounts therefore
+    return a stable but short page.  Keep this bounded and opt-in: if the
+    client's low-level authenticated GraphQL request is unavailable, return no
+    rows and let the existing completeness gate fail closed.
+    """
+    request = getattr(client, 'private_graphql_query_request', None)
+    rank_token = _value(client, 'rank_token')
+    if not callable(request) or not isinstance(rank_token, str) or not rank_token:
+        return []
+
+    users: list[Any] = []
+    max_id: Any = None
+    seen_cursors: set[str] = set()
+    for _ in range(20):
+        variables: dict[str, Any] = {
+            'user_id': str(user_id),
+            'skip_suggested_users': True,
+            'skip_more_groups_available': True,
+            'skip_friendship_followers_fields': True,
+            'request_data': {'rank_token': rank_token, 'enableGroups': True},
+            'skip_page_size': False,
+            'skip_pending_admins': True,
+            'skip_has_more': False,
+            'search_surface': 'follow_list_page',
+            'query': '',
+            'skip_big_list': False,
+            'include_unseen_count': True,
+        }
+        if max_id is not None:
+            variables['max_id'] = max_id
+        response = request(
+            friendly_name='FollowersList',
+            root_field_name='xdt_api__v1__friendships__followers',
+            variables=variables,
+            client_doc_id='28479704797510738576165798526',
+            priority='u=3, i',
+            extra_headers={'X-FB-RMD': 'state=URL_ELIGIBLE'},
+        )
+        payload = _value(response, 'data', response)
+        if not isinstance(payload, dict):
+            break
+        root = payload.get('xdt_api__v1__friendships__followers')
+        if not isinstance(root, dict):
+            root = next(
+                (
+                    value for key, value in payload.items()
+                    if 'friendships__followers' in str(key) and isinstance(value, dict)
+                ),
+                {},
+            )
+        page = root.get('users') if isinstance(root, dict) else None
+        if not isinstance(page, list) or not page:
+            break
+        users.extend(page)
+        if len(users) >= limit:
+            break
+        next_id = root.get('next_max_id')
+        if next_id is None:
+            break
+        cursor = str(next_id)
+        if cursor in seen_cursors:
+            break
+        seen_cursors.add(cursor)
+        max_id = next_id
+    return users[:limit]
 
 
 def _user_row(value: Any) -> dict[str, Any]:
@@ -274,6 +351,11 @@ class InstagrapiGateway:
                         public_graphql(user_id, amount=limit),
                         'public GraphQL relationship users',
                     ))
+
+            if side == 'followers' and len(users) < limit:
+                users.extend(_private_graphql_followers_large_list(
+                    self._client, user_id, limit,
+                ))
 
             unique_users: list[Any] = []
             seen_ids: set[str] = set()

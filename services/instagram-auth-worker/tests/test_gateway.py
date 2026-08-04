@@ -456,6 +456,40 @@ class InstagrapiGatewayTest(unittest.TestCase):
         )
         self.assertEqual(client.public_graphql_args, ('123', 3))
 
+    def test_tops_up_large_followers_from_authenticated_graphql_pages(self):
+        class LargeListClient(FakeClient):
+            rank_token = 'rank-token'
+
+            def user_followers(self, user_id, amount):
+                return {'1': user(1, 'one.user')}
+
+            def user_followers_private_gql(self, user_id, amount):
+                return [user(2, 'two.user')]
+
+            def user_followers_gql(self, user_id, amount):
+                return [user(3, 'three.user')]
+
+            def private_graphql_query_request(self, **kwargs):
+                self.large_list_request = kwargs
+                return {
+                    'data': {
+                        'xdt_api__v1__friendships__followers': {
+                            'users': [user(4, 'four.user')],
+                            'next_max_id': None,
+                        },
+                    },
+                }
+
+        client = LargeListClient()
+        result = InstagrapiGateway(client).relationship('followers', 'target.user', 4)
+
+        self.assertEqual(
+            [row['username'] for row in result],
+            ['one.user', 'two.user', 'three.user', 'four.user'],
+        )
+        self.assertFalse(client.large_list_request['variables']['skip_big_list'])
+        self.assertFalse(client.large_list_request['variables']['skip_has_more'])
+
     def test_keeps_following_on_the_existing_mobile_path(self):
         class FollowingClient(FakeClient):
             def user_followers_private_gql(self, user_id, amount):
