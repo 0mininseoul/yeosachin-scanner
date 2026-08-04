@@ -170,6 +170,70 @@ class InstagrapiGatewayTest(unittest.TestCase):
         self.assertTrue(post['likesCountHidden'])
         self.assertTrue(post['commentsCountHidden'])
 
+    def test_profile_accepts_a_twenty_slide_carousel(self):
+        class TwentySlideCarouselClient(FakeClient):
+            def user_info_by_username(self, username):
+                return SimpleNamespace(
+                    pk='123', username=username, full_name='', biography='', profile_pic_url='',
+                    follower_count=12, following_count=3, media_count=2,
+                    is_private=False, is_verified=False,
+                )
+
+            def user_medias(self, user_id, amount):
+                return [SimpleNamespace(
+                    pk='post-2', code='Carousel20', taken_at=datetime(2026, 8, 3, tzinfo=timezone.utc),
+                    media_type=8, product_type=None, caption_text='',
+                    image_versions2=SimpleNamespace(candidates=[SimpleNamespace(
+                        url='https://cdn.example/carousel.jpg',
+                    )]),
+                    thumbnail_url=None, video_url=None,
+                    like_count=7, comment_count=2, usertags=[],
+                    resources=[SimpleNamespace(
+                        pk=f'child-{index}',
+                        media_type=1 if index < 12 else 2,
+                        thumbnail_url='https://cdn.example/child.jpg',
+                        video_url='https://cdn.example/child.mp4' if index >= 12 else None,
+                        usertags=[],
+                    ) for index in range(20)],
+                )]
+
+        [post] = InstagrapiGateway(TwentySlideCarouselClient()).profile(
+            'target.user', 1,
+        )['latestPosts']
+        self.assertEqual(post['type'], 'carousel')
+        self.assertEqual(post['declaredMediaCount'], 20)
+        self.assertTrue(post['childrenComplete'])
+        self.assertEqual(len(post['mediaItems']), 20)
+        self.assertEqual([item['type'] for item in post['mediaItems'][-8:]], ['video'] * 8)
+
+    def test_profile_rejects_a_carousel_above_the_twenty_slide_bound(self):
+        class OversizedCarouselClient(FakeClient):
+            def user_info_by_username(self, username):
+                return SimpleNamespace(
+                    pk='123', username=username, full_name='', biography='', profile_pic_url='',
+                    follower_count=12, following_count=3, media_count=2,
+                    is_private=False, is_verified=False,
+                )
+
+            def user_medias(self, user_id, amount):
+                return [SimpleNamespace(
+                    pk='post-2', code='Carousel21', taken_at=datetime(2026, 8, 3, tzinfo=timezone.utc),
+                    media_type=8, product_type=None, caption_text='',
+                    image_versions2=SimpleNamespace(candidates=[SimpleNamespace(
+                        url='https://cdn.example/carousel.jpg',
+                    )]),
+                    thumbnail_url=None, video_url=None,
+                    like_count=7, comment_count=2, usertags=[],
+                    resources=[SimpleNamespace(
+                        pk=f'child-{index}', media_type=1,
+                        thumbnail_url='https://cdn.example/child.jpg', video_url=None,
+                        usertags=[],
+                    ) for index in range(21)],
+                )]
+
+        with self.assertRaises(WorkerSchemaError):
+            InstagrapiGateway(OversizedCarouselClient()).profile('target.user', 1)
+
     def test_profile_marks_none_post_counts_as_hidden(self):
         class NoneCountClient(FakeClient):
             def user_info_by_username(self, username):
