@@ -359,15 +359,17 @@ class InstagrapiGateway:
                 ))
 
             # The authenticated list surface can return a different partial
-            # window on a subsequent request. One bounded retry lets the
-            # existing dedupe/coverage gate union that window without turning
-            # a single analysis into an unbounded scraper loop.
+            # window on a subsequent request. Two bounded retries let the
+            # existing dedupe/coverage gate union those windows without
+            # turning a single analysis into an unbounded scraper loop.
             if callable(private_graphql):
-                unique_ids = {
-                    _identifier(_value(value, 'pk'), 'user id')
-                    for value in users
-                }
-                if len(unique_ids) < limit:
+                for _ in range(2):
+                    unique_ids = {
+                        _identifier(_value(value, 'pk'), 'user id')
+                        for value in users
+                    }
+                    if len(unique_ids) >= limit:
+                        break
                     users.extend(_collection(
                         private_graphql(user_id, amount=limit),
                         'private GraphQL retry relationship users',
