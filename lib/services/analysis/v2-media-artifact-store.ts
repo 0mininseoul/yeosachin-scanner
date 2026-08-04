@@ -75,6 +75,24 @@ export interface AnalysisV2PrivateMediaObjectClient {
         Promise<void>;
 }
 
+/**
+ * Narrow extension for durable, opaque source-media bundles. The caller owns the
+ * retained-path contract; this adapter only accepts that exact namespace and never
+ * writes source URLs, usernames, request UUIDs, or selection IDs to object metadata.
+ */
+export interface AnalysisV2PrivateRetainedMediaObjectClient {
+    createRetained(input: {
+        objectName: string;
+        bytes: Buffer;
+        contentSha256: string;
+        contentType: 'application/octet-stream';
+    }): Promise<CreatedMediaObject>;
+    readRetained(input: {
+        objectName: string;
+        maximumBytes: number;
+    }): Promise<Buffer | null>;
+}
+
 export interface AnalysisV2MediaArtifactRegistry {
     register(input: AnalysisV2MediaArtifactJobFence & AnalysisV2MediaArtifactRef):
         Promise<AnalysisV2MediaArtifactRef>;
@@ -431,13 +449,17 @@ function gcsStatusCode(error: unknown): number | null {
     return typeof status === 'number' && Number.isSafeInteger(status) ? status : null;
 }
 
-function throwSafeGcsError(error: unknown, operation: string): never {
+function throwSafeGcsError(
+    error: unknown,
+    operation: string,
+    code = 'ANALYSIS_V2_MEDIA_ARTIFACT_OBJECT_ERROR',
+): never {
     const status = gcsStatusCode(error);
     const safeStatus = status !== null && status >= 100 && status <= 599
         ? String(status)
         : 'unknown';
     throw new Error(
-        `ANALYSIS_V2_MEDIA_ARTIFACT_OBJECT_ERROR: ${operation} failed (${safeStatus}).`
+        `${code}: ${operation} failed (${safeStatus}).`
     );
 }
 
@@ -515,6 +537,14 @@ function parseObjectNameIdentity(objectName: string): {
         throw new Error('ANALYSIS_V2_MEDIA_ARTIFACT_VALIDATION_ERROR: object name mismatch.');
     }
     return identity;
+}
+
+function assertRetainedObjectName(objectName: string): void {
+    if (!/^analysis-v2-retained\/[a-f0-9]{64}\/[a-f0-9]{64}\.bin$/.test(objectName)) {
+        throw new Error(
+            'ANALYSIS_V2_SOURCE_MEDIA_ARCHIVE_VALIDATION_ERROR: object name mismatch.'
+        );
+    }
 }
 
 function assertObjectCreateIdentity(input: {
@@ -688,7 +718,7 @@ export function deserializeAnalysisV2MediaBundle(
 export function createGoogleCloudPrivateMediaObjectClient(input: {
     bucketName: string;
     requester?: GoogleCloudStorageAuthorizedRequester;
-}): AnalysisV2PrivateMediaObjectClient {
+}): AnalysisV2PrivateMediaObjectClient & AnalysisV2PrivateRetainedMediaObjectClient {
     const bucketName = input.bucketName.trim();
     if (!BUCKET_PATTERN.test(bucketName) || bucketName.includes('..')) {
         throw new Error('ANALYSIS_V2_MEDIA_ARTIFACT_CONFIG_ERROR: invalid bucket.');
@@ -865,6 +895,186 @@ export function createGoogleCloudPrivateMediaObjectClient(input: {
             } catch (error) {
                 if (gcsStatusCode(error) !== 404) throwSafeGcsError(error, 'object delete');
             }
+        },
+
+        async createRetained(object) {
+            assertRetainedObjectName(object.objectName);
+            requiredHash(object.contentSha256, 'retained content hash');
+            if (
+                object.contentType !== 'application/octet-stream'
+                || object.bytes.length < 16
+                || object.bytes.length > ANALYSIS_V2_MEDIA_BUNDLE_MAX_BYTES
+                || sha256(object.bytes) !== object.contentSha256
+            ) {
+                throw new Error(
+                    'ANALYSIS_V2_SOURCE_MEDIA_ARCHIVE_VALIDATION_ERROR: invalid retained bundle.'
+                );
+            }
+            const operationSignal = AbortSignal.timeout(
+                ANALYSIS_V2_MEDIA_OBJECT_OPERATION_DEADLINE_MS
+            );
+            let created = false;
+            let metadata: GoogleCloudStorageObjectMetadata;
+            try {
+                const response = await requester.request<GoogleCloudStorageObjectMetadata>({
+                    url: uploadUrl,
+                    method: 'POST',
+                    params: {
+                        uploadType: 'media',
+                        name: object.objectName,
+                        ifGenerationMatch: '0',
+                    },
+                    headers: {
+                        'Content-Type': object.contentType,
+                        'Content-Length': String(object.bytes.length),
+                    },
+                    data: object.bytes,
+                    responseType: 'json',
+                    timeout: 15_000,
+                    signal: operationSignal,
+                    ...retryOptions('POST'),
+                });
+                metadata = response.data;
+                created = true;
+            } catch (error) {
+                if (gcsStatusCode(error) !== 412) {
+                    throwSafeGcsError(
+                        error,
+                        'retained upload',
+                        'ANALYSIS_V2_SOURCE_MEDIA_ARCHIVE_OBJECT_ERROR'
+                    );
+                }
+                try {
+                    const response = await requester.request<GoogleCloudStorageObjectMetadata>({
+                        url: metadataUrl(object.objectName),
+                        method: 'GET',
+                        responseType: 'json',
+                        timeout: 15_000,
+                        signal: operationSignal,
+                        ...retryOptions('GET'),
+                    });
+                    metadata = response.data;
+                } catch (metadataError) {
+                    throwSafeGcsError(
+                        metadataError,
+                        'existing retained metadata read',
+                        'ANALYSIS_V2_SOURCE_MEDIA_ARCHIVE_OBJECT_ERROR'
+                    );
+                }
+            }
+            const generation = verifiedObjectMetadata(metadata, {
+                objectName: object.objectName,
+                contentType: object.contentType,
+                byteSize: object.bytes.length,
+            });
+            if (!created) {
+                let response: { data: unknown };
+                try {
+                    response = await requester.request<unknown>({
+                        url: downloadUrl(object.objectName),
+                        method: 'GET',
+                        params: { alt: 'media', generation },
+                        responseType: 'arraybuffer',
+                        timeout: 15_000,
+                        maxContentLength: object.bytes.length,
+                        signal: operationSignal,
+                        ...retryOptions('GET'),
+                    });
+                } catch (readError) {
+                    throwSafeGcsError(
+                        readError,
+                        'existing retained object read',
+                        'ANALYSIS_V2_SOURCE_MEDIA_ARCHIVE_OBJECT_ERROR'
+                    );
+                }
+                const existingBytes = mediaBytes(response.data);
+                if (
+                    existingBytes.length !== object.bytes.length
+                    || sha256(existingBytes) !== object.contentSha256
+                ) {
+                    throw new Error(
+                        'ANALYSIS_V2_SOURCE_MEDIA_ARCHIVE_CONFLICT: existing content mismatch.'
+                    );
+                }
+            }
+            return { created, generation };
+        },
+
+        async readRetained(object) {
+            assertRetainedObjectName(object.objectName);
+            if (
+                !Number.isSafeInteger(object.maximumBytes)
+                || object.maximumBytes < 16
+                || object.maximumBytes > ANALYSIS_V2_MEDIA_BUNDLE_MAX_BYTES
+            ) {
+                throw new Error(
+                    'ANALYSIS_V2_SOURCE_MEDIA_ARCHIVE_VALIDATION_ERROR: invalid maximum size.'
+                );
+            }
+            const operationSignal = AbortSignal.timeout(
+                ANALYSIS_V2_MEDIA_OBJECT_OPERATION_DEADLINE_MS
+            );
+            let metadata: GoogleCloudStorageObjectMetadata;
+            try {
+                const response = await requester.request<GoogleCloudStorageObjectMetadata>({
+                    url: metadataUrl(object.objectName),
+                    method: 'GET',
+                    responseType: 'json',
+                    timeout: 15_000,
+                    signal: operationSignal,
+                    ...retryOptions('GET'),
+                });
+                metadata = response.data;
+            } catch (error) {
+                if (gcsStatusCode(error) === 404) return null;
+                throwSafeGcsError(
+                    error,
+                    'retained metadata read',
+                    'ANALYSIS_V2_SOURCE_MEDIA_ARCHIVE_OBJECT_ERROR'
+                );
+            }
+            const size = typeof metadata.size === 'string'
+                ? Number(metadata.size)
+                : metadata.size;
+            if (
+                metadata.name !== object.objectName
+                || metadata.contentType !== 'application/octet-stream'
+                || typeof size !== 'number'
+                || !Number.isSafeInteger(size)
+                || size < 16
+                || size > object.maximumBytes
+            ) {
+                throw new Error(
+                    'ANALYSIS_V2_SOURCE_MEDIA_ARCHIVE_OBJECT_ERROR: metadata mismatch.'
+                );
+            }
+            const generation = requiredGeneration(metadata.generation);
+            let response: { data: unknown };
+            try {
+                response = await requester.request<unknown>({
+                    url: downloadUrl(object.objectName),
+                    method: 'GET',
+                    params: { alt: 'media', generation },
+                    responseType: 'arraybuffer',
+                    timeout: 15_000,
+                    maxContentLength: size,
+                    signal: operationSignal,
+                    ...retryOptions('GET'),
+                });
+            } catch (error) {
+                throwSafeGcsError(
+                    error,
+                    'retained object read',
+                    'ANALYSIS_V2_SOURCE_MEDIA_ARCHIVE_OBJECT_ERROR'
+                );
+            }
+            const bytes = mediaBytes(response.data);
+            if (bytes.length !== size) {
+                throw new Error(
+                    'ANALYSIS_V2_SOURCE_MEDIA_ARCHIVE_OBJECT_ERROR: object size mismatch.'
+                );
+            }
+            return bytes;
         },
     };
 }

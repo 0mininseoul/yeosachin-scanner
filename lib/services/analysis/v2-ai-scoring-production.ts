@@ -17,6 +17,7 @@ import {
 } from './v2-ai-scoring-runtime-deps';
 import { analysisV2AiScoringStageStore } from './v2-ai-scoring-stage-store';
 import { createConfiguredAnalysisV2MediaArtifactStore } from './v2-media-artifact-store';
+import { createConfiguredAnalysisV2SourceMediaArchiveStore } from './v2-source-media-archive';
 import { analysisV2ResultStore } from './v2-result-store';
 import {
     captureResultImageSources,
@@ -72,6 +73,7 @@ export function createProductionAnalysisV2AiScoringExecutorRegistry(
     const credentialSlot = selectAnalysisV2ApifyCredentialSlot(env);
     selectApifyApiToken(env, credentialSlot);
     const mediaStore = createConfiguredAnalysisV2MediaArtifactStore(env);
+    const sourceMediaArchive = createConfiguredAnalysisV2SourceMediaArchiveStore(env);
     const dependencies: AnalysisV2AiScoringExecutorDependencies = {
         profileBatches: createAnalysisV2ProfileBatchReadModel(),
         evidence: createAnalysisV2RelationshipEvidenceReadModel(),
@@ -80,6 +82,7 @@ export function createProductionAnalysisV2AiScoringExecutorRegistry(
         resultStore: analysisV2ResultStore,
         resultImages: createProductionResultImageCapture(env),
         mediaStore,
+        sourceMediaArchive,
         ai: createDurableAnalysisV2AiStageRuntime(),
         reverseLikes: createAnalysisV2ReverseLikeCollector({
             adapter: makeApifyInteractionAdapter({ env }),
