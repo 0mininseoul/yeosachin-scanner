@@ -139,6 +139,25 @@ function isJsonValue(value: unknown): boolean {
     return Object.values(value as Record<string, unknown>).every(isJsonValue);
 }
 
+/**
+ * PostgreSQL JSONB does not preserve object-key insertion order. Compare the
+ * semantic payload rather than the transport-specific JSON.stringify order.
+ */
+function stableJsonStringify(value: unknown): string {
+    if (Array.isArray(value)) {
+        return `[${value.map(item => stableJsonStringify(item)).join(',')}]`;
+    }
+    if (value !== null && typeof value === 'object') {
+        const object = value as Record<string, unknown>;
+        return `{${Object.keys(object).sort().map(key => (
+            `${JSON.stringify(key)}:${stableJsonStringify(object[key])}`
+        )).join(',')}}`;
+    }
+    const encoded = JSON.stringify(value);
+    if (encoded === undefined) throw new Error('ANALYSIS_V2_SELFHOSTED_AUTH_RUN_VALIDATION_ERROR');
+    return encoded;
+}
+
 function canonicalItems(
     items: unknown,
     operationKey: string,
@@ -253,7 +272,7 @@ export function createAnalysisV2SelfHostedAuthRunStore(
                 || receipt.inputHash !== input.inputHash
                 || receipt.runId !== input.runId
                 || receipt.accountSlot !== input.accountSlot
-                || JSON.stringify(receipt.items) !== JSON.stringify(items)
+                || stableJsonStringify(receipt.items) !== stableJsonStringify(items)
             ) {
                 throw new Error('ANALYSIS_V2_SELFHOSTED_AUTH_RUN_RESPONSE drift');
             }
