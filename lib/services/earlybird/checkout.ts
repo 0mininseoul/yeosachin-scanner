@@ -123,9 +123,13 @@ export async function createEarlybirdCheckout(input: {
     if (!isPaidEarlybirdPlanId(input.planId)) {
         throw new EarlybirdWaitlistRequiredError();
     }
-    const remainingSlots = (await fetchEarlybirdRemainingSlots())[input.planId];
-    if (remainingSlots !== undefined && remainingSlots <= 0) {
-        throw new EarlybirdSoldOutError();
+    // Basic remains an application-managed earlybird allocation. Standard
+    // inventory is managed in Groble and must never be blocked by this table.
+    if (input.planId === 'basic') {
+        const remainingSlots = (await fetchEarlybirdRemainingSlots())[input.planId];
+        if (remainingSlots !== undefined && remainingSlots <= 0) {
+            throw new EarlybirdSoldOutError();
+        }
     }
     const config = readGrobleConfig();
     const plan = EARLYBIRD_PLAN_CATALOG[input.planId];
