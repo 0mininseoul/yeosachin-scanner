@@ -196,9 +196,13 @@ async function handleGET(
                 session.supabase,
             ));
         }
+        // Groble is the source of truth for Standard inventory. Keep the
+        // legacy Basic counter for its existing earlybird gate, but never
+        // expose Standard's server-side counter as a sold-out signal.
         const remainingSlotsByPlan = stored.status === 'ready'
             ? await fetchEarlybirdRemainingSlots()
             : {};
+        delete remainingSlotsByPlan.standard;
         return NextResponse.json(publicPreflightStatusDto(stored, remainingSlotsByPlan));
     } catch (error) {
         if (demoRecognized) {

@@ -89,6 +89,29 @@ describe('analysis V2 selfhosted auth run receipt store', () => {
         });
     });
 
+    it('accepts JSONB responses whose object-key order differs from the request', async () => {
+        const rpc = vi.fn(async () => ({
+            data: {
+                schemaVersion: 1,
+                provider: 'selfhosted_auth',
+                operationKey: input.operationKey,
+                inputHash: input.inputHash,
+                runId: input.runId,
+                accountSlot: 'primary',
+                items: [{ isVerified: true, isPrivate: false, username: 'first_user' }],
+            },
+            error: null,
+        }));
+        const store = createAnalysisV2SelfHostedAuthRunStore(
+            { rpc } as AnalysisV2SelfHostedAuthRunSupabaseClient
+        );
+
+        await expect(store.checkpoint({
+            ...input,
+            items: [{ username: 'first_user', isPrivate: false, isVerified: true }],
+        })).resolves.toMatchObject({ provider: 'selfhosted_auth' });
+    });
+
     it('loads and re-fences an exact cached payload under the current live claim', async () => {
         const rpc = vi.fn(async () => ({
             data: {

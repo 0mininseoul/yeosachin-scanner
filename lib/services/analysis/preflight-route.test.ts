@@ -800,7 +800,7 @@ describe('preflight owner routes', () => {
         expect(mocks.flush).toHaveBeenCalledOnce();
     });
 
-    it('carries earlybird remaining slots into a ready GET response', async () => {
+    it('carries only the Basic server-managed slots into a ready GET response', async () => {
         vi.stubEnv('IMAGE_PROXY_SIGNING_SECRET', imageProxySigningSecret);
         const snapshot = buildReadyPreflightSnapshot(
             targetProfile(),
@@ -831,7 +831,7 @@ describe('preflight owner routes', () => {
         };
         const byPlan = Object.fromEntries(body.plans.map(plan => [plan.planId, plan]));
         expect(byPlan.basic).toHaveProperty('remainingSlots', 3);
-        expect(byPlan.standard).toHaveProperty('remainingSlots', 0);
+        expect(byPlan.standard).not.toHaveProperty('remainingSlots');
         expect(byPlan.plus).not.toHaveProperty('remainingSlots');
     });
 

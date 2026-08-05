@@ -75,6 +75,13 @@ function persistenceError(): never {
     throw new Error('ANALYSIS_V2_SELFHOSTED_AUTH_RUN_PERSISTENCE_ERROR');
 }
 
+function receiptDiagnostic(event: string, code?: string): void {
+    console.error(JSON.stringify({
+        event,
+        code: code && /^[A-Z0-9_]{1,80}$/.test(code) ? code : 'unknown',
+    }));
+}
+
 function operationMatchesJob(jobKey: string, operationKey: string): boolean {
     if (jobKey === 'track:relationships:collect') {
         return /^relationship-(?:followers|following):[0-9a-f]{64}$/.test(operationKey);
@@ -137,6 +144,25 @@ function isJsonValue(value: unknown): boolean {
     if (typeof value !== 'object') return false;
     if (Object.getPrototypeOf(value) !== Object.prototype) return false;
     return Object.values(value as Record<string, unknown>).every(isJsonValue);
+}
+
+/**
+ * PostgreSQL JSONB does not preserve object-key insertion order. Compare the
+ * semantic payload rather than the transport-specific JSON.stringify order.
+ */
+function stableJsonStringify(value: unknown): string {
+    if (Array.isArray(value)) {
+        return `[${value.map(item => stableJsonStringify(item)).join(',')}]`;
+    }
+    if (value !== null && typeof value === 'object') {
+        const object = value as Record<string, unknown>;
+        return `{${Object.keys(object).sort().map(key => (
+            `${JSON.stringify(key)}:${stableJsonStringify(object[key])}`
+        )).join(',')}}`;
+    }
+    const encoded = JSON.stringify(value);
+    if (encoded === undefined) throw new Error('ANALYSIS_V2_SELFHOSTED_AUTH_RUN_VALIDATION_ERROR');
+    return encoded;
 }
 
 function canonicalItems(
@@ -245,6 +271,7 @@ export function createAnalysisV2SelfHostedAuthRunStore(
                 }
             );
             if (error) {
+                receiptDiagnostic('analysis_v2.selfhosted_auth_receipt_rpc_error', error.code);
                 persistenceError();
             }
             const receipt = parseReceipt(data);
@@ -253,8 +280,9 @@ export function createAnalysisV2SelfHostedAuthRunStore(
                 || receipt.inputHash !== input.inputHash
                 || receipt.runId !== input.runId
                 || receipt.accountSlot !== input.accountSlot
-                || JSON.stringify(receipt.items) !== JSON.stringify(items)
+                || stableJsonStringify(receipt.items) !== stableJsonStringify(items)
             ) {
+                receiptDiagnostic('analysis_v2.selfhosted_auth_receipt_response_drift', 'response_drift');
                 throw new Error('ANALYSIS_V2_SELFHOSTED_AUTH_RUN_RESPONSE drift');
             }
             return receipt;
@@ -273,6 +301,7 @@ export function createAnalysisV2SelfHostedAuthRunStore(
                 }
             );
             if (error) {
+                receiptDiagnostic('analysis_v2.selfhosted_auth_receipt_load_rpc_error', error.code);
                 persistenceError();
             }
             if (data === null) return null;
