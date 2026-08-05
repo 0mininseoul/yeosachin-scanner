@@ -14,7 +14,6 @@ import {
     publicPreflightStatusDto,
     type PreflightSupabaseClient,
 } from '@/lib/services/analysis/preflight';
-import { fetchEarlybirdRemainingSlots } from '@/lib/services/earlybird/inventory';
 import {
     observeRoute,
     suppressOperationalObservation,
@@ -145,10 +144,9 @@ async function handleGET(
                 client: session.supabase,
             });
             if (!stored) return errorResponse(404, 'NOT_FOUND', '사전 점검 요청을 찾을 수 없습니다.');
-            const remainingSlotsByPlan = stored.status === 'ready'
-                ? await fetchEarlybirdRemainingSlots()
-                : {};
-            return NextResponse.json(publicPreflightStatusDto(stored, remainingSlotsByPlan));
+            // Groble is the source of truth for paid-plan inventory. The server
+            // must not expose a second, potentially stale sold-out signal.
+            return NextResponse.json(publicPreflightStatusDto(stored));
         }
         const { user } = session;
 
@@ -196,14 +194,9 @@ async function handleGET(
                 session.supabase,
             ));
         }
-        // Groble is the source of truth for Standard inventory. Keep the
-        // legacy Basic counter for its existing earlybird gate, but never
-        // expose Standard's server-side counter as a sold-out signal.
-        const remainingSlotsByPlan = stored.status === 'ready'
-            ? await fetchEarlybirdRemainingSlots()
-            : {};
-        delete remainingSlotsByPlan.standard;
-        return NextResponse.json(publicPreflightStatusDto(stored, remainingSlotsByPlan));
+        // Groble is the source of truth for paid-plan inventory. The server
+        // must not expose a second, potentially stale sold-out signal.
+        return NextResponse.json(publicPreflightStatusDto(stored));
     } catch (error) {
         if (demoRecognized) {
             return suppressOperationalObservation(demoErrorResponse(

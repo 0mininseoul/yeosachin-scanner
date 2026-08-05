@@ -582,7 +582,7 @@ describe('earlybird checkout and waitlist routes', () => {
         expect(createdEvents[0][0].fields).not.toHaveProperty('target_instagram_id');
     });
 
-    it('rejects a sold-out plan checkout without creating the order', async () => {
+    it('allows a paid checkout when the legacy server counter is full', async () => {
         mocks.from.mockReturnValue({
             select: vi.fn(() => ({
                 in: vi.fn(() => ({
@@ -593,32 +593,6 @@ describe('earlybird checkout and waitlist routes', () => {
                 })),
             })),
         });
-
-        const response = await checkout(request('/api/earlybird/checkout', {
-            preflightId: PREFLIGHT_ID,
-            planId: 'basic',
-            disclosureAccepted: true,
-        }));
-
-        expect(response.status).toBe(409);
-        await expect(response.json()).resolves.toEqual({
-            code: 'EARLYBIRD_SOLD_OUT',
-            error: '이 플랜의 얼리버드 물량이 모두 소진되었습니다.',
-        });
-        expect(mocks.rpc).not.toHaveBeenCalled();
-    });
-
-    it('allows checkout when the plan still has remaining slots', async () => {
-        mocks.from.mockReturnValue({
-            select: vi.fn(() => ({
-                in: vi.fn(() => ({
-                    abortSignal: vi.fn(async () => ({
-                        data: [{ plan_id: 'basic', sale_limit: 10, sold_count: 9 }],
-                        error: null,
-                    })),
-                })),
-            })),
-        });
         mockCheckoutRecord(true);
 
         const response = await checkout(request('/api/earlybird/checkout', {
@@ -633,26 +607,7 @@ describe('earlybird checkout and waitlist routes', () => {
             checkoutUrl: 'https://groble.im/payment/basic-checkout-a1'
                 + `?ref=${SELLER_REFERENCE}`,
         });
-    });
-
-    it('fails open and allows checkout when the inventory lookup throws', async () => {
-        mocks.from.mockImplementation(() => {
-            throw new Error('network down');
-        });
-        mockCheckoutRecord(true);
-
-        const response = await checkout(request('/api/earlybird/checkout', {
-            preflightId: PREFLIGHT_ID,
-            planId: 'basic',
-            disclosureAccepted: true,
-        }));
-
-        expect(response.status).toBe(201);
-        await expect(response.json()).resolves.toEqual({
-            orderId: ORDER_ID,
-            checkoutUrl: 'https://groble.im/payment/basic-checkout-a1'
-                + `?ref=${SELLER_REFERENCE}`,
-        });
+        expect(mocks.from).not.toHaveBeenCalledWith('earlybird_plan_inventory');
     });
 
     it('maps server plan validation failures and never creates a Plus payment object', async () => {
