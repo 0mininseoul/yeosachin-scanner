@@ -114,6 +114,7 @@ describe('Amplitude analytics adapter', () => {
             TARGET_SUBMITTED: 'target_submitted',
             AUTH_STARTED: 'auth_started',
             AUTH_COMPLETED: 'auth_completed',
+            LOGIN_PROMPTED: 'login_prompted',
             PREFLIGHT_STARTED: 'preflight_started',
             PREFLIGHT_SUCCEEDED: 'preflight_succeeded',
             PREFLIGHT_FAILED: 'preflight_failed',
@@ -127,6 +128,7 @@ describe('Amplitude analytics adapter', () => {
             ANALYSIS_STARTED: 'analysis_started',
             ANALYSIS_DURATION_ESTIMATE_SHOWN: 'analysis_duration_estimate_shown',
             ANALYSIS_COMPLETED: 'analysis_completed',
+            ANALYSIS_FAILED: 'analysis_failed',
             RESULT_VIEWED: 'result_viewed',
             RESULT_SHARED: 'result_shared',
         });
@@ -274,7 +276,7 @@ describe('Amplitude analytics adapter', () => {
             .toBeLessThan(amplitudeMocks.setUserId.mock.invocationCallOrder[0]);
     });
 
-    it('resets an absent stored user before applying the first authenticated user', async () => {
+    it('preserves an absent stored user so anonymous events can merge on first authentication', async () => {
         enableBrowser();
         amplitudeMocks.getUserId.mockReturnValue(undefined);
         const { initAmplitude } = await loadAnalytics();
@@ -282,10 +284,32 @@ describe('Amplitude analytics adapter', () => {
         await expect(initAmplitude(SECOND_UUID)).resolves.toBe(true);
 
         expect(amplitudeMocks.getUserId).toHaveBeenCalledTimes(1);
-        expect(amplitudeMocks.reset).toHaveBeenCalledTimes(1);
+        expect(amplitudeMocks.reset).not.toHaveBeenCalled();
         expect(amplitudeMocks.setUserId.mock.calls).toEqual([[SECOND_UUID]]);
-        expect(amplitudeMocks.reset.mock.invocationCallOrder[0])
-            .toBeLessThan(amplitudeMocks.setUserId.mock.invocationCallOrder[0]);
+    });
+
+    it('flushes pre-auth events only after assigning the authenticated Supabase UUID', async () => {
+        enableBrowser();
+        amplitudeMocks.getUserId.mockReturnValue(undefined);
+        const analytics = await loadAnalytics();
+
+        analytics.trackEvent(analytics.EVENTS.PLAN_VIEWED, {
+            plan_id: 'standard',
+            amount_krw: 1990,
+            source: 'direct',
+        });
+        await expect(analytics.initAmplitude(SECOND_UUID)).resolves.toBe(true);
+
+        expect(amplitudeMocks.reset).not.toHaveBeenCalled();
+        analytics.markAnalyticsIdentityReady();
+
+        expect(amplitudeMocks.track).toHaveBeenCalledWith('plan_viewed', {
+            plan_id: 'standard',
+            amount_krw: 1990,
+            source: 'direct',
+        });
+        expect(amplitudeMocks.setUserId.mock.invocationCallOrder[0])
+            .toBeLessThan(amplitudeMocks.track.mock.invocationCallOrder[0]);
     });
 
     it('preserves an exactly matching stored user on first authenticated boot', async () => {

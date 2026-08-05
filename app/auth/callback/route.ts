@@ -17,6 +17,12 @@ import {
     type OperationalRequestContext,
 } from '@/lib/observability/request';
 import { operationalLogger } from '@/lib/observability/server';
+import {
+    claimAnonymousAnalysisV2Preflight,
+    type AnonymousPreflightClient,
+} from '@/lib/services/analysis/anonymous-preflight';
+
+const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
 function asRecord(value: unknown): Record<string, unknown> {
     return typeof value === 'object' && value !== null && !Array.isArray(value)
@@ -123,6 +129,42 @@ async function syncKakaoProfile(
 
 function authProvider(value: unknown): 'google' | 'kakao' | undefined {
     return value === 'google' || value === 'kakao' ? value : undefined;
+}
+
+async function restoreAnonymousPreflightClaim(
+    requestUrl: string,
+    rawNext: string | null,
+    userId: string | undefined,
+    client: AnonymousPreflightClient,
+): Promise<URL> {
+    const redirectUrl = appRedirectUrlForRequest(requestUrl, rawNext);
+    const preflightId = redirectUrl.searchParams.get('preflight');
+    const claimToken = redirectUrl.searchParams.get('claim');
+    if (!preflightId && !claimToken) return redirectUrl;
+    if (
+        redirectUrl.pathname !== '/analyze'
+        || !userId
+        || !preflightId
+        || !UUID_PATTERN.test(preflightId)
+        || !claimToken
+    ) {
+        return new URL('/analyze?claim=restore_failed', appOriginForRequest(requestUrl));
+    }
+    try {
+        const claimed = await claimAnonymousAnalysisV2Preflight(
+            preflightId,
+            claimToken,
+            userId,
+            { client },
+        );
+        if (!claimed) {
+            return new URL('/analyze?claim=restore_failed', appOriginForRequest(requestUrl));
+        }
+        redirectUrl.searchParams.delete('claim');
+        return redirectUrl;
+    } catch {
+        return new URL('/analyze?claim=restore_failed', appOriginForRequest(requestUrl));
+    }
 }
 
 async function handleGET(
@@ -244,7 +286,12 @@ async function handleGET(
         if (typeof deleteAttributionCookie === 'function') deleteAttributionCookie(KAKAO_ATTRIBUTION_COOKIE);
     }
 
-    const redirectUrl = appRedirectUrlForRequest(request.url, searchParams.get('next'));
+    const redirectUrl = await restoreAnonymousPreflightClaim(
+        request.url,
+        searchParams.get('next'),
+        authedUser?.id,
+        supabase,
+    );
     redirectUrl.searchParams.set('verified', 'true');
 
     operationalLogger.emit({

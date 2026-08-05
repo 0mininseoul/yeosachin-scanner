@@ -39,6 +39,7 @@ import {
 import { EVENTS, flushAnalytics, trackEvent } from '@/lib/services/analytics';
 import {
     availableAnalyticsStorage,
+    currentAttributionSource,
     tryClaimAnalyticsEvent,
 } from '@/lib/services/analytics-funnel';
 import {
@@ -47,6 +48,7 @@ import {
 } from '@/lib/services/earlybird/analytics-state';
 import { TopBar, BrandMark, Eyebrow, CaseCard, Panel, PrimaryButton } from '@/components/case-ui';
 import { InstagramLookupLink } from '@/components/instagram-lookup-link';
+import { LoginModal } from '@/components/login-modal';
 
 const PLAN_NAMES: Readonly<Record<PlanId, string>> = {
     basic: 'Basic',
@@ -91,6 +93,7 @@ const DISCLOSURE_ACCEPTED = true;
     const [purchaseSubmitting, setPurchaseSubmitting] = useState(false);
     const [waitlistComplete, setWaitlistComplete] = useState(false);
     const [checkoutStatusCta, setCheckoutStatusCta] = useState<CheckoutStatusCta | null>(null);
+    const [loginPromptOpen, setLoginPromptOpen] = useState(false);
     const querySelectedPlan = useHydrationSafePlanQuery();
     const router = useRouter();
     const { user, loading: authLoading } = useAuth();
@@ -111,6 +114,8 @@ const DISCLOSURE_ACCEPTED = true;
         refreshPreflight,
         reset,
         analyticsEligible,
+        claimToken,
+        loginFallbackRequired,
     } = useAnalysisV2Preflight();
 
     const {
@@ -204,17 +209,24 @@ const DISCLOSURE_ACCEPTED = true;
         const resumablePreflightId = params.get('preflight');
         const shouldAutostart = params.get('autostart') === '1';
 
-        if (resumablePreflightId && user) {
+        const resumableClaimToken = params.get('claim');
+        if (resumablePreflightId && (user || resumableClaimToken)) {
             let boundTarget: string | null = null;
-            try {
-                boundTarget = readPendingAnalysisTargetForPreflight(sessionStorage, {
-                    ownerId: user.id,
-                    preflightId: resumablePreflightId,
-                });
-            } catch {
-                boundTarget = null;
+            if (user) {
+                try {
+                    boundTarget = readPendingAnalysisTargetForPreflight(sessionStorage, {
+                        ownerId: user.id,
+                        preflightId: resumablePreflightId,
+                    });
+                } catch {
+                    boundTarget = null;
+                }
             }
-            void resumePreflight(resumablePreflightId, boundTarget ?? undefined).then((resumed) => {
+            void resumePreflight(
+                resumablePreflightId,
+                boundTarget ?? undefined,
+                resumableClaimToken ?? undefined,
+            ).then((resumed) => {
                 const storage = availablePendingTargetStorage();
                 if (!resumed && storage) clearPendingAnalysisTarget(storage);
             });
@@ -237,33 +249,32 @@ const DISCLOSURE_ACCEPTED = true;
             window.setTimeout(() => setInstagramId(pending), 0);
         }
 
-        if (!shouldAutostart || !pending) return;
-        if (!user) {
-            router.replace('/login?redirectTo=%2Fanalyze%3Fautostart%3D1');
-        }
+        if (!shouldAutostart || !pending || user) return;
+        router.replace('/login?redirectTo=%2Fanalyze%3Fautostart%3D1');
     }, [authLoading, resumePreflight, router, user]);
 
+    useEffect(() => {
+        if (user || !loginFallbackRequired || !instagramId.trim()) return;
+        if (!storePendingAnalysisTarget(sessionStorage, instagramId)) return;
+        setLoginPromptOpen(true);
+    }, [instagramId, loginFallbackRequired, user]);
+
     const handleStartPreflight = async () => {
-        if (!user) {
-            try {
-                storePendingAnalysisTarget(sessionStorage, instagramId);
-            } catch {
-                /* ignore */
-            }
-            router.push('/login?redirectTo=%2Fanalyze%3Fautostart%3D1');
-            return;
-        }
         const accepted = await startPreflight(instagramId);
         if (!accepted) {
-            clearPendingAnalysisTarget(sessionStorage);
+            if (user) clearPendingAnalysisTarget(sessionStorage);
             return;
         }
-        bindPendingAnalysisTarget(sessionStorage, {
-            ownerId: user.id,
-            preflightId: accepted.preflightId,
-            target: instagramId,
-        });
-        router.replace('/analyze?preflight=' + encodeURIComponent(accepted.preflightId));
+        if (user) {
+            bindPendingAnalysisTarget(sessionStorage, {
+                ownerId: user.id,
+                preflightId: accepted.preflightId,
+                target: instagramId,
+            });
+        }
+        const next = new URLSearchParams({ preflight: accepted.preflightId });
+        if (accepted.claimToken) next.set('claim', accepted.claimToken);
+        router.replace(`/analyze?${next.toString()}`);
     };
 
     const handleExclusion = async () => {
@@ -312,13 +323,40 @@ const DISCLOSURE_ACCEPTED = true;
             selectedPlanAvailable
         )) return;
 
+        trackPlanSelection(effectiveSelectedPlan);
+        if (!user) {
+            if (analyticsEligible && isPaidEarlybirdPlanId(effectiveSelectedPlan)) {
+                // The checkout flow begins at the click that opens the auth
+                // prompt. This keeps the anonymous pricing funnel measurable;
+                // the actual order remains server-gated until OAuth claim.
+                emitCurrentEarlybirdPricingEvent(
+                    'checkout_started',
+                    readyPreflight,
+                    effectiveSelectedPlan,
+                    properties => trackEvent(EVENTS.CHECKOUT_STARTED, properties),
+                );
+            }
+            const loginProperties = {
+                plan_id: effectiveSelectedPlan,
+                ...(effectiveSelectedCard?.price.status === 'quoted'
+                    ? { amount_krw: effectiveSelectedCard.price.amountKrw }
+                    : {}),
+                preflight_id: readyPreflight.preflightId,
+                ...(currentAttributionSource(availableAnalyticsStorage())
+                    ? { source: 'shared' as const }
+                    : {}),
+            };
+            if (analyticsEligible) trackEvent(EVENTS.LOGIN_PROMPTED, loginProperties);
+            setLoginPromptOpen(true);
+            return;
+        }
+
         setPurchaseSubmitting(true);
         setWaitlistComplete(false);
         setCheckoutStatusCta(null);
         setError(null);
         try {
             const paidPlan = isPaidEarlybirdPlanId(effectiveSelectedPlan);
-            trackPlanSelection(effectiveSelectedPlan);
             const analyticsProperties = {
                 plan_id: effectiveSelectedPlan,
                 ...(effectiveSelectedCard?.price.status === 'quoted'
@@ -466,6 +504,18 @@ const DISCLOSURE_ACCEPTED = true;
             console.error('Logout failed:', cause);
         }
     };
+
+    const loginRedirectParams = loginFallbackRequired
+        ? new URLSearchParams({
+            autostart: '1',
+            ...(effectiveSelectedPlan ? { plan: effectiveSelectedPlan } : {}),
+        })
+        : new URLSearchParams({
+            preflight: readyPreflight?.preflightId ?? '',
+            plan: effectiveSelectedPlan ?? '',
+        });
+    if (!loginFallbackRequired && claimToken) loginRedirectParams.set('claim', claimToken);
+    const loginRedirectTo = `/analyze?${loginRedirectParams.toString()}`;
 
     if (authLoading) {
         return (
@@ -906,6 +956,12 @@ const DISCLOSURE_ACCEPTED = true;
                     </>
                 )}
             </main>
+
+            <LoginModal
+                open={loginPromptOpen}
+                onClose={() => setLoginPromptOpen(false)}
+                redirectTo={loginRedirectTo}
+            />
 
         </div>
     );

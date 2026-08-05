@@ -275,7 +275,7 @@ describe('analytics and observability disclosure contract', () => {
         expect(env).not.toContain('NEXT_PUBLIC_DEMO_ANALYSIS_ENABLED');
         expect(operations).toContain('닫힌 allowlist');
         expect(operations).toContain('얼리버드 전환 대시보드');
-        expect(dashboardSection.match(/^\d+\. /gm)).toHaveLength(8);
+        expect(dashboardSection.match(/^\d+\. /gm)).toHaveLength(9);
         expect(operations).toMatch(/이벤트 기반[^\n]*이탈/);
         expect(operations).toMatch(/Plus[^\n]*대기 신청[^\n]*(만들지|제외)/);
         expect(operations).toMatch(/Comet[^\n]*UI/);

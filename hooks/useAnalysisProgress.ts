@@ -12,16 +12,6 @@ import {
     shouldApplyProgressRevision,
 } from '@/lib/services/analysis/v2-progress-client-state';
 import { createClient } from '@/lib/supabase/client';
-import { EVENTS, trackEvent } from '@/lib/services/analytics';
-import {
-    analysisCompletedEventKey,
-    analysisStartedEventKey,
-    availableAnalyticsStorage,
-    claimObservedAnalysisStart,
-    readAnalysisStartedAt,
-    trustedDurationMs,
-    tryClaimAnalyticsEvent,
-} from '@/lib/services/analytics-funnel';
 import { captureExceptionSafely } from '@/lib/observability/sentry-capture';
 
 interface AnalysisProgress {
@@ -89,8 +79,6 @@ export function useAnalysisProgress(requestId: string) {
     const v2LastEventSeqRef = useRef(0);
     const v2RevisionRef = useRef(-1);
     const fetchQueuedRef = useRef(false);
-    const analysisStartedTrackedRef = useRef(new Set<string>());
-    const completionTrackedRef = useRef(new Set<string>());
     const analyticsEligibleRef = useRef(true);
     const activeRequestIdRef = useRef<string | null>(null);
     const fetchInFlightRef = useRef<{
@@ -269,41 +257,6 @@ export function useAnalysisProgress(requestId: string) {
 
     const currentData = data?.id === requestId ? data : null;
     const currentOutcome = outcome.requestId === requestId ? outcome : null;
-
-    useEffect(() => {
-        if (
-            !analyticsEligibleRef.current ||
-            (currentData?.status !== 'pending' && currentData?.status !== 'processing')
-            || currentData.id !== requestId
-        ) return;
-        const eventKey = analysisStartedEventKey(requestId);
-        if (analysisStartedTrackedRef.current.has(eventKey)) return;
-        analysisStartedTrackedRef.current.add(eventKey);
-        const startedAt = Date.now();
-        if (!claimObservedAnalysisStart(availableAnalyticsStorage(), requestId, {
-            requestId: currentData.id,
-            status: currentData.status,
-        }, startedAt)) return;
-        trackEvent(EVENTS.ANALYSIS_STARTED, { request_id: requestId });
-    }, [currentData?.id, currentData?.status, requestId]);
-
-    useEffect(() => {
-        if (!analyticsEligibleRef.current || currentData?.status !== 'completed' || currentData.id !== requestId) return;
-        const eventKey = analysisCompletedEventKey(requestId);
-        if (completionTrackedRef.current.has(eventKey)) return;
-        completionTrackedRef.current.add(eventKey);
-        const storage = availableAnalyticsStorage();
-        if (!tryClaimAnalyticsEvent(storage, eventKey)) return;
-
-        const durationMs = trustedDurationMs(
-            readAnalysisStartedAt(storage, requestId),
-            Date.now(),
-        );
-        trackEvent(EVENTS.ANALYSIS_COMPLETED, {
-            request_id: requestId,
-            ...(durationMs === undefined ? {} : { duration_ms: durationMs }),
-        });
-    }, [currentData?.id, currentData?.status, requestId]);
 
     useEffect(() => {
         if (

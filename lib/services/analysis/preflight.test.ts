@@ -826,6 +826,57 @@ describe('preflight persistence adapter', () => {
 });
 
 describe('preflight worker domain', () => {
+    it('routes anonymous profile summaries to Apify and reuses the global summary cache', async () => {
+        const baseAnonymousClaim = claim();
+        const anonymousPlans = Object.fromEntries(
+            Object.entries(baseAnonymousClaim.catalogSnapshot.plans).map(([planId, plan]) => [
+                planId,
+                { ...plan, launchStatus: 'production' as const },
+            ])
+        ) as PreflightCatalogSnapshot['plans'];
+        const anonymousClaim = claim({
+            userId: null,
+            accessMode: 'production',
+            catalogSnapshot: {
+                ...baseAnonymousClaim.catalogSnapshot,
+                plans: anonymousPlans,
+            },
+        });
+        const firstStore = workerStore(anonymousClaim);
+        const secondStore = workerStore(anonymousClaim);
+        const cache = {
+            load: vi.fn()
+                .mockResolvedValueOnce(null)
+                .mockResolvedValueOnce(profile()),
+            store: vi.fn(async () => true),
+        };
+        const authenticated = vi.fn(async () => profile());
+        const apify = vi.fn(async () => profile());
+
+        await expect(processPreflight(preflightId, {
+            store: firstStore,
+            getProfile: authenticated,
+            getFallbackProfile: apify,
+            providerRunStore: providerRunStore(),
+            anonymousProfileCache: cache,
+        })).resolves.toBe('ready');
+        await expect(processPreflight(preflightId, {
+            store: secondStore,
+            getProfile: authenticated,
+            getFallbackProfile: apify,
+            providerRunStore: providerRunStore(),
+            anonymousProfileCache: cache,
+        })).resolves.toBe('ready');
+
+        expect(apify).toHaveBeenCalledOnce();
+        expect(authenticated).not.toHaveBeenCalled();
+        expect(cache.store).toHaveBeenCalledOnce();
+        expect(firstStore.finalizeReady).toHaveBeenCalledWith(
+            anonymousClaim,
+            expect.objectContaining({ requiredPlan: 'basic' }),
+        );
+    });
+
     it('reports safe profile and ready metadata without profile content', async () => {
         const observer = vi.fn();
 
@@ -985,24 +1036,38 @@ describe('preflight worker domain', () => {
     });
 
     it.each([
-        ['missing target', null, 'TARGET_NOT_FOUND'],
-        ['private target', profile({ isPrivate: true }), 'TARGET_PRIVATE'],
+        ['missing target', null, 'TARGET_NOT_FOUND', 'TARGET_NOT_FOUND'],
+        ['private target', profile({ isPrivate: true }), 'TARGET_PRIVATE', 'TARGET_PRIVATE'],
         [
             'over Plus target',
             profile({ followersCount: 1_201, followingCount: 1 }),
             'OVER_PLUS_CAPACITY',
+            'PLAN_CAPACITY_EXCEEDED',
         ],
-    ] as const)('terminalizes a %s with a bounded code', async (_name, result, code) => {
+    ] as const)('terminalizes a %s with a bounded code', async (
+        _name,
+        result,
+        code,
+        ledgerCode,
+    ) => {
         const store = workerStore();
+        const recordFailure = vi.fn(async () => true);
         await expect(processPreflight(preflightId, {
             store,
             getProfile: vi.fn(async () => result),
             providerRunStore: providerRunStore(),
+            recordPreflightFailure: recordFailure,
         })).resolves.toBe('blocked');
         expect(store.finalizeBlocked).toHaveBeenCalledWith(
             expect.objectContaining({ preflightId }),
             code
         );
+        expect(recordFailure).toHaveBeenCalledWith({
+            userId,
+            preflightId,
+            stage: 'profile',
+            errorCode: ledgerCode,
+        });
         expect(store.finalizeReady).not.toHaveBeenCalled();
     });
 
@@ -1342,6 +1407,27 @@ describe('preflight worker domain', () => {
         expect(fallback).not.toHaveBeenCalled();
         expect(runs.reserve).not.toHaveBeenCalled();
         expect(store.finalizeBlocked).toHaveBeenCalledWith(expect.anything(), 'ANALYSIS_FAILED');
+    });
+
+    it('records a terminal provider run as a temporary provider failure', async () => {
+        const runs = providerRunStore();
+        vi.mocked(runs.load).mockResolvedValue(storedRun('failed'));
+        const recordFailure = vi.fn(async () => true);
+
+        await expect(processPreflight(preflightId, {
+            store: workerStore(),
+            getProfile: vi.fn(),
+            getFallbackProfile: vi.fn(),
+            providerRunStore: runs,
+            recordPreflightFailure: recordFailure,
+        })).resolves.toBe('blocked');
+
+        expect(recordFailure).toHaveBeenCalledWith({
+            userId,
+            preflightId,
+            stage: 'profile',
+            errorCode: 'PROVIDER_TEMPORARY_FAILURE',
+        });
     });
 
     it.each([

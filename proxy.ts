@@ -100,7 +100,10 @@ export async function proxy(request: NextRequest) {
     }
 
     // 보호된 경로 체크
-    const protectedPaths = ['/analyze', '/progress', '/result', '/earlybird'];
+    // Anonymous users may run the profile-only preflight and see its bounded
+    // plan/pricing snapshot on /analyze. Execution, results, and checkout stay
+    // owner-gated below and at their respective API boundaries.
+    const protectedPaths = ['/progress', '/result', '/earlybird'];
     const isProtectedPath = protectedPaths.some((path) =>
         request.nextUrl.pathname.startsWith(path)
     );

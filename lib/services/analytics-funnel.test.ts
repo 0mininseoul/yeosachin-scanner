@@ -6,9 +6,12 @@ import {
     boundedDurationMs,
     claimAnalysisStart,
     claimObservedAnalysisStart,
+    currentAttributionSource,
     landingViewEventKey,
     preflightOutcomeEventKey,
     readAttribution,
+    readAnalyticsAttribution,
+    markSharedAttribution,
     relationshipBucket,
     readAnalysisStartedAt,
     safeAnalyticsErrorCode,
@@ -86,13 +89,28 @@ describe('Amplitude funnel helpers', () => {
     });
 
     it('maps operational failures to the registered error vocabulary', () => {
-        expect(safeAnalyticsErrorCode({ code: 'TARGET_NOT_FOUND' })).toBe('NOT_FOUND');
-        expect(safeAnalyticsErrorCode({ code: 'TARGET_PRIVATE' })).toBe('VALIDATION_ERROR');
+        expect(safeAnalyticsErrorCode({ code: 'TARGET_NOT_FOUND' })).toBe('TARGET_NOT_FOUND');
+        expect(safeAnalyticsErrorCode({ code: 'TARGET_PRIVATE' })).toBe('TARGET_PRIVATE');
         expect(safeAnalyticsErrorCode({ code: 'AI_RATE_LIMITED' })).toBe('RATE_LIMITED');
         expect(safeAnalyticsErrorCode(new TypeError('network details must not escape')))
             .toBe('NETWORK_ERROR');
         expect(safeAnalyticsErrorCode({ code: 'person@example.com' })).toBe('UNKNOWN');
         expect(safeAnalyticsErrorCode('arbitrary raw message')).toBe('UNKNOWN');
+    });
+
+    it('attributes a valid share visit without persisting the opaque token', () => {
+        const values = new Map<string, string>();
+        const storage = {
+            getItem: (key: string) => values.get(key) ?? null,
+            setItem: (key: string, value: string) => void values.set(key, value),
+        };
+        expect(markSharedAttribution(storage)).toBe(true);
+        expect(currentAttributionSource(storage)).toBe('shared');
+        expect(readAnalyticsAttribution('', storage)).toEqual({
+            source: 'shared',
+            medium: 'referral',
+        });
+        expect(JSON.stringify(values)).not.toMatch(/token|instagram|target/);
     });
 
     it('builds non-PII lifecycle keys and bounds durations', () => {

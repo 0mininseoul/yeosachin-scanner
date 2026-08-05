@@ -4,6 +4,7 @@ import Link from 'next/link';
 import { useRouter } from 'next/navigation';
 import { useEffect, useRef, useState } from 'react';
 import { BrandMark, CaseCard, Eyebrow, PrimaryButton } from '@/components/case-ui';
+import { useAuth } from '@/hooks/useAuth';
 import type { EarlybirdOrderStatusDto } from '@/lib/services/earlybird/order-status';
 import { EVENTS, flushAnalytics, trackEvent } from '@/lib/services/analytics';
 import {
@@ -34,6 +35,7 @@ function DetailRow({ label, value }: { label: string; value: string }) {
 export function EarlybirdStatus({ order }: { order: EarlybirdOrderStatusDto }) {
     const trackedRef = useRef(new Set<string>());
     const router = useRouter();
+    const { user, loading: authLoading } = useAuth();
     const [notifyModalOpen, setNotifyModalOpen] = useState(false);
     const [checkoutRecoveryPending, setCheckoutRecoveryPending] = useState(false);
     const [checkoutRecoveryError, setCheckoutRecoveryError] = useState<string | null>(null);
@@ -55,6 +57,11 @@ export function EarlybirdStatus({ order }: { order: EarlybirdOrderStatusDto }) {
     }, [notifyModalOpen, router]);
 
     useEffect(() => {
+        // The server-rendered order is owner-bound, but the browser SDK can still
+        // be anonymous while Supabase restores its session. Never send an order
+        // event during that gap: a later setUserId cannot repair an already sent
+        // event's identity.
+        if (authLoading || !user?.id) return;
         const properties = {
             order_id: order.orderId,
             plan_id: order.planId,
@@ -78,7 +85,7 @@ export function EarlybirdStatus({ order }: { order: EarlybirdOrderStatusDto }) {
                 trackEvent(EVENTS.PAYMENT_CONFIRMED_VIEWED, properties);
             }
         }
-    }, [order]);
+    }, [authLoading, order, user?.id]);
 
     useEffect(() => {
         if (!isAutomaticFulfillmentBridge) return;

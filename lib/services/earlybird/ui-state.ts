@@ -8,6 +8,10 @@ import {
 } from '@/lib/domain/earlybird/catalog';
 import { parseGrobleSellerReference } from '@/lib/services/earlybird/seller-reference';
 import type { PreflightStatusV1 } from '@/lib/contracts/analysis-v2';
+import {
+    availableAnalyticsStorage,
+    currentAttributionSource,
+} from '@/lib/services/analytics-funnel';
 
 type ReadyPreflight = Extract<PreflightStatusV1, { status: 'ready' }>;
 type EarlybirdPricingEvent =
@@ -276,6 +280,9 @@ export function emitCurrentEarlybirdPricingEvent(
     emit({
         plan_id: planId,
         preflight_id: readyPreflight.preflightId,
+        ...(currentAttributionSource(availableAnalyticsStorage())
+            ? { source: 'shared' }
+            : {}),
         ...(event === 'checkout_started'
             ? {}
             : { required_plan_id: readyPreflight.requiredPlan }),

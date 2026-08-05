@@ -15,8 +15,9 @@ import { motion, useReducedMotion } from 'framer-motion';
 import { trackEvent, EVENTS } from '@/lib/services/analytics';
 import {
   availableAnalyticsStorage,
+  currentAttributionSource,
   landingViewEventKey,
-  readAttribution,
+  readAnalyticsAttribution,
   tryClaimAnalyticsEvent,
 } from '@/lib/services/analytics-funnel';
 import {
@@ -82,8 +83,9 @@ export default function LandingPage({
   const [loginOpen, setLoginOpen] = useState(false);
 
   useEffect(() => {
-    if (!tryClaimAnalyticsEvent(availableAnalyticsStorage(), landingViewEventKey())) return;
-    trackEvent(EVENTS.LANDING_VIEWED, readAttribution(window.location.search));
+    const storage = availableAnalyticsStorage();
+    if (!tryClaimAnalyticsEvent(storage, landingViewEventKey())) return;
+    trackEvent(EVENTS.LANDING_VIEWED, readAnalyticsAttribution(window.location.search, storage));
   }, []);
 
   const closeLogin = useCallback(() => {
@@ -115,6 +117,9 @@ export default function LandingPage({
 
     trackEvent(EVENTS.TARGET_SUBMITTED, {
       stage: user ? 'authenticated' : 'anonymous',
+      ...(currentAttributionSource(availableAnalyticsStorage())
+        ? { source: 'shared' }
+        : {}),
     });
 
     if (!user) {

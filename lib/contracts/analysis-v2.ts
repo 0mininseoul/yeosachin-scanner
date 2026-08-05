@@ -197,6 +197,9 @@ export const preflightAcceptedV1Schema = z.object({
     expiresAt: timestampSchema,
     status: z.literal('pending'),
     exclusionDecision: z.literal('pending'),
+    // Anonymous preflight ownership is transferred after OAuth. This signed,
+    // short-lived value is transport state only and is never analytics data.
+    claimToken: z.string().min(32).max(512).optional(),
 }).strict();
 
 const preflightPendingV1Schema = preflightAcceptedV1Schema.extend({
