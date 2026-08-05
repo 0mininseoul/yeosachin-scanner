@@ -23,7 +23,7 @@ AI가 남자친구의 인스타그램 맞팔 중 위장 여사친을 찾아주�
 | 개발 호스팅 | Vercel Hobby | 개발·비상업 검증 전용 |
 | 운영 실행 | Vercel + Cloud Run + Google Cloud Tasks | 키리스 OIDC 기반 비동기 V2 worker |
 | 백엔드/DB | Supabase | Auth, DB, owner-scoped progress reads |
-| 인스타 수집 | 직접 공개 프로필 + Apify 관계 목록 | Vendor API 과금 |
+| 인스타 수집 | 유료: 지정 버너 계정 인증 worker(`selfhosted_auth`) / 공개: 로그인 없는 자체 수집 | 유료 정상 경로 Apify `$0` |
 | AI 분석 | Vertex AI Gemini 3 Flash | Google Cloud |
 | 이메일 발송 | Resend | 완료 알림 |
 | 애널리틱스 | Amplitude | 제품 이벤트 |
@@ -238,7 +238,7 @@ npm test         # 단위 테스트
 
 ### 완료
 - 사용자 인증 (카카오/구글 OAuth)
-- 팔로워/팔로잉 수집 (Apify 기본, 99% 완전성 검증, 개인 Instagram 쿠키 미사용)
+- 팔로워/팔로잉 수집 (유료는 인증 worker `selfhosted_auth`, 99% 고유 커버리지 검증. 사용자 개인 Instagram 쿠키는 어떤 경로에서도 받지 않음)
 - 분석 파이프라인 (단계별 step 방식, 레거시 run 기본 비활성)
 - AI 종합 분석 (기본 계정당 프로필 1장 + 게시물 최대 10장, 단일 Vertex AI Gemini 호출)
 - AI 분석 결과 캐싱 (30일) 및 프로필 snapshot 수집 가속 (기본 12시간)
@@ -270,6 +270,7 @@ MIT
 
 ## 관련 문서
 
+- [전략 문서](docs/strategy/README.md) — 린 스타트업 관점의 문제·고객·솔루션·가치 제안 재정립과 검증 보드
 - [기획서](docs/AI_위장여사친판독기_기획서.md)
 - [PRD](docs/PRD.md)
 - [운영 비용 및 가격 모델](docs/operations-cost-model.md)
