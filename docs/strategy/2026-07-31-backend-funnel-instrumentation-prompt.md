@@ -158,6 +158,31 @@ Supabase `earlybird_orders` 원장(17행)에서 **결제 흔적이 있는 주문
 
 근거: `target_submitted`(108) → `auth_completed`(27)에서 **81명이 이탈**한다. 플랜~결제 전체 손실(15명)의 5배가 넘고, **가격을 본 사람이 18명뿐**이라 가격 가설을 검증할 수 없다.
 
+## B0. 바꿔야 할 API 인증 계약 — 가장 큰 구현 표면
+
+**이 항목이 B에서 가장 크다.** 현재 preflight 경로는 인증에 하드로 묶여 있어서, claim token만 만든다고 익명이 되지 않는다.
+
+### 열어야 하는 것
+
+| 위치 | 현재 | 필요한 변경 |
+|---|---|---|
+| `POST /api/analysis/preflight` (`app/api/analysis/preflight/route.ts:131-135`) | `supabase.auth.getUser()` 실패 시 **`401 UNAUTHORIZED`, "로그인이 필요합니다"** | 익명 요청 허용. `userId`를 null로 두고 claim token 발급 |
+| `GET /api/analysis/preflight/[preflightId]` (`:160`) | `preflightStore.findForOwner(preflightId, user.id)` — **소유자 스코프 읽기** | claim token을 읽기 자격으로 받는 경로 추가. 익명 preflight는 토큰이 소유권을 대신한다 |
+| `analysis_preflights` RLS | owner 기준 정책 | 익명 행(`user_id IS NULL`)의 읽기·갱신 경계를 새로 정의해야 한다. **service role로 우회하지 말고 정책으로 표현할 것** |
+| 플랜 적격성·카탈로그 노출 | 인증 뒤에서만 계산 | 비로그인 상태에서 preflight 결과 기반으로 적격 플랜과 가격을 반환해야 한다 |
+
+### 반드시 닫아둬야 하는 것
+
+- **`POST /api/earlybird/checkout`은 인증을 유지한다.** 여기가 로그인이 착지하는 지점이고, 주문은 사용자에 귀속돼야 한다
+- 결과 조회(`/api/analysis/result/...`), 진행 상태, 마이페이지는 그대로 소유자 스코프를 유지한다
+- **익명 preflight는 분석을 시작시킬 수 없다.** 분석 실행 자격은 claim + 결제 이후에만 생긴다
+
+### 함께 깨지는 곳 — 데모 경로
+
+`isDemoEligible(user.id, rawTargetInstagramId)`(`app/api/analysis/preflight/route.ts:147`)와 `isDemoOperator(user.id)`가 **`user.id`를 키로 쓴다.** 익명 preflight에서는 이 값이 없다.
+
+샘플 리포트를 데모 데이터로 만들 예정이므로(별도 작업) **데모 자격 판정을 사용자 식별자에 묶지 않는 형태로 바꿔야 한다.** 이 항목은 샘플 리포트 설계와 함께 결정한다.
+
 ## B1. 익명 preflight 소유권 이전(claim)과 OAuth 상태 전달
 
 - preflight를 `user_id NULL`로 생성하고 **서명된 claim token**을 발급한다. 로그인 완료 후 그 토큰으로 `user_id`를 채운다
@@ -214,6 +239,8 @@ Supabase `earlybird_orders` 원장(17행)에서 **결제 흔적이 있는 주문
 - 결제·webhook 경로의 서버측 Amplitude 발화
 - 신규 대시보드 생성 (기존 [얼리버드 전환 대시보드](https://app.amplitude.com/analytics/shiny-disk-989835/dashboard/p7w87cf8)에 패널 추가로 충분한지 먼저 확인)
 - 분석 소요시간 단축 (별도 진행 중)
+- **샘플 리포트(데모 데이터) 구현 — 별도 작업으로 계획 예정.** 다만 B0의 데모 자격 판정 변경은 그 작업과 맞물리므로 함께 결정한다
+- **프론트 UX 구현** — 화면 순서, 로그인 모달 카피와 복귀 처리는 이 프롬프트 범위 밖이다. 설계는 `docs/strategy/2026-08-05-anonymous-preflight-ux-design.md`
 
 # 프라이버시 계약 (모든 항목 공통)
 
