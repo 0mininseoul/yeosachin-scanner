@@ -75,6 +75,14 @@ import {
     type BetaApifyPreflightCoordinator,
 } from './beta-apify-preflight-coordinator';
 import { shouldAbortPipelineBeforeExecution } from './pipeline-retry';
+import {
+    anonymousProfileCache,
+    type AnonymousProfileCache,
+} from './anonymous-profile-cache';
+import {
+    preflightFailureReason,
+    recordPreflightFailure,
+} from './preflight-failure-ledger';
 
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const ISO_TIMESTAMP_PATTERN = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})$/;
@@ -96,6 +104,9 @@ export const PREFLIGHT_DATABASE_NAMES = Object.freeze({
     completeRpc: 'complete_analysis_v2_preflight',
     blockRpc: 'block_analysis_v2_preflight',
     exclusionRpc: 'set_analysis_v2_preflight_exclusion',
+    anonymousCompleteRpc: 'complete_anonymous_analysis_v2_preflight',
+    anonymousBlockRpc: 'block_anonymous_analysis_v2_preflight',
+    ownerExclusionRpc: 'set_authenticated_analysis_v2_preflight_exclusion',
 });
 
 export type PreflightPolicyVersionsSnapshot = Readonly<{
@@ -172,7 +183,7 @@ export interface BetaPrepareClaim {
 export interface ClaimedPreflight {
     preflightId: string;
     claimToken: string;
-    userId: string;
+    userId: string | null;
     targetInstagramId: string;
     accessMode: PlanAccessMode;
     /** Set only by the database claim contract; public creation remains standard-only. */
@@ -195,7 +206,7 @@ export interface PreflightWorkerFailureClassification {
 
 interface PreflightProcessObservationBase {
     preflightId: string;
-    userId: string;
+    userId: string | null;
     targetInstagramId: string;
     followersCount?: number;
     followingCount?: number;
@@ -262,6 +273,32 @@ export function classifyPreflightWorkerFailure(
         httpStatus: null,
         workerAttemptCount: null,
     });
+}
+
+function workerFailureLedgerReason(
+    errorCode: string,
+    category?: PreflightWorkerFailureClassification['category'],
+): ReturnType<typeof preflightFailureReason> {
+    // A provider failure can be retried several times before the preflight is
+    // terminalized. Preserve that distinction when the final bounded failure is
+    // written to the ledger instead of collapsing it into INTERNAL_ERROR.
+    if (
+        errorCode === 'ANALYSIS_FAILED'
+        && category
+        && new Set<PreflightWorkerFailureClassification['category']>([
+            'auth',
+            'circuit',
+            'http',
+            'rate_limit',
+            'timeout',
+            'transport',
+            'provider',
+            'run_pending',
+        ]).has(category)
+    ) {
+        return 'PROVIDER_TEMPORARY_FAILURE';
+    }
+    return preflightFailureReason(errorCode);
 }
 
 function notifyPreflightObserver(
@@ -369,7 +406,11 @@ export interface StoredPreflight {
 
 export interface PreflightStore {
     createOrReplay(input: CreatePreflightInput): Promise<CreatedPreflight>;
-    findForOwner(preflightId: string, userId: string): Promise<StoredPreflight | null>;
+    findForOwner(
+        preflightId: string,
+        userId: string,
+        options?: OwnerScopedOptions,
+    ): Promise<StoredPreflight | null>;
     claim(preflightId: string): Promise<ClaimedPreflight | null>;
     reserveDispatch(preflightId: string, userId: string): Promise<{
         shouldEnqueue: boolean;
@@ -392,7 +433,7 @@ export interface PreflightStore {
         userId: string;
         decision: ExclusionDecision;
         excludedInstagramId: string | null;
-    }): Promise<void>;
+    }, options?: OwnerScopedOptions): Promise<void>;
 }
 
 export interface BetaPreflightEntryStore {
@@ -405,7 +446,11 @@ export interface BetaPreflightEntryStore {
         prepareGeneration: number;
         prepareToken: string;
     }): Promise<void>;
-    hasBetaEntryProvenance(preflightId: string, userId: string): Promise<boolean>;
+    hasBetaEntryProvenance(
+        preflightId: string,
+        userId: string,
+        options?: OwnerScopedOptions,
+    ): Promise<boolean>;
 }
 
 export interface BetaPreflightPrepareStore {
@@ -459,9 +504,13 @@ interface OwnerQuery {
     maybeSingle(): PromiseLike<RpcResult>;
 }
 
-interface PreflightSupabaseClient {
+export interface PreflightSupabaseClient {
     rpc(name: string, params: Record<string, unknown>): PromiseLike<RpcResult>;
     from(table: string): OwnerQuery;
+}
+
+export interface OwnerScopedOptions {
+    client?: PreflightSupabaseClient;
 }
 
 export class PreflightIdempotencyConflictError extends Error {
@@ -544,21 +593,21 @@ function isRecord(value: unknown): value is Record<string, unknown> {
     return Boolean(value) && typeof value === 'object' && !Array.isArray(value);
 }
 
-function launchStatusSnapshot(): Record<PlanId, 'production' | 'test_only' | 'disabled'> {
+export function launchStatusSnapshot(): Record<PlanId, 'production' | 'test_only' | 'disabled'> {
     return Object.fromEntries(PLAN_IDS.map(planId => [
         planId,
         ANALYSIS_PLAN_CATALOG[planId].launchStatus,
     ])) as Record<PlanId, 'production' | 'test_only' | 'disabled'>;
 }
 
-function pricingSnapshot(): Record<PlanId, ReadyPreflightSnapshot['plans'][number]['price']> {
+export function pricingSnapshot(): Record<PlanId, ReadyPreflightSnapshot['plans'][number]['price']> {
     return Object.fromEntries(PLAN_IDS.map(planId => [
         planId,
         { ...ANALYSIS_PLAN_CATALOG[planId].price },
     ])) as Record<PlanId, ReadyPreflightSnapshot['plans'][number]['price']>;
 }
 
-function planCatalogSnapshot(): PlanEligibilityCatalog {
+export function planCatalogSnapshot(): PlanEligibilityCatalog {
     return Object.fromEntries(PLAN_IDS.map(planId => {
         const plan = ANALYSIS_PLAN_CATALOG[planId];
         return [planId, {
@@ -569,7 +618,7 @@ function planCatalogSnapshot(): PlanEligibilityCatalog {
     })) as PlanEligibilityCatalog;
 }
 
-function currentPreflightCatalogSnapshot(): PreflightCatalogSnapshot {
+export function currentPreflightCatalogSnapshot(): PreflightCatalogSnapshot {
     return {
         plans: planCatalogSnapshot(),
         pricingVersion: PLAN_PRICING_VERSION,
@@ -738,7 +787,7 @@ function readySnapshotFromColumns(row: Record<string, unknown>): ReadyPreflightS
     }) as ReadyPreflightSnapshot;
 }
 
-function storedPreflightFromRow(row: Record<string, unknown>): StoredPreflight {
+export function storedPreflightFromRow(row: Record<string, unknown>): StoredPreflight {
     const status = row.status;
     if (![
         'pending',
@@ -983,8 +1032,8 @@ export function createSupabasePreflightStore(
             return data;
         },
 
-        async findForOwner(preflightId, userId) {
-            const query = client.from(PREFLIGHT_DATABASE_NAMES.table);
+        async findForOwner(preflightId, userId, options) {
+            const query = (options?.client ?? client).from(PREFLIGHT_DATABASE_NAMES.table);
             const { data, error } = await query
                 .select(`
                     id,
@@ -1015,8 +1064,8 @@ export function createSupabasePreflightStore(
             return row ? storedPreflightFromRow(row) : null;
         },
 
-        async hasBetaEntryProvenance(preflightId, userId) {
-            const query = client.from(PREFLIGHT_DATABASE_NAMES.table);
+        async hasBetaEntryProvenance(preflightId, userId, options) {
+            const query = (options?.client ?? client).from(PREFLIGHT_DATABASE_NAMES.table);
             const { data, error } = await query
                 .select('beta_entry_provenance')
                 .eq('id', preflightId)
@@ -1109,7 +1158,9 @@ export function createSupabasePreflightStore(
             return {
                 preflightId: requiredUuid(preflightId, 'preflight id'),
                 claimToken,
-                userId: requiredUuid(row.user_id, 'user id'),
+                userId: row.user_id === null || row.user_id === undefined
+                    ? null
+                    : requiredUuid(row.user_id, 'user id'),
                 targetInstagramId: requiredUsername(row.target_instagram_id),
                 accessMode: requiredAccessMode(row.access_mode),
                 analysisEntryChannel: row.analysis_entry_channel === undefined
@@ -1137,30 +1188,60 @@ export function createSupabasePreflightStore(
         },
 
         async finalizeReady(claim, snapshot) {
-            const { error } = await client.rpc(PREFLIGHT_DATABASE_NAMES.completeRpc, {
-                p_preflight_id: claim.preflightId,
-                p_user_id: claim.userId,
-                p_claim_token: claim.claimToken,
-                p_target_full_name: snapshot.target.fullName,
-                p_target_bio: snapshot.target.bio,
-                p_target_profile_image_url: snapshot.target.profileImageUrl,
-                p_target_followers_count: snapshot.target.followersCount,
-                p_target_following_count: snapshot.target.followingCount,
-                p_target_is_private: snapshot.target.isPrivate,
-                p_capacity_required_plan_id: snapshot.capacityRequiredPlan,
-                p_required_plan_id: snapshot.requiredPlan,
-                p_plan_cards_snapshot: planCardsSnapshot(snapshot),
-            });
+            const { error } = await client.rpc(
+                claim.userId === null
+                    ? PREFLIGHT_DATABASE_NAMES.anonymousCompleteRpc
+                    : PREFLIGHT_DATABASE_NAMES.completeRpc,
+                claim.userId === null
+                    ? {
+                        p_preflight_id: claim.preflightId,
+                        p_claim_token: claim.claimToken,
+                        p_target_full_name: snapshot.target.fullName,
+                        p_target_bio: snapshot.target.bio,
+                        p_target_profile_image_url: snapshot.target.profileImageUrl,
+                        p_target_followers_count: snapshot.target.followersCount,
+                        p_target_following_count: snapshot.target.followingCount,
+                        p_target_is_private: snapshot.target.isPrivate,
+                        p_capacity_required_plan_id: snapshot.capacityRequiredPlan,
+                        p_required_plan_id: snapshot.requiredPlan,
+                        p_plan_cards_snapshot: planCardsSnapshot(snapshot),
+                    }
+                    : {
+                        p_preflight_id: claim.preflightId,
+                        p_user_id: claim.userId,
+                        p_claim_token: claim.claimToken,
+                        p_target_full_name: snapshot.target.fullName,
+                        p_target_bio: snapshot.target.bio,
+                        p_target_profile_image_url: snapshot.target.profileImageUrl,
+                        p_target_followers_count: snapshot.target.followersCount,
+                        p_target_following_count: snapshot.target.followingCount,
+                        p_target_is_private: snapshot.target.isPrivate,
+                        p_capacity_required_plan_id: snapshot.capacityRequiredPlan,
+                        p_required_plan_id: snapshot.requiredPlan,
+                        p_plan_cards_snapshot: planCardsSnapshot(snapshot),
+                    },
+            );
             if (error) throwRpcError(error, 'ready finalize');
         },
 
         async finalizeBlocked(claim, code) {
-            const { error } = await client.rpc(PREFLIGHT_DATABASE_NAMES.blockRpc, {
-                p_preflight_id: claim.preflightId,
-                p_user_id: claim.userId,
-                p_claim_token: claim.claimToken,
-                p_error_code: code,
-            });
+            const { error } = await client.rpc(
+                claim.userId === null
+                    ? PREFLIGHT_DATABASE_NAMES.anonymousBlockRpc
+                    : PREFLIGHT_DATABASE_NAMES.blockRpc,
+                claim.userId === null
+                    ? {
+                        p_preflight_id: claim.preflightId,
+                        p_claim_token: claim.claimToken,
+                        p_error_code: code,
+                    }
+                    : {
+                        p_preflight_id: claim.preflightId,
+                        p_user_id: claim.userId,
+                        p_claim_token: claim.claimToken,
+                        p_error_code: code,
+                    },
+            );
             if (error) throwRpcError(error, 'blocked finalize');
         },
 
@@ -1174,13 +1255,19 @@ export function createSupabasePreflightStore(
             if (error) throwRpcError(error, 'queue unavailable block');
         },
 
-        async setExclusion(input) {
-            const { data, error } = await client.rpc(PREFLIGHT_DATABASE_NAMES.exclusionRpc, {
-                p_preflight_id: input.preflightId,
-                p_user_id: input.userId,
-                p_decision: input.decision,
-                p_excluded_instagram_id: input.excludedInstagramId,
-            });
+        async setExclusion(input, options) {
+            const scopedClient = options?.client ?? client;
+            const { data, error } = await scopedClient.rpc(
+                options?.client
+                    ? PREFLIGHT_DATABASE_NAMES.ownerExclusionRpc
+                    : PREFLIGHT_DATABASE_NAMES.exclusionRpc,
+                {
+                    p_preflight_id: input.preflightId,
+                    p_user_id: input.userId,
+                    p_decision: input.decision,
+                    p_excluded_instagram_id: input.excludedInstagramId,
+                },
+            );
             if (error) throwRpcError(error, 'exclusion');
             if (typeof data !== 'boolean') {
                 throw new Error('PREFLIGHT_PERSISTENCE_ERROR: invalid exclusion result.');
@@ -1535,7 +1622,9 @@ export async function processPreflight(
         ) => Promise<InstagramProfile | null>;
         getFallbackProfile?: typeof getApifyProfileSummary;
         providerRunStore?: PreflightProviderRunStore;
+        anonymousProfileCache?: AnonymousProfileCache;
         betaCreditCoordinator?: BetaApifyPreflightCoordinator;
+        recordPreflightFailure?: typeof recordPreflightFailure;
         env?: Record<string, string | undefined>;
         observer?: PreflightProcessObserver;
         /** Post-terminal only; true means a beta allocation was processed. */
@@ -1545,6 +1634,18 @@ export async function processPreflight(
 ): Promise<'noop' | 'ready' | 'blocked'> {
     const store = dependencies.store ?? preflightStore;
     const providerRuns = dependencies.providerRunStore ?? preflightProviderRunStore;
+    const recordTerminalFailure = (
+        claim: ClaimedPreflight,
+        errorCode: string,
+        category?: PreflightWorkerFailureClassification['category'],
+    ): void => {
+        void (dependencies.recordPreflightFailure ?? recordPreflightFailure)({
+            userId: claim.userId,
+            preflightId: claim.preflightId,
+            stage: 'profile',
+            errorCode: workerFailureLedgerReason(errorCode, category),
+        });
+    };
     const settleTerminalBetaCredit = async (knownBeta: boolean): Promise<void> => {
         let processed = false;
         let settlementFailed = false;
@@ -1581,7 +1682,8 @@ export async function processPreflight(
     > = {};
     try {
         const isBetatest = claim.analysisEntryChannel === 'betatest';
-        const useAuthenticatedProfile = !isBetatest
+        const isAnonymousPreflight = claim.userId === null;
+        const useAuthenticatedProfile = !isAnonymousPreflight && !isBetatest
             && getAnalysisV2PaidCollectionProvider(dependencies.env) === 'selfhosted_auth';
         const betaHold = isBetatest
             ? await dependencies.betaCreditCoordinator?.reuse(claim.preflightId)
@@ -1600,7 +1702,98 @@ export async function processPreflight(
         });
 
         let profile: InstagramProfile | null;
-        if (existingRun && !useAuthenticatedProfile) {
+        if (isAnonymousPreflight) {
+            const cache = dependencies.anonymousProfileCache ?? anonymousProfileCache;
+            profile = await cache.load(inputHash);
+            let profileWasCached = profile !== null;
+            let cacheLease: string | null = null;
+            const reserveCache = cache.reserve;
+            const releaseCache = cache.release;
+            if (!profile && reserveCache && releaseCache) {
+                let lockUnavailable = false;
+                try {
+                    cacheLease = await reserveCache(inputHash);
+                } catch {
+                    // Cache coordination is an optimization. If its lock RPC is
+                    // unavailable, preserve the existing provider fallback path.
+                    lockUnavailable = true;
+                }
+                if (!cacheLease && !lockUnavailable) {
+                    profile = await cache.waitFor?.(inputHash) ?? null;
+                    profileWasCached = profile !== null;
+                    if (!profile) {
+                        try {
+                            cacheLease = await reserveCache(inputHash);
+                        } catch {
+                            lockUnavailable = true;
+                        }
+                    }
+                    if (!profile && !cacheLease && !lockUnavailable) {
+                        // Another worker owns the target snapshot. Let the task
+                        // retry after that worker releases its short lease rather
+                        // than issuing a second external request.
+                        throw new Error('SCRAPING_RUN_PENDING_ERROR: anonymous profile cache lock');
+                    }
+                }
+            }
+            try {
+                if (!profile && existingRun) {
+                    if (
+                        ['starting', 'rejected', 'failed', 'aborted', 'timed_out']
+                            .includes(existingRun.status)
+                    ) {
+                        await store.finalizeBlocked(claim, 'ANALYSIS_FAILED');
+                        recordTerminalFailure(
+                            claim,
+                            'ANALYSIS_FAILED',
+                            existingRun.status === 'timed_out' ? 'timeout' : 'provider',
+                        );
+                        terminalized = true;
+                        notifyPreflightObserver(dependencies.observer, {
+                            type: 'completed',
+                            outcome: 'blocked',
+                            ...baseObservation,
+                            errorCode: 'ANALYSIS_FAILED',
+                            failureCategory: existingRun.status === 'timed_out'
+                                ? 'timeout'
+                                : 'provider',
+                        });
+                        return 'blocked';
+                    }
+                    const bound = await bindPreflightProviderRunCheckpoint({
+                        store: providerRuns,
+                        claim,
+                        inputHash,
+                        identity: preflightProviderIdentity(existingRun.credentialSlot),
+                    });
+                    profile = await (dependencies.getFallbackProfile ?? getApifyProfileSummary)(
+                        claim.targetInstagramId,
+                        fallbackCallContext(bound.checkpoint, workerStartedAt)
+                    );
+                } else if (!profile) {
+                    const identity = preflightProviderIdentity(
+                        selectAnalysisV2ApifyCredentialSlot(dependencies.env)
+                    );
+                    const bound = await bindPreflightProviderRunCheckpoint({
+                        store: providerRuns,
+                        claim,
+                        inputHash,
+                        identity,
+                    });
+                    profile = await (dependencies.getFallbackProfile ?? getApifyProfileSummary)(
+                        claim.targetInstagramId,
+                        fallbackCallContext(bound.checkpoint, workerStartedAt)
+                    );
+                }
+                if (profile && !profileWasCached) {
+                    await cache.store(inputHash, profile);
+                }
+            } finally {
+                if (cacheLease && releaseCache) {
+                    await releaseCache(inputHash, cacheLease).catch(() => undefined);
+                }
+            }
+        } else if (existingRun && !useAuthenticatedProfile) {
             if (
                 betaHold
                 && existingRun.credentialSlot !== betaHold.credentialSlot
@@ -1612,6 +1805,11 @@ export async function processPreflight(
                     .includes(existingRun.status)
             ) {
                 await store.finalizeBlocked(claim, 'ANALYSIS_FAILED');
+                recordTerminalFailure(
+                    claim,
+                    'ANALYSIS_FAILED',
+                    existingRun.status === 'timed_out' ? 'timeout' : 'provider',
+                );
                 terminalized = true;
                 notifyPreflightObserver(dependencies.observer, {
                     type: 'completed',
@@ -1702,6 +1900,7 @@ export async function processPreflight(
         }
         if (!profile) {
             await store.finalizeBlocked(claim, 'TARGET_NOT_FOUND');
+            recordTerminalFailure(claim, 'TARGET_NOT_FOUND');
             terminalized = true;
             notifyPreflightObserver(dependencies.observer, {
                 type: 'completed',
@@ -1730,6 +1929,7 @@ export async function processPreflight(
         );
         if (typeof snapshot === 'string') {
             await store.finalizeBlocked(claim, snapshot);
+            recordTerminalFailure(claim, snapshot);
             terminalized = true;
             notifyPreflightObserver(dependencies.observer, {
                 type: 'completed',
@@ -1758,6 +1958,7 @@ export async function processPreflight(
             && error.message === BETA_APIFY_POOL_CAPACITY_ERROR
         ) {
             await store.finalizeBlocked(claim, 'BETA_CAPACITY_UNAVAILABLE');
+            recordTerminalFailure(claim, 'BETA_CAPACITY_UNAVAILABLE');
             terminalized = true;
             notifyPreflightObserver(dependencies.observer, {
                 type: 'completed', outcome: 'blocked', ...baseObservation,
@@ -1769,6 +1970,7 @@ export async function processPreflight(
         if (!terminalized && !failure.retryable) {
             try {
                 await store.finalizeBlocked(claim, 'ANALYSIS_FAILED');
+                recordTerminalFailure(claim, 'ANALYSIS_FAILED', failure.category);
                 terminalized = true;
                 notifyPreflightObserver(dependencies.observer, {
                     type: 'completed',
@@ -1814,13 +2016,17 @@ export async function processPreflight(
     }
 }
 
-export function acceptedPreflightDto(created: CreatedPreflight): PreflightAcceptedV1 {
+export function acceptedPreflightDto(
+    created: CreatedPreflight,
+    claimToken?: string,
+): PreflightAcceptedV1 {
     return preflightAcceptedV1Schema.parse({
         schemaVersion: ANALYSIS_V2_SCHEMA_VERSION,
         preflightId: created.preflightId,
         expiresAt: created.expiresAt,
         status: 'pending',
         exclusionDecision: 'pending',
+        ...(claimToken ? { claimToken } : {}),
     });
 }
 

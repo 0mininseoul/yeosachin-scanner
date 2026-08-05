@@ -5,6 +5,7 @@ const mocks = vi.hoisted(() => ({
     createServerClient: vi.fn(),
     exchangeCodeForSession: vi.fn(),
     getUser: vi.fn(),
+    claimAnonymousPreflight: vi.fn(),
     emit: vi.fn(),
     observeRoute: vi.fn((
         _request: Request,
@@ -24,6 +25,9 @@ vi.mock('@/lib/observability/request', () => ({ observeRoute: mocks.observeRoute
 vi.mock('@/lib/observability/server', () => ({
     operationalLogger: { emit: mocks.emit },
 }));
+vi.mock('@/lib/services/analysis/anonymous-preflight', () => ({
+    claimAnonymousAnalysisV2Preflight: mocks.claimAnonymousPreflight,
+}));
 
 import { GET } from '@/app/auth/callback/route';
 import { CANONICAL_APP_ORIGIN } from '@/lib/constants/app-url';
@@ -37,11 +41,13 @@ describe('OAuth callback redirects', () => {
         });
         mocks.exchangeCodeForSession.mockResolvedValue({ error: null });
         mocks.getUser.mockResolvedValue({ data: { user: { id: 'user-1' } }, error: null });
+        mocks.claimAnonymousPreflight.mockResolvedValue(true);
         mocks.createServerClient.mockReturnValue({
             auth: {
                 exchangeCodeForSession: mocks.exchangeCodeForSession,
                 getUser: mocks.getUser,
             },
+            rpc: vi.fn(),
         });
     });
 
@@ -67,6 +73,30 @@ describe('OAuth callback redirects', () => {
 
         expect(response.headers.get('location')).toBe(
             'http://localhost:3000/analyze?verified=true'
+        );
+    });
+
+    it('claims the anonymous preflight from the OAuth next state before redirecting', async () => {
+        const userId = '123e4567-e89b-42d3-a456-426614174000';
+        mocks.exchangeCodeForSession.mockResolvedValue({
+            data: { session: {}, user: { id: userId, app_metadata: { provider: 'google' } } },
+            error: null,
+        });
+        const claimToken = 'v1.signed-claim-value.signature-value';
+        const response = await GET(new Request(
+            `https://preview.example/auth/callback?code=oauth-code&next=${encodeURIComponent(
+                `/analyze?preflight=223e4567-e89b-42d3-a456-426614174000&claim=${claimToken}&plan=standard`
+            )}`,
+        ));
+
+        expect(mocks.claimAnonymousPreflight).toHaveBeenCalledWith(
+            '223e4567-e89b-42d3-a456-426614174000',
+            claimToken,
+            userId,
+            expect.objectContaining({ client: expect.any(Object) }),
+        );
+        expect(response.headers.get('location')).toBe(
+            `${CANONICAL_APP_ORIGIN}/analyze?preflight=223e4567-e89b-42d3-a456-426614174000&plan=standard&verified=true`
         );
     });
 

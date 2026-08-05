@@ -12,9 +12,9 @@ import {
     PreflightNotFoundError,
     preflightStore,
     publicPreflightStatusDto,
+    type PreflightSupabaseClient,
 } from '@/lib/services/analysis/preflight';
 import { fetchEarlybirdRemainingSlots } from '@/lib/services/earlybird/inventory';
-import { supabaseAdmin } from '@/lib/supabase/admin';
 import {
     observeRoute,
     suppressOperationalObservation,
@@ -30,6 +30,12 @@ import {
     betaTestFreePoolEnabled,
     hasBetaTestAccess,
 } from '@/lib/services/analysis/betatest-access';
+import { recordPreflightFailure } from '@/lib/services/analysis/preflight-failure-ledger';
+import {
+    AnonymousPreflightClaimInvalidError,
+    readAnonymousAnalysisV2Preflight,
+    setAnonymousAnalysisV2PreflightExclusion,
+} from '@/lib/services/analysis/anonymous-preflight';
 
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
@@ -52,7 +58,10 @@ function demoErrorResponse(status: number, code: string, message: string): NextR
 async function authenticatedSession() {
     const supabase = await createClient();
     const { data: { user }, error } = await supabase.auth.getUser();
-    return error || !user ? null : { user, supabase };
+    return {
+        user: error || !user ? null : user,
+        supabase: supabase as unknown as PreflightSupabaseClient,
+    };
 }
 
 function captureExcludedLandingLead(
@@ -85,9 +94,10 @@ function exclusionFailureErrorCode(error: unknown): 'PREFLIGHT_PERSISTENCE_ERROR
 async function consumedPreflightStatus(
     preflightId: string,
     userId: string,
-    exclusionDecision: 'exclude' | 'skip'
+    exclusionDecision: 'exclude' | 'skip',
+    client: PreflightSupabaseClient,
 ) {
-    const { data, error } = await supabaseAdmin
+    const { data, error } = await client
         .from('analysis_requests')
         .select('id, user_id, preflight_id, pipeline_version')
         .eq('preflight_id', preflightId)
@@ -117,18 +127,30 @@ async function consumedPreflightStatus(
 }
 
 async function handleGET(
-    _request: Request,
+    request: Request,
     { params }: { params: Promise<{ preflightId: string }> }
 ) {
     let demoRecognized = false;
     try {
         const session = await authenticatedSession();
-        if (!session) return errorResponse(401, 'UNAUTHORIZED', '로그인이 필요합니다.');
-        const { user } = session;
         const { preflightId } = await params;
         if (!UUID_PATTERN.test(preflightId)) {
             return errorResponse(400, 'INVALID_REQUEST', '사전 점검 식별자가 올바르지 않습니다.');
         }
+
+        if (!session.user) {
+            const claimToken = request.headers.get('x-preflight-claim-token')?.trim();
+            if (!claimToken) return errorResponse(401, 'UNAUTHORIZED', '로그인이 필요합니다.');
+            const stored = await readAnonymousAnalysisV2Preflight(preflightId, claimToken, {
+                client: session.supabase,
+            });
+            if (!stored) return errorResponse(404, 'NOT_FOUND', '사전 점검 요청을 찾을 수 없습니다.');
+            const remainingSlotsByPlan = stored.status === 'ready'
+                ? await fetchEarlybirdRemainingSlots()
+                : {};
+            return NextResponse.json(publicPreflightStatusDto(stored, remainingSlotsByPlan));
+        }
+        const { user } = session;
 
         const demo = await demoAnalysisStore.findForOwner(preflightId, user.id);
         if (demo) {
@@ -157,7 +179,9 @@ async function handleGET(
             ));
         }
 
-        const stored = await preflightStore.findForOwner(preflightId, user.id);
+        const stored = await preflightStore.findForOwner(preflightId, user.id, {
+            client: session.supabase,
+        });
         if (!stored) {
             return errorResponse(404, 'NOT_FOUND', '사전 점검 요청을 찾을 수 없습니다.');
         }
@@ -168,7 +192,8 @@ async function handleGET(
             return NextResponse.json(await consumedPreflightStatus(
                 preflightId,
                 user.id,
-                stored.exclusionDecision
+                stored.exclusionDecision,
+                session.supabase,
             ));
         }
         const remainingSlotsByPlan = stored.status === 'ready'
@@ -185,6 +210,12 @@ async function handleGET(
         }
         if (error instanceof PreflightExpiredError) {
             return errorResponse(410, 'PREFLIGHT_EXPIRED', '사전 점검 요청이 만료되었습니다.');
+        }
+        if (error instanceof AnonymousPreflightClaimInvalidError) {
+            return errorResponse(401, 'UNAUTHORIZED', '사전 점검 상태를 확인할 수 없습니다.');
+        }
+        if (error instanceof Error && error.message.includes('ANONYMOUS_PREFLIGHT_CLAIM_CONFIG_ERROR')) {
+            return errorResponse(503, 'ANONYMOUS_PREFLIGHT_UNAVAILABLE', '익명 사전 점검을 잠시 사용할 수 없습니다.');
         }
         console.error('Preflight status read failed.');
         return errorResponse(500, 'ANALYSIS_FAILED', '사전 점검 상태 조회에 실패했습니다.');
@@ -212,14 +243,62 @@ async function handlePATCH(
     let observedPreflightId: string | undefined;
     try {
         const session = await authenticatedSession();
-        if (!session) return errorResponse(401, 'UNAUTHORIZED', '로그인이 필요합니다.');
-        const { user, supabase } = session;
-        observedUserId = user.id;
         const { preflightId } = await params;
         if (!UUID_PATTERN.test(preflightId)) {
             return errorResponse(400, 'INVALID_REQUEST', '사전 점검 식별자가 올바르지 않습니다.');
         }
         observedPreflightId = preflightId;
+
+        if (!session.user) {
+            const claimToken = request.headers.get('x-preflight-claim-token')?.trim();
+            if (!claimToken) return errorResponse(401, 'UNAUTHORIZED', '로그인이 필요합니다.');
+            let anonymousBody: unknown;
+            try {
+                anonymousBody = await request.json();
+            } catch {
+                void recordPreflightFailure({
+                    preflightId,
+                    stage: 'exclusion',
+                    errorCode: 'EXCLUSION_RULE_VIOLATION',
+                });
+                return errorResponse(400, 'INVALID_EXCLUSION', '제외 계정 입력을 확인해주세요.');
+            }
+            const anonymousParsed = preflightExclusionRequestV1Schema.safeParse(anonymousBody);
+            if (!anonymousParsed.success) {
+                void recordPreflightFailure({
+                    preflightId,
+                    stage: 'exclusion',
+                    errorCode: 'EXCLUSION_RULE_VIOLATION',
+                });
+                return errorResponse(400, 'INVALID_EXCLUSION', '제외 계정 입력을 확인해주세요.');
+            }
+            const updated = await setAnonymousAnalysisV2PreflightExclusion({
+                preflightId,
+                claimToken,
+                decision: anonymousParsed.data.decision,
+                excludedInstagramId: anonymousParsed.data.decision === 'exclude'
+                    ? anonymousParsed.data.excludedInstagramId
+                    : null,
+            }, { client: session.supabase });
+            if (!updated) return errorResponse(409, 'PREFLIGHT_IMMUTABLE', '이 사전 점검 요청은 변경할 수 없습니다.');
+            if (anonymousParsed.data.decision === 'exclude') {
+                captureExcludedLandingLead(preflightId, anonymousParsed.data.excludedInstagramId);
+            }
+            operationalLogger.emit({
+                event: 'preflight.exclusion_decided',
+                severity: 'info',
+                fields: {
+                    ...context,
+                    preflight_id: preflightId,
+                    operation: 'anonymous_exclusion',
+                    disposition: 'accepted',
+                },
+            });
+            return new NextResponse(null, { status: 204 });
+        }
+
+        const { user, supabase } = session;
+        observedUserId = user.id;
 
         const demo = await demoAnalysisStore.findForOwner(preflightId, user.id);
         if (demo) {
@@ -246,15 +325,29 @@ async function handlePATCH(
         try {
             body = await request.json();
         } catch {
+            void recordPreflightFailure({
+                userId: user.id,
+                preflightId,
+                stage: 'exclusion',
+                errorCode: 'EXCLUSION_RULE_VIOLATION',
+            });
             return errorResponse(400, 'INVALID_EXCLUSION', '제외 계정 입력을 확인해주세요.');
         }
         const parsed = preflightExclusionRequestV1Schema.safeParse(body);
         if (!parsed.success) {
+            void recordPreflightFailure({
+                userId: user.id,
+                preflightId,
+                stage: 'exclusion',
+                errorCode: 'EXCLUSION_RULE_VIOLATION',
+            });
             return errorResponse(400, 'INVALID_EXCLUSION', '제외 계정 입력을 확인해주세요.');
         }
 
         if (
-            await preflightStore.hasBetaEntryProvenance(preflightId, user.id)
+            await preflightStore.hasBetaEntryProvenance(preflightId, user.id, {
+                client: supabase,
+            })
             && (
                 !betaTestFreePoolEnabled()
                 || !await hasBetaTestAccess(supabase)
@@ -274,7 +367,7 @@ async function handlePATCH(
             excludedInstagramId: parsed.data.decision === 'exclude'
                 ? parsed.data.excludedInstagramId
                 : null,
-        });
+        }, { client: supabase });
         if (parsed.data.decision === 'exclude') {
             captureExcludedLandingLead(
                 preflightId,
@@ -307,7 +400,19 @@ async function handlePATCH(
         if (error instanceof PreflightNotFoundError) {
             return errorResponse(404, 'NOT_FOUND', '사전 점검 요청을 찾을 수 없습니다.');
         }
+        if (error instanceof AnonymousPreflightClaimInvalidError) {
+            return errorResponse(401, 'UNAUTHORIZED', '사전 점검 상태를 확인할 수 없습니다.');
+        }
+        if (error instanceof Error && error.message.includes('ANONYMOUS_PREFLIGHT_CLAIM_CONFIG_ERROR')) {
+            return errorResponse(503, 'ANONYMOUS_PREFLIGHT_UNAVAILABLE', '익명 사전 점검을 잠시 사용할 수 없습니다.');
+        }
         if (error instanceof InvalidPreflightExclusionError) {
+            void recordPreflightFailure({
+                ...(observedUserId ? { userId: observedUserId } : {}),
+                ...(observedPreflightId ? { preflightId: observedPreflightId } : {}),
+                stage: 'exclusion',
+                errorCode: 'EXCLUSION_RULE_VIOLATION',
+            });
             return errorResponse(400, 'INVALID_EXCLUSION', '대상 계정은 제외할 수 없습니다.');
         }
         if (error instanceof PreflightImmutableError) {

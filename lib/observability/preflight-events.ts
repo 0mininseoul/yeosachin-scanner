@@ -5,6 +5,10 @@ import type {
 
 import type { OperationalRequestContext } from './request';
 import { operationalLogger } from './server';
+import {
+    preflightFailureReason,
+    recordPreflightFailure,
+} from '@/lib/services/analysis/preflight-failure-ledger';
 
 const PREFLIGHT_WORKER_ERROR_CODES: Record<
     PreflightWorkerFailureClassification['category'],
@@ -66,6 +70,16 @@ export function emitPreflightProcessObservation(
         return;
     }
     if (observation.type === 'completed') {
+        if (observation.outcome === 'blocked') {
+            void recordPreflightFailure({
+                userId: observation.userId,
+                preflightId: observation.preflightId,
+                stage: 'profile',
+                errorCode: preflightFailureReason(
+                    observation.failureCategory ?? observation.errorCode,
+                ),
+            });
+        }
         operationalLogger.emit({
             event: 'preflight.completed',
             severity: observation.outcome === 'ready' ? 'info' : 'warn',
@@ -82,6 +96,12 @@ export function emitPreflightProcessObservation(
         });
         return;
     }
+    void recordPreflightFailure({
+        userId: observation.userId,
+        preflightId: observation.preflightId,
+        stage: 'profile',
+        errorCode: preflightFailureReason(preflightWorkerErrorCode(observation.category)),
+    });
     operationalLogger.emit({
         event: 'preflight.failed',
         severity: 'error',

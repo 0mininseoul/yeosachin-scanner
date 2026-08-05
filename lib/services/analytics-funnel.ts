@@ -7,9 +7,15 @@ export type RelationshipBucket =
 
 export type AnalyticsErrorCode =
     | 'INTERNAL_ERROR'
+    | 'HANDLE_FORMAT_INVALID'
     | 'NETWORK_ERROR'
     | 'NOT_FOUND'
+    | 'TARGET_NOT_FOUND'
+    | 'TARGET_PRIVATE'
+    | 'PLAN_CAPACITY_EXCEEDED'
+    | 'EXCLUSION_RULE_VIOLATION'
     | 'PROVIDER_ERROR'
+    | 'PROVIDER_TEMPORARY_FAILURE'
     | 'RATE_LIMITED'
     | 'TIMEOUT'
     | 'UNAUTHORIZED'
@@ -25,9 +31,15 @@ const MAX_DURATION_MS = 86_400_000;
 const CANONICAL_REQUEST_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const REGISTERED_ERROR_CODES = new Set<AnalyticsErrorCode>([
     'INTERNAL_ERROR',
+    'HANDLE_FORMAT_INVALID',
     'NETWORK_ERROR',
     'NOT_FOUND',
+    'TARGET_NOT_FOUND',
+    'TARGET_PRIVATE',
+    'PLAN_CAPACITY_EXCEEDED',
+    'EXCLUSION_RULE_VIOLATION',
     'PROVIDER_ERROR',
+    'PROVIDER_TEMPORARY_FAILURE',
     'RATE_LIMITED',
     'TIMEOUT',
     'UNAUTHORIZED',
@@ -36,28 +48,53 @@ const REGISTERED_ERROR_CODES = new Set<AnalyticsErrorCode>([
 ]);
 
 const DOMAIN_ERROR_CODES: Readonly<Record<string, AnalyticsErrorCode>> = {
-    TARGET_NOT_FOUND: 'NOT_FOUND',
-    TARGET_PRIVATE: 'VALIDATION_ERROR',
-    TARGET_UNSUPPORTED: 'VALIDATION_ERROR',
-    OVER_PLUS_CAPACITY: 'VALIDATION_ERROR',
-    EXCLUSION_REQUIRED: 'VALIDATION_ERROR',
-    INVALID_EXCLUSION: 'VALIDATION_ERROR',
+    INVALID_REQUEST: 'HANDLE_FORMAT_INVALID',
+    TARGET_NOT_FOUND: 'TARGET_NOT_FOUND',
+    TARGET_PRIVATE: 'TARGET_PRIVATE',
+    TARGET_UNSUPPORTED: 'HANDLE_FORMAT_INVALID',
+    OVER_PLUS_CAPACITY: 'PLAN_CAPACITY_EXCEEDED',
+    EXCLUSION_REQUIRED: 'EXCLUSION_RULE_VIOLATION',
+    INVALID_EXCLUSION: 'EXCLUSION_RULE_VIOLATION',
     PLAN_UPGRADE_REQUIRED: 'VALIDATION_ERROR',
-    RELATIONSHIP_INCOMPLETE: 'PROVIDER_ERROR',
-    PROFILE_EVIDENCE_INCOMPLETE: 'PROVIDER_ERROR',
+    RELATIONSHIP_INCOMPLETE: 'PROVIDER_TEMPORARY_FAILURE',
+    PROFILE_EVIDENCE_INCOMPLETE: 'PROVIDER_TEMPORARY_FAILURE',
     QUEUE_UNAVAILABLE: 'PROVIDER_ERROR',
+    PROVIDER_ERROR: 'PROVIDER_TEMPORARY_FAILURE',
     AI_RATE_LIMITED: 'RATE_LIMITED',
     AI_AMBIGUOUS_RESULT: 'PROVIDER_ERROR',
     ANALYSIS_FAILED: 'INTERNAL_ERROR',
 };
 
 const ATTRIBUTION_VALUES = {
-    source: new Set(['direct', 'google', 'instagram', 'kakao']),
+    source: new Set(['direct', 'google', 'instagram', 'kakao', 'shared']),
     medium: new Set(['direct', 'organic', 'paid_social', 'referral']),
     campaign: new Set(['launch_2026']),
     content: new Set(['hero-a']),
     term: new Set(['detector']),
 } as const;
+
+const SHARED_ATTRIBUTION_KEY = 'amplitude:attribution:shared_result';
+
+export function markSharedAttribution(storage: AnalyticsStorage | null | undefined): boolean {
+    if (!storage) return false;
+    try {
+        storage.setItem(SHARED_ATTRIBUTION_KEY, '1');
+        return true;
+    } catch {
+        return false;
+    }
+}
+
+export function currentAttributionSource(
+    storage: AnalyticsStorage | null | undefined,
+): 'shared' | undefined {
+    if (!storage) return undefined;
+    try {
+        return storage.getItem(SHARED_ATTRIBUTION_KEY) === '1' ? 'shared' : undefined;
+    } catch {
+        return undefined;
+    }
+}
 
 export function relationshipBucket(value: number | null | undefined): RelationshipBucket {
     if (typeof value !== 'number' || !Number.isFinite(value) || value < 0) return 'unknown';
@@ -102,6 +139,15 @@ export function readAttribution(search: string): {
     }
     if (isChatGptReferral && !params.has('utm_medium')) result.medium = 'referral';
     return result;
+}
+
+export function readAnalyticsAttribution(
+    search: string,
+    storage?: AnalyticsStorage | null,
+): ReturnType<typeof readAttribution> {
+    const attribution = readAttribution(search);
+    const source = currentAttributionSource(storage);
+    return source ? { ...attribution, source, medium: 'referral' } : attribution;
 }
 
 export function safeAnalyticsErrorCode(value: unknown): AnalyticsErrorCode {

@@ -39,7 +39,7 @@ describe('Amplitude caller privacy contract', () => {
         expect(landing).not.toMatch(/\/analyze\?[^'"`]*target=/);
         expect(analyze).not.toMatch(/[?&]target=/);
         expect(analyze).not.toMatch(/params\.get\(['"]target['"]\)/);
-        expect(analyze).toContain("router.replace('/analyze?preflight=");
+        expect(analyze).toContain("router.replace(`/analyze?${next.toString()}`);");
     });
 
     it('tracks result sharing only after the share helper confirms a channel', () => {

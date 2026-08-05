@@ -25,6 +25,12 @@ const mocks = vi.hoisted(() => ({
     trustedAccessMode: vi.fn(),
     betaEnabled: vi.fn(),
     betaAccess: vi.fn(),
+    anonymousBudget: vi.fn(),
+    anonymousCreate: vi.fn(),
+    anonymousRead: vi.fn(),
+    anonymousExclusion: vi.fn(),
+    anonymousReserve: vi.fn(),
+    anonymousMark: vi.fn(),
     admin: {
         from: vi.fn(),
     },
@@ -84,6 +90,18 @@ vi.mock('@/lib/services/analysis/preflight-tasks', async (importOriginal) => {
         ...actual,
         enqueuePreflightTask: mocks.enqueue,
         resolvePreflightDispatchPolicy: mocks.resolveDispatch,
+    };
+});
+vi.mock('@/lib/services/analysis/anonymous-preflight', async (importOriginal) => {
+    const actual = await importOriginal<typeof import('./anonymous-preflight')>();
+    return {
+        ...actual,
+        reserveAnonymousPreflightBudget: mocks.anonymousBudget,
+        createAnonymousAnalysisV2Preflight: mocks.anonymousCreate,
+        readAnonymousAnalysisV2Preflight: mocks.anonymousRead,
+        setAnonymousAnalysisV2PreflightExclusion: mocks.anonymousExclusion,
+        reserveAnonymousAnalysisV2PreflightDispatch: mocks.anonymousReserve,
+        markAnonymousAnalysisV2PreflightDispatched: mocks.anonymousMark,
     };
 });
 vi.mock('@/lib/services/analysis/v2-execution-gate', () => ({
@@ -184,7 +202,11 @@ function loadedFixture(version: string) {
 describe('preflight owner routes', () => {
     beforeEach(() => {
         vi.clearAllMocks();
-        mocks.createClient.mockResolvedValue({ auth: { getUser: mocks.getUser } });
+        mocks.createClient.mockResolvedValue({
+            auth: { getUser: mocks.getUser },
+            from: mocks.admin.from,
+            rpc: vi.fn(),
+        });
         mocks.admissionAvailable.mockReturnValue(true);
         mocks.getUser.mockResolvedValue({
             data: {
@@ -227,6 +249,28 @@ describe('preflight owner routes', () => {
         mocks.store.blockQueueUnavailable.mockResolvedValue(undefined);
         mocks.enqueue.mockResolvedValue('enqueued');
         mocks.process.mockResolvedValue('ready');
+        mocks.anonymousBudget.mockResolvedValue({
+            allowed: true,
+            reason: 'accepted',
+            dailyCount: 1,
+        });
+        mocks.anonymousCreate.mockImplementation(async (input: { claimToken: string }) => ({
+            preflightId,
+            expiresAt,
+            created: true,
+            status: 'pending',
+            claimToken: input.claimToken,
+            claimExpiresAt: '2030-07-13T13:10:00.000Z',
+        }));
+        mocks.anonymousRead.mockResolvedValue(null);
+        mocks.anonymousExclusion.mockResolvedValue(true);
+        mocks.anonymousReserve.mockResolvedValue({
+            shouldEnqueue: true,
+            generation: 1,
+            reservationToken: '323e4567-e89b-42d3-a456-426614174000', // gitleaks:allow -- UUID fixture
+            status: 'pending',
+        });
+        mocks.anonymousMark.mockResolvedValue(true);
         mocks.admin.from.mockReturnValue(mocks.adminQuery);
         mocks.adminQuery.select.mockReturnValue(mocks.adminQuery);
         mocks.adminQuery.eq.mockReturnValue(mocks.adminQuery);
@@ -248,13 +292,103 @@ describe('preflight owner routes', () => {
         vi.unstubAllEnvs();
     });
 
-    it('requires a verified Supabase user before creating or reading a preflight', async () => {
+    it('falls back to the bounded anonymous path for creation while keeping owner reads protected', async () => {
         mocks.getUser.mockResolvedValue({ data: { user: null }, error: null });
-        expect((await createPreflight(postRequest())).status).toBe(401);
+        expect((await createPreflight(postRequest())).status).toBe(503);
         expect((await getPreflight(new Request('https://example.com'), context())).status)
             .toBe(401);
         expect(mocks.store.createOrReplay).not.toHaveBeenCalled();
         expect(mocks.store.findForOwner).not.toHaveBeenCalled();
+    });
+
+    it('lets a claim holder read anonymous eligibility and exact stored prices', async () => {
+        mocks.getUser.mockResolvedValue({ data: { user: null }, error: null });
+        vi.stubEnv('IMAGE_PROXY_SIGNING_SECRET', imageProxySigningSecret);
+        const snapshot = buildReadyPreflightSnapshot(
+            targetProfile(),
+            'production',
+        ) as ReadyPreflightSnapshot;
+        mocks.anonymousRead.mockResolvedValue({
+            preflightId,
+            status: 'ready',
+            expiresAt,
+            blockedCode: null,
+            readySnapshot: snapshot,
+            exclusionDecision: 'pending',
+        });
+
+        const response = await getPreflight(new Request('https://example.com', {
+            headers: { 'x-preflight-claim-token': 'v1.claim.signature' },
+        }), context());
+
+        expect(response.status).toBe(200);
+        expect(mocks.anonymousRead).toHaveBeenCalledWith(
+            preflightId,
+            'v1.claim.signature',
+            expect.objectContaining({ client: expect.any(Object) }),
+        );
+        const body = await response.json() as {
+            plans: Array<{ planId: string; price: { amountKrw: number | null } }>;
+        };
+        const byPlan = Object.fromEntries(body.plans.map(plan => [plan.planId, plan]));
+        expect(byPlan.basic.price.amountKrw).toBe(990);
+        expect(byPlan.standard.price.amountKrw).toBe(1_990);
+    });
+
+    it('updates anonymous exclusion only through the claim-bound client path', async () => {
+        mocks.getUser.mockResolvedValue({ data: { user: null }, error: null });
+
+        const response = await patchPreflight(new Request('https://example.com', {
+            method: 'PATCH',
+            headers: {
+                'Content-Type': 'application/json',
+                'x-preflight-claim-token': 'v1.claim.signature',
+            },
+            body: JSON.stringify({ decision: 'skip' }),
+        }), context());
+
+        expect(response.status).toBe(204);
+        expect(mocks.anonymousExclusion).toHaveBeenCalledWith({
+            preflightId,
+            claimToken: 'v1.claim.signature',
+            decision: 'skip',
+            excludedInstagramId: null,
+        }, expect.objectContaining({ client: expect.any(Object) }));
+        expect(mocks.store.setExclusion).not.toHaveBeenCalled();
+    });
+
+    it('creates an anonymous preflight with a claim token and the isolated Apify dispatch', async () => {
+        mocks.getUser.mockResolvedValue({ data: { user: null }, error: null });
+        vi.stubEnv(
+            'ANONYMOUS_PREFLIGHT_CLAIM_SECRET',
+            'anonymous-preflight-test-secret-with-at-least-32-bytes',
+        );
+        vi.stubEnv(
+            'ANALYSIS_V2_PREFLIGHT_IDENTITY_HMAC_SECRET',
+            Buffer.alloc(32, 7).toString('base64url'),
+        );
+
+        const response = await createPreflight(postRequest());
+
+        expect(response.status).toBe(202);
+        await expect(response.json()).resolves.toMatchObject({
+            preflightId,
+            status: 'pending',
+            claimToken: expect.stringMatching(/^v1\./),
+        });
+        expect(mocks.anonymousBudget).toHaveBeenCalledWith(expect.objectContaining({
+            targetInputHash: expect.any(String),
+        }));
+        expect(mocks.anonymousCreate).toHaveBeenCalledWith(expect.objectContaining({
+            targetInstagramId: 'target.name',
+            idempotencyKey: 'preflight-key-000000000000',
+        }), expect.objectContaining({ client: expect.any(Object) }));
+        expect(mocks.enqueue).toHaveBeenCalledWith(preflightId, 1, { config: taskConfig });
+        expect(mocks.anonymousMark).toHaveBeenCalledWith(expect.objectContaining({
+            preflightId,
+            generation: 1,
+        }), expect.any(Object));
+        expect(JSON.stringify(mocks.emit.mock.calls)).not.toContain('target.name');
     });
 
     it('strictly validates the body and idempotency key', async () => {
@@ -321,7 +455,11 @@ describe('preflight owner routes', () => {
         expect(mocks.store.createOrReplay).toHaveBeenCalledOnce();
 
         vi.clearAllMocks();
-        mocks.createClient.mockResolvedValue({ auth: { getUser: mocks.getUser } });
+        mocks.createClient.mockResolvedValue({
+            auth: { getUser: mocks.getUser },
+            from: mocks.admin.from,
+            rpc: vi.fn(),
+        });
         mocks.getUser.mockResolvedValue({
             data: {
                 user: {
@@ -731,7 +869,11 @@ describe('preflight owner routes', () => {
     it('owner-filters GET and maps expired rows to a bounded 410', async () => {
         expect((await getPreflight(new Request('https://example.com'), context())).status)
             .toBe(200);
-        expect(mocks.store.findForOwner).toHaveBeenCalledWith(preflightId, userId);
+        expect(mocks.store.findForOwner).toHaveBeenCalledWith(
+            preflightId,
+            userId,
+            expect.objectContaining({ client: expect.any(Object) }),
+        );
 
         const pendingResponse = await getPreflight(
             new Request('https://example.com'),
@@ -820,12 +962,15 @@ describe('preflight owner routes', () => {
             body: JSON.stringify({ decision: 'exclude', excludedInstagramId: 'Girlfriend.Name' }),
         }), context());
         expect(response.status).toBe(204);
-        expect(mocks.store.setExclusion).toHaveBeenCalledWith({
-            preflightId,
-            userId,
-            decision: 'exclude',
-            excludedInstagramId: 'girlfriend.name',
-        });
+        expect(mocks.store.setExclusion).toHaveBeenCalledWith(
+            {
+                preflightId,
+                userId,
+                decision: 'exclude',
+                excludedInstagramId: 'girlfriend.name',
+            },
+            expect.objectContaining({ client: expect.any(Object) }),
+        );
         expect(mocks.emit).toHaveBeenCalledWith({
             event: 'preflight.exclusion_decided',
             severity: 'info',

@@ -6,6 +6,9 @@ import type { EarlybirdOrderStatusDto } from './order-status';
 vi.mock('next/navigation', () => ({
     useRouter: () => ({ push: vi.fn(), replace: vi.fn(), refresh: vi.fn() }),
 }));
+vi.mock('@/hooks/useAuth', () => ({
+    useAuth: () => ({ user: { id: '123e4567-e89b-42d3-a456-426614174000' }, loading: false }),
+}));
 vi.mock('@/lib/services/analytics', () => ({
     EVENTS: {
         EARLYBIRD_STATUS_VIEWED: 'earlybird_status_viewed',

@@ -88,6 +88,7 @@ import {
 } from './v2-ai-stage-runtime';
 import { AnalysisV2AiResultRecoveryPendingError } from './v2-ai-result-store';
 import { isAnalysisV2AiDeterministicFallbackError } from './v2-ai-fallback-policy';
+import { emitAnalysisLifecycleEvent } from '@/lib/services/analytics-server';
 import {
     screenAnalysisV2OfficialAccount,
     type AnalysisV2OfficialExclusionReason,
@@ -529,6 +530,7 @@ export interface AnalysisV2AiScoringExecutorDependencies {
     profileAiConcurrency?: number;
     partnerSafetyConcurrency?: number;
     narrativeConcurrency?: number;
+    analysisLifecycleEventEmitter?: typeof emitAnalysisLifecycleEvent;
 }
 
 export function buildAnalysisV2ResultImageSources(input: {
@@ -2716,6 +2718,14 @@ export function createAnalysisV2AiScoringExecutorRegistry(
                 targetProfileImageUrl: target.profilePicUrl ?? null,
                 ...(resultImageManifest ? { resultImageManifest } : {}),
             });
+            try {
+                await (dependencies.analysisLifecycleEventEmitter ?? emitAnalysisLifecycleEvent)({
+                    requestId: context.claim.requestId,
+                    eventName: 'analysis_completed',
+                });
+            } catch {
+                // Analytics is advisory after the result finalization is durable.
+            }
             await dependencies.stageStore.purgeTerminal(checkpointClaim(context));
             try {
                 await dependencies.mediaStore.cleanupTerminal();

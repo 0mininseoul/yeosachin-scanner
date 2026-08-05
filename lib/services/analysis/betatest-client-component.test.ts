@@ -488,9 +488,11 @@ describe('beta-test client', () => {
 
         expect(navigation.push).toHaveBeenCalledWith(`/progress/${REQUEST_ID}`);
         expect(navigation.push).toHaveBeenCalledTimes(1);
+        // analysis_started is server-owned now; the browser must not emit or
+        // deduplicate a second lifecycle event while polling admission.
         expect(setItem.mock.calls.filter(([key]) => (
             key === `amplitude:analysis_started:${REQUEST_ID}`
-        ))).toHaveLength(1);
+        ))).toHaveLength(0);
         const admissionCalls = calls.filter(call => call.url.endsWith('/admit'));
         expect(admissionCalls).toHaveLength(3);
         expect(new Set(admissionCalls.map(call => call.url))).toEqual(new Set([

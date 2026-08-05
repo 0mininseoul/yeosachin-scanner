@@ -5,6 +5,10 @@ import Image from 'next/image';
 import Link from 'next/link';
 import { trackEvent, EVENTS } from '@/lib/services/analytics';
 import {
+    availableAnalyticsStorage,
+    markSharedAttribution,
+} from '@/lib/services/analytics-funnel';
+import {
     genderBreakdownFromStats,
     OWNER_GENDER_LABELS,
 } from '@/lib/services/analysis/owner-view-presentation';
@@ -192,6 +196,9 @@ export default function ShareResultPage({ params }: PageProps) {
                 if (!response.ok) {
                     throw new Error(result.error || '결과를 불러올 수 없습니다.');
                 }
+                // Keep only a bounded session-level cohort marker. The opaque share
+                // token never enters an analytics event or user property.
+                markSharedAttribution(availableAnalyticsStorage());
 
                 // v2 shares carry their own masked shape; legacy v1 shares still
                 // arrive as this view's DTO with real identities in it.

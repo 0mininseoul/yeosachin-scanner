@@ -62,6 +62,10 @@ import { prepareAnalysisV2ProviderRunsForTerminalFailure } from './v2-provider-l
 import { analysisV2ProviderRunStore } from './v2-provider-run-store';
 import { getAnalysisV2ProductionExecutorRegistry } from './v2-production-executors';
 import {
+    emitAnalysisLifecycleEvent,
+} from '@/lib/services/analytics-server';
+import { safeAnalyticsErrorCode } from '@/lib/services/analytics-funnel';
+import {
     dispatchAnalysisV2Job,
     dispatchReservedAnalysisV2Job,
 } from './v2-tasks';
@@ -242,6 +246,7 @@ export async function finalizeAnalysisV2TerminalFailure(
     dependencies: {
         prepareProviderRuns?: typeof prepareAnalysisV2ProviderRunsForTerminalFailure;
         failRequest?: AnalysisV2TerminalFailureFinalizer;
+        analysisLifecycleEventEmitter?: typeof emitAnalysisLifecycleEvent;
     } = {}
 ): Promise<unknown> {
     const failure = {
@@ -253,7 +258,7 @@ export async function finalizeAnalysisV2TerminalFailure(
     };
     await (dependencies.prepareProviderRuns
         ?? prepareAnalysisV2ProviderRunsForTerminalFailure)(failure);
-    return (dependencies.failRequest
+    const result = await (dependencies.failRequest
         ?? (input => analysisV2ResultStore.fail({
             requestId: input.requestId,
             jobKey: input.jobKey,
@@ -261,10 +266,17 @@ export async function finalizeAnalysisV2TerminalFailure(
             jobInputHash: input.inputHash,
             errorCode,
         })))(claim, errorCode);
+    try {
+        await (dependencies.analysisLifecycleEventEmitter ?? emitAnalysisLifecycleEvent)({
+            requestId: claim.requestId,
+            eventName: 'analysis_failed',
+            errorCode: safeAnalyticsErrorCode({ code: errorCode }),
+        });
+    } catch {
+        // Analytics is fail-open and must never change terminalization.
+    }
+    return result;
 }
-
-const finalizeTerminalFailure: AnalysisV2TerminalFailureFinalizer =
-    finalizeAnalysisV2TerminalFailure;
 
 const cleanupTerminalMedia: AnalysisV2TerminalMediaCleanup = async () => {
     await cleanupConfiguredAnalysisV2TerminalMedia();
@@ -930,6 +942,7 @@ export async function processAnalysisV2TaskDelivery(
         terminalFailureFinalizer?: AnalysisV2TerminalFailureFinalizer;
         terminalMediaCleanup?: AnalysisV2TerminalMediaCleanup;
         terminalFailureIntentLoader?: AnalysisV2TerminalFailureIntentLoader;
+        analysisLifecycleEventEmitter?: typeof emitAnalysisLifecycleEvent;
         handlerDeadlineAtMs?: number;
         jobLeaseSeconds?: number;
     } = {}
@@ -943,8 +956,26 @@ export async function processAnalysisV2TaskDelivery(
         handlerDeadlineAtMs: dependencies.handlerDeadlineAtMs,
     }));
     const dispatch = dependencies.dispatch ?? dispatchAnalysisV2Job;
+    const terminalFailureFinalizer = dependencies.terminalFailureFinalizer ?? (
+        (claimToFinalize, errorCode) => finalizeAnalysisV2TerminalFailure(
+            claimToFinalize,
+            errorCode,
+            { analysisLifecycleEventEmitter: dependencies.analysisLifecycleEventEmitter },
+        )
+    );
     const claim = await store.claim(delivery, dependencies.jobLeaseSeconds);
     if (!claim) return Object.freeze({ status: 'already_terminal' });
+
+    try {
+        // The first durable job claim is the server-owned admission boundary. The
+        // ledger's unique key makes later task retries harmless.
+        await (dependencies.analysisLifecycleEventEmitter ?? emitAnalysisLifecycleEvent)({
+            requestId: claim.requestId,
+            eventName: 'analysis_started',
+        });
+    } catch {
+        // Analytics is fail-open and must not delay or fail the worker.
+    }
 
     let pendingTerminalFailure: string | null;
     try {
@@ -959,7 +990,7 @@ export async function processAnalysisV2TaskDelivery(
             claim,
             pendingTerminalFailure,
             store,
-            dependencies.terminalFailureFinalizer ?? finalizeTerminalFailure
+            terminalFailureFinalizer
         );
         if (cleanupRetry) return cleanupRetry;
         try {
@@ -1033,7 +1064,7 @@ export async function processAnalysisV2TaskDelivery(
                 claim,
                 exhausted ? 'JOB_ATTEMPTS_EXHAUSTED' : failure.code,
                 store,
-                dependencies.terminalFailureFinalizer ?? finalizeTerminalFailure
+                terminalFailureFinalizer
             );
             if (cleanupRetry) return cleanupRetry;
             try {

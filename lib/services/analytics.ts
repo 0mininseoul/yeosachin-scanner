@@ -5,6 +5,7 @@ export const EVENTS = {
     TARGET_SUBMITTED: 'target_submitted',
     AUTH_STARTED: 'auth_started',
     AUTH_COMPLETED: 'auth_completed',
+    LOGIN_PROMPTED: 'login_prompted',
     PREFLIGHT_STARTED: 'preflight_started',
     PREFLIGHT_SUCCEEDED: 'preflight_succeeded',
     PREFLIGHT_FAILED: 'preflight_failed',
@@ -18,6 +19,7 @@ export const EVENTS = {
     ANALYSIS_STARTED: 'analysis_started',
     ANALYSIS_DURATION_ESTIMATE_SHOWN: 'analysis_duration_estimate_shown',
     ANALYSIS_COMPLETED: 'analysis_completed',
+    ANALYSIS_FAILED: 'analysis_failed',
     RESULT_VIEWED: 'result_viewed',
     RESULT_SHARED: 'result_shared',
 } as const;
@@ -144,9 +146,15 @@ function uuidValidator(value: unknown): string | undefined {
 
 const errorCodeValidator = enumValidator([
     'INTERNAL_ERROR',
+    'HANDLE_FORMAT_INVALID',
     'NETWORK_ERROR',
     'NOT_FOUND',
+    'TARGET_NOT_FOUND',
+    'TARGET_PRIVATE',
+    'PLAN_CAPACITY_EXCEEDED',
+    'EXCLUSION_RULE_VIOLATION',
     'PROVIDER_ERROR',
+    'PROVIDER_TEMPORARY_FAILURE',
     'RATE_LIMITED',
     'TIMEOUT',
     'UNAUTHORIZED',
@@ -181,7 +189,7 @@ const PROPERTY_VALIDATORS: Record<PropertyName, PropertyValidator> = {
     required_plan_id: enumValidator(['basic', 'standard', 'plus']),
     result_count: integerValidator(0, 10_000),
     share_channel: enumValidator(['clipboard', 'kakao', 'web_share']),
-    source: enumValidator(['direct', 'google', 'instagram', 'kakao', 'chatgpt']),
+    source: enumValidator(['direct', 'google', 'instagram', 'kakao', 'chatgpt', 'shared']),
     stage: enumValidator([
         'analysis',
         'anonymous',
@@ -211,9 +219,10 @@ const PROPERTY_VALIDATORS: Record<PropertyName, PropertyValidator> = {
 
 const EVENT_SCHEMAS: Record<AnalyticsEvent, readonly PropertyName[]> = {
     [EVENTS.LANDING_VIEWED]: ['source', 'medium', 'campaign', 'content', 'term'],
-    [EVENTS.TARGET_SUBMITTED]: ['stage'],
+    [EVENTS.TARGET_SUBMITTED]: ['stage', 'source'],
     [EVENTS.AUTH_STARTED]: ['provider'],
     [EVENTS.AUTH_COMPLETED]: ['provider'],
+    [EVENTS.LOGIN_PROMPTED]: ['plan_id', 'amount_krw', 'preflight_id', 'source'],
     [EVENTS.PREFLIGHT_STARTED]: [],
     [EVENTS.PREFLIGHT_SUCCEEDED]: [
         'duration_ms',
@@ -224,15 +233,16 @@ const EVENT_SCHEMAS: Record<AnalyticsEvent, readonly PropertyName[]> = {
     ],
     [EVENTS.PREFLIGHT_FAILED]: ['duration_ms', 'error_code', 'stage', 'preflight_id'],
     [EVENTS.EXCLUSION_DECIDED]: ['preflight_id', 'decision'],
-    [EVENTS.PLAN_VIEWED]: ['plan_id', 'required_plan_id', 'amount_krw', 'preflight_id'],
-    [EVENTS.PLAN_SELECTED]: ['plan_id', 'required_plan_id', 'amount_krw', 'preflight_id'],
-    [EVENTS.CHECKOUT_STARTED]: ['plan_id', 'amount_krw', 'preflight_id'],
-    [EVENTS.CHECKOUT_REDIRECTED]: ['plan_id', 'amount_krw', 'preflight_id'],
+    [EVENTS.PLAN_VIEWED]: ['plan_id', 'required_plan_id', 'amount_krw', 'preflight_id', 'source'],
+    [EVENTS.PLAN_SELECTED]: ['plan_id', 'required_plan_id', 'amount_krw', 'preflight_id', 'source'],
+    [EVENTS.CHECKOUT_STARTED]: ['plan_id', 'amount_krw', 'preflight_id', 'source'],
+    [EVENTS.CHECKOUT_REDIRECTED]: ['plan_id', 'amount_krw', 'preflight_id', 'source'],
     [EVENTS.PAYMENT_CONFIRMED_VIEWED]: ['order_id', 'plan_id', 'amount_krw', 'status'],
     [EVENTS.EARLYBIRD_STATUS_VIEWED]: ['order_id', 'plan_id', 'amount_krw', 'status'],
     [EVENTS.ANALYSIS_STARTED]: ['request_id', 'plan_id', 'preflight_id'],
     [EVENTS.ANALYSIS_DURATION_ESTIMATE_SHOWN]: ['stage', 'estimate_version', 'duration_range'],
     [EVENTS.ANALYSIS_COMPLETED]: ['request_id', 'duration_ms'],
+    [EVENTS.ANALYSIS_FAILED]: ['request_id', 'duration_ms', 'error_code'],
     [EVENTS.RESULT_VIEWED]: ['request_id', 'result_count', 'is_shared'],
     [EVENTS.RESULT_SHARED]: ['request_id', 'share_channel'],
 };
@@ -503,21 +513,49 @@ function resetSdkIdentity(sdk: UnifiedSdk): boolean {
     }
 }
 
-function bootIdentityRequiresReset(sdk: UnifiedSdk): boolean {
+interface SdkIdentitySnapshot {
+    readable: boolean;
+    userId: string | undefined;
+}
+
+function readSdkIdentity(sdk: UnifiedSdk): SdkIdentitySnapshot {
     try {
         const storedUserId: unknown = sdk.getUserId();
-        const readable = storedUserId === undefined || typeof storedUserId === 'string';
-        return desiredUserId === undefined || !readable || storedUserId !== desiredUserId;
+        if (storedUserId === undefined) return { readable: true, userId: undefined };
+        if (typeof storedUserId === 'string') return { readable: true, userId: storedUserId };
+        return { readable: false, userId: undefined };
     } catch {
-        return true;
+        return { readable: false, userId: undefined };
     }
+}
+
+function bootIdentityRequiresReset(snapshot: SdkIdentitySnapshot): boolean {
+    if (!snapshot.readable) return true;
+
+    // An SDK-created anonymous device is the bridge for events recorded before OAuth.
+    // Setting the Supabase UUID on that same device lets Amplitude merge those events
+    // into the authenticated user. Reset only when a different authenticated user is
+    // present, or when logging out of one.
+    if (desiredUserId === undefined) return snapshot.userId !== undefined;
+    return snapshot.userId !== undefined && snapshot.userId !== desiredUserId;
 }
 
 function reconcileInitializedIdentity(sdk: UnifiedSdk): boolean {
     if (!hasInspectedSdkIdentity) {
-        const bootResetRequired = bootIdentityRequiresReset(sdk);
+        const snapshot = readSdkIdentity(sdk);
+        const bootResetRequired = bootIdentityRequiresReset(snapshot);
         pendingIdentityReset = pendingIdentityReset || bootResetRequired;
         hasInspectedSdkIdentity = true;
+
+        // When the SDK has no stored user, this is the OAuth merge boundary: apply the
+        // UUID without reset so events already attributed to the anonymous device remain
+        // mergeable. Matching stored identities need no setter call.
+        if (!pendingIdentityReset
+            && desiredUserId !== undefined
+            && snapshot.userId !== desiredUserId
+        ) {
+            setSdkUserId(sdk, desiredUserId);
+        }
     }
 
     if (pendingIdentityReset) {

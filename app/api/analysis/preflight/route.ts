@@ -44,6 +44,26 @@ import {
     bestEffortBetaApifySettlement,
     settleBetaApifyPreflightCredit,
 } from '@/lib/services/analysis/beta-apify-credit-settlement-runtime';
+import {
+    preflightFailureReason,
+    recordPreflightFailure,
+} from '@/lib/services/analysis/preflight-failure-ledger';
+import {
+    AnonymousPreflightClaimInvalidError,
+    AnonymousPreflightIdempotencyConflictError,
+    AnonymousPreflightRateLimitedError,
+    createAnonymousAnalysisV2Preflight,
+    markAnonymousAnalysisV2PreflightDispatched,
+    reserveAnonymousAnalysisV2PreflightDispatch,
+    reserveAnonymousPreflightBudget,
+    type AnonymousPreflightClient,
+} from '@/lib/services/analysis/anonymous-preflight';
+import {
+    createAnonymousPreflightClaim,
+    hashAnonymousRateLimitValue,
+    requestClientIp,
+} from '@/lib/services/analysis/anonymous-preflight-claim';
+import { preflightTargetInputHash } from '@/lib/services/analysis/preflight-identity';
 
 const IDEMPOTENCY_KEY_PATTERN = /^[A-Za-z0-9._:-]{16,128}$/;
 
@@ -91,6 +111,199 @@ function signedTestAdmissionState(
     }
 }
 
+function anonymousPreflightDailyLimit(
+    env: Record<string, string | undefined> = process.env,
+): number {
+    const raw = env.ANONYMOUS_PREFLIGHT_DAILY_LIMIT?.trim();
+    if (!raw) return 300;
+    const value = Number(raw);
+    if (!Number.isSafeInteger(value) || value < 1 || value > 10_000) {
+        throw new Error('ANONYMOUS_PREFLIGHT_CONFIG_ERROR');
+    }
+    return value;
+}
+
+async function handleAnonymousPOST(
+    request: Request,
+    context: OperationalRequestContext,
+    client: AnonymousPreflightClient,
+): Promise<NextResponse> {
+    let targetInstagramId: string | undefined;
+    let preflightId: string | undefined;
+    const failed = (status: number, code: string, message: string): NextResponse => {
+        void recordPreflightFailure({
+            ...(preflightId ? { preflightId } : {}),
+            stage: 'request',
+            errorCode: preflightFailureReason(code),
+        });
+        operationalLogger.emit({
+            event: 'preflight.failed',
+            severity: status >= 500 ? 'error' : 'warn',
+            fields: {
+                ...context,
+                ...(preflightId ? { preflight_id: preflightId } : {}),
+                operation: 'preflight',
+                disposition: status === 429
+                    ? 'rate_limited'
+                    : status >= 500 ? 'failed' : 'rejected',
+                error_code: preflightErrorCode(code),
+            },
+        });
+        return errorResponse(status, code, message);
+    };
+
+    try {
+        let body: unknown;
+        try {
+            body = await request.json();
+        } catch {
+            return failed(400, 'INVALID_REQUEST', '요청 형식이 올바르지 않습니다.');
+        }
+        const parsed = preflightRequestV1Schema.safeParse(body);
+        if (!parsed.success) {
+            return failed(400, 'INVALID_REQUEST', '인스타그램 아이디를 확인해주세요.');
+        }
+        targetInstagramId = parsed.data.targetInstagramId;
+        const idempotencyKey = request.headers.get('idempotency-key')?.trim();
+        if (!idempotencyKey || !IDEMPOTENCY_KEY_PATTERN.test(idempotencyKey)) {
+            return failed(400, 'INVALID_IDEMPOTENCY_KEY', '올바른 Idempotency-Key가 필요합니다.');
+        }
+        if (!isAnalysisV2AdmissionAvailable()) {
+            return failed(
+                503,
+                'V2_PIPELINE_UNAVAILABLE',
+                '새 분석 접수가 일시적으로 중단되었습니다.',
+            );
+        }
+
+        let dispatchPolicy;
+        try {
+            dispatchPolicy = resolvePreflightDispatchPolicy();
+        } catch {
+            return failed(503, 'QUEUE_UNAVAILABLE', '사전 점검 작업 큐를 사용할 수 없습니다.');
+        }
+        if (dispatchPolicy.mode === 'unavailable') {
+            return failed(503, 'QUEUE_UNAVAILABLE', '사전 점검 작업 큐를 사용할 수 없습니다.');
+        }
+
+        const env = process.env;
+        const targetInputHash = preflightTargetInputHash(targetInstagramId, env);
+        const deviceValue = request.headers.get('x-anonymous-device-id')?.trim()
+            || request.headers.get('user-agent')?.trim()
+            || 'missing-device';
+        const budget = await reserveAnonymousPreflightBudget({
+            ipHash: hashAnonymousRateLimitValue(requestClientIp(request), 'ip', env),
+            deviceHash: hashAnonymousRateLimitValue(deviceValue, 'device', env),
+            targetInputHash,
+            dailyLimit: anonymousPreflightDailyLimit(env),
+        });
+        if (!budget.allowed) {
+            throw new AnonymousPreflightRateLimitedError(budget.reason === 'daily_cap'
+                ? 'daily_cap'
+                : 'rate_limited');
+        }
+
+        const claim = createAnonymousPreflightClaim({ env });
+        const created = await createAnonymousAnalysisV2Preflight({
+            targetInstagramId,
+            targetInputHash,
+            idempotencyKey,
+            claimToken: claim.token,
+            env,
+        }, { client, env });
+        preflightId = created.preflightId;
+        if (created.status === 'expired') throw new PreflightExpiredError();
+        if (created.status === 'consumed') throw new PreflightConsumedError();
+
+        const reservation = await reserveAnonymousAnalysisV2PreflightDispatch(
+            created.preflightId,
+            claim.token,
+            { env, client },
+        );
+        if (reservation.status === 'expired') throw new PreflightExpiredError();
+        if (reservation.status === 'missing') throw new AnonymousPreflightClaimInvalidError();
+
+        if (reservation.shouldEnqueue && dispatchPolicy.mode === 'queue') {
+            try {
+                await enqueuePreflightTask(created.preflightId, reservation.generation, {
+                    config: dispatchPolicy.config,
+                });
+                if (!reservation.reservationToken) {
+                    throw new Error('ANONYMOUS_PREFLIGHT_DISPATCH_TOKEN_MISSING');
+                }
+                await markAnonymousAnalysisV2PreflightDispatched({
+                    preflightId: created.preflightId,
+                    claimToken: claim.token,
+                    generation: reservation.generation,
+                    reservationToken: reservation.reservationToken,
+                }, { env, client });
+            } catch (error) {
+                if (error instanceof PreflightTaskEnqueueError
+                    && error.disposition === 'replayable') {
+                    return failed(503, 'QUEUE_UNAVAILABLE', '사전 점검 작업 큐를 사용할 수 없습니다.');
+                }
+                return failed(503, 'QUEUE_UNAVAILABLE', '사전 점검 작업 큐를 사용할 수 없습니다.');
+            }
+        } else if (reservation.shouldEnqueue) {
+            if (!reservation.reservationToken) {
+                return failed(503, 'QUEUE_UNAVAILABLE', '사전 점검 작업 상태를 확정할 수 없습니다.');
+            }
+            await markAnonymousAnalysisV2PreflightDispatched({
+                preflightId: created.preflightId,
+                claimToken: claim.token,
+                generation: reservation.generation,
+                reservationToken: reservation.reservationToken,
+            }, { env, client });
+            after(async () => {
+                try {
+                    await processPreflight(created.preflightId, {
+                        observer(observation: PreflightProcessObservation) {
+                            emitPreflightProcessObservation(context, observation);
+                        },
+                    });
+                } catch {
+                    console.error('Anonymous preflight local worker failed.');
+                } finally {
+                    await flushOperationalLogs();
+                }
+            });
+        }
+
+        operationalLogger.emit({
+            event: 'preflight.requested',
+            severity: 'info',
+            fields: {
+                ...context,
+                preflight_id: created.preflightId,
+                operation: 'anonymous_preflight',
+                disposition: 'requested',
+                provider: 'apify',
+            },
+        });
+        return NextResponse.json(acceptedPreflightDto(created, claim.token), {
+            status: created.created ? 202 : 200,
+        });
+    } catch (error) {
+        if (error instanceof AnonymousPreflightRateLimitedError) {
+            return failed(429, 'PREFLIGHT_RATE_LIMITED', '사전 점검 요청이 너무 많습니다. 로그인 후 계속할 수 있습니다.');
+        }
+        if (error instanceof AnonymousPreflightIdempotencyConflictError) {
+            return failed(409, 'IDEMPOTENCY_CONFLICT', '같은 Idempotency-Key가 다른 요청에 사용되었습니다.');
+        }
+        if (error instanceof PreflightExpiredError) {
+            return failed(410, 'PREFLIGHT_EXPIRED', '사전 점검 요청이 만료되었습니다.');
+        }
+        if (error instanceof AnonymousPreflightClaimInvalidError) {
+            return failed(401, 'UNAUTHORIZED', '사전 점검 상태를 확인할 수 없습니다.');
+        }
+        if (error instanceof Error && error.message.includes('CONFIG_ERROR')) {
+            return failed(503, 'ANONYMOUS_PREFLIGHT_UNAVAILABLE', '익명 사전 점검을 잠시 사용할 수 없습니다. 로그인 후 계속해주세요.');
+        }
+        console.error('Anonymous preflight creation failed.');
+        return failed(500, 'ANALYSIS_FAILED', '사전 점검 요청 생성에 실패했습니다.');
+    }
+}
+
 async function handlePOST(
     request: Request,
     context: OperationalRequestContext,
@@ -107,6 +320,12 @@ async function handlePOST(
             error: message,
         }, { status, headers: demoResponseHeaders() });
     const failed = (status: number, code: string, message: string): NextResponse => {
+        void recordPreflightFailure({
+            ...(userId ? { userId } : {}),
+            ...(preflightId ? { preflightId } : {}),
+            stage: 'request',
+            errorCode: preflightFailureReason(code),
+        });
         operationalLogger.emit({
             event: 'preflight.failed',
             severity: status >= 500 ? 'error' : 'warn',
@@ -130,7 +349,7 @@ async function handlePOST(
         const supabase = await createClient();
         const { data: { user }, error } = await supabase.auth.getUser();
         if (error || !user) {
-            return failed(401, 'UNAUTHORIZED', '로그인이 필요합니다.');
+            return handleAnonymousPOST(request, context, supabase);
         }
         userId = user.id;
         let body: unknown;

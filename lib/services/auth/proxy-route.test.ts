@@ -50,11 +50,11 @@ describe('authentication proxy redirects', () => {
         mockAuthenticatedUser(null);
 
         const response = await proxy(new NextRequest(
-            'http://localhost:3000/analyze?autostart=1'
+            'http://localhost:3000/progress/request-1?autostart=1'
         ));
 
         expect(response.headers.get('location')).toBe(
-            'http://localhost:3000/login?redirectTo=%2Fanalyze%3Fautostart%3D1'
+            'http://localhost:3000/login?redirectTo=%2Fprogress%2Frequest-1%3Fautostart%3D1'
         );
     });
 
@@ -67,7 +67,16 @@ describe('authentication proxy redirects', () => {
         expect(response.headers.get('location')).toBeNull();
     });
 
-    it.each(['/analyze', '/progress/example', '/result/example', '/earlybird'])('continues to protect %s for anonymous visitors', async path => {
+    it('keeps the anonymous preflight page public', async () => {
+        mockAuthenticatedUser(null);
+
+        const response = await proxy(new NextRequest('http://localhost:3000/analyze'));
+
+        expect(response.status).toBe(200);
+        expect(response.headers.get('location')).toBeNull();
+    });
+
+    it.each(['/progress/example', '/result/example', '/earlybird'])('continues to protect %s for anonymous visitors', async path => {
         mockAuthenticatedUser(null);
 
         const response = await proxy(new NextRequest(`http://localhost:3000${path}`));

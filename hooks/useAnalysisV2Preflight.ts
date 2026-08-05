@@ -30,7 +30,6 @@ import {
 import { EVENTS, trackEvent } from '@/lib/services/analytics';
 import {
     availableAnalyticsStorage,
-    claimAnalysisStart,
     persistPreflightStartedAt,
     preflightOutcomeEventKey,
     readPreflightStartedAt,
@@ -40,6 +39,7 @@ import {
     trustedDurationMs,
     tryClaimAnalyticsEvent,
 } from '@/lib/services/analytics-funnel';
+import { anonymousPreflightDeviceId } from '@/lib/services/analysis/anonymous-preflight-device';
 
 export type ExclusionState = 'undecided' | 'saving' | 'excluded' | 'skipped';
 
@@ -86,6 +86,23 @@ export function betaAdmissionFailureMessage(payload: unknown): string | null {
         return '베타 테스트 이용 권한을 확인할 수 없습니다.';
     }
     return null;
+}
+
+const ANONYMOUS_LOGIN_FALLBACK_CODES = new Set([
+    'PREFLIGHT_RATE_LIMITED',
+    'ANONYMOUS_PREFLIGHT_UNAVAILABLE',
+]);
+
+export function shouldOfferAnonymousPreflightLogin(
+    payload: unknown,
+    status: number,
+    flow: AnalysisV2PreflightFlow = 'standard',
+): boolean {
+    if (flow !== 'standard') return false;
+    if (status < 400) return false;
+    if (status === 429) return true;
+    if (!payload || typeof payload !== 'object' || Array.isArray(payload)) return false;
+    return ANONYMOUS_LOGIN_FALLBACK_CODES.has(String(Reflect.get(payload, 'code')));
 }
 
 export function isBetaAdmissionPending(
@@ -350,12 +367,14 @@ export function useAnalysisV2Preflight({
     const [, setCredentialRevision] = useState(0);
     const [error, setError] = useState<string | null>(null);
     const [analyticsEligible, setAnalyticsEligible] = useState(true);
+    const [claimToken, setClaimToken] = useState<string | null>(null);
+    const [loginFallbackRequired, setLoginFallbackRequired] = useState(false);
     const [coordinator] = useState(() => new PreflightRequestCoordinator());
     const idempotencyRef = useRef<AnalysisStartIdempotency | null>(null);
+    const claimTokenRef = useRef<string | null>(null);
     const entitlementScopeRef = useRef<PreflightRequestScope | null>(null);
     const preflightStartedAtRef = useRef<number | null>(null);
     const preflightOutcomeTrackedRef = useRef(new Set<string>());
-    const analysisStartedTrackedRef = useRef(new Set<string>());
     const analyticsEligibleRef = useRef(true);
 
     const trackPreflightOutcome = useCallback((status: PreflightStatusV1) => {
@@ -408,9 +427,15 @@ export function useAnalysisV2Preflight({
         preflightId: string,
         scope: PreflightRequestScope
     ): Promise<PreflightStatusV1 | null> => {
+        const headers = new Headers();
+        if (claimTokenRef.current) {
+            headers.set('x-preflight-claim-token', claimTokenRef.current);
+        }
+        const deviceId = flow === 'standard' ? anonymousPreflightDeviceId() : null;
+        if (deviceId) headers.set('x-anonymous-device-id', deviceId);
         const response = await fetch(
             flowConfig.statusEndpoint(preflightId),
-            { cache: 'no-store', signal: scope.signal }
+            { cache: 'no-store', headers, signal: scope.signal }
         );
         const payload = await readPayload(response);
         analyticsEligibleRef.current = response.headers.get('x-analytics-eligible') !== '0';
@@ -454,13 +479,18 @@ export function useAnalysisV2Preflight({
             setError(null);
         }
         return parsed.data;
-    }, [flowConfig, trackPreflightOutcome]);
+    }, [flow, flowConfig, trackPreflightOutcome]);
 
     const resumePreflight = useCallback(async (
         preflightId: string,
-        rawTargetInstagramId?: string
+        rawTargetInstagramId?: string,
+        anonymousClaimToken?: string,
     ) => {
         if (!UUID_PATTERN.test(preflightId)) return false;
+        if (anonymousClaimToken !== undefined) {
+            claimTokenRef.current = anonymousClaimToken || null;
+            setClaimToken(anonymousClaimToken || null);
+        }
         const normalizedTarget = rawTargetInstagramId
             ? normalizeInstagramUsername(rawTargetInstagramId)
             : null;
@@ -507,6 +537,9 @@ export function useAnalysisV2Preflight({
         setTargetInstagramId(normalized);
         setPreflight(null);
         setExclusionState('undecided');
+        setLoginFallbackRequired(false);
+        claimTokenRef.current = null;
+        setClaimToken(null);
         preflightStartedAtRef.current = Date.now();
 
         try {
@@ -523,6 +556,8 @@ export function useAnalysisV2Preflight({
                 'Content-Type': 'application/json',
                 'Idempotency-Key': idempotencyRef.current.key,
             });
+            const deviceId = flow === 'standard' ? anonymousPreflightDeviceId() : null;
+            if (deviceId) headers.set('X-Anonymous-Device-Id', deviceId);
             if (testAdmission) {
                 headers.set('X-Analysis-Test-Admission', testAdmission.token);
             }
@@ -546,6 +581,9 @@ export function useAnalysisV2Preflight({
             analyticsEligibleRef.current = response.headers.get('x-analytics-eligible') !== '0';
             setAnalyticsEligible(analyticsEligibleRef.current);
             if (!response.ok) {
+                if (shouldOfferAnonymousPreflightLogin(payload, response.status, flow)) {
+                    setLoginFallbackRequired(true);
+                }
                 throw new AnalyticsRequestError(
                     (flow === 'betatest' ? betaAdmissionFailureMessage(payload) : null)
                     ?? messageFromPayload(payload, '사전 점검을 시작할 수 없습니다.'),
@@ -560,6 +598,7 @@ export function useAnalysisV2Preflight({
                 );
             }
             if (analyticsEligibleRef.current) trackEvent(EVENTS.PREFLIGHT_STARTED);
+            setLoginFallbackRequired(false);
             if (!scope.isCurrent()) return null;
             if (!coordinator.attachPreflight(generation, accepted.data.preflightId)) return null;
             if (preflightStartedAtRef.current !== null) {
@@ -572,6 +611,8 @@ export function useAnalysisV2Preflight({
             if (testAdmission) {
                 consumeTestAdmissionCredential(sessionStorage, normalized);
             }
+            claimTokenRef.current = accepted.data.claimToken ?? null;
+            setClaimToken(accepted.data.claimToken ?? null);
             setPreflight(accepted.data);
             return accepted.data;
         } catch (cause) {
@@ -617,7 +658,12 @@ export function useAnalysisV2Preflight({
                 `/api/analysis/preflight/${encodeURIComponent(preflight.preflightId)}`,
                 {
                     method: 'PATCH',
-                    headers: { 'Content-Type': 'application/json' },
+                    headers: {
+                        'Content-Type': 'application/json',
+                        ...(claimTokenRef.current
+                            ? { 'x-preflight-claim-token': claimTokenRef.current }
+                            : {}),
+                    },
                     body: JSON.stringify(excludedInstagramId
                         ? { decision: 'exclude', excludedInstagramId }
                         : { decision: 'skip' }),
@@ -761,20 +807,6 @@ export function useAnalysisV2Preflight({
                         planId
                     );
                     const requestId = parsed.data.requestId;
-                    if (!analysisStartedTrackedRef.current.has(requestId)) {
-                        analysisStartedTrackedRef.current.add(requestId);
-                        if (claimAnalysisStart(
-                            availableAnalyticsStorage(),
-                            requestId,
-                            Date.now(),
-                        )) {
-                            trackEvent(EVENTS.ANALYSIS_STARTED, {
-                                request_id: requestId,
-                                plan_id: planId,
-                                preflight_id: preflight.preflightId,
-                            });
-                        }
-                    }
                     return requestId;
                 }
                 await waitForRetry(parsed.data.retryAfterMs, scope.signal);
@@ -844,16 +876,6 @@ export function useAnalysisV2Preflight({
                 if (typeof requestId !== 'string' || !UUID_PATTERN.test(requestId)) {
                     throw new Error('판독 시작 응답을 확인할 수 없습니다.');
                 }
-                if (!analysisStartedTrackedRef.current.has(requestId)) {
-                    analysisStartedTrackedRef.current.add(requestId);
-                    if (claimAnalysisStart(availableAnalyticsStorage(), requestId, Date.now())) {
-                        trackEvent(EVENTS.ANALYSIS_STARTED, {
-                            request_id: requestId,
-                            plan_id: planId,
-                            preflight_id: preflight.preflightId,
-                        });
-                    }
-                }
                 return requestId;
             }
             throw new Error('무료 판독 배정을 확인하는 데 시간이 걸리고 있습니다. 다시 시도해주세요.');
@@ -876,12 +898,15 @@ export function useAnalysisV2Preflight({
         coordinator.beginLifecycle();
         entitlementScopeRef.current = null;
         idempotencyRef.current = null;
+        claimTokenRef.current = null;
+        setClaimToken(null);
         preflightStartedAtRef.current = null;
         setTargetInstagramId(null);
         setPreflight(null);
         setCreating(false);
         setExclusionState('undecided');
         setStarting(false);
+        setLoginFallbackRequired(false);
         analyticsEligibleRef.current = true;
         setAnalyticsEligible(true);
         setError(null);
@@ -951,11 +976,13 @@ export function useAnalysisV2Preflight({
 
     return {
         targetInstagramId,
+        claimToken,
         preflight,
         creating,
         exclusionState,
         starting,
         analyticsEligible,
+        loginFallbackRequired,
         error,
         setError,
         startPreflight,
