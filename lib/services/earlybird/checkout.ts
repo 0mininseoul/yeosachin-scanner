@@ -8,7 +8,6 @@ import {
 import type { PlanId } from '@/lib/domain/analysis/plan-catalog';
 import { getGrobleCheckoutUrl, readGrobleConfig } from '@/lib/services/groble/config';
 import { normalizeKoreanMobileNumber } from '@/lib/services/identity/phone-number';
-import { fetchEarlybirdRemainingSlots } from './inventory';
 import {
     earlybirdStore,
     EarlybirdPersistenceError,
@@ -122,14 +121,6 @@ export async function createEarlybirdCheckout(input: {
 }) {
     if (!isPaidEarlybirdPlanId(input.planId)) {
         throw new EarlybirdWaitlistRequiredError();
-    }
-    // Basic remains an application-managed earlybird allocation. Standard
-    // inventory is managed in Groble and must never be blocked by this table.
-    if (input.planId === 'basic') {
-        const remainingSlots = (await fetchEarlybirdRemainingSlots())[input.planId];
-        if (remainingSlots !== undefined && remainingSlots <= 0) {
-            throw new EarlybirdSoldOutError();
-        }
     }
     const config = readGrobleConfig();
     const plan = EARLYBIRD_PLAN_CATALOG[input.planId];

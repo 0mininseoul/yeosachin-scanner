@@ -800,7 +800,7 @@ describe('preflight owner routes', () => {
         expect(mocks.flush).toHaveBeenCalledOnce();
     });
 
-    it('carries only the Basic server-managed slots into a ready GET response', async () => {
+    it('does not expose legacy server inventory in a ready GET response', async () => {
         vi.stubEnv('IMAGE_PROXY_SIGNING_SECRET', imageProxySigningSecret);
         const snapshot = buildReadyPreflightSnapshot(
             targetProfile(),
@@ -814,25 +814,16 @@ describe('preflight owner routes', () => {
             readySnapshot: snapshot,
             exclusionDecision: 'skip',
         });
-        mocks.adminQuery.abortSignal.mockResolvedValue({
-            data: [
-                { plan_id: 'basic', sale_limit: 10, sold_count: 7 },
-                { plan_id: 'standard', sale_limit: 10, sold_count: 10 },
-            ],
-            error: null,
-        });
 
         const response = await getPreflight(new Request('https://example.com'), context());
 
         expect(response.status).toBe(200);
-        expect(mocks.admin.from).toHaveBeenCalledWith('earlybird_plan_inventory');
+        expect(mocks.admin.from).not.toHaveBeenCalledWith('earlybird_plan_inventory');
         const body = await response.json() as {
             plans: Array<{ planId: string; remainingSlots?: number }>;
         };
-        const byPlan = Object.fromEntries(body.plans.map(plan => [plan.planId, plan]));
-        expect(byPlan.basic).toHaveProperty('remainingSlots', 3);
-        expect(byPlan.standard).not.toHaveProperty('remainingSlots');
-        expect(byPlan.plus).not.toHaveProperty('remainingSlots');
+        expect(body.plans).toHaveLength(3);
+        expect(body.plans.every(plan => !('remainingSlots' in plan))).toBe(true);
     });
 
     it('never queries earlybird plan inventory for a pending GET', async () => {
