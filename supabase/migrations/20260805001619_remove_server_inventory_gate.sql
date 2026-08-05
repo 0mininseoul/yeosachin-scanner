@@ -135,6 +135,10 @@ BEGIN
     )
     INTO v_definition;
 
+    IF pg_catalog.strpos(v_definition, 'IF v_order.plan_id = ''standard'' THEN') > 0 THEN
+        RETURN;
+    END IF;
+
     IF v_definition IS NULL OR pg_catalog.strpos(v_definition, v_old) = 0 THEN
         RAISE EXCEPTION USING
             MESSAGE = 'EARLYBIRD_STANDARD_INVENTORY_FUNCTION_SHAPE_UNEXPECTED',
