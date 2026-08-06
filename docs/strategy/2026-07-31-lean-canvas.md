@@ -237,12 +237,23 @@ Supabase `earlybird_orders` 17행 대조 결과.
 
 **2026-08-04 `selfhosted_auth` 전격 전환으로 구조가 바뀌었다.** 유료 V2가 대상 프로필 preflight·`fresh_admission`·후보 프로필 배치·followers/following·liker/comment 수집 **전부**를 지정 버너 계정의 인증 worker로 옮겼다.
 
+### 🚨 정정 (2026-08-06) — `Apify $0`은 달성 상태가 아니라 설계 의도다
+
+이전 판본은 이 칸을 **✅ 검증됨**으로 표기했다. **틀렸다.** [selfhosted_auth 전략 재검토](./2026-08-06-selfhosted-auth-strategy-review.md)가 확인한 것:
+
+- **완전한 분석 결과까지 도달한 `selfhosted_auth` E2E 성공 기록이 아직 0건이다**
+- 2026-08-05에 팔로워·팔로잉·liker·comment 수집이 여러 번 성공했지만, **14개 요청 전부 최종 `failed`**
+- 최근 Standard 검증은 팔로잉 수집에서 Instagram **`401` + `PleaseWaitFewMinutes`**로 거절됐고 이후 상호작용 요청이 423으로 잠겼다
+- 같은 계정에서도 성공한 날과 거절된 날이 갈린다
+
+**즉 Apify를 껐다는 사실은 확인됐지만, 그 자리를 selfhosted_auth가 메운다는 것은 아직 확인되지 않았다.**
+
 | 항목 | 현재 상태 |
 |---|---|
-| **Apify Actor** | 정상 유료 경로에서 **`$0`** ✅ |
+| **Apify Actor** | 유료 경로에서 호출하지 않음. 다만 **그 대체가 완주한 적 없음** ⚠️ |
 | **Vertex AI Gemini** | Basic/Standard **미측정**. Plus 단일 표본 `$0.5858645`가 유일한 관측치 |
 | Cloud Run (인증 worker) / Cloud Tasks / 네트워크 | **미측정** |
-| 버너 계정 운영비 | **미측정** |
+| 버너 계정 운영비·복구 인건비 | **미측정** |
 | 실패 재시도 | 실패해도 원가는 전액 발생 |
 
 **Groble 수수료 8.69% 차감 후 순수입** (현행 가격 기준)
@@ -253,6 +264,25 @@ Supabase `earlybird_orders` 17행 대조 결과.
 | Standard | 1,990원 | **1,817원** |
 
 > **Gemini 하나가 마진을 결정한다.** Standard 순수입 1,817원은 약 $1.3이고, Apify가 빠져도 Gemini는 그대로 남는다. Plus 표본의 Gemini만으로 $0.586이었다. `docs/operations-cost-model.md`는 여전히 **"Basic/Standard의 complete cost는 아직 없다"**고 명시한다.
+
+### 🚨 이 캔버스에서 가장 큰 미해결 리스크 — 가격·원가 시차
+
+**수익은 이미 5배 낮췄는데, 그걸 정당화한 원가 절감은 아직 일어나지 않았다.**
+
+| 시점 | 사건 |
+|---|---|
+| 2026-08-03 | 가격 v3 인하 (6,900→990 / 9,900→1,990) |
+| 2026-08-04 | `selfhosted_auth` 전환 — 인하의 전제 |
+| 2026-08-06 | **selfhosted_auth E2E 성공 0건 확인** |
+
+지금 갈림길에 좋은 가지가 없다.
+
+| 선택 | 결과 |
+|---|---|
+| Apify로 되돌린다 | 1,990원에 provider $2~4 → **건당 확정 역마진** |
+| selfhosted를 고수한다 | 분석이 완주하지 못한다 → **결제받고 결과를 못 준다** |
+
+**외부 결제가 0건이라 이 갈림길이 아직 터지지 않았을 뿐이다.** 첫 외부 결제가 들어오는 순간 둘 중 하나가 실현된다. 대응은 [전략 세션 답변](./2026-08-06-selfhosted-auth-strategy-answer.md) 참조.
 
 ### 원가 실측이 최우선인 이유
 
