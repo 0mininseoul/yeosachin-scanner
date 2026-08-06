@@ -17,6 +17,12 @@ describe('analyze autostart handoff', () => {
         expect(autostartCalls.length).toBe(0);
     });
 
+    it('keeps anonymous autostart on the public preflight page', () => {
+        expect(source).not.toContain(
+            "router.replace('/login?redirectTo=%2Fanalyze%3Fautostart%3D1');",
+        );
+    });
+
     it('keeps a plan query as a render fallback instead of racing preflight resume state', () => {
         expect(source).toContain('useHydrationSafePlanQuery');
         expect(source).toContain('<HydrationSafePlanQueryObserver />');

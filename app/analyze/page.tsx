@@ -249,8 +249,7 @@ const DISCLOSURE_ACCEPTED = true;
             window.setTimeout(() => setInstagramId(pending), 0);
         }
 
-        if (!shouldAutostart || !pending || user) return;
-        router.replace('/login?redirectTo=%2Fanalyze%3Fautostart%3D1');
+        if (!shouldAutostart || !pending) return;
     }, [authLoading, resumePreflight, router, user]);
 
     useEffect(() => {

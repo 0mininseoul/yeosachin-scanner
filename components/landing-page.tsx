@@ -124,8 +124,6 @@ export default function LandingPage({
 
     if (!user) {
       reportLandingLead({ instagramId: id, rawInput: igId, search: window.location.search });
-      setLoginOpen(true);
-      return;
     }
 
     try {
