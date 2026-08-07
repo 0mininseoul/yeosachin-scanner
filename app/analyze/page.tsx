@@ -1,7 +1,7 @@
 'use client';
 
 import Image from 'next/image';
-import { Suspense, useEffect, useRef, useState } from 'react';
+import { Suspense, useCallback, useEffect, useRef, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import { useAuth } from '@/hooks/useAuth';
 import { useAnalysisV2Preflight } from '@/hooks/useAnalysisV2Preflight';
@@ -46,6 +46,12 @@ import {
     planSelectedEventKey,
     planViewEventKey,
 } from '@/lib/services/earlybird/analytics-state';
+import {
+    AUTO_CHECKOUT_QUERY_PARAM,
+    checkoutContinuationKey,
+    checkoutContinuationPlan,
+    shouldAutoSubmitEarlybirdAction,
+} from '@/lib/services/earlybird/post-login-checkout';
 import { TopBar, BrandMark, Eyebrow, CaseCard, Panel, PrimaryButton } from '@/components/case-ui';
 import { InstagramLookupLink } from '@/components/instagram-lookup-link';
 import { LoginModal } from '@/components/login-modal';
@@ -94,6 +100,9 @@ const DISCLOSURE_ACCEPTED = true;
     const [waitlistComplete, setWaitlistComplete] = useState(false);
     const [checkoutStatusCta, setCheckoutStatusCta] = useState<CheckoutStatusCta | null>(null);
     const [loginPromptOpen, setLoginPromptOpen] = useState(false);
+    const [autoCheckoutRequested, setAutoCheckoutRequested] = useState(false);
+    const [autoCheckoutPreflightId, setAutoCheckoutPreflightId] = useState<string | null>(null);
+    const [autoCheckoutPlan, setAutoCheckoutPlan] = useState<PlanId | null>(null);
     const querySelectedPlan = useHydrationSafePlanQuery();
     const router = useRouter();
     const { user, loading: authLoading } = useAuth();
@@ -101,6 +110,7 @@ const DISCLOSURE_ACCEPTED = true;
     const planViewsTrackedRef = useRef(new Set<string>());
     const planSelectionsTrackedRef = useRef(new Set<string>());
     const stalePricingRefreshHandledRef = useRef<string | null>(null);
+    const autoCheckoutAttemptedRef = useRef<string | null>(null);
     const {
         targetInstagramId,
         preflight,
@@ -154,12 +164,36 @@ const DISCLOSURE_ACCEPTED = true;
     // selected another plan or started a new preflight.
     const visibleError = activeCheckoutStatusCta?.message ?? error;
 
+    const removeAutoCheckoutQuery = useCallback(() => {
+        if (typeof window === 'undefined') return;
+        const nextUrl = new URL(window.location.href);
+        if (!nextUrl.searchParams.has(AUTO_CHECKOUT_QUERY_PARAM)) return;
+        nextUrl.searchParams.delete(AUTO_CHECKOUT_QUERY_PARAM);
+        router.replace(`${nextUrl.pathname}${nextUrl.search}${nextUrl.hash}`);
+    }, [router]);
+
+    const clearAutoCheckoutContinuation = useCallback(() => {
+        setAutoCheckoutRequested(false);
+        setAutoCheckoutPreflightId(null);
+        setAutoCheckoutPlan(null);
+        autoCheckoutAttemptedRef.current = null;
+        removeAutoCheckoutQuery();
+    }, [removeAutoCheckoutQuery]);
+
+    const consumeAutoCheckoutContinuation = useCallback(() => {
+        setAutoCheckoutRequested(false);
+        setAutoCheckoutPreflightId(null);
+        setAutoCheckoutPlan(null);
+        removeAutoCheckoutQuery();
+    }, [removeAutoCheckoutQuery]);
+
     useEffect(() => {
         if (
             !stalePricingPreflightId
             || stalePricingRefreshHandledRef.current === stalePricingPreflightId
         ) return;
         stalePricingRefreshHandledRef.current = stalePricingPreflightId;
+        clearAutoCheckoutContinuation();
         void recoverOrRefreshStaleEarlybirdPricing(stalePricingPreflightId, {
             request: fetch,
             redirectCheckout: checkoutUrl => window.location.assign(checkoutUrl),
@@ -174,7 +208,7 @@ const DISCLOSURE_ACCEPTED = true;
                 ),
             },
         });
-    }, [reset, router, setError, stalePricingPreflightId]);
+    }, [clearAutoCheckoutContinuation, reset, router, setError, stalePricingPreflightId]);
 
     useEffect(() => {
         if (!readyPreflight || !exclusionDecided || !analyticsEligible) return;
@@ -208,6 +242,12 @@ const DISCLOSURE_ACCEPTED = true;
         const params = new URLSearchParams(window.location.search);
         const resumablePreflightId = params.get('preflight');
         const shouldAutostart = params.get('autostart') === '1';
+        const requestedCheckoutPlan = checkoutContinuationPlan(params);
+        setAutoCheckoutRequested(requestedCheckoutPlan !== null);
+        setAutoCheckoutPreflightId(
+            requestedCheckoutPlan && resumablePreflightId ? resumablePreflightId : null,
+        );
+        setAutoCheckoutPlan(requestedCheckoutPlan);
 
         const resumableClaimToken = params.get('claim');
         if (resumablePreflightId && (user || resumableClaimToken)) {
@@ -228,7 +268,10 @@ const DISCLOSURE_ACCEPTED = true;
                 resumableClaimToken ?? undefined,
             ).then((resumed) => {
                 const storage = availablePendingTargetStorage();
-                if (!resumed && storage) clearPendingAnalysisTarget(storage);
+                if (!resumed) {
+                    clearAutoCheckoutContinuation();
+                    if (storage) clearPendingAnalysisTarget(storage);
+                }
             });
             return;
         }
@@ -250,7 +293,7 @@ const DISCLOSURE_ACCEPTED = true;
         }
 
         if (!shouldAutostart || !pending) return;
-    }, [authLoading, resumePreflight, router, user]);
+    }, [authLoading, clearAutoCheckoutContinuation, resumePreflight, router, user]);
 
     useEffect(() => {
         if (user || !loginFallbackRequired || !instagramId.trim()) return;
@@ -259,6 +302,7 @@ const DISCLOSURE_ACCEPTED = true;
     }, [instagramId, loginFallbackRequired, user]);
 
     const handleStartPreflight = async () => {
+        clearAutoCheckoutContinuation();
         const accepted = await startPreflight(instagramId);
         if (!accepted) {
             if (user) clearPendingAnalysisTarget(sessionStorage);
@@ -280,7 +324,7 @@ const DISCLOSURE_ACCEPTED = true;
         await submitExclusion(girlfriendInstagramId);
     };
 
-    const trackPlanSelection = (planId: PlanId) => {
+    const trackPlanSelection = useCallback((planId: PlanId) => {
         if (!readyPreflight || !analyticsEligible) return;
         const plan = readyPreflight.plans.find(candidate => candidate.planId === planId);
         if (!plan || plan.selectionState === 'unavailable') return;
@@ -298,9 +342,12 @@ const DISCLOSURE_ACCEPTED = true;
             planId,
             properties => trackEvent(EVENTS.PLAN_SELECTED, properties)
         );
-    };
+    }, [analyticsEligible, readyPreflight]);
 
     const handlePlanSelection = (planId: PlanId) => {
+        if (autoCheckoutRequested && autoCheckoutPlan !== planId) {
+            clearAutoCheckoutContinuation();
+        }
         setCheckoutStatusCta(null);
         setSelectedPlan(planId);
         trackPlanSelection(planId);
@@ -314,7 +361,7 @@ const DISCLOSURE_ACCEPTED = true;
         router.push(activeCheckoutStatusCta.path);
     };
 
-    const handleEarlybirdAction = async () => {
+    const handleEarlybirdAction = useCallback(async () => {
         if (!effectiveSelectedPlan || !readyPreflight || !selectedPlanAvailable) return;
         if (!canSubmitEarlybirdSelection(
             effectiveSelectedPlan,
@@ -467,9 +514,62 @@ const DISCLOSURE_ACCEPTED = true;
         } finally {
             setPurchaseSubmitting(false);
         }
-    };
+    }, [
+        DISCLOSURE_ACCEPTED,
+        analyticsEligible,
+        effectiveSelectedCard,
+        effectiveSelectedPlan,
+        readyPreflight,
+        refreshPreflight,
+        reset,
+        router,
+        selectedPlanAvailable,
+        setError,
+        targetInstagramId,
+        trackPlanSelection,
+        user,
+    ]);
+
+    useEffect(() => {
+        const preflightId = readyPreflight?.preflightId ?? null;
+        if (!shouldAutoSubmitEarlybirdAction({
+            requested: autoCheckoutRequested,
+            authenticated: Boolean(user),
+            ready: readyPreflight !== null,
+            preflightId,
+            requestedPreflightId: autoCheckoutPreflightId,
+            requestedPlanId: autoCheckoutPlan,
+            planId: effectiveSelectedPlan,
+            exclusionDecided,
+            planAvailable: selectedPlanAvailable,
+            submitting: purchaseSubmitting,
+            attemptedKey: autoCheckoutAttemptedRef.current,
+        })) return;
+        if (!preflightId || !effectiveSelectedPlan) return;
+
+        autoCheckoutAttemptedRef.current = checkoutContinuationKey(
+            preflightId,
+            effectiveSelectedPlan,
+        );
+        consumeAutoCheckoutContinuation();
+        void handleEarlybirdAction();
+    }, [
+        autoCheckoutRequested,
+        autoCheckoutPlan,
+        autoCheckoutPreflightId,
+        consumeAutoCheckoutContinuation,
+        effectiveSelectedPlan,
+        exclusionDecided,
+        handleEarlybirdAction,
+        purchaseSubmitting,
+        readyPreflight,
+        router,
+        selectedPlanAvailable,
+        user,
+    ]);
 
     const handleReset = () => {
+        clearAutoCheckoutContinuation();
         try {
             clearPendingAnalysisTarget(sessionStorage);
         } catch {
@@ -514,6 +614,9 @@ const DISCLOSURE_ACCEPTED = true;
             plan: effectiveSelectedPlan ?? '',
         });
     if (!loginFallbackRequired && claimToken) loginRedirectParams.set('claim', claimToken);
+    if (!loginFallbackRequired && readyPreflight && effectiveSelectedPlan && selectedPlanAvailable) {
+        loginRedirectParams.set(AUTO_CHECKOUT_QUERY_PARAM, '1');
+    }
     const loginRedirectTo = `/analyze?${loginRedirectParams.toString()}`;
 
     if (authLoading) {
