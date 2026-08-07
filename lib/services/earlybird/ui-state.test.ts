@@ -671,7 +671,7 @@ describe('earlybird analyze UI state', () => {
         expect(source).toContain('결제 계속하기');
     });
 
-    it('wires classified checkout lineages to owner status without replaying checkout', () => {
+    it('auto-recovers an active pending lineage after OAuth, while keeping manual recovery owner-bound', () => {
         const source = readFileSync(
             new URL('../../../app/analyze/page.tsx', import.meta.url),
             'utf8'
@@ -683,8 +683,10 @@ describe('earlybird analyze UI state', () => {
         expect(source).toContain('kind: lineageStatusAction.kind');
         expect(source).toContain('const visibleError = activeCheckoutStatusCta?.message ?? error;');
         expect(source).not.toContain("setError('기존 결제 처리 상태를 먼저 확인해주세요.')");
-        expect(source).not.toContain('recoverPendingEarlybirdCheckout(');
-        expect(source).not.toContain('checkoutRecoveryPreflightId');
+        expect(source).toContain('recoverPendingEarlybirdCheckout(');
+        expect(source).toContain('lineageStatusAction.kind === \'active_pending\' && autoCheckoutAttempt');
+        expect(source).toContain('checkoutRecoveryGuardRef.current');
+        expect(source).toContain('setPending: setPurchaseSubmitting');
     });
 
     it('derives stale owner-status CTA visibility without synchronous effect state cleanup', () => {

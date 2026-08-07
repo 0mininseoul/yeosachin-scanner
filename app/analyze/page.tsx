@@ -23,6 +23,7 @@ import {
     isEarlybirdPlanSoldOut,
     isCurrentEarlybirdCheckoutStatusCta,
     isSafeGrobleCheckoutUrl,
+    recoverPendingEarlybirdCheckout,
     recoverOrRefreshStaleEarlybirdPricing,
     resolveEarlybirdPricingBoundary,
 } from '@/lib/services/earlybird/ui-state';
@@ -111,6 +112,8 @@ const DISCLOSURE_ACCEPTED = true;
     const planSelectionsTrackedRef = useRef(new Set<string>());
     const stalePricingRefreshHandledRef = useRef<string | null>(null);
     const autoCheckoutAttemptedRef = useRef<string | null>(null);
+    const autoCheckoutRecoveryRequestedRef = useRef(false);
+    const checkoutRecoveryGuardRef = useRef({ inFlight: false });
     const {
         targetInstagramId,
         preflight,
@@ -177,6 +180,7 @@ const DISCLOSURE_ACCEPTED = true;
         setAutoCheckoutPreflightId(null);
         setAutoCheckoutPlan(null);
         autoCheckoutAttemptedRef.current = null;
+        autoCheckoutRecoveryRequestedRef.current = false;
         removeAutoCheckoutQuery();
     }, [removeAutoCheckoutQuery]);
 
@@ -369,6 +373,9 @@ const DISCLOSURE_ACCEPTED = true;
             selectedPlanAvailable
         )) return;
 
+        const autoCheckoutAttempt = autoCheckoutRecoveryRequestedRef.current;
+        autoCheckoutRecoveryRequestedRef.current = false;
+
         trackPlanSelection(effectiveSelectedPlan);
         if (!user) {
             if (analyticsEligible && isPaidEarlybirdPlanId(effectiveSelectedPlan)) {
@@ -441,6 +448,26 @@ const DISCLOSURE_ACCEPTED = true;
                     effectiveSelectedPlan
                 );
                 if (lineageStatusAction) {
+                    if (lineageStatusAction.kind === 'active_pending' && autoCheckoutAttempt) {
+                        const recoveryResult = await recoverPendingEarlybirdCheckout(
+                            readyPreflight.preflightId,
+                            checkoutRecoveryGuardRef.current,
+                            {
+                                request: fetch,
+                                redirectCheckout: checkoutUrl => {
+                                    if (analyticsEligible) {
+                                        trackEvent(EVENTS.CHECKOUT_REDIRECTED, analyticsProperties);
+                                        void flushAnalytics().finally(() => window.location.assign(checkoutUrl));
+                                        return;
+                                    }
+                                    window.location.assign(checkoutUrl);
+                                },
+                                setPending: setPurchaseSubmitting,
+                                showError: setError,
+                            },
+                        );
+                        if (recoveryResult === 'checkout_recovered') return;
+                    }
                     const lineageMessage = payload && typeof payload === 'object'
                         && 'error' in payload && typeof payload.error === 'string'
                         && payload.error.length <= 200
@@ -552,6 +579,7 @@ const DISCLOSURE_ACCEPTED = true;
             effectiveSelectedPlan,
         );
         consumeAutoCheckoutContinuation();
+        autoCheckoutRecoveryRequestedRef.current = true;
         void handleEarlybirdAction();
     }, [
         autoCheckoutRequested,
