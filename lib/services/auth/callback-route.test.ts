@@ -198,6 +198,78 @@ describe('OAuth callback redirects', () => {
         );
     });
 
+    it('retries the browser claim when a provider continuation claim cannot be restored', async () => {
+        const userId = '123e4567-e89b-42d3-a456-426614174000';
+        mocks.exchangeCodeForSession.mockResolvedValue({
+            data: { session: {}, user: { id: userId, app_metadata: { provider: 'kakao' } } },
+            error: null,
+        });
+        mocks.claimAnonymousPreflight
+            .mockRejectedValueOnce(new Error('ANONYMOUS_PREFLIGHT_CLAIM_INVALID'))
+            .mockResolvedValueOnce(true);
+        const browserIntent = '/analyze?preflight=223e4567-e89b-42d3-a456-426614174000&claim=browser-claim&plan=standard&checkout=1';
+        const response = await GET(new Request(
+            'https://preview.example/auth/callback?code=oauth-code&next=%2Fanalyze&preflight=223e4567-e89b-42d3-a456-426614174000&claim=provider-claim&plan=standard&checkout=1',
+            {
+                headers: {
+                    cookie: `auth_redirect_intent=${encodeURIComponent(browserIntent)}`,
+                },
+            },
+        ));
+
+        expect(mocks.claimAnonymousPreflight).toHaveBeenNthCalledWith(
+            1,
+            '223e4567-e89b-42d3-a456-426614174000',
+            'provider-claim',
+            userId,
+            expect.objectContaining({ client: expect.any(Object) }),
+        );
+        expect(mocks.claimAnonymousPreflight).toHaveBeenNthCalledWith(
+            2,
+            '223e4567-e89b-42d3-a456-426614174000',
+            'browser-claim',
+            userId,
+            expect.objectContaining({ client: expect.any(Object) }),
+        );
+        expect(response.headers.get('location')).toBe(
+            `${CANONICAL_APP_ORIGIN}/analyze?preflight=223e4567-e89b-42d3-a456-426614174000&plan=standard&checkout=1&verified=true`
+        );
+    });
+
+    it('does not retry a browser claim belonging to another preflight', async () => {
+        const userId = '123e4567-e89b-42d3-a456-426614174000';
+        mocks.exchangeCodeForSession.mockResolvedValue({
+            data: { session: {}, user: { id: userId, app_metadata: { provider: 'kakao' } } },
+            error: null,
+        });
+        mocks.claimAnonymousPreflight.mockRejectedValueOnce(
+            new Error('ANONYMOUS_PREFLIGHT_CLAIM_INVALID')
+        );
+        const browserIntent = '/analyze?preflight=323e4567-e89b-42d3-a456-426614174000&claim=browser-claim&plan=standard&checkout=1';
+        const response = await GET(new Request(
+            'https://preview.example/auth/callback?code=oauth-code&next=%2Fanalyze&preflight=223e4567-e89b-42d3-a456-426614174000&claim=provider-claim&plan=standard&checkout=1',
+            {
+                headers: {
+                    cookie: `auth_redirect_intent=${encodeURIComponent(browserIntent)}`,
+                },
+            },
+        ));
+
+        expect(mocks.claimAnonymousPreflight).toHaveBeenCalledTimes(1);
+        expect(mocks.emit).toHaveBeenCalledWith(expect.objectContaining({
+            event: 'auth.callback_completed',
+            severity: 'warn',
+            fields: expect.objectContaining({
+                operation: 'callback',
+                disposition: 'completed',
+                error_code: 'UNAUTHORIZED',
+            }),
+        }));
+        expect(response.headers.get('location')).toBe(
+            `${CANONICAL_APP_ORIGIN}/analyze?claim=restore_failed&verified=true`
+        );
+    });
+
     it('lands a missing-code callback on a bounded terminal error', async () => {
         const response = await GET(new Request(
             'https://preview.example/auth/callback?next=%2Fanalyze'
