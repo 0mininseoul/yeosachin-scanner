@@ -43,7 +43,10 @@ describe('OAuth callback redirects', () => {
         });
         mocks.exchangeCodeForSession.mockResolvedValue({ error: null });
         mocks.getUser.mockResolvedValue({ data: { user: { id: 'user-1' } }, error: null });
-        mocks.claimAnonymousPreflight.mockResolvedValue(true);
+        mocks.claimAnonymousPreflight.mockResolvedValue({
+            claimed: true,
+            ownerPreflightId: null,
+        });
         mocks.createServerClient.mockReturnValue({
             auth: {
                 exchangeCodeForSession: mocks.exchangeCodeForSession,
@@ -248,7 +251,7 @@ describe('OAuth callback redirects', () => {
         });
         mocks.claimAnonymousPreflight
             .mockRejectedValueOnce(new Error('ANONYMOUS_PREFLIGHT_CLAIM_INVALID'))
-            .mockResolvedValueOnce(true);
+            .mockResolvedValueOnce({ claimed: true, ownerPreflightId: null });
         const browserIntent = '/analyze?preflight=223e4567-e89b-42d3-a456-426614174000&claim=browser-claim&plan=standard&checkout=1';
         const response = await GET(new Request(
             'https://preview.example/auth/callback?code=oauth-code&next=%2Fanalyze&preflight=223e4567-e89b-42d3-a456-426614174000&claim=provider-claim&plan=standard&checkout=1',
@@ -309,6 +312,27 @@ describe('OAuth callback redirects', () => {
         }));
         expect(response.headers.get('location')).toBe(
             `${CANONICAL_APP_ORIGIN}/analyze?claim=restore_failed&verified=true`
+        );
+    });
+
+    it('resumes checkout against an existing owner preflight after a retry', async () => {
+        const userId = '123e4567-e89b-42d3-a456-426614174000';
+        const ownerPreflightId = '323e4567-e89b-42d3-a456-426614174000';
+        mocks.exchangeCodeForSession.mockResolvedValue({
+            data: { session: {}, user: { id: userId, app_metadata: { provider: 'kakao' } } },
+            error: null,
+        });
+        mocks.claimAnonymousPreflight.mockResolvedValue({
+            claimed: false,
+            ownerPreflightId,
+        });
+
+        const response = await GET(new Request(
+            'https://preview.example/auth/callback?code=oauth-code&next=%2Fanalyze%3Fpreflight%3D223e4567-e89b-42d3-a456-426614174000%26claim%3Dclaim-token%26plan%3Dstandard%26checkout%3D1',
+        ));
+
+        expect(response.headers.get('location')).toBe(
+            `${CANONICAL_APP_ORIGIN}/analyze?preflight=${ownerPreflightId}&plan=standard&checkout=1&verified=true`
         );
     });
 

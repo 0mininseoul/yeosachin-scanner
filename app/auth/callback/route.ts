@@ -226,13 +226,26 @@ async function restoreAnonymousPreflightClaim(
             continue;
         }
         try {
-            const claimed = await claimAnonymousAnalysisV2Preflight(
+            const claimResult = await claimAnonymousAnalysisV2Preflight(
                 preflightId,
                 claimToken,
                 userId,
                 { client },
             );
-            if (!claimed) {
+            // Keep the boolean fallback for test/runtime adapters that still
+            // expose the pre-migration claim result shape.
+            const claimed = typeof claimResult === 'boolean'
+                ? { claimed: claimResult, ownerPreflightId: null }
+                : claimResult;
+            if (!claimed.claimed) {
+                if (claimed.ownerPreflightId) {
+                    redirectUrl.searchParams.set(
+                        'preflight',
+                        claimed.ownerPreflightId,
+                    );
+                    redirectUrl.searchParams.delete('claim');
+                    return { redirectUrl };
+                }
                 errorCode = 'UNAUTHORIZED';
                 continue;
             }

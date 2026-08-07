@@ -163,6 +163,16 @@ export interface CreatedAnonymousPreflight extends CreatedPreflight {
     claimExpiresAt: string;
 }
 
+export interface AnonymousPreflightClaimResult {
+    claimed: boolean;
+    /**
+     * When the authenticated user already owns a ready preflight for the same
+     * target, the database keeps that owner row authoritative and returns its
+     * id so OAuth can resume checkout against it.
+     */
+    ownerPreflightId: string | null;
+}
+
 export async function createAnonymousAnalysisV2Preflight(
     input: CreateAnonymousPreflightInput,
     options: ServiceOptions = {},
@@ -224,7 +234,7 @@ export async function claimAnonymousAnalysisV2Preflight(
     claimToken: string,
     userId: string,
     options: ServiceOptions = {},
-): Promise<boolean> {
+): Promise<AnonymousPreflightClaimResult> {
     const id = requireUuid(preflightId, 'ID');
     const ownerId = requireUuid(userId, 'USER');
     const env = options.env ?? process.env;
@@ -240,7 +250,11 @@ export async function claimAnonymousAnalysisV2Preflight(
     if (!row || typeof row.claimed !== 'boolean') {
         throw new Error('ANONYMOUS_PREFLIGHT_PERSISTENCE_ERROR:claim');
     }
-    return row.claimed;
+    const ownerPreflightId = row.owner_preflight_id === null
+        || row.owner_preflight_id === undefined
+        ? null
+        : requireUuid(String(row.owner_preflight_id), 'OWNER_PREFLIGHT_ID');
+    return { claimed: row.claimed, ownerPreflightId };
 }
 
 export async function setAnonymousAnalysisV2PreflightExclusion(input: {
