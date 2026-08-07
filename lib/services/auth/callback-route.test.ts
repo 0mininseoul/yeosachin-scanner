@@ -146,6 +146,36 @@ describe('OAuth callback redirects', () => {
         );
     });
 
+    it('claims when the provider returns a partial destination but the browser intent retains the claim', async () => {
+        const userId = '123e4567-e89b-42d3-a456-426614174000';
+        mocks.exchangeCodeForSession.mockResolvedValue({
+            data: { session: {}, user: { id: userId, app_metadata: { provider: 'google' } } },
+            error: null,
+        });
+        const claimToken = 'v1.signed-claim-value.signature-value';
+        const intent = `/analyze?preflight=223e4567-e89b-42d3-a456-426614174000&claim=${claimToken}&plan=standard&checkout=1`;
+        const response = await GET(new Request(
+            `https://preview.example/auth/callback?code=oauth-code&next=${encodeURIComponent(
+                '/analyze?preflight=223e4567-e89b-42d3-a456-426614174000&plan=standard&checkout=1'
+            )}`,
+            {
+                headers: {
+                    cookie: `auth_redirect_intent=${encodeURIComponent(intent)}`,
+                },
+            },
+        ));
+
+        expect(mocks.claimAnonymousPreflight).toHaveBeenCalledWith(
+            '223e4567-e89b-42d3-a456-426614174000',
+            claimToken,
+            userId,
+            expect.objectContaining({ client: expect.any(Object) }),
+        );
+        expect(response.headers.get('location')).toBe(
+            `${CANONICAL_APP_ORIGIN}/analyze?preflight=223e4567-e89b-42d3-a456-426614174000&plan=standard&checkout=1&verified=true`
+        );
+    });
+
     it('lands a missing-code callback on a bounded terminal error', async () => {
         const response = await GET(new Request(
             'https://preview.example/auth/callback?next=%2Fanalyze'
