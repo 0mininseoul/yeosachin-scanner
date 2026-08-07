@@ -21,6 +21,11 @@ import {
     claimAnonymousAnalysisV2Preflight,
     type AnonymousPreflightClient,
 } from '@/lib/services/analysis/anonymous-preflight';
+import {
+    AUTH_REDIRECT_INTENT_COOKIE,
+    readOAuthRedirectIntent,
+    selectOAuthRedirectIntent,
+} from '@/lib/services/auth/oauth-redirect-intent';
 
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
@@ -131,6 +136,12 @@ function authProvider(value: unknown): 'google' | 'kakao' | undefined {
     return value === 'google' || value === 'kakao' ? value : undefined;
 }
 
+function redirectAndClearOAuthIntent(url: URL): NextResponse {
+    const response = NextResponse.redirect(url);
+    response.cookies.delete(AUTH_REDIRECT_INTENT_COOKIE);
+    return response;
+}
+
 async function restoreAnonymousPreflightClaim(
     requestUrl: string,
     rawNext: string | null,
@@ -174,6 +185,7 @@ async function handleGET(
     const { searchParams } = new URL(request.url);
     const code = searchParams.get('code');
     const appOrigin = appOriginForRequest(request.url);
+    const cookieNext = readOAuthRedirectIntent(request.headers.get('cookie'));
 
     if (!code) {
         console.error('Auth callback: No code provided');
@@ -187,7 +199,7 @@ async function handleGET(
                 error_code: 'INVALID_REQUEST',
             },
         });
-        return NextResponse.redirect(new URL('/login?error=no_code', appOrigin));
+        return redirectAndClearOAuthIntent(new URL('/login?error=no_code', appOrigin));
     }
 
     const cookieStore = await cookies();
@@ -227,7 +239,7 @@ async function handleGET(
         });
         const loginUrl = new URL('/login', appOrigin);
         loginUrl.searchParams.set('error', 'exchange_failed');
-        return NextResponse.redirect(loginUrl);
+        return redirectAndClearOAuthIntent(loginUrl);
     }
     const exchange = exchangeResult.data;
 
@@ -288,7 +300,7 @@ async function handleGET(
 
     const redirectUrl = await restoreAnonymousPreflightClaim(
         request.url,
-        searchParams.get('next'),
+        selectOAuthRedirectIntent(searchParams.get('next'), cookieNext),
         authedUser?.id,
         supabase,
     );
@@ -306,7 +318,7 @@ async function handleGET(
         },
     });
 
-    return NextResponse.redirect(redirectUrl);
+    return redirectAndClearOAuthIntent(redirectUrl);
 }
 
 export async function GET(request: Request): Promise<NextResponse> {

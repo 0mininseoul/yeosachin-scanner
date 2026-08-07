@@ -76,6 +76,52 @@ describe('OAuth callback redirects', () => {
         );
     });
 
+    it('recovers the intended destination when the provider returns the root path', async () => {
+        const response = await GET(new Request(
+            'https://preview.example/auth/callback?code=oauth-code&next=%2F',
+            {
+                headers: {
+                    cookie: 'auth_redirect_intent=%2Fanalyze%3Fautostart%3D1',
+                },
+            },
+        ));
+
+        expect(response.headers.get('location')).toBe(
+            `${CANONICAL_APP_ORIGIN}/analyze?autostart=1&verified=true`
+        );
+        expect(response.headers.get('set-cookie')).toMatch(
+            /auth_redirect_intent=;.*Expires=Thu, 01 Jan 1970 00:00:00 GMT/
+        );
+    });
+
+    it('restores an anonymous preflight claim from the browser intent fallback', async () => {
+        const userId = '123e4567-e89b-42d3-a456-426614174000';
+        mocks.exchangeCodeForSession.mockResolvedValue({
+            data: { session: {}, user: { id: userId, app_metadata: { provider: 'google' } } },
+            error: null,
+        });
+        const claimToken = 'v1.signed-claim-value.signature-value';
+        const intent = `/analyze?preflight=223e4567-e89b-42d3-a456-426614174000&claim=${claimToken}&plan=standard`;
+        const response = await GET(new Request(
+            `https://preview.example/auth/callback?code=oauth-code&next=%2F`,
+            {
+                headers: {
+                    cookie: `auth_redirect_intent=${encodeURIComponent(intent)}`,
+                },
+            },
+        ));
+
+        expect(mocks.claimAnonymousPreflight).toHaveBeenCalledWith(
+            '223e4567-e89b-42d3-a456-426614174000',
+            claimToken,
+            userId,
+            expect.objectContaining({ client: expect.any(Object) }),
+        );
+        expect(response.headers.get('location')).toBe(
+            `${CANONICAL_APP_ORIGIN}/analyze?preflight=223e4567-e89b-42d3-a456-426614174000&plan=standard&verified=true`
+        );
+    });
+
     it('claims the anonymous preflight from the OAuth next state before redirecting', async () => {
         const userId = '123e4567-e89b-42d3-a456-426614174000';
         mocks.exchangeCodeForSession.mockResolvedValue({
