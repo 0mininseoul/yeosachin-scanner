@@ -3,6 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 const mocks = vi.hoisted(() => ({
     cookies: vi.fn(),
     createServerClient: vi.fn(),
+    createRlsClient: vi.fn(),
     exchangeCodeForSession: vi.fn(),
     getUser: vi.fn(),
     claimAnonymousPreflight: vi.fn(),
@@ -21,6 +22,7 @@ const mocks = vi.hoisted(() => ({
 
 vi.mock('next/headers', () => ({ cookies: mocks.cookies }));
 vi.mock('@supabase/ssr', () => ({ createServerClient: mocks.createServerClient }));
+vi.mock('@supabase/supabase-js', () => ({ createClient: mocks.createRlsClient }));
 vi.mock('@/lib/observability/request', () => ({ observeRoute: mocks.observeRoute }));
 vi.mock('@/lib/observability/server', () => ({
     operationalLogger: { emit: mocks.emit },
@@ -49,6 +51,7 @@ describe('OAuth callback redirects', () => {
             },
             rpc: vi.fn(),
         });
+        mocks.createRlsClient.mockReturnValue({ rpc: vi.fn() });
     });
 
     afterEach(() => {
@@ -143,6 +146,40 @@ describe('OAuth callback redirects', () => {
         );
         expect(response.headers.get('location')).toBe(
             `${CANONICAL_APP_ORIGIN}/analyze?preflight=223e4567-e89b-42d3-a456-426614174000&plan=standard&verified=true`
+        );
+    });
+
+    it('uses the exchanged access token for the authenticated claim RPC client', async () => {
+        const userId = '123e4567-e89b-42d3-a456-426614174000';
+        const accessToken = 'oauth-access-token';
+        mocks.exchangeCodeForSession.mockResolvedValue({
+            data: {
+                session: { access_token: accessToken },
+                user: { id: userId, app_metadata: { provider: 'google' } },
+            },
+            error: null,
+        });
+        const claimToken = 'v1.signed-claim-value.signature-value';
+
+        await GET(new Request(
+            `https://preview.example/auth/callback?code=oauth-code&next=${encodeURIComponent(
+                `/analyze?preflight=223e4567-e89b-42d3-a456-426614174000&claim=${claimToken}`
+            )}`,
+        ));
+
+        expect(mocks.createRlsClient).toHaveBeenCalledTimes(1);
+        expect(mocks.createRlsClient.mock.calls[0]?.[2]).toEqual(expect.objectContaining({
+            accessToken: expect.any(Function),
+        }));
+        const accessTokenFactory = mocks.createRlsClient.mock.calls[0]?.[2]?.accessToken;
+        await expect(accessTokenFactory()).resolves.toBe(accessToken);
+        expect(mocks.claimAnonymousPreflight).toHaveBeenCalledWith(
+            expect.any(String),
+            claimToken,
+            userId,
+            expect.objectContaining({
+                client: expect.objectContaining({ rpc: expect.any(Function) }),
+            }),
         );
     });
 
