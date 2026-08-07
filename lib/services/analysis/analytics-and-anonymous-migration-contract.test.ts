@@ -18,6 +18,10 @@ const anonymousClaimRetryMigration = readFileSync(resolve(
     process.cwd(),
     'supabase/migrations/20260807150000_resume_oauth_against_existing_owner_preflight.sql',
 ), 'utf8');
+const anonymousClaimExpiryMigration = readFileSync(resolve(
+    process.cwd(),
+    'supabase/migrations/20260807170000_ignore_expired_oauth_owner_preflight.sql',
+), 'utf8');
 
 describe('analytics and anonymous preflight migration contracts', () => {
     it('keeps server lifecycle delivery durable, bounded, and service-only', () => {
@@ -160,6 +164,24 @@ describe('analytics and anonymous preflight migration contracts', () => {
         expect(anonymousClaimRetryMigration).toContain("status = 'expired'");
         expect(anonymousClaimRetryMigration).toContain('claim_token_hash = NULL');
         expect(anonymousClaimRetryMigration).toContain(
+            'GRANT EXECUTE ON FUNCTION public.claim_anonymous_analysis_v2_preflight(UUID, VARCHAR, UUID)',
+        );
+    });
+
+    it('does not reuse an expired owner row during an OAuth retry', () => {
+        expect(anonymousClaimExpiryMigration).toContain(
+            'CREATE OR REPLACE FUNCTION public.claim_anonymous_analysis_v2_preflight(',
+        );
+        expect(anonymousClaimExpiryMigration).toContain(
+            'IF v_owner.expires_at <= v_now THEN',
+        );
+        expect(anonymousClaimExpiryMigration).toContain(
+            "SET status = 'expired'",
+        );
+        expect(anonymousClaimExpiryMigration).toContain(
+            "status IN ('pending', 'processing', 'ready')",
+        );
+        expect(anonymousClaimExpiryMigration).toContain(
             'GRANT EXECUTE ON FUNCTION public.claim_anonymous_analysis_v2_preflight(UUID, VARCHAR, UUID)',
         );
     });
