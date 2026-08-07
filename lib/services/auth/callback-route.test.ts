@@ -170,6 +170,11 @@ describe('OAuth callback redirects', () => {
         expect(mocks.createRlsClient).toHaveBeenCalledTimes(1);
         expect(mocks.createRlsClient.mock.calls[0]?.[2]).toEqual(expect.objectContaining({
             accessToken: expect.any(Function),
+            global: expect.objectContaining({
+                headers: expect.objectContaining({
+                    Authorization: `Bearer ${accessToken}`,
+                }),
+            }),
         }));
         const accessTokenFactory = mocks.createRlsClient.mock.calls[0]?.[2]?.accessToken;
         await expect(accessTokenFactory()).resolves.toBe(accessToken);

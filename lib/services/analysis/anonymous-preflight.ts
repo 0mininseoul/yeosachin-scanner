@@ -55,6 +55,16 @@ export class AnonymousPreflightClaimInvalidError extends Error {
     }
 }
 
+export class AnonymousPreflightPersistenceError extends Error {
+    constructor(
+        readonly operation: string,
+        readonly rpcCode: string | null,
+    ) {
+        super(`ANONYMOUS_PREFLIGHT_PERSISTENCE_ERROR:${operation}`);
+        this.name = 'AnonymousPreflightPersistenceError';
+    }
+}
+
 export class AnonymousPreflightIdempotencyConflictError extends Error {
     constructor() {
         super('ANONYMOUS_PREFLIGHT_IDEMPOTENCY_CONFLICT');
@@ -92,7 +102,11 @@ function rpcError(error: RpcError, operation: string): never {
     ) {
         throw new AnonymousPreflightClaimInvalidError();
     }
-    throw new Error(`ANONYMOUS_PREFLIGHT_PERSISTENCE_ERROR:${operation}`);
+    const rpcCode = typeof error.code === 'string'
+        && /^[A-Za-z0-9_]{1,32}$/.test(error.code)
+        ? error.code
+        : null;
+    throw new AnonymousPreflightPersistenceError(operation, rpcCode);
 }
 
 function requireClaim(
