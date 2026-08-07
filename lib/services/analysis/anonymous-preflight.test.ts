@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
 import {
+    claimAnonymousAnalysisV2Preflight,
     createAnonymousAnalysisV2Preflight,
     readAnonymousAnalysisV2Preflight,
     reserveAnonymousPreflightBudget,
@@ -135,5 +136,27 @@ describe('anonymous preflight service', () => {
             targetInputHash: 'c'.repeat(64),
             client: { rpc },
         })).resolves.toEqual({ allowed: false, reason: 'daily_cap', dailyCount: 300 });
+    });
+
+    it('returns an existing owner preflight id for an authenticated retry', async () => {
+        const claim = createAnonymousPreflightClaim({ env });
+        const rpc = vi.fn().mockResolvedValue({
+            data: [{
+                claimed: false,
+                preflight_status: 'owner_active',
+                owner_preflight_id: preflightId,
+            }],
+            error: null,
+        });
+
+        await expect(claimAnonymousAnalysisV2Preflight(
+            preflightId,
+            claim.token,
+            '223e4567-e89b-42d3-a456-426614174000',
+            { env, client: { rpc } },
+        )).resolves.toEqual({
+            claimed: false,
+            ownerPreflightId: preflightId,
+        });
     });
 });

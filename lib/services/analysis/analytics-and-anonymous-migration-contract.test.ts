@@ -14,6 +14,10 @@ const anonymousMigration = readFileSync(resolve(
     process.cwd(),
     'supabase/migrations/20260805092000_add_anonymous_preflight_claim_runtime.sql',
 ), 'utf8');
+const anonymousClaimRetryMigration = readFileSync(resolve(
+    process.cwd(),
+    'supabase/migrations/20260807150000_resume_oauth_against_existing_owner_preflight.sql',
+), 'utf8');
 
 describe('analytics and anonymous preflight migration contracts', () => {
     it('keeps server lifecycle delivery durable, bounded, and service-only', () => {
@@ -145,5 +149,18 @@ describe('analytics and anonymous preflight migration contracts', () => {
             anonymousMigration.indexOf('CREATE INDEX analysis_anonymous_attempts_ip_idx'),
         );
         expect(attemptsTable).not.toMatch(/target_instagram_id|raw_error|error_message/iu);
+    });
+
+    it('returns an existing same-target owner preflight for OAuth retries', () => {
+        expect(anonymousClaimRetryMigration).toContain(
+            'DROP FUNCTION public.claim_anonymous_analysis_v2_preflight(UUID, VARCHAR, UUID);',
+        );
+        expect(anonymousClaimRetryMigration).toContain('owner_preflight_id UUID');
+        expect(anonymousClaimRetryMigration).toContain("'owner_active'::TEXT");
+        expect(anonymousClaimRetryMigration).toContain("status = 'expired'");
+        expect(anonymousClaimRetryMigration).toContain('claim_token_hash = NULL');
+        expect(anonymousClaimRetryMigration).toContain(
+            'GRANT EXECUTE ON FUNCTION public.claim_anonymous_analysis_v2_preflight(UUID, VARCHAR, UUID)',
+        );
     });
 });
