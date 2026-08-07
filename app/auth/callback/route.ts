@@ -163,6 +163,14 @@ function anonymousClaimRestoreErrorCode(error: unknown): AnonymousClaimRestoreEr
     return 'PREFLIGHT_PERSISTENCE_ERROR';
 }
 
+function anonymousClaimRpcCode(error: unknown): string {
+    if (!error || typeof error !== 'object') return 'unknown';
+    const code = (error as { rpcCode?: unknown }).rpcCode;
+    return typeof code === 'string' && /^[A-Za-z0-9_]{1,32}$/.test(code)
+        ? code
+        : 'unknown';
+}
+
 async function restoreAnonymousPreflightClaim(
     requestUrl: string,
     rawNext: string | null,
@@ -234,6 +242,10 @@ async function restoreAnonymousPreflightClaim(
             // A provider can preserve a malformed/stale continuation while the
             // same-browser signed claim remains valid in the fallback cookie.
             // Try that bounded, same-preflight capability before failing closed.
+            console.warn('Auth callback anonymous preflight claim RPC failed', {
+                operation: 'claim',
+                rpc_code: anonymousClaimRpcCode(error),
+            });
             errorCode = anonymousClaimRestoreErrorCode(error);
         }
     }
@@ -319,7 +331,8 @@ async function handleGET(
     // otherwise the claim is evaluated as the public anon role and fails before
     // the RLS boundary can transfer ownership. This client is still anon-key
     // backed, so the database policy—not the service role—remains authoritative.
-    const claimClient = exchange?.session?.access_token
+    const claimAccessToken = exchange?.session?.access_token;
+    const claimClient = claimAccessToken
         ? createAccessTokenClient(
             process.env.NEXT_PUBLIC_SUPABASE_URL!,
             process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!,
@@ -328,7 +341,16 @@ async function handleGET(
                     autoRefreshToken: false,
                     persistSession: false,
                 },
-                accessToken: async () => exchange.session.access_token,
+                // Keep the authorization identity explicit on the request. The
+                // accessToken callback is the normal Supabase path, while this
+                // header also protects the RLS claim RPC from a server-runtime
+                // client losing the exchanged session between requests.
+                global: {
+                    headers: {
+                        Authorization: `Bearer ${claimAccessToken}`,
+                    },
+                },
+                accessToken: async () => claimAccessToken,
             },
         )
         : supabase;
