@@ -143,40 +143,104 @@ function redirectAndClearOAuthIntent(url: URL): NextResponse {
     return response;
 }
 
+type AnonymousClaimRestoreErrorCode = 'UNAUTHORIZED' | 'PREFLIGHT_PERSISTENCE_ERROR';
+
+interface AnonymousClaimRestoreResult {
+    redirectUrl: URL;
+    errorCode?: AnonymousClaimRestoreErrorCode;
+}
+
+function anonymousClaimRestoreErrorCode(error: unknown): AnonymousClaimRestoreErrorCode {
+    if (
+        error instanceof Error
+        && (
+            error.name === 'AnonymousPreflightClaimInvalidError'
+            || error.message === 'ANONYMOUS_PREFLIGHT_CLAIM_INVALID'
+            || error.message.startsWith('ANONYMOUS_PREFLIGHT_INVALID_')
+        )
+    ) return 'UNAUTHORIZED';
+    return 'PREFLIGHT_PERSISTENCE_ERROR';
+}
+
 async function restoreAnonymousPreflightClaim(
     requestUrl: string,
     rawNext: string | null,
     userId: string | undefined,
     client: AnonymousPreflightClient,
-): Promise<URL> {
-    const redirectUrl = appRedirectUrlForRequest(requestUrl, rawNext);
-    const preflightId = redirectUrl.searchParams.get('preflight');
-    const claimToken = redirectUrl.searchParams.get('claim');
-    if (!preflightId && !claimToken) return redirectUrl;
+    browserClaimFallback: string | null = null,
+): Promise<AnonymousClaimRestoreResult> {
+    const candidates = [rawNext];
     if (
-        redirectUrl.pathname !== '/analyze'
-        || !userId
-        || !preflightId
-        || !UUID_PATTERN.test(preflightId)
-        || !claimToken
+        browserClaimFallback
+        && browserClaimFallback !== rawNext
+        && rawNext
     ) {
-        return new URL('/analyze?claim=restore_failed', appOriginForRequest(requestUrl));
-    }
-    try {
-        const claimed = await claimAnonymousAnalysisV2Preflight(
-            preflightId,
-            claimToken,
-            userId,
-            { client },
-        );
-        if (!claimed) {
-            return new URL('/analyze?claim=restore_failed', appOriginForRequest(requestUrl));
+        try {
+            const primaryUrl = appRedirectUrlForRequest(requestUrl, rawNext);
+            const fallbackUrl = appRedirectUrlForRequest(requestUrl, browserClaimFallback);
+            const primaryPreflightId = primaryUrl.searchParams.get('preflight');
+            const fallbackPreflightId = fallbackUrl.searchParams.get('preflight');
+            // A browser cookie is a fallback only for the same bounded preflight.
+            // This prevents a provider-supplied explicit destination from being
+            // combined with a claim for another anonymous request.
+            if (
+                primaryUrl.pathname === '/analyze'
+                && fallbackUrl.pathname === '/analyze'
+                && primaryPreflightId
+                && UUID_PATTERN.test(primaryPreflightId)
+                && fallbackPreflightId
+                && UUID_PATTERN.test(fallbackPreflightId)
+                && primaryPreflightId.toLowerCase() === fallbackPreflightId.toLowerCase()
+                && fallbackUrl.searchParams.get('claim')
+            ) {
+                candidates.push(browserClaimFallback);
+            }
+        } catch {
+            // appRedirectUrlForRequest performs the final redirect validation.
         }
-        redirectUrl.searchParams.delete('claim');
-        return redirectUrl;
-    } catch {
-        return new URL('/analyze?claim=restore_failed', appOriginForRequest(requestUrl));
     }
+
+    let errorCode: AnonymousClaimRestoreErrorCode | undefined;
+    for (const candidate of candidates) {
+        const redirectUrl = appRedirectUrlForRequest(requestUrl, candidate);
+        const preflightId = redirectUrl.searchParams.get('preflight');
+        const claimToken = redirectUrl.searchParams.get('claim');
+        if (!preflightId && !claimToken) return { redirectUrl };
+        if (
+            redirectUrl.pathname !== '/analyze'
+            || !userId
+            || !preflightId
+            || !UUID_PATTERN.test(preflightId)
+            || !claimToken
+        ) {
+            errorCode = 'UNAUTHORIZED';
+            continue;
+        }
+        try {
+            const claimed = await claimAnonymousAnalysisV2Preflight(
+                preflightId,
+                claimToken,
+                userId,
+                { client },
+            );
+            if (!claimed) {
+                errorCode = 'UNAUTHORIZED';
+                continue;
+            }
+            redirectUrl.searchParams.delete('claim');
+            return { redirectUrl };
+        } catch (error) {
+            // A provider can preserve a malformed/stale continuation while the
+            // same-browser signed claim remains valid in the fallback cookie.
+            // Try that bounded, same-preflight capability before failing closed.
+            errorCode = anonymousClaimRestoreErrorCode(error);
+        }
+    }
+
+    return {
+        redirectUrl: new URL('/analyze?claim=restore_failed', appOriginForRequest(requestUrl)),
+        errorCode: errorCode ?? 'UNAUTHORIZED',
+    };
 }
 
 async function handleGET(
@@ -300,26 +364,30 @@ async function handleGET(
         if (typeof deleteAttributionCookie === 'function') deleteAttributionCookie(KAKAO_ATTRIBUTION_COOKIE);
     }
 
-    const redirectUrl = await restoreAnonymousPreflightClaim(
+    const selectedRedirectIntent = selectOAuthRedirectIntent(
+        callbackContinuation ?? searchParams.get('next'),
+        cookieNext,
+    );
+    const claimRestore = await restoreAnonymousPreflightClaim(
         request.url,
-        selectOAuthRedirectIntent(
-            callbackContinuation ?? searchParams.get('next'),
-            cookieNext,
-        ),
+        selectedRedirectIntent,
         authedUser?.id,
         supabase,
+        selectedRedirectIntent !== cookieNext ? cookieNext : null,
     );
+    const redirectUrl = claimRestore.redirectUrl;
     redirectUrl.searchParams.set('verified', 'true');
 
     operationalLogger.emit({
         event: 'auth.callback_completed',
-        severity: 'info',
+        severity: claimRestore.errorCode ? 'warn' : 'info',
         fields: {
             ...context,
             ...(authedUser ? { user_id: authedUser.id } : {}),
             ...(provider ? { provider } : {}),
             operation: 'callback',
             disposition: 'completed',
+            ...(claimRestore.errorCode ? { error_code: claimRestore.errorCode } : {}),
         },
     });
 
