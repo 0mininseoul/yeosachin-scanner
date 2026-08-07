@@ -23,6 +23,7 @@ import {
 } from '@/lib/services/analysis/anonymous-preflight';
 import {
     AUTH_REDIRECT_INTENT_COOKIE,
+    readAnonymousPreflightOAuthContinuation,
     readOAuthRedirectIntent,
     selectOAuthRedirectIntent,
 } from '@/lib/services/auth/oauth-redirect-intent';
@@ -186,6 +187,7 @@ async function handleGET(
     const code = searchParams.get('code');
     const appOrigin = appOriginForRequest(request.url);
     const cookieNext = readOAuthRedirectIntent(request.headers.get('cookie'));
+    const callbackContinuation = readAnonymousPreflightOAuthContinuation(searchParams);
 
     if (!code) {
         console.error('Auth callback: No code provided');
@@ -300,7 +302,10 @@ async function handleGET(
 
     const redirectUrl = await restoreAnonymousPreflightClaim(
         request.url,
-        selectOAuthRedirectIntent(searchParams.get('next'), cookieNext),
+        selectOAuthRedirectIntent(
+            callbackContinuation ?? searchParams.get('next'),
+            cookieNext,
+        ),
         authedUser?.id,
         supabase,
     );

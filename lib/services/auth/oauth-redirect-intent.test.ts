@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 
 import {
+    addAnonymousPreflightOAuthContinuation,
     AUTH_REDIRECT_INTENT_COOKIE,
     AUTH_REDIRECT_INTENT_TTL_SECONDS,
     readOAuthRedirectIntent,
@@ -10,6 +11,22 @@ import {
 } from './oauth-redirect-intent';
 
 describe('OAuth redirect intent', () => {
+    it('duplicates an anonymous preflight continuation at the callback top level', () => {
+        const callbackUrl = new URL('https://yeosachin.com/auth/callback');
+        const destination = new URL(
+            'https://yeosachin.com/analyze?preflight=223e4567-e89b-42d3-a456-426614174000&claim=signed&plan=standard&checkout=1',
+        );
+
+        addAnonymousPreflightOAuthContinuation(callbackUrl, destination);
+
+        expect(callbackUrl.searchParams.get('next')).toBe('/analyze');
+        expect(callbackUrl.searchParams.get('preflight'))
+            .toBe('223e4567-e89b-42d3-a456-426614174000');
+        expect(callbackUrl.searchParams.get('claim')).toBe('signed');
+        expect(callbackUrl.searchParams.get('plan')).toBe('standard');
+        expect(callbackUrl.searchParams.get('checkout')).toBe('1');
+    });
+
     it('writes a bounded same-site cookie for the browser handoff', () => {
         const writes: string[] = [];
 
