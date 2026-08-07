@@ -1,4 +1,5 @@
 import { createServerClient } from '@supabase/ssr';
+import { createClient as createAccessTokenClient } from '@supabase/supabase-js';
 import { cookies } from 'next/headers';
 import { after, NextResponse } from 'next/server';
 import { supabaseAdmin } from '@/lib/supabase/admin';
@@ -312,6 +313,26 @@ async function handleGET(
     // 세션 검증을 통해 쿠키 설정 강제 (setAll 트리거)
     await supabase.auth.getUser();
 
+    // The claim RPC is SECURITY INVOKER and its UPDATE policy is granted only
+    // to `authenticated`. The server cookie client has just exchanged the code,
+    // but its PostgREST request must still carry that access token explicitly;
+    // otherwise the claim is evaluated as the public anon role and fails before
+    // the RLS boundary can transfer ownership. This client is still anon-key
+    // backed, so the database policy—not the service role—remains authoritative.
+    const claimClient = exchange?.session?.access_token
+        ? createAccessTokenClient(
+            process.env.NEXT_PUBLIC_SUPABASE_URL!,
+            process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!,
+            {
+                auth: {
+                    autoRefreshToken: false,
+                    persistSession: false,
+                },
+                accessToken: async () => exchange.session.access_token,
+            },
+        )
+        : supabase;
+
     // 카카오: REST API로 성별·출생연도·전화번호 등 보강 저장
     const session = exchange?.session;
     const authedUser = exchange?.user;
@@ -372,7 +393,7 @@ async function handleGET(
         request.url,
         selectedRedirectIntent,
         authedUser?.id,
-        supabase,
+        claimClient,
         selectedRedirectIntent !== cookieNext ? cookieNext : null,
     );
     const redirectUrl = claimRestore.redirectUrl;
