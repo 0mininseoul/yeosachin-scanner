@@ -107,6 +107,7 @@ export function EarlybirdStatus({ order }: { order: EarlybirdOrderStatusDto }) {
         setCheckoutRecoveryError(null);
         await recoverPendingEarlybirdCheckout(
             order.preflightId,
+            order.planId,
             checkoutRecoveryGuardRef.current,
             {
                 request: fetch,

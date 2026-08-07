@@ -222,6 +222,7 @@ function pendingCheckoutRecoveryErrorMessage(code: string | null): string {
 
 export async function recoverPendingEarlybirdCheckout(
     preflightId: string,
+    planId: 'basic' | 'standard',
     guard: EarlybirdCheckoutRecoveryGuard,
     dependencies: PendingEarlybirdRecoveryDependencies
 ): Promise<'checkout_recovered' | 'already_in_progress' | 'recovery_failed'> {
@@ -232,7 +233,7 @@ export async function recoverPendingEarlybirdCheckout(
         const response = await dependencies.request('/api/earlybird/checkout', {
             method: 'PUT',
             headers: { 'content-type': 'application/json' },
-            body: JSON.stringify({ preflightId }),
+            body: JSON.stringify({ preflightId, planId }),
         });
         const payload: unknown = await response.json().catch(() => null);
         if (

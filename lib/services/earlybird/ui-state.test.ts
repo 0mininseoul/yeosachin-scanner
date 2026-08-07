@@ -462,6 +462,7 @@ describe('earlybird analyze UI state', () => {
             earlybirdUiState as unknown as {
                 recoverPendingEarlybirdCheckout?: (
                     preflightId: string,
+                    planId: 'basic' | 'standard',
                     guard: { inFlight: boolean },
                     dependencies: Record<string, unknown>
                 ) => Promise<string>;
@@ -485,8 +486,8 @@ describe('earlybird analyze UI state', () => {
             showError,
         };
 
-        const first = recover!(preflightId, guard, dependencies);
-        await expect(recover!(preflightId, guard, dependencies)).resolves.toBe(
+        const first = recover!(preflightId, 'basic', guard, dependencies);
+        await expect(recover!(preflightId, 'basic', guard, dependencies)).resolves.toBe(
             'already_in_progress'
         );
         expect(request).toHaveBeenCalledTimes(1);
@@ -506,7 +507,7 @@ describe('earlybird analyze UI state', () => {
         expect(request).toHaveBeenCalledWith('/api/earlybird/checkout', {
             method: 'PUT',
             headers: { 'content-type': 'application/json' },
-            body: JSON.stringify({ preflightId }),
+            body: JSON.stringify({ preflightId, planId: 'basic' }),
         });
         expect(redirectCheckout).toHaveBeenCalledOnce();
         expect(showError).not.toHaveBeenCalled();
@@ -632,6 +633,7 @@ describe('earlybird analyze UI state', () => {
             earlybirdUiState as unknown as {
                 recoverPendingEarlybirdCheckout: (
                     preflightId: string,
+                    planId: 'basic' | 'standard',
                     guard: { inFlight: boolean },
                     dependencies: Record<string, unknown>
                 ) => Promise<string>;
@@ -641,6 +643,7 @@ describe('earlybird analyze UI state', () => {
 
         await expect(recover(
             '10000000-0000-4000-8000-000000000001',
+            'basic',
             { inFlight: false },
             {
                 request: vi.fn().mockResolvedValue(new Response(JSON.stringify({
@@ -684,7 +687,8 @@ describe('earlybird analyze UI state', () => {
         expect(source).toContain('const visibleError = activeCheckoutStatusCta?.message ?? error;');
         expect(source).not.toContain("setError('기존 결제 처리 상태를 먼저 확인해주세요.')");
         expect(source).toContain('recoverPendingEarlybirdCheckout(');
-        expect(source).toContain('lineageStatusAction.kind === \'active_pending\' && autoCheckoutAttempt');
+        expect(source).toContain("lineageStatusAction.kind === 'active_pending'");
+        expect(source).toContain('autoCheckoutAttempt');
         expect(source).toContain('checkoutRecoveryGuardRef.current');
         expect(source).toContain('setPending: setPurchaseSubmitting');
     });

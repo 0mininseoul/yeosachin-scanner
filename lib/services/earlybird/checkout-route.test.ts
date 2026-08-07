@@ -92,6 +92,7 @@ function recoveryOrderRow(overrides: Record<string, unknown> = {}) {
         id: ORDER_ID,
         user_id: USER_ID,
         preflight_id: PREFLIGHT_ID,
+        target_instagram_id: 'target.account',
         plan_id: 'basic',
         pricing_version: 'earlybird-2026-07-v1',
         expected_amount_krw: 14_900,
@@ -369,6 +370,7 @@ describe('earlybird checkout and waitlist routes', () => {
         const { ownerFilter, userFilter } = installRecoveryOrder(recoveryOrderRow());
         const response = await recoverCheckout({
             preflightId: PREFLIGHT_ID,
+            planId: 'basic',
         });
 
         expect(response.status).toBe(200);
@@ -382,7 +384,7 @@ describe('earlybird checkout and waitlist routes', () => {
         expect(ownerFilter).toHaveBeenCalledWith('user_id', USER_ID);
         expect(mocks.from).toHaveBeenCalledWith('users');
         expect(userFilter).toHaveBeenCalledWith('id', USER_ID);
-        expect(mocks.findForOwner).not.toHaveBeenCalled();
+        expect(mocks.findForOwner).toHaveBeenCalledWith(PREFLIGHT_ID, USER_ID);
         expect(mocks.rpc).not.toHaveBeenCalled();
 
         mocks.from.mockClear();
@@ -397,6 +399,70 @@ describe('earlybird checkout and waitlist routes', () => {
         expect(mocks.from).not.toHaveBeenCalled();
     });
 
+    it('recovers a pending checkout from an older preflight when the current target and plan match', async () => {
+        const filters = new Map<string, unknown>();
+        const fallbackOrder = recoveryOrderRow({
+            preflight_id: '123e4567-e89b-42d3-a456-426614174004',
+            target_instagram_id: 'target.account',
+            plan_id: 'standard',
+            pricing_version: 'earlybird-2026-08-v3',
+            expected_amount_krw: 1_990,
+            expected_groble_product_id: 'standard_product-01',
+            disclosure_version: 'earlybird-auto-start-v2',
+            disclosure_text: '결제 확인 후 판독이 자동으로 시작됩니다.',
+        });
+        const exactOrderQuery = {
+            select: vi.fn(),
+            eq: vi.fn((key: string, value: unknown) => {
+                filters.set(key, value);
+                return exactOrderQuery;
+            }),
+            maybeSingle: vi.fn().mockResolvedValue({
+                data: null,
+                error: null,
+            }),
+        };
+        exactOrderQuery.select.mockReturnValue(exactOrderQuery);
+        const lineageOrderQuery = {
+            select: vi.fn(),
+            eq: vi.fn((key: string, value: unknown) => {
+                filters.set(key, value);
+                return lineageOrderQuery;
+            }),
+            maybeSingle: vi.fn().mockResolvedValue({
+                data: fallbackOrder,
+                error: null,
+            }),
+        };
+        lineageOrderQuery.select.mockReturnValue(lineageOrderQuery);
+        const userQuery = recoveryQuery(currentPhoneRow());
+        let orderQueryCalls = 0;
+        mocks.from.mockImplementation((table: string) => {
+            if (table === 'earlybird_orders') {
+                orderQueryCalls += 1;
+                return orderQueryCalls === 1 ? exactOrderQuery : lineageOrderQuery;
+            }
+            if (table === 'users') return userQuery;
+            throw new Error(`unexpected table: ${table}`);
+        });
+
+        const response = await recoverCheckout({
+            preflightId: PREFLIGHT_ID,
+            planId: 'standard',
+        });
+
+        expect(response.status).toBe(200);
+        await expect(response.json()).resolves.toEqual({
+            orderId: ORDER_ID,
+            checkoutUrl: 'https://groble.im/payment/standard-checkout-b2'
+                + `?ref=${SELLER_REFERENCE}`,
+        });
+        expect(mocks.findForOwner).toHaveBeenCalledWith(PREFLIGHT_ID, USER_ID);
+        expect(lineageOrderQuery.eq).toHaveBeenCalledWith('target_instagram_id', 'target.account');
+        expect(lineageOrderQuery.eq).toHaveBeenCalledWith('plan_id', 'standard');
+        expect(lineageOrderQuery.eq).toHaveBeenCalledWith('status', 'payment_pending');
+    });
+
     it('recovers an immutable v2 pending checkout at its original price', async () => {
         installRecoveryOrder(recoveryOrderRow({
             pricing_version: 'earlybird-2026-07-v2',
@@ -405,7 +471,10 @@ describe('earlybird checkout and waitlist routes', () => {
             disclosure_text: '결제 확인 후 판독이 자동으로 시작됩니다.',
         }));
 
-        const response = await recoverCheckout({ preflightId: PREFLIGHT_ID });
+        const response = await recoverCheckout({
+            preflightId: PREFLIGHT_ID,
+            planId: 'basic',
+        });
 
         expect(response.status).toBe(200);
         await expect(response.json()).resolves.toMatchObject({ orderId: ORDER_ID });
@@ -413,7 +482,10 @@ describe('earlybird checkout and waitlist routes', () => {
 
     it('requires authentication and same-origin JSON for checkout recovery', async () => {
         authenticate(null);
-        expect((await recoverCheckout({ preflightId: PREFLIGHT_ID })).status).toBe(401);
+        expect((await recoverCheckout({
+            preflightId: PREFLIGHT_ID,
+            planId: 'basic',
+        })).status).toBe(401);
         expect(mocks.from).not.toHaveBeenCalled();
 
         authenticate();
@@ -426,7 +498,10 @@ describe('earlybird checkout and waitlist routes', () => {
 
     it('does not expose another owner order and never recovers paid or cancelled checkout state', async () => {
         installRecoveryOrder(null);
-        const hidden = await recoverCheckout({ preflightId: PREFLIGHT_ID });
+        const hidden = await recoverCheckout({
+            preflightId: PREFLIGHT_ID,
+            planId: 'basic',
+        });
         expect(hidden.status).toBe(404);
         await expect(hidden.json()).resolves.toEqual({
             code: 'EARLYBIRD_CHECKOUT_RECOVERY_NOT_FOUND',
@@ -435,7 +510,10 @@ describe('earlybird checkout and waitlist routes', () => {
 
         for (const status of ['paid', 'cancelled'] as const) {
             installRecoveryOrder(recoveryOrderRow({ status }));
-            const conflict = await recoverCheckout({ preflightId: PREFLIGHT_ID });
+            const conflict = await recoverCheckout({
+                preflightId: PREFLIGHT_ID,
+                planId: 'basic',
+            });
             expect(conflict.status).toBe(409);
             const body = await conflict.json();
             expect(body).toEqual({
@@ -481,7 +559,10 @@ describe('earlybird checkout and waitlist routes', () => {
             ],
         ] as const) {
             installRecoveryOrder(recoveryOrderRow(), currentPhone);
-            const response = await recoverCheckout({ preflightId: PREFLIGHT_ID });
+            const response = await recoverCheckout({
+                preflightId: PREFLIGHT_ID,
+                planId: 'basic',
+            });
             expect(response.status).toBe(409);
             const body = await response.json();
             expect(body).toEqual(expected);
@@ -498,7 +579,10 @@ describe('earlybird checkout and waitlist routes', () => {
             { groble_seller_reference: null },
         ]) {
             installRecoveryOrder(recoveryOrderRow(overrides));
-            const response = await recoverCheckout({ preflightId: PREFLIGHT_ID });
+            const response = await recoverCheckout({
+                preflightId: PREFLIGHT_ID,
+                planId: 'basic',
+            });
             expect(response.status).toBe(409);
             await expect(response.json()).resolves.toEqual({
                 code: 'EARLYBIRD_CHECKOUT_NOT_RECOVERABLE',

@@ -448,9 +448,14 @@ const DISCLOSURE_ACCEPTED = true;
                     effectiveSelectedPlan
                 );
                 if (lineageStatusAction) {
-                    if (lineageStatusAction.kind === 'active_pending' && autoCheckoutAttempt) {
+                    if (
+                        lineageStatusAction.kind === 'active_pending'
+                        && autoCheckoutAttempt
+                        && isPaidEarlybirdPlanId(effectiveSelectedPlan)
+                    ) {
                         const recoveryResult = await recoverPendingEarlybirdCheckout(
                             readyPreflight.preflightId,
+                            effectiveSelectedPlan,
                             checkoutRecoveryGuardRef.current,
                             {
                                 request: fetch,

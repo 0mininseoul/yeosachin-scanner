@@ -365,10 +365,16 @@ async function handlePUT(request: Request): Promise<NextResponse> {
     }
 
     try {
+        const ownerPreflight = await preflightStore.findForOwner(
+            parsed.data.preflightId,
+            user.id,
+        );
         const currentPhone = await loadCurrentEarlybirdCheckoutPhone(user.id);
         const result = await recoverEarlybirdCheckout({
             userId: user.id,
             preflightId: parsed.data.preflightId,
+            planId: parsed.data.planId,
+            targetInstagramId: ownerPreflight?.readySnapshot?.target.username ?? null,
             currentPhone,
         });
         return NextResponse.json({
