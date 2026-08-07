@@ -6,6 +6,12 @@ export function isCheckoutContinuationRequested(params: URLSearchParams): boolea
     return params.get(AUTO_CHECKOUT_QUERY_PARAM) === '1';
 }
 
+export function checkoutContinuationPlan(params: URLSearchParams): PlanId | null {
+    if (!isCheckoutContinuationRequested(params)) return null;
+    const plan = params.get('plan');
+    return plan === 'basic' || plan === 'standard' || plan === 'plus' ? plan : null;
+}
+
 export function checkoutContinuationKey(preflightId: string, planId: PlanId): string {
     return `${preflightId}:${planId}`;
 }
@@ -15,6 +21,8 @@ export function shouldAutoSubmitEarlybirdAction(input: {
     authenticated: boolean;
     ready: boolean;
     preflightId: string | null;
+    requestedPreflightId: string | null;
+    requestedPlanId: PlanId | null;
     planId: PlanId | null;
     exclusionDecided: boolean;
     planAvailable: boolean;
@@ -26,7 +34,11 @@ export function shouldAutoSubmitEarlybirdAction(input: {
         || !input.authenticated
         || !input.ready
         || !input.preflightId
+        || !input.requestedPreflightId
+        || !input.requestedPlanId
         || !input.planId
+        || input.requestedPreflightId !== input.preflightId
+        || input.requestedPlanId !== input.planId
         || !input.exclusionDecided
         || !input.planAvailable
         || input.submitting
