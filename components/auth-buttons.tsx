@@ -6,6 +6,7 @@ import {
     appOriginForRequest,
     appRedirectUrlForRequest,
 } from '@/lib/constants/app-url';
+import { writeOAuthRedirectIntentCookie } from '@/lib/services/auth/oauth-redirect-intent';
 import {
     availableAnalyticsSessionStorage,
     beginPendingAuthEvent,
@@ -72,10 +73,16 @@ export function AuthButtons({
             const supabase = createClient();
             const appOrigin = appOriginForRequest(window.location.href);
             const nextUrl = appRedirectUrlForRequest(window.location.href, redirectTo);
+            const nextPath = `${nextUrl.pathname}${nextUrl.search}${nextUrl.hash}`;
+            writeOAuthRedirectIntentCookie(
+                nextPath,
+                value => { document.cookie = value; },
+                window.location.protocol === 'https:',
+            );
             const callbackUrl = new URL('/auth/callback', appOrigin);
             callbackUrl.searchParams.set(
                 'next',
-                `${nextUrl.pathname}${nextUrl.search}${nextUrl.hash}`
+                nextPath
             );
             // 카카오는 승인된 동의항목(이름·성별·출생연도·전화번호 등)을 받기 위해 scope를 명시.
             // 구글은 기본 scope(email·profile) 사용.
