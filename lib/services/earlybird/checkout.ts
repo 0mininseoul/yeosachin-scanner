@@ -149,18 +149,29 @@ export async function createEarlybirdCheckout(input: {
 export async function recoverEarlybirdCheckout(input: {
     userId: string;
     preflightId: string;
+    planId: 'basic' | 'standard';
+    targetInstagramId: string | null;
     currentPhone: CurrentEarlybirdCheckoutPhone;
 }) {
     const record = await earlybirdStore.findCheckoutForRecovery(
         input.userId,
-        input.preflightId
+        input.preflightId,
+        input.targetInstagramId,
+        input.planId,
     );
     if (!record) {
         throw new EarlybirdCheckoutRecoveryError(
             'EARLYBIRD_CHECKOUT_RECOVERY_NOT_FOUND'
         );
     }
-    if (record.status !== 'payment_pending') {
+    if (
+        record.status !== 'payment_pending'
+        || record.planId !== input.planId
+        || (
+            input.targetInstagramId !== null
+            && record.targetInstagramId !== input.targetInstagramId
+        )
+    ) {
         throw new EarlybirdCheckoutRecoveryError(
             'EARLYBIRD_CHECKOUT_NOT_RECOVERABLE'
         );
