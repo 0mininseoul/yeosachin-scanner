@@ -146,6 +146,28 @@ describe('OAuth callback redirects', () => {
         );
     });
 
+    it('claims when the OAuth callback carries the preflight continuation at top level', async () => {
+        const userId = '123e4567-e89b-42d3-a456-426614174000';
+        mocks.exchangeCodeForSession.mockResolvedValue({
+            data: { session: {}, user: { id: userId, app_metadata: { provider: 'kakao' } } },
+            error: null,
+        });
+        const claimToken = 'v1.signed-claim-value.signature-value';
+        const response = await GET(new Request(
+            `https://preview.example/auth/callback?code=oauth-code&next=%2Fanalyze&preflight=223e4567-e89b-42d3-a456-426614174000&claim=${encodeURIComponent(claimToken)}&plan=standard&checkout=1`,
+        ));
+
+        expect(mocks.claimAnonymousPreflight).toHaveBeenCalledWith(
+            '223e4567-e89b-42d3-a456-426614174000',
+            claimToken,
+            userId,
+            expect.objectContaining({ client: expect.any(Object) }),
+        );
+        expect(response.headers.get('location')).toBe(
+            `${CANONICAL_APP_ORIGIN}/analyze?preflight=223e4567-e89b-42d3-a456-426614174000&plan=standard&checkout=1&verified=true`
+        );
+    });
+
     it('claims when the provider returns a partial destination but the browser intent retains the claim', async () => {
         const userId = '123e4567-e89b-42d3-a456-426614174000';
         mocks.exchangeCodeForSession.mockResolvedValue({

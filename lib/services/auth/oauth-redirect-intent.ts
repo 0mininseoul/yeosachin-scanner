@@ -2,6 +2,53 @@ export const AUTH_REDIRECT_INTENT_COOKIE = 'auth_redirect_intent';
 export const AUTH_REDIRECT_INTENT_TTL_SECONDS = 30 * 60;
 
 const MAX_REDIRECT_INTENT_LENGTH = 2_048;
+const OAUTH_CONTINUATION_PARAMETERS = ['plan', 'checkout'] as const;
+
+/**
+ * Keep the anonymous preflight capability in the OAuth callback URL itself.
+ * Some providers preserve the callback path but normalize or drop a nested
+ * `next` value. The claim is still verified by the callback and the database;
+ * this helper only duplicates the already bounded internal destination.
+ */
+export function addAnonymousPreflightOAuthContinuation(
+    callbackUrl: URL,
+    destination: URL,
+): void {
+    if (destination.pathname !== '/analyze') return;
+    const preflight = destination.searchParams.get('preflight');
+    const claim = destination.searchParams.get('claim');
+    if (!preflight || !claim) return;
+
+    callbackUrl.searchParams.set('next', '/analyze');
+    callbackUrl.searchParams.set('preflight', preflight);
+    callbackUrl.searchParams.set('claim', claim);
+    for (const parameter of OAUTH_CONTINUATION_PARAMETERS) {
+        const value = destination.searchParams.get(parameter);
+        if (value) callbackUrl.searchParams.set(parameter, value);
+    }
+}
+
+/**
+ * Rebuild the bounded analyze destination from the callback's direct
+ * continuation parameters. Only values needed to resume checkout are copied;
+ * arbitrary callback query parameters never become a redirect target.
+ */
+export function readAnonymousPreflightOAuthContinuation(
+    searchParams: URLSearchParams,
+): string | null {
+    const preflight = searchParams.get('preflight');
+    const claim = searchParams.get('claim');
+    if (!preflight || !claim) return null;
+
+    const destination = new URL('/analyze', 'https://oauth-intent.invalid');
+    destination.searchParams.set('preflight', preflight);
+    destination.searchParams.set('claim', claim);
+    for (const parameter of OAUTH_CONTINUATION_PARAMETERS) {
+        const value = searchParams.get(parameter);
+        if (value) destination.searchParams.set(parameter, value);
+    }
+    return `${destination.pathname}${destination.search}`;
+}
 
 export function serializeOAuthRedirectIntent(
     nextPath: string,
