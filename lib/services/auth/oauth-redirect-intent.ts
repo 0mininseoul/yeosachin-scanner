@@ -60,5 +60,31 @@ export function selectOAuthRedirectIntent(
     // site root. Prefer the browser-bound intent in that case; the callback
     // still validates the selected path and claim token server-side.
     if (cookieNext && (!explicit || explicit === '/')) return cookieNext;
+
+    // Some providers preserve the analyze path and ordinary query parameters
+    // but drop the signed claim from a nested callback destination. A claim is
+    // a browser-bound capability, so recover it only when the explicit
+    // destination is the same analyze flow and does not contain a claim of its
+    // own. A different preflight remains authoritative and is not merged.
+    if (explicit && cookieNext) {
+        try {
+            const explicitUrl = new URL(explicit, 'https://oauth-intent.invalid');
+            const cookieUrl = new URL(cookieNext, 'https://oauth-intent.invalid');
+            const cookiePreflight = cookieUrl.searchParams.get('preflight');
+            const cookieClaim = cookieUrl.searchParams.get('claim');
+            const explicitPreflight = explicitUrl.searchParams.get('preflight');
+            if (
+                explicitUrl.pathname === '/analyze'
+                && cookieUrl.pathname === '/analyze'
+                && cookiePreflight
+                && cookieClaim
+                && !explicitUrl.searchParams.has('claim')
+                && explicitPreflight === cookiePreflight
+            ) return cookieNext;
+        } catch {
+            // appRedirectUrlForRequest performs the final redirect validation.
+        }
+    }
+
     return explicit ?? cookieNext;
 }
