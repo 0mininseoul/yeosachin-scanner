@@ -46,4 +46,24 @@ describe('OAuth redirect intent', () => {
             claimIntent,
         )).toBe(claimIntent);
     });
+
+    it('does not inherit a stale claim when the explicit preflight is missing', () => {
+        const claimIntent = '/analyze?preflight=223e4567-e89b-42d3-a456-426614174000&claim=signed&plan=standard&checkout=1';
+
+        expect(selectOAuthRedirectIntent('/analyze', claimIntent)).toBe('/analyze');
+    });
+
+    it('does not merge a claim across different preflights', () => {
+        const claimIntent = '/analyze?preflight=223e4567-e89b-42d3-a456-426614174000&claim=signed&plan=standard&checkout=1';
+        const explicit = '/analyze?preflight=323e4567-e89b-42d3-a456-426614174000&plan=standard&checkout=1';
+
+        expect(selectOAuthRedirectIntent(explicit, claimIntent)).toBe(explicit);
+    });
+
+    it('keeps an explicit claim authoritative', () => {
+        const cookieIntent = '/analyze?preflight=223e4567-e89b-42d3-a456-426614174000&claim=cookie&plan=standard&checkout=1';
+        const explicit = '/analyze?preflight=223e4567-e89b-42d3-a456-426614174000&claim=explicit&plan=standard&checkout=1';
+
+        expect(selectOAuthRedirectIntent(explicit, cookieIntent)).toBe(explicit);
+    });
 });

@@ -79,7 +79,7 @@ export function selectOAuthRedirectIntent(
                 && cookiePreflight
                 && cookieClaim
                 && !explicitUrl.searchParams.has('claim')
-                && (!explicitPreflight || explicitPreflight === cookiePreflight)
+                && explicitPreflight === cookiePreflight
             ) return cookieNext;
         } catch {
             // appRedirectUrlForRequest performs the final redirect validation.
