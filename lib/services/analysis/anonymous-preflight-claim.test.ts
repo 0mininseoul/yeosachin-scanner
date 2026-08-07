@@ -18,12 +18,12 @@ describe('anonymous preflight claim tokens', () => {
             randomBytes: () => Buffer.from('0123456789abcdefghijklmnop'),
         });
 
-        expect(claim.expiresAt).toBe('2026-08-05T00:10:00.000Z');
+        expect(claim.expiresAt).toBe('2026-08-05T00:30:00.000Z');
         expect(claim.token).toMatch(/^v1\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$/);
         expect(claim.token).not.toContain('instagram');
         expect(claim.tokenHash).toBe(hashAnonymousPreflightClaim(claim.token));
         expect(readAnonymousPreflightClaim(claim.token, {
-            nowMs: Date.parse('2026-08-05T00:09:59.000Z'),
+            nowMs: Date.parse('2026-08-05T00:29:59.000Z'),
             env,
         })).toEqual({ expiresAt: claim.expiresAt });
     });
@@ -37,7 +37,7 @@ describe('anonymous preflight claim tokens', () => {
 
         expect(readAnonymousPreflightClaim(`${claim.token}x`, { env })).toBeNull();
         expect(readAnonymousPreflightClaim(claim.token, {
-            nowMs: Date.parse('2026-08-05T00:10:00.000Z'),
+            nowMs: Date.parse('2026-08-05T00:30:00.000Z'),
             env,
         })).toBeNull();
         expect(readAnonymousPreflightClaim(claim.token, {
