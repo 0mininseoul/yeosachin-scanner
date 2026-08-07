@@ -64,10 +64,10 @@ describe('OAuth redirect intent', () => {
         )).toBe(claimIntent);
     });
 
-    it('does not inherit a stale claim when the explicit preflight is missing', () => {
+    it('restores the browser claim when the provider keeps only the analyze path', () => {
         const claimIntent = '/analyze?preflight=223e4567-e89b-42d3-a456-426614174000&claim=signed&plan=standard&checkout=1';
 
-        expect(selectOAuthRedirectIntent('/analyze', claimIntent)).toBe('/analyze');
+        expect(selectOAuthRedirectIntent('/analyze', claimIntent)).toBe(claimIntent);
     });
 
     it('does not merge a claim across different preflights', () => {
