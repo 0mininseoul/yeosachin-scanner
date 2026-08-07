@@ -444,10 +444,15 @@ export function useAnalysisV2Preflight({
             const responseCode = payload && typeof payload === 'object' && !Array.isArray(payload)
                 ? Reflect.get(payload, 'code')
                 : null;
+            const terminal = (
+                response.status === 410 && responseCode === 'PREFLIGHT_EXPIRED'
+            ) || (
+                response.status === 401 && responseCode === 'UNAUTHORIZED'
+            );
             throw new AnalyticsRequestError(
                 messageFromPayload(payload, '사전 점검 상태를 확인할 수 없습니다.'),
                 safeAnalyticsHttpErrorCode(response.status, payload),
-                response.status === 410 && responseCode === 'PREFLIGHT_EXPIRED',
+                terminal,
             );
         }
         const parsed = preflightStatusV1Schema.safeParse(payload);

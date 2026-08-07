@@ -6,7 +6,11 @@ import {
 } from 'node:crypto';
 
 const TOKEN_VERSION = 'v1';
-const CLAIM_TTL_SECONDS = 10 * 60;
+// Keep the signed claim valid for the full 30-minute preflight lifetime. The
+// Cloud Tasks queue can retry a transient provider failure within that same
+// window; a shorter claim would leave a successfully completed preflight
+// unreadable to the browser after an infrastructure delay.
+const CLAIM_TTL_SECONDS = 30 * 60;
 const MIN_SECRET_LENGTH = 32;
 const TOKEN_PATTERN = /^v1\.([A-Za-z0-9_-]{16,256})\.([A-Za-z0-9_-]{40,128})$/;
 
