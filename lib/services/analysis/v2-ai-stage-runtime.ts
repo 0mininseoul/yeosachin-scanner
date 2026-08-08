@@ -470,7 +470,10 @@ export function createDurableAnalysisV2AiStageRuntime(
                 input: plan.input,
             }));
             try {
-                const identity = createGenderTriageMicrobatchResultIdentity(accounts);
+                const identity = createGenderTriageMicrobatchResultIdentity(
+                    accounts,
+                    assertAiStagePolicyVersion(group.fence),
+                );
                 const responseSchema = createGenderTriageMicrobatchResponseSchema(accounts);
                 const envelopeSchema = z.object({
                     results: z.array(z.object({
