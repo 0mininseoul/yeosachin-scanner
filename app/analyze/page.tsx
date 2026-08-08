@@ -53,6 +53,7 @@ import {
     checkoutContinuationKey,
     checkoutContinuationPlan,
     hasCheckoutContinuationIntent,
+    shouldClearAutoCheckoutUiPending,
     shouldAutoSubmitEarlybirdAction,
 } from '@/lib/services/earlybird/post-login-checkout';
 import { TopBar, BrandMark, Eyebrow, CaseCard, Panel, PrimaryButton } from '@/components/case-ui';
@@ -428,6 +429,7 @@ const DISCLOSURE_ACCEPTED = true;
         setWaitlistComplete(false);
         setCheckoutStatusCta(null);
         setError(null);
+        let checkoutRedirectStarted = false;
         try {
             const paidPlan = isPaidEarlybirdPlanId(effectiveSelectedPlan);
             const analyticsProperties = {
@@ -480,6 +482,7 @@ const DISCLOSURE_ACCEPTED = true;
                             {
                                 request: fetch,
                                 redirectCheckout: checkoutUrl => {
+                                    checkoutRedirectStarted = true;
                                     if (analyticsEligible) {
                                         trackEvent(EVENTS.CHECKOUT_REDIRECTED, analyticsProperties);
                                         void flushAnalytics().finally(() => window.location.assign(checkoutUrl));
@@ -547,6 +550,7 @@ const DISCLOSURE_ACCEPTED = true;
                 && 'nextUrl' in payload
                 && typeof payload.nextUrl === 'string'
                 && /^\/progress\/[0-9a-f-]{36}$/i.test(payload.nextUrl)) {
+                checkoutRedirectStarted = true;
                 await flushAnalytics();
                 window.location.assign(payload.nextUrl);
                 return;
@@ -560,12 +564,16 @@ const DISCLOSURE_ACCEPTED = true;
             }
             if (analyticsEligible) trackEvent(EVENTS.CHECKOUT_REDIRECTED, analyticsProperties);
             if (analyticsEligible) await flushAnalytics();
+            checkoutRedirectStarted = true;
             window.location.assign(payload.checkoutUrl);
         } catch {
             setError('요청을 처리하지 못했습니다. 잠시 후 다시 시도해주세요.');
         } finally {
             setPurchaseSubmitting(false);
-            if (autoCheckoutAttempt) setAutoCheckoutUiPending(false);
+            if (shouldClearAutoCheckoutUiPending({
+                autoCheckoutAttempt,
+                checkoutRedirectStarted,
+            })) setAutoCheckoutUiPending(false);
         }
     }, [
         DISCLOSURE_ACCEPTED,
