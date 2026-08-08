@@ -693,6 +693,22 @@ describe('earlybird analyze UI state', () => {
         expect(source).toContain('setPending: setPurchaseSubmitting');
     });
 
+    it('keeps the plan screen hidden while OAuth checkout continuation is redirecting', () => {
+        const source = readFileSync(
+            new URL('../../../app/analyze/page.tsx', import.meta.url),
+            'utf8'
+        );
+        expect(source).toContain(
+            'const [autoCheckoutUiPending, setAutoCheckoutUiPending] = useState(false);'
+        );
+        expect(source).toContain('const autoCheckoutTransitionVisible =');
+        expect(source).toContain('결제창으로 이동하고 있어요');
+        expect(source).toContain(
+            '{exclusionDecided && readyPreflight && !autoCheckoutTransitionVisible && ('
+        );
+        expect(source).toContain('setAutoCheckoutUiPending(false);');
+    });
+
     it('derives stale owner-status CTA visibility without synchronous effect state cleanup', () => {
         const source = readFileSync(
             new URL('../../../app/analyze/page.tsx', import.meta.url),

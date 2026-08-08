@@ -104,6 +104,7 @@ const DISCLOSURE_ACCEPTED = true;
     const [autoCheckoutRequested, setAutoCheckoutRequested] = useState(false);
     const [autoCheckoutPreflightId, setAutoCheckoutPreflightId] = useState<string | null>(null);
     const [autoCheckoutPlan, setAutoCheckoutPlan] = useState<PlanId | null>(null);
+    const [autoCheckoutUiPending, setAutoCheckoutUiPending] = useState(false);
     const querySelectedPlan = useHydrationSafePlanQuery();
     const router = useRouter();
     const { user, loading: authLoading } = useAuth();
@@ -166,6 +167,9 @@ const DISCLOSURE_ACCEPTED = true;
     // CTA. A late 409 must not leave this message behind after the user has
     // selected another plan or started a new preflight.
     const visibleError = activeCheckoutStatusCta?.message ?? error;
+    const autoCheckoutTransitionVisible = autoCheckoutUiPending
+        && exclusionDecided
+        && readyPreflight !== null;
 
     const removeAutoCheckoutQuery = useCallback(() => {
         if (typeof window === 'undefined') return;
@@ -179,6 +183,7 @@ const DISCLOSURE_ACCEPTED = true;
         setAutoCheckoutRequested(false);
         setAutoCheckoutPreflightId(null);
         setAutoCheckoutPlan(null);
+        setAutoCheckoutUiPending(false);
         autoCheckoutAttemptedRef.current = null;
         autoCheckoutRecoveryRequestedRef.current = false;
         removeAutoCheckoutQuery();
@@ -215,7 +220,12 @@ const DISCLOSURE_ACCEPTED = true;
     }, [clearAutoCheckoutContinuation, reset, router, setError, stalePricingPreflightId]);
 
     useEffect(() => {
-        if (!readyPreflight || !exclusionDecided || !analyticsEligible) return;
+        if (
+            !readyPreflight
+            || !exclusionDecided
+            || !analyticsEligible
+            || autoCheckoutUiPending
+        ) return;
         for (const plan of readyPreflight.plans) {
             if (
                 plan.planId === 'plus'
@@ -237,7 +247,7 @@ const DISCLOSURE_ACCEPTED = true;
                 properties => trackEvent(EVENTS.PLAN_VIEWED, properties)
             );
         }
-    }, [analyticsEligible, exclusionDecided, readyPreflight]);
+    }, [analyticsEligible, autoCheckoutUiPending, exclusionDecided, readyPreflight]);
 
     useEffect(() => {
         if (authLoading || initializedRef.current || typeof window === 'undefined') return;
@@ -252,6 +262,9 @@ const DISCLOSURE_ACCEPTED = true;
             requestedCheckoutPlan && resumablePreflightId ? resumablePreflightId : null,
         );
         setAutoCheckoutPlan(requestedCheckoutPlan);
+        setAutoCheckoutUiPending(
+            requestedCheckoutPlan !== null && resumablePreflightId !== null
+        );
 
         const resumableClaimToken = params.get('claim');
         if (resumablePreflightId && (user || resumableClaimToken)) {
@@ -366,18 +379,25 @@ const DISCLOSURE_ACCEPTED = true;
     };
 
     const handleEarlybirdAction = useCallback(async () => {
-        if (!effectiveSelectedPlan || !readyPreflight || !selectedPlanAvailable) return;
+        const autoCheckoutAttempt = autoCheckoutRecoveryRequestedRef.current;
+        if (!effectiveSelectedPlan || !readyPreflight || !selectedPlanAvailable) {
+            if (autoCheckoutAttempt) setAutoCheckoutUiPending(false);
+            return;
+        }
         if (!canSubmitEarlybirdSelection(
             effectiveSelectedPlan,
             DISCLOSURE_ACCEPTED,
             selectedPlanAvailable
-        )) return;
+        )) {
+            if (autoCheckoutAttempt) setAutoCheckoutUiPending(false);
+            return;
+        }
 
-        const autoCheckoutAttempt = autoCheckoutRecoveryRequestedRef.current;
         autoCheckoutRecoveryRequestedRef.current = false;
 
         trackPlanSelection(effectiveSelectedPlan);
         if (!user) {
+            if (autoCheckoutAttempt) setAutoCheckoutUiPending(false);
             if (analyticsEligible && isPaidEarlybirdPlanId(effectiveSelectedPlan)) {
                 // The checkout flow begins at the click that opens the auth
                 // prompt. This keeps the anonymous pricing funnel measurable;
@@ -545,6 +565,7 @@ const DISCLOSURE_ACCEPTED = true;
             setError('요청을 처리하지 못했습니다. 잠시 후 다시 시도해주세요.');
         } finally {
             setPurchaseSubmitting(false);
+            if (autoCheckoutAttempt) setAutoCheckoutUiPending(false);
         }
     }, [
         DISCLOSURE_ACCEPTED,
@@ -563,6 +584,22 @@ const DISCLOSURE_ACCEPTED = true;
     ]);
 
     useEffect(() => {
+        if (
+            autoCheckoutUiPending
+            && autoCheckoutRequested
+            && readyPreflight
+            && exclusionDecided
+            && autoCheckoutPlan
+            && (
+                autoCheckoutPreflightId !== readyPreflight.preflightId
+                || autoCheckoutPlan !== effectiveSelectedPlan
+                || !selectedPlanAvailable
+            )
+        ) {
+            clearAutoCheckoutContinuation();
+            return;
+        }
+
         const preflightId = readyPreflight?.preflightId ?? null;
         if (!shouldAutoSubmitEarlybirdAction({
             requested: autoCheckoutRequested,
@@ -590,6 +627,8 @@ const DISCLOSURE_ACCEPTED = true;
         autoCheckoutRequested,
         autoCheckoutPlan,
         autoCheckoutPreflightId,
+        autoCheckoutUiPending,
+        clearAutoCheckoutContinuation,
         consumeAutoCheckoutContinuation,
         effectiveSelectedPlan,
         exclusionDecided,
@@ -747,9 +786,13 @@ const DISCLOSURE_ACCEPTED = true;
                     <>
                         <div className="flex items-start justify-between gap-3">
                             <div>
-                                <Eyebrow>{exclusionDecided ? '판독 의뢰서 · 대상 확인' : '판독 의뢰서 · 본인 제외'}</Eyebrow>
+                                <Eyebrow>{autoCheckoutTransitionVisible
+                                    ? '결제 진행'
+                                    : exclusionDecided ? '판독 의뢰서 · 대상 확인' : '판독 의뢰서 · 본인 제외'}</Eyebrow>
                                 <h1 className="mt-3 text-[24px] font-extrabold leading-snug text-fg">
-                                    {!exclusionDecided
+                                    {autoCheckoutTransitionVisible
+                                        ? '결제창으로 이동하고 있어요'
+                                        : !exclusionDecided
                                         ? '본인 계정은 먼저 제외해주세요'
                                         : readyPreflight
                                             ? '판독 대상을 확인했어요'
@@ -837,7 +880,23 @@ const DISCLOSURE_ACCEPTED = true;
                             </div>
                         )}
 
-                        {exclusionDecided && readyPreflight && (
+                        {autoCheckoutTransitionVisible && (
+                            <CaseCard bracket="var(--color-blood)" className="mt-7 p-7 text-center">
+                                <div role="status" aria-live="polite">
+                                    <div className="mx-auto flex h-14 w-14 items-center justify-center border border-line bg-ink">
+                                        <BrandMark size={26} className="anim-blink text-blood" />
+                                    </div>
+                                    <h2 className="mt-5 text-[18px] font-extrabold text-fg">
+                                        결제창으로 이동하고 있어요
+                                    </h2>
+                                    <p className="mt-2 text-[13px] text-fg-dim">
+                                        잠시만 기다려주세요.
+                                    </p>
+                                </div>
+                            </CaseCard>
+                        )}
+
+                        {exclusionDecided && readyPreflight && !autoCheckoutTransitionVisible && (
                             <>
                                 <CaseCard bracket="var(--color-blood)" className="mt-7 overflow-hidden">
                                     <div className="flex items-start gap-4 p-5" data-amp-block>
