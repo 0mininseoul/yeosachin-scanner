@@ -701,10 +701,11 @@ describe('earlybird analyze UI state', () => {
         expect(source).toContain(
             'const [autoCheckoutUiPending, setAutoCheckoutUiPending] = useState(false);'
         );
-        expect(source).toContain('const autoCheckoutTransitionVisible =');
+        expect(source).toContain('useHydrationSafeCheckoutPlanQuery');
+        expect(source).toContain('const autoCheckoutTransitionVisible = Boolean(user)');
         expect(source).toContain('결제창으로 이동하고 있어요');
         expect(source).toContain(
-            '{exclusionDecided && readyPreflight && !autoCheckoutTransitionVisible && ('
+            "{autoCheckoutTransitionVisible && preflight?.status !== 'blocked' ? ("
         );
         expect(source).toContain('setAutoCheckoutUiPending(false);');
     });
