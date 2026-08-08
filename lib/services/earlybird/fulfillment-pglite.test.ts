@@ -214,6 +214,13 @@ const relationshipAdoptionSourceCountMigration = readFileSync(
     ),
     'utf8'
 );
+const freshAdmissionProviderRecoveryMigration = readFileSync(
+    new URL(
+        '../../../supabase/migrations/20260808150000_recover_fresh_admission_provider_failure.sql',
+        import.meta.url
+    ),
+    'utf8'
+);
 
 const USER = '123e4567-e89b-42d3-a456-426614174001';
 const PREFLIGHT = '223e4567-e89b-42d3-a456-426614174001';
@@ -1262,6 +1269,7 @@ describe('operator-approved earlybird fulfillment migration', () => {
         `)).rows[0].definition;
         await db.exec(relationshipAdoptionChargeDriftMigration);
         await db.exec(relationshipAdoptionChargeDriftMigration);
+        await db.exec(freshAdmissionProviderRecoveryMigration);
     });
 
     beforeEach(async () => {
@@ -1328,6 +1336,111 @@ describe('operator-approved earlybird fulfillment migration', () => {
 
     afterAll(async () => {
         await db.close();
+    });
+
+    it('rebinds only the paid request-free fresh-admission provider incident', async () => {
+        await db.query(
+            `UPDATE public.analysis_preflights
+             SET created_at = pg_catalog.clock_timestamp() - INTERVAL '2 hours',
+                 ready_at = pg_catalog.clock_timestamp() - INTERVAL '2 hours',
+                 expires_at = pg_catalog.clock_timestamp() - INTERVAL '90 minutes',
+                 updated_at = pg_catalog.clock_timestamp(),
+                 admission_status = 'blocked',
+                 admission_generation = 1,
+                 admission_selected_plan_id = 'basic',
+                 admission_entitlement_jti_hash = repeat('a', 64),
+                 admission_token = $2,
+                 admission_requested_at = pg_catalog.clock_timestamp() - INTERVAL '1 hour',
+                 admission_refreshed_at = pg_catalog.clock_timestamp() - INTERVAL '50 minutes',
+                 admission_dispatch_state = 'enqueued',
+                 admission_dispatch_generation = 1,
+                 admission_dispatch_token = $3,
+                 admission_dispatch_reserved_at = pg_catalog.clock_timestamp() - INTERVAL '55 minutes',
+                 admission_dispatched_at = pg_catalog.clock_timestamp() - INTERVAL '54 minutes',
+                 admission_error_code = 'ANALYSIS_V2_FRESH_PROFILE_UNAVAILABLE',
+                 admission_failure_count = 3,
+                 admission_last_error_code = 'ANALYSIS_V2_FRESH_PROFILE_UNAVAILABLE'
+             WHERE id = $1`,
+            [PREFLIGHT, ADMISSION_TOKEN, DISPATCH_TOKEN]
+        );
+        await db.query(
+            `UPDATE public.earlybird_fulfillments
+             SET status = 'manual_review',
+                 operator_admitted_at = pg_catalog.clock_timestamp(),
+                 last_error_code = 'TARGET_UNAVAILABLE',
+                 last_error_at = pg_catalog.clock_timestamp(),
+                 manual_review_at = pg_catalog.clock_timestamp()
+             WHERE order_id = $1`,
+            [ORDER]
+        );
+
+        const recovery = await db.query<{
+            fulfillment_status: string;
+            preflight_id: string;
+            request_id: string | null;
+        }>(
+            `SELECT fulfillment_status, preflight_id, request_id
+             FROM public.recover_earlybird_fresh_admission_provider_failure($1)`,
+            [ORDER]
+        );
+        expect(recovery.rows).toHaveLength(1);
+        expect(recovery.rows[0]).toMatchObject({
+            fulfillment_status: 'retryable_failure',
+            request_id: null,
+        });
+        expect(recovery.rows[0].preflight_id).not.toBe(PREFLIGHT);
+
+        expect((await db.query<{
+            status: string;
+            actual_amount_krw: number;
+            result_request_id: string | null;
+            rebound: boolean;
+        }>(
+            `SELECT earlybird_order.status,
+                    earlybird_order.actual_amount_krw,
+                    earlybird_order.result_request_id,
+                    earlybird_order.preflight_id = $2 AS rebound
+             FROM public.earlybird_orders AS earlybird_order
+             WHERE earlybird_order.id = $1`,
+            [ORDER, recovery.rows[0].preflight_id]
+        )).rows[0]).toEqual({
+            status: 'paid',
+            actual_amount_krw: 14900,
+            result_request_id: null,
+            rebound: true,
+        });
+        expect((await db.query<{
+            status: string;
+            last_error_code: string;
+            manual_review_at: string | null;
+        }>(
+            `SELECT status, last_error_code, manual_review_at
+             FROM public.earlybird_fulfillments
+             WHERE order_id = $1`,
+            [ORDER]
+        )).rows[0]).toEqual({
+            status: 'retryable_failure',
+            last_error_code: 'FRESH_ADMISSION_PROVIDER_RECOVERY',
+            manual_review_at: null,
+        });
+        expect((await db.query<{
+            old_status: string;
+            new_status: string;
+            new_admission_status: string;
+        }>(
+            `SELECT old_preflight.status AS old_status,
+                    new_preflight.status AS new_status,
+                    new_preflight.admission_status AS new_admission_status
+             FROM public.analysis_preflights AS old_preflight
+             JOIN public.analysis_preflights AS new_preflight
+               ON new_preflight.id = $2
+             WHERE old_preflight.id = $1`,
+            [PREFLIGHT, recovery.rows[0].preflight_id]
+        )).rows[0]).toEqual({
+            old_status: 'expired',
+            new_status: 'ready',
+            new_admission_status: 'idle',
+        });
     });
 
     it('rejects security, lock, and immutable audit replay drift before replacing the 1600 definition', async () => {
