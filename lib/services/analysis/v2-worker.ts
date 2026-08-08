@@ -779,7 +779,7 @@ function isTransientProfileCheckpointFailure(error: Error): boolean {
 
 function isTransientMediaObjectFailure(error: Error): boolean {
     const match = error.message.match(
-        /^ANALYSIS_V2_MEDIA_ARTIFACT_OBJECT_ERROR: [a-z ]+ failed \((unknown|[1-5][0-9]{2})\)\.$/
+        /^ANALYSIS_V2_(?:MEDIA_ARTIFACT|SOURCE_MEDIA_ARCHIVE)_OBJECT_ERROR: [a-z ]+ failed \((unknown|[1-5][0-9]{2})\)\.$/
     );
     if (!match) return false;
     if (match[1] === 'unknown') return true;
@@ -799,7 +799,10 @@ function failureDispositionForCode(
         return 'transient';
     }
     if (
-        code === 'ANALYSIS_V2_MEDIA_ARTIFACT_OBJECT_ERROR'
+        (
+            code === 'ANALYSIS_V2_MEDIA_ARTIFACT_OBJECT_ERROR'
+            || code === 'ANALYSIS_V2_SOURCE_MEDIA_ARCHIVE_OBJECT_ERROR'
+        )
         && isTransientMediaObjectFailure(error)
     ) {
         return 'transient';
