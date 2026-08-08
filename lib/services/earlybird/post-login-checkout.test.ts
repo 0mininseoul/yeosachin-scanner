@@ -5,12 +5,24 @@ import {
     checkoutContinuationPlan,
     hasCheckoutContinuationIntent,
     isCheckoutContinuationRequested,
+    shouldClearAutoCheckoutUiPending,
     shouldAutoSubmitEarlybirdAction,
 } from './post-login-checkout';
 
 const PREFLIGHT_ID = '223e4567-e89b-42d3-a456-426614174000';
 
 describe('post-login earlybird checkout continuation', () => {
+    it('keeps the transition gate while an external checkout redirect is in flight', () => {
+        expect(shouldClearAutoCheckoutUiPending({
+            autoCheckoutAttempt: true,
+            checkoutRedirectStarted: true,
+        })).toBe(false);
+        expect(shouldClearAutoCheckoutUiPending({
+            autoCheckoutAttempt: true,
+            checkoutRedirectStarted: false,
+        })).toBe(true);
+    });
+
     it('detects a complete browser continuation before the preflight snapshot is restored', () => {
         expect(hasCheckoutContinuationIntent(new URLSearchParams({
             preflight: PREFLIGHT_ID,
