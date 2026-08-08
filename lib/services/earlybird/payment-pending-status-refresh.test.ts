@@ -78,4 +78,25 @@ describe('earlybird payment-pending status refresh', () => {
         expect(shouldRefreshEarlybirdStatusSnapshot(manualReview)).toBe(true);
         expect(shouldAutomaticallyRedirectEarlybirdStatus(manualReview)).toBe(false);
     });
+
+    it('keeps paid and in-progress orders on the email-delivery notice', () => {
+        expect(shouldAutomaticallyRedirectEarlybirdStatus({
+            systemStatus: 'paid',
+            requiresSupport: false,
+            resultUrl: null,
+        })).toBe(false);
+        expect(shouldAutomaticallyRedirectEarlybirdStatus({
+            systemStatus: 'analysis_in_progress',
+            requiresSupport: false,
+            resultUrl: null,
+        })).toBe(false);
+    });
+
+    it('redirects only when a completed result is available', () => {
+        expect(shouldAutomaticallyRedirectEarlybirdStatus({
+            systemStatus: 'completed',
+            requiresSupport: false,
+            resultUrl: '/result/example',
+        })).toBe(true);
+    });
 });
