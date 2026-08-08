@@ -58,6 +58,7 @@
     "resend": "^6.8.0",
     "server-only": "0.0.1",
     "sharp": "0.35.3",
+    "tsx": "^4.23.0",
     "zod": "^4.3.6"
   },
   "devDependencies": {
@@ -73,7 +74,6 @@
     "pg": "8.22.0",
     "supabase": "^2.72.8",
     "tailwindcss": "^4",
-    "tsx": "^4.23.0",
     "typescript": "^5",
     "vitest": "^3.2.7"
   },
