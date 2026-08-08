@@ -651,7 +651,7 @@ describe('V2 staged AI services', () => {
         };
 
         await expect(genderTriage(inputB, audit('genderTriage', inputA)))
-            .rejects.toThrow('operationKey');
+            .rejects.toThrow('ANALYSIS_V2_AI_AUDIT_CONTEXT_INVALID');
         expect(mocks.analyzeWithGemini).not.toHaveBeenCalled();
     });
 
@@ -731,11 +731,13 @@ describe('V2 staged AI services', () => {
         await expect(genderTriage({ media: media() }, {
             ...audit(),
             onBeforeAttempt: undefined,
-        } as unknown as StagedAiAuditContext)).rejects.toThrow('onBeforeAttempt');
+        } as unknown as StagedAiAuditContext)).rejects.toThrow(
+            'ANALYSIS_V2_AI_AUDIT_CONTEXT_INVALID'
+        );
         await expect(genderTriage({ media: media() }, {
             ...audit(),
             operationKey: 'candidate.user',
-        })).rejects.toThrow('operationKey');
+        })).rejects.toThrow('ANALYSIS_V2_AI_AUDIT_CONTEXT_INVALID');
     });
 
     it('downgrades high-confidence gender based on only one visual item', async () => {

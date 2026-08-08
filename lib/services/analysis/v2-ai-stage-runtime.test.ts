@@ -4,9 +4,13 @@ import {
     AI_STAGE_POLICY_V28_VERSION,
     AI_STAGE_POLICY_V29_VERSION,
     AI_STAGE_POLICY_V210_VERSION,
+    AI_STAGE_POLICY_V211_VERSION,
     AI_STAGE_POLICY_VERSION,
 } from '@/lib/services/ai/stage-policy';
-import type { GenderTriageInput } from '@/lib/services/ai/v2-staged-analysis';
+import {
+    createGenderTriageMicrobatchResultIdentity,
+    type GenderTriageInput,
+} from '@/lib/services/ai/v2-staged-analysis';
 
 vi.mock('@/lib/observability/server', () => ({
     operationalLogger: { emit: vi.fn() },
@@ -540,7 +544,12 @@ describe('durable V2 AI stage runtime', () => {
         }, scheduledFence)).rejects.toThrow('ANALYSIS_V2_AI_TERMINAL_UNAVAILABLE');
     });
 
-    it('keeps v2.10 on the v2.9 microbatch scheduler path while binding its own immutable policy', async () => {
+    it.each([
+        ['v2.10', AI_STAGE_POLICY_V210_VERSION],
+        ['v2.11', AI_STAGE_POLICY_V211_VERSION],
+    ] as const)(
+        'keeps %s on the v2.9 microbatch scheduler path while binding its own immutable policy',
+        async (_label, policyVersion) => {
         const runGenderMicrobatch = vi.fn(async (
             accounts: readonly { accountId: string; input: GenderTriageInput }[],
         ) => accounts.map(account => ({
@@ -589,7 +598,7 @@ describe('durable V2 AI stage runtime', () => {
         });
         const scheduledFence = {
             ...fence,
-            aiStagePolicyVersion: AI_STAGE_POLICY_V210_VERSION,
+            aiStagePolicyVersion: policyVersion,
             schedulerCapability: 'scheduler-v1' as const,
             handlerDeadlineAtMs: performance.now() + 300_000,
         };
@@ -607,12 +616,18 @@ describe('durable V2 AI stage runtime', () => {
         expect(runScheduler).toHaveBeenCalledOnce();
         expect(runGenderMicrobatch).toHaveBeenCalledOnce();
         const call = runGenderMicrobatch.mock.calls[0] as unknown as [
-            unknown,
-            unknown,
+            Parameters<typeof createGenderTriageMicrobatchResultIdentity>[0],
+            { operationKey: string },
             { aiStagePolicyVersion?: string },
         ];
+        expect(call[1].operationKey).toBe(
+            createGenderTriageMicrobatchResultIdentity(
+                call[0],
+                policyVersion,
+            ).operationKey,
+        );
         expect(call[2]).toEqual({
-            aiStagePolicyVersion: AI_STAGE_POLICY_V210_VERSION,
+            aiStagePolicyVersion: policyVersion,
         });
     });
 
