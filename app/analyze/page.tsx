@@ -7,6 +7,7 @@ import { useAuth } from '@/hooks/useAuth';
 import { useAnalysisV2Preflight } from '@/hooks/useAnalysisV2Preflight';
 import {
     HydrationSafePlanQueryObserver,
+    useHydrationSafeCheckoutPlanQuery,
     useHydrationSafePlanQuery,
 } from '@/hooks/useHydrationSafePlanQuery';
 import type { PlanId } from '@/lib/domain/analysis/plan-catalog';
@@ -51,6 +52,7 @@ import {
     AUTO_CHECKOUT_QUERY_PARAM,
     checkoutContinuationKey,
     checkoutContinuationPlan,
+    hasCheckoutContinuationIntent,
     shouldAutoSubmitEarlybirdAction,
 } from '@/lib/services/earlybird/post-login-checkout';
 import { TopBar, BrandMark, Eyebrow, CaseCard, Panel, PrimaryButton } from '@/components/case-ui';
@@ -106,6 +108,7 @@ const DISCLOSURE_ACCEPTED = true;
     const [autoCheckoutPlan, setAutoCheckoutPlan] = useState<PlanId | null>(null);
     const [autoCheckoutUiPending, setAutoCheckoutUiPending] = useState(false);
     const querySelectedPlan = useHydrationSafePlanQuery();
+    const queryCheckoutPlan = useHydrationSafeCheckoutPlanQuery();
     const router = useRouter();
     const { user, loading: authLoading } = useAuth();
     const initializedRef = useRef(false);
@@ -167,9 +170,8 @@ const DISCLOSURE_ACCEPTED = true;
     // CTA. A late 409 must not leave this message behind after the user has
     // selected another plan or started a new preflight.
     const visibleError = activeCheckoutStatusCta?.message ?? error;
-    const autoCheckoutTransitionVisible = autoCheckoutUiPending
-        && exclusionDecided
-        && readyPreflight !== null;
+    const autoCheckoutTransitionVisible = Boolean(user)
+        && (autoCheckoutUiPending || queryCheckoutPlan !== null);
 
     const removeAutoCheckoutQuery = useCallback(() => {
         if (typeof window === 'undefined') return;
@@ -262,9 +264,7 @@ const DISCLOSURE_ACCEPTED = true;
             requestedCheckoutPlan && resumablePreflightId ? resumablePreflightId : null,
         );
         setAutoCheckoutPlan(requestedCheckoutPlan);
-        setAutoCheckoutUiPending(
-            requestedCheckoutPlan !== null && resumablePreflightId !== null
-        );
+        setAutoCheckoutUiPending(hasCheckoutContinuationIntent(params));
 
         const resumableClaimToken = params.get('claim');
         if (resumablePreflightId && (user || resumableClaimToken)) {
@@ -716,7 +716,21 @@ const DISCLOSURE_ACCEPTED = true;
             />
 
             <main className="mx-auto max-w-[500px] px-5 pb-16 pt-7">
-                {!preflight ? (
+                {autoCheckoutTransitionVisible && preflight?.status !== 'blocked' ? (
+                    <CaseCard bracket="var(--color-blood)" className="mt-7 p-7 text-center">
+                        <div role="status" aria-live="polite">
+                            <div className="mx-auto flex h-14 w-14 items-center justify-center border border-line bg-ink">
+                                <BrandMark size={26} className="anim-blink text-blood" />
+                            </div>
+                            <h1 className="mt-5 text-[22px] font-extrabold text-fg">
+                                결제창으로 이동하고 있어요
+                            </h1>
+                            <p className="mt-2 text-[13px] text-fg-dim">
+                                잠시만 기다려주세요.
+                            </p>
+                        </div>
+                    </CaseCard>
+                ) : !preflight ? (
                     <>
                         <Eyebrow>판독 의뢰서 · 대상 지정</Eyebrow>
                         <h1 className="mt-3 text-[26px] font-extrabold leading-snug text-fg">
@@ -786,13 +800,9 @@ const DISCLOSURE_ACCEPTED = true;
                     <>
                         <div className="flex items-start justify-between gap-3">
                             <div>
-                                <Eyebrow>{autoCheckoutTransitionVisible
-                                    ? '결제 진행'
-                                    : exclusionDecided ? '판독 의뢰서 · 대상 확인' : '판독 의뢰서 · 본인 제외'}</Eyebrow>
+                                <Eyebrow>{exclusionDecided ? '판독 의뢰서 · 대상 확인' : '판독 의뢰서 · 본인 제외'}</Eyebrow>
                                 <h1 className="mt-3 text-[24px] font-extrabold leading-snug text-fg">
-                                    {autoCheckoutTransitionVisible
-                                        ? '결제창으로 이동하고 있어요'
-                                        : !exclusionDecided
+                                    {!exclusionDecided
                                         ? '본인 계정은 먼저 제외해주세요'
                                         : readyPreflight
                                             ? '판독 대상을 확인했어요'
@@ -880,23 +890,7 @@ const DISCLOSURE_ACCEPTED = true;
                             </div>
                         )}
 
-                        {autoCheckoutTransitionVisible && (
-                            <CaseCard bracket="var(--color-blood)" className="mt-7 p-7 text-center">
-                                <div role="status" aria-live="polite">
-                                    <div className="mx-auto flex h-14 w-14 items-center justify-center border border-line bg-ink">
-                                        <BrandMark size={26} className="anim-blink text-blood" />
-                                    </div>
-                                    <h2 className="mt-5 text-[18px] font-extrabold text-fg">
-                                        결제창으로 이동하고 있어요
-                                    </h2>
-                                    <p className="mt-2 text-[13px] text-fg-dim">
-                                        잠시만 기다려주세요.
-                                    </p>
-                                </div>
-                            </CaseCard>
-                        )}
-
-                        {exclusionDecided && readyPreflight && !autoCheckoutTransitionVisible && (
+                        {exclusionDecided && readyPreflight && (
                             <>
                                 <CaseCard bracket="var(--color-blood)" className="mt-7 overflow-hidden">
                                     <div className="flex items-start gap-4 p-5" data-amp-block>

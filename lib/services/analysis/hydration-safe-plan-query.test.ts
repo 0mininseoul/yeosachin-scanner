@@ -15,6 +15,7 @@ vi.mock('next/navigation', () => ({
 import {
     __test__,
     HydrationSafePlanQueryObserver,
+    useHydrationSafeCheckoutPlanQuery,
     useHydrationSafePlanQuery,
 } from '@/hooks/useHydrationSafePlanQuery';
 
@@ -23,6 +24,11 @@ import {
 
 function PlanProbe() {
     const plan = useHydrationSafePlanQuery();
+    return createElement('output', null, plan ?? 'none');
+}
+
+function CheckoutProbe() {
+    const plan = useHydrationSafeCheckoutPlanQuery();
     return createElement('output', null, plan ?? 'none');
 }
 
@@ -46,6 +52,15 @@ function App({ onProductMount, probes = 1 }: { onProductMount: () => void; probe
         createElement(QueryObserverBoundary),
         createElement(ProductProbe, { onMount: onProductMount }),
         ...Array.from({ length: probes - 1 }, (_, index) => createElement(PlanProbe, { key: index })),
+    );
+}
+
+function CheckoutApp() {
+    return createElement(
+        'main',
+        null,
+        createElement(QueryObserverBoundary),
+        createElement(CheckoutProbe),
     );
 }
 
@@ -113,6 +128,34 @@ describe('hydration-safe linked plan query', () => {
             await act(async () => root?.unmount());
             root = null;
             expect(__test__.listenerCount()).toBe(0);
+        } finally {
+            container.remove();
+        }
+    });
+
+    it('publishes only a complete checkout continuation before the product snapshot is ready', async () => {
+        navigation.searchParams = new URLSearchParams(
+            'preflight=223e4567-e89b-42d3-a456-426614174000&checkout=1&plan=standard'
+        );
+        const html = renderToString(createElement(CheckoutApp));
+        expect(html).toContain('none');
+
+        const container = document.createElement('div');
+        container.innerHTML = html;
+        document.body.append(container);
+        try {
+            await act(async () => {
+                root = hydrateRoot(container, createElement(CheckoutApp));
+                await new Promise(resolve => window.setTimeout(resolve, 0));
+            });
+            expect(container.textContent).toBe('standard');
+
+            navigation.searchParams = new URLSearchParams('plan=standard');
+            await act(async () => {
+                root!.render(createElement(CheckoutApp));
+                await new Promise(resolve => window.setTimeout(resolve, 0));
+            });
+            expect(container.textContent).toBe('none');
         } finally {
             container.remove();
         }

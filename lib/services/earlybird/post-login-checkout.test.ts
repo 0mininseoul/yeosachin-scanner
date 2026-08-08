@@ -3,6 +3,7 @@ import {
     AUTO_CHECKOUT_QUERY_PARAM,
     checkoutContinuationKey,
     checkoutContinuationPlan,
+    hasCheckoutContinuationIntent,
     isCheckoutContinuationRequested,
     shouldAutoSubmitEarlybirdAction,
 } from './post-login-checkout';
@@ -10,6 +11,22 @@ import {
 const PREFLIGHT_ID = '223e4567-e89b-42d3-a456-426614174000';
 
 describe('post-login earlybird checkout continuation', () => {
+    it('detects a complete browser continuation before the preflight snapshot is restored', () => {
+        expect(hasCheckoutContinuationIntent(new URLSearchParams({
+            preflight: PREFLIGHT_ID,
+            [AUTO_CHECKOUT_QUERY_PARAM]: '1',
+            plan: 'standard',
+        }))).toBe(true);
+        expect(hasCheckoutContinuationIntent(new URLSearchParams({
+            [AUTO_CHECKOUT_QUERY_PARAM]: '1',
+            plan: 'standard',
+        }))).toBe(false);
+        expect(hasCheckoutContinuationIntent(new URLSearchParams({
+            preflight: PREFLIGHT_ID,
+            [AUTO_CHECKOUT_QUERY_PARAM]: '1',
+        }))).toBe(false);
+    });
+
     it('recognizes the OAuth return intent and submits once the ready plan can be acted on', () => {
         const params = new URLSearchParams({
             [AUTO_CHECKOUT_QUERY_PARAM]: '1',
