@@ -306,7 +306,9 @@ export function assembleFirstPaymentConciergeSource(input: {
     const followers = selectLargestRelationshipRun(input.runs, targetUsername, 'followers');
     const following = selectLargestRelationshipRun(input.runs, targetUsername, 'following');
     if (followers.length !== 390 || following.length !== 256) {
-        fail('FIRST_PAYMENT_CONCIERGE_RELATIONSHIP_COUNT_DRIFT');
+        fail(
+            `FIRST_PAYMENT_CONCIERGE_RELATIONSHIP_COUNT_DRIFT(${followers.length}:${following.length})`,
+        );
     }
     const followerByUsername = new Map(followers.map(row => [row.username, row]));
     const mutualRows: FirstPaymentConciergeRelationshipRow[] = following.flatMap(row => {
@@ -326,7 +328,9 @@ export function assembleFirstPaymentConciergeSource(input: {
         || publicMutuals.length !== 134
         || privateRows.length !== 48
     ) {
-        fail('FIRST_PAYMENT_CONCIERGE_MUTUAL_COUNT_DRIFT');
+        fail(
+            `FIRST_PAYMENT_CONCIERGE_MUTUAL_COUNT_DRIFT(${mutualRows.length}:${publicMutuals.length}:${privateRows.length})`,
+        );
     }
 
     const candidateProfiles = new Map<string, InstagramProfile>();
@@ -356,7 +360,7 @@ export function assembleFirstPaymentConciergeSource(input: {
         return profile ? [{ ordinal: row.mutualOrdinal, profile }] : [];
     });
     if (publicProfiles.length !== 130) {
-        fail('FIRST_PAYMENT_CONCIERGE_PROFILE_COUNT_DRIFT');
+        fail(`FIRST_PAYMENT_CONCIERGE_PROFILE_COUNT_DRIFT(${publicProfiles.length})`);
     }
 
     const likerItems = largestItems(input.runs, 'target-likers');
