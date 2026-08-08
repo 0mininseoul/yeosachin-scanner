@@ -44,6 +44,8 @@ export function EarlybirdStatus({ order }: { order: EarlybirdOrderStatusDto }) {
         shouldRefreshEarlybirdStatusSnapshot(order);
     const isAutomaticFulfillmentBridge =
         shouldAutomaticallyRedirectEarlybirdStatus(order);
+    const isPaidDeliveryPending = order.systemStatus === 'paid'
+        || order.systemStatus === 'analysis_in_progress';
 
     useEffect(() => {
         if (!shouldRefreshPaymentPendingStatus) return;
@@ -126,9 +128,25 @@ export function EarlybirdStatus({ order }: { order: EarlybirdOrderStatusDto }) {
                     판독 상태를 확인하고 있어요
                 </h1>
                 <p className="mt-3 text-[13px] leading-relaxed text-fg-dim">
-                    확인이 끝나는 대로 가입하신 이메일로 안내해드릴게요.
+                    판독 결과가 완성되면 가입하신 이메일로 결과 링크를 보내드릴게요.
                 </p>
             </CaseCard>
+        );
+    }
+
+    if (isPaidDeliveryPending) {
+        return (
+            <div role="status">
+                <CaseCard className="mt-8 p-7 text-center">
+                    <Eyebrow className="justify-center">결제 완료</Eyebrow>
+                    <h1 className="mt-3 text-[22px] font-extrabold tracking-tight text-fg">
+                        결제가 완료되었어요
+                    </h1>
+                    <p className="mt-3 text-[13px] leading-relaxed text-fg-dim">
+                        판독 결과가 완성되면 가입하신 이메일로 결과 링크를 보내드릴게요.
+                    </p>
+                </CaseCard>
+            </div>
         );
     }
 
