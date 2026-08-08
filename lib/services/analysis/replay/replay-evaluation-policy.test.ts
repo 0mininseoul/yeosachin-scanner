@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import {
     BETATEST_FREE_POOL_STANDARD_V210_EXACT_REPLAY_CAPABILITY,
     CURRENT_PRODUCTION_STANDARD_V210_EXACT_REPLAY_CAPABILITY,
+    FIRST_PAYMENT_BASIC_V211_CONCIERGE_CAPABILITY,
     TEST_ENTITLEMENT_STANDARD_V211_LEGACY_SECONDARY_REPLAY_CAPABILITY,
     HISTORICAL_OFFICIAL_E2E_REPLAY_CAPABILITY,
     HISTORICAL_OFFICIAL_E2E_REPLAY_V210_CAPABILITY,
@@ -39,6 +40,36 @@ const standard = (aiStage: 'ai-stage-policy-v2.7' | 'ai-stage-policy-v2.8' | 'ai
 }) as ReplaySourceLineage;
 
 describe('replay cross-policy evaluation capability', () => {
+    it('admits only the exact first-payment Basic v2.11 concierge lineage', () => {
+        const source = {
+            selectedPlanId: 'basic' as const,
+            policyVersions: {
+                pipeline: 'v2' as const,
+                risk: 'risk-policy-v2.5' as const,
+                aiStage: 'ai-stage-policy-v2.11' as const,
+                scheduler: 'ai-scheduler-v1' as const,
+            },
+        } satisfies ReplaySourceLineage;
+        const capability = {
+            capability: FIRST_PAYMENT_BASIC_V211_CONCIERGE_CAPABILITY,
+            aiStage: 'ai-stage-policy-v2.11' as const,
+        } satisfies ReplayEvaluationPolicy;
+
+        expect(resolveReplayAiStagePolicyVersion(source, capability))
+            .toBe('ai-stage-policy-v2.11');
+        expect(() => resolveReplayAiStagePolicyVersion(source))
+            .toThrow('ANALYSIS_V2_REPLAY_AI_POLICY_UNSUPPORTED');
+        expect(() => resolveReplayAiStagePolicyVersion({
+            ...source,
+            selectedPlanId: 'standard',
+        } as never, capability))
+            .toThrow('ANALYSIS_V2_REPLAY_EVALUATION_SOURCE_INELIGIBLE');
+        expect(replayEvaluationPolicySchema.safeParse({
+            ...capability,
+            extra: true,
+        }).success).toBe(false);
+    });
+
     it('authenticates only exact Standard v2.10/risk-v2.5/scheduler-v1 production lineage', () => {
         const current = {
             selectedPlanId: 'standard' as const,
