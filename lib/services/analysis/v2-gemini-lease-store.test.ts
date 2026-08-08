@@ -209,6 +209,36 @@ describe('deployment-wide Gemini lease store', () => {
         );
     });
 
+    it('accepts the v2.11 launch policy for scheduler-stage admission', async () => {
+        const operationKey = `gender-triage:${'c'.repeat(64)}`;
+        const { rpc, store } = setup([{
+            outcome: 'acquired',
+            slot: 2,
+            lease_claim_token: claimToken,
+            fence: 10,
+            expires_at: expiresAt,
+        }]);
+
+        await expect(store.acquire({
+            ...input(),
+            operationKey,
+            stage: 'genderTriage',
+            aiStagePolicyVersion: 'ai-stage-policy-v2.11',
+        })).resolves.toMatchObject({
+            operationKey,
+            stage: 'genderTriage',
+            aiStagePolicyVersion: 'ai-stage-policy-v2.11',
+        });
+        expect(rpc).toHaveBeenCalledWith(
+            ANALYSIS_V2_GEMINI_LEASE_DATABASE_NAMES.acquireSchedulerV1Rpc,
+            expect.objectContaining({
+                p_request_id: requestId,
+                p_operation_key: operationKey,
+                p_stage: 'genderTriage',
+            })
+        );
+    });
+
     it('maps resolver-only deployment capacity to an internal skip signal', async () => {
         const { store } = setup([{
             outcome: 'resolver_capacity_pending',
