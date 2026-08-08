@@ -43,12 +43,23 @@ const standardV210RiskV25PolicySchema = z.object({
     scheduler: z.literal('ai-scheduler-v1'),
 }).strict();
 
+const firstPaymentBasicV211PolicySchema = z.object({
+    pipeline,
+    aiStage: z.literal(AI_STAGE_POLICY_V211_VERSION),
+    risk: z.literal('risk-policy-v2.5'),
+    scheduler: z.literal('ai-scheduler-v1'),
+}).strict();
+
 /**
  * Source lineage is deliberately exact. Historical v2.7 snapshots predate the
  * scheduler key, so that key is optional only for v2.7. v2.8 starts after the
  * scheduler rollout and must carry its exact four-key snapshot.
  */
 export const replaySourceLineageSchema = z.union([
+    z.object({
+        selectedPlanId: z.literal('basic'),
+        policyVersions: firstPaymentBasicV211PolicySchema,
+    }).strict(),
     z.object({
         selectedPlanId: z.literal('standard'),
         policyVersions: standardV27PolicySchema,
@@ -101,6 +112,9 @@ export const TEST_ENTITLEMENT_STANDARD_V211_LEGACY_SECONDARY_REPLAY_CAPABILITY =
     'test-entitlement-standard-v210-risk-v25-scheduler-v1-to-ai-v211-legacy-secondary' as const;
 export const TEST_ENTITLEMENT_STANDARD_V211_LEGACY_SECONDARY_TEXT_ONLY_REPLAY_CAPABILITY =
     'test-entitlement-standard-v210-risk-v25-scheduler-v1-to-ai-v211-legacy-secondary-account-text-only' as const;
+/** Exact, incident-scoped AI workload for the first paid Basic concierge delivery. */
+export const FIRST_PAYMENT_BASIC_V211_CONCIERGE_CAPABILITY =
+    'first-payment-basic-v211-risk-v25-scheduler-v1-concierge' as const;
 const currentEvaluationPolicySchema = z.object({
     capability: z.literal(REPLAY_V29_CROSS_POLICY_EVALUATION_CAPABILITY),
     aiStage: z.literal(AI_STAGE_POLICY_V29_VERSION),
@@ -137,6 +151,10 @@ const testEntitlementStandardV211LegacySecondaryTextOnlyEvaluationPolicySchema =
     capability: z.literal(TEST_ENTITLEMENT_STANDARD_V211_LEGACY_SECONDARY_TEXT_ONLY_REPLAY_CAPABILITY),
     aiStage: z.literal(AI_STAGE_POLICY_V211_VERSION),
 }).strict();
+const firstPaymentBasicV211ConciergeEvaluationPolicySchema = z.object({
+    capability: z.literal(FIRST_PAYMENT_BASIC_V211_CONCIERGE_CAPABILITY),
+    aiStage: z.literal(AI_STAGE_POLICY_V211_VERSION),
+}).strict();
 export const replayEvaluationPolicySchema = z.union([
     currentEvaluationPolicySchema,
     historicalOfficialE2EEvaluationPolicySchema,
@@ -147,6 +165,7 @@ export const replayEvaluationPolicySchema = z.union([
     betatestFreePoolStandardV210EvaluationPolicySchema,
     testEntitlementStandardV211LegacySecondaryEvaluationPolicySchema,
     testEntitlementStandardV211LegacySecondaryTextOnlyEvaluationPolicySchema,
+    firstPaymentBasicV211ConciergeEvaluationPolicySchema,
 ]);
 export type ReplayEvaluationPolicy = z.infer<typeof replayEvaluationPolicySchema>;
 
@@ -189,6 +208,21 @@ export function resolveReplayAiStagePolicyVersion(
         throw new Error('ANALYSIS_V2_REPLAY_EVALUATION_POLICY_UNSUPPORTED');
     }
     const policy = lineage.policyVersions;
+    if (
+        parsed.data.capability === FIRST_PAYMENT_BASIC_V211_CONCIERGE_CAPABILITY
+    ) {
+        if (
+            lineage.selectedPlanId !== 'basic'
+            || policy.pipeline !== 'v2'
+            || policy.risk !== 'risk-policy-v2.5'
+            || policy.aiStage !== AI_STAGE_POLICY_V211_VERSION
+            || !('scheduler' in policy)
+            || policy.scheduler !== 'ai-scheduler-v1'
+        ) {
+            throw new Error('ANALYSIS_V2_REPLAY_EVALUATION_SOURCE_INELIGIBLE');
+        }
+        return AI_STAGE_POLICY_V211_VERSION;
+    }
     if (
         parsed.data.capability
             === CURRENT_PRODUCTION_STANDARD_V210_EXACT_REPLAY_CAPABILITY
