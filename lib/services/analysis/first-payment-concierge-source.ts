@@ -207,10 +207,11 @@ function profileRows(run: LoadedRun): Map<string, InstagramProfile> {
     return parsed.profilesByUsername;
 }
 
-function selectLargestRelationshipRun(
+function selectExpectedRelationshipRun(
     runs: readonly LoadedRun[],
     targetUsername: string,
     side: 'followers' | 'following',
+    expectedCount: number,
 ) {
     const kind = `relationship-${side}`;
     const candidates = runs.flatMap(run => {
@@ -232,7 +233,11 @@ function selectLargestRelationshipRun(
         }
         return [{ run, rows }];
     });
-    const selected = candidates.sort((left, right) => (
+    const exactCandidates = candidates.filter(candidate => (
+        candidate.rows.length === expectedCount
+    ));
+    const selectionPool = exactCandidates.length > 0 ? exactCandidates : candidates;
+    const selected = selectionPool.sort((left, right) => (
         right.rows.length - left.rows.length
         || sourcePriority[left.run.sourceLabel] - sourcePriority[right.run.sourceLabel]
         || left.run.runId.localeCompare(right.run.runId)
@@ -303,8 +308,18 @@ export function assembleFirstPaymentConciergeSource(input: {
     const targetProfile = orderedTargets[0]?.profile;
     if (!targetProfile) fail('FIRST_PAYMENT_CONCIERGE_TARGET_PROFILE_INVALID');
 
-    const followers = selectLargestRelationshipRun(input.runs, targetUsername, 'followers');
-    const following = selectLargestRelationshipRun(input.runs, targetUsername, 'following');
+    const followers = selectExpectedRelationshipRun(
+        input.runs,
+        targetUsername,
+        'followers',
+        390,
+    );
+    const following = selectExpectedRelationshipRun(
+        input.runs,
+        targetUsername,
+        'following',
+        256,
+    );
     if (followers.length !== 390 || following.length !== 256) {
         fail(
             `FIRST_PAYMENT_CONCIERGE_RELATIONSHIP_COUNT_DRIFT(${followers.length}:${following.length})`,
