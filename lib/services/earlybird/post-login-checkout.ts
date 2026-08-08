@@ -32,6 +32,13 @@ export function checkoutContinuationKey(preflightId: string, planId: PlanId): st
     return `${preflightId}:${planId}`;
 }
 
+export function shouldClearAutoCheckoutUiPending(input: {
+    autoCheckoutAttempt: boolean;
+    checkoutRedirectStarted: boolean;
+}): boolean {
+    return input.autoCheckoutAttempt && !input.checkoutRedirectStarted;
+}
+
 export function shouldAutoSubmitEarlybirdAction(input: {
     requested: boolean;
     authenticated: boolean;
