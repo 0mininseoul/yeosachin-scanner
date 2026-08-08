@@ -18,6 +18,7 @@
     "earlybird:reconcile-no-sale": "tsx --env-file=.env.local scripts/reconcile-earlybird-checkout-no-sale.ts",
     "earlybird:fulfill": "tsx --env-file=.env.local scripts/fulfill-earlybird-order.ts",
     "earlybird:recover-schema-failed": "tsx --conditions=react-server scripts/recover-earlybird-schema-failed-fulfillment.ts",
+    "earlybird:recover-fresh-admission": "tsx --conditions=react-server --env-file=.env.local scripts/recover-earlybird-fresh-admission-provider-failure.ts",
     "canary:instagram": "tsx --env-file=.env.local scripts/canary-instagram-provider.ts",
     "canary:apify-profile-repair": "tsx --env-file=.env.local scripts/canary-apify-profile-repair.ts",
     "canary:instagram-profile-provider": "tsx --env-file=.env.local scripts/canary-instagram-profile-provider.ts",

@@ -228,6 +228,24 @@ CLI 출력은 `orderId`, bounded `status`, 생성된 경우의 `requestId`, `nex
 필드뿐이다. `manual_review`는 결제 취소나 환불을 자동 실행한다는 뜻이 아니며, 기존
 환불 운영 절차에서 별도로 확인해야 한다.
 
+### fresh-admission provider 장애 복구
+
+결제와 seller reference는 유효하지만 요청 생성 전에 fresh profile admission이 정확히
+3회 실패해 `TARGET_UNAVAILABLE` 수동 검토로 격리된 건은, provider routing을 실제
+serving revision에서 수정한 뒤에만 아래 전용 명령으로 재무장한다.
+
+```bash
+npm run earlybird:recover-fresh-admission -- \
+  --order-id <reference-confirmed paid order UUID> \
+  --confirm-fresh-admission-provider-recovery
+```
+
+전용 RPC는 `paid`, payment ID·금액·상품 일치, seller reference 확인, 결과 요청 없음,
+만료된 production preflight, `ANALYSIS_V2_FRESH_PROFILE_UNAVAILABLE` 3회 실패를 한
+transaction 안에서 다시 확인한다. 정확히 일치할 때만 기존 preflight를 보존한 채 새
+30분 admission 세대를 만들며 결제·환불 상태는 수정하지 않는다. 재실행 시 이미 생성된
+요청을 재사용하고, CLI stdout은 식별자를 제거한 `status`와 `nextAction`만 출력한다.
+
 ### 만료 preflight 보존
 
 `earlybird_orders.preflight_id`와 `earlybird_waitlist.preflight_id`는 의도적으로 `ON DELETE RESTRICT`를 사용한다. 만료된 연결 preflight는 retention 작업에서 대상 프로필 PII를 `retained.*` tombstone으로 scrub하지만, 주문 또는 대기 신청이 참조하는 동안 행 자체는 삭제하지 않는다. 어느 상업 레코드에서도 참조하지 않고 provider 사용액도 모두 정산된 만료 tombstone만 삭제할 수 있다. FK를 `CASCADE`로 바꾸거나 retention 500을 재시도로만 덮지 않는다.
