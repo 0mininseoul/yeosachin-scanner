@@ -185,6 +185,23 @@ function hash(domain: string, value: unknown): string {
     return createHash('sha256').update(`${domain}\n${canonical(value)}`).digest('hex');
 }
 
+export function firstPaymentConciergeSafeFailureCode(error: unknown): string {
+    const messages: string[] = [];
+    let current = error;
+    for (let depth = 0; depth < 3 && current instanceof Error; depth++) {
+        messages.push(current.message);
+        current = current.cause;
+    }
+    for (const message of messages) {
+        const match = /^([A-Z][A-Z0-9_]{2,119})(?::|$)/.exec(message);
+        if (match?.[1]) return match[1];
+    }
+    if (error instanceof z.ZodError) {
+        return 'FIRST_PAYMENT_CONCIERGE_ZOD_VALIDATION_FAILED';
+    }
+    return 'FIRST_PAYMENT_CONCIERGE_UNCLASSIFIED_FAILURE';
+}
+
 async function runBounded<T>(
     values: readonly T[],
     concurrency: number,
@@ -229,13 +246,17 @@ function replayEvidence(source: FirstPaymentConciergeSource): AnalysisV2ReplayBu
 }
 
 function checkpointProfile(profile: InstagramProfile) {
-    return analysisV2CheckpointProfileSchema.parse({
+    const parsed = analysisV2CheckpointProfileSchema.safeParse({
         ...profile,
         ...(profile.fullName ? { fullName: profile.fullName } : {}),
         ...(profile.bio ? { bio: profile.bio } : {}),
         ...(profile.externalUrl ? { externalUrl: profile.externalUrl } : {}),
         ...(profile.profilePicUrl ? { profilePicUrl: profile.profilePicUrl } : {}),
     });
+    if (!parsed.success) {
+        throw new Error('FIRST_PAYMENT_CONCIERGE_PROFILE_SCHEMA_INVALID');
+    }
+    return parsed.data;
 }
 
 function isMediaTerminal(error: unknown): boolean {

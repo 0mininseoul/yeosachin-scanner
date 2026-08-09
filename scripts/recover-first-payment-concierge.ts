@@ -13,7 +13,10 @@ import {
 import {
     captureFirstPaymentConciergeAiBundle,
     createFirstPaymentConciergePublication,
+    firstPaymentConciergeSafeFailureCode,
 } from '@/lib/services/analysis/first-payment-concierge';
+
+let recoveryStage = 'startup';
 
 const slots = new Set<ApifyCredentialSlot>([
     'primary',
@@ -56,10 +59,12 @@ function publishAuthorized(): boolean {
 }
 
 async function main(): Promise<void> {
+    recoveryStage = 'source_descriptor';
     const descriptor = firstPaymentConciergeRecoverySourceSchema.parse(
         await rpc('read_earlybird_v211_concierge_recovery_source'),
     );
     const clients = new Map<string, ReturnType<typeof createReplayReadonlyApifyClient>>();
+    recoveryStage = 'source_datasets';
     const datasets = await loadFirstPaymentConciergeDatasets({
         descriptor,
         clientForSlot(slot) {
@@ -75,6 +80,7 @@ async function main(): Promise<void> {
             return client;
         },
     });
+    recoveryStage = 'source_assembly';
     const source = assembleFirstPaymentConciergeSource({ descriptor, runs: datasets });
     const sourceMetric = {
         state: 'source_ready',
@@ -96,11 +102,14 @@ async function main(): Promise<void> {
         throw new Error('FIRST_PAYMENT_CONCIERGE_EXPLICIT_PUBLISH_REQUIRED');
     }
 
+    recoveryStage = 'media_capture';
     const captured = await captureFirstPaymentConciergeAiBundle({ source });
+    recoveryStage = 'ai_and_publication_compose';
     const publication = await createFirstPaymentConciergePublication({
         source,
         captured,
     });
+    recoveryStage = 'atomic_publication';
     const applied = publicationResultSchema.parse(await rpc(
         'publish_earlybird_v211_first_payment_concierge',
         {
@@ -109,6 +118,7 @@ async function main(): Promise<void> {
             p_payload: publication.payload,
         },
     ));
+    recoveryStage = 'publication_verification';
     const status = statusSchema.parse(await rpc(
         'read_earlybird_v211_concierge_publication_status',
     ));
@@ -134,10 +144,10 @@ async function main(): Promise<void> {
 }
 
 main().catch(error => {
-    const message = error instanceof Error ? error.message : '';
-    const safeCode = /^[A-Z0-9_():.-]{1,180}$/.test(message)
-        ? message
-        : 'FIRST_PAYMENT_CONCIERGE_UNCLASSIFIED_FAILURE';
-    console.error(JSON.stringify({ state: 'failed', code: safeCode }));
+    console.error(JSON.stringify({
+        state: 'failed',
+        stage: recoveryStage,
+        code: firstPaymentConciergeSafeFailureCode(error),
+    }));
     process.exitCode = 1;
 });

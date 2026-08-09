@@ -1,5 +1,8 @@
 import { describe, expect, it } from 'vitest';
-import { firstPaymentConciergePublicationPayloadSchema } from './first-payment-concierge';
+import {
+    firstPaymentConciergePublicationPayloadSchema,
+    firstPaymentConciergeSafeFailureCode,
+} from './first-payment-concierge';
 
 function payload() {
     return {
@@ -80,5 +83,19 @@ describe('firstPaymentConciergePublicationPayloadSchema', () => {
         }];
         expect(firstPaymentConciergePublicationPayloadSchema.safeParse(value).success)
             .toBe(false);
+    });
+});
+
+describe('firstPaymentConciergeSafeFailureCode', () => {
+    it('retains only a leading machine code from a detailed provider error', () => {
+        expect(firstPaymentConciergeSafeFailureCode(
+            new Error('ANALYSIS_IMAGE_PREPARATION_TIMEOUT: remote detail'),
+        )).toBe('ANALYSIS_IMAGE_PREPARATION_TIMEOUT');
+    });
+
+    it('does not expose unclassified error messages', () => {
+        expect(firstPaymentConciergeSafeFailureCode(
+            new Error('sensitive lower-case detail'),
+        )).toBe('FIRST_PAYMENT_CONCIERGE_UNCLASSIFIED_FAILURE');
     });
 });
