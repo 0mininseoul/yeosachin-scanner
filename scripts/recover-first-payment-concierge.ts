@@ -84,6 +84,7 @@ async function main(): Promise<void> {
         followingCollected: source.followingCollected,
         mutuals: source.mutualRows.length,
         publicProfiles: source.publicProfiles.length,
+        publicUnavailable: source.publicUnavailableRows.length,
         privateProfiles: source.privateRows.length,
         targetInteractions: source.targetInteractions.length,
     };

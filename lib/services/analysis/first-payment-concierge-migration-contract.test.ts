@@ -6,6 +6,10 @@ const migration = readFileSync(join(
     process.cwd(),
     'supabase/migrations/20260808280000_publish_v211_first_payment_concierge.sql',
 ), 'utf8');
+const coverageCorrectionMigration = readFileSync(join(
+    process.cwd(),
+    'supabase/migrations/20260808290000_correct_v211_first_payment_concierge_coverage.sql',
+), 'utf8');
 
 describe('first payment concierge publication migration', () => {
     it('keeps both source and publication RPCs service-role-only', () => {
@@ -60,6 +64,39 @@ describe('first payment concierge publication migration', () => {
         );
         expect(migration).toContain(
             'EXECUTE FUNCTION public.analysis_v2_seal_gender_resolution_metrics()',
+        );
+    });
+});
+
+describe('first payment concierge coverage correction migration', () => {
+    it('replaces only the exact one-shot publisher definition', () => {
+        expect(coverageCorrectionMigration).toContain('MIGRATION_PREDECESSOR=20260808280000');
+        expect(coverageCorrectionMigration).toContain(
+            "'public.publish_earlybird_v211_first_payment_concierge(text,text,jsonb)'::pg_catalog.regprocedure",
+        );
+        expect(coverageCorrectionMigration).toContain('EXECUTE v_corrected_definition');
+    });
+
+    it('uses the frozen Basic scope and truthful unavailable count', () => {
+        for (const marker of [
+            'OR v_screened_mutuals <> 134',
+            'OR v_not_screened_mutuals <> 0',
+            'OR v_fetch_unavailable <> 5',
+            'OR v_unknown NOT BETWEEN 5 AND 134',
+            'OR v_male + v_female + v_unknown <> 134',
+            'OR v_fetch_unavailable + v_media_unavailable',
+        ]) expect(coverageCorrectionMigration).toContain(marker);
+    });
+
+    it('retains the service-role-only publication fence', () => {
+        expect(coverageCorrectionMigration).toContain(
+            "pg_catalog.has_function_privilege('anon', v_signature, 'EXECUTE')",
+        );
+        expect(coverageCorrectionMigration).toContain(
+            "pg_catalog.has_function_privilege('authenticated', v_signature, 'EXECUTE')",
+        );
+        expect(coverageCorrectionMigration).toContain(
+            "pg_catalog.has_function_privilege('service_role', v_signature, 'EXECUTE')",
         );
     });
 });
