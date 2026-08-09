@@ -13,6 +13,8 @@ const mocks = vi.hoisted(() => ({
     observeRoute: vi.fn(),
     demoFindForOwner: vi.fn(),
     loadFixture: vi.fn(),
+    isResultOperator: vi.fn(),
+    resolveResultOwner: vi.fn(),
 }));
 
 vi.mock('@/lib/supabase/server', () => ({ createClient: mocks.createClient }));
@@ -30,6 +32,10 @@ vi.mock('@/lib/observability/server', () => ({
 }));
 vi.mock('@/lib/services/demo-analysis/fixture-store', () => ({
     loadDemoFixtureForVersion: mocks.loadFixture,
+}));
+vi.mock('@/lib/services/analysis/result-operator-access', () => ({
+    isAnalysisResultOperator: mocks.isResultOperator,
+    resolveAnalysisResultOwner: mocks.resolveResultOwner,
 }));
 
 import { GET } from '@/app/api/analysis/v2/result/[requestId]/route';
@@ -114,6 +120,8 @@ describe('analysis V2 owner result route', () => {
         mocks.getUser.mockResolvedValue({ data: { user: { id: userId } }, error: null });
         mocks.loadPage.mockResolvedValue(page());
         mocks.demoFindForOwner.mockResolvedValue(null);
+        mocks.isResultOperator.mockReturnValue(false);
+        mocks.resolveResultOwner.mockResolvedValue(null);
         mocks.observeRoute.mockImplementation(async (
             _request: Request,
             _route: string,
@@ -335,6 +343,54 @@ describe('analysis V2 owner result route', () => {
             requestId,
         });
         expect(mocks.operationalEmit).not.toHaveBeenCalled();
+        expect(mocks.resolveResultOwner).not.toHaveBeenCalled();
+    });
+
+    it('lets the authenticated result operator read a completed result through its real owner boundary', async () => {
+        const ownerUserId = '423e4567-e89b-42d3-a456-426614174000';
+        mocks.getUser.mockResolvedValue({
+            data: { user: { id: userId, email: 'ym1113@kakao.com' } },
+            error: null,
+        });
+        mocks.isResultOperator.mockReturnValue(true);
+        mocks.resolveResultOwner.mockResolvedValue(ownerUserId);
+
+        const response = await GET(
+            new Request(`https://example.com/api/analysis/v2/result/${requestId}`),
+            context(),
+        );
+
+        expect(response.status).toBe(200);
+        expect(mocks.isResultOperator).toHaveBeenCalledWith({
+            id: userId,
+            email: 'ym1113@kakao.com',
+        });
+        expect(mocks.resolveResultOwner).toHaveBeenCalledWith(requestId);
+        expect(mocks.loadPage).toHaveBeenCalledWith(expect.objectContaining({
+            requestId,
+            userId: ownerUserId,
+        }));
+        expect(mocks.operationalEmit).toHaveBeenCalledWith(expect.objectContaining({
+            fields: expect.objectContaining({ user_id: userId }),
+        }));
+    });
+
+    it('does not resolve another owner for a normal authenticated user', async () => {
+        mocks.getUser.mockResolvedValue({
+            data: { user: { id: userId, email: 'someone@example.com' } },
+            error: null,
+        });
+
+        const response = await GET(
+            new Request(`https://example.com/api/analysis/v2/result/${requestId}`),
+            context(),
+        );
+
+        expect(response.status).toBe(200);
+        expect(mocks.resolveResultOwner).not.toHaveBeenCalled();
+        expect(mocks.loadPage).toHaveBeenCalledWith(expect.objectContaining({
+            userId,
+        }));
     });
 
     it('records the initial completed-result view with the owner and analysis join keys', async () => {

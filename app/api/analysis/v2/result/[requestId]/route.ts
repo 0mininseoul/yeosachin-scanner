@@ -17,6 +17,10 @@ import {
 } from '@/lib/observability/request';
 import { operationalLogger } from '@/lib/observability/server';
 import { loadDemoFixtureForVersion } from '@/lib/services/demo-analysis/fixture-store';
+import {
+    isAnalysisResultOperator,
+    resolveAnalysisResultOwner,
+} from '@/lib/services/analysis/result-operator-access';
 
 const requestIdSchema = z.string().uuid();
 const pageSizeSchema = z.string().regex(/^\d{1,2}$/).transform(Number)
@@ -100,9 +104,17 @@ async function handleGET(
             })), 200);
         }
 
+        const operator = isAnalysisResultOperator({ id: user.id, email: user.email });
+        const authorizedOwnerId = operator
+            ? await resolveAnalysisResultOwner(requestId.data)
+            : user.id;
+        if (!authorizedOwnerId) {
+            return json({ error: 'Analysis result not found.' }, 404);
+        }
+
         const result = await analysisV2ResultStore.loadPage({
             requestId: requestId.data,
-            userId: user.id,
+            userId: authorizedOwnerId,
             femaleCursor,
             privateCursor,
             pageSize: pageSize.data,
