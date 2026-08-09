@@ -245,9 +245,18 @@ function replayEvidence(source: FirstPaymentConciergeSource): AnalysisV2ReplayBu
     };
 }
 
-function checkpointProfile(profile: InstagramProfile) {
+export function firstPaymentConciergeCheckpointProfile(profile: InstagramProfile) {
+    const latestPosts = profile.latestPosts === undefined
+        ? undefined
+        : [...profile.latestPosts]
+            .sort((left, right) => (
+                Date.parse(right.timestamp) - Date.parse(left.timestamp)
+                || left.id.localeCompare(right.id)
+            ))
+            .slice(0, 8);
     const parsed = analysisV2CheckpointProfileSchema.safeParse({
         ...profile,
+        ...(latestPosts === undefined ? {} : { latestPosts }),
         ...(profile.fullName ? { fullName: profile.fullName } : {}),
         ...(profile.bio ? { bio: profile.bio } : {}),
         ...(profile.externalUrl ? { externalUrl: profile.externalUrl } : {}),
@@ -279,7 +288,7 @@ export async function captureFirstPaymentConciergeAiBundle(input: {
     );
     const mediaUnavailable = new Set<number>();
     await runBounded(input.source.publicProfiles, 4, async item => {
-        const profile = checkpointProfile(item.profile);
+        const profile = firstPaymentConciergeCheckpointProfile(item.profile);
         try {
             const one = await captureAnalysisV2ReplayBundle({
                 selector: { targetUsername: profile.username },
