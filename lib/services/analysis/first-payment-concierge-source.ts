@@ -69,6 +69,7 @@ export interface FirstPaymentConciergeSource {
         ordinal: number;
         profile: InstagramProfile;
     }>[];
+    publicUnavailableRows: readonly FirstPaymentConciergeRelationshipRow[];
     privateRows: readonly FirstPaymentConciergeRelationshipRow[];
     targetInteractions: readonly Readonly<{
         actorUsername: string;
@@ -374,8 +375,13 @@ export function assembleFirstPaymentConciergeSource(input: {
         const profile = candidateProfiles.get(row.username);
         return profile ? [{ ordinal: row.mutualOrdinal, profile }] : [];
     });
-    if (publicProfiles.length !== 130) {
-        fail(`FIRST_PAYMENT_CONCIERGE_PROFILE_COUNT_DRIFT(${publicProfiles.length})`);
+    const publicUnavailableRows = publicMutuals.filter(row => (
+        !candidateProfiles.has(row.username)
+    ));
+    if (publicProfiles.length !== 129 || publicUnavailableRows.length !== 5) {
+        fail(
+            `FIRST_PAYMENT_CONCIERGE_PROFILE_COUNT_DRIFT(${publicProfiles.length}:${publicUnavailableRows.length})`,
+        );
     }
 
     const likerItems = largestItems(input.runs, 'target-likers');
@@ -408,6 +414,7 @@ export function assembleFirstPaymentConciergeSource(input: {
         followingCollected: following.length,
         mutualRows: Object.freeze(mutualRows),
         publicProfiles: Object.freeze(publicProfiles),
+        publicUnavailableRows: Object.freeze(publicUnavailableRows),
         privateRows: Object.freeze(privateRows),
         targetInteractions: Object.freeze(targetInteractions),
     });

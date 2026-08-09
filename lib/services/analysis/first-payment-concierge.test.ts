@@ -16,14 +16,14 @@ function payload() {
             detectedMutuals: 182 as const,
             publicMutuals: 134 as const,
             privateMutuals: 48 as const,
-            screenedMutuals: 130 as const,
-            notScreenedMutuals: 4 as const,
-            fetchUnavailableCount: 0 as const,
+            screenedMutuals: 134 as const,
+            notScreenedMutuals: 0 as const,
+            fetchUnavailableCount: 5 as const,
             mediaUnavailableCount: 2,
             analysisUnavailableCount: 3,
             male: 80,
             female: 0,
-            unknown: 50,
+            unknown: 54,
         },
         femaleRows: [] as unknown[],
         privateRows: Array.from({ length: 48 }, (_, index) => ({
@@ -45,14 +45,15 @@ describe('firstPaymentConciergePublicationPayloadSchema', () => {
                 detectedMutuals: 182,
                 publicMutuals: 134,
                 privateMutuals: 48,
-                screenedMutuals: 130,
-                notScreenedMutuals: 4,
+                screenedMutuals: 134,
+                notScreenedMutuals: 0,
+                fetchUnavailableCount: 5,
             });
     });
 
     it('rejects gender totals that do not cover every screened public account', () => {
         const value = payload();
-        value.counts.unknown = 49;
+        value.counts.unknown = 53;
         expect(firstPaymentConciergePublicationPayloadSchema.safeParse(value).success)
             .toBe(false);
     });

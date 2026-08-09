@@ -60,7 +60,7 @@ describe('first payment concierge source selection', () => {
         ];
         const oversizedFollowers = [...retainedFollowers, 'new_follower'];
         const following = Array.from({ length: 256 }, (_, index) => `u${index}`);
-        const publicProfiles = Array.from({ length: 130 }, (_, index) => profile(`u${index}`));
+        const publicProfiles = Array.from({ length: 129 }, (_, index) => profile(`u${index}`));
 
         const source = assembleFirstPaymentConciergeSource({
             descriptor: {
@@ -108,7 +108,8 @@ describe('first payment concierge source selection', () => {
         expect(source.followersCollected).toBe(390);
         expect(source.followingCollected).toBe(256);
         expect(source.mutualRows).toHaveLength(182);
-        expect(source.publicProfiles).toHaveLength(130);
+        expect(source.publicProfiles).toHaveLength(129);
+        expect(source.publicUnavailableRows).toHaveLength(5);
         expect(source.privateRows).toHaveLength(48);
     });
 });

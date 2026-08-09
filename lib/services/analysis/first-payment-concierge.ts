@@ -67,14 +67,14 @@ const countsSchema = z.object({
     detectedMutuals: z.literal(182),
     publicMutuals: z.literal(134),
     privateMutuals: z.literal(48),
-    screenedMutuals: z.literal(130),
-    notScreenedMutuals: z.literal(4),
-    fetchUnavailableCount: z.literal(0),
-    mediaUnavailableCount: z.number().int().min(0).max(130),
-    analysisUnavailableCount: z.number().int().min(0).max(130),
-    male: z.number().int().min(0).max(130),
-    female: z.number().int().min(0).max(130),
-    unknown: z.number().int().min(0).max(130),
+    screenedMutuals: z.literal(134),
+    notScreenedMutuals: z.literal(0),
+    fetchUnavailableCount: z.literal(5),
+    mediaUnavailableCount: z.number().int().min(0).max(129),
+    analysisUnavailableCount: z.number().int().min(0).max(129),
+    male: z.number().int().min(0).max(129),
+    female: z.number().int().min(0).max(129),
+    unknown: z.number().int().min(5).max(134),
 }).strict();
 
 const femaleRowSchema = z.object({
@@ -158,6 +158,7 @@ export type FirstPaymentConciergePublicationPayload = z.infer<
 
 export interface FirstPaymentConciergeCapturedBundle {
     bundle: Extract<AnalysisV2ReplayBundle, { schemaVersion: 1 }>;
+    fetchUnavailableOrdinals: readonly number[];
     mediaUnavailableOrdinals: readonly number[];
 }
 
@@ -252,6 +253,9 @@ export async function captureFirstPaymentConciergeAiBundle(input: {
         ?? createAnalysisV2SelectedMediaNormalizer();
     const evidence = replayEvidence(input.source);
     const captured = new Map<number, AnalysisV2ReplayBundle['profiles'][number]>();
+    const fetchUnavailable = new Set(
+        input.source.publicUnavailableRows.map(row => row.mutualOrdinal),
+    );
     const mediaUnavailable = new Set<number>();
     await runBounded(input.source.publicProfiles, 4, async item => {
         const profile = checkpointProfile(item.profile);
@@ -282,7 +286,7 @@ export async function captureFirstPaymentConciergeAiBundle(input: {
             mediaUnavailable.add(item.ordinal);
         }
     });
-    if (captured.size + mediaUnavailable.size !== 130) {
+    if (captured.size + mediaUnavailable.size + fetchUnavailable.size !== 134) {
         throw new Error('FIRST_PAYMENT_CONCIERGE_CAPTURE_COUNT_DRIFT');
     }
     const now = input.now ?? Date.now();
@@ -300,6 +304,9 @@ export async function captureFirstPaymentConciergeAiBundle(input: {
     };
     return Object.freeze({
         bundle,
+        fetchUnavailableOrdinals: Object.freeze(
+            [...fetchUnavailable].sort((a, b) => a - b),
+        ),
         mediaUnavailableOrdinals: Object.freeze([...mediaUnavailable].sort((a, b) => a - b)),
     });
 }
@@ -469,6 +476,7 @@ export async function createFirstPaymentConciergePublication(input: {
     }));
 
     const mediaUnavailable = new Set(input.captured.mediaUnavailableOrdinals);
+    const fetchUnavailable = new Set(input.captured.fetchUnavailableOrdinals);
     const analysisUnavailableCount = [...details.values()].filter(detail => (
         detail.finalClassification === 'analysis_unavailable'
     )).length;
@@ -476,13 +484,14 @@ export async function createFirstPaymentConciergePublication(input: {
         detail.finalClassification === 'verified_non_female'
     )).length;
     const female = verifiedFemale.length;
-    const unknown = 130 - male - female;
+    const unknown = 134 - male - female;
     const semanticInputFingerprint = analysisV2ReplaySemanticInputFingerprint(
         input.captured.bundle,
     );
     const evidenceHash = hash('first-payment-concierge-evidence-v1', {
         descriptorHash: input.source.descriptorHash,
         semanticInputFingerprint,
+        fetchUnavailableOrdinals: [...fetchUnavailable].sort((a, b) => a - b),
         mediaUnavailableOrdinals: [...mediaUnavailable].sort((a, b) => a - b),
         accounts: [...details.values()].sort((a, b) => a.ordinal - b.ordinal),
     });
@@ -498,11 +507,13 @@ export async function createFirstPaymentConciergePublication(input: {
             followingDeclared: input.source.followingDeclared,
             followingCollected: input.source.followingCollected,
             detectedMutuals: input.source.mutualRows.length,
-            publicMutuals: input.source.publicProfiles.length + 4,
+            publicMutuals: input.source.publicProfiles.length
+                + input.source.publicUnavailableRows.length,
             privateMutuals: input.source.privateRows.length,
-            screenedMutuals: input.source.publicProfiles.length,
-            notScreenedMutuals: 4,
-            fetchUnavailableCount: 0,
+            screenedMutuals: input.source.publicProfiles.length
+                + input.source.publicUnavailableRows.length,
+            notScreenedMutuals: 0,
+            fetchUnavailableCount: fetchUnavailable.size,
             mediaUnavailableCount: mediaUnavailable.size,
             analysisUnavailableCount,
             male,
