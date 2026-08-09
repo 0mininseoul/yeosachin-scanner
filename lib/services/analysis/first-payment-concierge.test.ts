@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import {
+    firstPaymentConciergeCheckpointProfile,
     firstPaymentConciergePublicationPayloadSchema,
     firstPaymentConciergeSafeFailureCode,
 } from './first-payment-concierge';
@@ -97,5 +98,33 @@ describe('firstPaymentConciergeSafeFailureCode', () => {
         expect(firstPaymentConciergeSafeFailureCode(
             new Error('sensitive lower-case detail'),
         )).toBe('FIRST_PAYMENT_CONCIERGE_UNCLASSIFIED_FAILURE');
+    });
+});
+
+describe('firstPaymentConciergeCheckpointProfile', () => {
+    it('uses the production eight-post checkpoint boundary', () => {
+        const latestPosts = Array.from({ length: 10 }, (_, index) => ({
+            id: `post-${index}`,
+            shortCode: `short-${index}`,
+            imageUrl: 'https://example.com/post.jpg',
+            type: 'image' as const,
+            likesCount: 0,
+            commentsCount: 0,
+            timestamp: new Date(Date.UTC(2026, 0, index + 1)).toISOString(),
+            taggedUsers: [],
+            mentionedUsers: [],
+        }));
+        const checkpoint = firstPaymentConciergeCheckpointProfile({
+            username: 'candidate',
+            followersCount: 1,
+            followingCount: 1,
+            postsCount: 10,
+            isPrivate: false,
+            isVerified: false,
+            latestPosts,
+        });
+
+        expect(checkpoint.latestPosts).toHaveLength(8);
+        expect(checkpoint.latestPosts?.[0]?.id).toBe('post-9');
     });
 });
