@@ -1,17 +1,17 @@
 # 2026년 8월 매출 우선 운영 전략
 
 - 최초 작성일: 2026-08-08
-- 최종 갱신일: 2026-08-09
+- 최종 갱신일: 2026-08-10
 - 상태: 팀 공유용 실행 결정안
 - 적용 기간: 2026-08-08 ~ 2026-08-31
-- 코드 기준: `origin/main@7f899b7c` + 결제 후 안내 화면 hotfix `a91ac71a` + 첫 결제 concierge 복구 `47d10dee`
-- 현재 상태: **첫 결제 결과 생성·소유자 URL 검증 완료, 운영자 직접 전달 대기**
+- 코드 기준: `origin/main@7f899b7c` + 결제 후 안내 화면 + 첫 결제 concierge 복구 + 운영자 결과 조회 경로(`979e5a67`까지)
+- 현재 상태: **첫 결제 결과 생성 완료, 구매자가 2026-08-09 보관함에서 직접 열람, 운영자 계정 조회도 검증 완료**
 - 8월 최우선 목표: **관리자·내부 테스트를 제외한 환불 차감 실결제 누적 100,000원**
 - 동시 운영 목표: **모든 유료 주문을 약속한 기한 안에 결과까지 전달**
 - 범위: 위장여사친판독기와 맞팔 알리미의 출시 순서, 가격, 원가 상한, 운영 중단 기준
 - 제외: 사용자 인터뷰, 확정 랜딩 카피 변경, 장기 자동화 상세 설계
 
-> 이 문서는 8월 매출 실행 순서에 관해 [전략 전면 재검토 rev.2](./2026-08-07-strategy-full-review.md)를 대체한다. 제품 가설의 정본은 [린 캔버스](./2026-07-31-lean-canvas.md), 운영 원가의 측정 정본은 [운영 비용 및 가격 모델](../operations-cost-model.md)이다.
+> 이 문서는 8월 매출 실행 순서와 가격·판매 중단 규칙의 정본이며 [전략 전면 재검토 rev.3](./2026-08-07-strategy-full-review.md)를 대체한다. 제품 가설의 정본은 [린 캔버스](./2026-07-31-lean-canvas.md), 운영 원가의 측정 정본은 [운영 비용 및 가격 모델](../operations-cost-model.md)이다. 구현 계약은 [계정 원장](../superpowers/specs/2026-08-10-account-ledger-paid-status-design.md), [성별 라우팅](../superpowers/specs/2026-08-10-gender-routing-cost-control-design.md), [유료 분석 E2E](../superpowers/specs/2026-08-10-revenue-e2e-observability-design.md) 설계를 따른다.
 
 ---
 
@@ -28,6 +28,8 @@
 5. 알리미는 최초 기준 목록을 만드는 일회성 설정비와 월 감시비를 분리한다. 화면에는 `월 1,990원부터`를 주 가격으로 노출하되 설정비를 결제 전에 명확히 알린다.
 6. 변화가 전혀 없는 달의 무료 정책은 초기 이벤트로 채택한다. 환불이나 0원 재결제가 아니라 **다음 30일 무료 연장**으로 운영한다.
 7. selfhosted_auth는 8월 매출의 선행 조건이 아니다. Apify로 매출과 E2E를 먼저 만들고, 버너 계정 2~3개의 별도 canary가 통과한 뒤에만 전환한다.
+8. 자동 완료 이메일 파이프라인은 이번 운영 주기에 구축하지 않는다. 자동 E2E가 복구될 때까지 운영자가 완료 건을 확인하고 수동으로 전달한다.
+9. 구현 우선순위는 **Apify Basic/Standard E2E 복구 → 유료 주문 원장·관측 정합성 → 맞팔 알리미 concierge 파일럿**이다. 계정 정리는 E2E를 방해하지 않는 additive migration으로 병행한다.
 
 한 문장으로 요약하면 다음과 같다.
 
@@ -64,19 +66,19 @@ Amplitude 원시 이벤트 시각과 당시 fulfillment 상태를 함께 보면,
 - 현재 결제 후 안내 문구는 `판독 결과가 완성되면 가입하신 이메일로 결과 링크를 보내드릴게요.`다.
 - 이 안내 화면은 production에 배포됐다.
 
-주의할 점이 하나 있다. V2 결과 완료 시 자동 이메일 outbox는 아직 없다. 재고가 제한된 현재는 운영자가 완료 여부를 확인해 이메일 또는 직접 URL로 전달한다. **자동 이메일이 구현되기 전까지 화면의 약속은 concierge 운영 SLA로 이행한다.**
+주의할 점이 하나 있다. V2 결과 완료 시 자동 이메일 outbox는 없고 이번 운영 주기에도 만들지 않는다. 재고가 제한된 현재는 운영자가 완료 여부를 확인해 이메일 또는 직접 URL로 전달한다. **자동 E2E가 복구될 때까지 화면의 약속은 concierge 운영 SLA로 이행한다.**
 
 ### 2.4 첫 주문의 처리 원칙
 
 - 전달 기한: 주문 원장의 `due_at`, 2026-08-09 21:41 KST 이전
 - 우선순위: 신규 기능보다 이 주문의 Apify 분석 생성과 결과 전달이 먼저다.
-- 결과가 자동 주문 흐름에 연결되지 않더라도, 소유자가 볼 수 있는 결과 URL을 concierge로 먼저 생성해 직접 전달한다.
+- 결과가 자동 주문 흐름에 연결되지 않더라도, 소유자가 볼 수 있는 결과 URL을 concierge로 먼저 생성한다. 구매자가 보관함에서 먼저 확인하면 별도 URL을 중복 발송하지 않고 열람 사실만 기록한다.
 - 환불 요청이 오면 분석 완료 여부와 무관하게 즉시 환불 절차로 전환한다.
 - 환불 요청이 없는 현재 상태를 임의로 환불·완료 처리하지 않는다.
 
 ### 2.5 첫 주문 복구 결과
 
-2026-08-09 09:37 KST, due_at보다 약 12시간 먼저 결과 생성과 소유자 전용 결과 페이지 검증을 완료했다. 주문·fulfillment·분석 요청은 하나의 트랜잭션으로 `completed`가 됐으며, 운영자의 직접 URL 전달만 남았다.
+2026-08-09 09:37 KST, due_at보다 약 12시간 먼저 결과 생성과 소유자 전용 결과 페이지 검증을 완료했다. 주문·fulfillment·분석 요청은 하나의 트랜잭션으로 `completed`가 됐다. 구매자는 같은 날 14:48 KST경 보관함에서 결과를 직접 확인했고, 운영자 계정에서도 같은 결과를 열 수 있음을 확인했다. 따라서 추가 URL 발송은 하지 않았다.
 
 - 신규 Apify 수집을 시작하지 않고 기존 결제 건에 귀속된 데이터셋 19개를 재사용했다.
 - 수집 범위: 팔로워 390, 팔로잉 256, 맞팔 182, 공개 134, 비공개 48
@@ -92,6 +94,10 @@ Amplitude 원시 이벤트 시각과 당시 fulfillment 상태를 함께 보면,
 2. Apify의 최근 게시물 최대 10개를 운영 체크포인트 규칙과 동일하게 최신순 8개로 정규화해야 한다.
 3. `not screened`는 플랜 상한 초과에만 사용한다. 프로필 조회 실패는 `fetch unavailable`로 분리한다.
 
+세 항목은 첫 결제 concierge 복구 경로에서 각각 코드·migration·계약 테스트로 반영됐다. 다만 이는 **보존 데이터 재생 경로의 수정 완료**를 뜻하며, 신규 수집부터 결과 페이지까지의 fresh Basic/Standard E2E가 복구됐다는 뜻은 아니다. fresh E2E 두 건이 아래 출시 gate다.
+
+첫 결과의 프로필 이미지는 결과 화면에서 표시되지 않았다. 결과 수치와 소유권은 정상이나, 공급자 CDN URL은 장기 결과 표시 계약으로 사용할 수 없다. fresh E2E에서는 최종 결과 이미지가 공급자 URL이 아니라 내부 R2 보존 객체와 권한을 검사하는 안정된 same-origin 경로로 열리는 것을 필수 합격 조건으로 둔다.
+
 ---
 
 ## 3. 8월 목표와 매출 산식
@@ -106,7 +112,7 @@ Amplitude 원시 이벤트 시각과 당시 fulfillment 상태를 함께 보면,
 | 환불 차감 매출 | **100,000원** | 실결제 총액에서 완료된 환불액을 차감 |
 | 기한 내 전달률 | **100%** | `due_at` 안에 결과 URL을 전달한 유료 주문 비율 |
 
-첫 Basic 990원은 외부 실결제 총액에 포함하므로 현재 목표 잔액은 **99,010원**이다. 다만 결과를 전달하기 전까지는 `fulfilled paid order`로 세지 않는다.
+첫 Basic 990원은 외부 실결제 총액과 `fulfilled paid order`에 포함한다. 결과가 완성됐고 구매자가 직접 열람했기 때문이다. 현재 목표 잔액은 **99,010원**이다.
 
 ### 3.2 판독기만으로는 10만 원에 도달할 수 없다
 
@@ -139,16 +145,18 @@ Basic과 Standard의 전체 재고를 각각 10건으로 제한하고 현재 가
 
 1. ~~현재 Basic 결제 건을 Apify로 재실행하거나 concierge 결과로 생성한다.~~ 완료
 2. ~~결과 URL을 소유자가 열 수 있는지 확인한다.~~ 완료
-3. 운영자가 직접 결과 URL을 전달하고 전달 시각을 기록한다.
+3. ~~구매자의 보관함 결과 열람을 확인하고 별도 URL 발송 여부를 결정한다.~~ 직접 열람 확인, 추가 발송 생략
 4. 같은 설정에서 Basic E2E 한 건을 추가 canary로 완주한다.
 
 ### 4.2 8월 10일~11일: 판독기 E2E와 제한 판매
 
-1. Apify Basic과 Standard를 각각 결제 전부터 결과 페이지까지 완주한다.
+1. Apify Basic과 Standard를 각각 preflight부터 결과 페이지까지 완주한다. Basic 대상은 `winglss1`, Standard 대상은 `0_min._.00`으로 고정한다.
 2. provider 실제 비용, Gemini 사용량, 소요 시간, 재시도 횟수, coverage를 기록한다.
 3. 기존 Groble 재고 제한 Basic 10 / Standard 10을 유지한다.
 4. likes/comments 범위는 유지한다. 원가 절감은 5.3의 1, 2단계까지만 한다.
 5. 신규 결제를 기본적으로 닫지 않는다. 대신 아래 중단 기준을 자동 또는 운영 체크리스트로 집행한다.
+6. 실제 Groble 재결제 대신 분리된 E2E 인증 계정과 signed test entitlement를 사용한다. 결제 경계는 이미 발생한 외부 실결제 원장과 별도 계약 테스트로 검증한다.
+7. fresh E2E가 통과하면 ready preflight와 플랜 사이에 현재 published synthetic fixture를 축약한 demo 결과를 노출한다. 실제 대상의 결과처럼 보이게 만들지 않고 `예시 결과`로 명확히 표시하되, 기존 결과 컴포넌트와 디자인 시스템을 재사용해 결제 전에 결과 경험을 이해시키고 몰입을 만든다.
 
 ### 4.3 8월 12일까지: 맞팔 알리미 유료 파일럿 출시
 
@@ -200,8 +208,12 @@ selfhosted_auth가 성공해도 990원 / 1,990원으로 자동 인하하지 않�
 
 이번 운영 주기에는 다음 두 단계만 실행한다.
 
-1. 관계 수집 결과에 이미 포함된 `username`, `fullname`, `profile_pic_url`을 재사용해 불필요한 전수 profile batch를 제거한다.
-2. 상세 후보 수집 상한을 Basic 100명 / Standard 200명으로 제한하고 실제 coverage와 결과 품질을 기록한다.
+1. 공개 맞팔이 상세 상한을 넘을 때만 관계 수집 결과의 **`profile_pic_url`과 `fullname`**으로 1차 라우팅 점수를 만든다. 상한 이하면 모델을 호출하지 않고 전원을 상세 분석한다. username, bio, 기존 프로필 캐시 전수 검색은 입력과 보강 경로에서 제외한다. 1차 점수는 최종 성별 판정이 아니라 상세 수집 우선순위를 정하는 값이다.
+2. 상세 profile·media·interaction 후보를 Basic 100명 / Standard 200명으로 제한한다. 상한을 넘는 모집단에서는 여성 우선 80%와 불확실 탐색 20%를 서로 겹치지 않게 뽑고, 부족분은 고정된 순서로 채운다. 동점은 요청·checkpoint·후보의 안정 식별자를 사용한 HMAC으로 결정한다.
+
+상한 밖 공개 맞팔은 `unknown`이 아니라 `not_screened`로 기록한다. 상한 안 후보는 기존 상세 프로필·미디어 단계에서 최종적으로 여성·남성·미상으로 판정한다. `fetch/media/analysis_unavailable`는 screened unknown의 원인이지 별도 모집단이 아니다. 최종 미상 비율의 자동 완료 SLO는 screened 후보 기준 **30% 이하**다. 30%를 넘으면 bounded resolver를 실행하고, 그래도 넘으면 결과를 억지로 이진 분류하지 않고 `manual_review`로 보낸다.
+
+30%는 답을 낸 범위를 보는 coverage gate일 뿐 성별 정확도를 증명하지 않는다. Basic/Standard E2E에서는 1차 점수를 보지 않는 blind review와 `not_screened` holdout으로 정확도를 별도 검사한다. 무료 credit도 공개 단가로 환산한다. provider+AI 변동원가 목표는 수수료 차감 후 계획 순수입인 Basic 904원 / Standard 1,817원이며, 제한 판매의 hard safety cap은 그 두 배인 1,808원 / 3,634원이다. 목표 초과·hard cap 이하는 `negative_margin_pilot`로 표시해 재고를 확대하지 않고, hard cap 초과는 자동화 출시 gate 실패다. 완결된 알고리즘·재시도·manifest·audit 계약은 [성별 라우팅 설계](../superpowers/specs/2026-08-10-gender-routing-cost-control-design.md)가 정본이다.
 
 다음 항목은 후순위로 보류한다.
 
@@ -215,9 +227,16 @@ likes/comments를 줄이는 결정은 위 두 단계의 실원가를 확인한 �
 ### 5.4 이메일 전달 운영
 
 - `paid`, `analysis_in_progress`, `manual_review` 화면은 결과 링크를 이메일로 보낸다고 안내한다.
-- V2 completion email outbox 구현 전에는 운영자가 수동 발송한다.
-- 미전달 유료 주문이 3건에 도달하기 전 V2 완료 이메일 outbox를 구현한다.
+- 자동 분석 E2E가 복구되기 전에는 운영자가 완료 목록을 확인하고 수동 발송한다.
+- 이번 운영 주기에는 V2 완료 이메일 outbox를 구현하지 않는다. 미전달 유료 주문이 늘면 재고 중단 기준을 적용하고 자동 발송 범위를 별도 승인한다.
 - 이메일 발송 성공만으로 완료 처리하지 않고, 소유자 전용 결과 URL이 실제 `completed` 요청을 가리키는지 확인한다.
+
+### 5.5 결과 이미지 보존
+
+- provider dataset의 CDN URL을 완성된 결과의 장기 이미지 URL로 저장하지 않는다.
+- finalize 전에 대상, 결과 여성 후보, 비공개 후보의 표시 이미지를 내부 R2 result-image 객체로 캡처한다.
+- 결과 API는 안정된 same-origin 불투명 경로만 반환하고, 원본 provider URL·버킷 객체 키·만료 URL을 immutable result에 넣지 않는다.
+- Basic/Standard E2E는 결과 페이지의 대상·후보 이미지가 새 세션에서도 실제 로드될 때만 성공으로 판정한다.
 
 ---
 
@@ -248,6 +267,15 @@ AND 조건은 원가가 낮지만 실제 신규 맞팔을 놓친다.
 
 count가 같은 순교체는 일별 count만으로 잡을 수 없다. 파일럿에서는 이를 제한사항으로 고지하고, 갱신 시점의 전체 감사에서 보완한다.
 
+refresh credit은 사용자 화면에서 매번 차감되는 포인트가 아니라 **운영 원가 상한**이다. 그렇다고 상한을 넘어서 계속 무제한 수집하는 것도 아니다.
+
+- Light와 Standard는 각각 표에 적힌 full-refresh 상당량까지만 목록 수집을 자동 승인한다.
+- 상한에 도달하면 저비용 일별 count 감시는 계속하지만 목록 refresh와 상세 알림은 중지한다.
+- 사용자에게 추가권 구매 또는 다음 30일 갱신을 안내한다. 자동 추가 과금은 하지 않는다.
+- 추가권 구매나 다음 주기 시작 후에는 마지막 정상 스냅샷과 새 스냅샷의 순변화를 전달한다. 중지 기간 안의 날짜별 발생 순서까지 복원된다고 약속하지 않는다.
+
+따라서 남자친구가 서로 다른 5일에 일반 계정을 한 명씩 팔로우해 내부 한도를 소진하면 서비스가 끝없이 비용을 쓰지 않는다. 신규 맞팔이 없더라도 새 following 정보 자체를 알림 가치로 제공할지는 파일럿에서 별도 카피·수요 신호로 검증하되, 현재 핵심 약속은 **새 맞팔 감지**로 유지한다.
+
 ---
 
 ## 7. 맞팔 알리미 가격 정책
@@ -256,8 +284,8 @@ count가 같은 순교체는 일별 count만으로 잡을 수 없다. 파일럿�
 
 | 플랜 | 계정 규모 조건¹ | 최초 설정비 | 30일 감시비 | 포함량 |
 |---|---|---:|---:|---|
-| Light | 각 방향 ≤400, 합계 ≤800 | **1,990원** | **1,990원** | 일별 count + full refresh 1회 상당 + 알림톡 |
-| Standard | 각 방향 ≤800, 합계 ≤1,600 | **2,990원** | **2,990원** | 일별 count + full refresh 1회 상당 + 알림톡 |
+| Light | 각 방향 ≤400, 합계 ≤800 | **1,990원** | **1,990원** | 일별 count + full refresh 1회 상당의 내부 원가 한도 + 알림톡 |
+| Standard | 각 방향 ≤800, 합계 ≤1,600 | **2,990원** | **2,990원** | 일별 count + full refresh 1회 상당의 내부 원가 한도 + 알림톡 |
 | 초과 계정 | 위 상한 중 하나라도 초과 | 대기 신청 | - | 개별 견적 전 판매하지 않음 |
 
 ¹ 합계뿐 아니라 방향별 상한도 적용한다. 한 방향으로 치우친 계정의 원가 초과를 막기 위해서다.
@@ -327,23 +355,69 @@ selfhosted_auth는 첫 매출 조건이 아니라 장기 원가 절감 실험이
 
 ---
 
-## 9. 퍼널 계측 정정
+## 9. 사용자 원장·결제 플래그·관측 정책
 
-기존 문서의 `checkout_started 고유 사용자 5명`은 **Amplitude identity 5개**라는 뜻으로는 맞지만, 현재 Supabase 사용자와 일대일로 확인된 사람 5명이라는 뜻은 아니다.
+### 9.1 퍼널 집계 정정
 
-- 관리자 identity를 정확히 제외하면 외부 Amplitude identity는 5개다.
-- 현재 Supabase/Auth 사용자 기록과 이름이 연결되는 외부 사용자는 4명이다.
-- 나머지 1개 identity는 2026-07-19의 Basic 14,900원 checkout 이벤트만 남고 현재 사용자·Auth·preflight 기록이 없어 이름을 확인할 수 없다.
+기존 문서의 `checkout_started 고유 사용자 5명`은 외부 사용자 5명으로 사용할 수 없다. 당시 이름과 연결되지 않았던 2026-07-19 Basic 14,900원 checkout identity는 관리자였고, 별도로 지정된 내부 테스터도 모든 퍼널·매출 지표에서 제외해야 한다.
 
-앞으로 퍼널 표에는 다음을 구분한다.
+기존 숫자를 사람 이름 목록으로 유지하지 않는다. 앞으로 모든 Amplitude·Axiom·Supabase 집계는 서버에서 결정한 `traffic_class`를 공통으로 사용한다.
 
-| 지표 | 의미 |
+| `traffic_class` | 집계 정책 |
 |---|---|
-| Amplitude unique identity | 이벤트의 고유 `user_id` 수 |
-| verified named user | 현재 사용자 원장과 연결되는 외부 사용자 수 |
-| verified external payment | 결제 원장에서 승인까지 확인된 외부 주문 수 |
+| `external` | 퍼널·매출·제품 KPI에 포함 |
+| `operator` | 운영 검증으로 분리, 외부 KPI 제외 |
+| `e2e_test` | E2E 품질 지표에만 포함, 외부 KPI 제외 |
+| `internal_tester` | 기능 테스트로 분리, 외부 KPI 제외 |
+| `unknown` | 외부로 자동 간주하지 않고 identity 정합성 큐로 보냄 |
 
-기존 2026-07-01~08-05 퍼널의 `checkout_started`는 `5 identities (4 named + 1 orphan)`으로 주석 처리한다.
+따라서 과거 `checkout_started = 5` 표기는 폐기하고, 분류가 적용된 원시 이벤트로 다시 산출한 값만 사용한다. 실제 매출은 계속 Supabase 승인 원장이 정본이며 Amplitude checkout 이벤트로 대체하지 않는다.
+
+### 9.2 E2E 계정 분리
+
+2026-08-10 원격 원장을 읽기 전용으로 감사한 결과는 다음과 같다.
+
+- `users` 물리 행은 50개다.
+- Auth identity가 연결된 행은 33개, Auth identity가 없는 행은 17개다.
+- Auth identity가 없는 17개는 명백한 테스트 결제·분석 흔적만 가진 합성 행이다.
+- 테스트 흔적이 많은 Auth identity 한 개는 관리자 운영 계정이므로 E2E 계정으로 분류하거나 정리하지 않는다.
+- 나머지 실제 가입 계정은 테스트 근거가 없으므로 E2E로 추정하지 않는다.
+
+이에 따라 실유저와 테스트 사용자를 FK가 끊긴 별도 물리 테이블로 즉시 이동하지 않는다. 11개 FK와 현재 함수 정의 43개가 사용자 원장을 참조하므로, 단일 기준 원장 `account_principals`에 `account_class`, `traffic_class`, `lifecycle`을 두고 다음 표면을 분리한다. rename 전에 애플리케이션의 직접 사용자 읽기·쓰기를 stable service-only RPC로 옮기고 이전 revision을 drain한다.
+
+- `users`: `production / active` 계정만 보이는 읽기 전용 운영 표면. 관리자 포함
+- `e2e_users`: active와 retired를 lifecycle로 구분하는 service-role 전용 테스트 표면
+- 신규 Basic/Standard E2E용 Auth identity는 두 개만 별도로 만든다.
+- 17개 합성 행은 deterministic 조건과 사전 승인한 집합 HMAC이 모두 맞을 때만 server-only transaction에서 `e2e_test / retired`로 분류한다. 삭제하지 않는다.
+- E2E 복구 후 활성 테스트 계정은 두 개만 유지하고, 실패 실험 계정은 세션을 폐기한 뒤 `retired`로 바꾼다.
+
+`retired`는 표기만 바꾸는 값이 아니다. 기존 세션을 무효화하고 로그인 bootstrap, preflight, checkout, test entitlement, owner admission을 모두 fail-closed한다. 실제 cutover 순서와 함수 권한은 [계정 원장 설계](../superpowers/specs/2026-08-10-account-ledger-paid-status-design.md)를 따른다.
+
+### 9.3 결제 상태
+
+`is_paid_user`는 **한 번이라도 실제 승인 결제가 있었는가**를 뜻하는 paid-ever 플래그로 고정한다.
+
+첫 외부 구매자의 값이 false인 것은 결제가 실패해서가 아니라, 현재 Groble 주문 확정 경로가 `users.is_paid_user`를 갱신하지 않기 때문이다. 주문 원장이 정본이고 플래그가 뒤처진 상태다.
+
+- 서버가 `external`로 분류한 계정에 `payment.completed` event의 `disposition = accepted`와 주문 lineage가 확정되는 같은 트랜잭션에서 central writer가 `is_paid_user = true`와 가장 이른 `first_paid_at`을 기록한다.
+- 환불 후에도 과거 구매 사실은 사라지지 않으므로 `is_paid_user`를 false로 되돌리지 않는다.
+- 현재 유효한 이용권은 별도 `has_active_purchase` 파생 값으로 조회한다.
+- 웹훅 경로뿐 아니라 운영 reconciliation로 결제가 확정돼도 같은 central DB writer를 사용한다.
+- `payment_id`·`paid_at`·양수 금액만으로는 paid-ever를 올리지 않는다. 원격의 합성 E2E 주문도 이 형태를 가지므로 account/traffic 분류와 외부 결제 provenance가 모두 필요하다.
+- 기존 승인 결제는 관리자·테스터 분류를 먼저 완료한 뒤 외부 주문만 backfill한다.
+
+### 9.4 결과 공유와 Session Replay
+
+채널마다 확인 가능한 성공 경계가 다르므로 하나의 `result_shared`로 뭉치지 않는다.
+
+- 공유 UI/SDK 호출은 `result_share_initiated`다.
+- 클립보드 resolve는 `result_share_copy_succeeded`다. 링크 복사이지 상대 전달 성공은 아니다.
+- Web Share resolve는 `result_share_handoff_completed`다. 플랫폼에 따라 resolve 시점이 달라 실제 전송 완료로 부르지 않는다.
+- Kakao는 공식 Share webhook이 도착한 경우에만 `result_shared_confirmed`다. webhook을 붙이기 전에는 initiated만 기록한다.
+- share token 결과 페이지가 열리면 별도 `shared_result_opened`로 본다.
+- 각 사건은 인증·권한 검증된 서버 경계를 거쳐 Amplitude와 Axiom에 같은 의미로 기록한다. Axiom 허용 필드는 `request_id`, bounded channel/outcome, `traffic_class`와 공통 metadata뿐이며 공유 URL, 토큰, 사용자 이메일, Instagram 식별자와 결과 내용은 금지한다.
+- 공유 준비용 prewarm이나 `/api/share/enable` 호출은 어떤 성공 이벤트도 아니다.
+- Session Replay는 결과 페이지의 레이아웃·일반 텍스트·프로필 카드와 이미지를 볼 수 있도록 과도한 `data-amp-block`을 제거한다. 로그인·결제 입력, 연락처, 자유 입력, 오류 원문과 인증정보는 계속 마스킹한다.
 
 ---
 
@@ -361,6 +435,10 @@ selfhosted_auth는 첫 매출 조건이 아니라 장기 원가 절감 실험이
 | alert setup sold | 유료 알리미 최초 설정 수 | 16건 목표 |
 | refresh cost/operator minutes | 알리미 refresh당 비용과 수동 시간 | 자동화 우선순위 |
 | free extension liability | 무변화 무료 연장 계정 수와 예상 113원 | 이벤트 예산 상한 |
+| screened unknown ratio | 상세 수집 후보 중 최종 미상 비율 | coverage gate; 정확도와 별도 관리 |
+| traffic-class leakage | 외부 KPI에 operator/test가 섞인 건수 | 0건이 아니면 대시보드 숫자 폐기 |
+| paid-flag drift | accepted 외부 결제와 `is_paid_user`가 불일치한 계정 | central writer·backfill 장애 확인 |
+| share initiated / handoff / confirmed | 시도·복사/OS handoff·Kakao 확인 전송 | 채널별 공유 루프 판단 |
 
 ---
 
@@ -372,7 +450,7 @@ selfhosted_auth는 첫 매출 조건이 아니라 장기 원가 절감 실험이
 - likes/comments를 1, 2단계 원가 실측 전에 축소
 - AND-only 감지를 누락 없는 신규 맞팔 알림으로 판매
 - 알리미 수요 검증 전에 자동 갱신·대규모 스케줄러 완성
-- 자동 이메일이 없는 상태를 숨기고 무인 운영으로 간주
+- 자동 이메일이 없는 상태를 숨기고 무인 운영으로 간주하거나, E2E 복구 전에 이메일 자동화부터 구현
 - `payment_pending` 또는 환불 완료 주문을 매출로 집계
 - 결제자 이름, UUID, 대상 Instagram ID, 정확한 출생연도를 전략 문서에 기록
 - 확정된 판독기 랜딩 마케팅 카피 변경
@@ -389,10 +467,14 @@ selfhosted_auth는 첫 매출 조건이 아니라 장기 원가 절감 실험이
 - [x] production scraper를 Apify로 rollback하고 실제 serving traffic 100% 확인
 - [x] 결제 후 이메일 결과 안내 화면 배포
 - [x] 첫 결제 건 결과 생성 및 소유자 URL 확인
-- [ ] 2026-08-09 21:41 KST 전 직접 전달
+- [x] 구매자가 보관함에서 결과를 직접 열람
+- [x] 운영자 계정으로 구매자 결과 조회 확인
 - [ ] Apify Basic 전체 E2E 1건 완주
 - [ ] Apify Standard 전체 E2E 1건 완주
 - [ ] 플랜별 실제 비용·시간·coverage 기록
+- [ ] 완료 결과의 대상·후보 R2 이미지 로드 확인
+- [ ] screened 최종 미상 비율 30% 이하, blind audit와 비용 cap 통과
+- [ ] preflight 이후 synthetic demo 결과 노출과 `demo_result_viewed` 계측
 
 ### 맞팔 알리미
 
@@ -406,9 +488,13 @@ selfhosted_auth는 첫 매출 조건이 아니라 장기 원가 절감 실험이
 
 ### 안정화와 자동화
 
-- [ ] 미전달 주문 3건 전 V2 완료 이메일 outbox 구현
 - [ ] 원가 절감 1단계: 관계 payload 재사용
-- [ ] 원가 절감 2단계: Basic 100 / Standard 200 후보 상한
+- [ ] 원가 절감 2단계: 80/20 라우팅으로 Basic 100 / Standard 200 후보 상한
+- [ ] `account_principals` + production `users` / service-only `e2e_users` 표면 분리
+- [ ] 두 개의 전용 E2E Auth identity 생성, 기존 합성 테스트 행 retired 분류
+- [ ] paid-ever central writer·`first_paid_at` backfill·`has_active_purchase` 조회
+- [ ] 공유 initiated/copy/handoff/Kakao confirmed의 Amplitude·Axiom 서버 관측 추가
+- [ ] 결과 Replay의 과도한 block 해제와 민감 입력 마스킹 회귀 테스트
 - [ ] 정상 전달 5건 후 1,990원 / 2,990원 가격 실험 판정
 - [ ] 버너 2~3개 selfhosted_auth canary는 매출 작업과 분리
 
@@ -422,4 +508,4 @@ selfhosted_auth는 첫 매출 조건이 아니라 장기 원가 절감 실험이
 
 따라서 8월의 실행 순서는 다음과 같다.
 
-> **첫 유료 주문을 Apify concierge로 즉시 전달 → 판독기 제한 판매 유지 → 8월 12일까지 맞팔 알리미 `월 1,990원부터` 유료 파일럿 병행 출시 → 두 제품 합산 환불 차감 매출 10만 원 달성 → selfhosted_auth는 별도 원가 절감 canary로 검증.**
+> **첫 유료 주문 열람 완료 → 전용 테스트 계정으로 Apify Basic/Standard E2E 복구 → 판독기 제한 판매 유지와 맞팔 알리미 `월 1,990원부터` concierge 파일럿 병행 → 두 제품 합산 환불 차감 매출 10만 원 달성 → selfhosted_auth는 별도 원가 절감 canary로 검증.**

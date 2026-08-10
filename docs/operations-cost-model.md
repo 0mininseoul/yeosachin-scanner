@@ -1,11 +1,19 @@
 # V2 운영 비용 모델
 
-기준일: 2026-07-28. 현재 backend 운영 상태의 정본은 [Analysis V2 프로덕션 운영 정본](./analysis-v2-production-operations.md)이다. 이 문서는 **과금 단위·측정값·미측정 경계**만 정리한다. 자동 분석 공개 입장은 소유자 결정으로 이미 열려 있으나, 이는 원가 완전성 또는 시간 SLA의 증명이 아니다. Actor 콘솔 가격, 과거 V1 canary, 환경변수의 예산 상한을 V2 실측 원가로 대체해서는 안 된다.
+최초 기준일: 2026-07-28. 최종 갱신일: 2026-08-10. 현재 매출·판매 결정은 [8월 매출 우선 운영 전략](./strategy/2026-08-08-revenue-first-operating-strategy.md), backend 배포 상태는 [Analysis V2 프로덕션 운영 정본](./analysis-v2-production-operations.md)이 정본이다. 이 문서는 **과금 단위·측정값·미측정 경계**만 정리한다. Actor 콘솔 가격, 과거 canary, 무료 credit, 환경변수 예산 상한을 fresh Basic/Standard 실측 원가로 대체하지 않는다.
+
+## 2026-08-10 현재 정정
+
+- 첫 외부 Basic 990원 주문은 완료·열람됐지만 **결제 건에 보존된 Apify dataset을 concierge로 재생**했으므로 fresh complete-cost 표본이 아니다.
+- 첫 결제의 selfhosted fresh admission 실패 뒤 유료 serving selector 여섯 개는 Apify로 되돌렸다. 아래 `2026-08-04 selfhosted_auth 전환` 절은 당시 상태를 보존한 역사 기록이며 현재 유료 경로가 아니다.
+- 현재 코드의 상세 상한은 여전히 Basic 300 / Standard 600이다. 승인된 다음 변경은 `profile_pic_url + fullname` 1차 라우팅 뒤 Basic 100 / Standard 200으로 줄이는 것이며 아직 구현·fresh E2E되지 않았다.
+- 새 정책의 provider+AI 변동원가 margin target은 Basic 904원 / Standard 1,817원, 제한 판매 hard safety cap은 Basic 1,808원 / Standard 3,634원이다. target 초과·hard cap 이하는 `negative_margin_pilot`, hard cap 초과는 자동화 출시 실패로 분류한다. 이 숫자는 complete cost 실측값이 아니라 사전 운영 예산이다.
+- Basic/Standard fresh complete cost, GCP infra 포함 total, p50/p95는 계속 미측정이다.
 
 ## 현재 의사결정 및 측정 상태
 
 - 얼리버드 현재 가격은 Basic **990원**, Standard **1,990원**이다. 가격 snapshot은 `earlybird-2026-08-v3`이며, 가격 유지가 complete cost의 증거는 아니다.
-- 승인된 최신 Standard 표본은 기능·latency·quality 관측이지 complete cost 표본이 아니다. mutual 385명(공개 240, 비공개 145), gender M/F/U 72/84/84(unknown 35%), 전체 94.6분, 결과 이미지 healthy, completed card 및 failed card 없음이다. 원본 Instagram handle은 비용 판단에 필요하지 않아 운영 문서에 남기지 않는다.
+- 승인된 과거 Standard 표본은 기능·latency·quality 관측이지 complete cost 표본이 아니다. mutual 385명(공개 240, 비공개 145), gender M/F/U 72/84/84(unknown 35%), 전체 94.6분, 결과 이미지 healthy, completed card 및 failed card 없음이다. 원본 Instagram handle은 비용 판단에 필요하지 않아 운영 문서에 남기지 않는다.
 - 비교 baseline은 공개 240명, M/F/U 62/69/109(unknown 45.4%), 121.9분이다. unknown 목표 `<=20%`는 아직 충족하지 못했다.
 - UI의 4–6/5–8/8–12/10–15분 workload band는 계획 band일 뿐 검증된 SLA가 아니다. 94.6분 최신 표본은 이 band 안에 들지 않는다.
 - Basic/Standard의 complete cost는 아직 없다. provider·Gemini 일부 관측과 실제 기능 표본을 전체 원가, p50/p95, 마진 증명으로 쓰지 않는다. 새 유료 E2E는 실행하지 않았다.
@@ -42,9 +50,9 @@ Basic과 Standard는 각각 독립적으로 선착순 10건씩만 받는다. Plu
 
 Groble 결제 건당 수수료 가정은 실제 운영 조건인 **8.69%**다. 이 비율은 결제 webhook 금액 검증에 사용하지 않고 마진 계획에만 사용한다. 단순 산술상 Basic은 `990 × (1 - 0.0869) = 903.97원`, Standard는 `1,990 × (1 - 0.0869) = 1,817.07원`이다. 원 단위 반올림 계획 순수입은 각각 **904원**, **1,817원**이다. 실제 정산액과 세금 처리는 Groble 정산 명세를 정본으로 대사한다.
 
-## V2 과금 경로
+## V2 과금 경로의 역사와 현재
 
-### 2026-08-04 유료 selfhosted_auth 전환
+### 2026-08-04 유료 selfhosted_auth 전환 — 역사적, 현재 비활성
 
 프로덕션 유료 V2는 공개 `selfhosted` 프로필 수집을 시작 단계에서 제거하고, 대상 프로필 preflight와 checkout-time `fresh_admission`부터 지정 버너 계정의 `selfhosted_auth`를 사용한다. 대상 full profile·피드, 후보 프로필 batch, followers/following, liker/comment 수집도 유료 provider selector가 `selfhosted_auth`인 경우 같은 인증 worker를 사용한다. 인증 worker 실패는 bounded retry/failure-budget 경로로만 처리하고 Apify profile fallback을 열지 않는다.
 

@@ -1,6 +1,6 @@
 # Axiom 운영 관측 가이드
 
-이 문서는 서버 운영 로그를 Axiom에 연결하고 검증하는 운영 절차다. 애플리케이션 요청은 Axiom 장애와 무관하게 계속되어야 하며, 비밀 값은 이 문서, Git, 로그, 명령 출력에 기록하지 않는다.
+이 문서는 서버 운영 로그를 Axiom에 연결하고 검증하는 운영 절차다. 2026-08-10 기준 제품 사건의 의미와 매출 집계 기준은 [8월 매출 우선 운영 전략](strategy/2026-08-08-revenue-first-operating-strategy.md), 구현 경계는 [매출 E2E·관측 설계](superpowers/specs/2026-08-10-revenue-e2e-observability-design.md)를 따른다. 애플리케이션 요청은 Axiom 장애와 무관하게 계속되어야 하며, 비밀 값은 이 문서, Git, 로그, 명령 출력에 기록하지 않는다.
 
 공식 참고 문서:
 
@@ -45,9 +45,12 @@ AXIOM_ORG_ID=<UI에서 확인한 실제 조직 ID>
 - 결제: `earlybird.checkout_*`, `earlybird.waitlist_*`, `groble.webhook_*`
 - 수집: `scraper.batch_*`, `scraper.fallback_selected`, `scraper.candidate_failed`
 - 작업 큐·분석: `cloud_task.enqueue_*`, `analysis_v2.fresh_admission_enqueued`, `analysis_v2.request_queued`, `analysis_v2.worker_*`, `analysis_v2.result_viewed`
+- 결과 공유: `result_share_initiated`, `result_share_copy_succeeded`, `result_share_handoff_completed`, `result_share_cancelled`, `result_share_failed`, `result_shared_confirmed`, `shared_result_opened`
 - AI: `gemini.stage_*`
 
-허용 차원은 환경, 이벤트, severity, request/trace ID, 정적 route·method·status·duration, 내부 user/preflight/order/analysis UUID, job key, 대상·후보·제외 인스타그램 아이디, provider·operation·phase·attempt·disposition, 집계 건수, 오류 코드, retry/fallback, 모델·thinking level·토큰 수·추정 비용, plan·금액으로 제한한다. 성공은 배치·단계 단위로 집계하고, 후보 인스타그램 아이디는 실패·재시도·fallback 진단에서만 사용한다.
+허용 차원은 환경, 이벤트, severity, request/trace ID, 정적 route·method·status·duration, 내부 user/preflight/order/analysis UUID, job key, 대상·후보·제외 인스타그램 아이디, provider·operation·phase·attempt·disposition, 집계 건수, 오류 코드, retry/fallback, 모델·thinking level·토큰 수·추정 비용, plan·금액, 서버가 판정한 `traffic_class`로 제한한다. 성공은 배치·단계 단위로 집계하고, 후보 인스타그램 아이디는 실패·재시도·fallback 진단에서만 사용한다. `traffic_class`는 `external`, `operator`, `e2e_test`, `internal_tester`, `unknown`의 닫힌 값만 허용하고 매출·수요 지표는 `external`만 집계한다.
+
+공유 사건은 더 좁은 전용 allowlist를 사용한다. `event`, `request_id`, `share_channel`, `share_outcome`, `traffic_class`, environment·route·status와 필요한 correlation ID만 허용한다. 공유 URL·토큰, user/preflight/order ID, Instagram 식별자, 결과 내용은 기록하지 않는다. 클립보드 성공은 링크 복사, Web Share 성공은 OS handoff일 뿐 수신자 전달 확인이 아니다. `result_shared_confirmed`는 Kakao 공식 Share webhook을 검증한 경우에만 사용한다.
 
 다음은 금지 필드다.
 
@@ -81,6 +84,9 @@ Cloud Tasks 재시도로 terminal 이벤트는 attempt 단위 at-least-once로 �
 - Cloud Tasks enqueue와 V2 worker 성공·재시도·terminal 실패
 - Gemini 단계 성공·rate limit·실패 및 토큰·비용 집계
 - 유효한 테스트 서명으로 만든 Groble fixture의 accepted와 unmatched/mismatch 처리. 실제 구매자 PII와 원문 webhook은 사용하지 않는다.
+- 결과 소유자 또는 허용된 관리자의 공유 endpoint 호출과 비인가 호출 거부
+- clipboard 성공·거절, Web Share handoff·취소·실패, Kakao Share webhook의 유효·중복·무효 요청. 실제 공유 URL·토큰은 로그 fixture에 넣지 않는다.
+- Axiom 전송 실패 시 공유 UI와 webhook의 제품 응답이 기존 의미를 유지하는지 확인
 
 대표 레코드를 조회한다.
 
@@ -114,7 +120,8 @@ Axiom UI에서 `Yeosachin Operational Health`를 만들고 모든 요소에 `['f
 - Cloud Tasks / V2 worker: enqueue 결과, retry·failure·timeout, job key·phase별 상태
 - Groble: `accepted`, `duplicate_event`, `duplicate_payment`, `unmatched`, `ambiguous_buyer`, `mismatch`, `overflow_refund_required`, `cancel_requested`, `cancel_duplicate_event`, `cancel_unmatched`, `cancel_mismatch`, `cancel_before_payment`, `late_cancelled_payment` disposition과 webhook route 5xx
 - Analysis: 완료·실패 수, 총 지연, phase별 p50·p90 단계 지연
-- User lifecycle: `preflight.requested` → `preflight.completed` → `preflight.exclusion_decided` → `earlybird.checkout_created` 또는 `earlybird.waitlist_created` → `groble.webhook_finalized` → `analysis_v2.fresh_admission_enqueued` → `analysis_v2.request_queued` → `analysis_v2.worker_*` → `analysis_v2.result_viewed` 수와 이탈 지점
+- Result sharing: share event·channel·outcome·`traffic_class`별 수. 제품 KPI에는 `traffic_class=external`만 사용하고 initiated/copy/handoff/Kakao-confirmed/open을 합치지 않는다.
+- User lifecycle: `preflight.requested` → `preflight.completed` → `preflight.exclusion_decided` → `earlybird.checkout_created` 또는 `earlybird.waitlist_created` → `groble.webhook_finalized` → `analysis_v2.fresh_admission_enqueued` → `analysis_v2.request_queued` → `analysis_v2.worker_*` → `analysis_v2.result_viewed` → 공유 사건 → `shared_result_opened` 수와 이탈 지점
 
 성공 로그 수를 계정·이미지 수로 해석하지 않는다. 대시보드의 결제 금액은 운영 신호이며 매출 장부는 Supabase를 기준으로 한다.
 
@@ -124,13 +131,13 @@ Axiom UI에서 `Yeosachin Operational Health`를 만들고 모든 요소에 `['f
 
 1. `preflight_id`: 사전 점검 요청, 완료/차단, 제외 결정, 결제·대기 신청의 기본 키
 2. `order_id`: checkout 생성과 Groble webhook 최종화의 연결 키
-3. `analysis_request_id`: 분석 접수, 워커 실행, 결과 페이지 열람의 기본 키
+3. `analysis_request_id`: 분석 접수, 워커 실행, 결과 페이지 열람과 공유 시도의 기본 키
 4. `job_key`: 한 분석 요청 안의 큐·워커 단계 키
 5. `request_id`: 하나의 HTTP 요청과 Vercel 런타임 로그를 연결하는 단기 진단 키
 
 `preflight_id`와 `analysis_request_id`는 `analysis_v2.request_queued`에 함께 기록된다. 결제 webhook은 `order_id`로 checkout 생성 이벤트와 연결한다. 따라서 결제 webhook만으로 user 또는 preflight를 역조회하려 하지 않는다.
 
-사전 점검부터 결과 페이지 열람까지의 전환을 확인하는 기본 조회 예시는 다음과 같다. 실제 UUID 값은 운영 티켓·로그 출력에 복사하지 않고 Axiom UI의 안전한 필터 입력으로만 사용한다.
+사전 점검부터 결과 페이지 열람·공유까지의 전환을 확인하는 기본 조회 예시는 다음과 같다. 실제 UUID 값은 운영 티켓·로그 출력에 복사하지 않고 Axiom UI의 안전한 필터 입력으로만 사용한다. 사업 지표로 볼 때는 `['fields.traffic_class'] == "external"` 필터를 추가한다.
 
 ```apl
 ['yeosachin-logs']
@@ -140,16 +147,20 @@ Axiom UI에서 `Yeosachin Operational Health`를 만들고 모든 요소에 `['f
     "earlybird.checkout_created", "earlybird.waitlist_created",
     "groble.webhook_finalized", "analysis_v2.fresh_admission_enqueued",
     "analysis_v2.request_queued", "analysis_v2.worker_completed",
-    "analysis_v2.worker_retry", "analysis_v2.worker_failed", "analysis_v2.result_viewed"
+    "analysis_v2.worker_retry", "analysis_v2.worker_failed", "analysis_v2.result_viewed",
+    "result_share_initiated", "result_share_copy_succeeded",
+    "result_share_handoff_completed", "result_share_cancelled", "result_share_failed",
+    "result_shared_confirmed", "shared_result_opened"
 )
 | project _time, ['fields.event'], ['fields.severity'], ['fields.disposition'],
     ['fields.error_code'], ['fields.request_id'], ['fields.user_id'], ['fields.preflight_id'],
     ['fields.order_id'], ['fields.analysis_request_id'], ['fields.job_key'], ['fields.plan_id'],
-    ['fields.status'], ['fields.duration_ms']
+    ['fields.status'], ['fields.duration_ms'], ['fields.share_channel'],
+    ['fields.share_outcome'], ['fields.traffic_class']
 | order by _time asc
 ```
 
-결과 페이지의 다음 페이지와 진행 화면의 폴링은 lifecycle 이벤트로 기록하지 않는다. `analysis_v2.result_viewed`는 커서 없는 결과 페이지 응답을 기록하므로 새로고침·재열람은 별도 실제 열람으로 남을 수 있다. 고유 전환율은 Amplitude의 제품 퍼널을 기준으로 보고, Axiom에서는 결과 도달·재열람의 운영 신호로만 사용한다.
+결과 페이지의 다음 페이지와 진행 화면의 폴링은 lifecycle 이벤트로 기록하지 않는다. `analysis_v2.result_viewed`는 커서 없는 결과 페이지 응답을 기록하므로 새로고침·재열람은 별도 실제 열람으로 남을 수 있다. `result_share_copy_succeeded`와 `result_share_handoff_completed`는 수신자 전달이 아니라 각각 복사와 OS handoff의 운영 신호다. 고유 전환율은 Amplitude의 제품 퍼널을 기준으로 보고, Axiom에서는 결과 도달·재열람·공유 경계의 운영 신호로만 사용한다.
 
 Vercel에서 같은 시점의 상세 요청을 볼 때는 Axiom 이벤트의 `request_id`와 route를 사용한다. Axiom은 상태 전환의 권위 있는 보관소이고, Vercel은 짧은 실시간 조사 창이다. 어느 쪽도 Amplitude의 브라우저 UX 퍼널을 대체하지 않는다.
 
@@ -169,6 +180,7 @@ Personal 요금제의 3개 모니터 제한 안에서 다음 세 개의 결합 �
 
 - 결제: `request_id`·`order_id`로 route 실패와 `groble.webhook_*` disposition을 연결한다. 구매자 연락처나 raw webhook을 Axiom에서 찾지 않는다.
 - 분석: `preflight_id` → `analysis_request_id` → `job_key` 순으로 `analysis_v2.request_queued`, worker, `analysis_v2.result_viewed`를 연결한다.
+- 공유: `analysis_request_id`와 `request_id`로 공유 사건을 연결하되 로그에서 공유 URL·토큰·Instagram 식별자·결과 내용을 찾지 않는다. Kakao 확인 전송은 검증된 webhook 사건만 인정한다.
 - Provider: provider·operation·error code·fallback을 확인하고 quota/auth 문제인지 일시 장애인지 구분한다.
 - Gemini: operation·model·attempt·rate limit·토큰·비용 집계를 확인한다. 프롬프트나 모델 응답은 Axiom에서 찾지 않는다.
 - 영향 범위와 시작 시각을 기록한 뒤 admission 또는 worker gate 등 기존 운영 스위치로 신규 작업을 제한한다. 데이터 수정·재실행은 해당 runbook의 멱등성과 fence 조건을 확인한 뒤 수행한다.
