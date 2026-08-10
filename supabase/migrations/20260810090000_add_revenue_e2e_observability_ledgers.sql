@@ -263,6 +263,145 @@ REVOKE ALL ON FUNCTION public.analysis_v2_gender_routing_manifest_json(
     public.analysis_v2_gender_routing_manifests
 ) FROM PUBLIC, anon, authenticated, service_role;
 
+-- The retry path reads this service-only authority before it is allowed to
+-- prepare CDN evidence or call the assessor. It deliberately returns no
+-- relationship PII: selected ordinal/key/slot topology is sufficient.
+CREATE OR REPLACE FUNCTION public.load_current_analysis_v2_gender_routing_manifest(
+    p_request_id UUID,
+    p_job_key TEXT,
+    p_claim_token UUID,
+    p_job_input_hash TEXT,
+    p_relationship_checkpoint_id TEXT,
+    p_policy_version TEXT,
+    p_plan_id TEXT
+)
+RETURNS JSONB
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = ''
+AS $$
+DECLARE
+    v_now TIMESTAMPTZ := pg_catalog.clock_timestamp();
+    v_request public.analysis_requests%ROWTYPE;
+    v_job public.analysis_pipeline_jobs%ROWTYPE;
+    v_policy public.analysis_v2_provider_execution_policies%ROWTYPE;
+    v_relationship public.analysis_v2_relationship_manifests%ROWTYPE;
+    v_manifest public.analysis_v2_gender_routing_manifests%ROWTYPE;
+    v_row_count INTEGER;
+    v_selected_count INTEGER;
+    v_min_ordinal INTEGER;
+    v_max_ordinal INTEGER;
+    v_rows JSONB;
+BEGIN
+    IF p_request_id IS NULL
+       OR p_job_key <> 'track:relationships:collect'
+       OR p_claim_token IS NULL
+       OR p_job_input_hash !~ '^[a-f0-9]{64}$'
+       OR p_relationship_checkpoint_id !~ '^[a-f0-9]{64}$'
+       OR p_policy_version <> 'gender-routing-v1'
+       OR p_plan_id NOT IN ('basic', 'standard') THEN
+        RAISE EXCEPTION USING MESSAGE = 'ANALYSIS_V2_GENDER_ROUTING_MANIFEST_INVALID', ERRCODE = 'P0001';
+    END IF;
+
+    SELECT analysis_request.* INTO v_request
+    FROM public.analysis_requests AS analysis_request
+    WHERE analysis_request.id = p_request_id
+    FOR UPDATE;
+    SELECT job.* INTO v_job
+    FROM public.analysis_pipeline_jobs AS job
+    WHERE job.request_id = p_request_id AND job.job_key = p_job_key
+    FOR UPDATE;
+    SELECT policy.* INTO v_policy
+    FROM public.analysis_v2_provider_execution_policies AS policy
+    WHERE policy.request_id = p_request_id
+    FOR UPDATE;
+    SELECT relationship_manifest.* INTO v_relationship
+    FROM public.analysis_v2_relationship_manifests AS relationship_manifest
+    WHERE relationship_manifest.request_id = p_request_id
+      AND relationship_manifest.job_key = p_job_key
+      AND relationship_manifest.result_hash = p_relationship_checkpoint_id
+    FOR UPDATE;
+    IF v_request.id IS NULL
+       OR v_request.pipeline_version IS DISTINCT FROM 'v2'
+       OR v_request.status IS DISTINCT FROM 'processing'
+       OR v_request.plan_access_mode_snapshot IS DISTINCT FROM 'test_entitlement'
+       OR v_request.selected_plan_id_snapshot IS DISTINCT FROM p_plan_id
+       OR v_policy.request_id IS NULL
+       OR v_policy.mode IS DISTINCT FROM 'test_operation_split'
+       OR v_policy.policy_version IS DISTINCT FROM 'authorized-free-e2e-v1'
+       OR v_job.request_id IS NULL
+       OR v_job.status IS DISTINCT FROM 'processing'
+       OR v_job.input_hash IS DISTINCT FROM p_job_input_hash
+       OR v_job.lease_token IS DISTINCT FROM p_claim_token
+       OR v_job.lease_expires_at IS NULL
+       OR v_job.lease_expires_at <= v_now
+       OR v_relationship.request_id IS NULL THEN
+        RAISE EXCEPTION USING MESSAGE = 'ANALYSIS_V2_GENDER_ROUTING_MANIFEST_FENCE_MISMATCH', ERRCODE = 'P0001';
+    END IF;
+
+    SELECT routing_manifest.* INTO v_manifest
+    FROM public.analysis_v2_gender_routing_manifests AS routing_manifest
+    WHERE routing_manifest.request_id = p_request_id
+      AND routing_manifest.relationship_checkpoint_id = p_relationship_checkpoint_id
+      AND routing_manifest.policy_version = p_policy_version
+    FOR UPDATE;
+    IF NOT FOUND THEN
+        RETURN NULL;
+    END IF;
+    IF v_manifest.status = 'building' THEN
+        RETURN NULL;
+    END IF;
+    IF v_manifest.status IS DISTINCT FROM 'complete' THEN
+        RAISE EXCEPTION USING MESSAGE = 'ANALYSIS_V2_GENDER_ROUTING_MANIFEST_NOT_COMPLETE', ERRCODE = 'P0001';
+    END IF;
+    IF v_manifest.relationship_job_key IS DISTINCT FROM p_job_key
+       OR v_manifest.relationship_job_input_hash IS DISTINCT FROM p_job_input_hash
+       OR v_manifest.plan_id IS DISTINCT FROM p_plan_id
+       OR (p_plan_id = 'basic' AND (v_manifest.detailed_cap <> 100 OR v_manifest.population_count NOT BETWEEN 0 AND 400))
+       OR (p_plan_id = 'standard' AND (v_manifest.detailed_cap <> 200 OR v_manifest.population_count NOT BETWEEN 0 AND 800))
+       OR v_relationship.public_count IS DISTINCT FROM v_manifest.population_count THEN
+        RAISE EXCEPTION USING MESSAGE = 'ANALYSIS_V2_GENDER_ROUTING_MANIFEST_FENCE_MISMATCH', ERRCODE = 'P0001';
+    END IF;
+    SELECT pg_catalog.count(*)::INTEGER,
+           (SELECT pg_catalog.count(*)::INTEGER
+            FROM public.analysis_v2_gender_routing_candidates AS all_candidate
+            WHERE all_candidate.request_id = p_request_id
+              AND all_candidate.relationship_checkpoint_id = p_relationship_checkpoint_id
+              AND all_candidate.policy_version = p_policy_version),
+           COALESCE(pg_catalog.min(candidate.ordinal), 1),
+           COALESCE(pg_catalog.max(candidate.ordinal), 0),
+           COALESCE(pg_catalog.jsonb_agg(pg_catalog.jsonb_build_object(
+                'mutualOrdinal', candidate.mutual_ordinal,
+                'candidateKey', candidate.candidate_key,
+                'selectionSlot', candidate.selection_slot,
+                'ordinal', candidate.ordinal
+           ) ORDER BY candidate.ordinal), '[]'::JSONB)
+    INTO v_selected_count, v_row_count, v_min_ordinal, v_max_ordinal, v_rows
+    FROM public.analysis_v2_gender_routing_candidates AS candidate
+    WHERE candidate.request_id = p_request_id
+      AND candidate.relationship_checkpoint_id = p_relationship_checkpoint_id
+      AND candidate.policy_version = p_policy_version
+      AND candidate.selected;
+    IF v_row_count IS DISTINCT FROM v_manifest.population_count
+       OR v_selected_count IS DISTINCT FROM v_manifest.selected_count
+       OR v_min_ordinal <> 1
+       OR v_max_ordinal <> v_selected_count THEN
+        RAISE EXCEPTION USING MESSAGE = 'ANALYSIS_V2_GENDER_ROUTING_MANIFEST_CORRUPT', ERRCODE = 'P0001';
+    END IF;
+    RETURN pg_catalog.jsonb_build_object(
+        'header', public.analysis_v2_gender_routing_manifest_json(v_manifest),
+        'selected', pg_catalog.jsonb_build_object('selectedCount', v_manifest.selected_count, 'rows', v_rows)
+    );
+END;
+$$;
+
+REVOKE ALL ON FUNCTION public.load_current_analysis_v2_gender_routing_manifest(
+    UUID, TEXT, UUID, TEXT, TEXT, TEXT, TEXT
+) FROM PUBLIC, anon, authenticated, service_role;
+GRANT EXECUTE ON FUNCTION public.load_current_analysis_v2_gender_routing_manifest(
+    UUID, TEXT, UUID, TEXT, TEXT, TEXT, TEXT
+) TO service_role;
+
 CREATE OR REPLACE FUNCTION public.begin_analysis_v2_gender_routing_manifest(
     p_request_id UUID,
     p_job_key TEXT,

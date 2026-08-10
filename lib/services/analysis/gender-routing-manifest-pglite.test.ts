@@ -281,6 +281,15 @@ async function loadSelectedUsernames(
     );
 }
 
+async function loadCurrentComplete(claimToken = CLAIM_TOKEN) {
+    return asService<{ result: { header: { status: string }; selected: { rows: Array<{ ordinal: number }> } } | null }>(
+        `SELECT public.load_current_analysis_v2_gender_routing_manifest(
+            $1, 'track:relationships:collect', $2, $3, $4, 'gender-routing-v1', 'basic'
+         ) AS result`,
+        [REQUEST_ID, claimToken, INPUT_HASH, CHECKPOINT_ID],
+    );
+}
+
 function relationshipSelectionCheckpoint(overrides: Record<string, unknown> = {}) {
     return {
         revision: 1,
@@ -363,7 +372,12 @@ function pgliteManifestStore() {
                         params.p_selected_female_priority_count, params.p_selected_uncertainty_count,
                         params.p_selected_male_deprioritized_count, JSON.stringify(params.p_rows),
                     ]
-                    : [
+                    : name === 'load_current_analysis_v2_gender_routing_manifest'
+                        ? [
+                            params.p_request_id, params.p_job_key, params.p_claim_token, params.p_job_input_hash,
+                            params.p_relationship_checkpoint_id, params.p_policy_version, params.p_plan_id,
+                        ]
+                        : [
                         params.p_request_id, params.p_relationship_checkpoint_id,
                         params.p_policy_version, params.p_plan_id,
                     ];
@@ -426,6 +440,21 @@ afterEach(async () => {
 });
 
 describe('analysis V2 gender-routing manifest PGlite authority', () => {
+    it('returns a current complete manifest only for the exact active relationship claim', async () => {
+        db = await PGlite.create();
+        await seed();
+
+        await expect(loadCurrentComplete()).resolves.toMatchObject({ rows: [{ result: null }] });
+        await begin();
+        await publish();
+        await expect(loadCurrentComplete()).resolves.toMatchObject({
+            rows: [{ result: { header: { status: 'complete' }, selected: { rows: expect.any(Array) } } }],
+        });
+        await expect(loadCurrentComplete('51b42f42-204d-4dfb-86f8-9658d21c78f2')).rejects.toThrow(
+            'ANALYSIS_V2_GENDER_ROUTING_MANIFEST_FENCE_MISMATCH',
+        );
+    }, 30_000);
+
     it('rejects a truncated Basic population instead of accepting it as manifest lineage', async () => {
         db = await PGlite.create();
         await seed();
@@ -491,6 +520,11 @@ describe('analysis V2 gender-routing manifest PGlite authority', () => {
                     `SELECT public.load_analysis_v2_gender_routing_selected(
                         $1, $2, 'gender-routing-v1', 'basic'
                      )`, [REQUEST_ID, CHECKPOINT_ID],
+                )).rejects.toThrow(/permission denied/i);
+                await expect(db!.query(
+                    `SELECT public.load_current_analysis_v2_gender_routing_manifest(
+                        $1, 'track:relationships:collect', $2, $3, $4, 'gender-routing-v1', 'basic'
+                     )`, [REQUEST_ID, CLAIM_TOKEN, INPUT_HASH, CHECKPOINT_ID],
                 )).rejects.toThrow(/permission denied/i);
             } finally {
                 await db!.exec('RESET ROLE');

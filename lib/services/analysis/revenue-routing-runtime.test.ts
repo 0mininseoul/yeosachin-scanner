@@ -50,6 +50,143 @@ async function prepareEveryImage(sources: readonly { candidateKey: string; fulln
 }
 
 describe('revenue gender-routing runtime', () => {
+    it('loads a current complete manifest before preparation or assessment, even when the CDN evidence would now fail', async () => {
+        const completeHeader = {
+            status: 'complete' as const,
+            attemptCount: 1,
+            requestId: base.requestId,
+            relationshipCheckpointId: 'a'.repeat(64),
+            policyVersion: 'gender-routing-v1' as const,
+            planId: 'basic' as const,
+            canonicalInputHmac: 'b'.repeat(64),
+            populationCount: 101,
+            detailedCap: 100 as const,
+            relationshipJobInputHash: 'd'.repeat(64),
+            selectedCount: 100,
+            modelAttemptedCount: 101,
+            modelValidCount: 101,
+            modelFailedCount: 0,
+            modelRetriedCount: 0,
+            quotaFemaleShortfall: 0,
+            quotaUncertaintyShortfall: 20,
+            femalePriorityCount: 101,
+            uncertaintyCount: 0,
+            maleDeprioritizedCount: 0,
+            selectedFemalePriorityCount: 100,
+            selectedUncertaintyCount: 0,
+            selectedMaleDeprioritizedCount: 0,
+        };
+        const manifestStore = {
+            loadCurrentComplete: vi.fn(async () => ({
+                header: completeHeader,
+                selected: Array.from({ length: 100 }, (_, index) => ({
+                    mutualOrdinal: index + 1,
+                    candidateKey: `mutual:${index + 1}`,
+                    selectionSlot: 'female' as const,
+                    ordinal: index + 1,
+                })),
+            })),
+            begin: vi.fn(),
+            publish: vi.fn(),
+            loadSelected: vi.fn(),
+            loadSelectedUsernames: vi.fn(),
+        } as unknown as AnalysisV2GenderRoutingManifestStore;
+        const inputPreparer = vi.fn(async () => {
+            throw new Error('CDN_CHANGED');
+        });
+        const assess = vi.fn();
+
+        const result = await routeAndPersistRevenueGenderCandidates({
+            ...base,
+            relationshipCheckpointId: 'a'.repeat(64),
+            accessMode: 'test_entitlement',
+            planId: 'basic',
+            candidates: Array.from({ length: 101 }, (_, index) => ({
+                mutualOrdinal: index + 1,
+                candidateKey: `mutual:${index + 1}`,
+                profilePicUrl: 'https://cdn.example/now-failing.jpg',
+                fullname: 'Now changed',
+            })),
+            inputPreparer,
+            assess,
+            jobKey: 'track:relationships:collect',
+            claimToken: '123e4567-e89b-42d3-a456-426614174001',
+            jobInputHash: 'd'.repeat(64),
+            manifestStore,
+        });
+
+        expect(manifestStore.loadCurrentComplete).toHaveBeenCalledTimes(1);
+        expect(inputPreparer).not.toHaveBeenCalled();
+        expect(assess).not.toHaveBeenCalled();
+        expect(manifestStore.begin).not.toHaveBeenCalled();
+        expect(result).toMatchObject({
+            canonicalInputHmac: 'b'.repeat(64),
+            selectedMutualOrdinals: Array.from({ length: 100 }, (_, index) => index + 1),
+        });
+    });
+
+    it('fails closed when a preparer substitutes a fullname for the same candidate key', async () => {
+        const assess = vi.fn();
+        await expect(routeRevenueGenderCandidates({
+            ...base,
+            accessMode: 'test_entitlement',
+            planId: 'basic',
+            candidates: candidates(101),
+            inputPreparer: async sources => sources.map(source => ({
+                candidateKey: source.candidateKey,
+                fullname: source.candidateKey === 'candidate:1' ? 'Substituted name' : source.fullname,
+                imageBytes: null,
+            })),
+            assess,
+        })).rejects.toThrow('REVENUE_GENDER_ROUTING_PREPARATION_DRIFT');
+        expect(assess).not.toHaveBeenCalled();
+    });
+
+    it('uses deterministic assessor microbatches of at most ten and preserves exact retry evidence', async () => {
+        const input = candidates(201);
+        const calls: Array<{ attempt: number; evidence: Map<string, string | null> }> = [];
+        const assess = vi.fn(async (rows: readonly RevenueGenderRoutingModelCandidate[], attempt: 1 | 2) => {
+            calls.push({ attempt, evidence: new Map(rows.map(row => [row.candidateKey, row.imageBase64])) });
+            return new Map(rows
+                .filter(row => attempt === 2 || Number(row.candidateKey.slice('candidate:'.length)) <= 180)
+                .map(row => [row.candidateKey, assessment]));
+        });
+
+        const result = await routeRevenueGenderCandidates({
+            ...base,
+            accessMode: 'test_entitlement',
+            planId: 'standard',
+            candidates: input,
+            inputPreparer: prepareEveryImage,
+            assess,
+        });
+
+        expect(assess.mock.calls.every(([rows]) => rows.length <= 10)).toBe(true);
+        expect(calls.filter(call => call.attempt === 1)).toHaveLength(21);
+        const firstEvidence = calls.find(call => call.attempt === 1 && call.evidence.has('candidate:200'))!;
+        const retryEvidence = calls.find(call => call.attempt === 2 && call.evidence.has('candidate:200'))!;
+        expect(retryEvidence.evidence.get('candidate:200')).toBe(firstEvidence.evidence.get('candidate:200'));
+        expect(result?.manifest.rows.find(row => row.candidateKey === 'candidate:200')?.imageContentHmac).toMatch(/^[a-f0-9]{64}$/);
+    });
+
+    it('rejects aggregate normalized image evidence before building an unbounded Standard payload', async () => {
+        const assess = vi.fn();
+        await expect(routeRevenueGenderCandidates({
+            ...base,
+            accessMode: 'test_entitlement',
+            planId: 'standard',
+            candidates: candidates(201),
+            inputPreparer: async sources => sources.map(source => ({
+                candidateKey: source.candidateKey,
+                fullname: source.fullname,
+                imageBytes: Uint8Array.from({ length: 256 * 1024 }, (_, index) => (
+                    index === 0 ? Number(source.candidateKey.slice('candidate:'.length)) : 0
+                )),
+            })),
+            assess,
+        })).rejects.toThrow('REVENUE_GENDER_ROUTING_IMAGE_BUDGET_EXCEEDED');
+        expect(assess).not.toHaveBeenCalled();
+    });
     it('is a no-op for the production path', async () => {
         const assess = vi.fn();
 
@@ -86,9 +223,10 @@ describe('revenue gender-routing runtime', () => {
             fullname,
             imageBase64: preparedImageBase64,
         }));
-        const assess = vi.fn(async (rows: readonly { candidateKey: string }[]) => new Map(
-            rows.map(row => [row.candidateKey, assessment])
-        ));
+        const assess = vi.fn(async (rows: readonly { candidateKey: string }[], attempt: 1 | 2) => {
+            expect(attempt).toBe(1);
+            return new Map(rows.map(row => [row.candidateKey, assessment]));
+        });
 
         const result = await routeRevenueGenderCandidates({
             ...base,
@@ -99,8 +237,9 @@ describe('revenue gender-routing runtime', () => {
             assess,
         });
 
-        expect(assess).toHaveBeenCalledTimes(1);
-        expect(assess).toHaveBeenCalledWith(modelInput, 1);
+        expect(assess).toHaveBeenCalledTimes(11);
+        expect(assess.mock.calls.flatMap(([rows]) => rows)).toEqual(modelInput);
+        expect(assess.mock.calls.every(([rows, attempt]) => rows.length <= 10 && attempt === 1)).toBe(true);
         expect(JSON.stringify(assess.mock.calls[0]?.[0])).not.toContain('mutualOrdinal');
         expect(JSON.stringify(assess.mock.calls[0]?.[0])).not.toContain('imageContentHmac');
         expect(result?.selectedMutualOrdinals).toHaveLength(100);
@@ -150,10 +289,10 @@ describe('revenue gender-routing runtime', () => {
             fullname,
             imageBase64: preparedImageBase64,
         }));
-        const initial = new Map(input.slice(0, 100).map(row => [row.candidateKey, assessment]));
-        const retry = new Map(input.slice(100).map(row => [row.candidateKey, assessment]));
         const assess = vi.fn(async (rows: readonly { candidateKey: string }[], attempt: 1 | 2) => (
-            attempt === 1 ? initial : retry
+            new Map(rows
+                .filter(row => attempt === 2 || Number(row.candidateKey.slice('candidate:'.length)) <= 100)
+                .map(row => [row.candidateKey, assessment]))
         ));
 
         const result = await routeRevenueGenderCandidates({
@@ -165,8 +304,8 @@ describe('revenue gender-routing runtime', () => {
             assess,
         });
 
-        expect(assess).toHaveBeenNthCalledWith(1, modelInput, 1);
-        expect(assess).toHaveBeenNthCalledWith(2, modelInput.slice(100), 2);
+        expect(assess.mock.calls.filter(([, attempt]) => attempt === 1).flatMap(([rows]) => rows)).toEqual(modelInput);
+        expect(assess.mock.calls.filter(([, attempt]) => attempt === 2).flatMap(([rows]) => rows)).toEqual(modelInput.slice(100));
         expect(result?.manifest.modelRetriedCount).toBe(20);
         expect(result?.manifest.modelFailedCount).toBe(0);
     });
@@ -205,14 +344,15 @@ describe('revenue gender-routing runtime', () => {
             .update('gender-routing:image-content:v1\0')
             .update(Buffer.from(imageBase64, 'base64'))
             .digest('hex');
-        expect(assess).toHaveBeenCalledTimes(2);
+        expect(assess).toHaveBeenCalledTimes(14);
         expect(result?.manifest.rows.every(row => row.imageContentHmac === expectedHmac)).toBe(true);
     });
 
     it('does not retry at exactly ten percent initial failures and retains those candidates as unavailable', async () => {
         const input = candidates(110);
-        const initial = new Map(input.slice(0, 99).map(row => [row.candidateKey, assessment]));
-        const assess = vi.fn(async () => initial);
+        const assess = vi.fn(async (rows: readonly { candidateKey: string }[]) => new Map(rows
+            .filter(row => Number(row.candidateKey.slice('candidate:'.length)) <= 99)
+            .map(row => [row.candidateKey, assessment])));
 
         const result = await routeRevenueGenderCandidates({
             ...base,
@@ -223,7 +363,7 @@ describe('revenue gender-routing runtime', () => {
             assess,
         });
 
-        expect(assess).toHaveBeenCalledTimes(1);
+        expect(assess).toHaveBeenCalledTimes(11);
         expect(result?.manifest.modelRetriedCount).toBe(0);
         expect(result?.manifest.modelFailedCount).toBe(11);
         expect(result?.manifest.rows.filter(row => row.routingUnavailable)).toHaveLength(11);
@@ -245,11 +385,9 @@ describe('revenue gender-routing runtime', () => {
             assess,
         });
 
-        expect(assess).toHaveBeenNthCalledWith(2, expect.arrayContaining([
-            expect.objectContaining({ candidateKey: 'candidate:1' }),
-            expect.objectContaining({ candidateKey: 'candidate:101' }),
-        ]), 2);
-        expect(assess.mock.calls[1]?.[0]).toHaveLength(101);
+        const retries = assess.mock.calls.filter(([, attempt]) => attempt === 2);
+        expect(retries.flatMap(([rows]) => rows).map(row => row.candidateKey)).toEqual(input.map(row => row.candidateKey));
+        expect(retries.every(([rows]) => rows.length <= 10)).toBe(true);
         expect(result?.manifest).toMatchObject({
             modelAttemptedCount: 101,
             modelRetriedCount: 101,
@@ -273,10 +411,9 @@ describe('revenue gender-routing runtime', () => {
             }))
         ));
         const assess = vi.fn(async (modelCandidates: readonly RevenueGenderRoutingModelCandidate[]) => {
-            expect(modelCandidates[0]).toMatchObject({
-                candidateKey: 'candidate:1',
-                fullname: 'Åda Lovelace',
-                imageBase64: Buffer.from(image).toString('base64'),
+            const first = modelCandidates.find(candidate => candidate.candidateKey === 'candidate:1');
+            if (first) expect(first).toMatchObject({
+                candidateKey: 'candidate:1', fullname: 'Åda Lovelace', imageBase64: Buffer.from(image).toString('base64'),
             });
             expect(modelCandidates[0]).not.toHaveProperty('profilePicUrl');
             return new Map(modelCandidates.map(candidate => [candidate.candidateKey as string, assessment]));
@@ -384,6 +521,7 @@ describe('revenue gender-routing runtime', () => {
             selectedMaleDeprioritizedCount: input.selectedBucketCounts.male_deprioritized,
         });
         const manifestStore: AnalysisV2GenderRoutingManifestStore = {
+            loadCurrentComplete: vi.fn(async () => null),
             begin: vi.fn(async input => ({
                 status: 'building' as const,
                 attemptCount: 1,
@@ -429,8 +567,8 @@ describe('revenue gender-routing runtime', () => {
             manifestStore,
         });
 
-        expect(assess).toHaveBeenCalledTimes(2);
-        expect(assess.mock.calls[1]?.[0]).toEqual(rows.slice(100).map(row => ({
+        expect(assess).toHaveBeenCalledTimes(14);
+        expect(assess.mock.calls.filter(([, attempt]) => attempt === 2).flatMap(([modelCandidates]) => modelCandidates)).toEqual(rows.slice(100).map(row => ({
             candidateKey: row.candidateKey,
             fullname: row.fullname,
             imageBase64: null,

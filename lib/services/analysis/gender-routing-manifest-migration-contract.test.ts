@@ -46,6 +46,7 @@ describe('analysis V2 gender-routing manifest migration contract', () => {
         for (const name of [
             'begin_analysis_v2_gender_routing_manifest',
             'publish_analysis_v2_gender_routing_manifest',
+            'load_current_analysis_v2_gender_routing_manifest',
             'load_analysis_v2_gender_routing_selected',
             'load_analysis_v2_gender_routing_selected_usernames',
         ]) {
@@ -95,6 +96,17 @@ describe('analysis V2 gender-routing manifest migration contract', () => {
         }
         expect(functionDefinition('publish_analysis_v2_gender_routing_manifest'))
             .toContain('p_model_failed_count::NUMERIC / p_model_attempted_count > 0.1');
+    });
+
+    it('uses a claim-fenced complete-manifest reader before any retry can touch raw evidence', () => {
+        const definition = functionDefinition('load_current_analysis_v2_gender_routing_manifest');
+        expect(definition).toContain("v_request.status IS DISTINCT FROM 'processing'");
+        expect(definition).toContain('v_job.lease_token IS DISTINCT FROM p_claim_token');
+        expect(definition).toContain('v_job.input_hash IS DISTINCT FROM p_job_input_hash');
+        expect(definition).toContain("v_manifest.status = 'building'");
+        expect(definition).toContain("v_manifest.status IS DISTINCT FROM 'complete'");
+        expect(definition).toContain("'header', public.analysis_v2_gender_routing_manifest_json(v_manifest)");
+        expect(definition).not.toMatch(/\b(username|full_name|profile_pic_url|image_bytes)\b/i);
     });
 
     it('permits the reduced relationship selection only with a complete, exact routing identity', () => {

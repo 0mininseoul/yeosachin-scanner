@@ -704,10 +704,6 @@ export function createAnalysisV2RelationshipsExecutor(
                 || publicMutualRows.length > cap.population
                 || new Set(publicMutualRows.map(row => row.mutualOrdinal)).size !== publicMutualRows.length
             ) throw new Error('ANALYSIS_V2_GENDER_ROUTING_POPULATION_DRIFT');
-            if (!dependencies.revenueGenderRoutingAssessor) {
-                throw new Error('ANALYSIS_V2_GENDER_ROUTING_ASSESSOR_MISSING');
-            }
-
             const hmacSecret = revenueGenderRoutingSecret(dependencies);
             const routed = await routeAndPersistRevenueGenderCandidates({
                 requestId: claim.requestId,
@@ -722,7 +718,7 @@ export function createAnalysisV2RelationshipsExecutor(
                 })),
                 hmacSecret,
                 inputPreparer: dependencies.revenueGenderRoutingInputPreparer,
-                assess: dependencies.revenueGenderRoutingAssessor,
+                assess: dependencies.revenueGenderRoutingAssessor ?? undefined,
                 jobKey: 'track:relationships:collect',
                 claimToken: claim.claimToken,
                 jobInputHash: claim.jobInputHash,

@@ -83,7 +83,7 @@ export interface RouteRevenueGenderCandidatesInput {
     /** Called only for N > detailed cap, before the durable manifest begin. */
     readonly inputPreparer?: RevenueGenderRoutingInputPreparer;
     /** The only runtime boundary that can invoke the stage-one model. */
-    assess(
+    assess?(
         candidates: readonly RevenueGenderRoutingModelCandidate[],
         attempt: 1 | 2,
     ): Promise<ReadonlyMap<string, GenderRoutingAssessment>>;
@@ -116,8 +116,15 @@ export function usesRevenueGenderRouting(input: Pick<
 
 interface PreparedRevenueRoutingPopulation {
     readonly candidates: readonly GenderRoutingCandidateInput[];
-    readonly modelCandidates: readonly RevenueGenderRoutingModelCandidate[];
+    readonly evidenceByCandidateKey: ReadonlyMap<string, Readonly<{
+        fullname: string | null;
+        imageBytes: Uint8Array | null;
+    }>>;
 }
+
+/** A bounded request-local ceiling; assessor payloads are separately capped at ten rows. */
+export const REVENUE_GENDER_ROUTING_MAX_AGGREGATE_NORMALIZED_IMAGE_BYTES = 8 * 1024 * 1024;
+export const REVENUE_GENDER_ROUTING_ASSESSOR_MICROBATCH_SIZE = 10;
 
 function assertRevenueRoutingCandidates(input: RouteRevenueGenderCandidatesInput): Map<string, RevenueRoutingCandidate> {
     const cap = GENDER_ROUTING_CAPS[input.planId as GenderRoutingPlan];
@@ -140,7 +147,7 @@ function stageSkippedPopulation(candidates: readonly RevenueRoutingCandidate[]):
             fullname: candidate.fullname,
             imageContentHmac: null,
         }))),
-        modelCandidates: Object.freeze([]),
+        evidenceByCandidateKey: new Map(),
     });
 }
 
@@ -163,14 +170,21 @@ async function prepareRevenueRoutingPopulation(
     }
 
     const candidates: GenderRoutingCandidateInput[] = [];
-    const modelCandidates: RevenueGenderRoutingModelCandidate[] = [];
+    const evidenceByCandidateKey = new Map<string, Readonly<{
+        fullname: string | null;
+        imageBytes: Uint8Array | null;
+    }>>();
+    const normalizedImageByHmac = new Map<string, Uint8Array>();
+    let aggregateNormalizedImageBytes = 0;
     for (const source of input.candidates) {
         const candidate = byKey.get(source.candidateKey)!;
         if (
-            candidate.fullname !== null && typeof candidate.fullname !== 'string'
+            candidate.candidateKey !== source.candidateKey
+            || candidate.fullname !== source.fullname
+            || candidate.fullname !== null && typeof candidate.fullname !== 'string'
             || candidate.imageBytes !== null && !(candidate.imageBytes instanceof Uint8Array)
             || candidate.imageBytes !== null && (candidate.imageBytes.byteLength < 1 || candidate.imageBytes.byteLength > 256 * 1024)
-        ) throw new Error('REVENUE_GENDER_ROUTING_PREPARATION_INVALID');
+        ) throw new Error('REVENUE_GENDER_ROUTING_PREPARATION_DRIFT');
         const fullname = normalizeGenderRoutingFullname(candidate.fullname);
         const imageContentHmac = candidate.imageBytes === null
             ? null
@@ -178,26 +192,78 @@ async function prepareRevenueRoutingPopulation(
                 hmacSecret: input.hmacSecret,
                 imageBytes: candidate.imageBytes,
             });
+        let imageBytes: Uint8Array | null = null;
+        if (candidate.imageBytes !== null) {
+            imageBytes = normalizedImageByHmac.get(imageContentHmac!) ?? null;
+            if (imageBytes === null) {
+                if (aggregateNormalizedImageBytes + candidate.imageBytes.byteLength
+                    > REVENUE_GENDER_ROUTING_MAX_AGGREGATE_NORMALIZED_IMAGE_BYTES) {
+                    throw new Error('REVENUE_GENDER_ROUTING_IMAGE_BUDGET_EXCEEDED');
+                }
+                // Detach the durable-in-memory evidence snapshot from a mutable preparer result.
+                imageBytes = new Uint8Array(candidate.imageBytes);
+                normalizedImageByHmac.set(imageContentHmac!, imageBytes);
+                aggregateNormalizedImageBytes += imageBytes.byteLength;
+            }
+        }
         candidates.push(Object.freeze({ candidateKey: candidate.candidateKey, fullname, imageContentHmac }));
-        modelCandidates.push(Object.freeze({
-            candidateKey: candidate.candidateKey,
+        evidenceByCandidateKey.set(candidate.candidateKey, Object.freeze({
             fullname,
-            imageBase64: candidate.imageBytes === null
-                ? null
-                : Buffer.from(candidate.imageBytes).toString('base64'),
+            imageBytes,
         }));
     }
-    return Object.freeze({ candidates: Object.freeze(candidates), modelCandidates: Object.freeze(modelCandidates) });
+    return Object.freeze({ candidates: Object.freeze(candidates), evidenceByCandidateKey });
+}
+
+function modelCandidatesForKeys(
+    candidateKeys: readonly string[],
+    population: PreparedRevenueRoutingPopulation,
+): readonly RevenueGenderRoutingModelCandidate[] {
+    return Object.freeze(candidateKeys.map(candidateKey => {
+        const evidence = population.evidenceByCandidateKey.get(candidateKey);
+        if (!evidence) throw new Error('REVENUE_GENDER_ROUTING_PREPARATION_DRIFT');
+        return Object.freeze({
+            candidateKey,
+            fullname: evidence.fullname,
+            imageBase64: evidence.imageBytes === null
+                ? null
+                : Buffer.from(evidence.imageBytes).toString('base64'),
+        });
+    }));
+}
+
+async function assessMicrobatches(
+    input: RouteRevenueGenderCandidatesInput,
+    population: PreparedRevenueRoutingPopulation,
+    candidateKeys: readonly string[],
+    attempt: 1 | 2,
+): Promise<ReadonlyMap<string, GenderRoutingAssessment>> {
+    if (!input.assess) throw new Error('ANALYSIS_V2_GENDER_ROUTING_ASSESSOR_MISSING');
+    const assessments = new Map<string, GenderRoutingAssessment>();
+    for (let start = 0; start < candidateKeys.length; start += REVENUE_GENDER_ROUTING_ASSESSOR_MICROBATCH_SIZE) {
+        const batch = modelCandidatesForKeys(
+            candidateKeys.slice(start, start + REVENUE_GENDER_ROUTING_ASSESSOR_MICROBATCH_SIZE),
+            population,
+        );
+        const result = await input.assess(batch, attempt);
+        for (const [candidateKey, assessment] of result) {
+            if (!batch.some(candidate => candidate.candidateKey === candidateKey)) {
+                throw new Error('REVENUE_GENDER_ROUTING_ASSESSMENT_DRIFT');
+            }
+            assessments.set(candidateKey, assessment);
+        }
+    }
+    return assessments;
 }
 
 async function routePreparedRevenueGenderCandidates(input: RouteRevenueGenderCandidatesInput, population: PreparedRevenueRoutingPopulation): Promise<RevenueGenderRoutingResult> {
     const inputByKey = assertRevenueRoutingCandidates(input);
-    const callableModelCandidates = population.modelCandidates.filter(candidate => (
-        candidate.imageBase64 !== null || candidate.fullname !== null
-    ));
+    const callableCandidateKeys = population.candidates
+        .filter(candidate => candidate.imageContentHmac !== null || candidate.fullname !== null)
+        .map(candidate => candidate.candidateKey);
     const initial = input.candidates.length <= GENDER_ROUTING_CAPS[input.planId as GenderRoutingPlan].detailed
         ? undefined
-        : await input.assess(callableModelCandidates, 1);
+        : await assessMicrobatches(input, population, callableCandidateKeys, 1);
     const retryKeys = initial === undefined
         ? []
         : genderRoutingRetryCandidateKeys({
@@ -205,11 +271,9 @@ async function routePreparedRevenueGenderCandidates(input: RouteRevenueGenderCan
             assessments: initial,
             hmacSecret: input.hmacSecret,
         });
-    const retryCandidates = retryKeys.map(candidateKey => population.modelCandidates.find(candidate => candidate.candidateKey === candidateKey))
-        .filter((candidate): candidate is RevenueGenderRoutingModelCandidate => candidate !== undefined);
-    const retry = retryCandidates.length === 0
+    const retry = retryKeys.length === 0
         ? undefined
-        : await input.assess(retryCandidates, 2);
+        : await assessMicrobatches(input, population, retryKeys, 2);
     const manifest = buildGenderRoutingManifest({
         planId: input.planId as GenderRoutingPlan,
         requestId: input.requestId,
@@ -250,6 +314,28 @@ export async function routeAndPersistRevenueGenderCandidates(
     input: PersistRevenueGenderRoutingInput,
 ): Promise<PersistedRevenueGenderRoutingResult | null> {
     if (!usesRevenueGenderRouting(input)) return null;
+
+    const current = await input.manifestStore.loadCurrentComplete({
+        requestId: input.requestId,
+        jobKey: input.jobKey,
+        claimToken: input.claimToken,
+        jobInputHash: input.jobInputHash,
+        relationshipCheckpointId: input.relationshipCheckpointId,
+        policyVersion: 'gender-routing-v1',
+        planId: input.planId,
+    });
+    if (current !== null) {
+        const cap = GENDER_ROUTING_CAPS[input.planId];
+        if (
+            current.selected.length !== current.header.selectedCount
+            || current.selected.length > cap.detailed
+        ) throw new Error('REVENUE_GENDER_ROUTING_SELECTION_DRIFT');
+        return Object.freeze({
+            header: current.header,
+            canonicalInputHmac: current.header.canonicalInputHmac,
+            selectedMutualOrdinals: Object.freeze(current.selected.map(row => row.mutualOrdinal)),
+        });
+    }
 
     const cap = GENDER_ROUTING_CAPS[input.planId];
     if (

@@ -3200,8 +3200,9 @@ describe('analysis V2 concrete collection executors', () => {
         const selectedUsernames = routing.selected().map(row => (
             usernamesByOrdinal.get(row.mutualOrdinal)!
         ));
-        expect(assessor).toHaveBeenCalledTimes(1);
-        expect(assessor.mock.calls[0]?.[0]).toHaveLength(101);
+        expect(assessor).toHaveBeenCalledTimes(11);
+        expect(assessor.mock.calls.every(([rows]) => rows.length <= 10)).toBe(true);
+        expect(assessor.mock.calls.flatMap(([rows]) => rows)).toHaveLength(101);
         expect(JSON.stringify(assessor.mock.calls[0]?.[0])).not.toContain('mutualOrdinal');
         expect(relationship.checkpoint.manifest.detailedSelectedPublicCount).toBe(100);
         expect(relationship.checkpoint.manifest.profileBatches).toEqual(
@@ -3550,6 +3551,7 @@ function routingManifestStore(usernamesByOrdinal: ReadonlyMap<number, string>) {
             ordinal: row.ordinal!,
         }));
     const store: AnalysisV2GenderRoutingManifestStore = {
+        loadCurrentComplete: vi.fn(async () => null),
         begin: vi.fn(async input => ({
             status: 'building' as const,
             attemptCount: 1,
