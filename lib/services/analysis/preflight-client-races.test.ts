@@ -43,6 +43,18 @@ function consumedRedirect(): RedirectConsumedPreflight | undefined {
         | undefined;
 }
 
+describe('blocked preflight copy', () => {
+    it('shows the exact capacity-limit message on the blocked screen', () => {
+        const blockedPreflightMessage = Reflect.get(preflightClient, 'blockedPreflightMessage') as
+            | ((code: string) => string)
+            | undefined;
+
+        expect(blockedPreflightMessage?.('OVER_PLUS_CAPACITY')).toBe(
+            '팔로워 또는 팔로잉 수가 현재 최대 지원 범위인 각각 1,200명을 초과해 판독할 수 없습니다.',
+        );
+    });
+});
+
 const plans = [
     {
         planId: 'basic',
