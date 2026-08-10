@@ -43,35 +43,71 @@ CREATE TABLE public.account_e2e_test_runners (account_id uuid PRIMARY KEY, runne
 CREATE FUNCTION public.load_e2e_test_runner_v1(uuid) RETURNS TABLE(runner_plan text) LANGUAGE sql AS $$
  SELECT runner_plan FROM public.account_e2e_test_runners WHERE account_id = $1
 $$;
-CREATE TABLE public.analysis_preflight_provider_runs (
+	CREATE TABLE public.analysis_preflight_provider_runs (
  preflight_id uuid NOT NULL REFERENCES public.analysis_preflights(id), operation_key text NOT NULL,
  status text NOT NULL CHECK (status IN ('starting','running','succeeded','failed','aborted','timed_out','resolved_no_run')),
  actual_usage_usd numeric(18,12), terminalized_at timestamptz, usage_reconciled_at timestamptz,
  PRIMARY KEY (preflight_id, operation_key),
- CHECK ((actual_usage_usd IS NULL OR actual_usage_usd >= 0) AND (usage_reconciled_at IS NULL OR terminalized_at IS NOT NULL))
-);
-CREATE TABLE public.analysis_pipeline_jobs (
- request_id uuid REFERENCES public.analysis_requests(id) ON DELETE CASCADE, job_key text CHECK (job_key ~ '^[a-z0-9][a-z0-9:._-]{0,159}$'),
- status text NOT NULL CHECK (status IN ('pending','processing','completed','failed','cancelled')),
- lease_token uuid, lease_expires_at timestamptz, input_hash text NOT NULL CHECK (input_hash ~ '^[a-f0-9]{64}$'), required_job_keys text[], PRIMARY KEY(request_id, job_key),
- CHECK ((status='processing' AND lease_token IS NOT NULL AND lease_expires_at IS NOT NULL) OR (status <> 'processing' AND lease_token IS NULL AND lease_expires_at IS NULL))
-);
-CREATE TABLE public.analysis_v2_provider_runs (
- request_id uuid NOT NULL, job_key text NOT NULL, operation_key text NOT NULL CHECK (operation_key ~ '^(target-profile|profile-fallback|profile-repair|relationship-followers|relationship-following|target-likers|target-comments|candidate-likers):[a-f0-9]{64}$'),
- input_hash text NOT NULL CHECK (input_hash ~ '^[a-f0-9]{64}$'), job_claim_token uuid NOT NULL, reservation_token uuid NOT NULL,
- logical_provider text NOT NULL, actor_id text NOT NULL, credential_slot text NOT NULL, max_charge_usd numeric(18,12) NOT NULL CHECK(max_charge_usd >= 0), status text NOT NULL CHECK(status IN ('starting','running','rejected','succeeded','failed','aborted','timed_out')),
- run_id text, actual_usage_usd numeric(18,12), reserved_at timestamptz NOT NULL DEFAULT clock_timestamp(), run_started_at timestamptz, terminalized_at timestamptz, usage_reconciled_at timestamptz, updated_at timestamptz NOT NULL DEFAULT clock_timestamp(),
- PRIMARY KEY(request_id,job_key,operation_key), UNIQUE(reservation_token), FOREIGN KEY(request_id,job_key) REFERENCES public.analysis_pipeline_jobs(request_id,job_key) ON DELETE CASCADE,
- CHECK ((status='starting' AND run_id IS NULL AND actual_usage_usd IS NULL) OR (status <> 'starting'))
-);
-CREATE TABLE public.analysis_v2_ai_attempts (
- request_id uuid NOT NULL, job_key text NOT NULL, job_claim_token uuid NOT NULL, operation_key text NOT NULL CHECK(operation_key ~ '^(gender-triage|gender-resolution|feature-analysis|high-risk-narrative|private-account-name|partner-safety):[a-f0-9]{64}$'), attempt smallint NOT NULL CHECK(attempt BETWEEN 1 AND 4), reservation_token uuid NOT NULL,
- status text NOT NULL CHECK(status IN ('reserved','success','rate_limited','ambiguous','rejected','response_rejected','cutoff')),
- model_name text NOT NULL, location text NOT NULL, stage text NOT NULL, thinking_level text, media_count smallint NOT NULL, media_resolution text, prompt_version text NOT NULL, schema_version smallint NOT NULL, max_output_tokens integer NOT NULL, retry_count smallint NOT NULL,
- usage_metadata_status text, usage_complete boolean, prompt_tokens integer, completion_tokens integer, total_tokens integer, thinking_tokens integer, latency_ms integer, estimated_cost_usd numeric(15,12), finish_reason text, terminal_payload_hash text, created_at timestamptz NOT NULL DEFAULT clock_timestamp(), terminalized_at timestamptz, updated_at timestamptz NOT NULL DEFAULT clock_timestamp(),
- PRIMARY KEY(request_id,operation_key,attempt), UNIQUE(reservation_token), FOREIGN KEY(request_id,job_key) REFERENCES public.analysis_pipeline_jobs(request_id,job_key) ON DELETE CASCADE,
- CHECK ((status='reserved' AND terminalized_at IS NULL AND estimated_cost_usd IS NULL) OR status <> 'reserved'), CHECK(retry_count=attempt-1)
-);
+	 CHECK ((actual_usage_usd IS NULL OR actual_usage_usd >= 0) AND (usage_reconciled_at IS NULL OR terminalized_at IS NOT NULL))
+	);
+	CREATE FUNCTION public.analysis_v2_valid_apify_credential_slot(p_slot text) RETURNS boolean LANGUAGE sql IMMUTABLE SET search_path = '' AS $$
+	 SELECT COALESCE(p_slot IN ('primary','secondary','tertiary','quaternary','quinary','senary','septenary'), FALSE)
+	$$;
+	CREATE TABLE public.analysis_pipeline_jobs (
+	 request_id uuid REFERENCES public.analysis_requests(id) ON DELETE CASCADE, job_key text CHECK (job_key ~ '^[a-z0-9][a-z0-9:._-]{0,159}$'),
+	 status text NOT NULL DEFAULT 'pending', dispatch_state text NOT NULL DEFAULT 'pending', dispatch_generation int NOT NULL DEFAULT 0,
+	 dispatch_reservation_token uuid, dispatch_reserved_at timestamptz, dispatched_at timestamptz, dispatch_task_name text, delivered_at timestamptz,
+	 lease_token uuid, lease_expires_at timestamptz, input_hash text NOT NULL CHECK (input_hash ~ '^[a-f0-9]{64}$'), required_job_keys text[] NOT NULL DEFAULT '{}'::text[],
+	 created_at timestamptz NOT NULL DEFAULT clock_timestamp(), updated_at timestamptz NOT NULL DEFAULT clock_timestamp(), PRIMARY KEY(request_id, job_key),
+	 CONSTRAINT analysis_pipeline_jobs_status_check CHECK (status IN ('pending','processing','completed','failed','cancelled')),
+	 CONSTRAINT analysis_pipeline_jobs_dispatch_state_check CHECK (dispatch_state IN ('pending','reserved','enqueued','delivered')),
+	 CONSTRAINT analysis_pipeline_jobs_dispatch_generation_check CHECK (dispatch_generation BETWEEN 0 AND 1000),
+	 CONSTRAINT analysis_pipeline_jobs_dispatch_pair_check CHECK (
+	   (dispatch_state='pending' AND dispatch_generation=0 AND dispatch_reservation_token IS NULL AND dispatch_reserved_at IS NULL AND dispatched_at IS NULL AND dispatch_task_name IS NULL AND delivered_at IS NULL)
+	   OR (dispatch_state='reserved' AND dispatch_generation>0 AND dispatch_reservation_token IS NOT NULL AND dispatch_reserved_at IS NOT NULL AND dispatched_at IS NULL AND dispatch_task_name IS NULL AND delivered_at IS NULL)
+	   OR (dispatch_state='enqueued' AND dispatch_generation>0 AND dispatch_reservation_token IS NOT NULL AND dispatch_reserved_at IS NOT NULL AND dispatched_at IS NOT NULL AND dispatch_task_name IS NOT NULL AND delivered_at IS NULL)
+	   OR (dispatch_state='delivered' AND dispatch_generation>0 AND dispatch_reservation_token IS NOT NULL AND dispatch_reserved_at IS NOT NULL AND dispatched_at IS NOT NULL AND dispatch_task_name IS NOT NULL AND delivered_at IS NOT NULL)
+	 ),
+	 CONSTRAINT analysis_pipeline_jobs_task_name_check CHECK (dispatch_task_name IS NULL OR (char_length(dispatch_task_name) BETWEEN 1 AND 512 AND dispatch_task_name ~ '^[A-Za-z0-9][A-Za-z0-9._:/=-]*$')),
+	 CONSTRAINT analysis_pipeline_jobs_lease_check CHECK ((status='processing' AND lease_token IS NOT NULL AND lease_expires_at IS NOT NULL AND dispatch_state='delivered') OR (status <> 'processing' AND lease_token IS NULL AND lease_expires_at IS NULL)),
+	 CONSTRAINT analysis_pipeline_jobs_timestamp_check CHECK (updated_at >= created_at AND (dispatch_reserved_at IS NULL OR dispatch_reserved_at >= created_at) AND (dispatched_at IS NULL OR dispatched_at >= dispatch_reserved_at) AND (delivered_at IS NULL OR delivered_at >= dispatched_at) AND (lease_expires_at IS NULL OR lease_expires_at > updated_at))
+	);
+	CREATE TABLE public.analysis_v2_provider_runs (
+	 request_id uuid NOT NULL, job_key text NOT NULL, operation_key text NOT NULL CHECK (operation_key ~ '^(target-profile|profile-fallback|profile-repair|relationship-followers|relationship-following|target-likers|target-comments|candidate-likers):[a-f0-9]{64}$'),
+	 input_hash text NOT NULL CHECK (input_hash ~ '^[a-f0-9]{64}$'), job_claim_token uuid NOT NULL, reservation_token uuid NOT NULL,
+	 logical_provider text NOT NULL CHECK(logical_provider IN ('apify','coderx')), actor_id text NOT NULL CHECK(char_length(actor_id) BETWEEN 3 AND 200 AND actor_id ~ '^[A-Za-z0-9][A-Za-z0-9._~/-]{2,199}$'), credential_slot text NOT NULL, max_charge_usd numeric(18,12) NOT NULL,
+	 status text NOT NULL CHECK(status IN ('starting','running','rejected','succeeded','failed','aborted','timed_out')),
+	 run_id text, actual_usage_usd numeric(18,12), reserved_at timestamptz NOT NULL DEFAULT clock_timestamp(), run_started_at timestamptz, terminalized_at timestamptz, usage_reconciled_at timestamptz, updated_at timestamptz NOT NULL DEFAULT clock_timestamp(),
+	 PRIMARY KEY(request_id,job_key,operation_key), UNIQUE(reservation_token), FOREIGN KEY(request_id,job_key) REFERENCES public.analysis_pipeline_jobs(request_id,job_key) ON DELETE CASCADE,
+	 CONSTRAINT analysis_v2_provider_run_credential_check CHECK (public.analysis_v2_valid_apify_credential_slot(credential_slot)),
+	 CONSTRAINT analysis_v2_provider_run_run_id_check CHECK (run_id IS NULL OR run_id ~ '^[A-Za-z0-9]{8,64}$'),
+	 CONSTRAINT analysis_v2_provider_run_cost_check CHECK (max_charge_usd BETWEEN 0 AND 100000 AND (actual_usage_usd IS NULL OR actual_usage_usd BETWEEN 0 AND 100000)),
+	 CONSTRAINT analysis_v2_provider_run_state_check CHECK (
+	   (status='starting' AND run_id IS NULL AND run_started_at IS NULL AND terminalized_at IS NULL AND actual_usage_usd IS NULL AND usage_reconciled_at IS NULL)
+	   OR (status='running' AND run_id IS NOT NULL AND run_started_at IS NOT NULL AND terminalized_at IS NULL AND actual_usage_usd IS NULL AND usage_reconciled_at IS NULL)
+	   OR (status='rejected' AND run_id IS NULL AND run_started_at IS NULL AND terminalized_at IS NOT NULL AND actual_usage_usd=0 AND usage_reconciled_at IS NOT NULL)
+	   OR (status IN ('succeeded','failed','aborted','timed_out') AND run_id IS NOT NULL AND run_started_at IS NOT NULL AND terminalized_at IS NOT NULL AND ((actual_usage_usd IS NULL AND usage_reconciled_at IS NULL) OR (actual_usage_usd IS NOT NULL AND usage_reconciled_at IS NOT NULL)))
+	 ),
+	 CONSTRAINT analysis_v2_provider_run_time_check CHECK (updated_at >= reserved_at AND (run_started_at IS NULL OR run_started_at >= reserved_at) AND (terminalized_at IS NULL OR terminalized_at >= run_started_at) AND (usage_reconciled_at IS NULL OR usage_reconciled_at >= terminalized_at))
+	);
+	CREATE TABLE public.analysis_v2_ai_attempts (
+	 request_id uuid NOT NULL, job_key text NOT NULL, job_claim_token uuid NOT NULL, operation_key text NOT NULL CHECK(operation_key ~ '^(gender-triage|gender-resolution|feature-analysis|high-risk-narrative|private-account-name|partner-safety):[a-f0-9]{64}$'), attempt smallint NOT NULL CHECK(attempt BETWEEN 1 AND 4), reservation_token uuid NOT NULL,
+	 status text NOT NULL CHECK(status IN ('reserved','success','rate_limited','ambiguous','rejected','response_rejected','cutoff')),
+	 model_name text NOT NULL, location text NOT NULL, stage text NOT NULL, thinking_level text, media_count smallint NOT NULL, media_resolution text, prompt_version text NOT NULL, schema_version smallint NOT NULL, max_output_tokens integer NOT NULL, retry_count smallint NOT NULL,
+	 usage_metadata_status text, usage_complete boolean, prompt_tokens integer, completion_tokens integer, total_tokens integer, thinking_tokens integer, latency_ms integer, estimated_cost_usd numeric(15,12), finish_reason text, terminal_payload_hash text, created_at timestamptz NOT NULL DEFAULT clock_timestamp(), terminalized_at timestamptz, updated_at timestamptz NOT NULL DEFAULT clock_timestamp(),
+	 PRIMARY KEY(request_id,operation_key,attempt), UNIQUE(reservation_token), FOREIGN KEY(request_id,job_key) REFERENCES public.analysis_pipeline_jobs(request_id,job_key) ON DELETE CASCADE,
+	 CONSTRAINT analysis_v2_ai_attempt_model_check CHECK(model_name ~ '^[a-z0-9][a-z0-9._-]{0,99}$'),
+	 CONSTRAINT analysis_v2_ai_attempt_location_check CHECK(location ~ '^[a-z][a-z0-9-]{0,62}$'),
+	 CONSTRAINT analysis_v2_ai_attempt_stage_check CHECK(stage IN ('genderTriage','genderResolution','featureAnalysis','highRiskNarrative','privateAccountName','partnerSafety')),
+	 CONSTRAINT analysis_v2_ai_attempt_thinking_check CHECK(thinking_level IS NULL OR thinking_level IN ('MINIMAL','LOW','MEDIUM','HIGH')),
+	 CONSTRAINT analysis_v2_ai_attempt_media_check CHECK(media_count BETWEEN 0 AND 11 AND (media_resolution IS NULL OR media_resolution IN ('LOW','MEDIUM','HIGH'))),
+	 CONSTRAINT analysis_v2_ai_attempt_prompt_check CHECK(char_length(prompt_version) BETWEEN 1 AND 64 AND prompt_version ~ '^[A-Za-z0-9._:-]+$' AND schema_version BETWEEN 1 AND 9999 AND max_output_tokens BETWEEN 1 AND 65536 AND retry_count=attempt-1),
+	 CONSTRAINT analysis_v2_ai_attempt_usage_check CHECK ((usage_metadata_status='complete' AND usage_complete AND prompt_tokens BETWEEN 0 AND 100000000 AND completion_tokens BETWEEN 0 AND 100000000 AND total_tokens BETWEEN 0 AND 100000000 AND thinking_tokens BETWEEN 0 AND 100000000 AND total_tokens=prompt_tokens+completion_tokens+thinking_tokens) OR (usage_metadata_status IN ('missing','malformed') AND NOT usage_complete AND prompt_tokens IS NULL AND completion_tokens IS NULL AND total_tokens IS NULL AND thinking_tokens IS NULL AND estimated_cost_usd IS NULL) OR (usage_metadata_status IS NULL AND usage_complete IS NULL AND prompt_tokens IS NULL AND completion_tokens IS NULL AND total_tokens IS NULL AND thinking_tokens IS NULL AND estimated_cost_usd IS NULL)),
+	 CONSTRAINT analysis_v2_ai_attempt_terminal_shape_check CHECK ((status='reserved' AND latency_ms IS NULL AND finish_reason IS NULL AND terminal_payload_hash IS NULL AND terminalized_at IS NULL) OR (status <> 'reserved' AND usage_metadata_status IS NOT NULL AND usage_complete IS NOT NULL AND latency_ms BETWEEN 0 AND 3600000 AND terminal_payload_hash ~ '^[0-9a-f]{64}$' AND terminalized_at IS NOT NULL)),
+	 CONSTRAINT analysis_v2_ai_attempt_generation_failure_check CHECK (status NOT IN ('rate_limited','ambiguous') OR (usage_metadata_status='missing' AND NOT usage_complete AND prompt_tokens IS NULL AND completion_tokens IS NULL AND total_tokens IS NULL AND thinking_tokens IS NULL AND estimated_cost_usd IS NULL AND finish_reason IS NULL)),
+	 CONSTRAINT analysis_v2_ai_attempt_cost_check CHECK(estimated_cost_usd IS NULL OR estimated_cost_usd BETWEEN 0 AND 999.999999999999),
+	 CONSTRAINT analysis_v2_ai_attempt_time_check CHECK(updated_at >= created_at AND (terminalized_at IS NULL OR terminalized_at >= created_at))
+	);
 CREATE TABLE public.analysis_revenue_run_ledgers (
  request_id uuid PRIMARY KEY REFERENCES public.analysis_requests(id) ON DELETE CASCADE,
  preflight_id uuid NOT NULL, user_id uuid NOT NULL, plan_id text NOT NULL CHECK (plan_id IN ('basic','standard')),
@@ -140,8 +176,15 @@ const aiOperationKey = `private-account-name:${hash('f')}`;
 async function seedLiveSources(db: PGlite, providerKey = providerOperationKey): Promise<void> {
     await begin(db);
     await db.exec(`
-        INSERT INTO public.analysis_pipeline_jobs(request_id,job_key,status,lease_token,lease_expires_at,input_hash)
-        VALUES ('${requestId}','${jobKey}','processing','${claimToken}',clock_timestamp() + interval '5 minutes','${inputHash}');
+        INSERT INTO public.analysis_pipeline_jobs(
+          request_id,job_key,status,dispatch_state,dispatch_generation,dispatch_reservation_token,
+          dispatch_reserved_at,dispatched_at,dispatch_task_name,delivered_at,lease_token,lease_expires_at,
+          input_hash,created_at,updated_at
+        ) VALUES (
+          '${requestId}','${jobKey}','processing','delivered',1,'${claimToken}',
+          clock_timestamp() - interval '3 minutes',clock_timestamp() - interval '2 minutes','analysis-v2.relationships.collect',clock_timestamp() - interval '1 minute','${claimToken}',clock_timestamp() + interval '5 minutes',
+          '${inputHash}',clock_timestamp() - interval '4 minutes',clock_timestamp() - interval '30 seconds'
+        );
         INSERT INTO public.analysis_v2_provider_runs(request_id,job_key,operation_key,input_hash,job_claim_token,reservation_token,logical_provider,actor_id,credential_slot,max_charge_usd,status)
         VALUES ('${requestId}','${jobKey}','${providerKey}','${providerInputHash}','${claimToken}','55555555-5555-4555-8555-555555555555','apify','actor-id','primary',0.2,'starting');
         INSERT INTO public.analysis_v2_ai_attempts(request_id,job_key,job_claim_token,operation_key,attempt,reservation_token,status,model_name,location,stage,media_count,prompt_version,schema_version,max_output_tokens,retry_count)
@@ -149,9 +192,9 @@ async function seedLiveSources(db: PGlite, providerKey = providerOperationKey): 
     `);
 }
 
-async function replayTotals(db: PGlite): Promise<{ reservedCostKrw: number; economicActualKrw: number; actualCostKrw: number; billedActualKrw: number; status: string; manualReviewReason: string | null; childCount: number }> {
-    const parent = await db.query<{ reserved_cost_krw: number; economic_actual_krw: number; actual_cost_krw: number; billed_actual_krw: number; status: string; manual_review_reason: string | null }>(
-        'SELECT reserved_cost_krw,economic_actual_krw,actual_cost_krw,billed_actual_krw,status,manual_review_reason FROM public.analysis_revenue_run_ledgers WHERE request_id=$1',
+async function replayTotals(db: PGlite): Promise<{ reservedCostKrw: number; economicActualKrw: number; actualCostKrw: number; billedActualKrw: number; status: string; manualReviewReason: string | null; preflightRefreshedAt: string; requestStartedAt: string; childCount: number }> {
+    const parent = await db.query<{ reserved_cost_krw: number; economic_actual_krw: number; actual_cost_krw: number; billed_actual_krw: number; status: string; manual_review_reason: string | null; preflight_refreshed_at: string; request_started_at: string }>(
+        'SELECT reserved_cost_krw,economic_actual_krw,actual_cost_krw,billed_actual_krw,status,manual_review_reason,preflight_refreshed_at,request_started_at FROM public.analysis_revenue_run_ledgers WHERE request_id=$1',
         [requestId],
     );
     const children = await db.query<{ count: number }>(
@@ -167,6 +210,8 @@ async function replayTotals(db: PGlite): Promise<{ reservedCostKrw: number; econ
         billedActualKrw: row.billed_actual_krw,
         status: row.status,
         manualReviewReason: row.manual_review_reason,
+        preflightRefreshedAt: row.preflight_refreshed_at,
+        requestStartedAt: row.request_started_at,
         childCount: children.rows[0]?.count ?? 0,
     };
 }
@@ -300,6 +345,55 @@ describe('revenue cost operation ledger PGlite', () => {
         await expect(db.query('SELECT reserved_cost_krw FROM public.analysis_revenue_run_ledgers WHERE request_id=$1', [requestId])).resolves.toMatchObject({ rows: [{ reserved_cost_krw: 290 }] });
     });
 
+    it.each(['completed', 'failed'])('rejects %s requests before a first reserve and a started replay without further cost mutation', async (requestStatus) => {
+        const firstReserve = await createDb();
+        await seedLiveSources(firstReserve);
+        await firstReserve.exec(`UPDATE public.analysis_requests SET status='${requestStatus}' WHERE id='${requestId}'`);
+        const reserve = `SELECT public.reserve_analysis_revenue_cost_operation_v2('${requestId}','${jobKey}','${claimToken}','${inputHash}','provider_run','${providerOperationKey}',0::smallint)`;
+        const beforeFirstReserve = await replayTotals(firstReserve);
+        await expectError(query(firstReserve, reserve), 'REVENUE_COST_OPERATION_FENCE');
+        await expect(replayTotals(firstReserve)).resolves.toEqual(beforeFirstReserve);
+
+        const startedReplay = await createDb();
+        await seedLiveSources(startedReplay);
+        const start = `SELECT public.mark_analysis_revenue_cost_operation_started_v2('${requestId}','${jobKey}','${claimToken}','${inputHash}','provider_run','${providerOperationKey}',0::smallint)`;
+        await query(startedReplay, reserve);
+        await query(startedReplay, start);
+        await startedReplay.exec(`UPDATE public.analysis_requests SET status='${requestStatus}' WHERE id='${requestId}'`);
+        const beforeStartedReplay = await replayTotals(startedReplay);
+        await expectError(query(startedReplay, start), 'REVENUE_COST_OPERATION_FENCE');
+        await expect(replayTotals(startedReplay)).resolves.toEqual(beforeStartedReplay);
+    });
+
+    it.each([
+        ['preflight refreshed at', `UPDATE public.analysis_revenue_run_ledgers SET preflight_refreshed_at='2026-08-10T00:01:01Z' WHERE request_id='${requestId}'`],
+        ['request started at', `UPDATE public.analysis_revenue_run_ledgers SET request_started_at='2026-08-10T00:00:01Z' WHERE request_id='${requestId}'`],
+    ])('rejects %s drift on a reserve replay without further parent or child mutation', async (_name, mutation) => {
+        const db = await createDb();
+        await seedLiveSources(db);
+        const reserve = `SELECT public.reserve_analysis_revenue_cost_operation_v2('${requestId}','${jobKey}','${claimToken}','${inputHash}','provider_run','${providerOperationKey}',0::smallint)`;
+        await query(db, reserve);
+        await db.exec(mutation);
+        const before = await replayTotals(db);
+        await expectError(query(db, reserve), 'REVENUE_COST_OPERATION_FENCE');
+        await expect(replayTotals(db)).resolves.toEqual(before);
+    });
+
+    it.each([
+        ['preflight refreshed at', `UPDATE public.analysis_revenue_run_ledgers SET preflight_refreshed_at='2026-08-10T00:01:01Z' WHERE request_id='${requestId}'`],
+        ['request started at', `UPDATE public.analysis_revenue_run_ledgers SET request_started_at='2026-08-10T00:00:01Z' WHERE request_id='${requestId}'`],
+    ])('rejects %s drift on start without further parent or child mutation', async (_name, mutation) => {
+        const db = await createDb();
+        await seedLiveSources(db);
+        const reserve = `SELECT public.reserve_analysis_revenue_cost_operation_v2('${requestId}','${jobKey}','${claimToken}','${inputHash}','provider_run','${providerOperationKey}',0::smallint)`;
+        const start = `SELECT public.mark_analysis_revenue_cost_operation_started_v2('${requestId}','${jobKey}','${claimToken}','${inputHash}','provider_run','${providerOperationKey}',0::smallint)`;
+        await query(db, reserve);
+        await db.exec(mutation);
+        const before = await replayTotals(db);
+        await expectError(query(db, start), 'REVENUE_COST_OPERATION_FENCE');
+        await expect(replayTotals(db)).resolves.toEqual(before);
+    });
+
     it.each([
         [targetProfileOperationKey, 'target_profile'],
         [profileFallbackOperationKey, 'detail_profile'],
@@ -317,7 +411,7 @@ describe('revenue cost operation ledger PGlite', () => {
         ['wrong job key', '', 'track:other'],
         ['expired lease', `UPDATE public.analysis_pipeline_jobs SET lease_expires_at=clock_timestamp() - interval '1 second' WHERE request_id='${requestId}' AND job_key='${jobKey}'`],
         ['source claim', `UPDATE public.analysis_v2_provider_runs SET job_claim_token='77777777-7777-4777-8777-777777777777' WHERE request_id='${requestId}'`],
-        ['source status', `UPDATE public.analysis_v2_provider_runs SET status='running',run_id='run12345' WHERE request_id='${requestId}'`],
+        ['source status', `UPDATE public.analysis_v2_provider_runs SET status='running',run_id='run12345',run_started_at=clock_timestamp() WHERE request_id='${requestId}'`],
     ])('rejects provider reserve fences without changing any parent total or review state: %s', async (_name, mutation, rpcJobKey = jobKey) => {
         const db = await createDb();
         await seedLiveSources(db);
