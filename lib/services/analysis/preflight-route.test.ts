@@ -61,6 +61,7 @@ const mocks = vi.hoisted(() => ({
     loadFixture: vi.fn(),
     requireActiveAccountClassification: vi.fn(),
     requireActiveE2eTestAccount: vi.fn(),
+    requireActiveE2eTestRunner: vi.fn(),
 }));
 
 vi.mock('@/lib/supabase/admin', () => ({ supabaseAdmin: mocks.admin }));
@@ -123,6 +124,7 @@ vi.mock('@/lib/services/identity/account-principal-store', async importOriginal 
     ...(await importOriginal<typeof import('@/lib/services/identity/account-principal-store')>()),
     requireActiveAccountClassification: mocks.requireActiveAccountClassification,
     requireActiveE2eTestAccount: mocks.requireActiveE2eTestAccount,
+    requireActiveE2eTestRunner: mocks.requireActiveE2eTestRunner,
 }));
 
 import { POST as createPreflight } from '@/app/api/analysis/preflight/route';
@@ -307,6 +309,14 @@ describe('preflight owner routes', () => {
             trafficClass: 'e2e_test',
             lifecycle: 'active',
             classificationVersion: 'account-ledger-v1',
+        });
+        mocks.requireActiveE2eTestRunner.mockResolvedValue({
+            userId,
+            accountClass: 'e2e_test',
+            trafficClass: 'e2e_test',
+            lifecycle: 'active',
+            classificationVersion: 'account-ledger-v1',
+            runnerPlan: 'basic',
         });
     });
 
@@ -522,7 +532,7 @@ describe('preflight owner routes', () => {
         vi.stubEnv('ANALYSIS_TEST_ENTITLEMENTS_ENABLED', 'true');
         vi.stubEnv('ANALYSIS_TEST_ENTITLEMENT_SECRET', secret);
         mocks.admissionAvailable.mockReturnValue(false);
-        mocks.requireActiveE2eTestAccount.mockRejectedValue(
+        mocks.requireActiveE2eTestRunner.mockRejectedValue(
             new AccountPrincipalAdmissionError(),
         );
         const token = createAnalysisTestAdmission({
@@ -542,7 +552,43 @@ describe('preflight owner routes', () => {
         await expect(response.json()).resolves.toMatchObject({
             code: 'ACCOUNT_ADMISSION_DENIED',
         });
-        expect(mocks.requireActiveE2eTestAccount).toHaveBeenCalledWith(userId);
+        expect(mocks.requireActiveE2eTestRunner).toHaveBeenCalledWith(
+            expect.objectContaining({ id: userId }),
+        );
+        expect(mocks.store.createOrReplay).not.toHaveBeenCalled();
+    });
+
+    it('rejects a signed canary whose Auth metadata does not establish an approved E2E runner', async () => {
+        const secret = Buffer.alloc(32, 13).toString('base64url');
+        vi.stubEnv('ANALYSIS_TEST_ENTITLEMENTS_ENABLED', 'true');
+        vi.stubEnv('ANALYSIS_TEST_ENTITLEMENT_SECRET', secret);
+        mocks.admissionAvailable.mockReturnValue(false);
+        mocks.requireActiveE2eTestRunner.mockRejectedValue(
+            new AccountPrincipalAdmissionError(),
+        );
+        const token = createAnalysisTestAdmission({
+            userId,
+            targetInstagramId: 'target.name',
+            idempotencyKey: 'preflight-key-000000000000',
+            nonce: 'preflight_admission_nonce_05',
+        }, { secret });
+
+        const response = await createPreflight(postRequest(
+            { targetInstagramId: 'Target.Name' },
+            'preflight-key-000000000000',
+            token,
+        ));
+
+        expect(response.status).toBe(403);
+        await expect(response.json()).resolves.toMatchObject({
+            code: 'ACCOUNT_ADMISSION_DENIED',
+        });
+        expect(mocks.requireActiveE2eTestRunner).toHaveBeenCalledWith(
+            expect.objectContaining({
+                id: userId,
+                app_metadata: { provider: 'google' },
+            }),
+        );
         expect(mocks.store.createOrReplay).not.toHaveBeenCalled();
     });
 

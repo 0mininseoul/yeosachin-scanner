@@ -17,6 +17,7 @@ import {
     requireActiveAccountClassification,
     requireActiveAccountSession,
     requireActiveE2eTestAccount,
+    requireActiveE2eTestRunner,
     upsertKakaoAccountProfile,
 } from './account-principal-store';
 
@@ -284,6 +285,39 @@ describe('account principal RPC store', () => {
             lifecycle: 'active',
         });
         await expect(requireActiveE2eTestAccount(USER_ID)).rejects.toMatchObject({
+            name: 'AccountPrincipalAdmissionError',
+            code: 'ACCOUNT_ADMISSION_DENIED',
+        });
+    });
+
+    it('requires immutable runner metadata to agree with the signed entitlement plan', async () => {
+        const activeE2eClassification = {
+            id: USER_ID,
+            account_class: 'e2e_test',
+            traffic_class: 'e2e_test',
+            lifecycle: 'active',
+            classification_version: 'account-ledger-v1',
+        };
+        mocks.rpc
+            .mockResolvedValueOnce({ data: [activeE2eClassification], error: null })
+            .mockResolvedValueOnce({ data: [activeE2eClassification], error: null })
+            .mockResolvedValueOnce({ data: [activeE2eClassification], error: null });
+
+        await expect(requireActiveE2eTestRunner({
+            id: USER_ID,
+            app_metadata: { analysis_test_runner_v1: 'basic' },
+        }, 'basic')).resolves.toMatchObject({ runnerPlan: 'basic' });
+        await expect(requireActiveE2eTestRunner({
+            id: USER_ID,
+            app_metadata: { analysis_test_runner_v1: 'basic' },
+        }, 'standard')).rejects.toMatchObject({
+            name: 'AccountPrincipalAdmissionError',
+            code: 'ACCOUNT_ADMISSION_DENIED',
+        });
+        await expect(requireActiveE2eTestRunner({
+            id: USER_ID,
+            app_metadata: { analysis_test_runner_v1: 'unrecognized' },
+        })).rejects.toMatchObject({
             name: 'AccountPrincipalAdmissionError',
             code: 'ACCOUNT_ADMISSION_DENIED',
         });

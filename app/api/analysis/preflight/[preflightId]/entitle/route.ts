@@ -46,7 +46,7 @@ import {
 import { operationalLogger } from '@/lib/observability/server';
 import {
     AccountPrincipalAdmissionError,
-    requireActiveE2eTestAccount,
+    requireActiveE2eTestRunner,
 } from '@/lib/services/identity/account-principal-store';
 
 const uuidSchema = z.string().uuid().transform(value => value.toLowerCase());
@@ -146,26 +146,6 @@ async function handlePOST(
                 { status: 401 }
             );
         }
-        try {
-            await requireActiveE2eTestAccount(user.id);
-        } catch (accountError) {
-            if (accountError instanceof AccountPrincipalAdmissionError) {
-                return NextResponse.json(
-                    {
-                        error: '이 계정은 현재 사용할 수 없습니다.',
-                        code: accountError.code,
-                    },
-                    { status: 403 },
-                );
-            }
-            return NextResponse.json(
-                {
-                    error: '분석 테스트 이용권을 사용할 수 없습니다.',
-                    code: 'TEST_ENTITLEMENTS_UNAVAILABLE',
-                },
-                { status: 503 },
-            );
-        }
         let entitlementsEnabled = false;
         try {
             entitlementsEnabled = analysisTestEntitlementsEnabled();
@@ -212,6 +192,27 @@ async function handlePOST(
             return NextResponse.json(
                 { error: '요청 형식이 올바르지 않습니다.', code: 'INVALID_REQUEST' },
                 { status: 400 }
+            );
+        }
+
+        try {
+            await requireActiveE2eTestRunner(user, body.data.planId);
+        } catch (accountError) {
+            if (accountError instanceof AccountPrincipalAdmissionError) {
+                return NextResponse.json(
+                    {
+                        error: '이 계정은 현재 사용할 수 없습니다.',
+                        code: accountError.code,
+                    },
+                    { status: 403 },
+                );
+            }
+            return NextResponse.json(
+                {
+                    error: '분석 테스트 이용권을 사용할 수 없습니다.',
+                    code: 'TEST_ENTITLEMENTS_UNAVAILABLE',
+                },
+                { status: 503 },
             );
         }
 

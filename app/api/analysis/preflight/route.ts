@@ -67,7 +67,7 @@ import { preflightTargetInputHash } from '@/lib/services/analysis/preflight-iden
 import {
     AccountPrincipalAdmissionError,
     requireActiveAccountClassification,
-    requireActiveE2eTestAccount,
+    requireActiveE2eTestRunner,
 } from '@/lib/services/identity/account-principal-store';
 
 const IDEMPOTENCY_KEY_PATTERN = /^[A-Za-z0-9._:-]{16,128}$/;
@@ -432,7 +432,7 @@ async function handlePOST(
         }
         if (signedTestAdmission === 'valid') {
             try {
-                await requireActiveE2eTestAccount(user.id);
+                await requireActiveE2eTestRunner(user);
             } catch (accountError) {
                 if (accountError instanceof AccountPrincipalAdmissionError) {
                     return failed(
