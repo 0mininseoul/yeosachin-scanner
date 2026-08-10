@@ -10,7 +10,7 @@ import {
 } from './v2-collection-executors';
 import {
     buildAnalysisV2DagPlan,
-    type AnalysisV2DagRelationshipManifest,
+    type AnalysisV2DagState,
 } from './v2-dag-planner';
 import { createSupabaseAnalysisV2DagStateStore } from './v2-dag-state-store';
 import type {
@@ -317,31 +317,7 @@ async function checkpointRelationshipSelection(manifest = relationshipSelectionC
     );
 }
 
-function standardRelationshipSelectionCheckpoint(): AnalysisV2DagRelationshipManifest {
-    return {
-        ...relationshipSelectionCheckpoint({
-            detectedMutualCount: 201,
-            publicCount: 201,
-            detailedSelectedPublicCount: 200,
-            notScreenedPublicCount: 1,
-            profileBatches: [30, 30, 30, 30, 30, 30, 20].map((itemCount, batch) => ({
-                batch,
-                itemCount,
-                inputHash: String(batch + 1).repeat(64),
-            })),
-        }),
-        relationshipSelectionPolicy: {
-            policyVersion: 'gender-routing-v1' as const,
-            relationshipCheckpointId: CHECKPOINT_ID,
-            relationshipJobInputHash: INPUT_HASH,
-            planId: 'standard' as const,
-            publicPopulationCount: 201,
-            selectedCount: 200,
-        },
-    };
-}
-
-async function seedCompleteStandardRoutingManifest(): Promise<void> {
+async function configureStandardRelationshipSnapshot(): Promise<void> {
     await db!.query(
         `UPDATE public.analysis_requests
          SET selected_plan_id_snapshot = 'standard' WHERE id = $1`,
@@ -363,37 +339,6 @@ async function seedCompleteStandardRoutingManifest(): Promise<void> {
                   'fixture_' || value::TEXT, FALSE
            FROM pg_catalog.generate_series(102, 201) AS value`,
         [REQUEST_ID],
-    );
-    await db!.query(
-        `INSERT INTO public.analysis_v2_gender_routing_manifests (
-            request_id, relationship_job_key, relationship_job_input_hash,
-            relationship_checkpoint_id, policy_version, plan_id, detailed_cap,
-            population_count, canonical_input_hmac, status, selected_count,
-            model_attempted_count, model_valid_count, model_failed_count, model_retried_count,
-            quota_female_shortfall, quota_uncertainty_shortfall, female_priority_count,
-            uncertainty_count, male_deprioritized_count, selected_female_priority_count,
-            selected_uncertainty_count, selected_male_deprioritized_count, candidate_rows_hash,
-            completed_at
-         ) VALUES (
-            $1, 'track:relationships:collect', $2, $3, 'gender-routing-v1', 'standard',
-            200, 201, $4, 'complete', 200, 0, 0, 0, 0, 0, 0, 0, 0, 201, 0, 0, 200,
-            $5, pg_catalog.clock_timestamp()
-         )`,
-        [REQUEST_ID, INPUT_HASH, CHECKPOINT_ID, CANONICAL_INPUT_HMAC, 'd'.repeat(32)],
-    );
-    await db!.query(
-        `INSERT INTO public.analysis_v2_gender_routing_candidates (
-            request_id, relationship_checkpoint_id, policy_version, relationship_job_key,
-            mutual_ordinal, candidate_key, has_image, has_name, bucket, routing_unavailable,
-            selected, selection_reason, selection_slot, ordinal
-         ) SELECT $1, $2, 'gender-routing-v1', 'track:relationships:collect',
-                  value::SMALLINT, 'mutual:' || value::TEXT, FALSE, FALSE,
-                  'male_deprioritized', FALSE, value <= 200,
-                  CASE WHEN value <= 200 THEN 'fill' ELSE 'not_selected' END,
-                  CASE WHEN value <= 200 THEN 'fill' ELSE NULL END,
-                  CASE WHEN value <= 200 THEN value::SMALLINT ELSE NULL END
-           FROM pg_catalog.generate_series(1, 201) AS value`,
-        [REQUEST_ID, CHECKPOINT_ID],
     );
 }
 
@@ -591,33 +536,265 @@ describe('analysis V2 gender-routing manifest PGlite authority', () => {
         });
     }, 30_000);
 
-    it('accepts the complete Standard 201-public marker and schedules exactly 200 durable profiles', async () => {
+    it('executes the Standard public=201 path through durable gender-routing before scheduling profiles', async () => {
         db = await PGlite.create();
         await seed();
-        await seedCompleteStandardRoutingManifest();
+        await configureStandardRelationshipSnapshot();
+
+        const manifestStore = pgliteManifestStore();
+        const mutualRows = Array.from({ length: 201 }, (_, index) => ({
+            username: `fixture_${index + 1}`,
+            isPrivate: false,
+            isVerified: false,
+            fullName: `Fixture ${index + 1}`,
+            profilePicUrl: `https://raw-image.example/${index + 1}?volatile=true`,
+            mutualOrdinal: index + 1,
+            followingOrdinal: index + 1,
+            detailedOrdinal: index + 1,
+        }));
+        const hmacSecret = 'pglite-standard-routing-secret-at-least-thirty-two-characters';
+        const request = {
+            requestId: REQUEST_ID,
+            targetUsername: 'target_fixture',
+            excludedUsername: 'excluded_fixture',
+            accessMode: 'test_entitlement' as const,
+            providerExecutionPolicy: {
+                mode: 'test_operation_split' as const,
+                policyVersion: 'authorized-free-e2e-v1',
+                operationSlots: {
+                    'target-profile': 'tertiary',
+                    'relationship-followers': 'primary',
+                    'relationship-following': 'secondary',
+                    'profile-fallback': 'tertiary',
+                    'target-likers': 'quaternary',
+                    'target-comments': 'tertiary',
+                    'candidate-likers': 'quinary',
+                },
+            } as const,
+            planId: 'standard' as const,
+            followersDeclaredCount: 0,
+            followingDeclaredCount: 0,
+            detailedMutualLimit: 600 as const,
+        };
+        const evidenceStore = {
+            checkpointRelationshipSide: async () => ({}),
+            freezeRelationships: async () => ({
+                revision: 1,
+                resultHash: CHECKPOINT_ID,
+                exclusionDecisionHash: 'f'.repeat(64),
+                followersResultHash: 'f'.repeat(64),
+                followingResultHash: 'f'.repeat(64),
+                mutualCount: 201,
+                publicCount: 201,
+                privateCount: 0,
+                detailedPublicCount: 201,
+                unscreenedPublicCount: 0,
+            }),
+            loadRelationshipStaging: async () => ({
+                excludedUsername: 'excluded_fixture',
+                detailedPublicUsernames: mutualRows.map(row => row.username),
+                privateMutualUsernames: [],
+                mutualRows,
+            }),
+        };
+        const scope = {
+            schemaVersion: 2 as const,
+            requestSnapshotHash: 'd'.repeat(64),
+            planId: 'standard' as const,
+            planSnapshotHash: 'e'.repeat(64),
+            girlfriendExclusion: { decisionHash: 'f'.repeat(64), excludedCount: 1 as const },
+        };
+        const relationshipContext = {
+            stage: 'relationships',
+            claim: {
+                requestId: REQUEST_ID, jobKey: 'track:relationships:collect', track: 'relationships',
+                kind: 'collection', batch: null, inputHash: INPUT_HASH, generation: 1,
+                reservationToken: CLAIM_TOKEN, claimToken: CLAIM_TOKEN, attemptCount: 1,
+            },
+            job: {
+                requestId: REQUEST_ID, jobKey: 'track:relationships:collect', track: 'relationships',
+                kind: 'collection', batch: null, inputHash: INPUT_HASH, requiredJobKeys: [],
+            },
+            state: scope,
+            aiStagePolicyVersion: null,
+            riskPolicyVersion: null,
+        } as Parameters<ReturnType<typeof createAnalysisV2RelationshipsExecutor>>[0];
+        const profileResumes = new Map<string, AnalysisV2ProfileFetchResume>();
+        const profileCheckpointStore = {
+            load: vi.fn(async (input: { jobKey: string }) => profileResumes.get(input.jobKey) ?? null),
+            checkpointPrimary: vi.fn(async (input: {
+                requestId: string;
+                jobKey: string;
+                requestedUsernames: readonly string[];
+                results: readonly AnalysisV2ProfileAttemptResultInput[];
+            }) => {
+                const resume: AnalysisV2ProfileFetchResume = {
+                    requestId: input.requestId,
+                    jobKey: input.jobKey,
+                    requestedUsernames: [...input.requestedUsernames],
+                    frozenUnresolvedUsernames: [],
+                    primaryResults: input.results as AnalysisV2ProfileFetchResume['primaryResults'],
+                    fallbackResults: [],
+                    primaryCapturedAt: '2026-08-11T00:00:00.000Z',
+                    fallbackCapturedAt: null,
+                    repairResults: [],
+                    repairUsernames: null,
+                    repairCapturedAt: null,
+                };
+                profileResumes.set(input.jobKey, resume);
+                return resume;
+            }),
+            checkpointFallback: vi.fn(async () => {
+                throw new Error('unexpected paid fallback');
+            }),
+            checkpointRepair: vi.fn(async () => {
+                throw new Error('unexpected paid repair');
+            }),
+            purgeTerminal: vi.fn(async () => 0),
+        };
+        const profileFetcher = vi.fn(async (
+            usernames: readonly string[],
+            options: Parameters<typeof import('@/lib/services/instagram/scraper').getProfilesBatchV2>[1],
+        ) => {
+            const results = usernames.map(username => ({
+                outcome: {
+                    requestedUsername: username,
+                    source: 'selfhosted' as const,
+                    status: 'success' as const,
+                    failureCategory: null,
+                    httpStatus: null,
+                    requestCount: 1,
+                    latencyMs: 1,
+                    capturedAt: '2026-08-11T00:00:00.000Z',
+                },
+                profile: {
+                    username,
+                    fullName: `Profile ${username}`,
+                    followersCount: 1,
+                    followingCount: 1,
+                    postsCount: 0,
+                    isPrivate: false,
+                    isVerified: false,
+                    latestPosts: [],
+                },
+            }));
+            await options.persistAttemptOutcomes({
+                attempt: 'primary',
+                source: 'selfhosted',
+                requestedUsernames: usernames,
+                results,
+            });
+            return {
+                results,
+                profiles: results.map(result => result.profile),
+                primaryResults: results,
+                fallbackResults: [],
+                frozenUnresolvedUsernames: [],
+            };
+        });
+        const profileExecutor = createAnalysisV2ProfileFetchExecutor({
+            requestContextStore: { load: async () => request },
+            evidenceStore: evidenceStore as never,
+            profileCheckpointStore: profileCheckpointStore as never,
+            genderRoutingManifestStore: manifestStore,
+            getProfilesBatchV2: profileFetcher as never,
+            env: { ANALYSIS_V2_GENDER_ROUTING_HMAC_SECRET: hmacSecret },
+        });
+        const profileContext = (
+            job: ReturnType<typeof buildAnalysisV2DagPlan>['jobs'][number],
+            state: AnalysisV2DagState,
+        ) => {
+            if (job.batch === null) throw new Error('expected a profile batch');
+            return {
+                stage: 'profile_fetch',
+                claim: {
+                    requestId: REQUEST_ID, jobKey: job.jobKey, track: 'profiles',
+                    kind: 'profile_fetch', batch: job.batch, inputHash: job.inputHash, generation: 1,
+                    reservationToken: CLAIM_TOKEN, claimToken: CLAIM_TOKEN, attemptCount: 1,
+                },
+                job,
+                state,
+                aiStagePolicyVersion: null,
+                riskPolicyVersion: null,
+            } as Parameters<ReturnType<typeof createAnalysisV2ProfileFetchExecutor>>[0];
+        };
+        const relationshipExecutor = createAnalysisV2RelationshipsExecutor({
+            requestContextStore: { load: async () => request },
+            evidenceStore: evidenceStore as never,
+            genderRoutingManifestStore: manifestStore,
+            revenueGenderRoutingAssessor: async candidates => new Map(candidates.map(candidate => [
+                candidate.candidateKey,
+                { femaleScore: 0.9, maleScore: 0.05, uncertaintyScore: 0.05, evidence: 'name_only' as const },
+            ])),
+            env: { ANALYSIS_V2_GENDER_ROUTING_HMAC_SECRET: hmacSecret },
+        });
+
+        const relationship = await relationshipExecutor(relationshipContext);
+        const selected = await manifestStore.loadSelectedUsernames({
+            requestId: REQUEST_ID,
+            relationshipCheckpointId: CHECKPOINT_ID,
+            policyVersion: 'gender-routing-v1',
+            planId: 'standard',
+        });
+        expect(selected).toHaveLength(200);
+        expect(relationship.checkpoint.manifest).toMatchObject({
+            detailedSelectedPublicCount: 200,
+            notScreenedPublicCount: 1,
+            relationshipSelectionPolicy: {
+                policyVersion: 'gender-routing-v1',
+                relationshipCheckpointId: CHECKPOINT_ID,
+                relationshipJobInputHash: INPUT_HASH,
+                planId: 'standard',
+                publicPopulationCount: 201,
+                selectedCount: 200,
+            },
+        });
+        expect(relationship.checkpoint.manifest.profileBatches.map(batch => batch.itemCount)).toEqual(
+            [30, 30, 30, 30, 30, 30, 20],
+        );
 
         const dagStateStore = pgliteDagStateStore();
-        const state = await dagStateStore.checkpointManifest({
+        await dagStateStore.checkpointManifest({
             requestId: REQUEST_ID,
             jobKey: 'track:relationships:collect',
             inputHash: INPUT_HASH,
             claimToken: CLAIM_TOKEN,
-        }, {
-            kind: 'relationships',
-            manifest: standardRelationshipSelectionCheckpoint(),
-        });
-        expect(state.relationships?.relationshipSelectionPolicy).toMatchObject({
-            planId: 'standard',
-            publicPopulationCount: 201,
-            selectedCount: 200,
-        });
-        const plan = buildAnalysisV2DagPlan(REQUEST_ID, state);
-        const profiles = plan.jobs.filter(job => job.track === 'profiles');
-        expect(profiles).toHaveLength(7);
-        expect(profiles.reduce(
-            (count, job) => count + state.relationships!.profileBatches[job.batch!]!.itemCount,
-            0,
-        )).toBe(200);
+        }, relationship.checkpoint);
+        const loadedState = await dagStateStore.load(REQUEST_ID);
+        expect(loadedState?.relationships?.relationshipSelectionPolicy).toEqual(
+            relationship.checkpoint.manifest.relationshipSelectionPolicy,
+        );
+        expect(loadedState).not.toBeNull();
+        const loadedPlan = buildAnalysisV2DagPlan(REQUEST_ID, loadedState!);
+        const profileJobs = loadedPlan.jobs.filter(job => job.track === 'profiles');
+        expect(profileJobs).toHaveLength(7);
+        expect(profileJobs.map(job => loadedState!.relationships!.profileBatches[job.batch!]!.itemCount)).toEqual(
+            [30, 30, 30, 30, 30, 30, 20],
+        );
+
+        for (const job of profileJobs) {
+            await profileExecutor(profileContext(job, loadedState!));
+        }
+        expect(profileFetcher.mock.calls.map(([usernames]) => usernames.length)).toEqual(
+            [30, 30, 30, 30, 30, 30, 20],
+        );
+        expect(profileFetcher.mock.calls.flatMap(([usernames]) => usernames)).toEqual(
+            selected.map(row => row.username),
+        );
+
+        await db!.query(
+            `UPDATE public.analysis_v2_gender_routing_manifests
+             SET status = 'invalidated', invalidated_at = pg_catalog.clock_timestamp()
+             WHERE request_id = $1`,
+            [REQUEST_ID],
+        );
+        await expect(loadSelectedUsernames('standard')).rejects.toThrow(
+            'ANALYSIS_V2_GENDER_ROUTING_MANIFEST_NOT_COMPLETE',
+        );
+        await expect(profileExecutor(profileContext(profileJobs[0]!, loadedState!))).rejects.toThrow(
+            'ANALYSIS_V2_GENDER_ROUTING_MANIFEST_PERSISTENCE_ERROR',
+        );
+        expect(profileFetcher).toHaveBeenCalledTimes(7);
     }, 30_000);
 
     it('rejects forged, invalidated, production, beta, and Plus routing markers', async () => {
