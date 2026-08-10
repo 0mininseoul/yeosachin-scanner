@@ -686,19 +686,18 @@ export function createAnalysisV2RelationshipsExecutor(
         let detailedSelectedPublicCount = manifest.detailedPublicCount;
         let notScreenedPublicCount = manifest.unscreenedPublicCount;
         if (isRevenueGenderRoutingRequest(request)) {
-            if (!dependencies.revenueGenderRoutingAssessor) {
-                throw new Error('ANALYSIS_V2_GENDER_ROUTING_ASSESSOR_MISSING');
-            }
             const publicMutualRows = staging.mutualRows
                 .filter(row => !row.isPrivate)
                 .sort((left, right) => left.mutualOrdinal - right.mutualOrdinal);
             const cap = GENDER_ROUTING_CAPS[request.planId];
-            const routingPopulation = publicMutualRows.slice(0, cap.population);
             if (
                 publicMutualRows.length !== manifest.publicCount
-                || routingPopulation.length !== Math.min(publicMutualRows.length, cap.population)
+                || publicMutualRows.length > cap.population
                 || new Set(publicMutualRows.map(row => row.mutualOrdinal)).size !== publicMutualRows.length
             ) throw new Error('ANALYSIS_V2_GENDER_ROUTING_POPULATION_DRIFT');
+            if (!dependencies.revenueGenderRoutingAssessor) {
+                throw new Error('ANALYSIS_V2_GENDER_ROUTING_ASSESSOR_MISSING');
+            }
 
             const hmacSecret = revenueGenderRoutingSecret(dependencies);
             const routed = await routeAndPersistRevenueGenderCandidates({
@@ -706,7 +705,7 @@ export function createAnalysisV2RelationshipsExecutor(
                 relationshipCheckpointId: manifest.resultHash,
                 accessMode: request.accessMode,
                 planId: request.planId,
-                candidates: routingPopulation.map(row => ({
+                candidates: publicMutualRows.map(row => ({
                     mutualOrdinal: row.mutualOrdinal,
                     candidateKey: `mutual:${row.mutualOrdinal}`,
                     profilePicUrl: row.profilePicUrl,
@@ -1434,14 +1433,13 @@ export function createAnalysisV2ProfileFetchExecutor(
             const publicMutualRows = relationshipStaging.mutualRows
                 .filter(row => !row.isPrivate)
                 .sort((left, right) => left.mutualOrdinal - right.mutualOrdinal);
-            const routingPopulation = publicMutualRows.slice(0, cap.population);
             if (
                 publicMutualRows.length !== relationship.publicCount
-                || routingPopulation.length !== Math.min(publicMutualRows.length, cap.population)
+                || publicMutualRows.length > cap.population
                 || new Set(publicMutualRows.map(row => row.mutualOrdinal)).size !== publicMutualRows.length
             ) throw new Error('ANALYSIS_V2_GENDER_ROUTING_POPULATION_DRIFT');
             const canonicalInputHmac = createGenderRoutingCanonicalInputHmac({
-                candidates: routingPopulation.map(row => ({
+                candidates: publicMutualRows.map(row => ({
                     candidateKey: `mutual:${row.mutualOrdinal}`,
                     profilePicUrl: row.profilePicUrl,
                     fullname: row.fullName,

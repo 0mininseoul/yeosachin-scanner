@@ -331,10 +331,7 @@ BEGIN
        OR v_job.lease_expires_at IS NULL
        OR v_job.lease_expires_at <= v_now
        OR v_relationship.request_id IS NULL
-       OR p_population_count IS DISTINCT FROM LEAST(
-            v_relationship.public_count,
-            CASE WHEN p_plan_id = 'basic' THEN 400 ELSE 800 END
-       ) THEN
+       OR v_relationship.public_count IS DISTINCT FROM p_population_count THEN
         RAISE EXCEPTION USING MESSAGE = 'ANALYSIS_V2_GENDER_ROUTING_MANIFEST_FENCE_MISMATCH', ERRCODE = 'P0001';
     END IF;
 
@@ -510,10 +507,7 @@ BEGIN
        OR v_job.lease_expires_at IS NULL
        OR v_job.lease_expires_at <= v_now
        OR v_relationship.request_id IS NULL
-       OR p_population_count IS DISTINCT FROM LEAST(
-            v_relationship.public_count,
-            CASE WHEN p_plan_id = 'basic' THEN 400 ELSE 800 END
-       ) THEN
+       OR v_relationship.public_count IS DISTINCT FROM p_population_count THEN
         RAISE EXCEPTION USING MESSAGE = 'ANALYSIS_V2_GENDER_ROUTING_MANIFEST_FENCE_MISMATCH', ERRCODE = 'P0001';
     END IF;
 

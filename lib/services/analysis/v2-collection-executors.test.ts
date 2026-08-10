@@ -3245,7 +3245,7 @@ describe('analysis V2 concrete collection executors', () => {
         );
     });
 
-    it('routes Standard to its durable 200-row cap and bounds a larger Basic snapshot to 400 before model work', async () => {
+    it('routes Standard to its durable 200-row cap', async () => {
         const standardRows = routingMutualRows(201);
         const standardRouting = routingManifestStore(new Map(
             standardRows.map(row => [row.mutualOrdinal, row.username])
@@ -3293,47 +3293,113 @@ describe('analysis V2 concrete collection executors', () => {
             0,
         )).toBe(200);
 
-        const overCapRows = routingMutualRows(401);
-        const overCapRouting = routingManifestStore(new Map(
-            overCapRows.map(row => [row.mutualOrdinal, row.username])
-        ));
-        const overCapAssessor = vi.fn(async (candidates: readonly { candidateKey: string }[]) => new Map(
-            candidates.map(candidate => [candidate.candidateKey, {
-                femaleScore: 0.9,
-                maleScore: 0.05,
-                uncertaintyScore: 0.05,
-                evidence: 'image_and_name' as const,
-            }])
-        ));
-        const overCapExecutor = createAnalysisV2RelationshipsExecutor({
-            requestContextStore: contextStore(requestContext({
-                accessMode: 'test_entitlement',
-                providerExecutionPolicy: authorizedProviderPolicy,
-                followersDeclaredCount: 0,
-                followingDeclaredCount: 0,
-            })),
-            evidenceStore: {
-                checkpointRelationshipSide: vi.fn(async () => ({})),
-                freezeRelationships: vi.fn(async () => ({
-                    revision: 1, resultHash, exclusionDecisionHash: 'f'.repeat(64),
-                    followersResultHash: resultHash, followingResultHash: resultHash,
-                    mutualCount: 401, publicCount: 401, privateCount: 0,
-                    detailedPublicCount: 300, unscreenedPublicCount: 101,
+    });
+
+    it('fails closed for Basic 401 and Standard 801 before routing or provider work', async () => {
+        for (const testCase of [
+            { planId: 'basic' as const, population: 401, detailedCap: 300, injectAssessor: false },
+            { planId: 'standard' as const, population: 801, detailedCap: 600, injectAssessor: true },
+        ] as const) {
+            const publicRows = routingMutualRows(testCase.population);
+            const assessor = vi.fn();
+            const getFollowers = vi.fn();
+            const getFollowing = vi.fn();
+            const manifestStore = {
+                begin: vi.fn(),
+                publish: vi.fn(),
+                loadSelected: vi.fn(),
+                loadSelectedUsernames: vi.fn(),
+            } as unknown as AnalysisV2GenderRoutingManifestStore;
+            const executor = createAnalysisV2RelationshipsExecutor({
+                requestContextStore: contextStore(requestContext({
+                    accessMode: 'test_entitlement',
+                    providerExecutionPolicy: authorizedProviderPolicy,
+                    planId: testCase.planId,
+                    detailedMutualLimit: testCase.detailedCap,
+                    followersDeclaredCount: 0,
+                    followingDeclaredCount: 0,
                 })),
-                loadRelationshipStaging: vi.fn(async () => ({
-                    excludedUsername: 'girlfriend', detailedPublicUsernames: [],
-                    privateMutualUsernames: [], mutualRows: overCapRows,
+                evidenceStore: {
+                    checkpointRelationshipSide: vi.fn(async () => ({})),
+                    freezeRelationships: vi.fn(async () => ({
+                        revision: 1, resultHash, exclusionDecisionHash: 'f'.repeat(64),
+                        followersResultHash: resultHash, followingResultHash: resultHash,
+                        mutualCount: testCase.population, publicCount: testCase.population,
+                        privateCount: 0, detailedPublicCount: testCase.detailedCap,
+                        unscreenedPublicCount: testCase.population - testCase.detailedCap,
+                    })),
+                    loadRelationshipStaging: vi.fn(async () => ({
+                        excludedUsername: 'girlfriend', detailedPublicUsernames: [],
+                        privateMutualUsernames: [], mutualRows: publicRows,
+                    })),
+                } as unknown as AnalysisV2EvidenceStore,
+                genderRoutingManifestStore: manifestStore,
+                revenueGenderRoutingAssessor: testCase.injectAssessor ? assessor : undefined,
+                getFollowers: getFollowers as unknown as typeof import('@/lib/services/instagram/scraper').getFollowers,
+                getFollowing: getFollowing as unknown as typeof import('@/lib/services/instagram/scraper').getFollowing,
+                env: { ANALYSIS_V2_GENDER_ROUTING_HMAC_SECRET: 'routing-test-secret-at-least-thirty-two-characters' },
+            });
+
+            await expect(executor(stageContext(
+                'relationships',
+                state({ planId: testCase.planId }),
+            ))).rejects.toThrow('ANALYSIS_V2_GENDER_ROUTING_POPULATION_DRIFT');
+            expect(assessor).not.toHaveBeenCalled();
+            expect(manifestStore.begin).not.toHaveBeenCalled();
+            expect(manifestStore.publish).not.toHaveBeenCalled();
+            expect(manifestStore.loadSelected).not.toHaveBeenCalled();
+            expect(manifestStore.loadSelectedUsernames).not.toHaveBeenCalled();
+            expect(getFollowers).not.toHaveBeenCalled();
+            expect(getFollowing).not.toHaveBeenCalled();
+        }
+    });
+
+    it('fails closed at the paid profile boundary for Basic 401 and Standard 801', async () => {
+        for (const testCase of [
+            { planId: 'basic' as const, population: 401, detailedCap: 300 },
+            { planId: 'standard' as const, population: 801, detailedCap: 600 },
+        ] as const) {
+            const selectedLoader = vi.fn();
+            const profileFetcher = vi.fn();
+            const executor = createAnalysisV2ProfileFetchExecutor({
+                requestContextStore: contextStore(requestContext({
+                    accessMode: 'test_entitlement',
+                    providerExecutionPolicy: authorizedProviderPolicy,
+                    planId: testCase.planId,
+                    detailedMutualLimit: testCase.detailedCap,
                 })),
-            } as unknown as AnalysisV2EvidenceStore,
-            genderRoutingManifestStore: overCapRouting.store,
-            revenueGenderRoutingAssessor: overCapAssessor,
-            env: { ANALYSIS_V2_GENDER_ROUTING_HMAC_SECRET: 'routing-test-secret-at-least-thirty-two-characters' },
-        });
-        const capped = await overCapExecutor(stageContext('relationships', state()));
-        expect(overCapAssessor).toHaveBeenCalledWith(expect.any(Array), 1);
-        expect(overCapAssessor.mock.calls[0]?.[0]).toHaveLength(400);
-        expect(capped.checkpoint.manifest.detailedSelectedPublicCount).toBe(100);
-        expect(capped.checkpoint.manifest.notScreenedPublicCount).toBe(301);
+                evidenceStore: {
+                    loadRelationshipStaging: vi.fn(async () => ({
+                        excludedUsername: 'girlfriend', detailedPublicUsernames: [],
+                        privateMutualUsernames: [],
+                        mutualRows: routingMutualRows(testCase.population),
+                    })),
+                } as unknown as AnalysisV2EvidenceStore,
+                profileCheckpointStore: { load: vi.fn() } as unknown as AnalysisV2ProfileFetchCheckpointStore,
+                genderRoutingManifestStore: {
+                    loadSelectedUsernames: selectedLoader,
+                } as unknown as AnalysisV2GenderRoutingManifestStore,
+                getProfilesBatchV2: profileFetcher as unknown as typeof import('@/lib/services/instagram/scraper').getProfilesBatchV2,
+                env: { ANALYSIS_V2_GENDER_ROUTING_HMAC_SECRET: 'routing-test-secret-at-least-thirty-two-characters' },
+            });
+
+            await expect(executor(stageContext('profile_fetch', state({
+                planId: testCase.planId,
+                relationships: {
+                    revision: 1,
+                    resultHash,
+                    detectedMutualCount: testCase.population,
+                    publicCount: testCase.population,
+                    privateCount: 0,
+                    detailedSelectedPublicCount: testCase.detailedCap,
+                    notScreenedPublicCount: testCase.population - testCase.detailedCap,
+                    profileBatches: [],
+                    privateNameBatches: [],
+                },
+            }), 0))).rejects.toThrow('ANALYSIS_V2_GENDER_ROUTING_POPULATION_DRIFT');
+            expect(selectedLoader).not.toHaveBeenCalled();
+            expect(profileFetcher).not.toHaveBeenCalled();
+        }
     });
 
     it('leaves production, Plus, and beta free-pool relationship topology on the legacy path', async () => {
