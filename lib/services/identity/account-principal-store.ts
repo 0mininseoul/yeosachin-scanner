@@ -9,6 +9,16 @@ const trafficClassSchema = z.enum([
     'internal_tester',
 ]);
 const lifecycleSchema = z.enum(['active', 'retired']);
+const e2eTestRunnerPlanSchema = z.enum(['basic', 'standard']);
+
+/**
+ * Auth app_metadata is only mutable by trusted Auth administration. This v1
+ * field identifies the dedicated E2E runner; the database principal remains
+ * the separate, durable admission authority.
+ */
+export const E2E_TEST_RUNNER_APP_METADATA_KEY = 'analysis_test_runner_v1';
+export type E2eTestRunnerPlan = z.infer<typeof e2eTestRunnerPlanSchema>;
+export type E2eTestEntitlementPlan = E2eTestRunnerPlan | 'plus';
 
 const socialProfileSchema = z.object({
     name: z.string().min(1).max(255).optional(),
@@ -313,4 +323,38 @@ export async function requireActiveE2eTestAccount(userId: string) {
         throw new AccountPrincipalAdmissionError();
     }
     return classification;
+}
+
+/**
+ * Test capability requires two independent, server-verified facts:
+ * 1. the service-only principal classification is active E2E traffic; and
+ * 2. Auth app_metadata names one of the dedicated Basic/Standard runners.
+ *
+ * The signed entitlement remains the cryptographic source of the preflight,
+ * user, and selected-plan binding. This guard adds the runner-to-plan binding
+ * before either route persists or consumes that capability.
+ */
+export async function requireActiveE2eTestRunner(
+    user: {
+        id: string;
+        app_metadata?: Record<string, unknown> | null;
+    },
+    expectedPlan?: E2eTestEntitlementPlan,
+) {
+    const classification = await requireActiveE2eTestAccount(user.id);
+    const runnerPlan = e2eTestRunnerPlanSchema.safeParse(
+        user.app_metadata?.[E2E_TEST_RUNNER_APP_METADATA_KEY],
+    );
+
+    if (
+        !runnerPlan.success
+        || (expectedPlan !== undefined && runnerPlan.data !== expectedPlan)
+    ) {
+        throw new AccountPrincipalAdmissionError();
+    }
+
+    return Object.freeze({
+        ...classification,
+        runnerPlan: runnerPlan.data,
+    });
 }

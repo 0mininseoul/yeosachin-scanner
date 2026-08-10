@@ -11,6 +11,7 @@ const mocks = vi.hoisted(() => ({
     observeRoute: vi.fn(),
     rpc: vi.fn(),
     requireActiveE2eTestAccount: vi.fn(),
+    requireActiveE2eTestRunner: vi.fn(),
 }));
 
 vi.mock('@/lib/supabase/admin', () => ({
@@ -36,6 +37,7 @@ vi.mock('@/lib/observability/server', () => ({
 vi.mock('@/lib/services/identity/account-principal-store', async importOriginal => ({
     ...(await importOriginal<typeof import('@/lib/services/identity/account-principal-store')>()),
     requireActiveE2eTestAccount: mocks.requireActiveE2eTestAccount,
+    requireActiveE2eTestRunner: mocks.requireActiveE2eTestRunner,
 }));
 
 import { POST } from '@/app/api/analysis/preflight/[preflightId]/entitle/route';
@@ -223,7 +225,15 @@ describe('analysis V2 durable test-entitlement route', () => {
         mocks.createServerClient.mockResolvedValue({
             auth: {
                 getUser: vi.fn().mockResolvedValue({
-                    data: { user: { id: USER_ID } },
+                    data: {
+                        user: {
+                            id: USER_ID,
+                            app_metadata: {
+                                provider: 'google',
+                                analysis_test_runner_v1: 'standard',
+                            },
+                        },
+                    },
                     error: null,
                 }),
             },
@@ -234,6 +244,14 @@ describe('analysis V2 durable test-entitlement route', () => {
             trafficClass: 'e2e_test',
             lifecycle: 'active',
             classificationVersion: 'account-ledger-v1',
+        });
+        mocks.requireActiveE2eTestRunner.mockResolvedValue({
+            userId: USER_ID,
+            accountClass: 'e2e_test',
+            trafficClass: 'e2e_test',
+            lifecycle: 'active',
+            classificationVersion: 'account-ledger-v1',
+            runnerPlan: 'standard',
         });
         installPreflightQuery();
         mocks.rpc.mockImplementation(async (
@@ -328,7 +346,7 @@ describe('analysis V2 durable test-entitlement route', () => {
     });
 
     it('rejects a non-E2E or retired identity before it reads or consumes an entitlement', async () => {
-        mocks.requireActiveE2eTestAccount.mockRejectedValue(
+        mocks.requireActiveE2eTestRunner.mockRejectedValue(
             new AccountPrincipalAdmissionError(),
         );
 
@@ -339,7 +357,54 @@ describe('analysis V2 durable test-entitlement route', () => {
             error: '이 계정은 현재 사용할 수 없습니다.',
             code: 'ACCOUNT_ADMISSION_DENIED',
         });
-        expect(mocks.requireActiveE2eTestAccount).toHaveBeenCalledWith(USER_ID);
+        expect(mocks.requireActiveE2eTestRunner).toHaveBeenCalledWith(
+            expect.objectContaining({ id: USER_ID }),
+            'standard',
+        );
+        expect(mocks.from).not.toHaveBeenCalled();
+        expect(mocks.rpc).not.toHaveBeenCalled();
+        expect(mocks.dispatchAdmission).not.toHaveBeenCalled();
+        expect(mocks.dispatchJob).not.toHaveBeenCalled();
+    });
+
+    it('rejects a Basic runner attempting to consume a signed Standard entitlement before any read', async () => {
+        mocks.requireActiveE2eTestRunner.mockRejectedValue(
+            new AccountPrincipalAdmissionError(),
+        );
+        mocks.createServerClient.mockResolvedValue({
+            auth: {
+                getUser: vi.fn().mockResolvedValue({
+                    data: {
+                        user: {
+                            id: USER_ID,
+                            app_metadata: {
+                                provider: 'google',
+                                analysis_test_runner_v1: 'basic',
+                            },
+                        },
+                    },
+                    error: null,
+                }),
+            },
+        });
+
+        const response = await POST(request(), context());
+
+        expect(response.status).toBe(403);
+        await expect(response.json()).resolves.toEqual({
+            error: '이 계정은 현재 사용할 수 없습니다.',
+            code: 'ACCOUNT_ADMISSION_DENIED',
+        });
+        expect(mocks.requireActiveE2eTestRunner).toHaveBeenCalledWith(
+            expect.objectContaining({
+                id: USER_ID,
+                app_metadata: {
+                    provider: 'google',
+                    analysis_test_runner_v1: 'basic',
+                },
+            }),
+            'standard',
+        );
         expect(mocks.from).not.toHaveBeenCalled();
         expect(mocks.rpc).not.toHaveBeenCalled();
         expect(mocks.dispatchAdmission).not.toHaveBeenCalled();
