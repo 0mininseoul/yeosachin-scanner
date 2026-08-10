@@ -43,6 +43,16 @@ ALTER TABLE public.users
     ADD CONSTRAINT users_lifecycle_check CHECK (
         lifecycle IN ('active', 'retired')
     ) NOT VALID,
+    ADD CONSTRAINT users_classification_pair_check CHECK (
+        (
+            account_class = 'production'
+            AND traffic_class IN ('external', 'operator')
+        )
+        OR (
+            account_class = 'e2e_test'
+            AND traffic_class IN ('e2e_test', 'internal_tester')
+        )
+    ) NOT VALID,
     ADD CONSTRAINT users_classification_version_check CHECK (
         classification_version IS NULL
         OR classification_version ~ '^[a-z0-9._-]{1,64}$'
@@ -54,8 +64,23 @@ ALTER TABLE public.users
 ALTER TABLE public.users VALIDATE CONSTRAINT users_account_class_check;
 ALTER TABLE public.users VALIDATE CONSTRAINT users_traffic_class_check;
 ALTER TABLE public.users VALIDATE CONSTRAINT users_lifecycle_check;
+ALTER TABLE public.users VALIDATE CONSTRAINT users_classification_pair_check;
 ALTER TABLE public.users VALIDATE CONSTRAINT users_classification_version_check;
 ALTER TABLE public.users VALIDATE CONSTRAINT users_paid_ever_shape_check;
+
+-- Preserve NULL for the pre-existing rows until the approved classification
+-- command reviews them, while keeping legacy user INSERT functions on the
+-- production/external runtime path after this bridge is deployed.
+ALTER TABLE public.users
+    ALTER COLUMN classification_version SET DEFAULT 'runtime_default_v1';
+
+-- Phase A/B keeps the physical relation named users, but the new account
+-- fields are already part of the service-owned ledger. Do not leave the
+-- legacy authenticated self-select policy as a second client read path.
+REVOKE ALL ON TABLE public.users
+    FROM PUBLIC, anon, authenticated;
+GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE public.users
+    TO service_role;
 
 CREATE INDEX users_account_surface_idx
     ON public.users(account_class, lifecycle, created_at DESC);
@@ -247,7 +272,8 @@ LANGUAGE sql
 IMMUTABLE
 SET search_path = ''
 AS $$
-    SELECT pg_catalog.jsonb_typeof(p_patch) = 'object'
+    SELECT p_patch IS NOT NULL
+       AND pg_catalog.jsonb_typeof(p_patch) = 'object'
        AND NOT EXISTS (
             SELECT 1
             FROM pg_catalog.jsonb_each(p_patch) AS patch_item(key, value)
@@ -384,6 +410,7 @@ BEGIN
        OR p_email IS NULL
        OR pg_catalog.btrim(p_email) = ''
        OR pg_catalog.char_length(p_email) > 255
+       OR p_provider IS NULL
        OR p_provider NOT IN ('google', 'kakao')
        OR NOT public.account_profile_patch_valid(p_profile, FALSE) THEN
         RAISE EXCEPTION USING
@@ -660,10 +687,22 @@ SET search_path = ''
 AS $$
 DECLARE
     v_state TEXT;
+    v_account_id UUID;
     v_evidence RECORD;
     v_existing public.account_paid_evidence%ROWTYPE;
     v_counts_as_external BOOLEAN;
 BEGIN
+    SELECT paid_order.user_id
+    INTO v_account_id
+    FROM public.earlybird_orders AS paid_order
+    WHERE paid_order.id = p_order_id;
+
+    IF FOUND THEN
+        PERFORM pg_catalog.pg_advisory_xact_lock(
+            pg_catalog.hashtextextended(v_account_id::TEXT, 0)
+        );
+    END IF;
+
     SELECT rollout.paid_ever_state
     INTO v_state
     FROM public.account_ledger_rollout_state AS rollout
@@ -791,10 +830,14 @@ DECLARE
     v_reason_code TEXT;
     v_updated_count INTEGER := 0;
     v_event RECORD;
+    v_activation_replay BOOLEAN := FALSE;
+    v_rollout_state TEXT;
+    v_rollout_command_version TEXT;
 BEGIN
     IF p_command_version IS NULL
        OR p_command_version !~ '^[a-z0-9._-]{1,64}$'
-       OR pg_catalog.jsonb_typeof(p_assignments) <> 'array'
+       OR p_assignments IS NULL
+       OR pg_catalog.jsonb_typeof(p_assignments) IS DISTINCT FROM 'array'
        OR pg_catalog.jsonb_array_length(p_assignments) NOT BETWEEN 1 AND 100
        OR (
             SELECT pg_catalog.count(*)
@@ -809,6 +852,32 @@ BEGIN
         RAISE EXCEPTION USING
             MESSAGE = 'ACCOUNT_CLASSIFICATION_INPUT_INVALID',
             ERRCODE = 'P0001';
+    END IF;
+
+    IF p_activate_paid_ever IS TRUE THEN
+        SELECT rollout.paid_ever_state,
+            rollout.classification_command_version
+        INTO v_rollout_state, v_rollout_command_version
+        FROM public.account_ledger_rollout_state AS rollout
+        WHERE rollout.singleton IS TRUE;
+
+        IF v_rollout_state = 'active'
+           AND v_rollout_command_version IS DISTINCT FROM p_command_version THEN
+            RAISE EXCEPTION USING
+                MESSAGE = 'ACCOUNT_PAID_EVER_ACTIVATION_CONFLICT',
+                ERRCODE = 'P0001';
+        END IF;
+    ELSE
+        SELECT rollout.paid_ever_state
+        INTO v_rollout_state
+        FROM public.account_ledger_rollout_state AS rollout
+        WHERE rollout.singleton IS TRUE;
+
+        IF v_rollout_state = 'active' THEN
+            RAISE EXCEPTION USING
+                MESSAGE = 'ACCOUNT_CLASSIFICATION_ROLLOUT_ACTIVE',
+                ERRCODE = 'P0001';
+        END IF;
     END IF;
 
     FOR v_assignment IN
@@ -837,15 +906,31 @@ BEGIN
                 MESSAGE = 'ACCOUNT_CLASSIFICATION_INPUT_INVALID',
                 ERRCODE = 'P0001';
         END;
+        IF v_account_id IS NULL THEN
+            RAISE EXCEPTION USING
+                MESSAGE = 'ACCOUNT_CLASSIFICATION_INPUT_INVALID',
+                ERRCODE = 'P0001';
+        END IF;
         v_account_class := v_assignment ->> 'account_class';
         v_traffic_class := v_assignment ->> 'traffic_class';
         v_lifecycle := v_assignment ->> 'lifecycle';
         v_reason_code := v_assignment ->> 'reason_code';
 
-        IF v_account_class NOT IN ('production', 'e2e_test')
+        IF v_account_class IS NULL
+           OR v_account_class NOT IN ('production', 'e2e_test')
+           OR v_traffic_class IS NULL
            OR v_traffic_class NOT IN (
                 'external', 'operator', 'e2e_test', 'internal_tester'
            )
+           OR (
+                v_account_class = 'production'
+                AND v_traffic_class NOT IN ('external', 'operator')
+           )
+           OR (
+                v_account_class = 'e2e_test'
+                AND v_traffic_class NOT IN ('e2e_test', 'internal_tester')
+           )
+           OR v_lifecycle IS NULL
            OR v_lifecycle NOT IN ('active', 'retired')
            OR v_reason_code IS NULL
            OR v_reason_code !~ '^[A-Z0-9_]{1,64}$' THEN
@@ -853,6 +938,10 @@ BEGIN
                 MESSAGE = 'ACCOUNT_CLASSIFICATION_INPUT_INVALID',
                 ERRCODE = 'P0001';
         END IF;
+
+        PERFORM pg_catalog.pg_advisory_xact_lock(
+            pg_catalog.hashtextextended(v_account_id::TEXT, 0)
+        );
 
         SELECT account.*
         INTO v_account
@@ -865,56 +954,113 @@ BEGIN
                 ERRCODE = 'P0001';
         END IF;
 
-        INSERT INTO public.account_classification_audit (
-            account_id, command_version, reason_code,
-            previous_account_class, previous_traffic_class,
-            previous_lifecycle, next_account_class, next_traffic_class,
-            next_lifecycle
-        ) VALUES (
-            v_account_id, p_command_version, v_reason_code,
-            v_account.account_class, v_account.traffic_class,
-            v_account.lifecycle, v_account_class, v_traffic_class,
-            v_lifecycle
-        );
+        -- The first rollout read is only an early rejection. A pending
+        -- command can have waited for this account lock while activation
+        -- completed, so recheck in the account -> rollout lock order before
+        -- writing the classification.
+        IF p_activate_paid_ever IS NOT TRUE THEN
+            SELECT rollout.paid_ever_state
+            INTO v_rollout_state
+            FROM public.account_ledger_rollout_state AS rollout
+            WHERE rollout.singleton IS TRUE
+            FOR SHARE;
 
-        UPDATE public.users AS account
-        SET account_class = v_account_class,
-            traffic_class = v_traffic_class,
-            lifecycle = v_lifecycle,
-            classification_version = p_command_version
-        WHERE account.id = v_account_id;
-        v_updated_count := v_updated_count + 1;
+            IF v_rollout_state = 'active' THEN
+                RAISE EXCEPTION USING
+                    MESSAGE = 'ACCOUNT_CLASSIFICATION_ROLLOUT_ACTIVE',
+                    ERRCODE = 'P0001';
+            END IF;
+        END IF;
+
+        IF p_activate_paid_ever IS TRUE THEN
+            SELECT rollout.paid_ever_state,
+                rollout.classification_command_version
+            INTO v_rollout_state, v_rollout_command_version
+            FROM public.account_ledger_rollout_state AS rollout
+            WHERE rollout.singleton IS TRUE;
+
+            IF v_rollout_state = 'active' THEN
+                IF v_rollout_command_version IS DISTINCT FROM p_command_version THEN
+                    RAISE EXCEPTION USING
+                        MESSAGE = 'ACCOUNT_PAID_EVER_ACTIVATION_CONFLICT',
+                        ERRCODE = 'P0001';
+                END IF;
+                IF v_account.classification_version IS DISTINCT FROM p_command_version
+                   OR v_account.account_class IS DISTINCT FROM v_account_class
+                   OR v_account.traffic_class IS DISTINCT FROM v_traffic_class
+                   OR v_account.lifecycle IS DISTINCT FROM v_lifecycle
+                   OR NOT EXISTS (
+                        SELECT 1
+                        FROM public.account_classification_audit AS audit
+                        WHERE audit.account_id = v_account_id
+                          AND audit.command_version = p_command_version
+                          AND audit.reason_code = v_reason_code
+                          AND audit.next_account_class = v_account_class
+                          AND audit.next_traffic_class = v_traffic_class
+                          AND audit.next_lifecycle = v_lifecycle
+                   ) THEN
+                    RAISE EXCEPTION USING
+                        MESSAGE = 'ACCOUNT_PAID_EVER_ACTIVATION_CONFLICT',
+                        ERRCODE = 'P0001';
+                END IF;
+                v_activation_replay := TRUE;
+            END IF;
+        END IF;
+
+        IF NOT v_activation_replay THEN
+            INSERT INTO public.account_classification_audit (
+                account_id, command_version, reason_code,
+                previous_account_class, previous_traffic_class,
+                previous_lifecycle, next_account_class, next_traffic_class,
+                next_lifecycle
+            ) VALUES (
+                v_account_id, p_command_version, v_reason_code,
+                v_account.account_class, v_account.traffic_class,
+                v_account.lifecycle, v_account_class, v_traffic_class,
+                v_lifecycle
+            );
+
+            UPDATE public.users AS account
+            SET account_class = v_account_class,
+                traffic_class = v_traffic_class,
+                lifecycle = v_lifecycle,
+                classification_version = p_command_version
+            WHERE account.id = v_account_id;
+            v_updated_count := v_updated_count + 1;
+        END IF;
     END LOOP;
 
     IF p_activate_paid_ever THEN
-        IF EXISTS (
-            SELECT 1
-            FROM public.users AS account
-            WHERE account.classification_version IS NULL
-        ) THEN
-            RAISE EXCEPTION USING
-                MESSAGE = 'ACCOUNT_CLASSIFICATION_INCOMPLETE',
-                ERRCODE = 'P0001';
-        END IF;
+        IF NOT v_activation_replay THEN
+            IF EXISTS (
+                SELECT 1
+                FROM public.users AS account
+                WHERE account.classification_version IS NULL
+            ) THEN
+                RAISE EXCEPTION USING
+                    MESSAGE = 'ACCOUNT_CLASSIFICATION_INCOMPLETE',
+                    ERRCODE = 'P0001';
+            END IF;
 
-        UPDATE public.account_ledger_rollout_state AS rollout
-        SET paid_ever_state = 'active',
-            classification_command_version = p_command_version,
-            classification_completed_at = pg_catalog.clock_timestamp(),
-            updated_at = pg_catalog.clock_timestamp()
-        WHERE rollout.singleton IS TRUE
-          AND rollout.paid_ever_state = 'pending';
-
-        IF NOT FOUND AND NOT EXISTS (
-            SELECT 1
-            FROM public.account_ledger_rollout_state AS rollout
+            UPDATE public.account_ledger_rollout_state AS rollout
+            SET paid_ever_state = 'active',
+                classification_command_version = p_command_version,
+                classification_completed_at = pg_catalog.clock_timestamp(),
+                updated_at = pg_catalog.clock_timestamp()
             WHERE rollout.singleton IS TRUE
-              AND rollout.paid_ever_state = 'active'
-              AND rollout.classification_command_version = p_command_version
-        ) THEN
-            RAISE EXCEPTION USING
-                MESSAGE = 'ACCOUNT_PAID_EVER_ACTIVATION_CONFLICT',
-                ERRCODE = 'P0001';
+              AND rollout.paid_ever_state = 'pending';
+
+            IF NOT FOUND AND NOT EXISTS (
+                SELECT 1
+                FROM public.account_ledger_rollout_state AS rollout
+                WHERE rollout.singleton IS TRUE
+                  AND rollout.paid_ever_state = 'active'
+                  AND rollout.classification_command_version = p_command_version
+            ) THEN
+                RAISE EXCEPTION USING
+                    MESSAGE = 'ACCOUNT_PAID_EVER_ACTIVATION_CONFLICT',
+                    ERRCODE = 'P0001';
+            END IF;
         END IF;
 
         FOR v_event IN
@@ -1206,3 +1352,87 @@ GRANT EXECUTE ON FUNCTION public.finalize_earlybird_groble_payment(
     TEXT, TEXT, TEXT, TIMESTAMP WITH TIME ZONE, TEXT, TEXT, TEXT, INTEGER,
     TIMESTAMP WITH TIME ZONE
 ) TO service_role;
+
+-- Owner history is an authenticated RPC used directly by /mypage. Keep the
+-- lifecycle boundary in the database as well as in the page guard so a
+-- retired session cannot bypass admission by calling the RPC directly.
+CREATE OR REPLACE FUNCTION public.load_analysis_owner_history_v1()
+RETURNS JSONB
+LANGUAGE plpgsql
+STABLE
+SECURITY DEFINER
+SET search_path = ''
+AS $$
+DECLARE
+    v_user_id UUID := auth.uid();
+    v_lifecycle TEXT;
+    v_items JSONB;
+BEGIN
+    IF v_user_id IS NULL THEN
+        RAISE EXCEPTION USING
+            MESSAGE = 'ANALYSIS_OWNER_HISTORY_AUTH_REQUIRED',
+            ERRCODE = '42501';
+    END IF;
+
+    SELECT account.lifecycle
+    INTO v_lifecycle
+    FROM public.users AS account
+    WHERE account.id = v_user_id;
+
+    IF NOT FOUND OR v_lifecycle <> 'active' THEN
+        RAISE EXCEPTION USING
+            MESSAGE = 'ANALYSIS_OWNER_HISTORY_ACCOUNT_RETIRED',
+            ERRCODE = 'P0001';
+    END IF;
+
+    SELECT COALESCE(
+        pg_catalog.jsonb_agg(
+            pg_catalog.jsonb_build_object(
+                'id', analysis_request.id,
+                'targetInstagramId', CASE
+                    WHEN analysis_request.pipeline_version = 'v2'
+                         AND analysis_request.status = 'completed'
+                        THEN result_summary.target_instagram_id
+                    WHEN analysis_request.pipeline_version = 'v2'
+                         AND analysis_request.target_instagram_id LIKE 'retained.%'
+                        THEN NULL
+                    ELSE analysis_request.target_instagram_id
+                END,
+                'status', analysis_request.status,
+                'createdAt', analysis_request.created_at,
+                'planType', analysis_request.plan_type,
+                'pipelineVersion', CASE
+                    WHEN analysis_request.pipeline_version = 'v2' THEN 'v2'
+                    ELSE 'v1'
+                END,
+                'publicFemaleCount', CASE
+                    WHEN analysis_request.pipeline_version = 'v2'
+                         AND analysis_request.status = 'completed'
+                        THEN result_summary.female_count
+                    ELSE NULL
+                END
+            )
+            ORDER BY analysis_request.created_at DESC NULLS LAST, analysis_request.id DESC
+        ),
+        '[]'::JSONB
+    )
+    INTO v_items
+    FROM public.analysis_requests AS analysis_request
+    LEFT JOIN public.analysis_v2_result_summaries AS result_summary
+      ON result_summary.request_id = analysis_request.id
+     AND analysis_request.pipeline_version = 'v2'
+     AND analysis_request.status = 'completed'
+    WHERE analysis_request.user_id = v_user_id
+      AND analysis_request.status IN ('pending', 'processing', 'completed');
+
+    RETURN pg_catalog.jsonb_build_object(
+        'schemaVersion', 1,
+        'items', v_items
+    );
+END;
+$$;
+
+REVOKE ALL ON FUNCTION public.load_analysis_owner_history_v1()
+    FROM PUBLIC, anon, authenticated, service_role;
+GRANT EXECUTE ON FUNCTION public.load_analysis_owner_history_v1()
+    TO authenticated;

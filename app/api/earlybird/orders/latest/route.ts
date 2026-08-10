@@ -4,6 +4,10 @@ import {
     EarlybirdOrderLookupError,
     loadLatestEarlybirdOrder,
 } from '@/lib/services/earlybird/order-status';
+import {
+    AccountPrincipalAdmissionError,
+    requireActiveAccountClassification,
+} from '@/lib/services/identity/account-principal-store';
 
 function response(status: number, body: Record<string, unknown>): NextResponse {
     return NextResponse.json(body, {
@@ -20,6 +24,21 @@ export async function GET(request: Request): Promise<NextResponse> {
     const { data: { user }, error: authError } = await supabase.auth.getUser();
     if (authError || !user) {
         return response(401, { code: 'UNAUTHORIZED', error: '로그인이 필요합니다.' });
+    }
+
+    try {
+        await requireActiveAccountClassification(user.id);
+    } catch (error) {
+        if (error instanceof AccountPrincipalAdmissionError) {
+            return response(403, {
+                code: error.code,
+                error: '이 계정은 현재 사용할 수 없습니다.',
+            });
+        }
+        return response(503, {
+            code: 'ORDER_LOOKUP_FAILED',
+            error: '구매 상태를 불러오지 못했습니다.',
+        });
     }
 
     const requestedPlan = new URL(request.url).searchParams.get('plan');

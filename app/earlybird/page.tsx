@@ -6,6 +6,7 @@ import { NOINDEX_METADATA } from '@/lib/services/seo/discovery';
 import { createClient } from '@/lib/supabase/server';
 import { loadLatestEarlybirdOrder } from '@/lib/services/earlybird/order-status';
 import { EarlybirdStatus } from './earlybird-status';
+import { requireActiveAccountSession } from '@/lib/services/identity/account-principal-store';
 
 export const dynamic = 'force-dynamic';
 
@@ -22,6 +23,12 @@ export default async function EarlybirdPage({
     const supabase = await createClient();
     const { data: { user }, error } = await supabase.auth.getUser();
     if (error || !user) redirect('/login?redirectTo=%2Fearlybird');
+
+    try {
+        await requireActiveAccountSession(user);
+    } catch {
+        redirect('/login?error=account_unavailable');
+    }
 
     const params = await searchParams;
     const requestedPlan = params.plan;

@@ -15,6 +15,7 @@ import {
     loadAccountClassification,
     loadAccountPrincipal,
     requireActiveAccountClassification,
+    requireActiveAccountSession,
     requireActiveE2eTestAccount,
     upsertKakaoAccountProfile,
 } from './account-principal-store';
@@ -201,6 +202,61 @@ describe('account principal RPC store', () => {
             name: 'AccountPrincipalAdmissionError',
             code: 'ACCOUNT_ADMISSION_DENIED',
         });
+    });
+
+    it.each(['google', 'kakao'] as const)(
+        'bootstraps a missing %s OAuth principal before admitting the first session',
+        async provider => {
+            mocks.rpc
+                .mockResolvedValueOnce({ data: [], error: null })
+                .mockResolvedValueOnce({ data: [principalRow], error: null })
+                .mockResolvedValueOnce({
+                    data: [{
+                        id: USER_ID,
+                        account_class: 'production',
+                        traffic_class: 'external',
+                        lifecycle: 'active',
+                        classification_version: 'runtime_default_v1',
+                    }],
+                    error: null,
+                });
+
+            await expect(requireActiveAccountSession({
+                id: USER_ID,
+                email: 'first-login@example.com',
+                app_metadata: { provider },
+            })).resolves.toMatchObject({
+                userId: USER_ID,
+                accountClass: 'production',
+                trafficClass: 'external',
+                lifecycle: 'active',
+            });
+
+            expect(mocks.rpc).toHaveBeenNthCalledWith(
+                2,
+                'ensure_account_principal_v1',
+                {
+                    p_user_id: USER_ID,
+                    p_email: 'first-login@example.com',
+                    p_provider: provider,
+                    p_profile: {},
+                },
+            );
+        },
+    );
+
+    it('does not infer a production principal when first-session provider metadata is not approved', async () => {
+        mocks.rpc.mockResolvedValueOnce({ data: [], error: null });
+
+        await expect(requireActiveAccountSession({
+            id: USER_ID,
+            email: 'first-login@example.com',
+            app_metadata: { provider: 'unknown-provider' },
+        })).rejects.toMatchObject({
+            name: 'AccountPrincipalAdmissionError',
+            code: 'ACCOUNT_ADMISSION_DENIED',
+        });
+        expect(mocks.rpc).toHaveBeenCalledTimes(1);
     });
 
     it('admits test capability only for an active E2E principal', async () => {

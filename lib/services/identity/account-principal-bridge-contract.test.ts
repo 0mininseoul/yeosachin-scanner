@@ -25,6 +25,12 @@ describe('account principal additive migration contract', () => {
             /traffic_class IN\s*\(\s*'external',\s*'operator',\s*'e2e_test',\s*'internal_tester'\s*\)/,
         );
         expect(migration).toMatch(/lifecycle IN \('active', 'retired'\)/);
+        expect(migration).toMatch(
+            /REVOKE ALL ON TABLE public\.users\s+FROM PUBLIC, anon, authenticated/,
+        );
+        expect(migration).toMatch(
+            /GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE public\.users\s+TO service_role/,
+        );
         expect(migration).not.toMatch(/ALTER TABLE public\.users RENAME TO account_principals/i);
         expect(migration).not.toMatch(/CREATE (?:OR REPLACE )?VIEW public\.users/i);
     });
@@ -74,6 +80,61 @@ describe('account principal additive migration contract', () => {
         expect(calls.length).toBeGreaterThanOrEqual(4);
         expect(migration).toMatch(/CREATE OR REPLACE FUNCTION public\.finalize_earlybird_groble_payment_by_reference/);
         expect(migration.match(/CREATE OR REPLACE FUNCTION public\.finalize_earlybird_groble_payment\(/g)).toHaveLength(2);
+    });
+
+    it('takes each classification account advisory lock before its row lock', () => {
+        const start = migration.indexOf(
+            'CREATE OR REPLACE FUNCTION public.classify_account_principals_v1',
+        );
+        const end = migration.indexOf('$$;', start);
+        const body = migration.slice(start, end);
+        const advisoryLock = body.indexOf('pg_advisory_xact_lock');
+        const rowLock = body.indexOf('FOR UPDATE;');
+
+        expect(advisoryLock).toBeGreaterThanOrEqual(0);
+        expect(advisoryLock).toBeLessThan(rowLock);
+        expect(body).toContain(
+            "hashtextextended(v_account_id::TEXT, 0)",
+        );
+    });
+
+    it('takes the paid-ever account advisory lock before the rollout share lock', () => {
+        const start = migration.indexOf(
+            'CREATE OR REPLACE FUNCTION public.record_external_paid_ever',
+        );
+        const end = migration.indexOf('$$;', start);
+        const body = migration.slice(start, end);
+        const advisoryLock = body.indexOf('pg_advisory_xact_lock');
+        const rolloutLock = body.indexOf(
+            'FROM public.account_ledger_rollout_state',
+        );
+
+        expect(advisoryLock).toBeGreaterThanOrEqual(0);
+        expect(advisoryLock).toBeLessThan(rolloutLock);
+        expect(body).toContain(
+            "hashtextextended(v_account_id::TEXT, 0)",
+        );
+    });
+
+    it('redeclares the existing owner-history signature, security boundary, and ACL after replacement', () => {
+        const start = migration.lastIndexOf(
+            'CREATE OR REPLACE FUNCTION public.load_analysis_owner_history_v1()',
+        );
+        expect(start).toBeGreaterThanOrEqual(0);
+        const replacement = migration.slice(start);
+
+        expect(replacement).toMatch(
+            /CREATE OR REPLACE FUNCTION public\.load_analysis_owner_history_v1\(\)\s+RETURNS JSONB\s+LANGUAGE plpgsql\s+STABLE\s+SECURITY DEFINER\s+SET search_path = ''/,
+        );
+        expect(replacement).toMatch(
+            /REVOKE ALL ON FUNCTION public\.load_analysis_owner_history_v1\(\)\s+FROM PUBLIC, anon, authenticated, service_role/,
+        );
+        expect(replacement).toMatch(
+            /GRANT EXECUTE ON FUNCTION public\.load_analysis_owner_history_v1\(\)\s+TO authenticated/,
+        );
+        expect(replacement).not.toMatch(
+            /GRANT EXECUTE ON FUNCTION public\.load_analysis_owner_history_v1\(\)\s+TO (?:anon|service_role)/,
+        );
     });
 });
 

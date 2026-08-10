@@ -40,6 +40,10 @@ import {
     capPublicProfiles,
     getRelationshipScrapeLimit,
 } from '@/lib/services/analysis/plan-limits';
+import {
+    AccountPrincipalAdmissionError,
+    requireActiveAccountClassification,
+} from '@/lib/services/identity/account-principal-store';
 
 const LEGACY_RUN_LEASE_SECONDS = 3_600;
 
@@ -77,6 +81,18 @@ export async function POST(request: Request) {
         const { data: { user }, error: authError } = await supabase.auth.getUser();
         if (authError || !user) {
             return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
+        }
+
+        try {
+            await requireActiveAccountClassification(user.id);
+        } catch (error) {
+            if (error instanceof AccountPrincipalAdmissionError) {
+                return NextResponse.json(
+                    { error: 'Account unavailable.', code: error.code },
+                    { status: 403 },
+                );
+            }
+            throw error;
         }
 
         const { requestId } = await request.json();
