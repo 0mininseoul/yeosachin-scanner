@@ -9,16 +9,19 @@ const ownerKeyHash = 'a'.repeat(64);
 const scopeHash = 'b'.repeat(64);
 
 function client(data: unknown, error: { code?: string; message?: string } | null = null) {
-    const rpc = vi.fn().mockResolvedValue({ data, error });
+    const normalized = data && typeof data === 'object' && !Array.isArray(data)
+        ? { created: false, replayed: true, ...data as Record<string, unknown> }
+        : data;
+    const rpc = vi.fn().mockResolvedValue({ data: normalized, error });
     return { rpc, client: { rpc } as RevenueCostOperationRpcClient };
 }
 
 describe('RevenueCostOperationStore', () => {
     it('uses the fenced begin RPC and rejects malformed request identity', async () => {
-        const stub = client({ disposition: 'begun', operationId: '22222222-2222-4222-8222-222222222222' });
+        const stub = client({ disposition: 'begun', created: true, replayed: false, operationId: '22222222-2222-4222-8222-222222222222' });
         const store = new RevenueCostOperationStore(stub.client);
 
-        await expect(store.begin({ requestId })).resolves.toMatchObject({ disposition: 'begun' });
+        await expect(store.begin({ requestId })).resolves.toMatchObject({ disposition: 'begun', created: true, replayed: false });
         expect(stub.rpc).toHaveBeenCalledWith('begin_analysis_revenue_cost_ledger_v1', { p_request_id: requestId });
         await expect(store.begin({ requestId: 'not-a-uuid' })).rejects.toThrow('REVENUE_COST_OPERATION_INVALID_INPUT');
     });

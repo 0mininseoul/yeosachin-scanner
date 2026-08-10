@@ -54,6 +54,8 @@ export interface ReserveRevenueCostOperation extends Identity {
 
 export interface RevenueCostOperationOutcome {
     readonly disposition: 'begun' | 'accepted' | 'denied' | 'started' | 'settled' | 'released' | 'ambiguous' | 'manual_review';
+    readonly created: boolean;
+    readonly replayed: boolean;
     readonly operationId?: string;
     readonly reason?: string;
 }
@@ -99,8 +101,14 @@ function safeOutcome(data: unknown): RevenueCostOperationOutcome {
     if (!['begun', 'accepted', 'denied', 'started', 'settled', 'released', 'ambiguous', 'manual_review'].includes(String(disposition))) {
         throw new Error('REVENUE_COST_OPERATION_INVALID_RESPONSE');
     }
+    if (typeof row.created !== 'boolean' || typeof row.replayed !== 'boolean'
+        || (row.created && row.replayed)) {
+        throw new Error('REVENUE_COST_OPERATION_INVALID_RESPONSE');
+    }
     return {
         disposition: disposition as RevenueCostOperationOutcome['disposition'],
+        created: row.created,
+        replayed: row.replayed,
         ...(typeof row.operationId === 'string' ? { operationId: row.operationId } : {}),
         ...(typeof row.reason === 'string' && /^[a-z_]{1,48}$/.test(row.reason) ? { reason: row.reason } : {}),
     };
