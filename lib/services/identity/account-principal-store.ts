@@ -87,6 +87,10 @@ const classificationRowSchema = z.object({
     classification_version: z.string().min(1).max(64).nullable(),
 }).strict();
 
+const e2eTestRunnerRowSchema = z.object({
+    runner_plan: e2eTestRunnerPlanSchema,
+}).strict();
+
 export type AccountPrincipal = z.infer<typeof accountPrincipalRowSchema>;
 export type SocialAccountProfile = z.infer<typeof socialProfileSchema>;
 export type KakaoAccountProfile = z.infer<typeof kakaoProfileSchema>;
@@ -326,6 +330,20 @@ export async function requireActiveE2eTestAccount(userId: string) {
 }
 
 /**
+ * The registry is the durable counterpart to Auth app_metadata. Returning no
+ * row on a metadata/registry disagreement keeps test capability fail-closed.
+ */
+export async function loadE2eTestRunnerPlan(userId: string): Promise<E2eTestRunnerPlan | null> {
+    const row = await rpcSingle(
+        'load_e2e_test_runner_v1',
+        { p_user_id: userId },
+        e2eTestRunnerRowSchema,
+        true,
+    );
+    return row?.runner_plan ?? null;
+}
+
+/**
  * Test capability requires two independent, server-verified facts:
  * 1. the service-only principal classification is active E2E traffic; and
  * 2. Auth app_metadata names one of the dedicated Basic/Standard runners.
@@ -350,6 +368,11 @@ export async function requireActiveE2eTestRunner(
         !runnerPlan.success
         || (expectedPlan !== undefined && runnerPlan.data !== expectedPlan)
     ) {
+        throw new AccountPrincipalAdmissionError();
+    }
+
+    const registryPlan = await loadE2eTestRunnerPlan(user.id);
+    if (registryPlan !== runnerPlan.data) {
         throw new AccountPrincipalAdmissionError();
     }
 
