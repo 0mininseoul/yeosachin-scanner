@@ -1,13 +1,9 @@
 import 'server-only';
 
 export type RevenueCostOperationOwnerKind =
-    | 'target_profile'
-    | 'relationship'
-    | 'routing'
-    | 'profile'
-    | 'media'
-    | 'interaction'
-    | 'resolver';
+    | 'preflight_provider_run'
+    | 'provider_run'
+    | 'ai_attempt';
 export type RevenueCostOperationKind =
     | 'target_profile'
     | 'relationship_followers'
@@ -33,6 +29,22 @@ interface Identity {
     readonly attempt: number;
 }
 
+export interface BeginRevenueCostLedger {
+    readonly requestId: string;
+}
+
+export interface SettleRevenueCostOperation extends Identity {
+    readonly economicActualUsd: number;
+    readonly billedActualUsd: number;
+}
+
+export interface RevenueCostReconciliationClaim {
+    readonly requestId: string;
+    readonly jobKey: 'coordinator:finalize';
+    readonly claimToken: string;
+    readonly jobInputHash: string;
+}
+
 export interface ReserveRevenueCostOperation extends Identity {
     readonly operationKind: RevenueCostOperationKind;
     readonly units: number;
@@ -41,15 +53,23 @@ export interface ReserveRevenueCostOperation extends Identity {
 }
 
 export interface RevenueCostOperationOutcome {
-    readonly disposition: 'accepted' | 'denied' | 'started' | 'settled' | 'released' | 'ambiguous' | 'manual_review';
+    readonly disposition: 'begun' | 'accepted' | 'denied' | 'started' | 'settled' | 'released' | 'ambiguous' | 'manual_review';
     readonly operationId?: string;
     readonly reason?: string;
+}
+
+export interface RevenueCostReconciliation {
+    readonly finalizable: boolean;
+    readonly reason: string;
+    readonly economicDisposition: 'within_margin_target' | 'negative_margin_pilot' | 'hard_cap_exceeded';
+    readonly economicActualKrw: number;
+    readonly billedActualKrw: number;
 }
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const HASH = /^[a-f0-9]{64}$/;
 const OWNER_KINDS = new Set<RevenueCostOperationOwnerKind>([
-    'target_profile', 'relationship', 'routing', 'profile', 'media', 'interaction', 'resolver',
+    'preflight_provider_run', 'provider_run', 'ai_attempt',
 ]);
 const OPERATION_KINDS = new Set<RevenueCostOperationKind>([
     'target_profile', 'relationship_followers', 'relationship_following', 'stage_one_routing',
@@ -59,7 +79,7 @@ const OPERATION_KINDS = new Set<RevenueCostOperationKind>([
 function assertIdentity(input: Identity): void {
     if (!UUID.test(input.requestId) || !OWNER_KINDS.has(input.ownerKind)
         || !HASH.test(input.ownerKeyHash) || !Number.isSafeInteger(input.attempt)
-        || input.attempt < 1 || input.attempt > 2) {
+        || input.attempt < 1 || input.attempt > 4) {
         throw new Error('REVENUE_COST_OPERATION_INVALID_INPUT');
     }
 }
@@ -76,7 +96,7 @@ function safeOutcome(data: unknown): RevenueCostOperationOutcome {
     }
     const row = data as Record<string, unknown>;
     const disposition = row.disposition;
-    if (!['accepted', 'denied', 'started', 'settled', 'released', 'ambiguous', 'manual_review'].includes(String(disposition))) {
+    if (!['begun', 'accepted', 'denied', 'started', 'settled', 'released', 'ambiguous', 'manual_review'].includes(String(disposition))) {
         throw new Error('REVENUE_COST_OPERATION_INVALID_RESPONSE');
     }
     return {
@@ -86,8 +106,26 @@ function safeOutcome(data: unknown): RevenueCostOperationOutcome {
     };
 }
 
+function safeReconciliation(data: unknown): RevenueCostReconciliation {
+    if (!data || typeof data !== 'object' || Array.isArray(data)) throw new Error('REVENUE_COST_OPERATION_INVALID_RESPONSE');
+    const row = data as Record<string, unknown>;
+    if (typeof row.finalizable !== 'boolean'
+        || typeof row.reason !== 'string' || !/^[a-z_]{1,48}$/.test(row.reason)
+        || !['within_margin_target', 'negative_margin_pilot', 'hard_cap_exceeded'].includes(String(row.economicDisposition))
+        || !Number.isSafeInteger(row.economicActualKrw) || (row.economicActualKrw as number) < 0
+        || !Number.isSafeInteger(row.billedActualKrw) || (row.billedActualKrw as number) < 0) {
+        throw new Error('REVENUE_COST_OPERATION_INVALID_RESPONSE');
+    }
+    return row as unknown as RevenueCostReconciliation;
+}
+
 export class RevenueCostOperationStore {
     constructor(private readonly client: RevenueCostOperationRpcClient) {}
+
+    async begin(input: BeginRevenueCostLedger): Promise<RevenueCostOperationOutcome> {
+        if (!UUID.test(input.requestId)) throw new Error('REVENUE_COST_OPERATION_INVALID_INPUT');
+        return this.call('begin_analysis_revenue_cost_ledger_v1', { p_request_id: input.requestId });
+    }
 
     async reserve(input: ReserveRevenueCostOperation): Promise<RevenueCostOperationOutcome> {
         assertIdentity(input);
@@ -117,11 +155,45 @@ export class RevenueCostOperationStore {
         });
     }
 
+    async settle(input: SettleRevenueCostOperation): Promise<RevenueCostOperationOutcome> {
+        assertIdentity(input);
+        if (!Number.isFinite(input.economicActualUsd) || input.economicActualUsd < 0 || input.economicActualUsd > 100_000
+            || !Number.isFinite(input.billedActualUsd) || input.billedActualUsd < 0 || input.billedActualUsd > 100_000) {
+            throw new Error('REVENUE_COST_OPERATION_INVALID_INPUT');
+        }
+        return this.call('settle_analysis_revenue_cost_operation_v1', {
+            p_request_id: input.requestId, p_owner_kind: input.ownerKind,
+            p_owner_key_hash: input.ownerKeyHash, p_attempt: input.attempt,
+            p_economic_actual_usd: input.economicActualUsd, p_billed_actual_usd: input.billedActualUsd,
+        });
+    }
+
+    release(input: Identity): Promise<RevenueCostOperationOutcome> {
+        assertIdentity(input);
+        return this.call('release_analysis_revenue_cost_operation_v1', {
+            p_request_id: input.requestId, p_owner_kind: input.ownerKind,
+            p_owner_key_hash: input.ownerKeyHash, p_attempt: input.attempt,
+        });
+    }
+
     manualReview(input: { requestId: string; reasonCode: 'routing_failure' | 'ambiguous_external_call' | 'cost_overrun' }): Promise<RevenueCostOperationOutcome> {
         if (!UUID.test(input.requestId)) throw new Error('REVENUE_COST_OPERATION_INVALID_INPUT');
         return this.call('mark_analysis_revenue_manual_review_v1', {
             p_request_id: input.requestId, p_reason_code: input.reasonCode,
         });
+    }
+
+    async reconcile(input: RevenueCostReconciliationClaim): Promise<RevenueCostReconciliation> {
+        if (!UUID.test(input.requestId) || input.jobKey !== 'coordinator:finalize'
+            || !UUID.test(input.claimToken) || !HASH.test(input.jobInputHash)) {
+            throw new Error('REVENUE_COST_OPERATION_INVALID_INPUT');
+        }
+        const { data, error } = await this.client.rpc('read_analysis_revenue_cost_reconciliation_v1', {
+            p_request_id: input.requestId, p_job_key: input.jobKey,
+            p_claim_token: input.claimToken, p_job_input_hash: input.jobInputHash,
+        });
+        if (error) throw new Error(`REVENUE_COST_OPERATION_RPC_FAILED_${safeCode(error)}`);
+        return safeReconciliation(data);
     }
 
     private async call(functionName: string, params: Record<string, unknown>): Promise<RevenueCostOperationOutcome> {
