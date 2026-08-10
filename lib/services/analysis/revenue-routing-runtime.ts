@@ -34,7 +34,8 @@ export interface RevenueGenderRoutingResult {
 export interface RevenueGenderRoutingModelCandidate {
     readonly candidateKey: string;
     readonly fullname: string | null;
-    readonly imageBytes: Uint8Array | null;
+    /** Immutable transport of the exact normalized bytes bound into imageContentHmac. */
+    readonly imageBase64: string | null;
 }
 
 /** Raw inputs permitted to the stage-one preparation adapter. */
@@ -181,7 +182,9 @@ async function prepareRevenueRoutingPopulation(
         modelCandidates.push(Object.freeze({
             candidateKey: candidate.candidateKey,
             fullname,
-            imageBytes: candidate.imageBytes,
+            imageBase64: candidate.imageBytes === null
+                ? null
+                : Buffer.from(candidate.imageBytes).toString('base64'),
         }));
     }
     return Object.freeze({ candidates: Object.freeze(candidates), modelCandidates: Object.freeze(modelCandidates) });
@@ -190,7 +193,7 @@ async function prepareRevenueRoutingPopulation(
 async function routePreparedRevenueGenderCandidates(input: RouteRevenueGenderCandidatesInput, population: PreparedRevenueRoutingPopulation): Promise<RevenueGenderRoutingResult> {
     const inputByKey = assertRevenueRoutingCandidates(input);
     const callableModelCandidates = population.modelCandidates.filter(candidate => (
-        candidate.imageBytes !== null || candidate.fullname !== null
+        candidate.imageBase64 !== null || candidate.fullname !== null
     ));
     const initial = input.candidates.length <= GENDER_ROUTING_CAPS[input.planId as GenderRoutingPlan].detailed
         ? undefined

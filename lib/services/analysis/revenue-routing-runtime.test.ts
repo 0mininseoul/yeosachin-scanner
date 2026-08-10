@@ -1,3 +1,4 @@
+import { createHmac } from 'node:crypto';
 import { describe, expect, it, vi } from 'vitest';
 import type {
     AnalysisV2GenderRoutingManifestPublishInput,
@@ -38,6 +39,7 @@ const nameOnlyAssessment = {
 };
 
 const preparedImage = new Uint8Array([9, 8, 7]);
+const preparedImageBase64 = Buffer.from(preparedImage).toString('base64');
 
 async function prepareEveryImage(sources: readonly { candidateKey: string; fullname: string | null }[]) {
     return sources.map(source => ({
@@ -82,7 +84,7 @@ describe('revenue gender-routing runtime', () => {
         const modelInput = input.map(({ candidateKey, fullname }) => ({
             candidateKey,
             fullname,
-            imageBytes: preparedImage,
+            imageBase64: preparedImageBase64,
         }));
         const assess = vi.fn(async (rows: readonly { candidateKey: string }[]) => new Map(
             rows.map(row => [row.candidateKey, assessment])
@@ -146,7 +148,7 @@ describe('revenue gender-routing runtime', () => {
         const modelInput = input.map(({ candidateKey, fullname }) => ({
             candidateKey,
             fullname,
-            imageBytes: preparedImage,
+            imageBase64: preparedImageBase64,
         }));
         const initial = new Map(input.slice(0, 100).map(row => [row.candidateKey, assessment]));
         const retry = new Map(input.slice(100).map(row => [row.candidateKey, assessment]));
@@ -167,6 +169,44 @@ describe('revenue gender-routing runtime', () => {
         expect(assess).toHaveBeenNthCalledWith(2, modelInput.slice(100), 2);
         expect(result?.manifest.modelRetriedCount).toBe(20);
         expect(result?.manifest.modelFailedCount).toBe(0);
+    });
+
+    it('binds immutable base64 model evidence to the persisted content HMAC on both attempts', async () => {
+        const image = new Uint8Array([0xff, 0xd8, 0xff, 0x01]);
+        const imageBase64 = Buffer.from(image).toString('base64');
+        const input = candidates(120);
+        const assess = vi.fn(async (
+            rows: readonly RevenueGenderRoutingModelCandidate[],
+            attempt: 1 | 2,
+        ) => {
+            for (const row of rows) {
+                expect(row).toMatchObject({ imageBase64 });
+                expect(row).not.toHaveProperty('imageBytes');
+            }
+            return new Map(rows
+                .filter(row => attempt === 2 || Number(row.candidateKey.slice('candidate:'.length)) <= 100)
+                .map(row => [row.candidateKey, assessment]));
+        });
+
+        const result = await routeRevenueGenderCandidates({
+            ...base,
+            accessMode: 'test_entitlement',
+            planId: 'basic',
+            candidates: input,
+            inputPreparer: async sources => sources.map(source => ({
+                candidateKey: source.candidateKey,
+                fullname: source.fullname,
+                imageBytes: new Uint8Array(image),
+            })),
+            assess,
+        });
+
+        const expectedHmac = createHmac('sha256', base.hmacSecret)
+            .update('gender-routing:image-content:v1\0')
+            .update(Buffer.from(imageBase64, 'base64'))
+            .digest('hex');
+        expect(assess).toHaveBeenCalledTimes(2);
+        expect(result?.manifest.rows.every(row => row.imageContentHmac === expectedHmac)).toBe(true);
     });
 
     it('does not retry at exactly ten percent initial failures and retains those candidates as unavailable', async () => {
@@ -236,7 +276,7 @@ describe('revenue gender-routing runtime', () => {
             expect(modelCandidates[0]).toMatchObject({
                 candidateKey: 'candidate:1',
                 fullname: 'Åda Lovelace',
-                imageBytes: image,
+                imageBase64: Buffer.from(image).toString('base64'),
             });
             expect(modelCandidates[0]).not.toHaveProperty('profilePicUrl');
             return new Map(modelCandidates.map(candidate => [candidate.candidateKey as string, assessment]));
@@ -393,7 +433,7 @@ describe('revenue gender-routing runtime', () => {
         expect(assess.mock.calls[1]?.[0]).toEqual(rows.slice(100).map(row => ({
             candidateKey: row.candidateKey,
             fullname: row.fullname,
-            imageBytes: null,
+            imageBase64: null,
         })));
         expect(publication.value?.modelRetriedCount).toBe(12);
         expect(publication.value?.modelFailedCount).toBe(11);
