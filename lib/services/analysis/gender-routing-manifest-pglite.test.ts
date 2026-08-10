@@ -8,6 +8,11 @@ import {
     createAnalysisV2ProfileFetchExecutor,
     createAnalysisV2RelationshipsExecutor,
 } from './v2-collection-executors';
+import {
+    buildAnalysisV2DagPlan,
+    type AnalysisV2DagRelationshipManifest,
+} from './v2-dag-planner';
+import { createSupabaseAnalysisV2DagStateStore } from './v2-dag-state-store';
 import type {
     AnalysisV2ProfileAttemptResultInput,
     AnalysisV2ProfileFetchResume,
@@ -43,6 +48,9 @@ CREATE TABLE public.analysis_requests (
 CREATE TABLE public.analysis_pipeline_jobs (
     request_id UUID NOT NULL REFERENCES public.analysis_requests(id),
     job_key TEXT NOT NULL,
+    track TEXT NOT NULL DEFAULT 'relationships',
+    kind TEXT NOT NULL DEFAULT 'collection',
+    batch INTEGER,
     status TEXT NOT NULL,
     input_hash TEXT NOT NULL,
     lease_token UUID,
@@ -72,6 +80,67 @@ CREATE TABLE public.analysis_v2_mutual_rows (
     FOREIGN KEY (request_id, job_key)
         REFERENCES public.analysis_v2_relationship_manifests(request_id, job_key)
 );
+CREATE TABLE public.analysis_v2_dag_scopes (
+    request_id UUID PRIMARY KEY REFERENCES public.analysis_requests(id),
+    schema_version SMALLINT NOT NULL,
+    request_snapshot_hash TEXT NOT NULL,
+    plan_id TEXT NOT NULL,
+    plan_snapshot_hash TEXT NOT NULL,
+    exclusion_decision_hash TEXT NOT NULL,
+    excluded_count SMALLINT NOT NULL
+);
+CREATE TABLE public.analysis_v2_dag_stage_manifests (
+    request_id UUID NOT NULL REFERENCES public.analysis_v2_dag_scopes(request_id),
+    stage_kind TEXT NOT NULL,
+    producer_job_key TEXT NOT NULL,
+    producer_input_hash TEXT NOT NULL,
+    revision INTEGER NOT NULL,
+    result_hash TEXT NOT NULL,
+    detected_mutual_count INTEGER,
+    public_count INTEGER,
+    private_count INTEGER,
+    detailed_selected_public_count INTEGER,
+    not_screened_public_count INTEGER,
+    interactor_count INTEGER,
+    verified_female_count INTEGER,
+    shortlist_count INTEGER,
+    shortlist_hash TEXT,
+    featured_high_risk_count INTEGER,
+    narrative_count INTEGER,
+    narrative_batch_hash TEXT,
+    PRIMARY KEY (request_id, stage_kind)
+);
+CREATE TABLE public.analysis_v2_dag_batch_topology (
+    request_id UUID NOT NULL REFERENCES public.analysis_v2_dag_scopes(request_id),
+    topology_kind TEXT NOT NULL,
+    batch INTEGER NOT NULL,
+    item_count INTEGER NOT NULL,
+    input_hash TEXT NOT NULL,
+    producer_job_key TEXT NOT NULL,
+    producer_input_hash TEXT NOT NULL,
+    PRIMARY KEY (request_id, topology_kind, batch)
+);
+CREATE TABLE public.analysis_v2_dag_batch_results (
+    request_id UUID NOT NULL REFERENCES public.analysis_v2_dag_scopes(request_id),
+    result_kind TEXT NOT NULL,
+    batch INTEGER NOT NULL,
+    item_count INTEGER NOT NULL,
+    producer_job_key TEXT NOT NULL,
+    producer_input_hash TEXT NOT NULL,
+    revision INTEGER NOT NULL,
+    result_hash TEXT NOT NULL,
+    PRIMARY KEY (request_id, result_kind, batch)
+);
+CREATE FUNCTION public.analysis_v2_dag_bounded_integer(
+    p_value JSONB, p_minimum INTEGER, p_maximum INTEGER
+) RETURNS BOOLEAN LANGUAGE sql IMMUTABLE AS $$
+    SELECT pg_catalog.jsonb_typeof(p_value) = 'number'
+       AND p_value::TEXT ~ '^(0|[1-9][0-9]{0,6})$'
+       AND (p_value::TEXT)::NUMERIC BETWEEN p_minimum AND p_maximum
+$$;
+CREATE FUNCTION public.checkpoint_analysis_v2_dag_manifest(
+    UUID, TEXT, TEXT, UUID, TEXT, JSONB
+) RETURNS JSONB LANGUAGE sql AS $$ SELECT NULL::JSONB $$;
 `;
 
 async function asService<T>(sql: string, params: unknown[] = []): Promise<Results<T>> {
@@ -151,6 +220,13 @@ async function seed(): Promise<void> {
         [REQUEST_ID, CHECKPOINT_ID],
     );
     await db!.query(
+        `INSERT INTO public.analysis_v2_dag_scopes (
+            request_id, schema_version, request_snapshot_hash, plan_id, plan_snapshot_hash,
+            exclusion_decision_hash, excluded_count
+         ) VALUES ($1, 2, $2, 'basic', $3, $4, 1)`,
+        [REQUEST_ID, 'd'.repeat(64), 'e'.repeat(64), 'f'.repeat(64)],
+    );
+    await db!.query(
         `INSERT INTO public.analysis_v2_mutual_rows (
             request_id, job_key, mutual_ordinal, username, is_private
          ) SELECT $1, 'track:relationships:collect', value::SMALLINT,
@@ -205,6 +281,122 @@ async function loadSelectedUsernames(
     );
 }
 
+function relationshipSelectionCheckpoint(overrides: Record<string, unknown> = {}) {
+    return {
+        revision: 1,
+        resultHash: CHECKPOINT_ID,
+        detectedMutualCount: 101,
+        publicCount: 101,
+        privateCount: 0,
+        detailedSelectedPublicCount: 100,
+        notScreenedPublicCount: 1,
+        profileBatches: [30, 30, 30, 10].map((itemCount, batch) => ({
+            batch,
+            itemCount,
+            inputHash: String(batch + 1).repeat(64),
+        })),
+        privateNameBatches: [],
+        relationshipSelectionPolicy: {
+            policyVersion: 'gender-routing-v1',
+            relationshipCheckpointId: CHECKPOINT_ID,
+            relationshipJobInputHash: INPUT_HASH,
+            planId: 'basic',
+            publicPopulationCount: 101,
+            selectedCount: 100,
+        },
+        ...overrides,
+    };
+}
+
+async function checkpointRelationshipSelection(manifest = relationshipSelectionCheckpoint()) {
+    return asService<{ result: unknown }>(
+        `SELECT public.checkpoint_analysis_v2_dag_manifest(
+            $1, 'track:relationships:collect', $2, $3, 'relationships', $4::JSONB
+         ) AS result`,
+        [REQUEST_ID, INPUT_HASH, CLAIM_TOKEN, JSON.stringify(manifest)],
+    );
+}
+
+function standardRelationshipSelectionCheckpoint(): AnalysisV2DagRelationshipManifest {
+    return {
+        ...relationshipSelectionCheckpoint({
+            detectedMutualCount: 201,
+            publicCount: 201,
+            detailedSelectedPublicCount: 200,
+            notScreenedPublicCount: 1,
+            profileBatches: [30, 30, 30, 30, 30, 30, 20].map((itemCount, batch) => ({
+                batch,
+                itemCount,
+                inputHash: String(batch + 1).repeat(64),
+            })),
+        }),
+        relationshipSelectionPolicy: {
+            policyVersion: 'gender-routing-v1' as const,
+            relationshipCheckpointId: CHECKPOINT_ID,
+            relationshipJobInputHash: INPUT_HASH,
+            planId: 'standard' as const,
+            publicPopulationCount: 201,
+            selectedCount: 200,
+        },
+    };
+}
+
+async function seedCompleteStandardRoutingManifest(): Promise<void> {
+    await db!.query(
+        `UPDATE public.analysis_requests
+         SET selected_plan_id_snapshot = 'standard' WHERE id = $1`,
+        [REQUEST_ID],
+    );
+    await db!.query(
+        `UPDATE public.analysis_v2_dag_scopes SET plan_id = 'standard' WHERE request_id = $1`,
+        [REQUEST_ID],
+    );
+    await db!.query(
+        `UPDATE public.analysis_v2_relationship_manifests
+         SET public_count = 201 WHERE request_id = $1`,
+        [REQUEST_ID],
+    );
+    await db!.query(
+        `INSERT INTO public.analysis_v2_mutual_rows (
+            request_id, job_key, mutual_ordinal, username, is_private
+         ) SELECT $1, 'track:relationships:collect', value::SMALLINT,
+                  'fixture_' || value::TEXT, FALSE
+           FROM pg_catalog.generate_series(102, 201) AS value`,
+        [REQUEST_ID],
+    );
+    await db!.query(
+        `INSERT INTO public.analysis_v2_gender_routing_manifests (
+            request_id, relationship_job_key, relationship_job_input_hash,
+            relationship_checkpoint_id, policy_version, plan_id, detailed_cap,
+            population_count, canonical_input_hmac, status, selected_count,
+            model_attempted_count, model_valid_count, model_failed_count, model_retried_count,
+            quota_female_shortfall, quota_uncertainty_shortfall, female_priority_count,
+            uncertainty_count, male_deprioritized_count, selected_female_priority_count,
+            selected_uncertainty_count, selected_male_deprioritized_count, candidate_rows_hash,
+            completed_at
+         ) VALUES (
+            $1, 'track:relationships:collect', $2, $3, 'gender-routing-v1', 'standard',
+            200, 201, $4, 'complete', 200, 0, 0, 0, 0, 0, 0, 0, 0, 201, 0, 0, 200,
+            $5, pg_catalog.clock_timestamp()
+         )`,
+        [REQUEST_ID, INPUT_HASH, CHECKPOINT_ID, CANONICAL_INPUT_HMAC, 'd'.repeat(32)],
+    );
+    await db!.query(
+        `INSERT INTO public.analysis_v2_gender_routing_candidates (
+            request_id, relationship_checkpoint_id, policy_version, relationship_job_key,
+            mutual_ordinal, candidate_key, has_image, has_name, bucket, routing_unavailable,
+            selected, selection_reason, selection_slot, ordinal
+         ) SELECT $1, $2, 'gender-routing-v1', 'track:relationships:collect',
+                  value::SMALLINT, 'mutual:' || value::TEXT, FALSE, FALSE,
+                  'male_deprioritized', FALSE, value <= 200,
+                  CASE WHEN value <= 200 THEN 'fill' ELSE 'not_selected' END,
+                  CASE WHEN value <= 200 THEN 'fill' ELSE NULL END,
+                  CASE WHEN value <= 200 THEN value::SMALLINT ELSE NULL END
+           FROM pg_catalog.generate_series(1, 201) AS value`,
+        [REQUEST_ID, CHECKPOINT_ID],
+    );
+}
+
 function pgliteManifestStore() {
     return createAnalysisV2GenderRoutingManifestStore({
         rpc: async (name, params) => {
@@ -235,6 +427,38 @@ function pgliteManifestStore() {
                     ? `$${index + 1}::JSONB`
                     : `$${index + 1}`
             )).join(', ');
+            try {
+                const result = await asService<{ result: unknown }>(
+                    `SELECT public.${name}(${cast}) AS result`,
+                    ordered,
+                );
+                return { data: result.rows[0]?.result ?? null, error: null };
+            } catch (error) {
+                return {
+                    data: null,
+                    error: { message: error instanceof Error ? error.message : String(error) },
+                };
+            }
+        },
+    });
+}
+
+function pgliteDagStateStore() {
+    return createSupabaseAnalysisV2DagStateStore({
+        rpc: async (name, params) => {
+            const ordered = name === 'checkpoint_analysis_v2_dag_manifest'
+                ? [
+                    params.p_request_id,
+                    params.p_job_key,
+                    params.p_input_hash,
+                    params.p_claim_token,
+                    params.p_manifest_kind,
+                    JSON.stringify(params.p_manifest),
+                ]
+                : [params.p_request_id];
+            const cast = name === 'checkpoint_analysis_v2_dag_manifest'
+                ? '$1, $2, $3, $4, $5, $6::JSONB'
+                : '$1';
             try {
                 const result = await asService<{ result: unknown }>(
                     `SELECT public.${name}(${cast}) AS result`,
@@ -326,6 +550,127 @@ describe('analysis V2 gender-routing manifest PGlite authority', () => {
             } finally {
                 await db!.exec('RESET ROLE');
             }
+        }
+    }, 30_000);
+
+    it('accepts only a complete, authorized Basic routing marker and retains it through the DAG RPC round-trip', async () => {
+        db = await PGlite.create();
+        await seed();
+        await begin();
+
+        await expect(checkpointRelationshipSelection()).rejects.toThrow(
+            'ANALYSIS_V2_DAG_STATE_FENCE_MISMATCH',
+        );
+
+        await publish();
+        const accepted = await checkpointRelationshipSelection();
+        expect(accepted.rows[0]?.result).toMatchObject({
+            relationships: {
+                detailedSelectedPublicCount: 100,
+                relationshipSelectionPolicy: {
+                    policyVersion: 'gender-routing-v1',
+                    relationshipCheckpointId: CHECKPOINT_ID,
+                    relationshipJobInputHash: INPUT_HASH,
+                    planId: 'basic',
+                    publicPopulationCount: 101,
+                    selectedCount: 100,
+                },
+            },
+        });
+        await expect(checkpointRelationshipSelection()).resolves.toMatchObject({
+            rows: [{ result: { relationships: { detailedSelectedPublicCount: 100 } } }],
+        });
+        const loaded = await asService<{ result: unknown }>(
+            'SELECT public.load_analysis_v2_dag_state($1) AS result',
+            [REQUEST_ID],
+        );
+        expect(loaded.rows[0]?.result).toMatchObject({
+            relationships: {
+                relationshipSelectionPolicy: { selectedCount: 100 },
+            },
+        });
+    }, 30_000);
+
+    it('accepts the complete Standard 201-public marker and schedules exactly 200 durable profiles', async () => {
+        db = await PGlite.create();
+        await seed();
+        await seedCompleteStandardRoutingManifest();
+
+        const dagStateStore = pgliteDagStateStore();
+        const state = await dagStateStore.checkpointManifest({
+            requestId: REQUEST_ID,
+            jobKey: 'track:relationships:collect',
+            inputHash: INPUT_HASH,
+            claimToken: CLAIM_TOKEN,
+        }, {
+            kind: 'relationships',
+            manifest: standardRelationshipSelectionCheckpoint(),
+        });
+        expect(state.relationships?.relationshipSelectionPolicy).toMatchObject({
+            planId: 'standard',
+            publicPopulationCount: 201,
+            selectedCount: 200,
+        });
+        const plan = buildAnalysisV2DagPlan(REQUEST_ID, state);
+        const profiles = plan.jobs.filter(job => job.track === 'profiles');
+        expect(profiles).toHaveLength(7);
+        expect(profiles.reduce(
+            (count, job) => count + state.relationships!.profileBatches[job.batch!]!.itemCount,
+            0,
+        )).toBe(200);
+    }, 30_000);
+
+    it('rejects forged, invalidated, production, beta, and Plus routing markers', async () => {
+        db = await PGlite.create();
+        await seed();
+        await begin();
+        await publish();
+
+        await expect(checkpointRelationshipSelection(relationshipSelectionCheckpoint({
+            relationshipSelectionPolicy: {
+                ...relationshipSelectionCheckpoint().relationshipSelectionPolicy,
+                relationshipCheckpointId: 'f'.repeat(64),
+            },
+        }))).rejects.toThrow(/ANALYSIS_V2_DAG_STATE_(INVALID|FENCE_MISMATCH)/);
+
+        const cases = [
+            [
+                'invalidated',
+                `UPDATE public.analysis_v2_gender_routing_manifests
+                 SET status = 'invalidated', invalidated_at = pg_catalog.clock_timestamp()
+                 WHERE request_id = $1`,
+                `UPDATE public.analysis_v2_gender_routing_manifests
+                 SET status = 'complete', invalidated_at = NULL
+                 WHERE request_id = $1`,
+            ],
+            [
+                'production',
+                `UPDATE public.analysis_requests
+                 SET plan_access_mode_snapshot = 'production' WHERE id = $1`,
+                `UPDATE public.analysis_requests
+                 SET plan_access_mode_snapshot = 'test_entitlement' WHERE id = $1`,
+            ],
+            [
+                'beta',
+                `UPDATE public.analysis_v2_provider_execution_policies
+                 SET mode = 'betatest_free_pool' WHERE request_id = $1`,
+                `UPDATE public.analysis_v2_provider_execution_policies
+                 SET mode = 'test_operation_split' WHERE request_id = $1`,
+            ],
+            [
+                'Plus',
+                `UPDATE public.analysis_requests
+                 SET selected_plan_id_snapshot = 'plus' WHERE id = $1`,
+                `UPDATE public.analysis_requests
+                 SET selected_plan_id_snapshot = 'basic' WHERE id = $1`,
+            ],
+        ] as const;
+        for (const [label, introduce, restore] of cases) {
+            await db!.query(introduce, [REQUEST_ID]);
+            await expect(checkpointRelationshipSelection(), label).rejects.toThrow(
+                'ANALYSIS_V2_DAG_STATE_FENCE_MISMATCH',
+            );
+            await db!.query(restore, [REQUEST_ID]);
         }
     }, 30_000);
 
@@ -603,7 +948,28 @@ describe('analysis V2 gender-routing manifest PGlite authority', () => {
         expect(relationship.checkpoint.manifest.profileBatches).toEqual(
             createAnalysisV2CollectionTopology('profiles', selectedUsernames),
         );
-        const profile = await profileExecutor(profileContext(relationship.checkpoint.manifest));
+        const dagStateStore = pgliteDagStateStore();
+        const persistedState = await dagStateStore.checkpointManifest({
+            requestId: REQUEST_ID,
+            jobKey: 'track:relationships:collect',
+            inputHash: INPUT_HASH,
+            claimToken: CLAIM_TOKEN,
+        }, relationship.checkpoint);
+        expect(persistedState.relationships?.relationshipSelectionPolicy).toEqual({
+            policyVersion: 'gender-routing-v1',
+            relationshipCheckpointId: CHECKPOINT_ID,
+            relationshipJobInputHash: INPUT_HASH,
+            planId: 'basic',
+            publicPopulationCount: 101,
+            selectedCount: 100,
+        });
+        const persistedPlan = buildAnalysisV2DagPlan(REQUEST_ID, persistedState);
+        expect(persistedPlan.jobs.filter(job => job.track === 'profiles')).toHaveLength(4);
+        expect(persistedPlan.jobs.filter(job => job.track === 'profiles').reduce(
+            (count, job) => count + persistedState.relationships!.profileBatches[job.batch!]!.itemCount,
+            0,
+        )).toBe(100);
+        const profile = await profileExecutor(profileContext(persistedState.relationships));
         expect(profileFetcher).toHaveBeenCalledWith(selectedUsernames.slice(0, 30), expect.any(Object));
         expect(profile.checkpoint.manifest).toMatchObject({
             batch: 0,
