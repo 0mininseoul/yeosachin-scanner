@@ -496,6 +496,26 @@ describe('analysis V2 gender-routing manifest PGlite authority', () => {
         await expect(publish(drift)).rejects.toThrow('ANALYSIS_V2_GENDER_ROUTING_MANIFEST_CONFLICT');
     }, 30_000);
 
+    it('keeps concurrent complete-manifest and selected-reader RPCs on the same fenced lock graph', async () => {
+        db = await PGlite.create();
+        await seed();
+        await begin();
+        await publish();
+
+        const [current, selected, usernames] = await Promise.all([
+            loadCurrentComplete(),
+            loadSelected(),
+            loadSelectedUsernames(),
+        ]);
+
+        expect(current.rows[0]?.result).toMatchObject({
+            header: { status: 'complete', selectedCount: 100 },
+            selected: { selectedCount: 100 },
+        });
+        expect(selected.rows[0]?.result.rows).toHaveLength(100);
+        expect(usernames.rows[0]?.result.rows).toHaveLength(100);
+    }, 30_000);
+
     it('does not consume stale, building, or invalidated manifests and keeps tables/RPCs service-only', async () => {
         db = await PGlite.create();
         await seed();
@@ -1224,5 +1244,32 @@ describe('analysis V2 gender-routing manifest PGlite authority', () => {
         const duplicateOrdinal = rows();
         duplicateOrdinal[1] = { ...duplicateOrdinal[1]!, ordinal: 1 };
         await expect(publish(duplicateOrdinal)).rejects.toThrow('ANALYSIS_V2_GENDER_ROUTING_MANIFEST_INVALID');
+    }, 30_000);
+
+    it('rejects non-fallback unavailable scores and null-score rows above the detailed cap', async () => {
+        db = await PGlite.create();
+        await seed();
+        await begin();
+
+        const unavailableButNotFallback = rows();
+        unavailableButNotFallback[100] = {
+            ...unavailableButNotFallback[100]!,
+            femaleScore: 0.1,
+            maleScore: 0.1,
+            uncertaintyScore: 0.8,
+        };
+        await expect(publish(unavailableButNotFallback))
+            .rejects.toThrow('ANALYSIS_V2_GENDER_ROUTING_MANIFEST_INVALID');
+
+        const missingScoresAboveCap = rows() as unknown as Array<Record<string, unknown>>;
+        missingScoresAboveCap[100] = {
+            ...missingScoresAboveCap[100]!,
+            femaleScore: null,
+            maleScore: null,
+            uncertaintyScore: null,
+            evidence: null,
+        };
+        await expect(publish(missingScoresAboveCap as unknown as ReturnType<typeof rows>))
+            .rejects.toThrow('ANALYSIS_V2_GENDER_ROUTING_MANIFEST_INVALID');
     }, 30_000);
 });

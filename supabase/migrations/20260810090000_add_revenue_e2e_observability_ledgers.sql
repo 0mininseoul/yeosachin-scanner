@@ -124,7 +124,7 @@ CREATE TABLE public.analysis_v2_gender_routing_manifests (
             AND candidate_rows_hash IS NULL AND completed_at IS NULL
             AND invalidated_at IS NULL)
         OR (status = 'complete'
-            AND selected_count BETWEEN 0 AND detailed_cap
+            AND selected_count = LEAST(population_count, detailed_cap)
             AND model_attempted_count BETWEEN 0 AND population_count
             AND model_valid_count BETWEEN 0 AND model_attempted_count
             AND model_failed_count BETWEEN 0 AND model_attempted_count
@@ -384,6 +384,7 @@ BEGIN
       AND candidate.selected;
     IF v_row_count IS DISTINCT FROM v_manifest.population_count
        OR v_selected_count IS DISTINCT FROM v_manifest.selected_count
+       OR v_manifest.selected_count IS DISTINCT FROM LEAST(v_manifest.population_count, v_manifest.detailed_cap)
        OR v_min_ordinal <> 1
        OR v_max_ordinal <> v_selected_count THEN
         RAISE EXCEPTION USING MESSAGE = 'ANALYSIS_V2_GENDER_ROUTING_MANIFEST_CORRUPT', ERRCODE = 'P0001';
@@ -750,7 +751,9 @@ BEGIN
         IF v_row->'femaleScore' = 'null'::JSONB
            AND v_row->'maleScore' = 'null'::JSONB
            AND v_row->'uncertaintyScore' = 'null'::JSONB THEN
-            IF v_row->'evidence' <> 'null'::JSONB THEN
+            IF p_population_count > p_detailed_cap
+               OR v_row->'evidence' <> 'null'::JSONB
+               OR v_unavailable THEN
                 RAISE EXCEPTION USING MESSAGE = 'ANALYSIS_V2_GENDER_ROUTING_MANIFEST_INVALID', ERRCODE = 'P0001';
             END IF;
         ELSE
@@ -766,7 +769,8 @@ BEGIN
             v_female_score := (v_row->>'femaleScore')::NUMERIC;
             v_male_score := (v_row->>'maleScore')::NUMERIC;
             v_uncertainty_score := (v_row->>'uncertaintyScore')::NUMERIC;
-            IF v_female_score NOT BETWEEN 0 AND 1 OR v_male_score NOT BETWEEN 0 AND 1
+            IF p_population_count <= p_detailed_cap
+               OR v_female_score NOT BETWEEN 0 AND 1 OR v_male_score NOT BETWEEN 0 AND 1
                OR v_uncertainty_score NOT BETWEEN 0 AND 1
                OR v_female_score + v_male_score + v_uncertainty_score NOT BETWEEN 0.999999 AND 1.000001
                OR v_row->>'evidence' <> (CASE
@@ -782,7 +786,12 @@ BEGIN
                OR (v_row->>'bucket' = 'male_deprioritized' AND (
                     v_female_score > v_male_score
                     OR v_uncertainty_score >= 0.4
-                    OR pg_catalog.abs(v_female_score - v_male_score) < 0.15)) THEN
+                    OR pg_catalog.abs(v_female_score - v_male_score) < 0.15))
+               OR (v_unavailable AND (
+                    v_row->>'bucket' <> 'uncertainty'
+                    OR v_female_score <> 0
+                    OR v_male_score <> 0
+                    OR v_uncertainty_score <> 1)) THEN
                 RAISE EXCEPTION USING MESSAGE = 'ANALYSIS_V2_GENDER_ROUTING_MANIFEST_INVALID', ERRCODE = 'P0001';
             END IF;
         END IF;
@@ -968,6 +977,25 @@ BEGIN
        OR p_plan_id NOT IN ('basic', 'standard') THEN
         RAISE EXCEPTION USING MESSAGE = 'ANALYSIS_V2_GENDER_ROUTING_MANIFEST_INVALID', ERRCODE = 'P0001';
     END IF;
+    SELECT analysis_request.* INTO v_request
+    FROM public.analysis_requests AS analysis_request
+    WHERE analysis_request.id = p_request_id
+    FOR UPDATE;
+    SELECT job.* INTO v_job
+    FROM public.analysis_pipeline_jobs AS job
+    WHERE job.request_id = p_request_id
+      AND job.job_key = 'track:relationships:collect'
+    FOR UPDATE;
+    SELECT policy.* INTO v_policy
+    FROM public.analysis_v2_provider_execution_policies AS policy
+    WHERE policy.request_id = p_request_id
+    FOR UPDATE;
+    SELECT relationship_manifest.* INTO v_relationship
+    FROM public.analysis_v2_relationship_manifests AS relationship_manifest
+    WHERE relationship_manifest.request_id = p_request_id
+      AND relationship_manifest.job_key = 'track:relationships:collect'
+      AND relationship_manifest.result_hash = p_relationship_checkpoint_id
+    FOR UPDATE;
     SELECT routing_manifest.* INTO v_manifest
     FROM public.analysis_v2_gender_routing_manifests AS routing_manifest
     WHERE routing_manifest.request_id = p_request_id
@@ -977,24 +1005,6 @@ BEGIN
     IF NOT FOUND THEN
         RAISE EXCEPTION USING MESSAGE = 'ANALYSIS_V2_GENDER_ROUTING_MANIFEST_MISSING', ERRCODE = 'P0001';
     END IF;
-    SELECT analysis_request.* INTO v_request
-    FROM public.analysis_requests AS analysis_request
-    WHERE analysis_request.id = p_request_id
-    FOR UPDATE;
-    SELECT policy.* INTO v_policy
-    FROM public.analysis_v2_provider_execution_policies AS policy
-    WHERE policy.request_id = p_request_id;
-    SELECT job.* INTO v_job
-    FROM public.analysis_pipeline_jobs AS job
-    WHERE job.request_id = p_request_id
-      AND job.job_key = v_manifest.relationship_job_key
-    FOR UPDATE;
-    SELECT relationship_manifest.* INTO v_relationship
-    FROM public.analysis_v2_relationship_manifests AS relationship_manifest
-    WHERE relationship_manifest.request_id = p_request_id
-      AND relationship_manifest.job_key = v_manifest.relationship_job_key
-      AND relationship_manifest.result_hash = p_relationship_checkpoint_id
-    FOR UPDATE;
     IF v_manifest.plan_id IS DISTINCT FROM p_plan_id
        OR (p_plan_id = 'basic' AND (v_manifest.detailed_cap <> 100 OR v_manifest.population_count NOT BETWEEN 0 AND 400))
        OR (p_plan_id = 'standard' AND (v_manifest.detailed_cap <> 200 OR v_manifest.population_count NOT BETWEEN 0 AND 800)) THEN
@@ -1039,6 +1049,7 @@ BEGIN
       AND candidate.selected;
     IF v_row_count IS DISTINCT FROM v_manifest.population_count
        OR v_selected_count IS DISTINCT FROM v_manifest.selected_count
+       OR v_manifest.selected_count IS DISTINCT FROM LEAST(v_manifest.population_count, v_manifest.detailed_cap)
        OR v_min_ordinal <> 1
        OR v_max_ordinal <> v_selected_count THEN
         RAISE EXCEPTION USING MESSAGE = 'ANALYSIS_V2_GENDER_ROUTING_MANIFEST_CORRUPT', ERRCODE = 'P0001';
@@ -1083,6 +1094,25 @@ BEGIN
        OR p_plan_id NOT IN ('basic', 'standard') THEN
         RAISE EXCEPTION USING MESSAGE = 'ANALYSIS_V2_GENDER_ROUTING_MANIFEST_INVALID', ERRCODE = 'P0001';
     END IF;
+    SELECT analysis_request.* INTO v_request
+    FROM public.analysis_requests AS analysis_request
+    WHERE analysis_request.id = p_request_id
+    FOR UPDATE;
+    SELECT job.* INTO v_job
+    FROM public.analysis_pipeline_jobs AS job
+    WHERE job.request_id = p_request_id
+      AND job.job_key = 'track:relationships:collect'
+    FOR UPDATE;
+    SELECT policy.* INTO v_policy
+    FROM public.analysis_v2_provider_execution_policies AS policy
+    WHERE policy.request_id = p_request_id
+    FOR UPDATE;
+    SELECT relationship_manifest.* INTO v_relationship
+    FROM public.analysis_v2_relationship_manifests AS relationship_manifest
+    WHERE relationship_manifest.request_id = p_request_id
+      AND relationship_manifest.job_key = 'track:relationships:collect'
+      AND relationship_manifest.result_hash = p_relationship_checkpoint_id
+    FOR UPDATE;
     SELECT routing_manifest.* INTO v_manifest
     FROM public.analysis_v2_gender_routing_manifests AS routing_manifest
     WHERE routing_manifest.request_id = p_request_id
@@ -1092,24 +1122,6 @@ BEGIN
     IF NOT FOUND THEN
         RAISE EXCEPTION USING MESSAGE = 'ANALYSIS_V2_GENDER_ROUTING_MANIFEST_MISSING', ERRCODE = 'P0001';
     END IF;
-    SELECT analysis_request.* INTO v_request
-    FROM public.analysis_requests AS analysis_request
-    WHERE analysis_request.id = p_request_id
-    FOR UPDATE;
-    SELECT policy.* INTO v_policy
-    FROM public.analysis_v2_provider_execution_policies AS policy
-    WHERE policy.request_id = p_request_id;
-    SELECT job.* INTO v_job
-    FROM public.analysis_pipeline_jobs AS job
-    WHERE job.request_id = p_request_id
-      AND job.job_key = v_manifest.relationship_job_key
-    FOR UPDATE;
-    SELECT relationship_manifest.* INTO v_relationship
-    FROM public.analysis_v2_relationship_manifests AS relationship_manifest
-    WHERE relationship_manifest.request_id = p_request_id
-      AND relationship_manifest.job_key = v_manifest.relationship_job_key
-      AND relationship_manifest.result_hash = p_relationship_checkpoint_id
-    FOR UPDATE;
     IF v_manifest.plan_id IS DISTINCT FROM p_plan_id
        OR (p_plan_id = 'basic' AND (v_manifest.detailed_cap <> 100 OR v_manifest.population_count NOT BETWEEN 0 AND 400))
        OR (p_plan_id = 'standard' AND (v_manifest.detailed_cap <> 200 OR v_manifest.population_count NOT BETWEEN 0 AND 800)) THEN
@@ -1160,6 +1172,7 @@ BEGIN
       AND NOT mutual_row.is_private;
     IF v_row_count IS DISTINCT FROM v_manifest.population_count
        OR v_selected_count IS DISTINCT FROM v_manifest.selected_count
+       OR v_manifest.selected_count IS DISTINCT FROM LEAST(v_manifest.population_count, v_manifest.detailed_cap)
        OR v_min_ordinal <> 1
        OR v_max_ordinal <> v_selected_count THEN
         RAISE EXCEPTION USING MESSAGE = 'ANALYSIS_V2_GENDER_ROUTING_MANIFEST_CORRUPT', ERRCODE = 'P0001';

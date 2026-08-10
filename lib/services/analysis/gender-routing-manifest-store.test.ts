@@ -254,4 +254,78 @@ describe('analysis V2 gender-routing manifest store', () => {
             planId: 'basic',
         })).rejects.toThrow('ANALYSIS_V2_GENDER_ROUTING_MANIFEST_INVALID_RESULT');
     });
+
+    it('rejects a complete header whose selected count is not the policy-required minimum', async () => {
+        const store = createAnalysisV2GenderRoutingManifestStore(client({
+            header: {
+                ...completeHeader,
+                selectedCount: 99,
+                selectedFemalePriorityCount: 99,
+            },
+            selected: {
+                selectedCount: 99,
+                rows: Array.from({ length: 99 }, (_, index) => ({
+                    mutualOrdinal: index + 1,
+                    candidateKey: `mutual:${index + 1}`,
+                    selectionSlot: 'female',
+                    ordinal: index + 1,
+                })),
+            },
+        }));
+
+        await expect(store.loadCurrentComplete({
+            requestId,
+            jobKey: 'track:relationships:collect',
+            claimToken,
+            jobInputHash,
+            relationshipCheckpointId: checkpointId,
+            policyVersion: 'gender-routing-v1',
+            planId: 'basic',
+        })).rejects.toThrow('ANALYSIS_V2_GENDER_ROUTING_MANIFEST_INVALID_RESULT');
+    });
+
+    it('rejects score-bearing or unavailable rows when the actual population is within cap', async () => {
+        const db = client(completeHeader);
+        const store = createAnalysisV2GenderRoutingManifestStore(db);
+
+        await expect(store.publish({
+            requestId,
+            jobKey: 'track:relationships:collect',
+            claimToken,
+            jobInputHash,
+            relationshipCheckpointId: checkpointId,
+            policyVersion: 'gender-routing-v1',
+            planId: 'basic',
+            canonicalInputHmac,
+            populationCount: 1,
+            detailedCap: 100,
+            selectedCount: 1,
+            modelAttemptedCount: 0,
+            modelValidCount: 0,
+            modelFailedCount: 0,
+            modelRetriedCount: 0,
+            quotaShortfalls: { female: 0, uncertainty: 0 },
+            bucketCounts: { female_priority: 0, uncertainty: 1, male_deprioritized: 0 },
+            selectedBucketCounts: { female_priority: 0, uncertainty: 1, male_deprioritized: 0 },
+            rows: [{
+                mutualOrdinal: 1,
+                candidateKey: 'mutual:1',
+                hasImage: false,
+                hasName: false,
+                imageContentHmac: null,
+                fullnameHmac: null,
+                femaleScore: 0,
+                maleScore: 0,
+                uncertaintyScore: 1,
+                evidence: 'none',
+                bucket: 'uncertainty',
+                routingUnavailable: true,
+                selected: true,
+                selectionReason: 'population_within_cap',
+                selectionSlot: 'fill',
+                ordinal: 1,
+            }],
+        })).rejects.toThrow('ANALYSIS_V2_GENDER_ROUTING_MANIFEST_VALIDATION_ERROR');
+        expect(db.rpc).not.toHaveBeenCalled();
+    });
 });
