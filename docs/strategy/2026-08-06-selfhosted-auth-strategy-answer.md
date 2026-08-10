@@ -3,7 +3,7 @@
 - 작성일: 2026-08-06
 - 대상 문서: [selfhosted_auth 전략 재검토 보고서](./2026-08-06-selfhosted-auth-strategy-review.md) §9의 여섯 질문
 - 근거: [린 캔버스](./2026-07-31-lean-canvas.md) 실측 퍼널 + Supabase 원장
-- 상태: 전략 판단. 코드·설정 변경을 승인하지 않는다
+- 상태: **역사적 전략 판단. 현재 운영 결정은 [8월 매출 우선 운영 전략](./2026-08-08-revenue-first-operating-strategy.md)이 대체한다**
 
 ---
 
