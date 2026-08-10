@@ -57,4 +57,17 @@ describe('analysis V2 gender-routing manifest migration contract', () => {
         expect(functionDefinition('load_analysis_v2_gender_routing_selected'))
             .toContain("v_manifest.status IS DISTINCT FROM 'complete'");
     });
+
+    it('requires the complete relationship population in both manifest mutations', () => {
+        for (const name of [
+            'begin_analysis_v2_gender_routing_manifest',
+            'publish_analysis_v2_gender_routing_manifest',
+        ]) {
+            const definition = functionDefinition(name);
+            expect(definition).toContain(
+                'v_relationship.public_count IS DISTINCT FROM p_population_count',
+            );
+            expect(definition).not.toContain('LEAST(\n            v_relationship.public_count');
+        }
+    });
 });

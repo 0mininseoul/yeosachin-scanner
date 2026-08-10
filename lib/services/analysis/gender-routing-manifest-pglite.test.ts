@@ -149,13 +149,13 @@ async function seed(): Promise<void> {
     );
 }
 
-async function begin() {
+async function begin(populationCount = 101) {
     return asService<{ result: { status: string; attemptCount: number } }>(
         `SELECT public.begin_analysis_v2_gender_routing_manifest(
             $1, 'track:relationships:collect', $2, $3, $4, 'gender-routing-v1',
-            'basic', $5, 101, 100
+            'basic', $5, $6, 100
          ) AS result`,
-        [REQUEST_ID, CLAIM_TOKEN, INPUT_HASH, CHECKPOINT_ID, CANONICAL_INPUT_HMAC],
+        [REQUEST_ID, CLAIM_TOKEN, INPUT_HASH, CHECKPOINT_ID, CANONICAL_INPUT_HMAC, populationCount],
     );
 }
 
@@ -176,6 +176,21 @@ afterEach(async () => {
 });
 
 describe('analysis V2 gender-routing manifest PGlite authority', () => {
+    it('rejects a truncated Basic population instead of accepting it as manifest lineage', async () => {
+        db = await PGlite.create();
+        await seed();
+        await db.query(
+            `UPDATE public.analysis_v2_relationship_manifests
+             SET public_count = 401
+             WHERE request_id = $1 AND job_key = 'track:relationships:collect'`,
+            [REQUEST_ID],
+        );
+
+        await expect(begin(400)).rejects.toThrow(
+            'ANALYSIS_V2_GENDER_ROUTING_MANIFEST_FENCE_MISMATCH',
+        );
+    }, 30_000);
+
     it('publishes once atomically, is idempotent, and only exposes the exact selected ordinal topology', async () => {
         db = await PGlite.create();
         await seed();
