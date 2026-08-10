@@ -17,6 +17,10 @@ import {
     isAnalysisResultOperator,
     resolveAnalysisResultOwner,
 } from '@/lib/services/analysis/result-operator-access';
+import {
+    AccountPrincipalAdmissionError,
+    requireActiveAccountClassification,
+} from '@/lib/services/identity/account-principal-store';
 
 export async function GET(
     request: Request,
@@ -35,6 +39,17 @@ export async function GET(
                 { error: '로그인이 필요합니다.' },
                 { status: 401 }
             );
+        }
+        try {
+            await requireActiveAccountClassification(user.id);
+        } catch (accountError) {
+            if (accountError instanceof AccountPrincipalAdmissionError) {
+                return NextResponse.json(
+                    { error: '이 계정은 현재 사용할 수 없습니다.' },
+                    { status: 403 },
+                );
+            }
+            throw accountError;
         }
 
         const demo = await demoAnalysisStore.findForOwner(requestId, user.id);
@@ -229,6 +244,17 @@ export async function DELETE(
         const { data: { user }, error: authError } = await supabase.auth.getUser();
         if (authError || !user) {
             return NextResponse.json({ error: '로그인이 필요합니다.' }, { status: 401 });
+        }
+        try {
+            await requireActiveAccountClassification(user.id);
+        } catch (accountError) {
+            if (accountError instanceof AccountPrincipalAdmissionError) {
+                return NextResponse.json(
+                    { error: '이 계정은 현재 사용할 수 없습니다.' },
+                    { status: 403 },
+                );
+            }
+            throw accountError;
         }
 
         const demo = await demoAnalysisStore.findForOwner(requestId, user.id);

@@ -1,11 +1,15 @@
 import { createClient } from '@/lib/supabase/server';
-import { supabaseAdmin } from '@/lib/supabase/admin';
 import { NextResponse } from 'next/server';
 import type { User } from '@supabase/supabase-js';
 import { buildAuthProfilePatch } from '@/lib/services/identity/auth-profile';
+import {
+    AccountPrincipalPersistenceError,
+    ensureAccountPrincipal,
+    loadAccountPrincipal,
+    type AccountPrincipal,
+    type SocialAccountProfile,
+} from '@/lib/services/identity/account-principal-store';
 
-const USER_RESPONSE_COLUMNS = 'id, email, provider, analysis_count, is_paid_user, is_unlimited, created_at, updated_at';
-const USER_INTERNAL_COLUMNS = `${USER_RESPONSE_COLUMNS}, name, nickname, profile_image, gender, birthyear`;
 const SAFE_DATABASE_CODE = /^(?:[0-9A-Z]{5}|PGRST[0-9]{3})$/;
 
 interface UserResponseDto {
@@ -25,27 +29,42 @@ type DatabaseOperation = 'read' | 'insert' | 'update';
 // user_metadata는 사용자가 수정할 수 있으므로 결제 식별용 전화번호로 사용하지 않는다.
 // ⚠️ user_metadata 키는 공급자/Supabase 매핑에 따라 다를 수 있어 방어적으로 조회한다.
 //    실제 로그인 후 users 테이블에 값이 비어 있으면 키 매핑을 조정할 것.
-function extractProfile(user: User) {
+const SOCIAL_PROFILE_FIELDS = [
+    'name',
+    'nickname',
+    'profile_image',
+    'gender',
+    'birthyear',
+] as const;
+
+function extractProfile(user: User): SocialAccountProfile {
     const m = (user.user_metadata ?? {}) as Record<string, unknown>;
-    return buildAuthProfilePatch({
+    const patch = buildAuthProfilePatch({
         name: [m.name, m.full_name],
         nickname: [m.nickname, m.preferred_username, m.user_name, m.name],
         profileImage: [m.avatar_url, m.picture, m.profile_image],
         gender: [m.gender],
         birthyear: [m.birthyear, m.birth_year],
     });
+    return {
+        ...(patch.name ? { name: patch.name } : {}),
+        ...(patch.nickname ? { nickname: patch.nickname } : {}),
+        ...(patch.profile_image ? { profile_image: patch.profile_image } : {}),
+        ...(patch.gender ? { gender: patch.gender } : {}),
+        ...(patch.birthyear ? { birthyear: patch.birthyear } : {}),
+    };
 }
 
-function toUserResponse(row: Record<string, unknown>): UserResponseDto {
+function toUserResponse(row: AccountPrincipal): UserResponseDto {
     return {
-        id: row.id as string,
-        email: row.email as string,
-        provider: row.provider as string,
-        analysis_count: row.analysis_count as number,
-        is_paid_user: row.is_paid_user as boolean,
-        is_unlimited: row.is_unlimited as boolean,
-        created_at: row.created_at as string,
-        updated_at: row.updated_at as string,
+        id: row.id,
+        email: row.email,
+        provider: row.provider,
+        analysis_count: row.analysis_count,
+        is_paid_user: row.is_paid_user,
+        is_unlimited: row.is_unlimited,
+        created_at: row.created_at,
+        updated_at: row.updated_at,
     };
 }
 
@@ -59,6 +78,14 @@ function databaseErrorCode(error: unknown): string {
 
 function logDatabaseFailure(operation: DatabaseOperation, error: unknown) {
     console.error('user.me database failure', operation, databaseErrorCode(error));
+}
+
+function bridgeDatabaseError(error: unknown) {
+    return {
+        code: error instanceof AccountPrincipalPersistenceError
+            ? error.databaseCode
+            : 'unknown',
+    };
 }
 
 export async function GET() {
@@ -77,15 +104,13 @@ export async function GET() {
 
         const profile = extractProfile(user);
 
-        // Admin 클라이언트로 사용자 정보 조회 (RLS 우회)
-        const { data: dbUser, error: dbError } = await supabaseAdmin
-            .from('users')
-            .select(USER_INTERNAL_COLUMNS)
-            .eq('id', user.id)
-            .single();
-
-        if (dbError && databaseErrorCode(dbError) !== 'PGRST116') {
-            logDatabaseFailure('read', dbError);
+        // Stable service-role RPC boundary keeps this revision valid before
+        // and after the physical users -> account_principals cutover.
+        let dbUser: AccountPrincipal | null;
+        try {
+            dbUser = await loadAccountPrincipal(user.id);
+        } catch (error) {
+            logDatabaseFailure('read', bridgeDatabaseError(error));
             return NextResponse.json(
                 { error: '사용자 정보 조회에 실패했습니다.' },
                 { status: 500 }
@@ -93,23 +118,26 @@ export async function GET() {
         }
 
         if (!dbUser) {
-            // 사용자 레코드가 없으면 생성 (소셜 프로필 정보 포함)
-            const { data: newUser, error: createError } = await supabaseAdmin
-                .from('users')
-                .insert({
-                    id: user.id,
-                    email: user.email!,
-                    provider: user.app_metadata.provider || 'google',
-                    analysis_count: 0,
-                    is_paid_user: false,
-                    is_unlimited: false,
-                    ...profile,
-                })
-                .select(USER_RESPONSE_COLUMNS)
-                .single();
-
-            if (createError || !newUser) {
-                logDatabaseFailure('insert', createError);
+            if (!user.email) {
+                logDatabaseFailure('insert', { code: 'ACCOUNT_EMAIL_REQUIRED' });
+                return NextResponse.json(
+                    { error: '사용자 정보 생성에 실패했습니다.' },
+                    { status: 500 }
+                );
+            }
+            const provider = user.app_metadata.provider === 'kakao'
+                ? 'kakao'
+                : 'google';
+            let newUser: AccountPrincipal;
+            try {
+                newUser = await ensureAccountPrincipal({
+                    userId: user.id,
+                    email: user.email,
+                    provider,
+                    profile,
+                });
+            } catch (error) {
+                logDatabaseFailure('insert', bridgeDatabaseError(error));
                 return NextResponse.json(
                     { error: '사용자 정보 생성에 실패했습니다.' },
                     { status: 500 }
@@ -117,34 +145,47 @@ export async function GET() {
             }
 
             return NextResponse.json({
-                user: toUserResponse(newUser as Record<string, unknown>),
+                user: toUserResponse(newUser),
             });
         }
 
         // 기존 유저: 새로 승인된 프로필 항목이 비어 있으면 백필
-        const existing = dbUser as Record<string, unknown>;
-        const patch: Record<string, string | null> = {};
-        for (const [key, value] of Object.entries(profile)) {
-            if (typeof value === 'string' && value && !existing[key]) {
-                patch[key] = value;
+        const existing = dbUser;
+        const patch: SocialAccountProfile = {};
+        for (const field of SOCIAL_PROFILE_FIELDS) {
+            const value = profile[field];
+            if (value && !existing[field]) {
+                patch[field] = value;
             }
         }
         if (Object.keys(patch).length > 0) {
-            const { data: updated, error: updateError } = await supabaseAdmin
-                .from('users')
-                .update(patch)
-                .eq('id', user.id)
-                .select(USER_RESPONSE_COLUMNS)
-                .single();
-            if (updateError || !updated) {
-                logDatabaseFailure('update', updateError);
+            if (!user.email) {
+                logDatabaseFailure('update', { code: 'ACCOUNT_EMAIL_REQUIRED' });
+                return NextResponse.json(
+                    { error: '사용자 정보 업데이트에 실패했습니다.' },
+                    { status: 500 }
+                );
+            }
+            const provider = user.app_metadata.provider === 'kakao'
+                ? 'kakao'
+                : 'google';
+            let updated: AccountPrincipal;
+            try {
+                updated = await ensureAccountPrincipal({
+                    userId: user.id,
+                    email: user.email,
+                    provider,
+                    profile: patch,
+                });
+            } catch (error) {
+                logDatabaseFailure('update', bridgeDatabaseError(error));
                 return NextResponse.json(
                     { error: '사용자 정보 업데이트에 실패했습니다.' },
                     { status: 500 }
                 );
             }
             return NextResponse.json({
-                user: toUserResponse(updated as Record<string, unknown>),
+                user: toUserResponse(updated),
             });
         }
 
