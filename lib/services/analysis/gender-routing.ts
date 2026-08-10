@@ -42,9 +42,14 @@ export interface GenderRoutingManifestRow {
     readonly hasName: boolean;
     readonly imageContentHmac: string | null;
     readonly fullnameHmac: string | null;
+    readonly femaleScore: number | null;
+    readonly maleScore: number | null;
+    readonly uncertaintyScore: number | null;
+    readonly evidence: GenderRoutingEvidence | null;
     readonly bucket: GenderRoutingBucket;
     readonly routingUnavailable: boolean;
     readonly selected: boolean;
+    readonly selectionReason: 'population_within_cap' | 'female_quota' | 'uncertainty_quota' | 'fill' | 'not_selected';
     readonly selectionSlot: 'female' | 'uncertainty' | 'fill' | null;
     readonly ordinal: number | null;
 }
@@ -57,6 +62,9 @@ export interface GenderRoutingManifest {
     readonly modelAttemptedCount: number;
     readonly modelValidCount: number;
     readonly modelFailedCount: number;
+    readonly modelRetriedCount: number;
+    readonly canonicalInputHmac: string;
+    readonly quotaShortfalls: Readonly<{ female: number; uncertainty: number }>;
     readonly bucketCounts: Readonly<Record<GenderRoutingBucket, number>>;
     readonly selectedBucketCounts: Readonly<Record<GenderRoutingBucket, number>>;
     readonly rows: readonly GenderRoutingManifestRow[];
@@ -73,13 +81,30 @@ function finiteScore(value: number): boolean {
     return Number.isFinite(value) && value >= 0 && value <= 1;
 }
 
-function validAssessment(value: GenderRoutingAssessment): boolean {
+function validAssessment(
+    value: GenderRoutingAssessment,
+    candidate: Readonly<{ hasImage: boolean; hasName: boolean }>,
+): boolean {
+    const scoreTotal = value.femaleScore + value.maleScore + value.uncertaintyScore;
+    const expectedEvidence: GenderRoutingEvidence = candidate.hasImage
+        ? candidate.hasName ? 'image_and_name' : 'image_only'
+        : candidate.hasName ? 'name_only' : 'none';
     return finiteScore(value.femaleScore)
         && finiteScore(value.maleScore)
         && finiteScore(value.uncertaintyScore)
-        && value.femaleScore + value.maleScore >= 0.99
-        && value.femaleScore + value.maleScore <= 1.01
-        && ['image_and_name', 'image_only', 'name_only', 'none'].includes(value.evidence);
+        && scoreTotal >= 0.99
+        && scoreTotal <= 1.01
+        && value.evidence === expectedEvidence;
+}
+
+function normalizedAssessment(value: GenderRoutingAssessment): GenderRoutingAssessment {
+    const total = value.femaleScore + value.maleScore + value.uncertaintyScore;
+    return {
+        femaleScore: value.femaleScore / total,
+        maleScore: value.maleScore / total,
+        uncertaintyScore: value.uncertaintyScore / total,
+        evidence: value.evidence,
+    };
 }
 
 function hmac(secret: string, value: string): string {
@@ -104,10 +129,34 @@ function normalizeCandidate(candidate: GenderRoutingCandidateInput, secret: stri
         hasImage: candidate.profilePicUrl !== null,
         hasName: candidate.fullname !== null && candidate.fullname.trim().length > 0,
         imageContentHmac: candidate.imageContentHmac ?? null,
-        fullnameHmac: candidate.fullname === null
+        fullnameHmac: candidate.fullname === null || candidate.fullname.trim().length === 0
             ? null
             : hmac(secret, `gender-routing:fullname:v1\n${candidate.fullname}`),
     };
+}
+
+/**
+ * Returns exactly the candidate set permitted one model retry. The runtime uses this before it
+ * starts the retry so a valid first response is never charged a second time.
+ */
+export function genderRoutingRetryCandidateKeys(input: {
+    candidates: readonly GenderRoutingCandidateInput[];
+    assessments?: ReadonlyMap<string, GenderRoutingAssessment>;
+    hmacSecret: string;
+}): readonly string[] {
+    const normalized = input.candidates.map(candidate => normalizeCandidate(candidate, input.hmacSecret));
+    const callable = normalized.filter(candidate => candidate.hasImage || candidate.hasName);
+    const failed = callable.filter(candidate => {
+        const assessment = input.assessments?.get(candidate.candidateKey);
+        return !assessment || !validAssessment(assessment, candidate);
+    });
+    const valid = callable.length - failed.length;
+    if (callable.length === 0 || valid === 0 || failed.length / callable.length > 0.1) {
+        return Object.freeze(valid === 0
+            ? callable.map(candidate => candidate.candidateKey)
+            : failed.map(candidate => candidate.candidateKey));
+    }
+    return Object.freeze([]);
 }
 
 function bucketFor(assessment: GenderRoutingAssessment): GenderRoutingBucket {
@@ -123,12 +172,16 @@ function tieBreak(secret: string, requestId: string, checkpointId: string, candi
     return hmac(secret, `gender-routing:tie:v1\n${requestId}\n${checkpointId}\n${candidateKey}\n${GENDER_ROUTING_POLICY_VERSION}`);
 }
 
-function sorted(
-    rows: readonly { candidateKey: string; bucket: GenderRoutingBucket; assessment: GenderRoutingAssessment }[],
+function sorted<T extends {
+    candidateKey: string;
+    bucket: GenderRoutingBucket;
+    assessment: GenderRoutingAssessment;
+}>(
+    rows: readonly T[],
     secret: string,
     requestId: string,
     checkpointId: string,
-): typeof rows {
+): T[] {
     return [...rows].sort((left, right) => {
         const score = left.bucket === 'female_priority'
             ? right.assessment.femaleScore - left.assessment.femaleScore
@@ -158,6 +211,7 @@ export function buildGenderRoutingManifest(input: {
     relationshipCheckpointId: string;
     candidates: readonly GenderRoutingCandidateInput[];
     assessments?: ReadonlyMap<string, GenderRoutingAssessment>;
+    retryAssessments?: ReadonlyMap<string, GenderRoutingAssessment>;
     hmacSecret: string;
 }): GenderRoutingManifest {
     const cap = GENDER_ROUTING_CAPS[input.planId];
@@ -171,12 +225,29 @@ export function buildGenderRoutingManifest(input: {
     }
     const ordered = [...normalized].sort((a, b) => tieBreak(input.hmacSecret, input.requestId, input.relationshipCheckpointId, a.candidateKey)
         .localeCompare(tieBreak(input.hmacSecret, input.requestId, input.relationshipCheckpointId, b.candidateKey)));
+    const canonicalInputHmac = hmac(input.hmacSecret, [
+        'gender-routing:canonical-input:v1',
+        ...[...normalized]
+            .sort((left, right) => left.candidateKey.localeCompare(right.candidateKey))
+            .map(candidate => [
+                candidate.candidateKey,
+                candidate.hasImage ? 'image' : 'no_image',
+                candidate.hasName ? 'name' : 'no_name',
+                candidate.fullnameHmac ?? '',
+                candidate.imageContentHmac ?? '',
+            ].join('|')),
+    ].join('\n'));
     if (normalized.length <= cap.detailed) {
         const rows = ordered.map((candidate, index): GenderRoutingManifestRow => ({
             ...candidate,
+            femaleScore: null,
+            maleScore: null,
+            uncertaintyScore: null,
+            evidence: null,
             bucket: 'female_priority',
             routingUnavailable: false,
             selected: true,
+            selectionReason: 'population_within_cap',
             selectionSlot: 'fill',
             ordinal: index + 1,
         }));
@@ -188,34 +259,74 @@ export function buildGenderRoutingManifest(input: {
             modelAttemptedCount: 0,
             modelValidCount: 0,
             modelFailedCount: 0,
+            modelRetriedCount: 0,
+            canonicalInputHmac,
+            quotaShortfalls: { female: 0, uncertainty: 0 },
             bucketCounts: { female_priority: normalized.length, uncertainty: 0, male_deprioritized: 0 },
             selectedBucketCounts: { female_priority: normalized.length, uncertainty: 0, male_deprioritized: 0 },
             rows,
         });
     }
 
-    const assessed: { candidateKey: string; bucket: GenderRoutingBucket; assessment: GenderRoutingAssessment }[] = [];
+    const assessed: { candidateKey: string; bucket: GenderRoutingBucket; assessment: GenderRoutingAssessment; routingUnavailable: boolean }[] = [];
     let attempted = 0;
     let valid = 0;
     let failed = 0;
+    let retried = 0;
+    const invalidCandidates = new Set<string>();
     for (const candidate of normalized) {
         const assessment = candidate.hasImage || candidate.hasName
             ? input.assessments?.get(candidate.candidateKey)
             : undefined;
         if (candidate.hasImage || candidate.hasName) attempted += 1;
-        if (!assessment || !validAssessment(assessment)) {
+        if (!assessment || !validAssessment(assessment, candidate)) {
             if (candidate.hasImage || candidate.hasName) failed += 1;
+            if (candidate.hasImage || candidate.hasName) invalidCandidates.add(candidate.candidateKey);
             assessed.push({
                 candidateKey: candidate.candidateKey,
                 bucket: 'uncertainty',
                 assessment: { femaleScore: 0, maleScore: 0, uncertaintyScore: 1, evidence: 'none' },
+                routingUnavailable: true,
             });
             continue;
         }
         valid += 1;
-        assessed.push({ candidateKey: candidate.candidateKey, bucket: bucketFor(assessment), assessment });
+        const normalizedScores = normalizedAssessment(assessment);
+        assessed.push({
+            candidateKey: candidate.candidateKey,
+            bucket: bucketFor(normalizedScores),
+            assessment: normalizedScores,
+            routingUnavailable: false,
+        });
     }
-    if (attempted === 0 || valid === 0 || failed / attempted > 0.1) {
+    const stageFailed = attempted === 0 || valid === 0 || failed / attempted > 0.1;
+    if (stageFailed && attempted > 0) {
+        const retryKeys = valid === 0
+            ? normalized.filter(candidate => candidate.hasImage || candidate.hasName).map(candidate => candidate.candidateKey)
+            : [...invalidCandidates];
+        for (const candidateKey of retryKeys) {
+            const candidate = normalized.find(row => row.candidateKey === candidateKey)!;
+            const retry = input.retryAssessments?.get(candidateKey);
+            retried += 1;
+            if (!retry || !validAssessment(retry, candidate)) continue;
+            const assessment = normalizedAssessment(retry);
+            const index = assessed.findIndex(row => row.candidateKey === candidateKey);
+            assessed[index] = {
+                candidateKey,
+                bucket: bucketFor(assessment),
+                assessment,
+                routingUnavailable: false,
+            };
+            valid += 1;
+        }
+    }
+    // The policy gate measures the unresolved candidate burden, not unsuccessful model calls.
+    // A recovered first attempt must not remain failed and a retry never dilutes the denominator.
+    const finalFailed = assessed.filter(row => {
+        const candidate = normalized.find(item => item.candidateKey === row.candidateKey)!;
+        return row.routingUnavailable && (candidate.hasImage || candidate.hasName);
+    }).length;
+    if (attempted === 0 || valid === 0 || finalFailed / attempted > 0.1) {
         throw new GenderRoutingError('ROUTING_UNAVAILABLE');
     }
     const byKey = new Map(assessed.map(row => [row.candidateKey, row]));
@@ -243,9 +354,20 @@ export function buildGenderRoutingManifest(input: {
         const scored = byKey.get(candidate.candidateKey)!;
         return {
             ...candidate,
+            femaleScore: scored.assessment.femaleScore,
+            maleScore: scored.assessment.maleScore,
+            uncertaintyScore: scored.assessment.uncertaintyScore,
+            evidence: scored.assessment.evidence,
             bucket: scored.bucket,
-            routingUnavailable: scored.assessment.evidence === 'none',
+            routingUnavailable: scored.routingUnavailable,
             selected: selectedSlot !== null,
+            selectionReason: selectedSlot === 'female'
+                ? 'female_quota'
+                : selectedSlot === 'uncertainty'
+                    ? 'uncertainty_quota'
+                    : selectedSlot === 'fill'
+                        ? 'fill'
+                        : 'not_selected',
             selectionSlot: selectedSlot,
             ordinal: selectedSlot === null ? null : [...selected.keys()].indexOf(candidate.candidateKey) + 1,
         } satisfies GenderRoutingManifestRow;
@@ -262,7 +384,13 @@ export function buildGenderRoutingManifest(input: {
         selectedCount: selected.size,
         modelAttemptedCount: attempted,
         modelValidCount: valid,
-        modelFailedCount: failed,
+        modelFailedCount: finalFailed,
+        modelRetriedCount: retried,
+        canonicalInputHmac,
+        quotaShortfalls: {
+            female: Math.max(0, cap.femaleQuota - pools.female_priority.length),
+            uncertainty: Math.max(0, cap.uncertaintyQuota - pools.uncertainty.length),
+        },
         bucketCounts: counts(() => true),
         selectedBucketCounts: counts(row => row.selected),
         rows,
