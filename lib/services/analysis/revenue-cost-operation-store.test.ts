@@ -7,6 +7,9 @@ import {
 const requestId = '11111111-1111-4111-8111-111111111111';
 const ownerKeyHash = 'a'.repeat(64);
 const scopeHash = 'b'.repeat(64);
+const jobKey = 'track:relationships:collect';
+const claimToken = '33333333-3333-4333-8333-333333333333';
+const operationKey = `relationship-followers:${'c'.repeat(64)}`;
 
 function client(data: unknown, error: { code?: string; message?: string } | null = null) {
     const normalized = data && typeof data === 'object' && !Array.isArray(data)
@@ -17,6 +20,45 @@ function client(data: unknown, error: { code?: string; message?: string } | null
 }
 
 describe('RevenueCostOperationStore', () => {
+    it('uses provider-source v2 authority without caller-supplied cost or operation fields', async () => {
+        const stub = client({ disposition: 'accepted', created: true, replayed: false, operationId: '22222222-2222-4222-8222-222222222222' });
+        const store = new RevenueCostOperationStore(stub.client);
+
+        await store.reserveV2({
+            requestId, jobKey, jobClaimToken: claimToken, jobInputHash: scopeHash,
+            sourceKind: 'provider_run', sourceOperationKey: operationKey, sourceAttempt: 0,
+        });
+        expect(stub.rpc).toHaveBeenCalledWith('reserve_analysis_revenue_cost_operation_v2', {
+            p_request_id: requestId, p_job_key: jobKey, p_job_claim_token: claimToken,
+            p_job_input_hash: scopeHash, p_source_kind: 'provider_run',
+            p_source_operation_key: operationKey, p_source_attempt: 0,
+        });
+        await store.markStartedV2({
+            requestId, jobKey, jobClaimToken: claimToken, jobInputHash: scopeHash,
+            sourceKind: 'provider_run', sourceOperationKey: operationKey, sourceAttempt: 0,
+        });
+        expect(stub.rpc).toHaveBeenLastCalledWith('mark_analysis_revenue_cost_operation_started_v2', {
+            p_request_id: requestId, p_job_key: jobKey, p_job_claim_token: claimToken,
+            p_job_input_hash: scopeHash, p_source_kind: 'provider_run',
+            p_source_operation_key: operationKey, p_source_attempt: 0,
+        });
+    });
+
+    it('fails closed locally for an otherwise valid AI source until authoritative pre-call pricing exists', async () => {
+        const stub = client({ disposition: 'accepted' });
+        const store = new RevenueCostOperationStore(stub.client);
+        const aiSource = {
+            requestId, jobKey, jobClaimToken: claimToken, jobInputHash: scopeHash,
+            sourceKind: 'ai_attempt' as const,
+            sourceOperationKey: `private-account-name:${'d'.repeat(64)}`,
+            sourceAttempt: 1,
+        };
+
+        await expect(store.reserveV2(aiSource)).rejects.toThrow('REVENUE_COST_OPERATION_AI_NOT_READY');
+        expect(stub.rpc).not.toHaveBeenCalled();
+        expect(() => store.markStartedV2(aiSource)).toThrow('REVENUE_COST_OPERATION_AI_NOT_READY');
+        expect(stub.rpc).not.toHaveBeenCalled();
+    });
     it('uses the fenced begin RPC and rejects malformed request identity', async () => {
         const stub = client({ disposition: 'begun', created: true, replayed: false, operationId: '22222222-2222-4222-8222-222222222222' });
         const store = new RevenueCostOperationStore(stub.client);
