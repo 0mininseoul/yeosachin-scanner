@@ -1,5 +1,9 @@
 import { describe, expect, it } from 'vitest';
-import { buildGenderRoutingManifest, GenderRoutingError } from './gender-routing';
+import {
+    buildGenderRoutingManifest,
+    createGenderRoutingCanonicalInputHmac,
+    GenderRoutingError,
+} from './gender-routing';
 
 const base = {
     planId: 'basic' as const,
@@ -129,6 +133,29 @@ describe('revenue gender routing', () => {
         expect(result.modelFailedCount).toBe(10);
     });
 
+    it('fails closed when one failed retry leaves more than ten percent unresolved on the original denominator', () => {
+        const candidates = Array.from({ length: 101 }, (_, index) => candidate(index));
+        const initial = new Map(candidates.slice(0, 80).map(row => [row.candidateKey, {
+            femaleScore: 0.8,
+            maleScore: 0.1,
+            uncertaintyScore: 0.1,
+            evidence: 'image_and_name' as const,
+        }]));
+        const retry = new Map(candidates.slice(80, 90).map(row => [row.candidateKey, {
+            femaleScore: 0.1,
+            maleScore: 0.8,
+            uncertaintyScore: 0.1,
+            evidence: 'image_and_name' as const,
+        }]));
+
+        expect(() => buildGenderRoutingManifest({
+            ...base,
+            candidates,
+            assessments: initial,
+            retryAssessments: retry,
+        })).toThrowError(new GenderRoutingError('ROUTING_UNAVAILABLE'));
+    });
+
     it('does not count candidates with neither permitted input as failed model calls', () => {
         const candidates = Array.from({ length: 101 }, (_, index) => index === 100
             ? { candidateKey: 'candidate:no-input', profilePicUrl: null, fullname: null }
@@ -148,5 +175,35 @@ describe('revenue gender routing', () => {
             routingUnavailable: true,
             selected: true,
         });
+    });
+
+    it('canonicalizes normalized fullnames and does not treat an unfingerprinted image URL as image evidence', () => {
+        const composed = [{
+            candidateKey: 'candidate:1',
+            profilePicUrl: 'https://images.example/original.jpg',
+            fullname: '  Åda\t\nLovelace  ',
+            imageContentHmac: 'a'.repeat(64),
+        }];
+        const decomposed = [{
+            candidateKey: 'candidate:1',
+            profilePicUrl: 'https://images.example/changed-query.jpg?cache=2',
+            fullname: 'A\u030Ada Lovelace',
+            imageContentHmac: 'a'.repeat(64),
+        }];
+
+        expect(createGenderRoutingCanonicalInputHmac({
+            candidates: composed,
+            hmacSecret: base.hmacSecret,
+        })).toBe(createGenderRoutingCanonicalInputHmac({
+            candidates: decomposed,
+            hmacSecret: base.hmacSecret,
+        }));
+        expect(buildGenderRoutingManifest({
+            ...base,
+            candidates: [{
+                candidateKey: 'candidate:missing-image-fingerprint',
+                fullname: null,
+            }],
+        }).rows[0]).toMatchObject({ hasImage: false, evidence: null });
     });
 });

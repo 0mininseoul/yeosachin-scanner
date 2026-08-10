@@ -1,6 +1,17 @@
 import { readFileSync } from 'node:fs';
 import { PGlite, type Results } from '@electric-sql/pglite';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
+import { createAnalysisV2GenderRoutingManifestStore } from './gender-routing-manifest-store';
+import { createGenderRoutingCanonicalInputHmac } from './gender-routing';
+import {
+    createAnalysisV2CollectionTopology,
+    createAnalysisV2ProfileFetchExecutor,
+    createAnalysisV2RelationshipsExecutor,
+} from './v2-collection-executors';
+import type {
+    AnalysisV2ProfileAttemptResultInput,
+    AnalysisV2ProfileFetchResume,
+} from './v2-profile-fetch-store';
 
 const migration = readFileSync(
     new URL(
@@ -170,6 +181,76 @@ async function publish(payload = rows()) {
     );
 }
 
+async function loadSelected(
+    planId: 'basic' | 'standard' = 'basic',
+    relationshipCheckpointId = CHECKPOINT_ID,
+) {
+    return asService<{ result: { selectedCount: number; rows: Array<{ ordinal: number }> } }>(
+        `SELECT public.load_analysis_v2_gender_routing_selected(
+            $1, $2, 'gender-routing-v1', $3
+         ) AS result`,
+        [REQUEST_ID, relationshipCheckpointId, planId],
+    );
+}
+
+async function loadSelectedUsernames(
+    planId: 'basic' | 'standard' = 'basic',
+    relationshipCheckpointId = CHECKPOINT_ID,
+) {
+    return asService<{ result: { selectedCount: number; rows: Array<{ ordinal: number; username: string }> } }>(
+        `SELECT public.load_analysis_v2_gender_routing_selected_usernames(
+            $1, $2, 'gender-routing-v1', $3
+         ) AS result`,
+        [REQUEST_ID, relationshipCheckpointId, planId],
+    );
+}
+
+function pgliteManifestStore() {
+    return createAnalysisV2GenderRoutingManifestStore({
+        rpc: async (name, params) => {
+            const ordered = name === 'begin_analysis_v2_gender_routing_manifest'
+                ? [
+                    params.p_request_id, params.p_job_key, params.p_claim_token, params.p_job_input_hash,
+                    params.p_relationship_checkpoint_id, params.p_policy_version, params.p_plan_id,
+                    params.p_canonical_input_hmac, params.p_population_count, params.p_detailed_cap,
+                ]
+                : name === 'publish_analysis_v2_gender_routing_manifest'
+                    ? [
+                        params.p_request_id, params.p_job_key, params.p_claim_token, params.p_job_input_hash,
+                        params.p_relationship_checkpoint_id, params.p_policy_version, params.p_plan_id,
+                        params.p_canonical_input_hmac, params.p_population_count, params.p_detailed_cap,
+                        params.p_selected_count, params.p_model_attempted_count, params.p_model_valid_count,
+                        params.p_model_failed_count, params.p_model_retried_count, params.p_quota_female_shortfall,
+                        params.p_quota_uncertainty_shortfall, params.p_female_priority_count,
+                        params.p_uncertainty_count, params.p_male_deprioritized_count,
+                        params.p_selected_female_priority_count, params.p_selected_uncertainty_count,
+                        params.p_selected_male_deprioritized_count, JSON.stringify(params.p_rows),
+                    ]
+                    : [
+                        params.p_request_id, params.p_relationship_checkpoint_id,
+                        params.p_policy_version, params.p_plan_id,
+                    ];
+            const cast = ordered.map((_, index) => (
+                name === 'publish_analysis_v2_gender_routing_manifest' && index === ordered.length - 1
+                    ? `$${index + 1}::JSONB`
+                    : `$${index + 1}`
+            )).join(', ');
+            try {
+                const result = await asService<{ result: unknown }>(
+                    `SELECT public.${name}(${cast}) AS result`,
+                    ordered,
+                );
+                return { data: result.rows[0]?.result ?? null, error: null };
+            } catch (error) {
+                return {
+                    data: null,
+                    error: { message: error instanceof Error ? error.message : String(error) },
+                };
+            }
+        },
+    });
+}
+
 afterEach(async () => {
     await db?.close();
     db = undefined;
@@ -195,7 +276,8 @@ describe('analysis V2 gender-routing manifest PGlite authority', () => {
         db = await PGlite.create();
         await seed();
 
-        await expect(begin()).resolves.toMatchObject({ rows: [{ result: { status: 'building', attemptCount: 1 } }] });
+        const begins = await Promise.all([begin(), begin()]);
+        expect(begins.map(result => result.rows[0]?.result.attemptCount).sort()).toEqual([1, 2]);
         const concurrent = await Promise.all([publish(), publish()]);
         for (const result of concurrent) {
             expect(result.rows[0]?.result).toMatchObject({ status: 'complete', selectedCount: 100 });
@@ -204,16 +286,12 @@ describe('analysis V2 gender-routing manifest PGlite authority', () => {
             'SELECT pg_catalog.count(*)::INTEGER AS count FROM public.analysis_v2_gender_routing_candidates',
         )).rows).toEqual([{ count: 101 }]);
 
-        const selected = await asService<{ result: { selectedCount: number; rows: Array<{ ordinal: number }> } }>(
-            `SELECT public.load_analysis_v2_gender_routing_selected(
-                $1, $2, 'gender-routing-v1', 'basic', $3
-             ) AS result`,
-            [REQUEST_ID, CHECKPOINT_ID, CANONICAL_INPUT_HMAC],
-        );
+        const selected = await loadSelected();
         expect(selected.rows[0]?.result.selectedCount).toBe(100);
         expect(selected.rows[0]?.result.rows.map(row => row.ordinal)).toEqual(
             Array.from({ length: 100 }, (_, index) => index + 1),
         );
+        await expect(publish()).resolves.toMatchObject({ rows: [{ result: { status: 'complete', selectedCount: 100 } }] });
 
         const drift = rows();
         drift[0] = { ...drift[0]!, femaleScore: 0.7, maleScore: 0.2 };
@@ -224,27 +302,15 @@ describe('analysis V2 gender-routing manifest PGlite authority', () => {
         db = await PGlite.create();
         await seed();
         await begin();
-        await expect(asService(
-            `SELECT public.load_analysis_v2_gender_routing_selected(
-                $1, $2, 'gender-routing-v1', 'basic', $3
-             )`, [REQUEST_ID, CHECKPOINT_ID, CANONICAL_INPUT_HMAC],
-        )).rejects.toThrow('ANALYSIS_V2_GENDER_ROUTING_MANIFEST_NOT_COMPLETE');
+        await expect(loadSelected()).rejects.toThrow('ANALYSIS_V2_GENDER_ROUTING_MANIFEST_NOT_COMPLETE');
         await publish();
-        await expect(asService(
-            `SELECT public.load_analysis_v2_gender_routing_selected(
-                $1, $2, 'gender-routing-v1', 'basic', $3
-             )`, [REQUEST_ID, CHECKPOINT_ID, 'f'.repeat(64)],
-        )).rejects.toThrow('ANALYSIS_V2_GENDER_ROUTING_MANIFEST_DRIFT');
+        await expect(loadSelected('standard')).rejects.toThrow('ANALYSIS_V2_GENDER_ROUTING_MANIFEST_DRIFT');
         await db!.query(
             `UPDATE public.analysis_v2_gender_routing_manifests
              SET status = 'invalidated', invalidated_at = pg_catalog.clock_timestamp()
              WHERE request_id = $1`, [REQUEST_ID],
         );
-        await expect(asService(
-            `SELECT public.load_analysis_v2_gender_routing_selected(
-                $1, $2, 'gender-routing-v1', 'basic', $3
-             )`, [REQUEST_ID, CHECKPOINT_ID, CANONICAL_INPUT_HMAC],
-        )).rejects.toThrow('ANALYSIS_V2_GENDER_ROUTING_MANIFEST_NOT_COMPLETE');
+        await expect(loadSelected()).rejects.toThrow('ANALYSIS_V2_GENDER_ROUTING_MANIFEST_NOT_COMPLETE');
 
         for (const role of ['anon', 'authenticated']) {
             await db!.exec(`SET ROLE ${role}`);
@@ -254,13 +320,316 @@ describe('analysis V2 gender-routing manifest PGlite authority', () => {
                 )).rejects.toThrow(/permission denied/i);
                 await expect(db!.query(
                     `SELECT public.load_analysis_v2_gender_routing_selected(
-                        $1, $2, 'gender-routing-v1', 'basic', $3
-                     )`, [REQUEST_ID, CHECKPOINT_ID, CANONICAL_INPUT_HMAC],
+                        $1, $2, 'gender-routing-v1', 'basic'
+                     )`, [REQUEST_ID, CHECKPOINT_ID],
                 )).rejects.toThrow(/permission denied/i);
             } finally {
                 await db!.exec('RESET ROLE');
             }
         }
+    }, 30_000);
+
+    it('re-fences both selected loaders against current scope, policy, job input, relationship count, and corruption', async () => {
+        db = await PGlite.create();
+        await seed();
+        await begin();
+        await publish();
+        await expect(loadSelected()).resolves.toMatchObject({ rows: [{ result: { selectedCount: 100 } }] });
+        await expect(loadSelectedUsernames()).resolves.toMatchObject({ rows: [{ result: { selectedCount: 100 } }] });
+
+        const driftCases = [
+            ['pipeline version', `UPDATE public.analysis_requests SET pipeline_version = 'v1' WHERE id = $1`, `UPDATE public.analysis_requests SET pipeline_version = 'v2' WHERE id = $1`],
+            ['request status', `UPDATE public.analysis_requests SET status = 'pending' WHERE id = $1`, `UPDATE public.analysis_requests SET status = 'processing' WHERE id = $1`],
+            ['access mode', `UPDATE public.analysis_requests SET plan_access_mode_snapshot = 'production' WHERE id = $1`, `UPDATE public.analysis_requests SET plan_access_mode_snapshot = 'test_entitlement' WHERE id = $1`],
+            ['plan snapshot', `UPDATE public.analysis_requests SET selected_plan_id_snapshot = 'standard' WHERE id = $1`, `UPDATE public.analysis_requests SET selected_plan_id_snapshot = 'basic' WHERE id = $1`],
+            ['provider mode', `UPDATE public.analysis_v2_provider_execution_policies SET mode = 'production' WHERE request_id = $1`, `UPDATE public.analysis_v2_provider_execution_policies SET mode = 'test_operation_split' WHERE request_id = $1`],
+            ['provider policy', `UPDATE public.analysis_v2_provider_execution_policies SET policy_version = 'wrong' WHERE request_id = $1`, `UPDATE public.analysis_v2_provider_execution_policies SET policy_version = 'authorized-free-e2e-v1' WHERE request_id = $1`],
+            ['relationship job input', `UPDATE public.analysis_pipeline_jobs SET input_hash = $2 WHERE request_id = $1 AND job_key = 'track:relationships:collect'`, `UPDATE public.analysis_pipeline_jobs SET input_hash = $2 WHERE request_id = $1 AND job_key = 'track:relationships:collect'`],
+            ['public count', `UPDATE public.analysis_v2_relationship_manifests SET public_count = 100 WHERE request_id = $1`, `UPDATE public.analysis_v2_relationship_manifests SET public_count = 101 WHERE request_id = $1`],
+        ] as const;
+        for (const [label, introduce, restore] of driftCases) {
+            const needsHash = label === 'relationship job input';
+            await db!.query(introduce, needsHash ? [REQUEST_ID, 'f'.repeat(64)] : [REQUEST_ID]);
+            await expect(loadSelected(), label).rejects.toThrow('ANALYSIS_V2_GENDER_ROUTING_MANIFEST_FENCE_MISMATCH');
+            await expect(loadSelectedUsernames(), label).rejects.toThrow('ANALYSIS_V2_GENDER_ROUTING_MANIFEST_FENCE_MISMATCH');
+            await db!.query(restore, needsHash ? [REQUEST_ID, INPUT_HASH] : [REQUEST_ID]);
+        }
+        await expect(loadSelected('basic', 'f'.repeat(64)))
+            .rejects.toThrow('ANALYSIS_V2_GENDER_ROUTING_MANIFEST_MISSING');
+        await expect(loadSelectedUsernames('basic', 'f'.repeat(64)))
+            .rejects.toThrow('ANALYSIS_V2_GENDER_ROUTING_MANIFEST_MISSING');
+        await expect(db!.query(
+            `UPDATE public.analysis_v2_relationship_manifests SET result_hash = $2 WHERE request_id = $1`,
+            [REQUEST_ID, 'f'.repeat(64)],
+        )).rejects.toThrow(/foreign key/i);
+        await db!.query(
+            `DELETE FROM public.analysis_v2_gender_routing_candidates
+             WHERE request_id = $1 AND relationship_checkpoint_id = $2 AND mutual_ordinal = 101`,
+            [REQUEST_ID, CHECKPOINT_ID],
+        );
+        await expect(loadSelected()).rejects.toThrow('ANALYSIS_V2_GENDER_ROUTING_MANIFEST_CORRUPT');
+        await expect(loadSelectedUsernames()).rejects.toThrow('ANALYSIS_V2_GENDER_ROUTING_MANIFEST_CORRUPT');
+    }, 30_000);
+
+    it('drives the real relationship and profile executors from the typed PGlite manifest store', async () => {
+        db = await PGlite.create();
+        await seed();
+        const manifestStore = pgliteManifestStore();
+        const mutualRows = Array.from({ length: 101 }, (_, index) => ({
+            username: `fixture_${index + 1}`,
+            isPrivate: false,
+            isVerified: false,
+            fullName: `Fixture ${index + 1}`,
+            profilePicUrl: `https://raw-image.example/${index + 1}?volatile=true`,
+            mutualOrdinal: index + 1,
+            followingOrdinal: index + 1,
+            detailedOrdinal: index + 1,
+        }));
+        const hmacSecret = 'pglite-routing-secret-at-least-thirty-two-characters';
+        const canonicalInputHmac = createGenderRoutingCanonicalInputHmac({
+            hmacSecret,
+            candidates: mutualRows.map(row => ({
+                candidateKey: `mutual:${row.mutualOrdinal}`,
+                fullname: row.fullName,
+                imageContentHmac: null,
+            })),
+        });
+        const request = {
+            requestId: REQUEST_ID,
+            targetUsername: 'target_fixture',
+            excludedUsername: 'excluded_fixture',
+            accessMode: 'test_entitlement' as const,
+            providerExecutionPolicy: {
+                mode: 'test_operation_split' as const,
+                policyVersion: 'authorized-free-e2e-v1',
+                operationSlots: {
+                    'target-profile': 'tertiary',
+                    'relationship-followers': 'primary',
+                    'relationship-following': 'secondary',
+                    'profile-fallback': 'tertiary',
+                    'target-likers': 'quaternary',
+                    'target-comments': 'tertiary',
+                    'candidate-likers': 'quinary',
+                },
+            } as const,
+            planId: 'basic' as const,
+            followersDeclaredCount: 0,
+            followingDeclaredCount: 0,
+            detailedMutualLimit: 300 as const,
+        };
+        const evidenceStore = {
+            checkpointRelationshipSide: async () => ({}),
+            freezeRelationships: async () => ({
+                revision: 1,
+                resultHash: CHECKPOINT_ID,
+                exclusionDecisionHash: 'f'.repeat(64),
+                followersResultHash: 'f'.repeat(64),
+                followingResultHash: 'f'.repeat(64),
+                mutualCount: 101,
+                publicCount: 101,
+                privateCount: 0,
+                detailedPublicCount: 101,
+                unscreenedPublicCount: 0,
+            }),
+            loadRelationshipStaging: async () => ({
+                excludedUsername: 'excluded_fixture',
+                detailedPublicUsernames: mutualRows.map(row => row.username),
+                privateMutualUsernames: [],
+                mutualRows,
+            }),
+        };
+        const scope = {
+            schemaVersion: 2,
+            requestSnapshotHash: 'd'.repeat(64),
+            planId: 'basic',
+            planSnapshotHash: 'e'.repeat(64),
+            girlfriendExclusion: { decisionHash: 'f'.repeat(64), excludedCount: 1 as const },
+        };
+        const relationshipContext = {
+            stage: 'relationships',
+            claim: {
+                requestId: REQUEST_ID, jobKey: 'track:relationships:collect', track: 'relationships',
+                kind: 'collection', batch: null, inputHash: INPUT_HASH, generation: 1,
+                reservationToken: CLAIM_TOKEN, claimToken: CLAIM_TOKEN, attemptCount: 1,
+            },
+            job: {
+                requestId: REQUEST_ID, jobKey: 'track:relationships:collect', track: 'relationships',
+                kind: 'collection', batch: null, inputHash: INPUT_HASH, requiredJobKeys: [],
+            },
+            state: scope,
+            aiStagePolicyVersion: null,
+            riskPolicyVersion: null,
+        } as Parameters<ReturnType<typeof createAnalysisV2RelationshipsExecutor>>[0];
+        let profileResume: AnalysisV2ProfileFetchResume | null = null;
+        const profileCheckpointStore = {
+            load: vi.fn(async () => profileResume),
+            checkpointPrimary: vi.fn(async (input: {
+                requestId: string;
+                jobKey: string;
+                requestedUsernames: readonly string[];
+                results: readonly AnalysisV2ProfileAttemptResultInput[];
+            }) => {
+                profileResume = {
+                    requestId: input.requestId,
+                    jobKey: input.jobKey,
+                    requestedUsernames: [...input.requestedUsernames],
+                    frozenUnresolvedUsernames: input.results
+                        .filter(result => result.outcome.status !== 'success')
+                        .map(result => result.outcome.requestedUsername),
+                    primaryResults: input.results as AnalysisV2ProfileFetchResume['primaryResults'],
+                    fallbackResults: [],
+                    primaryCapturedAt: '2026-08-11T00:00:00.000Z',
+                    fallbackCapturedAt: null,
+                    repairResults: [],
+                    repairUsernames: null,
+                    repairCapturedAt: null,
+                };
+                return profileResume;
+            }),
+            checkpointFallback: vi.fn(async () => {
+                throw new Error('unexpected paid fallback');
+            }),
+            checkpointRepair: vi.fn(async () => {
+                throw new Error('unexpected paid repair');
+            }),
+            purgeTerminal: vi.fn(async () => 0),
+        };
+        const profileFetcher = vi.fn(async (
+            usernames: readonly string[],
+            options: Parameters<typeof import('@/lib/services/instagram/scraper').getProfilesBatchV2>[1],
+        ) => {
+            const results = usernames.map(username => ({
+                outcome: {
+                    requestedUsername: username,
+                    source: 'selfhosted' as const,
+                    status: 'success' as const,
+                    failureCategory: null,
+                    httpStatus: null,
+                    requestCount: 1,
+                    latencyMs: 1,
+                    capturedAt: '2026-08-11T00:00:00.000Z',
+                },
+                profile: {
+                    username,
+                    fullName: `Profile ${username}`,
+                    followersCount: 1,
+                    followingCount: 1,
+                    postsCount: 0,
+                    isPrivate: false,
+                    isVerified: false,
+                    latestPosts: [],
+                },
+            }));
+            await options.persistAttemptOutcomes({
+                attempt: 'primary',
+                source: 'selfhosted',
+                requestedUsernames: usernames,
+                results,
+            });
+            return {
+                results,
+                profiles: results.map(result => result.profile),
+                primaryResults: results,
+                fallbackResults: [],
+                frozenUnresolvedUsernames: [],
+            };
+        });
+        const profileContext = (relationships: unknown) => ({
+            stage: 'profile_fetch',
+            claim: {
+                requestId: REQUEST_ID, jobKey: 'track:profiles:batch:0', track: 'profiles',
+                kind: 'profile_fetch', batch: 0, inputHash: INPUT_HASH, generation: 1,
+                reservationToken: CLAIM_TOKEN, claimToken: CLAIM_TOKEN, attemptCount: 1,
+            },
+            job: {
+                requestId: REQUEST_ID, jobKey: 'track:profiles:batch:0', track: 'profiles',
+                kind: 'profile_fetch', batch: 0, inputHash: INPUT_HASH,
+                requiredJobKeys: ['track:relationships:collect'],
+            },
+            state: { ...scope, relationships },
+            aiStagePolicyVersion: null,
+            riskPolicyVersion: null,
+        }) as Parameters<ReturnType<typeof createAnalysisV2ProfileFetchExecutor>>[0];
+        const profileExecutor = createAnalysisV2ProfileFetchExecutor({
+            requestContextStore: { load: async () => request },
+            evidenceStore: evidenceStore as never,
+            profileCheckpointStore: profileCheckpointStore as never,
+            genderRoutingManifestStore: manifestStore,
+            getProfilesBatchV2: profileFetcher as never,
+            env: { ANALYSIS_V2_GENDER_ROUTING_HMAC_SECRET: hmacSecret },
+        });
+
+        await manifestStore.begin({
+            requestId: REQUEST_ID,
+            jobKey: 'track:relationships:collect',
+            claimToken: CLAIM_TOKEN,
+            jobInputHash: INPUT_HASH,
+            relationshipCheckpointId: CHECKPOINT_ID,
+            policyVersion: 'gender-routing-v1',
+            planId: 'basic',
+            canonicalInputHmac,
+            populationCount: 101,
+            detailedCap: 100,
+        });
+        const blockedTopology = createAnalysisV2CollectionTopology('profiles', mutualRows.slice(0, 100).map(row => row.username));
+        const blockedRelationships = {
+            revision: 1, resultHash: CHECKPOINT_ID, detectedMutualCount: 101,
+            publicCount: 101, privateCount: 0, detailedSelectedPublicCount: 100,
+            notScreenedPublicCount: 1, profileBatches: blockedTopology, privateNameBatches: [],
+        };
+        await expect(profileExecutor(profileContext(blockedRelationships))).rejects.toThrow();
+        expect(profileFetcher).not.toHaveBeenCalled();
+
+        const relationshipExecutor = createAnalysisV2RelationshipsExecutor({
+            requestContextStore: { load: async () => request },
+            evidenceStore: evidenceStore as never,
+            genderRoutingManifestStore: manifestStore,
+            revenueGenderRoutingAssessor: async candidates => new Map(candidates.map(candidate => [
+                candidate.candidateKey,
+                candidate.candidateKey === 'mutual:1'
+                    ? { femaleScore: 0.05, maleScore: 0.9, uncertaintyScore: 0.05, evidence: 'name_only' as const }
+                    : { femaleScore: 0.9, maleScore: 0.05, uncertaintyScore: 0.05, evidence: 'name_only' as const },
+            ])),
+            env: { ANALYSIS_V2_GENDER_ROUTING_HMAC_SECRET: hmacSecret },
+        });
+        const relationship = await relationshipExecutor(relationshipContext);
+        const selected = await manifestStore.loadSelectedUsernames({
+            requestId: REQUEST_ID,
+            relationshipCheckpointId: CHECKPOINT_ID,
+            policyVersion: 'gender-routing-v1',
+            planId: 'basic',
+        });
+        const selectedUsernames = selected.map(row => row.username);
+        expect(relationship.checkpoint.manifest.profileBatches).toEqual(
+            createAnalysisV2CollectionTopology('profiles', selectedUsernames),
+        );
+        const profile = await profileExecutor(profileContext(relationship.checkpoint.manifest));
+        expect(profileFetcher).toHaveBeenCalledWith(selectedUsernames.slice(0, 30), expect.any(Object));
+        expect(profile.checkpoint.manifest).toMatchObject({
+            batch: 0,
+            itemCount: 30,
+            producerInputHash: INPUT_HASH,
+            resultHash: expect.stringMatching(/^[a-f0-9]{64}$/),
+        });
+
+        await db!.query(
+            `UPDATE public.analysis_requests SET status = 'pending' WHERE id = $1`,
+            [REQUEST_ID],
+        );
+        await expect(profileExecutor(profileContext(relationship.checkpoint.manifest))).rejects.toThrow();
+        expect(profileFetcher).toHaveBeenCalledTimes(1);
+        await db!.query(
+            `UPDATE public.analysis_requests SET status = 'processing' WHERE id = $1`,
+            [REQUEST_ID],
+        );
+        await db!.query(
+            `UPDATE public.analysis_v2_gender_routing_manifests
+             SET status = 'invalidated', invalidated_at = pg_catalog.clock_timestamp()
+             WHERE request_id = $1`,
+            [REQUEST_ID],
+        );
+        await expect(profileExecutor(profileContext(relationship.checkpoint.manifest))).rejects.toThrow();
+        expect(profileFetcher).toHaveBeenCalledTimes(1);
     }, 30_000);
 
     it('rejects malformed evidence and non-contiguous selected ordinals inside the publish transaction', async () => {

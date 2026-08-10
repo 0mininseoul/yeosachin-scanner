@@ -23,9 +23,8 @@ export type GenderRoutingEvidence = 'image_and_name' | 'image_only' | 'name_only
 
 export interface GenderRoutingCandidateInput {
     readonly candidateKey: string;
-    readonly profilePicUrl: string | null;
     readonly fullname: string | null;
-    /** Computed from fetched bytes. URL text is never persisted in the manifest. */
+    /** Computed only from normalized fetched bytes; a URL is never routing evidence. */
     readonly imageContentHmac?: string | null;
 }
 
@@ -115,12 +114,27 @@ function hmac(secret: string, value: string): string {
     return createHmac('sha256', secret).update(value, 'utf8').digest('hex');
 }
 
+/** HMAC of normalized ephemeral image content for manifest-safe image identity. */
+export function createGenderRoutingImageContentHmac(input: {
+    readonly hmacSecret: string;
+    readonly imageBytes: Uint8Array;
+}): string {
+    return createHmac('sha256', input.hmacSecret)
+        .update('gender-routing:image-content:v1\0', 'utf8')
+        .update(input.imageBytes)
+        .digest('hex');
+}
+
+/** The only fullname form that may influence a durable routing fingerprint. */
+export function normalizeGenderRoutingFullname(value: string | null): string | null {
+    if (value === null) return null;
+    const normalized = value.normalize('NFC').trim().replace(/\s+/gu, ' ');
+    return normalized.length > 0 ? normalized : null;
+}
+
 function normalizeCandidate(candidate: GenderRoutingCandidateInput, secret: string) {
     if (
         !OPAQUE_KEY.test(candidate.candidateKey)
-        || (candidate.profilePicUrl !== null && (
-            typeof candidate.profilePicUrl !== 'string' || candidate.profilePicUrl.length > 8_192
-        ))
         || (candidate.fullname !== null && (
             typeof candidate.fullname !== 'string' || candidate.fullname.length > 200
         ))
@@ -128,14 +142,17 @@ function normalizeCandidate(candidate: GenderRoutingCandidateInput, secret: stri
             && candidate.imageContentHmac !== null
             && !HASH.test(candidate.imageContentHmac))
     ) throw new GenderRoutingError('INVALID_INPUT');
+    const normalizedFullname = normalizeGenderRoutingFullname(candidate.fullname);
     return {
         candidateKey: candidate.candidateKey,
-        hasImage: candidate.profilePicUrl !== null,
-        hasName: candidate.fullname !== null && candidate.fullname.trim().length > 0,
+        // A URL is only a fetch locator. It does not establish image evidence until
+        // normalized image bytes have produced a manifest-safe content HMAC.
+        hasImage: candidate.imageContentHmac !== null && candidate.imageContentHmac !== undefined,
+        hasName: normalizedFullname !== null,
         imageContentHmac: candidate.imageContentHmac ?? null,
-        fullnameHmac: candidate.fullname === null || candidate.fullname.trim().length === 0
+        fullnameHmac: normalizedFullname === null
             ? null
-            : hmac(secret, `gender-routing:fullname:v1\n${candidate.fullname}`),
+            : hmac(secret, `gender-routing:fullname:v1\n${normalizedFullname}`),
     };
 }
 
@@ -178,6 +195,11 @@ export function genderRoutingRetryCandidateKeys(input: {
         const assessment = input.assessments?.get(candidate.candidateKey);
         return !assessment || !validAssessment(assessment, candidate);
     });
+    const valid = callable.length - failed.length;
+    if (
+        failed.length === 0
+        || !(valid === 0 || failed.length / callable.length > 0.1)
+    ) return Object.freeze([]);
     return Object.freeze(failed.map(candidate => candidate.candidateKey));
 }
 
@@ -316,7 +338,10 @@ export function buildGenderRoutingManifest(input: {
             routingUnavailable: false,
         });
     }
-    if (attempted > 0 && invalidCandidates.size > 0) {
+    const shouldRetry = attempted > 0
+        && invalidCandidates.size > 0
+        && (valid === 0 || invalidCandidates.size / attempted > 0.1);
+    if (shouldRetry) {
         const retryKeys = [...invalidCandidates];
         for (const candidateKey of retryKeys) {
             const candidate = normalized.find(row => row.candidateKey === candidateKey)!;
