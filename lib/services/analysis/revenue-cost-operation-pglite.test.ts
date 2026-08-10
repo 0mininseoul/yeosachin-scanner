@@ -523,6 +523,130 @@ describe('revenue cost operation ledger PGlite', () => {
         expect(reconciliation.rows[0]?.result).toMatchObject({ finalizable: false, reason: 'not_ready' });
     });
 
+    it('releases a reserved provider operation only when the authoritative source proves rejection without a run', async () => {
+        const db = await createDb();
+        await seedLiveSources(db);
+        const reserve = `SELECT public.reserve_analysis_revenue_cost_operation_v2('${requestId}','${jobKey}','${claimToken}','${inputHash}','provider_run','${providerOperationKey}',0::smallint)`;
+        const release = `SELECT public.release_analysis_revenue_cost_operation_v2('${requestId}','${jobKey}','${claimToken}','${inputHash}','provider_run','${providerOperationKey}',0::smallint) AS result`;
+        await query(db, reserve);
+        await db.exec(`UPDATE public.analysis_v2_provider_runs SET status='rejected',actual_usage_usd=0,terminalized_at=clock_timestamp(),usage_reconciled_at=clock_timestamp() WHERE request_id='${requestId}'`);
+        await expect(query<{ result: { disposition: string; created: boolean } }>(db, release)).resolves.toMatchObject({ rows: [{ result: { disposition: 'released', created: true } }] });
+        await expect(query<{ result: { replayed: boolean } }>(db, release)).resolves.toMatchObject({ rows: [{ result: { replayed: true } }] });
+        await expect(db.query(`SELECT reserved_cost_krw,billed_actual_krw FROM public.analysis_revenue_run_ledgers WHERE request_id='${requestId}'`))
+            .resolves.toMatchObject({ rows: [{ reserved_cost_krw: 0, billed_actual_krw: 0 }] });
+    });
+
+    it('releases a locally started child when the provider authoritatively rejects before a run exists', async () => {
+        const db = await createDb();
+        await seedLiveSources(db);
+        const reserve = `SELECT public.reserve_analysis_revenue_cost_operation_v2('${requestId}','${jobKey}','${claimToken}','${inputHash}','provider_run','${providerOperationKey}',0::smallint)`;
+        const start = `SELECT public.mark_analysis_revenue_cost_operation_started_v2('${requestId}','${jobKey}','${claimToken}','${inputHash}','provider_run','${providerOperationKey}',0::smallint)`;
+        const settle = `SELECT public.settle_analysis_revenue_cost_operation_v2('${requestId}','${jobKey}','provider_run','${providerOperationKey}',0::smallint) AS result`;
+        await query(db, reserve); await query(db, start);
+        await db.exec(`UPDATE public.analysis_v2_provider_runs SET status='rejected',actual_usage_usd=0,terminalized_at=reserved_at + interval '1 second',usage_reconciled_at=reserved_at + interval '2 seconds',updated_at=reserved_at + interval '3 seconds' WHERE request_id='${requestId}'`);
+        await expect(query<{ result: { disposition: string } }>(db, settle)).resolves.toMatchObject({ rows: [{ result: { disposition: 'released' } }] });
+        await expect(db.query(`SELECT status,started_at,terminal_at FROM public.analysis_revenue_cost_operations WHERE request_id='${requestId}' AND owner_kind='provider_run'`))
+            .resolves.toMatchObject({ rows: [{ status: 'released', started_at: null }] });
+        await expect(db.query(`SELECT reserved_cost_krw FROM public.analysis_revenue_run_ledgers WHERE request_id='${requestId}'`)).resolves.toMatchObject({ rows: [{ reserved_cost_krw: 0 }] });
+    });
+
+    it('uses a lifecycle-safe terminal timestamp for a definite no-run starting release', async () => {
+        const db = await createDb();
+        await seedLiveSources(db);
+        const reserve = `SELECT public.reserve_analysis_revenue_cost_operation_v2('${requestId}','${jobKey}','${claimToken}','${inputHash}','provider_run','${providerOperationKey}',0::smallint)`;
+        const release = `SELECT public.release_analysis_revenue_cost_operation_v2('${requestId}','${jobKey}','${claimToken}','${inputHash}','provider_run','${providerOperationKey}',0::smallint)`;
+        await query(db, reserve); await query(db, release);
+        await expect(db.query(`SELECT terminal_at >= created_at AS lifecycle_safe FROM public.analysis_revenue_cost_operations WHERE request_id='${requestId}' AND owner_kind='provider_run'`))
+            .resolves.toMatchObject({ rows: [{ lifecycle_safe: true }] });
+    });
+
+    it.each(['succeeded', 'failed'])('settles authoritative terminal %s usage after the request and lease are terminal', async (status) => {
+        const db = await createDb();
+        await seedLiveSources(db);
+        const reserve = `SELECT public.reserve_analysis_revenue_cost_operation_v2('${requestId}','${jobKey}','${claimToken}','${inputHash}','provider_run','${providerOperationKey}',0::smallint)`;
+        const start = `SELECT public.mark_analysis_revenue_cost_operation_started_v2('${requestId}','${jobKey}','${claimToken}','${inputHash}','provider_run','${providerOperationKey}',0::smallint)`;
+        const settle = `SELECT public.settle_analysis_revenue_cost_operation_v2('${requestId}','${jobKey}','provider_run','${providerOperationKey}',0::smallint) AS result`;
+        await query(db, reserve);
+        await query(db, start);
+        await db.exec(`UPDATE public.analysis_v2_provider_runs SET status='${status}',run_id='run12345',run_started_at=reserved_at + interval '1 second',terminalized_at=reserved_at + interval '2 seconds',actual_usage_usd=0.21,usage_reconciled_at=reserved_at + interval '3 seconds',updated_at=reserved_at + interval '4 seconds' WHERE request_id='${requestId}';
+          UPDATE public.analysis_pipeline_jobs SET status='completed',lease_token=NULL,lease_expires_at=NULL WHERE request_id='${requestId}' AND job_key='${jobKey}';
+          UPDATE public.analysis_requests SET status='completed' WHERE id='${requestId}'`);
+        await expect(query<{ result: { disposition: string; created: boolean } }>(db, settle)).resolves.toMatchObject({ rows: [{ result: { disposition: 'settled', created: true } }] });
+        await expect(query<{ result: { replayed: boolean } }>(db, settle)).resolves.toMatchObject({ rows: [{ result: { disposition: 'settled', replayed: true } }] });
+        await expect(db.query(`SELECT reserved_cost_krw,economic_actual_krw,actual_cost_krw,billed_actual_krw FROM public.analysis_revenue_run_ledgers WHERE request_id='${requestId}'`))
+            .resolves.toMatchObject({ rows: [{ reserved_cost_krw: 0, economic_actual_krw: 313, actual_cost_krw: 313, billed_actual_krw: 0 }] });
+    });
+
+    it('does not mutate an active or terminal-unreconciled provider source during settlement', async () => {
+        const db = await createDb();
+        await seedLiveSources(db);
+        const reserve = `SELECT public.reserve_analysis_revenue_cost_operation_v2('${requestId}','${jobKey}','${claimToken}','${inputHash}','provider_run','${providerOperationKey}',0::smallint)`;
+        const start = `SELECT public.mark_analysis_revenue_cost_operation_started_v2('${requestId}','${jobKey}','${claimToken}','${inputHash}','provider_run','${providerOperationKey}',0::smallint)`;
+        const settle = `SELECT public.settle_analysis_revenue_cost_operation_v2('${requestId}','${jobKey}','provider_run','${providerOperationKey}',0::smallint)`;
+        await query(db, reserve); await query(db, start);
+        const beforeRunning = await replayTotals(db);
+        await expectError(query(db, settle), 'REVENUE_COST_OPERATION_NOT_READY');
+        await expect(replayTotals(db)).resolves.toEqual(beforeRunning);
+        await db.exec(`UPDATE public.analysis_v2_provider_runs SET status='failed',run_id='run12345',run_started_at=reserved_at + interval '1 second',terminalized_at=reserved_at + interval '2 seconds',updated_at=reserved_at + interval '3 seconds' WHERE request_id='${requestId}'`);
+        const beforeUnreconciled = await replayTotals(db);
+        await expectError(query(db, settle), 'REVENUE_COST_OPERATION_NOT_READY');
+        await expect(replayTotals(db)).resolves.toEqual(beforeUnreconciled);
+    });
+
+    it('records terminal cost truth and fences skipped start plus over-cap truth for manual review', async () => {
+        const db = await createDb();
+        await seedLiveSources(db);
+        const reserve = `SELECT public.reserve_analysis_revenue_cost_operation_v2('${requestId}','${jobKey}','${claimToken}','${inputHash}','provider_run','${providerOperationKey}',0::smallint)`;
+        const settle = `SELECT public.settle_analysis_revenue_cost_operation_v2('${requestId}','${jobKey}','provider_run','${providerOperationKey}',0::smallint)`;
+        await query(db, reserve);
+        await db.exec(`UPDATE public.analysis_v2_provider_runs SET status='succeeded',run_id='run12345',run_started_at=reserved_at + interval '1 second',terminalized_at=reserved_at + interval '2 seconds',actual_usage_usd=2,usage_reconciled_at=reserved_at + interval '3 seconds',updated_at=reserved_at + interval '4 seconds' WHERE request_id='${requestId}'`);
+        await query(db, settle);
+        await expect(db.query(`SELECT reserved_cost_krw,economic_actual_krw,billed_actual_krw,status,manual_review_reason FROM public.analysis_revenue_run_ledgers WHERE request_id='${requestId}'`))
+            .resolves.toMatchObject({ rows: [{ reserved_cost_krw: 0, economic_actual_krw: 2908, billed_actual_krw: 0, status: 'manual_review', manual_review_reason: 'cost_overrun' }] });
+    });
+
+    it('fences a started provider release as ambiguous then clears that ambiguity only after terminal reconciliation', async () => {
+        const db = await createDb();
+        await seedLiveSources(db);
+        const reserve = `SELECT public.reserve_analysis_revenue_cost_operation_v2('${requestId}','${jobKey}','${claimToken}','${inputHash}','provider_run','${providerOperationKey}',0::smallint)`;
+        const start = `SELECT public.mark_analysis_revenue_cost_operation_started_v2('${requestId}','${jobKey}','${claimToken}','${inputHash}','provider_run','${providerOperationKey}',0::smallint)`;
+        const release = `SELECT public.release_analysis_revenue_cost_operation_v2('${requestId}','${jobKey}','${claimToken}','${inputHash}','provider_run','${providerOperationKey}',0::smallint) AS result`;
+        const settle = `SELECT public.settle_analysis_revenue_cost_operation_v2('${requestId}','${jobKey}','provider_run','${providerOperationKey}',0::smallint) AS result`;
+        await query(db, reserve); await query(db, start);
+        await db.exec(`UPDATE public.analysis_v2_provider_runs SET status='running',run_id='run12345',run_started_at=reserved_at + interval '1 second',updated_at=reserved_at + interval '2 seconds' WHERE request_id='${requestId}'`);
+        await expect(query<{ result: { disposition: string } }>(db, release)).resolves.toMatchObject({ rows: [{ result: { disposition: 'ambiguous' } }] });
+        await expect(db.query(`SELECT reserved_cost_krw,status,manual_review_reason FROM public.analysis_revenue_run_ledgers WHERE request_id='${requestId}'`))
+            .resolves.toMatchObject({ rows: [{ reserved_cost_krw: 0, status: 'manual_review', manual_review_reason: 'ambiguous_external_call' }] });
+        await db.exec(`UPDATE public.analysis_v2_provider_runs SET status='failed',terminalized_at=reserved_at + interval '3 seconds',actual_usage_usd=0.1,usage_reconciled_at=reserved_at + interval '4 seconds',updated_at=reserved_at + interval '5 seconds' WHERE request_id='${requestId}'`);
+        await expect(query<{ result: { disposition: string } }>(db, settle)).resolves.toMatchObject({ rows: [{ result: { disposition: 'settled' } }] });
+        await expect(db.query(`SELECT status,manual_review_reason,billed_actual_krw FROM public.analysis_revenue_run_ledgers WHERE request_id='${requestId}'`))
+            .resolves.toMatchObject({ rows: [{ status: 'running', manual_review_reason: null, billed_actual_krw: 0 }] });
+    });
+
+    it('treats a started marker as ambiguous even before the provider has a run id', async () => {
+        const db = await createDb();
+        await seedLiveSources(db);
+        const reserve = `SELECT public.reserve_analysis_revenue_cost_operation_v2('${requestId}','${jobKey}','${claimToken}','${inputHash}','provider_run','${providerOperationKey}',0::smallint)`;
+        const start = `SELECT public.mark_analysis_revenue_cost_operation_started_v2('${requestId}','${jobKey}','${claimToken}','${inputHash}','provider_run','${providerOperationKey}',0::smallint)`;
+        const release = `SELECT public.release_analysis_revenue_cost_operation_v2('${requestId}','${jobKey}','${claimToken}','${inputHash}','provider_run','${providerOperationKey}',0::smallint) AS result`;
+        await query(db, reserve); await query(db, start);
+        await expect(query<{ result: { disposition: string } }>(db, release)).resolves.toMatchObject({ rows: [{ result: { disposition: 'ambiguous' } }] });
+        await expect(db.query(`SELECT reserved_cost_krw,status,manual_review_reason FROM public.analysis_revenue_run_ledgers WHERE request_id='${requestId}'`))
+            .resolves.toMatchObject({ rows: [{ reserved_cost_krw: 0, status: 'manual_review', manual_review_reason: 'ambiguous_external_call' }] });
+    });
+
+    it('marks a reserved child with below-cap confirmed usage as routing failure rather than losing provider truth', async () => {
+        const db = await createDb();
+        await seedLiveSources(db);
+        const reserve = `SELECT public.reserve_analysis_revenue_cost_operation_v2('${requestId}','${jobKey}','${claimToken}','${inputHash}','provider_run','${providerOperationKey}',0::smallint)`;
+        const settle = `SELECT public.settle_analysis_revenue_cost_operation_v2('${requestId}','${jobKey}','provider_run','${providerOperationKey}',0::smallint)`;
+        await query(db, reserve);
+        await db.exec(`UPDATE public.analysis_v2_provider_runs SET status='succeeded',run_id='run12345',run_started_at=reserved_at + interval '1 second',terminalized_at=reserved_at + interval '2 seconds',actual_usage_usd=0.1,usage_reconciled_at=reserved_at + interval '3 seconds',updated_at=reserved_at + interval '4 seconds' WHERE request_id='${requestId}'`);
+        await query(db, settle);
+        await expect(db.query(`SELECT status,manual_review_reason,billed_actual_krw FROM public.analysis_revenue_run_ledgers WHERE request_id='${requestId}'`))
+            .resolves.toMatchObject({ rows: [{ status: 'manual_review', manual_review_reason: 'routing_failure', billed_actual_krw: 0 }] });
+    });
+
     it('has only the four-argument reconciliation RPC and foundation schema properties', async () => {
         const db = await createDb();
         const procedures = await db.query<{ args: string }>(`SELECT pg_catalog.oidvectortypes(proargtypes) AS args FROM pg_proc WHERE proname='read_analysis_revenue_cost_reconciliation_v1'`);
@@ -531,6 +655,10 @@ describe('revenue cost operation ledger PGlite', () => {
         expect(reserveProcedures.rows).toEqual([{ args: 'uuid, text, uuid, text, text, text, smallint' }]);
         const startProcedures = await db.query<{ args: string }>(`SELECT pg_catalog.oidvectortypes(proargtypes) AS args FROM pg_proc WHERE proname='mark_analysis_revenue_cost_operation_started_v2'`);
         expect(startProcedures.rows).toEqual([{ args: 'uuid, text, uuid, text, text, text, smallint' }]);
+        const settleProcedures = await db.query<{ args: string }>(`SELECT pg_catalog.oidvectortypes(proargtypes) AS args FROM pg_proc WHERE proname='settle_analysis_revenue_cost_operation_v2'`);
+        expect(settleProcedures.rows).toEqual([{ args: 'uuid, text, text, text, smallint' }]);
+        const releaseProcedures = await db.query<{ args: string }>(`SELECT pg_catalog.oidvectortypes(proargtypes) AS args FROM pg_proc WHERE proname='release_analysis_revenue_cost_operation_v2'`);
+        expect(releaseProcedures.rows).toEqual([{ args: 'uuid, text, uuid, text, text, text, smallint' }]);
         const table = await db.query<{ relrowsecurity: boolean; relforcerowsecurity: boolean }>(`SELECT relrowsecurity,relforcerowsecurity FROM pg_class WHERE oid='public.analysis_revenue_cost_operations'::regclass`);
         expect(table.rows[0]).toEqual({ relrowsecurity: true, relforcerowsecurity: true });
         const constraints = await db.query<{ conname: string }>(`SELECT conname FROM pg_constraint WHERE conrelid='public.analysis_revenue_cost_operations'::regclass`);

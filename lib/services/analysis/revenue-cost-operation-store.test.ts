@@ -59,6 +59,41 @@ describe('RevenueCostOperationStore', () => {
         expect(() => store.markStartedV2(aiSource)).toThrow('REVENUE_COST_OPERATION_AI_NOT_READY');
         expect(stub.rpc).not.toHaveBeenCalled();
     });
+
+    it('settles from provider authority without accepting caller cost or a live job claim', async () => {
+        const stub = client({ disposition: 'settled', created: true, replayed: false });
+        const store = new RevenueCostOperationStore(stub.client);
+
+        await store.settleV2({
+            requestId, jobKey, sourceKind: 'provider_run', sourceOperationKey: operationKey, sourceAttempt: 0,
+        });
+
+        expect(stub.rpc).toHaveBeenCalledWith('settle_analysis_revenue_cost_operation_v2', {
+            p_request_id: requestId, p_job_key: jobKey, p_source_kind: 'provider_run',
+            p_source_operation_key: operationKey, p_source_attempt: 0,
+        });
+    });
+
+    it('releases only with the live provider job identity and fails closed for AI before an RPC', async () => {
+        const stub = client({ disposition: 'released', created: true, replayed: false });
+        const store = new RevenueCostOperationStore(stub.client);
+        const provider = {
+            requestId, jobKey, jobClaimToken: claimToken, jobInputHash: scopeHash,
+            sourceKind: 'provider_run' as const, sourceOperationKey: operationKey, sourceAttempt: 0,
+        };
+
+        await store.releaseV2(provider);
+        expect(stub.rpc).toHaveBeenCalledWith('release_analysis_revenue_cost_operation_v2', {
+            p_request_id: requestId, p_job_key: jobKey, p_job_claim_token: claimToken,
+            p_job_input_hash: scopeHash, p_source_kind: 'provider_run',
+            p_source_operation_key: operationKey, p_source_attempt: 0,
+        });
+        expect(() => store.settleV2({ ...provider, sourceKind: 'ai_attempt', sourceOperationKey: `private-account-name:${'d'.repeat(64)}`, sourceAttempt: 1 }))
+            .toThrow('REVENUE_COST_OPERATION_AI_NOT_READY');
+        expect(() => store.releaseV2({ ...provider, sourceKind: 'ai_attempt', sourceOperationKey: `private-account-name:${'d'.repeat(64)}`, sourceAttempt: 1 }))
+            .toThrow('REVENUE_COST_OPERATION_AI_NOT_READY');
+        expect(stub.rpc).toHaveBeenCalledTimes(1);
+    });
     it('uses the fenced begin RPC and rejects malformed request identity', async () => {
         const stub = client({ disposition: 'begun', created: true, replayed: false, operationId: '22222222-2222-4222-8222-222222222222' });
         const store = new RevenueCostOperationStore(stub.client);

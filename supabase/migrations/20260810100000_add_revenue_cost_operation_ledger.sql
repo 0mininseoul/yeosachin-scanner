@@ -522,3 +522,251 @@ REVOKE ALL ON FUNCTION public.reserve_analysis_revenue_cost_operation_v2(UUID,TE
 REVOKE ALL ON FUNCTION public.mark_analysis_revenue_cost_operation_started_v2(UUID,TEXT,UUID,TEXT,TEXT,TEXT,SMALLINT) FROM PUBLIC, anon, authenticated, service_role;
 GRANT EXECUTE ON FUNCTION public.reserve_analysis_revenue_cost_operation_v2(UUID,TEXT,UUID,TEXT,TEXT,TEXT,SMALLINT) TO service_role;
 GRANT EXECUTE ON FUNCTION public.mark_analysis_revenue_cost_operation_started_v2(UUID,TEXT,UUID,TEXT,TEXT,TEXT,SMALLINT) TO service_role;
+
+-- Terminal settlement intentionally does not accept a caller amount or live
+-- job claim.  Provider reconciliation is the cost authority and commonly
+-- arrives after the worker and request have both become terminal.
+DROP FUNCTION IF EXISTS public.settle_analysis_revenue_cost_operation_v2(UUID,TEXT,TEXT,TEXT,SMALLINT,NUMERIC,NUMERIC);
+DROP FUNCTION IF EXISTS public.settle_analysis_revenue_cost_operation_v2(UUID,TEXT,TEXT,TEXT,SMALLINT);
+CREATE OR REPLACE FUNCTION public.settle_analysis_revenue_cost_operation_v2(
+    p_request_id UUID, p_job_key TEXT, p_source_kind TEXT,
+    p_source_operation_key TEXT, p_source_attempt SMALLINT
+) RETURNS JSONB LANGUAGE plpgsql SECURITY DEFINER SET search_path = '' AS $$
+DECLARE
+    v_preflight public.analysis_preflights%ROWTYPE; v_request public.analysis_requests%ROWTYPE;
+    v_job public.analysis_pipeline_jobs%ROWTYPE; v_provider public.analysis_v2_provider_runs%ROWTYPE;
+    v_entitlement public.analysis_v2_test_entitlement_consumptions%ROWTYPE;
+    v_policy public.analysis_v2_provider_execution_policies%ROWTYPE; v_parent public.analysis_revenue_run_ledgers%ROWTYPE;
+    v_child public.analysis_revenue_cost_operations%ROWTYPE; v_runner_plan TEXT; v_source_hash TEXT; v_owner_hash TEXT;
+    v_operation_kind TEXT; v_expected_krw INTEGER; v_actual_krw INTEGER; v_active_reserved INTEGER;
+    v_settled_economic INTEGER; v_settled_billed INTEGER; v_unsettled INTEGER; v_denied INTEGER;
+BEGIN
+    IF p_request_id IS NULL OR p_job_key IS NULL OR p_job_key !~ '^[a-z0-9][a-z0-9:._-]{0,159}$'
+       OR p_source_kind IS NULL OR p_source_kind NOT IN ('provider_run','ai_attempt') OR p_source_operation_key IS NULL
+       OR p_source_attempt IS DISTINCT FROM 0 THEN RAISE EXCEPTION USING MESSAGE='REVENUE_COST_OPERATION_FENCE'; END IF;
+    IF p_source_kind = 'ai_attempt' THEN RAISE EXCEPTION USING MESSAGE='REVENUE_COST_OPERATION_AI_NOT_READY'; END IF;
+
+    -- Canonical delayed-settlement order: preflight -> request -> exact job ->
+    -- exact provider source -> parent -> child.  No clock-derived lease fence is
+    -- used because terminal reconciliation must survive a missing/expired lease.
+    SELECT * INTO v_preflight FROM public.analysis_preflights WHERE consumed_request_id=p_request_id FOR UPDATE;
+    SELECT * INTO v_request FROM public.analysis_requests WHERE id=p_request_id FOR UPDATE;
+    SELECT * INTO v_entitlement FROM public.analysis_v2_test_entitlement_consumptions WHERE request_id=p_request_id;
+    SELECT * INTO v_policy FROM public.analysis_v2_provider_execution_policies WHERE request_id=p_request_id;
+    SELECT runner_plan INTO v_runner_plan FROM public.load_e2e_test_runner_v1(v_request.user_id);
+    IF v_preflight.id IS NULL OR v_request.id IS NULL OR v_request.preflight_id IS DISTINCT FROM v_preflight.id
+       OR v_entitlement.request_id IS NULL OR v_policy.request_id IS NULL
+       OR v_request.pipeline_version IS DISTINCT FROM 'v2' OR v_request.plan_access_mode_snapshot IS DISTINCT FROM 'test_entitlement'
+       OR v_request.selected_plan_id_snapshot NOT IN ('basic','standard')
+       OR v_preflight.status IS DISTINCT FROM 'consumed' OR v_preflight.access_mode IS DISTINCT FROM 'test_entitlement'
+       OR v_preflight.admission_generation IS DISTINCT FROM 1 OR v_preflight.admission_status IS DISTINCT FROM 'ready'
+       OR v_preflight.admission_selected_plan_id IS DISTINCT FROM v_request.selected_plan_id_snapshot
+       OR v_preflight.admission_entitlement_jti_hash IS DISTINCT FROM v_request.test_entitlement_jti_hash
+       OR v_preflight.user_id IS DISTINCT FROM v_request.user_id
+       OR pg_catalog.lower(v_preflight.target_instagram_id) IS DISTINCT FROM pg_catalog.lower(v_request.target_instagram_id)
+       OR v_entitlement.preflight_id IS DISTINCT FROM v_preflight.id OR v_entitlement.user_id IS DISTINCT FROM v_request.user_id
+       OR v_entitlement.selected_plan_id IS DISTINCT FROM v_request.selected_plan_id_snapshot
+       OR v_entitlement.entitlement_jti_hash IS DISTINCT FROM v_request.test_entitlement_jti_hash
+       OR v_policy.mode IS DISTINCT FROM 'test_operation_split' OR v_policy.policy_version IS DISTINCT FROM 'authorized-free-e2e-v1'
+       OR v_policy.entitlement_jti_hash IS DISTINCT FROM v_entitlement.entitlement_jti_hash
+       OR pg_catalog.lower(v_policy.target_instagram_id) IS DISTINCT FROM pg_catalog.lower(v_preflight.target_instagram_id)
+       OR v_runner_plan IS DISTINCT FROM v_request.selected_plan_id_snapshot THEN RAISE EXCEPTION USING MESSAGE='REVENUE_COST_OPERATION_FENCE'; END IF;
+    SELECT * INTO v_job FROM public.analysis_pipeline_jobs WHERE request_id=p_request_id AND job_key=p_job_key FOR UPDATE;
+    IF v_job.request_id IS NULL THEN RAISE EXCEPTION USING MESSAGE='REVENUE_COST_OPERATION_FENCE'; END IF;
+    SELECT * INTO v_provider FROM public.analysis_v2_provider_runs WHERE request_id=p_request_id AND job_key=p_job_key AND operation_key=p_source_operation_key FOR UPDATE;
+    IF v_provider.request_id IS NULL OR v_provider.input_hash !~ '^[a-f0-9]{64}$' THEN RAISE EXCEPTION USING MESSAGE='REVENUE_COST_OPERATION_FENCE'; END IF;
+    v_operation_kind := CASE
+        WHEN p_source_operation_key ~ '^target-profile:[a-f0-9]{64}$' THEN 'target_profile'
+        WHEN p_source_operation_key ~ '^(profile-fallback|profile-repair):[a-f0-9]{64}$' THEN 'detail_profile'
+        WHEN p_source_operation_key ~ '^relationship-followers:[a-f0-9]{64}$' THEN 'relationship_followers'
+        WHEN p_source_operation_key ~ '^relationship-following:[a-f0-9]{64}$' THEN 'relationship_following'
+        WHEN p_source_operation_key ~ '^(target-likers|target-comments|candidate-likers):[a-f0-9]{64}$' THEN 'detail_interaction'
+        ELSE NULL END;
+    IF v_operation_kind IS NULL THEN RAISE EXCEPTION USING MESSAGE='REVENUE_COST_OPERATION_FENCE'; END IF;
+    v_source_hash := pg_catalog.encode(extensions.digest(pg_catalog.convert_to(p_source_operation_key,'UTF8'),'sha256'),'hex');
+    v_owner_hash := pg_catalog.encode(extensions.digest(pg_catalog.convert_to('revenue-cost/live-provider-owner/v2:' || p_request_id::TEXT || ':' || p_job_key || ':' || p_source_operation_key || ':' || v_provider.input_hash,'UTF8'),'sha256'),'hex');
+    v_expected_krw := public.analysis_revenue_cost_ceil_krw(v_provider.max_charge_usd);
+    SELECT * INTO v_parent FROM public.analysis_revenue_run_ledgers WHERE request_id=p_request_id FOR UPDATE;
+    IF v_parent.request_id IS NULL OR v_parent.preflight_id IS DISTINCT FROM v_preflight.id OR v_parent.user_id IS DISTINCT FROM v_request.user_id
+       OR v_parent.plan_id IS DISTINCT FROM v_request.selected_plan_id_snapshot OR v_parent.access_mode IS DISTINCT FROM 'test_entitlement'
+       OR v_parent.target_username_hmac IS DISTINCT FROM v_preflight.target_input_hash
+       OR v_parent.preflight_refreshed_at IS DISTINCT FROM v_preflight.admission_refreshed_at OR v_parent.request_started_at IS DISTINCT FROM v_request.created_at
+       OR v_parent.pricing_snapshot_version IS DISTINCT FROM 'revenue-e2e-cost-2026-08-10-v1' OR v_parent.buffered_fx_krw_per_usd IS DISTINCT FROM 1450
+       OR v_parent.cost_cap_krw IS DISTINCT FROM (CASE WHEN v_request.selected_plan_id_snapshot='basic' THEN 1808 ELSE 3634 END)
+       OR v_parent.margin_target_krw IS DISTINCT FROM (CASE WHEN v_request.selected_plan_id_snapshot='basic' THEN 904 ELSE 1817 END)
+       OR v_parent.status NOT IN ('running','manual_review') THEN RAISE EXCEPTION USING MESSAGE='REVENUE_COST_OPERATION_FENCE'; END IF;
+    SELECT COALESCE(pg_catalog.sum(CASE WHEN status IN ('reserved','started') THEN reserved_krw ELSE 0 END),0)::INTEGER,
+           COALESCE(pg_catalog.sum(CASE WHEN status='settled' THEN economic_actual_krw ELSE 0 END),0)::INTEGER,
+           COALESCE(pg_catalog.sum(CASE WHEN status='settled' THEN billed_actual_krw ELSE 0 END),0)::INTEGER
+      INTO v_active_reserved,v_settled_economic,v_settled_billed FROM public.analysis_revenue_cost_operations WHERE request_id=p_request_id;
+    IF v_parent.reserved_cost_krw IS DISTINCT FROM v_active_reserved OR v_parent.economic_actual_krw IS DISTINCT FROM v_settled_economic
+       OR v_parent.actual_cost_krw IS DISTINCT FROM v_settled_economic OR v_parent.billed_actual_krw IS DISTINCT FROM v_settled_billed THEN RAISE EXCEPTION USING MESSAGE='REVENUE_COST_OPERATION_FENCE'; END IF;
+    SELECT * INTO v_child FROM public.analysis_revenue_cost_operations WHERE request_id=p_request_id AND owner_kind='provider_run'
+      AND source_job_key=p_job_key AND source_operation_key_hash=v_source_hash AND source_attempt=0 FOR UPDATE;
+    IF NOT FOUND OR v_child.owner_key_hash IS DISTINCT FROM v_owner_hash OR v_child.attempt IS DISTINCT FROM 1
+       OR v_child.operation_kind IS DISTINCT FROM v_operation_kind OR v_child.units IS DISTINCT FROM 1 OR v_child.selected_manifest_scope_hash IS NOT NULL
+       OR v_child.estimated_economic_usd IS DISTINCT FROM v_provider.max_charge_usd OR v_child.reserved_krw IS DISTINCT FROM v_expected_krw
+       OR v_child.denial_reason IS NOT NULL THEN RAISE EXCEPTION USING MESSAGE='REVENUE_COST_OPERATION_FENCE'; END IF;
+
+    IF v_provider.status = 'rejected' THEN
+        IF v_provider.run_id IS NOT NULL OR v_provider.actual_usage_usd IS DISTINCT FROM 0 OR v_provider.terminalized_at IS NULL OR v_provider.usage_reconciled_at IS NULL THEN
+            RAISE EXCEPTION USING MESSAGE='REVENUE_COST_OPERATION_FENCE'; END IF;
+        IF v_child.status='released' AND v_child.started_at IS NULL AND v_child.terminal_at IS NOT DISTINCT FROM v_provider.usage_reconciled_at
+           AND v_child.economic_actual_usd IS NULL AND v_child.billed_actual_usd IS NULL AND v_parent.status='running' AND v_parent.manual_review_reason IS NULL THEN
+            RETURN pg_catalog.jsonb_build_object('disposition','released','created',FALSE,'replayed',TRUE,'operationId',v_child.id);
+        END IF;
+        IF v_child.status NOT IN ('reserved','started') OR v_child.terminal_at IS NOT NULL
+           OR v_child.economic_actual_usd IS NOT NULL OR v_child.billed_actual_usd IS NOT NULL THEN RAISE EXCEPTION USING MESSAGE='REVENUE_COST_OPERATION_FENCE'; END IF;
+        UPDATE public.analysis_revenue_cost_operations SET status='released',started_at=NULL,terminal_at=v_provider.usage_reconciled_at WHERE id=v_child.id;
+        UPDATE public.analysis_revenue_run_ledgers SET reserved_cost_krw=reserved_cost_krw-v_child.reserved_krw WHERE request_id=p_request_id;
+        RETURN pg_catalog.jsonb_build_object('disposition','released','created',TRUE,'replayed',FALSE,'operationId',v_child.id);
+    END IF;
+    IF v_provider.status NOT IN ('succeeded','failed','aborted','timed_out') OR v_provider.run_id IS NULL OR v_provider.run_started_at IS NULL
+       OR v_provider.terminalized_at IS NULL OR v_provider.actual_usage_usd IS NULL OR v_provider.usage_reconciled_at IS NULL THEN
+        RAISE EXCEPTION USING MESSAGE='REVENUE_COST_OPERATION_NOT_READY'; END IF;
+    v_actual_krw := public.analysis_revenue_cost_ceil_krw(v_provider.actual_usage_usd);
+    IF v_child.status='settled' THEN
+        IF v_child.started_at IS NULL OR v_child.terminal_at IS DISTINCT FROM v_provider.usage_reconciled_at
+           OR v_child.economic_actual_usd IS DISTINCT FROM v_provider.actual_usage_usd OR v_child.billed_actual_usd IS DISTINCT FROM 0
+           OR v_child.economic_actual_krw IS DISTINCT FROM v_actual_krw OR v_child.billed_actual_krw IS DISTINCT FROM 0 THEN RAISE EXCEPTION USING MESSAGE='REVENUE_COST_OPERATION_FENCE'; END IF;
+        RETURN pg_catalog.jsonb_build_object('disposition','settled','created',FALSE,'replayed',TRUE,'operationId',v_child.id);
+    END IF;
+    IF v_child.status NOT IN ('reserved','started','ambiguous') OR v_child.terminal_at IS NOT NULL AND v_child.status <> 'ambiguous'
+       OR v_child.economic_actual_usd IS NOT NULL OR v_child.billed_actual_usd IS NOT NULL THEN RAISE EXCEPTION USING MESSAGE='REVENUE_COST_OPERATION_FENCE'; END IF;
+    UPDATE public.analysis_revenue_cost_operations
+       SET status='settled',started_at=COALESCE(v_child.started_at,v_provider.run_started_at),terminal_at=v_provider.usage_reconciled_at,
+           economic_actual_usd=v_provider.actual_usage_usd,billed_actual_usd=0,economic_actual_krw=v_actual_krw,billed_actual_krw=0
+     WHERE id=v_child.id;
+    UPDATE public.analysis_revenue_run_ledgers
+       SET reserved_cost_krw=reserved_cost_krw-CASE WHEN v_child.status IN ('reserved','started') THEN v_child.reserved_krw ELSE 0 END,
+           economic_actual_krw=economic_actual_krw+v_actual_krw,actual_cost_krw=actual_cost_krw+v_actual_krw,billed_actual_krw=billed_actual_krw
+     WHERE request_id=p_request_id;
+    SELECT pg_catalog.count(*)::INTEGER, pg_catalog.count(*) FILTER (WHERE status='denied')::INTEGER INTO v_unsettled,v_denied
+      FROM public.analysis_revenue_cost_operations WHERE request_id=p_request_id AND status NOT IN ('settled','released');
+    IF v_provider.actual_usage_usd > v_provider.max_charge_usd OR v_parent.economic_actual_krw+v_actual_krw > v_parent.cost_cap_krw THEN
+        UPDATE public.analysis_revenue_run_ledgers SET status='manual_review',manual_review_reason='cost_overrun' WHERE request_id=p_request_id;
+    ELSIF v_child.status='reserved' THEN
+        -- A terminal provider run with no recorded start is still cost truth,
+        -- but it proves the runtime skipped the required start transition.
+        UPDATE public.analysis_revenue_run_ledgers SET status='manual_review',manual_review_reason='routing_failure' WHERE request_id=p_request_id;
+    ELSIF v_parent.status='manual_review' AND v_parent.manual_review_reason='ambiguous_external_call' AND v_unsettled=0 AND v_denied=0 THEN
+        UPDATE public.analysis_revenue_run_ledgers SET status='running',manual_review_reason=NULL WHERE request_id=p_request_id;
+    END IF;
+    RETURN pg_catalog.jsonb_build_object('disposition','settled','created',TRUE,'replayed',FALSE,'operationId',v_child.id);
+END; $$;
+
+-- Release retains the reserve/start live identity.  A lease-holder may release
+-- only a definitely non-started source; any observed provider run becomes an
+-- ambiguity fence until terminal provider reconciliation settles it.
+DROP FUNCTION IF EXISTS public.release_analysis_revenue_cost_operation_v2(UUID,TEXT,UUID,TEXT,TEXT,TEXT,SMALLINT,TEXT);
+DROP FUNCTION IF EXISTS public.release_analysis_revenue_cost_operation_v2(UUID,TEXT,UUID,TEXT,TEXT,TEXT,SMALLINT);
+CREATE OR REPLACE FUNCTION public.release_analysis_revenue_cost_operation_v2(
+    p_request_id UUID,p_job_key TEXT,p_job_claim_token UUID,p_job_input_hash TEXT,
+    p_source_kind TEXT,p_source_operation_key TEXT,p_source_attempt SMALLINT
+) RETURNS JSONB LANGUAGE plpgsql SECURITY DEFINER SET search_path = '' AS $$
+DECLARE
+    v_preflight public.analysis_preflights%ROWTYPE; v_request public.analysis_requests%ROWTYPE; v_job public.analysis_pipeline_jobs%ROWTYPE;
+    v_provider public.analysis_v2_provider_runs%ROWTYPE; v_parent public.analysis_revenue_run_ledgers%ROWTYPE; v_child public.analysis_revenue_cost_operations%ROWTYPE;
+    v_entitlement public.analysis_v2_test_entitlement_consumptions%ROWTYPE; v_policy public.analysis_v2_provider_execution_policies%ROWTYPE;
+    v_runner_plan TEXT; v_operation_kind TEXT; v_source_hash TEXT; v_owner_hash TEXT; v_expected_krw INTEGER; v_now TIMESTAMPTZ;
+    v_active_reserved INTEGER; v_settled_economic INTEGER; v_settled_billed INTEGER;
+BEGIN
+    IF p_request_id IS NULL OR p_job_claim_token IS NULL OR p_job_key IS NULL OR p_job_key !~ '^[a-z0-9][a-z0-9:._-]{0,159}$'
+       OR p_job_input_hash !~ '^[a-f0-9]{64}$' OR p_source_kind IS NULL OR p_source_kind NOT IN ('provider_run','ai_attempt')
+       OR p_source_operation_key IS NULL OR p_source_attempt IS DISTINCT FROM 0 THEN RAISE EXCEPTION USING MESSAGE='REVENUE_COST_OPERATION_FENCE'; END IF;
+    IF p_source_kind = 'ai_attempt' THEN RAISE EXCEPTION USING MESSAGE='REVENUE_COST_OPERATION_AI_NOT_READY'; END IF;
+    SELECT * INTO v_preflight FROM public.analysis_preflights WHERE consumed_request_id=p_request_id FOR UPDATE;
+    SELECT * INTO v_request FROM public.analysis_requests WHERE id=p_request_id FOR UPDATE;
+    SELECT * INTO v_entitlement FROM public.analysis_v2_test_entitlement_consumptions WHERE request_id=p_request_id;
+    SELECT * INTO v_policy FROM public.analysis_v2_provider_execution_policies WHERE request_id=p_request_id;
+    SELECT runner_plan INTO v_runner_plan FROM public.load_e2e_test_runner_v1(v_request.user_id);
+    IF v_preflight.id IS NULL OR v_request.id IS NULL OR v_request.preflight_id IS DISTINCT FROM v_preflight.id
+       OR v_request.pipeline_version IS DISTINCT FROM 'v2' OR v_request.plan_access_mode_snapshot IS DISTINCT FROM 'test_entitlement'
+       OR v_request.selected_plan_id_snapshot NOT IN ('basic','standard') OR v_request.status NOT IN ('pending','processing')
+       OR v_preflight.status IS DISTINCT FROM 'consumed' OR v_preflight.access_mode IS DISTINCT FROM 'test_entitlement'
+       OR v_preflight.admission_generation IS DISTINCT FROM 1 OR v_preflight.admission_status IS DISTINCT FROM 'ready'
+       OR v_preflight.admission_selected_plan_id IS DISTINCT FROM v_request.selected_plan_id_snapshot
+       OR v_preflight.admission_entitlement_jti_hash IS DISTINCT FROM v_request.test_entitlement_jti_hash
+       OR v_preflight.user_id IS DISTINCT FROM v_request.user_id
+       OR pg_catalog.lower(v_preflight.target_instagram_id) IS DISTINCT FROM pg_catalog.lower(v_request.target_instagram_id)
+       OR v_entitlement.request_id IS NULL OR v_entitlement.preflight_id IS DISTINCT FROM v_preflight.id OR v_entitlement.user_id IS DISTINCT FROM v_request.user_id
+       OR v_entitlement.selected_plan_id IS DISTINCT FROM v_request.selected_plan_id_snapshot OR v_entitlement.entitlement_jti_hash IS DISTINCT FROM v_request.test_entitlement_jti_hash
+       OR v_policy.request_id IS NULL OR v_policy.mode IS DISTINCT FROM 'test_operation_split' OR v_policy.policy_version IS DISTINCT FROM 'authorized-free-e2e-v1'
+       OR v_policy.entitlement_jti_hash IS DISTINCT FROM v_entitlement.entitlement_jti_hash
+       OR pg_catalog.lower(v_policy.target_instagram_id) IS DISTINCT FROM pg_catalog.lower(v_preflight.target_instagram_id)
+       OR v_runner_plan IS DISTINCT FROM v_request.selected_plan_id_snapshot THEN RAISE EXCEPTION USING MESSAGE='REVENUE_COST_OPERATION_FENCE'; END IF;
+    SELECT * INTO v_job FROM public.analysis_pipeline_jobs WHERE request_id=p_request_id AND job_key=p_job_key FOR UPDATE;
+    v_now:=pg_catalog.clock_timestamp();
+    IF v_job.request_id IS NULL OR v_job.status IS DISTINCT FROM 'processing' OR v_job.lease_token IS DISTINCT FROM p_job_claim_token
+       OR v_job.input_hash IS DISTINCT FROM p_job_input_hash OR v_job.lease_expires_at IS NULL OR v_job.lease_expires_at<=v_now THEN RAISE EXCEPTION USING MESSAGE='REVENUE_COST_OPERATION_FENCE'; END IF;
+    SELECT * INTO v_provider FROM public.analysis_v2_provider_runs WHERE request_id=p_request_id AND job_key=p_job_key AND operation_key=p_source_operation_key FOR UPDATE;
+    IF v_provider.request_id IS NULL OR v_provider.input_hash !~ '^[a-f0-9]{64}$' OR v_provider.job_claim_token IS DISTINCT FROM p_job_claim_token THEN RAISE EXCEPTION USING MESSAGE='REVENUE_COST_OPERATION_FENCE'; END IF;
+    v_operation_kind := CASE
+        WHEN p_source_operation_key ~ '^target-profile:[a-f0-9]{64}$' THEN 'target_profile'
+        WHEN p_source_operation_key ~ '^(profile-fallback|profile-repair):[a-f0-9]{64}$' THEN 'detail_profile'
+        WHEN p_source_operation_key ~ '^relationship-followers:[a-f0-9]{64}$' THEN 'relationship_followers'
+        WHEN p_source_operation_key ~ '^relationship-following:[a-f0-9]{64}$' THEN 'relationship_following'
+        WHEN p_source_operation_key ~ '^(target-likers|target-comments|candidate-likers):[a-f0-9]{64}$' THEN 'detail_interaction'
+        ELSE NULL END;
+    IF v_operation_kind IS NULL THEN RAISE EXCEPTION USING MESSAGE='REVENUE_COST_OPERATION_FENCE'; END IF;
+    v_source_hash:=pg_catalog.encode(extensions.digest(pg_catalog.convert_to(p_source_operation_key,'UTF8'),'sha256'),'hex');
+    v_owner_hash:=pg_catalog.encode(extensions.digest(pg_catalog.convert_to('revenue-cost/live-provider-owner/v2:' || p_request_id::TEXT || ':' || p_job_key || ':' || p_source_operation_key || ':' || v_provider.input_hash,'UTF8'),'sha256'),'hex');
+    v_expected_krw:=public.analysis_revenue_cost_ceil_krw(v_provider.max_charge_usd);
+    SELECT * INTO v_parent FROM public.analysis_revenue_run_ledgers WHERE request_id=p_request_id FOR UPDATE;
+    IF v_parent.request_id IS NULL OR v_parent.preflight_id IS DISTINCT FROM v_preflight.id OR v_parent.user_id IS DISTINCT FROM v_request.user_id
+       OR v_parent.plan_id IS DISTINCT FROM v_request.selected_plan_id_snapshot OR v_parent.access_mode IS DISTINCT FROM 'test_entitlement'
+       OR v_parent.target_username_hmac IS DISTINCT FROM v_preflight.target_input_hash OR v_parent.preflight_refreshed_at IS DISTINCT FROM v_preflight.admission_refreshed_at
+       OR v_parent.request_started_at IS DISTINCT FROM v_request.created_at OR v_parent.pricing_snapshot_version IS DISTINCT FROM 'revenue-e2e-cost-2026-08-10-v1'
+       OR v_parent.buffered_fx_krw_per_usd IS DISTINCT FROM 1450
+       OR v_parent.cost_cap_krw IS DISTINCT FROM (CASE WHEN v_request.selected_plan_id_snapshot='basic' THEN 1808 ELSE 3634 END)
+       OR v_parent.margin_target_krw IS DISTINCT FROM (CASE WHEN v_request.selected_plan_id_snapshot='basic' THEN 904 ELSE 1817 END)
+       OR v_parent.status NOT IN ('running','manual_review') THEN RAISE EXCEPTION USING MESSAGE='REVENUE_COST_OPERATION_FENCE'; END IF;
+    SELECT COALESCE(pg_catalog.sum(CASE WHEN status IN ('reserved','started') THEN reserved_krw ELSE 0 END),0)::INTEGER,
+           COALESCE(pg_catalog.sum(CASE WHEN status='settled' THEN economic_actual_krw ELSE 0 END),0)::INTEGER,
+           COALESCE(pg_catalog.sum(CASE WHEN status='settled' THEN billed_actual_krw ELSE 0 END),0)::INTEGER
+      INTO v_active_reserved,v_settled_economic,v_settled_billed FROM public.analysis_revenue_cost_operations WHERE request_id=p_request_id;
+    IF v_parent.reserved_cost_krw IS DISTINCT FROM v_active_reserved OR v_parent.economic_actual_krw IS DISTINCT FROM v_settled_economic
+       OR v_parent.actual_cost_krw IS DISTINCT FROM v_settled_economic OR v_parent.billed_actual_krw IS DISTINCT FROM v_settled_billed THEN RAISE EXCEPTION USING MESSAGE='REVENUE_COST_OPERATION_FENCE'; END IF;
+    SELECT * INTO v_child FROM public.analysis_revenue_cost_operations WHERE request_id=p_request_id AND owner_kind='provider_run' AND source_job_key=p_job_key
+      AND source_operation_key_hash=v_source_hash AND source_attempt=0 FOR UPDATE;
+    IF NOT FOUND OR v_child.owner_key_hash IS DISTINCT FROM v_owner_hash OR v_child.attempt IS DISTINCT FROM 1 OR v_child.operation_kind IS DISTINCT FROM v_operation_kind OR v_child.units IS DISTINCT FROM 1
+       OR v_child.selected_manifest_scope_hash IS NOT NULL OR v_child.estimated_economic_usd IS DISTINCT FROM v_provider.max_charge_usd OR v_child.reserved_krw IS DISTINCT FROM v_expected_krw
+       OR v_child.denial_reason IS NOT NULL THEN RAISE EXCEPTION USING MESSAGE='REVENUE_COST_OPERATION_FENCE'; END IF;
+    IF v_child.status='released' AND v_child.started_at IS NULL AND v_child.economic_actual_usd IS NULL AND v_child.billed_actual_usd IS NULL
+       AND v_child.economic_actual_krw IS NULL AND v_child.billed_actual_krw IS NULL AND v_child.denial_reason IS NULL
+       AND v_parent.status='running' AND v_parent.manual_review_reason IS NULL
+       AND ((v_provider.status='starting' AND v_provider.run_id IS NULL AND v_provider.run_started_at IS NULL
+             AND v_provider.terminalized_at IS NULL AND v_provider.actual_usage_usd IS NULL AND v_provider.usage_reconciled_at IS NULL
+             AND v_child.terminal_at IS NOT DISTINCT FROM GREATEST(v_provider.reserved_at,v_child.created_at))
+            OR (v_provider.status='rejected' AND v_provider.run_id IS NULL AND v_provider.run_started_at IS NULL
+             AND v_provider.actual_usage_usd IS NOT DISTINCT FROM 0 AND v_provider.terminalized_at IS NOT NULL AND v_provider.usage_reconciled_at IS NOT NULL
+             AND v_child.terminal_at IS NOT DISTINCT FROM v_provider.usage_reconciled_at)) THEN
+        RETURN pg_catalog.jsonb_build_object('disposition','released','created',FALSE,'replayed',TRUE,'operationId',v_child.id);
+    END IF;
+    IF v_child.status='ambiguous' AND v_child.started_at IS NOT NULL AND v_child.terminal_at IS NOT NULL
+       AND v_parent.status='manual_review' AND v_parent.manual_review_reason='ambiguous_external_call' THEN RETURN pg_catalog.jsonb_build_object('disposition','ambiguous','created',FALSE,'replayed',TRUE,'operationId',v_child.id,'reason','ambiguous_external_call'); END IF;
+    IF v_child.status NOT IN ('reserved','started') OR v_child.economic_actual_usd IS NOT NULL OR v_child.billed_actual_usd IS NOT NULL THEN RAISE EXCEPTION USING MESSAGE='REVENUE_COST_OPERATION_FENCE'; END IF;
+    IF v_child.status='started' THEN
+        -- The runtime marks this immediately before its provider call.  Even a
+        -- still-starting provider row cannot prove that the call never crossed
+        -- the external boundary, so it must remain recoverable ambiguity.
+        UPDATE public.analysis_revenue_cost_operations SET status='ambiguous',terminal_at=v_now WHERE id=v_child.id;
+        UPDATE public.analysis_revenue_run_ledgers SET reserved_cost_krw=reserved_cost_krw-v_child.reserved_krw,status='manual_review',manual_review_reason='ambiguous_external_call' WHERE request_id=p_request_id;
+        RETURN pg_catalog.jsonb_build_object('disposition','ambiguous','created',TRUE,'replayed',FALSE,'operationId',v_child.id,'reason','ambiguous_external_call');
+    END IF;
+    IF v_provider.status IN ('starting','rejected') AND v_provider.run_id IS NULL AND v_provider.run_started_at IS NULL THEN
+        IF v_child.status<>'reserved' OR v_child.started_at IS NOT NULL OR v_child.terminal_at IS NOT NULL THEN RAISE EXCEPTION USING MESSAGE='REVENUE_COST_OPERATION_FENCE'; END IF;
+        UPDATE public.analysis_revenue_cost_operations SET status='released',terminal_at=CASE WHEN v_provider.status='rejected' THEN v_provider.usage_reconciled_at ELSE GREATEST(v_provider.reserved_at,v_child.created_at) END WHERE id=v_child.id;
+        UPDATE public.analysis_revenue_run_ledgers SET reserved_cost_krw=reserved_cost_krw-v_child.reserved_krw WHERE request_id=p_request_id;
+        RETURN pg_catalog.jsonb_build_object('disposition','released','created',TRUE,'replayed',FALSE,'operationId',v_child.id);
+    END IF;
+    IF v_provider.run_id IS NULL OR v_provider.run_started_at IS NULL THEN RAISE EXCEPTION USING MESSAGE='REVENUE_COST_OPERATION_FENCE'; END IF;
+    UPDATE public.analysis_revenue_cost_operations SET status='ambiguous',started_at=COALESCE(started_at,v_provider.run_started_at),terminal_at=v_now WHERE id=v_child.id;
+    UPDATE public.analysis_revenue_run_ledgers SET reserved_cost_krw=reserved_cost_krw-CASE WHEN v_child.status IN ('reserved','started') THEN v_child.reserved_krw ELSE 0 END,status='manual_review',manual_review_reason='ambiguous_external_call' WHERE request_id=p_request_id;
+    RETURN pg_catalog.jsonb_build_object('disposition','ambiguous','created',TRUE,'replayed',FALSE,'operationId',v_child.id,'reason','ambiguous_external_call');
+END; $$;
+
+REVOKE ALL ON FUNCTION public.settle_analysis_revenue_cost_operation_v2(UUID,TEXT,TEXT,TEXT,SMALLINT) FROM PUBLIC, anon, authenticated, service_role;
+REVOKE ALL ON FUNCTION public.release_analysis_revenue_cost_operation_v2(UUID,TEXT,UUID,TEXT,TEXT,TEXT,SMALLINT) FROM PUBLIC, anon, authenticated, service_role;
+GRANT EXECUTE ON FUNCTION public.settle_analysis_revenue_cost_operation_v2(UUID,TEXT,TEXT,TEXT,SMALLINT) TO service_role;
+GRANT EXECUTE ON FUNCTION public.release_analysis_revenue_cost_operation_v2(UUID,TEXT,UUID,TEXT,TEXT,TEXT,SMALLINT) TO service_role;

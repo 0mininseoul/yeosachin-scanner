@@ -75,4 +75,17 @@ describe('revenue cost-operation migration contract', () => {
         expect(source).toContain("REVOKE ALL ON FUNCTION public.mark_analysis_revenue_cost_operation_started_v2");
         expect(source).toContain("GRANT EXECUTE ON FUNCTION public.mark_analysis_revenue_cost_operation_started_v2");
     });
+
+    it('adds provider-authoritative settlement and live-identity release without unsafe overloads', () => {
+        expect(source).toContain('FUNCTION public.settle_analysis_revenue_cost_operation_v2');
+        expect(source).toContain('FUNCTION public.release_analysis_revenue_cost_operation_v2');
+        expect(source).toContain("p_source_kind = 'ai_attempt' THEN RAISE EXCEPTION USING MESSAGE = 'REVENUE_COST_OPERATION_AI_NOT_READY'");
+        expect(source).toContain("v_provider.status = 'rejected'");
+        expect(source).toContain("v_provider.status NOT IN ('succeeded','failed','aborted','timed_out')");
+        expect(source).toContain("REVENUE_COST_OPERATION_NOT_READY");
+        expect(source).toContain('DROP FUNCTION IF EXISTS public.settle_analysis_revenue_cost_operation_v2(UUID,TEXT,TEXT,TEXT,SMALLINT,NUMERIC,NUMERIC)');
+        expect(source).toContain('DROP FUNCTION IF EXISTS public.release_analysis_revenue_cost_operation_v2(UUID,TEXT,UUID,TEXT,TEXT,TEXT,SMALLINT,TEXT)');
+        expect(source).toContain('REVOKE ALL ON FUNCTION public.settle_analysis_revenue_cost_operation_v2(UUID,TEXT,TEXT,TEXT,SMALLINT) FROM PUBLIC, anon, authenticated, service_role');
+        expect(source).toContain('GRANT EXECUTE ON FUNCTION public.release_analysis_revenue_cost_operation_v2(UUID,TEXT,UUID,TEXT,TEXT,TEXT,SMALLINT) TO service_role');
+    });
 });
