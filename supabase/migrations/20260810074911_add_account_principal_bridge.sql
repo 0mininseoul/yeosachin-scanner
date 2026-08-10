@@ -1107,6 +1107,520 @@ BEGIN
 END;
 $$;
 
+-- This is the approved legacy E2E marker. It is deliberately a relationship
+-- predicate, not an email convention or a hand-written UUID allowlist: an
+-- unclassified principal without Auth must have both historical analysis and
+-- positive-payment-shaped order lineage, while having no accepted external
+-- payment lineage. The operator command HMACs its sorted result before any
+-- classification can be applied.
+CREATE OR REPLACE FUNCTION public.account_ledger_legacy_e2e_candidate_ids_v1()
+RETURNS TABLE(account_id UUID)
+LANGUAGE sql
+STABLE
+SECURITY DEFINER
+SET search_path = ''
+AS $$
+    SELECT account.id
+    FROM public.users AS account
+    WHERE account.classification_version IS NULL
+      AND NOT EXISTS (
+          SELECT 1
+          FROM auth.users AS auth_user
+          WHERE auth_user.id = account.id
+      )
+      AND EXISTS (
+          SELECT 1
+          FROM public.analysis_requests AS analysis_request
+          WHERE analysis_request.user_id = account.id
+      )
+      AND EXISTS (
+          SELECT 1
+          FROM public.earlybird_orders AS paid_order
+          WHERE paid_order.user_id = account.id
+            AND paid_order.payment_id IS NOT NULL
+            AND paid_order.paid_at IS NOT NULL
+            AND paid_order.actual_amount_krw > 0
+      )
+      AND NOT EXISTS (
+          SELECT 1
+          FROM public.earlybird_orders AS paid_order
+          JOIN public.earlybird_webhook_events AS webhook_event
+            ON webhook_event.order_id = paid_order.id
+          WHERE paid_order.user_id = account.id
+            AND webhook_event.event_type = 'payment.completed'
+            AND webhook_event.disposition = 'accepted'
+            AND webhook_event.payment_id = paid_order.payment_id
+            AND webhook_event.product_id = paid_order.actual_groble_product_id
+            AND webhook_event.amount_krw = paid_order.actual_amount_krw
+      )
+    ORDER BY account.id
+$$;
+
+REVOKE ALL ON FUNCTION public.account_ledger_legacy_e2e_candidate_ids_v1()
+    FROM PUBLIC, anon, authenticated, service_role;
+
+CREATE OR REPLACE FUNCTION public.list_account_ledger_legacy_e2e_candidates_v1()
+RETURNS TABLE(account_id UUID)
+LANGUAGE sql
+STABLE
+SECURITY DEFINER
+SET search_path = ''
+AS $$
+    SELECT candidate.account_id
+    FROM public.account_ledger_legacy_e2e_candidate_ids_v1() AS candidate
+$$;
+
+REVOKE ALL ON FUNCTION public.list_account_ledger_legacy_e2e_candidates_v1()
+    FROM PUBLIC, anon, authenticated, service_role;
+
+-- Build the full bounded payload inside PostgreSQL after recomputing the
+-- legacy set. The command receives opaque IDs only from Keychain and never
+-- serializes this JSON payload to stdout or an observability sink.
+CREATE OR REPLACE FUNCTION public.build_account_ledger_classification_plan_v1(
+    p_legacy_candidate_ids JSONB,
+    p_operator_account_ids JSONB,
+    p_internal_tester_account_ids JSONB
+)
+RETURNS TABLE(
+    assignments JSONB,
+    total_count INTEGER,
+    legacy_e2e_count INTEGER,
+    operator_count INTEGER,
+    internal_tester_count INTEGER,
+    production_external_count INTEGER
+)
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = ''
+AS $$
+DECLARE
+    v_legacy_ids JSONB;
+    v_operator_ids JSONB;
+    v_internal_tester_ids JSONB;
+    v_actual_legacy_ids JSONB;
+    v_total_count INTEGER;
+    v_legacy_count INTEGER;
+    v_operator_count INTEGER;
+    v_internal_tester_count INTEGER;
+    v_production_external_count INTEGER;
+    v_assignments JSONB;
+BEGIN
+    IF p_legacy_candidate_ids IS NULL
+       OR p_operator_account_ids IS NULL
+       OR p_internal_tester_account_ids IS NULL
+       OR pg_catalog.jsonb_typeof(p_legacy_candidate_ids) <> 'array'
+       OR pg_catalog.jsonb_typeof(p_operator_account_ids) <> 'array'
+       OR pg_catalog.jsonb_typeof(p_internal_tester_account_ids) <> 'array'
+       OR pg_catalog.jsonb_array_length(p_legacy_candidate_ids) NOT BETWEEN 1 AND 100
+       OR pg_catalog.jsonb_array_length(p_operator_account_ids) NOT BETWEEN 1 AND 16
+       OR pg_catalog.jsonb_array_length(p_internal_tester_account_ids) NOT BETWEEN 1 AND 16
+       OR EXISTS (
+           SELECT 1
+           FROM pg_catalog.jsonb_array_elements(p_legacy_candidate_ids) AS item
+           WHERE pg_catalog.jsonb_typeof(item) <> 'string'
+              OR item #>> '{}' !~* '^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$'
+       )
+       OR EXISTS (
+           SELECT 1
+           FROM pg_catalog.jsonb_array_elements(p_operator_account_ids) AS item
+           WHERE pg_catalog.jsonb_typeof(item) <> 'string'
+              OR item #>> '{}' !~* '^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$'
+       )
+       OR EXISTS (
+           SELECT 1
+           FROM pg_catalog.jsonb_array_elements(p_internal_tester_account_ids) AS item
+           WHERE pg_catalog.jsonb_typeof(item) <> 'string'
+              OR item #>> '{}' !~* '^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$'
+       ) THEN
+        RAISE EXCEPTION USING
+            MESSAGE = 'ACCOUNT_CLASSIFICATION_INPUT_INVALID',
+            ERRCODE = 'P0001';
+    END IF;
+
+    SELECT pg_catalog.jsonb_agg(pg_catalog.to_jsonb(value) ORDER BY value)
+    INTO v_legacy_ids
+    FROM pg_catalog.jsonb_array_elements_text(p_legacy_candidate_ids) AS value;
+    SELECT pg_catalog.jsonb_agg(pg_catalog.to_jsonb(value) ORDER BY value)
+    INTO v_operator_ids
+    FROM pg_catalog.jsonb_array_elements_text(p_operator_account_ids) AS value;
+    SELECT pg_catalog.jsonb_agg(pg_catalog.to_jsonb(value) ORDER BY value)
+    INTO v_internal_tester_ids
+    FROM pg_catalog.jsonb_array_elements_text(p_internal_tester_account_ids) AS value;
+
+    IF (
+        SELECT pg_catalog.count(*)
+        FROM (
+            SELECT value FROM pg_catalog.jsonb_array_elements_text(v_legacy_ids)
+            UNION ALL
+            SELECT value FROM pg_catalog.jsonb_array_elements_text(v_operator_ids)
+            UNION ALL
+            SELECT value FROM pg_catalog.jsonb_array_elements_text(v_internal_tester_ids)
+        ) AS supplied_id
+    ) <> (
+        SELECT pg_catalog.count(DISTINCT value)
+        FROM (
+            SELECT value FROM pg_catalog.jsonb_array_elements_text(v_legacy_ids)
+            UNION ALL
+            SELECT value FROM pg_catalog.jsonb_array_elements_text(v_operator_ids)
+            UNION ALL
+            SELECT value FROM pg_catalog.jsonb_array_elements_text(v_internal_tester_ids)
+        ) AS supplied_id
+    ) THEN
+        RAISE EXCEPTION USING
+            MESSAGE = 'ACCOUNT_CLASSIFICATION_INPUT_INVALID',
+            ERRCODE = 'P0001';
+    END IF;
+
+    SELECT COALESCE(
+        pg_catalog.jsonb_agg(pg_catalog.to_jsonb(candidate.account_id) ORDER BY candidate.account_id),
+        '[]'::JSONB
+    )
+    INTO v_actual_legacy_ids
+    FROM public.account_ledger_legacy_e2e_candidate_ids_v1() AS candidate;
+    IF v_legacy_ids IS DISTINCT FROM v_actual_legacy_ids THEN
+        RAISE EXCEPTION USING
+            MESSAGE = 'ACCOUNT_CLASSIFICATION_LEGACY_CANDIDATE_DRIFT',
+            ERRCODE = 'P0001';
+    END IF;
+
+    IF (
+        SELECT pg_catalog.count(*)
+        FROM public.users AS account
+        WHERE account.id IN (
+            SELECT value::UUID
+            FROM pg_catalog.jsonb_array_elements_text(v_operator_ids)
+            UNION ALL
+            SELECT value::UUID
+            FROM pg_catalog.jsonb_array_elements_text(v_internal_tester_ids)
+        )
+          AND account.classification_version IS NULL
+    ) <> pg_catalog.jsonb_array_length(v_operator_ids)
+        + pg_catalog.jsonb_array_length(v_internal_tester_ids) THEN
+        RAISE EXCEPTION USING
+            MESSAGE = 'ACCOUNT_CLASSIFICATION_IDENTIFIER_NOT_PENDING',
+            ERRCODE = 'P0001';
+    END IF;
+
+    SELECT pg_catalog.count(*)::INTEGER
+    INTO v_total_count
+    FROM public.users AS account
+    WHERE account.classification_version IS NULL;
+    IF v_total_count NOT BETWEEN 1 AND 100 THEN
+        RAISE EXCEPTION USING
+            MESSAGE = 'ACCOUNT_CLASSIFICATION_PLAN_SIZE_INVALID',
+            ERRCODE = 'P0001';
+    END IF;
+
+    SELECT pg_catalog.jsonb_agg(
+        pg_catalog.jsonb_build_object(
+            'account_id', account.id,
+            'account_class', CASE
+                WHEN account.id::TEXT IN (
+                    SELECT value FROM pg_catalog.jsonb_array_elements_text(v_legacy_ids)
+                ) OR account.id::TEXT IN (
+                    SELECT value FROM pg_catalog.jsonb_array_elements_text(v_internal_tester_ids)
+                ) THEN 'e2e_test'
+                WHEN account.id::TEXT IN (
+                    SELECT value FROM pg_catalog.jsonb_array_elements_text(v_operator_ids)
+                ) THEN 'production'
+                ELSE 'production'
+            END,
+            'traffic_class', CASE
+                WHEN account.id::TEXT IN (
+                    SELECT value FROM pg_catalog.jsonb_array_elements_text(v_legacy_ids)
+                ) THEN 'e2e_test'
+                WHEN account.id::TEXT IN (
+                    SELECT value FROM pg_catalog.jsonb_array_elements_text(v_internal_tester_ids)
+                ) THEN 'internal_tester'
+                WHEN account.id::TEXT IN (
+                    SELECT value FROM pg_catalog.jsonb_array_elements_text(v_operator_ids)
+                ) THEN 'operator'
+                ELSE 'external'
+            END,
+            'lifecycle', CASE
+                WHEN account.id::TEXT IN (
+                    SELECT value FROM pg_catalog.jsonb_array_elements_text(v_legacy_ids)
+                ) OR account.id::TEXT IN (
+                    SELECT value FROM pg_catalog.jsonb_array_elements_text(v_internal_tester_ids)
+                ) THEN 'retired'
+                ELSE 'active'
+            END,
+            'reason_code', CASE
+                WHEN account.id::TEXT IN (
+                    SELECT value FROM pg_catalog.jsonb_array_elements_text(v_legacy_ids)
+                ) THEN 'LEGACY_E2E_HMAC_VERIFIED'
+                WHEN account.id::TEXT IN (
+                    SELECT value FROM pg_catalog.jsonb_array_elements_text(v_internal_tester_ids)
+                ) THEN 'INTERNAL_TESTER_KEYCHAIN_VERIFIED'
+                WHEN account.id::TEXT IN (
+                    SELECT value FROM pg_catalog.jsonb_array_elements_text(v_operator_ids)
+                ) THEN 'OPERATOR_KEYCHAIN_VERIFIED'
+                ELSE 'PRODUCTION_EXTERNAL_DEFAULT'
+            END
+        )
+        ORDER BY account.id
+    )
+    INTO v_assignments
+    FROM public.users AS account
+    WHERE account.classification_version IS NULL;
+
+    SELECT pg_catalog.count(*)::INTEGER
+    INTO v_legacy_count
+    FROM public.users AS account
+    WHERE account.classification_version IS NULL
+      AND account.id::TEXT IN (
+          SELECT value FROM pg_catalog.jsonb_array_elements_text(v_legacy_ids)
+      );
+    SELECT pg_catalog.count(*)::INTEGER
+    INTO v_operator_count
+    FROM public.users AS account
+    WHERE account.classification_version IS NULL
+      AND account.id::TEXT IN (
+          SELECT value FROM pg_catalog.jsonb_array_elements_text(v_operator_ids)
+      );
+    SELECT pg_catalog.count(*)::INTEGER
+    INTO v_internal_tester_count
+    FROM public.users AS account
+    WHERE account.classification_version IS NULL
+      AND account.id::TEXT IN (
+          SELECT value FROM pg_catalog.jsonb_array_elements_text(v_internal_tester_ids)
+      );
+    v_production_external_count := v_total_count - v_legacy_count
+        - v_operator_count - v_internal_tester_count;
+
+    RETURN QUERY
+    SELECT v_assignments,
+        v_total_count,
+        v_legacy_count,
+        v_operator_count,
+        v_internal_tester_count,
+        v_production_external_count;
+END;
+$$;
+
+REVOKE ALL ON FUNCTION public.build_account_ledger_classification_plan_v1(
+    JSONB, JSONB, JSONB
+) FROM PUBLIC, anon, authenticated, service_role;
+
+CREATE OR REPLACE FUNCTION public.load_account_ledger_rollout_state_v1()
+RETURNS TABLE(paid_ever_state TEXT, classification_command_version TEXT)
+LANGUAGE sql
+STABLE
+SECURITY DEFINER
+SET search_path = ''
+AS $$
+    SELECT rollout.paid_ever_state, rollout.classification_command_version
+    FROM public.account_ledger_rollout_state AS rollout
+    WHERE rollout.singleton IS TRUE
+$$;
+
+REVOKE ALL ON FUNCTION public.load_account_ledger_rollout_state_v1()
+    FROM PUBLIC, anon, authenticated, service_role;
+
+-- A registry makes the two permitted runner plans unique in the database.
+-- The Auth metadata is validated on every provisioning/read path; this table
+-- is immutable so an administrator cannot silently remap a runner plan.
+CREATE TABLE public.account_e2e_test_runners (
+    account_id UUID PRIMARY KEY REFERENCES public.users(id) ON DELETE RESTRICT,
+    runner_plan TEXT NOT NULL UNIQUE CHECK (runner_plan IN ('basic', 'standard')),
+    command_version TEXT NOT NULL CHECK (command_version ~ '^[a-z0-9._-]{1,64}$'),
+    created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT pg_catalog.clock_timestamp()
+);
+
+ALTER TABLE public.account_e2e_test_runners ENABLE ROW LEVEL SECURITY;
+REVOKE ALL ON TABLE public.account_e2e_test_runners
+    FROM PUBLIC, anon, authenticated, service_role;
+GRANT SELECT ON TABLE public.account_e2e_test_runners TO service_role;
+
+CREATE OR REPLACE FUNCTION public.reject_account_e2e_test_runner_mutation()
+RETURNS TRIGGER
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = ''
+AS $$
+BEGIN
+    RAISE EXCEPTION USING
+        MESSAGE = 'ACCOUNT_E2E_TEST_RUNNER_IMMUTABLE',
+        ERRCODE = 'P0001';
+END;
+$$;
+
+REVOKE ALL ON FUNCTION public.reject_account_e2e_test_runner_mutation()
+    FROM PUBLIC, anon, authenticated, service_role;
+
+CREATE TRIGGER reject_account_e2e_test_runner_mutation_before_write
+BEFORE UPDATE OR DELETE ON public.account_e2e_test_runners
+FOR EACH ROW
+EXECUTE FUNCTION public.reject_account_e2e_test_runner_mutation();
+
+CREATE OR REPLACE FUNCTION public.provision_e2e_test_runner_v1(
+    p_user_id UUID,
+    p_email TEXT,
+    p_runner_plan TEXT,
+    p_command_version TEXT
+)
+RETURNS TABLE(runner_plan TEXT, created BOOLEAN)
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = ''
+AS $$
+DECLARE
+    v_auth_runner_plan TEXT;
+    v_account public.users%ROWTYPE;
+    v_registered_account_id UUID;
+    v_created BOOLEAN := FALSE;
+BEGIN
+    IF p_user_id IS NULL
+       OR p_email IS NULL
+       OR p_email !~ '^[^[:space:]@]+@[^[:space:]@]+\.[^[:space:]@]+$'
+       OR p_runner_plan NOT IN ('basic', 'standard')
+       OR p_command_version IS NULL
+       OR p_command_version !~ '^[a-z0-9._-]{1,64}$' THEN
+        RAISE EXCEPTION USING
+            MESSAGE = 'ACCOUNT_E2E_TEST_RUNNER_INPUT_INVALID',
+            ERRCODE = 'P0001';
+    END IF;
+
+    SELECT auth_user.raw_app_meta_data ->> 'analysis_test_runner_v1'
+    INTO v_auth_runner_plan
+    FROM auth.users AS auth_user
+    WHERE auth_user.id = p_user_id;
+    IF NOT FOUND OR v_auth_runner_plan IS DISTINCT FROM p_runner_plan THEN
+        RAISE EXCEPTION USING
+            MESSAGE = 'ACCOUNT_E2E_TEST_RUNNER_AUTH_METADATA_MISMATCH',
+            ERRCODE = 'P0001';
+    END IF;
+
+    PERFORM pg_catalog.pg_advisory_xact_lock(
+        pg_catalog.hashtextextended('account-e2e-test-runner:' || p_runner_plan, 0)
+    );
+    SELECT runner.account_id
+    INTO v_registered_account_id
+    FROM public.account_e2e_test_runners AS runner
+    WHERE runner.runner_plan = p_runner_plan
+    FOR UPDATE;
+    IF FOUND AND v_registered_account_id IS DISTINCT FROM p_user_id THEN
+        RAISE EXCEPTION USING
+            MESSAGE = 'ACCOUNT_E2E_TEST_RUNNER_PLAN_ALREADY_BOUND',
+            ERRCODE = 'P0001';
+    END IF;
+
+    SELECT account.*
+    INTO v_account
+    FROM public.users AS account
+    WHERE account.id = p_user_id
+    FOR UPDATE;
+    IF NOT FOUND THEN
+        INSERT INTO public.users (
+            id, email, provider, analysis_count, is_paid_user, is_unlimited,
+            account_class, traffic_class, lifecycle, classification_version
+        ) VALUES (
+            p_user_id, p_email, 'e2e', 0, FALSE, FALSE,
+            'e2e_test', 'e2e_test', 'active', p_command_version
+        );
+        SELECT account.*
+        INTO v_account
+        FROM public.users AS account
+        WHERE account.id = p_user_id
+        FOR UPDATE;
+        v_created := TRUE;
+    END IF;
+
+    IF v_account.email IS DISTINCT FROM p_email
+       OR v_account.account_class IS DISTINCT FROM 'e2e_test'
+       OR v_account.traffic_class IS DISTINCT FROM 'e2e_test'
+       OR v_account.lifecycle IS DISTINCT FROM 'active'
+       OR v_account.classification_version IS DISTINCT FROM p_command_version THEN
+        RAISE EXCEPTION USING
+            MESSAGE = 'ACCOUNT_E2E_TEST_RUNNER_PRINCIPAL_MISMATCH',
+            ERRCODE = 'P0001';
+    END IF;
+
+    INSERT INTO public.account_e2e_test_runners (
+        account_id, runner_plan, command_version
+    ) VALUES (
+        p_user_id, p_runner_plan, p_command_version
+    ) ON CONFLICT (account_id) DO NOTHING;
+
+    SELECT runner.account_id
+    INTO v_registered_account_id
+    FROM public.account_e2e_test_runners AS runner
+    WHERE runner.runner_plan = p_runner_plan;
+    IF v_registered_account_id IS DISTINCT FROM p_user_id THEN
+        RAISE EXCEPTION USING
+            MESSAGE = 'ACCOUNT_E2E_TEST_RUNNER_PLAN_ALREADY_BOUND',
+            ERRCODE = 'P0001';
+    END IF;
+
+    IF NOT EXISTS (
+        SELECT 1
+        FROM public.account_classification_audit AS audit
+        WHERE audit.account_id = p_user_id
+          AND audit.command_version = p_command_version
+          AND audit.reason_code = 'E2E_RUNNER_PROVISIONED'
+    ) THEN
+        INSERT INTO public.account_classification_audit (
+            account_id, command_version, reason_code,
+            previous_account_class, previous_traffic_class, previous_lifecycle,
+            next_account_class, next_traffic_class, next_lifecycle
+        ) VALUES (
+            p_user_id, p_command_version, 'E2E_RUNNER_PROVISIONED',
+            'e2e_test', 'e2e_test', 'active',
+            'e2e_test', 'e2e_test', 'active'
+        );
+    END IF;
+
+    RETURN QUERY SELECT p_runner_plan, v_created;
+END;
+$$;
+
+REVOKE ALL ON FUNCTION public.provision_e2e_test_runner_v1(UUID, TEXT, TEXT, TEXT)
+    FROM PUBLIC, anon, authenticated, service_role;
+
+CREATE OR REPLACE FUNCTION public.load_e2e_test_runner_v1(p_user_id UUID)
+RETURNS TABLE(runner_plan TEXT)
+LANGUAGE sql
+STABLE
+SECURITY DEFINER
+SET search_path = ''
+AS $$
+    SELECT runner.runner_plan
+    FROM public.account_e2e_test_runners AS runner
+    JOIN public.users AS account ON account.id = runner.account_id
+    JOIN auth.users AS auth_user ON auth_user.id = runner.account_id
+    WHERE runner.account_id = p_user_id
+      AND account.account_class = 'e2e_test'
+      AND account.traffic_class = 'e2e_test'
+      AND account.lifecycle = 'active'
+      AND auth_user.raw_app_meta_data ->> 'analysis_test_runner_v1'
+            = runner.runner_plan
+$$;
+
+REVOKE ALL ON FUNCTION public.load_e2e_test_runner_v1(UUID)
+    FROM PUBLIC, anon, authenticated, service_role;
+
+CREATE OR REPLACE FUNCTION public.list_e2e_test_runner_plans_v1()
+RETURNS TABLE(runner_plan TEXT)
+LANGUAGE sql
+STABLE
+SECURITY DEFINER
+SET search_path = ''
+AS $$
+    SELECT runner.runner_plan
+    FROM public.account_e2e_test_runners AS runner
+    JOIN public.users AS account ON account.id = runner.account_id
+    JOIN auth.users AS auth_user ON auth_user.id = runner.account_id
+    WHERE account.account_class = 'e2e_test'
+      AND account.traffic_class = 'e2e_test'
+      AND account.lifecycle = 'active'
+      AND auth_user.raw_app_meta_data ->> 'analysis_test_runner_v1'
+            = runner.runner_plan
+    ORDER BY runner.runner_plan
+$$;
+
+REVOKE ALL ON FUNCTION public.list_e2e_test_runner_plans_v1()
+    FROM PUBLIC, anon, authenticated, service_role;
+
 -- Recreate all three payment-completion entry points. The refund-aware
 -- delegate remains the single attribution/locking authority; the wrapper only
 -- resolves its immutable accepted event and calls the idempotent paid helper.
@@ -1326,6 +1840,19 @@ GRANT EXECUTE ON FUNCTION public.record_external_paid_ever(UUID, TEXT)
 GRANT EXECUTE ON FUNCTION public.classify_account_principals_v1(
     JSONB, TEXT, BOOLEAN
 ) TO service_role;
+GRANT EXECUTE ON FUNCTION public.list_account_ledger_legacy_e2e_candidates_v1()
+    TO service_role;
+GRANT EXECUTE ON FUNCTION public.build_account_ledger_classification_plan_v1(
+    JSONB, JSONB, JSONB
+) TO service_role;
+GRANT EXECUTE ON FUNCTION public.load_account_ledger_rollout_state_v1()
+    TO service_role;
+GRANT EXECUTE ON FUNCTION public.provision_e2e_test_runner_v1(UUID, TEXT, TEXT, TEXT)
+    TO service_role;
+GRANT EXECUTE ON FUNCTION public.load_e2e_test_runner_v1(UUID)
+    TO service_role;
+GRANT EXECUTE ON FUNCTION public.list_e2e_test_runner_plans_v1()
+    TO service_role;
 
 REVOKE ALL ON FUNCTION public.finalize_earlybird_groble_payment(
     TEXT, TEXT, TEXT, TIMESTAMP WITH TIME ZONE, TEXT, TEXT, TEXT, TEXT,

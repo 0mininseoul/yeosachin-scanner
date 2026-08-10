@@ -51,6 +51,12 @@ async function createDatabase(): Promise<PGlite> {
         CREATE ROLE authenticated NOLOGIN;
         CREATE ROLE service_role NOLOGIN;
 
+        CREATE SCHEMA auth;
+        CREATE TABLE auth.users (
+            id UUID PRIMARY KEY,
+            raw_app_meta_data JSONB NOT NULL DEFAULT '{}'::JSONB
+        );
+
         CREATE TABLE public.users (
             id UUID PRIMARY KEY,
             email VARCHAR NOT NULL,
@@ -74,6 +80,11 @@ async function createDatabase(): Promise<PGlite> {
         );
 
         GRANT SELECT, INSERT, UPDATE, DELETE ON public.users TO anon, authenticated;
+
+        CREATE TABLE public.analysis_requests (
+            id UUID PRIMARY KEY,
+            user_id UUID NOT NULL REFERENCES public.users(id)
+        );
 
         CREATE TABLE public.earlybird_orders (
             id UUID PRIMARY KEY,
@@ -945,5 +956,111 @@ describe('account-principal Phase A+B migration semantics', () => {
         await expect(withRole(db, 'authenticated', () => db.query(
             'SELECT id, lifecycle FROM public.users',
         ))).rejects.toThrow();
+    }, PGLITE_TEST_TIMEOUT_MS);
+
+    it('recomputes the bounded legacy E2E candidate set and rejects a stale planner payload', async () => {
+        const db = await createDatabase();
+        await db.exec(`
+            INSERT INTO public.users(id, email, provider, classification_version) VALUES
+                ('${E2E_ACCOUNT_ID}', 'legacy-e2e@invalid.test', 'kakao', NULL),
+                ('${OPERATOR_ACCOUNT_ID}', 'operator@invalid.test', 'google', NULL),
+                ('${INTERNAL_TESTER_ACCOUNT_ID}', 'internal@invalid.test', 'google', NULL);
+            INSERT INTO public.analysis_requests(id, user_id) VALUES
+                ('${EXTERNAL_LATE_ORDER_ID}', '${E2E_ACCOUNT_ID}');
+            INSERT INTO public.earlybird_orders(
+                id, user_id, status, payment_id, actual_groble_product_id,
+                actual_amount_krw, paid_at
+            ) VALUES (
+                '${E2E_ORDER_ID}', '${E2E_ACCOUNT_ID}', 'completed', 'legacy-payment',
+                'legacy-product', 1000, pg_catalog.clock_timestamp()
+            );
+        `);
+
+        const candidates = await asService<{ account_id: string }>(db,
+            'SELECT account_id FROM public.list_account_ledger_legacy_e2e_candidates_v1()',
+        );
+        expect(candidates.rows.map(row => row.account_id)).toEqual([E2E_ACCOUNT_ID]);
+
+        const plan = await asService<{
+            total_count: number;
+            legacy_e2e_count: number;
+            operator_count: number;
+            internal_tester_count: number;
+        }>(db, `
+            SELECT total_count, legacy_e2e_count, operator_count, internal_tester_count
+            FROM public.build_account_ledger_classification_plan_v1(
+                $1::JSONB, $2::JSONB, $3::JSONB
+            )
+        `, [
+            JSON.stringify([E2E_ACCOUNT_ID]),
+            JSON.stringify([OPERATOR_ACCOUNT_ID]),
+            JSON.stringify([INTERNAL_TESTER_ACCOUNT_ID]),
+        ]);
+        expect(plan.rows).toEqual([{
+            total_count: 3,
+            legacy_e2e_count: 1,
+            operator_count: 1,
+            internal_tester_count: 1,
+        }]);
+        await expect(asService(db, `
+            SELECT * FROM public.build_account_ledger_classification_plan_v1(
+                $1::JSONB, $2::JSONB, $3::JSONB
+            )
+        `, [
+            JSON.stringify([EXTERNAL_ACCOUNT_ID]),
+            JSON.stringify([OPERATOR_ACCOUNT_ID]),
+            JSON.stringify([INTERNAL_TESTER_ACCOUNT_ID]),
+        ])).rejects.toThrow('ACCOUNT_CLASSIFICATION_LEGACY_CANDIDATE_DRIFT');
+    }, PGLITE_TEST_TIMEOUT_MS);
+
+    it('binds exactly one immutable runner per plan, remains idempotent, and denies a retired runner', async () => {
+        const db = await createDatabase();
+        const basicRunnerId = '50000000-0000-4000-8000-000000000001';
+        const standardRunnerId = '50000000-0000-4000-8000-000000000002';
+        const duplicateBasicRunnerId = '50000000-0000-4000-8000-000000000003';
+        await db.exec(`
+            INSERT INTO auth.users(id, raw_app_meta_data) VALUES
+                ('${basicRunnerId}', '{"analysis_test_runner_v1":"basic"}'::JSONB),
+                ('${standardRunnerId}', '{"analysis_test_runner_v1":"standard"}'::JSONB),
+                ('${duplicateBasicRunnerId}', '{"analysis_test_runner_v1":"basic"}'::JSONB);
+        `);
+
+        const firstBasic = await asService<{ runner_plan: string; created: boolean }>(db, `
+            SELECT * FROM public.provision_e2e_test_runner_v1(
+                $1::UUID, $2::TEXT, 'basic', 'account-ledger-v1'
+            )
+        `, [basicRunnerId, 'basic-runner@invalid.test']);
+        const replayBasic = await asService<{ runner_plan: string; created: boolean }>(db, `
+            SELECT * FROM public.provision_e2e_test_runner_v1(
+                $1::UUID, $2::TEXT, 'basic', 'account-ledger-v1'
+            )
+        `, [basicRunnerId, 'basic-runner@invalid.test']);
+        await asService(db, `
+            SELECT * FROM public.provision_e2e_test_runner_v1(
+                $1::UUID, $2::TEXT, 'standard', 'account-ledger-v1'
+            )
+        `, [standardRunnerId, 'standard-runner@invalid.test']);
+        expect(firstBasic.rows).toEqual([{ runner_plan: 'basic', created: true }]);
+        expect(replayBasic.rows).toEqual([{ runner_plan: 'basic', created: false }]);
+        await expect(asService(db, `
+            SELECT * FROM public.provision_e2e_test_runner_v1(
+                $1::UUID, $2::TEXT, 'basic', 'account-ledger-v1'
+            )
+        `, [duplicateBasicRunnerId, 'duplicate-runner@invalid.test']))
+            .rejects.toThrow('ACCOUNT_E2E_TEST_RUNNER_PLAN_ALREADY_BOUND');
+
+        const plans = await asService<{ runner_plan: string }>(db,
+            'SELECT runner_plan FROM public.list_e2e_test_runner_plans_v1()',
+        );
+        expect(plans.rows.map(row => row.runner_plan)).toEqual(['basic', 'standard']);
+        await asService(db,
+            "UPDATE public.users SET lifecycle = 'retired' WHERE id = $1::UUID",
+            [basicRunnerId],
+        );
+        const retiredRunner = await asService<{ runner_plan: string }>(db,
+            'SELECT runner_plan FROM public.load_e2e_test_runner_v1($1::UUID)',
+            [basicRunnerId],
+        );
+        expect(retiredRunner.rows).toEqual([]);
     }, PGLITE_TEST_TIMEOUT_MS);
 });
