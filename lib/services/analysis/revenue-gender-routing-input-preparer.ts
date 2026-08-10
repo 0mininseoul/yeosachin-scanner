@@ -19,6 +19,8 @@ export const REVENUE_GENDER_ROUTING_IMAGE_MAX_BYTES = 256 * 1024;
 export const REVENUE_GENDER_ROUTING_IMAGE_TIMEOUT_MS = 3_000;
 export const REVENUE_GENDER_ROUTING_IMAGE_MAX_REDIRECTS = 2;
 export const REVENUE_GENDER_ROUTING_IMAGE_MAX_CONCURRENCY = 4;
+/** Bounds all distinct normalized request-local evidence, before assessor batching. */
+export const REVENUE_GENDER_ROUTING_MAX_AGGREGATE_NORMALIZED_IMAGE_BYTES = 8 * 1024 * 1024;
 
 const REVENUE_GENDER_ROUTING_IMAGE_POLICY: AnalysisImagePolicy = Object.freeze({
     maxImages: 1,
@@ -38,6 +40,7 @@ export interface RevenueGenderRoutingInputPreparerDependencies {
     /** Injectable only for deterministic failure/size boundary tests. */
     normalize?: (bytes: Buffer) => Promise<Buffer>;
     maxConcurrency?: number;
+    maxAggregateNormalizedBytes?: number;
 }
 
 function isSupportedSourceImage(bytes: Buffer): boolean {
@@ -63,6 +66,14 @@ function boundedConcurrency(value: number | undefined): number {
     const resolved = value ?? REVENUE_GENDER_ROUTING_IMAGE_MAX_CONCURRENCY;
     if (!Number.isSafeInteger(resolved) || resolved < 1 || resolved > 16) {
         throw new Error('REVENUE_GENDER_ROUTING_IMAGE_CONCURRENCY_INVALID');
+    }
+    return resolved;
+}
+
+function boundedAggregateNormalizedBytes(value: number | undefined): number {
+    const resolved = value ?? REVENUE_GENDER_ROUTING_MAX_AGGREGATE_NORMALIZED_IMAGE_BYTES;
+    if (!Number.isSafeInteger(resolved) || resolved < REVENUE_GENDER_ROUTING_IMAGE_MAX_BYTES || resolved > 64 * 1024 * 1024) {
+        throw new Error('REVENUE_GENDER_ROUTING_IMAGE_BUDGET_INVALID');
     }
     return resolved;
 }
@@ -111,6 +122,9 @@ export function createRevenueGenderRoutingInputPreparer(
         REVENUE_GENDER_ROUTING_IMAGE_POLICY,
     ));
     const concurrency = boundedConcurrency(dependencies.maxConcurrency);
+    const maxAggregateNormalizedBytes = boundedAggregateNormalizedBytes(
+        dependencies.maxAggregateNormalizedBytes,
+    );
 
     return async candidates => {
         const urls = new Map<string, null>();
@@ -122,10 +136,18 @@ export function createRevenueGenderRoutingInputPreparer(
         const preparedByUrl = new Map<string, Uint8Array | null>();
         const pendingUrls = [...urls.keys()];
         let nextUrlIndex = 0;
+        let aggregateNormalizedBytes = 0;
         async function worker(): Promise<void> {
             while (nextUrlIndex < pendingUrls.length) {
                 const url = pendingUrls[nextUrlIndex++];
-                preparedByUrl.set(url, await prepareOneImage(url, download, normalize));
+                const normalizedImage = await prepareOneImage(url, download, normalize);
+                if (normalizedImage !== null) {
+                    if (aggregateNormalizedBytes + normalizedImage.byteLength > maxAggregateNormalizedBytes) {
+                        throw new Error('REVENUE_GENDER_ROUTING_IMAGE_BUDGET_EXCEEDED');
+                    }
+                    aggregateNormalizedBytes += normalizedImage.byteLength;
+                }
+                preparedByUrl.set(url, normalizedImage);
             }
         }
         await Promise.all(Array.from(
@@ -139,9 +161,9 @@ export function createRevenueGenderRoutingInputPreparer(
             return Object.freeze({
                 candidateKey: candidate.candidateKey,
                 fullname: candidate.fullname,
-                // Retain URL work deduplication while preventing duplicate candidates
-                // from sharing writable evidence at the runtime boundary.
-                imageBytes: normalizedImage === null ? null : new Uint8Array(normalizedImage),
+                // The runtime snapshots this private request-local evidence before any model call.
+                // Sharing it here prevents duplicate URLs from multiplying mutable buffers.
+                imageBytes: normalizedImage,
             });
         }));
     };

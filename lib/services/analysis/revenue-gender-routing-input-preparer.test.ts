@@ -55,10 +55,7 @@ describe('revenue gender-routing input preparer', () => {
             'candidate:2', 'candidate:1', 'candidate:3',
         ]);
         expect(output.map(candidate => candidate.fullname)).toEqual(['  A\u030Ada  ', 'Name', null]);
-        expect(output[0].imageBytes).not.toBe(output[1].imageBytes);
-        const secondImage = Buffer.from(output[1].imageBytes!);
-        output[0].imageBytes![0] ^= 0xff;
-        expect(Buffer.from(output[1].imageBytes!)).toEqual(secondImage);
+        expect(output[0].imageBytes).toBe(output[1].imageBytes);
         expect(output[2].imageBytes).toBeNull();
     });
 
@@ -192,6 +189,35 @@ describe('revenue gender-routing input preparer', () => {
         expect(first?.manifest.canonicalInputHmac).toBe(second?.manifest.canonicalInputHmac);
         expect(first).toEqual(second);
         expect(assess.mock.calls[0]?.[0][0]).toMatchObject({ fullname: 'Åda' });
+    });
+
+    it('downloads and normalizes one exact URL once across Standard microbatch boundaries', async () => {
+        const download = vi.fn(async () => downloaded());
+        const normalize = vi.fn(async (bytes: Buffer) => Buffer.from(bytes));
+        const prepare = createRevenueGenderRoutingInputPreparer({ download, normalize });
+        const assess = vi.fn(async (rows: readonly RevenueGenderRoutingModelCandidate[]) => new Map(rows.map(row => [
+            row.candidateKey,
+            { femaleScore: 0.8, maleScore: 0.1, uncertaintyScore: 0.1, evidence: 'image_and_name' as const },
+        ])));
+        const candidates = Array.from({ length: 201 }, (_, index) => ({
+            ...source(`candidate:${index + 1}`, 'https://scontent.cdninstagram.com/shared-boundary.jpg', 'Name'),
+            mutualOrdinal: index + 1,
+        }));
+
+        await routeRevenueGenderCandidates({
+            requestId: '123e4567-e89b-42d3-a456-426614174000',
+            relationshipCheckpointId: 'checkpoint',
+            accessMode: 'test_entitlement',
+            planId: 'standard',
+            candidates,
+            hmacSecret: 'revenue-routing-input-preparer-test-secret',
+            inputPreparer: prepare,
+            assess,
+        });
+
+        expect(download).toHaveBeenCalledTimes(1);
+        expect(normalize).toHaveBeenCalledTimes(1);
+        expect(assess.mock.calls.every(([rows]) => rows.length <= 10)).toBe(true);
     });
 
     it('bounds distinct URL preparation concurrency', async () => {

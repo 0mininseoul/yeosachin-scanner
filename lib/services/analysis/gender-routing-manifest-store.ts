@@ -69,6 +69,17 @@ export interface AnalysisV2GenderRoutingManifestBeginInput {
     readonly detailedCap: 100 | 200;
 }
 
+/** Claim-fenced identity for the only retry-safe complete-manifest reader. */
+export interface AnalysisV2GenderRoutingManifestCurrentCompleteInput {
+    readonly requestId: string;
+    readonly jobKey: typeof JOB_KEY;
+    readonly claimToken: string;
+    readonly jobInputHash: string;
+    readonly relationshipCheckpointId: string;
+    readonly policyVersion: 'gender-routing-v1';
+    readonly planId: GenderRoutingPlan;
+}
+
 export interface AnalysisV2GenderRoutingManifestCandidateRow extends GenderRoutingManifestRow {
     /** The only link back to the relationship PII staging row. */
     readonly mutualOrdinal: number;
@@ -122,6 +133,10 @@ export interface AnalysisV2GenderRoutingManifestSupabaseClient {
 }
 
 export interface AnalysisV2GenderRoutingManifestStore {
+    loadCurrentComplete(input: AnalysisV2GenderRoutingManifestCurrentCompleteInput): Promise<{
+        readonly header: Extract<AnalysisV2GenderRoutingManifestHeader, { status: 'complete' }>;
+        readonly selected: readonly AnalysisV2GenderRoutingSelectedRow[];
+    } | null>;
     begin(input: AnalysisV2GenderRoutingManifestBeginInput): Promise<AnalysisV2GenderRoutingManifestHeader>;
     publish(input: AnalysisV2GenderRoutingManifestPublishInput): Promise<AnalysisV2GenderRoutingManifestHeader>;
     loadSelected(input: AnalysisV2GenderRoutingSelectedIdentity): Promise<readonly AnalysisV2GenderRoutingSelectedRow[]>;
@@ -135,6 +150,7 @@ export const ANALYSIS_V2_GENDER_ROUTING_MANIFEST_DATABASE_NAMES = Object.freeze(
     publishRpc: 'publish_analysis_v2_gender_routing_manifest',
     loadSelectedRpc: 'load_analysis_v2_gender_routing_selected',
     loadSelectedUsernamesRpc: 'load_analysis_v2_gender_routing_selected_usernames',
+    loadCurrentCompleteRpc: 'load_current_analysis_v2_gender_routing_manifest',
 });
 
 function validateBegin(input: AnalysisV2GenderRoutingManifestBeginInput): void {
@@ -154,6 +170,18 @@ function validateBegin(input: AnalysisV2GenderRoutingManifestBeginInput): void {
     ) {
         throw new Error('ANALYSIS_V2_GENDER_ROUTING_MANIFEST_VALIDATION_ERROR');
     }
+}
+
+function validateCurrentComplete(input: AnalysisV2GenderRoutingManifestCurrentCompleteInput): void {
+    if (
+        !UUID_PATTERN.test(input.requestId)
+        || input.jobKey !== JOB_KEY
+        || !UUID_PATTERN.test(input.claimToken)
+        || !HASH_PATTERN.test(input.jobInputHash)
+        || !HASH_PATTERN.test(input.relationshipCheckpointId)
+        || input.policyVersion !== 'gender-routing-v1'
+        || (input.planId !== 'basic' && input.planId !== 'standard')
+    ) throw new Error('ANALYSIS_V2_GENDER_ROUTING_MANIFEST_VALIDATION_ERROR');
 }
 
 function nonNegativeInteger(value: number, maximum: number): boolean {
@@ -318,6 +346,11 @@ const selectedUsernameResultSchema = z.object({
     }).strict()).max(200),
 }).strict();
 
+const currentCompleteResultSchema = z.object({
+    header: completeManifestHeaderSchema,
+    selected: selectedResultSchema,
+}).strict();
+
 function parsedSelectedRows<T extends AnalysisV2GenderRoutingSelectedRow>(
     parsed: { selectedCount: number; rows: readonly T[] },
 ): readonly T[] {
@@ -376,10 +409,47 @@ function assertHeaderMatchesPublish(
     ) throw new Error('ANALYSIS_V2_GENDER_ROUTING_MANIFEST_INVALID_RESULT');
 }
 
+function assertHeaderMatchesCurrent(
+    header: Extract<AnalysisV2GenderRoutingManifestHeader, { status: 'complete' }>,
+    input: AnalysisV2GenderRoutingManifestCurrentCompleteInput,
+): void {
+    if (
+        header.requestId.toLowerCase() !== input.requestId.toLowerCase()
+        || header.relationshipCheckpointId !== input.relationshipCheckpointId
+        || header.policyVersion !== input.policyVersion
+        || header.planId !== input.planId
+        || header.relationshipJobInputHash !== input.jobInputHash
+    ) throw new Error('ANALYSIS_V2_GENDER_ROUTING_MANIFEST_INVALID_RESULT');
+}
+
 export function createAnalysisV2GenderRoutingManifestStore(
     client: AnalysisV2GenderRoutingManifestSupabaseClient = supabaseAdmin,
 ): AnalysisV2GenderRoutingManifestStore {
     return {
+        async loadCurrentComplete(input) {
+            validateCurrentComplete(input);
+            const { data, error } = await client.rpc(
+                ANALYSIS_V2_GENDER_ROUTING_MANIFEST_DATABASE_NAMES.loadCurrentCompleteRpc,
+                {
+                    p_request_id: input.requestId.toLowerCase(),
+                    p_job_key: input.jobKey,
+                    p_claim_token: input.claimToken.toLowerCase(),
+                    p_job_input_hash: input.jobInputHash,
+                    p_relationship_checkpoint_id: input.relationshipCheckpointId,
+                    p_policy_version: input.policyVersion,
+                    p_plan_id: input.planId,
+                }
+            );
+            if (error) throw new Error('ANALYSIS_V2_GENDER_ROUTING_MANIFEST_PERSISTENCE_ERROR');
+            if (data === null) return null;
+            const parsed = currentCompleteResultSchema.safeParse(data);
+            if (!parsed.success) throw new Error('ANALYSIS_V2_GENDER_ROUTING_MANIFEST_INVALID_RESULT');
+            assertHeaderMatchesCurrent(parsed.data.header, input);
+            return Object.freeze({
+                header: Object.freeze(parsed.data.header),
+                selected: parsedSelectedRows(parsed.data.selected),
+            });
+        },
         async begin(input) {
             validateBegin(input);
             const { data, error } = await client.rpc(
