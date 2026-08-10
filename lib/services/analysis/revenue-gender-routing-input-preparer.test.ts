@@ -55,7 +55,10 @@ describe('revenue gender-routing input preparer', () => {
             'candidate:2', 'candidate:1', 'candidate:3',
         ]);
         expect(output.map(candidate => candidate.fullname)).toEqual(['  A\u030Ada  ', 'Name', null]);
-        expect(output[0].imageBytes).toBe(output[1].imageBytes);
+        expect(output[0].imageBytes).not.toBe(output[1].imageBytes);
+        const secondImage = Buffer.from(output[1].imageBytes!);
+        output[0].imageBytes![0] ^= 0xff;
+        expect(Buffer.from(output[1].imageBytes!)).toEqual(secondImage);
         expect(output[2].imageBytes).toBeNull();
     });
 
@@ -180,13 +183,14 @@ describe('revenue gender-routing input preparer', () => {
             assess,
         });
 
-        const bytes = assess.mock.calls[0]?.[0][0]?.imageBytes;
+        const imageBase64 = assess.mock.calls[0]?.[0][0]?.imageBase64;
         const expectedHmac = createHmac('sha256', 'revenue-routing-input-preparer-test-secret')
             .update('gender-routing:image-content:v1\0')
-            .update(bytes!)
+            .update(Buffer.from(imageBase64!, 'base64'))
             .digest('hex');
         expect(first?.manifest.rows[0]?.imageContentHmac).toBe(expectedHmac);
         expect(first?.manifest.canonicalInputHmac).toBe(second?.manifest.canonicalInputHmac);
+        expect(first).toEqual(second);
         expect(assess.mock.calls[0]?.[0][0]).toMatchObject({ fullname: 'Åda' });
     });
 

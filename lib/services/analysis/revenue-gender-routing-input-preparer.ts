@@ -135,10 +135,13 @@ export function createRevenueGenderRoutingInputPreparer(
 
         return Object.freeze(candidates.map((candidate): RevenueGenderRoutingPreparedCandidate => {
             const url = profileImageUrl(candidate);
+            const normalizedImage = url === null ? null : preparedByUrl.get(url) ?? null;
             return Object.freeze({
                 candidateKey: candidate.candidateKey,
                 fullname: candidate.fullname,
-                imageBytes: url === null ? null : preparedByUrl.get(url) ?? null,
+                // Retain URL work deduplication while preventing duplicate candidates
+                // from sharing writable evidence at the runtime boundary.
+                imageBytes: normalizedImage === null ? null : new Uint8Array(normalizedImage),
             });
         }));
     };
