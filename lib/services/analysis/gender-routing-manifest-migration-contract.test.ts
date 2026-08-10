@@ -74,6 +74,32 @@ describe('analysis V2 gender-routing manifest migration contract', () => {
         }
     });
 
+    it('uses one request-to-routing lock order and exact complete-selection cardinality in every manifest RPC', () => {
+        const lockOrder = [
+            'FROM public.analysis_requests AS analysis_request',
+            'FROM public.analysis_pipeline_jobs AS job',
+            'FROM public.analysis_v2_provider_execution_policies AS policy',
+            'FROM public.analysis_v2_relationship_manifests AS relationship_manifest',
+            'FROM public.analysis_v2_gender_routing_manifests AS routing_manifest',
+        ];
+        for (const name of [
+            'load_current_analysis_v2_gender_routing_manifest',
+            'begin_analysis_v2_gender_routing_manifest',
+            'publish_analysis_v2_gender_routing_manifest',
+            'load_analysis_v2_gender_routing_selected',
+            'load_analysis_v2_gender_routing_selected_usernames',
+        ]) {
+            const definition = functionDefinition(name);
+            const positions = lockOrder.map(token => definition.indexOf(token));
+            expect(positions, `${name} locks every fence relation`).not.toContain(-1);
+            expect(positions, `${name} never locks in inverse order`).toEqual([...positions].sort((a, b) => a - b));
+            const policyStart = definition.indexOf(lockOrder[2]);
+            const policyEnd = definition.indexOf(';', policyStart);
+            expect(definition.slice(policyStart, policyEnd)).toContain('FOR UPDATE');
+        }
+        expect(migration).toContain('selected_count = LEAST(population_count, detailed_cap)');
+    });
+
     it('re-fences both selected loaders to the current paid-request scope and persisted job binding', () => {
         for (const name of [
             'load_analysis_v2_gender_routing_selected',

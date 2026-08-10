@@ -41,6 +41,7 @@ const completeManifestHeaderSchema = manifestHeaderBaseSchema.extend({
 }).strict().superRefine((value, context) => {
     if (
         value.modelValidCount + value.modelFailedCount !== value.modelAttemptedCount
+        || value.selectedCount !== Math.min(value.populationCount, value.detailedCap)
         || value.femalePriorityCount + value.uncertaintyCount + value.maleDeprioritizedCount
             !== value.populationCount
         || value.selectedFemalePriorityCount + value.selectedUncertaintyCount
@@ -225,7 +226,7 @@ function validatePublish(input: AnalysisV2GenderRoutingManifestPublishInput): vo
         values.some(value => !nonNegativeInteger(value, cap.population))
         || input.rows.length !== input.populationCount
         || input.rows.length > cap.population
-        || input.selectedCount > cap.detailed
+        || input.selectedCount !== Math.min(input.populationCount, cap.detailed)
         || input.modelValidCount + input.modelFailedCount !== input.modelAttemptedCount
         || (input.populationCount > cap.detailed && (
             input.modelAttemptedCount === 0
@@ -278,6 +279,19 @@ function validatePublish(input: AnalysisV2GenderRoutingManifestPublishInput): vo
             || (!populatedScores && scores.some(score => score !== null))
             || (populatedScores && row.evidence !== expectedEvidence)
             || (!populatedScores && row.evidence !== null)
+            || (input.populationCount <= cap.detailed && (
+                populatedScores || row.evidence !== null || row.routingUnavailable
+            ))
+            || (input.populationCount > cap.detailed && (
+                !populatedScores
+                || row.evidence !== expectedEvidence
+                || (row.routingUnavailable && (
+                    row.bucket !== 'uncertainty'
+                    || row.femaleScore !== 0
+                    || row.maleScore !== 0
+                    || row.uncertaintyScore !== 1
+                ))
+            ))
             || (row.selected && (row.selectionSlot === null || row.ordinal === null))
             || (!row.selected && (row.selectionSlot !== null || row.ordinal !== null))
             || (row.selected && !Number.isSafeInteger(row.ordinal))

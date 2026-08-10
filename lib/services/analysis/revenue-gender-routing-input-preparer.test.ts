@@ -220,6 +220,55 @@ describe('revenue gender-routing input preparer', () => {
         expect(assess.mock.calls.every(([rows]) => rows.length <= 10)).toBe(true);
     });
 
+    it('keeps maximum Standard evidence immutable and bounded while downloading one exact URL once', async () => {
+        const sourceBytes = Buffer.concat([Buffer.from([0xff, 0xd8, 0xff]), Buffer.alloc(256 * 1024 - 3, 9)]);
+        const download = vi.fn(async () => downloaded(sourceBytes));
+        const normalized = Buffer.from(sourceBytes);
+        const expectedBase64 = normalized.toString('base64');
+        const expectedHmac = createHmac('sha256', 'revenue-routing-input-preparer-test-secret')
+            .update('gender-routing:image-content:v1\0')
+            .update(normalized)
+            .digest('hex');
+        const normalize = vi.fn(async () => normalized);
+        const prepare = createRevenueGenderRoutingInputPreparer({ download, normalize });
+        let assessorCall = 0;
+        const assess = vi.fn(async (rows: readonly RevenueGenderRoutingModelCandidate[]) => {
+            for (const row of rows) expect(row.imageBase64).toBe(expectedBase64);
+            if (assessorCall++ === 0) normalized[3] ^= 0xff;
+            return new Map(rows.map(row => [row.candidateKey, {
+                femaleScore: 0.8,
+                maleScore: 0.1,
+                uncertaintyScore: 0.1,
+                evidence: 'image_and_name' as const,
+            }]));
+        });
+        const candidates = Array.from({ length: 800 }, (_, index) => ({
+            ...source(`candidate:${index + 1}`, 'https://scontent.cdninstagram.com/one-exact-url.jpg', 'Name'),
+            mutualOrdinal: index + 1,
+        }));
+
+        const result = await routeRevenueGenderCandidates({
+            requestId: '123e4567-e89b-42d3-a456-426614174000',
+            relationshipCheckpointId: 'checkpoint',
+            accessMode: 'test_entitlement',
+            planId: 'standard',
+            candidates,
+            hmacSecret: 'revenue-routing-input-preparer-test-secret',
+            inputPreparer: prepare,
+            assess,
+        });
+
+        candidates[0]!.fullname = 'mutated-after-routing';
+        expect(download).toHaveBeenCalledTimes(1);
+        expect(normalize).toHaveBeenCalledTimes(1);
+        expect(assess).toHaveBeenCalledTimes(80);
+        expect(assess.mock.calls.every(([rows]) => rows.length <= 10)).toBe(true);
+        expect(result?.manifest.rows).toHaveLength(800);
+        expect(result?.manifest.rows.every(row => row.imageContentHmac === expectedHmac)).toBe(true);
+        expect(result?.manifest.canonicalInputHmac).toMatch(/^[a-f0-9]{64}$/);
+        expect(result?.manifest.rows[0]?.imageContentHmac).toBe(expectedHmac);
+    });
+
     it('bounds distinct URL preparation concurrency', async () => {
         let active = 0;
         let maximum = 0;

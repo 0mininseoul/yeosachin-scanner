@@ -94,7 +94,6 @@ describe('revenue gender-routing runtime', () => {
         const inputPreparer = vi.fn(async () => {
             throw new Error('CDN_CHANGED');
         });
-        const assess = vi.fn();
 
         const result = await routeAndPersistRevenueGenderCandidates({
             ...base,
@@ -108,7 +107,6 @@ describe('revenue gender-routing runtime', () => {
                 fullname: 'Now changed',
             })),
             inputPreparer,
-            assess,
             jobKey: 'track:relationships:collect',
             claimToken: '123e4567-e89b-42d3-a456-426614174001',
             jobInputHash: 'd'.repeat(64),
@@ -117,12 +115,45 @@ describe('revenue gender-routing runtime', () => {
 
         expect(manifestStore.loadCurrentComplete).toHaveBeenCalledTimes(1);
         expect(inputPreparer).not.toHaveBeenCalled();
-        expect(assess).not.toHaveBeenCalled();
         expect(manifestStore.begin).not.toHaveBeenCalled();
         expect(result).toMatchObject({
             canonicalInputHmac: 'b'.repeat(64),
             selectedMutualOrdinals: Array.from({ length: 100 }, (_, index) => index + 1),
         });
+    });
+
+    it('rejects a missing assessor before preparation when no complete manifest exists', async () => {
+        const manifestStore = {
+            loadCurrentComplete: vi.fn(async () => null),
+            begin: vi.fn(),
+            publish: vi.fn(),
+            loadSelected: vi.fn(),
+            loadSelectedUsernames: vi.fn(),
+        } as unknown as AnalysisV2GenderRoutingManifestStore;
+        const inputPreparer = vi.fn(async () => {
+            throw new Error('DOWNLOADER_MUST_NOT_RUN');
+        });
+
+        await expect(routeAndPersistRevenueGenderCandidates({
+            ...base,
+            relationshipCheckpointId: 'a'.repeat(64),
+            accessMode: 'test_entitlement',
+            planId: 'basic',
+            candidates: Array.from({ length: 101 }, (_, index) => ({
+                mutualOrdinal: index + 1,
+                candidateKey: `mutual:${index + 1}`,
+                profilePicUrl: 'https://cdn.example/would-download.jpg',
+                fullname: 'Would prepare',
+            })),
+            inputPreparer,
+            jobKey: 'track:relationships:collect',
+            claimToken: '123e4567-e89b-42d3-a456-426614174001',
+            jobInputHash: 'd'.repeat(64),
+            manifestStore,
+        })).rejects.toThrow('ANALYSIS_V2_GENDER_ROUTING_ASSESSOR_MISSING');
+
+        expect(inputPreparer).not.toHaveBeenCalled();
+        expect(manifestStore.begin).not.toHaveBeenCalled();
     });
 
     it('fails closed when a preparer substitutes a fullname for the same candidate key', async () => {

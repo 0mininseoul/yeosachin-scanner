@@ -327,6 +327,11 @@ export async function routeAndPersistRevenueGenderCandidates(
     if (current !== null) {
         const cap = GENDER_ROUTING_CAPS[input.planId];
         if (
+            current.header.selectedCount !== Math.min(
+                current.header.populationCount,
+                current.header.detailedCap,
+            )
+            ||
             current.selected.length !== current.header.selectedCount
             || current.selected.length > cap.detailed
         ) throw new Error('REVENUE_GENDER_ROUTING_SELECTION_DRIFT');
@@ -343,6 +348,9 @@ export async function routeAndPersistRevenueGenderCandidates(
         || new Set(input.candidates.map(candidate => candidate.mutualOrdinal)).size !== input.candidates.length
         || input.candidates.some(candidate => candidate.candidateKey !== `mutual:${candidate.mutualOrdinal}`)
     ) throw new Error('REVENUE_GENDER_ROUTING_INVALID_CANDIDATES');
+    if (input.candidates.length > cap.detailed && !input.assess) {
+        throw new Error('ANALYSIS_V2_GENDER_ROUTING_ASSESSOR_MISSING');
+    }
 
     const population = await prepareRevenueRoutingPopulation(input);
     const canonicalInputHmac = createGenderRoutingCanonicalInputHmac({
