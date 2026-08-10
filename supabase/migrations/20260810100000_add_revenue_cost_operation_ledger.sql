@@ -298,6 +298,7 @@ BEGIN
        OR v_entitlement.request_id IS NULL OR v_policy.request_id IS NULL
        OR v_request.pipeline_version IS DISTINCT FROM 'v2' OR v_request.plan_access_mode_snapshot IS DISTINCT FROM 'test_entitlement'
        OR v_request.selected_plan_id_snapshot NOT IN ('basic','standard')
+       OR v_request.status IS NULL OR v_request.status NOT IN ('pending','processing')
        OR v_preflight.status IS DISTINCT FROM 'consumed' OR v_preflight.access_mode IS DISTINCT FROM 'test_entitlement'
        OR v_preflight.admission_generation IS DISTINCT FROM 1 OR v_preflight.admission_status IS DISTINCT FROM 'ready'
        OR v_preflight.admission_selected_plan_id IS DISTINCT FROM v_request.selected_plan_id_snapshot
@@ -350,6 +351,8 @@ BEGIN
     IF v_parent.request_id IS NULL OR v_parent.preflight_id IS DISTINCT FROM v_preflight.id
        OR v_parent.user_id IS DISTINCT FROM v_request.user_id OR v_parent.plan_id IS DISTINCT FROM v_request.selected_plan_id_snapshot
        OR v_parent.access_mode IS DISTINCT FROM 'test_entitlement' OR v_parent.target_username_hmac IS DISTINCT FROM v_preflight.target_input_hash
+       OR v_parent.preflight_refreshed_at IS DISTINCT FROM v_preflight.admission_refreshed_at
+       OR v_parent.request_started_at IS DISTINCT FROM v_request.created_at
        OR v_parent.pricing_snapshot_version IS DISTINCT FROM 'revenue-e2e-cost-2026-08-10-v1'
        OR v_parent.buffered_fx_krw_per_usd IS DISTINCT FROM 1450
        OR v_parent.cost_cap_krw IS DISTINCT FROM (CASE WHEN v_request.selected_plan_id_snapshot='basic' THEN 1808 ELSE 3634 END)
@@ -440,6 +443,7 @@ BEGIN
        OR v_entitlement.request_id IS NULL OR v_policy.request_id IS NULL
        OR v_request.pipeline_version IS DISTINCT FROM 'v2' OR v_request.plan_access_mode_snapshot IS DISTINCT FROM 'test_entitlement'
        OR v_request.selected_plan_id_snapshot NOT IN ('basic','standard') OR v_preflight.status IS DISTINCT FROM 'consumed'
+       OR v_request.status IS NULL OR v_request.status NOT IN ('pending','processing')
        OR v_preflight.access_mode IS DISTINCT FROM 'test_entitlement' OR v_preflight.admission_generation IS DISTINCT FROM 1
        OR v_preflight.admission_status IS DISTINCT FROM 'ready' OR v_preflight.admission_selected_plan_id IS DISTINCT FROM v_request.selected_plan_id_snapshot
        OR v_preflight.admission_entitlement_jti_hash IS DISTINCT FROM v_request.test_entitlement_jti_hash
@@ -481,6 +485,8 @@ BEGIN
     IF v_parent.request_id IS NULL OR v_parent.preflight_id IS DISTINCT FROM v_preflight.id OR v_parent.user_id IS DISTINCT FROM v_request.user_id
        OR v_parent.plan_id IS DISTINCT FROM v_request.selected_plan_id_snapshot OR v_parent.access_mode IS DISTINCT FROM 'test_entitlement'
        OR v_parent.target_username_hmac IS DISTINCT FROM v_preflight.target_input_hash
+       OR v_parent.preflight_refreshed_at IS DISTINCT FROM v_preflight.admission_refreshed_at
+       OR v_parent.request_started_at IS DISTINCT FROM v_request.created_at
        OR v_parent.pricing_snapshot_version IS DISTINCT FROM 'revenue-e2e-cost-2026-08-10-v1' OR v_parent.buffered_fx_krw_per_usd IS DISTINCT FROM 1450
        OR v_parent.cost_cap_krw IS DISTINCT FROM (CASE WHEN v_request.selected_plan_id_snapshot='basic' THEN 1808 ELSE 3634 END)
        OR v_parent.margin_target_krw IS DISTINCT FROM (CASE WHEN v_request.selected_plan_id_snapshot='basic' THEN 904 ELSE 1817 END)
