@@ -8,7 +8,10 @@ import type {
     ApifyPostLiker,
 } from '@/lib/services/instagram/providers/apify-interactions';
 import type { InstagramFollower, InstagramPost, InstagramProfile } from '@/lib/types/instagram';
-import type { AnalysisV2DagState } from './v2-dag-planner';
+import {
+    buildAnalysisV2DagPlan,
+    type AnalysisV2DagState,
+} from './v2-dag-planner';
 import type { AnalysisV2EvidenceStore } from './v2-evidence-store';
 import type { AnalysisV2TargetEvidenceCheckpointInput } from './v2-evidence-store';
 import type {
@@ -3146,7 +3149,7 @@ describe('analysis V2 concrete collection executors', () => {
         expect(reportActiveProfile).not.toHaveBeenCalled();
     });
 
-    it('routes Basic from the fresh public mutual snapshot and makes durable selected ordinals the profile batch', async () => {
+    it('routes Basic from the fresh public mutual snapshot, persists its durable selection, and schedules exactly 100 profiles', async () => {
         const mutualRows = routingMutualRows(101);
         const usernamesByOrdinal = new Map(mutualRows.map(row => [row.mutualOrdinal, row.username]));
         const routing = routingManifestStore(usernamesByOrdinal);
@@ -3205,6 +3208,16 @@ describe('analysis V2 concrete collection executors', () => {
             createAnalysisV2CollectionTopology('profiles', selectedUsernames)
         );
 
+        const persistedState = state({
+            relationships: relationship.checkpoint.manifest,
+        });
+        const persistedPlan = buildAnalysisV2DagPlan(requestId, persistedState);
+        expect(persistedPlan.jobs.filter(job => job.track === 'profiles').reduce(
+            (count, job) => count + (job.batch === null ? 0 : relationship.checkpoint.manifest
+                .profileBatches[job.batch]!.itemCount),
+            0,
+        )).toBe(100);
+
         const profiles = inMemoryProfileStore(null);
         const profileFetcher = vi.fn(async (
             requested: readonly string[],
@@ -3245,7 +3258,7 @@ describe('analysis V2 concrete collection executors', () => {
         );
     });
 
-    it('routes Standard to its durable 200-row cap', async () => {
+    it('routes Standard through the DAG with its durable 200-row selection', async () => {
         const standardRows = routingMutualRows(201);
         const standardRouting = routingManifestStore(new Map(
             standardRows.map(row => [row.mutualOrdinal, row.username])
@@ -3290,6 +3303,15 @@ describe('analysis V2 concrete collection executors', () => {
         expect(standard.checkpoint.manifest.detailedSelectedPublicCount).toBe(200);
         expect(standard.checkpoint.manifest.profileBatches.reduce(
             (count, batch) => count + batch.itemCount,
+            0,
+        )).toBe(200);
+        const persistedPlan = buildAnalysisV2DagPlan(requestId, state({
+            planId: 'standard',
+            relationships: standard.checkpoint.manifest,
+        }));
+        expect(persistedPlan.jobs.filter(job => job.track === 'profiles').reduce(
+            (count, job) => count + (job.batch === null ? 0 : standard.checkpoint.manifest
+                .profileBatches[job.batch]!.itemCount),
             0,
         )).toBe(200);
 

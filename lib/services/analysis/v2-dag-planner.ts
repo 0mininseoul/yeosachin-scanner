@@ -53,6 +53,19 @@ export interface AnalysisV2DagResultManifest {
     resultHash: string;
 }
 
+/**
+ * PII-free identity proving that a relationship checkpoint's selected public rows came from the
+ * completed, authorized gender-routing manifest rather than the legacy detailed-mutual limit.
+ */
+export interface AnalysisV2DagRelationshipSelectionPolicy {
+    policyVersion: 'gender-routing-v1';
+    relationshipCheckpointId: string;
+    relationshipJobInputHash: string;
+    planId: Extract<PlanId, 'basic' | 'standard'>;
+    publicPopulationCount: number;
+    selectedCount: number;
+}
+
 export interface AnalysisV2DagRelationshipManifest extends AnalysisV2DagResultManifest {
     detectedMutualCount: number;
     publicCount: number;
@@ -61,6 +74,7 @@ export interface AnalysisV2DagRelationshipManifest extends AnalysisV2DagResultMa
     notScreenedPublicCount: number;
     profileBatches: readonly AnalysisV2DagBatchManifest[];
     privateNameBatches: readonly AnalysisV2DagBatchManifest[];
+    relationshipSelectionPolicy?: AnalysisV2DagRelationshipSelectionPolicy;
 }
 
 export interface AnalysisV2DagTargetEvidenceManifest extends AnalysisV2DagResultManifest {
@@ -292,7 +306,7 @@ function normalizeRelationships(
         'notScreenedPublicCount',
         'profileBatches',
         'privateNameBatches',
-    ], [], 'relationships manifest');
+    ], ['relationshipSelectionPolicy'], 'relationships manifest');
     const plan = getAnalysisPlan(planId);
     const maximumDetected = Math.min(
         plan.relationshipCapacity.followers,
@@ -315,7 +329,21 @@ function normalizeRelationships(
         0,
         plan.detailedMutualLimit
     );
-    const expectedDetailed = Math.min(publicCount, plan.detailedMutualLimit);
+    const relationshipSelectionPolicy = item.relationshipSelectionPolicy === undefined
+        ? undefined
+        : normalizeRelationshipSelectionPolicy(
+            item.relationshipSelectionPolicy,
+            planId,
+            item.resultHash,
+            publicCount,
+            detailedSelectedPublicCount
+        );
+    const expectedDetailed = relationshipSelectionPolicy
+        ? Math.min(
+            publicCount,
+            relationshipSelectionPolicy.planId === 'basic' ? 100 : 200
+        )
+        : Math.min(publicCount, plan.detailedMutualLimit);
     if (detailedSelectedPublicCount !== expectedDetailed) {
         fail('detailed public selection mismatch');
     }
@@ -352,6 +380,74 @@ function normalizeRelationships(
             ANALYSIS_V2_PRIVATE_NAME_BATCH_LIMIT,
             privateCount
         ),
+        ...(relationshipSelectionPolicy ? { relationshipSelectionPolicy } : {}),
+    });
+}
+
+function normalizeRelationshipSelectionPolicy(
+    value: unknown,
+    statePlanId: PlanId,
+    relationshipResultHash: unknown,
+    publicCount: number,
+    detailedSelectedPublicCount: number
+): Readonly<AnalysisV2DagRelationshipSelectionPolicy> {
+    const item = record(value, 'relationship selection policy');
+    assertKeys(item, [
+        'policyVersion',
+        'relationshipCheckpointId',
+        'relationshipJobInputHash',
+        'planId',
+        'publicPopulationCount',
+        'selectedCount',
+    ], [], 'relationship selection policy');
+    if (item.policyVersion !== 'gender-routing-v1') {
+        fail('invalid relationship selection policy version');
+    }
+    const planId = normalizePlanId(item.planId);
+    if (
+        (planId !== 'basic' && planId !== 'standard')
+        || planId !== statePlanId
+        || hash(item.relationshipCheckpointId, 'relationship selection checkpoint')
+            !== hash(relationshipResultHash, 'relationships result')
+    ) {
+        fail('relationship selection policy mismatch');
+    }
+    const relationshipJobInputHash = hash(
+        item.relationshipJobInputHash,
+        'relationship selection job input'
+    );
+    const publicPopulationCount = integer(
+        item.publicPopulationCount,
+        'relationship selection public population count',
+        0,
+        ANALYSIS_V2_MAX_DETECTED_MUTUALS
+    );
+    const selectedCount = integer(
+        item.selectedCount,
+        'relationship selection selected count',
+        0,
+        200
+    );
+    const cap = planId === 'basic' ? 100 : 200;
+    const populationCap = planId === 'basic' ? 400 : 800;
+    if (
+        publicPopulationCount !== publicCount
+        || publicPopulationCount > populationCap
+        || selectedCount !== detailedSelectedPublicCount
+        || selectedCount !== Math.min(publicPopulationCount, cap)
+    ) {
+        fail('relationship selection policy counts mismatch');
+    }
+    return Object.freeze({
+        policyVersion: 'gender-routing-v1',
+        relationshipCheckpointId: hash(
+            item.relationshipCheckpointId,
+            'relationship selection checkpoint'
+        ),
+        relationshipJobInputHash,
+        planId,
+        publicPopulationCount,
+        selectedCount,
     });
 }
 

@@ -1035,3 +1035,545 @@ REVOKE ALL ON FUNCTION public.load_analysis_v2_gender_routing_selected_usernames
 GRANT EXECUTE ON FUNCTION public.load_analysis_v2_gender_routing_selected_usernames(
     UUID, TEXT, TEXT, TEXT
 ) TO service_role;
+
+-- A relationship checkpoint normally follows the frozen plan's detailed-mutual limit. The
+-- nullable policy identity below is the sole exception: it records only the completed routing
+-- manifest identity and aggregate counts, never a username or other relationship evidence.
+ALTER TABLE public.analysis_v2_dag_stage_manifests
+    ADD COLUMN relationship_selection_policy_version TEXT,
+    ADD COLUMN relationship_selection_checkpoint_id VARCHAR(64),
+    ADD COLUMN relationship_selection_job_input_hash VARCHAR(64),
+    ADD COLUMN relationship_selection_plan_id TEXT,
+    ADD COLUMN relationship_selection_public_population_count INTEGER,
+    ADD COLUMN relationship_selection_selected_count INTEGER,
+    ADD CONSTRAINT analysis_v2_dag_relationship_selection_policy_shape_check CHECK (
+        (
+            stage_kind = 'relationships'
+            AND (
+                pg_catalog.num_nonnulls(
+                    relationship_selection_policy_version,
+                    relationship_selection_checkpoint_id,
+                    relationship_selection_job_input_hash,
+                    relationship_selection_plan_id,
+                    relationship_selection_public_population_count,
+                    relationship_selection_selected_count
+                ) = 0
+                OR (
+                    relationship_selection_policy_version = 'gender-routing-v1'
+                    AND relationship_selection_checkpoint_id ~ '^[a-f0-9]{64}$'
+                    AND relationship_selection_checkpoint_id = result_hash
+                    AND relationship_selection_job_input_hash ~ '^[a-f0-9]{64}$'
+                    AND relationship_selection_job_input_hash = producer_input_hash
+                    AND relationship_selection_plan_id IN ('basic', 'standard')
+                    AND relationship_selection_public_population_count = public_count
+                    AND relationship_selection_selected_count = detailed_selected_public_count
+                    AND (
+                        (relationship_selection_plan_id = 'basic'
+                            AND relationship_selection_public_population_count BETWEEN 0 AND 400
+                            AND relationship_selection_selected_count
+                                = LEAST(relationship_selection_public_population_count, 100))
+                        OR (relationship_selection_plan_id = 'standard'
+                            AND relationship_selection_public_population_count BETWEEN 0 AND 800
+                            AND relationship_selection_selected_count
+                                = LEAST(relationship_selection_public_population_count, 200))
+                    )
+                )
+            )
+        )
+        OR (
+            stage_kind <> 'relationships'
+            AND pg_catalog.num_nonnulls(
+                relationship_selection_policy_version,
+                relationship_selection_checkpoint_id,
+                relationship_selection_job_input_hash,
+                relationship_selection_plan_id,
+                relationship_selection_public_population_count,
+                relationship_selection_selected_count
+            ) = 0
+        )
+    );
+
+CREATE OR REPLACE FUNCTION public.analysis_v2_dag_state_json(p_request_id UUID)
+RETURNS JSONB
+LANGUAGE sql
+STABLE
+SET search_path = ''
+AS $$
+    SELECT pg_catalog.jsonb_strip_nulls(pg_catalog.jsonb_build_object(
+        'schemaVersion', scope.schema_version,
+        'requestSnapshotHash', scope.request_snapshot_hash,
+        'planId', scope.plan_id,
+        'planSnapshotHash', scope.plan_snapshot_hash,
+        'girlfriendExclusion', pg_catalog.jsonb_build_object(
+            'decisionHash', scope.exclusion_decision_hash,
+            'excludedCount', scope.excluded_count
+        ),
+        'relationships', (
+            SELECT pg_catalog.jsonb_strip_nulls(pg_catalog.jsonb_build_object(
+                'revision', stage.revision,
+                'resultHash', stage.result_hash,
+                'detectedMutualCount', stage.detected_mutual_count,
+                'publicCount', stage.public_count,
+                'privateCount', stage.private_count,
+                'detailedSelectedPublicCount', stage.detailed_selected_public_count,
+                'notScreenedPublicCount', stage.not_screened_public_count,
+                'profileBatches', COALESCE((
+                    SELECT pg_catalog.jsonb_agg(pg_catalog.jsonb_build_object(
+                        'batch', topology.batch,
+                        'itemCount', topology.item_count,
+                        'inputHash', topology.input_hash
+                    ) ORDER BY topology.batch)
+                    FROM public.analysis_v2_dag_batch_topology AS topology
+                    WHERE topology.request_id = scope.request_id
+                      AND topology.topology_kind = 'profile'
+                ), '[]'::JSONB),
+                'privateNameBatches', COALESCE((
+                    SELECT pg_catalog.jsonb_agg(pg_catalog.jsonb_build_object(
+                        'batch', topology.batch,
+                        'itemCount', topology.item_count,
+                        'inputHash', topology.input_hash
+                    ) ORDER BY topology.batch)
+                    FROM public.analysis_v2_dag_batch_topology AS topology
+                    WHERE topology.request_id = scope.request_id
+                      AND topology.topology_kind = 'private_name'
+                ), '[]'::JSONB),
+                'relationshipSelectionPolicy', CASE
+                    WHEN stage.relationship_selection_policy_version IS NULL THEN NULL
+                    ELSE pg_catalog.jsonb_build_object(
+                        'policyVersion', stage.relationship_selection_policy_version,
+                        'relationshipCheckpointId', stage.relationship_selection_checkpoint_id,
+                        'relationshipJobInputHash', stage.relationship_selection_job_input_hash,
+                        'planId', stage.relationship_selection_plan_id,
+                        'publicPopulationCount', stage.relationship_selection_public_population_count,
+                        'selectedCount', stage.relationship_selection_selected_count
+                    )
+                END
+            ))
+            FROM public.analysis_v2_dag_stage_manifests AS stage
+            WHERE stage.request_id = scope.request_id
+              AND stage.stage_kind = 'relationships'
+        ),
+        'targetEvidence', (
+            SELECT pg_catalog.jsonb_build_object(
+                'revision', stage.revision,
+                'resultHash', stage.result_hash,
+                'interactorCount', stage.interactor_count
+            )
+            FROM public.analysis_v2_dag_stage_manifests AS stage
+            WHERE stage.request_id = scope.request_id AND stage.stage_kind = 'target_evidence'
+        ),
+        'profileFetchBatches', COALESCE((
+            SELECT pg_catalog.jsonb_agg(pg_catalog.jsonb_build_object(
+                'batch', result.batch, 'itemCount', result.item_count,
+                'producerInputHash', result.producer_input_hash,
+                'revision', result.revision, 'resultHash', result.result_hash
+            ) ORDER BY result.batch)
+            FROM public.analysis_v2_dag_batch_results AS result
+            WHERE result.request_id = scope.request_id AND result.result_kind = 'profile_fetch'
+        ), '[]'::JSONB),
+        'profileAiBatches', COALESCE((
+            SELECT pg_catalog.jsonb_agg(pg_catalog.jsonb_build_object(
+                'batch', result.batch, 'itemCount', result.item_count,
+                'producerInputHash', result.producer_input_hash,
+                'revision', result.revision, 'resultHash', result.result_hash
+            ) ORDER BY result.batch)
+            FROM public.analysis_v2_dag_batch_results AS result
+            WHERE result.request_id = scope.request_id AND result.result_kind = 'profile_ai'
+        ), '[]'::JSONB),
+        'privateNameBatches', COALESCE((
+            SELECT pg_catalog.jsonb_agg(pg_catalog.jsonb_build_object(
+                'batch', result.batch, 'itemCount', result.item_count,
+                'producerInputHash', result.producer_input_hash,
+                'revision', result.revision, 'resultHash', result.result_hash
+            ) ORDER BY result.batch)
+            FROM public.analysis_v2_dag_batch_results AS result
+            WHERE result.request_id = scope.request_id AND result.result_kind = 'private_name'
+        ), '[]'::JSONB),
+        'primaryJoin', (
+            SELECT pg_catalog.jsonb_build_object(
+                'revision', stage.revision, 'resultHash', stage.result_hash,
+                'verifiedFemaleCount', stage.verified_female_count
+            ) FROM public.analysis_v2_dag_stage_manifests AS stage
+            WHERE stage.request_id = scope.request_id AND stage.stage_kind = 'primary_join'
+        ),
+        'screening', (
+            SELECT pg_catalog.jsonb_build_object(
+                'revision', stage.revision, 'resultHash', stage.result_hash,
+                'verifiedFemaleCount', stage.verified_female_count,
+                'shortlistCount', stage.shortlist_count, 'shortlistHash', stage.shortlist_hash
+            ) FROM public.analysis_v2_dag_stage_manifests AS stage
+            WHERE stage.request_id = scope.request_id AND stage.stage_kind = 'screening'
+        ),
+        'reverseLikes', (
+            SELECT pg_catalog.jsonb_build_object(
+                'revision', stage.revision, 'resultHash', stage.result_hash,
+                'shortlistCount', stage.shortlist_count
+            ) FROM public.analysis_v2_dag_stage_manifests AS stage
+            WHERE stage.request_id = scope.request_id AND stage.stage_kind = 'reverse_likes'
+        ),
+        'partnerSafety', (
+            SELECT pg_catalog.jsonb_build_object(
+                'revision', stage.revision, 'resultHash', stage.result_hash,
+                'shortlistCount', stage.shortlist_count
+            ) FROM public.analysis_v2_dag_stage_manifests AS stage
+            WHERE stage.request_id = scope.request_id AND stage.stage_kind = 'partner_safety'
+        ),
+        'finalScore', (
+            SELECT pg_catalog.jsonb_build_object(
+                'revision', stage.revision, 'resultHash', stage.result_hash,
+                'featuredHighRiskCount', stage.featured_high_risk_count,
+                'narrativeCount', stage.narrative_count,
+                'narrativeBatchHash', stage.narrative_batch_hash
+            ) FROM public.analysis_v2_dag_stage_manifests AS stage
+            WHERE stage.request_id = scope.request_id AND stage.stage_kind = 'final_score'
+        ),
+        'narrative', (
+            SELECT pg_catalog.jsonb_build_object(
+                'revision', stage.revision, 'resultHash', stage.result_hash,
+                'narrativeCount', stage.narrative_count
+            ) FROM public.analysis_v2_dag_stage_manifests AS stage
+            WHERE stage.request_id = scope.request_id AND stage.stage_kind = 'narrative'
+        )
+    ))
+    FROM public.analysis_v2_dag_scopes AS scope
+    WHERE scope.request_id = p_request_id;
+$$;
+
+REVOKE ALL ON FUNCTION public.analysis_v2_dag_state_json(UUID)
+    FROM PUBLIC, anon, authenticated, service_role;
+
+-- Retain the deployed exact legacy path for every checkpoint that has no policy identity. Only
+-- the special relationship form below can bypass its min(publicCount, detailedMutualLimit) rule.
+ALTER FUNCTION public.checkpoint_analysis_v2_dag_manifest(UUID, TEXT, TEXT, UUID, TEXT, JSONB)
+    RENAME TO checkpoint_analysis_v2_dag_manifest_legacy;
+REVOKE ALL ON FUNCTION public.checkpoint_analysis_v2_dag_manifest_legacy(
+    UUID, TEXT, TEXT, UUID, TEXT, JSONB
+) FROM PUBLIC, anon, authenticated, service_role;
+
+CREATE OR REPLACE FUNCTION public.checkpoint_analysis_v2_dag_manifest(
+    p_request_id UUID,
+    p_job_key TEXT,
+    p_input_hash TEXT,
+    p_claim_token UUID,
+    p_manifest_kind TEXT,
+    p_manifest JSONB
+)
+RETURNS JSONB
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = ''
+AS $$
+DECLARE
+    v_now TIMESTAMP WITH TIME ZONE := pg_catalog.clock_timestamp();
+    v_request public.analysis_requests%ROWTYPE;
+    v_job public.analysis_pipeline_jobs%ROWTYPE;
+    v_scope public.analysis_v2_dag_scopes%ROWTYPE;
+    v_policy public.analysis_v2_provider_execution_policies%ROWTYPE;
+    v_relationship_manifest public.analysis_v2_relationship_manifests%ROWTYPE;
+    v_routing_manifest public.analysis_v2_gender_routing_manifests%ROWTYPE;
+    v_stage public.analysis_v2_dag_stage_manifests%ROWTYPE;
+    v_detected INTEGER;
+    v_public INTEGER;
+    v_private INTEGER;
+    v_detailed INTEGER;
+    v_not_screened INTEGER;
+    v_revision INTEGER;
+    v_result_hash TEXT;
+    v_profile_batches JSONB;
+    v_private_batches JSONB;
+    v_existing_batches JSONB;
+    v_selection JSONB;
+    v_selection_plan TEXT;
+    v_population INTEGER;
+    v_selected INTEGER;
+    v_population_cap INTEGER;
+    v_detailed_cap INTEGER;
+    v_all_candidates INTEGER;
+    v_selected_candidates INTEGER;
+    v_min_ordinal INTEGER;
+    v_max_ordinal INTEGER;
+BEGIN
+    IF p_manifest IS NULL
+       OR pg_catalog.jsonb_typeof(p_manifest) <> 'object'
+       OR NOT (p_manifest ? 'relationshipSelectionPolicy') THEN
+        RETURN public.checkpoint_analysis_v2_dag_manifest_legacy(
+            p_request_id, p_job_key, p_input_hash, p_claim_token, p_manifest_kind, p_manifest
+        );
+    END IF;
+
+    IF p_request_id IS NULL
+       OR p_claim_token IS NULL
+       OR p_job_key <> 'track:relationships:collect'
+       OR p_input_hash IS NULL
+       OR p_input_hash !~ '^[a-f0-9]{64}$'
+       OR p_manifest_kind <> 'relationships'
+       OR pg_catalog.octet_length(p_manifest::TEXT) > 65536
+       OR NOT (p_manifest ?& ARRAY[
+            'revision', 'resultHash', 'detectedMutualCount', 'publicCount', 'privateCount',
+            'detailedSelectedPublicCount', 'notScreenedPublicCount', 'profileBatches',
+            'privateNameBatches', 'relationshipSelectionPolicy'
+       ])
+       OR p_manifest - ARRAY[
+            'revision', 'resultHash', 'detectedMutualCount', 'publicCount', 'privateCount',
+            'detailedSelectedPublicCount', 'notScreenedPublicCount', 'profileBatches',
+            'privateNameBatches', 'relationshipSelectionPolicy'
+       ]::TEXT[] <> '{}'::JSONB
+       OR NOT public.analysis_v2_dag_bounded_integer(p_manifest->'revision', 1, 1000000)
+       OR pg_catalog.jsonb_typeof(p_manifest->'resultHash') <> 'string'
+       OR p_manifest->>'resultHash' !~ '^[a-f0-9]{64}$'
+       OR NOT public.analysis_v2_dag_bounded_integer(p_manifest->'detectedMutualCount', 0, 1200)
+       OR NOT public.analysis_v2_dag_bounded_integer(p_manifest->'publicCount', 0, 1200)
+       OR NOT public.analysis_v2_dag_bounded_integer(p_manifest->'privateCount', 0, 1200)
+       OR NOT public.analysis_v2_dag_bounded_integer(p_manifest->'detailedSelectedPublicCount', 0, 200)
+       OR NOT public.analysis_v2_dag_bounded_integer(p_manifest->'notScreenedPublicCount', 0, 1200)
+       OR pg_catalog.jsonb_typeof(p_manifest->'profileBatches') <> 'array'
+       OR pg_catalog.jsonb_typeof(p_manifest->'privateNameBatches') <> 'array'
+       OR pg_catalog.jsonb_typeof(p_manifest->'relationshipSelectionPolicy') <> 'object' THEN
+        RAISE EXCEPTION USING MESSAGE = 'ANALYSIS_V2_DAG_STATE_INVALID', ERRCODE = 'P0001';
+    END IF;
+
+    v_selection := p_manifest->'relationshipSelectionPolicy';
+    IF NOT (v_selection ?& ARRAY[
+            'policyVersion', 'relationshipCheckpointId', 'relationshipJobInputHash', 'planId',
+            'publicPopulationCount', 'selectedCount'
+       ])
+       OR v_selection - ARRAY[
+            'policyVersion', 'relationshipCheckpointId', 'relationshipJobInputHash', 'planId',
+            'publicPopulationCount', 'selectedCount'
+       ]::TEXT[] <> '{}'::JSONB
+       OR v_selection->>'policyVersion' <> 'gender-routing-v1'
+       OR pg_catalog.jsonb_typeof(v_selection->'relationshipCheckpointId') <> 'string'
+       OR v_selection->>'relationshipCheckpointId' !~ '^[a-f0-9]{64}$'
+       OR pg_catalog.jsonb_typeof(v_selection->'relationshipJobInputHash') <> 'string'
+       OR v_selection->>'relationshipJobInputHash' !~ '^[a-f0-9]{64}$'
+       OR v_selection->>'planId' NOT IN ('basic', 'standard')
+       OR NOT public.analysis_v2_dag_bounded_integer(v_selection->'publicPopulationCount', 0, 1200)
+       OR NOT public.analysis_v2_dag_bounded_integer(v_selection->'selectedCount', 0, 200) THEN
+        RAISE EXCEPTION USING MESSAGE = 'ANALYSIS_V2_DAG_STATE_INVALID', ERRCODE = 'P0001';
+    END IF;
+
+    v_revision := (p_manifest->>'revision')::INTEGER;
+    v_result_hash := p_manifest->>'resultHash';
+    v_detected := (p_manifest->>'detectedMutualCount')::INTEGER;
+    v_public := (p_manifest->>'publicCount')::INTEGER;
+    v_private := (p_manifest->>'privateCount')::INTEGER;
+    v_detailed := (p_manifest->>'detailedSelectedPublicCount')::INTEGER;
+    v_not_screened := (p_manifest->>'notScreenedPublicCount')::INTEGER;
+    v_profile_batches := p_manifest->'profileBatches';
+    v_private_batches := p_manifest->'privateNameBatches';
+    v_selection_plan := v_selection->>'planId';
+    v_population := (v_selection->>'publicPopulationCount')::INTEGER;
+    v_selected := (v_selection->>'selectedCount')::INTEGER;
+    v_population_cap := CASE WHEN v_selection_plan = 'basic' THEN 400 ELSE 800 END;
+    v_detailed_cap := CASE WHEN v_selection_plan = 'basic' THEN 100 ELSE 200 END;
+
+    IF v_public + v_private <> v_detected
+       OR v_detected > v_population_cap
+       OR v_population <> v_public
+       OR v_selected <> v_detailed
+       OR v_selected <> LEAST(v_population, v_detailed_cap)
+       OR v_not_screened <> v_public - v_detailed
+       OR pg_catalog.jsonb_array_length(v_profile_batches)
+            <> (CASE WHEN v_detailed = 0 THEN 0 ELSE (v_detailed + 29) / 30 END)
+       OR pg_catalog.jsonb_array_length(v_private_batches)
+            <> (CASE WHEN v_private = 0 THEN 0 ELSE (v_private + 99) / 100 END)
+       OR EXISTS (
+            SELECT 1 FROM pg_catalog.jsonb_array_elements(v_profile_batches) WITH ORDINALITY AS item(value, ordinal)
+            WHERE pg_catalog.jsonb_typeof(item.value) <> 'object'
+               OR NOT (item.value ?& ARRAY['batch', 'itemCount', 'inputHash'])
+               OR item.value - ARRAY['batch', 'itemCount', 'inputHash']::TEXT[] <> '{}'::JSONB
+               OR NOT public.analysis_v2_dag_bounded_integer(item.value->'batch', 0, 100000)
+               OR NOT public.analysis_v2_dag_bounded_integer(item.value->'itemCount', 1, 30)
+               OR pg_catalog.jsonb_typeof(item.value->'inputHash') <> 'string'
+               OR item.value->>'inputHash' !~ '^[a-f0-9]{64}$'
+               OR (item.value->>'batch')::INTEGER <> item.ordinal - 1
+               OR (item.value->>'itemCount')::INTEGER <> LEAST(30, v_detailed - ((item.ordinal - 1) * 30))
+       )
+       OR EXISTS (
+            SELECT 1 FROM pg_catalog.jsonb_array_elements(v_private_batches) WITH ORDINALITY AS item(value, ordinal)
+            WHERE pg_catalog.jsonb_typeof(item.value) <> 'object'
+               OR NOT (item.value ?& ARRAY['batch', 'itemCount', 'inputHash'])
+               OR item.value - ARRAY['batch', 'itemCount', 'inputHash']::TEXT[] <> '{}'::JSONB
+               OR NOT public.analysis_v2_dag_bounded_integer(item.value->'batch', 0, 100000)
+               OR NOT public.analysis_v2_dag_bounded_integer(item.value->'itemCount', 1, 100)
+               OR pg_catalog.jsonb_typeof(item.value->'inputHash') <> 'string'
+               OR item.value->>'inputHash' !~ '^[a-f0-9]{64}$'
+               OR (item.value->>'batch')::INTEGER <> item.ordinal - 1
+               OR (item.value->>'itemCount')::INTEGER <> LEAST(100, v_private - ((item.ordinal - 1) * 100))
+       ) THEN
+        RAISE EXCEPTION USING MESSAGE = 'ANALYSIS_V2_DAG_STATE_INVALID', ERRCODE = 'P0001';
+    END IF;
+
+    SELECT analysis_request.* INTO v_request
+    FROM public.analysis_requests AS analysis_request
+    WHERE analysis_request.id = p_request_id FOR UPDATE;
+    SELECT job.* INTO v_job
+    FROM public.analysis_pipeline_jobs AS job
+    WHERE job.request_id = p_request_id AND job.job_key = p_job_key FOR UPDATE;
+    SELECT scope.* INTO v_scope
+    FROM public.analysis_v2_dag_scopes AS scope
+    WHERE scope.request_id = p_request_id FOR SHARE;
+    SELECT policy.* INTO v_policy
+    FROM public.analysis_v2_provider_execution_policies AS policy
+    WHERE policy.request_id = p_request_id FOR UPDATE;
+    SELECT relationship_manifest.* INTO v_relationship_manifest
+    FROM public.analysis_v2_relationship_manifests AS relationship_manifest
+    WHERE relationship_manifest.request_id = p_request_id
+      AND relationship_manifest.job_key = p_job_key
+      AND relationship_manifest.result_hash = v_result_hash FOR UPDATE;
+    SELECT routing_manifest.* INTO v_routing_manifest
+    FROM public.analysis_v2_gender_routing_manifests AS routing_manifest
+    WHERE routing_manifest.request_id = p_request_id
+      AND routing_manifest.relationship_checkpoint_id = v_result_hash
+      AND routing_manifest.policy_version = 'gender-routing-v1' FOR UPDATE;
+
+    IF v_request.id IS NULL
+       OR v_request.pipeline_version IS DISTINCT FROM 'v2'
+       OR v_request.status NOT IN ('pending', 'processing')
+       OR v_request.plan_access_mode_snapshot IS DISTINCT FROM 'test_entitlement'
+       OR v_request.selected_plan_id_snapshot IS DISTINCT FROM v_selection_plan
+       OR v_scope.request_id IS NULL
+       OR v_scope.plan_id IS DISTINCT FROM v_selection_plan
+       OR v_job.request_id IS NULL
+       OR v_job.track IS DISTINCT FROM 'relationships'
+       OR v_job.kind IS DISTINCT FROM 'collection'
+       OR v_job.batch IS NOT NULL
+       OR v_job.input_hash IS DISTINCT FROM p_input_hash
+       OR v_job.status IS DISTINCT FROM 'processing'
+       OR v_job.lease_token IS DISTINCT FROM p_claim_token
+       OR v_job.lease_expires_at IS NULL
+       OR v_job.lease_expires_at <= v_now
+       OR v_policy.request_id IS NULL
+       OR v_policy.mode IS DISTINCT FROM 'test_operation_split'
+       OR v_policy.policy_version IS DISTINCT FROM 'authorized-free-e2e-v1'
+       OR v_relationship_manifest.request_id IS NULL
+       OR v_relationship_manifest.public_count IS DISTINCT FROM v_public
+       OR v_selection->>'relationshipCheckpointId' IS DISTINCT FROM v_result_hash
+       OR v_selection->>'relationshipJobInputHash' IS DISTINCT FROM p_input_hash
+       OR v_routing_manifest.request_id IS NULL
+       OR v_routing_manifest.status IS DISTINCT FROM 'complete'
+       OR v_routing_manifest.relationship_job_key IS DISTINCT FROM p_job_key
+       OR v_routing_manifest.relationship_job_input_hash IS DISTINCT FROM p_input_hash
+       OR v_routing_manifest.plan_id IS DISTINCT FROM v_selection_plan
+       OR v_routing_manifest.detailed_cap IS DISTINCT FROM v_detailed_cap
+       OR v_routing_manifest.population_count IS DISTINCT FROM v_population
+       OR v_routing_manifest.selected_count IS DISTINCT FROM v_selected THEN
+        RAISE EXCEPTION USING MESSAGE = 'ANALYSIS_V2_DAG_STATE_FENCE_MISMATCH', ERRCODE = 'P0001';
+    END IF;
+
+    SELECT pg_catalog.count(*)::INTEGER,
+           pg_catalog.count(*) FILTER (WHERE candidate.selected)::INTEGER,
+           COALESCE(pg_catalog.min(candidate.ordinal) FILTER (WHERE candidate.selected), 1),
+           COALESCE(pg_catalog.max(candidate.ordinal) FILTER (WHERE candidate.selected), 0)
+    INTO v_all_candidates, v_selected_candidates, v_min_ordinal, v_max_ordinal
+    FROM public.analysis_v2_gender_routing_candidates AS candidate
+    WHERE candidate.request_id = p_request_id
+      AND candidate.relationship_checkpoint_id = v_result_hash
+      AND candidate.policy_version = 'gender-routing-v1';
+    IF v_all_candidates IS DISTINCT FROM v_population
+       OR v_selected_candidates IS DISTINCT FROM v_selected
+       OR v_min_ordinal <> 1
+       OR v_max_ordinal <> v_selected THEN
+        RAISE EXCEPTION USING MESSAGE = 'ANALYSIS_V2_DAG_STATE_FENCE_MISMATCH', ERRCODE = 'P0001';
+    END IF;
+
+    SELECT stage.* INTO v_stage
+    FROM public.analysis_v2_dag_stage_manifests AS stage
+    WHERE stage.request_id = p_request_id AND stage.stage_kind = 'relationships' FOR UPDATE;
+    IF FOUND THEN
+        IF v_stage.producer_job_key <> p_job_key
+           OR v_stage.producer_input_hash <> p_input_hash
+           OR v_stage.revision <> v_revision
+           OR v_stage.result_hash <> v_result_hash
+           OR v_stage.detected_mutual_count <> v_detected
+           OR v_stage.public_count <> v_public
+           OR v_stage.private_count <> v_private
+           OR v_stage.detailed_selected_public_count <> v_detailed
+           OR v_stage.not_screened_public_count <> v_not_screened
+           OR v_stage.relationship_selection_policy_version <> 'gender-routing-v1'
+           OR v_stage.relationship_selection_checkpoint_id <> v_result_hash
+           OR v_stage.relationship_selection_job_input_hash <> p_input_hash
+           OR v_stage.relationship_selection_plan_id <> v_selection_plan
+           OR v_stage.relationship_selection_public_population_count <> v_population
+           OR v_stage.relationship_selection_selected_count <> v_selected THEN
+            RAISE EXCEPTION USING MESSAGE = 'ANALYSIS_V2_DAG_STATE_CONFLICT', ERRCODE = 'P0001';
+        END IF;
+    ELSE
+        INSERT INTO public.analysis_v2_dag_stage_manifests (
+            request_id, stage_kind, producer_job_key, producer_input_hash, revision, result_hash,
+            detected_mutual_count, public_count, private_count, detailed_selected_public_count,
+            not_screened_public_count, relationship_selection_policy_version,
+            relationship_selection_checkpoint_id, relationship_selection_job_input_hash,
+            relationship_selection_plan_id, relationship_selection_public_population_count,
+            relationship_selection_selected_count
+        ) VALUES (
+            p_request_id, 'relationships', p_job_key, p_input_hash, v_revision, v_result_hash,
+            v_detected, v_public, v_private, v_detailed, v_not_screened, 'gender-routing-v1',
+            v_result_hash, p_input_hash, v_selection_plan, v_population, v_selected
+        );
+        INSERT INTO public.analysis_v2_dag_batch_topology (
+            request_id, topology_kind, batch, item_count, input_hash,
+            producer_job_key, producer_input_hash
+        )
+        SELECT p_request_id, 'profile', (item.value->>'batch')::INTEGER,
+               (item.value->>'itemCount')::INTEGER, item.value->>'inputHash', p_job_key, p_input_hash
+        FROM pg_catalog.jsonb_array_elements(v_profile_batches) AS item(value);
+        INSERT INTO public.analysis_v2_dag_batch_topology (
+            request_id, topology_kind, batch, item_count, input_hash,
+            producer_job_key, producer_input_hash
+        )
+        SELECT p_request_id, 'private_name', (item.value->>'batch')::INTEGER,
+               (item.value->>'itemCount')::INTEGER, item.value->>'inputHash', p_job_key, p_input_hash
+        FROM pg_catalog.jsonb_array_elements(v_private_batches) AS item(value);
+    END IF;
+
+    IF EXISTS (
+        SELECT 1 FROM public.analysis_v2_dag_batch_topology AS topology
+        WHERE topology.request_id = p_request_id
+          AND (topology.producer_job_key <> p_job_key OR topology.producer_input_hash <> p_input_hash)
+    ) THEN
+        RAISE EXCEPTION USING MESSAGE = 'ANALYSIS_V2_DAG_STATE_CONFLICT', ERRCODE = 'P0001';
+    END IF;
+    SELECT COALESCE(pg_catalog.jsonb_agg(pg_catalog.jsonb_build_object(
+        'batch', topology.batch, 'itemCount', topology.item_count, 'inputHash', topology.input_hash
+    ) ORDER BY topology.batch), '[]'::JSONB)
+    INTO v_existing_batches
+    FROM public.analysis_v2_dag_batch_topology AS topology
+    WHERE topology.request_id = p_request_id AND topology.topology_kind = 'profile';
+    IF v_existing_batches <> v_profile_batches THEN
+        RAISE EXCEPTION USING MESSAGE = 'ANALYSIS_V2_DAG_STATE_CONFLICT', ERRCODE = 'P0001';
+    END IF;
+    SELECT COALESCE(pg_catalog.jsonb_agg(pg_catalog.jsonb_build_object(
+        'batch', topology.batch, 'itemCount', topology.item_count, 'inputHash', topology.input_hash
+    ) ORDER BY topology.batch), '[]'::JSONB)
+    INTO v_existing_batches
+    FROM public.analysis_v2_dag_batch_topology AS topology
+    WHERE topology.request_id = p_request_id AND topology.topology_kind = 'private_name';
+    IF v_existing_batches <> v_private_batches THEN
+        RAISE EXCEPTION USING MESSAGE = 'ANALYSIS_V2_DAG_STATE_CONFLICT', ERRCODE = 'P0001';
+    END IF;
+
+    RETURN public.analysis_v2_dag_state_json(p_request_id);
+END;
+$$;
+
+REVOKE ALL ON FUNCTION public.checkpoint_analysis_v2_dag_manifest(
+    UUID, TEXT, TEXT, UUID, TEXT, JSONB
+) FROM PUBLIC, anon, authenticated, service_role;
+GRANT EXECUTE ON FUNCTION public.checkpoint_analysis_v2_dag_manifest(
+    UUID, TEXT, TEXT, UUID, TEXT, JSONB
+) TO service_role;
+
+CREATE OR REPLACE FUNCTION public.load_analysis_v2_dag_state(p_request_id UUID)
+RETURNS JSONB
+LANGUAGE sql
+STABLE
+SECURITY DEFINER
+SET search_path = ''
+AS $$
+    SELECT public.analysis_v2_dag_state_json(p_request_id);
+$$;
+
+REVOKE ALL ON FUNCTION public.load_analysis_v2_dag_state(UUID)
+    FROM PUBLIC, anon, authenticated, service_role;
+GRANT EXECUTE ON FUNCTION public.load_analysis_v2_dag_state(UUID) TO service_role;

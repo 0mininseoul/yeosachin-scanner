@@ -686,6 +686,14 @@ export function createAnalysisV2RelationshipsExecutor(
         let detailedPublicUsernames = staging.detailedPublicUsernames;
         let detailedSelectedPublicCount = manifest.detailedPublicCount;
         let notScreenedPublicCount = manifest.unscreenedPublicCount;
+        let relationshipSelectionPolicy: {
+            policyVersion: 'gender-routing-v1';
+            relationshipCheckpointId: string;
+            relationshipJobInputHash: string;
+            planId: 'basic' | 'standard';
+            publicPopulationCount: number;
+            selectedCount: number;
+        } | undefined;
         if (isRevenueGenderRoutingRequest(request)) {
             const publicMutualRows = staging.mutualRows
                 .filter(row => !row.isPrivate)
@@ -741,6 +749,14 @@ export function createAnalysisV2RelationshipsExecutor(
             detailedPublicUsernames = selectedRows.map(row => row.username);
             detailedSelectedPublicCount = selectedRows.length;
             notScreenedPublicCount = publicMutualRows.length - selectedRows.length;
+            relationshipSelectionPolicy = Object.freeze({
+                policyVersion: 'gender-routing-v1',
+                relationshipCheckpointId: manifest.resultHash,
+                relationshipJobInputHash: claim.jobInputHash,
+                planId: request.planId,
+                publicPopulationCount: publicMutualRows.length,
+                selectedCount: selectedRows.length,
+            });
         }
 
         return Object.freeze({
@@ -762,6 +778,7 @@ export function createAnalysisV2RelationshipsExecutor(
                         'private_names',
                         staging.privateMutualUsernames
                     ),
+                    ...(relationshipSelectionPolicy ? { relationshipSelectionPolicy } : {}),
                 }),
             }),
         });

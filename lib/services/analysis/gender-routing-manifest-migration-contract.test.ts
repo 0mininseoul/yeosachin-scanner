@@ -96,4 +96,23 @@ describe('analysis V2 gender-routing manifest migration contract', () => {
         expect(functionDefinition('publish_analysis_v2_gender_routing_manifest'))
             .toContain('p_model_failed_count::NUMERIC / p_model_attempted_count > 0.1');
     });
+
+    it('permits the reduced relationship selection only with a complete, exact routing identity', () => {
+        const checkpoint = functionDefinition('checkpoint_analysis_v2_dag_manifest');
+        expect(migration).toContain('relationship_selection_policy_version');
+        expect(migration).toContain('analysis_v2_dag_relationship_selection_policy_shape_check');
+        expect(migration).toContain('RENAME TO checkpoint_analysis_v2_dag_manifest_legacy');
+        expect(checkpoint).toContain("p_manifest ? 'relationshipSelectionPolicy'");
+        expect(checkpoint).toContain("v_selection->>'policyVersion' <> 'gender-routing-v1'");
+        expect(checkpoint).toContain("v_request.plan_access_mode_snapshot IS DISTINCT FROM 'test_entitlement'");
+        expect(checkpoint).toContain("v_policy.mode IS DISTINCT FROM 'test_operation_split'");
+        expect(checkpoint).toContain("v_policy.policy_version IS DISTINCT FROM 'authorized-free-e2e-v1'");
+        expect(checkpoint).toContain("v_routing_manifest.status IS DISTINCT FROM 'complete'");
+        expect(checkpoint).toContain('v_routing_manifest.relationship_job_input_hash IS DISTINCT FROM p_input_hash');
+        expect(checkpoint).toContain('v_routing_manifest.population_count IS DISTINCT FROM v_population');
+        expect(checkpoint).toContain('v_routing_manifest.selected_count IS DISTINCT FROM v_selected');
+        expect(checkpoint).toContain("RETURN public.checkpoint_analysis_v2_dag_manifest_legacy(");
+        const marker = migration.slice(migration.indexOf('-- A relationship checkpoint normally'));
+        expect(marker).not.toMatch(/relationship_selection_[a-z_]*(username|full_name|profile_pic|bio)/i);
+    });
 });
