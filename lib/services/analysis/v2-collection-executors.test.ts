@@ -25,6 +25,10 @@ import type {
 import type { AnalysisV2ProviderRunAdoptionStore } from './v2-provider-run-adoption-store';
 import type { AnalysisV2TargetProfileReuseStore } from './v2-target-profile-reuse';
 import type { AnalysisV2SelfHostedAuthRunReceipt } from './v2-selfhosted-auth-run-store';
+import type {
+    AnalysisV2GenderRoutingManifestPublishInput,
+    AnalysisV2GenderRoutingManifestStore,
+} from './gender-routing-manifest-store';
 import { SelfHostedAuthWorkerError } from '@/lib/services/instagram/providers/selfhosted-auth/client';
 import {
     AnalysisV2CollectionContextFenceError,
@@ -1492,6 +1496,8 @@ describe('analysis V2 concrete collection executors', () => {
             requestContextStore: contextStore(requestContext({
                 accessMode: 'test_entitlement',
                 providerExecutionPolicy: authorizedProviderPolicy,
+                planId: 'plus',
+                detailedMutualLimit: 900,
                 followersDeclaredCount: 1,
                 followingDeclaredCount: 1,
             })),
@@ -1521,7 +1527,7 @@ describe('analysis V2 concrete collection executors', () => {
             } as unknown as AnalysisV2EvidenceStore,
         });
 
-        await executor(stageContext('relationships', state()));
+        await executor(stageContext('relationships', state({ planId: 'plus' })));
 
         const byOperation = new Map(providers.bindAdapterCheckpoint.mock.calls.map(([call]) => [
             call.operationKey.split(':', 1)[0],
@@ -2440,6 +2446,8 @@ describe('analysis V2 concrete collection executors', () => {
             requestContextStore: contextStore(requestContext({
                 accessMode: 'test_entitlement',
                 providerExecutionPolicy: authorizedProviderPolicy,
+                planId: 'plus',
+                detailedMutualLimit: 900,
             })),
             profileCheckpointStore: profileStore.store,
             providerRunStore: providers.value,
@@ -2447,7 +2455,10 @@ describe('analysis V2 concrete collection executors', () => {
             evidenceStore: relationshipEvidence(usernames),
             getProfilesBatchV2: fetcher as unknown as typeof import('@/lib/services/instagram/scraper').getProfilesBatchV2,
         });
-        const dagState = state({ relationships: relationshipManifest(topology) });
+        const dagState = state({
+            planId: 'plus',
+            relationships: relationshipManifest(topology),
+        });
 
         await expect(executor({
             ...stageContext('profile_fetch', dagState, 0),
@@ -3134,6 +3145,258 @@ describe('analysis V2 concrete collection executors', () => {
         expect(fetcher).not.toHaveBeenCalled();
         expect(reportActiveProfile).not.toHaveBeenCalled();
     });
+
+    it('routes Basic from the fresh public mutual snapshot and makes durable selected ordinals the profile batch', async () => {
+        const mutualRows = routingMutualRows(101);
+        const usernamesByOrdinal = new Map(mutualRows.map(row => [row.mutualOrdinal, row.username]));
+        const routing = routingManifestStore(usernamesByOrdinal);
+        const relationshipEvidenceStore = {
+            checkpointRelationshipSide: vi.fn(async () => ({})),
+            freezeRelationships: vi.fn(async () => ({
+                revision: 1,
+                resultHash,
+                exclusionDecisionHash: 'f'.repeat(64),
+                followersResultHash: resultHash,
+                followingResultHash: resultHash,
+                mutualCount: 101,
+                publicCount: 101,
+                privateCount: 0,
+                detailedPublicCount: 101,
+                unscreenedPublicCount: 0,
+            })),
+            loadRelationshipStaging: vi.fn(async () => ({
+                excludedUsername: 'girlfriend',
+                detailedPublicUsernames: mutualRows.slice(0, 100).map(row => row.username),
+                privateMutualUsernames: [],
+                mutualRows,
+            })),
+        } as unknown as AnalysisV2EvidenceStore;
+        const assessor = vi.fn(async (candidates: readonly { candidateKey: string }[]) => new Map(
+            candidates.map(candidate => [candidate.candidateKey, candidate.candidateKey === 'mutual:1'
+                ? { femaleScore: 0.05, maleScore: 0.9, uncertaintyScore: 0.05, evidence: 'image_and_name' as const }
+                : { femaleScore: 0.9, maleScore: 0.05, uncertaintyScore: 0.05, evidence: 'image_and_name' as const }])
+        ));
+        const request = requestContext({
+            accessMode: 'test_entitlement',
+            providerExecutionPolicy: authorizedProviderPolicy,
+            followersDeclaredCount: 0,
+            followingDeclaredCount: 0,
+        });
+        const relationshipExecutor = createAnalysisV2RelationshipsExecutor({
+            requestContextStore: contextStore(request),
+            evidenceStore: relationshipEvidenceStore,
+            genderRoutingManifestStore: routing.store,
+            revenueGenderRoutingAssessor: assessor,
+            env: {
+                ...authorizedProviderEnv,
+                ANALYSIS_V2_GENDER_ROUTING_HMAC_SECRET: 'routing-test-secret-at-least-thirty-two-characters',
+            },
+        });
+
+        const relationship = await relationshipExecutor(stageContext('relationships', state()));
+        const selectedUsernames = routing.selected().map(row => (
+            usernamesByOrdinal.get(row.mutualOrdinal)!
+        ));
+        expect(assessor).toHaveBeenCalledTimes(1);
+        expect(assessor.mock.calls[0]?.[0]).toHaveLength(101);
+        expect(JSON.stringify(assessor.mock.calls[0]?.[0])).not.toContain('mutualOrdinal');
+        expect(relationship.checkpoint.manifest.detailedSelectedPublicCount).toBe(100);
+        expect(relationship.checkpoint.manifest.profileBatches).toEqual(
+            createAnalysisV2CollectionTopology('profiles', selectedUsernames)
+        );
+
+        const profiles = inMemoryProfileStore(null);
+        const profileFetcher = vi.fn(async (
+            requested: readonly string[],
+            options: Parameters<typeof import('@/lib/services/instagram/scraper').getProfilesBatchV2>[1],
+        ) => {
+            const results = requested.map(username => success(username));
+            await options.persistAttemptOutcomes({
+                attempt: 'primary',
+                source: 'selfhosted',
+                requestedUsernames: requested,
+                results,
+            });
+            return {
+                results,
+                profiles: requested.map(username => profile(username)),
+                primaryResults: results,
+                fallbackResults: [],
+                frozenUnresolvedUsernames: [],
+            };
+        });
+        const profileExecutor = createAnalysisV2ProfileFetchExecutor({
+            requestContextStore: contextStore(request),
+            evidenceStore: relationshipEvidenceStore,
+            profileCheckpointStore: profiles.store,
+            genderRoutingManifestStore: routing.store,
+            env: {
+                ...authorizedProviderEnv,
+                ANALYSIS_V2_GENDER_ROUTING_HMAC_SECRET: 'routing-test-secret-at-least-thirty-two-characters',
+            },
+            getProfilesBatchV2: profileFetcher as unknown as typeof import('@/lib/services/instagram/scraper').getProfilesBatchV2,
+        });
+        await profileExecutor(stageContext('profile_fetch', state({
+            relationships: relationship.checkpoint.manifest,
+        }), 0));
+        expect(profileFetcher).toHaveBeenCalledWith(selectedUsernames.slice(0, 30), expect.any(Object));
+        expect(profileFetcher.mock.calls[0]?.[0]).not.toEqual(
+            mutualRows.slice(0, 30).map(row => row.username)
+        );
+    });
+
+    it('routes Standard to its durable 200-row cap and bounds a larger Basic snapshot to 400 before model work', async () => {
+        const standardRows = routingMutualRows(201);
+        const standardRouting = routingManifestStore(new Map(
+            standardRows.map(row => [row.mutualOrdinal, row.username])
+        ));
+        const standardAssessor = vi.fn(async (candidates: readonly { candidateKey: string }[]) => new Map(
+            candidates.map(candidate => [candidate.candidateKey, {
+                femaleScore: 0.9,
+                maleScore: 0.05,
+                uncertaintyScore: 0.05,
+                evidence: 'image_and_name' as const,
+            }])
+        ));
+        const standardRequest = requestContext({
+            accessMode: 'test_entitlement',
+            providerExecutionPolicy: authorizedProviderPolicy,
+            planId: 'standard',
+            detailedMutualLimit: 600,
+            followersDeclaredCount: 0,
+            followingDeclaredCount: 0,
+        });
+        const standardExecutor = createAnalysisV2RelationshipsExecutor({
+            requestContextStore: contextStore(standardRequest),
+            evidenceStore: {
+                checkpointRelationshipSide: vi.fn(async () => ({})),
+                freezeRelationships: vi.fn(async () => ({
+                    revision: 1, resultHash, exclusionDecisionHash: 'f'.repeat(64),
+                    followersResultHash: resultHash, followingResultHash: resultHash,
+                    mutualCount: 201, publicCount: 201, privateCount: 0,
+                    detailedPublicCount: 201, unscreenedPublicCount: 0,
+                })),
+                loadRelationshipStaging: vi.fn(async () => ({
+                    excludedUsername: 'girlfriend', detailedPublicUsernames: [],
+                    privateMutualUsernames: [], mutualRows: standardRows,
+                })),
+            } as unknown as AnalysisV2EvidenceStore,
+            genderRoutingManifestStore: standardRouting.store,
+            revenueGenderRoutingAssessor: standardAssessor,
+            env: { ANALYSIS_V2_GENDER_ROUTING_HMAC_SECRET: 'routing-test-secret-at-least-thirty-two-characters' },
+        });
+        const standard = await standardExecutor(stageContext('relationships', state({ planId: 'standard' })));
+        expect(standardAssessor).toHaveBeenCalledWith(expect.any(Array), 1);
+        expect(standard.checkpoint.manifest.detailedSelectedPublicCount).toBe(200);
+        expect(standard.checkpoint.manifest.profileBatches.reduce(
+            (count, batch) => count + batch.itemCount,
+            0,
+        )).toBe(200);
+
+        const overCapRows = routingMutualRows(401);
+        const overCapRouting = routingManifestStore(new Map(
+            overCapRows.map(row => [row.mutualOrdinal, row.username])
+        ));
+        const overCapAssessor = vi.fn(async (candidates: readonly { candidateKey: string }[]) => new Map(
+            candidates.map(candidate => [candidate.candidateKey, {
+                femaleScore: 0.9,
+                maleScore: 0.05,
+                uncertaintyScore: 0.05,
+                evidence: 'image_and_name' as const,
+            }])
+        ));
+        const overCapExecutor = createAnalysisV2RelationshipsExecutor({
+            requestContextStore: contextStore(requestContext({
+                accessMode: 'test_entitlement',
+                providerExecutionPolicy: authorizedProviderPolicy,
+                followersDeclaredCount: 0,
+                followingDeclaredCount: 0,
+            })),
+            evidenceStore: {
+                checkpointRelationshipSide: vi.fn(async () => ({})),
+                freezeRelationships: vi.fn(async () => ({
+                    revision: 1, resultHash, exclusionDecisionHash: 'f'.repeat(64),
+                    followersResultHash: resultHash, followingResultHash: resultHash,
+                    mutualCount: 401, publicCount: 401, privateCount: 0,
+                    detailedPublicCount: 300, unscreenedPublicCount: 101,
+                })),
+                loadRelationshipStaging: vi.fn(async () => ({
+                    excludedUsername: 'girlfriend', detailedPublicUsernames: [],
+                    privateMutualUsernames: [], mutualRows: overCapRows,
+                })),
+            } as unknown as AnalysisV2EvidenceStore,
+            genderRoutingManifestStore: overCapRouting.store,
+            revenueGenderRoutingAssessor: overCapAssessor,
+            env: { ANALYSIS_V2_GENDER_ROUTING_HMAC_SECRET: 'routing-test-secret-at-least-thirty-two-characters' },
+        });
+        const capped = await overCapExecutor(stageContext('relationships', state()));
+        expect(overCapAssessor).toHaveBeenCalledWith(expect.any(Array), 1);
+        expect(overCapAssessor.mock.calls[0]?.[0]).toHaveLength(400);
+        expect(capped.checkpoint.manifest.detailedSelectedPublicCount).toBe(100);
+        expect(capped.checkpoint.manifest.notScreenedPublicCount).toBe(301);
+    });
+
+    it('leaves production, Plus, and beta free-pool relationship topology on the legacy path', async () => {
+        const cases = [
+            {
+                request: requestContext({ followersDeclaredCount: 0, followingDeclaredCount: 0 }),
+                dagState: state(),
+            },
+            {
+                request: requestContext({
+                    accessMode: 'test_entitlement',
+                    providerExecutionPolicy: authorizedProviderPolicy,
+                    planId: 'plus',
+                    detailedMutualLimit: 900,
+                    followersDeclaredCount: 0,
+                    followingDeclaredCount: 0,
+                }),
+                dagState: state({ planId: 'plus' }),
+            },
+            {
+                request: requestContext({
+                    accessMode: 'test_entitlement',
+                    providerExecutionPolicy: betaProviderPolicy,
+                    followersDeclaredCount: 0,
+                    followingDeclaredCount: 0,
+                }),
+                dagState: state(),
+            },
+        ];
+        for (const testCase of cases) {
+            const assessor = vi.fn();
+            const manifestStore = {
+                begin: vi.fn(async () => { throw new Error('routing should not begin'); }),
+            } as unknown as AnalysisV2GenderRoutingManifestStore;
+            const executor = createAnalysisV2RelationshipsExecutor({
+                requestContextStore: contextStore(testCase.request),
+                evidenceStore: {
+                    checkpointRelationshipSide: vi.fn(async () => ({})),
+                    freezeRelationships: vi.fn(async () => ({
+                        revision: 1, resultHash, exclusionDecisionHash: 'f'.repeat(64),
+                        followersResultHash: resultHash, followingResultHash: resultHash,
+                        mutualCount: 1, publicCount: 1, privateCount: 0,
+                        detailedPublicCount: 1, unscreenedPublicCount: 0,
+                    })),
+                    loadRelationshipStaging: vi.fn(async () => ({
+                        excludedUsername: 'girlfriend',
+                        detailedPublicUsernames: ['legacy_candidate'],
+                        privateMutualUsernames: [],
+                        mutualRows: routingMutualRows(1),
+                    })),
+                } as unknown as AnalysisV2EvidenceStore,
+                genderRoutingManifestStore: manifestStore,
+                revenueGenderRoutingAssessor: assessor,
+                env: { ANALYSIS_V2_GENDER_ROUTING_HMAC_SECRET: 'routing-test-secret-at-least-thirty-two-characters' },
+            });
+            const result = await executor(stageContext('relationships', testCase.dagState));
+            expect(result.checkpoint.manifest.profileBatches).toEqual(
+                createAnalysisV2CollectionTopology('profiles', ['legacy_candidate'])
+            );
+            expect(assessor).not.toHaveBeenCalled();
+            expect(manifestStore.begin).not.toHaveBeenCalled();
+        }
+    });
 });
 
 interface ProfilesBatchSnapshot {
@@ -3160,6 +3423,79 @@ function relationshipManifest(profileBatches: readonly {
         profileBatches,
         privateNameBatches: [],
     };
+}
+
+function routingManifestStore(usernamesByOrdinal: ReadonlyMap<number, string>) {
+    const publication: { value: AnalysisV2GenderRoutingManifestPublishInput | null } = { value: null };
+    const complete = (input: AnalysisV2GenderRoutingManifestPublishInput) => ({
+        status: 'complete' as const,
+        attemptCount: 1,
+        requestId: input.requestId,
+        relationshipCheckpointId: input.relationshipCheckpointId,
+        policyVersion: input.policyVersion,
+        planId: input.planId,
+        canonicalInputHmac: input.canonicalInputHmac,
+        populationCount: input.populationCount,
+        detailedCap: input.detailedCap,
+        selectedCount: input.selectedCount,
+        modelAttemptedCount: input.modelAttemptedCount,
+        modelValidCount: input.modelValidCount,
+        modelFailedCount: input.modelFailedCount,
+        modelRetriedCount: input.modelRetriedCount,
+        quotaFemaleShortfall: input.quotaShortfalls.female,
+        quotaUncertaintyShortfall: input.quotaShortfalls.uncertainty,
+        femalePriorityCount: input.bucketCounts.female_priority,
+        uncertaintyCount: input.bucketCounts.uncertainty,
+        maleDeprioritizedCount: input.bucketCounts.male_deprioritized,
+        selectedFemalePriorityCount: input.selectedBucketCounts.female_priority,
+        selectedUncertaintyCount: input.selectedBucketCounts.uncertainty,
+        selectedMaleDeprioritizedCount: input.selectedBucketCounts.male_deprioritized,
+    });
+    const selected = () => publication.value!.rows
+        .filter(row => row.selected)
+        .sort((left, right) => left.ordinal! - right.ordinal!)
+        .map(row => ({
+            mutualOrdinal: row.mutualOrdinal,
+            candidateKey: row.candidateKey,
+            selectionSlot: row.selectionSlot!,
+            ordinal: row.ordinal!,
+        }));
+    const store: AnalysisV2GenderRoutingManifestStore = {
+        begin: vi.fn(async input => ({
+            status: 'building' as const,
+            attemptCount: 1,
+            requestId: input.requestId,
+            relationshipCheckpointId: input.relationshipCheckpointId,
+            policyVersion: input.policyVersion,
+            planId: input.planId,
+            canonicalInputHmac: input.canonicalInputHmac,
+            populationCount: input.populationCount,
+            detailedCap: input.detailedCap,
+        })),
+        publish: vi.fn(async input => {
+            publication.value = input;
+            return complete(input);
+        }),
+        loadSelected: vi.fn(async () => selected()),
+        loadSelectedUsernames: vi.fn(async () => selected().map(row => ({
+            ...row,
+            username: usernamesByOrdinal.get(row.mutualOrdinal) ?? '',
+        }))),
+    };
+    return { store, publication, selected };
+}
+
+function routingMutualRows(count: number) {
+    return Array.from({ length: count }, (_, index) => ({
+        username: `routing_${index + 1}`,
+        isPrivate: false,
+        isVerified: false,
+        fullName: `Routing ${index + 1}`,
+        profilePicUrl: `https://images.example/routing_${index + 1}.jpg`,
+        mutualOrdinal: index + 1,
+        followingOrdinal: index + 1,
+        detailedOrdinal: index + 1,
+    }));
 }
 
 function relationshipEvidence(usernames: readonly string[]): AnalysisV2EvidenceStore {

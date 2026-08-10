@@ -118,12 +118,29 @@ import {
     createAnalysisV2SelfHostedAuthWorkerIdentity,
     type AnalysisV2SelfHostedAuthRunStore,
 } from './v2-selfhosted-auth-run-store';
+import {
+    createGenderRoutingCanonicalInputHmac,
+    GENDER_ROUTING_CAPS,
+} from './gender-routing';
+import {
+    analysisV2GenderRoutingManifestStore,
+    type AnalysisV2GenderRoutingManifestStore,
+} from './gender-routing-manifest-store';
+import {
+    routeAndPersistRevenueGenderCandidates,
+    usesRevenueGenderRouting,
+    type RevenueGenderRoutingModelCandidate,
+} from './revenue-routing-runtime';
 
 const PROFILE_ACTOR_ID = 'apify/instagram-profile-scraper';
 
 type RelationshipGetter = typeof getFollowers;
 type ProfileBatchFetcher = typeof getProfilesBatchV2;
 type ProfileRepairRunner = typeof runAnalysisV2ProfileRepair;
+type RevenueGenderRoutingAssessor = (
+    candidates: readonly RevenueGenderRoutingModelCandidate[],
+    attempt: 1 | 2,
+) => Promise<ReadonlyMap<string, import('./gender-routing').GenderRoutingAssessment>>;
 
 export interface AnalysisV2CollectionExecutorDependencies {
     requestContextStore?: AnalysisV2CollectionRequestContextStore;
@@ -139,6 +156,8 @@ export interface AnalysisV2CollectionExecutorDependencies {
     runProfileRepair?: ProfileRepairRunner;
     interactionAdapter?: ApifyInteractionAdapter;
     selfHostedAuthInteractionAdapter?: ApifyInteractionAdapter;
+    genderRoutingManifestStore?: AnalysisV2GenderRoutingManifestStore;
+    revenueGenderRoutingAssessor?: RevenueGenderRoutingAssessor;
     env?: Record<string, string | undefined>;
 }
 
@@ -156,6 +175,8 @@ interface ResolvedDependencies {
     runProfileRepair: ProfileRepairRunner;
     interactionAdapter: ApifyInteractionAdapter;
     selfHostedAuthInteractionAdapter: ApifyInteractionAdapter;
+    genderRoutingManifestStore: AnalysisV2GenderRoutingManifestStore;
+    revenueGenderRoutingAssessor: RevenueGenderRoutingAssessor | null;
     env: Record<string, string | undefined>;
 }
 
@@ -179,6 +200,9 @@ function deps(input: AnalysisV2CollectionExecutorDependencies): ResolvedDependen
         interactionAdapter: input.interactionAdapter ?? apifyInteractionAdapter,
         selfHostedAuthInteractionAdapter:
             input.selfHostedAuthInteractionAdapter ?? selfHostedAuthInteractionAdapter,
+        genderRoutingManifestStore:
+            input.genderRoutingManifestStore ?? analysisV2GenderRoutingManifestStore,
+        revenueGenderRoutingAssessor: input.revenueGenderRoutingAssessor ?? null,
         env: input.env ?? process.env,
     };
 }
@@ -223,6 +247,26 @@ function collectionClaim(context: {
 
 function isBetaFreePoolRequest(request: AnalysisV2CollectionRequestContext): boolean {
     return request.providerExecutionPolicy?.mode === 'betatest_free_pool';
+}
+
+function isRevenueGenderRoutingRequest(
+    request: AnalysisV2CollectionRequestContext,
+): request is AnalysisV2CollectionRequestContext & {
+    accessMode: 'test_entitlement';
+    planId: 'basic' | 'standard';
+    providerExecutionPolicy: NonNullable<AnalysisV2CollectionRequestContext['providerExecutionPolicy']>;
+} {
+    return usesRevenueGenderRouting({ accessMode: request.accessMode, planId: request.planId })
+        && request.providerExecutionPolicy?.mode === 'test_operation_split'
+        && request.providerExecutionPolicy.policyVersion === 'authorized-free-e2e-v1';
+}
+
+function revenueGenderRoutingSecret(dependencies: ResolvedDependencies): string {
+    const secret = dependencies.env.ANALYSIS_V2_GENDER_ROUTING_HMAC_SECRET;
+    if (!secret || secret.length < 32) {
+        throw new Error('ANALYSIS_V2_GENDER_ROUTING_SECRET_MISSING');
+    }
+    return secret;
 }
 
 function collectionProviderForRequest(
@@ -638,6 +682,67 @@ export function createAnalysisV2RelationshipsExecutor(
             throw new Error('ANALYSIS_V2_GIRLFRIEND_EXCLUSION_LEAK');
         }
 
+        let detailedPublicUsernames = staging.detailedPublicUsernames;
+        let detailedSelectedPublicCount = manifest.detailedPublicCount;
+        let notScreenedPublicCount = manifest.unscreenedPublicCount;
+        if (isRevenueGenderRoutingRequest(request)) {
+            if (!dependencies.revenueGenderRoutingAssessor) {
+                throw new Error('ANALYSIS_V2_GENDER_ROUTING_ASSESSOR_MISSING');
+            }
+            const publicMutualRows = staging.mutualRows
+                .filter(row => !row.isPrivate)
+                .sort((left, right) => left.mutualOrdinal - right.mutualOrdinal);
+            const cap = GENDER_ROUTING_CAPS[request.planId];
+            const routingPopulation = publicMutualRows.slice(0, cap.population);
+            if (
+                publicMutualRows.length !== manifest.publicCount
+                || routingPopulation.length !== Math.min(publicMutualRows.length, cap.population)
+                || new Set(publicMutualRows.map(row => row.mutualOrdinal)).size !== publicMutualRows.length
+            ) throw new Error('ANALYSIS_V2_GENDER_ROUTING_POPULATION_DRIFT');
+
+            const hmacSecret = revenueGenderRoutingSecret(dependencies);
+            const routed = await routeAndPersistRevenueGenderCandidates({
+                requestId: claim.requestId,
+                relationshipCheckpointId: manifest.resultHash,
+                accessMode: request.accessMode,
+                planId: request.planId,
+                candidates: routingPopulation.map(row => ({
+                    mutualOrdinal: row.mutualOrdinal,
+                    candidateKey: `mutual:${row.mutualOrdinal}`,
+                    profilePicUrl: row.profilePicUrl,
+                    fullname: row.fullName,
+                })),
+                hmacSecret,
+                assess: dependencies.revenueGenderRoutingAssessor,
+                jobKey: 'track:relationships:collect',
+                claimToken: claim.claimToken,
+                jobInputHash: claim.jobInputHash,
+                manifestStore: dependencies.genderRoutingManifestStore,
+            });
+            if (!routed) throw new Error('ANALYSIS_V2_GENDER_ROUTING_NOT_APPLICABLE');
+            const selectedRows = await dependencies.genderRoutingManifestStore.loadSelectedUsernames({
+                requestId: claim.requestId,
+                relationshipCheckpointId: manifest.resultHash,
+                policyVersion: 'gender-routing-v1',
+                planId: request.planId,
+                canonicalInputHmac: routed.canonicalInputHmac,
+            });
+            const publicByOrdinal = new Map(publicMutualRows.map(row => [row.mutualOrdinal, row]));
+            if (
+                selectedRows.length !== routed.header.selectedCount
+                || selectedRows.length !== routed.selectedMutualOrdinals.length
+                || selectedRows.length > cap.detailed
+                || selectedRows.some((row, index) => (
+                    row.ordinal !== index + 1
+                    || row.candidateKey !== `mutual:${row.mutualOrdinal}`
+                    || publicByOrdinal.get(row.mutualOrdinal)?.username !== row.username
+                ))
+            ) throw new Error('ANALYSIS_V2_GENDER_ROUTING_SELECTION_DRIFT');
+            detailedPublicUsernames = selectedRows.map(row => row.username);
+            detailedSelectedPublicCount = selectedRows.length;
+            notScreenedPublicCount = publicMutualRows.length - selectedRows.length;
+        }
+
         return Object.freeze({
             checkpoint: Object.freeze({
                 kind: 'relationships' as const,
@@ -647,11 +752,11 @@ export function createAnalysisV2RelationshipsExecutor(
                     detectedMutualCount: manifest.mutualCount,
                     publicCount: manifest.publicCount,
                     privateCount: manifest.privateCount,
-                    detailedSelectedPublicCount: manifest.detailedPublicCount,
-                    notScreenedPublicCount: manifest.unscreenedPublicCount,
+                    detailedSelectedPublicCount,
+                    notScreenedPublicCount,
                     profileBatches: createAnalysisV2CollectionTopology(
                         'profiles',
-                        staging.detailedPublicUsernames
+                        detailedPublicUsernames
                     ),
                     privateNameBatches: createAnalysisV2CollectionTopology(
                         'private_names',
@@ -1319,7 +1424,52 @@ export function createAnalysisV2ProfileFetchExecutor(
         });
         if (!relationshipStaging) throw new Error('ANALYSIS_V2_RELATIONSHIP_STAGING_MISSING');
         const offset = context.job.batch * ANALYSIS_V2_PROFILE_BATCH_LIMIT;
-        const usernames = relationshipStaging.detailedPublicUsernames.slice(
+        let allSelectedUsernames = relationshipStaging.detailedPublicUsernames;
+        if (isRevenueGenderRoutingRequest(request)) {
+            const relationship = context.state.relationships;
+            if (!relationship) {
+                throw new Error('ANALYSIS_V2_GENDER_ROUTING_MANIFEST_MISSING');
+            }
+            const cap = GENDER_ROUTING_CAPS[request.planId];
+            const publicMutualRows = relationshipStaging.mutualRows
+                .filter(row => !row.isPrivate)
+                .sort((left, right) => left.mutualOrdinal - right.mutualOrdinal);
+            const routingPopulation = publicMutualRows.slice(0, cap.population);
+            if (
+                publicMutualRows.length !== relationship.publicCount
+                || routingPopulation.length !== Math.min(publicMutualRows.length, cap.population)
+                || new Set(publicMutualRows.map(row => row.mutualOrdinal)).size !== publicMutualRows.length
+            ) throw new Error('ANALYSIS_V2_GENDER_ROUTING_POPULATION_DRIFT');
+            const canonicalInputHmac = createGenderRoutingCanonicalInputHmac({
+                candidates: routingPopulation.map(row => ({
+                    candidateKey: `mutual:${row.mutualOrdinal}`,
+                    profilePicUrl: row.profilePicUrl,
+                    fullname: row.fullName,
+                })),
+                hmacSecret: revenueGenderRoutingSecret(dependencies),
+            });
+            const selectedRows = await dependencies.genderRoutingManifestStore.loadSelectedUsernames({
+                requestId: claim.requestId,
+                relationshipCheckpointId: relationship.resultHash,
+                policyVersion: 'gender-routing-v1',
+                planId: request.planId,
+                canonicalInputHmac,
+            });
+            const publicByOrdinal = new Map(publicMutualRows.map(row => [row.mutualOrdinal, row]));
+            if (
+                selectedRows.length !== relationship.detailedSelectedPublicCount
+                || selectedRows.length > cap.detailed
+                || selectedRows.some((row, index) => (
+                    row.ordinal !== index + 1
+                    || row.candidateKey !== `mutual:${row.mutualOrdinal}`
+                    || publicByOrdinal.get(row.mutualOrdinal)?.username !== row.username
+                ))
+                || relationship.profileBatches.reduce((total, batch) => total + batch.itemCount, 0)
+                    !== selectedRows.length
+            ) throw new Error('ANALYSIS_V2_GENDER_ROUTING_SELECTION_DRIFT');
+            allSelectedUsernames = selectedRows.map(row => row.username);
+        }
+        const usernames = allSelectedUsernames.slice(
             offset,
             offset + ANALYSIS_V2_PROFILE_BATCH_LIMIT
         );
