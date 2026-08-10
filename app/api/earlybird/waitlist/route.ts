@@ -15,6 +15,10 @@ import {
 import { operationalLogger } from '@/lib/observability/server';
 import { demoResponseHeaders, isDemoOperator } from '@/lib/services/demo-analysis/demo-analysis';
 import { demoAnalysisStore } from '@/lib/services/demo-analysis/store';
+import {
+    AccountPrincipalAdmissionError,
+    requireActiveAccountClassification,
+} from '@/lib/services/identity/account-principal-store';
 
 function errorResponse(status: number, code: string, error: string): NextResponse {
     return NextResponse.json({ code, error }, { status });
@@ -25,7 +29,9 @@ function demoErrorResponse(status: number, code: string, error: string): NextRes
 }
 
 function waitlistErrorCode(code: string): string {
-    if (code === 'UNAUTHORIZED') return 'UNAUTHORIZED';
+    if (code === 'UNAUTHORIZED' || code === 'ACCOUNT_ADMISSION_DENIED') {
+        return 'UNAUTHORIZED';
+    }
     if (code === 'EARLYBIRD_UNAVAILABLE') return 'INTERNAL_ERROR';
     return 'VALIDATION_ERROR';
 }
@@ -65,6 +71,14 @@ async function handlePOST(
         return failed(401, 'UNAUTHORIZED', '로그인이 필요합니다.');
     }
     state.userId = user.id;
+    try {
+        await requireActiveAccountClassification(user.id);
+    } catch (accountError) {
+        if (accountError instanceof AccountPrincipalAdmissionError) {
+            return failed(403, accountError.code, '이 계정은 현재 사용할 수 없습니다.');
+        }
+        return failed(503, 'EARLYBIRD_UNAVAILABLE', '대기 신청을 잠시 후 다시 시도해주세요.');
+    }
 
     let body: unknown;
     try {

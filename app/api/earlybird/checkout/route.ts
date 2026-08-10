@@ -16,6 +16,10 @@ import {
 } from '@/lib/services/earlybird/checkout';
 import { EarlybirdPersistenceError } from '@/lib/services/earlybird/store';
 import {
+    AccountPrincipalAdmissionError,
+    requireActiveAccountClassification,
+} from '@/lib/services/identity/account-principal-store';
+import {
     EARLYBIRD_PLAN_CATALOG,
     isPaidEarlybirdPlanId,
 } from '@/lib/domain/earlybird/catalog';
@@ -99,7 +103,9 @@ function persistenceErrorResponse(error: EarlybirdPersistenceError): NextRespons
 }
 
 function checkoutErrorCode(code: string): string {
-    if (code === 'UNAUTHORIZED') return 'UNAUTHORIZED';
+    if (code === 'UNAUTHORIZED' || code === 'ACCOUNT_ADMISSION_DENIED') {
+        return 'UNAUTHORIZED';
+    }
     if (code === 'EARLYBIRD_UNAVAILABLE') return 'INTERNAL_ERROR';
     return 'VALIDATION_ERROR';
 }
@@ -215,6 +221,14 @@ async function handlePOST(
         return failed(401, 'UNAUTHORIZED', '로그인이 필요합니다.');
     }
     state.userId = user.id;
+    try {
+        await requireActiveAccountClassification(user.id);
+    } catch (error) {
+        if (error instanceof AccountPrincipalAdmissionError) {
+            return failed(403, error.code, '이 계정은 현재 사용할 수 없습니다.');
+        }
+        return failed(503, 'EARLYBIRD_UNAVAILABLE', '사전 구매 접수를 잠시 후 다시 시도해주세요.');
+    }
 
     let body: unknown;
     try {
@@ -351,6 +365,18 @@ async function handlePUT(request: Request): Promise<NextResponse> {
     const { data: { user }, error: authError } = await supabase.auth.getUser();
     if (authError || !user) {
         return errorResponse(401, 'UNAUTHORIZED', '로그인이 필요합니다.');
+    }
+    try {
+        await requireActiveAccountClassification(user.id);
+    } catch (error) {
+        if (error instanceof AccountPrincipalAdmissionError) {
+            return errorResponse(403, error.code, '이 계정은 현재 사용할 수 없습니다.');
+        }
+        return errorResponse(
+            503,
+            'EARLYBIRD_UNAVAILABLE',
+            '결제창을 다시 불러오지 못했습니다.',
+        );
     }
 
     let body: unknown;

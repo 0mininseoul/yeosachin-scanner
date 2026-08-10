@@ -6,6 +6,8 @@ const mocks = vi.hoisted(() => ({
     createRlsClient: vi.fn(),
     exchangeCodeForSession: vi.fn(),
     getUser: vi.fn(),
+    signOut: vi.fn(),
+    accountRpc: vi.fn(),
     claimAnonymousPreflight: vi.fn(),
     emit: vi.fn(),
     observeRoute: vi.fn((
@@ -23,6 +25,9 @@ const mocks = vi.hoisted(() => ({
 vi.mock('next/headers', () => ({ cookies: mocks.cookies }));
 vi.mock('@supabase/ssr', () => ({ createServerClient: mocks.createServerClient }));
 vi.mock('@supabase/supabase-js', () => ({ createClient: mocks.createRlsClient }));
+vi.mock('@/lib/supabase/admin', () => ({
+    supabaseAdmin: { rpc: mocks.accountRpc },
+}));
 vi.mock('@/lib/observability/request', () => ({ observeRoute: mocks.observeRoute }));
 vi.mock('@/lib/observability/server', () => ({
     operationalLogger: { emit: mocks.emit },
@@ -43,6 +48,8 @@ describe('OAuth callback redirects', () => {
         });
         mocks.exchangeCodeForSession.mockResolvedValue({ error: null });
         mocks.getUser.mockResolvedValue({ data: { user: { id: 'user-1' } }, error: null });
+        mocks.signOut.mockResolvedValue({ error: null });
+        mocks.accountRpc.mockResolvedValue({ data: [], error: null });
         mocks.claimAnonymousPreflight.mockResolvedValue({
             claimed: true,
             ownerPreflightId: null,
@@ -51,6 +58,7 @@ describe('OAuth callback redirects', () => {
             auth: {
                 exchangeCodeForSession: mocks.exchangeCodeForSession,
                 getUser: mocks.getUser,
+                signOut: mocks.signOut,
             },
             rpc: vi.fn(),
         });

@@ -15,6 +15,7 @@ const mocks = vi.hoisted(() => ({
     loadFixture: vi.fn(),
     isResultOperator: vi.fn(),
     resolveResultOwner: vi.fn(),
+    requireActiveAccountClassification: vi.fn(),
 }));
 
 vi.mock('@/lib/supabase/server', () => ({ createClient: mocks.createClient }));
@@ -37,8 +38,13 @@ vi.mock('@/lib/services/analysis/result-operator-access', () => ({
     isAnalysisResultOperator: mocks.isResultOperator,
     resolveAnalysisResultOwner: mocks.resolveResultOwner,
 }));
+vi.mock('@/lib/services/identity/account-principal-store', async importOriginal => ({
+    ...(await importOriginal<typeof import('@/lib/services/identity/account-principal-store')>()),
+    requireActiveAccountClassification: mocks.requireActiveAccountClassification,
+}));
 
 import { GET } from '@/app/api/analysis/v2/result/[requestId]/route';
+import { AccountPrincipalAdmissionError } from '@/lib/services/identity/account-principal-store';
 
 const requestId = '123e4567-e89b-42d3-a456-426614174000';
 const userId = '223e4567-e89b-42d3-a456-426614174000';
@@ -122,6 +128,13 @@ describe('analysis V2 owner result route', () => {
         mocks.demoFindForOwner.mockResolvedValue(null);
         mocks.isResultOperator.mockReturnValue(false);
         mocks.resolveResultOwner.mockResolvedValue(null);
+        mocks.requireActiveAccountClassification.mockResolvedValue({
+            userId,
+            accountClass: 'production',
+            trafficClass: 'external',
+            lifecycle: 'active',
+            classificationVersion: 'account-ledger-v1',
+        });
         mocks.observeRoute.mockImplementation(async (
             _request: Request,
             _route: string,
@@ -176,6 +189,25 @@ describe('analysis V2 owner result route', () => {
         );
         expect(response.status).toBe(401);
         expect(response.headers.get('x-analytics-eligible')).toBeNull();
+        expect(mocks.demoFindForOwner).not.toHaveBeenCalled();
+        expect(mocks.loadPage).not.toHaveBeenCalled();
+    });
+
+    it('fails closed before demo or result access when the owner account is retired', async () => {
+        mocks.requireActiveAccountClassification.mockRejectedValue(
+            new AccountPrincipalAdmissionError(),
+        );
+
+        const response = await GET(
+            new Request(`https://example.com/api/analysis/v2/result/${requestId}`),
+            context(),
+        );
+
+        expect(response.status).toBe(403);
+        await expect(response.json()).resolves.toEqual({
+            error: 'Account unavailable.',
+        });
+        expect(mocks.requireActiveAccountClassification).toHaveBeenCalledWith(userId);
         expect(mocks.demoFindForOwner).not.toHaveBeenCalled();
         expect(mocks.loadPage).not.toHaveBeenCalled();
     });

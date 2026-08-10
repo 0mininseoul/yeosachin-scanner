@@ -1,5 +1,6 @@
 import { z } from 'zod';
 import { supabaseAdmin } from '@/lib/supabase/admin';
+import { loadAccountCheckoutPhone } from '@/lib/services/identity/account-principal-store';
 
 const checkoutResultSchema = z.array(z.object({
     order_id: z.string().uuid(),
@@ -39,15 +40,6 @@ const checkoutRecoveryRowSchema = z.object({
     payment_id: z.string().nullable(),
     actual_amount_krw: z.number().int().nonnegative().nullable(),
     paid_at: z.string().datetime({ offset: true }).nullable(),
-});
-
-const currentCheckoutPhoneRowSchema = z.object({
-    id: z.string().uuid(),
-    provider: z.string().min(1).max(50),
-    phone_number: z.string().min(1).max(50).nullable(),
-    phone_number_normalized: z.string().min(1).max(32).nullable(),
-    phone_number_verification_source: z.string().min(1).max(64).nullable(),
-    phone_number_verified_at: z.string().datetime({ offset: true }).nullable(),
 });
 
 const waitlistResultSchema = z.array(z.object({
@@ -240,30 +232,11 @@ export const earlybirdStore = {
     },
 
     async findCurrentCheckoutPhone(userId: string) {
-        const { data, error } = await supabaseAdmin
-            .from('users')
-            .select(
-                'id, provider, phone_number, phone_number_normalized, '
-                + 'phone_number_verification_source, phone_number_verified_at'
-            )
-            .eq('id', userId)
-            .maybeSingle();
-        if (error) {
+        try {
+            return await loadAccountCheckoutPhone(userId);
+        } catch {
             throw new EarlybirdPersistenceError('EARLYBIRD_PERSISTENCE_FAILED');
         }
-        if (!data) return null;
-        const parsed = currentCheckoutPhoneRowSchema.safeParse(data);
-        if (!parsed.success || parsed.data.id !== userId) {
-            throw new EarlybirdPersistenceError('EARLYBIRD_PERSISTENCE_FAILED');
-        }
-        return Object.freeze({
-            userId: parsed.data.id,
-            provider: parsed.data.provider,
-            phoneNumber: parsed.data.phone_number,
-            phoneNumberNormalized: parsed.data.phone_number_normalized,
-            verificationSource: parsed.data.phone_number_verification_source,
-            verifiedAt: parsed.data.phone_number_verified_at,
-        });
     },
 
     async joinWaitlist(userId: string, preflightId: string) {

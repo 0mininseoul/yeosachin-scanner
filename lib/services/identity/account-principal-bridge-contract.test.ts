@@ -1,0 +1,105 @@
+import { readFileSync, readdirSync } from 'node:fs';
+import { resolve } from 'node:path';
+import { describe, expect, it } from 'vitest';
+
+const migrationDirectory = resolve(process.cwd(), 'supabase/migrations');
+const migrationName = readdirSync(migrationDirectory)
+    .find(name => name.endsWith('_add_account_principal_bridge.sql'));
+const migration = migrationName
+    ? readFileSync(resolve(migrationDirectory, migrationName), 'utf8')
+    : '';
+
+function source(relativePath: string): string {
+    return readFileSync(resolve(process.cwd(), relativePath), 'utf8');
+}
+
+describe('account principal additive migration contract', () => {
+    it('adds bounded classification and paid-ever state without performing the rename cutover', () => {
+        expect(migrationName).toBeDefined();
+        expect(migration).toMatch(/ALTER TABLE public\.users[\s\S]*ADD COLUMN account_class TEXT NOT NULL DEFAULT 'production'/);
+        expect(migration).toMatch(/ADD COLUMN traffic_class TEXT NOT NULL DEFAULT 'external'/);
+        expect(migration).toMatch(/ADD COLUMN lifecycle TEXT NOT NULL DEFAULT 'active'/);
+        expect(migration).toMatch(/ADD COLUMN first_paid_at TIMESTAMP WITH TIME ZONE/);
+        expect(migration).toMatch(/account_class IN \('production', 'e2e_test'\)/);
+        expect(migration).toMatch(
+            /traffic_class IN\s*\(\s*'external',\s*'operator',\s*'e2e_test',\s*'internal_tester'\s*\)/,
+        );
+        expect(migration).toMatch(/lifecycle IN \('active', 'retired'\)/);
+        expect(migration).not.toMatch(/ALTER TABLE public\.users RENAME TO account_principals/i);
+        expect(migration).not.toMatch(/CREATE (?:OR REPLACE )?VIEW public\.users/i);
+    });
+
+    it('creates a service-only, immutable paid evidence boundary and derived active-purchase state', () => {
+        expect(migration).toMatch(/CREATE TABLE public\.account_paid_evidence/);
+        expect(migration).toMatch(/order_id UUID PRIMARY KEY[\s\S]*REFERENCES public\.earlybird_orders/);
+        expect(migration).toMatch(/event_id (?:TEXT|VARCHAR\(256\)) NOT NULL UNIQUE[\s\S]*REFERENCES public\.earlybird_webhook_events/);
+        expect(migration).toMatch(/CREATE (?:OR REPLACE )?FUNCTION public\.record_external_paid_ever/);
+        expect(migration).toMatch(/event_type = 'payment\.completed'/);
+        expect(migration).toMatch(/disposition = 'accepted'/);
+        expect(migration).toMatch(/actual_amount_krw > 0/);
+        expect(migration).toMatch(/traffic_class = 'external'/);
+        expect(migration).toMatch(/is_paid_user = TRUE/);
+        expect(migration).toMatch(/first_paid_at = CASE/);
+        expect(migration).toMatch(/CREATE (?:OR REPLACE )?FUNCTION public\.load_account_principal_v1/);
+        expect(migration).toMatch(/has_active_purchase BOOLEAN/);
+        expect(migration).toMatch(/'paid', 'analysis_in_progress', 'completed'/);
+    });
+
+    it('keeps every bridge function security-definer and service-role only', () => {
+        const functionNames = [
+            'load_account_principal_v1',
+            'ensure_account_principal_v1',
+            'upsert_kakao_account_profile_v1',
+            'load_account_checkout_phone_v1',
+            'load_account_classification_v1',
+            'record_external_paid_ever',
+            'classify_account_principals_v1',
+        ];
+
+        for (const functionName of functionNames) {
+            expect(migration).toMatch(new RegExp(
+                `FUNCTION public\\.${functionName}\\([\\s\\S]*?SECURITY DEFINER[\\s\\S]*?SET search_path = ''`,
+            ));
+            expect(migration).toMatch(new RegExp(
+                `REVOKE ALL ON FUNCTION public\\.${functionName}\\([\\s\\S]*?FROM PUBLIC, anon, authenticated`,
+            ));
+            expect(migration).toMatch(new RegExp(
+                `GRANT EXECUTE ON FUNCTION public\\.${functionName}\\([\\s\\S]*?TO service_role`,
+            ));
+        }
+    });
+
+    it('reaches paid-ever recording from every payment completion entry point', () => {
+        const calls = migration.match(/record_external_paid_ever\(/g) ?? [];
+        expect(calls.length).toBeGreaterThanOrEqual(4);
+        expect(migration).toMatch(/CREATE OR REPLACE FUNCTION public\.finalize_earlybird_groble_payment_by_reference/);
+        expect(migration.match(/CREATE OR REPLACE FUNCTION public\.finalize_earlybird_groble_payment\(/g)).toHaveLength(2);
+    });
+});
+
+describe('account principal application bridge contract', () => {
+    it('removes direct users relation access from the five application call sites', () => {
+        const currentUserSource = source('app/api/user/me/route.ts');
+        const callbackSource = source('app/auth/callback/route.ts');
+        const checkoutSource = source('lib/services/earlybird/store.ts');
+        const principalStoreSource = source(
+            'lib/services/identity/account-principal-store.ts',
+        );
+        const applicationSources = [
+            currentUserSource,
+            callbackSource,
+            checkoutSource,
+            principalStoreSource,
+        ].join('\n');
+
+        expect(applicationSources).not.toMatch(/\.from\(['"]users['"]\)/);
+        expect(currentUserSource).toContain('loadAccountPrincipal');
+        expect(currentUserSource).toContain('ensureAccountPrincipal');
+        expect(callbackSource).toContain('upsertKakaoAccountProfile');
+        expect(checkoutSource).toContain('loadAccountCheckoutPhone');
+        expect(principalStoreSource).toContain("'load_account_principal_v1'");
+        expect(principalStoreSource).toContain("'ensure_account_principal_v1'");
+        expect(principalStoreSource).toContain("'upsert_kakao_account_profile_v1'");
+        expect(principalStoreSource).toContain("'load_account_checkout_phone_v1'");
+    });
+});

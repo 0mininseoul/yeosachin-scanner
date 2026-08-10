@@ -14,6 +14,8 @@ const mocks = vi.hoisted(() => ({
     },
     emit: vi.fn(),
     suppressOperationalObservation: vi.fn((response: Response) => response),
+    loadAccountCheckoutPhone: vi.fn(),
+    requireActiveAccountClassification: vi.fn(),
     observeRoute: vi.fn((
         request: Request,
         route: string,
@@ -48,9 +50,15 @@ vi.mock('@/lib/services/analysis/preflight', () => ({
     preflightStore: { findForOwner: mocks.findForOwner },
 }));
 vi.mock('@/lib/services/demo-analysis/store', () => ({ demoAnalysisStore: mocks.demoStore }));
+vi.mock('@/lib/services/identity/account-principal-store', async importOriginal => ({
+    ...(await importOriginal<typeof import('@/lib/services/identity/account-principal-store')>()),
+    loadAccountCheckoutPhone: mocks.loadAccountCheckoutPhone,
+    requireActiveAccountClassification: mocks.requireActiveAccountClassification,
+}));
 
 import * as checkoutRoute from '@/app/api/earlybird/checkout/route';
 import { POST as waitlist } from '@/app/api/earlybird/waitlist/route';
+import { AccountPrincipalAdmissionError } from '@/lib/services/identity/account-principal-store';
 
 const checkout = checkoutRoute.POST;
 const USER_ID = '123e4567-e89b-42d3-a456-426614174000';
@@ -115,12 +123,12 @@ function recoveryOrderRow(overrides: Record<string, unknown> = {}) {
 
 function currentPhoneRow(overrides: Record<string, unknown> = {}) {
     return {
-        id: USER_ID,
+        userId: USER_ID,
         provider: 'kakao',
-        phone_number: '010-1234-5678',
-        phone_number_normalized: '+821012345678',
-        phone_number_verification_source: 'kakao_rest_api',
-        phone_number_verified_at: new Date().toISOString(),
+        phoneNumber: '010-1234-5678',
+        phoneNumberNormalized: '+821012345678',
+        verificationSource: 'kakao_rest_api',
+        verifiedAt: new Date().toISOString(),
         ...overrides,
     };
 }
@@ -141,18 +149,15 @@ function installRecoveryOrder(
     currentPhone: unknown = currentPhoneRow()
 ): {
     ownerFilter: ReturnType<typeof vi.fn>;
-    userFilter: ReturnType<typeof vi.fn>;
 } {
     const orderQuery = recoveryQuery(order);
-    const userQuery = recoveryQuery(currentPhone);
     mocks.from.mockImplementation((table: string) => {
         if (table === 'earlybird_orders') return orderQuery;
-        if (table === 'users') return userQuery;
         throw new Error(`unexpected table: ${table}`);
     });
+    mocks.loadAccountCheckoutPhone.mockResolvedValue(currentPhone);
     return {
         ownerFilter: orderQuery.eq,
-        userFilter: userQuery.eq,
     };
 }
 
@@ -187,6 +192,16 @@ describe('earlybird checkout and waitlist routes', () => {
         vi.clearAllMocks();
         mocks.after.mockReset();
         mocks.from.mockReset();
+        mocks.loadAccountCheckoutPhone.mockReset();
+        mocks.loadAccountCheckoutPhone.mockResolvedValue(currentPhoneRow());
+        mocks.requireActiveAccountClassification.mockReset();
+        mocks.requireActiveAccountClassification.mockResolvedValue({
+            userId: USER_ID,
+            accountClass: 'production',
+            trafficClass: 'external',
+            lifecycle: 'active',
+            classificationVersion: 'account-ledger-v1',
+        });
         mocks.from.mockReturnValue({
             select: vi.fn(() => ({
                 in: vi.fn(() => ({
@@ -265,6 +280,38 @@ describe('earlybird checkout and waitlist routes', () => {
         expect(JSON.stringify(mocks.emit.mock.calls)).not.toMatch(
             /private@example|private-signature/
         );
+        expect(mocks.rpc).not.toHaveBeenCalled();
+    });
+
+    it('fails closed before checkout when the authenticated account is retired', async () => {
+        mocks.requireActiveAccountClassification.mockRejectedValue(
+            new AccountPrincipalAdmissionError(),
+        );
+
+        const response = await checkout(request('/api/earlybird/checkout', {
+            preflightId: PREFLIGHT_ID,
+            planId: 'basic',
+            disclosureAccepted: true,
+        }));
+
+        expect(response.status).toBe(403);
+        await expect(response.json()).resolves.toEqual({
+            code: 'ACCOUNT_ADMISSION_DENIED',
+            error: '이 계정은 현재 사용할 수 없습니다.',
+        });
+        expect(mocks.requireActiveAccountClassification).toHaveBeenCalledWith(USER_ID);
+        expect(mocks.rpc).not.toHaveBeenCalled();
+
+        const waitlistResponse = await waitlist(request('/api/earlybird/waitlist', {
+            preflightId: PREFLIGHT_ID,
+            planId: 'plus',
+        }));
+        expect(waitlistResponse.status).toBe(403);
+        await expect(waitlistResponse.json()).resolves.toEqual({
+            code: 'ACCOUNT_ADMISSION_DENIED',
+            error: '이 계정은 현재 사용할 수 없습니다.',
+        });
+        expect(mocks.requireActiveAccountClassification).toHaveBeenCalledTimes(2);
         expect(mocks.rpc).not.toHaveBeenCalled();
     });
 
@@ -367,7 +414,7 @@ describe('earlybird checkout and waitlist routes', () => {
     });
 
     it('recovers the same owner-scoped pending checkout after preflight expiry without trusting client commerce fields', async () => {
-        const { ownerFilter, userFilter } = installRecoveryOrder(recoveryOrderRow());
+        const { ownerFilter } = installRecoveryOrder(recoveryOrderRow());
         const response = await recoverCheckout({
             preflightId: PREFLIGHT_ID,
             planId: 'basic',
@@ -382,8 +429,7 @@ describe('earlybird checkout and waitlist routes', () => {
         expect(mocks.from).toHaveBeenCalledWith('earlybird_orders');
         expect(ownerFilter).toHaveBeenCalledWith('preflight_id', PREFLIGHT_ID);
         expect(ownerFilter).toHaveBeenCalledWith('user_id', USER_ID);
-        expect(mocks.from).toHaveBeenCalledWith('users');
-        expect(userFilter).toHaveBeenCalledWith('id', USER_ID);
+        expect(mocks.loadAccountCheckoutPhone).toHaveBeenCalledWith(USER_ID);
         expect(mocks.findForOwner).toHaveBeenCalledWith(PREFLIGHT_ID, USER_ID);
         expect(mocks.rpc).not.toHaveBeenCalled();
 
@@ -435,16 +481,15 @@ describe('earlybird checkout and waitlist routes', () => {
             }),
         };
         lineageOrderQuery.select.mockReturnValue(lineageOrderQuery);
-        const userQuery = recoveryQuery(currentPhoneRow());
         let orderQueryCalls = 0;
         mocks.from.mockImplementation((table: string) => {
             if (table === 'earlybird_orders') {
                 orderQueryCalls += 1;
                 return orderQueryCalls === 1 ? exactOrderQuery : lineageOrderQuery;
             }
-            if (table === 'users') return userQuery;
             throw new Error(`unexpected table: ${table}`);
         });
+        mocks.loadAccountCheckoutPhone.mockResolvedValue(currentPhoneRow());
 
         const response = await recoverCheckout({
             preflightId: PREFLIGHT_ID,
@@ -529,7 +574,7 @@ describe('earlybird checkout and waitlist routes', () => {
         const staleVerification = new Date(Date.now() - 25 * 60 * 60 * 1_000).toISOString();
         for (const [currentPhone, expected] of [
             [
-                currentPhoneRow({ phone_number_verified_at: staleVerification }),
+                currentPhoneRow({ verifiedAt: staleVerification }),
                 {
                     code: 'CHECKOUT_PHONE_REQUIRED',
                     error: '카카오 계정의 전화번호 동의 정보를 확인한 뒤 다시 로그인해주세요.',
@@ -537,10 +582,10 @@ describe('earlybird checkout and waitlist routes', () => {
             ],
             [
                 currentPhoneRow({
-                    phone_number: null,
-                    phone_number_normalized: null,
-                    phone_number_verification_source: null,
-                    phone_number_verified_at: null,
+                    phoneNumber: null,
+                    phoneNumberNormalized: null,
+                    verificationSource: null,
+                    verifiedAt: null,
                 }),
                 {
                     code: 'CHECKOUT_PHONE_REQUIRED',
@@ -549,8 +594,8 @@ describe('earlybird checkout and waitlist routes', () => {
             ],
             [
                 currentPhoneRow({
-                    phone_number: '010-9999-8888',
-                    phone_number_normalized: '+821099998888',
+                    phoneNumber: '010-9999-8888',
+                    phoneNumberNormalized: '+821099998888',
                 }),
                 {
                     code: 'EARLYBIRD_CHECKOUT_NOT_RECOVERABLE',

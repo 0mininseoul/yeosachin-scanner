@@ -2,12 +2,17 @@ import { createServerClient } from '@supabase/ssr';
 import { createClient as createAccessTokenClient } from '@supabase/supabase-js';
 import { cookies } from 'next/headers';
 import { after, NextResponse } from 'next/server';
-import { supabaseAdmin } from '@/lib/supabase/admin';
 import {
     appOriginForRequest,
     appRedirectUrlForRequest,
 } from '@/lib/constants/app-url';
 import { buildAuthProfilePatch } from '@/lib/services/identity/auth-profile';
+import {
+    AccountPrincipalPersistenceError,
+    loadAccountClassification,
+    upsertKakaoAccountProfile,
+    type KakaoAccountProfile,
+} from '@/lib/services/identity/account-principal-store';
 import {
     deliverKakaoSignupDiscordNotifications,
     stageKakaoSignupDiscordProfile,
@@ -76,7 +81,7 @@ async function syncKakaoProfile(
     providerToken: string,
     signedUpAt: Date,
     attribution: { label: string | null; origin: string | null },
-): Promise<'PROVIDER_ERROR' | 'INTERNAL_ERROR' | null> {
+): Promise<'PROVIDER_ERROR' | 'INTERNAL_ERROR' | 'ACCOUNT_RETIRED' | null> {
     const res = await fetch('https://kapi.kakao.com/v2/user/me', {
         headers: { Authorization: `Bearer ${providerToken}` },
         cache: 'no-store',
@@ -100,7 +105,10 @@ async function syncKakaoProfile(
             value: account.phone_number,
         },
     });
-    const phoneProvenancePatch = profilePatch.phone_number_normalized
+    const phoneProvenancePatch: Pick<
+        KakaoAccountProfile,
+        'phone_number_verification_source' | 'phone_number_verified_at'
+    > = profilePatch.phone_number_normalized
         ? {
             phone_number_verification_source: 'kakao_rest_api',
             phone_number_verified_at: new Date().toISOString(),
@@ -110,17 +118,24 @@ async function syncKakaoProfile(
             phone_number_verified_at: null,
         };
 
-    const { error } = await supabaseAdmin
-        .from('users')
-        .upsert({
-            id: userId,
-            ...(email ? { email } : {}),
-            provider: 'kakao',
-            ...profilePatch,
-            ...phoneProvenancePatch,
-        }, { onConflict: 'id' });
-    if (error) {
-        console.error('users upsert (kakao profile) failed:', error.code);
+    try {
+        await upsertKakaoAccountProfile({
+            userId,
+            email: email ?? null,
+            profile: {
+                ...profilePatch,
+                ...phoneProvenancePatch,
+            },
+        });
+    } catch (error) {
+        const databaseCode = error instanceof AccountPrincipalPersistenceError
+            ? error.databaseCode
+            : 'unknown';
+        console.error('users upsert (kakao profile) failed:', databaseCode);
+        if (error instanceof AccountPrincipalPersistenceError
+            && error.code === 'ACCOUNT_RETIRED') {
+            return 'ACCOUNT_RETIRED';
+        }
         await stageUnavailableKakaoSignupProfile(userId, signedUpAt, attribution);
         return 'INTERNAL_ERROR';
     }
@@ -142,6 +157,16 @@ function redirectAndClearOAuthIntent(url: URL): NextResponse {
     const response = NextResponse.redirect(url);
     response.cookies.delete(AUTH_REDIRECT_INTENT_COOKIE);
     return response;
+}
+
+async function redirectUnavailableAccount(
+    signOut: () => Promise<unknown>,
+    appOrigin: string,
+): Promise<NextResponse> {
+    await signOut().catch(() => undefined);
+    const loginUrl = new URL('/login', appOrigin);
+    loginUrl.searchParams.set('error', 'account_unavailable');
+    return redirectAndClearOAuthIntent(loginUrl);
 }
 
 type AnonymousClaimRestoreErrorCode = 'UNAUTHORIZED' | 'PREFLIGHT_PERSISTENCE_ERROR';
@@ -368,9 +393,27 @@ async function handleGET(
         )
         : supabase;
 
-    // 카카오: REST API로 성별·출생연도·전화번호 등 보강 저장
     const session = exchange?.session;
     const authedUser = exchange?.user;
+    if (authedUser) {
+        try {
+            const classification = await loadAccountClassification(authedUser.id);
+            if (classification?.lifecycle === 'retired') {
+                return redirectUnavailableAccount(
+                    () => supabase.auth.signOut({ scope: 'local' }),
+                    appOrigin,
+                );
+            }
+        } catch {
+            // A lifecycle check must not fail open after a session exchange.
+            return redirectUnavailableAccount(
+                () => supabase.auth.signOut({ scope: 'local' }),
+                appOrigin,
+            );
+        }
+    }
+
+    // 카카오: REST API로 성별·출생연도·전화번호 등 보강 저장
     const provider = authProvider(authedUser?.app_metadata?.provider);
     if (authedUser && provider === 'kakao') {
         const signedUpAt = new Date(authedUser.created_at ?? Date.now());
@@ -380,7 +423,11 @@ async function handleGET(
         const attribution = readKakaoSignupAttribution(
             typeof getAttributionCookie === 'function' ? getAttributionCookie(KAKAO_ATTRIBUTION_COOKIE)?.value : undefined,
         );
-        let errorCode: 'PROVIDER_ERROR' | 'INTERNAL_ERROR' | null;
+        let errorCode:
+            | 'PROVIDER_ERROR'
+            | 'INTERNAL_ERROR'
+            | 'ACCOUNT_RETIRED'
+            | null;
         if (!session?.provider_token) {
             await stageUnavailableKakaoSignupProfile(authedUser.id, signedUpAt, attribution);
             errorCode = 'PROVIDER_ERROR';
@@ -400,6 +447,12 @@ async function handleGET(
             }
         }
         if (errorCode) {
+            if (errorCode === 'ACCOUNT_RETIRED') {
+                return redirectUnavailableAccount(
+                    () => supabase.auth.signOut({ scope: 'local' }),
+                    appOrigin,
+                );
+            }
             operationalLogger.emit({
                 event: 'auth.profile_sync_failed',
                 severity: 'warn',

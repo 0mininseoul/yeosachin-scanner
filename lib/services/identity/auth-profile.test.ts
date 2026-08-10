@@ -10,6 +10,7 @@ const routeMocks = vi.hoisted(() => ({
     createBrowserClient: vi.fn(),
     exchangeCodeForSession: vi.fn(),
     getCallbackUser: vi.fn(),
+    signOut: vi.fn(),
     getMeUser: vi.fn(),
     fetch: vi.fn(),
     from: vi.fn(),
@@ -19,6 +20,7 @@ const routeMocks = vi.hoisted(() => ({
     single: vi.fn(),
     insert: vi.fn(),
     update: vi.fn(),
+    rpc: vi.fn(),
     emit: vi.fn(),
     after: vi.fn(),
     stageKakaoSignupDiscordProfile: vi.fn(),
@@ -50,7 +52,7 @@ vi.mock('@/lib/supabase/client', () => ({
     createClient: routeMocks.createBrowserClient,
 }));
 vi.mock('@/lib/supabase/admin', () => ({
-    supabaseAdmin: { from: routeMocks.from },
+    supabaseAdmin: { from: routeMocks.from, rpc: routeMocks.rpc },
 }));
 vi.mock('@/lib/services/identity/kakao-signup-discord', () => ({
     stageKakaoSignupDiscordProfile: routeMocks.stageKakaoSignupDiscordProfile,
@@ -72,8 +74,6 @@ import { GET as getCurrentUser } from '@/app/api/user/me/route';
 import { AuthButtons } from '@/components/auth-buttons';
 
 const USER_ID = '123e4567-e89b-42d3-a456-426614174000';
-const USER_RESPONSE_COLUMNS = 'id, email, provider, analysis_count, is_paid_user, is_unlimited, created_at, updated_at';
-const USER_INTERNAL_COLUMNS = `${USER_RESPONSE_COLUMNS}, name, nickname, profile_image, gender, birthyear`;
 const SAFE_USER_DTO = {
     id: USER_ID,
     email: 'user@example.com',
@@ -94,6 +94,11 @@ function privateUserRow(overrides: Record<string, unknown> = {}) {
         profile_image: 'https://example.com/private.jpg',
         gender: 'female',
         birthyear: '1994',
+        account_class: 'production',
+        traffic_class: 'external',
+        lifecycle: 'active',
+        first_paid_at: null,
+        has_active_purchase: false,
         phone_number: PRIVATE_PHONE,
         phone_number_normalized: '+821099998888',
         ...overrides,
@@ -123,6 +128,7 @@ function installCallbackSession(
         auth: {
             exchangeCodeForSession: routeMocks.exchangeCodeForSession,
             getUser: routeMocks.getCallbackUser,
+            signOut: routeMocks.signOut,
         },
     });
 }
@@ -169,11 +175,38 @@ describe('OAuth callback profile persistence', () => {
             getAll: vi.fn(() => []),
             set: vi.fn(),
         });
-        routeMocks.from.mockImplementation((table: string) => {
-            if (table !== 'users') throw new Error(`unexpected table: ${table}`);
-            return { upsert: routeMocks.upsert };
-        });
         routeMocks.upsert.mockResolvedValue({ error: null });
+        routeMocks.signOut.mockResolvedValue({ error: null });
+        routeMocks.rpc.mockImplementation(async (
+            functionName: string,
+            params: Record<string, unknown>,
+        ) => {
+            if (functionName === 'load_account_classification_v1') {
+                return { data: [], error: null };
+            }
+            if (functionName !== 'upsert_kakao_account_profile_v1') {
+                throw new Error(`unexpected rpc: ${functionName}`);
+            }
+            const profile = params.p_profile as Record<string, unknown>;
+            const legacyResult = await routeMocks.upsert({
+                id: params.p_user_id,
+                ...(params.p_email ? { email: params.p_email } : {}),
+                provider: 'kakao',
+                ...profile,
+            }, { onConflict: 'id' });
+            if (legacyResult?.error) {
+                return { data: null, error: legacyResult.error };
+            }
+            return {
+                data: [{
+                    id: params.p_user_id,
+                    account_class: 'production',
+                    traffic_class: 'external',
+                    lifecycle: 'active',
+                }],
+                error: null,
+            };
+        });
         routeMocks.after.mockImplementation((callback: () => void | Promise<void>) => {
             void callback();
         });
@@ -387,6 +420,57 @@ describe('OAuth callback profile persistence', () => {
         expect(errorSpy).not.toHaveBeenCalled();
     });
 
+    it('rejects a retired Google principal before completing the app callback', async () => {
+        installCallbackSession('google', 'google-provider-token');
+        const defaultRpc = routeMocks.rpc.getMockImplementation();
+        routeMocks.rpc.mockImplementation(async (
+            functionName: string,
+            params: Record<string, unknown>,
+        ) => {
+            if (functionName === 'load_account_classification_v1') {
+                return {
+                    data: [{
+                        id: USER_ID,
+                        account_class: 'e2e_test',
+                        traffic_class: 'e2e_test',
+                        lifecycle: 'retired',
+                        classification_version: 'account-ledger-v1',
+                    }],
+                    error: null,
+                };
+            }
+            return defaultRpc!(functionName, params);
+        });
+
+        const response = await authCallback(callbackRequest('retired-google-account'));
+
+        expect(response.headers.get('location')).toBe(
+            'http://localhost:3000/login?error=account_unavailable',
+        );
+        expect(routeMocks.signOut).toHaveBeenCalledWith({ scope: 'local' });
+        expect(routeMocks.fetch).not.toHaveBeenCalled();
+        expect(routeMocks.upsert).not.toHaveBeenCalled();
+        expect(routeMocks.stageKakaoSignupDiscordProfile).not.toHaveBeenCalled();
+        expect(routeMocks.deliverKakaoSignupDiscordNotifications).not.toHaveBeenCalled();
+    });
+
+    it('rejects a retired Kakao principal instead of completing the app callback', async () => {
+        installCallbackSession('kakao', 'provider-token');
+        installCallbackProfileFetch();
+        routeMocks.upsert.mockResolvedValue({
+            error: { code: 'P0001', message: 'ACCOUNT_RETIRED' },
+        });
+
+        const response = await authCallback(callbackRequest('retired-account'));
+
+        expect(response.headers.get('location')).toBe(
+            'http://localhost:3000/login?error=account_unavailable',
+        );
+        expect(routeMocks.signOut).toHaveBeenCalledWith({ scope: 'local' });
+        expect(routeMocks.stageKakaoSignupDiscordProfile).not.toHaveBeenCalled();
+        expect(routeMocks.deliverKakaoSignupDiscordNotifications).not.toHaveBeenCalled();
+    });
+
     it('logs only a non-PII code when the Kakao profile upsert fails', async () => {
         const providerToken = 'private-provider-token';
         const rawPhone = '+82 10-1234-5678';
@@ -444,24 +528,70 @@ function installAuthenticatedUser(user: Record<string, unknown>) {
 function installUserAdminResults(
     ...results: Array<{ data: unknown; error: unknown }>
 ) {
-    const query = {
-        select: routeMocks.select,
-        eq: routeMocks.eq,
-        single: routeMocks.single,
-        insert: routeMocks.insert,
-        update: routeMocks.update,
-    };
-    routeMocks.select.mockReturnValue(query);
-    routeMocks.eq.mockReturnValue(query);
-    routeMocks.insert.mockReturnValue(query);
-    routeMocks.update.mockReturnValue(query);
-    for (const result of results) {
-        routeMocks.single.mockResolvedValueOnce(result);
-    }
-    routeMocks.from.mockImplementation((table: string) => {
-        if (table !== 'users') throw new Error(`unexpected table: ${table}`);
-        return query;
+    const queue = [...results];
+    let principalWasMissing = false;
+    routeMocks.rpc.mockImplementation(async (
+        functionName: string,
+        params: Record<string, unknown>,
+    ) => {
+        const result = queue.shift();
+        if (!result) throw new Error(`unexpected rpc result: ${functionName}`);
+        if (functionName === 'load_account_principal_v1') {
+            principalWasMissing = result.data === null;
+            if ((result.error as { code?: unknown } | null)?.code === 'PGRST116') {
+                return { data: [], error: null };
+            }
+            return {
+                data: result.data ? [principalRpcRow(result.data)] : [],
+                error: result.error,
+            };
+        }
+        if (functionName === 'ensure_account_principal_v1') {
+            const profile = params.p_profile as Record<string, unknown>;
+            if (principalWasMissing) {
+                routeMocks.insert({
+                    id: params.p_user_id,
+                    email: params.p_email,
+                    provider: params.p_provider,
+                    analysis_count: 0,
+                    is_paid_user: false,
+                    is_unlimited: false,
+                    ...profile,
+                });
+            } else {
+                routeMocks.update(profile);
+            }
+            return {
+                data: result.data ? [principalRpcRow(result.data)] : [],
+                error: result.error,
+            };
+        }
+        throw new Error(`unexpected rpc: ${functionName}`);
     });
+}
+
+function principalRpcRow(value: unknown) {
+    const row = value as Record<string, unknown>;
+    return {
+        id: row.id,
+        email: row.email,
+        provider: row.provider,
+        analysis_count: row.analysis_count,
+        is_paid_user: row.is_paid_user,
+        is_unlimited: row.is_unlimited,
+        created_at: row.created_at,
+        updated_at: row.updated_at,
+        name: row.name ?? null,
+        nickname: row.nickname ?? null,
+        profile_image: row.profile_image ?? null,
+        gender: row.gender ?? null,
+        birthyear: row.birthyear ?? null,
+        account_class: row.account_class ?? 'production',
+        traffic_class: row.traffic_class ?? 'external',
+        lifecycle: row.lifecycle ?? 'active',
+        first_paid_at: row.first_paid_at ?? null,
+        has_active_purchase: row.has_active_purchase ?? false,
+    };
 }
 
 function privateDatabaseError(code: string) {
@@ -536,27 +666,27 @@ describe('/api/user/me profile persistence', () => {
         const response = await getCurrentUser();
 
         await expectSafeUserResponse(response, createdDto);
-        expect(routeMocks.insert).toHaveBeenCalledWith({
-            id: USER_ID,
-            email: 'user@example.com',
-            provider: 'kakao',
-            analysis_count: 0,
-            is_paid_user: false,
-            is_unlimited: false,
-            name: 'Full Name',
-            nickname: 'Preferred Nick',
-            profile_image: 'https://example.com/social.jpg',
-            gender: 'female',
-            birthyear: '1994',
-        });
-        const inserted = routeMocks.insert.mock.calls[0]?.[0];
-        expect(inserted).not.toHaveProperty('phone_number');
-        expect(inserted).not.toHaveProperty('phone_number_normalized');
-        expect(inserted).not.toHaveProperty('phone_number_verification_source');
-        expect(inserted).not.toHaveProperty('phone_number_verified_at');
-        expect(routeMocks.select).toHaveBeenNthCalledWith(1, USER_INTERNAL_COLUMNS);
-        expect(routeMocks.select).toHaveBeenNthCalledWith(2, USER_RESPONSE_COLUMNS);
-        expect(routeMocks.update).not.toHaveBeenCalled();
+        expect(routeMocks.rpc).toHaveBeenNthCalledWith(
+            1,
+            'load_account_principal_v1',
+            { p_user_id: USER_ID },
+        );
+        expect(routeMocks.rpc).toHaveBeenNthCalledWith(
+            2,
+            'ensure_account_principal_v1',
+            {
+                p_user_id: USER_ID,
+                p_email: 'user@example.com',
+                p_provider: 'kakao',
+                p_profile: {
+                    name: 'Full Name',
+                    nickname: 'Preferred Nick',
+                    profile_image: 'https://example.com/social.jpg',
+                    gender: 'female',
+                    birthyear: '1994',
+                },
+            },
+        );
     });
 
     it('ignores forged Kakao metadata phones when verified user.phone is absent', async () => {
@@ -584,15 +714,16 @@ describe('/api/user/me profile persistence', () => {
         const response = await getCurrentUser();
 
         await expectSafeUserResponse(response, createdDto);
-        const inserted = routeMocks.insert.mock.calls[0]?.[0];
-        expect(inserted).toEqual(expect.objectContaining({
-            provider: 'kakao',
-            nickname: 'Kakao Nick',
-        }));
-        expect(inserted).not.toHaveProperty('phone_number');
-        expect(inserted).not.toHaveProperty('phone_number_normalized');
-        expect(inserted).not.toHaveProperty('phone_number_verification_source');
-        expect(inserted).not.toHaveProperty('phone_number_verified_at');
+        expect(routeMocks.rpc).toHaveBeenNthCalledWith(
+            2,
+            'ensure_account_principal_v1',
+            {
+                p_user_id: USER_ID,
+                p_email: 'user@example.com',
+                p_provider: 'kakao',
+                p_profile: { nickname: 'Kakao Nick' },
+            },
+        );
     });
 
     it('ignores forged Google metadata phones and preserves a partial stored pair', async () => {
@@ -622,14 +753,16 @@ describe('/api/user/me profile persistence', () => {
         const response = await getCurrentUser();
 
         await expectSafeUserResponse(response, googleDto);
-        expect(routeMocks.update).toHaveBeenCalledWith({
-            nickname: 'Google Nick',
-        });
-        const updated = routeMocks.update.mock.calls[0]?.[0];
-        expect(updated).not.toHaveProperty('phone_number');
-        expect(updated).not.toHaveProperty('phone_number_normalized');
-        expect(updated).not.toHaveProperty('phone_number_verification_source');
-        expect(updated).not.toHaveProperty('phone_number_verified_at');
+        expect(routeMocks.rpc).toHaveBeenNthCalledWith(
+            2,
+            'ensure_account_principal_v1',
+            {
+                p_user_id: USER_ID,
+                p_email: 'user@example.com',
+                p_provider: 'google',
+                p_profile: { nickname: 'Google Nick' },
+            },
+        );
     });
 
     it('never synchronizes user.phone while backfilling non-phone profile fields', async () => {
@@ -658,17 +791,19 @@ describe('/api/user/me profile persistence', () => {
         const response = await getCurrentUser();
 
         await expectSafeUserResponse(response, SAFE_USER_DTO);
-        expect(routeMocks.update).toHaveBeenCalledWith({
-            gender: 'male',
-            birthyear: '1996',
-        });
-        const updated = routeMocks.update.mock.calls[0]?.[0];
-        expect(updated).not.toHaveProperty('phone_number');
-        expect(updated).not.toHaveProperty('phone_number_normalized');
-        expect(updated).not.toHaveProperty('phone_number_verification_source');
-        expect(updated).not.toHaveProperty('phone_number_verified_at');
-        expect(routeMocks.select).toHaveBeenNthCalledWith(2, USER_RESPONSE_COLUMNS);
-        expect(routeMocks.insert).not.toHaveBeenCalled();
+        expect(routeMocks.rpc).toHaveBeenNthCalledWith(
+            2,
+            'ensure_account_principal_v1',
+            {
+                p_user_id: USER_ID,
+                p_email: 'user@example.com',
+                p_provider: 'kakao',
+                p_profile: {
+                    gender: 'male',
+                    birthyear: '1996',
+                },
+            },
+        );
     });
 
     it('does not clear or update stored phone provenance for invalid user.phone', async () => {
@@ -685,8 +820,7 @@ describe('/api/user/me profile persistence', () => {
         const response = await getCurrentUser();
 
         await expectSafeUserResponse(response, SAFE_USER_DTO);
-        expect(routeMocks.update).not.toHaveBeenCalled();
-        expect(routeMocks.insert).not.toHaveBeenCalled();
+        expect(routeMocks.rpc).toHaveBeenCalledTimes(1);
     });
 
     it('does not synchronize an unconfirmed user.phone value', async () => {
@@ -709,8 +843,7 @@ describe('/api/user/me profile persistence', () => {
         const response = await getCurrentUser();
 
         await expectSafeUserResponse(response, SAFE_USER_DTO);
-        expect(routeMocks.update).not.toHaveBeenCalled();
-        expect(routeMocks.insert).not.toHaveBeenCalled();
+        expect(routeMocks.rpc).toHaveBeenCalledTimes(1);
     });
 
     it('returns only the safe DTO when no profile update is needed', async () => {
@@ -726,9 +859,11 @@ describe('/api/user/me profile persistence', () => {
         const response = await getCurrentUser();
 
         await expectSafeUserResponse(response, SAFE_USER_DTO);
-        expect(routeMocks.select).toHaveBeenCalledWith(USER_INTERNAL_COLUMNS);
-        expect(routeMocks.update).not.toHaveBeenCalled();
-        expect(routeMocks.insert).not.toHaveBeenCalled();
+        expect(routeMocks.rpc).toHaveBeenCalledTimes(1);
+        expect(routeMocks.rpc).toHaveBeenCalledWith(
+            'load_account_principal_v1',
+            { p_user_id: USER_ID },
+        );
     });
 
     it('logs only a bounded code on read failure', async () => {

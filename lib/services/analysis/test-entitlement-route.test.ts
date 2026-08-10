@@ -10,6 +10,7 @@ const mocks = vi.hoisted(() => ({
     operationalEmit: vi.fn(),
     observeRoute: vi.fn(),
     rpc: vi.fn(),
+    requireActiveE2eTestAccount: vi.fn(),
 }));
 
 vi.mock('@/lib/supabase/admin', () => ({
@@ -32,11 +33,16 @@ vi.mock('@/lib/observability/request', () => ({
 vi.mock('@/lib/observability/server', () => ({
     operationalLogger: { emit: mocks.operationalEmit },
 }));
+vi.mock('@/lib/services/identity/account-principal-store', async importOriginal => ({
+    ...(await importOriginal<typeof import('@/lib/services/identity/account-principal-store')>()),
+    requireActiveE2eTestAccount: mocks.requireActiveE2eTestAccount,
+}));
 
 import { POST } from '@/app/api/analysis/preflight/[preflightId]/entitle/route';
 import { ANALYSIS_V2_BOOTSTRAP_JOB_KEY } from './v2-coordinator';
 import { createAnalysisTestEntitlement } from './test-entitlement';
 import { hashAnalysisTestEntitlementJti } from './test-entitlement-consumption';
+import { AccountPrincipalAdmissionError } from '@/lib/services/identity/account-principal-store';
 
 const PREFLIGHT_ID = '123e4567-e89b-42d3-a456-426614174000';
 const USER_ID = '123e4567-e89b-42d3-b456-426614174001';
@@ -222,6 +228,13 @@ describe('analysis V2 durable test-entitlement route', () => {
                 }),
             },
         });
+        mocks.requireActiveE2eTestAccount.mockResolvedValue({
+            userId: USER_ID,
+            accountClass: 'e2e_test',
+            trafficClass: 'e2e_test',
+            lifecycle: 'active',
+            classificationVersion: 'account-ledger-v1',
+        });
         installPreflightQuery();
         mocks.rpc.mockImplementation(async (
             name: string,
@@ -312,6 +325,25 @@ describe('analysis V2 durable test-entitlement route', () => {
                 disposition: 'enqueued',
             }),
         });
+    });
+
+    it('rejects a non-E2E or retired identity before it reads or consumes an entitlement', async () => {
+        mocks.requireActiveE2eTestAccount.mockRejectedValue(
+            new AccountPrincipalAdmissionError(),
+        );
+
+        const response = await POST(request(), context());
+
+        expect(response.status).toBe(403);
+        await expect(response.json()).resolves.toEqual({
+            error: '이 계정은 현재 사용할 수 없습니다.',
+            code: 'ACCOUNT_ADMISSION_DENIED',
+        });
+        expect(mocks.requireActiveE2eTestAccount).toHaveBeenCalledWith(USER_ID);
+        expect(mocks.from).not.toHaveBeenCalled();
+        expect(mocks.rpc).not.toHaveBeenCalled();
+        expect(mocks.dispatchAdmission).not.toHaveBeenCalled();
+        expect(mocks.dispatchJob).not.toHaveBeenCalled();
     });
 
     it('polls a durable pending dispatch without issuing duplicate Cloud Tasks creates', async () => {

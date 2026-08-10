@@ -44,6 +44,10 @@ import {
     type OperationalRequestContext,
 } from '@/lib/observability/request';
 import { operationalLogger } from '@/lib/observability/server';
+import {
+    AccountPrincipalAdmissionError,
+    requireActiveE2eTestAccount,
+} from '@/lib/services/identity/account-principal-store';
 
 const uuidSchema = z.string().uuid().transform(value => value.toLowerCase());
 const requestBodySchema = z.object({
@@ -140,6 +144,26 @@ async function handlePOST(
             return NextResponse.json(
                 { error: '로그인이 필요합니다.', code: 'AUTHENTICATION_REQUIRED' },
                 { status: 401 }
+            );
+        }
+        try {
+            await requireActiveE2eTestAccount(user.id);
+        } catch (accountError) {
+            if (accountError instanceof AccountPrincipalAdmissionError) {
+                return NextResponse.json(
+                    {
+                        error: '이 계정은 현재 사용할 수 없습니다.',
+                        code: accountError.code,
+                    },
+                    { status: 403 },
+                );
+            }
+            return NextResponse.json(
+                {
+                    error: '분석 테스트 이용권을 사용할 수 없습니다.',
+                    code: 'TEST_ENTITLEMENTS_UNAVAILABLE',
+                },
+                { status: 503 },
             );
         }
         let entitlementsEnabled = false;
