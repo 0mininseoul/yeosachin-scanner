@@ -204,11 +204,15 @@ const BLOCKED_PREFLIGHT_COPY: Readonly<Record<string, string>> = {
     TARGET_NOT_FOUND: '해당 인스타그램 계정을 찾을 수 없습니다.',
     TARGET_PRIVATE: '비공개 계정은 판독할 수 없습니다.',
     TARGET_UNSUPPORTED: '현재 판독할 수 없는 계정입니다.',
-    OVER_PLUS_CAPACITY: '현재 제공하는 플랜 범위를 넘어서 판독할 수 없습니다.',
+    OVER_PLUS_CAPACITY: '팔로워 또는 팔로잉 수가 현재 최대 지원 범위인 각각 1,200명을 초과해 판독할 수 없습니다.',
     QUEUE_UNAVAILABLE: '사전 점검 작업이 지연되고 있습니다. 잠시 후 다시 시도해주세요.',
     BETA_CAPACITY_UNAVAILABLE: '현재 무료 판독 가능 인원이 모두 찼습니다. 잠시 후 다시 시도해주세요.',
     ANALYSIS_FAILED: '사전 점검을 완료하지 못했습니다.',
 };
+export function blockedPreflightMessage(code: string): string {
+    return BLOCKED_PREFLIGHT_COPY[code] ?? '사전 점검을 완료하지 못했습니다.';
+}
+
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
 function messageFromPayload(payload: unknown, fallback: string): string {
@@ -479,7 +483,7 @@ export function useAnalysisV2Preflight({
             setTargetInstagramId(parsed.data.target.username);
         }
         if (parsed.data.status === 'blocked') {
-            setError(BLOCKED_PREFLIGHT_COPY[parsed.data.code] ?? '사전 점검을 완료하지 못했습니다.');
+            setError(blockedPreflightMessage(parsed.data.code));
         } else {
             setError(null);
         }
