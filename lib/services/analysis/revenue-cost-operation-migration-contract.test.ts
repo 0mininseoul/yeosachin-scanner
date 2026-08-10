@@ -29,10 +29,33 @@ describe('revenue cost-operation migration contract', () => {
         expect(source).toContain('GRANT EXECUTE ON FUNCTION');
     });
 
-    it('keeps target profile exposure to fallback plus fresh admission generation one', () => {
+    it('imports exactly the two reconciled preflight source rows with opaque provenance', () => {
         expect(source).toContain("'target-profile-fallback'");
         expect(source).toContain("'target-profile-fresh-admission:g1'");
-        expect(source).toContain('v_exposure_count > 2');
+        expect(source).toContain('v_exposure_count <> 2');
+        expect(source).toContain('actual_usage_usd IS NULL');
+        expect(source).toContain('usage_reconciled_at IS NULL');
+        expect(source).toContain('target_input_hash');
+        expect(source).not.toContain("digest(convert_to(lower(v_request.target_instagram_id)");
+    });
+
+    it('uses the canonical runner function, a parent FK, strict ACLs, and manifest-derived scopes', () => {
+        expect(source).toContain('public.load_e2e_test_runner_v1(v_request.user_id)');
+        expect(source).toContain('REFERENCES public.analysis_revenue_run_ledgers(request_id)');
+        expect(source).toContain('REVOKE ALL ON TABLE public.analysis_revenue_run_ledgers FROM PUBLIC, anon, authenticated, service_role');
+        expect(source).toContain('REVOKE ALL ON FUNCTION');
+        expect(source).toContain('FROM public.analysis_v2_gender_routing_manifests AS manifest');
+        expect(source).toContain('FROM public.analysis_v2_gender_routing_candidates AS candidate');
+        expect(source).toContain("status = 'complete'");
+    });
+
+    it('uses parent-first lock ordering and finalizer-bound reconciliation', () => {
+        expect(source).toContain('SELECT * INTO v_ledger FROM public.analysis_revenue_run_ledgers WHERE request_id = p_request_id FOR UPDATE');
+        expect(source).toContain('p_job_key TEXT, p_claim_token UUID, p_job_input_hash TEXT');
+        expect(source).toContain("p_job_key IS DISTINCT FROM 'coordinator:finalize'");
+        expect(source).toContain('missing_fresh_import');
+        expect(source).toContain('provider_source_unmatched');
+        expect(source).toContain('ai_source_unmatched');
     });
 
     it('binds detail work to the selected manifest scope and keeps terminality explicit', () => {
