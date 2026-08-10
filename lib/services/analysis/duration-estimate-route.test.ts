@@ -7,6 +7,7 @@ const mocks = vi.hoisted(() => ({
     loadDag: vi.fn(),
     demoFindForOwner: vi.fn(),
     isDemoOperator: vi.fn(),
+    requireActiveAccountClassification: vi.fn(),
 }));
 
 vi.mock('@/lib/supabase/server', () => ({ createClient: mocks.createClient }));
@@ -22,8 +23,13 @@ vi.mock('@/lib/services/demo-analysis/store', () => ({
 vi.mock('@/lib/services/demo-analysis/demo-analysis', () => ({
     isDemoOperator: mocks.isDemoOperator,
 }));
+vi.mock('@/lib/services/identity/account-principal-store', async importOriginal => ({
+    ...(await importOriginal<typeof import('@/lib/services/identity/account-principal-store')>()),
+    requireActiveAccountClassification: mocks.requireActiveAccountClassification,
+}));
 
 import { GET } from '@/app/api/analysis/duration/[requestId]/route';
+import { AccountPrincipalAdmissionError } from '@/lib/services/identity/account-principal-store';
 
 const requestId = '123e4567-e89b-42d3-a456-426614174000';
 const userId = '223e4567-e89b-42d3-a456-426614174000';
@@ -52,6 +58,13 @@ describe('analysis duration owner route', () => {
         mocks.loadForOwner.mockResolvedValue({ snapshot: { status: 'processing' } });
         mocks.loadDag.mockResolvedValue(state());
         mocks.isDemoOperator.mockReturnValue(true);
+        mocks.requireActiveAccountClassification.mockResolvedValue({
+            userId,
+            accountClass: 'production',
+            trafficClass: 'external',
+            lifecycle: 'active',
+            classificationVersion: 'account-ledger-v1',
+        });
     });
 
     it('owner-scopes stage two and returns only its versioned public range', async () => {
@@ -84,5 +97,21 @@ describe('analysis duration owner route', () => {
         const terminal = await GET(new Request(`https://example.com/api/analysis/duration/${requestId}`), context());
         expect(await terminal.json()).toEqual({ estimate: null });
         expect(mocks.loadDag).not.toHaveBeenCalled();
+    });
+
+    it('fails closed before owner duration reads for a retired account', async () => {
+        mocks.requireActiveAccountClassification.mockRejectedValue(
+            new AccountPrincipalAdmissionError(),
+        );
+
+        const response = await GET(
+            new Request(`https://example.com/api/analysis/duration/${requestId}`),
+            context(),
+        );
+
+        expect(response.status).toBe(403);
+        expect(mocks.requireActiveAccountClassification).toHaveBeenCalledWith(userId);
+        expect(mocks.demoFindForOwner).not.toHaveBeenCalled();
+        expect(mocks.loadForOwner).not.toHaveBeenCalled();
     });
 });

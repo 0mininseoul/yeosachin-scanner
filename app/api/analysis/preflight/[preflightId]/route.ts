@@ -35,6 +35,10 @@ import {
     readAnonymousAnalysisV2Preflight,
     setAnonymousAnalysisV2PreflightExclusion,
 } from '@/lib/services/analysis/anonymous-preflight';
+import {
+    AccountPrincipalAdmissionError,
+    requireActiveAccountClassification,
+} from '@/lib/services/identity/account-principal-store';
 
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
@@ -149,6 +153,15 @@ async function handleGET(
             return NextResponse.json(publicPreflightStatusDto(stored));
         }
         const { user } = session;
+
+        try {
+            await requireActiveAccountClassification(user.id);
+        } catch (accountError) {
+            if (accountError instanceof AccountPrincipalAdmissionError) {
+                return errorResponse(403, accountError.code, '이 계정은 현재 사용할 수 없습니다.');
+            }
+            throw accountError;
+        }
 
         const demo = await demoAnalysisStore.findForOwner(preflightId, user.id);
         if (demo) {
@@ -296,6 +309,15 @@ async function handlePATCH(
 
         const { user, supabase } = session;
         observedUserId = user.id;
+
+        try {
+            await requireActiveAccountClassification(user.id);
+        } catch (accountError) {
+            if (accountError instanceof AccountPrincipalAdmissionError) {
+                return errorResponse(403, accountError.code, '이 계정은 현재 사용할 수 없습니다.');
+            }
+            throw accountError;
+        }
 
         const demo = await demoAnalysisStore.findForOwner(preflightId, user.id);
         if (demo) {

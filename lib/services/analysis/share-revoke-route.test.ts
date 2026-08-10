@@ -9,6 +9,7 @@ const mocks = vi.hoisted(() => ({
     loadPage: vi.fn(),
     resolveImage: vi.fn(),
     readImage: vi.fn(),
+    requireActiveAccountClassification: vi.fn(),
 }));
 
 vi.mock('@/lib/supabase/server', () => ({ createClient: mocks.createClient }));
@@ -26,6 +27,10 @@ vi.mock('@/lib/services/media/result-image-resolver', () => ({
     resolveAnalysisV2ResultImageLocator: mocks.resolveImage,
     readAnalysisV2ResultImageObject: mocks.readImage,
 }));
+vi.mock('@/lib/services/identity/account-principal-store', async importOriginal => ({
+    ...(await importOriginal<typeof import('@/lib/services/identity/account-principal-store')>()),
+    requireActiveAccountClassification: mocks.requireActiveAccountClassification,
+}));
 vi.mock('next/og', () => ({
     ImageResponse: class extends Response {
         constructor() {
@@ -41,6 +46,7 @@ import * as shareEnableRoute from '@/app/api/share/enable/route';
 import { GET as sharedResult } from '@/app/api/share/[token]/route';
 import { GET as sharedImage } from '@/app/api/share/[token]/image/route';
 import { GET as sharedOpenGraphImage } from '@/app/api/share/[token]/opengraph-image/route';
+import { AccountPrincipalAdmissionError } from '@/lib/services/identity/account-principal-store';
 
 const userId = '123e4567-e89b-42d3-a456-426614174000';
 const requestId = '223e4567-e89b-42d3-a456-426614174000';
@@ -183,6 +189,13 @@ describe('owner share revoke lifecycle', () => {
         });
         mocks.demoFind.mockResolvedValue(null);
         mocks.generateToken.mockReturnValue(newToken);
+        mocks.requireActiveAccountClassification.mockResolvedValue({
+            userId,
+            accountClass: 'production',
+            trafficClass: 'external',
+            lifecycle: 'active',
+            classificationVersion: 'account-ledger-v1',
+        });
     });
 
     it('requires an authenticated owner before reading or mutating a share', async () => {
@@ -203,6 +216,28 @@ describe('owner share revoke lifecycle', () => {
         ));
 
         expect(response.status).toBe(401);
+        expect(mocks.from).not.toHaveBeenCalled();
+    });
+
+    it('fails closed before revoking a share for a retired account', async () => {
+        mocks.requireActiveAccountClassification.mockRejectedValue(
+            new AccountPrincipalAdmissionError(),
+        );
+        const revoke = revokeHandler();
+
+        expect(revoke).toBeTypeOf('function');
+        if (!revoke) return;
+        const response = await revoke(new Request(
+            'https://example.com/api/share/enable',
+            {
+                method: 'DELETE',
+                headers: { 'content-type': 'application/json' },
+                body: JSON.stringify({ requestId }),
+            },
+        ));
+
+        expect(response.status).toBe(403);
+        expect(mocks.requireActiveAccountClassification).toHaveBeenCalledWith(userId);
         expect(mocks.from).not.toHaveBeenCalled();
     });
 

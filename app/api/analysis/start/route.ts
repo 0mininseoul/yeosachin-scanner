@@ -23,6 +23,10 @@ import {
     acquireAnalysisRequestLease,
     releaseAnalysisRequestLease,
 } from '@/lib/services/analysis/request-lease';
+import {
+    AccountPrincipalAdmissionError,
+    requireActiveAccountClassification,
+} from '@/lib/services/identity/account-principal-store';
 
 // 무료 분석 횟수 제한
 const FREE_ANALYSIS_LIMIT = 1;
@@ -82,6 +86,21 @@ export async function POST(request: Request) {
             return NextResponse.json(
                 { error: '로그인이 필요합니다.' },
                 { status: 401 }
+            );
+        }
+
+        try {
+            await requireActiveAccountClassification(user.id);
+        } catch (error) {
+            if (error instanceof AccountPrincipalAdmissionError) {
+                return NextResponse.json(
+                    { error: '이 계정은 현재 사용할 수 없습니다.', code: error.code },
+                    { status: 403 },
+                );
+            }
+            return NextResponse.json(
+                { error: '분석 접수를 일시적으로 사용할 수 없습니다.' },
+                { status: 503 },
             );
         }
 

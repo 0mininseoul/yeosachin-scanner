@@ -158,6 +158,10 @@ import {
 } from '@/lib/services/analysis/observability';
 import { recordGeminiUsageExpectation } from '@/lib/services/analysis/gemini-usage-expectation';
 import { reconcileSettledAnalysisProviderCosts } from '@/lib/services/analysis/provider-cost-reconciliation';
+import {
+    AccountPrincipalAdmissionError,
+    requireActiveAccountClassification,
+} from '@/lib/services/identity/account-principal-store';
 
 const MAX_INTERACTION_EVIDENCE_ROWS = 2_500;
 const PROVIDER_COST_RECONCILIATION_DELAY_MS = 35_000;
@@ -179,6 +183,17 @@ export async function POST(request: Request) {
                 return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
             }
             userId = user.id;
+            try {
+                await requireActiveAccountClassification(user.id);
+            } catch (accountError) {
+                if (accountError instanceof AccountPrincipalAdmissionError) {
+                    return NextResponse.json(
+                        { error: 'Account unavailable.', code: accountError.code },
+                        { status: 403 },
+                    );
+                }
+                throw accountError;
+            }
         }
 
         const { requestId } = await request.json();

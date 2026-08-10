@@ -7,6 +7,7 @@ const mocks = vi.hoisted(() => ({
     loadForOwner: vi.fn(),
     demoFindForOwner: vi.fn(),
     loadFixture: vi.fn(),
+    requireActiveAccountClassification: vi.fn(),
 }));
 
 vi.mock('@/lib/supabase/server', () => ({ createClient: mocks.createClient }));
@@ -19,8 +20,13 @@ vi.mock('@/lib/services/demo-analysis/store', () => ({
 vi.mock('@/lib/services/demo-analysis/fixture-store', () => ({
     loadDemoFixtureForVersion: mocks.loadFixture,
 }));
+vi.mock('@/lib/services/identity/account-principal-store', async importOriginal => ({
+    ...(await importOriginal<typeof import('@/lib/services/identity/account-principal-store')>()),
+    requireActiveAccountClassification: mocks.requireActiveAccountClassification,
+}));
 
 import { GET } from '@/app/api/analysis/progress/[requestId]/route';
+import { AccountPrincipalAdmissionError } from '@/lib/services/identity/account-principal-store';
 
 const requestId = '123e4567-e89b-42d3-a456-426614174000';
 const userId = '223e4567-e89b-42d3-a456-426614174000';
@@ -106,6 +112,13 @@ describe('analysis V2 owner progress route', () => {
         });
         mocks.demoFindForOwner.mockResolvedValue(null);
         mocks.loadFixture.mockImplementation(async (version: string) => loadedFixture(version));
+        mocks.requireActiveAccountClassification.mockResolvedValue({
+            userId,
+            accountClass: 'production',
+            trafficClass: 'external',
+            lifecycle: 'active',
+            classificationVersion: 'account-ledger-v1',
+        });
     });
 
     it('requires authentication before reading malformed pagination for a valid route id', async () => {
@@ -169,6 +182,22 @@ describe('analysis V2 owner progress route', () => {
             },
             events: [{ seq: 1, eventCode: 'PROFILE_SCREENED' }],
         });
+    });
+
+    it('fails closed before owner progress reads for a retired account', async () => {
+        mocks.requireActiveAccountClassification.mockRejectedValue(
+            new AccountPrincipalAdmissionError(),
+        );
+
+        const response = await GET(
+            new Request(`https://example.com/api/analysis/progress/${requestId}`),
+            context(),
+        );
+
+        expect(response.status).toBe(403);
+        expect(mocks.requireActiveAccountClassification).toHaveBeenCalledWith(userId);
+        expect(mocks.demoFindForOwner).not.toHaveBeenCalled();
+        expect(mocks.loadForOwner).not.toHaveBeenCalled();
     });
 
     it('serves an allowlisted started demo without loading production progress', async () => {

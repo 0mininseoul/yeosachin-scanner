@@ -265,6 +265,45 @@ export async function requireActiveAccountClassification(userId: string) {
     return classification;
 }
 
+/**
+ * Authenticated page/session entry point. A legitimate first Google/Kakao
+ * session may not have a users row yet, so bootstrap that service-owned row
+ * through the same RPC used by /api/user/me, then apply the normal active
+ * classification guard. Unknown providers and missing email fail closed; in
+ * particular, this helper does not infer E2E status from an unapproved
+ * metadata convention.
+ */
+export async function requireActiveAccountSession(user: {
+    id: string;
+    email?: string | null;
+    app_metadata?: Record<string, unknown> | null;
+}) {
+    const existing = await loadAccountClassification(user.id);
+    if (existing) {
+        if (existing.lifecycle !== 'active') {
+            throw new AccountPrincipalAdmissionError();
+        }
+        return existing;
+    }
+
+    const provider = user.app_metadata?.provider;
+    if (
+        !user.email
+        || (provider !== 'google' && provider !== 'kakao')
+    ) {
+        throw new AccountPrincipalAdmissionError();
+    }
+
+    await ensureAccountPrincipal({
+        userId: user.id,
+        email: user.email,
+        provider,
+        profile: {},
+    });
+
+    return requireActiveAccountClassification(user.id);
+}
+
 export async function requireActiveE2eTestAccount(userId: string) {
     const classification = await requireActiveAccountClassification(userId);
     if (

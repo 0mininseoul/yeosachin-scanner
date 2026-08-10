@@ -12,6 +12,7 @@ const mocks = vi.hoisted(() => ({
         blockBetaPrepareCapacity: vi.fn(),
     },
     admin: { rpc: vi.fn() },
+    requireActiveAccountClassification: vi.fn(),
 }));
 
 vi.mock('@/lib/supabase/server', () => ({ createClient: mocks.createClient }));
@@ -29,8 +30,14 @@ vi.mock('@/lib/services/analysis/preflight-tasks', () => ({
     getPreflightTasksConfig: () => ({ queue: 'configured' }),
     enqueueBetaPreflightPrepareTask: mocks.enqueuePrepare,
 }));
+vi.mock('@/lib/services/identity/account-principal-store', async importOriginal => ({
+    ...(await importOriginal<typeof import('@/lib/services/identity/account-principal-store')>()),
+    requireActiveAccountClassification: mocks.requireActiveAccountClassification,
+}));
 
 import { POST as createBetaPreflight } from '@/app/api/analysis/betatest/preflight/route';
+import { POST as admitBetaPreflight } from '@/app/api/analysis/betatest/preflight/[preflightId]/admit/route';
+import { AccountPrincipalAdmissionError } from '@/lib/services/identity/account-principal-store';
 import {
     BetaPreflightAccessUnavailableError,
     prepareBetaPreflightDispatch,
@@ -64,6 +71,13 @@ describe('dedicated betatest preflight route', () => {
         mocks.store.markBetaPrepareDispatched.mockResolvedValue(undefined);
         mocks.store.blockBetaPrepareCapacity.mockResolvedValue('blocked');
         mocks.enqueuePrepare.mockResolvedValue('enqueued');
+        mocks.requireActiveAccountClassification.mockResolvedValue({
+            userId,
+            accountClass: 'production',
+            trafficClass: 'external',
+            lifecycle: 'active',
+            classificationVersion: 'account-ledger-v1',
+        });
     });
 
     it('fails closed before a mutation when auth, flag, or self-grant is unavailable', async () => {
@@ -76,6 +90,38 @@ describe('dedicated betatest preflight route', () => {
         mocks.ensureAccess.mockResolvedValue(false);
         expect((await createBetaPreflight(request())).status).toBe(403);
         expect(mocks.store.createOrReplayBeta).not.toHaveBeenCalled();
+    });
+
+    it('fails closed before beta preflight creation for a retired account', async () => {
+        mocks.requireActiveAccountClassification.mockRejectedValue(
+            new AccountPrincipalAdmissionError(),
+        );
+
+        const response = await createBetaPreflight(request());
+
+        expect(response.status).toBe(403);
+        expect(mocks.requireActiveAccountClassification).toHaveBeenCalledWith(userId);
+        expect(mocks.store.createOrReplayBeta).not.toHaveBeenCalled();
+        expect(mocks.ensureAccess).not.toHaveBeenCalled();
+    });
+
+    it('fails closed before beta admission for a retired account', async () => {
+        mocks.requireActiveAccountClassification.mockRejectedValue(
+            new AccountPrincipalAdmissionError(),
+        );
+
+        const response = await admitBetaPreflight(
+            new Request(`https://example.com/api/analysis/betatest/preflight/${preflightId}/admit`, {
+                method: 'POST',
+                headers: { 'content-type': 'application/json' },
+                body: JSON.stringify({ planId: 'basic' }),
+            }),
+            { params: Promise.resolve({ preflightId }) },
+        );
+
+        expect(response.status).toBe(403);
+        expect(mocks.requireActiveAccountClassification).toHaveBeenCalledWith(userId);
+        expect(mocks.ensureAccess).not.toHaveBeenCalled();
     });
 
     it('creates a production preflight and enqueues only worker beta preparation', async () => {

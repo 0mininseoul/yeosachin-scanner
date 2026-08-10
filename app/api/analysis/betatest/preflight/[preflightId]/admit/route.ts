@@ -30,6 +30,10 @@ import {
 } from '@/lib/services/analysis/beta-apify-credit-runtime';
 import { dispatchAnalysisV2Job } from '@/lib/services/analysis/v2-tasks';
 import { operationalLogger } from '@/lib/observability/server';
+import {
+    AccountPrincipalAdmissionError,
+    requireActiveAccountClassification,
+} from '@/lib/services/identity/account-principal-store';
 
 const idSchema = z.string().uuid().transform(value => value.toLowerCase());
 const bodySchema = z.object({ planId: planIdSchema }).strict();
@@ -53,6 +57,14 @@ export async function POST(request: Request, { params }: RouteContext): Promise<
     const supabase = await createClient();
     const { data: { user }, error: authError } = await supabase.auth.getUser();
     if (authError || !user) return failure(401, 'UNAUTHORIZED', '로그인이 필요합니다.');
+    try {
+        await requireActiveAccountClassification(user.id);
+    } catch (error) {
+        if (error instanceof AccountPrincipalAdmissionError) {
+            return failure(403, error.code, '이 계정은 현재 사용할 수 없습니다.');
+        }
+        return failure(503, BETA_ADMISSION_PENDING, '베타 분석을 준비할 수 없습니다.');
+    }
     const preflight = idSchema.safeParse((await params).preflightId);
     let rawBody: unknown;
     try { rawBody = await request.json(); } catch { rawBody = null; }

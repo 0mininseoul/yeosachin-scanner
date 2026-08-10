@@ -121,6 +121,21 @@ describe('owner-facing V1/V2 route selection', () => {
         expect(mocks.expireStale).not.toHaveBeenCalled();
     });
 
+    it('fails closed before legacy status reads for a retired owner', async () => {
+        mocks.requireActiveAccountClassification.mockRejectedValue(
+            new AccountPrincipalAdmissionError(),
+        );
+
+        const response = await getLegacyStatus(
+            new Request(`https://example.com/api/analysis/status/${requestId}`),
+            context(),
+        );
+
+        expect(response.status).toBe(403);
+        expect(mocks.requireActiveAccountClassification).toHaveBeenCalledWith(userId);
+        expect(mocks.from).not.toHaveBeenCalled();
+    });
+
     it('fails closed before legacy result reads or deletion for a retired owner', async () => {
         mocks.requireActiveAccountClassification.mockRejectedValue(
             new AccountPrincipalAdmissionError(),

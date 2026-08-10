@@ -958,6 +958,25 @@ describe('preflight owner routes', () => {
         await expect(expired.json()).resolves.toMatchObject({ code: 'PREFLIGHT_EXPIRED' });
     });
 
+    it('fails closed before authenticated preflight status or exclusion access for a retired account', async () => {
+        mocks.requireActiveAccountClassification.mockRejectedValue(
+            new AccountPrincipalAdmissionError(),
+        );
+
+        const read = await getPreflight(new Request('https://example.com'), context());
+        const update = await patchPreflight(new Request('https://example.com', {
+            method: 'PATCH',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ decision: 'skip' }),
+        }), context());
+
+        expect(read.status).toBe(403);
+        expect(update.status).toBe(403);
+        expect(mocks.requireActiveAccountClassification).toHaveBeenCalledTimes(2);
+        expect(mocks.store.findForOwner).not.toHaveBeenCalled();
+        expect(mocks.store.setExclusion).not.toHaveBeenCalled();
+    });
+
     it('owner-recovers a consumed request even after the preflight TTL', async () => {
         mocks.store.findForOwner.mockResolvedValue({
             preflightId,

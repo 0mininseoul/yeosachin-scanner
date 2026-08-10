@@ -149,6 +149,19 @@ export async function GET() {
             });
         }
 
+        // /api/user/me is the browser session bootstrap path. A retired
+        // principal must not receive a live-looking DTO that keeps the app
+        // session admitted while later APIs reject it.
+        if (dbUser.lifecycle !== 'active') {
+            return NextResponse.json(
+                {
+                    error: '계정을 사용할 수 없습니다.',
+                    code: 'ACCOUNT_ADMISSION_DENIED',
+                },
+                { status: 403 },
+            );
+        }
+
         // 기존 유저: 새로 승인된 프로필 항목이 비어 있으면 백필
         const existing = dbUser;
         const patch: SocialAccountProfile = {};

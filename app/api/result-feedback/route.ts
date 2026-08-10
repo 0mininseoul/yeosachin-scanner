@@ -8,6 +8,10 @@ import {
     resultFeedbackRequestSchema,
 } from '@/lib/services/feedback/contracts';
 import { insertResultFeedback } from '@/lib/services/feedback/store';
+import {
+    AccountPrincipalAdmissionError,
+    requireActiveAccountClassification,
+} from '@/lib/services/identity/account-principal-store';
 
 const PRIVATE_NO_STORE_HEADERS = {
     'Cache-Control': 'private, no-store, max-age=0',
@@ -49,6 +53,15 @@ export async function POST(request: Request): Promise<NextResponse> {
         const { data: { user }, error: authError } = await supabase.auth.getUser();
         if (authError || !user) {
             return errorResponse(401, 'UNAUTHENTICATED', '로그인이 필요합니다.');
+        }
+
+        try {
+            await requireActiveAccountClassification(user.id);
+        } catch (error) {
+            if (error instanceof AccountPrincipalAdmissionError) {
+                return errorResponse(403, error.code, '이 계정은 현재 사용할 수 없습니다.');
+            }
+            throw error;
         }
 
         // Never trust a client-supplied request id: confirm this caller owns it.

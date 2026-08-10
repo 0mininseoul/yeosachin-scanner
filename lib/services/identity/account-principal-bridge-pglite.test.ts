@@ -73,6 +73,8 @@ async function createDatabase(): Promise<PGlite> {
             phone_number_verified_at TIMESTAMP WITH TIME ZONE
         );
 
+        GRANT SELECT, INSERT, UPDATE, DELETE ON public.users TO anon, authenticated;
+
         CREATE TABLE public.earlybird_orders (
             id UUID PRIMARY KEY,
             user_id UUID NOT NULL REFERENCES public.users(id),
@@ -365,6 +367,132 @@ describe('account-principal Phase A+B migration semantics', () => {
         )).rows).toEqual([{ count: 5 }]);
     }, PGLITE_TEST_TIMEOUT_MS);
 
+    it('replays an already-active classification command without duplicating audit transitions', async () => {
+        const db = await createDatabase();
+        await seedLedgerScenario(db);
+        await activateAndReplay(db);
+
+        const replay = await asService<{
+            updated_count: number;
+            evidence_count: number;
+            paid_account_count: number;
+        }>(
+            db,
+            `SELECT * FROM public.classify_account_principals_v1(
+                $1::JSONB, 'account-ledger-v1', TRUE
+            )`,
+            [approvedClassifications()],
+        );
+
+        expect(replay.rows).toEqual([{
+            updated_count: 0,
+            evidence_count: 5,
+            paid_account_count: 1,
+        }]);
+        expect((await db.query<{ count: number }>(
+            'SELECT COUNT(*)::INTEGER AS count FROM public.account_classification_audit',
+        )).rows).toEqual([{ count: 4 }]);
+
+        const replayAssignments = JSON.parse(approvedClassifications()) as Array<Record<string, string>>;
+        replayAssignments[1] = {
+            ...replayAssignments[1],
+            traffic_class: 'e2e_test',
+        };
+        await expect(asService(
+            db,
+            `SELECT * FROM public.classify_account_principals_v1(
+                $1::JSONB, 'account-ledger-v1', TRUE
+            )`,
+            [JSON.stringify(replayAssignments)],
+        )).rejects.toThrow('ACCOUNT_CLASSIFICATION_INPUT_INVALID');
+
+        const validButDifferentReplay = JSON.parse(approvedClassifications()) as Array<Record<string, string>>;
+        validButDifferentReplay[0] = {
+            ...validButDifferentReplay[0],
+            lifecycle: 'retired',
+            reason_code: 'DIFFERENT_REPLAY',
+        };
+        await expect(asService(
+            db,
+            `SELECT * FROM public.classify_account_principals_v1(
+                $1::JSONB, 'account-ledger-v1', TRUE
+            )`,
+            [JSON.stringify(validButDifferentReplay)],
+        )).rejects.toThrow('ACCOUNT_PAID_EVER_ACTIVATION_CONFLICT');
+    }, PGLITE_TEST_TIMEOUT_MS);
+
+    it('rejects non-activation classification mutations after paid-ever activation', async () => {
+        const db = await createDatabase();
+        await seedLedgerScenario(db);
+        await activateAndReplay(db);
+
+        const changedAssignments = JSON.parse(approvedClassifications()) as Array<Record<string, string>>;
+        changedAssignments[0] = {
+            ...changedAssignments[0],
+            lifecycle: 'retired',
+            reason_code: 'RETIRE_AFTER_ACTIVATION',
+        };
+        await expect(asService(
+            db,
+            `SELECT * FROM public.classify_account_principals_v1(
+                $1::JSONB, 'post-activation-change', FALSE
+            )`,
+            [JSON.stringify(changedAssignments)],
+        )).rejects.toThrow('ACCOUNT_CLASSIFICATION_ROLLOUT_ACTIVE');
+    }, PGLITE_TEST_TIMEOUT_MS);
+
+    it('rechecks the rollout after account locking when activation wins the interleaving', async () => {
+        const db = await createDatabase();
+        await seedLedgerScenario(db);
+        await db.exec(`
+            CREATE FUNCTION public.activate_rollout_after_first_classification()
+            RETURNS TRIGGER
+            LANGUAGE plpgsql
+            AS $$
+            BEGIN
+                UPDATE public.account_ledger_rollout_state
+                SET paid_ever_state = 'active',
+                    classification_command_version = 'activation-won',
+                    classification_completed_at = pg_catalog.clock_timestamp(),
+                    updated_at = pg_catalog.clock_timestamp()
+                WHERE singleton IS TRUE;
+                RETURN NEW;
+            END;
+            $$;
+            CREATE TRIGGER activate_rollout_after_first_classification_trigger
+            AFTER UPDATE OF classification_version ON public.users
+            FOR EACH ROW
+            WHEN (OLD.classification_version IS DISTINCT FROM NEW.classification_version)
+            EXECUTE FUNCTION public.activate_rollout_after_first_classification();
+        `);
+
+        const assignments = JSON.stringify(
+            (JSON.parse(approvedClassifications()) as Array<Record<string, string>>)
+                .slice(0, 2),
+        );
+        await expect(asService(
+            db,
+            `SELECT * FROM public.classify_account_principals_v1(
+                $1::JSONB, 'racing-classification', FALSE
+            )`,
+            [assignments],
+        )).rejects.toThrow('ACCOUNT_CLASSIFICATION_ROLLOUT_ACTIVE');
+
+        expect((await db.query<{ count: number }>(
+            `SELECT COUNT(*)::INTEGER AS count
+             FROM public.account_classification_audit`,
+        )).rows).toEqual([{ count: 0 }]);
+        expect((await db.query<{ paid_ever_state: string }>(
+            `SELECT paid_ever_state
+             FROM public.account_ledger_rollout_state`,
+        )).rows).toEqual([{ paid_ever_state: 'pending' }]);
+        expect((await db.query<{ count: number }>(
+            `SELECT COUNT(*)::INTEGER AS count
+             FROM public.users
+             WHERE classification_version = 'racing-classification'`,
+        )).rows).toEqual([{ count: 0 }]);
+    }, PGLITE_TEST_TIMEOUT_MS);
+
     it('does not turn pending, failed, cancelled, zero-value, or unaccepted orders into paid-ever during replay', async () => {
         const db = await createDatabase();
         const candidates = [
@@ -598,6 +726,105 @@ describe('account-principal Phase A+B migration semantics', () => {
         )).rejects.toThrow('ACCOUNT_RETIRED');
     }, PGLITE_TEST_TIMEOUT_MS);
 
+    it('rejects a NULL profile patch at the database boundary', async () => {
+        const db = await createDatabase();
+        await expect(asService(
+            db,
+            `SELECT * FROM public.ensure_account_principal_v1(
+                $1::UUID, 'new@invalid.test', 'google', NULL::JSONB
+            )`,
+            ['50000000-0000-4000-8000-000000000001'],
+        )).rejects.toThrow('ACCOUNT_PRINCIPAL_INPUT_INVALID');
+    }, PGLITE_TEST_TIMEOUT_MS);
+
+    it('rejects a NULL provider at the database boundary', async () => {
+        const db = await createDatabase();
+        await expect(asService(
+            db,
+            `SELECT * FROM public.ensure_account_principal_v1(
+                $1::UUID, 'new@invalid.test', NULL::TEXT, '{}'::JSONB
+            )`,
+            ['50000000-0000-4000-8000-000000000003'],
+        )).rejects.toThrow('ACCOUNT_PRINCIPAL_INPUT_INVALID');
+    }, PGLITE_TEST_TIMEOUT_MS);
+
+    it('rejects NULL classification assignments at the database boundary', async () => {
+        const db = await createDatabase();
+        await expect(asService(
+            db,
+            `SELECT * FROM public.classify_account_principals_v1(
+                NULL::JSONB, 'account-ledger-v1', FALSE
+            )`,
+        )).rejects.toThrow('ACCOUNT_CLASSIFICATION_INPUT_INVALID');
+    }, PGLITE_TEST_TIMEOUT_MS);
+
+    it('rejects NULL classification account ids at the database boundary', async () => {
+        const db = await createDatabase();
+        const assignments = JSON.stringify([{
+            account_id: null,
+            account_class: 'production',
+            traffic_class: 'external',
+            lifecycle: 'active',
+            reason_code: 'MISSING_ACCOUNT_ID',
+        }]);
+
+        await expect(asService(
+            db,
+            `SELECT * FROM public.classify_account_principals_v1(
+                $1::JSONB, 'account-ledger-v1', FALSE
+            )`,
+            [assignments],
+        )).rejects.toThrow('ACCOUNT_CLASSIFICATION_INPUT_INVALID');
+    }, PGLITE_TEST_TIMEOUT_MS);
+
+    it('gives legacy user inserts a runtime classification version', async () => {
+        const db = await createDatabase();
+        await db.query(
+            `INSERT INTO public.users(id, email, provider)
+             VALUES ($1::UUID, 'legacy@invalid.test', 'google')`,
+            ['50000000-0000-4000-8000-000000000002'],
+        );
+
+        expect((await db.query<{ classification_version: string | null }>(
+            `SELECT classification_version
+             FROM public.users
+             WHERE id = $1::UUID`,
+            ['50000000-0000-4000-8000-000000000002'],
+        )).rows).toEqual([{ classification_version: 'runtime_default_v1' }]);
+    }, PGLITE_TEST_TIMEOUT_MS);
+
+    it('rejects contradictory account and traffic classifications', async () => {
+        const db = await createDatabase();
+        await seedLedgerScenario(db);
+        const contradictory = JSON.stringify([{
+            account_id: E2E_ACCOUNT_ID,
+            account_class: 'e2e_test',
+            traffic_class: 'external',
+            lifecycle: 'active',
+            reason_code: 'CONTRADICTORY_CLASS',
+        }]);
+
+        await expect(asService(
+            db,
+            `SELECT * FROM public.classify_account_principals_v1(
+                $1::JSONB, 'contradictory-class', FALSE
+            )`,
+            [contradictory],
+        )).rejects.toThrow('ACCOUNT_CLASSIFICATION_INPUT_INVALID');
+    }, PGLITE_TEST_TIMEOUT_MS);
+
+    it('rejects contradictory classification through the users table boundary', async () => {
+        const db = await createDatabase();
+        await seedLedgerScenario(db);
+
+        await expect(db.query(
+            `UPDATE public.users
+             SET account_class = 'e2e_test', traffic_class = 'external'
+             WHERE id = $1::UUID`,
+            [E2E_ACCOUNT_ID],
+        )).rejects.toThrow('users_classification_pair_check');
+    }, PGLITE_TEST_TIMEOUT_MS);
+
     it('grants the bridge RPCs to service_role and rejects client-role execution', async () => {
         const db = await createDatabase();
         const grants = await db.query<{
@@ -688,6 +915,35 @@ describe('account-principal Phase A+B migration semantics', () => {
         await expect(withRole(db, 'authenticated', () => db.query(
             'SELECT * FROM public.load_account_principal_v1($1::UUID)',
             [EXTERNAL_ACCOUNT_ID],
+        ))).rejects.toThrow();
+    }, PGLITE_TEST_TIMEOUT_MS);
+
+    it('keeps the physical users relation service-role-only during Phase A+B', async () => {
+        const db = await createDatabase();
+        const grants = await db.query<{
+            anon_select: boolean;
+            authenticated_select: boolean;
+            service_select: boolean;
+            service_update: boolean;
+        }>(`
+            SELECT
+                has_table_privilege('anon', 'public.users', 'SELECT') AS anon_select,
+                has_table_privilege('authenticated', 'public.users', 'SELECT')
+                    AS authenticated_select,
+                has_table_privilege('service_role', 'public.users', 'SELECT')
+                    AS service_select,
+                has_table_privilege('service_role', 'public.users', 'UPDATE')
+                    AS service_update
+        `);
+
+        expect(grants.rows).toEqual([{
+            anon_select: false,
+            authenticated_select: false,
+            service_select: true,
+            service_update: true,
+        }]);
+        await expect(withRole(db, 'authenticated', () => db.query(
+            'SELECT id, lifecycle FROM public.users',
         ))).rejects.toThrow();
     }, PGLITE_TEST_TIMEOUT_MS);
 });

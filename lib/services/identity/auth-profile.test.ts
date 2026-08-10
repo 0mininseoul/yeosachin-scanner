@@ -866,6 +866,27 @@ describe('/api/user/me profile persistence', () => {
         );
     });
 
+    it('fails closed for a retired principal during session bootstrap', async () => {
+        installAuthenticatedUser({
+            id: USER_ID,
+            email: 'user@example.com',
+            app_metadata: { provider: 'google' },
+            user_metadata: {},
+        });
+        installUserAdminResults({
+            data: privateUserRow({ lifecycle: 'retired' }),
+            error: null,
+        });
+
+        const response = await getCurrentUser();
+
+        expect(response.status).toBe(403);
+        await expect(response.json()).resolves.toEqual({
+            error: '계정을 사용할 수 없습니다.',
+            code: 'ACCOUNT_ADMISSION_DENIED',
+        });
+    });
+
     it('logs only a bounded code on read failure', async () => {
         const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => undefined);
         installAuthenticatedUser({

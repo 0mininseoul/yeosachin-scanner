@@ -14,6 +14,10 @@ import {
 import { NextResponse } from 'next/server';
 import { demoResponseHeaders, isDemoOperator } from '@/lib/services/demo-analysis/demo-analysis';
 import { demoAnalysisStore } from '@/lib/services/demo-analysis/store';
+import {
+    AccountPrincipalAdmissionError,
+    requireActiveAccountClassification,
+} from '@/lib/services/identity/account-principal-store';
 
 const STATUS_COLUMNS = 'id, user_id, pipeline_version, status, current_step, progress, progress_step, error_message, background_processing, created_at, completed_at, idempotency_key';
 
@@ -43,6 +47,18 @@ export async function GET(
                 { error: '로그인이 필요합니다.' },
                 { status: 401 }
             );
+        }
+
+        try {
+            await requireActiveAccountClassification(user.id);
+        } catch (error) {
+            if (error instanceof AccountPrincipalAdmissionError) {
+                return NextResponse.json(
+                    { error: '이 계정은 현재 사용할 수 없습니다.' },
+                    { status: 403 },
+                );
+            }
+            throw error;
         }
 
         const demo = await demoAnalysisStore.findForOwner(requestId, user.id);

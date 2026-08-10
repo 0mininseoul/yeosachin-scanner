@@ -14,6 +14,7 @@ const mocks = vi.hoisted(() => ({
     releaseLease: vi.fn(),
     rpc: vi.fn(),
     verifyTask: vi.fn(),
+    requireActiveAccountClassification: vi.fn(),
 }));
 
 vi.mock('@/lib/supabase/admin', () => ({
@@ -76,11 +77,16 @@ vi.mock('next/server', async (importOriginal) => {
     const actual = await importOriginal<typeof import('next/server')>();
     return { ...actual, after: mocks.after };
 });
+vi.mock('@/lib/services/identity/account-principal-store', async importOriginal => ({
+    ...(await importOriginal<typeof import('@/lib/services/identity/account-principal-store')>()),
+    requireActiveAccountClassification: mocks.requireActiveAccountClassification,
+}));
 
 import {
     POST,
     scheduleBrowserFallbackCostReconciliation,
 } from '@/app/api/analysis/step/route';
+import { AccountPrincipalAdmissionError } from '@/lib/services/identity/account-principal-store';
 
 const requestId = '123e4567-e89b-42d3-a456-426614174000';
 const userId = '223e4567-e89b-42d3-a456-426614174000';
@@ -149,6 +155,13 @@ describe('analysis step route orchestration', () => {
         });
         mocks.rpc.mockResolvedValue({ data: 1, error: null });
         mocks.enqueueTask.mockResolvedValue('exists');
+        mocks.requireActiveAccountClassification.mockResolvedValue({
+            userId,
+            accountClass: 'production',
+            trafficClass: 'external',
+            lifecycle: 'active',
+            classificationVersion: 'account-ledger-v1',
+        });
         mocks.createServerClient.mockResolvedValue({
             auth: { getUser: vi.fn().mockResolvedValue({ data: { user: { id: userId } } }) },
         });
@@ -193,6 +206,20 @@ describe('analysis step route orchestration', () => {
             expect.anything(),
             expect.objectContaining({ step: 'profiles', eventType: 'completed' })
         );
+    });
+
+    it('fails closed before a browser-driven step for a retired account', async () => {
+        mocks.verifyTask.mockResolvedValue(false);
+        mocks.requireActiveAccountClassification.mockRejectedValue(
+            new AccountPrincipalAdmissionError(),
+        );
+
+        const response = await POST(postRequest());
+
+        expect(response.status).toBe(403);
+        expect(mocks.requireActiveAccountClassification).toHaveBeenCalledWith(userId);
+        expect(mocks.from).not.toHaveBeenCalled();
+        expect(mocks.acquireLease).not.toHaveBeenCalled();
     });
 
     it('never executes a persisted V2 request through the paid V1 state machine', async () => {

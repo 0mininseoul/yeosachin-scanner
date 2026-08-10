@@ -6,6 +6,7 @@ import {
     betaTestFreePoolEnabled,
     ensureBetaTestAccess,
 } from '@/lib/services/analysis/betatest-access';
+import { requireActiveAccountSession } from '@/lib/services/identity/account-principal-store';
 
 function unavailablePage() {
     return (
@@ -25,6 +26,12 @@ export default async function BetaTestPage() {
     const { data: { user }, error } = await supabase.auth.getUser();
     if (error || !user) {
         return <LandingPage loginRedirectTo="/betatest" />;
+    }
+
+    try {
+        await requireActiveAccountSession(user);
+    } catch {
+        return unavailablePage();
     }
 
     if (!betaTestFreePoolEnabled() || !await ensureBetaTestAccess(supabaseAdmin, user.id)) {

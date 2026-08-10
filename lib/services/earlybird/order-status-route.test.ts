@@ -7,6 +7,7 @@ const mocks = vi.hoisted(() => ({
     rpc: vi.fn(),
     orderQuery: null as ReturnType<typeof queryBuilder> | null,
     resultQuery: null as ReturnType<typeof queryBuilder> | null,
+    requireActiveAccountClassification: vi.fn(),
 }));
 
 function queryBuilder(data: unknown) {
@@ -30,8 +31,13 @@ vi.mock('@/lib/supabase/server', () => ({
 vi.mock('@/lib/supabase/admin', () => ({
     supabaseAdmin: { from: mocks.from, rpc: mocks.rpc },
 }));
+vi.mock('@/lib/services/identity/account-principal-store', async importOriginal => ({
+    ...(await importOriginal<typeof import('@/lib/services/identity/account-principal-store')>()),
+    requireActiveAccountClassification: mocks.requireActiveAccountClassification,
+}));
 
 import { GET } from '@/app/api/earlybird/orders/latest/route';
+import { AccountPrincipalAdmissionError } from '@/lib/services/identity/account-principal-store';
 
 const USER_ID = '123e4567-e89b-42d3-a456-426614174000';
 const ORDER_ID = '123e4567-e89b-42d3-a456-426614174001';
@@ -96,6 +102,13 @@ describe('earlybird owner order status route', () => {
         vi.clearAllMocks();
         authenticate();
         installQueries(orderRow());
+        mocks.requireActiveAccountClassification.mockResolvedValue({
+            userId: USER_ID,
+            accountClass: 'production',
+            trafficClass: 'external',
+            lifecycle: 'active',
+            classificationVersion: 'account-ledger-v1',
+        });
     });
 
     it('requires authentication and returns no cached owner data', async () => {
@@ -136,6 +149,18 @@ describe('earlybird owner order status route', () => {
             },
         });
         expect(JSON.stringify(body)).not.toMatch(/payment_id|product|disclosure|buyer|card/);
+    });
+
+    it('fails closed before reading order history for a retired account', async () => {
+        mocks.requireActiveAccountClassification.mockRejectedValue(
+            new AccountPrincipalAdmissionError(),
+        );
+
+        const response = await GET(new Request('https://example.com/api/earlybird/orders/latest'));
+
+        expect(response.status).toBe(403);
+        expect(mocks.requireActiveAccountClassification).toHaveBeenCalledWith(USER_ID);
+        expect(mocks.from).not.toHaveBeenCalled();
     });
 
     it('returns a paid zero-KRW coupon order instead of dropping the owner history', async () => {

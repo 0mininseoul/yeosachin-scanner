@@ -11,6 +11,7 @@ const mocks = vi.hoisted(() => ({
     demoFind: vi.fn(),
     generateToken: vi.fn(),
     loadV2Page: vi.fn(),
+    requireActiveAccountClassification: vi.fn(),
 }));
 
 vi.mock('@/lib/supabase/server', () => ({ createClient: mocks.createClient }));
@@ -24,9 +25,14 @@ vi.mock('@/lib/services/share/generate-token', () => ({
 vi.mock('@/lib/services/share/v2-result-share', () => ({
     v2ShareResultService: { loadPage: mocks.loadV2Page },
 }));
+vi.mock('@/lib/services/identity/account-principal-store', async importOriginal => ({
+    ...(await importOriginal<typeof import('@/lib/services/identity/account-principal-store')>()),
+    requireActiveAccountClassification: mocks.requireActiveAccountClassification,
+}));
 
 import { POST as enableShare } from '@/app/api/share/enable/route';
 import { GET as sharedResult } from '@/app/api/share/[token]/route';
+import { AccountPrincipalAdmissionError } from '@/lib/services/identity/account-principal-store';
 
 const userId = '123e4567-e89b-42d3-a456-426614174000';
 const requestId = '223e4567-e89b-42d3-a456-426614174000';
@@ -174,6 +180,13 @@ describe('V2 share isolation', () => {
         vi.clearAllMocks();
         mocks.createClient.mockResolvedValue({ auth: { getUser: mocks.getUser } });
         mocks.getUser.mockResolvedValue({ data: { user: { id: userId } }, error: null });
+        mocks.requireActiveAccountClassification.mockResolvedValue({
+            userId,
+            accountClass: 'production',
+            trafficClass: 'external',
+            lifecycle: 'active',
+            classificationVersion: 'account-ledger-v1',
+        });
         mocks.demoFind.mockResolvedValue(null);
         mocks.generateToken.mockReturnValue('b'.repeat(64));
     });
@@ -213,6 +226,22 @@ describe('V2 share isolation', () => {
         expect(request.select).toHaveBeenCalledWith(
             'id, user_id, pipeline_version, status, share_token, share_enabled'
         );
+    });
+
+    it('fails closed before enabling a share for a retired account', async () => {
+        mocks.requireActiveAccountClassification.mockRejectedValue(
+            new AccountPrincipalAdmissionError(),
+        );
+
+        const response = await enableShare(new Request('https://example.com/api/share/enable', {
+            method: 'POST',
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify({ requestId }),
+        }));
+
+        expect(response.status).toBe(403);
+        expect(mocks.requireActiveAccountClassification).toHaveBeenCalledWith(userId);
+        expect(mocks.from).not.toHaveBeenCalled();
     });
 
     it.each([null, 'v1'] as const)(
