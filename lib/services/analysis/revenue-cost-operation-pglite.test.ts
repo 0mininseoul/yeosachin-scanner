@@ -104,6 +104,37 @@ async function expectError(operation: Promise<unknown>, code: string): Promise<v
     await expect(operation).rejects.toThrow(code);
 }
 
+async function begin(db: PGlite): Promise<void> {
+    await seedBegin(db);
+    await query(db, 'SELECT public.begin_analysis_revenue_cost_ledger_v1($1::uuid)', [requestId]);
+}
+
+async function replayTotals(db: PGlite): Promise<{ economicActualKrw: number; actualCostKrw: number; billedActualKrw: number; childCount: number }> {
+    const parent = await db.query<{ economic_actual_krw: number; actual_cost_krw: number; billed_actual_krw: number }>(
+        'SELECT economic_actual_krw,actual_cost_krw,billed_actual_krw FROM public.analysis_revenue_run_ledgers WHERE request_id=$1',
+        [requestId],
+    );
+    const children = await db.query<{ count: number }>(
+        'SELECT count(*)::int AS count FROM public.analysis_revenue_cost_operations WHERE request_id=$1',
+        [requestId],
+    );
+    const row = parent.rows[0];
+    if (!row) throw new Error('missing ledger');
+    return {
+        economicActualKrw: row.economic_actual_krw,
+        actualCostKrw: row.actual_cost_krw,
+        billedActualKrw: row.billed_actual_krw,
+        childCount: children.rows[0]?.count ?? 0,
+    };
+}
+
+async function expectRejectedReplay(db: PGlite, code: string, mutate: () => Promise<void>): Promise<void> {
+    const before = await replayTotals(db);
+    await mutate();
+    await expectError(query(db, 'SELECT public.begin_analysis_revenue_cost_ledger_v1($1::uuid)', [requestId]), code);
+    await expect(replayTotals(db)).resolves.toEqual(before);
+}
+
 afterEach(async () => { await Promise.all(databases.splice(0).map(db => db.close())); });
 
 describe('revenue cost operation ledger PGlite', () => {
@@ -149,6 +180,59 @@ describe('revenue cost operation ledger PGlite', () => {
         await db.exec(`DELETE FROM public.analysis_preflight_provider_runs WHERE preflight_id='${preflightId}' AND operation_key='target-profile-fresh-admission:g2';
           UPDATE public.analysis_revenue_cost_operations SET status='released',started_at=NULL,economic_actual_usd=NULL,billed_actual_usd=NULL,economic_actual_krw=NULL,billed_actual_krw=NULL WHERE request_id='${requestId}' AND attempt=1`);
         await expectError(query(db, 'SELECT public.begin_analysis_revenue_cost_ledger_v1($1::uuid)', [requestId]), 'REVENUE_COST_LEDGER_DRIFT');
+    });
+
+    it.each([
+        ['target hash', `UPDATE public.analysis_preflights SET target_input_hash='${hash('f')}' WHERE id='${preflightId}'`, 'REVENUE_COST_LEDGER_DRIFT'],
+        ['request plan', `UPDATE public.analysis_requests SET selected_plan_id_snapshot='standard' WHERE id='${requestId}'`, 'REVENUE_COST_LEDGER_FENCE'],
+        ['admission plan', `UPDATE public.analysis_preflights SET admission_selected_plan_id='standard' WHERE id='${preflightId}'`, 'REVENUE_COST_LEDGER_FENCE'],
+        ['request JTI', `UPDATE public.analysis_requests SET test_entitlement_jti_hash='${hash('f')}' WHERE id='${requestId}'`, 'REVENUE_COST_LEDGER_FENCE'],
+        ['admission JTI', `UPDATE public.analysis_preflights SET admission_entitlement_jti_hash='${hash('f')}' WHERE id='${preflightId}'`, 'REVENUE_COST_LEDGER_FENCE'],
+    ])('rejects a replay when its %s fence drifts', async (_name, mutation, error) => {
+        const db = await createDb();
+        await begin(db);
+        await expectRejectedReplay(db, error, async () => { await db.exec(mutation); });
+    });
+
+    it.each([
+        [
+            'pricing snapshot',
+            `ALTER TABLE public.analysis_revenue_run_ledgers DROP CONSTRAINT analysis_revenue_run_ledgers_pricing_snapshot_version_check;
+             UPDATE public.analysis_revenue_run_ledgers SET pricing_snapshot_version='tampered-price' WHERE request_id='${requestId}'`,
+        ],
+        [
+            'FX rate',
+            `ALTER TABLE public.analysis_revenue_run_ledgers DROP CONSTRAINT analysis_revenue_run_ledgers_buffered_fx_krw_per_usd_check;
+             UPDATE public.analysis_revenue_run_ledgers SET buffered_fx_krw_per_usd=1449 WHERE request_id='${requestId}'`,
+        ],
+    ])('rejects a replay when the immutable parent %s drifts', async (_name, mutation) => {
+        const db = await createDb();
+        await begin(db);
+        await expectRejectedReplay(db, 'REVENUE_COST_LEDGER_DRIFT', async () => { await db.exec(mutation); });
+    });
+
+    it.each([
+        ['source status', `UPDATE public.analysis_preflight_provider_runs SET status='failed' WHERE preflight_id='${preflightId}' AND operation_key='target-profile-fallback'`, 'REVENUE_COST_LEDGER_TARGET_LINEAGE'],
+        ['terminal timestamp', `UPDATE public.analysis_preflight_provider_runs SET terminalized_at='2026-08-10T00:02:30Z' WHERE preflight_id='${preflightId}' AND operation_key='target-profile-fallback'`, 'REVENUE_COST_LEDGER_DRIFT'],
+        ['reconciliation timestamp', `UPDATE public.analysis_preflight_provider_runs SET usage_reconciled_at='2026-08-10T00:03:30Z' WHERE preflight_id='${preflightId}' AND operation_key='target-profile-fallback'`, 'REVENUE_COST_LEDGER_DRIFT'],
+    ])('rejects a replay when the authoritative source %s drifts', async (_name, mutation, error) => {
+        const db = await createDb();
+        await begin(db);
+        await expectRejectedReplay(db, error, async () => { await db.exec(mutation); });
+    });
+
+    it.each([
+        ['owner identity', `UPDATE public.analysis_revenue_cost_operations SET owner_key_hash='${hash('f')}' WHERE request_id='${requestId}' AND attempt=1`],
+        ['source identity', `UPDATE public.analysis_revenue_cost_operations SET source_operation_key_hash='${hash('f')}' WHERE request_id='${requestId}' AND attempt=1`],
+        ['amount', `UPDATE public.analysis_revenue_cost_operations SET estimated_economic_usd=0.004 WHERE request_id='${requestId}' AND attempt=1`],
+        ['selected scope', `UPDATE public.analysis_revenue_cost_operations SET selected_manifest_scope_hash='${hash('f')}' WHERE request_id='${requestId}' AND attempt=1`],
+        ['denial', `UPDATE public.analysis_revenue_cost_operations SET denial_reason='hard_cap' WHERE request_id='${requestId}' AND attempt=1`],
+        ['started timestamp', `UPDATE public.analysis_revenue_cost_operations SET started_at='2026-08-10T00:01:30Z' WHERE request_id='${requestId}' AND attempt=1`],
+        ['terminal timestamp', `UPDATE public.analysis_revenue_cost_operations SET terminal_at='2026-08-10T00:03:30Z' WHERE request_id='${requestId}' AND attempt=1`],
+    ])('rejects a replay when an imported child %s drifts', async (_name, mutation) => {
+        const db = await createDb();
+        await begin(db);
+        await expectRejectedReplay(db, 'REVENUE_COST_LEDGER_DRIFT', async () => { await db.exec(mutation); });
     });
 
     it('keeps compatibility mutations not-ready and leaves child costs untouched', async () => {

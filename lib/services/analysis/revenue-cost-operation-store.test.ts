@@ -119,4 +119,16 @@ describe('RevenueCostOperationStore', () => {
         await expect(outcome).rejects.toThrow('REVENUE_COST_OPERATION_RPC_FAILED_P0001');
         await expect(outcome).rejects.not.toThrow('private-target');
     });
+
+    it.each([
+        [{ disposition: 'begun', replayed: false }, 'missing created'],
+        [{ disposition: 'begun', created: false }, 'missing replayed'],
+        [{ disposition: 'begun', created: true, replayed: true }, 'contradictory replay flags'],
+    ])('rejects a begin response with %s', async (data, _description) => {
+        void _description;
+        const rpc = vi.fn().mockResolvedValue({ data, error: null });
+        const store = new RevenueCostOperationStore({ rpc });
+
+        await expect(store.begin({ requestId })).rejects.toThrow('REVENUE_COST_OPERATION_INVALID_RESPONSE');
+    });
 });
