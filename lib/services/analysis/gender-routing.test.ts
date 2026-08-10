@@ -23,8 +23,8 @@ describe('revenue gender routing', () => {
     it('uses deterministic buckets, 80/20 quotas, and never emits input PII', () => {
         const candidates = Array.from({ length: 120 }, (_, index) => candidate(index));
         const assessments = new Map(candidates.map((row, index) => [row.candidateKey, {
-            femaleScore: index < 100 ? 0.9 : 0.1,
-            maleScore: index < 100 ? 0.1 : 0.9,
+            femaleScore: index < 100 ? 0.8 : 0.1,
+            maleScore: index < 100 ? 0.1 : 0.8,
             uncertaintyScore: 0.1,
             evidence: 'image_and_name' as const,
         }]));
@@ -45,5 +45,108 @@ describe('revenue gender routing', () => {
         expect(() => buildGenderRoutingManifest({ ...base, candidates })).toThrowError(
             new GenderRoutingError('ROUTING_UNAVAILABLE'),
         );
+    });
+
+    it('rejects a score triple unless all three bounded scores total one', () => {
+        const candidates = Array.from({ length: 101 }, (_, index) => candidate(index));
+        const assessments = new Map(candidates.map(row => [row.candidateKey, {
+            femaleScore: 0.7,
+            maleScore: 0.3,
+            uncertaintyScore: 0.3,
+            evidence: 'image_and_name' as const,
+        }]));
+
+        expect(() => buildGenderRoutingManifest({ ...base, candidates, assessments })).toThrowError(
+            new GenderRoutingError('ROUTING_UNAVAILABLE'),
+        );
+    });
+
+    it('rejects evidence labels that do not match the actual image and name presence', () => {
+        const candidates = Array.from({ length: 101 }, (_, index) => candidate(index));
+        const assessments = new Map(candidates.map(row => [row.candidateKey, {
+            femaleScore: 0.8,
+            maleScore: 0.2,
+            uncertaintyScore: 0,
+            evidence: 'image_only' as const,
+        }]));
+
+        expect(() => buildGenderRoutingManifest({ ...base, candidates, assessments })).toThrowError(
+            new GenderRoutingError('ROUTING_UNAVAILABLE'),
+        );
+    });
+
+    it('uses final unresolved candidates over the original attempted population after its one retry', () => {
+        const candidates = Array.from({ length: 120 }, (_, index) => candidate(index));
+        const initial = new Map(candidates.slice(0, 100).map(row => [row.candidateKey, {
+            femaleScore: 0.8,
+            maleScore: 0.1,
+            uncertaintyScore: 0.1,
+            evidence: 'image_and_name' as const,
+        }]));
+        const retry = new Map(candidates.slice(100).map(row => [row.candidateKey, {
+            femaleScore: 0.1,
+            maleScore: 0.8,
+            uncertaintyScore: 0.1,
+            evidence: 'image_and_name' as const,
+        }]));
+
+        const result = buildGenderRoutingManifest({
+            ...base,
+            candidates,
+            assessments: initial,
+            retryAssessments: retry,
+        });
+
+        expect(result.modelRetriedCount).toBe(20);
+        expect(result.modelFailedCount).toBe(0);
+        expect(result.selectedCount).toBe(100);
+    });
+
+    it('allows exactly ten unresolved failed candidates after retry without inflating the denominator', () => {
+        const candidates = Array.from({ length: 101 }, (_, index) => candidate(index));
+        const initial = new Map(candidates.slice(0, 81).map(row => [row.candidateKey, {
+            femaleScore: 0.8,
+            maleScore: 0.1,
+            uncertaintyScore: 0.1,
+            evidence: 'image_and_name' as const,
+        }]));
+        const retry = new Map(candidates.slice(81, 91).map(row => [row.candidateKey, {
+            femaleScore: 0.1,
+            maleScore: 0.8,
+            uncertaintyScore: 0.1,
+            evidence: 'image_and_name' as const,
+        }]));
+
+        const result = buildGenderRoutingManifest({
+            ...base,
+            candidates,
+            assessments: initial,
+            retryAssessments: retry,
+        });
+
+        expect(result.modelAttemptedCount).toBe(101);
+        expect(result.modelRetriedCount).toBe(20);
+        expect(result.modelFailedCount).toBe(10);
+    });
+
+    it('does not count candidates with neither permitted input as failed model calls', () => {
+        const candidates = Array.from({ length: 101 }, (_, index) => index === 100
+            ? { candidateKey: 'candidate:no-input', profilePicUrl: null, fullname: null }
+            : candidate(index));
+        const assessments = new Map(candidates.slice(0, 100).map(row => [row.candidateKey, {
+            femaleScore: 0.8,
+            maleScore: 0.1,
+            uncertaintyScore: 0.1,
+            evidence: 'image_and_name' as const,
+        }]));
+
+        const result = buildGenderRoutingManifest({ ...base, candidates, assessments });
+
+        expect(result.modelAttemptedCount).toBe(100);
+        expect(result.modelFailedCount).toBe(0);
+        expect(result.rows.find(row => row.candidateKey === 'candidate:no-input')).toMatchObject({
+            routingUnavailable: true,
+            selected: true,
+        });
     });
 });
