@@ -1466,13 +1466,19 @@ SET search_path = ''
 AS $$
 DECLARE
     v_auth_runner_plan TEXT;
+    v_auth_email TEXT;
+    v_normalized_email TEXT;
+    v_rollout_state TEXT;
+    v_rollout_command_version TEXT;
     v_account public.users%ROWTYPE;
     v_registered_account_id UUID;
+    v_registered_command_version TEXT;
     v_created BOOLEAN := FALSE;
 BEGIN
+    v_normalized_email := pg_catalog.lower(pg_catalog.btrim(p_email));
     IF p_user_id IS NULL
        OR p_email IS NULL
-       OR p_email !~ '^[^[:space:]@]+@[^[:space:]@]+\.[^[:space:]@]+$'
+       OR v_normalized_email !~ '^[^[:space:]@]+@[^[:space:]@]+\.[^[:space:]@]+$'
        OR p_runner_plan NOT IN ('basic', 'standard')
        OR p_command_version IS NULL
        OR p_command_version !~ '^[a-z0-9._-]{1,64}$' THEN
@@ -1481,11 +1487,35 @@ BEGIN
             ERRCODE = 'P0001';
     END IF;
 
-    SELECT auth_user.raw_app_meta_data ->> 'analysis_test_runner_v1'
-    INTO v_auth_runner_plan
+    -- This row lock is the authorization invariant. The CLI check is only a
+    -- preflight; a direct RPC call cannot provision before exact activation.
+    SELECT rollout.paid_ever_state, rollout.classification_command_version
+    INTO v_rollout_state, v_rollout_command_version
+    FROM public.account_ledger_rollout_state AS rollout
+    WHERE rollout.singleton IS TRUE
+    FOR SHARE;
+    IF NOT FOUND OR v_rollout_state IS DISTINCT FROM 'active' THEN
+        RAISE EXCEPTION USING
+            MESSAGE = 'ACCOUNT_E2E_TEST_RUNNER_ROLLOUT_NOT_ACTIVE',
+            ERRCODE = 'P0001';
+    END IF;
+    IF v_rollout_command_version IS DISTINCT FROM p_command_version THEN
+        RAISE EXCEPTION USING
+            MESSAGE = 'ACCOUNT_E2E_TEST_RUNNER_ROLLOUT_COMMAND_MISMATCH',
+            ERRCODE = 'P0001';
+    END IF;
+
+    SELECT pg_catalog.lower(pg_catalog.btrim(auth_user.email)),
+        auth_user.raw_app_meta_data ->> 'analysis_test_runner_v1'
+    INTO v_auth_email, v_auth_runner_plan
     FROM auth.users AS auth_user
     WHERE auth_user.id = p_user_id;
-    IF NOT FOUND OR v_auth_runner_plan IS DISTINCT FROM p_runner_plan THEN
+    IF NOT FOUND OR v_auth_email IS DISTINCT FROM v_normalized_email THEN
+        RAISE EXCEPTION USING
+            MESSAGE = 'ACCOUNT_E2E_TEST_RUNNER_AUTH_EMAIL_MISMATCH',
+            ERRCODE = 'P0001';
+    END IF;
+    IF v_auth_runner_plan IS DISTINCT FROM p_runner_plan THEN
         RAISE EXCEPTION USING
             MESSAGE = 'ACCOUNT_E2E_TEST_RUNNER_AUTH_METADATA_MISMATCH',
             ERRCODE = 'P0001';
@@ -1494,14 +1524,19 @@ BEGIN
     PERFORM pg_catalog.pg_advisory_xact_lock(
         pg_catalog.hashtextextended('account-e2e-test-runner:' || p_runner_plan, 0)
     );
-    SELECT runner.account_id
-    INTO v_registered_account_id
+    SELECT runner.account_id, runner.command_version
+    INTO v_registered_account_id, v_registered_command_version
     FROM public.account_e2e_test_runners AS runner
     WHERE runner.runner_plan = p_runner_plan
     FOR UPDATE;
     IF FOUND AND v_registered_account_id IS DISTINCT FROM p_user_id THEN
         RAISE EXCEPTION USING
             MESSAGE = 'ACCOUNT_E2E_TEST_RUNNER_PLAN_ALREADY_BOUND',
+            ERRCODE = 'P0001';
+    END IF;
+    IF FOUND AND v_registered_command_version IS DISTINCT FROM p_command_version THEN
+        RAISE EXCEPTION USING
+            MESSAGE = 'ACCOUNT_E2E_TEST_RUNNER_COMMAND_MISMATCH',
             ERRCODE = 'P0001';
     END IF;
 
@@ -1515,7 +1550,7 @@ BEGIN
             id, email, provider, analysis_count, is_paid_user, is_unlimited,
             account_class, traffic_class, lifecycle, classification_version
         ) VALUES (
-            p_user_id, p_email, 'e2e', 0, FALSE, FALSE,
+            p_user_id, v_normalized_email, 'e2e', 0, FALSE, FALSE,
             'e2e_test', 'e2e_test', 'active', p_command_version
         );
         SELECT account.*
@@ -1526,7 +1561,8 @@ BEGIN
         v_created := TRUE;
     END IF;
 
-    IF v_account.email IS DISTINCT FROM p_email
+    IF pg_catalog.lower(pg_catalog.btrim(v_account.email))
+            IS DISTINCT FROM v_normalized_email
        OR v_account.account_class IS DISTINCT FROM 'e2e_test'
        OR v_account.traffic_class IS DISTINCT FROM 'e2e_test'
        OR v_account.lifecycle IS DISTINCT FROM 'active'
@@ -1542,13 +1578,18 @@ BEGIN
         p_user_id, p_runner_plan, p_command_version
     ) ON CONFLICT (account_id) DO NOTHING;
 
-    SELECT runner.account_id
-    INTO v_registered_account_id
+    SELECT runner.account_id, runner.command_version
+    INTO v_registered_account_id, v_registered_command_version
     FROM public.account_e2e_test_runners AS runner
     WHERE runner.runner_plan = p_runner_plan;
     IF v_registered_account_id IS DISTINCT FROM p_user_id THEN
         RAISE EXCEPTION USING
             MESSAGE = 'ACCOUNT_E2E_TEST_RUNNER_PLAN_ALREADY_BOUND',
+            ERRCODE = 'P0001';
+    END IF;
+    IF v_registered_command_version IS DISTINCT FROM p_command_version THEN
+        RAISE EXCEPTION USING
+            MESSAGE = 'ACCOUNT_E2E_TEST_RUNNER_COMMAND_MISMATCH',
             ERRCODE = 'P0001';
     END IF;
 
@@ -1588,10 +1629,16 @@ AS $$
     FROM public.account_e2e_test_runners AS runner
     JOIN public.users AS account ON account.id = runner.account_id
     JOIN auth.users AS auth_user ON auth_user.id = runner.account_id
+    JOIN public.account_ledger_rollout_state AS rollout ON rollout.singleton IS TRUE
     WHERE runner.account_id = p_user_id
       AND account.account_class = 'e2e_test'
       AND account.traffic_class = 'e2e_test'
       AND account.lifecycle = 'active'
+      AND runner.command_version = account.classification_version
+      AND runner.command_version = rollout.classification_command_version
+      AND rollout.paid_ever_state = 'active'
+      AND pg_catalog.lower(pg_catalog.btrim(auth_user.email))
+            = pg_catalog.lower(pg_catalog.btrim(account.email))
       AND auth_user.raw_app_meta_data ->> 'analysis_test_runner_v1'
             = runner.runner_plan
 $$;
@@ -1610,9 +1657,15 @@ AS $$
     FROM public.account_e2e_test_runners AS runner
     JOIN public.users AS account ON account.id = runner.account_id
     JOIN auth.users AS auth_user ON auth_user.id = runner.account_id
+    JOIN public.account_ledger_rollout_state AS rollout ON rollout.singleton IS TRUE
     WHERE account.account_class = 'e2e_test'
       AND account.traffic_class = 'e2e_test'
       AND account.lifecycle = 'active'
+      AND runner.command_version = account.classification_version
+      AND runner.command_version = rollout.classification_command_version
+      AND rollout.paid_ever_state = 'active'
+      AND pg_catalog.lower(pg_catalog.btrim(auth_user.email))
+            = pg_catalog.lower(pg_catalog.btrim(account.email))
       AND auth_user.raw_app_meta_data ->> 'analysis_test_runner_v1'
             = runner.runner_plan
     ORDER BY runner.runner_plan

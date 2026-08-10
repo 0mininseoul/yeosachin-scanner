@@ -1,3 +1,4 @@
+import { createHmac } from 'node:crypto';
 import { describe, expect, it, vi } from 'vitest';
 
 import {
@@ -66,6 +67,7 @@ function createDependencies(
                 id: input.runnerPlan === 'basic'
                     ? '40000000-0000-4000-8000-000000000001'
                     : '40000000-0000-4000-8000-000000000002',
+                email: input.email,
                 appMetadata: { analysis_test_runner_v1: input.runnerPlan },
             })),
             getUser: vi.fn(async () => null),
@@ -79,6 +81,15 @@ function createDependencies(
 }
 
 describe('account-ledger rollout command', () => {
+    it('derives the legacy candidate HMAC from decoded canonical key material without reporting it', () => {
+        const expected = createHmac('sha256', Buffer.from(AUDIT_SECRET, 'base64url'))
+            .update(`account-ledger-legacy-e2e-candidates-v1\n${[...LEGACY_IDS].sort().join('\n')}`, 'utf8')
+            .digest('base64url');
+
+        expect(createLegacyCandidateHmac([...LEGACY_IDS].reverse(), AUDIT_SECRET)).toBe(expected);
+        expect(createLegacyCandidateHmac([...LEGACY_IDS].reverse(), AUDIT_SECRET)).toBe(expected);
+    });
+
     it('defaults to a read-only audit and rejects mutation modes without an exact confirmation', async () => {
         expect(parseAccountLedgerRolloutArgs([])).toEqual({ mode: 'audit' });
         expect(() => parseAccountLedgerRolloutArgs(['--mode', 'apply'])).toThrow(
@@ -170,6 +181,25 @@ describe('account-ledger rollout command', () => {
         expect(active.dependencies.ledger.applyClassificationPlan).not.toHaveBeenCalled();
     });
 
+    it('rejects a partial pending apply result before emitting an activation report', async () => {
+        const partial = createDependencies({
+            ledger: {
+                ...createDependencies().dependencies.ledger,
+                applyClassificationPlan: vi.fn(async () => ({
+                    updatedCount: PLAN_ASSIGNMENTS.length - 1,
+                    evidenceCount: 1,
+                    paidAccountCount: 1,
+                })),
+            },
+        });
+
+        await expect(runAccountLedgerRollout({
+            mode: 'apply',
+            confirmed: true,
+        }, partial.dependencies)).rejects.toThrow('ACCOUNT_LEDGER_CLASSIFICATION_APPLY_RESULT_INVALID');
+        expect(partial.reports).toEqual([]);
+    });
+
     it('provisions exactly the immutable Basic and Standard runner pair after activation', async () => {
         const { dependencies, reports } = createDependencies({
             ledger: {
@@ -214,6 +244,7 @@ describe('account-ledger rollout command', () => {
                 ...createDependencies().dependencies.auth,
                 createUser: vi.fn(async input => ({
                     id: '40000000-0000-4000-8000-000000000001',
+                    email: input.email,
                     appMetadata: { analysis_test_runner_v1: input.runnerPlan === 'basic' ? 'standard' : 'basic' },
                 })),
             },
@@ -232,5 +263,30 @@ describe('account-ledger rollout command', () => {
         });
         await expect(runAccountLedgerRollout({ mode: 'provision', confirmed: true }, registryDrift.dependencies))
             .rejects.toThrow('ACCOUNT_LEDGER_E2E_RUNNER_REGISTRY_MISMATCH');
+    });
+
+    it('rejects an Auth identity whose normalized email differs from the Keychain credential', async () => {
+        const identityDrift = createDependencies({
+            ledger: {
+                ...createDependencies().dependencies.ledger,
+                getRolloutState: vi.fn(async () => ({
+                    state: 'active' as const, commandVersion: ACCOUNT_LEDGER_COMMAND_VERSION,
+                })),
+            },
+            auth: {
+                ...createDependencies().dependencies.auth,
+                createUser: vi.fn(async input => ({
+                    id: '40000000-0000-4000-8000-000000000001',
+                    email: input.runnerPlan === 'basic'
+                        ? 'different-runner@e2e.invalid'
+                        : input.email,
+                    appMetadata: { analysis_test_runner_v1: input.runnerPlan },
+                })),
+            },
+        });
+
+        await expect(runAccountLedgerRollout({ mode: 'provision', confirmed: true }, identityDrift.dependencies))
+            .rejects.toThrow('ACCOUNT_LEDGER_E2E_RUNNER_EMAIL_MISMATCH');
+        expect(JSON.stringify(identityDrift.reports)).not.toContain('different-runner@e2e.invalid');
     });
 });

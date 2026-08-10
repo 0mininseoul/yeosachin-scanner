@@ -54,6 +54,7 @@ async function createDatabase(): Promise<PGlite> {
         CREATE SCHEMA auth;
         CREATE TABLE auth.users (
             id UUID PRIMARY KEY,
+            email TEXT,
             raw_app_meta_data JSONB NOT NULL DEFAULT '{}'::JSONB
         );
 
@@ -1013,17 +1014,49 @@ describe('account-principal Phase A+B migration semantics', () => {
         ])).rejects.toThrow('ACCOUNT_CLASSIFICATION_LEGACY_CANDIDATE_DRIFT');
     }, PGLITE_TEST_TIMEOUT_MS);
 
-    it('binds exactly one immutable runner per plan, remains idempotent, and denies a retired runner', async () => {
+    it('keeps runner provisioning and reads fail-closed until the exact active command, Auth email, metadata, and principal agree', async () => {
         const db = await createDatabase();
         const basicRunnerId = '50000000-0000-4000-8000-000000000001';
         const standardRunnerId = '50000000-0000-4000-8000-000000000002';
         const duplicateBasicRunnerId = '50000000-0000-4000-8000-000000000003';
         await db.exec(`
-            INSERT INTO auth.users(id, raw_app_meta_data) VALUES
-                ('${basicRunnerId}', '{"analysis_test_runner_v1":"basic"}'::JSONB),
-                ('${standardRunnerId}', '{"analysis_test_runner_v1":"standard"}'::JSONB),
-                ('${duplicateBasicRunnerId}', '{"analysis_test_runner_v1":"basic"}'::JSONB);
+            INSERT INTO auth.users(id, email, raw_app_meta_data) VALUES
+                ('${basicRunnerId}', 'basic-runner@invalid.test', '{"analysis_test_runner_v1":"basic"}'::JSONB),
+                ('${standardRunnerId}', 'standard-runner@invalid.test', '{"analysis_test_runner_v1":"standard"}'::JSONB),
+                ('${duplicateBasicRunnerId}', 'duplicate-runner@invalid.test', '{"analysis_test_runner_v1":"basic"}'::JSONB);
         `);
+
+        await expect(asService(db, `
+            SELECT * FROM public.provision_e2e_test_runner_v1(
+                $1::UUID, $2::TEXT, 'basic', 'account-ledger-v1'
+            )
+        `, [basicRunnerId, 'basic-runner@invalid.test']))
+            .rejects.toThrow('ACCOUNT_E2E_TEST_RUNNER_ROLLOUT_NOT_ACTIVE');
+        expect((await db.query<{ count: number }>(
+            'SELECT COUNT(*)::INTEGER AS count FROM public.account_e2e_test_runners',
+        )).rows).toEqual([{ count: 0 }]);
+
+        await db.exec(`
+            UPDATE public.account_ledger_rollout_state
+            SET paid_ever_state = 'active',
+                classification_command_version = 'account-ledger-v1',
+                classification_completed_at = pg_catalog.clock_timestamp(),
+                updated_at = pg_catalog.clock_timestamp()
+            WHERE singleton IS TRUE;
+        `);
+
+        await expect(asService(db, `
+            SELECT * FROM public.provision_e2e_test_runner_v1(
+                $1::UUID, $2::TEXT, 'basic', 'wrong-command-version'
+            )
+        `, [basicRunnerId, 'basic-runner@invalid.test']))
+            .rejects.toThrow('ACCOUNT_E2E_TEST_RUNNER_ROLLOUT_COMMAND_MISMATCH');
+        await expect(asService(db, `
+            SELECT * FROM public.provision_e2e_test_runner_v1(
+                $1::UUID, $2::TEXT, 'basic', 'account-ledger-v1'
+            )
+        `, [basicRunnerId, 'wrong-runner@invalid.test']))
+            .rejects.toThrow('ACCOUNT_E2E_TEST_RUNNER_AUTH_EMAIL_MISMATCH');
 
         const firstBasic = await asService<{ runner_plan: string; created: boolean }>(db, `
             SELECT * FROM public.provision_e2e_test_runner_v1(
@@ -1053,6 +1086,46 @@ describe('account-principal Phase A+B migration semantics', () => {
             'SELECT runner_plan FROM public.list_e2e_test_runner_plans_v1()',
         );
         expect(plans.rows.map(row => row.runner_plan)).toEqual(['basic', 'standard']);
+
+        await db.exec(`
+            UPDATE public.account_ledger_rollout_state
+            SET classification_command_version = 'wrong-command-version'
+            WHERE singleton IS TRUE;
+        `);
+        expect((await asService<{ runner_plan: string }>(db,
+            'SELECT runner_plan FROM public.load_e2e_test_runner_v1($1::UUID)',
+            [basicRunnerId],
+        )).rows).toEqual([]);
+        expect((await asService<{ runner_plan: string }>(db,
+            'SELECT runner_plan FROM public.list_e2e_test_runner_plans_v1()',
+        )).rows).toEqual([]);
+        await db.exec(`
+            UPDATE public.account_ledger_rollout_state
+            SET classification_command_version = 'account-ledger-v1'
+            WHERE singleton IS TRUE;
+            UPDATE auth.users
+            SET email = 'wrong-runner@invalid.test'
+            WHERE id = '${basicRunnerId}';
+        `);
+        expect((await asService<{ runner_plan: string }>(db,
+            'SELECT runner_plan FROM public.load_e2e_test_runner_v1($1::UUID)',
+            [basicRunnerId],
+        )).rows).toEqual([]);
+        await db.exec(`
+            UPDATE auth.users
+            SET email = 'basic-runner@invalid.test',
+                raw_app_meta_data = '{"analysis_test_runner_v1":"standard"}'::JSONB
+            WHERE id = '${basicRunnerId}';
+        `);
+        expect((await asService<{ runner_plan: string }>(db,
+            'SELECT runner_plan FROM public.load_e2e_test_runner_v1($1::UUID)',
+            [basicRunnerId],
+        )).rows).toEqual([]);
+        await db.exec(`
+            UPDATE auth.users
+            SET raw_app_meta_data = '{"analysis_test_runner_v1":"basic"}'::JSONB
+            WHERE id = '${basicRunnerId}';
+        `);
         await asService(db,
             "UPDATE public.users SET lifecycle = 'retired' WHERE id = $1::UUID",
             [basicRunnerId],

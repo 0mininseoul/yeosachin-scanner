@@ -64,9 +64,17 @@ export interface AccountLedgerAuthAdmin {
         password: string;
         runnerPlan: E2eRunnerPlan;
         appMetadata: Record<string, string>;
-    }): Promise<{ id: string; appMetadata: Record<string, unknown> }>;
-    getUser(userId: string): Promise<{ id: string; appMetadata: Record<string, unknown> } | null>;
-    findUserByEmail(email: string): Promise<{ id: string; appMetadata: Record<string, unknown> } | null>;
+    }): Promise<{ id: string; email: string; appMetadata: Record<string, unknown> }>;
+    getUser(userId: string): Promise<{
+        id: string;
+        email: string;
+        appMetadata: Record<string, unknown>;
+    } | null>;
+    findUserByEmail(email: string): Promise<{
+        id: string;
+        email: string;
+        appMetadata: Record<string, unknown>;
+    } | null>;
 }
 
 export interface AccountLedgerRolloutDependencies {
@@ -141,6 +149,10 @@ function requireKeychainSecret(value: string | null): string {
     return value;
 }
 
+function decodedKeychainSecret(value: string | null): Buffer {
+    return Buffer.from(requireKeychainSecret(value), 'base64url');
+}
+
 function constantTimeHmacEqual(actual: string, expected: string): boolean {
     if (!BASE64URL_32_BYTES_PATTERN.test(actual) || !BASE64URL_32_BYTES_PATTERN.test(expected)) {
         return false;
@@ -156,7 +168,7 @@ export function createLegacyCandidateHmac(
     auditSecret: string,
 ): string {
     const normalized = normalizedUniqueIds(candidateIds, 100);
-    return createHmac('sha256', auditSecret)
+    return createHmac('sha256', decodedKeychainSecret(auditSecret))
         .update(`${LEGACY_CANDIDATE_HMAC_DOMAIN}\n${normalized.join('\n')}`, 'utf8')
         .digest('base64url');
 }
@@ -256,6 +268,15 @@ function assertActiveCommand(
     }
 }
 
+function normalizedRunnerEmail(value: unknown): string {
+    if (typeof value !== 'string') fail('ACCOUNT_LEDGER_E2E_RUNNER_CREDENTIAL_INVALID');
+    const normalized = value.trim().toLowerCase();
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(normalized)) {
+        fail('ACCOUNT_LEDGER_E2E_RUNNER_CREDENTIAL_INVALID');
+    }
+    return normalized;
+}
+
 function parseRunnerCredential(value: string | null): RunnerCredential | null {
     if (value === null) return null;
     let parsed: unknown;
@@ -270,7 +291,6 @@ function parseRunnerCredential(value: string | null): RunnerCredential | null {
     const candidate = parsed as Record<string, unknown>;
     if (
         typeof candidate.email !== 'string'
-        || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(candidate.email)
         || typeof candidate.password !== 'string'
         || candidate.password.length < 16
         || (candidate.userId !== undefined && typeof candidate.userId !== 'string')
@@ -278,7 +298,7 @@ function parseRunnerCredential(value: string | null): RunnerCredential | null {
         fail('ACCOUNT_LEDGER_E2E_RUNNER_CREDENTIAL_INVALID');
     }
     return {
-        email: candidate.email,
+        email: normalizedRunnerEmail(candidate.email),
         password: candidate.password,
         ...(candidate.userId === undefined ? {} : { userId: normalizedUuid(candidate.userId) }),
     };
@@ -299,12 +319,16 @@ function generatedRunnerCredential(
 }
 
 function assertRunnerMetadata(
-    user: { id: string; appMetadata: Record<string, unknown> },
+    user: { id: string; email: string; appMetadata: Record<string, unknown> },
     runnerPlan: E2eRunnerPlan,
+    credentialEmail: string,
 ): string {
     const userId = normalizedUuid(user.id);
     if (user.appMetadata[RUNNER_METADATA_KEY] !== runnerPlan) {
         fail('ACCOUNT_LEDGER_E2E_RUNNER_METADATA_MISMATCH');
+    }
+    if (normalizedRunnerEmail(user.email) !== credentialEmail) {
+        fail('ACCOUNT_LEDGER_E2E_RUNNER_EMAIL_MISMATCH');
     }
     return userId;
 }
@@ -324,10 +348,13 @@ async function resolveRunnerUser(
     if (credential.userId) {
         const existing = await dependencies.auth.getUser(credential.userId);
         if (!existing) fail('ACCOUNT_LEDGER_E2E_RUNNER_AUTH_MISSING');
-        return { credential, userId: assertRunnerMetadata(existing, runnerPlan) };
+        return {
+            credential,
+            userId: assertRunnerMetadata(existing, runnerPlan, credential.email),
+        };
     }
 
-    let user: { id: string; appMetadata: Record<string, unknown> };
+    let user: { id: string; email: string; appMetadata: Record<string, unknown> };
     try {
         user = await dependencies.auth.createUser({
             email: credential.email,
@@ -340,7 +367,7 @@ async function resolveRunnerUser(
         if (!existing) fail('ACCOUNT_LEDGER_E2E_RUNNER_AUTH_CREATE_FAILED');
         user = existing;
     }
-    const userId = assertRunnerMetadata(user, runnerPlan);
+    const userId = assertRunnerMetadata(user, runnerPlan, credential.email);
     credential = { ...credential, userId };
     await dependencies.keychain.write(credentialAccount, serializeRunnerCredential(credential));
     return { credential, userId };
@@ -434,6 +461,7 @@ export async function runAccountLedgerRollout(
     if (
         !Number.isInteger(applied.updatedCount)
         || applied.updatedCount < 0
+        || applied.updatedCount !== plan.totalCount
         || !Number.isInteger(applied.evidenceCount)
         || applied.evidenceCount < 0
         || !Number.isInteger(applied.paidAccountCount)
