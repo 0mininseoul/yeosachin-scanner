@@ -66,6 +66,16 @@ export interface RevenueCostLiveSource {
 
 export type ReserveRevenueCostOperationV2 = RevenueCostLiveSource;
 
+export interface SettleRevenueCostOperationV2 {
+    readonly requestId: string;
+    readonly jobKey: string;
+    readonly sourceKind: RevenueCostLiveSourceKind;
+    readonly sourceOperationKey: string;
+    readonly sourceAttempt: number;
+}
+
+export type ReleaseRevenueCostOperationV2 = RevenueCostLiveSource;
+
 export interface RevenueCostOperationOutcome {
     readonly disposition: 'begun' | 'accepted' | 'denied' | 'started' | 'settled' | 'released' | 'ambiguous' | 'manual_review';
     readonly created: boolean;
@@ -107,6 +117,17 @@ function assertLiveSource(input: RevenueCostLiveSource): void {
     const sourceKeyPattern = input.sourceKind === 'provider_run' ? PROVIDER_OPERATION_KEY : AI_OPERATION_KEY;
     if (!UUID.test(input.requestId) || !JOB_KEY.test(input.jobKey) || !UUID.test(input.jobClaimToken)
         || !HASH.test(input.jobInputHash) || !['provider_run', 'ai_attempt'].includes(input.sourceKind)
+        || !sourceKeyPattern.test(input.sourceOperationKey) || !Number.isSafeInteger(input.sourceAttempt)
+        || (input.sourceKind === 'provider_run' && input.sourceAttempt !== 0)
+        || (input.sourceKind === 'ai_attempt' && (input.sourceAttempt < 1 || input.sourceAttempt > 4))) {
+        throw new Error('REVENUE_COST_OPERATION_INVALID_INPUT');
+    }
+}
+
+function assertSettlementSource(input: SettleRevenueCostOperationV2): void {
+    const sourceKeyPattern = input.sourceKind === 'provider_run' ? PROVIDER_OPERATION_KEY : AI_OPERATION_KEY;
+    if (!UUID.test(input.requestId) || !JOB_KEY.test(input.jobKey)
+        || !['provider_run', 'ai_attempt'].includes(input.sourceKind)
         || !sourceKeyPattern.test(input.sourceOperationKey) || !Number.isSafeInteger(input.sourceAttempt)
         || (input.sourceKind === 'provider_run' && input.sourceAttempt !== 0)
         || (input.sourceKind === 'ai_attempt' && (input.sourceAttempt < 1 || input.sourceAttempt > 4))) {
@@ -224,11 +245,30 @@ export class RevenueCostOperationStore {
         });
     }
 
+    settleV2(input: SettleRevenueCostOperationV2): Promise<RevenueCostOperationOutcome> {
+        assertSettlementSource(input);
+        if (input.sourceKind === 'ai_attempt') throw new Error('REVENUE_COST_OPERATION_AI_NOT_READY');
+        return this.call('settle_analysis_revenue_cost_operation_v2', {
+            p_request_id: input.requestId, p_job_key: input.jobKey, p_source_kind: input.sourceKind,
+            p_source_operation_key: input.sourceOperationKey, p_source_attempt: input.sourceAttempt,
+        });
+    }
+
     release(input: Identity): Promise<RevenueCostOperationOutcome> {
         assertIdentity(input);
         return this.call('release_analysis_revenue_cost_operation_v1', {
             p_request_id: input.requestId, p_owner_kind: input.ownerKind,
             p_owner_key_hash: input.ownerKeyHash, p_attempt: input.attempt,
+        });
+    }
+
+    releaseV2(input: ReleaseRevenueCostOperationV2): Promise<RevenueCostOperationOutcome> {
+        assertLiveSource(input);
+        if (input.sourceKind === 'ai_attempt') throw new Error('REVENUE_COST_OPERATION_AI_NOT_READY');
+        return this.call('release_analysis_revenue_cost_operation_v2', {
+            p_request_id: input.requestId, p_job_key: input.jobKey, p_job_claim_token: input.jobClaimToken,
+            p_job_input_hash: input.jobInputHash, p_source_kind: input.sourceKind,
+            p_source_operation_key: input.sourceOperationKey, p_source_attempt: input.sourceAttempt,
         });
     }
 
