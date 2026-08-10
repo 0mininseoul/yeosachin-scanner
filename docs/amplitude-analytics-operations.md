@@ -24,13 +24,15 @@ Session Replay 허용 경로 템플릿은 `/`, `/privacy`, `/terms`, `/login`, `
 
 DNT 또는 GPC(Global Privacy Control) opt-out이면 fail-closed로 `sampleRate: 0`, `capture_enabled: false`로 Replay를 차단한다. Vercel의 enable·sample 환경변수가 rollout 활성화와 표본율을 권위 있게 결정한다. 신뢰한 Amplitude remote config는 `capture_enabled: true`인지 확인하는 emergency veto로만 사용하며, upstream `sample_rate`와 다른 설정은 적용하거나 전달하지 않는다. Amplitude가 `capture_enabled: false`를 반환하면 Replay를 차단하고, remote config 응답 오류·실패·형식 오류도 fail-closed `sampleRate: 0`으로 처리한다. Replay의 click·scroll interaction은 batching을 켜서 수집하지만 network·console·performance·document title 수집은 끈다. 일반 Analytics autocapture도 page URL·view, form·element·frustration interaction을 포함해 계속 끈 상태다.
 
-Replay는 설치된 SDK가 지원하는 가장 낮은 기본 수준인 `light`를 사용한다. 전역 `form`/`input`/media/DOM attribute 마스킹·차단은 사용하지 않는다. `[data-amp-mask]`와 `[data-amp-block]`은 컴포넌트 allowlist/denylist로 관리한다.
+Replay는 설치된 SDK가 지원하는 가장 낮은 기본 수준인 `light`를 사용하며, 결과 전용 allowlist의 일반 텍스트와 media는 실제 화면처럼 보이게 한다. 전역 `form`/`input`/media/DOM attribute 마스킹·차단은 사용하지 않는다. `[data-amp-mask]`와 `[data-amp-block]`은 컴포넌트 allowlist/denylist로 관리한다.
+
+사용자 입력 이메일·전화번호 같은 연락처는 Replay나 event에 보내지 않고 해당 입력 UI에서 계속 마스킹한다.
 
 - 결과·공유 결과·profile preview·demo의 대상 요약, 순위 카드, private row, 프로필 이미지, 일반 설명·score·layout은 관측한다.
 - 로그인·회원정보·결제 입력, 이메일·전화번호·인증정보, 사용자가 직접 입력하는 target field와 자유 입력, query/share token/cookie, raw 오류 원문, 운영자 진단은 계속 mask/block한다.
 - 새 result child component는 기본 masked이며 privacy contract test에 명시적으로 추가한 뒤에만 해제한다. page-wide unmask selector는 만들지 않는다.
 
-명시 이벤트와 속성은 닫힌 allowlist를 통과하며 명시 이벤트에는 페이지 URL을 보내지 않는다. Replay URL은 local UGC filter rule으로 정규화한다. 이메일·전화번호·결제 연락처, 사용자가 입력한 Instagram target, bio/comment/caption 원문은 event·user property에 보내지 않고 denylist UI에서 보호한다. 결과 카드의 이름·이미지는 이벤트 속성에는 보내지 않지만 위 결과 전용 Replay allowlist에서는 화면 QA를 위해 보이게 한다.
+명시 이벤트와 속성은 닫힌 allowlist를 통과하며 명시 이벤트에는 페이지 URL을 보내지 않는다. Replay URL은 local UGC filter rule으로 정규화한다. 이벤트 속성에서는 인스타그램 식별자·이름·bio·댓글·caption·이미지·미디어·결제 연락처를 모두 제외한다. 이메일·전화번호, 사용자가 입력한 Instagram target과 bio/comment/caption 원문은 event·user property에 보내지 않고 denylist UI에서 보호한다. 결과 카드의 이름·이미지는 이벤트 속성에는 보내지 않지만 위 결과 전용 Replay allowlist에서는 화면 QA를 위해 보이게 한다.
 
 ## 3. 이벤트와 허용 속성
 
