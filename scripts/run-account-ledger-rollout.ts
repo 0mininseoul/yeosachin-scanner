@@ -51,6 +51,15 @@ function appMetadata(value: unknown): Record<string, unknown> {
     return value as Record<string, unknown>;
 }
 
+function normalizedEmail(value: unknown): string {
+    if (typeof value !== 'string') fail('ACCOUNT_LEDGER_AUTH_RESULT_INVALID');
+    const normalized = value.trim().toLowerCase();
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(normalized)) {
+        fail('ACCOUNT_LEDGER_AUTH_RESULT_INVALID');
+    }
+    return normalized;
+}
+
 const keychain: AccountLedgerKeychain = {
     async read(account) {
         try {
@@ -161,10 +170,14 @@ const ledger: AccountLedgerClient = {
     },
 };
 
-function authUser(value: unknown): { id: string; appMetadata: Record<string, unknown> } {
+function authUser(value: unknown): { id: string; email: string; appMetadata: Record<string, unknown> } {
     if (!value || typeof value !== 'object') fail('ACCOUNT_LEDGER_AUTH_RESULT_INVALID');
     const user = value as Record<string, unknown>;
-    return { id: uuid(user.id), appMetadata: appMetadata(user.app_metadata) };
+    return {
+        id: uuid(user.id),
+        email: normalizedEmail(user.email),
+        appMetadata: appMetadata(user.app_metadata),
+    };
 }
 
 const auth: AccountLedgerAuthAdmin = {
@@ -184,7 +197,7 @@ const auth: AccountLedgerAuthAdmin = {
         return data.user ? authUser(data.user) : null;
     },
     async findUserByEmail(email) {
-        let matches: { id: string; appMetadata: Record<string, unknown> }[] = [];
+        let matches: { id: string; email: string; appMetadata: Record<string, unknown> }[] = [];
         for (let page = 1; page <= MAX_AUTH_LOOKUP_PAGES; page += 1) {
             const { data, error } = await supabaseAdmin.auth.admin.listUsers({
                 page,
@@ -194,7 +207,13 @@ const auth: AccountLedgerAuthAdmin = {
                 fail('ACCOUNT_LEDGER_E2E_RUNNER_AUTH_LOOKUP_FAILED');
             }
             matches = matches.concat(data.users
-                .filter(user => user.email === email)
+                .filter(user => {
+                    try {
+                        return normalizedEmail(user.email) === email;
+                    } catch {
+                        return false;
+                    }
+                })
                 .map(authUser));
             if (data.users.length < AUTH_LOOKUP_PAGE_SIZE) break;
         }
