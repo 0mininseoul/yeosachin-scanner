@@ -28,6 +28,10 @@ CHALLENGE_EXCEPTION_NAMES = {
 }
 
 
+class SessionAccountMismatchError(RuntimeError):
+    pass
+
+
 def _secure_dump(client: Any, path: Path) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     descriptor, temporary_name = tempfile.mkstemp(
@@ -121,6 +125,11 @@ def main(argv: list[str] | None = None) -> None:
     ).strip()
     if not username or not password:
         raise SystemExit('Username and password are required.')
+    if args.output_path.exists() or args.output_path.is_symlink():
+        raise SystemExit(
+            'Session output already exists. Move or remove it, or choose a new '
+            '--output-path before starting another bootstrap attempt.'
+        )
 
     client = Client()
     resumed = args.state_path.exists()
@@ -133,9 +142,21 @@ def main(argv: list[str] | None = None) -> None:
         login_kwargs = {'verification_code': verification_code} if verification_code else {}
         if not client.login(username, password, **login_kwargs):
             raise RuntimeError('Instagram login did not complete.')
+        account = client.account_info()
+        authenticated_username = getattr(account, 'username', None)
+        if (
+            not isinstance(authenticated_username, str)
+            or authenticated_username.strip().lower() != username.lower()
+        ):
+            raise SessionAccountMismatchError(
+                'The saved session belongs to a different Instagram account. '
+                'Use a separate state path for each account.'
+            )
         _secure_dump(client, args.state_path)
         _write_output(_safe_settings(client.get_settings()), args.output_path)
     except Exception as error:
+        if isinstance(error, SessionAccountMismatchError):
+            raise SystemExit(str(error)) from None
         try:
             _secure_dump(client, args.state_path)
         except Exception:

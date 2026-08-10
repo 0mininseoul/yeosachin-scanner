@@ -43,6 +43,13 @@ value. Keeping the complete state is required by authenticated relationship
 endpoints that depend on the restored cookie and header state in addition to
 the session ID and device identifiers.
 
+Use a separate state path for every Instagram account. Before exporting a
+session, the helper verifies that the authenticated account matches the entered
+username. It also refuses to start when the output path already exists, so a
+failed new attempt cannot leave an older session artifact that looks current.
+Move or remove a verified prior output, or pass a new `--output-path`, before
+starting another bootstrap attempt.
+
 Treat both local files as secrets. Do not copy them into chat, shell history,
 logs, an env file, or Git. Use the approved Secret Manager workflow to create a
 version from the local output without echoing its contents, then configure the

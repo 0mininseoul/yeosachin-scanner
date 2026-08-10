@@ -50,6 +50,9 @@ class _FakeClient:
     def get_settings(self):
         return self.settings
 
+    def account_info(self):
+        return types.SimpleNamespace(username='burner')
+
 
 class BootstrapSessionTests(unittest.TestCase):
     def test_challenge_persists_state_and_next_run_reuses_complete_state(self):
@@ -99,6 +102,41 @@ class BootstrapSessionTests(unittest.TestCase):
                 'device_settings': {'model': 'stable-device'},
                 'nested': {'password_hint': 'must-not-be-written'},
             })
+
+    def test_resumed_session_must_match_the_entered_username(self):
+        _FakeClient.attempts = 1
+        with tempfile.TemporaryDirectory() as directory:
+            state_path = Path(directory) / 'state.json'
+            output_path = Path(directory) / 'session.b64'
+            state_path.write_text(json.dumps(_FakeClient().settings))
+            fake_module = types.SimpleNamespace(Client=_FakeClient)
+            with (
+                patch.dict('sys.modules', {'instagrapi': fake_module}),
+                patch('builtins.input', return_value='other.account'),
+                patch.object(MODULE.getpass, 'getpass', side_effect=['password', '']),
+            ):
+                with self.assertRaisesRegex(SystemExit, 'different Instagram account'):
+                    MODULE.main(['--state-path', str(state_path), '--output-path', str(output_path)])
+
+            self.assertFalse(output_path.exists())
+
+    def test_existing_output_blocks_a_new_attempt(self):
+        _FakeClient.attempts = 0
+        with tempfile.TemporaryDirectory() as directory:
+            state_path = Path(directory) / 'state.json'
+            output_path = Path(directory) / 'session.b64'
+            output_path.write_bytes(b'previous-session-output')
+            fake_module = types.SimpleNamespace(Client=_FakeClient)
+            with (
+                patch.dict('sys.modules', {'instagrapi': fake_module}),
+                patch('builtins.input', return_value='burner'),
+                patch.object(MODULE.getpass, 'getpass', side_effect=['password', '']),
+            ):
+                with self.assertRaisesRegex(SystemExit, 'Session output already exists'):
+                    MODULE.main(['--state-path', str(state_path), '--output-path', str(output_path)])
+
+            self.assertEqual(_FakeClient.attempts, 0)
+            self.assertEqual(output_path.read_bytes(), b'previous-session-output')
 
 
 if __name__ == '__main__':
