@@ -1,10 +1,24 @@
 import { describe, expect, it, vi } from 'vitest';
 
-const mocks = vi.hoisted(() => ({ emit: vi.fn() }));
+const mocks = vi.hoisted(() => ({
+    emit: vi.fn(),
+    recordPreflightFailure: vi.fn(async () => true),
+}));
 
 vi.mock('./server', () => ({
     operationalLogger: { emit: mocks.emit },
 }));
+
+vi.mock('@/lib/services/analysis/preflight-failure-ledger', async importOriginal => {
+    const actual = await importOriginal<
+        typeof import('@/lib/services/analysis/preflight-failure-ledger')
+    >();
+
+    return {
+        ...actual,
+        recordPreflightFailure: mocks.recordPreflightFailure,
+    };
+});
 
 import {
     emitPreflightProcessObservation,
@@ -79,6 +93,34 @@ describe('preflight operational terminal codes', () => {
 
         const emitted = mocks.emit.mock.calls[0]?.[0] as OperationalEvent;
         expect(sanitizeOperationalEvent(emitted).fields.error_code).toBe(errorCode);
+    });
+
+    it.each([
+        'TARGET_NOT_FOUND',
+        'OVER_PLUS_CAPACITY',
+    ] as const)('does not duplicate the canonical failure-ledger write for %s', errorCode => {
+        mocks.emit.mockClear();
+        mocks.recordPreflightFailure.mockClear();
+
+        emitPreflightProcessObservation({
+            request_id: '123e4567-e89b-42d3-a456-426614174000',
+            trace_id: null,
+            route: '/api/analysis/preflight/worker',
+            method: 'POST',
+        }, {
+            type: 'completed',
+            outcome: 'blocked',
+            preflightId: '223e4567-e89b-42d3-a456-426614174000',
+            userId: '323e4567-e89b-42d3-a456-426614174000',
+            targetInstagramId: 'target.name',
+            errorCode,
+        });
+
+        expect(mocks.recordPreflightFailure).not.toHaveBeenCalled();
+        expect(mocks.emit).toHaveBeenCalledWith(expect.objectContaining({
+            event: 'preflight.completed',
+            fields: expect.objectContaining({ error_code: errorCode }),
+        }));
     });
 
     it('drops an unregistered completion code after sanitization', () => {

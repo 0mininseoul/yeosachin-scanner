@@ -1068,6 +1068,7 @@ describe('preflight worker domain', () => {
             stage: 'profile',
             errorCode: ledgerCode,
         });
+        expect(recordFailure).toHaveBeenCalledTimes(1);
         expect(store.finalizeReady).not.toHaveBeenCalled();
     });
 

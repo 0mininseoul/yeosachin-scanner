@@ -70,16 +70,9 @@ export function emitPreflightProcessObservation(
         return;
     }
     if (observation.type === 'completed') {
-        if (observation.outcome === 'blocked') {
-            void recordPreflightFailure({
-                userId: observation.userId,
-                preflightId: observation.preflightId,
-                stage: 'profile',
-                errorCode: preflightFailureReason(
-                    observation.failureCategory ?? observation.errorCode,
-                ),
-            });
-        }
+        // The terminal processor owns the one durable failure-ledger row for a
+        // blocked preflight lineage. This observer may be replayed, so it must
+        // remain observability-only for completed transitions.
         operationalLogger.emit({
             event: 'preflight.completed',
             severity: observation.outcome === 'ready' ? 'info' : 'warn',
