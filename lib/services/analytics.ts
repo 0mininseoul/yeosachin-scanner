@@ -24,7 +24,19 @@ export const EVENTS = {
     RESULT_SHARED: 'result_shared',
 } as const;
 
-export type AnalyticsEvent = (typeof EVENTS)[keyof typeof EVENTS];
+/** Additive revenue events, kept out of EVENTS to preserve its dashboard shape. */
+export const REVENUE_SHARE_EVENTS = Object.freeze({
+    INITIATED: 'result_share_initiated',
+    COPY_SUCCEEDED: 'result_share_copy_succeeded',
+    HANDOFF_COMPLETED: 'result_share_handoff_completed',
+    CONFIRMED: 'result_shared_confirmed',
+    OPENED: 'shared_result_opened',
+    CANCELLED: 'result_share_cancelled',
+    FAILED: 'result_share_failed',
+} as const);
+
+export type AnalyticsEvent = (typeof EVENTS)[keyof typeof EVENTS]
+    | (typeof REVENUE_SHARE_EVENTS)[keyof typeof REVENUE_SHARE_EVENTS];
 export type AnalyticsAuthProvider = 'google' | 'kakao';
 export type AnalyticsShareChannel = 'clipboard' | 'kakao' | 'web_share';
 
@@ -53,6 +65,7 @@ type PropertyName =
     | 'required_plan_id'
     | 'result_count'
     | 'share_channel'
+    | 'share_outcome'
     | 'source'
     | 'stage'
     | 'status'
@@ -123,7 +136,10 @@ const SESSION_REPLAY_PRIVACY_CONFIG = {
 } as const;
 const SESSION_REPLAY_TRACK_TYPES = new Set(['replay', 'interaction']);
 
-const APPROVED_EVENTS = new Set<AnalyticsEvent>(Object.values(EVENTS));
+const APPROVED_EVENTS = new Set<AnalyticsEvent>([
+    ...Object.values(EVENTS),
+    ...Object.values(REVENUE_SHARE_EVENTS),
+]);
 
 function enumValidator<const T extends string>(values: readonly T[]): PropertyValidator {
     const allowed = new Set<string>(values);
@@ -189,6 +205,7 @@ const PROPERTY_VALIDATORS: Record<PropertyName, PropertyValidator> = {
     required_plan_id: enumValidator(['basic', 'standard', 'plus']),
     result_count: integerValidator(0, 10_000),
     share_channel: enumValidator(['clipboard', 'kakao', 'web_share']),
+    share_outcome: enumValidator(['started', 'succeeded', 'cancelled', 'failed', 'confirmed', 'opened']),
     source: enumValidator(['direct', 'google', 'instagram', 'kakao', 'chatgpt', 'shared']),
     stage: enumValidator([
         'analysis',
@@ -245,6 +262,13 @@ const EVENT_SCHEMAS: Record<AnalyticsEvent, readonly PropertyName[]> = {
     [EVENTS.ANALYSIS_FAILED]: ['request_id', 'duration_ms', 'error_code'],
     [EVENTS.RESULT_VIEWED]: ['request_id', 'result_count', 'is_shared'],
     [EVENTS.RESULT_SHARED]: ['request_id', 'share_channel'],
+    [REVENUE_SHARE_EVENTS.INITIATED]: ['request_id', 'share_channel', 'share_outcome'],
+    [REVENUE_SHARE_EVENTS.COPY_SUCCEEDED]: ['request_id', 'share_channel', 'share_outcome'],
+    [REVENUE_SHARE_EVENTS.HANDOFF_COMPLETED]: ['request_id', 'share_channel', 'share_outcome'],
+    [REVENUE_SHARE_EVENTS.CONFIRMED]: ['request_id', 'share_channel', 'share_outcome'],
+    [REVENUE_SHARE_EVENTS.OPENED]: ['request_id', 'share_channel', 'share_outcome'],
+    [REVENUE_SHARE_EVENTS.CANCELLED]: ['request_id', 'share_channel', 'share_outcome'],
+    [REVENUE_SHARE_EVENTS.FAILED]: ['request_id', 'share_channel', 'share_outcome'],
 };
 
 interface QueuedEvent {
