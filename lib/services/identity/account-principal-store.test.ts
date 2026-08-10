@@ -13,6 +13,7 @@ import {
     ensureAccountPrincipal,
     loadAccountCheckoutPhone,
     loadAccountClassification,
+    loadE2eTestRunnerPlan,
     loadAccountPrincipal,
     requireActiveAccountClassification,
     requireActiveAccountSession,
@@ -300,6 +301,7 @@ describe('account principal RPC store', () => {
         };
         mocks.rpc
             .mockResolvedValueOnce({ data: [activeE2eClassification], error: null })
+            .mockResolvedValueOnce({ data: [{ runner_plan: 'basic' }], error: null })
             .mockResolvedValueOnce({ data: [activeE2eClassification], error: null })
             .mockResolvedValueOnce({ data: [activeE2eClassification], error: null });
 
@@ -344,5 +346,32 @@ describe('account principal RPC store', () => {
         expect(failure).toBeInstanceOf(AccountPrincipalPersistenceError);
         expect(String(failure)).not.toContain('private phone');
         expect(String(failure)).not.toContain('email');
+    });
+
+    it('fails closed when immutable Auth runner metadata is no longer backed by the registry', async () => {
+        const activeE2eClassification = {
+            id: USER_ID,
+            account_class: 'e2e_test',
+            traffic_class: 'e2e_test',
+            lifecycle: 'active',
+            classification_version: 'account-ledger-v1',
+        };
+        mocks.rpc
+            .mockResolvedValueOnce({ data: [], error: null })
+            .mockResolvedValueOnce({ data: [activeE2eClassification], error: null })
+            .mockResolvedValueOnce({ data: [], error: null });
+
+        await expect(loadE2eTestRunnerPlan(USER_ID)).resolves.toBeNull();
+        await expect(requireActiveE2eTestRunner({
+            id: USER_ID,
+            app_metadata: { analysis_test_runner_v1: 'basic' },
+        }, 'basic')).rejects.toMatchObject({
+            name: 'AccountPrincipalAdmissionError',
+            code: 'ACCOUNT_ADMISSION_DENIED',
+        });
+        expect(mocks.rpc).toHaveBeenLastCalledWith(
+            'load_e2e_test_runner_v1',
+            { p_user_id: USER_ID },
+        );
     });
 });

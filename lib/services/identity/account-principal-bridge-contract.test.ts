@@ -60,6 +60,12 @@ describe('account principal additive migration contract', () => {
             'load_account_classification_v1',
             'record_external_paid_ever',
             'classify_account_principals_v1',
+            'list_account_ledger_legacy_e2e_candidates_v1',
+            'build_account_ledger_classification_plan_v1',
+            'load_account_ledger_rollout_state_v1',
+            'provision_e2e_test_runner_v1',
+            'load_e2e_test_runner_v1',
+            'list_e2e_test_runner_plans_v1',
         ];
 
         for (const functionName of functionNames) {
@@ -73,6 +79,31 @@ describe('account principal additive migration contract', () => {
                 `GRANT EXECUTE ON FUNCTION public\\.${functionName}\\([\\s\\S]*?TO service_role`,
             ));
         }
+    });
+
+    it('recomputes the legacy candidate set in the database without UUID or email allowlists', () => {
+        const start = migration.indexOf(
+            'CREATE OR REPLACE FUNCTION public.account_ledger_legacy_e2e_candidate_ids_v1',
+        );
+        const end = migration.indexOf('$$;', start);
+        const body = migration.slice(start, end);
+
+        expect(start).toBeGreaterThanOrEqual(0);
+        expect(body).toContain('FROM auth.users AS auth_user');
+        expect(body).toContain('FROM public.analysis_requests AS analysis_request');
+        expect(body).toContain('FROM public.earlybird_orders AS paid_order');
+        expect(body).toContain("webhook_event.disposition = 'accepted'");
+        expect(body).not.toContain('account.email');
+        expect(body).not.toContain('IN (\'');
+    });
+
+    it('keeps the Basic and Standard runner registry immutable and validates Auth metadata', () => {
+        expect(migration).toMatch(/CREATE TABLE public\.account_e2e_test_runners/);
+        expect(migration).toMatch(/runner_plan TEXT NOT NULL UNIQUE CHECK \(runner_plan IN \('basic', 'standard'\)\)/);
+        expect(migration).toMatch(/CREATE TRIGGER reject_account_e2e_test_runner_mutation_before_write/);
+        expect(migration).toMatch(/raw_app_meta_data ->> 'analysis_test_runner_v1'/);
+        expect(migration).toMatch(/ACCOUNT_E2E_TEST_RUNNER_PLAN_ALREADY_BOUND/);
+        expect(migration).toMatch(/ACCOUNT_E2E_TEST_RUNNER_AUTH_METADATA_MISMATCH/);
     });
 
     it('reaches paid-ever recording from every payment completion entry point', () => {

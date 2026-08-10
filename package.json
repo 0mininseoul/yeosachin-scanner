@@ -14,6 +14,7 @@
     "test": "vitest run",
     "test-admission:issue": "tsx --env-file=.env.local scripts/issue-analysis-test-admission.ts",
     "test-entitlement:issue": "tsx --env-file=.env.local scripts/issue-analysis-test-entitlement.ts",
+    "account-ledger:rollout": "tsx --conditions=react-server --env-file=.env.local scripts/run-account-ledger-rollout.ts",
     "report:earlybird-demand": "tsx --env-file=.env.local scripts/report-earlybird-demand.ts",
     "earlybird:reconcile-no-sale": "tsx --env-file=.env.local scripts/reconcile-earlybird-checkout-no-sale.ts",
     "earlybird:fulfill": "tsx --env-file=.env.local scripts/fulfill-earlybird-order.ts",
