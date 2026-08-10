@@ -52,6 +52,20 @@ export interface ReserveRevenueCostOperation extends Identity {
     readonly selectedManifestScopeHash: string | null;
 }
 
+export type RevenueCostLiveSourceKind = 'provider_run' | 'ai_attempt';
+
+export interface RevenueCostLiveSource {
+    readonly requestId: string;
+    readonly jobKey: string;
+    readonly jobClaimToken: string;
+    readonly jobInputHash: string;
+    readonly sourceKind: RevenueCostLiveSourceKind;
+    readonly sourceOperationKey: string;
+    readonly sourceAttempt: number;
+}
+
+export type ReserveRevenueCostOperationV2 = RevenueCostLiveSource;
+
 export interface RevenueCostOperationOutcome {
     readonly disposition: 'begun' | 'accepted' | 'denied' | 'started' | 'settled' | 'released' | 'ambiguous' | 'manual_review';
     readonly created: boolean;
@@ -70,6 +84,9 @@ export interface RevenueCostReconciliation {
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const HASH = /^[a-f0-9]{64}$/;
+const JOB_KEY = /^[a-z0-9][a-z0-9:._-]{0,159}$/;
+const PROVIDER_OPERATION_KEY = /^(target-profile|profile-fallback|profile-repair|relationship-followers|relationship-following|target-likers|target-comments|candidate-likers):[a-f0-9]{64}$/;
+const AI_OPERATION_KEY = /^(gender-triage|gender-resolution|feature-analysis|high-risk-narrative|private-account-name|partner-safety):[a-f0-9]{64}$/;
 const OWNER_KINDS = new Set<RevenueCostOperationOwnerKind>([
     'preflight_provider_run', 'provider_run', 'ai_attempt',
 ]);
@@ -82,6 +99,17 @@ function assertIdentity(input: Identity): void {
     if (!UUID.test(input.requestId) || !OWNER_KINDS.has(input.ownerKind)
         || !HASH.test(input.ownerKeyHash) || !Number.isSafeInteger(input.attempt)
         || input.attempt < 1 || input.attempt > 4) {
+        throw new Error('REVENUE_COST_OPERATION_INVALID_INPUT');
+    }
+}
+
+function assertLiveSource(input: RevenueCostLiveSource): void {
+    const sourceKeyPattern = input.sourceKind === 'provider_run' ? PROVIDER_OPERATION_KEY : AI_OPERATION_KEY;
+    if (!UUID.test(input.requestId) || !JOB_KEY.test(input.jobKey) || !UUID.test(input.jobClaimToken)
+        || !HASH.test(input.jobInputHash) || !['provider_run', 'ai_attempt'].includes(input.sourceKind)
+        || !sourceKeyPattern.test(input.sourceOperationKey) || !Number.isSafeInteger(input.sourceAttempt)
+        || (input.sourceKind === 'provider_run' && input.sourceAttempt !== 0)
+        || (input.sourceKind === 'ai_attempt' && (input.sourceAttempt < 1 || input.sourceAttempt > 4))) {
         throw new Error('REVENUE_COST_OPERATION_INVALID_INPUT');
     }
 }
@@ -155,11 +183,31 @@ export class RevenueCostOperationStore {
         });
     }
 
+    async reserveV2(input: ReserveRevenueCostOperationV2): Promise<RevenueCostOperationOutcome> {
+        assertLiveSource(input);
+        if (input.sourceKind === 'ai_attempt') throw new Error('REVENUE_COST_OPERATION_AI_NOT_READY');
+        return this.call('reserve_analysis_revenue_cost_operation_v2', {
+            p_request_id: input.requestId, p_job_key: input.jobKey, p_job_claim_token: input.jobClaimToken,
+            p_job_input_hash: input.jobInputHash, p_source_kind: input.sourceKind,
+            p_source_operation_key: input.sourceOperationKey, p_source_attempt: input.sourceAttempt,
+        });
+    }
+
     markStarted(input: Identity): Promise<RevenueCostOperationOutcome> {
         assertIdentity(input);
         return this.call('mark_analysis_revenue_cost_operation_started_v1', {
             p_request_id: input.requestId, p_owner_kind: input.ownerKind,
             p_owner_key_hash: input.ownerKeyHash, p_attempt: input.attempt,
+        });
+    }
+
+    markStartedV2(input: RevenueCostLiveSource): Promise<RevenueCostOperationOutcome> {
+        assertLiveSource(input);
+        if (input.sourceKind === 'ai_attempt') throw new Error('REVENUE_COST_OPERATION_AI_NOT_READY');
+        return this.call('mark_analysis_revenue_cost_operation_started_v2', {
+            p_request_id: input.requestId, p_job_key: input.jobKey, p_job_claim_token: input.jobClaimToken,
+            p_job_input_hash: input.jobInputHash, p_source_kind: input.sourceKind,
+            p_source_operation_key: input.sourceOperationKey, p_source_attempt: input.sourceAttempt,
         });
     }
 

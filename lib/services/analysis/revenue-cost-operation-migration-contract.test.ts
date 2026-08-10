@@ -60,4 +60,19 @@ describe('revenue cost-operation migration contract', () => {
         expect(source).toContain('REVOKE ALL ON FUNCTION');
         expect(source).toContain('GRANT EXECUTE ON FUNCTION');
     });
+
+    it('exposes only service-only source-aware v2 reserve/start authority', () => {
+        expect(source).toContain('FUNCTION public.reserve_analysis_revenue_cost_operation_v2');
+        expect(source).toContain('FUNCTION public.mark_analysis_revenue_cost_operation_started_v2');
+        expect(source).toContain('p_source_operation_key TEXT');
+        expect(source).toContain('p_job_claim_token UUID');
+        expect(source).toContain('DROP FUNCTION IF EXISTS public.reserve_analysis_revenue_cost_operation_v2(UUID,TEXT,UUID,TEXT,TEXT,TEXT,SMALLINT,TEXT,INTEGER,NUMERIC,TEXT)');
+        expect(source).toContain('v_now := pg_catalog.clock_timestamp()');
+        expect(source).toContain("REVENUE_COST_OPERATION_AI_NOT_READY");
+        expect(source).toContain("COALESCE(pg_catalog.sum(CASE WHEN status IN ('reserved','started') THEN reserved_krw ELSE 0 END), 0)");
+        expect(source).toContain("REVOKE ALL ON FUNCTION public.reserve_analysis_revenue_cost_operation_v2");
+        expect(source).toContain("GRANT EXECUTE ON FUNCTION public.reserve_analysis_revenue_cost_operation_v2");
+        expect(source).toContain("REVOKE ALL ON FUNCTION public.mark_analysis_revenue_cost_operation_started_v2");
+        expect(source).toContain("GRANT EXECUTE ON FUNCTION public.mark_analysis_revenue_cost_operation_started_v2");
+    });
 });
