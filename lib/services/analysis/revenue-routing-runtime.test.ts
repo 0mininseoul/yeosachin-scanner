@@ -61,6 +61,22 @@ describe('revenue gender-routing runtime', () => {
         expect(assess).not.toHaveBeenCalled();
     });
 
+    it('is a no-op for Plus even when a preparer is installed', async () => {
+        const assess = vi.fn();
+        const inputPreparer = vi.fn();
+
+        await expect(routeRevenueGenderCandidates({
+            ...base,
+            accessMode: 'test_entitlement',
+            planId: 'plus',
+            candidates: candidates(101),
+            inputPreparer,
+            assess,
+        })).resolves.toBeNull();
+        expect(inputPreparer).not.toHaveBeenCalled();
+        expect(assess).not.toHaveBeenCalled();
+    });
+
     it('uses the requested Basic cohort only, then exposes no more than its selected 100 rows', async () => {
         const input = candidates(101);
         const modelInput = input.map(({ candidateKey, fullname }) => ({
