@@ -63,6 +63,10 @@ export const ALLOWED_FIELD_NAMES = [
     'active_allocation_count',
     'overcommitted_slot_count',
     'runtime_enabled',
+    'share_channel',
+    'share_outcome',
+    'traffic_class',
+    'correlation',
 ] as const;
 
 type SanitizedValue = string | number | boolean | null;
@@ -116,6 +120,13 @@ export const OPERATIONAL_EVENT_NAMES = [
     'betatest_apify_credit.allocation_rejected',
     'betatest_apify_credit.settlement_completed',
     'betatest_apify_credit.pool_health_observed',
+    'result_share_initiated',
+    'result_share_copy_succeeded',
+    'result_share_handoff_completed',
+    'result_shared_confirmed',
+    'shared_result_opened',
+    'result_share_cancelled',
+    'result_share_failed',
 ] as const;
 
 export const OPERATIONAL_ERROR_CODES = [
@@ -539,6 +550,14 @@ function sanitizeField(name: string, value: unknown): SanitizedValue | undefined
             return safeFiniteNumber(value, 0, 6, true);
         case 'runtime_enabled':
             return typeof value === 'boolean' ? value : undefined;
+        case 'share_channel':
+            return safeExactRegistryValue(value, new Set(['clipboard', 'web_share', 'kakao']));
+        case 'share_outcome':
+            return safeExactRegistryValue(value, new Set(['started', 'succeeded', 'cancelled', 'failed', 'confirmed', 'opened']));
+        case 'traffic_class':
+            return safeExactRegistryValue(value, new Set(['external', 'operator', 'e2e_test', 'internal_tester', 'unknown']));
+        case 'correlation':
+            return safeString(value, LABEL_PATTERN);
         case 'settlement_lag_ms':
             return safeFiniteNumber(value, 0, 31_536_000_000);
         default:
