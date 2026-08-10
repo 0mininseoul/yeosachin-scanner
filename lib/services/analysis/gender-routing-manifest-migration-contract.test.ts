@@ -29,6 +29,8 @@ describe('analysis V2 gender-routing manifest migration contract', () => {
         );
         expect(candidates).not.toMatch(/\b(username|full_name|profile_pic_url|bio)\b/i);
         expect(migration).toContain('canonical_input_hmac');
+        expect(migration).toContain('relationship_job_input_hash');
+        expect(migration).toContain("'relationshipJobInputHash', p_manifest.relationship_job_input_hash");
         expect(migration).toContain("status IN ('building', 'complete', 'invalidated')");
     });
 
@@ -69,5 +71,29 @@ describe('analysis V2 gender-routing manifest migration contract', () => {
             );
             expect(definition).not.toContain('LEAST(\n            v_relationship.public_count');
         }
+    });
+
+    it('re-fences both selected loaders to the current paid-request scope and persisted job binding', () => {
+        for (const name of [
+            'load_analysis_v2_gender_routing_selected',
+            'load_analysis_v2_gender_routing_selected_usernames',
+        ]) {
+            const definition = functionDefinition(name);
+            expect(definition).toContain("v_request.pipeline_version IS DISTINCT FROM 'v2'");
+            expect(definition).toContain("v_request.status IS DISTINCT FROM 'processing'");
+            expect(definition).toContain("v_request.plan_access_mode_snapshot IS DISTINCT FROM 'test_entitlement'");
+            expect(definition).toContain('v_request.selected_plan_id_snapshot IS DISTINCT FROM p_plan_id');
+            expect(definition).toContain("v_policy.mode IS DISTINCT FROM 'test_operation_split'");
+            expect(definition).toContain("v_policy.policy_version IS DISTINCT FROM 'authorized-free-e2e-v1'");
+            expect(definition).toContain(
+                'v_job.input_hash IS DISTINCT FROM v_manifest.relationship_job_input_hash',
+            );
+            expect(definition).toContain(
+                'v_relationship.public_count IS DISTINCT FROM v_manifest.population_count',
+            );
+            expect(definition).toContain('v_row_count IS DISTINCT FROM v_manifest.population_count');
+        }
+        expect(functionDefinition('publish_analysis_v2_gender_routing_manifest'))
+            .toContain('p_model_failed_count::NUMERIC / p_model_attempted_count > 0.1');
     });
 });

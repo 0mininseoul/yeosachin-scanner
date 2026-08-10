@@ -3173,8 +3173,8 @@ describe('analysis V2 concrete collection executors', () => {
         } as unknown as AnalysisV2EvidenceStore;
         const assessor = vi.fn(async (candidates: readonly { candidateKey: string }[]) => new Map(
             candidates.map(candidate => [candidate.candidateKey, candidate.candidateKey === 'mutual:1'
-                ? { femaleScore: 0.05, maleScore: 0.9, uncertaintyScore: 0.05, evidence: 'image_and_name' as const }
-                : { femaleScore: 0.9, maleScore: 0.05, uncertaintyScore: 0.05, evidence: 'image_and_name' as const }])
+                ? { femaleScore: 0.05, maleScore: 0.9, uncertaintyScore: 0.05, evidence: 'name_only' as const }
+                : { femaleScore: 0.9, maleScore: 0.05, uncertaintyScore: 0.05, evidence: 'name_only' as const }])
         ));
         const request = requestContext({
             accessMode: 'test_entitlement',
@@ -3255,7 +3255,7 @@ describe('analysis V2 concrete collection executors', () => {
                 femaleScore: 0.9,
                 maleScore: 0.05,
                 uncertaintyScore: 0.05,
-                evidence: 'image_and_name' as const,
+                evidence: 'name_only' as const,
             }])
         ));
         const standardRequest = requestContext({
@@ -3503,6 +3503,7 @@ function routingManifestStore(usernamesByOrdinal: ReadonlyMap<number, string>) {
         canonicalInputHmac: input.canonicalInputHmac,
         populationCount: input.populationCount,
         detailedCap: input.detailedCap,
+        relationshipJobInputHash: input.jobInputHash,
         selectedCount: input.selectedCount,
         modelAttemptedCount: input.modelAttemptedCount,
         modelValidCount: input.modelValidCount,
@@ -3537,6 +3538,7 @@ function routingManifestStore(usernamesByOrdinal: ReadonlyMap<number, string>) {
             canonicalInputHmac: input.canonicalInputHmac,
             populationCount: input.populationCount,
             detailedCap: input.detailedCap,
+            relationshipJobInputHash: input.jobInputHash,
         })),
         publish: vi.fn(async input => {
             publication.value = input;

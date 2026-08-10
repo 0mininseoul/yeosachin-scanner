@@ -23,6 +23,7 @@ const completeHeader = {
     canonicalInputHmac,
     populationCount: 101,
     detailedCap: 100,
+    relationshipJobInputHash: jobInputHash,
     selectedCount: 100,
     modelAttemptedCount: 101,
     modelValidCount: 101,
@@ -54,6 +55,7 @@ describe('analysis V2 gender-routing manifest store', () => {
             canonicalInputHmac,
             populationCount: 101,
             detailedCap: 100,
+            relationshipJobInputHash: jobInputHash,
         });
         const store = createAnalysisV2GenderRoutingManifestStore(db);
 
@@ -149,6 +151,9 @@ describe('analysis V2 gender-routing manifest store', () => {
                 fullname: 'RAW_FULLNAME_DO_NOT_PERSIST',
                 profilePicUrl: 'https://raw-profile.example/do-not-persist.jpg',
                 bio: 'RAW_BIO_DO_NOT_PERSIST',
+                imageBytes: new Uint8Array([82, 65, 87, 95, 73, 77, 65, 71, 69]),
+                target: 'RAW_TARGET_DO_NOT_PERSIST',
+                token: 'RAW_TOKEN_DO_NOT_PERSIST',
                 hasImage: true,
                 hasName: true,
                 imageContentHmac: 'd'.repeat(64),
@@ -171,7 +176,6 @@ describe('analysis V2 gender-routing manifest store', () => {
             relationshipCheckpointId: checkpointId,
             policyVersion: 'gender-routing-v1',
             planId: 'basic',
-            canonicalInputHmac,
         })).resolves.toEqual([{
             mutualOrdinal: 9,
             candidateKey: 'mutual:9',
@@ -183,7 +187,6 @@ describe('analysis V2 gender-routing manifest store', () => {
             relationshipCheckpointId: checkpointId,
             policyVersion: 'gender-routing-v1',
             planId: 'basic',
-            canonicalInputHmac,
         })).resolves.toEqual([{
             mutualOrdinal: 9,
             candidateKey: 'mutual:9',
@@ -196,6 +199,9 @@ describe('analysis V2 gender-routing manifest store', () => {
         expect(JSON.stringify(publishParams)).not.toContain('RAW_FULLNAME_DO_NOT_PERSIST');
         expect(JSON.stringify(publishParams)).not.toContain('https://raw-profile.example/do-not-persist.jpg');
         expect(JSON.stringify(publishParams)).not.toContain('RAW_BIO_DO_NOT_PERSIST');
+        expect(JSON.stringify(publishParams)).not.toContain('imageBytes');
+        expect(JSON.stringify(publishParams)).not.toContain('RAW_TARGET_DO_NOT_PERSIST');
+        expect(JSON.stringify(publishParams)).not.toContain('RAW_TOKEN_DO_NOT_PERSIST');
     });
 
     it('rejects a malformed complete header and a selected-row count drift from the RPC', async () => {
@@ -229,7 +235,6 @@ describe('analysis V2 gender-routing manifest store', () => {
             relationshipCheckpointId: checkpointId,
             policyVersion: 'gender-routing-v1',
             planId: 'basic',
-            canonicalInputHmac,
         })).rejects.toThrow('ANALYSIS_V2_GENDER_ROUTING_MANIFEST_INVALID_RESULT');
 
         const usernameDriftStore = createAnalysisV2GenderRoutingManifestStore(client({
@@ -247,7 +252,6 @@ describe('analysis V2 gender-routing manifest store', () => {
             relationshipCheckpointId: checkpointId,
             policyVersion: 'gender-routing-v1',
             planId: 'basic',
-            canonicalInputHmac,
         })).rejects.toThrow('ANALYSIS_V2_GENDER_ROUTING_MANIFEST_INVALID_RESULT');
     });
 });

@@ -20,6 +20,7 @@ const manifestHeaderBaseSchema = z.object({
     canonicalInputHmac: z.string().regex(HASH_PATTERN),
     populationCount: z.number().int().min(0).max(800),
     detailedCap: z.union([z.literal(100), z.literal(200)]),
+    relationshipJobInputHash: z.string().regex(HASH_PATTERN),
 });
 
 const completeManifestHeaderSchema = manifestHeaderBaseSchema.extend({
@@ -91,7 +92,6 @@ export interface AnalysisV2GenderRoutingSelectedIdentity {
     readonly relationshipCheckpointId: string;
     readonly policyVersion: 'gender-routing-v1';
     readonly planId: GenderRoutingPlan;
-    readonly canonicalInputHmac: string;
 }
 
 export interface AnalysisV2GenderRoutingSelectedRow {
@@ -164,7 +164,6 @@ function validateSelectedIdentity(input: AnalysisV2GenderRoutingSelectedIdentity
     if (
         !UUID_PATTERN.test(input.requestId)
         || !HASH_PATTERN.test(input.relationshipCheckpointId)
-        || !HASH_PATTERN.test(input.canonicalInputHmac)
         || input.policyVersion !== 'gender-routing-v1'
         || (input.planId !== 'basic' && input.planId !== 'standard')
     ) throw new Error('ANALYSIS_V2_GENDER_ROUTING_MANIFEST_VALIDATION_ERROR');
@@ -199,7 +198,12 @@ function validatePublish(input: AnalysisV2GenderRoutingManifestPublishInput): vo
         || input.rows.length !== input.populationCount
         || input.rows.length > cap.population
         || input.selectedCount > cap.detailed
-        || input.modelValidCount + input.modelFailedCount > input.modelAttemptedCount
+        || input.modelValidCount + input.modelFailedCount !== input.modelAttemptedCount
+        || (input.populationCount > cap.detailed && (
+            input.modelAttemptedCount === 0
+            || input.modelValidCount === 0
+            || input.modelFailedCount / input.modelAttemptedCount > 0.1
+        ))
         || input.rows.filter(row => row.selected).length !== input.selectedCount
         || input.rows.filter(row => row.bucket === 'female_priority').length
             !== input.bucketCounts.female_priority
@@ -237,6 +241,8 @@ function validatePublish(input: AnalysisV2GenderRoutingManifestPublishInput): vo
             || row.mutualOrdinal > 1_200
             || row.candidateKey !== `mutual:${row.mutualOrdinal}`
             || !/^mutual:[1-9][0-9]{0,3}$/.test(row.candidateKey)
+            || row.hasImage !== (row.imageContentHmac !== null)
+            || row.hasName !== (row.fullnameHmac !== null)
             || (row.imageContentHmac !== null && !HASH_PATTERN.test(row.imageContentHmac))
             || (row.fullnameHmac !== null && !HASH_PATTERN.test(row.fullnameHmac))
             || scores.some(score => score !== null && (!Number.isFinite(score) || score < 0 || score > 1))
@@ -345,6 +351,7 @@ function assertHeaderMatchesBegin(
         || header.canonicalInputHmac !== input.canonicalInputHmac
         || header.populationCount !== input.populationCount
         || header.detailedCap !== input.detailedCap
+        || header.relationshipJobInputHash !== input.jobInputHash
     ) throw new Error('ANALYSIS_V2_GENDER_ROUTING_MANIFEST_INVALID_RESULT');
 }
 
@@ -444,7 +451,6 @@ export function createAnalysisV2GenderRoutingManifestStore(
                     p_relationship_checkpoint_id: input.relationshipCheckpointId,
                     p_policy_version: input.policyVersion,
                     p_plan_id: input.planId,
-                    p_canonical_input_hmac: input.canonicalInputHmac,
                 }
             );
             if (error) throw new Error('ANALYSIS_V2_GENDER_ROUTING_MANIFEST_PERSISTENCE_ERROR');
@@ -461,7 +467,6 @@ export function createAnalysisV2GenderRoutingManifestStore(
                     p_relationship_checkpoint_id: input.relationshipCheckpointId,
                     p_policy_version: input.policyVersion,
                     p_plan_id: input.planId,
-                    p_canonical_input_hmac: input.canonicalInputHmac,
                 }
             );
             if (error) throw new Error('ANALYSIS_V2_GENDER_ROUTING_MANIFEST_PERSISTENCE_ERROR');

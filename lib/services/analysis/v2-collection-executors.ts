@@ -118,10 +118,7 @@ import {
     createAnalysisV2SelfHostedAuthWorkerIdentity,
     type AnalysisV2SelfHostedAuthRunStore,
 } from './v2-selfhosted-auth-run-store';
-import {
-    createGenderRoutingCanonicalInputHmac,
-    GENDER_ROUTING_CAPS,
-} from './gender-routing';
+import { GENDER_ROUTING_CAPS } from './gender-routing';
 import {
     analysisV2GenderRoutingManifestStore,
     type AnalysisV2GenderRoutingManifestStore,
@@ -129,6 +126,7 @@ import {
 import {
     routeAndPersistRevenueGenderCandidates,
     usesRevenueGenderRouting,
+    type RevenueGenderRoutingInputPreparer,
     type RevenueGenderRoutingModelCandidate,
 } from './revenue-routing-runtime';
 
@@ -157,6 +155,7 @@ export interface AnalysisV2CollectionExecutorDependencies {
     interactionAdapter?: ApifyInteractionAdapter;
     selfHostedAuthInteractionAdapter?: ApifyInteractionAdapter;
     genderRoutingManifestStore?: AnalysisV2GenderRoutingManifestStore;
+    revenueGenderRoutingInputPreparer?: RevenueGenderRoutingInputPreparer;
     revenueGenderRoutingAssessor?: RevenueGenderRoutingAssessor;
     env?: Record<string, string | undefined>;
 }
@@ -176,6 +175,7 @@ interface ResolvedDependencies {
     interactionAdapter: ApifyInteractionAdapter;
     selfHostedAuthInteractionAdapter: ApifyInteractionAdapter;
     genderRoutingManifestStore: AnalysisV2GenderRoutingManifestStore;
+    revenueGenderRoutingInputPreparer: RevenueGenderRoutingInputPreparer | undefined;
     revenueGenderRoutingAssessor: RevenueGenderRoutingAssessor | null;
     env: Record<string, string | undefined>;
 }
@@ -202,6 +202,7 @@ function deps(input: AnalysisV2CollectionExecutorDependencies): ResolvedDependen
             input.selfHostedAuthInteractionAdapter ?? selfHostedAuthInteractionAdapter,
         genderRoutingManifestStore:
             input.genderRoutingManifestStore ?? analysisV2GenderRoutingManifestStore,
+        revenueGenderRoutingInputPreparer: input.revenueGenderRoutingInputPreparer,
         revenueGenderRoutingAssessor: input.revenueGenderRoutingAssessor ?? null,
         env: input.env ?? process.env,
     };
@@ -712,6 +713,7 @@ export function createAnalysisV2RelationshipsExecutor(
                     fullname: row.fullName,
                 })),
                 hmacSecret,
+                inputPreparer: dependencies.revenueGenderRoutingInputPreparer,
                 assess: dependencies.revenueGenderRoutingAssessor,
                 jobKey: 'track:relationships:collect',
                 claimToken: claim.claimToken,
@@ -724,7 +726,6 @@ export function createAnalysisV2RelationshipsExecutor(
                 relationshipCheckpointId: manifest.resultHash,
                 policyVersion: 'gender-routing-v1',
                 planId: request.planId,
-                canonicalInputHmac: routed.canonicalInputHmac,
             });
             const publicByOrdinal = new Map(publicMutualRows.map(row => [row.mutualOrdinal, row]));
             if (
@@ -1438,20 +1439,11 @@ export function createAnalysisV2ProfileFetchExecutor(
                 || publicMutualRows.length > cap.population
                 || new Set(publicMutualRows.map(row => row.mutualOrdinal)).size !== publicMutualRows.length
             ) throw new Error('ANALYSIS_V2_GENDER_ROUTING_POPULATION_DRIFT');
-            const canonicalInputHmac = createGenderRoutingCanonicalInputHmac({
-                candidates: publicMutualRows.map(row => ({
-                    candidateKey: `mutual:${row.mutualOrdinal}`,
-                    profilePicUrl: row.profilePicUrl,
-                    fullname: row.fullName,
-                })),
-                hmacSecret: revenueGenderRoutingSecret(dependencies),
-            });
             const selectedRows = await dependencies.genderRoutingManifestStore.loadSelectedUsernames({
                 requestId: claim.requestId,
                 relationshipCheckpointId: relationship.resultHash,
                 policyVersion: 'gender-routing-v1',
                 planId: request.planId,
-                canonicalInputHmac,
             });
             const publicByOrdinal = new Map(publicMutualRows.map(row => [row.mutualOrdinal, row]));
             if (
