@@ -81,14 +81,18 @@ function finiteScore(value: number): boolean {
     return Number.isFinite(value) && value >= 0 && value <= 1;
 }
 
+function evidenceFor(candidate: Readonly<{ hasImage: boolean; hasName: boolean }>): GenderRoutingEvidence {
+    return candidate.hasImage
+        ? candidate.hasName ? 'image_and_name' : 'image_only'
+        : candidate.hasName ? 'name_only' : 'none';
+}
+
 function validAssessment(
     value: GenderRoutingAssessment,
     candidate: Readonly<{ hasImage: boolean; hasName: boolean }>,
 ): boolean {
     const scoreTotal = value.femaleScore + value.maleScore + value.uncertaintyScore;
-    const expectedEvidence: GenderRoutingEvidence = candidate.hasImage
-        ? candidate.hasName ? 'image_and_name' : 'image_only'
-        : candidate.hasName ? 'name_only' : 'none';
+    const expectedEvidence = evidenceFor(candidate);
     return finiteScore(value.femaleScore)
         && finiteScore(value.maleScore)
         && finiteScore(value.uncertaintyScore)
@@ -136,6 +140,30 @@ function normalizeCandidate(candidate: GenderRoutingCandidateInput, secret: stri
 }
 
 /**
+ * Stable binding between the fresh relationship snapshot and a durable routing
+ * manifest. This intentionally hashes only locally held inputs and never
+ * serializes them into the manifest payload.
+ */
+export function createGenderRoutingCanonicalInputHmac(input: {
+    readonly candidates: readonly GenderRoutingCandidateInput[];
+    readonly hmacSecret: string;
+}): string {
+    const normalized = input.candidates.map(candidate => normalizeCandidate(candidate, input.hmacSecret));
+    return hmac(input.hmacSecret, [
+        'gender-routing:canonical-input:v1',
+        ...[...normalized]
+            .sort((left, right) => left.candidateKey.localeCompare(right.candidateKey))
+            .map(candidate => [
+                candidate.candidateKey,
+                candidate.hasImage ? 'image' : 'no_image',
+                candidate.hasName ? 'name' : 'no_name',
+                candidate.fullnameHmac ?? '',
+                candidate.imageContentHmac ?? '',
+            ].join('|')),
+    ].join('\n'));
+}
+
+/**
  * Returns exactly the candidate set permitted one model retry. The runtime uses this before it
  * starts the retry so a valid first response is never charged a second time.
  */
@@ -150,13 +178,7 @@ export function genderRoutingRetryCandidateKeys(input: {
         const assessment = input.assessments?.get(candidate.candidateKey);
         return !assessment || !validAssessment(assessment, candidate);
     });
-    const valid = callable.length - failed.length;
-    if (callable.length === 0 || valid === 0 || failed.length / callable.length > 0.1) {
-        return Object.freeze(valid === 0
-            ? callable.map(candidate => candidate.candidateKey)
-            : failed.map(candidate => candidate.candidateKey));
-    }
-    return Object.freeze([]);
+    return Object.freeze(failed.map(candidate => candidate.candidateKey));
 }
 
 function bucketFor(assessment: GenderRoutingAssessment): GenderRoutingBucket {
@@ -225,18 +247,10 @@ export function buildGenderRoutingManifest(input: {
     }
     const ordered = [...normalized].sort((a, b) => tieBreak(input.hmacSecret, input.requestId, input.relationshipCheckpointId, a.candidateKey)
         .localeCompare(tieBreak(input.hmacSecret, input.requestId, input.relationshipCheckpointId, b.candidateKey)));
-    const canonicalInputHmac = hmac(input.hmacSecret, [
-        'gender-routing:canonical-input:v1',
-        ...[...normalized]
-            .sort((left, right) => left.candidateKey.localeCompare(right.candidateKey))
-            .map(candidate => [
-                candidate.candidateKey,
-                candidate.hasImage ? 'image' : 'no_image',
-                candidate.hasName ? 'name' : 'no_name',
-                candidate.fullnameHmac ?? '',
-                candidate.imageContentHmac ?? '',
-            ].join('|')),
-    ].join('\n'));
+    const canonicalInputHmac = createGenderRoutingCanonicalInputHmac({
+        candidates: input.candidates,
+        hmacSecret: input.hmacSecret,
+    });
     if (normalized.length <= cap.detailed) {
         const rows = ordered.map((candidate, index): GenderRoutingManifestRow => ({
             ...candidate,
@@ -271,7 +285,6 @@ export function buildGenderRoutingManifest(input: {
     const assessed: { candidateKey: string; bucket: GenderRoutingBucket; assessment: GenderRoutingAssessment; routingUnavailable: boolean }[] = [];
     let attempted = 0;
     let valid = 0;
-    let failed = 0;
     let retried = 0;
     const invalidCandidates = new Set<string>();
     for (const candidate of normalized) {
@@ -280,12 +293,16 @@ export function buildGenderRoutingManifest(input: {
             : undefined;
         if (candidate.hasImage || candidate.hasName) attempted += 1;
         if (!assessment || !validAssessment(assessment, candidate)) {
-            if (candidate.hasImage || candidate.hasName) failed += 1;
             if (candidate.hasImage || candidate.hasName) invalidCandidates.add(candidate.candidateKey);
             assessed.push({
                 candidateKey: candidate.candidateKey,
                 bucket: 'uncertainty',
-                assessment: { femaleScore: 0, maleScore: 0, uncertaintyScore: 1, evidence: 'none' },
+                assessment: {
+                    femaleScore: 0,
+                    maleScore: 0,
+                    uncertaintyScore: 1,
+                    evidence: evidenceFor(candidate),
+                },
                 routingUnavailable: true,
             });
             continue;
@@ -299,11 +316,8 @@ export function buildGenderRoutingManifest(input: {
             routingUnavailable: false,
         });
     }
-    const stageFailed = attempted === 0 || valid === 0 || failed / attempted > 0.1;
-    if (stageFailed && attempted > 0) {
-        const retryKeys = valid === 0
-            ? normalized.filter(candidate => candidate.hasImage || candidate.hasName).map(candidate => candidate.candidateKey)
-            : [...invalidCandidates];
+    if (attempted > 0 && invalidCandidates.size > 0) {
+        const retryKeys = [...invalidCandidates];
         for (const candidateKey of retryKeys) {
             const candidate = normalized.find(row => row.candidateKey === candidateKey)!;
             const retry = input.retryAssessments?.get(candidateKey);
