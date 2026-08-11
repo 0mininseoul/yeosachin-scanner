@@ -83,6 +83,14 @@ export interface AnalysisV2AiJobFence {
     schedulerRecoveryOnly?: boolean;
     /** Internal terminal safe-fallback fence; production callers must not set it. */
     schedulerTerminalUnavailable?: boolean;
+    /**
+     * Strict revenue cohorts reserve a request-scoped resolver slot before
+     * constructing the external Gemini call. The callback is intentionally
+     * identity-only: no candidate fields or model inputs cross this boundary.
+     */
+    reserveGenderResolutionCapacity?: (
+        operationKey: string,
+    ) => Promise<'accepted' | 'capacity_skipped'>;
 }
 
 export interface AnalysisV2AuditedResult<T> {
@@ -637,6 +645,16 @@ export function createDurableAnalysisV2AiStageRuntime(
             let cutoffStarted: Promise<void> | null = null;
             const completion = (async () => {
                 try {
+                    if (fence.reserveGenderResolutionCapacity) {
+                        const admission = await fence.reserveGenderResolutionCapacity(
+                            identity.operationKey,
+                        );
+                        if (state.status !== 'pending') return;
+                        if (admission !== 'accepted') {
+                            state = { status: 'capacity_skipped' };
+                            return;
+                        }
+                    }
                     const result = await runGenderResolution(
                         input,
                         audit,

@@ -3,6 +3,7 @@ import {
     buildGenderRoutingManifest,
     createGenderRoutingCanonicalInputHmac,
     GenderRoutingError,
+    genderRoutingRetryCandidateKeys,
 } from './gender-routing';
 
 const base = {
@@ -175,6 +176,33 @@ describe('revenue gender routing', () => {
             routingUnavailable: true,
             selected: true,
         });
+    });
+
+    it('uses an exact integer boundary when deciding whether failed rows may retry', () => {
+        const candidates = Array.from({ length: 100 }, (_, index) => candidate(index));
+        const exactlyTenFailed = new Map(candidates.slice(0, 90).map(row => [row.candidateKey, {
+            femaleScore: 0.8,
+            maleScore: 0.1,
+            uncertaintyScore: 0.1,
+            evidence: 'image_and_name' as const,
+        }]));
+        const elevenFailed = new Map(candidates.slice(0, 89).map(row => [row.candidateKey, {
+            femaleScore: 0.8,
+            maleScore: 0.1,
+            uncertaintyScore: 0.1,
+            evidence: 'image_and_name' as const,
+        }]));
+
+        expect(genderRoutingRetryCandidateKeys({
+            candidates,
+            assessments: exactlyTenFailed,
+            hmacSecret: base.hmacSecret,
+        })).toEqual([]);
+        expect(genderRoutingRetryCandidateKeys({
+            candidates,
+            assessments: elevenFailed,
+            hmacSecret: base.hmacSecret,
+        })).toHaveLength(11);
     });
 
     it('canonicalizes normalized fullnames and does not treat an unfingerprinted image URL as image evidence', () => {

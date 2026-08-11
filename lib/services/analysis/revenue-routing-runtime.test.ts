@@ -393,9 +393,15 @@ describe('revenue gender-routing runtime', () => {
 
     it('does not retry at exactly ten percent initial failures and retains those candidates as unavailable', async () => {
         const input = candidates(110);
-        const assess = vi.fn(async (rows: readonly { candidateKey: string }[]) => new Map(rows
-            .filter(row => Number(row.candidateKey.slice('candidate:'.length)) <= 99)
-            .map(row => [row.candidateKey, assessment])));
+        const assess = vi.fn(async (
+            rows: readonly { candidateKey: string }[],
+            attempt: 1 | 2,
+        ) => {
+            void attempt;
+            return new Map(rows
+                .filter(row => Number(row.candidateKey.slice('candidate:'.length)) <= 99)
+                .map(row => [row.candidateKey, assessment]));
+        });
 
         const result = await routeRevenueGenderCandidates({
             ...base,
@@ -410,6 +416,63 @@ describe('revenue gender-routing runtime', () => {
         expect(result?.manifest.modelRetriedCount).toBe(0);
         expect(result?.manifest.modelFailedCount).toBe(11);
         expect(result?.manifest.rows.filter(row => row.routingUnavailable)).toHaveLength(11);
+    });
+
+    it('uses integer greater-than-ten-percent semantics and never re-bills valid rows in a mixed microbatch retry', async () => {
+        const input = candidates(120);
+        const assess = vi.fn(async (
+            rows: readonly { candidateKey: string }[], attempt: 1 | 2,
+        ) => new Map(rows
+            .filter(row => attempt === 2 || Number(row.candidateKey.slice('candidate:'.length)) <= 107)
+            .map(row => [row.candidateKey, assessment])));
+
+        const result = await routeRevenueGenderCandidates({
+            ...base,
+            accessMode: 'test_entitlement',
+            planId: 'basic',
+            candidates: input,
+            inputPreparer: prepareEveryImage,
+            assess,
+        });
+
+        const retried = assess.mock.calls
+            .filter(([, attempt]) => attempt === 2)
+            .flatMap(([rows]) => rows.map(row => row.candidateKey));
+        expect(retried).toEqual(input.slice(107).map(row => row.candidateKey));
+        expect(retried).not.toContain('candidate:1');
+        expect(result?.manifest).toMatchObject({
+            modelAttemptedCount: 120,
+            modelRetriedCount: 13,
+            modelFailedCount: 0,
+        });
+    });
+
+    it('does not retry an exact integer ten-percent failure burden', async () => {
+        const input = candidates(120);
+        const assess = vi.fn(async (
+            rows: readonly { candidateKey: string }[],
+            attempt: 1 | 2,
+        ) => {
+            void attempt;
+            return new Map(rows
+                .filter(row => Number(row.candidateKey.slice('candidate:'.length)) <= 108)
+                .map(row => [row.candidateKey, assessment]));
+        });
+
+        const result = await routeRevenueGenderCandidates({
+            ...base,
+            accessMode: 'test_entitlement',
+            planId: 'basic',
+            candidates: input,
+            inputPreparer: prepareEveryImage,
+            assess,
+        });
+
+        expect(assess.mock.calls.filter(([, attempt]) => attempt === 2)).toHaveLength(0);
+        expect(result?.manifest).toMatchObject({
+            modelRetriedCount: 0,
+            modelFailedCount: 12,
+        });
     });
 
     it('retries every callable candidate once when the initial stage has zero valid results', async () => {

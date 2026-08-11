@@ -158,6 +158,46 @@ describe('durable V2 AI stage runtime', () => {
         expect(onCutoff).not.toHaveBeenCalled();
     });
 
+    it('uses the durable resolver admission before its external model boundary', async () => {
+        const reserveResolverCapacity = vi.fn(async () => 'capacity_skipped' as const);
+        const runGenderResolution = vi.fn();
+        const runtime = createDurableAnalysisV2AiStageRuntime({
+            createAudit: vi.fn(options => ({
+                requestId: options.requestId,
+                operationKey: options.resultIdentity.operationKey,
+                resultIdentity: options.resultIdentity,
+                resultSchema: options.resultSchema,
+                prepare: vi.fn(),
+                onBeforeAttempt: vi.fn(),
+                onAttemptTelemetry: vi.fn(),
+            })),
+            runGenderResolution,
+        });
+        const handle = runtime.startGenderResolution({
+            media: [{
+                selectionId: 'profile:owner',
+                kind: 'profile',
+                normalizedJpegBase64: '/9j/2Q==',
+            }, {
+                selectionId: 'post:owner:thumbnail',
+                kind: 'feed',
+                normalizedJpegBase64: '/9j/2g==',
+                postId: 'owner-post',
+            }],
+        }, {
+            ...fence,
+            aiStagePolicyVersion: AI_STAGE_POLICY_LATEST_VERSION,
+            reserveGenderResolutionCapacity: reserveResolverCapacity,
+        });
+
+        await handle.completion;
+        expect(handle.peek()).toEqual({ status: 'capacity_skipped' });
+        expect(reserveResolverCapacity).toHaveBeenCalledWith(
+            expect.stringMatching(/^gender-resolution:[a-f0-9]{64}$/),
+        );
+        expect(runGenderResolution).not.toHaveBeenCalled();
+    });
+
     it('keeps the resolver available for v2.8 instead of coupling it to the old latest label', async () => {
         const createAudit = vi.fn(options => ({
             requestId: options.requestId,

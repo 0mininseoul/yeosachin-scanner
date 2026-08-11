@@ -218,7 +218,7 @@ export function genderRoutingRetryCandidateKeys(input: {
     const valid = callable.length - failed.length;
     if (
         failed.length === 0
-        || !(valid === 0 || failed.length / callable.length > 0.1)
+        || !(valid === 0 || failed.length * 10 > callable.length)
     ) return Object.freeze([]);
     return Object.freeze(failed.map(candidate => candidate.candidateKey));
 }
@@ -360,7 +360,7 @@ export function buildGenderRoutingManifest(input: {
     }
     const shouldRetry = attempted > 0
         && invalidCandidates.size > 0
-        && (valid === 0 || invalidCandidates.size / attempted > 0.1);
+        && (valid === 0 || invalidCandidates.size * 10 > attempted);
     if (shouldRetry) {
         const retryKeys = [...invalidCandidates];
         for (const candidateKey of retryKeys) {
@@ -385,7 +385,7 @@ export function buildGenderRoutingManifest(input: {
         const candidate = normalized.find(item => item.candidateKey === row.candidateKey)!;
         return row.routingUnavailable && (candidate.hasImage || candidate.hasName);
     }).length;
-    if (attempted === 0 || valid === 0 || finalFailed / attempted > 0.1) {
+    if (attempted === 0 || valid === 0 || finalFailed * 10 > attempted) {
         throw new GenderRoutingError('ROUTING_UNAVAILABLE');
     }
     const byKey = new Map(assessed.map(row => [row.candidateKey, row]));

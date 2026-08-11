@@ -31,9 +31,12 @@ export interface RevenueCostAiAttemptLiveFence {
     readonly jobClaimToken: string;
     readonly jobInputHash: string;
     readonly operationKey: string;
+    /** Immutable outer routing pass; Gemini retry attempt remains sourceAttempt. */
+    readonly routingAttempt?: 1 | 2;
 }
 
 export interface RevenueCostAiAttemptOperationStore {
+    registerRoutingAttempt?(input: RevenueCostLiveSource): Promise<RevenueCostOperationOutcome>;
     reserveV2(input: RevenueCostLiveSource): Promise<RevenueCostOperationOutcome>;
     markStartedV2(input: RevenueCostLiveSource): Promise<RevenueCostOperationOutcome>;
     settleV2(input: SettleRevenueCostOperationV2): Promise<RevenueCostOperationOutcome>;
@@ -95,6 +98,9 @@ function sourceForAttempt(
         sourceKind: 'ai_attempt',
         sourceOperationKey: fence.operationKey,
         sourceAttempt: attempt,
+        ...(fence.routingAttempt === undefined
+            ? {}
+            : { routingAttempt: fence.routingAttempt }),
     };
     assertAiAttemptSource(source);
     return source;
@@ -134,6 +140,26 @@ function isAccepted(outcome: RevenueCostOperationOutcome): boolean {
 
 function isStarted(outcome: RevenueCostOperationOutcome): boolean {
     return outcome.disposition === 'started';
+}
+
+function isSafeTerminal(outcome: RevenueCostOperationOutcome): boolean {
+    return outcome.disposition === 'settled' || outcome.disposition === 'released';
+}
+
+async function requireManualReview(
+    operations: RevenueCostAiAttemptOperationStore,
+    requestId: string,
+): Promise<RevenueCostOperationOutcome> {
+    const reviewed = await operations.manualReview({
+        requestId,
+        reasonCode: 'ambiguous_external_call',
+    });
+    if (reviewed.disposition !== 'manual_review') {
+        throw new RevenueCostAiAttemptLifecycleError(
+            'ANALYSIS_V2_REVENUE_COST_MANUAL_REVIEW_UNCONFIRMED',
+        );
+    }
+    return reviewed;
 }
 
 export interface RevenueCostAiAttemptCallbacks {
@@ -184,17 +210,32 @@ async function reserveWithExactIdentityRetry(
     // Do not release after an ambiguous reserve response: the exact first call may have committed
     // and therefore represents potentially billable state. Manual review and rejection of the
     // before-attempt callback are the only safe outcome before Gemini is permitted to run.
-    try {
-        await operations.manualReview({
-            requestId: source.requestId,
-            reasonCode: 'ambiguous_external_call',
-        });
-    } catch {
-        // A manual-review transport failure does not make the external boundary safe.
-    }
+    await requireManualReview(operations, source.requestId);
     throw new RevenueCostAiAttemptLifecycleError(
         'ANALYSIS_V2_REVENUE_COST_RESERVE_AMBIGUOUS',
     );
+}
+
+async function registerRoutingAttemptIfNeeded(
+    operations: RevenueCostAiAttemptOperationStore,
+    source: RevenueCostLiveSource,
+): Promise<void> {
+    // Every transport attempt must prove that it belongs to the immutable
+    // outer routing pass.  The registry key is the stable operation key, so
+    // a retry replays the same pass rather than creating another pass or
+    // another charge; SQL additionally verifies its reserved attempt row.
+    if (source.routingAttempt === undefined) return;
+    if (!operations.registerRoutingAttempt) {
+        throw new RevenueCostAiAttemptLifecycleError(
+            'ANALYSIS_V2_REVENUE_COST_ROUTING_ATTEMPT_UNAVAILABLE',
+        );
+    }
+    const registered = await operations.registerRoutingAttempt(source);
+    if (!isAccepted(registered)) {
+        throw new RevenueCostAiAttemptLifecycleError(
+            'ANALYSIS_V2_REVENUE_COST_ROUTING_ATTEMPT_UNAVAILABLE',
+        );
+    }
 }
 
 /**
@@ -212,6 +253,7 @@ export function createRevenueCostAiAttemptLifecycle(
                     const source = sourceForStartTelemetry(fence, telemetry);
                     if (!eligible(scope)) return;
 
+                    await registerRoutingAttemptIfNeeded(operations, source);
                     await reserveWithExactIdentityRetry(operations, source);
                     try {
                         const started = await operations.markStartedV2(source);
@@ -221,10 +263,15 @@ export function createRevenueCostAiAttemptLifecycle(
                     } catch (error) {
                         // No Gemini call has happened yet. The exact release RPC can prove a
                         // no-call outcome or preserve ambiguity if a start response was lost.
+                        let released: RevenueCostOperationOutcome | null = null;
                         try {
-                            await operations.releaseV2(source);
+                            released = await operations.releaseV2(source);
                         } catch {
-                            // The original start failure carries the boundary fence.
+                            // A transport failure can have committed after the external
+                            // boundary. It is not proof of a no-call cleanup.
+                        }
+                        if (released?.disposition !== 'released') {
+                            await requireManualReview(operations, source.requestId);
                         }
                         throw error;
                     }
@@ -235,20 +282,13 @@ export function createRevenueCostAiAttemptLifecycle(
                     if (!eligible(scope)) return;
                     try {
                         const settled = await operations.settleV2(settlementSource(source));
-                        if (settled.disposition === 'ambiguous' || settled.disposition === 'manual_review') {
+                        if (!isSafeTerminal(settled)) {
                             throw new RevenueCostAiAttemptLifecycleError(
                                 'ANALYSIS_V2_REVENUE_COST_SETTLEMENT_AMBIGUOUS',
                             );
                         }
                     } catch (error) {
-                        try {
-                            await operations.manualReview({
-                                requestId: source.requestId,
-                                reasonCode: 'ambiguous_external_call',
-                            });
-                        } catch {
-                            // The original terminal persistence error already fences dispatch.
-                        }
+                        await requireManualReview(operations, source.requestId);
                         throw error;
                     }
                 },
@@ -261,10 +301,7 @@ export function createRevenueCostAiAttemptLifecycle(
 
                 async manualReviewAfterExternalBoundary() {
                     if (!eligible(scope)) return null;
-                    return operations.manualReview({
-                        requestId: fence.requestId,
-                        reasonCode: 'ambiguous_external_call',
-                    });
+                    return requireManualReview(operations, fence.requestId);
                 },
             };
         },

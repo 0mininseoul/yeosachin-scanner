@@ -69,8 +69,6 @@ export function applyGenderResolution(
         input.baselineClassification === 'verified_female'
         || input.baselineClassification === 'verified_non_female'
         || input.baselineClassification === 'fetch_unavailable'
-        || input.baselineClassification === 'media_unavailable'
-        || input.baselineClassification === 'analysis_unavailable'
         || input.resolver === null
     ) {
         return unchanged();
@@ -85,7 +83,16 @@ export function applyGenderResolution(
         && resolverEvidenceCount >= 2;
     let shouldApply = false;
 
-    if (input.baselineClassification === 'unresolved') {
+    if (
+        input.baselineClassification === 'unresolved'
+        // A profile that reached the resolver with no retained feature is
+        // still a real, re-normalized profile.  A high/same-owner result is
+        // sufficient to repair a transient feature/analysis failure.  The
+        // resolver never runs for fetch_unavailable because there is no
+        // profile snapshot from which to form valid model media.
+        || input.baselineClassification === 'media_unavailable'
+        || input.baselineClassification === 'analysis_unavailable'
+    ) {
         shouldApply = isHighSameOwnerResolver;
         const feature = input.feature?.features;
         if (

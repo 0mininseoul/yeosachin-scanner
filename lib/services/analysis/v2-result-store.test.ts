@@ -186,6 +186,59 @@ function rawSnapshot(count = 3) {
 }
 
 describe('analysis V2 result checkpoint store', () => {
+    it('persists a primary-join resolver overlay with audited identity only, never a feature payload', async () => {
+        const overlay = {
+            candidateId: 'candidate-featureless',
+            classification: 'verified_female' as const,
+            operationKey: `gender-resolution:${hashA}`,
+            resultHash: hashB,
+        };
+        const fake = rpcClient(
+            { data: { rows: [overlay] }, error: null },
+            { data: { rows: [overlay] }, error: null },
+        );
+        const store = createSupabaseAnalysisV2ResultStore(fake.client);
+        const primaryClaim = claim('coordinator:join:primary-evidence');
+
+        await expect(store.checkpointRevenueResolverOutcomes({
+            ...primaryClaim,
+            rows: [overlay],
+        })).resolves.toEqual([overlay]);
+        await expect(store.loadRevenueResolverOutcomes(primaryClaim))
+            .resolves.toEqual([overlay]);
+
+        expect(fake.rpc).toHaveBeenNthCalledWith(
+            1,
+            ANALYSIS_V2_RESULT_DATABASE_NAMES.checkpointRevenueResolverRpc,
+            expect.objectContaining({
+                p_request_id: requestId,
+                p_job_key: 'coordinator:join:primary-evidence',
+                p_rows: [overlay],
+            }),
+        );
+        expect(Object.keys((fake.rpc.mock.calls[0]![1].p_rows as Record<string, unknown>[])[0]!))
+            .toEqual(['candidateId', 'classification', 'operationKey', 'resultHash']);
+        expect(fake.rpc).toHaveBeenNthCalledWith(
+            2,
+            ANALYSIS_V2_RESULT_DATABASE_NAMES.loadRevenueResolverRpc,
+            expect.objectContaining({ p_job_key: 'coordinator:join:primary-evidence' }),
+        );
+
+        const malformedFake = rpcClient();
+        await expect(createSupabaseAnalysisV2ResultStore(malformedFake.client)
+            .checkpointRevenueResolverOutcomes({
+                ...primaryClaim,
+                rows: [{ ...overlay, feature: {} }] as never,
+            }))
+            .rejects.toMatchObject({
+                issues: [expect.objectContaining({
+                    code: 'unrecognized_keys',
+                    keys: ['feature'],
+                })],
+            });
+        expect(malformedFake.rpc).not.toHaveBeenCalled();
+    });
+
     it('persists every requested terminal profile classification in one complete batch', async () => {
         const classifications = [
             'verified_female',

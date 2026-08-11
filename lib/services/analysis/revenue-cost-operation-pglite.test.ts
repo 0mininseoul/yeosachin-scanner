@@ -19,6 +19,13 @@ const providerSettlementQueueMigration = readFileSync(
     ),
     'utf8'
 );
+const routingAttemptContractMigration = readFileSync(
+    new URL(
+        '../../../supabase/migrations/20260811110000_add_revenue_gender_routing_attempt_contract.sql',
+        import.meta.url
+    ),
+    'utf8'
+);
 const requestId = '11111111-1111-4111-8111-111111111111';
 const standardRequestId = '12121212-1212-4121-8121-121212121212';
 const userId = '22222222-2222-4222-8222-222222222222';
@@ -130,6 +137,29 @@ $$;
 	 CONSTRAINT analysis_v2_ai_attempt_cost_check CHECK(estimated_cost_usd IS NULL OR estimated_cost_usd BETWEEN 0 AND 999.999999999999),
 	 CONSTRAINT analysis_v2_ai_attempt_time_check CHECK(updated_at >= created_at AND (terminalized_at IS NULL OR terminalized_at >= created_at))
 	);
+-- Minimal sealed-state slice used by the primary-join resolver overlay
+-- contract.  It intentionally stores no raw model inputs or identifiers.
+CREATE TABLE public.analysis_v2_candidate_feature_rows (
+ request_id uuid NOT NULL, candidate_id text NOT NULL,
+ baseline_classification text NOT NULL,
+ terminal_classification text, classification_source text,
+ gender_resolution_status text, gender_resolution_operation_key text,
+ gender_resolution_result_hash text, appearance_grade smallint,
+ exposure_score smallint, is_business_account boolean,
+ feature_partner_evidence_strong boolean, one_line_overview text,
+ PRIMARY KEY (request_id, candidate_id)
+);
+CREATE TABLE public.analysis_v2_ai_result_checkpoints (
+ request_id uuid NOT NULL, job_key text NOT NULL, operation_key text NOT NULL,
+ stage text NOT NULL, result_hash text NOT NULL, cache_scope text NOT NULL DEFAULT 'request'
+);
+CREATE TABLE public.analysis_v2_ai_scoring_stage_checkpoints (
+ request_id uuid NOT NULL, stage_kind text NOT NULL, payload jsonb NOT NULL DEFAULT '{}'::jsonb
+);
+CREATE TABLE public.analysis_v2_candidate_feature_manifests (
+ request_id uuid NOT NULL, batch integer NOT NULL, producer_job_key text NOT NULL,
+ PRIMARY KEY (request_id, batch)
+);
 CREATE TABLE public.analysis_revenue_run_ledgers (
  request_id uuid PRIMARY KEY REFERENCES public.analysis_requests(id) ON DELETE CASCADE,
  preflight_id uuid NOT NULL, user_id uuid NOT NULL, plan_id text NOT NULL CHECK (plan_id IN ('basic','standard')),
@@ -156,6 +186,7 @@ async function createDb(legacyParents = false): Promise<PGlite> {
     }
     await db.exec(migration);
     await db.exec(providerSettlementQueueMigration);
+    await db.exec(routingAttemptContractMigration);
     return db;
 }
 
@@ -181,8 +212,28 @@ async function expectError(operation: Promise<unknown>, code: string): Promise<v
     await expect(operation).rejects.toThrow(code);
 }
 
-async function begin(db: PGlite): Promise<void> {
+async function begin(db: PGlite, plan: 'basic' | 'standard' = 'basic'): Promise<void> {
     await seedBegin(db);
+    if (plan === 'standard') {
+        // Keep the exact immutable entitlement/runner lineage coherent before
+        // the ledger is born.  This exercises the same Standard branch the
+        // durable resolver admission reads, rather than merely unit-testing
+        // the runtime's local 40-slot mirror.
+        await db.exec(`
+            UPDATE public.analysis_requests
+               SET selected_plan_id_snapshot='standard'
+             WHERE id='${requestId}';
+            UPDATE public.analysis_preflights
+               SET admission_selected_plan_id='standard'
+             WHERE id='${preflightId}';
+            UPDATE public.analysis_v2_test_entitlement_consumptions
+               SET selected_plan_id='standard'
+             WHERE request_id='${requestId}';
+            UPDATE public.account_e2e_test_runners
+               SET runner_plan='standard'
+             WHERE account_id='${userId}';
+        `);
+    }
     await query(db, 'SELECT public.begin_analysis_revenue_cost_ledger_v1($1::uuid)', [requestId]);
 }
 
@@ -981,6 +1032,365 @@ describe('revenue cost operation ledger PGlite', () => {
             { operation_kind: 'stage_one_routing', selected_manifest_scope_hash: hash('b'), source_attempt: 1, status: 'released' },
             { operation_kind: 'stage_one_routing_retry', selected_manifest_scope_hash: hash('b'), source_attempt: 2, status: 'reserved' },
         ] });
+    });
+
+    it('keeps outer routing pass two through transport attempts one to two without rebilling attempt one', async () => {
+        const db = await createDb();
+        await seedLiveSources(db);
+        await db.exec(`
+            INSERT INTO public.analysis_v2_gender_routing_manifests(
+                request_id,relationship_job_key,relationship_job_input_hash,policy_version,
+                relationship_checkpoint_id,plan_id,canonical_input_hmac,status
+            ) VALUES (
+                '${requestId}','${jobKey}','${inputHash}','gender-routing-v1',
+                '${hash('4')}','basic','${hash('b')}','building'
+            );
+        `);
+        const outerRetryOperationKey = `gender-triage:${hash('c')}`;
+        await insertReservedAiAttempt(db, {
+            jobKey,
+            operationKey: outerRetryOperationKey,
+            attempt: 1,
+            reservationToken: fixtureToken(703),
+            modelName: 'gemini-3.1-flash-lite',
+            location: 'global',
+            stage: 'genderTriage',
+            thinkingLevel: 'MINIMAL',
+            mediaCount: 0,
+            mediaResolution: 'LOW',
+            promptVersion: 'gender-triage-v2',
+            schemaVersion: 2,
+            maxOutputTokens: 512,
+        });
+
+        await expect(query<{ result: { disposition: string } }>(db, `
+            SELECT public.register_analysis_revenue_ai_routing_attempt_v1(
+                '${requestId}','${jobKey}','${claimToken}','${inputHash}',
+                '${outerRetryOperationKey}',1::smallint,2::smallint
+            ) AS result
+        `)).resolves.toMatchObject({ rows: [{ result: { disposition: 'accepted' } }] });
+        await expect(query<{ result: { disposition: string } }>(db, `
+            SELECT public.reserve_analysis_revenue_cost_operation_v2(
+                '${requestId}','${jobKey}','${claimToken}','${inputHash}',
+                'ai_attempt','${outerRetryOperationKey}',1::smallint
+            ) AS result
+        `)).resolves.toMatchObject({ rows: [{ result: { disposition: 'accepted' } }] });
+
+        await expect(db.query(`
+            SELECT operation_kind,routing_attempt,source_attempt
+              FROM public.analysis_revenue_cost_operations
+             WHERE request_id='${requestId}'
+               AND source_operation_key_hash='${sourceOperationHash(outerRetryOperationKey)}'
+        `)).resolves.toMatchObject({ rows: [{
+            operation_kind: 'stage_one_routing_retry',
+            routing_attempt: 2,
+            source_attempt: 1,
+        }] });
+
+        // A transport retry is permitted only after the first reserved AI
+        // attempt became an authoritative rate-limit no-call and its exact
+        // cost child was released. The registry must then replay the same
+        // outer pass instead of remapping source_attempt=2 as a new pass.
+        await db.exec(`
+            UPDATE public.analysis_v2_ai_attempts
+               SET status='rate_limited',usage_metadata_status='missing',usage_complete=FALSE,
+                   latency_ms=1,terminal_payload_hash='${hash('d')}',
+                   terminalized_at=created_at + interval '1 second',updated_at=created_at + interval '1 second'
+             WHERE request_id='${requestId}'
+               AND operation_key='${outerRetryOperationKey}'
+               AND attempt=1
+        `);
+        await expect(query<{ result: { disposition: string } }>(db, `
+            SELECT public.release_analysis_revenue_cost_operation_v2(
+                '${requestId}','${jobKey}','${claimToken}','${inputHash}',
+                'ai_attempt','${outerRetryOperationKey}',1::smallint
+            ) AS result
+        `)).resolves.toMatchObject({ rows: [{ result: { disposition: 'released' } }] });
+        await insertReservedAiAttempt(db, {
+            jobKey,
+            operationKey: outerRetryOperationKey,
+            attempt: 2,
+            reservationToken: fixtureToken(704),
+            modelName: 'gemini-3.1-flash-lite',
+            location: 'global',
+            stage: 'genderTriage',
+            thinkingLevel: 'MINIMAL',
+            mediaCount: 0,
+            mediaResolution: 'LOW',
+            promptVersion: 'gender-triage-v2',
+            schemaVersion: 2,
+            maxOutputTokens: 512,
+        });
+        await expect(query<{ result: { disposition: string; replayed: boolean } }>(db, `
+            SELECT public.register_analysis_revenue_ai_routing_attempt_v1(
+                '${requestId}','${jobKey}','${claimToken}','${inputHash}',
+                '${outerRetryOperationKey}',2::smallint,2::smallint
+            ) AS result
+        `)).resolves.toMatchObject({ rows: [{ result: {
+            disposition: 'accepted', replayed: true,
+        } }] });
+        await expect(query<{ result: { disposition: string } }>(db, `
+            SELECT public.reserve_analysis_revenue_cost_operation_v2(
+                '${requestId}','${jobKey}','${claimToken}','${inputHash}',
+                'ai_attempt','${outerRetryOperationKey}',2::smallint
+            ) AS result
+        `)).resolves.toMatchObject({ rows: [{ result: { disposition: 'accepted' } }] });
+        await expect(db.query(`
+            SELECT operation_kind,routing_attempt,source_attempt,status
+              FROM public.analysis_revenue_cost_operations
+             WHERE request_id='${requestId}'
+               AND source_operation_key_hash='${sourceOperationHash(outerRetryOperationKey)}'
+             ORDER BY source_attempt
+        `)).resolves.toMatchObject({ rows: [
+            {
+                operation_kind: 'stage_one_routing_retry', routing_attempt: 2,
+                source_attempt: 1, status: 'released',
+            },
+            {
+                operation_kind: 'stage_one_routing_retry', routing_attempt: 2,
+                source_attempt: 2, status: 'reserved',
+            },
+        ] });
+    });
+
+    it('persists exact 30-percent final coverage but fails closed above it before finalization', async () => {
+        const accepted = await createDb();
+        await begin(accepted);
+        const finalizerInputHash = hash('f');
+        await insertLiveAiJob(accepted, 'coordinator:finalize', finalizerInputHash);
+        const acceptedGate = `
+            SELECT public.record_analysis_revenue_coverage_gate_v1(
+                '${requestId}','coordinator:finalize','${claimToken}','${finalizerInputHash}',
+                10,10,0,3,TRUE
+            ) AS result
+        `;
+        await expect(query<{ result: { disposition: string } }>(accepted, acceptedGate))
+            .resolves.toMatchObject({ rows: [{ result: { disposition: 'accepted' } }] });
+        await expect(query<{ result: { disposition: string; replayed: boolean } }>(accepted, acceptedGate))
+            .resolves.toMatchObject({ rows: [{ result: {
+                disposition: 'accepted', replayed: true,
+            } }] });
+
+        const rejected = await createDb();
+        await begin(rejected);
+        await insertLiveAiJob(rejected, 'coordinator:finalize', finalizerInputHash);
+        await expect(query<{ result: { disposition: string } }>(rejected, `
+            SELECT public.record_analysis_revenue_coverage_gate_v1(
+                '${requestId}','coordinator:finalize','${claimToken}','${finalizerInputHash}',
+                10,10,0,4,TRUE
+            ) AS result
+        `)).resolves.toMatchObject({ rows: [{ result: { disposition: 'manual_review' } }] });
+        await expect(rejected.query(`
+            SELECT status,manual_review_reason,public_mutual_count,screened_count,
+                   not_screened_count,unknown_burden_count
+              FROM public.analysis_revenue_run_ledgers
+             WHERE request_id='${requestId}'
+        `)).resolves.toMatchObject({ rows: [{
+            status: 'manual_review', manual_review_reason: 'routing_failure',
+            public_mutual_count: 10, screened_count: 10,
+            not_screened_count: 0, unknown_burden_count: 4,
+        }] });
+    });
+
+    it.each([
+        ['basic', 20],
+        ['standard', 40],
+    ] as const)(
+        'caps durable %s resolver admissions at %i across replay and recovery identities',
+        async (plan, capacityLimit) => {
+            const db = await createDb();
+            await begin(db, plan);
+            const resolverJobKey = 'coordinator:join:primary-evidence';
+            const resolverInputHash = hash('7');
+            await insertLiveAiJob(db, resolverJobKey, resolverInputHash);
+            await expect(query<{ result: { disposition: string } }>(db, `
+                SELECT public.begin_analysis_revenue_resolver_pass_v1(
+                    '${requestId}','${resolverJobKey}','${claimToken}','${resolverInputHash}',
+                    '${opaqueHash(`${plan}-resolver-capacity-plan`)}',100,31
+                ) AS result
+            `)).resolves.toMatchObject({ rows: [{ result: { disposition: 'accepted' } }] });
+            const reserve = (operationKey: string) => query<{
+                result: { disposition: string; created: boolean; replayed: boolean };
+            }>(db, `
+                SELECT public.reserve_analysis_revenue_resolver_capacity_v1(
+                    '${requestId}','${resolverJobKey}','${claimToken}','${resolverInputHash}',
+                    '${operationKey}'
+                ) AS result
+            `);
+            const operation = (ordinal: number) => (
+                `gender-resolution:${opaqueHash(`${plan}-resolver-capacity-${ordinal}`)}`
+            );
+
+            for (let ordinal = 0; ordinal < capacityLimit; ordinal += 1) {
+                await expect(reserve(operation(ordinal))).resolves.toMatchObject({
+                    rows: [{ result: { disposition: 'accepted', created: true, replayed: false } }],
+                });
+            }
+            await expect(reserve(operation(0))).resolves.toMatchObject({
+                rows: [{ result: { disposition: 'accepted', created: false, replayed: true } }],
+            });
+            await expect(reserve(operation(capacityLimit))).resolves.toMatchObject({
+                rows: [{ result: { disposition: 'capacity_skipped', created: true, replayed: false } }],
+            });
+            await expect(db.query(`
+                SELECT disposition,pg_catalog.count(*)::INTEGER AS count
+                  FROM public.analysis_revenue_resolver_capacity_reservations
+                 WHERE request_id='${requestId}'
+                 GROUP BY disposition
+                 ORDER BY disposition
+            `)).resolves.toMatchObject({ rows: [
+                { disposition: 'accepted', count: capacityLimit },
+                { disposition: 'capacity_skipped', count: 1 },
+            ] });
+        },
+    );
+
+    it('admits and replays a featureless primary-join resolver overlay through the AI-cost and finalizer fences', async () => {
+        const db = await createDb();
+        await begin(db);
+        const primaryJobKey = 'coordinator:join:primary-evidence';
+        const primaryInputHash = opaqueHash('primary-featureless-fence');
+        const resolverOperationKey = `gender-resolution:${opaqueHash('featureless-overlay')}`;
+        const resolverResultHash = opaqueHash('featureless-overlay-result');
+        const candidateId = 'candidate:featureless';
+        await insertLiveAiJob(db, primaryJobKey, primaryInputHash);
+        await expect(query<{ result: { disposition: string } }>(db, `
+            SELECT public.begin_analysis_revenue_resolver_pass_v1(
+                '${requestId}','${primaryJobKey}','${claimToken}','${primaryInputHash}',
+                '${opaqueHash('featureless-overlay-plan')}',10,4
+            ) AS result
+        `)).resolves.toMatchObject({ rows: [{ result: { disposition: 'accepted' } }] });
+        await expect(query<{ result: { disposition: string } }>(db, `
+            SELECT public.reserve_analysis_revenue_resolver_capacity_v1(
+                '${requestId}','${primaryJobKey}','${claimToken}','${primaryInputHash}',
+                '${resolverOperationKey}'
+            ) AS result
+        `)).resolves.toMatchObject({ rows: [{ result: { disposition: 'accepted' } }] });
+        await insertReservedAiAttempt(db, {
+            jobKey: primaryJobKey,
+            operationKey: resolverOperationKey,
+            attempt: 1,
+            reservationToken: fixtureToken(760),
+            modelName: 'gemini-3-flash-preview',
+            location: 'global',
+            stage: 'genderResolution',
+            thinkingLevel: 'LOW',
+            mediaCount: 2,
+            mediaResolution: 'MEDIUM',
+            promptVersion: 'gender-resolution-v1',
+            schemaVersion: 1,
+            maxOutputTokens: 512,
+        });
+        const reserveCost = `SELECT public.reserve_analysis_revenue_cost_operation_v2(
+            '${requestId}','${primaryJobKey}','${claimToken}','${primaryInputHash}',
+            'ai_attempt','${resolverOperationKey}',1::smallint
+        ) AS result`;
+        const startCost = `SELECT public.mark_analysis_revenue_cost_operation_started_v2(
+            '${requestId}','${primaryJobKey}','${claimToken}','${primaryInputHash}',
+            'ai_attempt','${resolverOperationKey}',1::smallint
+        ) AS result`;
+        await expect(query<{ result: { disposition: string } }>(db, reserveCost))
+            .resolves.toMatchObject({ rows: [{ result: { disposition: 'accepted' } }] });
+        await expect(query<{ result: { disposition: string } }>(db, startCost))
+            .resolves.toMatchObject({ rows: [{ result: { disposition: 'started' } }] });
+        await db.exec(`
+            UPDATE public.analysis_v2_ai_attempts
+               SET status='success',usage_metadata_status='complete',usage_complete=TRUE,
+                   prompt_tokens=100,completion_tokens=50,thinking_tokens=10,total_tokens=160,
+                   latency_ms=10,estimated_cost_usd=0.000230,finish_reason='STOP',
+                   terminal_payload_hash='${hash('e')}',terminalized_at=created_at + interval '1 second',
+                   updated_at=created_at + interval '1 second'
+             WHERE request_id='${requestId}'
+               AND operation_key='${resolverOperationKey}' AND attempt=1;
+            INSERT INTO public.analysis_v2_candidate_feature_rows(
+                request_id,candidate_id,baseline_classification
+            ) VALUES ('${requestId}','${candidateId}','analysis_unavailable');
+            INSERT INTO public.analysis_v2_ai_result_checkpoints(
+                request_id,job_key,operation_key,stage,result_hash,cache_scope
+            ) VALUES (
+                '${requestId}','${primaryJobKey}','${resolverOperationKey}',
+                'genderResolution','${resolverResultHash}','request'
+            );
+        `);
+        await expect(query<{ result: { disposition: string } }>(db, `
+            SELECT public.settle_analysis_revenue_cost_operation_v2(
+                '${requestId}','${primaryJobKey}','ai_attempt','${resolverOperationKey}',1::smallint
+            ) AS result
+        `)).resolves.toMatchObject({ rows: [{ result: { disposition: 'settled' } }] });
+
+        const overlayRows = JSON.stringify([{
+            candidateId,
+            classification: 'verified_female',
+            operationKey: resolverOperationKey,
+            resultHash: resolverResultHash,
+        }]);
+        const checkpointOverlay = `SELECT public.checkpoint_analysis_v2_revenue_resolver_outcomes_v1(
+            '${requestId}','${primaryJobKey}','${claimToken}','${primaryInputHash}',
+            '${overlayRows}'::jsonb
+        ) AS result`;
+        await expect(query<{ result: { rows: Array<Record<string, unknown>> } }>(db, checkpointOverlay))
+            .resolves.toMatchObject({ rows: [{ result: { rows: [{
+                candidateId,
+                classification: 'verified_female',
+                operationKey: resolverOperationKey,
+                resultHash: resolverResultHash,
+            }] } }] });
+        await expect(query<{ result: { rows: Array<Record<string, unknown>> } }>(db, checkpointOverlay))
+            .resolves.toMatchObject({ rows: [{ result: { rows: [{
+                candidateId,
+                classification: 'verified_female',
+                operationKey: resolverOperationKey,
+                resultHash: resolverResultHash,
+            }] } }] });
+        const persistedOverlay = await db.query<{ classification: string; operation_key: string; result_hash: string }>(`
+            SELECT classification,operation_key,result_hash
+              FROM public.analysis_revenue_resolver_outcome_overlays
+             WHERE request_id='${requestId}' AND candidate_id='${candidateId}'
+        `);
+        expect(persistedOverlay.rows).toEqual([{
+            classification: 'verified_female',
+            operation_key: resolverOperationKey,
+            result_hash: resolverResultHash,
+        }]);
+        expect(JSON.stringify(persistedOverlay.rows)).not.toContain('feature');
+        // A featureless analysis-unavailable candidate is resolved only by
+        // the audited overlay. No scoring feature is fabricated or copied
+        // through this RPC; primary membership consumes the overlay while
+        // screening later excludes the featureless row.
+        await expect(db.query(`
+            SELECT terminal_classification,classification_source,
+                   gender_resolution_status,appearance_grade,exposure_score,
+                   one_line_overview
+              FROM public.analysis_v2_candidate_feature_rows
+             WHERE request_id='${requestId}' AND candidate_id='${candidateId}'
+        `)).resolves.toMatchObject({ rows: [{
+            terminal_classification: null,
+            classification_source: null,
+            gender_resolution_status: null,
+            appearance_grade: null,
+            exposure_score: null,
+            one_line_overview: null,
+        }] });
+
+        await expect(query<{ result: { disposition: string } }>(db, `
+            SELECT public.checkpoint_analysis_revenue_primary_quality_v1(
+                '${requestId}','${primaryJobKey}','${claimToken}','${primaryInputHash}',
+                10,10,0,4,3,TRUE,TRUE
+            ) AS result
+        `)).resolves.toMatchObject({ rows: [{ result: { disposition: 'accepted' } }] });
+        const finalizerInputHash = opaqueHash('featureless-finalizer-fence');
+        await insertLiveAiJob(db, 'coordinator:finalize', finalizerInputHash);
+        const verify = `SELECT public.verify_analysis_revenue_final_coverage_gate_v1(
+            '${requestId}','coordinator:finalize','${claimToken}','${finalizerInputHash}'
+        ) AS result`;
+        await expect(query<{ result: { disposition: string; replayed: boolean } }>(db, verify))
+            .resolves.toMatchObject({ rows: [{ result: {
+                disposition: 'accepted', replayed: false,
+            } }] });
+        await expect(query<{ result: { disposition: string; replayed: boolean } }>(db, verify))
+            .resolves.toMatchObject({ rows: [{ result: {
+                disposition: 'accepted', replayed: true,
+            } }] });
     });
 
     it('rejects stage-one cost authority when more than one current manifest could supply its scope', async () => {

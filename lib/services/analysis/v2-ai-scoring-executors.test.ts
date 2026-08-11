@@ -27,6 +27,7 @@ import {
     createSupabaseAnalysisV2ResultStore,
     type AnalysisV2ProfileClassificationRow,
     type AnalysisV2ResultCheckpointManifest,
+    type AnalysisV2RevenueResolverOutcomePatch,
     type AnalysisV2ResultStageSnapshot,
     type AnalysisV2ResultSupabaseClient,
 } from './v2-result-store';
@@ -309,6 +310,7 @@ function partnerResult(strong = false, weak = false): PartnerSafetyResult {
 
 interface MemoryState {
     outcomes: AnalysisV2ProfileAiOutcome[];
+    resolverPatches: AnalysisV2RevenueResolverOutcomePatch[];
     primary: AnalysisV2PrimaryJoinSnapshot | null;
     screening: AnalysisV2ScreeningSnapshot | null;
     reverse: AnalysisV2ReverseLikeSnapshot | null;
@@ -463,7 +465,7 @@ function targetEvidence(
 
 function memory(): MemoryState {
     return {
-        outcomes: [], primary: null, screening: null, reverse: null,
+        outcomes: [], resolverPatches: [], primary: null, screening: null, reverse: null,
         partner: null, final: null, narrative: null,
     };
 }
@@ -493,6 +495,16 @@ function dependencies(
             checkpointScores: vi.fn(async input => checkpoint(input.jobKey, input.rows.length)),
             checkpointPrivateNames: vi.fn(async input => checkpoint(input.jobKey, input.rows.length)),
             checkpointNarratives: vi.fn(async input => checkpoint(input.jobKey, input.rows.length)),
+            checkpointRevenueResolverOutcomes: vi.fn(async input => {
+                const byCandidate = new Map(memoryState.resolverPatches.map(row => [
+                    row.candidateId,
+                    row,
+                ]));
+                for (const row of input.rows) byCandidate.set(row.candidateId, row);
+                memoryState.resolverPatches = [...byCandidate.values()];
+                return memoryState.resolverPatches;
+            }),
+            loadRevenueResolverOutcomes: vi.fn(async () => memoryState.resolverPatches),
             loadStageSnapshot: vi.fn(async () => null),
             finalize: vi.fn(async () => ({
                 finalized: true,
@@ -4158,6 +4170,623 @@ describe('V2 AI and scoring executors', () => {
 });
 
 describe('V2 retained result image finalization', () => {
+    function strictFinalizerState(screenedCount: number) {
+        const relationshipResultHash = digest(`strict-relationships:${screenedCount}`);
+        return state({
+            relationships: {
+                revision: 1,
+                resultHash: relationshipResultHash,
+                detectedMutualCount: screenedCount,
+                publicCount: screenedCount,
+                privateCount: 0,
+                detailedSelectedPublicCount: screenedCount,
+                notScreenedPublicCount: 0,
+                profileBatches: [{
+                    batch: 0,
+                    itemCount: screenedCount,
+                    inputHash: digest(`strict-profile:${screenedCount}`),
+                }],
+                privateNameBatches: [],
+                relationshipSelectionPolicy: {
+                    policyVersion: 'gender-routing-v1',
+                    relationshipCheckpointId: relationshipResultHash,
+                    relationshipJobInputHash: digest(`strict-relationship-input:${screenedCount}`),
+                    planId: 'basic',
+                    publicPopulationCount: screenedCount,
+                    selectedCount: screenedCount,
+                },
+            },
+        });
+    }
+
+    function unresolvedOutcome(username: string): AnalysisV2ProfileAiOutcome {
+        const baseline = verifiedOutcome(username);
+        const mediaIds = baseline.normalizedSelectionIds;
+        return {
+            ...baseline,
+            status: 'unresolved',
+            baselineClassification: 'unresolved',
+            classificationSource: 'unknown',
+            feature: feature(mediaIds, 'unresolved'),
+            genderResolutionStatus: 'not_eligible',
+            genderResolutionOperationKey: null,
+            genderResolutionResultHash: null,
+            mediaBundlePersisted: false,
+        };
+    }
+
+    function unavailableOutcome(
+        username: string,
+        status: 'analysis_unavailable' | 'media_unavailable' | 'fetch_unavailable',
+    ): AnalysisV2ProfileAiOutcome {
+        const baseline = verifiedOutcome(username);
+        return {
+            ...baseline,
+            status,
+            unavailableReason: status === 'analysis_unavailable' ? 'ai_response'
+                : status === 'fetch_unavailable' ? 'profile_fetch' : null,
+            profile: status === 'fetch_unavailable' ? null : baseline.profile,
+            triage: null,
+            feature: null,
+            normalizedSelectionIds: [],
+            mediaCoverage: { selectedCount: 0, normalizedCount: 0, failures: [] },
+            captions: [],
+            genderOperationKey: null,
+            genderResultHash: null,
+            featureOperationKey: null,
+            featureResultHash: null,
+            baselineClassification: status,
+            classificationSource: 'unavailable',
+            genderResolutionStatus: 'not_eligible',
+            genderResolutionOperationKey: null,
+            genderResolutionResultHash: null,
+            mediaBundlePersisted: false,
+        };
+    }
+
+    function strictResolverAdmission(capacityLimit: 20 | 40 = 20) {
+        return {
+            capacityLimit,
+            begin: vi.fn(async () => 'accepted' as const),
+            reserve: vi.fn(async () => 'accepted' as const),
+            complete: vi.fn(async (): Promise<'approved' | 'manual_review'> => 'approved'),
+        };
+    }
+
+    it('defers otherwise eligible strict profile resolver work until the primary unknown-burden checkpoint', async () => {
+        const memoryState = memory();
+        const account = profile('strict.deferred');
+        const deps = dependencies(memoryState, {
+            profileBatches: {
+                loadExactBatch: vi.fn(async () => ({
+                    requestedUsernames: [account.username],
+                    results: [{
+                        username: account.username,
+                        status: 'success' as const,
+                        profile: account,
+                    }],
+                })),
+            },
+        });
+        const strictState = {
+            ...strictFinalizerState(1),
+            profileFetchBatches: [{
+                batch: 0,
+                itemCount: 1,
+                producerInputHash: digest('strict-deferred-producer'),
+                revision: 1,
+                resultHash: digest('strict-deferred-profile'),
+            }],
+        };
+
+        await createAnalysisV2AiScoringExecutorRegistry(deps).profile_ai!(context('profile_ai', {
+            jobKey: 'track:profile-ai:batch:0',
+            batch: 0,
+            state: strictState,
+            aiStagePolicyVersion: AI_STAGE_POLICY_LATEST_VERSION,
+        }));
+
+        expect(deps.ai.gender).toHaveBeenCalledOnce();
+        expect(deps.ai.features).toHaveBeenCalledOnce();
+        expect(deps.ai.startGenderResolution).not.toHaveBeenCalled();
+        expect(memoryState.outcomes[0]).toMatchObject({
+            baselineClassification: 'verified_female',
+            genderResolutionStatus: 'not_eligible',
+        });
+    });
+
+    it('uses only the durable primary quality receipt at strict finalization and suppresses completion on manual review', async () => {
+        const memoryState = memory();
+        const verify = vi.fn(async () => 'manual_review' as const);
+        const admission = strictResolverAdmission();
+        const completed = vi.fn(async () => undefined);
+        const deps = dependencies(memoryState, {
+            revenueFinalQualityGate: {
+                isApplicable: vi.fn(async () => true),
+                verify,
+                evaluate: vi.fn(async () => 'approved' as const),
+            },
+            revenueResolverCapacity: { bind: vi.fn(async () => admission) },
+            analysisLifecycleEventEmitter: completed,
+        } as never);
+        const strictState = strictFinalizerState(1);
+
+        await expect(createAnalysisV2AiScoringExecutorRegistry(deps).finalize!(context('finalize', {
+            jobKey: 'coordinator:finalize',
+            state: strictState,
+        }))).rejects.toThrow('ANALYSIS_V2_REVENUE_FINAL_QUALITY_GATE_FAILED');
+
+        expect(verify).toHaveBeenCalledWith(expect.objectContaining({
+            jobKey: 'coordinator:finalize',
+        }));
+        expect(vi.mocked(deps.revenueResolverCapacity!.bind)).not.toHaveBeenCalled();
+        expect(deps.resultStore.finalize).not.toHaveBeenCalled();
+        expect(completed).not.toHaveBeenCalled();
+    });
+
+    it('keeps a strict primary join at the exact thirty-percent boundary resolver-free', async () => {
+        const memoryState = memory();
+        memoryState.outcomes = [
+            ...Array.from({ length: 7 }, (_, index) => verifiedOutcome(`verified.${index}`)),
+            ...Array.from({ length: 3 }, (_, index) => unresolvedOutcome(`unknown.${index}`)),
+        ];
+        const admission = strictResolverAdmission();
+        const deps = dependencies(memoryState, {
+            revenueResolverCapacity: { bind: vi.fn(async () => admission) },
+        } as never);
+
+        await createAnalysisV2AiScoringExecutorRegistry(deps).primary_join!(context('primary_join', {
+            jobKey: 'coordinator:join:primary-evidence',
+            state: strictFinalizerState(10),
+        }));
+
+        expect(admission.begin).not.toHaveBeenCalled();
+        expect(admission.reserve).not.toHaveBeenCalled();
+        expect(deps.ai.startGenderResolution).not.toHaveBeenCalled();
+        expect(admission.complete).toHaveBeenCalledWith(expect.objectContaining({
+            initialUnknownBurdenCount: 3,
+            finalUnknownBurdenCount: 3,
+            coverageValid: true,
+            resolverPassStarted: false,
+        }));
+        expect(deps.resultStore.checkpointRevenueResolverOutcomes).not.toHaveBeenCalled();
+        expect(memoryState.primary?.candidates).toHaveLength(7);
+    });
+
+    it('handles a strict screened-zero cohort without beginning a resolver pass', async () => {
+        const memoryState = memory();
+        const admission = strictResolverAdmission();
+        const deps = dependencies(memoryState, {
+            revenueResolverCapacity: { bind: vi.fn(async () => admission) },
+        } as never);
+
+        await createAnalysisV2AiScoringExecutorRegistry(deps).primary_join!(context('primary_join', {
+            jobKey: 'coordinator:join:primary-evidence',
+            state: strictFinalizerState(0),
+        }));
+
+        expect(admission.begin).not.toHaveBeenCalled();
+        expect(admission.reserve).not.toHaveBeenCalled();
+        expect(deps.ai.startGenderResolution).not.toHaveBeenCalled();
+        expect(admission.complete).toHaveBeenCalledWith({
+            publicMutualCount: 0,
+            screenedCount: 0,
+            notScreenedCount: 0,
+            initialUnknownBurdenCount: 0,
+            finalUnknownBurdenCount: 0,
+            coverageValid: true,
+            resolverPassStarted: false,
+        });
+        expect(memoryState.primary?.candidates).toEqual([]);
+    });
+
+    it('runs one Basic primary-join resolver pass in approved priority order and never consumes more than twenty request slots', async () => {
+        const memoryState = memory();
+        memoryState.outcomes = [
+            unavailableOutcome('analysis.unavailable', 'analysis_unavailable'),
+            unavailableOutcome('media.unavailable', 'media_unavailable'),
+            unavailableOutcome('fetch.unavailable', 'fetch_unavailable'),
+            ...Array.from({ length: 22 }, (_, index) => unresolvedOutcome(
+                `other.${String(index + 1).padStart(2, '0')}`,
+            )),
+        ];
+        const admission = strictResolverAdmission(20);
+        const deps = dependencies(memoryState, {
+            revenueResolverCapacity: { bind: vi.fn(async () => admission) },
+        } as never);
+        deps.ai.startGenderResolution = vi.fn((
+            input: Parameters<AnalysisV2AiStageRuntime['startGenderResolution']>[0],
+        ) => ({
+            operationKey: `gender-resolution:${digest(input.media[0]!.selectionId)}`,
+            completion: Promise.resolve(),
+            peek: () => ({
+                status: 'ready' as const,
+                value: {
+                    result: {
+                        assessment: {
+                            inferredGender: 'female' as const,
+                            confidence: 'high' as const,
+                            ownerConsistency: 'same_person' as const,
+                            evidenceSelectionIds: input.media.slice(0, 2).map(row => row.selectionId),
+                        },
+                        analyzedSelectionIds: input.media.map(row => row.selectionId),
+                    },
+                    operationKey: `gender-resolution:${digest(input.media[0]!.selectionId)}`,
+                    resultHash: digest(`resolver:${input.media[0]!.selectionId}`),
+                    source: 'checkpoint' as const,
+                },
+            }),
+            cutoff: vi.fn(async () => undefined),
+        }));
+
+        await createAnalysisV2AiScoringExecutorRegistry(deps).primary_join!(context('primary_join', {
+            jobKey: 'coordinator:join:primary-evidence',
+            state: strictFinalizerState(25),
+            aiStagePolicyVersion: AI_STAGE_POLICY_LATEST_VERSION,
+        }));
+
+        expect(admission.begin).toHaveBeenCalledOnce();
+        expect(admission.begin).toHaveBeenCalledWith(expect.objectContaining({
+            screenedCount: 25,
+            unknownBurdenCount: 25,
+        }));
+        expect(admission.reserve).toHaveBeenCalledTimes(20);
+        const resolverProfiles = vi.mocked(deps.ai.startGenderResolution).mock.calls.map(
+            ([input]) => input.media[0]!.selectionId,
+        );
+        expect(resolverProfiles).toEqual([
+            'profile:analysis.unavailable',
+            'profile:media.unavailable',
+            ...Array.from({ length: 18 }, (_, index) => (
+                `profile:other.${String(index + 1).padStart(2, '0')}`
+            )),
+        ]);
+        expect(resolverProfiles).not.toContain('profile:fetch.unavailable');
+        expect(admission.complete).toHaveBeenCalledWith(expect.objectContaining({
+            initialUnknownBurdenCount: 25,
+            finalUnknownBurdenCount: 5,
+            coverageValid: true,
+            resolverPassStarted: true,
+        }));
+        expect(deps.resultStore.checkpointRevenueResolverOutcomes).toHaveBeenCalledOnce();
+        expect(memoryState.primary?.candidates).toHaveLength(20);
+    });
+
+    it('resolves featureless analysis/media outages, skips fetch, and keeps only featureful women in screening', async () => {
+        const memoryState = memory();
+        const analysisUnavailable = unavailableOutcome(
+            'analysis.unavailable',
+            'analysis_unavailable',
+        );
+        const mediaUnavailable = unavailableOutcome(
+            'media.unavailable',
+            'media_unavailable',
+        );
+        const fetchUnavailable = unavailableOutcome(
+            'fetch.unavailable',
+            'fetch_unavailable',
+        );
+        const otherUnknown = unresolvedOutcome('other.unknown');
+        memoryState.outcomes = [
+            ...Array.from({ length: 6 }, (_, index) => verifiedOutcome(`verified.${index}`)),
+            analysisUnavailable,
+            mediaUnavailable,
+            fetchUnavailable,
+            otherUnknown,
+        ];
+        const admission = strictResolverAdmission();
+        const deps = dependencies(memoryState, {
+            revenueResolverCapacity: { bind: vi.fn(async () => admission) },
+        } as never);
+        deps.ai.startGenderResolution = vi.fn((
+            input: Parameters<AnalysisV2AiStageRuntime['startGenderResolution']>[0],
+        ) => {
+            const selectionId = input.media[0]!.selectionId;
+            return {
+                operationKey: `gender-resolution:${digest(`resolver:${selectionId}`)}`,
+                completion: Promise.resolve(),
+                peek: () => ({
+                    status: 'ready' as const,
+                    value: {
+                        result: {
+                            assessment: {
+                                inferredGender: 'female' as const,
+                                confidence: 'high' as const,
+                                ownerConsistency: 'same_person' as const,
+                                evidenceSelectionIds: input.media.slice(0, 2).map(row => row.selectionId),
+                            },
+                            analyzedSelectionIds: input.media.map(row => row.selectionId),
+                        },
+                        operationKey: `gender-resolution:${digest(`resolver:${selectionId}`)}`,
+                        resultHash: digest(`resolver-result:${selectionId}`),
+                        source: 'checkpoint' as const,
+                    },
+                }),
+                cutoff: vi.fn(async () => undefined),
+            };
+        });
+        const strictState = strictFinalizerState(10);
+        const registry = createAnalysisV2AiScoringExecutorRegistry(deps);
+
+        await registry.primary_join!(context('primary_join', {
+            jobKey: 'coordinator:join:primary-evidence',
+            state: strictState,
+            aiStagePolicyVersion: AI_STAGE_POLICY_LATEST_VERSION,
+        }));
+
+        const resolverProfiles = vi.mocked(deps.ai.startGenderResolution).mock.calls.map(
+            ([input]) => input.media[0]!.selectionId,
+        );
+        // analysis/media are attempted with freshly normalized profile media;
+        // no-profile fetch is skipped and the subsequent "other" candidate
+        // still receives its opportunity.
+        expect(resolverProfiles).toEqual([
+            'profile:analysis.unavailable',
+            'profile:media.unavailable',
+            'profile:other.unknown',
+        ]);
+        expect(admission.complete).toHaveBeenCalledWith(expect.objectContaining({
+            initialUnknownBurdenCount: 4,
+            finalUnknownBurdenCount: 1,
+            coverageValid: true,
+        }));
+        const overlayRows = memoryState.resolverPatches;
+        expect(overlayRows.map(row => row.candidateId)).toEqual([
+            analysisUnavailable.candidateId,
+            mediaUnavailable.candidateId,
+            otherUnknown.candidateId,
+        ]);
+        expect(overlayRows.every(row => !Object.hasOwn(row, 'feature'))).toBe(true);
+        expect(vi.mocked(deps.resultStore.checkpointRevenueResolverOutcomes))
+            .toHaveBeenCalledWith(expect.objectContaining({
+                rows: expect.arrayContaining([
+                    expect.not.objectContaining({ feature: expect.anything() }),
+                ]),
+            }));
+        // Both featureless women are durable membership, while the fetch
+        // outage remains unknown.  Only the formerly unresolved, featureful
+        // candidate needs a retained detail bundle.
+        expect(memoryState.primary?.candidates.map(row => row.candidateId)).toEqual([
+            ...Array.from({ length: 6 }, (_, index) => analysisV2CandidateId(`verified.${index}`)),
+            analysisUnavailable.candidateId,
+            mediaUnavailable.candidateId,
+            otherUnknown.candidateId,
+        ]);
+        expect(deps.mediaStore.persistBundle).toHaveBeenCalledTimes(1);
+
+        await registry.screening!(context('screening', {
+            jobKey: 'coordinator:candidate-screening',
+            state: strictState,
+        }));
+        expect(memoryState.screening?.candidates.map(row => row.candidateId)).toEqual([
+            ...Array.from({ length: 6 }, (_, index) => analysisV2CandidateId(`verified.${index}`)),
+            otherUnknown.candidateId,
+        ]);
+        expect(memoryState.screening?.candidates.map(row => row.candidateId)).not.toContain(
+            analysisUnavailable.candidateId,
+        );
+        expect(memoryState.screening?.candidates.map(row => row.candidateId)).not.toContain(
+            mediaUnavailable.candidateId,
+        );
+    });
+
+    it('bubbles a strict primary resolver recovery-pending state without checkpointing manual review', async () => {
+        const memoryState = memory();
+        memoryState.outcomes = [
+            ...Array.from({ length: 6 }, (_, index) => verifiedOutcome(`verified.${index}`)),
+            ...Array.from({ length: 4 }, (_, index) => unresolvedOutcome(`unknown.${index}`)),
+        ];
+        const admission = strictResolverAdmission();
+        const deps = dependencies(memoryState, {
+            revenueResolverCapacity: { bind: vi.fn(async () => admission) },
+        } as never);
+        deps.ai.startGenderResolution = vi.fn(() => ({
+            operationKey: `gender-resolution:${digest('primary-recovery-pending')}`,
+            completion: Promise.resolve(),
+            peek: () => ({ status: 'recovery_pending' as const }),
+            cutoff: vi.fn().mockResolvedValue(undefined),
+        }));
+
+        await expect(createAnalysisV2AiScoringExecutorRegistry(deps).primary_join!(context('primary_join', {
+            jobKey: 'coordinator:join:primary-evidence',
+            state: strictFinalizerState(10),
+            aiStagePolicyVersion: AI_STAGE_POLICY_LATEST_VERSION,
+        }))).rejects.toThrow('ANALYSIS_V2_AI_RESULT_RECOVERY_PENDING');
+
+        expect(admission.begin).toHaveBeenCalledOnce();
+        expect(admission.reserve).toHaveBeenCalledOnce();
+        expect(admission.complete).not.toHaveBeenCalled();
+        expect(deps.resultStore.checkpointRevenueResolverOutcomes).not.toHaveBeenCalled();
+        expect(memoryState.primary).toBeNull();
+    });
+
+    it('replays featureless resolver overlays by audited identity without another model call or feature payload', async () => {
+        const memoryState = memory();
+        const analysisUnavailable = unavailableOutcome(
+            'analysis.replay',
+            'analysis_unavailable',
+        );
+        const mediaUnavailable = unavailableOutcome(
+            'media.replay',
+            'media_unavailable',
+        );
+        const fetchUnavailable = unavailableOutcome(
+            'fetch.replay',
+            'fetch_unavailable',
+        );
+        const otherUnknown = unresolvedOutcome('other.replay');
+        memoryState.outcomes = [
+            ...Array.from({ length: 6 }, (_, index) => verifiedOutcome(`replay.verified.${index}`)),
+            analysisUnavailable,
+            mediaUnavailable,
+            fetchUnavailable,
+            otherUnknown,
+        ];
+        const admission = strictResolverAdmission();
+        const deps = dependencies(memoryState, {
+            revenueResolverCapacity: { bind: vi.fn(async () => admission) },
+        } as never);
+        deps.ai.startGenderResolution = vi.fn((
+            input: Parameters<AnalysisV2AiStageRuntime['startGenderResolution']>[0],
+        ) => {
+            const selectionId = input.media[0]!.selectionId;
+            const operationKey = `gender-resolution:${digest(`replay:${selectionId}`)}`;
+            return {
+                operationKey,
+                completion: Promise.resolve(),
+                peek: () => ({
+                    status: 'ready' as const,
+                    value: {
+                        result: {
+                            assessment: {
+                                inferredGender: 'female' as const,
+                                confidence: 'high' as const,
+                                ownerConsistency: 'same_person' as const,
+                                evidenceSelectionIds: input.media.slice(0, 2).map(row => row.selectionId),
+                            },
+                            analyzedSelectionIds: input.media.map(row => row.selectionId),
+                        },
+                        operationKey,
+                        resultHash: digest(`replay-result:${selectionId}`),
+                        source: 'checkpoint' as const,
+                    },
+                }),
+                cutoff: vi.fn(async () => undefined),
+            };
+        });
+        const strictState = strictFinalizerState(10);
+        const registry = createAnalysisV2AiScoringExecutorRegistry(deps);
+        const primaryContext = context('primary_join', {
+            jobKey: 'coordinator:join:primary-evidence',
+            state: strictState,
+            aiStagePolicyVersion: AI_STAGE_POLICY_LATEST_VERSION,
+        });
+
+        await registry.primary_join!(primaryContext);
+        const persistedIdentity = memoryState.resolverPatches.map(row => ({
+            candidateId: row.candidateId,
+            operationKey: row.operationKey,
+            resultHash: row.resultHash,
+        }));
+        const modelCallsBeforeReplay = vi.mocked(deps.ai.startGenderResolution).mock.calls.length;
+        const reserveCallsBeforeReplay = admission.reserve.mock.calls.length;
+
+        // Simulates a crash after overlay persistence but before the primary
+        // job's terminal acknowledgement. Loading the immutable overlay makes
+        // all successful rows terminal before the resolver loop starts.
+        await registry.primary_join!(primaryContext);
+
+        expect(vi.mocked(deps.ai.startGenderResolution)).toHaveBeenCalledTimes(
+            modelCallsBeforeReplay,
+        );
+        expect(admission.reserve).toHaveBeenCalledTimes(reserveCallsBeforeReplay);
+        expect(memoryState.resolverPatches.map(row => ({
+            candidateId: row.candidateId,
+            operationKey: row.operationKey,
+            resultHash: row.resultHash,
+        }))).toEqual(persistedIdentity);
+        expect(memoryState.resolverPatches.every(row => !Object.hasOwn(row, 'feature')))
+            .toBe(true);
+    });
+
+    it('durably blocks the primary join when the single resolver pass leaves the unknown burden above thirty percent', async () => {
+        const memoryState = memory();
+        memoryState.outcomes = [
+            ...Array.from({ length: 6 }, (_, index) => verifiedOutcome(`verified.${index}`)),
+            ...Array.from({ length: 4 }, (_, index) => unresolvedOutcome(`unknown.${index}`)),
+        ];
+        const admission = strictResolverAdmission();
+        admission.complete.mockResolvedValue('manual_review');
+        const deps = dependencies(memoryState, {
+            revenueResolverCapacity: { bind: vi.fn(async () => admission) },
+        } as never);
+
+        await expect(createAnalysisV2AiScoringExecutorRegistry(deps).primary_join!(context('primary_join', {
+            jobKey: 'coordinator:join:primary-evidence',
+            state: strictFinalizerState(10),
+            aiStagePolicyVersion: AI_STAGE_POLICY_LATEST_VERSION,
+        }))).rejects.toThrow('ANALYSIS_V2_REVENUE_PRIMARY_QUALITY_FAILED');
+
+        expect(admission.begin).toHaveBeenCalledOnce();
+        expect(admission.reserve).toHaveBeenCalledTimes(4);
+        expect(admission.complete).toHaveBeenCalledWith(expect.objectContaining({
+            initialUnknownBurdenCount: 4,
+            finalUnknownBurdenCount: 4,
+            coverageValid: false,
+        }));
+        expect(memoryState.primary).toBeNull();
+    });
+
+    it('keeps every marker-free primary join free of resolver admission, overlay, and model work', async () => {
+        const memoryState = memory();
+        memoryState.outcomes = [verifiedOutcome('legacy.woman')];
+        const bind = vi.fn();
+        const deps = dependencies(memoryState, {
+            revenueResolverCapacity: { bind } as never,
+        } as never);
+        const loadOverlay = vi.mocked(deps.resultStore.loadRevenueResolverOutcomes);
+        const checkpointOverlay = vi.mocked(deps.resultStore.checkpointRevenueResolverOutcomes);
+
+        await createAnalysisV2AiScoringExecutorRegistry(deps).primary_join!(context('primary_join', {
+            jobKey: 'coordinator:join:primary-evidence',
+            // `state()` deliberately has no relationshipSelectionPolicy;
+            // production, Plus, and every historical cohort take this exact
+            // marker-free path without a new context/revenue/model boundary.
+        }));
+
+        expect(bind).not.toHaveBeenCalled();
+        expect(loadOverlay).not.toHaveBeenCalled();
+        expect(checkpointOverlay).not.toHaveBeenCalled();
+        expect(deps.ai.startGenderResolution).not.toHaveBeenCalled();
+        expect(memoryState.primary?.candidates).toHaveLength(1);
+    });
+
+    it('leaves production and Plus finalizers free of new outcome, gate-RPC, assessor, and resolver work', async () => {
+        for (const lineage of ['production', 'plus'] as const) {
+            const memoryState = memory();
+            const deps = dependencies(memoryState);
+            const originalStore = deps.stageStore;
+            const loadProfileAiOutcomes = vi.fn(async () => memoryState.outcomes);
+            deps.stageStore = { ...originalStore, loadProfileAiOutcomes };
+            const isApplicable = vi.fn(async () => false);
+            const verify = vi.fn(async () => 'approved' as const);
+            const evaluate = vi.fn(async () => 'approved' as const);
+            const bind = vi.fn();
+            deps.revenueFinalQualityGate = { isApplicable, verify, evaluate };
+            deps.revenueResolverCapacity = { bind } as never;
+
+            await createAnalysisV2AiScoringExecutorRegistry(deps).finalize!(context('finalize', {
+                jobKey: 'coordinator:finalize',
+            }));
+
+            expect(isApplicable, lineage).not.toHaveBeenCalled();
+            expect(verify, lineage).not.toHaveBeenCalled();
+            expect(loadProfileAiOutcomes, lineage).not.toHaveBeenCalled();
+            expect(evaluate, lineage).not.toHaveBeenCalled();
+            expect(bind, lineage).not.toHaveBeenCalled();
+            expect(deps.ai.startGenderResolution, lineage).not.toHaveBeenCalled();
+            expect(deps.resultStore.finalize, lineage).toHaveBeenCalledOnce();
+        }
+    });
+
+    it('fails closed when a strict relationship marker is present without its final quality gate', async () => {
+        const memoryState = memory();
+        const deps = dependencies(memoryState, {
+            revenueResolverCapacity: { bind: vi.fn(async () => strictResolverAdmission()) },
+        } as never);
+        const originalStore = deps.stageStore;
+        const loadProfileAiOutcomes = vi.fn(async () => memoryState.outcomes);
+        deps.stageStore = { ...originalStore, loadProfileAiOutcomes };
+
+        await expect(createAnalysisV2AiScoringExecutorRegistry(deps).finalize!(context('finalize', {
+            jobKey: 'coordinator:finalize',
+            state: strictFinalizerState(1),
+        }))).rejects.toThrow('ANALYSIS_V2_REVENUE_FINAL_QUALITY_GATE_REQUIRED');
+
+        expect(loadProfileAiOutcomes).not.toHaveBeenCalled();
+        expect(deps.resultStore.finalize).not.toHaveBeenCalled();
+    });
+
     it('captures target, ranked women, and name-ranked private images before finalization', async () => {
         const memoryState = memory();
         const deps = dependencies(memoryState);

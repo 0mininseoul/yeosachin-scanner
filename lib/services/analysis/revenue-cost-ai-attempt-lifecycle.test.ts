@@ -111,6 +111,48 @@ describe('RevenueCostAiAttemptLifecycle', () => {
         });
     });
 
+    it('keeps immutable outer routing attempt across transport attempts without rebinding the retry', async () => {
+        const operations = {
+            ...store(),
+            registerRoutingAttempt: vi.fn().mockResolvedValue(outcome('accepted')),
+        };
+        const callbacks = createRevenueCostAiAttemptLifecycle(operations).bind({
+            scope: { accessMode: 'test_entitlement', planId: 'basic' },
+            fence: {
+                ...fence,
+                jobKey: 'track:relationships:collect',
+                operationKey: `gender-triage:${'d'.repeat(64)}`,
+                routingAttempt: 2,
+            },
+        });
+        const routingStart = {
+            ...startTelemetry,
+            attempt: 1,
+            retryCount: 0,
+            stage: 'genderTriage' as const,
+        };
+
+        await callbacks.onBeforeAttempt(routingStart);
+        await callbacks.onBeforeAttempt({
+            ...routingStart,
+            attempt: 2,
+            retryCount: 1,
+        });
+
+        expect(operations.registerRoutingAttempt).toHaveBeenNthCalledWith(1, expect.objectContaining({
+            sourceAttempt: 1, routingAttempt: 2,
+        }));
+        expect(operations.registerRoutingAttempt).toHaveBeenNthCalledWith(2, expect.objectContaining({
+            sourceAttempt: 2, routingAttempt: 2,
+        }));
+        expect(operations.reserveV2).toHaveBeenNthCalledWith(1, expect.objectContaining({
+            sourceAttempt: 1, routingAttempt: 2,
+        }));
+        expect(operations.reserveV2).toHaveBeenNthCalledWith(2, expect.objectContaining({
+            sourceAttempt: 2, routingAttempt: 2,
+        }));
+    });
+
     it('denies Gemini dispatch before its callback returns when the authoritative reserve denies', async () => {
         const { callbacks, operations } = callbackHooks();
         operations.reserveV2.mockResolvedValue(outcome('denied'));
@@ -169,6 +211,31 @@ describe('RevenueCostAiAttemptLifecycle', () => {
         expect(operations.releaseV2).toHaveBeenCalledWith(sourceForAttempt(1));
     });
 
+    it('requires an exact released cleanup after a start failure and records durable manual review for ambiguity', async () => {
+        const { callbacks, operations } = callbackHooks();
+        operations.markStartedV2.mockRejectedValue(new Error('start response lost'));
+        operations.releaseV2.mockResolvedValue(outcome('ambiguous'));
+
+        await expect(callbacks.onBeforeAttempt(startTelemetry))
+            .rejects.toThrow('start response lost');
+
+        expect(operations.releaseV2).toHaveBeenCalledWith(sourceForAttempt(1));
+        expect(operations.manualReview).toHaveBeenCalledWith({
+            requestId: fence.requestId,
+            reasonCode: 'ambiguous_external_call',
+        });
+    });
+
+    it('does not treat a manual-review RPC acknowledgement as durable manual review', async () => {
+        const { callbacks, operations } = callbackHooks();
+        operations.markStartedV2.mockRejectedValue(new Error('start response lost'));
+        operations.releaseV2.mockResolvedValue(outcome('manual_review'));
+        operations.manualReview.mockResolvedValue(outcome('accepted'));
+
+        await expect(callbacks.onBeforeAttempt(startTelemetry))
+            .rejects.toThrow('ANALYSIS_V2_REVENUE_COST_MANUAL_REVIEW_UNCONFIRMED');
+    });
+
     it('keeps proven-no-call release explicit and source-bound', async () => {
         const { callbacks, operations } = callbackHooks();
 
@@ -198,6 +265,32 @@ describe('RevenueCostAiAttemptLifecycle', () => {
             requestId: fence.requestId,
             reasonCode: 'ambiguous_external_call',
         });
+    });
+
+    it.each(['accepted', 'started', 'denied', 'ambiguous', 'manual_review'] as const)(
+        'fails closed when settle returns nonterminal %s',
+        async disposition => {
+            const { callbacks, operations } = callbackHooks();
+            operations.settleV2.mockResolvedValue(outcome(disposition));
+
+            await callbacks.onBeforeAttempt(startTelemetry);
+            await expect(callbacks.onAttemptTelemetry(terminalTelemetry))
+                .rejects.toThrow('ANALYSIS_V2_REVENUE_COST_SETTLEMENT_AMBIGUOUS');
+
+            expect(operations.manualReview).toHaveBeenCalledWith({
+                requestId: fence.requestId,
+                reasonCode: 'ambiguous_external_call',
+            });
+        },
+    );
+
+    it('accepts released as the only non-settled safe terminal outcome', async () => {
+        const { callbacks, operations } = callbackHooks();
+        operations.settleV2.mockResolvedValue(outcome('released'));
+
+        await callbacks.onBeforeAttempt(startTelemetry);
+        await expect(callbacks.onAttemptTelemetry(terminalTelemetry)).resolves.toBeUndefined();
+        expect(operations.manualReview).not.toHaveBeenCalled();
     });
 
     it('fails closed before every revenue RPC when callback identity drifts', async () => {

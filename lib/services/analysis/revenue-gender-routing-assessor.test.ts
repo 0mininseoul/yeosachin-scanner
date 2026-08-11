@@ -144,6 +144,7 @@ describe('trusted revenue gender-routing assessor', () => {
                 jobKey: 'track:relationships:collect',
                 jobClaimToken: claimToken,
                 jobInputHash: 'b'.repeat(64),
+                routingAttempt: 1,
             }),
         }));
         expect(responseSchema).not.toBeNull();
@@ -157,7 +158,110 @@ describe('trusted revenue gender-routing assessor', () => {
                 evidence: 'name_only',
                 invented_field: true,
             }],
+            top_level_field: true,
         }).success).toBe(false);
+    });
+
+    it('salvages only individually strict-valid rows from a mixed microbatch response', async () => {
+        const audit: RevenueGenderRoutingAssessorAuditAdapter = {
+            requestId,
+            operationKey: `gender-triage:${'b'.repeat(64)}`,
+            resultIdentity: {} as RevenueGenderRoutingAssessorAuditAdapter['resultIdentity'],
+            resultSchema: {} as RevenueGenderRoutingAssessorAuditAdapter['resultSchema'],
+            prepare: async () => ({ result: null, source: null, startingAttempt: 1 }),
+            onBeforeAttempt: async () => undefined,
+            onAttemptTelemetry: async () => undefined,
+        };
+        const costLifecycle = {
+            bind: () => ({
+                onBeforeAttempt: async () => undefined,
+                onAttemptTelemetry: async () => undefined,
+                releaseBeforeDispatch: async () => null,
+                manualReviewAfterExternalBoundary: async () => null,
+            }),
+        };
+        const analyze = async (
+            _prompt: string,
+            _images: string[] | undefined,
+            options: {
+                schema: { parse(value: unknown): unknown };
+                onBeforeAttempt?: (telemetry: GeminiAttemptStartTelemetry) => Promise<void>;
+                onAttemptTelemetry?: (telemetry: GeminiAttemptTelemetry, result?: unknown) => Promise<void>;
+            },
+        ) => {
+            await options.onBeforeAttempt?.(startTelemetry());
+            const response = options.schema.parse({
+                assessments: [
+                    {
+                        index: 0,
+                        female_score: 0.8,
+                        male_score: 0.1,
+                        uncertainty_score: 0.1,
+                        evidence: 'name_only',
+                    },
+                    {
+                        index: 1,
+                        female_score: 0.8,
+                        male_score: 0.2,
+                        uncertainty_score: 0.2,
+                        evidence: 'name_only',
+                    },
+                    {
+                        index: 2,
+                        female_score: 0.7,
+                        male_score: 0.2,
+                        uncertainty_score: 0.1,
+                        evidence: 'image_only',
+                    },
+                    {
+                        index: 99,
+                        female_score: 0.7,
+                        male_score: 0.2,
+                        uncertainty_score: 0.1,
+                        evidence: 'name_only',
+                    },
+                    {
+                        index: 3,
+                        female_score: 0.6,
+                        male_score: 0.3,
+                        uncertainty_score: 0.1,
+                        evidence: 'name_only',
+                        invented_field: true,
+                    },
+                ],
+            });
+            await options.onAttemptTelemetry?.(successTelemetry(), response);
+            return response;
+        };
+        const assessor = createRevenueGenderRoutingAssessorFactory({
+            analyze: analyze as never,
+            auditAdapterFactory: () => audit,
+            costLifecycle,
+        })({
+            requestId,
+            jobKey: 'track:relationships:collect',
+            jobClaimToken: claimToken,
+            jobInputHash: 'b'.repeat(64),
+            accessMode: 'test_entitlement',
+            planId: 'basic',
+        });
+
+        const result = await assessor([
+            { candidateKey: 'mutual:0', fullname: 'Zero', imageBase64: null, inputHmac: '0'.repeat(64) },
+            { candidateKey: 'mutual:1', fullname: 'One', imageBase64: null, inputHmac: '1'.repeat(64) },
+            { candidateKey: 'mutual:2', fullname: 'Two', imageBase64: null, inputHmac: '2'.repeat(64) },
+            { candidateKey: 'mutual:3', fullname: 'Three', imageBase64: null, inputHmac: '3'.repeat(64) },
+        ], 1);
+
+        expect([...result.entries()]).toEqual([[
+            'mutual:0',
+            {
+                femaleScore: 0.8,
+                maleScore: 0.1,
+                uncertaintyScore: 0.1,
+                evidence: 'name_only',
+            },
+        ]]);
     });
 
     it('fails closed into manual review when terminal audit persistence is lost after the Gemini boundary', async () => {
@@ -232,6 +336,54 @@ describe('trusted revenue gender-routing assessor', () => {
             'audit:terminal',
             'cost:manual-review',
         ]);
+    });
+
+    it('forces manual review before propagating an audit reservation response loss, but leaves deterministic replay blocks alone', async () => {
+        const manualReviewAfterExternalBoundary = vi.fn(async () => null);
+        const costLifecycle = {
+            bind: () => ({
+                onBeforeAttempt: async () => undefined,
+                onAttemptTelemetry: async () => undefined,
+                releaseBeforeDispatch: async () => null,
+                manualReviewAfterExternalBoundary,
+            }),
+        };
+        const audit: RevenueGenderRoutingAssessorAuditAdapter = {
+            requestId,
+            operationKey: `gender-triage:${'e'.repeat(64)}`,
+            resultIdentity: {} as RevenueGenderRoutingAssessorAuditAdapter['resultIdentity'],
+            resultSchema: {} as RevenueGenderRoutingAssessorAuditAdapter['resultSchema'],
+            prepare: async () => ({ result: null, source: null, startingAttempt: 1 }),
+            onBeforeAttempt: async () => {
+                throw new Error('reservation response lost after commit');
+            },
+            onAttemptTelemetry: async () => undefined,
+        };
+        const analyze = async (
+            _prompt: string,
+            _images: string[] | undefined,
+            options: { onBeforeAttempt?: (telemetry: GeminiAttemptStartTelemetry) => Promise<void> },
+        ) => {
+            await options.onBeforeAttempt?.(startTelemetry());
+            throw new Error('unreachable');
+        };
+        const assessor = createRevenueGenderRoutingAssessorFactory({
+            analyze: analyze as never,
+            auditAdapterFactory: () => audit,
+            costLifecycle,
+        })({
+            requestId,
+            jobKey: 'track:relationships:collect',
+            jobClaimToken: claimToken,
+            jobInputHash: 'b'.repeat(64),
+            accessMode: 'test_entitlement',
+            planId: 'basic',
+        });
+
+        await expect(assessor([{
+            candidateKey: 'mutual:1', fullname: 'Ari Kim', imageBase64: null, inputHmac: 'd'.repeat(64),
+        }], 1)).rejects.toThrow('reservation response lost after commit');
+        expect(manualReviewAfterExternalBoundary).toHaveBeenCalledOnce();
     });
 
     it('charges a response-rejected retry as a new immutable routing attempt while returning only failed candidates for retry', async () => {
@@ -323,5 +475,11 @@ describe('trusted revenue gender-routing assessor', () => {
         expect(operationKeys[1]).toBeDefined();
         expect(operationKeys[0]).not.toBe(operationKeys[1]);
         expect(auditAdapterFactory).toHaveBeenCalledTimes(2);
+        expect(costLifecycle.bind).toHaveBeenNthCalledWith(1, expect.objectContaining({
+            fence: expect.objectContaining({ routingAttempt: 1 }),
+        }));
+        expect(costLifecycle.bind).toHaveBeenNthCalledWith(2, expect.objectContaining({
+            fence: expect.objectContaining({ routingAttempt: 2 }),
+        }));
     });
 });

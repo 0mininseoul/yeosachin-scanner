@@ -61,6 +61,8 @@ export interface RevenueCostLiveSource {
     readonly jobInputHash: string;
     readonly sourceKind: RevenueCostLiveSourceKind;
     readonly sourceOperationKey: string;
+    /** Outer routing pass, intentionally separate from Gemini transport retry. */
+    readonly routingAttempt?: 1 | 2;
     readonly sourceAttempt: number;
 }
 
@@ -129,6 +131,9 @@ function assertLiveSource(input: RevenueCostLiveSource): void {
     if (!UUID.test(input.requestId) || !JOB_KEY.test(input.jobKey) || !UUID.test(input.jobClaimToken)
         || !HASH.test(input.jobInputHash) || !['provider_run', 'ai_attempt'].includes(input.sourceKind)
         || !sourceKeyPattern.test(input.sourceOperationKey) || !Number.isSafeInteger(input.sourceAttempt)
+        || (input.routingAttempt !== undefined
+            && (!Number.isSafeInteger(input.routingAttempt)
+                || (input.routingAttempt !== 1 && input.routingAttempt !== 2)))
         || (input.sourceKind === 'provider_run' && input.sourceAttempt !== 0)
         || (input.sourceKind === 'ai_attempt' && (input.sourceAttempt < 1 || input.sourceAttempt > 4))) {
         throw new Error('REVENUE_COST_OPERATION_INVALID_INPUT');
@@ -303,6 +308,27 @@ export class RevenueCostOperationStore {
             p_request_id: input.requestId, p_job_key: input.jobKey, p_job_claim_token: input.jobClaimToken,
             p_job_input_hash: input.jobInputHash, p_source_kind: input.sourceKind,
             p_source_operation_key: input.sourceOperationKey, p_source_attempt: input.sourceAttempt,
+        });
+    }
+
+    async registerRoutingAttempt(input: RevenueCostLiveSource): Promise<RevenueCostOperationOutcome> {
+        assertLiveSource(input);
+        if (
+            input.sourceKind !== 'ai_attempt'
+            || input.routingAttempt === undefined
+            || input.jobKey !== 'track:relationships:collect'
+            || !input.sourceOperationKey.startsWith('gender-triage:')
+        ) {
+            throw new Error('REVENUE_COST_OPERATION_INVALID_INPUT');
+        }
+        return this.call('register_analysis_revenue_ai_routing_attempt_v1', {
+            p_request_id: input.requestId,
+            p_job_key: input.jobKey,
+            p_job_claim_token: input.jobClaimToken,
+            p_job_input_hash: input.jobInputHash,
+            p_source_operation_key: input.sourceOperationKey,
+            p_source_attempt: input.sourceAttempt,
+            p_routing_attempt: input.routingAttempt,
         });
     }
 

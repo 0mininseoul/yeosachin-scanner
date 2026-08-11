@@ -19,6 +19,7 @@ import {
 import { RevenueCostOperationStore } from './revenue-cost-operation-store';
 import type { RevenueGenderRoutingModelCandidate } from './revenue-routing-runtime';
 import {
+    AnalysisV2AiResultReplayBlockedError,
     createAnalysisV2AiAuditAdapter,
     createAnalysisV2AiMediaSnapshotHash,
     createAnalysisV2AiResultIdentity,
@@ -57,10 +58,13 @@ const responseEntrySchema = z.object({
     evidence: evidenceSchema,
 }).strict();
 
-type RevenueGenderRoutingResponseEntry = z.infer<typeof responseEntrySchema>;
-
 interface RevenueGenderRoutingResponse {
-    readonly assessments: readonly RevenueGenderRoutingResponseEntry[];
+    /**
+     * The Gemini JSON envelope stays strict, while entries remain raw until
+     * they are validated against the corresponding candidate below.  A bad
+     * row must not discard another row that was already auditable and valid.
+     */
+    readonly assessments: readonly unknown[];
 }
 
 export type RevenueGenderRoutingAssessorAuditAdapter = AnalysisV2AiAuditAdapter<
@@ -166,40 +170,15 @@ function promptFor(
 }
 
 function responseSchemaFor(
-    candidates: readonly RevenueGenderRoutingModelCandidate[],
 ): z.ZodType<RevenueGenderRoutingResponse> {
     return z.object({
-        assessments: z.array(responseEntrySchema)
-            .length(candidates.length),
-    }).strict().superRefine((response, context) => {
-        const seen = new Set<number>();
-        for (const entry of response.assessments) {
-            if (!seen.add(entry.index) || entry.index >= candidates.length) {
-                context.addIssue({
-                    code: 'custom',
-                    path: ['assessments'],
-                    message: 'Each response index must occur exactly once.',
-                });
-                continue;
-            }
-            const candidate = candidates[entry.index]!;
-            const total = entry.female_score + entry.male_score + entry.uncertainty_score;
-            if (!Number.isFinite(total) || total < 0.99 || total > 1.01) {
-                context.addIssue({
-                    code: 'custom',
-                    path: ['assessments', entry.index],
-                    message: 'Scores must total within the routing tolerance.',
-                });
-            }
-            if (entry.evidence !== expectedEvidence(candidate)) {
-                context.addIssue({
-                    code: 'custom',
-                    path: ['assessments', entry.index, 'evidence'],
-                    message: 'Evidence must exactly reflect the available inputs.',
-                });
-            }
-        }
-    });
+        // A response can contain at most one row per microbatch input.  Do
+        // not make the transport parser validate fields in each row here: it
+        // would reject the complete batch before valid sibling rows could be
+        // retained.  Individual row validation is deliberately strict in
+        // mapResponse.
+        assessments: z.array(z.unknown()).max(REVENUE_GENDER_ROUTING_MAX_BATCH_SIZE),
+    }).strict();
 }
 
 /** Only HMACs and input-presence bits participate in durable identity material. */
@@ -252,18 +231,55 @@ function mapResponse(
     response: RevenueGenderRoutingResponse,
 ): ReadonlyMap<string, GenderRoutingAssessment> {
     const mapped = new Map<string, GenderRoutingAssessment>();
-    for (const entry of response.assessments) {
+    const invalidIndexes = new Set<number>();
+    const seenIndexes = new Set<number>();
+    const indexFor = (value: unknown): number | null => {
+        if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+        const index = (value as { index?: unknown }).index;
+        return typeof index === 'number'
+            && Number.isInteger(index)
+            && index >= 0
+            && index < candidates.length
+            ? index
+            : null;
+    };
+    const rejectIndex = (index: number | null) => {
+        if (index === null) return;
+        invalidIndexes.add(index);
+        const candidate = candidates[index];
+        if (candidate) mapped.delete(candidate.candidateKey);
+    };
+
+    for (const rawEntry of response.assessments) {
+        const hintedIndex = indexFor(rawEntry);
+        const parsed = responseEntrySchema.safeParse(rawEntry);
+        if (!parsed.success) {
+            rejectIndex(hintedIndex);
+            continue;
+        }
+        const entry = parsed.data;
         const candidate = candidates[entry.index];
-        if (!candidate) throw new Error('REVENUE_GENDER_ROUTING_ASSESSOR_RESPONSE_DRIFT');
+        if (!candidate || seenIndexes.has(entry.index) || invalidIndexes.has(entry.index)) {
+            rejectIndex(hintedIndex);
+            continue;
+        }
+        seenIndexes.add(entry.index);
+        const total = entry.female_score + entry.male_score + entry.uncertainty_score;
+        if (
+            !Number.isFinite(total)
+            || total < 0.99
+            || total > 1.01
+            || entry.evidence !== expectedEvidence(candidate)
+        ) {
+            rejectIndex(entry.index);
+            continue;
+        }
         mapped.set(candidate.candidateKey, Object.freeze({
             femaleScore: entry.female_score,
             maleScore: entry.male_score,
             uncertaintyScore: entry.uncertainty_score,
             evidence: entry.evidence,
         }));
-    }
-    if (mapped.size !== candidates.length) {
-        throw new Error('REVENUE_GENDER_ROUTING_ASSESSOR_RESPONSE_DRIFT');
     }
     return mapped;
 }
@@ -295,7 +311,19 @@ function composeCallbacks(input: {
 }): Pick<Parameters<typeof analyzeWithGemini>[2], 'onBeforeAttempt' | 'onAttemptTelemetry'> {
     return {
         async onBeforeAttempt(telemetry) {
-            await input.audit.onBeforeAttempt(telemetry);
+            try {
+                await input.audit.onBeforeAttempt(telemetry);
+            } catch (error) {
+                // A replay-blocked reservation is the one proven no-call
+                // path: the durable audit row already forbids dispatch. Any
+                // other failure might be a lost response after reservation
+                // commit and therefore has to enter manual review first.
+                if (error instanceof AnalysisV2AiResultReplayBlockedError) {
+                    throw error;
+                }
+                await input.cost.manualReviewAfterExternalBoundary();
+                throw error;
+            }
             try {
                 await input.cost.onBeforeAttempt(telemetry);
             } catch {
@@ -355,7 +383,7 @@ export function createRevenueGenderRoutingAssessorFactory(
 
         return async (candidates, routingAttempt) => {
             assertCandidates(candidates);
-            const schema = responseSchemaFor(candidates);
+            const schema = responseSchemaFor();
             const resultIdentity = identityFor(candidates, routingAttempt);
             const audit = auditAdapterFactory({
                 requestId: fence.requestId,
@@ -384,6 +412,7 @@ export function createRevenueGenderRoutingAssessorFactory(
                     jobClaimToken: fence.jobClaimToken,
                     jobInputHash: fence.jobInputHash,
                     operationKey: audit.operationKey,
+                    routingAttempt,
                 },
             });
             try {
