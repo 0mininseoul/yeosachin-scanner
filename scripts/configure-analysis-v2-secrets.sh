@@ -181,7 +181,12 @@ secret_json() {
 
 validate_gender_initial_pin() {
   local config
-  [[ "$rotate_target" != "gender-routing-hmac" ]] || return 0
+  if [[ "$rotate_target" == "gender-routing-hmac" ]]; then
+    if config="$(secret_json "$GENDER_ROUTING_HMAC_SECRET_ID")"; then
+      return 0
+    fi
+    die "cannot rotate gender-routing HMAC because Secret Manager resource $GENDER_ROUTING_HMAC_SECRET_ID does not exist; run ordinary apply first"
+  fi
   if config="$(secret_json "$GENDER_ROUTING_HMAC_SECRET_ID")"; then
     return 0
   fi
