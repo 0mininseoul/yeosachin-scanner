@@ -155,7 +155,7 @@ type PreflightTargetReveal = Readonly<{
 }>;
 ```
 
-이 값은 `readyPreflight.target`에서 직접 만들며, 화면의 target card 렌더링에만 사용한다. `preflightId`는 analytics dedupe와 component lifecycle key에만 사용한다. target object와 `preflightId`를 fixture endpoint URL, query, request body, server log, analytics property, synthetic DTO에 넣지 않는다.
+이 값은 `readyPreflight.target`에서 직접 만들며, 화면의 target card 렌더링에만 사용한다. 실제 target 데이터는 fixture 요청이나 analytics property에 절대 들어가지 않으며, synthetic DTO에도 넣지 않는다. `preflightId`는 component lifecycle key, local one-shot dedupe key, 그리고 `demo_result_viewed`와 `demo_result_expanded` 두 event의 allowlisted opaque `preflight_id` property로만 사용한다. 따라서 `preflightId`는 synthetic fixture endpoint URL, query, request body, server log, synthetic DTO, 또는 그 외 analytics property에 절대 넣지 않는다.
 
 ### 합성 preview DTO
 
