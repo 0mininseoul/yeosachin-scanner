@@ -135,10 +135,21 @@ function assertSettlementSource(input: SettleRevenueCostOperationV2): void {
     }
 }
 
-function safeCode(error: { code?: string }): string {
-    return typeof error.code === 'string' && /^[A-Z0-9_]{1,32}$/.test(error.code)
-        ? error.code
-        : 'UNKNOWN';
+const SAFE_RPC_REJECTIONS = new Set([
+    'REVENUE_COST_OPERATION_NOT_READY',
+    'REVENUE_COST_OPERATION_FENCE',
+    'REVENUE_COST_OPERATION_DRIFT',
+    'REVENUE_COST_OPERATION_AI_NOT_READY',
+]);
+
+function safeRpcFailure(error: { code?: string; message?: string }): string {
+    // PostgreSQL RAISE EXCEPTION messages arrive through Supabase as P0001.
+    // Only immutable, public revenue-operation dispositions are safe to expose.
+    if (error.code === 'P0001' && typeof error.message === 'string'
+        && SAFE_RPC_REJECTIONS.has(error.message)) {
+        return `REVENUE_COST_OPERATION_RPC_FAILED_${error.message}`;
+    }
+    return 'REVENUE_COST_OPERATION_RPC_FAILED';
 }
 
 function safeOutcome(data: unknown): RevenueCostOperationOutcome {
@@ -288,13 +299,13 @@ export class RevenueCostOperationStore {
             p_request_id: input.requestId, p_job_key: input.jobKey,
             p_claim_token: input.claimToken, p_job_input_hash: input.jobInputHash,
         });
-        if (error) throw new Error(`REVENUE_COST_OPERATION_RPC_FAILED_${safeCode(error)}`);
+        if (error) throw new Error(safeRpcFailure(error));
         return safeReconciliation(data);
     }
 
     private async call(functionName: string, params: Record<string, unknown>): Promise<RevenueCostOperationOutcome> {
         const { data, error } = await this.client.rpc(functionName, params);
-        if (error) throw new Error(`REVENUE_COST_OPERATION_RPC_FAILED_${safeCode(error)}`);
+        if (error) throw new Error(safeRpcFailure(error));
         return safeOutcome(data);
     }
 }
