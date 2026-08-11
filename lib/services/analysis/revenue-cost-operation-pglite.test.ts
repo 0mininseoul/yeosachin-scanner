@@ -671,15 +671,31 @@ describe('revenue cost operation ledger PGlite', () => {
         }] });
     });
 
+    it('rejects a null direct manual-review reason without mutating the parent', async () => {
+        const db = await createDb();
+        await seedLiveSources(db);
+        const before = await replayTotals(db);
+        await expectError(
+            query(db, `SELECT public.mark_analysis_revenue_manual_review_v1('${requestId}',NULL::text)`),
+            'REVENUE_COST_MANUAL_REVIEW_INVALID',
+        );
+        await expect(replayTotals(db)).resolves.toEqual(before);
+    });
+
     it('applies direct manual-review reason precedence without downgrading stronger causes', async () => {
         const db = await createDb();
         await seedLiveSources(db);
         for (const [existing, incoming, expected] of [
             ['cost_overrun', 'routing_failure', 'cost_overrun'],
             ['cost_overrun', 'ambiguous_external_call', 'cost_overrun'],
+            ['cost_overrun', 'cost_overrun', 'cost_overrun'],
             ['cost_denied', 'routing_failure', 'cost_denied'],
             ['cost_denied', 'ambiguous_external_call', 'cost_denied'],
+            ['cost_denied', 'cost_overrun', 'cost_overrun'],
             ['ambiguous_external_call', 'routing_failure', 'ambiguous_external_call'],
+            ['ambiguous_external_call', 'ambiguous_external_call', 'ambiguous_external_call'],
+            ['ambiguous_external_call', 'cost_overrun', 'cost_overrun'],
+            ['routing_failure', 'routing_failure', 'routing_failure'],
             ['routing_failure', 'ambiguous_external_call', 'ambiguous_external_call'],
             ['routing_failure', 'cost_overrun', 'cost_overrun'],
         ]) {
@@ -689,6 +705,51 @@ describe('revenue cost operation ledger PGlite', () => {
             await expect(db.query(`SELECT status,manual_review_reason FROM public.analysis_revenue_run_ledgers WHERE request_id='${requestId}'`))
                 .resolves.toMatchObject({ rows: [{ status: 'manual_review', manual_review_reason: expected }] });
         }
+    });
+
+    it('keeps active ambiguity through another child skipped-start settlement, then retains that anomaly after final reconciliation', async () => {
+        const db = await createDb();
+        await seedLiveSources(db);
+        await db.exec(`INSERT INTO public.analysis_v2_provider_runs(request_id,job_key,operation_key,input_hash,job_claim_token,reservation_token,logical_provider,actor_id,credential_slot,max_charge_usd,status)
+            VALUES ('${requestId}','${jobKey}','${secondProviderOperationKey}','${providerInputHash}','${claimToken}','77777777-7777-4777-8777-777777777777','apify','actor-id','primary',0.2,'starting')`);
+        const reserve = (key: string) => `SELECT public.reserve_analysis_revenue_cost_operation_v2('${requestId}','${jobKey}','${claimToken}','${inputHash}','provider_run','${key}',0::smallint)`;
+        const start = (key: string) => `SELECT public.mark_analysis_revenue_cost_operation_started_v2('${requestId}','${jobKey}','${claimToken}','${inputHash}','provider_run','${key}',0::smallint)`;
+        const release = (key: string) => `SELECT public.release_analysis_revenue_cost_operation_v2('${requestId}','${jobKey}','${claimToken}','${inputHash}','provider_run','${key}',0::smallint)`;
+        const settle = (key: string) => `SELECT public.settle_analysis_revenue_cost_operation_v2('${requestId}','${jobKey}','provider_run','${key}',0::smallint)`;
+        await query(db, reserve(providerOperationKey));
+        await query(db, reserve(secondProviderOperationKey));
+        await query(db, start(providerOperationKey));
+        await query(db, release(providerOperationKey));
+
+        await db.exec(`UPDATE public.analysis_v2_provider_runs SET status='failed',run_id='run67890',run_started_at=reserved_at + interval '1 second',terminalized_at=reserved_at + interval '2 seconds',actual_usage_usd=0.1,usage_reconciled_at=reserved_at + interval '3 seconds',updated_at=reserved_at + interval '4 seconds' WHERE request_id='${requestId}' AND operation_key='${secondProviderOperationKey}'`);
+        await query(db, settle(secondProviderOperationKey));
+        await expect(db.query(`SELECT status,manual_review_reason FROM public.analysis_revenue_run_ledgers WHERE request_id='${requestId}'`))
+            .resolves.toMatchObject({ rows: [{ status: 'manual_review', manual_review_reason: 'ambiguous_external_call' }] });
+
+        await db.exec(`UPDATE public.analysis_v2_provider_runs SET status='failed',run_id='run12345',run_started_at=reserved_at + interval '1 second',terminalized_at=reserved_at + interval '2 seconds',actual_usage_usd=0.1,usage_reconciled_at=reserved_at + interval '3 seconds',updated_at=reserved_at + interval '4 seconds' WHERE request_id='${requestId}' AND operation_key='${providerOperationKey}'`);
+        await query(db, settle(providerOperationKey));
+        await expect(db.query(`SELECT parent.status,parent.manual_review_reason,child.lifecycle_anomaly FROM public.analysis_revenue_run_ledgers parent JOIN public.analysis_revenue_cost_operations child ON child.request_id=parent.request_id WHERE parent.request_id='${requestId}' AND child.source_operation_key_hash=encode(digest('${secondProviderOperationKey}','sha256'),'hex')`))
+            .resolves.toMatchObject({ rows: [{ status: 'manual_review', manual_review_reason: 'routing_failure', lifecycle_anomaly: 'skipped_start' }] });
+        const afterTerminal = await replayTotals(db);
+        await query(db, settle(secondProviderOperationKey));
+        await query(db, settle(providerOperationKey));
+        await expect(replayTotals(db)).resolves.toEqual(afterTerminal);
+    });
+
+    it('constrains skipped-start evidence to a settled child and fences aggregate drift on its exact replay', async () => {
+        const db = await createDb();
+        await seedLiveSources(db);
+        const reserve = `SELECT public.reserve_analysis_revenue_cost_operation_v2('${requestId}','${jobKey}','${claimToken}','${inputHash}','provider_run','${providerOperationKey}',0::smallint)`;
+        const settle = `SELECT public.settle_analysis_revenue_cost_operation_v2('${requestId}','${jobKey}','provider_run','${providerOperationKey}',0::smallint)`;
+        await query(db, reserve);
+        await expect(db.exec(`UPDATE public.analysis_revenue_cost_operations SET lifecycle_anomaly='skipped_start' WHERE request_id='${requestId}' AND owner_kind='provider_run'`))
+            .rejects.toThrow('analysis_revenue_cost_operations_lifecycle_anomaly_check');
+        await db.exec(`UPDATE public.analysis_v2_provider_runs SET status='failed',run_id='run12345',run_started_at=reserved_at + interval '1 second',terminalized_at=reserved_at + interval '2 seconds',actual_usage_usd=0.1,usage_reconciled_at=reserved_at + interval '3 seconds',updated_at=reserved_at + interval '4 seconds' WHERE request_id='${requestId}'`);
+        await query(db, settle);
+        await db.exec(`UPDATE public.analysis_revenue_run_ledgers SET status='running',manual_review_reason=NULL WHERE request_id='${requestId}'`);
+        const beforeReplay = await replayTotals(db);
+        await expectError(query(db, settle), 'REVENUE_COST_OPERATION_FENCE');
+        await expect(replayTotals(db)).resolves.toEqual(beforeReplay);
     });
 
     it('never downgrades cost-overrun or cost-denied during ambiguity or reserved-but-confirmed recovery', async () => {

@@ -67,6 +67,11 @@ CREATE TABLE public.analysis_revenue_cost_operations (
     billed_actual_krw INTEGER CHECK (billed_actual_krw >= 0),
     status TEXT NOT NULL DEFAULT 'reserved' CHECK (status IN ('reserved', 'started', 'settled', 'released', 'ambiguous', 'denied')),
     denial_reason TEXT CHECK (denial_reason IN ('hard_cap', 'unit_cap', 'authority_fence')),
+    -- A terminal source can prove that the runtime skipped its mandatory local
+    -- start transition.  Keep that fact on the child: the parent has room for
+    -- only one review reason and may temporarily need to represent another
+    -- child's unresolved ambiguity instead.
+    lifecycle_anomaly TEXT CONSTRAINT analysis_revenue_cost_operations_lifecycle_anomaly_value_check CHECK (lifecycle_anomaly IN ('skipped_start')),
     created_at TIMESTAMPTZ NOT NULL DEFAULT pg_catalog.clock_timestamp(),
     started_at TIMESTAMPTZ,
     terminal_at TIMESTAMPTZ,
@@ -82,6 +87,10 @@ CREATE TABLE public.analysis_revenue_cost_operations (
         OR (status = 'released' AND started_at IS NULL AND terminal_at IS NOT NULL AND economic_actual_usd IS NULL AND billed_actual_usd IS NULL AND economic_actual_krw IS NULL AND billed_actual_krw IS NULL)
         OR (status = 'ambiguous' AND started_at IS NOT NULL AND terminal_at IS NOT NULL AND terminal_at >= started_at AND economic_actual_usd IS NULL AND billed_actual_usd IS NULL AND economic_actual_krw IS NULL AND billed_actual_krw IS NULL)
         OR (status = 'denied' AND started_at IS NULL AND terminal_at IS NOT NULL AND economic_actual_usd IS NULL AND billed_actual_usd IS NULL AND economic_actual_krw IS NULL AND billed_actual_krw IS NULL)
+    ),
+    CONSTRAINT analysis_revenue_cost_operations_lifecycle_anomaly_check CHECK (
+        lifecycle_anomaly IS NULL
+        OR (lifecycle_anomaly = 'skipped_start' AND status = 'settled' AND denial_reason IS NULL)
     ),
     UNIQUE (request_id, owner_kind, owner_key_hash, attempt),
     UNIQUE (request_id, owner_kind, source_job_key, source_operation_key_hash, source_attempt)
@@ -233,15 +242,15 @@ RETURNS JSONB LANGUAGE plpgsql SECURITY DEFINER SET search_path = '' AS $$ BEGIN
 CREATE OR REPLACE FUNCTION public.mark_analysis_revenue_manual_review_v1(p_request_id UUID, p_reason_code TEXT)
 RETURNS JSONB LANGUAGE plpgsql SECURITY DEFINER SET search_path = '' AS $$
 BEGIN
-    IF p_reason_code NOT IN ('routing_failure', 'ambiguous_external_call', 'cost_overrun') THEN RAISE EXCEPTION USING MESSAGE = 'REVENUE_COST_MANUAL_REVIEW_INVALID'; END IF;
+    IF p_reason_code IS NULL OR p_reason_code NOT IN ('routing_failure', 'ambiguous_external_call', 'cost_overrun') THEN RAISE EXCEPTION USING MESSAGE = 'REVENUE_COST_MANUAL_REVIEW_INVALID'; END IF;
     -- Review causes are monotonic: cost_overrun > cost_denied >
     -- ambiguous_external_call > routing_failure.  This RPC can introduce the
     -- three non-denial reasons but must never erase stronger cost evidence.
     UPDATE public.analysis_revenue_run_ledgers
        SET status = 'manual_review', manual_review_reason = CASE
            WHEN manual_review_reason = 'cost_overrun' THEN 'cost_overrun'
-           WHEN manual_review_reason = 'cost_denied' THEN 'cost_denied'
            WHEN p_reason_code = 'cost_overrun' THEN 'cost_overrun'
+           WHEN manual_review_reason = 'cost_denied' THEN 'cost_denied'
            WHEN manual_review_reason = 'ambiguous_external_call' THEN 'ambiguous_external_call'
            ELSE p_reason_code
        END
@@ -554,6 +563,7 @@ DECLARE
     v_child public.analysis_revenue_cost_operations%ROWTYPE; v_runner_plan TEXT; v_source_hash TEXT; v_owner_hash TEXT;
     v_operation_kind TEXT; v_expected_krw INTEGER; v_actual_krw INTEGER; v_active_reserved INTEGER;
     v_settled_economic INTEGER; v_settled_billed INTEGER; v_unsettled INTEGER; v_denied INTEGER;
+    v_ambiguous INTEGER; v_skipped_start INTEGER;
 BEGIN
     IF p_request_id IS NULL OR p_job_key IS NULL OR p_job_key !~ '^[a-z0-9][a-z0-9:._-]{0,159}$'
        OR p_source_kind IS NULL OR p_source_kind NOT IN ('provider_run','ai_attempt') OR p_source_operation_key IS NULL
@@ -619,6 +629,18 @@ BEGIN
       INTO v_active_reserved,v_settled_economic,v_settled_billed FROM public.analysis_revenue_cost_operations WHERE request_id=p_request_id;
     IF v_parent.reserved_cost_krw IS DISTINCT FROM v_active_reserved OR v_parent.economic_actual_krw IS DISTINCT FROM v_settled_economic
        OR v_parent.actual_cost_krw IS DISTINCT FROM v_settled_economic OR v_parent.billed_actual_krw IS DISTINCT FROM v_settled_billed THEN RAISE EXCEPTION USING MESSAGE='REVENUE_COST_OPERATION_FENCE'; END IF;
+    SELECT pg_catalog.count(*) FILTER (WHERE status='ambiguous')::INTEGER,
+           pg_catalog.count(*) FILTER (WHERE lifecycle_anomaly='skipped_start')::INTEGER
+      INTO v_ambiguous,v_skipped_start
+      FROM public.analysis_revenue_cost_operations WHERE request_id=p_request_id;
+    -- Aggregate review state must retain every child fact that cannot be
+    -- reconstructed from provider timestamps.  Cost causes are stronger; an
+    -- active ambiguity temporarily outranks a completed skipped-start anomaly.
+    IF v_parent.manual_review_reason IS DISTINCT FROM 'cost_overrun' AND v_parent.manual_review_reason IS DISTINCT FROM 'cost_denied'
+       AND ((v_ambiguous > 0 AND (v_parent.status IS DISTINCT FROM 'manual_review' OR v_parent.manual_review_reason IS DISTINCT FROM 'ambiguous_external_call'))
+         OR (v_ambiguous = 0 AND v_skipped_start > 0 AND (v_parent.status IS DISTINCT FROM 'manual_review' OR v_parent.manual_review_reason IS DISTINCT FROM 'routing_failure'))) THEN
+        RAISE EXCEPTION USING MESSAGE='REVENUE_COST_OPERATION_FENCE';
+    END IF;
     SELECT * INTO v_child FROM public.analysis_revenue_cost_operations WHERE request_id=p_request_id AND owner_kind='provider_run'
       AND source_job_key=p_job_key AND source_operation_key_hash=v_source_hash AND source_attempt=0 FOR UPDATE;
     IF NOT FOUND OR v_child.owner_key_hash IS DISTINCT FROM v_owner_hash OR v_child.attempt IS DISTINCT FROM 1
@@ -647,9 +669,16 @@ BEGIN
         UPDATE public.analysis_revenue_run_ledgers
            SET reserved_cost_krw=reserved_cost_krw-CASE WHEN v_child.status IN ('reserved','started') THEN v_child.reserved_krw ELSE 0 END
          WHERE request_id=p_request_id;
-        SELECT pg_catalog.count(*)::INTEGER, pg_catalog.count(*) FILTER (WHERE status='denied')::INTEGER INTO v_unsettled,v_denied
-          FROM public.analysis_revenue_cost_operations WHERE request_id=p_request_id AND status NOT IN ('settled','released');
-        IF v_parent.status='manual_review' AND v_parent.manual_review_reason='ambiguous_external_call' AND v_unsettled=0 AND v_denied=0 THEN
+        SELECT pg_catalog.count(*) FILTER (WHERE status NOT IN ('settled','released'))::INTEGER, pg_catalog.count(*) FILTER (WHERE status='denied')::INTEGER,
+               pg_catalog.count(*) FILTER (WHERE status='ambiguous')::INTEGER,
+               pg_catalog.count(*) FILTER (WHERE lifecycle_anomaly='skipped_start')::INTEGER
+          INTO v_unsettled,v_denied,v_ambiguous,v_skipped_start
+          FROM public.analysis_revenue_cost_operations WHERE request_id=p_request_id;
+        IF v_parent.manual_review_reason IS DISTINCT FROM 'cost_overrun' AND v_parent.manual_review_reason IS DISTINCT FROM 'cost_denied' AND v_ambiguous > 0 THEN
+            UPDATE public.analysis_revenue_run_ledgers SET status='manual_review',manual_review_reason='ambiguous_external_call' WHERE request_id=p_request_id;
+        ELSIF v_parent.manual_review_reason IS DISTINCT FROM 'cost_overrun' AND v_parent.manual_review_reason IS DISTINCT FROM 'cost_denied' AND v_skipped_start > 0 THEN
+            UPDATE public.analysis_revenue_run_ledgers SET status='manual_review',manual_review_reason='routing_failure' WHERE request_id=p_request_id;
+        ELSIF v_parent.status='manual_review' AND v_parent.manual_review_reason='ambiguous_external_call' AND v_unsettled=0 AND v_denied=0 THEN
             UPDATE public.analysis_revenue_run_ledgers SET status='running',manual_review_reason=NULL WHERE request_id=p_request_id;
         END IF;
         RETURN pg_catalog.jsonb_build_object('disposition','released','created',TRUE,'replayed',FALSE,'operationId',v_child.id);
@@ -668,23 +697,29 @@ BEGIN
        OR v_child.economic_actual_usd IS NOT NULL OR v_child.billed_actual_usd IS NOT NULL THEN RAISE EXCEPTION USING MESSAGE='REVENUE_COST_OPERATION_FENCE'; END IF;
     UPDATE public.analysis_revenue_cost_operations
        SET status='settled',started_at=COALESCE(v_child.started_at,v_provider.run_started_at),terminal_at=v_provider.usage_reconciled_at,
-           economic_actual_usd=v_provider.actual_usage_usd,billed_actual_usd=0,economic_actual_krw=v_actual_krw,billed_actual_krw=0
+           economic_actual_usd=v_provider.actual_usage_usd,billed_actual_usd=0,economic_actual_krw=v_actual_krw,billed_actual_krw=0,
+           lifecycle_anomaly=CASE WHEN v_child.status='reserved' THEN 'skipped_start' ELSE lifecycle_anomaly END
      WHERE id=v_child.id;
     UPDATE public.analysis_revenue_run_ledgers
        SET reserved_cost_krw=reserved_cost_krw-CASE WHEN v_child.status IN ('reserved','started') THEN v_child.reserved_krw ELSE 0 END,
            economic_actual_krw=economic_actual_krw+v_actual_krw,actual_cost_krw=actual_cost_krw+v_actual_krw,billed_actual_krw=billed_actual_krw
      WHERE request_id=p_request_id;
-    SELECT pg_catalog.count(*)::INTEGER, pg_catalog.count(*) FILTER (WHERE status='denied')::INTEGER INTO v_unsettled,v_denied
-      FROM public.analysis_revenue_cost_operations WHERE request_id=p_request_id AND status NOT IN ('settled','released');
+    SELECT pg_catalog.count(*) FILTER (WHERE status NOT IN ('settled','released'))::INTEGER, pg_catalog.count(*) FILTER (WHERE status='denied')::INTEGER,
+           pg_catalog.count(*) FILTER (WHERE status='ambiguous')::INTEGER,
+           pg_catalog.count(*) FILTER (WHERE lifecycle_anomaly='skipped_start')::INTEGER
+      INTO v_unsettled,v_denied,v_ambiguous,v_skipped_start
+      FROM public.analysis_revenue_cost_operations WHERE request_id=p_request_id;
     IF v_provider.actual_usage_usd > v_provider.max_charge_usd OR v_parent.economic_actual_krw+v_actual_krw > v_parent.cost_cap_krw THEN
         UPDATE public.analysis_revenue_run_ledgers SET status='manual_review',manual_review_reason='cost_overrun' WHERE request_id=p_request_id;
-    ELSIF v_child.status='reserved' THEN
+    ELSIF v_parent.manual_review_reason IN ('cost_overrun','cost_denied') THEN
+        NULL;
+    ELSIF v_ambiguous > 0 THEN
+        UPDATE public.analysis_revenue_run_ledgers SET status='manual_review',manual_review_reason='ambiguous_external_call' WHERE request_id=p_request_id;
+    ELSIF v_skipped_start > 0 THEN
         -- A terminal provider run with no recorded start is still cost truth,
-        -- but it proves the runtime skipped the required start transition.
+        -- and its explicit child marker survives other-child ambiguity.
         UPDATE public.analysis_revenue_run_ledgers
-           SET status='manual_review',manual_review_reason=CASE
-               WHEN manual_review_reason IN ('cost_overrun','cost_denied') THEN manual_review_reason
-               ELSE 'routing_failure' END
+           SET status='manual_review',manual_review_reason='routing_failure'
          WHERE request_id=p_request_id;
     ELSIF v_parent.status='manual_review' AND v_parent.manual_review_reason='ambiguous_external_call' AND v_unsettled=0 AND v_denied=0 THEN
         UPDATE public.analysis_revenue_run_ledgers SET status='running',manual_review_reason=NULL WHERE request_id=p_request_id;
