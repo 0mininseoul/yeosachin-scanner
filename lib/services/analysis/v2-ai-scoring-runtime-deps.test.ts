@@ -6,6 +6,7 @@ import {
 import type { AnalysisV2ProviderRunStore } from './v2-provider-run-store';
 import type { ProviderExecutionPolicy } from './authorized-test-provider-policy';
 import type { AnalysisV2SelfHostedAuthRunReceipt } from './v2-selfhosted-auth-run-store';
+import type { FreshProvenanceStore } from './fresh-provenance-store';
 import { RevenueCostOperationStore } from './revenue-cost-operation-store';
 import { AnalysisImagePreparationError } from '@/lib/services/ai/image-preprocessing';
 import { SelfHostedAuthWorkerError } from '@/lib/services/instagram/providers/selfhosted-auth/client';
@@ -309,6 +310,99 @@ describe('analysis V2 production profile consumer', () => {
 });
 
 describe('analysis V2 reverse-like production collector', () => {
+    it('rejects a strict cohort selfhosted/fallback configuration before the candidate-liker provider boundary', async () => {
+        const bindAdapterCheckpoint = vi.fn();
+        const getPostLikers = vi.fn();
+        const collector = createAnalysisV2ReverseLikeCollector({
+            providerRunStore: { bindAdapterCheckpoint } as unknown as AnalysisV2ProviderRunStore,
+            contextStore: reverseLikeContext(authorizedProviderPolicy),
+            adapter: { getPostLikers, getPostComments: vi.fn() },
+            env: {
+                SELFHOSTED_AUTH_ENABLED: 'true',
+                SCRAPER_FALLBACK: 'true',
+                SCRAPER_PROFILE: 'apify',
+                SCRAPER_PROFILES_BATCH: 'apify',
+                SCRAPER_FOLLOWERS: 'apify',
+                SCRAPER_FOLLOWING: 'apify',
+                SCRAPER_LIKERS: 'selfhosted_auth',
+                SCRAPER_COMMENTS: 'apify',
+            },
+        });
+
+        await expect(collector.collect({
+            requestId,
+            jobKey: 'track:reverse-likes:collect',
+            claimToken,
+            jobInputHash: consumerInputHash,
+            targetUsername: 'target.account',
+            candidates: [{
+                candidateId: 'candidate:a',
+                postUrl: 'https://instagram.com/p/POST_A/',
+                declaredLikesCount: 1,
+            }],
+            limitPerPost: 100,
+        })).rejects.toThrow('FRESH_PROVENANCE_CONFIG_ERROR');
+        expect(bindAdapterCheckpoint).not.toHaveBeenCalled();
+        expect(getPostLikers).not.toHaveBeenCalled();
+    });
+
+    it('injects the exact fresh store and job-input fence for strict candidate-likers', async () => {
+        const bindAdapterCheckpoint = vi.fn(async () => ({ stored: null, checkpoint: {} }));
+        const getPostLikers = vi.fn(async () => []);
+        const freshProvenanceStore = {
+            assertProviderAdmission: vi.fn(),
+            recordProviderRun: vi.fn(),
+            bindProviderDataset: vi.fn(),
+        } as unknown as FreshProvenanceStore;
+        const revenueCostOperationStore = new RevenueCostOperationStore({ rpc: vi.fn() });
+        const collector = createAnalysisV2ReverseLikeCollector({
+            providerRunStore: {
+                bindAdapterCheckpoint,
+                load: vi.fn(async () => ({ status: 'succeeded', runId: 'RUN123456' })),
+            } as unknown as AnalysisV2ProviderRunStore,
+            revenueCostOperationStore,
+            freshProvenanceStore,
+            contextStore: reverseLikeContext(authorizedProviderPolicy),
+            adapter: { getPostLikers, getPostComments: vi.fn() },
+            env: {
+                SELFHOSTED_AUTH_ENABLED: 'false',
+                SCRAPER_FALLBACK: 'false',
+                SCRAPER_PROFILE: 'apify',
+                SCRAPER_PROFILES_BATCH: 'apify',
+                SCRAPER_FOLLOWERS: 'apify',
+                SCRAPER_FOLLOWING: 'apify',
+                SCRAPER_LIKERS: 'apify',
+                SCRAPER_COMMENTS: 'apify',
+                ANALYSIS_V2_APIFY_API_TOKEN_SLOT: 'primary',
+                APIFY_PRIMARY_API_TOKEN: 'primary-test-token',
+                APIFY_SECONDARY_API_TOKEN: 'secondary-test-token',
+                APIFY_TERTIARY_API_TOKEN: 'tertiary-test-token',
+                APIFY_QUATERNARY_API_TOKEN: 'quaternary-test-token',
+                APIFY_QUINARY_API_TOKEN: 'quinary-test-token',
+            },
+        });
+
+        await collector.collect({
+            requestId,
+            jobKey: 'track:reverse-likes:collect',
+            claimToken,
+            jobInputHash: consumerInputHash,
+            targetUsername: 'target.account',
+            candidates: [{
+                candidateId: 'candidate:a',
+                postUrl: 'https://instagram.com/p/POST_A/',
+                declaredLikesCount: 1,
+            }],
+            limitPerPost: 100,
+        });
+
+        expect(bindAdapterCheckpoint).toHaveBeenCalledWith(expect.any(Object), {
+            revenueCostOperationStore,
+            freshProvenanceStore,
+            jobInputHash: consumerInputHash,
+        });
+    });
+
     it('rejects a beta reverse-like charge above its frozen budget before reserve or provider I/O', async () => {
         const bindAdapterCheckpoint = vi.fn();
         const getPostLikers = vi.fn();
@@ -467,6 +561,14 @@ describe('analysis V2 reverse-like production collector', () => {
             contextStore: reverseLikeContext(authorizedProviderPolicy),
             adapter: { getPostLikers, getPostComments: vi.fn() },
             env: {
+                SELFHOSTED_AUTH_ENABLED: 'false',
+                SCRAPER_FALLBACK: 'false',
+                SCRAPER_PROFILE: 'apify',
+                SCRAPER_PROFILES_BATCH: 'apify',
+                SCRAPER_FOLLOWERS: 'apify',
+                SCRAPER_FOLLOWING: 'apify',
+                SCRAPER_LIKERS: 'apify',
+                SCRAPER_COMMENTS: 'apify',
                 ANALYSIS_V2_APIFY_API_TOKEN_SLOT: 'primary',
                 APIFY_PRIMARY_API_TOKEN: 'primary-test-token',
                 APIFY_SECONDARY_API_TOKEN: 'secondary-test-token',
@@ -508,8 +610,9 @@ describe('analysis V2 reverse-like production collector', () => {
             actorId: 'datadoping/instagram-likes-scraper',
             credentialSlot: 'quinary',
         });
-        expect((bindAdapterCheckpoint.mock.calls[0] as unknown as unknown[])[1]).toEqual({
+        expect((bindAdapterCheckpoint.mock.calls[0] as unknown as unknown[])[1]).toMatchObject({
             revenueCostOperationStore,
+            jobInputHash: consumerInputHash,
         });
         expect(revenueRpc).not.toHaveBeenCalled();
         expect(result.operationKey).toMatch(/^candidate-likers:[a-f0-9]{64}$/);

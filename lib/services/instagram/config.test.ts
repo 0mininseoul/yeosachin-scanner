@@ -177,6 +177,7 @@ describe('getAnalysisV2PaidCollectionProvider', () => {
 describe('assertAnalysisV2FreshProvenanceConfiguration', () => {
     const strictApify = {
         SELFHOSTED_AUTH_ENABLED: 'false',
+        SCRAPER_FALLBACK: 'false',
         SCRAPER_PROFILE: 'apify',
         SCRAPER_PROFILES_BATCH: 'apify',
         SCRAPER_FOLLOWERS: 'apify',
@@ -194,6 +195,10 @@ describe('assertAnalysisV2FreshProvenanceConfiguration', () => {
         expect(() => assertAnalysisV2FreshProvenanceConfiguration({
             ...strictApify,
             SELFHOSTED_AUTH_ENABLED: 'true',
+        })).toThrow('FRESH_PROVENANCE');
+        expect(() => assertAnalysisV2FreshProvenanceConfiguration({
+            ...strictApify,
+            SCRAPER_FALLBACK: 'true',
         })).toThrow('FRESH_PROVENANCE');
     });
 });

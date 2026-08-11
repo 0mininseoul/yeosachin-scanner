@@ -438,12 +438,23 @@ describe('analysis V2 provider run store', () => {
                         }),
                         error: null,
                     });
+                case ANALYSIS_V2_PROVIDER_RUN_DATABASE_NAMES.terminalRpc:
+                    return Promise.resolve({
+                        data: storedRow('succeeded', {
+                            reservationToken: params.p_reservation_token,
+                            actualUsageUsd: 0.001,
+                            usageReconciledAt: '2026-07-13T17:20:30.000Z',
+                        }),
+                        error: null,
+                    });
                 case 'begin_analysis_revenue_cost_ledger_v1':
                     return Promise.resolve({ data: { disposition: 'begun', created: true, replayed: false }, error: null });
                 case 'reserve_analysis_revenue_cost_operation_v2':
                     return Promise.resolve({ data: { disposition: 'accepted', created: true, replayed: false }, error: null });
                 case 'mark_analysis_revenue_cost_operation_started_v2':
                     return Promise.resolve({ data: { disposition: 'started', created: true, replayed: false }, error: null });
+                case 'settle_analysis_revenue_cost_operation_v2':
+                    return Promise.resolve({ data: { disposition: 'settled', created: true, replayed: false }, error: null });
                 default:
                     throw new Error(`unexpected RPC ${String(name)}`);
             }
@@ -483,11 +494,18 @@ describe('analysis V2 provider run store', () => {
         ]);
 
         await binding.checkpoint.onRunStarted?.(runId);
+        await binding.checkpoint.onCostRunFinished?.({
+            logicalProvider: 'apify', actorId: identity.actorId,
+            credentialSlot: 'primary', maxChargeUsd: 0.40205,
+            runId, status: 'succeeded', usageTotalUsd: null,
+        });
         await binding.checkpoint.onProviderDatasetResolved?.('FreshDataset1234');
 
-        expect(order.slice(-3)).toEqual([
+        expect(order.slice(-5)).toEqual([
             `rpc:${ANALYSIS_V2_PROVIDER_RUN_DATABASE_NAMES.startedRpc}`,
             'fresh:record',
+            `rpc:${ANALYSIS_V2_PROVIDER_RUN_DATABASE_NAMES.terminalRpc}`,
+            'rpc:settle_analysis_revenue_cost_operation_v2',
             'fresh:dataset',
         ]);
         expect(fresh.recordProviderRun).toHaveBeenCalledWith(expect.objectContaining({
@@ -498,6 +516,54 @@ describe('analysis V2 provider run store', () => {
             runId,
             datasetId: 'FreshDataset1234',
         }));
+    });
+
+    it('quarantines a strict source when a dataset callback arrives before its successful terminal checkpoint', async () => {
+        const { rpc, client } = clientWithRpc();
+        rpc.mockImplementation((name, params) => {
+            switch (name) {
+                case ANALYSIS_V2_PROVIDER_RUN_DATABASE_NAMES.loadRpc:
+                    return Promise.resolve({ data: null, error: null });
+                case ANALYSIS_V2_PROVIDER_RUN_DATABASE_NAMES.reserveRpc:
+                    return createdReservationFromParams(params);
+                case ANALYSIS_V2_PROVIDER_RUN_DATABASE_NAMES.startedRpc:
+                    return Promise.resolve({
+                        data: storedRow('running', { reservationToken: params.p_reservation_token }),
+                        error: null,
+                    });
+                case 'begin_analysis_revenue_cost_ledger_v1':
+                    return Promise.resolve({ data: { disposition: 'begun', created: true, replayed: false }, error: null });
+                case 'reserve_analysis_revenue_cost_operation_v2':
+                    return Promise.resolve({ data: { disposition: 'accepted', created: true, replayed: false }, error: null });
+                case 'mark_analysis_revenue_cost_operation_started_v2':
+                    return Promise.resolve({ data: { disposition: 'started', created: true, replayed: false }, error: null });
+                case 'mark_analysis_revenue_manual_review_v1':
+                    return Promise.resolve({ data: { disposition: 'manual_review', created: true, replayed: false }, error: null });
+                default:
+                    throw new Error(`unexpected RPC ${String(name)}`);
+            }
+        });
+        const fresh = {
+            assertProviderAdmission: vi.fn(async () => ({ disposition: 'admitted', created: true, replayed: false })),
+            recordProviderRun: vi.fn(async () => ({ disposition: 'recorded', created: true, replayed: false })),
+            bindProviderDataset: vi.fn(async () => ({ disposition: 'bound', created: true, replayed: false })),
+        } as unknown as FreshProvenanceStore;
+        const binding = await createAnalysisV2ProviderRunStore(client).bindAdapterCheckpoint(identity, {
+            revenueCostOperationStore: new RevenueCostOperationStore({ rpc }),
+            freshProvenanceStore: fresh,
+            jobInputHash: inputHash,
+        });
+
+        await binding.checkpoint.onBeforeRunStart?.({
+            logicalProvider: 'apify', actorId: identity.actorId,
+            credentialSlot: 'primary', maxChargeUsd: 0.40205,
+        });
+        await binding.checkpoint.onRunStarted?.(runId);
+
+        await expect(binding.checkpoint.onProviderDatasetResolved?.('FreshDataset1234'))
+            .rejects.toThrow('ANALYSIS_V2_PROVIDER_RUN_FRESH_PROVENANCE_SOURCE_NOT_SUCCEEDED');
+        expect(fresh.bindProviderDataset).not.toHaveBeenCalled();
+        expect(rpc.mock.calls.map(([name]) => name)).toContain('mark_analysis_revenue_manual_review_v1');
     });
 
     it('fences a checkpointed paid run to manual review when fresh evidence persistence fails after confirmation', async () => {

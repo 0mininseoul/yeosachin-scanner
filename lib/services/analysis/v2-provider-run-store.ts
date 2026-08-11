@@ -798,6 +798,14 @@ export function createAnalysisV2ProviderRunStore(
         if (!jobInputHash || !SHA256_PATTERN.test(jobInputHash) || !run.runId || !run.runStartedAt) {
             throw new Error('ANALYSIS_V2_PROVIDER_RUN_FRESH_PROVENANCE_NOT_CHECKPOINTED');
         }
+        // A dataset ID is only provenance after the exact durable source has
+        // reached a successful terminal state. Providers normally emit this
+        // callback after their terminal-cost callback, but the fence also
+        // makes reordered/replayed callbacks fail closed rather than binding
+        // a running, failed, or ambiguous source.
+        if (run.status !== 'succeeded' || !run.terminalizedAt) {
+            throw new Error('ANALYSIS_V2_PROVIDER_RUN_FRESH_PROVENANCE_SOURCE_NOT_SUCCEEDED');
+        }
         const outcome = await freshProvenanceStore.bindProviderDataset({
             ...freshProviderSource(input, jobInputHash, run.runId),
             datasetId,

@@ -77,6 +77,7 @@ const authorizedProviderPolicy = {
 
 const authorizedProviderEnv = {
     SELFHOSTED_AUTH_ENABLED: 'false',
+    SCRAPER_FALLBACK: 'false',
     SCRAPER_PROFILE: 'apify',
     SCRAPER_PROFILES_BATCH: 'apify',
     SCRAPER_FOLLOWERS: 'apify',
@@ -2030,13 +2031,6 @@ describe('analysis V2 concrete collection executors', () => {
         const revenueRpc = vi.fn();
         const revenueCostOperationStore = new RevenueCostOperationStore({ rpc: revenueRpc });
         const fallbackProfile = profile('target', []);
-        const primary = [{
-            outcome: {
-                ...failure('target').outcome,
-                failureCategory: 'rate_limit' as const,
-                httpStatus: 429,
-            },
-        }] as ProfileAttemptResult[];
         const fallback = [{
             outcome: success('target', 'apify').outcome,
             profile: fallbackProfile,
@@ -2096,7 +2090,7 @@ describe('analysis V2 concrete collection executors', () => {
         expect(reusable.load).not.toHaveBeenCalled();
         expect(providers.bindAdapterCheckpoint).toHaveBeenCalledWith(expect.objectContaining({
             jobKey: 'track:target-evidence:collect',
-            operationKey: expect.stringMatching(/^profile-fallback:/),
+            operationKey: expect.stringMatching(/^target-profile:/),
         }), expect.objectContaining({
             revenueCostOperationStore,
             jobInputHash: inputHash,
@@ -2111,7 +2105,6 @@ describe('analysis V2 concrete collection executors', () => {
         const reusable = reusableTargetProfileRunStore(null);
         const revenueRpc = vi.fn();
         const revenueCostOperationStore = new RevenueCostOperationStore({ rpc: revenueRpc });
-        const primary = [failure('target')] as ProfileAttemptResult[];
         const fallbackProfile = profile('target', []);
         const fallback = [{
             outcome: success('target', 'apify').outcome,
@@ -2166,7 +2159,7 @@ describe('analysis V2 concrete collection executors', () => {
         expect(providers.bindAdapterCheckpoint).toHaveBeenCalledOnce();
         expect(providers.bindAdapterCheckpoint).toHaveBeenCalledWith(expect.objectContaining({
             jobKey: 'track:target-evidence:collect',
-            operationKey: expect.stringMatching(/^profile-fallback:/),
+            operationKey: expect.stringMatching(/^target-profile:/),
         }), expect.objectContaining({
             revenueCostOperationStore,
             jobInputHash: inputHash,
@@ -3156,9 +3149,10 @@ describe('analysis V2 concrete collection executors', () => {
         ))).rejects.toThrow('FRESH_PROVENANCE_PROFILE_REPAIR_UNAUTHORIZED');
 
         expect(runProfileRepair).not.toHaveBeenCalled();
-        expect(bindAdapterCheckpoint).toHaveBeenCalledOnce();
-        expect(bindAdapterCheckpoint.mock.calls[0]?.[0].operationKey)
-            .toMatch(/^profile-fallback:[0-9a-f]{64}$/);
+        // A strict resume that would require repair is rejected before the
+        // generic profile binding/provider boundary; profile-repair is not an
+        // approved fresh provenance operation.
+        expect(bindAdapterCheckpoint).not.toHaveBeenCalled();
     });
 
     it('never repairs a batch the fallback-only merge already clears', async () => {

@@ -274,7 +274,7 @@ function emitV2CandidateFailures(
     limit: number,
 ): number {
     let emitted = 0;
-    for (const result of results) {
+    for (const [index, result] of results.entries()) {
         if (result.outcome.status === 'success') continue;
         if (emitted === limit) break;
         emitted += 1;
@@ -283,7 +283,11 @@ function emitV2CandidateFailures(
                 event: 'scraper.candidate_failed',
                 severity: result.outcome.status === 'failed' ? 'error' : 'warn',
                 fields: {
-                    candidate_instagram_id: result.outcome.requestedUsername,
+                    // Strict fresh collection reaches this operational event.
+                    // Keep its telemetry unlinkable from raw requested targets:
+                    // ordinal/count and a bounded category are sufficient to
+                    // diagnose a batch without retaining a username or URL.
+                    candidate_ordinal: index + 1,
                     provider: result.outcome.source,
                     operation: 'profilesBatch',
                     disposition: result.outcome.status === 'unavailable'

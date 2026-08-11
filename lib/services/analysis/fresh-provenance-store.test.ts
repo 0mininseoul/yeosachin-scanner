@@ -19,6 +19,30 @@ function client(data: unknown) {
 }
 
 describe('FreshProvenanceStore', () => {
+    it('accepts only an exact fresh operation family and mutually exclusive RPC outcomes', async () => {
+        const malformedOutcome = client({
+            disposition: 'recorded',
+            created: false,
+            replayed: false,
+        });
+        const store = new FreshProvenanceStore(malformedOutcome.client);
+        const identity = {
+            requestId,
+            jobKey,
+            jobClaimToken: claimToken,
+            jobInputHash,
+            providerInputHash,
+            runId,
+        };
+
+        await expect(store.recordProviderRun({
+            ...identity,
+            operationKey: `profile-repair:${'c'.repeat(64)}`,
+        })).rejects.toThrow('FRESH_PROVENANCE_INVALID_INPUT');
+        await expect(store.recordProviderRun({ ...identity, operationKey }))
+            .rejects.toThrow('FRESH_PROVENANCE_INVALID_RESPONSE');
+    });
+
     it('records a checkpointed Apify run using only domain-separated hashes', async () => {
         const stub = client({ disposition: 'recorded', created: true, replayed: false });
         const store = new FreshProvenanceStore(stub.client);

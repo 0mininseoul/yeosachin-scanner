@@ -6,7 +6,13 @@ import { supabaseAdmin } from '@/lib/supabase/admin';
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const HASH = /^[a-f0-9]{64}$/;
 const JOB_KEY = /^[a-z0-9][a-z0-9:._-]{0,159}$/;
-const PROVIDER_OPERATION_KEY = /^(target-profile|profile-fallback|profile-repair|relationship-followers|relationship-following|target-likers|target-comments|candidate-likers):[a-f0-9]{64}$/;
+/**
+ * Exact provider operations admitted by the strict fresh revenue contract.
+ * This deliberately differs from the generic V2 provider-key grammar: only
+ * the approved target/batch fallback family reaches a fresh RPC; repair and
+ * every other generic provider operation are rejected before that boundary.
+ */
+const FRESH_PROVIDER_OPERATION_KEY = /^(target-profile|profile-fallback|relationship-followers|relationship-following|target-likers|target-comments|candidate-likers):[a-f0-9]{64}$/;
 const APIFY_ID = /^[A-Za-z0-9]{8,128}$/;
 
 export interface FreshProvenanceRpcClient {
@@ -36,12 +42,6 @@ export interface FreshProvenanceOutcome {
     readonly disposition: 'admitted' | 'recorded' | 'bound';
     readonly created: boolean;
     readonly replayed: boolean;
-}
-
-export interface FreshProvenanceBoundedSummary {
-    readonly providerRunCount: number;
-    readonly datasetBoundCount: number;
-    readonly allLive: boolean;
 }
 
 export class FreshProvenanceStoreError extends Error {
@@ -85,7 +85,7 @@ function assertIdentity(input: FreshProviderEvidenceIdentity): void {
         || !JOB_KEY.test(input.jobKey)
         || !UUID.test(input.jobClaimToken)
         || !HASH.test(input.jobInputHash)
-        || !PROVIDER_OPERATION_KEY.test(input.operationKey)
+        || !FRESH_PROVIDER_OPERATION_KEY.test(input.operationKey)
         || !HASH.test(input.providerInputHash)
         || !APIFY_ID.test(input.runId)
     ) throw new FreshProvenanceStoreError('INVALID_INPUT');
@@ -105,30 +105,15 @@ function parseOutcome(data: unknown, disposition: FreshProvenanceOutcome['dispos
         row.disposition !== disposition
         || typeof row.created !== 'boolean'
         || typeof row.replayed !== 'boolean'
-        || (row.created && row.replayed)
+        || !(
+            (row.created === true && row.replayed === false)
+            || (row.created === false && row.replayed === true)
+        )
     ) throw new FreshProvenanceStoreError('INVALID_RESPONSE');
     return Object.freeze({
         disposition,
         created: row.created,
         replayed: row.replayed,
-    });
-}
-
-function parseSummary(data: unknown): FreshProvenanceBoundedSummary {
-    const row = rpcObject(data);
-    if (
-        !Number.isSafeInteger(row.providerRunCount)
-        || (row.providerRunCount as number) < 0
-        || (row.providerRunCount as number) > 128
-        || !Number.isSafeInteger(row.datasetBoundCount)
-        || (row.datasetBoundCount as number) < 0
-        || (row.datasetBoundCount as number) > (row.providerRunCount as number)
-        || typeof row.allLive !== 'boolean'
-    ) throw new FreshProvenanceStoreError('INVALID_RESPONSE');
-    return Object.freeze({
-        providerRunCount: row.providerRunCount as number,
-        datasetBoundCount: row.datasetBoundCount as number,
-        allLive: row.allLive,
     });
 }
 
@@ -182,28 +167,6 @@ export class FreshProvenanceStore {
             p_provider_run_hash: freshProviderRunHash(input),
             p_provider_dataset_hash: freshProviderDatasetHash(input),
         }, 'bound');
-    }
-
-    async readBoundedSummary(input: Omit<FreshProviderEvidenceIdentity, 'runId' | 'providerInputHash'>): Promise<FreshProvenanceBoundedSummary> {
-        if (
-            !UUID.test(input.requestId)
-            || !JOB_KEY.test(input.jobKey)
-            || !UUID.test(input.jobClaimToken)
-            || !HASH.test(input.jobInputHash)
-            || !PROVIDER_OPERATION_KEY.test(input.operationKey)
-        ) throw new FreshProvenanceStoreError('INVALID_INPUT');
-        const { data, error } = await this.client.rpc(
-            'read_analysis_revenue_fresh_provider_evidence_summary_v1',
-            {
-                p_request_id: input.requestId.toLowerCase(),
-                p_job_key: input.jobKey,
-                p_job_claim_token: input.jobClaimToken.toLowerCase(),
-                p_job_input_hash: input.jobInputHash,
-                p_operation_key: input.operationKey,
-            }
-        );
-        if (error) throw safeRpcError(error);
-        return parseSummary(data);
     }
 
     private async call(

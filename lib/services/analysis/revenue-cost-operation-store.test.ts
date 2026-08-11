@@ -213,6 +213,7 @@ describe('RevenueCostOperationStore', () => {
         [{ disposition: 'begun', replayed: false }, 'missing created'],
         [{ disposition: 'begun', created: false }, 'missing replayed'],
         [{ disposition: 'begun', created: true, replayed: true }, 'contradictory replay flags'],
+        [{ disposition: 'begun', created: false, replayed: false }, 'ambiguous replay flags'],
     ])('rejects a begin response with %s', async (data, _description) => {
         void _description;
         const rpc = vi.fn().mockResolvedValue({ data, error: null });

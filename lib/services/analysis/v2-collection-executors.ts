@@ -43,6 +43,7 @@ import {
     ANALYSIS_V2_PRIVATE_NAME_BATCH_LIMIT,
     type AnalysisV2DagBatchManifest,
 } from './v2-dag-planner';
+import { ANALYSIS_V2_TARGET_EVIDENCE_JOB_KEY } from './v2-coordinator';
 import {
     analysisV2EvidenceStore,
     createAnalysisV2RelationshipNotApplicableInputHash,
@@ -881,6 +882,38 @@ function profileFallbackIdentity(usernames: readonly string[]): string {
     return canonicalProviderInput(['profile-fallback-v2', ...usernames]);
 }
 
+/**
+ * The target-evidence profile is not a generic fallback: its evidence must
+ * retain the exact approved target-profile operation identity. Candidate batch
+ * collection remains a separately approved profile-fallback family.
+ */
+function freshProfileOperation(input: {
+    claim: AnalysisV2CollectionJobClaim;
+    request: AnalysisV2CollectionRequestContext;
+    usernames: readonly string[];
+}): { operation: 'target-profile' | 'profile-fallback'; canonicalInput: string } {
+    if (input.claim.jobKey !== ANALYSIS_V2_TARGET_EVIDENCE_JOB_KEY) {
+        return {
+            operation: 'profile-fallback',
+            canonicalInput: profileFallbackIdentity(input.usernames),
+        };
+    }
+    if (
+        input.usernames.length !== 1
+        || input.usernames[0] !== input.request.targetUsername
+    ) {
+        throw new Error('FRESH_PROVENANCE_TARGET_PROFILE_IDENTITY_DRIFT');
+    }
+    return {
+        operation: 'target-profile',
+        canonicalInput: canonicalProviderInput([
+            'target-profile-fresh-v1',
+            input.claim.jobInputHash,
+            input.request.targetUsername,
+        ]),
+    };
+}
+
 function selfHostedAuthProfileIdentity(
     claim: AnalysisV2CollectionJobClaim,
     usernames: readonly string[]
@@ -912,6 +945,15 @@ function isFreshApifyProfileResume(
         && resume.repairCapturedAt === null;
 }
 
+function requiresUnauthorizedFreshProfileRepair(
+    resume: AnalysisV2ProfileFetchResume,
+    usernames: readonly string[],
+): boolean {
+    return resume.repairCapturedAt === null
+        && !evaluateProfileBatchCompleteness(finalCheckpointResults(resume), usernames).satisfied
+        && deriveRepairUsernames(resume).length > 0;
+}
+
 async function durableFreshApifyProfiles(input: {
     dependencies: ResolvedDependencies;
     claim: AnalysisV2CollectionJobClaim;
@@ -930,9 +972,21 @@ async function durableFreshApifyProfiles(input: {
     } = input;
     assertFreshRevenueCollectionRuntime(request, dependencies);
     const identity = profileIdentity(claim);
-    const canonicalInput = profileFallbackIdentity(usernames);
+    // Inspect a retained strict checkpoint before binding a provider row. A
+    // profile-repair source is deliberately outside the fresh operation
+    // family, so a replay that would enter that path must stop before any
+    // provider binding or external boundary.
+    const resume = await dependencies.profileCheckpointStore.load(identity);
+    if (resume && !isFreshApifyProfileResume(resume)) {
+        throw new Error('FRESH_PROVENANCE_PROFILE_CHECKPOINT_UNPROVEN');
+    }
+    if (resume && requiresUnauthorizedFreshProfileRepair(resume, usernames)) {
+        throw new Error('FRESH_PROVENANCE_PROFILE_REPAIR_UNAUTHORIZED');
+    }
+    const freshOperation = freshProfileOperation({ claim, request, usernames });
+    const canonicalInput = freshOperation.canonicalInput;
     const operationKey = createAnalysisV2ProviderOperationKey(
-        'profile-fallback',
+        freshOperation.operation,
         canonicalInput,
     );
     const providerInputHash = createAnalysisV2ProviderInputHash(canonicalInput);
@@ -943,17 +997,15 @@ async function durableFreshApifyProfiles(input: {
         dependencies,
         claim,
         request,
-        operation: 'profile-fallback',
+        operation: freshOperation.operation,
         operationKey,
         inputHash: providerInputHash,
         actorId: PROFILE_ACTOR_ID,
         maxChargeUsd: profileMaximumCharge(usernames.length, dependencies.env),
     });
-    const resume = await dependencies.profileCheckpointStore.load(identity);
     if (resume) {
         if (
-            !isFreshApifyProfileResume(resume)
-            || binding.stored === null
+            binding.stored === null
             || !binding.checkpoint.resumeRunId
         ) {
             throw new Error('FRESH_PROVENANCE_PROFILE_CHECKPOINT_UNPROVEN');

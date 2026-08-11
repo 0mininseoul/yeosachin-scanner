@@ -84,6 +84,17 @@ export interface RevenueCostOperationOutcome {
     readonly reason?: string;
 }
 
+/**
+ * A durable pre-dispatch fence for the strict test-entitlement revenue cohort.
+ * It is deliberately separate from cost-operation outcomes: the guard may
+ * need to quarantine a request whose begin RPC transport result was unknown.
+ */
+export interface RevenueDispatchGuardOutcome {
+    readonly disposition: 'active' | 'quarantined';
+    readonly created: boolean;
+    readonly replayed: boolean;
+}
+
 export interface RevenueCostReconciliation {
     readonly finalizable: boolean;
     readonly reason: string;
@@ -187,12 +198,78 @@ function safeReconciliation(data: unknown): RevenueCostReconciliation {
     return row as unknown as RevenueCostReconciliation;
 }
 
+function safeDispatchGuardOutcome(data: unknown): RevenueDispatchGuardOutcome {
+    if (!data || typeof data !== 'object' || Array.isArray(data)) {
+        throw new Error('REVENUE_COST_OPERATION_INVALID_RESPONSE');
+    }
+    const row = data as Record<string, unknown>;
+    if (
+        (row.disposition !== 'active' && row.disposition !== 'quarantined')
+        || typeof row.created !== 'boolean'
+        || typeof row.replayed !== 'boolean'
+        || !(
+            (row.created === true && row.replayed === false)
+            || (row.created === false && row.replayed === true)
+        )
+    ) {
+        throw new Error('REVENUE_COST_OPERATION_INVALID_RESPONSE');
+    }
+    return Object.freeze({
+        disposition: row.disposition,
+        created: row.created,
+        replayed: row.replayed,
+    });
+}
+
 export class RevenueCostOperationStore {
     constructor(private readonly client: RevenueCostOperationRpcClient) {}
 
     async begin(input: BeginRevenueCostLedger): Promise<RevenueCostOperationOutcome> {
         if (!UUID.test(input.requestId)) throw new Error('REVENUE_COST_OPERATION_INVALID_INPUT');
-        return this.call('begin_analysis_revenue_cost_ledger_v1', { p_request_id: input.requestId });
+        const outcome = await this.call(
+            'begin_analysis_revenue_cost_ledger_v1',
+            { p_request_id: input.requestId },
+        );
+        // Route admission treats begin as a durable pre-dispatch fence. An
+        // RPC result that cannot prove either a creation or an exact replay is
+        // transport-ambiguous and must take the route's quarantine path.
+        if (
+            outcome.disposition !== 'begun'
+            || !(
+                (outcome.created === true && outcome.replayed === false)
+                || (outcome.created === false && outcome.replayed === true)
+            )
+        ) {
+            throw new Error('REVENUE_COST_OPERATION_INVALID_RESPONSE');
+        }
+        return outcome;
+    }
+
+    async activateDispatchGuard(input: {
+        requestId: string;
+        jobKey: string;
+    }): Promise<RevenueDispatchGuardOutcome> {
+        if (!UUID.test(input.requestId) || !JOB_KEY.test(input.jobKey)) {
+            throw new Error('REVENUE_COST_OPERATION_INVALID_INPUT');
+        }
+        return this.callDispatchGuard('activate_analysis_revenue_dispatch_guard_v1', {
+            p_request_id: input.requestId,
+            p_job_key: input.jobKey,
+        });
+    }
+
+    async quarantineDispatch(input: {
+        requestId: string;
+        jobKey: string;
+    }): Promise<RevenueDispatchGuardOutcome> {
+        if (!UUID.test(input.requestId) || !JOB_KEY.test(input.jobKey)) {
+            throw new Error('REVENUE_COST_OPERATION_INVALID_INPUT');
+        }
+        return this.callDispatchGuard('quarantine_analysis_revenue_dispatch_v1', {
+            p_request_id: input.requestId,
+            p_job_key: input.jobKey,
+            p_reason_code: 'begin_failure',
+        });
     }
 
     async reserve(input: ReserveRevenueCostOperation): Promise<RevenueCostOperationOutcome> {
@@ -307,5 +384,14 @@ export class RevenueCostOperationStore {
         const { data, error } = await this.client.rpc(functionName, params);
         if (error) throw new Error(safeRpcFailure(error));
         return safeOutcome(data);
+    }
+
+    private async callDispatchGuard(
+        functionName: string,
+        params: Record<string, unknown>
+    ): Promise<RevenueDispatchGuardOutcome> {
+        const { data, error } = await this.client.rpc(functionName, params);
+        if (error) throw new Error(safeRpcFailure(error));
+        return safeDispatchGuardOutcome(data);
     }
 }

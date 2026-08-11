@@ -15,7 +15,10 @@ import type {
 } from '@/lib/services/instagram/providers/types';
 import { selfHostedAuthInteractionAdapter } from '@/lib/services/instagram/providers/selfhosted-auth';
 import { parseSelfHostedAuthLikerItems } from '@/lib/services/instagram/providers/selfhosted-auth/client';
-import { getInteractionScraperConfig } from '@/lib/services/instagram/config';
+import {
+    assertAnalysisV2FreshProvenanceConfiguration,
+    getInteractionScraperConfig,
+} from '@/lib/services/instagram/config';
 import { supabaseAdmin } from '@/lib/supabase/admin';
 import {
     analysisV2ProfileFetchResumeSchema,
@@ -58,6 +61,10 @@ import {
     createAnalysisV2SelfHostedAuthWorkerIdentity,
     type AnalysisV2SelfHostedAuthRunStore,
 } from './v2-selfhosted-auth-run-store';
+import {
+    analysisRevenueFreshProvenanceStore,
+    type FreshProvenanceStore,
+} from './fresh-provenance-store';
 import { RevenueCostOperationStore } from './revenue-cost-operation-store';
 export {
     ANALYSIS_V2_MAX_REVERSE_CANDIDATES as MAX_REVERSE_CANDIDATES,
@@ -369,6 +376,8 @@ export function createAnalysisV2ReverseLikeCollector(input: {
     selfHostedAuthAdapter?: ApifyInteractionAdapter;
     providerRunStore?: AnalysisV2ProviderRunStore;
     revenueCostOperationStore?: RevenueCostOperationStore;
+    /** Injected only for the strict Basic/Standard test-entitlement cohort. */
+    freshProvenanceStore?: FreshProvenanceStore;
     selfHostedAuthRunStore?: AnalysisV2SelfHostedAuthRunStore;
     contextStore?: AnalysisV2CollectionRequestContextStore;
     env?: Record<string, string | undefined>;
@@ -378,6 +387,7 @@ export function createAnalysisV2ReverseLikeCollector(input: {
     const providerRunStore = input.providerRunStore ?? analysisV2ProviderRunStore;
     const revenueCostOperationStore = input.revenueCostOperationStore
         ?? analysisV2RevenueCostOperationStore;
+    const injectedFreshProvenanceStore = input.freshProvenanceStore;
     const selfHostedAuthRunStore = input.selfHostedAuthRunStore
         ?? analysisV2SelfHostedAuthRunStore;
     const contextStore = input.contextStore ?? analysisV2CollectionRequestContextStore;
@@ -401,6 +411,14 @@ export function createAnalysisV2ReverseLikeCollector(input: {
                 return Object.freeze({ operationKey: null, results: Object.freeze([]) });
             }
             const requestContext = await contextStore.load(claim);
+            const isStrictFreshRequest = isRevenueCostLedgerRequest(requestContext);
+            // This is intentionally after the trusted request context fence and
+            // before parsing inputs, reserving a provider run, or crossing any
+            // provider boundary. Ordinary production/Plus requests never call
+            // this configuration reader or gain fresh-provenance dependencies.
+            if (isStrictFreshRequest) {
+                assertAnalysisV2FreshProvenanceConfiguration(env);
+            }
             const targetUsername = z.string().trim().toLowerCase()
                 .regex(/^[a-z0-9._]{1,30}$/)
                 .parse(rawInput.targetUsername);
@@ -452,9 +470,12 @@ export function createAnalysisV2ReverseLikeCollector(input: {
                     credentialSlot: providerBinding.credentialSlot,
                     maxChargeUsd,
                 } as const;
-                const binding = isRevenueCostLedgerRequest(requestContext)
+                const binding = isStrictFreshRequest
                     ? await providerRunStore.bindAdapterCheckpoint(providerRunIdentity, {
                         revenueCostOperationStore,
+                        freshProvenanceStore: injectedFreshProvenanceStore
+                            ?? analysisRevenueFreshProvenanceStore,
+                        jobInputHash: claim.jobInputHash,
                     })
                     : await providerRunStore.bindAdapterCheckpoint(providerRunIdentity);
                 const likers = await adapter.getPostLikers(
@@ -535,7 +556,12 @@ export function createAnalysisV2ReverseLikeCollector(input: {
             };
             let collected: Awaited<ReturnType<typeof executeApify>>
                 | Awaited<ReturnType<typeof executeSelfHostedAuth>>;
-            if (requestContext.providerExecutionPolicy?.mode === 'betatest_free_pool') {
+            if (isStrictFreshRequest) {
+                // Strict revenue work is Apify-only. Do not allow the normal
+                // authenticated-worker selector or its receipt cache to become
+                // a paid-run fallback/adoption path.
+                collected = await executeApify();
+            } else if (requestContext.providerExecutionPolicy?.mode === 'betatest_free_pool') {
                 collected = await executeApify();
             } else if (getInteractionScraperConfig(env).likers === 'selfhosted_auth') {
                 collected = await executeSelfHostedAuth();

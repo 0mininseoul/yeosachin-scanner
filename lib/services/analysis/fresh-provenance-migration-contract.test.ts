@@ -1,66 +1,75 @@
+import { createHash } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
 
-const source = readFileSync(
+const publishedMigration = readFileSync(
     new URL('../../../supabase/migrations/20260810090000_add_revenue_e2e_observability_ledgers.sql', import.meta.url),
-    'utf8'
+    'utf8',
+);
+const hardeningMigration = readFileSync(
+    new URL('../../../supabase/migrations/20260811090000_harden_fresh_provenance.sql', import.meta.url),
+    'utf8',
 );
 
+function functionSection(name: string, nextName: string): string {
+    const start = hardeningMigration.indexOf(`CREATE OR REPLACE FUNCTION public.${name}`);
+    const end = hardeningMigration.indexOf(`CREATE OR REPLACE FUNCTION public.${nextName}`, start);
+    expect(start, `missing ${name}`).toBeGreaterThanOrEqual(0);
+    expect(end, `missing successor for ${name}`).toBeGreaterThan(start);
+    return hardeningMigration.slice(start, end);
+}
+
 describe('fresh revenue provenance migration contract', () => {
-    it('keeps the revenue parent after request cleanup and protects its immutable lineage', () => {
-        const ledger = source.slice(
-            source.indexOf('CREATE TABLE public.analysis_revenue_run_ledgers'),
-            source.indexOf('CREATE TABLE public.analysis_result_share_observations')
-        );
-        expect(ledger).toMatch(/request_id UUID PRIMARY KEY(?!\s+REFERENCES)/);
-        expect(ledger).not.toContain('fresh_provenance JSONB');
-        expect(source).toContain('analysis_revenue_run_ledger_lineage_immutable');
-        expect(source).toContain('OLD.preflight_id IS DISTINCT FROM NEW.preflight_id');
-        expect(source).toContain('OLD.request_started_at IS DISTINCT FROM NEW.request_started_at');
-        expect(source).toContain('analysis_v2_result_image_manifests.request_id');
+    it('keeps the published migration byte-for-byte and moves all fresh evidence forward', () => {
+        expect(createHash('sha256').update(publishedMigration, 'utf8').digest('hex'))
+            .toBe('449455fa1d3c59bb60522f6f379aa521e32cfb171f6dcc3c329c344807a09dda');
+        expect(hardeningMigration).toContain('DROP CONSTRAINT analysis_revenue_run_ledgers_request_id_fkey');
+        expect(hardeningMigration).toContain('DROP COLUMN fresh_provenance');
+        expect(hardeningMigration).toContain('CREATE TABLE public.analysis_revenue_fresh_provider_evidence');
+        expect(hardeningMigration).toContain('analysis_revenue_run_ledger_lineage_immutable');
     });
 
-    it('uses normalized, service-only, opaque Apify evidence with exact source locks', () => {
-        expect(source).toContain('CREATE TABLE public.analysis_revenue_fresh_provider_evidence');
-        expect(source).toContain('provider_run_hash VARCHAR(64) NOT NULL');
-        expect(source).toContain('provider_dataset_hash VARCHAR(64)');
-        expect(source).toContain("provider TEXT NOT NULL DEFAULT 'apify'");
-        expect(source).toContain('record_analysis_revenue_fresh_provider_evidence_v1');
-        expect(source).toContain('assert_analysis_revenue_fresh_provider_admission_v1');
-        expect(source).toContain('bind_analysis_revenue_fresh_provider_dataset_v1');
-        expect(source).toContain('read_analysis_revenue_fresh_provider_evidence_summary_v1');
-        expect(source).toContain('FROM public.analysis_v2_provider_runs AS provider_run');
-        expect(source).toContain('FOR UPDATE');
-        expect(source).toContain("SET search_path = ''");
-        expect(source).toContain('REVOKE ALL ON FUNCTION public.assert_analysis_revenue_fresh_provider_admission_v1');
-        expect(source).toContain('GRANT EXECUTE ON FUNCTION public.assert_analysis_revenue_fresh_provider_admission_v1');
-        expect(source).not.toContain('run_id TEXT');
-        expect(source).not.toContain('dataset_id TEXT');
+    it('uses normalized, service-only, opaque Apify evidence with the exact fresh operation family', () => {
+        expect(hardeningMigration).toContain('provider_run_hash VARCHAR(64) NOT NULL');
+        expect(hardeningMigration).toContain('provider_dataset_hash VARCHAR(64)');
+        expect(hardeningMigration).toContain("provider TEXT NOT NULL DEFAULT 'apify'");
+        expect(hardeningMigration).toContain('record_analysis_revenue_fresh_provider_evidence_v1');
+        expect(hardeningMigration).toContain('assert_analysis_revenue_fresh_provider_admission_v1');
+        expect(hardeningMigration).toContain('bind_analysis_revenue_fresh_provider_dataset_v1');
+        expect(hardeningMigration).toContain(
+            '^(target-profile|profile-fallback|relationship-followers|relationship-following|target-likers|target-comments|candidate-likers):[a-f0-9]{64}$',
+        );
+        expect(hardeningMigration).not.toContain("'profile-repair'");
+        expect(hardeningMigration).toContain('REVOKE INSERT, UPDATE, DELETE ON TABLE public.analysis_revenue_run_ledgers FROM service_role');
+        expect(hardeningMigration).toContain('REVOKE INSERT, UPDATE, DELETE ON TABLE public.analysis_revenue_fresh_provider_evidence FROM service_role');
+        expect(hardeningMigration).toContain('analysis_revenue_fresh_provider_evidence_immutable');
+        expect(hardeningMigration).not.toContain('run_id TEXT');
+        expect(hardeningMigration).not.toContain('dataset_id TEXT');
     });
 
-    it('requires exact replay and only binds a previously-null dataset hash', () => {
-        const record = source.slice(
-            source.indexOf('CREATE OR REPLACE FUNCTION public.record_analysis_revenue_fresh_provider_evidence_v1'),
-            source.indexOf('CREATE OR REPLACE FUNCTION public.bind_analysis_revenue_fresh_provider_dataset_v1')
+    it('requires exact replay and a terminal succeeded source before one-way Dataset binding', () => {
+        const record = functionSection(
+            'record_analysis_revenue_fresh_provider_evidence_v1',
+            'bind_analysis_revenue_fresh_provider_dataset_v1',
         );
-        const bind = source.slice(
-            source.indexOf('CREATE OR REPLACE FUNCTION public.bind_analysis_revenue_fresh_provider_dataset_v1'),
-            source.indexOf('CREATE OR REPLACE FUNCTION public.read_analysis_revenue_fresh_provider_evidence_summary_v1')
+        const bind = functionSection(
+            'bind_analysis_revenue_fresh_provider_dataset_v1',
+            'analysis_v2_profile_checkpoint_snapshot',
         );
         expect(record).toContain("RAISE EXCEPTION USING MESSAGE = 'FRESH_PROVENANCE_DRIFT'");
         expect(record).toContain("'created', FALSE, 'replayed', TRUE");
         expect(bind).toContain('provider_dataset_hash IS NULL');
-        expect(bind).toContain("RAISE EXCEPTION USING MESSAGE = 'FRESH_PROVENANCE_DRIFT'");
+        expect(bind).toContain("v_provider.status IS DISTINCT FROM 'succeeded'");
+        expect(bind).toContain("RAISE EXCEPTION USING MESSAGE = 'FRESH_PROVENANCE_NOT_FRESH'");
     });
 
     it('allows the trusted direct profile checkpoint only from exact terminal Apify evidence', () => {
-        const freshProfile = source.slice(
-            source.indexOf('-- Trusted fresh Apify profile checkpoint.'),
-            source.indexOf('CREATE TABLE public.analysis_result_share_observations')
+        const freshProfile = functionSection(
+            'checkpoint_analysis_v2_profile_fresh_apify_v1',
+            'assert_analysis_revenue_dispatch_guard_v1',
         );
-        expect(freshProfile).toContain('checkpoint_analysis_v2_profile_fresh_apify_v1');
-        expect(freshProfile).toContain("attempt IN ('primary', 'fallback', 'repair', 'fresh_apify')");
-        expect(freshProfile).toMatch(/fresh_apify'\) AND source = 'apify'/);
+        expect(hardeningMigration).toContain("attempt IN ('primary', 'fallback', 'repair', 'fresh_apify')");
+        expect(freshProfile).toMatch(/fresh_apify' AND outcome\.source = 'apify'/);
         expect(freshProfile).toContain('assert_analysis_revenue_fresh_provider_admission_v1');
         expect(freshProfile).toContain('provider_dataset_hash IS NULL');
         expect(freshProfile).toContain("v_provider.status IS DISTINCT FROM 'succeeded'");

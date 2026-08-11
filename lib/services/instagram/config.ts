@@ -225,9 +225,14 @@ export function assertAnalysisV2FreshProvenanceConfiguration(
         interactions.likers,
         interactions.comments,
     ];
-    if (isSelfHostedAuthEnabled(env) || selectors.some(selector => selector !== 'apify')) {
+    if (
+        isSelfHostedAuthEnabled(env)
+        || collection.fallback
+        || interactions.fallback
+        || selectors.some(selector => selector !== 'apify')
+    ) {
         throw new Error(
-            'FRESH_PROVENANCE_CONFIG_ERROR: trusted revenue collection requires all-Apify selectors with selfhosted auth disabled.'
+            'FRESH_PROVENANCE_CONFIG_ERROR: trusted revenue collection requires all-Apify selectors, disabled selfhosted auth, and no fallback.'
         );
     }
 }

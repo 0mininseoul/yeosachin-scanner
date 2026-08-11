@@ -335,9 +335,14 @@ describe('getProfilesBatchV2', () => {
         const candidateFailures = emitted.filter(
             event => event.event === 'scraper.candidate_failed'
         );
-        expect(candidateFailures.map(event => event.fields.candidate_instagram_id))
-            .toEqual(['bob', 'carol', 'dave', 'carol']);
-        expect(JSON.stringify(candidateFailures)).not.toContain('alice');
+        expect(candidateFailures.map(event => event.fields.candidate_ordinal))
+            .toEqual([2, 3, 4, 2]);
+        const serializedFailures = JSON.stringify(candidateFailures);
+        expect(serializedFailures).not.toContain('candidate_instagram_id');
+        for (const username of ['alice', 'bob', 'carol', 'dave']) {
+            expect(serializedFailures).not.toContain(username);
+        }
+        expect(serializedFailures).not.toContain('https://www.instagram.com/p/private-post/');
     });
 
     it('caps exceptional candidate logs and never emits successful candidate usernames', async () => {
@@ -381,8 +386,10 @@ describe('getProfilesBatchV2', () => {
         expect(candidateFailures).toHaveLength(25);
         expect(emitted.filter(event => event.event === 'scraper.fallback_selected'))
             .toHaveLength(1);
-        expect(JSON.stringify(emitted)).not.toMatch(/private provider response|caption/);
-        expect(JSON.stringify(emitted)).not.toContain('candidate_29');
+        const serialized = JSON.stringify(emitted);
+        expect(serialized).not.toMatch(/private provider response|caption/);
+        for (const username of usernames) expect(serialized).not.toContain(username);
+        expect(serialized).not.toContain('https://www.instagram.com/p/private-post/');
     });
 
     it('turns a full primary transport failure into one failed outcome per username', async () => {

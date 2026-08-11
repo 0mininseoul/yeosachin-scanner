@@ -276,6 +276,18 @@ describe('analysis V2 durable test-entitlement route', () => {
                     error: null,
                 };
             }
+            if (name === 'activate_analysis_revenue_dispatch_guard_v1') {
+                return {
+                    data: { disposition: 'active', created: true, replayed: false },
+                    error: null,
+                };
+            }
+            if (name === 'quarantine_analysis_revenue_dispatch_v1') {
+                return {
+                    data: { disposition: 'quarantined', created: true, replayed: false },
+                    error: null,
+                };
+            }
             if (name === 'mark_analysis_v2_preflight_admission_dispatched') {
                 return { data: true, error: null };
             }
@@ -343,12 +355,14 @@ describe('analysis V2 durable test-entitlement route', () => {
                 request_id: '123e4567-e89b-42d3-a456-426614174099',
                 user_id: USER_ID,
                 preflight_id: PREFLIGHT_ID,
-                target_instagram_id: 'target.account',
                 plan_id: 'standard',
                 operation: 'fresh_admission',
                 disposition: 'enqueued',
             }),
         });
+        const freshAdmissionEvent = mocks.operationalEmit.mock.calls[0]?.[0];
+        expect(freshAdmissionEvent?.fields).not.toHaveProperty('target_instagram_id');
+        expect(JSON.stringify(freshAdmissionEvent)).not.toContain('target.account');
     });
 
     it('rejects a non-E2E or retired identity before it reads or consumes an entitlement', async () => {
@@ -481,12 +495,14 @@ describe('analysis V2 durable test-entitlement route', () => {
                 preflight_id: PREFLIGHT_ID,
                 analysis_request_id: REQUEST_ID,
                 job_key: ANALYSIS_V2_BOOTSTRAP_JOB_KEY,
-                target_instagram_id: 'target.account',
                 plan_id: 'standard',
                 operation: 'entitlement',
                 disposition: 'enqueued',
             }),
         });
+        const queuedEvent = mocks.operationalEmit.mock.calls[0]?.[0];
+        expect(queuedEvent?.fields).not.toHaveProperty('target_instagram_id');
+        expect(JSON.stringify(queuedEvent)).not.toContain('target.account');
     });
 
     it('does not dispatch a Basic or Standard request when durable revenue-ledger begin fails', async () => {
@@ -512,18 +528,25 @@ describe('analysis V2 durable test-entitlement route', () => {
             if (name === 'begin_analysis_revenue_cost_ledger_v1') {
                 return { data: null, error: { code: 'P0001', message: 'REVENUE_COST_LEDGER_FENCE' } };
             }
+            if (name === 'quarantine_analysis_revenue_dispatch_v1') {
+                return {
+                    data: { disposition: 'quarantined', created: true, replayed: false },
+                    error: null,
+                };
+            }
             throw new Error(`unexpected RPC: ${name}`);
         });
         const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => undefined);
 
         const response = await POST(request(), context());
 
-        expect(response.status).toBe(500);
+        expect(response.status).toBe(503);
         await expect(response.json()).resolves.toMatchObject({ code: 'ANALYSIS_START_FAILED' });
         expect(mocks.rpc.mock.calls.map(([name]) => name)).toEqual([
             'reserve_analysis_v2_preflight_admission',
             'consume_analysis_v2_authorized_test_entitlement',
             'begin_analysis_revenue_cost_ledger_v1',
+            'quarantine_analysis_revenue_dispatch_v1',
         ]);
         expect(mocks.dispatchJob).not.toHaveBeenCalled();
         expect(errorSpy).toHaveBeenCalled();
@@ -552,6 +575,7 @@ describe('analysis V2 durable test-entitlement route', () => {
             'reserve_analysis_v2_preflight_admission',
             'consume_analysis_v2_authorized_test_entitlement',
             'begin_analysis_revenue_cost_ledger_v1',
+            'activate_analysis_revenue_dispatch_guard_v1',
         ]);
         expect(mocks.rpc.mock.calls[1][1]).toMatchObject({
             p_user_id: USER_ID,
@@ -571,6 +595,9 @@ describe('analysis V2 durable test-entitlement route', () => {
             REQUEST_ID,
             ANALYSIS_V2_BOOTSTRAP_JOB_KEY
         );
+        // The strict fresh path receives a raw target only for authenticated
+        // RPC input; its operational event must not retain it.
+        expect(JSON.stringify(mocks.operationalEmit.mock.calls)).not.toContain('0_min._.00');
     });
 
     it('keeps ordinary targets on the original consumption RPC when test sharding is enabled', async () => {
@@ -593,6 +620,50 @@ describe('analysis V2 durable test-entitlement route', () => {
             'reserve_analysis_v2_preflight_admission',
             'consume_analysis_v2_test_entitlement',
         ]);
+    });
+
+    it('replays a strict terminal/manual-review-equivalent request without begin, guard activation, or dispatch', async () => {
+        mocks.getTasksConfig.mockReturnValue(null);
+        mocks.getPreflightTasksConfig.mockReturnValue(null);
+        installPreflightQuery(preflightRow({
+            status: 'consumed',
+            expires_at: new Date(Date.now() - 60_000).toISOString(),
+            consumed_request_id: REQUEST_ID,
+            target_instagram_id: '0_min._.00',
+        }));
+        Object.assign(process.env, {
+            ANALYSIS_V2_AUTHORIZED_TEST_SHARDING_ENABLED: 'true',
+            ANALYSIS_V2_AUTHORIZED_TEST_SHARD_TARGET: '0_min._.00',
+            ANALYSIS_V2_AUTHORIZED_TEST_OWNER_USER_ID: USER_ID,
+            ANALYSIS_V2_AUTHORIZED_TEST_RELATIONSHIP_FOLLOWERS_SLOT: 'primary',
+            ANALYSIS_V2_AUTHORIZED_TEST_RELATIONSHIP_FOLLOWING_SLOT: 'secondary',
+            ANALYSIS_V2_AUTHORIZED_TEST_PROFILE_FALLBACK_SLOT: 'tertiary',
+            ANALYSIS_V2_AUTHORIZED_TEST_TARGET_LIKERS_SLOT: 'quaternary',
+            ANALYSIS_V2_AUTHORIZED_TEST_TARGET_COMMENTS_SLOT: 'tertiary',
+            ANALYSIS_V2_AUTHORIZED_TEST_CANDIDATE_LIKERS_SLOT: 'quinary',
+        });
+        mocks.rpc.mockResolvedValueOnce({
+            data: consumedResult({
+                created: false,
+                request_status: 'failed',
+                background_processing: false,
+            }),
+            error: null,
+        });
+
+        const response = await POST(request(), context());
+
+        expect(response.status).toBe(200);
+        await expect(response.json()).resolves.toEqual({
+            schemaVersion: 1,
+            requestId: REQUEST_ID,
+            status: 'failed',
+            backgroundProcessing: false,
+        });
+        expect(mocks.rpc.mock.calls.map(([name]) => name)).toEqual([
+            'consume_analysis_v2_authorized_test_entitlement',
+        ]);
+        expect(mocks.dispatchJob).not.toHaveBeenCalled();
     });
 
     it('keeps the exact target on the original RPC for a different signed-test owner', async () => {
