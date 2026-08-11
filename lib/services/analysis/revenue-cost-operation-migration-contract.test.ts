@@ -111,4 +111,13 @@ describe('revenue cost-operation migration contract', () => {
         expect(source).toContain("WHEN manual_review_reason IN ('cost_overrun','cost_denied') THEN manual_review_reason");
         expect(source).toContain("v_parent.manual_review_reason='ambiguous_external_call' AND v_unsettled=0 AND v_denied=0");
     });
+
+    it('persists skipped-start lifecycle evidence and aggregates it below active ambiguity but above running', () => {
+        expect(source).toContain("lifecycle_anomaly TEXT CONSTRAINT analysis_revenue_cost_operations_lifecycle_anomaly_value_check CHECK (lifecycle_anomaly IN ('skipped_start'))");
+        expect(source).toContain('analysis_revenue_cost_operations_lifecycle_anomaly_check');
+        expect(source).toContain("lifecycle_anomaly=CASE WHEN v_child.status='reserved' THEN 'skipped_start' ELSE lifecycle_anomaly END");
+        expect(source).toContain("pg_catalog.count(*) FILTER (WHERE lifecycle_anomaly='skipped_start')::INTEGER");
+        expect(source).toContain("ELSIF v_ambiguous > 0 THEN");
+        expect(source).toContain("ELSIF v_skipped_start > 0 THEN");
+    });
 });
