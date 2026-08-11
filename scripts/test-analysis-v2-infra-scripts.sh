@@ -957,6 +957,11 @@ case "$command_line" in
         worker_gate="${ANALYSIS_V2_WORKER_ENABLED:-false}"
         recovery_gate="${ANALYSIS_V2_RECOVERY_ENABLED:-false}"
       fi
+      if [[ "${FAKE_GCLOUD_GENDER_ROUTING_HMAC_INITIAL_ADDITION:-false}" == "true" \
+        && ( "$state" == "staged_build" || "$state" == "staged_build_inherited_slot" \
+          || "$state" == "staged_final" || "$state" == "promoted" ) ]]; then
+        gender_routing_hmac_mode='canonical'
+      fi
       automatic_fulfillment_gate="${EARLYBIRD_AUTOMATIC_FULFILLMENT_ENABLED:-false}"
       jq -nc \
         --arg service "${ANALYSIS_V2_TASKS_CLOUD_RUN_SERVICE:-analysis-worker}" \
@@ -1209,6 +1214,16 @@ case "$command_line" in
     if [[ "$revision" == analysis-worker-b* \
       || "${FAKE_GCLOUD_ACTIVE_BOOTSTRAP:-false}" == "true" ]]; then
       bootstrap_revision='true'
+    fi
+    if [[ "${FAKE_GCLOUD_GENDER_ROUTING_HMAC_INITIAL_ADDITION:-false}" == "true" ]]; then
+      case "$revision" in
+        analysis-worker-00002)
+          active_gender_routing_hmac_mode="${FAKE_GCLOUD_ACTIVE_GENDER_ROUTING_HMAC_MODE:-absent}"
+          ;;
+        *)
+          active_gender_routing_hmac_mode='canonical'
+          ;;
+      esac
     fi
     jq -nc \
       --arg revision "$revision" \
@@ -2344,6 +2359,47 @@ build_snapshot_path="$(grep -o -- '--build-env-vars-file=[^ ]*' \
 [[ -n "$runtime_snapshot_path" && -n "$build_snapshot_path" \
   && ! -e "$runtime_snapshot_path" && ! -e "$build_snapshot_path" ]] \
   || fail "validated env manifest snapshots were not removed after deployment"
+
+# A pre-existing worker may add the dedicated gender-routing HMAC exactly once
+# when both the latest template and known-good revision are absent. The staged
+# revision must carry the exact pinned ref before promotion, and a subsequent
+# check must remain idempotent after promotion.
+printf 'ready\n' >"$temp_dir/gender-routing-hmac-first-addition-state"
+env "${common_env[@]}" \
+  "ANALYSIS_V2_WORKER_SOURCE_DIR=$deploy_source_repo" \
+  "ANALYSIS_V2_WORKER_ENV_VARS_FILE=$temp_dir/runtime.env" \
+  "ANALYSIS_V2_WORKER_BUILD_ENV_VARS_FILE=$temp_dir/build.yaml" \
+  "FAKE_GCLOUD_STATE_FILE=$temp_dir/gender-routing-hmac-first-addition-state" \
+  "FAKE_GCLOUD_SOURCE_COMMIT=$deploy_source_commit" \
+  'FAKE_GCLOUD_GENDER_ROUTING_HMAC_MODE=absent' \
+  'FAKE_GCLOUD_ACTIVE_GENDER_ROUTING_HMAC_MODE=absent' \
+  'FAKE_GCLOUD_GENDER_ROUTING_HMAC_INITIAL_ADDITION=true' \
+  "FAKE_GCLOUD_DEPLOY_LOG=$temp_dir/gender-routing-hmac-first-addition-deploy.out" \
+  "FAKE_GCLOUD_ENDPOINT_UPDATE_LOG=$temp_dir/gender-routing-hmac-first-addition-endpoint.out" \
+  "FAKE_GCLOUD_TRAFFIC_LOG=$temp_dir/gender-routing-hmac-first-addition-traffic.out" \
+  bash "$script_dir/deploy-analysis-v2-worker.sh" \
+  >"$temp_dir/gender-routing-hmac-first-addition-apply.out"
+assert_contains "$temp_dir/gender-routing-hmac-first-addition-apply.out" \
+  'promoted verified revision:'
+assert_contains "$temp_dir/gender-routing-hmac-first-addition-deploy.out" \
+  'ANALYSIS_V2_GENDER_ROUTING_HMAC_SECRET=ai-baram-v2-gender-routing-hmac:7'
+assert_contains "$temp_dir/gender-routing-hmac-first-addition-traffic.out" \
+  "--to-revisions=analysis-worker-f${deploy_source_commit:0:6}abc12=100"
+[[ "$(<"$temp_dir/gender-routing-hmac-first-addition-state")" == "promoted" ]] \
+  || fail "first gender-routing HMAC addition did not finish on the promoted revision"
+
+env "${common_env[@]}" \
+  "ANALYSIS_V2_WORKER_SOURCE_DIR=$deploy_source_repo" \
+  "ANALYSIS_V2_WORKER_BUILD_ENV_VARS_FILE=$temp_dir/build.yaml" \
+  "FAKE_GCLOUD_STATE_FILE=$temp_dir/gender-routing-hmac-first-addition-state" \
+  "FAKE_GCLOUD_SOURCE_COMMIT=$deploy_source_commit" \
+  'FAKE_GCLOUD_GENDER_ROUTING_HMAC_MODE=absent' \
+  'FAKE_GCLOUD_ACTIVE_GENDER_ROUTING_HMAC_MODE=absent' \
+  'FAKE_GCLOUD_GENDER_ROUTING_HMAC_INITIAL_ADDITION=true' \
+  bash "$script_dir/deploy-analysis-v2-worker.sh" --check \
+  >"$temp_dir/gender-routing-hmac-first-addition-check.out"
+assert_contains "$temp_dir/gender-routing-hmac-first-addition-check.out" \
+  'verified: private worker runtime, bounded scaling, and default dynamic egress'
 
 printf 'ready\n' >"$temp_dir/permanent-revision-mismatch-state"
 printf '0\n' >"$temp_dir/permanent-revision-observation-count"
@@ -3992,6 +4048,17 @@ if env "${common_env[@]}" 'FAKE_GCLOUD_STATE=ready' \
 fi
 assert_contains "$temp_dir/worker-gender-routing-hmac-check-absent.out" \
   'Cloud Run worker runtime, scaling, egress, or artifact config has drifted'
+
+for gender_routing_hmac_check_mode in wrong-secret duplicate; do
+  if env "${common_env[@]}" 'FAKE_GCLOUD_STATE=ready' \
+    "FAKE_GCLOUD_GENDER_ROUTING_HMAC_MODE=$gender_routing_hmac_check_mode" \
+    bash "$script_dir/deploy-analysis-v2-worker.sh" --check \
+    >"$temp_dir/worker-gender-routing-hmac-check-$gender_routing_hmac_check_mode.out" 2>&1; then
+    fail "Cloud Run check accepted an invalid gender-routing HMAC reference: $gender_routing_hmac_check_mode"
+  fi
+  assert_contains "$temp_dir/worker-gender-routing-hmac-check-$gender_routing_hmac_check_mode.out" \
+    'latest Cloud Run service template gender-routing HMAC reference is invalid or its numeric version changed'
+done
 
 if env "${common_env[@]}" 'FAKE_GCLOUD_STATE=ready' \
   'FAKE_GCLOUD_APIFY_SECRET_SLOTS=primary,secondary,tertiary,quaternary,quinary,senary' \

@@ -179,6 +179,16 @@ secret_json() {
     --format=json 2>/dev/null
 }
 
+validate_gender_initial_pin() {
+  local config
+  [[ "$rotate_target" != "gender-routing-hmac" ]] || return 0
+  if config="$(secret_json "$GENDER_ROUTING_HMAC_SECRET_ID")"; then
+    return 0
+  fi
+  [[ "$ANALYSIS_V2_GENDER_ROUTING_HMAC_SECRET_VERSION" == "1" ]] \
+    || die "ANALYSIS_V2_GENDER_ROUTING_HMAC_SECRET_VERSION must be 1 when $GENDER_ROUTING_HMAC_SECRET_ID is absent"
+}
+
 wait_for_secret_json() {
   local secret_id="$1"
   local attempt
@@ -372,7 +382,12 @@ validate_secret_source_value() {
       const key = process.argv[1];
       const minimum = key === "IMAGE_PROXY_SIGNING_SECRET" ? 32 : 20;
       const value = process.env[key];
-      if (typeof value !== "string" || value.trim().length < minimum || /[\r\n]/.test(value)) {
+      if (
+        typeof value !== "string"
+        || value !== value.trim()
+        || value.length < minimum
+        || /[\r\n]/.test(value)
+      ) {
         console.error(`required secret source value is missing or invalid: ${key}`);
         process.exit(1);
       }
@@ -524,7 +539,23 @@ process_secret() {
       add_secret_version "$secret_id" "$env_key"
       resolved_version="$added_version"
     elif [[ -n "$configured_version" ]]; then
-      resolve_version "$secret_id" "$configured_version" "$pin_name"
+      if [[ "$logical_target" == "gender-routing-hmac" ]]; then
+        inspect_enabled_versions "$secret_id"
+        if [[ "$enabled_version_count" == "0" ]] \
+          && ! secret_has_version_history "$secret_id"; then
+          [[ "$configured_version" == "1" ]] \
+            || die "$pin_name must be 1 when $secret_id has no version history"
+          [[ "$mode" != "check" ]] \
+            || die "$secret_id has no version; run ordinary apply to resume initial version creation"
+          log "resuming interrupted initial version creation for $secret_id"
+          add_secret_version "$secret_id" "$env_key"
+          resolved_version="$added_version"
+        else
+          resolve_version "$secret_id" "$configured_version" "$pin_name"
+        fi
+      else
+        resolve_version "$secret_id" "$configured_version" "$pin_name"
+      fi
     else
       inspect_enabled_versions "$secret_id"
       if [[ "$enabled_version_count" == "1" ]]; then
@@ -659,6 +690,7 @@ disabled="$(gcloud iam service-accounts describe \
   || die "worker runtime service account must already exist"
 [[ "$disabled" != "true" && "$disabled" != "True" ]] \
   || die "worker runtime service account is disabled"
+validate_gender_initial_pin
 
 cleanup() {
   local file
