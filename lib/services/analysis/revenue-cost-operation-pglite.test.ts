@@ -342,11 +342,15 @@ describe('revenue cost operation ledger PGlite', () => {
         await seedLiveSources(db);
         const reserveProvider = `SELECT public.reserve_analysis_revenue_cost_operation_v2('${requestId}','${jobKey}','${claimToken}','${inputHash}','provider_run','${providerOperationKey}',0::smallint) AS result`;
         const reserveAi = `SELECT public.reserve_analysis_revenue_cost_operation_v2('${requestId}','${jobKey}','${claimToken}','${inputHash}','ai_attempt','${aiOperationKey}',1::smallint) AS result`;
-        await expect(query<{ result: { disposition: string; created: boolean } }>(db, reserveProvider)).resolves.toMatchObject({ rows: [{ result: { disposition: 'accepted', created: true } }] });
-        await expect(query<{ result: { disposition: string; replayed: boolean } }>(db, reserveProvider)).resolves.toMatchObject({ rows: [{ result: { disposition: 'accepted', replayed: true } }] });
         const beforeAi = await replayTotals(db);
         await expectError(query(db, reserveAi), 'REVENUE_COST_OPERATION_AI_NOT_READY');
         await expect(replayTotals(db)).resolves.toEqual(beforeAi);
+        await expect(query<{ result: { replayed: boolean } }>(db, 'SELECT public.begin_analysis_revenue_cost_ledger_v1($1::uuid) AS result', [requestId]))
+            .resolves.toMatchObject({ rows: [{ result: { replayed: true } }] });
+        await expect(db.query(`SELECT count(*)::int AS count FROM public.analysis_revenue_cost_operations WHERE owner_kind='ai_attempt' OR lifecycle_anomaly IS NOT NULL`))
+            .resolves.toMatchObject({ rows: [{ count: 0 }] });
+        await expect(query<{ result: { disposition: string; created: boolean } }>(db, reserveProvider)).resolves.toMatchObject({ rows: [{ result: { disposition: 'accepted', created: true } }] });
+        await expect(query<{ result: { disposition: string; replayed: boolean } }>(db, reserveProvider)).resolves.toMatchObject({ rows: [{ result: { disposition: 'accepted', replayed: true } }] });
         const startProvider = `SELECT public.mark_analysis_revenue_cost_operation_started_v2('${requestId}','${jobKey}','${claimToken}','${inputHash}','provider_run','${providerOperationKey}',0::smallint) AS result`;
         await expect(query<{ result: { disposition: string; created: boolean } }>(db, startProvider)).resolves.toMatchObject({ rows: [{ result: { disposition: 'started', created: true } }] });
         await expect(query<{ result: { disposition: string; replayed: boolean } }>(db, startProvider)).resolves.toMatchObject({ rows: [{ result: { disposition: 'started', replayed: true } }] });
@@ -520,6 +524,36 @@ describe('revenue cost operation ledger PGlite', () => {
         await expect(query<{ result: { disposition: string; replayed: boolean } }>(db, sql)).resolves.toMatchObject({ rows: [{ result: { disposition: 'denied', replayed: true } }] });
         await expectError(query(db, `SELECT public.mark_analysis_revenue_cost_operation_started_v2('${requestId}','${jobKey}','${claimToken}','${inputHash}','provider_run','${providerOperationKey}',0::smallint)`), 'REVENUE_COST_OPERATION_FENCE');
         await expect(db.query('SELECT reserved_cost_krw,status,manual_review_reason FROM public.analysis_revenue_run_ledgers WHERE request_id=$1', [requestId])).resolves.toMatchObject({ rows: [{ reserved_cost_krw: 0, status: 'manual_review', manual_review_reason: 'cost_denied' }] });
+    });
+
+    it('fences a denied-child parent mismatch before settlement and preserves cost-denied unless cost-overrun is stronger', async () => {
+        const db = await createDb();
+        await seedLiveSources(db);
+        await db.exec(`INSERT INTO public.analysis_v2_provider_runs(request_id,job_key,operation_key,input_hash,job_claim_token,reservation_token,logical_provider,actor_id,credential_slot,max_charge_usd,status)
+            VALUES ('${requestId}','${jobKey}','${secondProviderOperationKey}','${providerInputHash}','${claimToken}','77777777-7777-4777-8777-777777777777','apify','actor-id','primary',2,'starting')`);
+        const reserve = (key: string) => `SELECT public.reserve_analysis_revenue_cost_operation_v2('${requestId}','${jobKey}','${claimToken}','${inputHash}','provider_run','${key}',0::smallint) AS result`;
+        const settle = `SELECT public.settle_analysis_revenue_cost_operation_v2('${requestId}','${jobKey}','provider_run','${providerOperationKey}',0::smallint)`;
+        await query(db, reserve(providerOperationKey));
+        await expect(query<{ result: { disposition: string } }>(db, reserve(secondProviderOperationKey))).resolves.toMatchObject({ rows: [{ result: { disposition: 'denied' } }] });
+        await db.exec(`UPDATE public.analysis_v2_provider_runs SET status='failed',run_id='run12345',run_started_at=reserved_at + interval '1 second',terminalized_at=reserved_at + interval '2 seconds',actual_usage_usd=0.1,usage_reconciled_at=reserved_at + interval '3 seconds',updated_at=reserved_at + interval '4 seconds' WHERE request_id='${requestId}' AND operation_key='${providerOperationKey}';
+            UPDATE public.analysis_revenue_run_ledgers SET status='running',manual_review_reason=NULL WHERE request_id='${requestId}'`);
+        const beforeFence = await replayTotals(db);
+        await expectError(query(db, settle), 'REVENUE_COST_OPERATION_FENCE');
+        await expect(replayTotals(db)).resolves.toEqual(beforeFence);
+
+        await db.exec(`UPDATE public.analysis_revenue_run_ledgers SET status='running',manual_review_reason='cost_overrun' WHERE request_id='${requestId}'`);
+        const beforeOverrunFence = await replayTotals(db);
+        await expectError(query(db, settle), 'REVENUE_COST_OPERATION_FENCE');
+        await expect(replayTotals(db)).resolves.toEqual(beforeOverrunFence);
+
+        await db.exec(`UPDATE public.analysis_revenue_run_ledgers SET status='manual_review',manual_review_reason='cost_denied' WHERE request_id='${requestId}'`);
+        await expect(query(db, settle)).resolves.toBeDefined();
+        await expect(db.query(`SELECT status,manual_review_reason FROM public.analysis_revenue_run_ledgers WHERE request_id='${requestId}'`))
+            .resolves.toMatchObject({ rows: [{ status: 'manual_review', manual_review_reason: 'cost_denied' }] });
+        await db.exec(`UPDATE public.analysis_revenue_run_ledgers SET manual_review_reason='cost_overrun' WHERE request_id='${requestId}'`);
+        await expect(query(db, settle)).resolves.toBeDefined();
+        await expect(db.query(`SELECT status,manual_review_reason FROM public.analysis_revenue_run_ledgers WHERE request_id='${requestId}'`))
+            .resolves.toMatchObject({ rows: [{ status: 'manual_review', manual_review_reason: 'cost_overrun' }] });
     });
 
     it('keeps compatibility mutations not-ready and leaves child costs untouched', async () => {
@@ -749,6 +783,21 @@ describe('revenue cost operation ledger PGlite', () => {
         await db.exec(`UPDATE public.analysis_revenue_run_ledgers SET status='running',manual_review_reason=NULL WHERE request_id='${requestId}'`);
         const beforeReplay = await replayTotals(db);
         await expectError(query(db, settle), 'REVENUE_COST_OPERATION_FENCE');
+        await expect(replayTotals(db)).resolves.toEqual(beforeReplay);
+    });
+
+    it('limits skipped-start evidence to provider settlement and rejects imported replay drift', async () => {
+        const db = await createDb();
+        await begin(db);
+        const markImported = `UPDATE public.analysis_revenue_cost_operations SET lifecycle_anomaly='skipped_start' WHERE request_id='${requestId}' AND owner_kind='preflight_provider_run'`;
+        await expect(db.exec(markImported)).rejects.toThrow('analysis_revenue_cost_operations_lifecycle_anomaly_check');
+        await expect(db.query(`SELECT lifecycle_anomaly FROM public.analysis_revenue_cost_operations WHERE request_id='${requestId}' ORDER BY attempt`))
+            .resolves.toMatchObject({ rows: [{ lifecycle_anomaly: null }, { lifecycle_anomaly: null }] });
+
+        await db.exec('ALTER TABLE public.analysis_revenue_cost_operations DROP CONSTRAINT analysis_revenue_cost_operations_lifecycle_anomaly_check');
+        await db.exec(markImported);
+        const beforeReplay = await replayTotals(db);
+        await expectError(query(db, 'SELECT public.begin_analysis_revenue_cost_ledger_v1($1::uuid)', [requestId]), 'REVENUE_COST_LEDGER_DRIFT');
         await expect(replayTotals(db)).resolves.toEqual(beforeReplay);
     });
 

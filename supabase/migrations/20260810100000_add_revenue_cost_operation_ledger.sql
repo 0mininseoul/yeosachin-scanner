@@ -90,7 +90,8 @@ CREATE TABLE public.analysis_revenue_cost_operations (
     ),
     CONSTRAINT analysis_revenue_cost_operations_lifecycle_anomaly_check CHECK (
         lifecycle_anomaly IS NULL
-        OR (lifecycle_anomaly = 'skipped_start' AND status = 'settled' AND denial_reason IS NULL)
+        OR (lifecycle_anomaly = 'skipped_start' AND owner_kind = 'provider_run' AND source_job_key <> 'preflight' AND source_attempt = 0 AND attempt = 1
+            AND status = 'settled' AND denial_reason IS NULL)
     ),
     UNIQUE (request_id, owner_kind, owner_key_hash, attempt),
     UNIQUE (request_id, owner_kind, source_job_key, source_operation_key_hash, source_attempt)
@@ -195,7 +196,7 @@ BEGIN
             IF NOT (
                 v_child.owner_kind = 'preflight_provider_run' AND v_child.operation_kind = 'target_profile'
                 AND v_child.source_job_key = 'preflight' AND v_child.source_attempt = 0 AND v_child.units = 1
-                AND v_child.selected_manifest_scope_hash IS NULL AND v_child.denial_reason IS NULL
+                AND v_child.selected_manifest_scope_hash IS NULL AND v_child.denial_reason IS NULL AND v_child.lifecycle_anomaly IS NULL
                 AND v_child.billed_actual_usd = 0 AND v_child.billed_actual_krw = 0 AND v_child.reserved_krw = 0 AND v_child.status = 'settled'
                 AND ((v_child.attempt = 1 AND v_child.owner_key_hash = v_fallback_owner AND v_child.source_operation_key_hash = v_fallback_hash
                      AND v_child.estimated_economic_usd = v_fallback.actual_usage_usd AND v_child.economic_actual_usd = v_fallback.actual_usage_usd
@@ -630,15 +631,19 @@ BEGIN
     IF v_parent.reserved_cost_krw IS DISTINCT FROM v_active_reserved OR v_parent.economic_actual_krw IS DISTINCT FROM v_settled_economic
        OR v_parent.actual_cost_krw IS DISTINCT FROM v_settled_economic OR v_parent.billed_actual_krw IS DISTINCT FROM v_settled_billed THEN RAISE EXCEPTION USING MESSAGE='REVENUE_COST_OPERATION_FENCE'; END IF;
     SELECT pg_catalog.count(*) FILTER (WHERE status='ambiguous')::INTEGER,
-           pg_catalog.count(*) FILTER (WHERE lifecycle_anomaly='skipped_start')::INTEGER
-      INTO v_ambiguous,v_skipped_start
+           pg_catalog.count(*) FILTER (WHERE lifecycle_anomaly='skipped_start')::INTEGER,
+           pg_catalog.count(*) FILTER (WHERE status='denied')::INTEGER
+      INTO v_ambiguous,v_skipped_start,v_denied
       FROM public.analysis_revenue_cost_operations WHERE request_id=p_request_id;
-    -- Aggregate review state must retain every child fact that cannot be
-    -- reconstructed from provider timestamps.  Cost causes are stronger; an
-    -- active ambiguity temporarily outranks a completed skipped-start anomaly.
-    IF v_parent.manual_review_reason IS DISTINCT FROM 'cost_overrun' AND v_parent.manual_review_reason IS DISTINCT FROM 'cost_denied'
-       AND ((v_ambiguous > 0 AND (v_parent.status IS DISTINCT FROM 'manual_review' OR v_parent.manual_review_reason IS DISTINCT FROM 'ambiguous_external_call'))
-         OR (v_ambiguous = 0 AND v_skipped_start > 0 AND (v_parent.status IS DISTINCT FROM 'manual_review' OR v_parent.manual_review_reason IS DISTINCT FROM 'routing_failure'))) THEN
+    -- Aggregate review state must retain every child fact before this terminal
+    -- mutation.  A denial is durable cost evidence, so it requires
+    -- cost_denied unless an already-recorded cost_overrun is stronger.
+    IF (v_denied > 0
+           AND (v_parent.status IS DISTINCT FROM 'manual_review'
+             OR (v_parent.manual_review_reason IS DISTINCT FROM 'cost_overrun' AND v_parent.manual_review_reason IS DISTINCT FROM 'cost_denied')))
+       OR (v_parent.manual_review_reason IS DISTINCT FROM 'cost_overrun' AND v_parent.manual_review_reason IS DISTINCT FROM 'cost_denied'
+           AND ((v_ambiguous > 0 AND (v_parent.status IS DISTINCT FROM 'manual_review' OR v_parent.manual_review_reason IS DISTINCT FROM 'ambiguous_external_call'))
+             OR (v_ambiguous = 0 AND v_skipped_start > 0 AND (v_parent.status IS DISTINCT FROM 'manual_review' OR v_parent.manual_review_reason IS DISTINCT FROM 'routing_failure')))) THEN
         RAISE EXCEPTION USING MESSAGE='REVENUE_COST_OPERATION_FENCE';
     END IF;
     SELECT * INTO v_child FROM public.analysis_revenue_cost_operations WHERE request_id=p_request_id AND owner_kind='provider_run'

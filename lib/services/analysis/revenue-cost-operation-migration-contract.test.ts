@@ -112,9 +112,27 @@ describe('revenue cost-operation migration contract', () => {
         expect(source).toContain("v_parent.manual_review_reason='ambiguous_external_call' AND v_unsettled=0 AND v_denied=0");
     });
 
-    it('persists skipped-start lifecycle evidence and aggregates it below active ambiguity but above running', () => {
+    it('counts denied children before settlement mutation and fences a parent that does not retain cost-denied unless cost-overrun is stronger', () => {
+        const settlement = source.slice(
+            source.indexOf('CREATE OR REPLACE FUNCTION public.settle_analysis_revenue_cost_operation_v2'),
+            source.indexOf('-- Release retains the reserve/start live identity.'),
+        );
+        const preMutationAggregation = settlement.slice(
+            settlement.indexOf("SELECT pg_catalog.count(*) FILTER (WHERE status='ambiguous')"),
+            settlement.indexOf('SELECT * INTO v_child FROM public.analysis_revenue_cost_operations'),
+        );
+        expect(preMutationAggregation).toContain("pg_catalog.count(*) FILTER (WHERE status='denied')::INTEGER");
+        expect(preMutationAggregation).toContain('v_denied > 0');
+        expect(preMutationAggregation).toContain("v_parent.manual_review_reason IS DISTINCT FROM 'cost_overrun'");
+        expect(preMutationAggregation).toContain("v_parent.manual_review_reason IS DISTINCT FROM 'cost_denied'");
+        expect(preMutationAggregation).toMatch(/v_denied > 0[\s\S]*?v_parent\.status IS DISTINCT FROM 'manual_review'[\s\S]*?v_parent\.manual_review_reason IS DISTINCT FROM 'cost_overrun' AND v_parent\.manual_review_reason IS DISTINCT FROM 'cost_denied'/);
+    });
+
+    it('restricts skipped-start lifecycle evidence to authoritative provider settlement and aggregates it below active ambiguity but above running', () => {
         expect(source).toContain("lifecycle_anomaly TEXT CONSTRAINT analysis_revenue_cost_operations_lifecycle_anomaly_value_check CHECK (lifecycle_anomaly IN ('skipped_start'))");
         expect(source).toContain('analysis_revenue_cost_operations_lifecycle_anomaly_check');
+        expect(source).toContain("lifecycle_anomaly = 'skipped_start' AND owner_kind = 'provider_run' AND source_job_key <> 'preflight' AND source_attempt = 0");
+        expect(source).toContain('AND v_child.lifecycle_anomaly IS NULL');
         expect(source).toContain("lifecycle_anomaly=CASE WHEN v_child.status='reserved' THEN 'skipped_start' ELSE lifecycle_anomaly END");
         expect(source).toContain("pg_catalog.count(*) FILTER (WHERE lifecycle_anomaly='skipped_start')::INTEGER");
         expect(source).toContain("ELSIF v_ambiguous > 0 THEN");
