@@ -2,9 +2,9 @@
 -- Fresh provenance is introduced here so 20260810090000 remains byte-for-byte stable.
 
 ALTER TABLE public.analysis_revenue_run_ledgers
-    DROP CONSTRAINT analysis_revenue_run_ledgers_request_id_fkey;
+    DROP CONSTRAINT IF EXISTS analysis_revenue_run_ledgers_request_id_fkey;
 ALTER TABLE public.analysis_revenue_run_ledgers
-    DROP COLUMN fresh_provenance;
+    DROP COLUMN IF EXISTS fresh_provenance;
 
 -- The revenue parent and its fresh evidence are service-owned write surfaces.
 -- Every mutation below is mediated by an exact SECURITY DEFINER RPC, never a
@@ -21,7 +21,8 @@ SECURITY DEFINER
 SET search_path = ''
 AS $$
 BEGIN
-    IF OLD.preflight_id IS DISTINCT FROM NEW.preflight_id
+    IF OLD.request_id IS DISTINCT FROM NEW.request_id
+       OR OLD.preflight_id IS DISTINCT FROM NEW.preflight_id
        OR OLD.user_id IS DISTINCT FROM NEW.user_id
        OR OLD.plan_id IS DISTINCT FROM NEW.plan_id
        OR OLD.access_mode IS DISTINCT FROM NEW.access_mode
@@ -37,6 +38,8 @@ $$;
 REVOKE ALL ON FUNCTION public.reject_analysis_revenue_run_ledger_lineage_mutation()
     FROM PUBLIC, anon, authenticated, service_role;
 
+DROP TRIGGER IF EXISTS analysis_revenue_run_ledger_lineage_immutable
+    ON public.analysis_revenue_run_ledgers;
 CREATE TRIGGER analysis_revenue_run_ledger_lineage_immutable
 BEFORE UPDATE ON public.analysis_revenue_run_ledgers
 FOR EACH ROW EXECUTE FUNCTION public.reject_analysis_revenue_run_ledger_lineage_mutation();
@@ -63,7 +66,7 @@ REVOKE ALL ON FUNCTION public.analysis_revenue_valid_fresh_provider_operation_ke
 -- The normalized fresh-evidence row is the sole provider freshness authority.
 -- It stores only domain-separated hashes; raw Apify run and Dataset ids never
 -- cross this table or any RPC response.
-CREATE TABLE public.analysis_revenue_fresh_provider_evidence (
+CREATE TABLE IF NOT EXISTS public.analysis_revenue_fresh_provider_evidence (
     request_id UUID NOT NULL
         REFERENCES public.analysis_revenue_run_ledgers(request_id) ON DELETE CASCADE,
     job_key VARCHAR(160) NOT NULL CHECK (
@@ -133,6 +136,8 @@ $$;
 REVOKE ALL ON FUNCTION public.reject_analysis_revenue_fresh_provider_evidence_mutation()
     FROM PUBLIC, anon, authenticated, service_role;
 
+DROP TRIGGER IF EXISTS analysis_revenue_fresh_provider_evidence_immutable
+    ON public.analysis_revenue_fresh_provider_evidence;
 CREATE TRIGGER analysis_revenue_fresh_provider_evidence_immutable
 BEFORE UPDATE ON public.analysis_revenue_fresh_provider_evidence
 FOR EACH ROW EXECUTE FUNCTION public.reject_analysis_revenue_fresh_provider_evidence_mutation();
@@ -201,6 +206,7 @@ BEGIN
        OR v_request.id IS NULL
        OR v_preflight.id IS NULL
        OR v_job.request_id IS NULL
+       OR v_request.preflight_id IS DISTINCT FROM v_preflight.id
        OR v_parent.preflight_id IS DISTINCT FROM v_request.preflight_id
        OR v_parent.user_id IS DISTINCT FROM v_request.user_id
        OR v_parent.plan_id IS DISTINCT FROM v_request.selected_plan_id_snapshot
@@ -711,6 +717,7 @@ BEGIN
     IF v_request.id IS NULL
        OR v_request.pipeline_version IS DISTINCT FROM 'v2'
        OR v_request.status NOT IN ('pending', 'processing')
+       OR v_request.preflight_id IS DISTINCT FROM v_preflight.id
        OR v_job.request_id IS NULL
        OR v_job.status IS DISTINCT FROM 'processing'
        OR v_job.input_hash IS DISTINCT FROM p_job_input_hash
@@ -928,6 +935,7 @@ BEGIN
 
     IF v_preflight.id IS NULL
        OR v_job.request_id IS NULL
+       OR v_request.preflight_id IS DISTINCT FROM v_preflight.id
        OR v_preflight.status IS DISTINCT FROM 'consumed'
        OR v_preflight.access_mode IS DISTINCT FROM 'test_entitlement'
        OR v_parent.request_id IS NULL

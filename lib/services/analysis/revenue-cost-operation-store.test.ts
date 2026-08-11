@@ -19,6 +19,11 @@ function client(data: unknown, error: { code?: string; message?: string } | null
     return { rpc, client: { rpc } as RevenueCostOperationRpcClient };
 }
 
+function rawClient(data: unknown) {
+    const rpc = vi.fn().mockResolvedValue({ data, error: null });
+    return { rpc, client: { rpc } as RevenueCostOperationRpcClient };
+}
+
 describe('RevenueCostOperationStore', () => {
     it('uses provider-source v2 authority without caller-supplied cost or operation fields', async () => {
         const stub = client({ disposition: 'accepted', created: true, replayed: false, operationId: '22222222-2222-4222-8222-222222222222' });
@@ -207,6 +212,32 @@ describe('RevenueCostOperationStore', () => {
         const hostile = new RevenueCostOperationStore(client(null, { code: 'XX000', message: 'target=private-target' }).client);
         await expect(hostile.manualReview({ requestId, reasonCode: 'routing_failure' }))
             .rejects.toThrow('REVENUE_COST_OPERATION_RPC_FAILED');
+    });
+
+    it.each([
+        'begun', 'accepted', 'denied', 'started', 'settled', 'released', 'ambiguous',
+    ] as const)('rejects an ambiguous false/false %s lifecycle outcome', async disposition => {
+        const stub = rawClient({ disposition, created: false, replayed: false });
+        const store = new RevenueCostOperationStore(stub.client);
+
+        await expect(store.reserve({
+            requestId,
+            ownerKind: 'provider_run',
+            ownerKeyHash,
+            attempt: 1,
+            operationKind: 'detail_profile',
+            units: 1,
+            estimatedEconomicUsd: 0.01,
+            selectedManifestScopeHash: scopeHash,
+        })).rejects.toThrow('REVENUE_COST_OPERATION_INVALID_RESPONSE');
+    });
+
+    it('accepts only the documented existing manual-review false/false outcome', async () => {
+        const stub = rawClient({ disposition: 'manual_review', created: false, replayed: false });
+        const store = new RevenueCostOperationStore(stub.client);
+
+        await expect(store.manualReview({ requestId, reasonCode: 'routing_failure' }))
+            .resolves.toEqual({ disposition: 'manual_review', created: false, replayed: false });
     });
 
     it.each([

@@ -172,8 +172,14 @@ function safeOutcome(data: unknown): RevenueCostOperationOutcome {
     if (!['begun', 'accepted', 'denied', 'started', 'settled', 'released', 'ambiguous', 'manual_review'].includes(String(disposition))) {
         throw new Error('REVENUE_COST_OPERATION_INVALID_RESPONSE');
     }
+    const exactCreateOrReplay = (
+        (row.created === true && row.replayed === false)
+        || (row.created === false && row.replayed === true)
+    );
+    const existingManualReview = disposition === 'manual_review'
+        && row.created === false && row.replayed === false;
     if (typeof row.created !== 'boolean' || typeof row.replayed !== 'boolean'
-        || (row.created && row.replayed)) {
+        || (!exactCreateOrReplay && !existingManualReview)) {
         throw new Error('REVENUE_COST_OPERATION_INVALID_RESPONSE');
     }
     return {

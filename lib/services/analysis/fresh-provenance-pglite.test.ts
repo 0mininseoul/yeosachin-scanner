@@ -1,3 +1,5 @@
+import { createHash } from 'node:crypto';
+import { execFileSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 import { PGlite, type Results } from '@electric-sql/pglite';
 import { pgcrypto } from '@electric-sql/pglite/contrib/pgcrypto';
@@ -14,9 +16,50 @@ const forwardMigration = readFileSync(
     new URL('../../../supabase/migrations/20260811090000_harden_fresh_provenance.sql', import.meta.url),
     'utf8',
 );
+const costOperationMigration = readFileSync(
+    new URL('../../../supabase/migrations/20260810100000_add_revenue_cost_operation_ledger.sql', import.meta.url),
+    'utf8',
+);
+const schedulerMigrationSources = [
+    readFileSync(new URL('../../../supabase/migrations/20260713155145_add_analysis_v2_job_foundation.sql', import.meta.url), 'utf8'),
+    readFileSync(new URL('../../../supabase/migrations/20260713214500_fix_analysis_v2_task_name_regex.sql', import.meta.url), 'utf8'),
+    readFileSync(new URL('../../../supabase/migrations/20260714031500_harden_analysis_v2_terminal_invariants.sql', import.meta.url), 'utf8'),
+    readFileSync(new URL('../../../supabase/migrations/20260727034000_add_analysis_v2_scheduler_live_operations.sql', import.meta.url), 'utf8'),
+];
+const appliedHistoricalMigration = execFileSync(
+    'git',
+    ['show', '99789de4:supabase/migrations/20260810090000_add_revenue_e2e_observability_ledgers.sql'],
+    { encoding: 'utf8' },
+);
+
+function historicalRevenueFreshLayer(source: string): string {
+    const end = source.indexOf('CREATE TABLE public.analysis_result_share_observations');
+    if (end <= 0) throw new Error('missing applied revenue/fresh migration layer');
+    return source.slice(0, end);
+}
+
+const appliedHistoricalRevenueFreshLayer = historicalRevenueFreshLayer(appliedHistoricalMigration);
+
+function historicalFunction(source: string, name: string): string {
+    const match = source.match(new RegExp(
+        `CREATE(?: OR REPLACE)? FUNCTION public\\.${name}\\([\\s\\S]*?\\n\\$\\$;`,
+    ));
+    if (!match) throw new Error(`missing historical scheduler function: ${name}`);
+    return match[0];
+}
+
+const historicalSchedulerFunctions = [
+    historicalFunction(schedulerMigrationSources[0]!, 'reserve_analysis_v2_job_dispatch'),
+    historicalFunction(schedulerMigrationSources[1]!, 'mark_analysis_v2_job_dispatched'),
+    historicalFunction(schedulerMigrationSources[0]!, 'rearm_analysis_v2_job_dispatch'),
+    historicalFunction(schedulerMigrationSources[2]!, 'claim_analysis_v2_job'),
+    historicalFunction(schedulerMigrationSources[3]!, 'continue_analysis_v2_scheduler_job'),
+].join('\n\n');
 
 const requestId = '11111111-1111-4111-8111-111111111111';
 const preflightId = '22222222-2222-4222-8222-222222222222';
+const hostilePreflightId = '23232323-2323-4232-8232-232323232323';
+const rewrittenRequestId = '24242424-2424-4242-8242-242424242424';
 const userId = '33333333-3333-4333-8333-333333333333';
 const claimToken = '44444444-4444-4444-8444-444444444444';
 const jobKey = 'track:relationships:collect';
@@ -28,17 +71,26 @@ const datasetId = 'FreshDataset1234';
 const hash = (character: string) => character.repeat(64);
 const databases: PGlite[] = [];
 
-const predecessorSchema = `
+// PGlite-only relation signatures required to parse the actual migration
+// history. The historical SQL bodies and migration constraints themselves are
+// always loaded from their source files below.
+const pgliteHistoricalDependencyBootstrap = `
 CREATE ROLE anon NOLOGIN;
 CREATE ROLE authenticated NOLOGIN;
 CREATE ROLE service_role NOLOGIN;
 GRANT USAGE ON SCHEMA public TO anon, authenticated, service_role;
 CREATE EXTENSION pgcrypto;
 CREATE SCHEMA extensions;
+CREATE FUNCTION extensions.gen_random_uuid() RETURNS uuid
+LANGUAGE sql AS $$ SELECT public.gen_random_uuid() $$;
 CREATE FUNCTION extensions.digest(text, text) RETURNS bytea
 LANGUAGE sql AS $$ SELECT public.digest($1, $2) $$;
 CREATE FUNCTION extensions.digest(bytea, text) RETURNS bytea
 LANGUAGE sql AS $$ SELECT public.digest($1, $2) $$;
+CREATE FUNCTION public.analysis_v2_valid_provider_operation_key(p_operation_key text)
+RETURNS boolean LANGUAGE sql IMMUTABLE AS $$
+    SELECT p_operation_key ~ '^(target-profile|profile-fallback|profile-repair|relationship-followers|relationship-following|target-likers|target-comments|candidate-likers):[a-f0-9]{64}$'
+$$;
 
 CREATE TABLE public.analysis_requests (
     id uuid PRIMARY KEY,
@@ -96,42 +148,49 @@ CREATE TABLE public.analysis_v2_provider_execution_policies (
     operation_slot_map jsonb NOT NULL DEFAULT '{}'::jsonb,
     policy_hash text NOT NULL DEFAULT '${hash('p')}'
 );
-
--- Exact predecessor shape from the published 20260810090000 migration plus
--- the later cost-ledger columns consumed by the forward hardening migration.
-CREATE TABLE public.analysis_revenue_run_ledgers (
-    request_id uuid PRIMARY KEY,
-    preflight_id uuid NOT NULL,
-    user_id uuid NOT NULL,
-    plan_id text NOT NULL CHECK (plan_id IN ('basic', 'standard')),
-    access_mode text NOT NULL CHECK (access_mode = 'test_entitlement'),
-    target_username_hmac text NOT NULL CHECK (target_username_hmac ~ '^[a-f0-9]{64}$'),
-    preflight_refreshed_at timestamptz NOT NULL,
-    request_started_at timestamptz NOT NULL,
-    fresh_provenance jsonb NOT NULL DEFAULT '{}'::jsonb,
-    cost_cap_krw integer NOT NULL CHECK (cost_cap_krw IN (1808, 3634)),
-    reserved_cost_krw integer NOT NULL DEFAULT 0,
-    actual_cost_krw integer NOT NULL DEFAULT 0,
-    public_mutual_count integer,
-    screened_count integer,
-    not_screened_count integer,
-    unknown_burden_count integer,
-    result_revision_id uuid,
-    image_manifest_id uuid,
-    content_hash text,
-    status text NOT NULL DEFAULT 'running' CHECK (status IN ('running', 'completed', 'manual_review', 'failed')),
-    created_at timestamptz NOT NULL DEFAULT pg_catalog.clock_timestamp(),
-    completed_at timestamptz,
-    manual_review_reason text CHECK (manual_review_reason IN (
-        'cost_denied', 'cost_overrun', 'ambiguous_external_call', 'routing_failure'
-    )),
-    CONSTRAINT analysis_revenue_run_ledgers_request_id_fkey
-        FOREIGN KEY (request_id) REFERENCES public.analysis_requests(id) ON DELETE CASCADE
+CREATE TABLE public.analysis_v2_test_entitlement_consumptions (
+    entitlement_jti_hash text PRIMARY KEY,
+    preflight_id uuid,
+    request_id uuid UNIQUE,
+    user_id uuid,
+    selected_plan_id text
 );
-ALTER TABLE public.analysis_revenue_run_ledgers ENABLE ROW LEVEL SECURITY;
-ALTER TABLE public.analysis_revenue_run_ledgers FORCE ROW LEVEL SECURITY;
-REVOKE ALL ON public.analysis_revenue_run_ledgers FROM PUBLIC, anon, authenticated, service_role;
-GRANT SELECT, INSERT, UPDATE ON public.analysis_revenue_run_ledgers TO service_role;
+CREATE TABLE public.analysis_preflight_provider_runs (
+    preflight_id uuid,
+    operation_key text,
+    status text,
+    actual_usage_usd numeric,
+    terminalized_at timestamptz,
+    usage_reconciled_at timestamptz,
+    PRIMARY KEY (preflight_id, operation_key)
+);
+CREATE TABLE public.account_e2e_test_runners (
+    account_id uuid PRIMARY KEY,
+    runner_plan text
+);
+CREATE FUNCTION public.load_e2e_test_runner_v1(p_account_id uuid)
+RETURNS TABLE(runner_plan text) LANGUAGE sql AS $$
+    SELECT runner_plan FROM public.account_e2e_test_runners WHERE account_id = p_account_id
+$$;
+CREATE TABLE public.analysis_v2_ai_attempts (
+    request_id uuid,
+    job_key text,
+    job_claim_token uuid,
+    operation_key text,
+    attempt smallint,
+    status text,
+    actual_usage_usd numeric,
+    terminalized_at timestamptz,
+    usage_reconciled_at timestamptz
+);
+CREATE TABLE public.analysis_v2_provider_cleanup_intents (
+    request_id uuid PRIMARY KEY,
+    failed_job_key text,
+    failed_job_input_hash text,
+    failed_claim_token uuid,
+    error_code text,
+    completed_at timestamptz
+);
 
 CREATE FUNCTION public.analysis_v2_valid_profile_username_list(
     p_usernames text[], p_allow_empty boolean
@@ -213,34 +272,54 @@ CREATE TABLE public.analysis_v2_profile_fetch_outcomes (
     )
 );
 
--- These are the published scheduler RPC identities immediately before the
--- forward hardening migration. Their bodies are intentionally inert: PGlite
--- exercises the newly-installed service_role wrappers and their guards, while
--- the production implementation remains supplied by the full predecessor
--- migration chain.
-CREATE FUNCTION public.reserve_analysis_v2_job_dispatch(uuid, text, uuid)
-RETURNS TABLE(reserved boolean, dispatch_generation integer, reservation_token uuid, job_status text, dispatch_state text, task_name text)
-LANGUAGE sql AS $$ SELECT FALSE, 0, NULL::uuid, NULL::text, NULL::text, NULL::text $$;
-CREATE FUNCTION public.mark_analysis_v2_job_dispatched(uuid, text, integer, uuid, text)
-RETURNS TABLE(marked boolean, job_status text, dispatch_state text, task_name text)
-LANGUAGE sql AS $$ SELECT FALSE, NULL::text, NULL::text, NULL::text $$;
-CREATE FUNCTION public.rearm_analysis_v2_job_dispatch(uuid, text, integer, uuid, uuid)
-RETURNS TABLE(rearmed boolean, dispatch_generation integer, reservation_token uuid, job_status text, dispatch_state text)
-LANGUAGE sql AS $$ SELECT FALSE, 0, NULL::uuid, NULL::text, NULL::text $$;
-CREATE FUNCTION public.claim_analysis_v2_job(uuid, text, integer, uuid, uuid, integer, integer)
-RETURNS TABLE(claimed boolean, job_status text, attempt_count integer, lease_expires_at timestamptz, track text, job_kind text, batch integer, input_hash text)
-LANGUAGE sql AS $$ SELECT FALSE, NULL::text, 0, NULL::timestamptz, NULL::text, NULL::text, 0, NULL::text $$;
-CREATE FUNCTION public.continue_analysis_v2_scheduler_job(uuid, text, uuid, uuid, text, integer)
-RETURNS TABLE(reserved boolean, dispatch_generation integer, reservation_token uuid, job_status text, dispatch_state text, task_name text, attempt_count integer, request_status text)
-LANGUAGE sql AS $$ SELECT FALSE, 0, NULL::uuid, NULL::text, NULL::text, NULL::text, 0, NULL::text $$;
 `;
 
-async function createDb(): Promise<PGlite> {
+async function installHistoricalSchedulerFunctions(db: PGlite): Promise<void> {
+    // PGlite cannot provision the unrelated historical scheduler dependency
+    // graph. It still installs the exact published function bodies rather
+    // than a behavioral substitute, and every runtime call below is fenced by
+    // the forward migration before that legacy body can execute.
+    await db.exec('SET check_function_bodies = off');
+    await db.exec(historicalSchedulerFunctions);
+    await db.exec('SET check_function_bodies = on');
+}
+
+async function applyDeployedRevenueHistory(db: PGlite): Promise<void> {
+    await db.exec('SET check_function_bodies = off');
+    await db.exec(pgliteHistoricalDependencyBootstrap);
+    await db.exec(appliedHistoricalRevenueFreshLayer);
+    await db.exec(costOperationMigration);
+    await installHistoricalSchedulerFunctions(db);
+}
+
+async function createDbFromLegacyParentCompatibilityShape(): Promise<PGlite> {
     const db = await PGlite.create({ extensions: { pgcrypto } });
     databases.push(db);
-    await db.exec(predecessorSchema);
+    await applyDeployedRevenueHistory(db);
+    // This is the smallest deliberate legacy variation: its parent still has
+    // the former request FK and JSONB scratch column. The ledger itself and
+    // fresh evidence table remain the deployed 20260810090000 definitions.
+    await db.exec(`
+        ALTER TABLE public.analysis_revenue_run_ledgers
+            ADD COLUMN fresh_provenance jsonb NOT NULL DEFAULT '{}'::jsonb;
+        ALTER TABLE public.analysis_revenue_run_ledgers
+            ADD CONSTRAINT analysis_revenue_run_ledgers_request_id_fkey
+            FOREIGN KEY (request_id) REFERENCES public.analysis_requests(id) ON DELETE CASCADE;
+    `);
     await db.exec(forwardMigration);
     return db;
+}
+
+async function createDbFromAppliedHistoricalChain(): Promise<PGlite> {
+    const db = await PGlite.create({ extensions: { pgcrypto } });
+    databases.push(db);
+    await applyDeployedRevenueHistory(db);
+    await db.exec(forwardMigration);
+    return db;
+}
+
+async function createDb(): Promise<PGlite> {
+    return createDbFromAppliedHistoricalChain();
 }
 
 async function query<T>(db: PGlite, sql: string, params: unknown[] = []): Promise<Results<T>> {
@@ -313,13 +392,22 @@ function rpcClient(db: PGlite): FreshProvenanceRpcClient {
     };
 }
 
-async function seed(db: PGlite): Promise<void> {
+async function seed(
+    db: PGlite,
+    { requestPreflightId = preflightId }: { requestPreflightId?: string } = {},
+): Promise<void> {
+    const hostilePreflight = requestPreflightId === preflightId ? '' : `
+        INSERT INTO public.analysis_preflights(
+            id,consumed_request_id,status,access_mode,target_input_hash,admission_refreshed_at
+        ) VALUES (
+            '${requestPreflightId}',NULL,'ready','test_entitlement','${hash('d')}','2026-08-10T00:00:00Z'
+        );`;
     await db.exec(`
         INSERT INTO public.analysis_requests(
             id,preflight_id,user_id,pipeline_version,plan_access_mode_snapshot,
             selected_plan_id_snapshot,status,background_processing,progress_step,current_step,created_at
         ) VALUES (
-            '${requestId}','${preflightId}','${userId}','v2','test_entitlement',
+            '${requestId}','${requestPreflightId}','${userId}','v2','test_entitlement',
             'basic','processing',TRUE,'running','running','2026-08-10T00:01:00Z'
         );
         INSERT INTO public.analysis_preflights(
@@ -329,10 +417,10 @@ async function seed(db: PGlite): Promise<void> {
         );
         INSERT INTO public.analysis_revenue_run_ledgers(
             request_id,preflight_id,user_id,plan_id,access_mode,target_username_hmac,
-            preflight_refreshed_at,request_started_at,cost_cap_krw
+            preflight_refreshed_at,request_started_at,cost_cap_krw,margin_target_krw
         ) VALUES (
-            '${requestId}','${preflightId}','${userId}','basic','test_entitlement','${hash('d')}',
-            '2026-08-10T00:00:00Z','2026-08-10T00:01:00Z',1808
+            '${requestId}','${requestPreflightId}','${userId}','basic','test_entitlement','${hash('d')}',
+            '2026-08-10T00:00:00Z','2026-08-10T00:01:00Z',1808,904
         );
         INSERT INTO public.analysis_pipeline_jobs(
             request_id,job_key,input_hash,status,dispatch_state,lease_token,lease_expires_at
@@ -351,6 +439,7 @@ async function seed(db: PGlite): Promise<void> {
             '${requestId}','${jobKey}','${operationKey}','${providerInputHash}','${claimToken}','apify','running',
             '${runId}','2026-08-10T00:02:00Z','2026-08-10T00:03:00Z'
         );
+        ${hostilePreflight}
     `);
 }
 
@@ -381,6 +470,51 @@ const directProfileOutcomes = [{
     captured_at: '2026-08-10T00:04:00Z',
     profile: null,
 }];
+
+function freshOperationHash(value: string): string {
+    return createHash('sha256').update(
+        `analysis-revenue-fresh-provider-operation/v1|${Buffer.byteLength(value, 'utf8')}:${value}`,
+        'utf8',
+    ).digest('hex');
+}
+
+function freshRunHash(value: string): string {
+    return createHash('sha256').update(
+        [
+            'analysis-revenue-fresh-provider-run/v1',
+            `${Buffer.byteLength(requestId, 'utf8')}:${requestId}`,
+            `${Buffer.byteLength(jobKey, 'utf8')}:${jobKey}`,
+            `${Buffer.byteLength(operationKey, 'utf8')}:${operationKey}`,
+            `${Buffer.byteLength(value, 'utf8')}:${value}`,
+        ].join('|'),
+        'utf8',
+    ).digest('hex');
+}
+
+async function seedBoundFreshEvidence(db: PGlite): Promise<void> {
+    await query(db,
+        "UPDATE public.analysis_v2_provider_runs SET status='succeeded' WHERE request_id=$1::uuid",
+        [requestId],
+    );
+    await query(db, `
+        INSERT INTO public.analysis_revenue_fresh_provider_evidence(
+            request_id,job_key,job_input_hash,operation_key_hash,provider,provider_input_hash,
+            provider_run_hash,provider_run_started_at,no_reuse,no_adoption,no_cache,
+            provider_dataset_hash,dataset_bound_at
+        ) VALUES (
+            $1::uuid,$2,$3,$4,'apify',$5,$6,'2026-08-10T00:03:00Z',TRUE,TRUE,TRUE,
+            $7,pg_catalog.clock_timestamp()
+        )
+    `, [
+        requestId,
+        jobKey,
+        jobInputHash,
+        freshOperationHash(operationKey),
+        providerInputHash,
+        freshRunHash(runId),
+        hash('f'),
+    ]);
+}
 
 async function checkpointFreshProfile(db: PGlite): Promise<unknown> {
     return asRole(db, 'service_role', async () => {
@@ -418,6 +552,29 @@ afterEach(async () => {
 });
 
 describe('fresh revenue provenance forward migration PGlite proof', () => {
+    it('loads the deployed ledger and fresh layer rather than a handwritten predecessor', () => {
+        expect(appliedHistoricalRevenueFreshLayer.startsWith('-- Revenue E2E additive ledgers.')).toBe(true);
+        expect(appliedHistoricalRevenueFreshLayer).toContain(
+            'CREATE TABLE public.analysis_revenue_run_ledgers',
+        );
+    });
+
+    it('applies the exact forward migration after the deployed historical fresh and cost migration chain', async () => {
+        const db = await createDbFromAppliedHistoricalChain();
+        const relation = await query<{ exists: boolean }>(db, `
+            SELECT pg_catalog.to_regclass('public.analysis_revenue_fresh_provider_evidence') IS NOT NULL AS exists
+        `);
+        expect(relation.rows[0]?.exists).toBe(true);
+    });
+
+    it('also applies the exact forward migration to the legacy FK/scratch compatibility shape', async () => {
+        const db = await createDbFromLegacyParentCompatibilityShape();
+        const relation = await query<{ exists: boolean }>(db, `
+            SELECT pg_catalog.to_regclass('public.analysis_revenue_fresh_provider_evidence') IS NOT NULL AS exists
+        `);
+        expect(relation.rows[0]?.exists).toBe(true);
+    });
+
     it('runs the full forward migration and uses only service_role RPCs for exact crash/resume evidence', async () => {
         const db = await createDb();
         await seed(db);
@@ -510,6 +667,66 @@ describe('fresh revenue provenance forward migration PGlite proof', () => {
         });
     });
 
+    it('rejects a hostile request/preflight lineage at fresh admission', async () => {
+        const db = await createDb();
+        await seed(db, { requestPreflightId: hostilePreflightId });
+
+        await expect(store(db).assertProviderAdmission(identity()))
+            .rejects.toThrow('FRESH_PROVENANCE_FENCE');
+    });
+
+    it('rejects a hostile request/preflight lineage before the fresh checkpoint can write outcomes', async () => {
+        const db = await createDb();
+        await seed(db, { requestPreflightId: hostilePreflightId });
+        await seedBoundFreshEvidence(db);
+
+        await expect(checkpointFreshProfile(db)).rejects.toThrow('FRESH_PROVENANCE_FENCE');
+        const outcomes = await query<{ count: number }>(db,
+            'SELECT count(*)::int AS count FROM public.analysis_v2_profile_fetch_outcomes',
+        );
+        expect(outcomes.rows[0]?.count).toBe(0);
+    });
+
+    it('rejects a hostile request/preflight lineage at the common dispatch guard', async () => {
+        const db = await createDb();
+        await seed(db, { requestPreflightId: hostilePreflightId });
+        const dispatchToken = '55555555-5555-4555-8555-555555555555';
+
+        await expect(serviceJsonRpc(
+            db,
+            'SELECT public.activate_analysis_revenue_dispatch_guard_v1($1::uuid,$2) AS result',
+            [requestId, jobKey],
+        )).resolves.toMatchObject({ disposition: 'active' });
+        await expect(serviceQuery(
+            db,
+            'SELECT * FROM public.reserve_analysis_v2_job_dispatch($1::uuid,$2,$3::uuid)',
+            [requestId, jobKey, dispatchToken],
+        )).rejects.toThrow('ANALYSIS_V2_REVENUE_DISPATCH_FENCE');
+    });
+
+    it('rejects parent request-id rewrites for a regranted service role and the table owner', async () => {
+        const db = await createDb();
+        await seed(db);
+
+        // This test-only privilege escalation isolates the trigger's protection
+        // from the production ACL/RLS denial path.
+        await db.exec(`
+            ALTER TABLE public.analysis_revenue_run_ledgers DISABLE ROW LEVEL SECURITY;
+            GRANT UPDATE (request_id) ON public.analysis_revenue_run_ledgers TO service_role;
+        `);
+        await expect(asRole(db, 'service_role', () => query(
+            db,
+            'UPDATE public.analysis_revenue_run_ledgers SET request_id=$1::uuid WHERE request_id=$2::uuid',
+            [rewrittenRequestId, requestId],
+        ))).rejects.toThrow('REVENUE_COST_LEDGER_DRIFT');
+
+        await expect(query(
+            db,
+            'UPDATE public.analysis_revenue_run_ledgers SET request_id=$1::uuid WHERE request_id=$2::uuid',
+            [rewrittenRequestId, requestId],
+        )).rejects.toThrow('REVENUE_COST_LEDGER_DRIFT');
+    });
+
     it('retains normalized evidence after request deletion and rejects a terminal/manual-review parent', async () => {
         const db = await createDb();
         await seed(db);
@@ -576,31 +793,57 @@ describe('fresh revenue provenance forward migration PGlite proof', () => {
         const db = await createDb();
         await seed(db);
         const dispatchToken = '55555555-5555-4555-8555-555555555555';
-        await expect(serviceQuery(
-            db,
-            'SELECT * FROM public.reserve_analysis_v2_job_dispatch($1::uuid,$2,$3::uuid)',
-            [requestId, jobKey, dispatchToken],
-        )).rejects.toThrow('ANALYSIS_V2_REVENUE_DISPATCH_FENCE');
+        const nextDispatchToken = '66666666-6666-4666-8666-666666666666';
+        const strictSchedulerCalls: readonly [string, readonly unknown[]][] = [
+            [
+                'SELECT * FROM public.reserve_analysis_v2_job_dispatch($1::uuid,$2,$3::uuid)',
+                [requestId, jobKey, dispatchToken],
+            ],
+            [
+                'SELECT * FROM public.mark_analysis_v2_job_dispatched($1::uuid,$2,$3,$4::uuid,$5)',
+                [requestId, jobKey, 1, dispatchToken, 'analysis-v2.relationships.collect'],
+            ],
+            [
+                'SELECT * FROM public.rearm_analysis_v2_job_dispatch($1::uuid,$2,$3,$4::uuid,$5::uuid)',
+                [requestId, jobKey, 1, dispatchToken, nextDispatchToken],
+            ],
+            [
+                'SELECT * FROM public.claim_analysis_v2_job($1::uuid,$2,$3,$4::uuid,$5::uuid,$6,$7)',
+                [requestId, jobKey, 1, dispatchToken, claimToken, 120, 7],
+            ],
+            [
+                'SELECT * FROM public.continue_analysis_v2_scheduler_job($1::uuid,$2,$3::uuid,$4::uuid,$5,$6)',
+                [requestId, jobKey, claimToken, dispatchToken, 'ANALYSIS_V2_AI_CAPACITY_PENDING', 60],
+            ],
+        ];
+        for (const [sql, params] of strictSchedulerCalls) {
+            await expect(serviceQuery(db, sql, [...params]))
+                .rejects.toThrow('ANALYSIS_V2_REVENUE_DISPATCH_FENCE');
+        }
 
         await expect(serviceJsonRpc(db,
             'SELECT public.activate_analysis_revenue_dispatch_guard_v1($1::uuid,$2) AS result',
             [requestId, jobKey],
         )).resolves.toEqual({ disposition: 'active', created: true, replayed: false });
-        await expect(serviceQuery(
-            db,
-            'SELECT * FROM public.reserve_analysis_v2_job_dispatch($1::uuid,$2,$3::uuid)',
-            [requestId, jobKey, dispatchToken],
-        )).resolves.toMatchObject({ rows: [{ reserved: false }] });
+        const unfencedFunctions = await query<{ count: number }>(db, `
+            SELECT count(*)::int AS count
+            FROM pg_catalog.pg_proc
+            WHERE proname IN (
+                'reserve_analysis_v2_job_dispatch_unfenced_20260811',
+                'mark_analysis_v2_job_dispatched_unfenced_20260811',
+                'rearm_analysis_v2_job_dispatch_unfenced_20260811',
+                'claim_analysis_v2_job_unfenced_20260811',
+                'continue_analysis_v2_scheduler_job_unfenced_20260811'
+            )
+        `);
+        expect(unfencedFunctions.rows[0]?.count).toBe(5);
 
         await expect(serviceJsonRpc(db,
             'SELECT public.quarantine_analysis_revenue_dispatch_v1($1::uuid,$2,$3) AS result',
             [requestId, jobKey, 'begin_failure'],
         )).resolves.toEqual({ disposition: 'quarantined', created: true, replayed: false });
-        await expect(serviceQuery(
-            db,
-            'SELECT * FROM public.reserve_analysis_v2_job_dispatch($1::uuid,$2,$3::uuid)',
-            [requestId, jobKey, dispatchToken],
-        )).rejects.toThrow('ANALYSIS_V2_REVENUE_DISPATCH_FENCE');
+        await expect(serviceQuery(db, strictSchedulerCalls[0]![0], [...strictSchedulerCalls[0]![1]]))
+            .rejects.toThrow('ANALYSIS_V2_REVENUE_DISPATCH_FENCE');
         await expect(store(db).assertProviderAdmission(identity())).rejects.toThrow('FRESH_PROVENANCE_FENCE');
         const quarantined = await query<{ request_status: string; parent_status: string; guard_state: string }>(db, `
             SELECT request.status AS request_status, parent.status AS parent_status, guard.state AS guard_state

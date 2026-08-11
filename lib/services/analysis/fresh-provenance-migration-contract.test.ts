@@ -23,9 +23,9 @@ describe('fresh revenue provenance migration contract', () => {
     it('keeps the published migration byte-for-byte and moves all fresh evidence forward', () => {
         expect(createHash('sha256').update(publishedMigration, 'utf8').digest('hex'))
             .toBe('449455fa1d3c59bb60522f6f379aa521e32cfb171f6dcc3c329c344807a09dda');
-        expect(hardeningMigration).toContain('DROP CONSTRAINT analysis_revenue_run_ledgers_request_id_fkey');
-        expect(hardeningMigration).toContain('DROP COLUMN fresh_provenance');
-        expect(hardeningMigration).toContain('CREATE TABLE public.analysis_revenue_fresh_provider_evidence');
+        expect(hardeningMigration).toContain('DROP CONSTRAINT IF EXISTS analysis_revenue_run_ledgers_request_id_fkey');
+        expect(hardeningMigration).toContain('DROP COLUMN IF EXISTS fresh_provenance');
+        expect(hardeningMigration).toContain('CREATE TABLE IF NOT EXISTS public.analysis_revenue_fresh_provider_evidence');
         expect(hardeningMigration).toContain('analysis_revenue_run_ledger_lineage_immutable');
     });
 
