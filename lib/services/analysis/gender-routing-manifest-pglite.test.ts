@@ -31,6 +31,40 @@ const CLAIM_TOKEN = '51b42f42-204d-4dfb-86f8-9658d21c78f1';
 const INPUT_HASH = 'a'.repeat(64);
 const CHECKPOINT_ID = 'b'.repeat(64);
 const CANONICAL_INPUT_HMAC = 'c'.repeat(64);
+const TRUSTED_REVENUE_ENV = {
+    SELFHOSTED_AUTH_ENABLED: 'false',
+    SCRAPER_FALLBACK: 'false',
+    SCRAPER_PROFILE: 'apify',
+    SCRAPER_PROFILES_BATCH: 'apify',
+    SCRAPER_FOLLOWERS: 'apify',
+    SCRAPER_FOLLOWING: 'apify',
+    SCRAPER_LIKERS: 'apify',
+    SCRAPER_COMMENTS: 'apify',
+    APIFY_PRIMARY_API_TOKEN: 'primary-test-token',
+    APIFY_SECONDARY_API_TOKEN: 'secondary-test-token',
+    APIFY_TERTIARY_API_TOKEN: 'tertiary-test-token',
+    APIFY_QUATERNARY_API_TOKEN: 'quaternary-test-token',
+    APIFY_QUINARY_API_TOKEN: 'quinary-test-token',
+} as const;
+
+function freshProviderRunStore() {
+    return {
+        bindAdapterCheckpoint: vi.fn(async (input: {
+            logicalProvider: 'apify';
+            actorId: string;
+            credentialSlot: string;
+            maxChargeUsd: number;
+        }) => ({
+            stored: null,
+            checkpoint: {
+                logicalProvider: input.logicalProvider,
+                actorId: input.actorId,
+                credentialSlot: input.credentialSlot,
+                maxChargeUsd: input.maxChargeUsd,
+            },
+        })),
+    } as never;
+}
 
 let db: PGlite | undefined;
 
@@ -676,7 +710,7 @@ describe('analysis V2 gender-routing manifest PGlite authority', () => {
         const profileResumes = new Map<string, AnalysisV2ProfileFetchResume>();
         const profileCheckpointStore = {
             load: vi.fn(async (input: { jobKey: string }) => profileResumes.get(input.jobKey) ?? null),
-            checkpointPrimary: vi.fn(async (input: {
+            checkpointFreshApify: vi.fn(async (input: {
                 requestId: string;
                 jobKey: string;
                 requestedUsernames: readonly string[];
@@ -713,7 +747,7 @@ describe('analysis V2 gender-routing manifest PGlite authority', () => {
             const results = usernames.map(username => ({
                 outcome: {
                     requestedUsername: username,
-                    source: 'selfhosted' as const,
+                    source: 'apify' as const,
                     status: 'success' as const,
                     failureCategory: null,
                     httpStatus: null,
@@ -733,8 +767,8 @@ describe('analysis V2 gender-routing manifest PGlite authority', () => {
                 },
             }));
             await options.persistAttemptOutcomes({
-                attempt: 'primary',
-                source: 'selfhosted',
+                attempt: 'fresh_apify',
+                source: 'apify',
                 requestedUsernames: usernames,
                 results,
             });
@@ -750,9 +784,10 @@ describe('analysis V2 gender-routing manifest PGlite authority', () => {
             requestContextStore: { load: async () => request },
             evidenceStore: evidenceStore as never,
             profileCheckpointStore: profileCheckpointStore as never,
+            providerRunStore: freshProviderRunStore(),
             genderRoutingManifestStore: manifestStore,
             getProfilesBatchV2: profileFetcher as never,
-            env: { ANALYSIS_V2_GENDER_ROUTING_HMAC_SECRET: hmacSecret },
+            env: { ...TRUSTED_REVENUE_ENV, ANALYSIS_V2_GENDER_ROUTING_HMAC_SECRET: hmacSecret },
         });
         const profileContext = (
             job: ReturnType<typeof buildAnalysisV2DagPlan>['jobs'][number],
@@ -780,7 +815,7 @@ describe('analysis V2 gender-routing manifest PGlite authority', () => {
                 candidate.candidateKey,
                 { femaleScore: 0.9, maleScore: 0.05, uncertaintyScore: 0.05, evidence: 'name_only' as const },
             ])),
-            env: { ANALYSIS_V2_GENDER_ROUTING_HMAC_SECRET: hmacSecret },
+            env: { ...TRUSTED_REVENUE_ENV, ANALYSIS_V2_GENDER_ROUTING_HMAC_SECRET: hmacSecret },
         });
 
         const relationship = await relationshipExecutor(relationshipContext);
@@ -1039,7 +1074,7 @@ describe('analysis V2 gender-routing manifest PGlite authority', () => {
         let profileResume: AnalysisV2ProfileFetchResume | null = null;
         const profileCheckpointStore = {
             load: vi.fn(async () => profileResume),
-            checkpointPrimary: vi.fn(async (input: {
+            checkpointFreshApify: vi.fn(async (input: {
                 requestId: string;
                 jobKey: string;
                 requestedUsernames: readonly string[];
@@ -1077,7 +1112,7 @@ describe('analysis V2 gender-routing manifest PGlite authority', () => {
             const results = usernames.map(username => ({
                 outcome: {
                     requestedUsername: username,
-                    source: 'selfhosted' as const,
+                    source: 'apify' as const,
                     status: 'success' as const,
                     failureCategory: null,
                     httpStatus: null,
@@ -1097,8 +1132,8 @@ describe('analysis V2 gender-routing manifest PGlite authority', () => {
                 },
             }));
             await options.persistAttemptOutcomes({
-                attempt: 'primary',
-                source: 'selfhosted',
+                attempt: 'fresh_apify',
+                source: 'apify',
                 requestedUsernames: usernames,
                 results,
             });
@@ -1130,9 +1165,10 @@ describe('analysis V2 gender-routing manifest PGlite authority', () => {
             requestContextStore: { load: async () => request },
             evidenceStore: evidenceStore as never,
             profileCheckpointStore: profileCheckpointStore as never,
+            providerRunStore: freshProviderRunStore(),
             genderRoutingManifestStore: manifestStore,
             getProfilesBatchV2: profileFetcher as never,
-            env: { ANALYSIS_V2_GENDER_ROUTING_HMAC_SECRET: hmacSecret },
+            env: { ...TRUSTED_REVENUE_ENV, ANALYSIS_V2_GENDER_ROUTING_HMAC_SECRET: hmacSecret },
         });
 
         await manifestStore.begin({
@@ -1166,7 +1202,7 @@ describe('analysis V2 gender-routing manifest PGlite authority', () => {
                     ? { femaleScore: 0.05, maleScore: 0.9, uncertaintyScore: 0.05, evidence: 'name_only' as const }
                     : { femaleScore: 0.9, maleScore: 0.05, uncertaintyScore: 0.05, evidence: 'name_only' as const },
             ])),
-            env: { ANALYSIS_V2_GENDER_ROUTING_HMAC_SECRET: hmacSecret },
+            env: { ...TRUSTED_REVENUE_ENV, ANALYSIS_V2_GENDER_ROUTING_HMAC_SECRET: hmacSecret },
         });
         const relationship = await relationshipExecutor(relationshipContext);
         const selected = await manifestStore.loadSelectedUsernames({
