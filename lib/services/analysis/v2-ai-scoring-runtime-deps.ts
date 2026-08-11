@@ -58,6 +58,7 @@ import {
     createAnalysisV2SelfHostedAuthWorkerIdentity,
     type AnalysisV2SelfHostedAuthRunStore,
 } from './v2-selfhosted-auth-run-store';
+import { RevenueCostOperationStore } from './revenue-cost-operation-store';
 export {
     ANALYSIS_V2_MAX_REVERSE_CANDIDATES as MAX_REVERSE_CANDIDATES,
     ANALYSIS_V2_REVERSE_LIKE_LIMIT as REVERSE_LIKE_LIMIT,
@@ -70,6 +71,7 @@ const SHA256_PATTERN = /^[0-9a-f]{64}$/;
 const PROFILE_JOB_PREFIX = 'track:profiles:batch:';
 const PROFILE_AI_JOB_PREFIX = 'track:profile-ai:batch:';
 const REVERSE_LIKE_JOB_KEY = 'track:reverse-likes:collect';
+const analysisV2RevenueCostOperationStore = new RevenueCostOperationStore(supabaseAdmin);
 
 export const ANALYSIS_V2_PROFILE_CONSUMER_DATABASE_NAMES = Object.freeze({
     loadRpc: 'load_analysis_v2_profile_fetch_for_consumer',
@@ -348,10 +350,25 @@ function providerContext(
     return { ...checkpoint, recordUsage: () => undefined };
 }
 
+function isRevenueCostLedgerRequest(input: {
+    accessMode: string;
+    planId: string;
+    providerExecutionPolicy: {
+        mode?: unknown;
+        policyVersion?: unknown;
+    } | null;
+}): boolean {
+    return input.accessMode === 'test_entitlement'
+        && (input.planId === 'basic' || input.planId === 'standard')
+        && input.providerExecutionPolicy?.mode === 'test_operation_split'
+        && input.providerExecutionPolicy.policyVersion === 'authorized-free-e2e-v1';
+}
+
 export function createAnalysisV2ReverseLikeCollector(input: {
     adapter?: ApifyInteractionAdapter;
     selfHostedAuthAdapter?: ApifyInteractionAdapter;
     providerRunStore?: AnalysisV2ProviderRunStore;
+    revenueCostOperationStore?: RevenueCostOperationStore;
     selfHostedAuthRunStore?: AnalysisV2SelfHostedAuthRunStore;
     contextStore?: AnalysisV2CollectionRequestContextStore;
     env?: Record<string, string | undefined>;
@@ -359,6 +376,8 @@ export function createAnalysisV2ReverseLikeCollector(input: {
     const adapter = input.adapter ?? apifyInteractionAdapter;
     const authenticatedAdapter = input.selfHostedAuthAdapter ?? selfHostedAuthInteractionAdapter;
     const providerRunStore = input.providerRunStore ?? analysisV2ProviderRunStore;
+    const revenueCostOperationStore = input.revenueCostOperationStore
+        ?? analysisV2RevenueCostOperationStore;
     const selfHostedAuthRunStore = input.selfHostedAuthRunStore
         ?? analysisV2SelfHostedAuthRunStore;
     const contextStore = input.contextStore ?? analysisV2CollectionRequestContextStore;
@@ -424,7 +443,7 @@ export function createAnalysisV2ReverseLikeCollector(input: {
                     maxChargeUsd,
                     env,
                 });
-                const binding = await providerRunStore.bindAdapterCheckpoint({
+                const providerRunIdentity = {
                     ...claim,
                     operationKey,
                     inputHash: createAnalysisV2ProviderInputHash(apifyCanonicalInput),
@@ -432,7 +451,12 @@ export function createAnalysisV2ReverseLikeCollector(input: {
                     actorId: APIFY_LIKERS_ACTOR_ID,
                     credentialSlot: providerBinding.credentialSlot,
                     maxChargeUsd,
-                });
+                } as const;
+                const binding = isRevenueCostLedgerRequest(requestContext)
+                    ? await providerRunStore.bindAdapterCheckpoint(providerRunIdentity, {
+                        revenueCostOperationStore,
+                    })
+                    : await providerRunStore.bindAdapterCheckpoint(providerRunIdentity);
                 const likers = await adapter.getPostLikers(
                     candidates.map(row => row.postUrl),
                     REVERSE_LIKE_LIMIT,

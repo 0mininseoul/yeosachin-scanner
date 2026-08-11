@@ -15,6 +15,7 @@ import {
     type AnalysisV2ProviderRunReservationInput,
     type AnalysisV2ProviderRunSupabaseClient,
 } from './v2-provider-run-store';
+import { RevenueCostOperationStore } from './revenue-cost-operation-store';
 
 // gitleaks:allow -- deterministic UUID fixtures
 const requestId = '11111111-1111-4111-8111-111111111111';
@@ -313,6 +314,323 @@ describe('analysis V2 provider run store', () => {
         }));
     });
 
+    it('opens, reserves, starts, and settles the revenue cost operation around one new confirmed provider run', async () => {
+        const { rpc, client } = clientWithRpc();
+        rpc.mockImplementation((name, params) => {
+            switch (name) {
+                case ANALYSIS_V2_PROVIDER_RUN_DATABASE_NAMES.loadRpc:
+                    return Promise.resolve({ data: null, error: null });
+                case ANALYSIS_V2_PROVIDER_RUN_DATABASE_NAMES.reserveRpc:
+                    return createdReservationFromParams(params);
+                case ANALYSIS_V2_PROVIDER_RUN_DATABASE_NAMES.startedRpc:
+                    return Promise.resolve({
+                        data: storedRow('running', {
+                            reservationToken: params.p_reservation_token,
+                        }),
+                        error: null,
+                    });
+                case ANALYSIS_V2_PROVIDER_RUN_DATABASE_NAMES.terminalRpc:
+                    return Promise.resolve({
+                        data: storedRow('succeeded', {
+                            reservationToken: params.p_reservation_token,
+                            actualUsageUsd: 0.401,
+                            usageReconciledAt: '2026-07-13T17:20:30.000Z',
+                        }),
+                        error: null,
+                    });
+                case 'begin_analysis_revenue_cost_ledger_v1':
+                    return Promise.resolve({
+                        data: { disposition: 'begun', created: true, replayed: false },
+                        error: null,
+                    });
+                case 'reserve_analysis_revenue_cost_operation_v2':
+                    return Promise.resolve({
+                        data: { disposition: 'accepted', created: true, replayed: false },
+                        error: null,
+                    });
+                case 'mark_analysis_revenue_cost_operation_started_v2':
+                    return Promise.resolve({
+                        data: { disposition: 'started', created: true, replayed: false },
+                        error: null,
+                    });
+                case 'settle_analysis_revenue_cost_operation_v2':
+                    return Promise.resolve({
+                        data: { disposition: 'settled', created: true, replayed: false },
+                        error: null,
+                    });
+                default:
+                    throw new Error(`unexpected RPC ${String(name)}`);
+            }
+        });
+        const revenueCostOperationStore = new RevenueCostOperationStore({ rpc });
+        const store = createAnalysisV2ProviderRunStore(client);
+        const binding = await store.bindAdapterCheckpoint(identity, {
+            revenueCostOperationStore,
+        });
+
+        await binding.checkpoint.onBeforeRunStart?.({
+            logicalProvider: 'apify',
+            actorId: identity.actorId,
+            credentialSlot: 'primary',
+            maxChargeUsd: 0.40205,
+        });
+        expect(rpc.mock.calls.map(([name]) => name)).toEqual([
+            ANALYSIS_V2_PROVIDER_RUN_DATABASE_NAMES.loadRpc,
+            ANALYSIS_V2_PROVIDER_RUN_DATABASE_NAMES.reserveRpc,
+            'begin_analysis_revenue_cost_ledger_v1',
+            'reserve_analysis_revenue_cost_operation_v2',
+            'mark_analysis_revenue_cost_operation_started_v2',
+        ]);
+        await binding.checkpoint.onRunStarted?.(runId);
+        await binding.checkpoint.onCostRunFinished?.({
+            logicalProvider: 'apify',
+            actorId: identity.actorId,
+            credentialSlot: 'primary',
+            maxChargeUsd: 0.40205,
+            runId,
+            status: 'succeeded',
+            usageTotalUsd: 0.401,
+        });
+
+        expect(rpc.mock.calls.map(([name]) => name)).toEqual([
+            ANALYSIS_V2_PROVIDER_RUN_DATABASE_NAMES.loadRpc,
+            ANALYSIS_V2_PROVIDER_RUN_DATABASE_NAMES.reserveRpc,
+            'begin_analysis_revenue_cost_ledger_v1',
+            'reserve_analysis_revenue_cost_operation_v2',
+            'mark_analysis_revenue_cost_operation_started_v2',
+            ANALYSIS_V2_PROVIDER_RUN_DATABASE_NAMES.startedRpc,
+            ANALYSIS_V2_PROVIDER_RUN_DATABASE_NAMES.terminalRpc,
+            'settle_analysis_revenue_cost_operation_v2',
+        ]);
+        expect(rpc.mock.calls[3]?.[1]).toEqual({
+            p_request_id: requestId,
+            p_job_key: jobKey,
+            p_job_claim_token: claimToken,
+            p_job_input_hash: inputHash,
+            p_source_kind: 'provider_run',
+            p_source_operation_key: operationKey,
+            p_source_attempt: 0,
+        });
+        expect(rpc.mock.calls[7]?.[1]).toEqual({
+            p_request_id: requestId,
+            p_job_key: jobKey,
+            p_source_kind: 'provider_run',
+            p_source_operation_key: operationKey,
+            p_source_attempt: 0,
+        });
+    });
+
+    it('releases the already-marked revenue operation only after a definite provider start rejection', async () => {
+        const { rpc, client } = clientWithRpc();
+        rpc.mockImplementation((name, params) => {
+            switch (name) {
+                case ANALYSIS_V2_PROVIDER_RUN_DATABASE_NAMES.loadRpc:
+                    return Promise.resolve({ data: null, error: null });
+                case ANALYSIS_V2_PROVIDER_RUN_DATABASE_NAMES.reserveRpc:
+                    return createdReservationFromParams(params);
+                case ANALYSIS_V2_PROVIDER_RUN_DATABASE_NAMES.rejectedRpc:
+                    return Promise.resolve({
+                        data: storedRow('rejected', {
+                            reservationToken: params.p_reservation_token,
+                        }),
+                        error: null,
+                    });
+                case 'begin_analysis_revenue_cost_ledger_v1':
+                    return Promise.resolve({
+                        data: { disposition: 'begun', created: true, replayed: false },
+                        error: null,
+                    });
+                case 'reserve_analysis_revenue_cost_operation_v2':
+                    return Promise.resolve({
+                        data: { disposition: 'accepted', created: true, replayed: false },
+                        error: null,
+                    });
+                case 'mark_analysis_revenue_cost_operation_started_v2':
+                    return Promise.resolve({
+                        data: { disposition: 'started', created: true, replayed: false },
+                        error: null,
+                    });
+                case 'release_analysis_revenue_cost_operation_v2':
+                    return Promise.resolve({
+                        data: { disposition: 'released', created: true, replayed: false },
+                        error: null,
+                    });
+                default:
+                    throw new Error(`unexpected RPC ${String(name)}`);
+            }
+        });
+        const revenueCostOperationStore = new RevenueCostOperationStore({ rpc });
+        const store = createAnalysisV2ProviderRunStore(client);
+        const binding = await store.bindAdapterCheckpoint(identity, {
+            revenueCostOperationStore,
+        });
+
+        await binding.checkpoint.onBeforeRunStart?.({
+            logicalProvider: 'apify',
+            actorId: identity.actorId,
+            credentialSlot: 'primary',
+            maxChargeUsd: 0.40205,
+        });
+        await binding.checkpoint.onRunStartRejected?.({
+            logicalProvider: 'apify',
+            actorId: identity.actorId,
+            credentialSlot: 'primary',
+            maxChargeUsd: 0.40205,
+            statusCode: 402,
+            errorType: 'usage-limit-exceeded',
+        });
+
+        expect(rpc.mock.calls.map(([name]) => name)).toEqual([
+            ANALYSIS_V2_PROVIDER_RUN_DATABASE_NAMES.loadRpc,
+            ANALYSIS_V2_PROVIDER_RUN_DATABASE_NAMES.reserveRpc,
+            'begin_analysis_revenue_cost_ledger_v1',
+            'reserve_analysis_revenue_cost_operation_v2',
+            'mark_analysis_revenue_cost_operation_started_v2',
+            ANALYSIS_V2_PROVIDER_RUN_DATABASE_NAMES.rejectedRpc,
+            'release_analysis_revenue_cost_operation_v2',
+        ]);
+        expect(rpc.mock.calls[6]?.[1]).toEqual({
+            p_request_id: requestId,
+            p_job_key: jobKey,
+            p_job_claim_token: claimToken,
+            p_job_input_hash: inputHash,
+            p_source_kind: 'provider_run',
+            p_source_operation_key: operationKey,
+            p_source_attempt: 0,
+        });
+    });
+
+    it('marks an opted-in child ambiguous rather than releasing it after an unconfirmed provider start', async () => {
+        const { rpc, client } = clientWithRpc();
+        rpc.mockImplementation((name, params) => {
+            switch (name) {
+                case ANALYSIS_V2_PROVIDER_RUN_DATABASE_NAMES.loadRpc:
+                    return Promise.resolve({ data: null, error: null });
+                case ANALYSIS_V2_PROVIDER_RUN_DATABASE_NAMES.reserveRpc:
+                    return createdReservationFromParams(params);
+                case 'begin_analysis_revenue_cost_ledger_v1':
+                    return Promise.resolve({
+                        data: { disposition: 'begun', created: true, replayed: false },
+                        error: null,
+                    });
+                case 'reserve_analysis_revenue_cost_operation_v2':
+                    return Promise.resolve({
+                        data: { disposition: 'accepted', created: true, replayed: false },
+                        error: null,
+                    });
+                case 'mark_analysis_revenue_cost_operation_started_v2':
+                    return Promise.resolve({
+                        data: { disposition: 'started', created: true, replayed: false },
+                        error: null,
+                    });
+                case 'release_analysis_revenue_cost_operation_v2':
+                    return Promise.resolve({
+                        data: {
+                            disposition: 'ambiguous',
+                            created: true,
+                            replayed: false,
+                            reason: 'ambiguous_external_call',
+                        },
+                        error: null,
+                    });
+                default:
+                    throw new Error(`unexpected RPC ${String(name)}`);
+            }
+        });
+        const store = createAnalysisV2ProviderRunStore(client);
+        const binding = await store.bindAdapterCheckpoint(identity, {
+            revenueCostOperationStore: new RevenueCostOperationStore({ rpc }),
+        });
+
+        await binding.checkpoint.onBeforeRunStart?.({
+            logicalProvider: 'apify',
+            actorId: identity.actorId,
+            credentialSlot: 'primary',
+            maxChargeUsd: 0.40205,
+        });
+        await binding.checkpoint.onRunStartAmbiguous?.({
+            logicalProvider: 'apify',
+            actorId: identity.actorId,
+            credentialSlot: 'primary',
+            maxChargeUsd: 0.40205,
+        });
+
+        expect(rpc.mock.calls.map(([name]) => name)).toEqual([
+            ANALYSIS_V2_PROVIDER_RUN_DATABASE_NAMES.loadRpc,
+            ANALYSIS_V2_PROVIDER_RUN_DATABASE_NAMES.reserveRpc,
+            'begin_analysis_revenue_cost_ledger_v1',
+            'reserve_analysis_revenue_cost_operation_v2',
+            'mark_analysis_revenue_cost_operation_started_v2',
+            'release_analysis_revenue_cost_operation_v2',
+        ]);
+        expect(rpc).not.toHaveBeenCalledWith(
+            ANALYSIS_V2_PROVIDER_RUN_DATABASE_NAMES.rejectedRpc,
+            expect.anything()
+        );
+    });
+
+    it('persists a definite no-call rejection and releases a reserved child when cost start fails before Apify', async () => {
+        const { rpc, client } = clientWithRpc();
+        rpc.mockImplementation((name, params) => {
+            switch (name) {
+                case ANALYSIS_V2_PROVIDER_RUN_DATABASE_NAMES.loadRpc:
+                    return Promise.resolve({ data: null, error: null });
+                case ANALYSIS_V2_PROVIDER_RUN_DATABASE_NAMES.reserveRpc:
+                    return createdReservationFromParams(params);
+                case ANALYSIS_V2_PROVIDER_RUN_DATABASE_NAMES.rejectedRpc:
+                    return Promise.resolve({
+                        data: storedRow('rejected', {
+                            reservationToken: params.p_reservation_token,
+                        }),
+                        error: null,
+                    });
+                case 'begin_analysis_revenue_cost_ledger_v1':
+                    return Promise.resolve({
+                        data: { disposition: 'begun', created: true, replayed: false },
+                        error: null,
+                    });
+                case 'reserve_analysis_revenue_cost_operation_v2':
+                    return Promise.resolve({
+                        data: { disposition: 'accepted', created: true, replayed: false },
+                        error: null,
+                    });
+                case 'mark_analysis_revenue_cost_operation_started_v2':
+                    return Promise.resolve({
+                        data: null,
+                        error: { code: 'PGRST000', message: 'network unavailable' },
+                    });
+                case 'release_analysis_revenue_cost_operation_v2':
+                    return Promise.resolve({
+                        data: { disposition: 'released', created: true, replayed: false },
+                        error: null,
+                    });
+                default:
+                    throw new Error(`unexpected RPC ${String(name)}`);
+            }
+        });
+        const store = createAnalysisV2ProviderRunStore(client);
+        const binding = await store.bindAdapterCheckpoint(identity, {
+            revenueCostOperationStore: new RevenueCostOperationStore({ rpc }),
+        });
+
+        await expect(binding.checkpoint.onBeforeRunStart?.({
+            logicalProvider: 'apify',
+            actorId: identity.actorId,
+            credentialSlot: 'primary',
+            maxChargeUsd: 0.40205,
+        })).rejects.toThrow('REVENUE_COST_OPERATION_RPC_FAILED');
+
+        expect(rpc.mock.calls.map(([name]) => name)).toEqual([
+            ANALYSIS_V2_PROVIDER_RUN_DATABASE_NAMES.loadRpc,
+            ANALYSIS_V2_PROVIDER_RUN_DATABASE_NAMES.reserveRpc,
+            'begin_analysis_revenue_cost_ledger_v1',
+            'reserve_analysis_revenue_cost_operation_v2',
+            'mark_analysis_revenue_cost_operation_started_v2',
+            ANALYSIS_V2_PROVIDER_RUN_DATABASE_NAMES.rejectedRpc,
+            'release_analysis_revenue_cost_operation_v2',
+        ]);
+    });
+
     it('persists a definite start rejection against the exact reservation fence', async () => {
         const { rpc, client } = clientWithRpc();
         rpc
@@ -388,6 +706,43 @@ describe('analysis V2 provider run store', () => {
         expect(rpc.mock.calls.map(([name]) => name)).toEqual([
             ANALYSIS_V2_PROVIDER_RUN_DATABASE_NAMES.loadRpc,
             ANALYSIS_V2_PROVIDER_RUN_DATABASE_NAMES.reserveRpc,
+        ]);
+    });
+
+    it('does not open another revenue cost operation when a stored provider run is resumed', async () => {
+        const { rpc, client } = clientWithRpc();
+        rpc
+            .mockResolvedValueOnce({ data: storedRow('running'), error: null })
+            .mockResolvedValueOnce({
+                data: reservationResponse(false, storedRow('running')),
+                error: null,
+            })
+            .mockResolvedValueOnce({
+                data: storedRow('failed'),
+                error: null,
+            });
+        const revenueCostOperationStore = new RevenueCostOperationStore({ rpc });
+        const store = createAnalysisV2ProviderRunStore(client);
+
+        const binding = await store.bindAdapterCheckpoint(identity, {
+            revenueCostOperationStore,
+        });
+
+        expect(binding.checkpoint.resumeRunId).toBe(runId);
+        expect(binding.checkpoint.onBeforeRunStart).toBeUndefined();
+        await binding.checkpoint.onCostRunFinished?.({
+            logicalProvider: 'apify',
+            actorId: identity.actorId,
+            credentialSlot: 'primary',
+            maxChargeUsd: 0.40205,
+            runId,
+            status: 'failed',
+            usageTotalUsd: null,
+        });
+        expect(rpc.mock.calls.map(([name]) => name)).toEqual([
+            ANALYSIS_V2_PROVIDER_RUN_DATABASE_NAMES.loadRpc,
+            ANALYSIS_V2_PROVIDER_RUN_DATABASE_NAMES.reserveRpc,
+            ANALYSIS_V2_PROVIDER_RUN_DATABASE_NAMES.terminalRpc,
         ]);
     });
 

@@ -1,5 +1,6 @@
 import { createHash } from 'node:crypto';
 import { getAnalysisPlan } from '@/lib/domain/analysis/plan-catalog';
+import { supabaseAdmin } from '@/lib/supabase/admin';
 import type {
     ProfileAttemptResult,
     ProviderCallContext,
@@ -129,8 +130,10 @@ import {
     type RevenueGenderRoutingInputPreparer,
     type RevenueGenderRoutingModelCandidate,
 } from './revenue-routing-runtime';
+import { RevenueCostOperationStore } from './revenue-cost-operation-store';
 
 const PROFILE_ACTOR_ID = 'apify/instagram-profile-scraper';
+const analysisV2RevenueCostOperationStore = new RevenueCostOperationStore(supabaseAdmin);
 
 type RelationshipGetter = typeof getFollowers;
 type ProfileBatchFetcher = typeof getProfilesBatchV2;
@@ -145,6 +148,7 @@ export interface AnalysisV2CollectionExecutorDependencies {
     evidenceStore?: AnalysisV2EvidenceStore;
     profileCheckpointStore?: AnalysisV2ProfileFetchCheckpointStore;
     providerRunStore?: AnalysisV2ProviderRunStore;
+    revenueCostOperationStore?: RevenueCostOperationStore;
     providerRunAdoptionStore?: AnalysisV2ProviderRunAdoptionStore;
     selfHostedAuthRunStore?: AnalysisV2SelfHostedAuthRunStore;
     targetProfileReuseStore?: AnalysisV2TargetProfileReuseStore;
@@ -165,6 +169,7 @@ interface ResolvedDependencies {
     evidenceStore: AnalysisV2EvidenceStore;
     profileCheckpointStore: AnalysisV2ProfileFetchCheckpointStore;
     providerRunStore: AnalysisV2ProviderRunStore;
+    revenueCostOperationStore: RevenueCostOperationStore;
     providerRunAdoptionStore: AnalysisV2ProviderRunAdoptionStore | null;
     selfHostedAuthRunStore: AnalysisV2SelfHostedAuthRunStore;
     targetProfileReuseStore: AnalysisV2TargetProfileReuseStore;
@@ -187,6 +192,8 @@ function deps(input: AnalysisV2CollectionExecutorDependencies): ResolvedDependen
         profileCheckpointStore:
             input.profileCheckpointStore ?? analysisV2ProfileFetchCheckpointStore,
         providerRunStore: input.providerRunStore ?? analysisV2ProviderRunStore,
+        revenueCostOperationStore:
+            input.revenueCostOperationStore ?? analysisV2RevenueCostOperationStore,
         providerRunAdoptionStore: input.providerRunAdoptionStore
             ?? (input.providerRunStore ? null : analysisV2ProviderRunAdoptionStore),
         selfHostedAuthRunStore:
@@ -250,6 +257,19 @@ function isBetaFreePoolRequest(request: AnalysisV2CollectionRequestContext): boo
     return request.providerExecutionPolicy?.mode === 'betatest_free_pool';
 }
 
+function isRevenueCostLedgerRequest(
+    request: AnalysisV2CollectionRequestContext,
+): request is AnalysisV2CollectionRequestContext & {
+    accessMode: 'test_entitlement';
+    planId: 'basic' | 'standard';
+    providerExecutionPolicy: NonNullable<AnalysisV2CollectionRequestContext['providerExecutionPolicy']>;
+} {
+    return request.accessMode === 'test_entitlement'
+        && (request.planId === 'basic' || request.planId === 'standard')
+        && request.providerExecutionPolicy?.mode === 'test_operation_split'
+        && request.providerExecutionPolicy.policyVersion === 'authorized-free-e2e-v1';
+}
+
 function isRevenueGenderRoutingRequest(
     request: AnalysisV2CollectionRequestContext,
 ): request is AnalysisV2CollectionRequestContext & {
@@ -257,9 +277,8 @@ function isRevenueGenderRoutingRequest(
     planId: 'basic' | 'standard';
     providerExecutionPolicy: NonNullable<AnalysisV2CollectionRequestContext['providerExecutionPolicy']>;
 } {
-    return usesRevenueGenderRouting({ accessMode: request.accessMode, planId: request.planId })
-        && request.providerExecutionPolicy?.mode === 'test_operation_split'
-        && request.providerExecutionPolicy.policyVersion === 'authorized-free-e2e-v1';
+    return isRevenueCostLedgerRequest(request)
+        && usesRevenueGenderRouting({ accessMode: request.accessMode, planId: request.planId });
 }
 
 function revenueGenderRoutingSecret(dependencies: ResolvedDependencies): string {
@@ -358,7 +377,11 @@ async function bindApifyRun(input: {
     const binding = await bindAdoptedProviderRunOrFallback({
         adoptionStore: input.dependencies.providerRunAdoptionStore,
         identity,
-        fallback: () => input.dependencies.providerRunStore.bindAdapterCheckpoint(identity),
+        fallback: () => isRevenueCostLedgerRequest(input.request)
+            ? input.dependencies.providerRunStore.bindAdapterCheckpoint(identity, {
+                revenueCostOperationStore: input.dependencies.revenueCostOperationStore,
+            })
+            : input.dependencies.providerRunStore.bindAdapterCheckpoint(identity),
     });
     if (binding.adopted) {
         return {

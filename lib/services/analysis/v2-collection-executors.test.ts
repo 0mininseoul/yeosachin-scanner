@@ -28,6 +28,7 @@ import type {
 import type { AnalysisV2ProviderRunAdoptionStore } from './v2-provider-run-adoption-store';
 import type { AnalysisV2TargetProfileReuseStore } from './v2-target-profile-reuse';
 import type { AnalysisV2SelfHostedAuthRunReceipt } from './v2-selfhosted-auth-run-store';
+import { RevenueCostOperationStore } from './revenue-cost-operation-store';
 import type {
     AnalysisV2GenderRoutingManifestPublishInput,
     AnalysisV2GenderRoutingManifestStore,
@@ -1974,10 +1975,12 @@ describe('analysis V2 concrete collection executors', () => {
         });
     });
 
-    it('replays an attested fresh-admission profile after the target primary 429 without binding a V2 run', async () => {
+    it('replays an attested fresh-admission profile without binding or opening a new revenue cost operation', async () => {
         const profileStore = inMemoryProfileStore(null);
         const providers = providerStore();
         const reusable = reusableTargetProfileRunStore();
+        const revenueRpc = vi.fn();
+        const revenueCostOperationStore = new RevenueCostOperationStore({ rpc: revenueRpc });
         const fallbackProfile = profile('target', []);
         const primary = [{
             outcome: {
@@ -2025,10 +2028,16 @@ describe('analysis V2 concrete collection executors', () => {
         });
 
         await createAnalysisV2TargetEvidenceExecutor({
-            requestContextStore: contextStore(requestContext()),
+            requestContextStore: contextStore(requestContext({
+                accessMode: 'test_entitlement',
+                planId: 'basic',
+                providerExecutionPolicy: authorizedProviderPolicy,
+            })),
             profileCheckpointStore: profileStore.store,
             providerRunStore: providers.value,
             targetProfileReuseStore: reusable.value,
+            revenueCostOperationStore,
+            env: authorizedProviderEnv,
             getProfilesBatchV2: fetcher as unknown as typeof import('@/lib/services/instagram/scraper').getProfilesBatchV2,
             interactionAdapter: { getPostLikers: vi.fn(), getPostComments: vi.fn() },
             evidenceStore: {
@@ -2052,12 +2061,15 @@ describe('analysis V2 concrete collection executors', () => {
         });
         expect(providers.bindAdapterCheckpoint).not.toHaveBeenCalled();
         expect(providers.load).not.toHaveBeenCalled();
+        expect(revenueRpc).not.toHaveBeenCalled();
     });
 
-    it('preserves the bound target fallback when no attested reusable run exists', async () => {
+    it('opts the authorized test cohort into the revenue cost binding', async () => {
         const profileStore = inMemoryProfileStore(null);
         const providers = providerStore();
         const reusable = reusableTargetProfileRunStore(null);
+        const revenueRpc = vi.fn();
+        const revenueCostOperationStore = new RevenueCostOperationStore({ rpc: revenueRpc });
         const primary = [failure('target')] as ProfileAttemptResult[];
         const fallbackProfile = profile('target', []);
         const fallback = [{
@@ -2091,10 +2103,16 @@ describe('analysis V2 concrete collection executors', () => {
         });
 
         await createAnalysisV2TargetEvidenceExecutor({
-            requestContextStore: contextStore(requestContext()),
+            requestContextStore: contextStore(requestContext({
+                accessMode: 'test_entitlement',
+                planId: 'basic',
+                providerExecutionPolicy: authorizedProviderPolicy,
+            })),
             profileCheckpointStore: profileStore.store,
             providerRunStore: providers.value,
             targetProfileReuseStore: reusable.value,
+            revenueCostOperationStore,
+            env: authorizedProviderEnv,
             getProfilesBatchV2: fetcher as unknown as typeof import('@/lib/services/instagram/scraper').getProfilesBatchV2,
             interactionAdapter: { getPostLikers: vi.fn(), getPostComments: vi.fn() },
             evidenceStore: {
@@ -2114,7 +2132,70 @@ describe('analysis V2 concrete collection executors', () => {
         expect(providers.bindAdapterCheckpoint).toHaveBeenCalledWith(expect.objectContaining({
             jobKey: 'track:target-evidence:collect',
             operationKey: expect.stringMatching(/^profile-fallback:/),
-        }));
+        }), { revenueCostOperationStore });
+        expect(revenueRpc).not.toHaveBeenCalled();
+    });
+
+    it('keeps ordinary production fallback calls free of revenue-cost RPCs and binding state', async () => {
+        const profileStore = inMemoryProfileStore(null);
+        const providers = providerStore();
+        const reusable = reusableTargetProfileRunStore(null);
+        const revenueRpc = vi.fn();
+        const revenueCostOperationStore = new RevenueCostOperationStore({ rpc: revenueRpc });
+        const primary = [failure('target')] as ProfileAttemptResult[];
+        const fallbackProfile = profile('target', []);
+        const fallback = [{
+            outcome: success('target', 'apify').outcome,
+            profile: fallbackProfile,
+        }] as ProfileAttemptResult[];
+        const fetcher = vi.fn(async (
+            requested: readonly string[],
+            options: Parameters<typeof import('@/lib/services/instagram/scraper').getProfilesBatchV2>[1]
+        ) => {
+            await options.persistAttemptOutcomes({
+                attempt: 'primary',
+                source: 'selfhosted',
+                requestedUsernames: requested,
+                results: primary,
+            });
+            await options.persistAttemptOutcomes({
+                attempt: 'fallback',
+                source: 'apify',
+                requestedUsernames: ['target'],
+                results: fallback,
+            });
+            return {
+                results: fallback,
+                profiles: [fallbackProfile],
+                primaryResults: primary,
+                fallbackResults: fallback,
+                frozenUnresolvedUsernames: ['target'],
+            };
+        });
+
+        await createAnalysisV2TargetEvidenceExecutor({
+            requestContextStore: contextStore(requestContext()),
+            profileCheckpointStore: profileStore.store,
+            providerRunStore: providers.value,
+            targetProfileReuseStore: reusable.value,
+            revenueCostOperationStore,
+            getProfilesBatchV2: fetcher as unknown as typeof import('@/lib/services/instagram/scraper').getProfilesBatchV2,
+            interactionAdapter: { getPostLikers: vi.fn(), getPostComments: vi.fn() },
+            evidenceStore: {
+                checkpointTargetEvidence: vi.fn(async () => ({
+                    revision: 1,
+                    resultHash,
+                    inputHash,
+                    interactorCount: 0,
+                    likerCount: 0,
+                    commentCount: 0,
+                })),
+            } as unknown as AnalysisV2EvidenceStore,
+        })(stageContext('target_evidence', state()));
+
+        expect(providers.bindAdapterCheckpoint).toHaveBeenCalledOnce();
+        expect(providers.bindAdapterCheckpoint.mock.calls[0]).toHaveLength(1);
+        expect(revenueRpc).not.toHaveBeenCalled();
     });
 
     it('reuses the same fresh run when a target job retries after its primary checkpoint', async () => {

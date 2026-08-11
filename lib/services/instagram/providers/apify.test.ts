@@ -242,6 +242,10 @@ describe('apifyProvider', () => {
         });
         expect(onCostRunStarted.mock.invocationCallOrder[0])
             .toBeLessThan(waitForFinish.mock.invocationCallOrder[0]);
+        expect(onBeforeRunStart.mock.invocationCallOrder[0])
+            .toBeLessThan(call.mock.invocationCallOrder[0]);
+        expect(call.mock.invocationCallOrder[0])
+            .toBeLessThan(onRunStarted.mock.invocationCallOrder[0]);
         expect(waitForFinish.mock.invocationCallOrder[0])
             .toBeLessThan(onCostRunFinished.mock.invocationCallOrder[0]);
         expect(client.run).toHaveBeenCalledWith('RunAbcd1234567890');
@@ -255,6 +259,7 @@ describe('apifyProvider', () => {
             call.mockImplementation(() => new Promise(() => undefined));
             const onBeforeRunStart = vi.fn().mockResolvedValue(undefined);
             const onRunStarted = vi.fn();
+            const onRunStartRejected = vi.fn();
 
             const pending = startOrResumeApifyActor(
                 client,
@@ -271,6 +276,7 @@ describe('apifyProvider', () => {
                     invocationDeadlineAtMs: Date.now() + 1_000,
                     onBeforeRunStart,
                     onRunStarted,
+                    onRunStartRejected,
                     recordUsage: vi.fn(),
                 }
             );
@@ -283,6 +289,7 @@ describe('apifyProvider', () => {
             expect(onBeforeRunStart).toHaveBeenCalledOnce();
             expect(call).toHaveBeenCalledOnce();
             expect(onRunStarted).not.toHaveBeenCalled();
+            expect(onRunStartRejected).not.toHaveBeenCalled();
             expect(waitForFinish).not.toHaveBeenCalled();
         } finally {
             vi.useRealTimers();
@@ -1776,13 +1783,31 @@ describe('apifyProvider', () => {
 
     it('fails closed on an ambiguous Actor start without exposing the response', async () => {
         const { client, call } = mockClient([relationshipItem('alice')]);
-        call.mockRejectedValueOnce(Object.assign(new Error('secret response'), {
-            statusCode: 429,
-            response: { headers: { authorization: 'Bearer secret' } },
-        }));
+        const ordering: string[] = [];
+        const onBeforeRunStart = vi.fn(async () => {
+            ordering.push('before');
+        });
+        const onRunStartAmbiguous = vi.fn(async () => {
+            ordering.push('ambiguous');
+        });
+        const onRunStartRejected = vi.fn();
+        call.mockImplementationOnce(async () => {
+            ordering.push('actor');
+            throw Object.assign(new Error('secret response'), {
+                statusCode: 429,
+                response: { headers: { authorization: 'Bearer secret' } },
+            });
+        });
 
-        await expect(makeApifyProvider({ client, env: {} }).getFollowers!('target', 1))
+        await expect(makeApifyProvider({ client, env: {} }).getFollowers!('target', 1, {
+            onBeforeRunStart,
+            onRunStartAmbiguous,
+            onRunStartRejected,
+            recordUsage: vi.fn(),
+        }))
             .rejects.toThrow('SCRAPING_AMBIGUOUS_START_ERROR');
+        expect(ordering).toEqual(['before', 'actor', 'ambiguous']);
+        expect(onRunStartRejected).not.toHaveBeenCalled();
     });
 
     it('serializes actor runs when shared concurrency is explicitly one', async () => {

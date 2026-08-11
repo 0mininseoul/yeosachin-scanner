@@ -1,0 +1,103 @@
+import { describe, expect, it, vi } from 'vitest';
+import type { StoredAnalysisV2ProviderRun } from './v2-provider-run-store';
+import {
+    createRevenueCostProviderRunSettlement,
+    type RevenueCostProviderRunSettlementClient,
+} from './revenue-cost-provider-run-reconciliation';
+
+const requestId = '11111111-1111-4111-8111-111111111111';
+const operationKey = `relationship-followers:${'a'.repeat(64)}`;
+
+function reconciledRun(): StoredAnalysisV2ProviderRun {
+    return {
+        requestId,
+        jobKey: 'track:relationships:collect',
+        operationKey,
+        inputHash: 'b'.repeat(64),
+        reservationToken: '22222222-2222-4222-8222-222222222222',
+        logicalProvider: 'apify',
+        actorId: 'apify/instagram-profile-scraper',
+        credentialSlot: 'primary',
+        maxChargeUsd: 0.02,
+        status: 'succeeded',
+        runId: 'RunAbcd1234567890',
+        actualUsageUsd: 0.01,
+        reservedAt: '2026-08-11T00:00:00.000Z',
+        runStartedAt: '2026-08-11T00:00:01.000Z',
+        terminalizedAt: '2026-08-11T00:00:02.000Z',
+        usageReconciledAt: '2026-08-11T00:00:03.000Z',
+    };
+}
+
+function clientWithChild(status: string | null) {
+    const rpc = vi.fn();
+    const maybeSingle = vi.fn(async () => ({
+        data: status === null ? null : { status },
+        error: null,
+    }));
+    const eq = vi.fn(() => ({ eq, maybeSingle }));
+    const select = vi.fn(() => ({ eq, maybeSingle }));
+    const from = vi.fn(() => ({ select }));
+    return {
+        rpc,
+        from,
+        client: { rpc, from } as unknown as RevenueCostProviderRunSettlementClient,
+    };
+}
+
+describe('revenue cost provider-run reconciliation settlement', () => {
+    it('settles only an exact opted-in provider child after authoritative usage, without a caller dollar amount', async () => {
+        const fixture = clientWithChild('started');
+        fixture.rpc.mockResolvedValue({
+            data: { disposition: 'settled', created: true, replayed: false },
+            error: null,
+        });
+        const settlement = createRevenueCostProviderRunSettlement(fixture.client);
+
+        await expect(settlement.settleAfterUsageReconciliation(reconciledRun()))
+            .resolves.toBeUndefined();
+
+        expect(fixture.rpc).toHaveBeenCalledWith(
+            'settle_analysis_revenue_cost_operation_v2',
+            {
+                p_request_id: requestId,
+                p_job_key: 'track:relationships:collect',
+                p_source_kind: 'provider_run',
+                p_source_operation_key: operationKey,
+                p_source_attempt: 0,
+            }
+        );
+    });
+
+    it('leaves an ordinary production provider run unchanged when no opted-in child exists', async () => {
+        const fixture = clientWithChild(null);
+        const settlement = createRevenueCostProviderRunSettlement(fixture.client);
+
+        await expect(settlement.settleAfterUsageReconciliation(reconciledRun()))
+            .resolves.toBeUndefined();
+
+        expect(fixture.rpc).not.toHaveBeenCalled();
+    });
+
+    it('fails closed to manual review if an opted-in child cannot settle after reconciliation', async () => {
+        const fixture = clientWithChild('started');
+        fixture.rpc
+            .mockResolvedValueOnce({
+                data: null,
+                error: { code: 'P0001', message: 'REVENUE_COST_OPERATION_FENCE' },
+            })
+            .mockResolvedValueOnce({
+                data: { disposition: 'manual_review', created: false, replayed: false },
+                error: null,
+            });
+        const settlement = createRevenueCostProviderRunSettlement(fixture.client);
+
+        await expect(settlement.settleAfterUsageReconciliation(reconciledRun()))
+            .rejects.toThrow('ANALYSIS_V2_REVENUE_COST_SETTLEMENT_MANUAL_REVIEW');
+
+        expect(fixture.rpc.mock.calls.map(([name]) => name)).toEqual([
+            'settle_analysis_revenue_cost_operation_v2',
+            'mark_analysis_revenue_manual_review_v1',
+        ]);
+    });
+});

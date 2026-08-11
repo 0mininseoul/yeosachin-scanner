@@ -58,8 +58,21 @@ export interface ProviderRunStartRejected {
     errorType: string | null;
 }
 
+export interface ProviderRunStartAmbiguous {
+    logicalProvider: Extract<ProviderName, 'apify' | 'coderx'>;
+    actorId: string;
+    credentialSlot: ApifyCredentialSlot;
+    maxChargeUsd: number;
+}
+
 interface ProviderRunStartCallbacks {
     onRunStartRejected?(input: ProviderRunStartRejected): void | Promise<void>;
+    /**
+     * The external start crossed the paid boundary but did not return a
+     * trustworthy run ID.  Callers must preserve that ambiguity rather than
+     * treating it as a no-call release.
+     */
+    onRunStartAmbiguous?(input: ProviderRunStartAmbiguous): void | Promise<void>;
 }
 
 export type ScraperTelemetryStatus = 'success' | 'error';

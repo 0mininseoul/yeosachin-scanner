@@ -6,6 +6,7 @@ import {
 import type { AnalysisV2ProviderRunStore } from './v2-provider-run-store';
 import type { ProviderExecutionPolicy } from './authorized-test-provider-policy';
 import type { AnalysisV2SelfHostedAuthRunReceipt } from './v2-selfhosted-auth-run-store';
+import { RevenueCostOperationStore } from './revenue-cost-operation-store';
 import { AnalysisImagePreparationError } from '@/lib/services/ai/image-preprocessing';
 import { SelfHostedAuthWorkerError } from '@/lib/services/instagram/providers/selfhosted-auth/client';
 import {
@@ -458,8 +459,11 @@ describe('analysis V2 reverse-like production collector', () => {
             isVerified: false,
             totalLikes: 1,
         }]);
+        const revenueRpc = vi.fn();
+        const revenueCostOperationStore = new RevenueCostOperationStore({ rpc: revenueRpc });
         const collector = createAnalysisV2ReverseLikeCollector({
             providerRunStore,
+            revenueCostOperationStore,
             contextStore: reverseLikeContext(authorizedProviderPolicy),
             adapter: { getPostLikers, getPostComments: vi.fn() },
             env: {
@@ -504,6 +508,10 @@ describe('analysis V2 reverse-like production collector', () => {
             actorId: 'datadoping/instagram-likes-scraper',
             credentialSlot: 'quinary',
         });
+        expect((bindAdapterCheckpoint.mock.calls[0] as unknown as unknown[])[1]).toEqual({
+            revenueCostOperationStore,
+        });
+        expect(revenueRpc).not.toHaveBeenCalled();
         expect(result.operationKey).toMatch(/^candidate-likers:[a-f0-9]{64}$/);
         expect(result.results).toEqual([
             {
@@ -726,6 +734,8 @@ describe('analysis V2 reverse-like production collector', () => {
 
     it('confirms absence only when the complete liker population is within the sample cap', async () => {
         const bindAdapterCheckpoint = vi.fn(async () => ({ stored: null, checkpoint: {} }));
+        const revenueRpc = vi.fn();
+        const revenueCostOperationStore = new RevenueCostOperationStore({ rpc: revenueRpc });
         const providerRunStore = {
             bindAdapterCheckpoint,
             load: vi.fn(async () => ({ status: 'succeeded', runId: 'RUN123456' })),
@@ -744,6 +754,7 @@ describe('analysis V2 reverse-like production collector', () => {
         ]);
         const collector = createAnalysisV2ReverseLikeCollector({
             providerRunStore,
+            revenueCostOperationStore,
             contextStore: reverseLikeContext(),
             adapter: { getPostLikers, getPostComments: vi.fn() },
             env: {},
@@ -779,6 +790,9 @@ describe('analysis V2 reverse-like production collector', () => {
         expect(sampled.results[0]?.status).toBe('not_collected');
         expect(sampled.operationKey).not.toBe(firstOperationKey);
         expect(bindAdapterCheckpoint).toHaveBeenCalledTimes(2);
+        expect((bindAdapterCheckpoint.mock.calls as unknown as unknown[][])
+            .every(call => call.length === 1)).toBe(true);
+        expect(revenueRpc).not.toHaveBeenCalled();
     });
 
     it('never confirms absence when the provider hid the declared liker count', async () => {

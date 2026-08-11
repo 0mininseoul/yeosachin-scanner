@@ -45,10 +45,15 @@ export interface AnalysisV2ProviderReconciliationSummary {
     hasMore: boolean;
 }
 
-interface ProviderLifecycleDependencies {
+export interface AnalysisV2ProviderUsageRevenueCostSettlement {
+    settleAfterUsageReconciliation(run: StoredAnalysisV2ProviderRun): Promise<void>;
+}
+
+export interface ProviderLifecycleDependencies {
     store?: AnalysisV2ProviderRunStore;
     env?: Record<string, string | undefined>;
     clientForSlot?: (slot: ApifyCredentialSlot) => LifecycleApifyClient;
+    revenueCostSettlement?: AnalysisV2ProviderUsageRevenueCostSettlement;
     concurrency?: number;
     maxBatches?: number;
 }
@@ -233,7 +238,7 @@ export async function reconcileAnalysisV2ProviderUsage(
                 ? terminalUsageTotalUsd(snapshot, run.maxChargeUsd)
                 : null;
             if (status !== run.status || usageTotalUsd === null) return false;
-            await store.reconcileUsage({
+            const reconciled = await store.reconcileUsage({
                 reservationToken: run.reservationToken,
                 runId: run.runId,
                 logicalProvider: run.logicalProvider,
@@ -243,6 +248,9 @@ export async function reconcileAnalysisV2ProviderUsage(
                 status,
                 actualUsageUsd: usageTotalUsd,
             });
+            await dependencies.revenueCostSettlement?.settleAfterUsageReconciliation(
+                reconciled
+            );
             return true;
         } catch {
             return false;

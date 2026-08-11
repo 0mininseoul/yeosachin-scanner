@@ -8,6 +8,10 @@ import type {
     ProviderRunCheckpoint,
 } from '@/lib/services/instagram/providers/types';
 import { isApifyCredentialSlot } from '@/lib/services/instagram/providers/types';
+import {
+    RevenueCostOperationStore,
+    type RevenueCostLiveSource,
+} from './revenue-cost-operation-store';
 
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const JOB_KEY_PATTERN = /^[a-z0-9][a-z0-9:._-]{0,159}$/;
@@ -162,7 +166,10 @@ export interface AnalysisV2ProviderRunStore {
     }): Promise<AnalysisV2ActiveProviderRunBatch>;
     settleForCleanup(input: AnalysisV2ProviderRunCleanupTerminalInput):
         Promise<StoredAnalysisV2ProviderRun>;
-    bindAdapterCheckpoint(input: AnalysisV2ProviderRunReservationInput):
+    bindAdapterCheckpoint(
+        input: AnalysisV2ProviderRunReservationInput,
+        dependencies?: AnalysisV2ProviderRunBindingDependencies
+    ):
         Promise<AnalysisV2ProviderRunAdapterBinding>;
 }
 
@@ -178,6 +185,10 @@ interface RpcResult {
 
 export interface AnalysisV2ProviderRunSupabaseClient {
     rpc(name: string, params: Record<string, unknown>): PromiseLike<RpcResult>;
+}
+
+export interface AnalysisV2ProviderRunBindingDependencies {
+    revenueCostOperationStore?: RevenueCostOperationStore;
 }
 
 export const ANALYSIS_V2_PROVIDER_RUN_DATABASE_NAMES = Object.freeze({
@@ -671,6 +682,102 @@ function throwRpcError(error: RpcError, operation: string): never {
 export function createAnalysisV2ProviderRunStore(
     client: AnalysisV2ProviderRunSupabaseClient = supabaseAdmin
 ): AnalysisV2ProviderRunStore {
+    const revenueLiveSource = (
+        input: AnalysisV2ProviderRunIdentity
+    ): RevenueCostLiveSource => ({
+        requestId: input.requestId,
+        jobKey: input.jobKey,
+        jobClaimToken: input.claimToken,
+        jobInputHash: input.inputHash,
+        sourceKind: 'provider_run',
+        sourceOperationKey: input.operationKey,
+        sourceAttempt: 0,
+    });
+
+    const reserveRevenueCost = async (
+        revenueCostOperationStore: RevenueCostOperationStore | undefined,
+        input: AnalysisV2ProviderRunIdentity
+    ): Promise<void> => {
+        if (!revenueCostOperationStore) return;
+        const source = revenueLiveSource(input);
+        const begun = await revenueCostOperationStore.begin({
+            requestId: input.requestId,
+        });
+        if (begun.disposition !== 'begun') {
+            throw new Error('ANALYSIS_V2_PROVIDER_RUN_REVENUE_COST_BEGIN_CONFLICT');
+        }
+        const reserved = await revenueCostOperationStore.reserveV2(source);
+        if (reserved.disposition !== 'accepted') {
+            throw new Error('ANALYSIS_V2_PROVIDER_RUN_REVENUE_COST_RESERVATION_DENIED');
+        }
+    };
+
+    const markRevenueCostStarted = async (
+        revenueCostOperationStore: RevenueCostOperationStore | undefined,
+        input: AnalysisV2ProviderRunIdentity
+    ): Promise<void> => {
+        if (!revenueCostOperationStore) return;
+        const started = await revenueCostOperationStore.markStartedV2(
+            revenueLiveSource(input)
+        );
+        if (started.disposition !== 'started') {
+            throw new Error('ANALYSIS_V2_PROVIDER_RUN_REVENUE_COST_START_CONFLICT');
+        }
+    };
+
+    const settleRevenueCost = async (
+        revenueCostOperationStore: RevenueCostOperationStore | undefined,
+        input: AnalysisV2ProviderRunIdentity,
+        run: StoredAnalysisV2ProviderRun
+    ): Promise<void> => {
+        if (
+            !revenueCostOperationStore
+            || run.actualUsageUsd === null
+            || run.usageReconciledAt === null
+        ) {
+            return;
+        }
+        const settled = await revenueCostOperationStore.settleV2({
+            requestId: input.requestId,
+            jobKey: input.jobKey,
+            sourceKind: 'provider_run',
+            sourceOperationKey: input.operationKey,
+            sourceAttempt: 0,
+        });
+        if (settled.disposition !== 'settled') {
+            throw new Error('ANALYSIS_V2_PROVIDER_RUN_REVENUE_COST_SETTLEMENT_CONFLICT');
+        }
+    };
+
+    const releaseRevenueCost = async (
+        revenueCostOperationStore: RevenueCostOperationStore | undefined,
+        input: AnalysisV2ProviderRunIdentity
+    ): Promise<void> => {
+        if (!revenueCostOperationStore) return;
+        const released = await revenueCostOperationStore.releaseV2(
+            revenueLiveSource(input)
+        );
+        if (released.disposition !== 'released') {
+            throw new Error('ANALYSIS_V2_PROVIDER_RUN_REVENUE_COST_RELEASE_CONFLICT');
+        }
+    };
+
+    const markRevenueCostAmbiguous = async (
+        revenueCostOperationStore: RevenueCostOperationStore | undefined,
+        input: AnalysisV2ProviderRunIdentity
+    ): Promise<void> => {
+        if (!revenueCostOperationStore) return;
+        // SQL uses the fenced release RPC as the only transition that can turn
+        // a just-started child plus a still-starting provider row into durable
+        // ambiguity.  The returned disposition must never be a release here.
+        const ambiguous = await revenueCostOperationStore.releaseV2(
+            revenueLiveSource(input)
+        );
+        if (ambiguous.disposition !== 'ambiguous') {
+            throw new Error('ANALYSIS_V2_PROVIDER_RUN_REVENUE_COST_AMBIGUITY_CONFLICT');
+        }
+    };
+
     const load = async (input: Pick<
         AnalysisV2ProviderRunIdentity,
         'requestId' | 'jobKey' | 'operationKey'
@@ -1015,11 +1122,17 @@ export function createAnalysisV2ProviderRunStore(
             return stored;
         },
 
-        async bindAdapterCheckpoint(input) {
+        async bindAdapterCheckpoint(input, bindingDependencies = {}) {
             validateClaimedIdentity(input);
             const expectedProvider = canonicalProviderIdentity(input);
             const expected = { ...input, ...expectedProvider };
             const loaded = await load(input);
+            // Only a fresh provider reservation can create this source child.
+            // Replays and resumes converge through authoritative reconciliation
+            // without re-opening or touching a live revenue operation.
+            const revenueCostOperationStore = loaded === null
+                ? bindingDependencies.revenueCostOperationStore
+                : undefined;
             let reserved: StoredAnalysisV2ProviderRun | null = null;
             if (loaded !== null) {
                 const replay = await store.reserve(expected);
@@ -1068,6 +1181,7 @@ export function createAnalysisV2ProviderRunStore(
                         status: event.status,
                         actualUsageUsd: event.usageTotalUsd,
                     });
+                    await settleRevenueCost(revenueCostOperationStore, input, reserved);
                 },
             };
 
@@ -1110,6 +1224,31 @@ export function createAnalysisV2ProviderRunStore(
                         if (!reservation.created) {
                             throw new AnalysisV2ProviderRunAlreadyReservedError();
                         }
+                        let revenueCostReserved = false;
+                        try {
+                            await reserveRevenueCost(revenueCostOperationStore, input);
+                            revenueCostReserved = revenueCostOperationStore !== undefined;
+                            await markRevenueCostStarted(revenueCostOperationStore, input);
+                        } catch (costError) {
+                            try {
+                                reserved = await store.rejectStart({
+                                    ...input,
+                                    ...expectedProvider,
+                                    reservationToken: reservation.run.reservationToken,
+                                });
+                                if (revenueCostReserved) {
+                                    await releaseRevenueCost(revenueCostOperationStore, input);
+                                }
+                            } catch {
+                                // No Actor call has happened, but the source/child cleanup
+                                // could not be proven. Preserve the original cost error only
+                                // when the definitive no-call cleanup was durable.
+                                throw new Error(
+                                    'ANALYSIS_V2_PROVIDER_RUN_REVENUE_COST_NO_CALL_CLEANUP_REQUIRED'
+                                );
+                            }
+                            throw costError;
+                        }
                     },
                     onRunStarted: async (runId) => {
                         const current = requireReserved();
@@ -1137,6 +1276,22 @@ export function createAnalysisV2ProviderRunStore(
                             ...expectedProvider,
                             reservationToken: current.reservationToken,
                         });
+                        await releaseRevenueCost(revenueCostOperationStore, input);
+                    },
+                    onRunStartAmbiguous: async (event) => {
+                        const current = requireReserved();
+                        const actual = canonicalProviderIdentity(event);
+                        if (
+                            current.status !== 'starting'
+                            || current.runId !== null
+                            || actual.logicalProvider !== expectedProvider.logicalProvider
+                            || actual.actorId !== expectedProvider.actorId
+                            || actual.credentialSlot !== expectedProvider.credentialSlot
+                            || actual.maxChargeUsd !== expectedProvider.maxChargeUsd
+                        ) {
+                            throw new AnalysisV2ProviderRunConflictError();
+                        }
+                        await markRevenueCostAmbiguous(revenueCostOperationStore, input);
                     },
                 },
             };
