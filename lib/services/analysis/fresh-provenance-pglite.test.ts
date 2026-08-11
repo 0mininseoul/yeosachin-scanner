@@ -1,5 +1,4 @@
 import { createHash } from 'node:crypto';
-import { execFileSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 import { PGlite, type Results } from '@electric-sql/pglite';
 import { pgcrypto } from '@electric-sql/pglite/contrib/pgcrypto';
@@ -8,6 +7,11 @@ import {
     FreshProvenanceStore,
     type FreshProvenanceRpcClient,
 } from './fresh-provenance-store';
+
+const harnessSource = readFileSync(
+    new URL('./fresh-provenance-pglite.test.ts', import.meta.url),
+    'utf8',
+);
 
 // This is intentionally the complete forward migration, not a copied SQL
 // fragment. The predecessor fixture only supplies the already-migrated schema
@@ -20,25 +24,215 @@ const costOperationMigration = readFileSync(
     new URL('../../../supabase/migrations/20260810100000_add_revenue_cost_operation_ledger.sql', import.meta.url),
     'utf8',
 );
-const schedulerMigrationSources = [
-    readFileSync(new URL('../../../supabase/migrations/20260713155145_add_analysis_v2_job_foundation.sql', import.meta.url), 'utf8'),
-    readFileSync(new URL('../../../supabase/migrations/20260713214500_fix_analysis_v2_task_name_regex.sql', import.meta.url), 'utf8'),
-    readFileSync(new URL('../../../supabase/migrations/20260714031500_harden_analysis_v2_terminal_invariants.sql', import.meta.url), 'utf8'),
-    readFileSync(new URL('../../../supabase/migrations/20260727034000_add_analysis_v2_scheduler_live_operations.sql', import.meta.url), 'utf8'),
-];
-const appliedHistoricalMigration = execFileSync(
-    'git',
-    ['show', '99789de4:supabase/migrations/20260810090000_add_revenue_e2e_observability_ledgers.sql'],
-    { encoding: 'utf8' },
+// The forward migration's immediate predecessor is a checked-in immutable
+// migration. Loading that file directly keeps this proof valid in a depth-one
+// CI checkout, where historical Git objects need not be reachable.
+const checkedInRevenuePredecessor = readFileSync(
+    new URL('../../../supabase/migrations/20260810090000_add_revenue_e2e_observability_ledgers.sql', import.meta.url),
+    'utf8',
 );
+const schedulerFoundationMigration = readFileSync(
+    new URL('../../../supabase/migrations/20260713155145_add_analysis_v2_job_foundation.sql', import.meta.url),
+    'utf8',
+);
+const schedulerTaskNameMigration = readFileSync(
+    new URL('../../../supabase/migrations/20260713214500_fix_analysis_v2_task_name_regex.sql', import.meta.url),
+    'utf8',
+);
+const schedulerRecoveryMigration = readFileSync(
+    new URL('../../../supabase/migrations/20260714045814_add_analysis_v2_recovery_rotation.sql', import.meta.url),
+    'utf8',
+);
+const schedulerClaimMigration = readFileSync(
+    new URL('../../../supabase/migrations/20260714031500_harden_analysis_v2_terminal_invariants.sql', import.meta.url),
+    'utf8',
+);
+const schedulerCapacityMigration = readFileSync(
+    new URL('../../../supabase/migrations/20260724123200_add_analysis_v2_gemini_leases.sql', import.meta.url),
+    'utf8',
+);
+const schedulerLiveMigration = readFileSync(
+    new URL('../../../supabase/migrations/20260727034000_add_analysis_v2_scheduler_live_operations.sql', import.meta.url),
+    'utf8',
+);
+const providerRunFoundationMigration = readFileSync(
+    new URL('../../../supabase/migrations/20260713171647_add_analysis_v2_provider_run_ledger.sql', import.meta.url),
+    'utf8',
+);
+const providerRunRepairOperationMigration = readFileSync(
+    new URL('../../../supabase/migrations/20260721000000_allow_analysis_v2_profile_repair_operation_key.sql', import.meta.url),
+    'utf8',
+);
+const providerRunCredentialSlotMigration = readFileSync(
+    new URL('../../../supabase/migrations/20260713204500_expand_analysis_v2_apify_credential_slots.sql', import.meta.url),
+    'utf8',
+);
+const providerRunRejectedMigration = readFileSync(
+    new URL('../../../supabase/migrations/20260722110000_record_definite_apify_start_rejections.sql', import.meta.url),
+    'utf8',
+);
+const providerRunAdoptionMigration = readFileSync(
+    new URL('../../../supabase/migrations/20260731090000_adopt_capacity_safe_relationship_provider_runs.sql', import.meta.url),
+    'utf8',
+);
+const providerRunLatestCredentialMigration = readFileSync(
+    new URL('../../../supabase/migrations/20260802010000_add_betatest_apify_credit_pool.sql', import.meta.url),
+    'utf8',
+);
+const providerPolicyMigration = readFileSync(
+    new URL('../../../supabase/migrations/20260715103605_expose_v2_access_mode_to_collection_context.sql', import.meta.url),
+    'utf8',
+);
+const profileCheckpointFoundationMigration = readFileSync(
+    new URL('../../../supabase/migrations/20260713164030_add_analysis_v2_profile_fetch_checkpoints.sql', import.meta.url),
+    'utf8',
+);
+const profileSnapshotCaptionMigration = readFileSync(
+    new URL('../../../supabase/migrations/20260716130000_allow_carousel_child_captions.sql', import.meta.url),
+    'utf8',
+);
+const profileRepairAttemptMigration = readFileSync(
+    new URL('../../../supabase/migrations/20260720130000_add_analysis_v2_profile_repair_attempt.sql', import.meta.url),
+    'utf8',
+);
+const profileHiddenCountsMigration = readFileSync(
+    new URL('../../../supabase/migrations/20260721164500_preserve_hidden_engagement_sentinels.sql', import.meta.url),
+    'utf8',
+);
+const profileSnapshotValidatorRevokeMigration = readFileSync(
+    new URL('../../../supabase/migrations/20260721170500_revoke_hidden_snapshot_validator.sql', import.meta.url),
+    'utf8',
+);
+const exactPredecessorSourceHashes: readonly [string, string, string][] = [
+    ['revenue ledger', checkedInRevenuePredecessor, '449455fa1d3c59bb60522f6f379aa521e32cfb171f6dcc3c329c344807a09dda'],
+    ['revenue cost', costOperationMigration, 'd730b9127b890ea9475e81f4eaefcd6fcf30fceb27efcc6b7b13f510390f4254'],
+    ['scheduler foundation', schedulerFoundationMigration, '77601b35d99131e690b4e6503bb2006807f1483d883d48d39c90b26b74e775b4'],
+    ['scheduler task-name correction', schedulerTaskNameMigration, 'adc90b1205f388c8ee7338ad75ce9cba011dbf490638ec848600c55d2f6624f2'],
+    ['scheduler recovery', schedulerRecoveryMigration, '080a19405177aed74985ad5a54f4a72e801512c6912f72025ac5fd2c2ff34f2c'],
+    ['scheduler claim', schedulerClaimMigration, 'a6dc4b0dec163ba184af5acda875c2a65830f5c0f83904a50fb828392688c2c6'],
+    ['scheduler capacity', schedulerCapacityMigration, 'c34451eea121a1eb7a6ed515519789374aa73e1319e71e08e0e100ab2e99de25'],
+    ['scheduler live operations', schedulerLiveMigration, '887e5ac342a88ae182333db996862a8e193d5085c3b175d18ec54c9d26c9b7c4'],
+    ['provider-run foundation', providerRunFoundationMigration, '35065db52a2987007a1db0a6655cedb7680e69e257a97b01a043aa9f4d66d714'],
+    ['provider-run repair operation', providerRunRepairOperationMigration, '415b5aad264d7c3c577b7fc9c2ab6edf908dd9effdcb8807d30fe7b7a56be23d'],
+    ['provider-run credential slots', providerRunCredentialSlotMigration, '197898acdc1cd5323fa61bade157c0db5aaf6076bab81e019d331a1756efdd0b'],
+    ['provider-run rejection state', providerRunRejectedMigration, '67d9e346080a45a060a812eba96fc6b10a66e92e50eb0acd3eb9bbd73968e7e3'],
+    ['provider-run adoption key', providerRunAdoptionMigration, 'd97d0443fea9f3ae1d40f0603c1aca72d82191860c4475b0a6bd1cb6184c9866'],
+    ['provider-run current slots', providerRunLatestCredentialMigration, '3ea84bc83462de553366e6af04ce3432a938c8485cb930720e8f96165e4cdff2'],
+    ['provider policy', providerPolicyMigration, '2634c90909a9ad1b3601ee539292d395c11b1d99d40d53c360c8bbf0ac9fff24'],
+    ['profile checkpoint foundation', profileCheckpointFoundationMigration, '3918a48fab30b5fc0d0d35bd4432bd709c5c559f720e3b72cd2a20906f605580'],
+    ['profile snapshot caption validator', profileSnapshotCaptionMigration, 'e68cfc9c07ff7d10bdfc9de13b723b896a58dfee990ae28cb36b7f7c019cccc6'],
+    ['profile repair attempt', profileRepairAttemptMigration, '67630086ff6edd1a4e9aeec6764e857e90828ebc71a4211157906a93874dc3bf'],
+    ['profile hidden-count validator', profileHiddenCountsMigration, '0e2e8cb99353d3f66a6fe489f5f2ca1ac893c7d67d7f3ab384587a34590125d6'],
+    ['profile validator permissions', profileSnapshotValidatorRevokeMigration, 'ce7b581166d8f6c56e58d2e94f9dd13f2bcc9fbb8fa6cebd5dd8fb833b5dfea0'],
+];
 
-function historicalRevenueFreshLayer(source: string): string {
+function sourceSection(source: string, startMarker: string, endMarker: string): string {
+    const start = source.indexOf(startMarker);
+    const end = source.indexOf(endMarker, start);
+    if (start < 0 || end < 0 || end <= start) {
+        throw new Error(`PGLITE_PREDECESSOR_SOURCE_SECTION_MISSING:${startMarker}`);
+    }
+    return source.slice(start, end);
+}
+
+function predecessorRevenueLedger(source: string): string {
     const end = source.indexOf('CREATE TABLE public.analysis_result_share_observations');
-    if (end <= 0) throw new Error('missing applied revenue/fresh migration layer');
+    if (end <= 0) throw new Error('PGLITE_PREDECESSOR_LEDGER_MISSING');
     return source.slice(0, end);
 }
 
-const appliedHistoricalRevenueFreshLayer = historicalRevenueFreshLayer(appliedHistoricalMigration);
+const checkedInRevenueLedgerPredecessor = predecessorRevenueLedger(checkedInRevenuePredecessor);
+
+// The exact source slices create the pre-forward scheduler table and its
+// accumulated constraints. This avoids a weak compatibility table whose
+// columns or fences drift from the scheduler functions the migration wraps.
+const exactSchedulerPredecessorSchema = [
+    sourceSection(
+        schedulerFoundationMigration,
+        'CREATE OR REPLACE FUNCTION public.analysis_v2_valid_job_keys',
+        '-- Keep the mature entitlement validation in a private helper',
+    ),
+    sourceSection(
+        schedulerTaskNameMigration,
+        'ALTER TABLE public.analysis_pipeline_jobs',
+        'CREATE OR REPLACE FUNCTION public.mark_analysis_v2_job_dispatched',
+    ),
+    sourceSection(
+        schedulerRecoveryMigration,
+        'ALTER TABLE public.analysis_pipeline_jobs',
+        'CREATE OR REPLACE FUNCTION public.defer_analysis_v2_job_recovery',
+    ),
+    sourceSection(
+        schedulerCapacityMigration,
+        'ALTER TABLE public.analysis_pipeline_jobs',
+        'CREATE FUNCTION public.defer_analysis_v2_job_for_ai_capacity',
+    ),
+    sourceSection(
+        schedulerLiveMigration,
+        'ALTER TABLE public.analysis_pipeline_jobs',
+        'CREATE TABLE public.analysis_v2_scheduler_operations',
+    ),
+].join('\n\n');
+
+const exactProviderRunPredecessorSchema = [
+    sourceSection(
+        providerRunFoundationMigration,
+        'CREATE OR REPLACE FUNCTION public.analysis_v2_valid_provider_operation_key',
+        'CREATE OR REPLACE FUNCTION public.analysis_v2_provider_run_json',
+    ),
+    providerRunRepairOperationMigration,
+    sourceSection(
+        providerRunCredentialSlotMigration,
+        'CREATE OR REPLACE FUNCTION public.analysis_v2_valid_apify_credential_slot',
+        'ALTER TABLE public.analysis_v2_relationship_sides',
+    ),
+    sourceSection(
+        schedulerClaimMigration,
+        'ALTER TABLE public.analysis_v2_provider_runs',
+        'CREATE OR REPLACE FUNCTION public.list_analysis_v2_unreconciled_provider_runs',
+    ),
+    sourceSection(
+        providerRunRejectedMigration,
+        'ALTER TABLE public.analysis_v2_provider_runs',
+        'ALTER TABLE public.analysis_preflight_provider_runs',
+    ),
+    sourceSection(
+        providerRunAdoptionMigration,
+        'ALTER TABLE public.analysis_v2_provider_runs',
+        'ALTER TABLE public.analysis_v2_recovery_provider_run_adoptions',
+    ),
+    sourceSection(
+        providerRunLatestCredentialMigration,
+        'CREATE OR REPLACE FUNCTION public.analysis_v2_valid_apify_credential_slot',
+        '-- The authorized-free-e2e-v1 policy is a historical six-slot contract',
+    ),
+].join('\n\n');
+
+const exactProviderPolicyPredecessorSchema = sourceSection(
+    providerPolicyMigration,
+    'CREATE OR REPLACE FUNCTION public.analysis_v2_valid_test_operation_slot_map',
+    'CREATE OR REPLACE FUNCTION public.bind_analysis_v2_authorized_test_provider_policy',
+);
+
+// Profile checkpoint functions and relations are also exact source slices.
+// The forward migration widens their attempt domain and invokes both
+// validators, so a handwritten approximation here could mask a real
+// predecessor incompatibility.
+const exactProfileCheckpointPredecessorSchema = [
+    sourceSection(
+        profileCheckpointFoundationMigration,
+        'CREATE OR REPLACE FUNCTION public.analysis_v2_valid_profile_username_list',
+        'CREATE OR REPLACE FUNCTION public.analysis_v2_profile_checkpoint_snapshot',
+    ),
+    profileSnapshotCaptionMigration,
+    sourceSection(
+        profileRepairAttemptMigration,
+        'ALTER TABLE public.analysis_v2_profile_fetch_outcomes',
+        '-- 4. Server-derived repair set',
+    ),
+    profileHiddenCountsMigration,
+    profileSnapshotValidatorRevokeMigration,
+].join('\n\n');
 
 function historicalFunction(source: string, name: string): string {
     const match = source.match(new RegExp(
@@ -49,11 +243,11 @@ function historicalFunction(source: string, name: string): string {
 }
 
 const historicalSchedulerFunctions = [
-    historicalFunction(schedulerMigrationSources[0]!, 'reserve_analysis_v2_job_dispatch'),
-    historicalFunction(schedulerMigrationSources[1]!, 'mark_analysis_v2_job_dispatched'),
-    historicalFunction(schedulerMigrationSources[0]!, 'rearm_analysis_v2_job_dispatch'),
-    historicalFunction(schedulerMigrationSources[2]!, 'claim_analysis_v2_job'),
-    historicalFunction(schedulerMigrationSources[3]!, 'continue_analysis_v2_scheduler_job'),
+    historicalFunction(schedulerFoundationMigration, 'reserve_analysis_v2_job_dispatch'),
+    historicalFunction(schedulerTaskNameMigration, 'mark_analysis_v2_job_dispatched'),
+    historicalFunction(schedulerFoundationMigration, 'rearm_analysis_v2_job_dispatch'),
+    historicalFunction(schedulerClaimMigration, 'claim_analysis_v2_job'),
+    historicalFunction(schedulerLiveMigration, 'continue_analysis_v2_scheduler_job'),
 ].join('\n\n');
 
 const requestId = '11111111-1111-4111-8111-111111111111';
@@ -62,6 +256,8 @@ const hostilePreflightId = '23232323-2323-4232-8232-232323232323';
 const rewrittenRequestId = '24242424-2424-4242-8242-242424242424';
 const userId = '33333333-3333-4333-8333-333333333333';
 const claimToken = '44444444-4444-4444-8444-444444444444';
+const schedulerReservationToken = '77777777-7777-4777-8777-777777777777';
+const providerReservationToken = '88888888-8888-4888-8888-888888888888';
 const jobKey = 'track:relationships:collect';
 const jobInputHash = 'a'.repeat(64);
 const providerInputHash = 'b'.repeat(64);
@@ -71,10 +267,12 @@ const datasetId = 'FreshDataset1234';
 const hash = (character: string) => character.repeat(64);
 const databases: PGlite[] = [];
 
-// PGlite-only relation signatures required to parse the actual migration
-// history. The historical SQL bodies and migration constraints themselves are
-// always loaded from their source files below.
-const pgliteHistoricalDependencyBootstrap = `
+// PGlite cannot provision every unrelated production dependency, so this
+// bridge holds only the request/preflight lineage signatures exercised by the
+// proof. Every relation the forward migration transforms or interprets (jobs,
+// profile checkpoints, provider runs, and policy) comes from exact checked-in
+// predecessor source slices above.
+const pgliteRuntimeDependencyBridge = `
 CREATE ROLE anon NOLOGIN;
 CREATE ROLE authenticated NOLOGIN;
 CREATE ROLE service_role NOLOGIN;
@@ -87,10 +285,6 @@ CREATE FUNCTION extensions.digest(text, text) RETURNS bytea
 LANGUAGE sql AS $$ SELECT public.digest($1, $2) $$;
 CREATE FUNCTION extensions.digest(bytea, text) RETURNS bytea
 LANGUAGE sql AS $$ SELECT public.digest($1, $2) $$;
-CREATE FUNCTION public.analysis_v2_valid_provider_operation_key(p_operation_key text)
-RETURNS boolean LANGUAGE sql IMMUTABLE AS $$
-    SELECT p_operation_key ~ '^(target-profile|profile-fallback|profile-repair|relationship-followers|relationship-following|target-likers|target-comments|candidate-likers):[a-f0-9]{64}$'
-$$;
 
 CREATE TABLE public.analysis_requests (
     id uuid PRIMARY KEY,
@@ -115,162 +309,10 @@ CREATE TABLE public.analysis_preflights (
     target_input_hash text NOT NULL,
     admission_refreshed_at timestamptz NOT NULL
 );
-CREATE TABLE public.analysis_pipeline_jobs (
-    request_id uuid NOT NULL REFERENCES public.analysis_requests(id) ON DELETE CASCADE,
-    job_key text NOT NULL,
-    input_hash text NOT NULL,
-    status text NOT NULL,
-    dispatch_state text,
-    lease_token uuid,
-    lease_expires_at timestamptz,
-    PRIMARY KEY (request_id, job_key)
-);
-GRANT SELECT, UPDATE ON public.analysis_pipeline_jobs TO service_role;
-CREATE TABLE public.analysis_v2_provider_runs (
-    request_id uuid NOT NULL,
-    job_key text NOT NULL,
-    operation_key text NOT NULL,
-    input_hash text NOT NULL,
-    job_claim_token uuid NOT NULL,
-    logical_provider text NOT NULL,
-    status text NOT NULL,
-    run_id text,
-    reserved_at timestamptz NOT NULL,
-    run_started_at timestamptz,
-    PRIMARY KEY (request_id, job_key, operation_key),
-    FOREIGN KEY (request_id, job_key)
-        REFERENCES public.analysis_pipeline_jobs(request_id, job_key) ON DELETE CASCADE
-);
-CREATE TABLE public.analysis_v2_provider_execution_policies (
-    request_id uuid PRIMARY KEY REFERENCES public.analysis_requests(id) ON DELETE CASCADE,
-    mode text NOT NULL,
-    policy_version text NOT NULL,
-    operation_slot_map jsonb NOT NULL DEFAULT '{}'::jsonb,
-    policy_hash text NOT NULL DEFAULT '${hash('p')}'
-);
-CREATE TABLE public.analysis_v2_test_entitlement_consumptions (
-    entitlement_jti_hash text PRIMARY KEY,
-    preflight_id uuid,
-    request_id uuid UNIQUE,
-    user_id uuid,
-    selected_plan_id text
-);
-CREATE TABLE public.analysis_preflight_provider_runs (
-    preflight_id uuid,
-    operation_key text,
-    status text,
-    actual_usage_usd numeric,
-    terminalized_at timestamptz,
-    usage_reconciled_at timestamptz,
-    PRIMARY KEY (preflight_id, operation_key)
-);
-CREATE TABLE public.account_e2e_test_runners (
-    account_id uuid PRIMARY KEY,
-    runner_plan text
-);
-CREATE FUNCTION public.load_e2e_test_runner_v1(p_account_id uuid)
-RETURNS TABLE(runner_plan text) LANGUAGE sql AS $$
-    SELECT runner_plan FROM public.account_e2e_test_runners WHERE account_id = p_account_id
-$$;
-CREATE TABLE public.analysis_v2_ai_attempts (
-    request_id uuid,
-    job_key text,
-    job_claim_token uuid,
-    operation_key text,
-    attempt smallint,
-    status text,
-    actual_usage_usd numeric,
-    terminalized_at timestamptz,
-    usage_reconciled_at timestamptz
-);
-CREATE TABLE public.analysis_v2_provider_cleanup_intents (
-    request_id uuid PRIMARY KEY,
-    failed_job_key text,
-    failed_job_input_hash text,
-    failed_claim_token uuid,
-    error_code text,
-    completed_at timestamptz
-);
-
-CREATE FUNCTION public.analysis_v2_valid_profile_username_list(
-    p_usernames text[], p_allow_empty boolean
-) RETURNS boolean
-LANGUAGE sql IMMUTABLE SET search_path = '' AS $$
-    SELECT p_usernames IS NOT NULL
-       AND (p_allow_empty OR pg_catalog.cardinality(p_usernames) > 0)
-       AND pg_catalog.cardinality(p_usernames) BETWEEN 0 AND 30
-       AND NOT EXISTS (
-           SELECT 1
-           FROM pg_catalog.unnest(p_usernames) AS username(value)
-           WHERE username.value !~ '^[a-z0-9._]{1,30}$'
-       )
-       AND pg_catalog.cardinality(p_usernames) = (
-           SELECT pg_catalog.count(DISTINCT username.value)
-           FROM pg_catalog.unnest(p_usernames) AS username(value)
-       )
-$$;
-CREATE FUNCTION public.analysis_v2_valid_profile_outcomes(
-    p_outcomes jsonb, p_expected_usernames text[], p_attempt text
-) RETURNS boolean
-LANGUAGE sql IMMUTABLE SET search_path = '' AS $$
-    SELECT p_attempt = 'fallback'
-       AND public.analysis_v2_valid_profile_username_list(p_expected_usernames, FALSE)
-       AND pg_catalog.jsonb_typeof(p_outcomes) = 'array'
-       AND pg_catalog.jsonb_array_length(p_outcomes) = pg_catalog.cardinality(p_expected_usernames)
-       AND NOT EXISTS (
-           SELECT 1
-           FROM pg_catalog.jsonb_array_elements(p_outcomes)
-               WITH ORDINALITY AS outcome(value, ordinal)
-           WHERE outcome.value->>'username' IS DISTINCT FROM p_expected_usernames[outcome.ordinal::integer]
-              OR outcome.value->>'source' IS DISTINCT FROM 'apify'
-              OR outcome.value->>'status' NOT IN ('success', 'unavailable', 'failed')
-              OR pg_catalog.jsonb_typeof(outcome.value->'request_count') IS DISTINCT FROM 'number'
-              OR pg_catalog.jsonb_typeof(outcome.value->'latency_ms') IS DISTINCT FROM 'number'
-              OR pg_catalog.jsonb_typeof(outcome.value->'captured_at') IS DISTINCT FROM 'string'
-       )
-$$;
-CREATE TABLE public.analysis_v2_profile_fetch_batches (
-    request_id uuid NOT NULL,
-    job_key text NOT NULL,
-    requested_usernames text[] NOT NULL,
-    frozen_unresolved_usernames text[] NOT NULL,
-    primary_payload_hash varchar(64) NOT NULL,
-    fallback_payload_hash varchar(64),
-    primary_completed_at timestamptz NOT NULL,
-    fallback_completed_at timestamptz,
-    repair_usernames text[],
-    repair_payload_hash varchar(64),
-    repair_completed_at timestamptz,
-    created_at timestamptz NOT NULL,
-    updated_at timestamptz NOT NULL,
-    PRIMARY KEY (request_id, job_key),
-    FOREIGN KEY (request_id, job_key)
-        REFERENCES public.analysis_pipeline_jobs(request_id, job_key) ON DELETE CASCADE
-);
-CREATE TABLE public.analysis_v2_profile_fetch_outcomes (
-    request_id uuid NOT NULL,
-    job_key text NOT NULL,
-    attempt varchar(16) NOT NULL,
-    ordinal smallint NOT NULL,
-    username varchar(30) NOT NULL,
-    source varchar(16) NOT NULL,
-    status varchar(16) NOT NULL,
-    failure_category varchar(32),
-    http_status smallint,
-    request_count smallint NOT NULL,
-    latency_ms integer NOT NULL,
-    captured_at timestamptz NOT NULL,
-    profile_snapshot jsonb,
-    created_at timestamptz NOT NULL DEFAULT pg_catalog.clock_timestamp(),
-    PRIMARY KEY (request_id, job_key, attempt, username),
-    CONSTRAINT analysis_v2_profile_outcomes_attempt_check CHECK (
-        attempt IN ('primary', 'fallback', 'repair')
-    ),
-    CONSTRAINT analysis_v2_profile_outcomes_source_check CHECK (
-        (attempt = 'primary' AND source IN ('cache', 'selfhosted'))
-        OR (attempt IN ('fallback', 'repair') AND source = 'apify')
-    )
-);
+${exactSchedulerPredecessorSchema}
+${exactProfileCheckpointPredecessorSchema}
+${exactProviderRunPredecessorSchema}
+${exactProviderPolicyPredecessorSchema}
 
 `;
 
@@ -286,31 +328,13 @@ async function installHistoricalSchedulerFunctions(db: PGlite): Promise<void> {
 
 async function applyDeployedRevenueHistory(db: PGlite): Promise<void> {
     await db.exec('SET check_function_bodies = off');
-    await db.exec(pgliteHistoricalDependencyBootstrap);
-    await db.exec(appliedHistoricalRevenueFreshLayer);
+    await db.exec(pgliteRuntimeDependencyBridge);
+    await db.exec(checkedInRevenueLedgerPredecessor);
     await db.exec(costOperationMigration);
     await installHistoricalSchedulerFunctions(db);
 }
 
-async function createDbFromLegacyParentCompatibilityShape(): Promise<PGlite> {
-    const db = await PGlite.create({ extensions: { pgcrypto } });
-    databases.push(db);
-    await applyDeployedRevenueHistory(db);
-    // This is the smallest deliberate legacy variation: its parent still has
-    // the former request FK and JSONB scratch column. The ledger itself and
-    // fresh evidence table remain the deployed 20260810090000 definitions.
-    await db.exec(`
-        ALTER TABLE public.analysis_revenue_run_ledgers
-            ADD COLUMN fresh_provenance jsonb NOT NULL DEFAULT '{}'::jsonb;
-        ALTER TABLE public.analysis_revenue_run_ledgers
-            ADD CONSTRAINT analysis_revenue_run_ledgers_request_id_fkey
-            FOREIGN KEY (request_id) REFERENCES public.analysis_requests(id) ON DELETE CASCADE;
-    `);
-    await db.exec(forwardMigration);
-    return db;
-}
-
-async function createDbFromAppliedHistoricalChain(): Promise<PGlite> {
+async function createDbFromCheckedInPredecessor(): Promise<PGlite> {
     const db = await PGlite.create({ extensions: { pgcrypto } });
     databases.push(db);
     await applyDeployedRevenueHistory(db);
@@ -319,7 +343,7 @@ async function createDbFromAppliedHistoricalChain(): Promise<PGlite> {
 }
 
 async function createDb(): Promise<PGlite> {
-    return createDbFromAppliedHistoricalChain();
+    return createDbFromCheckedInPredecessor();
 }
 
 async function query<T>(db: PGlite, sql: string, params: unknown[] = []): Promise<Results<T>> {
@@ -423,21 +447,32 @@ async function seed(
             '2026-08-10T00:00:00Z','2026-08-10T00:01:00Z',1808,904
         );
         INSERT INTO public.analysis_pipeline_jobs(
-            request_id,job_key,input_hash,status,dispatch_state,lease_token,lease_expires_at
+            request_id,job_key,track,kind,batch,input_hash,required_job_keys,
+            status,dispatch_state,dispatch_generation,dispatch_reservation_token,
+            dispatch_reserved_at,dispatched_at,dispatch_task_name,delivered_at,
+            lease_token,lease_expires_at,attempt_count,first_started_at,created_at,updated_at
         ) VALUES (
-            '${requestId}','${jobKey}','${jobInputHash}','processing',NULL,'${claimToken}','2099-01-01T00:00:00Z'
+            '${requestId}','${jobKey}','relationships','collect',NULL,'${jobInputHash}','{}'::text[],
+            'processing','delivered',1,'${schedulerReservationToken}',
+            '2026-08-10T00:01:01Z','2026-08-10T00:01:02Z','analysis-v2.relationships.collect','2026-08-10T00:01:03Z',
+            '${claimToken}','2099-01-01T00:00:00Z',1,'2026-08-10T00:01:03Z','2026-08-10T00:01:00Z','2026-08-10T00:01:04Z'
         );
         INSERT INTO public.analysis_v2_provider_execution_policies(
-            request_id,mode,policy_version
+            request_id,mode,policy_version,entitlement_jti_hash,target_instagram_id,
+            operation_slot_map,policy_hash
         ) VALUES (
-            '${requestId}','test_operation_split','authorized-free-e2e-v1'
+            '${requestId}','test_operation_split','authorized-free-e2e-v1','${hash('e')}','target.user',
+            '{"target-profile":"primary","relationship-followers":"tertiary","relationship-following":"quaternary","profile-fallback":"primary","target-likers":"senary","target-comments":"tertiary","candidate-likers":"quaternary"}'::jsonb,
+            '${hash('a')}'
         );
         INSERT INTO public.analysis_v2_provider_runs(
-            request_id,job_key,operation_key,input_hash,job_claim_token,logical_provider,status,
-            run_id,reserved_at,run_started_at
+            request_id,job_key,operation_key,input_hash,job_claim_token,reservation_token,
+            logical_provider,actor_id,credential_slot,max_charge_usd,status,
+            run_id,reserved_at,run_started_at,updated_at
         ) VALUES (
-            '${requestId}','${jobKey}','${operationKey}','${providerInputHash}','${claimToken}','apify','running',
-            '${runId}','2026-08-10T00:02:00Z','2026-08-10T00:03:00Z'
+            '${requestId}','${jobKey}','${operationKey}','${providerInputHash}','${claimToken}','${providerReservationToken}',
+            'apify','apify/actor','primary',0.01,'running',
+            '${runId}','2026-08-10T00:02:00Z','2026-08-10T00:03:00Z','2026-08-10T00:03:00Z'
         );
         ${hostilePreflight}
     `);
@@ -493,7 +528,7 @@ function freshRunHash(value: string): string {
 
 async function seedBoundFreshEvidence(db: PGlite): Promise<void> {
     await query(db,
-        "UPDATE public.analysis_v2_provider_runs SET status='succeeded' WHERE request_id=$1::uuid",
+        "UPDATE public.analysis_v2_provider_runs SET status='succeeded', terminalized_at='2026-08-10T00:04:00Z' WHERE request_id=$1::uuid",
         [requestId],
     );
     await query(db, `
@@ -552,27 +587,278 @@ afterEach(async () => {
 });
 
 describe('fresh revenue provenance forward migration PGlite proof', () => {
-    it('loads the deployed ledger and fresh layer rather than a handwritten predecessor', () => {
-        expect(appliedHistoricalRevenueFreshLayer.startsWith('-- Revenue E2E additive ledgers.')).toBe(true);
-        expect(appliedHistoricalRevenueFreshLayer).toContain(
-            'CREATE TABLE public.analysis_revenue_run_ledgers',
+    it('is independent of unreachable Git history in a depth-one checkout', () => {
+        expect(harnessSource).not.toContain(['node:', 'child_process'].join(''));
+        expect(harnessSource).not.toContain(['exec', 'FileSync('].join(''));
+        expect(harnessSource).not.toContain(['git ', 'show'].join(''));
+    });
+
+    it('keeps profile checkpoint validators out of the minimal handwritten bridge', () => {
+        const bridgeSource = sourceSection(
+            harnessSource,
+            'const pgliteRuntimeDependencyBridge = `',
+            '`;\n\nasync function installHistoricalSchedulerFunctions',
+        );
+        expect(bridgeSource).toContain('${exactProfileCheckpointPredecessorSchema}');
+        expect(bridgeSource).not.toContain(
+            'CREATE FUNCTION public.analysis_v2_valid_profile_',
+        );
+        expect(bridgeSource).not.toContain(
+            'CREATE TABLE public.analysis_v2_profile_fetch_',
         );
     });
 
-    it('applies the exact forward migration after the deployed historical fresh and cost migration chain', async () => {
-        const db = await createDbFromAppliedHistoricalChain();
+    it('loads the immutable checked-in predecessor rather than a rewritten history snapshot', () => {
+        for (const [name, source, expectedHash] of exactPredecessorSourceHashes) {
+            expect(createHash('sha256').update(source, 'utf8').digest('hex'), name)
+                .toBe(expectedHash);
+        }
+        expect(checkedInRevenueLedgerPredecessor.startsWith('-- Revenue E2E additive ledgers.')).toBe(true);
+        expect(checkedInRevenueLedgerPredecessor).toContain(
+            'CREATE TABLE public.analysis_revenue_run_ledgers',
+        );
+        expect(checkedInRevenueLedgerPredecessor).not.toContain(
+            'analysis_revenue_fresh_provider_evidence',
+        );
+    });
+
+    it('starts from the exact pre-hardening ledger and scheduler shape before the forward migration adds fresh objects', async () => {
+        const db = await PGlite.create({ extensions: { pgcrypto } });
+        databases.push(db);
+        await applyDeployedRevenueHistory(db);
+
+        const schedulerColumns = await query<{ column_name: string }>(db, `
+            SELECT column_name
+            FROM information_schema.columns
+            WHERE table_schema = 'public' AND table_name = 'analysis_pipeline_jobs'
+            ORDER BY ordinal_position
+        `);
+        expect(schedulerColumns.rows.map(row => row.column_name)).toEqual(expect.arrayContaining([
+            'track',
+            'kind',
+            'dispatch_generation',
+            'dispatch_reservation_token',
+            'dispatch_task_name',
+            'recovery_checked_at',
+            'recovery_not_before',
+            'ai_capacity_deferral_count',
+            'scheduler_not_before_at',
+        ]));
+        const schedulerConstraints = await query<{ conname: string }>(db, `
+            SELECT conname
+            FROM pg_catalog.pg_constraint
+            WHERE conrelid = 'public.analysis_pipeline_jobs'::pg_catalog.regclass
+            ORDER BY conname
+        `);
+        expect(schedulerConstraints.rows.map(row => row.conname)).toEqual(expect.arrayContaining([
+            'analysis_pipeline_jobs_dispatch_pair_check',
+            'analysis_pipeline_jobs_lease_check',
+            'analysis_pipeline_jobs_recovery_schedule_check',
+            'analysis_pipeline_jobs_ai_capacity_deferral_count_check',
+            'analysis_pipeline_jobs_task_name_check',
+        ]));
+        const providerColumns = await query<{ column_name: string }>(db, `
+            SELECT column_name
+            FROM information_schema.columns
+            WHERE table_schema = 'public' AND table_name = 'analysis_v2_provider_runs'
+            ORDER BY ordinal_position
+        `);
+        expect(providerColumns.rows.map(row => row.column_name)).toEqual(expect.arrayContaining([
+            'reservation_token',
+            'actor_id',
+            'credential_slot',
+            'max_charge_usd',
+            'terminalized_at',
+            'usage_reconciliation_attempt_count',
+            'usage_reconciliation_attempted_at',
+        ]));
+        const providerConstraints = await query<{ conname: string }>(db, `
+            SELECT conname
+            FROM pg_catalog.pg_constraint
+            WHERE conrelid = 'public.analysis_v2_provider_runs'::pg_catalog.regclass
+            ORDER BY conname
+        `);
+        expect(providerConstraints.rows.map(row => row.conname)).toEqual(expect.arrayContaining([
+            'analysis_v2_provider_run_operation_key_check',
+            'analysis_v2_provider_run_state_check',
+            'analysis_v2_provider_usage_attempt_count_check',
+            'analysis_v2_provider_usage_attempt_time_check',
+            'analysis_v2_provider_runs_adoption_source_run_unique',
+        ]));
+        const policyColumns = await query<{ column_name: string }>(db, `
+            SELECT column_name
+            FROM information_schema.columns
+            WHERE table_schema = 'public' AND table_name = 'analysis_v2_provider_execution_policies'
+            ORDER BY ordinal_position
+        `);
+        expect(policyColumns.rows.map(row => row.column_name)).toEqual(expect.arrayContaining([
+            'entitlement_jti_hash',
+            'target_instagram_id',
+            'operation_slot_map',
+            'policy_hash',
+        ]));
+
+        const predecessorObjects = await query<{
+            ledger_has_scratch: boolean;
+            ledger_has_request_fk: boolean;
+            evidence_exists: boolean;
+            evidence_trigger_count: number;
+        }>(db, `
+            SELECT
+                EXISTS (
+                    SELECT 1
+                    FROM information_schema.columns
+                    WHERE table_schema = 'public'
+                      AND table_name = 'analysis_revenue_run_ledgers'
+                      AND column_name = 'fresh_provenance'
+                ) AS ledger_has_scratch,
+                EXISTS (
+                    SELECT 1
+                    FROM pg_catalog.pg_constraint
+                    WHERE conrelid = 'public.analysis_revenue_run_ledgers'::pg_catalog.regclass
+                      AND conname = 'analysis_revenue_run_ledgers_request_id_fkey'
+                ) AS ledger_has_request_fk,
+                pg_catalog.to_regclass('public.analysis_revenue_fresh_provider_evidence') IS NOT NULL AS evidence_exists,
+                (
+                    SELECT count(*)::int
+                    FROM pg_catalog.pg_trigger
+                    WHERE tgname IN (
+                        'analysis_revenue_run_ledger_lineage_immutable',
+                        'analysis_revenue_fresh_provider_evidence_immutable'
+                    )
+                ) AS evidence_trigger_count
+        `);
+        expect(predecessorObjects.rows[0]).toEqual({
+            ledger_has_scratch: true,
+            ledger_has_request_fk: true,
+            evidence_exists: false,
+            evidence_trigger_count: 0,
+        });
+
+        await db.exec(forwardMigration);
+        const forwardObjects = await query<{
+            ledger_has_scratch: boolean;
+            ledger_has_request_fk: boolean;
+            evidence_exists: boolean;
+            evidence_trigger_count: number;
+        }>(db, `
+            SELECT
+                EXISTS (
+                    SELECT 1
+                    FROM information_schema.columns
+                    WHERE table_schema = 'public'
+                      AND table_name = 'analysis_revenue_run_ledgers'
+                      AND column_name = 'fresh_provenance'
+                ) AS ledger_has_scratch,
+                EXISTS (
+                    SELECT 1
+                    FROM pg_catalog.pg_constraint
+                    WHERE conrelid = 'public.analysis_revenue_run_ledgers'::pg_catalog.regclass
+                      AND conname = 'analysis_revenue_run_ledgers_request_id_fkey'
+                ) AS ledger_has_request_fk,
+                pg_catalog.to_regclass('public.analysis_revenue_fresh_provider_evidence') IS NOT NULL AS evidence_exists,
+                (
+                    SELECT count(*)::int
+                    FROM pg_catalog.pg_trigger
+                    WHERE tgname IN (
+                        'analysis_revenue_run_ledger_lineage_immutable',
+                        'analysis_revenue_fresh_provider_evidence_immutable'
+                    )
+                ) AS evidence_trigger_count
+        `);
+        expect(forwardObjects.rows[0]).toEqual({
+            ledger_has_scratch: false,
+            ledger_has_request_fk: false,
+            evidence_exists: true,
+            evidence_trigger_count: 2,
+        });
+    });
+
+    it('applies the exact forward migration after the checked-in predecessor and cost migration chain', async () => {
+        const db = await createDbFromCheckedInPredecessor();
         const relation = await query<{ exists: boolean }>(db, `
             SELECT pg_catalog.to_regclass('public.analysis_revenue_fresh_provider_evidence') IS NOT NULL AS exists
         `);
         expect(relation.rows[0]?.exists).toBe(true);
     });
 
-    it('also applies the exact forward migration to the legacy FK/scratch compatibility shape', async () => {
-        const db = await createDbFromLegacyParentCompatibilityShape();
-        const relation = await query<{ exists: boolean }>(db, `
-            SELECT pg_catalog.to_regclass('public.analysis_revenue_fresh_provider_evidence') IS NOT NULL AS exists
+    it('uses the exact profile checkpoint validators and repair constraints before fresh hardening', async () => {
+        const db = await PGlite.create({ extensions: { pgcrypto } });
+        databases.push(db);
+        await applyDeployedRevenueHistory(db);
+
+        const batchColumns = await query<{ column_name: string }>(db, `
+            SELECT column_name
+            FROM information_schema.columns
+            WHERE table_schema = 'public' AND table_name = 'analysis_v2_profile_fetch_batches'
+            ORDER BY ordinal_position
         `);
-        expect(relation.rows[0]?.exists).toBe(true);
+        expect(batchColumns.rows.map(row => row.column_name)).toEqual(expect.arrayContaining([
+            'requested_usernames',
+            'frozen_unresolved_usernames',
+            'repair_usernames',
+            'repair_payload_hash',
+            'repair_completed_at',
+        ]));
+        const profileConstraints = await query<{ conname: string }>(db, `
+            SELECT conname
+            FROM pg_catalog.pg_constraint
+            WHERE conrelid IN (
+                'public.analysis_v2_profile_fetch_batches'::pg_catalog.regclass,
+                'public.analysis_v2_profile_fetch_outcomes'::pg_catalog.regclass
+            )
+            ORDER BY conname
+        `);
+        expect(profileConstraints.rows.map(row => row.conname)).toEqual(expect.arrayContaining([
+            'analysis_v2_profile_batches_repair_pair_check',
+            'analysis_v2_profile_batches_repair_subset_check',
+            'analysis_v2_profile_outcomes_attempt_check',
+            'analysis_v2_profile_outcomes_ordinal_check',
+            'analysis_v2_profile_outcomes_result_check',
+            'analysis_v2_profile_outcomes_source_check',
+        ]));
+
+        const validators = await query<{
+            repair_outcomes_valid: boolean;
+            uppercase_username_valid: boolean;
+            hidden_count_snapshot_valid: boolean;
+        }>(db, `
+            SELECT
+                public.analysis_v2_valid_profile_outcomes(
+                    $1::jsonb, ARRAY['alice']::text[], 'repair'
+                ) AS repair_outcomes_valid,
+                public.analysis_v2_valid_profile_username_list(
+                    ARRAY['ALICE']::text[], FALSE
+                ) AS uppercase_username_valid,
+                public.analysis_v2_valid_profile_snapshot($2::jsonb)
+                    AS hidden_count_snapshot_valid
+        `, [
+            JSON.stringify(directProfileOutcomes),
+            JSON.stringify({
+                username: 'alice',
+                followersCount: 0,
+                followingCount: 0,
+                postsCount: 0,
+                isPrivate: false,
+                isVerified: false,
+                latestPosts: [{
+                    id: 'post-1',
+                    shortCode: 'post1',
+                    type: 'image',
+                    likesCount: 0,
+                    commentsCount: 0,
+                    timestamp: '2026-08-10T00:04:00Z',
+                    taggedUsers: [],
+                    mentionedUsers: [],
+                    likesCountHidden: true,
+                }],
+            }),
+        ]);
+        expect(validators.rows[0]).toEqual({
+            repair_outcomes_valid: true,
+            uppercase_username_valid: false,
+            hidden_count_snapshot_valid: true,
+        });
     });
 
     it('runs the full forward migration and uses only service_role RPCs for exact crash/resume evidence', async () => {
@@ -595,7 +881,7 @@ describe('fresh revenue provenance forward migration PGlite proof', () => {
             .rejects.toThrow('FRESH_PROVENANCE_NOT_FRESH');
 
         await query(db,
-            "UPDATE public.analysis_v2_provider_runs SET status='succeeded' WHERE request_id=$1::uuid",
+            "UPDATE public.analysis_v2_provider_runs SET status='succeeded', terminalized_at='2026-08-10T00:04:00Z' WHERE request_id=$1::uuid",
             [requestId],
         );
         await expect(store(db).bindProviderDataset({ ...identity(), datasetId })).resolves.toEqual({
@@ -766,7 +1052,7 @@ describe('fresh revenue provenance forward migration PGlite proof', () => {
         await expect(checkpointFreshProfile(db)).rejects.toThrow('FRESH_PROVENANCE_NOT_FRESH');
 
         await query(db,
-            "UPDATE public.analysis_v2_provider_runs SET status='succeeded' WHERE request_id=$1::uuid",
+            "UPDATE public.analysis_v2_provider_runs SET status='succeeded', terminalized_at='2026-08-10T00:04:00Z' WHERE request_id=$1::uuid",
             [requestId],
         );
         await fresh.bindProviderDataset({ ...identity(), datasetId });

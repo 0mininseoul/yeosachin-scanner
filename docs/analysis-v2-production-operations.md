@@ -98,6 +98,7 @@ score audit는 결과 확정 이후의 background 작업이다. final score chec
 
 ## Rollout, rollback, privacy·secret 경계
 
+- **Fresh provenance activation gate (미통과):** `fresh-provenance-pglite.test.ts`는 immutable predecessor shape, source hash, ACL, and deterministic SQL lock-order contract를 검증하지만 실제 PostgreSQL의 다중 connection row-lock 동작을 증명하지 않는다. `20260811090000_harden_fresh_provenance.sql`을 production에서 strict fresh admission cohort에 활성화하기 전에는, 격리된 disposable PostgreSQL에서 exact predecessor chain을 적용하고 two-session barrier로 fresh admission/record/bind/checkpoint 경로와 dispatch-guard/scheduler wrapper 경로를 교차 실행해야 한다. 각 교차 실행은 `lock_timeout` 안에 deadlock 없이 끝나고, `pg_stat_activity`에 잔류 lock wait가 없으며, canonical `preflight → request → job → provider/source → revenue parent → guard` 순서를 벗어나지 않는다는 것을 확인해야 한다. 이 gate는 paid provider call, production Supabase, real runner identity 없이 실행하며, pass/fail aggregate만 rollout record에 남긴다.
 - rollout은 reviewed migration history 확인 → 허용된 migration만 dry-run → DB migration/ACL 검증 → application 및 canonical worker 배포 → queue/recovery/preflight/automatic fulfillment 상태 확인 순서다. dirty/mixed worktree에서 `supabase db push --include-all`은 사용하지 않는다.
 - rollback은 Vercel admission gate와 Cloud Run worker/recovery/automatic-fulfillment gate를 각각 필요한 범위에서 끈다. 이미 durable admission 상태인 작업은 recovery로 drain하며, 결제 상태를 rollback 수단으로 바꾸지 않는다.
 - R2 capture/purge, provider reconciliation, Gemini quarantine, task delivery fence의 오류는 각각의 durable ledger를 먼저 조사한다. ambiguous provider start에 replacement run을 만들지 않는다.
