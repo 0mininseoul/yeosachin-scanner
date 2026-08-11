@@ -94,7 +94,7 @@ bridge revision이 100% serving이고 이전 revision의 요청이 모두 drain�
 
 일반 SQL migration에 UUID allowlist나 이메일 pattern을 넣지 않는다. 별도 server-only 분류 command가 다음 순서로 실행된다.
 
-1. DB 안에서 Auth 미연결, 주문·request 존재, 외부 lineage 부재, 승인된 legacy E2E marker만 존재하는 후보를 재계산한다.
+1. DB 안에서 Auth 미연결, 주문·request 존재, 그리고 주문과 accepted `payment.completed` webhook의 order/payment/product/amount가 정확히 일치하면서 주문 `payment_id`와 webhook `event_id`/`idempotency_key`/`payment_id`가 모두 bounded `^e2e-[a-z0-9][a-z0-9_-]{0,63}$` marker shape인 후보를 재계산한다. accepted non-marker·mismatch·malformed lineage가 하나라도 있으면 제외한다.
 2. 정렬된 후보 집합을 Keychain의 감사 키로 HMAC하고, 같은 방식으로 사전 승인해 Keychain에 저장한 기대 HMAC과 timing-safe 비교한다.
 3. 후보 수 17과 HMAC이 모두 맞을 때만 한 transaction에서 `e2e_test / e2e_test / retired`로 변경한다.
 4. aggregate count와 command version만 운영 로그에 남기고 식별자·HMAC·이메일은 stdout, 문서, Axiom, shell history에 남기지 않는다.

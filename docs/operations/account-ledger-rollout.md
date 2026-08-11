@@ -8,6 +8,13 @@ The default mode is a read-only audit. It recomputes the legacy E2E candidate
 set in PostgreSQL, requires the frozen count, and timing-safely compares its
 HMAC with the separately approved Keychain value.
 
+The candidate query treats the historical synthetic payment lineage as valid
+only when the order and accepted `payment.completed` webhook match exactly and
+the order `payment_id` plus webhook `event_id`, `idempotency_key`, and
+`payment_id` all match the bounded `^e2e-[a-z0-9][a-z0-9_-]{0,63}$` marker shape.
+Any accepted non-marker or mismatched lineage remains excluded; the aggregate
+count and HMAC guard are unchanged.
+
 ## Keychain inputs
 
 All values live under the `ai-baram-detector.account-ledger` Keychain service:
