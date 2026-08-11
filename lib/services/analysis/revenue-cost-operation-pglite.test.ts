@@ -678,13 +678,23 @@ describe('revenue cost operation ledger PGlite', () => {
         await seedLiveSources(db);
         await db.exec(`INSERT INTO public.analysis_v2_provider_runs(request_id,job_key,operation_key,input_hash,job_claim_token,reservation_token,logical_provider,actor_id,credential_slot,max_charge_usd,status)
             VALUES ('${requestId}','${jobKey}','${secondProviderOperationKey}','${providerInputHash}','${claimToken}','77777777-7777-4777-8777-777777777777','apify','actor-id','primary',0.2,'starting')`);
+        await db.exec(`INSERT INTO public.analysis_v2_provider_runs(request_id,job_key,operation_key,input_hash,job_claim_token,reservation_token,logical_provider,actor_id,credential_slot,max_charge_usd,status)
+            VALUES ('${requestId}','${jobKey}','${targetProfileOperationKey}','${providerInputHash}','${claimToken}','88888888-8888-4888-8888-888888888888','apify','actor-id','primary',0.2,'starting')`);
         const reserve = (key: string) => `SELECT public.reserve_analysis_revenue_cost_operation_v2('${requestId}','${jobKey}','${claimToken}','${inputHash}','provider_run','${key}',0::smallint)`;
         const start = (key: string) => `SELECT public.mark_analysis_revenue_cost_operation_started_v2('${requestId}','${jobKey}','${claimToken}','${inputHash}','provider_run','${key}',0::smallint)`;
         const release = (key: string) => `SELECT public.release_analysis_revenue_cost_operation_v2('${requestId}','${jobKey}','${claimToken}','${inputHash}','provider_run','${key}',0::smallint)`;
         const settle = (key: string) => `SELECT public.settle_analysis_revenue_cost_operation_v2('${requestId}','${jobKey}','provider_run','${key}',0::smallint)`;
         for (const key of [providerOperationKey, secondProviderOperationKey]) {
-            await query(db, reserve(key)); await query(db, start(key)); await query(db, release(key));
+            await query(db, reserve(key));
         }
+        for (const key of [providerOperationKey, secondProviderOperationKey]) {
+            await query(db, start(key));
+        }
+        await query(db, release(providerOperationKey));
+        const afterFirstAmbiguity = await replayTotals(db);
+        await expectError(query(db, reserve(targetProfileOperationKey)), 'REVENUE_COST_OPERATION_FENCE');
+        await expect(replayTotals(db)).resolves.toEqual(afterFirstAmbiguity);
+        await query(db, release(secondProviderOperationKey));
         await db.exec(`UPDATE public.analysis_v2_provider_runs SET status='failed',run_id='run12345',run_started_at=reserved_at + interval '1 second',terminalized_at=reserved_at + interval '2 seconds',actual_usage_usd=0.1,usage_reconciled_at=reserved_at + interval '3 seconds',updated_at=reserved_at + interval '4 seconds' WHERE request_id='${requestId}' AND operation_key='${providerOperationKey}'`);
         await query(db, settle(providerOperationKey));
         await expect(db.query(`SELECT status,manual_review_reason FROM public.analysis_revenue_run_ledgers WHERE request_id='${requestId}'`))
