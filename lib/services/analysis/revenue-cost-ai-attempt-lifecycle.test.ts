@@ -179,6 +179,27 @@ describe('RevenueCostAiAttemptLifecycle', () => {
         expect(operations.releaseV2).toHaveBeenCalledWith(sourceForAttempt(1));
     });
 
+    it('fails closed into manual review when post-boundary settlement is ambiguous', async () => {
+        const { callbacks, operations } = callbackHooks();
+        operations.settleV2.mockResolvedValue(outcome('ambiguous'));
+
+        await callbacks.onBeforeAttempt(startTelemetry);
+        await expect(callbacks.onAttemptTelemetry(terminalTelemetry))
+            .rejects.toThrow('ANALYSIS_V2_REVENUE_COST_SETTLEMENT_AMBIGUOUS');
+
+        expect(operations.settleV2).toHaveBeenCalledWith({
+            requestId: fence.requestId,
+            jobKey: fence.jobKey,
+            sourceKind: 'ai_attempt',
+            sourceOperationKey: fence.operationKey,
+            sourceAttempt: 1,
+        });
+        expect(operations.manualReview).toHaveBeenCalledWith({
+            requestId: fence.requestId,
+            reasonCode: 'ambiguous_external_call',
+        });
+    });
+
     it('fails closed before every revenue RPC when callback identity drifts', async () => {
         const { callbacks, operations } = callbackHooks();
 

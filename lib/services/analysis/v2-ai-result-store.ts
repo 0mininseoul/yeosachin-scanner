@@ -385,6 +385,12 @@ export interface CreateAnalysisV2AiAuditAdapterOptions<T> {
     schedulerRecoveryOnly?: boolean;
     /** A bounded scheduler recovery expired; force the stage's deterministic safe fallback. */
     schedulerTerminalUnavailable?: boolean;
+    /**
+     * Persist the immutable attempt/audit rows but never read or write a
+     * result checkpoint. Strict first-pass routing uses this because its
+     * inputs are allowed only from the fresh relationship payload.
+     */
+    disableResultCheckpoint?: boolean;
 }
 
 export class AnalysisV2AiResultConflictError extends Error {
@@ -1073,7 +1079,9 @@ export function createAnalysisV2AiAuditAdapter<T>(
         throw new Error('ANALYSIS_V2_AI_RESULT_VALIDATION_ERROR: invalid audit adapter.');
     }
     const attemptStore = options.attemptStore ?? analysisV2AiAttemptStore;
-    const resultStore = options.resultStore ?? analysisV2AiResultStore;
+    const resultStore = options.disableResultCheckpoint
+        ? null
+        : options.resultStore ?? analysisV2AiResultStore;
     const leaseStore = options.leaseStore ?? analysisV2GeminiLeaseStore;
     const aiStagePolicyVersion = options.aiStagePolicyVersion ?? AI_STAGE_POLICY_VERSION;
     const handlerDeadlineAtMs = options.handlerDeadlineAtMs
@@ -1155,7 +1163,21 @@ export function createAnalysisV2AiAuditAdapter<T>(
         async prepare() {
             if (preparation) return preparation;
             preparation = (async () => {
-                const checkpoint = await resultStore.loadRequest({
+                if (options.disableResultCheckpoint) {
+                    if (options.schedulerRecoveryOnly || options.schedulerTerminalUnavailable) {
+                        throw new AnalysisV2AiResultRecoveryPendingError();
+                    }
+                    // No request/global checkpoint lookup and no operation
+                    // pre-scan: a duplicate durable reserve fails closed
+                    // before Gemini can be dispatched.
+                    expectedAttempt = 1;
+                    return {
+                        result: null,
+                        source: null,
+                        startingAttempt: 1,
+                    };
+                }
+                const checkpoint = await resultStore!.loadRequest({
                     requestId: request.data.requestId,
                     resultIdentity,
                 }, options.resultSchema);
@@ -1224,7 +1246,7 @@ export function createAnalysisV2AiAuditAdapter<T>(
                 }
 
                 if (resultIdentity.cacheScope === 'global_ttl') {
-                    const cached = await resultStore.checkpointGlobalHit({
+                    const cached = await resultStore!.checkpointGlobalHit({
                         requestId: request.data.requestId,
                         jobKey: request.data.jobKey,
                         claimToken: request.data.claimToken,
@@ -1372,11 +1394,39 @@ export function createAnalysisV2AiAuditAdapter<T>(
                 }
                 const strictResult = validatedResult(parsedResult, options.resultSchema);
                 try {
-                    await resultStore.terminalizeSuccess<T>({
-                        ...shared,
-                        finishReason: 'STOP',
-                        result: strictResult,
-                    }, options.resultSchema);
+                    if (options.disableResultCheckpoint) {
+                        await attemptStore.terminalize({
+                            requestId: request.data.requestId,
+                            jobKey: request.data.jobKey,
+                            claimToken: request.data.claimToken,
+                            operationKey: resultIdentity.operationKey,
+                            attempt: telemetry.attempt,
+                            retryCount: telemetry.retryCount,
+                            reservationToken: reservation.reservationToken,
+                            modelName: resultIdentity.modelName,
+                            location: telemetry.location,
+                            stage: resultIdentity.stage,
+                            thinkingLevel: resultIdentity.thinkingLevel,
+                            mediaCount: telemetry.mediaCount,
+                            mediaResolution: resultIdentity.mediaResolution,
+                            promptVersion: resultIdentity.promptVersion,
+                            schemaVersion: resultIdentity.schemaVersion,
+                            maxOutputTokens: resultIdentity.maxOutputTokens,
+                            status: 'success',
+                            usageMetadataStatus: telemetry.usageMetadataStatus,
+                            usageComplete: telemetry.usageComplete,
+                            tokenUsage: telemetry.tokenUsage,
+                            latencyMs: telemetry.latencyMs,
+                            estimatedCostUsd: telemetry.estimatedCostUsd,
+                            finishReason: 'STOP',
+                        });
+                    } else {
+                        await resultStore!.terminalizeSuccess<T>({
+                            ...shared,
+                            finishReason: 'STOP',
+                            result: strictResult,
+                        }, options.resultSchema);
+                    }
                     terminal = true;
                     emitTerminalAttempt(telemetry);
                     await leaseStore.release(lease);

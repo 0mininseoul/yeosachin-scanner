@@ -1,5 +1,6 @@
 import {
     buildGenderRoutingManifest,
+    createGenderRoutingCandidateInputHmac,
     createGenderRoutingCanonicalInputHmac,
     createGenderRoutingImageContentHmac,
     GenderRoutingError,
@@ -36,6 +37,8 @@ export interface RevenueGenderRoutingModelCandidate {
     readonly fullname: string | null;
     /** Immutable transport of the exact normalized bytes bound into imageContentHmac. */
     readonly imageBase64: string | null;
+    /** Domain-separated opaque identity for audit/cost binding, never a model input. */
+    readonly inputHmac: string;
 }
 
 /** Raw inputs permitted to the stage-one preparation adapter. */
@@ -119,6 +122,7 @@ interface PreparedRevenueRoutingPopulation {
     readonly evidenceByCandidateKey: ReadonlyMap<string, Readonly<{
         fullname: string | null;
         imageBytes: Uint8Array | null;
+        imageContentHmac: string | null;
     }>>;
 }
 
@@ -173,6 +177,7 @@ async function prepareRevenueRoutingPopulation(
     const evidenceByCandidateKey = new Map<string, Readonly<{
         fullname: string | null;
         imageBytes: Uint8Array | null;
+        imageContentHmac: string | null;
     }>>();
     const normalizedImageByHmac = new Map<string, Uint8Array>();
     let aggregateNormalizedImageBytes = 0;
@@ -210,6 +215,7 @@ async function prepareRevenueRoutingPopulation(
         evidenceByCandidateKey.set(candidate.candidateKey, Object.freeze({
             fullname,
             imageBytes,
+            imageContentHmac,
         }));
     }
     return Object.freeze({ candidates: Object.freeze(candidates), evidenceByCandidateKey });
@@ -218,6 +224,7 @@ async function prepareRevenueRoutingPopulation(
 function modelCandidatesForKeys(
     candidateKeys: readonly string[],
     population: PreparedRevenueRoutingPopulation,
+    hmacSecret: string,
 ): readonly RevenueGenderRoutingModelCandidate[] {
     return Object.freeze(candidateKeys.map(candidateKey => {
         const evidence = population.evidenceByCandidateKey.get(candidateKey);
@@ -228,6 +235,14 @@ function modelCandidatesForKeys(
             imageBase64: evidence.imageBytes === null
                 ? null
                 : Buffer.from(evidence.imageBytes).toString('base64'),
+            inputHmac: createGenderRoutingCandidateInputHmac({
+                candidate: {
+                    candidateKey,
+                    fullname: evidence.fullname,
+                    imageContentHmac: evidence.imageContentHmac,
+                },
+                hmacSecret,
+            }),
         });
     }));
 }
@@ -244,6 +259,7 @@ async function assessMicrobatches(
         const batch = modelCandidatesForKeys(
             candidateKeys.slice(start, start + REVENUE_GENDER_ROUTING_ASSESSOR_MICROBATCH_SIZE),
             population,
+            input.hmacSecret,
         );
         const result = await input.assess(batch, attempt);
         for (const [candidateKey, assessment] of result) {

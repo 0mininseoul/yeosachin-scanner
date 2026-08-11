@@ -269,7 +269,9 @@ describe('revenue gender-routing runtime', () => {
         });
 
         expect(assess).toHaveBeenCalledTimes(11);
-        expect(assess.mock.calls.flatMap(([rows]) => rows)).toEqual(modelInput);
+        expect(assess.mock.calls.flatMap(([rows]) => rows)).toEqual(modelInput.map(row => (
+            expect.objectContaining({ ...row, inputHmac: expect.stringMatching(/^[a-f0-9]{64}$/) })
+        )));
         expect(assess.mock.calls.every(([rows, attempt]) => rows.length <= 10 && attempt === 1)).toBe(true);
         expect(JSON.stringify(assess.mock.calls[0]?.[0])).not.toContain('mutualOrdinal');
         expect(JSON.stringify(assess.mock.calls[0]?.[0])).not.toContain('imageContentHmac');
@@ -335,8 +337,18 @@ describe('revenue gender-routing runtime', () => {
             assess,
         });
 
-        expect(assess.mock.calls.filter(([, attempt]) => attempt === 1).flatMap(([rows]) => rows)).toEqual(modelInput);
-        expect(assess.mock.calls.filter(([, attempt]) => attempt === 2).flatMap(([rows]) => rows)).toEqual(modelInput.slice(100));
+        expect(assess.mock.calls.filter(([, attempt]) => attempt === 1).flatMap(([rows]) => rows)).toEqual(
+            modelInput.map(row => expect.objectContaining({
+                ...row,
+                inputHmac: expect.stringMatching(/^[a-f0-9]{64}$/),
+            }))
+        );
+        expect(assess.mock.calls.filter(([, attempt]) => attempt === 2).flatMap(([rows]) => rows)).toEqual(
+            modelInput.slice(100).map(row => expect.objectContaining({
+                ...row,
+                inputHmac: expect.stringMatching(/^[a-f0-9]{64}$/),
+            }))
+        );
         expect(result?.manifest.modelRetriedCount).toBe(20);
         expect(result?.manifest.modelFailedCount).toBe(0);
     });
@@ -432,6 +444,9 @@ describe('revenue gender-routing runtime', () => {
             ...candidate,
             profilePicUrl: `https://raw-url.example/${index + 1}?volatile=1`,
             fullname: index === 0 ? '  A\u030Ada\tLovelace  ' : candidate.fullname,
+            username: 'handle_should_not_reach_assessor',
+            bio: 'bio_should_not_reach_assessor',
+            cachedProfile: { should_not_reach_assessor: true },
         }));
         const image = new Uint8Array([1, 2, 3, 4]);
         const inputPreparer = vi.fn(async (sources: readonly { candidateKey: string; fullname: string | null }[]) => (
@@ -447,6 +462,10 @@ describe('revenue gender-routing runtime', () => {
                 candidateKey: 'candidate:1', fullname: 'Åda Lovelace', imageBase64: Buffer.from(image).toString('base64'),
             });
             expect(modelCandidates[0]).not.toHaveProperty('profilePicUrl');
+            expect(modelCandidates[0]).not.toHaveProperty('username');
+            expect(modelCandidates[0]).not.toHaveProperty('bio');
+            expect(modelCandidates[0]).not.toHaveProperty('cachedProfile');
+            expect(modelCandidates[0]?.inputHmac).toMatch(/^[a-f0-9]{64}$/);
             return new Map(modelCandidates.map(candidate => [candidate.candidateKey as string, assessment]));
         });
 
@@ -460,6 +479,8 @@ describe('revenue gender-routing runtime', () => {
         });
 
         expect(inputPreparer).toHaveBeenCalledTimes(1);
+        expect(JSON.stringify(inputPreparer.mock.calls)).not.toContain('handle_should_not_reach_assessor');
+        expect(JSON.stringify(inputPreparer.mock.calls)).not.toContain('bio_should_not_reach_assessor');
         expect(result?.manifest.rows[0]).toMatchObject({
             hasImage: true,
             hasName: true,
@@ -599,11 +620,14 @@ describe('revenue gender-routing runtime', () => {
         });
 
         expect(assess).toHaveBeenCalledTimes(14);
-        expect(assess.mock.calls.filter(([, attempt]) => attempt === 2).flatMap(([modelCandidates]) => modelCandidates)).toEqual(rows.slice(100).map(row => ({
-            candidateKey: row.candidateKey,
-            fullname: row.fullname,
-            imageBase64: null,
-        })));
+        expect(assess.mock.calls.filter(([, attempt]) => attempt === 2).flatMap(([modelCandidates]) => modelCandidates)).toEqual(
+            rows.slice(100).map(row => expect.objectContaining({
+                candidateKey: row.candidateKey,
+                fullname: row.fullname,
+                imageBase64: null,
+                inputHmac: expect.stringMatching(/^[a-f0-9]{64}$/),
+            }))
+        );
         expect(publication.value?.modelRetriedCount).toBe(12);
         expect(publication.value?.modelFailedCount).toBe(11);
         expect(result?.selectedMutualOrdinals).toHaveLength(100);

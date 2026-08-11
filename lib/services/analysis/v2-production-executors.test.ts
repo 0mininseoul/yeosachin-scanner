@@ -7,15 +7,20 @@ import {
 vi.mock('@/lib/supabase/admin', () => ({ supabaseAdmin: {} }));
 
 describe('analysis V2 production executor registry', () => {
-    it('injects the concrete image preparer into collection dependencies without adding an assessor', () => {
+    it('injects the concrete image preparer and the strict-only production assessor factory', () => {
         const preparer = vi.fn();
+        const assessorFactory = vi.fn();
         expect(createAnalysisV2ProductionCollectionDependencies({})
             .revenueGenderRoutingInputPreparer).toBeTypeOf('function');
+        expect(createAnalysisV2ProductionCollectionDependencies({})
+            .revenueGenderRoutingAssessorFactory).toBeTypeOf('function');
         const dependencies = createAnalysisV2ProductionCollectionDependencies({}, {
             revenueGenderRoutingInputPreparer: preparer,
+            revenueGenderRoutingAssessorFactory: assessorFactory,
         });
 
         expect(dependencies.revenueGenderRoutingInputPreparer).toBe(preparer);
+        expect(dependencies.revenueGenderRoutingAssessorFactory).toBe(assessorFactory);
         expect(dependencies).not.toHaveProperty('revenueGenderRoutingAssessor');
         expect(() => createAnalysisV2ProductionExecutorRegistry({
             ANALYSIS_V2_MEDIA_ARTIFACT_BUCKET: 'analysis-v2-private-media',
@@ -23,6 +28,7 @@ describe('analysis V2 production executor registry', () => {
             APIFY_TERTIARY_API_TOKEN: 'unit-test-token', // gitleaks:allow
         }, {
             revenueGenderRoutingInputPreparer: preparer,
+            revenueGenderRoutingAssessorFactory: assessorFactory,
         })).not.toThrow();
     });
 

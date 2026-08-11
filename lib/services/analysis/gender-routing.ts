@@ -181,6 +181,26 @@ export function createGenderRoutingCanonicalInputHmac(input: {
 }
 
 /**
+ * Request-local opaque identity for one assessor record. It is safe to bind
+ * into an attempt/cost identity because the fullname, image bytes, and
+ * candidate key remain inside the HMAC boundary.
+ */
+export function createGenderRoutingCandidateInputHmac(input: {
+    readonly candidate: GenderRoutingCandidateInput;
+    readonly hmacSecret: string;
+}): string {
+    const candidate = normalizeCandidate(input.candidate, input.hmacSecret);
+    return hmac(input.hmacSecret, [
+        'gender-routing:assessor-input:v1',
+        candidate.candidateKey,
+        candidate.hasImage ? 'image' : 'no_image',
+        candidate.hasName ? 'name' : 'no_name',
+        candidate.fullnameHmac ?? '',
+        candidate.imageContentHmac ?? '',
+    ].join('\n'));
+}
+
+/**
  * Returns exactly the candidate set permitted one model retry. The runtime uses this before it
  * starts the retry so a valid first response is never charged a second time.
  */

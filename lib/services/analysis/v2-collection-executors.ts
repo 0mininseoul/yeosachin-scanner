@@ -121,7 +121,7 @@ import {
     createAnalysisV2SelfHostedAuthWorkerIdentity,
     type AnalysisV2SelfHostedAuthRunStore,
 } from './v2-selfhosted-auth-run-store';
-import { GENDER_ROUTING_CAPS } from './gender-routing';
+import { GENDER_ROUTING_CAPS, GenderRoutingError } from './gender-routing';
 import {
     analysisV2GenderRoutingManifestStore,
     type AnalysisV2GenderRoutingManifestStore,
@@ -130,8 +130,11 @@ import {
     routeAndPersistRevenueGenderCandidates,
     usesRevenueGenderRouting,
     type RevenueGenderRoutingInputPreparer,
-    type RevenueGenderRoutingModelCandidate,
 } from './revenue-routing-runtime';
+import type {
+    RevenueGenderRoutingAssessor,
+    RevenueGenderRoutingAssessorFactory,
+} from './revenue-gender-routing-assessor';
 import { RevenueCostOperationStore } from './revenue-cost-operation-store';
 import {
     analysisRevenueFreshProvenanceStore,
@@ -144,11 +147,6 @@ const analysisV2RevenueCostOperationStore = new RevenueCostOperationStore(supaba
 type RelationshipGetter = typeof getFollowers;
 type ProfileBatchFetcher = typeof getProfilesBatchV2;
 type ProfileRepairRunner = typeof runAnalysisV2ProfileRepair;
-type RevenueGenderRoutingAssessor = (
-    candidates: readonly RevenueGenderRoutingModelCandidate[],
-    attempt: 1 | 2,
-) => Promise<ReadonlyMap<string, import('./gender-routing').GenderRoutingAssessment>>;
-
 export interface AnalysisV2CollectionExecutorDependencies {
     requestContextStore?: AnalysisV2CollectionRequestContextStore;
     evidenceStore?: AnalysisV2EvidenceStore;
@@ -167,6 +165,8 @@ export interface AnalysisV2CollectionExecutorDependencies {
     selfHostedAuthInteractionAdapter?: ApifyInteractionAdapter;
     genderRoutingManifestStore?: AnalysisV2GenderRoutingManifestStore;
     revenueGenderRoutingInputPreparer?: RevenueGenderRoutingInputPreparer;
+    /** Created only after the strict request/job lineage is proven in the relationships executor. */
+    revenueGenderRoutingAssessorFactory?: RevenueGenderRoutingAssessorFactory;
     revenueGenderRoutingAssessor?: RevenueGenderRoutingAssessor;
     env?: Record<string, string | undefined>;
 }
@@ -190,6 +190,7 @@ interface ResolvedDependencies {
     selfHostedAuthInteractionAdapter: ApifyInteractionAdapter;
     genderRoutingManifestStore: AnalysisV2GenderRoutingManifestStore;
     revenueGenderRoutingInputPreparer: RevenueGenderRoutingInputPreparer | undefined;
+    revenueGenderRoutingAssessorFactory: RevenueGenderRoutingAssessorFactory | null;
     revenueGenderRoutingAssessor: RevenueGenderRoutingAssessor | null;
     env: Record<string, string | undefined>;
 }
@@ -220,6 +221,7 @@ function deps(input: AnalysisV2CollectionExecutorDependencies): ResolvedDependen
         genderRoutingManifestStore:
             input.genderRoutingManifestStore ?? analysisV2GenderRoutingManifestStore,
         revenueGenderRoutingInputPreparer: input.revenueGenderRoutingInputPreparer,
+        revenueGenderRoutingAssessorFactory: input.revenueGenderRoutingAssessorFactory ?? null,
         revenueGenderRoutingAssessor: input.revenueGenderRoutingAssessor ?? null,
         env: input.env ?? process.env,
     };
@@ -758,25 +760,48 @@ export function createAnalysisV2RelationshipsExecutor(
                 || new Set(publicMutualRows.map(row => row.mutualOrdinal)).size !== publicMutualRows.length
             ) throw new Error('ANALYSIS_V2_GENDER_ROUTING_POPULATION_DRIFT');
             const hmacSecret = revenueGenderRoutingSecret(dependencies);
-            const routed = await routeAndPersistRevenueGenderCandidates({
-                requestId: claim.requestId,
-                relationshipCheckpointId: manifest.resultHash,
-                accessMode: request.accessMode,
-                planId: request.planId,
-                candidates: publicMutualRows.map(row => ({
-                    mutualOrdinal: row.mutualOrdinal,
-                    candidateKey: `mutual:${row.mutualOrdinal}`,
-                    profilePicUrl: row.profilePicUrl,
-                    fullname: row.fullName,
-                })),
-                hmacSecret,
-                inputPreparer: dependencies.revenueGenderRoutingInputPreparer,
-                assess: dependencies.revenueGenderRoutingAssessor ?? undefined,
-                jobKey: 'track:relationships:collect',
-                claimToken: claim.claimToken,
-                jobInputHash: claim.jobInputHash,
-                manifestStore: dependencies.genderRoutingManifestStore,
-            });
+            const assessor = dependencies.revenueGenderRoutingAssessor
+                ?? dependencies.revenueGenderRoutingAssessorFactory?.({
+                    requestId: claim.requestId,
+                    jobKey: 'track:relationships:collect',
+                    jobClaimToken: claim.claimToken,
+                    jobInputHash: claim.jobInputHash,
+                    accessMode: request.accessMode,
+                    planId: request.planId,
+                    ...(context.handlerDeadlineAtMs === undefined
+                        ? {}
+                        : { handlerDeadlineAtMs: context.handlerDeadlineAtMs }),
+                });
+            let routed: Awaited<ReturnType<typeof routeAndPersistRevenueGenderCandidates>>;
+            try {
+                routed = await routeAndPersistRevenueGenderCandidates({
+                    requestId: claim.requestId,
+                    relationshipCheckpointId: manifest.resultHash,
+                    accessMode: request.accessMode,
+                    planId: request.planId,
+                    candidates: publicMutualRows.map(row => ({
+                        mutualOrdinal: row.mutualOrdinal,
+                        candidateKey: `mutual:${row.mutualOrdinal}`,
+                        profilePicUrl: row.profilePicUrl,
+                        fullname: row.fullName,
+                    })),
+                    hmacSecret,
+                    inputPreparer: dependencies.revenueGenderRoutingInputPreparer,
+                    assess: assessor ?? undefined,
+                    jobKey: 'track:relationships:collect',
+                    claimToken: claim.claimToken,
+                    jobInputHash: claim.jobInputHash,
+                    manifestStore: dependencies.genderRoutingManifestStore,
+                });
+            } catch (error) {
+                if (error instanceof GenderRoutingError && error.code === 'ROUTING_UNAVAILABLE') {
+                    await dependencies.revenueCostOperationStore.manualReview({
+                        requestId: claim.requestId,
+                        reasonCode: 'routing_failure',
+                    });
+                }
+                throw error;
+            }
             if (!routed) throw new Error('ANALYSIS_V2_GENDER_ROUTING_NOT_APPLICABLE');
             const selectedRows = await dependencies.genderRoutingManifestStore.loadSelectedUsernames({
                 requestId: claim.requestId,

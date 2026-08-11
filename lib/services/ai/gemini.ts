@@ -214,6 +214,19 @@ const AI_ADMISSION_SIGNAL_CODES = new Set([
     'ANALYSIS_V2_AI_RESOLVER_CAPACITY_SKIPPED',
 ]);
 
+/**
+ * A caller may prove that a staged request was rejected before the Gemini SDK
+ * boundary after it has terminalized its own durable intent. Keep that signal
+ * distinct from a provider failure so the transport does not emit a second,
+ * ambiguous terminal event or retry the model call.
+ */
+export class GeminiPreDispatchAdmissionError extends Error {
+    constructor() {
+        super('ANALYSIS_V2_AI_PREDISPATCH_REJECTED');
+        this.name = 'GeminiPreDispatchAdmissionError';
+    }
+}
+
 // 토큰 사용량 타입
 export interface TokenUsage {
     promptTokens: number;
@@ -896,8 +909,9 @@ export async function analyzeWithGemini<T>(
                                 });
                             } catch (error) {
                                 if (
-                                    error instanceof Error
-                                    && AI_ADMISSION_SIGNAL_CODES.has(error.message)
+                                    error instanceof GeminiPreDispatchAdmissionError
+                                    || error instanceof Error
+                                        && AI_ADMISSION_SIGNAL_CODES.has(error.message)
                                 ) {
                                     throw error;
                                 }
@@ -918,6 +932,8 @@ export async function analyzeWithGemini<T>(
                 if (
                     generationError instanceof Error
                     && (
+                        generationError instanceof GeminiPreDispatchAdmissionError
+                        ||
                         generationError.message.startsWith(
                             'AI_ATTEMPT_AUDIT_PERSISTENCE_ERROR:'
                         )

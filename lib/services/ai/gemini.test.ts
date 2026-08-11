@@ -36,6 +36,7 @@ vi.mock('@/lib/supabase/admin', () => ({
 
 import {
     analyzeWithGemini,
+    GeminiPreDispatchAdmissionError,
     zodToGeminiResponseJsonSchema,
 } from './gemini';
 import {
@@ -727,6 +728,19 @@ describe('analyzeWithGemini stage request policy', () => {
             onBeforeAttempt: vi.fn().mockRejectedValue(new Error(code)),
             onAttemptTelemetry,
         })).rejects.toThrow(code);
+        expect(mocks.generateContent).not.toHaveBeenCalled();
+        expect(onAttemptTelemetry).not.toHaveBeenCalled();
+    });
+
+    it('preserves a composed pre-dispatch rejection without touching Gemini or emitting duplicate telemetry', async () => {
+        const onAttemptTelemetry = vi.fn();
+        await expect(analyzeWithGemini('prompt', undefined, {
+            schema: responseSchema,
+            stage: 'genderTriage',
+            requestId: stageRequestId,
+            onBeforeAttempt: vi.fn().mockRejectedValue(new GeminiPreDispatchAdmissionError()),
+            onAttemptTelemetry,
+        })).rejects.toBeInstanceOf(GeminiPreDispatchAdmissionError);
         expect(mocks.generateContent).not.toHaveBeenCalled();
         expect(onAttemptTelemetry).not.toHaveBeenCalled();
     });

@@ -34,6 +34,7 @@ import type {
     AnalysisV2GenderRoutingManifestPublishInput,
     AnalysisV2GenderRoutingManifestStore,
 } from './gender-routing-manifest-store';
+import type { RevenueGenderRoutingModelCandidate } from './revenue-routing-runtime';
 import { SelfHostedAuthWorkerError } from '@/lib/services/instagram/providers/selfhosted-auth/client';
 import {
     AnalysisV2CollectionContextFenceError,
@@ -3378,6 +3379,7 @@ describe('analysis V2 concrete collection executors', () => {
                 ? { femaleScore: 0.05, maleScore: 0.9, uncertaintyScore: 0.05, evidence: 'name_only' as const }
                 : { femaleScore: 0.9, maleScore: 0.05, uncertaintyScore: 0.05, evidence: 'name_only' as const }])
         ));
+        const assessorFactory = vi.fn(() => assessor);
         const request = requestContext({
             accessMode: 'test_entitlement',
             providerExecutionPolicy: authorizedProviderPolicy,
@@ -3388,7 +3390,7 @@ describe('analysis V2 concrete collection executors', () => {
             requestContextStore: contextStore(request),
             evidenceStore: relationshipEvidenceStore,
             genderRoutingManifestStore: routing.store,
-            revenueGenderRoutingAssessor: assessor,
+            revenueGenderRoutingAssessorFactory: assessorFactory,
             env: {
                 ...authorizedProviderEnv,
                 ANALYSIS_V2_GENDER_ROUTING_HMAC_SECRET: 'routing-test-secret-at-least-thirty-two-characters',
@@ -3400,6 +3402,11 @@ describe('analysis V2 concrete collection executors', () => {
             usernamesByOrdinal.get(row.mutualOrdinal)!
         ));
         expect(assessor).toHaveBeenCalledTimes(11);
+        expect(assessorFactory).toHaveBeenCalledWith(expect.objectContaining({
+            accessMode: 'test_entitlement',
+            planId: 'basic',
+            jobKey: 'track:relationships:collect',
+        }));
         expect(assessor.mock.calls.every(([rows]) => rows.length <= 10)).toBe(true);
         expect(assessor.mock.calls.flatMap(([rows]) => rows)).toHaveLength(101);
         expect(JSON.stringify(assessor.mock.calls[0]?.[0])).not.toContain('mutualOrdinal');
@@ -3519,6 +3526,64 @@ describe('analysis V2 concrete collection executors', () => {
             0,
         )).toBe(200);
 
+    });
+
+    it('terminalizes a strict routing failure as manual review after exactly one failed-candidate retry', async () => {
+        const publicRows = routingMutualRows(101);
+        const routing = routingManifestStore(new Map(
+            publicRows.map(row => [row.mutualOrdinal, row.username])
+        ));
+        const assessor = vi.fn(async (
+            _candidates: readonly RevenueGenderRoutingModelCandidate[],
+            _attempt: 1 | 2,
+        ) => {
+            void _candidates;
+            void _attempt;
+            return new Map();
+        });
+        const manualReview = vi.fn(async () => ({
+            disposition: 'manual_review' as const,
+            created: true,
+            replayed: false,
+        }));
+        const request = requestContext({
+            accessMode: 'test_entitlement',
+            providerExecutionPolicy: authorizedProviderPolicy,
+            followersDeclaredCount: 0,
+            followingDeclaredCount: 0,
+        });
+        const executor = createAnalysisV2RelationshipsExecutor({
+            requestContextStore: contextStore(request),
+            evidenceStore: {
+                checkpointRelationshipSide: vi.fn(async () => ({})),
+                freezeRelationships: vi.fn(async () => ({
+                    revision: 1, resultHash, exclusionDecisionHash: 'f'.repeat(64),
+                    followersResultHash: resultHash, followingResultHash: resultHash,
+                    mutualCount: 101, publicCount: 101, privateCount: 0,
+                    detailedPublicCount: 101, unscreenedPublicCount: 0,
+                })),
+                loadRelationshipStaging: vi.fn(async () => ({
+                    excludedUsername: 'girlfriend', detailedPublicUsernames: [],
+                    privateMutualUsernames: [], mutualRows: publicRows,
+                })),
+            } as unknown as AnalysisV2EvidenceStore,
+            genderRoutingManifestStore: routing.store,
+            revenueGenderRoutingAssessor: assessor,
+            revenueCostOperationStore: { manualReview } as unknown as RevenueCostOperationStore,
+            env: { ANALYSIS_V2_GENDER_ROUTING_HMAC_SECRET: 'routing-test-secret-at-least-thirty-two-characters' },
+        });
+
+        await expect(executor(stageContext('relationships', state())))
+            .rejects.toThrow('GENDER_ROUTING_ROUTING_UNAVAILABLE');
+
+        expect(assessor).toHaveBeenCalledTimes(22);
+        expect(assessor.mock.calls.filter(([, attempt]) => attempt === 1)).toHaveLength(11);
+        expect(assessor.mock.calls.filter(([, attempt]) => attempt === 2)).toHaveLength(11);
+        expect(manualReview).toHaveBeenCalledWith({
+            requestId,
+            reasonCode: 'routing_failure',
+        });
+        expect(routing.publication.value).toBeNull();
     });
 
     it('fails closed for Basic 401 and Standard 801 before routing or provider work', async () => {
@@ -3663,6 +3728,7 @@ describe('analysis V2 concrete collection executors', () => {
         ];
         for (const testCase of cases) {
             const assessor = vi.fn();
+            const assessorFactory = vi.fn(() => assessor);
             const manifestStore = {
                 begin: vi.fn(async () => { throw new Error('routing should not begin'); }),
             } as unknown as AnalysisV2GenderRoutingManifestStore;
@@ -3685,6 +3751,7 @@ describe('analysis V2 concrete collection executors', () => {
                 } as unknown as AnalysisV2EvidenceStore,
                 genderRoutingManifestStore: manifestStore,
                 revenueGenderRoutingAssessor: assessor,
+                revenueGenderRoutingAssessorFactory: assessorFactory,
                 env: { ANALYSIS_V2_GENDER_ROUTING_HMAC_SECRET: 'routing-test-secret-at-least-thirty-two-characters' },
             });
             const result = await executor(stageContext('relationships', testCase.dagState));
@@ -3692,6 +3759,7 @@ describe('analysis V2 concrete collection executors', () => {
                 createAnalysisV2CollectionTopology('profiles', ['legacy_candidate'])
             );
             expect(assessor).not.toHaveBeenCalled();
+            expect(assessorFactory).not.toHaveBeenCalled();
             expect(manifestStore.begin).not.toHaveBeenCalled();
         }
     });

@@ -145,6 +145,11 @@ export interface RevenueCostAiAttemptCallbacks {
     releaseBeforeDispatch(
         telemetry: GeminiAttemptStartTelemetry,
     ): Promise<RevenueCostOperationOutcome | null>;
+    /**
+     * A post-boundary audit or settlement persistence failure cannot be
+     * retried safely. The composer invokes this without inventing telemetry.
+     */
+    manualReviewAfterExternalBoundary(): Promise<RevenueCostOperationOutcome | null>;
 }
 
 export interface RevenueCostAiAttemptLifecycle {
@@ -228,13 +233,38 @@ export function createRevenueCostAiAttemptLifecycle(
                 async onAttemptTelemetry(telemetry) {
                     const source = sourceForTerminalTelemetry(fence, telemetry);
                     if (!eligible(scope)) return;
-                    await operations.settleV2(settlementSource(source));
+                    try {
+                        const settled = await operations.settleV2(settlementSource(source));
+                        if (settled.disposition === 'ambiguous' || settled.disposition === 'manual_review') {
+                            throw new RevenueCostAiAttemptLifecycleError(
+                                'ANALYSIS_V2_REVENUE_COST_SETTLEMENT_AMBIGUOUS',
+                            );
+                        }
+                    } catch (error) {
+                        try {
+                            await operations.manualReview({
+                                requestId: source.requestId,
+                                reasonCode: 'ambiguous_external_call',
+                            });
+                        } catch {
+                            // The original terminal persistence error already fences dispatch.
+                        }
+                        throw error;
+                    }
                 },
 
                 async releaseBeforeDispatch(telemetry) {
                     const source = sourceForStartTelemetry(fence, telemetry);
                     if (!eligible(scope)) return null;
                     return operations.releaseV2(source);
+                },
+
+                async manualReviewAfterExternalBoundary() {
+                    if (!eligible(scope)) return null;
+                    return operations.manualReview({
+                        requestId: fence.requestId,
+                        reasonCode: 'ambiguous_external_call',
+                    });
                 },
             };
         },
