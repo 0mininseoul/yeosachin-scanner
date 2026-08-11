@@ -31,7 +31,7 @@ const databases: PGlite[] = [];
 // and the v2 entitlement/policy/request migrations. Every field read by this
 // foundation's %ROWTYPE declarations and functions is represented below.
 const bootstrap = `
-CREATE ROLE anon NOLOGIN; CREATE ROLE authenticated NOLOGIN; CREATE ROLE service_role NOLOGIN;
+CREATE ROLE anon NOLOGIN; CREATE ROLE authenticated NOLOGIN; CREATE ROLE service_role NOLOGIN BYPASSRLS;
 CREATE EXTENSION pgcrypto;
 CREATE SCHEMA extensions;
 CREATE FUNCTION extensions.gen_random_uuid() RETURNS uuid LANGUAGE sql AS $$ SELECT public.gen_random_uuid() $$;
@@ -364,10 +364,7 @@ function pgliteRevenueChildQuery(db: PGlite): PgliteRevenueChildQuery {
                 };
             }
             try {
-                // PGlite's fixture role cannot BYPASSRLS like Supabase's
-                // service-role admin client. The owner connection is the
-                // faithful local stand-in for this read-only admin lookup.
-                const result = await db.query<{ status: string }>(`
+                const result = await query<{ status: string }>(db, `
                     SELECT status
                       FROM public.analysis_revenue_cost_operations
                      WHERE request_id=$1::uuid
