@@ -1,7 +1,15 @@
 import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
 
-const source = readFileSync(new URL('../../../supabase/migrations/20260810100000_add_revenue_cost_operation_ledger.sql', import.meta.url), 'utf8');
+const foundation = readFileSync(
+    new URL('../../../supabase/migrations/20260810100000_add_revenue_cost_operation_ledger.sql', import.meta.url),
+    'utf8',
+);
+const aiLifecycle = readFileSync(
+    new URL('../../../supabase/migrations/20260811105000_add_revenue_ai_cost_lifecycle_contract.sql', import.meta.url),
+    'utf8',
+);
+const source = `${foundation}\n${aiLifecycle}`;
 const AI_DISPATCH_MARKER = '-- Durable Gemini-attempt economic authority.';
 
 function aiDispatchWrapper(startSignature: string, endSignature?: string): string {
@@ -88,7 +96,7 @@ describe('revenue cost-operation migration contract', () => {
         expect(source).toContain("'stage_one_routing'");
         expect(source).toContain("'stage_one_routing_retry'");
         expect(source).toContain("'resolver'");
-        expect(source).not.toContain('REVENUE_COST_OPERATION_AI_NOT_READY');
+        expect(aiLifecycle).not.toContain('REVENUE_COST_OPERATION_AI_NOT_READY');
         expect(source).toContain("COALESCE(pg_catalog.sum(CASE WHEN status IN ('reserved','started') THEN reserved_krw ELSE 0 END), 0)");
         expect(source).toContain("REVOKE ALL ON FUNCTION public.reserve_analysis_revenue_cost_operation_v2");
         expect(source).toContain("GRANT EXECUTE ON FUNCTION public.reserve_analysis_revenue_cost_operation_v2");

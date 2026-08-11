@@ -19,6 +19,13 @@ const providerSettlementQueueMigration = readFileSync(
     ),
     'utf8'
 );
+const aiLifecycleMigration = readFileSync(
+    new URL(
+        '../../../supabase/migrations/20260811105000_add_revenue_ai_cost_lifecycle_contract.sql',
+        import.meta.url
+    ),
+    'utf8'
+);
 const routingAttemptContractMigration = readFileSync(
     new URL(
         '../../../supabase/migrations/20260811110000_add_revenue_gender_routing_attempt_contract.sql',
@@ -32,6 +39,7 @@ const userId = '22222222-2222-4222-8222-222222222222';
 const preflightId = '33333333-3333-4333-8333-333333333333';
 const hash = (char: string) => char.repeat(64);
 const databases: PGlite[] = [];
+type MigrationPath = 'already-migrated-baseline' | 'fresh-replay';
 
 // Minimal faithful slice of the predecessor schemas. Source anchors:
 // 20260810090000 (parent), 20260714175411 + 20260715002600 (preflight runs),
@@ -172,7 +180,10 @@ CREATE TABLE public.analysis_revenue_run_ledgers (
 );
 `;
 
-async function createDb(legacyParents = false): Promise<PGlite> {
+async function createDb(
+    legacyParents = false,
+    migrationPath: MigrationPath = 'already-migrated-baseline',
+): Promise<PGlite> {
     const db = await PGlite.create({ extensions: { pgcrypto } });
     databases.push(db);
     await db.exec(bootstrap);
@@ -184,9 +195,21 @@ async function createDb(legacyParents = false): Promise<PGlite> {
                    ('${standardRequestId}','${preflightId}','${userId}','standard','test_entitlement','${hash('b')}',clock_timestamp(),clock_timestamp(),3634,NULL);
         `);
     }
-    await db.exec(migration);
-    await db.exec(providerSettlementQueueMigration);
-    await db.exec(routingAttemptContractMigration);
+    if (migrationPath === 'fresh-replay') {
+        await db.exec([
+            migration,
+            providerSettlementQueueMigration,
+            aiLifecycleMigration,
+            routingAttemptContractMigration,
+        ].join('\n'));
+    } else {
+        // The old foundation is already applied before these forward-only
+        // follow-ups, which models the production upgrade path exactly.
+        await db.exec(migration);
+        await db.exec(providerSettlementQueueMigration);
+        await db.exec(aiLifecycleMigration);
+        await db.exec(routingAttemptContractMigration);
+    }
     return db;
 }
 
@@ -722,6 +745,35 @@ async function exactProviderCostState(db: PGlite): Promise<{
 afterEach(async () => { await Promise.all(databases.splice(0).map(db => db.close())); });
 
 describe('revenue cost operation ledger PGlite', () => {
+    it('replays the same AI lifecycle after an applied baseline and on a fresh database', async () => {
+        const upgraded = await createDb(false, 'already-migrated-baseline');
+        const fresh = await createDb(false, 'fresh-replay');
+        const queryFunctionNames = async (db: PGlite) => (await db.query<{ proname: string }>(
+            `SELECT proname
+               FROM pg_proc
+              WHERE proname IN (
+                'analysis_revenue_ai_cost_assert_lineage_v1',
+                'reserve_analysis_revenue_cost_operation_provider_v2',
+                'reserve_analysis_revenue_cost_operation_v2',
+                'register_analysis_revenue_ai_routing_attempt_v1'
+              )
+              ORDER BY proname`,
+        )).rows.map(row => row.proname);
+
+        await expect(queryFunctionNames(upgraded)).resolves.toEqual([
+            'analysis_revenue_ai_cost_assert_lineage_v1',
+            'register_analysis_revenue_ai_routing_attempt_v1',
+            'reserve_analysis_revenue_cost_operation_provider_v2',
+            'reserve_analysis_revenue_cost_operation_v2',
+        ]);
+        await expect(queryFunctionNames(fresh)).resolves.toEqual([
+            'analysis_revenue_ai_cost_assert_lineage_v1',
+            'register_analysis_revenue_ai_routing_attempt_v1',
+            'reserve_analysis_revenue_cost_operation_provider_v2',
+            'reserve_analysis_revenue_cost_operation_v2',
+        ]);
+    });
+
     it('backfills existing Basic and Standard parents without nullable actual cost arithmetic', async () => {
         const db = await createDb(true);
         const rows = await db.query<{ plan_id: string; margin_target_krw: number; actual_cost_krw: number }>(
