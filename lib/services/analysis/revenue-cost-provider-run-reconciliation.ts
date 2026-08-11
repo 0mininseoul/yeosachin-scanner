@@ -37,13 +37,6 @@ export interface RevenueCostProviderRunSettlementClient
     };
 }
 
-const SETTLABLE_CHILD_STATUSES = new Set<RevenueCostOperationStatus>([
-    'reserved',
-    'started',
-    'settled',
-    'ambiguous',
-]);
-
 function sourceOperationHash(operationKey: string): string {
     return createHash('sha256').update(operationKey, 'utf8').digest('hex');
 }
@@ -120,10 +113,14 @@ export function createRevenueCostProviderRunSettlement(
                     throw new Error('ANALYSIS_V2_REVENUE_COST_SCOPE_LOOKUP_FAILED');
                 }
                 const status = childStatus(data);
-                if (status === 'released' || status === 'denied') return;
-                if (status === null || !SETTLABLE_CHILD_STATUSES.has(status)) {
+                if (status === null) {
                     throw new Error('ANALYSIS_V2_REVENUE_COST_SCOPE_MISSING');
                 }
+                // The queue marker and this lookup identify an exact child, but
+                // only the SQL settlement RPC can prove its terminal amounts,
+                // timestamps, and parent aggregates still match this provider
+                // outcome. It replays valid released/settled children without
+                // mutating them and fences every drift to manual review.
                 const settled = await revenueCostOperationStore.settleV2({
                     requestId: run.requestId,
                     jobKey: run.jobKey,

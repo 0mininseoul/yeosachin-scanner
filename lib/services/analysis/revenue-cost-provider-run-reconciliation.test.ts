@@ -29,6 +29,16 @@ function reconciledRun(): StoredAnalysisV2ProviderRun {
     };
 }
 
+function rejectedRun(): StoredAnalysisV2ProviderRun {
+    return {
+        ...reconciledRun(),
+        status: 'rejected',
+        runId: null,
+        actualUsageUsd: 0,
+        runStartedAt: null,
+    };
+}
+
 function clientWithChild(status: string | null) {
     const rpc = vi.fn();
     const maybeSingle = vi.fn(async () => ({
@@ -80,6 +90,123 @@ describe('revenue cost provider-run reconciliation settlement', () => {
 
         expect(fixture.from).not.toHaveBeenCalled();
         expect(fixture.rpc).not.toHaveBeenCalled();
+    });
+
+    it('fails closed when a released child conflicts with an incurred provider run', async () => {
+        const fixture = clientWithChild('released');
+        fixture.rpc
+            .mockResolvedValueOnce({
+                data: null,
+                error: { code: 'P0001', message: 'REVENUE_COST_OPERATION_FENCE' },
+            })
+            .mockResolvedValueOnce({
+                data: { disposition: 'manual_review', created: false, replayed: false },
+                error: null,
+            });
+        const settlement = createRevenueCostProviderRunSettlement(fixture.client);
+
+        await expect(settlement.settleAfterUsageReconciliation(reconciledRun(), {
+            knownRevenueCostOperation: true,
+        })).rejects.toThrow('ANALYSIS_V2_REVENUE_COST_SETTLEMENT_MANUAL_REVIEW');
+
+        expect(fixture.rpc.mock.calls.map(([name]) => name)).toEqual([
+            'settle_analysis_revenue_cost_operation_v2',
+            'mark_analysis_revenue_manual_review_v1',
+        ]);
+    });
+
+    it('fails closed when a settled child conflicts with a rejected provider run', async () => {
+        const fixture = clientWithChild('settled');
+        fixture.rpc
+            .mockResolvedValueOnce({
+                data: null,
+                error: { code: 'P0001', message: 'REVENUE_COST_OPERATION_FENCE' },
+            })
+            .mockResolvedValueOnce({
+                data: { disposition: 'manual_review', created: false, replayed: false },
+                error: null,
+            });
+        const settlement = createRevenueCostProviderRunSettlement(fixture.client);
+
+        await expect(settlement.settleAfterUsageReconciliation(rejectedRun(), {
+            knownRevenueCostOperation: true,
+        })).rejects.toThrow('ANALYSIS_V2_REVENUE_COST_SETTLEMENT_MANUAL_REVIEW');
+
+        expect(fixture.rpc.mock.calls.map(([name]) => name)).toEqual([
+            'settle_analysis_revenue_cost_operation_v2',
+            'mark_analysis_revenue_manual_review_v1',
+        ]);
+    });
+
+    it('fails closed when a denied child appears after the trusted queue marker', async () => {
+        const fixture = clientWithChild('denied');
+        fixture.rpc
+            .mockResolvedValueOnce({
+                data: null,
+                error: { code: 'P0001', message: 'REVENUE_COST_OPERATION_FENCE' },
+            })
+            .mockResolvedValueOnce({
+                data: { disposition: 'manual_review', created: false, replayed: false },
+                error: null,
+            });
+        const settlement = createRevenueCostProviderRunSettlement(fixture.client);
+
+        await expect(settlement.settleAfterUsageReconciliation(reconciledRun(), {
+            knownRevenueCostOperation: true,
+        })).rejects.toThrow('ANALYSIS_V2_REVENUE_COST_SETTLEMENT_MANUAL_REVIEW');
+
+        expect(fixture.rpc.mock.calls.map(([name]) => name)).toEqual([
+            'settle_analysis_revenue_cost_operation_v2',
+            'mark_analysis_revenue_manual_review_v1',
+        ]);
+    });
+
+    it('replays an exact released child through SQL for a rejected provider run', async () => {
+        const fixture = clientWithChild('released');
+        fixture.rpc.mockResolvedValue({
+            data: { disposition: 'released', created: false, replayed: true },
+            error: null,
+        });
+        const settlement = createRevenueCostProviderRunSettlement(fixture.client);
+
+        await expect(settlement.settleAfterUsageReconciliation(rejectedRun(), {
+            knownRevenueCostOperation: true,
+        })).resolves.toBeUndefined();
+
+        expect(fixture.rpc).toHaveBeenCalledWith(
+            'settle_analysis_revenue_cost_operation_v2',
+            {
+                p_request_id: requestId,
+                p_job_key: 'track:relationships:collect',
+                p_source_kind: 'provider_run',
+                p_source_operation_key: operationKey,
+                p_source_attempt: 0,
+            }
+        );
+    });
+
+    it('replays an exact settled child through SQL for an incurred provider run', async () => {
+        const fixture = clientWithChild('settled');
+        fixture.rpc.mockResolvedValue({
+            data: { disposition: 'settled', created: false, replayed: true },
+            error: null,
+        });
+        const settlement = createRevenueCostProviderRunSettlement(fixture.client);
+
+        await expect(settlement.settleAfterUsageReconciliation(reconciledRun(), {
+            knownRevenueCostOperation: true,
+        })).resolves.toBeUndefined();
+
+        expect(fixture.rpc).toHaveBeenCalledWith(
+            'settle_analysis_revenue_cost_operation_v2',
+            {
+                p_request_id: requestId,
+                p_job_key: 'track:relationships:collect',
+                p_source_kind: 'provider_run',
+                p_source_operation_key: operationKey,
+                p_source_attempt: 0,
+            }
+        );
     });
 
     it('fails closed to manual review if an opted-in child cannot settle after reconciliation', async () => {
