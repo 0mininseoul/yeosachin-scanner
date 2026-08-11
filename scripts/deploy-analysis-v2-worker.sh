@@ -8,6 +8,7 @@ readonly ARTIFACT_REGISTRY_API="artifactregistry.googleapis.com"
 readonly SUPABASE_SECRET_ID="ai-baram-v2-supabase-service-role"
 readonly IMAGE_SIGNING_SECRET_ID="ai-baram-v2-image-proxy-signing"
 readonly PREFLIGHT_IDENTITY_HMAC_SECRET_ID="ai-baram-v2-preflight-identity-hmac"
+readonly GENDER_ROUTING_HMAC_SECRET_ID="ai-baram-v2-gender-routing-hmac"
 readonly R2_ACCESS_KEY_ID_SECRET_ID="ai-baram-v2-r2-writer-access-key-id"
 readonly R2_SECRET_ACCESS_KEY_SECRET_ID="ai-baram-v2-r2-writer-secret-access-key"
 readonly RESULT_IMAGE_OBJECT_HMAC_SECRET_ID="ai-baram-v2-result-image-object-hmac"
@@ -73,6 +74,7 @@ Required environment variables:
   ANALYSIS_V2_APIFY_API_TOKEN_SECRET_VERSION
   ANALYSIS_V2_IMAGE_PROXY_SIGNING_SECRET_VERSION
   ANALYSIS_V2_PREFLIGHT_IDENTITY_HMAC_SECRET_VERSION
+  ANALYSIS_V2_GENDER_ROUTING_HMAC_SECRET_VERSION
   ANALYSIS_V2_WORKER_BUILD_SERVICE_ACCOUNT
 
 The deprecated ANALYSIS_V2_TASKS_RECOVERY_SERVICE_ACCOUNT_EMAIL alias remains
@@ -123,7 +125,7 @@ and build env files must both resolve outside ANALYSIS_V2_WORKER_SOURCE_DIR so
 source upload cannot include them. The runtime file is non-secret and rejects
 all provider and Google credential keys. Updates without it preserve existing
 non-secret variables. Every deployment reapplies numeric pinned Secret Manager
-references for Supabase, image signing, preflight identity HMAC, the selected Apify slot, and any valid
+references for Supabase, image signing, preflight identity HMAC, gender-routing HMAC, the selected Apify slot, and any valid
 Apify slot references retained solely to recover older provider runs. `latest`
 and plaintext secret values are forbidden.
 
@@ -572,6 +574,8 @@ service_runtime_config_matches() {
     --arg image_version "$image_signing_secret_version" \
     --arg identity_hmac_secret "$PREFLIGHT_IDENTITY_HMAC_SECRET_ID" \
     --arg identity_hmac_version "$preflight_identity_hmac_secret_version" \
+    --arg gender_routing_hmac_secret "$GENDER_ROUTING_HMAC_SECRET_ID" \
+    --arg gender_routing_hmac_version "$gender_routing_hmac_secret_version" \
     --arg result_images_enabled "$result_images_enabled" \
     --arg automatic_fulfillment_enabled "$automatic_fulfillment_enabled" \
     --arg beta_free_pool_enabled "$beta_free_pool_enabled" \
@@ -628,6 +632,7 @@ service_runtime_config_matches() {
           | select(.name as $name | apify_env_names | index($name) | not)
           | select(.name != "IMAGE_PROXY_SIGNING_SECRET")
           | select(.name != "ANALYSIS_V2_PREFLIGHT_IDENTITY_HMAC_SECRET")
+          | select(.name != "ANALYSIS_V2_GENDER_ROUTING_HMAC_SECRET")
           | select(.name != "ANALYSIS_V2_RESULT_IMAGE_R2_ACCESS_KEY_ID")
           | select(.name != "ANALYSIS_V2_RESULT_IMAGE_R2_SECRET_ACCESS_KEY")
           | select(.name != "ANALYSIS_V2_RESULT_IMAGE_OBJECT_HMAC_SECRET")
@@ -679,6 +684,7 @@ service_runtime_config_matches() {
         and secret_ref($apify_env_key; $apify_secret; $apify_version)
         and secret_ref("IMAGE_PROXY_SIGNING_SECRET"; $image_secret; $image_version)
         and secret_ref("ANALYSIS_V2_PREFLIGHT_IDENTITY_HMAC_SECRET"; $identity_hmac_secret; $identity_hmac_version)
+        and secret_ref("ANALYSIS_V2_GENDER_ROUTING_HMAC_SECRET"; $gender_routing_hmac_secret; $gender_routing_hmac_version)
         and result_image_config_matches
         and (apify_refs == ($expected_apify_refs | sort_by(.env)))
         and (apify_refs | length) >= 1
@@ -800,6 +806,7 @@ service_has_forbidden_plaintext_credential() {
             or (.name as $name | allowed_apify_env_names | index($name))
             or .name == "IMAGE_PROXY_SIGNING_SECRET"
             or .name == "ANALYSIS_V2_PREFLIGHT_IDENTITY_HMAC_SECRET"
+            or .name == "ANALYSIS_V2_GENDER_ROUTING_HMAC_SECRET"
             or .name == "ANALYSIS_V2_RESULT_IMAGE_R2_ACCESS_KEY_ID"
             or .name == "ANALYSIS_V2_RESULT_IMAGE_R2_SECRET_ACCESS_KEY"
             or .name == "ANALYSIS_V2_RESULT_IMAGE_OBJECT_HMAC_SECRET")
@@ -812,6 +819,7 @@ service_has_forbidden_plaintext_credential() {
         | select(.name as $name | allowed_apify_env_names | index($name) | not)
         | select(.name != "IMAGE_PROXY_SIGNING_SECRET")
         | select(.name != "ANALYSIS_V2_PREFLIGHT_IDENTITY_HMAC_SECRET")
+        | select(.name != "ANALYSIS_V2_GENDER_ROUTING_HMAC_SECRET")
         | select(.name != "ANALYSIS_V2_RESULT_IMAGE_R2_ACCESS_KEY_ID")
         | select(.name != "ANALYSIS_V2_RESULT_IMAGE_R2_SECRET_ACCESS_KEY")
         | select(.name != "ANALYSIS_V2_RESULT_IMAGE_OBJECT_HMAC_SECRET")
@@ -836,6 +844,49 @@ verify_existing_preflight_identity_hmac_ref() {
           and ($entries[0].valueFrom.secretKeyRef.key | tostring) == $version
     ' <<<"$config" >/dev/null \
     || die "$surface existing preflight identity HMAC reference is invalid or its numeric version changed; it must be exactly one canonical ref at the requested numeric version; production in-place rotation is blocked until a DB-backed drain audit path exists"
+}
+
+gender_routing_hmac_ref_state() {
+  local config="$1"
+  jq -er \
+    --arg secret "$GENDER_ROUTING_HMAC_SECRET_ID" \
+    --arg version "$gender_routing_hmac_secret_version" '
+      def containers: (.spec.template.spec.containers // .spec.containers // []);
+      [containers[]?.env[]?
+        | select(.name == "ANALYSIS_V2_GENDER_ROUTING_HMAC_SECRET")] as $entries
+      | if ($entries | length) == 0 then "absent"
+        elif ($entries | length) == 1
+          and ($entries[0] | has("value") | not)
+          and $entries[0].valueFrom.secretKeyRef.name == $secret
+          and ((($entries[0].valueFrom.secretKeyRef.key // "") | tostring)
+            | test("^[1-9][0-9]*$"))
+          and (($entries[0].valueFrom.secretKeyRef.key | tostring) == $version)
+          then "exact"
+        else error("invalid gender-routing HMAC reference")
+        end
+    ' <<<"$config"
+}
+
+verify_existing_gender_routing_hmac_refs() {
+  local latest_config="$1"
+  local active_config="$2"
+  local allow_staged_addition="${3:-false}"
+  local latest_state
+  local active_state
+
+  latest_state="$(gender_routing_hmac_ref_state "$latest_config")" \
+    || die "latest Cloud Run service template gender-routing HMAC reference is invalid or its numeric version changed; it must be exactly one canonical ref at the requested numeric version"
+  active_state="$(gender_routing_hmac_ref_state "$active_config")" \
+    || die "active known-good Cloud Run revision gender-routing HMAC reference is invalid or its numeric version changed; it must be exactly one canonical ref at the requested numeric version"
+
+  if [[ "$latest_state" == "$active_state" ]]; then
+    return 0
+  fi
+  if [[ "$allow_staged_addition" == "true" \
+    && "$latest_state" == "exact" && "$active_state" == "absent" ]]; then
+    return 0
+  fi
+  die "gender-routing HMAC refs must be either absent from both existing service surfaces or exact on both"
 }
 
 apify_identity_for_existing_config() {
@@ -893,6 +944,7 @@ apify_identity_for_existing_config() {
 verify_existing_service_secret_identity() {
   local latest_config="$1"
   local active_config="$2"
+  local allow_staged_gender_routing_hmac_addition="${3:-false}"
   local latest_identity
   local active_identity
 
@@ -904,6 +956,8 @@ verify_existing_service_secret_identity() {
     "latest Cloud Run service template"
   verify_existing_preflight_identity_hmac_ref "$active_config" \
     "active known-good Cloud Run revision"
+  verify_existing_gender_routing_hmac_refs \
+    "$latest_config" "$active_config" "$allow_staged_gender_routing_hmac_addition"
 
   latest_identity="$(apify_identity_for_existing_config "$latest_config")" \
     || die "existing worker Apify references are invalid or the selected slot version changed in the latest Cloud Run service template; active and latest identities must agree, and same-slot overwrite can strand unresolved runs and account identity"
@@ -1095,7 +1149,7 @@ record_prune_promotion_fence() {
   revision_is_ready "$active_config" "$known_good_revision" \
     || die "active Cloud Run revision was not Ready after prune staging"
   verify_prune_apify_secret_inventory "$config" "$active_config"
-  verify_existing_service_secret_identity "$config" "$active_config"
+  verify_existing_service_secret_identity "$config" "$active_config" true
   verify_prune_supabase_destination "$config" "$active_config"
   prune_promotion_generation_identity="$(service_generation_identity "$config")" \
     || die "prune staging did not expose an exactly observed Cloud Run service generation"
@@ -1123,7 +1177,7 @@ verify_prune_promotion_fence() {
   revision_is_ready "$active_config" "$known_good_revision" \
     || die "active Cloud Run revision was not Ready immediately before prune promotion"
   verify_prune_apify_secret_inventory "$config" "$active_config"
-  verify_existing_service_secret_identity "$config" "$active_config"
+  verify_existing_service_secret_identity "$config" "$active_config" true
   verify_prune_supabase_destination "$config" "$active_config"
   known_good_config="$active_config"
 }
@@ -1929,7 +1983,7 @@ build_deploy_args() {
     "--revision-suffix=$build_revision_suffix"
     "--update-labels=$PROVENANCE_LABEL_KEY=$source_commit_sha"
     '--description=Private durable Analysis V2 Cloud Tasks worker'
-    "--set-secrets=SUPABASE_SERVICE_ROLE_KEY=$SUPABASE_SECRET_ID:$supabase_secret_version,$apify_secret_assignments,IMAGE_PROXY_SIGNING_SECRET=$IMAGE_SIGNING_SECRET_ID:$image_signing_secret_version,ANALYSIS_V2_PREFLIGHT_IDENTITY_HMAC_SECRET=$PREFLIGHT_IDENTITY_HMAC_SECRET_ID:$preflight_identity_hmac_secret_version$result_image_secret_assignments"
+    "--set-secrets=SUPABASE_SERVICE_ROLE_KEY=$SUPABASE_SECRET_ID:$supabase_secret_version,$apify_secret_assignments,IMAGE_PROXY_SIGNING_SECRET=$IMAGE_SIGNING_SECRET_ID:$image_signing_secret_version,ANALYSIS_V2_PREFLIGHT_IDENTITY_HMAC_SECRET=$PREFLIGHT_IDENTITY_HMAC_SECRET_ID:$preflight_identity_hmac_secret_version,ANALYSIS_V2_GENDER_ROUTING_HMAC_SECRET=$GENDER_ROUTING_HMAC_SECRET_ID:$gender_routing_hmac_secret_version$result_image_secret_assignments"
     '--quiet'
   )
 
@@ -2484,6 +2538,7 @@ promote_staged_revision() {
   service_traffic_matches_revision "$config" "$staged_revision" \
     || die "promoted Cloud Run revision does not serve exactly 100% of traffic"
   verify_revision_provenance "$staged_revision" "$source_commit_sha"
+  verify_existing_gender_routing_hmac_refs "$config" "$verified_revision_config"
   if [[ "$prune_apify_secret_refs_enabled" == "true" \
     || "$clear_apify_secret_ref_prune_fence_enabled" == "true" ]]; then
     log "promoted verified revision: $staged_revision (source provenance verified)"
@@ -2555,7 +2610,8 @@ for name in \
   ANALYSIS_V2_SUPABASE_SERVICE_ROLE_SECRET_VERSION \
   ANALYSIS_V2_APIFY_API_TOKEN_SECRET_VERSION \
   ANALYSIS_V2_IMAGE_PROXY_SIGNING_SECRET_VERSION \
-  ANALYSIS_V2_PREFLIGHT_IDENTITY_HMAC_SECRET_VERSION; do
+  ANALYSIS_V2_PREFLIGHT_IDENTITY_HMAC_SECRET_VERSION \
+  ANALYSIS_V2_GENDER_ROUTING_HMAC_SECRET_VERSION; do
   required_env "$name"
 done
 required_env ANALYSIS_V2_WORKER_BUILD_SERVICE_ACCOUNT
@@ -2605,6 +2661,7 @@ readonly supabase_secret_version="$ANALYSIS_V2_SUPABASE_SERVICE_ROLE_SECRET_VERS
 readonly apify_secret_version="$ANALYSIS_V2_APIFY_API_TOKEN_SECRET_VERSION"
 readonly image_signing_secret_version="$ANALYSIS_V2_IMAGE_PROXY_SIGNING_SECRET_VERSION"
 readonly preflight_identity_hmac_secret_version="$ANALYSIS_V2_PREFLIGHT_IDENTITY_HMAC_SECRET_VERSION"
+readonly gender_routing_hmac_secret_version="$ANALYSIS_V2_GENDER_ROUTING_HMAC_SECRET_VERSION"
 
 [[ -z "${ANALYSIS_V2_WORKER_EXECUTION_ENABLED:-}" ]] \
   || die "ANALYSIS_V2_WORKER_EXECUTION_ENABLED was removed; set ANALYSIS_V2_WORKER_ENABLED and ANALYSIS_V2_RECOVERY_ENABLED separately"
@@ -2627,6 +2684,8 @@ validate_numeric_version "$image_signing_secret_version" \
   ANALYSIS_V2_IMAGE_PROXY_SIGNING_SECRET_VERSION
 validate_numeric_version "$preflight_identity_hmac_secret_version" \
   ANALYSIS_V2_PREFLIGHT_IDENTITY_HMAC_SECRET_VERSION
+validate_numeric_version "$gender_routing_hmac_secret_version" \
+  ANALYSIS_V2_GENDER_ROUTING_HMAC_SECRET_VERSION
 command -v jq >/dev/null 2>&1 || die "jq is required"
 explicit_additional_apify_refs_json='[]'
 parse_additional_apify_secret_versions

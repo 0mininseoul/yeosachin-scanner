@@ -127,6 +127,9 @@ case "$command_line" in
       ai-baram-v2-preflight-identity-hmac)
         [[ "$payload" == "ERERERERERERERERERERERERERERERERERERERERERE" ]] || exit 94
         ;;
+      ai-baram-v2-gender-routing-hmac)
+        [[ "$payload" == "R0VOREVSX1JPVVRJTkdfSE1BQ19TRUNSRVRfMDEyMzQ1Njc4OUFCQ0RFRg==" ]] || exit 94
+        ;;
       *) exit 95 ;;
     esac
     version=$(( $(<"$path/version-counter") + 1 ))
@@ -226,6 +229,7 @@ APIFY_SENARY_API_TOKEN=APIFY_SENARY_SECRET_SENTINEL_0123456789
 APIFY_SEPTENARY_API_TOKEN=APIFY_SEPTENARY_SECRET_SENTINEL_0123456789
 IMAGE_PROXY_SIGNING_SECRET=IMAGE_SIGNING_SECRET_SENTINEL_01234567890123456789
 ANALYSIS_V2_PREFLIGHT_IDENTITY_HMAC_SECRET=ERERERERERERERERERERERERERERERERERERERERERE
+ANALYSIS_V2_GENDER_ROUTING_HMAC_SECRET=R0VOREVSX1JPVVRJTkdfSE1BQ19TRUNSRVRfMDEyMzQ1Njc4OUFCQ0RFRg==
 EOF
 
 secret_env=(
@@ -237,6 +241,7 @@ secret_env=(
   "ANALYSIS_V2_SECRET_SOURCE_ENV_FILE=$temp_dir/source.env"
   "ANALYSIS_V2_WORKER_SOURCE_DIR=$repo_dir"
 )
+export ANALYSIS_V2_GENDER_ROUTING_HMAC_SECRET_VERSION=1
 
 touch "$temp_dir/state/api-enabled"
 if env "${secret_env[@]}" \
@@ -259,11 +264,14 @@ assert_contains "$temp_dir/missing-dry-run.out" \
   "would stream allowlisted APIFY_QUINARY_API_TOKEN directly"
 assert_contains "$temp_dir/missing-dry-run.out" \
   "gcloud secrets create ai-baram-v2-preflight-identity-hmac"
+assert_contains "$temp_dir/missing-dry-run.out" \
+  "gcloud secrets create ai-baram-v2-gender-routing-hmac"
 for sentinel in \
   SUPABASE_SECRET_SENTINEL_0123456789 \
   APIFY_QUINARY_SECRET_SENTINEL_0123456789 \
   IMAGE_SIGNING_SECRET_SENTINEL_01234567890123456789 \
-  ERERERERERERERERERERERERERERERERERERERERERE; do
+  ERERERERERERERERERERERERERERERERERERERERERE \
+  R0VOREVSX1JPVVRJTkdfSE1BQ19TRUNSRVRfMDEyMzQ1Njc4OUFCQ0RFRg==; do
   assert_not_contains "$temp_dir/missing-dry-run.out" "$sentinel"
 done
 
@@ -325,7 +333,8 @@ for secret_id in \
   ai-baram-v2-supabase-service-role \
   ai-baram-v2-apify-quinary \
   ai-baram-v2-image-proxy-signing \
-  ai-baram-v2-preflight-identity-hmac; do
+  ai-baram-v2-preflight-identity-hmac \
+  ai-baram-v2-gender-routing-hmac; do
   [[ -f "$temp_dir/recovery-state/secrets/$secret_id/versions/1.json" ]] \
     || fail "interrupted apply recovery did not create version 1 for $secret_id"
 done
@@ -344,11 +353,14 @@ assert_contains "$temp_dir/missing-apply.out" \
   "pin: ANALYSIS_V2_IMAGE_PROXY_SIGNING_SECRET_VERSION=1"
 assert_contains "$temp_dir/missing-apply.out" \
   "pin: ANALYSIS_V2_PREFLIGHT_IDENTITY_HMAC_SECRET_VERSION=1"
+assert_contains "$temp_dir/missing-apply.out" \
+  "pin: ANALYSIS_V2_GENDER_ROUTING_HMAC_SECRET_VERSION=1"
 for secret_id in \
   ai-baram-v2-supabase-service-role \
   ai-baram-v2-apify-quinary \
   ai-baram-v2-image-proxy-signing \
-  ai-baram-v2-preflight-identity-hmac; do
+  ai-baram-v2-preflight-identity-hmac \
+  ai-baram-v2-gender-routing-hmac; do
   [[ -f "$temp_dir/state/secrets/$secret_id/versions/1.json" ]] \
     || fail "initial apply did not create version 1 for $secret_id"
   jq -e \
@@ -363,13 +375,14 @@ for secret_id in \
   ' "$temp_dir/state/secrets/$secret_id/policy.json" >/dev/null \
     || fail "initial apply did not create exact IAM for $secret_id"
 done
-[[ "$(wc -l <"$temp_dir/state/sleep-calls" | tr -d ' ')" == "8" ]] \
+[[ "$(wc -l <"$temp_dir/state/sleep-calls" | tr -d ' ')" == "10" ]] \
   || fail "post-create visibility retry was not bounded to the injected transient failures"
 for sentinel in \
   SUPABASE_SECRET_SENTINEL_0123456789 \
   APIFY_QUINARY_SECRET_SENTINEL_0123456789 \
   IMAGE_SIGNING_SECRET_SENTINEL_01234567890123456789 \
-  ERERERERERERERERERERERERERERERERERERERERERE; do
+  ERERERERERERERERERERERERERERERERERERERERERE \
+  R0VOREVSX1JPVVRJTkdfSE1BQ19TRUNSRVRfMDEyMzQ1Njc4OUFCQ0RFRg==; do
   assert_not_contains "$temp_dir/missing-apply.out" "$sentinel"
 done
 
@@ -378,7 +391,32 @@ pinned_env=(
   'ANALYSIS_V2_APIFY_API_TOKEN_SECRET_VERSION=1'
   'ANALYSIS_V2_IMAGE_PROXY_SIGNING_SECRET_VERSION=1'
   'ANALYSIS_V2_PREFLIGHT_IDENTITY_HMAC_SECRET_VERSION=1'
+  'ANALYSIS_V2_GENDER_ROUTING_HMAC_SECRET_VERSION=1'
 )
+for gender_routing_hmac_mode in apply dry-run check; do
+  if [[ "$gender_routing_hmac_mode" == "apply" ]]; then
+    if env -u ANALYSIS_V2_GENDER_ROUTING_HMAC_SECRET_VERSION "${secret_env[@]}" \
+      bash "$script_dir/configure-analysis-v2-secrets.sh" \
+      >"$temp_dir/gender-routing-hmac-unpinned-$gender_routing_hmac_mode.out" 2>&1; then
+      gender_routing_hmac_status="0"
+    else
+      gender_routing_hmac_status="$?"
+    fi
+  else
+    if env -u ANALYSIS_V2_GENDER_ROUTING_HMAC_SECRET_VERSION "${secret_env[@]}" \
+      bash "$script_dir/configure-analysis-v2-secrets.sh" "--$gender_routing_hmac_mode" \
+      >"$temp_dir/gender-routing-hmac-unpinned-$gender_routing_hmac_mode.out" 2>&1; then
+      gender_routing_hmac_status="0"
+    else
+      gender_routing_hmac_status="$?"
+    fi
+  fi
+  if [[ "$gender_routing_hmac_status" == "0" ]]; then
+    fail "unpinned gender-routing HMAC lifecycle $gender_routing_hmac_mode was accepted"
+  fi
+  assert_contains "$temp_dir/gender-routing-hmac-unpinned-$gender_routing_hmac_mode.out" \
+    "ANALYSIS_V2_GENDER_ROUTING_HMAC_SECRET_VERSION is required"
+done
 env "${secret_env[@]}" "${pinned_env[@]}" \
   bash "$script_dir/configure-analysis-v2-secrets.sh" --check \
   >"$temp_dir/ready-check.out"
@@ -542,6 +580,30 @@ assert_contains "$temp_dir/rotate-apify.out" \
   || fail "Apify rotation unexpectedly rotated the Supabase secret"
 assert_not_contains "$temp_dir/rotate-apify.out" \
   "APIFY_QUINARY_SECRET_SENTINEL_0123456789"
+
+invalid_gender_hmac_source="$temp_dir/invalid-gender-routing-hmac.env"
+sed 's|^ANALYSIS_V2_GENDER_ROUTING_HMAC_SECRET=.*|ANALYSIS_V2_GENDER_ROUTING_HMAC_SECRET=not-a-canonical-base64-hmac-value|' \
+  "$temp_dir/source.env" >"$invalid_gender_hmac_source"
+if env "${secret_env[@]}" "${pinned_env[@]}" \
+  "ANALYSIS_V2_SECRET_SOURCE_ENV_FILE=$invalid_gender_hmac_source" \
+  'ANALYSIS_V2_GENDER_ROUTING_HMAC_SECRET_VERSION=2' \
+  bash "$script_dir/configure-analysis-v2-secrets.sh" --rotate gender-routing-hmac \
+  >"$temp_dir/invalid-gender-routing-hmac.out" 2>&1; then
+  fail "invalid gender-routing HMAC source was accepted"
+fi
+assert_contains "$temp_dir/invalid-gender-routing-hmac.out" \
+  "required secret source value is missing or invalid: ANALYSIS_V2_GENDER_ROUTING_HMAC_SECRET"
+
+env "${secret_env[@]}" "${pinned_env[@]}" \
+  'ANALYSIS_V2_GENDER_ROUTING_HMAC_SECRET_VERSION=2' \
+  bash "$script_dir/configure-analysis-v2-secrets.sh" --rotate gender-routing-hmac \
+  >"$temp_dir/rotate-gender-routing-hmac.out"
+assert_contains "$temp_dir/rotate-gender-routing-hmac.out" \
+  "pin: ANALYSIS_V2_GENDER_ROUTING_HMAC_SECRET_VERSION=2"
+[[ -f "$temp_dir/state/secrets/ai-baram-v2-gender-routing-hmac/versions/2.json" ]] \
+  || fail "explicit gender-routing HMAC rotation did not add version 2"
+assert_not_contains "$temp_dir/rotate-gender-routing-hmac.out" \
+  "R0VOREVSX1JPVVRJTkdfSE1BQ19TRUNSRVRfMDEyMzQ1Njc4OUFCQ0RFRg=="
 
 if env "${secret_env[@]}" \
   bash "$script_dir/configure-analysis-v2-secrets.sh" --check \
@@ -759,7 +821,8 @@ for sentinel in \
   APIFY_QUINARY_SECRET_SENTINEL_0123456789 \
   APIFY_SEPTENARY_SECRET_SENTINEL_0123456789 \
   IMAGE_SIGNING_SECRET_SENTINEL_01234567890123456789 \
-  ERERERERERERERERERERERERERERERERERERERERERE; do
+  ERERERERERERERERERERERERERERERERERERERERERE \
+  R0VOREVSX1JPVVRJTkdfSE1BQ19TRUNSRVRfMDEyMzQ1Njc4OUFCQ0RFRg==; do
   assert_not_contains "$runtime_file" "$sentinel"
   assert_not_contains "$build_file" "$sentinel"
   assert_not_contains "$temp_dir/generator.out" "$sentinel"

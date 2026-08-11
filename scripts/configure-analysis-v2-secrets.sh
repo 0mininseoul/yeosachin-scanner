@@ -9,6 +9,7 @@ readonly SECRET_OBSERVE_RETRY_DELAY_SECONDS=1
 readonly SUPABASE_SECRET_ID="ai-baram-v2-supabase-service-role"
 readonly IMAGE_SIGNING_SECRET_ID="ai-baram-v2-image-proxy-signing"
 readonly PREFLIGHT_IDENTITY_HMAC_SECRET_ID="ai-baram-v2-preflight-identity-hmac"
+readonly GENDER_ROUTING_HMAC_SECRET_ID="ai-baram-v2-gender-routing-hmac"
 
 mode="apply"
 rotate_target=""
@@ -18,7 +19,7 @@ usage() {
   cat <<'EOF'
 Usage: scripts/configure-analysis-v2-secrets.sh [--dry-run | --check] [--rotate TARGET] [--reconcile-iam]
 
-Creates or verifies the four Analysis V2 Secret Manager resources and grants
+Creates or verifies the five Analysis V2 Secret Manager resources and grants
 the Cloud Run runtime identity resource-scoped access. Secret values are read
 only when a version must be created, and are streamed from an outside-source
 dotenv file directly to gcloud over stdin.
@@ -35,24 +36,28 @@ Required for creating or rotating a version:
   ANALYSIS_V2_SECRET_SOURCE_ENV_FILE
     Dotenv file outside ANALYSIS_V2_WORKER_SOURCE_DIR. It must contain
     SUPABASE_SERVICE_ROLE_KEY, IMAGE_PROXY_SIGNING_SECRET,
-    ANALYSIS_V2_PREFLIGHT_IDENTITY_HMAC_SECRET, and the one selected
-    APIFY_<SLOT>_API_TOKEN. The file is never sourced as shell code. The preflight
-    identity secret must be base64/base64url encoding of at least 32 random bytes.
+    ANALYSIS_V2_PREFLIGHT_IDENTITY_HMAC_SECRET,
+    ANALYSIS_V2_GENDER_ROUTING_HMAC_SECRET, and the one selected
+    APIFY_<SLOT>_API_TOKEN. The file is never sourced as shell code. Both HMAC
+    secrets must be base64/base64url encoding of at least 32 random bytes.
 
-Optional exact numeric version pins:
+Exact numeric version pins:
   ANALYSIS_V2_SUPABASE_SERVICE_ROLE_SECRET_VERSION
   ANALYSIS_V2_APIFY_API_TOKEN_SECRET_VERSION
   ANALYSIS_V2_IMAGE_PROXY_SIGNING_SECRET_VERSION
   ANALYSIS_V2_PREFLIGHT_IDENTITY_HMAC_SECRET_VERSION
+  ANALYSIS_V2_GENDER_ROUTING_HMAC_SECRET_VERSION
 
 When a pin is omitted, exactly one enabled numeric version must be discoverable.
-`latest` is never accepted. Deployments require all four explicit pins. A
+`latest` is never accepted. Deployments require all five explicit pins. The
+gender-routing HMAC pin is required even when its resource has one enabled
+version, so rollout intent can never rely on discovery. A
 create-only interrupted resource with no version history resumes its initial
 version on ordinary apply. If version history exists but every version is
 disabled, ordinary apply fails closed and an explicit rotation is required.
 
 Rotate targets:
-  supabase | apify | image-signing | preflight-identity-hmac
+  supabase | apify | image-signing | preflight-identity-hmac | gender-routing-hmac
 
 Rotation is explicit and adds one enabled version without disabling the old
 version. The script prints the new non-secret numeric pin; update the deployment
@@ -371,9 +376,15 @@ validate_secret_source_value() {
         console.error(`required secret source value is missing or invalid: ${key}`);
         process.exit(1);
       }
-      if (key === "ANALYSIS_V2_PREFLIGHT_IDENTITY_HMAC_SECRET") {
+      if (
+        key === "ANALYSIS_V2_PREFLIGHT_IDENTITY_HMAC_SECRET"
+        || key === "ANALYSIS_V2_GENDER_ROUTING_HMAC_SECRET"
+      ) {
         const raw = value.trim();
-        if (!/^[A-Za-z0-9+/_-]+={0,2}$/.test(raw) || raw.length % 4 === 1) process.exit(1);
+        if (!/^[A-Za-z0-9+/_-]+={0,2}$/.test(raw) || raw.length % 4 === 1) {
+          console.error(`required secret source value is missing or invalid: ${key}`);
+          process.exit(1);
+        }
         const normalized = raw.replace(/-/g, "+").replace(/_/g, "/").replace(/=+$/, "");
         const decoded = Buffer.from(normalized + "=".repeat((4 - normalized.length % 4) % 4), "base64");
         if (decoded.length < 32 || decoded.toString("base64").replace(/=+$/, "") !== normalized) {
@@ -564,7 +575,7 @@ while (($# > 0)); do
       ;;
     --rotate)
       shift
-      (($# > 0)) || die "--rotate requires supabase, apify, image-signing, or preflight-identity-hmac"
+      (($# > 0)) || die "--rotate requires supabase, apify, image-signing, preflight-identity-hmac, or gender-routing-hmac"
       [[ -z "$rotate_target" ]] || die "choose only one rotate target"
       rotate_target="$1"
       ;;
@@ -586,8 +597,8 @@ done
 normalize_worker_runtime_identity
 
 case "$rotate_target" in
-  ''|supabase|apify|image-signing|preflight-identity-hmac) ;;
-  *) die "--rotate requires supabase, apify, image-signing, or preflight-identity-hmac" ;;
+  ''|supabase|apify|image-signing|preflight-identity-hmac|gender-routing-hmac) ;;
+  *) die "--rotate requires supabase, apify, image-signing, preflight-identity-hmac, or gender-routing-hmac" ;;
 esac
 [[ "$mode" != "check" || -z "$rotate_target" ]] \
   || die "--check cannot be combined with --rotate"
@@ -606,6 +617,17 @@ validate_service_account_email \
   == "$ANALYSIS_V2_TASKS_PROJECT" ]] \
   || die "worker runtime service account must belong to ANALYSIS_V2_TASKS_PROJECT"
 validate_slot "$ANALYSIS_V2_APIFY_API_TOKEN_SLOT"
+
+if [[ "$rotate_target" != "gender-routing-hmac" ]]; then
+  required_env ANALYSIS_V2_GENDER_ROUTING_HMAC_SECRET_VERSION
+  validate_numeric_version \
+    "$ANALYSIS_V2_GENDER_ROUTING_HMAC_SECRET_VERSION" \
+    ANALYSIS_V2_GENDER_ROUTING_HMAC_SECRET_VERSION
+elif [[ -n "${ANALYSIS_V2_GENDER_ROUTING_HMAC_SECRET_VERSION:-}" ]]; then
+  validate_numeric_version \
+    "$ANALYSIS_V2_GENDER_ROUTING_HMAC_SECRET_VERSION" \
+    ANALYSIS_V2_GENDER_ROUTING_HMAC_SECRET_VERSION
+fi
 
 readonly slot_upper="$(printf '%s' "$ANALYSIS_V2_APIFY_API_TOKEN_SLOT" | tr '[:lower:]' '[:upper:]')"
 readonly apify_env_key="APIFY_${slot_upper}_API_TOKEN"
@@ -672,6 +694,12 @@ process_secret \
   ANALYSIS_V2_PREFLIGHT_IDENTITY_HMAC_SECRET \
   "${ANALYSIS_V2_PREFLIGHT_IDENTITY_HMAC_SECRET_VERSION:-}" \
   ANALYSIS_V2_PREFLIGHT_IDENTITY_HMAC_SECRET_VERSION
+process_secret \
+  gender-routing-hmac \
+  "$GENDER_ROUTING_HMAC_SECRET_ID" \
+  ANALYSIS_V2_GENDER_ROUTING_HMAC_SECRET \
+  "${ANALYSIS_V2_GENDER_ROUTING_HMAC_SECRET_VERSION:-}" \
+  ANALYSIS_V2_GENDER_ROUTING_HMAC_SECRET_VERSION
 
 if [[ "$mode" == "dry-run" ]]; then
   log "dry-run complete: no mutations were applied and no secret value was printed"

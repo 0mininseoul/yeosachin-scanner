@@ -673,6 +673,8 @@ case "$command_line" in
     done
     [[ "$deploy_source_count" -eq 1 ]] || exit 92
     [[ -n "$deploy_source" && -d "$deploy_source" ]] || exit 92
+    [[ "$secret_assignments" == *"ANALYSIS_V2_GENDER_ROUTING_HMAC_SECRET=ai-baram-v2-gender-routing-hmac:${ANALYSIS_V2_GENDER_ROUTING_HMAC_SECRET_VERSION:-}"* ]] \
+      || exit 92
     case "$deploy_source" in
       "${TMPDIR:-/tmp}"/analysis-v2-source.*) ;;
       *) exit 92 ;;
@@ -898,6 +900,8 @@ case "$command_line" in
       apify_bad_ref_slot="${FAKE_GCLOUD_APIFY_BAD_REF_SLOT:-}"
       identity_hmac_mode="${FAKE_GCLOUD_IDENTITY_HMAC_MODE:-canonical}"
       identity_hmac_version="${FAKE_GCLOUD_IDENTITY_HMAC_VERSION:-7}"
+      gender_routing_hmac_mode="${FAKE_GCLOUD_GENDER_ROUTING_HMAC_MODE:-canonical}"
+      gender_routing_hmac_version="${FAKE_GCLOUD_GENDER_ROUTING_HMAC_VERSION:-7}"
       supabase_public_url="${FAKE_GCLOUD_SUPABASE_URL:-https://abcdefghijklmnopqrst.supabase.co}"
       supabase_plaintext='false'
       sidecar='false'
@@ -981,6 +985,8 @@ case "$command_line" in
         --arg apify_bad_ref_slot "$apify_bad_ref_slot" \
         --arg identity_hmac_mode "$identity_hmac_mode" \
         --arg identity_hmac_version "$identity_hmac_version" \
+        --arg gender_routing_hmac_mode "$gender_routing_hmac_mode" \
+        --arg gender_routing_hmac_version "$gender_routing_hmac_version" \
         --arg supabase_public_url "$supabase_public_url" \
         --argjson supabase_plaintext "$supabase_plaintext" \
         --argjson sidecar "$sidecar" \
@@ -1089,10 +1095,30 @@ case "$command_line" in
                      name: "ANALYSIS_V2_PREFLIGHT_IDENTITY_HMAC_SECRET",
                      valueFrom: {secretKeyRef: {name: "ai-baram-v2-preflight-identity-hmac", key: $identity_hmac_version}}
                    }]
-                   else [{
+                  else [{
                      name: "ANALYSIS_V2_PREFLIGHT_IDENTITY_HMAC_SECRET",
                      valueFrom: {secretKeyRef: {name: "ai-baram-v2-preflight-identity-hmac", key: $identity_hmac_version}}
-                   }] end)
+                   }] end),
+                  (if $gender_routing_hmac_mode == "absent" then []
+                     elif $gender_routing_hmac_mode == "plaintext" then [{
+                       name: "ANALYSIS_V2_GENDER_ROUTING_HMAC_SECRET",
+                       value: "PLAINTEXT_GENDER_ROUTING_HMAC_SENTINEL_MUST_NOT_BE_PRINTED"
+                     }]
+                     elif $gender_routing_hmac_mode == "wrong-secret" then [{
+                       name: "ANALYSIS_V2_GENDER_ROUTING_HMAC_SECRET",
+                       valueFrom: {secretKeyRef: {name: "wrong-gender-routing-hmac", key: $gender_routing_hmac_version}}
+                     }]
+                     elif $gender_routing_hmac_mode == "duplicate" then [{
+                       name: "ANALYSIS_V2_GENDER_ROUTING_HMAC_SECRET",
+                       valueFrom: {secretKeyRef: {name: "ai-baram-v2-gender-routing-hmac", key: $gender_routing_hmac_version}}
+                     }, {
+                       name: "ANALYSIS_V2_GENDER_ROUTING_HMAC_SECRET",
+                       valueFrom: {secretKeyRef: {name: "ai-baram-v2-gender-routing-hmac", key: $gender_routing_hmac_version}}
+                     }]
+                     else [{
+                       name: "ANALYSIS_V2_GENDER_ROUTING_HMAC_SECRET",
+                       valueFrom: {secretKeyRef: {name: "ai-baram-v2-gender-routing-hmac", key: $gender_routing_hmac_version}}
+                     }] end)
                 ]
                   | flatten
                   + if $credential_name == "" then [] else
@@ -1174,6 +1200,8 @@ case "$command_line" in
     active_apify_secret_version="${FAKE_GCLOUD_ACTIVE_APIFY_SECRET_VERSION:-${FAKE_GCLOUD_APIFY_SECRET_VERSION:-7}}"
     active_identity_hmac_mode="${FAKE_GCLOUD_ACTIVE_IDENTITY_HMAC_MODE:-${FAKE_GCLOUD_IDENTITY_HMAC_MODE:-canonical}}"
     active_identity_hmac_version="${FAKE_GCLOUD_ACTIVE_IDENTITY_HMAC_VERSION:-${FAKE_GCLOUD_IDENTITY_HMAC_VERSION:-7}}"
+    active_gender_routing_hmac_mode="${FAKE_GCLOUD_ACTIVE_GENDER_ROUTING_HMAC_MODE:-${FAKE_GCLOUD_GENDER_ROUTING_HMAC_MODE:-canonical}}"
+    active_gender_routing_hmac_version="${FAKE_GCLOUD_ACTIVE_GENDER_ROUTING_HMAC_VERSION:-${FAKE_GCLOUD_GENDER_ROUTING_HMAC_VERSION:-7}}"
     active_supabase_public_url="${FAKE_GCLOUD_ACTIVE_SUPABASE_URL:-${FAKE_GCLOUD_SUPABASE_URL:-https://abcdefghijklmnopqrst.supabase.co}}"
     active_authorized_test_sharding="${FAKE_GCLOUD_ACTIVE_SHARDING_ENABLED:-${FAKE_GCLOUD_SHARDING_ENABLED:-false}}"
     revision_image='asia-northeast3-docker.pkg.dev/test-project/cloud-run-source-deploy/analysis-worker@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
@@ -1191,6 +1219,8 @@ case "$command_line" in
       --arg active_apify_secret_version "$active_apify_secret_version" \
       --arg active_identity_hmac_mode "$active_identity_hmac_mode" \
       --arg active_identity_hmac_version "$active_identity_hmac_version" \
+      --arg active_gender_routing_hmac_mode "$active_gender_routing_hmac_mode" \
+      --arg active_gender_routing_hmac_version "$active_gender_routing_hmac_version" \
       --arg active_supabase_public_url "$active_supabase_public_url" \
       --arg active_authorized_test_sharding "$active_authorized_test_sharding" \
       --arg revision_image "$revision_image" \
@@ -1248,6 +1278,26 @@ case "$command_line" in
              else [{
                name: "ANALYSIS_V2_PREFLIGHT_IDENTITY_HMAC_SECRET",
                valueFrom: {secretKeyRef: {name: "ai-baram-v2-preflight-identity-hmac", key: $active_identity_hmac_version}}
+             }] end)
+          + (if $active_gender_routing_hmac_mode == "absent" then []
+             elif $active_gender_routing_hmac_mode == "plaintext" then [{
+               name: "ANALYSIS_V2_GENDER_ROUTING_HMAC_SECRET",
+               value: "PLAINTEXT_ACTIVE_GENDER_ROUTING_HMAC_SENTINEL_MUST_NOT_BE_PRINTED"
+             }]
+             elif $active_gender_routing_hmac_mode == "wrong-secret" then [{
+               name: "ANALYSIS_V2_GENDER_ROUTING_HMAC_SECRET",
+               valueFrom: {secretKeyRef: {name: "wrong-gender-routing-hmac", key: $active_gender_routing_hmac_version}}
+             }]
+             elif $active_gender_routing_hmac_mode == "duplicate" then [{
+               name: "ANALYSIS_V2_GENDER_ROUTING_HMAC_SECRET",
+               valueFrom: {secretKeyRef: {name: "ai-baram-v2-gender-routing-hmac", key: $active_gender_routing_hmac_version}}
+             }, {
+               name: "ANALYSIS_V2_GENDER_ROUTING_HMAC_SECRET",
+               valueFrom: {secretKeyRef: {name: "ai-baram-v2-gender-routing-hmac", key: $active_gender_routing_hmac_version}}
+             }]
+             else [{
+               name: "ANALYSIS_V2_GENDER_ROUTING_HMAC_SECRET",
+               valueFrom: {secretKeyRef: {name: "ai-baram-v2-gender-routing-hmac", key: $active_gender_routing_hmac_version}}
              }] end))
         }]
       },
@@ -1582,6 +1632,12 @@ BETATEST_FREE_POOL_REFRESH_INTERVAL_SECONDS="60"
 SELFHOSTED_PROFILE_GLOBAL_GATE_ENABLED="true"
 SELFHOSTED_PROFILE_GLOBAL_MIN_INTERVAL_MS="750"
 SELFHOSTED_PROFILE_GLOBAL_RESPONSE_GUARD_MS="100"
+SELFHOSTED_AUTH_ENABLED="false"
+SCRAPER_FOLLOWERS="apify"
+SCRAPER_FOLLOWING="apify"
+SCRAPER_LIKERS="apify"
+SCRAPER_COMMENTS="apify"
+SCRAPER_FALLBACK="false"
 EOF
 
 cat >"$temp_dir/runtime-beta-secondary-slot.env" <<'EOF'
@@ -1593,6 +1649,12 @@ BETATEST_FREE_POOL_REFRESH_INTERVAL_SECONDS="60"
 SELFHOSTED_PROFILE_GLOBAL_GATE_ENABLED="true"
 SELFHOSTED_PROFILE_GLOBAL_MIN_INTERVAL_MS="750"
 SELFHOSTED_PROFILE_GLOBAL_RESPONSE_GUARD_MS="100"
+SELFHOSTED_AUTH_ENABLED="false"
+SCRAPER_FOLLOWERS="apify"
+SCRAPER_FOLLOWING="apify"
+SCRAPER_LIKERS="apify"
+SCRAPER_COMMENTS="apify"
+SCRAPER_FALLBACK="false"
 EOF
 
 cat >"$temp_dir/runtime-primary-slot.env" <<'EOF'
@@ -1606,6 +1668,12 @@ NEXT_PUBLIC_SUPABASE_URL="https://abcdefghijklmnopqrst.supabase.co"
 SELFHOSTED_PROFILE_GLOBAL_GATE_ENABLED="true"
 SELFHOSTED_PROFILE_GLOBAL_MIN_INTERVAL_MS="750"
 SELFHOSTED_PROFILE_GLOBAL_RESPONSE_GUARD_MS="100"
+SELFHOSTED_AUTH_ENABLED="false"
+SCRAPER_FOLLOWERS="apify"
+SCRAPER_FOLLOWING="apify"
+SCRAPER_LIKERS="apify"
+SCRAPER_COMMENTS="apify"
+SCRAPER_FALLBACK="false"
 EOF
 
 cat >"$temp_dir/build.yaml" <<'EOF'
@@ -1693,6 +1761,7 @@ common_env=(
   'ANALYSIS_V2_APIFY_ADDITIONAL_SECRET_VERSIONS=primary:7,secondary:7,tertiary:7,quaternary:7,senary:7,septenary:7'
   'ANALYSIS_V2_IMAGE_PROXY_SIGNING_SECRET_VERSION=7'
   'ANALYSIS_V2_PREFLIGHT_IDENTITY_HMAC_SECRET_VERSION=7'
+  'ANALYSIS_V2_GENDER_ROUTING_HMAC_SECRET_VERSION=7'
   'ANALYSIS_V2_WORKER_ENABLED=false'
   'ANALYSIS_V2_RECOVERY_ENABLED=false'
   'ANALYSIS_V2_DEPLOY_REVISION_NONCE=abc12'
@@ -2109,7 +2178,7 @@ assert_contains "$temp_dir/worker.out" \
 assert_contains "$temp_dir/worker.out" \
   "--build-service-account=projects/test-project/serviceAccounts/analysis-build@test-project.iam.gserviceaccount.com"
 assert_contains "$temp_dir/worker.out" \
-  "--set-secrets=SUPABASE_SERVICE_ROLE_KEY=ai-baram-v2-supabase-service-role:7\\,APIFY_PRIMARY_API_TOKEN=ai-baram-v2-apify-primary:7\\,APIFY_QUATERNARY_API_TOKEN=ai-baram-v2-apify-quaternary:7\\,APIFY_QUINARY_API_TOKEN=ai-baram-v2-apify-quinary:7\\,APIFY_SECONDARY_API_TOKEN=ai-baram-v2-apify-secondary:7\\,APIFY_SENARY_API_TOKEN=ai-baram-v2-apify-senary:7\\,APIFY_SEPTENARY_API_TOKEN=ai-baram-v2-apify-septenary:7\\,APIFY_TERTIARY_API_TOKEN=ai-baram-v2-apify-tertiary:7\\,IMAGE_PROXY_SIGNING_SECRET=ai-baram-v2-image-proxy-signing:7\\,ANALYSIS_V2_PREFLIGHT_IDENTITY_HMAC_SECRET=ai-baram-v2-preflight-identity-hmac:7"
+  "--set-secrets=SUPABASE_SERVICE_ROLE_KEY=ai-baram-v2-supabase-service-role:7\\,APIFY_PRIMARY_API_TOKEN=ai-baram-v2-apify-primary:7\\,APIFY_QUATERNARY_API_TOKEN=ai-baram-v2-apify-quaternary:7\\,APIFY_QUINARY_API_TOKEN=ai-baram-v2-apify-quinary:7\\,APIFY_SECONDARY_API_TOKEN=ai-baram-v2-apify-secondary:7\\,APIFY_SENARY_API_TOKEN=ai-baram-v2-apify-senary:7\\,APIFY_SEPTENARY_API_TOKEN=ai-baram-v2-apify-septenary:7\\,APIFY_TERTIARY_API_TOKEN=ai-baram-v2-apify-tertiary:7\\,IMAGE_PROXY_SIGNING_SECRET=ai-baram-v2-image-proxy-signing:7\\,ANALYSIS_V2_PREFLIGHT_IDENTITY_HMAC_SECRET=ai-baram-v2-preflight-identity-hmac:7\\,ANALYSIS_V2_GENDER_ROUTING_HMAC_SECRET=ai-baram-v2-gender-routing-hmac:7"
 assert_contains "$temp_dir/worker.out" "roles/run.invoker will contain only task and maintenance OIDC identities"
 assert_not_contains "$temp_dir/worker.out" "SECRET_SENTINEL_MUST_NOT_BE_PRINTED"
 assert_not_contains "$temp_dir/worker.out" "PUBLIC_BUILD_SENTINEL_MUST_NOT_BE_PRINTED"
@@ -3844,6 +3913,85 @@ assert_contains "$temp_dir/worker-hmac-plaintext.out" \
   'deployed worker contains a forbidden plaintext provider or credential value'
 assert_not_contains "$temp_dir/worker-hmac-plaintext.out" \
   'PLAINTEXT_HMAC_SENTINEL_MUST_NOT_BE_PRINTED'
+
+# The gender-routing HMAC is new, so an existing worker may add it only when
+# both current service surfaces are cleanly absent. All malformed, partial, or
+# version-changing states must be rejected before Cloud Run staging.
+env "${common_env[@]}" 'FAKE_GCLOUD_STATE=ready' \
+  'FAKE_GCLOUD_GENDER_ROUTING_HMAC_MODE=absent' \
+  'FAKE_GCLOUD_ACTIVE_GENDER_ROUTING_HMAC_MODE=absent' \
+  "ANALYSIS_V2_WORKER_ENV_VARS_FILE=$temp_dir/runtime.env" \
+  bash "$script_dir/deploy-analysis-v2-worker.sh" --dry-run \
+  >"$temp_dir/worker-gender-routing-hmac-initial.out"
+assert_contains "$temp_dir/worker-gender-routing-hmac-initial.out" \
+  'ANALYSIS_V2_GENDER_ROUTING_HMAC_SECRET=ai-baram-v2-gender-routing-hmac:7'
+
+if env "${common_env[@]}" 'FAKE_GCLOUD_STATE=ready' \
+  'ANALYSIS_V2_GENDER_ROUTING_HMAC_SECRET_VERSION=' \
+  "ANALYSIS_V2_WORKER_ENV_VARS_FILE=$temp_dir/runtime.env" \
+  bash "$script_dir/deploy-analysis-v2-worker.sh" --dry-run \
+  >"$temp_dir/worker-gender-routing-hmac-unpinned.out" 2>&1; then
+  fail "unpinned gender-routing HMAC deployment was accepted"
+fi
+assert_contains "$temp_dir/worker-gender-routing-hmac-unpinned.out" \
+  'ANALYSIS_V2_GENDER_ROUTING_HMAC_SECRET_VERSION is required'
+
+for gender_routing_hmac_mode in wrong-secret duplicate; do
+  if env "${common_env[@]}" 'FAKE_GCLOUD_STATE=ready' \
+    "FAKE_GCLOUD_GENDER_ROUTING_HMAC_MODE=$gender_routing_hmac_mode" \
+    "ANALYSIS_V2_WORKER_ENV_VARS_FILE=$temp_dir/runtime.env" \
+    bash "$script_dir/deploy-analysis-v2-worker.sh" --dry-run \
+    >"$temp_dir/worker-gender-routing-hmac-$gender_routing_hmac_mode.out" 2>&1; then
+    fail "invalid gender-routing HMAC reference was accepted: $gender_routing_hmac_mode"
+  fi
+  assert_contains "$temp_dir/worker-gender-routing-hmac-$gender_routing_hmac_mode.out" \
+    'gender-routing HMAC reference is invalid or its numeric version changed'
+done
+
+if env "${common_env[@]}" 'FAKE_GCLOUD_STATE=ready' \
+  'FAKE_GCLOUD_GENDER_ROUTING_HMAC_MODE=plaintext' \
+  "ANALYSIS_V2_WORKER_ENV_VARS_FILE=$temp_dir/runtime.env" \
+  bash "$script_dir/deploy-analysis-v2-worker.sh" --dry-run \
+  >"$temp_dir/worker-gender-routing-hmac-plaintext.out" 2>&1; then
+  fail "plaintext gender-routing HMAC reference was accepted"
+fi
+assert_contains "$temp_dir/worker-gender-routing-hmac-plaintext.out" \
+  'deployed worker contains a forbidden plaintext provider or credential value'
+assert_not_contains "$temp_dir/worker-gender-routing-hmac-plaintext.out" \
+  'PLAINTEXT_GENDER_ROUTING_HMAC_SENTINEL_MUST_NOT_BE_PRINTED'
+
+for gender_routing_hmac_version in latest 8; do
+  if env "${common_env[@]}" 'FAKE_GCLOUD_STATE=ready' \
+    "FAKE_GCLOUD_GENDER_ROUTING_HMAC_VERSION=$gender_routing_hmac_version" \
+    "ANALYSIS_V2_WORKER_ENV_VARS_FILE=$temp_dir/runtime.env" \
+    bash "$script_dir/deploy-analysis-v2-worker.sh" --dry-run \
+    >"$temp_dir/worker-gender-routing-hmac-v$gender_routing_hmac_version.out" 2>&1; then
+    fail "unmatched gender-routing HMAC version was accepted: $gender_routing_hmac_version"
+  fi
+  assert_contains "$temp_dir/worker-gender-routing-hmac-v$gender_routing_hmac_version.out" \
+    'gender-routing HMAC reference is invalid or its numeric version changed'
+done
+
+if env "${common_env[@]}" 'FAKE_GCLOUD_STATE=ready' \
+  'FAKE_GCLOUD_GENDER_ROUTING_HMAC_MODE=absent' \
+  'FAKE_GCLOUD_ACTIVE_GENDER_ROUTING_HMAC_MODE=canonical' \
+  "ANALYSIS_V2_WORKER_ENV_VARS_FILE=$temp_dir/runtime.env" \
+  bash "$script_dir/deploy-analysis-v2-worker.sh" --dry-run \
+  >"$temp_dir/worker-gender-routing-hmac-partial.out" 2>&1; then
+  fail "partially injected gender-routing HMAC reference was accepted"
+fi
+assert_contains "$temp_dir/worker-gender-routing-hmac-partial.out" \
+  'gender-routing HMAC refs must be either absent from both existing service surfaces or exact on both'
+
+if env "${common_env[@]}" 'FAKE_GCLOUD_STATE=ready' \
+  'FAKE_GCLOUD_GENDER_ROUTING_HMAC_MODE=absent' \
+  'FAKE_GCLOUD_ACTIVE_GENDER_ROUTING_HMAC_MODE=absent' \
+  bash "$script_dir/deploy-analysis-v2-worker.sh" --check \
+  >"$temp_dir/worker-gender-routing-hmac-check-absent.out" 2>&1; then
+  fail "Cloud Run check accepted an absent gender-routing HMAC reference"
+fi
+assert_contains "$temp_dir/worker-gender-routing-hmac-check-absent.out" \
+  'Cloud Run worker runtime, scaling, egress, or artifact config has drifted'
 
 if env "${common_env[@]}" 'FAKE_GCLOUD_STATE=ready' \
   'FAKE_GCLOUD_APIFY_SECRET_SLOTS=primary,secondary,tertiary,quaternary,quinary,senary' \
