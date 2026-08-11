@@ -5,6 +5,8 @@ import { AmplitudeProvider } from "@/components/amplitude-provider";
 import { CANONICAL_APP_ORIGIN } from "@/lib/constants/app-url";
 import "./globals.css";
 
+const naverSiteVerification = process.env.NAVER_SITE_VERIFICATION?.trim();
+
 const paperlogy = localFont({
   variable: "--font-paperlogy",
   display: "swap",
@@ -32,6 +34,15 @@ export const metadata: Metadata = {
   keywords: ["여사친", "위장여사친", "바람기", "AI분석", "인스타그램", "연애불안", "커플", "남사친"],
   authors: [{ name: "위장여사친 판독기" }],
   creator: "위장여사친 판독기",
+  ...(naverSiteVerification
+    ? {
+        verification: {
+          other: {
+            "naver-site-verification": naverSiteVerification,
+          },
+        },
+      }
+    : {}),
   metadataBase: new URL(CANONICAL_APP_ORIGIN),
   alternates: {
     canonical: "/",
