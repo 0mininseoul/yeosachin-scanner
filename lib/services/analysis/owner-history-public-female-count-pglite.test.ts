@@ -7,6 +7,10 @@ const migrationUrl = new URL(
     '../../../supabase/migrations/20260729090000_add_owner_history_public_female_count.sql',
     import.meta.url
 );
+const bridgeMigrationUrl = new URL(
+    '../../../supabase/migrations/20260810074911_add_account_principal_bridge.sql',
+    import.meta.url
+);
 
 const OWNER_ID = '10000000-0000-4000-8000-000000000001';
 const OTHER_OWNER_ID = '20000000-0000-4000-8000-000000000002';
@@ -43,6 +47,11 @@ CREATE TABLE public.analysis_requests (
     plan_type TEXT
 );
 
+CREATE TABLE public.users (
+    id UUID PRIMARY KEY,
+    lifecycle TEXT NOT NULL
+);
+
 CREATE TABLE public.analysis_v2_result_summaries (
     request_id UUID PRIMARY KEY REFERENCES public.analysis_requests(id),
     target_instagram_id TEXT,
@@ -56,6 +65,14 @@ CREATE TABLE public.analysis_v2_female_results (
 `;
 
 let db: PGlite;
+
+function functionStatement(migration: string, name: string): string {
+    const start = migration.indexOf(`CREATE OR REPLACE FUNCTION public.${name}(`);
+    if (start < 0) throw new Error(`${name} must exist`);
+    const end = migration.indexOf('\n$$;', start);
+    if (end < 0) throw new Error(`${name} must have a bounded body`);
+    return migration.slice(start, end + '\n$$;'.length);
+}
 
 async function loadHistoryForOwner(ownerId: string): Promise<unknown> {
     await db.exec('SET ROLE authenticated');
@@ -77,6 +94,14 @@ describe('owner history public female count migration PGlite contract', () => {
     beforeAll(async () => {
         db = await PGlite.create();
         await db.exec(bootstrap);
+        const historyMigration = readFileSync(migrationUrl, 'utf8');
+        const bridgeMigration = readFileSync(bridgeMigrationUrl, 'utf8');
+        await db.exec(historyMigration);
+        await db.exec(functionStatement(bridgeMigration, 'load_analysis_owner_history_v1'));
+        await db.query(
+            `INSERT INTO public.users (id, lifecycle) VALUES ($1, 'active'), ($2, 'retired')`,
+            [OWNER_ID, OTHER_OWNER_ID]
+        );
     });
 
     afterAll(async () => {
@@ -85,8 +110,6 @@ describe('owner history public female count migration PGlite contract', () => {
 
     it('returns only the durable completed V2 female aggregate after candidate identifiers are scrubbed', async () => {
         expect(existsSync(migrationUrl)).toBe(true);
-        const migration = readFileSync(migrationUrl, 'utf8');
-        await db.exec(migration);
 
         await db.query(
             `INSERT INTO public.analysis_requests (
@@ -190,4 +213,45 @@ describe('owner history public female count migration PGlite contract', () => {
             ],
         });
     }, 30_000);
+
+    it('rejects owner history for a retired authenticated account at the SQL boundary', async () => {
+        await expect(loadHistoryForOwner(OTHER_OWNER_ID)).rejects.toThrow(
+            'ANALYSIS_OWNER_HISTORY_ACCOUNT_RETIRED'
+        );
+    });
+
+    it('preserves the existing owner-history JSON signature and authenticated-only ACL', async () => {
+        const privileges = await db.query<{
+            result_type: string;
+            security_definer: boolean;
+            safe_search_path: boolean;
+            anon_execute: boolean;
+            authenticated_execute: boolean;
+            service_execute: boolean;
+        }>(`
+            SELECT
+                pg_catalog.pg_get_function_result(proc.oid) AS result_type,
+                proc.prosecdef AS security_definer,
+                COALESCE('search_path=""' = ANY(proc.proconfig), FALSE)
+                    AS safe_search_path,
+                pg_catalog.has_function_privilege('anon', proc.oid, 'EXECUTE')
+                    AS anon_execute,
+                pg_catalog.has_function_privilege('authenticated', proc.oid, 'EXECUTE')
+                    AS authenticated_execute,
+                pg_catalog.has_function_privilege('service_role', proc.oid, 'EXECUTE')
+                    AS service_execute
+            FROM pg_catalog.pg_proc AS proc
+            WHERE proc.oid =
+                'public.load_analysis_owner_history_v1()'::REGPROCEDURE
+        `);
+
+        expect(privileges.rows[0]).toEqual({
+            result_type: 'jsonb',
+            security_definer: true,
+            safe_search_path: true,
+            anon_execute: false,
+            authenticated_execute: true,
+            service_execute: false,
+        });
+    });
 });

@@ -138,6 +138,9 @@ export interface EarlybirdFulfillmentStore {
     recoverSchemaFailed(
         orderId: string
     ): Promise<EarlybirdSchemaFailureRecovery>;
+    recoverFreshAdmissionProviderFailure(
+        orderId: string
+    ): Promise<EarlybirdFulfillmentIdentity>;
     reconcile(limit: number): Promise<EarlybirdFulfillmentReconciliation>;
 }
 
@@ -383,6 +386,29 @@ export function createEarlybirdFulfillmentStore(
                 status: row.fulfillment_status,
                 preflightId: row.preflight_id,
             });
+        },
+
+        async recoverFreshAdmissionProviderFailure(orderId) {
+            const parsedOrderId = validatedOrderId(orderId);
+            const { data, error } = await dependencies.rpc(
+                'recover_earlybird_fresh_admission_provider_failure',
+                { p_order_id: parsedOrderId }
+            );
+            if (error) persistenceError();
+            const row = oneRow(data, identityRowSchema);
+            const isRecovered = row.fulfillment_status === 'retryable_failure'
+                && row.request_id === null;
+            const isIdempotentReplay = (
+                row.fulfillment_status === 'analysis_in_progress'
+                || row.fulfillment_status === 'completed'
+            ) && row.request_id !== null;
+            if (
+                row.order_id !== parsedOrderId
+                || (!isRecovered && !isIdempotentReplay)
+            ) {
+                persistenceError();
+            }
+            return identityFromRow(row);
         },
 
         async reconcile(limit) {
@@ -818,6 +844,16 @@ export async function recoverAndAdvanceEarlybirdSchemaFailedFulfillment(
 ): Promise<EarlybirdFulfillmentAdvanceResult> {
     await dependencies.store.recoverSchemaFailed(orderId);
     return admitAndAdvanceEarlybirdFulfillment(orderId, dependencies);
+}
+
+export async function recoverAndAdvanceEarlybirdFreshAdmissionProviderFailure(
+    orderId: string,
+    dependencies: EarlybirdFulfillmentAdvanceDependencies =
+        defaultAdvanceDependencies()
+): Promise<EarlybirdFulfillmentAdvanceResult> {
+    const recovered = await dependencies.store
+        .recoverFreshAdmissionProviderFailure(orderId);
+    return advanceAdmittedEarlybirdFulfillment(recovered, dependencies);
 }
 
 export type EarlybirdFulfillmentRecoverySummary = Readonly<{

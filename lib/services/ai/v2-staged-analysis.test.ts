@@ -529,9 +529,8 @@ describe('V2 staged AI services', () => {
         }).finalClassification).toBe('unresolved_stage_conflict');
     });
 
-    it('does not let resolver results replace unavailable or not-ready baselines', () => {
+    it('allows a ready resolver to repair analysis/media unavailable profiles without a feature', () => {
         for (const baselineClassification of [
-            'fetch_unavailable',
             'media_unavailable',
             'analysis_unavailable',
         ] as const) {
@@ -542,11 +541,22 @@ describe('V2 staged AI services', () => {
                 feature: null,
                 resolver: genderResolutionResult(),
             })).toEqual({
-                finalClassification: baselineClassification,
-                classificationSource: 'unavailable',
-                resolverApplied: false,
+                finalClassification: 'verified_female',
+                classificationSource: 'gender_resolution',
+                resolverApplied: true,
             });
         }
+        expect(applyGenderResolution({
+            baselineClassification: 'fetch_unavailable',
+            baselineSource: 'unavailable',
+            triage: null,
+            feature: null,
+            resolver: genderResolutionResult(),
+        })).toEqual({
+            finalClassification: 'fetch_unavailable',
+            classificationSource: 'unavailable',
+            resolverApplied: false,
+        });
         expect(applyGenderResolution({
             baselineClassification: 'unresolved',
             baselineSource: 'unknown',
@@ -651,7 +661,7 @@ describe('V2 staged AI services', () => {
         };
 
         await expect(genderTriage(inputB, audit('genderTriage', inputA)))
-            .rejects.toThrow('operationKey');
+            .rejects.toThrow('ANALYSIS_V2_AI_AUDIT_CONTEXT_INVALID');
         expect(mocks.analyzeWithGemini).not.toHaveBeenCalled();
     });
 
@@ -731,11 +741,13 @@ describe('V2 staged AI services', () => {
         await expect(genderTriage({ media: media() }, {
             ...audit(),
             onBeforeAttempt: undefined,
-        } as unknown as StagedAiAuditContext)).rejects.toThrow('onBeforeAttempt');
+        } as unknown as StagedAiAuditContext)).rejects.toThrow(
+            'ANALYSIS_V2_AI_AUDIT_CONTEXT_INVALID'
+        );
         await expect(genderTriage({ media: media() }, {
             ...audit(),
             operationKey: 'candidate.user',
-        })).rejects.toThrow('operationKey');
+        })).rejects.toThrow('ANALYSIS_V2_AI_AUDIT_CONTEXT_INVALID');
     });
 
     it('downgrades high-confidence gender based on only one visual item', async () => {

@@ -20,6 +20,10 @@ import {
     betaTestFreePoolEnabled,
     ensureBetaTestAccess,
 } from '@/lib/services/analysis/betatest-access';
+import {
+    AccountPrincipalAdmissionError,
+    requireActiveAccountClassification,
+} from '@/lib/services/identity/account-principal-store';
 
 const IDEMPOTENCY_KEY_PATTERN = /^[A-Za-z0-9._:-]{16,128}$/;
 
@@ -36,6 +40,14 @@ export async function POST(request: Request): Promise<NextResponse> {
     const supabase = await createClient();
     const { data: { user }, error: authError } = await supabase.auth.getUser();
     if (authError || !user) return response(401, 'UNAUTHORIZED', '로그인이 필요합니다.');
+    try {
+        await requireActiveAccountClassification(user.id);
+    } catch (error) {
+        if (error instanceof AccountPrincipalAdmissionError) {
+            return response(403, error.code, '이 계정은 현재 사용할 수 없습니다.');
+        }
+        return response(503, 'QUEUE_UNAVAILABLE', '사전 점검 작업을 시작할 수 없습니다.');
+    }
     if (!betaTestFreePoolEnabled() || !await ensureBetaTestAccess(supabaseAdmin, user.id)) {
         return response(403, BETA_TEST_ACCESS_UNAVAILABLE, '베타 분석을 사용할 수 없습니다.');
     }

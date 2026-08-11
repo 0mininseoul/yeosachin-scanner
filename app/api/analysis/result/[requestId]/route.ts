@@ -13,6 +13,14 @@ import { NextResponse } from 'next/server';
 import { isAnalysisDeletable } from '@/lib/services/analysis/deletion';
 import { demoResponseHeaders, isDemoOperator } from '@/lib/services/demo-analysis/demo-analysis';
 import { demoAnalysisStore } from '@/lib/services/demo-analysis/store';
+import {
+    isAnalysisResultOperator,
+    resolveAnalysisResultOwner,
+} from '@/lib/services/analysis/result-operator-access';
+import {
+    AccountPrincipalAdmissionError,
+    requireActiveAccountClassification,
+} from '@/lib/services/identity/account-principal-store';
 
 export async function GET(
     request: Request,
@@ -32,6 +40,17 @@ export async function GET(
                 { status: 401 }
             );
         }
+        try {
+            await requireActiveAccountClassification(user.id);
+        } catch (accountError) {
+            if (accountError instanceof AccountPrincipalAdmissionError) {
+                return NextResponse.json(
+                    { error: '이 계정은 현재 사용할 수 없습니다.' },
+                    { status: 403 },
+                );
+            }
+            throw accountError;
+        }
 
         const demo = await demoAnalysisStore.findForOwner(requestId, user.id);
         if (demo) {
@@ -44,6 +63,24 @@ export async function GET(
                 error: 'V2 분석은 전용 결과 경로를 사용합니다.', code: 'V2_ROUTE_REQUIRED', pipelineVersion: 'v2',
                 resultUrl: `/api/analysis/v2/result/${encodeURIComponent(demo.id)}`,
             }, { status: 409, headers: demoResponseHeaders() });
+        }
+
+        if (
+            isAnalysisResultOperator({ id: user.id, email: user.email })
+            && await resolveAnalysisResultOwner(requestId)
+        ) {
+            return NextResponse.json({
+                error: 'V2 분석은 전용 결과 경로를 사용합니다.',
+                code: 'V2_ROUTE_REQUIRED',
+                pipelineVersion: 'v2',
+                resultUrl: `/api/analysis/v2/result/${encodeURIComponent(requestId)}`,
+            }, {
+                status: 409,
+                headers: {
+                    'Cache-Control': 'private, no-store, max-age=0',
+                    Vary: 'Cookie',
+                },
+            });
         }
 
         // 2. 분석 요청 조회
@@ -207,6 +244,17 @@ export async function DELETE(
         const { data: { user }, error: authError } = await supabase.auth.getUser();
         if (authError || !user) {
             return NextResponse.json({ error: '로그인이 필요합니다.' }, { status: 401 });
+        }
+        try {
+            await requireActiveAccountClassification(user.id);
+        } catch (accountError) {
+            if (accountError instanceof AccountPrincipalAdmissionError) {
+                return NextResponse.json(
+                    { error: '이 계정은 현재 사용할 수 없습니다.' },
+                    { status: 403 },
+                );
+            }
+            throw accountError;
         }
 
         const demo = await demoAnalysisStore.findForOwner(requestId, user.id);

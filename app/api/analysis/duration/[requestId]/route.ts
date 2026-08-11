@@ -6,6 +6,10 @@ import { createSupabaseAnalysisV2DagStateStore } from '@/lib/services/analysis/v
 import { hydratePersistedAnalysisDurationEstimate } from '@/lib/services/analysis/duration-estimate-store';
 import { demoAnalysisStore } from '@/lib/services/demo-analysis/store';
 import { isDemoOperator } from '@/lib/services/demo-analysis/demo-analysis';
+import {
+    AccountPrincipalAdmissionError,
+    requireActiveAccountClassification,
+} from '@/lib/services/identity/account-principal-store';
 
 const requestIdSchema = z.string().uuid();
 const PRIVATE_NO_STORE_HEADERS = {
@@ -28,6 +32,15 @@ export async function GET(
         const supabase = await createClient();
         const { data: { user }, error } = await supabase.auth.getUser();
         if (error || !user) return json({ error: 'Authentication required.' }, 401);
+
+        try {
+            await requireActiveAccountClassification(user.id);
+        } catch (accountError) {
+            if (accountError instanceof AccountPrincipalAdmissionError) {
+                return json({ error: 'Account unavailable.' }, 403);
+            }
+            throw accountError;
+        }
 
         const demo = await demoAnalysisStore.findForOwner(parsedRequestId.data, user.id);
         if (demo) {

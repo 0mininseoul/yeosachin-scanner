@@ -30,6 +30,8 @@ import {
     loadResultImageR2Config,
 } from '@/lib/services/media/r2-result-image-store';
 import { supabaseAdmin } from '@/lib/supabase/admin';
+import { createAnalysisV2RevenueFinalQualityGate } from './revenue-final-quality-gate';
+import { createAnalysisV2RevenueResolverCapacity } from './revenue-resolver-capacity';
 
 export type AnalysisV2ProductionEnvironment = Record<string, string | undefined>;
 
@@ -67,9 +69,15 @@ function createProductionResultImageCapture(
  * Builds production AI/scoring executors only when the worker asks for them. This keeps module
  * import side-effect free while making a missing private bucket or selected Apify token fail fast.
  */
-export function createProductionAnalysisV2AiScoringExecutorRegistry(
+/**
+ * Kept as a named factory so production wiring is directly testable: strict
+ * primary/final stages must never accidentally omit their fail-closed durable
+ * quality dependencies while the ordinary registry remains dependency-free on
+ * its marker-free paths.
+ */
+export function createProductionAnalysisV2AiScoringExecutorDependencies(
     env: AnalysisV2ProductionEnvironment = process.env
-) {
+): AnalysisV2AiScoringExecutorDependencies {
     const credentialSlot = selectAnalysisV2ApifyCredentialSlot(env);
     selectApifyApiToken(env, credentialSlot);
     const mediaStore = createConfiguredAnalysisV2MediaArtifactStore(env);
@@ -89,6 +97,16 @@ export function createProductionAnalysisV2AiScoringExecutorRegistry(
             env,
         }),
         normalizeMedia: createAnalysisV2MediaNormalizer(),
+        revenueFinalQualityGate: createAnalysisV2RevenueFinalQualityGate(),
+        revenueResolverCapacity: createAnalysisV2RevenueResolverCapacity(),
     };
-    return createAnalysisV2AiScoringExecutorRegistry(dependencies);
+    return dependencies;
+}
+
+export function createProductionAnalysisV2AiScoringExecutorRegistry(
+    env: AnalysisV2ProductionEnvironment = process.env
+) {
+    return createAnalysisV2AiScoringExecutorRegistry(
+        createProductionAnalysisV2AiScoringExecutorDependencies(env),
+    );
 }

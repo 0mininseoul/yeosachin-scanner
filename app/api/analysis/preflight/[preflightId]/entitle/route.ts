@@ -44,6 +44,13 @@ import {
     type OperationalRequestContext,
 } from '@/lib/observability/request';
 import { operationalLogger } from '@/lib/observability/server';
+import {
+    AccountPrincipalAdmissionError,
+    requireActiveE2eTestRunner,
+} from '@/lib/services/identity/account-principal-store';
+import { RevenueCostOperationStore } from '@/lib/services/analysis/revenue-cost-operation-store';
+
+const revenueCostOperationStore = new RevenueCostOperationStore(supabaseAdmin);
 
 const uuidSchema = z.string().uuid().transform(value => value.toLowerCase());
 const requestBodySchema = z.object({
@@ -188,6 +195,27 @@ async function handlePOST(
             return NextResponse.json(
                 { error: '요청 형식이 올바르지 않습니다.', code: 'INVALID_REQUEST' },
                 { status: 400 }
+            );
+        }
+
+        try {
+            await requireActiveE2eTestRunner(user, body.data.planId);
+        } catch (accountError) {
+            if (accountError instanceof AccountPrincipalAdmissionError) {
+                return NextResponse.json(
+                    {
+                        error: '이 계정은 현재 사용할 수 없습니다.',
+                        code: accountError.code,
+                    },
+                    { status: 403 },
+                );
+            }
+            return NextResponse.json(
+                {
+                    error: '분석 테스트 이용권을 사용할 수 없습니다.',
+                    code: 'TEST_ENTITLEMENTS_UNAVAILABLE',
+                },
+                { status: 503 },
             );
         }
 
@@ -338,7 +366,6 @@ async function handlePOST(
                             ...context,
                             user_id: user.id,
                             preflight_id: preflightId,
-                            target_instagram_id: row.target_instagram_id,
                             plan_id: body.data.planId,
                             operation: 'fresh_admission',
                             disposition: 'enqueued',
@@ -379,8 +406,55 @@ async function handlePOST(
             } : {}),
         });
 
+        // A terminal entitlement replay is a read of its durable outcome, not
+        // a fresh admission. In particular, it must never replay begin against
+        // a completed/failed/manual-review revenue lineage.
         const terminal = consumed.requestStatus === 'completed'
             || consumed.requestStatus === 'failed';
+        const strictRevenueCohort = (
+            (body.data.planId === 'basic' || body.data.planId === 'standard')
+            && providerExecutionPolicy?.mode === 'test_operation_split'
+            && providerExecutionPolicy.policyVersion === 'authorized-free-e2e-v1'
+        );
+
+        // This remains opt-in for the signed Basic/Standard test cohort. The
+        // SQL begin RPC locks the consumed lineage before any job can dispatch;
+        // Plus and ordinary production paths retain zero revenue RPCs.
+        if (strictRevenueCohort && !terminal) {
+            try {
+                const begun = await revenueCostOperationStore.begin({
+                    requestId: consumed.requestId,
+                });
+                if (begun.disposition !== 'begun') {
+                    throw new Error('ANALYSIS_V2_REVENUE_LEDGER_BEGIN_CONFLICT');
+                }
+                await revenueCostOperationStore.activateDispatchGuard({
+                    requestId: consumed.requestId,
+                    jobKey: consumed.initialJobKey,
+                });
+            } catch {
+                // begin is after entitlement consumption. A definite error or
+                // an ambiguous transport result must never leave the consumed
+                // job recoverable for later scheduler delivery. The durable
+                // guard quarantines the request (and marks a proven parent for
+                // review) whenever the database can observe it.
+                try {
+                    await revenueCostOperationStore.quarantineDispatch({
+                        requestId: consumed.requestId,
+                        jobKey: consumed.initialJobKey,
+                    });
+                } catch {
+                    // The caller still fails closed: no provider task is
+                    // dispatched even if the quarantine RPC itself is down.
+                }
+                console.error('Analysis V2 revenue ledger begin was not durably confirmed.');
+                return NextResponse.json(
+                    { error: '분석 작업을 안전하게 시작할 수 없습니다.', code: 'ANALYSIS_START_FAILED' },
+                    { status: 503 },
+                );
+            }
+        }
+
         let dispatchOutcome: unknown;
         if (!terminal) {
             try {
@@ -410,7 +484,6 @@ async function handlePOST(
                     preflight_id: preflightId,
                     analysis_request_id: consumed.requestId,
                     job_key: consumed.initialJobKey,
-                    target_instagram_id: row.target_instagram_id,
                     plan_id: body.data.planId,
                     operation: 'entitlement',
                     disposition: dispatchOutcome === 'already_dispatched' ? 'exists' : 'enqueued',

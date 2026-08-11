@@ -6,6 +6,7 @@ const mocks = vi.hoisted(() => ({
     createServerClient: vi.fn(),
     from: vi.fn(),
     rpc: vi.fn(),
+    requireActiveAccountSession: vi.fn(),
 }));
 
 function queryBuilder(data: unknown) {
@@ -28,6 +29,9 @@ vi.mock('@/lib/supabase/server', () => ({
 }));
 vi.mock('@/lib/supabase/admin', () => ({
     supabaseAdmin: { from: mocks.from, rpc: mocks.rpc },
+}));
+vi.mock('@/lib/services/identity/account-principal-store', () => ({
+    requireActiveAccountSession: mocks.requireActiveAccountSession,
 }));
 vi.mock('next/navigation', () => ({
     redirect: vi.fn(),
@@ -85,6 +89,13 @@ describe('earlybird status page', () => {
             created_at: '2026-07-17T11:59:00.000Z',
         });
         mocks.rpc.mockResolvedValue({ data: null, error: null });
+        mocks.requireActiveAccountSession.mockResolvedValue({
+            userId: USER_ID,
+            accountClass: 'production',
+            trafficClass: 'external',
+            lifecycle: 'active',
+            classificationVersion: 'runtime_default_v1',
+        });
         mocks.from.mockImplementation((table: string) => {
             if (table === 'earlybird_orders') return orderQuery;
             throw new Error(`unexpected table: ${table}`);
@@ -100,5 +111,28 @@ describe('earlybird status page', () => {
         expect(markup).toContain(`data-testid="earlybird-status"`);
         expect(markup).toContain(`${ORDER_ID}:0`);
         expect(markup).not.toContain('확인할 내역이 없습니다');
+    });
+
+    it('does not expose order status to a retired account', async () => {
+        const redirectError = new Error('NEXT_REDIRECT');
+        mocks.requireActiveAccountSession.mockRejectedValue(
+            new Error('ACCOUNT_ADMISSION_DENIED')
+        );
+        const redirect = await import('next/navigation');
+        vi.mocked(redirect.redirect).mockImplementation(() => {
+            throw redirectError;
+        });
+
+        await expect(EarlybirdPage({
+            searchParams: Promise.resolve({}),
+        })).rejects.toBe(redirectError);
+
+        expect(redirect.redirect).toHaveBeenCalledWith(
+            '/login?error=account_unavailable'
+        );
+        expect(mocks.requireActiveAccountSession).toHaveBeenCalledWith(
+            expect.objectContaining({ id: USER_ID }),
+        );
+        expect(mocks.from).not.toHaveBeenCalled();
     });
 });

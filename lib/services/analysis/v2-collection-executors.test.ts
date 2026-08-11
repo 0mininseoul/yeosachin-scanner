@@ -8,7 +8,10 @@ import type {
     ApifyPostLiker,
 } from '@/lib/services/instagram/providers/apify-interactions';
 import type { InstagramFollower, InstagramPost, InstagramProfile } from '@/lib/types/instagram';
-import type { AnalysisV2DagState } from './v2-dag-planner';
+import {
+    buildAnalysisV2DagPlan,
+    type AnalysisV2DagState,
+} from './v2-dag-planner';
 import type { AnalysisV2EvidenceStore } from './v2-evidence-store';
 import type { AnalysisV2TargetEvidenceCheckpointInput } from './v2-evidence-store';
 import type {
@@ -25,6 +28,13 @@ import type {
 import type { AnalysisV2ProviderRunAdoptionStore } from './v2-provider-run-adoption-store';
 import type { AnalysisV2TargetProfileReuseStore } from './v2-target-profile-reuse';
 import type { AnalysisV2SelfHostedAuthRunReceipt } from './v2-selfhosted-auth-run-store';
+import { RevenueCostOperationStore } from './revenue-cost-operation-store';
+import type { FreshProvenanceStore } from './fresh-provenance-store';
+import type {
+    AnalysisV2GenderRoutingManifestPublishInput,
+    AnalysisV2GenderRoutingManifestStore,
+} from './gender-routing-manifest-store';
+import type { RevenueGenderRoutingModelCandidate } from './revenue-routing-runtime';
 import { SelfHostedAuthWorkerError } from '@/lib/services/instagram/providers/selfhosted-auth/client';
 import {
     AnalysisV2CollectionContextFenceError,
@@ -67,6 +77,14 @@ const authorizedProviderPolicy = {
 } as const;
 
 const authorizedProviderEnv = {
+    SELFHOSTED_AUTH_ENABLED: 'false',
+    SCRAPER_FALLBACK: 'false',
+    SCRAPER_PROFILE: 'apify',
+    SCRAPER_PROFILES_BATCH: 'apify',
+    SCRAPER_FOLLOWERS: 'apify',
+    SCRAPER_FOLLOWING: 'apify',
+    SCRAPER_LIKERS: 'apify',
+    SCRAPER_COMMENTS: 'apify',
     APIFY_PRIMARY_API_TOKEN: 'primary-test-token',
     APIFY_SECONDARY_API_TOKEN: 'secondary-test-token',
     APIFY_TERTIARY_API_TOKEN: 'tertiary-test-token',
@@ -400,6 +418,28 @@ function inMemoryProfileStore(initial: AnalysisV2ProfileFetchResume | null) {
             jobKey: string;
             claimToken: string;
             jobInputHash: string;
+            requestedUsernames: readonly string[];
+            results: readonly AnalysisV2ProfileAttemptResultInput[];
+        }) => {
+            const unresolved = input.results
+                .filter(result => result.outcome.status !== 'success')
+                .map(result => result.outcome.requestedUsername);
+            current = {
+                requestId: input.requestId,
+                jobKey: input.jobKey,
+                requestedUsernames: [...input.requestedUsernames],
+                frozenUnresolvedUsernames: unresolved,
+                primaryResults: input.results as AnalysisV2ProfileFetchResume['primaryResults'],
+                fallbackResults: [],
+                primaryCapturedAt: capturedAt,
+                fallbackCapturedAt: null,
+                ...unrepaired(),
+            };
+            return current;
+        }),
+        checkpointFreshApify: vi.fn(async (input: {
+            requestId: string;
+            jobKey: string;
             requestedUsernames: readonly string[];
             results: readonly AnalysisV2ProfileAttemptResultInput[];
         }) => {
@@ -1492,6 +1532,8 @@ describe('analysis V2 concrete collection executors', () => {
             requestContextStore: contextStore(requestContext({
                 accessMode: 'test_entitlement',
                 providerExecutionPolicy: authorizedProviderPolicy,
+                planId: 'plus',
+                detailedMutualLimit: 900,
                 followersDeclaredCount: 1,
                 followingDeclaredCount: 1,
             })),
@@ -1521,7 +1563,7 @@ describe('analysis V2 concrete collection executors', () => {
             } as unknown as AnalysisV2EvidenceStore,
         });
 
-        await executor(stageContext('relationships', state()));
+        await executor(stageContext('relationships', state({ planId: 'plus' })));
 
         const byOperation = new Map(providers.bindAdapterCheckpoint.mock.calls.map(([call]) => [
             call.operationKey.split(':', 1)[0],
@@ -1561,10 +1603,7 @@ describe('analysis V2 concrete collection executors', () => {
             index === 7 ? 'reel' : 'image'
         ));
         const target = profile('target', posts);
-        const profileStore = inMemoryProfileStore({
-            ...completedResume(['target'], [{ ...success('target'), profile: target }]),
-            jobKey: 'track:target-evidence:collect',
-        });
+        const profileStore = inMemoryProfileStore(null);
         const providers = providerStore();
         const getPostLikers = vi.fn(async (
             urls: string[],
@@ -1608,6 +1647,27 @@ describe('analysis V2 concrete collection executors', () => {
             likerCount: input.rows.filter(row => row.signal === 'target_post_like').length,
             commentCount: input.rows.filter(row => row.signal === 'target_post_comment').length,
         }));
+        const getProfilesBatchV2 = vi.fn(async (
+            requested: readonly string[],
+            options: Parameters<typeof import('@/lib/services/instagram/scraper').getProfilesBatchV2>[1],
+        ) => {
+            const results: ProfileAttemptResult[] = [
+                { ...success('target', 'apify'), profile: target },
+            ];
+            await options.persistAttemptOutcomes({
+                attempt: 'fresh_apify',
+                source: 'apify',
+                requestedUsernames: requested,
+                results,
+            });
+            return {
+                results,
+                profiles: [target],
+                primaryResults: results,
+                fallbackResults: [],
+                frozenUnresolvedUsernames: [],
+            };
+        });
         const executor = createAnalysisV2TargetEvidenceExecutor({
             requestContextStore: contextStore(requestContext({
                 accessMode: 'test_entitlement',
@@ -1618,7 +1678,7 @@ describe('analysis V2 concrete collection executors', () => {
             env: authorizedProviderEnv,
             interactionAdapter: { getPostLikers, getPostComments },
             evidenceStore: { checkpointTargetEvidence } as unknown as AnalysisV2EvidenceStore,
-            getProfilesBatchV2: vi.fn(),
+            getProfilesBatchV2: getProfilesBatchV2 as unknown as typeof import('@/lib/services/instagram/scraper').getProfilesBatchV2,
         });
 
         await executor(stageContext('target_evidence', state()));
@@ -1965,18 +2025,13 @@ describe('analysis V2 concrete collection executors', () => {
         });
     });
 
-    it('replays an attested fresh-admission profile after the target primary 429 without binding a V2 run', async () => {
+    it('rejects target-profile adoption for the trusted cohort and binds only a fresh provider source', async () => {
         const profileStore = inMemoryProfileStore(null);
         const providers = providerStore();
         const reusable = reusableTargetProfileRunStore();
+        const revenueRpc = vi.fn();
+        const revenueCostOperationStore = new RevenueCostOperationStore({ rpc: revenueRpc });
         const fallbackProfile = profile('target', []);
-        const primary = [{
-            outcome: {
-                ...failure('target').outcome,
-                failureCategory: 'rate_limit' as const,
-                httpStatus: 429,
-            },
-        }] as ProfileAttemptResult[];
         const fallback = [{
             outcome: success('target', 'apify').outcome,
             profile: fallbackProfile,
@@ -1986,40 +2041,39 @@ describe('analysis V2 concrete collection executors', () => {
             options: Parameters<typeof import('@/lib/services/instagram/scraper').getProfilesBatchV2>[1]
         ) => {
             await options.persistAttemptOutcomes({
-                attempt: 'primary',
-                source: 'selfhosted',
-                requestedUsernames: requested,
-                results: primary,
-            });
-            expect(options.providerRun).toEqual(expect.objectContaining({
-                resumeRunId: 'FreshAdmissionRun123',
-                logicalProvider: 'apify',
-                actorId: 'apify/instagram-profile-scraper',
-                credentialSlot: 'quinary',
-                maxChargeUsd: 0.0026,
-            }));
-            expect(options.providerRun?.onBeforeRunStart).toBeUndefined();
-            expect(options.providerRun?.onCostRunStarted).toBeUndefined();
-            await options.persistAttemptOutcomes({
-                attempt: 'fallback',
+                attempt: 'fresh_apify',
                 source: 'apify',
-                requestedUsernames: ['target'],
+                requestedUsernames: requested,
                 results: fallback,
             });
+            expect(options.providerRun).toEqual(expect.objectContaining({
+                logicalProvider: 'apify',
+                actorId: 'apify/instagram-profile-scraper',
+                credentialSlot: 'tertiary',
+                maxChargeUsd: 0.0026,
+            }));
+            expect(options.providerRun?.resumeRunId).toBeUndefined();
+            expect(options.providerRun?.onBeforeRunStart).toEqual(expect.any(Function));
             return {
                 results: fallback,
                 profiles: [fallbackProfile],
-                primaryResults: primary,
-                fallbackResults: fallback,
-                frozenUnresolvedUsernames: ['target'],
+                primaryResults: fallback,
+                fallbackResults: [],
+                frozenUnresolvedUsernames: [],
             };
         });
 
         await createAnalysisV2TargetEvidenceExecutor({
-            requestContextStore: contextStore(requestContext()),
+            requestContextStore: contextStore(requestContext({
+                accessMode: 'test_entitlement',
+                planId: 'basic',
+                providerExecutionPolicy: authorizedProviderPolicy,
+            })),
             profileCheckpointStore: profileStore.store,
             providerRunStore: providers.value,
             targetProfileReuseStore: reusable.value,
+            revenueCostOperationStore,
+            env: authorizedProviderEnv,
             getProfilesBatchV2: fetcher as unknown as typeof import('@/lib/services/instagram/scraper').getProfilesBatchV2,
             interactionAdapter: { getPostLikers: vi.fn(), getPostComments: vi.fn() },
             evidenceStore: {
@@ -2034,21 +2088,97 @@ describe('analysis V2 concrete collection executors', () => {
             } as unknown as AnalysisV2EvidenceStore,
         })(stageContext('target_evidence', state()));
 
-        expect(reusable.load).toHaveBeenCalledWith({
-            requestId,
+        expect(reusable.load).not.toHaveBeenCalled();
+        expect(providers.bindAdapterCheckpoint).toHaveBeenCalledWith(expect.objectContaining({
             jobKey: 'track:target-evidence:collect',
-            claimToken,
+            operationKey: expect.stringMatching(/^target-profile:/),
+        }), expect.objectContaining({
+            revenueCostOperationStore,
             jobInputHash: inputHash,
-            targetUsername: 'target',
-        });
-        expect(providers.bindAdapterCheckpoint).not.toHaveBeenCalled();
+        }));
         expect(providers.load).not.toHaveBeenCalled();
+        expect(revenueRpc).not.toHaveBeenCalled();
     });
 
-    it('preserves the bound target fallback when no attested reusable run exists', async () => {
+    it('opts the authorized test cohort into the revenue cost binding', async () => {
         const profileStore = inMemoryProfileStore(null);
         const providers = providerStore();
         const reusable = reusableTargetProfileRunStore(null);
+        const revenueRpc = vi.fn();
+        const revenueCostOperationStore = new RevenueCostOperationStore({ rpc: revenueRpc });
+        const fallbackProfile = profile('target', []);
+        const fallback = [{
+            outcome: success('target', 'apify').outcome,
+            profile: fallbackProfile,
+        }] as ProfileAttemptResult[];
+        const fetcher = vi.fn(async (
+            requested: readonly string[],
+            options: Parameters<typeof import('@/lib/services/instagram/scraper').getProfilesBatchV2>[1]
+        ) => {
+            await options.persistAttemptOutcomes({
+                attempt: 'fresh_apify',
+                source: 'apify',
+                requestedUsernames: requested,
+                results: fallback,
+            });
+            expect(options.providerRun?.onBeforeRunStart).toEqual(expect.any(Function));
+            return {
+                results: fallback,
+                profiles: [fallbackProfile],
+                primaryResults: fallback,
+                fallbackResults: [],
+                frozenUnresolvedUsernames: [],
+            };
+        });
+
+        await createAnalysisV2TargetEvidenceExecutor({
+            requestContextStore: contextStore(requestContext({
+                accessMode: 'test_entitlement',
+                planId: 'basic',
+                providerExecutionPolicy: authorizedProviderPolicy,
+            })),
+            profileCheckpointStore: profileStore.store,
+            providerRunStore: providers.value,
+            targetProfileReuseStore: reusable.value,
+            revenueCostOperationStore,
+            env: authorizedProviderEnv,
+            getProfilesBatchV2: fetcher as unknown as typeof import('@/lib/services/instagram/scraper').getProfilesBatchV2,
+            interactionAdapter: { getPostLikers: vi.fn(), getPostComments: vi.fn() },
+            evidenceStore: {
+                checkpointTargetEvidence: vi.fn(async () => ({
+                    revision: 1,
+                    resultHash,
+                    inputHash,
+                    interactorCount: 0,
+                    likerCount: 0,
+                    commentCount: 0,
+                })),
+            } as unknown as AnalysisV2EvidenceStore,
+        })(stageContext('target_evidence', state()));
+
+        expect(reusable.load).not.toHaveBeenCalled();
+        expect(providers.bindAdapterCheckpoint).toHaveBeenCalledOnce();
+        expect(providers.bindAdapterCheckpoint).toHaveBeenCalledWith(expect.objectContaining({
+            jobKey: 'track:target-evidence:collect',
+            operationKey: expect.stringMatching(/^target-profile:/),
+        }), expect.objectContaining({
+            revenueCostOperationStore,
+            jobInputHash: inputHash,
+        }));
+        expect(revenueRpc).not.toHaveBeenCalled();
+    });
+
+    it('keeps ordinary production fallback calls free of revenue-cost RPCs and binding state', async () => {
+        const profileStore = inMemoryProfileStore(null);
+        const providers = providerStore();
+        const reusable = reusableTargetProfileRunStore(null);
+        const revenueRpc = vi.fn();
+        const revenueCostOperationStore = new RevenueCostOperationStore({ rpc: revenueRpc });
+        const freshProvenanceStore = {
+            assertProviderAdmission: vi.fn(),
+            recordProviderRun: vi.fn(),
+            bindProviderDataset: vi.fn(),
+        } as unknown as FreshProvenanceStore;
         const primary = [failure('target')] as ProfileAttemptResult[];
         const fallbackProfile = profile('target', []);
         const fallback = [{
@@ -2065,7 +2195,6 @@ describe('analysis V2 concrete collection executors', () => {
                 requestedUsernames: requested,
                 results: primary,
             });
-            expect(options.providerRun?.onBeforeRunStart).toEqual(expect.any(Function));
             await options.persistAttemptOutcomes({
                 attempt: 'fallback',
                 source: 'apify',
@@ -2086,6 +2215,8 @@ describe('analysis V2 concrete collection executors', () => {
             profileCheckpointStore: profileStore.store,
             providerRunStore: providers.value,
             targetProfileReuseStore: reusable.value,
+            revenueCostOperationStore,
+            freshProvenanceStore,
             getProfilesBatchV2: fetcher as unknown as typeof import('@/lib/services/instagram/scraper').getProfilesBatchV2,
             interactionAdapter: { getPostLikers: vi.fn(), getPostComments: vi.fn() },
             evidenceStore: {
@@ -2100,12 +2231,12 @@ describe('analysis V2 concrete collection executors', () => {
             } as unknown as AnalysisV2EvidenceStore,
         })(stageContext('target_evidence', state()));
 
-        expect(reusable.load).toHaveBeenCalledOnce();
         expect(providers.bindAdapterCheckpoint).toHaveBeenCalledOnce();
-        expect(providers.bindAdapterCheckpoint).toHaveBeenCalledWith(expect.objectContaining({
-            jobKey: 'track:target-evidence:collect',
-            operationKey: expect.stringMatching(/^profile-fallback:/),
-        }));
+        expect(providers.bindAdapterCheckpoint.mock.calls[0]).toHaveLength(1);
+        expect(revenueRpc).not.toHaveBeenCalled();
+        expect(freshProvenanceStore.assertProviderAdmission).not.toHaveBeenCalled();
+        expect(freshProvenanceStore.recordProviderRun).not.toHaveBeenCalled();
+        expect(freshProvenanceStore.bindProviderDataset).not.toHaveBeenCalled();
     });
 
     it('reuses the same fresh run when a target job retries after its primary checkpoint', async () => {
@@ -2440,6 +2571,8 @@ describe('analysis V2 concrete collection executors', () => {
             requestContextStore: contextStore(requestContext({
                 accessMode: 'test_entitlement',
                 providerExecutionPolicy: authorizedProviderPolicy,
+                planId: 'plus',
+                detailedMutualLimit: 900,
             })),
             profileCheckpointStore: profileStore.store,
             providerRunStore: providers.value,
@@ -2447,7 +2580,10 @@ describe('analysis V2 concrete collection executors', () => {
             evidenceStore: relationshipEvidence(usernames),
             getProfilesBatchV2: fetcher as unknown as typeof import('@/lib/services/instagram/scraper').getProfilesBatchV2,
         });
-        const dagState = state({ relationships: relationshipManifest(topology) });
+        const dagState = state({
+            planId: 'plus',
+            relationships: relationshipManifest(topology),
+        });
 
         await expect(executor({
             ...stageContext('profile_fetch', dagState, 0),
@@ -2942,6 +3078,84 @@ describe('analysis V2 concrete collection executors', () => {
             .toMatch(/^profile-repair:[0-9a-f]{64}$/);
     });
 
+    it('fails closed instead of opening an unauthorized profile-repair source for the trusted cohort', async () => {
+        const usernames = Array.from({ length: 10 }, (_, index) => `user${index}`);
+        const failed = new Set(usernames.slice(-2));
+        const mutualRows = usernames.map((username, index) => ({
+            username,
+            isPrivate: false,
+            mutualOrdinal: index + 1,
+        }));
+        const resume: AnalysisV2ProfileFetchResume = {
+            requestId,
+            jobKey: 'track:profiles:batch:0',
+            requestedUsernames: usernames,
+            frozenUnresolvedUsernames: usernames.filter(username => failed.has(username)),
+            primaryResults: usernames.map(username => (
+                failed.has(username)
+                    ? incompleteFailure(username, 'apify')
+                    : success(username, 'apify')
+            )) as AnalysisV2ProfileFetchResume['primaryResults'],
+            fallbackResults: [],
+            primaryCapturedAt: capturedAt,
+            fallbackCapturedAt: null,
+            ...unrepaired(),
+        };
+        const runProfileRepair = repairRunner(repairSuccess);
+        const bindAdapterCheckpoint = vi.fn(async (identity: AnalysisV2ProviderRunReservationInput) => {
+            const stored = storedRun(identity);
+            return {
+                stored,
+                checkpoint: {
+                    logicalProvider: stored.logicalProvider,
+                    actorId: stored.actorId,
+                    credentialSlot: stored.credentialSlot,
+                    maxChargeUsd: stored.maxChargeUsd,
+                    resumeRunId: stored.runId!,
+                },
+            };
+        });
+
+        await expect(createAnalysisV2ProfileFetchExecutor({
+            requestContextStore: contextStore(requestContext({
+                accessMode: 'test_entitlement',
+                planId: 'basic',
+                providerExecutionPolicy: authorizedProviderPolicy,
+            })),
+            evidenceStore: {
+                loadRelationshipStaging: vi.fn(async () => ({
+                    detailedPublicUsernames: usernames,
+                    mutualRows,
+                })),
+            } as unknown as AnalysisV2EvidenceStore,
+            profileCheckpointStore: inMemoryProfileStore(resume).store,
+            providerRunStore: {
+                bindAdapterCheckpoint,
+                load: vi.fn(),
+            } as unknown as AnalysisV2ProviderRunStore,
+            genderRoutingManifestStore: {
+                loadSelectedUsernames: vi.fn(async () => usernames.map((username, index) => ({
+                    username,
+                    mutualOrdinal: index + 1,
+                    candidateKey: `mutual:${index + 1}`,
+                    ordinal: index + 1,
+                }))),
+            } as unknown as AnalysisV2GenderRoutingManifestStore,
+            runProfileRepair,
+            env: authorizedProviderEnv,
+        })(stageContext(
+            'profile_fetch',
+            state({ relationships: relationshipManifest(createAnalysisV2CollectionTopology('profiles', usernames)) }),
+            0
+        ))).rejects.toThrow('FRESH_PROVENANCE_PROFILE_REPAIR_UNAUTHORIZED');
+
+        expect(runProfileRepair).not.toHaveBeenCalled();
+        // A strict resume that would require repair is rejected before the
+        // generic profile binding/provider boundary; profile-repair is not an
+        // approved fresh provenance operation.
+        expect(bindAdapterCheckpoint).not.toHaveBeenCalled();
+    });
+
     it('never repairs a batch the fallback-only merge already clears', async () => {
         const usernames = Array.from({ length: 10 }, (_, index) => `user${index}`);
         const topology = createAnalysisV2CollectionTopology('profiles', usernames);
@@ -3134,6 +3348,424 @@ describe('analysis V2 concrete collection executors', () => {
         expect(fetcher).not.toHaveBeenCalled();
         expect(reportActiveProfile).not.toHaveBeenCalled();
     });
+
+    it('routes Basic from the fresh public mutual snapshot, persists its durable selection, and schedules exactly 100 profiles', async () => {
+        const mutualRows = routingMutualRows(101);
+        const usernamesByOrdinal = new Map(mutualRows.map(row => [row.mutualOrdinal, row.username]));
+        const routing = routingManifestStore(usernamesByOrdinal);
+        const relationshipEvidenceStore = {
+            checkpointRelationshipSide: vi.fn(async () => ({})),
+            freezeRelationships: vi.fn(async () => ({
+                revision: 1,
+                resultHash,
+                exclusionDecisionHash: 'f'.repeat(64),
+                followersResultHash: resultHash,
+                followingResultHash: resultHash,
+                mutualCount: 101,
+                publicCount: 101,
+                privateCount: 0,
+                detailedPublicCount: 101,
+                unscreenedPublicCount: 0,
+            })),
+            loadRelationshipStaging: vi.fn(async () => ({
+                excludedUsername: 'girlfriend',
+                detailedPublicUsernames: mutualRows.slice(0, 100).map(row => row.username),
+                privateMutualUsernames: [],
+                mutualRows,
+            })),
+        } as unknown as AnalysisV2EvidenceStore;
+        const assessor = vi.fn(async (candidates: readonly { candidateKey: string }[]) => new Map(
+            candidates.map(candidate => [candidate.candidateKey, candidate.candidateKey === 'mutual:1'
+                ? { femaleScore: 0.05, maleScore: 0.9, uncertaintyScore: 0.05, evidence: 'name_only' as const }
+                : { femaleScore: 0.9, maleScore: 0.05, uncertaintyScore: 0.05, evidence: 'name_only' as const }])
+        ));
+        const assessorFactory = vi.fn(() => assessor);
+        const request = requestContext({
+            accessMode: 'test_entitlement',
+            providerExecutionPolicy: authorizedProviderPolicy,
+            followersDeclaredCount: 0,
+            followingDeclaredCount: 0,
+        });
+        const relationshipExecutor = createAnalysisV2RelationshipsExecutor({
+            requestContextStore: contextStore(request),
+            evidenceStore: relationshipEvidenceStore,
+            genderRoutingManifestStore: routing.store,
+            revenueGenderRoutingAssessorFactory: assessorFactory,
+            env: {
+                ...authorizedProviderEnv,
+                ANALYSIS_V2_GENDER_ROUTING_HMAC_SECRET: 'routing-test-secret-at-least-thirty-two-characters',
+            },
+        });
+
+        const relationship = await relationshipExecutor(stageContext('relationships', state()));
+        const selectedUsernames = routing.selected().map(row => (
+            usernamesByOrdinal.get(row.mutualOrdinal)!
+        ));
+        expect(assessor).toHaveBeenCalledTimes(11);
+        expect(assessorFactory).toHaveBeenCalledWith(expect.objectContaining({
+            accessMode: 'test_entitlement',
+            planId: 'basic',
+            jobKey: 'track:relationships:collect',
+        }));
+        expect(assessor.mock.calls.every(([rows]) => rows.length <= 10)).toBe(true);
+        expect(assessor.mock.calls.flatMap(([rows]) => rows)).toHaveLength(101);
+        expect(JSON.stringify(assessor.mock.calls[0]?.[0])).not.toContain('mutualOrdinal');
+        expect(relationship.checkpoint.manifest.detailedSelectedPublicCount).toBe(100);
+        expect(relationship.checkpoint.manifest.profileBatches).toEqual(
+            createAnalysisV2CollectionTopology('profiles', selectedUsernames)
+        );
+
+        const persistedState = state({
+            relationships: relationship.checkpoint.manifest,
+        });
+        const persistedPlan = buildAnalysisV2DagPlan(requestId, persistedState);
+        expect(persistedPlan.jobs.filter(job => job.track === 'profiles').reduce(
+            (count, job) => count + (job.batch === null ? 0 : relationship.checkpoint.manifest
+                .profileBatches[job.batch]!.itemCount),
+            0,
+        )).toBe(100);
+
+        const profiles = inMemoryProfileStore(null);
+        const profileFetcher = vi.fn(async (
+            requested: readonly string[],
+            options: Parameters<typeof import('@/lib/services/instagram/scraper').getProfilesBatchV2>[1],
+        ) => {
+            const results = requested.map(username => success(username, 'apify'));
+            await options.persistAttemptOutcomes({
+                attempt: 'fresh_apify',
+                source: 'apify',
+                requestedUsernames: requested,
+                results,
+            });
+            return {
+                results,
+                profiles: requested.map(username => profile(username)),
+                primaryResults: results,
+                fallbackResults: [],
+                frozenUnresolvedUsernames: [],
+            };
+        });
+        const profileExecutor = createAnalysisV2ProfileFetchExecutor({
+            requestContextStore: contextStore(request),
+            evidenceStore: relationshipEvidenceStore,
+            profileCheckpointStore: profiles.store,
+            providerRunStore: providerStore().value,
+            genderRoutingManifestStore: routing.store,
+            env: {
+                ...authorizedProviderEnv,
+                ANALYSIS_V2_GENDER_ROUTING_HMAC_SECRET: 'routing-test-secret-at-least-thirty-two-characters',
+            },
+            getProfilesBatchV2: profileFetcher as unknown as typeof import('@/lib/services/instagram/scraper').getProfilesBatchV2,
+        });
+        await profileExecutor(stageContext('profile_fetch', state({
+            relationships: relationship.checkpoint.manifest,
+        }), 0));
+        expect(profileFetcher).toHaveBeenCalledWith(selectedUsernames.slice(0, 30), expect.any(Object));
+        expect(profileFetcher.mock.calls[0]?.[0]).not.toEqual(
+            mutualRows.slice(0, 30).map(row => row.username)
+        );
+    });
+
+    it('routes Standard through the DAG with its durable 200-row selection', async () => {
+        const standardRows = routingMutualRows(201);
+        const standardRouting = routingManifestStore(new Map(
+            standardRows.map(row => [row.mutualOrdinal, row.username])
+        ));
+        const standardAssessor = vi.fn(async (candidates: readonly { candidateKey: string }[]) => new Map(
+            candidates.map(candidate => [candidate.candidateKey, {
+                femaleScore: 0.9,
+                maleScore: 0.05,
+                uncertaintyScore: 0.05,
+                evidence: 'name_only' as const,
+            }])
+        ));
+        const standardRequest = requestContext({
+            accessMode: 'test_entitlement',
+            providerExecutionPolicy: authorizedProviderPolicy,
+            planId: 'standard',
+            detailedMutualLimit: 600,
+            followersDeclaredCount: 0,
+            followingDeclaredCount: 0,
+        });
+        const standardExecutor = createAnalysisV2RelationshipsExecutor({
+            requestContextStore: contextStore(standardRequest),
+            evidenceStore: {
+                checkpointRelationshipSide: vi.fn(async () => ({})),
+                freezeRelationships: vi.fn(async () => ({
+                    revision: 1, resultHash, exclusionDecisionHash: 'f'.repeat(64),
+                    followersResultHash: resultHash, followingResultHash: resultHash,
+                    mutualCount: 201, publicCount: 201, privateCount: 0,
+                    detailedPublicCount: 201, unscreenedPublicCount: 0,
+                })),
+                loadRelationshipStaging: vi.fn(async () => ({
+                    excludedUsername: 'girlfriend', detailedPublicUsernames: [],
+                    privateMutualUsernames: [], mutualRows: standardRows,
+                })),
+            } as unknown as AnalysisV2EvidenceStore,
+            genderRoutingManifestStore: standardRouting.store,
+            revenueGenderRoutingAssessor: standardAssessor,
+            env: {
+                ...authorizedProviderEnv,
+                ANALYSIS_V2_GENDER_ROUTING_HMAC_SECRET: 'routing-test-secret-at-least-thirty-two-characters',
+            },
+        });
+        const standard = await standardExecutor(stageContext('relationships', state({ planId: 'standard' })));
+        expect(standardAssessor).toHaveBeenCalledWith(expect.any(Array), 1);
+        expect(standard.checkpoint.manifest.detailedSelectedPublicCount).toBe(200);
+        expect(standard.checkpoint.manifest.profileBatches.reduce(
+            (count, batch) => count + batch.itemCount,
+            0,
+        )).toBe(200);
+        const persistedPlan = buildAnalysisV2DagPlan(requestId, state({
+            planId: 'standard',
+            relationships: standard.checkpoint.manifest,
+        }));
+        expect(persistedPlan.jobs.filter(job => job.track === 'profiles').reduce(
+            (count, job) => count + (job.batch === null ? 0 : standard.checkpoint.manifest
+                .profileBatches[job.batch]!.itemCount),
+            0,
+        )).toBe(200);
+
+    });
+
+    it('terminalizes a strict routing failure as manual review after exactly one failed-candidate retry', async () => {
+        const publicRows = routingMutualRows(101);
+        const routing = routingManifestStore(new Map(
+            publicRows.map(row => [row.mutualOrdinal, row.username])
+        ));
+        const assessor = vi.fn(async (
+            _candidates: readonly RevenueGenderRoutingModelCandidate[],
+            _attempt: 1 | 2,
+        ) => {
+            void _candidates;
+            void _attempt;
+            return new Map();
+        });
+        const manualReview = vi.fn(async () => ({
+            disposition: 'manual_review' as const,
+            created: true,
+            replayed: false,
+        }));
+        const request = requestContext({
+            accessMode: 'test_entitlement',
+            providerExecutionPolicy: authorizedProviderPolicy,
+            followersDeclaredCount: 0,
+            followingDeclaredCount: 0,
+        });
+        const executor = createAnalysisV2RelationshipsExecutor({
+            requestContextStore: contextStore(request),
+            evidenceStore: {
+                checkpointRelationshipSide: vi.fn(async () => ({})),
+                freezeRelationships: vi.fn(async () => ({
+                    revision: 1, resultHash, exclusionDecisionHash: 'f'.repeat(64),
+                    followersResultHash: resultHash, followingResultHash: resultHash,
+                    mutualCount: 101, publicCount: 101, privateCount: 0,
+                    detailedPublicCount: 101, unscreenedPublicCount: 0,
+                })),
+                loadRelationshipStaging: vi.fn(async () => ({
+                    excludedUsername: 'girlfriend', detailedPublicUsernames: [],
+                    privateMutualUsernames: [], mutualRows: publicRows,
+                })),
+            } as unknown as AnalysisV2EvidenceStore,
+            genderRoutingManifestStore: routing.store,
+            revenueGenderRoutingAssessor: assessor,
+            revenueCostOperationStore: { manualReview } as unknown as RevenueCostOperationStore,
+            env: {
+                ...authorizedProviderEnv,
+                ANALYSIS_V2_GENDER_ROUTING_HMAC_SECRET: 'routing-test-secret-at-least-thirty-two-characters',
+            },
+        });
+
+        await expect(executor(stageContext('relationships', state())))
+            .rejects.toThrow('GENDER_ROUTING_ROUTING_UNAVAILABLE');
+
+        expect(assessor).toHaveBeenCalledTimes(22);
+        expect(assessor.mock.calls.filter(([, attempt]) => attempt === 1)).toHaveLength(11);
+        expect(assessor.mock.calls.filter(([, attempt]) => attempt === 2)).toHaveLength(11);
+        expect(manualReview).toHaveBeenCalledWith({
+            requestId,
+            reasonCode: 'routing_failure',
+        });
+        expect(routing.publication.value).toBeNull();
+    });
+
+    it('fails closed for Basic 401 and Standard 801 before routing or provider work', async () => {
+        for (const testCase of [
+            { planId: 'basic' as const, population: 401, detailedCap: 300, injectAssessor: false },
+            { planId: 'standard' as const, population: 801, detailedCap: 600, injectAssessor: true },
+        ] as const) {
+            const publicRows = routingMutualRows(testCase.population);
+            const assessor = vi.fn();
+            const getFollowers = vi.fn();
+            const getFollowing = vi.fn();
+            const manifestStore = {
+                begin: vi.fn(),
+                publish: vi.fn(),
+                loadSelected: vi.fn(),
+                loadSelectedUsernames: vi.fn(),
+            } as unknown as AnalysisV2GenderRoutingManifestStore;
+            const executor = createAnalysisV2RelationshipsExecutor({
+                requestContextStore: contextStore(requestContext({
+                    accessMode: 'test_entitlement',
+                    providerExecutionPolicy: authorizedProviderPolicy,
+                    planId: testCase.planId,
+                    detailedMutualLimit: testCase.detailedCap,
+                    followersDeclaredCount: 0,
+                    followingDeclaredCount: 0,
+                })),
+                evidenceStore: {
+                    checkpointRelationshipSide: vi.fn(async () => ({})),
+                    freezeRelationships: vi.fn(async () => ({
+                        revision: 1, resultHash, exclusionDecisionHash: 'f'.repeat(64),
+                        followersResultHash: resultHash, followingResultHash: resultHash,
+                        mutualCount: testCase.population, publicCount: testCase.population,
+                        privateCount: 0, detailedPublicCount: testCase.detailedCap,
+                        unscreenedPublicCount: testCase.population - testCase.detailedCap,
+                    })),
+                    loadRelationshipStaging: vi.fn(async () => ({
+                        excludedUsername: 'girlfriend', detailedPublicUsernames: [],
+                        privateMutualUsernames: [], mutualRows: publicRows,
+                    })),
+                } as unknown as AnalysisV2EvidenceStore,
+                genderRoutingManifestStore: manifestStore,
+                revenueGenderRoutingAssessor: testCase.injectAssessor ? assessor : undefined,
+                getFollowers: getFollowers as unknown as typeof import('@/lib/services/instagram/scraper').getFollowers,
+                getFollowing: getFollowing as unknown as typeof import('@/lib/services/instagram/scraper').getFollowing,
+                env: {
+                    ...authorizedProviderEnv,
+                    ANALYSIS_V2_GENDER_ROUTING_HMAC_SECRET: 'routing-test-secret-at-least-thirty-two-characters',
+                },
+            });
+
+            await expect(executor(stageContext(
+                'relationships',
+                state({ planId: testCase.planId }),
+            ))).rejects.toThrow('ANALYSIS_V2_GENDER_ROUTING_POPULATION_DRIFT');
+            expect(assessor).not.toHaveBeenCalled();
+            expect(manifestStore.begin).not.toHaveBeenCalled();
+            expect(manifestStore.publish).not.toHaveBeenCalled();
+            expect(manifestStore.loadSelected).not.toHaveBeenCalled();
+            expect(manifestStore.loadSelectedUsernames).not.toHaveBeenCalled();
+            expect(getFollowers).not.toHaveBeenCalled();
+            expect(getFollowing).not.toHaveBeenCalled();
+        }
+    });
+
+    it('fails closed at the paid profile boundary for Basic 401 and Standard 801', async () => {
+        for (const testCase of [
+            { planId: 'basic' as const, population: 401, detailedCap: 300 },
+            { planId: 'standard' as const, population: 801, detailedCap: 600 },
+        ] as const) {
+            const selectedLoader = vi.fn();
+            const profileFetcher = vi.fn();
+            const executor = createAnalysisV2ProfileFetchExecutor({
+                requestContextStore: contextStore(requestContext({
+                    accessMode: 'test_entitlement',
+                    providerExecutionPolicy: authorizedProviderPolicy,
+                    planId: testCase.planId,
+                    detailedMutualLimit: testCase.detailedCap,
+                })),
+                evidenceStore: {
+                    loadRelationshipStaging: vi.fn(async () => ({
+                        excludedUsername: 'girlfriend', detailedPublicUsernames: [],
+                        privateMutualUsernames: [],
+                        mutualRows: routingMutualRows(testCase.population),
+                    })),
+                } as unknown as AnalysisV2EvidenceStore,
+                profileCheckpointStore: { load: vi.fn() } as unknown as AnalysisV2ProfileFetchCheckpointStore,
+                genderRoutingManifestStore: {
+                    loadSelectedUsernames: selectedLoader,
+                } as unknown as AnalysisV2GenderRoutingManifestStore,
+                getProfilesBatchV2: profileFetcher as unknown as typeof import('@/lib/services/instagram/scraper').getProfilesBatchV2,
+                env: {
+                    ...authorizedProviderEnv,
+                    ANALYSIS_V2_GENDER_ROUTING_HMAC_SECRET: 'routing-test-secret-at-least-thirty-two-characters',
+                },
+            });
+
+            await expect(executor(stageContext('profile_fetch', state({
+                planId: testCase.planId,
+                relationships: {
+                    revision: 1,
+                    resultHash,
+                    detectedMutualCount: testCase.population,
+                    publicCount: testCase.population,
+                    privateCount: 0,
+                    detailedSelectedPublicCount: testCase.detailedCap,
+                    notScreenedPublicCount: testCase.population - testCase.detailedCap,
+                    profileBatches: [],
+                    privateNameBatches: [],
+                },
+            }), 0))).rejects.toThrow('ANALYSIS_V2_GENDER_ROUTING_POPULATION_DRIFT');
+            expect(selectedLoader).not.toHaveBeenCalled();
+            expect(profileFetcher).not.toHaveBeenCalled();
+        }
+    });
+
+    it('leaves production, Plus, and beta free-pool relationship topology on the legacy path', async () => {
+        const cases = [
+            {
+                request: requestContext({ followersDeclaredCount: 0, followingDeclaredCount: 0 }),
+                dagState: state(),
+            },
+            {
+                request: requestContext({
+                    accessMode: 'test_entitlement',
+                    providerExecutionPolicy: authorizedProviderPolicy,
+                    planId: 'plus',
+                    detailedMutualLimit: 900,
+                    followersDeclaredCount: 0,
+                    followingDeclaredCount: 0,
+                }),
+                dagState: state({ planId: 'plus' }),
+            },
+            {
+                request: requestContext({
+                    accessMode: 'test_entitlement',
+                    providerExecutionPolicy: betaProviderPolicy,
+                    followersDeclaredCount: 0,
+                    followingDeclaredCount: 0,
+                }),
+                dagState: state(),
+            },
+        ];
+        for (const testCase of cases) {
+            const assessor = vi.fn();
+            const assessorFactory = vi.fn(() => assessor);
+            const manifestStore = {
+                begin: vi.fn(async () => { throw new Error('routing should not begin'); }),
+            } as unknown as AnalysisV2GenderRoutingManifestStore;
+            const executor = createAnalysisV2RelationshipsExecutor({
+                requestContextStore: contextStore(testCase.request),
+                evidenceStore: {
+                    checkpointRelationshipSide: vi.fn(async () => ({})),
+                    freezeRelationships: vi.fn(async () => ({
+                        revision: 1, resultHash, exclusionDecisionHash: 'f'.repeat(64),
+                        followersResultHash: resultHash, followingResultHash: resultHash,
+                        mutualCount: 1, publicCount: 1, privateCount: 0,
+                        detailedPublicCount: 1, unscreenedPublicCount: 0,
+                    })),
+                    loadRelationshipStaging: vi.fn(async () => ({
+                        excludedUsername: 'girlfriend',
+                        detailedPublicUsernames: ['legacy_candidate'],
+                        privateMutualUsernames: [],
+                        mutualRows: routingMutualRows(1),
+                    })),
+                } as unknown as AnalysisV2EvidenceStore,
+                genderRoutingManifestStore: manifestStore,
+                revenueGenderRoutingAssessor: assessor,
+                revenueGenderRoutingAssessorFactory: assessorFactory,
+                env: { ANALYSIS_V2_GENDER_ROUTING_HMAC_SECRET: 'routing-test-secret-at-least-thirty-two-characters' },
+            });
+            const result = await executor(stageContext('relationships', testCase.dagState));
+            expect(result.checkpoint.manifest.profileBatches).toEqual(
+                createAnalysisV2CollectionTopology('profiles', ['legacy_candidate'])
+            );
+            expect(assessor).not.toHaveBeenCalled();
+            expect(assessorFactory).not.toHaveBeenCalled();
+            expect(manifestStore.begin).not.toHaveBeenCalled();
+        }
+    });
 });
 
 interface ProfilesBatchSnapshot {
@@ -3160,6 +3792,82 @@ function relationshipManifest(profileBatches: readonly {
         profileBatches,
         privateNameBatches: [],
     };
+}
+
+function routingManifestStore(usernamesByOrdinal: ReadonlyMap<number, string>) {
+    const publication: { value: AnalysisV2GenderRoutingManifestPublishInput | null } = { value: null };
+    const complete = (input: AnalysisV2GenderRoutingManifestPublishInput) => ({
+        status: 'complete' as const,
+        attemptCount: 1,
+        requestId: input.requestId,
+        relationshipCheckpointId: input.relationshipCheckpointId,
+        policyVersion: input.policyVersion,
+        planId: input.planId,
+        canonicalInputHmac: input.canonicalInputHmac,
+        populationCount: input.populationCount,
+        detailedCap: input.detailedCap,
+        relationshipJobInputHash: input.jobInputHash,
+        selectedCount: input.selectedCount,
+        modelAttemptedCount: input.modelAttemptedCount,
+        modelValidCount: input.modelValidCount,
+        modelFailedCount: input.modelFailedCount,
+        modelRetriedCount: input.modelRetriedCount,
+        quotaFemaleShortfall: input.quotaShortfalls.female,
+        quotaUncertaintyShortfall: input.quotaShortfalls.uncertainty,
+        femalePriorityCount: input.bucketCounts.female_priority,
+        uncertaintyCount: input.bucketCounts.uncertainty,
+        maleDeprioritizedCount: input.bucketCounts.male_deprioritized,
+        selectedFemalePriorityCount: input.selectedBucketCounts.female_priority,
+        selectedUncertaintyCount: input.selectedBucketCounts.uncertainty,
+        selectedMaleDeprioritizedCount: input.selectedBucketCounts.male_deprioritized,
+    });
+    const selected = () => publication.value!.rows
+        .filter(row => row.selected)
+        .sort((left, right) => left.ordinal! - right.ordinal!)
+        .map(row => ({
+            mutualOrdinal: row.mutualOrdinal,
+            candidateKey: row.candidateKey,
+            selectionSlot: row.selectionSlot!,
+            ordinal: row.ordinal!,
+        }));
+    const store: AnalysisV2GenderRoutingManifestStore = {
+        loadCurrentComplete: vi.fn(async () => null),
+        begin: vi.fn(async input => ({
+            status: 'building' as const,
+            attemptCount: 1,
+            requestId: input.requestId,
+            relationshipCheckpointId: input.relationshipCheckpointId,
+            policyVersion: input.policyVersion,
+            planId: input.planId,
+            canonicalInputHmac: input.canonicalInputHmac,
+            populationCount: input.populationCount,
+            detailedCap: input.detailedCap,
+            relationshipJobInputHash: input.jobInputHash,
+        })),
+        publish: vi.fn(async input => {
+            publication.value = input;
+            return complete(input);
+        }),
+        loadSelected: vi.fn(async () => selected()),
+        loadSelectedUsernames: vi.fn(async () => selected().map(row => ({
+            ...row,
+            username: usernamesByOrdinal.get(row.mutualOrdinal) ?? '',
+        }))),
+    };
+    return { store, publication, selected };
+}
+
+function routingMutualRows(count: number) {
+    return Array.from({ length: count }, (_, index) => ({
+        username: `routing_${index + 1}`,
+        isPrivate: false,
+        isVerified: false,
+        fullName: `Routing ${index + 1}`,
+        profilePicUrl: `https://images.example/routing_${index + 1}.jpg`,
+        mutualOrdinal: index + 1,
+        followingOrdinal: index + 1,
+        detailedOrdinal: index + 1,
+    }));
 }
 
 function relationshipEvidence(usernames: readonly string[]): AnalysisV2EvidenceStore {

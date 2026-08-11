@@ -3,6 +3,7 @@
 - 작성일: 2026-08-05
 - **선행 프롬프트**: [계측 신뢰성 + 익명 preflight 지원](./2026-07-31-backend-funnel-instrumentation-prompt.md) — **이미 전달됨**
 - 성격: 선행 프롬프트 **B 섹션의 누락분 보충**. 대체가 아니라 추가
+- 상태: **익명 preflight·claim·결제 직전 로그인 계약은 구현 완료된 역사적 인계 문서. 당시 미결정이던 샘플 결과는 실제 target과 분리된 published synthetic fixture preview로 별도 구현한다.**
 
 아래 `---` 사이를 백엔드 세션에 추가로 전달하면 됩니다.
 

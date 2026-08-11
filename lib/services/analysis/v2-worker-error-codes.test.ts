@@ -15,6 +15,32 @@ const PROVIDER_LIFECYCLE_PERSISTENCE_CODES = [
     'ANALYSIS_V2_PROVIDER_RUN_REJECTION_PERSISTENCE_ERROR',
 ] as const;
 
+const PROFILE_AI_RUNTIME_CODES = [
+    'ANALYSIS_V2_AI_AUDIT_CONTEXT_INVALID',
+    'ANALYSIS_V2_AI_RESOLVER_CAPACITY_SKIPPED',
+    'ANALYSIS_V2_GENDER_RESOLUTION_CUTOFF_PERSISTENCE_ERROR',
+    'ANALYSIS_V2_GENDER_RESOLUTION_EVIDENCE_DRIFT',
+    'ANALYSIS_V2_GENDER_TRIAGE_MICROBATCH_DUPLICATE_ACCOUNT',
+    'ANALYSIS_V2_GENDER_TRIAGE_MICROBATCH_EVIDENCE_DRIFT',
+    'ANALYSIS_V2_GENDER_TRIAGE_MICROBATCH_MEDIA_LIMIT',
+    'ANALYSIS_V2_GENDER_TRIAGE_MICROBATCH_POLICY_MISMATCH',
+    'ANALYSIS_V2_GENDER_TRIAGE_MICROBATCH_RESULT_MISSING',
+    'ANALYSIS_V2_GENDER_TRIAGE_MICROBATCH_SCHEDULER_REQUIRED',
+    'ANALYSIS_V2_SCHEDULER_INVALID_POLICY',
+    'ANALYSIS_V2_SCHEDULER_INVALID_TOPOLOGY',
+    'ANALYSIS_V2_SCHEDULER_NOT_ENABLED',
+    'ANALYSIS_V2_SCHEDULER_OPERATION_FENCE_MISMATCH',
+    'ANALYSIS_V2_SCHEDULER_OPERATION_PERSISTENCE_ERROR',
+    'ANALYSIS_V2_SCHEDULER_OPERATION_STAGE_DRIFT',
+    'ANALYSIS_V2_SCHEDULER_OPERATION_VALIDATION_ERROR',
+    'ANALYSIS_V2_SCHEDULER_RECOVERY_HANDLER_MISSING',
+    'ANALYSIS_V2_SCHEDULER_TERMINAL_HANDLER_MISSING',
+    'ANALYSIS_V2_SOURCE_MEDIA_ARCHIVE_CONFIG_ERROR',
+    'ANALYSIS_V2_SOURCE_MEDIA_ARCHIVE_CONFLICT',
+    'ANALYSIS_V2_SOURCE_MEDIA_ARCHIVE_OBJECT_ERROR',
+    'ANALYSIS_V2_SOURCE_MEDIA_ARCHIVE_VALIDATION_ERROR',
+] as const;
+
 describe('analysis V2 worker error codes', () => {
     it('accepts every immutable Apify provider callback code', () => {
         expect(Array.isArray(APIFY_DURABLE_PROVIDER_CALLBACK_ERROR_CODES)).toBe(true);
@@ -28,6 +54,36 @@ describe('analysis V2 worker error codes', () => {
         'allows the provider lifecycle phase code %s',
         (code) => {
             expect(isAnalysisV2WorkerErrorCode(code)).toBe(true);
+        }
+    );
+
+    it.each(PROFILE_AI_RUNTIME_CODES)(
+        'preserves the profile AI runtime code %s instead of collapsing it',
+        (code) => {
+            expect(isAnalysisV2WorkerErrorCode(code)).toBe(true);
+            expect(classifyAnalysisV2JobFailure(new Error(code))).toMatchObject({
+                code,
+            });
+        }
+    );
+
+    it.each([
+        ['ANALYSIS_V2_SOURCE_MEDIA_ARCHIVE_OBJECT_ERROR: retained upload failed (403).',
+            'permanent', false],
+        ['ANALYSIS_V2_SOURCE_MEDIA_ARCHIVE_OBJECT_ERROR: retained upload failed (429).',
+            'transient', true],
+        ['ANALYSIS_V2_SOURCE_MEDIA_ARCHIVE_OBJECT_ERROR: retained upload failed (503).',
+            'transient', true],
+        ['ANALYSIS_V2_SOURCE_MEDIA_ARCHIVE_OBJECT_ERROR: retained upload failed (unknown).',
+            'transient', true],
+    ] as const)(
+        'classifies the retained media failure %s as %s',
+        (message, disposition, retryable) => {
+            expect(classifyAnalysisV2JobFailure(new Error(message))).toMatchObject({
+                code: 'ANALYSIS_V2_SOURCE_MEDIA_ARCHIVE_OBJECT_ERROR',
+                disposition,
+                retryable,
+            });
         }
     );
 

@@ -6,6 +6,7 @@ const mocks = vi.hoisted(() => ({
     getUser: vi.fn(),
     enabled: vi.fn(),
     ensureAccess: vi.fn(),
+    requireActiveAccountSession: vi.fn(),
     redirect: vi.fn(),
     admin: { rpc: vi.fn() },
     authButtons: vi.fn(() => 'AUTH_BUTTONS'),
@@ -17,6 +18,9 @@ vi.mock('@/lib/supabase/admin', () => ({ supabaseAdmin: mocks.admin }));
 vi.mock('@/lib/services/analysis/betatest-access', () => ({
     betaTestFreePoolEnabled: mocks.enabled,
     ensureBetaTestAccess: mocks.ensureAccess,
+}));
+vi.mock('@/lib/services/identity/account-principal-store', () => ({
+    requireActiveAccountSession: mocks.requireActiveAccountSession,
 }));
 vi.mock('@/components/auth-buttons', () => ({ AuthButtons: mocks.authButtons }));
 vi.mock('@/components/landing-page', () => ({ default: mocks.landingPage }));
@@ -37,6 +41,13 @@ describe('beta-test entry page', () => {
         });
         mocks.enabled.mockReturnValue(true);
         mocks.ensureAccess.mockResolvedValue(true);
+        mocks.requireActiveAccountSession.mockResolvedValue({
+            userId: '123e4567-e89b-42d3-a456-426614174000',
+            accountClass: 'production',
+            trafficClass: 'external',
+            lifecycle: 'active',
+            classificationVersion: 'runtime_default_v1',
+        });
     });
 
     it('renders the shared homepage landing with a beta OAuth return path for an unauthenticated visitor', async () => {
@@ -70,6 +81,18 @@ describe('beta-test entry page', () => {
 
         expect(markup).toContain('베타 테스트를 이용할 수 없습니다.');
         expect(markup).not.toContain('id="beta-target-instagram"');
+    });
+
+    it('does not issue a beta entitlement or render the form for a retired account', async () => {
+        mocks.requireActiveAccountSession.mockRejectedValue(
+            new Error('ACCOUNT_ADMISSION_DENIED')
+        );
+
+        const markup = renderToStaticMarkup(await BetaTestPage());
+
+        expect(markup).toContain('베타 테스트를 이용할 수 없습니다.');
+        expect(markup).not.toContain('id="beta-target-instagram"');
+        expect(mocks.ensureAccess).not.toHaveBeenCalled();
     });
 
     it('renders the checkout-free form only after the enabled self-grant check passes', async () => {

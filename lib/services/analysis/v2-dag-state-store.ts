@@ -133,6 +133,14 @@ const batchResultSchema = resultManifestSchema.extend({
     itemCount: z.number().int().min(1).max(100),
     producerInputHash: hashSchema,
 }).strict();
+const relationshipSelectionPolicySchema = z.object({
+    policyVersion: z.literal('gender-routing-v1'),
+    relationshipCheckpointId: hashSchema,
+    relationshipJobInputHash: hashSchema,
+    planId: z.enum(['basic', 'standard']),
+    publicPopulationCount: z.number().int().min(0).max(1_200),
+    selectedCount: z.number().int().min(0).max(200),
+}).strict();
 const relationshipsSchema = resultManifestSchema.extend({
     detectedMutualCount: z.number().int().min(0).max(1_200),
     publicCount: z.number().int().min(0).max(1_200),
@@ -141,6 +149,7 @@ const relationshipsSchema = resultManifestSchema.extend({
     notScreenedPublicCount: z.number().int().min(0).max(1_200),
     profileBatches: z.array(topologyBatchSchema).max(30),
     privateNameBatches: z.array(topologyBatchSchema).max(12),
+    relationshipSelectionPolicy: relationshipSelectionPolicySchema.optional(),
 }).strict();
 const targetEvidenceSchema = resultManifestSchema.extend({
     interactorCount: z.number().int().min(0).max(690),

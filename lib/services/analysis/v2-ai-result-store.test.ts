@@ -818,6 +818,53 @@ describe('analysis V2 Gemini audit adapter', () => {
         });
     });
 
+    it('can audit a strict first-pass attempt without any result-cache lookup or checkpoint write', async () => {
+        const reserve = vi.fn().mockResolvedValue(reservation());
+        const terminalize = vi.fn().mockResolvedValue(undefined);
+        const loadOperation = vi.fn();
+        const resultStore = {
+            loadRequest: vi.fn(),
+            checkpointGlobalHit: vi.fn(),
+            terminalizeSuccess: vi.fn(),
+        } as unknown as AnalysisV2AiResultStore;
+        const adapter = createAnalysisV2AiAuditAdapter({
+            requestId,
+            jobKey,
+            claimToken,
+            resultIdentity: identity({ cacheScope: 'request' }),
+            resultSchema,
+            disableResultCheckpoint: true,
+            attemptStore: {
+                reserve,
+                terminalize,
+                loadOperation,
+            } as unknown as AnalysisV2AiAttemptStore,
+            resultStore,
+        });
+
+        await expect(adapter.prepare()).resolves.toEqual({
+            result: null,
+            source: null,
+            startingAttempt: 1,
+        });
+        expect(loadOperation).not.toHaveBeenCalled();
+        expect(resultStore.loadRequest).not.toHaveBeenCalled();
+        expect(resultStore.checkpointGlobalHit).not.toHaveBeenCalled();
+
+        await adapter.onBeforeAttempt(startTelemetry());
+        await adapter.onAttemptTelemetry(
+            attemptTelemetry(),
+            { value: 'female', confidence: 0.9 },
+        );
+
+        expect(terminalize).toHaveBeenCalledWith(expect.objectContaining({
+            status: 'success',
+            reservationToken,
+            finishReason: 'STOP',
+        }));
+        expect(resultStore.terminalizeSuccess).not.toHaveBeenCalled();
+    });
+
     it('checks a request checkpoint first and attempt history before a global cache hit', async () => {
         const loadOperation = vi.fn();
         const attemptStore = {

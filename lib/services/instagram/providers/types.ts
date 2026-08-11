@@ -58,8 +58,30 @@ export interface ProviderRunStartRejected {
     errorType: string | null;
 }
 
+export interface ProviderRunStartAmbiguous {
+    logicalProvider: Extract<ProviderName, 'apify' | 'coderx'>;
+    actorId: string;
+    credentialSlot: ApifyCredentialSlot;
+    maxChargeUsd: number;
+}
+
 interface ProviderRunStartCallbacks {
     onRunStartRejected?(input: ProviderRunStartRejected): void | Promise<void>;
+    /**
+     * The external start crossed the paid boundary but did not return a
+     * trustworthy run ID.  Callers must preserve that ambiguity rather than
+     * treating it as a no-call release.
+     */
+    onRunStartAmbiguous?(input: ProviderRunStartAmbiguous): void | Promise<void>;
+}
+
+/**
+ * A dataset identifier is transient at the adapter boundary. Trusted callers
+ * may durably bind an opaque digest after the provider run itself is already
+ * checkpointed; no raw identifier is retained by the callback contract.
+ */
+interface ProviderFreshDatasetCallbacks {
+    onProviderDatasetResolved?(datasetId: string): void | Promise<void>;
 }
 
 export type ScraperTelemetryStatus = 'success' | 'error';
@@ -127,7 +149,7 @@ export interface SelfHostedAuthOperationIdentity {
 
 /** Durable hand-off for paid provider runs that may outlive one serverless invocation. */
 export interface ProviderRunCheckpoint
-    extends ProviderCostRunCallbacks, ProviderRunStartCallbacks {
+    extends ProviderCostRunCallbacks, ProviderRunStartCallbacks, ProviderFreshDatasetCallbacks {
     resumeRunId?: string;
     logicalProvider?: Extract<ProviderName, 'apify' | 'coderx'>;
     actorId?: string;
@@ -178,7 +200,7 @@ export interface ProviderUsageDelta {
 }
 
 export interface ProviderCallContext
-    extends ProviderCostRunCallbacks, ProviderRunStartCallbacks {
+    extends ProviderCostRunCallbacks, ProviderRunStartCallbacks, ProviderFreshDatasetCallbacks {
     requestId?: string;
     resumeRunId?: string;
     logicalProvider?: Extract<ProviderName, 'apify' | 'coderx'>;

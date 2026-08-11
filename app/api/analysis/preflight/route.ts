@@ -64,6 +64,11 @@ import {
     requestClientIp,
 } from '@/lib/services/analysis/anonymous-preflight-claim';
 import { preflightTargetInputHash } from '@/lib/services/analysis/preflight-identity';
+import {
+    AccountPrincipalAdmissionError,
+    requireActiveAccountClassification,
+    requireActiveE2eTestRunner,
+} from '@/lib/services/identity/account-principal-store';
 
 const IDEMPOTENCY_KEY_PATTERN = /^[A-Za-z0-9._:-]{16,128}$/;
 
@@ -81,6 +86,7 @@ function authProvider(value: unknown): PreflightAuthProvider | null {
 
 function preflightErrorCode(code: string): string {
     if (code === 'UNAUTHORIZED') return 'UNAUTHORIZED';
+    if (code === 'ACCOUNT_ADMISSION_DENIED') return 'UNAUTHORIZED';
     if (code === 'PREFLIGHT_RATE_LIMITED') return 'RATE_LIMITED';
     if (code === 'NOT_FOUND') return 'NOT_FOUND';
     if (code === 'QUEUE_UNAVAILABLE' || code === 'V2_PIPELINE_UNAVAILABLE') {
@@ -352,6 +358,18 @@ async function handlePOST(
             return handleAnonymousPOST(request, context, supabase);
         }
         userId = user.id;
+        try {
+            await requireActiveAccountClassification(user.id);
+        } catch (accountError) {
+            if (accountError instanceof AccountPrincipalAdmissionError) {
+                return failed(403, accountError.code, '이 계정은 현재 사용할 수 없습니다.');
+            }
+            return failed(
+                503,
+                'V2_PIPELINE_UNAVAILABLE',
+                '새 분석 접수가 일시적으로 중단되었습니다.',
+            );
+        }
         let body: unknown;
         try {
             body = await request.json();
@@ -411,6 +429,24 @@ async function handlePOST(
                 'V2_PIPELINE_UNAVAILABLE',
                 '새 분석 접수가 일시적으로 중단되었습니다.'
             );
+        }
+        if (signedTestAdmission === 'valid') {
+            try {
+                await requireActiveE2eTestRunner(user);
+            } catch (accountError) {
+                if (accountError instanceof AccountPrincipalAdmissionError) {
+                    return failed(
+                        403,
+                        accountError.code,
+                        '이 계정은 현재 사용할 수 없습니다.',
+                    );
+                }
+                return failed(
+                    503,
+                    'V2_PIPELINE_UNAVAILABLE',
+                    '새 분석 접수가 일시적으로 중단되었습니다.',
+                );
+            }
         }
         if (!publicAdmission && signedTestAdmission !== 'valid') {
             return failed(

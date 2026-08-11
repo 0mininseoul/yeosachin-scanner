@@ -4,10 +4,7 @@ import { supabaseAdmin } from '@/lib/supabase/admin';
 import {
     AI_GEMINI_LEASE_SECONDS,
     AI_GEMINI_MIN_REMAINING_MS,
-    AI_STAGE_POLICY_VERSION,
-    AI_STAGE_POLICY_V28_VERSION,
-    AI_STAGE_POLICY_V29_VERSION,
-    AI_STAGE_POLICY_V210_VERSION,
+    SUPPORTED_AI_STAGE_POLICY_VERSIONS,
     aiStagePolicySupports,
     type AiStageName,
     type AiStagePolicyVersion,
@@ -83,13 +80,7 @@ const acquireInputSchema = z.object({
         'privateAccountName',
         'partnerSafety',
     ]).optional(),
-    aiStagePolicyVersion: z.enum([
-        AI_STAGE_POLICY_VERSION,
-        'ai-stage-policy-v2.7',
-        AI_STAGE_POLICY_V28_VERSION,
-        AI_STAGE_POLICY_V29_VERSION,
-        AI_STAGE_POLICY_V210_VERSION,
-    ]).optional(),
+    aiStagePolicyVersion: z.enum(SUPPORTED_AI_STAGE_POLICY_VERSIONS).optional(),
 }).strict().superRefine((input, context) => {
     const v2 = input.aiStagePolicyVersion !== undefined
         && aiStagePolicySupports(input.aiStagePolicyVersion, 'durableGeminiLease');

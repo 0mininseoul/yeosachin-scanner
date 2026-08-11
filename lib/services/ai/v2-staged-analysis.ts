@@ -950,7 +950,7 @@ function parseAuditContext(
     expectedIdentity: AnalysisV2AiResultIdentity
 ): StagedAiAuditContext {
     if (!context || typeof context !== 'object') {
-        throw new Error('A durable staged AI audit context is required.');
+        throw new Error('ANALYSIS_V2_AI_AUDIT_CONTEXT_INVALID');
     }
     const requestId = requestIdSchema.parse(context.requestId);
     const expectedOperationPattern = new RegExp(
@@ -962,16 +962,16 @@ function parseAuditContext(
         || context.operationKey !== expectedIdentity.operationKey
         || !analysisV2AiResultIdentitiesEqual(context.resultIdentity, expectedIdentity)
     ) {
-        throw new Error('A valid PII-free staged AI operationKey is required.');
+        throw new Error('ANALYSIS_V2_AI_AUDIT_CONTEXT_INVALID');
     }
     if (typeof context.prepare !== 'function') {
-        throw new Error('A durable staged AI prepare hook is required.');
+        throw new Error('ANALYSIS_V2_AI_AUDIT_CONTEXT_INVALID');
     }
     if (typeof context.onBeforeAttempt !== 'function') {
-        throw new Error('A durable onBeforeAttempt hook is required.');
+        throw new Error('ANALYSIS_V2_AI_AUDIT_CONTEXT_INVALID');
     }
     if (typeof context.onAttemptTelemetry !== 'function') {
-        throw new Error('A durable onAttemptTelemetry hook is required.');
+        throw new Error('ANALYSIS_V2_AI_AUDIT_CONTEXT_INVALID');
     }
     return {
         requestId,

@@ -5,6 +5,10 @@ import { generateShareToken } from '@/lib/services/share/generate-token';
 import { appOriginForRequest } from '@/lib/constants/app-url';
 import { demoResponseHeaders, isDemoOperator } from '@/lib/services/demo-analysis/demo-analysis';
 import { demoAnalysisStore } from '@/lib/services/demo-analysis/store';
+import {
+    AccountPrincipalAdmissionError,
+    requireActiveAccountClassification,
+} from '@/lib/services/identity/account-principal-store';
 
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const SHARE_TOKEN_PATTERN = /^[0-9a-f]{64}$/;
@@ -195,6 +199,18 @@ export async function POST(request: Request) {
             );
         }
 
+        try {
+            await requireActiveAccountClassification(user.id);
+        } catch (error) {
+            if (error instanceof AccountPrincipalAdmissionError) {
+                return NextResponse.json(
+                    { code: error.code, error: '이 계정은 현재 사용할 수 없습니다.' },
+                    { status: 403 },
+                );
+            }
+            throw error;
+        }
+
         const demo = await demoAnalysisStore.findForOwner(requestId, user.id);
         if (demo) {
             demoRecognized = true;
@@ -338,6 +354,18 @@ export async function DELETE(request: Request) {
                 { error: '로그인이 필요합니다.' },
                 { status: 401 }
             );
+        }
+
+        try {
+            await requireActiveAccountClassification(user.id);
+        } catch (error) {
+            if (error instanceof AccountPrincipalAdmissionError) {
+                return NextResponse.json(
+                    { code: error.code, error: '이 계정은 현재 사용할 수 없습니다.' },
+                    { status: 403 },
+                );
+            }
+            throw error;
         }
 
         const demo = await demoAnalysisStore.findForOwner(requestId, user.id);

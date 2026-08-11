@@ -9,6 +9,7 @@ readonly SECRET_OBSERVE_RETRY_DELAY_SECONDS=1
 readonly SUPABASE_SECRET_ID="ai-baram-v2-supabase-service-role"
 readonly IMAGE_SIGNING_SECRET_ID="ai-baram-v2-image-proxy-signing"
 readonly PREFLIGHT_IDENTITY_HMAC_SECRET_ID="ai-baram-v2-preflight-identity-hmac"
+readonly GENDER_ROUTING_HMAC_SECRET_ID="ai-baram-v2-gender-routing-hmac"
 
 mode="apply"
 rotate_target=""
@@ -18,7 +19,7 @@ usage() {
   cat <<'EOF'
 Usage: scripts/configure-analysis-v2-secrets.sh [--dry-run | --check] [--rotate TARGET] [--reconcile-iam]
 
-Creates or verifies the four Analysis V2 Secret Manager resources and grants
+Creates or verifies the five Analysis V2 Secret Manager resources and grants
 the Cloud Run runtime identity resource-scoped access. Secret values are read
 only when a version must be created, and are streamed from an outside-source
 dotenv file directly to gcloud over stdin.
@@ -35,24 +36,28 @@ Required for creating or rotating a version:
   ANALYSIS_V2_SECRET_SOURCE_ENV_FILE
     Dotenv file outside ANALYSIS_V2_WORKER_SOURCE_DIR. It must contain
     SUPABASE_SERVICE_ROLE_KEY, IMAGE_PROXY_SIGNING_SECRET,
-    ANALYSIS_V2_PREFLIGHT_IDENTITY_HMAC_SECRET, and the one selected
-    APIFY_<SLOT>_API_TOKEN. The file is never sourced as shell code. The preflight
-    identity secret must be base64/base64url encoding of at least 32 random bytes.
+    ANALYSIS_V2_PREFLIGHT_IDENTITY_HMAC_SECRET,
+    ANALYSIS_V2_GENDER_ROUTING_HMAC_SECRET, and the one selected
+    APIFY_<SLOT>_API_TOKEN. The file is never sourced as shell code. Both HMAC
+    secrets must be base64/base64url encoding of at least 32 random bytes.
 
-Optional exact numeric version pins:
+Exact numeric version pins:
   ANALYSIS_V2_SUPABASE_SERVICE_ROLE_SECRET_VERSION
   ANALYSIS_V2_APIFY_API_TOKEN_SECRET_VERSION
   ANALYSIS_V2_IMAGE_PROXY_SIGNING_SECRET_VERSION
   ANALYSIS_V2_PREFLIGHT_IDENTITY_HMAC_SECRET_VERSION
+  ANALYSIS_V2_GENDER_ROUTING_HMAC_SECRET_VERSION
 
 When a pin is omitted, exactly one enabled numeric version must be discoverable.
-`latest` is never accepted. Deployments require all four explicit pins. A
+`latest` is never accepted. Deployments require all five explicit pins. The
+gender-routing HMAC pin is required even when its resource has one enabled
+version, so rollout intent can never rely on discovery. A
 create-only interrupted resource with no version history resumes its initial
 version on ordinary apply. If version history exists but every version is
 disabled, ordinary apply fails closed and an explicit rotation is required.
 
 Rotate targets:
-  supabase | apify | image-signing | preflight-identity-hmac
+  supabase | apify | image-signing | preflight-identity-hmac | gender-routing-hmac
 
 Rotation is explicit and adds one enabled version without disabling the old
 version. The script prints the new non-secret numeric pin; update the deployment
@@ -172,6 +177,21 @@ secret_json() {
   gcloud secrets describe "$secret_id" \
     "--project=$ANALYSIS_V2_TASKS_PROJECT" \
     --format=json 2>/dev/null
+}
+
+validate_gender_initial_pin() {
+  local config
+  if [[ "$rotate_target" == "gender-routing-hmac" ]]; then
+    if config="$(secret_json "$GENDER_ROUTING_HMAC_SECRET_ID")"; then
+      return 0
+    fi
+    die "cannot rotate gender-routing HMAC because Secret Manager resource $GENDER_ROUTING_HMAC_SECRET_ID does not exist; run ordinary apply first"
+  fi
+  if config="$(secret_json "$GENDER_ROUTING_HMAC_SECRET_ID")"; then
+    return 0
+  fi
+  [[ "$ANALYSIS_V2_GENDER_ROUTING_HMAC_SECRET_VERSION" == "1" ]] \
+    || die "ANALYSIS_V2_GENDER_ROUTING_HMAC_SECRET_VERSION must be 1 when $GENDER_ROUTING_HMAC_SECRET_ID is absent"
 }
 
 wait_for_secret_json() {
@@ -367,13 +387,24 @@ validate_secret_source_value() {
       const key = process.argv[1];
       const minimum = key === "IMAGE_PROXY_SIGNING_SECRET" ? 32 : 20;
       const value = process.env[key];
-      if (typeof value !== "string" || value.trim().length < minimum || /[\r\n]/.test(value)) {
+      if (
+        typeof value !== "string"
+        || value !== value.trim()
+        || value.length < minimum
+        || /[\r\n]/.test(value)
+      ) {
         console.error(`required secret source value is missing or invalid: ${key}`);
         process.exit(1);
       }
-      if (key === "ANALYSIS_V2_PREFLIGHT_IDENTITY_HMAC_SECRET") {
+      if (
+        key === "ANALYSIS_V2_PREFLIGHT_IDENTITY_HMAC_SECRET"
+        || key === "ANALYSIS_V2_GENDER_ROUTING_HMAC_SECRET"
+      ) {
         const raw = value.trim();
-        if (!/^[A-Za-z0-9+/_-]+={0,2}$/.test(raw) || raw.length % 4 === 1) process.exit(1);
+        if (!/^[A-Za-z0-9+/_-]+={0,2}$/.test(raw) || raw.length % 4 === 1) {
+          console.error(`required secret source value is missing or invalid: ${key}`);
+          process.exit(1);
+        }
         const normalized = raw.replace(/-/g, "+").replace(/_/g, "/").replace(/=+$/, "");
         const decoded = Buffer.from(normalized + "=".repeat((4 - normalized.length % 4) % 4), "base64");
         if (decoded.length < 32 || decoded.toString("base64").replace(/=+$/, "") !== normalized) {
@@ -411,26 +442,54 @@ verify_enabled_version() {
 
 enabled_version_count=0
 single_enabled_version=""
+validate_version_list_json() {
+  local secret_id="$1"
+  local require_enabled="$2"
+  local versions_json="$3"
+  jq -e \
+    --arg project_number "$tasks_project_number" \
+    --arg secret "$secret_id" \
+    --arg require_enabled "$require_enabled" '
+      def exact_version_entry:
+        type == "object"
+        and (.name | type) == "string"
+        and (.state | type) == "string"
+        and ((.name | split("/")) as $parts
+          | ($parts | length) == 6
+            and $parts[0] == "projects"
+            and $parts[1] == $project_number
+            and $parts[2] == "secrets"
+            and $parts[3] == $secret
+            and $parts[4] == "versions"
+            and ($parts[5] | test("^[1-9][0-9]*$")))
+        and ($require_enabled != "true" or .state == "ENABLED");
+      type == "array" and all(.[]; exact_version_entry)
+    ' <<<"$versions_json" >/dev/null
+}
+
 inspect_enabled_versions() {
   local secret_id="$1"
   local line
   local version
+  local versions_json
   local versions_output
   enabled_version_count=0
   single_enabled_version=""
-  versions_output="$(gcloud secrets versions list \
+  versions_json="$(gcloud secrets versions list \
     "$secret_id" \
     "--project=$ANALYSIS_V2_TASKS_PROJECT" \
     '--filter=state=ENABLED' \
-    '--format=value(name)')" \
+    '--limit=2' \
+    '--format=json')" \
     || die "could not list enabled versions for $secret_id"
+  validate_version_list_json "$secret_id" true "$versions_json" \
+    || die "enabled version discovery for $secret_id returned invalid JSON or canonical version resource"
+  versions_output="$(jq -r '.[] | .name | split("/") | .[5]' <<<"$versions_json")"
   while IFS= read -r line; do
     [[ -n "$line" ]] || continue
     version="${line##*/}"
     [[ "$version" =~ ^[1-9][0-9]*$ ]] \
       || die "enabled version discovery for $secret_id returned a non-numeric version"
-    [[ "$line" == "projects/$tasks_project_number/secrets/$secret_id/versions/$version" ]] \
-      || die "enabled version discovery for $secret_id returned an unexpected resource name"
     single_enabled_version="$version"
     enabled_version_count=$((enabled_version_count + 1))
   done <<<"$versions_output"
@@ -438,20 +497,16 @@ inspect_enabled_versions() {
 
 secret_has_version_history() {
   local secret_id="$1"
-  local first_version
-  local version
-  first_version="$(gcloud secrets versions list \
+  local versions_json
+  versions_json="$(gcloud secrets versions list \
     "$secret_id" \
     "--project=$ANALYSIS_V2_TASKS_PROJECT" \
     '--limit=1' \
-    '--format=value(name)')" \
+    '--format=json')" \
     || die "could not inspect version history for $secret_id"
-  [[ -n "$first_version" ]] || return 1
-  version="${first_version##*/}"
-  [[ "$version" =~ ^[1-9][0-9]*$ \
-    && "$first_version" == "projects/$tasks_project_number/secrets/$secret_id/versions/$version" ]] \
-    || die "version history for $secret_id returned an unexpected resource name"
-  return 0
+  validate_version_list_json "$secret_id" false "$versions_json" \
+    || die "version history for $secret_id returned invalid JSON or canonical version resource"
+  jq -e 'length > 0' <<<"$versions_json" >/dev/null
 }
 
 resolved_version=""
@@ -513,7 +568,23 @@ process_secret() {
       add_secret_version "$secret_id" "$env_key"
       resolved_version="$added_version"
     elif [[ -n "$configured_version" ]]; then
-      resolve_version "$secret_id" "$configured_version" "$pin_name"
+      if [[ "$logical_target" == "gender-routing-hmac" ]]; then
+        inspect_enabled_versions "$secret_id"
+        if [[ "$enabled_version_count" == "0" ]] \
+          && ! secret_has_version_history "$secret_id"; then
+          [[ "$configured_version" == "1" ]] \
+            || die "$pin_name must be 1 when $secret_id has no version history"
+          [[ "$mode" != "check" ]] \
+            || die "$secret_id has no version; run ordinary apply to resume initial version creation"
+          log "resuming interrupted initial version creation for $secret_id"
+          add_secret_version "$secret_id" "$env_key"
+          resolved_version="$added_version"
+        else
+          resolve_version "$secret_id" "$configured_version" "$pin_name"
+        fi
+      else
+        resolve_version "$secret_id" "$configured_version" "$pin_name"
+      fi
     else
       inspect_enabled_versions "$secret_id"
       if [[ "$enabled_version_count" == "1" ]]; then
@@ -564,7 +635,7 @@ while (($# > 0)); do
       ;;
     --rotate)
       shift
-      (($# > 0)) || die "--rotate requires supabase, apify, image-signing, or preflight-identity-hmac"
+      (($# > 0)) || die "--rotate requires supabase, apify, image-signing, preflight-identity-hmac, or gender-routing-hmac"
       [[ -z "$rotate_target" ]] || die "choose only one rotate target"
       rotate_target="$1"
       ;;
@@ -586,8 +657,8 @@ done
 normalize_worker_runtime_identity
 
 case "$rotate_target" in
-  ''|supabase|apify|image-signing|preflight-identity-hmac) ;;
-  *) die "--rotate requires supabase, apify, image-signing, or preflight-identity-hmac" ;;
+  ''|supabase|apify|image-signing|preflight-identity-hmac|gender-routing-hmac) ;;
+  *) die "--rotate requires supabase, apify, image-signing, preflight-identity-hmac, or gender-routing-hmac" ;;
 esac
 [[ "$mode" != "check" || -z "$rotate_target" ]] \
   || die "--check cannot be combined with --rotate"
@@ -606,6 +677,17 @@ validate_service_account_email \
   == "$ANALYSIS_V2_TASKS_PROJECT" ]] \
   || die "worker runtime service account must belong to ANALYSIS_V2_TASKS_PROJECT"
 validate_slot "$ANALYSIS_V2_APIFY_API_TOKEN_SLOT"
+
+if [[ "$rotate_target" != "gender-routing-hmac" ]]; then
+  required_env ANALYSIS_V2_GENDER_ROUTING_HMAC_SECRET_VERSION
+  validate_numeric_version \
+    "$ANALYSIS_V2_GENDER_ROUTING_HMAC_SECRET_VERSION" \
+    ANALYSIS_V2_GENDER_ROUTING_HMAC_SECRET_VERSION
+elif [[ -n "${ANALYSIS_V2_GENDER_ROUTING_HMAC_SECRET_VERSION:-}" ]]; then
+  validate_numeric_version \
+    "$ANALYSIS_V2_GENDER_ROUTING_HMAC_SECRET_VERSION" \
+    ANALYSIS_V2_GENDER_ROUTING_HMAC_SECRET_VERSION
+fi
 
 readonly slot_upper="$(printf '%s' "$ANALYSIS_V2_APIFY_API_TOKEN_SLOT" | tr '[:lower:]' '[:upper:]')"
 readonly apify_env_key="APIFY_${slot_upper}_API_TOKEN"
@@ -637,6 +719,7 @@ disabled="$(gcloud iam service-accounts describe \
   || die "worker runtime service account must already exist"
 [[ "$disabled" != "true" && "$disabled" != "True" ]] \
   || die "worker runtime service account is disabled"
+validate_gender_initial_pin
 
 cleanup() {
   local file
@@ -672,6 +755,12 @@ process_secret \
   ANALYSIS_V2_PREFLIGHT_IDENTITY_HMAC_SECRET \
   "${ANALYSIS_V2_PREFLIGHT_IDENTITY_HMAC_SECRET_VERSION:-}" \
   ANALYSIS_V2_PREFLIGHT_IDENTITY_HMAC_SECRET_VERSION
+process_secret \
+  gender-routing-hmac \
+  "$GENDER_ROUTING_HMAC_SECRET_ID" \
+  ANALYSIS_V2_GENDER_ROUTING_HMAC_SECRET \
+  "${ANALYSIS_V2_GENDER_ROUTING_HMAC_SECRET_VERSION:-}" \
+  ANALYSIS_V2_GENDER_ROUTING_HMAC_SECRET_VERSION
 
 if [[ "$mode" == "dry-run" ]]; then
   log "dry-run complete: no mutations were applied and no secret value was printed"

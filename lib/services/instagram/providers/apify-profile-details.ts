@@ -181,6 +181,7 @@ export async function runReplacementProfileDetails(
             'SCRAPING_SCHEMA_ERROR: replacement profile Actor has no default dataset.'
         );
     }
+    await input.context?.onProviderDatasetResolved?.(run.defaultDatasetId);
 
     let page: Awaited<ReturnType<ReturnType<ApifyClientLike['dataset']>['listItems']>>;
     try {

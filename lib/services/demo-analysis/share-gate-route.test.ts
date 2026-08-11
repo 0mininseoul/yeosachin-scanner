@@ -2,10 +2,15 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 const mocks = vi.hoisted(() => ({
     getUser: vi.fn(), createClient: vi.fn(), from: vi.fn(), demoFind: vi.fn(),
+    requireActiveAccountClassification: vi.fn(),
 }));
 vi.mock('@/lib/supabase/server', () => ({ createClient: mocks.createClient }));
 vi.mock('@/lib/supabase/admin', () => ({ supabaseAdmin: { from: mocks.from } }));
 vi.mock('@/lib/services/demo-analysis/store', () => ({ demoAnalysisStore: { findForOwner: mocks.demoFind } }));
+vi.mock('@/lib/services/identity/account-principal-store', async importOriginal => ({
+    ...(await importOriginal<typeof import('@/lib/services/identity/account-principal-store')>()),
+    requireActiveAccountClassification: mocks.requireActiveAccountClassification,
+}));
 import { POST } from '@/app/api/share/enable/route';
 
 const userId = '123e4567-e89b-42d3-a456-426614174000';
@@ -16,6 +21,13 @@ describe('demo share server gate', () => {
         vi.clearAllMocks();
         mocks.createClient.mockResolvedValue({ auth: { getUser: mocks.getUser } });
         mocks.getUser.mockResolvedValue({ data: { user: { id: userId } }, error: null });
+        mocks.requireActiveAccountClassification.mockResolvedValue({
+            userId,
+            accountClass: 'production',
+            trafficClass: 'external',
+            lifecycle: 'active',
+            classificationVersion: 'account-ledger-v1',
+        });
     });
     it('rejects an owner demo before production analysis queries or updates', async () => {
         vi.stubEnv('DEMO_ANALYSIS_ENABLED', 'true');

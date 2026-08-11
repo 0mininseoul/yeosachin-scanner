@@ -4,7 +4,10 @@ import {
     selectAnalysisMedia,
     type SelectedAnalysisMedia,
 } from '@/lib/domain/analysis/media-policy';
-import { applyGenderResolution } from '@/lib/services/ai/v2-staged-analysis';
+import {
+    applyGenderResolution,
+    createGenderResolutionResultIdentity,
+} from '@/lib/services/ai/v2-staged-analysis';
 import { buildCarouselCaptionPolicy } from '@/lib/domain/analysis/carousel-caption-policy';
 import {
     calculateRiskPolicy,
@@ -64,6 +67,7 @@ import type {
     AnalysisV2PrivateNameRow,
     AnalysisV2ReverseLikeRow as AnalysisV2StoredReverseLikeRow,
     AnalysisV2ResultCheckpointManifest,
+    AnalysisV2RevenueResolverOutcomePatch,
     AnalysisV2ResultStageSnapshot,
     AnalysisV2ResultStore,
     AnalysisV2VerifiedFemaleFeatureRow,
@@ -98,6 +102,12 @@ import { v211FeatureAdmission } from './v2-v211-feature-admission';
 import { v29GenderResolverAdmission } from './v2-v29-gender-resolver-admission';
 import { selectAnalysisV2GenderResolverMedia } from './v2-gender-resolver-media-policy';
 import { selectAnalysisV2ProgressCandidateMedia } from './progress-candidate-media';
+import { assertCoverageInvariant } from './revenue-ledger';
+import type { AnalysisV2RevenueFinalQualityGate } from './revenue-final-quality-gate';
+import type {
+    AnalysisV2RevenueResolverCapacity,
+    AnalysisV2RevenueResolverCapacityAdmission,
+} from './revenue-resolver-capacity';
 import {
     AnalysisV2TransientMediaPreparationError,
     isAnalysisV2PartialMediaCoverageAllowed,
@@ -511,6 +521,8 @@ export interface AnalysisV2AiScoringExecutorDependencies {
         | 'checkpointPrivateNames'
         | 'checkpointScores'
         | 'checkpointNarratives'
+        | 'checkpointRevenueResolverOutcomes'
+        | 'loadRevenueResolverOutcomes'
         | 'finalize'
         | 'loadStageSnapshot'>;
     resultImages?: {
@@ -531,6 +543,18 @@ export interface AnalysisV2AiScoringExecutorDependencies {
     partnerSafetyConcurrency?: number;
     narrativeConcurrency?: number;
     analysisLifecycleEventEmitter?: typeof emitAnalysisLifecycleEvent;
+    /**
+     * Strict test-entitlement only: verify the immutable primary-join quality
+     * checkpoint immediately before auto-finalization. Production and Plus
+     * never consult it because their relationship state has no strict marker.
+     */
+    revenueFinalQualityGate?: AnalysisV2RevenueFinalQualityGate;
+    /**
+     * Strict request-scoped resolver admission. It is queried only after the
+     * immutable strict relationship-selection marker at primary_join, after
+     * every profile-AI batch is durable and before screening.
+     */
+    revenueResolverCapacity?: AnalysisV2RevenueResolverCapacity;
 }
 
 export function buildAnalysisV2ResultImageSources(input: {
@@ -1227,6 +1251,497 @@ function checkpointClaim(context: AnalysisV2StageExecutorContext<AnalysisV2Stage
     };
 }
 
+interface AnalysisV2FinalRevenueCoverage {
+    publicMutualCount: number;
+    screenedCount: number;
+    notScreenedCount: number;
+    unknownBurdenCount: number;
+    coverageValid: boolean;
+    passesUnknownGate: boolean;
+}
+
+/**
+ * This marker is written only by the exact Basic/Standard test-entitlement
+ * relationship collector. It is intentionally the first discriminator for
+ * strict-only work: production, Plus, and every legacy cohort must retain the
+ * original executor path without a context-store, stage-store, revenue, or AI
+ * call introduced by this feature.
+ */
+function hasStrictRevenueRelationshipSelection(
+    context: AnalysisV2StageExecutorContext<AnalysisV2StageIdSubset>,
+): boolean {
+    const relationships = context.state.relationships;
+    const policy = relationships?.relationshipSelectionPolicy;
+    if (!relationships || !policy) return false;
+    const cap = policy.planId === 'basic' ? 100 : 200;
+    return policy.policyVersion === 'gender-routing-v1'
+        && context.state.planId === policy.planId
+        && relationships.resultHash === policy.relationshipCheckpointId
+        && policy.selectedCount === relationships.detailedSelectedPublicCount
+        && policy.publicPopulationCount === relationships.publicCount
+        && relationships.notScreenedPublicCount === (
+            relationships.publicCount - relationships.detailedSelectedPublicCount
+        )
+        && policy.selectedCount <= cap;
+}
+
+/**
+ * The durable relationship checkpoint is the cohort authority. A profile AI
+ * terminal state represents exactly one selected candidate, so the unknown
+ * burden is intentionally a union, not a sum of unavailable categories.
+ */
+function finalRevenueCoverage(
+    context: AnalysisV2StageExecutorContext<AnalysisV2StageIdSubset>,
+    outcomes: readonly AnalysisV2ProfileAiOutcome[],
+): AnalysisV2FinalRevenueCoverage {
+    const relationships = context.state.relationships;
+    const publicMutualCount = relationships?.publicCount ?? 0;
+    const screenedCount = relationships?.detailedSelectedPublicCount ?? 0;
+    const notScreenedCount = relationships?.notScreenedPublicCount ?? 0;
+    const unavailableReasonCounts = {
+        fetch_unavailable: 0,
+        media_unavailable: 0,
+        analysis_unavailable: 0,
+    };
+    const candidateIds = new Set<string>();
+    let unknownBurdenCount = 0;
+
+    for (const outcome of outcomes) {
+        if (!candidateIds.add(outcome.candidateId)) continue;
+        if (
+            outcome.status !== 'verified_female'
+            && outcome.status !== 'verified_non_female'
+        ) {
+            // `unresolved` and `unresolved_stage_conflict` are the explicit
+            // "other unknown" bucket. Each terminal row increments once even
+            // when it also has a fetch/media/analysis unavailable reason.
+            unknownBurdenCount += 1;
+        }
+        if (outcome.status === 'fetch_unavailable') {
+            unavailableReasonCounts.fetch_unavailable += 1;
+        } else if (outcome.status === 'media_unavailable') {
+            unavailableReasonCounts.media_unavailable += 1;
+        } else if (outcome.status === 'analysis_unavailable') {
+            unavailableReasonCounts.analysis_unavailable += 1;
+        }
+    }
+
+    let coverageValid = relationships !== undefined
+        && candidateIds.size === outcomes.length
+        && outcomes.length === screenedCount;
+    let passesUnknownGate = false;
+    try {
+        const coverage = assertCoverageInvariant({
+            publicMutualCount,
+            screenedCount,
+            notScreenedCount,
+            unknownBurdenCount,
+            unavailableReasonCounts,
+        });
+        passesUnknownGate = coverage.passesUnknownGate;
+    } catch {
+        coverageValid = false;
+    }
+    return {
+        publicMutualCount,
+        screenedCount,
+        notScreenedCount,
+        unknownBurdenCount,
+        coverageValid,
+        passesUnknownGate,
+    };
+}
+
+type RevenueResolverPriority = 0 | 1 | 2 | 3;
+
+function isFinalRevenueUnknown(outcome: AnalysisV2ProfileAiOutcome): boolean {
+    return outcome.status !== 'verified_female'
+        && outcome.status !== 'verified_non_female';
+}
+
+function revenueResolverPriority(outcome: AnalysisV2ProfileAiOutcome): RevenueResolverPriority {
+    switch (outcome.status) {
+        case 'analysis_unavailable': return 0;
+        case 'media_unavailable': return 1;
+        case 'fetch_unavailable': return 2;
+        default: return 3;
+    }
+}
+
+interface RevenueFinalResolverCandidate {
+    outcome: AnalysisV2ProfileAiOutcome;
+    /** Profile-AI batches preserve the selected routing-manifest HMAC order. */
+    manifestOrdinal: number;
+}
+
+function finalRevenueResolverCandidates(
+    outcomes: readonly AnalysisV2ProfileAiOutcome[],
+): readonly RevenueFinalResolverCandidate[] {
+    return outcomes
+        .map((outcome, manifestOrdinal) => ({ outcome, manifestOrdinal }))
+        .filter(({ outcome }) => isFinalRevenueUnknown(outcome))
+        .sort((left, right) => (
+            revenueResolverPriority(left.outcome) - revenueResolverPriority(right.outcome)
+            || left.manifestOrdinal - right.manifestOrdinal
+        ));
+}
+
+function finalRevenueResolverPlanHash(
+    candidates: readonly RevenueFinalResolverCandidate[],
+): string {
+    return sha256('analysis-v2-revenue-final-resolver-plan:v1', candidates.map(candidate => ({
+        // This is an opaque candidate-id digest, never a username, profile URL,
+        // raw manifest key, input HMAC, or model payload.
+        candidateHash: sha256('analysis-v2-revenue-final-resolver-candidate:v1',
+            candidate.outcome.candidateId),
+        priority: revenueResolverPriority(candidate.outcome),
+        manifestOrdinal: candidate.manifestOrdinal,
+    })));
+}
+
+interface RevenueResolverMediaPreparation {
+    media: NormalizedAiMediaSelection[];
+    /**
+     * Retained detail media is optional.  Resolver classification must not be
+     * made conditional on a feature payload: analysis/media-unavailable rows
+     * normally have none, but can still be safely classified from freshly
+     * normalized profile media.
+     */
+    bundleMedia: readonly AnalysisV2NormalizedMediaBundleItem[] | null;
+}
+
+async function finalRevenueResolverMedia(input: {
+    outcome: AnalysisV2ProfileAiOutcome;
+    aiStagePolicyVersion: string;
+    normalizeMedia: AnalysisV2AiScoringExecutorDependencies['normalizeMedia'];
+}): Promise<RevenueResolverMediaPreparation | null> {
+    // Fetch-unavailable has no profile snapshot. Media-unavailable may recover
+    // transiently, so it is deliberately skipped only if this bounded retry
+    // cannot form the existing resolver's valid media input; the next priority
+    // candidate is then considered.
+    if (
+        !input.outcome.profile
+        || input.outcome.profile.isPrivate
+    ) return null;
+    try {
+        const policy = mediaPolicy(
+            input.outcome.profile,
+            policySupports(input.aiStagePolicyVersion, 'inputQualityV28'),
+        );
+        const normalized = await normalizeAnalysisV2MediaSelections(
+            policy.feature.media,
+            input.normalizeMedia,
+            input.aiStagePolicyVersion,
+        );
+        if (!isAnalysisV2StageMediaCoverageUsable(
+            normalized.coverage,
+            input.aiStagePolicyVersion,
+        )) return null;
+        const resolverMedia = policySupports(
+            input.aiStagePolicyVersion,
+            'genderTriageMicrobatchV29',
+        )
+            ? selectAnalysisV2GenderResolverMedia(normalized.media)
+            : normalized.media;
+        // The approved opportunistic resolver keeps its existing conservative
+        // two-distinct-image minimum. A one-image or failed download is an
+        // explicit skip, never a fabricated classification.
+        if (resolverMedia.length < 2) return null;
+        const featureSelectionIds = new Set(
+            input.outcome.feature?.analyzedSelectionIds ?? [],
+        );
+        const bundleMedia = normalized.media.flatMap(media => {
+            if (!featureSelectionIds.has(media.selectionId)) return [];
+            const normalizedJpeg = normalized.bytes.get(media.selectionId);
+            return normalizedJpeg
+                ? [{ selectionId: media.selectionId, normalizedJpeg }]
+                : [];
+        });
+        // A missing retained feature bundle must not turn a valid
+        // analysis/media-unavailable resolver input into an artificial skip.
+        // Only featureful candidates with a complete retained bundle are
+        // later eligible for detail materialization.
+        return {
+            media: resolverMedia,
+            bundleMedia: featureSelectionIds.size > 0
+                && bundleMedia.length === featureSelectionIds.size
+                ? bundleMedia
+                : null,
+        };
+    } catch (error) {
+        if (error instanceof AnalysisV2AiResultRecoveryPendingError) throw error;
+        return null;
+    }
+}
+
+function applyRevenueResolverPatches(
+    outcomes: readonly AnalysisV2ProfileAiOutcome[],
+    patches: readonly AnalysisV2RevenueResolverOutcomePatch[],
+): readonly AnalysisV2ProfileAiOutcome[] {
+    const patchByCandidate = new Map(patches.map(patch => [patch.candidateId, patch]));
+    const effective = outcomes.map(outcome => {
+        const patch = patchByCandidate.get(outcome.candidateId);
+        if (!patch) return outcome;
+        if (
+            ![
+                'unresolved',
+                'unresolved_stage_conflict',
+                'media_unavailable',
+                'analysis_unavailable',
+            ].includes(
+                outcome.baselineClassification,
+            )
+            || outcome.status === 'verified_female'
+            || outcome.status === 'verified_non_female'
+        ) {
+            throw new Error('ANALYSIS_V2_REVENUE_RESOLVER_OVERLAY_DRIFT');
+        }
+        patchByCandidate.delete(outcome.candidateId);
+        return {
+            ...outcome,
+            status: patch.classification,
+            classificationSource: 'gender_resolution' as const,
+            genderResolutionStatus: 'ready_applied' as const,
+            genderResolutionOperationKey: patch.operationKey,
+            genderResolutionResultHash: patch.resultHash,
+            // Resolver provenance is authoritative independently of a
+            // detail feature bundle.  A featureless verified woman belongs in
+            // primary membership but is intentionally screened out later.
+            mediaBundlePersisted: outcome.mediaBundlePersisted,
+        };
+    });
+    if (patchByCandidate.size !== 0) {
+        throw new Error('ANALYSIS_V2_REVENUE_RESOLVER_OVERLAY_DRIFT');
+    }
+    return effective;
+}
+
+async function runPrimaryRevenueResolverPass(input: {
+    dependencies: AnalysisV2AiScoringExecutorDependencies;
+    context: AnalysisV2StageExecutorContext<AnalysisV2StageIdSubset>;
+    /** Immutable original profile outcomes define plan order and pass identity. */
+    plannedOutcomes: readonly AnalysisV2ProfileAiOutcome[];
+    /** Existing durable patches are merged here before recovery resumes. */
+    outcomes: readonly AnalysisV2ProfileAiOutcome[];
+    admission: AnalysisV2RevenueResolverCapacityAdmission;
+    coverage: AnalysisV2FinalRevenueCoverage;
+}): Promise<{
+    outcomes: readonly AnalysisV2ProfileAiOutcome[];
+    patches: readonly AnalysisV2RevenueResolverOutcomePatch[];
+}> {
+    const candidates = finalRevenueResolverCandidates(input.plannedOutcomes);
+    await input.admission.begin({
+        planHash: finalRevenueResolverPlanHash(candidates),
+        screenedCount: input.coverage.screenedCount,
+        unknownBurdenCount: input.coverage.unknownBurdenCount,
+    });
+    const aiFence = aiJobFence(input.context);
+    if (!policySupports(aiFence.aiStagePolicyVersion, 'genderResolution')) {
+        return { outcomes: input.outcomes, patches: [] };
+    }
+    const policyVersion = assertSupportedAiStagePolicyVersion(
+        aiFence.aiStagePolicyVersion,
+    );
+    const resolved = [...input.outcomes];
+    const patches: AnalysisV2RevenueResolverOutcomePatch[] = [];
+    let acceptedReservations = 0;
+    for (const candidate of candidates) {
+        const current = resolved[candidate.manifestOrdinal]!;
+        // A prior invocation persisted this exact outcome before its primary
+        // checkpoint. Recovery must reuse it, never re-bill or re-call Gemini.
+        if (!isFinalRevenueUnknown(current)) continue;
+        const media = await finalRevenueResolverMedia({
+            outcome: current,
+            aiStagePolicyVersion: aiFence.aiStagePolicyVersion,
+            normalizeMedia: input.dependencies.normalizeMedia,
+        });
+        if (!media) continue;
+        // The database reservation is the cross-recovery authority.  This
+        // local ceiling mirrors it so a malformed or overly permissive
+        // external adapter cannot issue a twenty-first Basic / forty-first
+        // Standard call inside one execution either.
+        if (acceptedReservations >= input.admission.capacityLimit) break;
+        const identity = createGenderResolutionResultIdentity(
+            { media: media.media },
+            policyVersion,
+        );
+        // Reserve before the model boundary. The runtime receives a matching
+        // cached admission only to retain its own immediate-before-call fence.
+        const disposition = await input.admission.reserve(identity.operationKey);
+        if (disposition !== 'accepted') break;
+        acceptedReservations += 1;
+        const resolver = input.dependencies.ai.startGenderResolution({ media: media.media }, {
+            ...aiFence,
+            reserveGenderResolutionCapacity: async operationKey => {
+                if (operationKey !== identity.operationKey) {
+                    throw new Error('ANALYSIS_V2_REVENUE_RESOLVER_OPERATION_DRIFT');
+                }
+                return 'accepted';
+            },
+        });
+        await resolver.completion;
+        const state = resolver.peek();
+        if (state.status === 'recovery_pending') {
+            throw new AnalysisV2AiResultRecoveryPendingError();
+        }
+        if (state.status !== 'ready') continue;
+        const reconciliation = applyGenderResolution({
+            baselineClassification: current.baselineClassification,
+            baselineSource: current.baselineClassification === 'verified_female'
+                || current.baselineClassification === 'verified_non_female'
+                ? 'feature'
+                : 'unknown',
+            triage: current.triage?.assessment ?? null,
+            feature: current.feature,
+            resolver: state.value.result,
+        });
+        if (
+            !reconciliation.resolverApplied
+            || (
+                reconciliation.finalClassification !== 'verified_female'
+                && reconciliation.finalClassification !== 'verified_non_female'
+            )
+            || state.value.resultHash === null
+        ) continue;
+        if (
+            reconciliation.finalClassification === 'verified_female'
+            && current.feature
+            && media.bundleMedia
+        ) {
+            await input.dependencies.mediaStore.persistBundle({
+                requestId: input.context.claim.requestId,
+                jobKey: input.context.claim.jobKey,
+                claimToken: input.context.claim.claimToken,
+                bundleId: analysisV2CandidateBundleId(current.candidateId),
+                media: media.bundleMedia,
+            });
+        }
+        resolved[candidate.manifestOrdinal] = {
+            ...current,
+            status: reconciliation.finalClassification,
+            classificationSource: reconciliation.classificationSource,
+            genderResolutionStatus: 'ready_applied',
+            genderResolutionOperationKey: state.value.operationKey,
+            genderResolutionResultHash: state.value.resultHash,
+            mediaBundlePersisted: reconciliation.finalClassification === 'verified_female'
+                && current.feature
+                && media.bundleMedia !== null
+                ? true
+                : current.mediaBundlePersisted,
+        };
+        patches.push({
+            candidateId: current.candidateId,
+            classification: reconciliation.finalClassification,
+            operationKey: state.value.operationKey,
+            resultHash: state.value.resultHash,
+        });
+    }
+    return { outcomes: resolved, patches };
+}
+
+async function enforceRevenueFinalQualityGate(
+    dependencies: AnalysisV2AiScoringExecutorDependencies,
+    context: AnalysisV2StageExecutorContext<AnalysisV2StageIdSubset>,
+): Promise<void> {
+    // The immutable relationship marker is the *first* branch. It prevents
+    // every new gate/context/stage/resolver/assessor call on production, Plus,
+    // and non-strict legacy cohorts.
+    if (!hasStrictRevenueRelationshipSelection(context)) return;
+    if (context.claim.jobKey !== 'coordinator:finalize') {
+        throw new Error('ANALYSIS_V2_REVENUE_FINAL_QUALITY_GATE_CLAIM_MISMATCH');
+    }
+    const claim = {
+        ...checkpointClaim(context),
+        jobKey: 'coordinator:finalize' as const,
+    };
+    const gate = dependencies.revenueFinalQualityGate;
+    if (!gate) {
+        throw new Error('ANALYSIS_V2_REVENUE_FINAL_QUALITY_GATE_REQUIRED');
+    }
+    // The marker is immutable strict lineage. A mismatch with the dependency's
+    // durable context proof is a fence violation, never permission to fall
+    // through to automatic completion.
+    if (!(await gate.isApplicable(claim))) {
+        throw new Error('ANALYSIS_V2_REVENUE_FINAL_QUALITY_GATE_REQUIRED');
+    }
+    const disposition = await gate.verify(claim);
+    if (disposition !== 'approved') {
+        throw new Error('ANALYSIS_V2_REVENUE_FINAL_QUALITY_GATE_FAILED');
+    }
+}
+
+async function resolveStrictPrimaryRevenueOutcomes(
+    dependencies: AnalysisV2AiScoringExecutorDependencies,
+    context: AnalysisV2StageExecutorContext<AnalysisV2StageIdSubset>,
+    plannedOutcomes: readonly AnalysisV2ProfileAiOutcome[],
+): Promise<readonly AnalysisV2ProfileAiOutcome[]> {
+    if (context.claim.jobKey !== 'coordinator:join:primary-evidence') {
+        throw new Error('ANALYSIS_V2_REVENUE_PRIMARY_QUALITY_CLAIM_MISMATCH');
+    }
+    const admissionFactory = dependencies.revenueResolverCapacity;
+    if (!admissionFactory) {
+        throw new Error('ANALYSIS_V2_REVENUE_PRIMARY_QUALITY_REQUIRED');
+    }
+    const claim = {
+        ...checkpointClaim(context),
+        jobKey: 'coordinator:join:primary-evidence' as const,
+    };
+    const admission = await admissionFactory.bind(claim);
+    // A state marker without the matching durable test-entitlement lineage is
+    // an integrity violation. It must not silently take the non-strict path.
+    if (!admission) {
+        throw new Error('ANALYSIS_V2_REVENUE_PRIMARY_QUALITY_REQUIRED');
+    }
+
+    const durablePatches = await dependencies.resultStore
+        .loadRevenueResolverOutcomes(claim);
+    let outcomes = applyRevenueResolverPatches(plannedOutcomes, durablePatches);
+    const initialCoverage = finalRevenueCoverage(context, plannedOutcomes);
+    let finalCoverage = finalRevenueCoverage(context, outcomes);
+    const resolverPassStarted = initialCoverage.unknownBurdenCount * 10
+        > initialCoverage.screenedCount * 3;
+
+    if (initialCoverage.coverageValid && !initialCoverage.passesUnknownGate) {
+        const pass = await runPrimaryRevenueResolverPass({
+            dependencies,
+            context,
+            plannedOutcomes,
+            outcomes,
+            admission,
+            coverage: initialCoverage,
+        });
+        outcomes = pass.outcomes;
+        if (pass.patches.length > 0) {
+            // Result materialization is updated before the membership checkpoint
+            // becomes authoritative. A crash/replay observes these same opaque
+            // patches and cannot invoke a successful resolver again.
+            await dependencies.resultStore.checkpointRevenueResolverOutcomes({
+                ...claim,
+                rows: pass.patches,
+            });
+        }
+        finalCoverage = finalRevenueCoverage(context, outcomes);
+    }
+
+    // This call is the durable primary-join quality decision for both a
+    // resolver-free <=30% cohort and a completed >30% pass. Recovery-pending
+    // errors above deliberately bubble before it; only confirmed terminal
+    // coverage failure is converted to durable manual_review by the RPC.
+    const disposition = await admission.complete({
+        publicMutualCount: finalCoverage.publicMutualCount,
+        screenedCount: finalCoverage.screenedCount,
+        notScreenedCount: finalCoverage.notScreenedCount,
+        initialUnknownBurdenCount: initialCoverage.unknownBurdenCount,
+        finalUnknownBurdenCount: finalCoverage.unknownBurdenCount,
+        coverageValid: finalCoverage.coverageValid && finalCoverage.passesUnknownGate,
+        resolverPassStarted,
+    });
+    if (disposition !== 'approved') {
+        throw new Error('ANALYSIS_V2_REVENUE_PRIMARY_QUALITY_FAILED');
+    }
+    return outcomes;
+}
+
 function aiJobFence(context: AnalysisV2StageExecutorContext<AnalysisV2StageIdSubset>) {
     if (!context.aiStagePolicyVersion) {
         throw new Error('ANALYSIS_V2_AI_STAGE_POLICY_MISMATCH');
@@ -1361,6 +1876,12 @@ export function createAnalysisV2AiScoringExecutorRegistry(
             const defaultGenderResolutionStatus = genderResolutionEnabled
                 ? 'not_eligible' as const
                 : 'disabled' as const;
+            // Strict revenue cohorts defer all resolver work until primary_join
+            // knows the request-wide unknown burden. The immutable relationship
+            // marker is checked locally, so non-strict profile work gains no
+            // context-store or revenue-admission dependency call.
+            const strictRevenueResolverDeferred = hasStrictRevenueRelationshipSelection(context);
+            const resolverFence = aiFence;
             const startedResolverHandles: AnalysisV2GenderResolutionHandle[] = [];
             let preparedOutcomes: AnalysisV2PreparedProfileAiOutcome[];
             try {
@@ -1616,9 +2137,10 @@ export function createAnalysisV2AiScoringExecutorRegistry(
                             )
                     );
                     const resolverHandle = resolverEligible
+                        && !strictRevenueResolverDeferred
                         ? dependencies.ai.startGenderResolution({
                             media: resolverMedia,
-                        }, aiFence)
+                        }, resolverFence)
                         : null;
                     if (resolverHandle) {
                         startedResolverHandles.push(resolverHandle);
@@ -2003,11 +2525,22 @@ export function createAnalysisV2AiScoringExecutorRegistry(
         },
 
         async primary_join(context) {
-            const [relationship, targetEvidence, outcomes] = await Promise.all([
+            const strictRevenue = hasStrictRevenueRelationshipSelection(context);
+            // Preserve the legacy Promise.all shape exactly for every request
+            // without the immutable strict marker. No revenue/context/result
+            // dependency is even referenced on that path.
+            const [relationship, targetEvidence, plannedOutcomes] = await Promise.all([
                 dependencies.evidence.loadRelationships(checkpointClaim(context)),
                 dependencies.evidence.loadTargetEvidence(checkpointClaim(context)),
                 dependencies.stageStore.loadProfileAiOutcomes(checkpointClaim(context)),
             ]);
+            const outcomes = strictRevenue
+                ? await resolveStrictPrimaryRevenueOutcomes(
+                    dependencies,
+                    context,
+                    plannedOutcomes,
+                )
+                : plannedOutcomes;
             const excluded = relationship.excludedUsername;
             const verified = outcomes.filter(outcome => (
                 outcome.status === 'verified_female'
@@ -2036,6 +2569,14 @@ export function createAnalysisV2AiScoringExecutorRegistry(
                 instagramId: outcome.instagramId,
                 interactions: joinedByUsername.get(outcome.instagramId) ?? [],
             }));
+            // `candidates` is the durable resolver-adjusted female-membership
+            // authority.  Its stage-manifest count remains the downstream
+            // detail count, because a featureless resolver-verified woman is
+            // intentionally excluded by screening and must not make result
+            // materialization expect a score row that cannot exist.
+            const screenableCandidateIds = new Set(verified.flatMap(outcome => (
+                outcome.profile && outcome.feature ? [outcome.candidateId] : []
+            )));
             const stored = await dependencies.stageStore.checkpointPrimaryJoin({
                 ...checkpointClaim(context),
                 candidates,
@@ -2046,7 +2587,9 @@ export function createAnalysisV2AiScoringExecutorRegistry(
                     manifest: {
                         revision: stored.revision,
                         resultHash: stored.resultHash,
-                        verifiedFemaleCount: candidates.length,
+                        verifiedFemaleCount: candidates.filter(candidate => (
+                            screenableCandidateIds.has(candidate.candidateId)
+                        )).length,
                     },
                 },
             };
@@ -2060,9 +2603,16 @@ export function createAnalysisV2AiScoringExecutorRegistry(
                 dependencies.stageStore.loadPrimaryJoin(checkpointClaim(context)),
             ]);
             if (!joined) throw new Error('ANALYSIS_V2_PRIMARY_JOIN_NOT_READY');
+            const strictRevenue = hasStrictRevenueRelationshipSelection(context);
             const joinedById = new Map(joined.candidates.map(row => [row.candidateId, row]));
             const verified = outcomes.filter(outcome => (
-                outcome.status === 'verified_female'
+                // The strict primary checkpoint is the durable authority after
+                // its resolver overlay. It must not be negated here by the
+                // immutable profile-AI baseline status, or a newly resolved
+                // woman would disappear before score/materialization.
+                (strictRevenue
+                    ? joinedById.has(outcome.candidateId)
+                    : outcome.status === 'verified_female')
                 && outcome.feature
                 && outcome.profile
                 && outcome.instagramId !== relationship.excludedUsername
@@ -2606,7 +3156,8 @@ export function createAnalysisV2AiScoringExecutorRegistry(
                     if (
                         !outcome?.profile
                         || !outcome.feature
-                        || !outcome.mediaBundlePersisted
+                        || (!outcome.mediaBundlePersisted
+                            && !hasStrictRevenueRelationshipSelection(context))
                     ) {
                         throw new Error('ANALYSIS_V2_NARRATIVE_FEATURE_MISSING');
                     }
@@ -2713,6 +3264,10 @@ export function createAnalysisV2AiScoringExecutorRegistry(
                     expectedRows: sources.length,
                 };
             }
+            // This is deliberately the last durable gate before resultStore.finalize:
+            // a strict cohort that fails coverage is manual-review only and must
+            // never emit analysis_completed.
+            await enforceRevenueFinalQualityGate(dependencies, context);
             await dependencies.resultStore.finalize({
                 ...checkpointClaim(context),
                 targetProfileImageUrl: target.profilePicUrl ?? null,

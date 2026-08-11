@@ -70,6 +70,10 @@ export const ANALYSIS_V2_RESULT_DATABASE_NAMES = Object.freeze({
     checkpointScoreRpc: 'checkpoint_analysis_v2_candidate_scores',
     checkpointPrivateRpc: 'checkpoint_analysis_v2_private_names',
     checkpointNarrativeRpc: 'checkpoint_analysis_v2_narratives',
+    checkpointRevenueResolverRpc:
+        'checkpoint_analysis_v2_revenue_resolver_outcomes_v1',
+    loadRevenueResolverRpc:
+        'load_analysis_v2_revenue_resolver_outcomes_v1',
     finalizeRpc: 'complete_analysis_v2_result_and_purge',
     failRpc: 'fail_analysis_v2_result_and_purge',
     loadStageRpc: 'load_analysis_v2_result_stage_snapshot',
@@ -192,6 +196,18 @@ export interface AnalysisV2ProfileClassificationRow {
     preFeatureAdmission?: 'nonpersonal_or_official' | 'unsupported_unknown' | null;
     feature: AnalysisV2VerifiedFemaleFeatureData | null;
 }
+
+/**
+ * Service-only primary-join overlay. It contains opaque candidate and audited
+ * resolver identities only; no username, URL, media, caption, or model input
+ * is copied into the revenue path.
+ */
+export type AnalysisV2RevenueResolverOutcomePatch = {
+    candidateId: string;
+    classification: 'verified_female' | 'verified_non_female';
+    operationKey: string;
+    resultHash: string;
+};
 
 /** Backward-readable name for executor code; the row now contains every terminal classification. */
 export type AnalysisV2VerifiedFemaleFeatureRow = AnalysisV2ProfileClassificationRow;
@@ -366,6 +382,11 @@ export interface AnalysisV2ResultStore {
     checkpointNarratives(input: AnalysisV2ResultJobClaim & {
         rows: readonly AnalysisV2NarrativeRow[];
     }): Promise<AnalysisV2ResultCheckpointManifest>;
+    checkpointRevenueResolverOutcomes(input: AnalysisV2ResultJobClaim & {
+        rows: readonly AnalysisV2RevenueResolverOutcomePatch[];
+    }): Promise<readonly AnalysisV2RevenueResolverOutcomePatch[]>;
+    loadRevenueResolverOutcomes(input: AnalysisV2ResultJobClaim):
+        Promise<readonly AnalysisV2RevenueResolverOutcomePatch[]>;
     finalize(input: AnalysisV2ResultJobClaim & {
         targetProfileImageUrl: string | null;
         resultImageManifest?: {
@@ -825,6 +846,25 @@ const narrativeRowSchema = z.object({
     }
     if (value.source === 'not_applicable') {
         context.addIssue({ code: 'custom', message: 'Not-applicable narratives have no row.' });
+    }
+});
+
+const revenueResolverOutcomePatchSchema = z.object({
+    candidateId: candidateIdSchema,
+    classification: z.enum(['verified_female', 'verified_non_female']),
+    operationKey: operationKeySchema.regex(/^gender-resolution:/),
+    resultHash: hashSchema,
+}).strict();
+const revenueResolverOutcomeResponseSchema = z.object({
+    rows: z.array(revenueResolverOutcomePatchSchema).max(40),
+}).strict().superRefine((value, context) => {
+    const candidateIds = value.rows.map(row => row.candidateId);
+    if (new Set(candidateIds).size !== candidateIds.length) {
+        context.addIssue({
+            code: 'custom',
+            path: ['rows'],
+            message: 'Revenue resolver outcome rows must be unique.',
+        });
     }
 });
 
@@ -1456,6 +1496,72 @@ export function createSupabaseAnalysisV2ResultStore(
                 input,
                 { p_rows: rows }
             );
+        },
+
+        async checkpointRevenueResolverOutcomes(input) {
+            const claim = validateClaim(input);
+            if (claim.jobKey !== 'coordinator:join:primary-evidence') {
+                throw new Error(
+                    'ANALYSIS_V2_RESULT_VALIDATION_ERROR: invalid resolver primary-join job.'
+                );
+            }
+            const rows = uniqueSortedRows(
+                input.rows,
+                revenueResolverOutcomePatchSchema,
+            );
+            if (rows.length > 40) {
+                throw new Error(
+                    'ANALYSIS_V2_RESULT_VALIDATION_ERROR: resolver capacity exceeds Standard limit.'
+                );
+            }
+            const { data, error } = await client.rpc(
+                ANALYSIS_V2_RESULT_DATABASE_NAMES.checkpointRevenueResolverRpc,
+                {
+                    p_request_id: claim.requestId,
+                    p_job_key: claim.jobKey,
+                    p_claim_token: claim.claimToken,
+                    p_job_input_hash: claim.jobInputHash,
+                    p_rows: rows,
+                },
+            );
+            if (error) throwRpcError(error, 'revenue resolver checkpoint');
+            const parsed = revenueResolverOutcomeResponseSchema.safeParse(
+                rpcPayload(data, 'revenue resolver checkpoint'),
+            );
+            if (!parsed.success) {
+                throw new Error(
+                    'ANALYSIS_V2_RESULT_PERSISTENCE_ERROR: invalid revenue resolver checkpoint.'
+                );
+            }
+            return Object.freeze(parsed.data.rows) as readonly AnalysisV2RevenueResolverOutcomePatch[];
+        },
+
+        async loadRevenueResolverOutcomes(input) {
+            const claim = validateClaim(input);
+            if (claim.jobKey !== 'coordinator:join:primary-evidence') {
+                throw new Error(
+                    'ANALYSIS_V2_RESULT_VALIDATION_ERROR: invalid resolver primary-join job.'
+                );
+            }
+            const { data, error } = await client.rpc(
+                ANALYSIS_V2_RESULT_DATABASE_NAMES.loadRevenueResolverRpc,
+                {
+                    p_request_id: claim.requestId,
+                    p_job_key: claim.jobKey,
+                    p_claim_token: claim.claimToken,
+                    p_job_input_hash: claim.jobInputHash,
+                },
+            );
+            if (error) throwRpcError(error, 'revenue resolver load');
+            const parsed = revenueResolverOutcomeResponseSchema.safeParse(
+                rpcPayload(data, 'revenue resolver load'),
+            );
+            if (!parsed.success) {
+                throw new Error(
+                    'ANALYSIS_V2_RESULT_PERSISTENCE_ERROR: invalid revenue resolver outcome load.'
+                );
+            }
+            return Object.freeze(parsed.data.rows) as readonly AnalysisV2RevenueResolverOutcomePatch[];
         },
 
         async finalize(input) {

@@ -1011,6 +1011,7 @@ export function makeApifyProvider(deps: ApifyProviderDeps = {}): ScraperProvider
         if (!run.defaultDatasetId) {
             throw new Error('SCRAPING_SCHEMA_ERROR: Apify profile run에 defaultDatasetId가 없습니다.');
         }
+        await context?.onProviderDatasetResolved?.(run.defaultDatasetId);
 
         let page;
         try {
@@ -1190,6 +1191,7 @@ export function makeApifyProvider(deps: ApifyProviderDeps = {}): ScraperProvider
             if (!run.defaultDatasetId) {
                 throw new Error('SCRAPING_SCHEMA_ERROR: Apify profile run에 defaultDatasetId가 없습니다.');
             }
+            await context?.onProviderDatasetResolved?.(run.defaultDatasetId);
             let page;
             try {
                 page = await waitForSettledApifyProfileDataset(

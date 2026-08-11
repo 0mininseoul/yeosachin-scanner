@@ -1,5 +1,6 @@
 import { createHash } from 'node:crypto';
 import { getAnalysisPlan } from '@/lib/domain/analysis/plan-catalog';
+import { supabaseAdmin } from '@/lib/supabase/admin';
 import type {
     ProfileAttemptResult,
     ProviderCallContext,
@@ -32,6 +33,7 @@ import {
     type ProfilesBatchV2AttemptSnapshot,
 } from '@/lib/services/instagram/scraper';
 import {
+    assertAnalysisV2FreshProvenanceConfiguration,
     getAnalysisV2PaidCollectionProvider,
 } from '@/lib/services/instagram/config';
 import type { InstagramFollower, InstagramPost, InstagramProfile } from '@/lib/types/instagram';
@@ -41,6 +43,7 @@ import {
     ANALYSIS_V2_PRIVATE_NAME_BATCH_LIMIT,
     type AnalysisV2DagBatchManifest,
 } from './v2-dag-planner';
+import { ANALYSIS_V2_TARGET_EVIDENCE_JOB_KEY } from './v2-coordinator';
 import {
     analysisV2EvidenceStore,
     createAnalysisV2RelationshipNotApplicableInputHash,
@@ -118,18 +121,39 @@ import {
     createAnalysisV2SelfHostedAuthWorkerIdentity,
     type AnalysisV2SelfHostedAuthRunStore,
 } from './v2-selfhosted-auth-run-store';
+import { GENDER_ROUTING_CAPS, GenderRoutingError } from './gender-routing';
+import {
+    analysisV2GenderRoutingManifestStore,
+    type AnalysisV2GenderRoutingManifestStore,
+} from './gender-routing-manifest-store';
+import {
+    routeAndPersistRevenueGenderCandidates,
+    usesRevenueGenderRouting,
+    type RevenueGenderRoutingInputPreparer,
+} from './revenue-routing-runtime';
+import type {
+    RevenueGenderRoutingAssessor,
+    RevenueGenderRoutingAssessorFactory,
+} from './revenue-gender-routing-assessor';
+import { RevenueCostOperationStore } from './revenue-cost-operation-store';
+import {
+    analysisRevenueFreshProvenanceStore,
+    type FreshProvenanceStore,
+} from './fresh-provenance-store';
 
 const PROFILE_ACTOR_ID = 'apify/instagram-profile-scraper';
+const analysisV2RevenueCostOperationStore = new RevenueCostOperationStore(supabaseAdmin);
 
 type RelationshipGetter = typeof getFollowers;
 type ProfileBatchFetcher = typeof getProfilesBatchV2;
 type ProfileRepairRunner = typeof runAnalysisV2ProfileRepair;
-
 export interface AnalysisV2CollectionExecutorDependencies {
     requestContextStore?: AnalysisV2CollectionRequestContextStore;
     evidenceStore?: AnalysisV2EvidenceStore;
     profileCheckpointStore?: AnalysisV2ProfileFetchCheckpointStore;
     providerRunStore?: AnalysisV2ProviderRunStore;
+    revenueCostOperationStore?: RevenueCostOperationStore;
+    freshProvenanceStore?: FreshProvenanceStore;
     providerRunAdoptionStore?: AnalysisV2ProviderRunAdoptionStore;
     selfHostedAuthRunStore?: AnalysisV2SelfHostedAuthRunStore;
     targetProfileReuseStore?: AnalysisV2TargetProfileReuseStore;
@@ -139,6 +163,11 @@ export interface AnalysisV2CollectionExecutorDependencies {
     runProfileRepair?: ProfileRepairRunner;
     interactionAdapter?: ApifyInteractionAdapter;
     selfHostedAuthInteractionAdapter?: ApifyInteractionAdapter;
+    genderRoutingManifestStore?: AnalysisV2GenderRoutingManifestStore;
+    revenueGenderRoutingInputPreparer?: RevenueGenderRoutingInputPreparer;
+    /** Created only after the strict request/job lineage is proven in the relationships executor. */
+    revenueGenderRoutingAssessorFactory?: RevenueGenderRoutingAssessorFactory;
+    revenueGenderRoutingAssessor?: RevenueGenderRoutingAssessor;
     env?: Record<string, string | undefined>;
 }
 
@@ -147,6 +176,9 @@ interface ResolvedDependencies {
     evidenceStore: AnalysisV2EvidenceStore;
     profileCheckpointStore: AnalysisV2ProfileFetchCheckpointStore;
     providerRunStore: AnalysisV2ProviderRunStore;
+    revenueCostOperationStore: RevenueCostOperationStore;
+    /** Deliberately absent for normal/Plus production requests. */
+    freshProvenanceStore?: FreshProvenanceStore;
     providerRunAdoptionStore: AnalysisV2ProviderRunAdoptionStore | null;
     selfHostedAuthRunStore: AnalysisV2SelfHostedAuthRunStore;
     targetProfileReuseStore: AnalysisV2TargetProfileReuseStore;
@@ -156,6 +188,10 @@ interface ResolvedDependencies {
     runProfileRepair: ProfileRepairRunner;
     interactionAdapter: ApifyInteractionAdapter;
     selfHostedAuthInteractionAdapter: ApifyInteractionAdapter;
+    genderRoutingManifestStore: AnalysisV2GenderRoutingManifestStore;
+    revenueGenderRoutingInputPreparer: RevenueGenderRoutingInputPreparer | undefined;
+    revenueGenderRoutingAssessorFactory: RevenueGenderRoutingAssessorFactory | null;
+    revenueGenderRoutingAssessor: RevenueGenderRoutingAssessor | null;
     env: Record<string, string | undefined>;
 }
 
@@ -166,6 +202,9 @@ function deps(input: AnalysisV2CollectionExecutorDependencies): ResolvedDependen
         profileCheckpointStore:
             input.profileCheckpointStore ?? analysisV2ProfileFetchCheckpointStore,
         providerRunStore: input.providerRunStore ?? analysisV2ProviderRunStore,
+        revenueCostOperationStore:
+            input.revenueCostOperationStore ?? analysisV2RevenueCostOperationStore,
+        freshProvenanceStore: input.freshProvenanceStore,
         providerRunAdoptionStore: input.providerRunAdoptionStore
             ?? (input.providerRunStore ? null : analysisV2ProviderRunAdoptionStore),
         selfHostedAuthRunStore:
@@ -179,6 +218,11 @@ function deps(input: AnalysisV2CollectionExecutorDependencies): ResolvedDependen
         interactionAdapter: input.interactionAdapter ?? apifyInteractionAdapter,
         selfHostedAuthInteractionAdapter:
             input.selfHostedAuthInteractionAdapter ?? selfHostedAuthInteractionAdapter,
+        genderRoutingManifestStore:
+            input.genderRoutingManifestStore ?? analysisV2GenderRoutingManifestStore,
+        revenueGenderRoutingInputPreparer: input.revenueGenderRoutingInputPreparer,
+        revenueGenderRoutingAssessorFactory: input.revenueGenderRoutingAssessorFactory ?? null,
+        revenueGenderRoutingAssessor: input.revenueGenderRoutingAssessor ?? null,
         env: input.env ?? process.env,
     };
 }
@@ -223,6 +267,46 @@ function collectionClaim(context: {
 
 function isBetaFreePoolRequest(request: AnalysisV2CollectionRequestContext): boolean {
     return request.providerExecutionPolicy?.mode === 'betatest_free_pool';
+}
+
+function isRevenueCostLedgerRequest(
+    request: AnalysisV2CollectionRequestContext,
+): request is AnalysisV2CollectionRequestContext & {
+    accessMode: 'test_entitlement';
+    planId: 'basic' | 'standard';
+    providerExecutionPolicy: NonNullable<AnalysisV2CollectionRequestContext['providerExecutionPolicy']>;
+} {
+    return request.accessMode === 'test_entitlement'
+        && (request.planId === 'basic' || request.planId === 'standard')
+        && request.providerExecutionPolicy?.mode === 'test_operation_split'
+        && request.providerExecutionPolicy.policyVersion === 'authorized-free-e2e-v1';
+}
+
+function isRevenueGenderRoutingRequest(
+    request: AnalysisV2CollectionRequestContext,
+): request is AnalysisV2CollectionRequestContext & {
+    accessMode: 'test_entitlement';
+    planId: 'basic' | 'standard';
+    providerExecutionPolicy: NonNullable<AnalysisV2CollectionRequestContext['providerExecutionPolicy']>;
+} {
+    return isRevenueCostLedgerRequest(request)
+        && usesRevenueGenderRouting({ accessMode: request.accessMode, planId: request.planId });
+}
+
+function assertFreshRevenueCollectionRuntime(
+    request: AnalysisV2CollectionRequestContext,
+    dependencies: ResolvedDependencies
+): void {
+    if (!isRevenueCostLedgerRequest(request)) return;
+    assertAnalysisV2FreshProvenanceConfiguration(dependencies.env);
+}
+
+function revenueGenderRoutingSecret(dependencies: ResolvedDependencies): string {
+    const secret = dependencies.env.ANALYSIS_V2_GENDER_ROUTING_HMAC_SECRET;
+    if (!secret || secret.length < 32) {
+        throw new Error('ANALYSIS_V2_GENDER_ROUTING_SECRET_MISSING');
+    }
+    return secret;
 }
 
 function collectionProviderForRequest(
@@ -292,6 +376,10 @@ async function bindApifyRun(input: {
     actorId: string;
     maxChargeUsd: number;
 }) {
+    const freshRevenueRequest = isRevenueCostLedgerRequest(input.request);
+    if (freshRevenueRequest) {
+        assertFreshRevenueCollectionRuntime(input.request, input.dependencies);
+    }
     const providerBinding = resolveAnalysisV2ApifyProviderBinding({
         accessMode: input.request.accessMode,
         policy: input.request.providerExecutionPolicy,
@@ -310,6 +398,17 @@ async function bindApifyRun(input: {
         credentialSlot: providerBinding.credentialSlot,
         maxChargeUsd: input.maxChargeUsd,
     } as const;
+    if (freshRevenueRequest) {
+        // Fresh provenance rejects any adoption before it can select an external
+        // Dataset. The only resumable path is the exact durable provider row.
+        const fallback = await input.dependencies.providerRunStore.bindAdapterCheckpoint(identity, {
+            revenueCostOperationStore: input.dependencies.revenueCostOperationStore,
+            freshProvenanceStore: input.dependencies.freshProvenanceStore
+                ?? analysisRevenueFreshProvenanceStore,
+            jobInputHash: input.claim.jobInputHash,
+        });
+        return { ...fallback, evidenceRun: null };
+    }
     const binding = await bindAdoptedProviderRunOrFallback({
         adoptionStore: input.dependencies.providerRunAdoptionStore,
         identity,
@@ -410,6 +509,7 @@ export function createAnalysisV2RelationshipsExecutor(
     return async (context) => {
         const claim = collectionClaim(context);
         const request = await dependencies.requestContextStore.load(claim);
+        assertFreshRevenueCollectionRuntime(request, dependencies);
         assertScopeMatchesState(request, context.state);
         const collectionProvider = collectionProviderForRequest(request, dependencies);
 
@@ -638,6 +738,101 @@ export function createAnalysisV2RelationshipsExecutor(
             throw new Error('ANALYSIS_V2_GIRLFRIEND_EXCLUSION_LEAK');
         }
 
+        let detailedPublicUsernames = staging.detailedPublicUsernames;
+        let detailedSelectedPublicCount = manifest.detailedPublicCount;
+        let notScreenedPublicCount = manifest.unscreenedPublicCount;
+        let relationshipSelectionPolicy: {
+            policyVersion: 'gender-routing-v1';
+            relationshipCheckpointId: string;
+            relationshipJobInputHash: string;
+            planId: 'basic' | 'standard';
+            publicPopulationCount: number;
+            selectedCount: number;
+        } | undefined;
+        if (isRevenueGenderRoutingRequest(request)) {
+            const publicMutualRows = staging.mutualRows
+                .filter(row => !row.isPrivate)
+                .sort((left, right) => left.mutualOrdinal - right.mutualOrdinal);
+            const cap = GENDER_ROUTING_CAPS[request.planId];
+            if (
+                publicMutualRows.length !== manifest.publicCount
+                || publicMutualRows.length > cap.population
+                || new Set(publicMutualRows.map(row => row.mutualOrdinal)).size !== publicMutualRows.length
+            ) throw new Error('ANALYSIS_V2_GENDER_ROUTING_POPULATION_DRIFT');
+            const hmacSecret = revenueGenderRoutingSecret(dependencies);
+            const assessor = dependencies.revenueGenderRoutingAssessor
+                ?? dependencies.revenueGenderRoutingAssessorFactory?.({
+                    requestId: claim.requestId,
+                    jobKey: 'track:relationships:collect',
+                    jobClaimToken: claim.claimToken,
+                    jobInputHash: claim.jobInputHash,
+                    accessMode: request.accessMode,
+                    planId: request.planId,
+                    ...(context.handlerDeadlineAtMs === undefined
+                        ? {}
+                        : { handlerDeadlineAtMs: context.handlerDeadlineAtMs }),
+                });
+            let routed: Awaited<ReturnType<typeof routeAndPersistRevenueGenderCandidates>>;
+            try {
+                routed = await routeAndPersistRevenueGenderCandidates({
+                    requestId: claim.requestId,
+                    relationshipCheckpointId: manifest.resultHash,
+                    accessMode: request.accessMode,
+                    planId: request.planId,
+                    candidates: publicMutualRows.map(row => ({
+                        mutualOrdinal: row.mutualOrdinal,
+                        candidateKey: `mutual:${row.mutualOrdinal}`,
+                        profilePicUrl: row.profilePicUrl,
+                        fullname: row.fullName,
+                    })),
+                    hmacSecret,
+                    inputPreparer: dependencies.revenueGenderRoutingInputPreparer,
+                    assess: assessor ?? undefined,
+                    jobKey: 'track:relationships:collect',
+                    claimToken: claim.claimToken,
+                    jobInputHash: claim.jobInputHash,
+                    manifestStore: dependencies.genderRoutingManifestStore,
+                });
+            } catch (error) {
+                if (error instanceof GenderRoutingError && error.code === 'ROUTING_UNAVAILABLE') {
+                    await dependencies.revenueCostOperationStore.manualReview({
+                        requestId: claim.requestId,
+                        reasonCode: 'routing_failure',
+                    });
+                }
+                throw error;
+            }
+            if (!routed) throw new Error('ANALYSIS_V2_GENDER_ROUTING_NOT_APPLICABLE');
+            const selectedRows = await dependencies.genderRoutingManifestStore.loadSelectedUsernames({
+                requestId: claim.requestId,
+                relationshipCheckpointId: manifest.resultHash,
+                policyVersion: 'gender-routing-v1',
+                planId: request.planId,
+            });
+            const publicByOrdinal = new Map(publicMutualRows.map(row => [row.mutualOrdinal, row]));
+            if (
+                selectedRows.length !== routed.header.selectedCount
+                || selectedRows.length !== routed.selectedMutualOrdinals.length
+                || selectedRows.length > cap.detailed
+                || selectedRows.some((row, index) => (
+                    row.ordinal !== index + 1
+                    || row.candidateKey !== `mutual:${row.mutualOrdinal}`
+                    || publicByOrdinal.get(row.mutualOrdinal)?.username !== row.username
+                ))
+            ) throw new Error('ANALYSIS_V2_GENDER_ROUTING_SELECTION_DRIFT');
+            detailedPublicUsernames = selectedRows.map(row => row.username);
+            detailedSelectedPublicCount = selectedRows.length;
+            notScreenedPublicCount = publicMutualRows.length - selectedRows.length;
+            relationshipSelectionPolicy = Object.freeze({
+                policyVersion: 'gender-routing-v1',
+                relationshipCheckpointId: manifest.resultHash,
+                relationshipJobInputHash: claim.jobInputHash,
+                planId: request.planId,
+                publicPopulationCount: publicMutualRows.length,
+                selectedCount: selectedRows.length,
+            });
+        }
+
         return Object.freeze({
             checkpoint: Object.freeze({
                 kind: 'relationships' as const,
@@ -647,16 +842,17 @@ export function createAnalysisV2RelationshipsExecutor(
                     detectedMutualCount: manifest.mutualCount,
                     publicCount: manifest.publicCount,
                     privateCount: manifest.privateCount,
-                    detailedSelectedPublicCount: manifest.detailedPublicCount,
-                    notScreenedPublicCount: manifest.unscreenedPublicCount,
+                    detailedSelectedPublicCount,
+                    notScreenedPublicCount,
                     profileBatches: createAnalysisV2CollectionTopology(
                         'profiles',
-                        staging.detailedPublicUsernames
+                        detailedPublicUsernames
                     ),
                     privateNameBatches: createAnalysisV2CollectionTopology(
                         'private_names',
                         staging.privateMutualUsernames
                     ),
+                    ...(relationshipSelectionPolicy ? { relationshipSelectionPolicy } : {}),
                 }),
             }),
         });
@@ -711,6 +907,38 @@ function profileFallbackIdentity(usernames: readonly string[]): string {
     return canonicalProviderInput(['profile-fallback-v2', ...usernames]);
 }
 
+/**
+ * The target-evidence profile is not a generic fallback: its evidence must
+ * retain the exact approved target-profile operation identity. Candidate batch
+ * collection remains a separately approved profile-fallback family.
+ */
+function freshProfileOperation(input: {
+    claim: AnalysisV2CollectionJobClaim;
+    request: AnalysisV2CollectionRequestContext;
+    usernames: readonly string[];
+}): { operation: 'target-profile' | 'profile-fallback'; canonicalInput: string } {
+    if (input.claim.jobKey !== ANALYSIS_V2_TARGET_EVIDENCE_JOB_KEY) {
+        return {
+            operation: 'profile-fallback',
+            canonicalInput: profileFallbackIdentity(input.usernames),
+        };
+    }
+    if (
+        input.usernames.length !== 1
+        || input.usernames[0] !== input.request.targetUsername
+    ) {
+        throw new Error('FRESH_PROVENANCE_TARGET_PROFILE_IDENTITY_DRIFT');
+    }
+    return {
+        operation: 'target-profile',
+        canonicalInput: canonicalProviderInput([
+            'target-profile-fresh-v1',
+            input.claim.jobInputHash,
+            input.request.targetUsername,
+        ]),
+    };
+}
+
 function selfHostedAuthProfileIdentity(
     claim: AnalysisV2CollectionJobClaim,
     usernames: readonly string[]
@@ -731,6 +959,118 @@ function selfHostedAuthProfileIdentity(
     });
 }
 
+function isFreshApifyProfileResume(
+    resume: AnalysisV2ProfileFetchResume,
+): boolean {
+    return resume.primaryResults.length > 0
+        && resume.primaryResults.every(result => result.outcome.source === 'apify')
+        && resume.fallbackResults.length === 0
+        && resume.fallbackCapturedAt === null
+        && resume.repairResults.length === 0
+        && resume.repairCapturedAt === null;
+}
+
+function requiresUnauthorizedFreshProfileRepair(
+    resume: AnalysisV2ProfileFetchResume,
+    usernames: readonly string[],
+): boolean {
+    return resume.repairCapturedAt === null
+        && !evaluateProfileBatchCompleteness(finalCheckpointResults(resume), usernames).satisfied
+        && deriveRepairUsernames(resume).length > 0;
+}
+
+async function durableFreshApifyProfiles(input: {
+    dependencies: ResolvedDependencies;
+    claim: AnalysisV2CollectionJobClaim;
+    request: AnalysisV2CollectionRequestContext;
+    usernames: readonly string[];
+    onProfileStart?: (username: string) => Promise<void>;
+    onProfileResolved?: (profile: InstagramProfile) => Promise<void>;
+}): Promise<AnalysisV2ProfileFetchResume> {
+    const {
+        dependencies,
+        claim,
+        request,
+        usernames,
+        onProfileStart,
+        onProfileResolved,
+    } = input;
+    assertFreshRevenueCollectionRuntime(request, dependencies);
+    const identity = profileIdentity(claim);
+    // Inspect a retained strict checkpoint before binding a provider row. A
+    // profile-repair source is deliberately outside the fresh operation
+    // family, so a replay that would enter that path must stop before any
+    // provider binding or external boundary.
+    const resume = await dependencies.profileCheckpointStore.load(identity);
+    if (resume && !isFreshApifyProfileResume(resume)) {
+        throw new Error('FRESH_PROVENANCE_PROFILE_CHECKPOINT_UNPROVEN');
+    }
+    if (resume && requiresUnauthorizedFreshProfileRepair(resume, usernames)) {
+        throw new Error('FRESH_PROVENANCE_PROFILE_REPAIR_UNAUTHORIZED');
+    }
+    const freshOperation = freshProfileOperation({ claim, request, usernames });
+    const canonicalInput = freshOperation.canonicalInput;
+    const operationKey = createAnalysisV2ProviderOperationKey(
+        freshOperation.operation,
+        canonicalInput,
+    );
+    const providerInputHash = createAnalysisV2ProviderInputHash(canonicalInput);
+    // The exact provider row is the only permitted retained state. This bind
+    // reasserts its source lineage and will never select target reuse, a cache,
+    // or an adopted Dataset for the trusted cohort.
+    const binding = await bindApifyRun({
+        dependencies,
+        claim,
+        request,
+        operation: freshOperation.operation,
+        operationKey,
+        inputHash: providerInputHash,
+        actorId: PROFILE_ACTOR_ID,
+        maxChargeUsd: profileMaximumCharge(usernames.length, dependencies.env),
+    });
+    if (resume) {
+        if (
+            binding.stored === null
+            || !binding.checkpoint.resumeRunId
+        ) {
+            throw new Error('FRESH_PROVENANCE_PROFILE_CHECKPOINT_UNPROVEN');
+        }
+        return resume;
+    }
+
+    try {
+        await dependencies.getProfilesBatchV2(usernames, {
+            requestId: claim.requestId,
+            freshApifyOnly: true,
+            allowApifyFallback: false,
+            providerRun: binding.checkpoint,
+            onProfileStart,
+            onProfileResolved,
+            persistAttemptOutcomes: async (snapshot: ProfilesBatchV2AttemptSnapshot) => {
+                if (snapshot.attempt !== 'fresh_apify' || snapshot.source !== 'apify') {
+                    throw new Error('FRESH_PROVENANCE_PROFILE_ATTEMPT_DRIFT');
+                }
+                await dependencies.profileCheckpointStore.checkpointFreshApify({
+                    ...identity,
+                    requestedUsernames: snapshot.requestedUsernames,
+                    results: checkpointAttemptResults(snapshot.results),
+                    operationKey,
+                    providerInputHash,
+                });
+            },
+        });
+    } catch (error) {
+        if (binding.evidenceRun) throw adoptionDatasetUnavailable(error);
+        throw error;
+    }
+
+    const stored = await dependencies.profileCheckpointStore.load(identity);
+    if (!stored || !isFreshApifyProfileResume(stored)) {
+        throw new Error('FRESH_PROVENANCE_PROFILE_CHECKPOINT_MISSING');
+    }
+    return stored;
+}
+
 async function durableProfiles(input: {
     dependencies: ResolvedDependencies;
     claim: AnalysisV2CollectionJobClaim;
@@ -747,6 +1087,9 @@ async function durableProfiles(input: {
         onProfileStart,
         onProfileResolved,
     } = input;
+    if (isRevenueCostLedgerRequest(request)) {
+        return durableFreshApifyProfiles(input);
+    }
     const allowApifyFallback = isBetaFreePoolRequest(request)
         || collectionProviderForRequest(request, dependencies) === 'apify';
     const authenticatedProfiles = !isBetaFreePoolRequest(request)
@@ -763,7 +1106,10 @@ async function durableProfiles(input: {
     let adoptedFallback = false;
     const bindFallback = async (unresolved: readonly string[]) => {
         if (unresolved.length === 0) return;
-        if (claim.jobKey === 'track:target-evidence:collect') {
+        if (
+            !isRevenueCostLedgerRequest(request)
+            && claim.jobKey === 'track:target-evidence:collect'
+        ) {
             if (
                 unresolved.length !== 1
                 || unresolved[0] !== request.targetUsername
@@ -883,6 +1229,11 @@ async function repairProfileBatch(input: {
     // made entirely of settled-unavailable accounts yields an empty set and no run.
     const repairUsernames = deriveRepairUsernames(resume);
     if (repairUsernames.length === 0) return resume;
+    if (isRevenueCostLedgerRequest(request)) {
+        // The applied provider-cost SQL intentionally has no authorized fresh
+        // profile-repair source mapping. Do not widen it implicitly here.
+        throw new Error('FRESH_PROVENANCE_PROFILE_REPAIR_UNAUTHORIZED');
+    }
 
     const identity = profileIdentity(claim);
     const canonicalInput = profileRepairIdentity(repairUsernames);
@@ -1177,6 +1528,7 @@ export function createAnalysisV2TargetEvidenceExecutor(
     return async (context) => {
         const claim = collectionClaim(context);
         const request = await dependencies.requestContextStore.load(claim);
+        assertFreshRevenueCollectionRuntime(request, dependencies);
         assertScopeMatchesState(request, context.state);
         const collectionProvider = collectionProviderForRequest(request, dependencies);
         const targetResume = await durableProfiles({
@@ -1309,6 +1661,7 @@ export function createAnalysisV2ProfileFetchExecutor(
     return async (context) => {
         const claim = collectionClaim(context);
         const request = await dependencies.requestContextStore.load(claim);
+        assertFreshRevenueCollectionRuntime(request, dependencies);
         assertScopeMatchesState(request, context.state);
         if (context.job.batch === null || context.job.batch < 0) {
             throw new Error('ANALYSIS_V2_PROFILE_BATCH_MISMATCH');
@@ -1319,7 +1672,42 @@ export function createAnalysisV2ProfileFetchExecutor(
         });
         if (!relationshipStaging) throw new Error('ANALYSIS_V2_RELATIONSHIP_STAGING_MISSING');
         const offset = context.job.batch * ANALYSIS_V2_PROFILE_BATCH_LIMIT;
-        const usernames = relationshipStaging.detailedPublicUsernames.slice(
+        let allSelectedUsernames = relationshipStaging.detailedPublicUsernames;
+        if (isRevenueGenderRoutingRequest(request)) {
+            const relationship = context.state.relationships;
+            if (!relationship) {
+                throw new Error('ANALYSIS_V2_GENDER_ROUTING_MANIFEST_MISSING');
+            }
+            const cap = GENDER_ROUTING_CAPS[request.planId];
+            const publicMutualRows = relationshipStaging.mutualRows
+                .filter(row => !row.isPrivate)
+                .sort((left, right) => left.mutualOrdinal - right.mutualOrdinal);
+            if (
+                publicMutualRows.length !== relationship.publicCount
+                || publicMutualRows.length > cap.population
+                || new Set(publicMutualRows.map(row => row.mutualOrdinal)).size !== publicMutualRows.length
+            ) throw new Error('ANALYSIS_V2_GENDER_ROUTING_POPULATION_DRIFT');
+            const selectedRows = await dependencies.genderRoutingManifestStore.loadSelectedUsernames({
+                requestId: claim.requestId,
+                relationshipCheckpointId: relationship.resultHash,
+                policyVersion: 'gender-routing-v1',
+                planId: request.planId,
+            });
+            const publicByOrdinal = new Map(publicMutualRows.map(row => [row.mutualOrdinal, row]));
+            if (
+                selectedRows.length !== relationship.detailedSelectedPublicCount
+                || selectedRows.length > cap.detailed
+                || selectedRows.some((row, index) => (
+                    row.ordinal !== index + 1
+                    || row.candidateKey !== `mutual:${row.mutualOrdinal}`
+                    || publicByOrdinal.get(row.mutualOrdinal)?.username !== row.username
+                ))
+                || relationship.profileBatches.reduce((total, batch) => total + batch.itemCount, 0)
+                    !== selectedRows.length
+            ) throw new Error('ANALYSIS_V2_GENDER_ROUTING_SELECTION_DRIFT');
+            allSelectedUsernames = selectedRows.map(row => row.username);
+        }
+        const usernames = allSelectedUsernames.slice(
             offset,
             offset + ANALYSIS_V2_PROFILE_BATCH_LIMIT
         );

@@ -9,6 +9,7 @@ import { isDemoOperator } from '@/lib/services/demo-analysis/demo-analysis';
 import { demoAnalysisStore } from '@/lib/services/demo-analysis/store';
 import { demoArchiveItems } from '@/lib/services/demo-analysis/archive';
 import { NOINDEX_METADATA } from '@/lib/services/seo/discovery';
+import { requireActiveAccountSession } from '@/lib/services/identity/account-principal-store';
 
 export const metadata: Metadata = {
     ...NOINDEX_METADATA,
@@ -23,6 +24,12 @@ export default async function MyPage() {
 
     if (authError || !user) {
         redirect('/login');
+    }
+
+    try {
+        await requireActiveAccountSession(user);
+    } catch {
+        redirect('/login?error=account_unavailable');
     }
 
     // 2. V2 terminal PII scrub 이후에도 owner-safe projection으로 분석 기록 조회

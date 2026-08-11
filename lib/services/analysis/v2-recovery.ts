@@ -15,9 +15,13 @@ import {
 import {
     reconcileAnalysisV2ProviderUsage,
     settleActiveAnalysisV2ProviderRuns,
+    type AnalysisV2ProviderUsageRevenueCostSettlement,
     type AnalysisV2ProviderCleanupSummary,
     type AnalysisV2ProviderReconciliationSummary,
 } from './v2-provider-lifecycle';
+import {
+    analysisV2RevenueCostProviderRunSettlement,
+} from './revenue-cost-provider-run-reconciliation';
 import {
     recoverEarlybirdFulfillments,
     type EarlybirdFulfillmentRecoverySummary,
@@ -217,6 +221,7 @@ export async function recoverAnalysisV2Jobs(
         cleanupTerminalMedia?: TerminalMediaCleanup;
         cleanupProviderRuns?: ProviderRunCleanup;
         reconcileProviderUsage?: ProviderUsageReconciliation;
+        revenueCostSettlement?: AnalysisV2ProviderUsageRevenueCostSettlement;
         recoverFulfillments?: FulfillmentRecovery;
         recoverGeminiCutoffAttempts?: GeminiCutoffAttemptRecovery;
         reapGeminiCutoffLeases?: GeminiCutoffLeaseReaper;
@@ -361,7 +366,10 @@ export async function recoverAnalysisV2Jobs(
     try {
         const reconciliation = await (
             dependencies.reconcileProviderUsage
-            ?? (() => reconcileAnalysisV2ProviderUsage())
+            ?? (() => reconcileAnalysisV2ProviderUsage({
+                revenueCostSettlement: dependencies.revenueCostSettlement
+                    ?? analysisV2RevenueCostProviderRunSettlement,
+            }))
         )();
         summary.providerUsageReconciled = reconciliation.reconciled;
         if (reconciliation.failed > 0 || reconciliation.hasMore) summary.failed += 1;

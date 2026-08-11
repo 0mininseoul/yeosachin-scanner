@@ -6,6 +6,10 @@ import { analysisV2ProgressStore } from '@/lib/services/analysis/v2-progress-sto
 import { demoResponseHeaders, isDemoOperator, projectDemoProgress } from '@/lib/services/demo-analysis/demo-analysis';
 import { demoAnalysisStore } from '@/lib/services/demo-analysis/store';
 import { loadDemoFixtureForVersion } from '@/lib/services/demo-analysis/fixture-store';
+import {
+    AccountPrincipalAdmissionError,
+    requireActiveAccountClassification,
+} from '@/lib/services/identity/account-principal-store';
 
 const requestIdSchema = z.string().uuid();
 const sequenceSchema = z.string().regex(/^\d{1,16}$/).transform(Number)
@@ -45,6 +49,15 @@ export async function GET(
         const { data: { user }, error } = await supabase.auth.getUser();
         if (error || !user) {
             return json({ error: 'Authentication required.' }, 401);
+        }
+
+        try {
+            await requireActiveAccountClassification(user.id);
+        } catch (accountError) {
+            if (accountError instanceof AccountPrincipalAdmissionError) {
+                return json({ error: 'Account unavailable.' }, 403);
+            }
+            throw accountError;
         }
 
         const demo = await demoAnalysisStore.findForOwner(requestId.data, user.id);

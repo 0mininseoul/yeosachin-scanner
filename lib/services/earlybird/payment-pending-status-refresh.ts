@@ -23,11 +23,9 @@ export function shouldRefreshEarlybirdStatusSnapshot(
 export function shouldAutomaticallyRedirectEarlybirdStatus(
     order: StatusRefreshOrder
 ): boolean {
-    return !order.requiresSupport && (
-        order.systemStatus === 'paid'
-        || order.systemStatus === 'analysis_in_progress'
-        || (order.systemStatus === 'completed' && Boolean(order.resultUrl))
-    );
+    return !order.requiresSupport
+        && order.systemStatus === 'completed'
+        && Boolean(order.resultUrl);
 }
 
 /**

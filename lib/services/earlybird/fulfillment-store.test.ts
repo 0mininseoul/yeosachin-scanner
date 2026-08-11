@@ -5,6 +5,7 @@ import {
     createEarlybirdFulfillmentStore,
     earlybirdFulfillmentAdmissionHash,
     isEarlybirdAutomaticFulfillmentEnabled,
+    recoverAndAdvanceEarlybirdFreshAdmissionProviderFailure,
     recoverEarlybirdFulfillments,
     type EarlybirdFulfillmentIdentity,
     type EarlybirdFulfillmentStore,
@@ -63,6 +64,10 @@ function store(
             status: 'admission_pending' as const,
             preflightId: PREFLIGHT,
         })),
+        recoverFreshAdmissionProviderFailure: vi.fn(async () => identity({
+            status: 'retryable_failure',
+            preflightId: REBOUND_PREFLIGHT,
+        })),
         reconcile: vi.fn(async () => ({
             scanned: 0,
             completed: 0,
@@ -74,6 +79,102 @@ function store(
 }
 
 describe('earlybird fulfillment store', () => {
+    it('parses only the bounded fresh-admission provider recovery identity', async () => {
+        const rpc = vi.fn((name: string, params: Record<string, unknown>) => {
+            expect(name).toBe(
+                'recover_earlybird_fresh_admission_provider_failure'
+            );
+            expect(params).toEqual({ p_order_id: ORDER });
+            return rpcResult([{
+                order_id: ORDER,
+                fulfillment_status: 'retryable_failure',
+                preflight_id: REBOUND_PREFLIGHT,
+                user_id: USER,
+                plan_id: 'basic',
+                request_id: null,
+            }]);
+        });
+        const fulfillmentStore = createEarlybirdFulfillmentStore({
+            rpc,
+            randomUuid: () => CLAIM,
+        });
+
+        await expect(
+            fulfillmentStore.recoverFreshAdmissionProviderFailure(ORDER)
+        ).resolves.toEqual(identity({
+            status: 'retryable_failure',
+            preflightId: REBOUND_PREFLIGHT,
+        }));
+    });
+
+    it.each([
+        'analysis_in_progress',
+        'completed',
+    ] as const)(
+        'accepts an idempotent %s recovery replay with its existing request',
+        async fulfillmentStatus => {
+            const rpc = vi.fn(() => rpcResult([{
+                order_id: ORDER,
+                fulfillment_status: fulfillmentStatus,
+                preflight_id: REBOUND_PREFLIGHT,
+                user_id: USER,
+                plan_id: 'basic',
+                request_id: REQUEST,
+            }]));
+            const fulfillmentStore = createEarlybirdFulfillmentStore({
+                rpc,
+                randomUuid: () => CLAIM,
+            });
+
+            await expect(
+                fulfillmentStore.recoverFreshAdmissionProviderFailure(ORDER)
+            ).resolves.toEqual(identity({
+                status: fulfillmentStatus,
+                preflightId: REBOUND_PREFLIGHT,
+                requestId: REQUEST,
+            }));
+        }
+    );
+
+    it('advances the rebound preflight without trying normal manual-review admission', async () => {
+        const orderStore = store();
+        const recover = vi.mocked(
+            orderStore.recoverFreshAdmissionProviderFailure
+        );
+        const reserveFreshAdmission = vi.fn(async (
+            _client: unknown,
+            input: { preflightId: string }
+        ) => {
+            expect(input.preflightId).toBe(REBOUND_PREFLIGHT);
+            return {
+                state: 'pending' as const,
+                shouldEnqueue: false,
+                generation: 1,
+                dispatchGeneration: 0,
+                dispatchToken: null,
+            };
+        });
+
+        await expect(
+            recoverAndAdvanceEarlybirdFreshAdmissionProviderFailure(ORDER, {
+                store: orderStore,
+                rebindExpiredPaidPreflight: vi.fn(),
+                reserveFreshAdmission,
+                enqueueFreshAdmission: vi.fn(),
+                markFreshAdmissionDispatched: vi.fn(),
+                releaseFreshAdmissionDispatch: vi.fn(),
+                dispatchAnalysisJob: vi.fn(),
+            })
+        ).resolves.toEqual({
+            orderId: ORDER,
+            status: 'admission_pending',
+            requestId: null,
+            nextAction: 'wait_for_fresh_admission',
+        });
+        expect(recover).toHaveBeenCalledWith(ORDER);
+        expect(orderStore.admit).not.toHaveBeenCalled();
+    });
+
     it('opens automatic fulfillment only for the exact true flag', () => {
         expect(isEarlybirdAutomaticFulfillmentEnabled({})).toBe(false);
         expect(isEarlybirdAutomaticFulfillmentEnabled({

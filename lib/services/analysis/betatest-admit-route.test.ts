@@ -2,6 +2,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 const mocks = vi.hoisted(() => ({
     createClient: vi.fn(), getUser: vi.fn(), enabled: vi.fn(), ensureAccess: vi.fn(),
+    requireActiveAccountClassification: vi.fn(),
     reserve: vi.fn(), admit: vi.fn(), replayConsumed: vi.fn(), dispatch: vi.fn(),
     runtimeConfig: vi.fn(),
     admin: { from: vi.fn() }, query: { select: vi.fn(), eq: vi.fn(), maybeSingle: vi.fn() },
@@ -36,6 +37,12 @@ vi.mock('@/lib/services/analysis/v2-tasks', () => ({ dispatchAnalysisV2Job: mock
 vi.mock('@/lib/observability/server', () => ({
     operationalLogger: { emit: vi.fn() },
 }));
+vi.mock('@/lib/services/identity/account-principal-store', () => ({
+    AccountPrincipalAdmissionError: class AccountPrincipalAdmissionError extends Error {
+        code = 'ACCOUNT_ADMISSION_DENIED';
+    },
+    requireActiveAccountClassification: mocks.requireActiveAccountClassification,
+}));
 
 import { POST } from '@/app/api/analysis/betatest/preflight/[preflightId]/admit/route';
 
@@ -50,6 +57,13 @@ describe('betatest plan admission route', () => {
         vi.clearAllMocks();
         mocks.createClient.mockResolvedValue({ auth: { getUser: mocks.getUser }, rpc: vi.fn() });
         mocks.getUser.mockResolvedValue({ data: { user: { id: userId } }, error: null });
+        mocks.requireActiveAccountClassification.mockResolvedValue({
+            userId,
+            accountClass: 'production',
+            trafficClass: 'external',
+            lifecycle: 'active',
+            classificationVersion: 'runtime_default_v1',
+        });
         mocks.enabled.mockReturnValue(true); mocks.ensureAccess.mockResolvedValue(true);
         mocks.runtimeConfig.mockReturnValue({
             enabled: true,

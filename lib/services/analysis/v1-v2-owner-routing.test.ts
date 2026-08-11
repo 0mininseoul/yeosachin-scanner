@@ -7,6 +7,9 @@ const mocks = vi.hoisted(() => ({
     expireStale: vi.fn(),
     demoFindForOwner: vi.fn(),
     demoDeleteForOwner: vi.fn(),
+    isResultOperator: vi.fn(),
+    resolveResultOwner: vi.fn(),
+    requireActiveAccountClassification: vi.fn(),
 }));
 
 vi.mock('@/lib/supabase/server', () => ({ createClient: mocks.createClient }));
@@ -34,9 +37,18 @@ vi.mock('@/lib/services/demo-analysis/store', () => ({
         deleteForOwner: mocks.demoDeleteForOwner,
     },
 }));
+vi.mock('@/lib/services/analysis/result-operator-access', () => ({
+    isAnalysisResultOperator: mocks.isResultOperator,
+    resolveAnalysisResultOwner: mocks.resolveResultOwner,
+}));
+vi.mock('@/lib/services/identity/account-principal-store', async importOriginal => ({
+    ...(await importOriginal<typeof import('@/lib/services/identity/account-principal-store')>()),
+    requireActiveAccountClassification: mocks.requireActiveAccountClassification,
+}));
 
 import { GET as getLegacyStatus } from '@/app/api/analysis/status/[requestId]/route';
 import { DELETE as deleteLegacyResult, GET as getLegacyResult } from '@/app/api/analysis/result/[requestId]/route';
+import { AccountPrincipalAdmissionError } from '@/lib/services/identity/account-principal-store';
 
 const requestId = '123e4567-e89b-42d3-a456-426614174000';
 const userId = '223e4567-e89b-42d3-a456-426614174000';
@@ -66,6 +78,15 @@ describe('owner-facing V1/V2 route selection', () => {
             error: null,
         });
         mocks.demoFindForOwner.mockResolvedValue(null);
+        mocks.isResultOperator.mockReturnValue(false);
+        mocks.resolveResultOwner.mockResolvedValue(null);
+        mocks.requireActiveAccountClassification.mockResolvedValue({
+            userId,
+            accountClass: 'production',
+            trafficClass: 'external',
+            lifecycle: 'active',
+            classificationVersion: 'account-ledger-v1',
+        });
     });
 
     it('routes an owned V2 request from legacy status to the durable progress endpoint', async () => {
@@ -100,6 +121,49 @@ describe('owner-facing V1/V2 route selection', () => {
         expect(mocks.expireStale).not.toHaveBeenCalled();
     });
 
+    it('fails closed before legacy status reads for a retired owner', async () => {
+        mocks.requireActiveAccountClassification.mockRejectedValue(
+            new AccountPrincipalAdmissionError(),
+        );
+
+        const response = await getLegacyStatus(
+            new Request(`https://example.com/api/analysis/status/${requestId}`),
+            context(),
+        );
+
+        expect(response.status).toBe(403);
+        expect(mocks.requireActiveAccountClassification).toHaveBeenCalledWith(userId);
+        expect(mocks.from).not.toHaveBeenCalled();
+    });
+
+    it('fails closed before legacy result reads or deletion for a retired owner', async () => {
+        mocks.requireActiveAccountClassification.mockRejectedValue(
+            new AccountPrincipalAdmissionError(),
+        );
+
+        const read = await getLegacyResult(
+            new Request(`https://example.com/api/analysis/result/${requestId}`),
+            context(),
+        );
+        const deleted = await deleteLegacyResult(
+            new Request(`https://example.com/api/analysis/result/${requestId}`, {
+                method: 'DELETE',
+            }),
+            context(),
+        );
+
+        expect(read.status).toBe(403);
+        await expect(read.json()).resolves.toEqual({
+            error: '이 계정은 현재 사용할 수 없습니다.',
+        });
+        expect(deleted.status).toBe(403);
+        await expect(deleted.json()).resolves.toEqual({
+            error: '이 계정은 현재 사용할 수 없습니다.',
+        });
+        expect(mocks.requireActiveAccountClassification).toHaveBeenCalledTimes(2);
+        expect(mocks.from).not.toHaveBeenCalled();
+    });
+
     it('routes an owned V2 request before touching any legacy result table', async () => {
         mocks.from.mockReturnValue(ownerQuery({
             id: requestId,
@@ -128,6 +192,34 @@ describe('owner-facing V1/V2 route selection', () => {
         });
         expect(mocks.from).toHaveBeenCalledOnce();
         expect(mocks.from).toHaveBeenCalledWith('analysis_requests');
+    });
+
+    it('routes the authenticated result operator to an unowned completed V2 result', async () => {
+        const ownerUserId = '323e4567-e89b-42d3-a456-426614174000';
+        mocks.getUser.mockResolvedValue({
+            data: { user: { id: userId, email: 'ym1113@kakao.com' } },
+            error: null,
+        });
+        mocks.isResultOperator.mockReturnValue(true);
+        mocks.resolveResultOwner.mockResolvedValue(ownerUserId);
+
+        const response = await getLegacyResult(
+            new Request(`https://example.com/api/analysis/result/${requestId}`),
+            context(),
+        );
+
+        expect(response.status).toBe(409);
+        await expect(response.json()).resolves.toMatchObject({
+            code: 'V2_ROUTE_REQUIRED',
+            pipelineVersion: 'v2',
+            resultUrl: `/api/analysis/v2/result/${requestId}`,
+        });
+        expect(mocks.isResultOperator).toHaveBeenCalledWith({
+            id: userId,
+            email: 'ym1113@kakao.com',
+        });
+        expect(mocks.resolveResultOwner).toHaveBeenCalledWith(requestId);
+        expect(mocks.from).not.toHaveBeenCalled();
     });
 
     it('routes an owner demo through the V2 result requirement without querying legacy tables', async () => {

@@ -45,10 +45,18 @@ export interface AnalysisV2ProviderReconciliationSummary {
     hasMore: boolean;
 }
 
-interface ProviderLifecycleDependencies {
+export interface AnalysisV2ProviderUsageRevenueCostSettlement {
+    settleAfterUsageReconciliation(
+        run: StoredAnalysisV2ProviderRun,
+        options?: { knownRevenueCostOperation?: boolean },
+    ): Promise<void>;
+}
+
+export interface ProviderLifecycleDependencies {
     store?: AnalysisV2ProviderRunStore;
     env?: Record<string, string | undefined>;
     clientForSlot?: (slot: ApifyCredentialSlot) => LifecycleApifyClient;
+    revenueCostSettlement?: AnalysisV2ProviderUsageRevenueCostSettlement;
     concurrency?: number;
     maxBatches?: number;
 }
@@ -223,6 +231,17 @@ export async function reconcileAnalysisV2ProviderUsage(
     const rows = await store.listUnreconciled(ANALYSIS_V2_PROVIDER_LIFECYCLE_MAX_ROWS);
     const outcomes = await runBounded(rows, concurrency, async run => {
         try {
+            if (
+                run.revenueCostSettlementRequired
+                && hasAuthoritativeRevenueCostSettlement(run)
+            ) {
+                const settlement = dependencies.revenueCostSettlement;
+                if (!settlement) return false;
+                await settlement.settleAfterUsageReconciliation(run, {
+                    knownRevenueCostOperation: true,
+                });
+                return true;
+            }
             if (!run.runId || !terminalStatusForStored(run.status)) return false;
             const snapshot = await lifecycleClient(
                 run.credentialSlot,
@@ -233,7 +252,7 @@ export async function reconcileAnalysisV2ProviderUsage(
                 ? terminalUsageTotalUsd(snapshot, run.maxChargeUsd)
                 : null;
             if (status !== run.status || usageTotalUsd === null) return false;
-            await store.reconcileUsage({
+            const reconciled = await store.reconcileUsage({
                 reservationToken: run.reservationToken,
                 runId: run.runId,
                 logicalProvider: run.logicalProvider,
@@ -243,6 +262,13 @@ export async function reconcileAnalysisV2ProviderUsage(
                 status,
                 actualUsageUsd: usageTotalUsd,
             });
+            if (run.revenueCostSettlementRequired) {
+                const settlement = dependencies.revenueCostSettlement;
+                if (!settlement) return false;
+                await settlement.settleAfterUsageReconciliation(reconciled, {
+                    knownRevenueCostOperation: true,
+                });
+            }
             return true;
         } catch {
             return false;
@@ -264,6 +290,24 @@ function terminalStatusForStored(
         || status === 'failed'
         || status === 'aborted'
         || status === 'timed_out';
+}
+
+function hasAuthoritativeRevenueCostSettlement(
+    run: StoredAnalysisV2ProviderRun
+): boolean {
+    if (run.status === 'rejected') {
+        return run.runId === null
+            && run.runStartedAt === null
+            && run.terminalizedAt !== null
+            && run.actualUsageUsd === 0
+            && run.usageReconciledAt !== null;
+    }
+    return terminalStatusForStored(run.status)
+        && run.runId !== null
+        && run.runStartedAt !== null
+        && run.terminalizedAt !== null
+        && run.actualUsageUsd !== null
+        && run.usageReconciledAt !== null;
 }
 
 export async function prepareAnalysisV2ProviderRunsForTerminalFailure(

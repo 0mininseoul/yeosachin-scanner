@@ -26,6 +26,8 @@ const PROVIDER_RUN_COST_TERMINAL_PERSISTENCE_ERROR =
     'ANALYSIS_V2_PROVIDER_RUN_COST_TERMINAL_PERSISTENCE_ERROR';
 const PROVIDER_RUN_REJECTION_PERSISTENCE_ERROR =
     'ANALYSIS_V2_PROVIDER_RUN_REJECTION_PERSISTENCE_ERROR';
+const PROVIDER_RUN_AMBIGUITY_PERSISTENCE_ERROR =
+    'ANALYSIS_V2_PROVIDER_RUN_AMBIGUITY_PERSISTENCE_ERROR';
 const PROVIDER_RUN_PERSISTENCE_ERROR = 'ANALYSIS_V2_PROVIDER_RUN_PERSISTENCE_ERROR';
 const SCRAPING_RUN_CHECKPOINT_ERROR =
     'SCRAPING_RUN_CHECKPOINT_ERROR: Apify run id could not be persisted.';
@@ -53,6 +55,7 @@ export const APIFY_DURABLE_PROVIDER_CALLBACK_ERROR_CODES = Object.freeze([
     PROVIDER_RUN_COST_START_PERSISTENCE_ERROR,
     PROVIDER_RUN_COST_TERMINAL_PERSISTENCE_ERROR,
     PROVIDER_RUN_REJECTION_PERSISTENCE_ERROR,
+    PROVIDER_RUN_AMBIGUITY_PERSISTENCE_ERROR,
     'ANALYSIS_V2_PROVIDER_RUN_RUN_CONFLICT',
     'ANALYSIS_V2_PROVIDER_RUN_STATE_CONFLICT',
     'ANALYSIS_V2_PROVIDER_RUN_TERMINAL_CONFLICT',
@@ -383,8 +386,24 @@ export async function startOrResumeApifyActor(
 
     let runId = resumeRunId;
     let durablyCheckpointed = Boolean(resumeRunId);
+    const reportAmbiguousStart = async (): Promise<void> => {
+        try {
+            await context?.onRunStartAmbiguous?.({
+                logicalProvider: options.logicalProvider,
+                actorId,
+                credentialSlot,
+                maxChargeUsd: maxTotalChargeUsd,
+            });
+        } catch (error) {
+            throw sanitizedProviderCallbackError(
+                error,
+                PROVIDER_RUN_AMBIGUITY_PERSISTENCE_ERROR
+            );
+        }
+    };
     if (!runId) {
         if (context?.startReserved) {
+            await reportAmbiguousStart();
             throw new Error(
                 'SCRAPING_AMBIGUOUS_START_ERROR: a reserved Actor start has no confirmed run id.'
             );
@@ -444,12 +463,16 @@ export async function startOrResumeApifyActor(
             }
             // Apify does not expose an idempotency key for Actor starts. Retrying an
             // ambiguous POST can double-charge, so this error is intentionally terminal.
+            await reportAmbiguousStart();
             throw new Error(
                 'SCRAPING_AMBIGUOUS_START_ERROR: Apify Actor start response was not confirmed.'
             );
         }
         if (!APIFY_RUN_ID_PATTERN.test(startedRun.id)) {
-            throw new Error('SCRAPING_SCHEMA_ERROR: Apify run id is invalid.');
+            await reportAmbiguousStart();
+            throw new Error(
+                'SCRAPING_AMBIGUOUS_START_ERROR: Apify Actor start response has no valid run id.'
+            );
         }
         runId = startedRun.id;
         try {
@@ -461,6 +484,7 @@ export async function startOrResumeApifyActor(
             } catch {
                 // The run checkpoint failure remains terminal even if best-effort abort fails.
             }
+            await reportAmbiguousStart();
             throw sanitizedRunCheckpointError(error);
         }
     }
@@ -642,6 +666,7 @@ export async function runApifyRelationshipActor(
             || typeof context.onCostRunStarted === 'function'
             || typeof context.onCostRunFinished === 'function'
             || typeof context.onRunStartRejected === 'function'
+            || typeof context.onRunStartAmbiguous === 'function'
         )
     ) {
         throw new Error(
@@ -725,6 +750,7 @@ export async function runApifyRelationshipActor(
         if (!run.defaultDatasetId) {
             throw new Error('SCRAPING_SCHEMA_ERROR: Apify run에 defaultDatasetId가 없습니다.');
         }
+        await context?.onProviderDatasetResolved?.(run.defaultDatasetId);
 
         const items: Array<Record<string, unknown>> = [];
         const dataset = client.dataset(run.defaultDatasetId);

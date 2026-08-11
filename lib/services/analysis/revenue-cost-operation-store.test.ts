@@ -1,0 +1,314 @@
+import { describe, expect, it, vi } from 'vitest';
+import {
+    RevenueCostOperationStore,
+    type RevenueCostOperationRpcClient,
+} from './revenue-cost-operation-store';
+
+const requestId = '11111111-1111-4111-8111-111111111111';
+const ownerKeyHash = 'a'.repeat(64);
+const scopeHash = 'b'.repeat(64);
+const jobKey = 'track:relationships:collect';
+const claimToken = '33333333-3333-4333-8333-333333333333';
+const operationKey = `relationship-followers:${'c'.repeat(64)}`;
+
+function client(data: unknown, error: { code?: string; message?: string } | null = null) {
+    const normalized = data && typeof data === 'object' && !Array.isArray(data)
+        ? { created: false, replayed: true, ...data as Record<string, unknown> }
+        : data;
+    const rpc = vi.fn().mockResolvedValue({ data: normalized, error });
+    return { rpc, client: { rpc } as RevenueCostOperationRpcClient };
+}
+
+function rawClient(data: unknown) {
+    const rpc = vi.fn().mockResolvedValue({ data, error: null });
+    return { rpc, client: { rpc } as RevenueCostOperationRpcClient };
+}
+
+describe('RevenueCostOperationStore', () => {
+    it('uses the authoritative AI-attempt reserve RPC without caller-supplied prices', async () => {
+        const stub = client({ disposition: 'accepted', created: true, replayed: false });
+        const store = new RevenueCostOperationStore(stub.client);
+
+        await store.reserveV2({
+            requestId, jobKey, jobClaimToken: claimToken, jobInputHash: scopeHash,
+            sourceKind: 'ai_attempt',
+            sourceOperationKey: `private-account-name:${'d'.repeat(64)}`,
+            sourceAttempt: 1,
+        });
+
+        expect(stub.rpc).toHaveBeenCalledWith('reserve_analysis_revenue_cost_operation_v2', {
+            p_request_id: requestId, p_job_key: jobKey, p_job_claim_token: claimToken,
+            p_job_input_hash: scopeHash, p_source_kind: 'ai_attempt',
+            p_source_operation_key: `private-account-name:${'d'.repeat(64)}`,
+            p_source_attempt: 1,
+        });
+    });
+
+    it('uses AI-attempt start, terminal settlement, and no-call release authority', async () => {
+        const stub = client({ disposition: 'started', created: true, replayed: false });
+        const store = new RevenueCostOperationStore(stub.client);
+        const aiSource = {
+            requestId, jobKey, jobClaimToken: claimToken, jobInputHash: scopeHash,
+            sourceKind: 'ai_attempt' as const,
+            sourceOperationKey: `private-account-name:${'d'.repeat(64)}`,
+            sourceAttempt: 1,
+        };
+
+        await store.markStartedV2(aiSource);
+        expect(stub.rpc).toHaveBeenCalledWith('mark_analysis_revenue_cost_operation_started_v2', {
+            p_request_id: requestId, p_job_key: jobKey, p_job_claim_token: claimToken,
+            p_job_input_hash: scopeHash, p_source_kind: 'ai_attempt',
+            p_source_operation_key: `private-account-name:${'d'.repeat(64)}`,
+            p_source_attempt: 1,
+        });
+        await store.settleV2({
+            requestId, jobKey, sourceKind: 'ai_attempt',
+            sourceOperationKey: `private-account-name:${'d'.repeat(64)}`,
+            sourceAttempt: 1,
+        });
+        expect(stub.rpc).toHaveBeenLastCalledWith('settle_analysis_revenue_cost_operation_v2', {
+            p_request_id: requestId, p_job_key: jobKey, p_source_kind: 'ai_attempt',
+            p_source_operation_key: `private-account-name:${'d'.repeat(64)}`,
+            p_source_attempt: 1,
+        });
+        await store.releaseV2(aiSource);
+        expect(stub.rpc).toHaveBeenLastCalledWith('release_analysis_revenue_cost_operation_v2', {
+            p_request_id: requestId, p_job_key: jobKey, p_job_claim_token: claimToken,
+            p_job_input_hash: scopeHash, p_source_kind: 'ai_attempt',
+            p_source_operation_key: `private-account-name:${'d'.repeat(64)}`,
+            p_source_attempt: 1,
+        });
+    });
+
+    it('uses provider-source v2 authority without caller-supplied cost or operation fields', async () => {
+        const stub = client({ disposition: 'accepted', created: true, replayed: false, operationId: '22222222-2222-4222-8222-222222222222' });
+        const store = new RevenueCostOperationStore(stub.client);
+
+        await store.reserveV2({
+            requestId, jobKey, jobClaimToken: claimToken, jobInputHash: scopeHash,
+            sourceKind: 'provider_run', sourceOperationKey: operationKey, sourceAttempt: 0,
+        });
+        expect(stub.rpc).toHaveBeenCalledWith('reserve_analysis_revenue_cost_operation_v2', {
+            p_request_id: requestId, p_job_key: jobKey, p_job_claim_token: claimToken,
+            p_job_input_hash: scopeHash, p_source_kind: 'provider_run',
+            p_source_operation_key: operationKey, p_source_attempt: 0,
+        });
+        await store.markStartedV2({
+            requestId, jobKey, jobClaimToken: claimToken, jobInputHash: scopeHash,
+            sourceKind: 'provider_run', sourceOperationKey: operationKey, sourceAttempt: 0,
+        });
+        expect(stub.rpc).toHaveBeenLastCalledWith('mark_analysis_revenue_cost_operation_started_v2', {
+            p_request_id: requestId, p_job_key: jobKey, p_job_claim_token: claimToken,
+            p_job_input_hash: scopeHash, p_source_kind: 'provider_run',
+            p_source_operation_key: operationKey, p_source_attempt: 0,
+        });
+    });
+
+    it('fails closed locally for malformed AI source identity before an RPC', async () => {
+        const stub = client({ disposition: 'accepted' });
+        const store = new RevenueCostOperationStore(stub.client);
+        const malformedAiSource = {
+            requestId, jobKey, jobClaimToken: claimToken, jobInputHash: scopeHash,
+            sourceKind: 'ai_attempt' as const,
+            sourceOperationKey: 'private-account-name:raw-source-identity',
+            sourceAttempt: 1,
+        };
+
+        await expect(store.reserveV2(malformedAiSource)).rejects.toThrow('REVENUE_COST_OPERATION_INVALID_INPUT');
+        expect(stub.rpc).not.toHaveBeenCalled();
+        expect(() => store.markStartedV2(malformedAiSource)).toThrow('REVENUE_COST_OPERATION_INVALID_INPUT');
+        expect(stub.rpc).not.toHaveBeenCalled();
+    });
+
+    it('settles from provider authority without accepting caller cost or a live job claim', async () => {
+        const stub = client({ disposition: 'settled', created: true, replayed: false });
+        const store = new RevenueCostOperationStore(stub.client);
+
+        await store.settleV2({
+            requestId, jobKey, sourceKind: 'provider_run', sourceOperationKey: operationKey, sourceAttempt: 0,
+        });
+
+        expect(stub.rpc).toHaveBeenCalledWith('settle_analysis_revenue_cost_operation_v2', {
+            p_request_id: requestId, p_job_key: jobKey, p_source_kind: 'provider_run',
+            p_source_operation_key: operationKey, p_source_attempt: 0,
+        });
+    });
+
+    it('releases only with a live job identity for provider and AI sources', async () => {
+        const stub = client({ disposition: 'released', created: true, replayed: false });
+        const store = new RevenueCostOperationStore(stub.client);
+        const provider = {
+            requestId, jobKey, jobClaimToken: claimToken, jobInputHash: scopeHash,
+            sourceKind: 'provider_run' as const, sourceOperationKey: operationKey, sourceAttempt: 0,
+        };
+
+        await store.releaseV2(provider);
+        expect(stub.rpc).toHaveBeenCalledWith('release_analysis_revenue_cost_operation_v2', {
+            p_request_id: requestId, p_job_key: jobKey, p_job_claim_token: claimToken,
+            p_job_input_hash: scopeHash, p_source_kind: 'provider_run',
+            p_source_operation_key: operationKey, p_source_attempt: 0,
+        });
+        await store.settleV2({
+            requestId, jobKey, sourceKind: 'ai_attempt',
+            sourceOperationKey: `private-account-name:${'d'.repeat(64)}`, sourceAttempt: 1,
+        });
+        await store.releaseV2({
+            ...provider, sourceKind: 'ai_attempt',
+            sourceOperationKey: `private-account-name:${'d'.repeat(64)}`, sourceAttempt: 1,
+        });
+        expect(stub.rpc).toHaveBeenCalledTimes(3);
+    });
+    it('uses the fenced begin RPC and rejects malformed request identity', async () => {
+        const stub = client({ disposition: 'begun', created: true, replayed: false, operationId: '22222222-2222-4222-8222-222222222222' });
+        const store = new RevenueCostOperationStore(stub.client);
+
+        await expect(store.begin({ requestId })).resolves.toMatchObject({ disposition: 'begun', created: true, replayed: false });
+        expect(stub.rpc).toHaveBeenCalledWith('begin_analysis_revenue_cost_ledger_v1', { p_request_id: requestId });
+        await expect(store.begin({ requestId: 'not-a-uuid' })).rejects.toThrow('REVENUE_COST_OPERATION_INVALID_INPUT');
+    });
+    it('uses only opaque identity inputs to reserve an operation', async () => {
+        const stub = client({ disposition: 'accepted', operationId: '22222222-2222-4222-8222-222222222222' });
+        const store = new RevenueCostOperationStore(stub.client);
+
+        await expect(store.reserve({
+            requestId,
+            ownerKind: 'ai_attempt',
+            ownerKeyHash,
+            attempt: 1,
+            operationKind: 'stage_one_routing',
+            units: 400,
+            estimatedEconomicUsd: 0.5,
+            selectedManifestScopeHash: scopeHash,
+        })).resolves.toMatchObject({ disposition: 'accepted' });
+
+        expect(stub.rpc).toHaveBeenCalledWith('reserve_analysis_revenue_cost_operation_v1', {
+            p_request_id: requestId,
+            p_owner_kind: 'ai_attempt',
+            p_owner_key_hash: ownerKeyHash,
+            p_attempt: 1,
+            p_operation_kind: 'stage_one_routing',
+            p_units: 400,
+            p_estimated_economic_usd: 0.5,
+            p_selected_manifest_scope_hash: scopeHash,
+        });
+    });
+
+    it('returns a durable denial without surfacing database details', async () => {
+        const stub = client({ disposition: 'denied', operationId: '22222222-2222-4222-8222-222222222222', reason: 'hard_cap' });
+        const store = new RevenueCostOperationStore(stub.client);
+        await expect(store.reserve({
+            requestId, ownerKind: 'provider_run', ownerKeyHash, attempt: 1,
+            operationKind: 'detail_profile', units: 100, estimatedEconomicUsd: 2, selectedManifestScopeHash: scopeHash,
+        })).resolves.toMatchObject({ disposition: 'denied', reason: 'hard_cap' });
+    });
+
+    it('rejects raw or malformed identity values before an RPC', async () => {
+        const stub = client({ disposition: 'accepted' });
+        const store = new RevenueCostOperationStore(stub.client);
+        await expect(store.reserve({
+            requestId, ownerKind: 'provider_run', ownerKeyHash: 'target_username', attempt: 1,
+            operationKind: 'detail_profile', units: 1, estimatedEconomicUsd: 0.01, selectedManifestScopeHash: scopeHash,
+        })).rejects.toThrow('REVENUE_COST_OPERATION_INVALID_INPUT');
+        expect(stub.rpc).not.toHaveBeenCalled();
+    });
+
+    it('fences lifecycle calls on the same opaque operation identity', async () => {
+        const stub = client({ disposition: 'started' });
+        const store = new RevenueCostOperationStore(stub.client);
+        await store.markStarted({ requestId, ownerKind: 'ai_attempt', ownerKeyHash, attempt: 1 });
+        expect(stub.rpc).toHaveBeenCalledWith('mark_analysis_revenue_cost_operation_started_v1', {
+            p_request_id: requestId, p_owner_kind: 'ai_attempt', p_owner_key_hash: ownerKeyHash, p_attempt: 1,
+        });
+    });
+
+    it('calls settle and release with strictly validated economic and billed amounts', async () => {
+        const stub = client({ disposition: 'settled', operationId: '22222222-2222-4222-8222-222222222222' });
+        const store = new RevenueCostOperationStore(stub.client);
+        const identity = { requestId, ownerKind: 'ai_attempt' as const, ownerKeyHash, attempt: 4 };
+
+        await store.settle({ ...identity, economicActualUsd: 0.01, billedActualUsd: 0 });
+        expect(stub.rpc).toHaveBeenCalledWith('settle_analysis_revenue_cost_operation_v1', {
+            p_request_id: requestId, p_owner_kind: 'ai_attempt', p_owner_key_hash: ownerKeyHash, p_attempt: 4,
+            p_economic_actual_usd: 0.01, p_billed_actual_usd: 0,
+        });
+        await expect(store.release(identity)).resolves.toMatchObject({ disposition: 'settled' });
+        await expect(store.settle({ ...identity, economicActualUsd: Number.NaN, billedActualUsd: 0 }))
+            .rejects.toThrow('REVENUE_COST_OPERATION_INVALID_INPUT');
+    });
+
+    it('passes a live finalizer claim to reconciliation and only accepts bounded reason enums', async () => {
+        const stub = client({ finalizable: false, reason: 'missing_fresh_import', economicDisposition: 'within_margin_target', economicActualKrw: 0, billedActualKrw: 0 });
+        const store = new RevenueCostOperationStore(stub.client);
+        await expect(store.reconcile({
+            requestId,
+            jobKey: 'coordinator:finalize',
+            claimToken: '33333333-3333-4333-8333-333333333333',
+            jobInputHash: scopeHash,
+        })).resolves.toMatchObject({ finalizable: false, reason: 'missing_fresh_import' });
+        expect(stub.rpc).toHaveBeenCalledWith('read_analysis_revenue_cost_reconciliation_v1', {
+            p_request_id: requestId,
+            p_job_key: 'coordinator:finalize',
+            p_claim_token: '33333333-3333-4333-8333-333333333333',
+            p_job_input_hash: scopeHash,
+        });
+    });
+
+    it('exposes only allowlisted revenue operation rejections from PostgreSQL P0001 errors', async () => {
+        const stub = client(null, { code: 'P0001', message: 'REVENUE_COST_OPERATION_FENCE' });
+        const store = new RevenueCostOperationStore(stub.client);
+
+        await expect(store.manualReview({ requestId, reasonCode: 'routing_failure' }))
+            .rejects.toThrow('REVENUE_COST_OPERATION_RPC_FAILED_REVENUE_COST_OPERATION_FENCE');
+    });
+
+    it('does not expose raw database messages or unrecognised database codes', async () => {
+        const stub = client(null, { code: 'P0001', message: 'username=private-target' });
+        const store = new RevenueCostOperationStore(stub.client);
+        const outcome = store.manualReview({ requestId, reasonCode: 'routing_failure' });
+        await expect(outcome).rejects.toThrow('REVENUE_COST_OPERATION_RPC_FAILED');
+        await expect(outcome).rejects.not.toThrow('private-target');
+
+        const hostile = new RevenueCostOperationStore(client(null, { code: 'XX000', message: 'target=private-target' }).client);
+        await expect(hostile.manualReview({ requestId, reasonCode: 'routing_failure' }))
+            .rejects.toThrow('REVENUE_COST_OPERATION_RPC_FAILED');
+    });
+
+    it.each([
+        'begun', 'accepted', 'denied', 'started', 'settled', 'released', 'ambiguous',
+    ] as const)('rejects an ambiguous false/false %s lifecycle outcome', async disposition => {
+        const stub = rawClient({ disposition, created: false, replayed: false });
+        const store = new RevenueCostOperationStore(stub.client);
+
+        await expect(store.reserve({
+            requestId,
+            ownerKind: 'provider_run',
+            ownerKeyHash,
+            attempt: 1,
+            operationKind: 'detail_profile',
+            units: 1,
+            estimatedEconomicUsd: 0.01,
+            selectedManifestScopeHash: scopeHash,
+        })).rejects.toThrow('REVENUE_COST_OPERATION_INVALID_RESPONSE');
+    });
+
+    it('accepts only the documented existing manual-review false/false outcome', async () => {
+        const stub = rawClient({ disposition: 'manual_review', created: false, replayed: false });
+        const store = new RevenueCostOperationStore(stub.client);
+
+        await expect(store.manualReview({ requestId, reasonCode: 'routing_failure' }))
+            .resolves.toEqual({ disposition: 'manual_review', created: false, replayed: false });
+    });
+
+    it.each([
+        [{ disposition: 'begun', replayed: false }, 'missing created'],
+        [{ disposition: 'begun', created: false }, 'missing replayed'],
+        [{ disposition: 'begun', created: true, replayed: true }, 'contradictory replay flags'],
+        [{ disposition: 'begun', created: false, replayed: false }, 'ambiguous replay flags'],
+    ])('rejects a begin response with %s', async (data, _description) => {
+        void _description;
+        const rpc = vi.fn().mockResolvedValue({ data, error: null });
+        const store = new RevenueCostOperationStore({ rpc });
+
+        await expect(store.begin({ requestId })).rejects.toThrow('REVENUE_COST_OPERATION_INVALID_RESPONSE');
+    });
+});

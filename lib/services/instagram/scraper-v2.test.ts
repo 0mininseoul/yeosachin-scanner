@@ -72,6 +72,87 @@ afterEach(() => {
 });
 
 describe('getProfilesBatchV2', () => {
+    it('uses one direct Apify profile attempt for the trusted fresh path without calling selfhosted or cache', async () => {
+        const selfhosted = vi.fn();
+        const apify = vi.fn(async (usernames: string[]) => usernames.map(profile));
+        const snapshots: ProfilesBatchV2AttemptSnapshot[] = [];
+        __setProvidersForTest({}, {
+            selfhosted: provider({
+                name: 'selfhosted',
+                paid: false,
+                getProfilesBatch: selfhosted,
+            }),
+            apify: provider({
+                name: 'apify',
+                paid: true,
+                getProfilesBatch: apify,
+            }),
+        });
+
+        const result = await getProfilesBatchV2(['alice', 'bob'], {
+            freshApifyOnly: true,
+            providerRun: durablePaidStart(),
+            persistAttemptOutcomes: async snapshot => { snapshots.push(snapshot); },
+        });
+
+        expect(selfhosted).not.toHaveBeenCalled();
+        expect(apify).toHaveBeenCalledWith(['alice', 'bob'], 2, expect.any(Object));
+        expect(snapshots).toHaveLength(1);
+        expect(snapshots[0]).toMatchObject({
+            attempt: 'fresh_apify',
+            source: 'apify',
+            requestedUsernames: ['alice', 'bob'],
+        });
+        expect(result.primaryResults.every(item => item.outcome.source === 'apify')).toBe(true);
+        expect(result.fallbackResults).toEqual([]);
+    });
+
+    it('forwards definitive rejection and ambiguity callbacks to a direct Apify attempt', async () => {
+        const onRunStartRejected = vi.fn();
+        const onRunStartAmbiguous = vi.fn();
+        const onProviderDatasetResolved = vi.fn();
+        const apify = vi.fn(async (
+            usernames: string[],
+            _batchSize: number | undefined,
+            context: ProviderCallContext | undefined,
+        ) => {
+            await context?.onRunStartRejected?.({
+                logicalProvider: 'apify',
+                actorId: 'apify/instagram-profile-scraper',
+                credentialSlot: 'primary',
+                maxChargeUsd: 0.0026,
+                statusCode: 400,
+                errorType: 'bad_request',
+            });
+            await context?.onRunStartAmbiguous?.({
+                logicalProvider: 'apify',
+                actorId: 'apify/instagram-profile-scraper',
+                credentialSlot: 'primary',
+                maxChargeUsd: 0.0026,
+            });
+            await context?.onProviderDatasetResolved?.('FreshDataset1234');
+            return usernames.map(profile);
+        });
+        __setProvidersForTest({}, {
+            apify: provider({ name: 'apify', paid: true, getProfilesBatch: apify }),
+        });
+
+        await getProfilesBatchV2(['alice'], {
+            freshApifyOnly: true,
+            providerRun: {
+                ...durablePaidStart(),
+                onRunStartRejected,
+                onRunStartAmbiguous,
+                onProviderDatasetResolved,
+            },
+            persistAttemptOutcomes: async () => undefined,
+        });
+
+        expect(onRunStartRejected).toHaveBeenCalledOnce();
+        expect(onRunStartAmbiguous).toHaveBeenCalledOnce();
+        expect(onProviderDatasetResolved).toHaveBeenCalledWith('FreshDataset1234');
+    });
+
     it('rejects an authenticated primary when an Apify fallback is requested', async () => {
         __setProvidersForTest({ SELFHOSTED_AUTH_ENABLED: 'true' }, {
             selfhosted_auth: provider({ name: 'selfhosted_auth', paid: false }),
@@ -254,9 +335,14 @@ describe('getProfilesBatchV2', () => {
         const candidateFailures = emitted.filter(
             event => event.event === 'scraper.candidate_failed'
         );
-        expect(candidateFailures.map(event => event.fields.candidate_instagram_id))
-            .toEqual(['bob', 'carol', 'dave', 'carol']);
-        expect(JSON.stringify(candidateFailures)).not.toContain('alice');
+        expect(candidateFailures.map(event => event.fields.candidate_ordinal))
+            .toEqual([2, 3, 4, 2]);
+        const serializedFailures = JSON.stringify(candidateFailures);
+        expect(serializedFailures).not.toContain('candidate_instagram_id');
+        for (const username of ['alice', 'bob', 'carol', 'dave']) {
+            expect(serializedFailures).not.toContain(username);
+        }
+        expect(serializedFailures).not.toContain('https://www.instagram.com/p/private-post/');
     });
 
     it('caps exceptional candidate logs and never emits successful candidate usernames', async () => {
@@ -300,8 +386,10 @@ describe('getProfilesBatchV2', () => {
         expect(candidateFailures).toHaveLength(25);
         expect(emitted.filter(event => event.event === 'scraper.fallback_selected'))
             .toHaveLength(1);
-        expect(JSON.stringify(emitted)).not.toMatch(/private provider response|caption/);
-        expect(JSON.stringify(emitted)).not.toContain('candidate_29');
+        const serialized = JSON.stringify(emitted);
+        expect(serialized).not.toMatch(/private provider response|caption/);
+        for (const username of usernames) expect(serialized).not.toContain(username);
+        expect(serialized).not.toContain('https://www.instagram.com/p/private-post/');
     });
 
     it('turns a full primary transport failure into one failed outcome per username', async () => {
