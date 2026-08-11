@@ -382,7 +382,8 @@ BEGIN
             RAISE EXCEPTION USING MESSAGE = 'REVENUE_COST_OPERATION_DRIFT';
         END IF;
         IF v_child.status = 'denied' AND v_child.denial_reason = 'hard_cap'
-           AND v_child.reserved_krw = 0 AND v_parent.status = 'manual_review' AND v_parent.manual_review_reason = 'cost_denied' THEN
+           AND v_child.reserved_krw = 0 AND v_parent.status = 'manual_review'
+           AND v_parent.manual_review_reason IN ('cost_denied','cost_overrun') THEN
             RETURN pg_catalog.jsonb_build_object('disposition','denied','created',FALSE,'replayed',TRUE,'operationId',v_child.id,'reason','hard_cap');
         END IF;
         IF v_child.status = 'reserved' AND v_child.reserved_krw = v_expected_krw
@@ -401,7 +402,9 @@ BEGIN
         ) VALUES (p_request_id, 'provider_run', v_owner_hash, 1, v_operation_kind, 1, NULL,
             p_job_key, v_source_hash, p_source_attempt, v_provider.max_charge_usd, 0, 'denied', 'hard_cap', v_now)
         RETURNING * INTO v_child;
-        UPDATE public.analysis_revenue_run_ledgers SET status = 'manual_review', manual_review_reason = 'cost_denied'
+        UPDATE public.analysis_revenue_run_ledgers SET status = 'manual_review', manual_review_reason = CASE
+            WHEN manual_review_reason = 'cost_overrun' THEN 'cost_overrun'
+            ELSE 'cost_denied' END
           WHERE request_id = p_request_id;
         RETURN pg_catalog.jsonb_build_object('disposition','denied','created',TRUE,'replayed',FALSE,'operationId',v_child.id,'reason','hard_cap');
     END IF;
@@ -549,6 +552,12 @@ BEGIN
     -- Canonical delayed-settlement order: preflight -> request -> exact job ->
     -- exact provider source -> parent -> child.  No clock-derived lease fence is
     -- used because terminal reconciliation must survive a missing/expired lease.
+    -- analysis_v2_scrub_terminal_request_pii deliberately replaces both raw
+    -- target_instagram_id values.  Terminal authority therefore relies on the
+    -- immutable request/preflight IDs, entitlement and policy bindings,
+    -- entitlement hash, parent target_username_hmac/preflight target_input_hash,
+    -- parent timestamps, and source/child derived hashes below -- never the raw
+    -- target fields that terminal PII retention intentionally destroys.
     SELECT * INTO v_preflight FROM public.analysis_preflights WHERE consumed_request_id=p_request_id FOR UPDATE;
     SELECT * INTO v_request FROM public.analysis_requests WHERE id=p_request_id FOR UPDATE;
     SELECT * INTO v_entitlement FROM public.analysis_v2_test_entitlement_consumptions WHERE request_id=p_request_id;
@@ -563,13 +572,11 @@ BEGIN
        OR v_preflight.admission_selected_plan_id IS DISTINCT FROM v_request.selected_plan_id_snapshot
        OR v_preflight.admission_entitlement_jti_hash IS DISTINCT FROM v_request.test_entitlement_jti_hash
        OR v_preflight.user_id IS DISTINCT FROM v_request.user_id
-       OR pg_catalog.lower(v_preflight.target_instagram_id) IS DISTINCT FROM pg_catalog.lower(v_request.target_instagram_id)
        OR v_entitlement.preflight_id IS DISTINCT FROM v_preflight.id OR v_entitlement.user_id IS DISTINCT FROM v_request.user_id
        OR v_entitlement.selected_plan_id IS DISTINCT FROM v_request.selected_plan_id_snapshot
        OR v_entitlement.entitlement_jti_hash IS DISTINCT FROM v_request.test_entitlement_jti_hash
        OR v_policy.mode IS DISTINCT FROM 'test_operation_split' OR v_policy.policy_version IS DISTINCT FROM 'authorized-free-e2e-v1'
        OR v_policy.entitlement_jti_hash IS DISTINCT FROM v_entitlement.entitlement_jti_hash
-       OR pg_catalog.lower(v_policy.target_instagram_id) IS DISTINCT FROM pg_catalog.lower(v_preflight.target_instagram_id)
        OR v_runner_plan IS DISTINCT FROM v_request.selected_plan_id_snapshot THEN RAISE EXCEPTION USING MESSAGE='REVENUE_COST_OPERATION_FENCE'; END IF;
     SELECT * INTO v_job FROM public.analysis_pipeline_jobs WHERE request_id=p_request_id AND job_key=p_job_key FOR UPDATE;
     IF v_job.request_id IS NULL THEN RAISE EXCEPTION USING MESSAGE='REVENUE_COST_OPERATION_FENCE'; END IF;
@@ -609,10 +616,15 @@ BEGIN
        OR v_child.denial_reason IS NOT NULL THEN RAISE EXCEPTION USING MESSAGE='REVENUE_COST_OPERATION_FENCE'; END IF;
 
     IF v_provider.status = 'rejected' THEN
-        IF v_provider.run_id IS NOT NULL OR v_provider.actual_usage_usd IS DISTINCT FROM 0 OR v_provider.terminalized_at IS NULL OR v_provider.usage_reconciled_at IS NULL THEN
+        IF v_provider.run_id IS NOT NULL OR v_provider.run_started_at IS NOT NULL
+           OR v_provider.actual_usage_usd IS DISTINCT FROM 0 OR v_provider.terminalized_at IS NULL OR v_provider.usage_reconciled_at IS NULL THEN
             RAISE EXCEPTION USING MESSAGE='REVENUE_COST_OPERATION_FENCE'; END IF;
+        -- A provider `rejected` row is authoritative proof that no external run
+        -- was created (run_id/run_started_at NULL and actual usage zero).  It can
+        -- safely release even a locally started child and clear that local marker.
         IF v_child.status='released' AND v_child.started_at IS NULL AND v_child.terminal_at IS NOT DISTINCT FROM v_provider.usage_reconciled_at
-           AND v_child.economic_actual_usd IS NULL AND v_child.billed_actual_usd IS NULL AND v_parent.status='running' AND v_parent.manual_review_reason IS NULL THEN
+           AND v_child.economic_actual_usd IS NULL AND v_child.billed_actual_usd IS NULL
+           AND v_child.economic_actual_krw IS NULL AND v_child.billed_actual_krw IS NULL THEN
             RETURN pg_catalog.jsonb_build_object('disposition','released','created',FALSE,'replayed',TRUE,'operationId',v_child.id);
         END IF;
         IF v_child.status NOT IN ('reserved','started') OR v_child.terminal_at IS NOT NULL
@@ -648,7 +660,11 @@ BEGIN
     ELSIF v_child.status='reserved' THEN
         -- A terminal provider run with no recorded start is still cost truth,
         -- but it proves the runtime skipped the required start transition.
-        UPDATE public.analysis_revenue_run_ledgers SET status='manual_review',manual_review_reason='routing_failure' WHERE request_id=p_request_id;
+        UPDATE public.analysis_revenue_run_ledgers
+           SET status='manual_review',manual_review_reason=CASE
+               WHEN manual_review_reason IN ('cost_overrun','cost_denied') THEN manual_review_reason
+               ELSE 'routing_failure' END
+         WHERE request_id=p_request_id;
     ELSIF v_parent.status='manual_review' AND v_parent.manual_review_reason='ambiguous_external_call' AND v_unsettled=0 AND v_denied=0 THEN
         UPDATE public.analysis_revenue_run_ledgers SET status='running',manual_review_reason=NULL WHERE request_id=p_request_id;
     END IF;
@@ -734,7 +750,6 @@ BEGIN
        OR v_child.denial_reason IS NOT NULL THEN RAISE EXCEPTION USING MESSAGE='REVENUE_COST_OPERATION_FENCE'; END IF;
     IF v_child.status='released' AND v_child.started_at IS NULL AND v_child.economic_actual_usd IS NULL AND v_child.billed_actual_usd IS NULL
        AND v_child.economic_actual_krw IS NULL AND v_child.billed_actual_krw IS NULL AND v_child.denial_reason IS NULL
-       AND v_parent.status='running' AND v_parent.manual_review_reason IS NULL
        AND ((v_provider.status='starting' AND v_provider.run_id IS NULL AND v_provider.run_started_at IS NULL
              AND v_provider.terminalized_at IS NULL AND v_provider.actual_usage_usd IS NULL AND v_provider.usage_reconciled_at IS NULL
              AND v_child.terminal_at IS NOT DISTINCT FROM GREATEST(v_provider.reserved_at,v_child.created_at))
@@ -744,25 +759,45 @@ BEGIN
         RETURN pg_catalog.jsonb_build_object('disposition','released','created',FALSE,'replayed',TRUE,'operationId',v_child.id);
     END IF;
     IF v_child.status='ambiguous' AND v_child.started_at IS NOT NULL AND v_child.terminal_at IS NOT NULL
-       AND v_parent.status='manual_review' AND v_parent.manual_review_reason='ambiguous_external_call' THEN RETURN pg_catalog.jsonb_build_object('disposition','ambiguous','created',FALSE,'replayed',TRUE,'operationId',v_child.id,'reason','ambiguous_external_call'); END IF;
+       AND ((v_provider.status='starting' AND v_provider.run_id IS NULL AND v_provider.run_started_at IS NULL
+             AND v_provider.terminalized_at IS NULL AND v_provider.actual_usage_usd IS NULL AND v_provider.usage_reconciled_at IS NULL)
+            OR (v_provider.status='running' AND v_provider.run_id IS NOT NULL AND v_provider.run_started_at IS NOT NULL
+             AND v_provider.terminalized_at IS NULL AND v_provider.actual_usage_usd IS NULL AND v_provider.usage_reconciled_at IS NULL)) THEN
+        RETURN pg_catalog.jsonb_build_object('disposition','ambiguous','created',FALSE,'replayed',TRUE,'operationId',v_child.id,'reason','ambiguous_external_call');
+    END IF;
     IF v_child.status NOT IN ('reserved','started') OR v_child.economic_actual_usd IS NOT NULL OR v_child.billed_actual_usd IS NOT NULL THEN RAISE EXCEPTION USING MESSAGE='REVENUE_COST_OPERATION_FENCE'; END IF;
+    -- Unlike a still-starting source, a rejected source is definitive provider
+    -- truth: no run crossed the external boundary.  It may release a local
+    -- started marker without manufacturing an ambiguity.
+    IF v_provider.status='rejected' AND v_provider.run_id IS NULL AND v_provider.run_started_at IS NULL
+       AND v_provider.actual_usage_usd IS NOT DISTINCT FROM 0 AND v_provider.terminalized_at IS NOT NULL AND v_provider.usage_reconciled_at IS NOT NULL THEN
+        IF v_child.terminal_at IS NOT NULL THEN RAISE EXCEPTION USING MESSAGE='REVENUE_COST_OPERATION_FENCE'; END IF;
+        UPDATE public.analysis_revenue_cost_operations SET status='released',started_at=NULL,terminal_at=v_provider.usage_reconciled_at WHERE id=v_child.id;
+        UPDATE public.analysis_revenue_run_ledgers SET reserved_cost_krw=reserved_cost_krw-v_child.reserved_krw WHERE request_id=p_request_id;
+        RETURN pg_catalog.jsonb_build_object('disposition','released','created',TRUE,'replayed',FALSE,'operationId',v_child.id);
+    END IF;
     IF v_child.status='started' THEN
         -- The runtime marks this immediately before its provider call.  Even a
         -- still-starting provider row cannot prove that the call never crossed
         -- the external boundary, so it must remain recoverable ambiguity.
         UPDATE public.analysis_revenue_cost_operations SET status='ambiguous',terminal_at=v_now WHERE id=v_child.id;
-        UPDATE public.analysis_revenue_run_ledgers SET reserved_cost_krw=reserved_cost_krw-v_child.reserved_krw,status='manual_review',manual_review_reason='ambiguous_external_call' WHERE request_id=p_request_id;
+        UPDATE public.analysis_revenue_run_ledgers SET reserved_cost_krw=reserved_cost_krw-v_child.reserved_krw,status='manual_review',manual_review_reason=CASE
+            WHEN manual_review_reason IN ('cost_overrun','cost_denied') THEN manual_review_reason
+            ELSE 'ambiguous_external_call' END WHERE request_id=p_request_id;
         RETURN pg_catalog.jsonb_build_object('disposition','ambiguous','created',TRUE,'replayed',FALSE,'operationId',v_child.id,'reason','ambiguous_external_call');
     END IF;
-    IF v_provider.status IN ('starting','rejected') AND v_provider.run_id IS NULL AND v_provider.run_started_at IS NULL THEN
+    IF v_provider.status = 'starting' AND v_provider.run_id IS NULL AND v_provider.run_started_at IS NULL
+       AND v_provider.terminalized_at IS NULL AND v_provider.actual_usage_usd IS NULL AND v_provider.usage_reconciled_at IS NULL THEN
         IF v_child.status<>'reserved' OR v_child.started_at IS NOT NULL OR v_child.terminal_at IS NOT NULL THEN RAISE EXCEPTION USING MESSAGE='REVENUE_COST_OPERATION_FENCE'; END IF;
-        UPDATE public.analysis_revenue_cost_operations SET status='released',terminal_at=CASE WHEN v_provider.status='rejected' THEN v_provider.usage_reconciled_at ELSE GREATEST(v_provider.reserved_at,v_child.created_at) END WHERE id=v_child.id;
+        UPDATE public.analysis_revenue_cost_operations SET status='released',terminal_at=GREATEST(v_provider.reserved_at,v_child.created_at) WHERE id=v_child.id;
         UPDATE public.analysis_revenue_run_ledgers SET reserved_cost_krw=reserved_cost_krw-v_child.reserved_krw WHERE request_id=p_request_id;
         RETURN pg_catalog.jsonb_build_object('disposition','released','created',TRUE,'replayed',FALSE,'operationId',v_child.id);
     END IF;
     IF v_provider.run_id IS NULL OR v_provider.run_started_at IS NULL THEN RAISE EXCEPTION USING MESSAGE='REVENUE_COST_OPERATION_FENCE'; END IF;
     UPDATE public.analysis_revenue_cost_operations SET status='ambiguous',started_at=COALESCE(started_at,v_provider.run_started_at),terminal_at=v_now WHERE id=v_child.id;
-    UPDATE public.analysis_revenue_run_ledgers SET reserved_cost_krw=reserved_cost_krw-CASE WHEN v_child.status IN ('reserved','started') THEN v_child.reserved_krw ELSE 0 END,status='manual_review',manual_review_reason='ambiguous_external_call' WHERE request_id=p_request_id;
+    UPDATE public.analysis_revenue_run_ledgers SET reserved_cost_krw=reserved_cost_krw-CASE WHEN v_child.status IN ('reserved','started') THEN v_child.reserved_krw ELSE 0 END,status='manual_review',manual_review_reason=CASE
+        WHEN manual_review_reason IN ('cost_overrun','cost_denied') THEN manual_review_reason
+        ELSE 'ambiguous_external_call' END WHERE request_id=p_request_id;
     RETURN pg_catalog.jsonb_build_object('disposition','ambiguous','created',TRUE,'replayed',FALSE,'operationId',v_child.id,'reason','ambiguous_external_call');
 END; $$;
 

@@ -189,12 +189,24 @@ describe('RevenueCostOperationStore', () => {
         });
     });
 
-    it('does not expose raw database messages', async () => {
+    it('exposes only allowlisted revenue operation rejections from PostgreSQL P0001 errors', async () => {
+        const stub = client(null, { code: 'P0001', message: 'REVENUE_COST_OPERATION_FENCE' });
+        const store = new RevenueCostOperationStore(stub.client);
+
+        await expect(store.manualReview({ requestId, reasonCode: 'routing_failure' }))
+            .rejects.toThrow('REVENUE_COST_OPERATION_RPC_FAILED_REVENUE_COST_OPERATION_FENCE');
+    });
+
+    it('does not expose raw database messages or unrecognised database codes', async () => {
         const stub = client(null, { code: 'P0001', message: 'username=private-target' });
         const store = new RevenueCostOperationStore(stub.client);
         const outcome = store.manualReview({ requestId, reasonCode: 'routing_failure' });
-        await expect(outcome).rejects.toThrow('REVENUE_COST_OPERATION_RPC_FAILED_P0001');
+        await expect(outcome).rejects.toThrow('REVENUE_COST_OPERATION_RPC_FAILED');
         await expect(outcome).rejects.not.toThrow('private-target');
+
+        const hostile = new RevenueCostOperationStore(client(null, { code: 'XX000', message: 'target=private-target' }).client);
+        await expect(hostile.manualReview({ requestId, reasonCode: 'routing_failure' }))
+            .rejects.toThrow('REVENUE_COST_OPERATION_RPC_FAILED');
     });
 
     it.each([

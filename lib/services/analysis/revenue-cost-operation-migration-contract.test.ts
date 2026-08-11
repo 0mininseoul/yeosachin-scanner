@@ -88,4 +88,27 @@ describe('revenue cost-operation migration contract', () => {
         expect(source).toContain('REVOKE ALL ON FUNCTION public.settle_analysis_revenue_cost_operation_v2(UUID,TEXT,TEXT,TEXT,SMALLINT) FROM PUBLIC, anon, authenticated, service_role');
         expect(source).toContain('GRANT EXECUTE ON FUNCTION public.release_analysis_revenue_cost_operation_v2(UUID,TEXT,UUID,TEXT,TEXT,TEXT,SMALLINT) TO service_role');
     });
+
+    it('uses immutable terminal lineage after PII scrub while keeping live release identity checks', () => {
+        const settlement = source.slice(
+            source.indexOf('CREATE OR REPLACE FUNCTION public.settle_analysis_revenue_cost_operation_v2'),
+            source.indexOf('-- Release retains the reserve/start live identity.'),
+        );
+        expect(settlement).toContain('analysis_v2_scrub_terminal_request_pii deliberately replaces both raw');
+        expect(settlement).toContain('v_parent.target_username_hmac IS DISTINCT FROM v_preflight.target_input_hash');
+        expect(settlement).toContain('v_parent.preflight_refreshed_at IS DISTINCT FROM v_preflight.admission_refreshed_at');
+        expect(settlement).toContain('v_parent.request_started_at IS DISTINCT FROM v_request.created_at');
+        expect(settlement).not.toContain('lower(v_preflight.target_instagram_id)');
+        expect(settlement).not.toContain('lower(v_policy.target_instagram_id)');
+        const release = source.slice(source.indexOf('CREATE OR REPLACE FUNCTION public.release_analysis_revenue_cost_operation_v2'));
+        expect(release).toContain('lower(v_preflight.target_instagram_id)');
+        expect(release).toContain('lower(v_policy.target_instagram_id)');
+    });
+
+    it('documents definite rejection and keeps terminal replays parent-state independent', () => {
+        expect(source).toContain('A provider `rejected` row is authoritative proof that no external run');
+        expect(source).toContain("UPDATE public.analysis_revenue_cost_operations SET status='released',started_at=NULL");
+        expect(source).toContain("WHEN manual_review_reason IN ('cost_overrun','cost_denied') THEN manual_review_reason");
+        expect(source).toContain("v_parent.manual_review_reason='ambiguous_external_call' AND v_unsettled=0 AND v_denied=0");
+    });
 });
