@@ -156,18 +156,32 @@ case "$command_line" in
     filter_enabled="false"
     for argument in "$@"; do
       [[ "$argument" != --secret=* ]] || exit 98
+      [[ "$argument" != '--format=value(name)' ]] || exit 98
       [[ "$argument" == --filter=state=ENABLED ]] && filter_enabled="true"
     done
     path="$(secret_path "$secret_id")"
     [[ -d "$path/versions" ]] || exit 1
+    fixture_file="$path/versions-list-history-json"
+    [[ "$filter_enabled" != "true" ]] \
+      || fixture_file="$path/versions-list-enabled-json"
+    if [[ -f "$fixture_file" ]]; then
+      cat "$fixture_file"
+      exit 0
+    fi
+    version_files=()
     for version_file in "$path"/versions/*.json; do
       [[ -f "$version_file" ]] || continue
-      if [[ "$filter_enabled" == "true" ]]; then
-        jq -r 'select(.state == "ENABLED") | .name' "$version_file"
-      else
-        jq -r '.name' "$version_file"
+      if [[ "$filter_enabled" == "true" ]] \
+        && [[ "$(jq -r '.state // ""' "$version_file")" != "ENABLED" ]]; then
+        continue
       fi
+      version_files+=("$version_file")
     done
+    if ((${#version_files[@]} == 0)); then
+      printf '[]\n'
+    else
+      jq -s '.' "${version_files[@]}"
+    fi
     ;;
   "secrets get-iam-policy"*)
     secret_id="$3"
@@ -480,6 +494,99 @@ pinned_env=(
   'ANALYSIS_V2_PREFLIGHT_IDENTITY_HMAC_SECRET_VERSION=1'
   'ANALYSIS_V2_GENDER_ROUTING_HMAC_SECRET_VERSION=1'
 )
+
+unpinned_supabase_env=()
+for item in "${pinned_env[@]}"; do
+  [[ "$item" == ANALYSIS_V2_SUPABASE_SERVICE_ROLE_SECRET_VERSION=* ]] \
+    || unpinned_supabase_env+=("$item")
+done
+
+discovery_one_state="$temp_dir/discovery-one-enabled-state"
+cp -R "$temp_dir/state" "$discovery_one_state"
+env -u ANALYSIS_V2_SUPABASE_SERVICE_ROLE_SECRET_VERSION \
+  "${secret_env[@]}" "${unpinned_supabase_env[@]}" \
+  "FAKE_GCLOUD_STATE_DIR=$discovery_one_state" \
+  bash "$script_dir/configure-analysis-v2-secrets.sh" --check \
+  >"$temp_dir/discovery-one-enabled.out"
+assert_contains "$temp_dir/discovery-one-enabled.out" \
+  "verified: discovered the single enabled numeric version for ai-baram-v2-supabase-service-role"
+
+discovery_multiple_state="$temp_dir/discovery-multiple-enabled-state"
+cp -R "$temp_dir/state" "$discovery_multiple_state"
+jq --arg name \
+  "projects/123456789012/secrets/ai-baram-v2-supabase-service-role/versions/2" \
+  '.name = $name | .state = "ENABLED"' \
+  "$discovery_multiple_state/secrets/ai-baram-v2-supabase-service-role/versions/1.json" \
+  >"$discovery_multiple_state/secrets/ai-baram-v2-supabase-service-role/versions/2.json"
+if env -u ANALYSIS_V2_SUPABASE_SERVICE_ROLE_SECRET_VERSION \
+  "${secret_env[@]}" "${unpinned_supabase_env[@]}" \
+  "FAKE_GCLOUD_STATE_DIR=$discovery_multiple_state" \
+  bash "$script_dir/configure-analysis-v2-secrets.sh" --check \
+  >"$temp_dir/discovery-multiple-enabled.out" 2>&1; then
+  fail "multiple enabled Secret Manager versions were silently auto-selected"
+fi
+assert_contains "$temp_dir/discovery-multiple-enabled.out" \
+  "ai-baram-v2-supabase-service-role requires an explicit numeric version pin because enabled-version discovery was not unique"
+
+for version_list_case in malformed short-name wrong-project wrong-secret non-numeric disabled-state; do
+  version_list_state="$temp_dir/discovery-invalid-$version_list_case-state"
+  cp -R "$temp_dir/state" "$version_list_state"
+  case "$version_list_case" in
+    malformed)
+      printf '{not-json\n' \
+        >"$version_list_state/secrets/ai-baram-v2-supabase-service-role/versions-list-enabled-json"
+      ;;
+    short-name)
+      printf '%s\n' '[{"name":"1","state":"ENABLED"}]' \
+        >"$version_list_state/secrets/ai-baram-v2-supabase-service-role/versions-list-enabled-json"
+      ;;
+    wrong-project)
+      printf '%s\n' '[{"name":"projects/999999999999/secrets/ai-baram-v2-supabase-service-role/versions/1","state":"ENABLED"}]' \
+        >"$version_list_state/secrets/ai-baram-v2-supabase-service-role/versions-list-enabled-json"
+      ;;
+    wrong-secret)
+      printf '%s\n' '[{"name":"projects/123456789012/secrets/wrong-secret/versions/1","state":"ENABLED"}]' \
+        >"$version_list_state/secrets/ai-baram-v2-supabase-service-role/versions-list-enabled-json"
+      ;;
+    non-numeric)
+      printf '%s\n' '[{"name":"projects/123456789012/secrets/ai-baram-v2-supabase-service-role/versions/latest","state":"ENABLED"}]' \
+        >"$version_list_state/secrets/ai-baram-v2-supabase-service-role/versions-list-enabled-json"
+      ;;
+    disabled-state)
+      printf '%s\n' '[{"name":"projects/123456789012/secrets/ai-baram-v2-supabase-service-role/versions/1","state":"DISABLED"}]' \
+        >"$version_list_state/secrets/ai-baram-v2-supabase-service-role/versions-list-enabled-json"
+      ;;
+  esac
+  if env -u ANALYSIS_V2_SUPABASE_SERVICE_ROLE_SECRET_VERSION \
+    "${secret_env[@]}" "${unpinned_supabase_env[@]}" \
+    "FAKE_GCLOUD_STATE_DIR=$version_list_state" \
+    bash "$script_dir/configure-analysis-v2-secrets.sh" --check \
+    >"$temp_dir/discovery-invalid-$version_list_case.out" 2>&1; then
+    fail "invalid $version_list_case Secret Manager version-list JSON was accepted"
+  fi
+  assert_contains "$temp_dir/discovery-invalid-$version_list_case.out" \
+    "enabled version discovery for ai-baram-v2-supabase-service-role returned invalid JSON or canonical version resource"
+done
+
+history_invalid_state="$temp_dir/discovery-invalid-history-state"
+cp -R "$temp_dir/state" "$history_invalid_state"
+rm -f "$history_invalid_state/secrets/ai-baram-v2-supabase-service-role/versions/1.json"
+printf '0\n' >"$history_invalid_state/secrets/ai-baram-v2-supabase-service-role/version-counter"
+printf '%s\n' '[]' \
+  >"$history_invalid_state/secrets/ai-baram-v2-supabase-service-role/versions-list-enabled-json"
+printf '%s\n' '{"name":"not-a-list"}' \
+  >"$history_invalid_state/secrets/ai-baram-v2-supabase-service-role/versions-list-history-json"
+if env -u ANALYSIS_V2_SUPABASE_SERVICE_ROLE_SECRET_VERSION \
+  "${secret_env[@]}" "${unpinned_supabase_env[@]}" \
+  "FAKE_GCLOUD_STATE_DIR=$history_invalid_state" \
+  bash "$script_dir/configure-analysis-v2-secrets.sh" \
+  >"$temp_dir/discovery-invalid-history.out" 2>&1; then
+  fail "invalid Secret Manager version-history JSON was accepted"
+fi
+assert_contains "$temp_dir/discovery-invalid-history.out" \
+  "version history for ai-baram-v2-supabase-service-role returned invalid JSON or canonical version resource"
+[[ ! -f "$history_invalid_state/secrets/ai-baram-v2-supabase-service-role/versions/1.json" ]] \
+  || fail "invalid version-history JSON unexpectedly resumed a secret version"
 
 gender_version_counter_before_rerun="$(<"$temp_dir/state/secrets/ai-baram-v2-gender-routing-hmac/version-counter")"
 cp "$temp_dir/state/secrets/ai-baram-v2-gender-routing-hmac/versions/1.json" \
