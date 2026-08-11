@@ -1,7 +1,15 @@
+import { createHash } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { PGlite, type Results } from '@electric-sql/pglite';
 import { pgcrypto } from '@electric-sql/pglite/contrib/pgcrypto';
 import { afterEach, describe, expect, it } from 'vitest';
+import { RevenueCostOperationStore } from './revenue-cost-operation-store';
+import {
+    createRevenueCostProviderRunSettlement,
+    type RevenueCostProviderRunSettlementClient,
+} from './revenue-cost-provider-run-reconciliation';
+import type { AnalysisV2ProviderUsageRevenueCostSettlement } from './v2-provider-lifecycle';
+import type { StoredAnalysisV2ProviderRun } from './v2-provider-run-store';
 
 const migration = readFileSync(new URL('../../../supabase/migrations/20260810100000_add_revenue_cost_operation_ledger.sql', import.meta.url), 'utf8');
 const providerSettlementQueueMigration = readFileSync(
@@ -243,6 +251,337 @@ async function expectRejectedReplay(db: PGlite, code: string, mutate: () => Prom
     await mutate();
     await expectError(query(db, 'SELECT public.begin_analysis_revenue_cost_ledger_v1($1::uuid)', [requestId]), code);
     await expect(replayTotals(db)).resolves.toEqual(before);
+}
+
+type PgliteRpcResult = {
+    data: unknown;
+    error: { code?: string; message?: string } | null;
+};
+
+type RevenueChildFilter = 'request_id' | 'owner_kind' | 'source_job_key'
+    | 'source_operation_key_hash' | 'source_attempt';
+
+interface PgliteRevenueChildQuery {
+    eq(column: RevenueChildFilter, value: string | number): PgliteRevenueChildQuery;
+    maybeSingle(): Promise<PgliteRpcResult>;
+}
+
+interface PgliteRevenueSettlementFixture {
+    settlement: AnalysisV2ProviderUsageRevenueCostSettlement;
+    rpcCalls: string[];
+}
+
+const SETTLE_V2_RPC = 'settle_analysis_revenue_cost_operation_v2';
+const MANUAL_REVIEW_RPC = 'mark_analysis_revenue_manual_review_v1';
+
+function pgliteRpcError(error: unknown): { code: string; message: string } {
+    const message = error instanceof Error ? error.message : String(error);
+    const revenueCode = message.match(/REVENUE_COST_[A-Z_]+/)?.[0];
+    return { code: 'P0001', message: revenueCode ?? message };
+}
+
+function rpcString(params: Record<string, unknown>, key: string): string {
+    const value = params[key];
+    if (typeof value !== 'string') throw new Error(`missing string RPC parameter: ${key}`);
+    return value;
+}
+
+function rpcNumber(params: Record<string, unknown>, key: string): number {
+    const value = params[key];
+    if (typeof value !== 'number') throw new Error(`missing numeric RPC parameter: ${key}`);
+    return value;
+}
+
+async function executePgliteRevenueRpc(
+    db: PGlite,
+    functionName: string,
+    params: Record<string, unknown>,
+): Promise<PgliteRpcResult> {
+    try {
+        switch (functionName) {
+            case SETTLE_V2_RPC: {
+                const result = await query<{ result: unknown }>(db, `
+                    SELECT public.settle_analysis_revenue_cost_operation_v2(
+                        $1::uuid, $2::text, $3::text, $4::text, $5::smallint
+                    ) AS result
+                `, [
+                    rpcString(params, 'p_request_id'),
+                    rpcString(params, 'p_job_key'),
+                    rpcString(params, 'p_source_kind'),
+                    rpcString(params, 'p_source_operation_key'),
+                    rpcNumber(params, 'p_source_attempt'),
+                ]);
+                return { data: result.rows[0]?.result ?? null, error: null };
+            }
+            case MANUAL_REVIEW_RPC: {
+                const result = await query<{ result: unknown }>(db, `
+                    SELECT public.mark_analysis_revenue_manual_review_v1(
+                        $1::uuid, $2::text
+                    ) AS result
+                `, [
+                    rpcString(params, 'p_request_id'),
+                    rpcString(params, 'p_reason_code'),
+                ]);
+                return { data: result.rows[0]?.result ?? null, error: null };
+            }
+            default:
+                return {
+                    data: null,
+                    error: {
+                        code: 'P0001',
+                        message: `unsupported PGlite revenue RPC: ${functionName}`,
+                    },
+                };
+        }
+    } catch (error) {
+        return { data: null, error: pgliteRpcError(error) };
+    }
+}
+
+function pgliteRevenueChildQuery(db: PGlite): PgliteRevenueChildQuery {
+    const filters = new Map<RevenueChildFilter, string | number>();
+    const builder: PgliteRevenueChildQuery = {
+        eq(column, value) {
+            filters.set(column, value);
+            return builder;
+        },
+        async maybeSingle() {
+            const request = filters.get('request_id');
+            const ownerKind = filters.get('owner_kind');
+            const job = filters.get('source_job_key');
+            const sourceHash = filters.get('source_operation_key_hash');
+            const attempt = filters.get('source_attempt');
+            if (
+                typeof request !== 'string'
+                || typeof ownerKind !== 'string'
+                || typeof job !== 'string'
+                || typeof sourceHash !== 'string'
+                || typeof attempt !== 'number'
+            ) {
+                return {
+                    data: null,
+                    error: { code: 'P0001', message: 'incomplete PGlite revenue child lookup' },
+                };
+            }
+            try {
+                // PGlite's fixture role cannot BYPASSRLS like Supabase's
+                // service-role admin client. The owner connection is the
+                // faithful local stand-in for this read-only admin lookup.
+                const result = await db.query<{ status: string }>(`
+                    SELECT status
+                      FROM public.analysis_revenue_cost_operations
+                     WHERE request_id=$1::uuid
+                       AND owner_kind=$2::text
+                       AND source_job_key=$3::text
+                       AND source_operation_key_hash=$4::text
+                       AND source_attempt=$5::smallint
+                `, [request, ownerKind, job, sourceHash, attempt]);
+                if (result.rows.length > 1) {
+                    return {
+                        data: null,
+                        error: { code: 'P0001', message: 'non-unique PGlite revenue child lookup' },
+                    };
+                }
+                return { data: result.rows[0] ?? null, error: null };
+            } catch (error) {
+                return { data: null, error: pgliteRpcError(error) };
+            }
+        },
+    };
+    return builder;
+}
+
+function createPgliteRevenueSettlementClient(db: PGlite): {
+    client: RevenueCostProviderRunSettlementClient;
+    rpcCalls: string[];
+} {
+    const rpcCalls: string[] = [];
+    const client: RevenueCostProviderRunSettlementClient = {
+        async rpc(functionName, params) {
+            rpcCalls.push(functionName);
+            return executePgliteRevenueRpc(db, functionName, params);
+        },
+        from(table) {
+            if (table !== 'analysis_revenue_cost_operations') {
+                throw new Error(`unexpected PGlite revenue table: ${table}`);
+            }
+            return {
+                select(columns) {
+                    if (columns !== 'status') {
+                        throw new Error(`unexpected PGlite revenue columns: ${columns}`);
+                    }
+                    return pgliteRevenueChildQuery(db);
+                },
+            };
+        },
+    };
+    return { client, rpcCalls };
+}
+
+function sourceOperationHash(operationKey: string): string {
+    return createHash('sha256').update(operationKey, 'utf8').digest('hex');
+}
+
+function createPgliteRevenueSettlementFixture(db: PGlite): PgliteRevenueSettlementFixture {
+    const { client, rpcCalls } = createPgliteRevenueSettlementClient(db);
+    const store = new RevenueCostOperationStore(client);
+    const settlement = createRevenueCostProviderRunSettlement(client, store);
+    return { settlement, rpcCalls };
+}
+
+async function providerRunFromDatabase(db: PGlite): Promise<StoredAnalysisV2ProviderRun> {
+    const result = await db.query<{
+        request_id: string;
+        job_key: string;
+        operation_key: string;
+        input_hash: string;
+        reservation_token: string;
+        logical_provider: string;
+        actor_id: string;
+        credential_slot: string;
+        max_charge_usd: number | string;
+        status: string;
+        run_id: string | null;
+        actual_usage_usd: number | string | null;
+        reserved_at: string;
+        run_started_at: string | null;
+        terminalized_at: string | null;
+        usage_reconciled_at: string | null;
+    }>(`
+        SELECT request_id,job_key,operation_key,input_hash,reservation_token,
+               logical_provider,actor_id,credential_slot,max_charge_usd,status,
+               run_id,actual_usage_usd,reserved_at,run_started_at,terminalized_at,
+               usage_reconciled_at
+          FROM public.analysis_v2_provider_runs
+         WHERE request_id=$1::uuid
+           AND job_key=$2::text
+           AND operation_key=$3::text
+    `, [requestId, jobKey, providerOperationKey]);
+    const row = result.rows[0];
+    if (!row) throw new Error('missing authoritative PGlite provider run');
+    return {
+        requestId: row.request_id,
+        jobKey: row.job_key,
+        operationKey: row.operation_key,
+        inputHash: row.input_hash,
+        reservationToken: row.reservation_token,
+        logicalProvider: row.logical_provider as StoredAnalysisV2ProviderRun['logicalProvider'],
+        actorId: row.actor_id,
+        credentialSlot: row.credential_slot as StoredAnalysisV2ProviderRun['credentialSlot'],
+        maxChargeUsd: Number(row.max_charge_usd),
+        status: row.status as StoredAnalysisV2ProviderRun['status'],
+        runId: row.run_id,
+        actualUsageUsd: row.actual_usage_usd === null ? null : Number(row.actual_usage_usd),
+        reservedAt: row.reserved_at,
+        runStartedAt: row.run_started_at,
+        terminalizedAt: row.terminalized_at,
+        usageReconciledAt: row.usage_reconciled_at,
+    };
+}
+
+function providerReserveSql(): string {
+    return `SELECT public.reserve_analysis_revenue_cost_operation_v2('${requestId}','${jobKey}','${claimToken}','${inputHash}','provider_run','${providerOperationKey}',0::smallint)`;
+}
+
+function providerStartSql(): string {
+    return `SELECT public.mark_analysis_revenue_cost_operation_started_v2('${requestId}','${jobKey}','${claimToken}','${inputHash}','provider_run','${providerOperationKey}',0::smallint)`;
+}
+
+function providerSettleSql(): string {
+    return `SELECT public.settle_analysis_revenue_cost_operation_v2('${requestId}','${jobKey}','provider_run','${providerOperationKey}',0::smallint)`;
+}
+
+async function setProviderRejected(db: PGlite): Promise<void> {
+    await db.exec(`
+        UPDATE public.analysis_v2_provider_runs
+           SET status='rejected',run_id=NULL,run_started_at=NULL,
+               terminalized_at=reserved_at + interval '2 seconds',actual_usage_usd=0,
+               usage_reconciled_at=reserved_at + interval '3 seconds',
+               updated_at=reserved_at + interval '4 seconds'
+         WHERE request_id='${requestId}' AND job_key='${jobKey}'
+           AND operation_key='${providerOperationKey}'
+    `);
+}
+
+async function setProviderSucceeded(db: PGlite): Promise<void> {
+    await db.exec(`
+        UPDATE public.analysis_v2_provider_runs
+           SET status='succeeded',run_id='run12345',
+               run_started_at=reserved_at + interval '1 second',
+               terminalized_at=reserved_at + interval '2 seconds',actual_usage_usd=0.1,
+               usage_reconciled_at=reserved_at + interval '3 seconds',
+               updated_at=reserved_at + interval '4 seconds'
+         WHERE request_id='${requestId}' AND job_key='${jobKey}'
+           AND operation_key='${providerOperationKey}'
+    `);
+}
+
+async function prepareExactReleasedProviderChild(db: PGlite): Promise<void> {
+    await seedLiveSources(db);
+    await query(db, providerReserveSql());
+    await setProviderRejected(db);
+    await query(db, providerSettleSql());
+}
+
+async function prepareExactSettledProviderChild(db: PGlite): Promise<void> {
+    await seedLiveSources(db);
+    await query(db, providerReserveSql());
+    await query(db, providerStartSql());
+    await setProviderSucceeded(db);
+    await query(db, providerSettleSql());
+}
+
+async function exactProviderCostState(db: PGlite): Promise<{
+    childStatus: string;
+    childStartedAt: string | null;
+    childTerminalAt: string | null;
+    childEconomicUsd: number | null;
+    ledgerStatus: string;
+    manualReviewReason: string | null;
+    reservedCostKrw: number;
+    economicActualKrw: number;
+}> {
+    const result = await db.query<{
+        child_status: string;
+        child_started_at: string | null;
+        child_terminal_at: string | null;
+        child_economic_usd: number | string | null;
+        ledger_status: string;
+        manual_review_reason: string | null;
+        reserved_cost_krw: number;
+        economic_actual_krw: number;
+    }>(`
+        SELECT child.status AS child_status,
+               child.started_at AS child_started_at,
+               child.terminal_at AS child_terminal_at,
+               child.economic_actual_usd AS child_economic_usd,
+               ledger.status AS ledger_status,
+               ledger.manual_review_reason,
+               ledger.reserved_cost_krw,
+               ledger.economic_actual_krw
+          FROM public.analysis_revenue_cost_operations AS child
+          JOIN public.analysis_revenue_run_ledgers AS ledger
+            ON ledger.request_id=child.request_id
+         WHERE child.request_id=$1::uuid
+           AND child.owner_kind='provider_run'
+           AND child.source_job_key=$2::text
+           AND child.source_operation_key_hash=$3::text
+           AND child.source_attempt=0::smallint
+    `, [requestId, jobKey, sourceOperationHash(providerOperationKey)]);
+    const row = result.rows[0];
+    if (!row) throw new Error('missing exact PGlite revenue child');
+    return {
+        childStatus: row.child_status,
+        childStartedAt: row.child_started_at,
+        childTerminalAt: row.child_terminal_at,
+        childEconomicUsd: row.child_economic_usd === null
+            ? null
+            : Number(row.child_economic_usd),
+        ledgerStatus: row.ledger_status,
+        manualReviewReason: row.manual_review_reason,
+        reservedCostKrw: row.reserved_cost_krw,
+        economicActualKrw: row.economic_actual_krw,
+    };
 }
 
 afterEach(async () => { await Promise.all(databases.splice(0).map(db => db.close())); });
@@ -1044,6 +1383,92 @@ describe('revenue cost operation ledger PGlite', () => {
         `)).resolves.toMatchObject({
             rows: [{ status: 'released', started_cleared: true }],
         });
+    });
+
+    it('fails closed when an exact released marker conflicts with incurred provider usage', async () => {
+        const db = await createDb();
+        await prepareExactReleasedProviderChild(db);
+        await setProviderSucceeded(db);
+        const fixture = createPgliteRevenueSettlementFixture(db);
+
+        await expect(
+            fixture.settlement.settleAfterUsageReconciliation(
+                await providerRunFromDatabase(db),
+                { knownRevenueCostOperation: true },
+            ),
+        ).rejects.toThrow('ANALYSIS_V2_REVENUE_COST_SETTLEMENT_MANUAL_REVIEW');
+
+        // The wrapper must reach the exact-child SQL proof instead of directly
+        // accepting the stale released marker, then fence the request.
+        expect(fixture.rpcCalls).toEqual([SETTLE_V2_RPC, MANUAL_REVIEW_RPC]);
+        await expect(exactProviderCostState(db)).resolves.toMatchObject({
+            childStatus: 'released',
+            childEconomicUsd: null,
+            ledgerStatus: 'manual_review',
+            manualReviewReason: 'ambiguous_external_call',
+            reservedCostKrw: 0,
+            economicActualKrw: 8,
+        });
+    });
+
+    it('fails closed when an exact settled marker conflicts with rejected provider truth', async () => {
+        const db = await createDb();
+        await prepareExactSettledProviderChild(db);
+        await setProviderRejected(db);
+        const fixture = createPgliteRevenueSettlementFixture(db);
+
+        await expect(
+            fixture.settlement.settleAfterUsageReconciliation(
+                await providerRunFromDatabase(db),
+                { knownRevenueCostOperation: true },
+            ),
+        ).rejects.toThrow('ANALYSIS_V2_REVENUE_COST_SETTLEMENT_MANUAL_REVIEW');
+
+        // Rejection proves no new provider run; it cannot silently overwrite
+        // a settled, incurred child that belongs to the opposite outcome.
+        expect(fixture.rpcCalls).toEqual([SETTLE_V2_RPC, MANUAL_REVIEW_RPC]);
+        await expect(exactProviderCostState(db)).resolves.toMatchObject({
+            childStatus: 'settled',
+            childEconomicUsd: 0.1,
+            ledgerStatus: 'manual_review',
+            manualReviewReason: 'ambiguous_external_call',
+            reservedCostKrw: 0,
+            economicActualKrw: 153,
+        });
+    });
+
+    it('replays an exact released child through settleV2 without mutation', async () => {
+        const db = await createDb();
+        await prepareExactReleasedProviderChild(db);
+        const before = await exactProviderCostState(db);
+        const fixture = createPgliteRevenueSettlementFixture(db);
+
+        await expect(
+            fixture.settlement.settleAfterUsageReconciliation(
+                await providerRunFromDatabase(db),
+                { knownRevenueCostOperation: true },
+            ),
+        ).resolves.toBeUndefined();
+
+        expect(fixture.rpcCalls).toEqual([SETTLE_V2_RPC]);
+        await expect(exactProviderCostState(db)).resolves.toEqual(before);
+    });
+
+    it('replays an exact settled child through settleV2 without mutation', async () => {
+        const db = await createDb();
+        await prepareExactSettledProviderChild(db);
+        const before = await exactProviderCostState(db);
+        const fixture = createPgliteRevenueSettlementFixture(db);
+
+        await expect(
+            fixture.settlement.settleAfterUsageReconciliation(
+                await providerRunFromDatabase(db),
+                { knownRevenueCostOperation: true },
+            ),
+        ).resolves.toBeUndefined();
+
+        expect(fixture.rpcCalls).toEqual([SETTLE_V2_RPC]);
+        await expect(exactProviderCostState(db)).resolves.toEqual(before);
     });
 
     it('has only the four-argument reconciliation RPC and foundation schema properties', async () => {
