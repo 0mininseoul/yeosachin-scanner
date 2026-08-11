@@ -4,9 +4,12 @@
 account-principal bridge. It never accepts account identifiers, credentials, or
 HMAC material as command-line arguments, and it emits aggregate-only JSON.
 
-The default mode is a read-only audit. It recomputes the legacy E2E candidate
-set in PostgreSQL, requires the frozen count, and timing-safely compares its
-HMAC with the separately approved Keychain value.
+The default mode is a read-only audit. While the rollout is pending, it
+recomputes the legacy E2E candidate set in PostgreSQL, requires the frozen
+count, and timing-safely compares its HMAC with the separately approved
+Keychain value. After activation with the matching command version, `audit`
+and `plan` return aggregate active state idempotently; they do not reclassify
+accounts or mutate the database.
 
 The candidate query treats the historical synthetic payment lineage as valid
 only when the order and accepted `payment.completed` webhook match exactly and
