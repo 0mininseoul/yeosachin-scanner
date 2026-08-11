@@ -634,43 +634,84 @@ describe('revenue cost operation ledger PGlite', () => {
         await expect(replayTotals(db)).resolves.toEqual(before);
     });
 
-    it('keeps a locally started child ambiguous for still-starting truth but releases it for definitive provider rejection', async () => {
-        const ambiguousDb = await createDb();
-        await seedLiveSources(ambiguousDb);
+    it('recovers an ambiguity-released child from authoritative rejection exactly once', async () => {
+        const db = await createDb();
+        await seedLiveSources(db);
         const reserve = `SELECT public.reserve_analysis_revenue_cost_operation_v2('${requestId}','${jobKey}','${claimToken}','${inputHash}','provider_run','${providerOperationKey}',0::smallint)`;
         const start = `SELECT public.mark_analysis_revenue_cost_operation_started_v2('${requestId}','${jobKey}','${claimToken}','${inputHash}','provider_run','${providerOperationKey}',0::smallint)`;
         const release = `SELECT public.release_analysis_revenue_cost_operation_v2('${requestId}','${jobKey}','${claimToken}','${inputHash}','provider_run','${providerOperationKey}',0::smallint) AS result`;
-        await query(ambiguousDb, reserve); await query(ambiguousDb, start);
-        await expect(query<{ result: { disposition: string } }>(ambiguousDb, release))
-            .resolves.toMatchObject({ rows: [{ result: { disposition: 'ambiguous' } }] });
+        const settle = `SELECT public.settle_analysis_revenue_cost_operation_v2('${requestId}','${jobKey}','provider_run','${providerOperationKey}',0::smallint) AS result`;
+        await query(db, reserve); await query(db, start); await query(db, release);
+        await expect(db.query(`SELECT reserved_cost_krw,status,manual_review_reason FROM public.analysis_revenue_run_ledgers WHERE request_id='${requestId}'`))
+            .resolves.toMatchObject({ rows: [{ reserved_cost_krw: 0, status: 'manual_review', manual_review_reason: 'ambiguous_external_call' }] });
+        await db.exec(`UPDATE public.analysis_v2_provider_runs SET status='rejected',actual_usage_usd=0,terminalized_at=reserved_at + interval '1 second',usage_reconciled_at=reserved_at + interval '2 seconds',updated_at=reserved_at + interval '3 seconds' WHERE request_id='${requestId}'`);
 
-        const rejectedDb = await createDb();
-        await seedLiveSources(rejectedDb);
-        await query(rejectedDb, reserve); await query(rejectedDb, start);
-        await rejectedDb.exec(`UPDATE public.analysis_v2_provider_runs SET status='rejected',actual_usage_usd=0,terminalized_at=reserved_at + interval '1 second',usage_reconciled_at=reserved_at + interval '2 seconds',updated_at=reserved_at + interval '3 seconds' WHERE request_id='${requestId}'`);
-        await expect(query<{ result: { disposition: string } }>(rejectedDb, release))
-            .resolves.toMatchObject({ rows: [{ result: { disposition: 'released' } }] });
+        await expect(query<{ result: { disposition: string; created: boolean; replayed: boolean } }>(db, settle))
+            .resolves.toMatchObject({ rows: [{ result: { disposition: 'released', created: true, replayed: false } }] });
+        const recovered = await replayTotals(db);
+        await expect(query<{ result: { disposition: string; replayed: boolean } }>(db, settle))
+            .resolves.toMatchObject({ rows: [{ result: { disposition: 'released', replayed: true } }] });
+        await expect(replayTotals(db)).resolves.toEqual(recovered);
+        await expect(db.query(`
+            SELECT child.status AS child_status,child.started_at IS NULL AS started_cleared,
+                   child.terminal_at=provider.usage_reconciled_at AS terminal_reconciled,
+                   child.economic_actual_usd IS NULL AS economic_usage_cleared,
+                   child.billed_actual_usd IS NULL AS billed_usage_cleared,
+                   parent.reserved_cost_krw,parent.economic_actual_krw,parent.actual_cost_krw,parent.billed_actual_krw,
+                   parent.status AS parent_status,parent.manual_review_reason
+              FROM public.analysis_revenue_cost_operations child
+              JOIN public.analysis_v2_provider_runs provider ON provider.request_id=child.request_id
+              JOIN public.analysis_revenue_run_ledgers parent ON parent.request_id=child.request_id
+             WHERE child.request_id='${requestId}' AND child.owner_kind='provider_run'
+        `)).resolves.toMatchObject({ rows: [{
+            child_status: 'released', started_cleared: true, terminal_reconciled: true,
+            economic_usage_cleared: true, billed_usage_cleared: true,
+            reserved_cost_krw: 0, economic_actual_krw: 8, actual_cost_krw: 8, billed_actual_krw: 0,
+            parent_status: 'running', manual_review_reason: null,
+        }] });
     });
 
-    it.each(['cost_overrun', 'cost_denied'] as const)('never downgrades %s during ambiguity or reserved-but-confirmed recovery', async (reason) => {
+    it('applies direct manual-review reason precedence without downgrading stronger causes', async () => {
         const db = await createDb();
         await seedLiveSources(db);
-        await db.exec(`INSERT INTO public.analysis_v2_provider_runs(request_id,job_key,operation_key,input_hash,job_claim_token,reservation_token,logical_provider,actor_id,credential_slot,max_charge_usd,status)
-            VALUES ('${requestId}','${jobKey}','${secondProviderOperationKey}','${providerInputHash}','${claimToken}','77777777-7777-4777-8777-777777777777','apify','actor-id','primary',0.2,'starting')`);
-        const reserve = (key: string) => `SELECT public.reserve_analysis_revenue_cost_operation_v2('${requestId}','${jobKey}','${claimToken}','${inputHash}','provider_run','${key}',0::smallint)`;
-        const start = (key: string) => `SELECT public.mark_analysis_revenue_cost_operation_started_v2('${requestId}','${jobKey}','${claimToken}','${inputHash}','provider_run','${key}',0::smallint)`;
-        const release = `SELECT public.release_analysis_revenue_cost_operation_v2('${requestId}','${jobKey}','${claimToken}','${inputHash}','provider_run','${providerOperationKey}',0::smallint)`;
-        const settleSecond = `SELECT public.settle_analysis_revenue_cost_operation_v2('${requestId}','${jobKey}','provider_run','${secondProviderOperationKey}',0::smallint)`;
-        await query(db, reserve(providerOperationKey)); await query(db, reserve(secondProviderOperationKey));
-        await query(db, start(providerOperationKey));
-        await db.exec(`UPDATE public.analysis_revenue_run_ledgers SET status='manual_review',manual_review_reason='${reason}' WHERE request_id='${requestId}'`);
-        await expect(query(db, release)).resolves.toBeDefined();
-        await expect(db.query(`SELECT manual_review_reason FROM public.analysis_revenue_run_ledgers WHERE request_id='${requestId}'`))
-            .resolves.toMatchObject({ rows: [{ manual_review_reason: reason }] });
-        await db.exec(`UPDATE public.analysis_v2_provider_runs SET status='succeeded',run_id='run12345',run_started_at=reserved_at + interval '1 second',terminalized_at=reserved_at + interval '2 seconds',actual_usage_usd=0.1,usage_reconciled_at=reserved_at + interval '3 seconds',updated_at=reserved_at + interval '4 seconds' WHERE request_id='${requestId}' AND operation_key='${secondProviderOperationKey}'`);
-        await query(db, settleSecond);
-        await expect(db.query(`SELECT manual_review_reason FROM public.analysis_revenue_run_ledgers WHERE request_id='${requestId}'`))
-            .resolves.toMatchObject({ rows: [{ manual_review_reason: reason }] });
+        for (const [existing, incoming, expected] of [
+            ['cost_overrun', 'routing_failure', 'cost_overrun'],
+            ['cost_overrun', 'ambiguous_external_call', 'cost_overrun'],
+            ['cost_denied', 'routing_failure', 'cost_denied'],
+            ['cost_denied', 'ambiguous_external_call', 'cost_denied'],
+            ['ambiguous_external_call', 'routing_failure', 'ambiguous_external_call'],
+            ['routing_failure', 'ambiguous_external_call', 'ambiguous_external_call'],
+            ['routing_failure', 'cost_overrun', 'cost_overrun'],
+        ]) {
+            await db.exec(`UPDATE public.analysis_revenue_run_ledgers SET status='manual_review',manual_review_reason='${existing}' WHERE request_id='${requestId}'`);
+            await expect(query<{ result: { disposition: string } }>(db, `SELECT public.mark_analysis_revenue_manual_review_v1('${requestId}','${incoming}') AS result`))
+                .resolves.toMatchObject({ rows: [{ result: { disposition: 'manual_review' } }] });
+            await expect(db.query(`SELECT status,manual_review_reason FROM public.analysis_revenue_run_ledgers WHERE request_id='${requestId}'`))
+                .resolves.toMatchObject({ rows: [{ status: 'manual_review', manual_review_reason: expected }] });
+        }
+    });
+
+    it('never downgrades cost-overrun or cost-denied during ambiguity or reserved-but-confirmed recovery', async () => {
+        for (const reason of ['cost_overrun', 'cost_denied'] as const) {
+            const db = await createDb();
+            await seedLiveSources(db);
+            await db.exec(`INSERT INTO public.analysis_v2_provider_runs(request_id,job_key,operation_key,input_hash,job_claim_token,reservation_token,logical_provider,actor_id,credential_slot,max_charge_usd,status)
+                VALUES ('${requestId}','${jobKey}','${secondProviderOperationKey}','${providerInputHash}','${claimToken}','77777777-7777-4777-8777-777777777777','apify','actor-id','primary',0.2,'starting')`);
+            const reserve = (key: string) => `SELECT public.reserve_analysis_revenue_cost_operation_v2('${requestId}','${jobKey}','${claimToken}','${inputHash}','provider_run','${key}',0::smallint)`;
+            const start = (key: string) => `SELECT public.mark_analysis_revenue_cost_operation_started_v2('${requestId}','${jobKey}','${claimToken}','${inputHash}','provider_run','${key}',0::smallint)`;
+            const release = `SELECT public.release_analysis_revenue_cost_operation_v2('${requestId}','${jobKey}','${claimToken}','${inputHash}','provider_run','${providerOperationKey}',0::smallint)`;
+            const settleSecond = `SELECT public.settle_analysis_revenue_cost_operation_v2('${requestId}','${jobKey}','provider_run','${secondProviderOperationKey}',0::smallint)`;
+            await query(db, reserve(providerOperationKey)); await query(db, reserve(secondProviderOperationKey));
+            await query(db, start(providerOperationKey));
+            await db.exec(`UPDATE public.analysis_revenue_run_ledgers SET status='manual_review',manual_review_reason='${reason}' WHERE request_id='${requestId}'`);
+            await expect(query(db, release)).resolves.toBeDefined();
+            await expect(db.query(`SELECT manual_review_reason FROM public.analysis_revenue_run_ledgers WHERE request_id='${requestId}'`))
+                .resolves.toMatchObject({ rows: [{ manual_review_reason: reason }] });
+            await db.exec(`UPDATE public.analysis_v2_provider_runs SET status='succeeded',run_id='run12345',run_started_at=reserved_at + interval '1 second',terminalized_at=reserved_at + interval '2 seconds',actual_usage_usd=0.1,usage_reconciled_at=reserved_at + interval '3 seconds',updated_at=reserved_at + interval '4 seconds' WHERE request_id='${requestId}' AND operation_key='${secondProviderOperationKey}'`);
+            await query(db, settleSecond);
+            await expect(db.query(`SELECT manual_review_reason FROM public.analysis_revenue_run_ledgers WHERE request_id='${requestId}'`))
+                .resolves.toMatchObject({ rows: [{ manual_review_reason: reason }] });
+        }
     });
 
     it('clears ambiguous_external_call only after every ambiguous child has authoritative terminal recovery', async () => {

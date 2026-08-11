@@ -234,7 +234,18 @@ CREATE OR REPLACE FUNCTION public.mark_analysis_revenue_manual_review_v1(p_reque
 RETURNS JSONB LANGUAGE plpgsql SECURITY DEFINER SET search_path = '' AS $$
 BEGIN
     IF p_reason_code NOT IN ('routing_failure', 'ambiguous_external_call', 'cost_overrun') THEN RAISE EXCEPTION USING MESSAGE = 'REVENUE_COST_MANUAL_REVIEW_INVALID'; END IF;
-    UPDATE public.analysis_revenue_run_ledgers SET status = 'manual_review', manual_review_reason = p_reason_code WHERE request_id = p_request_id;
+    -- Review causes are monotonic: cost_overrun > cost_denied >
+    -- ambiguous_external_call > routing_failure.  This RPC can introduce the
+    -- three non-denial reasons but must never erase stronger cost evidence.
+    UPDATE public.analysis_revenue_run_ledgers
+       SET status = 'manual_review', manual_review_reason = CASE
+           WHEN manual_review_reason = 'cost_overrun' THEN 'cost_overrun'
+           WHEN manual_review_reason = 'cost_denied' THEN 'cost_denied'
+           WHEN p_reason_code = 'cost_overrun' THEN 'cost_overrun'
+           WHEN manual_review_reason = 'ambiguous_external_call' THEN 'ambiguous_external_call'
+           ELSE p_reason_code
+       END
+     WHERE request_id = p_request_id;
     IF NOT FOUND THEN RAISE EXCEPTION USING MESSAGE = 'REVENUE_COST_OPERATION_FENCE'; END IF;
     RETURN pg_catalog.jsonb_build_object('disposition', 'manual_review', 'created', FALSE, 'replayed', FALSE);
 END; $$;
@@ -627,10 +638,20 @@ BEGIN
            AND v_child.economic_actual_krw IS NULL AND v_child.billed_actual_krw IS NULL THEN
             RETURN pg_catalog.jsonb_build_object('disposition','released','created',FALSE,'replayed',TRUE,'operationId',v_child.id);
         END IF;
-        IF v_child.status NOT IN ('reserved','started') OR v_child.terminal_at IS NOT NULL
-           OR v_child.economic_actual_usd IS NOT NULL OR v_child.billed_actual_usd IS NOT NULL THEN RAISE EXCEPTION USING MESSAGE='REVENUE_COST_OPERATION_FENCE'; END IF;
+        IF v_child.status NOT IN ('reserved','started','ambiguous')
+           OR (v_child.status IN ('reserved','started') AND v_child.terminal_at IS NOT NULL)
+           OR (v_child.status = 'ambiguous' AND (v_child.started_at IS NULL OR v_child.terminal_at IS NULL))
+           OR v_child.economic_actual_usd IS NOT NULL OR v_child.billed_actual_usd IS NOT NULL
+           OR v_child.economic_actual_krw IS NOT NULL OR v_child.billed_actual_krw IS NOT NULL THEN RAISE EXCEPTION USING MESSAGE='REVENUE_COST_OPERATION_FENCE'; END IF;
         UPDATE public.analysis_revenue_cost_operations SET status='released',started_at=NULL,terminal_at=v_provider.usage_reconciled_at WHERE id=v_child.id;
-        UPDATE public.analysis_revenue_run_ledgers SET reserved_cost_krw=reserved_cost_krw-v_child.reserved_krw WHERE request_id=p_request_id;
+        UPDATE public.analysis_revenue_run_ledgers
+           SET reserved_cost_krw=reserved_cost_krw-CASE WHEN v_child.status IN ('reserved','started') THEN v_child.reserved_krw ELSE 0 END
+         WHERE request_id=p_request_id;
+        SELECT pg_catalog.count(*)::INTEGER, pg_catalog.count(*) FILTER (WHERE status='denied')::INTEGER INTO v_unsettled,v_denied
+          FROM public.analysis_revenue_cost_operations WHERE request_id=p_request_id AND status NOT IN ('settled','released');
+        IF v_parent.status='manual_review' AND v_parent.manual_review_reason='ambiguous_external_call' AND v_unsettled=0 AND v_denied=0 THEN
+            UPDATE public.analysis_revenue_run_ledgers SET status='running',manual_review_reason=NULL WHERE request_id=p_request_id;
+        END IF;
         RETURN pg_catalog.jsonb_build_object('disposition','released','created',TRUE,'replayed',FALSE,'operationId',v_child.id);
     END IF;
     IF v_provider.status NOT IN ('succeeded','failed','aborted','timed_out') OR v_provider.run_id IS NULL OR v_provider.run_started_at IS NULL
