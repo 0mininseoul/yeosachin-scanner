@@ -482,6 +482,7 @@ async function runActor(
                 'SCRAPING_SCHEMA_ERROR: Apify interaction run has no defaultDatasetId.'
             );
         }
+        await context?.onProviderDatasetResolved?.(run.defaultDatasetId);
         return readBoundedDataset(client, run.defaultDatasetId, totalLimit, config, context);
     });
 }

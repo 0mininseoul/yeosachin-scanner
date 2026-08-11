@@ -750,6 +750,7 @@ export async function runApifyRelationshipActor(
         if (!run.defaultDatasetId) {
             throw new Error('SCRAPING_SCHEMA_ERROR: Apify run에 defaultDatasetId가 없습니다.');
         }
+        await context?.onProviderDatasetResolved?.(run.defaultDatasetId);
 
         const items: Array<Record<string, unknown>> = [];
         const dataset = client.dataset(run.defaultDatasetId);

@@ -15,6 +15,7 @@ const MAX_URL_LENGTH = 8_192;
 const JOB_KEY_PATTERN = /^[a-z0-9][a-z0-9:._-]{0,159}$/;
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const SHA256_PATTERN = /^[0-9a-f]{64}$/;
+const PROVIDER_OPERATION_KEY_PATTERN = /^(target-profile|profile-fallback|profile-repair|relationship-followers|relationship-following|target-likers|target-comments|candidate-likers):[a-f0-9]{64}$/;
 
 const usernameSchema = z.string()
     .trim()
@@ -200,6 +201,12 @@ export interface AnalysisV2ProfileFetchCheckpointStore {
         requestedUsernames: readonly string[];
         results: readonly AnalysisV2ProfileAttemptResultInput[];
     }): Promise<AnalysisV2ProfileFetchResume>;
+    checkpointFreshApify(input: AnalysisV2ProfileFetchCheckpointIdentity & {
+        requestedUsernames: readonly string[];
+        results: readonly AnalysisV2ProfileAttemptResultInput[];
+        operationKey: string;
+        providerInputHash: string;
+    }): Promise<AnalysisV2ProfileFetchResume>;
     checkpointFallback(input: AnalysisV2ProfileFetchCheckpointIdentity & {
         results: readonly AnalysisV2ProfileAttemptResultInput[];
     }): Promise<AnalysisV2ProfileFetchResume>;
@@ -229,6 +236,7 @@ export const ANALYSIS_V2_PROFILE_FETCH_DATABASE_NAMES = Object.freeze({
     batchTable: 'analysis_v2_profile_fetch_batches',
     outcomeTable: 'analysis_v2_profile_fetch_outcomes',
     primaryRpc: 'checkpoint_analysis_v2_profile_primary',
+    freshApifyRpc: 'checkpoint_analysis_v2_profile_fresh_apify_v1',
     fallbackRpc: 'checkpoint_analysis_v2_profile_fallback',
     repairRpc: 'checkpoint_analysis_v2_profile_repair',
     loadRpc: 'load_analysis_v2_profile_fetch_checkpoint',
@@ -389,8 +397,10 @@ function validatePrimaryResumeSet(value: AnalysisV2ProfileResumeSets): void {
     if (!sameOrderedSet(summary.unresolvedUsernames, value.frozenUnresolvedUsernames)) {
         throw new Error('Frozen unresolved usernames do not match primary outcomes.');
     }
-    if (value.primaryResults.some(result => result.outcome.source === 'apify')) {
-        throw new Error('Primary checkpoint contains a paid fallback outcome.');
+    const primarySources = new Set(value.primaryResults.map(result => result.outcome.source));
+    const directApify = primarySources.size === 1 && primarySources.has('apify');
+    if (!directApify && value.primaryResults.some(result => result.outcome.source === 'apify')) {
+        throw new Error('Primary checkpoint mixes a paid fresh source with legacy evidence.');
     }
 }
 
@@ -474,6 +484,7 @@ function safeRpcCode(error: RpcError): string {
 function throwRpcError(error: RpcError, operation: string): never {
     const knownConflict = [
         'ANALYSIS_V2_PROFILE_PRIMARY_CONFLICT',
+        'ANALYSIS_V2_PROFILE_FRESH_APIFY_CONFLICT',
         'ANALYSIS_V2_PROFILE_FALLBACK_CONFLICT',
         'ANALYSIS_V2_PROFILE_REPAIR_CONFLICT',
         'ANALYSIS_V2_PROFILE_CHECKPOINT_INVALID',
@@ -538,6 +549,39 @@ export function createAnalysisV2ProfileFetchCheckpointStore(
             );
             if (error) throwRpcError(error, 'primary checkpoint');
             return parseResume(data, 'primary checkpoint');
+        },
+
+        async checkpointFreshApify(input) {
+            validateIdentity(input);
+            if (
+                !PROVIDER_OPERATION_KEY_PATTERN.test(input.operationKey)
+                || !SHA256_PATTERN.test(input.providerInputHash)
+            ) {
+                throw new Error(
+                    'ANALYSIS_V2_PROFILE_CHECKPOINT_ERROR: invalid fresh Apify source identity.'
+                );
+            }
+            const requestedUsernames = canonicalRequestedUsernames(input.requestedUsernames);
+            const results = canonicalResults(
+                requestedUsernames,
+                input.results,
+                ['apify']
+            );
+            const { data, error } = await client.rpc(
+                ANALYSIS_V2_PROFILE_FETCH_DATABASE_NAMES.freshApifyRpc,
+                {
+                    p_request_id: input.requestId,
+                    p_job_key: input.jobKey,
+                    p_claim_token: input.claimToken,
+                    p_job_input_hash: input.jobInputHash,
+                    p_requested_usernames: requestedUsernames,
+                    p_outcomes: databaseOutcomes(results),
+                    p_operation_key: input.operationKey,
+                    p_provider_input_hash: input.providerInputHash,
+                }
+            );
+            if (error) throwRpcError(error, 'fresh Apify checkpoint');
+            return parseResume(data, 'fresh Apify checkpoint');
         },
 
         async checkpointFallback(input) {

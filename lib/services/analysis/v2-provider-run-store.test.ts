@@ -16,6 +16,7 @@ import {
     type AnalysisV2ProviderRunSupabaseClient,
 } from './v2-provider-run-store';
 import { RevenueCostOperationStore } from './revenue-cost-operation-store';
+import type { FreshProvenanceStore } from './fresh-provenance-store';
 
 // gitleaks:allow -- deterministic UUID fixtures
 const requestId = '11111111-1111-4111-8111-111111111111';
@@ -418,6 +419,140 @@ describe('analysis V2 provider run store', () => {
             p_source_operation_key: operationKey,
             p_source_attempt: 0,
         });
+    });
+
+    it('proves fresh source admission before a cost-marked Actor start, then records only checkpointed run and dataset evidence', async () => {
+        const { rpc, client } = clientWithRpc();
+        const order: string[] = [];
+        rpc.mockImplementation((name, params) => {
+            order.push(`rpc:${String(name)}`);
+            switch (name) {
+                case ANALYSIS_V2_PROVIDER_RUN_DATABASE_NAMES.loadRpc:
+                    return Promise.resolve({ data: null, error: null });
+                case ANALYSIS_V2_PROVIDER_RUN_DATABASE_NAMES.reserveRpc:
+                    return createdReservationFromParams(params);
+                case ANALYSIS_V2_PROVIDER_RUN_DATABASE_NAMES.startedRpc:
+                    return Promise.resolve({
+                        data: storedRow('running', {
+                            reservationToken: params.p_reservation_token,
+                        }),
+                        error: null,
+                    });
+                case 'begin_analysis_revenue_cost_ledger_v1':
+                    return Promise.resolve({ data: { disposition: 'begun', created: true, replayed: false }, error: null });
+                case 'reserve_analysis_revenue_cost_operation_v2':
+                    return Promise.resolve({ data: { disposition: 'accepted', created: true, replayed: false }, error: null });
+                case 'mark_analysis_revenue_cost_operation_started_v2':
+                    return Promise.resolve({ data: { disposition: 'started', created: true, replayed: false }, error: null });
+                default:
+                    throw new Error(`unexpected RPC ${String(name)}`);
+            }
+        });
+        const fresh = {
+            assertProviderAdmission: vi.fn(async () => {
+                order.push('fresh:admit');
+                return { disposition: 'admitted', created: false, replayed: true };
+            }),
+            recordProviderRun: vi.fn(async () => {
+                order.push('fresh:record');
+                return { disposition: 'recorded', created: true, replayed: false };
+            }),
+            bindProviderDataset: vi.fn(async () => {
+                order.push('fresh:dataset');
+                return { disposition: 'bound', created: true, replayed: false };
+            }),
+        } as unknown as FreshProvenanceStore;
+        const store = createAnalysisV2ProviderRunStore(client);
+        const binding = await store.bindAdapterCheckpoint(identity, {
+            revenueCostOperationStore: new RevenueCostOperationStore({ rpc }),
+            freshProvenanceStore: fresh,
+            jobInputHash: inputHash,
+        });
+
+        await binding.checkpoint.onBeforeRunStart?.({
+            logicalProvider: 'apify', actorId: identity.actorId,
+            credentialSlot: 'primary', maxChargeUsd: 0.40205,
+        });
+        expect(order).toEqual([
+            `rpc:${ANALYSIS_V2_PROVIDER_RUN_DATABASE_NAMES.loadRpc}`,
+            `rpc:${ANALYSIS_V2_PROVIDER_RUN_DATABASE_NAMES.reserveRpc}`,
+            'fresh:admit',
+            'rpc:begin_analysis_revenue_cost_ledger_v1',
+            'rpc:reserve_analysis_revenue_cost_operation_v2',
+            'rpc:mark_analysis_revenue_cost_operation_started_v2',
+        ]);
+
+        await binding.checkpoint.onRunStarted?.(runId);
+        await binding.checkpoint.onProviderDatasetResolved?.('FreshDataset1234');
+
+        expect(order.slice(-3)).toEqual([
+            `rpc:${ANALYSIS_V2_PROVIDER_RUN_DATABASE_NAMES.startedRpc}`,
+            'fresh:record',
+            'fresh:dataset',
+        ]);
+        expect(fresh.recordProviderRun).toHaveBeenCalledWith(expect.objectContaining({
+            jobInputHash: inputHash,
+            runId,
+        }));
+        expect(fresh.bindProviderDataset).toHaveBeenCalledWith(expect.objectContaining({
+            runId,
+            datasetId: 'FreshDataset1234',
+        }));
+    });
+
+    it('fences a checkpointed paid run to manual review when fresh evidence persistence fails after confirmation', async () => {
+        const { rpc, client } = clientWithRpc();
+        rpc.mockImplementation((name, params) => {
+            switch (name) {
+                case ANALYSIS_V2_PROVIDER_RUN_DATABASE_NAMES.loadRpc:
+                    return Promise.resolve({ data: null, error: null });
+                case ANALYSIS_V2_PROVIDER_RUN_DATABASE_NAMES.reserveRpc:
+                    return createdReservationFromParams(params);
+                case ANALYSIS_V2_PROVIDER_RUN_DATABASE_NAMES.startedRpc:
+                    return Promise.resolve({
+                        data: storedRow('running', { reservationToken: params.p_reservation_token }),
+                        error: null,
+                    });
+                case 'begin_analysis_revenue_cost_ledger_v1':
+                    return Promise.resolve({ data: { disposition: 'begun', created: true, replayed: false }, error: null });
+                case 'reserve_analysis_revenue_cost_operation_v2':
+                    return Promise.resolve({ data: { disposition: 'accepted', created: true, replayed: false }, error: null });
+                case 'mark_analysis_revenue_cost_operation_started_v2':
+                    return Promise.resolve({ data: { disposition: 'started', created: true, replayed: false }, error: null });
+                case 'mark_analysis_revenue_manual_review_v1':
+                    return Promise.resolve({ data: { disposition: 'manual_review', created: true, replayed: false }, error: null });
+                default:
+                    throw new Error(`unexpected RPC ${String(name)}`);
+            }
+        });
+        const fresh = {
+            assertProviderAdmission: vi.fn(async () => ({ disposition: 'admitted', created: false, replayed: true })),
+            recordProviderRun: vi.fn(async () => {
+                throw new Error('FRESH_EVIDENCE_WRITE_FAILED');
+            }),
+            bindProviderDataset: vi.fn(),
+        } as unknown as FreshProvenanceStore;
+        const store = createAnalysisV2ProviderRunStore(client);
+        const binding = await store.bindAdapterCheckpoint(identity, {
+            revenueCostOperationStore: new RevenueCostOperationStore({ rpc }),
+            freshProvenanceStore: fresh,
+            jobInputHash: inputHash,
+        });
+
+        await binding.checkpoint.onBeforeRunStart?.({
+            logicalProvider: 'apify', actorId: identity.actorId,
+            credentialSlot: 'primary', maxChargeUsd: 0.40205,
+        });
+        await expect(binding.checkpoint.onRunStarted?.(runId))
+            .rejects.toThrow('FRESH_EVIDENCE_WRITE_FAILED');
+
+        expect(rpc.mock.calls.map(([name]) => name)).toEqual(expect.arrayContaining([
+            ANALYSIS_V2_PROVIDER_RUN_DATABASE_NAMES.startedRpc,
+            'mark_analysis_revenue_manual_review_v1',
+        ]));
+        expect(rpc.mock.calls.map(([name]) => name)).not.toContain(
+            'release_analysis_revenue_cost_operation_v2'
+        );
     });
 
     it('releases the already-marked revenue operation only after a definite provider start rejection', async () => {

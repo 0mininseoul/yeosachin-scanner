@@ -33,6 +33,7 @@ import {
     type ProfilesBatchV2AttemptSnapshot,
 } from '@/lib/services/instagram/scraper';
 import {
+    assertAnalysisV2FreshProvenanceConfiguration,
     getAnalysisV2PaidCollectionProvider,
 } from '@/lib/services/instagram/config';
 import type { InstagramFollower, InstagramPost, InstagramProfile } from '@/lib/types/instagram';
@@ -131,6 +132,10 @@ import {
     type RevenueGenderRoutingModelCandidate,
 } from './revenue-routing-runtime';
 import { RevenueCostOperationStore } from './revenue-cost-operation-store';
+import {
+    analysisRevenueFreshProvenanceStore,
+    type FreshProvenanceStore,
+} from './fresh-provenance-store';
 
 const PROFILE_ACTOR_ID = 'apify/instagram-profile-scraper';
 const analysisV2RevenueCostOperationStore = new RevenueCostOperationStore(supabaseAdmin);
@@ -149,6 +154,7 @@ export interface AnalysisV2CollectionExecutorDependencies {
     profileCheckpointStore?: AnalysisV2ProfileFetchCheckpointStore;
     providerRunStore?: AnalysisV2ProviderRunStore;
     revenueCostOperationStore?: RevenueCostOperationStore;
+    freshProvenanceStore?: FreshProvenanceStore;
     providerRunAdoptionStore?: AnalysisV2ProviderRunAdoptionStore;
     selfHostedAuthRunStore?: AnalysisV2SelfHostedAuthRunStore;
     targetProfileReuseStore?: AnalysisV2TargetProfileReuseStore;
@@ -170,6 +176,8 @@ interface ResolvedDependencies {
     profileCheckpointStore: AnalysisV2ProfileFetchCheckpointStore;
     providerRunStore: AnalysisV2ProviderRunStore;
     revenueCostOperationStore: RevenueCostOperationStore;
+    /** Deliberately absent for normal/Plus production requests. */
+    freshProvenanceStore?: FreshProvenanceStore;
     providerRunAdoptionStore: AnalysisV2ProviderRunAdoptionStore | null;
     selfHostedAuthRunStore: AnalysisV2SelfHostedAuthRunStore;
     targetProfileReuseStore: AnalysisV2TargetProfileReuseStore;
@@ -194,6 +202,7 @@ function deps(input: AnalysisV2CollectionExecutorDependencies): ResolvedDependen
         providerRunStore: input.providerRunStore ?? analysisV2ProviderRunStore,
         revenueCostOperationStore:
             input.revenueCostOperationStore ?? analysisV2RevenueCostOperationStore,
+        freshProvenanceStore: input.freshProvenanceStore,
         providerRunAdoptionStore: input.providerRunAdoptionStore
             ?? (input.providerRunStore ? null : analysisV2ProviderRunAdoptionStore),
         selfHostedAuthRunStore:
@@ -281,6 +290,14 @@ function isRevenueGenderRoutingRequest(
         && usesRevenueGenderRouting({ accessMode: request.accessMode, planId: request.planId });
 }
 
+function assertFreshRevenueCollectionRuntime(
+    request: AnalysisV2CollectionRequestContext,
+    dependencies: ResolvedDependencies
+): void {
+    if (!isRevenueCostLedgerRequest(request)) return;
+    assertAnalysisV2FreshProvenanceConfiguration(dependencies.env);
+}
+
 function revenueGenderRoutingSecret(dependencies: ResolvedDependencies): string {
     const secret = dependencies.env.ANALYSIS_V2_GENDER_ROUTING_HMAC_SECRET;
     if (!secret || secret.length < 32) {
@@ -356,6 +373,10 @@ async function bindApifyRun(input: {
     actorId: string;
     maxChargeUsd: number;
 }) {
+    const freshRevenueRequest = isRevenueCostLedgerRequest(input.request);
+    if (freshRevenueRequest) {
+        assertFreshRevenueCollectionRuntime(input.request, input.dependencies);
+    }
     const providerBinding = resolveAnalysisV2ApifyProviderBinding({
         accessMode: input.request.accessMode,
         policy: input.request.providerExecutionPolicy,
@@ -374,14 +395,21 @@ async function bindApifyRun(input: {
         credentialSlot: providerBinding.credentialSlot,
         maxChargeUsd: input.maxChargeUsd,
     } as const;
+    if (freshRevenueRequest) {
+        // Fresh provenance rejects any adoption before it can select an external
+        // Dataset. The only resumable path is the exact durable provider row.
+        const fallback = await input.dependencies.providerRunStore.bindAdapterCheckpoint(identity, {
+            revenueCostOperationStore: input.dependencies.revenueCostOperationStore,
+            freshProvenanceStore: input.dependencies.freshProvenanceStore
+                ?? analysisRevenueFreshProvenanceStore,
+            jobInputHash: input.claim.jobInputHash,
+        });
+        return { ...fallback, evidenceRun: null };
+    }
     const binding = await bindAdoptedProviderRunOrFallback({
         adoptionStore: input.dependencies.providerRunAdoptionStore,
         identity,
-        fallback: () => isRevenueCostLedgerRequest(input.request)
-            ? input.dependencies.providerRunStore.bindAdapterCheckpoint(identity, {
-                revenueCostOperationStore: input.dependencies.revenueCostOperationStore,
-            })
-            : input.dependencies.providerRunStore.bindAdapterCheckpoint(identity),
+        fallback: () => input.dependencies.providerRunStore.bindAdapterCheckpoint(identity),
     });
     if (binding.adopted) {
         return {
@@ -478,6 +506,7 @@ export function createAnalysisV2RelationshipsExecutor(
     return async (context) => {
         const claim = collectionClaim(context);
         const request = await dependencies.requestContextStore.load(claim);
+        assertFreshRevenueCollectionRuntime(request, dependencies);
         assertScopeMatchesState(request, context.state);
         const collectionProvider = collectionProviderForRequest(request, dependencies);
 
@@ -872,6 +901,99 @@ function selfHostedAuthProfileIdentity(
     });
 }
 
+function isFreshApifyProfileResume(
+    resume: AnalysisV2ProfileFetchResume,
+): boolean {
+    return resume.primaryResults.length > 0
+        && resume.primaryResults.every(result => result.outcome.source === 'apify')
+        && resume.fallbackResults.length === 0
+        && resume.fallbackCapturedAt === null
+        && resume.repairResults.length === 0
+        && resume.repairCapturedAt === null;
+}
+
+async function durableFreshApifyProfiles(input: {
+    dependencies: ResolvedDependencies;
+    claim: AnalysisV2CollectionJobClaim;
+    request: AnalysisV2CollectionRequestContext;
+    usernames: readonly string[];
+    onProfileStart?: (username: string) => Promise<void>;
+    onProfileResolved?: (profile: InstagramProfile) => Promise<void>;
+}): Promise<AnalysisV2ProfileFetchResume> {
+    const {
+        dependencies,
+        claim,
+        request,
+        usernames,
+        onProfileStart,
+        onProfileResolved,
+    } = input;
+    assertFreshRevenueCollectionRuntime(request, dependencies);
+    const identity = profileIdentity(claim);
+    const canonicalInput = profileFallbackIdentity(usernames);
+    const operationKey = createAnalysisV2ProviderOperationKey(
+        'profile-fallback',
+        canonicalInput,
+    );
+    const providerInputHash = createAnalysisV2ProviderInputHash(canonicalInput);
+    // The exact provider row is the only permitted retained state. This bind
+    // reasserts its source lineage and will never select target reuse, a cache,
+    // or an adopted Dataset for the trusted cohort.
+    const binding = await bindApifyRun({
+        dependencies,
+        claim,
+        request,
+        operation: 'profile-fallback',
+        operationKey,
+        inputHash: providerInputHash,
+        actorId: PROFILE_ACTOR_ID,
+        maxChargeUsd: profileMaximumCharge(usernames.length, dependencies.env),
+    });
+    const resume = await dependencies.profileCheckpointStore.load(identity);
+    if (resume) {
+        if (
+            !isFreshApifyProfileResume(resume)
+            || binding.stored === null
+            || !binding.checkpoint.resumeRunId
+        ) {
+            throw new Error('FRESH_PROVENANCE_PROFILE_CHECKPOINT_UNPROVEN');
+        }
+        return resume;
+    }
+
+    try {
+        await dependencies.getProfilesBatchV2(usernames, {
+            requestId: claim.requestId,
+            freshApifyOnly: true,
+            allowApifyFallback: false,
+            providerRun: binding.checkpoint,
+            onProfileStart,
+            onProfileResolved,
+            persistAttemptOutcomes: async (snapshot: ProfilesBatchV2AttemptSnapshot) => {
+                if (snapshot.attempt !== 'fresh_apify' || snapshot.source !== 'apify') {
+                    throw new Error('FRESH_PROVENANCE_PROFILE_ATTEMPT_DRIFT');
+                }
+                await dependencies.profileCheckpointStore.checkpointFreshApify({
+                    ...identity,
+                    requestedUsernames: snapshot.requestedUsernames,
+                    results: checkpointAttemptResults(snapshot.results),
+                    operationKey,
+                    providerInputHash,
+                });
+            },
+        });
+    } catch (error) {
+        if (binding.evidenceRun) throw adoptionDatasetUnavailable(error);
+        throw error;
+    }
+
+    const stored = await dependencies.profileCheckpointStore.load(identity);
+    if (!stored || !isFreshApifyProfileResume(stored)) {
+        throw new Error('FRESH_PROVENANCE_PROFILE_CHECKPOINT_MISSING');
+    }
+    return stored;
+}
+
 async function durableProfiles(input: {
     dependencies: ResolvedDependencies;
     claim: AnalysisV2CollectionJobClaim;
@@ -888,6 +1010,9 @@ async function durableProfiles(input: {
         onProfileStart,
         onProfileResolved,
     } = input;
+    if (isRevenueCostLedgerRequest(request)) {
+        return durableFreshApifyProfiles(input);
+    }
     const allowApifyFallback = isBetaFreePoolRequest(request)
         || collectionProviderForRequest(request, dependencies) === 'apify';
     const authenticatedProfiles = !isBetaFreePoolRequest(request)
@@ -904,7 +1029,10 @@ async function durableProfiles(input: {
     let adoptedFallback = false;
     const bindFallback = async (unresolved: readonly string[]) => {
         if (unresolved.length === 0) return;
-        if (claim.jobKey === 'track:target-evidence:collect') {
+        if (
+            !isRevenueCostLedgerRequest(request)
+            && claim.jobKey === 'track:target-evidence:collect'
+        ) {
             if (
                 unresolved.length !== 1
                 || unresolved[0] !== request.targetUsername
@@ -1024,6 +1152,11 @@ async function repairProfileBatch(input: {
     // made entirely of settled-unavailable accounts yields an empty set and no run.
     const repairUsernames = deriveRepairUsernames(resume);
     if (repairUsernames.length === 0) return resume;
+    if (isRevenueCostLedgerRequest(request)) {
+        // The applied provider-cost SQL intentionally has no authorized fresh
+        // profile-repair source mapping. Do not widen it implicitly here.
+        throw new Error('FRESH_PROVENANCE_PROFILE_REPAIR_UNAUTHORIZED');
+    }
 
     const identity = profileIdentity(claim);
     const canonicalInput = profileRepairIdentity(repairUsernames);
@@ -1318,6 +1451,7 @@ export function createAnalysisV2TargetEvidenceExecutor(
     return async (context) => {
         const claim = collectionClaim(context);
         const request = await dependencies.requestContextStore.load(claim);
+        assertFreshRevenueCollectionRuntime(request, dependencies);
         assertScopeMatchesState(request, context.state);
         const collectionProvider = collectionProviderForRequest(request, dependencies);
         const targetResume = await durableProfiles({
@@ -1450,6 +1584,7 @@ export function createAnalysisV2ProfileFetchExecutor(
     return async (context) => {
         const claim = collectionClaim(context);
         const request = await dependencies.requestContextStore.load(claim);
+        assertFreshRevenueCollectionRuntime(request, dependencies);
         assertScopeMatchesState(request, context.state);
         if (context.job.batch === null || context.job.batch < 0) {
             throw new Error('ANALYSIS_V2_PROFILE_BATCH_MISMATCH');

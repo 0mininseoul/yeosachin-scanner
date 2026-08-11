@@ -12,6 +12,7 @@ import {
     RevenueCostOperationStore,
     type RevenueCostLiveSource,
 } from './revenue-cost-operation-store';
+import { FreshProvenanceStore } from './fresh-provenance-store';
 
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const JOB_KEY_PATTERN = /^[a-z0-9][a-z0-9:._-]{0,159}$/;
@@ -195,6 +196,10 @@ export interface AnalysisV2ProviderRunSupabaseClient {
 
 export interface AnalysisV2ProviderRunBindingDependencies {
     revenueCostOperationStore?: RevenueCostOperationStore;
+    /** Present only for the trusted Basic/Standard test-entitlement cohort. */
+    freshProvenanceStore?: FreshProvenanceStore;
+    /** Exact live job input fence, distinct from the provider operation input hash. */
+    jobInputHash?: string;
 }
 
 export const ANALYSIS_V2_PROVIDER_RUN_DATABASE_NAMES = Object.freeze({
@@ -728,6 +733,80 @@ export function createAnalysisV2ProviderRunStore(
         sourceAttempt: 0,
     });
 
+    const freshProviderSource = (
+        input: AnalysisV2ProviderRunIdentity,
+        jobInputHash: string,
+        runId: string
+    ) => ({
+        requestId: input.requestId,
+        jobKey: input.jobKey,
+        jobClaimToken: input.claimToken,
+        jobInputHash,
+        operationKey: input.operationKey,
+        providerInputHash: input.inputHash,
+        runId,
+    });
+
+    const assertFreshProviderAdmission = async (
+        freshProvenanceStore: FreshProvenanceStore | undefined,
+        input: AnalysisV2ProviderRunIdentity,
+        jobInputHash: string | undefined
+    ): Promise<void> => {
+        if (!freshProvenanceStore) return;
+        if (!jobInputHash || !SHA256_PATTERN.test(jobInputHash)) {
+            throw new Error('ANALYSIS_V2_PROVIDER_RUN_FRESH_PROVENANCE_JOB_FENCE_MISSING');
+        }
+        const outcome = await freshProvenanceStore.assertProviderAdmission({
+            requestId: input.requestId,
+            jobKey: input.jobKey,
+            jobClaimToken: input.claimToken,
+            jobInputHash,
+            operationKey: input.operationKey,
+            providerInputHash: input.inputHash,
+        });
+        if (outcome.disposition !== 'admitted') {
+            throw new Error('ANALYSIS_V2_PROVIDER_RUN_FRESH_PROVENANCE_ADMISSION_CONFLICT');
+        }
+    };
+
+    const recordFreshProviderRun = async (
+        freshProvenanceStore: FreshProvenanceStore | undefined,
+        input: AnalysisV2ProviderRunIdentity,
+        jobInputHash: string | undefined,
+        run: StoredAnalysisV2ProviderRun
+    ): Promise<void> => {
+        if (!freshProvenanceStore) return;
+        if (!jobInputHash || !SHA256_PATTERN.test(jobInputHash) || !run.runId || !run.runStartedAt) {
+            throw new Error('ANALYSIS_V2_PROVIDER_RUN_FRESH_PROVENANCE_NOT_CHECKPOINTED');
+        }
+        const outcome = await freshProvenanceStore.recordProviderRun(
+            freshProviderSource(input, jobInputHash, run.runId)
+        );
+        if (outcome.disposition !== 'recorded') {
+            throw new Error('ANALYSIS_V2_PROVIDER_RUN_FRESH_PROVENANCE_RECORD_CONFLICT');
+        }
+    };
+
+    const bindFreshProviderDataset = async (
+        freshProvenanceStore: FreshProvenanceStore | undefined,
+        input: AnalysisV2ProviderRunIdentity,
+        jobInputHash: string | undefined,
+        run: StoredAnalysisV2ProviderRun,
+        datasetId: string
+    ): Promise<void> => {
+        if (!freshProvenanceStore) return;
+        if (!jobInputHash || !SHA256_PATTERN.test(jobInputHash) || !run.runId || !run.runStartedAt) {
+            throw new Error('ANALYSIS_V2_PROVIDER_RUN_FRESH_PROVENANCE_NOT_CHECKPOINTED');
+        }
+        const outcome = await freshProvenanceStore.bindProviderDataset({
+            ...freshProviderSource(input, jobInputHash, run.runId),
+            datasetId,
+        });
+        if (outcome.disposition !== 'bound') {
+            throw new Error('ANALYSIS_V2_PROVIDER_RUN_FRESH_PROVENANCE_DATASET_CONFLICT');
+        }
+    };
+
     const reserveRevenueCost = async (
         revenueCostOperationStore: RevenueCostOperationStore | undefined,
         input: AnalysisV2ProviderRunIdentity
@@ -1232,6 +1311,23 @@ export function createAnalysisV2ProviderRunStore(
             // it may need to fence a stale start or settle its exact existing
             // child, but it never re-opens or re-reserves that child.
             const revenueCostOperationStore = bindingDependencies.revenueCostOperationStore;
+            const freshProvenanceStore = bindingDependencies.freshProvenanceStore;
+            const freshJobInputHash = bindingDependencies.jobInputHash;
+            if (freshProvenanceStore && !revenueCostOperationStore) {
+                throw new Error(
+                    'ANALYSIS_V2_PROVIDER_RUN_FRESH_PROVENANCE_REVENUE_DEPENDENCY_MISSING'
+                );
+            }
+            const failClosedFreshProvenance = async (error: unknown): Promise<never> => {
+                try {
+                    await markRevenueCostManualReview(revenueCostOperationStore, input);
+                } catch {
+                    throw new Error(
+                        'ANALYSIS_V2_PROVIDER_RUN_FRESH_PROVENANCE_MANUAL_REVIEW_REQUIRED'
+                    );
+                }
+                throw error;
+            };
             let reserved: StoredAnalysisV2ProviderRun | null = null;
             if (loaded !== null) {
                 const replay = await store.reserve(expected);
@@ -1243,6 +1339,29 @@ export function createAnalysisV2ProviderRunStore(
                 reserved = replay.run;
             }
             if (reserved) assertStoredIdentity(reserved, expected);
+            if (reserved) {
+                try {
+                    await assertFreshProviderAdmission(
+                        freshProvenanceStore,
+                        input,
+                        freshJobInputHash
+                    );
+                } catch (error) {
+                    await failClosedFreshProvenance(error);
+                }
+            }
+            if (reserved?.runId) {
+                try {
+                    await recordFreshProviderRun(
+                        freshProvenanceStore,
+                        input,
+                        freshJobInputHash,
+                        reserved
+                    );
+                } catch (error) {
+                    await failClosedFreshProvenance(error);
+                }
+            }
 
             const requireReserved = (): StoredAnalysisV2ProviderRun => {
                 if (!reserved) {
@@ -1266,7 +1385,10 @@ export function createAnalysisV2ProviderRunStore(
 
             const costCallbacks: Pick<
                 ProviderRunCheckpoint,
-                'onCostRunStarted' | 'onCostRunFinished' | 'onRunStartAmbiguous'
+                | 'onCostRunStarted'
+                | 'onCostRunFinished'
+                | 'onRunStartAmbiguous'
+                | 'onProviderDatasetResolved'
             > = {
                 onCostRunStarted: async (event) => {
                     assertStarted(event);
@@ -1286,16 +1408,36 @@ export function createAnalysisV2ProviderRunStore(
                     const current = requireReserved();
                     const actual = canonicalProviderIdentity(event);
                     if (
-                        current.status !== 'starting'
-                        || current.runId !== null
-                        || actual.logicalProvider !== current.logicalProvider
+                        actual.logicalProvider !== current.logicalProvider
                         || actual.actorId !== current.actorId
                         || actual.credentialSlot !== current.credentialSlot
                         || actual.maxChargeUsd !== current.maxChargeUsd
                     ) {
                         throw new AnalysisV2ProviderRunConflictError();
                     }
-                    await markRevenueCostAmbiguous(revenueCostOperationStore, input);
+                    if (current.status === 'starting' && current.runId === null) {
+                        await markRevenueCostAmbiguous(revenueCostOperationStore, input);
+                        return;
+                    }
+                    if (current.runId !== null) {
+                        await markRevenueCostManualReview(revenueCostOperationStore, input);
+                        return;
+                    }
+                    throw new AnalysisV2ProviderRunConflictError();
+                },
+                onProviderDatasetResolved: async (datasetId) => {
+                    const current = requireReserved();
+                    try {
+                        await bindFreshProviderDataset(
+                            freshProvenanceStore,
+                            input,
+                            freshJobInputHash,
+                            current,
+                            datasetId
+                        );
+                    } catch (error) {
+                        await failClosedFreshProvenance(error);
+                    }
                 },
             };
 
@@ -1338,6 +1480,26 @@ export function createAnalysisV2ProviderRunStore(
                         if (!reservation.created) {
                             throw new AnalysisV2ProviderRunAlreadyReservedError();
                         }
+                        try {
+                            await assertFreshProviderAdmission(
+                                freshProvenanceStore,
+                                input,
+                                freshJobInputHash
+                            );
+                        } catch (freshError) {
+                            try {
+                                reserved = await store.rejectStart({
+                                    ...input,
+                                    ...expectedProvider,
+                                    reservationToken: reservation.run.reservationToken,
+                                });
+                            } catch {
+                                throw new Error(
+                                    'ANALYSIS_V2_PROVIDER_RUN_FRESH_PROVENANCE_PRECALL_CLEANUP_REQUIRED'
+                                );
+                            }
+                            throw freshError;
+                        }
                         let revenueCostOperationAttempted = false;
                         try {
                             // A transport error can arrive after begin/reserve
@@ -1378,6 +1540,16 @@ export function createAnalysisV2ProviderRunStore(
                             reservationToken: current.reservationToken,
                             runId,
                         });
+                        try {
+                            await recordFreshProviderRun(
+                                freshProvenanceStore,
+                                input,
+                                freshJobInputHash,
+                                reserved
+                            );
+                        } catch (error) {
+                            await failClosedFreshProvenance(error);
+                        }
                     },
                     onRunStartRejected: async (event) => {
                         const current = requireReserved();

@@ -68,7 +68,7 @@ const MAX_PAID_FALLBACKS = 1;
 export const MAX_V2_PROFILE_BATCH_SIZE = 30;
 
 export interface ProfilesBatchV2AttemptSnapshot {
-    attempt: 'primary' | 'fallback';
+    attempt: 'primary' | 'fallback' | 'fresh_apify';
     source: ProfileAttemptProvider;
     requestedUsernames: readonly string[];
     results: readonly ProfileAttemptResult[];
@@ -89,6 +89,11 @@ export interface ProfilesBatchV2Options {
     allowApifyFallback?: boolean;
     /** V2 selects authenticated profile collection only for the authenticated paid route. */
     primaryProvider?: Extract<ProviderName, 'selfhosted' | 'selfhosted_auth'>;
+    /**
+     * Trusted Basic/Standard revenue runs take one exact live Apify source path.
+     * This is intentionally opt-in: ordinary V2 collection retains its free-primary route.
+     */
+    freshApifyOnly?: boolean;
     /** Required by the authenticated profile worker; forwarded unchanged to its durable ledger. */
     selfHostedAuthIdentity?: SelfHostedAuthOperationIdentity;
     resume?: ProfilesBatchV2Resume;
@@ -347,6 +352,9 @@ async function runAttempt<T>(
         } : {}),
         onBeforeRunStart: options?.providerRun?.onBeforeRunStart,
         onRunStarted: options?.providerRun?.onRunStarted,
+        onRunStartRejected: options?.providerRun?.onRunStartRejected,
+        onRunStartAmbiguous: options?.providerRun?.onRunStartAmbiguous,
+        onProviderDatasetResolved: options?.providerRun?.onProviderDatasetResolved,
         onProfileStart: options?.onProfileStart,
         onProfileResolved: options?.onProfileResolved,
         onSelfHostedAuthRunFinished: options?.onSelfHostedAuthRunFinished,
@@ -835,6 +843,69 @@ export async function getProfilesBatchV2(
     let candidateFailureEvents = 0;
     const primary = providers[primaryProvider];
     const fallback = providers.apify;
+    if (options.freshApifyOnly === true) {
+        if (
+            options.resume
+            || options.primaryProvider !== undefined
+            || options.selfHostedAuthIdentity !== undefined
+            || !fallback
+            || fallback.name !== 'apify'
+            || fallback.paid !== true
+            || !options.providerRun
+            || (
+                !options.providerRun.resumeRunId
+                && !options.providerRun.startReserved
+                && (
+                    typeof options.providerRun.onBeforeRunStart !== 'function'
+                    || typeof options.providerRun.onRunStarted !== 'function'
+                )
+            )
+        ) {
+            throw new Error(
+                'FRESH_PROVENANCE_CONFIG_ERROR: direct Apify profile collection requires one durable live provider checkpoint.'
+            );
+        }
+        const directAttempt = await runProfileOutcomeAttempt(
+            fallback,
+            'apify',
+            requestedUsernames,
+            false,
+            {
+                requestId: options.requestId,
+                onTelemetry,
+                onProfileStart: options.onProfileStart,
+                onProfileResolved: options.onProfileResolved,
+                providerRun: options.providerRun,
+            }
+        );
+        if (directAttempt.paidRunBarrierError) throw directAttempt.paidRunBarrierError;
+        await persistProfileAttempt(options, Object.freeze({
+            attempt: 'fresh_apify',
+            source: 'apify' as const,
+            requestedUsernames,
+            results: directAttempt.results,
+        }));
+        candidateFailureEvents += emitV2CandidateFailures(
+            directAttempt.results,
+            MAX_BATCH_EXCEPTION_EVENTS - candidateFailureEvents,
+        );
+        const frozenUnresolvedUsernames = Object.freeze(
+            summarizeProfileFetchOutcomes(
+                requestedUsernames,
+                directAttempt.results.map(result => result.outcome)
+            ).unresolvedUsernames
+        );
+        const profiles = directAttempt.results.flatMap(result => (
+            'profile' in result ? [result.profile] : []
+        ));
+        return Object.freeze({
+            results: directAttempt.results,
+            profiles: Object.freeze(profiles),
+            primaryResults: directAttempt.results,
+            fallbackResults: Object.freeze([]),
+            frozenUnresolvedUsernames,
+        });
+    }
     if (
         !primary
         || primary.name !== primaryProvider

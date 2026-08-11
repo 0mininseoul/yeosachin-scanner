@@ -48,6 +48,9 @@ import {
     AccountPrincipalAdmissionError,
     requireActiveE2eTestRunner,
 } from '@/lib/services/identity/account-principal-store';
+import { RevenueCostOperationStore } from '@/lib/services/analysis/revenue-cost-operation-store';
+
+const revenueCostOperationStore = new RevenueCostOperationStore(supabaseAdmin);
 
 const uuidSchema = z.string().uuid().transform(value => value.toLowerCase());
 const requestBodySchema = z.object({
@@ -403,6 +406,22 @@ async function handlePOST(
                 providerExecutionPolicy,
             } : {}),
         });
+
+        // This remains opt-in for the signed Basic/Standard test cohort. The
+        // SQL begin RPC locks the consumed lineage before any job can dispatch;
+        // Plus and ordinary production paths retain zero revenue RPCs.
+        if (
+            (body.data.planId === 'basic' || body.data.planId === 'standard')
+            && providerExecutionPolicy?.mode === 'test_operation_split'
+            && providerExecutionPolicy.policyVersion === 'authorized-free-e2e-v1'
+        ) {
+            const begun = await revenueCostOperationStore.begin({
+                requestId: consumed.requestId,
+            });
+            if (begun.disposition !== 'begun') {
+                throw new Error('ANALYSIS_V2_REVENUE_LEDGER_BEGIN_CONFLICT');
+            }
+        }
 
         const terminal = consumed.requestStatus === 'completed'
             || consumed.requestStatus === 'failed';

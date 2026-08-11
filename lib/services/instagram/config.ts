@@ -206,3 +206,28 @@ export function getAnalysisV2PaidCollectionProvider(
         'SCRAPING_CONFIG_ERROR: Analysis V2 paid collection selectors must all be apify or selfhosted_auth.'
     );
 }
+
+/**
+ * The trusted Basic/Standard revenue cohort has a deliberately narrower
+ * collection envelope than production. Keep this check opt-in at the caller:
+ * ordinary requests retain the existing selector and fallback behaviour.
+ */
+export function assertAnalysisV2FreshProvenanceConfiguration(
+    env: Record<string, string | undefined> = process.env
+): void {
+    const collection = getScraperConfig(env);
+    const interactions = getInteractionScraperConfig(env);
+    const selectors = [
+        collection.profile,
+        collection.profilesBatch,
+        collection.followers,
+        collection.following,
+        interactions.likers,
+        interactions.comments,
+    ];
+    if (isSelfHostedAuthEnabled(env) || selectors.some(selector => selector !== 'apify')) {
+        throw new Error(
+            'FRESH_PROVENANCE_CONFIG_ERROR: trusted revenue collection requires all-Apify selectors with selfhosted auth disabled.'
+        );
+    }
+}

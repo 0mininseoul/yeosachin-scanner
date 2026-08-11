@@ -18,6 +18,8 @@ const requestId = '7df77338-2672-4ef2-93fe-13a0683ec9b4';
 const claimToken = '51b42f42-204d-4dfb-86f8-9658d21c78f1';
 const jobKey = 'track:profiles:batch:0';
 const jobInputHash = 'a'.repeat(64);
+const providerInputHash = 'b'.repeat(64);
+const operationKey = `profile-fallback:${'c'.repeat(64)}`;
 const capturedAt = '2026-07-13T07:30:00.000Z';
 const checkpointIdentity = { requestId, jobKey, claimToken, jobInputHash } as const;
 
@@ -286,6 +288,41 @@ describe('analysis V2 profile fetch checkpoint store', () => {
             http_status: 504,
             profile: null,
         });
+    });
+
+    it('persists a direct fresh-Apify primary only through its exact source RPC', async () => {
+        const directResume = {
+            requestId,
+            jobKey,
+            requestedUsernames: ['alice'],
+            frozenUnresolvedUsernames: [],
+            primaryResults: [apifySuccess('alice')],
+            fallbackResults: [],
+            primaryCapturedAt: capturedAt,
+            fallbackCapturedAt: null,
+        };
+        const fake = clientWith({ data: directResume, error: null });
+        const store = createAnalysisV2ProfileFetchCheckpointStore(fake.client);
+
+        await expect(store.checkpointFreshApify({
+            ...checkpointIdentity,
+            requestedUsernames: ['alice'],
+            results: [apifySuccess('alice')],
+            operationKey,
+            providerInputHash,
+        })).resolves.toMatchObject({
+            primaryResults: [expect.objectContaining({ outcome: expect.objectContaining({ source: 'apify' }) })],
+        });
+
+        expect(fake.rpc).toHaveBeenCalledWith(
+            'checkpoint_analysis_v2_profile_fresh_apify_v1',
+            expect.objectContaining({
+                p_operation_key: operationKey,
+                p_provider_input_hash: providerInputHash,
+                p_requested_usernames: ['alice'],
+                p_outcomes: [expect.objectContaining({ source: 'apify' })],
+            })
+        );
     });
 
     it('accepts mapper-shaped undefined optionals and preserves carousel child order', async () => {

@@ -1,6 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import {
     AUTOMATIC_FALLBACK,
+    assertAnalysisV2FreshProvenanceConfiguration,
     getInteractionScraperConfig,
     getScraperConfig,
     DEFAULT_PROVIDERS,
@@ -170,5 +171,29 @@ describe('getAnalysisV2PaidCollectionProvider', () => {
             ...auth,
             SCRAPER_COMMENTS: 'apify',
         })).toThrow('paid collection selectors');
+    });
+});
+
+describe('assertAnalysisV2FreshProvenanceConfiguration', () => {
+    const strictApify = {
+        SELFHOSTED_AUTH_ENABLED: 'false',
+        SCRAPER_PROFILE: 'apify',
+        SCRAPER_PROFILES_BATCH: 'apify',
+        SCRAPER_FOLLOWERS: 'apify',
+        SCRAPER_FOLLOWING: 'apify',
+        SCRAPER_LIKERS: 'apify',
+        SCRAPER_COMMENTS: 'apify',
+    } as const;
+
+    it('allows only all-Apify, selfhosted-disabled collection for fresh revenue provenance', () => {
+        expect(() => assertAnalysisV2FreshProvenanceConfiguration(strictApify)).not.toThrow();
+        expect(() => assertAnalysisV2FreshProvenanceConfiguration({
+            ...strictApify,
+            SCRAPER_PROFILE: 'selfhosted',
+        })).toThrow('FRESH_PROVENANCE');
+        expect(() => assertAnalysisV2FreshProvenanceConfiguration({
+            ...strictApify,
+            SELFHOSTED_AUTH_ENABLED: 'true',
+        })).toThrow('FRESH_PROVENANCE');
     });
 });

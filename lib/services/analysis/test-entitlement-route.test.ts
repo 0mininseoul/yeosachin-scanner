@@ -270,6 +270,12 @@ describe('analysis V2 durable test-entitlement route', () => {
             if (name === 'consume_analysis_v2_authorized_test_entitlement') {
                 return { data: consumedResult(), error: null };
             }
+            if (name === 'begin_analysis_revenue_cost_ledger_v1') {
+                return {
+                    data: { disposition: 'begun', created: true, replayed: false },
+                    error: null,
+                };
+            }
             if (name === 'mark_analysis_v2_preflight_admission_dispatched') {
                 return { data: true, error: null };
             }
@@ -483,6 +489,46 @@ describe('analysis V2 durable test-entitlement route', () => {
         });
     });
 
+    it('does not dispatch a Basic or Standard request when durable revenue-ledger begin fails', async () => {
+        installPreflightQuery(preflightRow({ target_instagram_id: '0_min._.00' }));
+        Object.assign(process.env, {
+            ANALYSIS_V2_AUTHORIZED_TEST_SHARDING_ENABLED: 'true',
+            ANALYSIS_V2_AUTHORIZED_TEST_SHARD_TARGET: '0_min._.00',
+            ANALYSIS_V2_AUTHORIZED_TEST_OWNER_USER_ID: USER_ID,
+            ANALYSIS_V2_AUTHORIZED_TEST_RELATIONSHIP_FOLLOWERS_SLOT: 'primary',
+            ANALYSIS_V2_AUTHORIZED_TEST_RELATIONSHIP_FOLLOWING_SLOT: 'secondary',
+            ANALYSIS_V2_AUTHORIZED_TEST_PROFILE_FALLBACK_SLOT: 'tertiary',
+            ANALYSIS_V2_AUTHORIZED_TEST_TARGET_LIKERS_SLOT: 'quaternary',
+            ANALYSIS_V2_AUTHORIZED_TEST_TARGET_COMMENTS_SLOT: 'tertiary',
+            ANALYSIS_V2_AUTHORIZED_TEST_CANDIDATE_LIKERS_SLOT: 'quinary',
+        });
+        mocks.rpc.mockImplementation(async (name: string, params: Record<string, unknown>) => {
+            if (name === 'reserve_analysis_v2_preflight_admission') {
+                return { data: [admissionRow({ admission_token: params.p_admission_token })], error: null };
+            }
+            if (name === 'consume_analysis_v2_authorized_test_entitlement') {
+                return { data: consumedResult(), error: null };
+            }
+            if (name === 'begin_analysis_revenue_cost_ledger_v1') {
+                return { data: null, error: { code: 'P0001', message: 'REVENUE_COST_LEDGER_FENCE' } };
+            }
+            throw new Error(`unexpected RPC: ${name}`);
+        });
+        const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+
+        const response = await POST(request(), context());
+
+        expect(response.status).toBe(500);
+        await expect(response.json()).resolves.toMatchObject({ code: 'ANALYSIS_START_FAILED' });
+        expect(mocks.rpc.mock.calls.map(([name]) => name)).toEqual([
+            'reserve_analysis_v2_preflight_admission',
+            'consume_analysis_v2_authorized_test_entitlement',
+            'begin_analysis_revenue_cost_ledger_v1',
+        ]);
+        expect(mocks.dispatchJob).not.toHaveBeenCalled();
+        expect(errorSpy).toHaveBeenCalled();
+    });
+
     it('atomically binds the exact authorized target policy before initial dispatch', async () => {
         installPreflightQuery(preflightRow({
             target_instagram_id: '0_min._.00',
@@ -505,6 +551,7 @@ describe('analysis V2 durable test-entitlement route', () => {
         expect(mocks.rpc.mock.calls.map(([name]) => name)).toEqual([
             'reserve_analysis_v2_preflight_admission',
             'consume_analysis_v2_authorized_test_entitlement',
+            'begin_analysis_revenue_cost_ledger_v1',
         ]);
         expect(mocks.rpc.mock.calls[1][1]).toMatchObject({
             p_user_id: USER_ID,
