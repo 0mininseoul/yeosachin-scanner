@@ -442,26 +442,54 @@ verify_enabled_version() {
 
 enabled_version_count=0
 single_enabled_version=""
+validate_version_list_json() {
+  local secret_id="$1"
+  local require_enabled="$2"
+  local versions_json="$3"
+  jq -e \
+    --arg project_number "$tasks_project_number" \
+    --arg secret "$secret_id" \
+    --arg require_enabled "$require_enabled" '
+      def exact_version_entry:
+        type == "object"
+        and (.name | type) == "string"
+        and (.state | type) == "string"
+        and ((.name | split("/")) as $parts
+          | ($parts | length) == 6
+            and $parts[0] == "projects"
+            and $parts[1] == $project_number
+            and $parts[2] == "secrets"
+            and $parts[3] == $secret
+            and $parts[4] == "versions"
+            and ($parts[5] | test("^[1-9][0-9]*$")))
+        and ($require_enabled != "true" or .state == "ENABLED");
+      type == "array" and all(.[]; exact_version_entry)
+    ' <<<"$versions_json" >/dev/null
+}
+
 inspect_enabled_versions() {
   local secret_id="$1"
   local line
   local version
+  local versions_json
   local versions_output
   enabled_version_count=0
   single_enabled_version=""
-  versions_output="$(gcloud secrets versions list \
+  versions_json="$(gcloud secrets versions list \
     "$secret_id" \
     "--project=$ANALYSIS_V2_TASKS_PROJECT" \
     '--filter=state=ENABLED' \
-    '--format=value(name)')" \
+    '--limit=2' \
+    '--format=json')" \
     || die "could not list enabled versions for $secret_id"
+  validate_version_list_json "$secret_id" true "$versions_json" \
+    || die "enabled version discovery for $secret_id returned invalid JSON or canonical version resource"
+  versions_output="$(jq -r '.[] | .name | split("/") | .[5]' <<<"$versions_json")"
   while IFS= read -r line; do
     [[ -n "$line" ]] || continue
     version="${line##*/}"
     [[ "$version" =~ ^[1-9][0-9]*$ ]] \
       || die "enabled version discovery for $secret_id returned a non-numeric version"
-    [[ "$line" == "projects/$tasks_project_number/secrets/$secret_id/versions/$version" ]] \
-      || die "enabled version discovery for $secret_id returned an unexpected resource name"
     single_enabled_version="$version"
     enabled_version_count=$((enabled_version_count + 1))
   done <<<"$versions_output"
@@ -469,20 +497,16 @@ inspect_enabled_versions() {
 
 secret_has_version_history() {
   local secret_id="$1"
-  local first_version
-  local version
-  first_version="$(gcloud secrets versions list \
+  local versions_json
+  versions_json="$(gcloud secrets versions list \
     "$secret_id" \
     "--project=$ANALYSIS_V2_TASKS_PROJECT" \
     '--limit=1' \
-    '--format=value(name)')" \
+    '--format=json')" \
     || die "could not inspect version history for $secret_id"
-  [[ -n "$first_version" ]] || return 1
-  version="${first_version##*/}"
-  [[ "$version" =~ ^[1-9][0-9]*$ \
-    && "$first_version" == "projects/$tasks_project_number/secrets/$secret_id/versions/$version" ]] \
-    || die "version history for $secret_id returned an unexpected resource name"
-  return 0
+  validate_version_list_json "$secret_id" false "$versions_json" \
+    || die "version history for $secret_id returned invalid JSON or canonical version resource"
+  jq -e 'length > 0' <<<"$versions_json" >/dev/null
 }
 
 resolved_version=""

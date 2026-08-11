@@ -534,8 +534,11 @@ case "$command_line" in
     [[ -n "$secret_id" && "$secret_id" != --* ]] || exit 90
     for argument in "$@"; do
       [[ "$argument" != --secret=* ]] || exit 90
+      [[ "$argument" != '--format=value(name)' ]] || exit 90
     done
-    printf 'projects/123456789012/secrets/%s/versions/7\n' "$secret_id"
+    jq -nc \
+      --arg name "projects/123456789012/secrets/$secret_id/versions/7" \
+      '[{name: $name, state: "ENABLED"}]'
     ;;
   "secrets get-iam-policy"*)
     [[ "$identity_ready" == "true" ]] || exit 1
