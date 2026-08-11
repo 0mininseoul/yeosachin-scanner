@@ -3570,7 +3570,10 @@ describe('analysis V2 concrete collection executors', () => {
             genderRoutingManifestStore: routing.store,
             revenueGenderRoutingAssessor: assessor,
             revenueCostOperationStore: { manualReview } as unknown as RevenueCostOperationStore,
-            env: { ANALYSIS_V2_GENDER_ROUTING_HMAC_SECRET: 'routing-test-secret-at-least-thirty-two-characters' },
+            env: {
+                ...authorizedProviderEnv,
+                ANALYSIS_V2_GENDER_ROUTING_HMAC_SECRET: 'routing-test-secret-at-least-thirty-two-characters',
+            },
         });
 
         await expect(executor(stageContext('relationships', state())))
