@@ -105,6 +105,13 @@ $$;
 	 ),
 	 CONSTRAINT analysis_v2_provider_run_time_check CHECK (updated_at >= reserved_at AND (run_started_at IS NULL OR run_started_at >= reserved_at) AND (terminalized_at IS NULL OR terminalized_at >= run_started_at) AND (usage_reconciled_at IS NULL OR usage_reconciled_at >= terminalized_at))
 	);
+	CREATE TABLE public.analysis_v2_gender_routing_manifests (
+	 request_id uuid NOT NULL, relationship_job_key text NOT NULL,
+	 relationship_job_input_hash text NOT NULL, relationship_checkpoint_id text NOT NULL,
+	 policy_version text NOT NULL,
+	 plan_id text NOT NULL, canonical_input_hmac text NOT NULL,
+	 status text NOT NULL, PRIMARY KEY(request_id, relationship_checkpoint_id, policy_version)
+	);
 	CREATE TABLE public.analysis_v2_ai_attempts (
 	 request_id uuid NOT NULL, job_key text NOT NULL, job_claim_token uuid NOT NULL, operation_key text NOT NULL CHECK(operation_key ~ '^(gender-triage|gender-resolution|feature-analysis|high-risk-narrative|private-account-name|partner-safety):[a-f0-9]{64}$'), attempt smallint NOT NULL CHECK(attempt BETWEEN 1 AND 4), reservation_token uuid NOT NULL,
 	 status text NOT NULL CHECK(status IN ('reserved','success','rate_limited','ambiguous','rejected','response_rejected','cutoff')),
@@ -180,8 +187,10 @@ async function begin(db: PGlite): Promise<void> {
 }
 
 const jobKey = 'track:relationships:collect';
+const aiJobKey = 'track:private-names:batch:0';
 const claimToken = '44444444-4444-4444-8444-444444444444';
 const inputHash = hash('d');
+const aiInputHash = hash('6');
 const providerInputHash = hash('9');
 const providerOperationKey = `relationship-followers:${hash('c')}`;
 const secondProviderOperationKey = `relationship-following:${hash('7')}`;
@@ -189,6 +198,15 @@ const targetProfileOperationKey = `target-profile:${hash('1')}`;
 const profileFallbackOperationKey = `profile-fallback:${hash('2')}`;
 const profileRepairOperationKey = `profile-repair:${hash('3')}`;
 const aiOperationKey = `private-account-name:${hash('f')}`;
+const stageOneOperationKey = `gender-triage:${hash('a')}`;
+
+function opaqueHash(label: string): string {
+    return createHash('sha256').update(label, 'utf8').digest('hex');
+}
+
+function fixtureToken(ordinal: number): string {
+    return `00000000-0000-4000-8000-${ordinal.toString(16).padStart(12, '0')}`;
+}
 
 async function seedLiveSources(db: PGlite, providerKey = providerOperationKey): Promise<void> {
     await begin(db);
@@ -202,11 +220,73 @@ async function seedLiveSources(db: PGlite, providerKey = providerOperationKey): 
           clock_timestamp() - interval '3 minutes',clock_timestamp() - interval '2 minutes','analysis-v2.relationships.collect',clock_timestamp() - interval '1 minute','${claimToken}',clock_timestamp() + interval '5 minutes',
           '${inputHash}',clock_timestamp() - interval '4 minutes',clock_timestamp() - interval '30 seconds'
         );
+        INSERT INTO public.analysis_pipeline_jobs(
+          request_id,job_key,status,dispatch_state,dispatch_generation,dispatch_reservation_token,
+          dispatch_reserved_at,dispatched_at,dispatch_task_name,delivered_at,lease_token,lease_expires_at,
+          input_hash,created_at,updated_at
+        ) VALUES (
+          '${requestId}','${aiJobKey}','processing','delivered',1,'${claimToken}',
+          clock_timestamp() - interval '3 minutes',clock_timestamp() - interval '2 minutes','analysis-v2.private-names.batch',clock_timestamp() - interval '1 minute','${claimToken}',clock_timestamp() + interval '5 minutes',
+          '${aiInputHash}',clock_timestamp() - interval '4 minutes',clock_timestamp() - interval '30 seconds'
+        );
         INSERT INTO public.analysis_v2_provider_runs(request_id,job_key,operation_key,input_hash,job_claim_token,reservation_token,logical_provider,actor_id,credential_slot,max_charge_usd,status)
         VALUES ('${requestId}','${jobKey}','${providerKey}','${providerInputHash}','${claimToken}','55555555-5555-4555-8555-555555555555','apify','actor-id','primary',0.2,'starting');
-        INSERT INTO public.analysis_v2_ai_attempts(request_id,job_key,job_claim_token,operation_key,attempt,reservation_token,status,model_name,location,stage,media_count,prompt_version,schema_version,max_output_tokens,retry_count)
-        VALUES ('${requestId}','${jobKey}','${claimToken}','${aiOperationKey}',1,'66666666-6666-4666-8666-666666666666','reserved','gemini-3-flash-preview','global','privateAccountName',0,'v1',1,1024,0);
+        INSERT INTO public.analysis_v2_ai_attempts(request_id,job_key,job_claim_token,operation_key,attempt,reservation_token,status,model_name,location,stage,thinking_level,media_count,media_resolution,prompt_version,schema_version,max_output_tokens,retry_count)
+        VALUES ('${requestId}','${aiJobKey}','${claimToken}','${aiOperationKey}',1,'66666666-6666-4666-8666-666666666666','reserved','gemini-3.1-flash-lite','global','privateAccountName','MINIMAL',0,'LOW','private-account-name-v1',1,8192,0);
     `);
+}
+
+async function insertLiveAiJob(
+    db: PGlite,
+    liveJobKey: string,
+    liveInputHash: string,
+): Promise<void> {
+    await db.query(`
+        INSERT INTO public.analysis_pipeline_jobs(
+            request_id,job_key,status,dispatch_state,dispatch_generation,dispatch_reservation_token,
+            dispatch_reserved_at,dispatched_at,dispatch_task_name,delivered_at,lease_token,lease_expires_at,
+            input_hash,created_at,updated_at
+        ) VALUES (
+            $1,$2,'processing','delivered',1,$3,
+            clock_timestamp() - interval '3 minutes',clock_timestamp() - interval '2 minutes',
+            'analysis-v2.ai',clock_timestamp() - interval '1 minute',$3,clock_timestamp() + interval '5 minutes',
+            $4,clock_timestamp() - interval '4 minutes',clock_timestamp() - interval '30 seconds'
+        )
+    `, [requestId, liveJobKey, claimToken, liveInputHash]);
+}
+
+interface AiAttemptFixture {
+    readonly jobKey: string;
+    readonly operationKey: string;
+    readonly attempt: number;
+    readonly reservationToken: string;
+    readonly modelName: string;
+    readonly location: string;
+    readonly stage: string;
+    readonly thinkingLevel: string;
+    readonly mediaCount: number;
+    readonly mediaResolution: string;
+    readonly promptVersion: string;
+    readonly schemaVersion: number;
+    readonly maxOutputTokens: number;
+}
+
+async function insertReservedAiAttempt(db: PGlite, fixture: AiAttemptFixture): Promise<void> {
+    await db.query(`
+        INSERT INTO public.analysis_v2_ai_attempts(
+            request_id,job_key,job_claim_token,operation_key,attempt,reservation_token,status,
+            model_name,location,stage,thinking_level,media_count,media_resolution,
+            prompt_version,schema_version,max_output_tokens,retry_count
+        ) VALUES (
+            $1,$2,$3,$4,$5,$6,'reserved',$7,$8,$9,$10,$11,$12,$13,$14,$15,$16
+        )
+    `, [
+        requestId, fixture.jobKey, claimToken, fixture.operationKey, fixture.attempt,
+        fixture.reservationToken, fixture.modelName, fixture.location, fixture.stage,
+        fixture.thinkingLevel, fixture.mediaCount, fixture.mediaResolution,
+        fixture.promptVersion, fixture.schemaVersion, fixture.maxOutputTokens,
+        fixture.attempt - 1,
+    ]);
 }
 
 async function scrubTerminalRequestPiiProductionEquivalent(db: PGlite): Promise<void> {
@@ -681,14 +761,10 @@ describe('revenue cost operation ledger PGlite', () => {
         await expectRejectedReplay(db, 'REVENUE_COST_LEDGER_DRIFT', async () => { await db.exec(mutation); });
     });
 
-    it('reserves and starts a provider source exactly once from database authority while AI remains not-ready', async () => {
+    it('reserves and starts a provider source exactly once from database authority', async () => {
         const db = await createDb();
         await seedLiveSources(db);
         const reserveProvider = `SELECT public.reserve_analysis_revenue_cost_operation_v2('${requestId}','${jobKey}','${claimToken}','${inputHash}','provider_run','${providerOperationKey}',0::smallint) AS result`;
-        const reserveAi = `SELECT public.reserve_analysis_revenue_cost_operation_v2('${requestId}','${jobKey}','${claimToken}','${inputHash}','ai_attempt','${aiOperationKey}',1::smallint) AS result`;
-        const beforeAi = await replayTotals(db);
-        await expectError(query(db, reserveAi), 'REVENUE_COST_OPERATION_AI_NOT_READY');
-        await expect(replayTotals(db)).resolves.toEqual(beforeAi);
         await expect(query<{ result: { replayed: boolean } }>(db, 'SELECT public.begin_analysis_revenue_cost_ledger_v1($1::uuid) AS result', [requestId]))
             .resolves.toMatchObject({ rows: [{ result: { replayed: true } }] });
         await expect(db.query(`SELECT count(*)::int AS count FROM public.analysis_revenue_cost_operations WHERE owner_kind='ai_attempt' OR lifecycle_anomaly IS NOT NULL`))
@@ -705,6 +781,462 @@ describe('revenue cost operation ledger PGlite', () => {
         expect(JSON.stringify(hashes.rows)).not.toContain(providerOperationKey);
         expect(Number(hashes.rows[0]?.estimated_economic_usd)).toBe(0.2);
         await expect(db.query('SELECT reserved_cost_krw FROM public.analysis_revenue_run_ledgers WHERE request_id=$1', [requestId])).resolves.toMatchObject({ rows: [{ reserved_cost_krw: 290 }] });
+    });
+
+    it('reserves an AI attempt from immutable attempt metadata without caller-supplied Gemini prices', async () => {
+        const db = await createDb();
+        await seedLiveSources(db);
+        const reserve = `SELECT public.reserve_analysis_revenue_cost_operation_v2('${requestId}','${aiJobKey}','${claimToken}','${aiInputHash}','ai_attempt','${aiOperationKey}',1::smallint) AS result`;
+
+        const firstReserve = await query<{ result: { disposition: string; created: boolean } }>(db, reserve);
+        expect(firstReserve).toMatchObject({ rows: [{ result: { disposition: 'accepted', created: true } }] });
+        await expect(query<{ result: { disposition: string; replayed: boolean } }>(db, reserve))
+            .resolves.toMatchObject({ rows: [{ result: { disposition: 'accepted', replayed: true } }] });
+        await expect(db.query(`
+            SELECT owner_kind,operation_kind,estimated_economic_usd,reserved_krw
+              FROM public.analysis_revenue_cost_operations
+             WHERE request_id='${requestId}' AND owner_kind='ai_attempt'
+        `)).resolves.toMatchObject({ rows: [expect.objectContaining({
+            owner_kind: 'ai_attempt', operation_kind: 'detail_profile',
+        })] });
+    });
+
+    it('settles only exact terminal AI telemetry and replays the same economic truth', async () => {
+        const db = await createDb();
+        await seedLiveSources(db);
+        const reserve = `SELECT public.reserve_analysis_revenue_cost_operation_v2('${requestId}','${aiJobKey}','${claimToken}','${aiInputHash}','ai_attempt','${aiOperationKey}',1::smallint)`;
+        const start = `SELECT public.mark_analysis_revenue_cost_operation_started_v2('${requestId}','${aiJobKey}','${claimToken}','${aiInputHash}','ai_attempt','${aiOperationKey}',1::smallint)`;
+        const settle = `SELECT public.settle_analysis_revenue_cost_operation_v2('${requestId}','${aiJobKey}','ai_attempt','${aiOperationKey}',1::smallint) AS result`;
+        await query(db, reserve);
+        await query(db, start);
+        await db.exec(`
+            UPDATE public.analysis_v2_ai_attempts
+               SET status='success',usage_metadata_status='complete',usage_complete=TRUE,
+                   prompt_tokens=100,completion_tokens=50,thinking_tokens=10,total_tokens=160,
+                   latency_ms=10,estimated_cost_usd=0.000115,finish_reason='STOP',
+                   terminal_payload_hash='${hash('e')}',terminalized_at=created_at + interval '1 second',
+                   updated_at=created_at + interval '1 second'
+             WHERE request_id='${requestId}' AND operation_key='${aiOperationKey}' AND attempt=1
+        `);
+
+        await expect(query<{ result: { disposition: string; created: boolean } }>(db, settle))
+            .resolves.toMatchObject({ rows: [{ result: { disposition: 'settled', created: true } }] });
+        const settled = await replayTotals(db);
+        await expect(query<{ result: { disposition: string; replayed: boolean } }>(db, settle))
+            .resolves.toMatchObject({ rows: [{ result: { disposition: 'settled', replayed: true } }] });
+        await expect(replayTotals(db)).resolves.toEqual(settled);
+        await expect(db.query(`
+            SELECT child.status,child.economic_actual_usd,child.economic_actual_krw,
+                   child.terminal_at=source.terminalized_at AS exact_terminal
+              FROM public.analysis_revenue_cost_operations child
+              JOIN public.analysis_v2_ai_attempts source
+                ON source.request_id=child.request_id
+               AND source.operation_key='${aiOperationKey}' AND source.attempt=1
+             WHERE child.request_id='${requestId}' AND child.owner_kind='ai_attempt'
+        `)).resolves.toMatchObject({ rows: [{
+            status: 'settled', economic_actual_usd: '0.000115000000', economic_actual_krw: 1,
+            exact_terminal: true,
+        }] });
+    });
+
+    it('releases a proven no-call reserve, but turns a marked unknown attempt into manual-review ambiguity', async () => {
+        const noCall = await createDb();
+        await seedLiveSources(noCall);
+        const reserve = `SELECT public.reserve_analysis_revenue_cost_operation_v2('${requestId}','${aiJobKey}','${claimToken}','${aiInputHash}','ai_attempt','${aiOperationKey}',1::smallint)`;
+        const release = `SELECT public.release_analysis_revenue_cost_operation_v2('${requestId}','${aiJobKey}','${claimToken}','${aiInputHash}','ai_attempt','${aiOperationKey}',1::smallint) AS result`;
+        await query(noCall, reserve);
+        await expect(query<{ result: { disposition: string; created: boolean } }>(noCall, release))
+            .resolves.toMatchObject({ rows: [{ result: { disposition: 'released', created: true } }] });
+        await expect(query<{ result: { disposition: string; replayed: boolean } }>(noCall, release))
+            .resolves.toMatchObject({ rows: [{ result: { disposition: 'released', replayed: true } }] });
+        await expect(noCall.query(`
+            SELECT status,started_at,reserved_krw FROM public.analysis_revenue_cost_operations
+             WHERE request_id='${requestId}' AND owner_kind='ai_attempt'
+        `)).resolves.toMatchObject({ rows: [{ status: 'released', started_at: null }] });
+
+        const unknown = await createDb();
+        await seedLiveSources(unknown);
+        const start = `SELECT public.mark_analysis_revenue_cost_operation_started_v2('${requestId}','${aiJobKey}','${claimToken}','${aiInputHash}','ai_attempt','${aiOperationKey}',1::smallint)`;
+        await query(unknown, reserve);
+        await query(unknown, start);
+        await expect(query<{ result: { disposition: string; reason: string } }>(unknown, release))
+            .resolves.toMatchObject({ rows: [{ result: { disposition: 'ambiguous', reason: 'ambiguous_external_call' } }] });
+        await expect(unknown.query(`
+            SELECT reserved_cost_krw,status,manual_review_reason
+              FROM public.analysis_revenue_run_ledgers WHERE request_id='${requestId}'
+        `)).resolves.toMatchObject({ rows: [{
+            reserved_cost_krw: 0, status: 'manual_review', manual_review_reason: 'ambiguous_external_call',
+        }] });
+    });
+
+    it('maps an authoritative stage-one retry and makes it consume the same parent budget after a proven rate-limit release', async () => {
+        const db = await createDb();
+        await seedLiveSources(db);
+        await db.exec(`
+            INSERT INTO public.analysis_v2_gender_routing_manifests(
+                request_id,relationship_job_key,relationship_job_input_hash,policy_version,
+                relationship_checkpoint_id,plan_id,canonical_input_hmac,status
+            ) VALUES (
+                '${requestId}','${jobKey}','${inputHash}','gender-routing-v1',
+                '${hash('4')}','basic','${hash('b')}','building'
+            );
+        `);
+        await insertReservedAiAttempt(db, {
+            jobKey,
+            operationKey: stageOneOperationKey,
+            attempt: 1,
+            reservationToken: fixtureToken(701),
+            modelName: 'gemini-3.1-flash-lite',
+            location: 'global',
+            stage: 'genderTriage',
+            thinkingLevel: 'MINIMAL',
+            mediaCount: 0,
+            mediaResolution: 'LOW',
+            promptVersion: 'gender-triage-v2',
+            schemaVersion: 2,
+            maxOutputTokens: 512,
+        });
+        const reserveOne = `SELECT public.reserve_analysis_revenue_cost_operation_v2('${requestId}','${jobKey}','${claimToken}','${inputHash}','ai_attempt','${stageOneOperationKey}',1::smallint)`;
+        const releaseOne = `SELECT public.release_analysis_revenue_cost_operation_v2('${requestId}','${jobKey}','${claimToken}','${inputHash}','ai_attempt','${stageOneOperationKey}',1::smallint) AS result`;
+        await query(db, reserveOne);
+        await db.exec(`
+            UPDATE public.analysis_v2_ai_attempts
+               SET status='rate_limited',usage_metadata_status='missing',usage_complete=FALSE,
+                   latency_ms=1,terminal_payload_hash='${hash('c')}',
+                   terminalized_at=created_at + interval '1 second',updated_at=created_at + interval '1 second'
+             WHERE request_id='${requestId}' AND operation_key='${stageOneOperationKey}' AND attempt=1
+        `);
+        await expect(query<{ result: { disposition: string } }>(db, releaseOne))
+            .resolves.toMatchObject({ rows: [{ result: { disposition: 'released' } }] });
+        await insertReservedAiAttempt(db, {
+            jobKey,
+            operationKey: stageOneOperationKey,
+            attempt: 2,
+            reservationToken: fixtureToken(702),
+            modelName: 'gemini-3.1-flash-lite',
+            location: 'global',
+            stage: 'genderTriage',
+            thinkingLevel: 'MINIMAL',
+            mediaCount: 0,
+            mediaResolution: 'LOW',
+            promptVersion: 'gender-triage-v2',
+            schemaVersion: 2,
+            maxOutputTokens: 512,
+        });
+        const reserveTwo = `SELECT public.reserve_analysis_revenue_cost_operation_v2('${requestId}','${jobKey}','${claimToken}','${inputHash}','ai_attempt','${stageOneOperationKey}',2::smallint) AS result`;
+        await expect(query<{ result: { disposition: string } }>(db, reserveTwo))
+            .resolves.toMatchObject({ rows: [{ result: { disposition: 'accepted' } }] });
+        await expect(db.query(`
+            SELECT operation_kind,selected_manifest_scope_hash,source_attempt,status
+              FROM public.analysis_revenue_cost_operations
+             WHERE request_id='${requestId}' AND owner_kind='ai_attempt'
+             ORDER BY source_attempt
+        `)).resolves.toMatchObject({ rows: [
+            { operation_kind: 'stage_one_routing', selected_manifest_scope_hash: hash('b'), source_attempt: 1, status: 'released' },
+            { operation_kind: 'stage_one_routing_retry', selected_manifest_scope_hash: hash('b'), source_attempt: 2, status: 'reserved' },
+        ] });
+    });
+
+    it('rejects stage-one cost authority when more than one current manifest could supply its scope', async () => {
+        const db = await createDb();
+        await seedLiveSources(db);
+        await db.exec(`
+            INSERT INTO public.analysis_v2_gender_routing_manifests(
+                request_id,relationship_job_key,relationship_job_input_hash,relationship_checkpoint_id,
+                policy_version,plan_id,canonical_input_hmac,status
+            ) VALUES
+                ('${requestId}','${jobKey}','${inputHash}','${hash('4')}',
+                 'gender-routing-v1','basic','${hash('b')}','building'),
+                ('${requestId}','${jobKey}','${inputHash}','${hash('5')}',
+                 'gender-routing-v1','basic','${hash('6')}','building');
+        `);
+        await insertReservedAiAttempt(db, {
+            jobKey,
+            operationKey: stageOneOperationKey,
+            attempt: 1,
+            reservationToken: fixtureToken(750),
+            modelName: 'gemini-3.1-flash-lite',
+            location: 'global',
+            stage: 'genderTriage',
+            thinkingLevel: 'MINIMAL',
+            mediaCount: 0,
+            mediaResolution: 'LOW',
+            promptVersion: 'gender-triage-v2',
+            schemaVersion: 2,
+            maxOutputTokens: 512,
+        });
+        const reserve = `SELECT public.reserve_analysis_revenue_cost_operation_v2('${requestId}','${jobKey}','${claimToken}','${inputHash}','ai_attempt','${stageOneOperationKey}',1::smallint)`;
+        const before = await replayTotals(db);
+        await expectError(query(db, reserve), 'REVENUE_COST_OPERATION_FENCE');
+        await expect(replayTotals(db)).resolves.toEqual(before);
+    });
+
+    it('maps every approved non-routing AI stage only to its supported runtime operation kind', async () => {
+        const db = await createDb();
+        await seedLiveSources(db);
+        const profileJobKey = 'track:profile-ai:batch:0';
+        const partnerJobKey = 'track:partner-safety:batch:0';
+        const narrativeJobKey = 'track:narratives:batch:0';
+        const profileInputHash = opaqueHash('profile-ai-input');
+        const partnerInputHash = opaqueHash('partner-safety-input');
+        const narrativeInputHash = opaqueHash('narrative-input');
+        await insertLiveAiJob(db, profileJobKey, profileInputHash);
+        await insertLiveAiJob(db, partnerJobKey, partnerInputHash);
+        await insertLiveAiJob(db, narrativeJobKey, narrativeInputHash);
+
+        const sources = [
+            {
+                jobKey: aiJobKey, jobInputHash: aiInputHash, operationKey: aiOperationKey,
+                expectedOperationKind: 'detail_profile', modelName: 'gemini-3.1-flash-lite',
+                location: 'global', stage: 'privateAccountName', thinkingLevel: 'MINIMAL', mediaCount: 0,
+                mediaResolution: 'LOW', promptVersion: 'private-account-name-v1', schemaVersion: 1,
+                maxOutputTokens: 8192,
+            },
+            {
+                jobKey: profileJobKey, jobInputHash: profileInputHash,
+                operationKey: `gender-triage:${opaqueHash('profile-triage')}`,
+                expectedOperationKind: 'detail_profile', modelName: 'gemini-3.1-flash-lite',
+                location: 'global', stage: 'genderTriage', thinkingLevel: 'MINIMAL', mediaCount: 0,
+                mediaResolution: 'LOW', promptVersion: 'gender-triage-v2', schemaVersion: 2,
+                maxOutputTokens: 512,
+            },
+            {
+                jobKey: profileJobKey, jobInputHash: profileInputHash,
+                operationKey: `gender-resolution:${opaqueHash('profile-resolution')}`,
+                expectedOperationKind: 'resolver', modelName: 'gemini-3-flash-preview',
+                location: 'global', stage: 'genderResolution', thinkingLevel: 'LOW', mediaCount: 0,
+                mediaResolution: 'MEDIUM', promptVersion: 'gender-resolution-v1', schemaVersion: 1,
+                maxOutputTokens: 512,
+            },
+            {
+                jobKey: profileJobKey, jobInputHash: profileInputHash,
+                operationKey: `feature-analysis:${opaqueHash('profile-feature')}`,
+                expectedOperationKind: 'detail_media', modelName: 'gemini-3.1-flash-lite',
+                location: 'global', stage: 'featureAnalysis', thinkingLevel: 'MEDIUM', mediaCount: 0,
+                mediaResolution: 'MEDIUM', promptVersion: 'feature-analysis-v3', schemaVersion: 3,
+                maxOutputTokens: 2048,
+            },
+            {
+                jobKey: partnerJobKey, jobInputHash: partnerInputHash,
+                operationKey: `partner-safety:${opaqueHash('partner-safety')}`,
+                expectedOperationKind: 'detail_interaction', modelName: 'gemini-3.1-flash-lite',
+                location: 'global', stage: 'partnerSafety', thinkingLevel: 'MEDIUM', mediaCount: 0,
+                mediaResolution: 'LOW', promptVersion: 'partner-safety-v2', schemaVersion: 2,
+                maxOutputTokens: 768,
+            },
+            {
+                jobKey: narrativeJobKey, jobInputHash: narrativeInputHash,
+                operationKey: `high-risk-narrative:${opaqueHash('narrative')}`,
+                expectedOperationKind: 'detail_interaction', modelName: 'gemini-3-flash-preview',
+                location: 'global', stage: 'highRiskNarrative', thinkingLevel: 'HIGH', mediaCount: 0,
+                mediaResolution: 'MEDIUM', promptVersion: 'high-risk-narrative-v2', schemaVersion: 2,
+                maxOutputTokens: 4096,
+            },
+        ] as const;
+
+        for (const [index, source] of sources.entries()) {
+            if (index > 0) {
+                await insertReservedAiAttempt(db, {
+                    jobKey: source.jobKey,
+                    operationKey: source.operationKey,
+                    attempt: 1,
+                    reservationToken: fixtureToken(800 + index),
+                    modelName: source.modelName,
+                    location: source.location,
+                    stage: source.stage,
+                    thinkingLevel: source.thinkingLevel,
+                    mediaCount: source.mediaCount,
+                    mediaResolution: source.mediaResolution,
+                    promptVersion: source.promptVersion,
+                    schemaVersion: source.schemaVersion,
+                    maxOutputTokens: source.maxOutputTokens,
+                });
+            }
+            const reserve = `SELECT public.reserve_analysis_revenue_cost_operation_v2('${requestId}','${source.jobKey}','${claimToken}','${source.jobInputHash}','ai_attempt','${source.operationKey}',1::smallint) AS result`;
+            await expect(query<{ result: { disposition: string } }>(db, reserve))
+                .resolves.toMatchObject({ rows: [{ result: { disposition: 'accepted' } }] });
+        }
+
+        const rows = await db.query<{ source_operation_key_hash: string; operation_kind: string }>(`
+            SELECT source_operation_key_hash,operation_kind
+              FROM public.analysis_revenue_cost_operations
+             WHERE request_id='${requestId}' AND owner_kind='ai_attempt'
+        `);
+        expect(Object.fromEntries(rows.rows.map(row => [row.source_operation_key_hash, row.operation_kind])))
+            .toMatchObject(Object.fromEntries(sources.map(source => [
+                opaqueHash(source.operationKey), source.expectedOperationKind,
+            ])));
+    });
+
+    it('serializes simultaneous AI reserves against one Basic parent hard cap', async () => {
+        const db = await createDb();
+        await seedLiveSources(db);
+        const concurrentOperationKey = `private-account-name:${opaqueHash('concurrent-private-name')}`;
+        await insertReservedAiAttempt(db, {
+            jobKey: aiJobKey,
+            operationKey: concurrentOperationKey,
+            attempt: 1,
+            reservationToken: fixtureToken(901),
+            modelName: 'gemini-3.1-flash-lite',
+            location: 'global',
+            stage: 'privateAccountName',
+            thinkingLevel: 'MINIMAL',
+            mediaCount: 0,
+            mediaResolution: 'LOW',
+            promptVersion: 'private-account-name-v1',
+            schemaVersion: 1,
+            maxOutputTokens: 8192,
+        });
+        await db.exec(`
+            INSERT INTO public.analysis_revenue_cost_operations(
+                request_id,owner_kind,owner_key_hash,attempt,operation_kind,units,
+                source_job_key,source_operation_key_hash,source_attempt,
+                estimated_economic_usd,reserved_krw,economic_actual_usd,billed_actual_usd,
+                economic_actual_krw,billed_actual_krw,status,started_at,terminal_at
+            ) VALUES (
+                '${requestId}','provider_run','${hash('9')}',1,'detail_profile',1,
+                '${jobKey}','${opaqueHash(providerOperationKey)}',0,
+                1,0,1,0,1770,0,'settled',
+                clock_timestamp() - interval '5 minutes',clock_timestamp() - interval '4 minutes'
+            );
+            UPDATE public.analysis_revenue_run_ledgers
+               SET economic_actual_krw=(
+                       SELECT COALESCE(sum(economic_actual_krw),0)::integer
+                         FROM public.analysis_revenue_cost_operations
+                        WHERE request_id='${requestId}' AND status='settled'
+                   ),
+                   actual_cost_krw=(
+                       SELECT COALESCE(sum(economic_actual_krw),0)::integer
+                         FROM public.analysis_revenue_cost_operations
+                        WHERE request_id='${requestId}' AND status='settled'
+                   )
+             WHERE request_id='${requestId}';
+        `);
+        const reserve = (operationKey: string) => `SELECT public.reserve_analysis_revenue_cost_operation_v2('${requestId}','${aiJobKey}','${claimToken}','${aiInputHash}','ai_attempt','${operationKey}',1::smallint) AS result`;
+        const responses = await Promise.all([
+            query<{ result: { disposition: string } }>(db, reserve(aiOperationKey)),
+            query<{ result: { disposition: string } }>(db, reserve(concurrentOperationKey)),
+        ]);
+        expect(responses.map(response => response.rows[0]?.result.disposition).sort())
+            .toEqual(['accepted', 'denied']);
+        await expect(db.query(`
+            SELECT economic_actual_krw,reserved_cost_krw,cost_cap_krw,status,manual_review_reason
+              FROM public.analysis_revenue_run_ledgers WHERE request_id='${requestId}'
+        `)).resolves.toMatchObject({ rows: [expect.objectContaining({
+            status: 'manual_review', manual_review_reason: 'cost_denied',
+        })] });
+        const parent = await db.query<{ economic_actual_krw: number; reserved_cost_krw: number; cost_cap_krw: number }>(`
+            SELECT economic_actual_krw,reserved_cost_krw,cost_cap_krw
+              FROM public.analysis_revenue_run_ledgers WHERE request_id='${requestId}'
+        `);
+        const row = parent.rows[0];
+        expect(row).toBeDefined();
+        expect((row?.economic_actual_krw ?? 0) + (row?.reserved_cost_krw ?? 0))
+            .toBeLessThanOrEqual(row?.cost_cap_krw ?? 0);
+    });
+
+    it('fails closed for AI terminal amount, timestamp, source-attempt, and missing-child drift', async () => {
+        const amount = await createDb();
+        await seedLiveSources(amount);
+        const reserve = `SELECT public.reserve_analysis_revenue_cost_operation_v2('${requestId}','${aiJobKey}','${claimToken}','${aiInputHash}','ai_attempt','${aiOperationKey}',1::smallint)`;
+        const start = `SELECT public.mark_analysis_revenue_cost_operation_started_v2('${requestId}','${aiJobKey}','${claimToken}','${aiInputHash}','ai_attempt','${aiOperationKey}',1::smallint)`;
+        const settle = `SELECT public.settle_analysis_revenue_cost_operation_v2('${requestId}','${aiJobKey}','ai_attempt','${aiOperationKey}',1::smallint) AS result`;
+        await query(amount, reserve);
+        await query(amount, start);
+        await amount.exec(`
+            UPDATE public.analysis_v2_ai_attempts
+               SET status='success',usage_metadata_status='complete',usage_complete=TRUE,
+                   prompt_tokens=100,completion_tokens=50,thinking_tokens=10,total_tokens=160,
+                   latency_ms=10,estimated_cost_usd=0.000116,finish_reason='STOP',
+                   terminal_payload_hash='${hash('1')}',terminalized_at=created_at + interval '1 second',
+                   updated_at=created_at + interval '1 second'
+             WHERE request_id='${requestId}' AND operation_key='${aiOperationKey}' AND attempt=1
+        `);
+        await expect(query<{ result: { disposition: string; reason: string } }>(amount, settle))
+            .resolves.toMatchObject({ rows: [{ result: {
+                disposition: 'ambiguous', reason: 'ambiguous_external_call',
+            } }] });
+        await expect(amount.query(`
+            SELECT child.status,ledger.status AS ledger_status,ledger.manual_review_reason
+              FROM public.analysis_revenue_cost_operations child
+              JOIN public.analysis_revenue_run_ledgers ledger ON ledger.request_id=child.request_id
+             WHERE child.request_id='${requestId}' AND child.owner_kind='ai_attempt'
+        `)).resolves.toMatchObject({ rows: [{
+            status: 'ambiguous', ledger_status: 'manual_review', manual_review_reason: 'ambiguous_external_call',
+        }] });
+
+        const malformed = await createDb();
+        await seedLiveSources(malformed);
+        await query(malformed, reserve);
+        await query(malformed, start);
+        await malformed.exec(`
+            UPDATE public.analysis_v2_ai_attempts
+               SET status='success',usage_metadata_status='malformed',usage_complete=FALSE,
+                   latency_ms=10,finish_reason=NULL,terminal_payload_hash='${hash('4')}',
+                   terminalized_at=created_at + interval '1 second',updated_at=created_at + interval '1 second'
+             WHERE request_id='${requestId}' AND operation_key='${aiOperationKey}' AND attempt=1
+        `);
+        await expect(query<{ result: { disposition: string; reason: string } }>(malformed, settle))
+            .resolves.toMatchObject({ rows: [{ result: {
+                disposition: 'ambiguous', reason: 'ambiguous_external_call',
+            } }] });
+
+        const timestamp = await createDb();
+        await seedLiveSources(timestamp);
+        await query(timestamp, reserve);
+        await query(timestamp, start);
+        await timestamp.exec(`
+            UPDATE public.analysis_v2_ai_attempts
+               SET status='success',usage_metadata_status='complete',usage_complete=TRUE,
+                   prompt_tokens=100,completion_tokens=50,thinking_tokens=10,total_tokens=160,
+                   latency_ms=10,estimated_cost_usd=0.000115,finish_reason='STOP',
+                   terminal_payload_hash='${hash('2')}',terminalized_at=created_at,updated_at=created_at
+             WHERE request_id='${requestId}' AND operation_key='${aiOperationKey}' AND attempt=1
+        `);
+        const beforeTimestamp = await replayTotals(timestamp);
+        await expectError(query(timestamp, settle), 'REVENUE_COST_OPERATION_FENCE');
+        await expect(replayTotals(timestamp)).resolves.toEqual(beforeTimestamp);
+
+        const sourceAttempt = await createDb();
+        await seedLiveSources(sourceAttempt);
+        const beforeSourceAttempt = await replayTotals(sourceAttempt);
+        await expectError(query(sourceAttempt,
+            `SELECT public.settle_analysis_revenue_cost_operation_v2('${requestId}','${aiJobKey}','ai_attempt','${aiOperationKey}',2::smallint)`
+        ), 'REVENUE_COST_OPERATION_FENCE');
+        await expect(replayTotals(sourceAttempt)).resolves.toEqual(beforeSourceAttempt);
+
+        const missingChild = await createDb();
+        await seedLiveSources(missingChild);
+        const missingChildOperation = `private-account-name:${opaqueHash('missing-child')}`;
+        await insertReservedAiAttempt(missingChild, {
+            jobKey: aiJobKey,
+            operationKey: missingChildOperation,
+            attempt: 1,
+            reservationToken: fixtureToken(1001),
+            modelName: 'gemini-3.1-flash-lite',
+            location: 'global',
+            stage: 'privateAccountName',
+            thinkingLevel: 'MINIMAL',
+            mediaCount: 0,
+            mediaResolution: 'LOW',
+            promptVersion: 'private-account-name-v1',
+            schemaVersion: 1,
+            maxOutputTokens: 8192,
+        });
+        await missingChild.exec(`
+            UPDATE public.analysis_v2_ai_attempts
+               SET status='success',usage_metadata_status='complete',usage_complete=TRUE,
+                   prompt_tokens=100,completion_tokens=50,thinking_tokens=10,total_tokens=160,
+                   latency_ms=10,estimated_cost_usd=0.000115,finish_reason='STOP',
+                   terminal_payload_hash='${hash('3')}',terminalized_at=created_at + interval '1 second',
+                   updated_at=created_at + interval '1 second'
+             WHERE request_id='${requestId}' AND operation_key='${missingChildOperation}' AND attempt=1
+        `);
+        const beforeMissingChild = await replayTotals(missingChild);
+        await expectError(query(missingChild,
+            `SELECT public.settle_analysis_revenue_cost_operation_v2('${requestId}','${aiJobKey}','ai_attempt','${missingChildOperation}',1::smallint)`
+        ), 'REVENUE_COST_OPERATION_FENCE');
+        await expect(replayTotals(missingChild)).resolves.toEqual(beforeMissingChild);
     });
 
     it.each(['completed', 'failed'])('rejects %s requests before a first reserve and a started replay without further cost mutation', async (requestStatus) => {
@@ -840,12 +1372,16 @@ describe('revenue cost operation ledger PGlite', () => {
         await expect(replayTotals(db)).resolves.toEqual(before);
     });
 
-    it('returns AI-not-ready for a valid AI start source before any mutation', async () => {
+    it('marks a reserved AI attempt immediately before its external boundary and replays exactly', async () => {
         const db = await createDb();
         await seedLiveSources(db);
-        const before = await replayTotals(db);
-        await expectError(query(db, `SELECT public.mark_analysis_revenue_cost_operation_started_v2('${requestId}','${jobKey}','${claimToken}','${inputHash}','ai_attempt','${aiOperationKey}',1::smallint)`), 'REVENUE_COST_OPERATION_AI_NOT_READY');
-        await expect(replayTotals(db)).resolves.toEqual(before);
+        const reserve = `SELECT public.reserve_analysis_revenue_cost_operation_v2('${requestId}','${aiJobKey}','${claimToken}','${aiInputHash}','ai_attempt','${aiOperationKey}',1::smallint)`;
+        const start = `SELECT public.mark_analysis_revenue_cost_operation_started_v2('${requestId}','${aiJobKey}','${claimToken}','${aiInputHash}','ai_attempt','${aiOperationKey}',1::smallint) AS result`;
+        await query(db, reserve);
+        await expect(query<{ result: { disposition: string; created: boolean } }>(db, start))
+            .resolves.toMatchObject({ rows: [{ result: { disposition: 'started', created: true } }] });
+        await expect(query<{ result: { disposition: string; replayed: boolean } }>(db, start))
+            .resolves.toMatchObject({ rows: [{ result: { disposition: 'started', replayed: true } }] });
     });
 
     it.each([

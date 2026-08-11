@@ -61,14 +61,20 @@ describe('revenue cost-operation migration contract', () => {
         expect(source).toContain('GRANT EXECUTE ON FUNCTION');
     });
 
-    it('exposes only service-only source-aware v2 reserve/start authority', () => {
+    it('exposes service-only source-aware reserve/start authority for provider and immutable AI attempts', () => {
         expect(source).toContain('FUNCTION public.reserve_analysis_revenue_cost_operation_v2');
         expect(source).toContain('FUNCTION public.mark_analysis_revenue_cost_operation_started_v2');
         expect(source).toContain('p_source_operation_key TEXT');
         expect(source).toContain('p_job_claim_token UUID');
         expect(source).toContain('DROP FUNCTION IF EXISTS public.reserve_analysis_revenue_cost_operation_v2(UUID,TEXT,UUID,TEXT,TEXT,TEXT,SMALLINT,TEXT,INTEGER,NUMERIC,TEXT)');
         expect(source).toContain('v_now := pg_catalog.clock_timestamp()');
-        expect(source).toContain("REVENUE_COST_OPERATION_AI_NOT_READY");
+        expect(source).toContain('analysis_revenue_ai_cost_max_usd_v1');
+        expect(source).toContain('analysis_revenue_ai_cost_owner_hash_v1');
+        expect(source).toContain('analysis_revenue_ai_cost_operation_mapping_v1');
+        expect(source).toContain("'stage_one_routing'");
+        expect(source).toContain("'stage_one_routing_retry'");
+        expect(source).toContain("'resolver'");
+        expect(source).not.toContain('REVENUE_COST_OPERATION_AI_NOT_READY');
         expect(source).toContain("COALESCE(pg_catalog.sum(CASE WHEN status IN ('reserved','started') THEN reserved_krw ELSE 0 END), 0)");
         expect(source).toContain("REVOKE ALL ON FUNCTION public.reserve_analysis_revenue_cost_operation_v2");
         expect(source).toContain("GRANT EXECUTE ON FUNCTION public.reserve_analysis_revenue_cost_operation_v2");
@@ -76,10 +82,26 @@ describe('revenue cost-operation migration contract', () => {
         expect(source).toContain("GRANT EXECUTE ON FUNCTION public.mark_analysis_revenue_cost_operation_started_v2");
     });
 
-    it('adds provider-authoritative settlement and live-identity release without unsafe overloads', () => {
+    it('makes the AI path test-entitlement-only and keeps one unified operation ledger authority', () => {
+        expect(source).toContain("v_request.plan_access_mode_snapshot IS DISTINCT FROM 'test_entitlement'");
+        expect(source).toContain("v_request.selected_plan_id_snapshot NOT IN ('basic', 'standard')");
+        expect(source).toContain("v_policy.mode IS DISTINCT FROM 'test_operation_split'");
+        expect(source).toContain("v_runner_plan IS DISTINCT FROM v_request.selected_plan_id_snapshot");
+        expect(source).toContain("owner_kind = 'ai_attempt' AND source_job_key <> 'preflight'");
+        expect(source).toContain("p_source_kind IS DISTINCT FROM 'ai_attempt'");
+        expect(source).toContain('v_manifest_count <> 1');
+        expect(source).not.toContain('CREATE TABLE public.analysis_revenue_ai_cost_operations');
+        expect(source).not.toContain('CREATE TABLE public.analysis_ai_cost_operations');
+    });
+
+    it('keeps provider-authoritative settlement while adding terminal AI telemetry settlement and release-or-ambiguity', () => {
         expect(source).toContain('FUNCTION public.settle_analysis_revenue_cost_operation_v2');
         expect(source).toContain('FUNCTION public.release_analysis_revenue_cost_operation_v2');
-        expect(source).toContain("p_source_kind = 'ai_attempt' THEN RAISE EXCEPTION USING MESSAGE = 'REVENUE_COST_OPERATION_AI_NOT_READY'");
+        expect(source).toContain("v_ai.usage_metadata_status='complete'");
+        expect(source).toContain("v_ai.status IN ('rate_limited','rejected')");
+        expect(source).toContain("'ambiguous_external_call'");
+        expect(source).toContain("v_ai.estimated_cost_usd IS DISTINCT FROM v_actual_usd");
+        expect(source).toContain("p_source_attempt > 1");
         expect(source).toContain("v_provider.status = 'rejected'");
         expect(source).toContain("v_provider.status NOT IN ('succeeded','failed','aborted','timed_out')");
         expect(source).toContain("REVENUE_COST_OPERATION_NOT_READY");

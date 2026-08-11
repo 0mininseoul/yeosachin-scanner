@@ -150,7 +150,6 @@ const SAFE_RPC_REJECTIONS = new Set([
     'REVENUE_COST_OPERATION_NOT_READY',
     'REVENUE_COST_OPERATION_FENCE',
     'REVENUE_COST_OPERATION_DRIFT',
-    'REVENUE_COST_OPERATION_AI_NOT_READY',
 ]);
 
 function safeRpcFailure(error: { code?: string; message?: string }): string {
@@ -300,7 +299,6 @@ export class RevenueCostOperationStore {
 
     async reserveV2(input: ReserveRevenueCostOperationV2): Promise<RevenueCostOperationOutcome> {
         assertLiveSource(input);
-        if (input.sourceKind === 'ai_attempt') throw new Error('REVENUE_COST_OPERATION_AI_NOT_READY');
         return this.call('reserve_analysis_revenue_cost_operation_v2', {
             p_request_id: input.requestId, p_job_key: input.jobKey, p_job_claim_token: input.jobClaimToken,
             p_job_input_hash: input.jobInputHash, p_source_kind: input.sourceKind,
@@ -318,7 +316,6 @@ export class RevenueCostOperationStore {
 
     markStartedV2(input: RevenueCostLiveSource): Promise<RevenueCostOperationOutcome> {
         assertLiveSource(input);
-        if (input.sourceKind === 'ai_attempt') throw new Error('REVENUE_COST_OPERATION_AI_NOT_READY');
         return this.call('mark_analysis_revenue_cost_operation_started_v2', {
             p_request_id: input.requestId, p_job_key: input.jobKey, p_job_claim_token: input.jobClaimToken,
             p_job_input_hash: input.jobInputHash, p_source_kind: input.sourceKind,
@@ -341,7 +338,6 @@ export class RevenueCostOperationStore {
 
     settleV2(input: SettleRevenueCostOperationV2): Promise<RevenueCostOperationOutcome> {
         assertSettlementSource(input);
-        if (input.sourceKind === 'ai_attempt') throw new Error('REVENUE_COST_OPERATION_AI_NOT_READY');
         return this.call('settle_analysis_revenue_cost_operation_v2', {
             p_request_id: input.requestId, p_job_key: input.jobKey, p_source_kind: input.sourceKind,
             p_source_operation_key: input.sourceOperationKey, p_source_attempt: input.sourceAttempt,
@@ -358,7 +354,6 @@ export class RevenueCostOperationStore {
 
     releaseV2(input: ReleaseRevenueCostOperationV2): Promise<RevenueCostOperationOutcome> {
         assertLiveSource(input);
-        if (input.sourceKind === 'ai_attempt') throw new Error('REVENUE_COST_OPERATION_AI_NOT_READY');
         return this.call('release_analysis_revenue_cost_operation_v2', {
             p_request_id: input.requestId, p_job_key: input.jobKey, p_job_claim_token: input.jobClaimToken,
             p_job_input_hash: input.jobInputHash, p_source_kind: input.sourceKind,
