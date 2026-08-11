@@ -275,6 +275,61 @@ assert_contains "$temp_dir/gender-routing-hmac-absent-pin-dry-run.out" \
 [[ ! -d "$bad_gender_pin_dry_run_state/secrets" ]] \
   || fail "mismatched absent gender-routing HMAC dry-run created a secret resource"
 
+for gender_rotate_pin in 1 2; do
+  gender_rotate_state="$temp_dir/gender-rotate-absent-pin-$gender_rotate_pin-state"
+  mkdir -p "$gender_rotate_state"
+  if env "${secret_env[@]}" \
+    "FAKE_GCLOUD_STATE_DIR=$gender_rotate_state" \
+    "ANALYSIS_V2_GENDER_ROUTING_HMAC_SECRET_VERSION=$gender_rotate_pin" \
+    bash "$script_dir/configure-analysis-v2-secrets.sh" \
+    --rotate gender-routing-hmac \
+    >"$temp_dir/gender-rotate-absent-pin-$gender_rotate_pin.out" 2>&1; then
+    fail "gender-routing HMAC rotation accepted an absent resource with pin $gender_rotate_pin"
+  fi
+  assert_contains "$temp_dir/gender-rotate-absent-pin-$gender_rotate_pin.out" \
+    "cannot rotate gender-routing HMAC because Secret Manager resource ai-baram-v2-gender-routing-hmac does not exist"
+  [[ ! -e "$gender_rotate_state/api-enabled" ]] \
+    || fail "absent gender-routing HMAC rotation with pin $gender_rotate_pin enabled Secret Manager API"
+  [[ ! -d "$gender_rotate_state/secrets" ]] \
+    || fail "absent gender-routing HMAC rotation with pin $gender_rotate_pin mutated another secret or created the target"
+done
+
+for gender_rotate_dry_pin in 1 2; do
+  gender_rotate_dry_state="$temp_dir/gender-rotate-absent-dry-run-pin-$gender_rotate_dry_pin-state"
+  mkdir -p "$gender_rotate_dry_state"
+  if env "${secret_env[@]}" \
+    "FAKE_GCLOUD_STATE_DIR=$gender_rotate_dry_state" \
+    "ANALYSIS_V2_GENDER_ROUTING_HMAC_SECRET_VERSION=$gender_rotate_dry_pin" \
+    bash "$script_dir/configure-analysis-v2-secrets.sh" --dry-run \
+    --rotate gender-routing-hmac \
+    >"$temp_dir/gender-rotate-absent-dry-run-pin-$gender_rotate_dry_pin.out" 2>&1; then
+    fail "gender-routing HMAC dry-run rotation accepted an absent resource with pin $gender_rotate_dry_pin"
+  fi
+  assert_contains "$temp_dir/gender-rotate-absent-dry-run-pin-$gender_rotate_dry_pin.out" \
+    "cannot rotate gender-routing HMAC because Secret Manager resource ai-baram-v2-gender-routing-hmac does not exist"
+  [[ ! -e "$gender_rotate_dry_state/api-enabled" ]] \
+    || fail "absent gender-routing HMAC dry-run rotation with pin $gender_rotate_dry_pin enabled Secret Manager API"
+  [[ ! -d "$gender_rotate_dry_state/secrets" ]] \
+    || fail "absent gender-routing HMAC dry-run rotation with pin $gender_rotate_dry_pin mutated another secret or created the target"
+done
+
+gender_rotate_unpinned_state="$temp_dir/gender-rotate-absent-unpinned-state"
+mkdir -p "$gender_rotate_unpinned_state"
+if env -u ANALYSIS_V2_GENDER_ROUTING_HMAC_SECRET_VERSION \
+  "${secret_env[@]}" \
+  "FAKE_GCLOUD_STATE_DIR=$gender_rotate_unpinned_state" \
+  bash "$script_dir/configure-analysis-v2-secrets.sh" \
+  --rotate gender-routing-hmac \
+  >"$temp_dir/gender-rotate-absent-unpinned.out" 2>&1; then
+  fail "unpinned gender-routing HMAC rotation accepted an absent resource"
+fi
+assert_contains "$temp_dir/gender-rotate-absent-unpinned.out" \
+  "cannot rotate gender-routing HMAC because Secret Manager resource ai-baram-v2-gender-routing-hmac does not exist"
+[[ ! -e "$gender_rotate_unpinned_state/api-enabled" ]] \
+  || fail "unpinned absent gender-routing HMAC rotation enabled Secret Manager API"
+[[ ! -d "$gender_rotate_unpinned_state/secrets" ]] \
+  || fail "unpinned absent gender-routing HMAC rotation mutated another secret or created the target"
+
 touch "$temp_dir/state/api-enabled"
 if env "${secret_env[@]}" \
   bash "$script_dir/configure-analysis-v2-secrets.sh" --check \
@@ -426,6 +481,29 @@ pinned_env=(
   'ANALYSIS_V2_GENDER_ROUTING_HMAC_SECRET_VERSION=1'
 )
 
+gender_version_counter_before_rerun="$(<"$temp_dir/state/secrets/ai-baram-v2-gender-routing-hmac/version-counter")"
+cp "$temp_dir/state/secrets/ai-baram-v2-gender-routing-hmac/versions/1.json" \
+  "$temp_dir/gender-routing-hmac-version-before-rerun.json"
+gender_version_files_before_rerun="$(find \
+  "$temp_dir/state/secrets/ai-baram-v2-gender-routing-hmac/versions" \
+  -maxdepth 1 -type f -name '*.json' | sort)"
+env "${secret_env[@]}" "${pinned_env[@]}" \
+  bash "$script_dir/configure-analysis-v2-secrets.sh" \
+  >"$temp_dir/first-addition-rerun.out"
+assert_contains "$temp_dir/first-addition-rerun.out" \
+  "pin: ANALYSIS_V2_GENDER_ROUTING_HMAC_SECRET_VERSION=1"
+[[ "$(<"$temp_dir/state/secrets/ai-baram-v2-gender-routing-hmac/version-counter")" \
+  == "$gender_version_counter_before_rerun" ]] \
+  || fail "ordinary apply after first gender-routing HMAC addition changed the version counter"
+gender_version_files_after_rerun="$(find \
+  "$temp_dir/state/secrets/ai-baram-v2-gender-routing-hmac/versions" \
+  -maxdepth 1 -type f -name '*.json' | sort)"
+[[ "$gender_version_files_after_rerun" == "$gender_version_files_before_rerun" ]] \
+  || fail "ordinary apply after first gender-routing HMAC addition changed version files"
+cmp -s "$temp_dir/gender-routing-hmac-version-before-rerun.json" \
+  "$temp_dir/state/secrets/ai-baram-v2-gender-routing-hmac/versions/1.json" \
+  || fail "ordinary apply after first gender-routing HMAC addition changed version 1"
+
 zero_gender_version_state="$temp_dir/zero-gender-version-state"
 cp -R "$temp_dir/state" "$zero_gender_version_state"
 rm -f "$zero_gender_version_state/secrets/ai-baram-v2-gender-routing-hmac/versions/1.json"
@@ -439,6 +517,36 @@ assert_contains "$temp_dir/zero-gender-version-recovery.out" \
   "pin: ANALYSIS_V2_GENDER_ROUTING_HMAC_SECRET_VERSION=1"
 [[ -f "$zero_gender_version_state/secrets/ai-baram-v2-gender-routing-hmac/versions/1.json" ]] \
   || fail "ordinary pinned apply did not recover a pre-existing zero-version gender-routing secret"
+
+zero_gender_check_state="$temp_dir/zero-gender-check-state"
+cp -R "$temp_dir/state" "$zero_gender_check_state"
+rm -f "$zero_gender_check_state/secrets/ai-baram-v2-gender-routing-hmac/versions/1.json"
+printf '0\n' >"$zero_gender_check_state/secrets/ai-baram-v2-gender-routing-hmac/version-counter"
+cp "$zero_gender_check_state/secrets/ai-baram-v2-gender-routing-hmac/metadata.json" \
+  "$temp_dir/zero-gender-check-metadata-before.json"
+cp "$zero_gender_check_state/secrets/ai-baram-v2-gender-routing-hmac/policy.json" \
+  "$temp_dir/zero-gender-check-policy-before.json"
+if env "${secret_env[@]}" \
+  "FAKE_GCLOUD_STATE_DIR=$zero_gender_check_state" \
+  "${pinned_env[@]}" \
+  bash "$script_dir/configure-analysis-v2-secrets.sh" --check \
+  >"$temp_dir/zero-gender-check.out" 2>&1; then
+  fail "Secret Manager check accepted an existing zero-version gender-routing resource"
+fi
+assert_contains "$temp_dir/zero-gender-check.out" \
+  "ai-baram-v2-gender-routing-hmac has no version; run ordinary apply to resume initial version creation"
+[[ ! -f "$zero_gender_check_state/secrets/ai-baram-v2-gender-routing-hmac/versions/1.json" ]] \
+  || fail "zero-version gender-routing check created a version"
+[[ "$(<"$zero_gender_check_state/secrets/ai-baram-v2-gender-routing-hmac/version-counter")" == "0" ]] \
+  || fail "zero-version gender-routing check changed the version counter"
+cmp -s "$temp_dir/zero-gender-check-metadata-before.json" \
+  "$zero_gender_check_state/secrets/ai-baram-v2-gender-routing-hmac/metadata.json" \
+  || fail "zero-version gender-routing check mutated the resource metadata"
+cmp -s "$temp_dir/zero-gender-check-policy-before.json" \
+  "$zero_gender_check_state/secrets/ai-baram-v2-gender-routing-hmac/policy.json" \
+  || fail "zero-version gender-routing check mutated the resource IAM policy"
+[[ -e "$zero_gender_check_state/api-enabled" ]] \
+  || fail "zero-version gender-routing check changed Secret Manager API state"
 
 missing_gender_check_state="$temp_dir/missing-gender-check-state"
 cp -R "$temp_dir/state" "$missing_gender_check_state"
