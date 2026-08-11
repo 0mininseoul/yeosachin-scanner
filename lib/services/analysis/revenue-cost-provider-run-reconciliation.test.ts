@@ -54,7 +54,9 @@ describe('revenue cost provider-run reconciliation settlement', () => {
         });
         const settlement = createRevenueCostProviderRunSettlement(fixture.client);
 
-        await expect(settlement.settleAfterUsageReconciliation(reconciledRun()))
+        await expect(settlement.settleAfterUsageReconciliation(reconciledRun(), {
+            knownRevenueCostOperation: true,
+        }))
             .resolves.toBeUndefined();
 
         expect(fixture.rpc).toHaveBeenCalledWith(
@@ -76,6 +78,7 @@ describe('revenue cost provider-run reconciliation settlement', () => {
         await expect(settlement.settleAfterUsageReconciliation(reconciledRun()))
             .resolves.toBeUndefined();
 
+        expect(fixture.from).not.toHaveBeenCalled();
         expect(fixture.rpc).not.toHaveBeenCalled();
     });
 
@@ -92,12 +95,58 @@ describe('revenue cost provider-run reconciliation settlement', () => {
             });
         const settlement = createRevenueCostProviderRunSettlement(fixture.client);
 
-        await expect(settlement.settleAfterUsageReconciliation(reconciledRun()))
+        await expect(settlement.settleAfterUsageReconciliation(reconciledRun(), {
+            knownRevenueCostOperation: true,
+        }))
             .rejects.toThrow('ANALYSIS_V2_REVENUE_COST_SETTLEMENT_MANUAL_REVIEW');
 
         expect(fixture.rpc.mock.calls.map(([name]) => name)).toEqual([
             'settle_analysis_revenue_cost_operation_v2',
             'mark_analysis_revenue_manual_review_v1',
         ]);
+    });
+
+    it('fails closed to manual review when an exact trusted-child lookup fails', async () => {
+        const rpc = vi.fn().mockResolvedValue({
+            data: { disposition: 'manual_review', created: false, replayed: false },
+            error: null,
+        });
+        const maybeSingle = vi.fn(async () => ({
+            data: null,
+            error: { code: 'PGRST000', message: 'network unavailable' },
+        }));
+        const eq = vi.fn(() => ({ eq, maybeSingle }));
+        const select = vi.fn(() => ({ eq, maybeSingle }));
+        const from = vi.fn(() => ({ select }));
+        const settlement = createRevenueCostProviderRunSettlement(
+            { rpc, from } as unknown as RevenueCostProviderRunSettlementClient
+        );
+
+        await expect(settlement.settleAfterUsageReconciliation(reconciledRun(), {
+            knownRevenueCostOperation: true,
+        })).rejects.toThrow('ANALYSIS_V2_REVENUE_COST_SETTLEMENT_MANUAL_REVIEW');
+
+        expect(rpc).toHaveBeenCalledWith(
+            'mark_analysis_revenue_manual_review_v1',
+            { p_request_id: requestId, p_reason_code: 'ambiguous_external_call' }
+        );
+    });
+
+    it('fails closed to manual review when a queue-proven exact child disappears before settlement', async () => {
+        const fixture = clientWithChild(null);
+        fixture.rpc.mockResolvedValue({
+            data: { disposition: 'manual_review', created: false, replayed: false },
+            error: null,
+        });
+        const settlement = createRevenueCostProviderRunSettlement(fixture.client);
+
+        await expect(settlement.settleAfterUsageReconciliation(reconciledRun(), {
+            knownRevenueCostOperation: true,
+        })).rejects.toThrow('ANALYSIS_V2_REVENUE_COST_SETTLEMENT_MANUAL_REVIEW');
+
+        expect(fixture.rpc).toHaveBeenCalledWith(
+            'mark_analysis_revenue_manual_review_v1',
+            { p_request_id: requestId, p_reason_code: 'ambiguous_external_call' }
+        );
     });
 });

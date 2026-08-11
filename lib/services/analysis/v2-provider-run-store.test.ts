@@ -569,6 +569,123 @@ describe('analysis V2 provider run store', () => {
         );
     });
 
+    it('fails closed and cleans up a possibly committed child when revenue reservation transport fails', async () => {
+        const { rpc, client } = clientWithRpc();
+        rpc.mockImplementation((name, params) => {
+            switch (name) {
+                case ANALYSIS_V2_PROVIDER_RUN_DATABASE_NAMES.loadRpc:
+                    return Promise.resolve({ data: null, error: null });
+                case ANALYSIS_V2_PROVIDER_RUN_DATABASE_NAMES.reserveRpc:
+                    return createdReservationFromParams(params);
+                case ANALYSIS_V2_PROVIDER_RUN_DATABASE_NAMES.rejectedRpc:
+                    return Promise.resolve({
+                        data: storedRow('rejected', {
+                            reservationToken: params.p_reservation_token,
+                        }),
+                        error: null,
+                    });
+                case 'begin_analysis_revenue_cost_ledger_v1':
+                    return Promise.resolve({
+                        data: { disposition: 'begun', created: true, replayed: false },
+                        error: null,
+                    });
+                case 'reserve_analysis_revenue_cost_operation_v2':
+                    // The caller cannot distinguish a transport failure before
+                    // commit from one after the exact child was reserved.
+                    return Promise.resolve({
+                        data: null,
+                        error: { code: 'PGRST000', message: 'network unavailable' },
+                    });
+                case 'release_analysis_revenue_cost_operation_v2':
+                    return Promise.resolve({
+                        data: { disposition: 'released', created: true, replayed: false },
+                        error: null,
+                    });
+                default:
+                    throw new Error(`unexpected RPC ${String(name)}`);
+            }
+        });
+        const store = createAnalysisV2ProviderRunStore(client);
+        const binding = await store.bindAdapterCheckpoint(identity, {
+            revenueCostOperationStore: new RevenueCostOperationStore({ rpc }),
+        });
+
+        await expect(binding.checkpoint.onBeforeRunStart?.({
+            logicalProvider: 'apify',
+            actorId: identity.actorId,
+            credentialSlot: 'primary',
+            maxChargeUsd: 0.40205,
+        })).rejects.toThrow('REVENUE_COST_OPERATION_RPC_FAILED');
+
+        expect(rpc.mock.calls.map(([name]) => name)).toEqual([
+            ANALYSIS_V2_PROVIDER_RUN_DATABASE_NAMES.loadRpc,
+            ANALYSIS_V2_PROVIDER_RUN_DATABASE_NAMES.reserveRpc,
+            'begin_analysis_revenue_cost_ledger_v1',
+            'reserve_analysis_revenue_cost_operation_v2',
+            ANALYSIS_V2_PROVIDER_RUN_DATABASE_NAMES.rejectedRpc,
+            'release_analysis_revenue_cost_operation_v2',
+        ]);
+        expect(rpc.mock.calls.filter(([name]) => (
+            name === 'reserve_analysis_revenue_cost_operation_v2'
+        ))).toHaveLength(1);
+    });
+
+    it('manually fences a possibly committed child when no-call cleanup is not provable', async () => {
+        const { rpc, client } = clientWithRpc();
+        rpc.mockImplementation((name, params) => {
+            switch (name) {
+                case ANALYSIS_V2_PROVIDER_RUN_DATABASE_NAMES.loadRpc:
+                    return Promise.resolve({ data: null, error: null });
+                case ANALYSIS_V2_PROVIDER_RUN_DATABASE_NAMES.reserveRpc:
+                    return createdReservationFromParams(params);
+                case ANALYSIS_V2_PROVIDER_RUN_DATABASE_NAMES.rejectedRpc:
+                    return Promise.resolve({
+                        data: storedRow('rejected', {
+                            reservationToken: params.p_reservation_token,
+                        }),
+                        error: null,
+                    });
+                case 'begin_analysis_revenue_cost_ledger_v1':
+                    return Promise.resolve({
+                        data: null,
+                        error: { code: 'PGRST000', message: 'network unavailable' },
+                    });
+                case 'release_analysis_revenue_cost_operation_v2':
+                    return Promise.resolve({
+                        data: null,
+                        error: { code: 'P0001', message: 'REVENUE_COST_OPERATION_FENCE' },
+                    });
+                case 'mark_analysis_revenue_manual_review_v1':
+                    return Promise.resolve({
+                        data: { disposition: 'manual_review', created: false, replayed: false },
+                        error: null,
+                    });
+                default:
+                    throw new Error(`unexpected RPC ${String(name)}`);
+            }
+        });
+        const store = createAnalysisV2ProviderRunStore(client);
+        const binding = await store.bindAdapterCheckpoint(identity, {
+            revenueCostOperationStore: new RevenueCostOperationStore({ rpc }),
+        });
+
+        await expect(binding.checkpoint.onBeforeRunStart?.({
+            logicalProvider: 'apify',
+            actorId: identity.actorId,
+            credentialSlot: 'primary',
+            maxChargeUsd: 0.40205,
+        })).rejects.toThrow('REVENUE_COST_OPERATION_RPC_FAILED');
+
+        expect(rpc.mock.calls.map(([name]) => name)).toEqual([
+            ANALYSIS_V2_PROVIDER_RUN_DATABASE_NAMES.loadRpc,
+            ANALYSIS_V2_PROVIDER_RUN_DATABASE_NAMES.reserveRpc,
+            'begin_analysis_revenue_cost_ledger_v1',
+            ANALYSIS_V2_PROVIDER_RUN_DATABASE_NAMES.rejectedRpc,
+            'release_analysis_revenue_cost_operation_v2',
+            'mark_analysis_revenue_manual_review_v1',
+        ]);
+    });
+
     it('persists a definite no-call rejection and releases a reserved child when cost start fails before Apify', async () => {
         const { rpc, client } = clientWithRpc();
         rpc.mockImplementation((name, params) => {
@@ -746,6 +863,65 @@ describe('analysis V2 provider run store', () => {
         ]);
     });
 
+    it('manually fences a loaded terminal callback when its exact revenue child cannot settle', async () => {
+        const { rpc, client } = clientWithRpc();
+        rpc.mockImplementation((name) => {
+            switch (name) {
+                case ANALYSIS_V2_PROVIDER_RUN_DATABASE_NAMES.loadRpc:
+                    return Promise.resolve({ data: storedRow('running'), error: null });
+                case ANALYSIS_V2_PROVIDER_RUN_DATABASE_NAMES.reserveRpc:
+                    return Promise.resolve({
+                        data: reservationResponse(false, storedRow('running')),
+                        error: null,
+                    });
+                case ANALYSIS_V2_PROVIDER_RUN_DATABASE_NAMES.terminalRpc:
+                    return Promise.resolve({
+                        data: storedRow('failed', {
+                            actualUsageUsd: 0,
+                            usageReconciledAt: '2026-07-13T17:20:30.000Z',
+                        }),
+                        error: null,
+                    });
+                case 'settle_analysis_revenue_cost_operation_v2':
+                    return Promise.resolve({
+                        data: null,
+                        error: { code: 'P0001', message: 'REVENUE_COST_OPERATION_FENCE' },
+                    });
+                case 'mark_analysis_revenue_manual_review_v1':
+                    return Promise.resolve({
+                        data: { disposition: 'manual_review', created: false, replayed: false },
+                        error: null,
+                    });
+                default:
+                    throw new Error(`unexpected RPC ${String(name)}`);
+            }
+        });
+        const store = createAnalysisV2ProviderRunStore(client);
+        const binding = await store.bindAdapterCheckpoint(identity, {
+            revenueCostOperationStore: new RevenueCostOperationStore({ rpc }),
+        });
+
+        await expect(binding.checkpoint.onCostRunFinished?.({
+            logicalProvider: 'apify',
+            actorId: identity.actorId,
+            credentialSlot: 'primary',
+            maxChargeUsd: 0.40205,
+            runId,
+            status: 'failed',
+            usageTotalUsd: 0,
+        })).rejects.toThrow(
+            'ANALYSIS_V2_PROVIDER_RUN_REVENUE_COST_SETTLEMENT_MANUAL_REVIEW'
+        );
+
+        expect(rpc.mock.calls.map(([name]) => name)).toEqual([
+            ANALYSIS_V2_PROVIDER_RUN_DATABASE_NAMES.loadRpc,
+            ANALYSIS_V2_PROVIDER_RUN_DATABASE_NAMES.reserveRpc,
+            ANALYSIS_V2_PROVIDER_RUN_DATABASE_NAMES.terminalRpc,
+            'settle_analysis_revenue_cost_operation_v2',
+            'mark_analysis_revenue_manual_review_v1',
+        ]);
+    });
+
     it('uses startReserved only for an existing intent without a run ID', async () => {
         const { rpc, client } = clientWithRpc();
         rpc
@@ -762,6 +938,99 @@ describe('analysis V2 provider run store', () => {
         expect(binding.checkpoint.onBeforeRunStart).toBeUndefined();
         expect(binding.checkpoint.onRunStarted).toBeUndefined();
         expect(rpc).toHaveBeenCalledTimes(2);
+    });
+
+    it('rebinds a stale starting run to fence its exact opted-in child as ambiguous', async () => {
+        const { rpc, client } = clientWithRpc();
+        rpc.mockImplementation((name) => {
+            switch (name) {
+                case ANALYSIS_V2_PROVIDER_RUN_DATABASE_NAMES.loadRpc:
+                    return Promise.resolve({ data: storedRow('starting'), error: null });
+                case ANALYSIS_V2_PROVIDER_RUN_DATABASE_NAMES.reserveRpc:
+                    return Promise.resolve({
+                        data: reservationResponse(false, storedRow('starting')),
+                        error: null,
+                    });
+                case 'release_analysis_revenue_cost_operation_v2':
+                    return Promise.resolve({
+                        data: {
+                            disposition: 'ambiguous',
+                            created: true,
+                            replayed: false,
+                            reason: 'ambiguous_external_call',
+                        },
+                        error: null,
+                    });
+                default:
+                    throw new Error(`unexpected RPC ${String(name)}`);
+            }
+        });
+        const store = createAnalysisV2ProviderRunStore(client);
+        const binding = await store.bindAdapterCheckpoint(identity, {
+            revenueCostOperationStore: new RevenueCostOperationStore({ rpc }),
+        });
+
+        expect(binding.checkpoint.startReserved).toBe(true);
+        expect(binding.checkpoint.onRunStartAmbiguous).toEqual(expect.any(Function));
+        await binding.checkpoint.onRunStartAmbiguous?.({
+            logicalProvider: 'apify',
+            actorId: identity.actorId,
+            credentialSlot: 'primary',
+            maxChargeUsd: 0.40205,
+        });
+
+        expect(rpc.mock.calls.map(([name]) => name)).toEqual([
+            ANALYSIS_V2_PROVIDER_RUN_DATABASE_NAMES.loadRpc,
+            ANALYSIS_V2_PROVIDER_RUN_DATABASE_NAMES.reserveRpc,
+            'release_analysis_revenue_cost_operation_v2',
+        ]);
+    });
+
+    it('manually fences a stale starting run when its exact revenue child is missing', async () => {
+        const { rpc, client } = clientWithRpc();
+        rpc.mockImplementation((name) => {
+            switch (name) {
+                case ANALYSIS_V2_PROVIDER_RUN_DATABASE_NAMES.loadRpc:
+                    return Promise.resolve({ data: storedRow('starting'), error: null });
+                case ANALYSIS_V2_PROVIDER_RUN_DATABASE_NAMES.reserveRpc:
+                    return Promise.resolve({
+                        data: reservationResponse(false, storedRow('starting')),
+                        error: null,
+                    });
+                case 'release_analysis_revenue_cost_operation_v2':
+                    return Promise.resolve({
+                        data: null,
+                        error: { code: 'P0001', message: 'REVENUE_COST_OPERATION_FENCE' },
+                    });
+                case 'mark_analysis_revenue_manual_review_v1':
+                    return Promise.resolve({
+                        data: { disposition: 'manual_review', created: false, replayed: false },
+                        error: null,
+                    });
+                default:
+                    throw new Error(`unexpected RPC ${String(name)}`);
+            }
+        });
+        const store = createAnalysisV2ProviderRunStore(client);
+        const binding = await store.bindAdapterCheckpoint(identity, {
+            revenueCostOperationStore: new RevenueCostOperationStore({ rpc }),
+        });
+
+        await expect(binding.checkpoint.onRunStartAmbiguous?.({
+            logicalProvider: 'apify',
+            actorId: identity.actorId,
+            credentialSlot: 'primary',
+            maxChargeUsd: 0.40205,
+        })).rejects.toThrow(
+            'ANALYSIS_V2_PROVIDER_RUN_REVENUE_COST_AMBIGUITY_MANUAL_REVIEW'
+        );
+
+        expect(rpc.mock.calls.map(([name]) => name)).toEqual([
+            ANALYSIS_V2_PROVIDER_RUN_DATABASE_NAMES.loadRpc,
+            ANALYSIS_V2_PROVIDER_RUN_DATABASE_NAMES.reserveRpc,
+            'release_analysis_revenue_cost_operation_v2',
+            'mark_analysis_revenue_manual_review_v1',
+        ]);
     });
 
     it('resumes a terminal run so a lost response can rebuild output without another Actor start', async () => {
@@ -880,6 +1149,27 @@ describe('analysis V2 provider run store', () => {
             ANALYSIS_V2_PROVIDER_RUN_DATABASE_NAMES.listUnreconciledRpc,
             { p_limit: 12 }
         );
+    });
+
+    it('accepts a queue-proven exact revenue child after provider usage is already authoritative', async () => {
+        const { rpc, client } = clientWithRpc();
+        rpc.mockResolvedValueOnce({
+            data: [storedRow('failed', {
+                actualUsageUsd: 0.1,
+                usageReconciledAt: '2026-07-13T17:20:30.000Z',
+                revenueCostSettlementRequired: true,
+            })],
+            error: null,
+        });
+        const store = createAnalysisV2ProviderRunStore(client);
+
+        await expect(store.listUnreconciled(12)).resolves.toEqual([
+            expect.objectContaining({
+                status: 'failed',
+                actualUsageUsd: 0.1,
+                revenueCostSettlementRequired: true,
+            }),
+        ]);
     });
 
     it('reconciles usage without a live job claim behind the immutable run fences', async () => {

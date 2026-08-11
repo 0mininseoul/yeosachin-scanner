@@ -87,6 +87,12 @@ export interface StoredAnalysisV2ProviderRun
     runStartedAt: string | null;
     terminalizedAt: string | null;
     usageReconciledAt: string | null;
+    /**
+     * Internal reconciliation-list marker. SQL derives it only for an exact
+     * Basic/Standard test-entitlement revenue child; it is never stored on the
+     * provider row and never authorizes a new provider call.
+     */
+    revenueCostSettlementRequired?: true;
 }
 
 export interface AnalysisV2ProviderRunReservation {
@@ -444,16 +450,44 @@ function parseUnreconciledRuns(data: unknown, limit: number): StoredAnalysisV2Pr
     }
     return data.map((value) => {
         const run = parseStoredRun(value, 'reconciliation list');
+        const row = rpcObject(value, 'reconciliation list');
+        const revenueCostSettlementRequired = row.revenueCostSettlementRequired;
         if (
-            !['succeeded', 'failed', 'aborted', 'timed_out'].includes(run.status)
-            || run.actualUsageUsd !== null
-            || run.usageReconciledAt !== null
+            revenueCostSettlementRequired !== undefined
+            && typeof revenueCostSettlementRequired !== 'boolean'
         ) {
+            throw new Error(
+                'ANALYSIS_V2_PROVIDER_RUN_PERSISTENCE_ERROR: invalid revenue reconciliation marker.'
+            );
+        }
+        const usageReconciliationRequired = (
+            ['succeeded', 'failed', 'aborted', 'timed_out'].includes(run.status)
+            && run.actualUsageUsd === null
+            && run.usageReconciledAt === null
+        );
+        const revenueCostReconciliationRequired = revenueCostSettlementRequired === true
+            && (
+                (['succeeded', 'failed', 'aborted', 'timed_out'].includes(run.status)
+                    && run.runId !== null
+                    && run.runStartedAt !== null
+                    && run.terminalizedAt !== null
+                    && run.actualUsageUsd !== null
+                    && run.usageReconciledAt !== null)
+                || (run.status === 'rejected'
+                    && run.runId === null
+                    && run.runStartedAt === null
+                    && run.terminalizedAt !== null
+                    && run.actualUsageUsd === 0
+                    && run.usageReconciledAt !== null)
+            );
+        if (!usageReconciliationRequired && !revenueCostReconciliationRequired) {
             throw new Error(
                 'ANALYSIS_V2_PROVIDER_RUN_PERSISTENCE_ERROR: invalid unreconciled run.'
             );
         }
-        return run;
+        return revenueCostSettlementRequired === true
+            ? { ...run, revenueCostSettlementRequired: true }
+            : run;
     });
 }
 
@@ -725,6 +759,20 @@ export function createAnalysisV2ProviderRunStore(
         }
     };
 
+    const markRevenueCostManualReview = async (
+        revenueCostOperationStore: RevenueCostOperationStore | undefined,
+        input: AnalysisV2ProviderRunIdentity
+    ): Promise<void> => {
+        if (!revenueCostOperationStore) return;
+        const reviewed = await revenueCostOperationStore.manualReview({
+            requestId: input.requestId,
+            reasonCode: 'ambiguous_external_call',
+        });
+        if (reviewed.disposition !== 'manual_review') {
+            throw new Error('ANALYSIS_V2_PROVIDER_RUN_REVENUE_COST_MANUAL_REVIEW_CONFLICT');
+        }
+    };
+
     const settleRevenueCost = async (
         revenueCostOperationStore: RevenueCostOperationStore | undefined,
         input: AnalysisV2ProviderRunIdentity,
@@ -737,15 +785,31 @@ export function createAnalysisV2ProviderRunStore(
         ) {
             return;
         }
-        const settled = await revenueCostOperationStore.settleV2({
-            requestId: input.requestId,
-            jobKey: input.jobKey,
-            sourceKind: 'provider_run',
-            sourceOperationKey: input.operationKey,
-            sourceAttempt: 0,
-        });
-        if (settled.disposition !== 'settled') {
-            throw new Error('ANALYSIS_V2_PROVIDER_RUN_REVENUE_COST_SETTLEMENT_CONFLICT');
+        try {
+            const settled = await revenueCostOperationStore.settleV2({
+                requestId: input.requestId,
+                jobKey: input.jobKey,
+                sourceKind: 'provider_run',
+                sourceOperationKey: input.operationKey,
+                sourceAttempt: 0,
+            });
+            if (settled.disposition !== 'settled') {
+                throw new Error('ANALYSIS_V2_PROVIDER_RUN_REVENUE_COST_SETTLEMENT_CONFLICT');
+            }
+        } catch {
+            // The provider terminal row is already durable. A missing child,
+            // transport failure, or fenced settlement must leave a durable
+            // parent-level manual-review signal instead of losing recovery.
+            try {
+                await markRevenueCostManualReview(revenueCostOperationStore, input);
+            } catch {
+                throw new Error(
+                    'ANALYSIS_V2_PROVIDER_RUN_REVENUE_COST_SETTLEMENT_MANUAL_REVIEW_REQUIRED'
+                );
+            }
+            throw new Error(
+                'ANALYSIS_V2_PROVIDER_RUN_REVENUE_COST_SETTLEMENT_MANUAL_REVIEW'
+            );
         }
     };
 
@@ -762,19 +826,55 @@ export function createAnalysisV2ProviderRunStore(
         }
     };
 
+    const releaseRevenueCostAfterNoCall = async (
+        revenueCostOperationStore: RevenueCostOperationStore | undefined,
+        input: AnalysisV2ProviderRunIdentity
+    ): Promise<void> => {
+        if (!revenueCostOperationStore) return;
+        try {
+            await releaseRevenueCost(revenueCostOperationStore, input);
+        } catch {
+            try {
+                await markRevenueCostManualReview(revenueCostOperationStore, input);
+            } catch {
+                throw new Error(
+                    'ANALYSIS_V2_PROVIDER_RUN_REVENUE_COST_NO_CALL_CLEANUP_REQUIRED'
+                );
+            }
+        }
+    };
+
     const markRevenueCostAmbiguous = async (
         revenueCostOperationStore: RevenueCostOperationStore | undefined,
         input: AnalysisV2ProviderRunIdentity
     ): Promise<void> => {
         if (!revenueCostOperationStore) return;
-        // SQL uses the fenced release RPC as the only transition that can turn
-        // a just-started child plus a still-starting provider row into durable
-        // ambiguity.  The returned disposition must never be a release here.
-        const ambiguous = await revenueCostOperationStore.releaseV2(
-            revenueLiveSource(input)
-        );
-        if (ambiguous.disposition !== 'ambiguous') {
-            throw new Error('ANALYSIS_V2_PROVIDER_RUN_REVENUE_COST_AMBIGUITY_CONFLICT');
+        try {
+            // SQL uses the fenced release RPC as the only transition that can turn
+            // a just-started child plus a still-starting provider row into durable
+            // ambiguity. The returned disposition must never be a release here.
+            const ambiguous = await revenueCostOperationStore.releaseV2(
+                revenueLiveSource(input)
+            );
+            if (ambiguous.disposition !== 'ambiguous') {
+                throw new Error(
+                    'ANALYSIS_V2_PROVIDER_RUN_REVENUE_COST_AMBIGUITY_CONFLICT'
+                );
+            }
+        } catch {
+            // A stale starting row can predate the child or have an uncertain
+            // release response. It remains fail-closed only if the trusted
+            // cohort's parent ledger is durably sent to manual review.
+            try {
+                await markRevenueCostManualReview(revenueCostOperationStore, input);
+            } catch {
+                throw new Error(
+                    'ANALYSIS_V2_PROVIDER_RUN_REVENUE_COST_AMBIGUITY_MANUAL_REVIEW_REQUIRED'
+                );
+            }
+            throw new Error(
+                'ANALYSIS_V2_PROVIDER_RUN_REVENUE_COST_AMBIGUITY_MANUAL_REVIEW'
+            );
         }
     };
 
@@ -1128,11 +1228,10 @@ export function createAnalysisV2ProviderRunStore(
             const expected = { ...input, ...expectedProvider };
             const loaded = await load(input);
             // Only a fresh provider reservation can create this source child.
-            // Replays and resumes converge through authoritative reconciliation
-            // without re-opening or touching a live revenue operation.
-            const revenueCostOperationStore = loaded === null
-                ? bindingDependencies.revenueCostOperationStore
-                : undefined;
+            // A loaded row must still retain the injected trusted-cohort store:
+            // it may need to fence a stale start or settle its exact existing
+            // child, but it never re-opens or re-reserves that child.
+            const revenueCostOperationStore = bindingDependencies.revenueCostOperationStore;
             let reserved: StoredAnalysisV2ProviderRun | null = null;
             if (loaded !== null) {
                 const replay = await store.reserve(expected);
@@ -1167,7 +1266,7 @@ export function createAnalysisV2ProviderRunStore(
 
             const costCallbacks: Pick<
                 ProviderRunCheckpoint,
-                'onCostRunStarted' | 'onCostRunFinished'
+                'onCostRunStarted' | 'onCostRunFinished' | 'onRunStartAmbiguous'
             > = {
                 onCostRunStarted: async (event) => {
                     assertStarted(event);
@@ -1182,6 +1281,21 @@ export function createAnalysisV2ProviderRunStore(
                         actualUsageUsd: event.usageTotalUsd,
                     });
                     await settleRevenueCost(revenueCostOperationStore, input, reserved);
+                },
+                onRunStartAmbiguous: async (event) => {
+                    const current = requireReserved();
+                    const actual = canonicalProviderIdentity(event);
+                    if (
+                        current.status !== 'starting'
+                        || current.runId !== null
+                        || actual.logicalProvider !== current.logicalProvider
+                        || actual.actorId !== current.actorId
+                        || actual.credentialSlot !== current.credentialSlot
+                        || actual.maxChargeUsd !== current.maxChargeUsd
+                    ) {
+                        throw new AnalysisV2ProviderRunConflictError();
+                    }
+                    await markRevenueCostAmbiguous(revenueCostOperationStore, input);
                 },
             };
 
@@ -1224,10 +1338,14 @@ export function createAnalysisV2ProviderRunStore(
                         if (!reservation.created) {
                             throw new AnalysisV2ProviderRunAlreadyReservedError();
                         }
-                        let revenueCostReserved = false;
+                        let revenueCostOperationAttempted = false;
                         try {
+                            // A transport error can arrive after begin/reserve
+                            // committed. Mark the attempt before either RPC so
+                            // the rejected provider truth drives a release or
+                            // manual-review fence rather than a second reserve.
+                            revenueCostOperationAttempted = revenueCostOperationStore !== undefined;
                             await reserveRevenueCost(revenueCostOperationStore, input);
-                            revenueCostReserved = revenueCostOperationStore !== undefined;
                             await markRevenueCostStarted(revenueCostOperationStore, input);
                         } catch (costError) {
                             try {
@@ -1236,8 +1354,11 @@ export function createAnalysisV2ProviderRunStore(
                                     ...expectedProvider,
                                     reservationToken: reservation.run.reservationToken,
                                 });
-                                if (revenueCostReserved) {
-                                    await releaseRevenueCost(revenueCostOperationStore, input);
+                                if (revenueCostOperationAttempted) {
+                                    await releaseRevenueCostAfterNoCall(
+                                        revenueCostOperationStore,
+                                        input
+                                    );
                                 }
                             } catch {
                                 // No Actor call has happened, but the source/child cleanup
@@ -1277,21 +1398,6 @@ export function createAnalysisV2ProviderRunStore(
                             reservationToken: current.reservationToken,
                         });
                         await releaseRevenueCost(revenueCostOperationStore, input);
-                    },
-                    onRunStartAmbiguous: async (event) => {
-                        const current = requireReserved();
-                        const actual = canonicalProviderIdentity(event);
-                        if (
-                            current.status !== 'starting'
-                            || current.runId !== null
-                            || actual.logicalProvider !== expectedProvider.logicalProvider
-                            || actual.actorId !== expectedProvider.actorId
-                            || actual.credentialSlot !== expectedProvider.credentialSlot
-                            || actual.maxChargeUsd !== expectedProvider.maxChargeUsd
-                        ) {
-                            throw new AnalysisV2ProviderRunConflictError();
-                        }
-                        await markRevenueCostAmbiguous(revenueCostOperationStore, input);
                     },
                 },
             };

@@ -46,7 +46,10 @@ export interface AnalysisV2ProviderReconciliationSummary {
 }
 
 export interface AnalysisV2ProviderUsageRevenueCostSettlement {
-    settleAfterUsageReconciliation(run: StoredAnalysisV2ProviderRun): Promise<void>;
+    settleAfterUsageReconciliation(
+        run: StoredAnalysisV2ProviderRun,
+        options?: { knownRevenueCostOperation?: boolean },
+    ): Promise<void>;
 }
 
 export interface ProviderLifecycleDependencies {
@@ -228,6 +231,17 @@ export async function reconcileAnalysisV2ProviderUsage(
     const rows = await store.listUnreconciled(ANALYSIS_V2_PROVIDER_LIFECYCLE_MAX_ROWS);
     const outcomes = await runBounded(rows, concurrency, async run => {
         try {
+            if (
+                run.revenueCostSettlementRequired
+                && hasAuthoritativeRevenueCostSettlement(run)
+            ) {
+                const settlement = dependencies.revenueCostSettlement;
+                if (!settlement) return false;
+                await settlement.settleAfterUsageReconciliation(run, {
+                    knownRevenueCostOperation: true,
+                });
+                return true;
+            }
             if (!run.runId || !terminalStatusForStored(run.status)) return false;
             const snapshot = await lifecycleClient(
                 run.credentialSlot,
@@ -248,9 +262,13 @@ export async function reconcileAnalysisV2ProviderUsage(
                 status,
                 actualUsageUsd: usageTotalUsd,
             });
-            await dependencies.revenueCostSettlement?.settleAfterUsageReconciliation(
-                reconciled
-            );
+            if (run.revenueCostSettlementRequired) {
+                const settlement = dependencies.revenueCostSettlement;
+                if (!settlement) return false;
+                await settlement.settleAfterUsageReconciliation(reconciled, {
+                    knownRevenueCostOperation: true,
+                });
+            }
             return true;
         } catch {
             return false;
@@ -272,6 +290,24 @@ function terminalStatusForStored(
         || status === 'failed'
         || status === 'aborted'
         || status === 'timed_out';
+}
+
+function hasAuthoritativeRevenueCostSettlement(
+    run: StoredAnalysisV2ProviderRun
+): boolean {
+    if (run.status === 'rejected') {
+        return run.runId === null
+            && run.runStartedAt === null
+            && run.terminalizedAt !== null
+            && run.actualUsageUsd === 0
+            && run.usageReconciledAt !== null;
+    }
+    return terminalStatusForStored(run.status)
+        && run.runId !== null
+        && run.runStartedAt !== null
+        && run.terminalizedAt !== null
+        && run.actualUsageUsd !== null
+        && run.usageReconciledAt !== null;
 }
 
 export async function prepareAnalysisV2ProviderRunsForTerminalFailure(

@@ -49,6 +49,13 @@ function sourceOperationHash(operationKey: string): string {
 }
 
 function isSettledProviderUsage(run: StoredAnalysisV2ProviderRun): boolean {
+    if (run.status === 'rejected') {
+        return run.runId === null
+            && run.runStartedAt === null
+            && run.terminalizedAt !== null
+            && run.actualUsageUsd === 0
+            && run.usageReconciledAt !== null;
+    }
     return (run.status === 'succeeded'
             || run.status === 'failed'
             || run.status === 'aborted'
@@ -89,26 +96,34 @@ export function createRevenueCostProviderRunSettlement(
     revenueCostOperationStore = new RevenueCostOperationStore(client),
 ): AnalysisV2ProviderUsageRevenueCostSettlement {
     return {
-        async settleAfterUsageReconciliation(run) {
+        async settleAfterUsageReconciliation(run, options = {}) {
             if (!isSettledProviderUsage(run)) {
                 throw new Error('ANALYSIS_V2_REVENUE_COST_SETTLEMENT_NOT_READY');
             }
-            const { data, error } = await client
-                .from('analysis_revenue_cost_operations')
-                .select('status')
-                .eq('request_id', run.requestId)
-                .eq('owner_kind', 'provider_run')
-                .eq('source_job_key', run.jobKey)
-                .eq('source_operation_key_hash', sourceOperationHash(run.operationKey))
-                .eq('source_attempt', 0)
-                .maybeSingle();
-            if (error) {
-                throw new Error('ANALYSIS_V2_REVENUE_COST_SCOPE_LOOKUP_FAILED');
-            }
-            const status = childStatus(data);
-            if (status === null || !SETTLABLE_CHILD_STATUSES.has(status)) return;
+            // The provider-run reconciliation RPC emits this marker only after
+            // proving the exact active child belongs to the Basic/Standard test
+            // cohort. Without that proof, ordinary production runs retain their
+            // legacy behavior and never read or mutate revenue-cost state.
+            if (!options.knownRevenueCostOperation) return;
 
             try {
+                const { data, error } = await client
+                    .from('analysis_revenue_cost_operations')
+                    .select('status')
+                    .eq('request_id', run.requestId)
+                    .eq('owner_kind', 'provider_run')
+                    .eq('source_job_key', run.jobKey)
+                    .eq('source_operation_key_hash', sourceOperationHash(run.operationKey))
+                    .eq('source_attempt', 0)
+                    .maybeSingle();
+                if (error) {
+                    throw new Error('ANALYSIS_V2_REVENUE_COST_SCOPE_LOOKUP_FAILED');
+                }
+                const status = childStatus(data);
+                if (status === 'released' || status === 'denied') return;
+                if (status === null || !SETTLABLE_CHILD_STATUSES.has(status)) {
+                    throw new Error('ANALYSIS_V2_REVENUE_COST_SCOPE_MISSING');
+                }
                 const settled = await revenueCostOperationStore.settleV2({
                     requestId: run.requestId,
                     jobKey: run.jobKey,
@@ -116,7 +131,10 @@ export function createRevenueCostProviderRunSettlement(
                     sourceOperationKey: run.operationKey,
                     sourceAttempt: 0,
                 });
-                if (settled.disposition !== 'settled') {
+                const expectedDisposition = run.status === 'rejected'
+                    ? 'released'
+                    : 'settled';
+                if (settled.disposition !== expectedDisposition) {
                     throw new Error('ANALYSIS_V2_REVENUE_COST_SETTLEMENT_CONFLICT');
                 }
             } catch {

@@ -25,6 +25,7 @@ import {
     createAnalysisV2ProviderRunStore,
     type AnalysisV2ProviderRunSupabaseClient,
 } from '@/lib/services/analysis/v2-provider-run-store';
+import { RevenueCostOperationStore } from '@/lib/services/analysis/revenue-cost-operation-store';
 import type { InstagramProfile } from '@/lib/types/instagram';
 import { APIFY_CREDENTIAL_SLOTS } from './types';
 
@@ -876,6 +877,93 @@ describe('apifyProvider', () => {
         )).rejects.toThrow('SCRAPING_AMBIGUOUS_START_ERROR');
 
         expect(call).not.toHaveBeenCalled();
+    });
+
+    it('uses a rebound stale-start callback to durably fence its opted-in revenue child', async () => {
+        const requestId = '11111111-1111-4111-8111-111111111111';
+        const claimToken = '22222222-2222-4222-8222-222222222222';
+        const reservationToken = '33333333-3333-4333-8333-333333333333';
+        const inputHash = 'a'.repeat(64);
+        const operationKey = `relationship-followers:${'b'.repeat(64)}`;
+        const storedStarting = {
+            requestId,
+            jobKey: 'track:relationships:collect',
+            operationKey,
+            inputHash,
+            reservationToken,
+            logicalProvider: 'apify',
+            actorId: APIFY_RELATIONSHIP_ACTOR_ID,
+            credentialSlot: 'primary',
+            maxChargeUsd: 0.1,
+            status: 'starting',
+            runId: null,
+            actualUsageUsd: null,
+            reservedAt: '2026-08-11T00:00:00.000Z',
+            runStartedAt: null,
+            terminalizedAt: null,
+            usageReconciledAt: null,
+        };
+        const rpc = vi.fn(async (name: string) => {
+            switch (name) {
+                case 'load_analysis_v2_provider_run':
+                    return { data: storedStarting, error: null };
+                case 'reserve_analysis_v2_provider_run':
+                    return {
+                        data: { created: false, run: storedStarting },
+                        error: null,
+                    };
+                case 'release_analysis_revenue_cost_operation_v2':
+                    return {
+                        data: {
+                            disposition: 'ambiguous',
+                            created: true,
+                            replayed: false,
+                            reason: 'ambiguous_external_call',
+                        },
+                        error: null,
+                    };
+                default:
+                    throw new Error(`unexpected RPC ${name}`);
+            }
+        });
+        const providerRunStore = createAnalysisV2ProviderRunStore({
+            rpc,
+        } as AnalysisV2ProviderRunSupabaseClient);
+        const binding = await providerRunStore.bindAdapterCheckpoint({
+            requestId,
+            jobKey: 'track:relationships:collect',
+            claimToken,
+            operationKey,
+            inputHash,
+            logicalProvider: 'apify',
+            actorId: APIFY_RELATIONSHIP_ACTOR_ID,
+            credentialSlot: 'primary',
+            maxChargeUsd: 0.1,
+        }, {
+            revenueCostOperationStore: new RevenueCostOperationStore({ rpc }),
+        });
+        const { client, call } = mockClient([]);
+
+        await expect(startOrResumeApifyActor(
+            client,
+            APIFY_RELATIONSHIP_ACTOR_ID,
+            {},
+            {
+                logicalProvider: 'apify',
+                credentialSlot: 'primary',
+                timeoutSecs: 120,
+                maxItems: 1,
+                maxTotalChargeUsd: 0.1,
+            },
+            { ...binding.checkpoint, recordUsage: vi.fn() }
+        )).rejects.toThrow('SCRAPING_AMBIGUOUS_START_ERROR');
+
+        expect(call).not.toHaveBeenCalled();
+        expect(rpc.mock.calls.map(([name]) => name)).toEqual([
+            'load_analysis_v2_provider_run',
+            'reserve_analysis_v2_provider_run',
+            'release_analysis_revenue_cost_operation_v2',
+        ]);
     });
 
     it('aborts a newly started run when its durable checkpoint cannot be stored', async () => {

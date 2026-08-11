@@ -4,6 +4,13 @@ import { pgcrypto } from '@electric-sql/pglite/contrib/pgcrypto';
 import { afterEach, describe, expect, it } from 'vitest';
 
 const migration = readFileSync(new URL('../../../supabase/migrations/20260810100000_add_revenue_cost_operation_ledger.sql', import.meta.url), 'utf8');
+const providerSettlementQueueMigration = readFileSync(
+    new URL(
+        '../../../supabase/migrations/20260811100000_add_revenue_cost_provider_settlement_queue.sql',
+        import.meta.url
+    ),
+    'utf8'
+);
 const requestId = '11111111-1111-4111-8111-111111111111';
 const standardRequestId = '12121212-1212-4121-8121-121212121212';
 const userId = '22222222-2222-4222-8222-222222222222';
@@ -77,7 +84,7 @@ $$;
 	 input_hash text NOT NULL CHECK (input_hash ~ '^[a-f0-9]{64}$'), job_claim_token uuid NOT NULL, reservation_token uuid NOT NULL,
 	 logical_provider text NOT NULL CHECK(logical_provider IN ('apify','coderx')), actor_id text NOT NULL CHECK(char_length(actor_id) BETWEEN 3 AND 200 AND actor_id ~ '^[A-Za-z0-9][A-Za-z0-9._~/-]{2,199}$'), credential_slot text NOT NULL, max_charge_usd numeric(18,12) NOT NULL,
 	 status text NOT NULL CHECK(status IN ('starting','running','rejected','succeeded','failed','aborted','timed_out')),
-	 run_id text, actual_usage_usd numeric(18,12), reserved_at timestamptz NOT NULL DEFAULT clock_timestamp(), run_started_at timestamptz, terminalized_at timestamptz, usage_reconciled_at timestamptz, updated_at timestamptz NOT NULL DEFAULT clock_timestamp(),
+	 run_id text, actual_usage_usd numeric(18,12), reserved_at timestamptz NOT NULL DEFAULT clock_timestamp(), run_started_at timestamptz, terminalized_at timestamptz, usage_reconciled_at timestamptz, usage_reconciliation_attempt_count integer NOT NULL DEFAULT 0, usage_reconciliation_attempted_at timestamptz, updated_at timestamptz NOT NULL DEFAULT clock_timestamp(),
 	 PRIMARY KEY(request_id,job_key,operation_key), UNIQUE(reservation_token), FOREIGN KEY(request_id,job_key) REFERENCES public.analysis_pipeline_jobs(request_id,job_key) ON DELETE CASCADE,
 	 CONSTRAINT analysis_v2_provider_run_credential_check CHECK (public.analysis_v2_valid_apify_credential_slot(credential_slot)),
 	 CONSTRAINT analysis_v2_provider_run_run_id_check CHECK (run_id IS NULL OR run_id ~ '^[A-Za-z0-9]{8,64}$'),
@@ -133,6 +140,7 @@ async function createDb(legacyParents = false): Promise<PGlite> {
         `);
     }
     await db.exec(migration);
+    await db.exec(providerSettlementQueueMigration);
     return db;
 }
 
@@ -951,6 +959,91 @@ describe('revenue cost operation ledger PGlite', () => {
         await query(db, settle);
         await expect(db.query(`SELECT status,manual_review_reason,billed_actual_krw FROM public.analysis_revenue_run_ledgers WHERE request_id='${requestId}'`))
             .resolves.toMatchObject({ rows: [{ status: 'manual_review', manual_review_reason: 'routing_failure', billed_actual_krw: 0 }] });
+    });
+
+    it('keeps a terminal failed provider child discoverable until its authoritative settlement succeeds', async () => {
+        const db = await createDb();
+        await seedLiveSources(db);
+        const reserve = `SELECT public.reserve_analysis_revenue_cost_operation_v2('${requestId}','${jobKey}','${claimToken}','${inputHash}','provider_run','${providerOperationKey}',0::smallint)`;
+        const start = `SELECT public.mark_analysis_revenue_cost_operation_started_v2('${requestId}','${jobKey}','${claimToken}','${inputHash}','provider_run','${providerOperationKey}',0::smallint)`;
+        const list = 'SELECT public.list_analysis_v2_unreconciled_provider_runs(64) AS result';
+        const settle = `SELECT public.settle_analysis_revenue_cost_operation_v2('${requestId}','${jobKey}','provider_run','${providerOperationKey}',0::smallint) AS result`;
+        await query(db, reserve);
+        await query(db, start);
+        await db.exec(`
+            UPDATE public.analysis_v2_provider_runs
+               SET status='failed',run_id='run12345',reserved_at=clock_timestamp() - interval '4 minutes',
+                   run_started_at=clock_timestamp() - interval '3 minutes',
+                   terminalized_at=clock_timestamp() - interval '2 minutes',actual_usage_usd=0.1,
+                   usage_reconciled_at=clock_timestamp() - interval '90 seconds',updated_at=clock_timestamp()
+             WHERE request_id='${requestId}' AND operation_key='${providerOperationKey}';
+            UPDATE public.analysis_revenue_cost_operations
+               SET created_at=clock_timestamp() - interval '4 minutes',
+                   started_at=clock_timestamp() - interval '3 minutes'
+             WHERE request_id='${requestId}' AND owner_kind='provider_run'
+        `);
+
+        const afterCrash = await query<{ result: Array<Record<string, unknown>> }>(db, list);
+        expect(afterCrash.rows[0]?.result).toEqual([
+            expect.objectContaining({
+                status: 'failed',
+                actualUsageUsd: 0.1,
+                revenueCostSettlementRequired: true,
+            }),
+        ]);
+
+        // A process can die after provider usage is durable. Reset only the
+        // durable queue backoff, then prove the same exact child is retried.
+        await db.exec(`
+            UPDATE public.analysis_v2_provider_runs
+               SET usage_reconciliation_attempted_at=clock_timestamp() - interval '2 hours',
+                   updated_at=clock_timestamp()
+             WHERE request_id='${requestId}' AND operation_key='${providerOperationKey}'
+        `);
+        await expect(query<{ result: Array<Record<string, unknown>> }>(db, list))
+            .resolves.toMatchObject({
+                rows: [{ result: [expect.objectContaining({
+                    revenueCostSettlementRequired: true,
+                })] }],
+            });
+        await expect(query<{ result: { disposition: string } }>(db, settle))
+            .resolves.toMatchObject({ rows: [{ result: { disposition: 'settled' } }] });
+        await expect(query<{ result: Array<unknown> }>(db, list))
+            .resolves.toMatchObject({ rows: [{ result: [] }] });
+    });
+
+    it('retries a possibly committed reserved child only after rejected provider truth is durable', async () => {
+        const db = await createDb();
+        await seedLiveSources(db);
+        const reserve = `SELECT public.reserve_analysis_revenue_cost_operation_v2('${requestId}','${jobKey}','${claimToken}','${inputHash}','provider_run','${providerOperationKey}',0::smallint)`;
+        const list = 'SELECT public.list_analysis_v2_unreconciled_provider_runs(64) AS result';
+        const settle = `SELECT public.settle_analysis_revenue_cost_operation_v2('${requestId}','${jobKey}','provider_run','${providerOperationKey}',0::smallint) AS result`;
+        await query(db, reserve);
+        await db.exec(`
+            UPDATE public.analysis_v2_provider_runs
+               SET status='rejected',reserved_at=clock_timestamp() - interval '4 minutes',
+                   terminalized_at=clock_timestamp() - interval '2 minutes',actual_usage_usd=0,
+                   usage_reconciled_at=clock_timestamp() - interval '90 seconds',updated_at=clock_timestamp()
+             WHERE request_id='${requestId}' AND operation_key='${providerOperationKey}'
+        `);
+
+        await expect(query<{ result: Array<Record<string, unknown>> }>(db, list))
+            .resolves.toMatchObject({
+                rows: [{ result: [expect.objectContaining({
+                    status: 'rejected',
+                    actualUsageUsd: 0,
+                    revenueCostSettlementRequired: true,
+                })] }],
+            });
+        await expect(query<{ result: { disposition: string } }>(db, settle))
+            .resolves.toMatchObject({ rows: [{ result: { disposition: 'released' } }] });
+        await expect(db.query(`
+            SELECT status,started_at IS NULL AS started_cleared
+              FROM public.analysis_revenue_cost_operations
+             WHERE request_id='${requestId}' AND owner_kind='provider_run'
+        `)).resolves.toMatchObject({
+            rows: [{ status: 'released', started_cleared: true }],
+        });
     });
 
     it('has only the four-argument reconciliation RPC and foundation schema properties', async () => {

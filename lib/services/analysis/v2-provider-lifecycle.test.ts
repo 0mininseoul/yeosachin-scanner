@@ -251,6 +251,7 @@ describe('analysis V2 paid-provider lifecycle', () => {
         const terminal = run(1, {
             status: 'succeeded',
             terminalizedAt: '2026-07-14T00:01:00.000Z',
+            revenueCostSettlementRequired: true,
         });
         const reconciled = run(1, {
             status: 'succeeded',
@@ -282,6 +283,87 @@ describe('analysis V2 paid-provider lifecycle', () => {
         });
 
         expect(settleAfterUsageReconciliation).toHaveBeenCalledOnce();
-        expect(settleAfterUsageReconciliation).toHaveBeenCalledWith(reconciled);
+        expect(settleAfterUsageReconciliation).toHaveBeenCalledWith(reconciled, {
+            knownRevenueCostOperation: true,
+        });
+    });
+
+    it('does not invoke the revenue lifecycle for an unchanged production provider run', async () => {
+        const terminal = run(1, {
+            status: 'succeeded',
+            terminalizedAt: '2026-07-14T00:01:00.000Z',
+        });
+        const reconciled = run(1, {
+            status: 'succeeded',
+            actualUsageUsd: 0.2,
+            terminalizedAt: '2026-07-14T00:01:00.000Z',
+            usageReconciledAt: '2026-07-14T00:02:00.000Z',
+        });
+        const providerStore = store({
+            listUnreconciled: vi.fn(async () => [terminal]),
+            reconcileUsage: vi.fn(async () => reconciled),
+        });
+        const settleAfterUsageReconciliation = vi.fn(async () => undefined);
+
+        await expect(reconcileAnalysisV2ProviderUsage({
+            store: providerStore,
+            revenueCostSettlement: { settleAfterUsageReconciliation },
+            clientForSlot: () => ({
+                run: () => ({
+                    get: async () => ({ status: 'SUCCEEDED', usageTotalUsd: 0.2 }),
+                    abort: vi.fn(),
+                    waitForFinish: vi.fn(),
+                }),
+            }),
+        })).resolves.toMatchObject({ reconciled: 1, failed: 0 });
+
+        expect(settleAfterUsageReconciliation).not.toHaveBeenCalled();
+    });
+
+    it('retries an authoritative opted-in child after a crash between usage persistence and settlement', async () => {
+        const queued = run(1, {
+            status: 'succeeded',
+            actualUsageUsd: 0.2,
+            terminalizedAt: '2026-07-14T00:01:00.000Z',
+            usageReconciledAt: '2026-07-14T00:02:00.000Z',
+            revenueCostSettlementRequired: true,
+        });
+        const providerStore = store({
+            listUnreconciled: vi.fn(async () => [queued]),
+        });
+        const settleAfterUsageReconciliation = vi.fn()
+            .mockRejectedValueOnce(new Error('settlement transport failure'))
+            .mockResolvedValueOnce(undefined);
+        const clientForSlot = vi.fn();
+
+        await expect(reconcileAnalysisV2ProviderUsage({
+            store: providerStore,
+            revenueCostSettlement: { settleAfterUsageReconciliation },
+            clientForSlot,
+        })).resolves.toEqual({
+            eligible: 1,
+            reconciled: 0,
+            failed: 1,
+            hasMore: false,
+        });
+        await expect(reconcileAnalysisV2ProviderUsage({
+            store: providerStore,
+            revenueCostSettlement: { settleAfterUsageReconciliation },
+            clientForSlot,
+        })).resolves.toEqual({
+            eligible: 1,
+            reconciled: 1,
+            failed: 0,
+            hasMore: false,
+        });
+
+        expect(providerStore.reconcileUsage).not.toHaveBeenCalled();
+        expect(clientForSlot).not.toHaveBeenCalled();
+        expect(settleAfterUsageReconciliation).toHaveBeenNthCalledWith(1, queued, {
+            knownRevenueCostOperation: true,
+        });
+        expect(settleAfterUsageReconciliation).toHaveBeenNthCalledWith(2, queued, {
+            knownRevenueCostOperation: true,
+        });
     });
 });
