@@ -243,6 +243,38 @@ secret_env=(
 )
 export ANALYSIS_V2_GENDER_ROUTING_HMAC_SECRET_VERSION=1
 
+bad_gender_pin_state="$temp_dir/bad-gender-pin-state"
+mkdir -p "$bad_gender_pin_state"
+if env "${secret_env[@]}" \
+  "FAKE_GCLOUD_STATE_DIR=$bad_gender_pin_state" \
+  'ANALYSIS_V2_GENDER_ROUTING_HMAC_SECRET_VERSION=2' \
+  bash "$script_dir/configure-analysis-v2-secrets.sh" \
+  >"$temp_dir/gender-routing-hmac-absent-pin-apply.out" 2>&1; then
+  fail "absent gender-routing HMAC accepted a mismatched first-version pin in apply"
+fi
+assert_contains "$temp_dir/gender-routing-hmac-absent-pin-apply.out" \
+  "ANALYSIS_V2_GENDER_ROUTING_HMAC_SECRET_VERSION must be 1 when ai-baram-v2-gender-routing-hmac is absent"
+[[ ! -e "$bad_gender_pin_state/api-enabled" ]] \
+  || fail "mismatched absent gender-routing HMAC pin mutated Secret Manager API state"
+[[ ! -d "$bad_gender_pin_state/secrets" ]] \
+  || fail "mismatched absent gender-routing HMAC pin created a secret resource"
+
+bad_gender_pin_dry_run_state="$temp_dir/bad-gender-pin-dry-run-state"
+mkdir -p "$bad_gender_pin_dry_run_state"
+if env "${secret_env[@]}" \
+  "FAKE_GCLOUD_STATE_DIR=$bad_gender_pin_dry_run_state" \
+  'ANALYSIS_V2_GENDER_ROUTING_HMAC_SECRET_VERSION=2' \
+  bash "$script_dir/configure-analysis-v2-secrets.sh" --dry-run \
+  >"$temp_dir/gender-routing-hmac-absent-pin-dry-run.out" 2>&1; then
+  fail "absent gender-routing HMAC accepted a mismatched first-version pin in dry-run"
+fi
+assert_contains "$temp_dir/gender-routing-hmac-absent-pin-dry-run.out" \
+  "ANALYSIS_V2_GENDER_ROUTING_HMAC_SECRET_VERSION must be 1 when ai-baram-v2-gender-routing-hmac is absent"
+[[ ! -e "$bad_gender_pin_dry_run_state/api-enabled" ]] \
+  || fail "mismatched absent gender-routing HMAC dry-run mutated Secret Manager API state"
+[[ ! -d "$bad_gender_pin_dry_run_state/secrets" ]] \
+  || fail "mismatched absent gender-routing HMAC dry-run created a secret resource"
+
 touch "$temp_dir/state/api-enabled"
 if env "${secret_env[@]}" \
   bash "$script_dir/configure-analysis-v2-secrets.sh" --check \
@@ -393,6 +425,34 @@ pinned_env=(
   'ANALYSIS_V2_PREFLIGHT_IDENTITY_HMAC_SECRET_VERSION=1'
   'ANALYSIS_V2_GENDER_ROUTING_HMAC_SECRET_VERSION=1'
 )
+
+zero_gender_version_state="$temp_dir/zero-gender-version-state"
+cp -R "$temp_dir/state" "$zero_gender_version_state"
+rm -f "$zero_gender_version_state/secrets/ai-baram-v2-gender-routing-hmac/versions/1.json"
+printf '0\n' >"$zero_gender_version_state/secrets/ai-baram-v2-gender-routing-hmac/version-counter"
+env "${secret_env[@]}" \
+  "FAKE_GCLOUD_STATE_DIR=$zero_gender_version_state" \
+  "${pinned_env[@]}" \
+  bash "$script_dir/configure-analysis-v2-secrets.sh" \
+  >"$temp_dir/zero-gender-version-recovery.out"
+assert_contains "$temp_dir/zero-gender-version-recovery.out" \
+  "pin: ANALYSIS_V2_GENDER_ROUTING_HMAC_SECRET_VERSION=1"
+[[ -f "$zero_gender_version_state/secrets/ai-baram-v2-gender-routing-hmac/versions/1.json" ]] \
+  || fail "ordinary pinned apply did not recover a pre-existing zero-version gender-routing secret"
+
+missing_gender_check_state="$temp_dir/missing-gender-check-state"
+cp -R "$temp_dir/state" "$missing_gender_check_state"
+rm -rf "$missing_gender_check_state/secrets/ai-baram-v2-gender-routing-hmac"
+if env "${secret_env[@]}" \
+  "FAKE_GCLOUD_STATE_DIR=$missing_gender_check_state" \
+  "${pinned_env[@]}" \
+  bash "$script_dir/configure-analysis-v2-secrets.sh" --check \
+  >"$temp_dir/missing-gender-check.out" 2>&1; then
+  fail "Secret Manager check accepted an absent gender-routing HMAC resource"
+fi
+assert_contains "$temp_dir/missing-gender-check.out" \
+  "Secret Manager resource ai-baram-v2-gender-routing-hmac does not exist"
+
 for gender_routing_hmac_mode in apply dry-run check; do
   if [[ "$gender_routing_hmac_mode" == "apply" ]]; then
     if env -u ANALYSIS_V2_GENDER_ROUTING_HMAC_SECRET_VERSION "${secret_env[@]}" \
@@ -593,6 +653,23 @@ if env "${secret_env[@]}" "${pinned_env[@]}" \
 fi
 assert_contains "$temp_dir/invalid-gender-routing-hmac.out" \
   "required secret source value is missing or invalid: ANALYSIS_V2_GENDER_ROUTING_HMAC_SECRET"
+
+whitespace_gender_hmac_source="$temp_dir/whitespace-gender-routing-hmac.env"
+sed 's|^ANALYSIS_V2_GENDER_ROUTING_HMAC_SECRET=.*|ANALYSIS_V2_GENDER_ROUTING_HMAC_SECRET=" R0VOREVSX1JPVVRJTkdfSE1BQ19TRUNSRVRfMDEyMzQ1Njc4OUFCQ0RFRg== "|' \
+  "$temp_dir/source.env" >"$whitespace_gender_hmac_source"
+if env "${secret_env[@]}" "${pinned_env[@]}" \
+  "ANALYSIS_V2_SECRET_SOURCE_ENV_FILE=$whitespace_gender_hmac_source" \
+  'ANALYSIS_V2_GENDER_ROUTING_HMAC_SECRET_VERSION=2' \
+  bash "$script_dir/configure-analysis-v2-secrets.sh" --rotate gender-routing-hmac \
+  >"$temp_dir/whitespace-gender-routing-hmac.out" 2>&1; then
+  fail "quoted whitespace around gender-routing HMAC was accepted"
+fi
+assert_contains "$temp_dir/whitespace-gender-routing-hmac.out" \
+  "required secret source value is missing or invalid: ANALYSIS_V2_GENDER_ROUTING_HMAC_SECRET"
+assert_not_contains "$temp_dir/whitespace-gender-routing-hmac.out" \
+  "R0VOREVSX1JPVVRJTkdfSE1BQ19TRUNSRVRfMDEyMzQ1Njc4OUFCQ0RFRg=="
+[[ ! -f "$temp_dir/state/secrets/ai-baram-v2-gender-routing-hmac/versions/3.json" ]] \
+  || fail "whitespace gender-routing HMAC unexpectedly created a new version"
 
 env "${secret_env[@]}" "${pinned_env[@]}" \
   'ANALYSIS_V2_GENDER_ROUTING_HMAC_SECRET_VERSION=2' \
