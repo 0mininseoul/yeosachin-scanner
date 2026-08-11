@@ -1327,7 +1327,7 @@ BEGIN
         pg_catalog.count(*) FILTER (WHERE lifecycle_anomaly = 'skipped_start')::INTEGER
       INTO v_unsettled, v_denied, v_ambiguous, v_skipped_start
       FROM public.analysis_revenue_cost_operations WHERE request_id = p_request_id;
-    IF v_parent.manual_review_reason = 'cost_overrun' THEN
+    IF v_parent.manual_review_reason IN ('cost_overrun','cost_denied') THEN
         RETURN;
     ELSIF v_denied > 0 THEN
         UPDATE public.analysis_revenue_run_ledgers
@@ -1728,8 +1728,9 @@ BEGIN
         END IF;
         IF v_child.status NOT IN ('reserved','started','ambiguous') THEN
             UPDATE public.analysis_revenue_run_ledgers
-               SET status='manual_review',manual_review_reason=CASE WHEN manual_review_reason='cost_overrun'
-                   THEN 'cost_overrun' ELSE 'ambiguous_external_call' END
+               SET status='manual_review',manual_review_reason=CASE
+                   WHEN manual_review_reason IN ('cost_overrun','cost_denied') THEN manual_review_reason
+                   ELSE 'ambiguous_external_call' END
              WHERE request_id=p_request_id;
             RETURN pg_catalog.jsonb_build_object('disposition','ambiguous','created',FALSE,'replayed',FALSE,'operationId',v_child.id,'reason','ambiguous_external_call');
         END IF;
@@ -1743,8 +1744,9 @@ BEGIN
          WHERE id=v_child.id;
         UPDATE public.analysis_revenue_run_ledgers
            SET reserved_cost_krw=reserved_cost_krw-CASE WHEN v_was_active THEN v_child.reserved_krw ELSE 0 END,
-               status='manual_review',manual_review_reason=CASE WHEN manual_review_reason='cost_overrun'
-                   THEN 'cost_overrun' ELSE 'ambiguous_external_call' END
+               status='manual_review',manual_review_reason=CASE
+                   WHEN manual_review_reason IN ('cost_overrun','cost_denied') THEN manual_review_reason
+                   ELSE 'ambiguous_external_call' END
          WHERE request_id=p_request_id;
         RETURN pg_catalog.jsonb_build_object('disposition','ambiguous','created',TRUE,'replayed',FALSE,'operationId',v_child.id,'reason','ambiguous_external_call');
     END IF;
@@ -1755,8 +1757,9 @@ BEGIN
            OR v_child.economic_actual_usd IS DISTINCT FROM v_actual_usd OR v_child.billed_actual_usd IS DISTINCT FROM 0
            OR v_child.economic_actual_krw IS DISTINCT FROM v_actual_krw OR v_child.billed_actual_krw IS DISTINCT FROM 0 THEN
             UPDATE public.analysis_revenue_run_ledgers
-               SET status='manual_review',manual_review_reason=CASE WHEN manual_review_reason='cost_overrun'
-                   THEN 'cost_overrun' ELSE 'ambiguous_external_call' END
+               SET status='manual_review',manual_review_reason=CASE
+                   WHEN manual_review_reason IN ('cost_overrun','cost_denied') THEN manual_review_reason
+                   ELSE 'ambiguous_external_call' END
              WHERE request_id=p_request_id;
             RETURN pg_catalog.jsonb_build_object('disposition','ambiguous','created',FALSE,'replayed',FALSE,'operationId',v_child.id,'reason','ambiguous_external_call');
         END IF;
@@ -1764,8 +1767,9 @@ BEGIN
     END IF;
     IF v_child.status NOT IN ('reserved','started','ambiguous') THEN
         UPDATE public.analysis_revenue_run_ledgers
-           SET status='manual_review',manual_review_reason=CASE WHEN manual_review_reason='cost_overrun'
-               THEN 'cost_overrun' ELSE 'ambiguous_external_call' END
+           SET status='manual_review',manual_review_reason=CASE
+               WHEN manual_review_reason IN ('cost_overrun','cost_denied') THEN manual_review_reason
+               ELSE 'ambiguous_external_call' END
          WHERE request_id=p_request_id;
         RETURN pg_catalog.jsonb_build_object('disposition','ambiguous','created',FALSE,'replayed',FALSE,'operationId',v_child.id,'reason','ambiguous_external_call');
     END IF;
@@ -1884,7 +1888,9 @@ BEGIN
        SET status='ambiguous',terminal_at=v_now WHERE id=v_child.id;
     UPDATE public.analysis_revenue_run_ledgers
        SET reserved_cost_krw=reserved_cost_krw-v_child.reserved_krw,
-           status='manual_review',manual_review_reason='ambiguous_external_call'
+           status='manual_review',manual_review_reason=CASE
+               WHEN manual_review_reason IN ('cost_overrun','cost_denied') THEN manual_review_reason
+               ELSE 'ambiguous_external_call' END
      WHERE request_id=p_request_id;
     RETURN pg_catalog.jsonb_build_object('disposition','ambiguous','created',TRUE,'replayed',FALSE,'operationId',v_child.id,'reason','ambiguous_external_call');
 END;

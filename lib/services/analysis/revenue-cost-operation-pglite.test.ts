@@ -349,6 +349,7 @@ interface PgliteRevenueChildQuery {
 interface PgliteRevenueSettlementFixture {
     settlement: AnalysisV2ProviderUsageRevenueCostSettlement;
     rpcCalls: string[];
+    childLookupRoles: string[];
 }
 
 const SETTLE_V2_RPC = 'settle_analysis_revenue_cost_operation_v2';
@@ -418,7 +419,10 @@ async function executePgliteRevenueRpc(
     }
 }
 
-function pgliteRevenueChildQuery(db: PGlite): PgliteRevenueChildQuery {
+function pgliteRevenueChildQuery(
+    db: PGlite,
+    childLookupRoles: string[],
+): PgliteRevenueChildQuery {
     const filters = new Map<RevenueChildFilter, string | number>();
     const builder: PgliteRevenueChildQuery = {
         eq(column, value) {
@@ -444,8 +448,8 @@ function pgliteRevenueChildQuery(db: PGlite): PgliteRevenueChildQuery {
                 };
             }
             try {
-                const result = await query<{ status: string }>(db, `
-                    SELECT status
+                const result = await query<{ status: string; lookup_role: string }>(db, `
+                    SELECT status, CURRENT_USER AS lookup_role
                       FROM public.analysis_revenue_cost_operations
                      WHERE request_id=$1::uuid
                        AND owner_kind=$2::text
@@ -453,6 +457,7 @@ function pgliteRevenueChildQuery(db: PGlite): PgliteRevenueChildQuery {
                        AND source_operation_key_hash=$4::text
                        AND source_attempt=$5::smallint
                 `, [request, ownerKind, job, sourceHash, attempt]);
+                childLookupRoles.push(result.rows[0]?.lookup_role ?? '');
                 if (result.rows.length > 1) {
                     return {
                         data: null,
@@ -471,8 +476,10 @@ function pgliteRevenueChildQuery(db: PGlite): PgliteRevenueChildQuery {
 function createPgliteRevenueSettlementClient(db: PGlite): {
     client: RevenueCostProviderRunSettlementClient;
     rpcCalls: string[];
+    childLookupRoles: string[];
 } {
     const rpcCalls: string[] = [];
+    const childLookupRoles: string[] = [];
     const client: RevenueCostProviderRunSettlementClient = {
         async rpc(functionName, params) {
             rpcCalls.push(functionName);
@@ -487,12 +494,12 @@ function createPgliteRevenueSettlementClient(db: PGlite): {
                     if (columns !== 'status') {
                         throw new Error(`unexpected PGlite revenue columns: ${columns}`);
                     }
-                    return pgliteRevenueChildQuery(db);
+                    return pgliteRevenueChildQuery(db, childLookupRoles);
                 },
             };
         },
     };
-    return { client, rpcCalls };
+    return { client, rpcCalls, childLookupRoles };
 }
 
 function sourceOperationHash(operationKey: string): string {
@@ -500,10 +507,10 @@ function sourceOperationHash(operationKey: string): string {
 }
 
 function createPgliteRevenueSettlementFixture(db: PGlite): PgliteRevenueSettlementFixture {
-    const { client, rpcCalls } = createPgliteRevenueSettlementClient(db);
+    const { client, rpcCalls, childLookupRoles } = createPgliteRevenueSettlementClient(db);
     const store = new RevenueCostOperationStore(client);
     const settlement = createRevenueCostProviderRunSettlement(client, store);
-    return { settlement, rpcCalls };
+    return { settlement, rpcCalls, childLookupRoles };
 }
 
 async function providerRunFromDatabase(db: PGlite): Promise<StoredAnalysisV2ProviderRun> {
@@ -866,6 +873,45 @@ describe('revenue cost operation ledger PGlite', () => {
               FROM public.analysis_revenue_run_ledgers WHERE request_id='${requestId}'
         `)).resolves.toMatchObject({ rows: [{
             reserved_cost_krw: 0, status: 'manual_review', manual_review_reason: 'ambiguous_external_call',
+        }] });
+    });
+
+    it('keeps cost-denied monotonic when later AI telemetry is ambiguous and replayed', async () => {
+        const db = await createDb();
+        await seedLiveSources(db);
+        const reserve = `SELECT public.reserve_analysis_revenue_cost_operation_v2('${requestId}','${aiJobKey}','${claimToken}','${aiInputHash}','ai_attempt','${aiOperationKey}',1::smallint)`;
+        const start = `SELECT public.mark_analysis_revenue_cost_operation_started_v2('${requestId}','${aiJobKey}','${claimToken}','${aiInputHash}','ai_attempt','${aiOperationKey}',1::smallint)`;
+        const settle = `SELECT public.settle_analysis_revenue_cost_operation_v2('${requestId}','${aiJobKey}','ai_attempt','${aiOperationKey}',1::smallint) AS result`;
+        await query(db, reserve);
+        await query(db, start);
+        // A concurrent denied child is authoritative cost-cap evidence. Model its already-locked
+        // parent state here so this sibling's later terminal telemetry cannot downgrade it.
+        await db.exec(`
+            UPDATE public.analysis_revenue_run_ledgers
+               SET status='manual_review',manual_review_reason='cost_denied'
+             WHERE request_id='${requestId}'
+        `);
+        await db.exec(`
+            UPDATE public.analysis_v2_ai_attempts
+               SET status='ambiguous',usage_metadata_status='missing',usage_complete=FALSE,
+                   latency_ms=10,finish_reason=NULL,terminal_payload_hash='${hash('8')}',
+                   terminalized_at=created_at + interval '1 second',updated_at=created_at + interval '1 second'
+             WHERE request_id='${requestId}' AND operation_key='${aiOperationKey}' AND attempt=1
+        `);
+
+        await expect(query<{ result: { disposition: string } }>(db, settle))
+            .resolves.toMatchObject({ rows: [{ result: { disposition: 'ambiguous' } }] });
+        const afterFirstSettlement = await replayTotals(db);
+        await expect(query<{ result: { disposition: string; replayed: boolean } }>(db, settle))
+            .resolves.toMatchObject({ rows: [{ result: {
+                disposition: 'ambiguous', replayed: true,
+            } }] });
+        await expect(replayTotals(db)).resolves.toEqual(afterFirstSettlement);
+        await expect(db.query(`
+            SELECT status,manual_review_reason
+              FROM public.analysis_revenue_run_ledgers WHERE request_id='${requestId}'
+        `)).resolves.toMatchObject({ rows: [{
+            status: 'manual_review', manual_review_reason: 'cost_denied',
         }] });
     });
 
@@ -2002,6 +2048,24 @@ describe('revenue cost operation ledger PGlite', () => {
 
         expect(fixture.rpcCalls).toEqual([SETTLE_V2_RPC]);
         await expect(exactProviderCostState(db)).resolves.toEqual(before);
+    });
+
+    it('executes settlement child lookup through the BYPASSRLS service-role boundary', async () => {
+        const db = await createDb();
+        await prepareExactReleasedProviderChild(db);
+        const fixture = createPgliteRevenueSettlementFixture(db);
+
+        await expect(
+            fixture.settlement.settleAfterUsageReconciliation(
+                await providerRunFromDatabase(db),
+                { knownRevenueCostOperation: true },
+            ),
+        ).resolves.toBeUndefined();
+
+        expect(fixture.childLookupRoles).toEqual(['service_role']);
+        await expect(db.query<{ rolbypassrls: boolean }>(`
+            SELECT rolbypassrls FROM pg_roles WHERE rolname='service_role'
+        `)).resolves.toMatchObject({ rows: [{ rolbypassrls: true }] });
     });
 
     it('has only the four-argument reconciliation RPC and foundation schema properties', async () => {

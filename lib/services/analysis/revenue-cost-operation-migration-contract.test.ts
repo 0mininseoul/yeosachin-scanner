@@ -2,6 +2,20 @@ import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
 
 const source = readFileSync(new URL('../../../supabase/migrations/20260810100000_add_revenue_cost_operation_ledger.sql', import.meta.url), 'utf8');
+const AI_DISPATCH_MARKER = '-- Durable Gemini-attempt economic authority.';
+
+function aiDispatchWrapper(startSignature: string, endSignature?: string): string {
+    const aiDispatch = source.slice(source.indexOf(AI_DISPATCH_MARKER));
+    const start = aiDispatch.indexOf(startSignature);
+    const end = endSignature === undefined ? -1 : aiDispatch.indexOf(endSignature, start + 1);
+    return aiDispatch.slice(start, end === -1 ? undefined : end);
+}
+
+function aiReviewRefresh(): string {
+    const start = source.indexOf('CREATE OR REPLACE FUNCTION public.analysis_revenue_ai_cost_refresh_review_v1');
+    const end = source.indexOf('-- Preserve the provider implementation exactly', start);
+    return source.slice(start, end);
+}
 
 describe('revenue cost-operation migration contract', () => {
     it('freezes pricing and makes legacy parent actual cost non-null before pricing enforcement', () => {
@@ -111,20 +125,22 @@ describe('revenue cost-operation migration contract', () => {
         expect(source).toContain('GRANT EXECUTE ON FUNCTION public.release_analysis_revenue_cost_operation_v2(UUID,TEXT,UUID,TEXT,TEXT,TEXT,SMALLINT) TO service_role');
     });
 
-    it('uses immutable terminal lineage after PII scrub while keeping live release identity checks', () => {
-        const settlement = source.slice(
-            source.indexOf('CREATE OR REPLACE FUNCTION public.settle_analysis_revenue_cost_operation_v2'),
-            source.indexOf('-- Release retains the reserve/start live identity.'),
+    it('targets the exact AI terminal and release wrappers without raw target-field reads', () => {
+        const settlement = aiDispatchWrapper(
+            'CREATE OR REPLACE FUNCTION public.settle_analysis_revenue_cost_operation_v2',
+            'CREATE OR REPLACE FUNCTION public.release_analysis_revenue_cost_operation_v2',
         );
-        expect(settlement).toContain('analysis_v2_scrub_terminal_request_pii deliberately replaces both raw');
-        expect(settlement).toContain('v_parent.target_username_hmac IS DISTINCT FROM v_preflight.target_input_hash');
-        expect(settlement).toContain('v_parent.preflight_refreshed_at IS DISTINCT FROM v_preflight.admission_refreshed_at');
-        expect(settlement).toContain('v_parent.request_started_at IS DISTINCT FROM v_request.created_at');
+        expect(settlement).toContain('analysis_revenue_ai_cost_assert_lineage_v1(p_request_id,p_job_key,NULL,NULL,FALSE)');
+        expect(settlement).toContain('SELECT * INTO v_ai FROM public.analysis_v2_ai_attempts');
         expect(settlement).not.toContain('lower(v_preflight.target_instagram_id)');
         expect(settlement).not.toContain('lower(v_policy.target_instagram_id)');
-        const release = source.slice(source.indexOf('CREATE OR REPLACE FUNCTION public.release_analysis_revenue_cost_operation_v2'));
-        expect(release).toContain('lower(v_preflight.target_instagram_id)');
-        expect(release).toContain('lower(v_policy.target_instagram_id)');
+        const release = aiDispatchWrapper(
+            'CREATE OR REPLACE FUNCTION public.release_analysis_revenue_cost_operation_v2',
+        );
+        expect(release).toContain('analysis_revenue_ai_cost_assert_lineage_v1(p_request_id,p_job_key,p_job_claim_token,p_job_input_hash,TRUE)');
+        expect(release).toContain('RETURN public.settle_analysis_revenue_cost_operation_v2(');
+        expect(release).not.toContain('lower(v_preflight.target_instagram_id)');
+        expect(release).not.toContain('lower(v_policy.target_instagram_id)');
     });
 
     it('documents definite rejection and keeps terminal replays parent-state independent', () => {
@@ -134,20 +150,34 @@ describe('revenue cost-operation migration contract', () => {
         expect(source).toContain("v_parent.manual_review_reason='ambiguous_external_call' AND v_unsettled=0 AND v_denied=0");
     });
 
-    it('counts denied children before settlement mutation and fences a parent that does not retain cost-denied unless cost-overrun is stronger', () => {
-        const settlement = source.slice(
-            source.indexOf('CREATE OR REPLACE FUNCTION public.settle_analysis_revenue_cost_operation_v2'),
-            source.indexOf('-- Release retains the reserve/start live identity.'),
+    it('routes exact AI settlement through the denied-child precedence refresh rather than the earlier provider function', () => {
+        const settlement = aiDispatchWrapper(
+            'CREATE OR REPLACE FUNCTION public.settle_analysis_revenue_cost_operation_v2',
+            'CREATE OR REPLACE FUNCTION public.release_analysis_revenue_cost_operation_v2',
         );
-        const preMutationAggregation = settlement.slice(
-            settlement.indexOf("SELECT pg_catalog.count(*) FILTER (WHERE status='ambiguous')"),
-            settlement.indexOf('SELECT * INTO v_child FROM public.analysis_revenue_cost_operations'),
+        const refresh = aiReviewRefresh();
+        expect(settlement).toContain('PERFORM public.analysis_revenue_ai_cost_refresh_review_v1(p_request_id)');
+        expect(refresh).toContain("pg_catalog.count(*) FILTER (WHERE status = 'denied')::INTEGER");
+        expect(refresh).toContain('ELSIF v_denied > 0 THEN');
+        expect(refresh).toContain("manual_review_reason = 'cost_denied'");
+        expect(refresh).toContain("v_parent.manual_review_reason IN ('cost_overrun','cost_denied')");
+    });
+
+    it('targets the exact new AI dispatch wrappers and keeps cost-denied monotonic across settlement', () => {
+        const settlement = aiDispatchWrapper(
+            'CREATE OR REPLACE FUNCTION public.settle_analysis_revenue_cost_operation_v2',
+            'CREATE OR REPLACE FUNCTION public.release_analysis_revenue_cost_operation_v2',
         );
-        expect(preMutationAggregation).toContain("pg_catalog.count(*) FILTER (WHERE status='denied')::INTEGER");
-        expect(preMutationAggregation).toContain('v_denied > 0');
-        expect(preMutationAggregation).toContain("v_parent.manual_review_reason IS DISTINCT FROM 'cost_overrun'");
-        expect(preMutationAggregation).toContain("v_parent.manual_review_reason IS DISTINCT FROM 'cost_denied'");
-        expect(preMutationAggregation).toMatch(/v_denied > 0[\s\S]*?v_parent\.status IS DISTINCT FROM 'manual_review'[\s\S]*?v_parent\.manual_review_reason IS DISTINCT FROM 'cost_overrun' AND v_parent\.manual_review_reason IS DISTINCT FROM 'cost_denied'/);
+        const release = aiDispatchWrapper(
+            'CREATE OR REPLACE FUNCTION public.release_analysis_revenue_cost_operation_v2',
+        );
+
+        expect(settlement).toContain("IF p_source_kind='provider_run' THEN");
+        expect(settlement).toContain('SELECT * INTO v_ai FROM public.analysis_v2_ai_attempts');
+        expect(settlement).toContain("v_ai.usage_metadata_status='complete'");
+        expect(settlement).not.toContain('v_provider.actual_usage_usd');
+        expect(settlement).toContain("manual_review_reason IN ('cost_overrun','cost_denied')");
+        expect(release).toContain("manual_review_reason IN ('cost_overrun','cost_denied')");
     });
 
     it('restricts skipped-start lifecycle evidence to authoritative provider settlement and aggregates it below active ambiguity but above running', () => {

@@ -1,6 +1,12 @@
 import { describe, expect, it, vi } from 'vitest';
+import type {
+    AnalyzeWithGeminiOptions,
+    GeminiAttemptStartTelemetry,
+    GeminiAttemptTelemetry,
+} from '@/lib/services/ai/gemini';
 import {
     RevenueCostAiAttemptCostDeniedError,
+    RevenueCostAiAttemptLifecycleError,
     createRevenueCostAiAttemptLifecycle,
 } from './revenue-cost-ai-attempt-lifecycle';
 import type {
@@ -8,15 +14,51 @@ import type {
     RevenueCostOperationOutcome,
 } from './revenue-cost-operation-store';
 
-const source: RevenueCostLiveSource = {
+const fence = {
     requestId: '11111111-1111-4111-8111-111111111111',
-    jobKey: 'track:relationships:collect',
+    jobKey: 'track:private-names:batch:0',
     jobClaimToken: '33333333-3333-4333-8333-333333333333',
     jobInputHash: 'b'.repeat(64),
-    sourceKind: 'ai_attempt',
-    sourceOperationKey: `gender-triage:${'c'.repeat(64)}`,
-    sourceAttempt: 1,
+    operationKey: `private-account-name:${'c'.repeat(64)}`,
 };
+
+const startTelemetry: GeminiAttemptStartTelemetry = {
+    requestId: fence.requestId,
+    modelName: 'gemini-3.1-flash-lite',
+    location: 'global',
+    stage: 'privateAccountName',
+    thinkingLevel: 'MINIMAL',
+    mediaCount: 0,
+    mediaResolution: 'LOW',
+    promptVersion: 'private-account-name-v1',
+    schemaVersion: 1,
+    maxOutputTokens: 8192,
+    attempt: 1,
+    retryCount: 0,
+};
+
+const terminalTelemetry: GeminiAttemptTelemetry = {
+    ...startTelemetry,
+    tokenUsage: null,
+    usageComplete: false,
+    usageMetadataStatus: 'missing',
+    latencyMs: 12,
+    estimatedCostUsd: null,
+    disposition: 'rate_limited',
+    finishReason: null,
+};
+
+function sourceForAttempt(attempt: number): RevenueCostLiveSource {
+    return {
+        requestId: fence.requestId,
+        jobKey: fence.jobKey,
+        jobClaimToken: fence.jobClaimToken,
+        jobInputHash: fence.jobInputHash,
+        sourceKind: 'ai_attempt',
+        sourceOperationKey: fence.operationKey,
+        sourceAttempt: attempt,
+    };
+}
 
 function outcome(disposition: RevenueCostOperationOutcome['disposition']): RevenueCostOperationOutcome {
     return {
@@ -32,151 +74,152 @@ function store() {
         markStartedV2: vi.fn().mockResolvedValue(outcome('started')),
         settleV2: vi.fn().mockResolvedValue(outcome('settled')),
         releaseV2: vi.fn().mockResolvedValue(outcome('released')),
+        manualReview: vi.fn().mockResolvedValue(outcome('manual_review')),
     };
 }
 
+function callbackHooks() {
+    const operations = store();
+    const lifecycle = createRevenueCostAiAttemptLifecycle(operations);
+    const callbacks = lifecycle.bind({
+        scope: { accessMode: 'test_entitlement', planId: 'basic' },
+        fence,
+    });
+    return { callbacks, lifecycle, operations };
+}
+
 describe('RevenueCostAiAttemptLifecycle', () => {
-    it('reserves and marks durable AI cost before entering the external boundary', async () => {
-        const operations = store();
-        const calls: string[] = [];
-        operations.reserveV2.mockImplementation(async () => {
-            calls.push('reserve');
-            return outcome('accepted');
-        });
-        operations.markStartedV2.mockImplementation(async () => {
-            calls.push('started');
-            return outcome('started');
-        });
-        const lifecycle = createRevenueCostAiAttemptLifecycle(operations);
+    it('binds directly to the existing Gemini callbacks and derives the exact per-attempt source', async () => {
+        const { callbacks, lifecycle, operations } = callbackHooks();
+        const onBeforeAttempt: NonNullable<AnalyzeWithGeminiOptions<unknown>['onBeforeAttempt']>
+            = callbacks.onBeforeAttempt;
+        const onAttemptTelemetry: NonNullable<AnalyzeWithGeminiOptions<unknown>['onAttemptTelemetry']>
+            = callbacks.onAttemptTelemetry;
 
-        const result = await lifecycle.runMarked({
-            scope: { accessMode: 'test_entitlement', planId: 'basic' },
-            source,
-            runExternal: async () => {
-                calls.push('external');
-                return 'provider-result';
-            },
-        });
+        await onBeforeAttempt({ ...startTelemetry, attempt: 2, retryCount: 1 });
+        await onAttemptTelemetry({ ...terminalTelemetry, attempt: 2, retryCount: 1 });
 
-        expect(result).toBe('provider-result');
-        expect(operations.reserveV2).toHaveBeenCalledWith(source);
-        expect(operations.markStartedV2).toHaveBeenCalledWith(source);
-        expect(calls).toEqual(['reserve', 'started', 'external']);
+        expect('runMarked' in lifecycle).toBe(false);
+        expect(operations.reserveV2).toHaveBeenCalledWith(sourceForAttempt(2));
+        expect(operations.markStartedV2).toHaveBeenCalledWith(sourceForAttempt(2));
+        expect(operations.settleV2).toHaveBeenCalledWith({
+            requestId: fence.requestId,
+            jobKey: fence.jobKey,
+            sourceKind: 'ai_attempt',
+            sourceOperationKey: fence.operationKey,
+            sourceAttempt: 2,
+        });
     });
 
-    it('denies dispatch before the external boundary when the authoritative reserve denies', async () => {
-        const operations = store();
+    it('denies Gemini dispatch before its callback returns when the authoritative reserve denies', async () => {
+        const { callbacks, operations } = callbackHooks();
         operations.reserveV2.mockResolvedValue(outcome('denied'));
-        const lifecycle = createRevenueCostAiAttemptLifecycle(operations);
-        const runExternal = vi.fn().mockResolvedValue('should-not-run');
 
-        await expect(lifecycle.runMarked({
-            scope: { accessMode: 'test_entitlement', planId: 'standard' },
-            source,
-            runExternal,
-        })).rejects.toBeInstanceOf(RevenueCostAiAttemptCostDeniedError);
+        await expect(callbacks.onBeforeAttempt(startTelemetry))
+            .rejects.toBeInstanceOf(RevenueCostAiAttemptCostDeniedError);
 
         expect(operations.markStartedV2).not.toHaveBeenCalled();
-        expect(runExternal).not.toHaveBeenCalled();
+        expect(operations.manualReview).not.toHaveBeenCalled();
+        expect(operations.releaseV2).not.toHaveBeenCalled();
     });
 
-    it('fails closed before every revenue RPC when a non-AI source reaches the AI adapter', async () => {
-        const operations = store();
-        const lifecycle = createRevenueCostAiAttemptLifecycle(operations);
-        const runExternal = vi.fn().mockResolvedValue('should-not-run');
+    it('retries an ambiguous reserve transport response with the same exact identity before Gemini dispatch', async () => {
+        const { callbacks, operations } = callbackHooks();
+        operations.reserveV2
+            .mockRejectedValueOnce(new Error('transport disconnected after commit'))
+            .mockResolvedValueOnce(outcome('accepted'));
 
-        await expect(lifecycle.runMarked({
-            scope: { accessMode: 'test_entitlement', planId: 'basic' },
-            source: {
-                ...source,
-                sourceKind: 'provider_run',
-                sourceOperationKey: `relationship-followers:${'d'.repeat(64)}`,
-                sourceAttempt: 0,
-            },
-            runExternal,
+        await expect(callbacks.onBeforeAttempt(startTelemetry)).resolves.toBeUndefined();
+
+        expect(operations.reserveV2).toHaveBeenCalledTimes(2);
+        expect(operations.reserveV2).toHaveBeenNthCalledWith(1, sourceForAttempt(1));
+        expect(operations.reserveV2).toHaveBeenNthCalledWith(2, sourceForAttempt(1));
+        expect(operations.markStartedV2).toHaveBeenCalledWith(sourceForAttempt(1));
+        expect(operations.manualReview).not.toHaveBeenCalled();
+        expect(operations.releaseV2).not.toHaveBeenCalled();
+    });
+
+    it('fails closed into manual review without release or Gemini dispatch when exact reserve retry stays unresolved', async () => {
+        const { callbacks, operations } = callbackHooks();
+        operations.reserveV2.mockRejectedValue(new Error('transport disconnected after commit'));
+
+        await expect(callbacks.onBeforeAttempt(startTelemetry))
+            .rejects.toBeInstanceOf(RevenueCostAiAttemptLifecycleError);
+
+        expect(operations.reserveV2).toHaveBeenCalledTimes(2);
+        expect(operations.reserveV2).toHaveBeenNthCalledWith(1, sourceForAttempt(1));
+        expect(operations.reserveV2).toHaveBeenNthCalledWith(2, sourceForAttempt(1));
+        expect(operations.manualReview).toHaveBeenCalledWith({
+            requestId: fence.requestId,
+            reasonCode: 'ambiguous_external_call',
+        });
+        expect(operations.markStartedV2).not.toHaveBeenCalled();
+        expect(operations.releaseV2).not.toHaveBeenCalled();
+    });
+
+    it('does not cross the Gemini callback boundary when a start response is lost', async () => {
+        const { callbacks, operations } = callbackHooks();
+        operations.markStartedV2.mockRejectedValue(new Error('REVENUE_COST_OPERATION_RPC_FAILED'));
+
+        await expect(callbacks.onBeforeAttempt(startTelemetry))
+            .rejects.toThrow('REVENUE_COST_OPERATION_RPC_FAILED');
+
+        expect(operations.reserveV2).toHaveBeenCalledWith(sourceForAttempt(1));
+        expect(operations.markStartedV2).toHaveBeenCalledWith(sourceForAttempt(1));
+        expect(operations.releaseV2).toHaveBeenCalledWith(sourceForAttempt(1));
+    });
+
+    it('keeps proven-no-call release explicit and source-bound', async () => {
+        const { callbacks, operations } = callbackHooks();
+
+        await expect(callbacks.releaseBeforeDispatch(startTelemetry)).resolves.toMatchObject({
+            disposition: 'released',
+        });
+
+        expect(operations.releaseV2).toHaveBeenCalledWith(sourceForAttempt(1));
+    });
+
+    it('fails closed before every revenue RPC when callback identity drifts', async () => {
+        const { callbacks, operations } = callbackHooks();
+
+        await expect(callbacks.onBeforeAttempt({
+            ...startTelemetry,
+            requestId: '22222222-2222-4222-8222-222222222222',
+        })).rejects.toThrow('ANALYSIS_V2_REVENUE_COST_LIFECYCLE_ERROR');
+        await expect(callbacks.onAttemptTelemetry({
+            ...terminalTelemetry,
+            attempt: 2,
+            retryCount: 0,
         })).rejects.toThrow('ANALYSIS_V2_REVENUE_COST_LIFECYCLE_ERROR');
 
         expect(operations.reserveV2).not.toHaveBeenCalled();
         expect(operations.markStartedV2).not.toHaveBeenCalled();
-        expect(operations.releaseV2).not.toHaveBeenCalled();
-        expect(runExternal).not.toHaveBeenCalled();
+        expect(operations.settleV2).not.toHaveBeenCalled();
     });
 
-    it('runs ordinary production and Plus attempts without new revenue RPCs', async () => {
+    it('runs ordinary production and Plus callbacks without any new revenue RPC', async () => {
         const operations = store();
         const lifecycle = createRevenueCostAiAttemptLifecycle(operations);
-        const productionRun = vi.fn().mockResolvedValue('production');
-        const plusRun = vi.fn().mockResolvedValue('plus');
-
-        await expect(lifecycle.runMarked({
+        const production = lifecycle.bind({
             scope: { accessMode: 'production', planId: 'basic' },
-            source,
-            runExternal: productionRun,
-        })).resolves.toBe('production');
-        await expect(lifecycle.runMarked({
+            fence,
+        });
+        const plus = lifecycle.bind({
             scope: { accessMode: 'test_entitlement', planId: 'plus' },
-            source,
-            runExternal: plusRun,
-        })).resolves.toBe('plus');
+            fence,
+        });
 
-        expect(productionRun).toHaveBeenCalledOnce();
-        expect(plusRun).toHaveBeenCalledOnce();
+        await production.onBeforeAttempt(startTelemetry);
+        await production.onAttemptTelemetry(terminalTelemetry);
+        await production.releaseBeforeDispatch(startTelemetry);
+        await plus.onBeforeAttempt(startTelemetry);
+        await plus.onAttemptTelemetry(terminalTelemetry);
+        await plus.releaseBeforeDispatch(startTelemetry);
+
         expect(operations.reserveV2).not.toHaveBeenCalled();
         expect(operations.markStartedV2).not.toHaveBeenCalled();
         expect(operations.settleV2).not.toHaveBeenCalled();
         expect(operations.releaseV2).not.toHaveBeenCalled();
-    });
-
-    it('delegates only covered test-entitlement terminals to authoritative settlement and release', async () => {
-        const operations = store();
-        const lifecycle = createRevenueCostAiAttemptLifecycle(operations);
-        const scope = { accessMode: 'test_entitlement' as const, planId: 'basic' as const };
-
-        await expect(lifecycle.settleAfterTerminal({ scope, source })).resolves.toMatchObject({
-            disposition: 'settled',
-        });
-        await expect(lifecycle.releaseOrAmbiguousBeforeDispatch({ scope, source })).resolves.toMatchObject({
-            disposition: 'released',
-        });
-        await expect(lifecycle.settleAfterTerminal({
-            scope: { accessMode: 'production', planId: 'basic' }, source,
-        })).resolves.toBeNull();
-
-        expect(operations.settleV2).toHaveBeenCalledWith({
-            requestId: source.requestId,
-            jobKey: source.jobKey,
-            sourceKind: source.sourceKind,
-            sourceOperationKey: source.sourceOperationKey,
-            sourceAttempt: source.sourceAttempt,
-        });
-        expect(operations.releaseV2).toHaveBeenCalledWith(source);
-    });
-
-    it('does not cross the external boundary when a start response is lost', async () => {
-        const operations = store();
-        const calls: string[] = [];
-        operations.reserveV2.mockImplementation(async () => {
-            calls.push('reserve');
-            return outcome('accepted');
-        });
-        operations.markStartedV2.mockImplementation(async () => {
-            calls.push('started');
-            throw new Error('REVENUE_COST_OPERATION_RPC_FAILED');
-        });
-        operations.releaseV2.mockImplementation(async () => {
-            calls.push('release');
-            return outcome('ambiguous');
-        });
-        const lifecycle = createRevenueCostAiAttemptLifecycle(operations);
-        const runExternal = vi.fn().mockResolvedValue('should-not-run');
-
-        await expect(lifecycle.runMarked({
-            scope: { accessMode: 'test_entitlement', planId: 'standard' },
-            source,
-            runExternal,
-        })).rejects.toThrow('REVENUE_COST_OPERATION_RPC_FAILED');
-
-        expect(calls).toEqual(['reserve', 'started', 'release']);
-        expect(runExternal).not.toHaveBeenCalled();
+        expect(operations.manualReview).not.toHaveBeenCalled();
     });
 });
