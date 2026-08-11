@@ -138,7 +138,7 @@ export function preflightPolicyVersions(accessMode: PlanAccessMode): PreflightPo
         : legacySnapshot;
 }
 
-export type PreflightAuthProvider = 'google' | 'kakao';
+export type PreflightAuthProvider = 'google' | 'kakao' | 'email';
 export type ExclusionDecision = 'exclude' | 'skip';
 
 export interface CreatePreflightInput {
