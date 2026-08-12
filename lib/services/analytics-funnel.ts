@@ -40,6 +40,12 @@ export function classifyPreflightAnalyticsOutcome(
     return code && PREFLIGHT_BUSINESS_BLOCK_CODES.has(code) ? 'blocked' : 'failed';
 }
 
+export function classifyPreflightRequestAnalyticsOutcome(
+    status: number,
+): Extract<PreflightAnalyticsOutcome, 'blocked' | 'failed'> {
+    return status >= 400 && status < 500 ? 'blocked' : 'failed';
+}
+
 export interface AnalyticsStorage {
     getItem(key: string): string | null;
     setItem(key: string, value: string): void;

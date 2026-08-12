@@ -805,8 +805,8 @@ describe('preflight owner routes', () => {
         expect(mocks.store.reserveDispatch).not.toHaveBeenCalled();
         expect(mocks.enqueue).not.toHaveBeenCalled();
         expect(mocks.emit).toHaveBeenCalledWith({
-            event: 'preflight.failed',
-            severity: 'warn',
+            event: 'preflight.blocked',
+            severity: 'info',
             fields: expect.objectContaining({
                 user_id: userId,
                 target_instagram_id: 'target.name',
@@ -816,6 +816,21 @@ describe('preflight owner routes', () => {
             }),
         });
         expect(JSON.stringify(mocks.emit.mock.calls)).not.toContain('owner@example.com');
+    });
+
+    it('records invalid request input as a blocked request rather than a worker failure', async () => {
+        const response = await createPreflight(postRequest({ targetInstagramId: 'not valid!' }));
+
+        expect(response.status).toBe(400);
+        expect(mocks.emit).toHaveBeenCalledWith({
+            event: 'preflight.blocked',
+            severity: 'info',
+            fields: expect.objectContaining({
+                operation: 'preflight',
+                disposition: 'rejected',
+                error_code: 'VALIDATION_ERROR',
+            }),
+        });
     });
 
     it('fails closed before persistence when no queue or explicit local runner is available', async () => {

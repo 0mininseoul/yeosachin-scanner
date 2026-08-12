@@ -31,6 +31,7 @@ import { EVENTS, trackEvent } from '@/lib/services/analytics';
 import {
     availableAnalyticsStorage,
     classifyPreflightAnalyticsOutcome,
+    classifyPreflightRequestAnalyticsOutcome,
     persistPreflightStartedAt,
     preflightOutcomeEventKey,
     readPreflightStartedAt,
@@ -192,12 +193,19 @@ interface ApiErrorPayload {
 class AnalyticsRequestError extends Error {
     readonly code: string;
     readonly terminal: boolean;
+    readonly outcome: 'blocked' | 'failed';
 
-    constructor(message: string, code: string, terminal = false) {
+    constructor(
+        message: string,
+        code: string,
+        terminal = false,
+        outcome: 'blocked' | 'failed' = 'failed',
+    ) {
         super(message);
         this.name = 'AnalyticsRequestError';
         this.code = code;
         this.terminal = terminal;
+        this.outcome = outcome;
     }
 }
 
@@ -426,7 +434,10 @@ export function useAnalysisV2Preflight({
     ) => {
         if (!analyticsEligibleRef.current) return;
         const durationMs = trustedDurationMs(preflightStartedAtRef.current, Date.now());
-        trackEvent(EVENTS.PREFLIGHT_FAILED, {
+        const event = cause instanceof AnalyticsRequestError && cause.outcome === 'blocked'
+            ? EVENTS.PREFLIGHT_BLOCKED
+            : EVENTS.PREFLIGHT_FAILED;
+        trackEvent(event, {
             ...(durationMs === undefined ? {} : { duration_ms: durationMs }),
             error_code: safeAnalyticsErrorCode(cause),
             stage: 'preflight',
@@ -604,6 +615,8 @@ export function useAnalysisV2Preflight({
                     (flow === 'betatest' ? betaAdmissionFailureMessage(payload) : null)
                     ?? messageFromPayload(payload, '사전 점검을 시작할 수 없습니다.'),
                     safeAnalyticsHttpErrorCode(response.status, payload),
+                    false,
+                    classifyPreflightRequestAnalyticsOutcome(response.status),
                 );
             }
             const accepted = preflightAcceptedV1Schema.safeParse(payload);
