@@ -33,7 +33,7 @@ export const ANALYSIS_V2_FRESH_ADMISSION_DATABASE_NAMES = Object.freeze({
     reserveRpc: 'reserve_analysis_v2_preflight_admission',
     markDispatchedRpc: 'mark_analysis_v2_preflight_admission_dispatched',
     releaseDispatchRpc: 'release_analysis_v2_preflight_admission_dispatch',
-    claimRpc: 'claim_analysis_v2_preflight_admission',
+    claimRpc: 'claim_analysis_v2_preflight_admission_v2',
     completeRpc: 'complete_analysis_v2_preflight_admission',
     blockRpc: 'block_analysis_v2_preflight_admission',
     releaseRpc: 'release_analysis_v2_preflight_admission',
@@ -64,6 +64,7 @@ const terminalAdmissionErrorSchema = z.enum([
     'ANALYSIS_V2_OVER_PLUS_CAPACITY',
     'ANALYSIS_V2_FRESH_PROFILE_UNAVAILABLE',
 ]);
+const accessModeSchema = z.enum(['production', 'test_entitlement']);
 
 const uuidSchema = z.string().uuid().transform(value => value.toLowerCase());
 const sha256Schema = z.string().regex(/^[a-f0-9]{64}$/);
@@ -156,6 +157,7 @@ const claimResultSchema = z.array(z.object({
     admission_status: z.enum(['pending', 'processing', 'ready', 'blocked']),
     target_instagram_id: usernameSchema.nullable(),
     analysis_entry_channel: z.enum(['standard', 'betatest']).optional().default('standard'),
+    access_mode: accessModeSchema.nullable(),
 }).strict()).length(1);
 const terminalResultSchema = z.array(z.object({
     admission_status: z.enum(['ready', 'blocked']),
@@ -241,6 +243,7 @@ interface ClaimedAnalysisV2FreshAdmission {
     claimToken: string;
     targetInstagramId: string;
     analysisEntryChannel: 'standard' | 'betatest';
+    accessMode: z.infer<typeof accessModeSchema>;
 }
 
 export type AnalysisV2FreshProfileFetcher = typeof getSelfHostedAdmissionProfileSummary;
@@ -486,7 +489,11 @@ async function claimAnalysisV2FreshAdmission(
         }
         return null;
     }
-    if (!row.target_instagram_id || row.admission_status !== 'processing') {
+    if (
+        !row.target_instagram_id
+        || row.admission_status !== 'processing'
+        || row.access_mode === null
+    ) {
         throw new Error('ANALYSIS_V2_FRESH_ADMISSION_ERROR: invalid claimed row.');
     }
     return Object.freeze({
@@ -494,6 +501,7 @@ async function claimAnalysisV2FreshAdmission(
         claimToken,
         targetInstagramId: row.target_instagram_id,
         analysisEntryChannel: row.analysis_entry_channel,
+        accessMode: row.access_mode,
     });
 }
 
@@ -672,10 +680,82 @@ export async function processAnalysisV2FreshAdmission(
         let profile: Awaited<ReturnType<AnalysisV2FreshProfileFetcher>>;
         let reusableProfileInputHash: string | null = null;
         let useAuthenticatedProfile = false;
+        const assertClaimedProfile = (
+            value: Awaited<ReturnType<AnalysisV2FreshProfileFetcher>>
+        ): void => {
+            if (
+                value
+                && value.username.trim().toLowerCase() !== claim.targetInstagramId
+            ) {
+                throw new Error('ANALYSIS_V2_FRESH_ADMISSION_ERROR: target identity mismatch.');
+            }
+            if (value) {
+                assertFreshCount(value.followersCount);
+                assertFreshCount(value.followingCount);
+            }
+        };
+        const fetchPaidProfile = async (
+            fallbackFailure?: ReturnType<typeof classifyPreflightError>
+        ): Promise<Readonly<{
+            profile: Awaited<ReturnType<AnalysisV2FreshProfileFetcher>>;
+            inputHash: string;
+        }>> => {
+            const inputHash = preflightTargetInputHash(
+                claim.targetInstagramId,
+                dependencies.env
+            );
+            const existingRun = await providerRuns.load({
+                preflightId: claim.preflightId,
+                claimToken: claim.claimToken,
+                inputHash,
+            });
+            if (
+                betaHold
+                && existingRun
+                && existingRun.credentialSlot !== betaHold.credentialSlot
+            ) {
+                throw new Error(BETA_APIFY_POOL_CAPACITY_ERROR);
+            }
+            if (existingRun?.status === 'rejected') {
+                throw new Error('SCRAPING_PROVIDER_START_REJECTED_ERROR');
+            }
+            if (fallbackFailure) {
+                logPreflightProfileFallbackEntry({
+                    operation: 'fresh_admission',
+                    failure: fallbackFailure,
+                    existingRun: existingRun !== null,
+                });
+            }
+            const identity = preflightProviderIdentity(
+                betaHold?.credentialSlot
+                ?? existingRun?.credentialSlot
+                ?? selectAnalysisV2ApifyCredentialSlot(dependencies.env)
+            );
+            const bound = await bindPreflightProviderRunCheckpoint({
+                store: providerRuns,
+                claim,
+                inputHash,
+                identity,
+            });
+            const paidProfile = await (
+                dependencies.getFallbackProfile ?? getApifyProfile
+            )(
+                claim.targetInstagramId,
+                fallbackCallContext(bound.checkpoint, workerStartedAt)
+            );
+            assertClaimedProfile(paidProfile);
+            return Object.freeze({ profile: paidProfile, inputHash });
+        };
         try {
-            useAuthenticatedProfile = claim.analysisEntryChannel !== 'betatest'
+            const forcePaidProfile = claim.accessMode === 'test_entitlement';
+            useAuthenticatedProfile = !forcePaidProfile
+                && claim.analysisEntryChannel !== 'betatest'
                 && getAnalysisV2PaidCollectionProvider(dependencies.env) === 'selfhosted_auth';
-            if (useAuthenticatedProfile) {
+            if (forcePaidProfile) {
+                const paid = await fetchPaidProfile();
+                profile = paid.profile;
+                reusableProfileInputHash = profile ? paid.inputHash : null;
+            } else if (useAuthenticatedProfile) {
                 const authenticatedProvider = dependencies.getAuthenticatedProfile
                     ?? selfHostedAuthProvider.getProfileSummary;
                 if (!authenticatedProvider) {
@@ -703,76 +783,20 @@ export async function processAnalysisV2FreshAdmission(
                     invocationDeadlineAtMs: workerStartedAt + PREFLIGHT_PROVIDER_DEADLINE_MS,
                 });
             }
-            if (
-                profile
-                && profile.username.trim().toLowerCase() !== claim.targetInstagramId
-            ) {
-                throw new Error('ANALYSIS_V2_FRESH_ADMISSION_ERROR: target identity mismatch.');
-            }
-            if (profile) {
-                assertFreshCount(profile.followersCount);
-                assertFreshCount(profile.followingCount);
-            }
+            assertClaimedProfile(profile);
         } catch (primaryError) {
             const primaryFailure = classifyPreflightError(primaryError);
-            if (useAuthenticatedProfile || !primaryFailure.paidFallbackEligible) {
+            if (
+                claim.accessMode === 'test_entitlement'
+                || useAuthenticatedProfile
+                || !primaryFailure.paidFallbackEligible
+            ) {
                 return await settleFailure(primaryError);
             }
             try {
-                const inputHash = preflightTargetInputHash(
-                    claim.targetInstagramId,
-                    dependencies.env
-                );
-                const existingRun = await providerRuns.load({
-                    preflightId: claim.preflightId,
-                    claimToken: claim.claimToken,
-                    inputHash,
-                });
-                if (
-                    betaHold
-                    && existingRun
-                    && existingRun.credentialSlot !== betaHold.credentialSlot
-                ) {
-                    throw new Error(BETA_APIFY_POOL_CAPACITY_ERROR);
-                }
-                if (existingRun?.status === 'rejected') {
-                    throw new Error('SCRAPING_PROVIDER_START_REJECTED_ERROR');
-                }
-                logPreflightProfileFallbackEntry({
-                    operation: 'fresh_admission',
-                    failure: primaryFailure,
-                    existingRun: existingRun !== null,
-                });
-                const identity = preflightProviderIdentity(
-                    betaHold?.credentialSlot
-                    ?? existingRun?.credentialSlot
-                    ?? selectAnalysisV2ApifyCredentialSlot(dependencies.env)
-                );
-                const bound = await bindPreflightProviderRunCheckpoint({
-                    store: providerRuns,
-                    claim,
-                    inputHash,
-                    identity,
-                });
-                profile = await (
-                    dependencies.getFallbackProfile ?? getApifyProfile
-                )(
-                    claim.targetInstagramId,
-                    fallbackCallContext(bound.checkpoint, workerStartedAt)
-                );
-                if (
-                    profile
-                    && profile.username.trim().toLowerCase() !== claim.targetInstagramId
-                ) {
-                    throw new Error(
-                        'ANALYSIS_V2_FRESH_ADMISSION_ERROR: target identity mismatch.'
-                    );
-                }
-                if (profile) {
-                    assertFreshCount(profile.followersCount);
-                    assertFreshCount(profile.followingCount);
-                    reusableProfileInputHash = inputHash;
-                }
+                const paid = await fetchPaidProfile(primaryFailure);
+                profile = paid.profile;
+                reusableProfileInputHash = profile ? paid.inputHash : null;
             } catch (fallbackError) {
                 return await settleFailure(fallbackError);
             }
