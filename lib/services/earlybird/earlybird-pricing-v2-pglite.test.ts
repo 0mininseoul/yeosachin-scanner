@@ -661,10 +661,33 @@ describe('earlybird pricing v5 database behavior', () => {
         });
     }, 30_000);
 
-    it('requires an unpurchased v4 preflight to refresh while replaying its pending snapshot unchanged', async () => {
+    it('replays a higher-priced v1 pending snapshot without rewriting it', async () => {
+        const db = await createDatabase(false);
+        const legacy = await seedPreflight(db, 925, 'basic', V1);
+        const pending = await checkout(db, legacy, 'basic', V1);
+        await db.exec(pricingV2Migration);
+        await db.exec(checkoutLineageMigration);
+        await db.exec(autoStartCheckoutMigration);
+        await db.exec(pricingV3Migration);
+        await db.exec(pricingV4Migration);
+        await db.exec(pricingV5Migration);
+
+        await expect(checkout(db, legacy, 'basic', V5, undefined, {
+            version: AUTO_START_DISCLOSURE_VERSION,
+            text: AUTO_START_DISCLOSURE_TEXT,
+        })).resolves.toEqual({ order_id: pending.order_id, created: false });
+        expect((await db.query<{
+            pricing_version: string;
+            expected_amount_krw: number;
+        }>('SELECT pricing_version, expected_amount_krw FROM public.earlybird_orders')).rows).toEqual([
+            { pricing_version: V1, expected_amount_krw: 14_900 },
+        ]);
+    }, 30_000);
+
+    it('requires v4 preflights to refresh and blocks an underpriced pending snapshot without mutation', async () => {
         const db = await createPricingV4Database();
         const pendingPreflight = await seedPreflight(db, 923, 'basic', V4);
-        const pending = await checkout(db, pendingPreflight, 'basic', V4, undefined, {
+        await checkout(db, pendingPreflight, 'basic', V4, undefined, {
             version: AUTO_START_DISCLOSURE_VERSION,
             text: AUTO_START_DISCLOSURE_TEXT,
         });
@@ -674,7 +697,7 @@ describe('earlybird pricing v5 database behavior', () => {
         await expect(checkout(db, pendingPreflight, 'basic', V5, undefined, {
             version: AUTO_START_DISCLOSURE_VERSION,
             text: AUTO_START_DISCLOSURE_TEXT,
-        })).resolves.toEqual({ order_id: pending.order_id, created: false });
+        })).rejects.toThrow(/EARLYBIRD_CHECKOUT_ACTIVE_PENDING_LINEAGE:STALE_PRICING_LINEAGE/);
         await expect(checkout(db, untouchedPreflight, 'standard', V5, undefined, {
             version: AUTO_START_DISCLOSURE_VERSION,
             text: AUTO_START_DISCLOSURE_TEXT,

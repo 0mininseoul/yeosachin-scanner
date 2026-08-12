@@ -135,6 +135,9 @@ BEGIN
             RAISE EXCEPTION 'EARLYBIRD_ORDER_CONFLICT';
         END IF;
         IF v_existing.status = 'payment_pending' THEN
+            IF v_existing.expected_amount_krw < p_expected_amount_krw THEN
+                RAISE EXCEPTION 'EARLYBIRD_CHECKOUT_ACTIVE_PENDING_LINEAGE:STALE_PRICING_LINEAGE';
+            END IF;
             RETURN QUERY SELECT v_existing.id, FALSE;
             RETURN;
         END IF;

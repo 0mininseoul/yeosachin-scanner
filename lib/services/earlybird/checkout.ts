@@ -171,9 +171,12 @@ export async function recoverEarlybirdCheckout(input: {
 
     const config = readGrobleConfig();
     const amountKrw = recoverableAmount(record.pricingVersion, record.planId);
+    const currentAmountKrw =
+        EARLYBIRD_PLAN_CATALOG[record.planId].earlybirdAmountKrw;
     if (
         amountKrw === null
         || record.expectedAmountKrw !== amountKrw
+        || record.expectedAmountKrw < currentAmountKrw
         || record.expectedProductId !== config.productIds[record.planId]
         || record.buyerMatchPolicy !== 'verified_kakao_phone'
         || !record.expectedBuyerPhoneNumberNormalized

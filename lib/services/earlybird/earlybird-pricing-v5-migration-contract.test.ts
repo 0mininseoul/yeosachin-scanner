@@ -54,7 +54,7 @@ describe('earlybird pricing v5 forward migration contract', () => {
         );
     });
 
-    it('replays an exact pending order without rewriting its historical snapshot', () => {
+    it('replays only a pending order whose immutable snapshot covers the current price', () => {
         const replay = migration.indexOf('SELECT existing_order.*');
         const refresh = migration.indexOf(
             "RAISE EXCEPTION 'EARLYBIRD_PRICING_REFRESH_REQUIRED'"
@@ -62,7 +62,7 @@ describe('earlybird pricing v5 forward migration contract', () => {
         expect(replay).toBeGreaterThan(-1);
         expect(refresh).toBeGreaterThan(replay);
         expect(migration.slice(replay, refresh)).toMatch(
-            /v_existing\.user_id <> p_user_id[\s\S]*?v_existing\.plan_id <> p_plan_id[\s\S]*?v_existing\.expected_groble_product_id <> p_expected_product_id[\s\S]*?v_existing\.status = 'payment_pending'/
+            /v_existing\.user_id <> p_user_id[\s\S]*?v_existing\.plan_id <> p_plan_id[\s\S]*?v_existing\.expected_groble_product_id <> p_expected_product_id[\s\S]*?v_existing\.status = 'payment_pending'[\s\S]*?v_existing\.expected_amount_krw < p_expected_amount_krw[\s\S]*?EARLYBIRD_CHECKOUT_ACTIVE_PENDING_LINEAGE:STALE_PRICING_LINEAGE/
         );
         expect(migration.slice(replay, refresh)).not.toMatch(
             /UPDATE\s+public\.earlybird_orders/

@@ -56,7 +56,7 @@ GROBLE_WEBHOOK_PREVIOUS_SECRET=<키 교체 기간에만 이전 secret>
 
 가격 v4 배포에서는 `20260812120000_update_earlybird_pricing_v4.sql`을 애플리케이션보다 먼저 적용한다. 새 v4 checkout은 Basic 1,990원/Standard 2,990원을 immutable snapshot으로 기록한다. 기존 v1/v2/v3 `payment_pending` 주문은 같은 주문과 결제창을 재사용하며 금액·버전을 바꾸지 않는다. 아직 주문이 없는 v1/v2/v3 preflight는 `EARLYBIRD_PRICING_REFRESH_REQUIRED`로 새 snapshot을 받는다.
 
-가격 v5 배포에서는 `20260812122517_update_earlybird_pricing_v5.sql`을 애플리케이션보다 먼저 적용한다. 새 v5 checkout은 Basic 9,900원/Standard 19,900원을 immutable snapshot으로 기록한다. 기존 v1/v2/v3/v4 `payment_pending` 주문은 같은 주문과 결제창을 재사용하며 금액·버전을 바꾸지 않는다. 아직 주문이 없는 v1/v2/v3/v4 preflight는 `EARLYBIRD_PRICING_REFRESH_REQUIRED`로 새 snapshot을 받는다.
+가격 v5 배포에서는 `20260812122517_update_earlybird_pricing_v5.sql`을 애플리케이션보다 먼저 적용한다. 새 v5 checkout은 Basic 9,900원/Standard 19,900원을 immutable snapshot으로 기록한다. 기존 v1/v2/v3/v4 `payment_pending` 주문의 금액·버전은 바꾸지 않는다. 기존 기대금액이 현재 결제액 이상인 주문만 같은 결제창을 재사용하고, 현재 결제액보다 낮은 주문은 `EARLYBIRD_CHECKOUT_ACTIVE_PENDING_LINEAGE:STALE_PRICING_LINEAGE`로 차단한다. 아직 주문이 없는 v1/v2/v3/v4 preflight는 `EARLYBIRD_PRICING_REFRESH_REQUIRED`로 새 snapshot을 받는다.
 
 배포 후 실제 결제를 만들지 않고 Basic/Standard checkout 응답의 `https://groble.im/payment/...` 링크가 안전한 seller reference를 포함하는지만 읽기 전용 회귀 검증한다. Groble 대시보드나 상품 설정은 이 검증에서 변경하지 않는다.
 

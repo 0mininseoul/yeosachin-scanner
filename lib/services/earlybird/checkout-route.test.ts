@@ -445,7 +445,7 @@ describe('earlybird checkout and waitlist routes', () => {
         expect(mocks.from).not.toHaveBeenCalled();
     });
 
-    it('recovers a pending checkout from an older preflight when the current target and plan match', async () => {
+    it('rejects an older pending checkout when its snapshot is below the current price', async () => {
         const filters = new Map<string, unknown>();
         const fallbackOrder = recoveryOrderRow({
             preflight_id: '123e4567-e89b-42d3-a456-426614174004',
@@ -496,11 +496,9 @@ describe('earlybird checkout and waitlist routes', () => {
             planId: 'standard',
         });
 
-        expect(response.status).toBe(200);
-        await expect(response.json()).resolves.toEqual({
-            orderId: ORDER_ID,
-            checkoutUrl: 'https://groble.im/payment/standard-checkout-b2'
-                + `?ref=${SELLER_REFERENCE}`,
+        expect(response.status).toBe(409);
+        await expect(response.json()).resolves.toMatchObject({
+            code: 'EARLYBIRD_CHECKOUT_NOT_RECOVERABLE',
         });
         expect(mocks.findForOwner).toHaveBeenCalledWith(PREFLIGHT_ID, USER_ID);
         expect(lineageOrderQuery.eq).toHaveBeenCalledWith('target_instagram_id', 'target.account');
@@ -508,7 +506,7 @@ describe('earlybird checkout and waitlist routes', () => {
         expect(lineageOrderQuery.eq).toHaveBeenCalledWith('status', 'payment_pending');
     });
 
-    it('recovers an immutable v2 pending checkout at its original price', async () => {
+    it('rejects a v2 pending checkout below the current price', async () => {
         installRecoveryOrder(recoveryOrderRow({
             pricing_version: 'earlybird-2026-07-v2',
             expected_amount_krw: 6_900,
@@ -521,11 +519,13 @@ describe('earlybird checkout and waitlist routes', () => {
             planId: 'basic',
         });
 
-        expect(response.status).toBe(200);
-        await expect(response.json()).resolves.toMatchObject({ orderId: ORDER_ID });
+        expect(response.status).toBe(409);
+        await expect(response.json()).resolves.toMatchObject({
+            code: 'EARLYBIRD_CHECKOUT_NOT_RECOVERABLE',
+        });
     });
 
-    it('recovers an immutable v3 pending checkout at its original price', async () => {
+    it('rejects a v3 pending checkout below the current price', async () => {
         installRecoveryOrder(recoveryOrderRow({
             pricing_version: 'earlybird-2026-08-v3',
             expected_amount_krw: 990,
@@ -538,8 +538,10 @@ describe('earlybird checkout and waitlist routes', () => {
             planId: 'basic',
         });
 
-        expect(response.status).toBe(200);
-        await expect(response.json()).resolves.toMatchObject({ orderId: ORDER_ID });
+        expect(response.status).toBe(409);
+        await expect(response.json()).resolves.toMatchObject({
+            code: 'EARLYBIRD_CHECKOUT_NOT_RECOVERABLE',
+        });
     });
 
     it('requires authentication and same-origin JSON for checkout recovery', async () => {
