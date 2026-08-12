@@ -141,10 +141,11 @@ function adoptedRelationshipContext() {
 }
 
 describe('apifyProvider', () => {
-    it('deterministically distributes preflight runs across primary and secondary', () => {
+    it('deterministically distributes preflight runs across three dedicated credentials', () => {
         const env = {
             APIFY_API_TOKEN: 'primary-token',
             APIFY_SECONDARY_API_TOKEN: 'secondary-token',
+            APIFY_QUATERNARY_API_TOKEN: 'quaternary-token',
         };
         const ids = Array.from({ length: 100 }, (_, index) =>
             `123e4567-e89b-42d3-a456-${index.toString().padStart(12, '0')}`
@@ -153,18 +154,23 @@ describe('apifyProvider', () => {
 
         expect(selectPreflightApifyCredentialSlot(ids[0], env))
             .toBe(selectPreflightApifyCredentialSlot(ids[0].toUpperCase(), env));
-        expect(new Set(selected)).toEqual(new Set(['primary', 'secondary']));
-        expect(selected.filter(slot => slot === 'primary').length)
-            .toBeGreaterThanOrEqual(35);
-        expect(selected.filter(slot => slot === 'primary').length)
-            .toBeLessThanOrEqual(65);
+        expect(new Set(selected)).toEqual(
+            new Set(['primary', 'secondary', 'quaternary'])
+        );
+        for (const slot of ['primary', 'secondary', 'quaternary'] as const) {
+            expect(selected.filter(candidate => candidate === slot).length)
+                .toBeGreaterThanOrEqual(20);
+            expect(selected.filter(candidate => candidate === slot).length)
+                .toBeLessThanOrEqual(45);
+        }
     });
 
-    it('preserves the configured Analysis V2 slot without two usable credentials', () => {
+    it('preserves the configured Analysis V2 slot without all three credentials', () => {
         expect(selectPreflightApifyCredentialSlot(
             '123e4567-e89b-42d3-a456-426614174000',
             {
                 APIFY_API_TOKEN: 'primary-token',
+                APIFY_SECONDARY_API_TOKEN: 'secondary-token',
                 ANALYSIS_V2_APIFY_API_TOKEN_SLOT: 'quinary',
             },
         )).toBe('quinary');
