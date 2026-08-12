@@ -39,6 +39,7 @@ function profileCollectionFailureCode(error: unknown): string {
     if (message.startsWith('SCRAPING_BUDGET_ERROR:')) return 'budget';
     if (message.startsWith('SCRAPING_SCHEMA_ERROR:')) return 'schema';
     if (message.startsWith('SCRAPING_INCOMPLETE_ERROR:')) return 'incomplete';
+    if (message.startsWith('SCRAPING_ACCESS_ERROR:')) return 'access';
     if (message.startsWith('SCRAPING_RUN_PENDING_ERROR:')) return 'pending';
     if (message.includes('actor 실행 실패')) return 'actor_status';
     if (message.includes('transport request failed')) return 'transport';
@@ -47,6 +48,7 @@ function profileCollectionFailureCode(error: unknown): string {
     if (message === 'SCRAPING_QUEUED_START_CANCELLED') return 'start_cancelled';
     if (message.includes('run status request failed')) return 'status_transport';
     if (message.startsWith('SCRAPING_AMBIGUOUS_START_ERROR:')) return 'ambiguous_start';
+    if (message.startsWith('SCRAPING_ERROR:')) return 'scraping';
     return 'provider';
 }
 
