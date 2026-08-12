@@ -76,15 +76,8 @@ async function generateDto(preflightId: string, targetUsername: string): Promise
         try {
             profile = await getInstagramProfile(targetUsername, {
                 requestId: preflightId,
-                // The teaser is pre-payment and must not create an unledgered paid Actor run.
-                // The public-profile self-hosted path supplies the small feed sample B-lite
-                // needs; fail open when it is unavailable instead of falling back to Apify.
-                provider: 'selfhosted',
-                fallback: false,
-                providerRun: {
-                    invocationDeadlineAtMs: deadlineAtMs,
-                    startCancellationSignal: controller.signal,
-                },
+                invocationDeadlineAtMs: deadlineAtMs,
+                startCancellationSignal: controller.signal,
             });
         } catch {
             throw new Error('PRECHECKOUT_BLITE_PROFILE_COLLECTION_FAILED');

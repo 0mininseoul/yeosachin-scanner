@@ -25,6 +25,25 @@ function providerWith(over: Partial<ScraperProvider>): ScraperProvider {
 }
 
 describe('라우팅', () => {
+    it('ordinary calls forward deadline and cancellation without a durable run', async () => {
+        const getProfile = vi.fn().mockResolvedValue({ username: 'x' });
+        __setProvidersForTest(
+            { SCRAPER_PROFILE: 'apify', SCRAPER_FALLBACK: 'false' },
+            { apify: providerWith({ name: 'apify', getProfile }) }
+        );
+        const signal = new AbortController().signal;
+
+        await getInstagramProfile('x', {
+            invocationDeadlineAtMs: 12345,
+            startCancellationSignal: signal,
+        });
+
+        expect(getProfile).toHaveBeenCalledWith('x', expect.objectContaining({
+            invocationDeadlineAtMs: 12345,
+            startCancellationSignal: signal,
+        }));
+    });
+
     it('SCRAPER_PROFILE=selfhosted면 selfhosted.getProfile을 쓴다', async () => {
         const getProfile = vi.fn().mockResolvedValue({ username: 'x' });
         __setProvidersForTest(

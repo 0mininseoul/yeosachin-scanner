@@ -347,8 +347,10 @@ async function runAttempt<T>(
         maxChargeUsd: options?.providerRun?.maxChargeUsd,
         startReserved: options?.providerRun?.startReserved,
         invocationWaitLimitSecs: options?.providerRun?.invocationWaitLimitSecs,
-        invocationDeadlineAtMs: options?.providerRun?.invocationDeadlineAtMs,
-        startCancellationSignal: options?.providerRun?.startCancellationSignal,
+        invocationDeadlineAtMs: options?.providerRun?.invocationDeadlineAtMs
+            ?? options?.invocationDeadlineAtMs,
+        startCancellationSignal: options?.providerRun?.startCancellationSignal
+            ?? options?.startCancellationSignal,
         ...(options?.providerRun?.allowAdoptedRelationshipTruncation === true ? {
             allowAdoptedRelationshipTruncation: true,
             adoptedRelationshipSourceDeclaredCount:
