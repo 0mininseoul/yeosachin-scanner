@@ -205,6 +205,8 @@ export interface PreflightWorkerFailureClassification {
     retryable: boolean;
     httpStatus: number | null;
     workerAttemptCount: number | null;
+    persistenceOperation?: string;
+    persistenceCode?: string;
 }
 
 interface PreflightProcessObservationBase {
@@ -262,8 +264,28 @@ export class PreflightWorkerRetryError extends Error {
     ) {
         super('PREFLIGHT_WORKER_RETRY', { cause });
         this.name = 'PreflightWorkerRetryError';
-        this.classification = Object.freeze({ ...classification, workerAttemptCount });
+        const persistence = persistenceFailureDiagnostic(cause);
+        this.classification = Object.freeze({
+            ...classification,
+            workerAttemptCount,
+            ...persistence,
+        });
     }
+}
+
+function persistenceFailureDiagnostic(error: unknown): {
+    persistenceOperation?: string;
+    persistenceCode?: string;
+} {
+    if (!(error instanceof Error)) return {};
+    const match = error.message.match(
+        /^PREFLIGHT_PERSISTENCE_ERROR: ([a-z ]{1,32}) failed \(([A-Za-z0-9_]{1,32})\)\./
+    );
+    if (!match) return {};
+    return {
+        persistenceOperation: match[1],
+        persistenceCode: match[2],
+    };
 }
 
 export function classifyPreflightWorkerFailure(

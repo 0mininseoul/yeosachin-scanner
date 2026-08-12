@@ -190,6 +190,12 @@ async function handlePOST(
             retryable: failure.retryable,
             httpStatus: failure.httpStatus,
             workerAttemptCount: failure.workerAttemptCount,
+            ...(failure.persistenceOperation
+                ? { persistenceOperation: failure.persistenceOperation }
+                : {}),
+            ...(failure.persistenceCode
+                ? { persistenceCode: failure.persistenceCode }
+                : {}),
         }));
         if (isFreshAdmission || !profileFailureObserved) {
             operationalLogger.emit({
