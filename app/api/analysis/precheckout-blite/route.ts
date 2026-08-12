@@ -33,6 +33,16 @@ interface PrecheckoutBliteCacheEntry {
     expiresAt: number;
 }
 
+function profileCollectionFailureCode(error: unknown): string {
+    const message = error instanceof Error ? error.message : '';
+    if (message.startsWith('SCRAPING_CONFIG_ERROR:')) return 'configuration';
+    if (message.startsWith('SCRAPING_BUDGET_ERROR:')) return 'budget';
+    if (message.startsWith('SCRAPING_SCHEMA_ERROR:')) return 'schema';
+    if (message.startsWith('SCRAPING_INCOMPLETE_ERROR:')) return 'incomplete';
+    if (message.startsWith('SCRAPING_RUN_PENDING_ERROR:')) return 'pending';
+    return 'provider';
+}
+
 // In-process, short-TTL, size-bounded cache keyed by preflight id. Stored on `globalThis` so a
 // warm serverless instance (or Next dev hot reload) reuses it instead of resetting per import.
 const cacheScope = globalThis as typeof globalThis & {
@@ -81,8 +91,10 @@ async function generateDto(preflightId: string, targetUsername: string): Promise
                 invocationDeadlineAtMs: deadlineAtMs,
                 startCancellationSignal: controller.signal,
             });
-        } catch {
-            throw new Error('PRECHECKOUT_BLITE_PROFILE_COLLECTION_FAILED');
+        } catch (error) {
+            throw new Error(
+                `PRECHECKOUT_BLITE_PROFILE_COLLECTION_FAILED:${profileCollectionFailureCode(error)}`
+            );
         }
         if (!profile || profile.isPrivate || !profile.latestPosts?.length) return null;
         let dto;
@@ -187,8 +199,8 @@ async function handlePOST(request: Request): Promise<NextResponse> {
         return NextResponse.json(dto);
     } catch (error) {
         // Never 5xx into the product flow.
-        const reason = error instanceof Error && error.message === 'PRECHECKOUT_BLITE_PROFILE_COLLECTION_FAILED'
-            ? 'profile_collection_failed'
+        const reason = error instanceof Error && error.message.startsWith('PRECHECKOUT_BLITE_PROFILE_COLLECTION_FAILED:')
+            ? `profile_collection_failed_${error.message.split(':')[1] ?? 'provider'}`
             : error instanceof Error && error.message === 'PRECHECKOUT_BLITE_INFERENCE_FAILED'
                 ? 'inference_failed'
                 : error instanceof Error && error.message.includes('DEADLINE')
