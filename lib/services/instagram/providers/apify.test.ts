@@ -165,13 +165,19 @@ describe('apifyProvider', () => {
         }
     });
 
-    it('preserves the configured Analysis V2 slot without all three credentials', () => {
+    it.each([
+        { missing: 'primary', APIFY_PRIMARY_API_TOKEN: '' },
+        { missing: 'secondary', APIFY_SECONDARY_API_TOKEN: ' ' },
+        { missing: 'quaternary', APIFY_QUATERNARY_API_TOKEN: undefined },
+    ])('preserves the configured slot when $missing is unusable', override => {
         expect(selectPreflightApifyCredentialSlot(
             '123e4567-e89b-42d3-a456-426614174000',
             {
-                APIFY_API_TOKEN: 'primary-token',
+                APIFY_PRIMARY_API_TOKEN: 'primary-token',
                 APIFY_SECONDARY_API_TOKEN: 'secondary-token',
+                APIFY_QUATERNARY_API_TOKEN: 'quaternary-token',
                 ANALYSIS_V2_APIFY_API_TOKEN_SLOT: 'quinary',
+                ...override,
             },
         )).toBe('quinary');
     });
