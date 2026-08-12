@@ -42,6 +42,9 @@ function profileCollectionFailureCode(error: unknown): string {
     if (message.startsWith('SCRAPING_RUN_PENDING_ERROR:')) return 'pending';
     if (message.includes('actor 실행 실패')) return 'actor_status';
     if (message.includes('transport request failed')) return 'transport';
+    if (message === 'SCRAPING_PROVIDER_QUOTA_ERROR') return 'quota';
+    if (message === 'SCRAPING_PROVIDER_START_REJECTED_ERROR') return 'start_rejected';
+    if (message === 'SCRAPING_QUEUED_START_CANCELLED') return 'start_cancelled';
     return 'provider';
 }
 
