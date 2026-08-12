@@ -309,8 +309,26 @@ describe('PrecheckoutImmersive', () => {
         });
         await settleUi();
 
-        expect(onAvailabilityChange).toHaveBeenNthCalledWith(1, false);
+        expect(onAvailabilityChange).toHaveBeenNthCalledWith(1, true);
         expect(onAvailabilityChange).toHaveBeenLastCalledWith(true);
+    });
+
+    it('releases the plan gate when B-lite is unavailable', async () => {
+        const onAvailabilityChange = vi.fn();
+        vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response(null, { status: 204 })));
+
+        await act(async () => {
+            root.render(createElement(PrecheckoutImmersive, {
+                preflightId: PREFLIGHT_ID,
+                claimToken: null,
+                onGoToPlans: vi.fn(),
+                onAvailabilityChange,
+            }));
+        });
+        await settleUi();
+
+        expect(onAvailabilityChange).toHaveBeenNthCalledWith(1, true);
+        expect(onAvailabilityChange).toHaveBeenLastCalledWith(false);
     });
 
     it('omits the claim token header when claimToken is null', async () => {
