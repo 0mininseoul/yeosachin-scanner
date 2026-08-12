@@ -295,6 +295,24 @@ describe('PrecheckoutImmersive', () => {
         expect(headers['Content-Type']).toBe('application/json');
     });
 
+    it('reports availability only after a valid B-lite payload arrives', async () => {
+        const onAvailabilityChange = vi.fn();
+        vi.stubGlobal('fetch', vi.fn().mockResolvedValue(jsonResponse(validDto({ likelyFemale: false }))));
+
+        await act(async () => {
+            root.render(createElement(PrecheckoutImmersive, {
+                preflightId: PREFLIGHT_ID,
+                claimToken: null,
+                onGoToPlans: vi.fn(),
+                onAvailabilityChange,
+            }));
+        });
+        await settleUi();
+
+        expect(onAvailabilityChange).toHaveBeenNthCalledWith(1, false);
+        expect(onAvailabilityChange).toHaveBeenLastCalledWith(true);
+    });
+
     it('omits the claim token header when claimToken is null', async () => {
         const fetchMock = vi.fn().mockResolvedValue(jsonResponse(validDto({ likelyFemale: false })));
         vi.stubGlobal('fetch', fetchMock);

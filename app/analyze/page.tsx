@@ -110,6 +110,8 @@ const DISCLOSURE_ACCEPTED = true;
     const [autoCheckoutPreflightId, setAutoCheckoutPreflightId] = useState<string | null>(null);
     const [autoCheckoutPlan, setAutoCheckoutPlan] = useState<PlanId | null>(null);
     const [autoCheckoutUiPending, setAutoCheckoutUiPending] = useState(false);
+    const [precheckoutPreviewAvailable, setPrecheckoutPreviewAvailable] = useState(false);
+    const [precheckoutPlansRevealed, setPrecheckoutPlansRevealed] = useState(false);
     const querySelectedPlan = useHydrationSafePlanQuery();
     const queryCheckoutPlan = useHydrationSafeCheckoutPlanQuery();
     const router = useRouter();
@@ -378,9 +380,16 @@ const DISCLOSURE_ACCEPTED = true;
     // Nothing else — it must not select a plan, start checkout, or trigger login.
     const planSectionRef = useRef<HTMLElement>(null);
     const planHeadingRef = useRef<HTMLHeadingElement>(null);
+    useEffect(() => {
+        setPrecheckoutPreviewAvailable(false);
+        setPrecheckoutPlansRevealed(false);
+    }, [readyPreflight?.preflightId]);
     const handleGoToPlans = useCallback(() => {
+        setPrecheckoutPlansRevealed(true);
+        requestAnimationFrame(() => {
         planSectionRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' });
         planHeadingRef.current?.focus();
+        });
     }, []);
 
     const handleCheckoutStatusNavigation = () => {
@@ -955,12 +964,14 @@ const DISCLOSURE_ACCEPTED = true;
                                         preflightId={readyPreflight.preflightId}
                                         claimToken={claimToken}
                                         onGoToPlans={handleGoToPlans}
+                                        onAvailabilityChange={setPrecheckoutPreviewAvailable}
                                     />
                                 )}
 
                                 <section
                                     id="plan-selection"
                                     ref={planSectionRef}
+                                    hidden={precheckoutPreviewAvailable && !precheckoutPlansRevealed}
                                     className="mt-9 scroll-mt-20"
                                     aria-labelledby="plan-heading"
                                 >

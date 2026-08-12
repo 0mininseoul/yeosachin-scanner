@@ -76,15 +76,22 @@ export interface PrecheckoutImmersiveProps {
      */
     claimToken: string | null;
     onGoToPlans: () => void;
+    onAvailabilityChange?: (available: boolean) => void;
 }
 
-export function PrecheckoutImmersive({ preflightId, claimToken, onGoToPlans }: PrecheckoutImmersiveProps) {
+export function PrecheckoutImmersive({
+    preflightId,
+    claimToken,
+    onGoToPlans,
+    onAvailabilityChange,
+}: PrecheckoutImmersiveProps) {
     const [dto, setDto] = useState<PrecheckoutBliteV1 | null>(null);
     const [dismissed, setDismissed] = useState(false);
     const [screen, setScreen] = useState<Screen | null>(null);
     const [sequenceComplete, setSequenceComplete] = useState(false);
 
     useEffect(() => {
+        onAvailabilityChange?.(false);
         setDto(null);
         setDismissed(false);
         setScreen(null);
@@ -112,6 +119,7 @@ export function PrecheckoutImmersive({ preflightId, claimToken, onGoToPlans }: P
                 const parsed = precheckoutBliteV1Schema.safeParse(body);
                 if (!parsed.success) return;
                 if (controller.signal.aborted) return;
+                onAvailabilityChange?.(true);
                 setDto(parsed.data);
                 const showConfirm = parsed.data.genderRead.likelyFemale
                     && parsed.data.genderRead.confidence >= PRECHECKOUT_BLITE_LIKELY_FEMALE_CONFIDENCE_THRESHOLD;
@@ -127,7 +135,7 @@ export function PrecheckoutImmersive({ preflightId, claimToken, onGoToPlans }: P
             clearTimeout(timeout);
             controller.abort();
         };
-    }, [preflightId, claimToken]);
+    }, [preflightId, claimToken, onAvailabilityChange]);
 
     const handleSequenceComplete = useCallback(() => setSequenceComplete(true), []);
 
