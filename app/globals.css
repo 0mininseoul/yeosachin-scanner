@@ -276,3 +276,95 @@ body::before {
     scroll-behavior: auto !important;
   }
 }
+
+/* ============================================================
+   Precheckout immersive preview
+   (components/precheckout-immersive.tsx, components/precheckout-stage-graphs.tsx)
+   ============================================================ */
+
+/* Default (desktop / inline) viewport box for the four-stage demo. Declared here rather than as
+   an inline style so the mobile-fullscreen override below (a same-specificity-class selector on
+   top of this one) can actually win the cascade — an inline style would out-rank any stylesheet
+   rule, including the media-query override, and silently break the mobile fullscreen layout. */
+.precheckout-viewport {
+  aspect-ratio: 300 / 220;
+}
+
+/* Not-yet-revealed verdict/CTA block on the four-stage demo screen: inert until the sequence
+   completes. visibility + pointer-events (not opacity alone) so it can never be hit-tested,
+   focused, or clicked early — the approved prototype had a measured defect where an
+   opacity-only hidden CTA was still clickable. See PrecheckoutImmersive's click guard for the
+   second, independent layer of the same fix. */
+.precheckout-reveal {
+  visibility: hidden;
+  pointer-events: none;
+  opacity: 0;
+  transform: translateY(10px);
+  transition: opacity 0.5s var(--ease-settle), transform 0.5s var(--ease-settle), visibility 0s linear 0.5s;
+}
+.precheckout-reveal.is-visible {
+  visibility: visible;
+  pointer-events: auto;
+  opacity: 1;
+  transform: none;
+  transition: opacity 0.5s var(--ease-settle), transform 0.5s var(--ease-settle), visibility 0s linear 0s;
+}
+
+/* Mobile-only fullscreen layer for the four-stage demo screen. Desktop keeps it inline in
+   normal page flow — nothing below this breakpoint applies there. The body scroll lock itself
+   is applied in JS (only while this is mounted and the viewport matches), since that can't be
+   expressed in CSS alone. */
+@media (max-width: 760px) {
+  .precheckout-demo-fullscreen {
+    position: fixed;
+    inset: 0;
+    z-index: 80;
+    /* Neutralise the inherited mt-7 (desktop inline spacing) — as a fixed layer with inset: 0,
+       margin still offsets the box away from the viewport edge instead of being absorbed by
+       normal flow, which pushed this layer down by 28px and clipped the final CTA at the
+       bottom. The fullscreen layer must sit flush with the viewport. */
+    margin: 0;
+    height: 100dvh;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+    background: var(--color-ink);
+    padding:
+      calc(env(safe-area-inset-top, 0px) + 16px)
+      calc(env(safe-area-inset-right, 0px) + 16px)
+      calc(env(safe-area-inset-bottom, 0px) + 16px)
+      calc(env(safe-area-inset-left, 0px) + 16px);
+  }
+  .precheckout-demo-fullscreen .precheckout-stage-graphs {
+    display: flex;
+    flex-direction: column;
+    flex: 1 1 auto;
+    min-height: 0;
+  }
+  .precheckout-demo-fullscreen .precheckout-viewport {
+    aspect-ratio: auto;
+    flex: 1 1 auto;
+    min-height: 140px;
+  }
+  /* Extra inertness layer specifically inside the fullscreen immersive layer, per the brief:
+     display:none until the sequence completes, on top of the visibility/pointer-events rule
+     above. */
+  .precheckout-demo-fullscreen .precheckout-reveal {
+    display: none;
+  }
+  .precheckout-demo-fullscreen .precheckout-reveal.is-visible {
+    display: block;
+    flex: 0 0 auto;
+  }
+}
+
+/* Short-viewport compaction (e.g. iPhone SE) so the revealed verdict still fits inside the
+   fixed 100dvh layer without inner scrolling or clipping. */
+@media (max-width: 760px) and (max-height: 720px) {
+  .precheckout-demo-fullscreen .precheckout-stagesub {
+    display: none;
+  }
+  .precheckout-demo-fullscreen .precheckout-reveal {
+    margin-top: 10px;
+  }
+}

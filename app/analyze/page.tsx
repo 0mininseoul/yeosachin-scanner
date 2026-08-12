@@ -59,6 +59,7 @@ import {
 import { TopBar, BrandMark, Eyebrow, CaseCard, Panel, PrimaryButton } from '@/components/case-ui';
 import { InstagramLookupLink } from '@/components/instagram-lookup-link';
 import { LoginModal } from '@/components/login-modal';
+import { PrecheckoutImmersive } from '@/components/precheckout-immersive';
 
 const PLAN_NAMES: Readonly<Record<PlanId, string>> = {
     basic: 'Basic',
@@ -370,6 +371,15 @@ const DISCLOSURE_ACCEPTED = true;
         setSelectedPlan(planId);
         trackPlanSelection(planId);
     };
+
+    // Precheckout immersive preview's CTA scrolls here and moves focus to the heading.
+    // Nothing else — it must not select a plan, start checkout, or trigger login.
+    const planSectionRef = useRef<HTMLElement>(null);
+    const planHeadingRef = useRef<HTMLHeadingElement>(null);
+    const handleGoToPlans = useCallback(() => {
+        planSectionRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+        planHeadingRef.current?.focus();
+    }, []);
 
     const handleCheckoutStatusNavigation = () => {
         if (!activeCheckoutStatusCta || activeCheckoutStatusCta.navigating) return;
@@ -951,9 +961,27 @@ const DISCLOSURE_ACCEPTED = true;
                                     </div>
                                 </CaseCard>
 
-                                <section className="mt-9" aria-labelledby="plan-heading">
+                                {!autoCheckoutTransitionVisible && (
+                                    <PrecheckoutImmersive
+                                        preflightId={readyPreflight.preflightId}
+                                        claimToken={claimToken}
+                                        onGoToPlans={handleGoToPlans}
+                                    />
+                                )}
+
+                                <section
+                                    id="plan-selection"
+                                    ref={planSectionRef}
+                                    className="mt-9 scroll-mt-20"
+                                    aria-labelledby="plan-heading"
+                                >
                                     <Eyebrow>요금제 선택</Eyebrow>
-                                    <h2 id="plan-heading" className="mt-3 text-[22px] font-extrabold text-fg">
+                                    <h2
+                                        id="plan-heading"
+                                        ref={planHeadingRef}
+                                        tabIndex={-1}
+                                        className="mt-3 text-[22px] font-extrabold text-fg outline-none"
+                                    >
                                         계정 규모에 맞는 플랜이에요
                                     </h2>
                                     <p className="mt-2 text-[13px] leading-relaxed text-fg-dim">

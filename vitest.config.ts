@@ -4,7 +4,7 @@ import path from 'node:path';
 export default defineConfig({
     test: {
         environment: 'node',
-        include: ['lib/**/*.test.ts', 'scripts/**/*.test.ts'],
+        include: ['lib/**/*.test.ts', 'scripts/**/*.test.ts', 'app/**/*.test.ts', 'components/**/*.test.tsx'],
         // Bound concurrent PGlite/WASM startups to avoid resource contention.
         maxWorkers: 4,
         // Full CI runs can briefly queue PGlite/WASM startup behind the same bounded workers.
