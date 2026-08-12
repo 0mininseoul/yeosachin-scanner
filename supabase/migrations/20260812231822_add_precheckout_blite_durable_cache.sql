@@ -59,6 +59,9 @@ BEGIN
      WHERE preflight_id = p_preflight_id
      FOR UPDATE;
 
+    -- Re-evaluate wall time after any row-lock wait before deciding lease ownership.
+    v_now := pg_catalog.clock_timestamp();
+
     IF v_cache.state = 'complete' THEN
         RETURN pg_catalog.jsonb_build_object('disposition', 'complete', 'dto', v_cache.dto);
     END IF;
@@ -92,20 +95,42 @@ LANGUAGE plpgsql
 SECURITY DEFINER
 SET search_path = ''
 AS $$
-DECLARE v_now TIMESTAMPTZ := clock_timestamp();
 BEGIN
     IF p_dto IS NULL OR pg_catalog.jsonb_typeof(p_dto) <> 'object' THEN
         RETURN FALSE;
     END IF;
     UPDATE public.precheckout_blite_cache
-       SET state = 'complete', dto = p_dto, completed_at = v_now, updated_at = v_now
+       SET state = 'complete', dto = p_dto,
+           completed_at = pg_catalog.clock_timestamp(),
+           updated_at = pg_catalog.clock_timestamp()
      WHERE preflight_id = p_preflight_id
        AND state = 'pending'
        AND lease_token = p_lease_token
-       AND lease_expires_at > v_now;
+       AND lease_expires_at > pg_catalog.clock_timestamp();
     RETURN FOUND;
 END;
 $$;
+
+CREATE OR REPLACE FUNCTION public.delete_precheckout_blite_cache_on_pii_scrub_v1()
+RETURNS TRIGGER
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = ''
+AS $$
+BEGIN
+    IF NEW.pii_scrubbed_at IS NOT NULL
+       AND OLD.pii_scrubbed_at IS DISTINCT FROM NEW.pii_scrubbed_at THEN
+        DELETE FROM public.precheckout_blite_cache
+         WHERE preflight_id = NEW.id;
+    END IF;
+    RETURN NEW;
+END;
+$$;
+
+CREATE TRIGGER delete_precheckout_blite_cache_on_pii_scrub
+AFTER UPDATE OF pii_scrubbed_at ON public.analysis_preflights
+FOR EACH ROW
+EXECUTE FUNCTION public.delete_precheckout_blite_cache_on_pii_scrub_v1();
 
 CREATE OR REPLACE FUNCTION public.release_precheckout_blite_v1(
     p_preflight_id UUID,
@@ -128,6 +153,7 @@ $$;
 REVOKE ALL ON FUNCTION public.claim_precheckout_blite_v1(UUID) FROM PUBLIC, anon, authenticated;
 REVOKE ALL ON FUNCTION public.complete_precheckout_blite_v1(UUID, UUID, JSONB) FROM PUBLIC, anon, authenticated;
 REVOKE ALL ON FUNCTION public.release_precheckout_blite_v1(UUID, UUID) FROM PUBLIC, anon, authenticated;
+REVOKE ALL ON FUNCTION public.delete_precheckout_blite_cache_on_pii_scrub_v1() FROM PUBLIC, anon, authenticated, service_role;
 GRANT EXECUTE ON FUNCTION public.claim_precheckout_blite_v1(UUID) TO service_role;
 GRANT EXECUTE ON FUNCTION public.complete_precheckout_blite_v1(UUID, UUID, JSONB) TO service_role;
 GRANT EXECUTE ON FUNCTION public.release_precheckout_blite_v1(UUID, UUID) TO service_role;

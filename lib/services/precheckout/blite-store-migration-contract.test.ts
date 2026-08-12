@@ -15,17 +15,23 @@ describe('precheckout B-lite durable cache migration', () => {
     });
 
     it('fences completion and release by the exact lease token', () => {
-        expect(migration).toMatch(/complete_precheckout_blite_v1[\s\S]*lease_token = p_lease_token[\s\S]*lease_expires_at > v_now/);
+        expect(migration).toMatch(/complete_precheckout_blite_v1[\s\S]*lease_token = p_lease_token[\s\S]*lease_expires_at > pg_catalog\.clock_timestamp\(\)/);
         expect(migration).toMatch(/release_precheckout_blite_v1[\s\S]*lease_token = p_lease_token/);
+        expect(migration).toMatch(/FOR UPDATE;[\s\S]*v_now := pg_catalog\.clock_timestamp\(\)/);
+    });
+
+    it('deletes derived persona data whenever its parent preflight is PII-scrubbed', () => {
+        expect(migration).toContain('AFTER UPDATE OF pii_scrubbed_at ON public.analysis_preflights');
+        expect(migration).toMatch(/NEW\.pii_scrubbed_at IS NOT NULL[\s\S]*DELETE FROM public\.precheckout_blite_cache/);
     });
 
     it('keeps the table and security-definer RPCs service-role only', () => {
         expect(migration).toContain('ENABLE ROW LEVEL SECURITY');
         expect(migration).toContain('FORCE ROW LEVEL SECURITY');
         expect(migration).toMatch(/REVOKE ALL ON TABLE public\.precheckout_blite_cache FROM PUBLIC, anon, authenticated/);
-        expect(migration.match(/SECURITY DEFINER/g)).toHaveLength(3);
-        expect(migration.match(/SET search_path = ''/g)).toHaveLength(3);
-        expect(migration.match(/REVOKE ALL ON FUNCTION/g)).toHaveLength(3);
+        expect(migration.match(/SECURITY DEFINER/g)).toHaveLength(4);
+        expect(migration.match(/SET search_path = ''/g)).toHaveLength(4);
+        expect(migration.match(/REVOKE ALL ON FUNCTION/g)).toHaveLength(4);
         expect(migration.match(/GRANT EXECUTE ON FUNCTION/g)).toHaveLength(3);
     });
 });
