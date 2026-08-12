@@ -91,7 +91,9 @@ export function PrecheckoutImmersive({
     const [sequenceComplete, setSequenceComplete] = useState(false);
 
     useEffect(() => {
-        onAvailabilityChange?.(false);
+        // Gate plans while availability is being resolved. A failed/204 request releases the
+        // gate in `finally`; a valid preview keeps it until the demo CTA reveals plans.
+        onAvailabilityChange?.(true);
         setDto(null);
         setDismissed(false);
         setScreen(null);
@@ -100,6 +102,7 @@ export function PrecheckoutImmersive({
         const controller = new AbortController();
         const timeout = setTimeout(() => controller.abort(), FETCH_DEADLINE_MS);
 
+        let validPreview = false;
         (async () => {
             try {
                 const res = await fetch('/api/analysis/precheckout-blite', {
@@ -119,7 +122,7 @@ export function PrecheckoutImmersive({
                 const parsed = precheckoutBliteV1Schema.safeParse(body);
                 if (!parsed.success) return;
                 if (controller.signal.aborted) return;
-                onAvailabilityChange?.(true);
+                validPreview = true;
                 setDto(parsed.data);
                 const showConfirm = parsed.data.genderRead.likelyFemale
                     && parsed.data.genderRead.confidence >= PRECHECKOUT_BLITE_LIKELY_FEMALE_CONFIDENCE_THRESHOLD;
@@ -128,6 +131,7 @@ export function PrecheckoutImmersive({
                 // Network error, JSON parse failure, or the bounded abort — stay unavailable.
             } finally {
                 clearTimeout(timeout);
+                if (!validPreview) onAvailabilityChange?.(false);
             }
         })();
 
