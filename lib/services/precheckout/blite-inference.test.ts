@@ -292,6 +292,8 @@ describe('inferPrecheckoutBlite', () => {
         expect(options.abortSignal).toBe(controller.signal);
         expect(options.analysisType).toBe('precheckout_blite');
         expect(options.stage).toBeUndefined();
+        expect(options.thinkingLevel).toBe('MINIMAL');
+        expect(options.maxOutputTokens).toBe(3_072);
     });
 
     it('prepares image evidence from the profile photo and recent post photos, bounded to 4 total (1 profile + 3 posts)', async () => {
