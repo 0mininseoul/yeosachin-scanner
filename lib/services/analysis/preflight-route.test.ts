@@ -527,6 +527,143 @@ describe('preflight owner routes', () => {
         expect(mocks.store.createOrReplay).not.toHaveBeenCalled();
     });
 
+    it('accepts email auth only for a valid signed E2E runner admission', async () => {
+        const secret = Buffer.alloc(32, 13).toString('base64url');
+        vi.stubEnv('ANALYSIS_TEST_ENTITLEMENTS_ENABLED', 'true');
+        vi.stubEnv('ANALYSIS_TEST_ENTITLEMENT_SECRET', secret);
+        mocks.getUser.mockResolvedValue({
+            data: {
+                user: {
+                    id: userId,
+                    email: 'runner@example.com',
+                    app_metadata: { provider: 'email', analysis_test_runner_v1: 'basic' },
+                },
+            },
+            error: null,
+        });
+        const token = createAnalysisTestAdmission({
+            userId,
+            targetInstagramId: 'target.name',
+            idempotencyKey: 'preflight-key-000000000000',
+            nonce: 'preflight_admission_nonce_06',
+        }, { secret });
+
+        const response = await createPreflight(postRequest(
+            { targetInstagramId: 'Target.Name' },
+            'preflight-key-000000000000',
+            token,
+        ));
+
+        await expect(response.clone().json()).resolves.not.toMatchObject({
+            code: 'UNSUPPORTED_AUTH',
+        });
+        expect(response.status).toBe(202);
+        expect(mocks.requireActiveE2eTestRunner).toHaveBeenCalledOnce();
+        expect(mocks.store.createOrReplay).toHaveBeenCalledWith(
+            expect.objectContaining({ authProvider: 'email', accessMode: 'test_entitlement' }),
+        );
+    });
+
+    it('rejects an ordinary email-auth preflight before persistence', async () => {
+        mocks.getUser.mockResolvedValue({
+            data: {
+                user: {
+                    id: userId,
+                    email: 'runner@example.com',
+                    app_metadata: { provider: 'email' },
+                },
+            },
+            error: null,
+        });
+
+        const response = await createPreflight(postRequest());
+
+        expect(response.status).toBe(400);
+        await expect(response.json()).resolves.toMatchObject({ code: 'UNSUPPORTED_AUTH' });
+        expect(mocks.store.createOrReplay).not.toHaveBeenCalled();
+    });
+
+    it('fails closed for an email-auth runner with a mismatched signed admission', async () => {
+        const secret = Buffer.alloc(32, 13).toString('base64url');
+        vi.stubEnv('ANALYSIS_TEST_ENTITLEMENTS_ENABLED', 'true');
+        vi.stubEnv('ANALYSIS_TEST_ENTITLEMENT_SECRET', secret);
+        mocks.admissionAvailable.mockReturnValue(true);
+        mocks.getUser.mockResolvedValue({
+            data: {
+                user: {
+                    id: userId,
+                    email: 'runner@example.com',
+                    app_metadata: { provider: 'email', analysis_test_runner_v1: 'basic' },
+                },
+            },
+            error: null,
+        });
+        const token = createAnalysisTestAdmission({
+            userId,
+            targetInstagramId: 'different.target',
+            idempotencyKey: 'preflight-key-000000000000',
+            nonce: 'preflight_admission_nonce_07',
+        }, { secret });
+
+        const response = await createPreflight(postRequest(
+            { targetInstagramId: 'Target.Name' },
+            'preflight-key-000000000000',
+            token,
+        ));
+
+        expect(response.status).toBe(503);
+        await expect(response.json()).resolves.toMatchObject({
+            code: 'V2_PIPELINE_UNAVAILABLE',
+        });
+        expect(mocks.requireActiveE2eTestRunner).not.toHaveBeenCalled();
+        expect(mocks.store.createOrReplay).not.toHaveBeenCalled();
+        expect(mocks.enqueue).not.toHaveBeenCalled();
+    });
+
+    it('rejects an email-auth runner when signed admission classification fails', async () => {
+        const secret = Buffer.alloc(32, 13).toString('base64url');
+        vi.stubEnv('ANALYSIS_TEST_ENTITLEMENTS_ENABLED', 'true');
+        vi.stubEnv('ANALYSIS_TEST_ENTITLEMENT_SECRET', secret);
+        mocks.getUser.mockResolvedValue({
+            data: {
+                user: {
+                    id: userId,
+                    email: 'runner@example.com',
+                    app_metadata: { provider: 'email', analysis_test_runner_v1: 'basic' },
+                },
+            },
+            error: null,
+        });
+        mocks.requireActiveE2eTestRunner.mockRejectedValue(
+            new AccountPrincipalAdmissionError(),
+        );
+        const token = createAnalysisTestAdmission({
+            userId,
+            targetInstagramId: 'target.name',
+            idempotencyKey: 'preflight-key-000000000000',
+            nonce: 'preflight_admission_nonce_08',
+        }, { secret });
+
+        const response = await createPreflight(postRequest(
+            { targetInstagramId: 'Target.Name' },
+            'preflight-key-000000000000',
+            token,
+        ));
+
+        expect(response.status).toBe(403);
+        await expect(response.json()).resolves.toMatchObject({
+            code: 'ACCOUNT_ADMISSION_DENIED',
+        });
+        expect(mocks.requireActiveE2eTestRunner).toHaveBeenCalledWith(
+            expect.objectContaining({
+                id: userId,
+                app_metadata: { provider: 'email', analysis_test_runner_v1: 'basic' },
+            }),
+        );
+        expect(mocks.store.createOrReplay).not.toHaveBeenCalled();
+        expect(mocks.enqueue).not.toHaveBeenCalled();
+    });
+
     it('rejects a valid signed canary from a non-E2E principal before persistence', async () => {
         const secret = Buffer.alloc(32, 13).toString('base64url');
         vi.stubEnv('ANALYSIS_TEST_ENTITLEMENTS_ENABLED', 'true');

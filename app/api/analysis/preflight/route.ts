@@ -80,8 +80,13 @@ function errorResponse(status: number, code: string, message: string): NextRespo
     }, { status });
 }
 
-function authProvider(value: unknown): PreflightAuthProvider | null {
-    return value === 'google' || value === 'kakao' ? value : null;
+function authProvider(
+    value: unknown,
+    options: { allowSignedE2eEmail: boolean } = { allowSignedE2eEmail: false },
+): PreflightAuthProvider | null {
+    if (value === 'google' || value === 'kakao') return value;
+    if (options.allowSignedE2eEmail && value === 'email') return value;
+    return null;
 }
 
 function preflightErrorCode(code: string): string {
@@ -456,7 +461,9 @@ async function handlePOST(
             );
         }
         const email = user.email?.trim();
-        provider = authProvider(user.app_metadata?.provider);
+        provider = authProvider(user.app_metadata?.provider, {
+            allowSignedE2eEmail: signedTestAdmission === 'valid',
+        });
         if (!email || email.length > 320 || !provider) {
             return failed(400, 'UNSUPPORTED_AUTH', '인증 정보를 확인할 수 없습니다.');
         }
