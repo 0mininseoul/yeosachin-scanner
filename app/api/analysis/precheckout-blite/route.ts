@@ -147,6 +147,7 @@ async function handlePOST(request: Request): Promise<NextResponse> {
     if (!parsed.success) return empty();
     const { preflightId } = parsed.data;
 
+    let stage = 'session';
     try {
         const supabase = await createClient();
         const { data: { user }, error } = await supabase.auth.getUser();
@@ -157,6 +158,7 @@ async function handlePOST(request: Request): Promise<NextResponse> {
         // checks are never bypassed, and require the ready state before doing any paid work
         // below. This is what ties inference cost to a real preflight instead of an
         // arbitrary username.
+        stage = 'access';
         const stored = error || !user
             ? await anonymousStoredPreflight(request, preflightId, client)
             : await preflightStore.findForOwner(preflightId, user.id, { client });
@@ -168,6 +170,7 @@ async function handlePOST(request: Request): Promise<NextResponse> {
         const cached = readCachedDto(preflightId);
         if (cached) return NextResponse.json(cached);
 
+        stage = 'generation';
         const dto = await sharedGeneration(preflightId, stored.readySnapshot.target.username);
         if (!dto) return unavailable('generation_unavailable');
         writeCachedDto(preflightId, dto);
@@ -176,7 +179,7 @@ async function handlePOST(request: Request): Promise<NextResponse> {
         // Never 5xx into the product flow.
         const reason = error instanceof Error && error.message.includes('DEADLINE')
             ? 'operation_deadline'
-            : 'unexpected';
+            : `unexpected_${stage}`;
         return unavailable(reason);
     }
 }
