@@ -804,6 +804,36 @@ describe('revenue cost operation ledger PGlite', () => {
             .resolves.toMatchObject({ rows: [{ economic_actual_krw: 8, actual_cost_krw: 8, billed_actual_krw: 0 }] });
     });
 
+    it('serializes concurrent ledger begins into one parent and two immutable source operations', async () => {
+        const db = await createDb();
+        await seedBegin(db);
+        const responses = await Promise.all([
+            query<{ result: { disposition: string; created: boolean; replayed: boolean } }>(
+                db,
+                'SELECT public.begin_analysis_revenue_cost_ledger_v1($1::uuid) AS result',
+                [requestId],
+            ),
+            query<{ result: { disposition: string; created: boolean; replayed: boolean } }>(
+                db,
+                'SELECT public.begin_analysis_revenue_cost_ledger_v1($1::uuid) AS result',
+                [requestId],
+            ),
+        ]);
+        expect(responses.map(response => response.rows[0]?.result).sort((left, right) =>
+            Number(left?.created ?? false) - Number(right?.created ?? false)
+        )).toEqual([
+            expect.objectContaining({ disposition: 'begun', created: false, replayed: true }),
+            expect.objectContaining({ disposition: 'begun', created: true, replayed: false }),
+        ]);
+        await expect(db.query(
+            `SELECT
+                (SELECT count(*)::INTEGER FROM public.analysis_revenue_run_ledgers
+                 WHERE request_id = '${requestId}') AS parent_count,
+                (SELECT count(*)::INTEGER FROM public.analysis_revenue_cost_operations
+                 WHERE request_id = '${requestId}') AS child_count`
+        )).resolves.toMatchObject({ rows: [{ parent_count: 1, child_count: 2 }] });
+    });
+
     it('fails closed for a changed source amount, an extra source generation, and imported child tamper', async () => {
         const db = await createDb();
         await seedBegin(db);

@@ -452,6 +452,7 @@ describe('test entitlement consumption RPC', () => {
             'ANALYSIS_V2_AUTHORIZED_TEST_POLICY_SCOPE_MISMATCH',
             'ANALYSIS_V2_AUTHORIZED_TEST_POLICY_CONFLICT',
             'ANALYSIS_V2_AUTHORIZED_TEST_POLICY_TOO_LATE',
+            'ANALYSIS_V2_REVENUE_SETTLEMENT_PENDING',
         ]) {
             const bounded = clientWith(null, { code: 'P0001', message: code });
             await expect(consumeAnalysisV2TestEntitlement(bounded.client, input))

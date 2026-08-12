@@ -41,6 +41,8 @@ export const ANALYSIS_V2_FRESH_ADMISSION_DATABASE_NAMES = Object.freeze({
 });
 
 export const ANALYSIS_V2_FRESH_ADMISSION_MAX_FAILURES = 3;
+export const ANALYSIS_V2_REVENUE_SETTLEMENT_FENCE_CODE =
+    'ANALYSIS_V2_REVENUE_SETTLEMENT_FENCE';
 
 export const ANALYSIS_V2_FRESH_ADMISSION_ERROR_CODES = [
     'ANALYSIS_V2_PREFLIGHT_NOT_FOUND',
@@ -262,6 +264,13 @@ export class AnalysisV2FreshAdmissionError extends Error {
     }
 }
 
+export class AnalysisV2RevenueSettlementFenceError extends Error {
+    constructor() {
+        super(ANALYSIS_V2_REVENUE_SETTLEMENT_FENCE_CODE);
+        this.name = 'AnalysisV2RevenueSettlementFenceError';
+    }
+}
+
 export class AnalysisV2FreshAdmissionLeaseBusyError extends Error {
     constructor() {
         super('ANALYSIS_V2_FRESH_ADMISSION_LEASE_BUSY');
@@ -283,6 +292,9 @@ function safeDatabaseErrorCode(error: RpcError): string {
 }
 
 function throwRpcError(error: RpcError, operation: string): never {
+    if (error.message === ANALYSIS_V2_REVENUE_SETTLEMENT_FENCE_CODE) {
+        throw new AnalysisV2RevenueSettlementFenceError();
+    }
     if (isBoundedErrorCode(error.message)) {
         throw new AnalysisV2FreshAdmissionError(error.message);
     }

@@ -1107,10 +1107,21 @@ describe('fresh revenue provenance forward migration PGlite proof', () => {
                 .rejects.toThrow('ANALYSIS_V2_REVENUE_DISPATCH_FENCE');
         }
 
-        await expect(serviceJsonRpc(db,
-            'SELECT public.activate_analysis_revenue_dispatch_guard_v1($1::uuid,$2) AS result',
-            [requestId, jobKey],
-        )).resolves.toEqual({ disposition: 'active', created: true, replayed: false });
+        const guardResults = await Promise.all([
+            serviceJsonRpc(db,
+                'SELECT public.activate_analysis_revenue_dispatch_guard_v1($1::uuid,$2) AS result',
+                [requestId, jobKey],
+            ),
+            serviceJsonRpc(db,
+                'SELECT public.activate_analysis_revenue_dispatch_guard_v1($1::uuid,$2) AS result',
+                [requestId, jobKey],
+            ),
+        ]) as Array<{ disposition: string; created: boolean; replayed: boolean }>;
+        expect(guardResults.sort((left, right) => Number(left.created) - Number(right.created)))
+            .toEqual([
+                { disposition: 'active', created: false, replayed: true },
+                { disposition: 'active', created: true, replayed: false },
+            ]);
         const unfencedFunctions = await query<{ count: number }>(db, `
             SELECT count(*)::int AS count
             FROM pg_catalog.pg_proc
