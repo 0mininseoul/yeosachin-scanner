@@ -181,6 +181,13 @@ export default function LandingPage({
           )
         }
       />
+      <div
+        role="status"
+        data-testid="traffic-delay-banner"
+        className="border-y border-blood/60 bg-blood/15 px-5 py-2.5 text-center text-[13px] font-semibold leading-relaxed text-white"
+      >
+        현재 접속자가 많아 분석 대기 시간이 평소보다 길어지고 있습니다.
+      </div>
       <main className="mx-auto max-w-[460px] px-5">
         {/* ---------- HERO ---------- */}
         <section className="pb-14 pt-7">
