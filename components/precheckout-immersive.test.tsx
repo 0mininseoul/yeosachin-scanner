@@ -7,7 +7,10 @@ import {
     PRECHECKOUT_BLITE_LIKELY_FEMALE_CONFIDENCE_THRESHOLD,
     PRECHECKOUT_BLITE_SCHEMA_VERSION,
 } from '@/lib/services/precheckout/blite-contract';
-import { PrecheckoutImmersive } from './precheckout-immersive';
+import {
+    PrecheckoutImmersive,
+    __resetBrowserBliteRequestsForTest,
+} from './precheckout-immersive';
 
 (globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT: boolean })
     .IS_REACT_ACT_ENVIRONMENT = true;
@@ -104,6 +107,7 @@ describe('PrecheckoutImmersive', () => {
     let root: Root;
 
     beforeEach(() => {
+        __resetBrowserBliteRequestsForTest();
         container = document.createElement('div');
         document.body.append(container);
         root = createRoot(container);
@@ -329,6 +333,32 @@ describe('PrecheckoutImmersive', () => {
 
         expect(onAvailabilityChange).toHaveBeenNthCalledWith(1, true);
         expect(onAvailabilityChange).toHaveBeenLastCalledWith(false);
+    });
+
+    it('reuses one browser request when the same preflight remounts', async () => {
+        const fetchMock = vi.fn().mockResolvedValue(jsonResponse(validDto({ likelyFemale: false })));
+        vi.stubGlobal('fetch', fetchMock);
+
+        await act(async () => {
+            root.render(createElement(PrecheckoutImmersive, {
+                preflightId: 'cccccccc-cccc-4ccc-8ccc-cccccccccccc',
+                claimToken: 'same-claim',
+                onGoToPlans: vi.fn(),
+            }));
+        });
+        await settleUi();
+        act(() => root.unmount());
+        root = createRoot(container);
+        await act(async () => {
+            root.render(createElement(PrecheckoutImmersive, {
+                preflightId: 'cccccccc-cccc-4ccc-8ccc-cccccccccccc',
+                claimToken: 'same-claim',
+                onGoToPlans: vi.fn(),
+            }));
+        });
+        await settleUi();
+
+        expect(fetchMock).toHaveBeenCalledTimes(1);
     });
 
     it('omits the claim token header when claimToken is null', async () => {

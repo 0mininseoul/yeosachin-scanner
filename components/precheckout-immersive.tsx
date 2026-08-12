@@ -23,6 +23,46 @@ import { PrecheckoutStageGraphs } from '@/components/precheckout-stage-graphs';
 // legitimate work first; keep a small response-delivery margin beyond the server deadline.
 const FETCH_DEADLINE_MS = 80_000;
 
+const browserBliteRequests = new Map<string, Promise<PrecheckoutBliteV1 | null>>();
+
+export function __resetBrowserBliteRequestsForTest(): void {
+    browserBliteRequests.clear();
+}
+
+async function fetchPrecheckoutBlite(
+    preflightId: string,
+    claimToken: string | null,
+): Promise<PrecheckoutBliteV1 | null> {
+    const key = `${preflightId}:${claimToken ?? ''}`;
+    const existing = browserBliteRequests.get(key);
+    if (existing) return existing;
+    const pending = (async () => {
+        const controller = new AbortController();
+        const timeout = setTimeout(() => controller.abort(), FETCH_DEADLINE_MS);
+        try {
+            const res = await fetch('/api/analysis/precheckout-blite', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                    ...(claimToken ? { 'x-preflight-claim-token': claimToken } : {}),
+                },
+                body: JSON.stringify({ preflightId }),
+                signal: controller.signal,
+                cache: 'no-store',
+            });
+            if (res.status !== 200) return null;
+            const parsed = precheckoutBliteV1Schema.safeParse(await res.json() as unknown);
+            return parsed.success ? parsed.data : null;
+        } catch {
+            return null;
+        } finally {
+            clearTimeout(timeout);
+        }
+    })();
+    browserBliteRequests.set(key, pending);
+    return pending;
+}
+
 type Screen = 'confirm' | 'result' | 'demo';
 
 const SIGNAL_BAND_LABEL: Record<PrecheckoutBliteSignalBand, string> = {
@@ -99,46 +139,22 @@ export function PrecheckoutImmersive({
         setScreen(null);
         setSequenceComplete(false);
 
-        const controller = new AbortController();
-        const timeout = setTimeout(() => controller.abort(), FETCH_DEADLINE_MS);
-
         let validPreview = false;
         (async () => {
             try {
-                const res = await fetch('/api/analysis/precheckout-blite', {
-                    method: 'POST',
-                    headers: {
-                        'Content-Type': 'application/json',
-                        ...(claimToken ? { 'x-preflight-claim-token': claimToken } : {}),
-                    },
-                    body: JSON.stringify({ preflightId }),
-                    signal: controller.signal,
-                    cache: 'no-store',
-                });
-                // 204 (feature unavailable) and any non-200 status both fail open.
-                if (res.status !== 200) return;
-                const body: unknown = await res.json();
-                // Re-validate on the client no matter what the server already checked.
-                const parsed = precheckoutBliteV1Schema.safeParse(body);
-                if (!parsed.success) return;
-                if (controller.signal.aborted) return;
+                const parsed = await fetchPrecheckoutBlite(preflightId, claimToken);
+                if (!parsed) return;
                 validPreview = true;
-                setDto(parsed.data);
-                const showConfirm = parsed.data.genderRead.likelyFemale
-                    && parsed.data.genderRead.confidence >= PRECHECKOUT_BLITE_LIKELY_FEMALE_CONFIDENCE_THRESHOLD;
+                setDto(parsed);
+                const showConfirm = parsed.genderRead.likelyFemale
+                    && parsed.genderRead.confidence >= PRECHECKOUT_BLITE_LIKELY_FEMALE_CONFIDENCE_THRESHOLD;
                 setScreen(showConfirm ? 'confirm' : 'result');
-            } catch {
-                // Network error, JSON parse failure, or the bounded abort — stay unavailable.
             } finally {
-                clearTimeout(timeout);
                 if (!validPreview) onAvailabilityChange?.(false);
             }
         })();
 
-        return () => {
-            clearTimeout(timeout);
-            controller.abort();
-        };
+        return undefined;
     }, [preflightId, claimToken, onAvailabilityChange]);
 
     const handleSequenceComplete = useCallback(() => setSequenceComplete(true), []);
