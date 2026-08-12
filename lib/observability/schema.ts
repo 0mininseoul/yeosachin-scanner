@@ -88,6 +88,7 @@ export const OPERATIONAL_EVENT_NAMES = [
     'preflight.requested',
     'preflight.profile_collected',
     'preflight.completed',
+    'preflight.blocked',
     'preflight.failed',
     'preflight.exclusion_decided',
     'earlybird.advance_failed',

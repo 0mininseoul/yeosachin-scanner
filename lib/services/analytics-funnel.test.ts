@@ -9,6 +9,7 @@ import {
     currentAttributionSource,
     landingViewEventKey,
     classifyPreflightAnalyticsOutcome,
+    classifyPreflightRequestAnalyticsOutcome,
     preflightOutcomeEventKey,
     readAttribution,
     readAnalyticsAttribution,
@@ -156,6 +157,16 @@ describe('Amplitude funnel helpers', () => {
 
     it('classifies ready preflight as succeeded regardless of code', () => {
         expect(classifyPreflightAnalyticsOutcome('ready')).toBe('succeeded');
+    });
+
+    it.each([
+        [400, 'blocked'],
+        [401, 'blocked'],
+        [429, 'blocked'],
+        [500, 'failed'],
+        [503, 'failed'],
+    ] as const)('classifies request HTTP %s as %s', (status, expected) => {
+        expect(classifyPreflightRequestAnalyticsOutcome(status)).toBe(expected);
     });
 
     it('claims a session event once and fails open when storage is unavailable', () => {

@@ -410,6 +410,24 @@ describe('sanitizeOperationalEvent', () => {
         expect(JSON.stringify(sanitized)).not.toContain('PGRST202');
     });
 
+    it('accepts the bounded preflight request-block event', () => {
+        const sanitized = sanitizeOperationalEvent({
+            event: 'preflight.blocked',
+            severity: 'info',
+            fields: {
+                operation: 'preflight',
+                disposition: 'rate_limited',
+                error_code: 'RATE_LIMITED',
+            },
+        });
+
+        expect(sanitized.fields).toMatchObject({
+            event: 'preflight.blocked',
+            disposition: 'rate_limited',
+            error_code: 'RATE_LIMITED',
+        });
+    });
+
     it('drops unregistered categorical values and broad-prefix error codes', () => {
         const sanitized = sanitizeOperationalEvent({
             event: 'attacker.secret_token',
@@ -467,6 +485,7 @@ describe('sanitizeOperationalEvent', () => {
             'preflight.requested',
             'preflight.profile_collected',
             'preflight.completed',
+            'preflight.blocked',
             'preflight.failed',
             'preflight.exclusion_decided',
             'earlybird.checkout_created',
