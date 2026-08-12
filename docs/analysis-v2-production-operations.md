@@ -14,7 +14,7 @@
 
 여기서 **사전 점검(preflight)** 은 결제·분석 전에 대상과 플랜 가능성을 확인하고 불변 snapshot을 만드는 단계다. preflight는 분석 요청과 별개이며, 실행 시 snapshot을 다시 검증한다.
 
-1. checkout은 서버 카탈로그 및 preflight snapshot에서만 Basic/Standard를 만들며, 현재 가격 버전은 `earlybird-2026-08-v3`다. 기존 v1/v2 payment lineage는 새 checkout으로 바꾸지 않고 immutable snapshot을 보존한다([`20260803200000_update_earlybird_pricing_v3.sql`](../supabase/migrations/20260803200000_update_earlybird_pricing_v3.sql), [`app/api/earlybird/checkout/route.ts`](../app/api/earlybird/checkout/route.ts)).
+1. checkout은 서버 카탈로그 및 preflight snapshot에서만 Basic/Standard를 만들며, 현재 가격 버전은 `earlybird-2026-08-v4`다. 기존 v1/v2/v3 payment lineage는 새 checkout으로 바꾸지 않고 immutable snapshot을 보존한다([`20260812120000_update_earlybird_pricing_v4.sql`](../supabase/migrations/20260812120000_update_earlybird_pricing_v4.sql), [`app/api/earlybird/checkout/route.ts`](../app/api/earlybird/checkout/route.ts)).
 2. Groble webhook은 결제를 검증하고 `earlybird_fulfillments.awaiting_operator` outbox 행만 만든다. webhook이 직접 `analysis_requests`나 Task를 만들지 않는다([`20260724123300_add_earlybird_fulfillment_outbox.sql`](../supabase/migrations/20260724123300_add_earlybird_fulfillment_outbox.sql)).
 3. canonical recovery가 `EARLYBIRD_AUTOMATIC_FULFILLMENT_ENABLED=true`일 때만 bounded 자동 입장을 실행한다. paid/reference-confirmed/payment ID/금액·상품/소유자/production preflight 및 불변 launch·catalog·pricing·policy snapshot을 모두 다시 검증한다([`20260728120000_add_earlybird_automatic_fulfillment.sql`](../supabase/migrations/20260728120000_add_earlybird_automatic_fulfillment.sql), [`lib/services/earlybird/fulfillment-store.ts`](../lib/services/earlybird/fulfillment-store.ts)).
 4. 복구는 이미 `admission_pending`인 작업을 drain하며, 불일치·실패는 새 유료 요청을 임의로 만들지 않고 `manual_review` 또는 기존 재시도 경계로 남긴다. `payment_pending` 주문 두 건은 독립된 provider 증거가 없는 한 변경하지 않는다.

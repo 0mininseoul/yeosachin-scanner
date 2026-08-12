@@ -363,8 +363,8 @@ describe('preflight owner routes', () => {
             plans: Array<{ planId: string; price: { amountKrw: number | null } }>;
         };
         const byPlan = Object.fromEntries(body.plans.map(plan => [plan.planId, plan]));
-        expect(byPlan.basic.price.amountKrw).toBe(990);
-        expect(byPlan.standard.price.amountKrw).toBe(1_990);
+        expect(byPlan.basic.price.amountKrw).toBe(1_990);
+        expect(byPlan.standard.price.amountKrw).toBe(2_990);
     });
 
     it('updates anonymous exclusion only through the claim-bound client path', async () => {

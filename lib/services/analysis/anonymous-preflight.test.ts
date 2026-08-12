@@ -118,9 +118,9 @@ describe('anonymous preflight service', () => {
             expect.objectContaining({ p_claim_token_hash: claim.tokenHash }),
         );
         expect(result?.readySnapshot?.plans.find(plan => plan.planId === 'basic')?.price)
-            .toEqual({ status: 'quoted', currency: 'KRW', amountKrw: 990 });
-        expect(result?.readySnapshot?.plans.find(plan => plan.planId === 'standard')?.price)
             .toEqual({ status: 'quoted', currency: 'KRW', amountKrw: 1_990 });
+        expect(result?.readySnapshot?.plans.find(plan => plan.planId === 'standard')?.price)
+            .toEqual({ status: 'quoted', currency: 'KRW', amountKrw: 2_990 });
         expect(result?.readySnapshot?.target.profileImageUrl).toBeNull();
         expect(planCatalogSnapshot().standard.relationshipCapacity.followers).toBe(800);
     });

@@ -1,6 +1,6 @@
 import type { PlanId } from '@/lib/domain/analysis/plan-catalog';
 
-export const EARLYBIRD_PRICING_VERSION = 'earlybird-2026-08-v3' as const;
+export const EARLYBIRD_PRICING_VERSION = 'earlybird-2026-08-v4' as const;
 export const EARLYBIRD_DISCLOSURE_VERSION = 'earlybird-auto-start-v2' as const;
 export const EARLYBIRD_DISCLOSURE_TEXT =
     '결제 확인 후 판독이 자동으로 시작됩니다.' as const;
@@ -30,16 +30,16 @@ export const EARLYBIRD_PLAN_CATALOG = Object.freeze({
     basic: Object.freeze({
         planId: 'basic',
         referenceAmountKrw: 3_990,
-        earlybirdAmountKrw: 990,
-        displayDiscountPercent: 72,
+        earlybirdAmountKrw: 1_990,
+        displayDiscountPercent: 50,
         serverLimit: 10,
         fulfillment: 'groble_payment',
     } satisfies PaidEarlybirdPlan),
     standard: Object.freeze({
         planId: 'standard',
         referenceAmountKrw: 7_990,
-        earlybirdAmountKrw: 1_990,
-        displayDiscountPercent: 72,
+        earlybirdAmountKrw: 2_990,
+        displayDiscountPercent: 62,
         serverLimit: 10,
         fulfillment: 'groble_payment',
     } satisfies PaidEarlybirdPlan),
