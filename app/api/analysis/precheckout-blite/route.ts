@@ -22,9 +22,9 @@ const requestBodySchema = z.object({
 /** Server-only gate. Never exposed to the browser. */
 const PRECHECKOUT_BLITE_ENABLED_FLAG = 'PRECHECKOUT_BLITE_ENABLED';
 
-// Apify's profile actor reserves 20s of dataset-settlement headroom. Keep enough budget for
-// that bounded fetch plus the single Gemini inference while still failing open promptly.
-const PRECHECKOUT_BLITE_OPERATION_TIMEOUT_MS = 45_000;
+// Apify's profile actor reserves 20s of dataset-settlement headroom and recent successful
+// production runs take up to ~35s. Leave a bounded 55s Actor window plus model-processing time.
+const PRECHECKOUT_BLITE_OPERATION_TIMEOUT_MS = 75_000;
 const PRECHECKOUT_BLITE_CACHE_TTL_MS = 5 * 60_000;
 const PRECHECKOUT_BLITE_CACHE_MAX_ENTRIES = 200;
 
