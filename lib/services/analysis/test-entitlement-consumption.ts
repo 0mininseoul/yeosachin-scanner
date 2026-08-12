@@ -13,7 +13,6 @@ import {
     type AuthorizedTestProviderExecutionPolicy,
 } from './authorized-test-provider-policy';
 export { hashAnalysisTestEntitlementJti } from './test-entitlement-jti';
-import { hashAnalysisTestEntitlementJti } from './test-entitlement-jti';
 
 const uuidSchema = z.string().uuid();
 const usernameSchema = z.string()
@@ -115,6 +114,9 @@ export const ANALYSIS_V2_ENTITLEMENT_ERROR_CODES = [
     'ANALYSIS_V2_AUTHORIZED_TEST_POLICY_SCOPE_MISMATCH',
     'ANALYSIS_V2_AUTHORIZED_TEST_POLICY_CONFLICT',
     'ANALYSIS_V2_AUTHORIZED_TEST_POLICY_TOO_LATE',
+    // The migration-first SQL gate uses this bounded code while an already
+    // admitted strict lineage waits for the existing cost reconciler.
+    'ANALYSIS_V2_REVENUE_SETTLEMENT_PENDING',
 ] as const;
 
 export type AnalysisV2EntitlementErrorCode =

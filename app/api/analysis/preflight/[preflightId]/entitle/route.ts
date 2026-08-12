@@ -22,7 +22,10 @@ import {
     configuredAuthorizedTestProviderPolicy,
 } from '@/lib/services/analysis/authorized-test-provider-policy';
 import {
+    ANALYSIS_V2_REVENUE_SETTLEMENT_FENCE_CODE,
+    ANALYSIS_V2_FRESH_ADMISSION_ERROR_CODES,
     AnalysisV2FreshAdmissionError,
+    AnalysisV2RevenueSettlementFenceError,
     markAnalysisV2FreshAdmissionDispatched,
     releaseAnalysisV2FreshAdmissionDispatch,
     reserveAnalysisV2FreshAdmission,
@@ -35,6 +38,7 @@ import {
     enqueueFreshAdmissionTask,
     getPreflightTasksConfig,
 } from '@/lib/services/analysis/preflight-tasks';
+import { preflightTargetInputHash } from '@/lib/services/analysis/preflight-identity';
 import {
     dispatchAnalysisV2Job,
     getAnalysisV2TasksConfig,
@@ -90,6 +94,7 @@ const ERROR_STATUS: Readonly<Record<AnalysisV2EntitlementErrorCode, number>> = {
     ANALYSIS_V2_AUTHORIZED_TEST_POLICY_SCOPE_MISMATCH: 403,
     ANALYSIS_V2_AUTHORIZED_TEST_POLICY_CONFLICT: 409,
     ANALYSIS_V2_AUTHORIZED_TEST_POLICY_TOO_LATE: 409,
+    ANALYSIS_V2_REVENUE_SETTLEMENT_PENDING: 503,
 };
 
 const FRESH_ADMISSION_ERROR_STATUS: Readonly<
@@ -105,6 +110,17 @@ Record<AnalysisV2FreshAdmissionErrorCode, number>
     ANALYSIS_V2_OVER_PLUS_CAPACITY: 409,
     ANALYSIS_V2_FRESH_PROFILE_UNAVAILABLE: 503,
 };
+
+const STRICT_REVENUE_SETTLEMENT_RETRY_AFTER_MS = 5_000;
+const strictRevenueSettlementAdmissionSchema = z.discriminatedUnion('disposition', [
+    z.object({ disposition: z.literal('not_applicable') }).strict(),
+    z.object({ disposition: z.literal('replayable') }).strict(),
+    z.object({ disposition: z.literal('pending') }).strict(),
+    z.object({
+        disposition: z.literal('ready'),
+        admissionToken: uuidSchema,
+    }).strict(),
+]);
 
 function entitlementError(code: AnalysisV2EntitlementErrorCode) {
     return NextResponse.json(
@@ -125,6 +141,59 @@ function freshAdmissionError(
         },
         { status: FRESH_ADMISSION_ERROR_STATUS[code] }
     );
+}
+
+function strictRevenueSettlementPendingResponse(preflightId: string) {
+    return NextResponse.json({
+        schemaVersion: ANALYSIS_V2_SCHEMA_VERSION,
+        preflightId,
+        status: 'admission_pending',
+        backgroundProcessing: true,
+        retryAfterMs: STRICT_REVENUE_SETTLEMENT_RETRY_AFTER_MS,
+    }, {
+        status: 202,
+        headers: { 'Retry-After': '5' },
+    });
+}
+
+async function prepareStrictRevenueSettlementAdmission(input: {
+    preflightId: string;
+    userId: string;
+    selectedPlanId: 'basic' | 'standard';
+    entitlementJtiHash: string;
+    serverTargetInputHash: string;
+}): Promise<z.infer<typeof strictRevenueSettlementAdmissionSchema>> {
+    const { data, error } = await supabaseAdmin.rpc(
+        'prepare_analysis_v2_authorized_revenue_settlement_admission',
+        {
+            p_preflight_id: input.preflightId,
+            p_user_id: input.userId,
+            p_selected_plan_id: input.selectedPlanId,
+            p_entitlement_jti_hash: input.entitlementJtiHash,
+            p_server_target_input_hash: input.serverTargetInputHash,
+        },
+    );
+    if (error) {
+        if (error.message === ANALYSIS_V2_REVENUE_SETTLEMENT_FENCE_CODE) {
+            throw new AnalysisV2RevenueSettlementFenceError();
+        }
+        if (
+            typeof error.message === 'string'
+            && ANALYSIS_V2_FRESH_ADMISSION_ERROR_CODES.includes(
+                error.message as AnalysisV2FreshAdmissionErrorCode
+            )
+        ) {
+            throw new AnalysisV2FreshAdmissionError(
+                error.message as AnalysisV2FreshAdmissionErrorCode
+            );
+        }
+        throw new Error('ANALYSIS_V2_REVENUE_SETTLEMENT_ADMISSION_ERROR');
+    }
+    const parsed = strictRevenueSettlementAdmissionSchema.safeParse(data);
+    if (!parsed.success) {
+        throw new Error('ANALYSIS_V2_REVENUE_SETTLEMENT_ADMISSION_ERROR');
+    }
+    return parsed.data;
 }
 
 async function dispatchInitialJob(
@@ -299,8 +368,61 @@ async function handlePOST(
             }
         }
 
+        const strictRevenueCohort = (
+            (body.data.planId === 'basic' || body.data.planId === 'standard')
+            && providerExecutionPolicy?.mode === 'test_operation_split'
+            && providerExecutionPolicy.policyVersion === 'authorized-free-e2e-v1'
+        );
+
+        let serverTargetInputHash: string | null = null;
+        if (strictRevenueCohort && validatedPreflight.state === 'ready') {
+            try {
+                serverTargetInputHash = preflightTargetInputHash(row.target_instagram_id);
+            } catch {
+                console.error('Authorized analysis test target identity is unavailable.');
+                return NextResponse.json(
+                    {
+                        error: '분석 테스트 대상 확인을 사용할 수 없습니다.',
+                        code: 'TEST_ENTITLEMENTS_UNAVAILABLE',
+                    },
+                    { status: 503 },
+                );
+            }
+        }
+
         let admissionToken: string | null = null;
-        if (validatedPreflight.state === 'ready') {
+        let strictRevenueSettlementPrepared = false;
+        let strictRevenueSettlementReplayable = false;
+        if (strictRevenueCohort && validatedPreflight.state === 'ready') {
+            const selectedPlanId = body.data.planId;
+            if (selectedPlanId !== 'basic' && selectedPlanId !== 'standard') {
+                throw new Error('ANALYSIS_V2_REVENUE_SETTLEMENT_ADMISSION_ERROR');
+            }
+            const settlement = await prepareStrictRevenueSettlementAdmission({
+                preflightId,
+                userId: user.id,
+                selectedPlanId,
+                entitlementJtiHash,
+                serverTargetInputHash: serverTargetInputHash!,
+            });
+            if (settlement.disposition === 'pending') {
+                return strictRevenueSettlementPendingResponse(preflightId);
+            }
+            if (settlement.disposition === 'replayable') {
+                strictRevenueSettlementReplayable = true;
+                strictRevenueSettlementPrepared = true;
+            }
+            if (settlement.disposition === 'ready') {
+                admissionToken = settlement.admissionToken;
+                strictRevenueSettlementPrepared = true;
+            }
+        }
+
+        if (
+            validatedPreflight.state === 'ready'
+            && admissionToken === null
+            && !strictRevenueSettlementReplayable
+        ) {
             const admission = await reserveAnalysisV2FreshAdmission(supabaseAdmin, {
                 preflightId,
                 userId: user.id,
@@ -394,6 +516,56 @@ async function handlePOST(
             }
             admissionToken = admission.admissionToken;
         }
+
+        // The first prepare call avoids re-reserving an already-completed
+        // strict admission. If this request just received a ready admission,
+        // run it again to close the worker/route race before consumption.
+        if (
+            strictRevenueCohort
+            && validatedPreflight.state === 'ready'
+            && !strictRevenueSettlementPrepared
+            && !strictRevenueSettlementReplayable
+        ) {
+            const selectedPlanId = body.data.planId;
+            if (selectedPlanId !== 'basic' && selectedPlanId !== 'standard') {
+                throw new Error('ANALYSIS_V2_REVENUE_SETTLEMENT_ADMISSION_ERROR');
+            }
+            const settlement = await prepareStrictRevenueSettlementAdmission({
+                preflightId,
+                userId: user.id,
+                selectedPlanId,
+                entitlementJtiHash,
+                serverTargetInputHash: serverTargetInputHash!,
+            });
+            if (settlement.disposition === 'pending') {
+                return strictRevenueSettlementPendingResponse(preflightId);
+            }
+            if (settlement.disposition === 'replayable') {
+                strictRevenueSettlementReplayable = true;
+                admissionToken = null;
+            } else if (settlement.disposition === 'not_applicable') {
+                // A competing request may have consumed the exact token after
+                // reserve returned. Keep that token and let the durable
+                // consume RPC return its existing request idempotently.
+                if (admissionToken === null) {
+                    throw new Error('ANALYSIS_V2_REVENUE_SETTLEMENT_ADMISSION_ERROR');
+                }
+            } else if (settlement.disposition !== 'ready') {
+                throw new Error('ANALYSIS_V2_REVENUE_SETTLEMENT_ADMISSION_ERROR');
+            } else {
+                admissionToken = settlement.admissionToken;
+            }
+        }
+
+        if (
+            strictRevenueCohort
+            && validatedPreflight.state === 'ready'
+            && admissionToken === null
+            && !strictRevenueSettlementReplayable
+        ) {
+            throw new Error('ANALYSIS_V2_REVENUE_SETTLEMENT_ADMISSION_ERROR');
+        }
+
         const consumed = await consumeAnalysisV2TestEntitlement(supabaseAdmin, {
             preflightId,
             userId: user.id,
@@ -411,12 +583,6 @@ async function handlePOST(
         // a completed/failed/manual-review revenue lineage.
         const terminal = consumed.requestStatus === 'completed'
             || consumed.requestStatus === 'failed';
-        const strictRevenueCohort = (
-            (body.data.planId === 'basic' || body.data.planId === 'standard')
-            && providerExecutionPolicy?.mode === 'test_operation_split'
-            && providerExecutionPolicy.policyVersion === 'authorized-free-e2e-v1'
-        );
-
         // This remains opt-in for the signed Basic/Standard test cohort. The
         // SQL begin RPC locks the consumed lineage before any job can dispatch;
         // Plus and ordinary production paths retain zero revenue RPCs.
@@ -505,8 +671,28 @@ async function handlePOST(
             backgroundProcessing,
         }, { status: consumed.created ? 201 : 200 });
     } catch (error) {
+        if (error instanceof AnalysisV2RevenueSettlementFenceError) {
+            return NextResponse.json(
+                {
+                    error: '분석 테스트 대상 확인을 사용할 수 없습니다.',
+                    code: 'TEST_ENTITLEMENTS_UNAVAILABLE',
+                },
+                { status: 503 },
+            );
+        }
         if (error instanceof AnalysisV2FreshAdmissionError) {
             return freshAdmissionError(error.code);
+        }
+        if (
+            error instanceof AnalysisV2EntitlementConsumptionError
+            && error.code === 'ANALYSIS_V2_REVENUE_SETTLEMENT_PENDING'
+        ) {
+            // A draining older route can reach the DB gate after its previous
+            // prepare. Preserve the bounded retry contract; it has not
+            // consumed an entitlement or created a new provider generation.
+            return strictRevenueSettlementPendingResponse(
+                uuidSchema.parse((await params).preflightId)
+            );
         }
         if (error instanceof AnalysisV2EntitlementConsumptionError) {
             return entitlementError(error.code);
