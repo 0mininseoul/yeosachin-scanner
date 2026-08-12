@@ -101,6 +101,10 @@ async function generateDto(preflightId: string, targetUsername: string): Promise
         try {
             profile = await getInstagramProfile(targetUsername, {
                 requestId: preflightId,
+                // B-lite needs recent feed media and its bounded cost model is tied to the
+                // Apify profile actor. Do not inherit the paid E2E scraper selector here.
+                provider: 'apify',
+                fallback: false,
                 invocationDeadlineAtMs: deadlineAtMs,
                 startCancellationSignal: controller.signal,
             });

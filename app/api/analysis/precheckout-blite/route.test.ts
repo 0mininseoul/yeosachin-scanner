@@ -270,6 +270,8 @@ describe('POST /api/analysis/precheckout-blite', () => {
             'resolved_target',
             expect.objectContaining({
                 requestId: preflightId,
+                provider: 'apify',
+                fallback: false,
                 invocationDeadlineAtMs: expect.any(Number),
                 startCancellationSignal: expect.any(AbortSignal),
             })
