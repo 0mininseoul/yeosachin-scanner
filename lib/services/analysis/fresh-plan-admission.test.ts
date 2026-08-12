@@ -419,6 +419,7 @@ describe('durable fresh V2 admission worker', () => {
                         claimed: true,
                         admission_status: 'processing',
                         target_instagram_id: 'target.account',
+                        access_mode: 'production',
                     }],
                     error: null,
                 };
@@ -482,6 +483,7 @@ describe('durable fresh V2 admission worker', () => {
                         claimed: true,
                         admission_status: 'processing',
                         target_instagram_id: 'target.account',
+                        access_mode: 'production',
                     }],
                     error: null,
                 };
@@ -527,6 +529,170 @@ describe('durable fresh V2 admission worker', () => {
         expect(getFallbackProfile).not.toHaveBeenCalled();
     });
 
+    it('uses a durable Apify fresh-admission run for a test-entitlement claim despite self-hosted collection selectors', async () => {
+        const { client } = clientWith(async (name) => {
+            if (name === ANALYSIS_V2_FRESH_ADMISSION_DATABASE_NAMES.claimRpc) {
+                return {
+                    data: [{
+                        claimed: true,
+                        admission_status: 'processing',
+                        target_instagram_id: 'target.account',
+                        access_mode: 'test_entitlement',
+                    }],
+                    error: null,
+                };
+            }
+            if (name === ANALYSIS_V2_FRESH_ADMISSION_DATABASE_NAMES.completeRpc) {
+                return {
+                    data: [{ admission_status: 'ready', admission_error_code: null }],
+                    error: null,
+                };
+            }
+            throw new Error(`unexpected RPC ${name}`);
+        });
+        const runs = providerRunStore();
+        const getProfile = vi.fn();
+        const getAuthenticatedProfile = vi.fn().mockResolvedValue(profile());
+        const getFallbackProfile = vi.fn(async (
+            _username: string,
+            context?: ProviderCallContext
+        ) => {
+            const identity = {
+                logicalProvider: 'apify' as const,
+                actorId: 'apify/instagram-profile-scraper',
+                credentialSlot: 'quinary' as const,
+                maxChargeUsd: 0.0026 as const,
+            };
+            await context?.onBeforeRunStart?.(identity);
+            await context?.onRunStarted?.('FreshAdmissionRevenueRun1');
+            await context?.onCostRunStarted?.({
+                ...identity,
+                runId: 'FreshAdmissionRevenueRun1',
+            });
+            await context?.onCostRunFinished?.({
+                ...identity,
+                runId: 'FreshAdmissionRevenueRun1',
+                status: 'succeeded',
+                usageTotalUsd: 0.0026,
+            });
+            return profile({ postsCount: 0, latestPosts: [] });
+        });
+        const env = {
+            ...FRESH_ENV,
+            SELFHOSTED_AUTH_ENABLED: 'true',
+            SCRAPER_FOLLOWERS: 'selfhosted_auth',
+            SCRAPER_FOLLOWING: 'selfhosted_auth',
+            SCRAPER_LIKERS: 'selfhosted_auth',
+            SCRAPER_COMMENTS: 'selfhosted_auth',
+        };
+
+        await expect(processAnalysisV2FreshAdmission(client, {
+            ...workerInput(),
+            generation: 1,
+        }, {
+            getProfile,
+            getAuthenticatedProfile,
+            getFallbackProfile,
+            providerRunStore: runs,
+            env,
+            createClaimToken: () => CLAIM_TOKEN,
+        })).resolves.toBe('ready');
+
+        expect(getProfile).not.toHaveBeenCalled();
+        expect(getAuthenticatedProfile).not.toHaveBeenCalled();
+        expect(getFallbackProfile).toHaveBeenCalledOnce();
+        expect(runs.reserve).toHaveBeenCalledOnce();
+        expect(runs.checkpointStarted).toHaveBeenCalledOnce();
+        expect(runs.checkpointTerminal).toHaveBeenCalledOnce();
+        expect(runs.markReusableProfileSchemaV1).toHaveBeenCalledOnce();
+    });
+
+    it('settles a test-entitlement paid-fetch error without re-entering the paid provider', async () => {
+        const { client, rpc } = clientWith(async (name) => {
+            if (name === ANALYSIS_V2_FRESH_ADMISSION_DATABASE_NAMES.claimRpc) {
+                return {
+                    data: [{
+                        claimed: true,
+                        admission_status: 'processing',
+                        target_instagram_id: 'target.account',
+                        access_mode: 'test_entitlement',
+                    }],
+                    error: null,
+                };
+            }
+            if (name === ANALYSIS_V2_FRESH_ADMISSION_DATABASE_NAMES.failureRpc) {
+                return {
+                    data: [{
+                        admission_status: 'pending',
+                        failure_count: 1,
+                        admission_error_code: null,
+                    }],
+                    error: null,
+                };
+            }
+            throw new Error(`unexpected RPC ${name}`);
+        });
+        const getProfile = vi.fn();
+        const getAuthenticatedProfile = vi.fn();
+        const getFallbackProfile = vi.fn().mockRejectedValue(
+            new Error('paid provider unavailable')
+        );
+
+        await expect(processAnalysisV2FreshAdmission(client, workerInput(), {
+            getProfile,
+            getAuthenticatedProfile,
+            getFallbackProfile,
+            providerRunStore: providerRunStore(),
+            env: {
+                ...FRESH_ENV,
+                SELFHOSTED_AUTH_ENABLED: 'true',
+                SCRAPER_FOLLOWERS: 'selfhosted_auth',
+                SCRAPER_FOLLOWING: 'selfhosted_auth',
+                SCRAPER_LIKERS: 'selfhosted_auth',
+                SCRAPER_COMMENTS: 'selfhosted_auth',
+            },
+            createClaimToken: () => CLAIM_TOKEN,
+        })).rejects.toMatchObject({
+            message: 'PREFLIGHT_WORKER_RETRY',
+            classification: { workerAttemptCount: 1 },
+        });
+
+        expect(getProfile).not.toHaveBeenCalled();
+        expect(getAuthenticatedProfile).not.toHaveBeenCalled();
+        expect(getFallbackProfile).toHaveBeenCalledOnce();
+        expect(rpc).toHaveBeenLastCalledWith(
+            ANALYSIS_V2_FRESH_ADMISSION_DATABASE_NAMES.failureRpc,
+            expect.objectContaining({ p_claim_token: CLAIM_TOKEN })
+        );
+    });
+
+    it('rejects a claimed admission row without its authoritative access mode', async () => {
+        const { client } = clientWith(async (name) => {
+            if (name === ANALYSIS_V2_FRESH_ADMISSION_DATABASE_NAMES.claimRpc) {
+                return {
+                    data: [{
+                        claimed: true,
+                        admission_status: 'processing',
+                        target_instagram_id: 'target.account',
+                    }],
+                    error: null,
+                };
+            }
+            if (name === ANALYSIS_V2_FRESH_ADMISSION_DATABASE_NAMES.completeRpc) {
+                return {
+                    data: [{ admission_status: 'ready', admission_error_code: null }],
+                    error: null,
+                };
+            }
+            throw new Error(`unexpected RPC ${name}`);
+        });
+
+        await expect(processAnalysisV2FreshAdmission(client, workerInput(), {
+            getProfile: vi.fn().mockResolvedValue(profile()),
+            createClaimToken: () => CLAIM_TOKEN,
+        })).rejects.toThrow('invalid claim result');
+    });
+
     it.each([
         ['missing', null, 'ANALYSIS_V2_TARGET_NOT_FOUND'],
         ['private', profile({ isPrivate: true }), 'ANALYSIS_V2_TARGET_PRIVATE'],
@@ -538,6 +704,7 @@ describe('durable fresh V2 admission worker', () => {
                         claimed: true,
                         admission_status: 'processing',
                         target_instagram_id: 'target.account',
+                        access_mode: 'production',
                     }],
                     error: null,
                 };
@@ -574,6 +741,7 @@ describe('durable fresh V2 admission worker', () => {
                         claimed: true,
                         admission_status: 'processing',
                         target_instagram_id: 'target.account',
+                        access_mode: 'production',
                     }],
                     error: null,
                 };
@@ -651,6 +819,7 @@ describe('durable fresh V2 admission worker', () => {
                         claimed: true,
                         admission_status: 'processing',
                         target_instagram_id: 'target.account',
+                        access_mode: 'production',
                     }],
                     error: null,
                 };
@@ -707,6 +876,7 @@ describe('durable fresh V2 admission worker', () => {
                         claimed: true,
                         admission_status: 'processing',
                         target_instagram_id: 'target.account',
+                        access_mode: 'production',
                     }],
                     error: null,
                 };
@@ -761,6 +931,7 @@ describe('durable fresh V2 admission worker', () => {
                         claimed: true,
                         admission_status: 'processing',
                         target_instagram_id: 'target.account',
+                        access_mode: 'production',
                     }],
                     error: null,
                 };
@@ -810,6 +981,7 @@ describe('durable fresh V2 admission worker', () => {
                         claimed: true,
                         admission_status: 'processing',
                         target_instagram_id: 'target.account',
+                        access_mode: 'production',
                     }],
                     error: null,
                 };
@@ -884,6 +1056,7 @@ describe('durable fresh V2 admission worker', () => {
                         claimed: true,
                         admission_status: 'processing',
                         target_instagram_id: 'target.account',
+                        access_mode: 'production',
                     }],
                     error: null,
                 };
@@ -932,6 +1105,7 @@ describe('durable fresh V2 admission worker', () => {
                         claimed: true,
                         admission_status: 'processing',
                         target_instagram_id: 'target.account',
+                        access_mode: 'production',
                     }],
                     error: null,
                 };
@@ -974,6 +1148,7 @@ describe('durable fresh V2 admission worker', () => {
                         claimed: true,
                         admission_status: 'processing',
                         target_instagram_id: 'target.account',
+                        access_mode: 'production',
                     }],
                     error: null,
                 };
@@ -1022,6 +1197,7 @@ describe('durable fresh V2 admission worker', () => {
                         claimed: true,
                         admission_status: 'processing',
                         target_instagram_id: 'target.account',
+                        access_mode: 'production',
                     }],
                     error: null,
                 };
@@ -1059,6 +1235,7 @@ describe('durable fresh V2 admission worker', () => {
                         admission_status: 'processing',
                         target_instagram_id: 'target.account',
                         analysis_entry_channel: 'betatest',
+                        access_mode: 'production',
                     }],
                     error: null,
                 };
@@ -1126,6 +1303,7 @@ describe('durable fresh V2 admission worker', () => {
                         claimed: true,
                         admission_status: 'processing',
                         target_instagram_id: 'target.account',
+                        access_mode: 'production',
                     }],
                     error: null,
                 };
@@ -1162,6 +1340,7 @@ describe('durable fresh V2 admission worker', () => {
                             claimed: true,
                             admission_status: 'processing',
                             target_instagram_id: 'target.account',
+                            access_mode: 'production',
                         }],
                         error: null,
                     };
@@ -1199,6 +1378,7 @@ describe('durable fresh V2 admission worker', () => {
                 claimed: false,
                 admission_status: 'processing',
                 target_instagram_id: null,
+                access_mode: 'production',
             }],
             error: null,
         }));

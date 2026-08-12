@@ -19,6 +19,10 @@ const migrationUrls = [
         '../../../supabase/migrations/20260802070000_wire_betatest_preflight_credit_runtime.sql',
         import.meta.url
     ),
+    new URL(
+        '../../../supabase/migrations/20260812011137_expose_test_entitlement_access_mode_to_fresh_admission_claim.sql',
+        import.meta.url
+    ),
 ];
 const migrations = migrationUrls.map(migrationUrl => (
     existsSync(migrationUrl) ? readFileSync(migrationUrl, 'utf8') : ''
@@ -459,6 +463,7 @@ describe('beta Apify credit reservation migration PGlite', () => {
             '20260802010100_validate_betatest_entry_channel_constraints.sql',
             '20260802020000_add_betatest_apify_credit_reservations.sql',
             '20260802070000_wire_betatest_preflight_credit_runtime.sql',
+            '20260812011137_expose_test_entitlement_access_mode_to_fresh_admission_claim.sql',
         ]);
     });
 
@@ -537,6 +542,53 @@ describe('beta Apify credit reservation migration PGlite', () => {
             claimed: true, admission_status: 'processing', target_instagram_id: 'target.user',
             analysis_entry_channel: 'betatest',
         });
+    });
+
+    it('exposes test-entitlement access mode only through the additive fresh-admission claim v2', async () => {
+        await db.query('INSERT INTO public.users (id) VALUES ($1)', [USER_ID]);
+        await db.query(
+            `INSERT INTO public.analysis_preflights (
+                id, user_id, status, access_mode, target_instagram_id,
+                admission_status, admission_generation,
+                admission_dispatch_generation, admission_dispatch_token,
+                admission_dispatch_state, expires_at
+             ) VALUES (
+                $1, $2, 'ready', 'test_entitlement', 'target.user',
+                'pending', 1, 1, $3, 'reserved',
+                pg_catalog.clock_timestamp() + INTERVAL '30 minutes'
+             )`,
+            [PREFLIGHT_ID, USER_ID, DISPATCH_TOKEN]
+        );
+
+        const claimed = await serviceQuery<{
+            claimed: boolean; admission_status: string; target_instagram_id: string | null;
+            analysis_entry_channel: string; access_mode: string | null;
+        }>(
+            'SELECT * FROM public.claim_analysis_v2_preflight_admission_v2($1, 1, 1, $2, $3, 60)',
+            [PREFLIGHT_ID, DISPATCH_TOKEN, CLAIM_TOKEN]
+        );
+        expect(claimed.rows).toEqual([{
+            claimed: true,
+            admission_status: 'processing',
+            target_instagram_id: 'target.user',
+            analysis_entry_channel: 'standard',
+            access_mode: 'test_entitlement',
+        }]);
+
+        const unclaimed = await serviceQuery<{
+            claimed: boolean; admission_status: string; target_instagram_id: string | null;
+            analysis_entry_channel: string; access_mode: string | null;
+        }>(
+            'SELECT * FROM public.claim_analysis_v2_preflight_admission_v2($1, 1, 1, $2, $3, 60)',
+            [OTHER_PREFLIGHT_ID, DISPATCH_TOKEN, CLAIM_TOKEN_B]
+        );
+        expect(unclaimed.rows).toEqual([{
+            claimed: false,
+            admission_status: 'blocked',
+            target_instagram_id: null,
+            analysis_entry_channel: 'standard',
+            access_mode: null,
+        }]);
     });
 
     it('forces RLS, exposes no forbidden columns, and denies direct DML', async () => {
