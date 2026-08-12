@@ -134,6 +134,27 @@ BEGIN
     DELETE FROM public.private_accounts AS private_account
     USING public.analysis_requests AS request
     WHERE private_account.request_id = request.id AND request.user_id = p_account_id;
+    DELETE FROM public.analysis_v2_ai_result_checkpoints AS checkpoint
+    USING public.analysis_requests AS request
+    WHERE checkpoint.request_id = request.id AND request.user_id = p_account_id;
+    DELETE FROM public.analysis_v2_private_name_manifests AS manifest
+    USING public.analysis_requests AS request
+    WHERE manifest.request_id = request.id AND request.user_id = p_account_id;
+    DELETE FROM public.analysis_v2_narrative_manifests AS manifest
+    USING public.analysis_requests AS request
+    WHERE manifest.request_id = request.id AND request.user_id = p_account_id;
+    DELETE FROM public.analysis_v2_score_audit_intents AS audit
+    USING public.analysis_requests AS request
+    WHERE audit.request_id = request.id AND request.user_id = p_account_id;
+    DELETE FROM public.analysis_v2_score_audit_sources AS audit
+    USING public.analysis_requests AS request
+    WHERE audit.request_id = request.id AND request.user_id = p_account_id;
+    DELETE FROM public.analysis_v2_score_audit_scan_locators AS audit
+    USING public.analysis_requests AS request
+    WHERE audit.request_id = request.id AND request.user_id = p_account_id;
+    DELETE FROM public.analysis_v2_result_coverage_telemetry AS telemetry
+    USING public.analysis_requests AS request
+    WHERE telemetry.request_id = request.id AND request.user_id = p_account_id;
     DELETE FROM public.analysis_v2_result_summaries AS summary
     USING public.analysis_requests AS request
     WHERE summary.request_id = request.id AND request.user_id = p_account_id;

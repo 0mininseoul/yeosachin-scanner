@@ -36,6 +36,13 @@ CREATE TABLE public.analysis_requests (
 CREATE TABLE public.analysis_results (id uuid primary key, request_id uuid not null references public.analysis_requests(id), suspect_instagram_id text);
 CREATE TABLE public.private_accounts (id uuid primary key, request_id uuid not null references public.analysis_requests(id), instagram_id text);
 CREATE TABLE public.analysis_v2_result_summaries (request_id uuid primary key references public.analysis_requests(id), target_instagram_id text);
+CREATE TABLE public.analysis_v2_ai_result_checkpoints (request_id uuid references public.analysis_requests(id), operation_key text, primary key(request_id, operation_key));
+CREATE TABLE public.analysis_v2_private_name_manifests (request_id uuid references public.analysis_requests(id), batch int, primary key(request_id,batch));
+CREATE TABLE public.analysis_v2_narrative_manifests (request_id uuid primary key references public.analysis_requests(id));
+CREATE TABLE public.analysis_v2_score_audit_intents (request_id uuid primary key references public.analysis_requests(id));
+CREATE TABLE public.analysis_v2_score_audit_sources (request_id uuid references public.analysis_requests(id), source_result_hash text, primary key(request_id,source_result_hash));
+CREATE TABLE public.analysis_v2_score_audit_scan_locators (request_id uuid primary key references public.analysis_requests(id));
+CREATE TABLE public.analysis_v2_result_coverage_telemetry (request_id uuid primary key references public.analysis_requests(id));
 CREATE TABLE public.analysis_v2_result_image_manifests (request_id uuid primary key references public.analysis_requests(id));
 CREATE TABLE public.analysis_v2_result_image_objects (request_id uuid references public.analysis_requests(id), object_key text, primary key(request_id, object_key));
 CREATE TABLE public.analysis_result_share_observations (id uuid primary key, request_id uuid references public.analysis_requests(id));
