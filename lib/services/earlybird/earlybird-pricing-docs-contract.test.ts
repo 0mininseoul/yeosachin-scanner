@@ -13,31 +13,29 @@ const operations = readFileSync(
 describe('earlybird pricing operations contract', () => {
     it('documents the exact reference, checkout, discount, and stock values', () => {
         for (const source of [costModel, operations]) {
-            expect(source).toContain('3,990원');
-            expect(source).toContain('1,990원');
-            expect(source).toContain('7,990원');
-            expect(source).toContain('2,990원');
+            expect(source).toContain('19,900원');
+            expect(source).toContain('9,900원');
+            expect(source).toContain('39,900원');
             expect(source).toContain('50%');
-            expect(source).toContain('62%');
         }
-        expect(operations).toMatch(/Basic 1,990원\/Standard 2,990원/);
+        expect(operations).toMatch(/Basic 9,900원\/Standard 19,900원/);
         expect(operations).toMatch(/재고가 10건/);
     });
 
     it('uses the 8.69% fee only as a margin-planning assumption', () => {
         const feeRate = 0.0869;
-        expect(Math.round(1_990 * (1 - feeRate))).toBe(1_817);
-        expect(Math.round(2_990 * (1 - feeRate))).toBe(2_730);
-        expect(costModel).toContain('1,817.07원');
-        expect(costModel).toContain('2,730.17원');
-        expect(costModel).toContain('1,817원');
-        expect(costModel).toContain('2,730원');
+        expect(Math.round(9_900 * (1 - feeRate))).toBe(9_040);
+        expect(Math.round(19_900 * (1 - feeRate))).toBe(18_171);
+        expect(costModel).toContain('9,039.69원');
+        expect(costModel).toContain('18,170.69원');
+        expect(costModel).toContain('9,040원');
+        expect(costModel).toContain('18,171원');
         expect(costModel).toContain('결제 webhook 금액 검증에 사용하지 않고');
     });
 
     it('pins migration-first rollout and read-only checkout verification', () => {
         expect(operations).toContain(
-            '20260812120000_update_earlybird_pricing_v4.sql'
+            '20260812122517_update_earlybird_pricing_v5.sql'
         );
         expect(operations).toContain('EARLYBIRD_PRICING_REFRESH_REQUIRED');
         expect(operations).toContain('읽기 전용 회귀 검증');

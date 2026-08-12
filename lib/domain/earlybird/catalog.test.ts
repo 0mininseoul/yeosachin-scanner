@@ -13,20 +13,20 @@ import {
 
 describe('earlybird presale catalog', () => {
     it('owns immutable prices and independent plan limits on the server', () => {
-        expect(EARLYBIRD_PRICING_VERSION).toBe('earlybird-2026-08-v4');
+        expect(EARLYBIRD_PRICING_VERSION).toBe('earlybird-2026-08-v5');
         expect(EARLYBIRD_PLAN_CATALOG.basic).toEqual({
             planId: 'basic',
-            referenceAmountKrw: 3_990,
-            earlybirdAmountKrw: 1_990,
+            referenceAmountKrw: 19_900,
+            earlybirdAmountKrw: 9_900,
             displayDiscountPercent: 50,
             serverLimit: 10,
             fulfillment: 'groble_payment',
         });
         expect(EARLYBIRD_PLAN_CATALOG.standard).toEqual({
             planId: 'standard',
-            referenceAmountKrw: 7_990,
-            earlybirdAmountKrw: 2_990,
-            displayDiscountPercent: 62,
+            referenceAmountKrw: 39_900,
+            earlybirdAmountKrw: 19_900,
+            displayDiscountPercent: 50,
             serverLimit: 10,
             fulfillment: 'groble_payment',
         });

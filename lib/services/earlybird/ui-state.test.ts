@@ -152,15 +152,15 @@ describe('earlybird analyze UI state', () => {
 
     it('presents reference, earlybird, and waitlist pricing without invented wording', () => {
         expect(buildEarlybirdPlanPresentation('basic')).toEqual({
-            referencePriceLabel: '3,990원',
-            priceLabel: '1,990원',
+            referencePriceLabel: '19,900원',
+            priceLabel: '9,900원',
             discountLabel: '50% OFF',
             actionLabel: '지금 분석하기',
         });
         expect(buildEarlybirdPlanPresentation('standard')).toMatchObject({
-            referencePriceLabel: '7,990원',
-            priceLabel: '2,990원',
-            discountLabel: '62% OFF',
+            referencePriceLabel: '39,900원',
+            priceLabel: '19,900원',
+            discountLabel: '50% OFF',
         });
         expect(buildEarlybirdPlanPresentation('plus')).toEqual({
             referencePriceLabel: null,
@@ -397,9 +397,9 @@ describe('earlybird analyze UI state', () => {
         }
     });
 
-    it('emits zero pricing events for stale v1 and current 1,990/2,990 prices for fresh v4', () => {
+    it('emits zero pricing events for stale v1 and current 9,900/19,900 prices for fresh v5', () => {
         const stale = readyPreflight('earlybird-2026-07-v1', 14_900, 19_900);
-        const fresh = readyPreflight('earlybird-2026-08-v4', 1_990, 2_990);
+        const fresh = readyPreflight('earlybird-2026-08-v5', 9_900, 19_900);
         const emit = vi.fn();
 
         for (const event of [
@@ -417,8 +417,8 @@ describe('earlybird analyze UI state', () => {
         expect(emit).not.toHaveBeenCalled();
 
         for (const [planId, amountKrw] of [
-            ['basic', 1_990],
-            ['standard', 2_990],
+            ['basic', 9_900],
+            ['standard', 19_900],
         ] as const) {
             for (const event of [
                 'plan_viewed',
