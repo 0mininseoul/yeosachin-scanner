@@ -9,6 +9,10 @@ const removalMigration = readFileSync(
     'supabase/migrations/20260812134650_remove_preflight_global_hourly_limit.sql',
     'utf8',
 );
+const activeRemovalMigration = readFileSync(
+    'supabase/migrations/20260812135104_remove_active_preflight_global_hourly_limit.sql',
+    'utf8',
+);
 
 describe('preflight global hourly limit migration', () => {
     it('raises only the shared ceiling and preserves the private helper permissions', () => {
@@ -26,5 +30,15 @@ describe('preflight global hourly limit migration', () => {
         expect(removalMigration).toContain(
             'FROM PUBLIC, anon, authenticated, service_role',
         );
+    });
+
+    it('updates the active public RPC and restores its exact execute grant', () => {
+        expect(activeRemovalMigration).toContain(
+            "'IF v_recent_preflight_count >= 5 OR EXISTS'",
+        );
+        expect(activeRemovalMigration).toContain(
+            'FROM PUBLIC, anon, authenticated, service_role',
+        );
+        expect(activeRemovalMigration).toContain('TO service_role');
     });
 });
