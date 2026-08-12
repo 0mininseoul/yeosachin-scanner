@@ -15,6 +15,9 @@ import {
     type PrecheckoutBliteV1,
 } from '@/lib/services/precheckout/blite-contract';
 
+// Vercel must allow the route's own 75s fail-open budget to elapse first.
+export const maxDuration = 90;
+
 const requestBodySchema = z.object({
     preflightId: z.string().uuid(),
 }).strict();
