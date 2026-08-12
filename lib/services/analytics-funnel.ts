@@ -22,6 +22,24 @@ export type AnalyticsErrorCode =
     | 'UNKNOWN'
     | 'VALIDATION_ERROR';
 
+export type PreflightAnalyticsOutcome = 'succeeded' | 'blocked' | 'failed';
+
+const PREFLIGHT_BUSINESS_BLOCK_CODES = new Set([
+    'TARGET_NOT_FOUND',
+    'TARGET_PRIVATE',
+    'TARGET_UNSUPPORTED',
+    'OVER_PLUS_CAPACITY',
+    'BETA_CAPACITY_UNAVAILABLE',
+]);
+
+export function classifyPreflightAnalyticsOutcome(
+    status: 'ready' | 'blocked',
+    code?: string,
+): PreflightAnalyticsOutcome {
+    if (status === 'ready') return 'succeeded';
+    return code && PREFLIGHT_BUSINESS_BLOCK_CODES.has(code) ? 'blocked' : 'failed';
+}
+
 export interface AnalyticsStorage {
     getItem(key: string): string | null;
     setItem(key: string, value: string): void;
@@ -327,7 +345,7 @@ export function analysisCompletedEventKey(requestId: string): string {
 }
 
 export function preflightOutcomeEventKey(
-    outcome: 'succeeded' | 'failed',
+    outcome: PreflightAnalyticsOutcome,
     preflightId: string,
 ): string {
     return `amplitude:preflight_${outcome}:${preflightId}`;
