@@ -40,6 +40,8 @@ function profileCollectionFailureCode(error: unknown): string {
     if (message.startsWith('SCRAPING_SCHEMA_ERROR:')) return 'schema';
     if (message.startsWith('SCRAPING_INCOMPLETE_ERROR:')) return 'incomplete';
     if (message.startsWith('SCRAPING_RUN_PENDING_ERROR:')) return 'pending';
+    if (message.includes('actor 실행 실패')) return 'actor_status';
+    if (message.includes('transport request failed')) return 'transport';
     return 'provider';
 }
 
