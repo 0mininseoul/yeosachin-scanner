@@ -19,9 +19,9 @@ import { PrecheckoutStageGraphs } from '@/components/precheckout-stage-graphs';
    looks and behaves exactly as it does today.
    ============================================================ */
 
-// The server bounds profile collection + inference at 45s. The client must not cancel that
+// The server bounds profile collection + inference at 75s. The client must not cancel that
 // legitimate work first; keep a small response-delivery margin beyond the server deadline.
-const FETCH_DEADLINE_MS = 50_000;
+const FETCH_DEADLINE_MS = 80_000;
 
 type Screen = 'confirm' | 'result' | 'demo';
 
