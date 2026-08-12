@@ -72,18 +72,28 @@ async function generateDto(preflightId: string, targetUsername: string): Promise
     const deadlineAtMs = Date.now() + PRECHECKOUT_BLITE_OPERATION_TIMEOUT_MS;
     const timeout = setTimeout(() => controller.abort(), PRECHECKOUT_BLITE_OPERATION_TIMEOUT_MS);
     try {
-        const profile = await getInstagramProfile(targetUsername, {
-            requestId: preflightId,
-            providerRun: {
-                invocationDeadlineAtMs: deadlineAtMs,
-                startCancellationSignal: controller.signal,
-            },
-        });
+        let profile;
+        try {
+            profile = await getInstagramProfile(targetUsername, {
+                requestId: preflightId,
+                providerRun: {
+                    invocationDeadlineAtMs: deadlineAtMs,
+                    startCancellationSignal: controller.signal,
+                },
+            });
+        } catch {
+            throw new Error('PRECHECKOUT_BLITE_PROFILE_COLLECTION_FAILED');
+        }
         if (!profile || profile.isPrivate || !profile.latestPosts?.length) return null;
-        const dto = await inferPrecheckoutBlite(profile, {
-            requestId: preflightId,
-            abortSignal: controller.signal,
-        });
+        let dto;
+        try {
+            dto = await inferPrecheckoutBlite(profile, {
+                requestId: preflightId,
+                abortSignal: controller.signal,
+            });
+        } catch {
+            throw new Error('PRECHECKOUT_BLITE_INFERENCE_FAILED');
+        }
         if (!dto) return null;
         const revalidated = precheckoutBliteV1Schema.safeParse(dto);
         return revalidated.success ? revalidated.data : null;
@@ -177,9 +187,13 @@ async function handlePOST(request: Request): Promise<NextResponse> {
         return NextResponse.json(dto);
     } catch (error) {
         // Never 5xx into the product flow.
-        const reason = error instanceof Error && error.message.includes('DEADLINE')
-            ? 'operation_deadline'
-            : `unexpected_${stage}`;
+        const reason = error instanceof Error && error.message === 'PRECHECKOUT_BLITE_PROFILE_COLLECTION_FAILED'
+            ? 'profile_collection_failed'
+            : error instanceof Error && error.message === 'PRECHECKOUT_BLITE_INFERENCE_FAILED'
+                ? 'inference_failed'
+                : error instanceof Error && error.message.includes('DEADLINE')
+                    ? 'operation_deadline'
+                    : `unexpected_${stage}`;
         return unavailable(reason);
     }
 }

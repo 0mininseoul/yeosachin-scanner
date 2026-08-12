@@ -192,6 +192,34 @@ describe('POST /api/analysis/precheckout-blite', () => {
         expect(mocks.inferPrecheckoutBlite).not.toHaveBeenCalled();
     });
 
+    it('classifies a thrown profile collection failure without exposing its message', async () => {
+        const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+        mocks.getInstagramProfile.mockRejectedValue(new Error('secret provider detail'));
+
+        const response = await POST(request());
+
+        expect(response.status).toBe(204);
+        expect(warn).toHaveBeenCalledWith('precheckout_blite.unavailable', {
+            reason: 'profile_collection_failed',
+        });
+        expect(JSON.stringify(warn.mock.calls)).not.toContain('secret provider detail');
+        warn.mockRestore();
+    });
+
+    it('classifies a thrown inference failure without exposing its message', async () => {
+        const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+        mocks.inferPrecheckoutBlite.mockRejectedValue(new Error('secret model detail'));
+
+        const response = await POST(request());
+
+        expect(response.status).toBe(204);
+        expect(warn).toHaveBeenCalledWith('precheckout_blite.unavailable', {
+            reason: 'inference_failed',
+        });
+        expect(JSON.stringify(warn.mock.calls)).not.toContain('secret model detail');
+        warn.mockRestore();
+    });
+
     it('responds 204 for a private profile', async () => {
         mocks.getInstagramProfile.mockResolvedValue(profileWithPosts({ isPrivate: true }));
         const response = await POST(request());
