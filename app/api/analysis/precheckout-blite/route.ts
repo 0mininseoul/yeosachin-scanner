@@ -45,6 +45,7 @@ function profileCollectionFailureCode(error: unknown): string {
     if (message === 'SCRAPING_PROVIDER_QUOTA_ERROR') return 'quota';
     if (message === 'SCRAPING_PROVIDER_START_REJECTED_ERROR') return 'start_rejected';
     if (message === 'SCRAPING_QUEUED_START_CANCELLED') return 'start_cancelled';
+    if (message.includes('run status request failed')) return 'status_transport';
     return 'provider';
 }
 
