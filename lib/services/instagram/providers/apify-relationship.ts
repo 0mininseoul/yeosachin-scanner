@@ -1,4 +1,5 @@
 import { ApifyApiError, ApifyClient } from 'apify-client';
+import { createHash } from 'node:crypto';
 import type { InstagramFollower } from '@/lib/types/instagram';
 import type {
     ApifyCredentialSlot,
@@ -291,6 +292,23 @@ export function selectAnalysisV2ApifyCredentialSlot(
         );
     }
     return configured;
+}
+
+export function selectPreflightApifyCredentialSlot(
+    preflightId: string,
+    env: Record<string, string | undefined> = process.env,
+): ApifyCredentialSlot {
+    const hasPrimary = Boolean(
+        env.APIFY_PRIMARY_API_TOKEN?.trim() || env.APIFY_API_TOKEN?.trim()
+    );
+    const hasSecondary = Boolean(env.APIFY_SECONDARY_API_TOKEN?.trim());
+    if (!hasPrimary || !hasSecondary) {
+        return selectAnalysisV2ApifyCredentialSlot(env);
+    }
+    const firstByte = createHash('sha256')
+        .update(preflightId.toLowerCase(), 'utf8')
+        .digest()[0];
+    return firstByte % 2 === 0 ? 'primary' : 'secondary';
 }
 
 export function selectApifyApiToken(
