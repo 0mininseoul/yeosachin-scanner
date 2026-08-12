@@ -392,6 +392,31 @@ describe('preflight worker route', () => {
         );
     });
 
+    it('logs only the persistence operation and database code from a retry cause', async () => {
+        const log = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+        mocks.process.mockRejectedValue(new PreflightWorkerRetryError({
+            category: 'persistence',
+            retryable: true,
+            httpStatus: null,
+        }, 3, new Error('PREFLIGHT_PERSISTENCE_ERROR: claim failed (55P03). raw-secret')));
+
+        const response = await POST(request({ preflightId }));
+
+        expect(response.status).toBe(500);
+        const record = String(log.mock.calls[0][0]);
+        expect(JSON.parse(record)).toEqual({
+            event: 'preflight_worker_failed',
+            operation: 'profile',
+            category: 'persistence',
+            retryable: true,
+            httpStatus: null,
+            workerAttemptCount: 3,
+            persistenceOperation: 'claim',
+            persistenceCode: '55P03',
+        });
+        expect(record).not.toContain('raw-secret');
+    });
+
     it('logs only sanitized fresh-admission failure metadata and its bounded attempt', async () => {
         const log = vi.spyOn(console, 'error').mockImplementation(() => undefined);
         mocks.processAdmission.mockRejectedValue(new PreflightWorkerRetryError({
