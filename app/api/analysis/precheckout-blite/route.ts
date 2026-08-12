@@ -52,6 +52,7 @@ function profileCollectionFailureCode(error: unknown): string {
     if (message.includes('run status request failed')) return 'status_transport';
     if (message.startsWith('SCRAPING_AMBIGUOUS_START_ERROR:')) return 'ambiguous_start';
     if (message.startsWith('SCRAPING_ERROR:')) return 'scraping';
+    if (message === 'SCRAPING_INVOCATION_DEADLINE_ERROR') return 'deadline';
     return 'provider';
 }
 
