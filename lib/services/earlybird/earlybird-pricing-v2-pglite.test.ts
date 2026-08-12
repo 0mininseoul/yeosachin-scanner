@@ -39,6 +39,9 @@ const autoStartCheckoutMigration = migration(
 const pricingV3Migration = migration(
     '20260803200000_update_earlybird_pricing_v3.sql'
 );
+const pricingV4Migration = migration(
+    '20260812120000_update_earlybird_pricing_v4.sql'
+);
 const refundedMigration = migration(
     '20260803193000_finalize_groble_refunded_webhooks.sql'
 );
@@ -104,6 +107,7 @@ CREATE TABLE public.analysis_preflights (
 const V1 = 'earlybird-2026-07-v1';
 const V2 = 'earlybird-2026-07-v2';
 const V3 = 'earlybird-2026-08-v3';
+const V4 = 'earlybird-2026-08-v4';
 const DISCLOSURE_VERSION = 'earlybird-24h-v1';
 const DISCLOSURE_TEXT =
     '현재 얼리버드 기간에는 즉시 자동 판독이 아닌, 결제 완료 후 24시간 이내 판독 결과를 제공합니다.';
@@ -138,17 +142,18 @@ function uuid(prefix: '1' | '2', index: number): string {
     return `${prefix}0000000-0000-4000-8000-${String(index).padStart(12, '0')}`;
 }
 
-function amount(planId: PaidPlanId, version: typeof V1 | typeof V2 | typeof V3): number {
+function amount(planId: PaidPlanId, version: typeof V1 | typeof V2 | typeof V3 | typeof V4): number {
     if (version === V1) return planId === 'basic' ? 14_900 : 19_900;
     if (version === V2) return planId === 'basic' ? 6_900 : 9_900;
-    return planId === 'basic' ? 990 : 1_990;
+    if (version === V3) return planId === 'basic' ? 990 : 1_990;
+    return planId === 'basic' ? 1_990 : 2_990;
 }
 
 function productId(planId: PaidPlanId): string {
     return planId === 'basic' ? BASIC_PRODUCT_ID : STANDARD_PRODUCT_ID;
 }
 
-function pricingSnapshot(version: typeof V1 | typeof V2 | typeof V3) {
+function pricingSnapshot(version: typeof V1 | typeof V2 | typeof V3 | typeof V4) {
     return {
         basic: { currency: 'KRW', status: 'quoted', amountKrw: amount('basic', version) },
         standard: {
@@ -206,6 +211,12 @@ async function createPricingV3Database(): Promise<PGlite> {
     return db;
 }
 
+async function createPricingV4Database(): Promise<PGlite> {
+    const db = await createPricingV3Database();
+    await db.exec(pricingV4Migration);
+    return db;
+}
+
 async function createRefundBeforeCompletionDatabase(): Promise<PGlite> {
     const db = await createReconciliationDatabase();
     await db.exec(pricingV3Migration);
@@ -231,7 +242,7 @@ async function seedPreflight(
     db: PGlite,
     index: number,
     planId: PaidPlanId,
-    version: typeof V1 | typeof V2 | typeof V3
+    version: typeof V1 | typeof V2 | typeof V3 | typeof V4
 ): Promise<Seed> {
     const suffix = String(index).padStart(8, '0');
     const seed = {
@@ -281,7 +292,7 @@ async function seedNewerPreflightForUser(
     seed: Seed,
     index: number,
     planId: PaidPlanId,
-    version: typeof V1 | typeof V2 | typeof V3
+    version: typeof V1 | typeof V2 | typeof V3 | typeof V4
 ): Promise<Seed> {
     const newer = {
         ...seed,
@@ -318,7 +329,7 @@ async function checkout(
     db: PGlite,
     seed: Seed,
     planId: PaidPlanId,
-    version: typeof V1 | typeof V2 | typeof V3,
+    version: typeof V1 | typeof V2 | typeof V3 | typeof V4,
     expectedAmount = amount(planId, version),
     disclosure: { version: string; text: string } = {
         version: DISCLOSURE_VERSION,
@@ -546,6 +557,63 @@ describe('earlybird pricing v3 database behavior', () => {
             expected_amount_krw: number;
         }>('SELECT pricing_version, expected_amount_krw FROM public.earlybird_orders')).rows).toEqual([
             { pricing_version: V2, expected_amount_krw: 6_900 },
+        ]);
+    }, 30_000);
+});
+
+describe('earlybird pricing v4 database behavior', () => {
+    it('snapshots and finalizes the exact 1,990/2,990 KRW Groble prices', async () => {
+        const db = await createPricingV4Database();
+        const basic = await seedPreflight(db, 911, 'basic', V4);
+        const standard = await seedPreflight(db, 912, 'standard', V4);
+        const disclosure = {
+            version: AUTO_START_DISCLOSURE_VERSION,
+            text: AUTO_START_DISCLOSURE_TEXT,
+        };
+
+        const basicOrder = await checkout(db, basic, 'basic', V4, undefined, disclosure);
+        const standardOrder = await checkout(db, standard, 'standard', V4, undefined, disclosure);
+
+        expect((await db.query<{
+            plan_id: string;
+            pricing_version: string;
+            expected_amount_krw: number;
+        }>(`SELECT plan_id, pricing_version, expected_amount_krw
+             FROM public.earlybird_orders ORDER BY expected_amount_krw`)).rows).toEqual([
+            { plan_id: 'basic', pricing_version: V4, expected_amount_krw: 1_990 },
+            { plan_id: 'standard', pricing_version: V4, expected_amount_krw: 2_990 },
+        ]);
+        await expect(finalize(db, basic, 'basic', 911, 1_990)).resolves.toMatchObject({
+            disposition: 'accepted', order_id: basicOrder.order_id, status: 'paid',
+        });
+        await expect(finalize(db, standard, 'standard', 912, 2_990)).resolves.toMatchObject({
+            disposition: 'accepted', order_id: standardOrder.order_id, status: 'paid',
+        });
+    }, 30_000);
+
+    it('requires an unpurchased v3 preflight to refresh while replaying its pending snapshot unchanged', async () => {
+        const db = await createPricingV3Database();
+        const pendingPreflight = await seedPreflight(db, 913, 'basic', V3);
+        const pending = await checkout(db, pendingPreflight, 'basic', V3, undefined, {
+            version: AUTO_START_DISCLOSURE_VERSION,
+            text: AUTO_START_DISCLOSURE_TEXT,
+        });
+        const untouchedPreflight = await seedPreflight(db, 914, 'standard', V3);
+        await db.exec(pricingV4Migration);
+
+        await expect(checkout(db, pendingPreflight, 'basic', V4, undefined, {
+            version: AUTO_START_DISCLOSURE_VERSION,
+            text: AUTO_START_DISCLOSURE_TEXT,
+        })).resolves.toEqual({ order_id: pending.order_id, created: false });
+        await expect(checkout(db, untouchedPreflight, 'standard', V4, undefined, {
+            version: AUTO_START_DISCLOSURE_VERSION,
+            text: AUTO_START_DISCLOSURE_TEXT,
+        })).rejects.toThrow(/EARLYBIRD_PRICING_REFRESH_REQUIRED/);
+        expect((await db.query<{
+            pricing_version: string;
+            expected_amount_krw: number;
+        }>('SELECT pricing_version, expected_amount_krw FROM public.earlybird_orders')).rows).toEqual([
+            { pricing_version: V3, expected_amount_krw: 990 },
         ]);
     }, 30_000);
 });
