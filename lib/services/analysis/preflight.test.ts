@@ -827,11 +827,12 @@ describe('preflight persistence adapter', () => {
 });
 
 describe('preflight worker domain', () => {
-    it('selects the deterministic dual-account slot for a new anonymous fallback', async () => {
+    it('selects the deterministic three-account slot for a new anonymous fallback', async () => {
         const selectedPreflightId = '123e4567-e89b-42d3-a456-000000000001';
         const env = {
             APIFY_API_TOKEN: 'primary-token',
             APIFY_SECONDARY_API_TOKEN: 'secondary-token',
+            APIFY_QUATERNARY_API_TOKEN: 'quaternary-token',
             ANALYSIS_V2_PREFLIGHT_IDENTITY_HMAC_SECRET: preflightIdentitySecret,
         };
         const baseClaim = claim();
@@ -891,11 +892,12 @@ describe('preflight worker domain', () => {
         }));
     });
 
-    it('selects the deterministic dual-account slot for a new standard fallback', async () => {
+    it('selects the deterministic three-account slot for a new standard fallback', async () => {
         const selectedPreflightId = '123e4567-e89b-42d3-a456-000000000001';
         const env = {
             APIFY_API_TOKEN: 'primary-token',
             APIFY_SECONDARY_API_TOKEN: 'secondary-token',
+            APIFY_QUATERNARY_API_TOKEN: 'quaternary-token',
             ANALYSIS_V2_PREFLIGHT_IDENTITY_HMAC_SECRET: preflightIdentitySecret,
         };
         const selectedClaim = claim({ preflightId: selectedPreflightId });

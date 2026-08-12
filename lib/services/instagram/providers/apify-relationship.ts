@@ -302,13 +302,14 @@ export function selectPreflightApifyCredentialSlot(
         env.APIFY_PRIMARY_API_TOKEN?.trim() || env.APIFY_API_TOKEN?.trim()
     );
     const hasSecondary = Boolean(env.APIFY_SECONDARY_API_TOKEN?.trim());
-    if (!hasPrimary || !hasSecondary) {
+    const hasQuaternary = Boolean(env.APIFY_QUATERNARY_API_TOKEN?.trim());
+    if (!hasPrimary || !hasSecondary || !hasQuaternary) {
         return selectAnalysisV2ApifyCredentialSlot(env);
     }
     const firstByte = createHash('sha256')
         .update(preflightId.toLowerCase(), 'utf8')
         .digest()[0];
-    return firstByte % 2 === 0 ? 'primary' : 'secondary';
+    return (['primary', 'secondary', 'quaternary'] as const)[firstByte % 3];
 }
 
 export function selectApifyApiToken(
