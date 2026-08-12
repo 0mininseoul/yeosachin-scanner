@@ -26,7 +26,9 @@ const MAX_CAPTION_EXCERPT_LENGTH = 160;
 const MAX_FULL_NAME_EXCERPT_LENGTH = 60;
 const MAX_USERNAMES_PER_POST = 15;
 const MAX_HASHTAGS_PER_POST = 15;
-const PRECHECKOUT_BLITE_MAX_OUTPUT_TOKENS = 1536;
+// Gemini 3 counts thinking tokens against maxOutputTokens. Keep reasoning minimal for this
+// compact schema and leave enough room for the complete JSON response.
+const PRECHECKOUT_BLITE_MAX_OUTPUT_TOKENS = 3072;
 
 /**
  * Image evidence for `genderRead` only (profile photo + up to 3 recent post photos = 4 max).
@@ -337,6 +339,7 @@ export async function inferPrecheckoutBlite(
                     analysisType: 'precheckout_blite',
                     requestId: options.requestId,
                     abortSignal: options.abortSignal,
+                    thinkingLevel: 'MINIMAL',
                     maxOutputTokens: PRECHECKOUT_BLITE_MAX_OUTPUT_TOKENS,
                 },
             );
