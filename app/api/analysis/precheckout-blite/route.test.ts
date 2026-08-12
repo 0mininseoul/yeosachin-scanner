@@ -200,7 +200,7 @@ describe('POST /api/analysis/precheckout-blite', () => {
 
         expect(response.status).toBe(204);
         expect(warn).toHaveBeenCalledWith('precheckout_blite.unavailable', {
-            reason: 'profile_collection_failed',
+            reason: 'profile_collection_failed_provider',
         });
         expect(JSON.stringify(warn.mock.calls)).not.toContain('secret provider detail');
         warn.mockRestore();
