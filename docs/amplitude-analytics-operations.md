@@ -39,7 +39,7 @@ Replay는 설치된 SDK가 지원하는 가장 낮은 기본 수준인 `light`�
 이벤트 vocabulary:
 
 - 유입·인증: `landing_viewed`, `target_submitted`, `auth_started`, `auth_completed`, `login_prompted`
-- 사전 검사·demo: `preflight_started`, `preflight_succeeded`, `preflight_failed`, `exclusion_decided`, `demo_result_viewed`, `demo_result_expanded`
+- 사전 검사·demo: `preflight_started`, `preflight_succeeded`, `preflight_blocked`, `preflight_failed`, `exclusion_decided`, `demo_result_viewed`, `demo_result_expanded`
 - 플랜·결제 이동: `plan_viewed`, `plan_selected`, `checkout_started`, `checkout_redirected`
 - 결제 확인: `payment_confirmed_viewed`, `earlybird_status_viewed`
 - 분석·결과: `analysis_started`, `analysis_completed`, `analysis_failed`, `result_viewed`
@@ -67,7 +67,7 @@ preflight 실패 사유의 원인 확인 결과, 현재 POST 경로는 인증·�
 2. 핵심 전환 funnel: `landing_viewed` → `target_submitted` → `auth_completed` → `preflight_succeeded` → `plan_selected` → `checkout_redirected` → `payment_confirmed_viewed`
 3. 단계별 이탈률: 같은 funnel의 단계 전환율과 median conversion time
 4. Basic·Standard 수요: `plan_viewed`, `plan_selected`, `checkout_started`, `checkout_redirected`를 `plan_id`로 breakdown하고 각 플랜 전환율 비교
-5. 사전 검사 품질: `preflight_succeeded`와 `preflight_failed` 비율, `error_code` breakdown, `duration_ms` p50·p90
+5. 사전 검사 품질: `preflight_succeeded`, `preflight_blocked`, `preflight_failed` 비율과 `error_code` breakdown, `duration_ms` p50·p90. `preflight_blocked`는 비공개·미존재·지원 범위 밖·플랜/베타 수용량 제한처럼 정상적으로 판정된 비즈니스 차단이고, `preflight_failed`는 provider·queue 등 기술 실패와 분류되지 않은 비정상 종료만 포함한다.
 6. 결제 확인: `payment_confirmed_viewed`의 distinct user·event 수와 화면에 표시된 금액의 참고 breakdown. 매출 확정은 `earlybird_orders.payment_id`, `actual_amount_krw`, `paid_at`이 모두 있는 행만 Supabase와 대조
 7. 결과 사용: `result_viewed`와 공유 initiated/copy/handoff/Kakao-confirmed/open을 채널별로 분리해 추이 확인
 8. 이벤트 기반 핵심 이탈 세그먼트: 같은 세션에서 `target_submitted` 후 `preflight_succeeded`가 없거나 `plan_selected` 후 `checkout_redirected`가 없는 사용자. Replay 링크 없이 후속 이벤트 유무로만 구성

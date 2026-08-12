@@ -59,6 +59,7 @@ import {
 import { TopBar, BrandMark, Eyebrow, CaseCard, Panel, PrimaryButton } from '@/components/case-ui';
 import { InstagramLookupLink } from '@/components/instagram-lookup-link';
 import { LoginModal } from '@/components/login-modal';
+import { PreflightPendingStatus } from '@/components/preflight-pending-status';
 
 const PLAN_NAMES: Readonly<Record<PlanId, string>> = {
     basic: 'Basic',
@@ -121,6 +122,7 @@ const DISCLOSURE_ACCEPTED = true;
     const checkoutRecoveryGuardRef = useRef({ inFlight: false });
     const {
         targetInstagramId,
+        preflightStartedAt,
         preflight,
         creating,
         exclusionState,
@@ -879,23 +881,10 @@ const DISCLOSURE_ACCEPTED = true;
                         )}
 
                         {exclusionDecided && !readyPreflight && (
-                            <div className="mt-7 py-4 text-center">
-                                <div className="mx-auto flex h-14 w-14 items-center justify-center border border-line bg-ink">
-                                    <BrandMark size={26} className="anim-blink text-blood" />
-                                </div>
-                                <h2 data-amp-block className="mt-5 text-[18px] font-extrabold text-fg">
-                                    @{targetInstagramId ?? '대상 계정'} 조회 중
-                                </h2>
-                                <p className="mt-2 text-[13px] text-fg-dim" aria-live="polite">
-                                    프로필과 계정 규모를 확인하고 있습니다.
-                                </p>
-                                <div className="mt-6 h-1.5 w-full overflow-hidden bg-line">
-                                    <div className="h-full w-1/3 bg-blood anim-indeterminate" />
-                                </div>
-                                <p className="mt-5 text-[12px] text-fg-mute">
-                                    보통 몇 초 이내에 끝나요. 화면을 벗어나도 진행됩니다.
-                                </p>
-                            </div>
+                            <PreflightPendingStatus
+                                targetInstagramId={targetInstagramId}
+                                startedAt={preflightStartedAt}
+                            />
                         )}
 
                         {exclusionDecided && readyPreflight && (

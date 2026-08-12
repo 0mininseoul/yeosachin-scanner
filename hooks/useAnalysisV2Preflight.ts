@@ -30,6 +30,7 @@ import {
 import { EVENTS, trackEvent } from '@/lib/services/analytics';
 import {
     availableAnalyticsStorage,
+    classifyPreflightAnalyticsOutcome,
     persistPreflightStartedAt,
     preflightOutcomeEventKey,
     readPreflightStartedAt,
@@ -384,7 +385,10 @@ export function useAnalysisV2Preflight({
     const trackPreflightOutcome = useCallback((status: PreflightStatusV1) => {
         if (!analyticsEligibleRef.current) return;
         if (status.status !== 'ready' && status.status !== 'blocked') return;
-        const outcome = status.status === 'ready' ? 'succeeded' : 'failed';
+        const outcome = classifyPreflightAnalyticsOutcome(
+            status.status,
+            status.status === 'blocked' ? status.code : undefined,
+        );
         const localKey = `${outcome}:${status.preflightId}`;
         if (preflightOutcomeTrackedRef.current.has(localKey)) return;
         const eventKey = preflightOutcomeEventKey(outcome, status.preflightId);
@@ -405,12 +409,15 @@ export function useAnalysisV2Preflight({
             });
             return;
         }
-        trackEvent(EVENTS.PREFLIGHT_FAILED, {
-            ...durationProperties,
-            error_code: safeAnalyticsErrorCode({ code: status.code }),
-            stage: 'preflight',
-            preflight_id: status.preflightId,
-        });
+        trackEvent(
+            outcome === 'blocked' ? EVENTS.PREFLIGHT_BLOCKED : EVENTS.PREFLIGHT_FAILED,
+            {
+                ...durationProperties,
+                error_code: safeAnalyticsErrorCode({ code: status.code }),
+                stage: 'preflight',
+                preflight_id: status.preflightId,
+            },
+        );
     }, []);
 
     const trackPreflightAttemptFailure = useCallback((
@@ -985,6 +992,7 @@ export function useAnalysisV2Preflight({
 
     return {
         targetInstagramId,
+        preflightStartedAt: preflightStartedAtRef.current,
         claimToken,
         preflight,
         creating,

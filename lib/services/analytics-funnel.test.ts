@@ -8,6 +8,7 @@ import {
     claimObservedAnalysisStart,
     currentAttributionSource,
     landingViewEventKey,
+    classifyPreflightAnalyticsOutcome,
     preflightOutcomeEventKey,
     readAttribution,
     readAnalyticsAttribution,
@@ -124,9 +125,37 @@ describe('Amplitude funnel helpers', () => {
             .toBe(`amplitude:analysis_completed:${requestId}`);
         expect(preflightOutcomeEventKey('succeeded', requestId))
             .toBe(`amplitude:preflight_succeeded:${requestId}`);
+        expect(preflightOutcomeEventKey('blocked', requestId))
+            .toBe(`amplitude:preflight_blocked:${requestId}`);
+        expect(preflightOutcomeEventKey('failed', requestId))
+            .toBe(`amplitude:preflight_failed:${requestId}`);
         expect(boundedDurationMs(2_000, 2_777.9)).toBe(777);
         expect(boundedDurationMs(5_000, 4_000)).toBe(0);
         expect(boundedDurationMs(0, Number.POSITIVE_INFINITY)).toBe(86_400_000);
+    });
+
+    it.each([
+        ['TARGET_NOT_FOUND'],
+        ['TARGET_PRIVATE'],
+        ['TARGET_UNSUPPORTED'],
+        ['OVER_PLUS_CAPACITY'],
+        ['BETA_CAPACITY_UNAVAILABLE'],
+    ])('classifies business block %s separately from failures', (code) => {
+        expect(classifyPreflightAnalyticsOutcome('blocked', code)).toBe('blocked');
+    });
+
+    it.each([
+        ['PROVIDER_ERROR'],
+        ['QUEUE_UNAVAILABLE'],
+        ['ANALYSIS_FAILED'],
+        ['UNRECOGNIZED_CODE'],
+        [undefined],
+    ])('classifies technical or unknown terminal block %s as failed', (code) => {
+        expect(classifyPreflightAnalyticsOutcome('blocked', code)).toBe('failed');
+    });
+
+    it('classifies ready preflight as succeeded regardless of code', () => {
+        expect(classifyPreflightAnalyticsOutcome('ready')).toBe('succeeded');
     });
 
     it('claims a session event once and fails open when storage is unavailable', () => {

@@ -117,6 +117,7 @@ describe('Amplitude analytics adapter', () => {
             LOGIN_PROMPTED: 'login_prompted',
             PREFLIGHT_STARTED: 'preflight_started',
             PREFLIGHT_SUCCEEDED: 'preflight_succeeded',
+            PREFLIGHT_BLOCKED: 'preflight_blocked',
             PREFLIGHT_FAILED: 'preflight_failed',
             EXCLUSION_DECIDED: 'exclusion_decided',
             PLAN_VIEWED: 'plan_viewed',
@@ -1837,6 +1838,13 @@ describe('Amplitude analytics adapter', () => {
             stage: 'preflight',
             preflight_id: VALID_USER_ID,
         });
+        analytics.trackEvent(analytics.EVENTS.PREFLIGHT_BLOCKED, {
+            duration_ms: 27_900,
+            error_code: 'TARGET_PRIVATE',
+            stage: 'preflight',
+            preflight_id: SECOND_UUID,
+            target_instagram_id: 'must-not-escape',
+        } as never);
         analytics.trackEvent(analytics.EVENTS.PAYMENT_CONFIRMED_VIEWED, {
             order_id: SECOND_UUID,
             plan_id: 'basic',
@@ -1862,6 +1870,12 @@ describe('Amplitude analytics adapter', () => {
                 error_code: 'NETWORK_ERROR',
                 stage: 'preflight',
                 preflight_id: VALID_USER_ID,
+            }],
+            ['preflight_blocked', {
+                duration_ms: 27_900,
+                error_code: 'TARGET_PRIVATE',
+                stage: 'preflight',
+                preflight_id: SECOND_UUID,
             }],
             ['payment_confirmed_viewed', {
                 order_id: SECOND_UUID,
