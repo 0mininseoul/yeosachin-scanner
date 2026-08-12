@@ -4,12 +4,17 @@ import { redirect } from 'next/navigation';
 import { TopBar, Eyebrow } from '@/components/case-ui';
 import { LogoutButton } from '@/components/logout-button';
 import { ownerAnalysisHistoryV1Schema } from '@/lib/services/analysis/owner-history';
+import { buildArchiveEntries } from '@/lib/services/analysis/archive-entries';
 import AnalysisList from './analysis-list';
 import { isDemoOperator } from '@/lib/services/demo-analysis/demo-analysis';
 import { demoAnalysisStore } from '@/lib/services/demo-analysis/store';
 import { demoArchiveItems } from '@/lib/services/demo-analysis/archive';
 import { NOINDEX_METADATA } from '@/lib/services/seo/discovery';
 import { requireActiveAccountSession } from '@/lib/services/identity/account-principal-store';
+import {
+    type AwaitingEarlybirdDelivery,
+    listAwaitingEarlybirdDeliveries,
+} from '@/lib/services/earlybird/awaiting-delivery';
 
 export const metadata: Metadata = {
     ...NOINDEX_METADATA,
@@ -49,6 +54,17 @@ export default async function MyPage() {
         : [];
     const analyses = [...demoAnalyses, ...productionAnalyses].sort((left, right) => (right.createdAt ?? '').localeCompare(left.createdAt ?? ''));
 
+    // earlybird_orders is looked up separately from analysis_requests: right after
+    // payment only the order row exists, and fulfillment creates the analysis row
+    // later. A lookup failure here must not break the archive for a paying user.
+    let awaitingDeliveries: readonly AwaitingEarlybirdDelivery[] = [];
+    try {
+        awaitingDeliveries = await listAwaitingEarlybirdDeliveries(user.id);
+    } catch (error) {
+        console.error('Error fetching awaiting earlybird deliveries:', error);
+    }
+    const entries = buildArchiveEntries(analyses, awaitingDeliveries);
+
     return (
         <div className="min-h-dvh">
             <TopBar
@@ -68,7 +84,7 @@ export default async function MyPage() {
                 <p className="mt-2 text-[13px] text-fg-dim">지난 판독 기록을 확인하고 관리하세요.</p>
 
                 <div className="mt-8">
-                    <AnalysisList initialAnalyses={analyses} />
+                    <AnalysisList initialEntries={entries} />
                 </div>
             </main>
         </div>
