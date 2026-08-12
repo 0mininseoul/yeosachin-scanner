@@ -1050,30 +1050,12 @@ const DISCLOSURE_ACCEPTED = true;
                                         })}
                                     </fieldset>
 
-                                    {readyPreflight && effectiveSelectedCard && (
-                                        <div className="mt-4 border border-line bg-ink-2 px-4 py-3" aria-live="polite">
-                                            <p className="eyebrow">예상 소요 시간</p>
-                                            <p className="mt-1 text-[15px] font-bold text-fg">
-                                                {analyticsEligible ? '약 5~10분' : '약 5분'}
-                                            </p>
-                                            <p className="mt-1 text-[11px] leading-relaxed text-fg-mute">
-                                                {analyticsEligible
-                                                    ? '계정 규모와 수집 상황에 따라 달라질 수 있습니다.'
-                                                    : '정확한 완료 시간은 계정 규모와 수집 상황에 따라 달라질 수 있습니다.'}
-                                            </p>
-                                            {/* The sentence recorded against the
-                                                order, shown where the order is
-                                                placed. It states what happens
-                                                rather than asking anyone to
-                                                accept a condition, so it carries
-                                                no checkbox — the 24-hour delay
-                                                that needed one is gone. */}
-                                            {isPaidEarlybirdPlanId(effectiveSelectedCard.planId) && (
-                                                <p className="mt-2.5 border-t border-line pt-2.5 text-[11.5px] leading-relaxed text-fg-dim">
-                                                    {EARLYBIRD_DISCLOSURE_TEXT}
-                                                </p>
-                                            )}
-                                        </div>
+                                    {readyPreflight
+                                        && effectiveSelectedCard
+                                        && isPaidEarlybirdPlanId(effectiveSelectedCard.planId) && (
+                                        <p className="mt-4 text-[11.5px] leading-relaxed text-fg-dim">
+                                            {EARLYBIRD_DISCLOSURE_TEXT}
+                                        </p>
                                     )}
 
                                     {visibleError && (
