@@ -6,9 +6,9 @@
 
 | 설정 | Basic | Standard |
 |---|---|---|
-| 기준가 | 3,990원 | 7,990원 |
-| 얼리버드 결제액 | 1,990원 | 2,990원 |
-| 표시 할인율 | 50% | 62% |
+| 기준가 | 19,900원 | 39,900원 |
+| 얼리버드 결제액 | 9,900원 | 19,900원 |
+| 표시 할인율 | 50% | 50% |
 | 진입 페이지 | `https://yeosachin.com/analyze?plan=basic` | `https://yeosachin.com/analyze?plan=standard` |
 | 이동 페이지 | `https://yeosachin.com/earlybird?plan=basic` | `https://yeosachin.com/earlybird?plan=standard` |
 | 이동 버튼 문구 | `사전 구매 현황 확인` | `사전 구매 현황 확인` |
@@ -41,7 +41,7 @@ GROBLE_WEBHOOK_PREVIOUS_SECRET=<키 교체 기간에만 이전 secret>
 
 이 문서는 순서만 정의한다. 사용자 승인 전에는 아래 배포와 실제 결제를 수행하지 않는다.
 
-1. Groble의 기존 두 상품이 Basic 1,990원/Standard 2,990원이고 상품별 재고가 10건인지 읽기 전용으로 다시 확인한다. 가격은 소유자가 이미 직접 변경했으므로 자동화나 이 저장소에서 수정하지 않는다.
+1. Groble의 기존 두 상품이 Basic 9,900원/Standard 19,900원이고 상품별 재고가 10건인지 읽기 전용으로 다시 확인한다. 가격은 소유자가 직접 변경하므로 자동화나 이 저장소에서 수정하지 않는다.
 2. 운영 환경의 다섯 가지 필수 서버 전용 값과, 필요한 경우 이전 webhook secret을 비밀 관리 시스템에 설정한다.
 3. `20260717140000_add_groble_earlybird_presale.sql` forward migration을 먼저 적용한다.
 4. checkout 쓰기를 제한한 maintenance window에서 아래 전화번호 매칭 migration 게이트를 통과한 뒤 6개 파일을 순서대로 적용한다.
@@ -55,6 +55,8 @@ GROBLE_WEBHOOK_PREVIOUS_SECRET=<키 교체 기간에만 이전 secret>
 가격 v3 배포에서는 `20260803200000_update_earlybird_pricing_v3.sql`을 애플리케이션보다 먼저 적용한다. 새 v3 checkout은 Basic 990원/Standard 1,990원을 immutable snapshot으로 기록한다. 기존 v1/v2 `payment_pending` 주문은 같은 주문과 결제창을 재사용하며 금액·버전을 바꾸지 않는다. 아직 주문이 없는 v1/v2 preflight는 `EARLYBIRD_PRICING_REFRESH_REQUIRED`로 새 snapshot을 받는다.
 
 가격 v4 배포에서는 `20260812120000_update_earlybird_pricing_v4.sql`을 애플리케이션보다 먼저 적용한다. 새 v4 checkout은 Basic 1,990원/Standard 2,990원을 immutable snapshot으로 기록한다. 기존 v1/v2/v3 `payment_pending` 주문은 같은 주문과 결제창을 재사용하며 금액·버전을 바꾸지 않는다. 아직 주문이 없는 v1/v2/v3 preflight는 `EARLYBIRD_PRICING_REFRESH_REQUIRED`로 새 snapshot을 받는다.
+
+가격 v5 배포에서는 `20260812122517_update_earlybird_pricing_v5.sql`을 애플리케이션보다 먼저 적용한다. 새 v5 checkout은 Basic 9,900원/Standard 19,900원을 immutable snapshot으로 기록한다. 기존 v1/v2/v3/v4 `payment_pending` 주문은 같은 주문과 결제창을 재사용하며 금액·버전을 바꾸지 않는다. 아직 주문이 없는 v1/v2/v3/v4 preflight는 `EARLYBIRD_PRICING_REFRESH_REQUIRED`로 새 snapshot을 받는다.
 
 배포 후 실제 결제를 만들지 않고 Basic/Standard checkout 응답의 `https://groble.im/payment/...` 링크가 안전한 seller reference를 포함하는지만 읽기 전용 회귀 검증한다. Groble 대시보드나 상품 설정은 이 검증에서 변경하지 않는다.
 

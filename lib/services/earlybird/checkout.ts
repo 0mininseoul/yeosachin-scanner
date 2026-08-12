@@ -39,34 +39,26 @@ export class EarlybirdCheckoutRecoveryError extends Error {
     }
 }
 
-const LEGACY_EARLYBIRD_PRICING_VERSION = 'earlybird-2026-07-v1';
-const PREVIOUS_EARLYBIRD_PRICING_VERSION = 'earlybird-2026-07-v2';
 const LEGACY_EARLYBIRD_DISCLOSURE_VERSION = 'earlybird-24h-v1';
 const LEGACY_EARLYBIRD_DISCLOSURE_TEXT =
     '현재 얼리버드 기간에는 즉시 자동 판독이 아닌, 결제 완료 후 24시간 이내 판독 결과를 제공합니다.';
-const LEGACY_EARLYBIRD_AMOUNTS = Object.freeze({
-    basic: 14_900,
-    standard: 19_900,
-});
-const PREVIOUS_EARLYBIRD_AMOUNTS = Object.freeze({
-    basic: 6_900,
-    standard: 9_900,
-});
+const HISTORICAL_EARLYBIRD_AMOUNTS = Object.freeze({
+    'earlybird-2026-07-v1': Object.freeze({ basic: 14_900, standard: 19_900 }),
+    'earlybird-2026-07-v2': Object.freeze({ basic: 6_900, standard: 9_900 }),
+    'earlybird-2026-08-v3': Object.freeze({ basic: 990, standard: 1_990 }),
+    'earlybird-2026-08-v4': Object.freeze({ basic: 1_990, standard: 2_990 }),
+} satisfies Readonly<Record<string, Readonly<Record<'basic' | 'standard', number>>>>);
 
 function recoverableAmount(
     pricingVersion: string,
     planId: 'basic' | 'standard'
 ): number | null {
-    if (pricingVersion === LEGACY_EARLYBIRD_PRICING_VERSION) {
-        return LEGACY_EARLYBIRD_AMOUNTS[planId];
-    }
-    if (pricingVersion === PREVIOUS_EARLYBIRD_PRICING_VERSION) {
-        return PREVIOUS_EARLYBIRD_AMOUNTS[planId];
-    }
     if (pricingVersion === EARLYBIRD_PRICING_VERSION) {
         return EARLYBIRD_PLAN_CATALOG[planId].earlybirdAmountKrw;
     }
-    return null;
+    return HISTORICAL_EARLYBIRD_AMOUNTS[
+        pricingVersion as keyof typeof HISTORICAL_EARLYBIRD_AMOUNTS
+    ]?.[planId] ?? null;
 }
 
 function isRecoverableDisclosure(record: {

@@ -337,8 +337,8 @@ describe('earlybird checkout and waitlist routes', () => {
             p_preflight_id: PREFLIGHT_ID,
             p_plan_id: 'basic',
             p_expected_product_id: 'basic_product-01',
-            p_expected_amount_krw: 1_990,
-            p_pricing_version: 'earlybird-2026-08-v4',
+            p_expected_amount_krw: 9_900,
+            p_pricing_version: 'earlybird-2026-08-v5',
             p_disclosure_version: 'earlybird-auto-start-v2',
         }));
         expect(mocks.rpc).toHaveBeenCalledWith(
@@ -363,7 +363,7 @@ describe('earlybird checkout and waitlist routes', () => {
                 order_id: ORDER_ID,
                 target_instagram_id: 'target.account',
                 plan_id: 'basic',
-                amount_krw: 1_990,
+                amount_krw: 9_900,
                 operation: 'checkout',
                 disposition: 'accepted',
             },
@@ -402,7 +402,7 @@ describe('earlybird checkout and waitlist routes', () => {
                 order_id: ORDER_ID,
                 target_instagram_id: 'target.account',
                 plan_id: 'standard',
-                amount_krw: 2_990,
+                amount_krw: 19_900,
                 operation: 'checkout',
                 disposition: 'exists',
             }),
@@ -512,6 +512,23 @@ describe('earlybird checkout and waitlist routes', () => {
         installRecoveryOrder(recoveryOrderRow({
             pricing_version: 'earlybird-2026-07-v2',
             expected_amount_krw: 6_900,
+            disclosure_version: 'earlybird-auto-start-v2',
+            disclosure_text: '결제 확인 후 판독이 자동으로 시작됩니다.',
+        }));
+
+        const response = await recoverCheckout({
+            preflightId: PREFLIGHT_ID,
+            planId: 'basic',
+        });
+
+        expect(response.status).toBe(200);
+        await expect(response.json()).resolves.toMatchObject({ orderId: ORDER_ID });
+    });
+
+    it('recovers an immutable v3 pending checkout at its original price', async () => {
+        installRecoveryOrder(recoveryOrderRow({
+            pricing_version: 'earlybird-2026-08-v3',
+            expected_amount_krw: 990,
             disclosure_version: 'earlybird-auto-start-v2',
             disclosure_text: '결제 확인 후 판독이 자동으로 시작됩니다.',
         }));
@@ -667,7 +684,7 @@ describe('earlybird checkout and waitlist routes', () => {
                 preflight_id: PREFLIGHT_ID,
                 order_id: ORDER_ID,
                 plan_id: 'basic',
-                amount_krw: 1_990,
+                amount_krw: 9_900,
                 operation: 'checkout',
                 disposition: 'accepted',
             }),
@@ -849,7 +866,7 @@ describe('earlybird checkout and waitlist routes', () => {
                 preflight_id: PREFLIGHT_ID,
                 target_instagram_id: 'target.account',
                 plan_id: 'basic',
-                amount_krw: 1_990,
+                amount_krw: 9_900,
                 operation: 'checkout',
                 disposition: 'rejected',
                 error_code: 'VALIDATION_ERROR',
