@@ -192,6 +192,7 @@ export interface ClaimedPreflight {
     /** Set only by the database claim contract; public creation remains standard-only. */
     analysisEntryChannel?: 'standard' | 'betatest';
     workerAttemptCount: number;
+    leaseExpiresAt?: string;
     catalogSnapshot: PreflightCatalogSnapshot;
 }
 
@@ -1193,6 +1194,7 @@ export function createSupabasePreflightStore(
                     ? 'standard'
                     : z.enum(['standard', 'betatest']).parse(row.analysis_entry_channel),
                 workerAttemptCount: requiredWorkerAttemptCount(row.worker_attempt_count),
+                leaseExpiresAt: requiredTimestamp(row.lease_expires_at),
                 catalogSnapshot: {
                     plans: planCatalogSnapshotSchema.parse(row.plan_catalog_snapshot),
                     pricingVersion: z.string()
@@ -1696,6 +1698,14 @@ export async function processPreflight(
         return 'noop';
     }
     const workerStartedAt = Date.now();
+    if (
+        claim.userId === null
+        && claim.leaseExpiresAt
+        && Date.parse(claim.leaseExpiresAt) - workerStartedAt
+            < PREFLIGHT_PROVIDER_DEADLINE_MS
+    ) {
+        return 'noop';
+    }
     let terminalized = false;
     const baseObservation = {
         preflightId: claim.preflightId,
