@@ -110,6 +110,11 @@ function empty(): NextResponse {
     return new NextResponse(null, { status: 204 });
 }
 
+function unavailable(reason: string): NextResponse {
+    console.warn('precheckout_blite.unavailable', { reason });
+    return empty();
+}
+
 /**
  * This screen sits before login and payment, so most callers arrive with no Supabase
  * session at all. Anonymous access is proven the same way the existing preflight routes
@@ -155,20 +160,24 @@ async function handlePOST(request: Request): Promise<NextResponse> {
         const stored = error || !user
             ? await anonymousStoredPreflight(request, preflightId, client)
             : await preflightStore.findForOwner(preflightId, user.id, { client });
-        if (!stored || stored.status !== 'ready' || !stored.readySnapshot
-            || Date.parse(stored.expiresAt) <= Date.now()) return empty();
+        if (!stored) return unavailable('preflight_access_denied');
+        if (stored.status !== 'ready' || !stored.readySnapshot) return unavailable('preflight_not_ready');
+        if (Date.parse(stored.expiresAt) <= Date.now()) return unavailable('preflight_expired');
 
         // Ownership is confirmed; a cache hit can now short-circuit the paid path.
         const cached = readCachedDto(preflightId);
         if (cached) return NextResponse.json(cached);
 
         const dto = await sharedGeneration(preflightId, stored.readySnapshot.target.username);
-        if (!dto) return empty();
+        if (!dto) return unavailable('generation_unavailable');
         writeCachedDto(preflightId, dto);
         return NextResponse.json(dto);
-    } catch {
+    } catch (error) {
         // Never 5xx into the product flow.
-        return empty();
+        const reason = error instanceof Error && error.message.includes('DEADLINE')
+            ? 'operation_deadline'
+            : 'unexpected';
+        return unavailable(reason);
     }
 }
 
