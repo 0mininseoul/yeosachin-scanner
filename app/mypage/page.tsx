@@ -15,6 +15,7 @@ import {
     type AwaitingEarlybirdDelivery,
     listAwaitingEarlybirdDeliveries,
 } from '@/lib/services/earlybird/awaiting-delivery';
+import { AccountDeletionPanel } from './account-deletion-panel';
 
 export const metadata: Metadata = {
     ...NOINDEX_METADATA,
@@ -31,8 +32,9 @@ export default async function MyPage() {
         redirect('/login');
     }
 
+    let accountClassification;
     try {
-        await requireActiveAccountSession(user);
+        accountClassification = await requireActiveAccountSession(user);
     } catch {
         redirect('/login?error=account_unavailable');
     }
@@ -86,6 +88,10 @@ export default async function MyPage() {
                 <div className="mt-8">
                     <AnalysisList initialEntries={entries} />
                 </div>
+
+                {accountClassification.accountClass === 'production'
+                    && accountClassification.trafficClass === 'external'
+                    && <AccountDeletionPanel />}
             </main>
         </div>
     );
