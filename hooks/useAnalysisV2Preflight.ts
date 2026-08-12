@@ -412,10 +412,10 @@ export function useAnalysisV2Preflight({
         trackEvent(
             outcome === 'blocked' ? EVENTS.PREFLIGHT_BLOCKED : EVENTS.PREFLIGHT_FAILED,
             {
-            ...durationProperties,
-            error_code: safeAnalyticsErrorCode({ code: status.code }),
-            stage: 'preflight',
-            preflight_id: status.preflightId,
+                ...durationProperties,
+                error_code: safeAnalyticsErrorCode({ code: status.code }),
+                stage: 'preflight',
+                preflight_id: status.preflightId,
             },
         );
     }, []);

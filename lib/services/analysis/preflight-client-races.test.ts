@@ -43,6 +43,19 @@ function consumedRedirect(): RedirectConsumedPreflight | undefined {
         | undefined;
 }
 
+describe('preflight pending status integration', () => {
+    it('uses the shared staged status in both preflight entry screens', () => {
+        const analyzeSource = readFileSync('app/analyze/page.tsx', 'utf8');
+        const betaSource = readFileSync('app/betatest/betatest-client.tsx', 'utf8');
+
+        for (const source of [analyzeSource, betaSource]) {
+            expect(source).toContain("@/components/preflight-pending-status");
+            expect(source).toContain('<PreflightPendingStatus');
+            expect(source).toContain('startedAt={preflightStartedAt}');
+        }
+    });
+});
+
 describe('blocked preflight copy', () => {
     it('shows the exact capacity-limit message on the blocked screen', () => {
         const blockedPreflightMessage = Reflect.get(preflightClient, 'blockedPreflightMessage') as

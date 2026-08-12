@@ -12,6 +12,7 @@ import {
     TopBar,
 } from '@/components/case-ui';
 import { InstagramLookupLink } from '@/components/instagram-lookup-link';
+import { PreflightPendingStatus } from '@/components/preflight-pending-status';
 
 export function BetaTestClient() {
     const router = useRouter();
@@ -19,6 +20,8 @@ export function BetaTestClient() {
     const [excludedInstagramId, setExcludedInstagramId] = useState('');
     const [automaticAdmission, setAutomaticAdmission] = useState(false);
     const {
+        targetInstagramId,
+        preflightStartedAt,
         preflight,
         creating,
         exclusionState,
@@ -193,6 +196,13 @@ export function BetaTestClient() {
                                     </button>
                                 </div>
                             </Panel>
+                        )}
+
+                        {exclusionDecided && preflight.status === 'pending' && (
+                            <PreflightPendingStatus
+                                targetInstagramId={targetInstagramId}
+                                startedAt={preflightStartedAt}
+                            />
                         )}
 
                         {exclusionDecided && preflight.status === 'ready' && (
