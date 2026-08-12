@@ -45,7 +45,10 @@ import { getSelfHostedProfileSummary } from '@/lib/services/instagram/providers/
 import { getApifyProfileSummary } from '@/lib/services/instagram/providers/apify';
 import { selfHostedAuthProvider } from '@/lib/services/instagram/providers/selfhosted-auth';
 import { getAnalysisV2PaidCollectionProvider } from '@/lib/services/instagram/config';
-import { selectAnalysisV2ApifyCredentialSlot } from '@/lib/services/instagram/providers/apify-relationship';
+import {
+    selectAnalysisV2ApifyCredentialSlot,
+    selectPreflightApifyCredentialSlot,
+} from '@/lib/services/instagram/providers/apify-relationship';
 import {
     classifyWebProfileFailure,
     type WebProfileFailureKind,
@@ -1772,7 +1775,10 @@ export async function processPreflight(
                     );
                 } else if (!profile) {
                     const identity = preflightProviderIdentity(
-                        selectAnalysisV2ApifyCredentialSlot(dependencies.env)
+                        selectPreflightApifyCredentialSlot(
+                            claim.preflightId,
+                            dependencies.env,
+                        )
                     );
                     const bound = await bindPreflightProviderRunCheckpoint({
                         store: providerRuns,
@@ -1884,7 +1890,10 @@ export async function processPreflight(
                 });
                 const identity = preflightProviderIdentity(
                     betaHold?.credentialSlot
-                    ?? selectAnalysisV2ApifyCredentialSlot(dependencies.env)
+                    ?? selectPreflightApifyCredentialSlot(
+                        claim.preflightId,
+                        dependencies.env,
+                    )
                 );
                 const bound = await bindPreflightProviderRunCheckpoint({
                     store: providerRuns,

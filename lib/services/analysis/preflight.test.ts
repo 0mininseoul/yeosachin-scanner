@@ -2,6 +2,7 @@ import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import type { InstagramProfile } from '@/lib/types/instagram';
 import type { ProviderCallContext } from '@/lib/services/instagram/providers/types';
 import { APIFY_PROFILE_ACTOR_ID } from '@/lib/services/instagram/providers/apify';
+import { selectPreflightApifyCredentialSlot } from '@/lib/services/instagram/providers/apify-relationship';
 import { makeWebProfileFetcher } from '@/lib/services/instagram/providers/selfhosted/web-client';
 import { RISK_POLICY_VERSION } from '@/lib/domain/analysis/risk-policy';
 import { AI_STAGE_POLICY_LATEST_VERSION } from '@/lib/services/ai/stage-policy';
@@ -826,6 +827,119 @@ describe('preflight persistence adapter', () => {
 });
 
 describe('preflight worker domain', () => {
+    it('selects the deterministic dual-account slot for a new anonymous fallback', async () => {
+        const selectedPreflightId = '123e4567-e89b-42d3-a456-000000000001';
+        const env = {
+            APIFY_API_TOKEN: 'primary-token',
+            APIFY_SECONDARY_API_TOKEN: 'secondary-token',
+            ANALYSIS_V2_PREFLIGHT_IDENTITY_HMAC_SECRET: preflightIdentitySecret,
+        };
+        const baseClaim = claim();
+        const selectedClaim = claim({
+            preflightId: selectedPreflightId,
+            userId: null,
+            accessMode: 'production',
+            catalogSnapshot: {
+                ...baseClaim.catalogSnapshot,
+                plans: Object.fromEntries(Object.entries(
+                    baseClaim.catalogSnapshot.plans,
+                ).map(([planId, plan]) => [planId, {
+                    ...plan,
+                    launchStatus: 'production' as const,
+                }])) as PreflightCatalogSnapshot['plans'],
+            },
+        });
+        const selectedSlot = selectPreflightApifyCredentialSlot(selectedPreflightId, env);
+        const runs = providerRunStore();
+        vi.mocked(runs.reserve).mockImplementation(async input => ({
+            created: true,
+            run: {
+                ...storedRun('starting'),
+                preflightId: selectedPreflightId,
+                credentialSlot: input.credentialSlot,
+            },
+        }));
+        const apify = vi.fn(async (
+            _username: string,
+            context?: ProviderCallContext,
+        ) => {
+            expect(context?.credentialSlot).toBe(selectedSlot);
+            await context?.onBeforeRunStart?.({
+                logicalProvider: 'apify',
+                actorId: APIFY_PROFILE_ACTOR_ID,
+                credentialSlot: selectedSlot,
+                maxChargeUsd: 0.0026,
+            });
+            return profile();
+        });
+
+        await expect(processPreflight(selectedPreflightId, {
+            store: workerStore(selectedClaim),
+            getFallbackProfile: apify,
+            providerRunStore: runs,
+            anonymousProfileCache: {
+                load: vi.fn(async () => null),
+                store: vi.fn(async () => true),
+            },
+            env,
+        })).resolves.toBe('ready');
+
+        expect(apify).toHaveBeenCalledOnce();
+        expect(runs.reserve).toHaveBeenCalledWith(expect.objectContaining({
+            preflightId: selectedPreflightId,
+            credentialSlot: selectedSlot,
+        }));
+    });
+
+    it('selects the deterministic dual-account slot for a new standard fallback', async () => {
+        const selectedPreflightId = '123e4567-e89b-42d3-a456-000000000001';
+        const env = {
+            APIFY_API_TOKEN: 'primary-token',
+            APIFY_SECONDARY_API_TOKEN: 'secondary-token',
+            ANALYSIS_V2_PREFLIGHT_IDENTITY_HMAC_SECRET: preflightIdentitySecret,
+        };
+        const selectedClaim = claim({ preflightId: selectedPreflightId });
+        const selectedSlot = selectPreflightApifyCredentialSlot(selectedPreflightId, env);
+        const runs = providerRunStore();
+        vi.mocked(runs.reserve).mockImplementation(async input => ({
+            created: true,
+            run: {
+                ...storedRun('starting'),
+                preflightId: selectedPreflightId,
+                credentialSlot: input.credentialSlot,
+            },
+        }));
+        const apify = vi.fn(async (
+            _username: string,
+            context?: ProviderCallContext,
+        ) => {
+            expect(context?.credentialSlot).toBe(selectedSlot);
+            await context?.onBeforeRunStart?.({
+                logicalProvider: 'apify',
+                actorId: APIFY_PROFILE_ACTOR_ID,
+                credentialSlot: selectedSlot,
+                maxChargeUsd: 0.0026,
+            });
+            return profile();
+        });
+
+        await expect(processPreflight(selectedPreflightId, {
+            store: workerStore(selectedClaim),
+            getProfile: vi.fn(async () => {
+                throw new Error('SCRAPING_SCHEMA_ERROR: force paid fallback');
+            }),
+            getFallbackProfile: apify,
+            providerRunStore: runs,
+            env,
+        })).resolves.toBe('ready');
+
+        expect(apify).toHaveBeenCalledOnce();
+        expect(runs.reserve).toHaveBeenCalledWith(expect.objectContaining({
+            preflightId: selectedPreflightId,
+            credentialSlot: selectedSlot,
+        }));
+    });
+
     it('routes anonymous profile summaries to Apify and reuses the global summary cache', async () => {
         const baseAnonymousClaim = claim();
         const anonymousPlans = Object.fromEntries(
