@@ -148,8 +148,8 @@ async function handleAnonymousPOST(
             errorCode: preflightFailureReason(code),
         });
         operationalLogger.emit({
-            event: 'preflight.failed',
-            severity: status >= 500 ? 'error' : 'warn',
+            event: status >= 500 ? 'preflight.failed' : 'preflight.blocked',
+            severity: status >= 500 ? 'error' : 'info',
             fields: {
                 ...context,
                 ...(preflightId ? { preflight_id: preflightId } : {}),
@@ -338,8 +338,8 @@ async function handlePOST(
             errorCode: preflightFailureReason(code),
         });
         operationalLogger.emit({
-            event: 'preflight.failed',
-            severity: status >= 500 ? 'error' : 'warn',
+            event: status >= 500 ? 'preflight.failed' : 'preflight.blocked',
+            severity: status >= 500 ? 'error' : 'info',
             fields: {
                 ...context,
                 ...(userId ? { user_id: userId } : {}),

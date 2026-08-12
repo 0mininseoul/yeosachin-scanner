@@ -8,6 +8,7 @@ const BUSINESS_EVENTS = [
     'preflight.requested',
     'preflight.profile_collected',
     'preflight.completed',
+    'preflight.blocked',
     'preflight.failed',
     'preflight.exclusion_decided',
     'earlybird.checkout_created',
