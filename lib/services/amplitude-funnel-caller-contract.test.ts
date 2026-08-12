@@ -23,6 +23,7 @@ describe('Amplitude product funnel caller contract', () => {
             'LANDING_VIEWED',
             'PREFLIGHT_STARTED',
             'PREFLIGHT_SUCCEEDED',
+            'PREFLIGHT_BLOCKED',
             'PREFLIGHT_FAILED',
             'EXCLUSION_DECIDED',
             'PLAN_VIEWED',
@@ -105,6 +106,9 @@ describe('Amplitude product funnel caller contract', () => {
         expect(preflight).toContain('readPreflightStartedAt(');
 
         expect(preflight).toContain('trustedDurationMs(');
+        expect(preflight).toContain('classifyPreflightAnalyticsOutcome(');
+        expect(preflight).toContain('EVENTS.PREFLIGHT_BLOCKED');
+        expect(preflight).toMatch(/preflightStartedAt:\s*preflightStartedAtRef\.current/);
     });
 
     it('honors the disabled analytics capability through preflight, progress, result pagination, and commercial controls', () => {

@@ -55,6 +55,20 @@ describe('blocked preflight copy', () => {
     });
 });
 
+describe('preflight analytics outcome caller contract', () => {
+    it('routes business blocks separately while preserving technical failures', () => {
+        const hookSource = readFileSync(
+            new URL('../../../hooks/useAnalysisV2Preflight.ts', import.meta.url),
+            'utf8',
+        );
+
+        expect(hookSource).toContain('classifyPreflightAnalyticsOutcome(');
+        expect(hookSource).toContain('EVENTS.PREFLIGHT_BLOCKED');
+        expect(hookSource).toContain('EVENTS.PREFLIGHT_FAILED');
+        expect(hookSource).toMatch(/preflightStartedAt:\s*preflightStartedAtRef\.current/);
+    });
+});
+
 const plans = [
     {
         planId: 'basic',
