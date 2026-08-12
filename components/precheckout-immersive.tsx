@@ -19,7 +19,9 @@ import { PrecheckoutStageGraphs } from '@/components/precheckout-stage-graphs';
    looks and behaves exactly as it does today.
    ============================================================ */
 
-const FETCH_DEADLINE_MS = 12_000;
+// The server bounds profile collection + inference at 45s. The client must not cancel that
+// legitimate work first; keep a small response-delivery margin beyond the server deadline.
+const FETCH_DEADLINE_MS = 50_000;
 
 type Screen = 'confirm' | 'result' | 'demo';
 
@@ -115,7 +117,7 @@ export function PrecheckoutImmersive({ preflightId, claimToken, onGoToPlans }: P
                     && parsed.data.genderRead.confidence >= PRECHECKOUT_BLITE_LIKELY_FEMALE_CONFIDENCE_THRESHOLD;
                 setScreen(showConfirm ? 'confirm' : 'result');
             } catch {
-                // Network error, JSON parse failure, or the 2s abort — stay unavailable.
+                // Network error, JSON parse failure, or the bounded abort — stay unavailable.
             } finally {
                 clearTimeout(timeout);
             }
