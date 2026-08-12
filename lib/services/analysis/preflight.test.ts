@@ -1504,6 +1504,22 @@ describe('preflight worker domain', () => {
         expect(store.releaseClaim).not.toHaveBeenCalled();
     });
 
+    it('does not start provider work when an anonymous lease cannot cover its deadline', async () => {
+        const getFallbackProfile = vi.fn();
+        const store = workerStore(claim({
+            userId: null,
+            leaseExpiresAt: new Date(Date.now() + 30_000).toISOString(),
+        }));
+
+        await expect(processPreflight(preflightId, {
+            store,
+            getFallbackProfile,
+            providerRunStore: providerRunStore(),
+        })).resolves.toBe('noop');
+
+        expect(getFallbackProfile).not.toHaveBeenCalled();
+    });
+
     it('maps anonymous expiry from a finalize RPC to an immutable error', async () => {
         const store = createSupabasePreflightStore({
             rpc: vi.fn(async () => ({
