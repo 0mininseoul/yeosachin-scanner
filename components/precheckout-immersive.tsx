@@ -19,7 +19,7 @@ import { PrecheckoutStageGraphs } from '@/components/precheckout-stage-graphs';
    looks and behaves exactly as it does today.
    ============================================================ */
 
-const FETCH_DEADLINE_MS = 2000;
+const FETCH_DEADLINE_MS = 12_000;
 
 type Screen = 'confirm' | 'result' | 'demo';
 
@@ -149,7 +149,10 @@ export function PrecheckoutImmersive({ preflightId, claimToken, onGoToPlans }: P
         <DemoScreen
             sequenceComplete={sequenceComplete}
             onComplete={handleSequenceComplete}
-            onGoToPlans={onGoToPlans}
+            onGoToPlans={() => {
+                setDismissed(true);
+                onGoToPlans();
+            }}
         />
     );
 }

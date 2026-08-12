@@ -63,6 +63,12 @@ function storedReadyPreflight(overrides: { username?: string } = {}) {
     };
 }
 
+function deferred<T>() {
+    let resolve!: (value: T) => void;
+    const promise = new Promise<T>(resolver => { resolve = resolver; });
+    return { promise, resolve };
+}
+
 function storedNonReadyPreflight() {
     return {
         preflightId,
@@ -169,6 +175,16 @@ describe('POST /api/analysis/precheckout-blite', () => {
         expect(mocks.getInstagramProfile).not.toHaveBeenCalled();
     });
 
+    it('responds 204 for an expired ready preflight before reading cache or scraping', async () => {
+        mocks.findForOwner.mockResolvedValue({
+            ...storedReadyPreflight(),
+            expiresAt: new Date(Date.now() - 1_000).toISOString(),
+        });
+        const response = await POST(request());
+        expect(response.status).toBe(204);
+        expect(mocks.getInstagramProfile).not.toHaveBeenCalled();
+    });
+
     it('responds 204 when the profile cannot be fetched', async () => {
         mocks.getInstagramProfile.mockResolvedValue(null);
         const response = await POST(request());
@@ -224,8 +240,30 @@ describe('POST /api/analysis/precheckout-blite', () => {
         await POST(request());
         expect(mocks.getInstagramProfile).toHaveBeenCalledWith(
             'resolved_target',
-            expect.objectContaining({ requestId: preflightId })
+            expect.objectContaining({
+                requestId: preflightId,
+                providerRun: expect.objectContaining({
+                    invocationDeadlineAtMs: expect.any(Number),
+                    startCancellationSignal: expect.any(AbortSignal),
+                }),
+            })
         );
+    });
+
+    it('coalesces concurrent requests for one preflight into one scrape and inference', async () => {
+        const pendingProfile = deferred<ReturnType<typeof profileWithPosts>>();
+        mocks.getInstagramProfile.mockReturnValue(pendingProfile.promise);
+
+        const firstPromise = POST(request());
+        const secondPromise = POST(request());
+        await vi.waitFor(() => expect(mocks.getInstagramProfile).toHaveBeenCalledTimes(1));
+
+        pendingProfile.resolve(profileWithPosts());
+        const [first, second] = await Promise.all([firstPromise, secondPromise]);
+        expect(first.status).toBe(200);
+        expect(second.status).toBe(200);
+        expect(mocks.getInstagramProfile).toHaveBeenCalledTimes(1);
+        expect(mocks.inferPrecheckoutBlite).toHaveBeenCalledTimes(1);
     });
 
     it('caches the DTO by preflightId so a repeat request does not re-run inference', async () => {

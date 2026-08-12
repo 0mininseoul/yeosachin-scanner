@@ -185,23 +185,23 @@ describe('buildPrecheckoutBliteDigest', () => {
         expect(serialized).not.toContain('900');
     });
 
-    it('widens fullName and bio into the digest as gender-read-only evidence', () => {
+    it('widens fullName but excludes bio from the gender-read digest', () => {
         const digest = buildPrecheckoutBliteDigest(profile());
         expect(digest.fullName).toBe('홍길동');
-        expect(digest.bio).toBe('자기소개입니다');
+        expect(digest).not.toHaveProperty('bio');
     });
 
-    it('truncates an overlong fullName/bio and returns null when absent', () => {
+    it('truncates an overlong fullName and returns null when absent', () => {
         const long = buildPrecheckoutBliteDigest(profile({
             fullName: '가'.repeat(100),
             bio: '나'.repeat(300),
         }));
         expect(long.fullName?.length).toBeLessThanOrEqual(61); // 60 chars + ellipsis
-        expect(long.bio?.length).toBeLessThanOrEqual(161); // 160 chars + ellipsis
+        expect(long).not.toHaveProperty('bio');
 
         const missing = buildPrecheckoutBliteDigest(profile({ fullName: undefined, bio: undefined }));
         expect(missing.fullName).toBeNull();
-        expect(missing.bio).toBeNull();
+        expect(missing).not.toHaveProperty('bio');
     });
 
     it('reflects post type distribution, carousel depth, and hidden-count flags', () => {
@@ -231,12 +231,13 @@ describe('buildPrecheckoutBlitePrompt', () => {
         expect(prompt).not.toContain('900');
     });
 
-    it('restricts fullName/bio/image evidence to genderRead only, in the prompt instructions', () => {
+    it('restricts fullName/image evidence to genderRead and never sends bio', () => {
         const digest = buildPrecheckoutBliteDigest(profile());
         const prompt = buildPrecheckoutBlitePrompt(digest, { count: 2, hasProfileImage: true });
         // The widened evidence text does end up in the prompt (that's the point) ...
         expect(prompt).toContain('홍길동');
-        expect(prompt).toContain('자기소개입니다');
+        expect(prompt).not.toContain('자기소개입니다');
+        expect(prompt).not.toContain('소개글(bio)');
         // ... but the prompt must explicitly forbid using it for persona/signals.
         expect(prompt).toContain('오직 성별 추정(genderRead)에만 사용');
         expect(prompt).toContain('이미지 2장이 첨부되어 있습니다');

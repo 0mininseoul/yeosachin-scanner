@@ -213,11 +213,12 @@ describe('precheckoutBliteV1Schema', () => {
         }
     });
 
-    it('includes the widened gender-read-only evidence fields (name, bio, images)', () => {
+    it('includes only the approved gender-read evidence fields (name and images, never bio)', () => {
         expect(PRECHECKOUT_BLITE_EVIDENCE_FIELDS).toContain('profile.fullName');
-        expect(PRECHECKOUT_BLITE_EVIDENCE_FIELDS).toContain('profile.bio');
+        expect(PRECHECKOUT_BLITE_EVIDENCE_FIELDS).not.toContain('profile.bio');
         expect(PRECHECKOUT_BLITE_EVIDENCE_FIELDS).toContain('profile.profilePicUrl');
         expect(PRECHECKOUT_BLITE_EVIDENCE_FIELDS).toContain('post.imageUrl');
+        expect(PRECHECKOUT_BLITE_EVIDENCE_FIELDS).toContain('post.thumbnailUrl');
     });
 });
 

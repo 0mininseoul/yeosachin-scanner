@@ -22,7 +22,7 @@ const requestBodySchema = z.object({
 /** Server-only gate. Never exposed to the browser. */
 const PRECHECKOUT_BLITE_ENABLED_FLAG = 'PRECHECKOUT_BLITE_ENABLED';
 
-const PRECHECKOUT_BLITE_INFERENCE_TIMEOUT_MS = 8_000;
+const PRECHECKOUT_BLITE_OPERATION_TIMEOUT_MS = 10_000;
 const PRECHECKOUT_BLITE_CACHE_TTL_MS = 5 * 60_000;
 const PRECHECKOUT_BLITE_CACHE_MAX_ENTRIES = 200;
 
@@ -35,9 +35,12 @@ interface PrecheckoutBliteCacheEntry {
 // warm serverless instance (or Next dev hot reload) reuses it instead of resetting per import.
 const cacheScope = globalThis as typeof globalThis & {
     __PRECHECKOUT_BLITE_DTO_CACHE_V1__?: Map<string, PrecheckoutBliteCacheEntry>;
+    __PRECHECKOUT_BLITE_IN_FLIGHT_V1__?: Map<string, Promise<PrecheckoutBliteV1 | null>>;
 };
 const dtoCache = cacheScope.__PRECHECKOUT_BLITE_DTO_CACHE_V1__ ?? new Map();
+const inFlight = cacheScope.__PRECHECKOUT_BLITE_IN_FLIGHT_V1__ ?? new Map();
 cacheScope.__PRECHECKOUT_BLITE_DTO_CACHE_V1__ = dtoCache;
+cacheScope.__PRECHECKOUT_BLITE_IN_FLIGHT_V1__ = inFlight;
 
 function readCachedDto(preflightId: string): PrecheckoutBliteV1 | null {
     const entry = dtoCache.get(preflightId);
@@ -61,6 +64,42 @@ function writeCachedDto(preflightId: string, dto: PrecheckoutBliteV1): void {
 /** Test-only: clears the in-process DTO cache so specs do not leak state across runs. */
 export function __resetPrecheckoutBliteCacheForTest(): void {
     dtoCache.clear();
+    inFlight.clear();
+}
+
+async function generateDto(preflightId: string, targetUsername: string): Promise<PrecheckoutBliteV1 | null> {
+    const controller = new AbortController();
+    const deadlineAtMs = Date.now() + PRECHECKOUT_BLITE_OPERATION_TIMEOUT_MS;
+    const timeout = setTimeout(() => controller.abort(), PRECHECKOUT_BLITE_OPERATION_TIMEOUT_MS);
+    try {
+        const profile = await getInstagramProfile(targetUsername, {
+            requestId: preflightId,
+            providerRun: {
+                invocationDeadlineAtMs: deadlineAtMs,
+                startCancellationSignal: controller.signal,
+            },
+        });
+        if (!profile || profile.isPrivate || !profile.latestPosts?.length) return null;
+        const dto = await inferPrecheckoutBlite(profile, {
+            requestId: preflightId,
+            abortSignal: controller.signal,
+        });
+        if (!dto) return null;
+        const revalidated = precheckoutBliteV1Schema.safeParse(dto);
+        return revalidated.success ? revalidated.data : null;
+    } finally {
+        clearTimeout(timeout);
+    }
+}
+
+function sharedGeneration(preflightId: string, targetUsername: string): Promise<PrecheckoutBliteV1 | null> {
+    const existing = inFlight.get(preflightId);
+    if (existing) return existing;
+    const pending = generateDto(preflightId, targetUsername).finally(() => {
+        if (inFlight.get(preflightId) === pending) inFlight.delete(preflightId);
+    });
+    inFlight.set(preflightId, pending);
+    return pending;
 }
 
 function precheckoutBliteEnabled(): boolean {
@@ -116,41 +155,17 @@ async function handlePOST(request: Request): Promise<NextResponse> {
         const stored = error || !user
             ? await anonymousStoredPreflight(request, preflightId, client)
             : await preflightStore.findForOwner(preflightId, user.id, { client });
-        if (!stored || stored.status !== 'ready' || !stored.readySnapshot) return empty();
+        if (!stored || stored.status !== 'ready' || !stored.readySnapshot
+            || Date.parse(stored.expiresAt) <= Date.now()) return empty();
 
         // Ownership is confirmed; a cache hit can now short-circuit the paid path.
         const cached = readCachedDto(preflightId);
         if (cached) return NextResponse.json(cached);
 
-        const targetUsername = stored.readySnapshot.target.username;
-        const profile = await getInstagramProfile(targetUsername, { requestId: preflightId });
-        if (!profile || profile.isPrivate) return empty();
-        if (!profile.latestPosts || profile.latestPosts.length === 0) return empty();
-
-        // Short abort/timeout so a slow model call cannot hold the connection open.
-        const controller = new AbortController();
-        const timeout = setTimeout(
-            () => controller.abort(),
-            PRECHECKOUT_BLITE_INFERENCE_TIMEOUT_MS
-        );
-        let dto: PrecheckoutBliteV1 | null;
-        try {
-            dto = await inferPrecheckoutBlite(profile, {
-                requestId: preflightId,
-                abortSignal: controller.signal,
-            });
-        } finally {
-            clearTimeout(timeout);
-        }
+        const dto = await sharedGeneration(preflightId, stored.readySnapshot.target.username);
         if (!dto) return empty();
-
-        // The route re-validates before caching/responding; reject/clamp rather than pass
-        // through anything that does not match the contract exactly.
-        const revalidated = precheckoutBliteV1Schema.safeParse(dto);
-        if (!revalidated.success) return empty();
-
-        writeCachedDto(preflightId, revalidated.data);
-        return NextResponse.json(revalidated.data);
+        writeCachedDto(preflightId, dto);
+        return NextResponse.json(dto);
     } catch {
         // Never 5xx into the product flow.
         return empty();

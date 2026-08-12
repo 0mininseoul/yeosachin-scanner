@@ -41,8 +41,8 @@ export function derivePrecheckoutBliteSignalBand(confidence: number): Precheckou
  * `InstagramProfile`/`InstagramPost` shape (see `blite-inference.ts`). This is the exhaustive
  * set `evidenceFields` may draw from.
  *
- * `post.*` fields feed persona/signals as before. The `profile.fullName`, `profile.bio`,
- * `profile.profilePicUrl`, and `post.imageUrl` fields are widened evidence for `genderRead`
+ * `post.*` fields feed persona/signals as before. The `profile.fullName`,
+ * `profile.profilePicUrl`, and post image fields are widened evidence for `genderRead`
  * only — the model prompt restricts them to that one field and forbids citing them for
  * persona/signals. `profile.username`, `profile.externalUrl`, `profile.followersCount`, and
  * `profile.followingCount` remain permanently excluded; the digest never sends those to the
@@ -61,8 +61,8 @@ export const PRECHECKOUT_BLITE_EVIDENCE_FIELDS = [
     'post.taggedUsers',
     'post.mentionedUsers',
     'post.imageUrl',
+    'post.thumbnailUrl',
     'profile.fullName',
-    'profile.bio',
     'profile.profilePicUrl',
 ] as const;
 export type PrecheckoutBliteEvidenceField = typeof PRECHECKOUT_BLITE_EVIDENCE_FIELDS[number];

@@ -256,6 +256,8 @@ describe('PrecheckoutImmersive', () => {
         await clickButton(container, '분석 결과 확인하기');
 
         expect(onGoToPlans).toHaveBeenCalledTimes(1);
+        expect(container.textContent).not.toContain('분석 결과 확인하기');
+        expect(document.body.style.overflow).toBe('');
     });
 
     it('renders the completed state immediately under prefers-reduced-motion', async () => {
