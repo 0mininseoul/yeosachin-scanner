@@ -849,20 +849,34 @@ describe('preflight worker domain', () => {
                 }])) as PreflightCatalogSnapshot['plans'],
             },
         });
+        const selectedSlot = selectPreflightApifyCredentialSlot(selectedPreflightId, env);
+        const runs = providerRunStore();
+        vi.mocked(runs.reserve).mockImplementation(async input => ({
+            created: true,
+            run: {
+                ...storedRun('starting'),
+                preflightId: selectedPreflightId,
+                credentialSlot: input.credentialSlot,
+            },
+        }));
         const apify = vi.fn(async (
             _username: string,
             context?: ProviderCallContext,
         ) => {
-            expect(context?.credentialSlot).toBe(
-                selectPreflightApifyCredentialSlot(selectedPreflightId, env),
-            );
+            expect(context?.credentialSlot).toBe(selectedSlot);
+            await context?.onBeforeRunStart?.({
+                logicalProvider: 'apify',
+                actorId: APIFY_PROFILE_ACTOR_ID,
+                credentialSlot: selectedSlot,
+                maxChargeUsd: 0.0026,
+            });
             return profile();
         });
 
         await expect(processPreflight(selectedPreflightId, {
             store: workerStore(selectedClaim),
             getFallbackProfile: apify,
-            providerRunStore: providerRunStore(),
+            providerRunStore: runs,
             anonymousProfileCache: {
                 load: vi.fn(async () => null),
                 store: vi.fn(async () => true),
@@ -871,6 +885,10 @@ describe('preflight worker domain', () => {
         })).resolves.toBe('ready');
 
         expect(apify).toHaveBeenCalledOnce();
+        expect(runs.reserve).toHaveBeenCalledWith(expect.objectContaining({
+            preflightId: selectedPreflightId,
+            credentialSlot: selectedSlot,
+        }));
     });
 
     it('selects the deterministic dual-account slot for a new standard fallback', async () => {
@@ -881,13 +899,27 @@ describe('preflight worker domain', () => {
             ANALYSIS_V2_PREFLIGHT_IDENTITY_HMAC_SECRET: preflightIdentitySecret,
         };
         const selectedClaim = claim({ preflightId: selectedPreflightId });
+        const selectedSlot = selectPreflightApifyCredentialSlot(selectedPreflightId, env);
+        const runs = providerRunStore();
+        vi.mocked(runs.reserve).mockImplementation(async input => ({
+            created: true,
+            run: {
+                ...storedRun('starting'),
+                preflightId: selectedPreflightId,
+                credentialSlot: input.credentialSlot,
+            },
+        }));
         const apify = vi.fn(async (
             _username: string,
             context?: ProviderCallContext,
         ) => {
-            expect(context?.credentialSlot).toBe(
-                selectPreflightApifyCredentialSlot(selectedPreflightId, env),
-            );
+            expect(context?.credentialSlot).toBe(selectedSlot);
+            await context?.onBeforeRunStart?.({
+                logicalProvider: 'apify',
+                actorId: APIFY_PROFILE_ACTOR_ID,
+                credentialSlot: selectedSlot,
+                maxChargeUsd: 0.0026,
+            });
             return profile();
         });
 
@@ -897,11 +929,15 @@ describe('preflight worker domain', () => {
                 throw new Error('SCRAPING_SCHEMA_ERROR: force paid fallback');
             }),
             getFallbackProfile: apify,
-            providerRunStore: providerRunStore(),
+            providerRunStore: runs,
             env,
         })).resolves.toBe('ready');
 
         expect(apify).toHaveBeenCalledOnce();
+        expect(runs.reserve).toHaveBeenCalledWith(expect.objectContaining({
+            preflightId: selectedPreflightId,
+            credentialSlot: selectedSlot,
+        }));
     });
 
     it('routes anonymous profile summaries to Apify and reuses the global summary cache', async () => {
