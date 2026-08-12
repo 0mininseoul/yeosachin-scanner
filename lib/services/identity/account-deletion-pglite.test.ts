@@ -6,6 +6,10 @@ const migration = readFileSync(new URL(
     '../../../supabase/migrations/20260812140423_add_account_deletion_lifecycle.sql',
     import.meta.url,
 ), 'utf8');
+const hotfixMigration = readFileSync(new URL(
+    '../../../supabase/migrations/20260812153818_fix_account_deletion_preflight_scrub.sql',
+    import.meta.url,
+), 'utf8');
 const db = await PGlite.create();
 
 const owner = '6d809496-1cb8-4e4f-a081-8efc14a7a64c';
@@ -49,7 +53,13 @@ CREATE TABLE public.analysis_result_share_observations (id uuid primary key, req
 CREATE TABLE public.analysis_preflights (
  id uuid primary key, user_id uuid references public.users(id), target_instagram_id text not null,
  target_full_name text, target_bio text, target_profile_image_url text, excluded_instagram_id text,
- exclusion_decision text, pii_scrubbed_at timestamptz
+ exclusion_decision text, status text not null, created_at timestamptz not null default now(),
+ updated_at timestamptz not null default now(), claimed_at timestamptz, dispatch_reserved_at timestamptz,
+ dispatched_at timestamptz, exclusion_decided_at timestamptz, ready_at timestamptz, blocked_at timestamptz,
+ consumed_at timestamptz, pii_scrubbed_at timestamptz,
+ CONSTRAINT analysis_preflights_timestamp_order_check CHECK (
+  pii_scrubbed_at IS NULL OR status IN ('expired', 'consumed')
+ )
 );
 CREATE TABLE public.earlybird_orders (
  id uuid primary key, user_id uuid references public.users(id), target_instagram_id text not null,
@@ -63,6 +73,7 @@ CREATE TABLE public.earlybird_orders (
 CREATE TABLE public.earlybird_waitlist (id uuid primary key, user_id uuid references public.users(id));
 `);
 await db.exec(migration);
+await db.exec(hotfixMigration);
 
 describe('account deletion migration', () => {
     afterAll(async () => db.close());
@@ -79,6 +90,13 @@ describe('account deletion migration', () => {
         await db.query(`INSERT INTO public.earlybird_orders(id,user_id,target_instagram_id,target_followers_count,target_following_count,
             exclusion_decision,buyer_match_policy,groble_buyer_email,disclosure_text,status,result_request_id)
             VALUES ('3d809496-1cb8-4e4f-a081-8efc14a7a64c',$1,'target_owner',10,11,'skip','legacy_email','owner@example.test','accepted','payment_pending',$2)`, [owner, ownerRequest]);
+        await db.query(`INSERT INTO public.analysis_preflights(
+            id,user_id,target_instagram_id,target_full_name,target_bio,target_profile_image_url,
+            exclusion_decision,status
+        ) VALUES (
+            '4d809496-1cb8-4e4f-a081-8efc14a7a64c',$1,'target_owner','Target','private bio',
+            'https://example.test/profile.jpg','skip','pending'
+        )`, [owner]);
 
         await db.query(`SELECT public.begin_account_deletion_v1($1)`, [owner]);
         await db.query(`SELECT public.finalize_account_deletion_database_v1($1, '[]'::jsonb)`, [owner]);
@@ -94,10 +112,30 @@ describe('account deletion migration', () => {
         expect((await db.query(`SELECT 1 FROM public.analysis_results WHERE request_id=$1`, [ownerRequest])).rows).toHaveLength(0);
         expect((await db.query(`SELECT share_token FROM public.analysis_requests WHERE id=$1`, [ownerRequest])).rows[0]).toEqual({ share_token: null });
         expect((await db.query(`SELECT suspect_instagram_id FROM public.analysis_results WHERE request_id=$1`, [otherRequest])).rows[0]).toEqual({ suspect_instagram_id: 'candidate_other' });
+        expect((await db.query(`SELECT target_instagram_id,target_full_name,target_bio,target_profile_image_url,pii_scrubbed_at
+            FROM public.analysis_preflights WHERE user_id=$1`, [owner])).rows[0]).toEqual({
+            target_instagram_id: 'deleted',
+            target_full_name: null,
+            target_bio: null,
+            target_profile_image_url: null,
+            pii_scrubbed_at: expect.any(Date),
+        });
     });
 
     it('rejects operator self-deletion', async () => {
         await db.query(`UPDATE public.users SET traffic_class='operator', lifecycle='active' WHERE id=$1`, [other]);
         await expect(db.query(`SELECT public.begin_account_deletion_v1($1)`, [other])).rejects.toThrow('ACCOUNT_DELETION_NOT_ALLOWED');
+    });
+
+    it('does not allow an active preflight to be marked scrubbed while PII remains', async () => {
+        await db.query(`INSERT INTO public.analysis_preflights(
+            id,user_id,target_instagram_id,target_full_name,exclusion_decision,status
+        ) VALUES (
+            '5d809496-1cb8-4e4f-a081-8efc14a7a64c',$1,'target_other','Other Target','skip','pending'
+        )`, [other]);
+
+        await expect(db.query(`UPDATE public.analysis_preflights
+            SET pii_scrubbed_at = now() WHERE id = '5d809496-1cb8-4e4f-a081-8efc14a7a64c'`))
+            .rejects.toThrow('analysis_preflights_timestamp_order_check');
     });
 });
