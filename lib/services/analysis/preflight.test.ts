@@ -1489,6 +1489,39 @@ describe('preflight worker domain', () => {
         expect(store.finalizeBlocked).toHaveBeenCalledWith(expect.anything(), 'TARGET_NOT_FOUND');
     });
 
+    it('acknowledges a preflight that expires while its blocked result is finalized', async () => {
+        const store = workerStore();
+        vi.mocked(store.finalizeBlocked).mockRejectedValue(
+            new PreflightImmutableError('ANONYMOUS_PREFLIGHT_EXPIRED')
+        );
+
+        await expect(processPreflight(preflightId, {
+            store,
+            getProfile: vi.fn(async () => null),
+            providerRunStore: providerRunStore(),
+        })).resolves.toBe('noop');
+
+        expect(store.releaseClaim).not.toHaveBeenCalled();
+    });
+
+    it('maps anonymous expiry from a finalize RPC to an immutable error', async () => {
+        const store = createSupabasePreflightStore({
+            rpc: vi.fn(async () => ({
+                data: null,
+                error: { code: 'P0001', message: 'ANONYMOUS_PREFLIGHT_EXPIRED' },
+            })),
+            from: vi.fn() as never,
+        });
+
+        await expect(store.finalizeBlocked(
+            claim({ userId: null }),
+            'TARGET_NOT_FOUND'
+        )).rejects.toMatchObject({
+            name: 'PreflightImmutableError',
+            message: 'ANONYMOUS_PREFLIGHT_EXPIRED',
+        });
+    });
+
     it('blocks a reserved start without a run id before invoking any paid provider', async () => {
         const store = workerStore(claim({ workerAttemptCount: 2 }));
         const runs = providerRunStore();

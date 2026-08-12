@@ -705,6 +705,7 @@ function throwRpcError(error: RpcError, operation: string): never {
     if (
         error.message === 'PREFLIGHT_EXPIRED'
         || error.message === 'ANALYSIS_V2_PREFLIGHT_EXPIRED'
+        || error.message === 'ANONYMOUS_PREFLIGHT_EXPIRED'
         || error.message === 'PREFLIGHT_CONSUMED'
         || error.message === 'ANALYSIS_V2_PREFLIGHT_CONSUMED'
         || error.message === 'ANALYSIS_V2_PREFLIGHT_NOT_READY'
@@ -1982,6 +1983,13 @@ export async function processPreflight(
         });
         return 'ready';
     } catch (error) {
+        if (
+            error instanceof PreflightImmutableError
+            && error.message.includes('EXPIRED')
+        ) {
+            terminalized = true;
+            return 'noop';
+        }
         if (
             !terminalized
             && claim.analysisEntryChannel === 'betatest'
