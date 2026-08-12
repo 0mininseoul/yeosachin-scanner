@@ -7,6 +7,9 @@ const mocks = vi.hoisted(() => ({
     readAnonymousAnalysisV2Preflight: vi.fn(),
     getInstagramProfile: vi.fn(),
     inferPrecheckoutBlite: vi.fn(),
+    claimBliteGeneration: vi.fn(),
+    completeBliteGeneration: vi.fn(),
+    releaseBliteGeneration: vi.fn(),
 }));
 
 vi.mock('@/lib/supabase/server', () => ({ createClient: mocks.createClient }));
@@ -21,6 +24,13 @@ vi.mock('@/lib/services/instagram/scraper', () => ({
 }));
 vi.mock('@/lib/services/precheckout/blite-inference', () => ({
     inferPrecheckoutBlite: mocks.inferPrecheckoutBlite,
+}));
+vi.mock('@/lib/services/precheckout/blite-store', () => ({
+    precheckoutBliteStore: {
+        claim: mocks.claimBliteGeneration,
+        complete: mocks.completeBliteGeneration,
+        release: mocks.releaseBliteGeneration,
+    },
 }));
 
 import { POST, __resetPrecheckoutBliteCacheForTest } from './route';
@@ -131,6 +141,9 @@ describe('POST /api/analysis/precheckout-blite', () => {
         mocks.findForOwner.mockResolvedValue(storedReadyPreflight());
         mocks.getInstagramProfile.mockResolvedValue(profileWithPosts());
         mocks.inferPrecheckoutBlite.mockResolvedValue(validDto());
+        mocks.claimBliteGeneration.mockResolvedValue({ disposition: 'claimed', leaseToken: 'cccccccc-cccc-4ccc-8ccc-cccccccccccc' });
+        mocks.completeBliteGeneration.mockResolvedValue(undefined);
+        mocks.releaseBliteGeneration.mockResolvedValue(undefined);
     });
 
     it('responds 204 with no body when the flag is off', async () => {
@@ -260,6 +273,31 @@ describe('POST /api/analysis/precheckout-blite', () => {
         expect(serialized).not.toContain('example.com');
         expect(serialized).not.toContain('1200');
         expect(serialized).not.toContain('900');
+    });
+
+    it('returns a durable cached DTO without scraping', async () => {
+        mocks.claimBliteGeneration.mockResolvedValue({ disposition: 'complete', dto: validDto() });
+        const response = await POST(request());
+        expect(response.status).toBe(200);
+        expect(await response.json()).toEqual(validDto());
+        expect(mocks.getInstagramProfile).not.toHaveBeenCalled();
+    });
+
+    it('fails open while another serverless instance owns the durable lease', async () => {
+        mocks.claimBliteGeneration.mockResolvedValue({ disposition: 'pending' });
+        const response = await POST(request());
+        expect(response.status).toBe(204);
+        expect(mocks.getInstagramProfile).not.toHaveBeenCalled();
+    });
+
+    it('persists the generated DTO under the durable lease', async () => {
+        const response = await POST(request());
+        expect(response.status).toBe(200);
+        expect(mocks.completeBliteGeneration).toHaveBeenCalledWith({
+            preflightId,
+            leaseToken: 'cccccccc-cccc-4ccc-8ccc-cccccccccccc',
+            dto: validDto(),
+        });
     });
 
     it('passes the ready-snapshot username to the scraper, not an arbitrary value', async () => {
