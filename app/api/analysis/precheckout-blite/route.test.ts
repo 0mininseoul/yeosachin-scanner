@@ -270,6 +270,8 @@ describe('POST /api/analysis/precheckout-blite', () => {
             'resolved_target',
             expect.objectContaining({
                 requestId: preflightId,
+                provider: 'selfhosted',
+                fallback: false,
                 providerRun: expect.objectContaining({
                     invocationDeadlineAtMs: expect.any(Number),
                     startCancellationSignal: expect.any(AbortSignal),
