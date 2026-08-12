@@ -13,6 +13,10 @@ const activeRemovalMigration = readFileSync(
     'supabase/migrations/20260812135104_remove_active_preflight_global_hourly_limit.sql',
     'utf8',
 );
+const activeReplayMigration = readFileSync(
+    'supabase/migrations/20260812135536_replay_active_preflight_before_rate_limit.sql',
+    'utf8',
+);
 
 describe('preflight global hourly limit migration', () => {
     it('raises only the shared ceiling and preserves the private helper permissions', () => {
@@ -40,5 +44,17 @@ describe('preflight global hourly limit migration', () => {
             'FROM PUBLIC, anon, authenticated, service_role',
         );
         expect(activeRemovalMigration).toContain('TO service_role');
+    });
+
+    it('replays an active same-target preflight before applying user limits', () => {
+        expect(activeReplayMigration).toContain(
+            "preflight.status IN (''pending'', ''processing'', ''ready'')",
+        );
+        expect(activeReplayMigration).toContain(
+            'preflight.target_instagram_id = v_target_instagram_id',
+        );
+        expect(activeReplayMigration).toContain(
+            'RETURN QUERY SELECT v_existing.id, FALSE',
+        );
     });
 });
