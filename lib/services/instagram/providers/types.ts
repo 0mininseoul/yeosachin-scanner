@@ -124,6 +124,10 @@ export interface ScrapeRequestOptions {
     fallback?: boolean;
     expectedResultCount?: number;
     requestId?: string;
+    /** Absolute deadline for ordinary (non-durable) provider I/O. */
+    invocationDeadlineAtMs?: number;
+    /** Cancellation fence for ordinary calls before provider work starts. */
+    startCancellationSignal?: AbortSignal;
     onTelemetry?: ScraperTelemetryHook;
     /** Internal UX heartbeat emitted only when work for an exact profile starts. */
     onProfileStart?(username: string): void | Promise<void>;
