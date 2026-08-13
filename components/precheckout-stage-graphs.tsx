@@ -667,42 +667,82 @@ const STAGES: readonly StageDef[] = [
 ];
 /** 2600 + 2700 + 2500 + 2600 + 1600 = 12000ms total, matching the approved prototype. */
 const REVEAL_MS = 1600;
-const TOTAL_MS = STAGES.reduce((sum, s) => sum + s.dur, 0) + REVEAL_MS;
+export const PRECHECKOUT_DEMO_STAGE_DURATIONS_MS = STAGES.map(stage => stage.dur);
+export const PRECHECKOUT_DEMO_DURATION_MS = PRECHECKOUT_DEMO_STAGE_DURATIONS_MS.reduce(
+    (sum, duration) => sum + duration,
+    REVEAL_MS,
+);
+const TOTAL_MS = PRECHECKOUT_DEMO_DURATION_MS;
 
 export interface PrecheckoutStageGraphsProps {
-    /** Called exactly once, when the 4-stage sequence reaches its reveal moment. */
-    onComplete: () => void;
+    /** Original demo start; every frame is derived from this absolute timeline. */
+    startedAtMs: number;
+    /** Mirrors the actual rendered stage, keeping accessible status text on the same clock. */
+    onStageChange?: (index: number) => void;
+    /** Reports renderer/asset/timer failures to the page-level fail-open owner. */
+    onError?: () => void;
 }
 
 /**
  * Renders the four-stage sequence into one viewport plus its player. All four SVG engines are
  * built once on mount so switching stages is a pure opacity/attribute toggle — no remount, no
- * layout thrash. `prefers-reduced-motion` skips every timer/rAF and jumps straight to the final
- * frame, calling `onComplete` synchronously.
+ * layout thrash. `prefers-reduced-motion` jumps the visual frame to the end while preserving the
+ * same completion deadline.
  */
-export function PrecheckoutStageGraphs({ onComplete }: PrecheckoutStageGraphsProps) {
+export function PrecheckoutStageGraphs({
+    startedAtMs,
+    onStageChange,
+    onError,
+}: PrecheckoutStageGraphsProps) {
     const viewportRef = useRef<HTMLDivElement>(null);
     const noRef = useRef<HTMLSpanElement>(null);
     const titleRef = useRef<HTMLSpanElement>(null);
     const subRef = useRef<HTMLParagraphElement>(null);
     const vtagRef = useRef<HTMLSpanElement>(null);
     const railRefs = useRef<Array<HTMLSpanElement | null>>([]);
-    const onCompleteRef = useRef(onComplete);
+    const onStageChangeRef = useRef(onStageChange);
+    const onErrorRef = useRef(onError);
+    const startedAtRef = useRef(startedAtMs);
 
     useEffect(() => {
-        onCompleteRef.current = onComplete;
-    }, [onComplete]);
+        onStageChangeRef.current = onStageChange;
+        onErrorRef.current = onError;
+    }, [onStageChange, onError]);
 
     useEffect(() => {
         const host = viewportRef.current;
         if (!host) return undefined;
 
-        const engines = STAGES.map(stage => stage.build(host));
-        const reduced = typeof window !== 'undefined' && typeof window.matchMedia === 'function'
-            && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+        if (!Number.isFinite(startedAtRef.current) || startedAtRef.current < 0) {
+            try {
+                onErrorRef.current?.();
+            } catch {
+                // The page-level error disposition must not become another renderer error.
+            }
+            return undefined;
+        }
+
+        const reportRendererError = () => {
+            try {
+                onErrorRef.current?.();
+            } catch {
+                // The page-level error disposition must not become another renderer error.
+            }
+        };
+
+        let engines: StageEngine[] = [];
+        let reduced = false;
+        try {
+            engines = STAGES.map(stage => stage.build(host));
+            reduced = typeof window !== 'undefined' && typeof window.matchMedia === 'function'
+                && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+        } catch {
+            engines.forEach(engine => engine.svg.remove());
+            reportRendererError();
+            return undefined;
+        }
 
         let activeIndex = -1;
-        let completedCalled = false;
 
         function applyStageMeta(index: number) {
             const stage = STAGES[index];
@@ -722,6 +762,7 @@ export function PrecheckoutStageGraphs({ onComplete }: PrecheckoutStageGraphsPro
             activeIndex = index;
             engines[index].svg.style.opacity = '1';
             applyStageMeta(index);
+            onStageChangeRef.current?.(index);
         }
 
         function paint(elapsed: number) {
@@ -745,47 +786,50 @@ export function PrecheckoutStageGraphs({ onComplete }: PrecheckoutStageGraphsPro
                 vtagRef.current.textContent = `${STAGES[active].tag} / ${String(Math.round(localClamped * 99)).padStart(2, '0')}`;
             }
 
-            const done = elapsed >= TOTAL_MS - REVEAL_MS;
-            if (done && !completedCalled) {
-                completedCalled = true;
-                onCompleteRef.current();
-            }
         }
 
         if (reduced) {
-            // Skip every timer/rAF; render the completed final state immediately.
-            const lastIndex = STAGES.length - 1;
-            setActive(lastIndex);
-            engines[lastIndex].draw(1);
-            const bar = railRefs.current[lastIndex];
-            if (bar) bar.style.width = '100%';
-            if (vtagRef.current) {
-                vtagRef.current.textContent = `${STAGES[lastIndex].tag} / 99`;
+            // Remove visual motion. PrecheckoutDemo owns the exact 12-second completion.
+            try {
+                const lastIndex = STAGES.length - 1;
+                setActive(lastIndex);
+                engines[lastIndex].draw(1);
+                const bar = railRefs.current[lastIndex];
+                if (bar) bar.style.width = '100%';
+                if (vtagRef.current) {
+                    vtagRef.current.textContent = `${STAGES[lastIndex].tag} / 99`;
+                }
+            } catch {
+                reportRendererError();
             }
-            completedCalled = true;
-            onCompleteRef.current();
-            return undefined;
+            return () => {
+                engines.forEach(engine => engine.svg.remove());
+            };
         }
 
         let rafId = 0;
-        let startTs: number | null = null;
-        function frame(ts: number) {
-            if (startTs === null) startTs = ts;
-            const elapsed = ts - startTs;
-            if (elapsed >= TOTAL_MS) {
-                paint(TOTAL_MS);
-                return;
+        function frame() {
+            try {
+                const elapsed = Math.max(0, Date.now() - startedAtRef.current);
+                paint(elapsed);
+                if (elapsed < TOTAL_MS) rafId = requestAnimationFrame(frame);
+            } catch {
+                reportRendererError();
             }
-            paint(elapsed);
-            rafId = requestAnimationFrame(frame);
         }
-        rafId = requestAnimationFrame(frame);
+        try {
+            rafId = requestAnimationFrame(frame);
+        } catch {
+            engines.forEach(engine => engine.svg.remove());
+            reportRendererError();
+            return undefined;
+        }
 
         return () => {
             if (rafId) cancelAnimationFrame(rafId);
+            engines.forEach(engine => engine.svg.remove());
         };
-        // Intentionally mount-once: onComplete is read through a ref so a new callback identity
-        // from the parent never restarts the 12s sequence.
+        // Intentionally mount-once: the original startedAtMs never changes on parent rerenders.
     }, []);
 
     return (

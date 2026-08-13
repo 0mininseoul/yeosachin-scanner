@@ -8,7 +8,7 @@ import {
     type PrecheckoutBliteV1,
 } from '@/lib/services/precheckout/blite-contract';
 import { CaseCard, Eyebrow, PrimaryButton } from '@/components/case-ui';
-import { PrecheckoutStageGraphs } from '@/components/precheckout-stage-graphs';
+import { PrecheckoutDemo } from '@/components/precheckout-demo';
 
 /* ============================================================
    Precheckout immersive preview
@@ -122,6 +122,7 @@ export interface PrecheckoutImmersiveProps {
     claimToken: string | null;
     onGoToPlans: () => void;
     onAvailabilityChange?: (available: boolean) => void;
+    onDemoError?: () => void;
 }
 
 export function PrecheckoutImmersive({
@@ -129,6 +130,7 @@ export function PrecheckoutImmersive({
     claimToken,
     onGoToPlans,
     onAvailabilityChange,
+    onDemoError,
 }: PrecheckoutImmersiveProps) {
     const [dto, setDto] = useState<PrecheckoutBliteV1 | null>(null);
     const [dismissed, setDismissed] = useState(false);
@@ -184,6 +186,7 @@ export function PrecheckoutImmersive({
         <DemoScreen
             sequenceComplete={sequenceComplete}
             onComplete={handleSequenceComplete}
+            onDemoError={onDemoError}
             onGoToPlans={() => {
                 setDismissed(true);
                 onGoToPlans();
@@ -316,14 +319,17 @@ function BliteResultScreen({
 function DemoScreen({
     sequenceComplete,
     onComplete,
+    onDemoError,
     onGoToPlans,
 }: {
     sequenceComplete: boolean;
     onComplete: () => void;
+    onDemoError?: () => void;
     onGoToPlans: () => void;
 }) {
     const [verdictIdx] = useState(() => Math.floor(Math.random() * VERDICTS.length));
     const [rotation, setRotation] = useState(0);
+    const [startedAtMs] = useState(() => Date.now());
 
     // Rotate the verdict copy every ~4.6s while it is on screen. Reduced motion shows one
     // sentence, chosen once, without cycling.
@@ -338,31 +344,6 @@ function DemoScreen({
         return () => clearInterval(id);
     }, [sequenceComplete]);
 
-    // Mobile-only fullscreen: escape into a fixed 100dvh layer and lock body scroll while it is
-    // mounted and the viewport is at/under the mobile breakpoint. Desktop stays inline — no lock.
-    useEffect(() => {
-        if (typeof window === 'undefined' || typeof window.matchMedia !== 'function') return undefined;
-        const mq = window.matchMedia('(max-width: 760px)');
-        let locked = false;
-        let prevOverflow = '';
-        function sync() {
-            if (mq.matches && !locked) {
-                prevOverflow = document.body.style.overflow;
-                document.body.style.overflow = 'hidden';
-                locked = true;
-            } else if (!mq.matches && locked) {
-                document.body.style.overflow = prevOverflow;
-                locked = false;
-            }
-        }
-        sync();
-        mq.addEventListener('change', sync);
-        return () => {
-            mq.removeEventListener('change', sync);
-            if (locked) document.body.style.overflow = prevOverflow;
-        };
-    }, []);
-
     const handleFinalCtaClick = () => {
         // Second layer of the CTA guard, independent of the CSS inertness below: even if the
         // reveal block were somehow hit-testable early, the handler itself refuses to act.
@@ -373,9 +354,12 @@ function DemoScreen({
     const verdict = VERDICTS[(verdictIdx + rotation) % VERDICTS.length];
 
     return (
-        <div className="precheckout-demo-fullscreen mt-7">
-            <PrecheckoutStageGraphs onComplete={onComplete} />
-
+        <PrecheckoutDemo
+            mode="success"
+            startedAtMs={startedAtMs}
+            onComplete={onComplete}
+            onError={onDemoError ?? (() => undefined)}
+        >
             {/* Not-yet-revealed block is genuinely inert (visibility+pointer-events, and
                 display:none inside the mobile fullscreen layer via CSS) — not just transparent. */}
             <div className={`precheckout-reveal mt-5${sequenceComplete ? ' is-visible' : ''}`}>
@@ -398,6 +382,6 @@ function DemoScreen({
                     분석 결과 확인하기
                 </PrimaryButton>
             </div>
-        </div>
+        </PrecheckoutDemo>
     );
 }

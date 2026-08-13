@@ -218,12 +218,10 @@ describe('PrecheckoutImmersive', () => {
         expect(container.textContent).toContain('분석 후보 예상 범위 3 – 9명');
     });
 
-    it('the final CTA is inert before the sequence completes and becomes active after', async () => {
-        let rafCallback: FrameRequestCallback | null = null;
-        vi.stubGlobal('requestAnimationFrame', (cb: FrameRequestCallback) => {
-            rafCallback = cb;
-            return 1;
-        });
+    it('the final CTA is inert until the exact 12-second sequence completes', async () => {
+        vi.useFakeTimers();
+        vi.setSystemTime(0);
+        vi.stubGlobal('requestAnimationFrame', vi.fn(() => 1));
         vi.stubGlobal('cancelAnimationFrame', vi.fn());
         // likelyFemale: false skips the confirmation branch so one click reaches the demo screen.
         vi.stubGlobal('fetch', vi.fn().mockResolvedValue(jsonResponse(validDto({ likelyFemale: false }))));
@@ -238,11 +236,13 @@ describe('PrecheckoutImmersive', () => {
         expect(ctaBefore.disabled).toBe(true);
         expect(ctaBefore.closest('.precheckout-reveal')?.classList.contains('is-visible')).toBe(false);
 
-        expect(rafCallback).not.toBeNull();
         await act(async () => {
-            // First frame starts the clock; second frame is far past the 12s total, completing it.
-            rafCallback?.(0);
-            rafCallback?.(20_000);
+            vi.advanceTimersByTime(11_999);
+        });
+        expect(button(container, '분석 결과 확인하기').disabled).toBe(true);
+
+        await act(async () => {
+            vi.advanceTimersByTime(1);
         });
 
         const ctaAfter = button(container, '분석 결과 확인하기');
@@ -251,11 +251,9 @@ describe('PrecheckoutImmersive', () => {
     });
 
     it('the CTA calls onGoToPlans and nothing else once active, and does nothing before that', async () => {
-        let rafCallback: FrameRequestCallback | null = null;
-        vi.stubGlobal('requestAnimationFrame', (cb: FrameRequestCallback) => {
-            rafCallback = cb;
-            return 1;
-        });
+        vi.useFakeTimers();
+        vi.setSystemTime(0);
+        vi.stubGlobal('requestAnimationFrame', vi.fn(() => 1));
         vi.stubGlobal('cancelAnimationFrame', vi.fn());
         vi.stubGlobal('fetch', vi.fn().mockResolvedValue(jsonResponse(validDto({ likelyFemale: false }))));
         const onGoToPlans = vi.fn();
@@ -272,8 +270,7 @@ describe('PrecheckoutImmersive', () => {
         expect(onGoToPlans).not.toHaveBeenCalled();
 
         await act(async () => {
-            rafCallback?.(0);
-            rafCallback?.(20_000);
+            vi.advanceTimersByTime(12_000);
         });
 
         await clickButton(container, '분석 결과 확인하기');
@@ -283,7 +280,9 @@ describe('PrecheckoutImmersive', () => {
         expect(document.body.style.overflow).toBe('');
     });
 
-    it('renders the completed state immediately under prefers-reduced-motion', async () => {
+    it('preserves the 12-second timing under prefers-reduced-motion', async () => {
+        vi.useFakeTimers();
+        vi.setSystemTime(0);
         stubMatchMedia(query => query.includes('reduce'));
         vi.stubGlobal('fetch', vi.fn().mockResolvedValue(jsonResponse(validDto({ likelyFemale: false }))));
 
@@ -294,6 +293,12 @@ describe('PrecheckoutImmersive', () => {
         await clickButton(container, '관계 판독 미리보기');
 
         const cta = button(container, '분석 결과 확인하기');
+        expect(cta.disabled).toBe(true);
+        expect(cta.closest('.precheckout-reveal')?.classList.contains('is-visible')).toBe(false);
+
+        await act(async () => {
+            vi.advanceTimersByTime(12_000);
+        });
         expect(cta.disabled).toBe(false);
         expect(cta.closest('.precheckout-reveal')?.classList.contains('is-visible')).toBe(true);
     });
