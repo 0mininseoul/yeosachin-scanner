@@ -20,6 +20,33 @@ const describePostgres = isSafePrecheckoutBlitePostgresTestTarget(databaseUrl, d
 const LEGACY_PREFLIGHT = '20000000-0000-4000-8000-000000000101';
 const ORIGIN_PREFLIGHT = '20000000-0000-4000-8000-000000000102';
 const LEGACY_FAILED_PREFLIGHT = '20000000-0000-4000-8000-000000000104';
+const ALL_EVIDENCE_PREFLIGHT = '20000000-0000-4000-8000-000000000105';
+const ALL_EVIDENCE_LEASE = '40000000-0000-4000-8000-000000000105';
+const ALL_EVIDENCE_HASH = 'a'.repeat(64);
+const ALL_EVIDENCE_DTO = JSON.stringify({
+    schemaVersion: 1,
+    persona: { headline: '분석 헤드라인', summary: '분석 요약 문장입니다' },
+    signals: [
+        { claim: '신호 하나', category: '관계', confidence: 0.8, band: 'high' },
+        { claim: '신호 둘', category: '관계', confidence: 0.6, band: 'medium' },
+        { claim: '신호 셋', category: '관계', confidence: 0.4, band: 'low' },
+        { claim: '신호 넷', category: '관계', confidence: 0.7, band: 'high' },
+    ],
+    candidateRange: { min: 1, max: 2 },
+    genderRead: {
+        likelyFemale: true,
+        confidence: 0.8,
+        reasons: ['이유 하나', '이유 둘', '이유 셋'],
+    },
+    postCount: 0,
+    evidenceFields: [
+        'post.caption', 'post.hashtags', 'post.type', 'post.mediaItems',
+        'post.declaredMediaCount', 'post.likesCount', 'post.commentsCount',
+        'post.likesCountHidden', 'post.commentsCountHidden', 'post.taggedUsers',
+        'post.mentionedUsers', 'post.imageUrl', 'post.thumbnailUrl',
+        'profile.fullName', 'profile.profilePicUrl',
+    ],
+});
 
 export function isSafePrecheckoutBlitePostgresTestTarget(
     connectionString: string | undefined,
@@ -236,5 +263,43 @@ describePostgres('precheckout B-lite PostgreSQL migration compatibility', () => 
             lease_token: '40000000-0000-4000-8000-000000000104',
             failure_reason: 'attempts_exhausted',
         }] });
+    });
+
+    it('accepts a v2 completion with all fifteen allowlisted evidence fields', async () => {
+        await pool.query(
+            `INSERT INTO public.analysis_preflights(
+                id,status,ready_at,expires_at,target_input_hash,precheckout_blite_cohort
+            ) VALUES ($1,'ready',clock_timestamp(),clock_timestamp() + interval '10 minutes',$2,true)`,
+            [ALL_EVIDENCE_PREFLIGHT, ALL_EVIDENCE_HASH],
+        );
+        await pool.query(
+            `INSERT INTO public.analysis_preflight_provider_runs(
+                preflight_id,operation_key,input_hash,logical_provider,status,run_id
+            ) VALUES ($1,'target-profile-fallback',$2,'apify','succeeded','ApifyRun123456')`,
+            [ALL_EVIDENCE_PREFLIGHT, ALL_EVIDENCE_HASH],
+        );
+        await pool.query(
+            `INSERT INTO public.precheckout_blite_sources(
+                preflight_id,schema_version,target_input_hash,provider_run_id,provider_operation_key,
+                provider_run_reference,payload,payload_bytes,payload_hash,collected_at,expires_at
+            ) VALUES (
+                $1,1,$2,$1,'target-profile-fallback','ApifyRun123456','{}'::jsonb,2,
+                repeat('b',64),clock_timestamp(),clock_timestamp() + interval '10 minutes'
+            )`,
+            [ALL_EVIDENCE_PREFLIGHT, ALL_EVIDENCE_HASH],
+        );
+        await pool.query(
+            `INSERT INTO public.precheckout_blite_cache(
+                preflight_id,state,lease_token,lease_expires_at,attempt_count,created_at,updated_at
+            ) VALUES ($1,'pending',$2,clock_timestamp() + interval '2 minutes',1,
+                clock_timestamp(),clock_timestamp())`,
+            [ALL_EVIDENCE_PREFLIGHT, ALL_EVIDENCE_LEASE],
+        );
+
+        await expect(asService<boolean>(
+            pool,
+            'SELECT public.complete_precheckout_blite_v2($1,$2,$3::jsonb) AS result',
+            [ALL_EVIDENCE_PREFLIGHT, ALL_EVIDENCE_LEASE, ALL_EVIDENCE_DTO],
+        )).resolves.toBe(true);
     });
 });

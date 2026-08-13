@@ -153,6 +153,19 @@ describe('projectPrecheckoutBliteSource', () => {
         expect(JSON.stringify(source)).not.toContain('plain-http');
     });
 
+    it('caps post-media references at three even when the profile image is absent or invalid', () => {
+        const source = projectPrecheckoutBliteSource(profile({
+            profilePicUrl: 'https://outside.example/profile.jpg',
+            latestPosts: [post(1), post(2), post(3), post(4)],
+        }));
+
+        expect(source.media).toEqual([
+            { role: 'post', url: imageUrl('post-1') },
+            { role: 'post', url: imageUrl('post-2') },
+            { role: 'post', url: imageUrl('post-3') },
+        ]);
+    });
+
     it('sorts validated provider posts newest-first before applying the ten-post and media limits', () => {
         const source = projectPrecheckoutBliteSource(profile({
             latestPosts: Array.from({ length: 11 }, (_, index) => post(index + 1, {

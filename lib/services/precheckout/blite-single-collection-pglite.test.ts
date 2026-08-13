@@ -62,6 +62,16 @@ const VALID_DTO = JSON.stringify({
     postCount: 0,
     evidenceFields: ['post.caption'],
 });
+const VALID_DTO_WITH_ALL_EVIDENCE_FIELDS = JSON.stringify({
+    ...JSON.parse(VALID_DTO),
+    evidenceFields: [
+        'post.caption', 'post.hashtags', 'post.type', 'post.mediaItems',
+        'post.declaredMediaCount', 'post.likesCount', 'post.commentsCount',
+        'post.likesCountHidden', 'post.commentsCountHidden', 'post.taggedUsers',
+        'post.mentionedUsers', 'post.imageUrl', 'post.thumbnailUrl',
+        'profile.fullName', 'profile.profilePicUrl',
+    ],
+});
 
 const bootstrap = `
 CREATE SCHEMA extensions;
@@ -467,6 +477,19 @@ describe('precheckout B-lite source and lease lifecycle', () => {
             `UPDATE public.precheckout_blite_cache SET dto='{"changed":true}'::jsonb WHERE preflight_id=$1`,
             [PREFLIGHT_B],
         )).rejects.toThrow('PRECHECKOUT_BLITE_TERMINAL_IMMUTABLE');
+    }, 30_000);
+
+    it('accepts a schema-valid terminal DTO with all fifteen allowlisted evidence fields', async () => {
+        const database = await createDb();
+        await seedProcessingPreflight(database, PREFLIGHT_A);
+        await finalizeSource(database, PREFLIGHT_A);
+        const owner = await claim(database, PREFLIGHT_A);
+        expect(owner.disposition).toBe('claimed');
+
+        await expect(database.query(
+            `SELECT public.complete_precheckout_blite_v2($1,$2,$3::jsonb) AS result`,
+            [PREFLIGHT_A, owner.leaseToken, VALID_DTO_WITH_ALL_EVIDENCE_FIELDS],
+        )).resolves.toMatchObject({ rows: [{ result: true }] });
     }, 30_000);
 
     it('returns one claimed owner and one pending waiter for concurrent PGlite claims', async () => {

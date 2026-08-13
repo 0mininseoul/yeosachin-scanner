@@ -189,6 +189,7 @@ function mediaReference(value: string | undefined): string | null {
 function projectMedia(profile: InstagramProfile, posts: readonly InstagramPost[]) {
     const media: Array<{ role: 'profile' | 'post'; url: string }> = [];
     const seen = new Set<string>();
+    let postMediaCount = 0;
     const profileUrl = mediaReference(profile.profilePicUrl);
     if (profileUrl) {
         media.push({ role: 'profile', url: profileUrl });
@@ -196,11 +197,12 @@ function projectMedia(profile: InstagramProfile, posts: readonly InstagramPost[]
     }
 
     for (const post of posts) {
-        if (media.length >= PRECHECKOUT_BLITE_SOURCE_MAX_MEDIA) break;
+        if (postMediaCount >= PRECHECKOUT_BLITE_SOURCE_MAX_MEDIA - 1) break;
         const postUrl = mediaReference(post.imageUrl) ?? mediaReference(post.thumbnailUrl);
         if (!postUrl || seen.has(postUrl)) continue;
         media.push({ role: 'post', url: postUrl });
         seen.add(postUrl);
+        postMediaCount += 1;
     }
 
     return media;

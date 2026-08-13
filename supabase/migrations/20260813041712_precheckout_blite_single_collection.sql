@@ -409,7 +409,7 @@ BEGIN
     IF public.precheckout_blite_v1_integer_in_range(p_dto->'postCount', 0, 100)
         IS DISTINCT FROM TRUE
        OR pg_catalog.jsonb_typeof(p_dto->'evidenceFields') IS DISTINCT FROM 'array'
-       OR pg_catalog.jsonb_array_length(p_dto->'evidenceFields') NOT BETWEEN 1 AND 14 THEN
+       OR pg_catalog.jsonb_array_length(p_dto->'evidenceFields') NOT BETWEEN 1 AND 15 THEN
         RETURN FALSE;
     END IF;
     FOR v_field IN
