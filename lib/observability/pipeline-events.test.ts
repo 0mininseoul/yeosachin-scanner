@@ -15,6 +15,9 @@ const PIPELINE_EVENTS = [
     'gemini.stage_completed',
     'gemini.stage_rate_limited',
     'gemini.stage_failed',
+    'precheckout_blite.completed',
+    'precheckout_blite.profile_collection_failed',
+    'precheckout_blite.inference_failed',
 ] as const;
 
 describe('pipeline operational event contract', () => {

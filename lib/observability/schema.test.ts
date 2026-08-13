@@ -25,6 +25,48 @@ afterEach(() => {
 });
 
 describe('sanitizeOperationalEvent', () => {
+    it.each([
+        ['precheckout_blite.completed', 'apify', 'success', undefined],
+        ['precheckout_blite.profile_collection_failed', 'apify', 'failure', 'PROVIDER_ERROR'],
+        ['precheckout_blite.inference_failed', 'gemini', 'response_rejected', 'VALIDATION_ERROR'],
+    ] as const)('keeps the bounded PII-free B-lite contract for %s', (
+        event,
+        provider,
+        disposition,
+        errorCode,
+    ) => {
+        const sanitized = sanitizeOperationalEvent({
+            event,
+            severity: errorCode ? 'error' : 'info',
+            fields: {
+                preflight_id: UUIDS.preflight,
+                provider,
+                operation: 'precheckout_blite',
+                duration_ms: 125.75,
+                disposition,
+                error_code: errorCode,
+                username: 'private_username',
+                image_url: 'https://private.example/image.jpg',
+                bio: 'private bio',
+                caption: 'private caption',
+                prompt: 'private prompt',
+                model_output: 'private model output',
+            },
+        });
+
+        expect(sanitized.message).toBe(event);
+        expect(sanitized.fields).toMatchObject({
+            event,
+            preflight_id: UUIDS.preflight,
+            provider,
+            operation: 'precheckout_blite',
+            duration_ms: 125.75,
+            disposition,
+            ...(errorCode ? { error_code: errorCode } : {}),
+        });
+        expect(JSON.stringify(sanitized)).not.toContain('private');
+    });
+
     it('derives the envelope and preserves every allowed field with a safe value', () => {
         process.env.VERCEL_ENV = 'preview';
 

@@ -10,6 +10,12 @@ const mocks = vi.hoisted(() => ({
     claimBliteGeneration: vi.fn(),
     completeBliteGeneration: vi.fn(),
     releaseBliteGeneration: vi.fn(),
+    createScraperTelemetryHook: vi.fn(),
+    scraperTelemetryHook: vi.fn(),
+    createBliteObservability: vi.fn(),
+    bliteCompleted: vi.fn(),
+    bliteProfileCollectionFailed: vi.fn(),
+    bliteInferenceFailed: vi.fn(),
 }));
 
 vi.mock('@/lib/supabase/server', () => ({ createClient: mocks.createClient }));
@@ -22,8 +28,14 @@ vi.mock('@/lib/services/analysis/anonymous-preflight', () => ({
 vi.mock('@/lib/services/instagram/scraper', () => ({
     getInstagramProfile: mocks.getInstagramProfile,
 }));
+vi.mock('@/lib/services/instagram/supabase-telemetry', () => ({
+    createSupabaseScraperTelemetryHook: mocks.createScraperTelemetryHook,
+}));
 vi.mock('@/lib/services/precheckout/blite-inference', () => ({
     inferPrecheckoutBlite: mocks.inferPrecheckoutBlite,
+}));
+vi.mock('@/lib/services/precheckout/blite-observability', () => ({
+    createPrecheckoutBliteObservability: mocks.createBliteObservability,
 }));
 vi.mock('@/lib/services/precheckout/blite-store', () => ({
     precheckoutBliteStore: {
@@ -144,6 +156,13 @@ describe('POST /api/analysis/precheckout-blite', () => {
         mocks.claimBliteGeneration.mockResolvedValue({ disposition: 'claimed', leaseToken: 'cccccccc-cccc-4ccc-8ccc-cccccccccccc' });
         mocks.completeBliteGeneration.mockResolvedValue(undefined);
         mocks.releaseBliteGeneration.mockResolvedValue(undefined);
+        mocks.createScraperTelemetryHook.mockReturnValue(mocks.scraperTelemetryHook);
+        mocks.createBliteObservability.mockReturnValue({
+            completed: mocks.bliteCompleted,
+            profileCollectionFailed: mocks.bliteProfileCollectionFailed,
+            inferenceFailed: mocks.bliteInferenceFailed,
+            inferenceAttempt: vi.fn(),
+        });
     });
 
     it('responds 204 with no body when the flag is off', async () => {
@@ -203,6 +222,8 @@ describe('POST /api/analysis/precheckout-blite', () => {
         const response = await POST(request());
         expect(response.status).toBe(204);
         expect(mocks.inferPrecheckoutBlite).not.toHaveBeenCalled();
+        expect(mocks.bliteProfileCollectionFailed).not.toHaveBeenCalled();
+        expect(mocks.bliteInferenceFailed).not.toHaveBeenCalled();
     });
 
     it('classifies a thrown profile collection failure without exposing its message', async () => {
@@ -216,6 +237,8 @@ describe('POST /api/analysis/precheckout-blite', () => {
             reason: 'profile_collection_failed_provider',
         });
         expect(JSON.stringify(warn.mock.calls)).not.toContain('secret provider detail');
+        expect(mocks.bliteProfileCollectionFailed).toHaveBeenCalledWith('provider');
+        expect(mocks.bliteInferenceFailed).not.toHaveBeenCalled();
         warn.mockRestore();
     });
 
@@ -230,6 +253,8 @@ describe('POST /api/analysis/precheckout-blite', () => {
             reason: 'inference_failed',
         });
         expect(JSON.stringify(warn.mock.calls)).not.toContain('secret model detail');
+        expect(mocks.bliteInferenceFailed).toHaveBeenCalledTimes(1);
+        expect(mocks.bliteCompleted).not.toHaveBeenCalled();
         warn.mockRestore();
     });
 
@@ -238,6 +263,8 @@ describe('POST /api/analysis/precheckout-blite', () => {
         const response = await POST(request());
         expect(response.status).toBe(204);
         expect(mocks.inferPrecheckoutBlite).not.toHaveBeenCalled();
+        expect(mocks.bliteProfileCollectionFailed).not.toHaveBeenCalled();
+        expect(mocks.bliteInferenceFailed).not.toHaveBeenCalled();
     });
 
     it('responds 204 when the profile has no posts', async () => {
@@ -245,12 +272,16 @@ describe('POST /api/analysis/precheckout-blite', () => {
         const response = await POST(request());
         expect(response.status).toBe(204);
         expect(mocks.inferPrecheckoutBlite).not.toHaveBeenCalled();
+        expect(mocks.bliteProfileCollectionFailed).not.toHaveBeenCalled();
+        expect(mocks.bliteInferenceFailed).not.toHaveBeenCalled();
     });
 
     it('responds 204 when inference returns null', async () => {
         mocks.inferPrecheckoutBlite.mockResolvedValue(null);
         const response = await POST(request());
         expect(response.status).toBe(204);
+        expect(mocks.bliteInferenceFailed).toHaveBeenCalledTimes(1);
+        expect(mocks.bliteCompleted).not.toHaveBeenCalled();
     });
 
     it('responds 204 (never 5xx) when an unexpected error is thrown', async () => {
@@ -281,6 +312,7 @@ describe('POST /api/analysis/precheckout-blite', () => {
         expect(response.status).toBe(200);
         expect(await response.json()).toEqual(validDto());
         expect(mocks.getInstagramProfile).not.toHaveBeenCalled();
+        expect(mocks.createBliteObservability).not.toHaveBeenCalled();
     });
 
     it('fails open while another serverless instance owns the durable lease', async () => {
@@ -288,6 +320,7 @@ describe('POST /api/analysis/precheckout-blite', () => {
         const response = await POST(request());
         expect(response.status).toBe(204);
         expect(mocks.getInstagramProfile).not.toHaveBeenCalled();
+        expect(mocks.createBliteObservability).not.toHaveBeenCalled();
     });
 
     it('persists the generated DTO under the durable lease', async () => {
@@ -298,6 +331,27 @@ describe('POST /api/analysis/precheckout-blite', () => {
             leaseToken: 'cccccccc-cccc-4ccc-8ccc-cccccccccccc',
             dto: validDto(),
         });
+        expect(mocks.bliteCompleted).toHaveBeenCalledTimes(1);
+        expect(mocks.completeBliteGeneration.mock.invocationCallOrder[0]).toBeLessThan(
+            mocks.bliteCompleted.mock.invocationCallOrder[0],
+        );
+    });
+
+    it('passes the lease-scoped Gemini attempt sink into inference', async () => {
+        const inferenceAttempt = vi.fn();
+        mocks.createBliteObservability.mockReturnValue({
+            completed: mocks.bliteCompleted,
+            profileCollectionFailed: mocks.bliteProfileCollectionFailed,
+            inferenceFailed: mocks.bliteInferenceFailed,
+            inferenceAttempt,
+        });
+
+        await POST(request());
+
+        expect(mocks.inferPrecheckoutBlite).toHaveBeenCalledWith(
+            expect.anything(),
+            expect.objectContaining({ onAttemptTelemetry: inferenceAttempt }),
+        );
     });
 
     it('passes the ready-snapshot username to the scraper, not an arbitrary value', async () => {
@@ -312,6 +366,7 @@ describe('POST /api/analysis/precheckout-blite', () => {
                 fallback: false,
                 invocationDeadlineAtMs: expect.any(Number),
                 startCancellationSignal: expect.any(AbortSignal),
+                onTelemetry: mocks.scraperTelemetryHook,
             })
         );
     });

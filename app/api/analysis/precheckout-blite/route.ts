@@ -9,7 +9,13 @@ import {
 } from '@/lib/services/analysis/preflight';
 import { readAnonymousAnalysisV2Preflight } from '@/lib/services/analysis/anonymous-preflight';
 import { getInstagramProfile } from '@/lib/services/instagram/scraper';
+import { createSupabaseScraperTelemetryHook } from '@/lib/services/instagram/supabase-telemetry';
 import { inferPrecheckoutBlite } from '@/lib/services/precheckout/blite-inference';
+import {
+    createPrecheckoutBliteObservability,
+    type PrecheckoutBliteObservability,
+    type PrecheckoutBliteProfileFailureCategory,
+} from '@/lib/services/precheckout/blite-observability';
 import { precheckoutBliteStore } from '@/lib/services/precheckout/blite-store';
 import {
     precheckoutBliteV1Schema,
@@ -37,7 +43,7 @@ interface PrecheckoutBliteCacheEntry {
     expiresAt: number;
 }
 
-function profileCollectionFailureCode(error: unknown): string {
+function profileCollectionFailureCode(error: unknown): PrecheckoutBliteProfileFailureCategory {
     const message = error instanceof Error ? error.message : '';
     if (message.startsWith('SCRAPING_CONFIG_ERROR:')) return 'configuration';
     if (message.startsWith('SCRAPING_BUDGET_ERROR:')) return 'budget';
@@ -93,13 +99,18 @@ export function __resetPrecheckoutBliteCacheForTest(): void {
     inFlight.clear();
 }
 
-async function generateDto(preflightId: string, targetUsername: string): Promise<PrecheckoutBliteV1 | null> {
+async function generateDto(
+    preflightId: string,
+    targetUsername: string,
+    observability: PrecheckoutBliteObservability,
+): Promise<PrecheckoutBliteV1 | null> {
     const controller = new AbortController();
     const deadlineAtMs = Date.now() + PRECHECKOUT_BLITE_OPERATION_TIMEOUT_MS;
     const timeout = setTimeout(() => controller.abort(), PRECHECKOUT_BLITE_OPERATION_TIMEOUT_MS);
     try {
         let profile;
         try {
+            const scraperTelemetry = createSupabaseScraperTelemetryHook();
             profile = await getInstagramProfile(targetUsername, {
                 requestId: preflightId,
                 // B-lite needs recent feed media and its bounded cost model is tied to the
@@ -108,10 +119,13 @@ async function generateDto(preflightId: string, targetUsername: string): Promise
                 fallback: false,
                 invocationDeadlineAtMs: deadlineAtMs,
                 startCancellationSignal: controller.signal,
+                onTelemetry: scraperTelemetry,
             });
         } catch (error) {
+            const category = profileCollectionFailureCode(error);
+            observability.profileCollectionFailed(category);
             throw new Error(
-                `PRECHECKOUT_BLITE_PROFILE_COLLECTION_FAILED:${profileCollectionFailureCode(error)}`
+                `PRECHECKOUT_BLITE_PROFILE_COLLECTION_FAILED:${category}`
             );
         }
         if (!profile || profile.isPrivate || !profile.latestPosts?.length) return null;
@@ -120,11 +134,16 @@ async function generateDto(preflightId: string, targetUsername: string): Promise
             dto = await inferPrecheckoutBlite(profile, {
                 requestId: preflightId,
                 abortSignal: controller.signal,
+                onAttemptTelemetry: observability.inferenceAttempt,
             });
         } catch {
+            observability.inferenceFailed();
             throw new Error('PRECHECKOUT_BLITE_INFERENCE_FAILED');
         }
-        if (!dto) return null;
+        if (!dto) {
+            observability.inferenceFailed();
+            return null;
+        }
         const revalidated = precheckoutBliteV1Schema.safeParse(dto);
         return revalidated.success ? revalidated.data : null;
     } finally {
@@ -132,10 +151,14 @@ async function generateDto(preflightId: string, targetUsername: string): Promise
     }
 }
 
-function sharedGeneration(preflightId: string, targetUsername: string): Promise<PrecheckoutBliteV1 | null> {
+function sharedGeneration(
+    preflightId: string,
+    targetUsername: string,
+    observability: PrecheckoutBliteObservability,
+): Promise<PrecheckoutBliteV1 | null> {
     const existing = inFlight.get(preflightId);
     if (existing) return existing;
-    const pending = generateDto(preflightId, targetUsername).finally(() => {
+    const pending = generateDto(preflightId, targetUsername, observability).finally(() => {
         if (inFlight.get(preflightId) === pending) inFlight.delete(preflightId);
     });
     inFlight.set(preflightId, pending);
@@ -220,8 +243,16 @@ async function handlePOST(request: Request): Promise<NextResponse> {
         if (durable.disposition === 'pending') return unavailable('generation_pending');
 
         stage = 'generation';
+        const observability = createPrecheckoutBliteObservability({
+            preflightId,
+            startedAtMs: Date.now(),
+        });
         try {
-            const dto = await sharedGeneration(preflightId, stored.readySnapshot.target.username);
+            const dto = await sharedGeneration(
+                preflightId,
+                stored.readySnapshot.target.username,
+                observability,
+            );
             if (!dto) {
                 await precheckoutBliteStore.release({
                     preflightId,
@@ -234,6 +265,7 @@ async function handlePOST(request: Request): Promise<NextResponse> {
                 leaseToken: durable.leaseToken,
                 dto,
             });
+            observability.completed();
             writeCachedDto(preflightId, dto);
             return NextResponse.json(dto);
         } catch (error) {
