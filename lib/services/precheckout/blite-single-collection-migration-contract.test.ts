@@ -116,6 +116,8 @@ describe('precheckout B-lite single-collection migration', () => {
         expect(finalize).toContain('public.complete_analysis_v2_preflight(');
         expect(finalize).toContain('public.complete_anonymous_analysis_v2_preflight(');
         expect(finalize).toContain('INSERT INTO public.precheckout_blite_sources');
+        expect(finalize).toContain("extensions.digest(pg_catalog.convert_to(p_payload::TEXT, 'UTF8'), 'sha256')");
+        expect(finalize).toContain('v_source.payload_hash = v_payload_hash');
         expect(migration).toContain('complete_analysis_v2_preflight_with_blite_source_v1');
         expect(migration).toContain('complete_anonymous_analysis_v2_preflight_with_blite_source_v1');
         expect(migration).toMatch(/DELETE FROM public\.precheckout_blite_sources[\s\S]*DELETE FROM public\.precheckout_blite_cache/);
@@ -128,11 +130,19 @@ describe('precheckout B-lite single-collection migration', () => {
         const finalizer = functionDefinition(migration, 'finalize_preflight_blite_source_v1');
         const claim = functionDefinition(migration, 'claim_precheckout_blite_v2');
 
+        const complete = functionDefinition(migration, 'complete_precheckout_blite_v2');
+        const fail = functionDefinition(migration, 'fail_precheckout_blite_v2');
         for (const definition of [finalizer, claim]) {
             const sourceLock = definition.indexOf('FROM public.precheckout_blite_sources AS source');
             const refreshedClock = definition.indexOf('v_now := pg_catalog.clock_timestamp();', sourceLock);
             expect(sourceLock).toBeGreaterThanOrEqual(0);
             expect(refreshedClock).toBeGreaterThan(sourceLock);
+        }
+        for (const definition of [complete, fail]) {
+            const cacheLock = definition.indexOf('FROM public.precheckout_blite_cache AS cache');
+            const refreshedClock = definition.indexOf('v_now := pg_catalog.clock_timestamp();', cacheLock);
+            expect(cacheLock).toBeGreaterThanOrEqual(0);
+            expect(refreshedClock).toBeGreaterThan(cacheLock);
         }
     });
 

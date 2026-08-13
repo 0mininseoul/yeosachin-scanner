@@ -220,6 +220,7 @@ DECLARE
     v_provider_run public.analysis_preflight_provider_runs%ROWTYPE;
     v_source public.precheckout_blite_sources%ROWTYPE;
     v_payload_bytes INTEGER;
+    v_payload_hash VARCHAR(64);
     v_completed BOOLEAN;
 BEGIN
     IF p_preflight_id IS NULL
@@ -273,6 +274,10 @@ BEGIN
         RAISE EXCEPTION USING
             MESSAGE = 'PRECHECKOUT_BLITE_SOURCE_TOO_LARGE', ERRCODE = 'P0001';
     END IF;
+    v_payload_hash := pg_catalog.encode(
+        extensions.digest(pg_catalog.convert_to(p_payload::TEXT, 'UTF8'), 'sha256'),
+        'hex'
+    );
 
     SELECT provider_run.* INTO v_provider_run
     FROM public.analysis_preflight_provider_runs AS provider_run
@@ -297,7 +302,7 @@ BEGIN
            AND v_source.target_input_hash = p_target_input_hash
            AND v_source.provider_run_id = p_provider_run_id
            AND v_source.provider_run_reference = p_provider_run_reference
-           AND v_source.payload_hash = p_payload_hash
+           AND v_source.payload_hash = v_payload_hash
            AND v_source.collected_at = p_collected_at
            AND v_source.expires_at = p_expires_at
            AND v_preflight.status = 'ready' THEN
@@ -343,7 +348,7 @@ BEGIN
         collected_at, expires_at, created_at, updated_at
     ) VALUES (
         v_preflight.id, 1, p_target_input_hash, p_provider_run_id,
-        p_provider_run_reference, p_payload, v_payload_bytes, p_payload_hash,
+        p_provider_run_reference, p_payload, v_payload_bytes, v_payload_hash,
         p_collected_at, p_expires_at, v_now, v_now
     );
 
@@ -551,11 +556,24 @@ SET search_path = ''
 AS $$
 DECLARE
     v_now TIMESTAMP WITH TIME ZONE := pg_catalog.clock_timestamp();
+    v_cache public.precheckout_blite_cache%ROWTYPE;
 BEGIN
     IF p_preflight_id IS NULL
        OR p_lease_token IS NULL
        OR p_dto IS NULL
        OR pg_catalog.jsonb_typeof(p_dto) <> 'object' THEN
+        RETURN FALSE;
+    END IF;
+
+    SELECT cache.* INTO v_cache
+    FROM public.precheckout_blite_cache AS cache
+    WHERE cache.preflight_id = p_preflight_id
+    FOR UPDATE;
+    v_now := pg_catalog.clock_timestamp();
+    IF NOT FOUND
+       OR v_cache.state <> 'pending'
+       OR v_cache.lease_token IS DISTINCT FROM p_lease_token
+       OR v_cache.lease_expires_at <= v_now THEN
         RETURN FALSE;
     END IF;
 
@@ -586,10 +604,23 @@ SET search_path = ''
 AS $$
 DECLARE
     v_now TIMESTAMP WITH TIME ZONE := pg_catalog.clock_timestamp();
+    v_cache public.precheckout_blite_cache%ROWTYPE;
 BEGIN
     IF p_preflight_id IS NULL
        OR p_lease_token IS NULL
        OR p_reason NOT IN ('source_missing', 'source_expired', 'source_invalid', 'source_insufficient', 'attempts_exhausted', 'deadline_exceeded', 'model_unavailable', 'model_invalid') THEN
+        RETURN FALSE;
+    END IF;
+
+    SELECT cache.* INTO v_cache
+    FROM public.precheckout_blite_cache AS cache
+    WHERE cache.preflight_id = p_preflight_id
+    FOR UPDATE;
+    v_now := pg_catalog.clock_timestamp();
+    IF NOT FOUND
+       OR v_cache.state <> 'pending'
+       OR v_cache.lease_token IS DISTINCT FROM p_lease_token
+       OR v_cache.lease_expires_at <= v_now THEN
         RETURN FALSE;
     END IF;
 
