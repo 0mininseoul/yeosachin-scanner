@@ -3,7 +3,11 @@
 import { StrictMode, act, createElement } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { PRECHECKOUT_DEMO_DURATION_MS, PrecheckoutDemo } from './precheckout-demo';
+import {
+    PRECHECKOUT_DEMO_DURATION_MS,
+    PRECHECKOUT_DEMO_STAGE_DURATIONS_MS,
+    PrecheckoutDemo,
+} from './precheckout-demo';
 
 (globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT: boolean })
     .IS_REACT_ACT_ENVIRONMENT = true;
@@ -61,6 +65,9 @@ describe('PrecheckoutDemo', () => {
     it('renders four ordered stages with an announced current stage and no skip control', async () => {
         const onComplete = vi.fn();
         const onError = vi.fn();
+
+        expect(PRECHECKOUT_DEMO_STAGE_DURATIONS_MS).toEqual([2_600, 2_700, 2_500, 2_600]);
+        expect(PRECHECKOUT_DEMO_DURATION_MS).toBe(12_000);
 
         await act(async () => {
             root.render(createElement(PrecheckoutDemo, {
@@ -253,7 +260,7 @@ describe('PrecheckoutDemo', () => {
         expect(onComplete).toHaveBeenCalledTimes(1);
     });
 
-    it('reports an animation-frame runtime failure through onError', async () => {
+    it.each(['success', 'fallback'] as const)('reports an animation-frame runtime failure through onError in %s mode', async mode => {
         const onError = vi.fn();
         vi.stubGlobal('requestAnimationFrame', vi.fn(() => {
             throw new Error('animation runtime unavailable');
@@ -261,7 +268,7 @@ describe('PrecheckoutDemo', () => {
 
         await act(async () => {
             root.render(createElement(PrecheckoutDemo, {
-                mode: 'fallback',
+                mode,
                 startedAtMs: 0,
                 onComplete: vi.fn(),
                 onError,
