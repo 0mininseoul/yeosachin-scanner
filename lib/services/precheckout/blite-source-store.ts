@@ -13,6 +13,9 @@ const uuid = z.string().uuid();
 const hash = z.string().regex(/^[0-9a-f]{64}$/);
 const timestamp = z.string().datetime({ offset: true });
 const providerReference = z.string().regex(/^[A-Za-z0-9]{8,64}$/);
+const providerOperationKey = z.string().regex(
+    /^(?:target-profile-fallback|target-profile-fresh-admission:g(?:[1-9]|[1-9][0-9]|100))$/,
+);
 const boundedNullableText = z.string().max(8_192).nullable();
 const boundedNullableCount = z.number().int().nonnegative().max(10_000_000).nullable();
 
@@ -34,6 +37,7 @@ const finalizeInputSchema = z.object({
     claimToken: uuid,
     targetInputHash: hash,
     providerRunId: uuid,
+    providerOperationKey,
     providerRunReference: providerReference,
     targetFullName: boundedNullableText,
     targetBio: boundedNullableText,
@@ -73,6 +77,7 @@ export function createPrecheckoutBliteSourceStore(client: RpcClient = supabaseAd
                 p_claim_token: parsed.data.claimToken,
                 p_target_input_hash: parsed.data.targetInputHash,
                 p_provider_run_id: parsed.data.providerRunId,
+                p_provider_operation_key: parsed.data.providerOperationKey,
                 p_provider_run_reference: parsed.data.providerRunReference,
                 p_target_full_name: parsed.data.targetFullName,
                 p_target_bio: parsed.data.targetBio,

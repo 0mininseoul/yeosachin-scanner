@@ -30,6 +30,7 @@ describe('precheckout B-lite single-collection migration', () => {
             'schema_version SMALLINT NOT NULL',
             'target_input_hash VARCHAR(64) NOT NULL',
             'provider_run_id UUID',
+            'provider_operation_key TEXT NOT NULL',
             'provider_run_reference TEXT',
             'payload JSONB NOT NULL',
             'payload_bytes INTEGER NOT NULL',
@@ -37,6 +38,12 @@ describe('precheckout B-lite single-collection migration', () => {
             'collected_at TIMESTAMP WITH TIME ZONE NOT NULL',
             'expires_at TIMESTAMP WITH TIME ZONE NOT NULL',
         ]) expect(migration).toContain(column);
+        expect(migration).toContain(
+            'FOREIGN KEY (provider_run_id, provider_operation_key)',
+        );
+        expect(migration).toContain(
+            'REFERENCES public.analysis_preflight_provider_runs(preflight_id, operation_key)',
+        );
         expect(migration).toMatch(/payload_bytes <= 262144/);
         expect(migration).toMatch(/payload_hash ~ '\^\[0-9a-f\]\{64\}\$'/);
         expect(migration).toContain("pg_catalog.jsonb_typeof(p_payload) <> 'object'");
@@ -60,7 +67,7 @@ describe('precheckout B-lite single-collection migration', () => {
         expect(migration).toContain("v_preflight.deadline_at > v_now");
         expect(migration).toContain("v_preflight.deadline_at - INTERVAL '4 seconds' > v_now");
         expect(migration).toContain("v_source.expires_at > v_now");
-        expect(migration).toContain("failure_reason IN ('source_missing', 'source_expired', 'source_invalid', 'source_insufficient', 'attempts_exhausted', 'deadline_exceeded', 'model_unavailable', 'model_invalid')");
+        expect(migration).toContain("failure_reason IN ('source_missing', 'source_expired', 'source_invalid', 'source_insufficient', 'dispatch_failed', 'inference_timeout', 'inference_rate_limited', 'inference_provider_failed', 'inference_response_invalid', 'persistence_failed', 'attempts_exhausted')");
     });
 
     it('anchors every cohort deadline to immutable preflight creation rather than worker wall time', () => {
@@ -113,6 +120,8 @@ describe('precheckout B-lite single-collection migration', () => {
         expect(finalize).toContain('p_claim_token');
         expect(finalize).toContain('p_target_input_hash');
         expect(finalize).toContain('p_provider_run_id');
+        expect(finalize).toContain('p_provider_operation_key');
+        expect(finalize).toContain('provider_run.operation_key = p_provider_operation_key');
         expect(finalize).toContain('public.complete_analysis_v2_preflight(');
         expect(finalize).toContain('public.complete_anonymous_analysis_v2_preflight(');
         expect(finalize).toContain('INSERT INTO public.precheckout_blite_sources');
@@ -123,6 +132,21 @@ describe('precheckout B-lite single-collection migration', () => {
         expect(migration).toMatch(/DELETE FROM public\.precheckout_blite_sources[\s\S]*DELETE FROM public\.precheckout_blite_cache/);
         expect(migration).toContain('AFTER UPDATE OF pii_scrubbed_at ON public.analysis_preflights');
         expect(migration).not.toContain('PRECHECKOUT_BLITE_ENABLED');
+    });
+
+    it('requires the database to validate every complete DTO, full provider lineage, and safe cleanup lock order', () => {
+        const migration = readSingleCollectionMigration();
+        const complete = functionDefinition(migration, 'complete_precheckout_blite_v2');
+        const purge = functionDefinition(migration, 'purge_expired_precheckout_blite_sources_v1');
+        const piiCleanup = functionDefinition(migration, 'delete_precheckout_blite_cache_on_pii_scrub_v1');
+
+        expect(complete).toContain('public.precheckout_blite_v1_dto_is_valid(p_dto)');
+        expect(complete).toContain("v_preflight.deadline_at - INTERVAL '4 seconds' > v_now");
+        expect(complete).toContain("failure_reason = 'inference_timeout'");
+        expect(purge.indexOf('FROM public.precheckout_blite_cache AS cache'))
+            .toBeLessThan(purge.indexOf('FROM public.precheckout_blite_sources AS source'));
+        expect(piiCleanup.indexOf('FROM public.precheckout_blite_cache AS cache'))
+            .toBeLessThan(piiCleanup.indexOf('FROM public.precheckout_blite_sources AS source'));
     });
 
     it('re-evaluates wall time after preflight, cache, and source lock waits', () => {

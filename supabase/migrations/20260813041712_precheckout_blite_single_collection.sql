@@ -73,8 +73,8 @@ CREATE TABLE public.precheckout_blite_sources (
     preflight_id UUID PRIMARY KEY REFERENCES public.analysis_preflights(id) ON DELETE CASCADE,
     schema_version SMALLINT NOT NULL,
     target_input_hash VARCHAR(64) NOT NULL,
-    provider_run_id UUID NOT NULL
-        REFERENCES public.analysis_preflight_provider_runs(preflight_id) ON DELETE CASCADE,
+    provider_run_id UUID NOT NULL,
+    provider_operation_key TEXT NOT NULL,
     provider_run_reference TEXT NOT NULL,
     payload JSONB NOT NULL,
     payload_bytes INTEGER NOT NULL,
@@ -86,6 +86,16 @@ CREATE TABLE public.precheckout_blite_sources (
     CONSTRAINT precheckout_blite_sources_schema_check CHECK (schema_version = 1),
     CONSTRAINT precheckout_blite_sources_target_hash_check CHECK (
         target_input_hash ~ '^[0-9a-f]{64}$'
+    ),
+    CONSTRAINT precheckout_blite_sources_provider_lineage_fkey FOREIGN KEY (provider_run_id, provider_operation_key)
+        REFERENCES public.analysis_preflight_provider_runs(preflight_id, operation_key)
+        ON DELETE CASCADE,
+    CONSTRAINT precheckout_blite_sources_provider_preflight_check CHECK (
+        provider_run_id = preflight_id
+    ),
+    CONSTRAINT precheckout_blite_sources_provider_operation_check CHECK (
+        provider_operation_key = 'target-profile-fallback'
+        OR provider_operation_key ~ '^target-profile-fresh-admission:g([1-9]|[1-9][0-9]|100)$'
     ),
     CONSTRAINT precheckout_blite_sources_provider_reference_check CHECK (
         provider_run_reference ~ '^[A-Za-z0-9]{8,64}$'
@@ -143,7 +153,7 @@ ALTER TABLE public.precheckout_blite_cache
     ADD CONSTRAINT precheckout_blite_cache_failure_reason_check CHECK (
         failure_reason IS NULL OR (
             pg_catalog.char_length(failure_reason) <= 64
-            AND failure_reason IN ('source_missing', 'source_expired', 'source_invalid', 'source_insufficient', 'attempts_exhausted', 'deadline_exceeded', 'model_unavailable', 'model_invalid')
+            AND failure_reason IN ('source_missing', 'source_expired', 'source_invalid', 'source_insufficient', 'dispatch_failed', 'inference_timeout', 'inference_rate_limited', 'inference_provider_failed', 'inference_response_invalid', 'persistence_failed', 'attempts_exhausted')
         )
     ),
     ADD CONSTRAINT precheckout_blite_cache_attempt_check CHECK (
@@ -185,6 +195,250 @@ EXECUTE FUNCTION public.enforce_precheckout_blite_terminal_immutability_v1();
 REVOKE ALL ON FUNCTION public.enforce_precheckout_blite_terminal_immutability_v1()
     FROM PUBLIC, anon, authenticated, service_role;
 
+CREATE OR REPLACE FUNCTION public.precheckout_blite_v1_has_exact_keys(
+    p_value JSONB,
+    p_expected_keys TEXT[]
+)
+RETURNS BOOLEAN
+LANGUAGE sql
+IMMUTABLE
+SET search_path = ''
+AS $$
+    SELECT COALESCE(
+        p_value IS NOT NULL
+        AND pg_catalog.jsonb_typeof(p_value) = 'object'
+        AND (
+            SELECT pg_catalog.count(*)
+            FROM pg_catalog.jsonb_object_keys(p_value)
+        ) = pg_catalog.array_length(p_expected_keys, 1)
+        AND p_value ?& p_expected_keys,
+        FALSE
+    )
+$$;
+
+CREATE OR REPLACE FUNCTION public.precheckout_blite_v1_copy_is_valid(
+    p_value TEXT,
+    p_max_length INTEGER
+)
+RETURNS BOOLEAN
+LANGUAGE sql
+IMMUTABLE
+SET search_path = ''
+AS $$
+    SELECT COALESCE(
+        p_value IS NOT NULL
+        AND p_value = pg_catalog.btrim(p_value)
+        AND pg_catalog.char_length(p_value) BETWEEN 1 AND p_max_length
+        AND p_value !~ E'[\\r\\n]'
+        AND p_value ~ '[가-힣]'
+        AND p_value !~* 'https?://'
+        AND p_value !~* 'www[.]'
+        AND p_value !~ '@',
+        FALSE
+    )
+$$;
+
+CREATE OR REPLACE FUNCTION public.precheckout_blite_v1_integer_in_range(
+    p_value JSONB,
+    p_minimum NUMERIC,
+    p_maximum NUMERIC
+)
+RETURNS BOOLEAN
+LANGUAGE plpgsql
+IMMUTABLE
+SET search_path = ''
+AS $$
+DECLARE
+    v_number NUMERIC;
+BEGIN
+    IF pg_catalog.jsonb_typeof(p_value) IS DISTINCT FROM 'number' THEN
+        RETURN FALSE;
+    END IF;
+    v_number := (p_value #>> '{}')::NUMERIC;
+    RETURN v_number = pg_catalog.trunc(v_number)
+       AND v_number BETWEEN p_minimum AND p_maximum;
+EXCEPTION
+    WHEN invalid_text_representation OR numeric_value_out_of_range THEN
+        RETURN FALSE;
+END;
+$$;
+
+CREATE OR REPLACE FUNCTION public.precheckout_blite_v1_confidence_is_valid(
+    p_value JSONB
+)
+RETURNS BOOLEAN
+LANGUAGE plpgsql
+IMMUTABLE
+SET search_path = ''
+AS $$
+DECLARE
+    v_number NUMERIC;
+BEGIN
+    IF pg_catalog.jsonb_typeof(p_value) IS DISTINCT FROM 'number' THEN
+        RETURN FALSE;
+    END IF;
+    v_number := (p_value #>> '{}')::NUMERIC;
+    RETURN v_number BETWEEN 0 AND 1
+       AND v_number = pg_catalog.round(v_number, 2);
+EXCEPTION
+    WHEN invalid_text_representation OR numeric_value_out_of_range THEN
+        RETURN FALSE;
+END;
+$$;
+
+CREATE OR REPLACE FUNCTION public.precheckout_blite_v1_dto_is_valid(
+    p_dto JSONB
+)
+RETURNS BOOLEAN
+LANGUAGE plpgsql
+IMMUTABLE
+SET search_path = ''
+AS $$
+DECLARE
+    v_value JSONB;
+    v_reason JSONB;
+    v_field JSONB;
+    v_candidate_min NUMERIC;
+    v_candidate_max NUMERIC;
+    v_confidence NUMERIC;
+    v_band TEXT;
+    v_all_high BOOLEAN := TRUE;
+    v_seen_fields TEXT[] := ARRAY[]::TEXT[];
+    v_field_name TEXT;
+BEGIN
+    IF public.precheckout_blite_v1_has_exact_keys(
+        p_dto,
+        ARRAY['schemaVersion', 'persona', 'signals', 'candidateRange', 'genderRead', 'postCount', 'evidenceFields']
+    ) IS DISTINCT FROM TRUE
+       OR public.precheckout_blite_v1_integer_in_range(p_dto->'schemaVersion', 1, 1)
+            IS DISTINCT FROM TRUE THEN
+        RETURN FALSE;
+    END IF;
+
+    IF public.precheckout_blite_v1_has_exact_keys(
+        p_dto->'persona', ARRAY['headline', 'summary']
+    ) IS DISTINCT FROM TRUE
+       OR pg_catalog.jsonb_typeof(p_dto->'persona'->'headline') IS DISTINCT FROM 'string'
+       OR pg_catalog.jsonb_typeof(p_dto->'persona'->'summary') IS DISTINCT FROM 'string'
+       OR public.precheckout_blite_v1_copy_is_valid(p_dto->'persona'->>'headline', 80)
+            IS DISTINCT FROM TRUE
+       OR public.precheckout_blite_v1_copy_is_valid(p_dto->'persona'->>'summary', 400)
+            IS DISTINCT FROM TRUE THEN
+        RETURN FALSE;
+    END IF;
+
+    IF pg_catalog.jsonb_typeof(p_dto->'signals') IS DISTINCT FROM 'array'
+       OR pg_catalog.jsonb_array_length(p_dto->'signals') <> 4 THEN
+        RETURN FALSE;
+    END IF;
+    FOR v_value IN
+        SELECT signal.value
+        FROM pg_catalog.jsonb_array_elements(p_dto->'signals') AS signal(value)
+    LOOP
+        IF public.precheckout_blite_v1_has_exact_keys(
+            v_value, ARRAY['claim', 'category', 'confidence', 'band']
+        ) IS DISTINCT FROM TRUE
+           OR pg_catalog.jsonb_typeof(v_value->'claim') IS DISTINCT FROM 'string'
+           OR pg_catalog.jsonb_typeof(v_value->'category') IS DISTINCT FROM 'string'
+           OR pg_catalog.jsonb_typeof(v_value->'band') IS DISTINCT FROM 'string'
+           OR public.precheckout_blite_v1_copy_is_valid(v_value->>'claim', 120)
+                IS DISTINCT FROM TRUE
+           OR public.precheckout_blite_v1_copy_is_valid(v_value->>'category', 24)
+                IS DISTINCT FROM TRUE
+           OR public.precheckout_blite_v1_confidence_is_valid(v_value->'confidence')
+                IS DISTINCT FROM TRUE THEN
+            RETURN FALSE;
+        END IF;
+        v_confidence := (v_value->'confidence' #>> '{}')::NUMERIC;
+        v_band := v_value->>'band';
+        IF v_band IS DISTINCT FROM (
+            CASE
+                WHEN v_confidence >= 0.7 THEN 'high'
+                WHEN v_confidence >= 0.5 THEN 'medium'
+                ELSE 'low'
+            END
+        ) THEN
+            RETURN FALSE;
+        END IF;
+        IF v_band <> 'high' THEN
+            v_all_high := FALSE;
+        END IF;
+    END LOOP;
+    IF v_all_high THEN
+        RETURN FALSE;
+    END IF;
+
+    IF public.precheckout_blite_v1_has_exact_keys(
+        p_dto->'candidateRange', ARRAY['min', 'max']
+    ) IS DISTINCT FROM TRUE
+       OR public.precheckout_blite_v1_integer_in_range(
+            p_dto->'candidateRange'->'min', 0, 1000000000
+       ) IS DISTINCT FROM TRUE
+       OR public.precheckout_blite_v1_integer_in_range(
+            p_dto->'candidateRange'->'max', 0, 1000000000
+       ) IS DISTINCT FROM TRUE THEN
+        RETURN FALSE;
+    END IF;
+    v_candidate_min := (p_dto->'candidateRange'->'min' #>> '{}')::NUMERIC;
+    v_candidate_max := (p_dto->'candidateRange'->'max' #>> '{}')::NUMERIC;
+    IF v_candidate_min >= v_candidate_max THEN
+        RETURN FALSE;
+    END IF;
+
+    IF public.precheckout_blite_v1_has_exact_keys(
+        p_dto->'genderRead', ARRAY['likelyFemale', 'confidence', 'reasons']
+    ) IS DISTINCT FROM TRUE
+       OR pg_catalog.jsonb_typeof(p_dto->'genderRead'->'likelyFemale') IS DISTINCT FROM 'boolean'
+       OR public.precheckout_blite_v1_confidence_is_valid(p_dto->'genderRead'->'confidence')
+            IS DISTINCT FROM TRUE
+       OR pg_catalog.jsonb_typeof(p_dto->'genderRead'->'reasons') IS DISTINCT FROM 'array'
+       OR pg_catalog.jsonb_array_length(p_dto->'genderRead'->'reasons') <> 3 THEN
+        RETURN FALSE;
+    END IF;
+    FOR v_reason IN
+        SELECT reason.value
+        FROM pg_catalog.jsonb_array_elements(p_dto->'genderRead'->'reasons') AS reason(value)
+    LOOP
+        IF pg_catalog.jsonb_typeof(v_reason) IS DISTINCT FROM 'string'
+           OR public.precheckout_blite_v1_copy_is_valid(v_reason #>> '{}', 90)
+                IS DISTINCT FROM TRUE THEN
+            RETURN FALSE;
+        END IF;
+    END LOOP;
+
+    IF public.precheckout_blite_v1_integer_in_range(p_dto->'postCount', 0, 100)
+        IS DISTINCT FROM TRUE
+       OR pg_catalog.jsonb_typeof(p_dto->'evidenceFields') IS DISTINCT FROM 'array'
+       OR pg_catalog.jsonb_array_length(p_dto->'evidenceFields') NOT BETWEEN 1 AND 14 THEN
+        RETURN FALSE;
+    END IF;
+    FOR v_field IN
+        SELECT field.value
+        FROM pg_catalog.jsonb_array_elements(p_dto->'evidenceFields') AS field(value)
+    LOOP
+        IF pg_catalog.jsonb_typeof(v_field) IS DISTINCT FROM 'string' THEN
+            RETURN FALSE;
+        END IF;
+        v_field_name := v_field #>> '{}';
+        IF v_field_name NOT IN (
+            'post.caption', 'post.hashtags', 'post.type', 'post.mediaItems',
+            'post.declaredMediaCount', 'post.likesCount', 'post.commentsCount',
+            'post.likesCountHidden', 'post.commentsCountHidden', 'post.taggedUsers',
+            'post.mentionedUsers', 'post.imageUrl', 'post.thumbnailUrl',
+            'profile.fullName', 'profile.profilePicUrl'
+        ) OR v_field_name = ANY(v_seen_fields) THEN
+            RETURN FALSE;
+        END IF;
+        v_seen_fields := pg_catalog.array_append(v_seen_fields, v_field_name);
+    END LOOP;
+
+    RETURN TRUE;
+EXCEPTION
+    WHEN invalid_text_representation OR numeric_value_out_of_range THEN
+        RETURN FALSE;
+END;
+$$;
+
 -- This finalizer keeps the existing ready-snapshot validation as the source of truth, but
 -- performs it and the source/cache write in one transaction. It supports both current
 -- authenticated and anonymous claim fences without putting either claim token in the payload.
@@ -194,6 +448,7 @@ CREATE OR REPLACE FUNCTION public.finalize_preflight_blite_source_v1(
     p_claim_token UUID,
     p_target_input_hash VARCHAR,
     p_provider_run_id UUID,
+    p_provider_operation_key TEXT,
     p_provider_run_reference TEXT,
     p_target_full_name TEXT,
     p_target_bio TEXT,
@@ -228,6 +483,12 @@ BEGIN
        OR p_target_input_hash IS NULL
        OR p_target_input_hash !~ '^[0-9a-f]{64}$'
        OR p_provider_run_id IS NULL
+       OR p_provider_run_id IS DISTINCT FROM p_preflight_id
+       OR p_provider_operation_key IS NULL
+       OR NOT (
+            p_provider_operation_key = 'target-profile-fallback'
+            OR p_provider_operation_key ~ '^target-profile-fresh-admission:g([1-9]|[1-9][0-9]|100)$'
+       )
        OR p_provider_run_reference IS NULL
        OR p_provider_run_reference !~ '^[A-Za-z0-9]{8,64}$'
        OR p_payload IS NULL
@@ -282,6 +543,7 @@ BEGIN
     SELECT provider_run.* INTO v_provider_run
     FROM public.analysis_preflight_provider_runs AS provider_run
     WHERE provider_run.preflight_id = v_preflight.id
+      AND provider_run.operation_key = p_provider_operation_key
     FOR UPDATE;
     IF NOT FOUND
        OR v_provider_run.input_hash IS DISTINCT FROM p_target_input_hash
@@ -301,6 +563,7 @@ BEGIN
         IF v_source.schema_version = 1
            AND v_source.target_input_hash = p_target_input_hash
            AND v_source.provider_run_id = p_provider_run_id
+           AND v_source.provider_operation_key = p_provider_operation_key
            AND v_source.provider_run_reference = p_provider_run_reference
            AND v_source.payload_hash = v_payload_hash
            AND v_source.collected_at = p_collected_at
@@ -317,7 +580,8 @@ BEGIN
     IF v_preflight.status <> 'processing'
        OR v_preflight.lease_token IS DISTINCT FROM p_claim_token
        OR v_preflight.lease_expires_at IS NULL
-       OR v_preflight.lease_expires_at <= v_now THEN
+       OR v_preflight.lease_expires_at <= v_now
+       OR v_preflight.deadline_at <= v_now THEN
         RAISE EXCEPTION USING
             MESSAGE = 'PRECHECKOUT_BLITE_PREFLIGHT_FENCE_LOST', ERRCODE = 'P0001';
     END IF;
@@ -344,11 +608,11 @@ BEGIN
 
     INSERT INTO public.precheckout_blite_sources (
         preflight_id, schema_version, target_input_hash, provider_run_id,
-        provider_run_reference, payload, payload_bytes, payload_hash,
+        provider_operation_key, provider_run_reference, payload, payload_bytes, payload_hash,
         collected_at, expires_at, created_at, updated_at
     ) VALUES (
         v_preflight.id, 1, p_target_input_hash, p_provider_run_id,
-        p_provider_run_reference, p_payload, v_payload_bytes, v_payload_hash,
+        p_provider_operation_key, p_provider_run_reference, p_payload, v_payload_bytes, v_payload_hash,
         p_collected_at, p_expires_at, v_now, v_now
     );
 
@@ -368,7 +632,8 @@ $$;
 -- remain untouched; Track C selects these before the provider starts.
 CREATE OR REPLACE FUNCTION public.complete_analysis_v2_preflight_with_blite_source_v1(
     p_preflight_id UUID, p_user_id UUID, p_claim_token UUID,
-    p_target_input_hash VARCHAR, p_provider_run_id UUID, p_provider_run_reference TEXT,
+    p_target_input_hash VARCHAR, p_provider_run_id UUID, p_provider_operation_key TEXT,
+    p_provider_run_reference TEXT,
     p_target_full_name TEXT, p_target_bio TEXT, p_target_profile_image_url TEXT,
     p_target_followers_count INTEGER, p_target_following_count INTEGER,
     p_target_is_private BOOLEAN, p_capacity_required_plan_id TEXT,
@@ -387,7 +652,8 @@ BEGIN
     END IF;
     RETURN public.finalize_preflight_blite_source_v1(
         p_preflight_id, p_user_id, p_claim_token, p_target_input_hash,
-        p_provider_run_id, p_provider_run_reference, p_target_full_name, p_target_bio,
+        p_provider_run_id, p_provider_operation_key, p_provider_run_reference,
+        p_target_full_name, p_target_bio,
         p_target_profile_image_url, p_target_followers_count, p_target_following_count,
         p_target_is_private, p_capacity_required_plan_id, p_required_plan_id,
         p_plan_cards_snapshot, p_payload, p_payload_hash, p_collected_at, p_expires_at
@@ -397,7 +663,8 @@ $$;
 
 CREATE OR REPLACE FUNCTION public.complete_anonymous_analysis_v2_preflight_with_blite_source_v1(
     p_preflight_id UUID, p_claim_token UUID, p_target_input_hash VARCHAR,
-    p_provider_run_id UUID, p_provider_run_reference TEXT, p_target_full_name TEXT,
+    p_provider_run_id UUID, p_provider_operation_key TEXT, p_provider_run_reference TEXT,
+    p_target_full_name TEXT,
     p_target_bio TEXT, p_target_profile_image_url TEXT, p_target_followers_count INTEGER,
     p_target_following_count INTEGER, p_target_is_private BOOLEAN,
     p_capacity_required_plan_id TEXT, p_required_plan_id TEXT,
@@ -412,7 +679,8 @@ AS $$
 BEGIN
     RETURN public.finalize_preflight_blite_source_v1(
         p_preflight_id, NULL, p_claim_token, p_target_input_hash,
-        p_provider_run_id, p_provider_run_reference, p_target_full_name, p_target_bio,
+        p_provider_run_id, p_provider_operation_key, p_provider_run_reference,
+        p_target_full_name, p_target_bio,
         p_target_profile_image_url, p_target_followers_count, p_target_following_count,
         p_target_is_private, p_capacity_required_plan_id, p_required_plan_id,
         p_plan_cards_snapshot, p_payload, p_payload_hash, p_collected_at, p_expires_at
@@ -454,6 +722,7 @@ BEGIN
     FROM public.precheckout_blite_cache AS cache
     WHERE cache.preflight_id = v_preflight.id
     FOR UPDATE;
+    v_now := pg_catalog.clock_timestamp();
     IF NOT FOUND THEN
         INSERT INTO public.precheckout_blite_cache (
             preflight_id, state, lease_token, lease_expires_at,
@@ -499,7 +768,7 @@ BEGIN
        OR pg_catalog.jsonb_typeof(v_source.payload) <> 'object' THEN
         v_reason := 'source_invalid';
     ELSIF NOT (v_preflight.deadline_at - INTERVAL '4 seconds' > v_now) THEN
-        v_reason := 'deadline_exceeded';
+        v_reason := 'inference_timeout';
     ELSIF v_cache.attempt_count >= 2 THEN
         v_reason := 'attempts_exhausted';
     ELSE
@@ -556,12 +825,28 @@ SET search_path = ''
 AS $$
 DECLARE
     v_now TIMESTAMP WITH TIME ZONE := pg_catalog.clock_timestamp();
+    v_preflight public.analysis_preflights%ROWTYPE;
     v_cache public.precheckout_blite_cache%ROWTYPE;
+    v_source public.precheckout_blite_sources%ROWTYPE;
 BEGIN
     IF p_preflight_id IS NULL
        OR p_lease_token IS NULL
        OR p_dto IS NULL
-       OR pg_catalog.jsonb_typeof(p_dto) <> 'object' THEN
+       OR public.precheckout_blite_v1_dto_is_valid(p_dto) IS DISTINCT FROM TRUE THEN
+        RETURN FALSE;
+    END IF;
+
+    -- Every lifecycle path takes these locks in parent -> cache -> source order.
+    SELECT preflight.* INTO v_preflight
+    FROM public.analysis_preflights AS preflight
+    WHERE preflight.id = p_preflight_id
+    FOR UPDATE;
+    v_now := pg_catalog.clock_timestamp();
+    IF NOT FOUND
+       OR NOT v_preflight.precheckout_blite_cohort
+       OR v_preflight.status <> 'ready'
+       OR v_preflight.pii_scrubbed_at IS NOT NULL
+       OR v_preflight.deadline_at IS NULL THEN
         RETURN FALSE;
     END IF;
 
@@ -574,6 +859,65 @@ BEGIN
        OR v_cache.state <> 'pending'
        OR v_cache.lease_token IS DISTINCT FROM p_lease_token
        OR v_cache.lease_expires_at <= v_now THEN
+        RETURN FALSE;
+    END IF;
+
+    SELECT source.* INTO v_source
+    FROM public.precheckout_blite_sources AS source
+    WHERE source.preflight_id = p_preflight_id
+    FOR UPDATE;
+    v_now := pg_catalog.clock_timestamp();
+    IF NOT FOUND THEN
+        UPDATE public.precheckout_blite_cache
+        SET state = 'failed', failure_reason = 'source_missing', failed_at = v_now,
+            updated_at = v_now
+        WHERE preflight_id = p_preflight_id
+          AND state = 'pending'
+          AND lease_token = p_lease_token
+          AND lease_expires_at > v_now;
+        RETURN FALSE;
+    END IF;
+
+    IF v_source.expires_at <= v_now THEN
+        UPDATE public.precheckout_blite_cache
+        SET state = 'failed', failure_reason = 'source_expired', failed_at = v_now,
+            updated_at = v_now
+        WHERE preflight_id = p_preflight_id
+          AND state = 'pending'
+          AND lease_token = p_lease_token
+          AND lease_expires_at > v_now;
+        DELETE FROM public.precheckout_blite_sources
+        WHERE preflight_id = p_preflight_id;
+        RETURN FALSE;
+    END IF;
+
+    IF v_source.target_input_hash IS DISTINCT FROM v_preflight.target_input_hash
+       OR v_source.provider_run_id IS DISTINCT FROM v_preflight.id
+       OR v_source.payload_bytes > 262144
+       OR pg_catalog.jsonb_typeof(v_source.payload) <> 'object' THEN
+        UPDATE public.precheckout_blite_cache
+        SET state = 'failed', failure_reason = 'source_invalid', failed_at = v_now,
+            updated_at = v_now
+        WHERE preflight_id = p_preflight_id
+          AND state = 'pending'
+          AND lease_token = p_lease_token
+          AND lease_expires_at > v_now;
+        DELETE FROM public.precheckout_blite_sources
+        WHERE preflight_id = p_preflight_id;
+        RETURN FALSE;
+    END IF;
+
+    -- A two-minute crash lease does not extend the shared T+56 inference cutoff.
+    IF NOT (v_preflight.deadline_at - INTERVAL '4 seconds' > v_now) THEN
+        UPDATE public.precheckout_blite_cache
+        SET state = 'failed', failure_reason = 'inference_timeout', failed_at = v_now,
+            updated_at = v_now
+        WHERE preflight_id = p_preflight_id
+          AND state = 'pending'
+          AND lease_token = p_lease_token
+          AND lease_expires_at > v_now;
+        DELETE FROM public.precheckout_blite_sources
+        WHERE preflight_id = p_preflight_id;
         RETURN FALSE;
     END IF;
 
@@ -604,11 +948,26 @@ SET search_path = ''
 AS $$
 DECLARE
     v_now TIMESTAMP WITH TIME ZONE := pg_catalog.clock_timestamp();
+    v_preflight public.analysis_preflights%ROWTYPE;
     v_cache public.precheckout_blite_cache%ROWTYPE;
+    v_source public.precheckout_blite_sources%ROWTYPE;
 BEGIN
     IF p_preflight_id IS NULL
        OR p_lease_token IS NULL
-       OR p_reason NOT IN ('source_missing', 'source_expired', 'source_invalid', 'source_insufficient', 'attempts_exhausted', 'deadline_exceeded', 'model_unavailable', 'model_invalid') THEN
+       OR p_reason IS NULL
+       OR p_reason NOT IN ('source_missing', 'source_expired', 'source_invalid', 'source_insufficient', 'dispatch_failed', 'inference_timeout', 'inference_rate_limited', 'inference_provider_failed', 'inference_response_invalid', 'persistence_failed', 'attempts_exhausted') THEN
+        RETURN FALSE;
+    END IF;
+
+    -- Failure remains available after the deadline to clean up a valid current lease.
+    SELECT preflight.* INTO v_preflight
+    FROM public.analysis_preflights AS preflight
+    WHERE preflight.id = p_preflight_id
+    FOR UPDATE;
+    v_now := pg_catalog.clock_timestamp();
+    IF NOT FOUND
+       OR NOT v_preflight.precheckout_blite_cohort
+       OR v_preflight.pii_scrubbed_at IS NOT NULL THEN
         RETURN FALSE;
     END IF;
 
@@ -623,6 +982,12 @@ BEGIN
        OR v_cache.lease_expires_at <= v_now THEN
         RETURN FALSE;
     END IF;
+
+    SELECT source.* INTO v_source
+    FROM public.precheckout_blite_sources AS source
+    WHERE source.preflight_id = p_preflight_id
+    FOR UPDATE;
+    v_now := pg_catalog.clock_timestamp();
 
     UPDATE public.precheckout_blite_cache
     SET state = 'failed', failure_reason = p_reason, failed_at = v_now,
@@ -692,6 +1057,9 @@ SET search_path = ''
 AS $$
 DECLARE
     v_preflight_id UUID;
+    v_now TIMESTAMP WITH TIME ZONE;
+    v_cache public.precheckout_blite_cache%ROWTYPE;
+    v_source public.precheckout_blite_sources%ROWTYPE;
     v_deleted INTEGER := 0;
 BEGIN
     IF p_limit IS NULL OR p_limit < 1 OR p_limit > 1000 THEN
@@ -700,13 +1068,31 @@ BEGIN
     END IF;
 
     FOR v_preflight_id IN
-        SELECT source.preflight_id
-        FROM public.precheckout_blite_sources AS source
-        WHERE source.expires_at <= pg_catalog.clock_timestamp()
-        ORDER BY source.expires_at, source.preflight_id
+        SELECT preflight.id
+        FROM public.analysis_preflights AS preflight
+        WHERE EXISTS (
+            SELECT 1
+            FROM public.precheckout_blite_sources AS expired_source
+            WHERE expired_source.preflight_id = preflight.id
+              AND expired_source.expires_at <= pg_catalog.clock_timestamp()
+        )
+        ORDER BY preflight.id
         LIMIT p_limit
         FOR UPDATE SKIP LOCKED
     LOOP
+        -- Match claim/finalizer/terminal cleanup: parent -> cache -> source.
+        SELECT cache.* INTO v_cache
+        FROM public.precheckout_blite_cache AS cache
+        WHERE cache.preflight_id = v_preflight_id
+        FOR UPDATE;
+        SELECT source.* INTO v_source
+        FROM public.precheckout_blite_sources AS source
+        WHERE source.preflight_id = v_preflight_id
+        FOR UPDATE;
+        v_now := pg_catalog.clock_timestamp();
+        IF NOT FOUND OR v_source.expires_at > v_now THEN
+            CONTINUE;
+        END IF;
         DELETE FROM public.precheckout_blite_cache
         WHERE preflight_id = v_preflight_id;
         DELETE FROM public.precheckout_blite_sources
@@ -728,9 +1114,19 @@ AS $$
 BEGIN
     IF NEW.pii_scrubbed_at IS NOT NULL
        AND OLD.pii_scrubbed_at IS DISTINCT FROM NEW.pii_scrubbed_at THEN
-        DELETE FROM public.precheckout_blite_sources
-        WHERE preflight_id = NEW.id;
+        -- The parent row is already locked by the UPDATE that fired this trigger.
+        -- Take cache before source to avoid a cycle with a concurrent terminal writer.
+        PERFORM 1
+        FROM public.precheckout_blite_cache AS cache
+        WHERE cache.preflight_id = NEW.id
+        FOR UPDATE;
+        PERFORM 1
+        FROM public.precheckout_blite_sources AS source
+        WHERE source.preflight_id = NEW.id
+        FOR UPDATE;
         DELETE FROM public.precheckout_blite_cache
+        WHERE preflight_id = NEW.id;
+        DELETE FROM public.precheckout_blite_sources
         WHERE preflight_id = NEW.id;
     END IF;
     RETURN NEW;
@@ -760,28 +1156,40 @@ REVOKE ALL ON FUNCTION public.release_precheckout_blite_v1(UUID, UUID)
 GRANT EXECUTE ON FUNCTION public.release_precheckout_blite_v1(UUID, UUID)
     TO service_role;
 
+-- Validation helpers are implementation details, not Data API endpoints.
+REVOKE ALL ON FUNCTION public.precheckout_blite_v1_has_exact_keys(JSONB, TEXT[])
+    FROM PUBLIC, anon, authenticated, service_role;
+REVOKE ALL ON FUNCTION public.precheckout_blite_v1_copy_is_valid(TEXT, INTEGER)
+    FROM PUBLIC, anon, authenticated, service_role;
+REVOKE ALL ON FUNCTION public.precheckout_blite_v1_integer_in_range(JSONB, NUMERIC, NUMERIC)
+    FROM PUBLIC, anon, authenticated, service_role;
+REVOKE ALL ON FUNCTION public.precheckout_blite_v1_confidence_is_valid(JSONB)
+    FROM PUBLIC, anon, authenticated, service_role;
+REVOKE ALL ON FUNCTION public.precheckout_blite_v1_dto_is_valid(JSONB)
+    FROM PUBLIC, anon, authenticated, service_role;
+
 REVOKE ALL ON FUNCTION public.finalize_preflight_blite_source_v1(
-    UUID, UUID, UUID, VARCHAR, UUID, TEXT, TEXT, TEXT, TEXT, INTEGER, INTEGER, BOOLEAN,
+    UUID, UUID, UUID, VARCHAR, UUID, TEXT, TEXT, TEXT, TEXT, TEXT, INTEGER, INTEGER, BOOLEAN,
     TEXT, TEXT, JSONB, JSONB, VARCHAR, TIMESTAMP WITH TIME ZONE, TIMESTAMP WITH TIME ZONE
 ) FROM PUBLIC, anon, authenticated, service_role;
 GRANT EXECUTE ON FUNCTION public.finalize_preflight_blite_source_v1(
-    UUID, UUID, UUID, VARCHAR, UUID, TEXT, TEXT, TEXT, TEXT, INTEGER, INTEGER, BOOLEAN,
+    UUID, UUID, UUID, VARCHAR, UUID, TEXT, TEXT, TEXT, TEXT, TEXT, INTEGER, INTEGER, BOOLEAN,
     TEXT, TEXT, JSONB, JSONB, VARCHAR, TIMESTAMP WITH TIME ZONE, TIMESTAMP WITH TIME ZONE
 ) TO service_role;
 REVOKE ALL ON FUNCTION public.complete_analysis_v2_preflight_with_blite_source_v1(
-    UUID, UUID, UUID, VARCHAR, UUID, TEXT, TEXT, TEXT, TEXT, INTEGER, INTEGER, BOOLEAN,
+    UUID, UUID, UUID, VARCHAR, UUID, TEXT, TEXT, TEXT, TEXT, TEXT, INTEGER, INTEGER, BOOLEAN,
     TEXT, TEXT, JSONB, JSONB, VARCHAR, TIMESTAMP WITH TIME ZONE, TIMESTAMP WITH TIME ZONE
 ) FROM PUBLIC, anon, authenticated, service_role;
 GRANT EXECUTE ON FUNCTION public.complete_analysis_v2_preflight_with_blite_source_v1(
-    UUID, UUID, UUID, VARCHAR, UUID, TEXT, TEXT, TEXT, TEXT, INTEGER, INTEGER, BOOLEAN,
+    UUID, UUID, UUID, VARCHAR, UUID, TEXT, TEXT, TEXT, TEXT, TEXT, INTEGER, INTEGER, BOOLEAN,
     TEXT, TEXT, JSONB, JSONB, VARCHAR, TIMESTAMP WITH TIME ZONE, TIMESTAMP WITH TIME ZONE
 ) TO service_role;
 REVOKE ALL ON FUNCTION public.complete_anonymous_analysis_v2_preflight_with_blite_source_v1(
-    UUID, UUID, VARCHAR, UUID, TEXT, TEXT, TEXT, TEXT, INTEGER, INTEGER, BOOLEAN,
+    UUID, UUID, VARCHAR, UUID, TEXT, TEXT, TEXT, TEXT, TEXT, INTEGER, INTEGER, BOOLEAN,
     TEXT, TEXT, JSONB, JSONB, VARCHAR, TIMESTAMP WITH TIME ZONE, TIMESTAMP WITH TIME ZONE
 ) FROM PUBLIC, anon, authenticated, service_role;
 GRANT EXECUTE ON FUNCTION public.complete_anonymous_analysis_v2_preflight_with_blite_source_v1(
-    UUID, UUID, VARCHAR, UUID, TEXT, TEXT, TEXT, TEXT, INTEGER, INTEGER, BOOLEAN,
+    UUID, UUID, VARCHAR, UUID, TEXT, TEXT, TEXT, TEXT, TEXT, INTEGER, INTEGER, BOOLEAN,
     TEXT, TEXT, JSONB, JSONB, VARCHAR, TIMESTAMP WITH TIME ZONE, TIMESTAMP WITH TIME ZONE
 ) TO service_role;
 REVOKE ALL ON FUNCTION public.claim_precheckout_blite_v2(UUID)

@@ -79,8 +79,10 @@ CREATE TABLE public.analysis_preflights (
  )
 );
 CREATE TABLE public.analysis_preflight_provider_runs (
- preflight_id uuid primary key references public.analysis_preflights(id) on delete cascade,
- input_hash varchar(64) not null, logical_provider text not null, status text not null, run_id varchar(64)
+ preflight_id uuid not null references public.analysis_preflights(id) on delete cascade,
+ operation_key text not null default 'target-profile-fallback',
+ input_hash varchar(64) not null, logical_provider text not null, status text not null, run_id varchar(64),
+ primary key(preflight_id, operation_key)
 );
 CREATE TABLE public.precheckout_blite_cache (
  preflight_id uuid primary key references public.analysis_preflights(id) on delete cascade,
@@ -153,16 +155,16 @@ describe('account deletion migration', () => {
             'https://example.test/profile.jpg','skip','pending'
         )`, [owner]);
         await db.query(`INSERT INTO public.analysis_preflight_provider_runs(
-            preflight_id,input_hash,logical_provider,status,run_id
+            preflight_id,operation_key,input_hash,logical_provider,status,run_id
         ) VALUES (
-            '4d809496-1cb8-4e4f-a081-8efc14a7a64c',repeat('a',64),'apify','succeeded','ApifyRun123456'
+            '4d809496-1cb8-4e4f-a081-8efc14a7a64c','target-profile-fallback',repeat('a',64),'apify','succeeded','ApifyRun123456'
         )`);
         await db.query(`INSERT INTO public.precheckout_blite_sources(
-            preflight_id,schema_version,target_input_hash,provider_run_id,provider_run_reference,
+            preflight_id,schema_version,target_input_hash,provider_run_id,provider_operation_key,provider_run_reference,
             payload,payload_bytes,payload_hash,collected_at,expires_at
         ) VALUES (
             '4d809496-1cb8-4e4f-a081-8efc14a7a64c',1,repeat('a',64),
-            '4d809496-1cb8-4e4f-a081-8efc14a7a64c','ApifyRun123456','{}'::jsonb,2,$1,
+            '4d809496-1cb8-4e4f-a081-8efc14a7a64c','target-profile-fallback','ApifyRun123456','{}'::jsonb,2,$1,
             clock_timestamp(),clock_timestamp() + interval '10 minutes'
         )`, [createHash('sha256').update('{}', 'utf8').digest('hex')]);
         await db.query(`INSERT INTO public.precheckout_blite_cache(

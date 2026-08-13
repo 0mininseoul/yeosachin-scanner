@@ -73,10 +73,13 @@ export const PRECHECKOUT_BLITE_FAILURE_REASONS = [
     'source_expired',
     'source_invalid',
     'source_insufficient',
+    'dispatch_failed',
+    'inference_timeout',
+    'inference_rate_limited',
+    'inference_provider_failed',
+    'inference_response_invalid',
+    'persistence_failed',
     'attempts_exhausted',
-    'deadline_exceeded',
-    'model_unavailable',
-    'model_invalid',
 ] as const;
 
 const failureReasonSchema = z.enum(PRECHECKOUT_BLITE_FAILURE_REASONS);

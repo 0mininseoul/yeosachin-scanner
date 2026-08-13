@@ -117,12 +117,12 @@ describe('precheckout B-lite v2 terminal store', () => {
             p_lease_token: LEASE,
             p_dto: value,
         });
-        await expect(store.fail({ preflightId: PREFLIGHT, leaseToken: LEASE, reason: 'model_invalid' }))
+        await expect(store.fail({ preflightId: PREFLIGHT, leaseToken: LEASE, reason: 'inference_response_invalid' }))
             .resolves.toBe(true);
         expect(database.rpc).toHaveBeenLastCalledWith('fail_precheckout_blite_v2', {
             p_preflight_id: PREFLIGHT,
             p_lease_token: LEASE,
-            p_reason: 'model_invalid',
+            p_reason: 'inference_response_invalid',
         });
     });
 

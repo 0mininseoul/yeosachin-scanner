@@ -9,6 +9,7 @@ const USER = 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb';
 const CLAIM = 'cccccccc-cccc-4ccc-8ccc-cccccccccccc';
 const HASH = 'a'.repeat(64);
 const PROVIDER_RUN = PREFLIGHT;
+const PROVIDER_OPERATION_KEY = 'target-profile-fallback';
 const COLLECTED_AT = '2026-08-13T00:00:00.000Z';
 const EXPIRES_AT = '2026-08-13T00:20:00.000Z';
 const SOURCE = {
@@ -25,6 +26,7 @@ function input(): FinalizePrecheckoutBliteSourceInput {
         claimToken: CLAIM,
         targetInputHash: HASH,
         providerRunId: PROVIDER_RUN,
+        providerOperationKey: PROVIDER_OPERATION_KEY,
         providerRunReference: 'ApifyRun123456',
         targetFullName: 'Target',
         targetBio: null,
@@ -54,6 +56,7 @@ describe('precheckout B-lite source store', () => {
             p_claim_token: CLAIM,
             p_target_input_hash: HASH,
             p_provider_run_id: PROVIDER_RUN,
+            p_provider_operation_key: PROVIDER_OPERATION_KEY,
             p_provider_run_reference: 'ApifyRun123456',
             p_target_full_name: 'Target',
             p_target_bio: null,
