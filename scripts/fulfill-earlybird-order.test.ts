@@ -79,7 +79,7 @@ describe('earlybird fulfillment operator CLI', () => {
             '--order-id',
             ORDER,
             '--confirm-paid-api-call',
-        ])).toEqual({ orderId: ORDER });
+        ])).toEqual({ orderId: ORDER, credentialSlot: null });
         for (const args of [
             ['--order-id', ORDER],
             ['--confirm-paid-api-call'],
@@ -91,6 +91,55 @@ describe('earlybird fulfillment operator CLI', () => {
         ]) {
             expect(() => parseEarlybirdFulfillmentCliArgs(args)).toThrow();
         }
+    });
+
+    it('accepts one allowlisted order-scoped credential slot', () => {
+        expect(parseEarlybirdFulfillmentCliArgs([
+            '--order-id',
+            ORDER,
+            '--confirm-paid-api-call',
+            '--credential-slot',
+            'tertiary',
+        ])).toEqual({ orderId: ORDER, credentialSlot: 'tertiary' });
+        expect(() => parseEarlybirdFulfillmentCliArgs([
+            '--order-id', ORDER, '--confirm-paid-api-call', '--credential-slot', 'global',
+        ])).toThrow();
+    });
+
+    it('binds the order-scoped slot before fulfillment', async () => {
+        const events: string[] = [];
+        const fulfill = vi.fn(async () => {
+            events.push('fulfill');
+            return {
+                orderId: ORDER,
+                status: 'analysis_in_progress' as const,
+                requestId: REQUEST,
+                nextAction: 'monitor_analysis' as const,
+            };
+        });
+        const bindCredentialSlot = vi.fn(async () => {
+            events.push('bind');
+        });
+        await runEarlybirdFulfillmentCli([
+            '--order-id', ORDER, '--confirm-paid-api-call', '--credential-slot', 'tertiary',
+        ], { fulfill, bindCredentialSlot, writeStdout: vi.fn() });
+        expect(bindCredentialSlot).toHaveBeenCalledWith(ORDER, 'tertiary');
+        expect(events).toEqual(['bind', 'fulfill']);
+    });
+
+    it('refuses a scoped fulfillment when no binding operator is available', async () => {
+        const fulfill = vi.fn(async () => ({
+            orderId: ORDER,
+            status: 'analysis_in_progress' as const,
+            requestId: REQUEST,
+            nextAction: 'monitor_analysis' as const,
+        }));
+        await expect(runEarlybirdFulfillmentCli([
+            '--order-id', ORDER, '--confirm-paid-api-call', '--credential-slot', 'tertiary',
+        ], { fulfill, writeStdout: vi.fn() })).rejects.toThrow(
+            'EARLYBIRD_ORDER_CREDENTIAL_SLOT_BIND_UNAVAILABLE'
+        );
+        expect(fulfill).not.toHaveBeenCalled();
     });
 
     it('prints only bounded fulfillment identifiers, state, and next action', async () => {

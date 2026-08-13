@@ -292,4 +292,41 @@ describe('authorized analysis V2 test provider policy', () => {
             requiredBudgets: operationBudgets,
         }).mode).toBe('betatest_free_pool');
     });
+
+    it('uses an explicitly bound production order slot without changing the global default', () => {
+        expect(resolveAnalysisV2ApifyProviderBinding({
+            accessMode: 'production',
+            policy: null,
+            operation: 'target-profile',
+            maxChargeUsd: 0.0026,
+            orderScopedCredentialSlot: 'tertiary',
+            env: {
+                ANALYSIS_V2_APIFY_API_TOKEN_SLOT: 'primary',
+                APIFY_PRIMARY_API_TOKEN: 'primary-token',
+                APIFY_TERTIARY_API_TOKEN: 'tertiary-token',
+            },
+        })).toMatchObject({ credentialSlot: 'tertiary' });
+
+        expect(resolveAnalysisV2ApifyProviderBinding({
+            accessMode: 'production',
+            policy: null,
+            operation: 'target-profile',
+            maxChargeUsd: 0.0026,
+            env: {
+                ANALYSIS_V2_APIFY_API_TOKEN_SLOT: 'primary',
+                APIFY_PRIMARY_API_TOKEN: 'primary-token',
+            },
+        })).toMatchObject({ credentialSlot: 'primary' });
+    });
+
+    it('rejects an order slot on non-production requests', () => {
+        expect(() => resolveAnalysisV2ApifyProviderBinding({
+            accessMode: 'test_entitlement',
+            policy: null,
+            operation: 'target-profile',
+            maxChargeUsd: 0.0026,
+            orderScopedCredentialSlot: 'tertiary',
+            env: { APIFY_TERTIARY_API_TOKEN: 'tertiary-token' },
+        })).toThrow('ANALYSIS_V2_ORDER_CREDENTIAL_SLOT_SCOPE_ERROR');
+    });
 });

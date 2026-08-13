@@ -385,6 +385,7 @@ async function bindApifyRun(input: {
         policy: input.request.providerExecutionPolicy,
         operation: input.operation,
         maxChargeUsd: input.maxChargeUsd,
+        orderScopedCredentialSlot: input.request.orderScopedCredentialSlot,
         env: input.dependencies.env,
     });
     const identity = {
