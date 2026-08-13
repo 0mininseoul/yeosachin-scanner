@@ -4,6 +4,10 @@ import {
     recoverUnstagedKakaoSignupDiscordNotifications,
     reconcileStaleKakaoSignupDiscordClaims,
 } from '@/lib/services/identity/kakao-signup-discord';
+import {
+    deliverEarlybirdPaymentDiscordNotifications,
+    reconcileStaleEarlybirdPaymentDiscordClaims,
+} from '@/lib/services/earlybird/payment-discord';
 
 export const runtime = 'nodejs';
 
@@ -18,5 +22,13 @@ export async function GET(request: Request): Promise<NextResponse> {
     const recovered = await recoverUnstagedKakaoSignupDiscordNotifications();
     const reconciled = await reconcileStaleKakaoSignupDiscordClaims();
     const claimed = await deliverKakaoSignupDiscordNotifications({ limit: 10 });
-    return NextResponse.json({ claimed, reconciled, recovered });
+    const paymentReconciled = await reconcileStaleEarlybirdPaymentDiscordClaims();
+    const paymentClaimed = await deliverEarlybirdPaymentDiscordNotifications({ limit: 10 });
+    return NextResponse.json({
+        claimed,
+        reconciled,
+        recovered,
+        paymentClaimed,
+        paymentReconciled,
+    });
 }
