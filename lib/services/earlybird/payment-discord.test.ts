@@ -85,6 +85,33 @@ describe('earlybird payment Discord notification', () => {
         expect(serialized).not.toMatch(/email|phone|payment_id|claim_token/i);
     });
 
+    it('formats the Standard settled amount of exactly 19,900 KRW', () => {
+        const payload = buildPaymentDiscordPayload({
+            ...ITEM,
+            plan_id: 'standard',
+            actual_amount_krw: 19_900,
+        });
+
+        expect(payload.embeds[0].fields[1]).toEqual({
+            name: '💰 결제금액',
+            value: '₩19,900',
+            inline: true,
+        });
+    });
+
+    it('falls back to unavailable when the settled amount is null', () => {
+        const payload = buildPaymentDiscordPayload({
+            ...ITEM,
+            actual_amount_krw: null,
+        });
+
+        expect(payload.embeds[0].fields[1]).toEqual({
+            name: '💰 결제금액',
+            value: '미제공',
+            inline: true,
+        });
+    });
+
     it.each([
         ['김', '*'],
         ['김민', '김*'],
