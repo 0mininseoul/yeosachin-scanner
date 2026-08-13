@@ -10,7 +10,16 @@ import { isDemoOperator } from '@/lib/services/demo-analysis/demo-analysis';
 import { demoAnalysisStore } from '@/lib/services/demo-analysis/store';
 import { demoArchiveItems } from '@/lib/services/demo-analysis/archive';
 import { NOINDEX_METADATA } from '@/lib/services/seo/discovery';
-import { requireActiveAccountSession } from '@/lib/services/identity/account-principal-store';
+import {
+    loadAccountPrincipal,
+    requireActiveAccountSession,
+} from '@/lib/services/identity/account-principal-store';
+import {
+    delayNoticeEnabledFromEnv,
+    hasPendingDelivery,
+    shouldShowArchiveDelayNotice,
+} from '@/lib/services/analysis/archive-delay-notice';
+import { ArchiveDelayNotice } from '@/components/archive-delay-notice';
 import {
     type AwaitingEarlybirdDelivery,
     listAwaitingEarlybirdDeliveries,
@@ -67,6 +76,24 @@ export default async function MyPage() {
     }
     const entries = buildArchiveEntries(analyses, awaitingDeliveries);
 
+    // is_paid_user is not part of the classification returned above, so the
+    // paid state is read from the service-owned principal rather than trusted
+    // from the browser. A lookup failure only costs the delay notice.
+    let isPaidUser = false;
+    try {
+        isPaidUser = (await loadAccountPrincipal(user.id))?.is_paid_user ?? false;
+    } catch (error) {
+        console.error('Error fetching account principal for delay notice:', error);
+    }
+
+    const showDelayNotice = shouldShowArchiveDelayNotice({
+        enabled: delayNoticeEnabledFromEnv(process.env.ARCHIVE_DELAY_NOTICE_ENABLED),
+        accountClass: accountClassification.accountClass,
+        trafficClass: accountClassification.trafficClass,
+        isPaidUser,
+        hasPendingDelivery: hasPendingDelivery(entries),
+    });
+
     return (
         <div className="min-h-dvh">
             <TopBar
@@ -93,6 +120,8 @@ export default async function MyPage() {
                     && accountClassification.trafficClass === 'external'
                     && <AccountDeletionPanel />}
             </main>
+
+            {showDelayNotice && <ArchiveDelayNotice />}
         </div>
     );
 }
