@@ -2299,7 +2299,7 @@ describe('apifyProvider', () => {
             { usernames: ['target'] },
             expect.objectContaining({
                 maxItems: 2,
-                maxTotalChargeUsd: 0.0026,
+                maxTotalChargeUsd: 0.003,
                 restartOnError: false,
             })
         );
@@ -2307,7 +2307,7 @@ describe('apifyProvider', () => {
         expect(onBeforeRunStart).toHaveBeenCalledWith(expect.objectContaining({
             actorId: APIFY_PROFILE_ACTOR_ID,
             credentialSlot: 'quinary',
-            maxChargeUsd: 0.0026,
+            maxChargeUsd: APIFY_PROFILE_SUMMARY_MAX_CHARGE_USD,
         }));
     });
 
