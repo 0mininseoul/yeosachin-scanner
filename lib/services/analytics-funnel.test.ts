@@ -163,6 +163,7 @@ describe('Amplitude funnel helpers', () => {
         [400, 'blocked'],
         [401, 'blocked'],
         [429, 'blocked'],
+        [410, 'blocked'],
         [500, 'failed'],
         [503, 'failed'],
     ] as const)('classifies request HTTP %s as %s', (status, expected) => {

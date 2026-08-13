@@ -80,6 +80,19 @@ describe('preflight analytics outcome caller contract', () => {
         expect(hookSource).toContain('EVENTS.PREFLIGHT_FAILED');
         expect(hookSource).toMatch(/preflightStartedAt:\s*preflightStartedAtRef\.current/);
     });
+
+    it('classifies status polling request blocks separately from technical failures', () => {
+        const hookSource = readFileSync(
+            new URL('../../../hooks/useAnalysisV2Preflight.ts', import.meta.url),
+            'utf8',
+        );
+
+        const pollingFailure = hookSource.match(
+            /const loadPreflight = useCallback\([\s\S]*?if \(!response\.ok\) \{([\s\S]*?)\n        \}/,
+        )?.[1] ?? '';
+
+        expect(pollingFailure).toContain('classifyPreflightRequestAnalyticsOutcome(response.status)');
+    });
 });
 
 const plans = [

@@ -475,6 +475,7 @@ export function useAnalysisV2Preflight({
                 messageFromPayload(payload, '사전 점검 상태를 확인할 수 없습니다.'),
                 safeAnalyticsHttpErrorCode(response.status, payload),
                 terminal,
+                classifyPreflightRequestAnalyticsOutcome(response.status),
             );
         }
         const parsed = preflightStatusV1Schema.safeParse(payload);
