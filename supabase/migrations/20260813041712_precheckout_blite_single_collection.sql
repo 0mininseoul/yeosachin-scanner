@@ -1340,3 +1340,210 @@ REVOKE ALL ON FUNCTION public.purge_expired_precheckout_blite_sources_v1(INTEGER
     FROM PUBLIC, anon, authenticated, service_role;
 GRANT EXECUTE ON FUNCTION public.purge_expired_precheckout_blite_sources_v1(INTEGER)
     TO service_role;
+
+-- Durable, additive recovery fence for the post-finalize B-lite task enqueue.
+-- The persisted cohort/readiness/source rows are authoritative; rollout env changes do not
+-- affect recovery. A deterministic Cloud Task name makes a lost acknowledgement safe to retry.
+CREATE TABLE IF NOT EXISTS public.precheckout_blite_dispatches (
+    preflight_id UUID PRIMARY KEY REFERENCES public.analysis_preflights(id) ON DELETE CASCADE,
+    state TEXT NOT NULL DEFAULT 'idle',
+    attempt_count SMALLINT NOT NULL DEFAULT 0,
+    dispatch_token UUID,
+    lease_expires_at TIMESTAMP WITH TIME ZONE,
+    failure_reason TEXT,
+    created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT pg_catalog.clock_timestamp(),
+    updated_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT pg_catalog.clock_timestamp(),
+    CONSTRAINT precheckout_blite_dispatch_state_check CHECK (state IN ('idle', 'enqueuing', 'enqueued')),
+    CONSTRAINT precheckout_blite_dispatch_attempt_check CHECK (attempt_count BETWEEN 0 AND 32767),
+    CONSTRAINT precheckout_blite_dispatch_failure_check CHECK (
+        failure_reason IS NULL OR failure_reason = 'dispatch_failed'
+    ),
+    CONSTRAINT precheckout_blite_dispatch_token_check CHECK (
+        (state = 'enqueuing' AND dispatch_token IS NOT NULL AND lease_expires_at IS NOT NULL)
+        OR (state IN ('idle', 'enqueued') AND dispatch_token IS NULL AND lease_expires_at IS NULL)
+    ),
+    CONSTRAINT precheckout_blite_dispatch_timestamp_check CHECK (updated_at >= created_at)
+);
+
+ALTER TABLE public.precheckout_blite_dispatches ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.precheckout_blite_dispatches FORCE ROW LEVEL SECURITY;
+REVOKE ALL ON TABLE public.precheckout_blite_dispatches FROM PUBLIC, anon, authenticated;
+GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE public.precheckout_blite_dispatches TO service_role;
+
+-- Extend the existing PII scrub trigger so the additive dispatch fence is removed with the
+-- source/cache rows; no user-visible status or task payload is retained after scrub.
+CREATE OR REPLACE FUNCTION public.delete_precheckout_blite_cache_on_pii_scrub_v1()
+RETURNS TRIGGER
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = ''
+AS $$
+BEGIN
+    IF NEW.pii_scrubbed_at IS NOT NULL
+       AND OLD.pii_scrubbed_at IS DISTINCT FROM NEW.pii_scrubbed_at THEN
+        PERFORM 1
+        FROM public.precheckout_blite_cache AS cache
+        WHERE cache.preflight_id = NEW.id
+        FOR UPDATE;
+        PERFORM 1
+        FROM public.precheckout_blite_sources AS source
+        WHERE source.preflight_id = NEW.id
+        FOR UPDATE;
+        PERFORM 1
+        FROM public.precheckout_blite_dispatches AS dispatch
+        WHERE dispatch.preflight_id = NEW.id
+        FOR UPDATE;
+        DELETE FROM public.precheckout_blite_cache WHERE preflight_id = NEW.id;
+        DELETE FROM public.precheckout_blite_sources WHERE preflight_id = NEW.id;
+        DELETE FROM public.precheckout_blite_dispatches WHERE preflight_id = NEW.id;
+    END IF;
+    RETURN NEW;
+END;
+$$;
+
+CREATE OR REPLACE FUNCTION public.reserve_precheckout_blite_dispatch_v1(p_preflight_id UUID)
+RETURNS JSONB
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = ''
+AS $$
+DECLARE
+    v_now TIMESTAMP WITH TIME ZONE := pg_catalog.clock_timestamp();
+    v_token UUID := extensions.gen_random_uuid();
+    v_preflight public.analysis_preflights%ROWTYPE;
+    v_dispatch public.precheckout_blite_dispatches%ROWTYPE;
+BEGIN
+    -- The database row, not the current rollout percentage, decides recovery eligibility.
+    IF p_preflight_id IS NULL THEN
+        RAISE EXCEPTION USING MESSAGE = 'PRECHECKOUT_BLITE_DISPATCH_INVALID', ERRCODE = 'P0001';
+    END IF;
+    SELECT preflight.* INTO v_preflight
+    FROM public.analysis_preflights AS preflight
+    WHERE preflight.id = p_preflight_id
+    FOR UPDATE;
+    -- Re-read wall time after the row-lock wait before applying the expiry fence.
+    v_now := pg_catalog.clock_timestamp();
+    IF NOT FOUND THEN
+        -- A valid UUID whose preflight was retention-deleted is an idempotent no-op. This
+        -- prevents replay loops while NULL/malformed inputs still fail closed above/type-check.
+        RETURN pg_catalog.jsonb_build_object(
+            'should_enqueue', FALSE, 'dispatch_token', NULL
+        );
+    END IF;
+    IF NOT v_preflight.precheckout_blite_cohort
+       OR v_preflight.status <> 'ready'
+       OR v_preflight.pii_scrubbed_at IS NOT NULL
+       OR v_preflight.expires_at <= v_now THEN
+        RETURN pg_catalog.jsonb_build_object(
+            'should_enqueue', FALSE, 'dispatch_token', NULL
+        );
+    END IF;
+    IF NOT EXISTS (
+            SELECT 1 FROM public.precheckout_blite_sources AS source
+            WHERE source.preflight_id = p_preflight_id
+       )
+       OR NOT EXISTS (
+            SELECT 1 FROM public.precheckout_blite_cache AS cache
+            WHERE cache.preflight_id = p_preflight_id
+       ) THEN
+        RETURN pg_catalog.jsonb_build_object(
+            'should_enqueue', FALSE, 'dispatch_token', NULL
+        );
+    END IF;
+
+    SELECT dispatch.* INTO v_dispatch
+    FROM public.precheckout_blite_dispatches AS dispatch
+    WHERE dispatch.preflight_id = p_preflight_id
+    FOR UPDATE;
+    IF NOT FOUND THEN
+        INSERT INTO public.precheckout_blite_dispatches (
+            preflight_id, state, attempt_count, created_at, updated_at
+        ) VALUES (p_preflight_id, 'idle', 0, v_now, v_now)
+        RETURNING * INTO v_dispatch;
+    END IF;
+
+    v_now := pg_catalog.clock_timestamp();
+    IF v_dispatch.state = 'enqueued' THEN
+        RETURN pg_catalog.jsonb_build_object(
+            'should_enqueue', FALSE, 'dispatch_token', NULL
+        );
+    END IF;
+    IF v_dispatch.state = 'enqueuing'
+       AND v_dispatch.lease_expires_at > v_now THEN
+        RETURN pg_catalog.jsonb_build_object(
+            'should_enqueue', FALSE, 'dispatch_token', NULL
+        );
+    END IF;
+
+    UPDATE public.precheckout_blite_dispatches
+    SET state = 'enqueuing',
+        attempt_count = v_dispatch.attempt_count + 1,
+        dispatch_token = v_token,
+        lease_expires_at = v_now + INTERVAL '2 minutes',
+        failure_reason = NULL,
+        updated_at = v_now
+    WHERE preflight_id = p_preflight_id;
+    RETURN pg_catalog.jsonb_build_object(
+        'should_enqueue', TRUE, 'dispatch_token', v_token
+    );
+END;
+$$;
+
+CREATE OR REPLACE FUNCTION public.mark_precheckout_blite_dispatch_failed_v1(
+    p_preflight_id UUID,
+    p_dispatch_token UUID
+)
+RETURNS BOOLEAN
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = ''
+AS $$
+DECLARE
+    v_now TIMESTAMP WITH TIME ZONE := pg_catalog.clock_timestamp();
+BEGIN
+    UPDATE public.precheckout_blite_dispatches
+    SET state = 'idle', dispatch_token = NULL, lease_expires_at = NULL,
+        failure_reason = 'dispatch_failed', updated_at = v_now
+    WHERE preflight_id = p_preflight_id
+      AND state = 'enqueuing'
+      AND dispatch_token = p_dispatch_token;
+    RETURN FOUND;
+END;
+$$;
+
+CREATE OR REPLACE FUNCTION public.mark_precheckout_blite_dispatch_enqueued_v1(
+    p_preflight_id UUID,
+    p_dispatch_token UUID
+)
+RETURNS BOOLEAN
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = ''
+AS $$
+DECLARE
+    v_now TIMESTAMP WITH TIME ZONE := pg_catalog.clock_timestamp();
+BEGIN
+    UPDATE public.precheckout_blite_dispatches
+    SET state = 'enqueued', dispatch_token = NULL, lease_expires_at = NULL,
+        failure_reason = NULL, updated_at = v_now
+    WHERE preflight_id = p_preflight_id
+      AND (
+        (state = 'enqueuing' AND dispatch_token = p_dispatch_token)
+        OR state = 'enqueued'
+      );
+    RETURN FOUND;
+END;
+$$;
+
+REVOKE ALL ON FUNCTION public.reserve_precheckout_blite_dispatch_v1(UUID)
+    FROM PUBLIC, anon, authenticated, service_role;
+GRANT EXECUTE ON FUNCTION public.reserve_precheckout_blite_dispatch_v1(UUID)
+    TO service_role;
+REVOKE ALL ON FUNCTION public.mark_precheckout_blite_dispatch_failed_v1(UUID, UUID)
+    FROM PUBLIC, anon, authenticated, service_role;
+GRANT EXECUTE ON FUNCTION public.mark_precheckout_blite_dispatch_failed_v1(UUID, UUID)
+    TO service_role;
+REVOKE ALL ON FUNCTION public.mark_precheckout_blite_dispatch_enqueued_v1(UUID, UUID)
+    FROM PUBLIC, anon, authenticated, service_role;
+GRANT EXECUTE ON FUNCTION public.mark_precheckout_blite_dispatch_enqueued_v1(UUID, UUID)
+    TO service_role;

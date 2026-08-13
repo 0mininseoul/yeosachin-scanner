@@ -620,8 +620,80 @@ describe('precheckout B-lite source and lease lifecycle', () => {
         await expect(database.query(
             `SELECT has_table_privilege('authenticated','public.precheckout_blite_sources','SELECT') AS allowed,
                     has_function_privilege('authenticated','public.claim_precheckout_blite_v2(uuid)','EXECUTE') AS claim_allowed,
-                    has_function_privilege('service_role','public.claim_precheckout_blite_v2(uuid)','EXECUTE') AS service_allowed`,
-        )).resolves.toMatchObject({ rows: [{ allowed: false, claim_allowed: false, service_allowed: true }] });
+                    has_function_privilege('service_role','public.claim_precheckout_blite_v2(uuid)','EXECUTE') AS service_allowed,
+                    has_table_privilege('authenticated','public.precheckout_blite_dispatches','SELECT') AS dispatch_allowed,
+                    has_function_privilege('authenticated','public.reserve_precheckout_blite_dispatch_v1(uuid)','EXECUTE') AS dispatch_claim_allowed,
+                    has_function_privilege('service_role','public.reserve_precheckout_blite_dispatch_v1(uuid)','EXECUTE') AS dispatch_service_allowed`,
+        )).resolves.toMatchObject({ rows: [{
+            allowed: false,
+            claim_allowed: false,
+            service_allowed: true,
+            dispatch_allowed: false,
+            dispatch_claim_allowed: false,
+            dispatch_service_allowed: true,
+        }] });
+    }, 30_000);
+
+    it('durably fences dispatch failure/recovery, makes acknowledgement replay idempotent, and scrubs the fence', async () => {
+        const database = await createDb();
+        await seedProcessingPreflight(database, PREFLIGHT_A);
+        await expect(finalizeSource(database, PREFLIGHT_A)).resolves.toBe(true);
+
+        const first = await database.query<{ result: { should_enqueue: boolean; dispatch_token: string } }>(
+            'SELECT public.reserve_precheckout_blite_dispatch_v1($1) AS result', [PREFLIGHT_A],
+        );
+        expect(first.rows[0]!.result.should_enqueue).toBe(true);
+        const firstToken = first.rows[0]!.result.dispatch_token;
+        await expect(database.query(
+            'SELECT public.mark_precheckout_blite_dispatch_failed_v1($1,$2) AS result',
+            [PREFLIGHT_A, firstToken],
+        )).resolves.toMatchObject({ rows: [{ result: true }] });
+
+        const recovery = await database.query<{ result: { should_enqueue: boolean; dispatch_token: string } }>(
+            'SELECT public.reserve_precheckout_blite_dispatch_v1($1) AS result', [PREFLIGHT_A],
+        );
+        expect(recovery.rows[0]!.result.should_enqueue).toBe(true);
+        const recoveryToken = recovery.rows[0]!.result.dispatch_token;
+        expect(recoveryToken).not.toBe(firstToken);
+        await expect(database.query(
+            'SELECT public.mark_precheckout_blite_dispatch_enqueued_v1($1,$2) AS result',
+            [PREFLIGHT_A, recoveryToken],
+        )).resolves.toMatchObject({ rows: [{ result: true }] });
+        await expect(database.query(
+            'SELECT public.reserve_precheckout_blite_dispatch_v1($1) AS result', [PREFLIGHT_A],
+        )).resolves.toMatchObject({ rows: [{ result: { should_enqueue: false, dispatch_token: null } }] });
+
+        await database.query(
+            `INSERT INTO public.analysis_preflights(
+                id,status,ready_at,expires_at,precheckout_blite_cohort
+            ) VALUES ($1,'ready',clock_timestamp(),clock_timestamp() + interval '10 minutes',false)`,
+            [PREFLIGHT_LEGACY],
+        );
+        await expect(database.query(
+            'SELECT public.reserve_precheckout_blite_dispatch_v1($1) AS result', [PREFLIGHT_LEGACY],
+        )).resolves.toMatchObject({ rows: [{ result: { should_enqueue: false, dispatch_token: null } }] });
+
+        await database.query(
+            `INSERT INTO public.analysis_preflights(
+                id,status,ready_at,expires_at,precheckout_blite_cohort
+            ) VALUES ($1,'ready',clock_timestamp(),clock_timestamp() + interval '10 minutes',true)`,
+            [PREFLIGHT_CASCADE],
+        );
+        await database.query(
+            'DELETE FROM public.analysis_preflights WHERE id=$1', [PREFLIGHT_CASCADE],
+        );
+        await expect(database.query(
+            'SELECT public.reserve_precheckout_blite_dispatch_v1($1) AS result', [PREFLIGHT_CASCADE],
+        )).resolves.toMatchObject({ rows: [{ result: { should_enqueue: false, dispatch_token: null } }] });
+
+        await database.query(
+            'UPDATE public.analysis_preflights SET pii_scrubbed_at = clock_timestamp() WHERE id=$1',
+            [PREFLIGHT_A],
+        );
+        await expect(database.query(
+            'SELECT count(*)::int AS count FROM public.precheckout_blite_dispatches WHERE preflight_id=$1',
+            [PREFLIGHT_A],
+        )).resolves.toMatchObject({ rows: [{ count: 0 }] });
     }, 30_000);
 
     it('keeps the flag-off v1 claim, release, and completion path executable after the migration', async () => {

@@ -8,6 +8,7 @@ import type { PrecheckoutBliteV1 } from './blite-contract';
 const PREFLIGHT = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa';
 const LEASE = 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb';
 const DEADLINE = '2026-08-13T00:01:00.000Z';
+const SUBMITTED_AT = '2026-08-13T00:00:00.000Z';
 const COMPLETED_AT = '2026-08-13T00:00:20.000Z';
 const FAILED_AT = '2026-08-13T00:00:20.000Z';
 const SOURCE = {
@@ -89,12 +90,16 @@ describe('precheckoutBliteStore', () => {
 describe('precheckout B-lite v2 terminal store', () => {
     it('parses the exact source-bearing v2 claim and sends only the v2 RPC input', async () => {
         const database = client({
-            disposition: 'claimed', leaseToken: LEASE, source: SOURCE, deadlineAt: DEADLINE,
+            disposition: 'claimed', leaseToken: LEASE, source: SOURCE,
+            submittedAt: SUBMITTED_AT, deadlineAt: DEADLINE,
+            followersCount: 350, followingCount: 300,
         });
         const store = createPrecheckoutBliteTerminalStore(database);
 
         await expect(store.claim({ preflightId: PREFLIGHT })).resolves.toEqual({
-            disposition: 'claimed', leaseToken: LEASE, source: SOURCE, deadlineAt: DEADLINE,
+            disposition: 'claimed', leaseToken: LEASE, source: SOURCE,
+            submittedAt: SUBMITTED_AT, deadlineAt: DEADLINE,
+            followersCount: 350, followingCount: 300,
         });
         expect(database.rpc).toHaveBeenCalledWith('claim_precheckout_blite_v2', {
             p_preflight_id: PREFLIGHT,

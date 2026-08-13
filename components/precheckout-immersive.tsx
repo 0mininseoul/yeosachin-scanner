@@ -11,6 +11,7 @@ import { CaseCard, Eyebrow, PrimaryButton } from '@/components/case-ui';
 import { PrecheckoutDemo } from '@/components/precheckout-demo';
 import {
     beginBlitePage,
+    BLITE_FALLBACK_LATCH_MS,
     initialBlitePageState,
     reduceBlitePage,
     type BlitePageEvent,
@@ -26,13 +27,16 @@ import {
    ============================================================ */
 
 const FETCH_DEADLINE_MS = 5_000;
+const TRANSIENT_STATUS_RETRY_MS = 1_000;
 
 type BrowserBliteStatus =
     | { state: 'pending'; submittedAt: string; fallbackAt: string; retryAfterMs: number }
     | { state: 'complete'; submittedAt: string; dto: PrecheckoutBliteV1 }
-    | { state: 'failed'; submittedAt: string; fallbackAt: string };
+    | { state: 'failed'; submittedAt: string; fallbackAt: string }
+    | { state: 'unavailable' }
+    | { state: 'transient' };
 
-const browserBliteRequests = new Map<string, Promise<BrowserBliteStatus | null>>();
+const browserBliteRequests = new Map<string, Promise<BrowserBliteStatus>>();
 
 export function __resetBrowserBliteRequestsForTest(): void {
     browserBliteRequests.clear();
@@ -41,7 +45,7 @@ export function __resetBrowserBliteRequestsForTest(): void {
 async function fetchPrecheckoutBlite(
     preflightId: string,
     claimToken: string | null,
-): Promise<BrowserBliteStatus | null> {
+): Promise<BrowserBliteStatus> {
     const key = `${preflightId}:${claimToken ?? ''}`;
     const existing = browserBliteRequests.get(key);
     if (existing) return existing;
@@ -67,20 +71,23 @@ async function fetchPrecheckoutBlite(
                     && typeof value.retryAfterMs === 'number'
                     && Number.isInteger(value.retryAfterMs)
                     ? { state: 'pending' as const, submittedAt: value.submittedAt, fallbackAt: value.fallbackAt, retryAfterMs: value.retryAfterMs }
-                    : null;
+                    : { state: 'transient' as const };
             }
-            if (res.status !== 200) return null;
+            if (res.status === 204) return { state: 'unavailable' as const };
+            if (res.status !== 200) return { state: 'transient' as const };
             const value = await res.json() as { state?: unknown; submittedAt?: unknown; fallbackAt?: unknown; dto?: unknown };
             if (value.state === 'complete' && typeof value.submittedAt === 'string') {
                 const parsed = precheckoutBliteV1Schema.safeParse(value.dto);
-                return parsed.success ? { state: 'complete' as const, submittedAt: value.submittedAt, dto: parsed.data } : null;
+                return parsed.success
+                    ? { state: 'complete' as const, submittedAt: value.submittedAt, dto: parsed.data }
+                    : { state: 'transient' as const };
             }
             if (value.state === 'failed' && typeof value.submittedAt === 'string' && typeof value.fallbackAt === 'string') {
                 return { state: 'failed' as const, submittedAt: value.submittedAt, fallbackAt: value.fallbackAt };
             }
-            return null;
+            return { state: 'transient' as const };
         } catch {
-            return null;
+            return { state: 'transient' as const };
         } finally {
             clearTimeout(timeout);
         }
@@ -89,7 +96,7 @@ async function fetchPrecheckoutBlite(
     void pending.then(result => {
         // Only a terminal success is a useful browser cache. Pending/failed states must be
         // fetched again; retaining a resolved pending promise would stall the T+48 timeline.
-        if (result?.state !== 'complete' && browserBliteRequests.get(key) === pending) {
+        if (result.state !== 'complete' && browserBliteRequests.get(key) === pending) {
             browserBliteRequests.delete(key);
         }
     });
@@ -146,6 +153,8 @@ export interface PrecheckoutImmersiveProps {
      * same anonymous-claim mechanism.
      */
     claimToken: string | null;
+    /** The original accepted preflight clock held by /analyze, used before status responds. */
+    submittedAtMs?: number | null;
     onGoToPlans: () => void;
     onAvailabilityChange?: (available: boolean) => void;
     onDemoError?: () => void;
@@ -154,6 +163,7 @@ export interface PrecheckoutImmersiveProps {
 export function PrecheckoutImmersive({
     preflightId,
     claimToken,
+    submittedAtMs = null,
     onGoToPlans,
     onAvailabilityChange,
     onDemoError,
@@ -161,8 +171,11 @@ export function PrecheckoutImmersive({
     const [dto, setDto] = useState<PrecheckoutBliteV1 | null>(null);
     const [dismissed, setDismissed] = useState(false);
     const [screen, setScreen] = useState<Screen | null>(null);
-    const [flow, setFlow] = useState<BlitePageState>(initialBlitePageState);
-    const flowRef = useRef<BlitePageState>(initialBlitePageState);
+    const initialFlow = submittedAtMs === null
+        ? initialBlitePageState
+        : beginBlitePage(submittedAtMs) ?? initialBlitePageState;
+    const [flow, setFlow] = useState<BlitePageState>(initialFlow);
+    const flowRef = useRef<BlitePageState>(initialFlow);
 
     useEffect(() => {
         let active = true;
@@ -188,12 +201,23 @@ export function PrecheckoutImmersive({
                 transition({ type: 'FALLBACK_AT_48', atMs: Date.now() });
             }, Math.max(0, fallbackAtMs - Date.now()));
         };
+        if (submittedAtMs !== null) {
+            scheduleFallback(submittedAtMs + BLITE_FALLBACK_LATCH_MS);
+        }
         (async () => {
             const poll = async (): Promise<void> => {
                 const status = await fetchPrecheckoutBlite(preflightId, claimToken);
                 if (!active) return;
-                if (!status) {
+                if (status.state === 'unavailable') {
+                    if (fallbackTimer) clearTimeout(fallbackTimer);
                     onAvailabilityChange?.(false);
+                    return;
+                }
+                if (status.state === 'transient') {
+                    // A network or status-route hiccup is not an authoritative feature-off
+                    // decision. Keep the awaiting surface mounted and retry until the durable
+                    // pending/terminal response provides the original T+48 clock.
+                    pollTimer = setTimeout(() => { void poll(); }, TRANSIENT_STATUS_RETRY_MS);
                     return;
                 }
 
@@ -207,7 +231,11 @@ export function PrecheckoutImmersive({
                         flowRef.current = pending;
                         setFlow(pending);
                     }
-                    const fallbackAtMs = Date.parse(status.fallbackAt);
+                    const fallbackAtMs = Math.min(
+                        Date.parse(status.fallbackAt),
+                        (flowRef.current.submittedAtMs ?? Date.parse(status.submittedAt))
+                            + BLITE_FALLBACK_LATCH_MS,
+                    );
                     scheduleFallback(fallbackAtMs);
                     const retryAfterMs = Math.max(250, Math.min(status.retryAfterMs, 5_000));
                     pollTimer = setTimeout(() => { void poll(); }, retryAfterMs);
@@ -245,7 +273,7 @@ export function PrecheckoutImmersive({
             if (pollTimer) clearTimeout(pollTimer);
             if (fallbackTimer) clearTimeout(fallbackTimer);
         };
-    }, [preflightId, claimToken, onAvailabilityChange]);
+    }, [preflightId, claimToken, onAvailabilityChange, submittedAtMs]);
 
     const transition = useCallback((event: BlitePageEvent) => {
         const next = reduceBlitePage(flowRef.current, event);

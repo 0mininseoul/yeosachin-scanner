@@ -29,7 +29,7 @@ Expected: clean branch, the expected task branch, and exit 0 from the ancestry c
 | Track | Branch from | Exclusive ownership | Dependency |
 | --- | --- | --- | --- |
 | A — PR #368 observability | doc commit | #368 files: `lib/services/precheckout/blite-observability*`, observability schemas/tests/docs, minimal route/inference telemetry relocation | none; compare final PR first |
-| B — database/source/output lifecycle | doc commit | migration `20260813130000`, source/output stores, migration/PGlite/concurrency/lifecycle tests | none |
+| B — database/source/output lifecycle | doc commit | migration `20260813041712`, source/output stores, migration/PGlite/concurrency/lifecycle tests | none |
 | C — one collection + async worker/status | doc commit for Tasks 7–8; Tasks 9–11 run on integration after A+B+C1+C2 | preflight service/task/worker, source projection, inference runner, status-only route and route tests | A and B for Tasks 9–11 |
 | D — irreversible UI latch/demo | doc commit for Tasks 12–13; Task 14 runs on integration after C and D1+D2 | `components/precheckout-*`, `app/analyze/page.tsx`, frontend contract/tests | C status DTO/deadline contract for Task 14 |
 | E — integration/rollout/canary | integration branch after A+B+C+D | env/config docs, vercel runtime contract, canary/query/runbook and cross-track tests | all tracks |
@@ -234,7 +234,7 @@ Expected GREEN: projection and existing inference tests pass; commit is B1.
 ### Task 4: Write the additive migration with RED contract tests
 
 **Files:**
-- Create: `supabase/migrations/20260813130000_add_preflight_blite_single_collection.sql`
+- Create: `supabase/migrations/20260813041712_precheckout_blite_single_collection.sql`
 - Create: `lib/services/precheckout/blite-single-collection-migration-contract.test.ts`
 - Create: `lib/services/precheckout/blite-single-collection-pglite.test.ts`
 - Modify: `lib/services/precheckout/blite-store-migration-contract.test.ts`
@@ -279,7 +279,7 @@ The migration must:
 ```bash
 npm test -- lib/services/precheckout/blite-single-collection-migration-contract.test.ts lib/services/precheckout/blite-store-migration-contract.test.ts
 git diff --check
-git add supabase/migrations/20260813130000_add_preflight_blite_single_collection.sql lib/services/precheckout/blite-single-collection-migration-contract.test.ts lib/services/precheckout/blite-store-migration-contract.test.ts
+git add supabase/migrations/20260813041712_precheckout_blite_single_collection.sql lib/services/precheckout/blite-single-collection-migration-contract.test.ts lib/services/precheckout/blite-store-migration-contract.test.ts
 git commit -m "feat: add single-collection B-lite persistence contract"
 ```
 
@@ -307,7 +307,7 @@ Expected RED: at least source/lifecycle and failed-state cases fail.
 
 - [ ] **Step 2: Correct the migration only**
 
-Keep all fixes in `20260813130000_add_preflight_blite_single_collection.sql`; do not create correction migrations before the migration has shipped.
+Keep all fixes in `20260813041712_precheckout_blite_single_collection.sql`; do not create correction migrations before the migration has shipped.
 
 - [ ] **Step 3: Run GREEN including real PostgreSQL harness**
 
@@ -321,7 +321,7 @@ Expected GREEN: all selected cases pass. If Docker/PostgreSQL is unavailable, re
 - [ ] **Step 4: Commit**
 
 ```bash
-git add supabase/migrations/20260813130000_add_preflight_blite_single_collection.sql lib/services/precheckout/blite-single-collection-pglite.test.ts lib/services/precheckout/blite-postgres-concurrency.integration.test.ts lib/services/analysis/preflight-retention.test.ts lib/services/identity/account-deletion-pglite.test.ts
+git add supabase/migrations/20260813041712_precheckout_blite_single_collection.sql lib/services/precheckout/blite-single-collection-pglite.test.ts lib/services/precheckout/blite-postgres-concurrency.integration.test.ts lib/services/analysis/preflight-retention.test.ts lib/services/identity/account-deletion-pglite.test.ts
 git commit -m "test: prove B-lite source and lease lifecycle"
 ```
 
@@ -458,7 +458,7 @@ Expected GREEN: selected tests pass; commit C2. Omit unchanged image-preprocessi
 
 - [ ] **Step 1: Write RED one-collection tests**
 
-For cohort requests, assert one `getFallbackProfile` call returns feed, both ready snapshot and `projectPrecheckoutBliteSource(profile)` receive that same object, the exact provider-run lineage is stored, and `finalizeReadyWithSource` occurs before inference dispatch. Assert `TARGET_PRIVATE`, `TARGET_NOT_FOUND`, `BETA_CAPACITY_UNAVAILABLE`, incomplete feed, and provider errors retain distinct outcomes and never dispatch Gemini.
+For cohort requests, assert one full-profile provider call returns feed, both ready snapshot and `projectPrecheckoutBliteSource(profile)` receive that same object, the exact provider-run lineage is stored, and `finalizeReadyWithSource` occurs before inference dispatch. Assert `TARGET_PRIVATE`, `TARGET_NOT_FOUND`, `BETA_CAPACITY_UNAVAILABLE`, incomplete feed, and provider errors retain distinct outcomes and never dispatch Gemini.
 
 Run:
 
@@ -711,7 +711,7 @@ Expected GREEN: all UI/state/race tests pass; commit D3. Omit unchanged hook/rac
 
 - [ ] **Step 1: Write RED integration contracts**
 
-Assert worker `maxDuration` is 75 seconds, status route <=15 seconds, master flag false and rollout 0 by default, migration name is the only new pending migration, no scraper import in status/runner/frontend, source cleanup remains flag-independent, and the runbook contains migration-first/GitHub-main-only/canary/rollback commands.
+Assert worker `maxDuration` is 75 seconds, status route <=15 seconds, master flag false and rollout 0 by default, exactly `20260813041712_precheckout_blite_single_collection.sql` is the only allowlisted migration, no scraper import in status/runner/frontend, source/dispatch cleanup remains flag-independent, dispatch RPC/security/PII/recovery smoke is documented, and the runbook contains migration-first/GitHub-main-only/canary/rollback commands.
 
 Run:
 
@@ -806,7 +806,7 @@ Expected: implementation PR is review-approved and green; worktree clean; `PRECH
 BLITE_DB_WORKDIR="$(mktemp -d)"
 mkdir -p "$BLITE_DB_WORKDIR/supabase/migrations"
 cp supabase/config.toml "$BLITE_DB_WORKDIR/supabase/config.toml"
-cp supabase/migrations/20260813130000_add_preflight_blite_single_collection.sql "$BLITE_DB_WORKDIR/supabase/migrations/"
+cp supabase/migrations/20260813041712_precheckout_blite_single_collection.sql "$BLITE_DB_WORKDIR/supabase/migrations/"
 find "$BLITE_DB_WORKDIR/supabase/migrations" -maxdepth 1 -type f -print
 ```
 
@@ -823,7 +823,7 @@ supabase link --project-ref "$BLITE_PROJECT_REF"
 supabase db push --dry-run
 ```
 
-Expected: dry-run lists only `20260813130000_add_preflight_blite_single_collection.sql`. If any other migration appears, stop.
+Expected: dry-run lists only `20260813041712_precheckout_blite_single_collection.sql`. If any other migration appears, stop.
 
 - [ ] **Step 4: Apply once and verify remote history before any retry**
 

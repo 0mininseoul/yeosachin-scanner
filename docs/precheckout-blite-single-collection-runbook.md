@@ -28,13 +28,16 @@ npm test -- lib/services/precheckout/blite-single-collection-migration-contract.
 ```
 
 Then, using an approved isolated operator session and no browser credentials, verify migration
-history and the service-only RPC/schema contract: the new source table has RLS forced, browser
-roles have no table/RPC grants, and these RPCs resolve with their expected signatures:
+history and the service-only RPC/schema contract: the source and dispatch tables have RLS forced,
+browser roles have no table/RPC grants, and these RPCs resolve with their expected signatures:
 `activate_precheckout_blite_cohort_v1`, `finalize_preflight_blite_source_v1`,
 `claim_precheckout_blite_v2`, `complete_precheckout_blite_v2`,
-`fail_precheckout_blite_v2`, and `read_precheckout_blite_status_v1`. Exercise the approved
+`fail_precheckout_blite_v2`, `read_precheckout_blite_status_v1`,
+`reserve_precheckout_blite_dispatch_v1`, `mark_precheckout_blite_dispatch_failed_v1`, and
+`mark_precheckout_blite_dispatch_enqueued_v1`. Exercise the approved
 schema fixture only in the isolated smoke environment; it must prove one source projection,
-terminal source deletion, and no second Instagram collection.
+terminal source/dispatch cleanup, durable dispatch recovery/ack replay, and no second Instagram
+collection.
 
 ## Canary and rollback
 

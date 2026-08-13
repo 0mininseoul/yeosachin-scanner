@@ -369,6 +369,73 @@ describe('PrecheckoutImmersive', () => {
         expect(onAvailabilityChange).toHaveBeenLastCalledWith(false);
     });
 
+    it('keeps the plan gate closed through a transient status failure and retries to the authoritative T+48 clock', async () => {
+        vi.useFakeTimers();
+        vi.setSystemTime(new Date(SUBMITTED_AT));
+        vi.stubGlobal('requestAnimationFrame', vi.fn(() => 1));
+        vi.stubGlobal('cancelAnimationFrame', vi.fn());
+        const onAvailabilityChange = vi.fn();
+        const fetchMock = vi.fn()
+            .mockRejectedValueOnce(new TypeError('network unavailable'))
+            .mockResolvedValueOnce(jsonResponse(pendingStatus({ submittedAt: SUBMITTED_AT }), 202));
+        vi.stubGlobal('fetch', fetchMock);
+
+        await act(async () => {
+            root.render(createElement(PrecheckoutImmersive, {
+                preflightId: PREFLIGHT_ID,
+                claimToken: null,
+                onGoToPlans: vi.fn(),
+                onAvailabilityChange,
+            }));
+        });
+        await settleUi();
+        expect(onAvailabilityChange).not.toHaveBeenCalledWith(false);
+        expect(container.innerHTML).toBe('');
+
+        await act(async () => { await vi.advanceTimersByTimeAsync(1_000); });
+        await settleUi();
+        expect(fetchMock).toHaveBeenCalledTimes(2);
+        expect(onAvailabilityChange).not.toHaveBeenCalledWith(false);
+
+        await act(async () => { await vi.advanceTimersByTimeAsync(48_000); });
+        expect(container.querySelector('[data-precheckout-demo-mode="fallback"]')).not.toBeNull();
+    });
+
+    it('uses the original preflight clock when every status request is transient and starts the exact T+48 fallback demo', async () => {
+        vi.useFakeTimers();
+        vi.setSystemTime(new Date(SUBMITTED_AT));
+        vi.stubGlobal('requestAnimationFrame', vi.fn(() => 1));
+        vi.stubGlobal('cancelAnimationFrame', vi.fn());
+        const onGoToPlans = vi.fn();
+        const onAvailabilityChange = vi.fn();
+        vi.stubGlobal('fetch', vi.fn().mockRejectedValue(new TypeError('network unavailable')));
+
+        await act(async () => {
+            root.render(createElement(PrecheckoutImmersive, {
+                preflightId: PREFLIGHT_ID,
+                claimToken: null,
+                submittedAtMs: Date.parse(SUBMITTED_AT),
+                onGoToPlans,
+                onAvailabilityChange,
+            }));
+        });
+        await settleUi();
+        expect(onAvailabilityChange).not.toHaveBeenCalledWith(false);
+        expect(container.querySelector('[data-precheckout-demo-mode="fallback"]')).toBeNull();
+
+        await act(async () => { await vi.advanceTimersByTimeAsync(47_999); });
+        expect(container.querySelector('[data-precheckout-demo-mode="fallback"]')).toBeNull();
+        expect(onGoToPlans).not.toHaveBeenCalled();
+        await act(async () => { await vi.advanceTimersByTimeAsync(1); });
+        expect(container.querySelector('[data-precheckout-demo-mode="fallback"]')).not.toBeNull();
+        expect(onGoToPlans).not.toHaveBeenCalled();
+
+        await act(async () => { await vi.advanceTimersByTimeAsync(11_999); });
+        expect(onGoToPlans).not.toHaveBeenCalled();
+        await act(async () => { await vi.advanceTimersByTimeAsync(1); });
+        expect(onGoToPlans).toHaveBeenCalledOnce();
+    });
+
     it('reuses one browser request when the same preflight remounts', async () => {
         const fetchMock = vi.fn().mockResolvedValue(jsonResponse(completeStatus(validDto({ likelyFemale: false }))));
         vi.stubGlobal('fetch', fetchMock);

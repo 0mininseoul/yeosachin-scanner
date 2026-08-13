@@ -9,6 +9,13 @@ function readSingleCollectionMigration(): string {
     return readFileSync(join(process.cwd(), 'supabase/migrations', migrations[0]), 'utf8');
 }
 
+function readRunbook(): string {
+    return readFileSync(
+        join(process.cwd(), 'docs/precheckout-blite-single-collection-runbook.md'),
+        'utf8',
+    );
+}
+
 function functionDefinition(migration: string, name: string): string {
     const start = migration.indexOf(`FUNCTION public.${name}(`);
     expect(start).toBeGreaterThanOrEqual(0);
@@ -186,5 +193,59 @@ describe('precheckout B-lite single-collection migration', () => {
                 `GRANT EXECUTE ON FUNCTION public\\.${signature.replace(/[()]/g, '\\$&').replaceAll(', ', ',\\s*')}[\\s\\S]*?TO service_role`,
             ));
         }
+    });
+
+    it('keeps dispatch recovery additive inside the single release migration and allowlist', () => {
+        const migration = readSingleCollectionMigration();
+        const migrationFiles = readdirSync(join(process.cwd(), 'supabase/migrations'))
+            .filter(name => name.includes('precheckout_blite'))
+            .filter(name => !name.startsWith('20260812231822_'))
+            .sort();
+        expect(migrationFiles).toEqual([
+            '20260813041712_precheckout_blite_single_collection.sql',
+        ]);
+        const runbook = readRunbook();
+        expect(runbook).toMatch(
+            /exact allowlist contains only[\s\S]*`20260813041712_precheckout_blite_single_collection\.sql`/,
+        );
+        expect(runbook).not.toMatch(/20260813\d+_precheckout_blite_dispatch_recovery\.sql/);
+
+        expect(migration).toContain('CREATE TABLE IF NOT EXISTS public.precheckout_blite_dispatches');
+        expect(migration).toContain('ALTER TABLE public.precheckout_blite_dispatches ENABLE ROW LEVEL SECURITY');
+        expect(migration).toContain('ALTER TABLE public.precheckout_blite_dispatches FORCE ROW LEVEL SECURITY');
+        expect(migration).toContain(
+            'REVOKE ALL ON TABLE public.precheckout_blite_dispatches FROM PUBLIC, anon, authenticated',
+        );
+        expect(migration).toContain(
+            'GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE public.precheckout_blite_dispatches TO service_role',
+        );
+        for (const name of [
+            'reserve_precheckout_blite_dispatch_v1',
+            'mark_precheckout_blite_dispatch_failed_v1',
+            'mark_precheckout_blite_dispatch_enqueued_v1',
+        ]) {
+            const definition = functionDefinition(migration, name);
+            expect(definition).toContain('SECURITY DEFINER');
+            expect(definition).toContain("SET search_path = ''");
+            expect(migration).toMatch(new RegExp(
+                `REVOKE ALL ON FUNCTION public\\.${name}\\([\\s\\S]*?FROM PUBLIC, anon, authenticated, service_role`,
+            ));
+            expect(migration).toMatch(new RegExp(
+                `GRANT EXECUTE ON FUNCTION public\\.${name}\\([\\s\\S]*?TO service_role`,
+            ));
+        }
+        const reserve = functionDefinition(migration, 'reserve_precheckout_blite_dispatch_v1');
+        expect(reserve).toContain('v_preflight.precheckout_blite_cohort');
+        expect(reserve).toContain("v_preflight.status <> 'ready'");
+        expect(reserve.indexOf('FOR UPDATE')).toBeLessThan(
+            reserve.indexOf('v_now := pg_catalog.clock_timestamp();', reserve.indexOf('FOR UPDATE')),
+        );
+        expect(reserve).toContain("'should_enqueue', FALSE");
+        expect(reserve).toContain('public.precheckout_blite_sources AS source');
+        expect(reserve).toContain('public.precheckout_blite_cache AS cache');
+        expect(reserve).toContain("v_dispatch.state = 'enqueued'");
+        expect(migration).toContain("failure_reason = 'dispatch_failed'");
+        expect(migration).toContain('public.precheckout_blite_dispatches AS dispatch');
+        expect(migration).toContain('DELETE FROM public.precheckout_blite_dispatches');
     });
 });

@@ -967,6 +967,7 @@ const DISCLOSURE_ACCEPTED = true;
                                         key={`${readyPreflight.preflightId}:${claimToken ?? ''}`}
                                         preflightId={readyPreflight.preflightId}
                                         claimToken={claimToken}
+                                        submittedAtMs={preflightStartedAt}
                                         onGoToPlans={handleGoToPlans}
                                         onAvailabilityChange={handlePrecheckoutAvailability}
                                     />

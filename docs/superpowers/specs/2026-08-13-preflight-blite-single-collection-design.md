@@ -1,7 +1,7 @@
 # Preflight + B-lite single-collection design
 
-Date: 2026-08-13  
-Status: approved architecture, implementation not started  
+Date: 2026-08-13
+Status: approved architecture, implementation not started
 Base: `origin/main` at `5c5a05574a0e477d2e8cdc90eb14cc64c6c1b4fe`  
 Production baseline: `PRECHECKOUT_BLITE_ENABLED=false`; legacy ready-preflight account card and plans are visible
 

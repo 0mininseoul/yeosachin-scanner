@@ -42,7 +42,7 @@ import {
     assertAnalysisTestEntitlementConfiguration,
 } from './test-entitlement';
 import { getSelfHostedProfileSummary } from '@/lib/services/instagram/providers/selfhosted';
-import { getApifyProfileSummary } from '@/lib/services/instagram/providers/apify';
+import { getApifyProfile, getApifyProfileSummary } from '@/lib/services/instagram/providers/apify';
 import { selfHostedAuthProvider } from '@/lib/services/instagram/providers/selfhosted-auth';
 import { getAnalysisV2PaidCollectionProvider } from '@/lib/services/instagram/config';
 import {
@@ -116,6 +116,9 @@ export const PREFLIGHT_DATABASE_NAMES = Object.freeze({
     claimRpc: 'claim_analysis_v2_preflight',
     reserveDispatchRpc: 'reserve_analysis_v2_preflight_dispatch',
     markDispatchedRpc: 'mark_analysis_v2_preflight_dispatched',
+    bliteDispatchReserveRpc: 'reserve_precheckout_blite_dispatch_v1',
+    bliteDispatchFailedRpc: 'mark_precheckout_blite_dispatch_failed_v1',
+    bliteDispatchEnqueuedRpc: 'mark_precheckout_blite_dispatch_enqueued_v1',
     releaseClaimRpc: 'release_analysis_preflight_claim',
     completeRpc: 'complete_analysis_v2_preflight',
     blockRpc: 'block_analysis_v2_preflight',
@@ -463,6 +466,18 @@ export interface PreflightStore {
         generation: number;
         reservationToken: string;
     }): Promise<void>;
+    reserveBliteDispatch?(preflightId: string): Promise<{
+        shouldEnqueue: boolean;
+        dispatchToken: string | null;
+    }>;
+    markBliteDispatchFailed?(input: {
+        preflightId: string;
+        dispatchToken: string;
+    }): Promise<boolean>;
+    markBliteDispatchEnqueued?(input: {
+        preflightId: string;
+        dispatchToken: string;
+    }): Promise<boolean>;
     releaseClaim(claim: ClaimedPreflight): Promise<void>;
     finalizeReady(claim: ClaimedPreflight, snapshot: ReadyPreflightSnapshot): Promise<void>;
     finalizeBlocked(claim: ClaimedPreflight, code: AnalysisV2ErrorCode): Promise<void>;
@@ -1171,6 +1186,55 @@ export function createSupabasePreflightStore(
             }
         },
 
+        async reserveBliteDispatch(preflightId) {
+            const { data, error } = await client.rpc(
+                PREFLIGHT_DATABASE_NAMES.bliteDispatchReserveRpc,
+                { p_preflight_id: preflightId }
+            );
+            if (error) throwRpcError(error, 'B-lite dispatch reserve');
+            const row = rpcRow(data, 'B-lite dispatch reserve');
+            if (!row || typeof row.should_enqueue !== 'boolean') {
+                throw new Error('PREFLIGHT_PERSISTENCE_ERROR: invalid B-lite dispatch reservation.');
+            }
+            const dispatchToken = row.dispatch_token === null
+                ? null
+                : requiredUuid(row.dispatch_token, 'B-lite dispatch token');
+            if (row.should_enqueue && dispatchToken === null) {
+                throw new Error('PREFLIGHT_PERSISTENCE_ERROR: B-lite dispatch token is missing.');
+            }
+            return { shouldEnqueue: row.should_enqueue, dispatchToken };
+        },
+
+        async markBliteDispatchFailed(input) {
+            const { data, error } = await client.rpc(
+                PREFLIGHT_DATABASE_NAMES.bliteDispatchFailedRpc,
+                {
+                    p_preflight_id: input.preflightId,
+                    p_dispatch_token: input.dispatchToken,
+                }
+            );
+            if (error) throwRpcError(error, 'B-lite dispatch failure mark');
+            if (typeof data !== 'boolean') {
+                throw new Error('PREFLIGHT_PERSISTENCE_ERROR: invalid B-lite dispatch failure mark.');
+            }
+            return data;
+        },
+
+        async markBliteDispatchEnqueued(input) {
+            const { data, error } = await client.rpc(
+                PREFLIGHT_DATABASE_NAMES.bliteDispatchEnqueuedRpc,
+                {
+                    p_preflight_id: input.preflightId,
+                    p_dispatch_token: input.dispatchToken,
+                }
+            );
+            if (error) throwRpcError(error, 'B-lite dispatch mark');
+            if (typeof data !== 'boolean') {
+                throw new Error('PREFLIGHT_PERSISTENCE_ERROR: invalid B-lite dispatch mark.');
+            }
+            return data;
+        },
+
         async claim(preflightId) {
             const claimToken = randomUUID();
             const { data, error } = await client.rpc(PREFLIGHT_DATABASE_NAMES.claimRpc, {
@@ -1662,6 +1726,8 @@ export async function processPreflight(
             context: ProviderCallContext
         ) => Promise<InstagramProfile | null>;
         getFallbackProfile?: typeof getApifyProfileSummary;
+        /** Full profile collection for the B-lite single-collection cohort path. */
+        getFullProfile?: typeof getApifyProfile;
         providerRunStore?: PreflightProviderRunStore;
         anonymousProfileCache?: AnonymousProfileCache;
         betaCreditCoordinator?: BetaApifyPreflightCoordinator;
@@ -1716,8 +1782,42 @@ export async function processPreflight(
             }
         }
     };
+    const dispatchBliteInference = async (targetPreflightId: string): Promise<void> => {
+        if (!dependencies.enqueueBliteInference) {
+            throw new Error('PREFLIGHT_TASKS_CONFIG_ERROR: B-lite inference enqueue is unavailable.');
+        }
+        const reservation = await store.reserveBliteDispatch?.(targetPreflightId);
+        if (reservation && !reservation.shouldEnqueue) return;
+        const dispatchToken = reservation?.dispatchToken ?? null;
+        try {
+            await dependencies.enqueueBliteInference(targetPreflightId);
+        } catch (error) {
+            if (dispatchToken && store.markBliteDispatchFailed) {
+                await store.markBliteDispatchFailed({
+                    preflightId: targetPreflightId,
+                    dispatchToken,
+                });
+            }
+            throw error;
+        }
+        if (dispatchToken && store.markBliteDispatchEnqueued) {
+            await store.markBliteDispatchEnqueued({
+                preflightId: targetPreflightId,
+                dispatchToken,
+            });
+        }
+    };
     const claim = await store.claim(preflightId);
     if (!claim) {
+        // A finalized cohort row may be replayed after the original worker lost the
+        // enqueue response. The database fence checks persisted cohort/readiness/source;
+        // legacy/cohort-off rows return a no-op reservation without reading rollout env.
+        if (
+            dependencies.enqueueBliteInference
+            && store.reserveBliteDispatch
+        ) {
+            await dispatchBliteInference(preflightId);
+        }
         // The claim RPC itself may have expired or exhausted the row. The
         // targeted RPC proves whether beta credit actually needs releasing.
         await settleTerminalBetaCredit(false);
@@ -1796,7 +1896,7 @@ export async function processPreflight(
                 inputHash,
                 identity,
             });
-            profile = await (dependencies.getFallbackProfile ?? getApifyProfileSummary)(
+            profile = await (dependencies.getFullProfile ?? getApifyProfile)(
                 claim.targetInstagramId,
                 fallbackCallContext(
                     bound.checkpoint,
@@ -2093,10 +2193,7 @@ export async function processPreflight(
                 expiresAt,
             });
             if (finalized) {
-                if (!dependencies.enqueueBliteInference) {
-                    throw new Error('PREFLIGHT_TASKS_CONFIG_ERROR: B-lite inference enqueue is unavailable.');
-                }
-                await dependencies.enqueueBliteInference(claim.preflightId);
+                await dispatchBliteInference(claim.preflightId);
             }
         } else {
             await store.finalizeReady(claim, snapshot);
