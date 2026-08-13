@@ -398,9 +398,11 @@ function abortSignalRejection(signal: AbortSignal | undefined): Promise<never> {
  * budget: once it is exhausted, no new media or Gemini work starts and the caller receives a
  * fail-open `null`.
  */
-function isDurableSource(value: object): value is PrecheckoutBliteSourceAdapter {
+function isDurableSource(value: unknown): value is PrecheckoutBliteSourceAdapter {
     return (
-        'schemaVersion' in value
+        value !== null
+        && typeof value === 'object'
+        && 'schemaVersion' in value
         && value.schemaVersion === 1
         && 'fullName' in value
         && 'posts' in value
