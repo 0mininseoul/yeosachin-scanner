@@ -12,6 +12,7 @@ export interface EarlybirdPaymentDiscordItem {
     order_id: string;
     claim_token: string;
     plan_id: string;
+    actual_amount_krw: number | null;
     paid_at: string;
     buyer_name: string | null;
     gender: string | null;
@@ -46,8 +47,15 @@ function productName(value: unknown): string {
     return '미제공';
 }
 
+function paidAmount(value: unknown): string {
+    if (typeof value !== 'number' || !Number.isFinite(value) || value < 0) {
+        return '미제공';
+    }
+    return `₩${new Intl.NumberFormat('ko-KR', { maximumFractionDigits: 0 }).format(value)}`;
+}
+
 export function buildPaymentDiscordPayload(
-    item: Pick<EarlybirdPaymentDiscordItem, 'plan_id' | 'buyer_name' | 'gender' | 'paid_at'>,
+    item: Pick<EarlybirdPaymentDiscordItem, 'plan_id' | 'actual_amount_krw' | 'buyer_name' | 'gender' | 'paid_at'>,
 ) {
     return {
         embeds: [{
@@ -55,6 +63,7 @@ export function buildPaymentDiscordPayload(
             color: 0x57F287,
             fields: [
                 { name: '🛍️ 상품명', value: productName(item.plan_id), inline: true },
+                { name: '💰 결제금액', value: paidAmount(item.actual_amount_krw), inline: true },
                 {
                     name: '👤 결제자',
                     value: maskKakaoName(item.buyer_name) ?? '미제공',
@@ -190,7 +199,7 @@ export async function deliverEarlybirdPaymentDiscordNotifications(options: {
 
     let data: unknown;
     try {
-        const result = await supabaseAdmin.rpc('claim_earlybird_payment_discord_outbox', {
+        const result = await supabaseAdmin.rpc('claim_earlybird_payment_discord_outbox_v2', {
             p_limit: Math.max(1, Math.min(options.limit ?? 1, 10)),
         });
         if (result.error) {

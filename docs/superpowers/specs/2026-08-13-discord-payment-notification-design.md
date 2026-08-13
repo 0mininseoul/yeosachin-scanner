@@ -32,6 +32,45 @@ Groble 결제가 기존 결제 원장에서 `accepted`로 확정되면, Discord�
 - 운영 설정은 `PAYMENT_DISCORD_ENABLED=true`, `PAYMENT_DISCORD_THREAD_ID=1537327100254486611`로 둔다. 토큰 값은 코드·문서·로그에 기록하지 않는다.
 - Vercel cron은 내부 인증(`CRON_SECRET`)을 유지하고, dispatcher가 처리할 수 있는 bounded batch만 drain한다.
 
+## v1 → v2 결제금액 claim cutover
+
+v2 migration은 기존 `claim_earlybird_payment_discord_outbox(integer)`를 교체하지
+않고 `claim_earlybird_payment_discord_outbox_v2(integer)`를 추가한다. 따라서 이미
+배포된 v1 worker가 같은 pending row를 먼저 claim하면 새 결제금액 필드가 없는
+알림이 전송될 수 있다. migration과 새 worker 활성화 사이의 경계를 운영자가
+실수로 뒤집지 않도록 다음 guard를 사용한다. 이 변수들은 배포 환경에 저장하지
+않는 일회성 cutover 확인값이다.
+
+1. v1 worker/cron을 중지하고 in-flight 호출이 끝날 때까지 기다린 뒤, 아래처럼
+   `drained` 또는 `disabled`를 명시한다. 먼저 pre-migration gate가 통과해야 한다.
+
+   ```bash
+   PAYMENT_DISCORD_OLD_WORKER_STATE=drained \
+   PAYMENT_DISCORD_V2_MIGRATION_APPLIED=false \
+   PAYMENT_DISCORD_V2_WORKER_ENABLED=false \
+   scripts/assert-payment-discord-cutover.sh pre-migration
+   ```
+
+2. pre-migration gate가 통과한 뒤에만
+   `20260814100000_add_actual_amount_to_payment_discord_claim.sql`을 적용한다.
+   적용 전에는 `supabase db push --include-all`을 사용하지 않고, reviewed
+   migration allowlist와 dry-run 절차를 따른다.
+
+3. migration 적용과 ACL 확인이 끝난 뒤 새 worker를 배포하고 v2 activation gate를
+   실행한다. old worker 상태를 다시 확인하며, v2 활성화 전에 migration 적용값과
+   worker enabled 값을 모두 명시한다.
+
+   ```bash
+   PAYMENT_DISCORD_OLD_WORKER_STATE=drained \
+   PAYMENT_DISCORD_V2_MIGRATION_APPLIED=true \
+   PAYMENT_DISCORD_V2_WORKER_ENABLED=true \
+   scripts/assert-payment-discord-cutover.sh activate-v2
+   ```
+
+`disabled`는 `drained` 대신 사용할 수 있다. v1 RPC는 이 cutover 동안 호환성을
+위해 남겨두지만, old worker가 drain/disable 되기 전에는 migration을 적용하거나
+v2 worker를 활성화하지 않는다.
+
 ## Embed 계약
 
 ```text
