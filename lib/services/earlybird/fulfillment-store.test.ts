@@ -430,6 +430,45 @@ describe('earlybird fulfillment store', () => {
         expect(orderStore.claim).not.toHaveBeenCalled();
     });
 
+    it('reports a release failure at dispatch_release and preserves that cause', async () => {
+        const enqueueError = new Error('PREFLIGHT_TASKS_ENQUEUE_ERROR: enqueue failed');
+        const releaseError = new Error(
+            'EARLYBIRD_FULFILLMENT_PERSISTENCE_ERROR: release failed'
+        );
+        const orderStore = store();
+        const releaseFreshAdmissionDispatch = vi.fn(async () => {
+            throw releaseError;
+        });
+        const failure = await advanceAdmittedEarlybirdFulfillment(
+            identity(),
+            {
+                store: orderStore,
+                rebindExpiredPaidPreflight: vi.fn(async () => PREFLIGHT),
+                reserveFreshAdmission: vi.fn(async () => ({
+                    state: 'pending' as const,
+                    shouldEnqueue: true,
+                    generation: 1,
+                    dispatchGeneration: 1,
+                    dispatchToken: CLAIM,
+                })),
+                enqueueFreshAdmission: vi.fn(async () => {
+                    throw enqueueError;
+                }),
+                markFreshAdmissionDispatched: vi.fn(),
+                releaseFreshAdmissionDispatch,
+                dispatchAnalysisJob: vi.fn(),
+            }
+        ).catch(error => error);
+
+        expect(failure).toMatchObject({
+            stage: 'dispatch_release',
+            category: 'persistence',
+            code: 'EARLYBIRD_FULFILLMENT_PERSISTENCE_ERROR',
+        });
+        expect(failure.cause).toBe(releaseError);
+        expect(failure.cause).not.toBe(enqueueError);
+    });
+
     it('claims only after fresh admission and creates before dispatching one request', async () => {
         const orderStore = store();
         const sequence: string[] = [];

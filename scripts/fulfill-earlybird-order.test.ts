@@ -1,5 +1,8 @@
 import { describe, expect, it, vi } from 'vitest';
-import { EarlybirdFulfillmentError } from '../lib/services/earlybird/fulfillment-store';
+import {
+    diagnoseEarlybirdFulfillmentError,
+    EarlybirdFulfillmentError,
+} from '../lib/services/earlybird/fulfillment-store';
 import * as fulfillmentCli from './fulfill-earlybird-order';
 import {
     parseEarlybirdFulfillmentCliArgs,
@@ -37,6 +40,37 @@ describe('earlybird fulfillment operator CLI', () => {
         )).toEqual({
             status: 'failed',
             errorCode: 'EARLYBIRD_FULFILLMENT_FAILED',
+        });
+    });
+
+    it('does not serialize a raw plain-object cause', () => {
+        const cause = { secret: 'raw-object-secret', nested: { value: 42 } };
+        const error = new EarlybirdFulfillmentError(
+            'ANALYSIS_V2_FRESH_ADMISSION_ERROR',
+            {
+                stage: 'reserve',
+                category: 'persistence',
+                cause,
+            }
+        );
+
+        expect(error.cause).toBe(cause);
+        expect(Object.keys(error)).not.toContain('cause');
+        expect(JSON.stringify(error)).not.toContain('raw-object-secret');
+    });
+
+    it('rejects arbitrary prefixed diagnostic codes', () => {
+        const diagnosed = diagnoseEarlybirdFulfillmentError(
+            new Error('ANALYSIS_V2_ARBITRARY_CODE: sensitive detail'),
+            'reserve'
+        );
+
+        expect(diagnosed.code).toBe('EARLYBIRD_FULFILLMENT_FAILED');
+        expect(fulfillmentCli.formatEarlybirdFulfillmentCliFailure(diagnosed)).toEqual({
+            status: 'failed',
+            errorCode: 'EARLYBIRD_FULFILLMENT_FAILED',
+            stage: 'reserve',
+            category: 'unknown',
         });
     });
 

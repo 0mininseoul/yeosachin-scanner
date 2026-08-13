@@ -163,7 +163,12 @@ export class EarlybirdFulfillmentError extends Error {
         this.code = code;
         this.stage = details.stage;
         this.category = details.category;
-        this.cause = details.cause;
+        Object.defineProperty(this, 'cause', {
+            configurable: true,
+            enumerable: false,
+            value: details.cause,
+            writable: true,
+        });
     }
 }
 
@@ -220,8 +225,49 @@ function isFailureCategory(
         );
 }
 
-const SAFE_OPERATOR_ERROR_CODE = /^(?:EARLYBIRD|ANALYSIS_V2|PREFLIGHT|SCRAPING)_[A-Z0-9_]{2,95}$/;
-const ERROR_CODE_PREFIX = /(?:^|\s)((?:EARLYBIRD|ANALYSIS_V2|PREFLIGHT|SCRAPING)_[A-Z0-9_]{2,95})/;
+const SAFE_OPERATOR_ERROR_CODES = new Set([
+    'EARLYBIRD_FULFILLMENT_FAILED',
+    'EARLYBIRD_FULFILLMENT_INPUT_INVALID',
+    'EARLYBIRD_FULFILLMENT_OPERATOR_ADMISSION_REQUIRED',
+    'EARLYBIRD_FULFILLMENT_PAYMENT_INVALID',
+    'EARLYBIRD_FULFILLMENT_PERSISTENCE_ERROR',
+    'EARLYBIRD_FULFILLMENT_SNAPSHOT_CONFLICT',
+    'ANALYSIS_BETA_POOL_CAPACITY_UNAVAILABLE',
+    'ANALYSIS_BETA_POOL_PERSISTENCE_ERROR',
+    'ANALYSIS_BETA_RUNTIME_CONFIG_INVALID',
+    'ANALYSIS_V2_FRESH_ADMISSION_ERROR',
+    'ANALYSIS_V2_FRESH_ADMISSION_LEASE_BUSY',
+    'ANALYSIS_V2_FRESH_PROFILE_UNAVAILABLE',
+    'ANALYSIS_V2_OVER_PLUS_CAPACITY',
+    'ANALYSIS_V2_PLAN_NOT_ALLOWED',
+    'ANALYSIS_V2_PREFLIGHT_EXPIRED',
+    'ANALYSIS_V2_PREFLIGHT_NOT_FOUND',
+    'ANALYSIS_V2_PREFLIGHT_NOT_READY',
+    'ANALYSIS_V2_REVENUE_SETTLEMENT_FENCE',
+    'ANALYSIS_V2_TARGET_MISMATCH',
+    'ANALYSIS_V2_TARGET_NOT_FOUND',
+    'ANALYSIS_V2_TARGET_PRIVATE',
+    'ANALYSIS_V2_TASKS_CONFIG_ERROR',
+    'ANALYSIS_V2_TASKS_DISPATCH_ERROR',
+    'ANALYSIS_V2_TASKS_ENQUEUE_ERROR',
+    'ANALYSIS_V2_TASKS_LOOKUP_ERROR',
+    'ANALYSIS_V2_TASKS_UNAVAILABLE',
+    'PREFLIGHT_PERSISTENCE_ERROR',
+    'PREFLIGHT_PROVIDER_RUN_PERSISTENCE_ERROR',
+    'PREFLIGHT_TASKS_CONFIG_ERROR',
+    'PREFLIGHT_TASKS_ENQUEUE_ERROR',
+    'SCRAPING_CONFIG_ERROR',
+    'SCRAPING_ERROR',
+    'SCRAPING_INCOMPLETE_ERROR',
+    'SCRAPING_INVOCATION_DEADLINE_ERROR',
+    'SCRAPING_PROVIDER_QUOTA_ERROR',
+    'SCRAPING_PROVIDER_START_REJECTED_ERROR',
+    'SCRAPING_QUEUED_START_CANCELLED',
+    'SCRAPING_RUN_CHECKPOINT_ERROR',
+    'SCRAPING_RUN_PENDING_ERROR',
+    'SCRAPING_SCHEMA_ERROR',
+]);
+const ERROR_CODE_TOKEN = /[A-Z][A-Z0-9_]{2,95}/g;
 
 function errorText(error: unknown): string {
     if (typeof error === 'string') return error;
@@ -234,10 +280,9 @@ function errorText(error: unknown): string {
 
 function safeOperatorErrorCode(error: unknown): string {
     const text = errorText(error);
-    const exact = text.match(/^[A-Z][A-Z0-9_]{2,95}/)?.[0];
-    if (exact && SAFE_OPERATOR_ERROR_CODE.test(exact)) return exact;
-    const prefixed = text.match(ERROR_CODE_PREFIX)?.[1];
-    if (prefixed && SAFE_OPERATOR_ERROR_CODE.test(prefixed)) return prefixed;
+    const candidates = text.match(ERROR_CODE_TOKEN) ?? [];
+    const safeCode = candidates.find(code => SAFE_OPERATOR_ERROR_CODES.has(code));
+    if (safeCode) return safeCode;
     return 'EARLYBIRD_FULFILLMENT_FAILED';
 }
 
@@ -884,12 +929,10 @@ export async function advanceAdmittedEarlybirdFulfillment(
                         supabaseAdmin,
                         dispatchInput
                     );
-                } catch {
+                } catch (releaseError) {
                     throw diagnoseEarlybirdFulfillmentError(
-                        error,
-                        error instanceof EarlybirdFulfillmentError && error.stage
-                            ? error.stage
-                            : 'dispatch_release'
+                        releaseError,
+                        'dispatch_release'
                     );
                 }
                 throw error;
