@@ -4,7 +4,7 @@
 
 **Goal:** Send a privacy-safe Discord Embed to thread 1537327100254486611 when a Groble payment is durably accepted, with a transactional outbox and bounded delivery retries.
 
-**Architecture:** An AFTER trigger on earlybird_orders creates one outbox row when an order enters paid, making notification creation atomic with payment finalization. A server-only dispatcher claims rows through Supabase RPCs, reads only the order plan/time and the user name/gender, masks and formats the payload, and posts it using the existing Discord bot token. The Groble route schedules an immediate after() drain for accepted payments; an authenticated cron route provides recovery.
+**Architecture:** An AFTER trigger on earlybird_orders creates one outbox row when an order enters paid, making notification creation atomic with payment finalization. A server-only dispatcher claims rows through Supabase RPCs, reads only the order plan/time and the user name/gender, masks and formats the payload, and posts it using the existing Discord bot token. The Groble route schedules an immediate after() drain for accepted payments; the existing daily Discord cron also provides recovery because this project uses Vercel Hobby's two-cron limit.
 
 **Tech Stack:** Next.js App Router route handlers, Supabase PostgreSQL migrations/RPCs, Supabase admin client, Discord Bot API v10, Vitest, PGlite.
 
@@ -21,7 +21,7 @@
 - Modify: app/api/webhooks/groble/route.ts — schedule payment outbox delivery only for finalization disposition accepted.
 - Modify: lib/services/earlybird/groble-webhook-route.test.ts — mock after()/payment dispatcher and assert accepted-only scheduling.
 - Modify: .env.example — document non-secret payment Discord toggle/thread settings and shared bot-token reuse.
-- Modify: vercel.json — configure the internal route and a bounded recovery cron.
+- Modify: vercel.json — configure the internal route without adding a third Hobby-incompatible cron.
 - Create: docs/superpowers/plans/2026-08-13-discord-payment-notification.md — this implementation plan.
 
 ## Task 1: Write the failing migration lifecycle test
@@ -363,14 +363,9 @@ PAYMENT_DISCORD_ENABLED=false
 PAYMENT_DISCORD_THREAD_ID=1537327100254486611
 ~~~
 
-Add the new route with maxDuration: 60 under functions, and add a five-minute recovery cron entry:
+Add the new route with maxDuration: 60 under functions. Keep the existing two daily cron entries unchanged; the existing Kakao Discord cron route also invokes payment reconciliation and delivery so the Hobby cron limit is preserved.
 
-~~~json
-{
-    "path": "/api/internal/earlybird-payment-discord-outbox",
-    "schedule": "*/5 * * * *"
-}
-~~~
+There is no new `crons` entry for the payment route. The payment route remains available for authenticated manual recovery and future plan upgrades.
 
 Do not read, print, or commit any local or Vercel secret value.
 

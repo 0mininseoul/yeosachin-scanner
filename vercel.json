@@ -8,6 +8,9 @@
         "app/api/internal/kakao-signup-discord-outbox/route.ts": {
             "maxDuration": 60
         },
+        "app/api/internal/earlybird-payment-discord-outbox/route.ts": {
+            "maxDuration": 60
+        },
         "app/api/internal/sentry-discord-alert-outbox/route.ts": {
             "maxDuration": 60
         },

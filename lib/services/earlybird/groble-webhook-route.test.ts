@@ -3,6 +3,8 @@ import { readFileSync } from 'node:fs';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 const mocks = vi.hoisted(() => ({
+    after: vi.fn(),
+    deliverPayment: vi.fn(),
     rpc: vi.fn(),
     emit: vi.fn(),
     observeRoute: vi.fn((
@@ -17,8 +19,15 @@ const mocks = vi.hoisted(() => ({
     })),
 }));
 
+vi.mock('next/server', async importOriginal => {
+    const actual = await importOriginal<typeof import('next/server')>();
+    return { ...actual, after: mocks.after };
+});
 vi.mock('@/lib/supabase/admin', () => ({
     supabaseAdmin: { rpc: mocks.rpc },
+}));
+vi.mock('@/lib/services/earlybird/payment-discord', () => ({
+    deliverEarlybirdPaymentDiscordNotifications: mocks.deliverPayment,
 }));
 vi.mock('@/lib/observability/request', () => ({ observeRoute: mocks.observeRoute }));
 vi.mock('@/lib/observability/server', () => ({
@@ -118,6 +127,8 @@ function request(body: string, options: {
 describe('signed Groble webhook route', () => {
     beforeEach(() => {
         vi.clearAllMocks();
+        mocks.after.mockImplementation(() => undefined);
+        mocks.deliverPayment.mockResolvedValue(0);
         process.env.GROBLE_BASIC_PRODUCT_ID = 'basic_product-01';
         process.env.GROBLE_STANDARD_PRODUCT_ID = 'standard_product-01';
         process.env.GROBLE_BASIC_PAYMENT_ADDRESS = 'basic-checkout-a1';
@@ -133,6 +144,37 @@ describe('signed Groble webhook route', () => {
             }],
             error: null,
         });
+    });
+
+    it('schedules Discord delivery only for an accepted payment finalization', async () => {
+        const acceptedResponse = await POST(request(JSON.stringify(payload())));
+
+        expect(acceptedResponse.status).toBe(200);
+        expect(mocks.after).toHaveBeenCalledTimes(1);
+        expect(mocks.after).toHaveBeenCalledWith(expect.any(Function));
+        expect(mocks.deliverPayment).not.toHaveBeenCalled();
+
+        const [drain] = mocks.after.mock.calls[0] as [() => Promise<unknown>];
+        await drain();
+        expect(mocks.deliverPayment).toHaveBeenCalledWith({ limit: 10 });
+
+        mocks.after.mockClear();
+        mocks.deliverPayment.mockClear();
+        mocks.rpc.mockResolvedValue({
+            data: [{
+                disposition: 'duplicate_event',
+                order_id: '123e4567-e89b-42d3-a456-426614174000',
+                status: 'paid',
+                plan_sequence: 1,
+            }],
+            error: null,
+        });
+
+        const duplicateResponse = await POST(request(JSON.stringify(payload())));
+
+        expect(duplicateResponse.status).toBe(200);
+        expect(mocks.after).not.toHaveBeenCalled();
+        expect(mocks.deliverPayment).not.toHaveBeenCalled();
     });
 
     it('rejects non-JSON, invalid signatures, stale timestamps, and malformed payloads', async () => {
