@@ -128,7 +128,7 @@ export function EarlybirdStatus({ order }: { order: EarlybirdOrderStatusDto }) {
                     판독 상태를 확인하고 있어요
                 </h1>
                 <p className="mt-3 text-[13px] leading-relaxed text-fg-dim">
-                    판독 결과가 완성되면 1일 이내에 가입하신 이메일로 결과 링크를 보내드릴게요.
+                    판독 결과가 완성되면 2일 이내에 가입하신 이메일로 결과 링크를 보내드릴게요.
                 </p>
             </CaseCard>
         );
@@ -143,7 +143,7 @@ export function EarlybirdStatus({ order }: { order: EarlybirdOrderStatusDto }) {
                         결제가 완료되었어요
                     </h1>
                     <p className="mt-3 text-[13px] leading-relaxed text-fg-dim">
-                        판독 결과가 완성되면 1일 이내에 가입하신 이메일로 결과 링크를 보내드릴게요.
+                        판독 결과가 완성되면 2일 이내에 가입하신 이메일로 결과 링크를 보내드릴게요.
                     </p>
                 </CaseCard>
             </div>
