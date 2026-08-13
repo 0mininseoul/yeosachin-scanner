@@ -10,6 +10,7 @@ import {
 import { readAnonymousAnalysisV2Preflight } from '@/lib/services/analysis/anonymous-preflight';
 import { getInstagramProfile } from '@/lib/services/instagram/scraper';
 import { inferPrecheckoutBlite } from '@/lib/services/precheckout/blite-inference';
+import { precheckoutBliteStore } from '@/lib/services/precheckout/blite-store';
 import {
     precheckoutBliteV1Schema,
     type PrecheckoutBliteV1,
@@ -209,11 +210,39 @@ async function handlePOST(request: Request): Promise<NextResponse> {
         const cached = readCachedDto(preflightId);
         if (cached) return NextResponse.json(cached);
 
+        const durable = await precheckoutBliteStore.claim({ preflightId });
+        if (durable.disposition === 'complete') {
+            const parsedDto = precheckoutBliteV1Schema.safeParse(durable.dto);
+            if (!parsedDto.success) return unavailable('durable_cache_invalid');
+            writeCachedDto(preflightId, parsedDto.data);
+            return NextResponse.json(parsedDto.data);
+        }
+        if (durable.disposition === 'pending') return unavailable('generation_pending');
+
         stage = 'generation';
-        const dto = await sharedGeneration(preflightId, stored.readySnapshot.target.username);
-        if (!dto) return unavailable('generation_unavailable');
-        writeCachedDto(preflightId, dto);
-        return NextResponse.json(dto);
+        try {
+            const dto = await sharedGeneration(preflightId, stored.readySnapshot.target.username);
+            if (!dto) {
+                await precheckoutBliteStore.release({
+                    preflightId,
+                    leaseToken: durable.leaseToken,
+                });
+                return unavailable('generation_unavailable');
+            }
+            await precheckoutBliteStore.complete({
+                preflightId,
+                leaseToken: durable.leaseToken,
+                dto,
+            });
+            writeCachedDto(preflightId, dto);
+            return NextResponse.json(dto);
+        } catch (error) {
+            await precheckoutBliteStore.release({
+                preflightId,
+                leaseToken: durable.leaseToken,
+            }).catch(() => undefined);
+            throw error;
+        }
     } catch (error) {
         // Never 5xx into the product flow.
         const reason = error instanceof Error && error.message.startsWith('PRECHECKOUT_BLITE_PROFILE_COLLECTION_FAILED:')

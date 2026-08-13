@@ -60,6 +60,11 @@ async function fetchPrecheckoutBlite(
         }
     })();
     browserBliteRequests.set(key, pending);
+    void pending.then(result => {
+        if (result === null && browserBliteRequests.get(key) === pending) {
+            browserBliteRequests.delete(key);
+        }
+    });
     return pending;
 }
 

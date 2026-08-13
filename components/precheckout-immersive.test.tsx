@@ -133,6 +133,25 @@ describe('PrecheckoutImmersive', () => {
         expect(container.innerHTML).toBe('');
     });
 
+    it('does not pin a transient unavailable response in the browser request map', async () => {
+        const fetchMock = vi.fn()
+            .mockResolvedValueOnce(noBody(204))
+            .mockResolvedValueOnce(jsonResponse(validDto()));
+        vi.stubGlobal('fetch', fetchMock);
+
+        await act(async () => {
+            root.render(createElement(PrecheckoutImmersive, { key: 'first', preflightId: PREFLIGHT_ID, claimToken: null, onGoToPlans: vi.fn() }));
+        });
+        await settleUi();
+        await act(async () => {
+            root.render(createElement(PrecheckoutImmersive, { key: 'second', preflightId: PREFLIGHT_ID, claimToken: null, onGoToPlans: vi.fn() }));
+        });
+        await settleUi();
+
+        expect(fetchMock).toHaveBeenCalledTimes(2);
+        expect(container.textContent).toContain('이 계정의 인물이 남자가 맞나요?');
+    });
+
     it('renders nothing when the 200 body fails schema validation', async () => {
         vi.stubGlobal('fetch', vi.fn().mockResolvedValue(jsonResponse({ schemaVersion: 1, nonsense: true })));
 
