@@ -186,6 +186,18 @@ describe('reduceBlitePage', () => {
         expect(reduceBlitePage(pending, { type: 'BLITE_FAILED' } as never)).toBe(pending);
     });
 
+    it('rejects timestamps from a different or pre-submission clock', () => {
+        const pending = pendingState();
+        expect(reduceBlitePage(pending, {
+            type: 'BLITE_COMPLETE',
+            atMs: 48_000,
+        })).toBe(pending);
+        expect(reduceBlitePage(pending, {
+            type: 'BLITE_FAILED',
+            atMs: pending.submittedAtMs! - 1,
+        })).toBe(pending);
+    });
+
     it('reveals the legacy plans state after normal demo completion without changing the latch', () => {
         const ready = reduceBlitePage(pendingState(), {
             type: 'BLITE_COMPLETE',

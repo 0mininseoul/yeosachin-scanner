@@ -1,6 +1,6 @@
 /**
  * The page-level B-lite flow is deliberately framework-free. The caller owns the clock and
- * feeds the reducer server-relative events; this module never polls, schedules, or performs
+ * feeds the reducer absolute epoch timestamps; this module never polls, schedules, or performs
  * provider work.
  */
 
@@ -54,7 +54,12 @@ function submissionCutoff(state: BlitePageState): number | null {
     if (!Number.isFinite(state.submittedAtMs) || state.submittedAtMs === null || state.submittedAtMs < 0) {
         return null;
     }
-    return state.submittedAtMs + BLITE_FALLBACK_LATCH_MS;
+    const cutoffMs = state.submittedAtMs + BLITE_FALLBACK_LATCH_MS;
+    return Number.isFinite(cutoffMs) ? cutoffMs : null;
+}
+
+function isAtOrAfterSubmission(state: BlitePageState, atMs: number): boolean {
+    return state.submittedAtMs !== null && atMs >= state.submittedAtMs;
 }
 
 function fallbackDemo(
@@ -85,7 +90,7 @@ export function reduceBlitePage(
             {
                 const atMs = transitionTimestamp(event);
                 const cutoffMs = submissionCutoff(state);
-                if (atMs === null || cutoffMs === null) return state;
+                if (atMs === null || cutoffMs === null || !isAtOrAfterSubmission(state, atMs)) return state;
                 if (atMs >= cutoffMs) return fallbackDemo(state, cutoffMs);
             }
             return {
@@ -103,7 +108,7 @@ export function reduceBlitePage(
             {
                 const atMs = transitionTimestamp(event);
                 const cutoffMs = submissionCutoff(state);
-                if (atMs === null || cutoffMs === null) return state;
+                if (atMs === null || cutoffMs === null || !isAtOrAfterSubmission(state, atMs)) return state;
                 return fallbackDemo(state, Math.min(atMs, cutoffMs));
             }
 
@@ -112,14 +117,14 @@ export function reduceBlitePage(
             {
                 const atMs = transitionTimestamp(event);
                 const cutoffMs = submissionCutoff(state);
-                if (atMs === null || cutoffMs === null || atMs < cutoffMs) return state;
+                if (atMs === null || cutoffMs === null || !isAtOrAfterSubmission(state, atMs) || atMs < cutoffMs) return state;
                 return fallbackDemo(state, cutoffMs);
             }
 
         case 'SUCCESS_CTA':
             if (state.view !== 'blite_ready' || state.pathLatch !== 'normal') return state;
             const startedAtMs = transitionTimestamp(event);
-            if (startedAtMs === null) return state;
+            if (startedAtMs === null || !isAtOrAfterSubmission(state, startedAtMs)) return state;
             return {
                 ...state,
                 view: 'success_demo',
