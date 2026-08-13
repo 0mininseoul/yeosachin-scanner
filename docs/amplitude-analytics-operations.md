@@ -2,6 +2,13 @@
 
 Amplitude는 클라이언트 제품 퍼널을 보는 보조 분석 도구다. 결제·주문·분석 상태의 원장은 Supabase이며, Amplitude 수치로 결제 장부를 확정하지 않는다.
 
+## 운영 조회 기준
+
+- 운영 이벤트 조회는 Amplitude MCP/connector가 아니라 로컬 canonical `main` worktree의 `.env.local` 키를 사용한 공식 Amplitude REST API로만 수행한다. Connector가 다른 프로젝트(예: `GATITA`)를 반환할 수 있으므로 운영 근거로 사용하지 않는다.
+- 실행 전에 `git worktree list`로 canonical `main` 경로를 확인하고, 그 worktree의 `.env.local`에서 `NEXT_PUBLIC_AMPLITUDE_API_KEY`와 `AMPLITUDE_SECRET_KEY`를 안전하게 주입한다. 현재 feature worktree의 환경변수나 connector의 기본 프로젝트를 사용하지 않는다.
+- 조회 대상 프로젝트가 `yeosachin`인지 프로젝트 설정/API 응답으로 확인한다. 키가 없거나 프로젝트 식별이 일치하지 않으면 조회를 중단하며 다른 프로젝트로 대체하지 않는다.
+- 키·secret·Authorization 헤더·raw export 파일·user/device 식별자와 원시 이벤트 payload는 터미널, 로그, 문서, 커밋, 채팅에 남기지 않는다. `.env.local`은 직접 `source`하지 않고 안전한 환경 주입 방식을 사용한다.
+
 공식 참고 문서:
 
 - [Unified Browser SDK](https://amplitude.com/docs/sdks/analytics/browser/browser-unified-sdk)

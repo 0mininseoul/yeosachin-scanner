@@ -139,3 +139,10 @@ ai-baram-detector/
 - `app/page.tsx`의 마케팅 카피(히어로 헤드라인/서브·미세문구, 판독 절차 STEP 문구, '왜 AI 판독인가' 신뢰 블록, 신뢰 스트립 문구, 하단 CTA 헤드라인/서브/버튼)는 **프론트엔드가 확정한 문구**입니다.
 - 백엔드·기능 작업 중에 이 카피를 **임의로 수정하거나 순화("공개 정보 기반/참고 결과" 식 완화 등)하지 마세요.** 기능 연동(로직·props·기능 추가)은 하되 **문구 자체는 건드리지 않습니다.**
 - 카피 변경이 꼭 필요하면(법적·컴플라이언스 등) 반드시 **사용자에게 먼저 확인**하세요. (과거 백엔드 커밋이 이 카피를 순화해 덮어쓴 사례가 있어 명시함.)
+
+### 5. Amplitude 운영 조회 경로 고정
+
+- Amplitude 이벤트·원시 데이터·프로젝트 조회에는 Amplitude MCP/connector를 사용하지 않는다. Connector가 다른 프로젝트(예: `GATITA`)를 반환할 수 있으므로 운영 데이터의 근거로 사용할 수 없다.
+- 조회는 `git worktree list`로 확인한 로컬 canonical `main` worktree의 `.env.local`에 있는 Amplitude 키를 사용해 공식 Amplitude REST API로 수행한다. 현재 feature worktree의 `.env.local`이나 connector의 기본 프로젝트를 대체 경로로 사용하지 않는다.
+- 읽기 API 호출은 `.env.local`의 프로젝트 API key(`NEXT_PUBLIC_AMPLITUDE_API_KEY` 또는 명시된 서버용 키)와 secret key(`AMPLITUDE_SECRET_KEY`)를 사용한다. 키가 없거나 프로젝트가 `yeosachin`인지 확인할 수 없으면 조회를 중단하고 connector로 우회하지 않는다.
+- 키·secret·Authorization 헤더·원시 export 파일은 터미널 출력, 로그, 커밋, 문서, 채팅에 남기지 않는다. `.env.local`은 직접 `source`하지 말고 안전한 환경 주입 방식으로 읽으며, 조회 결과의 user/device ID와 raw event payload도 응답에 그대로 복사하지 않는다.
