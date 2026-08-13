@@ -6,6 +6,10 @@ const migration = readFileSync(new URL(
     '../../../supabase/migrations/20260813160000_add_earlybird_payment_discord_outbox.sql',
     import.meta.url,
 ), 'utf8');
+const amountMigration = readFileSync(new URL(
+    '../../../supabase/migrations/20260814100000_add_actual_amount_to_payment_discord_claim.sql',
+    import.meta.url,
+), 'utf8');
 
 const USER_ID = '123e4567-e89b-42d3-a456-426614174000';
 const ORDER_ID = '223e4567-e89b-42d3-a456-426614174000';
@@ -32,11 +36,13 @@ beforeAll(async () => {
             id uuid PRIMARY KEY,
             user_id uuid NOT NULL REFERENCES public.users(id) ON DELETE CASCADE,
             plan_id text NOT NULL CHECK (plan_id IN ('basic', 'standard')),
+            actual_amount_krw integer,
             status text NOT NULL,
             paid_at timestamptz
         );
     `);
     await db.exec(migration);
+    await db.exec(amountMigration);
 }, 30_000);
 
 afterAll(async () => db.close());
@@ -46,8 +52,8 @@ describe('earlybird payment Discord outbox migration', () => {
         await db.exec(`
             INSERT INTO public.users (id, name, gender)
             VALUES ('${USER_ID}', '김민수', 'male');
-            INSERT INTO public.earlybird_orders (id, user_id, plan_id, status)
-            VALUES ('${ORDER_ID}', '${USER_ID}', 'basic', 'payment_pending');
+            INSERT INTO public.earlybird_orders (id, user_id, plan_id, actual_amount_krw, status)
+            VALUES ('${ORDER_ID}', '${USER_ID}', 'basic', 14900, 'payment_pending');
             UPDATE public.earlybird_orders
             SET status = 'paid', paid_at = '2026-08-13T00:00:00+09:00'
             WHERE id = '${ORDER_ID}';
@@ -75,6 +81,7 @@ describe('earlybird payment Discord outbox migration', () => {
             order_id: string;
             claim_token: string;
             plan_id: string;
+            actual_amount_krw: number;
             paid_at: string;
             buyer_name: string;
             gender: string;
@@ -83,6 +90,7 @@ describe('earlybird payment Discord outbox migration', () => {
         expect(claimed.rows).toHaveLength(1);
         const claimedRow = claimed.rows[0];
         expect(Object.keys(claimedRow).sort()).toEqual([
+            'actual_amount_krw',
             'attempts',
             'buyer_name',
             'claim_token',
@@ -95,6 +103,7 @@ describe('earlybird payment Discord outbox migration', () => {
         expect(claimedRow).toMatchObject({
             order_id: ORDER_ID,
             plan_id: 'basic',
+            actual_amount_krw: 14900,
             buyer_name: '김민수',
             gender: 'male',
             attempts: 1,
@@ -125,8 +134,8 @@ describe('earlybird payment Discord outbox migration', () => {
         await db.exec(`
             INSERT INTO public.users (id, name, gender)
             VALUES ('${userId}', '김서연', 'female');
-            INSERT INTO public.earlybird_orders (id, user_id, plan_id, status, paid_at)
-            VALUES ('${orderId}', '${userId}', 'standard', 'paid', '2026-08-13T00:00:00+09:00');
+            INSERT INTO public.earlybird_orders (id, user_id, plan_id, actual_amount_krw, status, paid_at)
+            VALUES ('${orderId}', '${userId}', 'standard', 19900, 'paid', '2026-08-13T00:00:00+09:00');
         `);
 
         await db.exec('SET ROLE service_role');

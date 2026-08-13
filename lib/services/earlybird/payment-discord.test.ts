@@ -24,6 +24,7 @@ const ITEM = {
     order_id: '223e4567-e89b-42d3-a456-426614174000',
     claim_token: '323e4567-e89b-42d3-a456-426614174000',
     plan_id: 'basic',
+    actual_amount_krw: 14_900,
     buyer_name: '김민수',
     gender: 'male',
     paid_at: '2026-08-13T00:01:00.000Z',
@@ -54,6 +55,7 @@ describe('earlybird payment Discord notification', () => {
                 color: 0x57F287,
                 fields: [
                     { name: '🛍️ 상품명', value: 'Basic', inline: true },
+                    { name: '💰 결제금액', value: '₩14,900', inline: true },
                     { name: '👤 결제자', value: '김*수', inline: true },
                     { name: '⚧ 성별', value: '남성', inline: true },
                     { name: '📅 결제일시', value: '2026-08-13 09:01 (KST)', inline: false },
@@ -67,11 +69,13 @@ describe('earlybird payment Discord notification', () => {
         const payload = buildPaymentDiscordPayload({
             ...ITEM,
             plan_id: 'standard',
+            actual_amount_krw: 123_456,
             buyer_name: null,
             gender: 'unknown-private-gender',
         });
         expect(payload.embeds[0].fields).toEqual([
             { name: '🛍️ 상품명', value: 'Standard', inline: true },
+            { name: '💰 결제금액', value: '₩123,456', inline: true },
             { name: '👤 결제자', value: '미제공', inline: true },
             { name: '⚧ 성별', value: '미제공', inline: true },
             { name: '📅 결제일시', value: '2026-08-13 09:01 (KST)', inline: false },
@@ -87,7 +91,7 @@ describe('earlybird payment Discord notification', () => {
         ['é-가', 'é*'],
     ])('uses the existing grapheme-safe name masking for %s', (name, expected) => {
         const payload = buildPaymentDiscordPayload({ ...ITEM, buyer_name: name });
-        expect(payload.embeds[0].fields[1]).toEqual({
+        expect(payload.embeds[0].fields[2]).toEqual({
             name: '👤 결제자',
             value: expected,
             inline: true,
