@@ -1,0 +1,511 @@
+import { readdirSync, readFileSync } from 'node:fs';
+import { afterEach, describe, expect, it } from 'vitest';
+import { PGlite } from '@electric-sql/pglite';
+
+const migrationName = readdirSync(new URL('../../../supabase/migrations/', import.meta.url))
+    .find(name => name.endsWith('_precheckout_blite_single_collection.sql'));
+if (!migrationName) throw new Error('PRECHECKOUT_BLITE_MIGRATION_MISSING');
+const migration = readFileSync(new URL(
+    `../../../supabase/migrations/${migrationName}`,
+    import.meta.url,
+), 'utf8');
+
+const USER_ID = '10000000-0000-4000-8000-000000000001';
+const PREFLIGHT_A = '20000000-0000-4000-8000-000000000001';
+const PREFLIGHT_B = '20000000-0000-4000-8000-000000000002';
+const PREFLIGHT_C = '20000000-0000-4000-8000-000000000003';
+const PREFLIGHT_D = '20000000-0000-4000-8000-000000000004';
+const PREFLIGHT_E = '20000000-0000-4000-8000-000000000005';
+const PREFLIGHT_LEGACY = '20000000-0000-4000-8000-000000000006';
+const PREFLIGHT_ORIGIN = '20000000-0000-4000-8000-000000000007';
+const PREFLIGHT_ORIGIN_INSERT = '20000000-0000-4000-8000-000000000008';
+const TARGET_HASH = 'a'.repeat(64);
+const OTHER_HASH = 'b'.repeat(64);
+const PAYLOAD_HASH = 'c'.repeat(64);
+const OTHER_PAYLOAD_HASH = 'd'.repeat(64);
+const PROVIDER_REFERENCE = 'ApifyRun123456';
+const CLAIM_TOKEN = '40000000-0000-4000-8000-000000000001';
+const SOURCE_PAYLOAD = JSON.stringify({
+    schemaVersion: 1,
+    fullName: null,
+    posts: [],
+    media: [],
+});
+
+const bootstrap = `
+CREATE SCHEMA extensions;
+CREATE FUNCTION extensions.gen_random_uuid()
+RETURNS UUID LANGUAGE sql VOLATILE AS $$
+    SELECT (
+        substr(md5(random()::text || clock_timestamp()::text), 1, 8) || '-' ||
+        substr(md5(random()::text || clock_timestamp()::text), 9, 4) || '-' ||
+        '4' || substr(md5(random()::text || clock_timestamp()::text), 14, 3) || '-' ||
+        '8' || substr(md5(random()::text || clock_timestamp()::text), 18, 3) || '-' ||
+        substr(md5(random()::text || clock_timestamp()::text), 21, 12)
+    )::uuid
+$$;
+CREATE ROLE anon NOLOGIN;
+CREATE ROLE authenticated NOLOGIN;
+CREATE ROLE service_role NOLOGIN;
+
+CREATE TABLE public.analysis_preflights (
+    id UUID PRIMARY KEY,
+    user_id UUID,
+    status TEXT NOT NULL,
+    ready_at TIMESTAMP WITH TIME ZONE,
+    expires_at TIMESTAMP WITH TIME ZONE NOT NULL,
+    pii_scrubbed_at TIMESTAMP WITH TIME ZONE,
+    target_input_hash VARCHAR(64),
+    lease_token UUID,
+    lease_expires_at TIMESTAMP WITH TIME ZONE,
+    target_full_name TEXT,
+    target_bio TEXT,
+    target_profile_image_url TEXT,
+    target_followers_count INTEGER,
+    target_following_count INTEGER,
+    target_is_private BOOLEAN,
+    capacity_required_plan_id TEXT,
+    required_plan_id TEXT,
+    plan_cards_snapshot JSONB,
+    created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT clock_timestamp(),
+    updated_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT clock_timestamp()
+);
+CREATE TABLE public.analysis_preflight_provider_runs (
+    preflight_id UUID PRIMARY KEY REFERENCES public.analysis_preflights(id) ON DELETE CASCADE,
+    input_hash VARCHAR(64) NOT NULL,
+    logical_provider TEXT NOT NULL,
+    status TEXT NOT NULL,
+    run_id VARCHAR(64)
+);
+CREATE TABLE public.precheckout_blite_cache (
+    preflight_id UUID PRIMARY KEY REFERENCES public.analysis_preflights(id) ON DELETE CASCADE,
+    state TEXT NOT NULL DEFAULT 'pending' CHECK (state IN ('pending', 'complete')),
+    lease_token UUID NOT NULL,
+    lease_expires_at TIMESTAMP WITH TIME ZONE NOT NULL,
+    dto JSONB,
+    created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT clock_timestamp(),
+    updated_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT clock_timestamp(),
+    completed_at TIMESTAMP WITH TIME ZONE,
+    CONSTRAINT precheckout_blite_cache_payload_check CHECK (
+        (state = 'pending' AND dto IS NULL AND completed_at IS NULL)
+        OR (state = 'complete' AND dto IS NOT NULL AND completed_at IS NOT NULL)
+    ),
+    CONSTRAINT precheckout_blite_cache_timestamp_check CHECK (
+        updated_at >= created_at
+        AND lease_expires_at >= created_at
+        AND (completed_at IS NULL OR completed_at >= created_at)
+    )
+);
+
+CREATE FUNCTION public.claim_precheckout_blite_v1(p_preflight_id UUID)
+RETURNS JSONB
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = ''
+AS $$
+DECLARE
+    v_now TIMESTAMP WITH TIME ZONE := pg_catalog.clock_timestamp();
+    v_lease UUID := extensions.gen_random_uuid();
+    v_cache public.precheckout_blite_cache%ROWTYPE;
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1
+        FROM public.analysis_preflights AS preflight
+        WHERE preflight.id = p_preflight_id
+          AND preflight.status = 'ready'
+          AND preflight.ready_at IS NOT NULL
+          AND preflight.expires_at > v_now
+    ) THEN
+        RAISE EXCEPTION USING
+            MESSAGE = 'PRECHECKOUT_BLITE_PREFLIGHT_NOT_READY', ERRCODE = 'P0001';
+    END IF;
+
+    INSERT INTO public.precheckout_blite_cache (
+        preflight_id, state, lease_token, lease_expires_at, created_at, updated_at
+    ) VALUES (
+        p_preflight_id, 'pending', v_lease, v_now + INTERVAL '2 minutes', v_now, v_now
+    ) ON CONFLICT (preflight_id) DO NOTHING;
+
+    SELECT * INTO v_cache
+    FROM public.precheckout_blite_cache
+    WHERE preflight_id = p_preflight_id
+    FOR UPDATE;
+    v_now := pg_catalog.clock_timestamp();
+
+    IF v_cache.state = 'complete' THEN
+        RETURN pg_catalog.jsonb_build_object('disposition', 'complete', 'dto', v_cache.dto);
+    END IF;
+    IF v_cache.lease_token = v_lease THEN
+        RETURN pg_catalog.jsonb_build_object(
+            'disposition', 'claimed', 'leaseToken', v_cache.lease_token
+        );
+    END IF;
+    IF v_cache.lease_expires_at <= v_now THEN
+        UPDATE public.precheckout_blite_cache
+        SET lease_token = v_lease,
+            lease_expires_at = v_now + INTERVAL '2 minutes',
+            updated_at = v_now
+        WHERE preflight_id = p_preflight_id;
+        RETURN pg_catalog.jsonb_build_object('disposition', 'claimed', 'leaseToken', v_lease);
+    END IF;
+    RETURN pg_catalog.jsonb_build_object('disposition', 'pending');
+END;
+$$;
+CREATE FUNCTION public.complete_precheckout_blite_v1(
+    p_preflight_id UUID,
+    p_lease_token UUID,
+    p_dto JSONB
+)
+RETURNS BOOLEAN
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = ''
+AS $$
+BEGIN
+    IF p_dto IS NULL OR pg_catalog.jsonb_typeof(p_dto) <> 'object' THEN
+        RETURN FALSE;
+    END IF;
+    UPDATE public.precheckout_blite_cache
+    SET state = 'complete', dto = p_dto,
+        completed_at = pg_catalog.clock_timestamp(),
+        updated_at = pg_catalog.clock_timestamp()
+    WHERE preflight_id = p_preflight_id
+      AND state = 'pending'
+      AND lease_token = p_lease_token
+      AND lease_expires_at > pg_catalog.clock_timestamp();
+    RETURN FOUND;
+END;
+$$;
+CREATE FUNCTION public.release_precheckout_blite_v1(
+    p_preflight_id UUID,
+    p_lease_token UUID
+)
+RETURNS BOOLEAN
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = ''
+AS $$
+BEGIN
+    DELETE FROM public.precheckout_blite_cache
+    WHERE preflight_id = p_preflight_id
+      AND state = 'pending'
+      AND lease_token = p_lease_token;
+    RETURN FOUND;
+END;
+$$;
+CREATE FUNCTION public.complete_analysis_v2_preflight(
+    p_preflight_id UUID, p_user_id UUID, p_claim_token UUID,
+    p_target_full_name TEXT, p_target_bio TEXT, p_target_profile_image_url TEXT,
+    p_target_followers_count INTEGER, p_target_following_count INTEGER,
+    p_target_is_private BOOLEAN, p_capacity_required_plan_id TEXT,
+    p_required_plan_id TEXT, p_plan_cards_snapshot JSONB
+) RETURNS BOOLEAN LANGUAGE plpgsql AS $$
+BEGIN
+    UPDATE public.analysis_preflights
+    SET status = 'ready', ready_at = clock_timestamp(), lease_token = NULL, lease_expires_at = NULL
+    WHERE id = p_preflight_id AND user_id = p_user_id AND lease_token = p_claim_token;
+    RETURN FOUND;
+END;
+$$;
+CREATE FUNCTION public.complete_anonymous_analysis_v2_preflight(
+    p_preflight_id UUID, p_claim_token UUID,
+    p_target_full_name TEXT, p_target_bio TEXT, p_target_profile_image_url TEXT,
+    p_target_followers_count INTEGER, p_target_following_count INTEGER,
+    p_target_is_private BOOLEAN, p_capacity_required_plan_id TEXT,
+    p_required_plan_id TEXT, p_plan_cards_snapshot JSONB
+) RETURNS BOOLEAN LANGUAGE plpgsql AS $$
+BEGIN
+    UPDATE public.analysis_preflights
+    SET status = 'ready', ready_at = clock_timestamp(), lease_token = NULL, lease_expires_at = NULL
+    WHERE id = p_preflight_id AND user_id IS NULL AND lease_token = p_claim_token;
+    RETURN FOUND;
+END;
+$$;
+CREATE FUNCTION public.purge_expired_analysis_v2_preflights(INTEGER)
+RETURNS INTEGER LANGUAGE sql AS $$ SELECT 0 $$;
+`;
+
+let db: PGlite | undefined;
+
+async function createDb(): Promise<PGlite> {
+    db = await PGlite.create();
+    await db.exec(bootstrap);
+    await db.exec(migration);
+    return db;
+}
+
+function nowIso(offsetMs: number): string {
+    return new Date(Date.now() + offsetMs).toISOString();
+}
+
+async function seedProcessingPreflight(
+    database: PGlite,
+    preflightId: string,
+    options: { userId?: string | null; expiresAt?: string; createdAt?: string } = {},
+) {
+    const userId = options.userId === undefined ? USER_ID : options.userId;
+    const expiresAt = options.expiresAt ?? nowIso(20 * 60_000);
+    const createdAt = options.createdAt ?? nowIso(-5_000);
+    const deadlineAt = new Date(new Date(createdAt).getTime() + 60_000).toISOString();
+    await database.query(
+        `INSERT INTO public.analysis_preflights(
+            id,user_id,status,expires_at,target_input_hash,lease_token,lease_expires_at,
+            created_at,precheckout_blite_cohort
+        ) VALUES ($1,$2,'processing',$3,$4,$5,clock_timestamp() + interval '5 minutes',$6,true)`,
+        [preflightId, userId, expiresAt, TARGET_HASH, CLAIM_TOKEN, createdAt],
+    );
+    await database.query(
+        `INSERT INTO public.analysis_preflight_provider_runs(
+            preflight_id,input_hash,logical_provider,status,run_id
+        ) VALUES ($1,$2,'apify','succeeded',$3)`,
+        [preflightId, TARGET_HASH, PROVIDER_REFERENCE],
+    );
+    return { expiresAt, deadlineAt, submittedAt: createdAt };
+}
+
+async function finalizeSource(
+    database: PGlite,
+    preflightId: string,
+    options: { payloadHash?: string; collectedAt?: string; expiresAt?: string; userId?: string | null } = {},
+): Promise<boolean> {
+    const collectedAt = options.collectedAt ?? nowIso(-1_000);
+    const preflight = await database.query<{ expires_at: string }>(
+        'SELECT expires_at FROM public.analysis_preflights WHERE id=$1', [preflightId],
+    );
+    const expiresAt = options.expiresAt ?? preflight.rows[0]!.expires_at;
+    const userId = options.userId === undefined ? USER_ID : options.userId;
+    const result = await database.query<{ result: boolean }>(
+        `SELECT public.finalize_preflight_blite_source_v1(
+            $1,$2,$3,$4,$5,$6,
+            'Target',NULL,'https://cdninstagram.com/profile.jpg',1,1,false,
+            'basic','basic','{}'::jsonb,$7::jsonb,$8,$9,$10
+        ) AS result`,
+        [
+            preflightId, userId, CLAIM_TOKEN, TARGET_HASH, preflightId, PROVIDER_REFERENCE,
+            SOURCE_PAYLOAD, options.payloadHash ?? PAYLOAD_HASH, collectedAt, expiresAt,
+        ],
+    );
+    return result.rows[0]!.result;
+}
+
+async function claim(database: PGlite, preflightId: string): Promise<Record<string, unknown>> {
+    const result = await database.query<{ result: Record<string, unknown> }>(
+        'SELECT public.claim_precheckout_blite_v2($1) AS result', [preflightId],
+    );
+    return result.rows[0]!.result;
+}
+
+afterEach(async () => {
+    await db?.close();
+    db = undefined;
+});
+
+describe('precheckout B-lite source and lease lifecycle', () => {
+    it('atomically records one source, accepts an identical replay, and rejects a changed hash', async () => {
+        const database = await createDb();
+        await seedProcessingPreflight(database, PREFLIGHT_A);
+        const collectedAt = nowIso(-1_000);
+
+        await expect(finalizeSource(database, PREFLIGHT_A, { collectedAt })).resolves.toBe(true);
+        await expect(finalizeSource(database, PREFLIGHT_A, { collectedAt })).resolves.toBe(false);
+        await expect(finalizeSource(database, PREFLIGHT_A, {
+            collectedAt,
+            payloadHash: OTHER_PAYLOAD_HASH,
+        }))
+            .rejects.toThrow('PRECHECKOUT_BLITE_SOURCE_CONFLICT');
+        await expect(database.query(
+            'SELECT payload_hash,target_input_hash FROM public.precheckout_blite_sources WHERE preflight_id=$1',
+            [PREFLIGHT_A],
+        )).resolves.toMatchObject({ rows: [{ payload_hash: PAYLOAD_HASH, target_input_hash: TARGET_HASH }] });
+    }, 30_000);
+
+    it('gives exactly one owner a lease, returns pending while it is live, and rejects stale terminal writes', async () => {
+        const database = await createDb();
+        await seedProcessingPreflight(database, PREFLIGHT_B);
+        await finalizeSource(database, PREFLIGHT_B);
+
+        const first = await claim(database, PREFLIGHT_B);
+        expect(first.disposition).toBe('claimed');
+        expect(first.source).toEqual(JSON.parse(SOURCE_PAYLOAD));
+        const firstLease = first.leaseToken as string;
+        await expect(claim(database, PREFLIGHT_B)).resolves.toEqual({ disposition: 'pending' });
+
+        await database.query(
+            `UPDATE public.precheckout_blite_cache
+             SET lease_expires_at = created_at WHERE preflight_id=$1`,
+            [PREFLIGHT_B],
+        );
+        const second = await claim(database, PREFLIGHT_B);
+        expect(second.disposition).toBe('claimed');
+        const secondLease = second.leaseToken as string;
+        expect(secondLease).not.toBe(firstLease);
+
+        await expect(database.query(
+            `SELECT public.complete_precheckout_blite_v2($1,$2,'{}'::jsonb) AS result`,
+            [PREFLIGHT_B, firstLease],
+        )).resolves.toMatchObject({ rows: [{ result: false }] });
+        await expect(database.query(
+            `SELECT public.fail_precheckout_blite_v2($1,$2,'model_invalid') AS result`,
+            [PREFLIGHT_B, firstLease],
+        )).resolves.toMatchObject({ rows: [{ result: false }] });
+        await expect(database.query(
+            `SELECT public.complete_precheckout_blite_v2($1,$2,'{}'::jsonb) AS result`,
+            [PREFLIGHT_B, secondLease],
+        )).resolves.toMatchObject({ rows: [{ result: true }] });
+        await expect(database.query(
+            'SELECT 1 FROM public.precheckout_blite_sources WHERE preflight_id=$1', [PREFLIGHT_B],
+        )).resolves.toMatchObject({ rows: [] });
+        await expect(database.query(
+            `UPDATE public.precheckout_blite_cache SET dto='{"changed":true}'::jsonb WHERE preflight_id=$1`,
+            [PREFLIGHT_B],
+        )).rejects.toThrow('PRECHECKOUT_BLITE_TERMINAL_IMMUTABLE');
+    }, 30_000);
+
+    it('caps leases at two attempts, deletes a terminal failed source, and keeps failed rows immutable', async () => {
+        const database = await createDb();
+        await seedProcessingPreflight(database, PREFLIGHT_C);
+        await finalizeSource(database, PREFLIGHT_C);
+
+        expect((await claim(database, PREFLIGHT_C)).disposition).toBe('claimed');
+        await database.query(
+            'UPDATE public.precheckout_blite_cache SET lease_expires_at=created_at WHERE preflight_id=$1',
+            [PREFLIGHT_C],
+        );
+        expect((await claim(database, PREFLIGHT_C)).disposition).toBe('claimed');
+        await database.query(
+            'UPDATE public.precheckout_blite_cache SET lease_expires_at=created_at WHERE preflight_id=$1',
+            [PREFLIGHT_C],
+        );
+        await expect(claim(database, PREFLIGHT_C)).resolves.toMatchObject({
+            disposition: 'failed', reason: 'attempts_exhausted',
+        });
+        await expect(database.query(
+            'SELECT state,failure_reason,attempt_count FROM public.precheckout_blite_cache WHERE preflight_id=$1',
+            [PREFLIGHT_C],
+        )).resolves.toMatchObject({ rows: [{ state: 'failed', failure_reason: 'attempts_exhausted', attempt_count: 2 }] });
+        await expect(database.query(
+            'SELECT 1 FROM public.precheckout_blite_sources WHERE preflight_id=$1', [PREFLIGHT_C],
+        )).resolves.toMatchObject({ rows: [] });
+        await expect(database.query(
+            `UPDATE public.precheckout_blite_cache SET failure_reason='model_invalid' WHERE preflight_id=$1`,
+            [PREFLIGHT_C],
+        )).rejects.toThrow('PRECHECKOUT_BLITE_TERMINAL_IMMUTABLE');
+    }, 30_000);
+
+    it('terminalizes an expired source without trying a model lease and purges expired source/cache rows', async () => {
+        const database = await createDb();
+        await seedProcessingPreflight(database, PREFLIGHT_D);
+        await finalizeSource(database, PREFLIGHT_D);
+        await database.query(
+            `UPDATE public.precheckout_blite_sources
+             SET collected_at=clock_timestamp() - interval '2 minutes',
+                 expires_at=clock_timestamp() - interval '1 minute'
+             WHERE preflight_id=$1`,
+            [PREFLIGHT_D],
+        );
+        await expect(claim(database, PREFLIGHT_D)).resolves.toMatchObject({
+            disposition: 'failed', reason: 'source_expired',
+        });
+
+        await seedProcessingPreflight(database, PREFLIGHT_E);
+        await finalizeSource(database, PREFLIGHT_E);
+        await database.query(
+            `UPDATE public.precheckout_blite_sources
+             SET collected_at=clock_timestamp() - interval '2 minutes',
+                 expires_at=clock_timestamp() - interval '1 minute'
+             WHERE preflight_id=$1`,
+            [PREFLIGHT_E],
+        );
+        await expect(database.query(
+            'SELECT public.purge_expired_precheckout_blite_sources_v1(10) AS result',
+        )).resolves.toMatchObject({ rows: [{ result: 1 }] });
+        await expect(database.query(
+            `SELECT (SELECT count(*)::int FROM public.precheckout_blite_sources WHERE preflight_id=$1) AS sources,
+                    (SELECT count(*)::int FROM public.precheckout_blite_cache WHERE preflight_id=$1) AS caches`,
+            [PREFLIGHT_E],
+        )).resolves.toMatchObject({ rows: [{ sources: 0, caches: 0 }] });
+    }, 30_000);
+
+    it('keeps source rows inaccessible to browser roles and grants lifecycle RPCs only to service_role', async () => {
+        const database = await createDb();
+        await expect(database.query(
+            `SELECT has_table_privilege('authenticated','public.precheckout_blite_sources','SELECT') AS allowed,
+                    has_function_privilege('authenticated','public.claim_precheckout_blite_v2(uuid)','EXECUTE') AS claim_allowed,
+                    has_function_privilege('service_role','public.claim_precheckout_blite_v2(uuid)','EXECUTE') AS service_allowed`,
+        )).resolves.toMatchObject({ rows: [{ allowed: false, claim_allowed: false, service_allowed: true }] });
+    }, 30_000);
+
+    it('keeps the flag-off v1 claim, release, and completion path executable after the migration', async () => {
+        const database = await createDb();
+        await database.query(
+            `INSERT INTO public.analysis_preflights(
+                id,status,ready_at,expires_at,precheckout_blite_cohort
+            ) VALUES ($1,'ready',clock_timestamp(),clock_timestamp() + interval '10 minutes',false)`,
+            [PREFLIGHT_LEGACY],
+        );
+
+        const first = await database.query<{ result: { disposition: string; leaseToken: string } }>(
+            'SELECT public.claim_precheckout_blite_v1($1) AS result', [PREFLIGHT_LEGACY],
+        );
+        expect(first.rows[0]!.result.disposition).toBe('claimed');
+        await expect(database.query(
+            'SELECT public.release_precheckout_blite_v1($1,$2) AS result',
+            [PREFLIGHT_LEGACY, first.rows[0]!.result.leaseToken],
+        )).resolves.toMatchObject({ rows: [{ result: true }] });
+
+        const second = await database.query<{ result: { disposition: string; leaseToken: string } }>(
+            'SELECT public.claim_precheckout_blite_v1($1) AS result', [PREFLIGHT_LEGACY],
+        );
+        await expect(database.query(
+            `SELECT public.complete_precheckout_blite_v1($1,$2,'{"legacy":true}'::jsonb) AS result`,
+            [PREFLIGHT_LEGACY, second.rows[0]!.result.leaseToken],
+        )).resolves.toMatchObject({ rows: [{ result: true }] });
+        await expect(database.query(
+            'SELECT state,dto,preflight.precheckout_blite_cohort AS cohort FROM public.precheckout_blite_cache AS cache JOIN public.analysis_preflights AS preflight ON preflight.id=cache.preflight_id WHERE cache.preflight_id=$1',
+            [PREFLIGHT_LEGACY],
+        )).resolves.toMatchObject({ rows: [{ state: 'complete', dto: { legacy: true }, cohort: false }] });
+    }, 30_000);
+
+    it('anchors cohort clocks to created_at and rejects queue-delay, refresh, retry, and caller-supplied resets', async () => {
+        const database = await createDb();
+        const origin = '2026-08-13T00:00:00.000Z';
+        await database.query(
+            `INSERT INTO public.analysis_preflights(
+                id,status,expires_at,created_at,precheckout_blite_cohort
+            ) VALUES ($1,'processing',clock_timestamp() + interval '10 minutes',$2,false)`,
+            [PREFLIGHT_ORIGIN, origin],
+        );
+        await database.query(
+            'UPDATE public.analysis_preflights SET precheckout_blite_cohort=true WHERE id=$1',
+            [PREFLIGHT_ORIGIN],
+        );
+        await database.query(
+            `UPDATE public.analysis_preflights
+             SET status='processing', updated_at=clock_timestamp()
+             WHERE id=$1`,
+            [PREFLIGHT_ORIGIN],
+        );
+        await expect(database.query(
+            `SELECT submitted_at = created_at AS submitted_from_origin,
+                    deadline_at = created_at + interval '60 seconds' AS deadline_from_origin
+             FROM public.analysis_preflights WHERE id=$1`,
+            [PREFLIGHT_ORIGIN],
+        )).resolves.toMatchObject({ rows: [{ submitted_from_origin: true, deadline_from_origin: true }] });
+
+        await expect(database.query(
+            `UPDATE public.analysis_preflights
+             SET submitted_at=clock_timestamp(), deadline_at=clock_timestamp() + interval '60 seconds'
+             WHERE id=$1`,
+            [PREFLIGHT_ORIGIN],
+        )).rejects.toThrow('PRECHECKOUT_BLITE_CLOCK_IMMUTABLE');
+        await expect(database.query(
+            `INSERT INTO public.analysis_preflights(
+                id,status,expires_at,created_at,precheckout_blite_cohort,submitted_at,deadline_at
+            ) VALUES (
+                $1,'processing',clock_timestamp() + interval '10 minutes',$2,true,
+                clock_timestamp(),clock_timestamp() + interval '60 seconds'
+            )`,
+            [PREFLIGHT_ORIGIN_INSERT, origin],
+        )).rejects.toThrow('PRECHECKOUT_BLITE_CLOCK_ORIGIN_FORBIDDEN');
+    }, 30_000);
+});

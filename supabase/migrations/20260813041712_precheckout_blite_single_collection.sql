@@ -14,8 +14,8 @@ ALTER TABLE public.analysis_preflights
         (NOT precheckout_blite_cohort AND submitted_at IS NULL AND deadline_at IS NULL)
         OR (
             precheckout_blite_cohort
-            AND submitted_at IS NOT NULL
-            AND deadline_at = submitted_at + INTERVAL '60 seconds'
+            AND submitted_at = created_at
+            AND deadline_at = created_at + INTERVAL '60 seconds'
         )
     );
 
@@ -25,44 +25,31 @@ LANGUAGE plpgsql
 SECURITY DEFINER
 SET search_path = ''
 AS $$
-DECLARE
-    v_now TIMESTAMP WITH TIME ZONE := pg_catalog.clock_timestamp();
 BEGIN
-    IF TG_OP = 'INSERT' THEN
-        IF NEW.precheckout_blite_cohort THEN
-            NEW.submitted_at := COALESCE(NEW.submitted_at, v_now);
-            NEW.deadline_at := COALESCE(
-                NEW.deadline_at,
-                NEW.submitted_at + INTERVAL '60 seconds'
-            );
-            IF NEW.deadline_at <> NEW.submitted_at + INTERVAL '60 seconds' THEN
-                RAISE EXCEPTION USING
-                    MESSAGE = 'PRECHECKOUT_BLITE_INVALID_DEADLINE', ERRCODE = 'P0001';
-            END IF;
-        ELSIF NEW.submitted_at IS NOT NULL OR NEW.deadline_at IS NOT NULL THEN
+    IF TG_OP = 'UPDATE' THEN
+        IF NEW.created_at IS DISTINCT FROM OLD.created_at THEN
             RAISE EXCEPTION USING
-                MESSAGE = 'PRECHECKOUT_BLITE_NON_COHORT_CLOCK_FORBIDDEN', ERRCODE = 'P0001';
+                MESSAGE = 'PRECHECKOUT_BLITE_CREATED_AT_IMMUTABLE', ERRCODE = 'P0001';
         END IF;
-        RETURN NEW;
+        IF OLD.precheckout_blite_cohort THEN
+            IF NEW.precheckout_blite_cohort IS DISTINCT FROM TRUE
+               OR NEW.submitted_at IS DISTINCT FROM OLD.submitted_at
+               OR NEW.deadline_at IS DISTINCT FROM OLD.deadline_at THEN
+                RAISE EXCEPTION USING
+                    MESSAGE = 'PRECHECKOUT_BLITE_CLOCK_IMMUTABLE', ERRCODE = 'P0001';
+            END IF;
+        END IF;
     END IF;
 
-    IF OLD.precheckout_blite_cohort THEN
-        IF NEW.precheckout_blite_cohort IS DISTINCT FROM TRUE
-           OR NEW.submitted_at IS DISTINCT FROM OLD.submitted_at
-           OR NEW.deadline_at IS DISTINCT FROM OLD.deadline_at THEN
+    IF NEW.precheckout_blite_cohort THEN
+        IF (NEW.submitted_at IS NOT NULL AND NEW.submitted_at IS DISTINCT FROM NEW.created_at)
+           OR (NEW.deadline_at IS NOT NULL
+               AND NEW.deadline_at IS DISTINCT FROM NEW.created_at + INTERVAL '60 seconds') THEN
             RAISE EXCEPTION USING
-                MESSAGE = 'PRECHECKOUT_BLITE_CLOCK_IMMUTABLE', ERRCODE = 'P0001';
+                MESSAGE = 'PRECHECKOUT_BLITE_CLOCK_ORIGIN_FORBIDDEN', ERRCODE = 'P0001';
         END IF;
-    ELSIF NEW.precheckout_blite_cohort THEN
-        NEW.submitted_at := COALESCE(NEW.submitted_at, v_now);
-        NEW.deadline_at := COALESCE(
-            NEW.deadline_at,
-            NEW.submitted_at + INTERVAL '60 seconds'
-        );
-        IF NEW.deadline_at <> NEW.submitted_at + INTERVAL '60 seconds' THEN
-            RAISE EXCEPTION USING
-                MESSAGE = 'PRECHECKOUT_BLITE_INVALID_DEADLINE', ERRCODE = 'P0001';
-        END IF;
+        NEW.submitted_at := NEW.created_at;
+        NEW.deadline_at := NEW.created_at + INTERVAL '60 seconds';
     ELSIF NEW.submitted_at IS NOT NULL OR NEW.deadline_at IS NOT NULL THEN
         RAISE EXCEPTION USING
             MESSAGE = 'PRECHECKOUT_BLITE_NON_COHORT_CLOCK_FORBIDDEN', ERRCODE = 'P0001';
@@ -74,7 +61,7 @@ $$;
 
 DROP TRIGGER IF EXISTS enforce_precheckout_blite_preflight_clock ON public.analysis_preflights;
 CREATE TRIGGER enforce_precheckout_blite_preflight_clock
-BEFORE INSERT OR UPDATE OF precheckout_blite_cohort, submitted_at, deadline_at
+BEFORE INSERT OR UPDATE OF precheckout_blite_cohort, submitted_at, deadline_at, created_at
 ON public.analysis_preflights
 FOR EACH ROW
 EXECUTE FUNCTION public.enforce_precheckout_blite_preflight_clock_v1();
@@ -127,6 +114,7 @@ ALTER TABLE public.precheckout_blite_cache
     ADD COLUMN IF NOT EXISTS failed_at TIMESTAMP WITH TIME ZONE;
 
 ALTER TABLE public.precheckout_blite_cache
+    DROP CONSTRAINT precheckout_blite_cache_state_check,
     DROP CONSTRAINT precheckout_blite_cache_payload_check,
     DROP CONSTRAINT precheckout_blite_cache_timestamp_check;
 
@@ -255,6 +243,7 @@ BEGIN
     FROM public.analysis_preflights AS preflight
     WHERE preflight.id = p_preflight_id
     FOR UPDATE;
+    v_now := pg_catalog.clock_timestamp();
     IF NOT FOUND
        OR NOT v_preflight.precheckout_blite_cohort
        OR v_preflight.pii_scrubbed_at IS NOT NULL
@@ -318,6 +307,8 @@ BEGIN
             MESSAGE = 'PRECHECKOUT_BLITE_SOURCE_CONFLICT', ERRCODE = 'P0001';
     END IF;
 
+    -- Provider/source lock waits consume the same deadline as work execution.
+    v_now := pg_catalog.clock_timestamp();
     IF v_preflight.status <> 'processing'
        OR v_preflight.lease_token IS DISTINCT FROM p_claim_token
        OR v_preflight.lease_expires_at IS NULL
@@ -442,6 +433,7 @@ BEGIN
     FROM public.analysis_preflights AS preflight
     WHERE preflight.id = p_preflight_id
     FOR UPDATE;
+    v_now := pg_catalog.clock_timestamp();
     IF NOT FOUND
        OR NOT v_preflight.precheckout_blite_cohort
        OR v_preflight.status <> 'ready'
@@ -484,6 +476,13 @@ BEGIN
     FROM public.precheckout_blite_sources AS source
     WHERE source.preflight_id = v_preflight.id
     FOR UPDATE;
+
+    -- Evaluate expiry/deadline only after every row-lock wait has completed.
+    v_now := pg_catalog.clock_timestamp();
+    IF v_preflight.expires_at <= v_now THEN
+        RAISE EXCEPTION USING
+            MESSAGE = 'PRECHECKOUT_BLITE_PREFLIGHT_NOT_READY', ERRCODE = 'P0001';
+    END IF;
 
     IF NOT FOUND THEN
         v_reason := 'source_missing';
@@ -714,10 +713,21 @@ AFTER UPDATE OF pii_scrubbed_at ON public.analysis_preflights
 FOR EACH ROW
 EXECUTE FUNCTION public.delete_precheckout_blite_cache_on_pii_scrub_v1();
 
--- Retire v1 entry points so a service worker cannot bypass the source/terminal fences.
-DROP FUNCTION public.claim_precheckout_blite_v1(UUID);
-DROP FUNCTION public.complete_precheckout_blite_v1(UUID, UUID, JSONB);
-DROP FUNCTION public.release_precheckout_blite_v1(UUID, UUID);
+-- Keep v1 reachable for flag-off callers during the DB-first rollout window. The new
+-- cohort path is fenced at its finalizer and v2 RPCs; legacy workers retain their
+-- original pending/complete/release lifecycle until the application rollout retires them.
+REVOKE ALL ON FUNCTION public.claim_precheckout_blite_v1(UUID)
+    FROM PUBLIC, anon, authenticated, service_role;
+GRANT EXECUTE ON FUNCTION public.claim_precheckout_blite_v1(UUID)
+    TO service_role;
+REVOKE ALL ON FUNCTION public.complete_precheckout_blite_v1(UUID, UUID, JSONB)
+    FROM PUBLIC, anon, authenticated, service_role;
+GRANT EXECUTE ON FUNCTION public.complete_precheckout_blite_v1(UUID, UUID, JSONB)
+    TO service_role;
+REVOKE ALL ON FUNCTION public.release_precheckout_blite_v1(UUID, UUID)
+    FROM PUBLIC, anon, authenticated, service_role;
+GRANT EXECUTE ON FUNCTION public.release_precheckout_blite_v1(UUID, UUID)
+    TO service_role;
 
 REVOKE ALL ON FUNCTION public.finalize_preflight_blite_source_v1(
     UUID, UUID, UUID, VARCHAR, UUID, TEXT, TEXT, TEXT, TEXT, INTEGER, INTEGER, BOOLEAN,
