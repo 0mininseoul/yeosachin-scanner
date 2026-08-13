@@ -459,6 +459,7 @@ export function createAnalysisV2ReverseLikeCollector(input: {
                     policy: requestContext.providerExecutionPolicy,
                     operation: 'candidate-likers',
                     maxChargeUsd,
+                    orderScopedCredentialSlot: requestContext.orderScopedCredentialSlot,
                     env,
                 });
                 const providerRunIdentity = {

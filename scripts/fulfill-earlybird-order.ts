@@ -3,8 +3,10 @@ import { z } from 'zod';
 import {
     admitAndAdvanceEarlybirdFulfillment,
     earlybirdFulfillmentDiagnostic,
+    supabaseEarlybirdFulfillmentOperator,
     type EarlybirdFulfillmentDiagnostic,
 } from '../lib/services/earlybird/fulfillment-store';
+import { APIFY_CREDENTIAL_SLOTS, type ApifyCredentialSlot } from '../lib/services/instagram/providers/types';
 
 const uuidSchema = z.string().uuid().transform(value => value.toLowerCase());
 const outputSchema = z.object({
@@ -26,6 +28,7 @@ const outputSchema = z.object({
 
 export interface EarlybirdFulfillmentCliDependencies {
     fulfill(orderId: string): Promise<unknown>;
+    bindCredentialSlot?(orderId: string, slot: ApifyCredentialSlot): Promise<void>;
     writeStdout(value: string): void;
 }
 
@@ -54,8 +57,9 @@ export function formatEarlybirdFulfillmentCliFailure(
 
 export function parseEarlybirdFulfillmentCliArgs(
     args: readonly string[]
-): { orderId: string } {
+): { orderId: string; credentialSlot: ApifyCredentialSlot | null } {
     let orderId: string | null = null;
+    let credentialSlot: ApifyCredentialSlot | null = null;
     let confirmed = false;
     for (let index = 0; index < args.length; index += 1) {
         const option = args[index];
@@ -80,6 +84,17 @@ export function parseEarlybirdFulfillmentCliArgs(
             index += 1;
             continue;
         }
+        if (option === '--credential-slot') {
+            if (credentialSlot !== null) throw new Error('--credential-slot must be provided exactly once');
+            const value = args[index + 1];
+            if (!value || value.startsWith('--')) throw new Error('--credential-slot requires an allowlisted slot');
+            if (!APIFY_CREDENTIAL_SLOTS.includes(value.trim().toLowerCase() as ApifyCredentialSlot)) {
+                throw new Error('--credential-slot requires an allowlisted slot');
+            }
+            credentialSlot = value.trim().toLowerCase() as ApifyCredentialSlot;
+            index += 1;
+            continue;
+        }
         throw new Error(`unknown argument: ${option}`);
     }
     if (!orderId || !confirmed) {
@@ -87,12 +102,13 @@ export function parseEarlybirdFulfillmentCliArgs(
             '--order-id and --confirm-paid-api-call are required'
         );
     }
-    return Object.freeze({ orderId });
+    return Object.freeze({ orderId, credentialSlot });
 }
 
 function defaultDependencies(): EarlybirdFulfillmentCliDependencies {
     return {
         fulfill: orderId => admitAndAdvanceEarlybirdFulfillment(orderId),
+        bindCredentialSlot: (orderId, slot) => supabaseEarlybirdFulfillmentOperator.bindCredentialSlot(orderId, slot),
         writeStdout: value => process.stdout.write(value),
     };
 }
@@ -101,7 +117,13 @@ export async function runEarlybirdFulfillmentCli(
     args: readonly string[],
     dependencies: EarlybirdFulfillmentCliDependencies = defaultDependencies()
 ) {
-    const { orderId } = parseEarlybirdFulfillmentCliArgs(args);
+    const { orderId, credentialSlot } = parseEarlybirdFulfillmentCliArgs(args);
+    if (credentialSlot !== null) {
+        if (!dependencies.bindCredentialSlot) {
+            throw new Error('EARLYBIRD_ORDER_CREDENTIAL_SLOT_BIND_UNAVAILABLE');
+        }
+        await dependencies.bindCredentialSlot(orderId, credentialSlot);
+    }
     const output = outputSchema.parse(
         await dependencies.fulfill(orderId)
     );

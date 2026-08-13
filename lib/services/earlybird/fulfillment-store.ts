@@ -1,6 +1,7 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { z } from 'zod';
 import { supabaseAdmin } from '@/lib/supabase/admin';
+import type { ApifyCredentialSlot } from '@/lib/services/instagram/providers/types';
 import {
     markAnalysisV2FreshAdmissionDispatched,
     releaseAnalysisV2FreshAdmissionDispatch,
@@ -1066,6 +1067,16 @@ export async function admitAndAdvanceEarlybirdFulfillment(
     }
     return advanceAdmittedEarlybirdFulfillment(admitted, dependencies);
 }
+
+export const supabaseEarlybirdFulfillmentOperator = Object.freeze({
+    async bindCredentialSlot(orderId: string, credentialSlot: ApifyCredentialSlot): Promise<void> {
+        const { error } = await supabaseAdmin.rpc(
+            'bind_earlybird_order_scoped_apify_slot',
+            { p_order_id: orderId, p_credential_slot: credentialSlot },
+        );
+        if (error) throw new Error('EARLYBIRD_ORDER_CREDENTIAL_SLOT_BIND_FAILED');
+    },
+});
 
 export async function recoverAndAdvanceEarlybirdSchemaFailedFulfillment(
     orderId: string,

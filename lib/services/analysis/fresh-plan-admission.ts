@@ -6,6 +6,7 @@ import { getSelfHostedAdmissionProfileSummary } from '@/lib/services/instagram/p
 import { selfHostedAuthProvider } from '@/lib/services/instagram/providers/selfhosted-auth';
 import { getApifyProfile } from '@/lib/services/instagram/providers/apify';
 import { selectAnalysisV2ApifyCredentialSlot } from '@/lib/services/instagram/providers/apify-relationship';
+import { APIFY_CREDENTIAL_SLOTS, type ApifyCredentialSlot } from '@/lib/services/instagram/providers/types';
 import {
     PREFLIGHT_PROVIDER_DEADLINE_MS,
     assertPreflightRuntimePolicy,
@@ -33,7 +34,7 @@ export const ANALYSIS_V2_FRESH_ADMISSION_DATABASE_NAMES = Object.freeze({
     reserveRpc: 'reserve_analysis_v2_preflight_admission',
     markDispatchedRpc: 'mark_analysis_v2_preflight_admission_dispatched',
     releaseDispatchRpc: 'release_analysis_v2_preflight_admission_dispatch',
-    claimRpc: 'claim_analysis_v2_preflight_admission_v2',
+    claimRpc: 'claim_analysis_v2_preflight_admission_v3',
     completeRpc: 'complete_analysis_v2_preflight_admission',
     blockRpc: 'block_analysis_v2_preflight_admission',
     releaseRpc: 'release_analysis_v2_preflight_admission',
@@ -160,6 +161,7 @@ const claimResultSchema = z.array(z.object({
     target_instagram_id: usernameSchema.nullable(),
     analysis_entry_channel: z.enum(['standard', 'betatest']).optional().default('standard'),
     access_mode: accessModeSchema.nullable(),
+    order_scoped_credential_slot: z.enum(APIFY_CREDENTIAL_SLOTS).nullable().default(null),
 }).strict()).length(1);
 const terminalResultSchema = z.array(z.object({
     admission_status: z.enum(['ready', 'blocked']),
@@ -246,6 +248,7 @@ interface ClaimedAnalysisV2FreshAdmission {
     targetInstagramId: string;
     analysisEntryChannel: 'standard' | 'betatest';
     accessMode: z.infer<typeof accessModeSchema>;
+    orderScopedCredentialSlot: ApifyCredentialSlot | null;
 }
 
 export type AnalysisV2FreshProfileFetcher = typeof getSelfHostedAdmissionProfileSummary;
@@ -514,6 +517,7 @@ async function claimAnalysisV2FreshAdmission(
         targetInstagramId: row.target_instagram_id,
         analysisEntryChannel: row.analysis_entry_channel,
         accessMode: row.access_mode,
+        orderScopedCredentialSlot: row.order_scoped_credential_slot ?? null,
     });
 }
 
@@ -741,6 +745,7 @@ export async function processAnalysisV2FreshAdmission(
             const identity = preflightProviderIdentity(
                 betaHold?.credentialSlot
                 ?? existingRun?.credentialSlot
+                ?? claim.orderScopedCredentialSlot
                 ?? selectAnalysisV2ApifyCredentialSlot(dependencies.env)
             );
             const bound = await bindPreflightProviderRunCheckpoint({

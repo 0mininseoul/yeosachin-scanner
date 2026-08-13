@@ -284,12 +284,21 @@ export function resolveAnalysisV2ApifyProviderBinding(input: {
     policy: ProviderExecutionPolicy | null;
     operation: ProviderPolicyOperationKind;
     maxChargeUsd: number;
+    /** Service-authorized, immutable selector for one paid concierge order. */
+    orderScopedCredentialSlot?: ApifyCredentialSlot | null;
     env?: Record<string, string | undefined>;
 }): Readonly<{
     credentialSlot: ApifyCredentialSlot;
     frozenFamilyBudgetUsd: number | null;
 }> {
-    const credentialSlot = resolveAnalysisV2ApifyCredentialSlot(input);
+    if (
+        input.orderScopedCredentialSlot != null
+        && (input.accessMode !== 'production' || input.policy !== null)
+    ) {
+        throw new Error('ANALYSIS_V2_ORDER_CREDENTIAL_SLOT_SCOPE_ERROR');
+    }
+    const credentialSlot = input.orderScopedCredentialSlot
+        ?? resolveAnalysisV2ApifyCredentialSlot(input);
     if (input.policy?.mode !== 'betatest_free_pool') {
         return Object.freeze({ credentialSlot, frozenFamilyBudgetUsd: null });
     }

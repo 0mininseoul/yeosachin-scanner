@@ -13,6 +13,7 @@ import {
     providerExecutionPolicySchema,
     type ProviderExecutionPolicy,
 } from './authorized-test-provider-policy';
+import { APIFY_CREDENTIAL_SLOTS, type ApifyCredentialSlot } from '@/lib/services/instagram/providers/types';
 import { getRequiredBetaApifyOperationBudgetCatalog } from './beta-apify-operation-budget';
 
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
@@ -25,6 +26,7 @@ const contextSchema = z.object({
     excludedUsername: z.string().regex(/^[a-z0-9._]{1,30}$/).nullable(),
     accessMode: z.enum(PLAN_ACCESS_MODES),
     providerExecutionPolicy: providerExecutionPolicySchema.nullable(),
+    orderScopedCredentialSlot: z.enum(APIFY_CREDENTIAL_SLOTS).nullable().default(null),
     planId: z.enum(PLAN_IDS),
     followersDeclaredCount: z.number().int().min(0).max(1_200),
     followingDeclaredCount: z.number().int().min(0).max(1_200),
@@ -44,6 +46,7 @@ export interface AnalysisV2CollectionRequestContext {
     excludedUsername: string | null;
     accessMode: PlanAccessMode;
     providerExecutionPolicy: ProviderExecutionPolicy | null;
+    orderScopedCredentialSlot?: ApifyCredentialSlot | null;
     planId: PlanId;
     followersDeclaredCount: number;
     followingDeclaredCount: number;
@@ -64,7 +67,7 @@ export interface AnalysisV2CollectionRequestContextSupabaseClient {
 }
 
 export const ANALYSIS_V2_COLLECTION_CONTEXT_DATABASE_NAMES = Object.freeze({
-    loadRpc: 'load_analysis_v2_collection_context_with_policy',
+    loadRpc: 'load_analysis_v2_collection_context_with_policy_v2',
 });
 
 export const ANALYSIS_V2_COLLECTION_CONTEXT_FAILURE_CODES = Object.freeze({
