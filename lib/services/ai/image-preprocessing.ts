@@ -156,6 +156,7 @@ interface PrepareAnalysisImagesOptions {
     loadImage?: (url: string) => Promise<string>;
     onError?: (candidate: AnalysisImageCandidate, error: unknown) => void;
     policy?: AnalysisImagePolicy;
+    abortSignal?: AbortSignal;
 }
 
 class AsyncSemaphore {
@@ -436,13 +437,19 @@ export async function prepareAnalysisImages(
 
     async function worker(): Promise<void> {
         while (nextIndex < candidates.length) {
+            if (options.abortSignal?.aborted) return;
             const index = nextIndex++;
             const candidate = candidates[index];
 
             try {
                 prepared[index] = {
                     ...candidate,
-                    base64: await runWithImagePreparationSlot(() => loadImage(candidate.url)),
+                    base64: await runWithImagePreparationSlot(async () => {
+                        if (options.abortSignal?.aborted) {
+                            throw options.abortSignal.reason ?? new Error('ABORTED');
+                        }
+                        return loadImage(candidate.url);
+                    }),
                 };
             } catch (error) {
                 onError(candidate, error);

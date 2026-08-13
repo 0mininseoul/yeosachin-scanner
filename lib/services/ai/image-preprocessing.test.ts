@@ -159,6 +159,28 @@ describe('prepareAnalysisImages', () => {
         expect(maxActive).toBe(MAX_VERTEX_AI_IMAGE_PREPARATION_CONCURRENCY);
     });
 
+    it('stops starting queued image work after cancellation', async () => {
+        const controller = new AbortController();
+        let started = 0;
+        const prepared = await prepareAnalysisImages(
+            'profile.jpg',
+            Array.from({ length: 10 }, (_, index) => `post-${index + 1}.jpg`),
+            {
+                abortSignal: controller.signal,
+                policy: getAnalysisImagePolicy(false),
+                loadImage: async url => {
+                    started += 1;
+                    if (started === 1) controller.abort();
+                    await Promise.resolve();
+                    return `base64:${url}`;
+                },
+            },
+        );
+
+        expect(started).toBeLessThanOrEqual(MAX_VERTEX_AI_IMAGE_PREPARATION_CONCURRENCY);
+        expect(prepared.length).toBeLessThanOrEqual(started);
+    });
+
     it('bounds image preparation across concurrent accounts in one process', async () => {
         let active = 0;
         let maxActive = 0;
