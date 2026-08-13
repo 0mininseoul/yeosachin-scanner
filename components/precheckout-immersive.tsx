@@ -189,11 +189,13 @@ export function PrecheckoutImmersive({
     const [dto, setDto] = useState<PrecheckoutBliteV1 | null>(null);
     const [dismissed, setDismissed] = useState(false);
     const [screen, setScreen] = useState<Screen | null>(null);
-    const initialFlow = submittedAtMs === null
-        ? initialBlitePageState
-        : beginBlitePage(submittedAtMs) ?? initialBlitePageState;
-    const [flow, setFlow] = useState<BlitePageState>(initialFlow);
-    const flowRef = useRef<BlitePageState>(initialFlow);
+    // Anonymous resumes can lack the persisted accepted-preflight timestamp (for example,
+    // when browser storage is unavailable). Start a local deadline clock in that case so
+    // repeated transient status responses cannot leave the plan gate pending forever.
+    const [flow, setFlow] = useState<BlitePageState>(() => (
+        beginBlitePage(submittedAtMs ?? Date.now()) ?? initialBlitePageState
+    ));
+    const flowRef = useRef<BlitePageState>(flow);
     const emittedEventKeysRef = useRef(new Set<string>());
 
     const emitPrecheckoutEvent = useCallback((
@@ -259,8 +261,8 @@ export function PrecheckoutImmersive({
                 transition({ type: 'FALLBACK_AT_48', atMs: Date.now() }, 'unresolved_at_48');
             }, Math.max(0, fallbackAtMs - Date.now()));
         };
-        if (submittedAtMs !== null) {
-            scheduleFallback(submittedAtMs + BLITE_FALLBACK_LATCH_MS);
+        if (flowRef.current.submittedAtMs !== null) {
+            scheduleFallback(flowRef.current.submittedAtMs + BLITE_FALLBACK_LATCH_MS);
         }
         (async () => {
             const poll = async (): Promise<void> => {

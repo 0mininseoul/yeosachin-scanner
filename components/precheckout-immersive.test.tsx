@@ -459,6 +459,27 @@ describe('PrecheckoutImmersive', () => {
         expect(onGoToPlans).toHaveBeenCalledOnce();
     });
 
+    it('starts the fallback demo by the local deadline when anonymous status polling never yields a submission clock', async () => {
+        vi.useFakeTimers();
+        vi.setSystemTime(new Date(SUBMITTED_AT));
+        vi.stubGlobal('requestAnimationFrame', vi.fn(() => 1));
+        vi.stubGlobal('cancelAnimationFrame', vi.fn());
+        vi.stubGlobal('fetch', vi.fn().mockRejectedValue(new TypeError('network unavailable')));
+
+        await act(async () => {
+            root.render(createElement(PrecheckoutImmersive, {
+                preflightId: PREFLIGHT_ID,
+                claimToken: null,
+                onGoToPlans: vi.fn(),
+            }));
+        });
+        await settleUi();
+
+        await act(async () => { await vi.advanceTimersByTimeAsync(48_000); });
+
+        expect(container.querySelector('[data-precheckout-demo-mode="fallback"]')).not.toBeNull();
+    });
+
     it('reuses one browser request when the same preflight remounts', async () => {
         const fetchMock = vi.fn().mockResolvedValue(jsonResponse(completeStatus(validDto({ likelyFemale: false }))));
         vi.stubGlobal('fetch', fetchMock);
