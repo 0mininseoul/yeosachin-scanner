@@ -1,7 +1,10 @@
 import 'server-only';
 import { z } from 'zod';
 import type { InstagramPost, InstagramProfile } from '@/lib/types/instagram';
-import { analyzeWithGemini } from '@/lib/services/ai/gemini';
+import {
+    analyzeWithGemini,
+    type GeminiAttemptTelemetry,
+} from '@/lib/services/ai/gemini';
 import {
     getAnalysisImagePolicy,
     prepareAnalysisImages,
@@ -263,6 +266,7 @@ function calibratePrecheckoutBliteSignals(
 export interface PrecheckoutBliteInferenceOptions {
     requestId?: string;
     abortSignal?: AbortSignal;
+    onAttemptTelemetry?: (telemetry: GeminiAttemptTelemetry) => void | Promise<void>;
 }
 
 function postImageUrl(post: InstagramPost): string | null {
@@ -344,6 +348,7 @@ export async function inferPrecheckoutBlite(
                     abortSignal: options.abortSignal,
                     thinkingLevel: 'MINIMAL',
                     maxOutputTokens: PRECHECKOUT_BLITE_MAX_OUTPUT_TOKENS,
+                    onAttemptTelemetry: options.onAttemptTelemetry,
                 },
             );
         })();

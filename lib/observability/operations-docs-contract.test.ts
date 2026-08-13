@@ -178,6 +178,30 @@ describe('analytics and observability disclosure contract', () => {
         expect(operations).not.toMatch(/`ambiguous`|`cancel`/);
     });
 
+    it('documents the production B-lite terminal outcome query and fail-open response', () => {
+        const operations = source('docs/axiom-observability-operations.md');
+
+        expect(operations).toContain("['fields.environment'] == \"production\"");
+        for (const event of [
+            'precheckout_blite.completed',
+            'precheckout_blite.profile_collection_failed',
+            'precheckout_blite.inference_failed',
+        ]) {
+            expect(operations).toContain(`\"${event}\"`);
+        }
+        for (const field of [
+            'provider',
+            'operation',
+            'error_code',
+            'disposition',
+            'duration_ms',
+            'preflight_id',
+        ]) {
+            expect(operations).toContain(`['fields.${field}']`);
+        }
+        expect(operations).toMatch(/B-lite[^\n]*204[^\n]*(preflight|checkout)/i);
+    });
+
     it('marks the contact-retention design documents as superseded without rewriting history', () => {
         for (const path of [
             'docs/superpowers/specs/2026-07-18-amplitude-axiom-groble-phone-design.md',

@@ -42,6 +42,7 @@ AXIOM_ORG_ID=<UI에서 확인한 실제 조직 ID>
 
 - HTTP·Next: `http.route_completed`, `http.route_failed`, `next.request_error`
 - 인증·사전 검사: `auth.*`, `preflight.*`
+- 결제 전 B-lite: `precheckout_blite.completed`, `precheckout_blite.profile_collection_failed`, `precheckout_blite.inference_failed`
 - 결제: `earlybird.checkout_*`, `earlybird.waitlist_*`, `groble.webhook_*`
 - 수집: `scraper.batch_*`, `scraper.fallback_selected`, `scraper.candidate_failed`
 - 작업 큐·분석: `cloud_task.enqueue_*`, `analysis_v2.fresh_admission_enqueued`, `analysis_v2.request_queued`, `analysis_v2.worker_*`, `analysis_v2.result_viewed`
@@ -98,6 +99,22 @@ Cloud Tasks 재시도로 terminal 이벤트는 attempt 단위 at-least-once로 �
     ['fields.duration_ms'], ['fields.provider'], ['fields.operation'], ['fields.phase'],
     ['fields.disposition'], ['fields.error_code']
 | limit 200
+```
+
+B-lite가 소유한 durable generation lease의 terminal outcome은 다음 production 조회로 확인한다. `provider=apify`인 실패는 프로필 수집, `provider=gemini`인 실패는 이미지 준비 또는 추론 경계다. B-lite 실패 응답의 기존 `204` fail-open은 preflight와 checkout availability를 보존하며, 관측 전송 실패도 이 응답을 바꾸지 않는다. cache hit, 다른 인스턴스가 소유한 pending lease, access denial은 새 provider outcome으로 집계하지 않는다.
+
+```apl
+['yeosachin-logs']
+| where ['fields.environment'] == "production"
+| where ['fields.event'] in (
+    "precheckout_blite.completed",
+    "precheckout_blite.profile_collection_failed",
+    "precheckout_blite.inference_failed"
+)
+| project _time, ['fields.event'], ['fields.provider'], ['fields.operation'],
+    ['fields.error_code'], ['fields.disposition'], ['fields.duration_ms'],
+    ['fields.preflight_id']
+| order by _time desc
 ```
 
 금지 필드 감사 체크리스트:

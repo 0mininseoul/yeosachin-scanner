@@ -280,9 +280,11 @@ describe('inferPrecheckoutBlite', () => {
     it('forwards requestId, abortSignal, and the prepared image evidence to the Gemini call', async () => {
         mocks.analyzeWithGemini.mockResolvedValue(validModelResponse());
         const controller = new AbortController();
+        const onAttemptTelemetry = vi.fn();
         await inferPrecheckoutBlite(profile(), {
             requestId: 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb',
             abortSignal: controller.signal,
+            onAttemptTelemetry,
         });
 
         expect(mocks.analyzeWithGemini).toHaveBeenCalledTimes(1);
@@ -294,6 +296,7 @@ describe('inferPrecheckoutBlite', () => {
         expect(options.stage).toBeUndefined();
         expect(options.thinkingLevel).toBe('MINIMAL');
         expect(options.maxOutputTokens).toBe(3_072);
+        expect(options.onAttemptTelemetry).toBe(onAttemptTelemetry);
     });
 
     it('prepares image evidence from the profile photo and recent post photos, bounded to 4 total (1 profile + 3 posts)', async () => {
