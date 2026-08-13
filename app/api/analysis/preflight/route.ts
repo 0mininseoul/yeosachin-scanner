@@ -207,6 +207,11 @@ async function handleAnonymousPOST(
             deviceHash: hashAnonymousRateLimitValue(deviceValue, 'device', env),
             targetInputHash,
             dailyLimit: anonymousPreflightDailyLimit(env),
+            // The budget RPC is intentionally service-role-only because it writes
+            // the abuse-prevention attempt ledger. Keep the public create/dispatch
+            // RPCs claim-bound to the anonymous client, but execute this server-side
+            // accounting call with the admin client.
+            client: supabaseAdmin,
         });
         if (!budget.allowed) {
             throw new AnonymousPreflightRateLimitedError(budget.reason === 'daily_cap'
