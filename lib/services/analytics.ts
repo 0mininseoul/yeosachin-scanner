@@ -54,9 +54,16 @@ export const REVENUE_SHARE_EVENTS = Object.freeze({
     FAILED: 'result_share_failed',
 } as const);
 
+/** Archive service-notice events, kept out of EVENTS to preserve its dashboard shape. */
+export const ARCHIVE_NOTICE_EVENTS = Object.freeze({
+    DELAY_SHOWN: 'archive_delay_notice_shown',
+    DELAY_DISMISSED: 'archive_delay_notice_dismissed',
+} as const);
+
 export type AnalyticsEvent = (typeof EVENTS)[keyof typeof EVENTS]
     | (typeof PRECHECKOUT_EVENTS)[keyof typeof PRECHECKOUT_EVENTS]
-    | (typeof REVENUE_SHARE_EVENTS)[keyof typeof REVENUE_SHARE_EVENTS];
+    | (typeof REVENUE_SHARE_EVENTS)[keyof typeof REVENUE_SHARE_EVENTS]
+    | (typeof ARCHIVE_NOTICE_EVENTS)[keyof typeof ARCHIVE_NOTICE_EVENTS];
 export type AnalyticsAuthProvider = 'google' | 'kakao';
 export type AnalyticsShareChannel = 'clipboard' | 'kakao' | 'web_share';
 export type PrecheckoutAnalyticsEvent =
@@ -82,6 +89,7 @@ type PropertyName =
     | 'gender_confirmation_outcome'
     | 'is_shared'
     | 'medium'
+    | 'notice_dismiss_scope'
     | 'order_id'
     | 'plan_id'
     | 'preflight_id'
@@ -165,6 +173,7 @@ const APPROVED_EVENTS = new Set<AnalyticsEvent>([
     ...Object.values(EVENTS),
     ...Object.values(PRECHECKOUT_EVENTS),
     ...Object.values(REVENUE_SHARE_EVENTS),
+    ...Object.values(ARCHIVE_NOTICE_EVENTS),
 ]);
 
 function enumValidator<const T extends string>(values: readonly T[]): PropertyValidator {
@@ -226,6 +235,7 @@ const PROPERTY_VALIDATORS: Record<PropertyName, PropertyValidator> = {
     gender_confirmation_outcome: enumValidator(['confirmed', 'rejected']),
     is_shared: (value) => typeof value === 'boolean' ? value : undefined,
     medium: enumValidator(['direct', 'organic', 'paid_social', 'referral']),
+    notice_dismiss_scope: enumValidator(['snoozed', 'permanent']),
     order_id: uuidValidator,
     plan_id: enumValidator(['basic', 'standard', 'plus']),
     preflight_id: uuidValidator,
@@ -311,6 +321,9 @@ const EVENT_SCHEMAS: Record<AnalyticsEvent, readonly PropertyName[]> = {
     [REVENUE_SHARE_EVENTS.OPENED]: ['request_id', 'share_channel', 'share_outcome'],
     [REVENUE_SHARE_EVENTS.CANCELLED]: ['request_id', 'share_channel', 'share_outcome'],
     [REVENUE_SHARE_EVENTS.FAILED]: ['request_id', 'share_channel', 'share_outcome'],
+    // The notice carries no order or target identifier, so neither event does.
+    [ARCHIVE_NOTICE_EVENTS.DELAY_SHOWN]: [],
+    [ARCHIVE_NOTICE_EVENTS.DELAY_DISMISSED]: ['notice_dismiss_scope'],
 };
 
 interface QueuedEvent {

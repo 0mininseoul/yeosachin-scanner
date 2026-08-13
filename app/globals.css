@@ -152,6 +152,12 @@ body::before {
   49%, 100% { opacity: 0.18; }
 }
 
+/* bottom sheet entry — lands on the same easeOutExpo settle as every reveal */
+@keyframes sheet-rise {
+  from { opacity: 0; transform: translateY(14px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
 @keyframes bar-fill {
   from { transform: scaleX(0); }
   to { transform: scaleX(1); }
@@ -220,6 +226,7 @@ body::before {
 .anim-scan { animation: scan-sweep 2.8s cubic-bezier(0.4, 0, 0.2, 1) infinite; }
 .anim-stamp { animation: stamp-in 0.5s cubic-bezier(0.2, 0.8, 0.2, 1) both; }
 .anim-blink { animation: blink 1.1s steps(1) infinite; }
+.anim-sheet-rise { animation: sheet-rise 0.42s var(--ease-settle) both; }
 .anim-radar { animation: radar-sweep 3.2s linear infinite; }
 .anim-marquee { animation: marquee 22s linear infinite; }
 .anim-indeterminate { animation: indeterminate-bar 1.6s cubic-bezier(0.4, 0, 0.2, 1) infinite; }
