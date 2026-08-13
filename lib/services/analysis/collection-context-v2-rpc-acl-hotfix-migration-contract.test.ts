@@ -26,13 +26,13 @@ describe('collection-context v2 RPC ACL hotfix migration contract', () => {
         );
 
         const grants = Array.from(
-            migration.matchAll(
-                /GRANT EXECUTE ON FUNCTION ([^(]+\([^;]+\)) TO ([^;]+);/g,
-            ),
-            ([, grantedSignature, role]) => ({ grantedSignature, role }),
+            migration.matchAll(/^\s*GRANT\s+[\s\S]*?;/gim),
+            ([grant]) => grant.replace(/\s+/g, ' ').trim(),
         );
 
-        expect(grants).toEqual([{ grantedSignature: signature, role: 'service_role' }]);
+        expect(grants).toEqual([
+            `GRANT EXECUTE ON FUNCTION ${signature} TO service_role;`,
+        ]);
     });
 
     it('rejects every alternate function or schema-level execution grant form', () => {
