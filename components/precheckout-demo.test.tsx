@@ -208,9 +208,6 @@ describe('PrecheckoutDemo', () => {
                 onError: vi.fn(),
             }));
         });
-        await act(async () => {
-            rafCallback?.(0);
-        });
         expect(container.querySelector('[role="status"]')?.textContent).toContain('4/4');
         await advanceTimersBy(DEMO_DURATION_MS - 10_001);
         expect(remountComplete).not.toHaveBeenCalled();

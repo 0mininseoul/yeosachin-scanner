@@ -812,13 +812,15 @@ export function PrecheckoutStageGraphs({
             try {
                 const elapsed = Math.max(0, Date.now() - startedAtRef.current);
                 paint(elapsed);
-                if (elapsed < TOTAL_MS) rafId = requestAnimationFrame(frame);
+                if (elapsed < TOTAL_MS) {
+                    rafId = requestAnimationFrame(frame);
+                }
             } catch {
                 reportRendererError();
             }
         }
         try {
-            rafId = requestAnimationFrame(frame);
+            frame();
         } catch {
             engines.forEach(engine => engine.svg.remove());
             reportRendererError();
