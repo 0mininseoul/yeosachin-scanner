@@ -38,6 +38,7 @@ import {
 
 export const APIFY_PROFILE_ACTOR_ID = 'apify/instagram-profile-scraper';
 export const APIFY_PROFILE_SUMMARY_MAX_CHARGE_USD = 0.0026;
+export const APIFY_PROFILE_SUMMARY_RUN_MAX_CHARGE_USD = 0.003;
 const APIFY_PROFILE_SUMMARY_WAIT_LIMIT_SECS = 75;
 export const APIFY_RELATIONSHIP_ACTOR_ID =
     'scraping_solutions/instagram-scraper-followers-following-no-cookies';
@@ -949,6 +950,9 @@ export function makeApifyProvider(deps: ApifyProviderDeps = {}): ScraperProvider
                 'SCRAPING_BUDGET_ERROR: Apify profile summary charge exceeds its fixed ceiling.'
             );
         }
+        const runMaximumChargeUsd = includePosts
+            ? maximumChargeUsd
+            : APIFY_PROFILE_SUMMARY_RUN_MAX_CHARGE_USD;
         const apify = client(context?.credentialSlot);
         const durableRun = hasDurableProfileRunCheckpoint(context);
         let run;
@@ -966,11 +970,12 @@ export function makeApifyProvider(deps: ApifyProviderDeps = {}): ScraperProvider
                             logicalProvider: 'apify',
                             credentialSlot: settings.credentialSlot,
                             timeoutSecs: settings.timeoutSecs,
-                            // Apify aborts a run as soon as maxItems is reached. Keep one
-                            // termination-headroom item while maxTotalChargeUsd still caps
-                            // the operation at exactly one requested profile result.
+                            // Apify can report ABORTED when the one profile charge lands
+                            // exactly on its runtime cap. Keep narrow execution headroom;
+                            // the durable billing ceiling above remains fixed at $0.0026.
                             maxItems: 2,
                             maxTotalChargeUsd: maximumChargeUsd,
+                            executionMaxTotalChargeUsd: runMaximumChargeUsd,
                             ...(effectiveInvocationWaitLimitSecs === undefined
                                 ? {}
                                 : { invocationWaitLimitSecs: effectiveInvocationWaitLimitSecs }),

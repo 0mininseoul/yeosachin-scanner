@@ -127,6 +127,7 @@ export interface ApifyActorRunOptions {
     timeoutSecs: number;
     maxItems: number;
     maxTotalChargeUsd: number;
+    executionMaxTotalChargeUsd?: number;
     invocationWaitLimitSecs?: number;
 }
 
@@ -383,6 +384,8 @@ export async function startOrResumeApifyActor(
     }
     const credentialSlot = context?.credentialSlot ?? options.credentialSlot;
     const maxTotalChargeUsd = context?.maxChargeUsd ?? options.maxTotalChargeUsd;
+    const executionMaxTotalChargeUsd = options.executionMaxTotalChargeUsd
+        ?? maxTotalChargeUsd;
     if (!isApifyCredentialSlot(credentialSlot)) {
         throw new Error('SCRAPING_RUN_CHECKPOINT_ERROR: stored credential slot is invalid.');
     }
@@ -392,6 +395,13 @@ export async function startOrResumeApifyActor(
         || maxTotalChargeUsd > 100_000
     ) {
         throw new Error('SCRAPING_RUN_CHECKPOINT_ERROR: stored maximum charge is invalid.');
+    }
+    if (
+        !Number.isFinite(executionMaxTotalChargeUsd)
+        || executionMaxTotalChargeUsd < maxTotalChargeUsd
+        || executionMaxTotalChargeUsd > 100_000
+    ) {
+        throw new Error('SCRAPING_CONFIG_ERROR: invalid Apify execution maximum charge.');
     }
     const invocationWaitLimitSecs = options.invocationWaitLimitSecs
         ?? MAX_INVOCATION_WAIT_SECS;
@@ -447,7 +457,7 @@ export async function startOrResumeApifyActor(
                     ...(options.actorBuild ? { build: options.actorBuild } : {}),
                     timeout: options.timeoutSecs,
                     maxItems: options.maxItems,
-                    maxTotalChargeUsd,
+                    maxTotalChargeUsd: executionMaxTotalChargeUsd,
                     restartOnError: false,
                 }),
                 context?.invocationDeadlineAtMs
