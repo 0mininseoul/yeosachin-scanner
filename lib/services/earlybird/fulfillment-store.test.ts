@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
 import { AnalysisV2FreshAdmissionError } from '@/lib/services/analysis/fresh-plan-admission';
 import {
+    admitAndAdvanceEarlybirdFulfillment,
     advanceAdmittedEarlybirdFulfillment,
     createEarlybirdFulfillmentStore,
     earlybirdFulfillmentAdmissionHash,
@@ -79,6 +80,38 @@ function store(
 }
 
 describe('earlybird fulfillment store', () => {
+    it('preserves a safe admission boundary diagnostic without the RPC message', async () => {
+        const secret = 'Bearer service-role-secret-do-not-print';
+        const orderStore = store({
+            admit: vi.fn(async () => {
+                throw new Error(`RPC failed: ${secret}`);
+            }),
+        });
+
+        await expect(admitAndAdvanceEarlybirdFulfillment(ORDER, {
+            store: orderStore,
+            rebindExpiredPaidPreflight: vi.fn(),
+            reserveFreshAdmission: vi.fn(),
+            enqueueFreshAdmission: vi.fn(),
+            markFreshAdmissionDispatched: vi.fn(),
+            releaseFreshAdmissionDispatch: vi.fn(),
+            dispatchAnalysisJob: vi.fn(),
+        })).rejects.toMatchObject({
+            stage: 'admit',
+            category: 'persistence',
+            code: 'EARLYBIRD_FULFILLMENT_FAILED',
+        });
+        await expect(admitAndAdvanceEarlybirdFulfillment(ORDER, {
+            store: orderStore,
+            rebindExpiredPaidPreflight: vi.fn(),
+            reserveFreshAdmission: vi.fn(),
+            enqueueFreshAdmission: vi.fn(),
+            markFreshAdmissionDispatched: vi.fn(),
+            releaseFreshAdmissionDispatch: vi.fn(),
+            dispatchAnalysisJob: vi.fn(),
+        })).rejects.not.toThrow(secret);
+    });
+
     it('parses only the bounded fresh-admission provider recovery identity', async () => {
         const rpc = vi.fn((name: string, params: Record<string, unknown>) => {
             expect(name).toBe(
@@ -251,6 +284,17 @@ describe('earlybird fulfillment store', () => {
         await expect(leaking.admit(ORDER)).rejects.toThrow(
             'EARLYBIRD_FULFILLMENT_PERSISTENCE_ERROR'
         );
+
+        const rpcFailure = createEarlybirdFulfillmentStore({
+            rpc: () => rpcResult(null, {
+                code: 'P0001',
+                message: 'EARLYBIRD_FULFILLMENT_PAYMENT_INVALID',
+            }),
+            randomUuid: () => CLAIM,
+        });
+        await expect(rpcFailure.admit(ORDER)).rejects.toMatchObject({
+            code: 'EARLYBIRD_FULFILLMENT_PAYMENT_INVALID',
+        });
     });
 
     it('derives one opaque admission identity without buyer or Instagram data', () => {
@@ -319,6 +363,110 @@ describe('earlybird fulfillment store', () => {
                 disposition: 'enqueued',
             },
         });
+    });
+
+    it('labels a reserve failure before any claim or request boundary', async () => {
+        const secret = 'reserve-rpc-secret';
+        const orderStore = store();
+        const failure = await advanceAdmittedEarlybirdFulfillment(
+            identity(),
+            {
+                store: orderStore,
+                rebindExpiredPaidPreflight: vi.fn(),
+                reserveFreshAdmission: vi.fn(async () => {
+                    throw new Error(
+                        `ANALYSIS_V2_FRESH_ADMISSION_ERROR: ${secret}`
+                    );
+                }),
+                enqueueFreshAdmission: vi.fn(),
+                markFreshAdmissionDispatched: vi.fn(),
+                releaseFreshAdmissionDispatch: vi.fn(),
+                dispatchAnalysisJob: vi.fn(),
+            }
+        ).catch(error => error);
+
+        expect(failure).toMatchObject({
+            stage: 'reserve',
+            category: 'persistence',
+            code: 'ANALYSIS_V2_FRESH_ADMISSION_ERROR',
+        });
+        expect((failure as Error).message).not.toContain(secret);
+        expect(orderStore.claim).not.toHaveBeenCalled();
+        expect(orderStore.createOrReplayRequest).not.toHaveBeenCalled();
+    });
+
+    it('labels admission-task enqueue failure and releases its reservation', async () => {
+        const secret = 'cloud-task-secret';
+        const orderStore = store();
+        const releaseFreshAdmissionDispatch = vi.fn(async () => 'released' as const);
+        const failure = await advanceAdmittedEarlybirdFulfillment(
+            identity(),
+            {
+                store: orderStore,
+                rebindExpiredPaidPreflight: vi.fn(async () => PREFLIGHT),
+                reserveFreshAdmission: vi.fn(async () => ({
+                    state: 'pending' as const,
+                    shouldEnqueue: true,
+                    generation: 1,
+                    dispatchGeneration: 1,
+                    dispatchToken: CLAIM,
+                })),
+                enqueueFreshAdmission: vi.fn(async () => {
+                    throw new Error(`PREFLIGHT_TASKS_ENQUEUE_ERROR: ${secret}`);
+                }),
+                markFreshAdmissionDispatched: vi.fn(),
+                releaseFreshAdmissionDispatch,
+                dispatchAnalysisJob: vi.fn(),
+            }
+        ).catch(error => error);
+
+        expect(failure).toMatchObject({
+            stage: 'enqueue',
+            category: 'transport',
+            code: 'PREFLIGHT_TASKS_ENQUEUE_ERROR',
+        });
+        expect((failure as Error).message).not.toContain(secret);
+        expect(releaseFreshAdmissionDispatch).toHaveBeenCalledOnce();
+        expect(orderStore.claim).not.toHaveBeenCalled();
+    });
+
+    it('reports a release failure at dispatch_release and preserves that cause', async () => {
+        const enqueueError = new Error('PREFLIGHT_TASKS_ENQUEUE_ERROR: enqueue failed');
+        const releaseError = new Error(
+            'EARLYBIRD_FULFILLMENT_PERSISTENCE_ERROR: release failed'
+        );
+        const orderStore = store();
+        const releaseFreshAdmissionDispatch = vi.fn(async () => {
+            throw releaseError;
+        });
+        const failure = await advanceAdmittedEarlybirdFulfillment(
+            identity(),
+            {
+                store: orderStore,
+                rebindExpiredPaidPreflight: vi.fn(async () => PREFLIGHT),
+                reserveFreshAdmission: vi.fn(async () => ({
+                    state: 'pending' as const,
+                    shouldEnqueue: true,
+                    generation: 1,
+                    dispatchGeneration: 1,
+                    dispatchToken: CLAIM,
+                })),
+                enqueueFreshAdmission: vi.fn(async () => {
+                    throw enqueueError;
+                }),
+                markFreshAdmissionDispatched: vi.fn(),
+                releaseFreshAdmissionDispatch,
+                dispatchAnalysisJob: vi.fn(),
+            }
+        ).catch(error => error);
+
+        expect(failure).toMatchObject({
+            stage: 'dispatch_release',
+            category: 'persistence',
+            code: 'EARLYBIRD_FULFILLMENT_PERSISTENCE_ERROR',
+        });
+        expect(failure.cause).toBe(releaseError);
+        expect(failure.cause).not.toBe(enqueueError);
     });
 
     it('claims only after fresh admission and creates before dispatching one request', async () => {
