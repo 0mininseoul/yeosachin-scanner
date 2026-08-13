@@ -10,6 +10,7 @@ import { processAnalysisV2FreshAdmission } from '@/lib/services/analysis/fresh-p
 import { supabaseAdmin } from '@/lib/supabase/admin';
 import {
     getPreflightTasksConfig,
+    enqueuePrecheckoutBliteTask,
     enqueuePreflightTask,
     verifyPreflightTaskAuthorization,
 } from '@/lib/services/analysis/preflight-tasks';
@@ -36,6 +37,7 @@ import {
     settleBetaApifyPreflightCredit,
 } from '@/lib/services/analysis/beta-apify-credit-settlement-runtime';
 import { trustedCloudTasksRetryCount } from '@/lib/services/analysis/pipeline-retry';
+import { runPrecheckoutBlite } from '@/lib/services/precheckout/blite-runner';
 
 const workerRequestSchema = z.union([
     z.object({
@@ -54,6 +56,10 @@ const workerRequestSchema = z.union([
         generation: z.number().int().min(1).max(100),
         dispatchGeneration: z.number().int().min(1).max(100),
         dispatchToken: z.string().uuid(),
+    }).strict(),
+    z.object({
+        preflightId: z.string().uuid(),
+        kind: z.literal('precheckout_blite'),
     }).strict(),
 ]);
 
@@ -106,14 +112,17 @@ async function handlePOST(
     const task = parsed.data;
     const isFreshAdmission = 'kind' in task && task.kind === 'fresh_admission';
     const isBetaPrepare = 'kind' in task && task.kind === 'beta_prepare';
+    const isPrecheckoutBlite = 'kind' in task && task.kind === 'precheckout_blite';
     const betaCreditCoordinator = createBetaApifyPreflightCoordinator({
         store: createBetaApifyCreditPoolStore(supabaseAdmin),
         clientForSlot: createServerBetaApifyCreditClientFactory(),
     });
     let profileFailureObserved = false;
     try {
-        let outcome: 'noop' | 'ready' | 'blocked' | 'prepared';
-        if (isFreshAdmission) {
+        let outcome: 'noop' | 'ready' | 'blocked' | 'prepared' | 'pending' | 'complete' | 'failed';
+        if (isPrecheckoutBlite) {
+            outcome = await runPrecheckoutBlite(task.preflightId);
+        } else if (isFreshAdmission) {
             outcome = await processAnalysisV2FreshAdmission(supabaseAdmin, {
                 preflightId: task.preflightId,
                 generation: task.generation,
@@ -143,6 +152,9 @@ async function handlePOST(
                 refreshBetaCredit: () => refreshBetaApifyCreditSnapshots(
                     supabaseAdmin, { telemetry: operationalLogger }
                 ),
+                enqueueBliteInference: preflightId => enqueuePrecheckoutBliteTask(
+                    preflightId, { config }
+                ),
                 observer(observation: PreflightProcessObservation) {
                     if (observation.type === 'failed') profileFailureObserved = true;
                     emitPreflightProcessObservation(context, observation);
@@ -164,11 +176,13 @@ async function handlePOST(
                 }
             });
         }
-        const operation = isFreshAdmission
+        const operation = isPrecheckoutBlite
+            ? 'precheckout_blite'
+            : isFreshAdmission
             ? 'fresh_admission'
             : isBetaPrepare ? 'beta_prepare' : 'profile';
         const disposition = outcome === 'noop' ? 'exists' : outcome;
-        if (isFreshAdmission || outcome === 'noop') {
+        if (isFreshAdmission || isPrecheckoutBlite || outcome === 'noop') {
             operationalLogger.emit({
                 event: 'preflight.completed',
                 severity: outcome === 'blocked' ? 'warn' : 'info',
@@ -185,7 +199,9 @@ async function handlePOST(
         const failure = classifyPreflightWorkerFailure(error);
         console.error(JSON.stringify({
             event: 'preflight_worker_failed',
-            operation: isFreshAdmission ? 'fresh_admission' : 'profile',
+            operation: isPrecheckoutBlite
+                ? 'precheckout_blite'
+                : isFreshAdmission ? 'fresh_admission' : 'profile',
             category: failure.category,
             retryable: failure.retryable,
             httpStatus: failure.httpStatus,
@@ -197,14 +213,16 @@ async function handlePOST(
                 ? { persistenceCode: failure.persistenceCode }
                 : {}),
         }));
-        if (isFreshAdmission || !profileFailureObserved) {
+        if (isFreshAdmission || isPrecheckoutBlite || !profileFailureObserved) {
             operationalLogger.emit({
                 event: 'preflight.failed',
                 severity: 'error',
                 fields: {
                     ...context,
                     preflight_id: task.preflightId,
-                    operation: isFreshAdmission
+                    operation: isPrecheckoutBlite
+                        ? 'precheckout_blite'
+                        : isFreshAdmission
                         ? 'fresh_admission'
                         : isBetaPrepare ? 'beta_prepare' : 'profile',
                     disposition: 'failed',

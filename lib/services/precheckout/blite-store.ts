@@ -88,7 +88,10 @@ const v2ClaimSchema = z.discriminatedUnion('disposition', [
         disposition: z.literal('claimed'),
         leaseToken: uuid,
         source: precheckoutBliteSourceV1Schema,
+        submittedAt: timestamp,
         deadlineAt: timestamp,
+        followersCount: z.number().int().nonnegative(),
+        followingCount: z.number().int().nonnegative(),
     }).strict(),
     z.object({ disposition: z.literal('pending') }).strict(),
     z.object({

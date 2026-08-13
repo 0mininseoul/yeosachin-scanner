@@ -867,7 +867,11 @@ BEGIN
 
     RETURN pg_catalog.jsonb_build_object(
         'disposition', 'claimed', 'leaseToken', v_lease,
-        'source', v_source.payload, 'deadlineAt', v_preflight.deadline_at
+        'source', v_source.payload,
+        'submittedAt', v_preflight.submitted_at,
+        'deadlineAt', v_preflight.deadline_at,
+        'followersCount', v_preflight.target_followers_count,
+        'followingCount', v_preflight.target_following_count
     );
 END;
 $$;

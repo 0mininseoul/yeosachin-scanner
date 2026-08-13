@@ -6,6 +6,8 @@ import {
     enqueueFreshAdmissionTask,
     enqueuePreflightTask,
     freshAdmissionTaskId,
+    enqueuePrecheckoutBliteTask,
+    precheckoutBliteTaskId,
     getPreflightTasksConfig,
     preflightTaskId,
     resolvePreflightDispatchPolicy,
@@ -132,6 +134,23 @@ describe('preflight Cloud Tasks', () => {
         });
         expect(JSON.parse(Buffer.from(request.task.httpRequest.body, 'base64').toString()))
             .toEqual({ preflightId });
+    });
+
+    it('creates one deterministic source-only B-lite task', async () => {
+        const createTask = vi.fn().mockResolvedValue([{}]);
+        const client = {
+            queuePath: vi.fn(() => 'queue-path'),
+            taskPath: vi.fn((_p: string, _l: string, _q: string, task: string) => (
+                `queue-path/tasks/${task}`
+            )),
+            createTask,
+        };
+        expect(precheckoutBliteTaskId(preflightId)).toBe(`preflight-blite-${preflightId}`);
+        await expect(enqueuePrecheckoutBliteTask(preflightId, { config, client }))
+            .resolves.toBe('enqueued');
+        const request = createTask.mock.calls[0][0] as { task: { httpRequest: { body: string } } };
+        expect(JSON.parse(Buffer.from(request.task.httpRequest.body, 'base64').toString()))
+            .toEqual({ kind: 'precheckout_blite', preflightId });
     });
 
     it('treats the UUID-named task as idempotent when Cloud Tasks reports it exists', async () => {
