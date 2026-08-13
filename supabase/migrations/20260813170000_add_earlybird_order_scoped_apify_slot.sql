@@ -74,9 +74,8 @@ REVOKE ALL ON FUNCTION public.bind_earlybird_order_scoped_apify_slot(UUID,TEXT)
 GRANT EXECUTE ON FUNCTION public.bind_earlybird_order_scoped_apify_slot(UUID,TEXT)
     TO service_role;
 
--- Preserve the latest collection-context fence while adding the selector to its
--- existing immutable JSON response. This avoids replacing the large, evolving
--- validation body by hand during a forward-only rollout.
+-- Preserve old workers by leaving the existing response shapes untouched. The
+-- new worker uses a versioned selector-bearing collection RPC.
 DO $context_patch$
 DECLARE
     v_signature REGPROCEDURE :=
@@ -87,6 +86,11 @@ BEGIN
     SELECT pg_catalog.pg_get_functiondef(v_signature) INTO v_original;
     v_patched := pg_catalog.replace(
         v_original,
+        $$CREATE OR REPLACE FUNCTION public.load_analysis_v2_collection_context_with_policy($$,
+        $$CREATE OR REPLACE FUNCTION public.load_analysis_v2_collection_context_with_policy_v2($$
+    );
+    v_patched := pg_catalog.replace(
+        v_patched,
         $$'detailedMutualLimit',v_detailed_limit);$$,
         $$'detailedMutualLimit',v_detailed_limit,'orderScopedCredentialSlot',(
             SELECT earlybird_order.concierge_apify_credential_slot
@@ -103,39 +107,40 @@ BEGIN
 END;
 $context_patch$;
 
--- The existing v2 fresh-admission claim carries the immutable preflight selector.
-DROP FUNCTION public.claim_analysis_v2_preflight_admission_v2(UUID, INTEGER, INTEGER, UUID, UUID, INTEGER);
-CREATE FUNCTION public.claim_analysis_v2_preflight_admission_v2(
-    p_preflight_id UUID, p_admission_generation INTEGER, p_dispatch_generation INTEGER,
-    p_dispatch_token UUID, p_claim_token UUID, p_lease_seconds INTEGER
-)
-RETURNS TABLE(claimed BOOLEAN, admission_status TEXT, target_instagram_id TEXT,
-              analysis_entry_channel TEXT, access_mode TEXT, order_scoped_credential_slot TEXT)
-LANGUAGE plpgsql SECURITY DEFINER SET search_path = '' AS $$
-DECLARE v_now TIMESTAMPTZ := pg_catalog.clock_timestamp(); v_preflight public.analysis_preflights%ROWTYPE;
+-- The versioned fresh-admission claim carries the immutable preflight selector;
+-- the existing v2 claim remains available to already-running workers.
+DO $claim_patch$
+DECLARE
+    v_signature REGPROCEDURE :=
+        'public.claim_analysis_v2_preflight_admission_v2(uuid,integer,integer,uuid,uuid,integer)'::REGPROCEDURE;
+    v_original TEXT;
+    v_patched TEXT;
 BEGIN
-    SELECT * INTO v_preflight FROM public.analysis_preflights WHERE id = p_preflight_id FOR UPDATE;
-    IF NOT FOUND OR v_preflight.status <> 'ready' OR v_preflight.consumed_request_id IS NOT NULL
-       OR v_preflight.expires_at <= v_now OR v_preflight.admission_generation <> p_admission_generation
-       OR v_preflight.admission_dispatch_generation <> p_dispatch_generation
-       OR v_preflight.admission_dispatch_token IS DISTINCT FROM p_dispatch_token
-       OR v_preflight.admission_dispatch_state NOT IN ('reserved','enqueued')
-    THEN RETURN QUERY SELECT FALSE,'blocked'::TEXT,NULL::TEXT,COALESCE(v_preflight.analysis_entry_channel::TEXT,'standard'),v_preflight.access_mode::TEXT,v_preflight.order_scoped_apify_credential_slot; RETURN; END IF;
-    IF v_preflight.admission_status IN ('idle','ready','blocked') THEN
-        RETURN QUERY SELECT FALSE,CASE WHEN v_preflight.admission_status='idle' THEN 'blocked' ELSE v_preflight.admission_status END,NULL::TEXT,v_preflight.analysis_entry_channel::TEXT,v_preflight.access_mode::TEXT,v_preflight.order_scoped_apify_credential_slot; RETURN;
+    SELECT pg_catalog.pg_get_functiondef(v_signature) INTO v_original;
+    v_patched := pg_catalog.replace(
+        v_original,
+        $$CREATE OR REPLACE FUNCTION public.claim_analysis_v2_preflight_admission_v2($$,
+        $$CREATE OR REPLACE FUNCTION public.claim_analysis_v2_preflight_admission_v3($$
+    );
+    v_patched := pg_catalog.replace(
+        v_patched,
+        $$RETURNS TABLE(claimed BOOLEAN, admission_status TEXT, target_instagram_id TEXT, analysis_entry_channel TEXT, access_mode TEXT)$$,
+        $$RETURNS TABLE(claimed BOOLEAN, admission_status TEXT, target_instagram_id TEXT, analysis_entry_channel TEXT, access_mode TEXT, order_scoped_credential_slot TEXT)$$
+    );
+    v_patched := pg_catalog.replace(
+        v_patched,
+        $$v_preflight.access_mode::TEXT$$,
+        $$v_preflight.access_mode::TEXT,v_preflight.order_scoped_apify_credential_slot$$
+    );
+    IF v_patched = v_original THEN
+        RAISE EXCEPTION 'EARLYBIRD_ORDER_CREDENTIAL_SLOT_CLAIM_PATCH_FAILED';
     END IF;
-    IF v_preflight.admission_status='processing' AND v_preflight.admission_lease_expires_at > v_now THEN
-        RETURN QUERY SELECT FALSE,'processing'::TEXT,NULL::TEXT,v_preflight.analysis_entry_channel::TEXT,v_preflight.access_mode::TEXT,v_preflight.order_scoped_apify_credential_slot; RETURN;
-    END IF;
-    UPDATE public.analysis_preflights SET admission_status='processing', admission_claim_token=p_claim_token,
-        admission_lease_expires_at=v_now+pg_catalog.make_interval(secs=>p_lease_seconds), admission_dispatch_state='enqueued',
-        admission_dispatched_at=COALESCE(admission_dispatched_at,v_now), updated_at=v_now WHERE id=v_preflight.id;
-    RETURN QUERY SELECT TRUE,'processing'::TEXT,v_preflight.target_instagram_id::TEXT,v_preflight.analysis_entry_channel::TEXT,v_preflight.access_mode::TEXT,v_preflight.order_scoped_apify_credential_slot;
+    EXECUTE v_patched;
 END;
-$$;
-REVOKE ALL ON FUNCTION public.claim_analysis_v2_preflight_admission_v2(UUID,INTEGER,INTEGER,UUID,UUID,INTEGER)
+$claim_patch$;
+REVOKE ALL ON FUNCTION public.claim_analysis_v2_preflight_admission_v3(UUID, INTEGER, INTEGER, UUID, UUID, INTEGER)
     FROM PUBLIC, anon, authenticated, service_role;
-GRANT EXECUTE ON FUNCTION public.claim_analysis_v2_preflight_admission_v2(UUID,INTEGER,INTEGER,UUID,UUID,INTEGER)
+GRANT EXECUTE ON FUNCTION public.claim_analysis_v2_preflight_admission_v3(UUID, INTEGER, INTEGER, UUID, UUID, INTEGER)
     TO service_role;
 
 COMMIT;

@@ -18,6 +18,11 @@ describe('earlybird order-scoped credential migration', () => {
         expect(migration).toMatch(/REVOKE ALL ON FUNCTION public\.bind_earlybird_order_scoped_apify_slot[\s\S]*?FROM PUBLIC, anon, authenticated, service_role;/);
         expect(migration).toMatch(/GRANT EXECUTE ON FUNCTION public\.bind_earlybird_order_scoped_apify_slot[\s\S]*?TO service_role;/);
         expect(migration).toContain('orderScopedCredentialSlot');
+        expect(migration).toContain('load_analysis_v2_collection_context_with_policy_v2');
+        expect(migration).toContain('claim_analysis_v2_preflight_admission_v3');
+        expect(migration).toContain('CREATE OR REPLACE FUNCTION public.load_analysis_v2_collection_context_with_policy_v2');
+        expect(migration).toContain('v_preflight.access_mode::TEXT,v_preflight.order_scoped_apify_credential_slot');
+        expect(migration).not.toContain('DROP FUNCTION public.claim_analysis_v2_preflight_admission_v2');
         expect(migration).not.toMatch(/APIFY_[A-Z_]*TOKEN\s*=/);
     });
 });

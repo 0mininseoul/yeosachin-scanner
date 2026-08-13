@@ -34,7 +34,7 @@ export const ANALYSIS_V2_FRESH_ADMISSION_DATABASE_NAMES = Object.freeze({
     reserveRpc: 'reserve_analysis_v2_preflight_admission',
     markDispatchedRpc: 'mark_analysis_v2_preflight_admission_dispatched',
     releaseDispatchRpc: 'release_analysis_v2_preflight_admission_dispatch',
-    claimRpc: 'claim_analysis_v2_preflight_admission_v2',
+    claimRpc: 'claim_analysis_v2_preflight_admission_v3',
     completeRpc: 'complete_analysis_v2_preflight_admission',
     blockRpc: 'block_analysis_v2_preflight_admission',
     releaseRpc: 'release_analysis_v2_preflight_admission',

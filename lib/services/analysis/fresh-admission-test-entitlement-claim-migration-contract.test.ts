@@ -45,7 +45,7 @@ describe('fresh admission test-entitlement claim migration contract', () => {
             'GRANT EXECUTE ON FUNCTION public.claim_analysis_v2_preflight_admission_v2(UUID, INTEGER, INTEGER, UUID, UUID, INTEGER) TO service_role;'
         );
         expect(freshAdmission).toContain(
-            "claimRpc: 'claim_analysis_v2_preflight_admission_v2'"
+            "claimRpc: 'claim_analysis_v2_preflight_admission_v3'"
         );
     });
 });
