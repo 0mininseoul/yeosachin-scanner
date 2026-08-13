@@ -2,6 +2,8 @@ import { pathToFileURL } from 'node:url';
 import { z } from 'zod';
 import {
     admitAndAdvanceEarlybirdFulfillment,
+    earlybirdFulfillmentDiagnostic,
+    type EarlybirdFulfillmentDiagnostic,
 } from '../lib/services/earlybird/fulfillment-store';
 
 const uuidSchema = z.string().uuid().transform(value => value.toLowerCase());
@@ -25,6 +27,29 @@ const outputSchema = z.object({
 export interface EarlybirdFulfillmentCliDependencies {
     fulfill(orderId: string): Promise<unknown>;
     writeStdout(value: string): void;
+}
+
+export type EarlybirdFulfillmentCliFailure = Readonly<{
+    status: 'failed';
+    errorCode: string;
+    stage?: EarlybirdFulfillmentDiagnostic['stage'];
+    category?: EarlybirdFulfillmentDiagnostic['category'];
+}>;
+
+export function formatEarlybirdFulfillmentCliFailure(
+    error: unknown
+): EarlybirdFulfillmentCliFailure {
+    const diagnostic = earlybirdFulfillmentDiagnostic(error);
+    if (!diagnostic) {
+        return Object.freeze({
+            status: 'failed',
+            errorCode: 'EARLYBIRD_FULFILLMENT_FAILED',
+        });
+    }
+    return Object.freeze({
+        status: 'failed',
+        ...diagnostic,
+    });
 }
 
 export function parseEarlybirdFulfillmentCliArgs(
@@ -90,11 +115,10 @@ function isDirectExecution(): boolean {
 }
 
 if (isDirectExecution()) {
-    runEarlybirdFulfillmentCli(process.argv.slice(2)).catch(() => {
-        process.stderr.write(`${JSON.stringify({
-            status: 'failed',
-            errorCode: 'EARLYBIRD_FULFILLMENT_FAILED',
-        })}\n`);
+    runEarlybirdFulfillmentCli(process.argv.slice(2)).catch(error => {
+        process.stderr.write(`${JSON.stringify(
+            formatEarlybirdFulfillmentCliFailure(error)
+        )}\n`);
         process.exitCode = 1;
     });
 }
