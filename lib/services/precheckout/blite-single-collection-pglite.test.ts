@@ -632,6 +632,37 @@ describe('precheckout B-lite source and lease lifecycle', () => {
         )).resolves.toMatchObject({ rows: [{ state: 'complete', dto: { legacy: true }, cohort: false }] });
     }, 30_000);
 
+    it('keeps a v1 caller non-mutating when it encounters a terminal B-lite failed cache row', async () => {
+        const database = await createDb();
+        await database.query(
+            `INSERT INTO public.analysis_preflights(
+                id,status,ready_at,expires_at,precheckout_blite_cohort
+            ) VALUES ($1,'ready',clock_timestamp(),clock_timestamp() + interval '10 minutes',false)`,
+            [PREFLIGHT_LEGACY],
+        );
+        await database.query(
+            `INSERT INTO public.precheckout_blite_cache(
+                preflight_id,state,lease_token,lease_expires_at,attempt_count,
+                failure_reason,failed_at,created_at,updated_at
+            ) VALUES (
+                $1,'failed',$2,clock_timestamp() - interval '1 second',2,
+                'attempts_exhausted',clock_timestamp(),clock_timestamp() - interval '2 seconds',clock_timestamp()
+            )`,
+            [PREFLIGHT_LEGACY, CLAIM_TOKEN],
+        );
+
+        await expect(database.query(
+            'SELECT public.claim_precheckout_blite_v1($1) AS result', [PREFLIGHT_LEGACY],
+        )).resolves.toMatchObject({ rows: [{ result: { disposition: 'pending' } }] });
+        await expect(database.query(
+            `SELECT state,lease_token,failure_reason
+             FROM public.precheckout_blite_cache WHERE preflight_id=$1`,
+            [PREFLIGHT_LEGACY],
+        )).resolves.toMatchObject({ rows: [{
+            state: 'failed', lease_token: CLAIM_TOKEN, failure_reason: 'attempts_exhausted',
+        }] });
+    }, 30_000);
+
     it('anchors cohort clocks to created_at and rejects queue-delay, refresh, retry, and caller-supplied resets', async () => {
         const database = await createDb();
         const origin = '2026-08-13T00:00:00.000Z';

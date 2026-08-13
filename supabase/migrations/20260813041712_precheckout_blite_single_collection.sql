@@ -1143,6 +1143,66 @@ EXECUTE FUNCTION public.delete_precheckout_blite_cache_on_pii_scrub_v1();
 -- Keep v1 reachable for flag-off callers during the DB-first rollout window. The new
 -- cohort path is fenced at its finalizer and v2 RPCs; legacy workers retain their
 -- original pending/complete/release lifecycle until the application rollout retires them.
+CREATE OR REPLACE FUNCTION public.claim_precheckout_blite_v1(p_preflight_id UUID)
+RETURNS JSONB
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = ''
+AS $$
+DECLARE
+    v_now TIMESTAMP WITH TIME ZONE := pg_catalog.clock_timestamp();
+    v_lease UUID := extensions.gen_random_uuid();
+    v_cache public.precheckout_blite_cache%ROWTYPE;
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1
+        FROM public.analysis_preflights AS preflight
+        WHERE preflight.id = p_preflight_id
+          AND preflight.status = 'ready'
+          AND preflight.ready_at IS NOT NULL
+          AND preflight.expires_at > v_now
+    ) THEN
+        RAISE EXCEPTION USING
+            MESSAGE = 'PRECHECKOUT_BLITE_PREFLIGHT_NOT_READY', ERRCODE = 'P0001';
+    END IF;
+
+    INSERT INTO public.precheckout_blite_cache (
+        preflight_id, state, lease_token, lease_expires_at, created_at, updated_at
+    ) VALUES (
+        p_preflight_id, 'pending', v_lease, v_now + INTERVAL '2 minutes', v_now, v_now
+    ) ON CONFLICT (preflight_id) DO NOTHING;
+
+    SELECT cache.* INTO v_cache
+    FROM public.precheckout_blite_cache AS cache
+    WHERE cache.preflight_id = p_preflight_id
+    FOR UPDATE;
+    v_now := pg_catalog.clock_timestamp();
+
+    IF v_cache.state = 'complete' THEN
+        RETURN pg_catalog.jsonb_build_object('disposition', 'complete', 'dto', v_cache.dto);
+    END IF;
+    -- A DB-first v1 caller can observe a terminal v2 row. Preserve the legacy result
+    -- vocabulary and leave its immutable failed state entirely untouched.
+    IF v_cache.state = 'failed' THEN
+        RETURN pg_catalog.jsonb_build_object('disposition', 'pending');
+    END IF;
+    IF v_cache.lease_token = v_lease THEN
+        RETURN pg_catalog.jsonb_build_object(
+            'disposition', 'claimed', 'leaseToken', v_cache.lease_token
+        );
+    END IF;
+    IF v_cache.lease_expires_at <= v_now THEN
+        UPDATE public.precheckout_blite_cache
+        SET lease_token = v_lease,
+            lease_expires_at = v_now + INTERVAL '2 minutes',
+            updated_at = v_now
+        WHERE preflight_id = p_preflight_id;
+        RETURN pg_catalog.jsonb_build_object('disposition', 'claimed', 'leaseToken', v_lease);
+    END IF;
+    RETURN pg_catalog.jsonb_build_object('disposition', 'pending');
+END;
+$$;
+
 REVOKE ALL ON FUNCTION public.claim_precheckout_blite_v1(UUID)
     FROM PUBLIC, anon, authenticated, service_role;
 GRANT EXECUTE ON FUNCTION public.claim_precheckout_blite_v1(UUID)

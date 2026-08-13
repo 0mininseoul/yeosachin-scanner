@@ -19,6 +19,7 @@ const describePostgres = isSafePrecheckoutBlitePostgresTestTarget(databaseUrl, d
 
 const LEGACY_PREFLIGHT = '20000000-0000-4000-8000-000000000101';
 const ORIGIN_PREFLIGHT = '20000000-0000-4000-8000-000000000102';
+const LEGACY_FAILED_PREFLIGHT = '20000000-0000-4000-8000-000000000104';
 
 export function isSafePrecheckoutBlitePostgresTestTarget(
     connectionString: string | undefined,
@@ -200,5 +201,40 @@ describePostgres('precheckout B-lite PostgreSQL migration compatibility', () => 
              WHERE id=$1`,
             [preflightId],
         )).rejects.toThrow('PRECHECKOUT_BLITE_CLOCK_IMMUTABLE');
+    });
+
+    it('keeps a v1 claim non-mutating when it sees a terminal B-lite failed cache row', async () => {
+        await pool.query(
+            `INSERT INTO public.analysis_preflights(
+                id,status,ready_at,expires_at,precheckout_blite_cohort
+            ) VALUES ($1,'ready',clock_timestamp(),clock_timestamp() + interval '10 minutes',false)`,
+            [LEGACY_FAILED_PREFLIGHT],
+        );
+        await pool.query(
+            `INSERT INTO public.precheckout_blite_cache(
+                preflight_id,state,lease_token,lease_expires_at,attempt_count,
+                failure_reason,failed_at,created_at,updated_at
+            ) VALUES (
+                $1,'failed','40000000-0000-4000-8000-000000000104',
+                clock_timestamp() - interval '1 second',2,'attempts_exhausted',clock_timestamp(),
+                clock_timestamp() - interval '2 seconds',clock_timestamp()
+            )`,
+            [LEGACY_FAILED_PREFLIGHT],
+        );
+
+        await expect(asService<{ disposition: string }>(
+            pool,
+            'SELECT public.claim_precheckout_blite_v1($1) AS result',
+            [LEGACY_FAILED_PREFLIGHT],
+        )).resolves.toEqual({ disposition: 'pending' });
+        await expect(pool.query(
+            `SELECT state,lease_token,failure_reason
+             FROM public.precheckout_blite_cache WHERE preflight_id=$1`,
+            [LEGACY_FAILED_PREFLIGHT],
+        )).resolves.toMatchObject({ rows: [{
+            state: 'failed',
+            lease_token: '40000000-0000-4000-8000-000000000104',
+            failure_reason: 'attempts_exhausted',
+        }] });
     });
 });

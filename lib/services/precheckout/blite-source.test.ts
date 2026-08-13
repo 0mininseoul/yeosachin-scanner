@@ -153,6 +153,27 @@ describe('projectPrecheckoutBliteSource', () => {
         expect(JSON.stringify(source)).not.toContain('plain-http');
     });
 
+    it('sorts validated provider posts newest-first before applying the ten-post and media limits', () => {
+        const source = projectPrecheckoutBliteSource(profile({
+            latestPosts: Array.from({ length: 11 }, (_, index) => post(index + 1, {
+                timestamp: new Date(Date.UTC(2026, 7, index + 1)).toISOString(),
+            })),
+        }));
+
+        expect(source.posts.map(value => value.likesCount)).toEqual([
+            11, 10, 9, 8, 7, 6, 5, 4, 3, 2,
+        ]);
+        expect(source.media).toEqual([
+            { role: 'profile', url: imageUrl('profile') },
+            { role: 'post', url: imageUrl('post-11') },
+            { role: 'post', url: imageUrl('post-10') },
+            { role: 'post', url: imageUrl('post-9') },
+        ]);
+        expect(() => projectPrecheckoutBliteSource(profile({
+            latestPosts: [post(1, { timestamp: 'not-a-timestamp' })],
+        }))).toThrow('PRECHECKOUT_BLITE_SOURCE_INVALID');
+    });
+
     it('rejects malformed strict source values with a bounded error that contains no source PII', () => {
         const badCaption = 'confidential-caption-that-must-not-appear-in-errors';
         const malformed = profile({

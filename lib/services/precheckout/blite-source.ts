@@ -5,6 +5,7 @@ import {
     INSTAGRAM_MEDIA_HOST_SUFFIXES,
     matchesAllowedHostSuffix,
 } from '@/lib/services/media/secure-image-fetch';
+import { instagramTimestampMs } from '@/lib/services/instagram/timestamp';
 import type { InstagramPost, InstagramProfile } from '@/lib/types/instagram';
 
 export const PRECHECKOUT_BLITE_SOURCE_SCHEMA_VERSION = 1 as const;
@@ -205,13 +206,25 @@ function projectMedia(profile: InstagramProfile, posts: readonly InstagramPost[]
     return media;
 }
 
+function newestPosts(posts: readonly InstagramPost[]): InstagramPost[] {
+    const timestamped = posts.map((post, index) => {
+        const timestampMs = instagramTimestampMs(post.timestamp);
+        if (!Number.isFinite(timestampMs)) throw sourceError('PRECHECKOUT_BLITE_SOURCE_INVALID');
+        return { post, index, timestampMs };
+    });
+    return timestamped
+        .sort((left, right) => right.timestampMs - left.timestampMs || left.index - right.index)
+        .slice(0, PRECHECKOUT_BLITE_SOURCE_MAX_POSTS)
+        .map(value => value.post);
+}
+
 /**
  * Project the one collection's validated profile snapshot into the short-lived B-lite evidence
  * contract. It intentionally has no identity/lineage columns: those are fenced separately by
  * the source table RPC and never live in the JSON payload.
  */
 export function projectPrecheckoutBliteSource(profile: InstagramProfile): PrecheckoutBliteSourceV1 {
-    const recentPosts = (profile.latestPosts ?? []).slice(0, PRECHECKOUT_BLITE_SOURCE_MAX_POSTS);
+    const recentPosts = newestPosts(profile.latestPosts ?? []);
     const parsed = precheckoutBliteSourceV1Schema.safeParse({
         schemaVersion: PRECHECKOUT_BLITE_SOURCE_SCHEMA_VERSION,
         fullName: boundedText(profile.fullName, PRECHECKOUT_BLITE_SOURCE_MAX_FULL_NAME_LENGTH),
