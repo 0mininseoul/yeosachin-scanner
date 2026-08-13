@@ -345,14 +345,26 @@ describe('OAuth callback redirects', () => {
     });
 
     it('lands a missing-code callback on a bounded terminal error', async () => {
+        const consoleError = vi.spyOn(console, 'error').mockImplementation(() => undefined);
         const response = await GET(new Request(
             'https://preview.example/auth/callback?next=%2Fanalyze'
         ));
+        const consoleErrorCalls = consoleError.mock.calls;
+        consoleError.mockRestore();
 
         expect(response.headers.get('location')).toBe(
             `${CANONICAL_APP_ORIGIN}/login?error=no_code`
         );
         expect(mocks.exchangeCodeForSession).not.toHaveBeenCalled();
+        expect(mocks.emit).toHaveBeenCalledWith(expect.objectContaining({
+            event: 'auth.callback_completed',
+            severity: 'warn',
+            fields: expect.objectContaining({
+                disposition: 'rejected',
+                error_code: 'INVALID_REQUEST',
+            }),
+        }));
+        expect(consoleErrorCalls).toHaveLength(0);
     });
 
     it('lands an exchange failure on a bounded code without reflecting provider details', async () => {

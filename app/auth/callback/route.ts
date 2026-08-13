@@ -305,7 +305,6 @@ async function handleGET(
     const callbackContinuation = readAnonymousPreflightOAuthContinuation(searchParams);
 
     if (!code) {
-        console.error('Auth callback: No code provided');
         operationalLogger.emit({
             event: 'auth.callback_completed',
             severity: 'warn',
