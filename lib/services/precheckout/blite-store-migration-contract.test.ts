@@ -43,15 +43,18 @@ describe('precheckout B-lite durable cache migration', () => {
         expect(migration.match(/GRANT EXECUTE ON FUNCTION/g)).toHaveLength(3);
     });
 
-    it('replaces the legacy result contract with the v2 failure-aware lifecycle', () => {
+    it('adds the v2 failure-aware lifecycle while preserving flag-off v1 RPCs', () => {
         const v2 = singleCollectionMigration();
         expect(v2).toContain("state IN ('pending', 'complete', 'failed')");
         expect(v2).toContain('claim_precheckout_blite_v2');
         expect(v2).toContain('complete_precheckout_blite_v2');
         expect(v2).toContain('fail_precheckout_blite_v2');
         expect(v2).toContain('read_precheckout_blite_status_v1');
-        expect(v2).toContain('DROP FUNCTION public.claim_precheckout_blite_v1(UUID)');
-        expect(v2).toContain('DROP FUNCTION public.complete_precheckout_blite_v1(UUID, UUID, JSONB)');
-        expect(v2).toContain('DROP FUNCTION public.release_precheckout_blite_v1(UUID, UUID)');
+        expect(v2).not.toContain('DROP FUNCTION public.claim_precheckout_blite_v1(UUID)');
+        expect(v2).not.toContain('DROP FUNCTION public.complete_precheckout_blite_v1(UUID, UUID, JSONB)');
+        expect(v2).not.toContain('DROP FUNCTION public.release_precheckout_blite_v1(UUID, UUID)');
+        expect(v2).toContain('GRANT EXECUTE ON FUNCTION public.claim_precheckout_blite_v1(UUID)');
+        expect(v2).toContain('GRANT EXECUTE ON FUNCTION public.complete_precheckout_blite_v1(UUID, UUID, JSONB)');
+        expect(v2).toContain('GRANT EXECUTE ON FUNCTION public.release_precheckout_blite_v1(UUID, UUID)');
     });
 });
