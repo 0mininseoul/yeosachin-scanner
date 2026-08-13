@@ -99,6 +99,11 @@ import {
     BLITE_PROVIDER_DEADLINE_MS,
     selectBliteCohort,
 } from '@/lib/services/precheckout/blite-runtime-policy';
+import {
+    createPrecheckoutBliteObservability,
+    precheckoutBliteProfileFailureCategory,
+    type PrecheckoutBliteObservability,
+} from '@/lib/services/precheckout/blite-observability';
 
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const ISO_TIMESTAMP_PATTERN = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})$/;
@@ -1746,6 +1751,8 @@ export async function processPreflight(
             expiresAt: string;
         }>;
         projectBliteSource?: (profile: InstagramProfile) => PrecheckoutBliteSourceV1;
+        /** Optional server-only sink for B-lite provider outcomes. */
+        bliteObservability?: PrecheckoutBliteObservability;
         finalizeReadyWithSource?: (
             input: FinalizePrecheckoutBliteSourceInput
         ) => Promise<boolean>;
@@ -1884,6 +1891,11 @@ export async function processPreflight(
         let profile: InstagramProfile | null;
         let bliteProviderRun: StoredPreflightProviderRun | null = null;
         if (bliteClock !== null) {
+            const bliteObservability = dependencies.bliteObservability
+                ?? createPrecheckoutBliteObservability({
+                    preflightId: claim.preflightId,
+                    startedAtMs: Date.parse(bliteClock.submittedAt),
+                });
             const identity = preflightProviderIdentity(
                 selectPreflightApifyCredentialSlot(
                     claim.preflightId,
@@ -1896,14 +1908,26 @@ export async function processPreflight(
                 inputHash,
                 identity,
             });
-            profile = await (dependencies.getFullProfile ?? getApifyProfile)(
-                claim.targetInstagramId,
-                fallbackCallContext(
-                    bound.checkpoint,
-                    workerStartedAt,
-                    bliteProviderDeadlineAtMs ?? undefined,
-                ),
-            );
+            try {
+                profile = await (dependencies.getFullProfile ?? getApifyProfile)(
+                    claim.targetInstagramId,
+                    fallbackCallContext(
+                        bound.checkpoint,
+                        workerStartedAt,
+                        bliteProviderDeadlineAtMs ?? undefined,
+                    ),
+                );
+            } catch (error) {
+                const category = precheckoutBliteProfileFailureCategory(error);
+                if (category) {
+                    try {
+                        bliteObservability.profileCollectionFailed(category);
+                    } catch {
+                        // Observability must never change the preflight outcome.
+                    }
+                }
+                throw error;
+            }
             bliteProviderRun = await providerRuns.load({
                 preflightId: claim.preflightId,
                 claimToken: claim.claimToken,

@@ -1,5 +1,7 @@
 'use client';
 
+import { availableAnalyticsStorage, tryClaimAnalyticsEvent } from './analytics-funnel';
+
 export const EVENTS = {
     LANDING_VIEWED: 'landing_viewed',
     TARGET_SUBMITTED: 'target_submitted',
@@ -25,6 +27,22 @@ export const EVENTS = {
     RESULT_SHARED: 'result_shared',
 } as const;
 
+/**
+ * The precheckout surface has its own immutable vocabulary so adding funnel detail does not
+ * change the shape of the established dashboard events above.
+ */
+export const PRECHECKOUT_EVENTS = Object.freeze({
+    BLITE_AVAILABLE: 'precheckout_blite_available',
+    BLITE_RESULT_VIEWED: 'precheckout_blite_result_viewed',
+    BLITE_FALLBACK_SELECTED: 'precheckout_blite_fallback_selected',
+    BLITE_GENDER_CONFIRMATION_COMPLETED: 'precheckout_blite_gender_confirmation_completed',
+    BLITE_PREVIEW_CTA_CLICKED: 'precheckout_blite_preview_cta_clicked',
+    DEMO_STARTED: 'precheckout_demo_started',
+    DEMO_COMPLETED: 'precheckout_demo_completed',
+    DEMO_FAILED: 'precheckout_demo_failed',
+    PLAN_GATE_REACHED: 'precheckout_plan_gate_reached',
+} as const);
+
 /** Additive revenue events, kept out of EVENTS to preserve its dashboard shape. */
 export const REVENUE_SHARE_EVENTS = Object.freeze({
     INITIATED: 'result_share_initiated',
@@ -37,9 +55,12 @@ export const REVENUE_SHARE_EVENTS = Object.freeze({
 } as const);
 
 export type AnalyticsEvent = (typeof EVENTS)[keyof typeof EVENTS]
+    | (typeof PRECHECKOUT_EVENTS)[keyof typeof PRECHECKOUT_EVENTS]
     | (typeof REVENUE_SHARE_EVENTS)[keyof typeof REVENUE_SHARE_EVENTS];
 export type AnalyticsAuthProvider = 'google' | 'kakao';
 export type AnalyticsShareChannel = 'clipboard' | 'kakao' | 'web_share';
+export type PrecheckoutAnalyticsEvent =
+    (typeof PRECHECKOUT_EVENTS)[keyof typeof PRECHECKOUT_EVENTS];
 
 type UnifiedSdk = typeof import('@amplitude/unified');
 type AnalyticsScalar = string | number | boolean;
@@ -50,12 +71,15 @@ type PropertyName =
     | 'campaign'
     | 'content'
     | 'decision'
+    | 'demo_mode'
     | 'duration_ms'
     | 'duration_range'
     | 'estimate_version'
     | 'error_code'
     | 'followers_bucket'
+    | 'fallback_reason'
     | 'following_bucket'
+    | 'gender_confirmation_outcome'
     | 'is_shared'
     | 'medium'
     | 'order_id'
@@ -139,6 +163,7 @@ const SESSION_REPLAY_TRACK_TYPES = new Set(['replay', 'interaction']);
 
 const APPROVED_EVENTS = new Set<AnalyticsEvent>([
     ...Object.values(EVENTS),
+    ...Object.values(PRECHECKOUT_EVENTS),
     ...Object.values(REVENUE_SHARE_EVENTS),
 ]);
 
@@ -190,12 +215,15 @@ const PROPERTY_VALIDATORS: Record<PropertyName, PropertyValidator> = {
     campaign: enumValidator(['launch_2026']),
     content: enumValidator(['hero-a']),
     decision: enumValidator(['exclude', 'skip']),
+    demo_mode: enumValidator(['success', 'fallback']),
     duration_ms: integerValidator(0, 86_400_000),
     duration_range: enumValidator(['4_6', '5_8', '8_12', '10_15', '60_90_seconds']),
     error_code: registeredErrorCodeValidator,
     estimate_version: enumValidator(['v1', 'demo-v1']),
     followers_bucket: enumValidator(['unknown', '0_400', '401_800', '801_1200', 'over_1200']),
+    fallback_reason: enumValidator(['terminal_before_48', 'unresolved_at_48', 'demo_error']),
     following_bucket: enumValidator(['unknown', '0_400', '401_800', '801_1200', 'over_1200']),
+    gender_confirmation_outcome: enumValidator(['confirmed', 'rejected']),
     is_shared: (value) => typeof value === 'boolean' ? value : undefined,
     medium: enumValidator(['direct', 'organic', 'paid_social', 'referral']),
     order_id: uuidValidator,
@@ -264,6 +292,18 @@ const EVENT_SCHEMAS: Record<AnalyticsEvent, readonly PropertyName[]> = {
     [EVENTS.ANALYSIS_FAILED]: ['request_id', 'duration_ms', 'error_code'],
     [EVENTS.RESULT_VIEWED]: ['request_id', 'result_count', 'is_shared'],
     [EVENTS.RESULT_SHARED]: ['request_id', 'share_channel'],
+    [PRECHECKOUT_EVENTS.BLITE_AVAILABLE]: ['preflight_id'],
+    [PRECHECKOUT_EVENTS.BLITE_RESULT_VIEWED]: ['preflight_id'],
+    [PRECHECKOUT_EVENTS.BLITE_FALLBACK_SELECTED]: ['preflight_id', 'fallback_reason'],
+    [PRECHECKOUT_EVENTS.BLITE_GENDER_CONFIRMATION_COMPLETED]: [
+        'preflight_id',
+        'gender_confirmation_outcome',
+    ],
+    [PRECHECKOUT_EVENTS.BLITE_PREVIEW_CTA_CLICKED]: ['preflight_id'],
+    [PRECHECKOUT_EVENTS.DEMO_STARTED]: ['preflight_id', 'demo_mode'],
+    [PRECHECKOUT_EVENTS.DEMO_COMPLETED]: ['preflight_id', 'demo_mode', 'duration_ms'],
+    [PRECHECKOUT_EVENTS.DEMO_FAILED]: ['preflight_id', 'demo_mode', 'duration_ms'],
+    [PRECHECKOUT_EVENTS.PLAN_GATE_REACHED]: ['preflight_id', 'demo_mode'],
     [REVENUE_SHARE_EVENTS.INITIATED]: ['request_id', 'share_channel', 'share_outcome'],
     [REVENUE_SHARE_EVENTS.COPY_SUCCEEDED]: ['request_id', 'share_channel', 'share_outcome'],
     [REVENUE_SHARE_EVENTS.HANDOFF_COMPLETED]: ['request_id', 'share_channel', 'share_outcome'],
@@ -295,6 +335,7 @@ let replayShutdownRequested = false;
 let navigationGuardConsumers = 0;
 let removeNavigationGuards: (() => void) | null = null;
 const queuedEvents: QueuedEvent[] = [];
+const claimedPrecheckoutEvents = new Set<string>();
 
 interface ReplaySamplingConfig {
     captureEnabled: boolean;
@@ -860,6 +901,33 @@ export function trackEvent(
     } catch {
         // Validation and analytics must never interrupt the product flow.
     }
+}
+
+/**
+ * Emits one precheckout event per validated preflight in this browser session. The session
+ * marker survives React StrictMode effects and component remounts; the in-memory marker covers
+ * restricted browsers where sessionStorage is unavailable. Event properties remain subject to
+ * the same closed schema as every other Amplitude event.
+ */
+export function trackPrecheckoutEvent(
+    eventName: PrecheckoutAnalyticsEvent,
+    preflightId: string,
+    properties?: Record<string, unknown>,
+): boolean {
+    if (!APPROVED_EVENTS.has(eventName) || !CANONICAL_UUID.test(preflightId)) return false;
+
+    const claimKey = `amplitude:${eventName}:${preflightId}`;
+    if (claimedPrecheckoutEvents.has(claimKey)) return false;
+
+    const storage = availableAnalyticsStorage();
+    if (storage && !tryClaimAnalyticsEvent(storage, claimKey)) return false;
+    claimedPrecheckoutEvents.add(claimKey);
+
+    trackEvent(eventName, {
+        ...properties,
+        preflight_id: preflightId,
+    });
+    return true;
 }
 
 /**

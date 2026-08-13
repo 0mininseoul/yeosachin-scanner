@@ -24,6 +24,8 @@ export type PrecheckoutBliteProfileFailureCategory =
     | 'deadline'
     | 'provider';
 
+export type PrecheckoutBliteInferenceFailureReason = 'provider' | 'timeout' | 'invalid';
+
 export const PRECHECKOUT_BLITE_FALLBACK_REASONS = [
     'terminal_before_48',
     'unresolved_at_48',
@@ -48,6 +50,54 @@ function profileFailureErrorCode(
     if (category === 'deadline') return 'TIMEOUT';
     if (category === 'quota') return 'RATE_LIMITED';
     return 'PROVIDER_ERROR';
+}
+
+/** Map provider-owned failures to the closed B-lite profile taxonomy without retaining text. */
+export function precheckoutBliteProfileFailureCategory(
+    error: unknown,
+): PrecheckoutBliteProfileFailureCategory | undefined {
+    const message = error instanceof Error ? error.message : '';
+    if (
+        message.startsWith('ANALYSIS_PERSISTENCE_ERROR:')
+        || message.startsWith('ANALYSIS_V2_PROGRESS_')
+        || message.startsWith('ANALYSIS_V2_PROVIDER_')
+        || message.startsWith('PREFLIGHT_PERSISTENCE_ERROR:')
+        || message.startsWith('PREFLIGHT_PROVIDER_RUN_')
+        || message.startsWith('SCRAPING_RUN_CHECKPOINT_ERROR:')
+        || message.startsWith('SCRAPING_RUN_PENDING_ERROR:')
+        || message.startsWith('SCRAPING_AMBIGUOUS_START_ERROR:')
+        || message === 'SCRAPING_QUEUED_START_CANCELLED'
+    ) return undefined;
+    if (message.startsWith('SCRAPING_CONFIG_ERROR:')) return 'configuration';
+    if (message.startsWith('SCRAPING_BUDGET_ERROR:')) return 'budget';
+    if (message.startsWith('SCRAPING_SCHEMA_ERROR:')) return 'schema';
+    if (message.startsWith('SCRAPING_INCOMPLETE_ERROR:') && message.includes('deadline')) {
+        return 'deadline';
+    }
+    if (message.startsWith('SCRAPING_INCOMPLETE_ERROR:')) return 'incomplete';
+    if (message.startsWith('SCRAPING_ACCESS_ERROR:')) return 'access';
+    if (
+        message.includes('actor 실행 실패')
+        || message.includes('actor status=')
+        || message.includes('Actor status=')
+    ) {
+        return 'actor_status';
+    }
+    if (message.includes('transport request failed')) return 'transport';
+    if (message === 'SCRAPING_PROVIDER_QUOTA_ERROR') return 'quota';
+    if (message === 'SCRAPING_PROVIDER_START_REJECTED_ERROR') return 'start_rejected';
+    if (message.includes('run status request failed')) return 'status_transport';
+    if (message.startsWith('SCRAPING_ERROR:')) return 'scraping';
+    if (message === 'SCRAPING_INVOCATION_DEADLINE_ERROR') return 'deadline';
+    return 'provider';
+}
+
+function inferenceFailureDisposition(
+    reason: PrecheckoutBliteInferenceFailureReason,
+): { disposition: 'failure'; errorCode: 'VALIDATION_ERROR' | 'TIMEOUT' | 'PROVIDER_ERROR' } {
+    if (reason === 'timeout') return { disposition: 'failure', errorCode: 'TIMEOUT' };
+    if (reason === 'invalid') return { disposition: 'failure', errorCode: 'VALIDATION_ERROR' };
+    return { disposition: 'failure', errorCode: 'PROVIDER_ERROR' };
 }
 
 function inferenceFailureErrorCode(
@@ -136,13 +186,14 @@ export function createPrecheckoutBliteObservability({
                 profileFailureErrorCode(category),
             );
         },
-        inferenceFailed(): void {
+        inferenceFailed(reason: PrecheckoutBliteInferenceFailureReason = 'provider'): void {
+            const failure = inferenceFailureDisposition(reason);
             emitTerminal(
                 'precheckout_blite.inference_failed',
                 'gemini',
                 'error',
-                'failure',
-                'PROVIDER_ERROR',
+                failure.disposition,
+                failure.errorCode,
             );
         },
         inferenceAttempt(telemetry: GeminiAttemptTelemetry): void {

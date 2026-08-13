@@ -8,7 +8,10 @@ vi.mock('@/lib/observability/server', () => ({
     operationalLogger: { emit: mocks.emit },
 }));
 
-import { createPrecheckoutBliteObservability } from './blite-observability';
+import {
+    createPrecheckoutBliteObservability,
+    precheckoutBliteProfileFailureCategory,
+} from './blite-observability';
 
 const preflightId = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa';
 
@@ -152,6 +155,22 @@ describe('precheckout B-lite observability', () => {
         expect(mocks.emit).not.toHaveBeenCalled();
     });
 
+    it.each([
+        'SCRAPING_RUN_PENDING_ERROR: checkpointed run is still active.',
+        'SCRAPING_AMBIGUOUS_START_ERROR: Actor start was not confirmed.',
+        'SCRAPING_RUN_CHECKPOINT_ERROR: run id could not be persisted.',
+        'ANALYSIS_V2_PROVIDER_RUN_RESERVATION_PERSISTENCE_ERROR',
+        'SCRAPING_QUEUED_START_CANCELLED',
+    ])('does not classify non-terminal provider barriers as profile failures: %s', message => {
+        expect(precheckoutBliteProfileFailureCategory(new Error(message))).toBeUndefined();
+    });
+
+    it('maps the Apify profile deadline envelope to the timeout error code', () => {
+        expect(precheckoutBliteProfileFailureCategory(new Error(
+            'SCRAPING_INCOMPLETE_ERROR: Apify profile dataset deadline was exhausted.',
+        ))).toBe('deadline');
+    });
+
     it('emits one bounded inference failure and deduplicates later terminal outcomes', () => {
         const observability = createPrecheckoutBliteObservability({
             preflightId,
@@ -176,6 +195,25 @@ describe('precheckout B-lite observability', () => {
                 error_code: 'PROVIDER_ERROR',
             },
         });
+    });
+
+    it.each([
+        ['timeout', 'TIMEOUT'],
+        ['invalid', 'VALIDATION_ERROR'],
+        ['provider', 'PROVIDER_ERROR'],
+    ] as const)('maps inference %s to %s', (reason, errorCode) => {
+        const observability = createPrecheckoutBliteObservability({
+            preflightId,
+            startedAtMs: 300,
+            now: () => 375,
+        });
+
+        observability.inferenceFailed(reason);
+
+        expect(mocks.emit).toHaveBeenCalledWith(expect.objectContaining({
+            event: 'precheckout_blite.inference_failed',
+            fields: expect.objectContaining({ error_code: errorCode }),
+        }));
     });
 
     it.each([

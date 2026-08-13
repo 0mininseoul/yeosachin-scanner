@@ -378,6 +378,48 @@ describe('operationalLogger runtime transport', () => {
         expect(JSON.stringify(consoleInfo.mock.calls)).not.toContain('buyer@example.com');
     });
 
+    it('writes one sanitized event to both Vercel console and Axiom when both are configured', async () => {
+        process.env.VERCEL = '1';
+        process.env.VERCEL_ENV = 'production';
+        process.env.AXIOM_TOKEN = 'runtime-token';
+        process.env.AXIOM_DATASET = 'yeosachin-logs';
+        process.env.AXIOM_ORG_ID = 'aa-example';
+        const consoleInfo = vi.spyOn(console, 'info').mockImplementation(() => undefined);
+        vi.resetModules();
+        const { operationalLogger, flushOperationalLogs } = await import('./server');
+
+        operationalLogger.emit({
+            event: 'precheckout_blite.completed',
+            severity: 'info',
+            fields: {
+                preflight_id: '123e4567-e89b-42d3-a456-426614174001',
+                provider: 'gemini',
+                operation: 'precheckout_blite',
+                disposition: 'success',
+                email: 'buyer@example.com',
+            },
+        });
+        await flushOperationalLogs();
+
+        expect(consoleInfo).toHaveBeenCalledWith(
+            'precheckout_blite.completed',
+            expect.objectContaining({
+                event: 'precheckout_blite.completed',
+                provider: 'gemini',
+            }),
+        );
+        expect(axiomMocks.loggerLog).toHaveBeenCalledWith(
+            'info',
+            'precheckout_blite.completed',
+            expect.objectContaining({
+                event: 'precheckout_blite.completed',
+                provider: 'gemini',
+            }),
+        );
+        expect(JSON.stringify(consoleInfo.mock.calls)).not.toContain('buyer@example.com');
+        expect(JSON.stringify(axiomMocks.loggerLog.mock.calls)).not.toContain('buyer@example.com');
+    });
+
     it('does not construct Axiom when any trimmed server runtime setting is missing', async () => {
         process.env.AXIOM_TOKEN = '   ';
         process.env.AXIOM_DATASET = 'yeosachin-logs';

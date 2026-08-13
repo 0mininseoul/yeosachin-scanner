@@ -1,12 +1,30 @@
 // @vitest-environment jsdom
 
-import { act, createElement } from 'react';
+import { act, createElement, StrictMode } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
     PRECHECKOUT_BLITE_LIKELY_FEMALE_CONFIDENCE_THRESHOLD,
     PRECHECKOUT_BLITE_SCHEMA_VERSION,
 } from '@/lib/services/precheckout/blite-contract';
+
+const analyticsMocks = vi.hoisted(() => ({
+    PRECHECKOUT_EVENTS: {
+        BLITE_AVAILABLE: 'precheckout_blite_available',
+        BLITE_RESULT_VIEWED: 'precheckout_blite_result_viewed',
+        BLITE_FALLBACK_SELECTED: 'precheckout_blite_fallback_selected',
+        BLITE_GENDER_CONFIRMATION_COMPLETED: 'precheckout_blite_gender_confirmation_completed',
+        BLITE_PREVIEW_CTA_CLICKED: 'precheckout_blite_preview_cta_clicked',
+        DEMO_STARTED: 'precheckout_demo_started',
+        DEMO_COMPLETED: 'precheckout_demo_completed',
+        DEMO_FAILED: 'precheckout_demo_failed',
+        PLAN_GATE_REACHED: 'precheckout_plan_gate_reached',
+    },
+    trackPrecheckoutEvent: vi.fn(),
+}));
+
+vi.mock('@/lib/services/analytics', () => analyticsMocks);
+
 import {
     PrecheckoutImmersive,
     __resetBrowserBliteRequestsForTest,
@@ -128,6 +146,7 @@ describe('PrecheckoutImmersive', () => {
 
     beforeEach(() => {
         __resetBrowserBliteRequestsForTest();
+        analyticsMocks.trackPrecheckoutEvent.mockReset();
         container = document.createElement('div');
         document.body.append(container);
         root = createRoot(container);
@@ -367,6 +386,10 @@ describe('PrecheckoutImmersive', () => {
 
         expect(onAvailabilityChange).toHaveBeenCalledOnce();
         expect(onAvailabilityChange).toHaveBeenLastCalledWith(false);
+        expect(analyticsMocks.trackPrecheckoutEvent).toHaveBeenCalledWith(
+            'precheckout_plan_gate_reached',
+            PREFLIGHT_ID,
+        );
     });
 
     it('keeps the plan gate closed through a transient status failure and retries to the authoritative T+48 clock', async () => {
@@ -480,5 +503,144 @@ describe('PrecheckoutImmersive', () => {
         const headers = options.headers as Record<string, string>;
         expect(headers['x-preflight-claim-token']).toBeUndefined();
         expect(headers['Content-Type']).toBe('application/json');
+    });
+
+    it('tracks the normal B-lite funnel from availability through the plan gate', async () => {
+        vi.useFakeTimers();
+        vi.setSystemTime(new Date(SUBMITTED_AT));
+        vi.stubGlobal('requestAnimationFrame', vi.fn(() => 1));
+        vi.stubGlobal('cancelAnimationFrame', vi.fn());
+        const onGoToPlans = vi.fn();
+        vi.stubGlobal('fetch', vi.fn().mockResolvedValue(jsonResponse(
+            completeStatus(validDto({ likelyFemale: false }), SUBMITTED_AT),
+        )));
+
+        await act(async () => {
+            root.render(createElement(PrecheckoutImmersive, {
+                preflightId: PREFLIGHT_ID,
+                claimToken: null,
+                onGoToPlans,
+            }));
+        });
+        await settleUi();
+        await clickButton(container, '관계 판독 미리보기');
+
+        await act(async () => { vi.advanceTimersByTime(12_000); });
+
+        expect(onGoToPlans).toHaveBeenCalledOnce();
+        expect(analyticsMocks.trackPrecheckoutEvent.mock.calls).toEqual([
+            ['precheckout_blite_available', PREFLIGHT_ID],
+            ['precheckout_blite_result_viewed', PREFLIGHT_ID],
+            ['precheckout_blite_preview_cta_clicked', PREFLIGHT_ID],
+            ['precheckout_demo_started', PREFLIGHT_ID, { demo_mode: 'success' }],
+            ['precheckout_demo_completed', PREFLIGHT_ID, { demo_mode: 'success', duration_ms: 12_000 }],
+            ['precheckout_plan_gate_reached', PREFLIGHT_ID, { demo_mode: 'success' }],
+        ]);
+    });
+
+    it('tracks fallback demo selection and completion with a bounded reason and mode', async () => {
+        vi.useFakeTimers();
+        vi.setSystemTime(new Date(SUBMITTED_AT));
+        vi.stubGlobal('requestAnimationFrame', vi.fn(() => 1));
+        vi.stubGlobal('cancelAnimationFrame', vi.fn());
+        const onGoToPlans = vi.fn();
+        vi.stubGlobal('fetch', vi.fn().mockResolvedValue(jsonResponse(failedStatus({
+            submittedAt: SUBMITTED_AT,
+        }))));
+
+        await act(async () => {
+            root.render(createElement(PrecheckoutImmersive, {
+                preflightId: PREFLIGHT_ID,
+                claimToken: null,
+                onGoToPlans,
+            }));
+        });
+        await settleUi();
+        await act(async () => { vi.advanceTimersByTime(12_000); });
+
+        expect(onGoToPlans).toHaveBeenCalledOnce();
+        expect(analyticsMocks.trackPrecheckoutEvent.mock.calls).toEqual([
+            ['precheckout_blite_fallback_selected', PREFLIGHT_ID, { fallback_reason: 'terminal_before_48' }],
+            ['precheckout_demo_started', PREFLIGHT_ID, { demo_mode: 'fallback' }],
+            ['precheckout_demo_completed', PREFLIGHT_ID, { demo_mode: 'fallback', duration_ms: 12_000 }],
+            ['precheckout_plan_gate_reached', PREFLIGHT_ID, { demo_mode: 'fallback' }],
+        ]);
+    });
+
+    it('tracks a fallback demo runtime failure before opening the plan gate', async () => {
+        vi.useFakeTimers();
+        vi.setSystemTime(new Date(SUBMITTED_AT));
+        vi.stubGlobal('requestAnimationFrame', vi.fn(() => 1));
+        vi.stubGlobal('cancelAnimationFrame', vi.fn());
+        vi.stubGlobal('matchMedia', vi.fn(() => {
+            throw new Error('demo runtime details must not escape');
+        }));
+        const onGoToPlans = vi.fn();
+        vi.stubGlobal('fetch', vi.fn().mockResolvedValue(jsonResponse(failedStatus({
+            submittedAt: SUBMITTED_AT,
+        }))));
+
+        await act(async () => {
+            root.render(createElement(PrecheckoutImmersive, {
+                preflightId: PREFLIGHT_ID,
+                claimToken: null,
+                onGoToPlans,
+            }));
+        });
+        await settleUi();
+
+        expect(onGoToPlans).toHaveBeenCalledOnce();
+        expect(analyticsMocks.trackPrecheckoutEvent.mock.calls).toEqual([
+            ['precheckout_blite_fallback_selected', PREFLIGHT_ID, { fallback_reason: 'terminal_before_48' }],
+            ['precheckout_demo_started', PREFLIGHT_ID, { demo_mode: 'fallback' }],
+            ['precheckout_demo_failed', PREFLIGHT_ID, { demo_mode: 'fallback', duration_ms: 0 }],
+            ['precheckout_plan_gate_reached', PREFLIGHT_ID, { demo_mode: 'fallback' }],
+        ]);
+    });
+
+    it('tracks gender confirmation outcomes and reaches the plan gate on rejection', async () => {
+        const onGoToPlans = vi.fn();
+        vi.stubGlobal('fetch', vi.fn().mockResolvedValue(jsonResponse(
+            completeStatus(validDto({ likelyFemale: true }), SUBMITTED_AT),
+        )));
+
+        await act(async () => {
+            root.render(createElement(PrecheckoutImmersive, {
+                preflightId: PREFLIGHT_ID,
+                claimToken: null,
+                onGoToPlans,
+            }));
+        });
+        await settleUi();
+        await clickButton(container, '아니오');
+
+        expect(onGoToPlans).toHaveBeenCalledOnce();
+        expect(analyticsMocks.trackPrecheckoutEvent.mock.calls).toEqual([
+            ['precheckout_blite_available', PREFLIGHT_ID],
+            ['precheckout_blite_gender_confirmation_completed', PREFLIGHT_ID, {
+                gender_confirmation_outcome: 'rejected',
+            }],
+            ['precheckout_plan_gate_reached', PREFLIGHT_ID],
+        ]);
+    });
+
+    it('does not duplicate lifecycle calls when React StrictMode remounts the flow', async () => {
+        vi.stubGlobal('fetch', vi.fn().mockResolvedValue(jsonResponse(
+            completeStatus(validDto({ likelyFemale: false }), SUBMITTED_AT),
+        )));
+
+        await act(async () => {
+            root.render(createElement(StrictMode, null, createElement(PrecheckoutImmersive, {
+                preflightId: PREFLIGHT_ID,
+                claimToken: null,
+                onGoToPlans: vi.fn(),
+            })));
+        });
+        await settleUi();
+
+        expect(analyticsMocks.trackPrecheckoutEvent.mock.calls).toEqual([
+            ['precheckout_blite_available', PREFLIGHT_ID],
+            ['precheckout_blite_result_viewed', PREFLIGHT_ID],
+        ]);
     });
 });

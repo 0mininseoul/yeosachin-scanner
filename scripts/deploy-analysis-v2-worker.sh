@@ -99,6 +99,8 @@ Optional deployment environment variables:
   ANALYSIS_V2_WORKER_TIMEOUT_SECONDS         Fixed launch value: 600.
   ANALYSIS_V2_WORKER_ENABLED                 Enables authenticated worker drain; defaults false.
   ANALYSIS_V2_RECOVERY_ENABLED               Enables scheduled recovery; defaults false.
+  PRECHECKOUT_BLITE_ENABLED                  Enables the server-only B-lite master gate; defaults false.
+  PRECHECKOUT_BLITE_ROLLOUT_PERCENT          Integer cohort rollout from 0 through 100; defaults 0.
   EARLYBIRD_AUTOMATIC_FULFILLMENT_ENABLED    Enables recovery-only admission of validated paid
                                              earlybird orders on canonical analysis-worker; defaults false.
   ANALYSIS_V2_APIFY_ADDITIONAL_SECRET_VERSIONS
@@ -561,6 +563,8 @@ service_runtime_config_matches() {
     --arg runtime_sa "$ANALYSIS_V2_WORKER_RUNTIME_SERVICE_ACCOUNT_EMAIL" \
     --arg bucket "$ANALYSIS_V2_MEDIA_ARTIFACT_BUCKET" \
     --arg slot "$ANALYSIS_V2_APIFY_API_TOKEN_SLOT" \
+    --arg precheckout_blite_enabled "$precheckout_blite_enabled" \
+    --arg precheckout_blite_rollout_percent "$precheckout_blite_rollout_percent" \
     --arg selfhosted_global_gate "$SELFHOSTED_PROFILE_GLOBAL_GATE_ENABLED" \
     --arg selfhosted_global_interval "$SELFHOSTED_PROFILE_GLOBAL_MIN_INTERVAL_MS" \
     --arg selfhosted_response_guard "$SELFHOSTED_PROFILE_GLOBAL_RESPONSE_GUARD_MS" \
@@ -673,6 +677,8 @@ service_runtime_config_matches() {
         and ([.spec.template.spec.containers[0].env[]? |
           select(.name == "ANALYSIS_V2_MEDIA_ARTIFACT_BUCKET") | .value] == [$bucket])
         and value("ANALYSIS_V2_APIFY_API_TOKEN_SLOT") == [$slot]
+        and value("PRECHECKOUT_BLITE_ENABLED") == [$precheckout_blite_enabled]
+        and value("PRECHECKOUT_BLITE_ROLLOUT_PERCENT") == [$precheckout_blite_rollout_percent]
         and value("SELFHOSTED_PROFILE_GLOBAL_GATE_ENABLED") == [$selfhosted_global_gate]
         and value("SELFHOSTED_PROFILE_GLOBAL_MIN_INTERVAL_MS") == [$selfhosted_global_interval]
         and value("SELFHOSTED_PROFILE_GLOBAL_RESPONSE_GUARD_MS") == [$selfhosted_response_guard]
@@ -1653,6 +1659,8 @@ worker_endpoint_env_matches() {
     --arg slot "$ANALYSIS_V2_APIFY_API_TOKEN_SLOT" \
     --arg worker_enabled "$worker_enabled" \
     --arg recovery_enabled "$recovery_enabled" \
+    --arg precheckout_blite_enabled "$precheckout_blite_enabled" \
+    --arg precheckout_blite_rollout_percent "$precheckout_blite_rollout_percent" \
     --arg automatic_fulfillment_enabled "$automatic_fulfillment_enabled" \
     --arg beta_free_pool_enabled "$beta_free_pool_enabled" \
     --arg beta_free_pool_max_snapshot_age_seconds "$beta_free_pool_max_snapshot_age_seconds" \
@@ -1683,6 +1691,8 @@ worker_endpoint_env_matches() {
         and value("ANALYSIS_V2_TASKS_ENABLED") == ["true"]
         and value("ANALYSIS_V2_WORKER_ENABLED") == [$worker_enabled]
         and value("ANALYSIS_V2_RECOVERY_ENABLED") == [$recovery_enabled]
+        and value("PRECHECKOUT_BLITE_ENABLED") == [$precheckout_blite_enabled]
+        and value("PRECHECKOUT_BLITE_ROLLOUT_PERCENT") == [$precheckout_blite_rollout_percent]
         and value("EARLYBIRD_AUTOMATIC_FULFILLMENT_ENABLED") == [$automatic_fulfillment_enabled]
         and value("BETATEST_FREE_POOL_ENABLED") == [$beta_free_pool_enabled]
         and value("BETATEST_FREE_POOL_MAX_SNAPSHOT_AGE_SECONDS") == [$beta_free_pool_max_snapshot_age_seconds]
@@ -1752,7 +1762,7 @@ ensure_worker_endpoint_env() {
     "${staging_args[@]}" \
     "--revision-suffix=$final_revision_suffix" \
     "--update-labels=$PROVENANCE_LABEL_KEY=$source_commit_sha" \
-    "--update-env-vars=ANALYSIS_V2_TASKS_ENABLED=true,ANALYSIS_V2_WORKER_ENABLED=$worker_enabled,ANALYSIS_V2_RECOVERY_ENABLED=$recovery_enabled,EARLYBIRD_AUTOMATIC_FULFILLMENT_ENABLED=$automatic_fulfillment_enabled,BETATEST_FREE_POOL_ENABLED=$beta_free_pool_enabled,BETATEST_FREE_POOL_MAX_SNAPSHOT_AGE_SECONDS=$beta_free_pool_max_snapshot_age_seconds,BETATEST_FREE_POOL_REFRESH_INTERVAL_SECONDS=$beta_free_pool_refresh_interval_seconds,ANALYSIS_V2_TASKS_PROJECT=$ANALYSIS_V2_TASKS_PROJECT,ANALYSIS_V2_TASKS_LOCATION=$ANALYSIS_V2_TASKS_LOCATION,ANALYSIS_V2_TASKS_QUEUE=$ANALYSIS_V2_TASKS_QUEUE,ANALYSIS_V2_TASKS_SERVICE_ACCOUNT_EMAIL=$ANALYSIS_V2_TASKS_SERVICE_ACCOUNT_EMAIL,ANALYSIS_V2_TASKS_CALLER_AUTH_MODE=adc,ANALYSIS_V2_APIFY_API_TOKEN_SLOT=$ANALYSIS_V2_APIFY_API_TOKEN_SLOT,ANALYSIS_V2_TASKS_TARGET_URL=$origin/api/analysis/v2/worker,ANALYSIS_V2_TASKS_OIDC_AUDIENCE=$origin,PREFLIGHT_TASKS_ENABLED=true,PREFLIGHT_TASKS_PROJECT=$ANALYSIS_V2_TASKS_PROJECT,PREFLIGHT_TASKS_LOCATION=$ANALYSIS_V2_TASKS_LOCATION,PREFLIGHT_TASKS_QUEUE=$preflight_queue,PREFLIGHT_TASKS_SERVICE_ACCOUNT_EMAIL=$ANALYSIS_V2_TASKS_SERVICE_ACCOUNT_EMAIL,PREFLIGHT_TASKS_CALLER_AUTH_MODE=adc,PREFLIGHT_TASKS_TARGET_URL=$origin/api/analysis/preflight/worker,PREFLIGHT_TASKS_OIDC_AUDIENCE=$origin,PREFLIGHT_LOCAL_AFTER_ENABLED=false,ANALYSIS_V2_MAINTENANCE_SERVICE_ACCOUNT_EMAIL=$ANALYSIS_V2_MAINTENANCE_SERVICE_ACCOUNT_EMAIL,ANALYSIS_V2_MAINTENANCE_OIDC_AUDIENCE=$origin,$result_image_env_assignments" \
+    "--update-env-vars=ANALYSIS_V2_TASKS_ENABLED=true,ANALYSIS_V2_WORKER_ENABLED=$worker_enabled,ANALYSIS_V2_RECOVERY_ENABLED=$recovery_enabled,PRECHECKOUT_BLITE_ENABLED=$precheckout_blite_enabled,PRECHECKOUT_BLITE_ROLLOUT_PERCENT=$precheckout_blite_rollout_percent,EARLYBIRD_AUTOMATIC_FULFILLMENT_ENABLED=$automatic_fulfillment_enabled,BETATEST_FREE_POOL_ENABLED=$beta_free_pool_enabled,BETATEST_FREE_POOL_MAX_SNAPSHOT_AGE_SECONDS=$beta_free_pool_max_snapshot_age_seconds,BETATEST_FREE_POOL_REFRESH_INTERVAL_SECONDS=$beta_free_pool_refresh_interval_seconds,ANALYSIS_V2_TASKS_PROJECT=$ANALYSIS_V2_TASKS_PROJECT,ANALYSIS_V2_TASKS_LOCATION=$ANALYSIS_V2_TASKS_LOCATION,ANALYSIS_V2_TASKS_QUEUE=$ANALYSIS_V2_TASKS_QUEUE,ANALYSIS_V2_TASKS_SERVICE_ACCOUNT_EMAIL=$ANALYSIS_V2_TASKS_SERVICE_ACCOUNT_EMAIL,ANALYSIS_V2_TASKS_CALLER_AUTH_MODE=adc,ANALYSIS_V2_APIFY_API_TOKEN_SLOT=$ANALYSIS_V2_APIFY_API_TOKEN_SLOT,ANALYSIS_V2_TASKS_TARGET_URL=$origin/api/analysis/v2/worker,ANALYSIS_V2_TASKS_OIDC_AUDIENCE=$origin,PREFLIGHT_TASKS_ENABLED=true,PREFLIGHT_TASKS_PROJECT=$ANALYSIS_V2_TASKS_PROJECT,PREFLIGHT_TASKS_LOCATION=$ANALYSIS_V2_TASKS_LOCATION,PREFLIGHT_TASKS_QUEUE=$preflight_queue,PREFLIGHT_TASKS_SERVICE_ACCOUNT_EMAIL=$ANALYSIS_V2_TASKS_SERVICE_ACCOUNT_EMAIL,PREFLIGHT_TASKS_CALLER_AUTH_MODE=adc,PREFLIGHT_TASKS_TARGET_URL=$origin/api/analysis/preflight/worker,PREFLIGHT_TASKS_OIDC_AUDIENCE=$origin,PREFLIGHT_LOCAL_AFTER_ENABLED=false,ANALYSIS_V2_MAINTENANCE_SERVICE_ACCOUNT_EMAIL=$ANALYSIS_V2_MAINTENANCE_SERVICE_ACCOUNT_EMAIL,ANALYSIS_V2_MAINTENANCE_OIDC_AUDIENCE=$origin,$result_image_env_assignments" \
     "--remove-env-vars=$remove_env_vars" \
     --quiet
 
@@ -1865,7 +1875,7 @@ validate_runtime_env_keys() {
   local key
   while IFS= read -r key; do
     case "$key" in
-      VERCEL|VERCEL_ENV|GCP_VERCEL_WIF_PROVIDER_RESOURCE|VERCEL_OIDC_TEAM_SLUG|VERCEL_OIDC_TEAM_ID|VERCEL_OIDC_PROJECT_ID|*_TASKS_ENQUEUER_SERVICE_ACCOUNT_EMAIL|ANALYSIS_V2_ADMISSION_ENABLED|ANALYSIS_V2_WORKER_EXECUTION_ENABLED|ANALYSIS_V2_TASKS_ENABLED|ANALYSIS_V2_WORKER_ENABLED|ANALYSIS_V2_RECOVERY_ENABLED|EARLYBIRD_AUTOMATIC_FULFILLMENT_ENABLED|PREFLIGHT_TASKS_ENABLED|PREFLIGHT_LOCAL_AFTER_ENABLED)
+      VERCEL|VERCEL_ENV|GCP_VERCEL_WIF_PROVIDER_RESOURCE|VERCEL_OIDC_TEAM_SLUG|VERCEL_OIDC_TEAM_ID|VERCEL_OIDC_PROJECT_ID|*_TASKS_ENQUEUER_SERVICE_ACCOUNT_EMAIL|ANALYSIS_V2_ADMISSION_ENABLED|ANALYSIS_V2_WORKER_EXECUTION_ENABLED|ANALYSIS_V2_TASKS_ENABLED|ANALYSIS_V2_WORKER_ENABLED|ANALYSIS_V2_RECOVERY_ENABLED|PRECHECKOUT_BLITE_ENABLED|PRECHECKOUT_BLITE_ROLLOUT_PERCENT|EARLYBIRD_AUTOMATIC_FULFILLMENT_ENABLED|PREFLIGHT_TASKS_ENABLED|PREFLIGHT_LOCAL_AFTER_ENABLED)
         die "runtime env file contains a forbidden placement, gate, or WIF bootstrap key: $key"
         ;;
       SUPABASE_SERVICE_ROLE_KEY|IMAGE_PROXY_SIGNING_SECRET|ANALYSIS_V2_RESULT_IMAGE_R2_ACCESS_KEY_ID|ANALYSIS_V2_RESULT_IMAGE_R2_SECRET_ACCESS_KEY|APIFY_API_TOKEN|APIFY_*_API_TOKEN|GOOGLE_APPLICATION_CREDENTIALS|GOOGLE_SERVICE_ACCOUNT_KEY_BASE64|*_API_KEY|*_SECRET|*_PASSWORD|*_CREDENTIAL|*_CREDENTIALS|*_PRIVATE_KEY|*_KEY_BASE64|*_ACCESS_TOKEN|*_REFRESH_TOKEN|*_OIDC_TOKEN|*_TOKEN)
@@ -1990,7 +2000,7 @@ build_deploy_args() {
   if [[ -n "$worker_env_deploy_file" ]]; then
     deploy_args+=("--env-vars-file=$worker_env_deploy_file")
   else
-    deploy_args+=("--update-env-vars=ANALYSIS_V2_MEDIA_ARTIFACT_BUCKET=$ANALYSIS_V2_MEDIA_ARTIFACT_BUCKET,ANALYSIS_V2_APIFY_API_TOKEN_SLOT=$ANALYSIS_V2_APIFY_API_TOKEN_SLOT,EARLYBIRD_AUTOMATIC_FULFILLMENT_ENABLED=$automatic_fulfillment_enabled,BETATEST_FREE_POOL_ENABLED=$beta_free_pool_enabled,BETATEST_FREE_POOL_MAX_SNAPSHOT_AGE_SECONDS=$beta_free_pool_max_snapshot_age_seconds,BETATEST_FREE_POOL_REFRESH_INTERVAL_SECONDS=$beta_free_pool_refresh_interval_seconds,$result_image_env_assignments")
+    deploy_args+=("--update-env-vars=ANALYSIS_V2_MEDIA_ARTIFACT_BUCKET=$ANALYSIS_V2_MEDIA_ARTIFACT_BUCKET,ANALYSIS_V2_APIFY_API_TOKEN_SLOT=$ANALYSIS_V2_APIFY_API_TOKEN_SLOT,PRECHECKOUT_BLITE_ENABLED=$precheckout_blite_enabled,PRECHECKOUT_BLITE_ROLLOUT_PERCENT=$precheckout_blite_rollout_percent,EARLYBIRD_AUTOMATIC_FULFILLMENT_ENABLED=$automatic_fulfillment_enabled,BETATEST_FREE_POOL_ENABLED=$beta_free_pool_enabled,BETATEST_FREE_POOL_MAX_SNAPSHOT_AGE_SECONDS=$beta_free_pool_max_snapshot_age_seconds,BETATEST_FREE_POOL_REFRESH_INTERVAL_SECONDS=$beta_free_pool_refresh_interval_seconds,$result_image_env_assignments")
   fi
   if [[ "$initial_deployment" != "true" ]]; then
     deploy_args+=('--no-traffic')
@@ -2641,6 +2651,8 @@ readonly worker_max_instances="${ANALYSIS_V2_WORKER_MAX_INSTANCES:-$DEFAULT_MAX_
 readonly worker_timeout_seconds="${ANALYSIS_V2_WORKER_TIMEOUT_SECONDS:-$DEFAULT_TIMEOUT_SECONDS}"
 readonly worker_enabled="${ANALYSIS_V2_WORKER_ENABLED:-false}"
 readonly recovery_enabled="${ANALYSIS_V2_RECOVERY_ENABLED:-false}"
+readonly precheckout_blite_enabled="${PRECHECKOUT_BLITE_ENABLED:-false}"
+readonly precheckout_blite_rollout_percent="${PRECHECKOUT_BLITE_ROLLOUT_PERCENT:-0}"
 readonly automatic_fulfillment_enabled="${EARLYBIRD_AUTOMATIC_FULFILLMENT_ENABLED:-false}"
 readonly beta_free_pool_enabled="${BETATEST_FREE_POOL_ENABLED:-false}"
 readonly beta_free_pool_max_snapshot_age_seconds="${BETATEST_FREE_POOL_MAX_SNAPSHOT_AGE_SECONDS:-300}"
@@ -2746,6 +2758,10 @@ fi
   || die "ANALYSIS_V2_WORKER_ENABLED must be true or false"
 [[ "$recovery_enabled" == "true" || "$recovery_enabled" == "false" ]] \
   || die "ANALYSIS_V2_RECOVERY_ENABLED must be true or false"
+[[ "$precheckout_blite_enabled" == "true" || "$precheckout_blite_enabled" == "false" ]] \
+  || die "PRECHECKOUT_BLITE_ENABLED must be true or false"
+[[ "$precheckout_blite_rollout_percent" =~ ^(0|[1-9][0-9]?|100)$ ]] \
+  || die "PRECHECKOUT_BLITE_ROLLOUT_PERCENT must be an integer from 0 through 100"
 [[ "$automatic_fulfillment_enabled" == "true" || "$automatic_fulfillment_enabled" == "false" ]] \
   || die "EARLYBIRD_AUTOMATIC_FULFILLMENT_ENABLED must be true or false"
 validate_beta_free_pool_controls
@@ -2842,11 +2858,15 @@ if [[ -n "$worker_env_file" ]]; then
   validate_paid_collection_runtime_contract "$runtime_env_json"
   runtime_env_json="$(jq -c \
     --arg enabled "$result_images_enabled" \
+    --arg precheckout_blite_enabled "$precheckout_blite_enabled" \
+    --arg precheckout_blite_rollout_percent "$precheckout_blite_rollout_percent" \
     --arg automatic_fulfillment_enabled "$automatic_fulfillment_enabled" \
     --arg endpoint "$result_image_r2_endpoint" \
     --arg bucket "$result_image_r2_bucket" '
       . + {
         ANALYSIS_V2_RESULT_IMAGES_ENABLED: $enabled,
+        PRECHECKOUT_BLITE_ENABLED: $precheckout_blite_enabled,
+        PRECHECKOUT_BLITE_ROLLOUT_PERCENT: $precheckout_blite_rollout_percent,
         EARLYBIRD_AUTOMATIC_FULFILLMENT_ENABLED: $automatic_fulfillment_enabled
       }
       | if $enabled == "true" then

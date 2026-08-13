@@ -138,6 +138,115 @@ describe('Amplitude analytics adapter', () => {
         expect((EVENTS as Record<string, string>).CLICK_SHARE_KAKAO).toBeUndefined();
     });
 
+    it('exports the immutable B-lite funnel taxonomy without legacy aliases', async () => {
+        const { PRECHECKOUT_EVENTS } = await loadAnalytics();
+
+        expect(PRECHECKOUT_EVENTS).toEqual({
+            BLITE_AVAILABLE: 'precheckout_blite_available',
+            BLITE_RESULT_VIEWED: 'precheckout_blite_result_viewed',
+            BLITE_FALLBACK_SELECTED: 'precheckout_blite_fallback_selected',
+            BLITE_GENDER_CONFIRMATION_COMPLETED: 'precheckout_blite_gender_confirmation_completed',
+            BLITE_PREVIEW_CTA_CLICKED: 'precheckout_blite_preview_cta_clicked',
+            DEMO_STARTED: 'precheckout_demo_started',
+            DEMO_COMPLETED: 'precheckout_demo_completed',
+            DEMO_FAILED: 'precheckout_demo_failed',
+            PLAN_GATE_REACHED: 'precheckout_plan_gate_reached',
+        });
+        expect(Object.isFrozen(PRECHECKOUT_EVENTS)).toBe(true);
+        expect((PRECHECKOUT_EVENTS as Record<string, string>).BLITE_VIEWED).toBeUndefined();
+    });
+
+    it('validates B-lite properties and strips raw identity, text, and error values', async () => {
+        enableBrowser();
+        const analytics = await loadAnalytics();
+        await analytics.initAmplitude(null);
+        analytics.markAnalyticsIdentityReady();
+
+        analytics.trackEvent(analytics.PRECHECKOUT_EVENTS.BLITE_FALLBACK_SELECTED, {
+            preflight_id: VALID_USER_ID,
+            fallback_reason: 'unresolved_at_48',
+            username: 'target_handle',
+            raw_error: 'provider secret details',
+        } as never);
+        analytics.trackEvent(analytics.PRECHECKOUT_EVENTS.DEMO_COMPLETED, {
+            preflight_id: VALID_USER_ID,
+            demo_mode: 'fallback',
+            duration_ms: 12_000,
+            persona: 'raw persona text',
+            profile: 'raw profile text',
+        } as never);
+        analytics.trackEvent(analytics.PRECHECKOUT_EVENTS.BLITE_GENDER_CONFIRMATION_COMPLETED, {
+            preflight_id: VALID_USER_ID,
+            gender_confirmation_outcome: 'rejected',
+            gender_reason: 'raw reason text',
+        } as never);
+
+        expect(amplitudeMocks.track.mock.calls).toEqual([
+            ['precheckout_blite_fallback_selected', {
+                preflight_id: VALID_USER_ID,
+                fallback_reason: 'unresolved_at_48',
+            }],
+            ['precheckout_demo_completed', {
+                preflight_id: VALID_USER_ID,
+                demo_mode: 'fallback',
+                duration_ms: 12_000,
+            }],
+            ['precheckout_blite_gender_confirmation_completed', {
+                preflight_id: VALID_USER_ID,
+                gender_confirmation_outcome: 'rejected',
+            }],
+        ]);
+        expect(JSON.stringify(amplitudeMocks.track.mock.calls)).not.toMatch(
+            /target_handle|provider secret|raw persona|raw profile|raw reason|username|profile|gender_reason/,
+        );
+    });
+
+    it('deduplicates one B-lite event per preflight across repeated calls', async () => {
+        enableBrowser();
+        const analytics = await loadAnalytics();
+        await analytics.initAmplitude(null);
+        analytics.markAnalyticsIdentityReady();
+
+        analytics.trackPrecheckoutEvent(analytics.PRECHECKOUT_EVENTS.BLITE_AVAILABLE, VALID_USER_ID);
+        analytics.trackPrecheckoutEvent(analytics.PRECHECKOUT_EVENTS.BLITE_AVAILABLE, VALID_USER_ID);
+        analytics.trackPrecheckoutEvent(analytics.PRECHECKOUT_EVENTS.BLITE_AVAILABLE, SECOND_UUID);
+
+        expect(amplitudeMocks.track.mock.calls).toEqual([
+            ['precheckout_blite_available', { preflight_id: VALID_USER_ID }],
+            ['precheckout_blite_available', { preflight_id: SECOND_UUID }],
+        ]);
+    });
+
+    it('keeps a claimed B-lite event deduplicated across module remounts', async () => {
+        const values = new Map<string, string>();
+        const storage = {
+            getItem: vi.fn((key: string) => values.get(key) ?? null),
+            setItem: vi.fn((key: string, value: string) => { values.set(key, value); }),
+        };
+        vi.stubGlobal('window', { sessionStorage: storage });
+        vi.stubEnv('NEXT_PUBLIC_AMPLITUDE_API_KEY', API_KEY);
+
+        const analytics = await loadAnalytics();
+        await analytics.initAmplitude(null);
+        analytics.markAnalyticsIdentityReady();
+        expect(analytics.trackPrecheckoutEvent(
+            analytics.PRECHECKOUT_EVENTS.BLITE_AVAILABLE,
+            VALID_USER_ID,
+        )).toBe(true);
+
+        vi.resetModules();
+        const remountedAnalytics = await loadAnalytics();
+        await remountedAnalytics.initAmplitude(null);
+        remountedAnalytics.markAnalyticsIdentityReady();
+
+        expect(remountedAnalytics.trackPrecheckoutEvent(
+            remountedAnalytics.PRECHECKOUT_EVENTS.BLITE_AVAILABLE,
+            VALID_USER_ID,
+        )).toBe(false);
+        expect(amplitudeMocks.track).toHaveBeenCalledTimes(1);
+        expect(storage.setItem).toHaveBeenCalledOnce();
+    });
+
     it('rotates stored identity on first anonymous boot with one safe initialization', async () => {
         enableBrowser();
         const hostileFetch = vi.fn().mockResolvedValue(new Response(JSON.stringify({
