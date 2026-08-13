@@ -110,8 +110,7 @@ const DISCLOSURE_ACCEPTED = true;
     const [autoCheckoutPreflightId, setAutoCheckoutPreflightId] = useState<string | null>(null);
     const [autoCheckoutPlan, setAutoCheckoutPlan] = useState<PlanId | null>(null);
     const [autoCheckoutUiPending, setAutoCheckoutUiPending] = useState(false);
-    const [precheckoutPreviewAvailable, setPrecheckoutPreviewAvailable] = useState(false);
-    const [precheckoutPlansRevealed, setPrecheckoutPlansRevealed] = useState(false);
+    const [precheckoutSurface, setPrecheckoutSurface] = useState<'awaiting' | 'preview' | 'legacy'>('awaiting');
     const querySelectedPlan = useHydrationSafePlanQuery();
     const queryCheckoutPlan = useHydrationSafeCheckoutPlanQuery();
     const router = useRouter();
@@ -381,11 +380,13 @@ const DISCLOSURE_ACCEPTED = true;
     const planSectionRef = useRef<HTMLElement>(null);
     const planHeadingRef = useRef<HTMLHeadingElement>(null);
     useEffect(() => {
-        setPrecheckoutPreviewAvailable(false);
-        setPrecheckoutPlansRevealed(false);
+        setPrecheckoutSurface('awaiting');
     }, [readyPreflight?.preflightId]);
+    const handlePrecheckoutAvailability = useCallback((available: boolean) => {
+        setPrecheckoutSurface(available ? 'preview' : 'legacy');
+    }, []);
     const handleGoToPlans = useCallback(() => {
-        setPrecheckoutPlansRevealed(true);
+        setPrecheckoutSurface('legacy');
         requestAnimationFrame(() => {
         planSectionRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' });
         planHeadingRef.current?.focus();
@@ -908,6 +909,7 @@ const DISCLOSURE_ACCEPTED = true;
 
                         {exclusionDecided && readyPreflight && (
                             <>
+                                {precheckoutSurface !== 'awaiting' && (
                                 <CaseCard bracket="var(--color-blood)" className="mt-7 overflow-hidden">
                                     <div className="flex items-start gap-4 p-5" data-amp-block>
                                         <div className="relative h-16 w-16 shrink-0 overflow-hidden rounded-full border border-line-2 bg-panel">
@@ -958,20 +960,20 @@ const DISCLOSURE_ACCEPTED = true;
                                         </div>
                                     </div>
                                 </CaseCard>
+                                )}
 
-                                {!autoCheckoutTransitionVisible && (
+                                {!autoCheckoutTransitionVisible && precheckoutSurface !== 'legacy' && (
                                     <PrecheckoutImmersive
                                         preflightId={readyPreflight.preflightId}
                                         claimToken={claimToken}
                                         onGoToPlans={handleGoToPlans}
-                                        onAvailabilityChange={setPrecheckoutPreviewAvailable}
+                                        onAvailabilityChange={handlePrecheckoutAvailability}
                                     />
                                 )}
 
-                                <section
+                                {precheckoutSurface === 'legacy' && <section
                                     id="plan-selection"
                                     ref={planSectionRef}
-                                    hidden={precheckoutPreviewAvailable && !precheckoutPlansRevealed}
                                     className="mt-9 scroll-mt-20"
                                     aria-labelledby="plan-heading"
                                 >
@@ -1156,7 +1158,7 @@ const DISCLOSURE_ACCEPTED = true;
                                                             ).actionLabel}
                                         </PrimaryButton>
                                     </div>
-                                </section>
+                                </section>}
                             </>
                         )}
                     </>

@@ -16,6 +16,7 @@ import {
     .IS_REACT_ACT_ENVIRONMENT = true;
 
 const PREFLIGHT_ID = '123e4567-e89b-42d3-a456-426614174000';
+const SUBMITTED_AT = '2026-08-13T00:00:00.000Z';
 
 function signal(overrides: Partial<{
     claim: string;
@@ -66,6 +67,25 @@ function jsonResponse(payload: unknown, status = 200): Response {
 
 function noBody(status = 204): Response {
     return new Response(null, { status });
+}
+
+function completeStatus(dto = validDto(), submittedAt = new Date().toISOString()) {
+    return { state: 'complete' as const, submittedAt, dto };
+}
+
+function pendingStatus({
+    submittedAt = new Date().toISOString(),
+    fallbackAt = new Date(Date.parse(submittedAt) + 48_000).toISOString(),
+    retryAfterMs = 5_000,
+}: Partial<{ submittedAt: string; fallbackAt: string; retryAfterMs: number }> = {}) {
+    return { state: 'pending' as const, submittedAt, fallbackAt, retryAfterMs };
+}
+
+function failedStatus({
+    submittedAt = new Date().toISOString(),
+    fallbackAt = new Date(Date.parse(submittedAt) + 48_000).toISOString(),
+}: Partial<{ submittedAt: string; fallbackAt: string }> = {}) {
+    return { state: 'failed' as const, submittedAt, fallbackAt };
 }
 
 async function settleUi() {
@@ -136,7 +156,7 @@ describe('PrecheckoutImmersive', () => {
     it('does not pin a transient unavailable response in the browser request map', async () => {
         const fetchMock = vi.fn()
             .mockResolvedValueOnce(noBody(204))
-            .mockResolvedValueOnce(jsonResponse(validDto()));
+            .mockResolvedValueOnce(jsonResponse(completeStatus()));
         vi.stubGlobal('fetch', fetchMock);
 
         await act(async () => {
@@ -165,7 +185,7 @@ describe('PrecheckoutImmersive', () => {
 
     it('shows the gender confirmation screen at/above the likely-female confidence threshold', async () => {
         vi.stubGlobal('fetch', vi.fn().mockResolvedValue(jsonResponse(
-            validDto({ likelyFemale: true, confidence: PRECHECKOUT_BLITE_LIKELY_FEMALE_CONFIDENCE_THRESHOLD })
+            completeStatus(validDto({ likelyFemale: true, confidence: PRECHECKOUT_BLITE_LIKELY_FEMALE_CONFIDENCE_THRESHOLD }))
         )));
 
         await act(async () => {
@@ -178,7 +198,7 @@ describe('PrecheckoutImmersive', () => {
 
     it('skips the confirmation screen below the confidence threshold', async () => {
         vi.stubGlobal('fetch', vi.fn().mockResolvedValue(jsonResponse(
-            validDto({ likelyFemale: true, confidence: PRECHECKOUT_BLITE_LIKELY_FEMALE_CONFIDENCE_THRESHOLD - 0.01 })
+            completeStatus(validDto({ likelyFemale: true, confidence: PRECHECKOUT_BLITE_LIKELY_FEMALE_CONFIDENCE_THRESHOLD - 0.01 }))
         )));
 
         await act(async () => {
@@ -191,7 +211,7 @@ describe('PrecheckoutImmersive', () => {
     });
 
     it('아니오 dismisses the whole preview and leaves the page renderable again', async () => {
-        vi.stubGlobal('fetch', vi.fn().mockResolvedValue(jsonResponse(validDto())));
+        vi.stubGlobal('fetch', vi.fn().mockResolvedValue(jsonResponse(completeStatus())));
 
         await act(async () => {
             root.render(createElement(PrecheckoutImmersive, { preflightId: PREFLIGHT_ID, claimToken: null, onGoToPlans: vi.fn() }));
@@ -205,7 +225,7 @@ describe('PrecheckoutImmersive', () => {
     });
 
     it('예 proceeds to the B-lite result screen', async () => {
-        vi.stubGlobal('fetch', vi.fn().mockResolvedValue(jsonResponse(validDto())));
+        vi.stubGlobal('fetch', vi.fn().mockResolvedValue(jsonResponse(completeStatus())));
 
         await act(async () => {
             root.render(createElement(PrecheckoutImmersive, { preflightId: PREFLIGHT_ID, claimToken: null, onGoToPlans: vi.fn() }));
@@ -218,45 +238,15 @@ describe('PrecheckoutImmersive', () => {
         expect(container.textContent).toContain('분석 후보 예상 범위 3 – 9명');
     });
 
-    it('the final CTA is inert until the exact 12-second sequence completes', async () => {
+    it('runs the success demo for exactly 12 seconds before revealing plans', async () => {
         vi.useFakeTimers();
-        vi.setSystemTime(0);
+        vi.setSystemTime(new Date(SUBMITTED_AT));
         vi.stubGlobal('requestAnimationFrame', vi.fn(() => 1));
         vi.stubGlobal('cancelAnimationFrame', vi.fn());
-        // likelyFemale: false skips the confirmation branch so one click reaches the demo screen.
-        vi.stubGlobal('fetch', vi.fn().mockResolvedValue(jsonResponse(validDto({ likelyFemale: false }))));
-
-        await act(async () => {
-            root.render(createElement(PrecheckoutImmersive, { preflightId: PREFLIGHT_ID, claimToken: null, onGoToPlans: vi.fn() }));
-        });
-        await settleUi();
-        await clickButton(container, '관계 판독 미리보기');
-
-        const ctaBefore = button(container, '분석 결과 확인하기');
-        expect(ctaBefore.disabled).toBe(true);
-        expect(ctaBefore.closest('.precheckout-reveal')?.classList.contains('is-visible')).toBe(false);
-
-        await act(async () => {
-            vi.advanceTimersByTime(11_999);
-        });
-        expect(button(container, '분석 결과 확인하기').disabled).toBe(true);
-
-        await act(async () => {
-            vi.advanceTimersByTime(1);
-        });
-
-        const ctaAfter = button(container, '분석 결과 확인하기');
-        expect(ctaAfter.disabled).toBe(false);
-        expect(ctaAfter.closest('.precheckout-reveal')?.classList.contains('is-visible')).toBe(true);
-    });
-
-    it('the CTA calls onGoToPlans and nothing else once active, and does nothing before that', async () => {
-        vi.useFakeTimers();
-        vi.setSystemTime(0);
-        vi.stubGlobal('requestAnimationFrame', vi.fn(() => 1));
-        vi.stubGlobal('cancelAnimationFrame', vi.fn());
-        vi.stubGlobal('fetch', vi.fn().mockResolvedValue(jsonResponse(validDto({ likelyFemale: false }))));
         const onGoToPlans = vi.fn();
+        vi.stubGlobal('fetch', vi.fn().mockResolvedValue(jsonResponse(
+            completeStatus(validDto({ likelyFemale: false }))
+        )));
 
         await act(async () => {
             root.render(createElement(PrecheckoutImmersive, { preflightId: PREFLIGHT_ID, claimToken: null, onGoToPlans }));
@@ -264,47 +254,67 @@ describe('PrecheckoutImmersive', () => {
         await settleUi();
         await clickButton(container, '관계 판독 미리보기');
 
+        expect(container.querySelector('[data-precheckout-demo-mode="success"]')).not.toBeNull();
+        expect(onGoToPlans).not.toHaveBeenCalled();
+
         await act(async () => {
-            button(container, '분석 결과 확인하기').click();
+            vi.advanceTimersByTime(11_999);
         });
         expect(onGoToPlans).not.toHaveBeenCalled();
 
         await act(async () => {
-            vi.advanceTimersByTime(12_000);
+            vi.advanceTimersByTime(1);
         });
-
-        await clickButton(container, '분석 결과 확인하기');
 
         expect(onGoToPlans).toHaveBeenCalledTimes(1);
-        expect(container.textContent).not.toContain('분석 결과 확인하기');
-        expect(document.body.style.overflow).toBe('');
     });
 
-    it('preserves the 12-second timing under prefers-reduced-motion', async () => {
+    it('starts the fallback demo on a terminal durable failure and reveals plans at failure plus 12 seconds', async () => {
         vi.useFakeTimers();
-        vi.setSystemTime(0);
-        stubMatchMedia(query => query.includes('reduce'));
-        vi.stubGlobal('fetch', vi.fn().mockResolvedValue(jsonResponse(validDto({ likelyFemale: false }))));
+        vi.setSystemTime(new Date(SUBMITTED_AT));
+        vi.stubGlobal('requestAnimationFrame', vi.fn(() => 1));
+        vi.stubGlobal('cancelAnimationFrame', vi.fn());
+        const onGoToPlans = vi.fn();
+        vi.stubGlobal('fetch', vi.fn().mockResolvedValue(jsonResponse(failedStatus())));
 
         await act(async () => {
-            root.render(createElement(PrecheckoutImmersive, { preflightId: PREFLIGHT_ID, claimToken: null, onGoToPlans: vi.fn() }));
+            root.render(createElement(PrecheckoutImmersive, { preflightId: PREFLIGHT_ID, claimToken: null, onGoToPlans }));
         });
         await settleUi();
-        await clickButton(container, '관계 판독 미리보기');
-
-        const cta = button(container, '분석 결과 확인하기');
-        expect(cta.disabled).toBe(true);
-        expect(cta.closest('.precheckout-reveal')?.classList.contains('is-visible')).toBe(false);
+        expect(container.querySelector('[data-precheckout-demo-mode="fallback"]')).not.toBeNull();
+        expect(onGoToPlans).not.toHaveBeenCalled();
 
         await act(async () => {
-            vi.advanceTimersByTime(12_000);
+            vi.advanceTimersByTime(11_999);
         });
-        expect(cta.disabled).toBe(false);
-        expect(cta.closest('.precheckout-reveal')?.classList.contains('is-visible')).toBe(true);
+        expect(onGoToPlans).not.toHaveBeenCalled();
+        await act(async () => { vi.advanceTimersByTime(1); });
+        expect(onGoToPlans).toHaveBeenCalledTimes(1);
+    });
+
+    it('latches pending work to the original T+48 deadline and never displays a late result', async () => {
+        vi.useFakeTimers();
+        vi.setSystemTime(new Date(SUBMITTED_AT));
+        vi.stubGlobal('fetch', vi.fn().mockResolvedValue(jsonResponse(pendingStatus(), 202)));
+        const onGoToPlans = vi.fn();
+
+        await act(async () => {
+            root.render(createElement(PrecheckoutImmersive, { preflightId: PREFLIGHT_ID, claimToken: null, onGoToPlans }));
+        });
+        await settleUi();
+
+        await act(async () => {
+            await vi.advanceTimersByTimeAsync(48_000);
+        });
+        expect(container.querySelector('[data-precheckout-demo-mode="fallback"]')).not.toBeNull();
+        expect(onGoToPlans).not.toHaveBeenCalled();
+
+        await act(async () => { await vi.advanceTimersByTimeAsync(12_000); });
+        expect(onGoToPlans).toHaveBeenCalledTimes(1);
     });
 
     it('sends the anonymous claim token header when claimToken is provided', async () => {
-        const fetchMock = vi.fn().mockResolvedValue(jsonResponse(validDto({ likelyFemale: false })));
+        const fetchMock = vi.fn().mockResolvedValue(jsonResponse(completeStatus(validDto({ likelyFemale: false }))));
         vi.stubGlobal('fetch', fetchMock);
 
         await act(async () => {
@@ -325,7 +335,7 @@ describe('PrecheckoutImmersive', () => {
 
     it('reports availability only after a valid B-lite payload arrives', async () => {
         const onAvailabilityChange = vi.fn();
-        vi.stubGlobal('fetch', vi.fn().mockResolvedValue(jsonResponse(validDto({ likelyFemale: false }))));
+        vi.stubGlobal('fetch', vi.fn().mockResolvedValue(jsonResponse(completeStatus(validDto({ likelyFemale: false })))));
 
         await act(async () => {
             root.render(createElement(PrecheckoutImmersive, {
@@ -355,12 +365,12 @@ describe('PrecheckoutImmersive', () => {
         });
         await settleUi();
 
-        expect(onAvailabilityChange).toHaveBeenNthCalledWith(1, true);
+        expect(onAvailabilityChange).toHaveBeenCalledOnce();
         expect(onAvailabilityChange).toHaveBeenLastCalledWith(false);
     });
 
     it('reuses one browser request when the same preflight remounts', async () => {
-        const fetchMock = vi.fn().mockResolvedValue(jsonResponse(validDto({ likelyFemale: false })));
+        const fetchMock = vi.fn().mockResolvedValue(jsonResponse(completeStatus(validDto({ likelyFemale: false }))));
         vi.stubGlobal('fetch', fetchMock);
 
         await act(async () => {
@@ -386,7 +396,7 @@ describe('PrecheckoutImmersive', () => {
     });
 
     it('omits the claim token header when claimToken is null', async () => {
-        const fetchMock = vi.fn().mockResolvedValue(jsonResponse(validDto({ likelyFemale: false })));
+        const fetchMock = vi.fn().mockResolvedValue(jsonResponse(completeStatus(validDto({ likelyFemale: false }))));
         vi.stubGlobal('fetch', fetchMock);
 
         await act(async () => {

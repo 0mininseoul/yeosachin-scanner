@@ -46,6 +46,21 @@ export const initialBlitePageState: BlitePageState = Object.freeze({
     demoStatus: 'idle',
 });
 
+/**
+ * Starts a page flow from the accepted submission clock. Keeping this constructor next to the
+ * reducer prevents a UI remount or polling response from inventing a newer fallback deadline.
+ */
+export function beginBlitePage(submittedAtMs: number): BlitePageState | null {
+    if (!Number.isFinite(submittedAtMs) || submittedAtMs < 0) return null;
+    return {
+        view: 'blite_pending',
+        pathLatch: null,
+        submittedAtMs,
+        demoStartedAtMs: null,
+        demoStatus: 'idle',
+    };
+}
+
 function transitionTimestamp(event: TimedBlitePageEvent): number | null {
     return Number.isFinite(event.atMs) && event.atMs >= 0 ? event.atMs : null;
 }

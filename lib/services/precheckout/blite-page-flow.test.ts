@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import {
+    beginBlitePage,
     initialBlitePageState,
     reduceBlitePage,
     type BlitePageState,
@@ -16,6 +17,11 @@ function pendingState(submittedAtMs = 1_700_000_000_000): BlitePageState {
 }
 
 describe('reduceBlitePage', () => {
+    it('starts one eligible flow from the original submission timestamp', () => {
+        expect(beginBlitePage(1_700_000_000_000)).toEqual(pendingState());
+        expect(beginBlitePage(Number.NaN)).toBeNull();
+    });
+
     it('moves an eligible pending request to normal-ready exactly once', () => {
         const ready = reduceBlitePage(pendingState(), {
             type: 'BLITE_COMPLETE',
