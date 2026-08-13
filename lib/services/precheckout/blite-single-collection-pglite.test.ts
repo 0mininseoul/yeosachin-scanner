@@ -686,6 +686,22 @@ describe('precheckout B-lite source and lease lifecycle', () => {
         }] });
     }, 30_000);
 
+    it('rejects a legacy v1 claim for a source-backed cohort without mutating its source or cache', async () => {
+        const database = await createDb();
+        await seedProcessingPreflight(database, PREFLIGHT_A);
+        await finalizeSource(database, PREFLIGHT_A);
+
+        await expect(database.query(
+            'SELECT public.claim_precheckout_blite_v1($1) AS result', [PREFLIGHT_A],
+        )).rejects.toThrow('PRECHECKOUT_BLITE_PREFLIGHT_NOT_READY');
+        await expect(database.query(
+            `SELECT cache.state,
+                    (SELECT count(*)::int FROM public.precheckout_blite_sources WHERE preflight_id=$1) AS sources
+             FROM public.precheckout_blite_cache AS cache WHERE cache.preflight_id=$1`,
+            [PREFLIGHT_A],
+        )).resolves.toMatchObject({ rows: [{ state: 'pending', sources: 1 }] });
+    }, 30_000);
+
     it('anchors cohort clocks to created_at and rejects queue-delay, refresh, retry, and caller-supplied resets', async () => {
         const database = await createDb();
         const origin = '2026-08-13T00:00:00.000Z';

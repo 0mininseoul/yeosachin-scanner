@@ -1161,6 +1161,7 @@ BEGIN
           AND preflight.status = 'ready'
           AND preflight.ready_at IS NOT NULL
           AND preflight.expires_at > v_now
+          AND NOT preflight.precheckout_blite_cohort
     ) THEN
         RAISE EXCEPTION USING
             MESSAGE = 'PRECHECKOUT_BLITE_PREFLIGHT_NOT_READY', ERRCODE = 'P0001';

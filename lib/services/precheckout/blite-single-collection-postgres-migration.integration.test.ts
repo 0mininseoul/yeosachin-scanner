@@ -23,6 +23,8 @@ const LEGACY_FAILED_PREFLIGHT = '20000000-0000-4000-8000-000000000104';
 const ALL_EVIDENCE_PREFLIGHT = '20000000-0000-4000-8000-000000000105';
 const ALL_EVIDENCE_LEASE = '40000000-0000-4000-8000-000000000105';
 const ALL_EVIDENCE_HASH = 'a'.repeat(64);
+const COHORT_V1_PREFLIGHT = '20000000-0000-4000-8000-000000000106';
+const COHORT_V1_LEASE = '40000000-0000-4000-8000-000000000106';
 const ALL_EVIDENCE_DTO = JSON.stringify({
     schemaVersion: 1,
     persona: { headline: '분석 헤드라인', summary: '분석 요약 문장입니다' },
@@ -301,5 +303,51 @@ describePostgres('precheckout B-lite PostgreSQL migration compatibility', () => 
             'SELECT public.complete_precheckout_blite_v2($1,$2,$3::jsonb) AS result',
             [ALL_EVIDENCE_PREFLIGHT, ALL_EVIDENCE_LEASE, ALL_EVIDENCE_DTO],
         )).resolves.toBe(true);
+    });
+
+    it('rejects a legacy v1 claim on a source-backed cohort without mutating its lifecycle rows', async () => {
+        await pool.query(
+            `INSERT INTO public.analysis_preflights(
+                id,status,ready_at,expires_at,target_input_hash,precheckout_blite_cohort
+            ) VALUES ($1,'ready',clock_timestamp(),clock_timestamp() + interval '10 minutes',$2,true)`,
+            [COHORT_V1_PREFLIGHT, ALL_EVIDENCE_HASH],
+        );
+        await pool.query(
+            `INSERT INTO public.analysis_preflight_provider_runs(
+                preflight_id,operation_key,input_hash,logical_provider,status,run_id
+            ) VALUES ($1,'target-profile-fallback',$2,'apify','succeeded','ApifyRun123456')`,
+            [COHORT_V1_PREFLIGHT, ALL_EVIDENCE_HASH],
+        );
+        await pool.query(
+            `INSERT INTO public.precheckout_blite_sources(
+                preflight_id,schema_version,target_input_hash,provider_run_id,provider_operation_key,
+                provider_run_reference,payload,payload_bytes,payload_hash,collected_at,expires_at
+            ) VALUES (
+                $1,1,$2,$1,'target-profile-fallback','ApifyRun123456','{}'::jsonb,2,
+                repeat('b',64),clock_timestamp(),clock_timestamp() + interval '10 minutes'
+            )`,
+            [COHORT_V1_PREFLIGHT, ALL_EVIDENCE_HASH],
+        );
+        await pool.query(
+            `INSERT INTO public.precheckout_blite_cache(
+                preflight_id,state,lease_token,lease_expires_at,attempt_count,created_at,updated_at
+            ) VALUES ($1,'pending',$2,clock_timestamp() - interval '1 second',0,
+                clock_timestamp() - interval '2 seconds',clock_timestamp() - interval '2 seconds')`,
+            [COHORT_V1_PREFLIGHT, COHORT_V1_LEASE],
+        );
+
+        await expect(asService<{ disposition: string }>(
+            pool,
+            'SELECT public.claim_precheckout_blite_v1($1) AS result',
+            [COHORT_V1_PREFLIGHT],
+        )).rejects.toThrow('PRECHECKOUT_BLITE_PREFLIGHT_NOT_READY');
+        await expect(pool.query(
+            `SELECT cache.state,cache.lease_token,
+                    (SELECT count(*)::int FROM public.precheckout_blite_sources WHERE preflight_id=$1) AS sources
+             FROM public.precheckout_blite_cache AS cache WHERE cache.preflight_id=$1`,
+            [COHORT_V1_PREFLIGHT],
+        )).resolves.toMatchObject({ rows: [{
+            state: 'pending', lease_token: COHORT_V1_LEASE, sources: 1,
+        }] });
     });
 });
