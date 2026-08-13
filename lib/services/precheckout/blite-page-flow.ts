@@ -110,10 +110,12 @@ export function reduceBlitePage(
                 };
             }
             if (state.view === 'success_demo' && state.pathLatch === 'normal') {
-                // The normal path remains the winner. Keep its start timestamp for deadline and
-                // telemetry consumers while the explicit status distinguishes completion.
+                // The normal path remains the winner. The legacy view is an explicit atomic
+                // post-demo surface for the account card + plans; keep the start timestamp for
+                // deadline and telemetry consumers.
                 return {
                     ...state,
+                    view: 'legacy',
                     demoStatus: 'complete',
                 };
             }

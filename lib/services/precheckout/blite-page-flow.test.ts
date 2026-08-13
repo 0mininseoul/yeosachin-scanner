@@ -106,13 +106,13 @@ describe('reduceBlitePage', () => {
         expect(reduceBlitePage(pending, { type: 'BLITE_FAILED' } as never)).toBe(pending);
     });
 
-    it('marks normal demo completion explicitly and ignores duplicate/late demo events', () => {
+    it('reveals the legacy plans state after normal demo completion without changing the latch', () => {
         const ready = reduceBlitePage(pendingState(), { type: 'BLITE_COMPLETE' });
         const demo = reduceBlitePage(ready, { type: 'SUCCESS_CTA', atMs: 65_000 });
         const complete = reduceBlitePage(demo, { type: 'DEMO_COMPLETE' });
 
         expect(complete).toEqual({
-            view: 'success_demo',
+            view: 'legacy',
             pathLatch: 'normal',
             demoStartedAtMs: 65_000,
             demoStatus: 'complete',
@@ -120,6 +120,18 @@ describe('reduceBlitePage', () => {
         expect(reduceBlitePage(complete, { type: 'DEMO_COMPLETE' })).toBe(complete);
         expect(reduceBlitePage(complete, { type: 'DEMO_ERROR' })).toBe(complete);
         expect(reduceBlitePage(complete, { type: 'FALLBACK_AT_48', atMs: 66_000 })).toBe(complete);
+    });
+
+    it('fails open from a normal demo error without changing the normal latch', () => {
+        const ready = reduceBlitePage(pendingState(), { type: 'BLITE_COMPLETE' });
+        const demo = reduceBlitePage(ready, { type: 'SUCCESS_CTA', atMs: 65_000 });
+
+        expect(reduceBlitePage(demo, { type: 'DEMO_ERROR' })).toEqual({
+            view: 'fallback_legacy',
+            pathLatch: 'normal',
+            demoStartedAtMs: 65_000,
+            demoStatus: 'error',
+        });
     });
 
     it('fails open from fallback demo on completion or demo error', () => {
