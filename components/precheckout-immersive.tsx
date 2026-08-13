@@ -165,12 +165,6 @@ export function PrecheckoutImmersive({
     const flowRef = useRef<BlitePageState>(initialBlitePageState);
 
     useEffect(() => {
-        setDto(null);
-        setDismissed(false);
-        setScreen(null);
-        flowRef.current = initialBlitePageState;
-        setFlow(initialBlitePageState);
-
         let active = true;
         let pollTimer: ReturnType<typeof setTimeout> | undefined;
         let fallbackTimer: ReturnType<typeof setTimeout> | undefined;

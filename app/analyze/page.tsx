@@ -964,6 +964,7 @@ const DISCLOSURE_ACCEPTED = true;
 
                                 {!autoCheckoutTransitionVisible && precheckoutSurface !== 'legacy' && (
                                     <PrecheckoutImmersive
+                                        key={`${readyPreflight.preflightId}:${claimToken ?? ''}`}
                                         preflightId={readyPreflight.preflightId}
                                         claimToken={claimToken}
                                         onGoToPlans={handleGoToPlans}
