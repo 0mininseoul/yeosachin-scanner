@@ -431,7 +431,8 @@ export async function downloadImageBytesViaTrustedProxy(
     await validateAllowedRemoteImageUrl(
         url,
         INSTAGRAM_MEDIA_HOST_SUFFIXES,
-        resolveHostname
+        resolveHostname,
+        signal,
     );
     assertImageWorkAvailable(signal, options.deadlineAtMs);
     const proxyUrl = `https://images.weserv.nl/?url=${encodeURIComponent(url)}&default=1`;
@@ -457,8 +458,8 @@ export async function normalizeImageToJpeg(
 ): Promise<Buffer> {
     try {
         assertImageWorkAvailable(signal, deadlineAtMs);
-        const normalized = await runWithImageDecodeSlot(() =>
-            sharp(imageBytes, {
+        const normalized = await runWithImageDecodeSlot(
+            () => sharp(imageBytes, {
                 failOn: 'error',
                 limitInputPixels: MAX_DECODED_IMAGE_PIXELS,
                 pages: 1,
@@ -477,8 +478,9 @@ export async function normalizeImageToJpeg(
                     chromaSubsampling: '4:2:0',
                     progressive: false,
                 })
-                .toBuffer()
-        , signal);
+                .toBuffer(),
+            signal,
+        );
         assertImageWorkAvailable(signal, deadlineAtMs);
         return normalized;
     } catch (error) {
@@ -510,7 +512,7 @@ export async function imageUrlToNormalizedBase64(
     deadlineAtMs?: number,
 ): Promise<string> {
     assertImageWorkAvailable(signal, deadlineAtMs);
-    await validateAllowedRemoteImageUrl(url, INSTAGRAM_MEDIA_HOST_SUFFIXES);
+    await validateAllowedRemoteImageUrl(url, INSTAGRAM_MEDIA_HOST_SUFFIXES, undefined, signal);
     assertImageWorkAvailable(signal, deadlineAtMs);
     try {
         return await downloadAndNormalizeImage(url, policy, signal, deadlineAtMs);
