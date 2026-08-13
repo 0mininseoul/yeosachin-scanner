@@ -8,6 +8,7 @@ import {
     PRECHECKOUT_DEMO_STAGE_DURATIONS_MS,
     PrecheckoutDemo,
 } from './precheckout-demo';
+import { reduceBlitePage, type BlitePageState } from '@/lib/services/precheckout/blite-page-flow';
 
 (globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT: boolean })
     .IS_REACT_ACT_ENVIRONMENT = true;
@@ -37,10 +38,13 @@ describe('PrecheckoutDemo', () => {
     let container: HTMLDivElement;
     let root: Root;
     let rafCallback: FrameRequestCallback | null;
+    let monotonicTimeMs: number;
 
     beforeEach(() => {
         vi.useFakeTimers();
         vi.setSystemTime(0);
+        monotonicTimeMs = 0;
+        vi.spyOn(performance, 'now').mockImplementation(() => monotonicTimeMs);
         stubMatchMedia();
         rafCallback = null;
         vi.stubGlobal('requestAnimationFrame', vi.fn((cb: FrameRequestCallback) => {
@@ -91,18 +95,22 @@ describe('PrecheckoutDemo', () => {
 
         await act(async () => {
             vi.setSystemTime(0);
+            monotonicTimeMs = 0;
             rafCallback?.(0);
             vi.setSystemTime(2_600);
+            monotonicTimeMs = 2_600;
             rafCallback?.(2_600);
         });
         expect(status?.textContent).toContain('2/4');
         await act(async () => {
             vi.setSystemTime(5_300);
+            monotonicTimeMs = 5_300;
             rafCallback?.(5_300);
         });
         expect(status?.textContent).toContain('3/4');
         await act(async () => {
             vi.setSystemTime(7_800);
+            monotonicTimeMs = 7_800;
             rafCallback?.(7_800);
         });
         expect(status?.textContent).toContain('4/4');
@@ -182,6 +190,7 @@ describe('PrecheckoutDemo', () => {
 
         await advanceTimersBy(10_000);
         await act(async () => {
+            monotonicTimeMs = 10_000;
             rafCallback?.(0);
         });
         expect(container.querySelector('[role="status"]')?.textContent).toContain('4/4');
@@ -222,6 +231,40 @@ describe('PrecheckoutDemo', () => {
         expect(remountComplete).toHaveBeenCalledTimes(1);
     });
 
+    it('hands the reducer absolute fallback start to the demo without mixing epoch and elapsed clocks', async () => {
+        const submittedAtMs = 1_700_000_000_000;
+        const pending: BlitePageState = {
+            view: 'blite_pending',
+            pathLatch: null,
+            submittedAtMs,
+            demoStartedAtMs: null,
+            demoStatus: 'idle',
+        };
+        const fallback = reduceBlitePage(pending, {
+            type: 'BLITE_FAILED',
+            atMs: submittedAtMs + 40_000,
+        });
+        const startedAtMs = fallback.demoStartedAtMs;
+        if (startedAtMs === null) throw new Error('reducer did not start fallback demo');
+
+        vi.setSystemTime(startedAtMs + 10_000);
+        const onComplete = vi.fn();
+        await act(async () => {
+            root.render(createElement(PrecheckoutDemo, {
+                mode: 'fallback',
+                startedAtMs,
+                onComplete,
+                onError: vi.fn(),
+            }));
+        });
+
+        expect(container.querySelector('[role="status"]')?.textContent).toContain('4/4');
+        await advanceTimersBy(DEMO_DURATION_MS - 10_001);
+        expect(onComplete).not.toHaveBeenCalled();
+        await advanceTimersBy(1);
+        expect(onComplete).toHaveBeenCalledTimes(1);
+    });
+
     it('locks mobile body scrolling and restores the previous overflow on cleanup', async () => {
         document.body.style.overflow = 'scroll';
         stubMatchMedia(query => query.includes('max-width'));
@@ -238,6 +281,38 @@ describe('PrecheckoutDemo', () => {
 
         act(() => root.unmount());
         root = createRoot(container);
+        expect(document.body.style.overflow).toBe('scroll');
+    });
+
+    it('restores body overflow even when media listener removal throws', async () => {
+        document.body.style.overflow = 'scroll';
+        const removeEventListener = vi.fn(() => {
+            throw new Error('listener removal failed');
+        });
+        vi.stubGlobal('matchMedia', vi.fn(() => ({
+            matches: true,
+            media: '(max-width: 760px)',
+            onchange: null,
+            addEventListener: vi.fn(),
+            removeEventListener,
+            addListener: vi.fn(),
+            removeListener: vi.fn(),
+            dispatchEvent: vi.fn(),
+        })));
+
+        await act(async () => {
+            root.render(createElement(PrecheckoutDemo, {
+                mode: 'fallback',
+                startedAtMs: 0,
+                onComplete: vi.fn(),
+                onError: vi.fn(),
+            }));
+        });
+        expect(document.body.style.overflow).toBe('hidden');
+
+        act(() => root.unmount());
+        root = createRoot(container);
+        expect(removeEventListener).toHaveBeenCalledTimes(1);
         expect(document.body.style.overflow).toBe('scroll');
     });
 

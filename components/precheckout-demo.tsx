@@ -195,9 +195,16 @@ export function PrecheckoutDemo(props: {
         return () => {
             try {
                 mediaQuery.removeEventListener?.('change', syncOverflow);
-                if (locked) document.body.style.overflow = previousOverflow;
             } catch {
                 reportError();
+            } finally {
+                if (locked) {
+                    try {
+                        document.body.style.overflow = previousOverflow;
+                    } catch {
+                        reportError();
+                    }
+                }
             }
         };
     }, [reportError]);

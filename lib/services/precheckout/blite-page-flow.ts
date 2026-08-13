@@ -15,23 +15,25 @@ export type BliteView =
 
 export type PathLatch = null | 'normal' | 'fallback';
 export type DemoStatus = 'idle' | 'running' | 'complete' | 'error';
+export const BLITE_FALLBACK_LATCH_MS = 48_000;
 
 export type BlitePageState = Readonly<{
     view: BliteView;
     pathLatch: PathLatch;
+    /** Original accepted submission timestamp, in the same absolute epoch clock as events. */
+    submittedAtMs: number | null;
     demoStartedAtMs: number | null;
     /** Explicitly distinguishes a finished normal demo from one still rendering. */
     demoStatus: DemoStatus;
 }>;
 
 type TimedBlitePageEvent = Readonly<{
-    type: 'BLITE_FAILED' | 'FALLBACK_AT_48' | 'SUCCESS_CTA';
-    /** Submission-relative or monotonic timestamp supplied by the page owner. */
+    type: 'BLITE_COMPLETE' | 'BLITE_FAILED' | 'FALLBACK_AT_48' | 'SUCCESS_CTA';
+    /** Absolute epoch timestamp from the same clock as submittedAtMs. */
     atMs: number;
 }>;
 
 export type BlitePageEvent =
-    | Readonly<{ type: 'BLITE_COMPLETE' }>
     | TimedBlitePageEvent
     | Readonly<{ type: 'DEMO_COMPLETE' }>
     | Readonly<{ type: 'DEMO_ERROR' }>;
@@ -39,6 +41,7 @@ export type BlitePageEvent =
 export const initialBlitePageState: BlitePageState = Object.freeze({
     view: 'legacy',
     pathLatch: null,
+    submittedAtMs: null,
     demoStartedAtMs: null,
     demoStatus: 'idle',
 });
@@ -47,9 +50,17 @@ function transitionTimestamp(event: TimedBlitePageEvent): number | null {
     return Number.isFinite(event.atMs) && event.atMs >= 0 ? event.atMs : null;
 }
 
-function fallbackDemo(state: BlitePageState, event: TimedBlitePageEvent): BlitePageState {
-    const startedAtMs = transitionTimestamp(event);
-    if (startedAtMs === null) return state;
+function submissionCutoff(state: BlitePageState): number | null {
+    if (!Number.isFinite(state.submittedAtMs) || state.submittedAtMs === null || state.submittedAtMs < 0) {
+        return null;
+    }
+    return state.submittedAtMs + BLITE_FALLBACK_LATCH_MS;
+}
+
+function fallbackDemo(
+    state: BlitePageState,
+    startedAtMs: number,
+): BlitePageState {
     return {
         ...state,
         view: 'fallback_demo',
@@ -71,6 +82,12 @@ export function reduceBlitePage(
     switch (event.type) {
         case 'BLITE_COMPLETE':
             if (state.view !== 'blite_pending' || state.pathLatch !== null) return state;
+            {
+                const atMs = transitionTimestamp(event);
+                const cutoffMs = submissionCutoff(state);
+                if (atMs === null || cutoffMs === null) return state;
+                if (atMs >= cutoffMs) return fallbackDemo(state, cutoffMs);
+            }
             return {
                 ...state,
                 view: 'blite_ready',
@@ -83,11 +100,21 @@ export function reduceBlitePage(
             // A business/preflight failure is intentionally not an eligible fallback path. Once
             // normal has won, a later inference failure cannot revoke the ready result either.
             if (state.view !== 'blite_pending' || state.pathLatch !== null) return state;
-            return fallbackDemo(state, event);
+            {
+                const atMs = transitionTimestamp(event);
+                const cutoffMs = submissionCutoff(state);
+                if (atMs === null || cutoffMs === null) return state;
+                return fallbackDemo(state, Math.min(atMs, cutoffMs));
+            }
 
         case 'FALLBACK_AT_48':
             if (state.view !== 'blite_pending' || state.pathLatch !== null) return state;
-            return fallbackDemo(state, event);
+            {
+                const atMs = transitionTimestamp(event);
+                const cutoffMs = submissionCutoff(state);
+                if (atMs === null || cutoffMs === null || atMs < cutoffMs) return state;
+                return fallbackDemo(state, cutoffMs);
+            }
 
         case 'SUCCESS_CTA':
             if (state.view !== 'blite_ready' || state.pathLatch !== 'normal') return state;

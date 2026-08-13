@@ -674,6 +674,14 @@ export const PRECHECKOUT_DEMO_DURATION_MS = PRECHECKOUT_DEMO_STAGE_DURATIONS_MS.
 );
 const TOTAL_MS = PRECHECKOUT_DEMO_DURATION_MS;
 
+function monotonicNowMs(): number {
+    if (typeof performance !== 'undefined' && typeof performance.now === 'function') {
+        const value = performance.now();
+        if (Number.isFinite(value)) return value;
+    }
+    return Date.now();
+}
+
 export interface PrecheckoutStageGraphsProps {
     /** Original demo start; every frame is derived from this absolute timeline. */
     startedAtMs: number;
@@ -808,9 +816,11 @@ export function PrecheckoutStageGraphs({
         }
 
         let rafId = 0;
+        const initialElapsedMs = Math.max(0, Date.now() - startedAtRef.current);
+        const monotonicStartedAtMs = monotonicNowMs();
         function frame() {
             try {
-                const elapsed = Math.max(0, Date.now() - startedAtRef.current);
+                const elapsed = initialElapsedMs + Math.max(0, monotonicNowMs() - monotonicStartedAtMs);
                 paint(elapsed);
                 if (elapsed < TOTAL_MS) {
                     rafId = requestAnimationFrame(frame);
