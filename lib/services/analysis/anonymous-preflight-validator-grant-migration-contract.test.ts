@@ -14,6 +14,10 @@ const dispatchMigration = readFileSync(resolve(
     process.cwd(),
     'supabase/migrations/20260806084409_fix_anonymous_preflight_dispatch_generation_qualification.sql',
 ), 'utf8');
+const slotValidatorMigration = readFileSync(resolve(
+    process.cwd(),
+    'supabase/migrations/20260813233000_allow_anonymous_preflight_slot_validator_exec.sql',
+), 'utf8');
 
 describe('anonymous preflight validator grant migration contract', () => {
     it('lets caller-owned anonymous inserts evaluate the bounded plan-card check', () => {
@@ -37,6 +41,12 @@ describe('anonymous preflight validator grant migration contract', () => {
         );
         expect(dispatchMigration).toContain(
             'SET dispatch_generation = target.dispatch_generation + 1,',
+        );
+    });
+
+    it('lets anonymous inserts evaluate the order-scoped slot check', () => {
+        expect(slotValidatorMigration).toMatch(
+            /GRANT EXECUTE ON FUNCTION public\.analysis_v2_valid_apify_credential_slot\(TEXT\)\s+TO anon, authenticated;/,
         );
     });
 });
