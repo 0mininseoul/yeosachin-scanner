@@ -1008,6 +1008,41 @@ describe('analyzeWithGemini process concurrency', () => {
         await expect(Promise.all([first, second])).resolves.toHaveLength(2);
     });
 
+    it('removes an aborted queued B-lite request without consuming a generation permit', async () => {
+        const deferred = deferredGenerations();
+        const active = Array.from({ length: 8 }, () => analyzeWithGemini('prompt', undefined, {
+            schema: responseSchema,
+            skipTokenLog: true,
+        }));
+        await vi.waitFor(() => expect(mocks.generateContent).toHaveBeenCalledTimes(8));
+
+        const controller = new AbortController();
+        const onAttemptTelemetry = vi.fn();
+        const queued = analyzeWithGemini('prompt', undefined, {
+            schema: responseSchema,
+            analysisType: 'precheckout_blite',
+            skipTokenLog: true,
+            abortSignal: controller.signal,
+            onAttemptTelemetry,
+        });
+        controller.abort();
+
+        await expect(queued).rejects.toThrow('AI_GENERATION_DEADLINE_EXCEEDED');
+        expect(mocks.generateContent).toHaveBeenCalledTimes(8);
+        expect(onAttemptTelemetry).not.toHaveBeenCalled();
+
+        deferred.releases.splice(0).forEach(release => release());
+        await expect(Promise.all(active)).resolves.toHaveLength(8);
+
+        const followUp = analyzeWithGemini('prompt', undefined, {
+            schema: responseSchema,
+            skipTokenLog: true,
+        });
+        await vi.waitFor(() => expect(mocks.generateContent).toHaveBeenCalledTimes(9));
+        deferred.releases.splice(0).forEach(release => release());
+        await expect(followUp).resolves.toEqual({ value: 'ok' });
+    });
+
     it('rejects resolver use under the frozen v2.6 policy', async () => {
         await expect(analyzeWithGemini('prompt', undefined, {
             schema: responseSchema,

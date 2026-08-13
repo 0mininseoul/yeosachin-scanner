@@ -63,12 +63,12 @@ describe('B-lite runtime policy', () => {
         }));
     });
 
-    it('rejects malformed or out-of-range rollout configuration', () => {
+    it('fails closed for malformed or out-of-range rollout configuration', () => {
         for (const rolloutPercent of ['-1', '2.5', '101', 'enabled']) {
-            expect(() => selectBliteCohort(PREFLIGHT_ID, {
+            expect(selectBliteCohort(PREFLIGHT_ID, {
                 PRECHECKOUT_BLITE_ENABLED: 'true',
                 PRECHECKOUT_BLITE_ROLLOUT_PERCENT: rolloutPercent,
-            })).toThrow('PRECHECKOUT_BLITE_ROLLOUT_PERCENT');
+            })).toBe(false);
         }
     });
 

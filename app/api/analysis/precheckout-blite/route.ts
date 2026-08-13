@@ -10,7 +10,8 @@ import {
 import { readAnonymousAnalysisV2Preflight } from '@/lib/services/analysis/anonymous-preflight';
 import { getInstagramProfile } from '@/lib/services/instagram/scraper';
 import { createSupabaseScraperTelemetryHook } from '@/lib/services/instagram/supabase-telemetry';
-import { inferPrecheckoutBlite } from '@/lib/services/precheckout/blite-inference';
+import { inferLegacyPrecheckoutBlite } from '@/lib/services/precheckout/blite-inference';
+import { computePrecheckoutBliteCandidateRange } from '@/lib/services/precheckout/blite-range';
 import {
     createPrecheckoutBliteObservability,
     type PrecheckoutBliteObservability,
@@ -103,10 +104,15 @@ async function generateDto(
     preflightId: string,
     targetUsername: string,
     observability: PrecheckoutBliteObservability,
+    candidateRange: { min: number; max: number },
+    submittedAtMs: number,
 ): Promise<PrecheckoutBliteV1 | null> {
     const controller = new AbortController();
-    const deadlineAtMs = Date.now() + PRECHECKOUT_BLITE_OPERATION_TIMEOUT_MS;
-    const timeout = setTimeout(() => controller.abort(), PRECHECKOUT_BLITE_OPERATION_TIMEOUT_MS);
+    const deadlineAtMs = submittedAtMs + PRECHECKOUT_BLITE_OPERATION_TIMEOUT_MS;
+    const timeout = setTimeout(
+        () => controller.abort(),
+        Math.max(0, deadlineAtMs - Date.now()),
+    );
     try {
         let profile;
         try {
@@ -131,10 +137,12 @@ async function generateDto(
         if (!profile || profile.isPrivate || !profile.latestPosts?.length) return null;
         let dto;
         try {
-            dto = await inferPrecheckoutBlite(profile, {
+            dto = await inferLegacyPrecheckoutBlite(profile, {
                 requestId: preflightId,
                 abortSignal: controller.signal,
                 onAttemptTelemetry: observability.inferenceAttempt,
+                candidateRange,
+                submittedAtMs,
             });
         } catch {
             observability.inferenceFailed();
@@ -155,10 +163,18 @@ function sharedGeneration(
     preflightId: string,
     targetUsername: string,
     observability: PrecheckoutBliteObservability,
+    candidateRange: { min: number; max: number },
 ): Promise<PrecheckoutBliteV1 | null> {
     const existing = inFlight.get(preflightId);
     if (existing) return existing;
-    const pending = generateDto(preflightId, targetUsername, observability).finally(() => {
+    const submittedAtMs = Date.now();
+    const pending = generateDto(
+        preflightId,
+        targetUsername,
+        observability,
+        candidateRange,
+        submittedAtMs,
+    ).finally(() => {
         if (inFlight.get(preflightId) === pending) inFlight.delete(preflightId);
     });
     inFlight.set(preflightId, pending);
@@ -252,6 +268,15 @@ async function handlePOST(request: Request): Promise<NextResponse> {
                 preflightId,
                 stored.readySnapshot.target.username,
                 observability,
+            const candidateRange = computePrecheckoutBliteCandidateRange(
+                stored.readySnapshot.target.followersCount,
+                stored.readySnapshot.target.followingCount,
+            );
+            const dto = await sharedGeneration(
+                preflightId,
+                stored.readySnapshot.target.username,
+                observability,
+                candidateRange,
             );
             if (!dto) {
                 await precheckoutBliteStore.release({

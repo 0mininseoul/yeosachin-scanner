@@ -32,7 +32,7 @@ vi.mock('@/lib/services/instagram/supabase-telemetry', () => ({
     createSupabaseScraperTelemetryHook: mocks.createScraperTelemetryHook,
 }));
 vi.mock('@/lib/services/precheckout/blite-inference', () => ({
-    inferPrecheckoutBlite: mocks.inferPrecheckoutBlite,
+    inferLegacyPrecheckoutBlite: mocks.inferPrecheckoutBlite,
 }));
 vi.mock('@/lib/services/precheckout/blite-observability', () => ({
     createPrecheckoutBliteObservability: mocks.createBliteObservability,
@@ -368,6 +368,18 @@ describe('POST /api/analysis/precheckout-blite', () => {
                 startCancellationSignal: expect.any(AbortSignal),
                 onTelemetry: mocks.scraperTelemetryHook,
             })
+        );
+    });
+
+    it('passes one captured operation timestamp and snapshot candidate range to the legacy adapter', async () => {
+        await POST(request());
+
+        expect(mocks.inferPrecheckoutBlite).toHaveBeenCalledWith(
+            expect.any(Object),
+            expect.objectContaining({
+                candidateRange: { min: 64, max: 152 },
+                submittedAtMs: expect.any(Number),
+            }),
         );
     });
 

@@ -12,6 +12,7 @@ import {
     normalizeImageToJpeg,
     prepareAnalysisImages,
     runWithImageDecodeSlot,
+    runWithImagePreparationSlot,
     selectAnalysisImageCandidates,
 } from './image-preprocessing';
 import {
@@ -179,6 +180,26 @@ describe('prepareAnalysisImages', () => {
 
         expect(started).toBeLessThanOrEqual(MAX_VERTEX_AI_IMAGE_PREPARATION_CONCURRENCY);
         expect(prepared.length).toBeLessThanOrEqual(started);
+    });
+
+    it('removes an aborted image semaphore waiter listener', async () => {
+        const releases: Array<() => void> = [];
+        const active = Array.from({ length: MAX_VERTEX_AI_CONCURRENT_IMAGE_PREPARATIONS }, () =>
+            runWithImagePreparationSlot(() => new Promise<void>(resolve => releases.push(resolve)))
+        );
+        await vi.waitFor(() => expect(releases).toHaveLength(MAX_VERTEX_AI_CONCURRENT_IMAGE_PREPARATIONS));
+
+        const controller = new AbortController();
+        const removeEventListener = vi.spyOn(controller.signal, 'removeEventListener');
+        const queued = runWithImagePreparationSlot(async () => undefined, controller.signal);
+        controller.abort();
+
+        await expect(queued).rejects.toBeDefined();
+        expect(removeEventListener).toHaveBeenCalledWith('abort', expect.any(Function));
+
+        releases.splice(0).forEach(resolve => resolve());
+        await Promise.all(active);
+        removeEventListener.mockRestore();
     });
 
     it('does not start queued image work once the absolute deadline expires', async () => {

@@ -50,14 +50,21 @@ const GOOGLE_CLOUD_LOCATION = process.env.GOOGLE_CLOUD_LOCATION || 'global';
 let genAI: GoogleGenAI | null = null;
 let extendedTelemetrySupported: boolean | null = null;
 
+interface GeminiSemaphoreWaiter {
+    resolve: () => void;
+    reject: (error: unknown) => void;
+    signal?: AbortSignal;
+    onAbort?: () => void;
+}
+
 class AsyncSemaphore {
     private active = 0;
-    private readonly queue: Array<() => void> = [];
+    private readonly queue: GeminiSemaphoreWaiter[] = [];
 
     constructor(private readonly limit: number) {}
 
-    async run<T>(task: () => Promise<T>): Promise<T> {
-        await this.acquire();
+    async run<T>(task: () => Promise<T>, signal?: AbortSignal): Promise<T> {
+        await this.acquire(signal);
         try {
             return await task();
         } finally {
@@ -76,19 +83,44 @@ class AsyncSemaphore {
         };
     }
 
-    private acquire(): Promise<void> {
+    private acquire(signal?: AbortSignal): Promise<void> {
+        if (signal?.aborted) {
+            return Promise.reject(signal.reason ?? new Error('ABORTED'));
+        }
         if (this.active < this.limit) {
             this.active++;
             return Promise.resolve();
         }
 
-        return new Promise<void>(resolve => this.queue.push(resolve));
+        return new Promise<void>((resolve, reject) => {
+            const waiter: GeminiSemaphoreWaiter = {
+                resolve,
+                reject,
+                signal,
+            };
+            const onAbort = () => {
+                const index = this.queue.indexOf(waiter);
+                if (index >= 0) this.queue.splice(index, 1);
+                signal?.removeEventListener('abort', onAbort);
+                reject(signal?.reason ?? new Error('ABORTED'));
+            };
+            waiter.onAbort = onAbort;
+            signal?.addEventListener('abort', onAbort, { once: true });
+            this.queue.push(waiter);
+            if (signal?.aborted) onAbort();
+        });
     }
 
     private release(): void {
-        const next = this.queue.shift();
-        if (next) {
-            next();
+        while (this.queue.length > 0) {
+            const next = this.queue.shift();
+            if (!next) break;
+            next.signal?.removeEventListener('abort', next.onAbort as EventListener);
+            if (next.signal?.aborted) {
+                next.reject(next.signal.reason ?? new Error('ABORTED'));
+                continue;
+            }
+            next.resolve();
             return;
         }
 
@@ -126,10 +158,20 @@ function getStageGenerationSemaphore(
 async function runWithGenerationSlot<T>(
     stage: AiStageName | null,
     policyVersion: AiStagePolicyVersion,
-    task: () => Promise<T>
+    task: () => Promise<T>,
+    signal?: AbortSignal,
 ): Promise<T> {
+    if (signal?.aborted) {
+        throw signal.reason ?? new Error('ABORTED');
+    }
+    const guardedTask = async (): Promise<T> => {
+        if (signal?.aborted) {
+            throw signal.reason ?? new Error('ABORTED');
+        }
+        return task();
+    };
     if (!stage) {
-        return generationLimiterState.shared.run(task);
+        return generationLimiterState.shared.run(guardedTask, signal);
     }
 
     const stageSemaphore = getStageGenerationSemaphore(policyVersion, stage);
@@ -144,7 +186,7 @@ async function runWithGenerationSlot<T>(
             throw new Error('ANALYSIS_V2_AI_RESOLVER_CAPACITY_SKIPPED');
         }
         try {
-            return await task();
+            return await guardedTask();
         } finally {
             releaseShared();
             releaseStage();
@@ -167,7 +209,7 @@ async function runWithGenerationSlot<T>(
             throw new Error('ANALYSIS_V2_AI_CAPACITY_PENDING');
         }
         try {
-            return await task();
+            return await guardedTask();
         } finally {
             releaseShared();
             releaseStage();
@@ -176,7 +218,10 @@ async function runWithGenerationSlot<T>(
 
     // Acquire the narrower stage slot first so queued stage work cannot occupy
     // otherwise-available shared capacity.
-    return stageSemaphore.run(() => generationLimiterState.shared.run(task));
+    return stageSemaphore.run(
+        () => generationLimiterState.shared.run(guardedTask, signal),
+        signal,
+    );
 }
 
 function getGenAIClient(): GoogleGenAI {
@@ -336,8 +381,22 @@ function getRetryDelay(attempt: number): number {
 /**
  * 지연 함수
  */
-function sleep(ms: number): Promise<void> {
-    return new Promise(resolve => setTimeout(resolve, ms));
+function sleep(ms: number, signal?: AbortSignal): Promise<void> {
+    return new Promise((resolve, reject) => {
+        let timer: ReturnType<typeof setTimeout> | undefined = setTimeout(() => {
+            timer = undefined;
+            signal?.removeEventListener('abort', onAbort);
+            resolve();
+        }, ms);
+        const onAbort = () => {
+            if (timer !== undefined) clearTimeout(timer);
+            timer = undefined;
+            signal?.removeEventListener('abort', onAbort);
+            reject(signal?.reason ?? new Error('ABORTED'));
+        };
+        if (signal?.aborted) onAbort();
+        else signal?.addEventListener('abort', onAbort, { once: true });
+    });
 }
 
 class RetryableGeminiRateLimitError extends Error {
@@ -858,7 +917,7 @@ export async function analyzeWithGemini<T>(
                 console.log(
                     `Retry attempt ${attemptNumber - 1}/${RETRY_CONFIG.maxRetries} after ${delay}ms`
                 );
-                await sleep(delay);
+                await sleep(delay, abortSignal);
                 if (abortSignal?.aborted) {
                     throw new Error('AI_GENERATION_DEADLINE_EXCEEDED');
                 }
@@ -908,6 +967,9 @@ export async function analyzeWithGemini<T>(
                     stage ?? null,
                     resolvedPolicyVersion,
                     async () => {
+                        if (abortSignal?.aborted) {
+                            throw new Error('AI_GENERATION_DEADLINE_EXCEEDED');
+                        }
                         attemptStartedAt = performance.now();
                         if (stage && requestId && stagePolicy && onBeforeAttempt) {
                             try {
@@ -938,16 +1000,26 @@ export async function analyzeWithGemini<T>(
                                     'AI_ATTEMPT_AUDIT_PERSISTENCE_ERROR: Gemini attempt intent was not durably stored.'
                                 );
                             }
+                            if (abortSignal?.aborted) {
+                                throw new Error('AI_GENERATION_DEADLINE_EXCEEDED');
+                            }
                         }
 
+                        if (abortSignal?.aborted) {
+                            throw new Error('AI_GENERATION_DEADLINE_EXCEEDED');
+                        }
                         return client.models.generateContent({
                             model: modelName,
                             contents: [{ role: 'user', parts }],
                             config,
                         });
-                    }
+                    },
+                    abortSignal,
                 );
             } catch (generationError) {
+                if (abortSignal?.aborted) {
+                    throw new Error('AI_GENERATION_DEADLINE_EXCEEDED');
+                }
                 if (
                     generationError instanceof Error
                     && (
@@ -1028,6 +1100,9 @@ export async function analyzeWithGemini<T>(
             };
 
             // V2 persists the validated result and attempt outcome before any best-effort legacy log.
+            if (abortSignal?.aborted) {
+                throw new Error('AI_GENERATION_DEADLINE_EXCEEDED');
+            }
             await emitAttemptTelemetry(
                 attemptTelemetry,
                 onAttemptTelemetry,
@@ -1078,6 +1153,12 @@ export async function analyzeWithGemini<T>(
 
             return parsed as T;
         } catch (error) {
+            if (abortSignal?.aborted) {
+                lastError = new Error('AI_GENERATION_DEADLINE_EXCEEDED');
+                console.error(`Gemini API Error (attempt ${attemptNumber}):`, lastError.message);
+                console.error('--- AnalyzeWithGemini End (Failed) ---');
+                throw lastError;
+            }
             lastError = error instanceof Error ? error : new Error(String(error));
             console.error(`Gemini API Error (attempt ${attemptNumber}):`, lastError.message);
 

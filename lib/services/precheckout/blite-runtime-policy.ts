@@ -26,7 +26,7 @@ function rolloutPercent(env: Record<string, string | undefined>): number {
     const value = env.PRECHECKOUT_BLITE_ROLLOUT_PERCENT;
     if (value === undefined || value === '') return 0;
     if (!/^(?:0|[1-9][0-9]?|100)$/u.test(value)) {
-        throw new Error('PRECHECKOUT_BLITE_ROLLOUT_PERCENT must be an integer from 0 through 100.');
+        return 0;
     }
     return Number(value);
 }

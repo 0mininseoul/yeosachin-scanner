@@ -16,6 +16,7 @@ vi.mock('@/lib/services/ai/image-preprocessing', () => ({
 import {
     buildPrecheckoutBliteDigest,
     buildPrecheckoutBlitePrompt,
+    inferLegacyPrecheckoutBlite,
     inferPrecheckoutBlite,
 } from './blite-inference';
 
@@ -40,6 +41,14 @@ type DurableSource = {
 };
 
 const CANDIDATE_RANGE = { min: 3, max: 9 } as const;
+
+function inferenceOptions(overrides: Record<string, unknown> = {}) {
+    return {
+        candidateRange: CANDIDATE_RANGE,
+        submittedAtMs: Date.now(),
+        ...overrides,
+    };
+}
 
 // Every concept/data source that requires the paid pipeline (mutual-follow gender
 // composition, who liked/commented on a post, follow-formation speed, or "erased/tidied
@@ -252,11 +261,73 @@ describe('buildPrecheckoutBlitePrompt', () => {
 });
 
 describe('inferPrecheckoutBlite', () => {
+    it('keeps the legacy route behind an explicit one-shot profile adapter', async () => {
+        mocks.analyzeWithGemini.mockResolvedValue(validModelResponse());
+        const profile = {
+            username: 'already_collected',
+            fullName: '홍길동',
+            profilePicUrl: 'https://cdninstagram.com/profile.jpg',
+            followersCount: 1_200,
+            followingCount: 900,
+            postsCount: 1,
+            isPrivate: false,
+            isVerified: false,
+            latestPosts: [{
+                id: 'post-1',
+                shortCode: 'post-1',
+                type: 'image' as const,
+                caption: '캡션',
+                hashtags: ['일상'],
+                imageUrl: 'https://cdninstagram.com/post.jpg',
+                likesCount: 12,
+                commentsCount: 2,
+                timestamp: '2026-08-13T00:00:00.000Z',
+                taggedUsers: [],
+                mentionedUsers: [],
+            }],
+        };
+
+        const result = await inferLegacyPrecheckoutBlite(profile, inferenceOptions());
+
+        expect(result).not.toBeNull();
+        expect(mocks.prepareAnalysisImages).toHaveBeenCalledWith(
+            'https://cdninstagram.com/profile.jpg',
+            ['https://cdninstagram.com/post.jpg'],
+            expect.objectContaining({ policy: expect.any(Object) }),
+        );
+        expect(mocks.analyzeWithGemini).toHaveBeenCalledOnce();
+    });
+
+    it('requires the original submission timestamp and explicit candidate metadata', async () => {
+        await expect(inferPrecheckoutBlite(source(), undefined as never)).resolves.toBeNull();
+        await expect(inferPrecheckoutBlite(
+            source(),
+            { candidateRange: CANDIDATE_RANGE } as never,
+        )).resolves.toBeNull();
+        await expect(inferPrecheckoutBlite(
+            source(),
+            { submittedAtMs: Date.now() } as never,
+        )).resolves.toBeNull();
+        expect(mocks.prepareAnalysisImages).not.toHaveBeenCalled();
+        expect(mocks.analyzeWithGemini).not.toHaveBeenCalled();
+    });
+
+    it('rejects a malformed durable source before media or Gemini work', async () => {
+        const result = await inferPrecheckoutBlite(
+            source({ posts: [post({ captionExcerpt: 'x'.repeat(161) })] }),
+            inferenceOptions(),
+        );
+        expect(result).toBeNull();
+        expect(mocks.prepareAnalysisImages).not.toHaveBeenCalled();
+        expect(mocks.analyzeWithGemini).not.toHaveBeenCalled();
+    });
+
     it('returns the assembled DTO using explicit preflight candidate metadata', async () => {
         mocks.analyzeWithGemini.mockResolvedValue(validModelResponse());
         const result = await inferPrecheckoutBlite(source(), {
             requestId: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',
             candidateRange: CANDIDATE_RANGE,
+            submittedAtMs: Date.now(),
         });
 
         expect(result).not.toBeNull();
@@ -275,6 +346,7 @@ describe('inferPrecheckoutBlite', () => {
             requestId: 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb',
             abortSignal: controller.signal,
             candidateRange: CANDIDATE_RANGE,
+            submittedAtMs: Date.now(),
             onAttemptTelemetry,
         });
 
@@ -282,7 +354,7 @@ describe('inferPrecheckoutBlite', () => {
         const [, images, options] = mocks.analyzeWithGemini.mock.calls[0];
         expect(images).toEqual(['BASE64_PROFILE', 'BASE64_POST_1']);
         expect(options.requestId).toBe('bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb');
-        expect(options.abortSignal).toBe(controller.signal);
+        expect(options.abortSignal).toBeInstanceOf(AbortSignal);
         expect(options.onAttemptTelemetry).toBe(onAttemptTelemetry);
         expect(options.analysisType).toBe('precheckout_blite');
         expect(options.thinkingLevel).toBe('MINIMAL');
@@ -292,7 +364,7 @@ describe('inferPrecheckoutBlite', () => {
 
     it('uses only the ordered durable image references, bounded to four total', async () => {
         mocks.analyzeWithGemini.mockResolvedValue(validModelResponse());
-        await inferPrecheckoutBlite(source(), { candidateRange: CANDIDATE_RANGE });
+        await inferPrecheckoutBlite(source(), inferenceOptions());
 
         expect(mocks.prepareAnalysisImages).toHaveBeenCalledTimes(1);
         const [profilePicUrl, postImageUrls, prepareOptions] = mocks.prepareAnalysisImages.mock.calls[0];
@@ -308,13 +380,14 @@ describe('inferPrecheckoutBlite', () => {
             maxDimension: 384,
             jpegQuality: 75,
         });
-        expect(prepareOptions.abortSignal).toBeUndefined();
+        expect(prepareOptions.abortSignal).toBeInstanceOf(AbortSignal);
         expect(mocks.getAnalysisImagePolicy).toHaveBeenCalledWith(true);
     });
 
     it('does not recollect a profile or use a scraper when the durable source has no posts', async () => {
         const result = await inferPrecheckoutBlite(source({ posts: [], media: [] }), {
             candidateRange: CANDIDATE_RANGE,
+            submittedAtMs: Date.now(),
         });
         expect(result).toBeNull();
         expect(mocks.analyzeWithGemini).not.toHaveBeenCalled();
@@ -324,7 +397,7 @@ describe('inferPrecheckoutBlite', () => {
     it('does not start media or Gemini work when the inference deadline is exhausted', async () => {
         const result = await inferPrecheckoutBlite(source(), {
             candidateRange: CANDIDATE_RANGE,
-            deadlineAtMs: Date.now() - 1,
+            submittedAtMs: Date.now() - 57_000,
         });
         expect(result).toBeNull();
         expect(mocks.prepareAnalysisImages).not.toHaveBeenCalled();
@@ -359,14 +432,16 @@ describe('inferPrecheckoutBlite', () => {
         await inferPrecheckoutBlite(source(), {
             abortSignal: controller.signal,
             candidateRange: CANDIDATE_RANGE,
+            submittedAtMs: Date.now(),
         });
-        expect(mocks.prepareAnalysisImages.mock.calls[0][2].abortSignal).toBe(controller.signal);
+        expect(mocks.prepareAnalysisImages.mock.calls[0][2].abortSignal)
+            .toBeInstanceOf(AbortSignal);
     });
 
     it('still calls Gemini without image evidence when all media preparation fails', async () => {
         mocks.prepareAnalysisImages.mockResolvedValue([]);
         mocks.analyzeWithGemini.mockResolvedValue(validModelResponse());
-        const result = await inferPrecheckoutBlite(source(), { candidateRange: CANDIDATE_RANGE });
+        const result = await inferPrecheckoutBlite(source(), inferenceOptions());
 
         expect(result).not.toBeNull();
         expect(mocks.analyzeWithGemini.mock.calls[0][1]).toBeUndefined();
@@ -381,7 +456,7 @@ describe('inferPrecheckoutBlite', () => {
             { claim: '신호 4', category: '카테고리', confidence: 0.85 },
         ];
         mocks.analyzeWithGemini.mockResolvedValue(allHigh);
-        const result = await inferPrecheckoutBlite(source(), { candidateRange: CANDIDATE_RANGE });
+        const result = await inferPrecheckoutBlite(source(), inferenceOptions());
 
         expect(result).not.toBeNull();
         const bands = result?.signals.map(signal => signal.band) ?? [];
@@ -393,13 +468,13 @@ describe('inferPrecheckoutBlite', () => {
 
     it('returns null when the Gemini call throws', async () => {
         mocks.analyzeWithGemini.mockRejectedValue(new Error('AI_RATE_LIMIT_ERROR: boom'));
-        const result = await inferPrecheckoutBlite(source(), { candidateRange: CANDIDATE_RANGE });
+        const result = await inferPrecheckoutBlite(source(), inferenceOptions());
         expect(result).toBeNull();
     });
 
     it('returns null when image preparation itself throws', async () => {
         mocks.prepareAnalysisImages.mockRejectedValue(new Error('boom'));
-        const result = await inferPrecheckoutBlite(source(), { candidateRange: CANDIDATE_RANGE });
+        const result = await inferPrecheckoutBlite(source(), inferenceOptions());
         expect(result).toBeNull();
         expect(mocks.analyzeWithGemini).not.toHaveBeenCalled();
     });
@@ -413,6 +488,7 @@ describe('inferPrecheckoutBlite', () => {
         const resultPromise = inferPrecheckoutBlite(source(), {
             abortSignal: controller.signal,
             candidateRange: CANDIDATE_RANGE,
+            submittedAtMs: Date.now(),
         });
         controller.abort();
 
@@ -425,7 +501,7 @@ describe('inferPrecheckoutBlite', () => {
         const malformed = validModelResponse();
         malformed.persona.headline = 'no korean characters at all here';
         mocks.analyzeWithGemini.mockResolvedValue(malformed);
-        const result = await inferPrecheckoutBlite(source(), { candidateRange: CANDIDATE_RANGE });
+        const result = await inferPrecheckoutBlite(source(), inferenceOptions());
         expect(result).toBeNull();
     });
 });

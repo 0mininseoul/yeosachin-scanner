@@ -197,11 +197,13 @@ class AsyncSemaphore {
             const onAbort = () => {
                 const index = this.queue.indexOf(waiter);
                 if (index >= 0) this.queue.splice(index, 1);
+                signal?.removeEventListener('abort', onAbort);
                 reject(signal?.reason ?? new Error('ABORTED'));
             };
             waiter.onAbort = onAbort;
             signal?.addEventListener('abort', onAbort, { once: true });
             this.queue.push(waiter);
+            if (signal?.aborted) onAbort();
         });
     }
 
