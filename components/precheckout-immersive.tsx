@@ -10,6 +10,10 @@ import {
 import { CaseCard, Eyebrow, PrimaryButton } from '@/components/case-ui';
 import { PrecheckoutDemo } from '@/components/precheckout-demo';
 import {
+    PRECHECKOUT_EVENTS,
+    trackPrecheckoutEvent,
+} from '@/lib/services/analytics';
+import {
     beginBlitePage,
     BLITE_FALLBACK_LATCH_MS,
     initialBlitePageState,
@@ -28,6 +32,20 @@ import {
 
 const FETCH_DEADLINE_MS = 5_000;
 const TRANSIENT_STATUS_RETRY_MS = 1_000;
+const MAX_ANALYTICS_DURATION_MS = 86_400_000;
+
+type PrecheckoutFallbackReason = 'terminal_before_48' | 'unresolved_at_48' | 'demo_error';
+type PrecheckoutDemoMode = 'success' | 'fallback';
+type PrecheckoutEventName = typeof PRECHECKOUT_EVENTS[keyof typeof PRECHECKOUT_EVENTS];
+
+function boundedDemoDurationMs(startedAtMs: number | null, finishedAtMs: number): number {
+    if (
+        typeof startedAtMs !== 'number'
+        || !Number.isFinite(startedAtMs)
+        || !Number.isFinite(finishedAtMs)
+    ) return 0;
+    return Math.min(MAX_ANALYTICS_DURATION_MS, Math.max(0, Math.floor(finishedAtMs - startedAtMs)));
+}
 
 type BrowserBliteStatus =
     | { state: 'pending'; submittedAt: string; fallbackAt: string; retryAfterMs: number }
@@ -176,29 +194,69 @@ export function PrecheckoutImmersive({
         : beginBlitePage(submittedAtMs) ?? initialBlitePageState;
     const [flow, setFlow] = useState<BlitePageState>(initialFlow);
     const flowRef = useRef<BlitePageState>(initialFlow);
+    const emittedEventKeysRef = useRef(new Set<string>());
+
+    const emitPrecheckoutEvent = useCallback((
+        eventName: PrecheckoutEventName,
+        properties?: Record<string, unknown>,
+    ): boolean => {
+        const key = `${eventName}:${preflightId}`;
+        if (emittedEventKeysRef.current.has(key)) return false;
+        emittedEventKeysRef.current.add(key);
+        return properties === undefined
+            ? trackPrecheckoutEvent(eventName, preflightId)
+            : trackPrecheckoutEvent(eventName, preflightId, properties);
+    }, [preflightId]);
+
+    const transition = useCallback((
+        event: BlitePageEvent,
+        fallbackReason?: PrecheckoutFallbackReason,
+    ): BlitePageState => {
+        const previous = flowRef.current;
+        const next = reduceBlitePage(previous, event);
+        if (next !== previous) {
+            const enteredFallback = next.pathLatch === 'fallback' && previous.pathLatch !== 'fallback';
+            if (enteredFallback) {
+                emitPrecheckoutEvent(PRECHECKOUT_EVENTS.BLITE_FALLBACK_SELECTED, {
+                    fallback_reason: fallbackReason
+                        ?? (event.type === 'FALLBACK_AT_48' ? 'unresolved_at_48' : 'terminal_before_48'),
+                });
+            }
+            const enteredDemo = (
+                (next.view === 'success_demo' || next.view === 'fallback_demo')
+                && next.demoStartedAtMs !== null
+                && previous.demoStartedAtMs === null
+            );
+            if (enteredDemo) {
+                emitPrecheckoutEvent(PRECHECKOUT_EVENTS.DEMO_STARTED, {
+                    demo_mode: next.pathLatch === 'fallback' ? 'fallback' : 'success',
+                });
+            }
+            if (event.type === 'DEMO_ERROR') {
+                emitPrecheckoutEvent(PRECHECKOUT_EVENTS.BLITE_FALLBACK_SELECTED, {
+                    fallback_reason: 'demo_error',
+                });
+            }
+            flowRef.current = next;
+            setFlow(next);
+        }
+        return next;
+    }, [emitPrecheckoutEvent]);
 
     useEffect(() => {
         let active = true;
         let pollTimer: ReturnType<typeof setTimeout> | undefined;
         let fallbackTimer: ReturnType<typeof setTimeout> | undefined;
-        const transition = (event: BlitePageEvent): BlitePageState => {
-            const next = reduceBlitePage(flowRef.current, event);
-            if (next !== flowRef.current) {
-                flowRef.current = next;
-                setFlow(next);
-            }
-            return next;
-        };
         const scheduleFallback = (fallbackAtMs: number) => {
             if (!Number.isFinite(fallbackAtMs)) return;
             if (fallbackTimer) clearTimeout(fallbackTimer);
             if (fallbackAtMs <= Date.now()) {
-                transition({ type: 'FALLBACK_AT_48', atMs: Date.now() });
+                transition({ type: 'FALLBACK_AT_48', atMs: Date.now() }, 'unresolved_at_48');
                 return;
             }
             fallbackTimer = setTimeout(() => {
                 if (!active) return;
-                transition({ type: 'FALLBACK_AT_48', atMs: Date.now() });
+                transition({ type: 'FALLBACK_AT_48', atMs: Date.now() }, 'unresolved_at_48');
             }, Math.max(0, fallbackAtMs - Date.now()));
         };
         if (submittedAtMs !== null) {
@@ -210,6 +268,7 @@ export function PrecheckoutImmersive({
                 if (!active) return;
                 if (status.state === 'unavailable') {
                     if (fallbackTimer) clearTimeout(fallbackTimer);
+                    emitPrecheckoutEvent(PRECHECKOUT_EVENTS.PLAN_GATE_REACHED);
                     onAvailabilityChange?.(false);
                     return;
                 }
@@ -224,6 +283,7 @@ export function PrecheckoutImmersive({
                 if (status.state === 'pending') {
                     const pending = beginBlitePage(Date.parse(status.submittedAt));
                     if (!pending) {
+                        emitPrecheckoutEvent(PRECHECKOUT_EVENTS.PLAN_GATE_REACHED);
                         onAvailabilityChange?.(false);
                         return;
                     }
@@ -245,6 +305,7 @@ export function PrecheckoutImmersive({
                 if (flowRef.current.submittedAtMs === null) {
                     const pending = beginBlitePage(Date.parse(status.submittedAt));
                     if (!pending) {
+                        emitPrecheckoutEvent(PRECHECKOUT_EVENTS.PLAN_GATE_REACHED);
                         onAvailabilityChange?.(false);
                         return;
                     }
@@ -253,16 +314,17 @@ export function PrecheckoutImmersive({
                 }
 
                 if (status.state === 'failed') {
-                    transition({ type: 'BLITE_FAILED', atMs: Date.now() });
+                    transition({ type: 'BLITE_FAILED', atMs: Date.now() }, 'terminal_before_48');
                     return;
                 }
 
-                const next = transition({ type: 'BLITE_COMPLETE', atMs: Date.now() });
+                const next = transition({ type: 'BLITE_COMPLETE', atMs: Date.now() }, 'unresolved_at_48');
                 if (next.view !== 'blite_ready') return;
                 setDto(status.dto);
                 const showConfirm = status.dto.genderRead.likelyFemale
                     && status.dto.genderRead.confidence >= PRECHECKOUT_BLITE_LIKELY_FEMALE_CONFIDENCE_THRESHOLD;
                 setScreen(showConfirm ? 'confirm' : 'result');
+                emitPrecheckoutEvent(PRECHECKOUT_EVENTS.BLITE_AVAILABLE);
                 onAvailabilityChange?.(true);
             }
             await poll();
@@ -273,29 +335,40 @@ export function PrecheckoutImmersive({
             if (pollTimer) clearTimeout(pollTimer);
             if (fallbackTimer) clearTimeout(fallbackTimer);
         };
-    }, [preflightId, claimToken, onAvailabilityChange, submittedAtMs]);
+    }, [claimToken, emitPrecheckoutEvent, onAvailabilityChange, preflightId, submittedAtMs, transition]);
 
-    const transition = useCallback((event: BlitePageEvent) => {
-        const next = reduceBlitePage(flowRef.current, event);
-        if (next !== flowRef.current) {
-            flowRef.current = next;
-            setFlow(next);
+    useEffect(() => {
+        if (screen === 'result' && dto) {
+            emitPrecheckoutEvent(PRECHECKOUT_EVENTS.BLITE_RESULT_VIEWED);
         }
-        return next;
-    }, []);
+    }, [dto, emitPrecheckoutEvent, screen]);
 
     const finishDemo = useCallback(() => {
+        const current = flowRef.current;
+        const demoMode: PrecheckoutDemoMode = current.pathLatch === 'fallback' ? 'fallback' : 'success';
+        emitPrecheckoutEvent(PRECHECKOUT_EVENTS.DEMO_COMPLETED, {
+            demo_mode: demoMode,
+            duration_ms: boundedDemoDurationMs(current.demoStartedAtMs, Date.now()),
+        });
         transition({ type: 'DEMO_COMPLETE' });
+        emitPrecheckoutEvent(PRECHECKOUT_EVENTS.PLAN_GATE_REACHED, { demo_mode: demoMode });
         setDismissed(true);
         onGoToPlans();
-    }, [onGoToPlans, transition]);
+    }, [emitPrecheckoutEvent, onGoToPlans, transition]);
 
     const failDemoOpen = useCallback(() => {
+        const current = flowRef.current;
+        const demoMode: PrecheckoutDemoMode = current.pathLatch === 'fallback' ? 'fallback' : 'success';
+        emitPrecheckoutEvent(PRECHECKOUT_EVENTS.DEMO_FAILED, {
+            demo_mode: demoMode,
+            duration_ms: boundedDemoDurationMs(current.demoStartedAtMs, Date.now()),
+        });
         transition({ type: 'DEMO_ERROR' });
         onDemoError?.();
+        emitPrecheckoutEvent(PRECHECKOUT_EVENTS.PLAN_GATE_REACHED, { demo_mode: demoMode });
         setDismissed(true);
         onGoToPlans();
-    }, [onDemoError, onGoToPlans, transition]);
+    }, [emitPrecheckoutEvent, onDemoError, onGoToPlans, transition]);
 
     if (dismissed || flow.view === 'legacy' || flow.view === 'fallback_legacy') return null;
 
@@ -320,14 +393,34 @@ export function PrecheckoutImmersive({
         return (
             <GenderConfirmScreen
                 dto={dto}
-                onYes={() => setScreen('result')}
-                onNo={() => { setDismissed(true); onGoToPlans(); }}
+                onYes={() => {
+                    emitPrecheckoutEvent(PRECHECKOUT_EVENTS.BLITE_GENDER_CONFIRMATION_COMPLETED, {
+                        gender_confirmation_outcome: 'confirmed',
+                    });
+                    setScreen('result');
+                }}
+                onNo={() => {
+                    emitPrecheckoutEvent(PRECHECKOUT_EVENTS.BLITE_GENDER_CONFIRMATION_COMPLETED, {
+                        gender_confirmation_outcome: 'rejected',
+                    });
+                    emitPrecheckoutEvent(PRECHECKOUT_EVENTS.PLAN_GATE_REACHED);
+                    setDismissed(true);
+                    onGoToPlans();
+                }}
             />
         );
     }
 
     if (screen === 'result') {
-        return <BliteResultScreen dto={dto} onContinue={() => transition({ type: 'SUCCESS_CTA', atMs: Date.now() })} />;
+        return (
+            <BliteResultScreen
+                dto={dto}
+                onContinue={() => {
+                    emitPrecheckoutEvent(PRECHECKOUT_EVENTS.BLITE_PREVIEW_CTA_CLICKED);
+                    transition({ type: 'SUCCESS_CTA', atMs: Date.now() });
+                }}
+            />
+        );
     }
 
     return null;
