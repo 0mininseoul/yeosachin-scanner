@@ -198,6 +198,15 @@ describe('analytics and observability disclosure contract', () => {
         expect(operations).toMatch(/no provider|provider.*(?:없|not|금지)/i);
     });
 
+    it('keeps browser-only fallback/demo outcomes on Amplitude without a server logging endpoint', () => {
+        const operations = source('docs/axiom-observability-operations.md');
+
+        expect(operations).toMatch(/fallback_latched[\s\S]*demo_started[\s\S]*demo_completed[\s\S]*demo_failed/);
+        expect(operations).toMatch(/Amplitude/);
+        expect(operations).toMatch(/(?:별도|new|new public)[^\n]*(?:endpoint|logging endpoint|로깅 endpoint)[^\n]*(?:추가하지|not|없)/i);
+        expect(operations).toMatch(/Vercel\/Axiom[\s\S]*(?:server outcomes|서버 결과|서버 운영)/i);
+    });
+
     it('documents the production B-lite terminal outcome query and fail-open response', () => {
         const operations = source('docs/axiom-observability-operations.md');
 

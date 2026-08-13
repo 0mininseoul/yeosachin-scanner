@@ -6,12 +6,29 @@ import {
     type PrecheckoutBliteFailureReason,
     type PrecheckoutBliteClaim,
 } from './blite-store';
+import {
+    createPrecheckoutBliteObservability,
+    type PrecheckoutBliteObservability,
+} from './blite-observability';
 
 const INFERENCE_WINDOW_MS = 56_000;
 
 type TerminalStore = Pick<typeof precheckoutBliteTerminalStore, 'claim' | 'complete' | 'fail'>;
+type PrecheckoutBliteInferenceTelemetry =
+    Parameters<PrecheckoutBliteObservability['inferenceAttempt']>[0];
 
-function inferenceFailureReason(nowMs: number, submittedAtMs: number): PrecheckoutBliteFailureReason {
+function emitBestEffort(action: () => void): void {
+    try {
+        action();
+    } catch {
+        // Observability must never change the durable inference outcome.
+    }
+}
+
+function inferenceFailureReason(
+    nowMs: number,
+    submittedAtMs: number,
+): PrecheckoutBliteFailureReason {
     return nowMs >= submittedAtMs + INFERENCE_WINDOW_MS
         ? 'inference_timeout'
         : 'inference_response_invalid';
@@ -22,10 +39,12 @@ export async function runPrecheckoutBlite(
     dependencies: {
         terminalStore?: TerminalStore;
         infer?: typeof inferPrecheckoutBlite;
+        observability?: PrecheckoutBliteObservability;
         now?: () => number;
     } = {},
 ): Promise<'noop' | 'pending' | 'complete' | 'failed'> {
     const terminalStore = dependencies.terminalStore ?? precheckoutBliteTerminalStore;
+    const now = dependencies.now ?? Date.now;
     const claim = await terminalStore.claim({ preflightId });
     if (claim.disposition === 'pending') return 'pending';
     if (claim.disposition === 'complete') return 'complete';
@@ -34,14 +53,35 @@ export async function runPrecheckoutBlite(
     const claimed: Extract<PrecheckoutBliteClaim, { disposition: 'claimed' }> = claim;
     const submittedAtMs = Date.parse(claimed.submittedAt);
     const deadlineAtMs = submittedAtMs + INFERENCE_WINDOW_MS;
-    const now = dependencies.now ?? Date.now;
-    if (!Number.isFinite(submittedAtMs) || !Number.isFinite(deadlineAtMs) || now() >= deadlineAtMs) {
-        await terminalStore.fail({
+    const observability = dependencies.observability ?? createPrecheckoutBliteObservability({
+        preflightId,
+        startedAtMs: Number.isFinite(submittedAtMs) ? submittedAtMs : now(),
+        now,
+    });
+    const onAttemptTelemetry = (telemetry: PrecheckoutBliteInferenceTelemetry): void => {
+        emitBestEffort(() => observability.inferenceAttempt(telemetry));
+    };
+    const failInference = async (
+        reason: PrecheckoutBliteFailureReason,
+    ): Promise<'failed'> => {
+        const failed = await terminalStore.fail({
             preflightId,
             leaseToken: claimed.leaseToken,
-            reason: 'inference_timeout',
+            reason,
         });
+        if (failed !== false) {
+            emitBestEffort(() => observability.inferenceFailed(
+                reason === 'inference_timeout'
+                    ? 'timeout'
+                    : reason === 'inference_response_invalid'
+                    ? 'invalid'
+                    : 'provider',
+            ));
+        }
         return 'failed';
+    };
+    if (!Number.isFinite(submittedAtMs) || !Number.isFinite(deadlineAtMs) || now() >= deadlineAtMs) {
+        return failInference('inference_timeout');
     }
 
     const dto = await (dependencies.infer ?? inferPrecheckoutBlite)(claimed.source, {
@@ -52,15 +92,12 @@ export async function runPrecheckoutBlite(
             claimed.followersCount,
             claimed.followingCount,
         ),
+        onAttemptTelemetry,
     });
     if (!dto) {
-        await terminalStore.fail({
-            preflightId,
-            leaseToken: claimed.leaseToken,
-            reason: inferenceFailureReason(now(), submittedAtMs),
-        });
-        return 'failed';
+        return failInference(inferenceFailureReason(now(), submittedAtMs));
     }
-    await terminalStore.complete({ preflightId, leaseToken: claimed.leaseToken, dto });
+    const completed = await terminalStore.complete({ preflightId, leaseToken: claimed.leaseToken, dto });
+    if (completed !== false) emitBestEffort(() => observability.completed());
     return 'complete';
 }

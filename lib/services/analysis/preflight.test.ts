@@ -118,6 +118,123 @@ describe('betatest preflight credit fence', () => {
 });
 
 describe('B-lite single-collection preflight', () => {
+    it('records a bounded profile collection failure when the selected Apify call fails', async () => {
+        const claimed = claim();
+        const store = workerStore(claimed);
+        const bliteObservability = {
+            completed: vi.fn(),
+            profileCollectionFailed: vi.fn(),
+            inferenceFailed: vi.fn(),
+            inferenceAttempt: vi.fn(),
+            fallbackLatched: vi.fn(),
+            demoCompleted: vi.fn(),
+            demoFailed: vi.fn(),
+        };
+        const activateBliteCohort = vi.fn(async () => ({
+            submittedAt: new Date(Date.now() - 1_000).toISOString(),
+            deadlineAt: new Date(Date.now() + 59_000).toISOString(),
+            expiresAt: new Date(Date.now() + 29 * 60_000).toISOString(),
+        }));
+        const runs = providerRunStore();
+        const fullProfile = vi.fn(async () => {
+            throw new Error('SCRAPING_SCHEMA_ERROR: Apify profile payload is invalid.');
+        });
+
+        await expect(processPreflight(preflightId, {
+            store,
+            providerRunStore: runs,
+            getFullProfile: fullProfile,
+            activateBliteCohort,
+            bliteObservability,
+            env: {
+                PRECHECKOUT_BLITE_ENABLED: 'true',
+                PRECHECKOUT_BLITE_ROLLOUT_PERCENT: '100',
+                ANALYSIS_V2_PREFLIGHT_IDENTITY_HMAC_SECRET: preflightIdentitySecret,
+            },
+        })).resolves.toBe('blocked');
+
+        expect(bliteObservability.profileCollectionFailed).toHaveBeenCalledWith('schema');
+        expect(bliteObservability.completed).not.toHaveBeenCalled();
+        expect(bliteObservability.inferenceFailed).not.toHaveBeenCalled();
+        expect(store.finalizeBlocked).toHaveBeenCalledWith(claimed, 'ANALYSIS_FAILED');
+        expect(JSON.stringify(bliteObservability.profileCollectionFailed.mock.calls))
+            .not.toContain('Apify profile payload');
+    });
+
+    it('does not report a provider failure for checkpoint persistence errors', async () => {
+        const claimed = claim();
+        const store = workerStore(claimed);
+        const bliteObservability = {
+            completed: vi.fn(),
+            profileCollectionFailed: vi.fn(),
+            inferenceFailed: vi.fn(),
+            inferenceAttempt: vi.fn(),
+            fallbackLatched: vi.fn(),
+            demoCompleted: vi.fn(),
+            demoFailed: vi.fn(),
+        };
+        const activateBliteCohort = vi.fn(async () => ({
+            submittedAt: new Date(Date.now() - 1_000).toISOString(),
+            deadlineAt: new Date(Date.now() + 59_000).toISOString(),
+            expiresAt: new Date(Date.now() + 29 * 60_000).toISOString(),
+        }));
+        const fullProfile = vi.fn(async () => {
+            throw new Error('ANALYSIS_PERSISTENCE_ERROR: provider checkpoint is unavailable.');
+        });
+
+        await expect(processPreflight(preflightId, {
+            store,
+            providerRunStore: providerRunStore(),
+            getFullProfile: fullProfile,
+            activateBliteCohort,
+            bliteObservability,
+            env: {
+                PRECHECKOUT_BLITE_ENABLED: 'true',
+                PRECHECKOUT_BLITE_ROLLOUT_PERCENT: '100',
+                ANALYSIS_V2_PREFLIGHT_IDENTITY_HMAC_SECRET: preflightIdentitySecret,
+            },
+        })).rejects.toMatchObject({ message: 'PREFLIGHT_WORKER_RETRY' });
+
+        expect(bliteObservability.profileCollectionFailed).not.toHaveBeenCalled();
+    });
+
+    it('does not report a provider failure while a checkpointed Apify run is pending', async () => {
+        const claimed = claim();
+        const store = workerStore(claimed);
+        const bliteObservability = {
+            completed: vi.fn(),
+            profileCollectionFailed: vi.fn(),
+            inferenceFailed: vi.fn(),
+            inferenceAttempt: vi.fn(),
+            fallbackLatched: vi.fn(),
+            demoCompleted: vi.fn(),
+            demoFailed: vi.fn(),
+        };
+        const activateBliteCohort = vi.fn(async () => ({
+            submittedAt: new Date(Date.now() - 1_000).toISOString(),
+            deadlineAt: new Date(Date.now() + 59_000).toISOString(),
+            expiresAt: new Date(Date.now() + 29 * 60_000).toISOString(),
+        }));
+        const fullProfile = vi.fn(async () => {
+            throw new Error('SCRAPING_RUN_PENDING_ERROR: checkpointed run is still active.');
+        });
+
+        await expect(processPreflight(preflightId, {
+            store,
+            providerRunStore: providerRunStore(),
+            getFullProfile: fullProfile,
+            activateBliteCohort,
+            bliteObservability,
+            env: {
+                PRECHECKOUT_BLITE_ENABLED: 'true',
+                PRECHECKOUT_BLITE_ROLLOUT_PERCENT: '100',
+                ANALYSIS_V2_PREFLIGHT_IDENTITY_HMAC_SECRET: preflightIdentitySecret,
+            },
+        })).rejects.toMatchObject({ message: 'PREFLIGHT_WORKER_RETRY' });
+
+        expect(bliteObservability.profileCollectionFailed).not.toHaveBeenCalled();
+    });
+
     it('collects one Apify profile, commits its ready snapshot and bounded source, then enqueues', async () => {
         const claimed = claim();
         const store = workerStore(claimed);

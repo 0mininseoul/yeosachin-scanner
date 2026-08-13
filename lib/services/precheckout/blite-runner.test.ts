@@ -21,6 +21,18 @@ const dto = {
 };
 
 describe('runPrecheckoutBlite', () => {
+    function observability() {
+        return {
+            completed: vi.fn(),
+            profileCollectionFailed: vi.fn(),
+            inferenceFailed: vi.fn(),
+            inferenceAttempt: vi.fn(),
+            fallbackLatched: vi.fn(),
+            demoCompleted: vi.fn(),
+            demoFailed: vi.fn(),
+        };
+    }
+
     it('claims durable source, infers once, and completes without any collection dependency', async () => {
         const terminal = {
             claim: vi.fn(async () => ({
@@ -36,10 +48,12 @@ describe('runPrecheckoutBlite', () => {
             fail: vi.fn(async () => true),
         };
         const infer = vi.fn(async () => dto);
+        const telemetry = observability();
 
         await expect(runPrecheckoutBlite(PREFLIGHT, {
             terminalStore: terminal,
             infer,
+            observability: telemetry,
             now: () => Date.parse(submittedAt) + 1_000,
         })).resolves.toBe('complete');
         expect(infer).toHaveBeenCalledWith(source, expect.objectContaining({
@@ -49,6 +63,80 @@ describe('runPrecheckoutBlite', () => {
         }));
         expect(terminal.complete).toHaveBeenCalledWith({ preflightId: PREFLIGHT, leaseToken: LEASE, dto });
         expect(terminal.fail).not.toHaveBeenCalled();
+    });
+
+    it('emits one completion event only for the owner that durably checkpoints success', async () => {
+        const terminal = {
+            claim: vi.fn()
+                .mockResolvedValueOnce({
+                    disposition: 'claimed' as const,
+                    leaseToken: LEASE,
+                    source,
+                    submittedAt,
+                    deadlineAt: '2026-08-13T00:01:00.000Z',
+                    followersCount: 1_200,
+                    followingCount: 900,
+                })
+                .mockResolvedValueOnce({ disposition: 'complete' as const, dto }),
+            complete: vi.fn(async () => true),
+            fail: vi.fn(async () => true),
+        };
+        const infer = vi.fn(async () => dto);
+        const telemetry = observability();
+
+        await expect(runPrecheckoutBlite(PREFLIGHT, {
+            terminalStore: terminal,
+            infer,
+            observability: telemetry,
+            now: () => Date.parse(submittedAt) + 1_000,
+        })).resolves.toBe('complete');
+        await expect(runPrecheckoutBlite(PREFLIGHT, {
+            terminalStore: terminal,
+            infer,
+            observability: telemetry,
+            now: () => Date.parse(submittedAt) + 2_000,
+        })).resolves.toBe('complete');
+
+        expect(telemetry.completed).toHaveBeenCalledTimes(1);
+        expect(terminal.complete).toHaveBeenCalledTimes(1);
+        const inferenceOptions = (infer.mock.calls[0] as unknown[])[1] as {
+            onAttemptTelemetry?: (value: unknown) => void;
+        };
+        expect(inferenceOptions.onAttemptTelemetry).toEqual(expect.any(Function));
+        inferenceOptions.onAttemptTelemetry?.({ disposition: 'success' });
+        expect(telemetry.inferenceAttempt).toHaveBeenCalledWith({ disposition: 'success' });
+        expect(infer).toHaveBeenCalledTimes(1);
+    });
+
+    it('emits an inference failure only after a null result is durably failed', async () => {
+        const terminal = {
+            claim: vi.fn(async () => ({
+                disposition: 'claimed' as const,
+                leaseToken: LEASE,
+                source,
+                submittedAt,
+                deadlineAt: '2026-08-13T00:01:00.000Z',
+                followersCount: 1_200,
+                followingCount: 900,
+            })),
+            complete: vi.fn(async () => true),
+            fail: vi.fn(async () => true),
+        };
+        const telemetry = observability();
+
+        await expect(runPrecheckoutBlite(PREFLIGHT, {
+            terminalStore: terminal,
+            infer: vi.fn(async () => null),
+            observability: telemetry,
+            now: () => Date.parse(submittedAt) + 1_000,
+        })).resolves.toBe('failed');
+
+        expect(terminal.fail).toHaveBeenCalledWith({
+            preflightId: PREFLIGHT,
+            leaseToken: LEASE,
+            reason: 'inference_response_invalid',
+        });
+        expect(telemetry.inferenceFailed).toHaveBeenCalledWith('invalid');
     });
 
     it('terminalizes an expired original T+56 deadline without starting inference', async () => {
@@ -66,10 +154,12 @@ describe('runPrecheckoutBlite', () => {
             fail: vi.fn(async () => true),
         };
         const infer = vi.fn();
+        const telemetry = observability();
 
         await expect(runPrecheckoutBlite(PREFLIGHT, {
             terminalStore: terminal,
             infer,
+            observability: telemetry,
             now: () => Date.parse(submittedAt) + 56_000,
         })).resolves.toBe('failed');
         expect(infer).not.toHaveBeenCalled();
@@ -78,5 +168,6 @@ describe('runPrecheckoutBlite', () => {
             leaseToken: LEASE,
             reason: 'inference_timeout',
         });
+        expect(telemetry.inferenceFailed).toHaveBeenCalledWith('timeout');
     });
 });
