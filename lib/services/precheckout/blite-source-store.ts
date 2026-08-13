@@ -53,6 +53,17 @@ const finalizeInputSchema = z.object({
     expiresAt: timestamp,
 }).strict();
 
+const activateCohortInputSchema = z.object({
+    preflightId: uuid,
+    claimToken: uuid,
+}).strict();
+
+const cohortClockSchema = z.object({
+    submittedAt: timestamp,
+    deadlineAt: timestamp,
+    expiresAt: timestamp,
+}).strict();
+
 export type FinalizePrecheckoutBliteSourceInput = z.infer<typeof finalizeInputSchema>;
 
 function sourcePayloadHash(source: PrecheckoutBliteSourceV1): string {
@@ -67,6 +78,22 @@ function validateSourceSize(source: PrecheckoutBliteSourceV1): void {
 
 export function createPrecheckoutBliteSourceStore(client: RpcClient = supabaseAdmin) {
     return {
+        async activateCohort(input: {
+            preflightId: string;
+            claimToken: string;
+        }): Promise<z.infer<typeof cohortClockSchema>> {
+            const parsed = activateCohortInputSchema.safeParse(input);
+            if (!parsed.success) throw persistenceError();
+            const { data, error } = await client.rpc('activate_precheckout_blite_cohort_v1', {
+                p_preflight_id: parsed.data.preflightId,
+                p_claim_token: parsed.data.claimToken,
+            });
+            if (error) throw persistenceError(error);
+            const clock = cohortClockSchema.safeParse(data);
+            if (!clock.success) throw persistenceError();
+            return clock.data;
+        },
+
         async finalizeReadyWithSource(input: FinalizePrecheckoutBliteSourceInput): Promise<boolean> {
             const parsed = finalizeInputSchema.safeParse(input);
             if (!parsed.success) throw persistenceError();
@@ -116,6 +143,13 @@ export function createPrecheckoutBliteSourceStore(client: RpcClient = supabaseAd
 }
 
 export const precheckoutBliteSourceStore = createPrecheckoutBliteSourceStore();
+
+export async function activateCohort(input: {
+    preflightId: string;
+    claimToken: string;
+}) {
+    return precheckoutBliteSourceStore.activateCohort(input);
+}
 
 export async function finalizeReadyWithSource(
     input: FinalizePrecheckoutBliteSourceInput,

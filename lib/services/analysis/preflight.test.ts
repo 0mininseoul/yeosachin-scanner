@@ -32,6 +32,7 @@ import type {
 import { preflightTargetInputHash } from './preflight-identity';
 import { PREFLIGHT_PROVIDER_DEADLINE_MS } from './preflight-runtime-policy';
 import type { BetaApifyPreflightCoordinator } from './beta-apify-preflight-coordinator';
+import type { PrecheckoutBliteSourceV1 } from '@/lib/services/precheckout/blite-source';
 
 const preflightId = '123e4567-e89b-42d3-a456-426614174000';
 const userId = '223e4567-e89b-42d3-a456-426614174000';
@@ -113,6 +114,86 @@ describe('betatest preflight credit fence', () => {
         expect(store.finalizeBlocked).toHaveBeenCalledWith(claimed, 'BETA_CAPACITY_UNAVAILABLE');
         expect(settleBetaCredit).toHaveBeenCalledWith(preflightId);
         expect(refreshBetaCredit).toHaveBeenCalledOnce();
+    });
+});
+
+describe('B-lite single-collection preflight', () => {
+    it('collects one Apify profile, commits its ready snapshot and bounded source, then enqueues', async () => {
+        const claimed = claim();
+        const store = workerStore(claimed);
+        const collectedProfile = profile({
+            latestPosts: [{
+                id: 'post-1',
+                shortCode: 'postone',
+                type: 'image',
+                likesCount: 10,
+                commentsCount: 2,
+                taggedUsers: [],
+                mentionedUsers: [],
+                hashtags: [],
+                imageUrl: 'https://scontent.cdninstagram.com/post.jpg',
+                timestamp: '2026-08-13T00:00:00.000Z',
+            }],
+        });
+        const source: PrecheckoutBliteSourceV1 = {
+            schemaVersion: 1,
+            fullName: 'Target',
+            posts: [],
+            media: [],
+        };
+        const fallback = vi.fn(async () => collectedProfile);
+        const projectBliteSource = vi.fn(() => source);
+        const order: string[] = [];
+        const activateBliteCohort = vi.fn(async () => ({
+            submittedAt: new Date(Date.now() - 1_000).toISOString(),
+            deadlineAt: new Date(Date.now() + 59_000).toISOString(),
+            expiresAt: new Date(Date.now() + 29 * 60_000).toISOString(),
+        }));
+        const finalizeReadyWithSource = vi.fn(async () => { order.push('finalize'); return true; });
+        const enqueueBliteInference = vi.fn(async () => { order.push('enqueue'); return 'enqueued' as const; });
+        const run = {
+            ...storedRun('succeeded'),
+            credentialSlot: selectPreflightApifyCredentialSlot(preflightId, {
+                PRECHECKOUT_BLITE_ENABLED: 'true',
+                PRECHECKOUT_BLITE_ROLLOUT_PERCENT: '100',
+                ANALYSIS_V2_PREFLIGHT_IDENTITY_HMAC_SECRET: preflightIdentitySecret,
+            }),
+        };
+        const runs: PreflightProviderRunStore = {
+            load: vi.fn(async () => run),
+            reserve: vi.fn(),
+            checkpointStarted: vi.fn(),
+            checkpointRejected: vi.fn(),
+            checkpointTerminal: vi.fn(),
+        };
+
+        await expect(processPreflight(preflightId, {
+            store,
+            providerRunStore: runs,
+            getProfile: vi.fn(() => { throw new Error('cohort must not use selfhosted'); }),
+            getFallbackProfile: fallback,
+            activateBliteCohort,
+            projectBliteSource,
+            finalizeReadyWithSource,
+            enqueueBliteInference,
+            env: {
+                PRECHECKOUT_BLITE_ENABLED: 'true',
+                PRECHECKOUT_BLITE_ROLLOUT_PERCENT: '100',
+                ANALYSIS_V2_PREFLIGHT_IDENTITY_HMAC_SECRET: preflightIdentitySecret,
+            },
+        })).resolves.toBe('ready');
+
+        expect(fallback).toHaveBeenCalledTimes(1);
+        expect(projectBliteSource).toHaveBeenCalledWith(collectedProfile);
+        expect(finalizeReadyWithSource).toHaveBeenCalledWith(expect.objectContaining({
+            source,
+            providerOperationKey: 'target-profile-fallback',
+            providerRunReference: 'StoredRun12345678',
+            targetFollowersCount: collectedProfile.followersCount,
+            targetFollowingCount: collectedProfile.followingCount,
+        }));
+        expect(store.finalizeReady).not.toHaveBeenCalled();
+        expect(order).toEqual(['finalize', 'enqueue']);
     });
 });
 

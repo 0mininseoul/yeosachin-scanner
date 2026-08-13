@@ -69,6 +69,65 @@ EXECUTE FUNCTION public.enforce_precheckout_blite_preflight_clock_v1();
 REVOKE ALL ON FUNCTION public.enforce_precheckout_blite_preflight_clock_v1()
     FROM PUBLIC, anon, authenticated, service_role;
 
+-- The cohort is chosen only after the ordinary claim fence succeeds, but before any provider
+-- work. This keeps its immutable T+60 clock anchored to the original preflight creation time.
+CREATE OR REPLACE FUNCTION public.activate_precheckout_blite_cohort_v1(
+    p_preflight_id UUID,
+    p_claim_token UUID
+)
+RETURNS JSONB
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = ''
+AS $$
+DECLARE
+    v_now TIMESTAMP WITH TIME ZONE := pg_catalog.clock_timestamp();
+    v_preflight public.analysis_preflights%ROWTYPE;
+BEGIN
+    IF p_preflight_id IS NULL OR p_claim_token IS NULL THEN
+        RAISE EXCEPTION USING
+            MESSAGE = 'PRECHECKOUT_BLITE_PREFLIGHT_FENCE_LOST', ERRCODE = 'P0001';
+    END IF;
+
+    SELECT preflight.* INTO v_preflight
+    FROM public.analysis_preflights AS preflight
+    WHERE preflight.id = p_preflight_id
+    FOR UPDATE;
+    IF NOT FOUND
+       OR v_preflight.status <> 'processing'
+       OR v_preflight.lease_token IS DISTINCT FROM p_claim_token
+       OR v_preflight.lease_expires_at IS NULL
+       OR v_preflight.lease_expires_at <= v_now
+       OR v_preflight.expires_at <= v_now
+       OR v_preflight.pii_scrubbed_at IS NOT NULL
+       OR v_preflight.created_at + INTERVAL '60 seconds' <= v_now THEN
+        RAISE EXCEPTION USING
+            MESSAGE = 'PRECHECKOUT_BLITE_PREFLIGHT_FENCE_LOST', ERRCODE = 'P0001';
+    END IF;
+
+    IF NOT v_preflight.precheckout_blite_cohort THEN
+        UPDATE public.analysis_preflights
+        SET precheckout_blite_cohort = TRUE,
+            updated_at = v_now
+        WHERE id = v_preflight.id
+        RETURNING * INTO v_preflight;
+    END IF;
+
+    IF v_preflight.submitted_at IS NULL
+       OR v_preflight.deadline_at IS NULL
+       OR v_preflight.deadline_at <= v_now THEN
+        RAISE EXCEPTION USING
+            MESSAGE = 'PRECHECKOUT_BLITE_PREFLIGHT_FENCE_LOST', ERRCODE = 'P0001';
+    END IF;
+
+    RETURN pg_catalog.jsonb_build_object(
+        'submittedAt', v_preflight.submitted_at,
+        'deadlineAt', v_preflight.deadline_at,
+        'expiresAt', v_preflight.expires_at
+    );
+END;
+$$;
+
 CREATE TABLE public.precheckout_blite_sources (
     preflight_id UUID PRIMARY KEY REFERENCES public.analysis_preflights(id) ON DELETE CASCADE,
     schema_version SMALLINT NOT NULL,
@@ -1237,6 +1296,10 @@ GRANT EXECUTE ON FUNCTION public.finalize_preflight_blite_source_v1(
     UUID, UUID, UUID, VARCHAR, UUID, TEXT, TEXT, TEXT, TEXT, TEXT, INTEGER, INTEGER, BOOLEAN,
     TEXT, TEXT, JSONB, JSONB, VARCHAR, TIMESTAMP WITH TIME ZONE, TIMESTAMP WITH TIME ZONE
 ) TO service_role;
+REVOKE ALL ON FUNCTION public.activate_precheckout_blite_cohort_v1(UUID, UUID)
+    FROM PUBLIC, anon, authenticated, service_role;
+GRANT EXECUTE ON FUNCTION public.activate_precheckout_blite_cohort_v1(UUID, UUID)
+    TO service_role;
 REVOKE ALL ON FUNCTION public.complete_analysis_v2_preflight_with_blite_source_v1(
     UUID, UUID, UUID, VARCHAR, UUID, TEXT, TEXT, TEXT, TEXT, TEXT, INTEGER, INTEGER, BOOLEAN,
     TEXT, TEXT, JSONB, JSONB, VARCHAR, TIMESTAMP WITH TIME ZONE, TIMESTAMP WITH TIME ZONE

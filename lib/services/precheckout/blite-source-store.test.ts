@@ -44,6 +44,31 @@ function input(): FinalizePrecheckoutBliteSourceInput {
 }
 
 describe('precheckout B-lite source store', () => {
+    it('activates the immutable cohort clock through its claim-fenced RPC before collection', async () => {
+        const database = {
+            rpc: vi.fn().mockResolvedValue({
+                data: {
+                    submittedAt: '2026-08-13T00:00:00.000Z',
+                    deadlineAt: '2026-08-13T00:01:00.000Z',
+                    expiresAt: '2026-08-13T00:30:00.000Z',
+                },
+                error: null,
+            }),
+        };
+        const store = createPrecheckoutBliteSourceStore(database);
+
+        await expect(store.activateCohort({ preflightId: PREFLIGHT, claimToken: CLAIM }))
+            .resolves.toEqual({
+                submittedAt: '2026-08-13T00:00:00.000Z',
+                deadlineAt: '2026-08-13T00:01:00.000Z',
+                expiresAt: '2026-08-13T00:30:00.000Z',
+            });
+        expect(database.rpc).toHaveBeenCalledWith('activate_precheckout_blite_cohort_v1', {
+            p_preflight_id: PREFLIGHT,
+            p_claim_token: CLAIM,
+        });
+    });
+
     it('finalizes the ready snapshot and bounded source through the exact atomic RPC', async () => {
         const database = { rpc: vi.fn().mockResolvedValue({ data: true, error: null }) };
         const store = createPrecheckoutBliteSourceStore(database);

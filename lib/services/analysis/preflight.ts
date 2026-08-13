@@ -70,6 +70,7 @@ import {
     bindPreflightProviderRunCheckpoint,
     preflightProviderIdentity,
     preflightProviderRunStore,
+    type StoredPreflightProviderRun,
     type PreflightProviderRunStore,
 } from './preflight-provider-run';
 import { preflightTargetInputHash } from './preflight-identity';
@@ -86,6 +87,18 @@ import {
     preflightFailureReason,
     recordPreflightFailure,
 } from './preflight-failure-ledger';
+import {
+    precheckoutBliteSourceStore,
+    type FinalizePrecheckoutBliteSourceInput,
+} from '@/lib/services/precheckout/blite-source-store';
+import {
+    projectPrecheckoutBliteSource,
+    type PrecheckoutBliteSourceV1,
+} from '@/lib/services/precheckout/blite-source';
+import {
+    BLITE_PROVIDER_DEADLINE_MS,
+    selectBliteCohort,
+} from '@/lib/services/precheckout/blite-runtime-policy';
 
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const ISO_TIMESTAMP_PATTERN = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})$/;
@@ -1519,9 +1532,9 @@ function assertMatchingProfile(profile: InstagramProfile, username: string): voi
 
 export function fallbackCallContext(
     checkpoint: ProviderRunCheckpoint,
-    startedAt: number
+    startedAt: number,
+    deadlineAtMs = startedAt + PREFLIGHT_PROVIDER_DEADLINE_MS,
 ) {
-    const deadlineAtMs = startedAt + PREFLIGHT_PROVIDER_DEADLINE_MS;
     const remainingMs = Math.max(
         1_000,
         deadlineAtMs - Date.now()
@@ -1658,6 +1671,19 @@ export async function processPreflight(
         /** Post-terminal only; true means a beta allocation was processed. */
         settleBetaCredit?: (preflightId: string) => Promise<boolean>;
         refreshBetaCredit?: () => Promise<void>;
+        activateBliteCohort?: (input: {
+            preflightId: string;
+            claimToken: string;
+        }) => Promise<{
+            submittedAt: string;
+            deadlineAt: string;
+            expiresAt: string;
+        }>;
+        projectBliteSource?: (profile: InstagramProfile) => PrecheckoutBliteSourceV1;
+        finalizeReadyWithSource?: (
+            input: FinalizePrecheckoutBliteSourceInput
+        ) => Promise<boolean>;
+        enqueueBliteInference?: (preflightId: string) => Promise<'enqueued' | 'exists'>;
     } = {}
 ): Promise<'noop' | 'ready' | 'blocked'> {
     const store = dependencies.store ?? preflightStore;
@@ -1719,6 +1745,24 @@ export async function processPreflight(
     try {
         const isBetatest = claim.analysisEntryChannel === 'betatest';
         const isAnonymousPreflight = claim.userId === null;
+        const selectedBliteCohort = selectBliteCohort(
+            claim.preflightId,
+            dependencies.env ?? process.env,
+            { signedTestEntitlement: claim.accessMode === 'test_entitlement' },
+        );
+        const bliteClock = selectedBliteCohort
+            ? await (dependencies.activateBliteCohort
+                ?? precheckoutBliteSourceStore.activateCohort)({
+                preflightId: claim.preflightId,
+                claimToken: claim.claimToken,
+            })
+            : null;
+        const bliteProviderDeadlineAtMs = bliteClock === null
+            ? null
+            : Date.parse(bliteClock.submittedAt) + BLITE_PROVIDER_DEADLINE_MS;
+        if (bliteClock !== null && !Number.isFinite(bliteProviderDeadlineAtMs)) {
+            throw new Error('PRECHECKOUT_BLITE_SOURCE_PERSISTENCE_ERROR: invalid cohort clock.');
+        }
         const useAuthenticatedProfile = !isAnonymousPreflight && !isBetatest
             && getAnalysisV2PaidCollectionProvider(dependencies.env) === 'selfhosted_auth';
         const betaHold = isBetatest
@@ -1738,7 +1782,41 @@ export async function processPreflight(
         });
 
         let profile: InstagramProfile | null;
-        if (isAnonymousPreflight) {
+        let bliteProviderRun: StoredPreflightProviderRun | null = null;
+        if (bliteClock !== null) {
+            const identity = preflightProviderIdentity(
+                selectPreflightApifyCredentialSlot(
+                    claim.preflightId,
+                    dependencies.env,
+                )
+            );
+            const bound = await bindPreflightProviderRunCheckpoint({
+                store: providerRuns,
+                claim,
+                inputHash,
+                identity,
+            });
+            profile = await (dependencies.getFallbackProfile ?? getApifyProfileSummary)(
+                claim.targetInstagramId,
+                fallbackCallContext(
+                    bound.checkpoint,
+                    workerStartedAt,
+                    bliteProviderDeadlineAtMs ?? undefined,
+                ),
+            );
+            bliteProviderRun = await providerRuns.load({
+                preflightId: claim.preflightId,
+                claimToken: claim.claimToken,
+                inputHash,
+            });
+            if (
+                !bliteProviderRun
+                || bliteProviderRun.status !== 'succeeded'
+                || !bliteProviderRun.runId
+            ) {
+                throw new Error('PRECHECKOUT_BLITE_SOURCE_PERSISTENCE_ERROR: provider lineage is incomplete.');
+            }
+        } else if (isAnonymousPreflight) {
             const cache = dependencies.anonymousProfileCache ?? anonymousProfileCache;
             profile = await cache.load(inputHash);
             let profileWasCached = profile !== null;
@@ -1982,7 +2060,47 @@ export async function processPreflight(
             });
             return 'blocked';
         }
-        await store.finalizeReady(claim, snapshot);
+        if (bliteClock !== null) {
+            if (!bliteProviderRun?.runId) {
+                throw new Error('PRECHECKOUT_BLITE_SOURCE_PERSISTENCE_ERROR: provider lineage is missing.');
+            }
+            const collectedAt = new Date().toISOString();
+            const expiresAt = new Date(Math.min(
+                Date.parse(bliteClock.expiresAt),
+                Date.parse(collectedAt) + 30 * 60 * 1_000,
+            )).toISOString();
+            const source = (dependencies.projectBliteSource ?? projectPrecheckoutBliteSource)(profile);
+            const finalized = await (dependencies.finalizeReadyWithSource
+                ?? precheckoutBliteSourceStore.finalizeReadyWithSource)({
+                preflightId: claim.preflightId,
+                userId: claim.userId,
+                claimToken: claim.claimToken,
+                targetInputHash: inputHash,
+                providerRunId: bliteProviderRun.preflightId,
+                providerOperationKey: bliteProviderRun.operationKey,
+                providerRunReference: bliteProviderRun.runId,
+                targetFullName: snapshot.target.fullName,
+                targetBio: snapshot.target.bio,
+                targetProfileImageUrl: snapshot.target.profileImageUrl,
+                targetFollowersCount: snapshot.target.followersCount,
+                targetFollowingCount: snapshot.target.followingCount,
+                targetIsPrivate: snapshot.target.isPrivate,
+                capacityRequiredPlanId: snapshot.capacityRequiredPlan,
+                requiredPlanId: snapshot.requiredPlan,
+                planCardsSnapshot: planCardsSnapshot(snapshot),
+                source,
+                collectedAt,
+                expiresAt,
+            });
+            if (finalized) {
+                if (!dependencies.enqueueBliteInference) {
+                    throw new Error('PREFLIGHT_TASKS_CONFIG_ERROR: B-lite inference enqueue is unavailable.');
+                }
+                await dependencies.enqueueBliteInference(claim.preflightId);
+            }
+        } else {
+            await store.finalizeReady(claim, snapshot);
+        }
         terminalized = true;
         notifyPreflightObserver(dependencies.observer, {
             type: 'completed',
