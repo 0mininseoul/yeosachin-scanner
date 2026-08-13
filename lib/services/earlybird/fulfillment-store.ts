@@ -146,12 +146,149 @@ export interface EarlybirdFulfillmentStore {
 
 export class EarlybirdFulfillmentError extends Error {
     readonly code: string;
+    readonly stage?: EarlybirdFulfillmentFailureStage;
+    readonly category?: EarlybirdFulfillmentFailureCategory;
+    readonly cause?: unknown;
 
-    constructor(code: string) {
+    constructor(
+        code: string,
+        details: {
+            stage?: EarlybirdFulfillmentFailureStage;
+            category?: EarlybirdFulfillmentFailureCategory;
+            cause?: unknown;
+        } = {}
+    ) {
         super(code);
         this.name = 'EarlybirdFulfillmentError';
         this.code = code;
+        this.stage = details.stage;
+        this.category = details.category;
+        this.cause = details.cause;
     }
+}
+
+export const EARLYBIRD_FULFILLMENT_FAILURE_STAGES = [
+    'admit',
+    'reserve',
+    'enqueue',
+    'dispatch_mark',
+    'dispatch_release',
+    'manual_review',
+    'claim',
+    'request',
+    'dispatch',
+] as const;
+
+export type EarlybirdFulfillmentFailureStage =
+    (typeof EARLYBIRD_FULFILLMENT_FAILURE_STAGES)[number];
+
+export const EARLYBIRD_FULFILLMENT_FAILURE_CATEGORIES = [
+    'input',
+    'persistence',
+    'configuration',
+    'timeout',
+    'transport',
+    'conflict',
+    'provider',
+    'unknown',
+] as const;
+
+export type EarlybirdFulfillmentFailureCategory =
+    (typeof EARLYBIRD_FULFILLMENT_FAILURE_CATEGORIES)[number];
+
+export type EarlybirdFulfillmentDiagnostic = Readonly<{
+    errorCode: string;
+    stage: EarlybirdFulfillmentFailureStage;
+    category: EarlybirdFulfillmentFailureCategory;
+}>;
+
+function isFailureStage(
+    value: unknown
+): value is EarlybirdFulfillmentFailureStage {
+    return typeof value === 'string'
+        && EARLYBIRD_FULFILLMENT_FAILURE_STAGES.includes(
+            value as EarlybirdFulfillmentFailureStage
+        );
+}
+
+function isFailureCategory(
+    value: unknown
+): value is EarlybirdFulfillmentFailureCategory {
+    return typeof value === 'string'
+        && EARLYBIRD_FULFILLMENT_FAILURE_CATEGORIES.includes(
+            value as EarlybirdFulfillmentFailureCategory
+        );
+}
+
+const SAFE_OPERATOR_ERROR_CODE = /^(?:EARLYBIRD|ANALYSIS_V2|PREFLIGHT|SCRAPING)_[A-Z0-9_]{2,95}$/;
+const ERROR_CODE_PREFIX = /(?:^|\s)((?:EARLYBIRD|ANALYSIS_V2|PREFLIGHT|SCRAPING)_[A-Z0-9_]{2,95})/;
+
+function errorText(error: unknown): string {
+    if (typeof error === 'string') return error;
+    if (typeof error !== 'object' || error === null) return '';
+    const candidate = error as { code?: unknown; message?: unknown };
+    return [candidate.code, candidate.message]
+        .filter((value): value is string => typeof value === 'string')
+        .join(' ');
+}
+
+function safeOperatorErrorCode(error: unknown): string {
+    const text = errorText(error);
+    const exact = text.match(/^[A-Z][A-Z0-9_]{2,95}/)?.[0];
+    if (exact && SAFE_OPERATOR_ERROR_CODE.test(exact)) return exact;
+    const prefixed = text.match(ERROR_CODE_PREFIX)?.[1];
+    if (prefixed && SAFE_OPERATOR_ERROR_CODE.test(prefixed)) return prefixed;
+    return 'EARLYBIRD_FULFILLMENT_FAILED';
+}
+
+function classifyEarlybirdFulfillmentError(
+    error: unknown,
+    code: string
+): EarlybirdFulfillmentFailureCategory {
+    const text = `${code} ${errorText(error)}`.toUpperCase();
+    if (/(?:INPUT|INVALID)/.test(text)) return 'input';
+    if (/(?:CONFIG|UNAVAILABLE)/.test(text)) return 'configuration';
+    if (/(?:TIMEOUT|DEADLINE)/.test(text)) return 'timeout';
+    if (/(?:ENQUEUE|TRANSPORT|NETWORK)/.test(text)) return 'transport';
+    if (/(?:CONFLICT|EXPIRED|BUSY|ALREADY)/.test(text)) return 'conflict';
+    if (/(?:PROVIDER|TARGET|PROFILE|SCRAPING)/.test(text)) return 'provider';
+    if (/(?:PERSIST|RPC|DATABASE|SUPABASE|POSTGREST|ADMISSION|DISPATCH)/.test(text)) {
+        return 'persistence';
+    }
+    return 'unknown';
+}
+
+export function diagnoseEarlybirdFulfillmentError(
+    error: unknown,
+    stage: EarlybirdFulfillmentFailureStage
+): EarlybirdFulfillmentError {
+    if (
+        error instanceof EarlybirdFulfillmentError
+        && error.stage === stage
+        && error.category
+    ) {
+        return error;
+    }
+    const code = safeOperatorErrorCode(error);
+    return new EarlybirdFulfillmentError(code, {
+        stage,
+        category: classifyEarlybirdFulfillmentError(error, code),
+        cause: error,
+    });
+}
+
+export function earlybirdFulfillmentDiagnostic(
+    error: unknown
+): EarlybirdFulfillmentDiagnostic | null {
+    if (!(error instanceof EarlybirdFulfillmentError)) return null;
+    if (!isFailureStage(error.stage) || !isFailureCategory(error.category)) {
+        return null;
+    }
+    return Object.freeze({
+        errorCode: safeOperatorErrorCode(error),
+        stage: error.stage,
+        category: error.category,
+    });
 }
 
 export function isEarlybirdAutomaticFulfillmentEnabled(
@@ -160,9 +297,12 @@ export function isEarlybirdAutomaticFulfillmentEnabled(
     return environment.EARLYBIRD_AUTOMATIC_FULFILLMENT_ENABLED === 'true';
 }
 
-function persistenceError(): never {
+function persistenceError(error?: unknown): never {
     throw new EarlybirdFulfillmentError(
-        'EARLYBIRD_FULFILLMENT_PERSISTENCE_ERROR'
+        error
+            ? safeOperatorErrorCode(error)
+            : 'EARLYBIRD_FULFILLMENT_PERSISTENCE_ERROR',
+        error ? { cause: error } : {}
     );
 }
 
@@ -228,7 +368,7 @@ export function createEarlybirdFulfillmentStore(
                 'admit_earlybird_fulfillment',
                 { p_order_id: validatedOrderId(orderId) }
             );
-            if (error) persistenceError();
+            if (error) persistenceError(error);
             return identityFromRow(oneRow(data, identityRowSchema));
         },
 
@@ -242,7 +382,7 @@ export function createEarlybirdFulfillmentStore(
                 'auto_admit_eligible_earlybird_fulfillments',
                 { p_limit: limit }
             );
-            if (error) persistenceError();
+            if (error) persistenceError(error);
             const parsed = identityRowsSchema.safeParse(data);
             if (!parsed.success || parsed.data.some(
                 row => row.fulfillment_status !== 'admission_pending'
@@ -262,7 +402,7 @@ export function createEarlybirdFulfillmentStore(
                 'list_recoverable_earlybird_fulfillments',
                 { p_limit: limit }
             );
-            if (error) persistenceError();
+            if (error) persistenceError(error);
             const parsed = identityRowsSchema.safeParse(data);
             if (!parsed.success) persistenceError();
             return Object.freeze(parsed.data.map(identityFromRow));
@@ -281,7 +421,7 @@ export function createEarlybirdFulfillmentStore(
                     p_lease_seconds: 300,
                 }
             );
-            if (error) persistenceError();
+            if (error) persistenceError(error);
             const row = oneRow(data, claimRowSchema);
             if (
                 row.claimed
@@ -330,7 +470,7 @@ export function createEarlybirdFulfillmentStore(
                     p_lease_fence: claim.fence,
                 }
             );
-            if (error) persistenceError();
+            if (error) persistenceError(error);
             const row = oneRow(data, requestRowSchema);
             if (
                 row.order_id !== claim.orderId.toLowerCase()
@@ -368,7 +508,7 @@ export function createEarlybirdFulfillmentStore(
                     p_error_code: parsedCode.data,
                 }
             );
-            if (error || data !== 'manual_review') persistenceError();
+            if (error || data !== 'manual_review') persistenceError(error);
             return 'manual_review';
         },
 
@@ -378,7 +518,7 @@ export function createEarlybirdFulfillmentStore(
                 'recover_earlybird_schema_failed_fulfillment',
                 { p_order_id: parsedOrderId }
             );
-            if (error) persistenceError();
+            if (error) persistenceError(error);
             const row = oneRow(data, schemaFailureRecoveryRowSchema);
             if (row.order_id !== parsedOrderId) persistenceError();
             return Object.freeze({
@@ -394,7 +534,7 @@ export function createEarlybirdFulfillmentStore(
                 'recover_earlybird_fresh_admission_provider_failure',
                 { p_order_id: parsedOrderId }
             );
-            if (error) persistenceError();
+            if (error) persistenceError(error);
             const row = oneRow(data, identityRowSchema);
             const isRecovered = row.fulfillment_status === 'retryable_failure'
                 && row.request_id === null;
@@ -421,7 +561,7 @@ export function createEarlybirdFulfillmentStore(
                 'reconcile_earlybird_fulfillments',
                 { p_limit: limit }
             );
-            if (error) persistenceError();
+            if (error) persistenceError(error);
             const row = oneRow(data, reconcileRowSchema);
             if (
                 row.completed + row.manual_review + row.retryable
@@ -518,7 +658,7 @@ export async function rebindExpiredPaidEarlybirdPreflight(
         'rebind_expired_paid_earlybird_preflight',
         { p_order_id: parsedOrderId.data }
     );
-    if (error) persistenceError();
+    if (error) persistenceError(error);
     const parsed = uuidSchema.safeParse(data);
     if (!parsed.success) persistenceError();
     return parsed.data;
@@ -639,7 +779,9 @@ export async function advanceAdmittedEarlybirdFulfillment(
             admissionInput(activePreflightId)
         );
     } catch (error) {
-        if (!isPreflightExpiredError(error)) throw error;
+        if (!isPreflightExpiredError(error)) {
+            throw diagnoseEarlybirdFulfillmentError(error, 'reserve');
+        }
         // Rebinding is best effort. When the database refuses, caps, or fails
         // outright, the original expiry stands and only this row counts as
         // failed, exactly as it did before — the rest of the sweep drains.
@@ -669,7 +811,7 @@ export async function advanceAdmittedEarlybirdFulfillment(
                     disposition: 'failure',
                 },
             });
-            throw error;
+            throw diagnoseEarlybirdFulfillmentError(error, 'reserve');
         }
         activePreflightId = rebound;
         emitOperationalEvent({
@@ -684,10 +826,14 @@ export async function advanceAdmittedEarlybirdFulfillment(
                 disposition: 'retry',
             },
         });
-        admission = await dependencies.reserveFreshAdmission(
-            supabaseAdmin,
-            admissionInput(activePreflightId)
-        );
+        try {
+            admission = await dependencies.reserveFreshAdmission(
+                supabaseAdmin,
+                admissionInput(activePreflightId)
+            );
+        } catch (retryError) {
+            throw diagnoseEarlybirdFulfillmentError(retryError, 'reserve');
+        }
     }
     if (admission.state === 'pending') {
         if (
@@ -702,16 +848,24 @@ export async function advanceAdmittedEarlybirdFulfillment(
                 dispatchToken: admission.dispatchToken,
             };
             try {
-                await dependencies.enqueueFreshAdmission(
-                    activePreflightId,
-                    admission.generation,
-                    admission.dispatchGeneration,
-                    admission.dispatchToken
-                );
-                await dependencies.markFreshAdmissionDispatched(
-                    supabaseAdmin,
-                    dispatchInput
-                );
+                try {
+                    await dependencies.enqueueFreshAdmission(
+                        activePreflightId,
+                        admission.generation,
+                        admission.dispatchGeneration,
+                        admission.dispatchToken
+                    );
+                } catch (error) {
+                    throw diagnoseEarlybirdFulfillmentError(error, 'enqueue');
+                }
+                try {
+                    await dependencies.markFreshAdmissionDispatched(
+                        supabaseAdmin,
+                        dispatchInput
+                    );
+                } catch (error) {
+                    throw diagnoseEarlybirdFulfillmentError(error, 'dispatch_mark');
+                }
                 emitOperationalEvent({
                     event: 'analysis_v2.fresh_admission_enqueued',
                     severity: 'info',
@@ -725,10 +879,19 @@ export async function advanceAdmittedEarlybirdFulfillment(
                     },
                 });
             } catch (error) {
-                await dependencies.releaseFreshAdmissionDispatch(
-                    supabaseAdmin,
-                    dispatchInput
-                );
+                try {
+                    await dependencies.releaseFreshAdmissionDispatch(
+                        supabaseAdmin,
+                        dispatchInput
+                    );
+                } catch {
+                    throw diagnoseEarlybirdFulfillmentError(
+                        error,
+                        error instanceof EarlybirdFulfillmentError && error.stage
+                            ? error.stage
+                            : 'dispatch_release'
+                    );
+                }
                 throw error;
             }
         }
@@ -743,12 +906,16 @@ export async function advanceAdmittedEarlybirdFulfillment(
         admission.state === 'blocked'
         || !admission.selectedPlanAllowed
     ) {
-        await dependencies.store.markManualReview(
-            identity.orderId,
-            admission.state === 'blocked'
-                ? 'TARGET_UNAVAILABLE'
-                : 'PLAN_NOT_ALLOWED'
-        );
+        try {
+            await dependencies.store.markManualReview(
+                identity.orderId,
+                admission.state === 'blocked'
+                    ? 'TARGET_UNAVAILABLE'
+                    : 'PLAN_NOT_ALLOWED'
+            );
+        } catch (error) {
+            throw diagnoseEarlybirdFulfillmentError(error, 'manual_review');
+        }
         return result(
             identity.orderId,
             'manual_review',
@@ -757,7 +924,12 @@ export async function advanceAdmittedEarlybirdFulfillment(
         );
     }
 
-    const claim = await dependencies.store.claim(identity.orderId);
+    let claim: EarlybirdFulfillmentClaim;
+    try {
+        claim = await dependencies.store.claim(identity.orderId);
+    } catch (error) {
+        throw diagnoseEarlybirdFulfillmentError(error, 'claim');
+    }
     if (!claim.claimed || !claim.claimToken) {
         return result(
             identity.orderId,
@@ -766,10 +938,15 @@ export async function advanceAdmittedEarlybirdFulfillment(
             'manual_review'
         );
     }
-    const request = await dependencies.store.createOrReplayRequest({
-        ...claim,
-        orderId: identity.orderId,
-    });
+    let request: EarlybirdFulfillmentRequest;
+    try {
+        request = await dependencies.store.createOrReplayRequest({
+            ...claim,
+            orderId: identity.orderId,
+        });
+    } catch (error) {
+        throw diagnoseEarlybirdFulfillmentError(error, 'request');
+    }
     // The database may see the two-minute admission freshness boundary pass
     // between the successful reservation above and this leased create. That is
     // a retryable race, not an evidence conflict: wait for the next admission
@@ -802,10 +979,15 @@ export async function advanceAdmittedEarlybirdFulfillment(
             'completed'
         );
     }
-    const dispatchOutcome = await dependencies.dispatchAnalysisJob(
-        request.requestId,
-        request.initialJobKey
-    );
+    let dispatchOutcome: unknown;
+    try {
+        dispatchOutcome = await dependencies.dispatchAnalysisJob(
+            request.requestId,
+            request.initialJobKey
+        );
+    } catch (error) {
+        throw diagnoseEarlybirdFulfillmentError(error, 'dispatch');
+    }
     emitOperationalEvent({
         event: 'analysis_v2.request_queued',
         severity: 'info',
@@ -833,7 +1015,12 @@ export async function admitAndAdvanceEarlybirdFulfillment(
     dependencies: EarlybirdFulfillmentAdvanceDependencies =
         defaultAdvanceDependencies()
 ): Promise<EarlybirdFulfillmentAdvanceResult> {
-    const admitted = await dependencies.store.admit(orderId);
+    let admitted: EarlybirdFulfillmentIdentity;
+    try {
+        admitted = await dependencies.store.admit(orderId);
+    } catch (error) {
+        throw diagnoseEarlybirdFulfillmentError(error, 'admit');
+    }
     return advanceAdmittedEarlybirdFulfillment(admitted, dependencies);
 }
 
