@@ -106,7 +106,7 @@ describe('earlybird payment Discord notification', () => {
 
         await expect(deliverEarlybirdPaymentDiscordNotifications({ fetcher })).resolves.toBe(1);
 
-        expect(mocks.rpc).toHaveBeenNthCalledWith(1, 'claim_earlybird_payment_discord_outbox', {
+        expect(mocks.rpc).toHaveBeenNthCalledWith(1, 'claim_earlybird_payment_discord_outbox_v2', {
             p_limit: 1,
         });
         expect(fetcher).toHaveBeenCalledWith(

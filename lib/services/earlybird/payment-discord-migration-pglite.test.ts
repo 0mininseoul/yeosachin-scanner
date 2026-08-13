@@ -48,6 +48,57 @@ beforeAll(async () => {
 afterAll(async () => db.close());
 
 describe('earlybird payment Discord outbox migration', () => {
+    it('keeps v1 compatible and restricts v2 to service_role with an empty search path', async () => {
+        const functions = await db.query<{
+            function_name: string;
+            security_definer: boolean;
+            settings: string[] | null;
+            anon_allowed: boolean;
+            authenticated_allowed: boolean;
+            service_allowed: boolean;
+        }>(`
+            SELECT function_name,
+                   proc.prosecdef AS security_definer,
+                   proc.proconfig AS settings,
+                   pg_catalog.has_function_privilege(
+                       'anon', function_name::pg_catalog.regprocedure, 'EXECUTE'
+                   ) AS anon_allowed,
+                   pg_catalog.has_function_privilege(
+                       'authenticated', function_name::pg_catalog.regprocedure, 'EXECUTE'
+                   ) AS authenticated_allowed,
+                   pg_catalog.has_function_privilege(
+                       'service_role', function_name::pg_catalog.regprocedure, 'EXECUTE'
+                   ) AS service_allowed
+            FROM (
+                VALUES
+                    ('public.claim_earlybird_payment_discord_outbox(integer)'),
+                    ('public.claim_earlybird_payment_discord_outbox_v2(integer)')
+            ) AS contracts(function_name)
+            JOIN pg_catalog.pg_proc AS proc
+                ON proc.oid = function_name::pg_catalog.regprocedure
+            ORDER BY function_name
+        `);
+
+        expect(functions.rows).toEqual([
+            {
+                function_name: 'public.claim_earlybird_payment_discord_outbox(integer)',
+                security_definer: true,
+                settings: ['search_path=pg_catalog, public'],
+                anon_allowed: false,
+                authenticated_allowed: false,
+                service_allowed: true,
+            },
+            {
+                function_name: 'public.claim_earlybird_payment_discord_outbox_v2(integer)',
+                security_definer: true,
+                settings: ['search_path=""'],
+                anon_allowed: false,
+                authenticated_allowed: false,
+                service_allowed: true,
+            },
+        ]);
+    });
+
     it('enqueues exactly once when an order enters paid and completes a claimed row', async () => {
         await db.exec(`
             INSERT INTO public.users (id, name, gender)
@@ -86,7 +137,7 @@ describe('earlybird payment Discord outbox migration', () => {
             buyer_name: string;
             gender: string;
             attempts: number;
-        }>('SELECT * FROM public.claim_earlybird_payment_discord_outbox($1)', [10]);
+        }>('SELECT * FROM public.claim_earlybird_payment_discord_outbox_v2($1)', [10]);
         expect(claimed.rows).toHaveLength(1);
         const claimedRow = claimed.rows[0];
         expect(Object.keys(claimedRow).sort()).toEqual([
@@ -140,7 +191,7 @@ describe('earlybird payment Discord outbox migration', () => {
 
         await db.exec('SET ROLE service_role');
         const claimed = await db.query<{ id: string; claim_token: string }>(
-            'SELECT id, claim_token FROM public.claim_earlybird_payment_discord_outbox($1)',
+            'SELECT id, claim_token FROM public.claim_earlybird_payment_discord_outbox_v2($1)',
             [1],
         );
         expect(claimed.rows).toHaveLength(1);
@@ -172,7 +223,7 @@ describe('earlybird payment Discord outbox migration', () => {
             [60],
         );
         const secondClaim = await db.query(
-            'SELECT id FROM public.claim_earlybird_payment_discord_outbox($1)',
+            'SELECT id FROM public.claim_earlybird_payment_discord_outbox_v2($1)',
             [1],
         );
         await db.exec('RESET ROLE');

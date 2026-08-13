@@ -199,7 +199,7 @@ export async function deliverEarlybirdPaymentDiscordNotifications(options: {
 
     let data: unknown;
     try {
-        const result = await supabaseAdmin.rpc('claim_earlybird_payment_discord_outbox', {
+        const result = await supabaseAdmin.rpc('claim_earlybird_payment_discord_outbox_v2', {
             p_limit: Math.max(1, Math.min(options.limit ?? 1, 10)),
         });
         if (result.error) {

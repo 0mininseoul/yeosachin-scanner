@@ -1,8 +1,10 @@
--- Include the settled order amount in the existing payment Discord claim payload.
--- This changes only the RPC return contract; the outbox and ledger schemas remain unchanged.
-DROP FUNCTION IF EXISTS public.claim_earlybird_payment_discord_outbox(integer);
+-- Add the settled order amount to a new claim contract without replacing v1.
+-- Keeping v1 callable lets already-running workers finish their old result shape
+-- while deployments roll out the v2 consumer first.
+SET LOCAL lock_timeout = '5s';
+SET LOCAL statement_timeout = '2min';
 
-CREATE FUNCTION public.claim_earlybird_payment_discord_outbox(
+CREATE FUNCTION public.claim_earlybird_payment_discord_outbox_v2(
     p_limit integer DEFAULT 1
 )
 RETURNS TABLE (
@@ -18,7 +20,7 @@ RETURNS TABLE (
 )
 LANGUAGE plpgsql
 SECURITY DEFINER
-SET search_path = pg_catalog, public
+SET search_path = ''
 AS $$
 BEGIN
     RETURN QUERY
@@ -28,18 +30,21 @@ BEGIN
         JOIN public.earlybird_orders AS earlybird_order
             ON earlybird_order.id = outbox.order_id
         WHERE outbox.status = 'pending'
-          AND outbox.next_attempt_at <= clock_timestamp()
+          AND outbox.next_attempt_at <= pg_catalog.clock_timestamp()
           AND earlybird_order.status = 'paid'
         ORDER BY outbox.created_at
         FOR UPDATE OF outbox SKIP LOCKED
-        LIMIT LEAST(GREATEST(COALESCE(p_limit, 1), 1), 10)
+        LIMIT least(
+            greatest(coalesce(p_limit, 1), 1),
+            10
+        )
     ), claimed AS (
         UPDATE public.earlybird_payment_discord_outbox AS outbox
         SET status = 'sending',
             attempts = outbox.attempts + 1,
-            claim_token = uuid_generate_v4(),
-            claimed_at = clock_timestamp(),
-            updated_at = clock_timestamp()
+            claim_token = public.uuid_generate_v4(),
+            claimed_at = pg_catalog.clock_timestamp(),
+            updated_at = pg_catalog.clock_timestamp()
         FROM candidates
         WHERE outbox.id = candidates.id
         RETURNING outbox.*
@@ -61,7 +66,7 @@ BEGIN
 END;
 $$;
 
-REVOKE ALL ON FUNCTION public.claim_earlybird_payment_discord_outbox(integer)
-    FROM PUBLIC, anon, authenticated;
-GRANT EXECUTE ON FUNCTION public.claim_earlybird_payment_discord_outbox(integer)
+REVOKE ALL ON FUNCTION public.claim_earlybird_payment_discord_outbox_v2(integer)
+    FROM PUBLIC, anon, authenticated, service_role;
+GRANT EXECUTE ON FUNCTION public.claim_earlybird_payment_discord_outbox_v2(integer)
     TO service_role;
