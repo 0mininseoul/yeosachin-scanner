@@ -25,6 +25,7 @@ export function isSafeFreshAdmissionV3PostgresTestTarget(
     if (!connectionString || suppliedTestMarker !== marker) return false;
     try {
         const target = new URL(connectionString);
+        if (target.search) return false;
         return target.protocol === 'postgresql:'
             && (target.hostname === '127.0.0.1' || target.hostname === 'localhost')
             && target.pathname === '/fresh_admission_v3_return_contract_test';
@@ -41,6 +42,7 @@ describe('fresh-admission v3 PostgreSQL destructive-test target guard', () => {
     it.each([
         ['postgresql://tester@127.0.0.1:5432/fresh_admission_v3_return_contract_test', marker, true],
         ['postgresql://tester@db.example.com/fresh_admission_v3_return_contract_test', marker, false],
+        ['postgresql://tester@127.0.0.1:5432/fresh_admission_v3_return_contract_test?host=db.example.com', marker, false],
         ['postgresql://tester@127.0.0.1:5432/postgres', marker, false],
         ['postgresql://tester@127.0.0.1:5432/fresh_admission_v3_return_contract_test', undefined, false],
     ])('accepts only an explicit disposable loopback target', (url, testMarker, expected) => {
