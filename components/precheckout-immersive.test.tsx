@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 
-import { act, createElement, StrictMode } from 'react';
+import { act, createElement, StrictMode, useState } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
@@ -478,6 +478,110 @@ describe('PrecheckoutImmersive', () => {
         await act(async () => { await vi.advanceTimersByTimeAsync(48_000); });
 
         expect(container.querySelector('[data-precheckout-demo-mode="fallback"]')).not.toBeNull();
+    });
+
+    it('replaces a provisional local clock with a late authoritative submission clock and preserves its T+48 deadline across remount', async () => {
+        vi.useFakeTimers();
+        vi.setSystemTime(new Date('2026-08-13T00:00:10.000Z'));
+        vi.stubGlobal('requestAnimationFrame', vi.fn(() => 1));
+        vi.stubGlobal('cancelAnimationFrame', vi.fn());
+        vi.stubGlobal('fetch', vi.fn().mockImplementation(() => Promise.resolve(
+            jsonResponse(pendingStatus({ submittedAt: SUBMITTED_AT }), 202)
+        )));
+
+        await act(async () => {
+            root.render(createElement(PrecheckoutImmersive, {
+                key: 'provisional',
+                preflightId: PREFLIGHT_ID,
+                claimToken: null,
+                onGoToPlans: vi.fn(),
+            }));
+        });
+        await settleUi();
+
+        await act(async () => {
+            root.render(createElement(PrecheckoutImmersive, {
+                key: 'authoritative-remount',
+                preflightId: PREFLIGHT_ID,
+                claimToken: null,
+                onGoToPlans: vi.fn(),
+            }));
+        });
+        await settleUi();
+
+        await act(async () => { await vi.advanceTimersByTimeAsync(37_999); });
+        expect(container.querySelector('[data-precheckout-demo-mode="fallback"]')).toBeNull();
+        await act(async () => { await vi.advanceTimersByTimeAsync(1); });
+        expect(container.querySelector('[data-precheckout-demo-mode="fallback"]')).not.toBeNull();
+    });
+
+    it('does not report 204 unavailable while the fallback demo is running', async () => {
+        vi.useFakeTimers();
+        vi.setSystemTime(new Date(SUBMITTED_AT));
+        vi.stubGlobal('requestAnimationFrame', vi.fn(() => 1));
+        vi.stubGlobal('cancelAnimationFrame', vi.fn());
+        const onAvailabilityChange = vi.fn();
+        const fetchMock = vi.fn().mockResolvedValue(jsonResponse(pendingStatus({ submittedAt: SUBMITTED_AT }), 202));
+        vi.stubGlobal('fetch', fetchMock);
+
+        await act(async () => {
+            root.render(createElement(PrecheckoutImmersive, {
+                preflightId: PREFLIGHT_ID,
+                claimToken: null,
+                submittedAtMs: Date.parse(SUBMITTED_AT),
+                onGoToPlans: vi.fn(),
+                onAvailabilityChange,
+            }));
+        });
+        await settleUi();
+        await act(async () => { await vi.advanceTimersByTimeAsync(48_000); });
+        expect(container.querySelector('[data-precheckout-demo-mode="fallback"]')).not.toBeNull();
+
+        fetchMock.mockResolvedValue(noBody(204));
+        await act(async () => { await vi.advanceTimersByTimeAsync(5_000); });
+
+        expect(container.querySelector('[data-precheckout-demo-mode="fallback"]')).not.toBeNull();
+        expect(onAvailabilityChange).not.toHaveBeenCalledWith(false);
+        expect(analyticsMocks.trackPrecheckoutEvent).not.toHaveBeenCalledWith(
+            'precheckout_plan_gate_reached',
+            PREFLIGHT_ID,
+        );
+    });
+
+    it('keeps the parent plan gate closed during fallback despite a later 204, until the demo CTA completes', async () => {
+        vi.useFakeTimers();
+        vi.setSystemTime(new Date(SUBMITTED_AT));
+        vi.stubGlobal('requestAnimationFrame', vi.fn(() => 1));
+        vi.stubGlobal('cancelAnimationFrame', vi.fn());
+        const fetchMock = vi.fn().mockResolvedValue(jsonResponse(pendingStatus({ submittedAt: SUBMITTED_AT }), 202));
+        vi.stubGlobal('fetch', fetchMock);
+
+        function ParentPlanGate() {
+            const [surface, setSurface] = useState<'awaiting' | 'preview' | 'legacy'>('awaiting');
+            if (surface === 'legacy') return <div data-plan-gate="open">plans</div>;
+            return <PrecheckoutImmersive
+                preflightId={PREFLIGHT_ID}
+                claimToken={null}
+                submittedAtMs={Date.parse(SUBMITTED_AT)}
+                onGoToPlans={() => setSurface('legacy')}
+                onAvailabilityChange={available => setSurface(available ? 'preview' : 'legacy')}
+            />;
+        }
+
+        await act(async () => {
+            root.render(createElement(ParentPlanGate));
+        });
+        await settleUi();
+        await act(async () => { await vi.advanceTimersByTimeAsync(48_000); });
+        expect(container.querySelector('[data-precheckout-demo-mode="fallback"]')).not.toBeNull();
+        expect(container.querySelector('[data-plan-gate="open"]')).toBeNull();
+
+        fetchMock.mockResolvedValue(noBody(204));
+        await act(async () => { await vi.advanceTimersByTimeAsync(5_000); });
+        expect(container.querySelector('[data-plan-gate="open"]')).toBeNull();
+
+        await act(async () => { await vi.advanceTimersByTimeAsync(7_000); });
+        expect(container.querySelector('[data-plan-gate="open"]')).not.toBeNull();
     });
 
     it('reuses one browser request when the same preflight remounts', async () => {

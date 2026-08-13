@@ -196,6 +196,13 @@ export function PrecheckoutImmersive({
         beginBlitePage(submittedAtMs ?? Date.now()) ?? initialBlitePageState
     ));
     const flowRef = useRef<BlitePageState>(flow);
+    // A missing parent timestamp starts a provisional local deadline only. The first durable
+    // status timestamp replaces it, including after a remount, so T+48 remains submission-bound.
+    const authoritativeSubmissionAtMsRef = useRef<number | null>(
+        typeof submittedAtMs === 'number' && Number.isFinite(submittedAtMs) && submittedAtMs >= 0
+            ? submittedAtMs
+            : null,
+    );
     const emittedEventKeysRef = useRef(new Set<string>());
 
     const emitPrecheckoutEvent = useCallback((
@@ -264,11 +271,25 @@ export function PrecheckoutImmersive({
         if (flowRef.current.submittedAtMs !== null) {
             scheduleFallback(flowRef.current.submittedAtMs + BLITE_FALLBACK_LATCH_MS);
         }
+        const acceptAuthoritativeSubmission = (submittedAt: string): boolean => {
+            const authoritativeSubmittedAtMs = Date.parse(submittedAt);
+            if (!Number.isFinite(authoritativeSubmittedAtMs)) return false;
+            if (authoritativeSubmissionAtMsRef.current !== null) return true;
+            const pending = beginBlitePage(authoritativeSubmittedAtMs);
+            if (!pending || flowRef.current.pathLatch !== null) return false;
+            authoritativeSubmissionAtMsRef.current = authoritativeSubmittedAtMs;
+            flowRef.current = pending;
+            setFlow(pending);
+            return true;
+        };
         (async () => {
             const poll = async (): Promise<void> => {
                 const status = await fetchPrecheckoutBlite(preflightId, claimToken);
                 if (!active) return;
                 if (status.state === 'unavailable') {
+                    // Pending polls can resolve after T+48 has already begun the fallback demo.
+                    // That demo owns the gate until its own CTA completes.
+                    if (flowRef.current.pathLatch === 'fallback') return;
                     if (fallbackTimer) clearTimeout(fallbackTimer);
                     emitPrecheckoutEvent(PRECHECKOUT_EVENTS.PLAN_GATE_REACHED);
                     onAvailabilityChange?.(false);
@@ -283,15 +304,10 @@ export function PrecheckoutImmersive({
                 }
 
                 if (status.state === 'pending') {
-                    const pending = beginBlitePage(Date.parse(status.submittedAt));
-                    if (!pending) {
+                    if (!acceptAuthoritativeSubmission(status.submittedAt)) {
                         emitPrecheckoutEvent(PRECHECKOUT_EVENTS.PLAN_GATE_REACHED);
                         onAvailabilityChange?.(false);
                         return;
-                    }
-                    if (flowRef.current.submittedAtMs === null) {
-                        flowRef.current = pending;
-                        setFlow(pending);
                     }
                     const fallbackAtMs = Math.min(
                         Date.parse(status.fallbackAt),
@@ -304,15 +320,10 @@ export function PrecheckoutImmersive({
                     return;
                 }
 
-                if (flowRef.current.submittedAtMs === null) {
-                    const pending = beginBlitePage(Date.parse(status.submittedAt));
-                    if (!pending) {
-                        emitPrecheckoutEvent(PRECHECKOUT_EVENTS.PLAN_GATE_REACHED);
-                        onAvailabilityChange?.(false);
-                        return;
-                    }
-                    flowRef.current = pending;
-                    setFlow(pending);
+                if (!acceptAuthoritativeSubmission(status.submittedAt)) {
+                    emitPrecheckoutEvent(PRECHECKOUT_EVENTS.PLAN_GATE_REACHED);
+                    onAvailabilityChange?.(false);
+                    return;
                 }
 
                 if (status.state === 'failed') {
