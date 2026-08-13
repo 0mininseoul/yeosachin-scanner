@@ -307,6 +307,8 @@ export interface AnalyzeWithGeminiOptions<T> {
     maxImages?: number;
     /** Resume only after a durably terminalized explicit 429. Attempts are globally bounded at 4. */
     startingAttempt?: number;
+    /** Optional caller budget; counts attempts from startingAttempt and never exceeds four. */
+    maxAttempts?: number;
     onTelemetry?: (telemetry: GeminiRequestTelemetry) => void | Promise<void>;
     /** Reserve a durable, PII-free generation intent before the SDK request starts. */
     onBeforeAttempt?: (telemetry: GeminiAttemptStartTelemetry) => void | Promise<void>;
@@ -741,6 +743,7 @@ export async function analyzeWithGemini<T>(
         maxOutputTokens,
         maxImages,
         startingAttempt = 1,
+        maxAttempts,
         onTelemetry,
         onBeforeAttempt,
         onAttemptTelemetry,
@@ -757,6 +760,12 @@ export async function analyzeWithGemini<T>(
     }
     if (!Number.isSafeInteger(startingAttempt) || startingAttempt < 1 || startingAttempt > 4) {
         throw new Error('Gemini startingAttempt must be an integer from 1 to 4');
+    }
+    if (
+        maxAttempts !== undefined
+        && (!Number.isSafeInteger(maxAttempts) || maxAttempts < 1 || maxAttempts > 4)
+    ) {
+        throw new Error('Gemini maxAttempts must be an integer from 1 to 4');
     }
     if (!stage && startingAttempt !== 1) {
         throw new Error('Gemini attempt resumption is available only for durable stage calls');
@@ -830,19 +839,29 @@ export async function analyzeWithGemini<T>(
     });
 
     let lastError: Error | null = null;
+    const finalAttemptNumber = Math.min(
+        RETRY_CONFIG.maxRetries + 1,
+        startingAttempt + (maxAttempts ?? RETRY_CONFIG.maxRetries + 1) - 1,
+    );
 
     for (
         let attemptNumber = startingAttempt;
-        attemptNumber <= RETRY_CONFIG.maxRetries + 1;
+        attemptNumber <= finalAttemptNumber;
         attemptNumber++
     ) {
         try {
+            if (abortSignal?.aborted) {
+                throw new Error('AI_GENERATION_DEADLINE_EXCEEDED');
+            }
             if (attemptNumber > startingAttempt) {
                 const delay = getRetryDelay(attemptNumber - 2);
                 console.log(
                     `Retry attempt ${attemptNumber - 1}/${RETRY_CONFIG.maxRetries} after ${delay}ms`
                 );
                 await sleep(delay);
+                if (abortSignal?.aborted) {
+                    throw new Error('AI_GENERATION_DEADLINE_EXCEEDED');
+                }
             }
 
             const client = getGenAIClient();
@@ -1064,7 +1083,7 @@ export async function analyzeWithGemini<T>(
 
             // 재시도 불가능한 에러거나 마지막 시도면 throw
             if (!(error instanceof RetryableGeminiRateLimitError)
-                || attemptNumber >= RETRY_CONFIG.maxRetries + 1) {
+                || attemptNumber >= finalAttemptNumber) {
                 console.error('--- AnalyzeWithGemini End (Failed) ---');
                 throw lastError;
             }

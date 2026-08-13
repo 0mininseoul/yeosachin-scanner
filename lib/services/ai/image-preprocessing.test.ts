@@ -181,6 +181,38 @@ describe('prepareAnalysisImages', () => {
         expect(prepared.length).toBeLessThanOrEqual(started);
     });
 
+    it('does not start queued image work once the absolute deadline expires', async () => {
+        vi.useFakeTimers();
+        try {
+            let started = 0;
+            const deadlineAtMs = Date.now() + 100;
+            const preparedPromise = prepareAnalysisImages(
+                'profile.jpg',
+                Array.from({ length: 10 }, (_, index) => `post-${index + 1}.jpg`),
+                {
+                    deadlineAtMs,
+                    policy: getAnalysisImagePolicy(false),
+                    loadImage: (_url, signal) => new Promise<string>((_resolve, reject) => {
+                        started += 1;
+                        if (signal?.aborted) {
+                            reject(signal.reason ?? new Error('ABORTED'));
+                            return;
+                        }
+                        signal?.addEventListener('abort', () => reject(signal.reason ?? new Error('ABORTED')), { once: true });
+                    }),
+                },
+            );
+
+            await vi.advanceTimersByTimeAsync(100);
+            const prepared = await preparedPromise;
+
+            expect(started).toBeLessThanOrEqual(MAX_VERTEX_AI_IMAGE_PREPARATION_CONCURRENCY);
+            expect(prepared.length).toBeLessThanOrEqual(started);
+        } finally {
+            vi.useRealTimers();
+        }
+    });
+
     it('bounds image preparation across concurrent accounts in one process', async () => {
         let active = 0;
         let maxActive = 0;

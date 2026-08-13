@@ -50,6 +50,8 @@ export interface SecureImageDownloadOptions {
     timeoutMs: number;
     maxRedirects?: number;
     headers?: HeadersInit;
+    /** Parent cancellation/deadline from the bounded analysis operation. */
+    signal?: AbortSignal;
 }
 
 export interface SecureImageDownload {
@@ -416,6 +418,7 @@ export async function downloadSecureImage(
         timeoutMs,
         maxRedirects = 3,
         headers,
+        signal: parentSignal,
     } = options;
     assertPositiveInteger(maxBytes, 'maxBytes');
     assertPositiveInteger(timeoutMs, 'timeoutMs');
@@ -428,8 +431,23 @@ export async function downloadSecureImage(
     }
 
     const controller = new AbortController();
+    const onParentAbort = () => {
+        controller.abort(parentSignal?.reason ?? new Error('IMAGE_DOWNLOAD_ABORTED'));
+    };
+    if (parentSignal) {
+        if (parentSignal.aborted) onParentAbort();
+        else parentSignal.addEventListener('abort', onParentAbort, { once: true });
+    }
     const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
     const abortPromise = new Promise<never>((_resolve, reject) => {
+        if (controller.signal.aborted) {
+            reject(new SecureImageFetchError(
+                'timeout',
+                'transient',
+                'Image download was cancelled',
+            ));
+            return;
+        }
         controller.signal.addEventListener('abort', () => {
             reject(new SecureImageFetchError(
                 'timeout',
@@ -601,5 +619,6 @@ export async function downloadSecureImage(
         );
     } finally {
         clearTimeout(timeoutId);
+        parentSignal?.removeEventListener('abort', onParentAbort);
     }
 }
