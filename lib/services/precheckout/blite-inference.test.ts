@@ -322,7 +322,16 @@ describe('inferPrecheckoutBlite', () => {
             maxDimension: 384,
             jpegQuality: 75,
         });
+        expect(prepareOptions.abortSignal).toBeUndefined();
         expect(mocks.getAnalysisImagePolicy).toHaveBeenCalledWith(true);
+    });
+
+    it('forwards cancellation to image preparation so timed-out work stops consuming slots', async () => {
+        mocks.analyzeWithGemini.mockResolvedValue(validModelResponse());
+        const controller = new AbortController();
+        await inferPrecheckoutBlite(profile(), { abortSignal: controller.signal });
+
+        expect(mocks.prepareAnalysisImages.mock.calls[0][2].abortSignal).toBe(controller.signal);
     });
 
     it('still succeeds and calls Gemini with no images when none could be prepared', async () => {
