@@ -1,6 +1,6 @@
 'use client';
 
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import {
     PRECHECKOUT_BLITE_LIKELY_FEMALE_CONFIDENCE_THRESHOLD,
     precheckoutBliteV1Schema,
@@ -8,22 +8,35 @@ import {
     type PrecheckoutBliteV1,
 } from '@/lib/services/precheckout/blite-contract';
 import { CaseCard, Eyebrow, PrimaryButton } from '@/components/case-ui';
-import { PrecheckoutStageGraphs } from '@/components/precheckout-stage-graphs';
+import { PrecheckoutDemo } from '@/components/precheckout-demo';
+import {
+    beginBlitePage,
+    BLITE_FALLBACK_LATCH_MS,
+    initialBlitePageState,
+    reduceBlitePage,
+    type BlitePageEvent,
+    type BlitePageState,
+} from '@/lib/services/precheckout/blite-page-flow';
 
 /* ============================================================
    Precheckout immersive preview
 
    Sits between the ready-preflight target card and the plan section on /analyze.
-   Fail-open by construction: any missing/invalid/slow DTO renders nothing at all, so
-   with the feature flag off (204 from the API) this component is a no-op and /analyze
-   looks and behaves exactly as it does today.
+   It reads the durable status route only. The reducer keeps the first accepted submission
+   clock through polling, so a late durable result can never replace the fallback path.
    ============================================================ */
 
-// The server bounds profile collection + inference at 75s. The client must not cancel that
-// legitimate work first; keep a small response-delivery margin beyond the server deadline.
-const FETCH_DEADLINE_MS = 80_000;
+const FETCH_DEADLINE_MS = 5_000;
+const TRANSIENT_STATUS_RETRY_MS = 1_000;
 
-const browserBliteRequests = new Map<string, Promise<PrecheckoutBliteV1 | null>>();
+type BrowserBliteStatus =
+    | { state: 'pending'; submittedAt: string; fallbackAt: string; retryAfterMs: number }
+    | { state: 'complete'; submittedAt: string; dto: PrecheckoutBliteV1 }
+    | { state: 'failed'; submittedAt: string; fallbackAt: string }
+    | { state: 'unavailable' }
+    | { state: 'transient' };
+
+const browserBliteRequests = new Map<string, Promise<BrowserBliteStatus>>();
 
 export function __resetBrowserBliteRequestsForTest(): void {
     browserBliteRequests.clear();
@@ -32,7 +45,7 @@ export function __resetBrowserBliteRequestsForTest(): void {
 async function fetchPrecheckoutBlite(
     preflightId: string,
     claimToken: string | null,
-): Promise<PrecheckoutBliteV1 | null> {
+): Promise<BrowserBliteStatus> {
     const key = `${preflightId}:${claimToken ?? ''}`;
     const existing = browserBliteRequests.get(key);
     if (existing) return existing;
@@ -50,25 +63,47 @@ async function fetchPrecheckoutBlite(
                 signal: controller.signal,
                 cache: 'no-store',
             });
-            if (res.status !== 200) return null;
-            const parsed = precheckoutBliteV1Schema.safeParse(await res.json() as unknown);
-            return parsed.success ? parsed.data : null;
+            if (res.status === 202) {
+                const value = await res.json() as { state?: unknown; submittedAt?: unknown; fallbackAt?: unknown; retryAfterMs?: unknown };
+                return value.state === 'pending'
+                    && typeof value.submittedAt === 'string'
+                    && typeof value.fallbackAt === 'string'
+                    && typeof value.retryAfterMs === 'number'
+                    && Number.isInteger(value.retryAfterMs)
+                    ? { state: 'pending' as const, submittedAt: value.submittedAt, fallbackAt: value.fallbackAt, retryAfterMs: value.retryAfterMs }
+                    : { state: 'transient' as const };
+            }
+            if (res.status === 204) return { state: 'unavailable' as const };
+            if (res.status !== 200) return { state: 'transient' as const };
+            const value = await res.json() as { state?: unknown; submittedAt?: unknown; fallbackAt?: unknown; dto?: unknown };
+            if (value.state === 'complete' && typeof value.submittedAt === 'string') {
+                const parsed = precheckoutBliteV1Schema.safeParse(value.dto);
+                return parsed.success
+                    ? { state: 'complete' as const, submittedAt: value.submittedAt, dto: parsed.data }
+                    : { state: 'transient' as const };
+            }
+            if (value.state === 'failed' && typeof value.submittedAt === 'string' && typeof value.fallbackAt === 'string') {
+                return { state: 'failed' as const, submittedAt: value.submittedAt, fallbackAt: value.fallbackAt };
+            }
+            return { state: 'transient' as const };
         } catch {
-            return null;
+            return { state: 'transient' as const };
         } finally {
             clearTimeout(timeout);
         }
     })();
     browserBliteRequests.set(key, pending);
     void pending.then(result => {
-        if (result === null && browserBliteRequests.get(key) === pending) {
+        // Only a terminal success is a useful browser cache. Pending/failed states must be
+        // fetched again; retaining a resolved pending promise would stall the T+48 timeline.
+        if (result.state !== 'complete' && browserBliteRequests.get(key) === pending) {
             browserBliteRequests.delete(key);
         }
     });
     return pending;
 }
 
-type Screen = 'confirm' | 'result' | 'demo';
+type Screen = 'confirm' | 'result';
 
 const SIGNAL_BAND_LABEL: Record<PrecheckoutBliteSignalBand, string> = {
     high: '신뢰도 높음',
@@ -110,8 +145,6 @@ const VERDICTS: ReadonlyArray<{ headline: readonly [string, string]; body: strin
         body: '넓게 반응하는 계정일수록 편중이 잘 보이지 않습니다. 분포를 걷어내고 방향만 남기면 남는 이름은 많지 않습니다.',
     },
 ];
-const VERDICT_ROTATE_MS = 4600;
-
 export interface PrecheckoutImmersiveProps {
     preflightId: string;
     /**
@@ -120,76 +153,184 @@ export interface PrecheckoutImmersiveProps {
      * same anonymous-claim mechanism.
      */
     claimToken: string | null;
+    /** The original accepted preflight clock held by /analyze, used before status responds. */
+    submittedAtMs?: number | null;
     onGoToPlans: () => void;
     onAvailabilityChange?: (available: boolean) => void;
+    onDemoError?: () => void;
 }
 
 export function PrecheckoutImmersive({
     preflightId,
     claimToken,
+    submittedAtMs = null,
     onGoToPlans,
     onAvailabilityChange,
+    onDemoError,
 }: PrecheckoutImmersiveProps) {
     const [dto, setDto] = useState<PrecheckoutBliteV1 | null>(null);
     const [dismissed, setDismissed] = useState(false);
     const [screen, setScreen] = useState<Screen | null>(null);
-    const [sequenceComplete, setSequenceComplete] = useState(false);
+    const initialFlow = submittedAtMs === null
+        ? initialBlitePageState
+        : beginBlitePage(submittedAtMs) ?? initialBlitePageState;
+    const [flow, setFlow] = useState<BlitePageState>(initialFlow);
+    const flowRef = useRef<BlitePageState>(initialFlow);
 
     useEffect(() => {
-        // Gate plans while availability is being resolved. A failed/204 request releases the
-        // gate in `finally`; a valid preview keeps it until the demo CTA reveals plans.
-        onAvailabilityChange?.(true);
-        setDto(null);
-        setDismissed(false);
-        setScreen(null);
-        setSequenceComplete(false);
-
-        let validPreview = false;
-        (async () => {
-            try {
-                const parsed = await fetchPrecheckoutBlite(preflightId, claimToken);
-                if (!parsed) return;
-                validPreview = true;
-                setDto(parsed);
-                const showConfirm = parsed.genderRead.likelyFemale
-                    && parsed.genderRead.confidence >= PRECHECKOUT_BLITE_LIKELY_FEMALE_CONFIDENCE_THRESHOLD;
-                setScreen(showConfirm ? 'confirm' : 'result');
-            } finally {
-                if (!validPreview) onAvailabilityChange?.(false);
+        let active = true;
+        let pollTimer: ReturnType<typeof setTimeout> | undefined;
+        let fallbackTimer: ReturnType<typeof setTimeout> | undefined;
+        const transition = (event: BlitePageEvent): BlitePageState => {
+            const next = reduceBlitePage(flowRef.current, event);
+            if (next !== flowRef.current) {
+                flowRef.current = next;
+                setFlow(next);
             }
+            return next;
+        };
+        const scheduleFallback = (fallbackAtMs: number) => {
+            if (!Number.isFinite(fallbackAtMs)) return;
+            if (fallbackTimer) clearTimeout(fallbackTimer);
+            if (fallbackAtMs <= Date.now()) {
+                transition({ type: 'FALLBACK_AT_48', atMs: Date.now() });
+                return;
+            }
+            fallbackTimer = setTimeout(() => {
+                if (!active) return;
+                transition({ type: 'FALLBACK_AT_48', atMs: Date.now() });
+            }, Math.max(0, fallbackAtMs - Date.now()));
+        };
+        if (submittedAtMs !== null) {
+            scheduleFallback(submittedAtMs + BLITE_FALLBACK_LATCH_MS);
+        }
+        (async () => {
+            const poll = async (): Promise<void> => {
+                const status = await fetchPrecheckoutBlite(preflightId, claimToken);
+                if (!active) return;
+                if (status.state === 'unavailable') {
+                    if (fallbackTimer) clearTimeout(fallbackTimer);
+                    onAvailabilityChange?.(false);
+                    return;
+                }
+                if (status.state === 'transient') {
+                    // A network or status-route hiccup is not an authoritative feature-off
+                    // decision. Keep the awaiting surface mounted and retry until the durable
+                    // pending/terminal response provides the original T+48 clock.
+                    pollTimer = setTimeout(() => { void poll(); }, TRANSIENT_STATUS_RETRY_MS);
+                    return;
+                }
+
+                if (status.state === 'pending') {
+                    const pending = beginBlitePage(Date.parse(status.submittedAt));
+                    if (!pending) {
+                        onAvailabilityChange?.(false);
+                        return;
+                    }
+                    if (flowRef.current.submittedAtMs === null) {
+                        flowRef.current = pending;
+                        setFlow(pending);
+                    }
+                    const fallbackAtMs = Math.min(
+                        Date.parse(status.fallbackAt),
+                        (flowRef.current.submittedAtMs ?? Date.parse(status.submittedAt))
+                            + BLITE_FALLBACK_LATCH_MS,
+                    );
+                    scheduleFallback(fallbackAtMs);
+                    const retryAfterMs = Math.max(250, Math.min(status.retryAfterMs, 5_000));
+                    pollTimer = setTimeout(() => { void poll(); }, retryAfterMs);
+                    return;
+                }
+
+                if (flowRef.current.submittedAtMs === null) {
+                    const pending = beginBlitePage(Date.parse(status.submittedAt));
+                    if (!pending) {
+                        onAvailabilityChange?.(false);
+                        return;
+                    }
+                    flowRef.current = pending;
+                    setFlow(pending);
+                }
+
+                if (status.state === 'failed') {
+                    transition({ type: 'BLITE_FAILED', atMs: Date.now() });
+                    return;
+                }
+
+                const next = transition({ type: 'BLITE_COMPLETE', atMs: Date.now() });
+                if (next.view !== 'blite_ready') return;
+                setDto(status.dto);
+                const showConfirm = status.dto.genderRead.likelyFemale
+                    && status.dto.genderRead.confidence >= PRECHECKOUT_BLITE_LIKELY_FEMALE_CONFIDENCE_THRESHOLD;
+                setScreen(showConfirm ? 'confirm' : 'result');
+                onAvailabilityChange?.(true);
+            }
+            await poll();
         })();
 
-        return undefined;
-    }, [preflightId, claimToken, onAvailabilityChange]);
+        return () => {
+            active = false;
+            if (pollTimer) clearTimeout(pollTimer);
+            if (fallbackTimer) clearTimeout(fallbackTimer);
+        };
+    }, [preflightId, claimToken, onAvailabilityChange, submittedAtMs]);
 
-    const handleSequenceComplete = useCallback(() => setSequenceComplete(true), []);
+    const transition = useCallback((event: BlitePageEvent) => {
+        const next = reduceBlitePage(flowRef.current, event);
+        if (next !== flowRef.current) {
+            flowRef.current = next;
+            setFlow(next);
+        }
+        return next;
+    }, []);
 
-    if (!dto || dismissed || screen === null) return null;
+    const finishDemo = useCallback(() => {
+        transition({ type: 'DEMO_COMPLETE' });
+        setDismissed(true);
+        onGoToPlans();
+    }, [onGoToPlans, transition]);
+
+    const failDemoOpen = useCallback(() => {
+        transition({ type: 'DEMO_ERROR' });
+        onDemoError?.();
+        setDismissed(true);
+        onGoToPlans();
+    }, [onDemoError, onGoToPlans, transition]);
+
+    if (dismissed || flow.view === 'legacy' || flow.view === 'fallback_legacy') return null;
+
+    if (flow.view === 'fallback_demo' && flow.demoStartedAtMs !== null) {
+        return (
+            <PrecheckoutDemo
+                mode="fallback"
+                startedAtMs={flow.demoStartedAtMs}
+                onComplete={finishDemo}
+                onError={failDemoOpen}
+            />
+        );
+    }
+
+    if (flow.view === 'success_demo' && flow.demoStartedAtMs !== null) {
+        return <DemoScreen startedAtMs={flow.demoStartedAtMs} onDemoError={failDemoOpen} onGoToPlans={finishDemo} />;
+    }
+
+    if (flow.view !== 'blite_ready' || !dto || screen === null) return null;
 
     if (screen === 'confirm') {
         return (
             <GenderConfirmScreen
                 dto={dto}
                 onYes={() => setScreen('result')}
-                onNo={() => setDismissed(true)}
+                onNo={() => { setDismissed(true); onGoToPlans(); }}
             />
         );
     }
 
     if (screen === 'result') {
-        return <BliteResultScreen dto={dto} onContinue={() => setScreen('demo')} />;
+        return <BliteResultScreen dto={dto} onContinue={() => transition({ type: 'SUCCESS_CTA', atMs: Date.now() })} />;
     }
 
-    return (
-        <DemoScreen
-            sequenceComplete={sequenceComplete}
-            onComplete={handleSequenceComplete}
-            onGoToPlans={() => {
-                setDismissed(true);
-                onGoToPlans();
-            }}
-        />
-    );
+    return null;
 }
 
 /* ---------------- screen 1: gender confirmation ---------------- */
@@ -314,71 +455,27 @@ function BliteResultScreen({
 /* ---------------- screen 3: four-stage demo + verdict + CTA ---------------- */
 
 function DemoScreen({
-    sequenceComplete,
-    onComplete,
+    startedAtMs,
+    onDemoError,
     onGoToPlans,
 }: {
-    sequenceComplete: boolean;
-    onComplete: () => void;
+    startedAtMs: number;
+    onDemoError?: () => void;
     onGoToPlans: () => void;
 }) {
     const [verdictIdx] = useState(() => Math.floor(Math.random() * VERDICTS.length));
-    const [rotation, setRotation] = useState(0);
-
-    // Rotate the verdict copy every ~4.6s while it is on screen. Reduced motion shows one
-    // sentence, chosen once, without cycling.
-    useEffect(() => {
-        if (!sequenceComplete) return undefined;
-        const reduced = typeof window !== 'undefined' && typeof window.matchMedia === 'function'
-            && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
-        if (reduced) return undefined;
-        const id = setInterval(() => {
-            setRotation(r => r + 1);
-        }, VERDICT_ROTATE_MS);
-        return () => clearInterval(id);
-    }, [sequenceComplete]);
-
-    // Mobile-only fullscreen: escape into a fixed 100dvh layer and lock body scroll while it is
-    // mounted and the viewport is at/under the mobile breakpoint. Desktop stays inline — no lock.
-    useEffect(() => {
-        if (typeof window === 'undefined' || typeof window.matchMedia !== 'function') return undefined;
-        const mq = window.matchMedia('(max-width: 760px)');
-        let locked = false;
-        let prevOverflow = '';
-        function sync() {
-            if (mq.matches && !locked) {
-                prevOverflow = document.body.style.overflow;
-                document.body.style.overflow = 'hidden';
-                locked = true;
-            } else if (!mq.matches && locked) {
-                document.body.style.overflow = prevOverflow;
-                locked = false;
-            }
-        }
-        sync();
-        mq.addEventListener('change', sync);
-        return () => {
-            mq.removeEventListener('change', sync);
-            if (locked) document.body.style.overflow = prevOverflow;
-        };
-    }, []);
-
-    const handleFinalCtaClick = () => {
-        // Second layer of the CTA guard, independent of the CSS inertness below: even if the
-        // reveal block were somehow hit-testable early, the handler itself refuses to act.
-        if (!sequenceComplete) return;
-        onGoToPlans();
-    };
-
-    const verdict = VERDICTS[(verdictIdx + rotation) % VERDICTS.length];
+    const verdict = VERDICTS[verdictIdx];
 
     return (
-        <div className="precheckout-demo-fullscreen mt-7">
-            <PrecheckoutStageGraphs onComplete={onComplete} />
-
+        <PrecheckoutDemo
+            mode="success"
+            startedAtMs={startedAtMs}
+            onComplete={onGoToPlans}
+            onError={() => { onDemoError?.(); onGoToPlans(); }}
+        >
             {/* Not-yet-revealed block is genuinely inert (visibility+pointer-events, and
                 display:none inside the mobile fullscreen layer via CSS) — not just transparent. */}
-            <div className={`precheckout-reveal mt-5${sequenceComplete ? ' is-visible' : ''}`}>
+            <div className="precheckout-reveal mt-5">
                 <div className="border-l-2 border-blood pl-3.5">
                     <h3 className="text-[16px] font-extrabold leading-snug text-fg">
                         {verdict.headline[0]}
@@ -388,16 +485,7 @@ function DemoScreen({
                     <p className="mt-2.5 text-[12.5px] leading-[1.8] text-fg-dim">{verdict.body}</p>
                 </div>
 
-                <PrimaryButton
-                    type="button"
-                    onClick={handleFinalCtaClick}
-                    disabled={!sequenceComplete}
-                    tabIndex={sequenceComplete ? undefined : -1}
-                    className="mt-5"
-                >
-                    분석 결과 확인하기
-                </PrimaryButton>
             </div>
-        </div>
+        </PrecheckoutDemo>
     );
 }

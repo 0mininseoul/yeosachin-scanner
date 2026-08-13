@@ -3,14 +3,16 @@ import { z } from 'zod';
 import type { InstagramPost, InstagramProfile } from '@/lib/types/instagram';
 import {
     analyzeWithGemini,
-    type GeminiAttemptTelemetry,
+    type AnalyzeWithGeminiOptions,
 } from '@/lib/services/ai/gemini';
 import {
     getAnalysisImagePolicy,
     prepareAnalysisImages,
     type AnalysisImagePolicy,
 } from '@/lib/services/ai/image-preprocessing';
-import { computePrecheckoutBliteCandidateRange } from './blite-range';
+import {
+    BLITE_INFERENCE_DEADLINE_MS,
+} from './blite-runtime-policy';
 import {
     PRECHECKOUT_BLITE_EVIDENCE_FIELDS,
     PRECHECKOUT_BLITE_SCHEMA_VERSION,
@@ -19,6 +21,7 @@ import {
     precheckoutBliteV1Schema,
     type PrecheckoutBliteSignal,
     type PrecheckoutBliteV1,
+    type PrecheckoutBliteCandidateRange,
 } from './blite-contract';
 
 // Re-exported for callers/UI that only need the confirmation-branch gate.
@@ -33,16 +36,77 @@ const MAX_HASHTAGS_PER_POST = 15;
 // compact schema and leave enough room for the complete JSON response.
 const PRECHECKOUT_BLITE_MAX_OUTPUT_TOKENS = 3072;
 
-/**
- * Image evidence for `genderRead` only (profile photo + up to 3 recent post photos = 4 max).
- * This stays on the cost-optimized dimension/quality bounds `image-preprocessing.ts` already
- * defines for the paid pipeline's cheap mode — a pre-payment teaser must not spend more per
- * image than the paid analysis's own cost-optimized path does. Only the image *count* is
- * widened relative to that preset (3 post images instead of 2) to match what the gender read
- * needs.
- */
+/** Durable source media: one profile reference plus at most three post references. */
 const PRECHECKOUT_BLITE_MAX_GENDER_EVIDENCE_POST_IMAGES = 3;
 const PRECHECKOUT_BLITE_MAX_GENDER_EVIDENCE_IMAGES = 4;
+const PRECHECKOUT_BLITE_MAX_SOURCE_BYTES = 256 * 1024;
+const PRECHECKOUT_BLITE_MAX_SOURCE_POSTS = 10;
+const PRECHECKOUT_BLITE_MAX_SOURCE_MEDIA = 4;
+const PRECHECKOUT_BLITE_MAX_SOURCE_URL_LENGTH = 8_192;
+const PRECHECKOUT_BLITE_MAX_SOURCE_USERNAME_LENGTH = 64;
+
+const precheckoutBliteSourcePostSchema = z.object({
+    type: z.enum(['image', 'video', 'carousel', 'reel']),
+    captionExcerpt: z.string().max(MAX_CAPTION_EXCERPT_LENGTH).nullable(),
+    hashtags: z.array(z.string().max(PRECHECKOUT_BLITE_MAX_SOURCE_USERNAME_LENGTH))
+        .max(MAX_HASHTAGS_PER_POST),
+    carouselDepth: z.number().int().nonnegative().nullable(),
+    likesCount: z.number().int().nonnegative().nullable(),
+    likesHidden: z.boolean(),
+    commentsCount: z.number().int().nonnegative().nullable(),
+    commentsHidden: z.boolean(),
+    taggedUsernames: z.array(z.string().max(PRECHECKOUT_BLITE_MAX_SOURCE_USERNAME_LENGTH))
+        .max(MAX_USERNAMES_PER_POST),
+    mentionedUsernames: z.array(z.string().max(PRECHECKOUT_BLITE_MAX_SOURCE_USERNAME_LENGTH))
+        .max(MAX_USERNAMES_PER_POST),
+}).strict();
+
+const precheckoutBliteSourceMediaSchema = z.object({
+    role: z.enum(['profile', 'post']),
+    url: z.string().min(1).max(PRECHECKOUT_BLITE_MAX_SOURCE_URL_LENGTH),
+}).strict();
+
+export const precheckoutBliteSourceV1Schema = z.object({
+    schemaVersion: z.literal(1),
+    fullName: z.string().max(MAX_FULL_NAME_EXCERPT_LENGTH).nullable(),
+    posts: z.array(precheckoutBliteSourcePostSchema).max(PRECHECKOUT_BLITE_MAX_SOURCE_POSTS),
+    media: z.array(precheckoutBliteSourceMediaSchema).max(PRECHECKOUT_BLITE_MAX_SOURCE_MEDIA),
+}).strict().superRefine((source, context) => {
+    let postMediaCount = 0;
+    let profileSeen = false;
+    let postSeen = false;
+    for (const [index, media] of source.media.entries()) {
+        if (media.role === 'profile') {
+            if (profileSeen || postSeen) {
+                context.addIssue({
+                    code: 'custom',
+                    path: ['media', index],
+                    message: 'media must contain at most one profile reference before post references',
+                });
+            }
+            profileSeen = true;
+        } else {
+            postSeen = true;
+            postMediaCount += 1;
+        }
+    }
+    if (postMediaCount > PRECHECKOUT_BLITE_MAX_GENDER_EVIDENCE_POST_IMAGES) {
+        context.addIssue({
+            code: 'custom',
+            path: ['media'],
+            message: 'media may contain at most three post references',
+        });
+    }
+    if (Buffer.byteLength(JSON.stringify(source), 'utf8') > PRECHECKOUT_BLITE_MAX_SOURCE_BYTES) {
+        context.addIssue({
+            code: 'custom',
+            message: 'durable source exceeds the 256 KiB bound',
+        });
+    }
+});
+
+export type PrecheckoutBliteSourceAdapter = z.infer<typeof precheckoutBliteSourceV1Schema>;
+export type PrecheckoutBliteSourceV1 = PrecheckoutBliteSourceAdapter;
 
 function precheckoutBliteImagePolicy(): AnalysisImagePolicy {
     return {
@@ -52,10 +116,15 @@ function precheckoutBliteImagePolicy(): AnalysisImagePolicy {
     };
 }
 
-// ── Compact digest built ONLY from the allowlisted InstagramProfile/InstagramPost fields ──
+/**
+ * Narrow, read-only adapter for the B-owned source projection. This mirrors the approved
+ * schema exactly and is intentionally not a persisted schema or a raw Instagram type. Media
+ * references are retained at the boundary and are the only media inputs fetched here.
+ */
+// ── Compact digest built ONLY from the allowlisted durable source projection ──
 
 export interface PrecheckoutBliteDigestPost {
-    readonly type: InstagramPost['type'];
+    readonly type: PrecheckoutBliteSourceAdapter['posts'][number]['type'];
     readonly captionExcerpt: string | null;
     readonly hashtags: readonly string[];
     /** Number of items in a carousel; null for non-carousel posts. */
@@ -87,46 +156,84 @@ export interface PrecheckoutBliteDigest {
     readonly fullName: string | null;
 }
 
-function truncateText(value: string | undefined, maxLength: number): string | null {
+function truncateText(value: string | null | undefined, maxLength: number): string | null {
     if (!value) return null;
     const collapsed = value.replace(/\s+/gu, ' ').trim();
     if (!collapsed) return null;
     return collapsed.length > maxLength
-        ? `${collapsed.slice(0, maxLength)}…`
+        ? `${collapsed.slice(0, Math.max(0, maxLength - 1))}…`
         : collapsed;
 }
 
-function digestPost(post: InstagramPost): PrecheckoutBliteDigestPost {
-    const carouselDepth = post.type === 'carousel'
-        ? post.declaredMediaCount ?? post.mediaItems?.length ?? null
-        : null;
+function digestPost(
+    post: PrecheckoutBliteSourceAdapter['posts'][number]
+): PrecheckoutBliteDigestPost {
     return {
         type: post.type,
-        captionExcerpt: truncateText(post.caption, MAX_CAPTION_EXCERPT_LENGTH),
-        hashtags: (post.hashtags ?? []).slice(0, MAX_HASHTAGS_PER_POST),
-        carouselDepth,
-        likesCount: post.likesCountHidden === true ? null : post.likesCount,
-        likesHidden: post.likesCountHidden === true,
-        commentsCount: post.commentsCountHidden === true ? null : post.commentsCount,
-        commentsHidden: post.commentsCountHidden === true,
-        taggedUsernames: (post.taggedUsers ?? []).slice(0, MAX_USERNAMES_PER_POST),
-        mentionedUsernames: (post.mentionedUsers ?? []).slice(0, MAX_USERNAMES_PER_POST),
+        captionExcerpt: truncateText(post.captionExcerpt, MAX_CAPTION_EXCERPT_LENGTH),
+        hashtags: post.hashtags.slice(0, MAX_HASHTAGS_PER_POST),
+        carouselDepth: post.carouselDepth,
+        likesCount: post.likesHidden ? null : post.likesCount,
+        likesHidden: post.likesHidden,
+        commentsCount: post.commentsHidden ? null : post.commentsCount,
+        commentsHidden: post.commentsHidden,
+        taggedUsernames: post.taggedUsernames.slice(0, MAX_USERNAMES_PER_POST),
+        mentionedUsernames: post.mentionedUsernames.slice(0, MAX_USERNAMES_PER_POST),
     };
 }
 
 /**
- * Build a compact digest from the allowlisted post fields (caption, hashtags, type, carousel
- * depth, like/comment counts and hidden flags, tagged/mentioned usernames) plus `fullName`
- * text, which is widened evidence for `genderRead` only. It deliberately excludes
- * `username`, `externalUrl`, `profilePicUrl` (image evidence is attached separately as model
- * media, never as digest text), and follower/following counts, and every field that would
- * require the paid pipeline (mutual-follow gender composition, who liked/commented,
- * follow-formation speed, or any "erased/tidied traces" claim) — those are structurally
- * impossible here because this function only ever reads `InstagramProfile.latestPosts`,
- * `fullName`.
+ * Explicit compatibility adapter for the pre-Task-9 route. The caller must pass the profile
+ * returned by that route's one provider call; this function performs no collection or lookup.
  */
-export function buildPrecheckoutBliteDigest(profile: InstagramProfile): PrecheckoutBliteDigest {
-    const posts = (profile.latestPosts ?? []).slice(0, MAX_DIGEST_POSTS);
+export function projectLegacyPrecheckoutBliteSource(
+    profile: InstagramProfile,
+): PrecheckoutBliteSourceAdapter {
+    const posts = (profile.latestPosts ?? []).slice(0, PRECHECKOUT_BLITE_MAX_SOURCE_POSTS);
+    const source = {
+        schemaVersion: 1 as const,
+        fullName: truncateText(profile.fullName, MAX_FULL_NAME_EXCERPT_LENGTH),
+        posts: posts.map((post: InstagramPost) => ({
+            type: post.type,
+            captionExcerpt: truncateText(post.caption, MAX_CAPTION_EXCERPT_LENGTH),
+            hashtags: (post.hashtags ?? []).slice(0, MAX_HASHTAGS_PER_POST),
+            carouselDepth: post.type === 'carousel'
+                ? post.declaredMediaCount ?? post.mediaItems?.length ?? null
+                : null,
+            likesCount: post.likesCountHidden === true ? null : post.likesCount,
+            likesHidden: post.likesCountHidden === true,
+            commentsCount: post.commentsCountHidden === true ? null : post.commentsCount,
+            commentsHidden: post.commentsCountHidden === true,
+            taggedUsernames: post.taggedUsers.slice(0, MAX_USERNAMES_PER_POST),
+            mentionedUsernames: post.mentionedUsers.slice(0, MAX_USERNAMES_PER_POST),
+        })),
+        media: [
+            ...(profile.profilePicUrl
+                ? [{ role: 'profile' as const, url: profile.profilePicUrl }]
+                : []),
+            ...posts
+                .map(post => post.imageUrl?.trim() || post.thumbnailUrl?.trim() || null)
+                .filter((url): url is string => url !== null)
+                .slice(0, PRECHECKOUT_BLITE_MAX_GENDER_EVIDENCE_POST_IMAGES)
+                .map(url => ({ role: 'post' as const, url })),
+        ],
+    };
+    const parsed = precheckoutBliteSourceV1Schema.safeParse(source);
+    if (!parsed.success) {
+        throw new Error('PRECHECKOUT_BLITE_SOURCE_INVALID');
+    }
+    return parsed.data;
+}
+
+/**
+ * Build a compact digest from the versioned source projection. The source contains only
+ * bounded post digests and ordered image references; identity, URLs, follower/following
+ * counts, raw provider fields, and every paid-pipeline concept are structurally unavailable.
+ */
+export function buildPrecheckoutBliteDigest(
+    source: PrecheckoutBliteSourceAdapter
+): PrecheckoutBliteDigest {
+    const posts = source.posts.slice(0, MAX_DIGEST_POSTS);
     const distribution: { image: number; video: number; carousel: number; reel: number } = {
         image: 0,
         video: 0,
@@ -141,7 +248,7 @@ export function buildPrecheckoutBliteDigest(profile: InstagramProfile): Precheck
         postCount: digestPosts.length,
         postTypeDistribution: distribution,
         posts: digestPosts,
-        fullName: truncateText(profile.fullName, MAX_FULL_NAME_EXCERPT_LENGTH),
+        fullName: truncateText(source.fullName, MAX_FULL_NAME_EXCERPT_LENGTH),
     };
 }
 
@@ -266,71 +373,193 @@ function calibratePrecheckoutBliteSignals(
 export interface PrecheckoutBliteInferenceOptions {
     requestId?: string;
     abortSignal?: AbortSignal;
-    onAttemptTelemetry?: (telemetry: GeminiAttemptTelemetry) => void | Promise<void>;
+    /** Original preflight snapshot metadata; never reconstructed from the source artifact. */
+    candidateRange: PrecheckoutBliteCandidateRange;
+    /** Original durable submission timestamp; every inference derives its T+56 cutoff from it. */
+    submittedAtMs: number;
+    /** Absolute server cutoff derived from the original preflight submission timestamp. */
+    deadlineAtMs?: number;
+    /** PR #368's bounded, PII-safe per-attempt telemetry sink. */
+    onAttemptTelemetry?: AnalyzeWithGeminiOptions<PrecheckoutBliteModelResponse>['onAttemptTelemetry'];
 }
 
-function postImageUrl(post: InstagramPost): string | null {
-    const url = post.imageUrl?.trim() || post.thumbnailUrl?.trim();
-    return url || null;
+const PRECHECKOUT_BLITE_INFERENCE_DEADLINE_ERROR =
+    'PRECHECKOUT_BLITE_INFERENCE_DEADLINE_EXCEEDED';
+
+function deadlineExpired(deadlineAtMs: number | undefined): boolean {
+    return deadlineAtMs !== undefined
+        && (!Number.isFinite(deadlineAtMs) || Date.now() >= deadlineAtMs);
 }
 
-/**
- * `prepareAnalysisImages` has no native cancellation hook (unlike `analyzeWithGemini`, which
- * accepts `abortSignal` directly and can cancel its own request). This promise is what lets
- * `Promise.race` bound that image-preparation phase too: it never resolves, and rejects the
- * instant `signal` fires, so the race settles even while the image download is still in flight.
- */
-function abortSignalRejection(signal: AbortSignal | undefined): Promise<never> {
-    return new Promise<never>((_resolve, reject) => {
-        if (!signal) return;
-        if (signal.aborted) {
-            reject(new Error('PRECHECKOUT_BLITE_INFERENCE_ABORTED'));
-            return;
-        }
-        signal.addEventListener('abort', () => {
-            reject(new Error('PRECHECKOUT_BLITE_INFERENCE_ABORTED'));
-        }, { once: true });
+function resolveInferenceDeadline(
+    submittedAtMs: number,
+    explicitDeadlineAtMs: number | undefined,
+): number | null {
+    if (!Number.isFinite(submittedAtMs)) return null;
+    const derivedDeadlineAtMs = submittedAtMs + BLITE_INFERENCE_DEADLINE_MS;
+    if (!Number.isFinite(derivedDeadlineAtMs)) return null;
+    if (
+        explicitDeadlineAtMs !== undefined
+        && explicitDeadlineAtMs !== derivedDeadlineAtMs
+    ) {
+        return null;
+    }
+    return derivedDeadlineAtMs;
+}
+
+function assertInferenceActive(
+    signal: AbortSignal | undefined,
+    deadlineAtMs: number | undefined,
+): void {
+    if (signal?.aborted || deadlineExpired(deadlineAtMs)) {
+        throw new Error(PRECHECKOUT_BLITE_INFERENCE_DEADLINE_ERROR);
+    }
+}
+
+interface EffectiveDeadlineSignal {
+    signal: AbortSignal | undefined;
+    cleanup: () => void;
+}
+
+/** Combine the parent cancellation with one absolute deadline; never create a new budget. */
+function createEffectiveDeadlineSignal(
+    parentSignal: AbortSignal | undefined,
+    deadlineAtMs: number | undefined,
+): EffectiveDeadlineSignal {
+    if (deadlineAtMs === undefined) {
+        return { signal: parentSignal, cleanup: () => undefined };
+    }
+
+    const controller = new AbortController();
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const onParentAbort = () => {
+        controller.abort(parentSignal?.reason ?? new Error('PRECHECKOUT_BLITE_INFERENCE_ABORTED'));
+    };
+
+    if (parentSignal) {
+        if (parentSignal.aborted) onParentAbort();
+        else parentSignal.addEventListener('abort', onParentAbort, { once: true });
+    }
+
+    const remainingMs = deadlineAtMs - Date.now();
+    if (!Number.isFinite(deadlineAtMs) || remainingMs <= 0) {
+        controller.abort(new Error(PRECHECKOUT_BLITE_INFERENCE_DEADLINE_ERROR));
+    } else {
+        timer = setTimeout(() => {
+            controller.abort(new Error(PRECHECKOUT_BLITE_INFERENCE_DEADLINE_ERROR));
+        }, remainingMs);
+    }
+
+    return {
+        signal: controller.signal,
+        cleanup: () => {
+            if (timer !== undefined) clearTimeout(timer);
+            parentSignal?.removeEventListener('abort', onParentAbort);
+        },
+    };
+}
+
+interface AbortSignalRejection {
+    promise: Promise<never>;
+    cleanup: () => void;
+}
+
+/** Reject the whole adapter as soon as its parent signal or absolute cutoff fires. */
+function abortSignalRejection(signal: AbortSignal | undefined): AbortSignalRejection {
+    if (!signal) {
+        return { promise: new Promise<never>(() => undefined), cleanup: () => undefined };
+    }
+    let onAbort: (() => void) | undefined;
+    const promise = new Promise<never>((_resolve, reject) => {
+        onAbort = () => reject(new Error('PRECHECKOUT_BLITE_INFERENCE_ABORTED'));
+        if (signal.aborted) onAbort();
+        else signal.addEventListener('abort', onAbort, { once: true });
     });
+    return {
+        promise,
+        cleanup: () => {
+            if (onAbort) signal.removeEventListener('abort', onAbort);
+        },
+    };
 }
 
 /**
  * Real first-pass inference for the precheckout B-lite teaser. Server-only. Reuses the shared
  * Gemini plumbing (`analyzeWithGemini`) without the durable V2 stage/audit machinery, matching
- * the lightweight caller pattern in `private-name-analysis.ts`'s non-audited branch. Image
- * evidence for the gender read is prepared with the same `prepareAnalysisImages` plumbing the
- * paid `appearance-analysis.ts`/`gender-analysis.ts` stages use, bounded by
- * `precheckoutBliteImagePolicy()` (profile photo + up to 3 recent post photos).
+ * the lightweight caller pattern in `private-name-analysis.ts`'s non-audited branch. The
+ * durable source's media references are the only media inputs: no Instagram recollection;
+ * bounded media download only.
  *
  * The gender read is produced by this same single call — there is no second model call. On any
  * model, parse, or timeout failure this returns `null` so the caller can fail open; it never
  * throws into the request path.
  *
- * `options.abortSignal` (the route's single deadline) bounds the *entire* image-prep + model-call
- * sequence via `Promise.race`, not just the `analyzeWithGemini` call — a slow or hanging image
- * host must not be able to hold this open past the same budget the route is enforcing. The
- * abandoned image-prep/model work is left to finish or time out on its own in the background;
- * only the wait is given up on, so the route can still return its fail-open `204` on schedule.
+ * The original preflight's absolute deadline bounds the source digest, bounded media
+ * preparation, and model-call sequence. A deadline does not create a retry or recollection
+ * budget: once it is exhausted, no new media or Gemini work starts and the caller receives a
+ * fail-open `null`.
  */
-export async function inferPrecheckoutBlite(
-    profile: InstagramProfile,
-    options: PrecheckoutBliteInferenceOptions = {},
-): Promise<PrecheckoutBliteV1 | null> {
+function parseDurableSource(value: unknown): PrecheckoutBliteSourceAdapter | null {
     try {
-        const digest = buildPrecheckoutBliteDigest(profile);
+        const parsed = precheckoutBliteSourceV1Schema.safeParse(value);
+        return parsed.success ? parsed.data : null;
+    } catch {
+        return null;
+    }
+}
+
+export function inferPrecheckoutBlite(
+    source: PrecheckoutBliteSourceAdapter,
+    options: PrecheckoutBliteInferenceOptions,
+): Promise<PrecheckoutBliteV1 | null>;
+export async function inferPrecheckoutBlite(
+    source: PrecheckoutBliteSourceAdapter,
+    options: PrecheckoutBliteInferenceOptions,
+): Promise<PrecheckoutBliteV1 | null> {
+    if (!options || typeof options !== 'object') return null;
+    const durableSource = parseDurableSource(source);
+    if (!durableSource) return null;
+    const inferenceDeadlineAtMs = resolveInferenceDeadline(
+        options.submittedAtMs,
+        options.deadlineAtMs,
+    );
+    if (
+        inferenceDeadlineAtMs === null
+        || !options.candidateRange
+        || !Number.isSafeInteger(options.candidateRange.min)
+        || !Number.isSafeInteger(options.candidateRange.max)
+        || options.candidateRange.min < 0
+        || options.candidateRange.min >= options.candidateRange.max
+    ) return null;
+    const effectiveDeadline = createEffectiveDeadlineSignal(
+        options.abortSignal,
+        inferenceDeadlineAtMs,
+    );
+    try {
+        assertInferenceActive(effectiveDeadline.signal, inferenceDeadlineAtMs);
+
+        const digest = buildPrecheckoutBliteDigest(durableSource);
         if (digest.postCount === 0) return null;
 
         const work = (async (): Promise<PrecheckoutBliteModelResponse> => {
-            const postImageUrls = (profile.latestPosts ?? [])
-                .map(postImageUrl)
-                .filter((url): url is string => url !== null);
+            assertInferenceActive(effectiveDeadline.signal, inferenceDeadlineAtMs);
+            const profileImageUrl = durableSource.media.find(media => media.role === 'profile')?.url;
+            const postImageUrls = durableSource.media
+                .filter(media => media.role === 'post')
+                .slice(0, PRECHECKOUT_BLITE_MAX_GENDER_EVIDENCE_POST_IMAGES)
+                .map(media => media.url);
             const preparedImages = await prepareAnalysisImages(
-                profile.profilePicUrl,
+                profileImageUrl,
                 postImageUrls,
                 {
                     policy: precheckoutBliteImagePolicy(),
-                    abortSignal: options.abortSignal,
+                    abortSignal: effectiveDeadline.signal,
+                    ...(inferenceDeadlineAtMs !== undefined
+                        ? { deadlineAtMs: inferenceDeadlineAtMs }
+                        : {}),
                 },
             );
+            assertInferenceActive(effectiveDeadline.signal, inferenceDeadlineAtMs);
             const images = preparedImages.map(image => image.base64);
             const imageEvidence: PrecheckoutBliteImageEvidence = {
                 count: images.length,
@@ -345,9 +574,10 @@ export async function inferPrecheckoutBlite(
                     schema: precheckoutBliteModelResponseSchema,
                     analysisType: 'precheckout_blite',
                     requestId: options.requestId,
-                    abortSignal: options.abortSignal,
+                    abortSignal: effectiveDeadline.signal,
                     thinkingLevel: 'MINIMAL',
                     maxOutputTokens: PRECHECKOUT_BLITE_MAX_OUTPUT_TOKENS,
+                    maxAttempts: 2,
                     onAttemptTelemetry: options.onAttemptTelemetry,
                 },
             );
@@ -356,29 +586,50 @@ export async function inferPrecheckoutBlite(
         // handler keeps that eventual settlement from surfacing as an unhandled rejection.
         void work.catch(() => undefined);
 
-        const modelResult: PrecheckoutBliteModelResponse = await Promise.race([
-            work,
-            abortSignalRejection(options.abortSignal),
-        ]);
+        const abortRejection = abortSignalRejection(effectiveDeadline.signal);
+        try {
+            const modelResult: PrecheckoutBliteModelResponse = await Promise.race([
+                work,
+                abortRejection.promise,
+            ]);
 
-        const candidateRange = computePrecheckoutBliteCandidateRange(
-            profile.followersCount,
-            profile.followingCount,
-        );
+            assertInferenceActive(effectiveDeadline.signal, inferenceDeadlineAtMs);
+            const dto = {
+                schemaVersion: PRECHECKOUT_BLITE_SCHEMA_VERSION,
+                persona: modelResult.persona,
+                signals: calibratePrecheckoutBliteSignals(modelResult.signals),
+                candidateRange: options.candidateRange,
+                genderRead: modelResult.genderRead,
+                postCount: digest.postCount,
+                evidenceFields: [...PRECHECKOUT_BLITE_EVIDENCE_FIELDS],
+            };
 
-        const dto = {
-            schemaVersion: PRECHECKOUT_BLITE_SCHEMA_VERSION,
-            persona: modelResult.persona,
-            signals: calibratePrecheckoutBliteSignals(modelResult.signals),
-            candidateRange,
-            genderRead: modelResult.genderRead,
-            postCount: digest.postCount,
-            evidenceFields: [...PRECHECKOUT_BLITE_EVIDENCE_FIELDS],
-        };
+            const parsed = precheckoutBliteV1Schema.safeParse(dto);
+            return parsed.success ? parsed.data : null;
+        } finally {
+            abortRejection.cleanup();
+        }
+    } catch {
+        return null;
+    } finally {
+        effectiveDeadline.cleanup();
+    }
+}
 
-        const parsed = precheckoutBliteV1Schema.safeParse(dto);
-        return parsed.success ? parsed.data : null;
+/**
+ * Explicit compatibility entrypoint for the legacy precheckout route. The route supplies the
+ * profile it already collected plus one operation timestamp and the preflight snapshot range;
+ * this adapter never calls the Instagram scraper or reconstructs either metadata value.
+ */
+export async function inferLegacyPrecheckoutBlite(
+    profile: InstagramProfile,
+    options: PrecheckoutBliteInferenceOptions,
+): Promise<PrecheckoutBliteV1 | null> {
+    let source: PrecheckoutBliteSourceAdapter;
+    try {
+        source = projectLegacyPrecheckoutBliteSource(profile);
     } catch {
         return null;
     }
+    return inferPrecheckoutBlite(source, options);
 }

@@ -32,6 +32,7 @@ import type {
 import { preflightTargetInputHash } from './preflight-identity';
 import { PREFLIGHT_PROVIDER_DEADLINE_MS } from './preflight-runtime-policy';
 import type { BetaApifyPreflightCoordinator } from './beta-apify-preflight-coordinator';
+import { projectPrecheckoutBliteSource } from '@/lib/services/precheckout/blite-source';
 
 const preflightId = '123e4567-e89b-42d3-a456-426614174000';
 const userId = '223e4567-e89b-42d3-a456-426614174000';
@@ -113,6 +114,152 @@ describe('betatest preflight credit fence', () => {
         expect(store.finalizeBlocked).toHaveBeenCalledWith(claimed, 'BETA_CAPACITY_UNAVAILABLE');
         expect(settleBetaCredit).toHaveBeenCalledWith(preflightId);
         expect(refreshBetaCredit).toHaveBeenCalledOnce();
+    });
+});
+
+describe('B-lite single-collection preflight', () => {
+    it('collects one Apify profile, commits its ready snapshot and bounded source, then enqueues', async () => {
+        const claimed = claim();
+        const store = workerStore(claimed);
+        const collectedProfile = profile({
+            latestPosts: [{
+                id: 'post-1',
+                shortCode: 'postone',
+                type: 'image',
+                likesCount: 10,
+                commentsCount: 2,
+                taggedUsers: [],
+                mentionedUsers: [],
+                hashtags: [],
+                imageUrl: 'https://scontent.cdninstagram.com/post.jpg',
+                timestamp: '2026-08-13T00:00:00.000Z',
+            }],
+        });
+        const fullProfile = vi.fn(async () => collectedProfile);
+        const fallback = vi.fn(async () => collectedProfile);
+        const projectBliteSource = vi.fn(projectPrecheckoutBliteSource);
+        const order: string[] = [];
+        const activateBliteCohort = vi.fn(async () => ({
+            submittedAt: new Date(Date.now() - 1_000).toISOString(),
+            deadlineAt: new Date(Date.now() + 59_000).toISOString(),
+            expiresAt: new Date(Date.now() + 29 * 60_000).toISOString(),
+        }));
+        const finalizeReadyWithSource = vi.fn(async () => { order.push('finalize'); return true; });
+        const enqueueBliteInference = vi.fn(async () => { order.push('enqueue'); return 'enqueued' as const; });
+        const run = {
+            ...storedRun('succeeded'),
+            credentialSlot: selectPreflightApifyCredentialSlot(preflightId, {
+                PRECHECKOUT_BLITE_ENABLED: 'true',
+                PRECHECKOUT_BLITE_ROLLOUT_PERCENT: '100',
+                ANALYSIS_V2_PREFLIGHT_IDENTITY_HMAC_SECRET: preflightIdentitySecret,
+            }),
+        };
+        const runs: PreflightProviderRunStore = {
+            load: vi.fn(async () => run),
+            reserve: vi.fn(),
+            checkpointStarted: vi.fn(),
+            checkpointRejected: vi.fn(),
+            checkpointTerminal: vi.fn(),
+        };
+
+        await expect(processPreflight(preflightId, {
+            store,
+            providerRunStore: runs,
+            getProfile: vi.fn(() => { throw new Error('cohort must not use selfhosted'); }),
+            getFullProfile: fullProfile,
+            getFallbackProfile: fallback,
+            activateBliteCohort,
+            projectBliteSource,
+            finalizeReadyWithSource,
+            enqueueBliteInference,
+            env: {
+                PRECHECKOUT_BLITE_ENABLED: 'true',
+                PRECHECKOUT_BLITE_ROLLOUT_PERCENT: '100',
+                ANALYSIS_V2_PREFLIGHT_IDENTITY_HMAC_SECRET: preflightIdentitySecret,
+            },
+        })).resolves.toBe('ready');
+
+        expect(fullProfile).toHaveBeenCalledTimes(1);
+        expect(fallback).not.toHaveBeenCalled();
+        expect(projectBliteSource).toHaveBeenCalledWith(collectedProfile);
+        expect(finalizeReadyWithSource).toHaveBeenCalledWith(expect.objectContaining({
+            source: expect.objectContaining({
+                posts: expect.arrayContaining([
+                    expect.objectContaining({ likesCount: 10, commentsCount: 2 }),
+                ]),
+            }),
+            providerOperationKey: 'target-profile-fallback',
+            providerRunReference: 'StoredRun12345678',
+            targetFollowersCount: collectedProfile.followersCount,
+            targetFollowingCount: collectedProfile.followingCount,
+        }));
+        expect(store.finalizeReady).not.toHaveBeenCalled();
+        expect(order).toEqual(['finalize', 'enqueue']);
+    });
+
+    it('recovers a finalized row after enqueue failure without reclaiming or recollecting', async () => {
+        const dispatchToken = '623e4567-e89b-42d3-a456-426614174000'; // gitleaks:allow -- UUID fixture
+        const reserveBliteDispatch = vi.fn(async () => ({
+            shouldEnqueue: true,
+            dispatchToken,
+        }));
+        const markBliteDispatchFailed = vi.fn(async () => true);
+        const markBliteDispatchEnqueued = vi.fn(async () => true);
+        const enqueueBliteInference = vi.fn()
+            .mockRejectedValueOnce(new Error('cloud task unavailable'))
+            .mockResolvedValueOnce('enqueued' as const);
+        const store = {
+            ...workerStore(null),
+            reserveBliteDispatch,
+            markBliteDispatchFailed,
+            markBliteDispatchEnqueued,
+        };
+        const env = {
+            PRECHECKOUT_BLITE_ENABLED: 'false',
+            PRECHECKOUT_BLITE_ROLLOUT_PERCENT: '0',
+            ANALYSIS_V2_PREFLIGHT_IDENTITY_HMAC_SECRET: preflightIdentitySecret,
+        };
+
+        await expect(processPreflight(preflightId, {
+            store,
+            enqueueBliteInference,
+            env,
+        })).rejects.toThrow('cloud task unavailable');
+        await expect(processPreflight(preflightId, {
+            store,
+            enqueueBliteInference,
+            env,
+        })).resolves.toBe('noop');
+
+        expect(store.claim).toHaveBeenCalledTimes(2);
+        expect(reserveBliteDispatch).toHaveBeenCalledTimes(2);
+        expect(markBliteDispatchFailed).toHaveBeenCalledWith({ preflightId, dispatchToken });
+        expect(markBliteDispatchEnqueued).toHaveBeenCalledWith({ preflightId, dispatchToken });
+        expect(enqueueBliteInference).toHaveBeenCalledTimes(2);
+    });
+
+    it('does not enqueue a legacy/cohort-off claim-null replay', async () => {
+        const reserveBliteDispatch = vi.fn(async () => ({
+            shouldEnqueue: false,
+            dispatchToken: null,
+        }));
+        const enqueueBliteInference = vi.fn(async () => 'enqueued' as const);
+        const store = {
+            ...workerStore(null),
+            reserveBliteDispatch,
+        };
+
+        await expect(processPreflight(preflightId, {
+            store,
+            enqueueBliteInference,
+            env: {
+                PRECHECKOUT_BLITE_ENABLED: 'false',
+                PRECHECKOUT_BLITE_ROLLOUT_PERCENT: '0',
+            },
+        })).resolves.toBe('noop');
+
+        expect(reserveBliteDispatch).toHaveBeenCalledWith(preflightId);
+        expect(enqueueBliteInference).not.toHaveBeenCalled();
     });
 });
 
@@ -594,6 +741,32 @@ describe('preflight persistence adapter', () => {
             p_dispatch_generation: 2,
             p_dispatch_token: reservationToken,
         });
+    });
+
+    it('reserves, fails, and recovers a finalized B-lite dispatch without duplicating the provider run', async () => {
+        const dispatchToken = '523e4567-e89b-42d3-a456-426614174000'; // gitleaks:allow -- UUID fixture
+        const rpc = vi.fn(async (...args: [string, Record<string, unknown>?]) => {
+            if (args[0] === PREFLIGHT_DATABASE_NAMES.bliteDispatchReserveRpc) {
+                return {
+                    data: { should_enqueue: true, dispatch_token: dispatchToken },
+                    error: null,
+                };
+            }
+            return { data: true, error: null };
+        });
+        const store = createSupabasePreflightStore({ rpc, from: vi.fn() as never });
+
+        await expect(store.reserveBliteDispatch!(preflightId)).resolves.toEqual({
+            shouldEnqueue: true,
+            dispatchToken,
+        });
+        await expect(store.markBliteDispatchFailed!({ preflightId, dispatchToken })).resolves.toBe(true);
+        await expect(store.markBliteDispatchEnqueued!({ preflightId, dispatchToken })).resolves.toBe(true);
+        expect(rpc.mock.calls.map(call => call[0])).toEqual([
+            PREFLIGHT_DATABASE_NAMES.bliteDispatchReserveRpc,
+            PREFLIGHT_DATABASE_NAMES.bliteDispatchFailedRpc,
+            PREFLIGHT_DATABASE_NAMES.bliteDispatchEnqueuedRpc,
+        ]);
     });
 
     it('persists and validates the dedicated beta prepare lifecycle fence', async () => {

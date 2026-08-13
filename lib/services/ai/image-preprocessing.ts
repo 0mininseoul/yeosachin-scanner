@@ -150,23 +150,33 @@ interface DownloadImageOptions {
     resolveHostname?: ResolveHostname;
     maxBytes?: number;
     timeoutMs?: number;
+    signal?: AbortSignal;
+    deadlineAtMs?: number;
 }
 
-interface PrepareAnalysisImagesOptions {
-    loadImage?: (url: string) => Promise<string>;
+export interface PrepareAnalysisImagesOptions {
+    loadImage?: (url: string, signal?: AbortSignal) => Promise<string>;
     onError?: (candidate: AnalysisImageCandidate, error: unknown) => void;
     policy?: AnalysisImagePolicy;
     abortSignal?: AbortSignal;
+    deadlineAtMs?: number;
+}
+
+interface SemaphoreWaiter {
+    resolve: () => void;
+    reject: (error: unknown) => void;
+    signal?: AbortSignal;
+    onAbort?: () => void;
 }
 
 class AsyncSemaphore {
     private active = 0;
-    private readonly queue: Array<() => void> = [];
+    private readonly queue: SemaphoreWaiter[] = [];
 
     constructor(private readonly limit: number) {}
 
-    async run<T>(task: () => Promise<T>): Promise<T> {
-        await this.acquire();
+    async run<T>(task: () => Promise<T>, signal?: AbortSignal): Promise<T> {
+        await this.acquire(signal);
         try {
             return await task();
         } finally {
@@ -174,18 +184,39 @@ class AsyncSemaphore {
         }
     }
 
-    private acquire(): Promise<void> {
+    private acquire(signal?: AbortSignal): Promise<void> {
+        if (signal?.aborted) {
+            return Promise.reject(signal.reason ?? new Error('ABORTED'));
+        }
         if (this.active < this.limit) {
             this.active++;
             return Promise.resolve();
         }
-        return new Promise<void>((resolve) => this.queue.push(resolve));
+        return new Promise<void>((resolve, reject) => {
+            const waiter: SemaphoreWaiter = { resolve, reject, signal };
+            const onAbort = () => {
+                const index = this.queue.indexOf(waiter);
+                if (index >= 0) this.queue.splice(index, 1);
+                signal?.removeEventListener('abort', onAbort);
+                reject(signal?.reason ?? new Error('ABORTED'));
+            };
+            waiter.onAbort = onAbort;
+            signal?.addEventListener('abort', onAbort, { once: true });
+            this.queue.push(waiter);
+            if (signal?.aborted) onAbort();
+        });
     }
 
     private release(): void {
-        const next = this.queue.shift();
-        if (next) {
-            next();
+        while (this.queue.length > 0) {
+            const next = this.queue.shift();
+            if (!next) break;
+            next.signal?.removeEventListener('abort', next.onAbort as EventListener);
+            if (next.signal?.aborted) {
+                next.reject(next.signal.reason ?? new Error('ABORTED'));
+                continue;
+            }
+            next.resolve();
             return;
         }
         this.active--;
@@ -197,12 +228,66 @@ const imagePreparationSemaphore = new AsyncSemaphore(
 );
 const imageDecodeSemaphore = new AsyncSemaphore(MAX_VERTEX_AI_CONCURRENT_IMAGE_DECODES);
 
-export function runWithImagePreparationSlot<T>(task: () => Promise<T>): Promise<T> {
-    return imagePreparationSemaphore.run(task);
+export function runWithImagePreparationSlot<T>(
+    task: () => Promise<T>,
+    signal?: AbortSignal,
+): Promise<T> {
+    return imagePreparationSemaphore.run(task, signal);
 }
 
-export function runWithImageDecodeSlot<T>(task: () => Promise<T>): Promise<T> {
-    return imageDecodeSemaphore.run(task);
+export function runWithImageDecodeSlot<T>(
+    task: () => Promise<T>,
+    signal?: AbortSignal,
+): Promise<T> {
+    return imageDecodeSemaphore.run(task, signal);
+}
+
+function assertImageWorkAvailable(
+    signal: AbortSignal | undefined,
+    deadlineAtMs: number | undefined,
+): void {
+    if (
+        signal?.aborted
+        || deadlineAtMs !== undefined
+            && (!Number.isFinite(deadlineAtMs) || Date.now() >= deadlineAtMs)
+    ) {
+        throw signal?.reason ?? new AnalysisImagePreparationError('timeout', 'transient');
+    }
+}
+
+interface ImageDeadlineSignal {
+    signal: AbortSignal | undefined;
+    cleanup: () => void;
+}
+
+function createImageDeadlineSignal(
+    parentSignal: AbortSignal | undefined,
+    deadlineAtMs: number | undefined,
+): ImageDeadlineSignal {
+    if (deadlineAtMs === undefined) return { signal: parentSignal, cleanup: () => undefined };
+    const controller = new AbortController();
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const onParentAbort = () => controller.abort(parentSignal?.reason ?? new Error('ABORTED'));
+    if (parentSignal) {
+        if (parentSignal.aborted) onParentAbort();
+        else parentSignal.addEventListener('abort', onParentAbort, { once: true });
+    }
+    const remainingMs = deadlineAtMs - Date.now();
+    if (!Number.isFinite(deadlineAtMs) || remainingMs <= 0) {
+        controller.abort(new AnalysisImagePreparationError('timeout', 'transient'));
+    } else {
+        timer = setTimeout(
+            () => controller.abort(new AnalysisImagePreparationError('timeout', 'transient')),
+            remainingMs,
+        );
+    }
+    return {
+        signal: controller.signal,
+        cleanup: () => {
+            if (timer !== undefined) clearTimeout(timer);
+            parentSignal?.removeEventListener('abort', onParentAbort);
+        },
+    };
 }
 
 export interface AnalysisV2SelectedMediaNormalizerDependencies {
@@ -312,16 +397,20 @@ export async function downloadImageBytes(
         resolveHostname,
         maxBytes = MAX_IMAGE_DOWNLOAD_BYTES,
         timeoutMs = IMAGE_DOWNLOAD_TIMEOUT_MS,
+        signal,
     } = options;
     try {
+        assertImageWorkAvailable(signal, options.deadlineAtMs);
         const downloaded = await downloadSecureImage(url, {
             allowedHostSuffixes: INSTAGRAM_MEDIA_HOST_SUFFIXES,
             ...(requestImpl ? { requestImpl } : {}),
             ...(resolveHostname ? { resolveHostname } : {}),
             maxBytes,
             timeoutMs,
+            ...(signal ? { signal } : {}),
             headers: { Accept: 'image/jpeg,image/png,image/webp,image/avif,image/*;q=0.8' },
         });
+        assertImageWorkAvailable(signal, options.deadlineAtMs);
         return downloaded.bytes;
     } catch (error) {
         throw classifyAnalysisImagePreparationError(error, 'download');
@@ -338,12 +427,16 @@ export async function downloadImageBytesViaTrustedProxy(
         resolveHostname,
         maxBytes = MAX_IMAGE_DOWNLOAD_BYTES,
         timeoutMs = IMAGE_DOWNLOAD_TIMEOUT_MS,
+        signal,
     } = options;
+    assertImageWorkAvailable(signal, options.deadlineAtMs);
     await validateAllowedRemoteImageUrl(
         url,
         INSTAGRAM_MEDIA_HOST_SUFFIXES,
-        resolveHostname
+        resolveHostname,
+        signal,
     );
+    assertImageWorkAvailable(signal, options.deadlineAtMs);
     const proxyUrl = `https://images.weserv.nl/?url=${encodeURIComponent(url)}&default=1`;
     const downloaded = await downloadSecureImage(proxyUrl, {
         allowedHostSuffixes: TRUSTED_IMAGE_PROXY_HOST_SUFFIXES,
@@ -351,19 +444,24 @@ export async function downloadImageBytesViaTrustedProxy(
         ...(resolveHostname ? { resolveHostname } : {}),
         maxBytes,
         timeoutMs,
+        ...(signal ? { signal } : {}),
         headers: { Accept: 'image/jpeg,image/png,image/webp,image/avif,image/*;q=0.8' },
     });
+    assertImageWorkAvailable(signal, options.deadlineAtMs);
     return downloaded.bytes;
 }
 
 /** Strip metadata, orient, resize, and encode every input identically as JPEG. */
 export async function normalizeImageToJpeg(
     imageBytes: Buffer,
-    policy: AnalysisImagePolicy = getAnalysisImagePolicy()
+    policy: AnalysisImagePolicy = getAnalysisImagePolicy(),
+    signal?: AbortSignal,
+    deadlineAtMs?: number,
 ): Promise<Buffer> {
     try {
-        return await runWithImageDecodeSlot(() =>
-            sharp(imageBytes, {
+        assertImageWorkAvailable(signal, deadlineAtMs);
+        const normalized = await runWithImageDecodeSlot(
+            () => sharp(imageBytes, {
                 failOn: 'error',
                 limitInputPixels: MAX_DECODED_IMAGE_PIXELS,
                 pages: 1,
@@ -382,16 +480,26 @@ export async function normalizeImageToJpeg(
                     chromaSubsampling: '4:2:0',
                     progressive: false,
                 })
-                .toBuffer()
+                .toBuffer(),
+            signal,
         );
+        assertImageWorkAvailable(signal, deadlineAtMs);
+        return normalized;
     } catch (error) {
         throw classifyAnalysisImagePreparationError(error, 'decode');
     }
 }
 
-async function downloadAndNormalizeImage(url: string, policy: AnalysisImagePolicy): Promise<string> {
-    const imageBytes = await downloadImageBytes(url);
-    const jpeg = await normalizeImageToJpeg(imageBytes, policy);
+async function downloadAndNormalizeImage(
+    url: string,
+    policy: AnalysisImagePolicy,
+    signal?: AbortSignal,
+    deadlineAtMs?: number,
+): Promise<string> {
+    assertImageWorkAvailable(signal, deadlineAtMs);
+    const imageBytes = await downloadImageBytes(url, { signal, deadlineAtMs });
+    assertImageWorkAvailable(signal, deadlineAtMs);
+    const jpeg = await normalizeImageToJpeg(imageBytes, policy, signal, deadlineAtMs);
     return jpeg.toString('base64');
 }
 
@@ -401,15 +509,20 @@ async function downloadAndNormalizeImage(url: string, policy: AnalysisImagePolic
  */
 export async function imageUrlToNormalizedBase64(
     url: string,
-    policy: AnalysisImagePolicy = getAnalysisImagePolicy()
+    policy: AnalysisImagePolicy = getAnalysisImagePolicy(),
+    signal?: AbortSignal,
+    deadlineAtMs?: number,
 ): Promise<string> {
-    await validateAllowedRemoteImageUrl(url, INSTAGRAM_MEDIA_HOST_SUFFIXES);
+    assertImageWorkAvailable(signal, deadlineAtMs);
+    await validateAllowedRemoteImageUrl(url, INSTAGRAM_MEDIA_HOST_SUFFIXES, undefined, signal);
+    assertImageWorkAvailable(signal, deadlineAtMs);
     try {
-        return await downloadAndNormalizeImage(url, policy);
+        return await downloadAndNormalizeImage(url, policy, signal, deadlineAtMs);
     } catch (directError) {
+        assertImageWorkAvailable(signal, deadlineAtMs);
         try {
-            const proxyBytes = await downloadImageBytesViaTrustedProxy(url);
-            const jpeg = await normalizeImageToJpeg(proxyBytes, policy);
+            const proxyBytes = await downloadImageBytesViaTrustedProxy(url, { signal, deadlineAtMs });
+            const jpeg = await normalizeImageToJpeg(proxyBytes, policy, signal, deadlineAtMs);
             return jpeg.toString('base64');
         } catch (proxyError) {
             const classified = classifyAnalysisImagePreparationError(proxyError, 'download');
@@ -427,7 +540,14 @@ export async function prepareAnalysisImages(
 ): Promise<PreparedAnalysisImage[]> {
     const policy = options.policy ?? getAnalysisImagePolicy();
     const candidates = selectAnalysisImageCandidates(profilePicUrl, postImageUrls, policy);
-    const loadImage = options.loadImage ?? (url => imageUrlToNormalizedBase64(url, policy));
+    const effectiveDeadline = createImageDeadlineSignal(options.abortSignal, options.deadlineAtMs);
+    const loadImage = options.loadImage
+        ?? ((url: string, signal?: AbortSignal) => imageUrlToNormalizedBase64(
+            url,
+            policy,
+            signal,
+            options.deadlineAtMs,
+        ));
     const onError = options.onError ?? (() => {
         console.warn('Failed to prepare an analysis image');
     });
@@ -437,7 +557,7 @@ export async function prepareAnalysisImages(
 
     async function worker(): Promise<void> {
         while (nextIndex < candidates.length) {
-            if (options.abortSignal?.aborted) return;
+            if (effectiveDeadline.signal?.aborted) return;
             const index = nextIndex++;
             const candidate = candidates[index];
 
@@ -445,11 +565,9 @@ export async function prepareAnalysisImages(
                 prepared[index] = {
                     ...candidate,
                     base64: await runWithImagePreparationSlot(async () => {
-                        if (options.abortSignal?.aborted) {
-                            throw options.abortSignal.reason ?? new Error('ABORTED');
-                        }
-                        return loadImage(candidate.url);
-                    }),
+                        assertImageWorkAvailable(effectiveDeadline.signal, options.deadlineAtMs);
+                        return loadImage(candidate.url, effectiveDeadline.signal);
+                    }, effectiveDeadline.signal),
                 };
             } catch (error) {
                 onError(candidate, error);
@@ -458,10 +576,14 @@ export async function prepareAnalysisImages(
         }
     }
 
-    await Promise.all(Array.from(
-        { length: Math.min(MAX_VERTEX_AI_IMAGE_PREPARATION_CONCURRENCY, candidates.length) },
-        () => worker()
-    ));
+    try {
+        await Promise.all(Array.from(
+            { length: Math.min(MAX_VERTEX_AI_IMAGE_PREPARATION_CONCURRENCY, candidates.length) },
+            () => worker()
+        ));
 
-    return prepared.filter((image): image is PreparedAnalysisImage => image !== null);
+        return prepared.filter((image): image is PreparedAnalysisImage => image !== null);
+    } finally {
+        effectiveDeadline.cleanup();
+    }
 }

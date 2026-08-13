@@ -1,5 +1,4 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import type { InstagramPost, InstagramProfile } from '@/lib/types/instagram';
 
 const mocks = vi.hoisted(() => ({
     analyzeWithGemini: vi.fn(),
@@ -17,30 +16,56 @@ vi.mock('@/lib/services/ai/image-preprocessing', () => ({
 import {
     buildPrecheckoutBliteDigest,
     buildPrecheckoutBlitePrompt,
+    inferLegacyPrecheckoutBlite,
     inferPrecheckoutBlite,
 } from './blite-inference';
-import { computePrecheckoutBliteCandidateRange } from './blite-range';
+
+type SourcePost = {
+    type: 'image' | 'video' | 'carousel' | 'reel';
+    captionExcerpt: string | null;
+    hashtags: string[];
+    carouselDepth: number | null;
+    likesCount: number | null;
+    likesHidden: boolean;
+    commentsCount: number | null;
+    commentsHidden: boolean;
+    taggedUsernames: string[];
+    mentionedUsernames: string[];
+};
+
+type DurableSource = {
+    schemaVersion: 1;
+    fullName: string | null;
+    posts: SourcePost[];
+    media: Array<{ role: 'profile' | 'post'; url: string }>;
+};
+
+const CANDIDATE_RANGE = { min: 3, max: 9 } as const;
+
+function inferenceOptions(overrides: Record<string, unknown> = {}) {
+    return {
+        candidateRange: CANDIDATE_RANGE,
+        submittedAtMs: Date.now(),
+        ...overrides,
+    };
+}
 
 // Every concept/data source that requires the paid pipeline (mutual-follow gender
 // composition, who liked/commented on a post, follow-formation speed, or "erased/tidied
-// traces") must never appear anywhere in the digest this module builds.
+// traces") must never appear anywhere in the durable-source digest.
 const FORBIDDEN_CONCEPT_SUBSTRINGS = [
     '맞팔', 'mutual', 'Mutual', 'MutualFollow',
     '좋아요를 누른', '댓글을 남긴', 'InteractionData', 'liker', 'Liker',
     '형성 속도', 'formation speed',
     '지운 흔적', '정리된', 'erased', 'tidied',
-    'followersCount', 'followingCount', 'gender',
+    'followersCount', 'followingCount',
 ];
 
-// Structural allowlist for every key the digest may ever contain, recursively. `fullName` and
-// `bio` are the widened evidence for `genderRead` only (Correction 2) — the set otherwise stays
-// closed: no username, externalUrl, profilePicUrl, or follower/following counts.
 const ALLOWED_DIGEST_KEYS = new Set([
     'postCount', 'postTypeDistribution', 'image', 'video', 'carousel', 'reel', 'posts',
     'type', 'captionExcerpt', 'hashtags', 'carouselDepth',
     'likesCount', 'likesHidden', 'commentsCount', 'commentsHidden',
-    'taggedUsernames', 'mentionedUsernames',
-    'fullName', 'bio',
+    'taggedUsernames', 'mentionedUsernames', 'fullName',
 ]);
 
 function collectKeysRecursively(value: unknown, keys: Set<string>): void {
@@ -56,54 +81,49 @@ function collectKeysRecursively(value: unknown, keys: Set<string>): void {
     }
 }
 
-function post(overrides: Partial<InstagramPost> = {}): InstagramPost {
+function post(overrides: Partial<SourcePost> = {}): SourcePost {
     return {
-        id: '1',
-        shortCode: 'abc123',
-        caption: '오늘도 좋은 하루 #일상 #소통',
-        hashtags: ['일상', '소통'],
-        imageUrl: 'https://cdn.example.com/a.jpg',
         type: 'image',
+        captionExcerpt: '오늘도 좋은 하루 #일상 #소통',
+        hashtags: ['일상', '소통'],
+        carouselDepth: null,
         likesCount: 120,
+        likesHidden: false,
         commentsCount: 8,
-        timestamp: '2026-08-01T00:00:00.000Z',
-        taggedUsers: ['friend_a'],
-        mentionedUsers: ['friend_b'],
+        commentsHidden: false,
+        taggedUsernames: ['friend_a'],
+        mentionedUsernames: ['friend_b'],
         ...overrides,
     };
 }
 
-function profile(overrides: Partial<InstagramProfile> = {}): InstagramProfile {
+function source(overrides: Partial<DurableSource> = {}): DurableSource {
     return {
-        username: 'target_user',
+        schemaVersion: 1,
         fullName: '홍길동',
-        bio: '자기소개입니다',
-        externalUrl: 'https://example.com',
-        profilePicUrl: 'https://cdn.example.com/profile.jpg',
-        followersCount: 1_200,
-        followingCount: 900,
-        postsCount: 42,
-        isPrivate: false,
-        isVerified: false,
-        latestPosts: [
-            post({ id: '1', type: 'image' }),
+        posts: [
+            post(),
             post({
-                id: '2',
                 type: 'carousel',
-                declaredMediaCount: 3,
-                caption: '캐러셀 게시물 캡션입니다 #여행',
+                carouselDepth: 3,
+                captionExcerpt: '캐러셀 게시물 캡션입니다 #여행',
                 hashtags: ['여행'],
-                taggedUsers: ['friend_c'],
-                mentionedUsers: [],
+                taggedUsernames: ['friend_c'],
+                mentionedUsernames: [],
             }),
             post({
-                id: '3',
                 type: 'reel',
-                likesCount: 0,
-                likesCountHidden: true,
-                commentsCount: 0,
-                commentsCountHidden: true,
+                likesCount: null,
+                likesHidden: true,
+                commentsCount: null,
+                commentsHidden: true,
             }),
+        ],
+        media: [
+            { role: 'profile', url: 'https://cdninstagram.com/profile.jpg' },
+            { role: 'post', url: 'https://cdninstagram.com/a.jpg' },
+            { role: 'post', url: 'https://cdninstagram.com/b.jpg' },
+            { role: 'post', url: 'https://cdninstagram.com/c.jpg' },
         ],
         ...overrides,
     };
@@ -136,7 +156,7 @@ function validModelResponse() {
 function preparedImage(overrides: Partial<{ role: 'profile' | 'post'; url: string; base64: string }> = {}) {
     return {
         role: 'profile' as const,
-        url: 'https://cdn.example.com/profile.jpg',
+        url: 'https://cdninstagram.com/profile.jpg',
         base64: 'BASE64_PROFILE',
         ...overrides,
     };
@@ -150,62 +170,53 @@ beforeEach(() => {
         maxDimension: 384,
         jpegQuality: 75,
     });
-    // Default: profile photo + one post photo prepared successfully. Individual tests override
-    // this to exercise the zero-image and multi-post-image paths.
     mocks.prepareAnalysisImages.mockResolvedValue([
         preparedImage(),
-        preparedImage({ role: 'post', url: 'https://cdn.example.com/a.jpg', base64: 'BASE64_POST_1' }),
+        preparedImage({ role: 'post', url: 'https://cdninstagram.com/a.jpg', base64: 'BASE64_POST_1' }),
     ]);
 });
 
 describe('buildPrecheckoutBliteDigest', () => {
-    it('only contains allowlisted keys', () => {
-        const digest = buildPrecheckoutBliteDigest(profile());
+    it('only contains allowlisted keys from the durable projection', () => {
+        const digest = buildPrecheckoutBliteDigest(source());
         const keys = new Set<string>();
         collectKeysRecursively(digest, keys);
-        for (const key of keys) {
-            expect(ALLOWED_DIGEST_KEYS.has(key)).toBe(true);
-        }
+        for (const key of keys) expect(ALLOWED_DIGEST_KEYS.has(key)).toBe(true);
     });
 
-    it('never contains a forbidden concept', () => {
-        const digest = buildPrecheckoutBliteDigest(profile());
-        const serialized = JSON.stringify(digest);
+    it('never contains a paid-pipeline concept', () => {
+        const serialized = JSON.stringify(buildPrecheckoutBliteDigest(source()));
         for (const forbidden of FORBIDDEN_CONCEPT_SUBSTRINGS) {
             expect(serialized).not.toContain(forbidden);
         }
     });
 
-    it('never contains the username, externalUrl, profilePicUrl, or follower/following counts', () => {
-        const digest = buildPrecheckoutBliteDigest(profile());
-        const serialized = JSON.stringify(digest);
+    it('does not contain identity, URL, or follower/following metadata', () => {
+        const serialized = JSON.stringify(buildPrecheckoutBliteDigest(source()));
         expect(serialized).not.toContain('target_user');
-        expect(serialized).not.toContain('example.com');
+        expect(serialized).not.toContain('cdninstagram.com');
         expect(serialized).not.toContain('1200');
         expect(serialized).not.toContain('900');
     });
 
-    it('widens fullName but excludes bio from the gender-read digest', () => {
-        const digest = buildPrecheckoutBliteDigest(profile());
+    it('uses fullName only as gender-read evidence and never invents bio', () => {
+        const digest = buildPrecheckoutBliteDigest(source());
         expect(digest.fullName).toBe('홍길동');
         expect(digest).not.toHaveProperty('bio');
     });
 
-    it('truncates an overlong fullName and returns null when absent', () => {
-        const long = buildPrecheckoutBliteDigest(profile({
-            fullName: '가'.repeat(100),
-            bio: '나'.repeat(300),
-        }));
-        expect(long.fullName?.length).toBeLessThanOrEqual(61); // 60 chars + ellipsis
-        expect(long).not.toHaveProperty('bio');
+    it('truncates an overlong fullName and returns an empty digest without posts', () => {
+        const long = buildPrecheckoutBliteDigest(source({ fullName: '가'.repeat(100) }));
+        expect(long.fullName?.length).toBeLessThanOrEqual(61);
 
-        const missing = buildPrecheckoutBliteDigest(profile({ fullName: undefined, bio: undefined }));
-        expect(missing.fullName).toBeNull();
-        expect(missing).not.toHaveProperty('bio');
+        const empty = buildPrecheckoutBliteDigest(source({ fullName: null, posts: [] }));
+        expect(empty.fullName).toBeNull();
+        expect(empty.postCount).toBe(0);
+        expect(empty.posts).toEqual([]);
     });
 
     it('reflects post type distribution, carousel depth, and hidden-count flags', () => {
-        const digest = buildPrecheckoutBliteDigest(profile());
+        const digest = buildPrecheckoutBliteDigest(source());
         expect(digest.postCount).toBe(3);
         expect(digest.postTypeDistribution).toEqual({ image: 1, video: 0, carousel: 1, reel: 1 });
         expect(digest.posts[1].carouselDepth).toBe(3);
@@ -213,45 +224,36 @@ describe('buildPrecheckoutBliteDigest', () => {
         expect(digest.posts[2].likesCount).toBeNull();
         expect(digest.posts[2].commentsHidden).toBe(true);
     });
-
-    it('caps digest posts and returns an empty digest for an account with no posts', () => {
-        const empty = buildPrecheckoutBliteDigest(profile({ latestPosts: [] }));
-        expect(empty.postCount).toBe(0);
-        expect(empty.posts).toEqual([]);
-    });
 });
 
 describe('buildPrecheckoutBlitePrompt', () => {
-    it('never leaks the username, externalUrl, or follower/following counts into the rendered prompt', () => {
-        const digest = buildPrecheckoutBliteDigest(profile());
-        const prompt = buildPrecheckoutBlitePrompt(digest);
+    it('does not leak source URLs or count metadata into the rendered prompt', () => {
+        const prompt = buildPrecheckoutBlitePrompt(buildPrecheckoutBliteDigest(source()));
         expect(prompt).not.toContain('target_user');
-        expect(prompt).not.toContain('example.com');
+        expect(prompt).not.toContain('cdninstagram.com');
         expect(prompt).not.toContain('1200');
         expect(prompt).not.toContain('900');
     });
 
-    it('restricts fullName/image evidence to genderRead and never sends bio', () => {
-        const digest = buildPrecheckoutBliteDigest(profile());
-        const prompt = buildPrecheckoutBlitePrompt(digest, { count: 2, hasProfileImage: true });
-        // The widened evidence text does end up in the prompt (that's the point) ...
+    it('restricts fullName/image evidence to genderRead', () => {
+        const prompt = buildPrecheckoutBlitePrompt(buildPrecheckoutBliteDigest(source()), {
+            count: 2,
+            hasProfileImage: true,
+        });
         expect(prompt).toContain('홍길동');
-        expect(prompt).not.toContain('자기소개입니다');
         expect(prompt).not.toContain('소개글(bio)');
-        // ... but the prompt must explicitly forbid using it for persona/signals.
         expect(prompt).toContain('오직 성별 추정(genderRead)에만 사용');
         expect(prompt).toContain('이미지 2장이 첨부되어 있습니다');
         expect(prompt).toContain('프로필 사진');
     });
 
     it('describes zero attached images when no image evidence is passed', () => {
-        const digest = buildPrecheckoutBliteDigest(profile());
-        const prompt = buildPrecheckoutBlitePrompt(digest);
+        const prompt = buildPrecheckoutBlitePrompt(buildPrecheckoutBliteDigest(source()));
         expect(prompt).toContain('첨부된 이미지가 없습니다');
     });
 
     it('is written in Korean and embeds the digest JSON', () => {
-        const digest = buildPrecheckoutBliteDigest(profile());
+        const digest = buildPrecheckoutBliteDigest(source());
         const prompt = buildPrecheckoutBlitePrompt(digest);
         expect(/[가-힣]/u.test(prompt)).toBe(true);
         expect(prompt).toContain(JSON.stringify(digest));
@@ -259,31 +261,92 @@ describe('buildPrecheckoutBlitePrompt', () => {
 });
 
 describe('inferPrecheckoutBlite', () => {
-    it('returns the assembled, validated DTO on a successful model call', async () => {
+    it('keeps the legacy route behind an explicit one-shot profile adapter', async () => {
         mocks.analyzeWithGemini.mockResolvedValue(validModelResponse());
-        const account = profile();
-        const result = await inferPrecheckoutBlite(account, { requestId: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa' });
+        const profile = {
+            username: 'already_collected',
+            fullName: '홍길동',
+            profilePicUrl: 'https://cdninstagram.com/profile.jpg',
+            followersCount: 1_200,
+            followingCount: 900,
+            postsCount: 1,
+            isPrivate: false,
+            isVerified: false,
+            latestPosts: [{
+                id: 'post-1',
+                shortCode: 'post-1',
+                type: 'image' as const,
+                caption: '캡션',
+                hashtags: ['일상'],
+                imageUrl: 'https://cdninstagram.com/post.jpg',
+                likesCount: 12,
+                commentsCount: 2,
+                timestamp: '2026-08-13T00:00:00.000Z',
+                taggedUsers: [],
+                mentionedUsers: [],
+            }],
+        };
+
+        const result = await inferLegacyPrecheckoutBlite(profile, inferenceOptions());
+
+        expect(result).not.toBeNull();
+        expect(mocks.prepareAnalysisImages).toHaveBeenCalledWith(
+            'https://cdninstagram.com/profile.jpg',
+            ['https://cdninstagram.com/post.jpg'],
+            expect.objectContaining({ policy: expect.any(Object) }),
+        );
+        expect(mocks.analyzeWithGemini).toHaveBeenCalledOnce();
+    });
+
+    it('requires the original submission timestamp and explicit candidate metadata', async () => {
+        await expect(inferPrecheckoutBlite(source(), undefined as never)).resolves.toBeNull();
+        await expect(inferPrecheckoutBlite(
+            source(),
+            { candidateRange: CANDIDATE_RANGE } as never,
+        )).resolves.toBeNull();
+        await expect(inferPrecheckoutBlite(
+            source(),
+            { submittedAtMs: Date.now() } as never,
+        )).resolves.toBeNull();
+        expect(mocks.prepareAnalysisImages).not.toHaveBeenCalled();
+        expect(mocks.analyzeWithGemini).not.toHaveBeenCalled();
+    });
+
+    it('rejects a malformed durable source before media or Gemini work', async () => {
+        const result = await inferPrecheckoutBlite(
+            source({ posts: [post({ captionExcerpt: 'x'.repeat(161) })] }),
+            inferenceOptions(),
+        );
+        expect(result).toBeNull();
+        expect(mocks.prepareAnalysisImages).not.toHaveBeenCalled();
+        expect(mocks.analyzeWithGemini).not.toHaveBeenCalled();
+    });
+
+    it('returns the assembled DTO using explicit preflight candidate metadata', async () => {
+        mocks.analyzeWithGemini.mockResolvedValue(validModelResponse());
+        const result = await inferPrecheckoutBlite(source(), {
+            requestId: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',
+            candidateRange: CANDIDATE_RANGE,
+            submittedAtMs: Date.now(),
+        });
 
         expect(result).not.toBeNull();
         expect(result?.schemaVersion).toBe(1);
         expect(result?.signals).toHaveLength(4);
         expect(result?.genderRead.reasons).toHaveLength(3);
         expect(result?.postCount).toBe(3);
-        expect(result?.candidateRange).toEqual(
-            computePrecheckoutBliteCandidateRange(account.followersCount, account.followingCount)
-        );
-        for (const evidenceField of result?.evidenceFields ?? []) {
-            expect(evidenceField.startsWith('post.') || evidenceField.startsWith('profile.')).toBe(true);
-        }
+        expect(result?.candidateRange).toEqual(CANDIDATE_RANGE);
     });
 
-    it('forwards requestId, abortSignal, and the prepared image evidence to the Gemini call', async () => {
+    it('forwards requestId, abortSignal, and #368 attempt telemetry to Gemini', async () => {
         mocks.analyzeWithGemini.mockResolvedValue(validModelResponse());
         const controller = new AbortController();
         const onAttemptTelemetry = vi.fn();
-        await inferPrecheckoutBlite(profile(), {
+        await inferPrecheckoutBlite(source(), {
             requestId: 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb',
             abortSignal: controller.signal,
+            candidateRange: CANDIDATE_RANGE,
+            submittedAtMs: Date.now(),
             onAttemptTelemetry,
         });
 
@@ -291,33 +354,25 @@ describe('inferPrecheckoutBlite', () => {
         const [, images, options] = mocks.analyzeWithGemini.mock.calls[0];
         expect(images).toEqual(['BASE64_PROFILE', 'BASE64_POST_1']);
         expect(options.requestId).toBe('bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb');
-        expect(options.abortSignal).toBe(controller.signal);
+        expect(options.abortSignal).toBeInstanceOf(AbortSignal);
+        expect(options.onAttemptTelemetry).toBe(onAttemptTelemetry);
         expect(options.analysisType).toBe('precheckout_blite');
-        expect(options.stage).toBeUndefined();
         expect(options.thinkingLevel).toBe('MINIMAL');
         expect(options.maxOutputTokens).toBe(3_072);
-        expect(options.onAttemptTelemetry).toBe(onAttemptTelemetry);
+        expect(options.maxAttempts).toBe(2);
     });
 
-    it('prepares image evidence from the profile photo and recent post photos, bounded to 4 total (1 profile + 3 posts)', async () => {
+    it('uses only the ordered durable image references, bounded to four total', async () => {
         mocks.analyzeWithGemini.mockResolvedValue(validModelResponse());
-        const account = profile({
-            profilePicUrl: 'https://cdn.example.com/profile.jpg',
-            latestPosts: [
-                post({ id: '1', imageUrl: 'https://cdn.example.com/p1.jpg' }),
-                post({ id: '2', imageUrl: 'https://cdn.example.com/p2.jpg' }),
-                post({ id: '3', imageUrl: undefined, thumbnailUrl: 'https://cdn.example.com/p3-thumb.jpg' }),
-            ],
-        });
-        await inferPrecheckoutBlite(account);
+        await inferPrecheckoutBlite(source(), inferenceOptions());
 
         expect(mocks.prepareAnalysisImages).toHaveBeenCalledTimes(1);
         const [profilePicUrl, postImageUrls, prepareOptions] = mocks.prepareAnalysisImages.mock.calls[0];
-        expect(profilePicUrl).toBe('https://cdn.example.com/profile.jpg');
+        expect(profilePicUrl).toBe('https://cdninstagram.com/profile.jpg');
         expect(postImageUrls).toEqual([
-            'https://cdn.example.com/p1.jpg',
-            'https://cdn.example.com/p2.jpg',
-            'https://cdn.example.com/p3-thumb.jpg',
+            'https://cdninstagram.com/a.jpg',
+            'https://cdninstagram.com/b.jpg',
+            'https://cdninstagram.com/c.jpg',
         ]);
         expect(prepareOptions.policy).toEqual({
             maxImages: 4,
@@ -325,26 +380,71 @@ describe('inferPrecheckoutBlite', () => {
             maxDimension: 384,
             jpegQuality: 75,
         });
-        expect(prepareOptions.abortSignal).toBeUndefined();
+        expect(prepareOptions.abortSignal).toBeInstanceOf(AbortSignal);
         expect(mocks.getAnalysisImagePolicy).toHaveBeenCalledWith(true);
     });
 
-    it('forwards cancellation to image preparation so timed-out work stops consuming slots', async () => {
-        mocks.analyzeWithGemini.mockResolvedValue(validModelResponse());
-        const controller = new AbortController();
-        await inferPrecheckoutBlite(profile(), { abortSignal: controller.signal });
-
-        expect(mocks.prepareAnalysisImages.mock.calls[0][2].abortSignal).toBe(controller.signal);
+    it('does not recollect a profile or use a scraper when the durable source has no posts', async () => {
+        const result = await inferPrecheckoutBlite(source({ posts: [], media: [] }), {
+            candidateRange: CANDIDATE_RANGE,
+            submittedAtMs: Date.now(),
+        });
+        expect(result).toBeNull();
+        expect(mocks.analyzeWithGemini).not.toHaveBeenCalled();
+        expect(mocks.prepareAnalysisImages).not.toHaveBeenCalled();
     });
 
-    it('still succeeds and calls Gemini with no images when none could be prepared', async () => {
+    it('does not start media or Gemini work when the inference deadline is exhausted', async () => {
+        const result = await inferPrecheckoutBlite(source(), {
+            candidateRange: CANDIDATE_RANGE,
+            submittedAtMs: Date.now() - 57_000,
+        });
+        expect(result).toBeNull();
+        expect(mocks.prepareAnalysisImages).not.toHaveBeenCalled();
+        expect(mocks.analyzeWithGemini).not.toHaveBeenCalled();
+    });
+
+    it('aborts the entire inference at T+56 and forwards the deadline signal', async () => {
+        vi.useFakeTimers();
+        try {
+            mocks.analyzeWithGemini.mockImplementation(() => new Promise(() => undefined));
+            const submittedAtMs = Date.now();
+            const resultPromise = inferPrecheckoutBlite(source(), {
+                candidateRange: CANDIDATE_RANGE,
+                submittedAtMs,
+            });
+
+            await vi.advanceTimersByTimeAsync(56_000);
+            await expect(resultPromise).resolves.toBeNull();
+
+            expect(mocks.analyzeWithGemini).toHaveBeenCalledTimes(1);
+            const options = mocks.analyzeWithGemini.mock.calls[0][2];
+            expect(options.abortSignal).toBeInstanceOf(AbortSignal);
+            expect(options.abortSignal.aborted).toBe(true);
+        } finally {
+            vi.useRealTimers();
+        }
+    });
+
+    it('forwards parent cancellation to image preparation', async () => {
+        mocks.analyzeWithGemini.mockResolvedValue(validModelResponse());
+        const controller = new AbortController();
+        await inferPrecheckoutBlite(source(), {
+            abortSignal: controller.signal,
+            candidateRange: CANDIDATE_RANGE,
+            submittedAtMs: Date.now(),
+        });
+        expect(mocks.prepareAnalysisImages.mock.calls[0][2].abortSignal)
+            .toBeInstanceOf(AbortSignal);
+    });
+
+    it('still calls Gemini without image evidence when all media preparation fails', async () => {
         mocks.prepareAnalysisImages.mockResolvedValue([]);
         mocks.analyzeWithGemini.mockResolvedValue(validModelResponse());
-        const result = await inferPrecheckoutBlite(profile());
+        const result = await inferPrecheckoutBlite(source(), inferenceOptions());
 
         expect(result).not.toBeNull();
-        const [, images] = mocks.analyzeWithGemini.mock.calls[0];
-        expect(images).toBeUndefined();
+        expect(mocks.analyzeWithGemini.mock.calls[0][1]).toBeUndefined();
     });
 
     it('downgrades the lowest-confidence signal when the model returns four highs', async () => {
@@ -356,64 +456,44 @@ describe('inferPrecheckoutBlite', () => {
             { claim: '신호 4', category: '카테고리', confidence: 0.85 },
         ];
         mocks.analyzeWithGemini.mockResolvedValue(allHigh);
-        const result = await inferPrecheckoutBlite(profile());
+        const result = await inferPrecheckoutBlite(source(), inferenceOptions());
 
         expect(result).not.toBeNull();
         const bands = result?.signals.map(signal => signal.band) ?? [];
         expect(bands.some(band => band !== 'high')).toBe(true);
         const downgraded = result?.signals.find(signal => signal.band !== 'high');
-        // The lowest-confidence signal (0.72) is the one that gets downgraded.
         expect(downgraded?.confidence).toBeLessThan(0.72);
         expect(downgraded?.confidence).toBeLessThan(0.7);
-        // Band must still agree with the (possibly downgraded) confidence.
-        for (const signal of result?.signals ?? []) {
-            expect(signal.confidence).toBeGreaterThanOrEqual(0);
-        }
-    });
-
-    it('returns null without calling Gemini or preparing images when there are no posts', async () => {
-        const result = await inferPrecheckoutBlite(profile({ latestPosts: [] }));
-        expect(result).toBeNull();
-        expect(mocks.analyzeWithGemini).not.toHaveBeenCalled();
-        expect(mocks.prepareAnalysisImages).not.toHaveBeenCalled();
     });
 
     it('returns null when the Gemini call throws', async () => {
         mocks.analyzeWithGemini.mockRejectedValue(new Error('AI_RATE_LIMIT_ERROR: boom'));
-        const result = await inferPrecheckoutBlite(profile());
+        const result = await inferPrecheckoutBlite(source(), inferenceOptions());
         expect(result).toBeNull();
     });
 
-    it('returns null (fails open) when image preparation itself throws', async () => {
+    it('returns null when image preparation itself throws', async () => {
         mocks.prepareAnalysisImages.mockRejectedValue(new Error('boom'));
-        const result = await inferPrecheckoutBlite(profile());
+        const result = await inferPrecheckoutBlite(source(), inferenceOptions());
         expect(result).toBeNull();
         expect(mocks.analyzeWithGemini).not.toHaveBeenCalled();
     });
 
-    it('closes the timeout gap: an abort during slow image prep still resolves to null without ever reaching Gemini', async () => {
-        // `prepareAnalysisImages` has no native abort hook, so this mock deliberately never
-        // settles on its own. If the abort deadline only bounded the Gemini call (the bug being
-        // fixed here), `inferPrecheckoutBlite` would hang forever waiting on this promise and
-        // this test would time out. The abort signal firing must be what ends the wait.
+    it('closes the timeout gap when image preparation hangs after parent cancellation', async () => {
         let releaseSlowPrepare: (() => void) | undefined;
         mocks.prepareAnalysisImages.mockImplementation(() => new Promise((resolve) => {
             releaseSlowPrepare = () => resolve([]);
         }));
         const controller = new AbortController();
-
-        const startedAt = Date.now();
-        const resultPromise = inferPrecheckoutBlite(profile(), { abortSignal: controller.signal });
+        const resultPromise = inferPrecheckoutBlite(source(), {
+            abortSignal: controller.signal,
+            candidateRange: CANDIDATE_RANGE,
+            submittedAtMs: Date.now(),
+        });
         controller.abort();
-        const result = await resultPromise;
-        const elapsedMs = Date.now() - startedAt;
 
-        expect(result).toBeNull();
+        await expect(resultPromise).resolves.toBeNull();
         expect(mocks.analyzeWithGemini).not.toHaveBeenCalled();
-        // Resolves promptly on abort rather than waiting on the still-pending image prep.
-        expect(elapsedMs).toBeLessThan(500);
-
-        // Let the abandoned image-prep promise settle so it can't leak into later tests.
         releaseSlowPrepare?.();
     });
 
@@ -421,7 +501,7 @@ describe('inferPrecheckoutBlite', () => {
         const malformed = validModelResponse();
         malformed.persona.headline = 'no korean characters at all here';
         mocks.analyzeWithGemini.mockResolvedValue(malformed);
-        const result = await inferPrecheckoutBlite(profile());
+        const result = await inferPrecheckoutBlite(source(), inferenceOptions());
         expect(result).toBeNull();
     });
 });

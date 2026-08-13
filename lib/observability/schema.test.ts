@@ -67,6 +67,48 @@ describe('sanitizeOperationalEvent', () => {
         expect(JSON.stringify(sanitized)).not.toContain('private');
     });
 
+    it.each([
+        ['precheckout_blite.fallback_latched', 'terminal_before_48'],
+        ['precheckout_blite.fallback_latched', 'unresolved_at_48'],
+        ['precheckout_blite.fallback_latched', 'demo_error'],
+        ['precheckout_blite.demo_completed', 'completed'],
+        ['precheckout_blite.demo_failed', 'failed'],
+    ] as const)('keeps the bounded fallback/SLA outcome %s:%s without provider dimensions', (
+        event,
+        disposition,
+    ) => {
+        const sanitized = sanitizeOperationalEvent({
+            event,
+            severity: event.endsWith('failed') ? 'error' : 'info',
+            fields: {
+                preflight_id: UUIDS.preflight,
+                operation: 'precheckout_blite',
+                duration_ms: 12_000,
+                disposition,
+                username: 'private_username',
+                full_name: 'Private Full Name',
+                bio: 'private bio',
+                caption: 'private caption',
+                url: 'https://private.example/profile',
+                token: 'private token',
+                email: 'buyer@example.com',
+            },
+        });
+
+        expect(sanitized.message).toBe(event);
+        expect(sanitized.fields).toMatchObject({
+            event,
+            preflight_id: UUIDS.preflight,
+            operation: 'precheckout_blite',
+            duration_ms: 12_000,
+            disposition,
+        });
+        expect(sanitized.fields).not.toHaveProperty('provider');
+        expect(JSON.stringify(sanitized)).not.toMatch(
+            /private|buyer@example\.com/i,
+        );
+    });
+
     it('derives the envelope and preserves every allowed field with a safe value', () => {
         process.env.VERCEL_ENV = 'preview';
 
@@ -547,6 +589,9 @@ describe('sanitizeOperationalEvent', () => {
             'gemini.stage_completed',
             'gemini.stage_rate_limited',
             'gemini.stage_failed',
+            'precheckout_blite.fallback_latched',
+            'precheckout_blite.demo_completed',
+            'precheckout_blite.demo_failed',
         ];
 
         for (const event of eventNames) {

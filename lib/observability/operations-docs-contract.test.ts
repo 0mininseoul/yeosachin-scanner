@@ -178,6 +178,26 @@ describe('analytics and observability disclosure contract', () => {
         expect(operations).not.toMatch(/`ambiguous`|`cancel`/);
     });
 
+    it('documents bounded B-lite fallback and SLA outcomes without provider-attempt inflation', () => {
+        const operations = source('docs/axiom-observability-operations.md');
+
+        for (const event of [
+            'precheckout_blite.fallback_latched',
+            'precheckout_blite.demo_completed',
+            'precheckout_blite.demo_failed',
+        ]) expect(operations).toContain(event);
+        for (const disposition of [
+            'terminal_before_48',
+            'unresolved_at_48',
+            'demo_error',
+        ]) expect(operations).toContain(`\`${disposition}\``);
+        expect(operations).toMatch(/T\+48/);
+        expect(operations).toMatch(/T\+60/);
+        expect(operations).toMatch(/provider attempt|provider outcome/i);
+        expect(operations).toMatch(/cache hit|pending lease|access denial/i);
+        expect(operations).toMatch(/no provider|provider.*(?:없|not|금지)/i);
+    });
+
     it('documents the production B-lite terminal outcome query and fail-open response', () => {
         const operations = source('docs/axiom-observability-operations.md');
 

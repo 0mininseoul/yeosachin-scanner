@@ -43,6 +43,75 @@ describe('precheckout B-lite observability', () => {
     });
 
     it.each([
+        'terminal_before_48',
+        'unresolved_at_48',
+        'demo_error',
+    ] as const)('emits a bounded fallback latch for %s', reason => {
+        const observability = createPrecheckoutBliteObservability({
+            preflightId,
+            startedAtMs: 100,
+            now: () => 225,
+        });
+
+        observability.fallbackLatched(reason);
+
+        expect(mocks.emit).toHaveBeenCalledWith({
+            event: 'precheckout_blite.fallback_latched',
+            severity: 'info',
+            fields: {
+                preflight_id: preflightId,
+                operation: 'precheckout_blite',
+                duration_ms: 125,
+                disposition: reason,
+            },
+        });
+        const serialized = JSON.stringify(mocks.emit.mock.calls);
+        expect(serialized).not.toMatch(/username|full_name|bio|caption|url|token|email/i);
+    });
+
+    it('emits a bounded fallback demo completion outcome', () => {
+        const observability = createPrecheckoutBliteObservability({
+            preflightId,
+            startedAtMs: 100,
+            now: () => 225,
+        });
+
+        observability.demoCompleted();
+
+        expect(mocks.emit).toHaveBeenCalledWith({
+            event: 'precheckout_blite.demo_completed',
+            severity: 'info',
+            fields: {
+                preflight_id: preflightId,
+                operation: 'precheckout_blite',
+                duration_ms: 125,
+                disposition: 'completed',
+            },
+        });
+    });
+
+    it('emits a bounded fallback demo failure outcome', () => {
+        const observability = createPrecheckoutBliteObservability({
+            preflightId,
+            startedAtMs: 100,
+            now: () => 225,
+        });
+
+        observability.demoFailed();
+
+        expect(mocks.emit).toHaveBeenCalledWith({
+            event: 'precheckout_blite.demo_failed',
+            severity: 'error',
+            fields: {
+                preflight_id: preflightId,
+                operation: 'precheckout_blite',
+                duration_ms: 125,
+                disposition: 'failed',
+            },
+        });
+    });
+
+    it.each([
         ['configuration', 'VALIDATION_ERROR'],
         ['schema', 'VALIDATION_ERROR'],
         ['deadline', 'TIMEOUT'],

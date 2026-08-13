@@ -178,6 +178,13 @@ export function preflightTaskId(preflightId: string, generation: number): string
     return `preflight-${preflightId.toLowerCase()}-g${generation}`;
 }
 
+export function precheckoutBliteTaskId(preflightId: string): string {
+    if (!UUID_PATTERN.test(preflightId)) {
+        throw new Error('PREFLIGHT_TASKS_CONFIG_ERROR: invalid preflight id.');
+    }
+    return `preflight-blite-${preflightId.toLowerCase()}`;
+}
+
 export function freshAdmissionTaskId(
     preflightId: string,
     generation: number,
@@ -308,6 +315,40 @@ export async function enqueuePreflightTask(
                 // Do not terminalize retryable or outcome-ambiguous failures.
                 throw new PreflightTaskEnqueueError('replayable');
             }
+        }
+    }
+    throw new PreflightTaskEnqueueError('replayable');
+}
+
+export async function enqueuePrecheckoutBliteTask(
+    preflightId: string,
+    options: {
+        config?: PreflightTasksConfig;
+        client?: CloudTasksClientLike;
+    } = {}
+): Promise<'enqueued' | 'exists'> {
+    const config = options.config ?? getPreflightTasksConfig();
+    if (!config) {
+        throw new Error('PREFLIGHT_TASKS_CONFIG_ERROR: queue is not configured.');
+    }
+    const client = options.client ?? await getSharedTasksClient(config);
+    const taskId = precheckoutBliteTaskId(preflightId);
+    const parent = client.queuePath(config.project, config.location, config.queue);
+    const name = client.taskPath(config.project, config.location, config.queue, taskId);
+    const request = taskRequest({
+        kind: 'precheckout_blite',
+        preflightId: preflightId.toLowerCase(),
+    }, name, parent, config);
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+        try {
+            await client.createTask(request);
+            return 'enqueued';
+        } catch (error) {
+            if (isAlreadyExists(error)) return 'exists';
+            if (attempt === 0 && isTerminalCreateFailure(error)) {
+                throw new PreflightTaskEnqueueError('terminal');
+            }
+            if (attempt === 1) throw new PreflightTaskEnqueueError('replayable');
         }
     }
     throw new PreflightTaskEnqueueError('replayable');

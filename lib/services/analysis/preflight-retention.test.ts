@@ -6,6 +6,7 @@ import {
 
 const emptyBetaRetention = {
     providerCostReconciliationFailures: 0,
+    bliteSourcesPurged: 0,
     betaCreditRecovered: 0,
     betaCreditArchived: 0,
     betaCreditRecoveryFailures: 0,
@@ -15,20 +16,25 @@ const emptyBetaRetention = {
 } as const;
 
 describe('preflight retention maintenance', () => {
-    it('reconciles bounded paid runs before both retention RPCs', async () => {
+    it('purges bounded B-lite sources before parent and terminal preflight retention', async () => {
         const rpc = vi.fn()
             .mockResolvedValueOnce({ data: [], error: null })
+            .mockResolvedValueOnce({ data: 7, error: null })
             .mockResolvedValueOnce({ data: 12, error: null })
             .mockResolvedValueOnce({ data: 4, error: null });
         await expect(runPreflightRetention({ rpc })).resolves.toEqual({
             ...emptyBetaRetention,
             providerCosts: { eligible: 0, finalized: 0, failed: 0, hasMore: false },
+            bliteSourcesPurged: 7,
             expiredPurged: 12,
             terminalScrubbed: 4,
         });
         expect(rpc.mock.calls).toEqual([
             ['list_analysis_preflight_unreconciled_provider_runs', {
                 p_limit: 17,
+            }],
+            ['purge_expired_precheckout_blite_sources_v1', {
+                p_limit: PREFLIGHT_RETENTION_BATCH_LIMIT,
             }],
             ['purge_expired_analysis_v2_preflights', {
                 p_limit: PREFLIGHT_RETENTION_BATCH_LIMIT,
@@ -43,6 +49,7 @@ describe('preflight retention maintenance', () => {
         await expect(runPreflightRetention({
             rpc: vi.fn()
                 .mockResolvedValueOnce({ data: [], error: null })
+                .mockResolvedValueOnce({ data: 0, error: null })
                 .mockResolvedValueOnce({ data: 9999, error: null }),
         })).rejects.toThrow('invalid purge_expired_analysis_v2_preflights result');
     });
@@ -58,6 +65,10 @@ describe('preflight retention maintenance', () => {
                 events.push('purge');
                 return { data: 3, error: null };
             }
+            if (name === 'purge_expired_precheckout_blite_sources_v1') {
+                events.push('blite');
+                return { data: 1, error: null };
+            }
             events.push('scrub');
             return { data: 2, error: null };
         });
@@ -69,11 +80,12 @@ describe('preflight retention maintenance', () => {
         });
 
         expect(events).toEqual([
-            'provider', 'purge', 'recover', 'archive', 'scrub', 'refresh',
+            'provider', 'blite', 'purge', 'recover', 'archive', 'scrub', 'refresh',
         ]);
         expect(summary).toEqual({
             providerCosts: { eligible: 0, finalized: 0, failed: 0, hasMore: false },
             providerCostReconciliationFailures: 1,
+            bliteSourcesPurged: 1,
             expiredPurged: 3,
             terminalScrubbed: 2,
             betaCreditRecovered: 1,
@@ -88,6 +100,7 @@ describe('preflight retention maintenance', () => {
     it('reports a failed cost read while retention safely proceeds behind the SQL delete fence', async () => {
         const rpc = vi.fn()
             .mockResolvedValueOnce({ data: 1, error: null })
+            .mockResolvedValueOnce({ data: 2, error: null })
             .mockResolvedValueOnce({ data: 2, error: null });
         const providerRunStore = {
             listUnreconciled: vi.fn(async () => [{
@@ -119,11 +132,13 @@ describe('preflight retention maintenance', () => {
         })).resolves.toEqual({
             ...emptyBetaRetention,
             providerCosts: { eligible: 1, finalized: 0, failed: 1, hasMore: false },
-            expiredPurged: 1,
+            bliteSourcesPurged: 1,
+            expiredPurged: 2,
             terminalScrubbed: 2,
         });
         expect(providerRunStore.reconcileUsage).not.toHaveBeenCalled();
         expect(rpc.mock.calls.map(call => call[0])).toEqual([
+            'purge_expired_precheckout_blite_sources_v1',
             'purge_expired_analysis_v2_preflights',
             'scrub_terminal_analysis_v2_preflights',
         ]);
@@ -133,8 +148,9 @@ describe('preflight retention maintenance', () => {
         const events: string[] = [];
         const summary = await runPreflightRetention({
             rpc: vi.fn(async name => {
-                events.push(name === 'purge_expired_analysis_v2_preflights'
-                    ? 'purge' : 'scrub');
+                events.push(name === 'purge_expired_precheckout_blite_sources_v1'
+                    ? 'blite'
+                    : name === 'purge_expired_analysis_v2_preflights' ? 'purge' : 'scrub');
                 return { data: 0, error: null };
             }),
         }, {
@@ -146,7 +162,7 @@ describe('preflight retention maintenance', () => {
             refreshBetaCredit: async () => { events.push('refresh'); throw new Error('unavailable'); },
             archiveBetaCredit: async () => { events.push('archive'); return 1; },
         });
-        expect(events).toEqual(['purge', 'recover', 'archive', 'scrub', 'refresh']);
+        expect(events).toEqual(['blite', 'purge', 'recover', 'archive', 'scrub', 'refresh']);
         expect(summary).toMatchObject({
             betaCreditRecovered: 1,
             betaCreditArchived: 1,
@@ -182,6 +198,7 @@ describe('preflight retention maintenance', () => {
         const summary = await runPreflightRetention({
             rpc: vi.fn()
                 .mockResolvedValueOnce({ data: [], error: null })
+                .mockResolvedValueOnce({ data: 0, error: null })
                 .mockResolvedValueOnce({ data: 0, error: null })
                 .mockResolvedValueOnce({ data: 0, error: null }),
         }, {

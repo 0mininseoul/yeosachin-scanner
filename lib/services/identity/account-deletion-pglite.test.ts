@@ -1,6 +1,8 @@
-import { readFileSync } from 'node:fs';
+import { createHash } from 'node:crypto';
+import { readdirSync, readFileSync } from 'node:fs';
 import { afterAll, describe, expect, it } from 'vitest';
 import { PGlite } from '@electric-sql/pglite';
+import { pgcrypto } from '@electric-sql/pglite/contrib/pgcrypto';
 
 const migration = readFileSync(new URL(
     '../../../supabase/migrations/20260812140423_add_account_deletion_lifecycle.sql',
@@ -10,7 +12,14 @@ const hotfixMigration = readFileSync(new URL(
     '../../../supabase/migrations/20260812153818_fix_account_deletion_preflight_scrub.sql',
     import.meta.url,
 ), 'utf8');
-const db = await PGlite.create();
+const bliteMigrationName = readdirSync(new URL('../../../supabase/migrations/', import.meta.url))
+    .find(name => name.endsWith('_precheckout_blite_single_collection.sql'));
+if (!bliteMigrationName) throw new Error('PRECHECKOUT_BLITE_MIGRATION_MISSING');
+const bliteMigration = readFileSync(new URL(
+    `../../../supabase/migrations/${bliteMigrationName}`,
+    import.meta.url,
+), 'utf8');
+const db = await PGlite.create({ extensions: { pgcrypto } });
 
 const owner = '6d809496-1cb8-4e4f-a081-8efc14a7a64c';
 const other = '7d809496-1cb8-4e4f-a081-8efc14a7a64c';
@@ -19,6 +28,11 @@ const otherRequest = '9d809496-1cb8-4e4f-a081-8efc14a7a64c';
 
 await db.exec(`
 CREATE ROLE anon; CREATE ROLE authenticated; CREATE ROLE service_role;
+CREATE SCHEMA extensions;
+CREATE EXTENSION pgcrypto WITH SCHEMA extensions;
+CREATE OR REPLACE FUNCTION extensions.gen_random_uuid() RETURNS uuid LANGUAGE sql AS $$
+    SELECT '40000000-0000-4000-8000-000000000001'::uuid
+$$;
 CREATE TABLE public.users (
  id uuid primary key, email text not null unique, provider text not null, analysis_count int default 0,
  is_paid_user boolean default false, is_unlimited boolean default false, created_at timestamptz default now(),
@@ -56,11 +70,53 @@ CREATE TABLE public.analysis_preflights (
  exclusion_decision text, status text not null, created_at timestamptz not null default now(),
  updated_at timestamptz not null default now(), claimed_at timestamptz, dispatch_reserved_at timestamptz,
  dispatched_at timestamptz, exclusion_decided_at timestamptz, ready_at timestamptz, blocked_at timestamptz,
- consumed_at timestamptz, pii_scrubbed_at timestamptz,
+ consumed_at timestamptz, pii_scrubbed_at timestamptz, expires_at timestamptz not null default now() + interval '30 minutes',
+ target_input_hash varchar(64), lease_token uuid, lease_expires_at timestamptz,
+ target_followers_count integer, target_following_count integer, target_is_private boolean,
+ capacity_required_plan_id text, required_plan_id text, plan_cards_snapshot jsonb,
  CONSTRAINT analysis_preflights_timestamp_order_check CHECK (
   pii_scrubbed_at IS NULL OR status IN ('expired', 'consumed')
  )
 );
+CREATE TABLE public.analysis_preflight_provider_runs (
+ preflight_id uuid not null references public.analysis_preflights(id) on delete cascade,
+ operation_key text not null default 'target-profile-fallback',
+ input_hash varchar(64) not null, logical_provider text not null, status text not null, run_id varchar(64),
+ primary key(preflight_id, operation_key)
+);
+CREATE TABLE public.precheckout_blite_cache (
+ preflight_id uuid primary key references public.analysis_preflights(id) on delete cascade,
+ state text not null default 'pending' check (state in ('pending', 'complete')),
+ lease_token uuid not null, lease_expires_at timestamptz not null, dto jsonb,
+ created_at timestamptz not null default now(), updated_at timestamptz not null default now(), completed_at timestamptz,
+ constraint precheckout_blite_cache_payload_check check (
+  (state = 'pending' and dto is null and completed_at is null)
+  or (state = 'complete' and dto is not null and completed_at is not null)
+ ),
+ constraint precheckout_blite_cache_timestamp_check check (
+  updated_at >= created_at and lease_expires_at >= created_at
+  and (completed_at is null or completed_at >= created_at)
+ )
+);
+CREATE FUNCTION public.claim_precheckout_blite_v1(uuid) RETURNS jsonb LANGUAGE sql AS $$
+ SELECT '{"disposition":"pending"}'::jsonb
+$$;
+CREATE FUNCTION public.complete_precheckout_blite_v1(uuid,uuid,jsonb) RETURNS boolean LANGUAGE sql AS $$
+ SELECT FALSE
+$$;
+CREATE FUNCTION public.release_precheckout_blite_v1(uuid,uuid) RETURNS boolean LANGUAGE sql AS $$
+ SELECT FALSE
+$$;
+CREATE FUNCTION public.complete_analysis_v2_preflight(
+ p_preflight_id uuid,p_user_id uuid,p_claim_token uuid,p_target_full_name text,p_target_bio text,
+ p_target_profile_image_url text,p_target_followers_count integer,p_target_following_count integer,
+ p_target_is_private boolean,p_capacity_required_plan_id text,p_required_plan_id text,p_plan_cards_snapshot jsonb
+) RETURNS boolean LANGUAGE sql AS $$ SELECT TRUE $$;
+CREATE FUNCTION public.complete_anonymous_analysis_v2_preflight(
+ p_preflight_id uuid,p_claim_token uuid,p_target_full_name text,p_target_bio text,
+ p_target_profile_image_url text,p_target_followers_count integer,p_target_following_count integer,
+ p_target_is_private boolean,p_capacity_required_plan_id text,p_required_plan_id text,p_plan_cards_snapshot jsonb
+) RETURNS boolean LANGUAGE sql AS $$ SELECT TRUE $$;
 CREATE TABLE public.earlybird_orders (
  id uuid primary key, user_id uuid references public.users(id), target_instagram_id text not null,
  target_followers_count int not null, target_following_count int not null, exclusion_decision text not null,
@@ -74,6 +130,7 @@ CREATE TABLE public.earlybird_waitlist (id uuid primary key, user_id uuid refere
 `);
 await db.exec(migration);
 await db.exec(hotfixMigration);
+await db.exec(bliteMigration);
 
 describe('account deletion migration', () => {
     afterAll(async () => db.close());
@@ -97,6 +154,26 @@ describe('account deletion migration', () => {
             '4d809496-1cb8-4e4f-a081-8efc14a7a64c',$1,'target_owner','Target','private bio',
             'https://example.test/profile.jpg','skip','pending'
         )`, [owner]);
+        await db.query(`INSERT INTO public.analysis_preflight_provider_runs(
+            preflight_id,operation_key,input_hash,logical_provider,status,run_id
+        ) VALUES (
+            '4d809496-1cb8-4e4f-a081-8efc14a7a64c','target-profile-fallback',repeat('a',64),'apify','succeeded','ApifyRun123456'
+        )`);
+        await db.query(`INSERT INTO public.precheckout_blite_sources(
+            preflight_id,schema_version,target_input_hash,provider_run_id,provider_operation_key,provider_run_reference,
+            payload,payload_bytes,payload_hash,collected_at,expires_at
+        ) VALUES (
+            '4d809496-1cb8-4e4f-a081-8efc14a7a64c',1,repeat('a',64),
+            '4d809496-1cb8-4e4f-a081-8efc14a7a64c','target-profile-fallback','ApifyRun123456','{}'::jsonb,2,$1,
+            clock_timestamp(),clock_timestamp() + interval '10 minutes'
+        )`, [createHash('sha256').update('{}', 'utf8').digest('hex')]);
+        await db.query(`INSERT INTO public.precheckout_blite_cache(
+            preflight_id,state,lease_token,lease_expires_at,attempt_count,created_at,updated_at
+        ) VALUES (
+            '4d809496-1cb8-4e4f-a081-8efc14a7a64c','pending',
+            '40000000-0000-4000-8000-000000000002',clock_timestamp() + interval '2 minutes',
+            0,clock_timestamp(),clock_timestamp()
+        )`);
 
         await db.query(`SELECT public.begin_account_deletion_v1($1)`, [owner]);
         await db.query(`SELECT public.finalize_account_deletion_database_v1($1, '[]'::jsonb)`, [owner]);
@@ -120,6 +197,12 @@ describe('account deletion migration', () => {
             target_profile_image_url: null,
             pii_scrubbed_at: expect.any(Date),
         });
+        expect((await db.query(`SELECT
+            (SELECT count(*)::int FROM public.precheckout_blite_sources
+             WHERE preflight_id='4d809496-1cb8-4e4f-a081-8efc14a7a64c') AS sources,
+            (SELECT count(*)::int FROM public.precheckout_blite_cache
+             WHERE preflight_id='4d809496-1cb8-4e4f-a081-8efc14a7a64c') AS caches`)).rows[0])
+            .toEqual({ sources: 0, caches: 0 });
     });
 
     it('rejects operator self-deletion', async () => {

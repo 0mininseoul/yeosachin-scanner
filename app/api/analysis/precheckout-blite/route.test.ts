@@ -4,18 +4,8 @@ const mocks = vi.hoisted(() => ({
     createClient: vi.fn(),
     getUser: vi.fn(),
     findForOwner: vi.fn(),
-    readAnonymousAnalysisV2Preflight: vi.fn(),
-    getInstagramProfile: vi.fn(),
-    inferPrecheckoutBlite: vi.fn(),
-    claimBliteGeneration: vi.fn(),
-    completeBliteGeneration: vi.fn(),
-    releaseBliteGeneration: vi.fn(),
-    createScraperTelemetryHook: vi.fn(),
-    scraperTelemetryHook: vi.fn(),
-    createBliteObservability: vi.fn(),
-    bliteCompleted: vi.fn(),
-    bliteProfileCollectionFailed: vi.fn(),
-    bliteInferenceFailed: vi.fn(),
+    readAnonymous: vi.fn(),
+    readStatus: vi.fn(),
 }));
 
 vi.mock('@/lib/supabase/server', () => ({ createClient: mocks.createClient }));
@@ -23,78 +13,31 @@ vi.mock('@/lib/services/analysis/preflight', () => ({
     preflightStore: { findForOwner: mocks.findForOwner },
 }));
 vi.mock('@/lib/services/analysis/anonymous-preflight', () => ({
-    readAnonymousAnalysisV2Preflight: mocks.readAnonymousAnalysisV2Preflight,
-}));
-vi.mock('@/lib/services/instagram/scraper', () => ({
-    getInstagramProfile: mocks.getInstagramProfile,
-}));
-vi.mock('@/lib/services/instagram/supabase-telemetry', () => ({
-    createSupabaseScraperTelemetryHook: mocks.createScraperTelemetryHook,
-}));
-vi.mock('@/lib/services/precheckout/blite-inference', () => ({
-    inferPrecheckoutBlite: mocks.inferPrecheckoutBlite,
-}));
-vi.mock('@/lib/services/precheckout/blite-observability', () => ({
-    createPrecheckoutBliteObservability: mocks.createBliteObservability,
+    readAnonymousAnalysisV2Preflight: mocks.readAnonymous,
 }));
 vi.mock('@/lib/services/precheckout/blite-store', () => ({
-    precheckoutBliteStore: {
-        claim: mocks.claimBliteGeneration,
-        complete: mocks.completeBliteGeneration,
-        release: mocks.releaseBliteGeneration,
-    },
+    precheckoutBliteTerminalStore: { readStatus: mocks.readStatus },
 }));
 
-import { POST, __resetPrecheckoutBliteCacheForTest } from './route';
+import { POST, maxDuration } from './route';
 
 const preflightId = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa';
 const userId = 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb';
-const anonymousClaimToken = 'v1.anonymous-claim-token-fixture';
+const submittedAt = '2026-08-13T00:00:00.000Z';
+const deadlineAt = '2026-08-13T00:01:00.000Z';
 
-function request(body: unknown = { preflightId }, headers: Record<string, string> = {}) {
+function request(headers: Record<string, string> = {}) {
     return new Request('https://example.com/api/analysis/precheckout-blite', {
         method: 'POST',
         headers: { 'content-type': 'application/json', ...headers },
-        body: JSON.stringify(body),
+        body: JSON.stringify({ preflightId }),
     });
 }
 
-function storedReadyPreflight(overrides: { username?: string } = {}) {
+function ready() {
     return {
         preflightId,
         status: 'ready' as const,
-        expiresAt: new Date(Date.now() + 60_000).toISOString(),
-        blockedCode: null,
-        exclusionDecision: 'pending' as const,
-        readySnapshot: {
-            target: {
-                username: overrides.username ?? 'target_user',
-                fullName: null,
-                bio: null,
-                profileImageUrl: null,
-                followersCount: 1_200,
-                followingCount: 900,
-                isPrivate: false as const,
-            },
-            accessMode: 'standard',
-            capacityRequiredPlan: 'basic',
-            requiredPlan: 'basic',
-            plans: [],
-            pricingVersion: 'v1',
-        },
-    };
-}
-
-function deferred<T>() {
-    let resolve!: (value: T) => void;
-    const promise = new Promise<T>(resolver => { resolve = resolver; });
-    return { promise, resolve };
-}
-
-function storedNonReadyPreflight() {
-    return {
-        preflightId,
-        status: 'pending' as const,
         expiresAt: new Date(Date.now() + 60_000).toISOString(),
         blockedCode: null,
         exclusionDecision: 'pending' as const,
@@ -102,43 +45,19 @@ function storedNonReadyPreflight() {
     };
 }
 
-function profileWithPosts(overrides: Record<string, unknown> = {}) {
-    return {
-        username: 'target_user',
-        fullName: '홍길동',
-        bio: 'bio text',
-        externalUrl: 'https://example.com',
-        profilePicUrl: 'https://cdn.example.com/p.jpg',
-        followersCount: 1_200,
-        followingCount: 900,
-        postsCount: 12,
-        isPrivate: false,
-        isVerified: false,
-        latestPosts: [{
-            id: '1', shortCode: 'a', type: 'image', likesCount: 5, commentsCount: 1,
-            timestamp: '2026-08-01T00:00:00.000Z', taggedUsers: [], mentionedUsers: [], hashtags: [],
-        }],
-        ...overrides,
-    };
-}
-
-function validDto() {
+function dto() {
     return {
         schemaVersion: 1,
-        persona: { headline: '헤드라인 텍스트입니다', summary: '요약 텍스트입니다 한글 포함' },
+        persona: { headline: '요약', summary: '설명' },
         signals: [
-            { claim: '신호 1 텍스트', category: '카테고리', confidence: 0.82, band: 'high' },
-            { claim: '신호 2 텍스트', category: '카테고리', confidence: 0.62, band: 'medium' },
-            { claim: '신호 3 텍스트', category: '카테고리', confidence: 0.35, band: 'low' },
-            { claim: '신호 4 텍스트', category: '카테고리', confidence: 0.71, band: 'high' },
+            { claim: '신호 하나', category: '성향', confidence: 0.8, band: 'high' as const },
+            { claim: '신호 둘', category: '성향', confidence: 0.6, band: 'medium' as const },
+            { claim: '신호 셋', category: '성향', confidence: 0.4, band: 'low' as const },
+            { claim: '신호 넷', category: '성향', confidence: 0.7, band: 'high' as const },
         ],
-        candidateRange: { min: 3, max: 9 },
-        genderRead: {
-            likelyFemale: true,
-            confidence: 0.81,
-            reasons: ['이유 1 텍스트', '이유 2 텍스트', '이유 3 텍스트'],
-        },
-        postCount: 1,
+        candidateRange: { min: 0, max: 1 },
+        genderRead: { likelyFemale: false, confidence: 0, reasons: ['가', '나', '다'] },
+        postCount: 0,
         evidenceFields: ['post.caption'],
     };
 }
@@ -146,341 +65,60 @@ function validDto() {
 describe('POST /api/analysis/precheckout-blite', () => {
     beforeEach(() => {
         vi.clearAllMocks();
-        __resetPrecheckoutBliteCacheForTest();
         process.env.PRECHECKOUT_BLITE_ENABLED = 'true';
         mocks.createClient.mockResolvedValue({ auth: { getUser: mocks.getUser } });
         mocks.getUser.mockResolvedValue({ data: { user: { id: userId } }, error: null });
-        mocks.findForOwner.mockResolvedValue(storedReadyPreflight());
-        mocks.getInstagramProfile.mockResolvedValue(profileWithPosts());
-        mocks.inferPrecheckoutBlite.mockResolvedValue(validDto());
-        mocks.claimBliteGeneration.mockResolvedValue({ disposition: 'claimed', leaseToken: 'cccccccc-cccc-4ccc-8ccc-cccccccccccc' });
-        mocks.completeBliteGeneration.mockResolvedValue(undefined);
-        mocks.releaseBliteGeneration.mockResolvedValue(undefined);
-        mocks.createScraperTelemetryHook.mockReturnValue(mocks.scraperTelemetryHook);
-        mocks.createBliteObservability.mockReturnValue({
-            completed: mocks.bliteCompleted,
-            profileCollectionFailed: mocks.bliteProfileCollectionFailed,
-            inferenceFailed: mocks.bliteInferenceFailed,
-            inferenceAttempt: vi.fn(),
+        mocks.findForOwner.mockResolvedValue(ready());
+    });
+
+    it('is a 15-second status-only route and returns a bounded pending response', async () => {
+        mocks.readStatus.mockResolvedValue({ state: 'pending', submittedAt, deadlineAt });
+
+        const response = await POST(request());
+
+        expect(maxDuration).toBe(15);
+        expect(response.status).toBe(202);
+        expect(response.headers.get('cache-control')).toBe('no-store');
+        expect(await response.json()).toEqual({
+            state: 'pending',
+            submittedAt,
+            deadlineAt,
+            fallbackAt: '2026-08-13T00:00:48.000Z',
+            retryAfterMs: 1_000,
+        });
+        expect(mocks.readStatus).toHaveBeenCalledWith({ preflightId });
+    });
+
+    it('returns complete and terminal failed cache states without any generation work', async () => {
+        mocks.readStatus.mockResolvedValueOnce({
+            state: 'complete', submittedAt, deadlineAt,
+            completedAt: '2026-08-13T00:00:20.000Z',
+            dto: dto(),
+        }).mockResolvedValueOnce({
+            state: 'failed', submittedAt, deadlineAt, failedAt: '2026-08-13T00:00:30.000Z',
+        });
+
+        const complete = await POST(request());
+        const failed = await POST(request());
+        expect(complete.status).toBe(200);
+        expect((await complete.json()).state).toBe('complete');
+        expect(failed.status).toBe(200);
+        expect(await failed.json()).toEqual({
+            state: 'failed', submittedAt, deadlineAt,
+            fallbackAt: '2026-08-13T00:00:48.000Z',
         });
     });
 
-    it('responds 204 with no body when the flag is off', async () => {
-        delete process.env.PRECHECKOUT_BLITE_ENABLED;
-        const response = await POST(request());
-        expect(response.status).toBe(204);
-        expect(mocks.findForOwner).not.toHaveBeenCalled();
-    });
-
-    it('responds 204 for a malformed request body', async () => {
-        const response = await POST(request({ preflightId: 'not-a-uuid' }));
-        expect(response.status).toBe(204);
-        expect(mocks.findForOwner).not.toHaveBeenCalled();
-    });
-
-    it('responds 204 for a request with no body at all', async () => {
-        const response = await POST(new Request('https://example.com/api/analysis/precheckout-blite', {
-            method: 'POST',
-        }));
-        expect(response.status).toBe(204);
-    });
-
-    it('responds 204 for an unauthenticated caller with no anonymous claim token', async () => {
+    it('keeps anonymous claim access and fails open when cache is unavailable', async () => {
         mocks.getUser.mockResolvedValue({ data: { user: null }, error: null });
-        const response = await POST(request());
-        expect(response.status).toBe(204);
-        expect(mocks.findForOwner).not.toHaveBeenCalled();
-        expect(mocks.readAnonymousAnalysisV2Preflight).not.toHaveBeenCalled();
-    });
+        mocks.readAnonymous.mockResolvedValue(ready());
+        mocks.readStatus.mockResolvedValue(null);
 
-    it('responds 204 when the preflight is not found', async () => {
-        mocks.findForOwner.mockResolvedValue(null);
-        const response = await POST(request());
-        expect(response.status).toBe(204);
-        expect(mocks.getInstagramProfile).not.toHaveBeenCalled();
-    });
-
-    it('responds 204 when the preflight is not in the ready state', async () => {
-        mocks.findForOwner.mockResolvedValue(storedNonReadyPreflight());
-        const response = await POST(request());
-        expect(response.status).toBe(204);
-        expect(mocks.getInstagramProfile).not.toHaveBeenCalled();
-    });
-
-    it('responds 204 for an expired ready preflight before reading cache or scraping', async () => {
-        mocks.findForOwner.mockResolvedValue({
-            ...storedReadyPreflight(),
-            expiresAt: new Date(Date.now() - 1_000).toISOString(),
-        });
-        const response = await POST(request());
-        expect(response.status).toBe(204);
-        expect(mocks.getInstagramProfile).not.toHaveBeenCalled();
-    });
-
-    it('responds 204 when the profile cannot be fetched', async () => {
-        mocks.getInstagramProfile.mockResolvedValue(null);
-        const response = await POST(request());
-        expect(response.status).toBe(204);
-        expect(mocks.inferPrecheckoutBlite).not.toHaveBeenCalled();
-        expect(mocks.bliteProfileCollectionFailed).not.toHaveBeenCalled();
-        expect(mocks.bliteInferenceFailed).not.toHaveBeenCalled();
-    });
-
-    it('classifies a thrown profile collection failure without exposing its message', async () => {
-        const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
-        mocks.getInstagramProfile.mockRejectedValue(new Error('secret provider detail'));
-
-        const response = await POST(request());
+        const response = await POST(request({ 'x-preflight-claim-token': 'anonymous-claim' }));
 
         expect(response.status).toBe(204);
-        expect(warn).toHaveBeenCalledWith('precheckout_blite.unavailable', {
-            reason: 'profile_collection_failed_provider',
-        });
-        expect(JSON.stringify(warn.mock.calls)).not.toContain('secret provider detail');
-        expect(mocks.bliteProfileCollectionFailed).toHaveBeenCalledWith('provider');
-        expect(mocks.bliteInferenceFailed).not.toHaveBeenCalled();
-        warn.mockRestore();
-    });
-
-    it('classifies a thrown inference failure without exposing its message', async () => {
-        const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
-        mocks.inferPrecheckoutBlite.mockRejectedValue(new Error('secret model detail'));
-
-        const response = await POST(request());
-
-        expect(response.status).toBe(204);
-        expect(warn).toHaveBeenCalledWith('precheckout_blite.unavailable', {
-            reason: 'inference_failed',
-        });
-        expect(JSON.stringify(warn.mock.calls)).not.toContain('secret model detail');
-        expect(mocks.bliteInferenceFailed).toHaveBeenCalledTimes(1);
-        expect(mocks.bliteCompleted).not.toHaveBeenCalled();
-        warn.mockRestore();
-    });
-
-    it('responds 204 for a private profile', async () => {
-        mocks.getInstagramProfile.mockResolvedValue(profileWithPosts({ isPrivate: true }));
-        const response = await POST(request());
-        expect(response.status).toBe(204);
-        expect(mocks.inferPrecheckoutBlite).not.toHaveBeenCalled();
-        expect(mocks.bliteProfileCollectionFailed).not.toHaveBeenCalled();
-        expect(mocks.bliteInferenceFailed).not.toHaveBeenCalled();
-    });
-
-    it('responds 204 when the profile has no posts', async () => {
-        mocks.getInstagramProfile.mockResolvedValue(profileWithPosts({ latestPosts: [] }));
-        const response = await POST(request());
-        expect(response.status).toBe(204);
-        expect(mocks.inferPrecheckoutBlite).not.toHaveBeenCalled();
-        expect(mocks.bliteProfileCollectionFailed).not.toHaveBeenCalled();
-        expect(mocks.bliteInferenceFailed).not.toHaveBeenCalled();
-    });
-
-    it('responds 204 when inference returns null', async () => {
-        mocks.inferPrecheckoutBlite.mockResolvedValue(null);
-        const response = await POST(request());
-        expect(response.status).toBe(204);
-        expect(mocks.bliteInferenceFailed).toHaveBeenCalledTimes(1);
-        expect(mocks.bliteCompleted).not.toHaveBeenCalled();
-    });
-
-    it('responds 204 (never 5xx) when an unexpected error is thrown', async () => {
-        mocks.findForOwner.mockRejectedValue(new Error('boom'));
-        const response = await POST(request());
-        expect(response.status).toBe(204);
-    });
-
-    it('returns the DTO body on success with no identifying field', async () => {
-        const response = await POST(request());
-        expect(response.status).toBe(200);
-        const payload = await response.json();
-        expect(payload).toEqual(validDto());
-
-        const serialized = JSON.stringify(payload);
-        expect(serialized).not.toContain('target_user');
-        expect(serialized).not.toContain(preflightId);
-        expect(serialized).not.toContain('홍길동');
-        expect(serialized).not.toContain('bio text');
-        expect(serialized).not.toContain('example.com');
-        expect(serialized).not.toContain('1200');
-        expect(serialized).not.toContain('900');
-    });
-
-    it('returns a durable cached DTO without scraping', async () => {
-        mocks.claimBliteGeneration.mockResolvedValue({ disposition: 'complete', dto: validDto() });
-        const response = await POST(request());
-        expect(response.status).toBe(200);
-        expect(await response.json()).toEqual(validDto());
-        expect(mocks.getInstagramProfile).not.toHaveBeenCalled();
-        expect(mocks.createBliteObservability).not.toHaveBeenCalled();
-    });
-
-    it('fails open while another serverless instance owns the durable lease', async () => {
-        mocks.claimBliteGeneration.mockResolvedValue({ disposition: 'pending' });
-        const response = await POST(request());
-        expect(response.status).toBe(204);
-        expect(mocks.getInstagramProfile).not.toHaveBeenCalled();
-        expect(mocks.createBliteObservability).not.toHaveBeenCalled();
-    });
-
-    it('persists the generated DTO under the durable lease', async () => {
-        const response = await POST(request());
-        expect(response.status).toBe(200);
-        expect(mocks.completeBliteGeneration).toHaveBeenCalledWith({
-            preflightId,
-            leaseToken: 'cccccccc-cccc-4ccc-8ccc-cccccccccccc',
-            dto: validDto(),
-        });
-        expect(mocks.bliteCompleted).toHaveBeenCalledTimes(1);
-        expect(mocks.completeBliteGeneration.mock.invocationCallOrder[0]).toBeLessThan(
-            mocks.bliteCompleted.mock.invocationCallOrder[0],
+        expect(mocks.readAnonymous).toHaveBeenCalledWith(
+            preflightId, 'anonymous-claim', expect.objectContaining({ client: expect.anything() }),
         );
-    });
-
-    it('passes the lease-scoped Gemini attempt sink into inference', async () => {
-        const inferenceAttempt = vi.fn();
-        mocks.createBliteObservability.mockReturnValue({
-            completed: mocks.bliteCompleted,
-            profileCollectionFailed: mocks.bliteProfileCollectionFailed,
-            inferenceFailed: mocks.bliteInferenceFailed,
-            inferenceAttempt,
-        });
-
-        await POST(request());
-
-        expect(mocks.inferPrecheckoutBlite).toHaveBeenCalledWith(
-            expect.anything(),
-            expect.objectContaining({ onAttemptTelemetry: inferenceAttempt }),
-        );
-    });
-
-    it('passes the ready-snapshot username to the scraper, not an arbitrary value', async () => {
-        mocks.findForOwner.mockResolvedValue(storedReadyPreflight({ username: 'resolved_target' }));
-        mocks.getInstagramProfile.mockResolvedValue(profileWithPosts({ username: 'resolved_target' }));
-        await POST(request());
-        expect(mocks.getInstagramProfile).toHaveBeenCalledWith(
-            'resolved_target',
-            expect.objectContaining({
-                requestId: preflightId,
-                provider: 'apify',
-                fallback: false,
-                invocationDeadlineAtMs: expect.any(Number),
-                startCancellationSignal: expect.any(AbortSignal),
-                onTelemetry: mocks.scraperTelemetryHook,
-            })
-        );
-    });
-
-    it('coalesces concurrent requests for one preflight into one scrape and inference', async () => {
-        const pendingProfile = deferred<ReturnType<typeof profileWithPosts>>();
-        mocks.getInstagramProfile.mockReturnValue(pendingProfile.promise);
-
-        const firstPromise = POST(request());
-        const secondPromise = POST(request());
-        await vi.waitFor(() => expect(mocks.getInstagramProfile).toHaveBeenCalledTimes(1));
-
-        pendingProfile.resolve(profileWithPosts());
-        const [first, second] = await Promise.all([firstPromise, secondPromise]);
-        expect(first.status).toBe(200);
-        expect(second.status).toBe(200);
-        expect(mocks.getInstagramProfile).toHaveBeenCalledTimes(1);
-        expect(mocks.inferPrecheckoutBlite).toHaveBeenCalledTimes(1);
-    });
-
-    it('caches the DTO by preflightId so a repeat request does not re-run inference', async () => {
-        const first = await POST(request());
-        expect(first.status).toBe(200);
-        const second = await POST(request());
-        expect(second.status).toBe(200);
-
-        expect(mocks.getInstagramProfile).toHaveBeenCalledTimes(1);
-        expect(mocks.inferPrecheckoutBlite).toHaveBeenCalledTimes(1);
-        // Ownership is still re-verified on every request, cache hit or not.
-        expect(mocks.findForOwner).toHaveBeenCalledTimes(2);
-
-        const secondPayload = await second.json();
-        expect(secondPayload).toEqual(validDto());
-    });
-
-    // This screen sits before login and payment, so most real callers arrive here with no
-    // Supabase session at all. Access is proven the same way the existing preflight status
-    // route proves it: a short-lived signed claim token in `x-preflight-claim-token`, verified
-    // server-side by `readAnonymousAnalysisV2Preflight`.
-    describe('anonymous caller (no session)', () => {
-        beforeEach(() => {
-            mocks.getUser.mockResolvedValue({ data: { user: null }, error: null });
-            mocks.readAnonymousAnalysisV2Preflight.mockResolvedValue(storedReadyPreflight());
-        });
-
-        it('returns the success DTO for an anonymous caller with a valid claim on a ready preflight', async () => {
-            const response = await POST(request(
-                { preflightId },
-                { 'x-preflight-claim-token': anonymousClaimToken },
-            ));
-            expect(response.status).toBe(200);
-            const payload = await response.json();
-            expect(payload).toEqual(validDto());
-
-            expect(mocks.readAnonymousAnalysisV2Preflight).toHaveBeenCalledWith(
-                preflightId,
-                anonymousClaimToken,
-                expect.objectContaining({ client: expect.anything() }),
-            );
-            expect(mocks.findForOwner).not.toHaveBeenCalled();
-        });
-
-        it('responds 204 for an anonymous caller who cannot prove access to the preflight', async () => {
-            mocks.readAnonymousAnalysisV2Preflight.mockResolvedValue(null);
-            const response = await POST(request(
-                { preflightId },
-                { 'x-preflight-claim-token': anonymousClaimToken },
-            ));
-            expect(response.status).toBe(204);
-            expect(mocks.getInstagramProfile).not.toHaveBeenCalled();
-        });
-
-        it('responds 204 for an anonymous caller with no claim token at all', async () => {
-            const response = await POST(request());
-            expect(response.status).toBe(204);
-            expect(mocks.readAnonymousAnalysisV2Preflight).not.toHaveBeenCalled();
-        });
-
-        it('responds 204 for an anonymous caller on a non-ready preflight', async () => {
-            mocks.readAnonymousAnalysisV2Preflight.mockResolvedValue(storedNonReadyPreflight());
-            const response = await POST(request(
-                { preflightId },
-                { 'x-preflight-claim-token': anonymousClaimToken },
-            ));
-            expect(response.status).toBe(204);
-            expect(mocks.getInstagramProfile).not.toHaveBeenCalled();
-        });
-
-        it('responds 204 (never 4xx/5xx) when claim verification itself throws', async () => {
-            mocks.readAnonymousAnalysisV2Preflight.mockRejectedValue(
-                new Error('ANONYMOUS_PREFLIGHT_CLAIM_INVALID')
-            );
-            const response = await POST(request(
-                { preflightId },
-                { 'x-preflight-claim-token': anonymousClaimToken },
-            ));
-            expect(response.status).toBe(204);
-        });
-
-        it('re-verifies the anonymous claim on every request, including cache hits', async () => {
-            const first = await POST(request(
-                { preflightId },
-                { 'x-preflight-claim-token': anonymousClaimToken },
-            ));
-            expect(first.status).toBe(200);
-            const second = await POST(request(
-                { preflightId },
-                { 'x-preflight-claim-token': anonymousClaimToken },
-            ));
-            expect(second.status).toBe(200);
-
-            expect(mocks.inferPrecheckoutBlite).toHaveBeenCalledTimes(1);
-            // Ownership/claim is still re-verified on every request, cache hit or not.
-            expect(mocks.readAnonymousAnalysisV2Preflight).toHaveBeenCalledTimes(2);
-        });
     });
 });

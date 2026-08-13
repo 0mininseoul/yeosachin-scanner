@@ -50,6 +50,8 @@ export interface SecureImageDownloadOptions {
     timeoutMs: number;
     maxRedirects?: number;
     headers?: HeadersInit;
+    /** Parent cancellation/deadline from the bounded analysis operation. */
+    signal?: AbortSignal;
 }
 
 export interface SecureImageDownload {
@@ -309,7 +311,8 @@ interface ValidatedRemoteImageUrl {
 async function resolveAllowedRemoteImageUrl(
     rawUrl: string,
     allowedHostSuffixes: readonly string[],
-    resolveHostname: ResolveHostname = defaultResolveHostname
+    resolveHostname: ResolveHostname = defaultResolveHostname,
+    signal?: AbortSignal,
 ): Promise<ValidatedRemoteImageUrl> {
     if (typeof rawUrl !== 'string' || rawUrl.length === 0 || rawUrl.length > 8_192) {
         secureImageFetchError('invalid_url', 'permanent', 'Image URL is invalid');
@@ -354,8 +357,35 @@ async function resolveAllowedRemoteImageUrl(
 
     let addresses: ResolvedAddress[];
     try {
-        addresses = await resolveHostname(hostname);
-    } catch {
+        if (signal?.aborted) {
+            throw new SecureImageFetchError('timeout', 'transient', 'Image host lookup cancelled');
+        }
+        const lookup = resolveHostname(hostname);
+        if (!signal) {
+            addresses = await lookup;
+        } else {
+            let onAbort: (() => void) | undefined;
+            try {
+                addresses = await Promise.race([
+                    lookup,
+                    new Promise<never>((_resolve, reject) => {
+                        onAbort = () => reject(new SecureImageFetchError(
+                            'timeout',
+                            'transient',
+                            'Image host lookup cancelled',
+                        ));
+                        signal.addEventListener('abort', onAbort, { once: true });
+                        if (signal.aborted) onAbort();
+                    }),
+                ]);
+            } finally {
+                if (onAbort) signal.removeEventListener('abort', onAbort);
+            }
+        }
+    } catch (error) {
+        if (error instanceof SecureImageFetchError) {
+            throw error;
+        }
         return secureImageFetchError(
             'network_failure',
             'transient',
@@ -387,12 +417,14 @@ async function resolveAllowedRemoteImageUrl(
 export async function validateAllowedRemoteImageUrl(
     rawUrl: string,
     allowedHostSuffixes: readonly string[],
-    resolveHostname: ResolveHostname = defaultResolveHostname
+    resolveHostname: ResolveHostname = defaultResolveHostname,
+    signal?: AbortSignal,
 ): Promise<URL> {
     return (await resolveAllowedRemoteImageUrl(
         rawUrl,
         allowedHostSuffixes,
-        resolveHostname
+        resolveHostname,
+        signal,
     )).url;
 }
 
@@ -416,6 +448,7 @@ export async function downloadSecureImage(
         timeoutMs,
         maxRedirects = 3,
         headers,
+        signal: parentSignal,
     } = options;
     assertPositiveInteger(maxBytes, 'maxBytes');
     assertPositiveInteger(timeoutMs, 'timeoutMs');
@@ -428,8 +461,23 @@ export async function downloadSecureImage(
     }
 
     const controller = new AbortController();
+    const onParentAbort = () => {
+        controller.abort(parentSignal?.reason ?? new Error('IMAGE_DOWNLOAD_ABORTED'));
+    };
+    if (parentSignal) {
+        if (parentSignal.aborted) onParentAbort();
+        else parentSignal.addEventListener('abort', onParentAbort, { once: true });
+    }
     const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
     const abortPromise = new Promise<never>((_resolve, reject) => {
+        if (controller.signal.aborted) {
+            reject(new SecureImageFetchError(
+                'timeout',
+                'transient',
+                'Image download was cancelled',
+            ));
+            return;
+        }
         controller.signal.addEventListener('abort', () => {
             reject(new SecureImageFetchError(
                 'timeout',
@@ -441,7 +489,7 @@ export async function downloadSecureImage(
 
     try {
         let current = await Promise.race([
-            resolveAllowedRemoteImageUrl(rawUrl, allowedHostSuffixes, resolveHostname),
+            resolveAllowedRemoteImageUrl(rawUrl, allowedHostSuffixes, resolveHostname, controller.signal),
             abortPromise,
         ]);
         const visited = new Set<string>();
@@ -486,7 +534,8 @@ export async function downloadSecureImage(
                     resolveAllowedRemoteImageUrl(
                         nextUrl.href,
                         allowedHostSuffixes,
-                        resolveHostname
+                        resolveHostname,
+                        controller.signal,
                     ),
                     abortPromise,
                 ]);
@@ -601,5 +650,6 @@ export async function downloadSecureImage(
         );
     } finally {
         clearTimeout(timeoutId);
+        parentSignal?.removeEventListener('abort', onParentAbort);
     }
 }

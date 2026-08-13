@@ -6,6 +6,7 @@ const mocks = vi.hoisted(() => ({
     prepareBeta: vi.fn(),
     enqueue: vi.fn(),
     processAdmission: vi.fn(),
+    runBlite: vi.fn(),
     settleBetaCredit: vi.fn(),
     refreshBetaCredit: vi.fn(),
     verify: vi.fn(),
@@ -37,6 +38,9 @@ vi.mock('@/lib/services/analysis/preflight', async (importOriginal) => {
 });
 vi.mock('@/lib/services/analysis/fresh-plan-admission', () => ({
     processAnalysisV2FreshAdmission: mocks.processAdmission,
+}));
+vi.mock('@/lib/services/precheckout/blite-runner', () => ({
+    runPrecheckoutBlite: mocks.runBlite,
 }));
 vi.mock('@/lib/services/analysis/preflight-tasks', () => ({
     getPreflightTasksConfig: mocks.getConfig,
@@ -93,6 +97,7 @@ describe('preflight worker route', () => {
         mocks.prepareBeta.mockResolvedValue('prepared');
         mocks.enqueue.mockResolvedValue('enqueued');
         mocks.processAdmission.mockResolvedValue('ready');
+        mocks.runBlite.mockResolvedValue('complete');
         mocks.settleBetaCredit.mockResolvedValue(false);
         mocks.refreshBetaCredit.mockResolvedValue(undefined);
     });
@@ -229,6 +234,15 @@ describe('preflight worker route', () => {
             expect.objectContaining({ betaCreditCoordinator: expect.any(Object) })
         );
         expect(mocks.process).not.toHaveBeenCalled();
+    });
+
+    it('runs the trusted B-lite task without invoking the profile preflight worker', async () => {
+        const response = await POST(request({ preflightId, kind: 'precheckout_blite' }));
+
+        expect(response.status).toBe(200);
+        expect(mocks.runBlite).toHaveBeenCalledWith(preflightId);
+        expect(mocks.process).not.toHaveBeenCalled();
+        await expect(response.json()).resolves.toEqual({ status: 'complete' });
     });
 
     it('prepares beta credit only with the persisted generation/token fence', async () => {

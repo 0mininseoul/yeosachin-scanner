@@ -27,6 +27,7 @@ interface RetentionRpcClient {
 export interface PreflightRetentionSummary {
     providerCosts: PreflightProviderCostReconciliationResult;
     providerCostReconciliationFailures: number;
+    bliteSourcesPurged: number;
     expiredPurged: number;
     terminalScrubbed: number;
     betaCreditRecovered: number;
@@ -112,6 +113,13 @@ export async function runPreflightRetention(
         // is retried later and cannot starve beta settlement or PII retention.
         providerCostReconciliationFailures = 1;
     }
+    // Source evidence has the shortest TTL and must remain purgeable even while
+    // the B-lite cohort is disabled. Run it before parent/terminal scrubbing.
+    const bliteSourcesPurged = await runRpc(
+        client,
+        'purge_expired_precheckout_blite_sources_v1',
+        PREFLIGHT_RETENTION_BATCH_LIMIT
+    );
     const expiredPurged = await runRpc(
         client,
         'purge_expired_analysis_v2_preflights',
@@ -167,6 +175,7 @@ export async function runPreflightRetention(
     return {
         providerCosts,
         providerCostReconciliationFailures,
+        bliteSourcesPurged,
         expiredPurged,
         terminalScrubbed,
         betaCreditRecovered,

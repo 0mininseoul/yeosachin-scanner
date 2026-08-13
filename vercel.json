@@ -29,8 +29,11 @@
         "app/api/analysis/preflight/retention/route.ts": {
             "maxDuration": 60
         },
+        "app/api/analysis/preflight/worker/route.ts": {
+            "maxDuration": 75
+        },
         "app/api/analysis/precheckout-blite/route.ts": {
-            "maxDuration": 90
+            "maxDuration": 15
         }
     },
     "crons": [

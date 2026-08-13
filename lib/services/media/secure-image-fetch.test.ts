@@ -62,6 +62,24 @@ describe('secure image URL validation', () => {
         )).rejects.toThrow('non-public');
     });
 
+    it('cancels hostname validation while DNS resolution is pending', async () => {
+        const controller = new AbortController();
+        const resolver: ResolveHostname = () => new Promise(() => undefined);
+        const validation = validateAllowedRemoteImageUrl(
+            'https://cdninstagram.com/image.jpg',
+            INSTAGRAM_MEDIA_HOST_SUFFIXES,
+            resolver,
+            controller.signal,
+        );
+
+        controller.abort();
+
+        await expect(validation).rejects.toMatchObject({
+            reason: 'timeout',
+            disposition: 'transient',
+        });
+    });
+
     it('recognizes private, link-local, mapped, and public network addresses', () => {
         expect(isPublicNetworkAddress('10.0.0.1')).toBe(false);
         expect(isPublicNetworkAddress('169.254.1.1')).toBe(false);
@@ -401,6 +419,25 @@ describe('secure image downloads', () => {
             maxBytes: 100,
             timeoutMs: 10,
         })).rejects.toThrow('timed out');
+    });
+
+    it('aborts DNS validation through the secure download boundary', async () => {
+        const controller = new AbortController();
+        const resolver: ResolveHostname = () => new Promise(() => undefined);
+        const download = downloadSecureImage('https://cdninstagram.com/stalled-dns.jpg', {
+            allowedHostSuffixes: INSTAGRAM_MEDIA_HOST_SUFFIXES,
+            resolveHostname: resolver,
+            signal: controller.signal,
+            maxBytes: 100,
+            timeoutMs: 1_000,
+        });
+
+        controller.abort();
+
+        await expect(download).rejects.toMatchObject({
+            reason: 'timeout',
+            disposition: 'transient',
+        });
     });
 
     it('returns a bounded retry disposition without exposing the requested URL', async () => {
