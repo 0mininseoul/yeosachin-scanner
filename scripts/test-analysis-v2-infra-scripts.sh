@@ -279,7 +279,7 @@ case "$state" in
     enqueuer_identity_ready="true"
     bucket_ready="true"
     ;;
-  broad|storage_broad|secret_broad|vertex_admin|keyed|build_broad|build_keyed|enqueuer_broad|enqueuer_keyed|failed_latest|old_traffic|unpromoted_latest|runtime_env_drift|runtime_admission_env|runtime_legacy_gate_env|runtime_selfhosted_global_gate_drift|runtime_selfhosted_global_interval_drift|runtime_selfhosted_response_guard_drift|credential_override|credential_key_base64|plaintext_secret|secret_ref_drift|slot_drift|runtime_sidecar|runtime_placement|runtime_duplicate_env)
+  broad|storage_broad|secret_broad|vertex_admin|keyed|build_broad|build_keyed|enqueuer_broad|enqueuer_keyed|failed_latest|old_traffic|unpromoted_latest|runtime_env_drift|runtime_blite_missing|runtime_blite_enabled_drift|runtime_blite_rollout_drift|runtime_admission_env|runtime_legacy_gate_env|runtime_selfhosted_global_gate_drift|runtime_selfhosted_global_interval_drift|runtime_selfhosted_response_guard_drift|credential_override|credential_key_base64|plaintext_secret|secret_ref_drift|slot_drift|runtime_sidecar|runtime_placement|runtime_duplicate_env)
     identity_ready="true"
     vertex_ready="true"
     build_identity_ready="true"
@@ -289,7 +289,9 @@ case "$state" in
     enqueuer_identity_ready="true"
     if [[ "$state" == "failed_latest" || "$state" == "old_traffic" \
       || "$state" == "unpromoted_latest" \
-      || "$state" == "runtime_env_drift" || "$state" == "credential_override" \
+      || "$state" == "runtime_env_drift" || "$state" == "runtime_blite_missing" \
+      || "$state" == "runtime_blite_enabled_drift" || "$state" == "runtime_blite_rollout_drift" \
+      || "$state" == "credential_override" \
       || "$state" == "credential_key_base64" || "$state" == "plaintext_secret" \
       || "$state" == "secret_ref_drift" || "$state" == "slot_drift" \
       || "$state" == "runtime_sidecar" || "$state" == "runtime_placement" \
@@ -691,12 +693,17 @@ case "$command_line" in
       [[ -f "$runtime_manifest" \
         && "$runtime_manifest" != "${ANALYSIS_V2_WORKER_ENV_VARS_FILE:-}" \
         && ! -w "$runtime_manifest" ]] || exit 93
-      jq -e --arg slot "${ANALYSIS_V2_APIFY_API_TOKEN_SLOT:-}" '
+      jq -e \
+        --arg slot "${ANALYSIS_V2_APIFY_API_TOKEN_SLOT:-}" \
+        --arg blite_enabled "${PRECHECKOUT_BLITE_ENABLED:-false}" \
+        --arg blite_rollout_percent "${PRECHECKOUT_BLITE_ROLLOUT_PERCENT:-0}" '
         .ANALYSIS_V2_MEDIA_ARTIFACT_BUCKET == "test-project-analysis-v2-media"
           and .ANALYSIS_V2_APIFY_API_TOKEN_SLOT == $slot
           and .BETATEST_FREE_POOL_ENABLED == "false"
           and .BETATEST_FREE_POOL_MAX_SNAPSHOT_AGE_SECONDS == "300"
           and .BETATEST_FREE_POOL_REFRESH_INTERVAL_SECONDS == "60"
+          and .PRECHECKOUT_BLITE_ENABLED == $blite_enabled
+          and .PRECHECKOUT_BLITE_ROLLOUT_PERCENT == $blite_rollout_percent
           and .SELFHOSTED_PROFILE_GLOBAL_GATE_ENABLED == "true"
           and .SELFHOSTED_PROFILE_GLOBAL_MIN_INTERVAL_MS == "750"
           and .SELFHOSTED_PROFILE_GLOBAL_RESPONSE_GUARD_MS == "100"
@@ -706,6 +713,10 @@ case "$command_line" in
       source_runtime_slot_applied='true'
     else
       [[ ",$source_runtime_env," == *",ANALYSIS_V2_MEDIA_ARTIFACT_BUCKET=test-project-analysis-v2-media,"* ]] \
+        || exit 93
+      [[ ",$source_runtime_env," == *",PRECHECKOUT_BLITE_ENABLED=${PRECHECKOUT_BLITE_ENABLED:-false},"* ]] \
+        || exit 93
+      [[ ",$source_runtime_env," == *",PRECHECKOUT_BLITE_ROLLOUT_PERCENT=${PRECHECKOUT_BLITE_ROLLOUT_PERCENT:-0},"* ]] \
         || exit 93
       if [[ ",$source_runtime_env," == *",ANALYSIS_V2_APIFY_API_TOKEN_SLOT=${ANALYSIS_V2_APIFY_API_TOKEN_SLOT:-},"* ]]; then
         source_runtime_slot_applied='true'
@@ -890,6 +901,8 @@ case "$command_line" in
       runtime_slot="${FAKE_GCLOUD_RUNTIME_SLOT:-quinary}"
       worker_gate='false'
       recovery_gate='false'
+      precheckout_blite_enabled="${FAKE_GCLOUD_PRECHECKOUT_BLITE_ENABLED:-false}"
+      precheckout_blite_rollout_percent="${FAKE_GCLOUD_PRECHECKOUT_BLITE_ROLLOUT_PERCENT:-0}"
       selfhosted_global_gate='true'
       selfhosted_global_interval='750'
       selfhosted_response_guard='100'
@@ -916,6 +929,9 @@ case "$command_line" in
       [[ "$state" != "old_traffic" ]] || traffic_revision='analysis-worker-00001'
       [[ "$state" != "unpromoted_latest" ]] || latest_created='analysis-worker-unpromoted'
       [[ "$state" != "runtime_env_drift" ]] || runtime_queue='wrong-v2-queue'
+      [[ "$state" != "runtime_blite_missing" ]] || precheckout_blite_enabled=''
+      [[ "$state" != "runtime_blite_enabled_drift" ]] || precheckout_blite_enabled='true'
+      [[ "$state" != "runtime_blite_rollout_drift" ]] || precheckout_blite_rollout_percent='1'
       [[ "$state" != "credential_override" ]] || credential_name='GOOGLE_APPLICATION_CREDENTIALS'
       [[ "$state" != "credential_key_base64" ]] || credential_name='GOOGLE_SERVICE_ACCOUNT_KEY_BASE64'
       [[ "$state" != "slot_drift" ]] || runtime_slot='primary'
@@ -979,6 +995,8 @@ case "$command_line" in
         --arg runtime_slot "$runtime_slot" \
         --arg worker_gate "$worker_gate" \
         --arg recovery_gate "$recovery_gate" \
+        --arg precheckout_blite_enabled "$precheckout_blite_enabled" \
+        --arg precheckout_blite_rollout_percent "$precheckout_blite_rollout_percent" \
         --arg automatic_fulfillment_gate "$automatic_fulfillment_gate" \
         --arg selfhosted_global_gate "$selfhosted_global_gate" \
         --arg selfhosted_global_interval "$selfhosted_global_interval" \
@@ -999,10 +1017,10 @@ case "$command_line" in
         --argjson supabase_plaintext "$supabase_plaintext" \
         --argjson sidecar "$sidecar" \
         --argjson placement "$placement" \
-      --argjson duplicate_env "$duplicate_env" \
-      --argjson admission_env "$admission_env" \
-      --argjson legacy_gate_env "$legacy_gate_env" \
-      --argjson traffic_tagged "${FAKE_GCLOUD_TRAFFIC_TAGGED:-false}" '
+        --argjson duplicate_env "$duplicate_env" \
+        --argjson admission_env "$admission_env" \
+        --argjson legacy_gate_env "$legacy_gate_env" \
+        --argjson traffic_tagged "${FAKE_GCLOUD_TRAFFIC_TAGGED:-false}" '
         {
           metadata: {
             name: $service,
@@ -1045,6 +1063,8 @@ case "$command_line" in
                   {name: "ANALYSIS_V2_TASKS_ENABLED", value: "true"},
                   {name: "ANALYSIS_V2_WORKER_ENABLED", value: $worker_gate},
                   {name: "ANALYSIS_V2_RECOVERY_ENABLED", value: $recovery_gate},
+                  {name: "PRECHECKOUT_BLITE_ENABLED", value: $precheckout_blite_enabled},
+                  {name: "PRECHECKOUT_BLITE_ROLLOUT_PERCENT", value: $precheckout_blite_rollout_percent},
                   {name: "EARLYBIRD_AUTOMATIC_FULFILLMENT_ENABLED", value: $automatic_fulfillment_gate},
                   {name: "ANALYSIS_V2_TASKS_PROJECT", value: "test-project"},
                   {name: "ANALYSIS_V2_TASKS_LOCATION", value: "asia-northeast3"},
@@ -1753,6 +1773,13 @@ cat >"$temp_dir/runtime-legacy-gate.env" <<'EOF'
 ANALYSIS_V2_MEDIA_ARTIFACT_BUCKET="test-project-analysis-v2-media"
 ANALYSIS_V2_APIFY_API_TOKEN_SLOT="quinary"
 ANALYSIS_V2_WORKER_EXECUTION_ENABLED="true"
+EOF
+
+cat >"$temp_dir/runtime-blite-gate.env" <<'EOF'
+ANALYSIS_V2_MEDIA_ARTIFACT_BUCKET="test-project-analysis-v2-media"
+ANALYSIS_V2_APIFY_API_TOKEN_SLOT="quinary"
+PRECHECKOUT_BLITE_ENABLED="true"
+PRECHECKOUT_BLITE_ROLLOUT_PERCENT="1"
 EOF
 
 repo_source_commit="$(git -C "$script_dir/.." rev-parse --verify 'HEAD^{commit}')"
@@ -2833,6 +2860,30 @@ assert_contains "$temp_dir/worker-independent-gates.out" \
 assert_not_contains "$temp_dir/worker-independent-gates.out" \
   "ANALYSIS_V2_WORKER_ENABLED=true\\,ANALYSIS_V2_RECOVERY_ENABLED=true"
 
+# B-lite is a nonsecret worker contract, not a Vercel-only setting. Its default
+# must be made explicit on the final immutable-image update so a source deploy
+# cannot leave an older worker revision without the safe off/zero values.
+env "${common_env[@]}" 'FAKE_GCLOUD_STATE=ready' \
+  bash "$script_dir/deploy-analysis-v2-worker.sh" --dry-run \
+  >"$temp_dir/worker-blite-default-contract.out"
+assert_contains "$temp_dir/worker-blite-default-contract.out" \
+  "PRECHECKOUT_BLITE_ENABLED=false\\,PRECHECKOUT_BLITE_ROLLOUT_PERCENT=0"
+blite_default_contract_count="$(LC_ALL=C grep -Fc -- \
+  'PRECHECKOUT_BLITE_ENABLED=false\,PRECHECKOUT_BLITE_ROLLOUT_PERCENT=0' \
+  "$temp_dir/worker-blite-default-contract.out" || true)"
+[[ "$blite_default_contract_count" == "2" ]] \
+  || fail "B-lite defaults were not present in both source deploy and final update commands"
+
+env "${common_env[@]}" 'FAKE_GCLOUD_STATE=ready' \
+  'PRECHECKOUT_BLITE_ENABLED=true' \
+  'PRECHECKOUT_BLITE_ROLLOUT_PERCENT=1' \
+  'FAKE_GCLOUD_PRECHECKOUT_BLITE_ENABLED=true' \
+  'FAKE_GCLOUD_PRECHECKOUT_BLITE_ROLLOUT_PERCENT=1' \
+  bash "$script_dir/deploy-analysis-v2-worker.sh" --dry-run \
+  >"$temp_dir/worker-blite-custom-contract.out"
+assert_contains "$temp_dir/worker-blite-custom-contract.out" \
+  "PRECHECKOUT_BLITE_ENABLED=true\\,PRECHECKOUT_BLITE_ROLLOUT_PERCENT=1"
+
 if env "${common_env[@]}" 'FAKE_GCLOUD_STATE=prerequisites_ready' \
   'ANALYSIS_V2_WORKER_EXECUTION_ENABLED=true' \
   "ANALYSIS_V2_WORKER_ENV_VARS_FILE=$temp_dir/runtime.env" \
@@ -2893,6 +2944,30 @@ for invalid_gate in ANALYSIS_V2_WORKER_ENABLED ANALYSIS_V2_RECOVERY_ENABLED; do
   fi
   assert_contains "$temp_dir/invalid-$invalid_gate.out" \
     "$invalid_gate must be true or false"
+done
+
+for invalid_blite_enabled in yes TRUE 1; do
+  if env "${common_env[@]}" 'FAKE_GCLOUD_STATE=prerequisites_ready' \
+    "PRECHECKOUT_BLITE_ENABLED=$invalid_blite_enabled" \
+    "ANALYSIS_V2_WORKER_ENV_VARS_FILE=$temp_dir/runtime.env" \
+    bash "$script_dir/deploy-analysis-v2-worker.sh" --dry-run \
+    >"$temp_dir/invalid-precheckout-blite-enabled.out" 2>&1; then
+    fail "non-boolean B-lite master flag was accepted: $invalid_blite_enabled"
+  fi
+  assert_contains "$temp_dir/invalid-precheckout-blite-enabled.out" \
+    "PRECHECKOUT_BLITE_ENABLED must be true or false"
+done
+
+for invalid_blite_rollout in -1 1.5 101 00 001 enabled; do
+  if env "${common_env[@]}" 'FAKE_GCLOUD_STATE=prerequisites_ready' \
+    "PRECHECKOUT_BLITE_ROLLOUT_PERCENT=$invalid_blite_rollout" \
+    "ANALYSIS_V2_WORKER_ENV_VARS_FILE=$temp_dir/runtime.env" \
+    bash "$script_dir/deploy-analysis-v2-worker.sh" --dry-run \
+    >"$temp_dir/invalid-precheckout-blite-rollout.out" 2>&1; then
+    fail "invalid B-lite rollout percent was accepted: $invalid_blite_rollout"
+  fi
+  assert_contains "$temp_dir/invalid-precheckout-blite-rollout.out" \
+    "PRECHECKOUT_BLITE_ROLLOUT_PERCENT must be an integer from 0 through 100"
 done
 
 if env "${common_env[@]}" 'FAKE_GCLOUD_STATE=prerequisites_ready' \
@@ -4192,6 +4267,15 @@ for forbidden_gate in admission legacy-gate; do
 done
 
 if env "${common_env[@]}" 'FAKE_GCLOUD_STATE=prerequisites_ready' \
+  "ANALYSIS_V2_WORKER_ENV_VARS_FILE=$temp_dir/runtime-blite-gate.env" \
+  bash "$script_dir/deploy-analysis-v2-worker.sh" --dry-run \
+  >"$temp_dir/runtime-blite-gate.out" 2>&1; then
+  fail "runtime manifest accepted deploy-owned B-lite contract keys"
+fi
+assert_contains "$temp_dir/runtime-blite-gate.out" \
+  "runtime env file contains a forbidden placement, gate, or WIF bootstrap key: PRECHECKOUT_BLITE_ENABLED"
+
+if env "${common_env[@]}" 'FAKE_GCLOUD_STATE=prerequisites_ready' \
   "ANALYSIS_V2_WORKER_ENV_VARS_FILE=$temp_dir/runtime-provider-secret.env" \
   bash "$script_dir/deploy-analysis-v2-worker.sh" --dry-run \
   >"$temp_dir/runtime-provider-secret.out" 2>&1; then
@@ -4713,6 +4797,16 @@ if env "${common_env[@]}" 'FAKE_GCLOUD_STATE=runtime_env_drift' \
 fi
 assert_contains "$temp_dir/worker-runtime-env-drift.out" \
   "Cloud Run worker queue, gate, target, or OIDC runtime configuration has drifted"
+
+for blite_drift_state in runtime_blite_missing runtime_blite_enabled_drift runtime_blite_rollout_drift; do
+  if env "${common_env[@]}" "FAKE_GCLOUD_STATE=$blite_drift_state" \
+    bash "$script_dir/deploy-analysis-v2-worker.sh" --check \
+    >"$temp_dir/worker-$blite_drift_state.out" 2>&1; then
+    fail "Cloud Run B-lite env drift was accepted: $blite_drift_state"
+  fi
+  assert_contains "$temp_dir/worker-$blite_drift_state.out" \
+    "Cloud Run worker runtime, scaling, egress, or artifact config has drifted"
+done
 
 if env "${common_env[@]}" 'FAKE_GCLOUD_STATE=ready' \
   'ANALYSIS_V2_WORKER_ENABLED=true' \
