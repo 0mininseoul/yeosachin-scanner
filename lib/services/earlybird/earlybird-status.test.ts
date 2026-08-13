@@ -67,27 +67,30 @@ describe('earlybird support fallback', () => {
         }));
 
         expect(markup).toContain('판독 상태를 확인하고 있어요');
-        expect(markup).toContain('판독 결과가 완성되면 1일 이내에 가입하신 이메일로 결과 링크를 보내드릴게요.');
+        expect(markup).toContain('판독 결과가 완성되면 2일 이내에 가입하신 이메일로 결과 링크를 보내드릴게요.');
         expect(markup).not.toContain('manual_review');
         expect(markup).not.toContain('판독을 자동으로 시작하고 있어요');
     });
 });
 
 describe('earlybird paid delivery notice', () => {
-    it('promises email delivery instead of showing an automatic-start bridge', () => {
-        const markup = renderToStaticMarkup(createElement(EarlybirdStatus, {
-            order: {
-                ...cancelledOrder(),
-                systemStatus: 'paid',
-                displayStatus: '판독 대기',
-                actualAmountKrw: 990,
-                acceptedAt: '2026-08-08T12:41:11.649881+00:00',
-            },
-        }));
+    it.each(['paid', 'analysis_in_progress'] as const)(
+        'promises 2-day email delivery for %s instead of showing an automatic-start bridge',
+        systemStatus => {
+            const markup = renderToStaticMarkup(createElement(EarlybirdStatus, {
+                order: {
+                    ...cancelledOrder(),
+                    systemStatus,
+                    displayStatus: '판독 대기',
+                    actualAmountKrw: 990,
+                    acceptedAt: '2026-08-08T12:41:11.649881+00:00',
+                },
+            }));
 
-        expect(markup).toContain('결제가 완료되었어요');
-        expect(markup).toContain('판독 결과가 완성되면 1일 이내에 가입하신 이메일로 결과 링크를 보내드릴게요.');
-        expect(markup).not.toContain('판독을 자동으로 시작하고 있어요');
-        expect(markup).not.toContain('잠시만 기다리면 진행 화면으로 이어집니다');
-    });
+            expect(markup).toContain('결제가 완료되었어요');
+            expect(markup).toContain('판독 결과가 완성되면 2일 이내에 가입하신 이메일로 결과 링크를 보내드릴게요.');
+            expect(markup).not.toContain('판독을 자동으로 시작하고 있어요');
+            expect(markup).not.toContain('잠시만 기다리면 진행 화면으로 이어집니다');
+        }
+    );
 });
