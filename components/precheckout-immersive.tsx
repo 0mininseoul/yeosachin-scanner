@@ -286,10 +286,10 @@ export function PrecheckoutImmersive({
             const poll = async (): Promise<void> => {
                 const status = await fetchPrecheckoutBlite(preflightId, claimToken);
                 if (!active) return;
+                // Once the fallback demo owns the gate, every late durable status is stale.
+                // Ignore it atomically so pending/failed/complete cannot revoke the fallback.
+                if (flowRef.current.pathLatch === 'fallback') return;
                 if (status.state === 'unavailable') {
-                    // Pending polls can resolve after T+48 has already begun the fallback demo.
-                    // That demo owns the gate until its own CTA completes.
-                    if (flowRef.current.pathLatch === 'fallback') return;
                     if (fallbackTimer) clearTimeout(fallbackTimer);
                     emitPrecheckoutEvent(PRECHECKOUT_EVENTS.PLAN_GATE_REACHED);
                     onAvailabilityChange?.(false);
