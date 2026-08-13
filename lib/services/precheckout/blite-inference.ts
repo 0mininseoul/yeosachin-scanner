@@ -322,7 +322,10 @@ export async function inferPrecheckoutBlite(
             const preparedImages = await prepareAnalysisImages(
                 profile.profilePicUrl,
                 postImageUrls,
-                { policy: precheckoutBliteImagePolicy() },
+                {
+                    policy: precheckoutBliteImagePolicy(),
+                    abortSignal: options.abortSignal,
+                },
             );
             const images = preparedImages.map(image => image.base64);
             const imageEvidence: PrecheckoutBliteImageEvidence = {
