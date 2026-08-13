@@ -1,7 +1,8 @@
 import { z } from 'zod';
-import { NextResponse } from 'next/server';
+import { after, NextResponse } from 'next/server';
 import { supabaseAdmin } from '@/lib/supabase/admin';
 import { isJsonRequest } from '@/lib/services/earlybird/contracts';
+import { deliverEarlybirdPaymentDiscordNotifications } from '@/lib/services/earlybird/payment-discord';
 import {
     readGrobleConfig,
     type GrobleConfig,
@@ -408,6 +409,17 @@ async function handlePOST(
             disposition: finalization.disposition,
         },
     });
+
+    if (finalization.disposition === 'accepted') {
+        const deliver = async () => {
+            await deliverEarlybirdPaymentDiscordNotifications({ limit: 10 }).catch(() => undefined);
+        };
+        try {
+            after(deliver);
+        } catch {
+            void deliver();
+        }
+    }
 
     return response(200, {
         received: true,
