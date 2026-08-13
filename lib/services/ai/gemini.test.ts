@@ -245,6 +245,42 @@ describe('analyzeWithGemini generation retry policy', () => {
         }));
     });
 
+    it('does not log token usage or invoke later telemetry after B-lite aborts during attempt telemetry', async () => {
+        vi.useFakeTimers();
+        vi.spyOn(console, 'error').mockImplementation(() => undefined);
+        vi.spyOn(console, 'log').mockImplementation(() => undefined);
+        const controller = new AbortController();
+        let markAttemptTelemetryStarted!: () => void;
+        let releaseAttemptTelemetry!: () => void;
+        const attemptTelemetryStarted = new Promise<void>(resolve => {
+            markAttemptTelemetryStarted = resolve;
+        });
+        const onAttemptTelemetry = vi.fn(() => new Promise<void>(resolve => {
+            releaseAttemptTelemetry = resolve;
+            markAttemptTelemetryStarted();
+        }));
+        const onTelemetry = vi.fn();
+        mocks.generateContent.mockResolvedValueOnce(successfulResponse());
+        setTimeout(() => controller.abort(), 56_000);
+
+        const result = analyzeWithGemini('prompt', undefined, {
+            schema: responseSchema,
+            analysisType: 'precheckout_blite',
+            requestId: 'request-1',
+            abortSignal: controller.signal,
+            onAttemptTelemetry,
+            onTelemetry,
+        });
+
+        await attemptTelemetryStarted;
+        await vi.advanceTimersByTimeAsync(56_000);
+        releaseAttemptTelemetry();
+
+        await expect(result).rejects.toThrow('AI_GENERATION_DEADLINE_EXCEEDED');
+        expect(mocks.tokenUsageInsert).not.toHaveBeenCalled();
+        expect(onTelemetry).not.toHaveBeenCalled();
+    });
+
     it('does not retry schema-invalid responses', async () => {
         vi.spyOn(console, 'error').mockImplementation(() => undefined);
         vi.spyOn(console, 'log').mockImplementation(() => undefined);

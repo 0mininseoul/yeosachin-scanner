@@ -1108,6 +1108,9 @@ export async function analyzeWithGemini<T>(
                 onAttemptTelemetry,
                 completionError ? undefined : parsed
             );
+            if (abortSignal?.aborted) {
+                throw new Error('AI_GENERATION_DEADLINE_EXCEEDED');
+            }
             emitResponseRejectionDiagnostic(attemptTelemetry);
 
             // The legacy table cannot represent unknown usage. Never persist a fabricated zero.
