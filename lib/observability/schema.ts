@@ -94,6 +94,9 @@ export const OPERATIONAL_EVENT_NAMES = [
     'precheckout_blite.completed',
     'precheckout_blite.profile_collection_failed',
     'precheckout_blite.inference_failed',
+    'precheckout_blite.fallback_latched',
+    'precheckout_blite.demo_completed',
+    'precheckout_blite.demo_failed',
     'earlybird.advance_failed',
     'earlybird.checkout_created',
     'earlybird.checkout_failed',
@@ -346,6 +349,9 @@ export const OPERATIONAL_DISPOSITIONS = [
     'refund_unmatched',
     'refund_mismatch',
     'partial_refund_recorded',
+    'terminal_before_48',
+    'unresolved_at_48',
+    'demo_error',
 ] as const;
 
 export const OPERATIONAL_WEBHOOK_EVENT_TYPES = [
