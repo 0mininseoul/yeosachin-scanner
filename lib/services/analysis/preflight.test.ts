@@ -129,7 +129,7 @@ describe('B-lite single-collection preflight', () => {
         });
     });
 
-    it('releases the claim when source finalization fails without terminalizing the preflight', async () => {
+    it('fails open to ordinary readiness when the source-finalization RPC is absent from PostgREST', async () => {
         const claimed = claim();
         const store = workerStore(claimed);
         const activateBliteCohort = vi.fn(async () => ({
@@ -139,6 +139,57 @@ describe('B-lite single-collection preflight', () => {
         }));
         const finalizeReadyWithSource = vi.fn(async () => {
             throw new Error('PRECHECKOUT_BLITE_SOURCE_PERSISTENCE_ERROR (PGRST202)');
+        });
+        const run = {
+            ...storedRun('succeeded'),
+            credentialSlot: selectPreflightApifyCredentialSlot(preflightId, {
+                PRECHECKOUT_BLITE_ENABLED: 'true',
+                PRECHECKOUT_BLITE_ROLLOUT_PERCENT: '100',
+                ANALYSIS_V2_PREFLIGHT_IDENTITY_HMAC_SECRET: preflightIdentitySecret,
+            }),
+        };
+        const runs: PreflightProviderRunStore = {
+            load: vi.fn(async () => run),
+            reserve: vi.fn(),
+            checkpointStarted: vi.fn(),
+            checkpointRejected: vi.fn(),
+            checkpointTerminal: vi.fn(),
+        };
+
+        await expect(processPreflight(preflightId, {
+            store,
+            providerRunStore: runs,
+            getFullProfile: vi.fn(async () => profile({ followersCount: 476, followingCount: 644 })),
+            activateBliteCohort,
+            finalizeReadyWithSource,
+            env: {
+                PRECHECKOUT_BLITE_ENABLED: 'true',
+                PRECHECKOUT_BLITE_ROLLOUT_PERCENT: '100',
+                ANALYSIS_V2_PREFLIGHT_IDENTITY_HMAC_SECRET: preflightIdentitySecret,
+            },
+        })).resolves.toBe('ready');
+
+        expect(finalizeReadyWithSource).toHaveBeenCalledOnce();
+        expect(store.finalizeReady).toHaveBeenCalledWith(
+            claimed,
+            expect.objectContaining({
+                target: expect.objectContaining({ followersCount: 476, followingCount: 644 }),
+            }),
+        );
+        expect(store.releaseClaim).not.toHaveBeenCalled();
+        expect(store.finalizeBlocked).not.toHaveBeenCalled();
+    });
+
+    it('keeps non-schema-cache source finalization failures on the retry fence', async () => {
+        const claimed = claim();
+        const store = workerStore(claimed);
+        const activateBliteCohort = vi.fn(async () => ({
+            submittedAt: new Date(Date.now() - 1_000).toISOString(),
+            deadlineAt: new Date(Date.now() + 59_000).toISOString(),
+            expiresAt: new Date(Date.now() + 29 * 60_000).toISOString(),
+        }));
+        const finalizeReadyWithSource = vi.fn(async () => {
+            throw new Error('PRECHECKOUT_BLITE_SOURCE_PERSISTENCE_ERROR (PGRST42501)');
         });
 
         await expect(processPreflight(preflightId, {
@@ -157,6 +208,7 @@ describe('B-lite single-collection preflight', () => {
             classification: { category: 'persistence', retryable: true },
         });
 
+        expect(store.finalizeReady).not.toHaveBeenCalled();
         expect(store.releaseClaim).toHaveBeenCalledOnce();
         expect(store.finalizeBlocked).not.toHaveBeenCalled();
     });
