@@ -523,6 +523,55 @@ describe('B-lite single-collection preflight', () => {
         );
     });
 
+    it('preserves the claimed target hash when an expired B-lite activation fails open', async () => {
+        const persistedTargetHash = 'c'.repeat(64);
+        const claimed = claim({
+            userId: null,
+            targetInputHash: persistedTargetHash,
+            leaseExpiresAt: new Date(Date.now() + 180_000).toISOString(),
+        });
+        const store = workerStore(claimed);
+        const env = {
+            PRECHECKOUT_BLITE_ENABLED: 'true',
+            PRECHECKOUT_BLITE_ROLLOUT_PERCENT: '100',
+            ANALYSIS_V2_PREFLIGHT_IDENTITY_HMAC_SECRET: preflightIdentitySecret,
+        };
+        const run = {
+            ...storedRun('succeeded'),
+            inputHash: persistedTargetHash,
+            credentialSlot: selectPreflightApifyCredentialSlot(preflightId, env),
+        };
+        const runs: PreflightProviderRunStore = {
+            load: vi.fn(async () => run),
+            reserve: vi.fn(),
+            checkpointStarted: vi.fn(),
+            checkpointRejected: vi.fn(),
+            checkpointTerminal: vi.fn(),
+        };
+        const activateBliteCohort = vi.fn(async () => {
+            throw new Error('PRECHECKOUT_BLITE_PREFLIGHT_FENCE_LOST');
+        });
+        const anonymousProfileCache = {
+            load: vi.fn(async () => null),
+            store: vi.fn(async () => true),
+        };
+
+        await expect(processPreflight(preflightId, {
+            store,
+            providerRunStore: runs,
+            getFallbackProfile: vi.fn(async () => profile()),
+            activateBliteCohort,
+            anonymousProfileCache,
+            env,
+        })).resolves.toBe('ready');
+
+        expect(runs.load).toHaveBeenCalledWith(expect.objectContaining({
+            inputHash: persistedTargetHash,
+        }));
+        expect(store.finalizeReady).toHaveBeenCalledOnce();
+        expect(store.finalizeBlocked).not.toHaveBeenCalled();
+    });
+
     it('collects one Apify profile, commits its ready snapshot and bounded source, then enqueues', async () => {
         const claimed = claim();
         const store = workerStore(claimed);

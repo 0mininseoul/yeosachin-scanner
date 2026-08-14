@@ -2041,7 +2041,11 @@ export async function processPreflight(
             }
             inputHash = claim.targetInputHash;
         } else {
-            inputHash = preflightTargetInputHash(
+            // An anonymous B-lite claim can fail open to ordinary readiness after its
+            // immutable deadline. Keep using the hash captured by the claim in that
+            // path; recomputing it from the worker environment would turn a Vercel /
+            // Cloud Run secret rotation into a provider-lineage identity failure.
+            inputHash = claim.targetInputHash ?? preflightTargetInputHash(
                 claim.targetInstagramId,
                 dependencies.env ?? process.env
             );
