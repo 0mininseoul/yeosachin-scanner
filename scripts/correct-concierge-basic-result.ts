@@ -296,16 +296,16 @@ DELETE FROM public.analysis_results WHERE request_id = ${requestId};
 INSERT INTO public.analysis_results (
   request_id, rank, suspect_instagram_id, suspect_profile_image, suspect_full_name, bio,
   risk_score, photogenic_grade, exposure_level, is_tagged, risk_grade, gender_confidence,
-  gender_status, is_unlocked, likes_count, intimate_comments_count, risk_analysis
+  gender_status, is_unlocked, likes_count, intimate_comments_count, one_line_overview, risk_analysis
 )
 SELECT ${requestId}, rank, suspect_instagram_id, suspect_profile_image, suspect_full_name, bio,
   risk_score, photogenic_grade, exposure_level, is_tagged, risk_grade, gender_confidence,
-  gender_status, is_unlocked, likes_count, intimate_comments_count, risk_analysis
+  gender_status, is_unlocked, likes_count, intimate_comments_count, one_line_overview, risk_analysis
 FROM jsonb_to_recordset(${payloadSql}->'femaleRows') AS rows(
   rank integer, suspect_instagram_id text, suspect_profile_image text, suspect_full_name text,
   bio text, risk_score integer, photogenic_grade integer, exposure_level text, is_tagged boolean,
   risk_grade text, gender_confidence double precision, gender_status text, is_unlocked boolean,
-  likes_count integer, intimate_comments_count integer, risk_analysis jsonb
+  likes_count integer, intimate_comments_count integer, one_line_overview varchar(180), risk_analysis jsonb
 );
 DELETE FROM public.private_accounts WHERE request_id = ${requestId};
 INSERT INTO public.private_accounts (
@@ -508,19 +508,27 @@ async function main(): Promise<void> {
     });
     const [afterRequest, afterResults, afterPrivate] = await Promise.all([
         supabaseAdmin.from('analysis_requests').select('status,progress,gender_stats,pipeline_version,step_data').eq('id', order.result_request_id).maybeSingle(),
-        supabaseAdmin.from('analysis_results').select('rank,risk_score,risk_grade,risk_analysis,gender_status').eq('request_id', order.result_request_id).order('rank'),
+        supabaseAdmin.from('analysis_results').select('rank,risk_score,risk_grade,one_line_overview,risk_analysis,gender_status').eq('request_id', order.result_request_id).order('rank'),
         supabaseAdmin.from('private_accounts').select('instagram_id').eq('request_id', order.result_request_id),
     ]);
     if (afterRequest.error || !afterRequest.data || afterRequest.data.status !== 'completed'
         || afterRequest.data.progress !== 100 || afterRequest.data.pipeline_version !== 'v1'
         || afterResults.error || !afterResults.data || afterResults.data.length !== result.femaleRows.length
-        || afterResults.data.some(row => row.risk_score === null || row.risk_grade === null || row.gender_status !== 'confirmed')
+        || afterResults.data.some(row => row.risk_score === null || row.risk_grade === null
+            || row.gender_status !== 'confirmed'
+            || typeof row.one_line_overview !== 'string'
+            || row.one_line_overview.length === 0 || row.one_line_overview.length > 180)
         || afterPrivate.error || !afterPrivate.data || afterPrivate.data.length !== result.privateRows.length) {
         throw new Error('CONCIERGE_PUBLICATION_VERIFY_FAILED');
     }
     const highRiskRows = afterResults.data.filter(row => row.risk_grade === 'high_risk');
     if (highRiskRows.some(row => !Array.isArray(row.risk_analysis) || row.risk_analysis.length !== 2)) {
         throw new Error('CONCIERGE_PUBLICATION_NARRATIVE_VERIFY_FAILED');
+    }
+    const overviewRows = afterResults.data.filter(row => row.risk_grade !== 'high_risk');
+    if (overviewRows.some(row => typeof row.one_line_overview !== 'string'
+        || row.one_line_overview.length === 0 || row.one_line_overview.length > 180)) {
+        throw new Error('CONCIERGE_PUBLICATION_OVERVIEW_VERIFY_FAILED');
     }
     const genderStats = afterRequest.data.gender_stats as Record<string, number> | null;
     if (!genderStats || genderStats.male + genderStats.female + genderStats.unknown !== partition.publicProfiles.length) {

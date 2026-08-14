@@ -1,8 +1,16 @@
 import { INSTAGRAM_MEDIA_HOST_SUFFIXES } from '@/lib/services/media/secure-image-fetch';
-import { parseSafePublicRiskNarrative } from './narrative-privacy';
+import {
+    isSafePublicRiskNarrativeLine,
+    parseSafePublicRiskNarrative,
+    sanitizePublicRiskNarrativeLine,
+} from './narrative-privacy';
 
 export interface ResultInteractionSummary {
     riskAnalysis: string[];
+}
+
+export interface OwnerResultInteractionSummary extends ResultInteractionSummary {
+    oneLineOverview?: string;
 }
 
 const MAX_IMAGE_URL_LENGTH = 8_192;
@@ -50,6 +58,33 @@ export function toResultInteractionSummary(
     row: Record<string, unknown>
 ): ResultInteractionSummary {
     return {
+        riskAnalysis: row.risk_grade === 'high_risk'
+            ? toSafeRiskAnalysis(row.risk_analysis)
+            : [],
+    };
+}
+
+/**
+ * Legacy owner results now carry an additive bounded overview column. Keep it
+ * out of the shared adapter so legacy share payloads retain their historical
+ * high-risk narrative contract.
+ */
+export function toOwnerResultInteractionSummary(
+    row: Record<string, unknown>
+): OwnerResultInteractionSummary {
+    if (
+        row.risk_grade !== 'normal'
+        && row.risk_grade !== 'caution'
+        && row.risk_grade !== 'high_risk'
+    ) {
+        return { riskAnalysis: [] };
+    }
+    const overview = sanitizePublicRiskNarrativeLine(row.one_line_overview);
+    if (!overview || !isSafePublicRiskNarrativeLine(overview)) {
+        return { riskAnalysis: [] };
+    }
+    return {
+        oneLineOverview: overview,
         riskAnalysis: row.risk_grade === 'high_risk'
             ? toSafeRiskAnalysis(row.risk_analysis)
             : [],

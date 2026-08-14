@@ -47,6 +47,8 @@ export interface AnalysisResult {
     female_to_target_comments_count: number;
     target_to_female_likes_count: number;
     recency_bonus: number;
+    /** Canonical bounded owner overview for legacy ranked public accounts. */
+    one_line_overview?: string | null;
     risk_analysis: string[];
 
     // 상호작용 카운트

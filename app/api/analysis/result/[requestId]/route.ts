@@ -6,7 +6,7 @@ import {
 } from '@/lib/services/analysis/recent-mutuals';
 import {
     targetProfileImageFromStepData,
-    toResultInteractionSummary,
+    toOwnerResultInteractionSummary,
 } from '@/lib/services/analysis/result-interactions';
 import { createImageProxyPath } from '@/lib/services/media/image-proxy-token';
 import { NextResponse } from 'next/server';
@@ -137,6 +137,7 @@ export async function GET(
                 suspect_full_name,
                 bio,
                 risk_grade,
+                one_line_overview,
                 risk_analysis
             `)
             .eq('request_id', requestId)
@@ -197,7 +198,7 @@ export async function GET(
                 riskGrade: result.risk_grade as 'high_risk' | 'caution' | 'normal',
                 bio: result.bio || '',
                 recentMutualRank: recentMutualRanks.get(instagramId.toLowerCase()),
-                ...toResultInteractionSummary(result),
+                ...toOwnerResultInteractionSummary(result),
             };
         }) || [];
 

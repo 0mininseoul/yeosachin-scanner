@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
     targetProfileImageFromStepData,
+    toOwnerResultInteractionSummary,
     toResultInteractionSummary,
     toSafeRiskAnalysis,
 } from './result-interactions';
@@ -78,6 +79,41 @@ describe('toResultInteractionSummary', () => {
             '프로필은 꽤 눈에 띕니다.',
             '댓글은 두 개 보였지만 수집 표본 밖 누락은 가능합니다.',
         ])).toEqual([]);
+    });
+
+    it('keeps legacy share semantics while exposing canonical one-line overviews to the owner result', () => {
+        const normalOverview = '공개 프로필과 최근 피드의 특징을 중심으로 정리한 계정입니다.';
+        const cautionOverview = '사진과 일상 기록의 흐름이 한눈에 드러나는 공개 계정입니다.';
+
+        expect(toResultInteractionSummary({
+            risk_grade: 'normal',
+            risk_analysis: [normalOverview],
+        })).toEqual({ riskAnalysis: [] });
+
+        expect(toOwnerResultInteractionSummary({
+            risk_grade: 'normal',
+            one_line_overview: normalOverview,
+            risk_analysis: [],
+        })).toEqual({ riskAnalysis: [], oneLineOverview: normalOverview });
+        expect(toOwnerResultInteractionSummary({
+            risk_grade: 'caution',
+            one_line_overview: cautionOverview,
+            risk_analysis: [],
+        })).toEqual({ riskAnalysis: [], oneLineOverview: cautionOverview });
+        expect(toOwnerResultInteractionSummary({
+            risk_grade: 'high_risk',
+            one_line_overview: normalOverview,
+            risk_analysis: [
+                '프로필과 최근 피드에서 눈에 띌 재료를 꽤 성실하게 모아 둔 계정입니다.',
+                '댓글 흔적은 제법 친절하지만, 수집 표본 밖 활동은 누락될 수 있습니다.',
+            ],
+        })).toEqual({
+            oneLineOverview: normalOverview,
+            riskAnalysis: [
+                '프로필과 최근 피드에서 눈에 띌 재료를 꽤 성실하게 모아 둔 계정입니다.',
+                '댓글 흔적은 제법 친절하지만, 수집 표본 밖 활동은 누락될 수 있습니다.',
+            ],
+        });
     });
 
     it('allows only normalized Instagram media URLs from step data', () => {

@@ -247,8 +247,14 @@ describe('owner-facing V1/V2 route selection', () => {
             suspect_profile_image: null,
             suspect_full_name: `Candidate ${index + 1}`,
             bio: '',
-            risk_grade: 'caution',
-            risk_analysis: [],
+            risk_grade: index === 0 ? 'normal' : index === 1 ? 'caution' : index === 2 ? 'high_risk' : 'caution',
+            one_line_overview: `${['첫', '두', '세', '네', '다섯'][index] ?? '여섯'} 번째 공개 계정의 특징을 중심으로 정리한 계정입니다.`,
+            risk_analysis: index === 2
+                ? [
+                    '프로필과 최근 피드에서 눈에 띌 재료를 꽤 성실하게 모아 둔 계정입니다.',
+                    '댓글 흔적은 제법 친절하지만, 수집 표본 밖 활동은 누락될 수 있습니다.',
+                ]
+                : [],
         }));
         const requestQuery = ownerQuery(requestRow);
         requestQuery.eq.mockImplementation((column: string, value: unknown) => {
@@ -297,6 +303,24 @@ describe('owner-facing V1/V2 route selection', () => {
         expect(response.status).toBe(200);
         const payload = await response.json() as { femaleAccounts?: unknown[] };
         expect(payload.femaleAccounts).toHaveLength(5);
+        expect(payload.femaleAccounts).toEqual(expect.arrayContaining([
+            expect.objectContaining({
+                instagramId: 'candidate_1',
+                oneLineOverview: '첫 번째 공개 계정의 특징을 중심으로 정리한 계정입니다.',
+            }),
+            expect.objectContaining({
+                instagramId: 'candidate_2',
+                oneLineOverview: '두 번째 공개 계정의 특징을 중심으로 정리한 계정입니다.',
+            }),
+            expect.objectContaining({
+                instagramId: 'candidate_3',
+                oneLineOverview: '세 번째 공개 계정의 특징을 중심으로 정리한 계정입니다.',
+                riskAnalysis: [
+                    '프로필과 최근 피드에서 눈에 띌 재료를 꽤 성실하게 모아 둔 계정입니다.',
+                    '댓글 흔적은 제법 친절하지만, 수집 표본 밖 활동은 누락될 수 있습니다.',
+                ],
+            }),
+        ]));
         expect(mocks.resolveResultOwner).toHaveBeenCalledWith(requestId, 'v1');
         expect(requestQuery.eq).toHaveBeenCalledWith('user_id', ownerUserId);
     });

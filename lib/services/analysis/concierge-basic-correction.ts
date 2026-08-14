@@ -52,6 +52,7 @@ export interface ConciergeLegacyResultRow {
     is_unlocked: true;
     likes_count: number;
     intimate_comments_count: number;
+    one_line_overview: string;
     risk_analysis: readonly string[];
 }
 
@@ -298,6 +299,10 @@ export function buildCanonicalConciergeResult(input: {
                 ...(commentText ? { commentText } : {}),
             })
             : [];
+        const overview = retained.detail.feature.features.oneLineOverview;
+        if (overview.length === 0 || overview.length > 180) {
+            throw new Error('CONCIERGE_OVERVIEW_REQUIRED');
+        }
         return {
             rank: index + 1,
             suspect_instagram_id: normalizedUsername(retained.profile.username),
@@ -314,7 +319,10 @@ export function buildCanonicalConciergeResult(input: {
             is_unlocked: true as const,
             likes_count: interaction?.uniqueTargetPostsLikedByCandidate ?? 0,
             intimate_comments_count: interaction?.boundedCandidateCommentsOnTarget ?? 0,
-            risk_analysis: narrative,
+            one_line_overview: overview,
+            // Featured high-risk rows retain their canonical two-line narrative
+            // contract; other rows have no narrative payload.
+            risk_analysis: score.riskBand === 'high_risk' ? narrative : [],
         };
     });
     const privateRows = input.privateProfiles.map(profile => ({
@@ -362,5 +370,12 @@ export function validateCanonicalConciergeCorrection(input: {
     }
     if (result.femaleRows.some(row => row.risk_grade === 'high_risk' && row.risk_analysis.length === 0)) {
         throw new Error('CONCIERGE_NARRATIVE_REQUIRED');
+    }
+    if (result.femaleRows.some(row => (
+        !row.one_line_overview
+        || row.one_line_overview.length > 180
+        || (row.risk_grade !== 'high_risk' && row.risk_analysis.length !== 0)
+    ))) {
+        throw new Error('CONCIERGE_OVERVIEW_REQUIRED');
     }
 }
