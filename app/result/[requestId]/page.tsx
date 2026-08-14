@@ -28,6 +28,8 @@ import {
     resolveResultPageCursor,
     resultPaginationModel,
     resultSummaryCounts,
+    countHighRiskBands,
+    countHighRiskGrades,
     v2ResultFailureAction,
     type OwnerProgressStatus,
 } from '@/lib/services/analysis/owner-view-presentation';
@@ -45,7 +47,7 @@ import { ResultActions } from '@/components/result-actions';
 import { ResultFeedback } from '@/components/result-feedback';
 import { ResultPagination } from '@/components/result-pagination';
 import { ProfilePreviewDialog, type InternalProfilePreview } from '@/components/profile-preview-dialog';
-import { useCountUp } from '@/hooks/useCountUp';
+import { HighRiskSummary } from '@/components/high-risk-summary';
 import { safeResultImageUrl } from '@/lib/services/result-local-image';
 
 interface PageProps {
@@ -235,9 +237,7 @@ export function mapV2Result(result: AnalysisResultPageV1, externalProfileLinks =
                 publicMutuals: result.summary.publicMutuals,
                 privateMutuals: result.summary.privateMutuals,
                 screenedMutuals: result.summary.screenedMutuals,
-                highRiskCount: result.femaleAccounts.filter(
-                    account => account.riskBand === 'high_risk'
-                ).length,
+                highRiskCount: countHighRiskBands(result.femaleAccounts),
             },
         },
         femaleAccounts: boundedOwnerResultPage(result.femaleAccounts).map(account => ({
@@ -679,14 +679,6 @@ export default function ResultPage({ params }: PageProps) {
         }
     };
 
-    // Hooks cannot sit behind the early returns below, so the verdict count is
-    // derived here and simply reads 0 until the result lands.
-    const highRiskCount = data
-        ? data.summary.v2?.highRiskCount
-            ?? data.femaleAccounts.filter((account) => account.riskGrade === 'high_risk').length
-        : 0;
-    const revealedHighCount = useCountUp(highRiskCount, { delayMs: 300, durationMs: 800 });
-
     if (loading) {
         return (
             <div className="flex min-h-dvh items-center justify-center">
@@ -739,7 +731,7 @@ export default function ResultPage({ params }: PageProps) {
         })
         : null;
     const highCount = summary.v2?.highRiskCount
-        ?? femaleAccounts.filter((a) => a.riskGrade === 'high_risk').length;
+        ?? countHighRiskGrades(femaleAccounts);
 
     return (
         <div className="min-h-dvh pb-16">
@@ -828,39 +820,10 @@ export default function ResultPage({ params }: PageProps) {
                             13px grey while secondary counts held the frame. Crimson
                             means danger, so a clean result must not wear it — zero
                             high-risk accounts is the best outcome, not the loudest. */}
-                        <div className="relative mt-5 pl-4">
-                            <span
-                                aria-hidden="true"
-                                className={`reveal-rail absolute inset-y-0 left-0 w-0.5 ${
-                                    highCount > 0 ? 'bg-blood' : 'bg-jade'
-                                }`}
-                                style={{ animationDelay: '300ms' }}
-                            />
-                            <div
-                                className={`num text-[56px] font-extrabold leading-[0.85] tracking-[-0.045em] ${
-                                    highCount > 0 ? 'text-blood-2' : 'text-jade'
-                                }`}
-                            >
-                                {/* The visible digit is mid-count during the reveal,
-                                    so the final value is announced separately. A bare
-                                    aria-label on a role-less div is not reliably read. */}
-                                <span className="sr-only">고위험 계정 {highCount}건</span>
-                                <span aria-hidden="true">{revealedHighCount}</span>
-                            </div>
-                            <p
-                                className="reveal mt-3 text-[17px] font-extrabold tracking-tight text-fg"
-                                style={{ animationDelay: '700ms' }}
-                            >
-                                고위험 계정
-                            </p>
-                            {/* The exact public count is already on the tab below. */}
-                            <p
-                                className="reveal mt-1 text-[12.5px] text-fg-dim"
-                                style={{ animationDelay: '780ms' }}
-                            >
-                                맞팔 <span className="num">{counts.mutual.toLocaleString()}</span>명 중 모든 공개 계정들을 판독했습니다.
-                            </p>
-                        </div>
+                        <HighRiskSummary
+                            count={highCount}
+                            context={<>맞팔 <span className="num">{counts.mutual.toLocaleString()}</span>명 중 모든 공개 계정들을 판독했습니다.</>}
+                        />
                         </div>
 
                         <div className="mt-6 border-t border-line pt-5">
@@ -883,11 +846,7 @@ export default function ResultPage({ params }: PageProps) {
                 ) : gr ? (
                     <>
                     <h1 className="mt-3 text-[24px] font-extrabold tracking-tight text-fg">판독 결과</h1>
-                    {highCount > 0 && (
-                        <p className="mt-2 text-[13px] text-fg-dim">
-                            위협 등급 <span className="font-bold text-blood">고위험 {highCount}건</span>이 감지됐습니다.
-                        </p>
-                    )}
+                    <HighRiskSummary count={highCount} />
                     <div className="mt-6 border-t border-line pt-5">
                         <div className="flex items-baseline justify-between gap-3">
                             <span className="label-ko">맞팔 계정 성별 분석</span>

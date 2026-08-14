@@ -4,6 +4,8 @@ import {
     analysisV2EventCopy,
     analysisV2ProgressCopy,
     boundedOwnerResultPage,
+    countHighRiskBands,
+    countHighRiskGrades,
     DEFAULT_THREAT_METER_SEGMENTS,
     genderBreakdownFromStats,
     OWNER_GENDER_LABELS,
@@ -63,6 +65,25 @@ describe('owner view presentation behavior', () => {
     it('bounds a result page to the page size without accumulating prior rows', () => {
         expect(boundedOwnerResultPage(Array.from({ length: 900 }, (_, index) => index)))
             .toHaveLength(50);
+    });
+
+    it('counts V1 high-risk grades without using presentation rank', () => {
+        expect(countHighRiskGrades([
+            { riskGrade: 'normal' },
+            { riskGrade: 'high_risk' },
+            { riskGrade: 'caution' },
+            { riskGrade: 'high_risk' },
+        ])).toBe(2);
+        expect(countHighRiskGrades([])).toBe(0);
+    });
+
+    it('counts V2 high-risk bands without using presentation rank', () => {
+        expect(countHighRiskBands([
+            { riskBand: 'normal' },
+            { riskBand: 'caution' },
+            { riskBand: 'high_risk' },
+        ])).toBe(1);
+        expect(countHighRiskBands([])).toBe(0);
     });
 
     it('shows no pagination when a single page holds everything', () => {
