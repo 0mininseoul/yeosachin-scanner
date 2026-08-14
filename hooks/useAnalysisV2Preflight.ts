@@ -25,6 +25,7 @@ import {
 import {
     availablePendingTargetStorage,
     clearPendingAnalysisTargetForTerminalState,
+    clearPreflightDisplayTarget,
     clearPreflightDisplayTargetForTerminalState,
     storePreflightDisplayTarget,
     type PendingTargetStorage,
@@ -989,8 +990,13 @@ export function useAnalysisV2Preflight({
                 if (next?.status === 'pending') schedule();
             } catch (cause) {
                 if (scope.isCurrent()) {
+                    const terminal = cause instanceof AnalyticsRequestError && cause.terminal;
+                    if (terminal) {
+                        const storage = availablePendingTargetStorage();
+                        if (storage) clearPreflightDisplayTarget(storage, pollingPreflightId);
+                    }
                     setError(cause instanceof Error ? cause.message : '사전 점검 상태를 확인할 수 없습니다.');
-                    if (cause instanceof AnalyticsRequestError && cause.terminal) {
+                    if (terminal) {
                         coordinator.beginLifecycle();
                         idempotencyRef.current = null;
                         preflightStartedAtRef.current = null;
