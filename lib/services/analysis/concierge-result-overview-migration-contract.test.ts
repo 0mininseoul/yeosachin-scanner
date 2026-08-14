@@ -17,6 +17,10 @@ const reviewedSourceMigration = readFileSync(
     new URL('../../../supabase/migrations/20260814223000_register_concierge_reviewed_source.sql', import.meta.url),
     'utf8',
 );
+const bootstrapMigration = readFileSync(
+    new URL('../../../supabase/migrations/20260815090000_bootstrap_v211_concierge_first_order.sql', import.meta.url),
+    'utf8',
+);
 
 describe('legacy concierge result overview persistence contract', () => {
     it('adds an additive bounded overview column without changing the narrative field', () => {
@@ -102,5 +106,18 @@ describe('legacy concierge result overview persistence contract', () => {
         expect(correctionScript).toContain('FOR UPDATE');
         expect(reviewedSourceMigration).toContain('published_source_fingerprint');
         expect(reviewedSourceMigration).toContain('published_result_hash');
+    });
+
+    it('hydrates only the remaining profile scope with actual senary-then-quinary lineage', () => {
+        const hydrationStart = correctionScript.indexOf('async function hydrateExactMutualProfiles');
+        const hydration = correctionScript.slice(hydrationStart);
+        expect(hydration).toContain("const PROFILE_HYDRATION_SLOTS = ['senary', 'quinary'] as const");
+        expect(hydration).toContain('const provider = makeDirectProvider(slot, token)');
+        expect(hydration).toContain('credentialSlot: slot');
+        expect(hydration).not.toContain("credentialSlot: 'primary' as const");
+        expect(hydration).not.toContain("makeDirectProvider('tertiary'");
+        expect(hydration).toContain('profileUnavailableUsernames');
+        expect(bootstrapMigration).toContain("p_publication_payload->'unavailablePublicUsernames'");
+        expect(bootstrapMigration).toContain('CONCIERGE_BOOTSTRAP_PROFILE_UNAVAILABLE_PROVENANCE_INVALID');
     });
 });

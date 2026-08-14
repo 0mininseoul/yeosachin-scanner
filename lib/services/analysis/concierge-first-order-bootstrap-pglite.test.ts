@@ -87,6 +87,7 @@ function publicationPayload() {
             full_name: `Private ${index}`,
         })),
         unresolvedUsernames: ['mutual148'],
+        unavailablePublicUsernames: [],
     };
 }
 

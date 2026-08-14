@@ -27,12 +27,24 @@ import {
 import { isAnalysisResultOperator, resolveAnalysisResultOwner } from '@/lib/services/analysis/result-operator-access';
 import { requireActiveAccountClassification } from '@/lib/services/identity/account-principal-store';
 import type { InstagramFollower, InstagramProfile } from '@/lib/types/instagram';
+import type { ApifyCredentialSlot, ProfileAttemptResult } from '@/lib/services/instagram/providers/types';
 
 const SAMPLE_START = '2026-08-12T09:07:00.000Z';
 const SAMPLE_END = '2026-08-12T09:08:00.000Z';
 const RELATIONSHIP_LIMIT = 1_200;
 const PROFILE_BATCH_SIZE = 30;
-const PROFILE_HYDRATION_TARGET_COUNT = 19;
+const PROFILE_HYDRATION_TARGET_COUNT = 34;
+const EXISTING_PROFILE_ARTIFACT = Object.freeze({
+    slot: 'tertiary' as const,
+    runId: 'NbsEMomWpuHW0uX8B',
+    datasetId: 'nEWNQBIxcUqlcR7WR',
+    usernames: Object.freeze([
+        's00.hwan24', 'jaewoo_ee', 'jjum_ed', 'rmlp129', '_joojinwoo', 'jimoon6',
+        'kok_chelin', 'kkh0479', 'woozlon', 'd_hyunl', 'hajongmin2', 'k_chichi_9',
+        'yan2.home', 'jieunee.ya', 'khh._.00', 'hwanyong_', 'pluto_flying',
+        'white.hour.snap', 'woo_x99',
+    ]),
+});
 const CANONICAL_WORKDIR = '/private/tmp/fresh-admission-v3-supabase.yfdl1o';
 const REVIEW_ARTIFACT_DIR = '/Users/youngminpark/orca/workspaces/ai-baram-detector/concierge-batch-delivery-20260814/output/manual-gender-review';
 const ALL_PUBLIC_CLASSIFICATIONS_SHA256 = '47a657f1c534680043e24ca44f9e2eaa16854b55cd34ab65e3bb2a8dee7fa8cb';
@@ -62,8 +74,17 @@ const targetEvidenceRowSchema = z.object({
 }).strict();
 
 type TargetEvidenceRow = z.infer<typeof targetEvidenceRowSchema>;
-type ApifySlot = 'tertiary' | 'secondary' | 'primary';
-type ProviderLineage = { slot: ApifySlot; runIds: string[] };
+type ApifySlot = ApifyCredentialSlot;
+type ProviderLineage = {
+    slot: ApifySlot;
+    runIds: string[];
+    attempts?: readonly Readonly<{
+        slot: ApifySlot;
+        runIds: readonly string[];
+        requestedUsernames?: readonly string[];
+        unavailableUsernames?: readonly string[];
+    }>[];
+};
 type FreshRelationship = {
     rows: readonly InstagramFollower[];
     uniqueCount: number;
@@ -161,10 +182,6 @@ function checkpointProfile(profile: InstagramProfile) {
         ...profile,
         ...(latestPosts === undefined ? {} : { latestPosts }),
     };
-}
-
-function isQuotaError(error: unknown): boolean {
-    return error instanceof Error && error.message.includes('SCRAPING_PROVIDER_QUOTA_ERROR');
 }
 
 function tokenFor(slot: ApifySlot): string | null {
@@ -267,106 +284,141 @@ async function collectRelationshipSide(
     side: 'followers' | 'following',
     sourceRequestId: string,
 ): Promise<FreshRelationship> {
-    if (process.env.CONCIERGE_FORCE_FRESH_RELATIONSHIPS !== '1') {
-        const durable = await durableRelationshipSide(targetUsername, side, sourceRequestId);
-        if (durable) return durable;
-    }
-    const slots: ApifySlot[] = ['tertiary', 'secondary', 'primary'];
-    let lastError: unknown;
-    for (const slot of slots) {
-        const token = tokenFor(slot);
-        if (!token) continue;
-        const runIds: string[] = [];
-        try {
-            const provider = makeDirectProvider(slot, token);
-            const context = {
-                credentialSlot: slot === 'secondary' ? 'secondary' as const : 'primary' as const,
-                maxChargeUsd: 1.5,
-                recordUsage: () => undefined,
-                onRunStarted: (runId: string) => { runIds.push(runId); },
-            };
-            const rows = side === 'followers'
-                ? await provider.getFollowers!(targetUsername, RELATIONSHIP_LIMIT, context)
-                : await provider.getFollowing!(targetUsername, RELATIONSHIP_LIMIT, context);
-            const seen = new Set<string>();
-            let duplicateCount = 0;
-            const normalizedRows = rows.flatMap(row => {
-                const username = normalizedUsername(row.username);
-                if (!username || seen.has(username)) {
-                    duplicateCount++;
-                    return [];
-                }
-                seen.add(username);
-                return [{ ...row, username }];
-            });
-            return {
-                rows: Object.freeze(normalizedRows),
-                uniqueCount: seen.size,
-                duplicateCount,
-                lineage: { slot, runIds },
-            };
-        } catch (error) {
-            lastError = error;
-            if (!isQuotaError(error)) throw error;
-        }
-    }
-    throw lastError instanceof Error ? lastError : new Error('CONCIERGE_APIFY_TOKEN_UNAVAILABLE');
+    const durable = await durableRelationshipSide(targetUsername, side, sourceRequestId);
+    if (durable) return durable;
+    // This recovery is intentionally profile-only.  A missing durable relationship
+    // side must stop before any new provider call rather than silently recollecting it.
+    throw new Error('CONCIERGE_RELATIONSHIP_RECOLLECTION_FORBIDDEN');
 }
 
 async function hydrateExactMutualProfiles(
     usernames: readonly string[],
     publicUsernames: readonly string[],
-    sourceRequestId: string,
-): Promise<{ profiles: readonly InstagramProfile[]; unresolved: readonly string[]; lineage: ProviderLineage }> {
+): Promise<{
+    profiles: readonly InstagramProfile[];
+    unresolved: readonly string[];
+    profileUnavailableUsernames: readonly string[];
+    existingProfileArtifactHash: string;
+    lineage: ProviderLineage;
+}> {
+    const PROFILE_HYDRATION_SLOTS = ['senary', 'quinary'] as const;
+    if (usernames.length !== 149 || publicUsernames.length !== 53) {
+        throw new Error('CONCIERGE_PROFILE_ARTIFACT_SCOPE_CONFLICT');
+    }
     const profiles = new Map<string, InstagramProfile>();
     const runIds: string[] = [];
-    const durableRuns = durableProviderRuns(sourceRequestId, 'profile-fallback:')
-        .filter(row => row.status === 'succeeded'
-            && row.logical_provider === 'apify'
-            && row.credential_slot === 'tertiary'
-            && row.run_id.trim());
-    const token = tokenFor('tertiary');
-    if (!token) throw new Error('CONCIERGE_PROFILE_TOKEN_UNAVAILABLE');
-    const client = new ApifyClient({ token, maxRetries: 0 });
-    for (const durableRun of durableRuns) {
-        const run = await client.run(durableRun.run_id).get();
-        const datasetId = run?.defaultDatasetId;
-        if (!datasetId) continue;
-        const items = (await client.dataset(datasetId).listItems({ limit: PROFILE_BATCH_SIZE })).items;
-        const requested = [...new Set(items
-            .map(item => item && typeof item === 'object' && typeof item.username === 'string'
-                ? normalizedUsername(item.username) : null)
-            .filter((value): value is string => value !== null))];
-        if (!requested.length) continue;
-        const parsed = parseApifyProfileDataset(items, requested);
-        for (const [username, profile] of parsed.profilesByUsername) profiles.set(username, profile);
-        runIds.push(durableRun.run_id);
+    const attempts: Array<{
+        slot: ApifySlot;
+        runIds: readonly string[];
+        requestedUsernames?: readonly string[];
+        unavailableUsernames?: readonly string[];
+    }> = [];
+
+    // This is the one pre-existing 19/19 artifact approved for retention.  It is
+    // read-only: no Actor is started, and its tertiary provenance is never reused
+    // for the new 34-account hydration scope.
+    const existingToken = tokenFor(EXISTING_PROFILE_ARTIFACT.slot);
+    if (!existingToken) throw new Error('CONCIERGE_EXISTING_PROFILE_ARTIFACT_UNAVAILABLE');
+    const existingClient = new ApifyClient({ token: existingToken, maxRetries: 0 });
+    const existingItems = (await existingClient.dataset(EXISTING_PROFILE_ARTIFACT.datasetId)
+        .listItems({ limit: EXISTING_PROFILE_ARTIFACT.usernames.length + 1 })).items;
+    const existingParsed = parseApifyProfileDataset(existingItems, EXISTING_PROFILE_ARTIFACT.usernames);
+    const existingUsernames = [...existingParsed.profilesByUsername.keys()].sort();
+    const expectedExistingUsernames = [...EXISTING_PROFILE_ARTIFACT.usernames].sort();
+    if (existingParsed.datasetContaminated
+        || existingParsed.failuresByUsername.size !== 0
+        || existingParsed.notFoundUsernames.size !== 0
+        || JSON.stringify(existingUsernames) !== JSON.stringify(expectedExistingUsernames)) {
+        throw new Error('CONCIERGE_EXISTING_PROFILE_ARTIFACT_INVALID');
     }
+    for (const [username, profile] of existingParsed.profilesByUsername) profiles.set(username, profile);
+    const existingArtifactHash = sha256({
+        runId: EXISTING_PROFILE_ARTIFACT.runId,
+        datasetId: EXISTING_PROFILE_ARTIFACT.datasetId,
+        usernames: expectedExistingUsernames,
+        profiles: expectedExistingUsernames.map(username => checkpointProfile(existingParsed.profilesByUsername.get(username)!)),
+    });
+    attempts.push({
+        slot: EXISTING_PROFILE_ARTIFACT.slot,
+        runIds: [EXISTING_PROFILE_ARTIFACT.runId],
+        requestedUsernames: expectedExistingUsernames,
+    });
+
     const missingPublic = publicUsernames.filter(username => !profiles.has(username));
-    if (missingPublic.length > 0) {
-        if (missingPublic.length !== PROFILE_HYDRATION_TARGET_COUNT) {
-            throw new Error('CONCIERGE_PROFILE_ARTIFACT_SCOPE_CONFLICT');
+    if (missingPublic.length !== PROFILE_HYDRATION_TARGET_COUNT) {
+        throw new Error('CONCIERGE_PROFILE_ARTIFACT_SCOPE_CONFLICT');
+    }
+    const unavailable = new Set(missingPublic);
+    for (const slot of PROFILE_HYDRATION_SLOTS) {
+        if (unavailable.size === 0) break;
+        const token = tokenFor(slot);
+        const requested = [...unavailable];
+        if (!token) {
+            attempts.push({ slot, runIds: [], requestedUsernames: requested, unavailableUsernames: requested });
+            continue;
         }
-        const provider = makeDirectProvider('tertiary', token);
-        const outcomes = await provider.getProfilesBatchOutcomes!(
-            [...missingPublic], PROFILE_BATCH_SIZE, {
-                credentialSlot: 'primary' as const,
-                maxChargeUsd: 0.12,
-                recordUsage: () => undefined,
-                onRunStarted: (runId: string) => { runIds.push(runId); },
-            },
-        );
-        for (const outcome of outcomes) {
-            if (outcome.outcome.status === 'success' && 'profile' in outcome) {
-                profiles.set(normalizedUsername(outcome.profile.username), outcome.profile);
+        const slotRunIds: string[] = [];
+        try {
+            const provider = makeDirectProvider(slot, token);
+            for (let offset = 0; offset < requested.length; offset += PROFILE_BATCH_SIZE) {
+                const batch = requested.slice(offset, offset + PROFILE_BATCH_SIZE);
+                const outcomes: ProfileAttemptResult[] = await provider.getProfilesBatchOutcomes!(
+                    batch, PROFILE_BATCH_SIZE, {
+                        // This exact context is the billing/provider lineage.  The
+                        // adapter's legacy env label is not trusted for attribution.
+                        credentialSlot: slot,
+                        maxChargeUsd: 0.12,
+                        recordUsage: () => undefined,
+                        onRunStarted: (runId: string) => { slotRunIds.push(runId); },
+                    },
+                );
+                for (const outcome of outcomes) {
+                    if (outcome.outcome.status === 'success' && 'profile' in outcome) {
+                        const username = normalizedUsername(outcome.profile.username);
+                        if (!unavailable.has(username) || !publicUsernames.includes(username)) {
+                            throw new Error('CONCIERGE_PROFILE_ARTIFACT_SCOPE_CONFLICT');
+                        }
+                        profiles.set(username, outcome.profile);
+                        unavailable.delete(username);
+                    }
+                }
+            }
+        } catch (error) {
+            // A bounded slot failure is provenance, not permission to retry it or
+            // widen the username scope; QUINARY gets only the still-unresolved set.
+            if (!safeError(error).startsWith('CONCIERGE_') && !(error instanceof Error)) {
+                throw error;
             }
         }
+        runIds.push(...slotRunIds);
+        attempts.push({
+            slot,
+            runIds: [...slotRunIds],
+            requestedUsernames: requested,
+            unavailableUsernames: requested.filter(username => unavailable.has(username)),
+        });
     }
-    const unresolved = publicUsernames.filter(username => !profiles.has(username));
+    const profileUnavailableUsernames = publicUsernames.filter(username => unavailable.has(username));
+    // Only the pre-approved private account remains unresolved in the exact
+    // relationship partition.  Public failures are retained as explicit unknown
+    // provenance and represented by a known relationship-backed placeholder below.
+    const unresolved = profileUnavailableUsernames.length > 0
+        ? []
+        : publicUsernames.filter(username => !profiles.has(username));
     return {
-        profiles: Object.freeze([...profiles.values()].filter(profile => publicUsernames.includes(normalizedUsername(profile.username)))),
+        profiles: Object.freeze([
+            ...[...profiles.values()].filter(profile => publicUsernames.includes(normalizedUsername(profile.username))),
+        ]),
         unresolved: Object.freeze(unresolved),
-        lineage: { slot: 'tertiary', runIds },
+        profileUnavailableUsernames: Object.freeze(profileUnavailableUsernames),
+        lineage: {
+            // The primary slot here describes the new bounded hydration lineage;
+            // the retained tertiary dataset is recorded only in attempts[0].
+            slot: PROFILE_HYDRATION_SLOTS[0],
+            runIds,
+            attempts: Object.freeze(attempts.map(attempt => Object.freeze(attempt))),
+        },
+        existingProfileArtifactHash: existingArtifactHash,
     };
 }
 
@@ -549,6 +601,7 @@ type NewPublicationInput = {
     femaleRows: readonly unknown[];
     privateRows: readonly unknown[];
     unresolvedUsernames: readonly string[];
+    unavailablePublicUsernames: readonly string[];
 };
 
 export function buildAtomicPublicationSql(input: LegacyPublicationInput): string;
@@ -579,6 +632,7 @@ export function buildAtomicPublicationSql(input: LegacyPublicationInput | NewPub
         femaleRows: input.femaleRows,
         privateRows: input.privateRows,
         unresolvedUsernames: input.unresolvedUsernames,
+        unavailablePublicUsernames: input.unavailablePublicUsernames,
     };
     const args = [
         `${sqlString(input.orderId)}::uuid`, `${sqlString(input.ownerId)}::uuid`,
@@ -684,7 +738,7 @@ async function main(): Promise<void> {
     const publicUsernames = [...reviewedArtifacts.classifications.keys()]
         .filter(username => orderedMutualUsernames.includes(username));
     if (publicUsernames.length !== 53) throw new Error('CONCIERGE_REVIEW_ARTIFACT_SCOPE_CONFLICT');
-    const hydration = await hydrateExactMutualProfiles(publicUsernames, publicUsernames, sourceRequest.id);
+    const hydration = await hydrateExactMutualProfiles(orderedMutualUsernames, publicUsernames);
     const { data: rawPrivateRows, error: privateError } = await supabaseAdmin
         .from('private_accounts')
         .select('instagram_id,profile_image,full_name')
@@ -707,11 +761,31 @@ async function main(): Promise<void> {
         isPrivate: true,
         isVerified: false,
     }));
-    const allProfiles = [...hydration.profiles, ...privateProfiles];
     const relationshipRows = [
         ...relationshipEvidence('followers', followers.rows),
         ...relationshipEvidence('following', following.rows),
     ];
+    const relationshipByUsername = new Map<string, ConciergeRelationshipEvidence>();
+    for (const row of relationshipRows) {
+        if (!relationshipByUsername.has(row.username)) relationshipByUsername.set(row.username, row);
+    }
+    const unavailableProfiles: InstagramProfile[] = hydration.profileUnavailableUsernames.map(username => {
+        const relationship = relationshipByUsername.get(username);
+        if (!relationship || relationship.isPrivate) {
+            throw new Error('CONCIERGE_PROFILE_UNAVAILABLE_PROVENANCE_INVALID');
+        }
+        return {
+            username,
+            fullName: relationship.fullName ?? undefined,
+            profilePicUrl: relationship.profilePicUrl ?? undefined,
+            followersCount: 0,
+            followingCount: 0,
+            postsCount: 0,
+            isPrivate: false,
+            isVerified: relationship.isVerified,
+        };
+    });
+    const allProfiles = [...hydration.profiles, ...unavailableProfiles, ...privateProfiles];
     const partition = deriveConciergePrivacyPartition({
         profiles: allProfiles,
         relationshipRows,
@@ -743,6 +817,9 @@ async function main(): Promise<void> {
             username: normalizedUsername(profile.username), isPrivate: profile.isPrivate,
             posts: profile.latestPosts?.map(post => post.id) ?? [],
         })),
+        existingProfileArtifactHash: hydration.existingProfileArtifactHash,
+        profileUnavailableUsernames: hydration.profileUnavailableUsernames,
+        profileHydrationLineage: hydration.lineage,
         unresolvedUsernames: partition.unresolvedUsernames,
         targetPosts: targetSnapshot.persistedTargetPosts,
         targetEvidence,
@@ -755,8 +832,9 @@ async function main(): Promise<void> {
         },
     });
     const profileByUsername = new Map(allProfiles.map(profile => [normalizedUsername(profile.username), profile]));
+    const profileUnavailableSet = new Set(hydration.profileUnavailableUsernames);
     const replayProfiles = orderedMutualUsernames
-        .filter(username => profileByUsername.has(username))
+        .filter(username => profileByUsername.has(username) && !profileUnavailableSet.has(username))
         .map(username => checkpointProfile(profileByUsername.get(username)!));
     const sourceEvidence: AnalysisV2ReplayBundle['evidence'] = {
         relationship: relationshipRows.map(row => ({
@@ -825,6 +903,7 @@ async function main(): Promise<void> {
         targetInteractions,
         targetPosts,
         privateProfiles: partition.privateProfiles,
+        unknownPublicUsernames: hydration.profileUnavailableUsernames,
     });
     validateCanonicalConciergeCorrection({
         fetchedCount: exactMutualCount,
@@ -834,7 +913,17 @@ async function main(): Promise<void> {
     if (result.femaleRows.length === 0) {
         throw new Error('CONCIERGE_NO_CANONICAL_RANKED_RESULT');
     }
-    if (result.counts.male !== 31 || result.counts.female !== 16 || result.counts.unknown !== 6) {
+    const expectedPublicGender = publicUsernames.reduce<Record<ReviewedGender, number>>((counts, username) => {
+        const gender = hydration.profileUnavailableUsernames.includes(username)
+            ? 'unknown'
+            : reviewedArtifacts.classifications.get(username);
+        if (!gender) throw new Error('CONCIERGE_REVIEW_ARTIFACT_SCOPE_CONFLICT');
+        counts[gender] += 1;
+        return counts;
+    }, { male: 0, female: 0, unknown: 0 });
+    if (result.counts.male !== expectedPublicGender.male
+        || result.counts.female !== expectedPublicGender.female
+        || result.counts.unknown !== expectedPublicGender.unknown) {
         throw new Error('CONCIERGE_PUBLIC_GENDER_REPORT_RECONCILIATION_FAILED');
     }
     const currentOrder = await supabaseAdmin.from('earlybird_orders')
@@ -896,6 +985,7 @@ async function main(): Promise<void> {
         femaleRows: result.femaleRows,
         privateRows: result.privateRows,
         unresolvedUsernames: partition.unresolvedUsernames,
+        unavailablePublicUsernames: hydration.profileUnavailableUsernames,
     });
     const [afterRequest, afterResults, afterPrivate] = await Promise.all([
         supabaseAdmin.from('analysis_requests').select('status,progress,gender_stats,pipeline_version').eq('id', order.result_request_id).maybeSingle(),

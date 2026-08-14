@@ -134,12 +134,18 @@ BEGIN
        OR pg_catalog.jsonb_typeof(p_publication_payload->'femaleRows') IS DISTINCT FROM 'array'
        OR pg_catalog.jsonb_typeof(p_publication_payload->'privateRows') IS DISTINCT FROM 'array'
        OR pg_catalog.jsonb_typeof(p_publication_payload->'unresolvedUsernames') IS DISTINCT FROM 'array'
+       OR pg_catalog.jsonb_typeof(p_publication_payload->'unavailablePublicUsernames') IS DISTINCT FROM 'array'
        OR pg_catalog.jsonb_typeof(p_publication_payload->'publicGender') IS DISTINCT FROM 'object'
        OR (p_publication_payload->'publicGender') - ARRAY['male', 'female', 'unknown'] <> '{}'::JSONB
        OR NOT ((p_publication_payload->'publicGender') ?& ARRAY['male', 'female', 'unknown'])
-       OR p_publication_payload->'publicGender'->>'male' IS DISTINCT FROM '31'
-       OR p_publication_payload->'publicGender'->>'female' IS DISTINCT FROM '16'
-       OR p_publication_payload->'publicGender'->>'unknown' IS DISTINCT FROM '6'
+       OR p_publication_payload->'publicGender'->>'male' !~ '^[0-9]{1,3}$'
+       OR p_publication_payload->'publicGender'->>'female' !~ '^[0-9]{1,3}$'
+       OR p_publication_payload->'publicGender'->>'unknown' !~ '^[0-9]{1,3}$'
+       OR (
+            (p_publication_payload->'publicGender'->>'male')::INTEGER
+            + (p_publication_payload->'publicGender'->>'female')::INTEGER
+            + (p_publication_payload->'publicGender'->>'unknown')::INTEGER
+       ) IS DISTINCT FROM p_public
        OR p_publication_payload->>'sourceFingerprint' IS DISTINCT FROM p_source_fingerprint
        OR p_publication_payload->>'resultHash' IS DISTINCT FROM p_result_hash THEN
         RAISE EXCEPTION USING
@@ -157,7 +163,8 @@ BEGIN
             ERRCODE = 'P0001';
     END IF;
 
-    IF pg_catalog.jsonb_array_length(p_publication_payload->'femaleRows') <> 16
+    IF pg_catalog.jsonb_array_length(p_publication_payload->'femaleRows')
+           <> (p_publication_payload->'publicGender'->>'female')::INTEGER
        OR pg_catalog.jsonb_array_length(p_publication_payload->'privateRows') <> p_private THEN
         RAISE EXCEPTION USING
             MESSAGE = 'CONCIERGE_BOOTSTRAP_PUBLICATION_PAYLOAD_INVALID',
@@ -180,6 +187,50 @@ BEGIN
        ) THEN
         RAISE EXCEPTION USING
             MESSAGE = 'CONCIERGE_BOOTSTRAP_UNRESOLVED_PROVENANCE_INVALID',
+            ERRCODE = 'P0001';
+    END IF;
+
+    IF (
+        SELECT pg_catalog.count(*)
+        FROM pg_catalog.jsonb_array_elements(p_publication_payload->'unavailablePublicUsernames') AS item
+        WHERE pg_catalog.jsonb_typeof(item) IS DISTINCT FROM 'string'
+           OR item #>> '{}' !~ '^[a-z0-9._]{1,30}$'
+    ) <> 0
+       OR (
+            SELECT pg_catalog.count(*)
+            FROM pg_catalog.jsonb_array_elements_text(p_publication_payload->'unavailablePublicUsernames') AS item(username)
+       ) <> (
+            SELECT pg_catalog.count(DISTINCT item.username)
+            FROM pg_catalog.jsonb_array_elements_text(p_publication_payload->'unavailablePublicUsernames') AS item(username)
+       )
+       OR EXISTS (
+            SELECT 1
+            FROM pg_catalog.jsonb_array_elements_text(p_publication_payload->'unavailablePublicUsernames') AS unavailable(username)
+            WHERE NOT EXISTS (
+                SELECT 1
+                FROM pg_catalog.jsonb_array_elements(p_followers) AS follower
+                JOIN pg_catalog.jsonb_array_elements(p_following) AS following
+                  ON following->>'username' = follower->>'username'
+                WHERE follower->>'username' = unavailable.username
+            )
+            OR EXISTS (
+                SELECT 1
+                FROM pg_catalog.jsonb_array_elements(p_publication_payload->'privateRows') AS private_row
+                WHERE private_row->>'instagram_id' = unavailable.username
+            )
+            OR EXISTS (
+                SELECT 1
+                FROM pg_catalog.jsonb_array_elements(p_publication_payload->'femaleRows') AS female_row
+                WHERE female_row->>'suspect_instagram_id' = unavailable.username
+            )
+            OR EXISTS (
+                SELECT 1
+                FROM pg_catalog.jsonb_array_elements_text(p_publication_payload->'unresolvedUsernames') AS unresolved(username)
+                WHERE unresolved.username = unavailable.username
+            )
+       ) THEN
+        RAISE EXCEPTION USING
+            MESSAGE = 'CONCIERGE_BOOTSTRAP_PROFILE_UNAVAILABLE_PROVENANCE_INVALID',
             ERRCODE = 'P0001';
     END IF;
 
@@ -619,6 +670,7 @@ BEGIN
                 'public', p_public, 'private', p_private,
                 'unresolved', p_unresolved,
                 'unresolvedUsernames', p_publication_payload->'unresolvedUsernames',
+                'unavailablePublicUsernames', p_publication_payload->'unavailablePublicUsernames',
                 'sourceFingerprint', p_source_fingerprint,
                 'resultHash', p_result_hash,
                 'artifactHashes', p_artifact_hashes
