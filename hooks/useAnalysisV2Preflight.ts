@@ -554,6 +554,11 @@ export function useAnalysisV2Preflight({
             return await loadPreflight(preflightId, scope) !== null;
         } catch (cause) {
             if (scope.isCurrent()) {
+                const terminal = cause instanceof AnalyticsRequestError && cause.terminal;
+                if (terminal) {
+                    const storage = availablePendingTargetStorage();
+                    if (storage) clearPreflightDisplayTarget(storage, preflightId);
+                }
                 trackPreflightAttemptFailure(cause, preflightId);
                 setError(cause instanceof Error
                     ? cause.message

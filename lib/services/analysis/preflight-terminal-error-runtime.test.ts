@@ -61,6 +61,7 @@ function HookProbe({
     const value = useAnalysisV2Preflight();
     capture(value);
     timeline.push(value.preflight ? `render:${value.preflight.status}` : 'render:reset');
+    if (value.error) timeline.push(`error:${value.error}`);
     return null;
 }
 
@@ -141,6 +142,84 @@ describe('preflight terminal error runtime behavior', () => {
             expect(latest?.error).toBe(message);
         },
     );
+
+    it.each([
+        [410, 'PREFLIGHT_EXPIRED', 'preflight expired'],
+        [401, 'UNAUTHORIZED', 'preflight unauthorized'],
+    ] as const) (
+        'clears the matching display target on the initial terminal %s %s before error handling',
+        async (status, code, message) => {
+            const timeline: string[] = [];
+            storePreflightDisplayTarget(window.sessionStorage, {
+                preflightId: PREFLIGHT_ID,
+                target: 'target.name',
+            });
+            const nativeRemoveItem = Storage.prototype.removeItem;
+            const removeItem = vi.spyOn(Storage.prototype, 'removeItem')
+                .mockImplementation(function (this: Storage, key) {
+                    timeline.push(`remove:${key}`);
+                    nativeRemoveItem.call(this, key);
+                });
+            const fetchMock = vi.fn(async () => jsonResponse({
+                code,
+                error: message,
+            }, status));
+            vi.stubGlobal('fetch', fetchMock);
+
+            act(() => {
+                root.render(createElement(HookProbe, {
+                    capture: value => { latest = value; },
+                    timeline,
+                }));
+            });
+            await act(async () => {
+                await latest?.resumePreflight(PREFLIGHT_ID, 'target.name');
+            });
+            await settleReact();
+
+            expect(fetchMock).toHaveBeenCalledTimes(1);
+            expect(readPreflightDisplayTarget(window.sessionStorage, {
+                preflightId: PREFLIGHT_ID,
+            })).toBeNull();
+            expect(removeItem).toHaveBeenCalledWith('preflight_display_target_v1');
+            const removeIndex = timeline.indexOf('remove:preflight_display_target_v1');
+            const errorIndex = timeline.indexOf(`error:${message}`);
+            expect(removeIndex).toBeGreaterThanOrEqual(0);
+            expect(errorIndex).toBeGreaterThan(removeIndex);
+            expect(latest?.preflight).toBeNull();
+            expect(latest?.error).toBe(message);
+        },
+    );
+
+    it('retains the display target on a nonterminal initial resume error', async () => {
+        storePreflightDisplayTarget(window.sessionStorage, {
+            preflightId: PREFLIGHT_ID,
+            target: 'target.name',
+        });
+        const removeItem = vi.spyOn(Storage.prototype, 'removeItem');
+        const fetchMock = vi.fn(async () => jsonResponse({
+            code: 'RATE_LIMITED',
+            error: 'try again later',
+        }, 429));
+        vi.stubGlobal('fetch', fetchMock);
+
+        act(() => {
+            root.render(createElement(HookProbe, {
+                capture: value => { latest = value; },
+                timeline: [],
+            }));
+        });
+        await act(async () => {
+            await latest?.resumePreflight(PREFLIGHT_ID, 'target.name');
+        });
+        await settleReact();
+
+        expect(fetchMock).toHaveBeenCalledTimes(1);
+        expect(removeItem).not.toHaveBeenCalled();
+        expect(readPreflightDisplayTarget(window.sessionStorage, {
+            preflightId: PREFLIGHT_ID,
+        })).toBe('target.name');
+    });
 
     it('does not clear a display target owned by another preflight on terminal polling error', async () => {
         const terminalResponse = deferred<Response>();
