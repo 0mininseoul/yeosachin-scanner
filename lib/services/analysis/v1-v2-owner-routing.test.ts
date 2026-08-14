@@ -61,8 +61,14 @@ function ownerQuery(row: Record<string, unknown>) {
     const query = {
         select: vi.fn(),
         eq: vi.fn(),
-        maybeSingle: vi.fn(async () => ({ data: row, error: null })),
-        single: vi.fn(async () => ({ data: row, error: null })),
+        maybeSingle: vi.fn(async (): Promise<{ data: Record<string, unknown> | null; error: unknown }> => ({
+            data: row,
+            error: null,
+        })),
+        single: vi.fn(async (): Promise<{ data: Record<string, unknown> | null; error: unknown }> => ({
+            data: row,
+            error: null,
+        })),
     };
     query.select.mockReturnValue(query);
     query.eq.mockReturnValue(query);
@@ -220,6 +226,113 @@ describe('owner-facing V1/V2 route selection', () => {
         });
         expect(mocks.resolveResultOwner).toHaveBeenCalledWith(requestId);
         expect(mocks.from).not.toHaveBeenCalled();
+    });
+
+    it('lets the authenticated result operator read an unowned completed V1 concierge result payload', async () => {
+        const ownerUserId = '323e4567-e89b-42d3-a456-426614174000';
+        const requestRow = {
+            id: requestId,
+            user_id: ownerUserId,
+            pipeline_version: 'v1',
+            target_instagram_id: 'target',
+            status: 'completed',
+            progress: 100,
+            mutual_follows: 5,
+            gender_stats: { male: 0, female: 5, unknown: 0 },
+            step_data: {},
+        };
+        const resultRows = Array.from({ length: 5 }, (_, index) => ({
+            rank: index + 1,
+            suspect_instagram_id: `candidate_${index + 1}`,
+            suspect_profile_image: null,
+            suspect_full_name: `Candidate ${index + 1}`,
+            bio: '',
+            risk_grade: 'caution',
+            risk_analysis: [],
+        }));
+        const requestQuery = ownerQuery(requestRow);
+        requestQuery.eq.mockImplementation((column: string, value: unknown) => {
+            if (column === 'user_id') {
+                requestQuery.single.mockResolvedValue({
+                    data: value === ownerUserId ? requestRow : null,
+                    error: value === ownerUserId ? null : { code: 'PGRST116' },
+                });
+            }
+            return requestQuery;
+        });
+        const listQuery = (rows: unknown[]) => {
+            const query = {
+                select: vi.fn(),
+                eq: vi.fn(),
+                order: vi.fn(),
+                then: (resolve: (value: unknown) => unknown, reject: (reason: unknown) => unknown) =>
+                    Promise.resolve({ data: rows, error: null }).then(resolve, reject),
+            };
+            query.select.mockReturnValue(query);
+            query.eq.mockReturnValue(query);
+            query.order.mockReturnValue(query);
+            return query;
+        };
+
+        mocks.getUser.mockResolvedValue({
+            data: { user: { id: userId, email: 'ym1113@kakao.com' } },
+            error: null,
+        });
+        mocks.isResultOperator.mockReturnValue(true);
+        mocks.resolveResultOwner.mockImplementation((_id: string, pipeline = 'v2') => (
+            pipeline === 'v1' ? ownerUserId : null
+        ));
+        mocks.from.mockImplementation((table: string) => {
+            if (table === 'analysis_requests') return requestQuery;
+            if (table === 'analysis_results') return listQuery(resultRows);
+            if (table === 'private_accounts') return listQuery([]);
+            throw new Error(`unexpected table: ${table}`);
+        });
+
+        const response = await getLegacyResult(
+            new Request(`https://example.com/api/analysis/result/${requestId}`),
+            context(),
+        );
+
+        expect(response.status).toBe(200);
+        const payload = await response.json() as { femaleAccounts?: unknown[] };
+        expect(payload.femaleAccounts).toHaveLength(5);
+        expect(mocks.resolveResultOwner).toHaveBeenCalledWith(requestId, 'v1');
+        expect(requestQuery.eq).toHaveBeenCalledWith('user_id', ownerUserId);
+    });
+
+    it('keeps an unowned completed V1 result hidden from a non-operator', async () => {
+        const ownerUserId = '323e4567-e89b-42d3-a456-426614174000';
+        const requestQuery = ownerQuery({
+            id: requestId,
+            user_id: ownerUserId,
+            pipeline_version: 'v1',
+            target_instagram_id: 'target',
+            status: 'completed',
+            progress: 100,
+            mutual_follows: 5,
+            gender_stats: { male: 0, female: 5, unknown: 0 },
+            step_data: {},
+        });
+        requestQuery.eq.mockImplementation((column: string, value: unknown) => {
+            if (column === 'user_id') {
+                requestQuery.single.mockResolvedValue({
+                    data: value === ownerUserId ? {} : null,
+                    error: value === ownerUserId ? null : { code: 'PGRST116' },
+                });
+            }
+            return requestQuery;
+        });
+        mocks.from.mockReturnValue(requestQuery);
+
+        const response = await getLegacyResult(
+            new Request(`https://example.com/api/analysis/result/${requestId}`),
+            context(),
+        );
+
+        expect(response.status).toBe(404);
+        expect(mocks.isResultOperator).toHaveBeenCalledWith({ id: userId, email: undefined });
+        expect(mocks.resolveResultOwner).not.toHaveBeenCalled();
     });
 
     it('routes an owner demo through the V2 result requirement without querying legacy tables', async () => {

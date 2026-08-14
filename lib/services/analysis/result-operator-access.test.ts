@@ -35,6 +35,18 @@ describe('analysis result operator access', () => {
         expect(eqStatus).toHaveBeenCalledWith('status', 'completed');
     });
 
+    it('resolves a completed V1 owner only when the caller selects the V1 pipeline', async () => {
+        const maybeSingle = vi.fn().mockResolvedValue({ data: { user_id: ownerId }, error: null });
+        const eqStatus = vi.fn().mockReturnValue({ maybeSingle });
+        const eqPipeline = vi.fn().mockReturnValue({ eq: eqStatus });
+        const eqId = vi.fn().mockReturnValue({ eq: eqPipeline });
+        const select = vi.fn().mockReturnValue({ eq: eqId });
+        const from = vi.fn().mockReturnValue({ select });
+
+        await expect(resolveAnalysisResultOwner(requestId, 'v1', { from } as never)).resolves.toBe(ownerId);
+        expect(eqPipeline).toHaveBeenCalledWith('pipeline_version', 'v1');
+    });
+
     it('fails closed for missing or malformed owner rows', async () => {
         const client = (data: unknown, error: unknown = null) => ({
             from: vi.fn().mockReturnValue({

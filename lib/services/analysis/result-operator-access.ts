@@ -4,6 +4,7 @@ import { supabaseAdmin } from '@/lib/supabase/admin';
 const uuidSchema = z.string().uuid();
 const ownerRowSchema = z.object({ user_id: uuidSchema }).strict();
 const ANALYSIS_RESULT_OPERATOR_EMAIL = 'ym1113@kakao.com';
+type AnalysisResultPipelineVersion = 'v1' | 'v2';
 
 interface AuthenticatedResultViewer {
     id: string;
@@ -14,7 +15,7 @@ interface ResultOwnerLookupClient {
     from(table: 'analysis_requests'): {
         select(columns: 'user_id'): {
             eq(column: 'id', value: string): {
-                eq(column: 'pipeline_version', value: 'v2'): {
+                eq(column: 'pipeline_version', value: AnalysisResultPipelineVersion): {
                     eq(column: 'status', value: 'completed'): {
                         maybeSingle(): PromiseLike<{
                             data: unknown;
@@ -34,16 +35,29 @@ export function isAnalysisResultOperator(viewer: AuthenticatedResultViewer): boo
 }
 
 /** Resolves the owner only after the route has authorized the operator. */
+export function resolveAnalysisResultOwner(
+    requestId: string,
+    client?: ResultOwnerLookupClient,
+): Promise<string | null>;
+export function resolveAnalysisResultOwner(
+    requestId: string,
+    pipelineVersion: AnalysisResultPipelineVersion,
+    client?: ResultOwnerLookupClient,
+): Promise<string | null>;
 export async function resolveAnalysisResultOwner(
     requestId: string,
-    client: ResultOwnerLookupClient = supabaseAdmin as unknown as ResultOwnerLookupClient,
+    pipelineOrClient: AnalysisResultPipelineVersion | ResultOwnerLookupClient = 'v2',
+    maybeClient?: ResultOwnerLookupClient,
 ): Promise<string | null> {
     if (!uuidSchema.safeParse(requestId).success) return null;
+    const pipelineVersion = typeof pipelineOrClient === 'string' ? pipelineOrClient : 'v2';
+    const client = (typeof pipelineOrClient === 'string' ? maybeClient : pipelineOrClient)
+        ?? (supabaseAdmin as unknown as ResultOwnerLookupClient);
     const { data, error } = await client
         .from('analysis_requests')
         .select('user_id')
         .eq('id', requestId)
-        .eq('pipeline_version', 'v2')
+        .eq('pipeline_version', pipelineVersion)
         .eq('status', 'completed')
         .maybeSingle();
     if (error) throw new Error('ANALYSIS_RESULT_OPERATOR_LOOKUP_FAILED');
