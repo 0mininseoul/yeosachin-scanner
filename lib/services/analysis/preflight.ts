@@ -794,6 +794,10 @@ function throwRpcError(error: RpcError, operation: string): never {
         || error.message === 'PREFLIGHT_CONSUMED'
         || error.message === 'ANALYSIS_V2_PREFLIGHT_CONSUMED'
         || error.message === 'ANALYSIS_V2_PREFLIGHT_NOT_READY'
+        || error.message === 'ANALYSIS_V2_PREFLIGHT_LEASE_LOST'
+        || error.message === 'ANALYSIS_V2_PREFLIGHT_BLOCK_CONFLICT'
+        || error.message === 'ANONYMOUS_PREFLIGHT_LEASE_LOST'
+        || error.message === 'ANONYMOUS_PREFLIGHT_BLOCK_CONFLICT'
         || error.message === 'PREFLIGHT_IMMUTABLE'
     ) {
         throw new PreflightImmutableError(error.message);

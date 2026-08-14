@@ -2129,6 +2129,29 @@ describe('preflight worker domain', () => {
         });
     });
 
+    it.each([
+        ['ANALYSIS_V2_PREFLIGHT_LEASE_LOST', claim()],
+        ['ANALYSIS_V2_PREFLIGHT_BLOCK_CONFLICT', claim()],
+        ['ANONYMOUS_PREFLIGHT_LEASE_LOST', claim({ userId: null })],
+        ['ANONYMOUS_PREFLIGHT_BLOCK_CONFLICT', claim({ userId: null })],
+    ] as const)('maps the stale terminal block fence %s to an immutable error', async (
+        message,
+        claimed,
+    ) => {
+        const store = createSupabasePreflightStore({
+            rpc: vi.fn(async () => ({
+                data: null,
+                error: { code: 'P0001', message },
+            })),
+            from: vi.fn() as never,
+        });
+
+        await expect(store.finalizeBlocked(claimed, 'ANALYSIS_FAILED')).rejects.toMatchObject({
+            name: 'PreflightImmutableError',
+            message,
+        });
+    });
+
     it('blocks a reserved start without a run id before invoking any paid provider', async () => {
         const store = workerStore(claim({ workerAttemptCount: 2 }));
         const runs = providerRunStore();
@@ -2306,6 +2329,61 @@ describe('preflight worker domain', () => {
         })).resolves.toBe('noop');
 
         expect(store.releaseClaim).not.toHaveBeenCalled();
+    });
+
+    it.each([
+        ['ANALYSIS_V2_PREFLIGHT_LEASE_LOST', claim({ workerAttemptCount: 7 })],
+        ['ANALYSIS_V2_PREFLIGHT_BLOCK_CONFLICT', claim({ workerAttemptCount: 7 })],
+        ['ANONYMOUS_PREFLIGHT_LEASE_LOST', claim({ userId: null, workerAttemptCount: 7 })],
+        ['ANONYMOUS_PREFLIGHT_BLOCK_CONFLICT', claim({ userId: null, workerAttemptCount: 7 })],
+    ] as const)('does not retry or report completion after stale fence %s', async (
+        message,
+        claimed,
+    ) => {
+        const rpc = vi.fn(async () => ({
+            data: null,
+            error: { code: 'P0001', message },
+        }));
+        const durableStore = createSupabasePreflightStore({
+            rpc,
+            from: vi.fn() as never,
+        });
+        const finalizeBlocked = vi.fn(async (
+            actualClaim: ClaimedPreflight,
+            code: Parameters<PreflightStore['finalizeBlocked']>[1],
+        ) => {
+            await durableStore.finalizeBlocked(actualClaim, code);
+        });
+        const store = { ...workerStore(claimed), finalizeBlocked } satisfies PreflightStore;
+        const runs = providerRunStore();
+        vi.mocked(runs.load).mockResolvedValue(storedRun('succeeded'));
+        const observer = vi.fn();
+        const anonymousProfileCache = {
+            load: vi.fn(async () => null),
+            store: vi.fn(async () => true),
+        };
+
+        await expect(processPreflight(preflightId, {
+            store,
+            getProfile: vi.fn(),
+            getFallbackProfile: vi.fn(async () => {
+                throw new Error('SCRAPING_RUN_PENDING_ERROR: provider returned no valid profile');
+            }),
+            providerRunStore: runs,
+            observer,
+            anonymousProfileCache,
+        })).resolves.toBe('noop');
+
+        expect(rpc).toHaveBeenCalledWith(
+            PREFLIGHT_DATABASE_NAMES[claimed.userId === null ? 'anonymousBlockRpc' : 'blockRpc'],
+            expect.objectContaining({
+                p_preflight_id: preflightId,
+                p_claim_token: claimToken,
+                p_error_code: 'ANALYSIS_FAILED',
+            }),
+        );
+        expect(store.releaseClaim).not.toHaveBeenCalled();
+        expect(observer).not.toHaveBeenCalledWith(expect.objectContaining({ type: 'completed' }));
     });
 
     it('does not retry a parent that has already terminalized', async () => {
