@@ -177,50 +177,61 @@ function makeProfileContext(slot: ApifySlot, runIds: string[]) {
 async function hydrateExactMutualProfiles(
     usernames: readonly string[],
 ): Promise<{ profiles: readonly InstagramProfile[]; unresolved: readonly string[]; lineage: ProviderLineage }> {
-    const slot: ApifySlot = tokenFor('secondary') ? 'secondary' : 'tertiary';
-    const token = tokenFor(slot);
-    if (!token) throw new Error('CONCIERGE_PROFILE_TOKEN_UNAVAILABLE');
-    const provider = makeDirectProvider(slot, token);
-    const runIds: string[] = [];
     const profiles = new Map<string, InstagramProfile>();
-    for (let offset = 0; offset < usernames.length; offset += PROFILE_BATCH_SIZE) {
-        const batch = usernames.slice(offset, offset + PROFILE_BATCH_SIZE);
-        let outcomes: Awaited<ReturnType<NonNullable<typeof provider.getProfilesBatchOutcomes>>> | null = null;
+    const runIds: string[] = [];
+    let selectedSlot: ApifySlot | null = null;
+    let lastAvailableSlot: ApifySlot | null = null;
+    for (const slot of ['tertiary', 'secondary', 'primary'] as const) {
+        const token = tokenFor(slot);
+        if (!token) continue;
+        lastAvailableSlot = slot;
+        const provider = makeDirectProvider(slot, token);
         try {
-            outcomes = await provider.getProfilesBatchOutcomes!(
-                [...batch],
-                PROFILE_BATCH_SIZE,
-                makeProfileContext(slot, runIds),
-            );
-        } catch {
-            // The bounded per-account retry below retains every failed identity as
-            // unresolved rather than treating a failed batch as an empty result.
-        }
-        for (const outcome of outcomes ?? []) {
-            if (outcome.outcome.status === 'success' && 'profile' in outcome) {
-                profiles.set(normalizedUsername(outcome.profile.username), outcome.profile);
-            }
-        }
-    }
-    const unresolvedAfterBatch = usernames.filter(username => !profiles.has(username));
-    for (const username of unresolvedAfterBatch) {
-        for (let attempt = 0; attempt < 2 && !profiles.has(username); attempt++) {
-            try {
-                const profile = await provider.getProfile!(
-                    username,
+            for (let offset = 0; offset < usernames.length; offset += PROFILE_BATCH_SIZE) {
+                const batch = usernames.slice(offset, offset + PROFILE_BATCH_SIZE)
+                    .filter(username => !profiles.has(username));
+                if (!batch.length) continue;
+                const outcomes = await provider.getProfilesBatchOutcomes!(
+                    [...batch],
+                    PROFILE_BATCH_SIZE,
                     makeProfileContext(slot, runIds),
                 );
-                if (profile) profiles.set(normalizedUsername(profile.username), profile);
-            } catch {
-                // Keep the account unresolved after bounded retries.
+                for (const outcome of outcomes) {
+                    if (outcome.outcome.status === 'success' && 'profile' in outcome) {
+                        selectedSlot = slot;
+                        profiles.set(normalizedUsername(outcome.profile.username), outcome.profile);
+                    }
+                }
             }
+            const unresolvedAfterBatch = usernames.filter(username => !profiles.has(username));
+            for (const username of unresolvedAfterBatch) {
+                for (let attempt = 0; attempt < 2 && !profiles.has(username); attempt++) {
+                    try {
+                        const profile = await provider.getProfile!(
+                            username,
+                            makeProfileContext(slot, runIds),
+                        );
+                        if (profile) {
+                            selectedSlot = slot;
+                            profiles.set(normalizedUsername(profile.username), profile);
+                        }
+                    } catch (error) {
+                        if (!isQuotaError(error)) throw error;
+                    }
+                }
+            }
+            if (profiles.size === usernames.length) break;
+        } catch (error) {
+            if (!isQuotaError(error)) throw error;
         }
     }
+    if (!selectedSlot) selectedSlot = lastAvailableSlot;
+    if (!selectedSlot) throw new Error('CONCIERGE_PROFILE_TOKEN_UNAVAILABLE');
     const unresolved = usernames.filter(username => !profiles.has(username));
     return {
         profiles: Object.freeze([...profiles.values()]),
         unresolved: Object.freeze(unresolved),
-        lineage: { slot, runIds },
+        lineage: { slot: selectedSlot, runIds },
     };
 }
 
