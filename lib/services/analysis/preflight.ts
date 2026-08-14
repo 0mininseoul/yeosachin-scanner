@@ -2302,7 +2302,10 @@ export async function processPreflight(
                     expiresAt,
                 });
             } catch (error) {
-                if (!isBliteSourceFinalizerSchemaCacheMiss(error)) throw error;
+                if (
+                    !isBliteSourceFinalizerSchemaCacheMiss(error)
+                    && !canFailOpenExpiredBliteFence(error, claim)
+                ) throw error;
                 await store.finalizeReady(claim, snapshot);
             }
             if (finalized) {
