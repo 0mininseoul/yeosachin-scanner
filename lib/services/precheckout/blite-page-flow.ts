@@ -13,10 +13,16 @@ export type BliteView =
     | 'blite_ready'
     | 'success_demo'
     | 'fallback_demo'
+    | 'demo_reveal'
     | 'fallback_legacy';
 
 export type PathLatch = null | 'normal' | 'fallback';
 export type DemoStatus = 'idle' | 'running' | 'complete' | 'error';
+export type PrecheckoutSurface = 'awaiting' | 'preview' | 'legacy';
+export type PrecheckoutSurfaceState = Readonly<{
+    preflightId: string | null;
+    surface: PrecheckoutSurface;
+}>;
 export { BLITE_FALLBACK_LATCH_MS } from './blite-deadline';
 
 export type BlitePageState = Readonly<{
@@ -39,6 +45,7 @@ type TimedBlitePageEvent = Readonly<{
 
 export type BlitePageEvent =
     | TimedBlitePageEvent
+    | Readonly<{ type: 'PLAN_CTA' }>
     | Readonly<{ type: 'DEMO_COMPLETE' }>
     | Readonly<{ type: 'DEMO_ERROR' }>;
 
@@ -49,6 +56,28 @@ export const initialBlitePageState: BlitePageState = Object.freeze({
     demoStartedAtMs: null,
     demoStatus: 'idle',
 });
+
+/**
+ * A B-lite status callback may reveal a verified preview, but its unavailable branch must not
+ * release the parent page's plans surface. The immersive state machine owns that release after
+ * the demo's explicit CTA.
+ */
+export function resolvePrecheckoutAvailabilitySurface(
+    current: PrecheckoutSurface,
+    available: boolean,
+): PrecheckoutSurface {
+    return available ? 'preview' : current;
+}
+
+/** A surface created for an earlier preflight must never bleed into the next cohort render. */
+export function resolveActivePrecheckoutSurface(
+    state: PrecheckoutSurfaceState,
+    activePreflightId: string | null | undefined,
+): PrecheckoutSurface {
+    return activePreflightId && state.preflightId === activePreflightId
+        ? state.surface
+        : 'awaiting';
+}
 
 /**
  * Starts a page flow from the accepted submission clock. Keeping this constructor next to the
@@ -162,33 +191,39 @@ export function reduceBlitePage(
 
         case 'DEMO_COMPLETE':
             if (state.demoStatus !== 'running') return state;
-            if (state.view === 'fallback_demo' && state.pathLatch === 'fallback') {
+            if (
+                (state.view === 'fallback_demo' && state.pathLatch === 'fallback')
+                || (state.view === 'success_demo' && state.pathLatch === 'normal')
+            ) {
                 return {
                     ...state,
-                    view: 'fallback_legacy',
+                    view: 'demo_reveal',
                     demoStatus: 'complete',
                 };
             }
-            if (state.view === 'success_demo' && state.pathLatch === 'normal') {
-                // The normal path remains the winner. The legacy view is an explicit atomic
-                // post-demo surface for the account card + plans; keep the start timestamp for
-                // deadline and telemetry consumers.
-                return {
-                    ...state,
-                    view: 'legacy',
-                    demoStatus: 'complete',
-                };
+            return state;
+
+        case 'PLAN_CTA':
+            if (
+                state.view !== 'demo_reveal'
+                || (state.demoStatus !== 'complete' && state.demoStatus !== 'error')
+            ) return state;
+            if (state.pathLatch === 'fallback') {
+                return { ...state, view: 'fallback_legacy' };
+            }
+            if (state.pathLatch === 'normal') {
+                return { ...state, view: 'legacy' };
             }
             return state;
 
         case 'DEMO_ERROR':
             if (state.demoStatus !== 'running') return state;
             if (state.view !== 'fallback_demo' && state.view !== 'success_demo') return state;
-            // Fail-open is safe for either demo: preserve the winning latch and reveal the
-            // legacy surface. In particular, fallback never waits for another timer after error.
+            // Keep the gate closed even if a demo runtime failure interrupts the animation.
+            // The explicit CTA is the only transition that can reveal legacy plans.
             return {
                 ...state,
-                view: 'fallback_legacy',
+                view: 'demo_reveal',
                 demoStatus: 'error',
             };
     }

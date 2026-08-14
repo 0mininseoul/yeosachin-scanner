@@ -166,15 +166,36 @@ describe('PrecheckoutImmersive', () => {
         vi.restoreAllMocks();
     });
 
-    it('renders nothing when the API answers 204 (feature unavailable)', async () => {
+    it('runs the four-stage fallback before plans when the API answers 204', async () => {
+        vi.useFakeTimers();
+        vi.setSystemTime(new Date(SUBMITTED_AT));
+        vi.stubGlobal('requestAnimationFrame', vi.fn(() => 1));
+        vi.stubGlobal('cancelAnimationFrame', vi.fn());
+        const onGoToPlans = vi.fn();
+        const onAvailabilityChange = vi.fn();
         vi.stubGlobal('fetch', vi.fn().mockResolvedValue(noBody(204)));
 
         await act(async () => {
-            root.render(createElement(PrecheckoutImmersive, { preflightId: PREFLIGHT_ID, claimToken: null, onGoToPlans: vi.fn() }));
+            root.render(createElement(PrecheckoutImmersive, {
+                preflightId: PREFLIGHT_ID,
+                claimToken: null,
+                submittedAtMs: Date.parse(SUBMITTED_AT),
+                onGoToPlans,
+                onAvailabilityChange,
+            }));
         });
         await settleUi();
 
-        expect(container.innerHTML).toBe('');
+        expect(container.querySelector('[data-precheckout-demo-mode="fallback"]')).not.toBeNull();
+        expect(onAvailabilityChange).not.toHaveBeenCalledWith(false);
+        expect(onGoToPlans).not.toHaveBeenCalled();
+
+        await act(async () => { await vi.advanceTimersByTimeAsync(12_000); });
+
+        expect(container.textContent).toContain('요금제 확인하기');
+        expect(onGoToPlans).not.toHaveBeenCalled();
+        await clickButton(container, '요금제 확인하기');
+        expect(onGoToPlans).toHaveBeenCalledOnce();
     });
 
     it('does not pin a transient unavailable response in the browser request map', async () => {
@@ -234,18 +255,35 @@ describe('PrecheckoutImmersive', () => {
         expect(container.textContent).toContain('관계 판독 미리보기');
     });
 
-    it('아니오 dismisses the whole preview and leaves the page renderable again', async () => {
+    it('아니오 still runs the four-stage demo and CTA before opening plans', async () => {
+        vi.useFakeTimers();
+        vi.setSystemTime(new Date(SUBMITTED_AT));
+        vi.stubGlobal('requestAnimationFrame', vi.fn(() => 1));
+        vi.stubGlobal('cancelAnimationFrame', vi.fn());
+        const onGoToPlans = vi.fn();
         vi.stubGlobal('fetch', vi.fn().mockResolvedValue(jsonResponse(completeStatus())));
 
         await act(async () => {
-            root.render(createElement(PrecheckoutImmersive, { preflightId: PREFLIGHT_ID, claimToken: null, onGoToPlans: vi.fn() }));
+            root.render(createElement(PrecheckoutImmersive, {
+                preflightId: PREFLIGHT_ID,
+                claimToken: null,
+                onGoToPlans,
+            }));
         });
         await settleUi();
         expect(container.textContent).toContain('이 계정의 인물이 남자가 맞나요?');
 
         await clickButton(container, '아니오');
 
-        expect(container.innerHTML).toBe('');
+        expect(container.querySelector('[data-precheckout-demo-mode="success"]')).not.toBeNull();
+        expect(onGoToPlans).not.toHaveBeenCalled();
+
+        await act(async () => { await vi.advanceTimersByTimeAsync(12_000); });
+
+        expect(container.textContent).toContain('요금제 확인하기');
+        expect(onGoToPlans).not.toHaveBeenCalled();
+        await clickButton(container, '요금제 확인하기');
+        expect(onGoToPlans).toHaveBeenCalledOnce();
     });
 
     it('예 proceeds to the B-lite result screen', async () => {
@@ -262,7 +300,7 @@ describe('PrecheckoutImmersive', () => {
         expect(container.textContent).toContain('분석 후보 예상 범위 3 – 9명');
     });
 
-    it('runs the success demo for exactly 12 seconds before revealing plans', async () => {
+    it('runs the success demo for exactly 12 seconds before revealing its plan CTA', async () => {
         vi.useFakeTimers();
         vi.setSystemTime(new Date(SUBMITTED_AT));
         vi.stubGlobal('requestAnimationFrame', vi.fn(() => 1));
@@ -290,10 +328,13 @@ describe('PrecheckoutImmersive', () => {
             vi.advanceTimersByTime(1);
         });
 
+        expect(container.textContent).toContain('요금제 확인하기');
+        expect(onGoToPlans).not.toHaveBeenCalled();
+        await clickButton(container, '요금제 확인하기');
         expect(onGoToPlans).toHaveBeenCalledTimes(1);
     });
 
-    it('starts the fallback demo on a terminal durable failure and reveals plans at failure plus 12 seconds', async () => {
+    it('starts the fallback demo on a terminal durable failure and reveals its plan CTA at failure plus 12 seconds', async () => {
         vi.useFakeTimers();
         vi.setSystemTime(new Date(SUBMITTED_AT));
         vi.stubGlobal('requestAnimationFrame', vi.fn(() => 1));
@@ -313,6 +354,9 @@ describe('PrecheckoutImmersive', () => {
         });
         expect(onGoToPlans).not.toHaveBeenCalled();
         await act(async () => { vi.advanceTimersByTime(1); });
+        expect(container.textContent).toContain('요금제 확인하기');
+        expect(onGoToPlans).not.toHaveBeenCalled();
+        await clickButton(container, '요금제 확인하기');
         expect(onGoToPlans).toHaveBeenCalledTimes(1);
     });
 
@@ -363,6 +407,9 @@ describe('PrecheckoutImmersive', () => {
         expect(onGoToPlans).not.toHaveBeenCalled();
 
         await act(async () => { await vi.advanceTimersByTimeAsync(12_000); });
+        expect(container.textContent).toContain('요금제 확인하기');
+        expect(onGoToPlans).not.toHaveBeenCalled();
+        await clickButton(container, '요금제 확인하기');
         expect(onGoToPlans).toHaveBeenCalledTimes(1);
     });
 
@@ -404,7 +451,12 @@ describe('PrecheckoutImmersive', () => {
         expect(onAvailabilityChange).toHaveBeenLastCalledWith(true);
     });
 
-    it('releases the plan gate when B-lite is unavailable', async () => {
+    it('keeps the plan gate closed when B-lite is unavailable until the fallback demo completes', async () => {
+        vi.useFakeTimers();
+        vi.setSystemTime(new Date(SUBMITTED_AT));
+        vi.stubGlobal('requestAnimationFrame', vi.fn(() => 1));
+        vi.stubGlobal('cancelAnimationFrame', vi.fn());
+        const onGoToPlans = vi.fn();
         const onAvailabilityChange = vi.fn();
         vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response(null, { status: 204 })));
 
@@ -412,17 +464,18 @@ describe('PrecheckoutImmersive', () => {
             root.render(createElement(PrecheckoutImmersive, {
                 preflightId: PREFLIGHT_ID,
                 claimToken: null,
-                onGoToPlans: vi.fn(),
+                submittedAtMs: Date.parse(SUBMITTED_AT),
+                onGoToPlans,
                 onAvailabilityChange,
             }));
         });
         await settleUi();
 
-        expect(onAvailabilityChange).toHaveBeenCalledOnce();
-        expect(onAvailabilityChange).toHaveBeenLastCalledWith(false);
-        expect(analyticsMocks.trackPrecheckoutEvent).toHaveBeenCalledWith(
-            'precheckout_plan_gate_reached',
-            PREFLIGHT_ID,
+        expect(container.querySelector('[data-precheckout-demo-mode="fallback"]')).not.toBeNull();
+        expect(onAvailabilityChange).not.toHaveBeenCalledWith(false);
+        expect(onGoToPlans).not.toHaveBeenCalled();
+        expect(analyticsMocks.trackPrecheckoutEvent).not.toHaveBeenCalledWith(
+            'precheckout_plan_gate_reached', PREFLIGHT_ID,
         );
     });
 
@@ -490,6 +543,9 @@ describe('PrecheckoutImmersive', () => {
         await act(async () => { await vi.advanceTimersByTimeAsync(11_999); });
         expect(onGoToPlans).not.toHaveBeenCalled();
         await act(async () => { await vi.advanceTimersByTimeAsync(1); });
+        expect(container.textContent).toContain('요금제 확인하기');
+        expect(onGoToPlans).not.toHaveBeenCalled();
+        await clickButton(container, '요금제 확인하기');
         expect(onGoToPlans).toHaveBeenCalledOnce();
     });
 
@@ -690,6 +746,8 @@ describe('PrecheckoutImmersive', () => {
         expect(container.querySelector('[data-plan-gate="open"]')).toBeNull();
 
         await act(async () => { await vi.advanceTimersByTimeAsync(7_000); });
+        expect(container.querySelector('[data-plan-gate="open"]')).toBeNull();
+        await clickButton(container, '요금제 확인하기');
         expect(container.querySelector('[data-plan-gate="open"]')).not.toBeNull();
     });
 
@@ -761,6 +819,9 @@ describe('PrecheckoutImmersive', () => {
 
         await act(async () => { vi.advanceTimersByTime(12_000); });
 
+        expect(container.textContent).toContain('요금제 확인하기');
+        expect(onGoToPlans).not.toHaveBeenCalled();
+        await clickButton(container, '요금제 확인하기');
         expect(onGoToPlans).toHaveBeenCalledOnce();
         expect(analyticsMocks.trackPrecheckoutEvent.mock.calls).toEqual([
             ['precheckout_blite_available', PREFLIGHT_ID],
@@ -792,6 +853,9 @@ describe('PrecheckoutImmersive', () => {
         await settleUi();
         await act(async () => { vi.advanceTimersByTime(12_000); });
 
+        expect(container.textContent).toContain('요금제 확인하기');
+        expect(onGoToPlans).not.toHaveBeenCalled();
+        await clickButton(container, '요금제 확인하기');
         expect(onGoToPlans).toHaveBeenCalledOnce();
         expect(analyticsMocks.trackPrecheckoutEvent.mock.calls).toEqual([
             ['precheckout_blite_fallback_selected', PREFLIGHT_ID, { fallback_reason: 'terminal_before_48' }],
@@ -801,7 +865,7 @@ describe('PrecheckoutImmersive', () => {
         ]);
     });
 
-    it('tracks a fallback demo runtime failure before opening the plan gate', async () => {
+    it('holds a fallback demo runtime failure at the CTA before opening the plan gate', async () => {
         vi.useFakeTimers();
         vi.setSystemTime(new Date(SUBMITTED_AT));
         vi.stubGlobal('requestAnimationFrame', vi.fn(() => 1));
@@ -823,6 +887,10 @@ describe('PrecheckoutImmersive', () => {
         });
         await settleUi();
 
+        expect(container.textContent).toContain('미리보기를 계속할 수 없어요');
+        expect(container.textContent).toContain('요금제 확인하기');
+        expect(onGoToPlans).not.toHaveBeenCalled();
+        await clickButton(container, '요금제 확인하기');
         expect(onGoToPlans).toHaveBeenCalledOnce();
         expect(analyticsMocks.trackPrecheckoutEvent.mock.calls).toEqual([
             ['precheckout_blite_fallback_selected', PREFLIGHT_ID, { fallback_reason: 'terminal_before_48' }],
@@ -832,7 +900,11 @@ describe('PrecheckoutImmersive', () => {
         ]);
     });
 
-    it('tracks gender confirmation outcomes and reaches the plan gate on rejection', async () => {
+    it('tracks gender confirmation rejection through the demo before the plan gate', async () => {
+        vi.useFakeTimers();
+        vi.setSystemTime(new Date(SUBMITTED_AT));
+        vi.stubGlobal('requestAnimationFrame', vi.fn(() => 1));
+        vi.stubGlobal('cancelAnimationFrame', vi.fn());
         const onGoToPlans = vi.fn();
         vi.stubGlobal('fetch', vi.fn().mockResolvedValue(jsonResponse(
             completeStatus(validDto({ likelyFemale: true }), SUBMITTED_AT),
@@ -847,14 +919,23 @@ describe('PrecheckoutImmersive', () => {
         });
         await settleUi();
         await clickButton(container, '아니오');
+        expect(onGoToPlans).not.toHaveBeenCalled();
+        expect(container.querySelector('[data-precheckout-demo-mode="success"]')).not.toBeNull();
 
+        await act(async () => { await vi.advanceTimersByTimeAsync(12_000); });
+
+        expect(container.textContent).toContain('요금제 확인하기');
+        expect(onGoToPlans).not.toHaveBeenCalled();
+        await clickButton(container, '요금제 확인하기');
         expect(onGoToPlans).toHaveBeenCalledOnce();
         expect(analyticsMocks.trackPrecheckoutEvent.mock.calls).toEqual([
             ['precheckout_blite_available', PREFLIGHT_ID],
             ['precheckout_blite_gender_confirmation_completed', PREFLIGHT_ID, {
                 gender_confirmation_outcome: 'rejected',
             }],
-            ['precheckout_plan_gate_reached', PREFLIGHT_ID],
+            ['precheckout_demo_started', PREFLIGHT_ID, { demo_mode: 'success' }],
+            ['precheckout_demo_completed', PREFLIGHT_ID, { demo_mode: 'success', duration_ms: 12_000 }],
+            ['precheckout_plan_gate_reached', PREFLIGHT_ID, { demo_mode: 'success' }],
         ]);
     });
 
