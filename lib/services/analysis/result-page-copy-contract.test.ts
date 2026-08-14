@@ -40,6 +40,10 @@ const compactSummary = resultPage.slice(
     resultPage.indexOf('{summary.v2 && counts ? ('),
     resultPage.indexOf(') : gr ? ('),
 );
+const legacySummary = resultPage.slice(
+    resultPage.indexOf(') : gr ? ('),
+    resultPage.indexOf('{/* public / private tabs */}'),
+);
 const verdictPresentation = `${compactSummary}\n${highRiskSummary}`;
 
 const reportHeader = resultPage.slice(
@@ -170,6 +174,12 @@ describe('result page pagination copy contract', () => {
         expect(verdictPresentation).toContain('count={highCount}');
         expect(verdictPresentation).toContain('고위험 계정');
         expect(compactSummary).not.toContain('INSTAGRAM 원지표');
+    });
+
+    it('keeps the V1 verdict scoped to the authoritative mutual count', () => {
+        expect(legacySummary).toMatch(
+            /<HighRiskSummary[\s\S]*?count=\{highCount\}[\s\S]*?context=\{<>\s*맞팔[\s\S]*?summary\.analyzedMutuals\.toLocaleString\(\)[\s\S]*?모든 공개 계정들을 판독했습니다\.\s*<\/>\}\s*\/>/,
+        );
     });
 
     it('does not paint a clean verdict in the danger accent', () => {

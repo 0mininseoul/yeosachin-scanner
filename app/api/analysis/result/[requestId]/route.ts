@@ -1,12 +1,14 @@
 import { createClient } from '@/lib/supabase/server';
 import { supabaseAdmin } from '@/lib/supabase/admin';
 import {
+    hydratedMutualCountFromStepData,
     inferRecentMutualFemaleRanks,
+    normalizeLegacyGenderStats,
     orderedMutualUsernamesFromStepData,
 } from '@/lib/services/analysis/recent-mutuals';
 import {
     targetProfileImageFromStepData,
-    toResultInteractionSummary,
+    toOwnerResultInteractionSummary,
 } from '@/lib/services/analysis/result-interactions';
 import { createImageProxyPath } from '@/lib/services/media/image-proxy-token';
 import { NextResponse } from 'next/server';
@@ -137,6 +139,7 @@ export async function GET(
                 suspect_full_name,
                 bio,
                 risk_grade,
+                one_line_overview,
                 risk_analysis
             `)
             .eq('request_id', requestId)
@@ -164,7 +167,7 @@ export async function GET(
         }
 
         // 6. 성별 비율 계산
-        const genderStats = analysisRequest.gender_stats || { male: 0, female: 0, unknown: 0 };
+        const genderStats = normalizeLegacyGenderStats(analysisRequest.gender_stats);
         const totalGender = genderStats.male + genderStats.female + genderStats.unknown;
         const genderRatio = {
             male: {
@@ -197,7 +200,7 @@ export async function GET(
                 riskGrade: result.risk_grade as 'high_risk' | 'caution' | 'normal',
                 bio: result.bio || '',
                 recentMutualRank: recentMutualRanks.get(instagramId.toLowerCase()),
-                ...toResultInteractionSummary(result),
+                ...toOwnerResultInteractionSummary(result),
             };
         }) || [];
 
@@ -208,6 +211,8 @@ export async function GET(
             profileImage: createImageProxyPath(account.profile_image),
             instagramUrl: `https://instagram.com/${account.instagram_id}`,
         })) || [];
+        const analyzedMutuals = hydratedMutualCountFromStepData(analysisRequest.step_data)
+            ?? totalGender + privateAccountsList.length;
 
         // 9. 응답 구성
         return NextResponse.json({
@@ -219,6 +224,7 @@ export async function GET(
                     targetProfileImageFromStepData(analysisRequest.step_data)
                 ),
                 mutualFollows: analysisRequest.mutual_follows || 0,
+                analyzedMutuals,
                 genderRatio,
             },
             femaleAccounts,

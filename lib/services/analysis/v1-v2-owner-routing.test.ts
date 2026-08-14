@@ -237,9 +237,12 @@ describe('owner-facing V1/V2 route selection', () => {
             target_instagram_id: 'target',
             status: 'completed',
             progress: 100,
-            mutual_follows: 5,
-            gender_stats: { male: 0, female: 5, unknown: 0 },
-            step_data: {},
+            mutual_follows: 150,
+            gender_stats: { male: 100, female: 5, unknown: 43 },
+            step_data: {
+                mutualFollows: ['candidate_1'],
+                conciergeEvidence: { hydration: { hydrated: 149, unresolved: 1 } },
+            },
         };
         const resultRows = Array.from({ length: 5 }, (_, index) => ({
             rank: index + 1,
@@ -247,8 +250,14 @@ describe('owner-facing V1/V2 route selection', () => {
             suspect_profile_image: null,
             suspect_full_name: `Candidate ${index + 1}`,
             bio: '',
-            risk_grade: 'caution',
-            risk_analysis: [],
+            risk_grade: index === 0 ? 'normal' : index === 1 ? 'caution' : index === 2 ? 'high_risk' : 'caution',
+            one_line_overview: `${['첫', '두', '세', '네', '다섯'][index] ?? '여섯'} 번째 공개 계정의 특징을 중심으로 정리한 계정입니다.`,
+            risk_analysis: index === 2
+                ? [
+                    '프로필과 최근 피드에서 눈에 띌 재료를 꽤 성실하게 모아 둔 계정입니다.',
+                    '댓글 흔적은 제법 친절하지만, 수집 표본 밖 활동은 누락될 수 있습니다.',
+                ]
+                : [],
         }));
         const requestQuery = ownerQuery(requestRow);
         requestQuery.eq.mockImplementation((column: string, value: unknown) => {
@@ -285,7 +294,11 @@ describe('owner-facing V1/V2 route selection', () => {
         mocks.from.mockImplementation((table: string) => {
             if (table === 'analysis_requests') return requestQuery;
             if (table === 'analysis_results') return listQuery(resultRows);
-            if (table === 'private_accounts') return listQuery([]);
+            if (table === 'private_accounts') return listQuery([{
+                instagram_id: 'private_candidate',
+                full_name: 'Private Candidate',
+                profile_image: null,
+            }]);
             throw new Error(`unexpected table: ${table}`);
         });
 
@@ -295,10 +308,92 @@ describe('owner-facing V1/V2 route selection', () => {
         );
 
         expect(response.status).toBe(200);
-        const payload = await response.json() as { femaleAccounts?: unknown[] };
+        const payload = await response.json() as {
+            femaleAccounts?: unknown[];
+            summary?: { mutualFollows?: number; analyzedMutuals?: number };
+        };
         expect(payload.femaleAccounts).toHaveLength(5);
+        expect(payload.summary).toMatchObject({ mutualFollows: 150, analyzedMutuals: 149 });
+        expect(payload.femaleAccounts).toEqual(expect.arrayContaining([
+            expect.objectContaining({
+                instagramId: 'candidate_1',
+                oneLineOverview: '첫 번째 공개 계정의 특징을 중심으로 정리한 계정입니다.',
+            }),
+            expect.objectContaining({
+                instagramId: 'candidate_2',
+                oneLineOverview: '두 번째 공개 계정의 특징을 중심으로 정리한 계정입니다.',
+            }),
+            expect.objectContaining({
+                instagramId: 'candidate_3',
+                oneLineOverview: '세 번째 공개 계정의 특징을 중심으로 정리한 계정입니다.',
+                riskAnalysis: [
+                    '프로필과 최근 피드에서 눈에 띌 재료를 꽤 성실하게 모아 둔 계정입니다.',
+                    '댓글 흔적은 제법 친절하지만, 수집 표본 밖 활동은 누락될 수 있습니다.',
+                ],
+            }),
+        ]));
         expect(mocks.resolveResultOwner).toHaveBeenCalledWith(requestId, 'v1');
         expect(requestQuery.eq).toHaveBeenCalledWith('user_id', ownerUserId);
+    });
+
+    it('returns finite zero gender counts for malformed legacy stats', async () => {
+        const ownerUserId = '323e4567-e89b-42d3-a456-426614174000';
+        const requestRow = {
+            id: requestId,
+            user_id: ownerUserId,
+            pipeline_version: 'v1',
+            target_instagram_id: 'target',
+            status: 'completed',
+            progress: 100,
+            mutual_follows: 0,
+            gender_stats: {},
+            step_data: {},
+        };
+        const requestQuery = ownerQuery(requestRow);
+        const listQuery = (rows: unknown[]) => {
+            const query = {
+                select: vi.fn(),
+                eq: vi.fn(),
+                order: vi.fn(),
+                then: (resolve: (value: unknown) => unknown, reject: (reason: unknown) => unknown) =>
+                    Promise.resolve({ data: rows, error: null }).then(resolve, reject),
+            };
+            query.select.mockReturnValue(query);
+            query.eq.mockReturnValue(query);
+            query.order.mockReturnValue(query);
+            return query;
+        };
+        mocks.getUser.mockResolvedValue({
+            data: { user: { id: userId, email: 'ym1113@kakao.com' } },
+            error: null,
+        });
+        mocks.isResultOperator.mockReturnValue(true);
+        mocks.resolveResultOwner.mockImplementation((_id: string, pipeline = 'v2') => (
+            pipeline === 'v1' ? ownerUserId : null
+        ));
+        mocks.from.mockImplementation((table: string) => {
+            if (table === 'analysis_requests') return requestQuery;
+            if (table === 'analysis_results' || table === 'private_accounts') return listQuery([]);
+            throw new Error(`unexpected table: ${table}`);
+        });
+
+        const response = await getLegacyResult(
+            new Request(`https://example.com/api/analysis/result/${requestId}`),
+            context(),
+        );
+
+        expect(response.status).toBe(200);
+        await expect(response.json()).resolves.toMatchObject({
+            summary: {
+                mutualFollows: 0,
+                analyzedMutuals: 0,
+                genderRatio: {
+                    male: { count: 0, percentage: 0 },
+                    female: { count: 0, percentage: 0 },
+                    unknown: { count: 0, percentage: 0 },
+                },
+            },
+        });
     });
 
     it('keeps an unowned completed V1 result hidden from a non-operator', async () => {

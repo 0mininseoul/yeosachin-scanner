@@ -120,6 +120,7 @@ interface ResultData {
         targetFullName?: string;
         targetProfileImage?: string;
         mutualFollows: number;
+        analyzedMutuals: number;
         genderRatio: GenderRatio | null;
         v2?: {
             followers: AnalysisResultPageV1['summary']['followers'];
@@ -230,6 +231,7 @@ export function mapV2Result(result: AnalysisResultPageV1, externalProfileLinks =
             targetFullName: targetFullName || undefined,
             targetProfileImage: result.summary.targetProfileImage || undefined,
             mutualFollows: result.summary.detectedMutuals,
+            analyzedMutuals: result.summary.detectedMutuals,
             genderRatio: genderStats ? genderBreakdownFromStats(genderStats) : null,
             v2: {
                 followers: result.summary.followers,
@@ -846,11 +848,14 @@ export default function ResultPage({ params }: PageProps) {
                 ) : gr ? (
                     <>
                     <h1 className="mt-3 text-[24px] font-extrabold tracking-tight text-fg">판독 결과</h1>
-                    <HighRiskSummary count={highCount} />
+                    <HighRiskSummary
+                        count={highCount}
+                        context={<>맞팔 <span className="num">{summary.analyzedMutuals.toLocaleString()}</span>명 중 모든 공개 계정들을 판독했습니다.</>}
+                    />
                     <div className="mt-6 border-t border-line pt-5">
                         <div className="flex items-baseline justify-between gap-3">
                             <span className="label-ko">맞팔 계정 성별 분석</span>
-                            <span className="num text-[10.5px] text-fg-dim">맞팔 {summary.mutualFollows}명</span>
+                            <span className="num text-[10.5px] text-fg-dim">맞팔 {summary.analyzedMutuals}명</span>
                         </div>
                         <div className="mt-2.5">
                             <GenderRatioBreakdown gr={gr} />

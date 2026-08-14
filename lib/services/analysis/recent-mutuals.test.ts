@@ -1,7 +1,9 @@
 import { describe, expect, it } from 'vitest';
 import {
     getRecentMutualBonus,
+    hydratedMutualCountFromStepData,
     inferRecentMutualFemaleRanks,
+    normalizeLegacyGenderStats,
     orderedMutualUsernamesFromStepData,
 } from './recent-mutuals';
 
@@ -50,6 +52,26 @@ describe('recent mutual inference', () => {
         })).toEqual(['first', 'second']);
         expect(orderedMutualUsernamesFromStepData(null)).toEqual([]);
         expect(orderedMutualUsernamesFromStepData({ mutualFollows: 'first' })).toEqual([]);
+    });
+
+    it('reads a bounded hydrated mutual count from concierge evidence', () => {
+        expect(hydratedMutualCountFromStepData({
+            mutualFollows: Array.from({ length: 150 }, (_, index) => `candidate_${index}`),
+            conciergeEvidence: {
+                hydration: { hydrated: 149, unresolved: 1 },
+            },
+        })).toBe(149);
+        expect(hydratedMutualCountFromStepData({ conciergeEvidence: { hydration: { hydrated: -1 } } }))
+            .toBeUndefined();
+        expect(hydratedMutualCountFromStepData({ conciergeEvidence: { hydration: { hydrated: '149' } } }))
+            .toBeUndefined();
+    });
+
+    it('normalizes malformed legacy gender stats to finite non-negative counts', () => {
+        expect(normalizeLegacyGenderStats({})).toEqual({ male: 0, female: 0, unknown: 0 });
+        expect(normalizeLegacyGenderStats({ male: 2, female: Number.NaN, unknown: -1 }))
+            .toEqual({ male: 2, female: 0, unknown: 0 });
+        expect(normalizeLegacyGenderStats(null)).toEqual({ male: 0, female: 0, unknown: 0 });
     });
 });
 
