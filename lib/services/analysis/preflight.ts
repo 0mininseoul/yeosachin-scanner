@@ -107,6 +107,7 @@ import {
 } from '@/lib/services/precheckout/blite-observability';
 
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+const SHA256_PATTERN = /^[0-9a-f]{64}$/;
 const ISO_TIMESTAMP_PATTERN = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})$/;
 const ISO_TIMESTAMP_PARTS_PATTERN = /^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2})(?:\.(\d+))?(Z|[+-]\d{2}:\d{2})$/;
 const BLITE_SOURCE_TTL_MICROSECONDS = BigInt(30 * 60 * 1_000_000);
@@ -160,6 +161,7 @@ export const PREFLIGHT_DATABASE_NAMES = Object.freeze({
     releaseBetaPrepareClaimRpc: 'release_analysis_beta_preflight_prepare_claim',
     blockBetaPrepareCapacityRpc: 'block_analysis_beta_preflight_capacity',
     claimRpc: 'claim_analysis_v2_preflight',
+    claimedTargetHashRpc: 'read_claimed_analysis_v2_preflight_target_hash_v1',
     reserveDispatchRpc: 'reserve_analysis_v2_preflight_dispatch',
     markDispatchedRpc: 'mark_analysis_v2_preflight_dispatched',
     bliteDispatchReserveRpc: 'reserve_precheckout_blite_dispatch_v1',
@@ -255,6 +257,8 @@ export interface ClaimedPreflight {
     analysisEntryChannel?: 'standard' | 'betatest';
     workerAttemptCount: number;
     leaseExpiresAt?: string;
+    /** Authoritative API-persisted identity hash; null is allowed for legacy ordinary rows. */
+    targetInputHash?: string | null;
     catalogSnapshot: PreflightCatalogSnapshot;
 }
 
@@ -807,6 +811,14 @@ function requiredTimestamp(value: unknown): string {
     return value;
 }
 
+function requiredNullableTargetInputHash(value: unknown): string | null {
+    if (value === null || value === undefined) return null;
+    if (typeof value !== 'string' || !SHA256_PATTERN.test(value)) {
+        throw new Error('PREFLIGHT_PERSISTENCE_ERROR: invalid target input hash.');
+    }
+    return value;
+}
+
 function requiredAccessMode(value: unknown): PlanAccessMode {
     if (value !== 'production' && value !== 'test_entitlement') {
         throw new Error('PREFLIGHT_PERSISTENCE_ERROR: invalid access mode.');
@@ -1305,6 +1317,16 @@ export function createSupabasePreflightStore(
                 }
                 return null;
             }
+            const { data: targetInputHash, error: targetInputHashError } = await client.rpc(
+                PREFLIGHT_DATABASE_NAMES.claimedTargetHashRpc,
+                {
+                    p_preflight_id: preflightId,
+                    p_claim_token: claimToken,
+                },
+            );
+            if (targetInputHashError) {
+                throwRpcError(targetInputHashError, 'claimed target hash');
+            }
             return {
                 preflightId: requiredUuid(preflightId, 'preflight id'),
                 claimToken,
@@ -1318,6 +1340,7 @@ export function createSupabasePreflightStore(
                     : z.enum(['standard', 'betatest']).parse(row.analysis_entry_channel),
                 workerAttemptCount: requiredWorkerAttemptCount(row.worker_attempt_count),
                 leaseExpiresAt: requiredTimestamp(row.lease_expires_at),
+                targetInputHash: requiredNullableTargetInputHash(targetInputHash),
                 catalogSnapshot: {
                     plans: planCatalogSnapshotSchema.parse(row.plan_catalog_snapshot),
                     pricingVersion: z.string()
@@ -1961,10 +1984,20 @@ export async function processPreflight(
         if (isBetatest && !betaHold) {
             throw new Error(BETA_APIFY_POOL_CAPACITY_ERROR);
         }
-        const inputHash = preflightTargetInputHash(
-            claim.targetInstagramId,
-            dependencies.env ?? process.env
-        );
+        let inputHash: string;
+        if (bliteClock !== null) {
+            if (!claim.targetInputHash) {
+                throw new Error(
+                    'PRECHECKOUT_BLITE_SOURCE_PERSISTENCE_ERROR: target hash is missing.'
+                );
+            }
+            inputHash = claim.targetInputHash;
+        } else {
+            inputHash = preflightTargetInputHash(
+                claim.targetInstagramId,
+                dependencies.env ?? process.env
+            );
+        }
         const existingRun = await providerRuns.load({
             preflightId: claim.preflightId,
             claimToken: claim.claimToken,

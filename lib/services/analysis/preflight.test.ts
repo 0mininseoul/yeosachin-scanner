@@ -474,6 +474,55 @@ describe('B-lite single-collection preflight', () => {
         expect(store.finalizeBlocked).not.toHaveBeenCalled();
     });
 
+    it('uses the claimed persisted target hash when the worker HMAC secret has drifted', async () => {
+        const persistedTargetHash = 'c'.repeat(64);
+        const claimed = claim({ targetInputHash: persistedTargetHash });
+        const store = workerStore(claimed);
+        const run = {
+            ...storedRun('succeeded'),
+            inputHash: persistedTargetHash,
+            credentialSlot: selectPreflightApifyCredentialSlot(preflightId, {
+                PRECHECKOUT_BLITE_ENABLED: 'true',
+                PRECHECKOUT_BLITE_ROLLOUT_PERCENT: '100',
+                ANALYSIS_V2_PREFLIGHT_IDENTITY_HMAC_SECRET: preflightIdentitySecret,
+            }),
+        };
+        const runs: PreflightProviderRunStore = {
+            load: vi.fn(async () => run),
+            reserve: vi.fn(),
+            checkpointStarted: vi.fn(),
+            checkpointRejected: vi.fn(),
+            checkpointTerminal: vi.fn(),
+        };
+        const finalizeReadyWithSource = vi.fn(async () => true);
+        const env = {
+            PRECHECKOUT_BLITE_ENABLED: 'true',
+            PRECHECKOUT_BLITE_ROLLOUT_PERCENT: '100',
+            ANALYSIS_V2_PREFLIGHT_IDENTITY_HMAC_SECRET: preflightIdentitySecret,
+        };
+
+        await expect(processPreflight(preflightId, {
+            store,
+            providerRunStore: runs,
+            getFullProfile: vi.fn(async () => profile()),
+            activateBliteCohort: vi.fn(async () => ({
+                submittedAt: new Date(Date.now() - 1_000).toISOString(),
+                deadlineAt: new Date(Date.now() + 89_000).toISOString(),
+                expiresAt: new Date(Date.now() + 29 * 60_000).toISOString(),
+            })),
+            finalizeReadyWithSource,
+            enqueueBliteInference: vi.fn(async () => 'enqueued' as const),
+            env,
+        })).resolves.toBe('ready');
+
+        expect(runs.load).toHaveBeenCalledWith(expect.objectContaining({
+            inputHash: persistedTargetHash,
+        }));
+        expect(finalizeReadyWithSource).toHaveBeenCalledWith(
+            expect.objectContaining({ targetInputHash: persistedTargetHash }),
+        );
+    });
+
     it('collects one Apify profile, commits its ready snapshot and bounded source, then enqueues', async () => {
         const claimed = claim();
         const store = workerStore(claimed);
@@ -687,6 +736,7 @@ function claim(overrides: Partial<ClaimedPreflight> = {}): ClaimedPreflight {
         targetInstagramId: 'target.name',
         accessMode: 'test_entitlement',
         workerAttemptCount: 1,
+        targetInputHash: preflightInputHash,
         catalogSnapshot: {
             plans: {
                 basic: {
@@ -1310,8 +1360,9 @@ describe('preflight persistence adapter', () => {
 
     it('keeps an active-lease duplicate delivery retryable instead of acknowledging it', async () => {
         const store = createSupabasePreflightStore({
-            rpc: vi.fn(async () => ({
-                data: [{
+            rpc: vi.fn(async (name: string) => name === PREFLIGHT_DATABASE_NAMES.claimedTargetHashRpc
+                ? { data: preflightInputHash, error: null }
+                : { data: [{
                     preflight_id: preflightId,
                     user_id: userId,
                     claimed: false,
@@ -1320,9 +1371,7 @@ describe('preflight persistence adapter', () => {
                     worker_attempt_count: 1,
                     lease_expires_at: expiresAt,
                     preflight_status: 'processing',
-                }],
-                error: null,
-            })),
+                }], error: null }),
             from: vi.fn() as never,
         });
 
@@ -1334,8 +1383,9 @@ describe('preflight persistence adapter', () => {
     it('claims the immutable stored catalog even when its pricing version is not current', async () => {
         const storedCatalog = claim().catalogSnapshot;
         const store = createSupabasePreflightStore({
-            rpc: vi.fn(async () => ({
-                data: [{
+            rpc: vi.fn(async (name: string) => name === PREFLIGHT_DATABASE_NAMES.claimedTargetHashRpc
+                ? { data: preflightInputHash, error: null }
+                : { data: [{
                     preflight_id: preflightId,
                     user_id: userId,
                     claimed: true,
@@ -1351,9 +1401,7 @@ describe('preflight persistence adapter', () => {
                     worker_attempt_count: 1,
                     lease_expires_at: expiresAt,
                     preflight_status: 'processing',
-                }],
-                error: null,
-            })),
+                }], error: null }),
             from: vi.fn() as never,
         });
 
