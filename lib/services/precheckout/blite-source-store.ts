@@ -19,6 +19,9 @@ const providerOperationKey = z.string().regex(
 const boundedNullableText = z.string().max(8_192).nullable();
 const boundedNullableCount = z.number().int().nonnegative().max(10_000_000).nullable();
 
+export const PRECHECKOUT_BLITE_PREFLIGHT_FENCE_LOST =
+    'PRECHECKOUT_BLITE_PREFLIGHT_FENCE_LOST';
+
 interface RpcClient {
     rpc(name: string, params: Record<string, unknown>): PromiseLike<{
         data: unknown;
@@ -26,7 +29,10 @@ interface RpcClient {
     }>;
 }
 
-function persistenceError(error?: { code?: string } | null): Error {
+function persistenceError(error?: { code?: string; message?: string } | null): Error {
+    if (error?.message === PRECHECKOUT_BLITE_PREFLIGHT_FENCE_LOST) {
+        return new Error(PRECHECKOUT_BLITE_PREFLIGHT_FENCE_LOST);
+    }
     const code = error?.code && /^[A-Za-z0-9_]{1,32}$/.test(error.code) ? error.code : 'invalid';
     return new Error(`PRECHECKOUT_BLITE_SOURCE_PERSISTENCE_ERROR (${code})`);
 }

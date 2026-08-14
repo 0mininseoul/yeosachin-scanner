@@ -345,6 +345,76 @@ describe('B-lite single-collection preflight', () => {
         expect(bliteObservability.profileCollectionFailed).not.toHaveBeenCalled();
     });
 
+    it('fails open to the ordinary ready flow when a retry crosses the immutable B-lite fence', async () => {
+        const claimed = claim({
+            userId: null,
+            workerAttemptCount: 1,
+            leaseExpiresAt: new Date(Date.now() + 180_000).toISOString(),
+        });
+        const store = workerStore(claimed);
+        vi.mocked(store.claim).mockResolvedValueOnce(claimed).mockResolvedValueOnce({
+            ...claimed,
+            workerAttemptCount: 2,
+        });
+        const runs = providerRunStore();
+        const env = {
+            PRECHECKOUT_BLITE_ENABLED: 'true',
+            PRECHECKOUT_BLITE_ROLLOUT_PERCENT: '100',
+            ANALYSIS_V2_PREFLIGHT_IDENTITY_HMAC_SECRET: preflightIdentitySecret,
+        };
+        const completedRun = {
+            ...storedRun('succeeded'),
+            credentialSlot: selectPreflightApifyCredentialSlot(preflightId, env),
+        };
+        vi.mocked(runs.load)
+            .mockResolvedValueOnce(null)
+            .mockResolvedValueOnce(null)
+            .mockResolvedValueOnce(completedRun)
+            .mockResolvedValueOnce(completedRun);
+        const activateBliteCohort = vi.fn()
+            .mockResolvedValueOnce({
+                submittedAt: new Date(Date.now() - 61_000).toISOString(),
+                deadlineAt: new Date(Date.now() - 1_000).toISOString(),
+                expiresAt: new Date(Date.now() + 29 * 60_000).toISOString(),
+            })
+            .mockRejectedValueOnce(new Error('PRECHECKOUT_BLITE_PREFLIGHT_FENCE_LOST'));
+        const getFullProfile = vi.fn(async () => {
+            throw new Error('SCRAPING_RUN_PENDING_ERROR: checkpointed run is still active.');
+        });
+        const getFallbackProfile = vi.fn(async () => profile());
+        const finalizeReadyWithSource = vi.fn();
+        const enqueueBliteInference = vi.fn();
+        const anonymousProfileCache = {
+            load: vi.fn(async () => null),
+            store: vi.fn(async () => true),
+        };
+        const options = {
+            store,
+            providerRunStore: runs,
+            getFullProfile,
+            getFallbackProfile,
+            activateBliteCohort,
+            finalizeReadyWithSource,
+            enqueueBliteInference,
+            anonymousProfileCache,
+            env,
+        };
+
+        await expect(processPreflight(preflightId, options))
+            .rejects.toMatchObject({ message: 'PREFLIGHT_WORKER_RETRY' });
+        expect(getFullProfile).toHaveBeenCalledOnce();
+        expect(store.releaseClaim).toHaveBeenCalledOnce();
+
+        await expect(processPreflight(preflightId, options)).resolves.toBe('ready');
+        expect(activateBliteCohort).toHaveBeenCalledTimes(2);
+        expect(getFullProfile).toHaveBeenCalledOnce();
+        expect(getFallbackProfile).toHaveBeenCalledOnce();
+        expect(store.finalizeReady).toHaveBeenCalledOnce();
+        expect(store.finalizeBlocked).not.toHaveBeenCalled();
+        expect(finalizeReadyWithSource).not.toHaveBeenCalled();
+        expect(enqueueBliteInference).not.toHaveBeenCalled();
+    });
+
     it('collects one Apify profile, commits its ready snapshot and bounded source, then enqueues', async () => {
         const claimed = claim();
         const store = workerStore(claimed);
@@ -507,6 +577,17 @@ it('classifies a definite provider start rejection as non-retryable', () => {
         new Error('SCRAPING_PROVIDER_START_REJECTED_ERROR')
     )).toEqual({
         category: 'provider',
+        retryable: false,
+        httpStatus: null,
+        paidFallbackEligible: false,
+    });
+});
+
+it('classifies an immutable B-lite fence loss as non-retryable persistence', () => {
+    expect(classifyPreflightError(
+        new Error('PRECHECKOUT_BLITE_PREFLIGHT_FENCE_LOST')
+    )).toEqual({
+        category: 'persistence',
         retryable: false,
         httpStatus: null,
         paidFallbackEligible: false,

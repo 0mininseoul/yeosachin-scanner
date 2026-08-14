@@ -88,6 +88,7 @@ import {
     recordPreflightFailure,
 } from './preflight-failure-ledger';
 import {
+    PRECHECKOUT_BLITE_PREFLIGHT_FENCE_LOST,
     precheckoutBliteSourceStore,
     type FinalizePrecheckoutBliteSourceInput,
 } from '@/lib/services/precheckout/blite-source-store';
@@ -1563,6 +1564,14 @@ export function classifyPreflightError(error: unknown): ClassifiedPreflightError
             paidFallbackEligible: false,
         };
     }
+    if (message === PRECHECKOUT_BLITE_PREFLIGHT_FENCE_LOST) {
+        return {
+            category: 'persistence',
+            retryable: false,
+            httpStatus: null,
+            paidFallbackEligible: false,
+        };
+    }
     if (
         message.startsWith('SCRAPING_CONFIG_ERROR:')
         || message.startsWith('PREFLIGHT_TASKS_CONFIG_ERROR:')
@@ -1643,6 +1652,18 @@ export function logPreflightProfileFallbackEntry(input: {
         httpStatus: input.failure.httpStatus,
         existingRun: input.existingRun,
     }));
+}
+
+function canFailOpenExpiredBliteFence(
+    error: unknown,
+    claim: ClaimedPreflight,
+): boolean {
+    if (!(error instanceof Error) || error.message !== PRECHECKOUT_BLITE_PREFLIGHT_FENCE_LOST) {
+        return false;
+    }
+    if (!claim.leaseExpiresAt) return false;
+    const leaseExpiresAtMs = Date.parse(claim.leaseExpiresAt);
+    return Number.isFinite(leaseExpiresAtMs) && leaseExpiresAtMs > Date.now();
 }
 
 function assertMatchingProfile(profile: InstagramProfile, username: string): void {
@@ -1909,13 +1930,23 @@ export async function processPreflight(
             dependencies.env ?? process.env,
             { signedTestEntitlement: claim.accessMode === 'test_entitlement' },
         );
-        const bliteClock = selectedBliteCohort
-            ? await (dependencies.activateBliteCohort
-                ?? precheckoutBliteSourceStore.activateCohort)({
-                preflightId: claim.preflightId,
-                claimToken: claim.claimToken,
-            })
-            : null;
+        let bliteClock: Awaited<
+            ReturnType<typeof precheckoutBliteSourceStore.activateCohort>
+        > | null = null;
+        if (selectedBliteCohort) {
+            try {
+                bliteClock = await (dependencies.activateBliteCohort
+                    ?? precheckoutBliteSourceStore.activateCohort)({
+                    preflightId: claim.preflightId,
+                    claimToken: claim.claimToken,
+                });
+            } catch (error) {
+                if (!canFailOpenExpiredBliteFence(error, claim)) throw error;
+                // The claim is still live, so this is the immutable B-lite T+60 fence.
+                // Keep its deadline/TTL untouched and continue through ordinary readiness;
+                // the ready parent lets the browser enter its durable B-lite fallback flow.
+            }
+        }
         const bliteProviderDeadlineAtMs = bliteClock === null
             ? null
             : Date.parse(bliteClock.submittedAt) + BLITE_PROVIDER_DEADLINE_MS;
