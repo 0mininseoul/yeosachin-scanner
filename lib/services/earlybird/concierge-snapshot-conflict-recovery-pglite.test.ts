@@ -7,6 +7,10 @@ const migration = readFileSync(new URL(
     '../../../supabase/migrations/20260813233100_recover_concierge_snapshot_conflict.sql',
     import.meta.url,
 ), 'utf8');
+const completionPrecheckMigration = readFileSync(new URL(
+    '../../../supabase/migrations/20260814000854_concierge_snapshot_completion_precheck_rpc.sql',
+    import.meta.url,
+), 'utf8');
 
 const PAID_AT = '2026-08-12T09:07:30.000Z';
 const MANUAL_REVIEW_AT = '2026-08-13T19:00:00.000Z';
@@ -373,6 +377,12 @@ beforeAll(async () => {
     db = await PGlite.create();
     await db.exec(bootstrap);
     await db.exec(migration);
+    await db.exec(`
+        INSERT INTO supabase_migrations.schema_migrations(version)
+        VALUES ('20260813233100')
+        ON CONFLICT (version) DO NOTHING;
+    `);
+    await db.exec(completionPrecheckMigration);
 }, 30_000);
 
 beforeEach(async () => {
@@ -388,6 +398,113 @@ beforeEach(async () => {
 afterAll(async () => db.close());
 
 describe('concierge snapshot-conflict recovery in PGlite', () => {
+    it('scopes completion precheck jobs to the exact preflight instead of global active work', async () => {
+        const incident = await seedIncident();
+        const unrelated = await seedIncident();
+        const unrelatedRequestId = randomUUID();
+        await db.query(
+            `INSERT INTO public.analysis_requests(id,user_id,preflight_id,status)
+             VALUES ($1,$2,$3,'processing')`,
+            [unrelatedRequestId, unrelated.userId, unrelated.preflightId],
+        );
+        await db.query(
+            `INSERT INTO public.analysis_pipeline_jobs(
+                request_id,job_key,status,dispatch_state,dispatch_generation
+             ) VALUES ($1,'coordinator:bootstrap','processing','delivered',1)`,
+            [unrelatedRequestId],
+        );
+
+        await db.exec('SET ROLE service_role');
+        try {
+            await expect(db.query<{ payload: {
+                active_request_count: number;
+                active_job_count: number;
+                provider_runs: Array<{ operation_key: string }>;
+                fulfillment: { status: string };
+            } }>(
+                `SELECT public.inspect_earlybird_concierge_snapshot_conflict_precheck(
+                    $1,$2,$3,$4,NULL
+                 ) AS payload`,
+                [incident.orderId, incident.preflightId, MANUAL_REVIEW_AT, ADMISSION_REFRESHED_AT],
+            )).resolves.toMatchObject({
+                rows: [{
+                    payload: {
+                        active_request_count: 0,
+                        active_job_count: 0,
+                        fulfillment: { status: 'manual_review' },
+                        provider_runs: expect.arrayContaining([
+                            expect.objectContaining({ operation_key: 'target-profile-fresh-admission:g1' }),
+                            expect.objectContaining({ operation_key: 'target-profile-fresh-admission:g2' }),
+                            expect.objectContaining({ operation_key: 'target-profile-fresh-admission:g3' }),
+                        ]),
+                    },
+                }],
+            });
+        } finally {
+            await db.exec('RESET ROLE');
+        }
+
+        const samePreflightRequestId = randomUUID();
+        await db.query(
+            `INSERT INTO public.analysis_requests(id,user_id,preflight_id,status)
+             VALUES ($1,$2,$3,'processing')`,
+            [samePreflightRequestId, incident.userId, incident.preflightId],
+        );
+        await db.query(
+            `INSERT INTO public.analysis_pipeline_jobs(
+                request_id,job_key,status,dispatch_state,dispatch_generation
+             ) VALUES ($1,'coordinator:bootstrap','processing','delivered',1)`,
+            [samePreflightRequestId],
+        );
+        await db.exec('SET ROLE service_role');
+        try {
+            const scoped = await db.query<{ payload: {
+                active_request_count: number;
+                active_job_count: number;
+            } }>(
+                `SELECT public.inspect_earlybird_concierge_snapshot_conflict_precheck(
+                    $1,$2,$3,$4,NULL
+                 ) AS payload`,
+                [incident.orderId, incident.preflightId, MANUAL_REVIEW_AT, ADMISSION_REFRESHED_AT],
+            );
+            expect(scoped.rows).toMatchObject([{
+                payload: { active_request_count: 1, active_job_count: 1 },
+            }]);
+        } finally {
+            await db.exec('RESET ROLE');
+        }
+    });
+
+    it('keeps the private ledgers RPC-only for service_role and RPC-only for public roles', async () => {
+        const incident = await seedIncident();
+        for (const role of ['anon', 'authenticated']) {
+            await db.exec(`SET ROLE ${role}`);
+            try {
+                await expect(db.query(
+                    `SELECT public.inspect_earlybird_concierge_snapshot_conflict_precheck(
+                        $1,$2,$3,$4,NULL
+                     )`,
+                    [incident.orderId, incident.preflightId, MANUAL_REVIEW_AT, ADMISSION_REFRESHED_AT],
+                )).rejects.toThrow(/permission denied/i);
+            } finally {
+                await db.exec('RESET ROLE');
+            }
+        }
+        await db.exec('SET ROLE service_role');
+        try {
+            await expect(db.query(
+                'SELECT status FROM public.earlybird_fulfillments WHERE order_id=$1',
+                [incident.orderId],
+            )).rejects.toThrow(/permission denied/i);
+            await expect(db.query(
+                'SELECT operation_key FROM public.analysis_preflight_provider_runs WHERE preflight_id=$1',
+                [incident.preflightId],
+            )).rejects.toThrow(/permission denied/i);
+        } finally {
+            await db.exec('RESET ROLE');
+        }
+    });
+
     it('authorizes only the receipt-backed drift without rewriting either snapshot', async () => {
         const incident = await seedIncident();
         await expect(recover(incident)).resolves.toMatchObject({

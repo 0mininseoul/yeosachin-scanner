@@ -161,6 +161,8 @@ const executionInspectionRowsSchema = z.array(executionInspectionRowSchema).leng
 const protectedPrecheckSchema = z.object({
     fulfillment: fulfillmentSchema,
     provider_runs: z.array(providerRunSchema).length(3),
+    active_request_count: z.number().int().min(0).max(500),
+    active_job_count: z.number().int().min(0).max(500),
 }).strict();
 
 function sameInstant(left: string, right: string): boolean {
@@ -176,7 +178,7 @@ async function exactIncidentPrecheck(
     const [{ data: orderData, error: orderError }, {
         data: preflightData,
         error: preflightError,
-    }, { data: protectedData, error: protectedError }] = await Promise.all([
+    }] = await Promise.all([
         supabaseAdmin.from('earlybird_orders').select(
             'user_id,preflight_id,target_instagram_id,target_followers_count,'
             + 'target_following_count,plan_id,status,payment_id,paid_at,'
@@ -189,21 +191,12 @@ async function exactIncidentPrecheck(
             + 'admission_target_followers_count,admission_target_following_count,'
             + 'order_scoped_apify_credential_slot',
         ).eq('id', input.preflightId).maybeSingle(),
-        supabaseAdmin.rpc('inspect_earlybird_concierge_snapshot_conflict_precheck', {
-            p_order_id: input.orderId,
-            p_preflight_id: input.preflightId,
-            p_expected_manual_review_at: input.expectedManualReviewAt,
-            p_expected_admission_refreshed_at: input.expectedAdmissionRefreshedAt,
-        }),
     ]);
-    if (orderError || preflightError || protectedError) {
+    if (orderError || preflightError) {
         throw new Error('CONCIERGE_SNAPSHOT_COMPLETION_PRECHECK_READ_FAILED');
     }
     const order = orderSchema.parse(orderData);
     const preflight = preflightSchema.parse(preflightData);
-    const protectedSnapshot = protectedPrecheckSchema.parse(protectedData);
-    const fulfillment = protectedSnapshot.fulfillment;
-    const providerRuns = protectedSnapshot.provider_runs;
     const { data: inspectionData, error: inspectionError } = await supabaseAdmin.rpc(
         'inspect_earlybird_concierge_snapshot_recovery_execution',
         {
@@ -217,6 +210,22 @@ async function exactIncidentPrecheck(
         throw new Error('CONCIERGE_SNAPSHOT_COMPLETION_PRECHECK_READ_FAILED');
     }
     const inspection = executionInspectionRowsSchema.parse(inspectionData)[0];
+    const { data: protectedData, error: protectedError } = await supabaseAdmin.rpc(
+        'inspect_earlybird_concierge_snapshot_conflict_precheck',
+        {
+            p_order_id: input.orderId,
+            p_preflight_id: input.preflightId,
+            p_expected_manual_review_at: input.expectedManualReviewAt,
+            p_expected_admission_refreshed_at: input.expectedAdmissionRefreshedAt,
+            p_request_id: inspection.request_id,
+        },
+    );
+    if (protectedError) {
+        throw new Error('CONCIERGE_SNAPSHOT_COMPLETION_PRECHECK_READ_FAILED');
+    }
+    const protectedSnapshot = protectedPrecheckSchema.parse(protectedData);
+    const fulfillment = protectedSnapshot.fulfillment;
+    const providerRuns = protectedSnapshot.provider_runs;
     const paidAt = Date.parse(order.paid_at);
     const incidentStart = Date.parse('2026-08-12T18:07:00+09:00');
     const incidentEnd = Date.parse('2026-08-12T18:08:00+09:00');
@@ -243,6 +252,8 @@ async function exactIncidentPrecheck(
         )
         || new Set(providerRuns.map(row => row.operation_key)).size !== 3
         || providerRuns.some(row => row.input_hash !== expectedInputHash)
+        || protectedSnapshot.active_request_count !== 0
+        || protectedSnapshot.active_job_count !== 0
     ) {
         throw new Error('CONCIERGE_SNAPSHOT_COMPLETION_PRECHECK_CONFLICT');
     }
@@ -577,19 +588,8 @@ async function reconcileAndVerifyExactRequest(input: {
         status: z.literal('completed'),
         pipeline_version: z.literal('v2'),
     }).strict().safeParse(requestData);
-    const { data: protectedData, error: protectedError } = await supabaseAdmin.rpc(
-        'inspect_earlybird_concierge_snapshot_conflict_precheck',
-        {
-            p_order_id: input.orderId,
-            p_preflight_id: input.preflightId,
-            p_expected_manual_review_at: input.expectedManualReviewAt,
-            p_expected_admission_refreshed_at: input.expectedAdmissionRefreshedAt,
-        },
-    );
-    const protectedSnapshot = protectedPrecheckSchema.safeParse(protectedData);
     if (
         requestError || !request.success || request.data.preflight_id !== input.preflightId
-        || protectedError || !protectedSnapshot.success
     ) {
         throw new Error('CONCIERGE_SNAPSHOT_COMPLETION_RESULT_CONFLICT');
     }
@@ -605,6 +605,17 @@ async function reconcileAndVerifyExactRequest(input: {
     if (completionError || typeof completed !== 'boolean') {
         throw new Error('CONCIERGE_SNAPSHOT_COMPLETION_RECONCILE_CONFLICT');
     }
+    const { data: protectedData, error: protectedError } = await supabaseAdmin.rpc(
+        'inspect_earlybird_concierge_snapshot_conflict_precheck',
+        {
+            p_order_id: input.orderId,
+            p_preflight_id: input.preflightId,
+            p_expected_manual_review_at: input.expectedManualReviewAt,
+            p_expected_admission_refreshed_at: input.expectedAdmissionRefreshedAt,
+            p_request_id: input.requestId,
+        },
+    );
+    const protectedSnapshot = protectedPrecheckSchema.safeParse(protectedData);
     const [{ data: orderData, error: orderError }, { count: activeRequestCount, error: activeRequestError }, {
         count: activeJobCount,
         error: activeJobError,
@@ -635,6 +646,7 @@ async function reconcileAndVerifyExactRequest(input: {
         : null);
     if (
         orderError || activeRequestError || activeJobError
+        || protectedError || !protectedSnapshot.success
         || activeRequestCount !== 0 || activeJobCount !== 0
         || !order.success || !fulfillment.success
         || order.data.preflight_id !== input.preflightId

@@ -45,6 +45,9 @@ describe('incident-scoped concierge snapshot-conflict completion', () => {
         );
         expect(source).not.toContain('unrelatedJobCount');
         expect(source).not.toContain('unrelatedRequestCount');
+        expect(source).toContain('protectedSnapshot.active_request_count');
+        expect(source).toContain('protectedSnapshot.active_job_count');
+        expect(source).toContain('inspection.request_status');
     });
 
     it('requires exactly one explicit dry-run or execute mode', () => {

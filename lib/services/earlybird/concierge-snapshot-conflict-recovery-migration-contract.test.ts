@@ -5,8 +5,33 @@ const migration = readFileSync(new URL(
     '../../../supabase/migrations/20260813233100_recover_concierge_snapshot_conflict.sql',
     import.meta.url,
 ), 'utf8');
+const completionPrecheckMigration = readFileSync(new URL(
+    '../../../supabase/migrations/20260814000854_concierge_snapshot_completion_precheck_rpc.sql',
+    import.meta.url,
+), 'utf8');
 
 describe('concierge snapshot-conflict recovery migration contract', () => {
+    it('fails closed unless the exact predecessor is present in migration history', () => {
+        expect(completionPrecheckMigration).toContain(
+            '-- MIGRATION_PREDECESSOR=20260813233100',
+        );
+        const guardStart = completionPrecheckMigration.indexOf('DO $migration$');
+        const functionStart = completionPrecheckMigration.indexOf(
+            'CREATE FUNCTION public.inspect_earlybird_concierge_snapshot_conflict_precheck(',
+        );
+        expect(guardStart).toBeGreaterThanOrEqual(0);
+        expect(functionStart).toBeGreaterThan(guardStart);
+        const guard = completionPrecheckMigration.slice(guardStart, functionStart);
+        expect(guard).toContain(
+            "pg_catalog.to_regclass('supabase_migrations.schema_migrations')",
+        );
+        expect(guard).toContain('FROM supabase_migrations.schema_migrations');
+        expect(guard).toContain("WHERE version = '20260813233100'");
+        expect(guard).toContain(
+            'CONCIERGE_SNAPSHOT_COMPLETION_PRECHECK_PREDECESSOR_MISSING',
+        );
+    });
+
     it('is fixed to the one paid Basic incident and its exact count transition', () => {
         expect(migration).toContain('recover_earlybird_concierge_snapshot_conflict');
         expect(migration).toContain("TIMESTAMPTZ '2026-08-12 18:07:00+09'");
@@ -24,6 +49,93 @@ describe('concierge snapshot-conflict recovery migration contract', () => {
         expect(migration).toMatch(
             /pg_catalog\.abs\(p_new_count - p_old_count\)::NUMERIC \* 100[\s\S]*?<= p_old_count::NUMERIC/,
         );
+    });
+
+    it('exposes only a service-role RPC for private completion-precheck projections and scoped jobs', () => {
+        expect(completionPrecheckMigration).toMatch(
+            /CREATE FUNCTION public\.inspect_earlybird_concierge_snapshot_conflict_precheck\(/,
+        );
+        expect(completionPrecheckMigration).toMatch(
+            /SECURITY DEFINER\s+SET search_path = ''/,
+        );
+        expect(completionPrecheckMigration).toContain('RETURNS JSONB');
+        for (const table of [
+            'earlybird_fulfillments',
+            'analysis_preflight_provider_runs',
+            'analysis_pipeline_jobs',
+        ]) {
+            expect(completionPrecheckMigration).toContain(`public.${table}`);
+        }
+        expect(completionPrecheckMigration).toMatch(
+            /'active_request_count'[\s\S]*?'active_job_count'/,
+        );
+        expect(completionPrecheckMigration).toContain(
+            'request.preflight_id = p_preflight_id',
+        );
+        expect(completionPrecheckMigration).toContain(
+            'AND (p_request_id IS NULL OR request.id IS DISTINCT FROM p_request_id)',
+        );
+        expect(completionPrecheckMigration).toContain(
+            'ON request.id = job.request_id',
+        );
+        expect(completionPrecheckMigration.match(
+            /REVOKE ALL ON FUNCTION public\.inspect_earlybird_concierge_snapshot_conflict_precheck\(/g,
+        )).toHaveLength(1);
+        expect(completionPrecheckMigration).toMatch(
+            /REVOKE ALL ON FUNCTION public\.inspect_earlybird_concierge_snapshot_conflict_precheck\([\s\S]*?FROM PUBLIC, anon, authenticated, service_role;/,
+        );
+        expect(completionPrecheckMigration).toMatch(
+            /GRANT EXECUTE ON FUNCTION public\.inspect_earlybird_concierge_snapshot_conflict_precheck\([\s\S]*?TO service_role;/,
+        );
+        expect(completionPrecheckMigration.match(
+            /GRANT EXECUTE ON FUNCTION public\.inspect_earlybird_concierge_snapshot_conflict_precheck\(/g,
+        )).toHaveLength(1);
+        expect(completionPrecheckMigration).not.toMatch(/GRANT\s+SELECT\s+ON\s+TABLE\b/);
+        expect(completionPrecheckMigration).toContain(
+            'pg_catalog.has_function_privilege(\'anon\', v_signature, \'EXECUTE\')',
+        );
+        expect(completionPrecheckMigration).toContain(
+            'pg_catalog.has_function_privilege(\'authenticated\', v_signature, \'EXECUTE\')',
+        );
+        expect(completionPrecheckMigration).toContain(
+            "pg_catalog.has_table_privilege(\n            'service_role', 'public.earlybird_fulfillments', 'SELECT'",
+        );
+        expect(completionPrecheckMigration).toContain(
+            "pg_catalog.has_table_privilege(\n            'service_role', 'public.analysis_preflight_provider_runs', 'SELECT'",
+        );
+    });
+
+    it('returns only bounded, non-PII precheck projections', () => {
+        const returnStart = completionPrecheckMigration.indexOf(
+            'RETURN pg_catalog.jsonb_build_object(',
+        );
+        const functionEnd = completionPrecheckMigration.indexOf(
+            '\nEND;\n$$;',
+            returnStart,
+        );
+        expect(returnStart).toBeGreaterThanOrEqual(0);
+        expect(functionEnd).toBeGreaterThan(returnStart);
+        const resultProjection = completionPrecheckMigration.slice(returnStart, functionEnd);
+        for (const field of [
+            "'fulfillment'",
+            "'provider_runs'",
+            "'active_request_count'",
+            "'active_job_count'",
+        ]) {
+            expect(resultProjection).toContain(field);
+        }
+        for (const field of [
+            'email',
+            'phone',
+            'target_instagram_id',
+            'payment_id',
+            'raw_payload',
+        ]) {
+            expect(resultProjection).not.toContain(`'${field}'`);
+        }
+        expect(resultProjection).toContain("'active_request_count'");
+        expect(resultProjection).toContain("'active_job_count'");
+        expect(completionPrecheckMigration).toContain('pg_catalog.count(*)::INTEGER');
     });
 
     it('requires paid, not-refunded, request-free manual concierge eligibility', () => {
