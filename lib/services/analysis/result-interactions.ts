@@ -79,14 +79,15 @@ export function toOwnerResultInteractionSummary(
     ) {
         return { riskAnalysis: [] };
     }
+    const riskAnalysis = row.risk_grade === 'high_risk'
+        ? toSafeRiskAnalysis(row.risk_analysis)
+        : [];
     const overview = sanitizePublicRiskNarrativeLine(row.one_line_overview);
     if (!overview || !isSafePublicRiskNarrativeLine(overview)) {
-        return { riskAnalysis: [] };
+        // The additive overview is optional for historical rows. Never let a
+        // missing or malformed overview erase a complete legacy high-risk
+        // narrative that already satisfies the public contract.
+        return { riskAnalysis };
     }
-    return {
-        oneLineOverview: overview,
-        riskAnalysis: row.risk_grade === 'high_risk'
-            ? toSafeRiskAnalysis(row.risk_analysis)
-            : [],
-    };
+    return { oneLineOverview: overview, riskAnalysis };
 }

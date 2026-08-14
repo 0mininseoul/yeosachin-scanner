@@ -1,5 +1,6 @@
 import { createHash } from 'node:crypto';
 import { execFileSync } from 'node:child_process';
+import { fileURLToPath } from 'node:url';
 import { ApifyClient } from 'apify-client';
 import { z } from 'zod';
 import { supabaseAdmin } from '@/lib/supabase/admin';
@@ -8,10 +9,7 @@ import { createAnalysisV2SelectedMediaNormalizer } from '@/lib/services/ai/image
 import { AI_STAGE_POLICY_V211_VERSION } from '@/lib/services/ai/stage-policy';
 import { createReplayStagedAiAdapter } from '@/lib/services/analysis/replay/replay-staged-ai-adapter';
 import { captureAnalysisV2ReplayBundle } from '@/lib/services/analysis/replay/replay-capture';
-import {
-    analysisV2ReplaySemanticInputFingerprint,
-    type AnalysisV2ReplayBundle,
-} from '@/lib/services/analysis/replay/replay-bundle';
+import type { AnalysisV2ReplayBundle } from '@/lib/services/analysis/replay/replay-bundle';
 import { FIRST_PAYMENT_BASIC_V211_CONCIERGE_CAPABILITY } from '@/lib/services/analysis/replay/replay-source-lineage';
 import { runAnalysisV2AiReplay, type ReplayAccountAiDetail } from '@/lib/services/analysis/replay/replay-runner';
 import {
@@ -264,7 +262,7 @@ function relationshipEvidence(
     }));
 }
 
-function buildAtomicPublicationSql(input: {
+export function buildAtomicPublicationSql(input: {
     orderId: string;
     requestId: string;
     femaleRows: readonly unknown[];
@@ -331,7 +329,11 @@ UPDATE public.analysis_requests
    SET status = 'completed', progress = 100, progress_step = '분석 완료!',
        mutual_follows = ${input.mutualFollows},
        opposite_gender_count = ${input.counts.female}, gender_stats = ${genderStats},
-       step_data = ${lineageSql}, current_step = 'completed', error_message = NULL, completed_at = now()
+       step_data = jsonb_set(
+         CASE WHEN jsonb_typeof(step_data) = 'object' THEN step_data ELSE '{}'::jsonb END,
+         '{conciergeEvidence}', ${lineageSql}, TRUE
+       ),
+       current_step = 'completed', error_message = NULL, completed_at = now()
  WHERE id = ${requestId};
 COMMIT;`;
 }
@@ -547,7 +549,7 @@ async function main(): Promise<void> {
     }
     await verifyAuthorization({ userId: order.user_id }, order.result_request_id);
     console.log(JSON.stringify({
-        state: 'completed', resultPath: `/result/${order.result_request_id}`,
+        state: 'completed',
         before: { resultRows: beforeRows.data?.length ?? 0, privateRows: beforePrivate.data?.length ?? 0 },
         after: {
             followerSnapshot: order.target_followers_count, followingSnapshot: order.target_following_count,
@@ -558,14 +560,15 @@ async function main(): Promise<void> {
             unresolved: partition.unresolvedUsernames.length,
             publicGender: { male: result.counts.male, female: result.counts.female, unknown: result.counts.unknown },
             resultRows: result.femaleRows.length, highRiskRows: highRiskRows.length,
-            semanticInputFingerprint: analysisV2ReplaySemanticInputFingerprint(bundle),
         },
         authorization: { buyerOwner: true, configuredAdminAllowlist: true },
         elapsedSeconds: Number(((Date.now() - startedAt) / 1_000).toFixed(1)),
     }));
 }
 
-main().catch(error => {
-    console.error(JSON.stringify({ state: 'failed', code: safeError(error) }));
-    process.exitCode = 1;
-});
+if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) {
+    main().catch(error => {
+        console.error(JSON.stringify({ state: 'failed', code: safeError(error) }));
+        process.exitCode = 1;
+    });
+}

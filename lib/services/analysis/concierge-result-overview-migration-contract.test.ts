@@ -35,4 +35,10 @@ describe('legacy concierge result overview persistence contract', () => {
         );
         expect(correctionScript).toContain('CONCIERGE_PUBLICATION_OVERVIEW_VERIFY_FAILED');
     });
+
+    it('keeps operator output free of request and result identifiers', () => {
+        expect(correctionScript).toContain("state: 'completed'");
+        expect(correctionScript).not.toContain('resultPath: `/result/${order.result_request_id}`');
+        expect(correctionScript).not.toContain('semanticInputFingerprint:');
+    });
 });

@@ -116,6 +116,42 @@ describe('toResultInteractionSummary', () => {
         });
     });
 
+    it('preserves valid high-risk narratives when the additive overview is missing or invalid', () => {
+        const highRiskNarrative = [
+            '프로필과 최근 피드에서 눈에 띌 재료를 꽤 성실하게 모아 둔 계정입니다.',
+            '댓글 흔적은 제법 친절하지만, 수집 표본 밖 활동은 누락될 수 있습니다.',
+        ];
+        const base = { risk_grade: 'high_risk', risk_analysis: highRiskNarrative };
+
+        expect(toOwnerResultInteractionSummary({
+            ...base,
+            one_line_overview: null,
+        })).toEqual({ riskAnalysis: highRiskNarrative });
+        expect(toOwnerResultInteractionSummary({
+            ...base,
+            one_line_overview: '좋아요 3건이 관측됐습니다.',
+        })).toEqual({ riskAnalysis: highRiskNarrative });
+    });
+
+    it('keeps normal and caution rows overview-only without inventing narratives', () => {
+        const overview = '공개 프로필과 최근 피드의 특징을 중심으로 정리한 계정입니다.';
+        const highRiskNarrative = [
+            '프로필과 최근 피드에서 눈에 띌 재료를 꽤 성실하게 모아 둔 계정입니다.',
+            '댓글 흔적은 제법 친절하지만, 수집 표본 밖 활동은 누락될 수 있습니다.',
+        ];
+
+        expect(toOwnerResultInteractionSummary({
+            risk_grade: 'normal',
+            one_line_overview: overview,
+            risk_analysis: highRiskNarrative,
+        })).toEqual({ oneLineOverview: overview, riskAnalysis: [] });
+        expect(toOwnerResultInteractionSummary({
+            risk_grade: 'caution',
+            one_line_overview: null,
+            risk_analysis: [],
+        })).toEqual({ riskAnalysis: [] });
+    });
+
     it('allows only normalized Instagram media URLs from step data', () => {
         expect(targetProfileImageFromStepData({
             targetProfileImage: 'https://scontent.cdninstagram.com/avatar.jpg#fragment',
