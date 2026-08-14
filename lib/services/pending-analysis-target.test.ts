@@ -3,10 +3,14 @@ import {
     bindPendingAnalysisTarget,
     clearPendingAnalysisTarget,
     clearPendingAnalysisTargetForTerminalState,
+    clearPreflightDisplayTarget,
+    clearPreflightDisplayTargetForTerminalState,
     readPendingAnalysisTargetForAutostart,
     readPendingAnalysisTargetForPreflight,
+    readPreflightDisplayTarget,
     signOutAndClearPendingAnalysisTarget,
     storePendingAnalysisTarget,
+    storePreflightDisplayTarget,
 } from './pending-analysis-target';
 
 const analyticsMocks = vi.hoisted(() => ({
@@ -101,6 +105,132 @@ describe('pending analysis target ownership', () => {
             preflightId,
         })).toBeNull();
         expect(storage.removeItem).toHaveBeenCalledWith('pending_ig');
+    });
+
+    it('stores and reads one normalized display target bound to a preflight', () => {
+        const storage = createStorage();
+
+        expect(storePreflightDisplayTarget(storage, {
+            now: NOW,
+            preflightId: PREFLIGHT_A,
+            target: '  @Target.Name  ',
+        })).toBe(true);
+        expect(JSON.parse(storage.setItem.mock.calls[0][1])).toEqual({
+            preflight_id: PREFLIGHT_A,
+            stored_at: NOW,
+            target: 'target.name',
+        });
+        expect(readPreflightDisplayTarget(storage, {
+            now: NOW + 60_000,
+            preflightId: PREFLIGHT_A,
+        })).toBe('target.name');
+    });
+
+    const invalidDisplayInputs: Array<[string, string, number]> = [
+        ['not-a-uuid', 'safe_target', NOW],
+        [PREFLIGHT_A, 'has spaces', NOW],
+        [PREFLIGHT_A, '.leading_dot', NOW],
+        [PREFLIGHT_A, 'trailing_dot.', NOW],
+        [PREFLIGHT_A, 'double..dot', NOW],
+        [PREFLIGHT_A, 'a'.repeat(31), NOW],
+        [PREFLIGHT_A, 'safe_target', Number.MAX_SAFE_INTEGER + 1],
+    ];
+    it.each(invalidDisplayInputs)('rejects invalid display record input %j', (preflightId, target, now) => {
+        const storage = createStorage();
+
+        expect(storePreflightDisplayTarget(storage, {
+            now,
+            preflightId,
+            target,
+        })).toBe(false);
+        expect(storage.setItem).not.toHaveBeenCalled();
+    });
+
+    it.each([
+        ['future', { preflight_id: PREFLIGHT_A, stored_at: NOW + 1, target: 'safe_target' }, NOW],
+        ['expired', { preflight_id: PREFLIGHT_A, stored_at: NOW, target: 'safe_target' }, NOW + 30 * 60_000 + 1],
+        ['malformed', '{"preflight_id":', NOW],
+        ['mismatched', { preflight_id: PREFLIGHT_B, stored_at: NOW, target: 'safe_target' }, NOW],
+    ])('removes and ignores a %s display record', (_label, raw, now) => {
+        const storage = createStorage();
+        storage.setItem('preflight_display_target_v1', typeof raw === 'string' ? raw : JSON.stringify(raw));
+        storage.removeItem.mockClear();
+
+        expect(readPreflightDisplayTarget(storage, {
+            now,
+            preflightId: PREFLIGHT_A,
+        })).toBeNull();
+        expect(storage.removeItem).toHaveBeenCalledWith('preflight_display_target_v1');
+    });
+
+    it('fences explicit cleanup to the stored preflight id', () => {
+        const storage = createStorage();
+        storePreflightDisplayTarget(storage, {
+            now: NOW,
+            preflightId: PREFLIGHT_A,
+            target: 'safe_target',
+        });
+
+        expect(clearPreflightDisplayTarget(storage, PREFLIGHT_B)).toBe(false);
+        expect(readPreflightDisplayTarget(storage, {
+            now: NOW,
+            preflightId: PREFLIGHT_A,
+        })).toBe('safe_target');
+        expect(clearPreflightDisplayTarget(storage, PREFLIGHT_A)).toBe(true);
+        expect(readPreflightDisplayTarget(storage, {
+            now: NOW,
+            preflightId: PREFLIGHT_A,
+        })).toBeNull();
+    });
+
+    it.each(['ready', 'blocked', 'expired', 'consumed', 'completed', 'failed']) (
+        'clears a matching display record for terminal state %s',
+        status => {
+            const storage = createStorage();
+            storePreflightDisplayTarget(storage, {
+                now: NOW,
+                preflightId: PREFLIGHT_A,
+                target: 'safe_target',
+            });
+
+            expect(clearPreflightDisplayTargetForTerminalState(storage, {
+                preflightId: PREFLIGHT_A,
+                status,
+            })).toBe(true);
+            expect(readPreflightDisplayTarget(storage, {
+                now: NOW,
+                preflightId: PREFLIGHT_A,
+            })).toBeNull();
+        },
+    );
+
+    it('retains a matching display record while pending and fails open when storage throws', () => {
+        const storage = createStorage();
+        storePreflightDisplayTarget(storage, {
+            now: NOW,
+            preflightId: PREFLIGHT_A,
+            target: 'safe_target',
+        });
+        expect(clearPreflightDisplayTargetForTerminalState(storage, {
+            preflightId: PREFLIGHT_A,
+            status: 'pending',
+        })).toBe(false);
+
+        const unavailable = {
+            getItem: vi.fn(() => { throw new Error('unavailable'); }),
+            removeItem: vi.fn(() => { throw new Error('unavailable'); }),
+            setItem: vi.fn(() => { throw new Error('unavailable'); }),
+        };
+        expect(storePreflightDisplayTarget(unavailable, {
+            now: NOW,
+            preflightId: PREFLIGHT_A,
+            target: 'safe_target',
+        })).toBe(false);
+        expect(readPreflightDisplayTarget(unavailable, {
+            now: NOW,
+            preflightId: PREFLIGHT_A,
+        })).toBeNull();
+        expect(() => clearPreflightDisplayTarget(unavailable, PREFLIGHT_A)).not.toThrow();
     });
 
     it('never uses an arbitrary unbound target to resume a URL preflight', () => {
