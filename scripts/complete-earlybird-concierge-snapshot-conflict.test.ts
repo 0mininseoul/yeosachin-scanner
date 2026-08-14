@@ -1,4 +1,7 @@
 import { randomUUID } from 'node:crypto';
+import { readFileSync } from 'node:fs';
+import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { describe, expect, it, vi } from 'vitest';
 import {
     parseConciergeSnapshotConflictCompletionArgs,
@@ -26,6 +29,24 @@ const pristinePrecheck = Object.freeze({
 });
 
 describe('incident-scoped concierge snapshot-conflict completion', () => {
+    it('uses the service-role precheck RPC instead of restricted table REST reads or global idle gates', () => {
+        const source = readFileSync(join(
+            dirname(fileURLToPath(import.meta.url)),
+            'complete-earlybird-concierge-snapshot-conflict.ts',
+        ), 'utf8');
+        expect(source).toContain(
+            "inspect_earlybird_concierge_snapshot_conflict_precheck",
+        );
+        expect(source).not.toContain(
+            "from('analysis_preflight_provider_runs').select(",
+        );
+        expect(source).not.toContain(
+            "from('earlybird_fulfillments').select(",
+        );
+        expect(source).not.toContain('unrelatedJobCount');
+        expect(source).not.toContain('unrelatedRequestCount');
+    });
+
     it('requires exactly one explicit dry-run or execute mode', () => {
         expect(parseConciergeSnapshotConflictCompletionArgs([
             ...exactArgs,
@@ -95,6 +116,8 @@ describe('incident-scoped concierge snapshot-conflict completion', () => {
                     orderId: ORDER_ID,
                     preflightId: PREFLIGHT_ID,
                     requestId: REQUEST_ID,
+                    expectedManualReviewAt: MANUAL_REVIEW_AT,
+                    expectedAdmissionRefreshedAt: ADMISSION_REFRESHED_AT,
                 });
                 calls.push('verify');
             },

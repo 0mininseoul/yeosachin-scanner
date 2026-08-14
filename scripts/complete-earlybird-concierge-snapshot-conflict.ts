@@ -60,6 +60,8 @@ export interface ConciergeSnapshotConflictCompletionDependencies {
         orderId: string;
         preflightId: string;
         requestId: string;
+        expectedManualReviewAt: string;
+        expectedAdmissionRefreshedAt: string;
     }): Promise<void>;
     writeStdout(value: string): void;
 }
@@ -156,6 +158,10 @@ const executionInspectionRowSchema = z.object({
 }).strict();
 
 const executionInspectionRowsSchema = z.array(executionInspectionRowSchema).length(1);
+const protectedPrecheckSchema = z.object({
+    fulfillment: fulfillmentSchema,
+    provider_runs: z.array(providerRunSchema).length(3),
+}).strict();
 
 function sameInstant(left: string, right: string): boolean {
     return Date.parse(left) === Date.parse(right);
@@ -168,21 +174,14 @@ async function exactIncidentPrecheck(
         throw new Error('CONCIERGE_SNAPSHOT_COMPLETION_TERTIARY_TOKEN_REQUIRED');
     }
     const [{ data: orderData, error: orderError }, {
-        data: fulfillmentData,
-        error: fulfillmentError,
-    }, { data: preflightData, error: preflightError }, {
-        data: providerData,
-        error: providerError,
-    }] = await Promise.all([
+        data: preflightData,
+        error: preflightError,
+    }, { data: protectedData, error: protectedError }] = await Promise.all([
         supabaseAdmin.from('earlybird_orders').select(
             'user_id,preflight_id,target_instagram_id,target_followers_count,'
             + 'target_following_count,plan_id,status,payment_id,paid_at,'
             + 'result_request_id,concierge_apify_credential_slot',
         ).eq('id', input.orderId).maybeSingle(),
-        supabaseAdmin.from('earlybird_fulfillments').select(
-            'status,request_id,lease_token,lease_expires_at,manual_review_at,'
-            + 'last_error_code,attempt_count',
-        ).eq('order_id', input.orderId).maybeSingle(),
         supabaseAdmin.from('analysis_preflights').select(
             'user_id,target_instagram_id,target_followers_count,target_following_count,'
             + 'target_is_private,status,consumed_request_id,admission_status,'
@@ -190,23 +189,21 @@ async function exactIncidentPrecheck(
             + 'admission_target_followers_count,admission_target_following_count,'
             + 'order_scoped_apify_credential_slot',
         ).eq('id', input.preflightId).maybeSingle(),
-        supabaseAdmin.from('analysis_preflight_provider_runs').select(
-            'operation_key,input_hash,logical_provider,actor_id,credential_slot,'
-            + 'status,run_id,terminalized_at,actual_usage_usd,'
-            + 'usage_reconciled_at,reusable_profile_schema_version',
-        ).eq('preflight_id', input.preflightId).in('operation_key', [
-            'target-profile-fresh-admission:g1',
-            'target-profile-fresh-admission:g2',
-            'target-profile-fresh-admission:g3',
-        ]),
+        supabaseAdmin.rpc('inspect_earlybird_concierge_snapshot_conflict_precheck', {
+            p_order_id: input.orderId,
+            p_preflight_id: input.preflightId,
+            p_expected_manual_review_at: input.expectedManualReviewAt,
+            p_expected_admission_refreshed_at: input.expectedAdmissionRefreshedAt,
+        }),
     ]);
-    if (orderError || fulfillmentError || preflightError || providerError) {
+    if (orderError || preflightError || protectedError) {
         throw new Error('CONCIERGE_SNAPSHOT_COMPLETION_PRECHECK_READ_FAILED');
     }
     const order = orderSchema.parse(orderData);
-    const fulfillment = fulfillmentSchema.parse(fulfillmentData);
     const preflight = preflightSchema.parse(preflightData);
-    const providerRuns = z.array(providerRunSchema).length(3).parse(providerData);
+    const protectedSnapshot = protectedPrecheckSchema.parse(protectedData);
+    const fulfillment = protectedSnapshot.fulfillment;
+    const providerRuns = protectedSnapshot.provider_runs;
     const { data: inspectionData, error: inspectionError } = await supabaseAdmin.rpc(
         'inspect_earlybird_concierge_snapshot_recovery_execution',
         {
@@ -307,23 +304,10 @@ async function exactIncidentPrecheck(
         throw new Error('CONCIERGE_SNAPSHOT_COMPLETION_PRECHECK_CONFLICT');
     }
 
-    let requestQuery = supabaseAdmin.from('analysis_requests')
-        .select('id', { count: 'exact', head: true })
-        .in('status', ['pending', 'processing']);
-    let jobQuery = supabaseAdmin.from('analysis_pipeline_jobs')
-        .select('request_id', { count: 'exact', head: true })
-        .in('status', ['pending', 'processing']);
-    if (inspection.request_id !== null) {
-        requestQuery = requestQuery.neq('id', inspection.request_id);
-        jobQuery = jobQuery.neq('request_id', inspection.request_id);
-    }
     const [{ count: incidentCount, error: incidentError }, {
         count: requestCount,
         error: requestError,
-    }, { count: refundCount, error: refundError }, {
-        count: unrelatedRequestCount,
-        error: unrelatedRequestError,
-    }, { count: unrelatedJobCount, error: unrelatedJobError }] = await Promise.all([
+    }, { count: refundCount, error: refundError }] = await Promise.all([
         supabaseAdmin.from('earlybird_orders').select('id', { count: 'exact', head: true })
             .eq('plan_id', 'basic')
             .gte('paid_at', '2026-08-12T18:07:00+09:00')
@@ -334,16 +318,12 @@ async function exactIncidentPrecheck(
             .select('event_id', { count: 'exact', head: true })
             .eq('payment_id', order.payment_id)
             .eq('event_type', 'payment.refunded'),
-        requestQuery,
-        jobQuery,
     ]);
     if (
         incidentError || requestError || refundError
-        || unrelatedRequestError || unrelatedJobError
         || incidentCount !== 1
         || requestCount !== (inspection.request_id === null ? 0 : 1)
         || refundCount !== 0
-        || unrelatedRequestCount !== 0 || unrelatedJobCount !== 0
     ) {
         throw new Error('CONCIERGE_SNAPSHOT_COMPLETION_PRECHECK_CONFLICT');
     }
@@ -582,6 +562,8 @@ async function reconcileAndVerifyExactRequest(input: {
     orderId: string;
     preflightId: string;
     requestId: string;
+    expectedManualReviewAt: string;
+    expectedAdmissionRefreshedAt: string;
 }): Promise<void> {
     const { data: requestData, error: requestError } = await supabaseAdmin
         .from('analysis_requests')
@@ -595,14 +577,19 @@ async function reconcileAndVerifyExactRequest(input: {
         status: z.literal('completed'),
         pipeline_version: z.literal('v2'),
     }).strict().safeParse(requestData);
-    const { count: unrelatedCount, error: unrelatedError } = await supabaseAdmin
-        .from('earlybird_fulfillments')
-        .select('order_id', { count: 'exact', head: true })
-        .eq('status', 'analysis_in_progress')
-        .neq('order_id', input.orderId);
+    const { data: protectedData, error: protectedError } = await supabaseAdmin.rpc(
+        'inspect_earlybird_concierge_snapshot_conflict_precheck',
+        {
+            p_order_id: input.orderId,
+            p_preflight_id: input.preflightId,
+            p_expected_manual_review_at: input.expectedManualReviewAt,
+            p_expected_admission_refreshed_at: input.expectedAdmissionRefreshedAt,
+        },
+    );
+    const protectedSnapshot = protectedPrecheckSchema.safeParse(protectedData);
     if (
         requestError || !request.success || request.data.preflight_id !== input.preflightId
-        || unrelatedError || unrelatedCount !== 0
+        || protectedError || !protectedSnapshot.success
     ) {
         throw new Error('CONCIERGE_SNAPSHOT_COMPLETION_RESULT_CONFLICT');
     }
@@ -618,10 +605,7 @@ async function reconcileAndVerifyExactRequest(input: {
     if (completionError || typeof completed !== 'boolean') {
         throw new Error('CONCIERGE_SNAPSHOT_COMPLETION_RECONCILE_CONFLICT');
     }
-    const [{ data: orderData, error: orderError }, {
-        data: fulfillmentData,
-        error: fulfillmentError,
-    }, { count: activeRequestCount, error: activeRequestError }, {
+    const [{ data: orderData, error: orderError }, { count: activeRequestCount, error: activeRequestError }, {
         count: activeJobCount,
         error: activeJobError,
     }] = await Promise.all([
@@ -629,15 +613,13 @@ async function reconcileAndVerifyExactRequest(input: {
             .select('preflight_id,result_request_id,status')
             .eq('id', input.orderId)
             .maybeSingle(),
-        supabaseAdmin.from('earlybird_fulfillments')
-            .select('request_id,status')
-            .eq('order_id', input.orderId)
-            .maybeSingle(),
         supabaseAdmin.from('analysis_requests')
             .select('id', { count: 'exact', head: true })
+            .eq('id', input.requestId)
             .in('status', ['pending', 'processing']),
         supabaseAdmin.from('analysis_pipeline_jobs')
             .select('request_id', { count: 'exact', head: true })
+            .eq('request_id', input.requestId)
             .in('status', ['pending', 'processing']),
     ]);
     const order = z.object({
@@ -648,9 +630,11 @@ async function reconcileAndVerifyExactRequest(input: {
     const fulfillment = z.object({
         request_id: uuidSchema,
         status: z.literal('completed'),
-    }).strict().safeParse(fulfillmentData);
+    }).strict().safeParse(protectedSnapshot.success
+        ? protectedSnapshot.data.fulfillment
+        : null);
     if (
-        orderError || fulfillmentError || activeRequestError || activeJobError
+        orderError || activeRequestError || activeJobError
         || activeRequestCount !== 0 || activeJobCount !== 0
         || !order.success || !fulfillment.success
         || order.data.preflight_id !== input.preflightId
@@ -740,6 +724,8 @@ export async function runConciergeSnapshotConflictCompletion(
         orderId: input.orderId,
         preflightId: input.preflightId,
         requestId: request.requestId,
+        expectedManualReviewAt: input.expectedManualReviewAt,
+        expectedAdmissionRefreshedAt: input.expectedAdmissionRefreshedAt,
     });
     const output = outputSchema.parse({ status: 'completed' });
     dependencies.writeStdout(`${JSON.stringify(output)}\n`);
