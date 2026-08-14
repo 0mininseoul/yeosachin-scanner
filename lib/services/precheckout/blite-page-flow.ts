@@ -148,7 +148,10 @@ export function reduceBlitePage(
                 const atMs = transitionTimestamp(event);
                 const cutoffMs = eventCutoff(state, event);
                 if (atMs === null || cutoffMs === null || !isAtOrAfterSubmission(state, atMs)) return state;
-                if (atMs >= cutoffMs) return fallbackDemo(state, cutoffMs);
+                // The deadline chooses the fallback path, but a client that mounts after it
+                // must still render the complete four-stage demo instead of skipping straight
+                // to its CTA with a stale start clock.
+                if (atMs >= cutoffMs) return fallbackDemo(state, atMs);
             }
             return {
                 ...state,
@@ -166,7 +169,7 @@ export function reduceBlitePage(
                 const atMs = transitionTimestamp(event);
                 const cutoffMs = eventCutoff(state, event);
                 if (atMs === null || cutoffMs === null || !isAtOrAfterSubmission(state, atMs)) return state;
-                return fallbackDemo(state, Math.min(atMs, cutoffMs));
+                return fallbackDemo(state, atMs);
             }
 
         case 'FALLBACK_AT_48':
@@ -175,7 +178,7 @@ export function reduceBlitePage(
                 const atMs = transitionTimestamp(event);
                 const cutoffMs = submissionCutoff(state);
                 if (atMs === null || cutoffMs === null || !isAtOrAfterSubmission(state, atMs) || atMs < cutoffMs) return state;
-                return fallbackDemo(state, cutoffMs);
+                return fallbackDemo(state, atMs);
             }
 
         case 'SUCCESS_CTA':

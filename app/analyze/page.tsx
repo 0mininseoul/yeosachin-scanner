@@ -958,8 +958,12 @@ const DISCLOSURE_ACCEPTED = true;
 
                         {exclusionDecided && readyPreflight && (
                             <>
-                                {activePrecheckoutSurface !== 'awaiting' && (
-                                <CaseCard bracket="var(--color-blood)" className="mt-7 overflow-hidden">
+                                {!autoCheckoutTransitionVisible && (
+                                <CaseCard
+                                    bracket="var(--color-blood)"
+                                    className="mt-7 overflow-hidden"
+                                    data-precheckout-target-card
+                                >
                                     <div className="flex items-start gap-4 p-5" data-amp-block>
                                         <div className="relative h-16 w-16 shrink-0 overflow-hidden rounded-full border border-line-2 bg-panel">
                                             {readyPreflight.target.profileImage ? (

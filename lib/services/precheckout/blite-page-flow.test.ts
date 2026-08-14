@@ -73,7 +73,7 @@ describe('reduceBlitePage', () => {
         })).toBe(fallback);
     });
 
-    it('enforces the original T+78 cutoff when a late complete arrives before the timer event', () => {
+    it('starts the full fallback demo when a late complete arrives after the cutoff', () => {
         const pending = pendingState();
         const lateComplete = reduceBlitePage(pending, {
             type: 'BLITE_COMPLETE',
@@ -84,7 +84,7 @@ describe('reduceBlitePage', () => {
             view: 'fallback_demo',
             pathLatch: 'fallback',
             submittedAtMs: 1_700_000_000_000,
-            demoStartedAtMs: 1_700_000_078_000,
+            demoStartedAtMs: 1_700_000_078_001,
             demoStatus: 'running',
         });
         expect(reduceBlitePage(lateComplete, {
@@ -93,7 +93,7 @@ describe('reduceBlitePage', () => {
         })).toBe(lateComplete);
     });
 
-    it('enforces the original T+78 cutoff when a late durable failure arrives before the timer event', () => {
+    it('starts the full fallback demo when a late durable failure arrives after the cutoff', () => {
         const lateFailure = reduceBlitePage(pendingState(), {
             type: 'BLITE_FAILED',
             atMs: 1_700_000_079_000,
@@ -103,12 +103,12 @@ describe('reduceBlitePage', () => {
             view: 'fallback_demo',
             pathLatch: 'fallback',
             submittedAtMs: 1_700_000_000_000,
-            demoStartedAtMs: 1_700_000_078_000,
+            demoStartedAtMs: 1_700_000_079_000,
             demoStatus: 'running',
         });
     });
 
-    it('honors a legacy row fallback cutoff without extending it to the new T+78 clock', () => {
+    it('starts a full fallback demo when a legacy row reports after its cutoff', () => {
         const legacyFallback = reduceBlitePage(pendingState(), {
             type: 'BLITE_COMPLETE',
             atMs: 1_700_000_055_000,
@@ -119,7 +119,7 @@ describe('reduceBlitePage', () => {
             view: 'fallback_demo',
             pathLatch: 'fallback',
             submittedAtMs: 1_700_000_000_000,
-            demoStartedAtMs: 1_700_000_048_000,
+            demoStartedAtMs: 1_700_000_055_000,
             demoStatus: 'running',
         });
     });

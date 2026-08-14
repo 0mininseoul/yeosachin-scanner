@@ -637,7 +637,7 @@ function DemoRevealScreen({
                     </>
                 )}
                 <PrimaryButton onClick={onContinue} className="mt-6">
-                    요금제 확인하기
+                    상세 분석 보기
                 </PrimaryButton>
             </div>
         </CaseCard>
