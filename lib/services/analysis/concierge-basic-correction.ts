@@ -252,6 +252,10 @@ export function buildCanonicalConciergeResult(input: {
     targetInteractions: readonly RawTargetInteractionEvidence[];
     targetPosts: readonly ConciergeTargetPostMentionEvidence[];
     privateProfiles: readonly InstagramProfile[];
+    /** Public usernames whose exact relationship identity is known but whose bounded
+     * profile-only hydration exhausted its approved slots; these are unknown, never
+     * female candidates, and must carry provenance in the publication fingerprint. */
+    unknownPublicUsernames?: readonly string[];
 }): {
     femaleRows: readonly ConciergeLegacyResultRow[];
     privateRows: readonly ConciergePrivateAccountRow[];
@@ -261,7 +265,8 @@ export function buildCanonicalConciergeResult(input: {
     const femaleDetails = input.details.filter(detail => (
         detail.finalClassification === 'verified_female' && detail.feature !== null
     ));
-    const unknownPublic = input.details.length - maleDetails.length - femaleDetails.length;
+    const unknownPublic = input.details.length - maleDetails.length - femaleDetails.length
+        + (input.unknownPublicUsernames?.length ?? 0);
     if (input.details.some(detail => (
         detail.finalClassification === 'verified_non_female'
         && input.profilesByOrdinal.get(detail.ordinal)
