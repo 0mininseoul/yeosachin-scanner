@@ -8,6 +8,32 @@ import { RECENT_MUTUAL_BONUS_MAX } from '@/lib/constants/scoring';
 const RECENT_MUTUAL_WINDOW = 10;
 const RECENT_MUTUAL_FEMALE_LIMIT = 5;
 
+export type LegacyGenderStats = {
+    male: number;
+    female: number;
+    unknown: number;
+};
+
+function safeLegacyGenderCount(value: unknown): number {
+    return typeof value === 'number'
+        && Number.isSafeInteger(value)
+        && value >= 0
+        ? value
+        : 0;
+}
+
+export function normalizeLegacyGenderStats(value: unknown): LegacyGenderStats {
+    if (!value || typeof value !== 'object' || Array.isArray(value)) {
+        return { male: 0, female: 0, unknown: 0 };
+    }
+    const stats = value as Record<string, unknown>;
+    return {
+        male: safeLegacyGenderCount(stats.male),
+        female: safeLegacyGenderCount(stats.female),
+        unknown: safeLegacyGenderCount(stats.unknown),
+    };
+}
+
 export type RecentMutualFemaleRank = 1 | 2 | 3 | 4 | 5;
 
 function usernameKey(value: string): string {

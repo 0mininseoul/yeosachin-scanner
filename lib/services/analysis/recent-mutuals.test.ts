@@ -3,6 +3,7 @@ import {
     getRecentMutualBonus,
     hydratedMutualCountFromStepData,
     inferRecentMutualFemaleRanks,
+    normalizeLegacyGenderStats,
     orderedMutualUsernamesFromStepData,
 } from './recent-mutuals';
 
@@ -64,6 +65,13 @@ describe('recent mutual inference', () => {
             .toBeUndefined();
         expect(hydratedMutualCountFromStepData({ conciergeEvidence: { hydration: { hydrated: '149' } } }))
             .toBeUndefined();
+    });
+
+    it('normalizes malformed legacy gender stats to finite non-negative counts', () => {
+        expect(normalizeLegacyGenderStats({})).toEqual({ male: 0, female: 0, unknown: 0 });
+        expect(normalizeLegacyGenderStats({ male: 2, female: Number.NaN, unknown: -1 }))
+            .toEqual({ male: 2, female: 0, unknown: 0 });
+        expect(normalizeLegacyGenderStats(null)).toEqual({ male: 0, female: 0, unknown: 0 });
     });
 });
 

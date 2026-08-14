@@ -41,4 +41,11 @@ describe('legacy concierge result overview persistence contract', () => {
         expect(correctionScript).not.toContain('resultPath: `/result/${order.result_request_id}`');
         expect(correctionScript).not.toContain('semanticInputFingerprint:');
     });
+
+    it('binds the correction source through the order-scoped replay lineage', () => {
+        expect(correctionScript).toContain("from('earlybird_v211_concierge_replays')");
+        expect(correctionScript).toContain("select('original_failed_request_id')");
+        expect(correctionScript).toContain("eq('order_id', order.id)");
+        expect(correctionScript).toContain('selectConciergeSourceRequest');
+    });
 });

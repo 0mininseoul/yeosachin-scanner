@@ -336,6 +336,66 @@ describe('owner-facing V1/V2 route selection', () => {
         expect(requestQuery.eq).toHaveBeenCalledWith('user_id', ownerUserId);
     });
 
+    it('returns finite zero gender counts for malformed legacy stats', async () => {
+        const ownerUserId = '323e4567-e89b-42d3-a456-426614174000';
+        const requestRow = {
+            id: requestId,
+            user_id: ownerUserId,
+            pipeline_version: 'v1',
+            target_instagram_id: 'target',
+            status: 'completed',
+            progress: 100,
+            mutual_follows: 0,
+            gender_stats: {},
+            step_data: {},
+        };
+        const requestQuery = ownerQuery(requestRow);
+        const listQuery = (rows: unknown[]) => {
+            const query = {
+                select: vi.fn(),
+                eq: vi.fn(),
+                order: vi.fn(),
+                then: (resolve: (value: unknown) => unknown, reject: (reason: unknown) => unknown) =>
+                    Promise.resolve({ data: rows, error: null }).then(resolve, reject),
+            };
+            query.select.mockReturnValue(query);
+            query.eq.mockReturnValue(query);
+            query.order.mockReturnValue(query);
+            return query;
+        };
+        mocks.getUser.mockResolvedValue({
+            data: { user: { id: userId, email: 'ym1113@kakao.com' } },
+            error: null,
+        });
+        mocks.isResultOperator.mockReturnValue(true);
+        mocks.resolveResultOwner.mockImplementation((_id: string, pipeline = 'v2') => (
+            pipeline === 'v1' ? ownerUserId : null
+        ));
+        mocks.from.mockImplementation((table: string) => {
+            if (table === 'analysis_requests') return requestQuery;
+            if (table === 'analysis_results' || table === 'private_accounts') return listQuery([]);
+            throw new Error(`unexpected table: ${table}`);
+        });
+
+        const response = await getLegacyResult(
+            new Request(`https://example.com/api/analysis/result/${requestId}`),
+            context(),
+        );
+
+        expect(response.status).toBe(200);
+        await expect(response.json()).resolves.toMatchObject({
+            summary: {
+                mutualFollows: 0,
+                analyzedMutuals: 0,
+                genderRatio: {
+                    male: { count: 0, percentage: 0 },
+                    female: { count: 0, percentage: 0 },
+                    unknown: { count: 0, percentage: 0 },
+                },
+            },
+        });
+    });
+
     it('keeps an unowned completed V1 result hidden from a non-operator', async () => {
         const ownerUserId = '323e4567-e89b-42d3-a456-426614174000';
         const requestQuery = ownerQuery({

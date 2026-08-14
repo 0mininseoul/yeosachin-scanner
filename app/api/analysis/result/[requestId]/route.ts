@@ -3,6 +3,7 @@ import { supabaseAdmin } from '@/lib/supabase/admin';
 import {
     hydratedMutualCountFromStepData,
     inferRecentMutualFemaleRanks,
+    normalizeLegacyGenderStats,
     orderedMutualUsernamesFromStepData,
 } from '@/lib/services/analysis/recent-mutuals';
 import {
@@ -166,7 +167,7 @@ export async function GET(
         }
 
         // 6. 성별 비율 계산
-        const genderStats = analysisRequest.gender_stats || { male: 0, female: 0, unknown: 0 };
+        const genderStats = normalizeLegacyGenderStats(analysisRequest.gender_stats);
         const totalGender = genderStats.male + genderStats.female + genderStats.unknown;
         const genderRatio = {
             male: {

@@ -18,6 +18,7 @@ import {
     validateCanonicalConciergeCorrection,
     type ConciergeRelationshipEvidence,
 } from '@/lib/services/analysis/concierge-basic-correction';
+import { selectConciergeSourceRequest } from '@/lib/services/analysis/concierge-source-scope';
 import { isAnalysisResultOperator, resolveAnalysisResultOwner } from '@/lib/services/analysis/result-operator-access';
 import { requireActiveAccountClassification } from '@/lib/services/identity/account-principal-store';
 import type { InstagramFollower, InstagramProfile } from '@/lib/types/instagram';
@@ -369,11 +370,25 @@ async function main(): Promise<void> {
         throw new Error('CONCIERGE_SAMPLE_ORDER_NOT_READY');
     }
     const { data: requests, error: requestError } = await supabaseAdmin
-        .from('analysis_requests').select('id,status,pipeline_version').eq('user_id', order.user_id);
+        .from('analysis_requests')
+        .select('id,user_id,target_instagram_id,status,pipeline_version')
+        .eq('user_id', order.user_id);
     if (requestError || !requests) throw new Error('CONCIERGE_SAMPLE_REQUEST_LOOKUP_FAILED');
     const request = requests.find(row => row.id === order.result_request_id);
-    const sourceRequest = requests.find(row => row.pipeline_version === 'v2' && row.status === 'failed');
-    if (!request || request.status !== 'completed' || request.pipeline_version !== 'v1' || !sourceRequest) {
+    const { data: lineageRows, error: lineageError } = await supabaseAdmin
+        .from('earlybird_v211_concierge_replays')
+        .select('original_failed_request_id')
+        .eq('order_id', order.id);
+    if (lineageError || !lineageRows || lineageRows.length !== 1
+        || typeof lineageRows[0]?.original_failed_request_id !== 'string') {
+        throw new Error('CONCIERGE_SAMPLE_REQUEST_SCOPE_CONFLICT');
+    }
+    const sourceRequest = selectConciergeSourceRequest(requests, {
+        sourceRequestId: lineageRows[0].original_failed_request_id,
+        userId: order.user_id,
+        targetInstagramId: order.target_instagram_id,
+    });
+    if (!request || request.status !== 'completed' || request.pipeline_version !== 'v1') {
         throw new Error('CONCIERGE_SAMPLE_REQUEST_SCOPE_CONFLICT');
     }
 
