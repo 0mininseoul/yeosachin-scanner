@@ -42,7 +42,7 @@ AXIOM_ORG_ID=<UI에서 확인한 실제 조직 ID>
 
 - HTTP·Next: `http.route_completed`, `http.route_failed`, `next.request_error`
 - 인증·사전 검사: `auth.*`, `preflight.*`
-- 결제 전 B-lite 서버 결과: `precheckout_blite.completed`, `precheckout_blite.profile_collection_failed`, `precheckout_blite.inference_failed`; 브라우저 결과 `precheckout_blite.fallback_latched`·`precheckout_blite.demo_started`·`precheckout_blite.demo_completed`·`precheckout_blite.demo_failed`는 Amplitude
+- 결제 전 B-lite 서버 결과: `precheckout_blite.completed`, `precheckout_blite.profile_collection_failed`, `precheckout_blite.inference_failed`, `precheckout_blite.finalizer_failed`; 브라우저 결과 `precheckout_blite.fallback_latched`·`precheckout_blite.demo_started`·`precheckout_blite.demo_completed`·`precheckout_blite.demo_failed`는 Amplitude
 - 결제: `earlybird.checkout_*`, `earlybird.waitlist_*`, `groble.webhook_*`
 - 수집: `scraper.batch_*`, `scraper.fallback_selected`, `scraper.candidate_failed`
 - 작업 큐·분석: `cloud_task.enqueue_*`, `analysis_v2.fresh_admission_enqueued`, `analysis_v2.request_queued`, `analysis_v2.worker_*`, `analysis_v2.result_viewed`
@@ -105,7 +105,7 @@ Cloud Tasks 재시도로 terminal 이벤트는 attempt 단위 at-least-once로 �
 | limit 200
 ```
 
-B-lite가 소유한 durable generation lease의 terminal outcome은 다음 production 조회로 확인한다. `provider=apify`인 실패는 프로필 수집, `provider=gemini`인 실패는 이미지 준비 또는 추론 경계다. B-lite 실패 응답의 기존 `204` fail-open은 preflight와 checkout availability를 보존하며, 관측 전송 실패도 이 응답을 바꾸지 않는다. cache hit, 다른 인스턴스가 소유한 pending lease, access denial은 새 provider outcome으로 집계하지 않는다.
+B-lite가 소유한 durable generation lease의 terminal outcome은 다음 production 조회로 확인한다. `provider=apify`인 실패는 프로필 수집, `provider=gemini`인 실패는 이미지 준비 또는 추론 경계다. `precheckout_blite.finalizer_failed`는 source/cache/dispatch를 만들기 전 최종화 RPC가 fail-open된 사건이며, `correlation`은 `schema_cache_miss` 또는 `fence_lost`의 닫힌 값만 허용한다. B-lite 실패 응답의 기존 `204` fail-open은 preflight와 checkout availability를 보존하며, 관측 전송 실패도 이 응답을 바꾸지 않는다. cache hit, 다른 인스턴스가 소유한 pending lease, access denial은 새 provider outcome으로 집계하지 않는다.
 
 ```apl
 ['yeosachin-logs']
@@ -113,11 +113,12 @@ B-lite가 소유한 durable generation lease의 terminal outcome은 다음 produ
 | where ['fields.event'] in (
     "precheckout_blite.completed",
     "precheckout_blite.profile_collection_failed",
-    "precheckout_blite.inference_failed"
+    "precheckout_blite.inference_failed",
+    "precheckout_blite.finalizer_failed"
 )
 | project _time, ['fields.event'], ['fields.provider'], ['fields.operation'],
     ['fields.error_code'], ['fields.disposition'], ['fields.duration_ms'],
-    ['fields.preflight_id']
+    ['fields.preflight_id'], ['fields.correlation']
 | order by _time desc
 ```
 
@@ -140,7 +141,7 @@ Axiom UI에서 `Yeosachin Operational Health`를 만들고 모든 요소에 `['f
 - Preflight: 요청·완료·실패 수, 오류 코드, 플랜별 지연
 - Provider: provider·operation별 요청·실패·fallback·quota/rate limit
 - Gemini: operation·model·thinking level별 지연, rate limit·재시도, prompt/completion/thinking token, 추정 비용
-- B-lite server terminal: `precheckout_blite.completed`, `precheckout_blite.profile_collection_failed`, `precheckout_blite.inference_failed`의 provider·error code·duration; 브라우저 fallback/demo 퍼널과 T+60 guard는 Amplitude 기준
+- B-lite server terminal: `precheckout_blite.completed`, `precheckout_blite.profile_collection_failed`, `precheckout_blite.inference_failed`, `precheckout_blite.finalizer_failed`의 provider·error code·duration; finalizer failure는 닫힌 `correlation`으로만 원인을 집계하며, 브라우저 fallback/demo 퍼널과 T+60 guard는 Amplitude 기준
 - Cloud Tasks / V2 worker: enqueue 결과, retry·failure·timeout, job key·phase별 상태
 - Groble: `accepted`, `duplicate_event`, `duplicate_payment`, `unmatched`, `ambiguous_buyer`, `mismatch`, `overflow_refund_required`, `cancel_requested`, `cancel_duplicate_event`, `cancel_unmatched`, `cancel_mismatch`, `cancel_before_payment`, `late_cancelled_payment` disposition과 webhook route 5xx
 - Analysis: 완료·실패 수, 총 지연, phase별 p50·p90 단계 지연

@@ -1973,8 +1973,9 @@ export async function processPreflight(
 
         let profile: InstagramProfile | null;
         let bliteProviderRun: StoredPreflightProviderRun | null = null;
+        let bliteObservability: PrecheckoutBliteObservability | undefined;
         if (bliteClock !== null) {
-            const bliteObservability = dependencies.bliteObservability
+            bliteObservability = dependencies.bliteObservability
                 ?? createPrecheckoutBliteObservability({
                     preflightId: claim.preflightId,
                     startedAtMs: Date.parse(bliteClock.submittedAt),
@@ -2302,10 +2303,13 @@ export async function processPreflight(
                     expiresAt,
                 });
             } catch (error) {
-                if (
-                    !isBliteSourceFinalizerSchemaCacheMiss(error)
-                    && !canFailOpenExpiredBliteFence(error, claim)
-                ) throw error;
+                const finalizerFailureReason = isBliteSourceFinalizerSchemaCacheMiss(error)
+                    ? 'schema_cache_miss'
+                    : canFailOpenExpiredBliteFence(error, claim)
+                    ? 'fence_lost'
+                    : null;
+                if (!finalizerFailureReason) throw error;
+                bliteObservability?.sourceFinalizerFailed?.(finalizerFailureReason);
                 await store.finalizeReady(claim, snapshot);
             }
             if (finalized) {

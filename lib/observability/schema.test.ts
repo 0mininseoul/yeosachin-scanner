@@ -29,6 +29,7 @@ describe('sanitizeOperationalEvent', () => {
         ['precheckout_blite.completed', 'apify', 'success', undefined],
         ['precheckout_blite.profile_collection_failed', 'apify', 'failure', 'PROVIDER_ERROR'],
         ['precheckout_blite.inference_failed', 'gemini', 'response_rejected', 'VALIDATION_ERROR'],
+        ['precheckout_blite.finalizer_failed', 'supabase', 'fallback', 'PREFLIGHT_PERSISTENCE_ERROR'],
     ] as const)('keeps the bounded PII-free B-lite contract for %s', (
         event,
         provider,

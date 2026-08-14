@@ -236,6 +236,7 @@ describe('B-lite single-collection preflight', () => {
             profileCollectionFailed: vi.fn(),
             inferenceFailed: vi.fn(),
             inferenceAttempt: vi.fn(),
+            sourceFinalizerFailed: vi.fn(),
             fallbackLatched: vi.fn(),
             demoCompleted: vi.fn(),
             demoFailed: vi.fn(),
@@ -279,6 +280,7 @@ describe('B-lite single-collection preflight', () => {
             profileCollectionFailed: vi.fn(),
             inferenceFailed: vi.fn(),
             inferenceAttempt: vi.fn(),
+            sourceFinalizerFailed: vi.fn(),
             fallbackLatched: vi.fn(),
             demoCompleted: vi.fn(),
             demoFailed: vi.fn(),
@@ -316,6 +318,7 @@ describe('B-lite single-collection preflight', () => {
             profileCollectionFailed: vi.fn(),
             inferenceFailed: vi.fn(),
             inferenceAttempt: vi.fn(),
+            sourceFinalizerFailed: vi.fn(),
             fallbackLatched: vi.fn(),
             demoCompleted: vi.fn(),
             demoFailed: vi.fn(),
@@ -444,6 +447,16 @@ describe('B-lite single-collection preflight', () => {
         const finalizeReadyWithSource = vi.fn(async () => {
             throw new Error('PRECHECKOUT_BLITE_PREFLIGHT_FENCE_LOST');
         });
+        const bliteObservability = {
+            completed: vi.fn(),
+            profileCollectionFailed: vi.fn(),
+            inferenceFailed: vi.fn(),
+            inferenceAttempt: vi.fn(),
+            sourceFinalizerFailed: vi.fn(),
+            fallbackLatched: vi.fn(),
+            demoCompleted: vi.fn(),
+            demoFailed: vi.fn(),
+        };
 
         await expect(processPreflight(preflightId, {
             store,
@@ -451,11 +464,13 @@ describe('B-lite single-collection preflight', () => {
             getFullProfile: vi.fn(async () => profile()),
             activateBliteCohort,
             finalizeReadyWithSource,
+            bliteObservability,
             env,
         })).resolves.toBe('ready');
 
         expect(finalizeReadyWithSource).toHaveBeenCalledOnce();
         expect(store.finalizeReady).toHaveBeenCalledOnce();
+        expect(bliteObservability.sourceFinalizerFailed).toHaveBeenCalledWith('fence_lost');
         expect(store.finalizeBlocked).not.toHaveBeenCalled();
     });
 

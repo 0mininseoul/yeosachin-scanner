@@ -14,8 +14,35 @@ import {
 } from './blite-observability';
 
 const preflightId = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa';
+const PREFLIGHT = preflightId;
 
 describe('precheckout B-lite observability', () => {
+    it('records the bounded swallowed source-finalizer reason without raw error text', () => {
+        const observability = createPrecheckoutBliteObservability({
+            preflightId: PREFLIGHT,
+            startedAtMs: 1_000,
+            now: () => 1_250,
+        });
+
+        observability.sourceFinalizerFailed('schema_cache_miss');
+
+        expect(mocks.emit).toHaveBeenCalledWith({
+            event: 'precheckout_blite.finalizer_failed',
+            severity: 'warn',
+            fields: {
+                preflight_id: PREFLIGHT,
+                provider: 'supabase',
+                operation: 'precheckout_blite',
+                phase: 'finalize',
+                duration_ms: 250,
+                disposition: 'fallback',
+                error_code: 'PREFLIGHT_PERSISTENCE_ERROR',
+                correlation: 'schema_cache_miss',
+            },
+        });
+        expect(JSON.stringify(mocks.emit.mock.calls)).not.toContain('PGRST202');
+    });
+
     beforeEach(() => {
         vi.clearAllMocks();
     });
