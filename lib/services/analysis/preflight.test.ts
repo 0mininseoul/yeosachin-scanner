@@ -2186,6 +2186,141 @@ describe('preflight worker domain', () => {
         });
     });
 
+    it('terminalizes a succeeded provider run with no valid profile at the final attempt', async () => {
+        const claimed = claim({ workerAttemptCount: 7 });
+        const store = workerStore(claimed);
+        const runs = providerRunStore();
+        vi.mocked(runs.load).mockResolvedValue(storedRun('succeeded'));
+        const observer = vi.fn();
+        const providerFailure = new Error(
+            'SCRAPING_RUN_PENDING_ERROR: provider returned no valid profile'
+        );
+
+        await expect(processPreflight(preflightId, {
+            store,
+            getProfile: vi.fn(),
+            getFallbackProfile: vi.fn(async () => { throw providerFailure; }),
+            providerRunStore: runs,
+            observer,
+        })).resolves.toBe('blocked');
+
+        expect(store.finalizeBlocked).toHaveBeenCalledTimes(1);
+        expect(store.finalizeBlocked).toHaveBeenCalledWith(claimed, 'ANALYSIS_FAILED');
+        expect(store.releaseClaim).not.toHaveBeenCalled();
+        expect(observer).toHaveBeenCalledWith(expect.objectContaining({
+            type: 'completed',
+            outcome: 'blocked',
+            errorCode: 'ANALYSIS_FAILED',
+            failureCategory: 'provider',
+            failureReason: 'provider_terminal_no_profile',
+        }));
+    });
+
+    it('keeps a succeeded provider run retryable before the final attempt', async () => {
+        const claimed = claim({ workerAttemptCount: 6 });
+        const store = workerStore(claimed);
+        const runs = providerRunStore();
+        vi.mocked(runs.load).mockResolvedValue(storedRun('succeeded'));
+        const providerFailure = new Error(
+            'SCRAPING_RUN_PENDING_ERROR: provider returned no valid profile'
+        );
+
+        await expect(processPreflight(preflightId, {
+            store,
+            getProfile: vi.fn(),
+            getFallbackProfile: vi.fn(async () => { throw providerFailure; }),
+            providerRunStore: runs,
+        })).rejects.toMatchObject({
+            message: 'PREFLIGHT_WORKER_RETRY',
+            classification: {
+                category: 'run_pending',
+                retryable: true,
+                workerAttemptCount: 6,
+            },
+        });
+
+        expect(store.finalizeBlocked).not.toHaveBeenCalled();
+        expect(store.releaseClaim).toHaveBeenCalledOnce();
+    });
+
+    it('keeps a final-attempt persistence failure retryable and unclassified as no-profile', async () => {
+        const claimed = claim({ workerAttemptCount: 7 });
+        const store = workerStore(claimed);
+        const runs = providerRunStore();
+        vi.mocked(runs.load).mockResolvedValue(storedRun('succeeded'));
+
+        await expect(processPreflight(preflightId, {
+            store,
+            getProfile: vi.fn(),
+            getFallbackProfile: vi.fn(async () => {
+                throw new Error('PREFLIGHT_PERSISTENCE_ERROR: profile extraction failed (08006).');
+            }),
+            providerRunStore: runs,
+        })).rejects.toMatchObject({
+            message: 'PREFLIGHT_WORKER_RETRY',
+            classification: {
+                category: 'persistence',
+                retryable: true,
+                workerAttemptCount: 7,
+            },
+        });
+
+        expect(store.finalizeBlocked).not.toHaveBeenCalled();
+        expect(store.releaseClaim).toHaveBeenCalledOnce();
+    });
+
+    it('keeps a valid profile ready at the final attempt', async () => {
+        const claimed = claim({ workerAttemptCount: 7 });
+        const store = workerStore(claimed);
+        const runs = providerRunStore();
+        vi.mocked(runs.load).mockResolvedValue(storedRun('succeeded'));
+
+        await expect(processPreflight(preflightId, {
+            store,
+            getProfile: vi.fn(),
+            getFallbackProfile: vi.fn(async () => profile()),
+            providerRunStore: runs,
+        })).resolves.toBe('ready');
+
+        expect(store.finalizeReady).toHaveBeenCalledOnce();
+        expect(store.finalizeBlocked).not.toHaveBeenCalled();
+    });
+
+    it('acknowledges a stale final-attempt fence without retrying the terminal transition', async () => {
+        const claimed = claim({ workerAttemptCount: 7 });
+        const store = workerStore(claimed);
+        const runs = providerRunStore();
+        vi.mocked(runs.load).mockResolvedValue(storedRun('succeeded'));
+        vi.mocked(store.finalizeBlocked).mockRejectedValue(
+            new PreflightImmutableError('PREFLIGHT_IMMUTABLE')
+        );
+        const providerFailure = new Error(
+            'SCRAPING_RUN_PENDING_ERROR: provider returned no valid profile'
+        );
+
+        await expect(processPreflight(preflightId, {
+            store,
+            getProfile: vi.fn(),
+            getFallbackProfile: vi.fn(async () => { throw providerFailure; }),
+            providerRunStore: runs,
+        })).resolves.toBe('noop');
+
+        expect(store.releaseClaim).not.toHaveBeenCalled();
+    });
+
+    it('does not retry a parent that has already terminalized', async () => {
+        const store = workerStore(null);
+        const getFallbackProfile = vi.fn();
+
+        await expect(processPreflight(preflightId, {
+            store,
+            getFallbackProfile,
+            providerRunStore: providerRunStore(),
+        })).resolves.toBe('noop');
+
+        expect(getFallbackProfile).not.toHaveBeenCalled();
+    });
+
     it.each([
         ['starting', 'provider'],
         ['rejected', 'provider'],
@@ -2218,6 +2353,23 @@ describe('preflight worker domain', () => {
 });
 
 describe('preflight public mapping', () => {
+    it('exposes a terminal provider failure as blocked status for the existing retry/error UX', () => {
+        const result = publicPreflightStatusDto({
+            preflightId,
+            status: 'blocked',
+            expiresAt,
+            blockedCode: 'ANALYSIS_FAILED',
+            readySnapshot: null,
+            exclusionDecision: 'pending',
+        });
+
+        expect(result).toMatchObject({
+            status: 'blocked',
+            code: 'ANALYSIS_FAILED',
+        });
+        expect(result.status).not.toBe('pending');
+    });
+
     it('returns retry exhaustion immediately as a queue-unavailable block', () => {
         expect(publicPreflightStatusDto({
             preflightId,

@@ -112,6 +112,9 @@ const ISO_TIMESTAMP_PATTERN = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:
 const ISO_TIMESTAMP_PARTS_PATTERN = /^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2})(?:\.(\d+))?(Z|[+-]\d{2}:\d{2})$/;
 const BLITE_SOURCE_TTL_MICROSECONDS = BigInt(30 * 60 * 1_000_000);
 
+/** The database claim RPC permits seven crawler executions per preflight. */
+export const PREFLIGHT_MAX_WORKER_ATTEMPTS = 7;
+
 function timestampToMicroseconds(timestamp: string): bigint {
     const match = timestamp.match(ISO_TIMESTAMP_PARTS_PATTERN);
     if (!match || (match[2]?.length ?? 0) > 6) {
@@ -286,6 +289,8 @@ interface PreflightProcessObservationBase {
 
 type PreflightBusinessBlockedCode = Exclude<AnalysisV2ErrorCode, 'ANALYSIS_FAILED'>;
 
+export type PreflightTerminalFailureReason = 'provider_terminal_no_profile';
+
 export type PreflightProcessObservation =
     | (PreflightProcessObservationBase & {
         type: 'profile_collected';
@@ -310,6 +315,7 @@ export type PreflightProcessObservation =
         requiredPlan?: never;
         errorCode: 'ANALYSIS_FAILED';
         failureCategory: PreflightWorkerFailureClassification['category'];
+        failureReason?: PreflightTerminalFailureReason;
     })
     | (PreflightProcessObservationBase & {
         type: 'failed';
@@ -1936,6 +1942,8 @@ export async function processPreflight(
         return 'noop';
     }
     let terminalized = false;
+    let existingRun: StoredPreflightProviderRun | null = null;
+    let profileCollected = false;
     const baseObservation = {
         preflightId: claim.preflightId,
         userId: claim.userId,
@@ -1945,6 +1953,42 @@ export async function processPreflight(
         PreflightProcessObservationBase,
         'followersCount' | 'followingCount'
     > = {};
+    const terminalizeProviderNoProfile = async (
+        failure: Pick<
+            PreflightWorkerFailureClassification,
+            'category' | 'retryable'
+        >,
+    ): Promise<'blocked' | 'noop' | null> => {
+        if (
+            profileCollected
+            || claim.workerAttemptCount < PREFLIGHT_MAX_WORKER_ATTEMPTS
+            || existingRun?.status !== 'succeeded'
+            || !failure.retryable
+            || failure.category === 'persistence'
+        ) {
+            return null;
+        }
+        try {
+            await store.finalizeBlocked(claim, 'ANALYSIS_FAILED');
+        } catch (error) {
+            if (error instanceof PreflightImmutableError) {
+                terminalized = true;
+                return 'noop';
+            }
+            throw error;
+        }
+        recordTerminalFailure(claim, 'ANALYSIS_FAILED', 'provider');
+        terminalized = true;
+        notifyPreflightObserver(dependencies.observer, {
+            type: 'completed',
+            outcome: 'blocked',
+            ...baseObservation,
+            errorCode: 'ANALYSIS_FAILED',
+            failureCategory: 'provider',
+            failureReason: 'provider_terminal_no_profile',
+        });
+        return 'blocked';
+    };
     try {
         const isBetatest = claim.analysisEntryChannel === 'betatest';
         const isAnonymousPreflight = claim.userId === null;
@@ -1998,7 +2042,7 @@ export async function processPreflight(
                 dependencies.env ?? process.env
             );
         }
-        const existingRun = await providerRuns.load({
+        existingRun = await providerRuns.load({
             preflightId: claim.preflightId,
             claimToken: claim.claimToken,
             inputHash,
@@ -2282,6 +2326,7 @@ export async function processPreflight(
             ...baseObservation,
             ...profileObservation,
         });
+        profileCollected = true;
 
         const snapshot = buildReadyPreflightSnapshot(
             profile,
@@ -2383,7 +2428,18 @@ export async function processPreflight(
             });
             return 'blocked';
         }
-        const failure = classifyPreflightError(error);
+        let failure = classifyPreflightError(error);
+        if (!terminalized) {
+            try {
+                const terminalOutcome = await terminalizeProviderNoProfile(failure);
+                if (terminalOutcome === 'blocked' || terminalOutcome === 'noop') {
+                    return terminalOutcome;
+                }
+            } catch (terminalizationError) {
+                error = terminalizationError;
+                failure = classifyPreflightError(error);
+            }
+        }
         if (!terminalized && !failure.retryable) {
             try {
                 await store.finalizeBlocked(claim, 'ANALYSIS_FAILED');

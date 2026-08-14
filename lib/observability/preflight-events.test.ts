@@ -70,6 +70,36 @@ describe('preflight operational terminal codes', () => {
         expect(JSON.stringify(mocks.emit.mock.calls)).not.toContain('ANALYSIS_FAILED');
     });
 
+    it('distinguishes terminal no-profile from ordinary provider and persistence failures', () => {
+        mocks.emit.mockClear();
+        emitPreflightProcessObservation({
+            request_id: '123e4567-e89b-42d3-a456-426614174000',
+            trace_id: null,
+            route: '/api/analysis/preflight/worker',
+            method: 'POST',
+        }, {
+            type: 'completed',
+            outcome: 'blocked',
+            preflightId: '223e4567-e89b-42d3-a456-426614174000',
+            userId: '323e4567-e89b-42d3-a456-426614174000',
+            targetInstagramId: 'target.name',
+            errorCode: 'ANALYSIS_FAILED',
+            failureCategory: 'provider',
+            failureReason: 'provider_terminal_no_profile',
+        } as PreflightProcessObservation);
+
+        const emitted = mocks.emit.mock.calls[0]?.[0] as OperationalEvent;
+        expect(emitted.fields).toMatchObject({
+            error_code: 'PROVIDER_ERROR',
+            failure_reason: 'provider_terminal_no_profile',
+        });
+        expect(sanitizeOperationalEvent(emitted).fields).toMatchObject({
+            error_code: 'PROVIDER_ERROR',
+            failure_reason: 'provider_terminal_no_profile',
+        });
+        expect(JSON.stringify(emitted)).not.toMatch(/bio|username|provider returned|token/i);
+    });
+
     it.each([
         'TARGET_NOT_FOUND',
         'TARGET_PRIVATE',
