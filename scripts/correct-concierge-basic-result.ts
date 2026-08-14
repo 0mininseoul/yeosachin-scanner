@@ -34,6 +34,7 @@ const SAMPLE_END = '2026-08-12T09:08:00.000Z';
 const RELATIONSHIP_LIMIT = 1_200;
 const PROFILE_BATCH_SIZE = 30;
 const PROFILE_HYDRATION_TARGET_COUNT = 34;
+const PROFILE_SLOT_DEADLINE_MS = 90_000;
 const EXISTING_PROFILE_ARTIFACT = Object.freeze({
     slot: 'tertiary' as const,
     runId: 'NbsEMomWpuHW0uX8B',
@@ -45,6 +46,27 @@ const EXISTING_PROFILE_ARTIFACT = Object.freeze({
         'white.hour.snap', 'woo_x99',
     ]),
 });
+const COLLECTED_PROFILE_ARTIFACTS = Object.freeze([
+    Object.freeze({
+        slot: 'senary' as const,
+        runId: 'taiOIzMft5KxUr6UX',
+        datasetId: 'CnZBJUXe3hgSSaauf',
+        usernames: Object.freeze([
+            '_daeun_mon', '_early99_', '_hi_zin_', 'abhi.rns', 'bbaetaegi._.hj',
+            'black_hwan', 'chang_gism', 'chang_h_s_', 'jaeyoon0604', 'jeon_.js0725',
+            'ji__hooooo__', 'joojoo__o2', 'kang_jinmyeong', 'kyu.ri__', 'l.sm__o__',
+            'leehw_20', 'ln_the_garden', 'meal_ae', 'mer.audwns72_', 'my_min.day',
+            'p_mjn.2419', 'parksan9hee', 'pigkoala8538', 'ponyong_11', 'seo_haechan',
+            'sng.min__', 'sparkjin_3', 'sujai_garg_', 'two.onenine', 'uiw6unrgreen',
+        ]),
+    }),
+    Object.freeze({
+        slot: 'senary' as const,
+        runId: 'vGAJfetuUpuhQ8z5G',
+        datasetId: 'wsAVEDmHaJUcSwS61',
+        usernames: Object.freeze(['uxso1', 'yanyan_e_', 'yeeuned___', 'yu_nuu__']),
+    }),
+]);
 const CANONICAL_WORKDIR = '/private/tmp/fresh-admission-v3-supabase.yfdl1o';
 const REVIEW_ARTIFACT_DIR = '/Users/youngminpark/orca/workspaces/ai-baram-detector/concierge-batch-delivery-20260814/output/manual-gender-review';
 const ALL_PUBLIC_CLASSIFICATIONS_SHA256 = '47a657f1c534680043e24ca44f9e2eaa16854b55cd34ab65e3bb2a8dee7fa8cb';
@@ -343,11 +365,43 @@ async function hydrateExactMutualProfiles(
         runIds: [EXISTING_PROFILE_ARTIFACT.runId],
         requestedUsernames: expectedExistingUsernames,
     });
-
-    const missingPublic = publicUsernames.filter(username => !profiles.has(username));
-    if (missingPublic.length !== PROFILE_HYDRATION_TARGET_COUNT) {
+    const initialMissingPublic = publicUsernames.filter(username => !profiles.has(username));
+    if (initialMissingPublic.length !== PROFILE_HYDRATION_TARGET_COUNT) {
         throw new Error('CONCIERGE_PROFILE_ARTIFACT_SCOPE_CONFLICT');
     }
+
+    // The two bounded SENARY runs were started exactly once for the remaining
+    // 34-account scope.  Reuse their sealed datasets read-only on the publication
+    // pass, validating run-to-dataset binding before any profile can enter replay.
+    const collectedToken = tokenFor('senary');
+    if (!collectedToken) throw new Error('CONCIERGE_COLLECTED_PROFILE_ARTIFACT_UNAVAILABLE');
+    const collectedClient = new ApifyClient({ token: collectedToken, maxRetries: 0 });
+    for (const artifact of COLLECTED_PROFILE_ARTIFACTS) {
+        const run = await collectedClient.run(artifact.runId).get();
+        if (!run || run.status !== 'SUCCEEDED' || run.defaultDatasetId !== artifact.datasetId) {
+            throw new Error('CONCIERGE_COLLECTED_PROFILE_ARTIFACT_INVALID');
+        }
+        const items = (await collectedClient.dataset(artifact.datasetId)
+            .listItems({ limit: artifact.usernames.length + 1 })).items;
+        const parsed = parseApifyProfileDataset(items, artifact.usernames);
+        const parsedUsernames = [...parsed.profilesByUsername.keys()].sort();
+        const expectedUsernames = [...artifact.usernames].sort();
+        if (parsed.datasetContaminated
+            || parsed.failuresByUsername.size !== 0
+            || parsed.notFoundUsernames.size !== 0
+            || JSON.stringify(parsedUsernames) !== JSON.stringify(expectedUsernames)) {
+            throw new Error('CONCIERGE_COLLECTED_PROFILE_ARTIFACT_INVALID');
+        }
+        for (const [username, profile] of parsed.profilesByUsername) profiles.set(username, profile);
+        runIds.push(artifact.runId);
+        attempts.push({
+            slot: artifact.slot,
+            runIds: [artifact.runId],
+            requestedUsernames: expectedUsernames,
+        });
+    }
+
+    const missingPublic = publicUsernames.filter(username => !profiles.has(username));
     const unavailable = new Set(missingPublic);
     for (const slot of PROFILE_HYDRATION_SLOTS) {
         if (unavailable.size === 0) break;
@@ -358,6 +412,7 @@ async function hydrateExactMutualProfiles(
             continue;
         }
         const slotRunIds: string[] = [];
+        let ambiguousStart = false;
         try {
             const provider = makeDirectProvider(slot, token);
             for (let offset = 0; offset < requested.length; offset += PROFILE_BATCH_SIZE) {
@@ -368,8 +423,11 @@ async function hydrateExactMutualProfiles(
                         // adapter's legacy env label is not trusted for attribution.
                         credentialSlot: slot,
                         maxChargeUsd: 0.12,
+                        invocationDeadlineAtMs: Date.now() + PROFILE_SLOT_DEADLINE_MS,
+                        invocationWaitLimitSecs: Math.floor(PROFILE_SLOT_DEADLINE_MS / 1_000),
                         recordUsage: () => undefined,
                         onRunStarted: (runId: string) => { slotRunIds.push(runId); },
+                        onRunStartAmbiguous: () => { ambiguousStart = true; },
                     },
                 );
                 for (const outcome of outcomes) {
@@ -386,6 +444,7 @@ async function hydrateExactMutualProfiles(
         } catch (error) {
             // A bounded slot failure is provenance, not permission to retry it or
             // widen the username scope; QUINARY gets only the still-unresolved set.
+            if (ambiguousStart) throw new Error('CONCIERGE_PROFILE_SLOT_AMBIGUOUS_START');
             if (!safeError(error).startsWith('CONCIERGE_') && !(error instanceof Error)) {
                 throw error;
             }
