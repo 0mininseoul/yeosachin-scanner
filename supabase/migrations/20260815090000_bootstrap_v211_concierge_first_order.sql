@@ -86,13 +86,21 @@ BEGIN
        OR p_failed_preflight_id IS NULL
        OR p_rearmed_preflight_id IS NULL
        OR p_result_request_id IS NULL
-       OR p_source_request_id IN (
-            p_first_relationship_request_id, p_second_relationship_request_id,
-            p_result_request_id
+       OR (
+            p_source_request_id IN (
+                p_first_relationship_request_id, p_second_relationship_request_id,
+                p_result_request_id
+            )
+            AND NOT (
+                p_first_relationship_request_id = p_source_request_id
+                AND p_second_relationship_request_id = p_source_request_id
+            )
        )
-       OR p_first_relationship_request_id IN (
-            p_second_relationship_request_id, p_result_request_id
+       OR (
+            p_first_relationship_request_id = p_second_relationship_request_id
+            AND p_first_relationship_request_id <> p_source_request_id
        )
+       OR p_first_relationship_request_id = p_result_request_id
        OR p_second_relationship_request_id = p_result_request_id
        OR v_target IS NULL
        OR v_target !~ '^[a-z0-9._]{1,30}$'
@@ -135,14 +143,14 @@ BEGIN
     -- The supplied CSV is the reviewed immutable file.  The prior manifest
     -- hash is intentionally not accepted, even if every other field matches.
     IF pg_catalog.jsonb_array_length(p_followers) <> 157
-       OR pg_catalog.jsonb_array_length(p_following) <> 362
+       OR pg_catalog.jsonb_array_length(p_following) <> 361
        OR pg_catalog.jsonb_array_length(p_target_evidence) <> 95 THEN
         RAISE EXCEPTION USING
             MESSAGE = 'CONCIERGE_BOOTSTRAP_RELATIONSHIP_ARTIFACT_MISSING',
             ERRCODE = 'P0001';
     END IF;
 
-    IF pg_catalog.jsonb_array_length(p_publication_payload->'femaleRows') <> 13
+    IF pg_catalog.jsonb_array_length(p_publication_payload->'femaleRows') <> 16
        OR pg_catalog.jsonb_array_length(p_publication_payload->'privateRows') <> p_private THEN
         RAISE EXCEPTION USING
             MESSAGE = 'CONCIERGE_BOOTSTRAP_PUBLICATION_PAYLOAD_INVALID',
@@ -393,6 +401,8 @@ BEGIN
     IF v_source.id IS NULL
        OR v_source.user_id IS DISTINCT FROM p_owner_id
        OR v_source.preflight_id IS DISTINCT FROM p_failed_preflight_id
+       OR pg_catalog.lower(pg_catalog.btrim(v_source.target_instagram_id))
+            IS DISTINCT FROM v_target
        OR v_source.pipeline_version IS DISTINCT FROM 'v2'
        OR v_source.status IS DISTINCT FROM 'failed'
        OR v_result.id IS NULL
@@ -405,7 +415,42 @@ BEGIN
             MESSAGE = 'CONCIERGE_FIRST_ORDER_BOOTSTRAP_SOURCE_SCOPE_CONFLICT',
             ERRCODE = 'P0001';
     END IF;
-    IF (
+    IF p_first_relationship_request_id = p_source_request_id
+       AND p_second_relationship_request_id = p_source_request_id THEN
+        -- This historical request persisted both relationship provider runs on
+        -- the same failed V2 source request.  Bind that exact request only when
+        -- the durable provider ledger proves one succeeded Apify run per side;
+        -- never synthesize a pair of failed request IDs.
+        IF pg_catalog.to_regclass('public.analysis_v2_provider_runs') IS NULL THEN
+            RAISE EXCEPTION USING
+                MESSAGE = 'CONCIERGE_FIRST_ORDER_BOOTSTRAP_RELATIONSHIP_SCOPE_CONFLICT',
+                ERRCODE = 'P0001';
+        END IF;
+        EXECUTE $relationship_runs$
+            SELECT CASE WHEN
+                count(*) FILTER (
+                    WHERE operation_key ~ '^relationship-followers:[a-f0-9]{64}$'
+                ) = 1
+                AND count(*) FILTER (
+                    WHERE operation_key ~ '^relationship-following:[a-f0-9]{64}$'
+                ) = 1
+                AND count(*) = 2
+            THEN 0 ELSE 1 END
+            FROM public.analysis_v2_provider_runs
+            WHERE request_id = $1
+              AND job_key = 'track:relationships:collect'
+              AND logical_provider = 'apify'
+              AND credential_slot = 'tertiary'
+              AND status = 'succeeded'
+              AND run_id IS NOT NULL
+              AND operation_key ~ '^relationship-(followers|following):[a-f0-9]{64}$'
+        $relationship_runs$ INTO v_recovery_rows USING p_source_request_id;
+        IF v_recovery_rows <> 0 THEN
+            RAISE EXCEPTION USING
+                MESSAGE = 'CONCIERGE_FIRST_ORDER_BOOTSTRAP_RELATIONSHIP_SCOPE_CONFLICT',
+                ERRCODE = 'P0001';
+        END IF;
+    ELSIF (
         SELECT pg_catalog.count(*)
         FROM public.analysis_requests AS relationship_request
         WHERE relationship_request.id IN (
@@ -454,15 +499,6 @@ BEGIN
             'resultHash', p_result_hash
         );
     END IF;
-    IF EXISTS (
-        SELECT 1 FROM public.earlybird_v211_concierge_replays
-        WHERE order_id IS DISTINCT FROM p_order_id
-    ) THEN
-        RAISE EXCEPTION USING
-            MESSAGE = 'CONCIERGE_FIRST_ORDER_BOOTSTRAP_REPLAY_SCOPE_CONFLICT',
-            ERRCODE = 'P0001';
-    END IF;
-
     -- Keep the existing order result pointer and the failed V2 source audit
     -- untouched.  This insert adds only the exact one-shot replay lineage.
     INSERT INTO public.earlybird_v211_concierge_replays (

@@ -47,7 +47,7 @@ function relationshipRows(count: number, prefix: string): unknown[] {
 
 function exactRelationships(): { followers: unknown[]; following: unknown[] } {
     const followers = relationshipRows(157, 'f');
-    const following = relationshipRows(362, 'g');
+    const following = relationshipRows(361, 'g');
     for (let index = 0; index < 150; index += 1) {
         followers[index] = { username: `mutual${index}`, isPrivate: index >= 53 };
         following[index] = { username: `mutual${index}`, isPrivate: index >= 53 };
@@ -68,7 +68,7 @@ function publicationPayload() {
     return {
         sourceFingerprint: SOURCE_FINGERPRINT,
         resultHash: RESULT_HASH,
-        femaleRows: Array.from({ length: 13 }, (_, index) => ({
+        femaleRows: Array.from({ length: 16 }, (_, index) => ({
             rank: index + 1,
             suspect_instagram_id: `mutual${index}`,
             suspect_profile_image: null,
@@ -233,8 +233,8 @@ async function seed() {
     await db.exec(migration);
     await db.query(`
         INSERT INTO public.analysis_requests(id, user_id, preflight_id, target_instagram_id, status, pipeline_version, step_data)
-        VALUES
-            ($1, $2, $3, 'retained.abcdef0123456789abcd', 'failed', 'v2', jsonb_build_object('sourceFingerprint', $4::text)),
+            VALUES
+            ($1, $2, $3, 'target', 'failed', 'v2', jsonb_build_object('sourceFingerprint', $4::text)),
             ($7, $2, $3, 'retained.abcdef0123456789abcd', 'failed', 'v2', '{}'::jsonb),
             ($8, $2, $3, 'retained.abcdef0123456789abcd', 'failed', 'v2', '{}'::jsonb),
             ($5, $2, $6, 'target', 'completed', 'v1', '{}'::jsonb)
@@ -301,6 +301,40 @@ describe('concierge first-order bootstrap migration contract', () => {
             published_source_fingerprint: SOURCE_FINGERPRINT,
             published_result_hash: RESULT_HASH,
         }] });
+    });
+
+    it('binds one failed V2 source request when its durable ledger has both relationship runs', async () => {
+        await db.exec(`
+            CREATE TABLE public.analysis_v2_provider_runs(
+                request_id uuid NOT NULL,
+                job_key text NOT NULL,
+                operation_key text NOT NULL,
+                logical_provider text NOT NULL,
+                credential_slot text NOT NULL,
+                status text NOT NULL,
+                run_id text
+            );
+            INSERT INTO public.analysis_v2_provider_runs(
+                request_id, job_key, operation_key, logical_provider,
+                credential_slot, status, run_id
+            ) VALUES
+                ('${SOURCE_REQUEST_ID}', 'track:relationships:collect',
+                 'relationship-followers:${'a'.repeat(64)}', 'apify', 'tertiary', 'succeeded', 'followers-run'),
+                ('${SOURCE_REQUEST_ID}', 'track:relationships:collect',
+                 'relationship-following:${'b'.repeat(64)}', 'apify', 'tertiary', 'succeeded', 'following-run');
+        `);
+        const params = callParams();
+        params[3] = SOURCE_REQUEST_ID;
+        params[4] = SOURCE_REQUEST_ID;
+        await expect(withRole('service_role', () => db.query(
+            `SELECT public.bootstrap_earlybird_v211_concierge_first_order(
+                $1::uuid,$2::uuid,$3::uuid,$4::uuid,$5::uuid,$6::uuid,$7::uuid,$8::uuid,
+                $9::text,$10::text,$11::smallint,$12::integer,$13::integer,$14::integer,
+                $15::integer,$16::integer,$17::text,$18::text,$19::jsonb,$20::jsonb,$21::jsonb,
+                $22::jsonb,$23::jsonb
+            )`,
+            params,
+        ))).resolves.toBeDefined();
     });
 
     it('is idempotent for an identical hash and rejects a different result hash', async () => {
