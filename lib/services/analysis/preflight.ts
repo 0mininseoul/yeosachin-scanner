@@ -1552,6 +1552,7 @@ export function classifyPreflightError(error: unknown): ClassifiedPreflightError
     }
     if (
         message.startsWith('PREFLIGHT_PERSISTENCE_ERROR:')
+        || message.startsWith('PRECHECKOUT_BLITE_SOURCE_PERSISTENCE_ERROR')
         || message.startsWith('PREFLIGHT_PROVIDER_RUN_PERSISTENCE_ERROR:')
         || message.startsWith('ANALYSIS_PERSISTENCE_ERROR:')
         || message === 'ANALYSIS_V2_PROVIDER_RUN_REJECTION_PERSISTENCE_ERROR'

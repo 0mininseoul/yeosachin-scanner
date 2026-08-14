@@ -118,6 +118,49 @@ describe('betatest preflight credit fence', () => {
 });
 
 describe('B-lite single-collection preflight', () => {
+    it('classifies source finalization persistence failures as retryable persistence', () => {
+        expect(classifyPreflightError(
+            new Error('PRECHECKOUT_BLITE_SOURCE_PERSISTENCE_ERROR (PGRST202)'),
+        )).toEqual({
+            category: 'persistence',
+            retryable: true,
+            httpStatus: null,
+            paidFallbackEligible: false,
+        });
+    });
+
+    it('releases the claim when source finalization fails without terminalizing the preflight', async () => {
+        const claimed = claim();
+        const store = workerStore(claimed);
+        const activateBliteCohort = vi.fn(async () => ({
+            submittedAt: new Date(Date.now() - 1_000).toISOString(),
+            deadlineAt: new Date(Date.now() + 59_000).toISOString(),
+            expiresAt: new Date(Date.now() + 29 * 60_000).toISOString(),
+        }));
+        const finalizeReadyWithSource = vi.fn(async () => {
+            throw new Error('PRECHECKOUT_BLITE_SOURCE_PERSISTENCE_ERROR (PGRST202)');
+        });
+
+        await expect(processPreflight(preflightId, {
+            store,
+            providerRunStore: providerRunStore(),
+            getFullProfile: vi.fn(async () => profile({ followersCount: 476, followingCount: 644 })),
+            activateBliteCohort,
+            finalizeReadyWithSource,
+            env: {
+                PRECHECKOUT_BLITE_ENABLED: 'true',
+                PRECHECKOUT_BLITE_ROLLOUT_PERCENT: '100',
+                ANALYSIS_V2_PREFLIGHT_IDENTITY_HMAC_SECRET: preflightIdentitySecret,
+            },
+        })).rejects.toMatchObject({
+            message: 'PREFLIGHT_WORKER_RETRY',
+            classification: { category: 'persistence', retryable: true },
+        });
+
+        expect(store.releaseClaim).toHaveBeenCalledOnce();
+        expect(store.finalizeBlocked).not.toHaveBeenCalled();
+    });
+
     it('records a bounded profile collection failure when the selected Apify call fails', async () => {
         const claimed = claim();
         const store = workerStore(claimed);
