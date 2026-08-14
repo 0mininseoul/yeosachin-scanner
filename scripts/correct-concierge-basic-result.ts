@@ -32,6 +32,7 @@ const SAMPLE_START = '2026-08-12T09:07:00.000Z';
 const SAMPLE_END = '2026-08-12T09:08:00.000Z';
 const RELATIONSHIP_LIMIT = 1_200;
 const PROFILE_BATCH_SIZE = 30;
+const PROFILE_HYDRATION_TARGET_COUNT = 19;
 const CANONICAL_WORKDIR = '/private/tmp/fresh-admission-v3-supabase.yfdl1o';
 const REVIEW_ARTIFACT_DIR = '/Users/youngminpark/orca/workspaces/ai-baram-detector/concierge-batch-delivery-20260814/output/manual-gender-review';
 const ALL_PUBLIC_CLASSIFICATIONS_SHA256 = '47a657f1c534680043e24ca44f9e2eaa16854b55cd34ab65e3bb2a8dee7fa8cb';
@@ -343,7 +344,23 @@ async function hydrateExactMutualProfiles(
     }
     const missingPublic = publicUsernames.filter(username => !profiles.has(username));
     if (missingPublic.length > 0) {
-        throw new Error('CONCIERGE_PROFILE_ARTIFACT_MISSING');
+        if (missingPublic.length !== PROFILE_HYDRATION_TARGET_COUNT) {
+            throw new Error('CONCIERGE_PROFILE_ARTIFACT_SCOPE_CONFLICT');
+        }
+        const provider = makeDirectProvider('tertiary', token);
+        const outcomes = await provider.getProfilesBatchOutcomes!(
+            [...missingPublic], PROFILE_BATCH_SIZE, {
+                credentialSlot: 'primary' as const,
+                maxChargeUsd: 0.12,
+                recordUsage: () => undefined,
+                onRunStarted: (runId: string) => { runIds.push(runId); },
+            },
+        );
+        for (const outcome of outcomes) {
+            if (outcome.outcome.status === 'success' && 'profile' in outcome) {
+                profiles.set(normalizedUsername(outcome.profile.username), outcome.profile);
+            }
+        }
     }
     const unresolved = publicUsernames.filter(username => !profiles.has(username));
     return {
