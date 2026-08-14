@@ -25,6 +25,8 @@ import {
 import {
     availablePendingTargetStorage,
     clearPendingAnalysisTargetForTerminalState,
+    clearPreflightDisplayTargetForTerminalState,
+    storePreflightDisplayTarget,
     type PendingTargetStorage,
 } from '@/lib/services/pending-analysis-target';
 import { EVENTS, trackEvent } from '@/lib/services/analytics';
@@ -180,7 +182,13 @@ export function redirectConsumedPreflight(
     { replace, storage }: ConsumedPreflightRedirectDependencies,
 ): boolean {
     if (status.status !== 'consumed') return false;
-    if (storage) clearPendingAnalysisTargetForTerminalState(storage, status.status);
+    if (storage) {
+        clearPendingAnalysisTargetForTerminalState(storage, status.status);
+        clearPreflightDisplayTargetForTerminalState(storage, {
+            preflightId: status.preflightId,
+            status: status.status,
+        });
+    }
     replace(`/progress/${encodeURIComponent(status.requestId)}`);
     return true;
 }
@@ -493,6 +501,13 @@ export function useAnalysisV2Preflight({
         })) {
             return parsed.data;
         }
+        const storage = availablePendingTargetStorage();
+        if (storage) {
+            clearPreflightDisplayTargetForTerminalState(storage, {
+                preflightId: parsed.data.preflightId,
+                status: parsed.data.status,
+            });
+        }
         setPreflight(current => mergeLoadedPreflight(current, parsed.data));
         setExclusionState(current => restoreExclusionState(
             current,
@@ -631,6 +646,15 @@ export function useAnalysisV2Preflight({
             setLoginFallbackRequired(false);
             if (!scope.isCurrent()) return null;
             if (!coordinator.attachPreflight(generation, accepted.data.preflightId)) return null;
+            if (flow === 'standard') {
+                const storage = availablePendingTargetStorage();
+                if (storage) {
+                    storePreflightDisplayTarget(storage, {
+                        preflightId: accepted.data.preflightId,
+                        target: normalized,
+                    });
+                }
+            }
             if (preflightStartedAtRef.current !== null) {
                 persistPreflightStartedAt(
                     availableAnalyticsStorage(),

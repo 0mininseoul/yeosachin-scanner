@@ -33,6 +33,8 @@ import {
     bindPendingAnalysisTarget,
     clearPendingAnalysisTarget,
     clearPendingAnalysisTargetForTerminalState,
+    clearPreflightDisplayTarget,
+    readPreflightDisplayTarget,
     readPendingAnalysisTargetForAutostart,
     readPendingAnalysisTargetForPreflight,
     signOutAndClearPendingAnalysisTarget,
@@ -272,11 +274,12 @@ const DISCLOSURE_ACCEPTED = true;
         setAutoCheckoutUiPending(hasCheckoutContinuationIntent(params));
 
         const resumableClaimToken = params.get('claim');
+        const storage = availablePendingTargetStorage();
         if (resumablePreflightId && (user || resumableClaimToken)) {
             let boundTarget: string | null = null;
-            if (user) {
+            if (user && storage) {
                 try {
-                    boundTarget = readPendingAnalysisTargetForPreflight(sessionStorage, {
+                    boundTarget = readPendingAnalysisTargetForPreflight(storage, {
                         ownerId: user.id,
                         preflightId: resumablePreflightId,
                     });
@@ -284,12 +287,14 @@ const DISCLOSURE_ACCEPTED = true;
                     boundTarget = null;
                 }
             }
+            const displayTarget = storage
+                ? readPreflightDisplayTarget(storage, { preflightId: resumablePreflightId })
+                : null;
             void resumePreflight(
                 resumablePreflightId,
-                boundTarget ?? undefined,
+                displayTarget ?? boundTarget ?? undefined,
                 resumableClaimToken ?? undefined,
             ).then((resumed) => {
-                const storage = availablePendingTargetStorage();
                 if (!resumed) {
                     clearAutoCheckoutContinuation();
                     if (storage) clearPendingAnalysisTarget(storage);
@@ -671,6 +676,11 @@ const DISCLOSURE_ACCEPTED = true;
     ]);
 
     const handleReset = () => {
+        const activePreflightId = preflight?.preflightId;
+        const storage = availablePendingTargetStorage();
+        if (storage && activePreflightId) {
+            clearPreflightDisplayTarget(storage, activePreflightId);
+        }
         clearAutoCheckoutContinuation();
         try {
             clearPendingAnalysisTarget(sessionStorage);

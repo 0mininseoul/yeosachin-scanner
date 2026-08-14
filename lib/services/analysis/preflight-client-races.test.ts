@@ -13,7 +13,11 @@ import {
 import * as preflightClient from '@/hooks/useAnalysisV2Preflight';
 import {
     bindPendingAnalysisTarget,
+    clearPreflightDisplayTarget,
+    clearPreflightDisplayTargetForTerminalState,
     readPendingAnalysisTargetForPreflight,
+    readPreflightDisplayTarget,
+    storePreflightDisplayTarget,
 } from '@/lib/services/pending-analysis-target';
 
 const preflightId = '123e4567-e89b-42d3-a456-426614174000';
@@ -193,6 +197,53 @@ describe('analysis V2 preflight request coordinator', () => {
 });
 
 describe('consumed preflight client redirect', () => {
+    it('clears display target synchronously before a consumed redirect', () => {
+        const redirectConsumedPreflight = consumedRedirect();
+        expect(redirectConsumedPreflight).toBeTypeOf('function');
+        if (!redirectConsumedPreflight) return;
+        const storage = createStorage();
+        storePreflightDisplayTarget(storage, {
+            now: 1_750_000_000_000,
+            preflightId,
+            target: 'safe_target',
+        });
+        storage.removeItem.mockClear();
+        const replace = vi.fn();
+        const consumed = preflightStatusV1Schema.parse({
+            schemaVersion: 1,
+            preflightId,
+            status: 'consumed',
+            exclusionDecision: 'skip',
+            requestId: otherPreflightId,
+        });
+
+        expect(redirectConsumedPreflight(consumed, { replace, storage })).toBe(true);
+        expect(readPreflightDisplayTarget(storage, {
+            now: 1_750_000_000_001,
+            preflightId,
+        })).toBeNull();
+        expect(replace).toHaveBeenCalledWith(`/progress/${otherPreflightId}`);
+        expect(storage.removeItem.mock.invocationCallOrder[0])
+            .toBeLessThan(replace.mock.invocationCallOrder[0]);
+    });
+
+    it('keeps a pending display target and fences cleanup to another preflight', () => {
+        const storage = createStorage();
+        storePreflightDisplayTarget(storage, {
+            now: 1_750_000_000_000,
+            preflightId,
+            target: 'safe_target',
+        });
+        expect(clearPreflightDisplayTargetForTerminalState(storage, {
+            preflightId: otherPreflightId,
+            status: 'ready',
+        })).toBe(false);
+        expect(readPreflightDisplayTarget(storage, {
+            now: 1_750_000_000_001,
+            preflightId,
+        })).toBe('safe_target');
+    });
+
     it('clears the matching bound target synchronously before redirecting', () => {
         const redirectConsumedPreflight = consumedRedirect();
         expect(redirectConsumedPreflight).toBeTypeOf('function');
@@ -261,6 +312,47 @@ describe('consumed preflight client redirect', () => {
         expect(hookSource).toMatch(
             /redirectConsumedPreflight\(parsed\.data, \{[\s\S]*?storage: availablePendingTargetStorage\(\),[\s\S]*?replace:/,
         );
+    });
+});
+
+describe('preflight display target lifecycle contracts', () => {
+    it('documents accepted-write, resume-ordering, standard-only, and reset contracts', () => {
+        const hookSource = readFileSync(
+            new URL('../../../hooks/useAnalysisV2Preflight.ts', import.meta.url),
+            'utf8',
+        );
+        const analyzeSource = readFileSync('app/analyze/page.tsx', 'utf8');
+        const attach = hookSource.indexOf(
+            'coordinator.attachPreflight(generation, accepted.data.preflightId)',
+        );
+        const store = hookSource.indexOf('storePreflightDisplayTarget(');
+        expect(attach).toBeGreaterThanOrEqual(0);
+        expect(store).toBeGreaterThan(attach);
+        expect(hookSource).toContain("if (flow === 'standard')");
+        expect(hookSource).toContain('clearPreflightDisplayTargetForTerminalState');
+        const displayRead = analyzeSource.indexOf('readPreflightDisplayTarget(');
+        const resumeCall = analyzeSource.indexOf('resumePreflight(');
+        expect(displayRead).toBeGreaterThanOrEqual(0);
+        expect(resumeCall).toBeGreaterThan(displayRead);
+        expect(analyzeSource).toContain('displayTarget ?? boundTarget');
+        expect(analyzeSource).toContain('clearPreflightDisplayTarget(storage, activePreflightId)');
+        expect(analyzeSource).toContain('new URLSearchParams({ preflight: accepted.preflightId })');
+        expect(analyzeSource).not.toContain('targetInstagramId: instagramId');
+    });
+
+    it('keeps explicit display cleanup scoped to the active preflight id', () => {
+        const storage = createStorage();
+        storePreflightDisplayTarget(storage, {
+            now: 1_750_000_000_000,
+            preflightId,
+            target: 'safe_target',
+        });
+        expect(clearPreflightDisplayTarget(storage, otherPreflightId)).toBe(false);
+        expect(readPreflightDisplayTarget(storage, {
+            now: 1_750_000_000_001,
+            preflightId,
+        })).toBe('safe_target');
+        expect(clearPreflightDisplayTarget(storage, preflightId)).toBe(true);
     });
 });
 
