@@ -1,3 +1,5 @@
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import {
     resolveActivePrecheckoutSurface,
@@ -24,5 +26,13 @@ describe('/analyze precheckout plan gate', () => {
             { preflightId: 'new-preflight', surface: 'legacy' },
             'new-preflight',
         )).toBe('legacy');
+    });
+
+    it('keeps the target account card above the B-lite surface while it is still awaiting a result', () => {
+        const page = readFileSync(join(process.cwd(), 'app/analyze/page.tsx'), 'utf8');
+
+        expect(page).toContain('data-precheckout-target-card');
+        expect(page).toContain('{!autoCheckoutTransitionVisible && (');
+        expect(page).not.toContain("{activePrecheckoutSurface !== 'awaiting' && (");
     });
 });
