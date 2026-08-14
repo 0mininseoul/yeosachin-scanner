@@ -48,7 +48,7 @@ function relationshipRows(count: number, prefix: string): unknown[] {
 function exactRelationships(): { followers: unknown[]; following: unknown[] } {
     const followers = relationshipRows(157, 'f');
     const following = relationshipRows(361, 'g');
-    for (let index = 0; index < 150; index += 1) {
+    for (let index = 0; index < 149; index += 1) {
         followers[index] = { username: `mutual${index}`, isPrivate: index >= 53 };
         following[index] = { username: `mutual${index}`, isPrivate: index >= 53 };
     }
@@ -68,6 +68,7 @@ function publicationPayload() {
     return {
         sourceFingerprint: SOURCE_FINGERPRINT,
         resultHash: RESULT_HASH,
+        publicGender: { male: 31, female: 16, unknown: 6 },
         femaleRows: Array.from({ length: 16 }, (_, index) => ({
             rank: index + 1,
             suspect_instagram_id: `mutual${index}`,
@@ -80,11 +81,12 @@ function publicationPayload() {
             one_line_overview: `공개 프로필과 최근 피드의 특징을 중심으로 정리한 계정 ${index}입니다.`,
             risk_analysis: index === 0 ? ['첫 문장', '둘째 문장'] : [],
         })),
-        privateRows: Array.from({ length: 96 }, (_, index) => ({
-            instagram_id: `private${index}`,
+        privateRows: Array.from({ length: 95 }, (_, index) => ({
+            instagram_id: `mutual${index + 53}`,
             profile_image: null,
             full_name: `Private ${index}`,
         })),
+        unresolvedUsernames: ['mutual148'],
     };
 }
 
@@ -102,10 +104,10 @@ function callParams(overrides: Record<string, unknown> = {}) {
         'target',
         'analysis_in_progress',
         2,
-        150,
         149,
+        148,
         53,
-        96,
+        95,
         1,
         SOURCE_FINGERPRINT,
         RESULT_HASH,
@@ -175,7 +177,9 @@ async function seed() {
             pipeline_version TEXT NOT NULL,
             step_data JSONB NOT NULL DEFAULT '{}'::jsonb,
             completed_at TIMESTAMPTZ,
-            mutual_follows INTEGER
+            mutual_follows INTEGER,
+            opposite_gender_count INTEGER,
+            gender_stats JSONB
         );
         CREATE TABLE public.analysis_results (
             request_id UUID NOT NULL,
@@ -301,6 +305,26 @@ describe('concierge first-order bootstrap migration contract', () => {
             published_source_fingerprint: SOURCE_FINGERPRINT,
             published_result_hash: RESULT_HASH,
         }] });
+        await expect(db.query(
+            `SELECT step_data->'conciergeBootstrap' AS bootstrap
+               FROM public.analysis_requests WHERE id = $1`,
+            [RESULT_REQUEST_ID],
+        )).resolves.toMatchObject({ rows: [{ bootstrap: {
+            exactMutual: 149,
+            hydrated: 148,
+            public: 53,
+            private: 95,
+            unresolved: 1,
+            unresolvedUsernames: ['mutual148'],
+        } }] });
+        await expect(db.query(
+            `SELECT opposite_gender_count, gender_stats
+               FROM public.analysis_requests WHERE id = $1`,
+            [RESULT_REQUEST_ID],
+        )).resolves.toMatchObject({ rows: [{
+            opposite_gender_count: 16,
+            gender_stats: { male: 31, female: 16, unknown: 6 },
+        }] });
     });
 
     it('binds one failed V2 source request when its durable ledger has both relationship runs', async () => {
@@ -422,6 +446,25 @@ describe('concierge first-order bootstrap migration contract', () => {
             )`,
             params,
         ))).rejects.toThrow('CONCIERGE_BOOTSTRAP_PUBLICATION_PAYLOAD_INVALID');
+        await expect(db.query('SELECT count(*)::int AS count FROM public.earlybird_v211_concierge_replays'))
+            .resolves.toMatchObject({ rows: [{ count: 0 }] });
+    });
+
+    it('rejects unresolved provenance outside the durable mutual intersection', async () => {
+        const params = callParams();
+        params[22] = JSON.stringify({
+            ...publicationPayload(),
+            unresolvedUsernames: ['not-mutual'],
+        });
+        await expect(withRole('service_role', () => db.query(
+            `SELECT public.bootstrap_earlybird_v211_concierge_first_order(
+                $1::uuid,$2::uuid,$3::uuid,$4::uuid,$5::uuid,$6::uuid,$7::uuid,$8::uuid,
+                $9::text,$10::text,$11::smallint,$12::integer,$13::integer,$14::integer,
+                $15::integer,$16::integer,$17::text,$18::text,$19::jsonb,$20::jsonb,$21::jsonb,
+                $22::jsonb,$23::jsonb
+            )`,
+            params,
+        ))).rejects.toThrow('CONCIERGE_BOOTSTRAP_UNRESOLVED_PROVENANCE_INVALID');
         await expect(db.query('SELECT count(*)::int AS count FROM public.earlybird_v211_concierge_replays'))
             .resolves.toMatchObject({ rows: [{ count: 0 }] });
     });

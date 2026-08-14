@@ -106,10 +106,10 @@ BEGIN
        OR v_target !~ '^[a-z0-9._]{1,30}$'
        OR p_expected_fulfillment_status IS DISTINCT FROM 'analysis_in_progress'
        OR p_expected_fulfillment_attempt_count IS DISTINCT FROM 2
-       OR p_exact_mutual IS DISTINCT FROM 150
-       OR p_hydrated IS DISTINCT FROM 149
+       OR p_exact_mutual IS DISTINCT FROM 149
+       OR p_hydrated IS DISTINCT FROM 148
        OR p_public IS DISTINCT FROM 53
-       OR p_private IS DISTINCT FROM 96
+       OR p_private IS DISTINCT FROM 95
        OR p_unresolved IS DISTINCT FROM 1
        OR p_source_fingerprint IS NULL
        OR p_source_fingerprint !~ '^[a-f0-9]{64}$'
@@ -133,6 +133,13 @@ BEGIN
        OR pg_catalog.jsonb_typeof(p_publication_payload) IS DISTINCT FROM 'object'
        OR pg_catalog.jsonb_typeof(p_publication_payload->'femaleRows') IS DISTINCT FROM 'array'
        OR pg_catalog.jsonb_typeof(p_publication_payload->'privateRows') IS DISTINCT FROM 'array'
+       OR pg_catalog.jsonb_typeof(p_publication_payload->'unresolvedUsernames') IS DISTINCT FROM 'array'
+       OR pg_catalog.jsonb_typeof(p_publication_payload->'publicGender') IS DISTINCT FROM 'object'
+       OR (p_publication_payload->'publicGender') - ARRAY['male', 'female', 'unknown'] <> '{}'::JSONB
+       OR NOT ((p_publication_payload->'publicGender') ?& ARRAY['male', 'female', 'unknown'])
+       OR p_publication_payload->'publicGender'->>'male' IS DISTINCT FROM '31'
+       OR p_publication_payload->'publicGender'->>'female' IS DISTINCT FROM '16'
+       OR p_publication_payload->'publicGender'->>'unknown' IS DISTINCT FROM '6'
        OR p_publication_payload->>'sourceFingerprint' IS DISTINCT FROM p_source_fingerprint
        OR p_publication_payload->>'resultHash' IS DISTINCT FROM p_result_hash THEN
         RAISE EXCEPTION USING
@@ -154,6 +161,51 @@ BEGIN
        OR pg_catalog.jsonb_array_length(p_publication_payload->'privateRows') <> p_private THEN
         RAISE EXCEPTION USING
             MESSAGE = 'CONCIERGE_BOOTSTRAP_PUBLICATION_PAYLOAD_INVALID',
+            ERRCODE = 'P0001';
+    END IF;
+
+    IF pg_catalog.jsonb_array_length(p_publication_payload->'unresolvedUsernames') <> p_unresolved
+       OR (
+            SELECT pg_catalog.count(*)
+            FROM pg_catalog.jsonb_array_elements(p_publication_payload->'unresolvedUsernames') AS item
+            WHERE pg_catalog.jsonb_typeof(item) IS DISTINCT FROM 'string'
+               OR item #>> '{}' !~ '^[a-z0-9._]{1,30}$'
+       ) <> 0
+       OR (
+            SELECT pg_catalog.count(*)
+            FROM pg_catalog.jsonb_array_elements_text(p_publication_payload->'unresolvedUsernames') AS item(username)
+       ) <> (
+            SELECT pg_catalog.count(DISTINCT item.username)
+            FROM pg_catalog.jsonb_array_elements_text(p_publication_payload->'unresolvedUsernames') AS item(username)
+       ) THEN
+        RAISE EXCEPTION USING
+            MESSAGE = 'CONCIERGE_BOOTSTRAP_UNRESOLVED_PROVENANCE_INVALID',
+            ERRCODE = 'P0001';
+    END IF;
+
+    IF EXISTS (
+        SELECT 1
+        FROM pg_catalog.jsonb_array_elements_text(p_publication_payload->'unresolvedUsernames') AS unresolved(username)
+        WHERE NOT EXISTS (
+            SELECT 1
+            FROM pg_catalog.jsonb_array_elements(p_followers) AS follower
+            JOIN pg_catalog.jsonb_array_elements(p_following) AS following
+              ON following->>'username' = follower->>'username'
+            WHERE follower->>'username' = unresolved.username
+        )
+        OR EXISTS (
+            SELECT 1
+            FROM pg_catalog.jsonb_array_elements(p_publication_payload->'privateRows') AS private_row
+            WHERE private_row->>'instagram_id' = unresolved.username
+        )
+        OR EXISTS (
+            SELECT 1
+            FROM pg_catalog.jsonb_array_elements(p_publication_payload->'femaleRows') AS female_row
+            WHERE female_row->>'suspect_instagram_id' = unresolved.username
+        )
+    ) THEN
+        RAISE EXCEPTION USING
+            MESSAGE = 'CONCIERGE_BOOTSTRAP_UNRESOLVED_PROVENANCE_INVALID',
             ERRCODE = 'P0001';
     END IF;
 
@@ -556,6 +608,8 @@ BEGIN
 
     UPDATE public.analysis_requests
     SET mutual_follows = p_exact_mutual,
+        opposite_gender_count = (p_publication_payload->'publicGender'->>'female')::INTEGER,
+        gender_stats = p_publication_payload->'publicGender',
         step_data = pg_catalog.jsonb_set(
             CASE WHEN pg_catalog.jsonb_typeof(step_data) = 'object'
                  THEN step_data ELSE '{}'::JSONB END,
@@ -564,6 +618,7 @@ BEGIN
                 'exactMutual', p_exact_mutual, 'hydrated', p_hydrated,
                 'public', p_public, 'private', p_private,
                 'unresolved', p_unresolved,
+                'unresolvedUsernames', p_publication_payload->'unresolvedUsernames',
                 'sourceFingerprint', p_source_fingerprint,
                 'resultHash', p_result_hash,
                 'artifactHashes', p_artifact_hashes

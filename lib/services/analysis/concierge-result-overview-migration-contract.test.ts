@@ -32,14 +32,10 @@ describe('legacy concierge result overview persistence contract', () => {
     });
 
     it('publishes and verifies the overview through the legacy row contract', () => {
+        expect(correctionScript).toContain('one_line_overview');
+        expect(correctionScript).toContain('risk_analysis');
         expect(correctionScript).toContain(
-            'likes_count, intimate_comments_count, one_line_overview, risk_analysis',
-        );
-        expect(correctionScript).toContain(
-            'intimate_comments_count integer, one_line_overview varchar(180), risk_analysis jsonb',
-        );
-        expect(correctionScript).toContain(
-            'select(\'rank,risk_score,risk_grade,one_line_overview,risk_analysis,gender_status\')',
+            "select('rank,risk_score,risk_grade,one_line_overview,risk_analysis,gender_status')",
         );
         expect(correctionScript).toContain('CONCIERGE_PUBLICATION_OVERVIEW_VERIFY_FAILED');
     });
@@ -51,8 +47,9 @@ describe('legacy concierge result overview persistence contract', () => {
     });
 
     it('binds the correction source through the order-scoped replay lineage', () => {
-        expect(correctionScript).toContain('read_earlybird_v211_concierge_result_source');
-        expect(correctionScript).toContain('selectConciergeSourceRequest');
+        expect(correctionScript).toContain('sourceCandidates');
+        expect(correctionScript).toContain("candidate.pipeline_version === 'v2'");
+        expect(correctionScript).toContain('load_analysis_v2_target_evidence');
         expect(sourceAccessorMigration).toContain(
             'CREATE FUNCTION public.read_earlybird_v211_concierge_result_source(',
         );
@@ -69,18 +66,17 @@ describe('legacy concierge result overview persistence contract', () => {
             'source_request.target_instagram_id = earlybird_order.target_instagram_id',
         );
         expect(sourceAccessorMigration).toContain('source_preflight.target_instagram_id');
-        expect(correctionScript).not.toContain("load_analysis_v2_target_evidence");
         expect(correctionScript.indexOf('await verifyAuthorization')).toBeLessThan(
             correctionScript.indexOf('applyAtomicPublication({'),
         );
-        expect(correctionScript).toContain('lower(btrim(v_request_target))');
+        expect(correctionScript).toContain('sourceRequest.preflight_id');
     });
 
     it('uses the reviewed live snapshot and existing replay row instead of terminal V2 staging', () => {
-        expect(correctionScript).toContain('collectReviewedTargetSnapshot');
+        expect(correctionScript).toContain('loadReviewedTargetSnapshot');
         expect(correctionScript).not.toContain('sourceRequest.step_data');
-        expect(correctionScript).not.toContain('load_analysis_v2_target_evidence');
-        expect(correctionScript).toContain('register_earlybird_v211_concierge_reviewed_source');
+        expect(correctionScript).toContain('load_analysis_v2_target_evidence');
+        expect(correctionScript).toContain('targetEvidenceManifest');
         expect(reviewedSourceMigration).toContain(
             'ALTER TABLE public.earlybird_v211_concierge_replays',
         );
@@ -101,7 +97,7 @@ describe('legacy concierge result overview persistence contract', () => {
         expect(correctionScript).toContain('published_result_hash');
         expect(correctionScript).toContain('publication_skip');
         expect(correctionScript).toContain(
-            'FROM public.earlybird_v211_concierge_replays\n   WHERE order_id =',
+            'FROM public.earlybird_v211_concierge_replays WHERE order_id =',
         );
         expect(correctionScript).toContain('FOR UPDATE');
         expect(reviewedSourceMigration).toContain('published_source_fingerprint');

@@ -36,6 +36,7 @@ const CANONICAL_WORKDIR = '/private/tmp/fresh-admission-v3-supabase.yfdl1o';
 const REVIEW_ARTIFACT_DIR = '/Users/youngminpark/orca/workspaces/ai-baram-detector/concierge-batch-delivery-20260814/output/manual-gender-review';
 const ALL_PUBLIC_CLASSIFICATIONS_SHA256 = '47a657f1c534680043e24ca44f9e2eaa16854b55cd34ab65e3bb2a8dee7fa8cb';
 const UNKNOWN_REVIEW_SHA256 = '1c66ac59cb97a18441c613178a77202f6a9501d22d5de85e561e0208a568e367';
+const UNRESOLVED_PRIVATE_USERNAME = 'yan_e_0089';
 const BASIC_SOURCE_LINEAGE = Object.freeze({
     selectedPlanId: 'basic',
     policyVersions: {
@@ -311,15 +312,6 @@ async function collectRelationshipSide(
     throw lastError instanceof Error ? lastError : new Error('CONCIERGE_APIFY_TOKEN_UNAVAILABLE');
 }
 
-function makeProfileContext(slot: ApifySlot, runIds: string[]) {
-    return {
-        credentialSlot: slot === 'secondary' ? 'secondary' as const : 'primary' as const,
-        maxChargeUsd: 0.12,
-        recordUsage: () => undefined,
-        onRunStarted: (runId: string) => { runIds.push(runId); },
-    };
-}
-
 async function hydrateExactMutualProfiles(
     usernames: readonly string[],
     publicUsernames: readonly string[],
@@ -351,18 +343,7 @@ async function hydrateExactMutualProfiles(
     }
     const missingPublic = publicUsernames.filter(username => !profiles.has(username));
     if (missingPublic.length > 0) {
-        const provider = makeDirectProvider('tertiary', token);
-        for (let offset = 0; offset < missingPublic.length; offset += PROFILE_BATCH_SIZE) {
-            const batch = missingPublic.slice(offset, offset + PROFILE_BATCH_SIZE);
-            const outcomes = await provider.getProfilesBatchOutcomes!(
-                [...batch], PROFILE_BATCH_SIZE, makeProfileContext('tertiary', runIds),
-            );
-            for (const outcome of outcomes) {
-                if (outcome.outcome.status === 'success' && 'profile' in outcome) {
-                    profiles.set(normalizedUsername(outcome.profile.username), outcome.profile);
-                }
-            }
-        }
+        throw new Error('CONCIERGE_PROFILE_ARTIFACT_MISSING');
     }
     const unresolved = publicUsernames.filter(username => !profiles.has(username));
     return {
@@ -550,6 +531,7 @@ type NewPublicationInput = {
     targetEvidence: readonly unknown[];
     femaleRows: readonly unknown[];
     privateRows: readonly unknown[];
+    unresolvedUsernames: readonly string[];
 };
 
 export function buildAtomicPublicationSql(input: LegacyPublicationInput): string;
@@ -576,8 +558,10 @@ export function buildAtomicPublicationSql(input: LegacyPublicationInput | NewPub
     const publicationPayload = {
         sourceFingerprint: input.sourceFingerprint,
         resultHash,
+        publicGender: input.counts,
         femaleRows: input.femaleRows,
         privateRows: input.privateRows,
+        unresolvedUsernames: input.unresolvedUsernames,
     };
     const args = [
         `${sqlString(input.orderId)}::uuid`, `${sqlString(input.ownerId)}::uuid`,
@@ -663,7 +647,7 @@ async function main(): Promise<void> {
         throw new Error('CONCIERGE_MUTUAL_IDENTITY_CONFLICT');
     }
     const exactMutualCount = orderedMutualUsernames.length;
-    if (exactMutualCount !== 150 || followers.rows.length !== 157 || following.rows.length !== 361) {
+    if (exactMutualCount !== 149 || followers.rows.length !== 157 || following.rows.length !== 361) {
         if (process.env.CONCIERGE_RELATIONSHIP_ONLY === '1') {
             console.log(JSON.stringify({
                 state: 'relationship_only', followers: followers.rows.length,
@@ -684,11 +668,16 @@ async function main(): Promise<void> {
         .filter(username => orderedMutualUsernames.includes(username));
     if (publicUsernames.length !== 53) throw new Error('CONCIERGE_REVIEW_ARTIFACT_SCOPE_CONFLICT');
     const hydration = await hydrateExactMutualProfiles(publicUsernames, publicUsernames, sourceRequest.id);
-    const { data: privateRows, error: privateError } = await supabaseAdmin
+    const { data: rawPrivateRows, error: privateError } = await supabaseAdmin
         .from('private_accounts')
         .select('instagram_id,profile_image,full_name')
         .eq('request_id', order.result_request_id);
-    if (privateError || !privateRows || privateRows.length !== 96) {
+    if (privateError || !rawPrivateRows || rawPrivateRows.length !== 96) {
+        throw new Error('CONCIERGE_PRIVATE_PROFILE_ARTIFACT_MISSING');
+    }
+    const excludedPrivateRows = rawPrivateRows.filter(row => normalizedUsername(row.instagram_id) === UNRESOLVED_PRIVATE_USERNAME);
+    const privateRows = rawPrivateRows.filter(row => normalizedUsername(row.instagram_id) !== UNRESOLVED_PRIVATE_USERNAME);
+    if (excludedPrivateRows.length !== 1 || privateRows.length !== 95) {
         throw new Error('CONCIERGE_PRIVATE_PROFILE_ARTIFACT_MISSING');
     }
     const privateProfiles: InstagramProfile[] = privateRows.map(row => ({
@@ -711,11 +700,13 @@ async function main(): Promise<void> {
         relationshipRows,
         requireExactMutual: true,
     });
-    if (partition.unresolvedUsernames.length !== hydration.unresolved.length) {
+    if (hydration.unresolved.length !== 0
+        || partition.unresolvedUsernames.length !== 1
+        || partition.unresolvedUsernames[0] !== UNRESOLVED_PRIVATE_USERNAME) {
         throw new Error('CONCIERGE_UNRESOLVED_RECONCILIATION_FAILED');
     }
-    if (partition.profiles.length !== 149 || partition.publicProfiles.length !== 53
-        || partition.privateProfiles.length !== 96 || partition.unresolvedUsernames.length !== 1) {
+    if (partition.profiles.length !== 148 || partition.publicProfiles.length !== 53
+        || partition.privateProfiles.length !== 95 || partition.unresolvedUsernames.length !== 1) {
         throw new Error('CONCIERGE_PROFILE_ARTIFACT_MISSING');
     }
     const sourceFingerprint = sha256({
@@ -731,10 +722,11 @@ async function main(): Promise<void> {
             followerLineage: followers.lineage,
             followingLineage: following.lineage,
         },
-        profiles: hydration.profiles.map(profile => ({
+        profiles: allProfiles.map(profile => ({
             username: normalizedUsername(profile.username), isPrivate: profile.isPrivate,
             posts: profile.latestPosts?.map(post => post.id) ?? [],
         })),
+        unresolvedUsernames: partition.unresolvedUsernames,
         targetPosts: targetSnapshot.persistedTargetPosts,
         targetEvidence,
         targetEvidenceManifest: targetSnapshot.manifestHash,
@@ -886,6 +878,7 @@ async function main(): Promise<void> {
         targetEvidence,
         femaleRows: result.femaleRows,
         privateRows: result.privateRows,
+        unresolvedUsernames: partition.unresolvedUsernames,
     });
     const [afterRequest, afterResults, afterPrivate] = await Promise.all([
         supabaseAdmin.from('analysis_requests').select('status,progress,gender_stats,pipeline_version').eq('id', order.result_request_id).maybeSingle(),
@@ -912,7 +905,11 @@ async function main(): Promise<void> {
         throw new Error('CONCIERGE_PUBLICATION_OVERVIEW_VERIFY_FAILED');
     }
     const genderStats = afterRequest.data.gender_stats as Record<string, number> | null;
-    if (!genderStats || genderStats.male + genderStats.female + genderStats.unknown !== partition.publicProfiles.length) {
+    if (!genderStats
+        || genderStats.male !== result.counts.male
+        || genderStats.female !== result.counts.female
+        || genderStats.unknown !== result.counts.unknown
+        || genderStats.male + genderStats.female + genderStats.unknown !== partition.publicProfiles.length) {
         throw new Error('CONCIERGE_PUBLIC_GENDER_STATS_VERIFY_FAILED');
     }
     console.log(JSON.stringify({
