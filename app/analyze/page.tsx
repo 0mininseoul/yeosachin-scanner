@@ -63,6 +63,11 @@ import { InstagramLookupLink } from '@/components/instagram-lookup-link';
 import { LoginModal } from '@/components/login-modal';
 import { PreflightPendingStatus } from '@/components/preflight-pending-status';
 import { PrecheckoutImmersive } from '@/components/precheckout-immersive';
+import {
+    resolveActivePrecheckoutSurface,
+    resolvePrecheckoutAvailabilitySurface,
+    type PrecheckoutSurfaceState,
+} from '@/lib/services/precheckout/blite-page-flow';
 
 const PLAN_NAMES: Readonly<Record<PlanId, string>> = {
     basic: 'Basic',
@@ -112,7 +117,10 @@ const DISCLOSURE_ACCEPTED = true;
     const [autoCheckoutPreflightId, setAutoCheckoutPreflightId] = useState<string | null>(null);
     const [autoCheckoutPlan, setAutoCheckoutPlan] = useState<PlanId | null>(null);
     const [autoCheckoutUiPending, setAutoCheckoutUiPending] = useState(false);
-    const [precheckoutSurface, setPrecheckoutSurface] = useState<'awaiting' | 'preview' | 'legacy'>('awaiting');
+    const [precheckoutSurface, setPrecheckoutSurface] = useState<PrecheckoutSurfaceState>({
+        preflightId: null,
+        surface: 'awaiting',
+    });
     const querySelectedPlan = useHydrationSafePlanQuery();
     const queryCheckoutPlan = useHydrationSafeCheckoutPlanQuery();
     const router = useRouter();
@@ -146,6 +154,10 @@ const DISCLOSURE_ACCEPTED = true;
         readyPreflight,
         stalePricingPreflightId,
     } = resolveEarlybirdPricingBoundary(preflight);
+    const activePrecheckoutSurface = resolveActivePrecheckoutSurface(
+        precheckoutSurface,
+        readyPreflight?.preflightId,
+    );
     const exclusionDecided = exclusionState === 'excluded' || exclusionState === 'skipped';
     // Query-plan selection is a hydration-safe rendering fallback, not a state
     // transition. It therefore cannot race the preflight resume effect.
@@ -234,6 +246,7 @@ const DISCLOSURE_ACCEPTED = true;
             || !exclusionDecided
             || !analyticsEligible
             || autoCheckoutUiPending
+            || activePrecheckoutSurface !== 'legacy'
         ) return;
         for (const plan of readyPreflight.plans) {
             if (
@@ -256,7 +269,13 @@ const DISCLOSURE_ACCEPTED = true;
                 properties => trackEvent(EVENTS.PLAN_VIEWED, properties)
             );
         }
-    }, [analyticsEligible, autoCheckoutUiPending, exclusionDecided, readyPreflight]);
+    }, [
+        activePrecheckoutSurface,
+        analyticsEligible,
+        autoCheckoutUiPending,
+        exclusionDecided,
+        readyPreflight,
+    ]);
 
     useEffect(() => {
         if (authLoading || initializedRef.current || typeof window === 'undefined') return;
@@ -388,18 +407,34 @@ const DISCLOSURE_ACCEPTED = true;
     const planSectionRef = useRef<HTMLElement>(null);
     const planHeadingRef = useRef<HTMLHeadingElement>(null);
     useEffect(() => {
-        setPrecheckoutSurface('awaiting');
+        setPrecheckoutSurface({
+            preflightId: readyPreflight?.preflightId ?? null,
+            surface: 'awaiting',
+        });
     }, [readyPreflight?.preflightId]);
     const handlePrecheckoutAvailability = useCallback((available: boolean) => {
-        setPrecheckoutSurface(available ? 'preview' : 'legacy');
-    }, []);
+        // The immersive flow is the only authority that may release the plan gate. A missing
+        // B-lite result can reveal the preview card only when it is valid; it never bypasses
+        // the four-stage fallback by opening the legacy surface from this status callback.
+        const preflightId = readyPreflight?.preflightId;
+        if (!preflightId) return;
+        setPrecheckoutSurface(current => ({
+            preflightId,
+            surface: resolvePrecheckoutAvailabilitySurface(
+                current.preflightId === preflightId ? current.surface : 'awaiting',
+                available,
+            ),
+        }));
+    }, [readyPreflight?.preflightId]);
     const handleGoToPlans = useCallback(() => {
-        setPrecheckoutSurface('legacy');
+        const preflightId = readyPreflight?.preflightId;
+        if (!preflightId) return;
+        setPrecheckoutSurface({ preflightId, surface: 'legacy' });
         requestAnimationFrame(() => {
         planSectionRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' });
         planHeadingRef.current?.focus();
         });
-    }, []);
+    }, [readyPreflight?.preflightId]);
 
     const handleCheckoutStatusNavigation = () => {
         if (!activeCheckoutStatusCta || activeCheckoutStatusCta.navigating) return;
@@ -691,6 +726,7 @@ const DISCLOSURE_ACCEPTED = true;
             /* ignore */
         }
         reset();
+        setPrecheckoutSurface({ preflightId: null, surface: 'awaiting' });
         setInstagramId('');
         setGirlfriendInstagramId('');
         setSelectedPlan(null);
@@ -922,7 +958,7 @@ const DISCLOSURE_ACCEPTED = true;
 
                         {exclusionDecided && readyPreflight && (
                             <>
-                                {precheckoutSurface !== 'awaiting' && (
+                                {activePrecheckoutSurface !== 'awaiting' && (
                                 <CaseCard bracket="var(--color-blood)" className="mt-7 overflow-hidden">
                                     <div className="flex items-start gap-4 p-5" data-amp-block>
                                         <div className="relative h-16 w-16 shrink-0 overflow-hidden rounded-full border border-line-2 bg-panel">
@@ -975,7 +1011,7 @@ const DISCLOSURE_ACCEPTED = true;
                                 </CaseCard>
                                 )}
 
-                                {!autoCheckoutTransitionVisible && precheckoutSurface !== 'legacy' && (
+                                {!autoCheckoutTransitionVisible && activePrecheckoutSurface !== 'legacy' && (
                                     <PrecheckoutImmersive
                                         key={`${readyPreflight.preflightId}:${claimToken ?? ''}`}
                                         preflightId={readyPreflight.preflightId}
@@ -986,7 +1022,7 @@ const DISCLOSURE_ACCEPTED = true;
                                     />
                                 )}
 
-                                {precheckoutSurface === 'legacy' && <section
+                                {activePrecheckoutSurface === 'legacy' && <section
                                     id="plan-selection"
                                     ref={planSectionRef}
                                     className="mt-9 scroll-mt-20"

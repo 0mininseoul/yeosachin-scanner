@@ -291,9 +291,10 @@ export function PrecheckoutImmersive({
                 // Ignore it atomically so pending/failed/complete cannot revoke the fallback.
                 if (flowRef.current.pathLatch === 'fallback') return;
                 if (status.state === 'unavailable') {
-                    if (fallbackTimer) clearTimeout(fallbackTimer);
-                    emitPrecheckoutEvent(PRECHECKOUT_EVENTS.PLAN_GATE_REACHED);
-                    onAvailabilityChange?.(false);
+                    // 204 is a terminal no-preview outcome (feature-off, non-cohort, or a
+                    // missing durable record), never permission to reveal the legacy plan
+                    // gate. It must use the same four-stage fallback as an explicit failure.
+                    transition({ type: 'BLITE_FAILED', atMs: Date.now() }, 'terminal_before_48');
                     return;
                 }
                 if (status.state === 'transient') {
@@ -306,8 +307,7 @@ export function PrecheckoutImmersive({
 
                 if (status.state === 'pending') {
                     if (!acceptAuthoritativeSubmission(status.submittedAt)) {
-                        emitPrecheckoutEvent(PRECHECKOUT_EVENTS.PLAN_GATE_REACHED);
-                        onAvailabilityChange?.(false);
+                        transition({ type: 'BLITE_FAILED', atMs: Date.now() }, 'terminal_before_48');
                         return;
                     }
                     const fallbackAtMs = Math.min(
@@ -322,8 +322,7 @@ export function PrecheckoutImmersive({
                 }
 
                 if (!acceptAuthoritativeSubmission(status.submittedAt)) {
-                    emitPrecheckoutEvent(PRECHECKOUT_EVENTS.PLAN_GATE_REACHED);
-                    onAvailabilityChange?.(false);
+                    transition({ type: 'BLITE_FAILED', atMs: Date.now() }, 'terminal_before_48');
                     return;
                 }
 
@@ -365,7 +364,7 @@ export function PrecheckoutImmersive({
         }
     }, [dto, emitPrecheckoutEvent, screen]);
 
-    const finishDemo = useCallback(() => {
+    const completeDemo = useCallback(() => {
         const current = flowRef.current;
         const demoMode: PrecheckoutDemoMode = current.pathLatch === 'fallback' ? 'fallback' : 'success';
         emitPrecheckoutEvent(PRECHECKOUT_EVENTS.DEMO_COMPLETED, {
@@ -373,6 +372,16 @@ export function PrecheckoutImmersive({
             duration_ms: boundedDemoDurationMs(current.demoStartedAtMs, Date.now()),
         });
         transition({ type: 'DEMO_COMPLETE' });
+    }, [emitPrecheckoutEvent, transition]);
+
+    const revealPlans = useCallback(() => {
+        const current = flowRef.current;
+        if (
+            current.view !== 'demo_reveal'
+            || (current.demoStatus !== 'complete' && current.demoStatus !== 'error')
+        ) return;
+        const demoMode: PrecheckoutDemoMode = current.pathLatch === 'fallback' ? 'fallback' : 'success';
+        transition({ type: 'PLAN_CTA' });
         emitPrecheckoutEvent(PRECHECKOUT_EVENTS.PLAN_GATE_REACHED, { demo_mode: demoMode });
         setDismissed(true);
         onGoToPlans();
@@ -387,10 +396,7 @@ export function PrecheckoutImmersive({
         });
         transition({ type: 'DEMO_ERROR' });
         onDemoError?.();
-        emitPrecheckoutEvent(PRECHECKOUT_EVENTS.PLAN_GATE_REACHED, { demo_mode: demoMode });
-        setDismissed(true);
-        onGoToPlans();
-    }, [emitPrecheckoutEvent, onDemoError, onGoToPlans, transition]);
+    }, [emitPrecheckoutEvent, onDemoError, transition]);
 
     if (dismissed || flow.view === 'legacy' || flow.view === 'fallback_legacy') return null;
 
@@ -399,14 +405,25 @@ export function PrecheckoutImmersive({
             <PrecheckoutDemo
                 mode="fallback"
                 startedAtMs={flow.demoStartedAtMs}
-                onComplete={finishDemo}
+                onComplete={completeDemo}
                 onError={failDemoOpen}
             />
         );
     }
 
     if (flow.view === 'success_demo' && flow.demoStartedAtMs !== null) {
-        return <DemoScreen startedAtMs={flow.demoStartedAtMs} onDemoError={failDemoOpen} onGoToPlans={finishDemo} />;
+        return <DemoScreen
+            startedAtMs={flow.demoStartedAtMs}
+            onDemoComplete={completeDemo}
+            onDemoError={failDemoOpen}
+        />;
+    }
+
+    if (flow.view === 'demo_reveal') {
+        return <DemoRevealScreen
+            demoStatus={flow.demoStatus === 'error' ? 'error' : 'complete'}
+            onContinue={revealPlans}
+        />;
     }
 
     if (flow.view !== 'blite_ready' || !dto || screen === null) return null;
@@ -425,9 +442,7 @@ export function PrecheckoutImmersive({
                     emitPrecheckoutEvent(PRECHECKOUT_EVENTS.BLITE_GENDER_CONFIRMATION_COMPLETED, {
                         gender_confirmation_outcome: 'rejected',
                     });
-                    emitPrecheckoutEvent(PRECHECKOUT_EVENTS.PLAN_GATE_REACHED);
-                    setDismissed(true);
-                    onGoToPlans();
+                    transition({ type: 'SUCCESS_CTA', atMs: Date.now() });
                 }}
             />
         );
@@ -571,36 +586,60 @@ function BliteResultScreen({
 
 function DemoScreen({
     startedAtMs,
+    onDemoComplete,
     onDemoError,
-    onGoToPlans,
 }: {
     startedAtMs: number;
+    onDemoComplete: () => void;
     onDemoError?: () => void;
-    onGoToPlans: () => void;
+}) {
+    return (
+        <PrecheckoutDemo
+            mode="success"
+            startedAtMs={startedAtMs}
+            onComplete={onDemoComplete}
+            onError={() => { onDemoError?.(); }}
+        />
+    );
+}
+
+function DemoRevealScreen({
+    demoStatus,
+    onContinue,
+}: {
+    demoStatus: 'complete' | 'error';
+    onContinue: () => void;
 }) {
     const [verdictIdx] = useState(() => Math.floor(Math.random() * VERDICTS.length));
     const verdict = VERDICTS[verdictIdx];
 
     return (
-        <PrecheckoutDemo
-            mode="success"
-            startedAtMs={startedAtMs}
-            onComplete={onGoToPlans}
-            onError={() => { onDemoError?.(); onGoToPlans(); }}
-        >
-            {/* Not-yet-revealed block is genuinely inert (visibility+pointer-events, and
-                display:none inside the mobile fullscreen layer via CSS) — not just transparent. */}
-            <div className="precheckout-reveal mt-5">
-                <div className="border-l-2 border-blood pl-3.5">
-                    <h3 className="text-[16px] font-extrabold leading-snug text-fg">
-                        {verdict.headline[0]}
-                        <br />
-                        {verdict.headline[1]}
-                    </h3>
-                    <p className="mt-2.5 text-[12.5px] leading-[1.8] text-fg-dim">{verdict.body}</p>
-                </div>
-
+        <CaseCard data-precheckout-demo-reveal className="mt-7 overflow-hidden p-6">
+            <div className="precheckout-reveal is-visible">
+                {demoStatus === 'complete' ? (
+                    <>
+                        <Eyebrow>4단계 관계 판독 완료</Eyebrow>
+                        <div className="mt-4 border-l-2 border-blood pl-3.5">
+                            <h3 className="text-[16px] font-extrabold leading-snug text-fg">
+                                {verdict.headline[0]}
+                                <br />
+                                {verdict.headline[1]}
+                            </h3>
+                            <p className="mt-2.5 text-[12.5px] leading-[1.8] text-fg-dim">{verdict.body}</p>
+                        </div>
+                    </>
+                ) : (
+                    <>
+                        <Eyebrow>미리보기를 계속할 수 없어요</Eyebrow>
+                        <p className="mt-4 text-[13px] leading-[1.8] text-fg-dim">
+                            요금제를 확인하고 전체 판독을 계속할 수 있어요.
+                        </p>
+                    </>
+                )}
+                <PrimaryButton onClick={onContinue} className="mt-6">
+                    요금제 확인하기
+                </PrimaryButton>
             </div>
-        </PrecheckoutDemo>
+        </CaseCard>
     );
 }
