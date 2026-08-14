@@ -2,7 +2,7 @@ import { createHash } from 'node:crypto';
 import type { AccountContext, AppearanceGrade } from '@/lib/domain/analysis/risk-policy';
 import type { FeatureAnalysisResult } from '@/lib/services/ai/v2-staged-analysis';
 import type { ReplayAccountAiDetail } from './replay/replay-runner';
-import type { InstagramProfile } from '@/lib/types/instagram';
+import type { InstagramPost, InstagramProfile } from '@/lib/types/instagram';
 import {
     calculateV2FinalScores,
     calculateV2PreliminaryScores,
@@ -63,6 +63,48 @@ export interface ConciergePrivateAccountRow {
     name_female_score: null;
     name_is_name: null;
     name_confidence: null;
+}
+
+export type ConciergeTargetPostMentionEvidence = Readonly<Pick<
+    InstagramPost,
+    'taggedUsers' | 'mentionedUsers'
+>>;
+
+function parseTargetPostMentionEvidence(value: unknown): ConciergeTargetPostMentionEvidence[] | null {
+    if (!Array.isArray(value)) return null;
+    if (!value.every(item => {
+        if (!item || typeof item !== 'object' || Array.isArray(item)) return false;
+        const row = item as { id?: unknown; taggedUsers?: unknown; mentionedUsers?: unknown };
+        return typeof row.id === 'string'
+            && Array.isArray(row.taggedUsers)
+            && row.taggedUsers.every(username => typeof username === 'string')
+            && Array.isArray(row.mentionedUsers)
+            && row.mentionedUsers.every(username => typeof username === 'string');
+    })) return null;
+    return value.map(item => {
+        const row = item as { taggedUsers: string[]; mentionedUsers: string[] };
+        return {
+            taggedUsers: [...row.taggedUsers],
+            mentionedUsers: [...row.mentionedUsers],
+        };
+    });
+}
+
+/** Reads only exact target-post mention fields from the source request checkpoint. */
+export function targetPostMentionEvidenceFromStepData(
+    stepData: unknown,
+): readonly ConciergeTargetPostMentionEvidence[] {
+    if (!stepData || typeof stepData !== 'object' || Array.isArray(stepData)) {
+        throw new Error('CONCIERGE_TARGET_POSTS_UNAVAILABLE');
+    }
+    const root = stepData as {
+        targetPosts?: unknown;
+        targetProfileCheckpoint?: { targetPosts?: unknown };
+    };
+    const targetPosts = parseTargetPostMentionEvidence(root.targetPosts)
+        ?? parseTargetPostMentionEvidence(root.targetProfileCheckpoint?.targetPosts);
+    if (!targetPosts) throw new Error('CONCIERGE_TARGET_POSTS_UNAVAILABLE');
+    return Object.freeze(targetPosts.map(post => Object.freeze(post)));
 }
 
 function normalizedUsername(value: string): string {
@@ -206,6 +248,7 @@ export function buildCanonicalConciergeResult(input: {
     details: readonly ReplayAccountAiDetail[];
     orderedMutualUsernames: readonly string[];
     targetInteractions: readonly RawTargetInteractionEvidence[];
+    targetPosts: readonly ConciergeTargetPostMentionEvidence[];
     privateProfiles: readonly InstagramProfile[];
 }): {
     femaleRows: readonly ConciergeLegacyResultRow[];
@@ -247,7 +290,7 @@ export function buildCanonicalConciergeResult(input: {
         const mentions = hasCandidateTargetMention({
             targetUsername: input.targetUsername,
             candidateUsername: username,
-            targetPosts: [],
+            targetPosts: input.targetPosts,
             candidatePosts: profile.latestPosts ?? [],
         });
         return {

@@ -9,6 +9,10 @@ const correctionScript = readFileSync(
     new URL('../../../scripts/correct-concierge-basic-result.ts', import.meta.url),
     'utf8',
 );
+const sourceAccessorMigration = readFileSync(
+    new URL('../../../supabase/migrations/20260814220000_add_concierge_source_accessor.sql', import.meta.url),
+    'utf8',
+);
 
 describe('legacy concierge result overview persistence contract', () => {
     it('adds an additive bounded overview column without changing the narrative field', () => {
@@ -43,9 +47,19 @@ describe('legacy concierge result overview persistence contract', () => {
     });
 
     it('binds the correction source through the order-scoped replay lineage', () => {
-        expect(correctionScript).toContain("from('earlybird_v211_concierge_replays')");
-        expect(correctionScript).toContain("select('original_failed_request_id')");
-        expect(correctionScript).toContain("eq('order_id', order.id)");
+        expect(correctionScript).toContain('read_earlybird_v211_concierge_result_source');
         expect(correctionScript).toContain('selectConciergeSourceRequest');
+        expect(sourceAccessorMigration).toContain(
+            'CREATE FUNCTION public.read_earlybird_v211_concierge_result_source(',
+        );
+        expect(sourceAccessorMigration).toContain('SECURITY DEFINER');
+        expect(sourceAccessorMigration).toContain("SET search_path = ''");
+        expect(sourceAccessorMigration).toMatch(
+            /REVOKE ALL ON FUNCTION public\.read_earlybird_v211_concierge_result_source\(UUID\)[\s\S]*?FROM PUBLIC, anon, authenticated, service_role;/,
+        );
+        expect(sourceAccessorMigration).toMatch(
+            /GRANT EXECUTE ON FUNCTION public\.read_earlybird_v211_concierge_result_source\(UUID\)[\s\S]*?TO service_role;/,
+        );
+        expect(sourceAccessorMigration).not.toMatch(/GRANT .* ON TABLE public\.earlybird_v211_concierge_replays/);
     });
 });

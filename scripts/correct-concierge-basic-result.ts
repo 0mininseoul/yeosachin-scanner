@@ -15,6 +15,7 @@ import { runAnalysisV2AiReplay, type ReplayAccountAiDetail } from '@/lib/service
 import {
     buildCanonicalConciergeResult,
     deriveConciergePrivacyPartition,
+    targetPostMentionEvidenceFromStepData,
     validateCanonicalConciergeCorrection,
     type ConciergeRelationshipEvidence,
 } from '@/lib/services/analysis/concierge-basic-correction';
@@ -302,6 +303,14 @@ BEGIN
     RAISE EXCEPTION 'CONCIERGE_ATOMIC_REQUEST_SCOPE_CONFLICT';
   END IF;
 END $guard$;
+DO $completeness_guard$
+BEGIN
+  IF COALESCE((
+      (${lineageSql})->'relationship'->>'completenessProven'
+    )::boolean, FALSE) IS NOT TRUE THEN
+    RAISE EXCEPTION 'CONCIERGE_RELATIONSHIP_SNAPSHOT_INCOMPLETE';
+  END IF;
+END $completeness_guard$;
 DELETE FROM public.analysis_results WHERE request_id = ${requestId};
 INSERT INTO public.analysis_results (
   request_id, rank, suspect_instagram_id, suspect_profile_image, suspect_full_name, bio,
@@ -371,26 +380,28 @@ async function main(): Promise<void> {
     }
     const { data: requests, error: requestError } = await supabaseAdmin
         .from('analysis_requests')
-        .select('id,user_id,target_instagram_id,status,pipeline_version')
+        .select('id,user_id,target_instagram_id,status,pipeline_version,step_data')
         .eq('user_id', order.user_id);
     if (requestError || !requests) throw new Error('CONCIERGE_SAMPLE_REQUEST_LOOKUP_FAILED');
     const request = requests.find(row => row.id === order.result_request_id);
-    const { data: lineageRows, error: lineageError } = await supabaseAdmin
-        .from('earlybird_v211_concierge_replays')
-        .select('original_failed_request_id')
-        .eq('order_id', order.id);
-    if (lineageError || !lineageRows || lineageRows.length !== 1
-        || typeof lineageRows[0]?.original_failed_request_id !== 'string') {
+    const { data: sourceLineagePayload, error: lineageError } = await supabaseAdmin.rpc(
+        'read_earlybird_v211_concierge_result_source',
+        { p_order_id: order.id },
+    );
+    const sourceRequestId = z.object({ sourceRequestId: z.string().uuid() })
+        .safeParse(sourceLineagePayload).data?.sourceRequestId;
+    if (lineageError || !sourceRequestId) {
         throw new Error('CONCIERGE_SAMPLE_REQUEST_SCOPE_CONFLICT');
     }
     const sourceRequest = selectConciergeSourceRequest(requests, {
-        sourceRequestId: lineageRows[0].original_failed_request_id,
+        sourceRequestId,
         userId: order.user_id,
         targetInstagramId: order.target_instagram_id,
     });
     if (!request || request.status !== 'completed' || request.pipeline_version !== 'v1') {
         throw new Error('CONCIERGE_SAMPLE_REQUEST_SCOPE_CONFLICT');
     }
+    const targetPosts = targetPostMentionEvidenceFromStepData(sourceRequest.step_data);
 
     const targetEvidence = await loadTargetEvidence(sourceRequest.id);
     const followers = await collectRelationshipSide(order.target_instagram_id, 'followers');
@@ -481,6 +492,7 @@ async function main(): Promise<void> {
         details: [...details.values()],
         orderedMutualUsernames,
         targetInteractions,
+        targetPosts,
         privateProfiles: partition.privateProfiles,
     });
     validateCanonicalConciergeCorrection({
@@ -503,6 +515,11 @@ async function main(): Promise<void> {
     }
     const beforeRows = await supabaseAdmin.from('analysis_results').select('rank').eq('request_id', order.result_request_id);
     const beforePrivate = await supabaseAdmin.from('private_accounts').select('instagram_id').eq('request_id', order.result_request_id);
+    const completenessProven = followers.rows.length === order.target_followers_count
+        && following.rows.length === order.target_following_count;
+    if (!completenessProven) {
+        throw new Error('CONCIERGE_RELATIONSHIP_SNAPSHOT_INCOMPLETE');
+    }
     const lineage = {
         schema: 'concierge-exact-mutual-v1',
         sourceFingerprint,
@@ -518,8 +535,7 @@ async function main(): Promise<void> {
                 duplicates: following.duplicateCount, runIds: following.lineage.runIds,
             },
             exactIntersection: exactMutualCount,
-            completenessProven: followers.rows.length === order.target_followers_count
-                && following.rows.length === order.target_following_count,
+            completenessProven,
         },
         hydration: {
             exactMutual: exactMutualCount, hydrated: partition.profiles.length,

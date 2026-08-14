@@ -4,6 +4,7 @@ export type ConciergeSourceRequest = {
     target_instagram_id: string;
     status: string;
     pipeline_version: string | null;
+    step_data?: unknown;
 };
 
 export function selectConciergeSourceRequest(

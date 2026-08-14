@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import {
     buildCanonicalConciergeResult,
     deriveConciergePrivacyPartition,
+    targetPostMentionEvidenceFromStepData,
     validateCanonicalConciergeCorrection,
 } from './concierge-basic-correction';
 import type { FeatureAnalysisResult } from '@/lib/services/ai/v2-staged-analysis';
@@ -79,6 +80,7 @@ describe('concierge basic correction', () => {
             )),
             orderedMutualUsernames: profiles.map(account => account.username),
             targetInteractions: [],
+            targetPosts: [],
             privateProfiles: [],
         });
 
@@ -98,6 +100,40 @@ describe('concierge basic correction', () => {
         expect(result.femaleRows.some(row => row.risk_grade === 'normal')).toBe(true);
         expect(result.femaleRows.some(row => row.risk_grade === 'caution')).toBe(true);
         expect(result.femaleRows.some(row => row.risk_grade === 'high_risk')).toBe(true);
+    });
+
+    it('preserves target-to-candidate mention signals from exact target post evidence', () => {
+        const profiles = [profile('female.1', false)];
+        const detail = femaleDetail(
+            1,
+            'female.1',
+            '공개 프로필과 최근 피드의 특징을 중심으로 정리한 계정입니다.',
+            1,
+        );
+        const baseInput = {
+            targetUsername: 'target',
+            profilesByOrdinal: new Map([[1, profiles[0]!]]),
+            details: [detail],
+            orderedMutualUsernames: ['female.1'],
+            targetInteractions: [],
+            privateProfiles: [],
+        };
+        const withoutMention = buildCanonicalConciergeResult({ ...baseInput, targetPosts: [] });
+        const withMention = buildCanonicalConciergeResult({
+            ...baseInput,
+            targetPosts: [{ taggedUsers: [], mentionedUsers: ['female.1'] }],
+        });
+        expect(withMention.femaleRows[0]!.risk_score)
+            .toBeGreaterThan(withoutMention.femaleRows[0]!.risk_score);
+    });
+
+    it('fails closed when retained target posts lack mention evidence', () => {
+        expect(targetPostMentionEvidenceFromStepData({
+            targetPosts: [{ id: 'post-1', taggedUsers: ['female.1'], mentionedUsers: [] }],
+        })).toEqual([{ taggedUsers: ['female.1'], mentionedUsers: [] }]);
+        expect(() => targetPostMentionEvidenceFromStepData({
+            targetPosts: [{ id: 'post-1' }],
+        })).toThrow('CONCIERGE_TARGET_POSTS_UNAVAILABLE');
     });
 
     it('derives privacy from profile and both relationship sides instead of defaulting public', () => {

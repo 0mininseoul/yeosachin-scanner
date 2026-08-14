@@ -129,6 +129,7 @@ describe('concierge publication persistence contract', () => {
             lineage: {
                 schema: 'concierge-exact-mutual-v1',
                 sourceFingerprint: 'a'.repeat(64),
+                relationship: { completenessProven: true },
                 hydration: { exactMutual: 150, hydrated: 149, public: 148, private: 1, unresolved: 1 },
             },
         }));
@@ -166,5 +167,31 @@ describe('concierge publication persistence contract', () => {
             one_line_overview: '공개 프로필과 최근 피드의 특징을 중심으로 정리한 계정입니다.',
             risk_grade: 'caution',
         }]);
+    });
+
+    it('rejects a publication when the relationship snapshot is incomplete', async () => {
+        await db.query(
+            `INSERT INTO public.analysis_requests (
+                id, status, pipeline_version, progress, progress_step,
+                mutual_follows, step_data, current_step
+            ) VALUES ($1, 'completed', 'v1', 100, '완료', 149, '{}'::jsonb, 'completed')`,
+            [REQUEST_ID],
+        );
+        await db.query(
+            `INSERT INTO public.earlybird_orders (
+                id, result_request_id, status, plan_id, paid_at
+            ) VALUES ($1, $2, 'completed', 'basic', '2026-08-12T09:07:30.000Z')`,
+            [ORDER_ID, REQUEST_ID],
+        );
+
+        await expect(db.exec(buildAtomicPublicationSql({
+            orderId: ORDER_ID,
+            requestId: REQUEST_ID,
+            femaleRows: [],
+            privateRows: [],
+            counts: { male: 0, female: 0, unknown: 0 },
+            mutualFollows: 150,
+            lineage: { relationship: { completenessProven: false } },
+        }))).rejects.toThrow('CONCIERGE_RELATIONSHIP_SNAPSHOT_INCOMPLETE');
     });
 });
