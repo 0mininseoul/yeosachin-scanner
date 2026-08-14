@@ -120,4 +120,15 @@ describe('legacy concierge result overview persistence contract', () => {
         expect(bootstrapMigration).toContain("p_publication_payload->'unavailablePublicUsernames'");
         expect(bootstrapMigration).toContain('CONCIERGE_BOOTSTRAP_PROFILE_UNAVAILABLE_PROVENANCE_INVALID');
     });
+
+    it('reconciles the private artifact to the current exact-mutual intersection', () => {
+        expect(correctionScript).toContain("const UNRESOLVED_PRIVATE_USERNAME = 'sunghueee';");
+        expect(correctionScript).toContain(
+            'const stalePrivateRows = rawPrivateRows.filter(row => !orderedMutualUsernames.includes(normalizedUsername(row.instagram_id)))',
+        );
+        expect(correctionScript).toContain(
+            'const privateRows = rawPrivateRows.filter(row => orderedMutualUsernames.includes(normalizedUsername(row.instagram_id))',
+        );
+        expect(correctionScript).not.toContain("const UNRESOLVED_PRIVATE_USERNAME = 'yan_e_0089';");
+    });
 });

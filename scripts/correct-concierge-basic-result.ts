@@ -71,7 +71,7 @@ const CANONICAL_WORKDIR = '/private/tmp/fresh-admission-v3-supabase.yfdl1o';
 const REVIEW_ARTIFACT_DIR = '/Users/youngminpark/orca/workspaces/ai-baram-detector/concierge-batch-delivery-20260814/output/manual-gender-review';
 const ALL_PUBLIC_CLASSIFICATIONS_SHA256 = '47a657f1c534680043e24ca44f9e2eaa16854b55cd34ab65e3bb2a8dee7fa8cb';
 const UNKNOWN_REVIEW_SHA256 = '1c66ac59cb97a18441c613178a77202f6a9501d22d5de85e561e0208a568e367';
-const UNRESOLVED_PRIVATE_USERNAME = 'yan_e_0089';
+const UNRESOLVED_PRIVATE_USERNAME = 'sunghueee';
 const BASIC_SOURCE_LINEAGE = Object.freeze({
     selectedPlanId: 'basic',
     policyVersions: {
@@ -805,9 +805,15 @@ async function main(): Promise<void> {
     if (privateError || !rawPrivateRows || rawPrivateRows.length !== 96) {
         throw new Error('CONCIERGE_PRIVATE_PROFILE_ARTIFACT_MISSING');
     }
-    const excludedPrivateRows = rawPrivateRows.filter(row => normalizedUsername(row.instagram_id) === UNRESOLVED_PRIVATE_USERNAME);
-    const privateRows = rawPrivateRows.filter(row => normalizedUsername(row.instagram_id) !== UNRESOLVED_PRIVATE_USERNAME);
-    if (excludedPrivateRows.length !== 1 || privateRows.length !== 95) {
+    if (!orderedMutualUsernames.includes(UNRESOLVED_PRIVATE_USERNAME)) {
+        throw new Error('CONCIERGE_UNRESOLVED_RECONCILIATION_FAILED');
+    }
+    const stalePrivateRows = rawPrivateRows.filter(row => !orderedMutualUsernames.includes(normalizedUsername(row.instagram_id)));
+    const privateRows = rawPrivateRows.filter(row => orderedMutualUsernames.includes(normalizedUsername(row.instagram_id))
+        && normalizedUsername(row.instagram_id) !== UNRESOLVED_PRIVATE_USERNAME);
+    if (stalePrivateRows.length !== 1
+        || stalePrivateRows.some(row => normalizedUsername(row.instagram_id) === UNRESOLVED_PRIVATE_USERNAME)
+        || privateRows.length !== 95) {
         throw new Error('CONCIERGE_PRIVATE_PROFILE_ARTIFACT_MISSING');
     }
     const privateProfiles: InstagramProfile[] = privateRows.map(row => ({
