@@ -22,6 +22,10 @@ const deadlineMigration = readFileSync(new URL(
     '../../../supabase/migrations/20260814150000_precheckout_blite_deadline_90.sql',
     import.meta.url,
 ), 'utf8');
+const claimedTargetHashMigration = readFileSync(new URL(
+    '../../../supabase/migrations/20260814160000_read_claimed_preflight_target_hash.sql',
+    import.meta.url,
+), 'utf8');
 
 const USER_ID = '10000000-0000-4000-8000-000000000001';
 const PREFLIGHT_A = '20000000-0000-4000-8000-000000000001';
@@ -39,6 +43,8 @@ const PREFLIGHT_PARALLEL = '20000000-0000-4000-8000-000000000012';
 const PREFLIGHT_DEADLINE = '20000000-0000-4000-8000-000000000013';
 const PREFLIGHT_NEW_CLOCK = '20000000-0000-4000-8000-000000000014';
 const PREFLIGHT_LEGACY_CLOCK = '20000000-0000-4000-8000-000000000015';
+const PREFLIGHT_HASH_DRIFT = '20000000-0000-4000-8000-000000000016';
+const DRIFTED_TARGET_HASH = 'b'.repeat(64);
 const TARGET_HASH = 'a'.repeat(64);
 const PROVIDER_REFERENCE = 'ApifyRun123456';
 const PROVIDER_OPERATION_KEY = 'target-profile-fallback';
@@ -297,6 +303,7 @@ async function createDb(): Promise<PGlite> {
         [PREFLIGHT_LEGACY_CLOCK],
     );
     await db.exec(deadlineMigration);
+    await db.exec(claimedTargetHashMigration);
     return db;
 }
 
@@ -353,6 +360,7 @@ async function finalizeSource(
         userId?: string | null;
         providerOperationKey?: string;
         providerRunReference?: string;
+        targetInputHash?: string;
         targetFollowersCount?: number;
         targetFollowingCount?: number;
     } = {},
@@ -371,7 +379,7 @@ async function finalizeSource(
             'basic','basic','{}'::jsonb,$8::jsonb,$9,$10,$11
         ) AS result`,
         [
-            preflightId, userId, CLAIM_TOKEN, TARGET_HASH, preflightId,
+            preflightId, userId, CLAIM_TOKEN, options.targetInputHash ?? TARGET_HASH, preflightId,
             options.providerOperationKey ?? PROVIDER_OPERATION_KEY,
             options.providerRunReference ?? PROVIDER_REFERENCE,
             options.payload ?? SOURCE_PAYLOAD, options.payloadHash ?? PAYLOAD_HASH, collectedAt, expiresAt,
@@ -425,6 +433,27 @@ afterEach(async () => {
 });
 
 describe('precheckout B-lite source and lease lifecycle', () => {
+    it('reproduces HMAC drift and reads the persisted target hash under the live claim fence', async () => {
+        const database = await createDb();
+        await seedProcessingPreflight(database, PREFLIGHT_HASH_DRIFT, { userId: null });
+        await database.query(
+            `UPDATE public.analysis_preflight_provider_runs
+             SET input_hash=$2 WHERE preflight_id=$1 AND operation_key=$3`,
+            [PREFLIGHT_HASH_DRIFT, DRIFTED_TARGET_HASH, PROVIDER_OPERATION_KEY],
+        );
+
+        await expect(finalizeSource(database, PREFLIGHT_HASH_DRIFT, {
+            userId: null,
+            targetInputHash: DRIFTED_TARGET_HASH,
+            targetFollowersCount: 476,
+            targetFollowingCount: 644,
+        })).rejects.toThrow('PRECHECKOUT_BLITE_PREFLIGHT_FENCE_LOST');
+        await expect(database.query<{ result: string | null }>(
+            `SELECT public.read_claimed_analysis_v2_preflight_target_hash_v1($1,$2) AS result`,
+            [PREFLIGHT_HASH_DRIFT, CLAIM_TOKEN],
+        )).resolves.toMatchObject({ rows: [{ result: TARGET_HASH }] });
+    }, 30_000);
+
     it('fails open a ready cohort with no source or cache instead of reporting a pending result forever', async () => {
         const database = await createDb();
         await seedProcessingPreflight(database, PREFLIGHT_A);

@@ -13,7 +13,8 @@ ready-preflight card and plans remain the rollback surface until a reviewed coho
    `20260813041712_precheckout_blite_single_collection.sql`,
    `20260814123000_precheckout_blite_missing_source_status_fail_open.sql`,
    `20260814140000_precheckout_blite_reload_schema_cache.sql`, and
-   `20260814150000_precheckout_blite_deadline_90.sql`. Run the approved
+   `20260814150000_precheckout_blite_deadline_90.sql`, plus
+   `20260814160000_read_claimed_preflight_target_hash.sql`. Run the approved
    dry-run there; never use `supabase db push --include-all` from a mixed or dirty worktree.
 3. Apply that approved migration before enabling any application cohort. If an apply command
    appears to hang, inspect remote migration history before stopping it and never retry blindly.
@@ -36,6 +37,7 @@ browser roles have no table/RPC grants, and these RPCs resolve with their expect
 `activate_precheckout_blite_cohort_v1`, `finalize_preflight_blite_source_v1`,
 `claim_precheckout_blite_v2`, `complete_precheckout_blite_v2`,
 `fail_precheckout_blite_v2`, `read_precheckout_blite_status_v1`,
+`read_claimed_analysis_v2_preflight_target_hash_v1`,
 `reserve_precheckout_blite_dispatch_v1`, `mark_precheckout_blite_dispatch_failed_v1`, and
 `mark_precheckout_blite_dispatch_enqueued_v1`. Exercise the approved
 schema fixture only in the isolated smoke environment; it must prove one source projection,
