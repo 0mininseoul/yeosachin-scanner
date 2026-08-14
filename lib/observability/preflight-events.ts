@@ -84,6 +84,9 @@ export function emitPreflightProcessObservation(
                     : observation.errorCode
                         ? { error_code: observation.errorCode }
                         : {}),
+                ...('failureReason' in observation && observation.failureReason
+                    ? { failure_reason: observation.failureReason }
+                    : {}),
                 disposition: observation.outcome,
             },
         });

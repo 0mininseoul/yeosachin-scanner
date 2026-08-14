@@ -37,6 +37,7 @@ export const ALLOWED_FIELD_NAMES = [
     'result_count',
     'error_name',
     'error_code',
+    'failure_reason',
     'disposition',
     'retryable',
     'estimated_cost_usd',
@@ -534,6 +535,8 @@ function sanitizeField(name: string, value: unknown): SanitizedValue | undefined
             return safeErrorName(value);
         case 'error_code':
             return safeErrorCode(value);
+        case 'failure_reason':
+            return safeExactRegistryValue(value, new Set(['provider_terminal_no_profile']));
         case 'retryable':
         case 'fallback':
             return typeof value === 'boolean' ? value : undefined;
