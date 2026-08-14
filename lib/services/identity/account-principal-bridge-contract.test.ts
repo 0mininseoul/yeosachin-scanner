@@ -8,12 +8,31 @@ const migrationName = readdirSync(migrationDirectory)
 const migration = migrationName
     ? readFileSync(resolve(migrationDirectory, migrationName), 'utf8')
     : '';
+const entitlementMigrationName = readdirSync(migrationDirectory)
+    .find(name => name.endsWith('_allow_active_paid_entitlement_revocation.sql'));
+const entitlementMigration = entitlementMigrationName
+    ? readFileSync(resolve(migrationDirectory, entitlementMigrationName), 'utf8')
+    : '';
 
 function source(relativePath: string): string {
     return readFileSync(resolve(process.cwd(), relativePath), 'utf8');
 }
 
 describe('account principal additive migration contract', () => {
+    it('makes is_paid_user reversible while retaining first-paid-at protection and ACLs', () => {
+        expect(entitlementMigrationName).toBeDefined();
+        expect(entitlementMigration).toMatch(
+            /CREATE OR REPLACE FUNCTION public\.enforce_account_paid_ever_monotonic\(\)[\s\S]*?SECURITY DEFINER[\s\S]*?SET search_path = ''/,
+        );
+        expect(entitlementMigration).not.toContain('ACCOUNT_PAID_EVER_REGRESSION');
+        expect(entitlementMigration).toContain('ACCOUNT_FIRST_PAID_AT_REGRESSION');
+        expect(entitlementMigration).toMatch(
+            /REVOKE ALL ON FUNCTION public\.enforce_account_paid_ever_monotonic\(\)[\s\S]*?FROM PUBLIC, anon, authenticated, service_role/,
+        );
+        expect(entitlementMigration).not.toMatch(/GRANT .* ON TABLE public\.users/);
+        expect(entitlementMigration).not.toMatch(/SECURITY DEFINER[\s\S]*?CREATE OR REPLACE FUNCTION public\.(?!enforce_account_paid_ever_monotonic)/);
+    });
+
     it('adds bounded classification and paid-ever state without performing the rename cutover', () => {
         expect(migrationName).toBeDefined();
         expect(migration).toMatch(/ALTER TABLE public\.users[\s\S]*ADD COLUMN account_class TEXT NOT NULL DEFAULT 'production'/);

@@ -6,6 +6,10 @@ const migration = readFileSync(new URL(
     '../../../supabase/migrations/20260810074911_add_account_principal_bridge.sql',
     import.meta.url,
 ), 'utf8');
+const entitlementMigration = readFileSync(new URL(
+    '../../../supabase/migrations/20260814130000_allow_active_paid_entitlement_revocation.sql',
+    import.meta.url,
+), 'utf8');
 
 const PGLITE_TEST_TIMEOUT_MS = 30_000;
 const databases: PGlite[] = [];
@@ -147,6 +151,7 @@ async function createDatabase(): Promise<PGlite> {
         $$;
     `);
     await db.exec(migration);
+    await db.exec(entitlementMigration);
     return db;
 }
 
@@ -636,7 +641,7 @@ describe('account-principal Phase A+B migration semantics', () => {
         }
     }, PGLITE_TEST_TIMEOUT_MS);
 
-    it('keeps paid evidence and classification audit immutable and preserves paid-ever monotonicity', async () => {
+    it('allows active entitlement revocation while preserving first-paid history monotonicity', async () => {
         const db = await createDatabase();
         await seedLedgerScenario(db);
         await activateAndReplay(db);
@@ -656,12 +661,27 @@ describe('account-principal Phase A+B migration semantics', () => {
              WHERE account_id = $1::UUID`,
             [EXTERNAL_ACCOUNT_ID],
         )).rejects.toThrow('ACCOUNT_CLASSIFICATION_AUDIT_IMMUTABLE');
-        await expect(db.query(
+        await expect(asService(db,
             `UPDATE public.users
              SET is_paid_user = FALSE
              WHERE id = $1::UUID`,
             [EXTERNAL_ACCOUNT_ID],
-        )).rejects.toThrow('ACCOUNT_PAID_EVER_REGRESSION');
+        )).resolves.toMatchObject({ affectedRows: 1 });
+        expect((await asService<{ is_paid_user: boolean }>(
+            db,
+            'SELECT is_paid_user FROM public.users WHERE id = $1::UUID',
+            [EXTERNAL_ACCOUNT_ID],
+        )).rows).toEqual([{ is_paid_user: false }]);
+        await expect(asService<{ recorded: boolean }>(
+            db,
+            `SELECT public.record_external_paid_ever($1::UUID, $2) AS recorded`,
+            [EXTERNAL_EARLY_ORDER_ID, 'event-external-early'],
+        )).resolves.toMatchObject({ rows: [{ recorded: true }] });
+        expect((await asService<{ is_paid_user: boolean }>(
+            db,
+            'SELECT is_paid_user FROM public.users WHERE id = $1::UUID',
+            [EXTERNAL_ACCOUNT_ID],
+        )).rows).toEqual([{ is_paid_user: true }]);
         await expect(db.query(
             `UPDATE public.users
              SET first_paid_at = '2026-08-05T00:00:00Z'::TIMESTAMP WITH TIME ZONE
@@ -956,6 +976,14 @@ describe('account-principal Phase A+B migration semantics', () => {
         }]);
         await expect(withRole(db, 'authenticated', () => db.query(
             'SELECT id, lifecycle FROM public.users',
+        ))).rejects.toThrow();
+        await expect(withRole(db, 'anon', () => db.query(
+            'UPDATE public.users SET is_paid_user = TRUE WHERE id = $1::UUID',
+            [EXTERNAL_ACCOUNT_ID],
+        ))).rejects.toThrow();
+        await expect(withRole(db, 'authenticated', () => db.query(
+            'UPDATE public.users SET is_paid_user = TRUE WHERE id = $1::UUID',
+            [EXTERNAL_ACCOUNT_ID],
         ))).rejects.toThrow();
     }, PGLITE_TEST_TIMEOUT_MS);
 
