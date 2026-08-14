@@ -1046,6 +1046,27 @@ describe('V2 staged AI services', () => {
         expect(prompt).toContain('분석 방법이나 자료의 한계를 직접 말하지 마세요');
     });
 
+    it('keeps the v2.11 individual-creator fallback inside the public-copy contract', async () => {
+        mocks.analyzeWithGemini.mockImplementationOnce(async (
+            _prompt: string,
+            _images: string[],
+            options: { schema: { parse(value: unknown): unknown } },
+        ) => options.schema.parse(featureResponse({
+            accountContext: 'individual_creator',
+            oneLineOverview: '공개 단서가 부족해 관계의 맥락을 단정하기 어렵습니다.',
+        })));
+
+        const result = await featureAnalysis(
+            featureInput(),
+            audit('featureAnalysis', featureInput(), AI_STAGE_POLICY_V211_VERSION),
+            { aiStagePolicyVersion: AI_STAGE_POLICY_V211_VERSION },
+        );
+
+        expect(result.features.oneLineOverview).toBe(
+            '창작과 일상 기록이 섞여 있고, 피드에 드러난 활동 흐름을 중심으로 읽어볼 만한 계정입니다.',
+        );
+    });
+
     it('keeps shipped v2.9 overview acceptance and legacy prompt bytes immutable', async () => {
         const input = featureInput();
         const shippedV29Copy = '판독관은 여행 사진이 정돈된 흐름을 보며 일정표까지 궁금해집니다.';

@@ -88,7 +88,7 @@ const FEATURE_OVERVIEW_FALLBACKS_V28 = Object.freeze({
 const FEATURE_OVERVIEW_FALLBACKS_V211 = Object.freeze({
     personal: '사진과 소개에 드러난 개인 기록의 결이 선명해서, 피드가 보여 준 장면부터 차분히 짚어볼 계정입니다.',
     individual_creator:
-        '창작과 일상 기록이 섞인 개인 계정입니다. 피드에 드러난 활동 흐름을 중심으로 읽어볼 만합니다.',
+        '창작과 일상 기록이 섞여 있고, 피드에 드러난 활동 흐름을 중심으로 읽어볼 만한 계정입니다.',
     official_group_or_brand:
         '공식 단체나 브랜드 맥락으로 분류됐습니다. 개인 계정보다 조직 성격을 먼저 볼 만합니다.',
     uncertain: '소개와 피드에 여러 결이 겹친 계정입니다. 보이는 장면을 중심으로 흐름을 정리해볼 만합니다.',
