@@ -14,6 +14,7 @@ import {
     PreflightImmutableError,
     PreflightLeaseBusyError,
     buildReadyPreflightSnapshot,
+    boundPrecheckoutBliteSourceExpiry,
     classifyPreflightError,
     createSupabasePreflightStore,
     preflightPolicyVersions,
@@ -118,6 +119,20 @@ describe('betatest preflight credit fence', () => {
 });
 
 describe('B-lite single-collection preflight', () => {
+    it('preserves the authoritative DB expiry through an exact 44-microsecond reproduction', () => {
+        expect(boundPrecheckoutBliteSourceExpiry(
+            '2030-07-13T12:00:00.000Z',
+            '2030-07-13T12:29:59.919044Z',
+        )).toBe('2030-07-13T12:29:59.919044Z');
+    });
+
+    it('clamps an expiry that is truly 44 microseconds later than the source bound', () => {
+        expect(boundPrecheckoutBliteSourceExpiry(
+            '2030-07-13T12:00:00.919Z',
+            '2030-07-13T12:30:00.919044Z',
+        )).toBe('2030-07-13T12:30:00.919Z');
+    });
+
     it('classifies source finalization persistence failures as retryable persistence', () => {
         expect(classifyPreflightError(
             new Error('PRECHECKOUT_BLITE_SOURCE_PERSISTENCE_ERROR (PGRST202)'),
@@ -351,10 +366,12 @@ describe('B-lite single-collection preflight', () => {
         const fallback = vi.fn(async () => collectedProfile);
         const projectBliteSource = vi.fn(projectPrecheckoutBliteSource);
         const order: string[] = [];
+        const authoritativeExpiresAt = `${new Date(Date.now() + 29 * 60_000)
+            .toISOString().slice(0, -1)}044Z`;
         const activateBliteCohort = vi.fn(async () => ({
             submittedAt: new Date(Date.now() - 1_000).toISOString(),
             deadlineAt: new Date(Date.now() + 59_000).toISOString(),
-            expiresAt: new Date(Date.now() + 29 * 60_000).toISOString(),
+            expiresAt: authoritativeExpiresAt,
         }));
         const finalizeReadyWithSource = vi.fn(async () => { order.push('finalize'); return true; });
         const enqueueBliteInference = vi.fn(async () => { order.push('enqueue'); return 'enqueued' as const; });
@@ -395,6 +412,7 @@ describe('B-lite single-collection preflight', () => {
         expect(fallback).not.toHaveBeenCalled();
         expect(projectBliteSource).toHaveBeenCalledWith(collectedProfile);
         expect(finalizeReadyWithSource).toHaveBeenCalledWith(expect.objectContaining({
+            expiresAt: authoritativeExpiresAt,
             source: expect.objectContaining({
                 posts: expect.arrayContaining([
                     expect.objectContaining({ likesCount: 10, commentsCount: 2 }),

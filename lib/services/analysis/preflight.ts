@@ -107,6 +107,46 @@ import {
 
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const ISO_TIMESTAMP_PATTERN = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})$/;
+const ISO_TIMESTAMP_PARTS_PATTERN = /^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2})(?:\.(\d+))?(Z|[+-]\d{2}:\d{2})$/;
+const BLITE_SOURCE_TTL_MICROSECONDS = BigInt(30 * 60 * 1_000_000);
+
+function timestampToMicroseconds(timestamp: string): bigint {
+    const match = timestamp.match(ISO_TIMESTAMP_PARTS_PATTERN);
+    if (!match || (match[2]?.length ?? 0) > 6) {
+        throw new Error('PRECHECKOUT_BLITE_SOURCE_PERSISTENCE_ERROR: invalid timestamp.');
+    }
+    const epochMilliseconds = Date.parse(`${match[1]}${match[3]}`);
+    if (!Number.isFinite(epochMilliseconds)) {
+        throw new Error('PRECHECKOUT_BLITE_SOURCE_PERSISTENCE_ERROR: invalid timestamp.');
+    }
+    const fraction = `${match[2] ?? ''}000000`.slice(0, 6);
+    return BigInt(epochMilliseconds) * BigInt(1_000) + BigInt(fraction);
+}
+
+function microsecondsToTimestamp(timestamp: bigint): string {
+    const epochMilliseconds = timestamp / BigInt(1_000);
+    const subMillisecond = timestamp % BigInt(1_000);
+    const iso = new Date(Number(epochMilliseconds)).toISOString();
+    const fraction = `${iso.slice(20, 23)}${subMillisecond.toString().padStart(3, '0')}`
+        .replace(/0+$/, '') || '000';
+    return `${iso.slice(0, 20)}${fraction}Z`;
+}
+
+/**
+ * Keeps the database's authoritative expiry string when it is the source TTL minimum.
+ * Comparisons retain PostgreSQL's microsecond precision so a later value cannot extend TTL.
+ */
+export function boundPrecheckoutBliteSourceExpiry(
+    collectedAt: string,
+    authoritativeExpiresAt: string,
+): string {
+    const collectedAtMicroseconds = timestampToMicroseconds(collectedAt);
+    const authoritativeMicroseconds = timestampToMicroseconds(authoritativeExpiresAt);
+    const upperBound = collectedAtMicroseconds + BLITE_SOURCE_TTL_MICROSECONDS;
+    return authoritativeMicroseconds <= upperBound
+        ? authoritativeExpiresAt
+        : microsecondsToTimestamp(upperBound);
+}
 
 export const PREFLIGHT_DATABASE_NAMES = Object.freeze({
     table: 'analysis_preflights',
@@ -2201,10 +2241,10 @@ export async function processPreflight(
                 throw new Error('PRECHECKOUT_BLITE_SOURCE_PERSISTENCE_ERROR: provider lineage is missing.');
             }
             const collectedAt = new Date().toISOString();
-            const expiresAt = new Date(Math.min(
-                Date.parse(bliteClock.expiresAt),
-                Date.parse(collectedAt) + 30 * 60 * 1_000,
-            )).toISOString();
+            const expiresAt = boundPrecheckoutBliteSourceExpiry(
+                collectedAt,
+                bliteClock.expiresAt,
+            );
             const source = (dependencies.projectBliteSource ?? projectPrecheckoutBliteSource)(profile);
             let finalized = false;
             try {
