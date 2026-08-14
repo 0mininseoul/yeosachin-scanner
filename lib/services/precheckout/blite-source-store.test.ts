@@ -69,6 +69,22 @@ describe('precheckout B-lite source store', () => {
         });
     });
 
+    it('preserves the immutable fence error instead of masking it as retryable persistence', async () => {
+        const database = {
+            rpc: vi.fn().mockResolvedValue({
+                data: null,
+                error: {
+                    code: 'P0001',
+                    message: 'PRECHECKOUT_BLITE_PREFLIGHT_FENCE_LOST',
+                },
+            }),
+        };
+        const store = createPrecheckoutBliteSourceStore(database);
+
+        await expect(store.activateCohort({ preflightId: PREFLIGHT, claimToken: CLAIM }))
+            .rejects.toMatchObject({ message: 'PRECHECKOUT_BLITE_PREFLIGHT_FENCE_LOST' });
+    });
+
     it('finalizes the ready snapshot and bounded source through the exact atomic RPC', async () => {
         const database = { rpc: vi.fn().mockResolvedValue({ data: true, error: null }) };
         const store = createPrecheckoutBliteSourceStore(database);
