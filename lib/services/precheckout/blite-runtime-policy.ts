@@ -1,11 +1,21 @@
 import 'server-only';
 import { createHash } from 'node:crypto';
+import {
+    BLITE_CHECKPOINT_DEADLINE_MS,
+    BLITE_FALLBACK_LATCH_MS,
+    BLITE_INFERENCE_DEADLINE_MS,
+    BLITE_PROVIDER_DEADLINE_MS,
+    BLITE_UX_DEADLINE_MS,
+} from './blite-deadline';
 
-export const BLITE_PROVIDER_DEADLINE_MS = 40_000;
-export const BLITE_CHECKPOINT_DEADLINE_MS = 43_000;
-export const BLITE_FALLBACK_LATCH_MS = 48_000;
-export const BLITE_INFERENCE_DEADLINE_MS = 56_000;
-export const BLITE_UX_DEADLINE_MS = 60_000;
+export {
+    BLITE_CHECKPOINT_DEADLINE_MS,
+    BLITE_FALLBACK_DEMO_DURATION_MS,
+    BLITE_FALLBACK_LATCH_MS,
+    BLITE_INFERENCE_DEADLINE_MS,
+    BLITE_PROVIDER_DEADLINE_MS,
+    BLITE_UX_DEADLINE_MS,
+} from './blite-deadline';
 
 const PREFLIGHT_ID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu;
 

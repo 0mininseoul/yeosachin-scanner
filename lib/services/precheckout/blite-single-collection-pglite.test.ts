@@ -18,6 +18,10 @@ const statusFailOpenMigration = readFileSync(new URL(
     `../../../supabase/migrations/${statusFailOpenMigrationName}`,
     import.meta.url,
 ), 'utf8');
+const deadlineMigration = readFileSync(new URL(
+    '../../../supabase/migrations/20260814150000_precheckout_blite_deadline_90.sql',
+    import.meta.url,
+), 'utf8');
 
 const USER_ID = '10000000-0000-4000-8000-000000000001';
 const PREFLIGHT_A = '20000000-0000-4000-8000-000000000001';
@@ -33,6 +37,8 @@ const PREFLIGHT_CASCADE = '20000000-0000-4000-8000-000000000010';
 const PREFLIGHT_FLAG_OFF_PURGE = '20000000-0000-4000-8000-000000000011';
 const PREFLIGHT_PARALLEL = '20000000-0000-4000-8000-000000000012';
 const PREFLIGHT_DEADLINE = '20000000-0000-4000-8000-000000000013';
+const PREFLIGHT_NEW_CLOCK = '20000000-0000-4000-8000-000000000014';
+const PREFLIGHT_LEGACY_CLOCK = '20000000-0000-4000-8000-000000000015';
 const TARGET_HASH = 'a'.repeat(64);
 const PROVIDER_REFERENCE = 'ApifyRun123456';
 const PROVIDER_OPERATION_KEY = 'target-profile-fallback';
@@ -283,6 +289,14 @@ async function createDb(): Promise<PGlite> {
     await db.exec(bootstrap);
     await db.exec(migration);
     await db.exec(statusFailOpenMigration);
+    await db.query(
+        `INSERT INTO public.analysis_preflights(
+            id,status,expires_at,created_at,precheckout_blite_cohort
+        ) VALUES ($1,'processing',clock_timestamp() + interval '10 minutes',
+            clock_timestamp() - interval '1 day',true)`,
+        [PREFLIGHT_LEGACY_CLOCK],
+    );
+    await db.exec(deadlineMigration);
     return db;
 }
 
@@ -303,7 +317,7 @@ async function seedProcessingPreflight(
     const userId = options.userId === undefined ? USER_ID : options.userId;
     const expiresAt = options.expiresAt ?? nowIso(20 * 60_000);
     const createdAt = options.createdAt ?? nowIso(-5_000);
-    const deadlineAt = new Date(new Date(createdAt).getTime() + 60_000).toISOString();
+    const deadlineAt = new Date(new Date(createdAt).getTime() + 90_000).toISOString();
     await database.query(
         `INSERT INTO public.analysis_preflights(
             id,user_id,status,expires_at,target_input_hash,lease_token,lease_expires_at,
@@ -631,10 +645,10 @@ describe('precheckout B-lite source and lease lifecycle', () => {
         )).resolves.toMatchObject({ rows: [{ sources: 0, caches: 0 }] });
     }, 30_000);
 
-    it('rejects a post-T+56 completion, terminalizes it as inference_timeout, and deletes source', async () => {
+    it('rejects a post-T+86 completion, terminalizes it as inference_timeout, and deletes source', async () => {
         const database = await createDb();
         await seedProcessingPreflight(database, PREFLIGHT_DEADLINE, {
-            createdAt: nowIso(-61_000),
+            createdAt: nowIso(-91_000),
         });
         await database.query(
             `UPDATE public.analysis_preflights
@@ -835,38 +849,43 @@ describe('precheckout B-lite source and lease lifecycle', () => {
         )).resolves.toMatchObject({ rows: [{ state: 'pending', sources: 1 }] });
     }, 30_000);
 
-    it('anchors cohort clocks to created_at and rejects queue-delay, refresh, retry, and caller-supplied resets', async () => {
+    it('anchors new cohort clocks to created_at and preserves legacy T+60 rows against resets', async () => {
         const database = await createDb();
         const origin = '2026-08-13T00:00:00.000Z';
-        await database.query(
-            `INSERT INTO public.analysis_preflights(
-                id,status,expires_at,created_at,precheckout_blite_cohort
-            ) VALUES ($1,'processing',clock_timestamp() + interval '10 minutes',$2,false)`,
-            [PREFLIGHT_ORIGIN, origin],
-        );
-        await database.query(
-            'UPDATE public.analysis_preflights SET precheckout_blite_cohort=true WHERE id=$1',
-            [PREFLIGHT_ORIGIN],
-        );
         await database.query(
             `UPDATE public.analysis_preflights
              SET status='processing', updated_at=clock_timestamp()
              WHERE id=$1`,
-            [PREFLIGHT_ORIGIN],
+            [PREFLIGHT_LEGACY_CLOCK],
         );
         await expect(database.query(
             `SELECT submitted_at = created_at AS submitted_from_origin,
                     deadline_at = created_at + interval '60 seconds' AS deadline_from_origin
              FROM public.analysis_preflights WHERE id=$1`,
-            [PREFLIGHT_ORIGIN],
+            [PREFLIGHT_LEGACY_CLOCK],
         )).resolves.toMatchObject({ rows: [{ submitted_from_origin: true, deadline_from_origin: true }] });
 
         await expect(database.query(
             `UPDATE public.analysis_preflights
              SET submitted_at=clock_timestamp(), deadline_at=clock_timestamp() + interval '60 seconds'
              WHERE id=$1`,
-            [PREFLIGHT_ORIGIN],
+            [PREFLIGHT_LEGACY_CLOCK],
         )).rejects.toThrow('PRECHECKOUT_BLITE_CLOCK_IMMUTABLE');
+        await database.query(
+            `INSERT INTO public.analysis_preflights(
+                id,status,expires_at,created_at,precheckout_blite_cohort
+            ) VALUES ($1,'processing',clock_timestamp() + interval '10 minutes',clock_timestamp(),false)`,
+            [PREFLIGHT_NEW_CLOCK],
+        );
+        await database.query(
+            'UPDATE public.analysis_preflights SET precheckout_blite_cohort=true WHERE id=$1',
+            [PREFLIGHT_NEW_CLOCK],
+        );
+        await expect(database.query(
+            `SELECT deadline_at = created_at + interval '90 seconds' AS deadline_from_origin
+             FROM public.analysis_preflights WHERE id=$1`,
+            [PREFLIGHT_NEW_CLOCK],
+        )).resolves.toMatchObject({ rows: [{ deadline_from_origin: true }] });
         await expect(database.query(
             `INSERT INTO public.analysis_preflights(
                 id,status,expires_at,created_at,precheckout_blite_cohort,submitted_at,deadline_at

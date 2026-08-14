@@ -9,6 +9,10 @@ const migration = readFileSync(new URL(
     `../../../supabase/migrations/${migrationName}`,
     import.meta.url,
 ), 'utf8');
+const deadlineMigration = readFileSync(new URL(
+    '../../../supabase/migrations/20260814150000_precheckout_blite_deadline_90.sql',
+    import.meta.url,
+), 'utf8');
 
 const databaseUrl = process.env.PRECHECKOUT_BLITE_POSTGRES_TEST_URL;
 const destructiveTestMarker = process.env.PRECHECKOUT_BLITE_POSTGRES_TEST_MARKER;
@@ -19,6 +23,7 @@ const describePostgres = isSafePrecheckoutBlitePostgresTestTarget(databaseUrl, d
 
 const LEGACY_PREFLIGHT = '20000000-0000-4000-8000-000000000101';
 const ORIGIN_PREFLIGHT = '20000000-0000-4000-8000-000000000102';
+const LEGACY_CLOCK_PREFLIGHT = '20000000-0000-4000-8000-000000000103';
 const LEGACY_FAILED_PREFLIGHT = '20000000-0000-4000-8000-000000000104';
 const ALL_EVIDENCE_PREFLIGHT = '20000000-0000-4000-8000-000000000105';
 const ALL_EVIDENCE_LEASE = '40000000-0000-4000-8000-000000000105';
@@ -131,6 +136,14 @@ describePostgres('precheckout B-lite PostgreSQL migration compatibility', () => 
         await pool.query(faithfulPreMigrationBootstrap());
         await pool.query('GRANT USAGE ON SCHEMA public TO anon, authenticated, service_role');
         await pool.query(migration);
+        await pool.query(
+            `INSERT INTO public.analysis_preflights(
+                id,status,expires_at,created_at,precheckout_blite_cohort
+            ) VALUES ($1,'processing',clock_timestamp() + interval '10 minutes',
+                '2026-08-13T00:00:00.000Z',true)`,
+            [LEGACY_CLOCK_PREFLIGHT],
+        );
+        await pool.query(deadlineMigration);
     }, 30_000);
 
     afterAll(async () => {
@@ -201,18 +214,7 @@ describePostgres('precheckout B-lite PostgreSQL migration compatibility', () => 
     });
 
     it('anchors cohort clocks to the immutable created_at origin across delayed assignment', async () => {
-        const preflightId = '20000000-0000-4000-8000-000000000103';
-        const origin = '2026-08-13T00:00:00.000Z';
-        await pool.query(
-            `INSERT INTO public.analysis_preflights(
-                id,status,expires_at,created_at,precheckout_blite_cohort
-            ) VALUES ($1,'processing',clock_timestamp() + interval '10 minutes',$2,false)`,
-            [preflightId, origin],
-        );
-        await pool.query(
-            'UPDATE public.analysis_preflights SET precheckout_blite_cohort=true WHERE id=$1',
-            [preflightId],
-        );
+        const preflightId = LEGACY_CLOCK_PREFLIGHT;
         await pool.query(
             `UPDATE public.analysis_preflights
              SET updated_at=clock_timestamp() WHERE id=$1`,

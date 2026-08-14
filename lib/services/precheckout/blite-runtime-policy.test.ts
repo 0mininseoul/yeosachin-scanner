@@ -37,9 +37,9 @@ describe('B-lite runtime policy', () => {
         }).toEqual({
             provider: 40_000,
             checkpoint: 43_000,
-            fallback: 48_000,
-            inference: 56_000,
-            ux: 60_000,
+            fallback: 78_000,
+            inference: 86_000,
+            ux: 90_000,
         });
     });
 

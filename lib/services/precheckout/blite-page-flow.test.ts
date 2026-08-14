@@ -25,7 +25,7 @@ describe('reduceBlitePage', () => {
     it('moves an eligible pending request to normal-ready exactly once', () => {
         const ready = reduceBlitePage(pendingState(), {
             type: 'BLITE_COMPLETE',
-            atMs: 1_700_000_047_999,
+            atMs: 1_700_000_077_999,
         });
 
         expect(ready).toEqual({
@@ -37,7 +37,7 @@ describe('reduceBlitePage', () => {
         });
         expect(reduceBlitePage(ready, {
             type: 'BLITE_COMPLETE',
-            atMs: 1_700_000_048_000,
+            atMs: 1_700_000_078_000,
         })).toBe(ready);
     });
 
@@ -54,52 +54,68 @@ describe('reduceBlitePage', () => {
         });
     });
 
-    it('latches unresolved pending work once at T+48', () => {
+    it('latches unresolved pending work once at T+78 while preserving the 12-second demo window', () => {
         const fallback = reduceBlitePage(pendingState(), {
             type: 'FALLBACK_AT_48',
-            atMs: 1_700_000_048_000,
+            atMs: 1_700_000_078_000,
         });
 
         expect(fallback).toEqual({
             view: 'fallback_demo',
             pathLatch: 'fallback',
             submittedAtMs: 1_700_000_000_000,
-            demoStartedAtMs: 1_700_000_048_000,
+            demoStartedAtMs: 1_700_000_078_000,
             demoStatus: 'running',
         });
         expect(reduceBlitePage(fallback, {
             type: 'FALLBACK_AT_48',
-            atMs: 1_700_000_049_000,
+            atMs: 1_700_000_079_000,
         })).toBe(fallback);
     });
 
-    it('enforces the original T+48 cutoff when a late complete arrives before the timer event', () => {
+    it('enforces the original T+78 cutoff when a late complete arrives before the timer event', () => {
         const pending = pendingState();
         const lateComplete = reduceBlitePage(pending, {
             type: 'BLITE_COMPLETE',
-            atMs: 1_700_000_048_001,
+            atMs: 1_700_000_078_001,
         });
 
         expect(lateComplete).toEqual({
             view: 'fallback_demo',
             pathLatch: 'fallback',
             submittedAtMs: 1_700_000_000_000,
-            demoStartedAtMs: 1_700_000_048_000,
+            demoStartedAtMs: 1_700_000_078_000,
             demoStatus: 'running',
         });
         expect(reduceBlitePage(lateComplete, {
             type: 'FALLBACK_AT_48',
-            atMs: 1_700_000_048_002,
+            atMs: 1_700_000_078_002,
         })).toBe(lateComplete);
     });
 
-    it('enforces the original T+48 cutoff when a late durable failure arrives before the timer event', () => {
+    it('enforces the original T+78 cutoff when a late durable failure arrives before the timer event', () => {
         const lateFailure = reduceBlitePage(pendingState(), {
             type: 'BLITE_FAILED',
-            atMs: 1_700_000_049_000,
+            atMs: 1_700_000_079_000,
         });
 
         expect(lateFailure).toEqual({
+            view: 'fallback_demo',
+            pathLatch: 'fallback',
+            submittedAtMs: 1_700_000_000_000,
+            demoStartedAtMs: 1_700_000_078_000,
+            demoStatus: 'running',
+        });
+    });
+
+    it('honors a legacy row fallback cutoff without extending it to the new T+78 clock', () => {
+        const legacyFallback = reduceBlitePage(pendingState(), {
+            type: 'BLITE_COMPLETE',
+            atMs: 1_700_000_055_000,
+            fallbackAtMs: 1_700_000_048_000,
+        });
+
+        expect(legacyFallback).toEqual({
             view: 'fallback_demo',
             pathLatch: 'fallback',
             submittedAtMs: 1_700_000_000_000,
@@ -111,12 +127,12 @@ describe('reduceBlitePage', () => {
     it('rejects a late success after fallback and never swaps the winning path', () => {
         const fallback = reduceBlitePage(pendingState(), {
             type: 'FALLBACK_AT_48',
-            atMs: 1_700_000_048_000,
+            atMs: 1_700_000_078_000,
         });
 
         expect(reduceBlitePage(fallback, {
             type: 'BLITE_COMPLETE',
-            atMs: 1_700_000_049_000,
+            atMs: 1_700_000_079_000,
         })).toBe(fallback);
         expect(reduceBlitePage(fallback, {
             type: 'BLITE_FAILED',
@@ -127,11 +143,11 @@ describe('reduceBlitePage', () => {
     it('does not fallback after normal success, including while the user is inactive', () => {
         const ready = reduceBlitePage(pendingState(), {
             type: 'BLITE_COMPLETE',
-            atMs: 1_700_000_047_999,
+            atMs: 1_700_000_077_999,
         });
         expect(reduceBlitePage(ready, {
             type: 'FALLBACK_AT_48',
-            atMs: 1_700_000_048_000,
+            atMs: 1_700_000_078_000,
         })).toBe(ready);
         expect(reduceBlitePage(ready, {
             type: 'BLITE_FAILED',
@@ -174,7 +190,7 @@ describe('reduceBlitePage', () => {
         })).toBe(businessFailure);
         expect(reduceBlitePage(businessFailure, {
             type: 'FALLBACK_AT_48',
-            atMs: 1_700_000_048_000,
+            atMs: 1_700_000_078_000,
         })).toBe(businessFailure);
     });
 
@@ -207,7 +223,7 @@ describe('reduceBlitePage', () => {
     it('reveals the legacy plans state after normal demo completion without changing the latch', () => {
         const ready = reduceBlitePage(pendingState(), {
             type: 'BLITE_COMPLETE',
-            atMs: 1_700_000_047_999,
+            atMs: 1_700_000_077_999,
         });
         const demo = reduceBlitePage(ready, {
             type: 'SUCCESS_CTA',
@@ -280,7 +296,7 @@ describe('reduceBlitePage', () => {
 
         const fallback = reduceBlitePage(pendingState(), {
             type: 'FALLBACK_AT_48',
-            atMs: 1_700_000_048_000,
+            atMs: 1_700_000_078_000,
         });
         const complete = reduceBlitePage(fallback, { type: 'DEMO_COMPLETE' });
         expect(reduceBlitePage(complete, { type: 'DEMO_COMPLETE' })).toBe(complete);

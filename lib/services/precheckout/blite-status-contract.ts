@@ -1,5 +1,6 @@
 import { z } from 'zod';
 import { precheckoutBliteV1Schema } from './blite-contract';
+import { BLITE_FALLBACK_DEMO_DURATION_MS } from './blite-deadline';
 import type { PrecheckoutBliteStatus } from './blite-store';
 
 const timestamp = z.string().datetime({ offset: true });
@@ -35,8 +36,16 @@ export function toBliteStatusV1(
     retryAfterMs = 1_000,
 ): BliteStatusV1 | null {
     const submittedAtMs = Date.parse(status.submittedAt);
-    const fallbackAtMs = submittedAtMs + 48_000;
-    if (!Number.isFinite(fallbackAtMs) || retryAfterMs < 500 || retryAfterMs > 2_000) return null;
+    const deadlineAtMs = Date.parse(status.deadlineAt);
+    const fallbackAtMs = deadlineAtMs - BLITE_FALLBACK_DEMO_DURATION_MS;
+    if (
+        !Number.isFinite(submittedAtMs)
+        || !Number.isFinite(deadlineAtMs)
+        || !Number.isFinite(fallbackAtMs)
+        || fallbackAtMs < submittedAtMs
+        || retryAfterMs < 500
+        || retryAfterMs > 2_000
+    ) return null;
     const base = {
         submittedAt: status.submittedAt,
         deadlineAt: status.deadlineAt,

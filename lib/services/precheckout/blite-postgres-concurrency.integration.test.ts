@@ -9,6 +9,10 @@ const migration = readFileSync(new URL(
     `../../../supabase/migrations/${migrationName}`,
     import.meta.url,
 ), 'utf8');
+const deadlineMigration = readFileSync(new URL(
+    '../../../supabase/migrations/20260814150000_precheckout_blite_deadline_90.sql',
+    import.meta.url,
+), 'utf8');
 
 const databaseUrl = process.env.PRECHECKOUT_BLITE_POSTGRES_CONCURRENCY_TEST_URL;
 const destructiveTestMarker = process.env.PRECHECKOUT_BLITE_POSTGRES_CONCURRENCY_TEST_MARKER;
@@ -179,6 +183,7 @@ describePostgres('precheckout B-lite PostgreSQL lease concurrency', () => {
         await pool.query(faithfulPreMigrationBootstrap());
         await pool.query('GRANT USAGE ON SCHEMA public TO anon, authenticated, service_role');
         await pool.query(migration);
+        await pool.query(deadlineMigration);
         await pool.query(`
             CREATE FUNCTION public.test_hold_precheckout_blite_claim(p_preflight_id UUID)
             RETURNS JSONB

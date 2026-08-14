@@ -1942,7 +1942,7 @@ export async function processPreflight(
                 });
             } catch (error) {
                 if (!canFailOpenExpiredBliteFence(error, claim)) throw error;
-                // The claim is still live, so this is the immutable B-lite T+60 fence.
+                // The claim is still live, so this is the immutable B-lite T+90 fence.
                 // Keep its deadline/TTL untouched and continue through ordinary readiness;
                 // the ready parent lets the browser enter its durable B-lite fallback flow.
             }
