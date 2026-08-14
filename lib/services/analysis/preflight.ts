@@ -1580,6 +1580,17 @@ export function classifyPreflightError(error: unknown): ClassifiedPreflightError
     };
 }
 
+/**
+ * The B-lite source finalizer is additive to the ordinary preflight snapshot.
+ * A PostgREST schema-cache miss means the finalizer is temporarily invisible,
+ * not that the already collected profile is unusable. Keep this deliberately
+ * narrower than generic persistence failures, which retain their retry fence.
+ */
+function isBliteSourceFinalizerSchemaCacheMiss(error: unknown): boolean {
+    return error instanceof Error
+        && error.message === 'PRECHECKOUT_BLITE_SOURCE_PERSISTENCE_ERROR (PGRST202)';
+}
+
 export function logPreflightProfileFallbackEntry(input: {
     operation: 'profile' | 'fresh_admission';
     failure: ClassifiedPreflightError;
@@ -2195,28 +2206,34 @@ export async function processPreflight(
                 Date.parse(collectedAt) + 30 * 60 * 1_000,
             )).toISOString();
             const source = (dependencies.projectBliteSource ?? projectPrecheckoutBliteSource)(profile);
-            const finalized = await (dependencies.finalizeReadyWithSource
-                ?? precheckoutBliteSourceStore.finalizeReadyWithSource)({
-                preflightId: claim.preflightId,
-                userId: claim.userId,
-                claimToken: claim.claimToken,
-                targetInputHash: inputHash,
-                providerRunId: bliteProviderRun.preflightId,
-                providerOperationKey: bliteProviderRun.operationKey,
-                providerRunReference: bliteProviderRun.runId,
-                targetFullName: snapshot.target.fullName,
-                targetBio: snapshot.target.bio,
-                targetProfileImageUrl: snapshot.target.profileImageUrl,
-                targetFollowersCount: snapshot.target.followersCount,
-                targetFollowingCount: snapshot.target.followingCount,
-                targetIsPrivate: snapshot.target.isPrivate,
-                capacityRequiredPlanId: snapshot.capacityRequiredPlan,
-                requiredPlanId: snapshot.requiredPlan,
-                planCardsSnapshot: planCardsSnapshot(snapshot),
-                source,
-                collectedAt,
-                expiresAt,
-            });
+            let finalized = false;
+            try {
+                finalized = await (dependencies.finalizeReadyWithSource
+                    ?? precheckoutBliteSourceStore.finalizeReadyWithSource)({
+                    preflightId: claim.preflightId,
+                    userId: claim.userId,
+                    claimToken: claim.claimToken,
+                    targetInputHash: inputHash,
+                    providerRunId: bliteProviderRun.preflightId,
+                    providerOperationKey: bliteProviderRun.operationKey,
+                    providerRunReference: bliteProviderRun.runId,
+                    targetFullName: snapshot.target.fullName,
+                    targetBio: snapshot.target.bio,
+                    targetProfileImageUrl: snapshot.target.profileImageUrl,
+                    targetFollowersCount: snapshot.target.followersCount,
+                    targetFollowingCount: snapshot.target.followingCount,
+                    targetIsPrivate: snapshot.target.isPrivate,
+                    capacityRequiredPlanId: snapshot.capacityRequiredPlan,
+                    requiredPlanId: snapshot.requiredPlan,
+                    planCardsSnapshot: planCardsSnapshot(snapshot),
+                    source,
+                    collectedAt,
+                    expiresAt,
+                });
+            } catch (error) {
+                if (!isBliteSourceFinalizerSchemaCacheMiss(error)) throw error;
+                await store.finalizeReady(claim, snapshot);
+            }
             if (finalized) {
                 await dispatchBliteInference(claim.preflightId);
             }

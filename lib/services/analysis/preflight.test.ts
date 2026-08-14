@@ -129,7 +129,7 @@ describe('B-lite single-collection preflight', () => {
         });
     });
 
-    it('releases the claim when source finalization fails without terminalizing the preflight', async () => {
+    it('fails open to ordinary readiness when the source-finalization RPC is absent from PostgREST', async () => {
         const claimed = claim();
         const store = workerStore(claimed);
         const activateBliteCohort = vi.fn(async () => ({
@@ -140,10 +140,25 @@ describe('B-lite single-collection preflight', () => {
         const finalizeReadyWithSource = vi.fn(async () => {
             throw new Error('PRECHECKOUT_BLITE_SOURCE_PERSISTENCE_ERROR (PGRST202)');
         });
+        const run = {
+            ...storedRun('succeeded'),
+            credentialSlot: selectPreflightApifyCredentialSlot(preflightId, {
+                PRECHECKOUT_BLITE_ENABLED: 'true',
+                PRECHECKOUT_BLITE_ROLLOUT_PERCENT: '100',
+                ANALYSIS_V2_PREFLIGHT_IDENTITY_HMAC_SECRET: preflightIdentitySecret,
+            }),
+        };
+        const runs: PreflightProviderRunStore = {
+            load: vi.fn(async () => run),
+            reserve: vi.fn(),
+            checkpointStarted: vi.fn(),
+            checkpointRejected: vi.fn(),
+            checkpointTerminal: vi.fn(),
+        };
 
         await expect(processPreflight(preflightId, {
             store,
-            providerRunStore: providerRunStore(),
+            providerRunStore: runs,
             getFullProfile: vi.fn(async () => profile({ followersCount: 476, followingCount: 644 })),
             activateBliteCohort,
             finalizeReadyWithSource,
@@ -152,12 +167,16 @@ describe('B-lite single-collection preflight', () => {
                 PRECHECKOUT_BLITE_ROLLOUT_PERCENT: '100',
                 ANALYSIS_V2_PREFLIGHT_IDENTITY_HMAC_SECRET: preflightIdentitySecret,
             },
-        })).rejects.toMatchObject({
-            message: 'PREFLIGHT_WORKER_RETRY',
-            classification: { category: 'persistence', retryable: true },
-        });
+        })).resolves.toBe('ready');
 
-        expect(store.releaseClaim).toHaveBeenCalledOnce();
+        expect(finalizeReadyWithSource).toHaveBeenCalledOnce();
+        expect(store.finalizeReady).toHaveBeenCalledWith(
+            claimed,
+            expect.objectContaining({
+                target: expect.objectContaining({ followersCount: 476, followingCount: 644 }),
+            }),
+        );
+        expect(store.releaseClaim).not.toHaveBeenCalled();
         expect(store.finalizeBlocked).not.toHaveBeenCalled();
     });
 
