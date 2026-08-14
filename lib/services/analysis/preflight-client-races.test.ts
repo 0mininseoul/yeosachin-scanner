@@ -194,6 +194,61 @@ describe('analysis V2 preflight request coordinator', () => {
         expect(coordinator.beginRequest(generation, otherPreflightId)).toBeNull();
         expect(coordinator.beginRequest(generation, preflightId)).not.toBeNull();
     });
+
+    it('fences an accepted target write after the request generation changes', () => {
+        const storage = createStorage();
+        const coordinator = new PreflightRequestCoordinator();
+        const staleGeneration = coordinator.beginLifecycle();
+        const staleRequest = coordinator.beginRequest(staleGeneration)!;
+
+        coordinator.beginLifecycle(otherPreflightId);
+
+        const acceptedWrite = () => {
+            if (!staleRequest.isCurrent()) return false;
+            if (!coordinator.attachPreflight(staleGeneration, preflightId)) return false;
+            return storePreflightDisplayTarget(storage, {
+                now: 1_750_000_000_000,
+                preflightId,
+                target: 'stale_target',
+            });
+        };
+
+        expect(acceptedWrite()).toBe(false);
+        expect(readPreflightDisplayTarget(storage, {
+            now: 1_750_000_000_001,
+            preflightId,
+        })).toBeNull();
+        expect(coordinator.isCurrent(coordinator.currentGeneration, otherPreflightId)).toBe(true);
+    });
+
+    it('cleans the matching target on reset but preserves a target after changing preflight', () => {
+        const storage = createStorage();
+        const coordinator = new PreflightRequestCoordinator();
+
+        coordinator.beginLifecycle(preflightId);
+        storePreflightDisplayTarget(storage, {
+            now: 1_750_000_000_000,
+            preflightId,
+            target: 'first_target',
+        });
+        expect(clearPreflightDisplayTarget(storage, preflightId)).toBe(true);
+        expect(readPreflightDisplayTarget(storage, {
+            now: 1_750_000_000_001,
+            preflightId,
+        })).toBeNull();
+
+        coordinator.beginLifecycle(otherPreflightId);
+        storePreflightDisplayTarget(storage, {
+            now: 1_750_000_000_002,
+            preflightId: otherPreflightId,
+            target: 'second_target',
+        });
+        expect(clearPreflightDisplayTarget(storage, preflightId)).toBe(false);
+        expect(readPreflightDisplayTarget(storage, {
+            now: 1_750_000_000_003,
+            preflightId: otherPreflightId,
+        })).toBe('second_target');
+    });
 });
 
 describe('consumed preflight client redirect', () => {
@@ -334,7 +389,9 @@ describe('preflight display target lifecycle contracts', () => {
         const resumeCall = analyzeSource.indexOf('resumePreflight(');
         expect(displayRead).toBeGreaterThanOrEqual(0);
         expect(resumeCall).toBeGreaterThan(displayRead);
-        expect(analyzeSource).toContain('displayTarget ?? boundTarget');
+        expect(analyzeSource).toContain('boundTarget ?? displayTarget');
+        expect(analyzeSource).not.toContain('displayTarget ?? boundTarget');
+        expect(analyzeSource).toMatch(/const resumeTarget = user\s+\? boundTarget \?\? displayTarget\s+: displayTarget;/);
         expect(analyzeSource).toContain('clearPreflightDisplayTarget(storage, activePreflightId)');
         expect(analyzeSource).toContain('new URLSearchParams({ preflight: accepted.preflightId })');
         expect(analyzeSource).not.toContain('targetInstagramId: instagramId');

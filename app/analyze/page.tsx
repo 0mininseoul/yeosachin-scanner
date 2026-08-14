@@ -290,9 +290,12 @@ const DISCLOSURE_ACCEPTED = true;
             const displayTarget = storage
                 ? readPreflightDisplayTarget(storage, { preflightId: resumablePreflightId })
                 : null;
+            const resumeTarget = user
+                ? boundTarget ?? displayTarget
+                : displayTarget;
             void resumePreflight(
                 resumablePreflightId,
-                displayTarget ?? boundTarget ?? undefined,
+                resumeTarget ?? undefined,
                 resumableClaimToken ?? undefined,
             ).then((resumed) => {
                 if (!resumed) {
