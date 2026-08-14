@@ -4,6 +4,8 @@
  * provider work.
  */
 
+import { BLITE_FALLBACK_LATCH_MS } from './blite-deadline';
+
 export type BliteView =
     | 'legacy'
     | 'preflight_failed'
@@ -15,7 +17,7 @@ export type BliteView =
 
 export type PathLatch = null | 'normal' | 'fallback';
 export type DemoStatus = 'idle' | 'running' | 'complete' | 'error';
-export const BLITE_FALLBACK_LATCH_MS = 48_000;
+export { BLITE_FALLBACK_LATCH_MS } from './blite-deadline';
 
 export type BlitePageState = Readonly<{
     view: BliteView;
@@ -31,6 +33,8 @@ type TimedBlitePageEvent = Readonly<{
     type: 'BLITE_COMPLETE' | 'BLITE_FAILED' | 'FALLBACK_AT_48' | 'SUCCESS_CTA';
     /** Absolute epoch timestamp from the same clock as submittedAtMs. */
     atMs: number;
+    /** Optional server-derived fallback cutoff, preserving legacy per-row clocks. */
+    fallbackAtMs?: number;
 }>;
 
 export type BlitePageEvent =
@@ -73,6 +77,15 @@ function submissionCutoff(state: BlitePageState): number | null {
     return Number.isFinite(cutoffMs) ? cutoffMs : null;
 }
 
+function eventCutoff(state: BlitePageState, event: TimedBlitePageEvent): number | null {
+    if (
+        typeof event.fallbackAtMs === 'number'
+        && Number.isFinite(event.fallbackAtMs)
+        && event.fallbackAtMs >= (state.submittedAtMs ?? 0)
+    ) return event.fallbackAtMs;
+    return submissionCutoff(state);
+}
+
 function isAtOrAfterSubmission(state: BlitePageState, atMs: number): boolean {
     return state.submittedAtMs !== null && atMs >= state.submittedAtMs;
 }
@@ -104,7 +117,7 @@ export function reduceBlitePage(
             if (state.view !== 'blite_pending' || state.pathLatch !== null) return state;
             {
                 const atMs = transitionTimestamp(event);
-                const cutoffMs = submissionCutoff(state);
+                const cutoffMs = eventCutoff(state, event);
                 if (atMs === null || cutoffMs === null || !isAtOrAfterSubmission(state, atMs)) return state;
                 if (atMs >= cutoffMs) return fallbackDemo(state, cutoffMs);
             }
@@ -122,7 +135,7 @@ export function reduceBlitePage(
             if (state.view !== 'blite_pending' || state.pathLatch !== null) return state;
             {
                 const atMs = transitionTimestamp(event);
-                const cutoffMs = submissionCutoff(state);
+                const cutoffMs = eventCutoff(state, event);
                 if (atMs === null || cutoffMs === null || !isAtOrAfterSubmission(state, atMs)) return state;
                 return fallbackDemo(state, Math.min(atMs, cutoffMs));
             }

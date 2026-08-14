@@ -191,8 +191,8 @@ describe('analytics and observability disclosure contract', () => {
             'unresolved_at_48',
             'demo_error',
         ]) expect(operations).toContain(`\`${disposition}\``);
-        expect(operations).toMatch(/T\+48/);
-        expect(operations).toMatch(/T\+60/);
+        expect(operations).toMatch(/T\+78/);
+        expect(operations).toMatch(/T\+90/);
         expect(operations).toMatch(/provider attempt|provider outcome/i);
         expect(operations).toMatch(/cache hit|pending lease|access denial/i);
         expect(operations).toMatch(/no provider|provider.*(?:없|not|금지)/i);

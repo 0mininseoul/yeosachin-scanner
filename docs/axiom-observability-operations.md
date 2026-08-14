@@ -51,7 +51,7 @@ AXIOM_ORG_ID=<UI에서 확인한 실제 조직 ID>
 
 허용 차원은 환경, 이벤트, severity, request/trace ID, 정적 route·method·status·duration, 내부 user/preflight/order/analysis UUID, job key, 대상·후보·제외 인스타그램 아이디, provider·operation·phase·attempt·disposition, 집계 건수, 오류 코드, retry/fallback, 모델·thinking level·토큰 수·추정 비용, plan·금액, 서버가 판정한 `traffic_class`로 제한한다. B-lite fallback latch는 `terminal_before_48`, `unresolved_at_48`, `demo_error`만 disposition으로 허용하고, demo outcome은 `completed` 또는 `failed`만 사용한다. 성공은 배치·단계 단위로 집계하고, 후보 인스타그램 아이디는 실패·재시도·fallback 진단에서만 사용한다. `traffic_class`는 `external`, `operator`, `e2e_test`, `internal_tester`, `unknown`의 닫힌 값만 허용하고 매출·수요 지표는 `external`만 집계한다.
 
-`precheckout_blite.fallback_latched`와 `precheckout_blite.demo_*`의 허용 차원은 `preflight_id`, `operation`, `duration_ms`, `disposition`뿐이며 provider 차원이나 provider 실행을 추가하지 않는다. No provider attempt is synthesized for a fallback latch, demo completion/failure, cache hit, another owner's pending lease, or access denial. `duration_ms`는 submit-origin 시각부터의 bounded elapsed time으로 조사하고, T+48 unresolved latch는 T+48–T+60의 12초 demo guard와 함께 확인한다.
+`precheckout_blite.fallback_latched`와 `precheckout_blite.demo_*`의 허용 차원은 `preflight_id`, `operation`, `duration_ms`, `disposition`뿐이며 provider 차원이나 provider 실행을 추가하지 않는다. No provider attempt is synthesized for a fallback latch, demo completion/failure, cache hit, another owner's pending lease, or access denial. `duration_ms`는 submit-origin 시각부터의 bounded elapsed time으로 조사하고, T+78 unresolved latch는 T+78–T+90의 12초 demo guard와 함께 확인한다.
 
 브라우저에서만 결정되는 `precheckout_blite.fallback_latched`, `precheckout_blite.demo_started`, `precheckout_blite.demo_completed`, `precheckout_blite.demo_failed`는 Amplitude 제품 퍼널이 소유한다. 기존 인증·상태 route는 상태 조회 전용이므로 별도 public logging endpoint나 bounded beacon을 추가하지 않으며, Vercel/Axiom은 서버 결과(`precheckout_blite.completed`, `precheckout_blite.profile_collection_failed`, `precheckout_blite.inference_failed`)만 담당한다.
 
@@ -122,7 +122,7 @@ B-lite가 소유한 durable generation lease의 terminal outcome은 다음 produ
 | order by _time desc
 ```
 
-Fallback/SLA의 브라우저 결과는 Amplitude에서 `fallback_latched`, `demo_started`, `demo_completed`, `demo_failed`로 집계하고, Vercel/Axiom에서는 위 서버 terminal events만 확인한다. Terminal failure가 T+48 전에 발생했는지, unresolved 요청이 T+48에서 latch되었는지, demo가 정확히 한 번 완료되었는지/실패했는지는 제품 퍼널에서 분리해 본다. 제출 시각부터 fallback legacy reveal까지의 p50/p95/p99와 T+60 plans-hidden guard rate는 Amplitude outcome과 서버 `duration_ms`를 함께 사용한다. Fallback, timeout, refresh, retry, late result, or demo event must never trigger a new Instagram collection.
+Fallback/SLA의 브라우저 결과는 Amplitude에서 `fallback_latched`, `demo_started`, `demo_completed`, `demo_failed`로 집계하고, Vercel/Axiom에서는 위 서버 terminal events만 확인한다. Terminal failure가 T+78 전에 발생했는지, unresolved 요청이 T+78에서 latch되었는지, demo가 정확히 한 번 완료되었는지/실패했는지는 제품 퍼널에서 분리해 본다. 제출 시각부터 fallback legacy reveal까지의 p50/p95/p99와 T+90 plans-hidden guard rate는 Amplitude outcome과 서버 `duration_ms`를 함께 사용한다. Fallback, timeout, refresh, retry, late result, or demo event must never trigger a new Instagram collection.
 
 금지 필드 감사 체크리스트:
 
@@ -141,7 +141,7 @@ Axiom UI에서 `Yeosachin Operational Health`를 만들고 모든 요소에 `['f
 - Preflight: 요청·완료·실패 수, 오류 코드, 플랜별 지연
 - Provider: provider·operation별 요청·실패·fallback·quota/rate limit
 - Gemini: operation·model·thinking level별 지연, rate limit·재시도, prompt/completion/thinking token, 추정 비용
-- B-lite server terminal: `precheckout_blite.completed`, `precheckout_blite.profile_collection_failed`, `precheckout_blite.inference_failed`, `precheckout_blite.finalizer_failed`의 provider·error code·duration; finalizer failure는 닫힌 `correlation`으로만 원인을 집계하며, 브라우저 fallback/demo 퍼널과 T+60 guard는 Amplitude 기준
+- B-lite server terminal: `precheckout_blite.completed`, `precheckout_blite.profile_collection_failed`, `precheckout_blite.inference_failed`, `precheckout_blite.finalizer_failed`의 provider·error code·duration; finalizer failure는 닫힌 `correlation`으로만 원인을 집계하며, 브라우저 fallback/demo 퍼널과 T+90 guard는 Amplitude 기준
 - Cloud Tasks / V2 worker: enqueue 결과, retry·failure·timeout, job key·phase별 상태
 - Groble: `accepted`, `duplicate_event`, `duplicate_payment`, `unmatched`, `ambiguous_buyer`, `mismatch`, `overflow_refund_required`, `cancel_requested`, `cancel_duplicate_event`, `cancel_unmatched`, `cancel_mismatch`, `cancel_before_payment`, `late_cancelled_payment` disposition과 webhook route 5xx
 - Analysis: 완료·실패 수, 총 지연, phase별 p50·p90 단계 지연

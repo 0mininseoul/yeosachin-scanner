@@ -88,12 +88,17 @@ function noBody(status = 204): Response {
 }
 
 function completeStatus(dto = validDto(), submittedAt = new Date().toISOString()) {
-    return { state: 'complete' as const, submittedAt, dto };
+    return {
+        state: 'complete' as const,
+        submittedAt,
+        fallbackAt: new Date(Date.parse(submittedAt) + 78_000).toISOString(),
+        dto,
+    };
 }
 
 function pendingStatus({
     submittedAt = new Date().toISOString(),
-    fallbackAt = new Date(Date.parse(submittedAt) + 48_000).toISOString(),
+    fallbackAt = new Date(Date.parse(submittedAt) + 78_000).toISOString(),
     retryAfterMs = 5_000,
 }: Partial<{ submittedAt: string; fallbackAt: string; retryAfterMs: number }> = {}) {
     return { state: 'pending' as const, submittedAt, fallbackAt, retryAfterMs };
@@ -101,7 +106,7 @@ function pendingStatus({
 
 function failedStatus({
     submittedAt = new Date().toISOString(),
-    fallbackAt = new Date(Date.parse(submittedAt) + 48_000).toISOString(),
+    fallbackAt = new Date(Date.parse(submittedAt) + 78_000).toISOString(),
 }: Partial<{ submittedAt: string; fallbackAt: string }> = {}) {
     return { state: 'failed' as const, submittedAt, fallbackAt };
 }
@@ -340,7 +345,7 @@ describe('PrecheckoutImmersive', () => {
         expect(container.querySelector('[data-precheckout-demo-mode="fallback"]')).not.toBeNull();
     });
 
-    it('latches pending work to the original T+48 deadline and never displays a late result', async () => {
+    it('latches pending work to the original T+78 deadline and never displays a late result', async () => {
         vi.useFakeTimers();
         vi.setSystemTime(new Date(SUBMITTED_AT));
         vi.stubGlobal('fetch', vi.fn().mockResolvedValue(jsonResponse(pendingStatus(), 202)));
@@ -352,7 +357,7 @@ describe('PrecheckoutImmersive', () => {
         await settleUi();
 
         await act(async () => {
-            await vi.advanceTimersByTimeAsync(48_000);
+            await vi.advanceTimersByTimeAsync(78_000);
         });
         expect(container.querySelector('[data-precheckout-demo-mode="fallback"]')).not.toBeNull();
         expect(onGoToPlans).not.toHaveBeenCalled();
@@ -421,7 +426,7 @@ describe('PrecheckoutImmersive', () => {
         );
     });
 
-    it('keeps the plan gate closed through a transient status failure and retries to the authoritative T+48 clock', async () => {
+    it('keeps the plan gate closed through a transient status failure and retries to the authoritative T+78 clock', async () => {
         vi.useFakeTimers();
         vi.setSystemTime(new Date(SUBMITTED_AT));
         vi.stubGlobal('requestAnimationFrame', vi.fn(() => 1));
@@ -449,11 +454,11 @@ describe('PrecheckoutImmersive', () => {
         expect(fetchMock).toHaveBeenCalledTimes(2);
         expect(onAvailabilityChange).not.toHaveBeenCalledWith(false);
 
-        await act(async () => { await vi.advanceTimersByTimeAsync(48_000); });
+        await act(async () => { await vi.advanceTimersByTimeAsync(78_000); });
         expect(container.querySelector('[data-precheckout-demo-mode="fallback"]')).not.toBeNull();
     });
 
-    it('uses the original preflight clock when every status request is transient and starts the exact T+48 fallback demo', async () => {
+    it('uses the original preflight clock when every status request is transient and starts the exact T+78 fallback demo', async () => {
         vi.useFakeTimers();
         vi.setSystemTime(new Date(SUBMITTED_AT));
         vi.stubGlobal('requestAnimationFrame', vi.fn(() => 1));
@@ -475,7 +480,7 @@ describe('PrecheckoutImmersive', () => {
         expect(onAvailabilityChange).not.toHaveBeenCalledWith(false);
         expect(container.querySelector('[data-precheckout-demo-mode="fallback"]')).toBeNull();
 
-        await act(async () => { await vi.advanceTimersByTimeAsync(47_999); });
+        await act(async () => { await vi.advanceTimersByTimeAsync(77_999); });
         expect(container.querySelector('[data-precheckout-demo-mode="fallback"]')).toBeNull();
         expect(onGoToPlans).not.toHaveBeenCalled();
         await act(async () => { await vi.advanceTimersByTimeAsync(1); });
@@ -504,7 +509,7 @@ describe('PrecheckoutImmersive', () => {
         });
         await settleUi();
 
-        await act(async () => { await vi.advanceTimersByTimeAsync(48_000); });
+        await act(async () => { await vi.advanceTimersByTimeAsync(78_000); });
 
         expect(container.querySelector('[data-precheckout-demo-mode="fallback"]')).not.toBeNull();
     });
@@ -533,7 +538,7 @@ describe('PrecheckoutImmersive', () => {
         });
         await settleUi();
 
-        await act(async () => { await vi.advanceTimersByTimeAsync(48_000); });
+        await act(async () => { await vi.advanceTimersByTimeAsync(78_000); });
         expect(container.querySelector('[data-precheckout-demo-mode="fallback"]')).not.toBeNull();
 
         fetchMock.mockResolvedValue(lateResponse);
@@ -584,7 +589,7 @@ describe('PrecheckoutImmersive', () => {
         window.removeEventListener('unhandledrejection', unhandledRejection);
     });
 
-    it('replaces a provisional local clock with a late authoritative submission clock and preserves its T+48 deadline across remount', async () => {
+    it('replaces a provisional local clock with a late authoritative submission clock and preserves its T+78 deadline across remount', async () => {
         vi.useFakeTimers();
         vi.setSystemTime(new Date('2026-08-13T00:00:10.000Z'));
         vi.stubGlobal('requestAnimationFrame', vi.fn(() => 1));
@@ -613,7 +618,7 @@ describe('PrecheckoutImmersive', () => {
         });
         await settleUi();
 
-        await act(async () => { await vi.advanceTimersByTimeAsync(37_999); });
+        await act(async () => { await vi.advanceTimersByTimeAsync(67_999); });
         expect(container.querySelector('[data-precheckout-demo-mode="fallback"]')).toBeNull();
         await act(async () => { await vi.advanceTimersByTimeAsync(1); });
         expect(container.querySelector('[data-precheckout-demo-mode="fallback"]')).not.toBeNull();
@@ -638,7 +643,7 @@ describe('PrecheckoutImmersive', () => {
             }));
         });
         await settleUi();
-        await act(async () => { await vi.advanceTimersByTimeAsync(48_000); });
+        await act(async () => { await vi.advanceTimersByTimeAsync(78_000); });
         expect(container.querySelector('[data-precheckout-demo-mode="fallback"]')).not.toBeNull();
 
         fetchMock.mockResolvedValue(noBody(204));
@@ -676,7 +681,7 @@ describe('PrecheckoutImmersive', () => {
             root.render(createElement(ParentPlanGate));
         });
         await settleUi();
-        await act(async () => { await vi.advanceTimersByTimeAsync(48_000); });
+        await act(async () => { await vi.advanceTimersByTimeAsync(78_000); });
         expect(container.querySelector('[data-precheckout-demo-mode="fallback"]')).not.toBeNull();
         expect(container.querySelector('[data-plan-gate="open"]')).toBeNull();
 

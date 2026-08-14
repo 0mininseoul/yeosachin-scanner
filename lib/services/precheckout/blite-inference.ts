@@ -12,7 +12,7 @@ import {
 } from '@/lib/services/ai/image-preprocessing';
 import {
     BLITE_INFERENCE_DEADLINE_MS,
-} from './blite-runtime-policy';
+} from './blite-deadline';
 import {
     PRECHECKOUT_BLITE_EVIDENCE_FIELDS,
     PRECHECKOUT_BLITE_SCHEMA_VERSION,
@@ -375,7 +375,7 @@ export interface PrecheckoutBliteInferenceOptions {
     abortSignal?: AbortSignal;
     /** Original preflight snapshot metadata; never reconstructed from the source artifact. */
     candidateRange: PrecheckoutBliteCandidateRange;
-    /** Original durable submission timestamp; every inference derives its T+56 cutoff from it. */
+    /** Original durable submission timestamp; every inference derives its T+86 cutoff from it. */
     submittedAtMs: number;
     /** Absolute server cutoff derived from the original preflight submission timestamp. */
     deadlineAtMs?: number;

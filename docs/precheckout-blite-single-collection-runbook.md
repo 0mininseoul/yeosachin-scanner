@@ -11,13 +11,14 @@ ready-preflight card and plans remain the rollback surface until a reviewed coho
    production integration.
 2. In an isolated Supabase worktree, confirm the exact allowlist contains only
    `20260813041712_precheckout_blite_single_collection.sql`,
-   `20260814123000_precheckout_blite_missing_source_status_fail_open.sql`, and
-   `20260814140000_precheckout_blite_reload_schema_cache.sql`. Run the approved
+   `20260814123000_precheckout_blite_missing_source_status_fail_open.sql`,
+   `20260814140000_precheckout_blite_reload_schema_cache.sql`, and
+   `20260814150000_precheckout_blite_deadline_90.sql`. Run the approved
    dry-run there; never use `supabase db push --include-all` from a mixed or dirty worktree.
 3. Apply that approved migration before enabling any application cohort. If an apply command
    appears to hang, inspect remote migration history before stopping it and never retry blindly.
 4. Keep both B-lite environment values at their default off/zero while the backward-compatible
-   `main` revision reaches production. The trusted preflight worker is capped at 75 seconds and
+   `main` revision reaches production. The trusted preflight worker is capped at 105 seconds and
    the browser status route at 15 seconds; neither limit authorizes an additional collection.
 
 ## Post-migration smoke
@@ -45,7 +46,7 @@ collection.
 
 Enable signed internal test-entitlement traffic first, then change the server-only rollout through
 reviewed GitHub `main` changes at 1%, 5%, 25%, and 100%. At each step confirm the original
-submission clock, one provider lineage, B-lite terminal state, T+48/T+60 demo behavior, and that
+submission clock, one provider lineage, B-lite terminal state, T+78/T+90 demo behavior, and that
 late cached results do not replace a fallback page.
 
 To stop rollout, return the GitHub `main` configuration to `PRECHECKOUT_BLITE_ENABLED=false` and

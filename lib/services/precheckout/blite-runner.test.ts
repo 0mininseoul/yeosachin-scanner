@@ -58,7 +58,7 @@ describe('runPrecheckoutBlite', () => {
         })).resolves.toBe('complete');
         expect(infer).toHaveBeenCalledWith(source, expect.objectContaining({
             submittedAtMs: Date.parse(submittedAt),
-            deadlineAtMs: Date.parse(submittedAt) + 56_000,
+            deadlineAtMs: Date.parse(submittedAt) + 86_000,
             candidateRange: expect.any(Object),
         }));
         expect(terminal.complete).toHaveBeenCalledWith({ preflightId: PREFLIGHT, leaseToken: LEASE, dto });
@@ -139,7 +139,7 @@ describe('runPrecheckoutBlite', () => {
         expect(telemetry.inferenceFailed).toHaveBeenCalledWith('invalid');
     });
 
-    it('terminalizes an expired original T+56 deadline without starting inference', async () => {
+    it('terminalizes an expired original T+86 deadline without starting inference', async () => {
         const terminal = {
             claim: vi.fn(async () => ({
                 disposition: 'claimed' as const,
@@ -160,7 +160,7 @@ describe('runPrecheckoutBlite', () => {
             terminalStore: terminal,
             infer,
             observability: telemetry,
-            now: () => Date.parse(submittedAt) + 56_000,
+            now: () => Date.parse(submittedAt) + 86_000,
         })).resolves.toBe('failed');
         expect(infer).not.toHaveBeenCalled();
         expect(terminal.fail).toHaveBeenCalledWith({

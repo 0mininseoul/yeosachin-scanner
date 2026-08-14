@@ -19,6 +19,16 @@ function readMissingSourceStatusFailOpenMigration(): string {
     );
 }
 
+function readDeadlineMigration(): string {
+    return readFileSync(
+        join(
+            process.cwd(),
+            'supabase/migrations/20260814150000_precheckout_blite_deadline_90.sql',
+        ),
+        'utf8',
+    );
+}
+
 function readSchemaCacheRepairMigration(): string {
     return readFileSync(
         join(
@@ -98,17 +108,28 @@ describe('precheckout B-lite single-collection migration', () => {
     });
 
     it('anchors every cohort deadline to immutable preflight creation rather than worker wall time', () => {
-        const migration = readSingleCollectionMigration();
+        const migration = readDeadlineMigration();
         const clock = functionDefinition(migration, 'enforce_precheckout_blite_preflight_clock_v1');
 
         expect(migration).toContain('submitted_at = created_at');
-        expect(migration).toContain("deadline_at = created_at + INTERVAL '60 seconds'");
+        expect(migration).toContain("deadline_at = created_at + INTERVAL '90 seconds'");
         expect(clock).toContain('NEW.submitted_at := NEW.created_at;');
-        expect(clock).toContain("NEW.deadline_at := NEW.created_at + INTERVAL '60 seconds';");
+        expect(clock).toContain("NEW.deadline_at := NEW.created_at + INTERVAL '90 seconds';");
         expect(clock).toContain('NEW.created_at IS DISTINCT FROM OLD.created_at');
         expect(migration).toContain(
-            'UPDATE OF precheckout_blite_cohort, submitted_at, deadline_at, created_at',
+            'UPDATE OF precheckout_blite_cohort, submitted_at, deadline_at, created_at,\n    precheckout_blite_deadline_seconds',
         );
+    });
+
+    it('preserves legacy T+60 clocks while assigning T+90 only to newly created preflights', () => {
+        const migration = readDeadlineMigration();
+
+        expect(migration).toContain('DROP CONSTRAINT IF EXISTS analysis_preflights_blite_cohort_clock_check');
+        expect(migration).toContain('precheckout_blite_deadline_seconds SMALLINT NOT NULL DEFAULT 60');
+        expect(migration).toContain("deadline_at = created_at + INTERVAL '60 seconds'");
+        expect(migration).toContain("deadline_at = created_at + INTERVAL '90 seconds'");
+        expect(migration).toContain('OLD.precheckout_blite_cohort');
+        expect(migration).toContain('RETURN NEW;');
     });
 
     it('provides only security-definer service RPCs with exact v2 names', () => {
@@ -226,10 +247,11 @@ describe('precheckout B-lite single-collection migration', () => {
             '20260813041712_precheckout_blite_single_collection.sql',
             '20260814123000_precheckout_blite_missing_source_status_fail_open.sql',
             '20260814140000_precheckout_blite_reload_schema_cache.sql',
+            '20260814150000_precheckout_blite_deadline_90.sql',
         ]);
         const runbook = readRunbook();
         expect(runbook).toMatch(
-            /exact allowlist contains only[\s\S]*`20260813041712_precheckout_blite_single_collection\.sql`[\s\S]*`20260814123000_precheckout_blite_missing_source_status_fail_open\.sql`[\s\S]*`20260814140000_precheckout_blite_reload_schema_cache\.sql`/,
+            /exact allowlist contains only[\s\S]*`20260813041712_precheckout_blite_single_collection\.sql`[\s\S]*`20260814123000_precheckout_blite_missing_source_status_fail_open\.sql`[\s\S]*`20260814140000_precheckout_blite_reload_schema_cache\.sql`[\s\S]*`20260814150000_precheckout_blite_deadline_90\.sql`/,
         );
         expect(runbook).not.toMatch(/20260813\d+_precheckout_blite_dispatch_recovery\.sql/);
 

@@ -24,7 +24,7 @@ import { POST, maxDuration } from './route';
 const preflightId = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa';
 const userId = 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb';
 const submittedAt = '2026-08-13T00:00:00.000Z';
-const deadlineAt = '2026-08-13T00:01:00.000Z';
+const deadlineAt = '2026-08-13T00:01:30.000Z';
 
 function request(headers: Record<string, string> = {}) {
     return new Request('https://example.com/api/analysis/precheckout-blite', {
@@ -83,7 +83,7 @@ describe('POST /api/analysis/precheckout-blite', () => {
             state: 'pending',
             submittedAt,
             deadlineAt,
-            fallbackAt: '2026-08-13T00:00:48.000Z',
+            fallbackAt: '2026-08-13T00:01:18.000Z',
             retryAfterMs: 1_000,
         });
         expect(mocks.readStatus).toHaveBeenCalledWith({ preflightId });
@@ -105,7 +105,7 @@ describe('POST /api/analysis/precheckout-blite', () => {
         expect(failed.status).toBe(200);
         expect(await failed.json()).toEqual({
             state: 'failed', submittedAt, deadlineAt,
-            fallbackAt: '2026-08-13T00:00:48.000Z',
+            fallbackAt: '2026-08-13T00:01:18.000Z',
         });
     });
 

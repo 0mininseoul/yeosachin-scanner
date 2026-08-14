@@ -1,6 +1,7 @@
 import 'server-only';
 import { computePrecheckoutBliteCandidateRange } from './blite-range';
 import { inferPrecheckoutBlite } from './blite-inference';
+import { BLITE_INFERENCE_DEADLINE_MS } from './blite-deadline';
 import {
     precheckoutBliteTerminalStore,
     type PrecheckoutBliteFailureReason,
@@ -10,8 +11,6 @@ import {
     createPrecheckoutBliteObservability,
     type PrecheckoutBliteObservability,
 } from './blite-observability';
-
-const INFERENCE_WINDOW_MS = 56_000;
 
 type TerminalStore = Pick<typeof precheckoutBliteTerminalStore, 'claim' | 'complete' | 'fail'>;
 type PrecheckoutBliteInferenceTelemetry =
@@ -29,7 +28,7 @@ function inferenceFailureReason(
     nowMs: number,
     submittedAtMs: number,
 ): PrecheckoutBliteFailureReason {
-    return nowMs >= submittedAtMs + INFERENCE_WINDOW_MS
+    return nowMs >= submittedAtMs + BLITE_INFERENCE_DEADLINE_MS
         ? 'inference_timeout'
         : 'inference_response_invalid';
 }
@@ -52,7 +51,7 @@ export async function runPrecheckoutBlite(
 
     const claimed: Extract<PrecheckoutBliteClaim, { disposition: 'claimed' }> = claim;
     const submittedAtMs = Date.parse(claimed.submittedAt);
-    const deadlineAtMs = submittedAtMs + INFERENCE_WINDOW_MS;
+    const deadlineAtMs = submittedAtMs + BLITE_INFERENCE_DEADLINE_MS;
     const observability = dependencies.observability ?? createPrecheckoutBliteObservability({
         preflightId,
         startedAtMs: Number.isFinite(submittedAtMs) ? submittedAtMs : now(),

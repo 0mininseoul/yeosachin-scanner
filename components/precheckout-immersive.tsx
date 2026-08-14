@@ -49,7 +49,7 @@ function boundedDemoDurationMs(startedAtMs: number | null, finishedAtMs: number)
 
 type BrowserBliteStatus =
     | { state: 'pending'; submittedAt: string; fallbackAt: string; retryAfterMs: number }
-    | { state: 'complete'; submittedAt: string; dto: PrecheckoutBliteV1 }
+    | { state: 'complete'; submittedAt: string; fallbackAt: string; dto: PrecheckoutBliteV1 }
     | { state: 'failed'; submittedAt: string; fallbackAt: string }
     | { state: 'unavailable' }
     | { state: 'transient' };
@@ -97,7 +97,8 @@ async function fetchPrecheckoutBlite(
             if (value.state === 'complete' && typeof value.submittedAt === 'string') {
                 const parsed = precheckoutBliteV1Schema.safeParse(value.dto);
                 return parsed.success
-                    ? { state: 'complete' as const, submittedAt: value.submittedAt, dto: parsed.data }
+                    && typeof value.fallbackAt === 'string'
+                    ? { state: 'complete' as const, submittedAt: value.submittedAt, fallbackAt: value.fallbackAt, dto: parsed.data }
                     : { state: 'transient' as const };
             }
             if (value.state === 'failed' && typeof value.submittedAt === 'string' && typeof value.fallbackAt === 'string') {
@@ -113,7 +114,7 @@ async function fetchPrecheckoutBlite(
     browserBliteRequests.set(key, pending);
     void pending.then(result => {
         // Only a terminal success is a useful browser cache. Pending/failed states must be
-        // fetched again; retaining a resolved pending promise would stall the T+48 timeline.
+        // fetched again; retaining a resolved pending promise would stall the T+78 timeline.
         if (result.state !== 'complete' && browserBliteRequests.get(key) === pending) {
             browserBliteRequests.delete(key);
         }
@@ -197,7 +198,7 @@ export function PrecheckoutImmersive({
     ));
     const flowRef = useRef<BlitePageState>(flow);
     // A missing parent timestamp starts a provisional local deadline only. The first durable
-    // status timestamp replaces it, including after a remount, so T+48 remains submission-bound.
+    // status timestamp replaces it, including after a remount, so T+78 remains submission-bound.
     const authoritativeSubmissionAtMsRef = useRef<number | null>(
         typeof submittedAtMs === 'number' && Number.isFinite(submittedAtMs) && submittedAtMs >= 0
             ? submittedAtMs
@@ -298,7 +299,7 @@ export function PrecheckoutImmersive({
                 if (status.state === 'transient') {
                     // A network or status-route hiccup is not an authoritative feature-off
                     // decision. Keep the awaiting surface mounted and retry until the durable
-                    // pending/terminal response provides the original T+48 clock.
+                    // pending/terminal response provides the original T+78 clock.
                     pollTimer = setTimeout(() => { void poll(); }, TRANSIENT_STATUS_RETRY_MS);
                     return;
                 }
@@ -327,11 +328,19 @@ export function PrecheckoutImmersive({
                 }
 
                 if (status.state === 'failed') {
-                    transition({ type: 'BLITE_FAILED', atMs: Date.now() }, 'terminal_before_48');
+                    transition({
+                        type: 'BLITE_FAILED',
+                        atMs: Date.now(),
+                        fallbackAtMs: Date.parse(status.fallbackAt),
+                    }, 'terminal_before_48');
                     return;
                 }
 
-                const next = transition({ type: 'BLITE_COMPLETE', atMs: Date.now() }, 'unresolved_at_48');
+                const next = transition({
+                    type: 'BLITE_COMPLETE',
+                    atMs: Date.now(),
+                    fallbackAtMs: Date.parse(status.fallbackAt),
+                }, 'unresolved_at_48');
                 if (next.view !== 'blite_ready') return;
                 setDto(status.dto);
                 const showConfirm = status.dto.genderRead.likelyFemale

@@ -39,9 +39,9 @@ import {
 import { trustedCloudTasksRetryCount } from '@/lib/services/analysis/pipeline-retry';
 import { runPrecheckoutBlite } from '@/lib/services/precheckout/blite-runner';
 
-// B-lite finishes its durable terminal checkpoint after the UI's T+60 guard; it must not
+// B-lite finishes its durable terminal checkpoint after the UI's T+90 guard; it must not
 // extend the preflight or provider deadline to consume this route-level cleanup margin.
-export const maxDuration = 75;
+export const maxDuration = 105;
 
 const workerRequestSchema = z.union([
     z.object({

@@ -397,14 +397,14 @@ describe('inferPrecheckoutBlite', () => {
     it('does not start media or Gemini work when the inference deadline is exhausted', async () => {
         const result = await inferPrecheckoutBlite(source(), {
             candidateRange: CANDIDATE_RANGE,
-            submittedAtMs: Date.now() - 57_000,
+            submittedAtMs: Date.now() - 87_000,
         });
         expect(result).toBeNull();
         expect(mocks.prepareAnalysisImages).not.toHaveBeenCalled();
         expect(mocks.analyzeWithGemini).not.toHaveBeenCalled();
     });
 
-    it('aborts the entire inference at T+56 and forwards the deadline signal', async () => {
+    it('aborts the entire inference at T+86 and forwards the deadline signal', async () => {
         vi.useFakeTimers();
         try {
             mocks.analyzeWithGemini.mockImplementation(() => new Promise(() => undefined));
@@ -414,7 +414,7 @@ describe('inferPrecheckoutBlite', () => {
                 submittedAtMs,
             });
 
-            await vi.advanceTimersByTimeAsync(56_000);
+            await vi.advanceTimersByTimeAsync(86_000);
             await expect(resultPromise).resolves.toBeNull();
 
             expect(mocks.analyzeWithGemini).toHaveBeenCalledTimes(1);

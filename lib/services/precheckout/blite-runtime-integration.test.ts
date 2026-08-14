@@ -12,9 +12,9 @@ describe('precheckout B-lite runtime integration', () => {
         const worker = readFileSync(join(root, 'app/api/analysis/preflight/worker/route.ts'), 'utf8');
         const status = readFileSync(join(root, 'app/api/analysis/precheckout-blite/route.ts'), 'utf8');
 
-        expect(worker).toContain('export const maxDuration = 75;');
+        expect(worker).toContain('export const maxDuration = 105;');
         expect(status).toContain('export const maxDuration = 15;');
-        expect(vercel.functions['app/api/analysis/preflight/worker/route.ts']?.maxDuration).toBe(75);
+        expect(vercel.functions['app/api/analysis/preflight/worker/route.ts']?.maxDuration).toBe(105);
         expect(vercel.functions['app/api/analysis/precheckout-blite/route.ts']?.maxDuration).toBe(15);
     });
 
