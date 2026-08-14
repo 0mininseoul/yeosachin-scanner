@@ -7,10 +7,17 @@ const migration = readFileSync(
     new URL('../../../supabase/migrations/20260814210000_add_legacy_result_overview.sql', import.meta.url),
     'utf8',
 );
+const reviewedSourceMigration = readFileSync(
+    new URL('../../../supabase/migrations/20260814223000_register_concierge_reviewed_source.sql', import.meta.url),
+    'utf8',
+);
 
 const REQUEST_ID = '123e4567-e89b-42d3-a456-426614174000';
 const ORDER_ID = '223e4567-e89b-42d3-a456-426614174000';
 const OWNER_ID = '323e4567-e89b-42d3-a456-426614174000';
+const SOURCE_REQUEST_ID = '423e4567-e89b-42d3-a456-426614174000';
+const SOURCE_FINGERPRINT = 'a'.repeat(64);
+const CHANGED_SOURCE_FINGERPRINT = 'b'.repeat(64);
 
 let db: PGlite;
 
@@ -75,8 +82,39 @@ beforeEach(async () => {
             name_is_name BOOLEAN,
             name_confidence DOUBLE PRECISION
         );
+        CREATE TABLE public.concierge_publication_mutations (kind TEXT NOT NULL);
+        CREATE FUNCTION public.record_concierge_publication_mutation()
+        RETURNS TRIGGER LANGUAGE plpgsql AS $$
+        BEGIN
+            INSERT INTO public.concierge_publication_mutations(kind)
+            VALUES (TG_OP);
+            RETURN COALESCE(NEW, OLD);
+        END;
+        $$;
+        CREATE TRIGGER record_concierge_publication_mutation
+        AFTER INSERT OR DELETE ON public.analysis_results
+        FOR EACH ROW EXECUTE FUNCTION public.record_concierge_publication_mutation();
+        CREATE TABLE public.earlybird_v211_concierge_replays (
+            order_id UUID PRIMARY KEY,
+            original_failed_request_id UUID NOT NULL,
+            first_relationship_failed_request_id UUID,
+            second_relationship_failed_request_id UUID,
+            failed_preflight_id UUID,
+            rearmed_preflight_id UUID,
+            expected_fulfillment_attempt_count SMALLINT,
+            expected_manual_review_at TIMESTAMPTZ,
+            created_at TIMESTAMPTZ DEFAULT now()
+        );
     `);
     await db.exec(migration);
+    await db.exec(reviewedSourceMigration);
+    await db.query(
+        `INSERT INTO public.analysis_requests (
+            id, user_id, target_instagram_id, status, pipeline_version, progress, progress_step,
+            mutual_follows, step_data, current_step
+        ) VALUES ($1, $2, 'retained.1234567890abcdef1234', 'failed', 'v2', 100, '실패', 0, '{}'::jsonb, 'failed')`,
+        [SOURCE_REQUEST_ID, OWNER_ID],
+    );
 });
 
 afterEach(async () => {
@@ -104,6 +142,11 @@ describe('concierge publication persistence contract', () => {
                 id, user_id, target_instagram_id, result_request_id, status, plan_id, paid_at
             ) VALUES ($1, $3, 'target', $2, 'completed', 'basic', '2026-08-12T09:07:30.000Z')`,
             [ORDER_ID, REQUEST_ID, OWNER_ID],
+        );
+        await db.query(
+            `INSERT INTO public.earlybird_v211_concierge_replays(order_id, original_failed_request_id)
+             VALUES ($1, $2)`,
+            [ORDER_ID, SOURCE_REQUEST_ID],
         );
 
         await db.exec(buildAtomicPublicationSql({
@@ -136,6 +179,14 @@ describe('concierge publication persistence contract', () => {
                 sourceFingerprint: 'a'.repeat(64),
                 relationship: { completenessProven: true },
                 hydration: { exactMutual: 150, hydrated: 149, public: 148, private: 1, unresolved: 1 },
+            },
+            reviewedSource: {
+                sourceRequestId: SOURCE_REQUEST_ID,
+                ownerId: OWNER_ID,
+                targetUsername: 'target',
+                resultRequestId: REQUEST_ID,
+                targetPosts: [],
+                targetEvidence: [],
             },
         }));
 
@@ -188,6 +239,11 @@ describe('concierge publication persistence contract', () => {
             ) VALUES ($1, $3, 'target', $2, 'completed', 'basic', '2026-08-12T09:07:30.000Z')`,
             [ORDER_ID, REQUEST_ID, OWNER_ID],
         );
+        await db.query(
+            `INSERT INTO public.earlybird_v211_concierge_replays(order_id, original_failed_request_id)
+             VALUES ($1, $2)`,
+            [ORDER_ID, SOURCE_REQUEST_ID],
+        );
 
         await expect(db.exec(buildAtomicPublicationSql({
             orderId: ORDER_ID,
@@ -196,7 +252,15 @@ describe('concierge publication persistence contract', () => {
             privateRows: [],
             counts: { male: 0, female: 0, unknown: 0 },
             mutualFollows: 150,
-            lineage: { relationship: { completenessProven: false } },
+            lineage: { sourceFingerprint: SOURCE_FINGERPRINT, relationship: { completenessProven: false } },
+            reviewedSource: {
+                sourceRequestId: SOURCE_REQUEST_ID,
+                ownerId: OWNER_ID,
+                targetUsername: 'target',
+                resultRequestId: REQUEST_ID,
+                targetPosts: [],
+                targetEvidence: [],
+            },
         }))).rejects.toThrow('CONCIERGE_RELATIONSHIP_SNAPSHOT_INCOMPLETE');
     });
 
@@ -214,6 +278,11 @@ describe('concierge publication persistence contract', () => {
             ) VALUES ($1, $3, 'target', $2, 'completed', 'basic', '2026-08-12T09:07:30.000Z')`,
             [ORDER_ID, REQUEST_ID, OWNER_ID],
         );
+        await db.query(
+            `INSERT INTO public.earlybird_v211_concierge_replays(order_id, original_failed_request_id)
+             VALUES ($1, $2)`,
+            [ORDER_ID, SOURCE_REQUEST_ID],
+        );
 
         await expect(db.exec(buildAtomicPublicationSql({
             orderId: ORDER_ID,
@@ -222,7 +291,15 @@ describe('concierge publication persistence contract', () => {
             privateRows: [],
             counts: { male: 0, female: 0, unknown: 0 },
             mutualFollows: 150,
-            lineage: { relationship: { completenessProven: true } },
+            lineage: { sourceFingerprint: SOURCE_FINGERPRINT, relationship: { completenessProven: true } },
+            reviewedSource: {
+                sourceRequestId: SOURCE_REQUEST_ID,
+                ownerId: OWNER_ID,
+                targetUsername: 'target',
+                resultRequestId: REQUEST_ID,
+                targetPosts: [],
+                targetEvidence: [],
+            },
         }))).rejects.toThrow('CONCIERGE_ATOMIC_IDENTITY_SCOPE_CONFLICT');
         await db.exec('ROLLBACK');
 
@@ -230,5 +307,188 @@ describe('concierge publication persistence contract', () => {
             .resolves.toMatchObject({ rows: [{ count: 0 }] });
         await expect(db.query('SELECT step_data FROM public.analysis_requests WHERE id = $1', [REQUEST_ID]))
             .resolves.toMatchObject({ rows: [{ step_data: { keep: true } }] });
+    });
+
+    it('registers the reviewed live snapshot when the failed V2 source is empty and staging is gone', async () => {
+        await db.query(
+            `INSERT INTO public.analysis_requests (
+                id, user_id, target_instagram_id, status, pipeline_version, progress, progress_step,
+                mutual_follows, step_data, current_step
+            ) VALUES ($1, $2, 'target', 'completed', 'v1', 100, '완료', 149, '{}'::jsonb, 'completed')`,
+            [REQUEST_ID, OWNER_ID],
+        );
+        await db.query(
+            `INSERT INTO public.earlybird_orders (
+                id, user_id, target_instagram_id, result_request_id, status, plan_id, paid_at
+            ) VALUES ($1, $3, 'target', $2, 'completed', 'basic', '2026-08-12T09:07:30.000Z')`,
+            [ORDER_ID, REQUEST_ID, OWNER_ID],
+        );
+        await db.query(
+            `INSERT INTO public.earlybird_v211_concierge_replays(order_id, original_failed_request_id)
+             VALUES ($1, $2)`,
+            [ORDER_ID, SOURCE_REQUEST_ID],
+        );
+
+        const targetPosts = [{ id: 'post-live-1', taggedUsers: ['candidate.one'], mentionedUsers: [] }];
+        const targetEvidence = [{
+            actorUsername: 'candidate.one', postId: 'post-live-1', signal: 'target_post_like',
+            sourceInteractionId: 'interaction-live-1', occurredAt: null, content: null,
+        }];
+        await db.exec(buildAtomicPublicationSql({
+            orderId: ORDER_ID,
+            requestId: REQUEST_ID,
+            femaleRows: [],
+            privateRows: [],
+            counts: { male: 0, female: 0, unknown: 0 },
+            mutualFollows: 150,
+            lineage: {
+                schema: 'concierge-exact-mutual-v1',
+                sourceFingerprint: SOURCE_FINGERPRINT,
+                relationship: { completenessProven: true },
+            },
+            reviewedSource: {
+                sourceRequestId: SOURCE_REQUEST_ID,
+                ownerId: OWNER_ID,
+                targetUsername: ' @TARGET ',
+                resultRequestId: REQUEST_ID,
+                targetPosts,
+                targetEvidence,
+            },
+        }));
+
+        await expect(db.query(
+            `SELECT reviewed_source_owner_id, reviewed_source_target_instagram_id,
+                    reviewed_source_result_request_id, reviewed_source_target_posts,
+                    reviewed_source_target_evidence, reviewed_source_fingerprint,
+                    published_source_fingerprint, published_result_hash
+               FROM public.earlybird_v211_concierge_replays WHERE order_id = $1`,
+            [ORDER_ID],
+        )).resolves.toMatchObject({ rows: [{
+            reviewed_source_owner_id: OWNER_ID,
+            reviewed_source_target_instagram_id: 'target',
+            reviewed_source_result_request_id: REQUEST_ID,
+            reviewed_source_target_posts: targetPosts,
+            reviewed_source_target_evidence: targetEvidence,
+            reviewed_source_fingerprint: SOURCE_FINGERPRINT,
+            published_source_fingerprint: SOURCE_FINGERPRINT,
+        }] });
+    });
+
+    it('makes an identical source-fingerprint retry idempotent without a second delete/insert', async () => {
+        await db.query(
+            `INSERT INTO public.analysis_requests (
+                id, user_id, target_instagram_id, status, pipeline_version, progress, progress_step,
+                mutual_follows, step_data, current_step
+            ) VALUES ($1, $2, 'target', 'completed', 'v1', 100, '완료', 149, '{}'::jsonb, 'completed')`,
+            [REQUEST_ID, OWNER_ID],
+        );
+        await db.query(
+            `INSERT INTO public.earlybird_orders (
+                id, user_id, target_instagram_id, result_request_id, status, plan_id, paid_at
+            ) VALUES ($1, $3, 'target', $2, 'completed', 'basic', '2026-08-12T09:07:30.000Z')`,
+            [ORDER_ID, REQUEST_ID, OWNER_ID],
+        );
+        await db.query(
+            `INSERT INTO public.earlybird_v211_concierge_replays(order_id, original_failed_request_id)
+             VALUES ($1, $2)`,
+            [ORDER_ID, SOURCE_REQUEST_ID],
+        );
+        const input = {
+            orderId: ORDER_ID,
+            requestId: REQUEST_ID,
+            femaleRows: [{
+                rank: 1,
+                suspect_instagram_id: 'candidate.one',
+                suspect_profile_image: null,
+                suspect_full_name: 'Candidate One',
+                bio: '공개 계정',
+                risk_score: 7,
+                photogenic_grade: 3,
+                exposure_level: 'medium',
+                is_tagged: false,
+                risk_grade: 'caution',
+                gender_confidence: 0.9,
+                gender_status: 'confirmed',
+                is_unlocked: true,
+                likes_count: 0,
+                intimate_comments_count: 0,
+                one_line_overview: '공개 프로필과 최근 피드의 특징을 중심으로 정리한 계정입니다.',
+                risk_analysis: [],
+            }],
+            privateRows: [],
+            counts: { male: 0, female: 1, unknown: 0 },
+            mutualFollows: 150,
+            lineage: {
+                schema: 'concierge-exact-mutual-v1',
+                sourceFingerprint: SOURCE_FINGERPRINT,
+                relationship: { completenessProven: true },
+            },
+            reviewedSource: {
+                sourceRequestId: SOURCE_REQUEST_ID,
+                ownerId: OWNER_ID,
+                targetUsername: 'target',
+                resultRequestId: REQUEST_ID,
+                targetPosts: [],
+                targetEvidence: [],
+            },
+        } as const;
+        await db.exec(buildAtomicPublicationSql(input));
+        const first = await db.query<{ count: number }>(
+            'SELECT count(*)::int AS count FROM public.concierge_publication_mutations',
+        );
+        await db.exec(buildAtomicPublicationSql(input));
+        await expect(db.query('SELECT count(*)::int AS count FROM public.concierge_publication_mutations'))
+            .resolves.toMatchObject({ rows: [{ count: 1 }] });
+        expect(first.rows[0]?.count).toBe(1);
+    });
+
+    it('rejects a changed source fingerprint before touching publication rows', async () => {
+        await db.query(
+            `INSERT INTO public.analysis_requests (
+                id, user_id, target_instagram_id, status, pipeline_version, progress, progress_step,
+                mutual_follows, step_data, current_step
+            ) VALUES ($1, $2, 'target', 'completed', 'v1', 100, '완료', 149, '{}'::jsonb, 'completed')`,
+            [REQUEST_ID, OWNER_ID],
+        );
+        await db.query(
+            `INSERT INTO public.earlybird_orders (
+                id, user_id, target_instagram_id, result_request_id, status, plan_id, paid_at
+            ) VALUES ($1, $3, 'target', $2, 'completed', 'basic', '2026-08-12T09:07:30.000Z')`,
+            [ORDER_ID, REQUEST_ID, OWNER_ID],
+        );
+        await db.query(
+            `INSERT INTO public.earlybird_v211_concierge_replays(order_id, original_failed_request_id)
+             VALUES ($1, $2)`,
+            [ORDER_ID, SOURCE_REQUEST_ID],
+        );
+        const base = {
+            orderId: ORDER_ID,
+            requestId: REQUEST_ID,
+            femaleRows: [],
+            privateRows: [],
+            counts: { male: 0, female: 0, unknown: 0 },
+            mutualFollows: 150,
+            lineage: { schema: 'concierge-exact-mutual-v1', relationship: { completenessProven: true } },
+            reviewedSource: {
+                sourceRequestId: SOURCE_REQUEST_ID,
+                ownerId: OWNER_ID,
+                targetUsername: 'target',
+                resultRequestId: REQUEST_ID,
+                targetPosts: [],
+                targetEvidence: [],
+            },
+        } as const;
+        await db.exec(buildAtomicPublicationSql({
+            ...base,
+            lineage: { ...base.lineage, sourceFingerprint: SOURCE_FINGERPRINT },
+        }));
+        const before = await db.query('SELECT count(*)::int AS count FROM public.analysis_results');
+        await expect(db.exec(buildAtomicPublicationSql({
+            ...base,
+            lineage: { ...base.lineage, sourceFingerprint: CHANGED_SOURCE_FINGERPRINT },
+        }))).rejects.toThrow('CONCIERGE_PUBLICATION_CAS_CONFLICT');
+        await db.exec('ROLLBACK');
+        await expect(db.query('SELECT count(*)::int AS count FROM public.analysis_results'))
+            .resolves.toEqual(before);
     });
 });

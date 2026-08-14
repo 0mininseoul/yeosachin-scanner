@@ -5,6 +5,7 @@ import { ApifyClient } from 'apify-client';
 import { z } from 'zod';
 import { supabaseAdmin } from '@/lib/supabase/admin';
 import { makeApifyProvider } from '@/lib/services/instagram/providers/apify';
+import { makeApifyInteractionAdapter } from '@/lib/services/instagram/providers/apify-interactions';
 import { createAnalysisV2SelectedMediaNormalizer } from '@/lib/services/ai/image-preprocessing';
 import { AI_STAGE_POLICY_V211_VERSION } from '@/lib/services/ai/stage-policy';
 import { createReplayStagedAiAdapter } from '@/lib/services/analysis/replay/replay-staged-ai-adapter';
@@ -12,11 +13,13 @@ import { captureAnalysisV2ReplayBundle } from '@/lib/services/analysis/replay/re
 import type { AnalysisV2ReplayBundle } from '@/lib/services/analysis/replay/replay-bundle';
 import { FIRST_PAYMENT_BASIC_V211_CONCIERGE_CAPABILITY } from '@/lib/services/analysis/replay/replay-source-lineage';
 import { runAnalysisV2AiReplay, type ReplayAccountAiDetail } from '@/lib/services/analysis/replay/replay-runner';
+import { extractRawTargetInteractions } from '@/lib/services/analysis/v2-target-interactions';
+import { instagramPostUrl, selectRecentInteractionPosts } from '@/lib/services/analysis/interaction-posts';
 import {
     buildCanonicalConciergeResult,
     deriveConciergePrivacyPartition,
-    targetPostMentionEvidenceFromStepData,
     validateCanonicalConciergeCorrection,
+    type ConciergeTargetPostMentionEvidence,
     type ConciergeRelationshipEvidence,
 } from '@/lib/services/analysis/concierge-basic-correction';
 import { selectConciergeSourceRequest } from '@/lib/services/analysis/concierge-source-scope';
@@ -235,19 +238,113 @@ async function hydrateExactMutualProfiles(
     };
 }
 
-export function targetEvidenceFromStepData(stepData: unknown): readonly TargetEvidenceRow[] {
-    if (!stepData || typeof stepData !== 'object' || Array.isArray(stepData)) {
+function makeDirectInteractionAdapter(slot: ApifySlot, token: string) {
+    const adapterSlot = slot === 'secondary' ? 'secondary' : 'primary';
+    const env = {
+        APIFY_API_TOKEN_SLOT: adapterSlot,
+        APIFY_API_TOKEN: token,
+        APIFY_SECONDARY_API_TOKEN: token,
+    };
+    return makeApifyInteractionAdapter({
+        env,
+        client: new ApifyClient({ token, maxRetries: 0 }),
+    });
+}
+
+type ReviewedTargetSnapshot = {
+    targetPosts: readonly ConciergeTargetPostMentionEvidence[];
+    persistedTargetPosts: readonly Readonly<{
+        id: string;
+        taggedUsers: readonly string[];
+        mentionedUsers: readonly string[];
+    }>[];
+    targetEvidence: readonly TargetEvidenceRow[];
+    lineage: ProviderLineage;
+};
+
+/** Collects the reviewed target surface in the correction run; no failed-request staging read. */
+async function collectReviewedTargetSnapshot(
+    targetUsername: string,
+): Promise<ReviewedTargetSnapshot> {
+    let lastError: unknown;
+    for (const slot of ['tertiary', 'secondary', 'primary'] as const) {
+        const token = tokenFor(slot);
+        if (!token) continue;
+        const runIds: string[] = [];
+        try {
+            const provider = makeDirectProvider(slot, token);
+            const targetProfile = await provider.getProfile!(
+                targetUsername,
+                makeProfileContext(slot, runIds),
+            );
+            if (!targetProfile || normalizedUsername(targetProfile.username) !== normalizedUsername(targetUsername)) {
+                throw new Error('CONCIERGE_TARGET_PROFILE_SCOPE_CONFLICT');
+            }
+            const sourcePosts = selectRecentInteractionPosts(
+                [...(targetProfile.latestPosts ?? [])],
+                8,
+            );
+            if (sourcePosts.length === 0) {
+                throw new Error('CONCIERGE_TARGET_POSTS_UNAVAILABLE');
+            }
+            const persistedTargetPosts = sourcePosts.map(post => Object.freeze({
+                id: post.id,
+                taggedUsers: Object.freeze([...post.taggedUsers].map(normalizedUsername)),
+                mentionedUsers: Object.freeze([...post.mentionedUsers].map(normalizedUsername)),
+            }));
+            const targetPosts = persistedTargetPosts.map(post => Object.freeze({
+                taggedUsers: [...post.taggedUsers],
+                mentionedUsers: [...post.mentionedUsers],
+            }));
+            const likerPosts = selectRecentInteractionPosts(sourcePosts, 4).map(instagramPostUrl);
+            const commentPosts = selectRecentInteractionPosts(sourcePosts, 6).map(instagramPostUrl);
+            const interactionContext = {
+                credentialSlot: slot === 'secondary' ? 'secondary' as const : 'primary' as const,
+                maxChargeUsd: 2,
+                recordUsage: () => undefined,
+                onRunStarted: (runId: string) => { runIds.push(runId); },
+            };
+            const interactionProvider = makeDirectInteractionAdapter(slot, token);
+            const [likers, comments] = await Promise.all([
+                interactionProvider.getPostLikers(likerPosts, 150, interactionContext),
+                interactionProvider.getPostComments(commentPosts, 15, interactionContext),
+            ]);
+            const extracted = extractRawTargetInteractions({
+                targetPosts: sourcePosts,
+                likers,
+                comments,
+                excludedUsernames: [normalizedUsername(targetUsername)],
+            });
+            const targetEvidence = extracted.evidence.map(row => targetEvidenceRowSchema.parse({
+                actorUsername: normalizedUsername(row.actorUsername),
+                postId: row.postId,
+                signal: row.signal,
+                sourceInteractionId: row.sourceInteractionId,
+                occurredAt: row.occurredAt ?? null,
+                content: row.content ?? null,
+            }));
+            if (targetEvidence.length !== 95) {
+                throw new Error('CONCIERGE_TARGET_EVIDENCE_SNAPSHOT_INCOMPLETE');
+            }
+            return {
+                targetPosts: Object.freeze(targetPosts),
+                persistedTargetPosts: Object.freeze(persistedTargetPosts),
+                targetEvidence: Object.freeze(targetEvidence),
+                lineage: { slot, runIds },
+            };
+        } catch (error) {
+            lastError = error;
+            if (!isQuotaError(error)) throw error;
+        }
+    }
+    throw lastError instanceof Error ? lastError : new Error('CONCIERGE_TARGET_SNAPSHOT_UNAVAILABLE');
+}
+
+export function parseReviewedTargetEvidence(value: unknown): readonly TargetEvidenceRow[] {
+    if (!Array.isArray(value)) {
         throw new Error('CONCIERGE_TARGET_EVIDENCE_UNAVAILABLE');
     }
-    const root = stepData as {
-        targetEvidence?: unknown;
-        targetInteractionEvidence?: unknown;
-        conciergeEvidence?: { targetEvidence?: unknown };
-    };
-    const retained = root.targetEvidence
-        ?? root.targetInteractionEvidence
-        ?? root.conciergeEvidence?.targetEvidence;
-    const parsed = z.array(targetEvidenceRowSchema).safeParse(retained);
+    const parsed = z.array(targetEvidenceRowSchema).safeParse(value);
     if (!parsed.success || parsed.data.length !== 95) {
         throw new Error('CONCIERGE_TARGET_EVIDENCE_UNAVAILABLE');
     }
@@ -277,14 +374,46 @@ export function buildAtomicPublicationSql(input: {
     counts: { male: number; female: number; unknown: number };
     mutualFollows: number;
     lineage: Record<string, unknown>;
+    reviewedSource: {
+        sourceRequestId: string;
+        ownerId: string;
+        targetUsername: string;
+        resultRequestId: string;
+        targetPosts: readonly unknown[];
+        targetEvidence: readonly unknown[];
+    };
 }): string {
+    const sourceFingerprint = input.lineage.sourceFingerprint;
+    if (typeof sourceFingerprint !== 'string' || !/^[a-f0-9]{64}$/.test(sourceFingerprint)) {
+        throw new Error('CONCIERGE_REVIEWED_SOURCE_FINGERPRINT_INVALID');
+    }
+    if (input.reviewedSource.resultRequestId !== input.requestId) {
+        throw new Error('CONCIERGE_REVIEWED_SOURCE_SCOPE_CONFLICT');
+    }
     const payload = JSON.stringify({ femaleRows: input.femaleRows, privateRows: input.privateRows });
     const requestId = sqlString(input.requestId);
     const orderId = sqlString(input.orderId);
     const payloadSql = `${sqlString(payload)}::jsonb`;
     const genderStats = `${sqlString(JSON.stringify(input.counts))}::jsonb`;
     const lineageSql = `${sqlString(JSON.stringify(input.lineage))}::jsonb`;
-    return `BEGIN;
+    const targetPostsSql = `${sqlString(JSON.stringify(input.reviewedSource.targetPosts))}::jsonb`;
+    const targetEvidenceSql = `${sqlString(JSON.stringify(input.reviewedSource.targetEvidence))}::jsonb`;
+    const resultHash = sha256({
+        schema: 'concierge-result-publication-v1',
+        sourceFingerprint,
+        femaleRows: input.femaleRows,
+        privateRows: input.privateRows,
+        counts: input.counts,
+        mutualFollows: input.mutualFollows,
+    });
+    const resultHashSql = sqlString(resultHash);
+    const sourceFingerprintSql = sqlString(sourceFingerprint);
+    const sourceRequestId = sqlString(input.reviewedSource.sourceRequestId);
+    const ownerId = sqlString(input.reviewedSource.ownerId);
+    const targetUsername = sqlString(input.reviewedSource.targetUsername);
+return `BEGIN;
+SELECT pg_catalog.set_config('app.earlybird_v211_concierge_publication_marker', '0', TRUE);
+SELECT pg_catalog.set_config('app.earlybird_v211_concierge_publication_skip', '0', TRUE);
 DO $guard$
 DECLARE
   v_pointer uuid;
@@ -297,10 +426,13 @@ DECLARE
   v_request_target text;
   v_request_status text;
   v_pipeline_version text;
+  v_reviewed_source_fingerprint text;
+  v_published_source_fingerprint text;
+  v_published_result_hash text;
 BEGIN
   SELECT result_request_id, user_id, target_instagram_id, status, plan_id, paid_at
     INTO v_pointer, v_order_user_id, v_order_target, v_order_status, v_plan_id, v_paid_at
-    FROM public.earlybird_orders WHERE id = ${orderId} FOR SHARE;
+    FROM public.earlybird_orders WHERE id = ${orderId} FOR UPDATE;
   IF v_pointer IS DISTINCT FROM ${requestId}
      OR v_order_status <> 'completed' OR v_plan_id <> 'basic'
      OR v_paid_at < '${SAMPLE_START}'::timestamptz OR v_paid_at >= '${SAMPLE_END}'::timestamptz THEN
@@ -318,6 +450,23 @@ BEGIN
      OR lower(btrim(v_request_target)) IS DISTINCT FROM lower(btrim(v_order_target)) THEN
     RAISE EXCEPTION 'CONCIERGE_ATOMIC_IDENTITY_SCOPE_CONFLICT';
   END IF;
+  SELECT reviewed_source_fingerprint, published_source_fingerprint, published_result_hash
+    INTO v_reviewed_source_fingerprint, v_published_source_fingerprint, v_published_result_hash
+    FROM public.earlybird_v211_concierge_replays
+   WHERE order_id = ${orderId}
+   FOR UPDATE;
+  IF v_reviewed_source_fingerprint IS NOT NULL
+     AND v_reviewed_source_fingerprint <> ${sourceFingerprintSql} THEN
+    RAISE EXCEPTION 'CONCIERGE_PUBLICATION_CAS_CONFLICT';
+  END IF;
+  IF v_published_source_fingerprint IS NOT NULL THEN
+    IF v_published_source_fingerprint = ${sourceFingerprintSql}
+       AND v_published_result_hash = ${resultHashSql} THEN
+      PERFORM pg_catalog.set_config('app.earlybird_v211_concierge_publication_skip', '1', TRUE);
+    ELSE
+      RAISE EXCEPTION 'CONCIERGE_PUBLICATION_CAS_CONFLICT';
+    END IF;
+  END IF;
 END $guard$;
 DO $completeness_guard$
 BEGIN
@@ -327,40 +476,90 @@ BEGIN
     RAISE EXCEPTION 'CONCIERGE_RELATIONSHIP_SNAPSHOT_INCOMPLETE';
   END IF;
 END $completeness_guard$;
-DELETE FROM public.analysis_results WHERE request_id = ${requestId};
-INSERT INTO public.analysis_results (
+DO $register_reviewed_source$
+BEGIN
+  PERFORM public.register_earlybird_v211_concierge_reviewed_source(
+    ${orderId}::uuid, ${sourceRequestId}::uuid, ${requestId}::uuid, ${ownerId}::uuid,
+    ${targetUsername}, ${sourceFingerprintSql}, ${targetPostsSql}, ${targetEvidenceSql}
+  );
+END $register_reviewed_source$;
+DO $cas$
+DECLARE
+  v_reviewed_source_fingerprint text;
+  v_published_source_fingerprint text;
+  v_published_result_hash text;
+BEGIN
+  IF pg_catalog.current_setting('app.earlybird_v211_concierge_publication_skip', TRUE) = '1' THEN
+    RETURN;
+  END IF;
+  SELECT reviewed_source_fingerprint, published_source_fingerprint, published_result_hash
+    INTO v_reviewed_source_fingerprint, v_published_source_fingerprint, v_published_result_hash
+    FROM public.earlybird_v211_concierge_replays
+   WHERE order_id = ${orderId}
+   FOR UPDATE;
+  IF v_reviewed_source_fingerprint IS DISTINCT FROM ${sourceFingerprintSql}
+     OR v_published_source_fingerprint IS NOT NULL
+     OR v_published_result_hash IS NOT NULL THEN
+    RAISE EXCEPTION 'CONCIERGE_PUBLICATION_CAS_CONFLICT';
+  END IF;
+  PERFORM pg_catalog.set_config('app.earlybird_v211_concierge_publication_marker', '1', TRUE);
+  UPDATE public.earlybird_v211_concierge_replays
+     SET published_source_fingerprint = ${sourceFingerprintSql},
+         published_result_hash = ${resultHashSql},
+         published_at = pg_catalog.clock_timestamp()
+   WHERE order_id = ${orderId}
+     AND reviewed_source_fingerprint = ${sourceFingerprintSql}
+     AND published_source_fingerprint IS NULL
+     AND published_result_hash IS NULL;
+  IF NOT FOUND THEN
+    RAISE EXCEPTION 'CONCIERGE_PUBLICATION_CAS_CONFLICT';
+  END IF;
+END $cas$;
+DO $write$
+BEGIN
+  IF pg_catalog.current_setting('app.earlybird_v211_concierge_publication_skip', TRUE) = '1' THEN
+    RETURN;
+  END IF;
+  DELETE FROM public.analysis_results WHERE request_id = ${requestId};
+  INSERT INTO public.analysis_results (
   request_id, rank, suspect_instagram_id, suspect_profile_image, suspect_full_name, bio,
   risk_score, photogenic_grade, exposure_level, is_tagged, risk_grade, gender_confidence,
   gender_status, is_unlocked, likes_count, intimate_comments_count, one_line_overview, risk_analysis
-)
-SELECT ${requestId}, rank, suspect_instagram_id, suspect_profile_image, suspect_full_name, bio,
+  )
+  SELECT ${requestId}, rank, suspect_instagram_id, suspect_profile_image, suspect_full_name, bio,
   risk_score, photogenic_grade, exposure_level, is_tagged, risk_grade, gender_confidence,
   gender_status, is_unlocked, likes_count, intimate_comments_count, one_line_overview, risk_analysis
-FROM jsonb_to_recordset(${payloadSql}->'femaleRows') AS rows(
+  FROM jsonb_to_recordset(${payloadSql}->'femaleRows') AS rows(
   rank integer, suspect_instagram_id text, suspect_profile_image text, suspect_full_name text,
   bio text, risk_score integer, photogenic_grade integer, exposure_level text, is_tagged boolean,
   risk_grade text, gender_confidence double precision, gender_status text, is_unlocked boolean,
   likes_count integer, intimate_comments_count integer, one_line_overview varchar(180), risk_analysis jsonb
-);
-DELETE FROM public.private_accounts WHERE request_id = ${requestId};
-INSERT INTO public.private_accounts (
+  );
+  DELETE FROM public.private_accounts WHERE request_id = ${requestId};
+  INSERT INTO public.private_accounts (
   request_id, instagram_id, profile_image, full_name, name_female_score, name_is_name, name_confidence
-)
-SELECT ${requestId}, instagram_id, profile_image, full_name, name_female_score, name_is_name, name_confidence
-FROM jsonb_to_recordset(${payloadSql}->'privateRows') AS rows(
+  )
+  SELECT ${requestId}, instagram_id, profile_image, full_name, name_female_score, name_is_name, name_confidence
+  FROM jsonb_to_recordset(${payloadSql}->'privateRows') AS rows(
   instagram_id text, profile_image text, full_name text, name_female_score double precision,
   name_is_name boolean, name_confidence double precision
-);
-UPDATE public.analysis_requests
+  );
+  UPDATE public.analysis_requests
    SET status = 'completed', progress = 100, progress_step = '분석 완료!',
        mutual_follows = ${input.mutualFollows},
        opposite_gender_count = ${input.counts.female}, gender_stats = ${genderStats},
        step_data = jsonb_set(
          CASE WHEN jsonb_typeof(step_data) = 'object' THEN step_data ELSE '{}'::jsonb END,
-         '{conciergeEvidence}', ${lineageSql}, TRUE
+         '{conciergeEvidence}', jsonb_set(
+           ${lineageSql}, '{publication}', jsonb_build_object(
+             'sourceFingerprint', ${sourceFingerprintSql},
+             'resultHash', ${resultHashSql}
+           ), TRUE
+         ), TRUE
        ),
        current_step = 'completed', error_message = NULL, completed_at = now()
- WHERE id = ${requestId};
+   WHERE id = ${requestId};
+END $write$;
 COMMIT;`;
 }
 
@@ -396,7 +595,7 @@ async function main(): Promise<void> {
     }
     const { data: requests, error: requestError } = await supabaseAdmin
         .from('analysis_requests')
-        .select('id,user_id,target_instagram_id,status,pipeline_version,step_data')
+        .select('id,user_id,target_instagram_id,status,pipeline_version')
         .eq('user_id', order.user_id);
     if (requestError || !requests) throw new Error('CONCIERGE_SAMPLE_REQUEST_LOOKUP_FAILED');
     const request = requests.find(row => row.id === order.result_request_id);
@@ -417,9 +616,9 @@ async function main(): Promise<void> {
     if (!request || request.status !== 'completed' || request.pipeline_version !== 'v1') {
         throw new Error('CONCIERGE_SAMPLE_REQUEST_SCOPE_CONFLICT');
     }
-    const targetPosts = targetPostMentionEvidenceFromStepData(sourceRequest.step_data);
-
-    const targetEvidence = targetEvidenceFromStepData(sourceRequest.step_data);
+    const targetSnapshot = await collectReviewedTargetSnapshot(order.target_instagram_id);
+    const targetPosts = targetSnapshot.targetPosts;
+    const targetEvidence = targetSnapshot.targetEvidence;
     const followers = await collectRelationshipSide(order.target_instagram_id, 'followers');
     const following = await collectRelationshipSide(order.target_instagram_id, 'following');
     const followerNames = followers.rows.map(row => normalizedUsername(row.username));
@@ -445,6 +644,10 @@ async function main(): Promise<void> {
     }
     const sourceFingerprint = sha256({
         sourceRequest: sourceRequest.id,
+        ownerId: order.user_id,
+        orderId: order.id,
+        resultRequestId: order.result_request_id,
+        targetUsername: normalizedUsername(order.target_instagram_id),
         relationship: {
             followers: followers.rows,
             following: following.rows,
@@ -455,7 +658,9 @@ async function main(): Promise<void> {
             username: normalizedUsername(profile.username), isPrivate: profile.isPrivate,
             posts: profile.latestPosts?.map(post => post.id) ?? [],
         })),
+        targetPosts: targetSnapshot.persistedTargetPosts,
         targetEvidence,
+        targetProviderLineage: targetSnapshot.lineage,
     });
     const profileByUsername = new Map(hydration.profiles.map(profile => [normalizedUsername(profile.username), profile]));
     const replayProfiles = orderedMutualUsernames
@@ -558,6 +763,11 @@ async function main(): Promise<void> {
             public: partition.publicProfiles.length, private: partition.privateProfiles.length,
             unresolved: partition.unresolvedUsernames.length, runIds: hydration.lineage.runIds,
         },
+        target: {
+            posts: targetSnapshot.persistedTargetPosts,
+            evidenceCount: targetEvidence.length,
+            runIds: targetSnapshot.lineage.runIds,
+        },
     };
     await verifyAuthorization({ userId: order.user_id }, order.result_request_id);
     applyAtomicPublication({
@@ -566,9 +776,17 @@ async function main(): Promise<void> {
         counts: { male: result.counts.male, female: result.counts.female, unknown: result.counts.unknown },
         mutualFollows: exactMutualCount,
         lineage,
+        reviewedSource: {
+            sourceRequestId: sourceRequest.id,
+            ownerId: order.user_id,
+            targetUsername: order.target_instagram_id,
+            resultRequestId: order.result_request_id,
+            targetPosts: targetSnapshot.persistedTargetPosts,
+            targetEvidence,
+        },
     });
     const [afterRequest, afterResults, afterPrivate] = await Promise.all([
-        supabaseAdmin.from('analysis_requests').select('status,progress,gender_stats,pipeline_version,step_data').eq('id', order.result_request_id).maybeSingle(),
+        supabaseAdmin.from('analysis_requests').select('status,progress,gender_stats,pipeline_version').eq('id', order.result_request_id).maybeSingle(),
         supabaseAdmin.from('analysis_results').select('rank,risk_score,risk_grade,one_line_overview,risk_analysis,gender_status').eq('request_id', order.result_request_id).order('rank'),
         supabaseAdmin.from('private_accounts').select('instagram_id').eq('request_id', order.result_request_id),
     ]);

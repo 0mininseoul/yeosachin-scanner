@@ -13,6 +13,10 @@ const sourceAccessorMigration = readFileSync(
     new URL('../../../supabase/migrations/20260814220000_add_concierge_source_accessor.sql', import.meta.url),
     'utf8',
 );
+const reviewedSourceMigration = readFileSync(
+    new URL('../../../supabase/migrations/20260814223000_register_concierge_reviewed_source.sql', import.meta.url),
+    'utf8',
+);
 
 describe('legacy concierge result overview persistence contract', () => {
     it('adds an additive bounded overview column without changing the narrative field', () => {
@@ -70,5 +74,37 @@ describe('legacy concierge result overview persistence contract', () => {
             correctionScript.indexOf('applyAtomicPublication({'),
         );
         expect(correctionScript).toContain('lower(btrim(v_request_target))');
+    });
+
+    it('uses the reviewed live snapshot and existing replay row instead of terminal V2 staging', () => {
+        expect(correctionScript).toContain('collectReviewedTargetSnapshot');
+        expect(correctionScript).not.toContain('sourceRequest.step_data');
+        expect(correctionScript).not.toContain('load_analysis_v2_target_evidence');
+        expect(correctionScript).toContain('register_earlybird_v211_concierge_reviewed_source');
+        expect(reviewedSourceMigration).toContain(
+            'ALTER TABLE public.earlybird_v211_concierge_replays',
+        );
+        expect(reviewedSourceMigration).not.toContain(
+            'CREATE TABLE public.earlybird_v211_concierge',
+        );
+        expect(reviewedSourceMigration).toContain('reviewed_source_target_posts');
+        expect(reviewedSourceMigration).toContain('reviewed_source_target_evidence');
+        expect(reviewedSourceMigration).toContain(
+            'GRANT EXECUTE ON FUNCTION public.register_earlybird_v211_concierge_reviewed_source(',
+        );
+        expect(reviewedSourceMigration).not.toMatch(/GRANT .* ON TABLE public\.earlybird_v211_concierge_replays/);
+    });
+
+    it('binds publication writes to a persisted fingerprint and result hash CAS marker', () => {
+        expect(correctionScript).toContain('CONCIERGE_PUBLICATION_CAS_CONFLICT');
+        expect(correctionScript).toContain('published_source_fingerprint');
+        expect(correctionScript).toContain('published_result_hash');
+        expect(correctionScript).toContain('publication_skip');
+        expect(correctionScript).toContain(
+            'FROM public.earlybird_v211_concierge_replays\n   WHERE order_id =',
+        );
+        expect(correctionScript).toContain('FOR UPDATE');
+        expect(reviewedSourceMigration).toContain('published_source_fingerprint');
+        expect(reviewedSourceMigration).toContain('published_result_hash');
     });
 });
