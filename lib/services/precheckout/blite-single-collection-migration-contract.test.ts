@@ -19,6 +19,16 @@ function readMissingSourceStatusFailOpenMigration(): string {
     );
 }
 
+function readSchemaCacheRepairMigration(): string {
+    return readFileSync(
+        join(
+            process.cwd(),
+            'supabase/migrations/20260814140000_precheckout_blite_reload_schema_cache.sql',
+        ),
+        'utf8',
+    );
+}
+
 function readRunbook(): string {
     return readFileSync(
         join(process.cwd(), 'docs/precheckout-blite-single-collection-runbook.md'),
@@ -215,10 +225,11 @@ describe('precheckout B-lite single-collection migration', () => {
         expect(migrationFiles).toEqual([
             '20260813041712_precheckout_blite_single_collection.sql',
             '20260814123000_precheckout_blite_missing_source_status_fail_open.sql',
+            '20260814140000_precheckout_blite_reload_schema_cache.sql',
         ]);
         const runbook = readRunbook();
         expect(runbook).toMatch(
-            /exact allowlist contains only[\s\S]*`20260813041712_precheckout_blite_single_collection\.sql`[\s\S]*`20260814123000_precheckout_blite_missing_source_status_fail_open\.sql`/,
+            /exact allowlist contains only[\s\S]*`20260813041712_precheckout_blite_single_collection\.sql`[\s\S]*`20260814123000_precheckout_blite_missing_source_status_fail_open\.sql`[\s\S]*`20260814140000_precheckout_blite_reload_schema_cache\.sql`/,
         );
         expect(runbook).not.toMatch(/20260813\d+_precheckout_blite_dispatch_recovery\.sql/);
 
@@ -265,5 +276,11 @@ describe('precheckout B-lite single-collection migration', () => {
         expect(migration).toContain("failure_reason = 'dispatch_failed'");
         expect(migration).toContain('public.precheckout_blite_dispatches AS dispatch');
         expect(migration).toContain('DELETE FROM public.precheckout_blite_dispatches');
+    });
+
+    it('refreshes PostgREST after publishing the durable finalizer and dispatch RPCs', () => {
+        const repair = readSchemaCacheRepairMigration();
+        expect(repair).toContain("NOTIFY pgrst, 'reload schema';");
+        expect(repair).not.toMatch(/DROP\s+(TABLE|FUNCTION|COLUMN)/i);
     });
 });

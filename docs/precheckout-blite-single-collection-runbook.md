@@ -10,8 +10,9 @@ ready-preflight card and plans remain the rollback surface until a reviewed coho
    flow. Do not use a direct Vercel deploy: only a merge to `main` may trigger the Vercel
    production integration.
 2. In an isolated Supabase worktree, confirm the exact allowlist contains only
-   `20260813041712_precheckout_blite_single_collection.sql` and
-   `20260814123000_precheckout_blite_missing_source_status_fail_open.sql`. Run the approved
+   `20260813041712_precheckout_blite_single_collection.sql`,
+   `20260814123000_precheckout_blite_missing_source_status_fail_open.sql`, and
+   `20260814140000_precheckout_blite_reload_schema_cache.sql`. Run the approved
    dry-run there; never use `supabase db push --include-all` from a mixed or dirty worktree.
 3. Apply that approved migration before enabling any application cohort. If an apply command
    appears to hang, inspect remote migration history before stopping it and never retry blindly.

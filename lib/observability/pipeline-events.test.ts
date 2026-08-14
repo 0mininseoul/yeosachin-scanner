@@ -18,6 +18,7 @@ const PIPELINE_EVENTS = [
     'precheckout_blite.completed',
     'precheckout_blite.profile_collection_failed',
     'precheckout_blite.inference_failed',
+    'precheckout_blite.finalizer_failed',
     'precheckout_blite.fallback_latched',
     'precheckout_blite.demo_completed',
     'precheckout_blite.demo_failed',

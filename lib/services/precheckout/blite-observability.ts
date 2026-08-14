@@ -26,6 +26,8 @@ export type PrecheckoutBliteProfileFailureCategory =
 
 export type PrecheckoutBliteInferenceFailureReason = 'provider' | 'timeout' | 'invalid';
 
+export type PrecheckoutBliteFinalizerFailureReason = 'schema_cache_miss' | 'fence_lost';
+
 export const PRECHECKOUT_BLITE_FALLBACK_REASONS = [
     'terminal_before_48',
     'unresolved_at_48',
@@ -196,6 +198,26 @@ export function createPrecheckoutBliteObservability({
                 failure.errorCode,
             );
         },
+        sourceFinalizerFailed(reason: PrecheckoutBliteFinalizerFailureReason): void {
+            try {
+                operationalLogger.emit({
+                    event: 'precheckout_blite.finalizer_failed',
+                    severity: 'warn',
+                    fields: {
+                        preflight_id: preflightId,
+                        provider: 'supabase',
+                        operation: 'precheckout_blite',
+                        phase: 'finalize',
+                        duration_ms: Math.max(0, now() - startedAtMs),
+                        disposition: 'fallback',
+                        error_code: 'PREFLIGHT_PERSISTENCE_ERROR',
+                        correlation: reason,
+                    },
+                });
+            } catch {
+                // Observability must never change the preflight outcome.
+            }
+        },
         inferenceAttempt(telemetry: GeminiAttemptTelemetry): void {
             if (telemetry.disposition === 'success') return;
             if (telemetry.disposition === 'rate_limited' && telemetry.attempt < 4) return;
@@ -235,4 +257,15 @@ export function createPrecheckoutBliteObservability({
     };
 }
 
-export type PrecheckoutBliteObservability = ReturnType<typeof createPrecheckoutBliteObservability>;
+type PrecheckoutBliteObservabilityImplementation =
+    ReturnType<typeof createPrecheckoutBliteObservability>;
+
+/** Optional keeps injected legacy sinks source-compatible while the default sink records it. */
+export type PrecheckoutBliteObservability = Omit<
+    PrecheckoutBliteObservabilityImplementation,
+    'sourceFinalizerFailed'
+> & {
+    sourceFinalizerFailed?: (
+        reason: PrecheckoutBliteFinalizerFailureReason,
+    ) => void;
+};
