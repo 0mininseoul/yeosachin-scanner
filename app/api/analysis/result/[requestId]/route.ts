@@ -65,22 +65,24 @@ export async function GET(
             }, { status: 409, headers: demoResponseHeaders() });
         }
 
-        if (
-            isAnalysisResultOperator({ id: user.id, email: user.email })
-            && await resolveAnalysisResultOwner(requestId)
-        ) {
-            return NextResponse.json({
-                error: 'V2 분석은 전용 결과 경로를 사용합니다.',
-                code: 'V2_ROUTE_REQUIRED',
-                pipelineVersion: 'v2',
-                resultUrl: `/api/analysis/v2/result/${encodeURIComponent(requestId)}`,
-            }, {
-                status: 409,
-                headers: {
-                    'Cache-Control': 'private, no-store, max-age=0',
-                    Vary: 'Cookie',
-                },
-            });
+        const operator = isAnalysisResultOperator({ id: user.id, email: user.email });
+        let authorizedUserId = user.id;
+        if (operator) {
+            if (await resolveAnalysisResultOwner(requestId)) {
+                return NextResponse.json({
+                    error: 'V2 분석은 전용 결과 경로를 사용합니다.',
+                    code: 'V2_ROUTE_REQUIRED',
+                    pipelineVersion: 'v2',
+                    resultUrl: `/api/analysis/v2/result/${encodeURIComponent(requestId)}`,
+                }, {
+                    status: 409,
+                    headers: {
+                        'Cache-Control': 'private, no-store, max-age=0',
+                        Vary: 'Cookie',
+                    },
+                });
+            }
+            authorizedUserId = await resolveAnalysisResultOwner(requestId, 'v1') ?? user.id;
         }
 
         // 2. 분석 요청 조회
@@ -88,7 +90,7 @@ export async function GET(
             .from('analysis_requests')
             .select('id, user_id, pipeline_version, target_instagram_id, status, progress, mutual_follows, gender_stats, step_data')
             .eq('id', requestId)
-            .eq('user_id', user.id)
+            .eq('user_id', authorizedUserId)
             .single();
 
         if (requestError || !analysisRequest) {
