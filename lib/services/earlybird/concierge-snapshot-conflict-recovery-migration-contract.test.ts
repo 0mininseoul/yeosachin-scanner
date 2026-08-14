@@ -73,6 +73,9 @@ describe('concierge snapshot-conflict recovery migration contract', () => {
             'request.preflight_id = p_preflight_id',
         );
         expect(completionPrecheckMigration).toContain(
+            "'reusable_profile_schema_version', provider_run.reusable_profile_schema_version",
+        );
+        expect(completionPrecheckMigration).toContain(
             'AND (p_request_id IS NULL OR request.id IS DISTINCT FROM p_request_id)',
         );
         expect(completionPrecheckMigration).toContain(

@@ -416,30 +416,61 @@ describe('concierge snapshot-conflict recovery in PGlite', () => {
 
         await db.exec('SET ROLE service_role');
         try {
-            await expect(db.query<{ payload: {
+            const initial = await db.query<{ payload: {
                 active_request_count: number;
                 active_job_count: number;
-                provider_runs: Array<{ operation_key: string }>;
+                provider_runs: Array<{
+                    operation_key: string;
+                    reusable_profile_schema_version: number | null;
+                }>;
                 fulfillment: { status: string };
             } }>(
                 `SELECT public.inspect_earlybird_concierge_snapshot_conflict_precheck(
                     $1,$2,$3,$4,NULL
                  ) AS payload`,
                 [incident.orderId, incident.preflightId, MANUAL_REVIEW_AT, ADMISSION_REFRESHED_AT],
-            )).resolves.toMatchObject({
-                rows: [{
-                    payload: {
-                        active_request_count: 0,
-                        active_job_count: 0,
-                        fulfillment: { status: 'manual_review' },
-                        provider_runs: expect.arrayContaining([
-                            expect.objectContaining({ operation_key: 'target-profile-fresh-admission:g1' }),
-                            expect.objectContaining({ operation_key: 'target-profile-fresh-admission:g2' }),
-                            expect.objectContaining({ operation_key: 'target-profile-fresh-admission:g3' }),
-                        ]),
-                    },
-                }],
-            });
+            );
+            expect(initial.rows).toMatchObject([{
+                payload: {
+                    active_request_count: 0,
+                    active_job_count: 0,
+                    fulfillment: { status: 'manual_review' },
+                    provider_runs: expect.arrayContaining([
+                        expect.objectContaining({
+                            operation_key: 'target-profile-fresh-admission:g1',
+                            reusable_profile_schema_version: 1,
+                        }),
+                        expect.objectContaining({ operation_key: 'target-profile-fresh-admission:g2' }),
+                        expect.objectContaining({ operation_key: 'target-profile-fresh-admission:g3' }),
+                    ]),
+                },
+            }]);
+            await db.exec('RESET ROLE');
+            await db.query(
+                `UPDATE public.analysis_preflight_provider_runs
+                 SET reusable_profile_schema_version=NULL
+                 WHERE preflight_id=$1
+                   AND operation_key='target-profile-fresh-admission:g1'`,
+                [incident.preflightId],
+            );
+            await db.exec('SET ROLE service_role');
+            const projectedDrift = await db.query<{ payload: {
+                provider_runs: Array<{
+                    operation_key: string;
+                    reusable_profile_schema_version: number | null;
+                }>;
+            } }>(
+                `SELECT public.inspect_earlybird_concierge_snapshot_conflict_precheck(
+                    $1,$2,$3,$4,NULL
+                 ) AS payload`,
+                [incident.orderId, incident.preflightId, MANUAL_REVIEW_AT, ADMISSION_REFRESHED_AT],
+            );
+            expect(projectedDrift.rows[0]?.payload.provider_runs).toEqual(expect.arrayContaining([
+                expect.objectContaining({
+                    operation_key: 'target-profile-fresh-admission:g1',
+                    reusable_profile_schema_version: null,
+                }),
+            ]));
         } finally {
             await db.exec('RESET ROLE');
         }
@@ -470,8 +501,42 @@ describe('concierge snapshot-conflict recovery in PGlite', () => {
             expect(scoped.rows).toMatchObject([{
                 payload: { active_request_count: 1, active_job_count: 1 },
             }]);
+            const excluded = await db.query<{ payload: {
+                active_request_count: number;
+                active_job_count: number;
+            } }>(
+                `SELECT public.inspect_earlybird_concierge_snapshot_conflict_precheck(
+                    $1,$2,$3,$4,$5
+                 ) AS payload`,
+                [
+                    incident.orderId,
+                    incident.preflightId,
+                    MANUAL_REVIEW_AT,
+                    ADMISSION_REFRESHED_AT,
+                    samePreflightRequestId,
+                ],
+            );
+            expect(excluded.rows[0]?.payload).toMatchObject({
+                active_request_count: 0,
+                active_job_count: 0,
+            });
         } finally {
             await db.exec('RESET ROLE');
+        }
+    });
+
+    it('fails before function creation when the exact predecessor is absent', async () => {
+        const guardDb = await PGlite.create();
+        try {
+            await guardDb.exec(`
+                CREATE SCHEMA supabase_migrations;
+                CREATE TABLE supabase_migrations.schema_migrations(version TEXT PRIMARY KEY);
+            `);
+            await expect(guardDb.exec(completionPrecheckMigration)).rejects.toThrow(
+                'CONCIERGE_SNAPSHOT_COMPLETION_PRECHECK_PREDECESSOR_MISSING',
+            );
+        } finally {
+            await guardDb.close();
         }
     });
 

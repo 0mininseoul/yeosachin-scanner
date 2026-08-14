@@ -104,7 +104,7 @@ BEGIN
             'terminalized_at', provider_run.terminalized_at,
             'actual_usage_usd', provider_run.actual_usage_usd,
             'usage_reconciled_at', provider_run.usage_reconciled_at,
-            'reusable_profile_schema_version', 1
+            'reusable_profile_schema_version', provider_run.reusable_profile_schema_version
         ) ORDER BY provider_run.operation_key
     )
     INTO v_provider_runs
