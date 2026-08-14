@@ -5,6 +5,7 @@ import { describe, expect, it } from 'vitest';
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..', '..', '..');
 const resultPage = readFileSync(join(root, 'app', 'result', '[requestId]', 'page.tsx'), 'utf8');
+const highRiskSummary = readFileSync(join(root, 'components', 'high-risk-summary.tsx'), 'utf8');
 const pagination = readFileSync(join(root, 'components', 'result-pagination.tsx'), 'utf8');
 const presentation = readFileSync(
     join(root, 'lib', 'services', 'analysis', 'owner-view-presentation.ts'),
@@ -39,6 +40,7 @@ const compactSummary = resultPage.slice(
     resultPage.indexOf('{summary.v2 && counts ? ('),
     resultPage.indexOf(') : gr ? ('),
 );
+const verdictPresentation = `${compactSummary}\n${highRiskSummary}`;
 
 const reportHeader = resultPage.slice(
     resultPage.indexOf('<Eyebrow className="shrink-0">판독 리포트</Eyebrow>'),
@@ -165,17 +167,17 @@ describe('result page pagination copy contract', () => {
     it('leads the summary with the high-risk verdict rather than raw counts', () => {
         // The verdict used to sit outside the summary container in 13px grey
         // while secondary counts held the frame; it now opens the page.
-        expect(compactSummary).toContain('{highCount}');
-        expect(compactSummary).toContain('고위험 계정');
+        expect(verdictPresentation).toContain('count={highCount}');
+        expect(verdictPresentation).toContain('고위험 계정');
         expect(compactSummary).not.toContain('INSTAGRAM 원지표');
     });
 
     it('does not paint a clean verdict in the danger accent', () => {
         // Zero high-risk accounts is the best outcome; rendering it in crimson
         // would make the safest result read as the most alarming one.
-        expect(compactSummary).toContain("highCount > 0 ? 'text-blood-2' : 'text-jade'");
+        expect(verdictPresentation).toContain("safeCount > 0 ? 'text-blood-2' : 'text-jade'");
         // The rail is an absolutely-positioned span so it can draw downward.
-        expect(compactSummary).toContain("highCount > 0 ? 'bg-blood' : 'bg-jade'");
+        expect(verdictPresentation).toContain("safeCount > 0 ? 'bg-blood' : 'bg-jade'");
     });
 
     it('reveals the header in hierarchy order and survives reduced motion', () => {
@@ -184,9 +186,9 @@ describe('result page pagination copy contract', () => {
         // Anchored on class names: in JSX the style attribute follows className,
         // so the nearest delay after the anchor belongs to that element.
         const delayOf = (className: string) => {
-            const at = compactSummary.indexOf(className);
+            const at = verdictPresentation.indexOf(className);
             expect(at, `missing anchor: ${className}`).toBeGreaterThan(-1);
-            const found = /animationDelay: '(\d+)ms'/.exec(compactSummary.slice(at, at + 400));
+            const found = /animationDelay: '(\d+)ms'/.exec(verdictPresentation.slice(at, at + 400));
             return Number(found?.[1] ?? NaN);
         };
         const lockup = delayOf('reveal mt-5 flex items-start');
@@ -198,7 +200,7 @@ describe('result page pagination copy contract', () => {
         expect(label).toBeLessThan(context);
         // The count-up is JS-driven, so the CSS reduced-motion block cannot cover
         // it; the hook has to opt out on its own.
-        expect(resultPage).toContain('useCountUp');
+        expect(highRiskSummary).toContain('useCountUp');
         expect(globals).toContain('prefers-reduced-motion');
     });
 

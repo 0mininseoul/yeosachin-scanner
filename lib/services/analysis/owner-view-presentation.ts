@@ -99,6 +99,32 @@ export interface ResultSummaryCounts {
     screened: number;
 }
 
+export type OwnerRiskGrade = 'high_risk' | 'caution' | 'normal';
+
+/**
+ * Counts only the canonical grade returned by the V1 result service.
+ *
+ * This intentionally does not use rank: ranking is presentation order and is
+ * not the result's risk classification.
+ */
+export function countHighRiskGrades(
+    accounts: readonly { riskGrade: OwnerRiskGrade }[],
+): number {
+    return accounts.filter(account => account.riskGrade === 'high_risk').length;
+}
+
+/**
+ * Counts only the canonical band returned by the V2 result service.
+ *
+ * Keep this separate from the V1 helper so a future contract change cannot
+ * silently make the UI count a derived score or featured rank instead.
+ */
+export function countHighRiskBands(
+    accounts: readonly { riskBand: OwnerRiskGrade }[],
+): number {
+    return accounts.filter(account => account.riskBand === 'high_risk').length;
+}
+
 // The contract guarantees publicMutuals + privateMutuals === detectedMutuals and
 // that the gender totals sum to screenedMutuals (the screened public count). These
 // are surfaced verbatim so the header numbers stay internally consistent.
@@ -204,8 +230,6 @@ export function resultPaginationModel(input: {
         hasNext: pageIndex < lastIndex,
     };
 }
-
-type OwnerRiskGrade = 'high_risk' | 'caution' | 'normal';
 
 // The threat meter renders as a fixed 10-segment gauge so that one filled
 // segment maps to one point of the rounded 1-10 risk score.
