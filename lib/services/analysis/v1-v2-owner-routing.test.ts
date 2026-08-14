@@ -237,9 +237,12 @@ describe('owner-facing V1/V2 route selection', () => {
             target_instagram_id: 'target',
             status: 'completed',
             progress: 100,
-            mutual_follows: 5,
-            gender_stats: { male: 0, female: 5, unknown: 0 },
-            step_data: {},
+            mutual_follows: 150,
+            gender_stats: { male: 100, female: 5, unknown: 43 },
+            step_data: {
+                mutualFollows: ['candidate_1'],
+                conciergeEvidence: { hydration: { hydrated: 149, unresolved: 1 } },
+            },
         };
         const resultRows = Array.from({ length: 5 }, (_, index) => ({
             rank: index + 1,
@@ -291,7 +294,11 @@ describe('owner-facing V1/V2 route selection', () => {
         mocks.from.mockImplementation((table: string) => {
             if (table === 'analysis_requests') return requestQuery;
             if (table === 'analysis_results') return listQuery(resultRows);
-            if (table === 'private_accounts') return listQuery([]);
+            if (table === 'private_accounts') return listQuery([{
+                instagram_id: 'private_candidate',
+                full_name: 'Private Candidate',
+                profile_image: null,
+            }]);
             throw new Error(`unexpected table: ${table}`);
         });
 
@@ -301,8 +308,12 @@ describe('owner-facing V1/V2 route selection', () => {
         );
 
         expect(response.status).toBe(200);
-        const payload = await response.json() as { femaleAccounts?: unknown[] };
+        const payload = await response.json() as {
+            femaleAccounts?: unknown[];
+            summary?: { mutualFollows?: number; analyzedMutuals?: number };
+        };
         expect(payload.femaleAccounts).toHaveLength(5);
+        expect(payload.summary).toMatchObject({ mutualFollows: 150, analyzedMutuals: 149 });
         expect(payload.femaleAccounts).toEqual(expect.arrayContaining([
             expect.objectContaining({
                 instagramId: 'candidate_1',

@@ -49,6 +49,20 @@ export function orderedMutualUsernamesFromStepData(stepData: unknown): string[] 
     );
 }
 
+/** Hydrated public/private mutual count persisted by the exact concierge correction. */
+export function hydratedMutualCountFromStepData(stepData: unknown): number | undefined {
+    if (!stepData || typeof stepData !== 'object' || Array.isArray(stepData)) return undefined;
+    const evidence = (stepData as {
+        conciergeEvidence?: { hydration?: { hydrated?: unknown } };
+    }).conciergeEvidence;
+    const hydrated = evidence?.hydration?.hydrated;
+    return typeof hydrated === 'number'
+        && Number.isSafeInteger(hydrated)
+        && hydrated >= 0
+        ? hydrated
+        : undefined;
+}
+
 export function inferRecentMutualFemaleRanks(
     orderedMutualUsernames: readonly string[],
     publicFemaleUsernames: readonly string[]

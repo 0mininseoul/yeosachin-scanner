@@ -1,6 +1,7 @@
 import { createClient } from '@/lib/supabase/server';
 import { supabaseAdmin } from '@/lib/supabase/admin';
 import {
+    hydratedMutualCountFromStepData,
     inferRecentMutualFemaleRanks,
     orderedMutualUsernamesFromStepData,
 } from '@/lib/services/analysis/recent-mutuals';
@@ -209,6 +210,8 @@ export async function GET(
             profileImage: createImageProxyPath(account.profile_image),
             instagramUrl: `https://instagram.com/${account.instagram_id}`,
         })) || [];
+        const analyzedMutuals = hydratedMutualCountFromStepData(analysisRequest.step_data)
+            ?? totalGender + privateAccountsList.length;
 
         // 9. 응답 구성
         return NextResponse.json({
@@ -220,6 +223,7 @@ export async function GET(
                     targetProfileImageFromStepData(analysisRequest.step_data)
                 ),
                 mutualFollows: analysisRequest.mutual_follows || 0,
+                analyzedMutuals,
                 genderRatio,
             },
             femaleAccounts,

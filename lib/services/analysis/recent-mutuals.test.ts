@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
     getRecentMutualBonus,
+    hydratedMutualCountFromStepData,
     inferRecentMutualFemaleRanks,
     orderedMutualUsernamesFromStepData,
 } from './recent-mutuals';
@@ -50,6 +51,19 @@ describe('recent mutual inference', () => {
         })).toEqual(['first', 'second']);
         expect(orderedMutualUsernamesFromStepData(null)).toEqual([]);
         expect(orderedMutualUsernamesFromStepData({ mutualFollows: 'first' })).toEqual([]);
+    });
+
+    it('reads a bounded hydrated mutual count from concierge evidence', () => {
+        expect(hydratedMutualCountFromStepData({
+            mutualFollows: Array.from({ length: 150 }, (_, index) => `candidate_${index}`),
+            conciergeEvidence: {
+                hydration: { hydrated: 149, unresolved: 1 },
+            },
+        })).toBe(149);
+        expect(hydratedMutualCountFromStepData({ conciergeEvidence: { hydration: { hydrated: -1 } } }))
+            .toBeUndefined();
+        expect(hydratedMutualCountFromStepData({ conciergeEvidence: { hydration: { hydrated: '149' } } }))
+            .toBeUndefined();
     });
 });
 

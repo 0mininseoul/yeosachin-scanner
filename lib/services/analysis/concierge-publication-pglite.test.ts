@@ -129,6 +129,7 @@ describe('concierge publication persistence contract', () => {
             lineage: {
                 schema: 'concierge-exact-mutual-v1',
                 sourceFingerprint: 'a'.repeat(64),
+                hydration: { exactMutual: 150, hydrated: 149, public: 148, private: 1, unresolved: 1 },
             },
         }));
 
@@ -149,6 +150,7 @@ describe('concierge publication persistence contract', () => {
                 conciergeEvidence: {
                     schema: 'concierge-exact-mutual-v1',
                     sourceFingerprint: 'a'.repeat(64),
+                    hydration: { exactMutual: 150, hydrated: 149, public: 148, private: 1, unresolved: 1 },
                 },
             },
         });
