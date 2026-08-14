@@ -1,0 +1,48 @@
+{
+  "schema_version": "concierge-sample-payload-v0",
+  "generated_at_utc": "2026-08-14T07:35:23.300Z",
+  "scope": {
+    "order_selector": "2026-08-12T09:07:50.058649Z|basic",
+    "eligible": true,
+    "manifest_reconciliation": {
+      "original_rows": 34,
+      "excluded_refund_or_cancelled": 4,
+      "excluded_unpaid_duplicate_test_or_admin": 0,
+      "eligible_paid_orders": 30,
+      "sample_still_eligible": true
+    },
+    "payment_evidence_changed": false
+  },
+  "collection": {
+    "source": "already_durable_target_evidence",
+    "manifest_revision": 1,
+    "interactor_count": 95,
+    "liker_count": 83,
+    "comment_count": 12,
+    "provider_started": false,
+    "credential_slot": "tertiary",
+    "token_printed": false
+  },
+  "analysis": {
+    "pipeline": "existing_v2_pure_functions",
+    "status": "quality_review_pending_missing_candidate_features",
+    "candidate_count": 95,
+    "top_risk_entries": [
+      { "rank": 1, "username": "<redacted>", "score": null, "risk_band": null },
+      { "rank": 2, "username": "<redacted>", "score": null, "risk_band": null },
+      { "rank": 3, "username": "<redacted>", "score": null, "risk_band": null }
+    ],
+    "missing_data_limitations": [
+      "Per-candidate profile, appearance, exposure, reverse-like, and mention features were not present in the local durable manifest.",
+      "No score or risk band is asserted; redacted entries are review placeholders only.",
+      "No database persistence, result URL, provider call, or email was performed."
+    ]
+  },
+  "verification": {
+    "payload_shape_smoke_check": "passed",
+    "privacy_check": "passed_no_tokens_uuids_emails_usernames_or_raw_payload",
+    "remote_mutation": false,
+    "elapsed_seconds_from_inbox_instruction": 181.3
+  },
+  "review_gate": "user_sample_review_required_before_any_remaining_order_provider_start"
+}
