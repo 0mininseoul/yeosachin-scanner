@@ -30,6 +30,8 @@ export interface ConciergePrivacyPartition {
     profiles: readonly InstagramProfile[];
     publicProfiles: readonly InstagramProfile[];
     privateProfiles: readonly InstagramProfile[];
+    /** Exact mutual accounts that could not be classified from authoritative profile hydration. */
+    unresolvedUsernames: readonly string[];
     relationshipRows: readonly ConciergeRelationshipEvidence[];
     orderedMutualUsernames: readonly string[];
 }
@@ -104,6 +106,8 @@ function requireRelationshipSides(
 export function deriveConciergePrivacyPartition(input: {
     profiles: readonly InstagramProfile[];
     relationshipRows: readonly ConciergeRelationshipEvidence[];
+    /** Exact follow intersection mode. Missing profile hydration stays unresolved. */
+    requireExactMutual?: boolean;
 }): ConciergePrivacyPartition {
     const profilesByUsername = new Map<string, InstagramProfile>();
     for (const profile of input.profiles) {
@@ -117,6 +121,22 @@ export function deriveConciergePrivacyPartition(input: {
         ...row,
         username: normalizedUsername(row.username),
     }));
+    const relationshipKeys = new Set<string>();
+    for (const row of relationshipRows) {
+        const key = `${row.side}:${row.username}`;
+        if (relationshipKeys.has(key)) {
+            throw new Error('CONCIERGE_PRIVACY_RELATIONSHIP_EVIDENCE_INCOMPLETE');
+        }
+        relationshipKeys.add(key);
+    }
+    const followerNames = new Set(
+        relationshipRows.filter(row => row.side === 'follower').map(row => row.username),
+    );
+    const orderedMutualUsernames = relationshipRows
+        .filter(row => row.side === 'following' && followerNames.has(row.username))
+        .sort((left, right) => left.ordinal - right.ordinal)
+        .map(row => row.username);
+    const mutualNames = new Set(orderedMutualUsernames);
     const publicProfiles: InstagramProfile[] = [];
     const privateProfiles: InstagramProfile[] = [];
     for (const [username, profile] of profilesByUsername) {
@@ -129,17 +149,17 @@ export function deriveConciergePrivacyPartition(input: {
         }
         (profile.isPrivate ? privateProfiles : publicProfiles).push(profile);
     }
-    const followerNames = new Set(
-        relationshipRows.filter(row => row.side === 'follower').map(row => row.username),
-    );
-    const orderedMutualUsernames = relationshipRows
-        .filter(row => row.side === 'following' && followerNames.has(row.username))
-        .sort((left, right) => left.ordinal - right.ordinal)
-        .map(row => row.username);
+    if (input.requireExactMutual && [...profilesByUsername.keys()].some(username => !mutualNames.has(username))) {
+        throw new Error('CONCIERGE_PRIVACY_PROFILE_NOT_EXACT_MUTUAL');
+    }
+    const unresolvedUsernames = input.requireExactMutual
+        ? orderedMutualUsernames.filter(username => !profilesByUsername.has(username))
+        : [];
     return Object.freeze({
         profiles: Object.freeze([...input.profiles]),
         publicProfiles: Object.freeze(publicProfiles),
         privateProfiles: Object.freeze(privateProfiles),
+        unresolvedUsernames: Object.freeze(unresolvedUsernames),
         relationshipRows: Object.freeze(relationshipRows),
         orderedMutualUsernames: Object.freeze(orderedMutualUsernames),
     });
@@ -318,21 +338,26 @@ export function buildCanonicalConciergeResult(input: {
             male: maleDetails.length,
             female: femaleDetails.length,
             unknownPublic,
-            unknown: unknownPublic + privateRows.length,
+            // Private accounts are deliberately excluded from gender totals. They are
+            // exposed through privateRows and are never sent to the AI gender resolver.
+            unknown: unknownPublic,
         },
     };
 }
 
 export function validateCanonicalConciergeCorrection(input: {
     fetchedCount: number;
-    partition: Pick<ConciergePrivacyPartition, 'publicProfiles' | 'privateProfiles'>;
+    partition: Pick<ConciergePrivacyPartition, 'publicProfiles' | 'privateProfiles'> & {
+        unresolvedUsernames?: readonly string[];
+    };
     result: ReturnType<typeof buildCanonicalConciergeResult>;
 }): void {
     const { fetchedCount, partition, result } = input;
-    if (partition.publicProfiles.length + partition.privateProfiles.length !== fetchedCount) {
+    const unresolvedCount = partition.unresolvedUsernames?.length ?? 0;
+    if (partition.publicProfiles.length + partition.privateProfiles.length + unresolvedCount !== fetchedCount) {
         throw new Error('CONCIERGE_COUNT_RECONCILIATION_FAILED');
     }
-    if (result.counts.male + result.counts.female + result.counts.unknown !== fetchedCount) {
+    if (result.counts.male + result.counts.female + result.counts.unknown !== partition.publicProfiles.length) {
         throw new Error('CONCIERGE_GENDER_COUNT_RECONCILIATION_FAILED');
     }
     if (result.femaleRows.some(row => row.risk_grade === 'high_risk' && row.risk_analysis.length === 0)) {

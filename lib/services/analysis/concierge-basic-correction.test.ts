@@ -64,7 +64,7 @@ describe('concierge basic correction', () => {
         const result = {
             femaleRows: [{ risk_grade: 'high_risk', risk_analysis: ['첫 문장', '둘째 문장'] }],
             privateRows: [],
-            counts: { male: 1, female: 1, unknownPublic: 0, unknown: 1 },
+            counts: { male: 1, female: 1, unknownPublic: 0, unknown: 0 },
         } as never;
         expect(() => validateCanonicalConciergeCorrection({
             fetchedCount: 3,
@@ -82,5 +82,31 @@ describe('concierge basic correction', () => {
             },
             result,
         })).toThrow('CONCIERGE_COUNT_RECONCILIATION_FAILED');
+    });
+
+    it('keeps missing exact-mutual hydration outside privacy and gender totals', () => {
+        const partition = deriveConciergePrivacyPartition({
+            profiles: [profile('public.one', false)],
+            relationshipRows: [
+                relationship('public.one', 'follower', false, 1),
+                relationship('unknown.one', 'follower', false, 2),
+                relationship('public.one', 'following', false, 1),
+                relationship('unknown.one', 'following', false, 2),
+            ],
+            requireExactMutual: true,
+        });
+        expect(partition.publicProfiles).toHaveLength(1);
+        expect(partition.privateProfiles).toHaveLength(0);
+        expect(partition.unresolvedUsernames).toEqual(['unknown.one']);
+        const result = {
+            femaleRows: [],
+            privateRows: [],
+            counts: { male: 0, female: 0, unknownPublic: 1, unknown: 1 },
+        } as never;
+        expect(() => validateCanonicalConciergeCorrection({
+            fetchedCount: 2,
+            partition,
+            result,
+        })).not.toThrow();
     });
 });
