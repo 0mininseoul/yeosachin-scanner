@@ -25,6 +25,9 @@ import {
 import {
     availablePendingTargetStorage,
     clearPendingAnalysisTargetForTerminalState,
+    clearPreflightDisplayTarget,
+    clearPreflightDisplayTargetForTerminalState,
+    storePreflightDisplayTarget,
     type PendingTargetStorage,
 } from '@/lib/services/pending-analysis-target';
 import { EVENTS, trackEvent } from '@/lib/services/analytics';
@@ -180,7 +183,13 @@ export function redirectConsumedPreflight(
     { replace, storage }: ConsumedPreflightRedirectDependencies,
 ): boolean {
     if (status.status !== 'consumed') return false;
-    if (storage) clearPendingAnalysisTargetForTerminalState(storage, status.status);
+    if (storage) {
+        clearPendingAnalysisTargetForTerminalState(storage, status.status);
+        clearPreflightDisplayTargetForTerminalState(storage, {
+            preflightId: status.preflightId,
+            status: status.status,
+        });
+    }
     replace(`/progress/${encodeURIComponent(status.requestId)}`);
     return true;
 }
@@ -493,6 +502,13 @@ export function useAnalysisV2Preflight({
         })) {
             return parsed.data;
         }
+        const storage = availablePendingTargetStorage();
+        if (storage) {
+            clearPreflightDisplayTargetForTerminalState(storage, {
+                preflightId: parsed.data.preflightId,
+                status: parsed.data.status,
+            });
+        }
         setPreflight(current => mergeLoadedPreflight(current, parsed.data));
         setExclusionState(current => restoreExclusionState(
             current,
@@ -538,6 +554,11 @@ export function useAnalysisV2Preflight({
             return await loadPreflight(preflightId, scope) !== null;
         } catch (cause) {
             if (scope.isCurrent()) {
+                const terminal = cause instanceof AnalyticsRequestError && cause.terminal;
+                if (terminal) {
+                    const storage = availablePendingTargetStorage();
+                    if (storage) clearPreflightDisplayTarget(storage, preflightId);
+                }
                 trackPreflightAttemptFailure(cause, preflightId);
                 setError(cause instanceof Error
                     ? cause.message
@@ -631,6 +652,15 @@ export function useAnalysisV2Preflight({
             setLoginFallbackRequired(false);
             if (!scope.isCurrent()) return null;
             if (!coordinator.attachPreflight(generation, accepted.data.preflightId)) return null;
+            if (flow === 'standard') {
+                const storage = availablePendingTargetStorage();
+                if (storage) {
+                    storePreflightDisplayTarget(storage, {
+                        preflightId: accepted.data.preflightId,
+                        target: normalized,
+                    });
+                }
+            }
             if (preflightStartedAtRef.current !== null) {
                 persistPreflightStartedAt(
                     availableAnalyticsStorage(),
@@ -965,8 +995,13 @@ export function useAnalysisV2Preflight({
                 if (next?.status === 'pending') schedule();
             } catch (cause) {
                 if (scope.isCurrent()) {
+                    const terminal = cause instanceof AnalyticsRequestError && cause.terminal;
+                    if (terminal) {
+                        const storage = availablePendingTargetStorage();
+                        if (storage) clearPreflightDisplayTarget(storage, pollingPreflightId);
+                    }
                     setError(cause instanceof Error ? cause.message : '사전 점검 상태를 확인할 수 없습니다.');
-                    if (cause instanceof AnalyticsRequestError && cause.terminal) {
+                    if (terminal) {
                         coordinator.beginLifecycle();
                         idempotencyRef.current = null;
                         preflightStartedAtRef.current = null;
