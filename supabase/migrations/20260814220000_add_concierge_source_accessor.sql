@@ -31,9 +31,19 @@ BEGIN
       ON earlybird_order.id = replay.order_id
     JOIN public.analysis_requests AS source_request
       ON source_request.id = replay.original_failed_request_id
+    JOIN public.analysis_preflights AS source_preflight
+      ON source_preflight.id = source_request.preflight_id
+    JOIN public.analysis_preflights AS current_preflight
+      ON current_preflight.id = replay.rearmed_preflight_id
+     AND current_preflight.id = earlybird_order.preflight_id
     WHERE replay.order_id = p_order_id
       AND source_request.user_id = earlybird_order.user_id
-      AND source_request.target_instagram_id = earlybird_order.target_instagram_id
+      AND source_preflight.user_id = earlybird_order.user_id
+      AND source_preflight.target_instagram_id = 'retained.'
+          || pg_catalog.substr(
+              pg_catalog.replace(source_preflight.id::TEXT, '-', ''), 1, 20
+          )
+      AND current_preflight.user_id = earlybird_order.user_id
       AND source_request.pipeline_version = 'v2'
       AND source_request.status = 'failed';
 
@@ -50,9 +60,19 @@ BEGIN
       ON earlybird_order.id = replay.order_id
     JOIN public.analysis_requests AS source_request
       ON source_request.id = replay.original_failed_request_id
+    JOIN public.analysis_preflights AS source_preflight
+      ON source_preflight.id = source_request.preflight_id
+    JOIN public.analysis_preflights AS current_preflight
+      ON current_preflight.id = replay.rearmed_preflight_id
+     AND current_preflight.id = earlybird_order.preflight_id
     WHERE replay.order_id = p_order_id
       AND source_request.user_id = earlybird_order.user_id
-      AND source_request.target_instagram_id = earlybird_order.target_instagram_id
+      AND source_preflight.user_id = earlybird_order.user_id
+      AND source_preflight.target_instagram_id = 'retained.'
+          || pg_catalog.substr(
+              pg_catalog.replace(source_preflight.id::TEXT, '-', ''), 1, 20
+          )
+      AND current_preflight.user_id = earlybird_order.user_id
       AND source_request.pipeline_version = 'v2'
       AND source_request.status = 'failed';
     IF v_source_request_id IS NULL THEN

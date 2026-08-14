@@ -235,18 +235,23 @@ async function hydrateExactMutualProfiles(
     };
 }
 
-async function loadTargetEvidence(sourceRequestId: string): Promise<readonly TargetEvidenceRow[]> {
-    const { data, error } = await supabaseAdmin.rpc('load_analysis_v2_target_evidence', {
-        p_request_id: sourceRequestId,
-        p_job_key: 'track:target-evidence:collect',
-    });
-    if (error || !data || typeof data !== 'object') throw new Error('CONCIERGE_TARGET_EVIDENCE_LOOKUP_FAILED');
-    const payload = data as { rows?: unknown; manifest?: { interactorCount?: number } };
-    const rows = z.array(targetEvidenceRowSchema).parse(payload.rows ?? []);
-    if (rows.length !== 95 || payload.manifest?.interactorCount !== 95) {
-        throw new Error('CONCIERGE_TARGET_EVIDENCE_SCOPE_CONFLICT');
+export function targetEvidenceFromStepData(stepData: unknown): readonly TargetEvidenceRow[] {
+    if (!stepData || typeof stepData !== 'object' || Array.isArray(stepData)) {
+        throw new Error('CONCIERGE_TARGET_EVIDENCE_UNAVAILABLE');
     }
-    return rows;
+    const root = stepData as {
+        targetEvidence?: unknown;
+        targetInteractionEvidence?: unknown;
+        conciergeEvidence?: { targetEvidence?: unknown };
+    };
+    const retained = root.targetEvidence
+        ?? root.targetInteractionEvidence
+        ?? root.conciergeEvidence?.targetEvidence;
+    const parsed = z.array(targetEvidenceRowSchema).safeParse(retained);
+    if (!parsed.success || parsed.data.length !== 95) {
+        throw new Error('CONCIERGE_TARGET_EVIDENCE_UNAVAILABLE');
+    }
+    return Object.freeze(parsed.data.map(row => Object.freeze(row)));
 }
 
 function relationshipEvidence(
@@ -283,24 +288,35 @@ export function buildAtomicPublicationSql(input: {
 DO $guard$
 DECLARE
   v_pointer uuid;
+  v_order_user_id uuid;
+  v_order_target text;
   v_order_status text;
   v_plan_id text;
   v_paid_at timestamptz;
+  v_request_user_id uuid;
+  v_request_target text;
   v_request_status text;
   v_pipeline_version text;
 BEGIN
-  SELECT result_request_id, status, plan_id, paid_at
-    INTO v_pointer, v_order_status, v_plan_id, v_paid_at
+  SELECT result_request_id, user_id, target_instagram_id, status, plan_id, paid_at
+    INTO v_pointer, v_order_user_id, v_order_target, v_order_status, v_plan_id, v_paid_at
     FROM public.earlybird_orders WHERE id = ${orderId} FOR SHARE;
   IF v_pointer IS DISTINCT FROM ${requestId}
      OR v_order_status <> 'completed' OR v_plan_id <> 'basic'
      OR v_paid_at < '${SAMPLE_START}'::timestamptz OR v_paid_at >= '${SAMPLE_END}'::timestamptz THEN
     RAISE EXCEPTION 'CONCIERGE_ATOMIC_SCOPE_CONFLICT';
   END IF;
-  SELECT status, pipeline_version INTO v_request_status, v_pipeline_version
+  SELECT status, pipeline_version, user_id, target_instagram_id
+    INTO v_request_status, v_pipeline_version, v_request_user_id, v_request_target
     FROM public.analysis_requests WHERE id = ${requestId} FOR UPDATE;
   IF v_request_status <> 'completed' OR v_pipeline_version <> 'v1' THEN
     RAISE EXCEPTION 'CONCIERGE_ATOMIC_REQUEST_SCOPE_CONFLICT';
+  END IF;
+  IF v_request_user_id IS NULL OR v_order_user_id IS NULL
+     OR v_request_user_id IS DISTINCT FROM v_order_user_id
+     OR v_request_target IS NULL OR v_order_target IS NULL
+     OR lower(btrim(v_request_target)) IS DISTINCT FROM lower(btrim(v_order_target)) THEN
+    RAISE EXCEPTION 'CONCIERGE_ATOMIC_IDENTITY_SCOPE_CONFLICT';
   END IF;
 END $guard$;
 DO $completeness_guard$
@@ -403,7 +419,7 @@ async function main(): Promise<void> {
     }
     const targetPosts = targetPostMentionEvidenceFromStepData(sourceRequest.step_data);
 
-    const targetEvidence = await loadTargetEvidence(sourceRequest.id);
+    const targetEvidence = targetEvidenceFromStepData(sourceRequest.step_data);
     const followers = await collectRelationshipSide(order.target_instagram_id, 'followers');
     const following = await collectRelationshipSide(order.target_instagram_id, 'following');
     const followerNames = followers.rows.map(row => normalizedUsername(row.username));
@@ -543,6 +559,7 @@ async function main(): Promise<void> {
             unresolved: partition.unresolvedUsernames.length, runIds: hydration.lineage.runIds,
         },
     };
+    await verifyAuthorization({ userId: order.user_id }, order.result_request_id);
     applyAtomicPublication({
         orderId: order.id, requestId: order.result_request_id,
         femaleRows: result.femaleRows, privateRows: result.privateRows,
@@ -578,7 +595,6 @@ async function main(): Promise<void> {
     if (!genderStats || genderStats.male + genderStats.female + genderStats.unknown !== partition.publicProfiles.length) {
         throw new Error('CONCIERGE_PUBLIC_GENDER_STATS_VERIFY_FAILED');
     }
-    await verifyAuthorization({ userId: order.user_id }, order.result_request_id);
     console.log(JSON.stringify({
         state: 'completed',
         before: { resultRows: beforeRows.data?.length ?? 0, privateRows: beforePrivate.data?.length ?? 0 },

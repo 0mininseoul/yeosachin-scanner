@@ -31,18 +31,28 @@ beforeEach(async () => {
         CREATE TABLE public.earlybird_orders (
             id UUID PRIMARY KEY,
             user_id UUID NOT NULL,
-            target_instagram_id TEXT NOT NULL
+            target_instagram_id TEXT NOT NULL,
+            preflight_id UUID NOT NULL
         );
         CREATE TABLE public.analysis_requests (
             id UUID PRIMARY KEY,
             user_id UUID NOT NULL,
-            target_instagram_id TEXT NOT NULL,
+            target_instagram_id TEXT,
+            preflight_id UUID NOT NULL,
             pipeline_version TEXT,
             status TEXT NOT NULL
         );
+        CREATE TABLE public.analysis_preflights (
+            id UUID PRIMARY KEY,
+            user_id UUID NOT NULL,
+            target_instagram_id TEXT NOT NULL,
+            pii_scrubbed_at TIMESTAMPTZ,
+            consumed_request_id UUID
+        );
         CREATE TABLE public.earlybird_v211_concierge_replays (
             order_id UUID PRIMARY KEY,
-            original_failed_request_id UUID NOT NULL
+            original_failed_request_id UUID NOT NULL,
+            rearmed_preflight_id UUID NOT NULL
         );
         ALTER TABLE public.earlybird_v211_concierge_replays ENABLE ROW LEVEL SECURITY;
         ALTER TABLE public.earlybird_v211_concierge_replays FORCE ROW LEVEL SECURITY;
@@ -50,18 +60,28 @@ beforeEach(async () => {
     `);
     await db.exec(migration);
     await db.query(
-        `INSERT INTO public.earlybird_orders(id, user_id, target_instagram_id)
-         VALUES ($1, $2, 'target')`,
+        `INSERT INTO public.analysis_preflights(id, user_id, target_instagram_id)
+         VALUES ('523e4567-e89b-42d3-a456-426614174000', $1, 'retained.523e4567e89b42d3a456')`,
+        [OWNER_ID],
+    );
+    await db.query(
+        `INSERT INTO public.analysis_preflights(id, user_id, target_instagram_id)
+         VALUES ('623e4567-e89b-42d3-a456-426614174000', $1, 'retained.623e4567e89b42d3a456')`,
+        [OWNER_ID],
+    );
+    await db.query(
+        `INSERT INTO public.earlybird_orders(id, user_id, target_instagram_id, preflight_id)
+         VALUES ($1, $2, 'target', '623e4567-e89b-42d3-a456-426614174000')`,
         [ORDER_ID, OWNER_ID],
     );
     await db.query(
-        `INSERT INTO public.analysis_requests(id, user_id, target_instagram_id, pipeline_version, status)
-         VALUES ($1, $2, 'target', 'v2', 'failed')`,
+        `INSERT INTO public.analysis_requests(id, user_id, target_instagram_id, preflight_id, pipeline_version, status)
+         VALUES ($1, $2, NULL, '523e4567-e89b-42d3-a456-426614174000', 'v2', 'failed')`,
         [SOURCE_REQUEST_ID, OWNER_ID],
     );
     await db.query(
-        `INSERT INTO public.earlybird_v211_concierge_replays(order_id, original_failed_request_id)
-         VALUES ($1, $2)`,
+        `INSERT INTO public.earlybird_v211_concierge_replays(order_id, original_failed_request_id, rearmed_preflight_id)
+         VALUES ($1, $2, '623e4567-e89b-42d3-a456-426614174000')`,
         [ORDER_ID, SOURCE_REQUEST_ID],
     );
 });

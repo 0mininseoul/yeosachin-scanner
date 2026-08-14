@@ -10,6 +10,7 @@ const migration = readFileSync(
 
 const REQUEST_ID = '123e4567-e89b-42d3-a456-426614174000';
 const ORDER_ID = '223e4567-e89b-42d3-a456-426614174000';
+const OWNER_ID = '323e4567-e89b-42d3-a456-426614174000';
 
 let db: PGlite;
 
@@ -21,6 +22,8 @@ beforeEach(async () => {
         CREATE ROLE service_role NOLOGIN;
         CREATE TABLE public.analysis_requests (
             id UUID PRIMARY KEY,
+            user_id UUID NOT NULL,
+            target_instagram_id TEXT NOT NULL,
             status TEXT NOT NULL,
             pipeline_version TEXT NOT NULL,
             progress INTEGER NOT NULL,
@@ -35,6 +38,8 @@ beforeEach(async () => {
         );
         CREATE TABLE public.earlybird_orders (
             id UUID PRIMARY KEY,
+            user_id UUID NOT NULL,
+            target_instagram_id TEXT NOT NULL,
             result_request_id UUID NOT NULL,
             status TEXT NOT NULL,
             plan_id TEXT NOT NULL,
@@ -83,11 +88,11 @@ describe('concierge publication persistence contract', () => {
         const targetProfileImage = 'https://scontent.cdninstagram.com/target.jpg';
         await db.query(
             `INSERT INTO public.analysis_requests (
-                id, status, pipeline_version, progress, progress_step,
+                id, user_id, target_instagram_id, status, pipeline_version, progress, progress_step,
                 mutual_follows, step_data, current_step
-            ) VALUES ($1, 'completed', 'v1', 100, '완료', 149,
-                $2::jsonb, 'completed')`,
-            [REQUEST_ID, JSON.stringify({
+            ) VALUES ($1, $2, 'target', 'completed', 'v1', 100, '완료', 149,
+                $3::jsonb, 'completed')`,
+            [REQUEST_ID, OWNER_ID, JSON.stringify({
                 mutualFollows: ['candidate.one'],
                 targetProfileImage,
                 targetPosts: [{ id: 'post-1' }],
@@ -96,9 +101,9 @@ describe('concierge publication persistence contract', () => {
         );
         await db.query(
             `INSERT INTO public.earlybird_orders (
-                id, result_request_id, status, plan_id, paid_at
-            ) VALUES ($1, $2, 'completed', 'basic', '2026-08-12T09:07:30.000Z')`,
-            [ORDER_ID, REQUEST_ID],
+                id, user_id, target_instagram_id, result_request_id, status, plan_id, paid_at
+            ) VALUES ($1, $3, 'target', $2, 'completed', 'basic', '2026-08-12T09:07:30.000Z')`,
+            [ORDER_ID, REQUEST_ID, OWNER_ID],
         );
 
         await db.exec(buildAtomicPublicationSql({
@@ -172,16 +177,16 @@ describe('concierge publication persistence contract', () => {
     it('rejects a publication when the relationship snapshot is incomplete', async () => {
         await db.query(
             `INSERT INTO public.analysis_requests (
-                id, status, pipeline_version, progress, progress_step,
+                id, user_id, target_instagram_id, status, pipeline_version, progress, progress_step,
                 mutual_follows, step_data, current_step
-            ) VALUES ($1, 'completed', 'v1', 100, '완료', 149, '{}'::jsonb, 'completed')`,
-            [REQUEST_ID],
+            ) VALUES ($1, $2, 'target', 'completed', 'v1', 100, '완료', 149, '{}'::jsonb, 'completed')`,
+            [REQUEST_ID, OWNER_ID],
         );
         await db.query(
             `INSERT INTO public.earlybird_orders (
-                id, result_request_id, status, plan_id, paid_at
-            ) VALUES ($1, $2, 'completed', 'basic', '2026-08-12T09:07:30.000Z')`,
-            [ORDER_ID, REQUEST_ID],
+                id, user_id, target_instagram_id, result_request_id, status, plan_id, paid_at
+            ) VALUES ($1, $3, 'target', $2, 'completed', 'basic', '2026-08-12T09:07:30.000Z')`,
+            [ORDER_ID, REQUEST_ID, OWNER_ID],
         );
 
         await expect(db.exec(buildAtomicPublicationSql({
@@ -193,5 +198,37 @@ describe('concierge publication persistence contract', () => {
             mutualFollows: 150,
             lineage: { relationship: { completenessProven: false } },
         }))).rejects.toThrow('CONCIERGE_RELATIONSHIP_SNAPSHOT_INCOMPLETE');
+    });
+
+    it('rejects a normalized owner/target mismatch before any publication write', async () => {
+        await db.query(
+            `INSERT INTO public.analysis_requests (
+                id, user_id, target_instagram_id, status, pipeline_version, progress, progress_step,
+                mutual_follows, step_data, current_step
+            ) VALUES ($1, $2, 'other-target', 'completed', 'v1', 100, '완료', 149, '{"keep":true}'::jsonb, 'completed')`,
+            [REQUEST_ID, OWNER_ID],
+        );
+        await db.query(
+            `INSERT INTO public.earlybird_orders (
+                id, user_id, target_instagram_id, result_request_id, status, plan_id, paid_at
+            ) VALUES ($1, $3, 'target', $2, 'completed', 'basic', '2026-08-12T09:07:30.000Z')`,
+            [ORDER_ID, REQUEST_ID, OWNER_ID],
+        );
+
+        await expect(db.exec(buildAtomicPublicationSql({
+            orderId: ORDER_ID,
+            requestId: REQUEST_ID,
+            femaleRows: [],
+            privateRows: [],
+            counts: { male: 0, female: 0, unknown: 0 },
+            mutualFollows: 150,
+            lineage: { relationship: { completenessProven: true } },
+        }))).rejects.toThrow('CONCIERGE_ATOMIC_IDENTITY_SCOPE_CONFLICT');
+        await db.exec('ROLLBACK');
+
+        await expect(db.query('SELECT count(*)::int AS count FROM public.analysis_results'))
+            .resolves.toMatchObject({ rows: [{ count: 0 }] });
+        await expect(db.query('SELECT step_data FROM public.analysis_requests WHERE id = $1', [REQUEST_ID]))
+            .resolves.toMatchObject({ rows: [{ step_data: { keep: true } }] });
     });
 });

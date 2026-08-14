@@ -61,5 +61,14 @@ describe('legacy concierge result overview persistence contract', () => {
             /GRANT EXECUTE ON FUNCTION public\.read_earlybird_v211_concierge_result_source\(UUID\)[\s\S]*?TO service_role;/,
         );
         expect(sourceAccessorMigration).not.toMatch(/GRANT .* ON TABLE public\.earlybird_v211_concierge_replays/);
+        expect(sourceAccessorMigration).not.toContain(
+            'source_request.target_instagram_id = earlybird_order.target_instagram_id',
+        );
+        expect(sourceAccessorMigration).toContain('source_preflight.target_instagram_id');
+        expect(correctionScript).not.toContain("load_analysis_v2_target_evidence");
+        expect(correctionScript.indexOf('await verifyAuthorization')).toBeLessThan(
+            correctionScript.indexOf('applyAtomicPublication({'),
+        );
+        expect(correctionScript).toContain('lower(btrim(v_request_target))');
     });
 });

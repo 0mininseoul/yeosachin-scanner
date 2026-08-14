@@ -127,13 +127,13 @@ describe('concierge basic correction', () => {
             .toBeGreaterThan(withoutMention.femaleRows[0]!.risk_score);
     });
 
-    it('fails closed when retained target posts lack mention evidence', () => {
+    it('accepts the canonical target-post checkpoint while preserving optional mention evidence', () => {
         expect(targetPostMentionEvidenceFromStepData({
             targetPosts: [{ id: 'post-1', taggedUsers: ['female.1'], mentionedUsers: [] }],
         })).toEqual([{ taggedUsers: ['female.1'], mentionedUsers: [] }]);
-        expect(() => targetPostMentionEvidenceFromStepData({
+        expect(targetPostMentionEvidenceFromStepData({
             targetPosts: [{ id: 'post-1' }],
-        })).toThrow('CONCIERGE_TARGET_POSTS_UNAVAILABLE');
+        })).toEqual([{ taggedUsers: [], mentionedUsers: [] }]);
     });
 
     it('derives privacy from profile and both relationship sides instead of defaulting public', () => {

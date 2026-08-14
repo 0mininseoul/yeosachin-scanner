@@ -75,17 +75,19 @@ function parseTargetPostMentionEvidence(value: unknown): ConciergeTargetPostMent
     if (!value.every(item => {
         if (!item || typeof item !== 'object' || Array.isArray(item)) return false;
         const row = item as { id?: unknown; taggedUsers?: unknown; mentionedUsers?: unknown };
-        return typeof row.id === 'string'
-            && Array.isArray(row.taggedUsers)
-            && row.taggedUsers.every(username => typeof username === 'string')
-            && Array.isArray(row.mentionedUsers)
-            && row.mentionedUsers.every(username => typeof username === 'string');
+        const taggedUsersValid = row.taggedUsers === undefined
+            || (Array.isArray(row.taggedUsers)
+                && row.taggedUsers.every(username => typeof username === 'string'));
+        const mentionedUsersValid = row.mentionedUsers === undefined
+            || (Array.isArray(row.mentionedUsers)
+                && row.mentionedUsers.every(username => typeof username === 'string'));
+        return typeof row.id === 'string' && taggedUsersValid && mentionedUsersValid;
     })) return null;
     return value.map(item => {
-        const row = item as { taggedUsers: string[]; mentionedUsers: string[] };
+        const row = item as { taggedUsers?: string[]; mentionedUsers?: string[] };
         return {
-            taggedUsers: [...row.taggedUsers],
-            mentionedUsers: [...row.mentionedUsers],
+            taggedUsers: [...(row.taggedUsers ?? [])],
+            mentionedUsers: [...(row.mentionedUsers ?? [])],
         };
     });
 }

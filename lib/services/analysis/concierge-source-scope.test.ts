@@ -29,4 +29,11 @@ describe('concierge source request scope', () => {
             },
         ], scope)).toThrow('CONCIERGE_SAMPLE_REQUEST_SCOPE_CONFLICT');
     });
+
+    it('accepts the finalization placeholder from a scrubbed V2 source request', () => {
+        expect(selectConciergeSourceRequest([{
+            id: 'source-request', user_id: 'owner', target_instagram_id: 'retained.1234567890abcdef1234',
+            status: 'failed', pipeline_version: 'v2',
+        }], scope).id).toBe('source-request');
+    });
 });
