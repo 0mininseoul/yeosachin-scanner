@@ -331,6 +331,8 @@ async function finalizeSource(
         userId?: string | null;
         providerOperationKey?: string;
         providerRunReference?: string;
+        targetFollowersCount?: number;
+        targetFollowingCount?: number;
     } = {},
 ): Promise<boolean> {
     const collectedAt = options.collectedAt ?? nowIso(-1_000);
@@ -342,7 +344,8 @@ async function finalizeSource(
     const result = await database.query<{ result: boolean }>(
         `SELECT public.finalize_preflight_blite_source_v1(
             $1,$2,$3,$4,$5,$6,$7,
-            'Target',NULL,'https://cdninstagram.com/profile.jpg',1,1,false,
+            'Target',NULL,'https://cdninstagram.com/profile.jpg',
+            $12,$13,false,
             'basic','basic','{}'::jsonb,$8::jsonb,$9,$10,$11
         ) AS result`,
         [
@@ -350,6 +353,7 @@ async function finalizeSource(
             options.providerOperationKey ?? PROVIDER_OPERATION_KEY,
             options.providerRunReference ?? PROVIDER_REFERENCE,
             options.payload ?? SOURCE_PAYLOAD, options.payloadHash ?? PAYLOAD_HASH, collectedAt, expiresAt,
+            options.targetFollowersCount ?? 1, options.targetFollowingCount ?? 1,
         ],
     );
     return result.rows[0]!.result;
@@ -399,6 +403,28 @@ afterEach(async () => {
 });
 
 describe('precheckout B-lite source and lease lifecycle', () => {
+    it('persists the anonymous rollout cohort source/cache for the observed 476/644 profile', async () => {
+        const database = await createDb();
+        await seedProcessingPreflight(database, PREFLIGHT_ORIGIN, { userId: null });
+
+        await expect(finalizeSource(database, PREFLIGHT_ORIGIN, {
+            userId: null,
+            targetFollowersCount: 476,
+            targetFollowingCount: 644,
+        }))
+            .resolves.toBe(true);
+        await expect(database.query(
+            `SELECT preflight.status,
+                    (SELECT count(*)::int FROM public.precheckout_blite_sources
+                     WHERE preflight_id=preflight.id) AS sources,
+                    (SELECT count(*)::int FROM public.precheckout_blite_cache
+                     WHERE preflight_id=preflight.id) AS caches
+             FROM public.analysis_preflights AS preflight
+             WHERE preflight.id=$1`,
+            [PREFLIGHT_ORIGIN],
+        )).resolves.toMatchObject({ rows: [{ status: 'ready', sources: 1, caches: 1 }] });
+    }, 30_000);
+
     it('atomically records one source, accepts an identical replay, and rejects a changed hash', async () => {
         const database = await createDb();
         await seedProcessingPreflight(database, PREFLIGHT_A, { includeFreshLineage: true });
