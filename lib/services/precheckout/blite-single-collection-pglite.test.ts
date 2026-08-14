@@ -11,6 +11,13 @@ const migration = readFileSync(new URL(
     `../../../supabase/migrations/${migrationName}`,
     import.meta.url,
 ), 'utf8');
+const statusFailOpenMigrationName = readdirSync(new URL('../../../supabase/migrations/', import.meta.url))
+    .find(name => name.endsWith('_precheckout_blite_missing_source_status_fail_open.sql'));
+if (!statusFailOpenMigrationName) throw new Error('PRECHECKOUT_BLITE_STATUS_FAIL_OPEN_MIGRATION_MISSING');
+const statusFailOpenMigration = readFileSync(new URL(
+    `../../../supabase/migrations/${statusFailOpenMigrationName}`,
+    import.meta.url,
+), 'utf8');
 
 const USER_ID = '10000000-0000-4000-8000-000000000001';
 const PREFLIGHT_A = '20000000-0000-4000-8000-000000000001';
@@ -275,6 +282,7 @@ async function createDb(): Promise<PGlite> {
     db = await PGlite.create({ extensions: { pgcrypto } });
     await db.exec(bootstrap);
     await db.exec(migration);
+    await db.exec(statusFailOpenMigration);
     return db;
 }
 
@@ -403,6 +411,33 @@ afterEach(async () => {
 });
 
 describe('precheckout B-lite source and lease lifecycle', () => {
+    it('fails open a ready cohort with no source or cache instead of reporting a pending result forever', async () => {
+        const database = await createDb();
+        await seedProcessingPreflight(database, PREFLIGHT_A);
+        await database.query(
+            `UPDATE public.analysis_preflights
+             SET status='ready', ready_at=clock_timestamp(), lease_token=NULL, lease_expires_at=NULL
+             WHERE id=$1`,
+            [PREFLIGHT_A],
+        );
+
+        await expect(database.query<{ result: { state: string } }>(
+            'SELECT public.read_precheckout_blite_status_v1($1) AS result',
+            [PREFLIGHT_A],
+        )).resolves.toMatchObject({ rows: [{ result: { state: 'failed' } }] });
+    }, 30_000);
+
+    it('keeps a healthy ready cohort with its source/cache pair pending for inference', async () => {
+        const database = await createDb();
+        await seedProcessingPreflight(database, PREFLIGHT_A);
+        await finalizeSource(database, PREFLIGHT_A);
+
+        await expect(database.query<{ result: { state: string } }>(
+            'SELECT public.read_precheckout_blite_status_v1($1) AS result',
+            [PREFLIGHT_A],
+        )).resolves.toMatchObject({ rows: [{ result: { state: 'pending' } }] });
+    }, 30_000);
+
     it('persists the anonymous rollout cohort source/cache for the observed 476/644 profile', async () => {
         const database = await createDb();
         await seedProcessingPreflight(database, PREFLIGHT_ORIGIN, { userId: null });

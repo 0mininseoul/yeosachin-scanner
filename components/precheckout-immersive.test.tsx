@@ -311,6 +311,35 @@ describe('PrecheckoutImmersive', () => {
         expect(onGoToPlans).toHaveBeenCalledTimes(1);
     });
 
+    it('refreshes an immediate durable fallback failure after remount instead of retaining a stale pending path', async () => {
+        vi.useFakeTimers();
+        vi.setSystemTime(new Date(SUBMITTED_AT));
+        vi.stubGlobal('requestAnimationFrame', vi.fn(() => 1));
+        vi.stubGlobal('cancelAnimationFrame', vi.fn());
+        const fetchMock = vi.fn().mockImplementation(() => Promise.resolve(
+            jsonResponse(failedStatus({ submittedAt: SUBMITTED_AT })),
+        ));
+        vi.stubGlobal('fetch', fetchMock);
+
+        await act(async () => {
+            root.render(createElement(PrecheckoutImmersive, {
+                key: 'missing-source-first', preflightId: PREFLIGHT_ID, claimToken: null, onGoToPlans: vi.fn(),
+            }));
+        });
+        await settleUi();
+        expect(container.querySelector('[data-precheckout-demo-mode="fallback"]')).not.toBeNull();
+
+        await act(async () => {
+            root.render(createElement(PrecheckoutImmersive, {
+                key: 'missing-source-refresh', preflightId: PREFLIGHT_ID, claimToken: null, onGoToPlans: vi.fn(),
+            }));
+        });
+        await settleUi();
+
+        expect(fetchMock).toHaveBeenCalledTimes(2);
+        expect(container.querySelector('[data-precheckout-demo-mode="fallback"]')).not.toBeNull();
+    });
+
     it('latches pending work to the original T+48 deadline and never displays a late result', async () => {
         vi.useFakeTimers();
         vi.setSystemTime(new Date(SUBMITTED_AT));

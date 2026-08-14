@@ -9,6 +9,16 @@ function readSingleCollectionMigration(): string {
     return readFileSync(join(process.cwd(), 'supabase/migrations', migrations[0]), 'utf8');
 }
 
+function readMissingSourceStatusFailOpenMigration(): string {
+    return readFileSync(
+        join(
+            process.cwd(),
+            'supabase/migrations/20260814123000_precheckout_blite_missing_source_status_fail_open.sql',
+        ),
+        'utf8',
+    );
+}
+
 function readRunbook(): string {
     return readFileSync(
         join(process.cwd(), 'docs/precheckout-blite-single-collection-runbook.md'),
@@ -195,20 +205,28 @@ describe('precheckout B-lite single-collection migration', () => {
         }
     });
 
-    it('keeps dispatch recovery additive inside the single release migration and allowlist', () => {
+    it('keeps dispatch recovery and the missing-source status fail-open additive in the release allowlist', () => {
         const migration = readSingleCollectionMigration();
+        const statusFailOpen = readMissingSourceStatusFailOpenMigration();
         const migrationFiles = readdirSync(join(process.cwd(), 'supabase/migrations'))
             .filter(name => name.includes('precheckout_blite'))
             .filter(name => !name.startsWith('20260812231822_'))
             .sort();
         expect(migrationFiles).toEqual([
             '20260813041712_precheckout_blite_single_collection.sql',
+            '20260814123000_precheckout_blite_missing_source_status_fail_open.sql',
         ]);
         const runbook = readRunbook();
         expect(runbook).toMatch(
-            /exact allowlist contains only[\s\S]*`20260813041712_precheckout_blite_single_collection\.sql`/,
+            /exact allowlist contains only[\s\S]*`20260813041712_precheckout_blite_single_collection\.sql`[\s\S]*`20260814123000_precheckout_blite_missing_source_status_fail_open\.sql`/,
         );
         expect(runbook).not.toMatch(/20260813\d+_precheckout_blite_dispatch_recovery\.sql/);
+
+        expect(statusFailOpen).toContain('CREATE OR REPLACE FUNCTION public.read_precheckout_blite_status_v1');
+        expect(statusFailOpen).toContain('SECURITY DEFINER');
+        expect(statusFailOpen).toContain("SET search_path = ''");
+        expect(statusFailOpen).toContain('FROM public.precheckout_blite_sources AS source');
+        expect(statusFailOpen).toContain("'state', 'failed'");
 
         expect(migration).toContain('CREATE TABLE IF NOT EXISTS public.precheckout_blite_dispatches');
         expect(migration).toContain('ALTER TABLE public.precheckout_blite_dispatches ENABLE ROW LEVEL SECURITY');
