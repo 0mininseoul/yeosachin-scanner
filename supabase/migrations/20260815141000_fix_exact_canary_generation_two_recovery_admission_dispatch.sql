@@ -171,6 +171,7 @@ BEGIN
        OR v_current.admission_last_error_code IS NOT NULL
        OR v_current.admission_error_code IS NOT NULL
        OR v_current.admission_dispatch_state IS DISTINCT FROM 'idle'
+       OR v_current.admission_dispatch_generation < 1
        OR v_current.admission_dispatch_token IS NOT NULL
        OR v_current.admission_dispatch_reserved_at IS NOT NULL
        OR v_current.admission_dispatched_at IS NOT NULL

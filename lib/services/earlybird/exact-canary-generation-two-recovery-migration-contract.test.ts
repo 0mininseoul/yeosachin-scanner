@@ -32,6 +32,7 @@ describe('exact generation-two pending-idle canary recovery migration contract',
         expect(recovery).toContain('v_current.admission_generation IS DISTINCT FROM 2');
         expect(recovery).toContain("v_current.admission_status IS DISTINCT FROM 'pending'");
         expect(recovery).toContain("v_current.admission_dispatch_state IS DISTINCT FROM 'idle'");
+        expect(recovery).toContain('v_current.admission_dispatch_generation < 1');
         expect(recovery).toContain('analysis_preflight_provider_runs AS generation_one_run');
         expect(recovery).toContain("generation_one_run.operation_key = 'target-profile-fresh-admission:g1'");
         expect(recovery).toContain("generation_one_run.status = 'succeeded'");
