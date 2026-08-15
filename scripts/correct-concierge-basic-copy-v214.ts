@@ -264,14 +264,16 @@ function v214FailureCode(error: unknown): string {
     return 'CONCIERGE_COPY_V214_GENERATION_FAILED';
 }
 
-function exactTargetFullName(stepData: unknown): string | null {
-    if (!stepData || typeof stepData !== 'object' || Array.isArray(stepData)) return null;
+function exactTargetFullName(stepData: unknown, fallbackUsername: string): string | null {
+    if (!stepData || typeof stepData !== 'object' || Array.isArray(stepData)) return fallbackUsername;
     const root = stepData as {
         targetProfileCheckpoint?: { fullName?: unknown };
         targetProfile?: { fullName?: unknown };
     };
     const value = root.targetProfileCheckpoint?.fullName ?? root.targetProfile?.fullName;
-    return typeof value === 'string' && value.trim().length > 0 ? value.trim() : null;
+    return typeof value === 'string' && value.trim().length > 0
+        ? value.trim()
+        : fallbackUsername;
 }
 
 function targetSelectedPostEvidence(stepData: unknown): V214ExactScope['targetSelectedPostEvidence'] {
@@ -355,7 +357,7 @@ async function loadExactV214Scope(): Promise<V214ExactScope> {
         : stepData?.sourceFingerprint;
     const publishedResultHash = stepData?.conciergeBootstrap?.resultHash;
     const priorCorrectionResultHash = stepData?.conciergeBootstrap?.v213CopyCorrection?.correctionResultHash;
-    const targetFullName = exactTargetFullName(stepData);
+    const targetFullName = exactTargetFullName(stepData, order.target_instagram_id);
     if (
         typeof sourceFingerprint !== 'string' || !SHA256.test(sourceFingerprint)
         || typeof publishedResultHash !== 'string' || !SHA256.test(publishedResultHash)
