@@ -319,6 +319,11 @@ function compareNormalizedUsername(left: string, right: string): number {
     return left < right ? -1 : left > right ? 1 : 0;
 }
 
+/** `private_accounts` persists these fields as PostgreSQL REAL values. */
+function privateNameScoreForStorage(value: number): number {
+    return Math.fround(value);
+}
+
 /** Builds legacy rows only from canonical V2 final scores and canonical safe narratives. */
 export function buildCanonicalConciergeResult(input: {
     targetUsername: string;
@@ -484,9 +489,9 @@ export function buildCanonicalConciergeResult(input: {
             instagram_id: instagramId,
             profile_image: profile.profilePicUrl ?? null,
             full_name: profile.fullName ?? null,
-            name_female_score: name.femaleScore,
+            name_female_score: privateNameScoreForStorage(name.femaleScore),
             name_is_name: name.isName,
-            name_confidence: name.confidence,
+            name_confidence: privateNameScoreForStorage(name.confidence),
         };
     }).sort((left, right) => (
         right.name_female_score - left.name_female_score
