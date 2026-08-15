@@ -1,9 +1,12 @@
 import { describe, expect, it } from 'vitest';
+import { isRecoverableGeminiResponseError } from '@/lib/services/ai/gemini-generation-policy';
 import {
+    createFirstPaymentConciergeHighRiskNarrativeInput,
     firstPaymentConciergeCheckpointProfile,
     firstPaymentConciergePublicationPayloadSchema,
     firstPaymentConciergeSafeFailureCode,
 } from './first-payment-concierge';
+import type { FeatureAnalysisResult } from '@/lib/services/ai/v2-staged-analysis';
 
 function payload() {
     return {
@@ -99,6 +102,16 @@ describe('firstPaymentConciergeSafeFailureCode', () => {
             new Error('sensitive lower-case detail'),
         )).toBe('FIRST_PAYMENT_CONCIERGE_UNCLASSIFIED_FAILURE');
     });
+
+    it('keeps a rejected Gemini public-copy generation retryable for recovery', () => {
+        const error = new Error(
+            'AI_GENERATION_RESPONSE_REJECTED_ERROR: generated response failed strict validation.',
+        );
+
+        expect(isRecoverableGeminiResponseError(error)).toBe(true);
+        expect(firstPaymentConciergeSafeFailureCode(error))
+            .toBe('AI_GENERATION_RESPONSE_REJECTED_ERROR');
+    });
 });
 
 describe('firstPaymentConciergeCheckpointProfile', () => {
@@ -126,5 +139,118 @@ describe('firstPaymentConciergeCheckpointProfile', () => {
 
         expect(checkpoint.latestPosts).toHaveLength(8);
         expect(checkpoint.latestPosts?.[0]?.id).toBe('post-9');
+    });
+});
+
+describe('createFirstPaymentConciergeHighRiskNarrativeInput', () => {
+    const target = {
+        username: 'target.user',
+        fullName: '김준호',
+        followersCount: 1,
+        followingCount: 1,
+        postsCount: 1,
+        isPrivate: false,
+        isVerified: false,
+        latestPosts: [],
+    };
+    const candidate = {
+        username: 'candidate.user',
+        fullName: '박민지',
+        bio: '여행과 공연 기록',
+        followersCount: 1,
+        followingCount: 1,
+        postsCount: 1,
+        isPrivate: false,
+        isVerified: false,
+        latestPosts: [{
+            id: 'candidate-post',
+            shortCode: 'Candidate1',
+            imageUrl: 'https://example.com/post.jpg',
+            type: 'image' as const,
+            likesCount: 0,
+            commentsCount: 0,
+            timestamp: '2026-01-01T00:00:00.000Z',
+            taggedUsers: ['target.user'],
+            mentionedUsers: ['target.user'],
+        }],
+    };
+    const capturedProfile = {
+        ordinal: 1,
+        isPrivate: false,
+        username: 'candidate.user',
+        fullName: '박민지',
+        hasProfileImage: true,
+        bio: '여행과 공연 기록',
+        media: [{
+            selectionId: 'post:candidate:1',
+            kind: 'feed' as const,
+            postId: 'candidate-post',
+            jpegBase64: 'aGVsbG8=',
+        }],
+        triageSelectionIds: ['post:candidate:1'],
+        featureSelectionIds: ['post:candidate:1'],
+        resolverSelectionIds: ['post:candidate:1'],
+        captions: [{
+            evidenceRefId: 'caption:candidate:1',
+            selectionId: 'post:candidate:1',
+            text: '공연 기록',
+        }],
+        coverage: { selectedCount: 1, normalizedCount: 1, failures: [] },
+    } as Parameters<typeof createFirstPaymentConciergeHighRiskNarrativeInput>[0]['capturedProfile'];
+    const feature = {
+        features: {
+            gender: 'female', genderConfidence: 'high', ownerConsistency: 'same_person',
+            appearanceGrade: 4, exposureScore: 2,
+            businessClassification: 'personal', businessConfidence: 'high',
+            accountContext: 'personal', marriageEvidence: 'none', partnerEvidence: 'none',
+            partnerExclusionContext: 'none',
+            evidenceSelectionIds: {
+                gender: ['post:candidate:1'], appearance: ['post:candidate:1'],
+                exposure: ['post:candidate:1'], business: [], accountContext: [], marriagePartner: [],
+            },
+            oneLineOverview: '여행과 공연 기록이 함께 이어져 취향의 결이 또렷하게 남는 계정입니다.',
+        },
+        finalGenderDecision: 'verified_female',
+        analyzedSelectionIds: ['post:candidate:1'],
+    } as FeatureAnalysisResult;
+
+    it('uses canonical names and only retained interaction, feed, comment, and appearance evidence', () => {
+        const input = createFirstPaymentConciergeHighRiskNarrativeInput({
+            targetProfile: target,
+            candidateProfile: candidate,
+            capturedProfile,
+            feature,
+            interactions: [{
+                candidateUsername: 'candidate.user',
+                postId: 'target-post',
+                signal: 'female_target_like',
+                sourceInteractionId: 'like-1',
+            }, {
+                candidateUsername: 'candidate.user',
+                postId: 'target-post',
+                signal: 'female_target_comment',
+                sourceInteractionId: 'comment-1',
+                content: '공연 너무 좋네요',
+            }],
+        });
+
+        expect(input.publicSubjects).toEqual({ targetFullName: '김준호', candidateFullName: '박민지' });
+        expect(input.appearance.isReliable).toBe(true);
+        expect(input.interactions.candidateToTargetLike.status).toBe('observed');
+        expect(input.interactions.candidateToTargetComment.status).toBe('observed');
+        expect(input.interactions.candidateToTargetTag.status).toBe('observed');
+        expect(input.interactions.candidateToTargetMention.status).toBe('observed');
+        expect(input.interactions.targetToCandidateLike.status).toBe('not_collected');
+        expect(input.interactions.comments[0]?.text).toBe('공연 너무 좋네요');
+    });
+
+    it('rejects a high-risk narrative when either canonical full name is absent', () => {
+        expect(() => createFirstPaymentConciergeHighRiskNarrativeInput({
+            targetProfile: { ...target, fullName: undefined },
+            candidateProfile: candidate,
+            capturedProfile,
+            feature,
+            interactions: [],
+        })).toThrow('FIRST_PAYMENT_CONCIERGE_CANONICAL_NAME_MISSING');
     });
 });

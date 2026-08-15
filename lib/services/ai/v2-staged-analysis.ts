@@ -36,10 +36,10 @@ import {
 } from '@/lib/services/analysis/v2-ai-fallback-policy';
 import {
     buildV211EvidenceSpecificOverview,
-    buildV211EvidenceSpecificRiskNarrative,
     v211CopySubjectNames,
 } from '@/lib/services/analysis/public-copy-quality';
 import {
+    AI_GENERATION_RESPONSE_REJECTED_ERROR_PREFIX,
     isAmbiguousGeminiGenerationError,
 } from './gemini-generation-policy';
 import {
@@ -1222,8 +1222,11 @@ function normalizeFeatureResponse(
         partnerEvidence,
         partnerExclusionContext,
         evidenceSelectionIds,
-        oneLineOverview: safeOverview.success
-            ? safeOverview.data
+        // A v2.11 overview is public concierge copy. Reject an invalid Gemini
+        // sentence at the grounded schema boundary instead of composing a
+        // repetitive deterministic substitute.
+        oneLineOverview: safeOverview.success || policyVersion === AI_STAGE_POLICY_V211_VERSION
+            ? value.oneLineOverview
             : featureOverviewFallback({
                 accountContext,
                 evidenceSelectionIds,
@@ -2869,31 +2872,22 @@ export async function highRiskNarrative(
         ) {
             throw error;
         }
+        if (policyVersion === AI_STAGE_POLICY_V211_VERSION) {
+            if (error instanceof z.ZodError) {
+                throw new Error(
+                    `${AI_GENERATION_RESPONSE_REJECTED_ERROR_PREFIX} generated response failed strict validation.`,
+                    { cause: error },
+                );
+            }
+            throw error;
+        }
         const firstComment = sanitized.comments[0]?.text;
-        const lines = policyVersion === AI_STAGE_POLICY_V211_VERSION
-            ? buildV211EvidenceSpecificRiskNarrative({
-                profileEvidence: sanitized.bio,
-                feedEvidence: sanitized.captions.map(caption => caption.text),
-                subjects: {
-                    ...input.forbiddenIdentifiers,
-                    ...input.publicSubjects,
-                },
-                candidateLikedTarget: observed(input.interactions.candidateToTargetLike),
-                candidateCommentedOnTarget: observed(input.interactions.candidateToTargetComment),
-                targetLikedCandidate: observed(input.interactions.targetToCandidateLike),
-                candidateTaggedTarget: observed(input.interactions.candidateToTargetTag),
-                targetTaggedCandidate: observed(input.interactions.targetToCandidateTag),
-                candidateMentionedTarget: observed(input.interactions.candidateToTargetMention),
-                targetMentionedCandidate: observed(input.interactions.targetToCandidateMention),
-                ...(firstComment ? { commentText: firstComment } : {}),
-                appearance: input.appearance,
-            })
-            : buildSafeFallbackRiskNarrative({
-                candidateLikedTarget: observed(input.interactions.candidateToTargetLike),
-                candidateCommentedOnTarget: observed(input.interactions.candidateToTargetComment),
-                targetLikedCandidate: observed(input.interactions.targetToCandidateLike),
-                ...(firstComment ? { commentText: firstComment } : {}),
-            });
+        const lines = buildSafeFallbackRiskNarrative({
+            candidateLikedTarget: observed(input.interactions.candidateToTargetLike),
+            candidateCommentedOnTarget: observed(input.interactions.candidateToTargetComment),
+            targetLikedCandidate: observed(input.interactions.targetToCandidateLike),
+            ...(firstComment ? { commentText: firstComment } : {}),
+        });
         return highRiskNarrativeResultSchema.parse({
             lines,
             evidenceRefs: fallbackEvidenceRefs(input, media, sanitized),

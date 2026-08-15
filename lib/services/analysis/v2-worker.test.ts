@@ -1121,6 +1121,7 @@ describe('analysis V2 durable DAG worker', () => {
             'ANALYSIS_V2_AI_SCORING_STAGE_PERSISTENCE_ERROR: rpc failed (08006).',
             'ANALYSIS_V2_MEDIA_PREPARATION_TRANSIENT',
             'AI_RATE_LIMIT_ERROR: provider rejected before generation.',
+            'AI_GENERATION_RESPONSE_REJECTED_ERROR: generated response failed strict validation.',
             'fetch failed: ECONNRESET',
             'ANALYSIS_V2_PROFILE_CHECKPOINT_ERROR: primary checkpoint failed (08006).',
             'ANALYSIS_V2_PROFILE_CHECKPOINT_ERROR: fallback checkpoint failed (PGRST000).',
