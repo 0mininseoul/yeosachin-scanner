@@ -115,8 +115,8 @@ function makeInput(): ConciergeManualPublicationInput {
         ledger: makeLedger(), manualImport,
         replay: {
             profilesByOrdinal: new Map([
-                [1, { username: 'one', isPrivate: false, profilePicUrl: null, fullName: null, bio: null, followersCount: 1, followingCount: 1, postsCount: 0, latestPosts: [] } as unknown as InstagramProfile],
-                [2, { username: 'two', isPrivate: false, profilePicUrl: null, fullName: null, bio: null, followersCount: 1, followingCount: 1, postsCount: 0, latestPosts: [] } as unknown as InstagramProfile],
+                [1, { username: 'one', isPrivate: false, profilePicUrl: null, fullName: null, bio: '드로잉 작업실', followersCount: 1, followingCount: 1, postsCount: 0, latestPosts: [] } as unknown as InstagramProfile],
+                [2, { username: 'two', isPrivate: false, profilePicUrl: null, fullName: null, bio: '필름 사진 기록', followersCount: 1, followingCount: 1, postsCount: 0, latestPosts: [] } as unknown as InstagramProfile],
             ]),
             details: [
                 { ordinal: 1, finalClassification: 'unresolved', classificationSource: 'unknown', featureOverview: null, triage: null, feature: makeFeature() },
@@ -134,6 +134,7 @@ function makeInput(): ConciergeManualPublicationInput {
                 [2, { originalAiClassification: 'female', confidence: 'high', classifier: 'replay', modelName: 'model', promptVersion: 'prompt', schemaVersion: 'schema', classificationOperationKey: 'op', classificationResultHash: HASH, secondPassStatus: 'collected', secondPassCompleteMedia: true }],
             ]),
             privateProfiles: [{ username: 'private', isPrivate: true, profilePicUrl: null, fullName: null, followersCount: 1, followingCount: 1, postsCount: 0, latestPosts: [] } as unknown as InstagramProfile],
+            privateNameResults: [{ id: 'private', femaleScore: 0.5, isName: false, confidence: 0 }],
             fetchedCount: 3, hydratedPublicCount: 2, hydratedPrivateCount: 1, analyzedPublicCount: 2, unresolvedCount: 0,
         },
     };
@@ -146,6 +147,95 @@ describe('concierge manual publication', () => {
         expect(publication.rows).toHaveLength(2);
         expect(publication.counts).toMatchObject({ male: 0, female: 2, unknown: 0, public: 2, private: 1, mutual: 3, authoritativeMutual: 3, hydrated: 3, analyzed: 2 });
         expect(publication.resultHash).toMatch(/^[a-f0-9]{64}$/);
+    });
+
+    it('carries text-only private-name likelihoods through the atomic publication payload in display order', async () => {
+        const input = makeInput();
+        const privateProfiles = [
+            { username: 'zulu', isPrivate: true, profilePicUrl: 'https://images.example/zulu.jpg', fullName: '줄리', followersCount: 1, followingCount: 1, postsCount: 0, latestPosts: [] },
+            { username: 'beta', isPrivate: true, profilePicUrl: 'https://images.example/beta.jpg', fullName: '베타', followersCount: 1, followingCount: 1, postsCount: 0, latestPosts: [] },
+            { username: 'alpha', isPrivate: true, profilePicUrl: 'https://images.example/alpha.jpg', fullName: '알파', followersCount: 1, followingCount: 1, postsCount: 0, latestPosts: [] },
+        ] as unknown as InstagramProfile[];
+        const privateTemplate = input.ledger.records.find(record => record.instagramId === 'private')!;
+        const privateRecords = privateProfiles.map((profile, index) => ({
+            ...privateTemplate,
+            candidateId: `candidate:${profile.username}`,
+            instagramId: profile.username,
+            mutualOrdinal: index + 3,
+        }));
+        const replay = {
+            ...input.replay,
+            orderedMutualUsernames: ['one', 'two', 'zulu', 'beta', 'alpha'],
+            privateProfiles,
+            privateNameResults: [
+                { id: 'zulu', femaleScore: 0.7, isName: true, confidence: 0.2 },
+                { id: 'beta', femaleScore: 0.9, isName: true, confidence: 0.6 },
+                { id: 'alpha', femaleScore: 0.9, isName: true, confidence: 0.6 },
+            ],
+            fetchedCount: 5,
+            hydratedPrivateCount: 3,
+        } as unknown as ConciergeManualPublicationInput['replay'];
+        const publicationInput = {
+            ...input,
+            expectedMutualCount: 5,
+            expectedHydratedCount: 5,
+            ledger: {
+                ...input.ledger,
+                mutualCount: 5,
+                hydratedPrivateCount: 3,
+                records: [
+                    ...input.ledger.records.filter(record => record.instagramId !== 'private'),
+                    ...privateRecords,
+                ],
+            },
+            replay,
+        };
+
+        const publication = buildConciergeManualPublication(publicationInput);
+
+        expect(publication.privateRows).toEqual([
+            { sort_ordinal: 1, instagram_id: 'alpha', profile_image: 'https://images.example/alpha.jpg', full_name: '알파', name_female_score: 0.9, name_is_name: true, name_confidence: 0.6 },
+            { sort_ordinal: 2, instagram_id: 'beta', profile_image: 'https://images.example/beta.jpg', full_name: '베타', name_female_score: 0.9, name_is_name: true, name_confidence: 0.6 },
+            { sort_ordinal: 3, instagram_id: 'zulu', profile_image: 'https://images.example/zulu.jpg', full_name: '줄리', name_female_score: 0.7, name_is_name: true, name_confidence: 0.2 },
+        ]);
+        expect(publication.counts).toMatchObject({ male: 0, female: 2, unknown: 0, public: 2, private: 3 });
+        expect(publication.rows.every(row => row.gender_status === 'confirmed')).toBe(true);
+
+        let forwarded: Readonly<Record<string, unknown>> | null = null;
+        const store = createConciergePublicationStore(async args => {
+            forwarded = args;
+            return {
+                data: {
+                    published: true,
+                    idempotent: false,
+                    ownerReadContractVerified: true,
+                    adminReadContractVerified: true,
+                    resultHash: publication.resultHash,
+                    resultUrl: publication.resultUrl,
+                    requestId: publication.requestId,
+                    version: publicationInput.expectedVersion + 1,
+                    counts: publication.counts,
+                },
+                error: null,
+            };
+        });
+
+        await expect(store.publishAtomic({
+            publication,
+            expectedVersion: publicationInput.expectedVersion,
+            expectedResultHash: publicationInput.expectedResultHash,
+            orderId: publicationInput.orderId,
+            requestId: publicationInput.requestId,
+            ownerId: publicationInput.ownerId,
+            targetUsername: publicationInput.targetUsername,
+            classificationLedger: publicationInput.ledger,
+            manualImport: publicationInput.manualImport,
+        })).resolves.toEqual({ published: true, idempotent: false });
+        expect(forwarded).toMatchObject({
+            publication: {
+                privateRows: publication.privateRows,
+            },
+        });
     });
 
     it('does not admit a manual female without complete collected second-pass media', () => {
@@ -194,7 +284,7 @@ describe('concierge manual publication', () => {
         } as unknown as ConciergeManualPublicationInput['replay'];
         const publication = buildConciergeManualPublication({ ...input, replay });
         const row = publication.rows[0] as unknown as Record<string, unknown>;
-        expect(row.one_line_overview).toBe('공개 프로필과 피드에서 확인된 특징을 중심으로 정리한 계정입니다.');
+        expect(row.one_line_overview).toContain('드로잉');
         expect(row.likes_count).toBe(1);
         expect(row.is_tagged).toBe(true);
         expect(publication.interactionLineageHash).toMatch(/^[a-f0-9]{64}$/);
