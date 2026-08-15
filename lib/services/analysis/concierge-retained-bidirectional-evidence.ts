@@ -1,0 +1,121 @@
+import { createHash } from 'node:crypto';
+import type { FeatureAnalysisResult, HighRiskNarrativeInput } from '@/lib/services/ai/v2-staged-analysis';
+import type { InstagramProfile } from '@/lib/types/instagram';
+
+export type RetainedObservation = {
+    status: 'observed' | 'not_observed' | 'not_collected';
+    evidenceRefIds: readonly string[];
+};
+
+export interface RetainedNarrativeProfile {
+    profile: InstagramProfile;
+    selectedPostEvidence: readonly {
+        postId: string;
+        selectionId: string;
+        taggedUsers: readonly string[];
+        mentionedUsers: readonly string[];
+    }[];
+}
+
+export interface RetainedBidirectionalNarrativeInputArgs {
+    target: RetainedNarrativeProfile;
+    candidate: RetainedNarrativeProfile;
+    feature: FeatureAnalysisResult;
+    candidateToTargetInteractions: readonly {
+        candidateUsername: string;
+        postId: string;
+        signal: 'female_target_like' | 'female_target_comment';
+        sourceInteractionId: string;
+        content?: string;
+    }[];
+    targetToCandidateLike: RetainedObservation;
+}
+
+export type RetainedBidirectionalNarrativeInput = HighRiskNarrativeInput & {
+    interactions: HighRiskNarrativeInput['interactions'] & {
+        targetToCandidateComment: RetainedObservation;
+    };
+};
+
+function clean(value: string | null | undefined, max: number): string | null {
+    if (!value) return null;
+    const result = value.normalize('NFKC').replace(/[\u0000-\u001f\u007f]/g, ' ')
+        .replace(/<[^>]*>/g, '').replace(/\s+/g, ' ').trim();
+    return result ? [...result].slice(0, max).join('') : null;
+}
+
+function username(value: string): string {
+    const result = value.trim().replace(/^@/u, '').toLowerCase();
+    if (!/^[a-z0-9._]{1,30}$/.test(result)) throw new Error('FIRST_PAYMENT_CONCIERGE_USERNAME_INVALID');
+    return result;
+}
+
+function comparableUsername(value: string): string {
+    return value.trim().replace(/^@/u, '').toLowerCase();
+}
+
+function canonicalName(value: string | undefined): string {
+    const result = clean(value, 200);
+    if (!result || /(?:대상\s*계정|후보\s*계정)/u.test(result)) {
+        throw new Error('FIRST_PAYMENT_CONCIERGE_CANONICAL_NAME_MISSING');
+    }
+    return result;
+}
+
+function opaque(domain: string, value: unknown): string {
+    return `retained:${domain}:${createHash('sha256').update(JSON.stringify(value)).digest('hex').slice(0, 48)}`;
+}
+
+function observation(refs: readonly string[]): HighRiskNarrativeInput['interactions']['candidateToTargetLike'] {
+    const unique = [...new Set(refs.map(value => value.trim()).filter(Boolean))].slice(0, 8);
+    return unique.length ? { status: 'observed', evidenceRefIds: unique } : { status: 'not_observed', evidenceRefIds: [] };
+}
+
+function postDirection(input: RetainedNarrativeProfile, subject: string, field: 'taggedUsers' | 'mentionedUsers'): RetainedObservation {
+    const refs = input.selectedPostEvidence
+        .filter(post => post[field].some(value => comparableUsername(value) === subject))
+        .map(post => post.selectionId);
+    return observation(refs);
+}
+
+export function buildRetainedBidirectionalNarrativeInput(
+    input: RetainedBidirectionalNarrativeInputArgs,
+): RetainedBidirectionalNarrativeInput {
+    const targetUsername = username(input.target.profile.username);
+    const candidateUsername = username(input.candidate.profile.username);
+    if (targetUsername === candidateUsername) throw new Error('FIRST_PAYMENT_CONCIERGE_USERNAME_INVALID');
+    const rows = input.candidateToTargetInteractions.filter(row => username(row.candidateUsername) === candidateUsername);
+    const uniqueRows = [...new Map(rows.map(row => [row.sourceInteractionId, row])).values()];
+    const likes = uniqueRows.filter(row => row.signal === 'female_target_like');
+    const commentRows = uniqueRows.filter(row => row.signal === 'female_target_comment' && clean(row.content, 300));
+    const comments = commentRows.slice(0, 12).map(row => ({
+        evidenceRefId: opaque('interaction', { candidateUsername, postId: row.postId, signal: row.signal, sourceInteractionId: row.sourceInteractionId }),
+        targetPostEvidenceRefId: opaque('target-post', row.postId),
+        text: clean(row.content, 300)!,
+    }));
+    const candidateToTargetLike = observation(likes.map(row => opaque('interaction', { candidateUsername, postId: row.postId, signal: row.signal, sourceInteractionId: row.sourceInteractionId })));
+    const candidateToTargetComment = observation(comments.map(row => row.evidenceRefId));
+    const media = [] as HighRiskNarrativeInput['media'];
+    return {
+        forbiddenIdentifiers: { targetUsername, candidateUsername },
+        publicSubjects: { targetFullName: canonicalName(input.target.profile.fullName), candidateFullName: canonicalName(input.candidate.profile.fullName) },
+        appearance: {
+            isReliable: input.feature.features.evidenceSelectionIds.appearance.some(selectionId => (
+                input.candidate.selectedPostEvidence.some(post => post.selectionId === selectionId)
+            )),
+        },
+        bio: clean(input.candidate.profile.bio, 2_200), media, captions: [], carouselCaptionDossier: null,
+        interactions: {
+            candidateToTargetLike, candidateToTargetComment,
+            targetToCandidateLike: observation(input.targetToCandidateLike.evidenceRefIds).status === 'observed'
+                ? observation(input.targetToCandidateLike.evidenceRefIds)
+                : { status: input.targetToCandidateLike.status, evidenceRefIds: [] },
+            candidateToTargetTag: postDirection(input.candidate, targetUsername, 'taggedUsers'),
+            candidateToTargetMention: postDirection(input.candidate, targetUsername, 'mentionedUsers'),
+            targetToCandidateTag: postDirection(input.target, candidateUsername, 'taggedUsers'),
+            targetToCandidateMention: postDirection(input.target, candidateUsername, 'mentionedUsers'),
+            targetToCandidateComment: { status: 'not_collected', evidenceRefIds: [] }, comments,
+            coverage: { status: 'partial', evidenceRefId: opaque('coverage', [targetUsername, candidateUsername]) },
+        },
+    } as unknown as RetainedBidirectionalNarrativeInput;
+}
