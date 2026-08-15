@@ -20,6 +20,13 @@ const generationTwoCreatorMigrationPath = new URL(
 const generationTwoCreatorMigration = existsSync(generationTwoCreatorMigrationPath)
     ? readFileSync(generationTwoCreatorMigrationPath, 'utf8')
     : '';
+const generationTwoConflictBindingMigrationPath = new URL(
+    '../../../supabase/migrations/20260815231000_first15_canary_gen2_creator_successor_conflict_request.sql',
+    import.meta.url,
+);
+const generationTwoConflictBindingMigration = existsSync(generationTwoConflictBindingMigrationPath)
+    ? readFileSync(generationTwoConflictBindingMigrationPath, 'utf8')
+    : '';
 
 describe('first15 terminal provider-canary recovery migration contract', () => {
     it('creates one service-role-only audited replay lineage after the copy-quality migration', () => {
@@ -92,5 +99,27 @@ describe('first15 terminal provider-canary recovery migration contract', () => {
         expect(generationTwoCreatorMigration).not.toContain('CREATE TABLE public.');
         expect(generationTwoCreatorMigration).not.toContain('CREATE FUNCTION public.');
         expect(generationTwoCreatorMigration).not.toContain('GRANT EXECUTE');
+    });
+
+    it('rebinds only an exact generation-two successor before the existing creator checks', () => {
+        expect(generationTwoConflictBindingMigration).toContain('-- MIGRATION_PREDECESSOR=20260815225000');
+        expect(generationTwoConflictBindingMigration).toContain('026b0411e95b47d792e78d6fbddaf42c');
+        expect(generationTwoConflictBindingMigration).toContain(
+            'v_first15_rearm_failed_request_id IS NOT NULL',
+        );
+        expect(generationTwoConflictBindingMigration).toContain(
+            'SELECT analysis_request.* INTO v_conflicting_request',
+        );
+        expect(generationTwoConflictBindingMigration).toContain(
+            'WHERE analysis_request.id = v_first15_rearm_failed_request_id',
+        );
+        expect(generationTwoConflictBindingMigration).toContain('FOR KEY SHARE;');
+        expect(generationTwoConflictBindingMigration).toContain(
+            'FIRST15_CANARY_GEN2_CONFLICT_REQUEST_OLD_SHAPE_MISMATCH',
+        );
+        expect(generationTwoConflictBindingMigration).not.toContain('CREATE TABLE public.');
+        expect(generationTwoConflictBindingMigration).not.toContain('CREATE FUNCTION public.');
+        expect(generationTwoConflictBindingMigration).not.toContain('GRANT ');
+        expect(generationTwoConflictBindingMigration).not.toContain('REVOKE ');
     });
 });
