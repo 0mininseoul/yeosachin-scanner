@@ -27,6 +27,13 @@ const generationTwoConflictBindingMigrationPath = new URL(
 const generationTwoConflictBindingMigration = existsSync(generationTwoConflictBindingMigrationPath)
     ? readFileSync(generationTwoConflictBindingMigrationPath, 'utf8')
     : '';
+const generationThreeMigrationPath = new URL(
+    '../../../supabase/migrations/20260816060000_first15_canary_gen3_rearm.sql',
+    import.meta.url,
+);
+const generationThreeMigration = existsSync(generationThreeMigrationPath)
+    ? readFileSync(generationThreeMigrationPath, 'utf8')
+    : '';
 
 describe('first15 terminal provider-canary recovery migration contract', () => {
     it('creates one service-role-only audited replay lineage after the copy-quality migration', () => {
@@ -121,5 +128,38 @@ describe('first15 terminal provider-canary recovery migration contract', () => {
         expect(generationTwoConflictBindingMigration).not.toContain('CREATE FUNCTION public.');
         expect(generationTwoConflictBindingMigration).not.toContain('GRANT ');
         expect(generationTwoConflictBindingMigration).not.toContain('REVOKE ');
+    });
+
+    it('extends the creator and readiness fence only to the exact generation-three successor', () => {
+        expect(generationThreeMigration).toContain(
+            '-- MIGRATION_PREDECESSOR=20260815231000',
+        );
+        expect(generationThreeMigration).toContain(
+            'f5477a2d0080259277bd3a90269167a7',
+        );
+        expect(generationThreeMigration).toContain(
+            '542a0f3f45263b0d07a669dd91401d92',
+        );
+        expect(generationThreeMigration).toContain(
+            'rearm.rearm_generation IN (2, 3)',
+        );
+        expect(generationThreeMigration).toContain(
+            'parent_rearm.rearm_generation = 2',
+        );
+        expect(generationThreeMigration).toContain(
+            "rearm.source_credential_slot = 'quinary'",
+        );
+        expect(generationThreeMigration).toContain(
+            "rearm.fallback_credential_slot = 'primary'",
+        );
+        expect(generationThreeMigration).toContain(
+            "rearm.rearm_generation = 3",
+        );
+        expect(generationThreeMigration).toContain(
+            "source_failure_code IN (\n                      'ANALYSIS_V2_JOB_HANDLER_FAILED',\n                      'ANALYSIS_V2_MEDIA_ARTIFACT_OBJECT_ERROR'\n                  )",
+        );
+        expect(generationThreeMigration).not.toContain('CREATE TABLE public.');
+        expect(generationThreeMigration).not.toContain('GRANT ');
+        expect(generationThreeMigration).not.toContain('REVOKE ');
     });
 });
