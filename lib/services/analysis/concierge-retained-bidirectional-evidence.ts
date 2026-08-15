@@ -1,11 +1,12 @@
 import { createHash } from 'node:crypto';
 import type { FeatureAnalysisResult, HighRiskNarrativeInput } from '@/lib/services/ai/v2-staged-analysis';
 import type { InstagramProfile } from '@/lib/types/instagram';
+import type { InteractionEvidenceRow } from './interaction-stage';
 
-export type RetainedObservation = {
-    status: 'observed' | 'not_observed' | 'not_collected';
-    evidenceRefIds: readonly string[];
-};
+export type RetainedObservation =
+    | { readonly status: 'observed'; readonly evidenceRefIds: readonly [string, ...string[]] }
+    | { readonly status: 'not_observed'; readonly evidenceRefIds: readonly [] }
+    | { readonly status: 'not_collected'; readonly evidenceRefIds: readonly [] };
 
 export interface RetainedNarrativeProfile {
     profile: InstagramProfile;
@@ -21,13 +22,7 @@ export interface RetainedBidirectionalNarrativeInputArgs {
     target: RetainedNarrativeProfile;
     candidate: RetainedNarrativeProfile;
     feature: FeatureAnalysisResult;
-    candidateToTargetInteractions: readonly {
-        candidateUsername: string;
-        postId: string;
-        signal: 'female_target_like' | 'female_target_comment';
-        sourceInteractionId: string;
-        content?: string;
-    }[];
+    candidateToTargetInteractions: readonly InteractionEvidenceRow[];
     targetToCandidateLike: RetainedObservation;
 }
 
@@ -66,9 +61,21 @@ function opaque(domain: string, value: unknown): string {
     return `retained:${domain}:${createHash('sha256').update(JSON.stringify(value)).digest('hex').slice(0, 48)}`;
 }
 
-function observation(refs: readonly string[]): HighRiskNarrativeInput['interactions']['candidateToTargetLike'] {
+function observation(refs: readonly string[]): RetainedObservation {
     const unique = [...new Set(refs.map(value => value.trim()).filter(Boolean))].slice(0, 8);
-    return unique.length ? { status: 'observed', evidenceRefIds: unique } : { status: 'not_observed', evidenceRefIds: [] };
+    return (unique.length ? { status: 'observed', evidenceRefIds: unique } : { status: 'not_observed', evidenceRefIds: [] }) as RetainedObservation;
+}
+
+function validateObservation(value: RetainedObservation): RetainedObservation {
+    if (value.status === 'observed') {
+        if (value.evidenceRefIds.length < 1 || value.evidenceRefIds.length > 8
+            || value.evidenceRefIds.some(ref => typeof ref !== 'string' || ref.trim().length === 0)) {
+            throw new Error('FIRST_PAYMENT_CONCIERGE_RETAINED_OBSERVATION_INVALID');
+        }
+    } else if (value.evidenceRefIds.length !== 0) {
+        throw new Error('FIRST_PAYMENT_CONCIERGE_RETAINED_OBSERVATION_INVALID');
+    }
+    return value;
 }
 
 function postDirection(input: RetainedNarrativeProfile, subject: string, field: 'taggedUsers' | 'mentionedUsers'): RetainedObservation {
@@ -85,14 +92,16 @@ export function buildRetainedBidirectionalNarrativeInput(
     const candidateUsername = username(input.candidate.profile.username);
     if (targetUsername === candidateUsername) throw new Error('FIRST_PAYMENT_CONCIERGE_USERNAME_INVALID');
     const rows = input.candidateToTargetInteractions.filter(row => username(row.candidateUsername) === candidateUsername);
-    const uniqueRows = [...new Map(rows.map(row => [row.sourceInteractionId, row])).values()];
-    const likes = uniqueRows.filter(row => row.signal === 'female_target_like');
-    const commentRows = uniqueRows.filter(row => row.signal === 'female_target_comment' && clean(row.content, 300));
-    const comments = commentRows.slice(0, 12).map(row => ({
-        evidenceRefId: opaque('interaction', { candidateUsername, postId: row.postId, signal: row.signal, sourceInteractionId: row.sourceInteractionId }),
-        targetPostEvidenceRefId: opaque('target-post', row.postId),
-        text: clean(row.content, 300)!,
-    }));
+    const likes = rows.filter(row => row.signal === 'female_target_like');
+    const commentRows = rows.filter(row => row.signal === 'female_target_comment' && clean(row.content, 300));
+    const comments = [...new Map(commentRows.map(row => {
+        const evidenceRefId = opaque('interaction', { candidateUsername, postId: row.postId, signal: row.signal, sourceInteractionId: row.sourceInteractionId });
+        return [evidenceRefId, {
+            evidenceRefId,
+            targetPostEvidenceRefId: opaque('target-post', row.postId),
+            text: clean(row.content, 300)!,
+        }];
+    })).values()].slice(0, 8);
     const candidateToTargetLike = observation(likes.map(row => opaque('interaction', { candidateUsername, postId: row.postId, signal: row.signal, sourceInteractionId: row.sourceInteractionId })));
     const candidateToTargetComment = observation(comments.map(row => row.evidenceRefId));
     const media = [] as HighRiskNarrativeInput['media'];
@@ -107,9 +116,7 @@ export function buildRetainedBidirectionalNarrativeInput(
         bio: clean(input.candidate.profile.bio, 2_200), media, captions: [], carouselCaptionDossier: null,
         interactions: {
             candidateToTargetLike, candidateToTargetComment,
-            targetToCandidateLike: observation(input.targetToCandidateLike.evidenceRefIds).status === 'observed'
-                ? observation(input.targetToCandidateLike.evidenceRefIds)
-                : { status: input.targetToCandidateLike.status, evidenceRefIds: [] },
+            targetToCandidateLike: validateObservation(input.targetToCandidateLike),
             candidateToTargetTag: postDirection(input.candidate, targetUsername, 'taggedUsers'),
             candidateToTargetMention: postDirection(input.candidate, targetUsername, 'mentionedUsers'),
             targetToCandidateTag: postDirection(input.target, candidateUsername, 'taggedUsers'),

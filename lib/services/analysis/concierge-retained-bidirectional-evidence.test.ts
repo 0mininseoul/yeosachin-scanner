@@ -45,7 +45,7 @@ function retainedFixture() {
             { candidateUsername: 'candidate.account', postId: 'target-post', signal: 'female_target_like' as const, sourceInteractionId: 'like:1' },
             { candidateUsername: 'candidate.account', postId: 'target-post', signal: 'female_target_comment' as const, sourceInteractionId: 'comment:1', content: '좋은 기록이에요' },
         ],
-        targetToCandidateLike: { status: 'observed' as const, evidenceRefIds: ['reverse-like:1'] },
+        targetToCandidateLike: { status: 'observed' as const, evidenceRefIds: ['reverse-like:1'] as const },
     };
 }
 
@@ -69,6 +69,34 @@ describe('buildRetainedBidirectionalNarrativeInput', () => {
             targetToCandidateLike: { status: 'not_collected', evidenceRefIds: [] },
         });
         expect(result.interactions.targetToCandidateLike).toEqual({ status: 'not_collected', evidenceRefIds: [] });
+    });
+
+    it('passes a validated observed reverse-like observation through unchanged', () => {
+        const reverse = { status: 'observed' as const, evidenceRefIds: ['opaque:reverse:1', 'opaque:reverse:2'] as const };
+        const result = buildRetainedBidirectionalNarrativeInput({ ...retainedFixture(), targetToCandidateLike: reverse });
+        expect(result.interactions.targetToCandidateLike).toEqual(reverse);
+    });
+
+    it('rejects contradictory retained observation status and refs', () => {
+        expect(() => buildRetainedBidirectionalNarrativeInput({
+            ...retainedFixture(),
+            targetToCandidateLike: { status: 'not_collected', evidenceRefIds: ['raw-ref'] } as never,
+        })).toThrow('FIRST_PAYMENT_CONCIERGE_RETAINED_OBSERVATION_INVALID');
+    });
+
+    it('caps sanitized comments at eight and keeps opaque refs distinct', () => {
+        const rows = Array.from({ length: 10 }, (_, index) => ({
+            candidateUsername: 'candidate.account', postId: `target-post-${index % 2}`,
+            signal: 'female_target_comment' as const, sourceInteractionId: `comment:${index}`,
+            content: index === 0 ? ' <b>정돈된</b>   댓글\u0000 ' : `댓글 ${index}`,
+        }));
+        const result = buildRetainedBidirectionalNarrativeInput({
+            ...retainedFixture(), candidateToTargetInteractions: rows,
+        });
+        expect(result.interactions.comments).toHaveLength(8);
+        expect(result.interactions.candidateToTargetComment.evidenceRefIds).toHaveLength(8);
+        expect(new Set(result.interactions.candidateToTargetComment.evidenceRefIds).size).toBe(8);
+        expect(result.interactions.comments[0]?.text).toBe('정돈된 댓글');
     });
 
     it('rejects missing canonical public names', () => {
