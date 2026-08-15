@@ -82,6 +82,14 @@ describe('buildRetainedBidirectionalNarrativeInput', () => {
             ...retainedFixture(),
             targetToCandidateLike: { status: 'not_collected', evidenceRefIds: ['raw-ref'] } as never,
         })).toThrow('FIRST_PAYMENT_CONCIERGE_RETAINED_OBSERVATION_INVALID');
+        expect(() => buildRetainedBidirectionalNarrativeInput({
+            ...retainedFixture(),
+            targetToCandidateLike: { status: 'future_status', evidenceRefIds: [] } as never,
+        })).toThrow('FIRST_PAYMENT_CONCIERGE_RETAINED_OBSERVATION_INVALID');
+        expect(() => buildRetainedBidirectionalNarrativeInput({
+            ...retainedFixture(),
+            targetToCandidateLike: { status: 'observed', evidenceRefIds: ['x'.repeat(241)] } as never,
+        })).toThrow('FIRST_PAYMENT_CONCIERGE_RETAINED_OBSERVATION_INVALID');
     });
 
     it('caps sanitized comments at eight and keeps opaque refs distinct', () => {
@@ -97,6 +105,24 @@ describe('buildRetainedBidirectionalNarrativeInput', () => {
         expect(result.interactions.candidateToTargetComment.evidenceRefIds).toHaveLength(8);
         expect(new Set(result.interactions.candidateToTargetComment.evidenceRefIds).size).toBe(8);
         expect(result.interactions.comments[0]?.text).toBe('정돈된 댓글');
+        expect(JSON.stringify(result)).not.toContain('comment:0');
+        expect(JSON.stringify(result)).not.toContain('<b>');
+    });
+
+    it('keeps same raw IDs distinct across post and signal and hashes each direction', () => {
+        const result = buildRetainedBidirectionalNarrativeInput({
+            ...retainedFixture(),
+            candidateToTargetInteractions: [
+                { candidateUsername: 'candidate.account', postId: 'post:a', signal: 'female_target_like', sourceInteractionId: 'same' },
+                { candidateUsername: 'candidate.account', postId: 'post:b', signal: 'female_target_comment', sourceInteractionId: 'same', content: '다른 단서' },
+            ],
+        });
+        expect(result.interactions.candidateToTargetLike.status).toBe('observed');
+        expect(result.interactions.candidateToTargetComment.status).toBe('observed');
+        expect(result.interactions.candidateToTargetTag.evidenceRefIds[0]).not.toBe(
+            result.interactions.targetToCandidateTag.evidenceRefIds[0],
+        );
+        expect(JSON.stringify(result)).not.toContain('same');
     });
 
     it('rejects missing canonical public names', () => {

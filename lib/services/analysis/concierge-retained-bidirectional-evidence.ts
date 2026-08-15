@@ -3,28 +3,29 @@ import type { FeatureAnalysisResult, HighRiskNarrativeInput } from '@/lib/servic
 import type { InstagramProfile } from '@/lib/types/instagram';
 import type { InteractionEvidenceRow } from './interaction-stage';
 
-export type RetainedObservation =
-    | { readonly status: 'observed'; readonly evidenceRefIds: readonly [string, ...string[]] }
-    | { readonly status: 'not_observed'; readonly evidenceRefIds: readonly [] }
-    | { readonly status: 'not_collected'; readonly evidenceRefIds: readonly [] };
+export type RetainedObservation = Readonly<
+    | { status: 'observed'; evidenceRefIds: readonly [string, ...string[]] }
+    | { status: 'not_observed'; evidenceRefIds: readonly [] }
+    | { status: 'not_collected'; evidenceRefIds: readonly [] }
+>;
 
-export interface RetainedNarrativeProfile {
-    profile: InstagramProfile;
-    selectedPostEvidence: readonly {
+export type RetainedNarrativeProfile = Readonly<{
+    profile: Readonly<InstagramProfile>;
+    selectedPostEvidence: readonly Readonly<{
         postId: string;
         selectionId: string;
         taggedUsers: readonly string[];
         mentionedUsers: readonly string[];
-    }[];
-}
+    }>[];
+}>;
 
-export interface RetainedBidirectionalNarrativeInputArgs {
+export type RetainedBidirectionalNarrativeInputArgs = Readonly<{
     target: RetainedNarrativeProfile;
     candidate: RetainedNarrativeProfile;
     feature: FeatureAnalysisResult;
-    candidateToTargetInteractions: readonly InteractionEvidenceRow[];
+    candidateToTargetInteractions: readonly Readonly<InteractionEvidenceRow>[];
     targetToCandidateLike: RetainedObservation;
-}
+}>;
 
 export type RetainedBidirectionalNarrativeInput = HighRiskNarrativeInput & {
     interactions: HighRiskNarrativeInput['interactions'] & {
@@ -66,22 +67,34 @@ function observation(refs: readonly string[]): RetainedObservation {
     return (unique.length ? { status: 'observed', evidenceRefIds: unique } : { status: 'not_observed', evidenceRefIds: [] }) as RetainedObservation;
 }
 
-function validateObservation(value: RetainedObservation): RetainedObservation {
-    if (value.status === 'observed') {
-        if (value.evidenceRefIds.length < 1 || value.evidenceRefIds.length > 8
-            || value.evidenceRefIds.some(ref => typeof ref !== 'string' || ref.trim().length === 0)) {
-            throw new Error('FIRST_PAYMENT_CONCIERGE_RETAINED_OBSERVATION_INVALID');
-        }
-    } else if (value.evidenceRefIds.length !== 0) {
+function validateObservation(value: unknown): RetainedObservation {
+    if (!value || typeof value !== 'object' || Array.isArray(value)) {
         throw new Error('FIRST_PAYMENT_CONCIERGE_RETAINED_OBSERVATION_INVALID');
     }
-    return value;
+    const candidate = value as { status?: unknown; evidenceRefIds?: unknown };
+    if (!Array.isArray(candidate.evidenceRefIds) || candidate.evidenceRefIds.length > 8
+        || candidate.evidenceRefIds.some(ref => typeof ref !== 'string' || ref.trim().length === 0 || ref.trim().length > 240)) {
+        throw new Error('FIRST_PAYMENT_CONCIERGE_RETAINED_OBSERVATION_INVALID');
+    }
+    if (candidate.status === 'observed') {
+        if (candidate.evidenceRefIds.length < 1) {
+            throw new Error('FIRST_PAYMENT_CONCIERGE_RETAINED_OBSERVATION_INVALID');
+        }
+        return { status: 'observed', evidenceRefIds: candidate.evidenceRefIds as [string, ...string[]] };
+    }
+    if (candidate.status !== 'not_observed' && candidate.status !== 'not_collected') {
+        throw new Error('FIRST_PAYMENT_CONCIERGE_RETAINED_OBSERVATION_INVALID');
+    }
+    if (candidate.evidenceRefIds.length !== 0) {
+        throw new Error('FIRST_PAYMENT_CONCIERGE_RETAINED_OBSERVATION_INVALID');
+    }
+    return { status: candidate.status, evidenceRefIds: [] };
 }
 
-function postDirection(input: RetainedNarrativeProfile, subject: string, field: 'taggedUsers' | 'mentionedUsers'): RetainedObservation {
+function postDirection(input: RetainedNarrativeProfile, subject: string, field: 'taggedUsers' | 'mentionedUsers', direction: 'candidate-to-target' | 'target-to-candidate'): RetainedObservation {
     const refs = input.selectedPostEvidence
         .filter(post => post[field].some(value => comparableUsername(value) === subject))
-        .map(post => post.selectionId);
+        .map(post => opaque(`post-${direction}-${field}`, post.selectionId));
     return observation(refs);
 }
 
@@ -117,10 +130,10 @@ export function buildRetainedBidirectionalNarrativeInput(
         interactions: {
             candidateToTargetLike, candidateToTargetComment,
             targetToCandidateLike: validateObservation(input.targetToCandidateLike),
-            candidateToTargetTag: postDirection(input.candidate, targetUsername, 'taggedUsers'),
-            candidateToTargetMention: postDirection(input.candidate, targetUsername, 'mentionedUsers'),
-            targetToCandidateTag: postDirection(input.target, candidateUsername, 'taggedUsers'),
-            targetToCandidateMention: postDirection(input.target, candidateUsername, 'mentionedUsers'),
+            candidateToTargetTag: postDirection(input.candidate, targetUsername, 'taggedUsers', 'candidate-to-target'),
+            candidateToTargetMention: postDirection(input.candidate, targetUsername, 'mentionedUsers', 'candidate-to-target'),
+            targetToCandidateTag: postDirection(input.target, candidateUsername, 'taggedUsers', 'target-to-candidate'),
+            targetToCandidateMention: postDirection(input.target, candidateUsername, 'mentionedUsers', 'target-to-candidate'),
             targetToCandidateComment: { status: 'not_collected', evidenceRefIds: [] }, comments,
             coverage: { status: 'partial', evidenceRefId: opaque('coverage', [targetUsername, candidateUsername]) },
         },
