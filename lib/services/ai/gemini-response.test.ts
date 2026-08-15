@@ -70,6 +70,25 @@ describe('parseGeminiJsonResponse', () => {
         expect(JSON.stringify(diagnostics)).not.toContain('unexpectedPrivateField');
     });
 
+    it('retains non-serializable field repair context for schema failures', () => {
+        let captured: unknown;
+        try {
+            parseGeminiJsonResponse(
+                '{"gender":"female","confidence":90,"reasoning":"evidence"}',
+                genderAnalysisResponseSchema,
+            );
+        } catch (error) {
+            captured = error;
+        }
+
+        expect(captured).toBeInstanceOf(GeminiResponseValidationError);
+        expect((captured as GeminiResponseValidationError).repairContext).toMatchObject({
+            candidate: { gender: 'female', confidence: 90, reasoning: 'evidence' },
+            issues: [{ path: ['confidence'], code: 'too_big', message: 'Too big: expected number to be <=1' }],
+        });
+        expect(JSON.stringify(captured)).not.toContain('repairContext');
+    });
+
     it('classifies malformed JSON without retaining response text', () => {
         const rawSecret = 'private-profile-value';
         let captured: unknown;

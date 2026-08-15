@@ -25,6 +25,7 @@ import type {
     AnalysisV2AiAttemptStore,
 } from '@/lib/services/analysis/v2-ai-attempt-store';
 import { zodToGeminiResponseJsonSchema } from './gemini';
+import { GeminiResponseValidationError } from './gemini-response';
 import {
     AI_STAGE_POLICY_VERSION,
     AI_STAGE_POLICY_V28_VERSION,
@@ -1074,6 +1075,63 @@ describe('V2 staged AI services', () => {
         expect(prompt).toContain('fiance, fiancee, fiancé, fiancée');
         expect(prompt).toContain('JSON 반환 직전에 oneLineOverview를 다시 검사하고');
         expect(prompt).toContain('어떤 언어·활용형·인용·부정문으로든');
+    });
+
+    it('repairs only a custom-invalid v2.11 overview with Gemini and revalidates the full feature contract', async () => {
+        const invalid = featureResponse({
+            oneLineOverview: '여행 기록을 따라가면 둘이 사귀는 듯한 흐름이 보입니다.',
+        });
+        const validation = new GeminiResponseValidationError(
+            'schema rejected',
+            { category: 'schema_validation', issues: [{ path: 'oneLineOverview', code: 'custom' }], truncated: false },
+            {
+                candidate: invalid,
+                issues: [{ code: 'custom', path: ['oneLineOverview'], message: 'v2.8 public copy must not assert or speculate about a relationship.' }],
+            },
+        );
+        mocks.analyzeWithGemini
+            .mockRejectedValueOnce(new Error('AI_GENERATION_RESPONSE_REJECTED_ERROR: generated response failed strict validation.', { cause: validation }))
+            .mockImplementationOnce(async (
+                prompt: string,
+                _images: string[],
+                options: { schema: { parse(value: unknown): unknown } },
+            ) => {
+                expect(prompt).toContain(invalid.oneLineOverview);
+                expect(prompt).toContain('v2.8 public copy must not assert or speculate about a relationship.');
+                return options.schema.parse({ value: '여행 사진과 짧은 기록이 일정표처럼 또렷하게 정돈된 피드입니다.' });
+            });
+
+        const result = await featureAnalysis(
+            featureInput(),
+            audit('featureAnalysis', featureInput(), AI_STAGE_POLICY_V211_VERSION),
+            { aiStagePolicyVersion: AI_STAGE_POLICY_V211_VERSION },
+        );
+
+        expect(result.features.oneLineOverview).toContain('일정표처럼');
+        expect(mocks.analyzeWithGemini).toHaveBeenCalledTimes(2);
+    });
+
+    it('does not repair a non-custom v2.11 overview schema rejection', async () => {
+        const invalid = featureResponse({ oneLineOverview: '짧음' });
+        const validation = new GeminiResponseValidationError(
+            'schema rejected',
+            { category: 'schema_validation', issues: [{ path: 'oneLineOverview', code: 'too_small' }], truncated: false },
+            {
+                candidate: invalid,
+                issues: [{ code: 'too_small', path: ['oneLineOverview'], message: 'Too small' } as never],
+            },
+        );
+        mocks.analyzeWithGemini.mockRejectedValueOnce(new Error(
+            'AI_GENERATION_RESPONSE_REJECTED_ERROR: generated response failed strict validation.',
+            { cause: validation },
+        ));
+
+        await expect(featureAnalysis(
+            featureInput(),
+            audit('featureAnalysis', featureInput(), AI_STAGE_POLICY_V211_VERSION),
+            { aiStagePolicyVersion: AI_STAGE_POLICY_V211_VERSION },
+        )).rejects.toThrow('AI_GENERATION_RESPONSE_REJECTED_ERROR');
+        expect(mocks.analyzeWithGemini).toHaveBeenCalledTimes(1);
     });
 
     it('rejects an invalid v2.11 individual-creator overview rather than publishing fallback copy', async () => {
@@ -2406,6 +2464,88 @@ describe('V2 staged AI services', () => {
         expect(prompt).toContain('tag:candidate-to-target');
         expect(prompt).toContain('JSON 반환 직전에 lines의 모든 text를 다시 검사하고');
         expect(prompt).toContain('어떤 언어·활용형·인용·부정문으로든');
+    });
+
+    it('repairs only a custom-invalid v2.11 narrative field with Gemini and revalidates both lines', async () => {
+        const input = {
+            ...narrativeInput(),
+            interactions: {
+                ...narrativeInput().interactions,
+                candidateToTargetLike: notObserved(),
+                targetToCandidateLike: notObserved(),
+                candidateToTargetComment: notObserved(),
+                comments: [],
+                candidateToTargetTag: observed('tag:candidate-to-target'),
+            },
+        };
+        const candidate = { lines: [{
+            text: '박민지님의 여행과 일상 기록은 꽤 차분하게 이어지는 피드입니다.',
+            evidenceRefs: ['profile:bio'],
+        }, {
+            text: '박민지님이 김준호님을 태그한 흔적은 확인되지만, 커플 기류로 단정할 수는 없습니다.',
+            evidenceRefs: ['tag:candidate-to-target', 'coverage:target-interactions'],
+        }] };
+        const validation = new GeminiResponseValidationError(
+            'schema rejected',
+            { category: 'schema_validation', issues: [{ path: 'lines.#.text', code: 'custom' }], truncated: false },
+            {
+                candidate,
+                issues: [{ code: 'custom', path: ['lines', 1, 'text'], message: 'Narrative violates the public two-line contract.' }],
+            },
+        );
+        mocks.analyzeWithGemini
+            .mockRejectedValueOnce(new Error('AI_GENERATION_RESPONSE_REJECTED_ERROR: generated response failed strict validation.', { cause: validation }))
+            .mockImplementationOnce(async (
+                prompt: string,
+                _images: string[],
+                options: { schema: { parse(value: unknown): unknown } },
+            ) => {
+                expect(prompt).toContain(candidate.lines[1].text);
+                expect(prompt).toContain('Narrative violates the public two-line contract.');
+                return options.schema.parse({ value: '박민지님이 김준호님을 태그한 흔적은 확인되지만, 수집 표본 밖 누락 가능성은 남습니다.' });
+            });
+
+        const result = await highRiskNarrative(
+            input,
+            audit('highRiskNarrative', input, AI_STAGE_POLICY_V211_VERSION),
+            { aiStagePolicyVersion: AI_STAGE_POLICY_V211_VERSION },
+        );
+
+        expect(result.lines[1]).toContain('수집 표본 밖');
+        expect(mocks.analyzeWithGemini).toHaveBeenCalledTimes(2);
+    });
+
+    it('fails closed when a targeted narrative repair still violates the full contract', async () => {
+        const input = narrativeInput();
+        const candidate = { lines: [{
+            text: '박민지님의 여행과 일상 기록은 꽤 차분하게 이어지는 피드입니다.',
+            evidenceRefs: ['profile:bio'],
+        }, {
+            text: '박민지님이 김준호님에게 남긴 좋아요와 댓글은 확인되지만, 커플 기류로 단정할 수는 없습니다.',
+            evidenceRefs: ['like:candidate-to-target', 'comment:1', 'coverage:target-interactions'],
+        }] };
+        const validation = new GeminiResponseValidationError(
+            'schema rejected',
+            { category: 'schema_validation', issues: [{ path: 'lines.#.text', code: 'custom' }], truncated: false },
+            {
+                candidate,
+                issues: [{ code: 'custom', path: ['lines', 1, 'text'], message: 'Narrative violates the public two-line contract.' }],
+            },
+        );
+        mocks.analyzeWithGemini
+            .mockRejectedValueOnce(new Error('AI_GENERATION_RESPONSE_REJECTED_ERROR: generated response failed strict validation.', { cause: validation }))
+            .mockImplementationOnce(async (
+                _prompt: string,
+                _images: string[],
+                options: { schema: { parse(value: unknown): unknown } },
+            ) => options.schema.parse({ value: candidate.lines[1].text }));
+
+        await expect(highRiskNarrative(
+            input,
+            audit('highRiskNarrative', input, AI_STAGE_POLICY_V211_VERSION),
+            { aiStagePolicyVersion: AI_STAGE_POLICY_V211_VERSION },
+        )).rejects.toThrow();
+        expect(mocks.analyzeWithGemini).toHaveBeenCalledTimes(2);
     });
 
     it('masks digits in canonical username subjects while requiring exact evidence refs', async () => {

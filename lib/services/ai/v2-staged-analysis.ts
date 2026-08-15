@@ -19,6 +19,7 @@ import {
     type GeminiAttemptStartTelemetry,
     type GeminiAttemptTelemetry,
 } from './gemini';
+import { GeminiResponseValidationError } from './gemini-response';
 import {
     AI_STAGE_POLICY_LATEST_VERSION,
     AI_STAGE_POLICY_VERSION,
@@ -2111,7 +2112,9 @@ export async function featureAnalysis(
         feedEvidence: input.captions.map(caption => caption.text),
     });
     const prepared = await prepareStagedResult(audit, responseSchema);
-    const features = prepared.cached ?? responseSchema.parse(await analyzeWithGemini(
+    let features;
+    try {
+        features = prepared.cached ?? responseSchema.parse(await analyzeWithGemini(
             prompt,
             media.map(item => item.normalizedJpegBase64),
             {
@@ -2128,6 +2131,43 @@ export async function featureAnalysis(
                     : {}),
             }
         ));
+    } catch (error) {
+        const validation = error instanceof Error && error.cause instanceof GeminiResponseValidationError
+            ? error.cause
+            : null;
+        const repair = validation?.repairContext;
+        const issue = repair?.issues.find(candidate => (
+            candidate.code === 'custom'
+            && candidate.path.length === 1
+            && candidate.path[0] === 'oneLineOverview'
+        ));
+        const candidate = repair?.candidate;
+        if (
+            policyVersion !== AI_STAGE_POLICY_V211_VERSION
+            || !issue
+            || !candidate
+            || typeof candidate !== 'object'
+            || Array.isArray(candidate)
+            || typeof (candidate as { oneLineOverview?: unknown }).oneLineOverview !== 'string'
+        ) throw error;
+        const invalidValue = (candidate as { oneLineOverview: string }).oneLineOverview;
+        const repaired = await analyzeWithGemini(
+            `다음 공개 문구 필드 하나만 수정하세요. 원문: ${JSON.stringify(invalidValue)}\n검증 요구사항: ${issue.message}\n관계 어휘를 어떤 언어·활용형·인용·부정문으로도 쓰지 말고 JSON만 반환하세요.`,
+            [],
+            {
+                schema: z.object({ value: safeOverviewSchemaFor(policyVersion) }).strict(),
+                analysisType: 'v2_feature_analysis',
+                requestId: audit.requestId,
+                ...(options.replayCapability
+                    ? { skipTokenLog: true, replayCapability: options.replayCapability }
+                    : {}),
+            },
+        );
+        features = responseSchema.parse({
+            ...(candidate as Record<string, unknown>),
+            oneLineOverview: repaired.value,
+        });
+    }
     return featureAnalysisResultSchema.parse({
         features,
         finalGenderDecision: resolveFinalGenderDecision(input.triage.assessment, features),
@@ -2937,33 +2977,72 @@ export async function highRiskNarrative(
                 }
             ));
     } catch (error) {
+        const validation = error instanceof Error && error.cause instanceof GeminiResponseValidationError
+            ? error.cause
+            : null;
+        const repair = validation?.repairContext;
+        const textIssues = repair?.issues.filter(issue => (
+            issue.code === 'custom'
+            && issue.path.length === 3
+            && issue.path[0] === 'lines'
+            && (issue.path[1] === 0 || issue.path[1] === 1)
+            && issue.path[2] === 'text'
+        )) ?? [];
         if (
-            !isAnalysisV2AiDeterministicFallbackError(error)
-            && !(error instanceof z.ZodError)
+            policyVersion === AI_STAGE_POLICY_V211_VERSION
+            && textIssues.length > 0
+            && repair?.candidate
+            && typeof repair.candidate === 'object'
+            && !Array.isArray(repair.candidate)
+            && Array.isArray((repair.candidate as { lines?: unknown }).lines)
         ) {
-            throw error;
-        }
-        if (policyVersion === AI_STAGE_POLICY_V211_VERSION) {
-            if (error instanceof z.ZodError) {
-                throw new Error(
-                    `${AI_GENERATION_RESPONSE_REJECTED_ERROR_PREFIX} generated response failed strict validation.`,
-                    { cause: error },
+            const repairedCandidate = structuredClone(repair.candidate) as {
+                lines: Array<{ text?: unknown }>;
+                [key: string]: unknown;
+            };
+            for (const issue of textIssues) {
+                const lineIndex = issue.path[1] as 0 | 1;
+                const invalidValue = repairedCandidate.lines[lineIndex]?.text;
+                if (typeof invalidValue !== 'string') throw error;
+                const repaired = await analyzeWithGemini(
+                    `다음 공개 문구 필드 하나만 수정하세요. 원문: ${JSON.stringify(invalidValue)}\n검증 요구사항: ${issue.message}\n관계 어휘를 어떤 언어·활용형·인용·부정문으로도 쓰지 말고 JSON만 반환하세요.`,
+                    [],
+                    {
+                        schema: z.object({ value: z.string().min(1).max(180) }).strict(),
+                        analysisType: 'v2_high_risk_narrative',
+                        requestId: audit.requestId,
+                    },
                 );
+                repairedCandidate.lines[lineIndex]!.text = repaired.value;
             }
-            throw error;
+            response = responseSchema.parse(repairedCandidate);
+        } else {
+            if (
+                !isAnalysisV2AiDeterministicFallbackError(error)
+                && !(error instanceof z.ZodError)
+            ) throw error;
+            if (policyVersion === AI_STAGE_POLICY_V211_VERSION) {
+                if (error instanceof z.ZodError) {
+                    throw new Error(
+                        `${AI_GENERATION_RESPONSE_REJECTED_ERROR_PREFIX} generated response failed strict validation.`,
+                        { cause: error },
+                    );
+                }
+                throw error;
+            }
+            const firstComment = sanitized.comments[0]?.text;
+            const lines = buildSafeFallbackRiskNarrative({
+                candidateLikedTarget: observed(input.interactions.candidateToTargetLike),
+                candidateCommentedOnTarget: observed(input.interactions.candidateToTargetComment),
+                targetLikedCandidate: observed(input.interactions.targetToCandidateLike),
+                ...(firstComment ? { commentText: firstComment } : {}),
+            });
+            return highRiskNarrativeResultSchemaFor(input, policyVersion).parse({
+                lines,
+                evidenceRefs: fallbackEvidenceRefs(input, media, sanitized),
+                source: 'safe_fallback',
+            });
         }
-        const firstComment = sanitized.comments[0]?.text;
-        const lines = buildSafeFallbackRiskNarrative({
-            candidateLikedTarget: observed(input.interactions.candidateToTargetLike),
-            candidateCommentedOnTarget: observed(input.interactions.candidateToTargetComment),
-            targetLikedCandidate: observed(input.interactions.targetToCandidateLike),
-            ...(firstComment ? { commentText: firstComment } : {}),
-        });
-        return highRiskNarrativeResultSchemaFor(input, policyVersion).parse({
-            lines,
-            evidenceRefs: fallbackEvidenceRefs(input, media, sanitized),
-            source: 'safe_fallback',
-        });
     }
     return highRiskNarrativeResultSchemaFor(input, policyVersion).parse({
         lines: [response.lines[0].text, response.lines[1].text],
