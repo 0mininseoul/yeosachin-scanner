@@ -2234,7 +2234,7 @@ describe('V2 staged AI services', () => {
         }
     );
 
-    it('rejects a v2.11 narrative fallback even when canonical names and appearance evidence are available', async () => {
+    it('preserves a retryable Gemini rejection instead of publishing a v2.11 narrative fallback', async () => {
         const input = {
             ...narrativeInput(),
             publicSubjects: {
@@ -2251,7 +2251,7 @@ describe('V2 staged AI services', () => {
             input,
             audit('highRiskNarrative', input, AI_STAGE_POLICY_V211_VERSION),
             { aiStagePolicyVersion: AI_STAGE_POLICY_V211_VERSION },
-        )).rejects.toThrow('AI_PUBLIC_COPY_GEMINI_REQUIRED');
+        )).rejects.toThrow('AI_GENERATION_RESPONSE_REJECTED_ERROR');
     });
 
     it('rejects an unqualified reciprocal-like claim rather than composing v2.11 fallback copy', async () => {
@@ -2279,7 +2279,7 @@ describe('V2 staged AI services', () => {
             input,
             audit('highRiskNarrative', input, AI_STAGE_POLICY_V211_VERSION),
             { aiStagePolicyVersion: AI_STAGE_POLICY_V211_VERSION },
-        )).rejects.toThrow('AI_PUBLIC_COPY_GEMINI_REQUIRED');
+        )).rejects.toThrow('AI_GENERATION_RESPONSE_REJECTED_ERROR');
     });
 
     it('rejects tag-only v2.11 fallback evidence rather than publishing deterministic copy', async () => {
@@ -2302,7 +2302,7 @@ describe('V2 staged AI services', () => {
             input,
             audit('highRiskNarrative', input, AI_STAGE_POLICY_V211_VERSION),
             { aiStagePolicyVersion: AI_STAGE_POLICY_V211_VERSION },
-        )).rejects.toThrow('AI_PUBLIC_COPY_GEMINI_REQUIRED');
+        )).rejects.toThrow('AI_GENERATION_RESPONSE_REJECTED_ERROR');
     });
 
     it('supplies and validates named tag direction evidence in v2.11 model output', async () => {

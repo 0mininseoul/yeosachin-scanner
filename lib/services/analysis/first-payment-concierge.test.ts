@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest';
+import { isRecoverableGeminiResponseError } from '@/lib/services/ai/gemini-generation-policy';
 import {
     createFirstPaymentConciergeHighRiskNarrativeInput,
     firstPaymentConciergeCheckpointProfile,
@@ -100,6 +101,16 @@ describe('firstPaymentConciergeSafeFailureCode', () => {
         expect(firstPaymentConciergeSafeFailureCode(
             new Error('sensitive lower-case detail'),
         )).toBe('FIRST_PAYMENT_CONCIERGE_UNCLASSIFIED_FAILURE');
+    });
+
+    it('keeps a rejected Gemini public-copy generation retryable for recovery', () => {
+        const error = new Error(
+            'AI_GENERATION_RESPONSE_REJECTED_ERROR: generated response failed strict validation.',
+        );
+
+        expect(isRecoverableGeminiResponseError(error)).toBe(true);
+        expect(firstPaymentConciergeSafeFailureCode(error))
+            .toBe('AI_GENERATION_RESPONSE_REJECTED_ERROR');
     });
 });
 

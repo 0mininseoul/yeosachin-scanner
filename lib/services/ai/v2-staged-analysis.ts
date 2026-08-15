@@ -39,6 +39,7 @@ import {
     v211CopySubjectNames,
 } from '@/lib/services/analysis/public-copy-quality';
 import {
+    AI_GENERATION_RESPONSE_REJECTED_ERROR_PREFIX,
     isAmbiguousGeminiGenerationError,
 } from './gemini-generation-policy';
 import {
@@ -2872,7 +2873,13 @@ export async function highRiskNarrative(
             throw error;
         }
         if (policyVersion === AI_STAGE_POLICY_V211_VERSION) {
-            throw new Error('AI_PUBLIC_COPY_GEMINI_REQUIRED', { cause: error });
+            if (error instanceof z.ZodError) {
+                throw new Error(
+                    `${AI_GENERATION_RESPONSE_REJECTED_ERROR_PREFIX} generated response failed strict validation.`,
+                    { cause: error },
+                );
+            }
+            throw error;
         }
         const firstComment = sanitized.comments[0]?.text;
         const lines = buildSafeFallbackRiskNarrative({
