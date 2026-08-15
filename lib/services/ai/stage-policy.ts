@@ -213,6 +213,10 @@ const AI_STAGE_POLICIES_V211 = Object.freeze({
         ...AI_STAGE_POLICIES_V210.featureAnalysis,
         promptVersion: 'feature-analysis-v5',
     }),
+    highRiskNarrative: Object.freeze({
+        ...AI_STAGE_POLICIES_V210.highRiskNarrative,
+        promptVersion: 'high-risk-narrative-v4',
+    }),
 } satisfies Record<AiStageName, Readonly<AiStagePolicy>>);
 
 export const AI_STAGE_POLICY_REGISTRY = Object.freeze({

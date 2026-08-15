@@ -37,6 +37,7 @@ import {
 import {
     buildV211EvidenceSpecificOverview,
     buildV211EvidenceSpecificRiskNarrative,
+    v211CopySubjectNames,
 } from '@/lib/services/analysis/public-copy-quality';
 import {
     isAmbiguousGeminiGenerationError,
@@ -94,6 +95,10 @@ const CANDIDATE_TO_TARGET_LIKE_PHRASE = '후보가 대상 게시물에 남긴 �
 const TARGET_TO_CANDIDATE_LIKE_PHRASE = '대상 계정이 후보 피드에 남긴 좋아요';
 const BIDIRECTIONAL_LIKE_PHRASE = '서로 남긴 좋아요';
 const CANDIDATE_TO_TARGET_COMMENT_PHRASE = '후보가 대상 게시물에 남긴 댓글';
+const CANDIDATE_TO_TARGET_TAG_PHRASE = '후보가 대상을 태그한 흔적';
+const TARGET_TO_CANDIDATE_TAG_PHRASE = '대상이 후보를 태그한 흔적';
+const CANDIDATE_TO_TARGET_MENTION_PHRASE = '후보가 대상을 적은 캡션 멘션';
+const TARGET_TO_CANDIDATE_MENTION_PHRASE = '대상이 후보를 적은 캡션 멘션';
 const IMPOSSIBLE_TARGET_TO_CANDIDATE_COMMENT_PATTERN =
     /대상\s*계정이\s*후보(?:의)?\s*(?:게시물|피드)에\s*남긴\s*댓글/u;
 const INTERNAL_RESULT_TERM_PATTERN =
@@ -779,6 +784,10 @@ const narrativeInteractionsSchema = z.object({
     candidateToTargetLike: interactionObservationSchema,
     targetToCandidateLike: interactionObservationSchema,
     candidateToTargetComment: interactionObservationSchema,
+    candidateToTargetTag: interactionObservationSchema,
+    targetToCandidateTag: interactionObservationSchema,
+    candidateToTargetMention: interactionObservationSchema,
+    targetToCandidateMention: interactionObservationSchema,
     comments: z.array(sanitizedCommentEvidenceSchema).max(12),
     coverage: z.object({
         status: z.enum(['complete', 'partial', 'unknown']),
@@ -825,6 +834,11 @@ const carouselCaptionDossierSchema = z.object({
 
 export const highRiskNarrativeInputSchema = z.object({
     forbiddenIdentifiers: forbiddenIdentifiersSchema,
+    publicSubjects: z.object({
+        targetFullName: z.string().trim().min(1).max(200).nullable(),
+        candidateFullName: z.string().trim().min(1).max(200).nullable(),
+    }).strict(),
+    appearance: z.object({ isReliable: z.boolean() }).strict(),
     bio: z.string().max(MAX_PROFILE_BIO_LENGTH).nullable(),
     media: normalizedMediaListSchema,
     captions: stagedCaptionListSchema,
@@ -864,6 +878,10 @@ export const highRiskNarrativeInputSchema = z.object({
             ...value.interactions.candidateToTargetLike.evidenceRefIds,
             ...value.interactions.targetToCandidateLike.evidenceRefIds,
             ...value.interactions.candidateToTargetComment.evidenceRefIds,
+            ...value.interactions.candidateToTargetTag.evidenceRefIds,
+            ...value.interactions.targetToCandidateTag.evidenceRefIds,
+            ...value.interactions.candidateToTargetMention.evidenceRefIds,
+            ...value.interactions.targetToCandidateMention.evidenceRefIds,
             ...value.interactions.comments.flatMap(comment => [
                 comment.evidenceRefId,
                 comment.targetPostEvidenceRefId,
@@ -2282,6 +2300,18 @@ function requiredInteractionPhrases(input: ParsedHighRiskNarrativeInput): string
         ...(observed(input.interactions.candidateToTargetComment)
             ? [CANDIDATE_TO_TARGET_COMMENT_PHRASE]
             : []),
+        ...(observed(input.interactions.candidateToTargetTag)
+            ? [CANDIDATE_TO_TARGET_TAG_PHRASE]
+            : []),
+        ...(observed(input.interactions.targetToCandidateTag)
+            ? [TARGET_TO_CANDIDATE_TAG_PHRASE]
+            : []),
+        ...(observed(input.interactions.candidateToTargetMention)
+            ? [CANDIDATE_TO_TARGET_MENTION_PHRASE]
+            : []),
+        ...(observed(input.interactions.targetToCandidateMention)
+            ? [TARGET_TO_CANDIDATE_MENTION_PHRASE]
+            : []),
     ];
 }
 
@@ -2290,6 +2320,10 @@ function allObservedInteractionRefs(input: ParsedHighRiskNarrativeInput): string
         ...input.interactions.candidateToTargetLike.evidenceRefIds,
         ...input.interactions.targetToCandidateLike.evidenceRefIds,
         ...input.interactions.candidateToTargetComment.evidenceRefIds,
+        ...input.interactions.candidateToTargetTag.evidenceRefIds,
+        ...input.interactions.targetToCandidateTag.evidenceRefIds,
+        ...input.interactions.candidateToTargetMention.evidenceRefIds,
+        ...input.interactions.targetToCandidateMention.evidenceRefIds,
     ];
 }
 
@@ -2298,6 +2332,10 @@ function observedInteractionRefGroups(input: ParsedHighRiskNarrativeInput): stri
         input.interactions.candidateToTargetLike,
         input.interactions.targetToCandidateLike,
         input.interactions.candidateToTargetComment,
+        input.interactions.candidateToTargetTag,
+        input.interactions.targetToCandidateTag,
+        input.interactions.candidateToTargetMention,
+        input.interactions.targetToCandidateMention,
     ].flatMap(observation => (
         observation.status === 'observed' ? [observation.evidenceRefIds] : []
     ));
@@ -2351,6 +2389,10 @@ function narrativePromptLegacy(
             candidateToTargetLike: input.interactions.candidateToTargetLike.status,
             targetToCandidateLike: input.interactions.targetToCandidateLike.status,
             candidateToTargetComment: input.interactions.candidateToTargetComment.status,
+            candidateToTargetTag: input.interactions.candidateToTargetTag.status,
+            targetToCandidateTag: input.interactions.targetToCandidateTag.status,
+            candidateToTargetMention: input.interactions.candidateToTargetMention.status,
+            targetToCandidateMention: input.interactions.targetToCandidateMention.status,
             coverage: input.interactions.coverage.status,
             requiredInteractionPhrases: requiredInteractionPhrases(input),
         },
@@ -2359,6 +2401,10 @@ function narrativePromptLegacy(
             candidateToTargetLike: input.interactions.candidateToTargetLike.evidenceRefIds,
             targetToCandidateLike: input.interactions.targetToCandidateLike.evidenceRefIds,
             candidateToTargetComment: input.interactions.candidateToTargetComment.evidenceRefIds,
+            candidateToTargetTag: input.interactions.candidateToTargetTag.evidenceRefIds,
+            targetToCandidateTag: input.interactions.targetToCandidateTag.evidenceRefIds,
+            candidateToTargetMention: input.interactions.candidateToTargetMention.evidenceRefIds,
+            targetToCandidateMention: input.interactions.targetToCandidateMention.evidenceRefIds,
             coverage: input.interactions.coverage.evidenceRefId,
         },
     };
@@ -2387,17 +2433,56 @@ function narrativePrompt(
 ): string {
     const legacy = narrativePromptLegacy(input, media, sanitized);
     if (!usesSafePublicPresentation(policyVersion)) return legacy;
+    if (policyVersion === AI_STAGE_POLICY_V211_VERSION) {
+        const subjects = v211CopySubjectNames({
+            ...input.forbiddenIdentifiers,
+            ...input.publicSubjects,
+        });
+        const appearanceRule = input.appearance.isReliable
+            ? '첫 문장에는 피드·프로필 맥락과 함께 가벼운 외모 농담을 한 번 넣되, 반드시 이미지 인상만으로 관계를 판단할 수 없다고 밝혀야 합니다.'
+            : '외모·이미지에 관한 문구를 만들지 마세요.';
+        return `${legacy}\nv2.11 공개 서사는 첫 문장에 ${subjects.candidate}, 둘째 문장에 ${subjects.candidate}와 ${subjects.target}을 직접 적으세요. \"대상 계정\"이나 \"후보 계정\"이라는 표현은 금지합니다. 각 좋아요·댓글·태그·멘션은 실제 관측 방향을 이름으로 설명하고, 단일 좋아요나 외모만으로 관계를 증명하지 마세요. ${appearanceRule}`;
+    }
     return `${legacy}\n고위험 서사는 상호작용과 제공된 시각 근거를 구분해 구체적으로 쓰되, ㅋㅋ·자기지칭을 절대 쓰지 마세요. bio·caption 인용을 포함해 관계 관련 용어 자체를 lines에 쓰지 마세요. 보호 특성·신체·외모를 조롱하지 마세요.`;
+}
+
+function v211NarrativeSubjects(input: ParsedHighRiskNarrativeInput) {
+    return v211CopySubjectNames({
+        ...input.forbiddenIdentifiers,
+        ...input.publicSubjects,
+    });
 }
 
 function containsForbiddenPublicIdentifier(
     value: string,
-    identifiers: z.infer<typeof forbiddenIdentifiersSchema>
+    identifiers: z.infer<typeof forbiddenIdentifiersSchema>,
+    allowedSubjects?: { target: string; candidate: string },
 ): boolean {
-    const normalized = value.normalize('NFKC').toLowerCase();
+    let normalized = value.normalize('NFKC').toLowerCase();
+    if (allowedSubjects) {
+        normalized = normalized
+            .replaceAll(allowedSubjects.target.normalize('NFKC').toLowerCase(), 'approved-name')
+            .replaceAll(allowedSubjects.candidate.normalize('NFKC').toLowerCase(), 'approved-name');
+    }
     return PUBLIC_IDENTIFIER_PATTERN.test(normalized)
         || normalized.includes(identifiers.targetUsername)
         || normalized.includes(identifiers.candidateUsername);
+}
+
+function escapesRegex(value: string): string {
+    return value.replace(/[.*+?^${}()|[\]\\]/gu, '\\$&');
+}
+
+function containsNamedInteractionDirection(
+    line: string,
+    actor: string,
+    receiver: string,
+    interaction: '좋아요' | '댓글' | '태그' | '멘션',
+): boolean {
+    return new RegExp(
+        `${escapesRegex(actor)}[^.]{0,80}${escapesRegex(receiver)}[^.]{0,80}${interaction}`,
+        'u',
+    ).test(line);
 }
 
 function narrativeResponseSchemaFor(
@@ -2406,6 +2491,9 @@ function narrativeResponseSchemaFor(
     sanitized: SanitizedNarrativeEvidence,
     policyVersion: AiStagePolicyVersion,
 ) {
+    const v211Subjects = policyVersion === AI_STAGE_POLICY_V211_VERSION
+        ? v211NarrativeSubjects(input)
+        : null;
     const allowedRefs = new Set([
         ...(sanitized.bio ? ['profile:bio'] : []),
         ...media.map(item => item.selectionId),
@@ -2432,7 +2520,7 @@ function narrativeResponseSchemaFor(
             .flatMap(comment => extractSafePublicCommentTerms(comment.text))
             .filter(term => !REDACTION_COMMENT_TERMS.has(term))
     )].slice(0, 8);
-    const requiredPhrases = requiredInteractionPhrases(input);
+    const requiredPhrases = v211Subjects ? [] : requiredInteractionPhrases(input);
 
     return highRiskNarrativeModelResponseSchema.superRefine((value, context) => {
         const texts: [string, string] = [value.lines[0].text, value.lines[1].text];
@@ -2455,7 +2543,11 @@ function narrativeResponseSchemaFor(
                 }
             }
             if (
-                containsForbiddenPublicIdentifier(line.text, input.forbiddenIdentifiers)
+                containsForbiddenPublicIdentifier(
+                    line.text,
+                    input.forbiddenIdentifiers,
+                    v211Subjects ?? undefined,
+                )
                 || INTERNAL_RESULT_TERM_PATTERN.test(line.text)
             ) {
                 context.addIssue({
@@ -2474,6 +2566,119 @@ function narrativeResponseSchemaFor(
                 }
             });
         });
+        if (v211Subjects) {
+            const [first, second] = texts;
+            if (
+                /(?:대상\s*계정|후보\s*계정)/u.test(first + second)
+                || !first.includes(v211Subjects.candidate)
+                || !second.includes(v211Subjects.candidate)
+                || !second.includes(v211Subjects.target)
+            ) {
+                context.addIssue({
+                    code: 'custom',
+                    path: ['lines'],
+                    message: 'v2.11 narrative must use canonical subject names, not generic role labels.',
+                });
+            }
+            if (
+                observed(input.interactions.candidateToTargetLike)
+                && !containsNamedInteractionDirection(
+                    second,
+                    v211Subjects.candidate,
+                    v211Subjects.target,
+                    '좋아요',
+                )
+            ) {
+                context.addIssue({
+                    code: 'custom',
+                    path: ['lines', 1, 'text'],
+                    message: 'v2.11 narrative omitted the candidate-to-target like direction.',
+                });
+            }
+            if (
+                observed(input.interactions.targetToCandidateLike)
+                && !containsNamedInteractionDirection(
+                    second,
+                    v211Subjects.target,
+                    v211Subjects.candidate,
+                    '좋아요')
+            ) {
+                context.addIssue({
+                    code: 'custom',
+                    path: ['lines', 1, 'text'],
+                    message: 'v2.11 narrative omitted the target-to-candidate like direction.',
+                });
+            }
+            if (
+                observed(input.interactions.candidateToTargetComment)
+                && !containsNamedInteractionDirection(
+                    second,
+                    v211Subjects.candidate,
+                    v211Subjects.target,
+                    '댓글',
+                )
+            ) {
+                context.addIssue({
+                    code: 'custom',
+                    path: ['lines', 1, 'text'],
+                    message: 'v2.11 narrative omitted the candidate-to-target comment direction.',
+                });
+            }
+            const namedDirections: ReadonlyArray<readonly [
+                z.infer<typeof interactionObservationSchema>, string, string, '태그' | '멘션', string
+            ]> = [
+                [
+                    input.interactions.candidateToTargetTag,
+                    v211Subjects.candidate,
+                    v211Subjects.target,
+                    '태그',
+                    'candidate-to-target tag',
+                ],
+                [
+                    input.interactions.targetToCandidateTag,
+                    v211Subjects.target,
+                    v211Subjects.candidate,
+                    '태그',
+                    'target-to-candidate tag',
+                ],
+                [
+                    input.interactions.candidateToTargetMention,
+                    v211Subjects.candidate,
+                    v211Subjects.target,
+                    '멘션',
+                    'candidate-to-target mention',
+                ],
+                [
+                    input.interactions.targetToCandidateMention,
+                    v211Subjects.target,
+                    v211Subjects.candidate,
+                    '멘션',
+                    'target-to-candidate mention',
+                ],
+            ];
+            for (const [observation, actor, receiver, interaction, label] of namedDirections) {
+                if (observed(observation) && !containsNamedInteractionDirection(
+                    second, actor, receiver, interaction,
+                )) {
+                    context.addIssue({
+                        code: 'custom',
+                        path: ['lines', 1, 'text'],
+                        message: `v2.11 narrative omitted the ${label} direction.`,
+                    });
+                }
+            }
+            if (
+                input.appearance.isReliable
+                && (!first.includes('이미지 인상만으로 관계를 판단할 수는 없습니다')
+                    || !/(?:예쁘|매력|눈길)/u.test(first))
+            ) {
+                context.addIssue({
+                    code: 'custom',
+                    path: ['lines', 0, 'text'],
+                    message: 'v2.11 reliable appearance copy requires a light, non-probative caveat.',
+                });
+            }
+        }
         if (!value.lines[0].evidenceRefs.some(ref => styleRefs.has(ref))) {
             context.addIssue({
                 code: 'custom',
@@ -2532,6 +2737,24 @@ function narrativeResponseSchemaFor(
                 code: 'custom',
                 path: ['lines', 1, 'text'],
                 message: 'Narrative introduced unobserved comment evidence.',
+            });
+        }
+        const hasAnyTag = observed(input.interactions.candidateToTargetTag)
+            || observed(input.interactions.targetToCandidateTag);
+        if (!hasAnyTag && value.lines[1].text.includes('태그')) {
+            context.addIssue({
+                code: 'custom',
+                path: ['lines', 1, 'text'],
+                message: 'Narrative introduced unobserved tag evidence.',
+            });
+        }
+        const hasAnyMention = observed(input.interactions.candidateToTargetMention)
+            || observed(input.interactions.targetToCandidateMention);
+        if (!hasAnyMention && value.lines[1].text.includes('멘션')) {
+            context.addIssue({
+                code: 'custom',
+                path: ['lines', 1, 'text'],
+                message: 'Narrative introduced unobserved mention evidence.',
             });
         }
         if (IMPOSSIBLE_TARGET_TO_CANDIDATE_COMMENT_PATTERN.test(value.lines[1].text)) {
@@ -2651,10 +2874,19 @@ export async function highRiskNarrative(
             ? buildV211EvidenceSpecificRiskNarrative({
                 profileEvidence: sanitized.bio,
                 feedEvidence: sanitized.captions.map(caption => caption.text),
+                subjects: {
+                    ...input.forbiddenIdentifiers,
+                    ...input.publicSubjects,
+                },
                 candidateLikedTarget: observed(input.interactions.candidateToTargetLike),
                 candidateCommentedOnTarget: observed(input.interactions.candidateToTargetComment),
                 targetLikedCandidate: observed(input.interactions.targetToCandidateLike),
+                candidateTaggedTarget: observed(input.interactions.candidateToTargetTag),
+                targetTaggedCandidate: observed(input.interactions.targetToCandidateTag),
+                candidateMentionedTarget: observed(input.interactions.candidateToTargetMention),
+                targetMentionedCandidate: observed(input.interactions.targetToCandidateMention),
                 ...(firstComment ? { commentText: firstComment } : {}),
+                appearance: input.appearance,
             })
             : buildSafeFallbackRiskNarrative({
                 candidateLikedTarget: observed(input.interactions.candidateToTargetLike),

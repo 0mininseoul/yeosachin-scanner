@@ -248,12 +248,21 @@ function observed(ref: string) {
     return { status: 'observed' as const, evidenceRefIds: [ref] };
 }
 
+function notObserved() {
+    return { status: 'not_observed' as const, evidenceRefIds: [] as string[] };
+}
+
 function narrativeInput(): HighRiskNarrativeInput {
     return {
         forbiddenIdentifiers: {
             targetUsername: 'target.user',
             candidateUsername: 'candidate.user',
         },
+        publicSubjects: {
+            targetFullName: '김준호',
+            candidateFullName: '박민지',
+        },
+        appearance: { isReliable: false },
         bio: 'candidate.user 여행 계정 https://example.com user@example.com 010-1234-5678',
         media: media(),
         captions: [{
@@ -265,6 +274,10 @@ function narrativeInput(): HighRiskNarrativeInput {
             candidateToTargetLike: observed('like:candidate-to-target'),
             targetToCandidateLike: observed('like:target-to-candidate'),
             candidateToTargetComment: observed('comment:1'),
+            candidateToTargetTag: notObserved(),
+            targetToCandidateTag: notObserved(),
+            candidateToTargetMention: notObserved(),
+            targetToCandidateMention: notObserved(),
             comments: [{
                 evidenceRefId: 'comment:1',
                 targetPostEvidenceRefId: 'target-post:1',
@@ -2225,6 +2238,131 @@ describe('V2 staged AI services', () => {
             expect(mocks.analyzeWithGemini).toHaveBeenCalledTimes(source === 'live' ? 1 : 0);
         }
     );
+
+    it('uses canonical names and reliable appearance context in the v2.11 narrative fallback', async () => {
+        const input = {
+            ...narrativeInput(),
+            publicSubjects: {
+                targetFullName: '김준호',
+                candidateFullName: '박민지',
+            },
+            appearance: { isReliable: true },
+        };
+        mocks.analyzeWithGemini.mockRejectedValueOnce(new Error(
+            'AI_GENERATION_RESPONSE_REJECTED_ERROR: generated response failed strict validation.'
+        ));
+
+        const result = await highRiskNarrative(
+            input,
+            audit('highRiskNarrative', input, AI_STAGE_POLICY_V211_VERSION),
+            { aiStagePolicyVersion: AI_STAGE_POLICY_V211_VERSION },
+        );
+
+        expect(result.source).toBe('safe_fallback');
+        expect(result.lines.join(' ')).toContain('박민지님이 김준호님 게시물에 남긴 좋아요');
+        expect(result.lines.join(' ')).toContain('위장여사친이 아니라고 하기엔 너무 예쁩니다');
+        expect(result.lines.join(' ')).toContain('이미지 인상만으로 관계를 판단할 수는 없습니다');
+        expect(result.lines.join(' ')).not.toMatch(/(?:대상\s*계정|후보\s*계정)/u);
+    });
+
+    it('rejects an unqualified reciprocal-like claim and requires both named directions in v2.11', async () => {
+        const input = narrativeInput();
+        mocks.analyzeWithGemini.mockImplementationOnce(async (
+            _prompt: string,
+            _images: string[],
+            options: { schema: { parse(value: unknown): unknown } },
+        ) => options.schema.parse({
+            lines: [{
+                text: '박민지님의 여행과 일상 기록은 꽤 차분하게 이어지는 피드입니다.',
+                evidenceRefs: ['profile:bio'],
+            }, {
+                text: '박민지님과 김준호님이 서로 남긴 좋아요와 댓글은 확인되지만, 수집 표본 밖 누락 가능성은 남습니다.',
+                evidenceRefs: [
+                    'like:candidate-to-target',
+                    'like:target-to-candidate',
+                    'comment:1',
+                    'coverage:target-interactions',
+                ],
+            }],
+        }));
+
+        const result = await highRiskNarrative(
+            input,
+            audit('highRiskNarrative', input, AI_STAGE_POLICY_V211_VERSION),
+            { aiStagePolicyVersion: AI_STAGE_POLICY_V211_VERSION },
+        );
+
+        expect(result.source).toBe('safe_fallback');
+        expect(result.lines[1]).toContain('박민지님이 김준호님 게시물에 남긴 좋아요');
+        expect(result.lines[1]).toContain('김준호님이 박민지님 피드에 남긴 좋아요');
+    });
+
+    it('keeps tag-only v2.11 fallback evidence directional and never says it was absent', async () => {
+        const input: HighRiskNarrativeInput = {
+            ...narrativeInput(),
+            interactions: {
+                ...narrativeInput().interactions,
+                candidateToTargetLike: notObserved(),
+                targetToCandidateLike: notObserved(),
+                candidateToTargetComment: notObserved(),
+                comments: [],
+                candidateToTargetTag: observed('tag:candidate-to-target'),
+            },
+        };
+        mocks.analyzeWithGemini.mockRejectedValueOnce(new Error(
+            'AI_GENERATION_RESPONSE_REJECTED_ERROR: generated response failed strict validation.',
+        ));
+
+        const result = await highRiskNarrative(
+            input,
+            audit('highRiskNarrative', input, AI_STAGE_POLICY_V211_VERSION),
+            { aiStagePolicyVersion: AI_STAGE_POLICY_V211_VERSION },
+        );
+
+        expect(result.source).toBe('safe_fallback');
+        expect(result.lines[1]).toContain('박민지님이 김준호님을 태그한 흔적');
+        expect(result.lines[1]).not.toContain('현재 확인되지 않았고');
+        expect(result.evidenceRefs[1]).toContain('tag:candidate-to-target');
+    });
+
+    it('supplies and validates named tag direction evidence in v2.11 model output', async () => {
+        const input: HighRiskNarrativeInput = {
+            ...narrativeInput(),
+            interactions: {
+                ...narrativeInput().interactions,
+                candidateToTargetLike: notObserved(),
+                targetToCandidateLike: notObserved(),
+                candidateToTargetComment: notObserved(),
+                comments: [],
+                candidateToTargetTag: observed('tag:candidate-to-target'),
+            },
+        };
+        mocks.analyzeWithGemini.mockImplementationOnce(async (
+            _prompt: string,
+            _images: string[],
+            options: { schema: { parse(value: unknown): unknown } },
+        ) => options.schema.parse({
+            lines: [{
+                text: '박민지님의 여행과 일상 기록은 꽤 차분하게 이어지는 피드입니다.',
+                evidenceRefs: ['profile:bio'],
+            }, {
+                text: '박민지님이 김준호님을 태그한 흔적은 확인되지만, 수집 표본 밖 누락 가능성은 남습니다.',
+                evidenceRefs: ['tag:candidate-to-target', 'coverage:target-interactions'],
+            }],
+        }));
+
+        const result = await highRiskNarrative(
+            input,
+            audit('highRiskNarrative', input, AI_STAGE_POLICY_V211_VERSION),
+            { aiStagePolicyVersion: AI_STAGE_POLICY_V211_VERSION },
+        );
+
+        expect(result.source).toBe('gemini');
+        expect(result.lines[1]).toContain('박민지님이 김준호님을 태그한 흔적');
+        const [prompt] = mocks.analyzeWithGemini.mock.calls[0]!;
+        expect(prompt).toContain('candidateToTargetTag":"observed');
+        expect(prompt).toContain('tag:candidate-to-target');
+    });
 
     it.each([
         'ANALYSIS_V2_AI_RESULT_REPLAY_BLOCKED',
