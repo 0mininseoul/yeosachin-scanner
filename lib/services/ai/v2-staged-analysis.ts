@@ -1607,6 +1607,7 @@ function featureAnalysisPromptV28(
             0,
             '총평에 "맥락이 부족하다", "판단하기 어렵다", "단정할 수 없다", "제약", "한계", "공개 자료만"처럼 분석 방법이나 자료의 한계를 직접 말하지 마세요. 실제로 보이는 단서를 짚어 단호하고 유용하게 쓰세요.',
             'oneLineOverview 금지 문자열: "개인 계정입니다", "일반 단계로 판독됐어요". 관계 용어 금지 목록: 사귀, 썸, 연애, 연인, 애인, 남자친구, 여자친구, 남친, 여친, 커플, 교제, 결혼, 혼인, 기혼, 미혼, 약혼, 부부, 배우자, 남편, 아내, 신랑, 신부, 돌싱, 동거, 이혼, 재혼, 불륜, 외도, 밀회, 데이트, 바람, boyfriend, girlfriend, couple, dating, relationship, married, husband, wife, spouse, fiance, fiancee, fiancé, fiancée, engaged, divorced. bio·caption 인용이나 부정문에서도 이 문자열을 쓰지 마세요.',
+            'JSON 반환 직전에 oneLineOverview를 다시 검사하고, 관계 어휘가 어떤 언어·활용형·인용·부정문으로든 있으면 해당 필드를 관계 어휘 없이 다시 쓰세요.',
         );
     }
     return [...instructions, `evidence(JSON): ${JSON.stringify(evidence)}`].join('\n');
@@ -2495,9 +2496,9 @@ function narrativePrompt(
                 ? [`${String(actor)}${String(actor).endsWith('님') ? '이' : '가'} ${String(receiver)}에게 남긴 ${interaction}`]
                 : []
         ));
-        return `${legacy}\nv2.11 공개 서사는 첫 문장에 ${subjects.candidate}, 둘째 문장에 ${subjects.candidate}와 ${subjects.target}을 직접 적으세요. \"대상 계정\"이나 \"후보 계정\"이라는 표현은 금지합니다. 둘째 문장에는 다음 관측 방향 문구를 한 글자도 바꾸지 말고 모두 포함하세요: ${JSON.stringify(namedDirections)}. 단일 좋아요나 외모만으로 관계를 증명하지 마세요. ${appearanceRule}`;
+        return `${legacy}\nv2.11 공개 서사는 첫 문장에 ${subjects.candidate}, 둘째 문장에 ${subjects.candidate}와 ${subjects.target}을 직접 적으세요. \"대상 계정\"이나 \"후보 계정\"이라는 표현은 금지합니다. 둘째 문장에는 다음 관측 방향 문구를 한 글자도 바꾸지 말고 모두 포함하세요: ${JSON.stringify(namedDirections)}. 단일 좋아요나 외모만으로 관계를 증명하지 마세요. ${appearanceRule} JSON 반환 직전에 lines의 모든 text를 다시 검사하고, 관계 어휘가 어떤 언어·활용형·인용·부정문으로든 있으면 해당 필드를 관계 어휘 없이 다시 쓰세요.`;
     }
-    return `${legacy}\n고위험 서사는 상호작용과 제공된 시각 근거를 구분해 구체적으로 쓰되, ㅋㅋ·자기지칭을 절대 쓰지 마세요. bio·caption 인용을 포함해 관계 관련 용어 자체를 lines에 쓰지 마세요. 보호 특성·신체·외모를 조롱하지 마세요.`;
+    return `${legacy}\n고위험 서사는 상호작용과 제공된 시각 근거를 구분해 구체적으로 쓰되, ㅋㅋ·자기지칭을 절대 쓰지 마세요. bio·caption 인용을 포함해 관계 관련 용어 자체를 lines에 쓰지 마세요. 보호 특성·신체·외모를 조롱하지 마세요. JSON 반환 직전에 lines의 모든 text를 다시 검사하고, 관계 어휘가 어떤 언어·활용형·인용·부정문으로든 있으면 해당 필드를 관계 어휘 없이 다시 쓰세요.`;
 }
 
 function v211NarrativeSubjects(input: ParsedHighRiskNarrativeInput) {
