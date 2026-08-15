@@ -1,9 +1,15 @@
-import { createHash } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { z } from 'zod';
 import type { AccountContext, AppearanceGrade } from '@/lib/domain/analysis/risk-policy';
 import { createAnalysisV2SelectedMediaNormalizer } from '@/lib/services/ai/image-preprocessing';
 import { AI_STAGE_POLICY_V211_VERSION } from '@/lib/services/ai/stage-policy';
-import type { FeatureAnalysisResult } from '@/lib/services/ai/v2-staged-analysis';
+import {
+    createHighRiskNarrativeResultIdentity,
+    highRiskNarrative,
+    type FeatureAnalysisResult,
+    type HighRiskNarrativeInput,
+    type StagedAiAuditContext,
+} from '@/lib/services/ai/v2-staged-analysis';
 import type { InstagramProfile } from '@/lib/types/instagram';
 import { analysisV2CheckpointProfileSchema } from './v2-profile-fetch-store';
 import {
@@ -14,7 +20,7 @@ import {
     calculateV2PreliminaryScores,
     hasCandidateTargetMention,
 } from './v2-candidate-scoring';
-import { buildSafeFallbackRiskNarrative } from './narrative-privacy';
+import type { InteractionEvidenceRow } from './interaction-stage';
 import {
     joinVerifiedFemaleTargetInteractions,
     summarizeCandidateTargetInteractions,
@@ -364,9 +370,160 @@ function weakPartner(feature: FeatureAnalysisResult): boolean {
             || feature.features.partnerEvidence === 'weak');
 }
 
+function canonicalPublicName(value: string | null | undefined): string {
+    const name = sanitized(value, 200);
+    if (!name || /(?:대상\s*계정|후보\s*계정)/u.test(name)) {
+        throw new Error('FIRST_PAYMENT_CONCIERGE_CANONICAL_NAME_MISSING');
+    }
+    return name;
+}
+
+function interactionRef(row: InteractionEvidenceRow): string {
+    return `interaction:${hash('first-payment-concierge-interaction-v1', {
+        candidateUsername: row.candidateUsername,
+        postId: row.postId,
+        signal: row.signal,
+        sourceInteractionId: row.sourceInteractionId,
+    })}`;
+}
+
+function observation(evidenceRefIds: readonly string[]) {
+    return evidenceRefIds.length > 0
+        ? { status: 'observed' as const, evidenceRefIds: [...new Set(evidenceRefIds)].slice(0, 8) }
+        : { status: 'not_observed' as const, evidenceRefIds: [] };
+}
+
+function notCollectedObservation() {
+    return { status: 'not_collected' as const, evidenceRefIds: [] };
+}
+
+function selectedPostEvidenceRefs(input: {
+    profile: InstagramProfile;
+    capturedProfile: AnalysisV2ReplayBundle['profiles'][number];
+    username: string;
+    field: 'taggedUsers' | 'mentionedUsers';
+}): string[] {
+    const selected = new Set(input.capturedProfile.featureSelectionIds);
+    const selectionByPostId = new Map(
+        input.capturedProfile.media
+            .filter(media => selected.has(media.selectionId) && media.postId)
+            .map(media => [media.postId!, media.selectionId]),
+    );
+    return (input.profile.latestPosts ?? []).flatMap(post => (
+        post[input.field].some(value => value.trim().replace(/^@/u, '').toLowerCase()
+            === input.username)
+            ? [selectionByPostId.get(post.id)]
+            : []
+    )).filter((value): value is string => Boolean(value));
+}
+
+/**
+ * Binds retained first-payment evidence directly to the existing Gemini
+ * high-risk stage.  It deliberately does not alter the scored snapshot.
+ */
+export function createFirstPaymentConciergeHighRiskNarrativeInput(input: {
+    targetProfile: InstagramProfile;
+    candidateProfile: InstagramProfile;
+    capturedProfile: AnalysisV2ReplayBundle['profiles'][number];
+    feature: FeatureAnalysisResult;
+    interactions: readonly InteractionEvidenceRow[];
+}): HighRiskNarrativeInput {
+    const targetUsername = input.targetProfile.username.toLowerCase();
+    const candidateUsername = input.candidateProfile.username.toLowerCase();
+    const selected = new Set(input.capturedProfile.featureSelectionIds);
+    const media = input.capturedProfile.media
+        .filter(item => selected.has(item.selectionId))
+        .map(item => ({
+            selectionId: item.selectionId,
+            kind: item.kind,
+            normalizedJpegBase64: item.jpegBase64,
+            ...(item.postId ? { postId: item.postId } : {}),
+        }));
+    const selectedMediaIds = new Set(media.map(item => item.selectionId));
+    const candidateInteractions = input.interactions.filter(row => (
+        row.candidateUsername === candidateUsername
+    ));
+    const likes = candidateInteractions.filter(row => row.signal === 'female_target_like');
+    const comments = candidateInteractions
+        .filter(row => row.signal === 'female_target_comment')
+        .flatMap(row => {
+            const text = sanitized(row.content, 300);
+            return text ? [{
+                evidenceRefId: interactionRef(row),
+                targetPostEvidenceRefId: `target-post:${hash(
+                    'first-payment-concierge-target-post-v1', row.postId,
+                )}`,
+                text,
+            }] : [];
+        })
+        .slice(0, 12);
+    const candidateToTargetTag = selectedPostEvidenceRefs({
+        profile: input.candidateProfile,
+        capturedProfile: input.capturedProfile,
+        username: targetUsername,
+        field: 'taggedUsers',
+    });
+    const candidateToTargetMention = selectedPostEvidenceRefs({
+        profile: input.candidateProfile,
+        capturedProfile: input.capturedProfile,
+        username: targetUsername,
+        field: 'mentionedUsers',
+    });
+
+    return {
+        forbiddenIdentifiers: { targetUsername, candidateUsername },
+        publicSubjects: {
+            targetFullName: canonicalPublicName(input.targetProfile.fullName),
+            candidateFullName: canonicalPublicName(input.candidateProfile.fullName),
+        },
+        appearance: {
+            isReliable: input.feature.features.evidenceSelectionIds.appearance
+                .some(selectionId => selectedMediaIds.has(selectionId)),
+        },
+        bio: sanitized(input.candidateProfile.bio, 2_200),
+        media,
+        captions: input.capturedProfile.captions
+            .filter(caption => selectedMediaIds.has(caption.selectionId))
+            .map(caption => ({ ...caption, text: sanitized(caption.text, 2_200) ?? '' }))
+            .filter(caption => caption.text.length > 0),
+        carouselCaptionDossier: null,
+        interactions: {
+            candidateToTargetLike: observation(likes.map(interactionRef)),
+            targetToCandidateLike: notCollectedObservation(),
+            candidateToTargetComment: observation(comments.map(comment => comment.evidenceRefId)),
+            candidateToTargetTag: observation(candidateToTargetTag),
+            targetToCandidateTag: notCollectedObservation(),
+            candidateToTargetMention: observation(candidateToTargetMention),
+            targetToCandidateMention: notCollectedObservation(),
+            comments,
+            coverage: {
+                status: 'partial',
+                evidenceRefId: 'coverage:retained-target-interactions',
+            },
+        },
+    };
+}
+
+function conciergeNarrativeAudit(input: HighRiskNarrativeInput): StagedAiAuditContext {
+    const resultIdentity = createHighRiskNarrativeResultIdentity(
+        input,
+        AI_STAGE_POLICY_V211_VERSION,
+    );
+    return {
+        requestId: randomUUID(),
+        operationKey: resultIdentity.operationKey,
+        resultIdentity,
+        prepare: async () => ({ result: null, source: null, startingAttempt: 1 }),
+        onBeforeAttempt: () => undefined,
+        onAttemptTelemetry: () => undefined,
+    };
+}
+
 export async function createFirstPaymentConciergePublication(input: {
     source: FirstPaymentConciergeSource;
     captured: FirstPaymentConciergeCapturedBundle;
+    /** Test seam for the existing high-risk Gemini stage; production uses it directly. */
+    runNarrative?: typeof highRiskNarrative;
 }): Promise<Readonly<{
     payload: FirstPaymentConciergePublicationPayload;
     report: AnalysisV2AiReplayReport;
@@ -455,10 +612,14 @@ export async function createFirstPaymentConciergePublication(input: {
         const profile = profileByOrdinal.get(detail.ordinal)!;
         return [analysisV2CandidateId(profile.username), { detail, profile }];
     }));
-    const femaleRows = finalScores.slice().sort((left, right) => (
+    const capturedProfileByOrdinal = new Map(
+        input.captured.bundle.profiles.map(profile => [profile.ordinal, profile]),
+    );
+    const runNarrative = input.runNarrative ?? highRiskNarrative;
+    const femaleRows = await Promise.all(finalScores.slice().sort((left, right) => (
         right.displayScore - left.displayScore
         || left.candidateId.localeCompare(right.candidateId)
-    )).map((score, index) => {
+    )).map(async (score, index) => {
         const retained = detailByCandidate.get(score.candidateId);
         if (!retained?.detail.feature) {
             throw new Error('FIRST_PAYMENT_CONCIERGE_FEMALE_RESULT_MISSING');
@@ -466,17 +627,33 @@ export async function createFirstPaymentConciergePublication(input: {
         const narrativeRequired = score.riskBand === 'high_risk'
             && score.featuredRank !== null
             && score.featuredRank <= 3;
-        const interaction = interactionByUsername.get(retained.profile.username.toLowerCase());
-        const commentText = joinedInteractions.find(row => (
-            row.candidateUsername === retained.profile.username.toLowerCase()
-            && row.signal === 'female_target_comment'
-        ))?.content;
-        const narrative = narrativeRequired ? buildSafeFallbackRiskNarrative({
-            candidateLikedTarget: (interaction?.uniqueTargetPostsLikedByCandidate ?? 0) > 0,
-            candidateCommentedOnTarget: (interaction?.boundedCandidateCommentsOnTarget ?? 0) > 0,
-            targetLikedCandidate: false,
-            ...(commentText ? { commentText } : {}),
-        }) : null;
+        const capturedProfile = capturedProfileByOrdinal.get(retained.detail.ordinal);
+        if (!capturedProfile) {
+            throw new Error('FIRST_PAYMENT_CONCIERGE_NARRATIVE_MEDIA_MISSING');
+        }
+        const narrativeInput = narrativeRequired
+            ? createFirstPaymentConciergeHighRiskNarrativeInput({
+                targetProfile: input.source.targetProfile,
+                candidateProfile: retained.profile,
+                capturedProfile,
+                feature: retained.detail.feature,
+                interactions: joinedInteractions,
+            })
+            : null;
+        const narrative = narrativeInput
+            ? await runNarrative(
+                narrativeInput,
+                conciergeNarrativeAudit(narrativeInput),
+                { aiStagePolicyVersion: AI_STAGE_POLICY_V211_VERSION },
+            )
+            : null;
+        if (narrativeRequired && narrative?.source !== 'gemini') {
+            throw new Error('FIRST_PAYMENT_CONCIERGE_GEMINI_NARRATIVE_REQUIRED');
+        }
+        const overview = sanitized(retained.detail.feature.features.oneLineOverview, 180);
+        if (!overview) {
+            throw new Error('FIRST_PAYMENT_CONCIERGE_GEMINI_OVERVIEW_MISSING');
+        }
         return {
             candidateId: score.candidateId,
             sortOrdinal: index + 1,
@@ -489,14 +666,11 @@ export async function createFirstPaymentConciergePublication(input: {
             featuredRank: score.featuredRank,
             recentMutualRank: score.recentMutualBadgeRank,
             analysisDepth: narrativeRequired ? 'narrative' as const : 'features' as const,
-            oneLineOverview: sanitized(
-                retained.detail.feature.features.oneLineOverview,
-                180,
-            ) ?? '공개 프로필과 최근 피드에서 확인된 특징을 중심으로 정리한 계정입니다.',
-            narrativeLineOne: narrative?.[0] ?? null,
-            narrativeLineTwo: narrative?.[1] ?? null,
+            oneLineOverview: overview,
+            narrativeLineOne: narrative?.lines[0] ?? null,
+            narrativeLineTwo: narrative?.lines[1] ?? null,
         };
-    });
+    }));
     const privateRows = input.source.privateRows.map((row, index) => ({
         candidateId: analysisV2CandidateId(row.username),
         sortOrdinal: index + 1,

@@ -1037,7 +1037,7 @@ describe('V2 staged AI services', () => {
         expect(prompt).toContain('물음표나 ㅋㅋ은');
     });
 
-    it('uses decisive v2.11 summary copy and falls back when the model exposes analysis limitations', async () => {
+    it('rejects a v2.11 overview that exposes analysis limitations instead of composing fallback copy', async () => {
         const input = featureInput();
         mocks.analyzeWithGemini.mockImplementationOnce(async (
             _prompt: string,
@@ -1047,19 +1047,17 @@ describe('V2 staged AI services', () => {
             oneLineOverview: '공개 단서가 부족해 관계의 맥락을 단정하기 어렵습니다.',
         })));
 
-        const result = await featureAnalysis(
+        await expect(featureAnalysis(
             input,
             audit('featureAnalysis', input, AI_STAGE_POLICY_V211_VERSION),
             { aiStagePolicyVersion: AI_STAGE_POLICY_V211_VERSION },
-        );
+        )).rejects.toThrow();
 
-        expect(result.features.oneLineOverview).toContain('여행');
-        expect(result.features.oneLineOverview).not.toContain('차분히 짚어볼 계정입니다');
         const [prompt] = mocks.analyzeWithGemini.mock.calls[0];
         expect(prompt).toContain('분석 방법이나 자료의 한계를 직접 말하지 마세요');
     });
 
-    it('keeps the v2.11 individual-creator fallback inside the public-copy contract', async () => {
+    it('rejects an invalid v2.11 individual-creator overview rather than publishing fallback copy', async () => {
         mocks.analyzeWithGemini.mockImplementationOnce(async (
             _prompt: string,
             _images: string[],
@@ -1069,14 +1067,11 @@ describe('V2 staged AI services', () => {
             oneLineOverview: '공개 단서가 부족해 관계의 맥락을 단정하기 어렵습니다.',
         })));
 
-        const result = await featureAnalysis(
+        await expect(featureAnalysis(
             featureInput(),
             audit('featureAnalysis', featureInput(), AI_STAGE_POLICY_V211_VERSION),
             { aiStagePolicyVersion: AI_STAGE_POLICY_V211_VERSION },
-        );
-
-        expect(result.features.oneLineOverview).toContain('여행');
-        expect(result.features.oneLineOverview).not.toContain('활동 흐름을 중심으로 읽어볼 만한 계정입니다');
+        )).rejects.toThrow();
     });
 
     it('keeps shipped v2.9 overview acceptance and legacy prompt bytes immutable', async () => {
@@ -2239,7 +2234,7 @@ describe('V2 staged AI services', () => {
         }
     );
 
-    it('uses canonical names and reliable appearance context in the v2.11 narrative fallback', async () => {
+    it('rejects a v2.11 narrative fallback even when canonical names and appearance evidence are available', async () => {
         const input = {
             ...narrativeInput(),
             publicSubjects: {
@@ -2252,20 +2247,14 @@ describe('V2 staged AI services', () => {
             'AI_GENERATION_RESPONSE_REJECTED_ERROR: generated response failed strict validation.'
         ));
 
-        const result = await highRiskNarrative(
+        await expect(highRiskNarrative(
             input,
             audit('highRiskNarrative', input, AI_STAGE_POLICY_V211_VERSION),
             { aiStagePolicyVersion: AI_STAGE_POLICY_V211_VERSION },
-        );
-
-        expect(result.source).toBe('safe_fallback');
-        expect(result.lines.join(' ')).toContain('박민지님이 김준호님 게시물에 좋아요를 남긴 흐름');
-        expect(result.lines.join(' ')).toContain('사진이 관계 설명서를 써주지는 않습니다');
-        expect(result.lines.join(' ')).not.toContain('위장여사친');
-        expect(result.lines.join(' ')).not.toMatch(/(?:대상\s*계정|후보\s*계정)/u);
+        )).rejects.toThrow('AI_PUBLIC_COPY_GEMINI_REQUIRED');
     });
 
-    it('rejects an unqualified reciprocal-like claim and requires both named directions in v2.11', async () => {
+    it('rejects an unqualified reciprocal-like claim rather than composing v2.11 fallback copy', async () => {
         const input = narrativeInput();
         mocks.analyzeWithGemini.mockImplementationOnce(async (
             _prompt: string,
@@ -2286,18 +2275,14 @@ describe('V2 staged AI services', () => {
             }],
         }));
 
-        const result = await highRiskNarrative(
+        await expect(highRiskNarrative(
             input,
             audit('highRiskNarrative', input, AI_STAGE_POLICY_V211_VERSION),
             { aiStagePolicyVersion: AI_STAGE_POLICY_V211_VERSION },
-        );
-
-        expect(result.source).toBe('safe_fallback');
-        expect(result.lines[1]).toContain('박민지님이 김준호님 게시물에 좋아요를 남긴 흐름');
-        expect(result.lines[1]).toContain('김준호님이 박민지님 피드에 좋아요를 남긴 흐름');
+        )).rejects.toThrow('AI_PUBLIC_COPY_GEMINI_REQUIRED');
     });
 
-    it('keeps tag-only v2.11 fallback evidence directional and never says it was absent', async () => {
+    it('rejects tag-only v2.11 fallback evidence rather than publishing deterministic copy', async () => {
         const input: HighRiskNarrativeInput = {
             ...narrativeInput(),
             interactions: {
@@ -2313,16 +2298,11 @@ describe('V2 staged AI services', () => {
             'AI_GENERATION_RESPONSE_REJECTED_ERROR: generated response failed strict validation.',
         ));
 
-        const result = await highRiskNarrative(
+        await expect(highRiskNarrative(
             input,
             audit('highRiskNarrative', input, AI_STAGE_POLICY_V211_VERSION),
             { aiStagePolicyVersion: AI_STAGE_POLICY_V211_VERSION },
-        );
-
-        expect(result.source).toBe('safe_fallback');
-        expect(result.lines[1]).toContain('박민지님이 김준호님을 태그한 흔적');
-        expect(result.lines[1]).not.toContain('현재 확인되지 않았고');
-        expect(result.evidenceRefs[1]).toContain('tag:candidate-to-target');
+        )).rejects.toThrow('AI_PUBLIC_COPY_GEMINI_REQUIRED');
     });
 
     it('supplies and validates named tag direction evidence in v2.11 model output', async () => {
