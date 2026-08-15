@@ -1,3 +1,4 @@
+import { ApifyApiError } from 'apify-client';
 import { getApifyClient } from '@/lib/services/instagram/providers/apify-relationship';
 import type {
     ApifyCredentialSlot,
@@ -45,6 +46,28 @@ export interface AnalysisV2ProviderReconciliationSummary {
     hasMore: boolean;
 }
 
+export const ANALYSIS_V2_PROVIDER_RECONCILIATION_FAILURE_REASONS = [
+    'provider_auth_failed',
+    'provider_run_missing',
+    'provider_rate_limited',
+    'provider_read_failed',
+    'remote_status_mismatch',
+    'remote_usage_missing',
+    'remote_usage_invalid',
+    'ledger_write_failed',
+    'revenue_settlement_unavailable',
+    'revenue_settlement_failed',
+    'stored_run_invalid',
+] as const;
+
+export type AnalysisV2ProviderReconciliationFailureReason =
+    typeof ANALYSIS_V2_PROVIDER_RECONCILIATION_FAILURE_REASONS[number];
+
+export interface AnalysisV2ProviderReconciliationFailure {
+    credentialSlot: ApifyCredentialSlot;
+    reason: AnalysisV2ProviderReconciliationFailureReason;
+}
+
 export interface AnalysisV2ProviderUsageRevenueCostSettlement {
     settleAfterUsageReconciliation(
         run: StoredAnalysisV2ProviderRun,
@@ -57,8 +80,41 @@ export interface ProviderLifecycleDependencies {
     env?: Record<string, string | undefined>;
     clientForSlot?: (slot: ApifyCredentialSlot) => LifecycleApifyClient;
     revenueCostSettlement?: AnalysisV2ProviderUsageRevenueCostSettlement;
+    /**
+     * Optional PII-free observability hook. It receives no provider run,
+     * request, actor, token, or remote error identifiers.
+     */
+    onUsageReconciliationFailure?: (
+        failure: AnalysisV2ProviderReconciliationFailure,
+    ) => void;
     concurrency?: number;
     maxBatches?: number;
+}
+
+function providerReadFailureReason(error: unknown): AnalysisV2ProviderReconciliationFailureReason {
+    if (error instanceof ApifyApiError) {
+        if (error.statusCode === 401 || error.statusCode === 403) {
+            return 'provider_auth_failed';
+        }
+        if (error.statusCode === 404) return 'provider_run_missing';
+        if (error.statusCode === 429) return 'provider_rate_limited';
+    }
+    return 'provider_read_failed';
+}
+
+function reportUsageReconciliationFailure(
+    run: StoredAnalysisV2ProviderRun,
+    reason: AnalysisV2ProviderReconciliationFailureReason,
+    dependencies: ProviderLifecycleDependencies,
+): void {
+    try {
+        dependencies.onUsageReconciliationFailure?.({
+            credentialSlot: run.credentialSlot,
+            reason,
+        });
+    } catch {
+        // Observability must not alter authoritative reconciliation behavior.
+    }
 }
 
 function terminalStatus(value: unknown): ProviderCostTerminalStatus | undefined {
@@ -230,29 +286,76 @@ export async function reconcileAnalysisV2ProviderUsage(
     const { concurrency } = lifecycleBounds(dependencies);
     const rows = await store.listUnreconciled(ANALYSIS_V2_PROVIDER_LIFECYCLE_MAX_ROWS);
     const outcomes = await runBounded(rows, concurrency, async run => {
-        try {
-            if (
-                run.revenueCostSettlementRequired
-                && hasAuthoritativeRevenueCostSettlement(run)
-            ) {
-                const settlement = dependencies.revenueCostSettlement;
-                if (!settlement) return false;
+        if (
+            run.revenueCostSettlementRequired
+            && hasAuthoritativeRevenueCostSettlement(run)
+        ) {
+            const settlement = dependencies.revenueCostSettlement;
+            if (!settlement) {
+                reportUsageReconciliationFailure(
+                    run,
+                    'revenue_settlement_unavailable',
+                    dependencies,
+                );
+                return false;
+            }
+            try {
                 await settlement.settleAfterUsageReconciliation(run, {
                     knownRevenueCostOperation: true,
                 });
                 return true;
+            } catch {
+                reportUsageReconciliationFailure(
+                    run,
+                    'revenue_settlement_failed',
+                    dependencies,
+                );
+                return false;
             }
-            if (!run.runId || !terminalStatusForStored(run.status)) return false;
-            const snapshot = await lifecycleClient(
+        }
+        if (!run.runId || !terminalStatusForStored(run.status)) {
+            reportUsageReconciliationFailure(run, 'stored_run_invalid', dependencies);
+            return false;
+        }
+
+        let snapshot: ApifyRunSnapshot | undefined;
+        try {
+            snapshot = await lifecycleClient(
                 run.credentialSlot,
                 dependencies
             ).run(run.runId).get();
-            const status = terminalStatus(snapshot?.status);
-            const usageTotalUsd = snapshot
-                ? terminalUsageTotalUsd(snapshot, run.maxChargeUsd)
-                : null;
-            if (status !== run.status || usageTotalUsd === null) return false;
-            const reconciled = await store.reconcileUsage({
+            if (!snapshot) {
+                reportUsageReconciliationFailure(run, 'provider_run_missing', dependencies);
+                return false;
+            }
+        } catch (error) {
+            reportUsageReconciliationFailure(
+                run,
+                providerReadFailureReason(error),
+                dependencies,
+            );
+            return false;
+        }
+
+        const status = terminalStatus(snapshot.status);
+        if (status !== run.status) {
+            reportUsageReconciliationFailure(run, 'remote_status_mismatch', dependencies);
+            return false;
+        }
+        let usageTotalUsd: number | null;
+        try {
+            usageTotalUsd = terminalUsageTotalUsd(snapshot, run.maxChargeUsd);
+        } catch {
+            reportUsageReconciliationFailure(run, 'remote_usage_invalid', dependencies);
+            return false;
+        }
+        if (usageTotalUsd === null) {
+            reportUsageReconciliationFailure(run, 'remote_usage_missing', dependencies);
+            return false;
+        }
+        let reconciled: StoredAnalysisV2ProviderRun;
+        try {
+            reconciled = await store.reconcileUsage({
                 reservationToken: run.reservationToken,
                 runId: run.runId,
                 logicalProvider: run.logicalProvider,
@@ -262,15 +365,31 @@ export async function reconcileAnalysisV2ProviderUsage(
                 status,
                 actualUsageUsd: usageTotalUsd,
             });
-            if (run.revenueCostSettlementRequired) {
-                const settlement = dependencies.revenueCostSettlement;
-                if (!settlement) return false;
-                await settlement.settleAfterUsageReconciliation(reconciled, {
-                    knownRevenueCostOperation: true,
-                });
-            }
+        } catch {
+            reportUsageReconciliationFailure(run, 'ledger_write_failed', dependencies);
+            return false;
+        }
+        if (!run.revenueCostSettlementRequired) return true;
+        const settlement = dependencies.revenueCostSettlement;
+        if (!settlement) {
+            reportUsageReconciliationFailure(
+                run,
+                'revenue_settlement_unavailable',
+                dependencies,
+            );
+            return false;
+        }
+        try {
+            await settlement.settleAfterUsageReconciliation(reconciled, {
+                knownRevenueCostOperation: true,
+            });
             return true;
         } catch {
+            reportUsageReconciliationFailure(
+                run,
+                'revenue_settlement_failed',
+                dependencies,
+            );
             return false;
         }
     });
