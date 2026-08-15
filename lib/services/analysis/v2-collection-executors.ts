@@ -494,6 +494,13 @@ function adoptionDatasetUnavailable(cause: unknown): Error {
     return new Error('ADOPTION_DATASET_UNAVAILABLE', { cause });
 }
 
+class AuthorizedAdoptedRelationshipIncompleteError extends Error {
+    constructor(cause: Error) {
+        super(cause.message, { cause });
+        this.name = 'AuthorizedAdoptedRelationshipIncompleteError';
+    }
+}
+
 function isReconciledSucceededRun(
     run: StoredAnalysisV2ProviderRun | null
 ): run is StoredAnalysisV2ProviderRun & { runId: string; status: 'succeeded' } {
@@ -571,7 +578,15 @@ export function createAnalysisV2RelationshipsExecutor(
                         providerRun: { ...binding.checkpoint, startCancellationSignal },
                     });
                 } catch (error) {
-                    if (binding.evidenceRun) throw adoptionDatasetUnavailable(error);
+                    if (binding.evidenceRun) {
+                        if (
+                            binding.evidenceRun.allowRelationshipIncompleteReplacement
+                            && isRelationshipIncompleteError(error)
+                        ) {
+                            throw new AuthorizedAdoptedRelationshipIncompleteError(error);
+                        }
+                        throw adoptionDatasetUnavailable(error);
+                    }
                     throw error;
                 }
                 const run = binding.evidenceRun ?? await requireSucceededRun(
@@ -601,7 +616,10 @@ export function createAnalysisV2RelationshipsExecutor(
                         jobKey: claim.jobKey,
                         operationKey: initialOperationKey,
                     });
-                    if (!isReconciledSucceededRun(initialRun)) throw error;
+                    if (
+                        !isReconciledSucceededRun(initialRun)
+                        && !(error instanceof AuthorizedAdoptedRelationshipIncompleteError)
+                    ) throw error;
                     return executeApify(
                         relationshipIncompleteReplacementIdentity(apifyCanonicalInput)
                     );

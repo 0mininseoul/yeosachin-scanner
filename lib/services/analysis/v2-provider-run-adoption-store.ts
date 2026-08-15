@@ -23,6 +23,10 @@ const adoptedRunSchema = z.object({
     // Only the cross-count relationship resolver returns this. Exact adoption
     // deliberately leaves it absent so the adapter remains fail-closed.
     relationshipSourceDeclaredCount: z.number().int().min(1).max(1_200).optional(),
+    // Only an incident-specific, audited resolver can set this. It permits the
+    // relationship executor to open its one existing replacement identity after
+    // an adopted terminal Dataset proves incomplete.
+    allowRelationshipIncompleteReplacement: z.literal(true).optional(),
 }).strict();
 
 export interface AdoptedAnalysisV2ProviderRun {
@@ -38,6 +42,7 @@ export interface AdoptedAnalysisV2ProviderRun {
     actualUsageUsd: number;
     usageReconciledAt: string;
     relationshipSourceDeclaredCount?: number;
+    allowRelationshipIncompleteReplacement?: true;
 }
 
 export interface AnalysisV2ProviderRunAdoptionStore {
