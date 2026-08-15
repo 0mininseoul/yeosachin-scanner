@@ -1,7 +1,10 @@
 import { readFileSync } from 'node:fs';
 import { PGlite } from '@electric-sql/pglite';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { buildAtomicPublicationSql } from '../../../scripts/correct-concierge-basic-result';
+import {
+    assertConciergePublicationRiskScores,
+    buildAtomicPublicationSql,
+} from '../../../scripts/correct-concierge-basic-result';
 
 const migration = readFileSync(
     new URL('../../../supabase/migrations/20260814210000_add_legacy_result_overview.sql', import.meta.url),
@@ -122,6 +125,27 @@ afterEach(async () => {
 });
 
 describe('concierge publication persistence contract', () => {
+    it('rejects missing, non-finite, out-of-range, or grade-incompatible risk scores', () => {
+        const valid = { risk_score: 43, risk_grade: 'caution' };
+
+        expect(() => assertConciergePublicationRiskScores([
+            { risk_grade: 'caution' },
+        ])).toThrow('CONCIERGE_PUBLICATION_RISK_SCORE_INVALID');
+        expect(() => assertConciergePublicationRiskScores([
+            { ...valid, risk_score: Number.POSITIVE_INFINITY },
+        ])).toThrow('CONCIERGE_PUBLICATION_RISK_SCORE_INVALID');
+        expect(() => assertConciergePublicationRiskScores([
+            { ...valid, risk_score: 101 },
+        ])).toThrow('CONCIERGE_PUBLICATION_RISK_SCORE_INVALID');
+        expect(() => assertConciergePublicationRiskScores([
+            { risk_score: 67, risk_grade: 'normal' },
+        ])).toThrow('CONCIERGE_PUBLICATION_RISK_SCORE_GRADE_MISMATCH');
+        expect(() => assertConciergePublicationRiskScores([
+            { risk_score: 43, risk_grade: 'caution' },
+            { risk_score: 67, risk_grade: 'caution' },
+        ])).not.toThrow();
+    });
+
     it('retains owner step data while atomically persisting the producer overview and mutual count', async () => {
         const targetProfileImage = 'https://scontent.cdninstagram.com/target.jpg';
         await db.query(
@@ -152,13 +176,13 @@ describe('concierge publication persistence contract', () => {
         await db.exec(buildAtomicPublicationSql({
             orderId: ORDER_ID,
             requestId: REQUEST_ID,
-            femaleRows: [{
-                rank: 1,
-                suspect_instagram_id: 'candidate.one',
+            femaleRows: [43, 67].map((riskScore, index) => ({
+                rank: index + 1,
+                suspect_instagram_id: `candidate.${index + 1}`,
                 suspect_profile_image: null,
-                suspect_full_name: 'Candidate One',
+                suspect_full_name: `Candidate ${index + 1}`,
                 bio: '공개 계정',
-                risk_score: 7,
+                risk_score: riskScore,
                 photogenic_grade: 3,
                 exposure_level: 'medium',
                 is_tagged: false,
@@ -168,11 +192,11 @@ describe('concierge publication persistence contract', () => {
                 is_unlocked: true,
                 likes_count: 0,
                 intimate_comments_count: 0,
-                one_line_overview: '공개 프로필과 최근 피드의 특징을 중심으로 정리한 계정입니다.',
+                one_line_overview: `공개 프로필과 최근 피드의 특징을 중심으로 정리한 계정 ${index + 1}입니다.`,
                 risk_analysis: [],
-            }],
+            })),
             privateRows: [],
-            counts: { male: 0, female: 1, unknown: 0 },
+            counts: { male: 0, female: 2, unknown: 0 },
             mutualFollows: 150,
             lineage: {
                 schema: 'concierge-exact-mutual-v1',
@@ -215,14 +239,17 @@ describe('concierge publication persistence contract', () => {
         const result = await db.query<{
             one_line_overview: string;
             risk_grade: string;
+            risk_score: number;
         }>(
-            'SELECT one_line_overview, risk_grade FROM public.analysis_results WHERE request_id = $1',
+            'SELECT one_line_overview, risk_grade, risk_score FROM public.analysis_results WHERE request_id = $1 ORDER BY rank',
             [REQUEST_ID],
         );
-        expect(result.rows).toEqual([{
-            one_line_overview: '공개 프로필과 최근 피드의 특징을 중심으로 정리한 계정입니다.',
-            risk_grade: 'caution',
-        }]);
+        expect(result.rows.map(row => ({ riskScore: row.risk_score, riskGrade: row.risk_grade })))
+            .toEqual([
+                { riskScore: 43, riskGrade: 'caution' },
+                { riskScore: 67, riskGrade: 'caution' },
+            ]);
+        expect(result.rows.every(row => Number.isFinite(row.risk_score))).toBe(true);
     });
 
     it('rejects a publication when the relationship snapshot is incomplete', async () => {
@@ -402,7 +429,7 @@ describe('concierge publication persistence contract', () => {
                 suspect_profile_image: null,
                 suspect_full_name: 'Candidate One',
                 bio: '공개 계정',
-                risk_score: 7,
+                risk_score: 50,
                 photogenic_grade: 3,
                 exposure_level: 'medium',
                 is_tagged: false,

@@ -29,6 +29,10 @@ import {
 } from '@/lib/services/analysis/concierge-basic-correction';
 import { isAnalysisResultOperator, resolveAnalysisResultOwner } from '@/lib/services/analysis/result-operator-access';
 import { requireActiveAccountClassification } from '@/lib/services/identity/account-principal-store';
+import {
+    isRiskBandCompatibleWithDisplayScore,
+    type RiskBand,
+} from '@/lib/domain/analysis/risk-policy';
 import type { InstagramFollower, InstagramProfile } from '@/lib/types/instagram';
 import type { ApifyCredentialSlot, ProfileAttemptResult } from '@/lib/services/instagram/providers/types';
 import {
@@ -610,7 +614,39 @@ type LegacyPublicationInput = {
     };
 };
 
+export function assertConciergePublicationRiskScores(femaleRows: readonly unknown[]): void {
+    for (const value of femaleRows) {
+        const row = value && typeof value === 'object' && !Array.isArray(value)
+            ? value as { risk_score?: unknown; risk_grade?: unknown }
+            : null;
+        if (
+            !row
+            || typeof row.risk_score !== 'number'
+            || !Number.isFinite(row.risk_score)
+            || !Number.isSafeInteger(row.risk_score)
+            || row.risk_score < 10
+            || row.risk_score > 100
+        ) {
+            throw new Error('CONCIERGE_PUBLICATION_RISK_SCORE_INVALID');
+        }
+        if (
+            row.risk_grade !== 'normal'
+            && row.risk_grade !== 'caution'
+            && row.risk_grade !== 'high_risk'
+        ) {
+            throw new Error('CONCIERGE_PUBLICATION_RISK_SCORE_GRADE_MISMATCH');
+        }
+        if (!isRiskBandCompatibleWithDisplayScore(
+            row.risk_score / 10,
+            row.risk_grade as RiskBand,
+        )) {
+            throw new Error('CONCIERGE_PUBLICATION_RISK_SCORE_GRADE_MISMATCH');
+        }
+    }
+}
+
 function buildLegacyPublicationSql(input: LegacyPublicationInput): string {
+    assertConciergePublicationRiskScores(input.femaleRows);
     const sourceFingerprint = input.lineage.sourceFingerprint;
     if (typeof sourceFingerprint !== 'string' || !/^[a-f0-9]{64}$/.test(sourceFingerprint)) {
         throw new Error('CONCIERGE_REVIEWED_SOURCE_FINGERPRINT_INVALID');
@@ -720,6 +756,7 @@ export function buildAtomicPublicationSql(input: LegacyPublicationInput): string
 export function buildAtomicPublicationSql(input: NewPublicationInput): string;
 export function buildAtomicPublicationSql(input: LegacyPublicationInput | NewPublicationInput): string {
     if ('lineage' in input) return buildLegacyPublicationSql(input);
+    assertConciergePublicationRiskScores(input.femaleRows);
     if (!/^[a-f0-9]{64}$/.test(input.sourceFingerprint)) {
         throw new Error('CONCIERGE_REVIEWED_SOURCE_FINGERPRINT_INVALID');
     }

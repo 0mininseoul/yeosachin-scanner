@@ -49,6 +49,10 @@ vi.mock('@/lib/services/identity/account-principal-store', async importOriginal 
 import { GET as getLegacyStatus } from '@/app/api/analysis/status/[requestId]/route';
 import { DELETE as deleteLegacyResult, GET as getLegacyResult } from '@/app/api/analysis/result/[requestId]/route';
 import { AccountPrincipalAdmissionError } from '@/lib/services/identity/account-principal-store';
+import {
+    ownerScorePercent,
+    threatMeterFillCount,
+} from '@/lib/services/analysis/owner-view-presentation';
 
 const requestId = '123e4567-e89b-42d3-a456-426614174000';
 const userId = '223e4567-e89b-42d3-a456-426614174000';
@@ -250,6 +254,7 @@ describe('owner-facing V1/V2 route selection', () => {
             suspect_profile_image: null,
             suspect_full_name: `Candidate ${index + 1}`,
             bio: '',
+            risk_score: [31, 43, 72, 67, 51][index],
             risk_grade: index === 0 ? 'normal' : index === 1 ? 'caution' : index === 2 ? 'high_risk' : 'caution',
             one_line_overview: `${['첫', '두', '세', '네', '다섯'][index] ?? '여섯'} 번째 공개 계정의 특징을 중심으로 정리한 계정입니다.`,
             risk_analysis: index === 2
@@ -282,6 +287,12 @@ describe('owner-facing V1/V2 route selection', () => {
             query.order.mockReturnValue(query);
             return query;
         };
+        const resultsQuery = listQuery(resultRows);
+        const privateAccountsQuery = listQuery([{
+            instagram_id: 'private_candidate',
+            full_name: 'Private Candidate',
+            profile_image: null,
+        }]);
 
         mocks.getUser.mockResolvedValue({
             data: { user: { id: userId, email: 'ym1113@kakao.com' } },
@@ -293,12 +304,8 @@ describe('owner-facing V1/V2 route selection', () => {
         ));
         mocks.from.mockImplementation((table: string) => {
             if (table === 'analysis_requests') return requestQuery;
-            if (table === 'analysis_results') return listQuery(resultRows);
-            if (table === 'private_accounts') return listQuery([{
-                instagram_id: 'private_candidate',
-                full_name: 'Private Candidate',
-                profile_image: null,
-            }]);
+            if (table === 'analysis_results') return resultsQuery;
+            if (table === 'private_accounts') return privateAccountsQuery;
             throw new Error(`unexpected table: ${table}`);
         });
 
@@ -322,6 +329,8 @@ describe('owner-facing V1/V2 route selection', () => {
             expect.objectContaining({
                 instagramId: 'candidate_2',
                 oneLineOverview: '두 번째 공개 계정의 특징을 중심으로 정리한 계정입니다.',
+                riskGrade: 'caution',
+                displayScore: 4.3,
             }),
             expect.objectContaining({
                 instagramId: 'candidate_3',
@@ -331,7 +340,27 @@ describe('owner-facing V1/V2 route selection', () => {
                     '댓글 흔적은 제법 친절하지만, 수집 표본 밖 활동은 누락될 수 있습니다.',
                 ],
             }),
+            expect.objectContaining({
+                instagramId: 'candidate_4',
+                riskGrade: 'caution',
+                displayScore: 6.7,
+            }),
         ]));
+        expect(resultsQuery.select).toHaveBeenCalledWith(expect.stringContaining('risk_score'));
+        const candidateTwo = payload.femaleAccounts?.find((account) => (
+            (account as { instagramId?: string }).instagramId === 'candidate_2'
+        )) as { displayScore: number; riskGrade: 'caution' };
+        const candidateFour = payload.femaleAccounts?.find((account) => (
+            (account as { instagramId?: string }).instagramId === 'candidate_4'
+        )) as { displayScore: number; riskGrade: 'caution' };
+        expect([
+            ownerScorePercent(candidateTwo.displayScore),
+            ownerScorePercent(candidateFour.displayScore),
+        ]).toEqual([43, 67]);
+        expect([
+            threatMeterFillCount({ grade: candidateTwo.riskGrade, displayScore: candidateTwo.displayScore, segments: 10 }),
+            threatMeterFillCount({ grade: candidateFour.riskGrade, displayScore: candidateFour.displayScore, segments: 10 }),
+        ]).toEqual([4, 7]);
         expect(mocks.resolveResultOwner).toHaveBeenCalledWith(requestId, 'v1');
         expect(requestQuery.eq).toHaveBeenCalledWith('user_id', ownerUserId);
     });

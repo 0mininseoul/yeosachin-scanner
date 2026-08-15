@@ -138,6 +138,7 @@ export async function GET(
                 suspect_profile_image,
                 suspect_full_name,
                 bio,
+                risk_score,
                 risk_grade,
                 one_line_overview,
                 risk_analysis
@@ -198,6 +199,12 @@ export async function GET(
                 profileImage: createImageProxyPath(result.suspect_profile_image),
                 instagramUrl: `https://instagram.com/${instagramId}`,
                 riskGrade: result.risk_grade as 'high_risk' | 'caution' | 'normal',
+                displayScore: typeof result.risk_score === 'number'
+                    && Number.isSafeInteger(result.risk_score)
+                    && result.risk_score >= 0
+                    && result.risk_score <= 100
+                    ? Math.min(10, Math.max(1, result.risk_score / 10))
+                    : undefined,
                 bio: result.bio || '',
                 recentMutualRank: recentMutualRanks.get(instagramId.toLowerCase()),
                 ...toOwnerResultInteractionSummary(result),

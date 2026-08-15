@@ -7,6 +7,7 @@ import {
 } from './concierge-basic-correction';
 import type { FeatureAnalysisResult } from '@/lib/services/ai/v2-staged-analysis';
 import type { ReplayAccountAiDetail } from './replay/replay-runner';
+import { isRiskBandCompatibleWithDisplayScore } from '@/lib/domain/analysis/risk-policy';
 
 function profile(username: string, isPrivate: boolean) {
     return {
@@ -106,6 +107,16 @@ describe('concierge basic correction', () => {
         expect(result.femaleRows.some(row => row.risk_grade === 'normal')).toBe(true);
         expect(result.femaleRows.some(row => row.risk_grade === 'caution')).toBe(true);
         expect(result.femaleRows.some(row => row.risk_grade === 'high_risk')).toBe(true);
+        expect(result.femaleRows.every(row => (
+            Number.isFinite(row.risk_score)
+            && Number.isSafeInteger(row.risk_score)
+            && isRiskBandCompatibleWithDisplayScore(row.risk_score / 10, row.risk_grade)
+        ))).toBe(true);
+        expect(result.femaleRows.some((row, index, rows) => rows.some(other => (
+            other !== row
+            && other.risk_grade === row.risk_grade
+            && other.risk_score !== row.risk_score
+        )))).toBe(true);
     });
 
     it('gives high-risk rows canonical names and treats reliable appearance as context, not proof', () => {
@@ -233,6 +244,7 @@ describe('concierge basic correction', () => {
     it('requires reconciled gender totals and canonical narratives for high-risk rows', () => {
         const result = {
             femaleRows: [{
+                risk_score: 70,
                 risk_grade: 'high_risk',
                 one_line_overview: '공개 프로필과 최근 피드의 특징을 중심으로 정리한 계정입니다.',
                 risk_analysis: ['첫 문장', '둘째 문장'],
@@ -260,7 +272,7 @@ describe('concierge basic correction', () => {
 
     it('rejects a ranked normal or caution row without its canonical overview', () => {
         const result = {
-            femaleRows: [{ risk_grade: 'caution', risk_analysis: [] }],
+            femaleRows: [{ risk_score: 50, risk_grade: 'caution', risk_analysis: [] }],
             privateRows: [],
             counts: { male: 0, female: 1, unknownPublic: 0, unknown: 0 },
         } as never;
@@ -272,6 +284,38 @@ describe('concierge basic correction', () => {
             },
             result,
         })).toThrow('CONCIERGE_OVERVIEW_REQUIRED');
+    });
+
+    it('rejects non-finite or grade-incompatible persisted risk scores', () => {
+        const baseResult = {
+            femaleRows: [{
+                risk_score: 43,
+                risk_grade: 'caution',
+                one_line_overview: '공개 프로필과 최근 피드의 특징을 중심으로 정리한 계정입니다.',
+                risk_analysis: [],
+            }],
+            privateRows: [],
+            counts: { male: 0, female: 1, unknownPublic: 0, unknown: 0 },
+        };
+        const correction = {
+            fetchedCount: 1,
+            partition: { publicProfiles: [profile('public.one', false)], privateProfiles: [] },
+        };
+
+        expect(() => validateCanonicalConciergeCorrection({
+            ...correction,
+            result: {
+                ...baseResult,
+                femaleRows: [{ ...baseResult.femaleRows[0]!, risk_score: Number.POSITIVE_INFINITY }],
+            } as never,
+        })).toThrow('CONCIERGE_RISK_SCORE_INVALID');
+        expect(() => validateCanonicalConciergeCorrection({
+            ...correction,
+            result: {
+                ...baseResult,
+                femaleRows: [{ ...baseResult.femaleRows[0]!, risk_score: 67, risk_grade: 'normal' }],
+            } as never,
+        })).toThrow('CONCIERGE_RISK_SCORE_GRADE_MISMATCH');
     });
 
     it('keeps missing exact-mutual hydration outside privacy and gender totals', () => {
