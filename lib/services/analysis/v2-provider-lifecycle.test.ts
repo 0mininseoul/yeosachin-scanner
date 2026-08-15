@@ -247,6 +247,42 @@ describe('analysis V2 paid-provider lifecycle', () => {
         );
     });
 
+    it('reports a PII-free source-read failure without reconciling a terminal ledger', async () => {
+        const terminal = run(1, {
+            status: 'succeeded',
+            terminalizedAt: '2026-07-14T00:01:00.000Z',
+        });
+        const providerStore = store({
+            listUnreconciled: vi.fn(async () => [terminal]),
+        });
+        const onUsageReconciliationFailure = vi.fn();
+
+        await expect(reconcileAnalysisV2ProviderUsage({
+            store: providerStore,
+            onUsageReconciliationFailure,
+            clientForSlot: () => ({
+                run: () => ({
+                    get: async () => {
+                        throw new Error('provider unavailable');
+                    },
+                    abort: vi.fn(),
+                    waitForFinish: vi.fn(),
+                }),
+            }),
+        })).resolves.toEqual({
+            eligible: 1,
+            reconciled: 0,
+            failed: 1,
+            hasMore: false,
+        });
+
+        expect(onUsageReconciliationFailure).toHaveBeenCalledWith({
+            credentialSlot: terminal.credentialSlot,
+            reason: 'provider_read_failed',
+        });
+        expect(providerStore.reconcileUsage).not.toHaveBeenCalled();
+    });
+
     it('settles an opted-in revenue child only after later authoritative provider usage reconciliation', async () => {
         const terminal = run(1, {
             status: 'succeeded',

@@ -75,4 +75,22 @@ describe('first15 canary recovery maintenance route', () => {
         expect(response.status).toBe(503);
         expect(mocks.recover).not.toHaveBeenCalled();
     });
+
+    it('logs only a bounded recovery code when the authoritative sweep fails', async () => {
+        const log = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+        mocks.recover.mockRejectedValueOnce(
+            new Error('FIRST15_CANARY_RECOVERY_SENARY_PROVIDER_AUTH_FAILED'),
+        );
+
+        const response = await POST(request());
+
+        expect(response.status).toBe(500);
+        await expect(response.json()).resolves.toEqual({
+            code: 'FIRST15_CANARY_RECOVERY_FAILED',
+        });
+        expect(log).toHaveBeenCalledWith('First15 provider-canary recovery failed.', {
+            code: 'FIRST15_CANARY_RECOVERY_SENARY_PROVIDER_AUTH_FAILED',
+        });
+        log.mockRestore();
+    });
 });

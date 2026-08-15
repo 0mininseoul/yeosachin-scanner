@@ -11,6 +11,13 @@ import { observeRoute } from '@/lib/observability/request';
 
 export const maxDuration = 300;
 
+function boundedRecoveryFailureCode(error: unknown): string {
+    const code = error instanceof Error ? error.message : '';
+    return /^FIRST15_CANARY_RECOVERY_[A-Z0-9_]{1,96}$/.test(code)
+        ? code
+        : 'FIRST15_CANARY_RECOVERY_UNEXPECTED_FAILURE';
+}
+
 async function handlePOST(request: Request) {
     let config;
     try {
@@ -29,8 +36,10 @@ async function handlePOST(request: Request) {
     }
     try {
         return NextResponse.json(await runFirst15CanaryProviderRecovery());
-    } catch {
-        console.error('First15 provider-canary recovery failed.');
+    } catch (error) {
+        console.error('First15 provider-canary recovery failed.', {
+            code: boundedRecoveryFailureCode(error),
+        });
         return NextResponse.json({ code: 'FIRST15_CANARY_RECOVERY_FAILED' }, { status: 500 });
     }
 }

@@ -3,6 +3,7 @@ import { supabaseAdmin } from '@/lib/supabase/admin';
 import { isAnalysisV2WorkerAvailable } from './v2-execution-gate';
 import {
     reconcileAnalysisV2ProviderUsage,
+    type AnalysisV2ProviderReconciliationFailure,
     type AnalysisV2ProviderReconciliationSummary,
 } from './v2-provider-lifecycle';
 import {
@@ -68,6 +69,7 @@ export interface First15CanaryProviderRecoveryDependencies {
     loadProviderRuns(requestIds: readonly string[]): Promise<readonly StoredAnalysisV2ProviderRun[]>;
     reconcileProviderRuns(
         runs: readonly StoredAnalysisV2ProviderRun[],
+        reportFailure?: (failure: AnalysisV2ProviderReconciliationFailure) => void,
     ): Promise<AnalysisV2ProviderReconciliationSummary>;
     rearm(input: {
         orderId: string;
@@ -124,6 +126,34 @@ const rawProviderRunSchema = z.object({
 
 function noOutputError(code: string): Error {
     return new Error(code);
+}
+
+const first15ReconciliationFailureCode = Object.freeze({
+    provider_auth_failed: 'FIRST15_CANARY_RECOVERY_SENARY_PROVIDER_AUTH_FAILED',
+    provider_run_missing: 'FIRST15_CANARY_RECOVERY_SENARY_PROVIDER_RUN_NOT_FOUND',
+    provider_rate_limited: 'FIRST15_CANARY_RECOVERY_SENARY_PROVIDER_RATE_LIMITED',
+    provider_read_failed: 'FIRST15_CANARY_RECOVERY_SENARY_PROVIDER_READ_FAILED',
+    remote_status_mismatch: 'FIRST15_CANARY_RECOVERY_SENARY_REMOTE_STATUS_MISMATCH',
+    remote_usage_missing: 'FIRST15_CANARY_RECOVERY_SENARY_REMOTE_USAGE_MISSING',
+    remote_usage_invalid: 'FIRST15_CANARY_RECOVERY_SENARY_REMOTE_USAGE_INVALID',
+    ledger_write_failed: 'FIRST15_CANARY_RECOVERY_PROVIDER_LEDGER_WRITE_FAILED',
+    revenue_settlement_unavailable: 'FIRST15_CANARY_RECOVERY_REVENUE_SETTLEMENT_UNAVAILABLE',
+    revenue_settlement_failed: 'FIRST15_CANARY_RECOVERY_REVENUE_SETTLEMENT_FAILED',
+    stored_run_invalid: 'FIRST15_CANARY_RECOVERY_PROVIDER_LEDGER_INVALID',
+} satisfies Record<AnalysisV2ProviderReconciliationFailure['reason'], string>);
+
+function reconciliationFailureCode(
+    failures: readonly AnalysisV2ProviderReconciliationFailure[],
+): string | undefined {
+    if (
+        failures.length === 0
+        || failures.some(failure => failure.credentialSlot !== 'senary')
+    ) {
+        return undefined;
+    }
+    const reasons = new Set(failures.map(failure => failure.reason));
+    if (reasons.size !== 1) return undefined;
+    return first15ReconciliationFailureCode[failures[0].reason];
 }
 
 function candidateKey(candidate: Pick<First15CanaryProviderRecoveryCandidate, 'orderId' | 'preflightId'>): string {
@@ -318,6 +348,7 @@ async function loadProviderRuns(
 
 async function reconcileProviderRuns(
     runs: readonly StoredAnalysisV2ProviderRun[],
+    reportFailure?: (failure: AnalysisV2ProviderReconciliationFailure) => void,
 ): Promise<AnalysisV2ProviderReconciliationSummary> {
     const scopedStore: AnalysisV2ProviderRunStore = {
         ...analysisV2ProviderRunStore,
@@ -327,6 +358,7 @@ async function reconcileProviderRuns(
         store: scopedStore,
         concurrency: 3,
         maxBatches: 1,
+        onUsageReconciliationFailure: reportFailure,
     });
 }
 
@@ -393,14 +425,21 @@ export async function runFirst15CanaryProviderRecovery(
     const requestIds = scoped.map(candidate => candidate.requestId);
     const providerRuns = await dependencies.loadProviderRuns(requestIds);
     const unreconciled = validateProviderRuns(providerRuns, requestIds);
-    const reconciliation = await dependencies.reconcileProviderRuns(unreconciled);
+    const reconciliationFailures: AnalysisV2ProviderReconciliationFailure[] = [];
+    const reconciliation = await dependencies.reconcileProviderRuns(
+        unreconciled,
+        failure => reconciliationFailures.push(failure),
+    );
     if (
         reconciliation.eligible !== unreconciled.length
         || reconciliation.reconciled !== unreconciled.length
         || reconciliation.failed !== 0
         || reconciliation.hasMore
     ) {
-        throw noOutputError('FIRST15_CANARY_RECOVERY_PROVIDER_RECONCILIATION_FAILED');
+        throw noOutputError(
+            reconciliationFailureCode(reconciliationFailures)
+                ?? 'FIRST15_CANARY_RECOVERY_PROVIDER_RECONCILIATION_FAILED',
+        );
     }
 
     let rearmed = 0;

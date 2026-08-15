@@ -179,4 +179,33 @@ describe('first15 terminal provider-canary recovery', () => {
         expect(deps.reconcileProviderRuns).not.toHaveBeenCalled();
         expect(deps.rearm).not.toHaveBeenCalled();
     });
+
+    it('reports a source-slot authentication blocker without rearming any canary', async () => {
+        const reconcileProviderRuns = vi.fn(async (...args: unknown[]) => {
+            const runs = args[0] as readonly StoredAnalysisV2ProviderRun[];
+            const report = args[1] as undefined | ((failure: {
+                credentialSlot: 'senary';
+                reason: 'provider_auth_failed';
+            }) => void);
+            report?.({ credentialSlot: 'senary', reason: 'provider_auth_failed' });
+            return {
+                eligible: runs.length,
+                reconciled: 0,
+                failed: runs.length,
+                hasMore: false,
+            };
+        });
+        const deps = dependencies({ reconcileProviderRuns });
+
+        await expect(runFirst15CanaryProviderRecovery(deps)).rejects.toThrow(
+            'FIRST15_CANARY_RECOVERY_SENARY_PROVIDER_AUTH_FAILED',
+        );
+
+        expect(reconcileProviderRuns).toHaveBeenCalledWith(
+            expect.any(Array),
+            expect.any(Function),
+        );
+        expect(deps.rearm).not.toHaveBeenCalled();
+        expect(deps.dispatch).not.toHaveBeenCalled();
+    });
 });
