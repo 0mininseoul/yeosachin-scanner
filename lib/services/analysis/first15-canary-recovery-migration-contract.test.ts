@@ -6,6 +6,13 @@ const migrationPath = new URL(
     import.meta.url,
 );
 const migration = existsSync(migrationPath) ? readFileSync(migrationPath, 'utf8') : '';
+const generationTwoMigrationPath = new URL(
+    '../../../supabase/migrations/20260815220000_first15_canary_existing_route_generation_two.sql',
+    import.meta.url,
+);
+const generationTwoMigration = existsSync(generationTwoMigrationPath)
+    ? readFileSync(generationTwoMigrationPath, 'utf8')
+    : '';
 
 describe('first15 terminal provider-canary recovery migration contract', () => {
     it('creates one service-role-only audited replay lineage after the copy-quality migration', () => {
@@ -34,5 +41,24 @@ describe('first15 terminal provider-canary recovery migration contract', () => {
         expect(migration).toContain('allowRelationshipIncompleteReplacement');
         expect(migration).not.toContain('UPDATE public.analysis_results');
         expect(migration).not.toContain('DELETE FROM public.analysis_v2_provider_runs');
+    });
+
+    it('continues only the recorded terminal successors through the existing route contract', () => {
+        expect(generationTwoMigration).toContain('-- MIGRATION_PREDECESSOR=20260815210000');
+        expect(generationTwoMigration).toContain(
+            'CREATE OR REPLACE FUNCTION public.list_earlybird_first15_canary_provider_recovery_candidates()',
+        );
+        expect(generationTwoMigration).toContain('parent.source_failure_code AS error_code');
+        expect(generationTwoMigration).toContain("request.error_message = 'ANALYSIS_V2_JOB_HANDLER_FAILED'");
+        expect(generationTwoMigration).toContain("request.error_message = 'ANALYSIS_V2_MEDIA_ARTIFACT_OBJECT_ERROR'");
+        expect(generationTwoMigration).toContain("receipt.failed_job_key = 'track:relationships:collect'");
+        expect(generationTwoMigration).toContain("receipt.failed_job_key = 'track:target-evidence:collect'");
+        expect(generationTwoMigration).toContain("receipt.failed_job_key = 'track:profile-ai:batch:2'");
+        expect(generationTwoMigration).toContain("p_fallback_credential_slot = 'quinary'");
+        expect(generationTwoMigration).toContain('FIRST15_CANARY_GEN2_REARM_OLD_SHAPE_MISMATCH');
+        expect(generationTwoMigration).toContain('usage_reconciled_at IS NULL');
+        expect(generationTwoMigration).not.toContain('CREATE TABLE public.');
+        expect(generationTwoMigration).not.toContain('list_analysis_v2_unreconciled_provider_runs');
+        expect(generationTwoMigration).not.toContain('GRANT SELECT ON TABLE public.analysis_v2_provider_runs');
     });
 });
