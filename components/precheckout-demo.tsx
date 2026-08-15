@@ -197,6 +197,10 @@ export function PrecheckoutDemo(props: {
         let active = true;
         let timeoutId: ReturnType<typeof setTimeout> | undefined;
         const targetAtMs = nextTransitionAt(startAtMs, Date.now());
+        if (targetAtMs <= Date.now()) {
+            completeOnce();
+            return undefined;
+        }
         const schedule = () => {
             const delay = Math.max(0, targetAtMs - Date.now());
             timeoutId = setTimeout(() => {

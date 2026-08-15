@@ -715,11 +715,16 @@ export function PrecheckoutStageGraphs({
     const onStageChangeRef = useRef(onStageChange);
     const onErrorRef = useRef(onError);
     const startedAtRef = useRef(startedAtMs);
+    const continueAfterFirstPassRef = useRef(continueAfterFirstPass);
 
     useEffect(() => {
         onStageChangeRef.current = onStageChange;
         onErrorRef.current = onError;
     }, [onStageChange, onError]);
+
+    useEffect(() => {
+        continueAfterFirstPassRef.current = continueAfterFirstPass;
+    }, [continueAfterFirstPass]);
 
     useEffect(() => {
         const host = viewportRef.current;
@@ -780,7 +785,7 @@ export function PrecheckoutStageGraphs({
         let slowCycle = -1;
 
         function paint(elapsed: number) {
-            if (continueAfterFirstPass && elapsed >= TOTAL_MS) {
+            if (continueAfterFirstPassRef.current && elapsed >= TOTAL_MS) {
                 const slowElapsed = elapsed - TOTAL_MS;
                 const cycleDurationMs = PRECHECKOUT_WAIT_STAGE_DURATION_MS * STAGES.length;
                 const nextSlowCycle = Math.floor(slowElapsed / cycleDurationMs);
@@ -853,7 +858,7 @@ export function PrecheckoutStageGraphs({
             try {
                 const elapsed = initialElapsedMs + Math.max(0, monotonicNowMs() - monotonicStartedAtMs);
                 paint(elapsed);
-                if (continueAfterFirstPass || elapsed < TOTAL_MS) {
+                if (continueAfterFirstPassRef.current || elapsed < TOTAL_MS) {
                     rafId = requestAnimationFrame(frame);
                 }
             } catch {

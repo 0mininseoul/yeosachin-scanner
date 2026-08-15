@@ -411,7 +411,7 @@ describe('PrecheckoutDemo', () => {
         const onComplete = vi.fn();
         await act(async () => {
             root.render(createElement(PrecheckoutDemo, {
-                mode: 'waiting' as never,
+                mode: 'waiting',
                 startedAtMs: 0,
                 finishRequested: false,
                 onComplete,
@@ -431,7 +431,7 @@ describe('PrecheckoutDemo', () => {
         const onComplete = vi.fn();
         await act(async () => {
             root.render(createElement(PrecheckoutDemo, {
-                mode: 'waiting' as never,
+                mode: 'waiting',
                 startedAtMs: 0,
                 finishRequested: false,
                 onComplete,
@@ -441,7 +441,7 @@ describe('PrecheckoutDemo', () => {
         await advanceTimersBy(DEMO_DURATION_MS + 1);
         await act(async () => {
             root.render(createElement(PrecheckoutDemo, {
-                mode: 'waiting' as never,
+                mode: 'waiting',
                 startedAtMs: 0,
                 finishRequested: true,
                 onComplete,

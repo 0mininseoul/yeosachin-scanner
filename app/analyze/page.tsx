@@ -65,7 +65,6 @@ import { PreflightPendingStatus } from '@/components/preflight-pending-status';
 import { PrecheckoutImmersive } from '@/components/precheckout-immersive';
 import {
     resolveActivePrecheckoutSurface,
-    resolvePrecheckoutAvailabilitySurface,
     type PrecheckoutSurfaceState,
 } from '@/lib/services/precheckout/blite-page-flow';
 
@@ -154,11 +153,19 @@ const DISCLOSURE_ACCEPTED = true;
         readyPreflight,
         stalePricingPreflightId,
     } = resolveEarlybirdPricingBoundary(preflight);
+    const exclusionDecided = exclusionState === 'excluded' || exclusionState === 'skipped';
+    // B-lite reads the same preflight source that produces the ready pricing snapshot, but its
+    // visual gate must start as soon as this already-accepted preflight has an exclusion decision.
+    // This avoids another provider/Gemini request while removing the old ready-state display wait.
+    const immersivePreflight = exclusionDecided
+        && preflight
+        && (preflight?.status === 'pending' || preflight?.status === 'ready')
+        ? preflight
+        : null;
     const activePrecheckoutSurface = resolveActivePrecheckoutSurface(
         precheckoutSurface,
-        readyPreflight?.preflightId,
+        immersivePreflight?.preflightId,
     );
-    const exclusionDecided = exclusionState === 'excluded' || exclusionState === 'skipped';
     // Query-plan selection is a hydration-safe rendering fallback, not a state
     // transition. It therefore cannot race the preflight resume effect.
     const selectedPlanWithQueryFallback = selectedPlan ?? querySelectedPlan;
@@ -406,35 +413,32 @@ const DISCLOSURE_ACCEPTED = true;
     // Nothing else — it must not select a plan, start checkout, or trigger login.
     const planSectionRef = useRef<HTMLElement>(null);
     const planHeadingRef = useRef<HTMLHeadingElement>(null);
+    const planGateRequestedRef = useRef(false);
     useEffect(() => {
         setPrecheckoutSurface({
-            preflightId: readyPreflight?.preflightId ?? null,
+            preflightId: immersivePreflight?.preflightId ?? null,
             surface: 'awaiting',
         });
-    }, [readyPreflight?.preflightId]);
-    const handlePrecheckoutAvailability = useCallback((available: boolean) => {
-        // The immersive flow is the only authority that may release the plan gate. A missing
-        // B-lite result can reveal the preview card only when it is valid; it never bypasses
-        // the four-stage fallback by opening the legacy surface from this status callback.
-        const preflightId = readyPreflight?.preflightId;
-        if (!preflightId) return;
-        setPrecheckoutSurface(current => ({
-            preflightId,
-            surface: resolvePrecheckoutAvailabilitySurface(
-                current.preflightId === preflightId ? current.surface : 'awaiting',
-                available,
-            ),
-        }));
-    }, [readyPreflight?.preflightId]);
+        planGateRequestedRef.current = false;
+    }, [immersivePreflight?.preflightId]);
     const handleGoToPlans = useCallback(() => {
-        const preflightId = readyPreflight?.preflightId;
+        const preflightId = immersivePreflight?.preflightId;
         if (!preflightId) return;
+        planGateRequestedRef.current = true;
         setPrecheckoutSurface({ preflightId, surface: 'legacy' });
+    }, [immersivePreflight?.preflightId]);
+    useEffect(() => {
+        if (
+            !planGateRequestedRef.current
+            || activePrecheckoutSurface !== 'legacy'
+            || !readyPreflight
+        ) return;
+        planGateRequestedRef.current = false;
         requestAnimationFrame(() => {
-        planSectionRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' });
-        planHeadingRef.current?.focus();
+            planSectionRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+            planHeadingRef.current?.focus();
         });
-    }, [readyPreflight?.preflightId]);
+    }, [activePrecheckoutSurface, readyPreflight]);
 
     const handleCheckoutStatusNavigation = () => {
         if (!activeCheckoutStatusCta || activeCheckoutStatusCta.navigating) return;
@@ -949,14 +953,27 @@ const DISCLOSURE_ACCEPTED = true;
                             </Panel>
                         )}
 
-                        {exclusionDecided && !readyPreflight && (
+                        {immersivePreflight
+                            && !autoCheckoutTransitionVisible
+                            && activePrecheckoutSurface !== 'legacy' && (
+                            <PrecheckoutImmersive
+                                key={`${immersivePreflight.preflightId}:${claimToken ?? ''}`}
+                                preflightId={immersivePreflight.preflightId}
+                                claimToken={claimToken}
+                                submittedAtMs={preflightStartedAt}
+                                targetUsername={targetInstagramId}
+                                onGoToPlans={handleGoToPlans}
+                            />
+                        )}
+
+                        {exclusionDecided && activePrecheckoutSurface === 'legacy' && !readyPreflight && (
                             <PreflightPendingStatus
                                 targetInstagramId={targetInstagramId}
                                 startedAt={preflightStartedAt}
                             />
                         )}
 
-                        {exclusionDecided && readyPreflight && (
+                        {exclusionDecided && activePrecheckoutSurface === 'legacy' && readyPreflight && (
                             <>
                                 {!autoCheckoutTransitionVisible && (
                                 <CaseCard
@@ -1015,18 +1032,7 @@ const DISCLOSURE_ACCEPTED = true;
                                 </CaseCard>
                                 )}
 
-                                {!autoCheckoutTransitionVisible && activePrecheckoutSurface !== 'legacy' && (
-                                    <PrecheckoutImmersive
-                                        key={`${readyPreflight.preflightId}:${claimToken ?? ''}`}
-                                        preflightId={readyPreflight.preflightId}
-                                        claimToken={claimToken}
-                                        submittedAtMs={preflightStartedAt}
-                                        onGoToPlans={handleGoToPlans}
-                                        onAvailabilityChange={handlePrecheckoutAvailability}
-                                    />
-                                )}
-
-                                {activePrecheckoutSurface === 'legacy' && <section
+                                <section
                                     id="plan-selection"
                                     ref={planSectionRef}
                                     className="mt-9 scroll-mt-20"
@@ -1213,7 +1219,7 @@ const DISCLOSURE_ACCEPTED = true;
                                                             ).actionLabel}
                                         </PrimaryButton>
                                     </div>
-                                </section>}
+                                </section>
                             </>
                         )}
                     </>
