@@ -3,8 +3,10 @@ import type { FeatureAnalysisResult } from '@/lib/services/ai/v2-staged-analysis
 import type { InstagramProfile } from '@/lib/types/instagram';
 import {
     buildConciergeManualPublication,
+    CONCIERGE_BATCH_PUBLICATION_RPC,
     ConciergePublicationError,
     createConciergePublicationStore,
+    createSupabaseConciergePublicationStore,
     publishConciergeManualOverride,
     type ConciergeManualPublicationInput,
     type ConciergePublicationStore,
@@ -194,9 +196,9 @@ describe('concierge manual publication', () => {
         const publication = buildConciergeManualPublication(publicationInput);
 
         expect(publication.privateRows).toEqual([
-            { sort_ordinal: 1, instagram_id: 'alpha', profile_image: 'https://images.example/alpha.jpg', full_name: '알파', name_female_score: 0.9, name_is_name: true, name_confidence: 0.6 },
-            { sort_ordinal: 2, instagram_id: 'beta', profile_image: 'https://images.example/beta.jpg', full_name: '베타', name_female_score: 0.9, name_is_name: true, name_confidence: 0.6 },
-            { sort_ordinal: 3, instagram_id: 'zulu', profile_image: 'https://images.example/zulu.jpg', full_name: '줄리', name_female_score: 0.7, name_is_name: true, name_confidence: 0.2 },
+            { sort_ordinal: 1, instagram_id: 'alpha', profile_image: 'https://images.example/alpha.jpg', full_name: '알파', name_female_score: Math.fround(0.9), name_is_name: true, name_confidence: Math.fround(0.6) },
+            { sort_ordinal: 2, instagram_id: 'beta', profile_image: 'https://images.example/beta.jpg', full_name: '베타', name_female_score: Math.fround(0.9), name_is_name: true, name_confidence: Math.fround(0.6) },
+            { sort_ordinal: 3, instagram_id: 'zulu', profile_image: 'https://images.example/zulu.jpg', full_name: '줄리', name_female_score: Math.fround(0.7), name_is_name: true, name_confidence: Math.fround(0.2) },
         ]);
         expect(publication.counts).toMatchObject({ male: 0, female: 2, unknown: 0, public: 2, private: 3 });
         expect(publication.rows.every(row => row.gender_status === 'confirmed')).toBe(true);
@@ -215,6 +217,15 @@ describe('concierge manual publication', () => {
                     requestId: publication.requestId,
                     version: publicationInput.expectedVersion + 1,
                     counts: publication.counts,
+                    privateRows: publication.privateRows.map(row => ({
+                        sortOrdinal: row.sort_ordinal,
+                        instagramId: row.instagram_id,
+                        profileImage: row.profile_image,
+                        fullName: row.full_name,
+                        nameFemaleScore: row.name_female_score,
+                        nameIsName: row.name_is_name,
+                        nameConfidence: row.name_confidence,
+                    })),
                 },
                 error: null,
             };
@@ -468,6 +479,15 @@ describe('concierge manual publication', () => {
                     ownerReadContractVerified: true, adminReadContractVerified: true,
                     resultHash: publication.resultHash, resultUrl: publication.resultUrl,
                     requestId: publication.requestId, version: 8, counts: publication.counts,
+                    privateRows: publication.privateRows.map(row => ({
+                        sortOrdinal: row.sort_ordinal,
+                        instagramId: row.instagram_id,
+                        profileImage: row.profile_image,
+                        fullName: row.full_name,
+                        nameFemaleScore: row.name_female_score,
+                        nameIsName: row.name_is_name,
+                        nameConfidence: row.name_confidence,
+                    })),
                 },
                 error: null,
             };
@@ -505,5 +525,74 @@ describe('concierge manual publication', () => {
             requestId: 'request', ownerId: 'owner', targetUsername: 'target',
             classificationLedger: makeLedger(), manualImport: makeInput().manualImport,
         })).rejects.toThrow('CONCIERGE_PUBLICATION_RPC_INVALID_RESPONSE');
+    });
+
+    it('binds future batches to the service-role RPC and verifies its ordered private readback', async () => {
+        const publication = buildConciergeManualPublication(makeInput());
+        const calls: string[] = [];
+        const store = createSupabaseConciergePublicationStore({
+            async rpc(name, args) {
+                calls.push(name);
+                expect(args).toMatchObject({
+                    request_id: publication.requestId,
+                    publication: expect.objectContaining({ privateRows: publication.privateRows }),
+                });
+                return {
+                    data: {
+                        published: true, idempotent: false,
+                        ownerReadContractVerified: true, adminReadContractVerified: true,
+                        resultHash: publication.resultHash, resultUrl: publication.resultUrl,
+                        requestId: publication.requestId, version: 8, counts: publication.counts,
+                        privateRows: publication.privateRows.map(row => ({
+                            sortOrdinal: row.sort_ordinal,
+                            instagramId: row.instagram_id,
+                            profileImage: row.profile_image,
+                            fullName: row.full_name,
+                            nameFemaleScore: row.name_female_score,
+                            nameIsName: row.name_is_name,
+                            nameConfidence: row.name_confidence,
+                        })),
+                    },
+                    error: null,
+                };
+            },
+        });
+
+        await expect(store.publishAtomic({
+            publication,
+            expectedVersion: 7,
+            expectedResultHash: 'e'.repeat(64),
+            orderId: 'order', requestId: 'request', ownerId: 'owner', targetUsername: 'target',
+            classificationLedger: makeLedger(), manualImport: makeInput().manualImport,
+        })).resolves.toEqual({ published: true, idempotent: false });
+        expect(calls).toEqual([CONCIERGE_BATCH_PUBLICATION_RPC]);
+    });
+
+    it('canonicalizes private-name scores to the existing REAL storage precision before hashing', () => {
+        const input = makeInput();
+        const preciseFemaleScore = 0.8123456789;
+        const preciseConfidence = 0.2345678912;
+        const publication = buildConciergeManualPublication({
+            ...input,
+            replay: {
+                ...input.replay,
+                privateNameResults: [{
+                    id: 'private',
+                    femaleScore: preciseFemaleScore,
+                    isName: true,
+                    confidence: preciseConfidence,
+                }],
+            },
+        });
+
+        expect(publication.privateRows).toEqual([{
+            sort_ordinal: 1,
+            instagram_id: 'private',
+            profile_image: null,
+            full_name: null,
+            name_female_score: Math.fround(preciseFemaleScore),
+            name_is_name: true,
+            name_confidence: Math.fround(preciseConfidence),
+        }]);
     });
 });

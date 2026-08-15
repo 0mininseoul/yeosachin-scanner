@@ -13,6 +13,7 @@ import type {
 import type { InteractionEvidenceRow, StoredInteractionCoverage } from './interaction-stage';
 import type { ReverseLikeStatus } from '@/lib/domain/analysis/risk-policy';
 import type { ReplayAccountAiDetail } from './replay/replay-runner';
+import { supabaseAdmin } from '@/lib/supabase/admin';
 import {
     applyConciergeManualClassificationImport,
     createConciergeClassificationLedgerHash,
@@ -171,6 +172,61 @@ export type ConciergePublicationRpc = (args: Readonly<Record<string, unknown>>) 
     error: { code?: string | null; message?: string | null } | null;
 }>;
 
+export interface ConciergePublicationSupabaseClient {
+    rpc(
+        name: string,
+        args: Readonly<Record<string, unknown>>,
+    ): PromiseLike<{
+        data: unknown;
+        error: { code?: string | null; message?: string | null } | null;
+    }>;
+}
+
+export const CONCIERGE_BATCH_PUBLICATION_RPC = 'publish_concierge_batch_manual_override';
+
+function privateReadContractRows(rows: readonly ConciergePrivateAccountRow[]): readonly {
+    sortOrdinal: number;
+    instagramId: string;
+    profileImage: string | null;
+    fullName: string | null;
+    nameFemaleScore: number;
+    nameIsName: boolean;
+    nameConfidence: number;
+}[] {
+    return rows.map(row => ({
+        sortOrdinal: row.sort_ordinal,
+        instagramId: row.instagram_id,
+        profileImage: row.profile_image,
+        fullName: row.full_name,
+        nameFemaleScore: row.name_female_score,
+        nameIsName: row.name_is_name,
+        nameConfidence: row.name_confidence,
+    }));
+}
+
+function privateReadContractMatches(
+    actual: unknown,
+    expected: readonly ReturnType<typeof privateReadContractRows>[number][],
+): boolean {
+    if (!Array.isArray(actual) || actual.length !== expected.length) return false;
+    return actual.every((value, index) => {
+        if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
+        const row = value as Record<string, unknown>;
+        const expectedRow = expected[index]!;
+        return row.sortOrdinal === expectedRow.sortOrdinal
+            && row.instagramId === expectedRow.instagramId
+            && row.profileImage === expectedRow.profileImage
+            && row.fullName === expectedRow.fullName
+            && typeof row.nameFemaleScore === 'number'
+            && Number.isFinite(row.nameFemaleScore)
+            && Math.fround(row.nameFemaleScore) === expectedRow.nameFemaleScore
+            && row.nameIsName === expectedRow.nameIsName
+            && typeof row.nameConfidence === 'number'
+            && Number.isFinite(row.nameConfidence)
+            && Math.fround(row.nameConfidence) === expectedRow.nameConfidence;
+    });
+}
+
 export function createConciergePublicationStore(
     invoke: ConciergePublicationRpc,
 ): ConciergePublicationStore {
@@ -218,6 +274,7 @@ export function createConciergePublicationStore(
                 requestId?: unknown;
                 version?: unknown;
                 counts?: unknown;
+                privateRows?: unknown;
             };
             if (data.published !== true || typeof data.idempotent !== 'boolean') {
                 throw new ConciergePublicationError('CONCIERGE_PUBLICATION_RPC_INVALID_RESPONSE');
@@ -233,10 +290,33 @@ export function createConciergePublicationStore(
                 || canonicalJson(data.counts) !== canonicalJson(publication.counts)) {
                 throw new ConciergePublicationError('CONCIERGE_PUBLICATION_RPC_ECHO_MISMATCH');
             }
+            if (!privateReadContractMatches(
+                data.privateRows,
+                privateReadContractRows(publication.privateRows),
+            )) {
+                throw new ConciergePublicationError('CONCIERGE_PUBLICATION_READ_CONTRACT_FAILED');
+            }
             return { published: true, idempotent: data.idempotent };
         },
     };
 }
+
+/**
+ * Production adapter for the forward-only service-role RPC.  Its database
+ * function owns the transaction and returns the ordered private-row readback;
+ * the already-published first concierge order remains on its one-shot RPC.
+ */
+export function createSupabaseConciergePublicationStore(
+    client: ConciergePublicationSupabaseClient = supabaseAdmin,
+): ConciergePublicationStore {
+    return createConciergePublicationStore(async args => {
+        const response = await client.rpc(CONCIERGE_BATCH_PUBLICATION_RPC, args);
+        return { data: response.data, error: response.error };
+    });
+}
+
+/** Service-role store for future concierge batch publications only. */
+export const conciergePublicationStore = createSupabaseConciergePublicationStore();
 
 function normalizeUsername(value: string): string {
     return value.trim().replace(/^@/, '').toLowerCase();
@@ -863,7 +943,7 @@ export function buildConciergeManualPublication(
 
 export async function publishConciergeManualOverride(
     input: ConciergeManualPublicationInput,
-    store: ConciergePublicationStore,
+    store: ConciergePublicationStore = conciergePublicationStore,
 ): Promise<{ published: true; idempotent: boolean; resultHash: string; resultUrl: string; counts: ConciergeCanonicalPublication['counts'] }> {
     const publication = buildConciergeManualPublication(input);
     const applied = await store.publishAtomic({
