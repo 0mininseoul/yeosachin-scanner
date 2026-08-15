@@ -56,10 +56,28 @@ describe('post-login earlybird checkout continuation', () => {
             requestedPlanId: 'standard',
             planId: 'standard',
             exclusionDecided: true,
+            immersiveReleased: true,
             planAvailable: true,
             submitting: false,
             attemptedKey: null,
         })).toBe(true);
+    });
+
+    it('does not resume a checkout continuation before the immersive plan gate is released', () => {
+        expect(shouldAutoSubmitEarlybirdAction({
+            requested: true,
+            authenticated: true,
+            ready: true,
+            preflightId: PREFLIGHT_ID,
+            requestedPreflightId: PREFLIGHT_ID,
+            requestedPlanId: 'standard',
+            planId: 'standard',
+            exclusionDecided: true,
+            immersiveReleased: false,
+            planAvailable: true,
+            submitting: false,
+            attemptedKey: null,
+        })).toBe(false);
     });
 
     it('waits for auth, the exclusion decision, and a usable snapshot, then deduplicates the continuation', () => {
@@ -74,6 +92,7 @@ describe('post-login earlybird checkout continuation', () => {
             requestedPlanId: 'standard',
             planId: 'standard',
             exclusionDecided: true,
+            immersiveReleased: true,
             planAvailable: true,
             submitting: false,
             attemptedKey: null,
@@ -87,6 +106,7 @@ describe('post-login earlybird checkout continuation', () => {
             requestedPlanId: 'standard',
             planId: 'standard',
             exclusionDecided: false,
+            immersiveReleased: true,
             planAvailable: true,
             submitting: false,
             attemptedKey: null,
@@ -100,6 +120,7 @@ describe('post-login earlybird checkout continuation', () => {
             requestedPlanId: 'standard',
             planId: 'standard',
             exclusionDecided: true,
+            immersiveReleased: true,
             planAvailable: true,
             submitting: false,
             attemptedKey: key,
@@ -113,6 +134,7 @@ describe('post-login earlybird checkout continuation', () => {
             requestedPlanId: 'standard',
             planId: 'basic',
             exclusionDecided: true,
+            immersiveReleased: true,
             planAvailable: true,
             submitting: false,
             attemptedKey: null,
@@ -126,6 +148,7 @@ describe('post-login earlybird checkout continuation', () => {
             requestedPlanId: 'standard',
             planId: 'standard',
             exclusionDecided: true,
+            immersiveReleased: true,
             planAvailable: true,
             submitting: false,
             attemptedKey: null,

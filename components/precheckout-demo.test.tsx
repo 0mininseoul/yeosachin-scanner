@@ -406,4 +406,52 @@ describe('PrecheckoutDemo', () => {
         expect(onComplete).toHaveBeenCalledTimes(1);
         expect(onError).toHaveBeenCalledTimes(1);
     });
+
+    it('keeps the graphs alive with changing progress after the initial four-stage pass', async () => {
+        const onComplete = vi.fn();
+        await act(async () => {
+            root.render(createElement(PrecheckoutDemo, {
+                mode: 'waiting',
+                startedAtMs: 0,
+                finishRequested: false,
+                onComplete,
+                onError: vi.fn(),
+            }));
+        });
+
+        await advanceTimersBy(DEMO_DURATION_MS);
+
+        expect(onComplete).not.toHaveBeenCalled();
+        expect(container.querySelector('[data-precheckout-demo-phase="waiting"]')).not.toBeNull();
+        expect(container.querySelector('[data-precheckout-progress]')?.textContent)
+            .toContain('추가 신호');
+    });
+
+    it('finishes a waiting flow only on the next slow graph transition after requested', async () => {
+        const onComplete = vi.fn();
+        await act(async () => {
+            root.render(createElement(PrecheckoutDemo, {
+                mode: 'waiting',
+                startedAtMs: 0,
+                finishRequested: false,
+                onComplete,
+                onError: vi.fn(),
+            }));
+        });
+        await advanceTimersBy(DEMO_DURATION_MS + 1);
+        await act(async () => {
+            root.render(createElement(PrecheckoutDemo, {
+                mode: 'waiting',
+                startedAtMs: 0,
+                finishRequested: true,
+                onComplete,
+                onError: vi.fn(),
+            }));
+        });
+
+        await advanceTimersBy(5_998);
+        expect(onComplete).not.toHaveBeenCalled();
+        await advanceTimersBy(1);
+        expect(onComplete).toHaveBeenCalledOnce();
+    });
 });

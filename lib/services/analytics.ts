@@ -230,7 +230,12 @@ const PROPERTY_VALIDATORS: Record<PropertyName, PropertyValidator> = {
     error_code: registeredErrorCodeValidator,
     estimate_version: enumValidator(['v1', 'demo-v1']),
     followers_bucket: enumValidator(['unknown', '0_400', '401_800', '801_1200', 'over_1200']),
-    fallback_reason: enumValidator(['terminal_before_48', 'unresolved_at_48', 'demo_error']),
+    fallback_reason: enumValidator([
+        'terminal_before_48',
+        'unresolved_at_48',
+        'unresolved_at_90',
+        'demo_error',
+    ]),
     following_bucket: enumValidator(['unknown', '0_400', '401_800', '801_1200', 'over_1200']),
     gender_confirmation_outcome: enumValidator(['confirmed', 'rejected']),
     is_shared: (value) => typeof value === 'boolean' ? value : undefined,

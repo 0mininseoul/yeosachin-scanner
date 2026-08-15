@@ -164,7 +164,7 @@ describe('Amplitude analytics adapter', () => {
 
         analytics.trackEvent(analytics.PRECHECKOUT_EVENTS.BLITE_FALLBACK_SELECTED, {
             preflight_id: VALID_USER_ID,
-            fallback_reason: 'unresolved_at_48',
+            fallback_reason: 'unresolved_at_90',
             username: 'target_handle',
             raw_error: 'provider secret details',
         } as never);
@@ -184,7 +184,7 @@ describe('Amplitude analytics adapter', () => {
         expect(amplitudeMocks.track.mock.calls).toEqual([
             ['precheckout_blite_fallback_selected', {
                 preflight_id: VALID_USER_ID,
-                fallback_reason: 'unresolved_at_48',
+                fallback_reason: 'unresolved_at_90',
             }],
             ['precheckout_demo_completed', {
                 preflight_id: VALID_USER_ID,

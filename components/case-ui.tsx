@@ -1,6 +1,6 @@
 import Image from "next/image";
 import Link from "next/link";
-import type { ButtonHTMLAttributes, CSSProperties, ReactNode } from "react";
+import type { ButtonHTMLAttributes, CSSProperties, HTMLAttributes, ReactNode } from "react";
 import {
   DEFAULT_THREAT_METER_SEGMENTS,
   threatMeterFillCount,
@@ -110,13 +110,14 @@ export function CaseCard({
   children,
   className = "",
   bracket = "var(--color-line-2)",
+  ...props
 }: {
   children: ReactNode;
   className?: string;
   bracket?: string;
-}) {
+} & HTMLAttributes<HTMLDivElement>) {
   return (
-    <div className={`relative border border-line bg-ink-2 ${className}`}>
+    <div {...props} className={`relative border border-line bg-ink-2 ${className}`}>
       <Corners color={bracket} />
       {children}
     </div>

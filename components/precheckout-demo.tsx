@@ -10,10 +10,18 @@ import {
 } from 'react';
 import {
     PRECHECKOUT_DEMO_DURATION_MS,
+    PRECHECKOUT_WAIT_STAGE_DURATION_MS,
     PrecheckoutStageGraphs,
 } from './precheckout-stage-graphs';
 
 export { PRECHECKOUT_DEMO_DURATION_MS, PRECHECKOUT_DEMO_STAGE_DURATIONS_MS } from './precheckout-stage-graphs';
+
+const WAITING_PROGRESS_COPY = [
+    '1차 판독을 마쳤어요. 추가 신호를 대조하고 있습니다.',
+    '연결 밀도를 다시 정렬하고 있습니다.',
+    '공개 피드 신호를 한 번 더 확인하고 있습니다.',
+    '관계 패턴을 최종 분류하고 있습니다.',
+] as const;
 
 const STAGE_LABELS = [
     '관계 궤도 정렬',
@@ -63,14 +71,31 @@ function isValidStartTime(startedAtMs: number): boolean {
     return Number.isFinite(startedAtMs) && startedAtMs >= 0;
 }
 
+function nextTransitionAt(startedAtMs: number, nowMs: number): number {
+    const firstPassEndsAt = startedAtMs + PRECHECKOUT_DEMO_DURATION_MS;
+    if (nowMs <= firstPassEndsAt) return firstPassEndsAt;
+    return firstPassEndsAt + Math.ceil(
+        (nowMs - firstPassEndsAt) / PRECHECKOUT_WAIT_STAGE_DURATION_MS,
+    ) * PRECHECKOUT_WAIT_STAGE_DURATION_MS;
+}
+
 export function PrecheckoutDemo(props: {
-    mode: 'success' | 'fallback';
+    mode: 'success' | 'fallback' | 'waiting';
     startedAtMs: number;
+    /** Waiting mode stays active until this request reaches a stage boundary. */
+    finishRequested?: boolean;
     onComplete: () => void;
     onError: () => void;
     children?: ReactNode;
 }): ReactNode {
-    const { mode, startedAtMs, onComplete, onError, children } = props;
+    const {
+        mode,
+        startedAtMs,
+        finishRequested = true,
+        onComplete,
+        onError,
+        children,
+    } = props;
     const [startAtMs] = useState(() => startedAtMs);
     const onCompleteRef = useRef(onComplete);
     const onErrorRef = useRef(onError);
@@ -78,6 +103,11 @@ export function PrecheckoutDemo(props: {
     const errorSentRef = useRef(false);
     const [stageIndex, setStageIndex] = useState(0);
     const [demoComplete, setDemoComplete] = useState(false);
+    const waitingMode = mode === 'waiting';
+    const [waiting, setWaiting] = useState(() => (
+        waitingMode && Date.now() >= startAtMs + PRECHECKOUT_DEMO_DURATION_MS
+    ));
+    const [waitingCopyIndex, setWaitingCopyIndex] = useState(0);
 
     const reportError = useCallback(() => {
         if (errorSentRef.current) return;
@@ -150,13 +180,64 @@ export function PrecheckoutDemo(props: {
             }
         };
 
-        scheduleAt(startedAt + PRECHECKOUT_DEMO_DURATION_MS, completeOnce);
+        if (waitingMode) {
+            scheduleAt(startedAt + PRECHECKOUT_DEMO_DURATION_MS, () => setWaiting(true));
+        } else {
+            scheduleAt(startedAt + PRECHECKOUT_DEMO_DURATION_MS, completeOnce);
+        }
 
         return () => {
             active = false;
             timeoutIds.forEach(clearTimeout);
         };
-    }, [completeOnce, reportError, startAtMs]);
+    }, [completeOnce, reportError, startAtMs, waitingMode]);
+
+    useEffect(() => {
+        if (!waitingMode || !finishRequested || !isValidStartTime(startAtMs)) return undefined;
+        let active = true;
+        let timeoutId: ReturnType<typeof setTimeout> | undefined;
+        const targetAtMs = nextTransitionAt(startAtMs, Date.now());
+        if (targetAtMs <= Date.now()) {
+            completeOnce();
+            return undefined;
+        }
+        const schedule = () => {
+            const delay = Math.max(0, targetAtMs - Date.now());
+            timeoutId = setTimeout(() => {
+                if (!active) return;
+                if (targetAtMs > Date.now()) {
+                    schedule();
+                    return;
+                }
+                completeOnce();
+            }, delay);
+        };
+        schedule();
+        return () => {
+            active = false;
+            if (timeoutId) clearTimeout(timeoutId);
+        };
+    }, [completeOnce, finishRequested, startAtMs, waitingMode]);
+
+    useEffect(() => {
+        if (!waitingMode || !isValidStartTime(startAtMs)) return undefined;
+        let active = true;
+        let timeoutId: ReturnType<typeof setTimeout> | undefined;
+        const update = () => {
+            if (!active) return;
+            const elapsed = Math.max(0, Date.now() - (startAtMs + PRECHECKOUT_DEMO_DURATION_MS));
+            const stage = Math.floor(elapsed / PRECHECKOUT_WAIT_STAGE_DURATION_MS);
+            setWaitingCopyIndex(stage % WAITING_PROGRESS_COPY.length);
+            const nextAtMs = startAtMs + PRECHECKOUT_DEMO_DURATION_MS
+                + (stage + 1) * PRECHECKOUT_WAIT_STAGE_DURATION_MS;
+            timeoutId = setTimeout(update, Math.max(0, nextAtMs - Date.now()));
+        };
+        update();
+        return () => {
+            active = false;
+            if (timeoutId) clearTimeout(timeoutId);
+        };
+    }, [startAtMs, waitingMode]);
 
     useEffect(() => {
         if (typeof window === 'undefined' || typeof window.matchMedia !== 'function') return undefined;
@@ -218,6 +299,7 @@ export function PrecheckoutDemo(props: {
             <div
                 className="precheckout-demo-fullscreen mt-7"
                 data-precheckout-demo-mode={mode}
+                data-precheckout-demo-phase={waiting ? 'waiting' : 'initial'}
                 aria-label="4단계 관계 판독 데모"
             >
                 <div className="sr-only" role="status" aria-live="polite" aria-atomic="true">
@@ -227,7 +309,13 @@ export function PrecheckoutDemo(props: {
                     startedAtMs={startAtMs}
                     onStageChange={handleStageChange}
                     onError={reportError}
+                    continueAfterFirstPass={waitingMode}
                 />
+                {waiting && (
+                    <p data-precheckout-progress className="mt-4 text-center text-[12px] text-fg-dim">
+                        {WAITING_PROGRESS_COPY[waitingCopyIndex]}
+                    </p>
+                )}
                 {children}
             </div>
         </DemoErrorBoundary>
