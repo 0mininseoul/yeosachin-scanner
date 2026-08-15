@@ -3,18 +3,20 @@ import { fileURLToPath } from 'node:url';
 import { z } from 'zod';
 import { supabaseAdmin } from '@/lib/supabase/admin';
 import {
-    buildV211EvidenceSpecificOverview,
+    areMateriallyNearDuplicatePublicCopies,
     buildV211EvidenceSpecificRiskNarrative,
-    extractV211EvidenceTerms,
-    needsV211EvidenceSpecificOverview,
-    validateV211PublicCopyRows,
+    buildV213ReviewedOverview,
+    createV213ReviewRecord,
+    isForbiddenV211Overview,
+    isForbiddenV211RiskNarrative,
+    validateV213FullReviewRows,
     v211CopySubjectNames,
-    type V211PublicCopyRow,
+    type V213FullReviewRow,
 } from '@/lib/services/analysis/public-copy-quality';
 import { loadRetainedConciergeProfileArtifacts } from './correct-concierge-basic-result';
 
 const RESULT_URL = 'https://yeosachin.com/result/975d0b48-b81a-432c-bb3e-d4a4d282e527';
-const COPY_QUALITY_VERSION = 'v212-natural-named-v1';
+const COPY_QUALITY_VERSION = 'v213-full-evidence-review-v1';
 const ORDER_START = '2026-08-12T00:00:00Z';
 const ORDER_END = '2026-08-13T00:00:00Z';
 const REVERSE_INTERACTION_ARTIFACT_PATH = process.env.CONCIERGE_REVERSE_INTERACTIONS_PATH
@@ -146,8 +148,9 @@ function interactionEvidence(row: z.infer<typeof resultRowSchema>, targetEvidenc
     const comment = evidenceRows.find(item => item.signal === 'target_post_comment')?.content;
     const candidateTaggedTarget = Boolean(row.is_tagged)
         || positiveNumber(row.post_tags_count);
-    const candidateMentionedTarget = positiveNumber(row.caption_mentions_count)
-        || positiveNumber(row.comment_mentions_count);
+    const candidateCaptionMentionedTarget = positiveNumber(row.caption_mentions_count);
+    const candidateCommentMentionedTarget = positiveNumber(row.comment_mentions_count);
+    const candidateMentionedTarget = candidateCaptionMentionedTarget || candidateCommentMentionedTarget;
     return {
         candidateLikedTarget: positiveNumber(row.female_to_target_likes_count)
             || positiveNumber(row.likes_count)
@@ -159,6 +162,8 @@ function interactionEvidence(row: z.infer<typeof resultRowSchema>, targetEvidenc
         targetCommentedOnCandidate: false,
         candidateTaggedTarget,
         targetTaggedCandidate: false,
+        candidateCaptionMentionedTarget,
+        candidateCommentMentionedTarget,
         candidateMentionedTarget,
         targetMentionedCandidate: false,
         tagEvidence: candidateTaggedTarget,
@@ -242,7 +247,7 @@ export async function loadExactScope() {
         conciergeBootstrap?: {
             sourceFingerprint?: unknown;
             resultHash?: unknown;
-            copyCorrection?: { correctionResultHash?: unknown };
+            v212CopyCorrection?: { correctionResultHash?: unknown };
         };
         targetProfileCheckpoint?: { fullName?: unknown };
         targetProfile?: { fullName?: unknown };
@@ -257,7 +262,7 @@ export async function loadExactScope() {
         || typeof publishedResultHash !== 'string' || !/^[a-f0-9]{64}$/.test(publishedResultHash)) {
         throw new Error('CONCIERGE_COPY_CORRECTION_CAS_CONFLICT');
     }
-    const priorCorrectionResultHash = stepData?.conciergeBootstrap?.copyCorrection?.correctionResultHash;
+    const priorCorrectionResultHash = stepData?.conciergeBootstrap?.v212CopyCorrection?.correctionResultHash;
     if (typeof priorCorrectionResultHash !== 'string' || !/^[a-f0-9]{64}$/.test(priorCorrectionResultHash)) {
         throw new Error('CONCIERGE_COPY_CORRECTION_PRIOR_CORRECTION_CONFLICT');
     }
@@ -307,14 +312,17 @@ export function buildCorrectionPayload(input: {
     targetEvidence: readonly unknown[];
     reverseInteractions: z.infer<typeof reverseInteractionArtifactSchema>;
 }) {
-    const copyRows: V211PublicCopyRow[] = [];
+    const copyRows: V213FullReviewRow[] = [];
     const payloadRows = input.rows.map(row => {
         const profile = input.profiles.get(normalizedUsername(row.suspect_instagram_id));
         if (!profile) throw new Error('CONCIERGE_COPY_CORRECTION_PROFILE_SCOPE_CONFLICT');
         const evidence = profileCopyEvidence(profile);
-        const overview = needsV211EvidenceSpecificOverview(row.one_line_overview, evidence)
-            ? buildV211EvidenceSpecificOverview(evidence)
-            : row.one_line_overview!;
+        if (!row.one_line_overview) throw new Error('CONCIERGE_COPY_CORRECTION_PRIOR_COPY_CONFLICT');
+        const composition = buildV213ReviewedOverview({
+            ...evidence,
+            reviewOrdinal: row.rank - 1,
+        });
+        const overview = composition.overview;
         const interaction = interactionEvidence(row, input.targetEvidence);
         const reverseObservation = input.reverseInteractions.observations.find(
             candidate => candidate.rank === row.rank
@@ -344,14 +352,27 @@ export function buildCorrectionPayload(input: {
                 appearance,
             })
             : [];
-        const copyRow: V211PublicCopyRow = {
+        const previousRiskAnalysis = z.array(z.string()).parse(row.risk_analysis ?? []);
+        const review = createV213ReviewRecord({
+            rank: row.rank,
+            previousOverview: row.one_line_overview,
+            nextOverview: overview,
+            overviewForm: composition.form,
+            evidenceTerms: composition.evidenceTerms,
+            previousRiskAnalysis,
+            nextRiskAnalysis: riskAnalysis,
+        });
+        const copyRow: V213FullReviewRow = {
             ...evidence,
             ...enrichedInteraction,
             subjects,
             appearance,
+            rank: row.rank,
+            previousOverview: row.one_line_overview,
             oneLineOverview: overview,
             riskGrade: row.risk_grade,
             riskAnalysis,
+            review,
         };
         copyRows.push(copyRow);
         return {
@@ -360,7 +381,7 @@ export function buildCorrectionPayload(input: {
             oneLineOverview: overview,
             riskGrade: row.risk_grade,
             riskAnalysis,
-            evidenceTerms: extractV211EvidenceTerms(evidence).slice(0, 4),
+            evidenceTerms: composition.evidenceTerms.slice(0, 4),
             interactionEvidence: interactionEvidencePayload(
                 enrichedInteraction,
                 reverseObservation
@@ -368,12 +389,62 @@ export function buildCorrectionPayload(input: {
                     : 'not_collected',
             ),
             subjects: v211CopySubjectNames(subjects),
+            review,
         };
     });
-    validateV211PublicCopyRows({ rows: copyRows });
+    validateV213FullReviewRows({ rows: copyRows });
     return {
         qualityVersion: COPY_QUALITY_VERSION,
         rows: payloadRows,
+    };
+}
+
+/** Non-PII preflight proof emitted for the full 16-row correction boundary. */
+export function summarizeCorrectionQuality(payload: ReturnType<typeof buildCorrectionPayload>) {
+    const rows = payload.rows;
+    let nearDuplicateOverviewPairs = 0;
+    for (let left = 0; left < rows.length; left += 1) {
+        for (let right = left + 1; right < rows.length; right += 1) {
+            if (areMateriallyNearDuplicatePublicCopies(
+                rows[left]!.oneLineOverview,
+                rows[right]!.oneLineOverview,
+            )) nearDuplicateOverviewPairs += 1;
+        }
+    }
+    const forbiddenCopyRows = rows.filter(row => (
+        isForbiddenV211Overview(row.oneLineOverview)
+        || (row.riskGrade === 'high_risk' && isForbiddenV211RiskNarrative(row.riskAnalysis))
+        || /(?:대상\s*계정|후보\s*계정|위장여사친)/u.test(
+            `${row.oneLineOverview} ${row.riskAnalysis.join(' ')}`,
+        )
+    )).length;
+    const highRiskRows = rows.filter(row => row.riskGrade === 'high_risk');
+    const highRiskDirectionRows = highRiskRows.filter(row => {
+        const candidateToTarget = row.interactionEvidence.candidateToTarget;
+        const targetToCandidate = row.interactionEvidence.targetToCandidate;
+        return candidateToTarget.likeObserved
+            || candidateToTarget.commentObserved
+            || candidateToTarget.tagObserved
+            || candidateToTarget.mentionObserved
+            || targetToCandidate.likeObserved
+            || targetToCandidate.commentObserved
+            || targetToCandidate.tagObserved
+            || targetToCandidate.mentionObserved;
+    }).length;
+    return {
+        resultRows: rows.length,
+        distinctOverviews: new Set(rows.map(row => row.oneLineOverview)).size,
+        reviewedRows: rows.filter(row => row.review.reviewVersion === 'v213-full-evidence-review-v1').length,
+        changedOverviewRows: rows.filter(row => row.review.overviewChanged).length,
+        uniqueOverviewForms: new Set(rows.map(row => row.review.overviewForm)).size,
+        nearDuplicateOverviewPairs,
+        forbiddenCopyRows,
+        highRiskRows: highRiskRows.length,
+        highRiskDirectionRows,
+        retainedNarrativeSentences: rows.reduce(
+            (count, row) => count + row.review.narrative.retainedSentenceJustifications.length,
+            0,
+        ),
     };
 }
 
@@ -394,7 +465,7 @@ async function verifyResult(input: {
     }
     const highRisk = rows.filter(row => row.risk_grade === 'high_risk');
     const genderStats = request.gender_stats as Record<string, unknown> | null;
-    const marker = (request.step_data as { conciergeBootstrap?: { v212CopyCorrection?: { qualityVersion?: string } } } | null)?.conciergeBootstrap?.v212CopyCorrection;
+    const marker = (request.step_data as { conciergeBootstrap?: { v213CopyCorrection?: { qualityVersion?: string } } } | null)?.conciergeBootstrap?.v213CopyCorrection;
     if (
         highRisk.length !== 2
         || rows.some(row => row.gender_status !== 'confirmed' || !row.one_line_overview || row.one_line_overview.length > 180)
@@ -447,6 +518,20 @@ async function main(): Promise<void> {
         reverseInteractionArtifactHash: reverseInteractions.artifactHash,
         rows: payload.rows,
     });
+    const qualityChecks = summarizeCorrectionQuality(payload);
+    if (
+        qualityChecks.resultRows !== 16
+        || qualityChecks.distinctOverviews !== 16
+        || qualityChecks.reviewedRows !== 16
+        || qualityChecks.changedOverviewRows !== 16
+        || qualityChecks.uniqueOverviewForms !== 16
+        || qualityChecks.nearDuplicateOverviewPairs !== 0
+        || qualityChecks.forbiddenCopyRows !== 0
+        || qualityChecks.highRiskRows !== 2
+        || qualityChecks.highRiskDirectionRows !== 2
+    ) {
+        throw new Error('CONCIERGE_COPY_CORRECTION_QUALITY_GATE_FAILED');
+    }
     if (process.env.CONCIERGE_COPY_CORRECTION_DRY_RUN === '1') {
         console.log(JSON.stringify({
             state: 'dry_run_ready',
@@ -457,12 +542,13 @@ async function main(): Promise<void> {
             sourceFingerprint: scope.sourceFingerprint,
             publishedResultHash: scope.publishedResultHash,
             priorCorrectionResultHash: scope.priorCorrectionResultHash,
+            qualityChecks,
         }));
         return;
     }
     // Exactly one RPC call is permitted for this correction.  The function owns
     // the transaction, row locks, immutable source CAS, and idempotency ledger.
-    const { data, error } = await supabaseAdmin.rpc('correct_earlybird_v212_concierge_copy', {
+    const { data, error } = await supabaseAdmin.rpc('correct_earlybird_v213_concierge_copy', {
         p_order_id: scope.order.id,
         p_owner_id: scope.order.user_id,
         p_result_request_id: scope.order.result_request_id,
