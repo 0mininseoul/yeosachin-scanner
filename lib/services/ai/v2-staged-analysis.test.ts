@@ -2259,9 +2259,9 @@ describe('V2 staged AI services', () => {
         );
 
         expect(result.source).toBe('safe_fallback');
-        expect(result.lines.join(' ')).toContain('박민지님이 김준호님 게시물에 남긴 좋아요');
-        expect(result.lines.join(' ')).toContain('위장여사친이 아니라고 하기엔 너무 예쁩니다');
-        expect(result.lines.join(' ')).toContain('이미지 인상만으로 관계를 판단할 수는 없습니다');
+        expect(result.lines.join(' ')).toContain('박민지님이 김준호님 게시물에 좋아요를 남긴 흐름');
+        expect(result.lines.join(' ')).toContain('사진이 관계 설명서를 써주지는 않습니다');
+        expect(result.lines.join(' ')).not.toContain('위장여사친');
         expect(result.lines.join(' ')).not.toMatch(/(?:대상\s*계정|후보\s*계정)/u);
     });
 
@@ -2293,8 +2293,8 @@ describe('V2 staged AI services', () => {
         );
 
         expect(result.source).toBe('safe_fallback');
-        expect(result.lines[1]).toContain('박민지님이 김준호님 게시물에 남긴 좋아요');
-        expect(result.lines[1]).toContain('김준호님이 박민지님 피드에 남긴 좋아요');
+        expect(result.lines[1]).toContain('박민지님이 김준호님 게시물에 좋아요를 남긴 흐름');
+        expect(result.lines[1]).toContain('김준호님이 박민지님 피드에 좋아요를 남긴 흐름');
     });
 
     it('keeps tag-only v2.11 fallback evidence directional and never says it was absent', async () => {

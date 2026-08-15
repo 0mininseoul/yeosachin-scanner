@@ -64,12 +64,12 @@ describe('v2.11 concierge public-copy quality', () => {
 
         expect(lines).toHaveLength(2);
         expect(lines[0]).toContain('전시');
-        expect(lines[0]).toContain('위장여사친이 아니라고 하기엔 너무 예쁩니다');
-        expect(lines[0]).toContain('이미지 인상만으로 관계를 판단할 수는 없습니다');
-        expect(lines[1]).toContain('박민지님이 김준호님 게시물에 남긴 좋아요');
-        expect(lines[1]).toContain('박민지님이 김준호님 게시물에 남긴 댓글의 “다음” 표현');
+        expect(lines[0]).toContain('사진이 관계 설명서를 써주지는 않습니다');
+        expect(lines[0]).not.toContain('위장여사친');
+        expect(lines[1]).toContain('박민지님이 김준호님 게시물에 좋아요를 남긴 흐름');
+        expect(lines[1]).toContain('박민지님이 김준호님 게시물에 댓글을 남긴 흐름');
         expect(lines[1]).toContain('박민지님이 김준호님을 태그한 흔적');
-        expect(lines[1]).toContain('수집 표본 밖');
+        expect(lines[1]).toContain('수집 범위 밖');
         expect(lines.join(' ')).not.toMatch(/(?:대상\s*계정|후보\s*계정)/u);
         expect(isForbiddenV211RiskNarrative(lines)).toBe(false);
     });
@@ -90,10 +90,10 @@ describe('v2.11 concierge public-copy quality', () => {
             targetCommentedOnCandidate: true,
         });
 
-        expect(lines[1]).toContain('박민지님이 김준호님 게시물에 남긴 좋아요');
-        expect(lines[1]).toContain('김준호님이 박민지님 피드에 남긴 좋아요');
-        expect(lines[1]).toContain('김준호님이 박민지님 피드에 남긴 댓글 내용');
-        expect(lines[1]).toContain('수집 표본 밖');
+        expect(lines[1]).toContain('박민지님이 김준호님 게시물에 좋아요를 남긴 흐름');
+        expect(lines[1]).toContain('김준호님이 박민지님 피드에 좋아요를 남긴 흐름');
+        expect(lines[1]).toContain('김준호님이 박민지님 피드에 댓글을 남긴 흐름');
+        expect(lines[1]).toContain('수집 범위 밖');
     });
 
     it('uses the normalized username only when the retained full name is absent', () => {
@@ -111,7 +111,7 @@ describe('v2.11 concierge public-copy quality', () => {
             targetLikedCandidate: false,
         });
 
-        expect(lines[1]).toContain('candidate.user가 target.user 게시물에 남긴 좋아요');
+        expect(lines[1]).toContain('candidate.user가 target.user 게시물에 좋아요를 남긴 흐름');
         expect(lines.join(' ')).not.toMatch(/(?:대상\s*계정|후보\s*계정)/u);
     });
 
@@ -130,7 +130,7 @@ describe('v2.11 concierge public-copy quality', () => {
             targetLikedCandidate: false,
         });
 
-        expect(lines[1]).toContain('candidate.user가 target.user 게시물에 남긴 좋아요');
+        expect(lines[1]).toContain('candidate.user가 target.user 게시물에 좋아요를 남긴 흐름');
         expect(lines.join(' ')).not.toMatch(/(?:대상\s*계정|후보\s*계정)/u);
     });
 
