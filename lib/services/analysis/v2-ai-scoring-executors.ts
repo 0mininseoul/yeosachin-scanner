@@ -1175,6 +1175,7 @@ function targetCoverageStatus(snapshot: AnalysisV2TargetEvidenceStagingSnapshot)
 
 function narrativeInput(input: {
     targetUsername: string;
+    targetFullName: string | null;
     outcome: AnalysisV2ProfileAiOutcome;
     media: readonly NormalizedAiMediaSelection[];
     carouselCaptionDossier: Readonly<{ evidenceRefId: string; text: string }> | null;
@@ -1206,6 +1207,18 @@ function narrativeInput(input: {
         forbiddenIdentifiers: {
             targetUsername: input.targetUsername,
             candidateUsername: input.outcome.instagramId,
+        },
+        publicSubjects: {
+            targetFullName: input.targetFullName,
+            candidateFullName: input.outcome.profile?.fullName ?? null,
+        },
+        appearance: {
+            isReliable: Boolean(
+                input.outcome.feature
+                && input.outcome.feature.features.appearanceGrade >= 4
+                && input.outcome.feature.features.evidenceSelectionIds.appearance.length > 0
+                && input.media.length > 0
+            ),
         },
         bio: input.outcome.profile?.bio ?? null,
         media: [...input.media],
@@ -3192,6 +3205,7 @@ export function createAnalysisV2AiScoringExecutorRegistry(
                     });
                     const analyzed = await dependencies.ai.narrative(narrativeInput({
                         targetUsername: target.username,
+                        targetFullName: target.fullName ?? null,
                         outcome,
                         media,
                         carouselCaptionDossier: captionPolicy.dossier,

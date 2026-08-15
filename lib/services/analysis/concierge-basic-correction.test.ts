@@ -108,6 +108,55 @@ describe('concierge basic correction', () => {
         expect(result.femaleRows.some(row => row.risk_grade === 'high_risk')).toBe(true);
     });
 
+    it('gives high-risk rows canonical names and treats reliable appearance as context, not proof', () => {
+        const candidate = {
+            ...profile('female.1', false),
+            fullName: '박민지',
+            profilePicUrl: 'https://example.com/candidate.jpg',
+            latestPosts: [{
+                id: 'post-1', shortCode: 'post1', caption: '성수 전시 관람', type: 'image' as const,
+                imageUrl: 'https://example.com/post.jpg', likesCount: 0, commentsCount: 0,
+                timestamp: '2026-08-12T00:00:00.000Z', taggedUsers: [], mentionedUsers: [],
+            }],
+        };
+        const otherProfiles = Array.from({ length: 9 }, (_, index) => (
+            profile(`female.${index + 2}`, false)
+        ));
+        const allProfiles = [candidate, ...otherProfiles];
+        const result = buildCanonicalConciergeResult({
+            targetUsername: 'target.user',
+            targetFullName: '김준호',
+            profilesByOrdinal: new Map(allProfiles.map((account, index) => [index + 1, account])),
+            details: allProfiles.map((account, index) => femaleDetail(
+                index + 1,
+                account.username,
+                index === 0
+                    ? '성수 전시 기록이 이어져, 관람 취향이 자연스럽게 드러나는 피드입니다.'
+                    : `${index + 1}번째 공개 계정의 여행 기록이 남아 있습니다.`,
+                index === 0 ? 5 : 1,
+            )),
+            orderedMutualUsernames: allProfiles.map(account => account.username),
+            targetInteractions: allProfiles.flatMap((account, profileIndex) => Array.from(
+                { length: profileIndex === 0 ? 5 : 1 },
+                (_, interactionIndex) => ({
+                    actorUsername: account.username,
+                    postId: `target-post-${profileIndex + 1}-${interactionIndex + 1}`,
+                    signal: 'target_post_like' as const,
+                    sourceInteractionId: `like-${account.username}-${interactionIndex + 1}`,
+                }),
+            )),
+            targetPosts: [],
+            privateProfiles: [],
+        });
+
+        const narrative = result.femaleRows.find(row => row.risk_grade === 'high_risk')?.risk_analysis;
+        expect(narrative).toBeDefined();
+        expect(narrative?.join(' ')).toContain('박민지님이 김준호님 게시물에 남긴 좋아요');
+        expect(narrative?.join(' ')).toContain('위장여사친이 아니라고 하기엔 너무 예쁩니다');
+        expect(narrative?.join(' ')).toContain('이미지 인상만으로 관계를 판단할 수는 없습니다');
+        expect(narrative?.join(' ')).not.toMatch(/(?:대상\s*계정|후보\s*계정)/u);
+    });
+
     it('preserves target-to-candidate mention signals from exact target post evidence', () => {
         const profiles = [profile('female.1', false)];
         const detail = femaleDetail(

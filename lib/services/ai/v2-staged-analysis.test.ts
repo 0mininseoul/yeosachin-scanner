@@ -254,6 +254,11 @@ function narrativeInput(): HighRiskNarrativeInput {
             targetUsername: 'target.user',
             candidateUsername: 'candidate.user',
         },
+        publicSubjects: {
+            targetFullName: '김준호',
+            candidateFullName: '박민지',
+        },
+        appearance: { isReliable: false },
         bio: 'candidate.user 여행 계정 https://example.com user@example.com 010-1234-5678',
         media: media(),
         captions: [{
@@ -2225,6 +2230,32 @@ describe('V2 staged AI services', () => {
             expect(mocks.analyzeWithGemini).toHaveBeenCalledTimes(source === 'live' ? 1 : 0);
         }
     );
+
+    it('uses canonical names and reliable appearance context in the v2.11 narrative fallback', async () => {
+        const input = {
+            ...narrativeInput(),
+            publicSubjects: {
+                targetFullName: '김준호',
+                candidateFullName: '박민지',
+            },
+            appearance: { isReliable: true },
+        };
+        mocks.analyzeWithGemini.mockRejectedValueOnce(new Error(
+            'AI_GENERATION_RESPONSE_REJECTED_ERROR: generated response failed strict validation.'
+        ));
+
+        const result = await highRiskNarrative(
+            input,
+            audit('highRiskNarrative', input, AI_STAGE_POLICY_V211_VERSION),
+            { aiStagePolicyVersion: AI_STAGE_POLICY_V211_VERSION },
+        );
+
+        expect(result.source).toBe('safe_fallback');
+        expect(result.lines.join(' ')).toContain('박민지님이 김준호님 게시물에 남긴 좋아요');
+        expect(result.lines.join(' ')).toContain('위장여사친이 아니라고 하기엔 너무 예쁩니다');
+        expect(result.lines.join(' ')).toContain('이미지 인상만으로 관계를 판단할 수는 없습니다');
+        expect(result.lines.join(' ')).not.toMatch(/(?:대상\s*계정|후보\s*계정)/u);
+    });
 
     it.each([
         'ANALYSIS_V2_AI_RESULT_REPLAY_BLOCKED',

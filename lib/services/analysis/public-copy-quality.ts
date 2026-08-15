@@ -2,11 +2,9 @@ import {
     containsDefinitiveRelationshipAccusation,
     containsExposedInteractionMetric,
     parseSafePublicRiskNarrative,
-    sanitizePublicRiskNarrativeLine,
 } from './narrative-privacy';
 
 const MAX_OVERVIEW_LENGTH = 110;
-const MAX_NARRATIVE_LENGTH = 180;
 
 /**
  * These strings were previously used as v2.11 fallbacks.  They remain listed
@@ -28,6 +26,7 @@ const V211_FORBIDDEN_RISK_SECOND_LINE =
 const genericEvidenceTerms = new Set([
     '계정', '개인', '공개', '프로필', '피드', '사진', '소개', '장면', '기록', '활동',
     '흐름', '맥락', '자료', '단서', '내용', '모습', '결', '오늘', '일상', '최근',
+    '주말마다', '오후',
     'instagram', 'profile', 'account', 'public', 'feed', 'photo', 'post', 'story',
 ]);
 const forbiddenEvidenceTerms = /(?:바람|불륜|외도|연인|애인|남자친구|여자친구|남친|여친|커플|교제|사귀|데이트|관계|점수|순위|등급|위험|좋아요|댓글|태그|멘션|퍼센트|건수|횟수)/u;
@@ -40,7 +39,16 @@ export type V211CopyEvidence = {
     structuralEvidence?: readonly string[];
 };
 
+export type V211CopySubjects = {
+    targetUsername: string;
+    targetFullName?: string | null;
+    candidateUsername: string;
+    candidateFullName?: string | null;
+};
+
 export type V211InteractionEvidence = {
+    /** Canonical public identities, used instead of generic target/candidate labels. */
+    subjects?: V211CopySubjects;
     candidateLikedTarget: boolean;
     candidateCommentedOnTarget: boolean;
     targetLikedCandidate: boolean;
@@ -51,6 +59,8 @@ export type V211InteractionEvidence = {
     targetMentionedCandidate?: boolean;
     tagEvidence?: boolean;
     commentText?: string | null;
+    /** Appearance copy is permitted only when analyzed image evidence is reliable. */
+    appearance?: { isReliable: boolean };
 };
 
 export type V211PublicCopyRow = V211CopyEvidence & V211InteractionEvidence & {
@@ -120,32 +130,110 @@ function quoted(term: string): string {
     return `“${term.slice(0, 14)}”`;
 }
 
+function normalizedUsername(value: string): string {
+    return normalizeCopy(value).replace(/^@/u, '').toLowerCase();
+}
+
+function normalizedFullName(value: string | null | undefined): string | null {
+    const normalized = normalizeCopy(value ?? '')
+        .replace(publicIdentifierPattern, ' ')
+        .replace(/\s+/g, ' ')
+        .trim();
+    return normalized || null;
+}
+
+function subjectName(fullName: string | null | undefined, username: string): string {
+    const canonicalFullName = normalizedFullName(fullName);
+    if (canonicalFullName) {
+        return canonicalFullName.endsWith('님') ? canonicalFullName : `${canonicalFullName}님`;
+    }
+    const normalized = normalizedUsername(username);
+    if (!normalized) throw new Error('CONCIERGE_COPY_SUBJECT_REQUIRED');
+    return normalized;
+}
+
+export function v211CopySubjectNames(input: V211CopySubjects | undefined): {
+    target: string;
+    candidate: string;
+} {
+    if (!input) throw new Error('CONCIERGE_COPY_SUBJECT_REQUIRED');
+    const target = subjectName(input.targetFullName, input.targetUsername);
+    const candidate = subjectName(input.candidateFullName, input.candidateUsername);
+    if (target === candidate) throw new Error('CONCIERGE_COPY_SUBJECT_CONFLICT');
+    return { target, candidate };
+}
+
+function subjectParticle(name: string): string {
+    return name.endsWith('님') ? `${name}이` : `${name}가`;
+}
+
+function genericRoleLabel(value: string): boolean {
+    return /(?:대상\s*계정|후보\s*계정)/u.test(value);
+}
+
+function parseV211NarrativeWithSubjects(
+    lines: [string, string],
+    subjects: { target: string; candidate: string },
+): [string, string] | null {
+    // A normalized username can legitimately include digits.  Mask the two
+    // approved subject names before the generic metric guard runs, so those
+    // digits cannot be mistaken for disclosed interaction counts.
+    const masked = lines.map(line => line
+        .replaceAll(subjects.target, 'PERSON')
+        .replaceAll(subjects.candidate, 'PERSON')
+        // Subject-name particles are grammatical, not interaction counts.
+        // Remove them together with the approved-name placeholder so the
+        // generic Korean-quantity detector cannot read 이/삼 as a count.
+        .replace(/PERSON[이가은는을를와과의]/gu, 'PERSON')) as [string, string];
+    return parseSafePublicRiskNarrative(masked) ? lines : null;
+}
+
+export function needsV211EvidenceSpecificOverview(
+    value: unknown,
+    evidence: V211CopyEvidence,
+): boolean {
+    if (typeof value !== 'string') return true;
+    const overview = normalizeCopy(value);
+    if (
+        overview.length < 25
+        || overview.length > MAX_OVERVIEW_LENGTH
+        || isForbiddenV211Overview(overview)
+        || containsDefinitiveRelationshipAccusation(overview)
+        || containsExposedInteractionMetric(overview)
+        || publicIdentifierPattern.test(overview)
+        || genericRoleLabel(overview)
+    ) return true;
+    const terms = extractV211EvidenceTerms(evidence);
+    return terms.length === 0
+        || !terms.some(term => overview.toLowerCase().includes(term.toLowerCase()));
+}
+
 /**
  * Deterministic, evidence-first fallback for v2.11.  There is intentionally
  * no generic branch: if retained evidence cannot yield a concrete term, the
  * caller must quarantine the account/correction instead of publishing copy.
  */
 export function buildV211EvidenceSpecificOverview(input: V211CopyEvidence & {
+    /** Retained for source compatibility; composition is evidence-driven, never rank-driven. */
     variation?: number;
 }): string {
-    const terms = extractV211EvidenceTerms(input);
+    const profileTerms = extractV211EvidenceTerms({ profileEvidence: input.profileEvidence });
+    const feedTerms = extractV211EvidenceTerms({
+        feedEvidence: input.feedEvidence,
+        structuralEvidence: input.structuralEvidence,
+    });
+    const terms = [...new Set([...profileTerms, ...feedTerms])];
     if (terms.length === 0) throw new Error('CONCIERGE_COPY_EVIDENCE_UNAVAILABLE');
-    const first = terms[0]!;
-    const second = terms[1];
-    const variation = Math.abs(input.variation ?? 0) % 4;
-    const raw = second
-        ? [
-            `${quoted(first)}와 ${quoted(second)} 장면이 이어져, 공개된 취향의 결이 구체적으로 보이는 피드입니다.`,
-            `피드에서 보인 ${quoted(first)}와 ${quoted(second)} 흐름이 겹쳐, 일상에서 건져 올린 장면이 선명한 계정입니다.`,
-            `${quoted(first)} 장면부터 ${quoted(second)} 기록까지 이어져, 활동의 결이 한눈에 잡히는 피드입니다.`,
-            `${quoted(first)}와 ${quoted(second)} 이야기가 포개져, 공개된 하루의 분위기가 또렷하게 남는 피드입니다.`,
-        ][variation]!
-        : [
-            `${quoted(first)} 장면이 이어져, 공개된 취향과 활동의 결이 구체적으로 보이는 피드입니다.`,
-            `피드에서 보인 ${quoted(first)} 흐름이 이어져, 일상에서 건져 올린 장면이 선명한 계정입니다.`,
-            `${quoted(first)} 기록을 중심으로, 공개된 활동의 결이 한눈에 잡히는 피드입니다.`,
-            `${quoted(first)} 이야기가 남아, 공개된 하루의 분위기를 구체적으로 읽게 하는 피드입니다.`,
-        ][variation]!;
+    const profile = profileTerms[0];
+    const feed = feedTerms[0];
+    const secondFeed = feedTerms.find(term => term !== feed);
+    const raw = profile && feed && profile !== feed
+        ? `소개에 적은 ${quoted(profile)}와 피드의 ${quoted(feed)} 장면이 자연스럽게 이어지는 기록입니다.`
+        : feed && secondFeed
+            ? `${quoted(feed)}부터 ${quoted(secondFeed)}까지 피드에 남겨, 취향의 흐름이 또렷하게 보이는 기록입니다.`
+            : feed
+                ? `${quoted(feed)} 장면을 피드에 남겨, 무엇을 좋아하는지 구체적으로 읽히는 기록입니다.`
+                : `${quoted(profile!)}을 소개에 적어 두어, 공개된 관심사가 선명하게 남는 계정입니다.`;
     const result = normalizeCopy(raw);
     if (
         result.length < 25
@@ -154,6 +242,7 @@ export function buildV211EvidenceSpecificOverview(input: V211CopyEvidence & {
         || containsDefinitiveRelationshipAccusation(result)
         || containsExposedInteractionMetric(result)
         || publicIdentifierPattern.test(result)
+        || genericRoleLabel(result)
         || !terms.some(term => result.toLowerCase().includes(term.toLowerCase()))
     ) {
         throw new Error('CONCIERGE_COPY_OVERVIEW_CONTRACT_FAILED');
@@ -161,28 +250,32 @@ export function buildV211EvidenceSpecificOverview(input: V211CopyEvidence & {
     return result;
 }
 
-function interactionParts(input: V211InteractionEvidence): string[] {
+function interactionParts(
+    input: V211InteractionEvidence,
+    subjects: { target: string; candidate: string },
+): string[] {
     const parts: string[] = [];
     if (input.candidateLikedTarget && input.targetLikedCandidate) {
-        parts.push('서로 남긴 좋아요 흔적');
+        parts.push(`${subjectParticle(subjects.candidate)} ${subjects.target} 게시물에 남긴 좋아요`);
+        parts.push(`${subjectParticle(subjects.target)} ${subjects.candidate} 피드에 남긴 좋아요`);
     } else if (input.candidateLikedTarget) {
-        parts.push('후보가 대상 게시물에 남긴 좋아요 흔적');
+        parts.push(`${subjectParticle(subjects.candidate)} ${subjects.target} 게시물에 남긴 좋아요`);
     } else if (input.targetLikedCandidate) {
-        parts.push('대상 계정이 후보 피드에 남긴 좋아요 흔적');
+        parts.push(`${subjectParticle(subjects.target)} ${subjects.candidate} 피드에 남긴 좋아요`);
     }
     if (input.candidateCommentedOnTarget) {
         const terms = extractV211EvidenceTerms({ profileEvidence: input.commentText });
         parts.push(terms[0]
-            ? `후보가 대상 게시물에 남긴 댓글의 ${quoted(terms[0])} 표현`
-            : '후보가 대상 게시물에 남긴 댓글 내용');
+            ? `${subjectParticle(subjects.candidate)} ${subjects.target} 게시물에 남긴 댓글의 ${quoted(terms[0])} 표현`
+            : `${subjectParticle(subjects.candidate)} ${subjects.target} 게시물에 남긴 댓글 내용`);
     }
     if (input.targetCommentedOnCandidate) {
-        parts.push('대상 계정이 후보 피드에 남긴 댓글 내용');
+        parts.push(`${subjectParticle(subjects.target)} ${subjects.candidate} 피드에 남긴 댓글 내용`);
     }
-    if (input.candidateTaggedTarget) parts.push('후보를 가리킨 태그 표기');
-    if (input.targetTaggedCandidate) parts.push('대상 계정을 가리킨 태그 표기');
-    if (input.candidateMentionedTarget) parts.push('후보가 남긴 캡션 멘션');
-    if (input.targetMentionedCandidate) parts.push('대상 계정의 캡션 멘션');
+    if (input.candidateTaggedTarget) parts.push(`${subjectParticle(subjects.candidate)} ${subjects.target}을 태그한 흔적`);
+    if (input.targetTaggedCandidate) parts.push(`${subjectParticle(subjects.target)} ${subjects.candidate}을 태그한 흔적`);
+    if (input.candidateMentionedTarget) parts.push(`${subjectParticle(subjects.candidate)} ${subjects.target}을 적은 캡션 멘션`);
+    if (input.targetMentionedCandidate) parts.push(`${subjectParticle(subjects.target)} ${subjects.candidate}을 적은 캡션 멘션`);
     if (input.tagEvidence && !input.candidateTaggedTarget && !input.targetTaggedCandidate) {
         parts.push('확인된 태그 표기');
     }
@@ -192,18 +285,23 @@ function interactionParts(input: V211InteractionEvidence): string[] {
 export function buildV211EvidenceSpecificRiskNarrative(
     input: V211CopyEvidence & V211InteractionEvidence,
 ): [string, string] {
+    const subjects = v211CopySubjectNames(input.subjects);
     const terms = extractV211EvidenceTerms(input);
     if (terms.length === 0) throw new Error('CONCIERGE_COPY_EVIDENCE_UNAVAILABLE');
     const first = terms[0]!;
     const second = terms[1];
-    const line1 = normalizeCopy(second
-        ? `프로필과 피드에서 ${quoted(first)} 및 ${quoted(second)} 장면이 이어져, 공개된 활동 맥락이 구체적으로 보입니다.`
-        : `프로필과 피드에서 ${quoted(first)} 장면이 이어져, 공개된 활동 맥락이 구체적으로 보입니다.`);
-    const parts = interactionParts(input);
+    const context = second
+        ? `${subjects.candidate}의 프로필과 피드에는 ${quoted(first)}와 ${quoted(second)} 기록이 이어집니다.`
+        : `${subjects.candidate}의 프로필과 피드에는 ${quoted(first)} 기록이 남아 있습니다.`;
+    const appearance = input.appearance?.isReliable
+        ? ' 위장여사친이 아니라고 하기엔 너무 예쁩니다. 다만 이미지 인상만으로 관계를 판단할 수는 없습니다.'
+        : '';
+    const line1 = normalizeCopy(context + appearance);
+    const parts = interactionParts(input, subjects);
     const line2 = parts.length === 0
-        ? '공개 좋아요·댓글·태그 흔적은 현재 확인되지 않지만, 수집 표본 밖 누락 가능성은 남습니다.'
-        : `${parts.join('과 ')}이 보이지만, 수집 표본 밖 누락 가능성은 남습니다.`;
-    const parsed = parseSafePublicRiskNarrative([line1, line2]);
+        ? `${subjects.candidate}과 ${subjects.target} 사이의 좋아요·댓글·태그·멘션은 현재 확인되지 않았고, 수집 표본 밖 누락 가능성은 남습니다.`
+        : `${parts.join('과 ')}이 확인되지만, 관계를 단정할 근거는 아니며 수집 표본 밖 누락 가능성은 남습니다.`;
+    const parsed = parseV211NarrativeWithSubjects([line1, line2], subjects);
     if (!parsed || isForbiddenV211RiskNarrative(parsed)) {
         throw new Error('CONCIERGE_COPY_NARRATIVE_CONTRACT_FAILED');
     }
@@ -255,23 +353,32 @@ function assertV211InteractionCopy(input: V211PublicCopyRow): void {
     }
     const first = normalizeCopy(lines[0] ?? '');
     const second = normalizeCopy(lines[1] ?? '');
+    const subjects = v211CopySubjectNames(input.subjects);
+    if (
+        genericRoleLabel(first + second)
+        || !first.includes(subjects.candidate)
+        || !second.includes(subjects.candidate)
+        || !second.includes(subjects.target)
+    ) {
+        throw new Error('CONCIERGE_COPY_SUBJECT_GROUNDING_FAILED');
+    }
     const terms = extractV211EvidenceTerms(input);
     if (!terms.some(term => first.toLowerCase().includes(term.toLowerCase()))) {
         throw new Error('CONCIERGE_COPY_EVIDENCE_GROUNDING_FAILED');
     }
-    if (input.candidateLikedTarget && !second.includes('후보가 대상 게시물에 남긴 좋아요')) {
+    if (input.candidateLikedTarget && !second.includes('좋아요')) {
         throw new Error('CONCIERGE_COPY_INTERACTION_GROUNDING_FAILED');
     }
-    if (input.targetLikedCandidate && !second.includes('대상 계정이 후보 피드에 남긴 좋아요') && !second.includes('서로 남긴 좋아요')) {
+    if (input.targetLikedCandidate && !second.includes('좋아요')) {
         throw new Error('CONCIERGE_COPY_INTERACTION_GROUNDING_FAILED');
     }
-    if (input.targetCommentedOnCandidate && !second.includes('대상 계정이 후보 피드에 남긴 댓글')) {
+    if (input.targetCommentedOnCandidate && !second.includes('댓글')) {
         throw new Error('CONCIERGE_COPY_INTERACTION_GROUNDING_FAILED');
     }
-    if (input.candidateCommentedOnTarget && !second.includes('후보가 대상 게시물에 남긴 댓글')) {
+    if (input.candidateCommentedOnTarget && !second.includes('댓글')) {
         throw new Error('CONCIERGE_COPY_INTERACTION_GROUNDING_FAILED');
     }
-    if (!parseSafePublicRiskNarrative([first, second])) {
+    if (!parseV211NarrativeWithSubjects([first, second], subjects)) {
         throw new Error('CONCIERGE_COPY_NARRATIVE_CONTRACT_FAILED');
     }
 }
@@ -281,12 +388,7 @@ export function validateV211PublicCopyRows(input: { rows: readonly V211PublicCop
     for (const row of input.rows) {
         const overview = normalizeCopy(row.oneLineOverview);
         if (
-            overview.length < 25
-            || overview.length > MAX_NARRATIVE_LENGTH
-            || isForbiddenV211Overview(overview)
-            || containsDefinitiveRelationshipAccusation(overview)
-            || containsExposedInteractionMetric(overview)
-            || publicIdentifierPattern.test(overview)
+            needsV211EvidenceSpecificOverview(overview, row)
         ) {
             throw new Error('CONCIERGE_COPY_GENERIC_FORBIDDEN');
         }

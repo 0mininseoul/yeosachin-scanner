@@ -37,6 +37,7 @@ import {
 import {
     buildV211EvidenceSpecificOverview,
     buildV211EvidenceSpecificRiskNarrative,
+    v211CopySubjectNames,
 } from '@/lib/services/analysis/public-copy-quality';
 import {
     isAmbiguousGeminiGenerationError,
@@ -825,6 +826,11 @@ const carouselCaptionDossierSchema = z.object({
 
 export const highRiskNarrativeInputSchema = z.object({
     forbiddenIdentifiers: forbiddenIdentifiersSchema,
+    publicSubjects: z.object({
+        targetFullName: z.string().trim().min(1).max(200).nullable(),
+        candidateFullName: z.string().trim().min(1).max(200).nullable(),
+    }).strict(),
+    appearance: z.object({ isReliable: z.boolean() }).strict(),
     bio: z.string().max(MAX_PROFILE_BIO_LENGTH).nullable(),
     media: normalizedMediaListSchema,
     captions: stagedCaptionListSchema,
@@ -2387,17 +2393,56 @@ function narrativePrompt(
 ): string {
     const legacy = narrativePromptLegacy(input, media, sanitized);
     if (!usesSafePublicPresentation(policyVersion)) return legacy;
+    if (policyVersion === AI_STAGE_POLICY_V211_VERSION) {
+        const subjects = v211CopySubjectNames({
+            ...input.forbiddenIdentifiers,
+            ...input.publicSubjects,
+        });
+        const appearanceRule = input.appearance.isReliable
+            ? '첫 문장에는 피드·프로필 맥락과 함께 가벼운 외모 농담을 한 번 넣되, 반드시 이미지 인상만으로 관계를 판단할 수 없다고 밝혀야 합니다.'
+            : '외모·이미지에 관한 문구를 만들지 마세요.';
+        return `${legacy}\nv2.11 공개 서사는 첫 문장에 ${subjects.candidate}, 둘째 문장에 ${subjects.candidate}와 ${subjects.target}을 직접 적으세요. \"대상 계정\"이나 \"후보 계정\"이라는 표현은 금지합니다. 각 좋아요·댓글·태그·멘션은 실제 관측 방향을 이름으로 설명하고, 단일 좋아요나 외모만으로 관계를 증명하지 마세요. ${appearanceRule}`;
+    }
     return `${legacy}\n고위험 서사는 상호작용과 제공된 시각 근거를 구분해 구체적으로 쓰되, ㅋㅋ·자기지칭을 절대 쓰지 마세요. bio·caption 인용을 포함해 관계 관련 용어 자체를 lines에 쓰지 마세요. 보호 특성·신체·외모를 조롱하지 마세요.`;
+}
+
+function v211NarrativeSubjects(input: ParsedHighRiskNarrativeInput) {
+    return v211CopySubjectNames({
+        ...input.forbiddenIdentifiers,
+        ...input.publicSubjects,
+    });
 }
 
 function containsForbiddenPublicIdentifier(
     value: string,
-    identifiers: z.infer<typeof forbiddenIdentifiersSchema>
+    identifiers: z.infer<typeof forbiddenIdentifiersSchema>,
+    allowedSubjects?: { target: string; candidate: string },
 ): boolean {
-    const normalized = value.normalize('NFKC').toLowerCase();
+    let normalized = value.normalize('NFKC').toLowerCase();
+    if (allowedSubjects) {
+        normalized = normalized
+            .replaceAll(allowedSubjects.target.normalize('NFKC').toLowerCase(), 'approved-name')
+            .replaceAll(allowedSubjects.candidate.normalize('NFKC').toLowerCase(), 'approved-name');
+    }
     return PUBLIC_IDENTIFIER_PATTERN.test(normalized)
         || normalized.includes(identifiers.targetUsername)
         || normalized.includes(identifiers.candidateUsername);
+}
+
+function escapesRegex(value: string): string {
+    return value.replace(/[.*+?^${}()|[\]\\]/gu, '\\$&');
+}
+
+function containsNamedInteractionDirection(
+    line: string,
+    actor: string,
+    receiver: string,
+    interaction: '좋아요' | '댓글',
+): boolean {
+    return new RegExp(
+        `${escapesRegex(actor)}[^.]{0,80}${escapesRegex(receiver)}[^.]{0,80}${interaction}`,
+        'u',
+    ).test(line);
 }
 
 function narrativeResponseSchemaFor(
@@ -2406,6 +2451,9 @@ function narrativeResponseSchemaFor(
     sanitized: SanitizedNarrativeEvidence,
     policyVersion: AiStagePolicyVersion,
 ) {
+    const v211Subjects = policyVersion === AI_STAGE_POLICY_V211_VERSION
+        ? v211NarrativeSubjects(input)
+        : null;
     const allowedRefs = new Set([
         ...(sanitized.bio ? ['profile:bio'] : []),
         ...media.map(item => item.selectionId),
@@ -2432,7 +2480,7 @@ function narrativeResponseSchemaFor(
             .flatMap(comment => extractSafePublicCommentTerms(comment.text))
             .filter(term => !REDACTION_COMMENT_TERMS.has(term))
     )].slice(0, 8);
-    const requiredPhrases = requiredInteractionPhrases(input);
+    const requiredPhrases = v211Subjects ? [] : requiredInteractionPhrases(input);
 
     return highRiskNarrativeModelResponseSchema.superRefine((value, context) => {
         const texts: [string, string] = [value.lines[0].text, value.lines[1].text];
@@ -2455,7 +2503,11 @@ function narrativeResponseSchemaFor(
                 }
             }
             if (
-                containsForbiddenPublicIdentifier(line.text, input.forbiddenIdentifiers)
+                containsForbiddenPublicIdentifier(
+                    line.text,
+                    input.forbiddenIdentifiers,
+                    v211Subjects ?? undefined,
+                )
                 || INTERNAL_RESULT_TERM_PATTERN.test(line.text)
             ) {
                 context.addIssue({
@@ -2474,6 +2526,77 @@ function narrativeResponseSchemaFor(
                 }
             });
         });
+        if (v211Subjects) {
+            const [first, second] = texts;
+            if (
+                /(?:대상\s*계정|후보\s*계정)/u.test(first + second)
+                || !first.includes(v211Subjects.candidate)
+                || !second.includes(v211Subjects.candidate)
+                || !second.includes(v211Subjects.target)
+            ) {
+                context.addIssue({
+                    code: 'custom',
+                    path: ['lines'],
+                    message: 'v2.11 narrative must use canonical subject names, not generic role labels.',
+                });
+            }
+            if (
+                observed(input.interactions.candidateToTargetLike)
+                && !containsNamedInteractionDirection(
+                    second,
+                    v211Subjects.candidate,
+                    v211Subjects.target,
+                    '좋아요',
+                )
+            ) {
+                context.addIssue({
+                    code: 'custom',
+                    path: ['lines', 1, 'text'],
+                    message: 'v2.11 narrative omitted the candidate-to-target like direction.',
+                });
+            }
+            if (
+                observed(input.interactions.targetToCandidateLike)
+                && !containsNamedInteractionDirection(
+                    second,
+                    v211Subjects.target,
+                    v211Subjects.candidate,
+                    '좋아요')
+                && !second.includes('서로 남긴 좋아요')
+            ) {
+                context.addIssue({
+                    code: 'custom',
+                    path: ['lines', 1, 'text'],
+                    message: 'v2.11 narrative omitted the target-to-candidate like direction.',
+                });
+            }
+            if (
+                observed(input.interactions.candidateToTargetComment)
+                && !containsNamedInteractionDirection(
+                    second,
+                    v211Subjects.candidate,
+                    v211Subjects.target,
+                    '댓글',
+                )
+            ) {
+                context.addIssue({
+                    code: 'custom',
+                    path: ['lines', 1, 'text'],
+                    message: 'v2.11 narrative omitted the candidate-to-target comment direction.',
+                });
+            }
+            if (
+                input.appearance.isReliable
+                && (!first.includes('이미지 인상만으로 관계를 판단할 수는 없습니다')
+                    || !/(?:예쁘|매력|눈길)/u.test(first))
+            ) {
+                context.addIssue({
+                    code: 'custom',
+                    path: ['lines', 0, 'text'],
+                    message: 'v2.11 reliable appearance copy requires a light, non-probative caveat.',
+                });
+            }
+        }
         if (!value.lines[0].evidenceRefs.some(ref => styleRefs.has(ref))) {
             context.addIssue({
                 code: 'custom',
@@ -2651,10 +2774,15 @@ export async function highRiskNarrative(
             ? buildV211EvidenceSpecificRiskNarrative({
                 profileEvidence: sanitized.bio,
                 feedEvidence: sanitized.captions.map(caption => caption.text),
+                subjects: {
+                    ...input.forbiddenIdentifiers,
+                    ...input.publicSubjects,
+                },
                 candidateLikedTarget: observed(input.interactions.candidateToTargetLike),
                 candidateCommentedOnTarget: observed(input.interactions.candidateToTargetComment),
                 targetLikedCandidate: observed(input.interactions.targetToCandidateLike),
                 ...(firstComment ? { commentText: firstComment } : {}),
+                appearance: input.appearance,
             })
             : buildSafeFallbackRiskNarrative({
                 candidateLikedTarget: observed(input.interactions.candidateToTargetLike),

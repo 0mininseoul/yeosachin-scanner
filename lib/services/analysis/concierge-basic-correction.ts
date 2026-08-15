@@ -14,7 +14,11 @@ import {
     type RawTargetInteractionEvidence,
 } from './v2-target-interactions';
 import { screenAnalysisV2OfficialAccount } from './v2-official-account-screening';
-import { buildV211EvidenceSpecificRiskNarrative, buildV211EvidenceSpecificOverview, isForbiddenV211Overview } from './public-copy-quality';
+import {
+    buildV211EvidenceSpecificRiskNarrative,
+    buildV211EvidenceSpecificOverview,
+    needsV211EvidenceSpecificOverview,
+} from './public-copy-quality';
 
 export interface ConciergeRelationshipEvidence {
     username: string;
@@ -246,6 +250,7 @@ function genderConfidence(detail: ReplayAccountAiDetail): number {
 function retainedPublicCopyEvidence(profile: InstagramProfile): {
     profileEvidence: string | null;
     feedEvidence: string[];
+    structuralEvidence: string[];
 } {
     const feedEvidence = (profile.latestPosts ?? []).flatMap(post => [
         ...(post.caption ? [post.caption] : []),
@@ -254,12 +259,35 @@ function retainedPublicCopyEvidence(profile: InstagramProfile): {
     return {
         profileEvidence: profile.bio ?? null,
         feedEvidence,
+        structuralEvidence: [
+            ...(profile.profilePicUrl ? ['프로필 이미지'] : []),
+            ...((profile.latestPosts ?? []).some(post => (
+                Boolean(post.imageUrl || post.thumbnailUrl || post.mediaItems?.some(item => (
+                    item.imageUrl || item.thumbnailUrl
+                )))
+            )) ? ['사진 게시물'] : []),
+        ],
     };
+}
+
+function hasReliableAppearanceEvidence(
+    profile: InstagramProfile,
+    detail: ReplayAccountAiDetail,
+): boolean {
+    const appearanceGrade = detail.feature?.features.appearanceGrade ?? 0;
+    const hasAnalyzableImage = Boolean(profile.profilePicUrl)
+        || (profile.latestPosts ?? []).some(post => (
+            Boolean(post.imageUrl || post.thumbnailUrl || post.mediaItems?.some(item => (
+                item.imageUrl || item.thumbnailUrl
+            )))
+        ));
+    return appearanceGrade >= 4 && hasAnalyzableImage;
 }
 
 /** Builds legacy rows only from canonical V2 final scores and canonical safe narratives. */
 export function buildCanonicalConciergeResult(input: {
     targetUsername: string;
+    targetFullName?: string | null;
     profilesByOrdinal: ReadonlyMap<number, InstagramProfile>;
     details: readonly ReplayAccountAiDetail[];
     orderedMutualUsernames: readonly string[];
@@ -359,15 +387,25 @@ export function buildCanonicalConciergeResult(input: {
         const narrative = score.riskBand === 'high_risk'
             ? buildV211EvidenceSpecificRiskNarrative({
                 ...copyEvidence,
+                subjects: {
+                    targetUsername: input.targetUsername,
+                    targetFullName: input.targetFullName ?? null,
+                    candidateUsername: retained.profile.username,
+                    candidateFullName: retained.profile.fullName ?? null,
+                },
                 candidateLikedTarget: (interaction?.uniqueTargetPostsLikedByCandidate ?? 0) > 0,
                 candidateCommentedOnTarget: (interaction?.boundedCandidateCommentsOnTarget ?? 0) > 0,
                 targetLikedCandidate: false,
                 candidateTaggedTarget: score.hasCandidateToTargetTagOrCaptionMention,
                 targetTaggedCandidate: score.hasTargetToCandidateTagOrCaptionMention,
                 ...(commentText ? { commentText } : {}),
+                appearance: { isReliable: hasReliableAppearanceEvidence(retained.profile, retained.detail) },
             })
             : [];
-        const overview = isForbiddenV211Overview(retained.detail.feature.features.oneLineOverview)
+        const overview = needsV211EvidenceSpecificOverview(
+            retained.detail.feature.features.oneLineOverview,
+            copyEvidence,
+        )
             ? buildV211EvidenceSpecificOverview({
                 ...copyEvidence,
                 variation: index,

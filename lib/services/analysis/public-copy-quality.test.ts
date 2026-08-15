@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import {
     buildV211EvidenceSpecificOverview,
     buildV211EvidenceSpecificRiskNarrative,
+    needsV211EvidenceSpecificOverview,
     isForbiddenV211Overview,
     isForbiddenV211RiskNarrative,
     areMateriallyNearDuplicatePublicCopies,
@@ -44,6 +45,12 @@ describe('v2.11 concierge public-copy quality', () => {
 
     it('builds a concrete two-line high-risk narrative with observed interactions', () => {
         const lines = buildV211EvidenceSpecificRiskNarrative({
+            subjects: {
+                targetUsername: 'target.user',
+                targetFullName: '김준호',
+                candidateUsername: 'candidate.user',
+                candidateFullName: '박민지',
+            },
             profileEvidence: '주말 전시와 커피 기록',
             feedEvidence: ['성수동 전시를 둘러본 오후'],
             candidateLikedTarget: true,
@@ -52,19 +59,29 @@ describe('v2.11 concierge public-copy quality', () => {
             candidateTaggedTarget: true,
             targetTaggedCandidate: false,
             commentText: '다음 전시도 같이 보자',
+            appearance: { isReliable: true },
         });
 
         expect(lines).toHaveLength(2);
         expect(lines[0]).toContain('전시');
-        expect(lines[1]).toContain('후보가 대상 게시물에 남긴 좋아요');
-        expect(lines[1]).toContain('댓글의 “다음” 표현');
-        expect(lines[1]).toContain('태그 표기');
+        expect(lines[0]).toContain('위장여사친이 아니라고 하기엔 너무 예쁩니다');
+        expect(lines[0]).toContain('이미지 인상만으로 관계를 판단할 수는 없습니다');
+        expect(lines[1]).toContain('박민지님이 김준호님 게시물에 남긴 좋아요');
+        expect(lines[1]).toContain('박민지님이 김준호님 게시물에 남긴 댓글의 “다음” 표현');
+        expect(lines[1]).toContain('박민지님이 김준호님을 태그한 흔적');
         expect(lines[1]).toContain('수집 표본 밖');
+        expect(lines.join(' ')).not.toMatch(/(?:대상\s*계정|후보\s*계정)/u);
         expect(isForbiddenV211RiskNarrative(lines)).toBe(false);
     });
 
     it('keeps candidate-to-target and target-to-candidate evidence directional', () => {
         const lines = buildV211EvidenceSpecificRiskNarrative({
+            subjects: {
+                targetUsername: 'target.user',
+                targetFullName: '김준호',
+                candidateUsername: 'candidate.user',
+                candidateFullName: '박민지',
+            },
             profileEvidence: '주말 전시와 커피 기록',
             feedEvidence: ['성수동 전시를 둘러본 오후'],
             candidateLikedTarget: true,
@@ -73,9 +90,44 @@ describe('v2.11 concierge public-copy quality', () => {
             targetCommentedOnCandidate: true,
         });
 
-        expect(lines[1]).toContain('서로 남긴 좋아요 흔적');
-        expect(lines[1]).toContain('대상 계정이 후보 피드에 남긴 댓글 내용');
+        expect(lines[1]).toContain('박민지님이 김준호님 게시물에 남긴 좋아요');
+        expect(lines[1]).toContain('김준호님이 박민지님 피드에 남긴 좋아요');
+        expect(lines[1]).toContain('김준호님이 박민지님 피드에 남긴 댓글 내용');
         expect(lines[1]).toContain('수집 표본 밖');
+    });
+
+    it('uses the normalized username only when the retained full name is absent', () => {
+        const lines = buildV211EvidenceSpecificRiskNarrative({
+            subjects: {
+                targetUsername: 'target.user',
+                targetFullName: null,
+                candidateUsername: 'candidate.user',
+                candidateFullName: null,
+            },
+            profileEvidence: '주말 전시와 커피 기록',
+            feedEvidence: ['성수동 전시를 둘러본 오후'],
+            candidateLikedTarget: true,
+            candidateCommentedOnTarget: false,
+            targetLikedCandidate: false,
+        });
+
+        expect(lines[1]).toContain('candidate.user가 target.user 게시물에 남긴 좋아요');
+        expect(lines.join(' ')).not.toMatch(/(?:대상\s*계정|후보\s*계정)/u);
+    });
+
+    it('keeps a natural grounded overview and refreshes only vague or forbidden overview copy', () => {
+        const evidence = {
+            profileEvidence: '주말마다 전시와 커피를 기록합니다',
+            feedEvidence: ['성수동 전시를 둘러본 오후'],
+        };
+        expect(needsV211EvidenceSpecificOverview(
+            '성수동 전시와 커피 기록이 이어져, 주말 취향이 자연스럽게 드러나는 피드입니다.',
+            evidence,
+        )).toBe(false);
+        expect(needsV211EvidenceSpecificOverview(
+            '사진과 소개에 드러난 개인 기록의 결이 선명해서, 피드가 보여 준 장면부터 차분히 짚어볼 계정입니다.',
+            evidence,
+        )).toBe(true);
     });
 
     it('does not allow generic fallback copy to pass final v2.11 validation', () => {
@@ -96,6 +148,12 @@ describe('v2.11 concierge public-copy quality', () => {
                 candidateLikedTarget: true,
                 candidateCommentedOnTarget: false,
                 targetLikedCandidate: false,
+                subjects: {
+                    targetUsername: 'target.user',
+                    targetFullName: '김준호',
+                    candidateUsername: 'candidate.user',
+                    candidateFullName: '박민지',
+                },
                 candidateTaggedTarget: false,
                 targetTaggedCandidate: false,
             }],

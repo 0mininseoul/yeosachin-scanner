@@ -6,13 +6,15 @@ import {
     buildV211EvidenceSpecificOverview,
     buildV211EvidenceSpecificRiskNarrative,
     extractV211EvidenceTerms,
+    needsV211EvidenceSpecificOverview,
     validateV211PublicCopyRows,
+    v211CopySubjectNames,
     type V211PublicCopyRow,
 } from '@/lib/services/analysis/public-copy-quality';
 import { loadRetainedConciergeProfileArtifacts } from './correct-concierge-basic-result';
 
 const RESULT_URL = 'https://yeosachin.com/result/975d0b48-b81a-432c-bb3e-d4a4d282e527';
-const COPY_QUALITY_VERSION = 'v211-evidence-specific-v1';
+const COPY_QUALITY_VERSION = 'v212-natural-named-v1';
 const ORDER_START = '2026-08-12T00:00:00Z';
 const ORDER_END = '2026-08-13T00:00:00Z';
 const REVERSE_INTERACTION_ARTIFACT_PATH = process.env.CONCIERGE_REVERSE_INTERACTIONS_PATH
@@ -30,6 +32,7 @@ const orderSchema = z.object({
 const resultRowSchema = z.object({
     rank: z.number().int().min(1).max(16),
     suspect_instagram_id: z.string().min(1),
+    suspect_full_name: z.string().nullable().optional(),
     risk_grade: z.enum(['normal', 'caution', 'high_risk']),
     one_line_overview: z.string().nullable(),
     risk_analysis: z.array(z.unknown()).nullable(),
@@ -42,6 +45,7 @@ const resultRowSchema = z.object({
     female_to_target_likes_count: z.number().nullable().optional(),
     female_to_target_comments_count: z.number().nullable().optional(),
     target_to_female_likes_count: z.number().nullable().optional(),
+    photogenic_grade: z.number().int().min(1).max(5).nullable().optional(),
     is_tagged: z.boolean().nullable().optional(),
 }).passthrough();
 
@@ -110,6 +114,24 @@ function profileCopyEvidence(profile: {
         feedEvidence,
         structuralEvidence,
     };
+}
+
+function hasReliableAppearanceEvidence(
+    row: z.infer<typeof resultRowSchema>,
+    profile: {
+        profilePicUrl?: string;
+        latestPosts?: readonly {
+            imageUrl?: string;
+            thumbnailUrl?: string;
+            mediaItems?: readonly { type?: string }[];
+        }[];
+    },
+): boolean {
+    const hasImageSurface = Boolean(profile.profilePicUrl)
+        || (profile.latestPosts ?? []).some(post => (
+            Boolean(post.imageUrl || post.thumbnailUrl || post.mediaItems?.length)
+        ));
+    return (row.photogenic_grade ?? 0) >= 4 && hasImageSurface;
 }
 
 function interactionEvidence(row: z.infer<typeof resultRowSchema>, targetEvidence: readonly unknown[]) {
@@ -195,7 +217,7 @@ export async function loadExactScope() {
     const order = orderSchema.parse(orders[0]);
     const [{ data: rows, error: rowsError }, { data: request, error: requestError }, { data: sourceCandidates, error: sourceError }] = await Promise.all([
         supabaseAdmin.from('analysis_results')
-            .select('rank,suspect_instagram_id,risk_grade,one_line_overview,risk_analysis,likes_count,intimate_comments_count,normal_comments_count,post_tags_count,caption_mentions_count,comment_mentions_count,female_to_target_likes_count,female_to_target_comments_count,target_to_female_likes_count,is_tagged')
+            .select('rank,suspect_instagram_id,suspect_full_name,risk_grade,one_line_overview,risk_analysis,likes_count,intimate_comments_count,normal_comments_count,post_tags_count,caption_mentions_count,comment_mentions_count,female_to_target_likes_count,female_to_target_comments_count,target_to_female_likes_count,photogenic_grade,is_tagged')
             .eq('request_id', order.result_request_id)
             .order('rank'),
         supabaseAdmin.from('analysis_requests')
@@ -209,14 +231,21 @@ export async function loadExactScope() {
             .eq('status', 'failed')
             .eq('pipeline_version', 'v2'),
     ]);
-    if (rowsError || !rows || rows.length !== 16 || requestError || !request || sourceError
-        || !sourceCandidates || sourceCandidates.length !== 1) {
+    if (rowsError || !rows || rows.length !== 16) throw new Error('CONCIERGE_COPY_CORRECTION_RESULT_READ_CONFLICT');
+    if (requestError || !request) throw new Error('CONCIERGE_COPY_CORRECTION_REQUEST_READ_CONFLICT');
+    if (sourceError || !sourceCandidates || sourceCandidates.length !== 1) {
         throw new Error('CONCIERGE_COPY_CORRECTION_SOURCE_SCOPE_CONFLICT');
     }
     const parsedRows = z.array(resultRowSchema).parse(rows);
     const stepData = request.step_data as {
         sourceFingerprint?: unknown;
-        conciergeBootstrap?: { sourceFingerprint?: unknown; resultHash?: unknown };
+        conciergeBootstrap?: {
+            sourceFingerprint?: unknown;
+            resultHash?: unknown;
+            copyCorrection?: { correctionResultHash?: unknown };
+        };
+        targetProfileCheckpoint?: { fullName?: unknown };
+        targetProfile?: { fullName?: unknown };
     } | null;
     // The bootstrap/replay lineage is authoritative.  The top-level field can
     // retain a superseded pre-publication fingerprint and must never win CAS.
@@ -227,6 +256,10 @@ export async function loadExactScope() {
     if (typeof sourceFingerprint !== 'string' || !/^[a-f0-9]{64}$/.test(sourceFingerprint)
         || typeof publishedResultHash !== 'string' || !/^[a-f0-9]{64}$/.test(publishedResultHash)) {
         throw new Error('CONCIERGE_COPY_CORRECTION_CAS_CONFLICT');
+    }
+    const priorCorrectionResultHash = stepData?.conciergeBootstrap?.copyCorrection?.correctionResultHash;
+    if (typeof priorCorrectionResultHash !== 'string' || !/^[a-f0-9]{64}$/.test(priorCorrectionResultHash)) {
+        throw new Error('CONCIERGE_COPY_CORRECTION_PRIOR_CORRECTION_CONFLICT');
     }
     const sourceRequestId = String((sourceCandidates[0] as { id: string }).id);
     const { data: targetData, error: targetError } = await supabaseAdmin.rpc('load_analysis_v2_target_evidence', {
@@ -242,15 +275,24 @@ export async function loadExactScope() {
         rows: parsedRows,
         sourceFingerprint,
         publishedResultHash,
+        priorCorrectionResultHash,
         sourceRequestId,
         stepData,
         targetEvidence: (targetData as { rows: unknown[] }).rows,
+        targetFullName: typeof stepData?.targetProfileCheckpoint?.fullName === 'string'
+            ? stepData.targetProfileCheckpoint.fullName
+            : typeof stepData?.targetProfile?.fullName === 'string'
+                ? stepData.targetProfile.fullName
+                : null,
     };
 }
 
 export function buildCorrectionPayload(input: {
+    targetUsername: string;
+    targetFullName: string | null;
     rows: readonly z.infer<typeof resultRowSchema>[];
     profiles: ReadonlyMap<string, {
+        fullName?: string;
         bio?: string;
         externalUrl?: string;
         profilePicUrl?: string;
@@ -270,10 +312,9 @@ export function buildCorrectionPayload(input: {
         const profile = input.profiles.get(normalizedUsername(row.suspect_instagram_id));
         if (!profile) throw new Error('CONCIERGE_COPY_CORRECTION_PROFILE_SCOPE_CONFLICT');
         const evidence = profileCopyEvidence(profile);
-        const overview = buildV211EvidenceSpecificOverview({
-            ...evidence,
-            variation: row.rank - 1,
-        });
+        const overview = needsV211EvidenceSpecificOverview(row.one_line_overview, evidence)
+            ? buildV211EvidenceSpecificOverview(evidence)
+            : row.one_line_overview!;
         const interaction = interactionEvidence(row, input.targetEvidence);
         const reverseObservation = input.reverseInteractions.observations.find(
             candidate => candidate.rank === row.rank
@@ -288,15 +329,26 @@ export function buildCorrectionPayload(input: {
             ...interaction,
             targetLikedCandidate: reverseObservation?.targetLikedCandidate ?? false,
         };
+        const subjects = {
+            targetUsername: input.targetUsername,
+            targetFullName: input.targetFullName,
+            candidateUsername: row.suspect_instagram_id,
+            candidateFullName: profile.fullName ?? row.suspect_full_name ?? null,
+        };
+        const appearance = { isReliable: hasReliableAppearanceEvidence(row, profile) };
         const riskAnalysis = row.risk_grade === 'high_risk'
             ? buildV211EvidenceSpecificRiskNarrative({
                 ...evidence,
+                subjects,
                 ...enrichedInteraction,
+                appearance,
             })
             : [];
         const copyRow: V211PublicCopyRow = {
             ...evidence,
             ...enrichedInteraction,
+            subjects,
+            appearance,
             oneLineOverview: overview,
             riskGrade: row.risk_grade,
             riskAnalysis,
@@ -315,6 +367,7 @@ export function buildCorrectionPayload(input: {
                     ? input.reverseInteractions.targetToCandidateCoverage
                     : 'not_collected',
             ),
+            subjects: v211CopySubjectNames(subjects),
         };
     });
     validateV211PublicCopyRows({ rows: copyRows });
@@ -329,6 +382,7 @@ async function verifyResult(input: {
     orderId: string;
     sourceFingerprint: string;
     publishedResultHash: string;
+    priorCorrectionResultHash: string;
 }) {
     const [{ data: rows, error: rowsError }, { data: request, error: requestError }, { data: privateRows, error: privateError }] = await Promise.all([
         supabaseAdmin.from('analysis_results').select('rank,risk_grade,one_line_overview,risk_analysis,gender_status').eq('request_id', input.requestId).order('rank'),
@@ -340,7 +394,7 @@ async function verifyResult(input: {
     }
     const highRisk = rows.filter(row => row.risk_grade === 'high_risk');
     const genderStats = request.gender_stats as Record<string, unknown> | null;
-    const marker = (request.step_data as { conciergeBootstrap?: { copyCorrection?: { qualityVersion?: string } } } | null)?.conciergeBootstrap?.copyCorrection;
+    const marker = (request.step_data as { conciergeBootstrap?: { v212CopyCorrection?: { qualityVersion?: string } } } | null)?.conciergeBootstrap?.v212CopyCorrection;
     if (
         highRisk.length !== 2
         || rows.some(row => row.gender_status !== 'confirmed' || !row.one_line_overview || row.one_line_overview.length > 180)
@@ -354,6 +408,7 @@ async function verifyResult(input: {
         || marker?.qualityVersion !== COPY_QUALITY_VERSION
         || input.sourceFingerprint.length !== 64
         || input.publishedResultHash.length !== 64
+        || input.priorCorrectionResultHash.length !== 64
     ) {
         throw new Error('CONCIERGE_COPY_CORRECTION_VERIFY_FAILED');
     }
@@ -375,6 +430,8 @@ async function main(): Promise<void> {
     const profiles = await loadRetainedConciergeProfileArtifacts();
     const reverseInteractions = await loadReverseInteractionArtifact(scope.order);
     const payload = buildCorrectionPayload({
+        targetUsername: scope.order.target_instagram_id,
+        targetFullName: scope.targetFullName,
         rows: scope.rows,
         profiles,
         targetEvidence: scope.targetEvidence,
@@ -386,6 +443,7 @@ async function main(): Promise<void> {
         resultRequestId: scope.order.result_request_id,
         sourceFingerprint: scope.sourceFingerprint,
         publishedResultHash: scope.publishedResultHash,
+        priorCorrectionResultHash: scope.priorCorrectionResultHash,
         reverseInteractionArtifactHash: reverseInteractions.artifactHash,
         rows: payload.rows,
     });
@@ -398,17 +456,19 @@ async function main(): Promise<void> {
             copyHash: correctionResultHash,
             sourceFingerprint: scope.sourceFingerprint,
             publishedResultHash: scope.publishedResultHash,
+            priorCorrectionResultHash: scope.priorCorrectionResultHash,
         }));
         return;
     }
     // Exactly one RPC call is permitted for this correction.  The function owns
     // the transaction, row locks, immutable source CAS, and idempotency ledger.
-    const { data, error } = await supabaseAdmin.rpc('correct_earlybird_v211_concierge_copy', {
+    const { data, error } = await supabaseAdmin.rpc('correct_earlybird_v212_concierge_copy', {
         p_order_id: scope.order.id,
         p_owner_id: scope.order.user_id,
         p_result_request_id: scope.order.result_request_id,
         p_source_fingerprint: scope.sourceFingerprint,
         p_expected_published_result_hash: scope.publishedResultHash,
+        p_prior_correction_result_hash: scope.priorCorrectionResultHash,
         p_correction_result_hash: correctionResultHash,
         p_copy_payload: payload,
     });
@@ -420,6 +480,7 @@ async function main(): Promise<void> {
         orderId: scope.order.id,
         sourceFingerprint: scope.sourceFingerprint,
         publishedResultHash: scope.publishedResultHash,
+        priorCorrectionResultHash: scope.priorCorrectionResultHash,
     });
     console.log(JSON.stringify({ state: 'completed', rpcState: (data as { state: string }).state, ...verification }));
 }
