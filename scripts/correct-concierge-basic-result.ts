@@ -14,7 +14,10 @@ import { createAnalysisV2SelectedMediaNormalizer } from '@/lib/services/ai/image
 import { AI_STAGE_POLICY_V211_VERSION } from '@/lib/services/ai/stage-policy';
 import { createReplayStagedAiAdapter } from '@/lib/services/analysis/replay/replay-staged-ai-adapter';
 import { captureAnalysisV2ReplayBundle } from '@/lib/services/analysis/replay/replay-capture';
-import type { AnalysisV2ReplayBundle } from '@/lib/services/analysis/replay/replay-bundle';
+import {
+    analysisV2ReplaySemanticInputFingerprint,
+    type AnalysisV2ReplayBundle,
+} from '@/lib/services/analysis/replay/replay-bundle';
 import { FIRST_PAYMENT_BASIC_V211_CONCIERGE_CAPABILITY } from '@/lib/services/analysis/replay/replay-source-lineage';
 import { runAnalysisV2AiReplay, type ReplayAccountAiDetail } from '@/lib/services/analysis/replay/replay-runner';
 import {
@@ -28,6 +31,12 @@ import { isAnalysisResultOperator, resolveAnalysisResultOwner } from '@/lib/serv
 import { requireActiveAccountClassification } from '@/lib/services/identity/account-principal-store';
 import type { InstagramFollower, InstagramProfile } from '@/lib/types/instagram';
 import type { ApifyCredentialSlot, ProfileAttemptResult } from '@/lib/services/instagram/providers/types';
+import {
+    clearConciergeAiCheckpoint,
+    conciergeErrorCode,
+    readConciergeAiCheckpoint,
+    writeConciergeAiCheckpoint,
+} from './concierge-ai-checkpoint';
 
 const SAMPLE_START = '2026-08-12T09:07:00.000Z';
 const SAMPLE_END = '2026-08-12T09:08:00.000Z';
@@ -35,7 +44,7 @@ const RELATIONSHIP_LIMIT = 1_200;
 const PROFILE_BATCH_SIZE = 30;
 const PROFILE_HYDRATION_TARGET_COUNT = 34;
 const PROFILE_SLOT_DEADLINE_MS = 90_000;
-const EXISTING_PROFILE_ARTIFACT = Object.freeze({
+export const EXISTING_PROFILE_ARTIFACT = Object.freeze({
     slot: 'tertiary' as const,
     runId: 'NbsEMomWpuHW0uX8B',
     datasetId: 'nEWNQBIxcUqlcR7WR',
@@ -46,7 +55,7 @@ const EXISTING_PROFILE_ARTIFACT = Object.freeze({
         'white.hour.snap', 'woo_x99',
     ]),
 });
-const COLLECTED_PROFILE_ARTIFACTS = Object.freeze([
+export const COLLECTED_PROFILE_ARTIFACTS = Object.freeze([
     Object.freeze({
         slot: 'senary' as const,
         runId: 'taiOIzMft5KxUr6UX',
@@ -120,11 +129,6 @@ function normalizedUsername(value: string): string {
 
 function sha256(value: unknown): string {
     return createHash('sha256').update(JSON.stringify(value)).digest('hex');
-}
-
-function safeError(error: unknown): string {
-    const message = error instanceof Error ? error.message : '';
-    return /^([A-Z][A-Z0-9_]{2,119})/.exec(message)?.[1] ?? 'CONCIERGE_EXACT_CORRECTION_FAILED';
 }
 
 type ReviewedGender = 'male' | 'female' | 'unknown';
@@ -313,6 +317,55 @@ async function collectRelationshipSide(
     throw new Error('CONCIERGE_RELATIONSHIP_RECOLLECTION_FORBIDDEN');
 }
 
+/** Read-only loader for the already collected profile datasets.  It never
+ * starts an Apify run and intentionally does not load relationship data. */
+export async function loadRetainedConciergeProfileArtifacts(): Promise<ReadonlyMap<string, InstagramProfile>> {
+    const profiles = new Map<string, InstagramProfile>();
+    const existingToken = tokenFor(EXISTING_PROFILE_ARTIFACT.slot);
+    if (!existingToken) throw new Error('CONCIERGE_EXISTING_PROFILE_ARTIFACT_UNAVAILABLE');
+    const existingClient = new ApifyClient({ token: existingToken, maxRetries: 0 });
+    const existingItems = (await existingClient.dataset(EXISTING_PROFILE_ARTIFACT.datasetId)
+        .listItems({ limit: EXISTING_PROFILE_ARTIFACT.usernames.length + 1 })).items;
+    const existingParsed = parseApifyProfileDataset(existingItems, EXISTING_PROFILE_ARTIFACT.usernames);
+    const expectedExistingUsernames = [...EXISTING_PROFILE_ARTIFACT.usernames].sort();
+    if (
+        existingParsed.datasetContaminated
+        || existingParsed.failuresByUsername.size !== 0
+        || existingParsed.notFoundUsernames.size !== 0
+        || JSON.stringify([...existingParsed.profilesByUsername.keys()].sort())
+            !== JSON.stringify(expectedExistingUsernames)
+    ) {
+        throw new Error('CONCIERGE_EXISTING_PROFILE_ARTIFACT_INVALID');
+    }
+    for (const [username, profile] of existingParsed.profilesByUsername) profiles.set(username, profile);
+
+    const collectedToken = tokenFor('senary');
+    if (!collectedToken) throw new Error('CONCIERGE_COLLECTED_PROFILE_ARTIFACT_UNAVAILABLE');
+    const collectedClient = new ApifyClient({ token: collectedToken, maxRetries: 0 });
+    for (const artifact of COLLECTED_PROFILE_ARTIFACTS) {
+        const run = await collectedClient.run(artifact.runId).get();
+        if (!run || run.status !== 'SUCCEEDED' || run.defaultDatasetId !== artifact.datasetId) {
+            throw new Error('CONCIERGE_COLLECTED_PROFILE_ARTIFACT_INVALID');
+        }
+        const items = (await collectedClient.dataset(artifact.datasetId)
+            .listItems({ limit: artifact.usernames.length + 1 })).items;
+        const parsed = parseApifyProfileDataset(items, artifact.usernames);
+        const expectedUsernames = [...artifact.usernames].sort();
+        if (
+            parsed.datasetContaminated
+            || parsed.failuresByUsername.size !== 0
+            || parsed.notFoundUsernames.size !== 0
+            || JSON.stringify([...parsed.profilesByUsername.keys()].sort())
+                !== JSON.stringify(expectedUsernames)
+        ) {
+            throw new Error('CONCIERGE_COLLECTED_PROFILE_ARTIFACT_INVALID');
+        }
+        for (const [username, profile] of parsed.profilesByUsername) profiles.set(username, profile);
+    }
+    if (profiles.size !== 53) throw new Error('CONCIERGE_PROFILE_ARTIFACT_SCOPE_CONFLICT');
+    return profiles;
+}
+
 async function hydrateExactMutualProfiles(
     usernames: readonly string[],
     publicUsernames: readonly string[],
@@ -445,7 +498,7 @@ async function hydrateExactMutualProfiles(
             // A bounded slot failure is provenance, not permission to retry it or
             // widen the username scope; QUINARY gets only the still-unresolved set.
             if (ambiguousStart) throw new Error('CONCIERGE_PROFILE_SLOT_AMBIGUOUS_START');
-            if (!safeError(error).startsWith('CONCIERGE_') && !(error instanceof Error)) {
+            if (!conciergeErrorCode(error).startsWith('CONCIERGE_') && !(error instanceof Error)) {
                 throw error;
             }
         }
@@ -708,9 +761,10 @@ export function buildAtomicPublicationSql(input: LegacyPublicationInput | NewPub
         `${sqlString(JSON.stringify(input.targetEvidence))}::jsonb`,
         `${sqlString(JSON.stringify(publicationPayload))}::jsonb`,
     ];
-    return `BEGIN;
-SELECT public.bootstrap_earlybird_v211_concierge_first_order(${args.join(',')}) AS result;
-COMMIT;`;
+    // Supabase CLI executes db query text as one prepared statement.  Keep the
+    // RPC itself as the sole statement: PostgreSQL functions are atomic, and
+    // the bootstrap RPC owns the row locks/CAS that protect the publication.
+    return `SELECT public.bootstrap_earlybird_v211_concierge_first_order(${args.join(',')}) AS result;`;
 }
 
 function applyAtomicPublication(input: Parameters<typeof buildAtomicPublicationSql>[0]): void {
@@ -926,12 +980,54 @@ async function main(): Promise<void> {
         normalizeMedia: createAnalysisV2SelectedMediaNormalizer(),
         evaluationPolicy: conciergeEvaluationPolicy,
     });
-    const details = new Map<number, ReplayAccountAiDetail>();
+    // The source fingerprint and full semantic input fingerprint bind this local
+    // checkpoint to the exact reviewed artifact set.  A resumed run can therefore
+    // skip only account ordinals that already completed structured AI processing;
+    // it never substitutes a result from another order or source revision.
+    const replayInputFingerprint = analysisV2ReplaySemanticInputFingerprint(bundle);
+    const checkpointPath = process.env.CONCIERGE_AI_CHECKPOINT_PATH?.trim()
+        || `/private/tmp/concierge-basic-v211-ai-${sourceFingerprint}.json`;
+    const details = new Map<number, ReplayAccountAiDetail>(
+        readConciergeAiCheckpoint(checkpointPath, {
+            sourceFingerprint,
+            replayInputFingerprint,
+            aiStagePolicy: AI_STAGE_POLICY_V211_VERSION,
+            allowReplayInputFingerprintMismatch:
+                process.env.CONCIERGE_AI_CHECKPOINT_ALLOW_REPLAY_INPUT_DRIFT === '1',
+        }),
+    );
+    const publicOrdinals = new Set(
+        bundle.profiles.filter(profile => !profile.isPrivate).map(profile => profile.ordinal),
+    );
+    if ([...details.keys()].some(ordinal => !publicOrdinals.has(ordinal))) {
+        throw new Error('CONCIERGE_AI_CHECKPOINT_SCOPE_CONFLICT');
+    }
+    // Private rows are already authoritative from the reviewed private artifact;
+    // no private-name AI output feeds the canonical publication.  Keep the exact
+    // source fingerprint above, but run only public profiles whose details remain
+    // incomplete.  Sparse original ordinals are intentional identity bindings.
+    const pendingProfiles = bundle.profiles.filter(profile => (
+        !profile.isPrivate && !details.has(profile.ordinal)
+    ));
+    const pendingBundle = pendingProfiles.length === bundle.profiles.length
+        ? bundle
+        : { ...bundle, profiles: pendingProfiles };
     await runAnalysisV2AiReplay({
-        bundle, runner: createReplayStagedAiAdapter(AI_STAGE_POLICY_V211_VERSION), mode: 'paid-ai',
+        bundle: pendingBundle, runner: createReplayStagedAiAdapter(AI_STAGE_POLICY_V211_VERSION), mode: 'paid-ai',
         paidAiOptIn: true, evaluationPolicy: conciergeEvaluationPolicy,
-        onAccountAnalyzed(detail) { details.set(detail.ordinal, detail); },
+        onAccountAnalyzed(detail) {
+            details.set(detail.ordinal, detail);
+            writeConciergeAiCheckpoint(checkpointPath, {
+                sourceFingerprint,
+                replayInputFingerprint,
+                aiStagePolicy: AI_STAGE_POLICY_V211_VERSION,
+                details,
+            });
+        },
     });
+    if (details.size !== publicOrdinals.size) {
+        throw new Error('CONCIERGE_AI_CHECKPOINT_INCOMPLETE');
+    }
     const profilesByOrdinal = new Map(bundle.profiles.map(profile => [
         profile.ordinal,
         profileByUsername.get(normalizedUsername(profile.username))!,
@@ -1084,6 +1180,7 @@ async function main(): Promise<void> {
         || genderStats.male + genderStats.female + genderStats.unknown !== partition.publicProfiles.length) {
         throw new Error('CONCIERGE_PUBLIC_GENDER_STATS_VERIFY_FAILED');
     }
+    clearConciergeAiCheckpoint(checkpointPath);
     console.log(JSON.stringify({
         state: 'completed',
         before: { resultRows: beforeRows.data?.length ?? 0, privateRows: beforePrivate.data?.length ?? 0 },
@@ -1104,7 +1201,7 @@ async function main(): Promise<void> {
 
 if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) {
     main().catch(error => {
-        console.error(JSON.stringify({ state: 'failed', code: safeError(error) }));
+        console.error(JSON.stringify({ state: 'failed', code: conciergeErrorCode(error) }));
         process.exitCode = 1;
     });
 }

@@ -11,6 +11,7 @@ import type { ReplayAccountAiDetail } from './replay/replay-runner';
 function profile(username: string, isPrivate: boolean) {
     return {
         username,
+        bio: '여행 기록',
         followersCount: 10,
         followingCount: 10,
         postsCount: 0,
@@ -79,7 +80,12 @@ describe('concierge basic correction', () => {
                 index === 0 ? 5 : index === 1 ? 3 : 1,
             )),
             orderedMutualUsernames: profiles.map(account => account.username),
-            targetInteractions: [],
+            targetInteractions: profiles.map(account => ({
+                actorUsername: account.username,
+                postId: 'target-post-1',
+                signal: 'target_post_like' as const,
+                sourceInteractionId: `like-${account.username}`,
+            })),
             targetPosts: [],
             privateProfiles: [],
         });

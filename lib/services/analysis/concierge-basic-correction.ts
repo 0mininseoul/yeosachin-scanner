@@ -14,7 +14,7 @@ import {
     type RawTargetInteractionEvidence,
 } from './v2-target-interactions';
 import { screenAnalysisV2OfficialAccount } from './v2-official-account-screening';
-import { buildSafeFallbackRiskNarrative } from './narrative-privacy';
+import { buildV211EvidenceSpecificRiskNarrative, buildV211EvidenceSpecificOverview, isForbiddenV211Overview } from './public-copy-quality';
 
 export interface ConciergeRelationshipEvidence {
     username: string;
@@ -243,6 +243,20 @@ function genderConfidence(detail: ReplayAccountAiDetail): number {
     return confidence === 'high' ? 0.9 : confidence === 'medium' ? 0.6 : 0.3;
 }
 
+function retainedPublicCopyEvidence(profile: InstagramProfile): {
+    profileEvidence: string | null;
+    feedEvidence: string[];
+} {
+    const feedEvidence = (profile.latestPosts ?? []).flatMap(post => [
+        ...(post.caption ? [post.caption] : []),
+        ...(post.mediaItems ?? []).flatMap(item => item.caption ? [item.caption] : []),
+    ]);
+    return {
+        profileEvidence: profile.bio ?? null,
+        feedEvidence,
+    };
+}
+
 /** Builds legacy rows only from canonical V2 final scores and canonical safe narratives. */
 export function buildCanonicalConciergeResult(input: {
     targetUsername: string;
@@ -341,15 +355,24 @@ export function buildCanonicalConciergeResult(input: {
             row.candidateUsername === normalizedUsername(retained.profile.username)
             && row.signal === 'female_target_comment'
         ))?.content;
+        const copyEvidence = retainedPublicCopyEvidence(retained.profile);
         const narrative = score.riskBand === 'high_risk'
-            ? buildSafeFallbackRiskNarrative({
+            ? buildV211EvidenceSpecificRiskNarrative({
+                ...copyEvidence,
                 candidateLikedTarget: (interaction?.uniqueTargetPostsLikedByCandidate ?? 0) > 0,
                 candidateCommentedOnTarget: (interaction?.boundedCandidateCommentsOnTarget ?? 0) > 0,
                 targetLikedCandidate: false,
+                candidateTaggedTarget: score.hasCandidateToTargetTagOrCaptionMention,
+                targetTaggedCandidate: score.hasTargetToCandidateTagOrCaptionMention,
                 ...(commentText ? { commentText } : {}),
             })
             : [];
-        const overview = retained.detail.feature.features.oneLineOverview;
+        const overview = isForbiddenV211Overview(retained.detail.feature.features.oneLineOverview)
+            ? buildV211EvidenceSpecificOverview({
+                ...copyEvidence,
+                variation: index,
+            })
+            : retained.detail.feature.features.oneLineOverview;
         if (overview.length === 0 || overview.length > 180) {
             throw new Error('CONCIERGE_OVERVIEW_REQUIRED');
         }

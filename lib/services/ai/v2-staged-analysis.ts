@@ -35,6 +35,10 @@ import {
     isAnalysisV2AiDeterministicFallbackError,
 } from '@/lib/services/analysis/v2-ai-fallback-policy';
 import {
+    buildV211EvidenceSpecificOverview,
+    buildV211EvidenceSpecificRiskNarrative,
+} from '@/lib/services/analysis/public-copy-quality';
+import {
     isAmbiguousGeminiGenerationError,
 } from './gemini-generation-policy';
 import {
@@ -81,17 +85,6 @@ const FEATURE_OVERVIEW_FALLBACKS_V28 = Object.freeze({
     official_group_or_brand:
         '공식 단체나 브랜드 맥락으로 분류됐습니다. 개인 계정보다 조직 성격을 먼저 볼 만합니다.',
     uncertain: '공개 자료만으로 계정 성격을 확정하기 어렵습니다. 없는 디테일까지 만들 필요는 없겠네요.',
-} satisfies Record<
-    'personal' | 'individual_creator' | 'official_group_or_brand' | 'uncertain',
-    string
->);
-const FEATURE_OVERVIEW_FALLBACKS_V211 = Object.freeze({
-    personal: '사진과 소개에 드러난 개인 기록의 결이 선명해서, 피드가 보여 준 장면부터 차분히 짚어볼 계정입니다.',
-    individual_creator:
-        '창작과 일상 기록이 섞여 있고, 피드에 드러난 활동 흐름을 중심으로 읽어볼 만한 계정입니다.',
-    official_group_or_brand:
-        '공식 단체나 브랜드 맥락으로 분류됐습니다. 개인 계정보다 조직 성격을 먼저 볼 만합니다.',
-    uncertain: '소개와 피드에 여러 결이 겹친 계정입니다. 보이는 장면을 중심으로 흐름을 정리해볼 만합니다.',
 } satisfies Record<
     'personal' | 'individual_creator' | 'official_group_or_brand' | 'uncertain',
     string
@@ -1132,6 +1125,10 @@ function normalizeFeatureResponse(
     value: z.infer<typeof featureAnalysisStructuralResponseSchema>,
     allowedIds: ReadonlySet<string>,
     policyVersion: AiStagePolicyVersion,
+    evidence: {
+        profileEvidence: string | null;
+        feedEvidence: readonly string[];
+    },
 ): z.input<typeof featureAnalysisModelResponseSchema> {
     const evidenceSelectionIds = {
         gender: distinctAllowedEvidenceIds(value.evidenceSelectionIds.gender, allowedIds),
@@ -1213,6 +1210,7 @@ function normalizeFeatureResponse(
                 accountContext,
                 evidenceSelectionIds,
                 policyVersion,
+                evidence,
             }),
     };
 }
@@ -1220,6 +1218,10 @@ function normalizeFeatureResponse(
 function featureResponseSchemaFor(
     media: readonly NormalizedAiMediaSelection[],
     policyVersion: AiStagePolicyVersion,
+    evidence: {
+        profileEvidence: string | null;
+        feedEvidence: readonly string[];
+    },
 ) {
     const allowedIds = new Set(media.map(item => item.selectionId));
     const groundedSchema = featureAnalysisModelResponseSchemaFor(policyVersion)
@@ -1284,7 +1286,7 @@ function featureResponseSchemaFor(
         }
         });
     return featureAnalysisStructuralResponseSchema
-        .transform(value => normalizeFeatureResponse(value, allowedIds, policyVersion))
+        .transform(value => normalizeFeatureResponse(value, allowedIds, policyVersion, evidence))
         .pipe(groundedSchema);
 }
 
@@ -1301,6 +1303,10 @@ function featureOverviewFallback(input: {
     accountContext: z.infer<typeof accountContextSchema>;
     evidenceSelectionIds: z.infer<typeof featureEvidenceIdsSchema>;
     policyVersion: AiStagePolicyVersion;
+    evidence: {
+        profileEvidence: string | null;
+        feedEvidence: readonly string[];
+    };
 }): string {
     const seed = [
         input.accountContext,
@@ -1311,7 +1317,11 @@ function featureOverviewFallback(input: {
         hash = ((hash * 31) + (character.codePointAt(0) ?? 0)) >>> 0;
     }
     if (usesDecisiveSummaryPresentation(input.policyVersion)) {
-        return FEATURE_OVERVIEW_FALLBACKS_V211[input.accountContext];
+        return buildV211EvidenceSpecificOverview({
+            profileEvidence: input.evidence.profileEvidence,
+            feedEvidence: input.evidence.feedEvidence,
+            variation: hash,
+        });
     }
     if (usesSafePublicPresentation(input.policyVersion)) {
         return FEATURE_OVERVIEW_FALLBACKS_V28[input.accountContext];
@@ -2037,7 +2047,10 @@ export async function featureAnalysis(
         policyVersion,
     );
     const audit = parseAuditContext(rawAuditContext, identity);
-    const responseSchema = featureResponseSchemaFor(media, policyVersion);
+    const responseSchema = featureResponseSchemaFor(media, policyVersion, {
+        profileEvidence: input.bio,
+        feedEvidence: input.captions.map(caption => caption.text),
+    });
     const prepared = await prepareStagedResult(audit, responseSchema);
     const features = prepared.cached ?? responseSchema.parse(await analyzeWithGemini(
             prompt,
@@ -2634,12 +2647,21 @@ export async function highRiskNarrative(
             throw error;
         }
         const firstComment = sanitized.comments[0]?.text;
-        const lines = buildSafeFallbackRiskNarrative({
-            candidateLikedTarget: observed(input.interactions.candidateToTargetLike),
-            candidateCommentedOnTarget: observed(input.interactions.candidateToTargetComment),
-            targetLikedCandidate: observed(input.interactions.targetToCandidateLike),
-            ...(firstComment ? { commentText: firstComment } : {}),
-        });
+        const lines = policyVersion === AI_STAGE_POLICY_V211_VERSION
+            ? buildV211EvidenceSpecificRiskNarrative({
+                profileEvidence: sanitized.bio,
+                feedEvidence: sanitized.captions.map(caption => caption.text),
+                candidateLikedTarget: observed(input.interactions.candidateToTargetLike),
+                candidateCommentedOnTarget: observed(input.interactions.candidateToTargetComment),
+                targetLikedCandidate: observed(input.interactions.targetToCandidateLike),
+                ...(firstComment ? { commentText: firstComment } : {}),
+            })
+            : buildSafeFallbackRiskNarrative({
+                candidateLikedTarget: observed(input.interactions.candidateToTargetLike),
+                candidateCommentedOnTarget: observed(input.interactions.candidateToTargetComment),
+                targetLikedCandidate: observed(input.interactions.targetToCandidateLike),
+                ...(firstComment ? { commentText: firstComment } : {}),
+            });
         return highRiskNarrativeResultSchema.parse({
             lines,
             evidenceRefs: fallbackEvidenceRefs(input, media, sanitized),
