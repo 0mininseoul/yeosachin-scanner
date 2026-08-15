@@ -106,7 +106,7 @@ function dependencies(
 }
 
 describe('first15 terminal provider-canary recovery', () => {
-    it('loads the immutable rearm lineage through its service-role RPC', async () => {
+    it('loads canary provider ledgers through their scoped service-role RPC', async () => {
         const candidates = [
             candidate(1, 'SCRAPING_INCOMPLETE_ERROR'),
             candidate(2, 'SCRAPING_PROVIDER_QUOTA_ERROR'),
@@ -133,6 +133,26 @@ describe('first15 terminal provider-canary recovery', () => {
             if (name === 'list_earlybird_first15_canary_provider_rearms') {
                 return { data: [], error: null };
             }
+            if (name === 'list_earlybird_first15_canary_provider_runs') {
+                return { data: [providerRun(1), providerRun(2), providerRun(3)].map(row => ({
+                    request_id: row.requestId,
+                    job_key: row.jobKey,
+                    operation_key: row.operationKey,
+                    input_hash: row.inputHash,
+                    reservation_token: row.reservationToken,
+                    logical_provider: row.logicalProvider,
+                    actor_id: row.actorId,
+                    credential_slot: row.credentialSlot,
+                    max_charge_usd: row.maxChargeUsd,
+                    status: row.status,
+                    run_id: row.runId,
+                    actual_usage_usd: row.actualUsageUsd,
+                    reserved_at: row.reservedAt,
+                    run_started_at: row.runStartedAt,
+                    terminalized_at: row.terminalizedAt,
+                    usage_reconciled_at: row.usageReconciledAt,
+                })), error: null };
+            }
             if (name === 'rearm_earlybird_first15_canary_provider_failure') {
                 return { data: [{
                     applied: true,
@@ -144,37 +164,7 @@ describe('first15 terminal provider-canary recovery', () => {
             throw new Error(`unexpected RPC ${name}`);
         });
         defaultRecoveryMocks.from.mockImplementation((table: string) => {
-            if (table === 'earlybird_first15_canary_provider_rearms') {
-                throw new Error('direct rearm-ledger reads are forbidden');
-            }
-            if (table === 'analysis_v2_provider_runs') {
-                return {
-                    select: vi.fn(() => ({
-                        in: vi.fn(() => ({ limit: vi.fn(async () => ({
-                            data: [providerRun(1), providerRun(2), providerRun(3)].map(row => ({
-                                request_id: row.requestId,
-                                job_key: row.jobKey,
-                                operation_key: row.operationKey,
-                                input_hash: row.inputHash,
-                                reservation_token: row.reservationToken,
-                                logical_provider: row.logicalProvider,
-                                actor_id: row.actorId,
-                                credential_slot: row.credentialSlot,
-                                max_charge_usd: row.maxChargeUsd,
-                                status: row.status,
-                                run_id: row.runId,
-                                actual_usage_usd: row.actualUsageUsd,
-                                reserved_at: row.reservedAt,
-                                run_started_at: row.runStartedAt,
-                                terminalized_at: row.terminalizedAt,
-                                usage_reconciled_at: row.usageReconciledAt,
-                            })),
-                            error: null,
-                        })) })),
-                    })),
-                };
-            }
-            throw new Error(`unexpected table ${table}`);
+            throw new Error(`direct protected-ledger reads are forbidden: ${table}`);
         });
 
         await expect(runFirst15CanaryProviderRecovery()).resolves.toMatchObject({
@@ -186,6 +176,10 @@ describe('first15 terminal provider-canary recovery', () => {
 
         expect(defaultRecoveryMocks.rpc).toHaveBeenCalledWith(
             'list_earlybird_first15_canary_provider_rearms',
+        );
+        expect(defaultRecoveryMocks.rpc).toHaveBeenCalledWith(
+            'list_earlybird_first15_canary_provider_runs',
+            { p_request_ids: candidates.map(row => row.requestId) },
         );
     });
 
