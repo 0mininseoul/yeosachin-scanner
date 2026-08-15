@@ -270,6 +270,51 @@ describe('first15 terminal provider-canary recovery', () => {
         }));
     });
 
+    it('uses the existing route contract for all three recorded tertiary successors', async () => {
+        const resumed = [
+            candidate(1, 'SCRAPING_INCOMPLETE_ERROR', 'tertiary'),
+            candidate(2, 'SCRAPING_PROVIDER_QUOTA_ERROR', 'tertiary'),
+            candidate(3, 'SCRAPING_PROVIDER_START_REJECTED_ERROR', 'tertiary'),
+        ];
+        const deps = dependencies({
+            loadCandidates: vi.fn(async () => resumed),
+            loadRearms: vi.fn(async (): Promise<readonly First15CanaryProviderRecoveryRearm[]> => (
+                resumed.map((row, index) => ({
+                    orderId: row.orderId,
+                    rearmedPreflightId: row.preflightId,
+                    rearmGeneration: 1,
+                    sourceFailureCode: [
+                        'SCRAPING_INCOMPLETE_ERROR',
+                        'SCRAPING_PROVIDER_QUOTA_ERROR',
+                        'SCRAPING_PROVIDER_START_REJECTED_ERROR',
+                    ][index] as First15CanaryProviderRecoveryRearm['sourceFailureCode'],
+                }))
+            )),
+            loadProviderRuns: vi.fn(async () => [providerRun(2)]),
+        });
+
+        await expect(runFirst15CanaryProviderRecovery(deps)).resolves.toEqual({
+            candidates: 3,
+            reconciledProviderRuns: 1,
+            rearmed: 3,
+            dispatched: 3,
+        });
+        expect(deps.loadProviderRuns).toHaveBeenCalledWith(resumed.map(row => row.requestId));
+        expect(deps.rearm).toHaveBeenCalledTimes(3);
+        expect(deps.rearm).toHaveBeenNthCalledWith(1, expect.objectContaining({
+            orderId: ORDER_A,
+            fallbackCredentialSlot: 'quinary',
+        }));
+        expect(deps.rearm).toHaveBeenNthCalledWith(2, expect.objectContaining({
+            orderId: ORDER_B,
+            fallbackCredentialSlot: 'quinary',
+        }));
+        expect(deps.rearm).toHaveBeenNthCalledWith(3, expect.objectContaining({
+            orderId: ORDER_C,
+            fallbackCredentialSlot: 'quinary',
+        }));
+    });
+
     it('does not rearm while a scoped provider run is still active', async () => {
         const active = providerRun(1);
         active.status = 'running';
