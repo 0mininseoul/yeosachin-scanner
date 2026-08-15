@@ -290,10 +290,9 @@ async function loadCandidates(): Promise<readonly First15CanaryProviderRecoveryC
 }
 
 async function loadRearms(): Promise<readonly First15CanaryProviderRecoveryRearm[]> {
-    const { data, error } = await supabaseAdmin
-        .from('earlybird_first15_canary_provider_rearms')
-        .select('order_id,rearmed_preflight_id,rearm_generation,source_failure_code')
-        .limit(13);
+    const { data, error } = await supabaseAdmin.rpc(
+        'list_earlybird_first15_canary_provider_rearms',
+    );
     if (error || !Array.isArray(data) || data.length > 12) {
         throw noOutputError('FIRST15_CANARY_RECOVERY_REARM_READ_FAILED');
     }

@@ -1,5 +1,33 @@
 import { describe, expect, it, vi } from 'vitest';
 import type { StoredAnalysisV2ProviderRun } from './v2-provider-run-store';
+
+const defaultRecoveryMocks = vi.hoisted(() => ({
+    rpc: vi.fn(),
+    from: vi.fn(),
+    workerAvailable: vi.fn(),
+    reconcile: vi.fn(),
+    dispatch: vi.fn(),
+}));
+
+vi.mock('@/lib/supabase/admin', () => ({
+    supabaseAdmin: {
+        rpc: defaultRecoveryMocks.rpc,
+        from: defaultRecoveryMocks.from,
+    },
+}));
+
+vi.mock('./v2-execution-gate', () => ({
+    isAnalysisV2WorkerAvailable: defaultRecoveryMocks.workerAvailable,
+}));
+
+vi.mock('./v2-provider-lifecycle', () => ({
+    reconcileAnalysisV2ProviderUsage: defaultRecoveryMocks.reconcile,
+}));
+
+vi.mock('./v2-tasks', () => ({
+    dispatchAnalysisV2Job: defaultRecoveryMocks.dispatch,
+}));
+
 import {
     runFirst15CanaryProviderRecovery,
     type First15CanaryProviderRecoveryCandidate,
@@ -78,6 +106,89 @@ function dependencies(
 }
 
 describe('first15 terminal provider-canary recovery', () => {
+    it('loads the immutable rearm lineage through its service-role RPC', async () => {
+        const candidates = [
+            candidate(1, 'SCRAPING_INCOMPLETE_ERROR'),
+            candidate(2, 'SCRAPING_PROVIDER_QUOTA_ERROR'),
+            candidate(3, 'SCRAPING_PROVIDER_START_REJECTED_ERROR'),
+        ];
+        defaultRecoveryMocks.workerAvailable.mockReturnValue(true);
+        defaultRecoveryMocks.reconcile.mockImplementation(async () => ({
+            eligible: 3,
+            reconciled: 3,
+            failed: 0,
+            hasMore: false,
+        }));
+        defaultRecoveryMocks.dispatch.mockResolvedValue('enqueued');
+        defaultRecoveryMocks.rpc.mockImplementation(async (name: string) => {
+            if (name === 'list_earlybird_first15_canary_provider_recovery_candidates') {
+                return { data: candidates.map(row => ({
+                    order_id: row.orderId,
+                    request_id: row.requestId,
+                    preflight_id: row.preflightId,
+                    error_code: row.errorCode,
+                    credential_slot: row.credentialSlot,
+                })), error: null };
+            }
+            if (name === 'list_earlybird_first15_canary_provider_rearms') {
+                return { data: [], error: null };
+            }
+            if (name === 'rearm_earlybird_first15_canary_provider_failure') {
+                return { data: [{
+                    applied: true,
+                    fulfillment_status: 'analysis_in_progress',
+                    request_id: '00000000-0000-4003-8000-000000000001',
+                    initial_job_key: 'coordinator:bootstrap',
+                }], error: null };
+            }
+            throw new Error(`unexpected RPC ${name}`);
+        });
+        defaultRecoveryMocks.from.mockImplementation((table: string) => {
+            if (table === 'earlybird_first15_canary_provider_rearms') {
+                throw new Error('direct rearm-ledger reads are forbidden');
+            }
+            if (table === 'analysis_v2_provider_runs') {
+                return {
+                    select: vi.fn(() => ({
+                        in: vi.fn(() => ({ limit: vi.fn(async () => ({
+                            data: [providerRun(1), providerRun(2), providerRun(3)].map(row => ({
+                                request_id: row.requestId,
+                                job_key: row.jobKey,
+                                operation_key: row.operationKey,
+                                input_hash: row.inputHash,
+                                reservation_token: row.reservationToken,
+                                logical_provider: row.logicalProvider,
+                                actor_id: row.actorId,
+                                credential_slot: row.credentialSlot,
+                                max_charge_usd: row.maxChargeUsd,
+                                status: row.status,
+                                run_id: row.runId,
+                                actual_usage_usd: row.actualUsageUsd,
+                                reserved_at: row.reservedAt,
+                                run_started_at: row.runStartedAt,
+                                terminalized_at: row.terminalizedAt,
+                                usage_reconciled_at: row.usageReconciledAt,
+                            })),
+                            error: null,
+                        })) })),
+                    })),
+                };
+            }
+            throw new Error(`unexpected table ${table}`);
+        });
+
+        await expect(runFirst15CanaryProviderRecovery()).resolves.toMatchObject({
+            candidates: 3,
+            reconciledProviderRuns: 3,
+            rearmed: 3,
+            dispatched: 3,
+        });
+
+        expect(defaultRecoveryMocks.rpc).toHaveBeenCalledWith(
+            'list_earlybird_first15_canary_provider_rearms',
+        );
+    });
+
     it('reconciles only the three source ledgers, then rearms them on tertiary sequentially', async () => {
         const deps = dependencies();
 
