@@ -114,6 +114,12 @@ export function extractV211EvidenceTerms(input: V211CopyEvidence): string[] {
         .slice(0, 8);
 }
 
+/** True only when the retained bio/caption source has visible raw text. */
+export function hasRetainedPublicText(input: V211CopyEvidence): boolean {
+    return [input.profileEvidence ?? '', ...(input.feedEvidence ?? [])]
+        .some(value => normalizeCopy(value).length > 0);
+}
+
 export function isForbiddenV211Overview(value: unknown): boolean {
     if (typeof value !== 'string') return true;
     const normalized = normalizeCopy(value);
@@ -259,7 +265,11 @@ export type V213ReviewedOverview = {
     /** The deliberately selected composition, retained with the correction audit. */
     form: string;
     evidenceTerms: readonly string[];
+    /** Present only for the two explicit no-text v2.13 evidence paths. */
+    sparseOverviewMode?: V213SparseOverviewMode;
 };
+
+export type V213SparseOverviewMode = 'observed_interaction' | 'no_text_evidence';
 
 /**
  * The correction pass intentionally rewrites every already-published overview.
@@ -368,6 +378,91 @@ function interactionParts(
     return parts;
 }
 
+/** A compact direction-preserving phrase when the target's display name cannot be public overview text. */
+function sparseInteractionPhrase(input: V211InteractionEvidence, candidate: string): string | null {
+    if (input.candidateLikedTarget) return `${candidate}이 상대 게시물에 좋아요를 남긴 흐름`;
+    if (input.candidateCommentedOnTarget) return `${candidate}이 상대 게시물에 댓글을 남긴 흐름`;
+    if (input.targetLikedCandidate) return `상대가 ${candidate} 피드에 좋아요를 남긴 흐름`;
+    if (input.targetCommentedOnCandidate) return `상대가 ${candidate} 피드에 댓글을 남긴 흐름`;
+    if (input.candidateTaggedTarget) return `${candidate}이 상대를 태그한 흔적`;
+    if (input.targetTaggedCandidate) return `상대가 ${candidate}을 태그한 흔적`;
+    if (input.candidateCaptionMentionedTarget) return `${candidate}이 캡션에서 상대를 멘션한 흔적`;
+    if (input.candidateCommentMentionedTarget) return `${candidate}이 댓글에서 상대를 멘션한 흔적`;
+    if (input.candidateMentionedTarget) return `${candidate}이 상대를 멘션한 흔적`;
+    if (input.targetCaptionMentionedCandidate) return `상대가 캡션에서 ${candidate}을 멘션한 흔적`;
+    if (input.targetCommentMentionedCandidate) return `상대가 댓글에서 ${candidate}을 멘션한 흔적`;
+    if (input.targetMentionedCandidate) return `상대가 ${candidate}을 멘션한 흔적`;
+    if (input.tagEvidence) return `${candidate}과 관련해 확인된 태그 표기`;
+    return null;
+}
+
+/**
+ * A v2.13-only path for a retained profile whose bio and captions contain no
+ * publishable text.  It deliberately never turns media shape into a fact:
+ * either an observed public interaction is named, or the copy says only that
+ * the available text is absent and refuses to invent a photo story.
+ */
+export function buildV213SparseEvidenceOverview(input: V211InteractionEvidence & {
+    reviewOrdinal: number;
+    subjects: V211CopySubjects;
+    /** Allows the no-text statement only when bio and retained captions are truly absent. */
+    textEvidenceAbsent: boolean;
+}): V213ReviewedOverview {
+    const candidateFullName = normalizedFullName(input.subjects.candidateFullName);
+    if (!candidateFullName || /[0-9@]/u.test(candidateFullName)) {
+        throw new Error('CONCIERGE_COPY_SPARSE_SUBJECTS_REQUIRED');
+    }
+    const candidate = candidateFullName.endsWith('님') ? candidateFullName : `${candidateFullName}님`;
+    const hasObservedInteraction = input.candidateLikedTarget
+        || input.candidateCommentedOnTarget
+        || input.targetLikedCandidate
+        || Boolean(input.targetCommentedOnCandidate)
+        || Boolean(input.candidateTaggedTarget)
+        || Boolean(input.targetTaggedCandidate)
+        || Boolean(input.candidateCaptionMentionedTarget)
+        || Boolean(input.candidateCommentMentionedTarget)
+        || Boolean(input.targetCaptionMentionedCandidate)
+        || Boolean(input.targetCommentMentionedCandidate)
+        || Boolean(input.candidateMentionedTarget)
+        || Boolean(input.targetMentionedCandidate)
+        || Boolean(input.tagEvidence);
+    if (!hasObservedInteraction && !input.textEvidenceAbsent) {
+        throw new Error('CONCIERGE_COPY_EVIDENCE_UNAVAILABLE');
+    }
+    const observedPart = hasObservedInteraction ? sparseInteractionPhrase(input, candidate) : null;
+    if (hasObservedInteraction && !observedPart) {
+        throw new Error('CONCIERGE_COPY_INTERACTION_EVIDENCE_UNAVAILABLE');
+    }
+    const sparseOverviewMode: V213SparseOverviewMode = observedPart
+        ? 'observed_interaction'
+        : 'no_text_evidence';
+    const raw = observedPart
+        ? `${observedPart}이 확인되지만, 단일 공개 반응만으로 관계를 단정하지 않고 공개 기록부터 살펴봅니다.`
+        : `${candidate}의 공개된 소개·캡션 문구가 비어 있어, 사진에서 이야기를 지어내지 않고 이름으로 확인되는 범위만 차분히 읽어봅니다.`;
+    const overview = normalizeCopy(raw);
+    // Sparse overview names must be canonical full names, not username
+    // fallbacks, because the immutable RPC rejects identifiers in overview text.
+    const masked = overview
+        .replaceAll(candidate, 'PERSON');
+    if (
+        overview.length < 25
+        || overview.length > MAX_OVERVIEW_LENGTH
+        || isForbiddenV211Overview(overview)
+        || containsDefinitiveRelationshipAccusation(masked)
+        || containsExposedInteractionMetric(masked)
+        || publicIdentifierPattern.test(overview)
+        || genericRoleLabel(overview)
+    ) {
+        throw new Error('CONCIERGE_COPY_OVERVIEW_CONTRACT_FAILED');
+    }
+    return {
+        overview,
+        form: `v213-full-review-${((input.reviewOrdinal % 16) + 16) % 16 + 1}`,
+        evidenceTerms: [candidate],
+        sparseOverviewMode,
+    };
+}
+
 export function buildV211EvidenceSpecificRiskNarrative(
     input: V211CopyEvidence & V211InteractionEvidence,
 ): [string, string] {
@@ -405,6 +500,7 @@ export type V213ReviewRecord = {
     nextOverview: string;
     overviewChanged: boolean;
     overviewForm: string;
+    overviewEvidenceMode: 'text_evidence' | V213SparseOverviewMode;
     observedEvidenceTerms: readonly string[];
     narrative: {
         previousLines: readonly string[];
@@ -422,6 +518,7 @@ export function createV213ReviewRecord(input: {
     nextOverview: string;
     overviewForm: string;
     evidenceTerms: readonly string[];
+    overviewEvidenceMode?: 'text_evidence' | V213SparseOverviewMode;
     previousRiskAnalysis: readonly string[];
     nextRiskAnalysis: readonly string[];
 }): V213ReviewRecord {
@@ -442,6 +539,7 @@ export function createV213ReviewRecord(input: {
         nextOverview,
         overviewChanged: previousOverview !== nextOverview,
         overviewForm: input.overviewForm,
+        overviewEvidenceMode: input.overviewEvidenceMode ?? 'text_evidence',
         observedEvidenceTerms: [...new Set(input.evidenceTerms)],
         narrative: {
             previousLines,
@@ -557,6 +655,7 @@ export type V213FullReviewRow = V211PublicCopyRow & {
     rank: number;
     previousOverview: string;
     review: V213ReviewRecord;
+    sparseOverviewMode?: V213SparseOverviewMode;
 };
 
 /**
@@ -568,11 +667,52 @@ export function validateV213FullReviewRows(input: {
     rows: readonly V213FullReviewRow[];
 }): void {
     if (input.rows.length !== 16) throw new Error('CONCIERGE_COPY_FULL_REVIEW_SCOPE_INVALID');
-    validateV211PublicCopyRows({ rows: input.rows });
 
     const ranks = new Set<number>();
     const forms = new Map<string, number>();
     for (const row of input.rows) {
+        const overview = normalizeCopy(row.oneLineOverview);
+        const subjects = v211CopySubjectNames(row.subjects);
+        if (row.sparseOverviewMode) {
+            const masked = overview
+                .replaceAll(subjects.candidate, 'PERSON')
+                .replaceAll(subjects.target, 'PERSON');
+            if (
+                overview.length < 25
+                || overview.length > MAX_OVERVIEW_LENGTH
+                || isForbiddenV211Overview(overview)
+                || containsDefinitiveRelationshipAccusation(masked)
+                || containsExposedInteractionMetric(masked)
+                || publicIdentifierPattern.test(overview)
+                || genericRoleLabel(overview)
+            ) {
+                throw new Error('CONCIERGE_COPY_GENERIC_FORBIDDEN');
+            }
+            const observedPart = sparseInteractionPhrase(row, subjects.candidate);
+            if (row.sparseOverviewMode === 'observed_interaction') {
+                if (!observedPart || !overview.includes(observedPart) || !overview.includes('단정하지 않고')) {
+                    throw new Error('CONCIERGE_COPY_EVIDENCE_GROUNDING_FAILED');
+                }
+            } else if (
+                row.sparseOverviewMode !== 'no_text_evidence'
+                || hasRetainedPublicText(row)
+                || observedPart !== null
+                || !overview.includes(subjects.candidate)
+                || !overview.includes('소개·캡션 문구가 비어 있어')
+                || !overview.includes('사진에서 이야기를 지어내지 않고')
+            ) {
+                throw new Error('CONCIERGE_COPY_EVIDENCE_GROUNDING_FAILED');
+            }
+        } else {
+            if (needsV211EvidenceSpecificOverview(overview, row)) {
+                throw new Error('CONCIERGE_COPY_GENERIC_FORBIDDEN');
+            }
+            const evidenceTerms = extractV211EvidenceTerms(row);
+            if (evidenceTerms.length === 0 || !evidenceTerms.some(term => overview.toLowerCase().includes(term.toLowerCase()))) {
+                throw new Error('CONCIERGE_COPY_EVIDENCE_GROUNDING_FAILED');
+            }
+        }
+        assertV211InteractionCopy(row);
         const review = row.review;
         if (!Number.isInteger(row.rank) || row.rank < 1 || row.rank > 16 || ranks.has(row.rank)) {
             throw new Error('CONCIERGE_COPY_FULL_REVIEW_SCOPE_INVALID');
@@ -582,6 +722,7 @@ export function validateV213FullReviewRows(input: {
             review.reviewVersion !== 'v213-full-evidence-review-v1'
             || review.rank !== row.rank
             || !review.overviewChanged
+            || review.overviewEvidenceMode !== (row.sparseOverviewMode ?? 'text_evidence')
             || normalizeCopy(review.previousOverview) !== normalizeCopy(row.previousOverview)
             || normalizeCopy(review.nextOverview) !== normalizeCopy(row.oneLineOverview)
             || normalizeCopy(review.previousOverview) === normalizeCopy(row.oneLineOverview)
@@ -617,5 +758,13 @@ export function validateV213FullReviewRows(input: {
     }
     if (ranks.size !== 16 || forms.size < 8 || [...forms.values()].some(count => count > 2)) {
         throw new Error('CONCIERGE_COPY_FULL_REVIEW_VARIETY_INVALID');
+    }
+    const overviews = input.rows.map(row => normalizeCopy(row.oneLineOverview));
+    for (let left = 0; left < overviews.length; left += 1) {
+        for (let right = left + 1; right < overviews.length; right += 1) {
+            if (areMateriallyNearDuplicatePublicCopies(overviews[left]!, overviews[right]!)) {
+                throw new Error('CONCIERGE_COPY_DUPLICATE_FORBIDDEN');
+            }
+        }
     }
 }

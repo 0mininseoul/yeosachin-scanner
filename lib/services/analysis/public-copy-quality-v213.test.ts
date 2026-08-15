@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import {
     buildV211EvidenceSpecificRiskNarrative,
     buildV213ReviewedOverview,
+    buildV213SparseEvidenceOverview,
     createV213ReviewRecord,
     validateV213FullReviewRows,
 } from './public-copy-quality';
@@ -125,5 +126,53 @@ describe('v2.13 concierge full public-copy review', () => {
 
         expect(narrative[1]).toContain('박민지님이 김준호님을 댓글에서 멘션한 흔적');
         expect(narrative[1]).not.toContain('캡션');
+    });
+
+    it('uses only a named observed interaction or the observed absence of text for sparse v2.13 profiles', () => {
+        const interactionOverview = buildV213SparseEvidenceOverview({
+            reviewOrdinal: 1,
+            subjects: {
+                targetUsername: 'target.user',
+                targetFullName: '김준호',
+                candidateUsername: 'candidate.user',
+                candidateFullName: '박민지',
+            },
+            candidateLikedTarget: true,
+            candidateCommentedOnTarget: false,
+            targetLikedCandidate: false,
+            textEvidenceAbsent: false,
+        });
+        expect(interactionOverview.overview).toContain('박민지님이 상대 게시물에 좋아요를 남긴 흐름');
+        expect(interactionOverview.overview).toContain('관계를 단정하지 않고');
+        expect(interactionOverview.evidenceTerms).toContain('박민지님');
+
+        const noTextOverview = buildV213SparseEvidenceOverview({
+            reviewOrdinal: 12,
+            subjects: {
+                targetUsername: 'target.user',
+                targetFullName: '김준호',
+                candidateUsername: 'candidate.user',
+                candidateFullName: '이서연',
+            },
+            candidateLikedTarget: false,
+            candidateCommentedOnTarget: false,
+            targetLikedCandidate: false,
+            textEvidenceAbsent: true,
+        });
+        expect(noTextOverview.overview).toContain('이서연님');
+        expect(noTextOverview.overview).toContain('소개·캡션 문구가 비어 있어');
+        expect(noTextOverview.overview).toContain('사진에서 이야기를 지어내지 않고');
+
+        expect(() => buildV213SparseEvidenceOverview({
+            reviewOrdinal: 0,
+            subjects: {
+                targetUsername: 'target2',
+                candidateUsername: 'candidate123',
+            },
+            candidateLikedTarget: true,
+            candidateCommentedOnTarget: false,
+            targetLikedCandidate: false,
+            textEvidenceAbsent: false,
+        })).toThrow('CONCIERGE_COPY_SPARSE_SUBJECTS_REQUIRED');
     });
 });

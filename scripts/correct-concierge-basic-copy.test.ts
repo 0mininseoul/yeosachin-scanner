@@ -27,15 +27,20 @@ describe('first published concierge copy correction', () => {
             photogenic_grade: index === 0 ? 5 : 1,
             is_tagged: index === 0,
         }));
-        const profiles = new Map(rows.map((row, index) => [row.suspect_instagram_id, {
-            fullName: row.suspect_full_name,
-            bio: `${['도자기', '러닝', '독서', '베이킹'][index % 4]} 기록`,
-            profilePicUrl: index === 0 ? 'https://example.com/one.jpg' : undefined,
-            latestPosts: [{
-                caption: `${['성수', '한강', '연희', '망원'][index % 4]}의 ${['전시', '산책', '커피', '공연'][index % 4]} 장면`,
-                imageUrl: 'https://example.com/post.jpg',
-            }],
-        }]));
+        const profiles = new Map(rows.map((row, index) => {
+            const hasNoPublishableText = index === 1 || index === 12;
+            return [row.suspect_instagram_id, {
+                fullName: row.suspect_full_name,
+                bio: hasNoPublishableText ? undefined : `${['도자기', '러닝', '독서', '베이킹'][index % 4]} 기록`,
+                profilePicUrl: index === 0 ? 'https://example.com/one.jpg' : undefined,
+                latestPosts: [{
+                    ...(hasNoPublishableText ? {} : {
+                        caption: `${['성수', '한강', '연희', '망원'][index % 4]}의 ${['전시', '산책', '커피', '공연'][index % 4]} 장면`,
+                    }),
+                    imageUrl: 'https://example.com/post.jpg',
+                }],
+            }];
+        }));
         const payload = buildCorrectionPayload({
             targetUsername: 'target.user',
             targetFullName: '김준호',
@@ -86,5 +91,9 @@ describe('first published concierge copy correction', () => {
         expect(highRisk?.riskAnalysis.join(' ')).toContain('박가민님이 김준호님 게시물에 좋아요를 남긴 흐름');
         expect(highRisk?.riskAnalysis.join(' ')).toContain('사진이 관계 설명서를 써주지는 않습니다');
         expect(highRisk?.riskAnalysis.join(' ')).not.toMatch(/(?:대상\s*계정|후보\s*계정|위장여사친)/u);
+        expect(payload.rows[1]?.oneLineOverview).toContain('박나민님이 상대 게시물에 댓글을 남긴 흐름');
+        expect(payload.rows[1]?.oneLineOverview).toContain('관계를 단정하지 않고');
+        expect(payload.rows[12]?.oneLineOverview).toContain('박파민님의 공개된 소개·캡션 문구가 비어 있어');
+        expect(payload.rows[12]?.oneLineOverview).toContain('사진에서 이야기를 지어내지 않고');
     });
 });
