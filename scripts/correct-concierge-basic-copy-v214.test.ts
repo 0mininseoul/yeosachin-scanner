@@ -5,6 +5,7 @@ vi.mock('@/lib/supabase/admin', () => ({ supabaseAdmin: {} }));
 import {
     buildV214NarrativeInput,
     buildV214GeminiCopyPayload,
+    generateV214GeminiCopyWithSchemaRetry,
     type V214FrozenResultRow,
 } from './correct-concierge-basic-copy-v214';
 import type { FeatureAnalysisResult } from '@/lib/services/ai/v2-staged-analysis';
@@ -57,6 +58,32 @@ function geminiRows(rows: readonly V214FrozenResultRow[]) {
 }
 
 describe('v2.14 first-payment Gemini copy correction', () => {
+    it('retries schema-rejected Gemini copy generation up to three total attempts', async () => {
+        const generate = vi.fn()
+            .mockRejectedValueOnce(new Error('AI_GENERATION_RESPONSE_REJECTED_ERROR: generated response failed strict validation.'))
+            .mockRejectedValueOnce(new Error('AI_GENERATION_RESPONSE_REJECTED_ERROR: generated response failed strict validation.'))
+            .mockResolvedValueOnce('valid-copy');
+
+        await expect(generateV214GeminiCopyWithSchemaRetry(generate)).resolves.toBe('valid-copy');
+        expect(generate).toHaveBeenCalledTimes(3);
+    });
+
+    it('fails closed after the third schema-rejected generation attempt', async () => {
+        const rejection = new Error('AI_GENERATION_RESPONSE_REJECTED_ERROR: generated response failed strict validation.');
+        const generate = vi.fn().mockRejectedValue(rejection);
+
+        await expect(generateV214GeminiCopyWithSchemaRetry(generate)).rejects.toBe(rejection);
+        expect(generate).toHaveBeenCalledTimes(3);
+    });
+
+    it('does not retry non-schema generation errors', async () => {
+        const failure = new Error('AI_RATE_LIMIT_ERROR: quota unavailable.');
+        const generate = vi.fn().mockRejectedValue(failure);
+
+        await expect(generateV214GeminiCopyWithSchemaRetry(generate)).rejects.toBe(failure);
+        expect(generate).toHaveBeenCalledTimes(1);
+    });
+
     it('binds the first-result adapter to retained bidirectional evidence without reverse comments', () => {
         const target = {
             username: 'target.user', fullName: '김준호', followersCount: 1,
