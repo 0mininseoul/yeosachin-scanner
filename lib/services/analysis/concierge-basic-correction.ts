@@ -1,5 +1,9 @@
 import { createHash } from 'node:crypto';
-import type { AccountContext, AppearanceGrade } from '@/lib/domain/analysis/risk-policy';
+import {
+    isRiskBandCompatibleWithDisplayScore,
+    type AccountContext,
+    type AppearanceGrade,
+} from '@/lib/domain/analysis/risk-policy';
 import type { FeatureAnalysisResult } from '@/lib/services/ai/v2-staged-analysis';
 import type { ReplayAccountAiDetail } from './replay/replay-runner';
 import type { InstagramPost, InstagramProfile } from '@/lib/types/instagram';
@@ -481,6 +485,19 @@ export function validateCanonicalConciergeCorrection(input: {
     }
     if (result.femaleRows.some(row => row.risk_grade === 'high_risk' && row.risk_analysis.length === 0)) {
         throw new Error('CONCIERGE_NARRATIVE_REQUIRED');
+    }
+    if (result.femaleRows.some(row => (
+        !Number.isFinite(row.risk_score)
+        || !Number.isSafeInteger(row.risk_score)
+        || row.risk_score < 10
+        || row.risk_score > 100
+    ))) {
+        throw new Error('CONCIERGE_RISK_SCORE_INVALID');
+    }
+    if (result.femaleRows.some(row => (
+        !isRiskBandCompatibleWithDisplayScore(row.risk_score / 10, row.risk_grade)
+    ))) {
+        throw new Error('CONCIERGE_RISK_SCORE_GRADE_MISMATCH');
     }
     if (result.femaleRows.some(row => (
         !row.one_line_overview
