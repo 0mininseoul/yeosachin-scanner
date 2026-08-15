@@ -2479,7 +2479,7 @@ function narrativePrompt(
             ...input.publicSubjects,
         });
         const appearanceRule = input.appearance.isReliable
-            ? '첫 문장에는 피드·프로필 맥락과 함께 가벼운 외모 농담을 한 번 넣되, 반드시 이미지 인상만으로 관계를 판단할 수 없다고 밝혀야 합니다.'
+            ? '첫 문장에는 피드·프로필 맥락과 함께 가벼운 외모 농담을 한 번 넣고, "예쁘", "매력", "눈길" 중 하나와 "이미지 인상만으로 관계를 판단할 수는 없습니다"를 그대로 포함하세요.'
             : '외모·이미지에 관한 문구를 만들지 마세요.';
         return `${legacy}\nv2.11 공개 서사는 첫 문장에 ${subjects.candidate}, 둘째 문장에 ${subjects.candidate}와 ${subjects.target}을 직접 적으세요. \"대상 계정\"이나 \"후보 계정\"이라는 표현은 금지합니다. 각 좋아요·댓글·태그·멘션은 실제 관측 방향을 이름으로 설명하고, 단일 좋아요나 외모만으로 관계를 증명하지 마세요. ${appearanceRule}`;
     }
