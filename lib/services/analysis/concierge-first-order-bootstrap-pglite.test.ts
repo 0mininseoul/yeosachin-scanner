@@ -9,6 +9,13 @@ const migrationPath = new URL(
 const migration = existsSync(migrationPath)
     ? readFileSync(migrationPath, 'utf8')
     : '';
+const guardMigrationPath = new URL(
+    '../../../supabase/migrations/20260815113000_allow_pr403_exclude_scope.sql',
+    import.meta.url,
+);
+const guardMigration = existsSync(guardMigrationPath)
+    ? readFileSync(guardMigrationPath, 'utf8')
+    : '';
 
 const ORDER_ID = '123e4567-e89b-42d3-a456-426614174000';
 const OWNER_ID = '223e4567-e89b-42d3-a456-426614174000';
@@ -36,6 +43,15 @@ const migrationContract = [
     'CONCIERGE_BOOTSTRAP_PUBLICATION_CAS_CONFLICT',
     'REVOKE ALL ON FUNCTION',
     'GRANT EXECUTE ON FUNCTION',
+] as const;
+
+const guardMigrationContract = [
+    'MIGRATION_PREDECESSOR=20260815090000',
+    'pg_get_functiondef',
+    'CONCIERGE_PR403_EXCLUDE_GUARD_DEFINITION_DRIFT',
+    "v_order.exclusion_decision = 'exclude'",
+    "v_order.exclusion_decision = 'skip'",
+    'CONCIERGE_PR403_EXCLUDE_GUARD_FINAL_MISMATCH',
 ] as const;
 
 function relationshipRows(count: number, prefix: string): unknown[] {
@@ -236,6 +252,7 @@ async function seed() {
         REVOKE ALL ON public.earlybird_v211_concierge_replays FROM PUBLIC, anon, authenticated, service_role;
     `);
     await db.exec(migration);
+    if (guardMigration.trim()) await db.exec(guardMigration);
     await db.query(`
         INSERT INTO public.analysis_requests(id, user_id, preflight_id, target_instagram_id, status, pipeline_version, step_data)
             VALUES
@@ -269,6 +286,65 @@ afterEach(async () => {
 describe('concierge first-order bootstrap migration contract', () => {
     it.each(migrationContract)('includes the narrow %s guard', (marker) => {
         expect(migration).toContain(marker);
+    });
+
+    it.each(guardMigrationContract)('includes the forward PR403 exclusion guard %s', (marker) => {
+        expect(guardMigration).toContain(marker);
+    });
+
+    it('accepts only the exact PR403-compatible excluded candidate state', async () => {
+        await db.query(
+            `UPDATE public.earlybird_orders
+                SET exclusion_decision = 'exclude', excluded_instagram_id = 'reviewed.other'
+              WHERE id = $1`,
+            [ORDER_ID],
+        );
+        const result = await withRole('service_role', () => db.query<{ result: Record<string, unknown> }>(
+            `SELECT public.bootstrap_earlybird_v211_concierge_first_order(
+                $1::uuid,$2::uuid,$3::uuid,$4::uuid,$5::uuid,$6::uuid,$7::uuid,$8::uuid,
+                $9::text,$10::text,$11::smallint,$12::integer,$13::integer,$14::integer,
+                $15::integer,$16::integer,$17::text,$18::text,$19::jsonb,$20::jsonb,$21::jsonb,
+                $22::jsonb,$23::jsonb
+            ) AS result`,
+            callParams(),
+        ));
+        expect(result.rows[0]?.result).toMatchObject({
+            disposition: 'published',
+            orderId: ORDER_ID,
+            resultRequestId: RESULT_REQUEST_ID,
+        });
+        await expect(db.query(
+            `SELECT result_request_id, target_instagram_id, status
+               FROM public.earlybird_orders WHERE id = $1`,
+            [ORDER_ID],
+        )).resolves.toMatchObject({ rows: [{
+            result_request_id: RESULT_REQUEST_ID,
+            target_instagram_id: 'target',
+            status: 'completed',
+        }] });
+    });
+
+    it.each([
+        ['same target', 'target'],
+        ['malformed username', 'bad username'],
+    ])('still rejects a PR403 exclusion that is not valid: %s', async (_label, excludedInstagramId) => {
+        await db.query(
+            `UPDATE public.earlybird_orders
+                SET exclusion_decision = 'exclude', excluded_instagram_id = $2
+              WHERE id = $1`,
+            [ORDER_ID, excludedInstagramId],
+        );
+        await expect(withRole('service_role', () => db.query(
+            `SELECT public.bootstrap_earlybird_v211_concierge_first_order(
+                $1::uuid,$2::uuid,$3::uuid,$4::uuid,$5::uuid,$6::uuid,$7::uuid,$8::uuid,
+                $9::text,$10::text,$11::smallint,$12::integer,$13::integer,$14::integer,
+                $15::integer,$16::integer,$17::text,$18::text,$19::jsonb,$20::jsonb,$21::jsonb,
+                $22::jsonb,$23::jsonb
+            )`,
+            callParams(),
+        ))).rejects.toThrow('CONCIERGE_FIRST_ORDER_BOOTSTRAP_ORDER_SCOPE_CONFLICT');
+        await expect(db.query('SELECT count(*)::int AS count FROM public.earlybird_v211_concierge_replays'))
+            .resolves.toMatchObject({ rows: [{ count: 0 }] });
     });
 
     it('bootstraps only with complete relationship evidence and keeps the V1 pointer unchanged', async () => {

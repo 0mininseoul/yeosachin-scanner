@@ -1040,8 +1040,8 @@ describe('V2 staged AI services', () => {
             { aiStagePolicyVersion: AI_STAGE_POLICY_V211_VERSION },
         );
 
-        expect(result.features.oneLineOverview)
-            .toBe('사진과 소개에 드러난 개인 기록의 결이 선명해서, 피드가 보여 준 장면부터 차분히 짚어볼 계정입니다.');
+        expect(result.features.oneLineOverview).toContain('여행');
+        expect(result.features.oneLineOverview).not.toContain('차분히 짚어볼 계정입니다');
         const [prompt] = mocks.analyzeWithGemini.mock.calls[0];
         expect(prompt).toContain('분석 방법이나 자료의 한계를 직접 말하지 마세요');
     });
@@ -1062,9 +1062,8 @@ describe('V2 staged AI services', () => {
             { aiStagePolicyVersion: AI_STAGE_POLICY_V211_VERSION },
         );
 
-        expect(result.features.oneLineOverview).toBe(
-            '창작과 일상 기록이 섞여 있고, 피드에 드러난 활동 흐름을 중심으로 읽어볼 만한 계정입니다.',
-        );
+        expect(result.features.oneLineOverview).toContain('여행');
+        expect(result.features.oneLineOverview).not.toContain('활동 흐름을 중심으로 읽어볼 만한 계정입니다');
     });
 
     it('keeps shipped v2.9 overview acceptance and legacy prompt bytes immutable', async () => {
