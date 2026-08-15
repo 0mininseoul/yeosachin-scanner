@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useRef, useState } from 'react';
 import {
+    PRECHECKOUT_BLITE_LIKELY_FEMALE_CONFIDENCE_THRESHOLD,
     precheckoutBliteV1Schema,
     type PrecheckoutBliteSignalBand,
     type PrecheckoutBliteV1,
@@ -21,7 +22,7 @@ const MAX_ANALYTICS_DURATION_MS = 86_400_000;
 
 type PrecheckoutEventName = typeof PRECHECKOUT_EVENTS[keyof typeof PRECHECKOUT_EVENTS];
 type DemoExit = 'result' | 'fallback';
-type ImmersiveView = 'demo' | 'result' | 'fallback';
+type ImmersiveView = 'demo' | 'genderConfirm' | 'result' | 'fallback' | 'rejected';
 type FallbackReason = 'unresolved_at_90' | 'demo_error';
 
 type BrowserBliteStatus =
@@ -145,7 +146,10 @@ export function PrecheckoutImmersive({
     onGoToPlans,
     onDemoError,
 }: PrecheckoutImmersiveProps) {
+    /** The accepted-preflight clock; governs BLITE_UX_DEADLINE_MS only. */
     const [startedAtMs] = useState(() => isValidEpoch(submittedAtMs) ? submittedAtMs : Date.now());
+    /** Mount-local clock, always fresh, so every mount/remount/reload plays S1 first. */
+    const [visibleEntryAtMs] = useState(() => Date.now());
     const [view, setView] = useState<ImmersiveView>('demo');
     const [dto, setDto] = useState<PrecheckoutBliteV1 | null>(null);
     const dtoRef = useRef<PrecheckoutBliteV1 | null>(null);
@@ -173,10 +177,17 @@ export function PrecheckoutImmersive({
         settledExitRef.current = true;
         emitPrecheckoutEvent(PRECHECKOUT_EVENTS.DEMO_COMPLETED, {
             demo_mode: finalExit === 'result' ? 'result' : 'fallback',
-            duration_ms: boundedDemoDurationMs(startedAtMs, Date.now()),
+            duration_ms: boundedDemoDurationMs(visibleEntryAtMs, Date.now()),
         });
-        setView(finalExit === 'result' && dtoRef.current ? 'result' : 'fallback');
-    }, [emitPrecheckoutEvent, startedAtMs]);
+        const resultDto = finalExit === 'result' ? dtoRef.current : null;
+        if (resultDto) {
+            const needsGenderConfirm = resultDto.genderRead.likelyFemale
+                && resultDto.genderRead.confidence >= PRECHECKOUT_BLITE_LIKELY_FEMALE_CONFIDENCE_THRESHOLD;
+            setView(needsGenderConfirm ? 'genderConfirm' : 'result');
+            return;
+        }
+        setView('fallback');
+    }, [emitPrecheckoutEvent, visibleEntryAtMs]);
 
     const requestExit = useCallback((
         nextExit: DemoExit,
@@ -193,7 +204,7 @@ export function PrecheckoutImmersive({
         setExit(nextExit);
         const targetAtMs = forceImmediate
             ? Date.now()
-            : nextGraphTransitionAt(startedAtMs, Date.now());
+            : nextGraphTransitionAt(visibleEntryAtMs, Date.now());
         const settle = () => {
             if (exitRef.current === nextExit) finishExit(nextExit);
         };
@@ -202,7 +213,7 @@ export function PrecheckoutImmersive({
         } else {
             exitTimerRef.current = setTimeout(settle, targetAtMs - Date.now());
         }
-    }, [emitPrecheckoutEvent, finishExit, startedAtMs]);
+    }, [emitPrecheckoutEvent, finishExit, visibleEntryAtMs]);
 
     useEffect(() => () => {
         if (exitTimerRef.current) clearTimeout(exitTimerRef.current);
@@ -210,7 +221,10 @@ export function PrecheckoutImmersive({
 
     const completeFallbackAtDeadline = useCallback(() => {
         if (exitRef.current === 'result') return;
-        requestExit('fallback', true);
+        // Settle at the next graph transition (from visibleEntryAtMs), never mid-sequence: a
+        // reload can make the accepted-preflight deadline land inside the freshly-restarted
+        // initial pass, and that pass must still finish its guaranteed 1->2->3->4 order.
+        requestExit('fallback');
     }, [requestExit]);
 
     useEffect(() => {
@@ -272,20 +286,40 @@ export function PrecheckoutImmersive({
     const handleDemoError = useCallback(() => {
         emitPrecheckoutEvent(PRECHECKOUT_EVENTS.DEMO_FAILED, {
             demo_mode: exitRef.current === 'result' ? 'result' : 'fallback',
-            duration_ms: boundedDemoDurationMs(startedAtMs, Date.now()),
+            duration_ms: boundedDemoDurationMs(visibleEntryAtMs, Date.now()),
         });
         requestExit('fallback', false, 'demo_error');
         onDemoError?.();
-    }, [emitPrecheckoutEvent, onDemoError, requestExit, startedAtMs]);
+    }, [emitPrecheckoutEvent, onDemoError, requestExit, visibleEntryAtMs]);
 
     if (view === 'demo') {
         return (
             <PrecheckoutDemo
                 mode="waiting"
-                startedAtMs={startedAtMs}
+                startedAtMs={visibleEntryAtMs}
                 finishRequested={exit !== null}
                 onComplete={handleDemoComplete}
                 onError={handleDemoError}
+            />
+        );
+    }
+
+    if (view === 'genderConfirm' && dto) {
+        return (
+            <GenderConfirmScreen
+                dto={dto}
+                onYes={() => {
+                    emitPrecheckoutEvent(PRECHECKOUT_EVENTS.BLITE_GENDER_CONFIRMATION_COMPLETED, {
+                        gender_confirmation_outcome: 'confirmed',
+                    });
+                    setView('result');
+                }}
+                onNo={() => {
+                    emitPrecheckoutEvent(PRECHECKOUT_EVENTS.BLITE_GENDER_CONFIRMATION_COMPLETED, {
+                        gender_confirmation_outcome: 'rejected',
+                    });
+                    setView('rejected');
+                }}
             />
         );
     }
@@ -304,10 +338,68 @@ export function PrecheckoutImmersive({
         );
     }
 
+    if (view === 'rejected') {
+        // A gender rejection is not a B-lite timeout/failure: the neutral completion CTA is
+        // reused as-is, but its analytics still record the already-available `result` demo mode.
+        return <FallbackScreen onContinue={() => {
+            emitPrecheckoutEvent(PRECHECKOUT_EVENTS.PLAN_GATE_REACHED, { demo_mode: 'result' });
+            onGoToPlans();
+        }} />;
+    }
+
     return <FallbackScreen onContinue={() => {
         emitPrecheckoutEvent(PRECHECKOUT_EVENTS.PLAN_GATE_REACHED, { demo_mode: 'fallback' });
         onGoToPlans();
     }} />;
+}
+
+function GenderConfirmScreen({
+    dto,
+    onYes,
+    onNo,
+}: {
+    dto: PrecheckoutBliteV1;
+    onYes: () => void;
+    onNo: () => void;
+}) {
+    return (
+        <CaseCard bracket="var(--color-amber)" className="mt-7 p-6 text-center">
+            <Eyebrow className="justify-center">판독 방향 확인</Eyebrow>
+            <h2 className="mt-3 text-[19px] font-extrabold leading-snug text-fg">
+                이 계정의 인물이 남자가 맞나요?
+            </h2>
+            <p data-amp-block className="mt-2.5 text-[13px] leading-relaxed text-fg-dim">
+                공개 게시물과 프로필 신호를 1차로 추론한 결과, 이 계정의 인물이{' '}
+                <span className="font-bold text-fg">여성일 가능성이 높다는 고신뢰 판독</span>이 나왔습니다.
+                판독 방향이 어긋나지 않도록, 시작 전에 한 번만 확인이 필요해요.
+            </p>
+
+            <div data-amp-block className="mt-4 border border-line bg-ink-2 p-3.5 text-left">
+                <p className="label-ko">이렇게 본 이유</p>
+                <ul className="mt-2 list-disc space-y-1.5 pl-4 text-[12px] leading-relaxed text-fg-dim">
+                    {dto.genderRead.reasons.map(reason => (
+                        <li key={reason}>{reason}</li>
+                    ))}
+                </ul>
+            </div>
+
+            <div className="mt-5 flex gap-2.5">
+                <button
+                    type="button"
+                    onClick={onNo}
+                    className="flex-1 border border-line-2 bg-transparent px-5 py-4 text-[15px] font-bold text-fg transition-colors duration-150 hover:border-fg-dim hover:bg-panel"
+                >
+                    아니오
+                </button>
+                <PrimaryButton onClick={onYes} className="flex-1">
+                    예
+                </PrimaryButton>
+            </div>
+            <p className="mt-2.5 text-[11px] text-fg-mute">
+                &quot;아니오&quot;를 선택하면 이 미리보기는 안전하게 종료돼요.
+            </p>
+        </CaseCard>
+    );
 }
 
 function BliteResultScreen({
@@ -339,7 +431,7 @@ function BliteResultScreen({
 
             <CaseCard data-precheckout-result-card bracket="var(--color-amber)" className="p-5">
                 <Eyebrow>공개 피드 신호</Eyebrow>
-                <p className="mt-2 text-[12px] text-fg-dim">최근 공개 게시물 {dto.postCount}개에서 확인한 패턴</p>
+                <p className="mt-2 text-[12px] text-fg-dim">최근 게시물들에서 확인한 패턴</p>
                 <div className="mt-3 divide-y divide-line border-t border-line">
                     {dto.signals.map(signal => (
                         <div key={signal.claim} className="py-3">
@@ -369,21 +461,10 @@ function BliteResultScreen({
                 </div>
             </CaseCard>
 
-            <CaseCard data-precheckout-result-card bracket="var(--color-amber)" className="p-5">
-                <Eyebrow>성별 판독 요약</Eyebrow>
-                <p className="mt-2 text-[14px] font-bold text-fg">
-                    {dto.genderRead.likelyFemale ? '여성 신호가 우세하게 관찰됐어요.' : '성별 신호가 한쪽으로 뚜렷하지 않아요.'}
-                </p>
-                <p className="num mt-1 text-[12px] text-fg-dim">신뢰도 {dto.genderRead.confidence.toFixed(2)}</p>
-                <ul data-amp-block className="mt-3 list-disc space-y-1 pl-4 text-[11.5px] leading-relaxed text-fg-dim">
-                    {dto.genderRead.reasons.map(reason => <li key={reason}>{reason}</li>)}
-                </ul>
-            </CaseCard>
-
             <CaseCard data-precheckout-result-card bracket="var(--color-blood)" className="p-5">
                 <Eyebrow>관계 판독 범위</Eyebrow>
                 <p className="num mt-2 text-[18px] font-extrabold text-fg">
-                    분석 후보 예상 범위 {dto.candidateRange.min} – {dto.candidateRange.max}명
+                    분석 후보 예상 범위 {dto.candidateRange.min}~{dto.candidateRange.max}명
                 </p>
                 <p className="mt-2 text-[11.5px] leading-relaxed text-fg-mute">
                     공개 피드와 계정 규모를 바탕으로 한 1차 범위예요. 전체 판독에서 후보별 관계 신호를 확인할 수 있어요.

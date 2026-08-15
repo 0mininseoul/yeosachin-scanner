@@ -12,6 +12,7 @@ const analyticsMocks = vi.hoisted(() => ({
         BLITE_AVAILABLE: 'precheckout_blite_available',
         BLITE_RESULT_VIEWED: 'precheckout_blite_result_viewed',
         BLITE_FALLBACK_SELECTED: 'precheckout_blite_fallback_selected',
+        BLITE_GENDER_CONFIRMATION_COMPLETED: 'precheckout_blite_gender_confirmation_completed',
         BLITE_PREVIEW_CTA_CLICKED: 'precheckout_blite_preview_cta_clicked',
         DEMO_STARTED: 'precheckout_demo_started',
         DEMO_COMPLETED: 'precheckout_demo_completed',
@@ -34,7 +35,11 @@ import {
 const PREFLIGHT_ID = '123e4567-e89b-42d3-a456-426614174000';
 const SUBMITTED_AT = '2026-08-15T00:00:00.000Z';
 
-function validDto() {
+function validDto(overrides: {
+    genderRead?: { likelyFemale: boolean; confidence: number; reasons: [string, string, string] };
+    candidateRange?: { min: number; max: number };
+    postCount?: number;
+} = {}) {
     return {
         schemaVersion: PRECHECKOUT_BLITE_SCHEMA_VERSION,
         persona: {
@@ -47,8 +52,8 @@ function validDto() {
             { claim: '해시태그 사용이 적은 편이에요.', category: '게시 습관', confidence: 0.35, band: 'low' as const },
             { claim: '댓글 반응을 활발히 유도해요.', category: '소통 성향', confidence: 0.71, band: 'high' as const },
         ],
-        candidateRange: { min: 3, max: 9 },
-        genderRead: {
+        candidateRange: overrides.candidateRange ?? { min: 3, max: 9 },
+        genderRead: overrides.genderRead ?? {
             likelyFemale: false,
             confidence: 0.62,
             reasons: [
@@ -57,7 +62,7 @@ function validDto() {
                 '게시물 주제가 다양한 편이에요.',
             ],
         },
-        postCount: 8,
+        postCount: overrides.postCount ?? 8,
         evidenceFields: ['post.caption', 'post.hashtags', 'post.taggedUsers'],
     };
 }
@@ -211,7 +216,8 @@ describe('PrecheckoutImmersive', () => {
         );
         expect(container.querySelector('[data-precheckout-fallback]')).toBeNull();
         expect(container.querySelector('[data-precheckout-demo-mode="waiting"]')).toBeNull();
-        expect(container.querySelectorAll('[data-precheckout-result-card]')).toHaveLength(5);
+        expect(container.querySelectorAll('[data-precheckout-result-card]')).toHaveLength(4);
+        expect(container.textContent).not.toContain('성별 판독 요약');
         expect(analyticsMocks.trackPrecheckoutEvent).toHaveBeenCalledWith(
             'precheckout_blite_result_viewed', PREFLIGHT_ID,
         );
@@ -370,5 +376,217 @@ describe('PrecheckoutImmersive', () => {
         const [, options] = fetchMock.mock.calls[0] as [string, RequestInit];
         expect((options.headers as Record<string, string>)['x-preflight-claim-token'])
             .toBe('claim-token');
+    });
+
+    it('always renders a fresh initial pass at mount, even with a stale accepted-preflight timestamp', async () => {
+        vi.stubGlobal('fetch', vi.fn().mockResolvedValue(noBody()));
+        const staleSubmittedAtMs = Date.parse(SUBMITTED_AT) - 20_000;
+
+        await act(async () => {
+            root.render(createElement(PrecheckoutImmersive, {
+                preflightId: PREFLIGHT_ID,
+                claimToken: null,
+                submittedAtMs: staleSubmittedAtMs,
+                targetUsername: 'target',
+                onGoToPlans: vi.fn(),
+            }));
+        });
+        await settleUi();
+
+        expect(container.querySelector('[data-precheckout-demo-phase="initial"]')).not.toBeNull();
+        expect(container.querySelector('[data-precheckout-progress]')).toBeNull();
+        expect(container.textContent).toContain('1/4');
+
+        await advance(11_999);
+        expect(container.querySelector('[data-precheckout-demo-phase="initial"]')).not.toBeNull();
+        await advance(1);
+        expect(container.querySelector('[data-precheckout-demo-phase="waiting"]')).not.toBeNull();
+    });
+
+    it('renders a fresh visible entry on every remount instead of resuming a stale elapsed position', async () => {
+        vi.stubGlobal('fetch', vi.fn().mockResolvedValue(noBody()));
+        const staleSubmittedAtMs = Date.parse(SUBMITTED_AT) - 20_000;
+        const props = {
+            preflightId: PREFLIGHT_ID,
+            claimToken: null,
+            submittedAtMs: staleSubmittedAtMs,
+            targetUsername: 'target',
+            onGoToPlans: vi.fn(),
+        };
+
+        await act(async () => {
+            root.render(createElement(PrecheckoutImmersive, props));
+        });
+        await settleUi();
+        expect(container.querySelector('[data-precheckout-demo-phase="initial"]')).not.toBeNull();
+
+        act(() => root.unmount());
+        vi.setSystemTime(new Date(Date.parse(SUBMITTED_AT) + 5_000));
+        root = createRoot(container);
+        await act(async () => {
+            root.render(createElement(StrictMode, null, createElement(PrecheckoutImmersive, props)));
+        });
+        await settleUi();
+
+        expect(container.querySelector('[data-precheckout-demo-phase="initial"]')).not.toBeNull();
+        expect(container.querySelector('[data-precheckout-demo-phase="waiting"]')).toBeNull();
+    });
+
+    it('settles a mid-pass deadline at the next transition instead of cutting the fresh pass short', async () => {
+        vi.stubGlobal('fetch', vi.fn().mockResolvedValue(noBody()));
+        // submittedAtMs + BLITE_UX_DEADLINE_MS(90s) lands 8s after this mount's visible entry,
+        // i.e. inside the freshly-restarted 12s initial pass.
+        const staleSubmittedAtMs = Date.parse(SUBMITTED_AT) - 82_000;
+        const onGoToPlans = vi.fn();
+
+        await act(async () => {
+            root.render(createElement(PrecheckoutImmersive, {
+                preflightId: PREFLIGHT_ID,
+                claimToken: null,
+                submittedAtMs: staleSubmittedAtMs,
+                targetUsername: 'target',
+                onGoToPlans,
+            }));
+        });
+        await settleUi();
+
+        await advance(8_000);
+        expect(container.querySelector('[data-precheckout-fallback]')).toBeNull();
+        expect(container.querySelector('[data-precheckout-demo-mode="waiting"]')).not.toBeNull();
+
+        await advance(3_999);
+        expect(container.querySelector('[data-precheckout-fallback]')).toBeNull();
+
+        await advance(1);
+        expect(container.querySelector('[data-precheckout-fallback]')).not.toBeNull();
+        expect(onGoToPlans).not.toHaveBeenCalled();
+    });
+
+    it('gates a high-confidence female read behind a confirmation screen before revealing the result', async () => {
+        vi.stubGlobal('fetch', vi.fn().mockResolvedValue(jsonResponse({
+            ...completeStatus(),
+            dto: validDto({
+                genderRead: { likelyFemale: true, confidence: 0.70, reasons: ['근거 하나', '근거 둘', '근거 셋'] },
+            }),
+        })));
+        const onGoToPlans = vi.fn();
+
+        await act(async () => {
+            root.render(createElement(PrecheckoutImmersive, {
+                preflightId: PREFLIGHT_ID,
+                claimToken: null,
+                submittedAtMs: Date.parse(SUBMITTED_AT),
+                targetUsername: 'target',
+                onGoToPlans,
+            }));
+        });
+        await settleUi();
+        await advance(12_000);
+
+        expect(container.textContent).toContain('여성일 가능성이 높다는 고신뢰 판독');
+        expect(container.textContent).toContain('근거 하나');
+        expect(container.querySelector('[data-precheckout-result-card]')).toBeNull();
+        expect(container.textContent).not.toContain('상세 분석 보기');
+
+        clickButton(container, '예');
+        expect(analyticsMocks.trackPrecheckoutEvent).toHaveBeenCalledWith(
+            'precheckout_blite_gender_confirmation_completed', PREFLIGHT_ID,
+            { gender_confirmation_outcome: 'confirmed' },
+        );
+        expect(container.querySelectorAll('[data-precheckout-result-card]')).toHaveLength(4);
+        expect(container.textContent).not.toContain('성별 판독 요약');
+        expect(onGoToPlans).not.toHaveBeenCalled();
+        clickButton(container, '상세 분석 보기');
+        expect(onGoToPlans).toHaveBeenCalledOnce();
+    });
+
+    it('suppresses the result and reports no fallback when a high-confidence gender read is rejected', async () => {
+        vi.stubGlobal('fetch', vi.fn().mockResolvedValue(jsonResponse({
+            ...completeStatus(),
+            dto: validDto({
+                genderRead: { likelyFemale: true, confidence: 0.95, reasons: ['근거 하나', '근거 둘', '근거 셋'] },
+            }),
+        })));
+        const onGoToPlans = vi.fn();
+
+        await act(async () => {
+            root.render(createElement(PrecheckoutImmersive, {
+                preflightId: PREFLIGHT_ID,
+                claimToken: null,
+                submittedAtMs: Date.parse(SUBMITTED_AT),
+                targetUsername: 'target',
+                onGoToPlans,
+            }));
+        });
+        await settleUi();
+        await advance(12_000);
+
+        clickButton(container, '아니오');
+        expect(analyticsMocks.trackPrecheckoutEvent).toHaveBeenCalledWith(
+            'precheckout_blite_gender_confirmation_completed', PREFLIGHT_ID,
+            { gender_confirmation_outcome: 'rejected' },
+        );
+        expect(analyticsMocks.trackPrecheckoutEvent).not.toHaveBeenCalledWith(
+            'precheckout_blite_fallback_selected', PREFLIGHT_ID, expect.anything(),
+        );
+        expect(container.querySelector('[data-precheckout-result-card]')).toBeNull();
+        expect(container.querySelector('[data-precheckout-fallback]')).not.toBeNull();
+        expect(onGoToPlans).not.toHaveBeenCalled();
+
+        clickButton(container, '상세 분석 보기');
+        expect(onGoToPlans).toHaveBeenCalledOnce();
+        expect(analyticsMocks.trackPrecheckoutEvent).toHaveBeenCalledWith(
+            'precheckout_plan_gate_reached', PREFLIGHT_ID, { demo_mode: 'result' },
+        );
+    });
+
+    it('does not gate a female read below the confirmation confidence threshold', async () => {
+        vi.stubGlobal('fetch', vi.fn().mockResolvedValue(jsonResponse({
+            ...completeStatus(),
+            dto: validDto({
+                genderRead: { likelyFemale: true, confidence: 0.69, reasons: ['근거 하나', '근거 둘', '근거 셋'] },
+            }),
+        })));
+
+        await act(async () => {
+            root.render(createElement(PrecheckoutImmersive, {
+                preflightId: PREFLIGHT_ID,
+                claimToken: null,
+                submittedAtMs: Date.parse(SUBMITTED_AT),
+                targetUsername: 'target',
+                onGoToPlans: vi.fn(),
+            }));
+        });
+        await settleUi();
+        await advance(12_000);
+
+        expect(container.textContent).not.toContain('판독 방향 확인');
+        expect(container.querySelectorAll('[data-precheckout-result-card]')).toHaveLength(4);
+        expect(container.textContent).toContain('상세 분석 보기');
+    });
+
+    it('renders the candidate range with a tilde and a generic feed caption without the exact post count', async () => {
+        vi.stubGlobal('fetch', vi.fn().mockResolvedValue(jsonResponse({
+            ...completeStatus(),
+            dto: validDto({ candidateRange: { min: 34, max: 80 }, postCount: 47 }),
+        })));
+
+        await act(async () => {
+            root.render(createElement(PrecheckoutImmersive, {
+                preflightId: PREFLIGHT_ID,
+                claimToken: null,
+                submittedAtMs: Date.parse(SUBMITTED_AT),
+                targetUsername: 'target',
+                onGoToPlans: vi.fn(),
+            }));
+        });
+        await settleUi();
+        await advance(12_000);
+
+        expect(container.textContent).toContain('34~80명');
+        expect(container.textContent).not.toContain('34 – 80명');
+        expect(container.textContent).not.toContain('34-80명');
+        expect(container.textContent).toContain('최근 게시물들에서 확인한 패턴');
+        expect(container.textContent).not.toContain('47개');
     });
 });

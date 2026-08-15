@@ -26,4 +26,16 @@ describe('/analyze precheckout plan gate', () => {
         expect(page).toContain("immersiveReleased: activePrecheckoutSurface === 'legacy'");
         expect(page).toContain('data-precheckout-target-card');
     });
+
+    it('resets the viewport to the top on the explicit immersive CTA transition instead of scrolling to plans', () => {
+        const page = readFileSync(join(process.cwd(), 'app/analyze/page.tsx'), 'utf8');
+
+        expect(page).not.toContain('planSectionRef.current?.scrollIntoView');
+        expect(page).not.toContain('planHeadingRef.current?.focus()');
+        expect(page).not.toContain("behavior: 'smooth', block: 'start'");
+        expect(page).toContain("window.scrollTo({ top: 0, left: 0, behavior: 'auto' })");
+        expect(page).toContain(
+            "if (!planGateRequestedRef.current || activePrecheckoutSurface !== 'legacy') return;",
+        );
+    });
 });
