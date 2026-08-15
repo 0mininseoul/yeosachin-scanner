@@ -672,6 +672,7 @@ export const PRECHECKOUT_DEMO_DURATION_MS = PRECHECKOUT_DEMO_STAGE_DURATIONS_MS.
     (sum, duration) => sum + duration,
     REVEAL_MS,
 );
+export const PRECHECKOUT_WAIT_STAGE_DURATION_MS = 6_000;
 const TOTAL_MS = PRECHECKOUT_DEMO_DURATION_MS;
 
 function monotonicNowMs(): number {
@@ -689,6 +690,8 @@ export interface PrecheckoutStageGraphsProps {
     onStageChange?: (index: number) => void;
     /** Reports renderer/asset/timer failures to the page-level fail-open owner. */
     onError?: () => void;
+    /** Continue on a deliberately slower, non-identical S1–S4 cycle after the approved pass. */
+    continueAfterFirstPass?: boolean;
 }
 
 /**
@@ -701,6 +704,7 @@ export function PrecheckoutStageGraphs({
     startedAtMs,
     onStageChange,
     onError,
+    continueAfterFirstPass = false,
 }: PrecheckoutStageGraphsProps) {
     const viewportRef = useRef<HTMLDivElement>(null);
     const noRef = useRef<HTMLSpanElement>(null);
@@ -773,7 +777,34 @@ export function PrecheckoutStageGraphs({
             onStageChangeRef.current?.(index);
         }
 
+        let slowCycle = -1;
+
         function paint(elapsed: number) {
+            if (continueAfterFirstPass && elapsed >= TOTAL_MS) {
+                const slowElapsed = elapsed - TOTAL_MS;
+                const cycleDurationMs = PRECHECKOUT_WAIT_STAGE_DURATION_MS * STAGES.length;
+                const nextSlowCycle = Math.floor(slowElapsed / cycleDurationMs);
+                if (nextSlowCycle !== slowCycle) {
+                    slowCycle = nextSlowCycle;
+                    railRefs.current.forEach(bar => {
+                        if (bar) bar.style.width = '0';
+                    });
+                }
+                const stageElapsed = slowElapsed % cycleDurationMs;
+                const active = Math.floor(stageElapsed / PRECHECKOUT_WAIT_STAGE_DURATION_MS);
+                const localClamped = clamp01(
+                    (stageElapsed % PRECHECKOUT_WAIT_STAGE_DURATION_MS)
+                        / PRECHECKOUT_WAIT_STAGE_DURATION_MS,
+                );
+                setActive(active);
+                engines[active].draw(localClamped);
+                const bar = railRefs.current[active];
+                if (bar) bar.style.width = `${localClamped * 100}%`;
+                if (vtagRef.current) {
+                    vtagRef.current.textContent = `${STAGES[active].tag} / ${String(Math.round(localClamped * 99)).padStart(2, '0')}`;
+                }
+                return;
+            }
             let acc = 0;
             let active = STAGES.length - 1;
             let local = 1;
@@ -822,7 +853,7 @@ export function PrecheckoutStageGraphs({
             try {
                 const elapsed = initialElapsedMs + Math.max(0, monotonicNowMs() - monotonicStartedAtMs);
                 paint(elapsed);
-                if (elapsed < TOTAL_MS) {
+                if (continueAfterFirstPass || elapsed < TOTAL_MS) {
                     rafId = requestAnimationFrame(frame);
                 }
             } catch {
