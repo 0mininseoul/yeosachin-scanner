@@ -13,6 +13,13 @@ const generationTwoMigrationPath = new URL(
 const generationTwoMigration = existsSync(generationTwoMigrationPath)
     ? readFileSync(generationTwoMigrationPath, 'utf8')
     : '';
+const generationTwoCreatorMigrationPath = new URL(
+    '../../../supabase/migrations/20260815225000_first15_canary_gen2_creator_successor_source_request.sql',
+    import.meta.url,
+);
+const generationTwoCreatorMigration = existsSync(generationTwoCreatorMigrationPath)
+    ? readFileSync(generationTwoCreatorMigrationPath, 'utf8')
+    : '';
 
 describe('first15 terminal provider-canary recovery migration contract', () => {
     it('creates one service-role-only audited replay lineage after the copy-quality migration', () => {
@@ -60,5 +67,30 @@ describe('first15 terminal provider-canary recovery migration contract', () => {
         expect(generationTwoMigration).not.toContain('CREATE TABLE public.');
         expect(generationTwoMigration).not.toContain('list_analysis_v2_unreconciled_provider_runs');
         expect(generationTwoMigration).not.toContain('GRANT SELECT ON TABLE public.analysis_v2_provider_runs');
+    });
+
+    it('passes only the exact generation-two successor request into the existing readiness fence', () => {
+        expect(generationTwoCreatorMigration).toContain('-- MIGRATION_PREDECESSOR=20260815220000');
+        expect(generationTwoCreatorMigration).toContain('cc8435f6fc8ee4184e99434005c529d8');
+        expect(generationTwoCreatorMigration).toContain(
+            'v_first15_rearm_failed_request_id UUID;',
+        );
+        expect(generationTwoCreatorMigration).toContain(
+            'rearm.order_id = v_order.id',
+        );
+        expect(generationTwoCreatorMigration).toContain(
+            'rearm.rearmed_preflight_id = v_preflight.id',
+        );
+        expect(generationTwoCreatorMigration).toContain('rearm.rearm_generation = 2');
+        expect(generationTwoCreatorMigration).toContain('FOR KEY SHARE;');
+        expect(generationTwoCreatorMigration).toContain(
+            'COALESCE(\n                    v_first15_rearm_failed_request_id,\n                    v_conflicting_request.id\n                )',
+        );
+        expect(generationTwoCreatorMigration).toContain(
+            'public.earlybird_first15_canary_provider_rearm_request_ready(',
+        );
+        expect(generationTwoCreatorMigration).not.toContain('CREATE TABLE public.');
+        expect(generationTwoCreatorMigration).not.toContain('CREATE FUNCTION public.');
+        expect(generationTwoCreatorMigration).not.toContain('GRANT EXECUTE');
     });
 });
