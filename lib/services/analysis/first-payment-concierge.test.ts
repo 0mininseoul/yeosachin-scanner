@@ -151,7 +151,17 @@ describe('createFirstPaymentConciergeHighRiskNarrativeInput', () => {
         postsCount: 1,
         isPrivate: false,
         isVerified: false,
-        latestPosts: [],
+        latestPosts: [{
+            id: 'target-post',
+            shortCode: 'Target1',
+            imageUrl: 'https://example.com/target.jpg',
+            type: 'image' as const,
+            likesCount: 0,
+            commentsCount: 0,
+            timestamp: '2026-01-01T00:00:00.000Z',
+            taggedUsers: ['candidate.user'],
+            mentionedUsers: ['candidate.user'],
+        }],
     };
     const candidate = {
         username: 'candidate.user',
@@ -240,8 +250,34 @@ describe('createFirstPaymentConciergeHighRiskNarrativeInput', () => {
         expect(input.interactions.candidateToTargetComment.status).toBe('observed');
         expect(input.interactions.candidateToTargetTag.status).toBe('observed');
         expect(input.interactions.candidateToTargetMention.status).toBe('observed');
+        expect(input.interactions.targetToCandidateTag.status).toBe('observed');
+        expect(input.interactions.targetToCandidateMention.status).toBe('observed');
         expect(input.interactions.targetToCandidateLike.status).toBe('not_collected');
+        expect(input.interactions.targetToCandidateComment).toEqual({
+            status: 'not_collected', evidenceRefIds: [],
+        });
         expect(input.interactions.comments[0]?.text).toBe('공연 너무 좋네요');
+    });
+
+    it('passes a retained reverse-like observation through the shared adapter', () => {
+        const input = createFirstPaymentConciergeHighRiskNarrativeInput({
+            targetProfile: target,
+            candidateProfile: candidate,
+            capturedProfile,
+            feature,
+            interactions: [],
+            targetToCandidateLike: {
+                status: 'observed',
+                evidenceRefIds: ['retained:reverse-like:test'],
+            },
+        });
+        expect(input.interactions.targetToCandidateLike).toEqual({
+            status: 'observed',
+            evidenceRefIds: ['retained:reverse-like:test'],
+        });
+        expect(input.interactions.targetToCandidateComment).toEqual({
+            status: 'not_collected', evidenceRefIds: [],
+        });
     });
 
     it('rejects a high-risk narrative when either canonical full name is absent', () => {

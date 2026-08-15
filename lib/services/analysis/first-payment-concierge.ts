@@ -22,6 +22,10 @@ import {
 } from './v2-candidate-scoring';
 import type { InteractionEvidenceRow } from './interaction-stage';
 import {
+    buildRetainedBidirectionalNarrativeInput,
+    type RetainedObservation,
+} from './concierge-retained-bidirectional-evidence';
+import {
     joinVerifiedFemaleTargetInteractions,
     summarizeCandidateTargetInteractions,
 } from './v2-target-interactions';
@@ -247,7 +251,11 @@ function replayEvidence(source: FirstPaymentConciergeSource): AnalysisV2ReplayBu
             occurredAt: row.occurredAt ?? null,
             content: sanitized(row.content, 1_000),
         })),
-        reverseInteractions: [],
+        reverseInteractions: (source.reverseInteractions ?? []).map(row => ({
+            candidateUsername: row.candidateUsername.trim().replace(/^@/u, '').toLowerCase(),
+            postId: row.postId,
+            status: row.status,
+        })),
     };
 }
 
@@ -370,51 +378,68 @@ function weakPartner(feature: FeatureAnalysisResult): boolean {
             || feature.features.partnerEvidence === 'weak');
 }
 
-function canonicalPublicName(value: string | null | undefined): string {
-    const name = sanitized(value, 200);
-    if (!name || /(?:대상\s*계정|후보\s*계정)/u.test(name)) {
-        throw new Error('FIRST_PAYMENT_CONCIERGE_CANONICAL_NAME_MISSING');
-    }
-    return name;
-}
-
-function interactionRef(row: InteractionEvidenceRow): string {
-    return `interaction:${hash('first-payment-concierge-interaction-v1', {
-        candidateUsername: row.candidateUsername,
-        postId: row.postId,
-        signal: row.signal,
-        sourceInteractionId: row.sourceInteractionId,
-    })}`;
-}
-
-function observation(evidenceRefIds: readonly string[]) {
-    return evidenceRefIds.length > 0
-        ? { status: 'observed' as const, evidenceRefIds: [...new Set(evidenceRefIds)].slice(0, 8) }
-        : { status: 'not_observed' as const, evidenceRefIds: [] };
-}
-
-function notCollectedObservation() {
-    return { status: 'not_collected' as const, evidenceRefIds: [] };
-}
-
-function selectedPostEvidenceRefs(input: {
+function selectedPostEvidence(input: {
     profile: InstagramProfile;
     capturedProfile: AnalysisV2ReplayBundle['profiles'][number];
-    username: string;
-    field: 'taggedUsers' | 'mentionedUsers';
-}): string[] {
+}): Array<{
+    postId: string;
+    selectionId: string;
+    taggedUsers: readonly string[];
+    mentionedUsers: readonly string[];
+}> | undefined {
+    if (input.profile.latestPosts === undefined) return undefined;
     const selected = new Set(input.capturedProfile.featureSelectionIds);
     const selectionByPostId = new Map(
         input.capturedProfile.media
             .filter(media => selected.has(media.selectionId) && media.postId)
             .map(media => [media.postId!, media.selectionId]),
     );
-    return (input.profile.latestPosts ?? []).flatMap(post => (
-        post[input.field].some(value => value.trim().replace(/^@/u, '').toLowerCase()
-            === input.username)
-            ? [selectionByPostId.get(post.id)]
-            : []
-    )).filter((value): value is string => Boolean(value));
+    return input.profile.latestPosts.flatMap(post => {
+        const selectionId = selectionByPostId.get(post.id);
+        return selectionId ? [{
+            postId: post.id,
+            selectionId,
+            taggedUsers: post.taggedUsers,
+            mentionedUsers: post.mentionedUsers,
+        }] : [];
+    });
+}
+
+function retainedProfilePostEvidence(profile: InstagramProfile): Array<{
+    postId: string;
+    selectionId: string;
+    taggedUsers: readonly string[];
+    mentionedUsers: readonly string[];
+}> {
+    return (profile.latestPosts ?? []).map(post => ({
+        postId: post.id,
+        selectionId: `retained:target-post-selection:${hash(
+            'first-payment-concierge-target-post-selection-v1',
+            post.id,
+        ).slice(0, 48)}`,
+        taggedUsers: post.taggedUsers,
+        mentionedUsers: post.mentionedUsers,
+    }));
+}
+
+function retainedReverseLikeObservation(
+    reverseInteractions: readonly AnalysisV2ReplayBundle['evidence']['reverseInteractions'][number][],
+    candidateUsername: string,
+): RetainedObservation {
+    const rows = reverseInteractions.filter(row => row.candidateUsername === candidateUsername);
+    if (rows.length === 0) return { status: 'not_collected', evidenceRefIds: [] };
+    const observedRefs = rows
+        .filter(row => row.status === 'observed')
+        .map(row => `retained:reverse-like:${hash('first-payment-concierge-reverse-like-v1', {
+            candidateUsername,
+            postId: row.postId,
+        }).slice(0, 48)}`);
+    if (observedRefs.length > 0) {
+        return { status: 'observed', evidenceRefIds: [...new Set(observedRefs)].slice(0, 8) as [string, ...string[]] };
+    }
+    return rows.some(row => row.status === 'not_observed')
+        ? { status: 'not_observed', evidenceRefIds: [] }
+        : { status: 'not_collected', evidenceRefIds: [] };
 }
 
 /**
@@ -427,9 +452,8 @@ export function createFirstPaymentConciergeHighRiskNarrativeInput(input: {
     capturedProfile: AnalysisV2ReplayBundle['profiles'][number];
     feature: FeatureAnalysisResult;
     interactions: readonly InteractionEvidenceRow[];
+    targetToCandidateLike?: RetainedObservation;
 }): HighRiskNarrativeInput {
-    const targetUsername = input.targetProfile.username.toLowerCase();
-    const candidateUsername = input.candidateProfile.username.toLowerCase();
     const selected = new Set(input.capturedProfile.featureSelectionIds);
     const media = input.capturedProfile.media
         .filter(item => selected.has(item.selectionId))
@@ -440,67 +464,33 @@ export function createFirstPaymentConciergeHighRiskNarrativeInput(input: {
             ...(item.postId ? { postId: item.postId } : {}),
         }));
     const selectedMediaIds = new Set(media.map(item => item.selectionId));
-    const candidateInteractions = input.interactions.filter(row => (
-        row.candidateUsername === candidateUsername
-    ));
-    const likes = candidateInteractions.filter(row => row.signal === 'female_target_like');
-    const comments = candidateInteractions
-        .filter(row => row.signal === 'female_target_comment')
-        .flatMap(row => {
-            const text = sanitized(row.content, 300);
-            return text ? [{
-                evidenceRefId: interactionRef(row),
-                targetPostEvidenceRefId: `target-post:${hash(
-                    'first-payment-concierge-target-post-v1', row.postId,
-                )}`,
-                text,
-            }] : [];
-        })
-        .slice(0, 12);
-    const candidateToTargetTag = selectedPostEvidenceRefs({
-        profile: input.candidateProfile,
-        capturedProfile: input.capturedProfile,
-        username: targetUsername,
-        field: 'taggedUsers',
-    });
-    const candidateToTargetMention = selectedPostEvidenceRefs({
-        profile: input.candidateProfile,
-        capturedProfile: input.capturedProfile,
-        username: targetUsername,
-        field: 'mentionedUsers',
+    const retained = buildRetainedBidirectionalNarrativeInput({
+        target: {
+            profile: input.targetProfile,
+            selectedPostEvidence: retainedProfilePostEvidence(input.targetProfile),
+        },
+        candidate: {
+            profile: input.candidateProfile,
+            selectedPostEvidence: selectedPostEvidence({
+                profile: input.candidateProfile,
+                capturedProfile: input.capturedProfile,
+            }) ?? [],
+        },
+        feature: input.feature,
+        candidateToTargetInteractions: input.interactions,
+        targetToCandidateLike: input.targetToCandidateLike ?? {
+            status: 'not_collected', evidenceRefIds: [],
+        },
     });
 
     return {
-        forbiddenIdentifiers: { targetUsername, candidateUsername },
-        publicSubjects: {
-            targetFullName: canonicalPublicName(input.targetProfile.fullName),
-            candidateFullName: canonicalPublicName(input.candidateProfile.fullName),
-        },
-        appearance: {
-            isReliable: input.feature.features.evidenceSelectionIds.appearance
-                .some(selectionId => selectedMediaIds.has(selectionId)),
-        },
-        bio: sanitized(input.candidateProfile.bio, 2_200),
+        ...retained,
         media,
         captions: input.capturedProfile.captions
             .filter(caption => selectedMediaIds.has(caption.selectionId))
             .map(caption => ({ ...caption, text: sanitized(caption.text, 2_200) ?? '' }))
             .filter(caption => caption.text.length > 0),
         carouselCaptionDossier: null,
-        interactions: {
-            candidateToTargetLike: observation(likes.map(interactionRef)),
-            targetToCandidateLike: notCollectedObservation(),
-            candidateToTargetComment: observation(comments.map(comment => comment.evidenceRefId)),
-            candidateToTargetTag: observation(candidateToTargetTag),
-            targetToCandidateTag: notCollectedObservation(),
-            candidateToTargetMention: observation(candidateToTargetMention),
-            targetToCandidateMention: notCollectedObservation(),
-            comments,
-            coverage: {
-                status: 'partial',
-                evidenceRefId: 'coverage:retained-target-interactions',
-            },
-        },
     };
 }
 
@@ -638,6 +628,10 @@ export async function createFirstPaymentConciergePublication(input: {
                 capturedProfile,
                 feature: retained.detail.feature,
                 interactions: joinedInteractions,
+                targetToCandidateLike: retainedReverseLikeObservation(
+                    input.captured.bundle.evidence.reverseInteractions,
+                    retained.profile.username.toLowerCase(),
+                ),
             })
             : null;
         const narrative = narrativeInput

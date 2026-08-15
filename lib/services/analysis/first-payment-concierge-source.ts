@@ -79,6 +79,12 @@ export interface FirstPaymentConciergeSource {
         occurredAt?: string;
         content?: string;
     }>[];
+    /** Optional retained reverse-like observations; no collection is performed here. */
+    reverseInteractions?: readonly Readonly<{
+        candidateUsername: string;
+        postId: string;
+        status: 'observed' | 'not_observed' | 'not_collected';
+    }>[];
 }
 
 type LoadedRun = FirstPaymentConciergeRun & { items: readonly unknown[] };
