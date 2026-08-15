@@ -93,4 +93,17 @@ describe('first15 canary recovery maintenance route', () => {
         });
         log.mockRestore();
     });
+
+    it('does not log an arbitrary recovery exception message', async () => {
+        const log = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+        mocks.recover.mockRejectedValueOnce(new Error('unbounded provider response'));
+
+        const response = await POST(request());
+
+        expect(response.status).toBe(500);
+        expect(log).toHaveBeenCalledWith('First15 provider-canary recovery failed.', {
+            code: 'FIRST15_CANARY_RECOVERY_UNEXPECTED_FAILURE',
+        });
+        log.mockRestore();
+    });
 });

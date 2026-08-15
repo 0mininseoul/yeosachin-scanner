@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
+import { ApifyApiError } from 'apify-client';
 import type { ApifyCredentialSlot } from '@/lib/services/instagram/providers/types';
 import {
     prepareAnalysisV2ProviderRunsForTerminalFailure,
@@ -283,6 +284,49 @@ describe('analysis V2 paid-provider lifecycle', () => {
         expect(providerStore.reconcileUsage).not.toHaveBeenCalled();
     });
 
+    it.each([
+        [401, 'provider_auth_failed'],
+        [403, 'provider_auth_failed'],
+        [404, 'provider_run_missing'],
+        [429, 'provider_rate_limited'],
+    ] as const)(
+        'classifies a provider read HTTP %i without exposing its response',
+        async (statusCode, reason) => {
+            const terminal = run(1, {
+                status: 'succeeded',
+                terminalizedAt: '2026-07-14T00:01:00.000Z',
+            });
+            const providerStore = store({
+                listUnreconciled: vi.fn(async () => [terminal]),
+            });
+            const onUsageReconciliationFailure = vi.fn();
+
+            await expect(reconcileAnalysisV2ProviderUsage({
+                store: providerStore,
+                onUsageReconciliationFailure,
+                clientForSlot: () => ({
+                    run: () => ({
+                        get: async () => {
+                            throw new ApifyApiError({
+                                status: statusCode,
+                                data: { error: { message: 'test', type: 'test' } },
+                                config: { method: 'get', url: '/v2/actor-runs/test' },
+                            } as never, 1);
+                        },
+                        abort: vi.fn(),
+                        waitForFinish: vi.fn(),
+                    }),
+                }),
+            })).resolves.toMatchObject({ reconciled: 0, failed: 1 });
+
+            expect(onUsageReconciliationFailure).toHaveBeenCalledWith({
+                credentialSlot: terminal.credentialSlot,
+                reason,
+            });
+            expect(providerStore.reconcileUsage).not.toHaveBeenCalled();
+        },
+    );
+
     it('settles an opted-in revenue child only after later authoritative provider usage reconciliation', async () => {
         const terminal = run(1, {
             status: 'succeeded',
@@ -321,6 +365,97 @@ describe('analysis V2 paid-provider lifecycle', () => {
         expect(settleAfterUsageReconciliation).toHaveBeenCalledOnce();
         expect(settleAfterUsageReconciliation).toHaveBeenCalledWith(reconciled, {
             knownRevenueCostOperation: true,
+        });
+    });
+
+    it('reports an unavailable revenue settlement after persisting authoritative usage', async () => {
+        const terminal = run(1, {
+            status: 'succeeded',
+            terminalizedAt: '2026-07-14T00:01:00.000Z',
+            revenueCostSettlementRequired: true,
+        });
+        const reconciled = run(1, {
+            status: 'succeeded',
+            actualUsageUsd: 0.2,
+            terminalizedAt: '2026-07-14T00:01:00.000Z',
+            usageReconciledAt: '2026-07-14T00:02:00.000Z',
+            revenueCostSettlementRequired: true,
+        });
+        const providerStore = store({
+            listUnreconciled: vi.fn(async () => [terminal]),
+            reconcileUsage: vi.fn(async () => reconciled),
+        });
+        const onUsageReconciliationFailure = vi.fn();
+
+        await expect(reconcileAnalysisV2ProviderUsage({
+            store: providerStore,
+            onUsageReconciliationFailure,
+            clientForSlot: () => ({
+                run: () => ({
+                    get: async () => ({ status: 'SUCCEEDED', usageTotalUsd: 0.2 }),
+                    abort: vi.fn(),
+                    waitForFinish: vi.fn(),
+                }),
+            }),
+        })).resolves.toEqual({
+            eligible: 1,
+            reconciled: 0,
+            failed: 1,
+            hasMore: false,
+        });
+
+        expect(providerStore.reconcileUsage).toHaveBeenCalledOnce();
+        expect(onUsageReconciliationFailure).toHaveBeenCalledWith({
+            credentialSlot: terminal.credentialSlot,
+            reason: 'revenue_settlement_unavailable',
+        });
+    });
+
+    it('reports a failed revenue settlement after persisting authoritative usage', async () => {
+        const terminal = run(1, {
+            status: 'succeeded',
+            terminalizedAt: '2026-07-14T00:01:00.000Z',
+            revenueCostSettlementRequired: true,
+        });
+        const reconciled = run(1, {
+            status: 'succeeded',
+            actualUsageUsd: 0.2,
+            terminalizedAt: '2026-07-14T00:01:00.000Z',
+            usageReconciledAt: '2026-07-14T00:02:00.000Z',
+            revenueCostSettlementRequired: true,
+        });
+        const providerStore = store({
+            listUnreconciled: vi.fn(async () => [terminal]),
+            reconcileUsage: vi.fn(async () => reconciled),
+        });
+        const onUsageReconciliationFailure = vi.fn();
+
+        await expect(reconcileAnalysisV2ProviderUsage({
+            store: providerStore,
+            onUsageReconciliationFailure,
+            revenueCostSettlement: {
+                settleAfterUsageReconciliation: vi.fn(async () => {
+                    throw new Error('settlement transport failure');
+                }),
+            },
+            clientForSlot: () => ({
+                run: () => ({
+                    get: async () => ({ status: 'SUCCEEDED', usageTotalUsd: 0.2 }),
+                    abort: vi.fn(),
+                    waitForFinish: vi.fn(),
+                }),
+            }),
+        })).resolves.toEqual({
+            eligible: 1,
+            reconciled: 0,
+            failed: 1,
+            hasMore: false,
+        });
+
+        expect(providerStore.reconcileUsage).toHaveBeenCalledOnce();
+        expect(onUsageReconciliationFailure).toHaveBeenCalledWith({
+            credentialSlot: terminal.credentialSlot,
+            reason: 'revenue_settlement_failed',
         });
     });
 

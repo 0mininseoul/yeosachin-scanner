@@ -353,8 +353,9 @@ export async function reconcileAnalysisV2ProviderUsage(
             reportUsageReconciliationFailure(run, 'remote_usage_missing', dependencies);
             return false;
         }
+        let reconciled: StoredAnalysisV2ProviderRun;
         try {
-            const reconciled = await store.reconcileUsage({
+            reconciled = await store.reconcileUsage({
                 reservationToken: run.reservationToken,
                 runId: run.runId,
                 logicalProvider: run.logicalProvider,
@@ -364,16 +365,31 @@ export async function reconcileAnalysisV2ProviderUsage(
                 status,
                 actualUsageUsd: usageTotalUsd,
             });
-            if (run.revenueCostSettlementRequired) {
-                const settlement = dependencies.revenueCostSettlement;
-                if (!settlement) return false;
-                await settlement.settleAfterUsageReconciliation(reconciled, {
-                    knownRevenueCostOperation: true,
-                });
-            }
-            return true;
         } catch {
             reportUsageReconciliationFailure(run, 'ledger_write_failed', dependencies);
+            return false;
+        }
+        if (!run.revenueCostSettlementRequired) return true;
+        const settlement = dependencies.revenueCostSettlement;
+        if (!settlement) {
+            reportUsageReconciliationFailure(
+                run,
+                'revenue_settlement_unavailable',
+                dependencies,
+            );
+            return false;
+        }
+        try {
+            await settlement.settleAfterUsageReconciliation(reconciled, {
+                knownRevenueCostOperation: true,
+            });
+            return true;
+        } catch {
+            reportUsageReconciliationFailure(
+                run,
+                'revenue_settlement_failed',
+                dependencies,
+            );
             return false;
         }
     });
