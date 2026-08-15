@@ -310,15 +310,10 @@ async function loadRearms(): Promise<readonly First15CanaryProviderRecoveryRearm
 async function loadProviderRuns(
     requestIds: readonly string[],
 ): Promise<readonly StoredAnalysisV2ProviderRun[]> {
-    const { data, error } = await supabaseAdmin
-        .from('analysis_v2_provider_runs')
-        .select(
-            'request_id,job_key,operation_key,input_hash,reservation_token,'
-            + 'logical_provider,actor_id,credential_slot,max_charge_usd,status,run_id,'
-            + 'actual_usage_usd,reserved_at,run_started_at,terminalized_at,usage_reconciled_at',
-        )
-        .in('request_id', requestIds)
-        .limit(64);
+    const { data, error } = await supabaseAdmin.rpc(
+        'list_earlybird_first15_canary_provider_runs',
+        { p_request_ids: [...requestIds] },
+    );
     if (error || !Array.isArray(data) || data.length === 64) {
         throw noOutputError('FIRST15_CANARY_RECOVERY_PROVIDER_READ_FAILED');
     }
