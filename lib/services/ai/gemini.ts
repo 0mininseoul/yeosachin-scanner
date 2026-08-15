@@ -1124,7 +1124,8 @@ export async function analyzeWithGemini<T>(
 
             if (completionError) {
                 throw new Error(
-                    `${AI_GENERATION_RESPONSE_REJECTED_ERROR_PREFIX} generated response failed strict validation.`
+                    `${AI_GENERATION_RESPONSE_REJECTED_ERROR_PREFIX} generated response failed strict validation.`,
+                    { cause: completionError },
                 );
             }
 

@@ -50,12 +50,24 @@ export interface GeminiResponseValidationDiagnostics {
 }
 
 export class GeminiResponseValidationError extends Error {
+    readonly repairContext?: Readonly<{
+        candidate: unknown;
+        issues: readonly ZodIssue[];
+    }>;
+
     constructor(
         message: string,
-        public readonly diagnostics: GeminiResponseValidationDiagnostics
+        public readonly diagnostics: GeminiResponseValidationDiagnostics,
+        repairContext?: Readonly<{ candidate: unknown; issues: readonly ZodIssue[] }>,
     ) {
         super(message);
         this.name = 'GeminiResponseValidationError';
+        if (repairContext) {
+            Object.defineProperty(this, 'repairContext', {
+                value: repairContext,
+                enumerable: false,
+            });
+        }
     }
 }
 
@@ -126,7 +138,8 @@ export function parseGeminiJsonResponse<T>(text: string, schema: ZodType<T>): T 
     if (!parsed.success) {
         throw new GeminiResponseValidationError(
             'Gemini response did not match the required analysis schema',
-            schemaDiagnostics(parsed.error.issues)
+            schemaDiagnostics(parsed.error.issues),
+            { candidate: parsedJson, issues: parsed.error.issues },
         );
     }
     return parsed.data;
