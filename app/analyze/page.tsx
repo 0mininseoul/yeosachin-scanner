@@ -410,10 +410,8 @@ const DISCLOSURE_ACCEPTED = true;
         trackPlanSelection(planId);
     };
 
-    // Precheckout immersive preview's CTA scrolls here and moves focus to the heading.
-    // Nothing else — it must not select a plan, start checkout, or trigger login.
-    const planSectionRef = useRef<HTMLElement>(null);
-    const planHeadingRef = useRef<HTMLHeadingElement>(null);
+    // Precheckout immersive preview's CTA opens this legacy surface, then resets the viewport
+    // to its top — it must not select a plan, start checkout, trigger login, or scroll to plans.
     const planGateRequestedRef = useRef(false);
     useEffect(() => {
         setPrecheckoutSurface({
@@ -429,17 +427,15 @@ const DISCLOSURE_ACCEPTED = true;
         setPrecheckoutSurface({ preflightId, surface: 'legacy' });
     }, [immersivePreflight?.preflightId]);
     useEffect(() => {
-        if (
-            !planGateRequestedRef.current
-            || activePrecheckoutSurface !== 'legacy'
-            || !readyPreflight
-        ) return;
+        // Fires once, exactly on the explicit CTA transition — whether the legacy surface
+        // initially renders the pending status or the ready target/plans. A later readiness
+        // change must not trigger a second, delayed scroll to plans.
+        if (!planGateRequestedRef.current || activePrecheckoutSurface !== 'legacy') return;
         planGateRequestedRef.current = false;
         requestAnimationFrame(() => {
-            planSectionRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' });
-            planHeadingRef.current?.focus();
+            window.scrollTo({ top: 0, left: 0, behavior: 'auto' });
         });
-    }, [activePrecheckoutSurface, readyPreflight]);
+    }, [activePrecheckoutSurface]);
 
     const handleCheckoutStatusNavigation = () => {
         if (!activeCheckoutStatusCta || activeCheckoutStatusCta.navigating) return;
@@ -1037,15 +1033,12 @@ const DISCLOSURE_ACCEPTED = true;
 
                                 <section
                                     id="plan-selection"
-                                    ref={planSectionRef}
                                     className="mt-9 scroll-mt-20"
                                     aria-labelledby="plan-heading"
                                 >
                                     <Eyebrow>요금제 선택</Eyebrow>
                                     <h2
                                         id="plan-heading"
-                                        ref={planHeadingRef}
-                                        tabIndex={-1}
                                         className="mt-3 text-[22px] font-extrabold text-fg outline-none"
                                     >
                                         계정 규모에 맞는 플랜이에요
