@@ -100,7 +100,7 @@ const TARGET_TO_CANDIDATE_TAG_PHRASE = '대상이 후보를 태그한 흔적';
 const CANDIDATE_TO_TARGET_MENTION_PHRASE = '후보가 대상을 적은 캡션 멘션';
 const TARGET_TO_CANDIDATE_MENTION_PHRASE = '대상이 후보를 적은 캡션 멘션';
 const IMPOSSIBLE_TARGET_TO_CANDIDATE_COMMENT_PATTERN =
-    /대상\s*계정이\s*후보(?:의)?\s*(?:게시물|피드)에\s*남긴\s*댓글/u;
+    /(?:대상\s*계정?|대상)[^.。!?\n]{0,80}후보[^.。!?\n]{0,80}댓글/u;
 const INTERNAL_RESULT_TERM_PATTERN =
     /(?:내부\s*)?(?:점수|스코어|순위|등급|고위험군?|주의군?|정상군?|상위|하위|퍼센트)/u;
 const GENERIC_FEATURE_OVERVIEW_PATTERN =
@@ -784,6 +784,10 @@ const narrativeInteractionsSchema = z.object({
     candidateToTargetLike: interactionObservationSchema,
     targetToCandidateLike: interactionObservationSchema,
     candidateToTargetComment: interactionObservationSchema,
+    // Reverse comments are intentionally outside the retained collection
+    // contract. Keep the slot explicit so a model cannot turn its absence into
+    // either a positive or a negative claim.
+    targetToCandidateComment: interactionObservationSchema,
     candidateToTargetTag: interactionObservationSchema,
     targetToCandidateTag: interactionObservationSchema,
     candidateToTargetMention: interactionObservationSchema,
@@ -794,6 +798,16 @@ const narrativeInteractionsSchema = z.object({
         evidenceRefId: evidenceRefIdSchema,
     }).strict(),
 }).strict().superRefine((value, context) => {
+    if (
+        value.targetToCandidateComment.status !== 'not_collected'
+        || value.targetToCandidateComment.evidenceRefIds.length !== 0
+    ) {
+        context.addIssue({
+            code: 'custom',
+            path: ['targetToCandidateComment'],
+            message: 'Reverse comments are not collected and cannot be asserted.',
+        });
+    }
     const commentObserved = value.candidateToTargetComment.status === 'observed';
     if (commentObserved !== (value.comments.length > 0)) {
         context.addIssue({
@@ -2392,6 +2406,7 @@ function narrativePromptLegacy(
             candidateToTargetLike: input.interactions.candidateToTargetLike.status,
             targetToCandidateLike: input.interactions.targetToCandidateLike.status,
             candidateToTargetComment: input.interactions.candidateToTargetComment.status,
+            targetToCandidateComment: input.interactions.targetToCandidateComment.status,
             candidateToTargetTag: input.interactions.candidateToTargetTag.status,
             targetToCandidateTag: input.interactions.targetToCandidateTag.status,
             candidateToTargetMention: input.interactions.candidateToTargetMention.status,
@@ -2625,6 +2640,21 @@ function narrativeResponseSchemaFor(
                     code: 'custom',
                     path: ['lines', 1, 'text'],
                     message: 'v2.11 narrative omitted the candidate-to-target comment direction.',
+                });
+            }
+            if (
+                containsNamedInteractionDirection(
+                    second,
+                    v211Subjects.target,
+                    v211Subjects.candidate,
+                    '댓글',
+                )
+                || IMPOSSIBLE_TARGET_TO_CANDIDATE_COMMENT_PATTERN.test(second)
+            ) {
+                context.addIssue({
+                    code: 'custom',
+                    path: ['lines', 1, 'text'],
+                    message: 'v2.11 narrative cannot assert or deny target-to-candidate comments.',
                 });
             }
             const namedDirections: ReadonlyArray<readonly [

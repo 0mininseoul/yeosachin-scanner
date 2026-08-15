@@ -11,19 +11,26 @@ import {
     featureAnalysis,
     highRiskNarrative,
     type FeatureAnalysisInput,
+    type FeatureAnalysisResult,
     type HighRiskNarrativeInput,
     type StagedAiAuditContext,
 } from '@/lib/services/ai/v2-staged-analysis';
 import type { InteractionEvidenceRow } from '@/lib/services/analysis/interaction-stage';
+import type { InstagramProfile } from '@/lib/types/instagram';
+import {
+    buildRetainedBidirectionalNarrativeInput,
+    type RetainedObservation,
+} from '@/lib/services/analysis/concierge-retained-bidirectional-evidence';
 import {
     captureAnalysisV2ReplayBundle,
 } from '@/lib/services/analysis/replay/replay-capture';
+import type { AnalysisV2ReplayBundle } from '@/lib/services/analysis/replay/replay-bundle';
 import {
     firstPaymentConciergeCheckpointProfile,
     firstPaymentConciergeEvaluationPolicy,
-    createFirstPaymentConciergeHighRiskNarrativeInput,
 } from '@/lib/services/analysis/first-payment-concierge';
 import { loadRetainedConciergeProfileArtifacts } from './correct-concierge-basic-result';
+import { loadReverseInteractionArtifact } from './correct-concierge-basic-copy';
 import {
     areMateriallyNearDuplicatePublicCopies,
     isForbiddenV211Overview,
@@ -222,6 +229,12 @@ type V214ExactScope = Readonly<{
     priorCorrectionResultHash: string;
     targetFullName: string;
     targetEvidence: readonly z.infer<typeof targetEvidenceRowSchema>[];
+    targetSelectedPostEvidence: readonly Readonly<{
+        postId: string;
+        selectionId: string;
+        taggedUsers: readonly string[];
+        mentionedUsers: readonly string[];
+    }>[];
 }>;
 
 function normalizedUsername(value: string): string {
@@ -259,6 +272,45 @@ function exactTargetFullName(stepData: unknown): string | null {
     };
     const value = root.targetProfileCheckpoint?.fullName ?? root.targetProfile?.fullName;
     return typeof value === 'string' && value.trim().length > 0 ? value.trim() : null;
+}
+
+function targetSelectedPostEvidence(stepData: unknown): V214ExactScope['targetSelectedPostEvidence'] {
+    if (!stepData || typeof stepData !== 'object' || Array.isArray(stepData)) return [];
+    const root = stepData as {
+        targetPosts?: unknown;
+        targetProfileCheckpoint?: { targetPosts?: unknown };
+    };
+    const value = root.targetPosts ?? root.targetProfileCheckpoint?.targetPosts;
+    if (!Array.isArray(value)) return [];
+    const parsed = value.map(item => {
+        if (!item || typeof item !== 'object' || Array.isArray(item)) return null;
+        const post = item as {
+            id?: unknown;
+            taggedUsers?: unknown;
+            mentionedUsers?: unknown;
+        };
+        if (
+            typeof post.id !== 'string'
+            || post.id.trim().length === 0
+            || !Array.isArray(post.taggedUsers)
+            || !Array.isArray(post.mentionedUsers)
+            || post.taggedUsers.some(username => typeof username !== 'string')
+            || post.mentionedUsers.some(username => typeof username !== 'string')
+        ) return null;
+        const postId = post.id.trim();
+        return {
+            postId,
+            selectionId: `retained:target-post-selection:${sha256({
+                domain: 'concierge-v214-target-post-selection-v1',
+                postId,
+            }).slice(0, 48)}`,
+            taggedUsers: post.taggedUsers.map(username => normalizedUsername(username)),
+            mentionedUsers: post.mentionedUsers.map(username => normalizedUsername(username)),
+        };
+    });
+    return parsed.every((post): post is NonNullable<typeof post> => post !== null)
+        ? parsed
+        : [];
 }
 
 async function loadExactV214Scope(): Promise<V214ExactScope> {
@@ -333,6 +385,7 @@ async function loadExactV214Scope(): Promise<V214ExactScope> {
         priorCorrectionResultHash,
         targetFullName,
         targetEvidence: z.array(targetEvidenceRowSchema).parse(rawTargetRows.rows),
+        targetSelectedPostEvidence: targetSelectedPostEvidence(stepData),
     };
 }
 
@@ -376,8 +429,134 @@ function interactionRows(
     }));
 }
 
+type V214ReverseInteractionArtifact = Awaited<
+    ReturnType<typeof loadReverseInteractionArtifact>
+>;
+
+function selectedPostEvidence(input: {
+    profile: Readonly<InstagramProfile>;
+    capturedProfile: AnalysisV2ReplayBundle['profiles'][number];
+}): Array<{
+    postId: string;
+    selectionId: string;
+    taggedUsers: readonly string[];
+    mentionedUsers: readonly string[];
+}> | undefined {
+    if (input.profile.latestPosts === undefined) return undefined;
+    const selected = new Set(input.capturedProfile.featureSelectionIds);
+    const selectionByPostId = new Map(
+        input.capturedProfile.media
+            .filter(media => selected.has(media.selectionId) && media.postId)
+            .map(media => [media.postId!, media.selectionId]),
+    );
+    return input.profile.latestPosts.flatMap(post => {
+        const selectionId = selectionByPostId.get(post.id);
+        return selectionId ? [{
+            postId: post.id,
+            selectionId,
+            taggedUsers: post.taggedUsers,
+            mentionedUsers: post.mentionedUsers,
+        }] : [];
+    });
+}
+
+function retainedProfilePostEvidence(profile: InstagramProfile): Array<{
+    postId: string;
+    selectionId: string;
+    taggedUsers: readonly string[];
+    mentionedUsers: readonly string[];
+}> {
+    return (profile.latestPosts ?? []).map(post => ({
+        postId: post.id,
+        selectionId: `retained:target-post-selection:${sha256({
+            domain: 'concierge-v214-target-post-selection-v1',
+            postId: post.id,
+        }).slice(0, 48)}`,
+        taggedUsers: post.taggedUsers,
+        mentionedUsers: post.mentionedUsers,
+    }));
+}
+
+function reverseLikeObservation(
+    artifact: V214ReverseInteractionArtifact,
+    row: V214FrozenResultRow,
+): RetainedObservation {
+    const username = normalizedUsername(row.suspect_instagram_id);
+    const observed = artifact.observations.find(candidate => candidate.rank === row.rank);
+    const unavailable = artifact.unavailable.find(candidate => candidate.rank === row.rank);
+    if ((observed ? 1 : 0) + (unavailable ? 1 : 0) !== 1) {
+        throw new Error('CONCIERGE_COPY_V214_REVERSE_SCOPE_CONFLICT');
+    }
+    const retainedUsername = observed?.username ?? unavailable?.username;
+    if (retainedUsername !== username) {
+        throw new Error('CONCIERGE_COPY_V214_REVERSE_SCOPE_CONFLICT');
+    }
+    if (unavailable) return { status: 'not_collected', evidenceRefIds: [] };
+    if (!observed) throw new Error('CONCIERGE_COPY_V214_REVERSE_SCOPE_CONFLICT');
+    if (!observed.targetLikedCandidate) {
+        return { status: 'not_observed', evidenceRefIds: [] };
+    }
+    return {
+        status: 'observed',
+        evidenceRefIds: [`retained:reverse-like:${sha256({
+            domain: 'concierge-v214-reverse-like-v1',
+            rank: row.rank,
+            username,
+            postUrl: observed.postUrl,
+        }).slice(0, 48)}`],
+    };
+}
+
+export function buildV214NarrativeInput(input: {
+    targetProfile: InstagramProfile;
+    candidateProfile: InstagramProfile;
+    capturedProfile: AnalysisV2ReplayBundle['profiles'][number];
+    feature: FeatureAnalysisResult;
+    interactions: readonly InteractionEvidenceRow[];
+    targetToCandidateLike: RetainedObservation;
+    targetSelectedPostEvidence?: V214ExactScope['targetSelectedPostEvidence'];
+}): HighRiskNarrativeInput {
+    const selected = new Set(input.capturedProfile.featureSelectionIds);
+    const media = input.capturedProfile.media
+        .filter(item => selected.has(item.selectionId))
+        .map(item => ({
+            selectionId: item.selectionId,
+            kind: item.kind,
+            normalizedJpegBase64: item.jpegBase64,
+            ...(item.postId ? { postId: item.postId } : {}),
+        }));
+    const selectedMediaIds = new Set(media.map(item => item.selectionId));
+    const retained = buildRetainedBidirectionalNarrativeInput({
+        target: {
+            profile: input.targetProfile,
+            selectedPostEvidence: input.targetSelectedPostEvidence
+                ?? retainedProfilePostEvidence(input.targetProfile),
+        },
+        candidate: {
+            profile: input.candidateProfile,
+            selectedPostEvidence: selectedPostEvidence({
+                profile: input.candidateProfile,
+                capturedProfile: input.capturedProfile,
+            }) ?? [],
+        },
+        feature: input.feature,
+        candidateToTargetInteractions: input.interactions,
+        targetToCandidateLike: input.targetToCandidateLike,
+    });
+    return {
+        ...retained,
+        media,
+        captions: input.capturedProfile.captions
+            .filter(caption => selectedMediaIds.has(caption.selectionId))
+            .map(caption => ({ ...caption, text: caption.text.normalize('NFKC').replace(/\s+/g, ' ').trim() }))
+            .filter(caption => caption.text.length > 0),
+        carouselCaptionDossier: null,
+    };
+}
+
 function observedInteraction(input: HighRiskNarrativeInput): 'like' | 'comment' | 'tag' | 'mention' {
     if (input.interactions.candidateToTargetLike.status === 'observed') return 'like';
+    if (input.interactions.targetToCandidateLike.status === 'observed') return 'like';
     if (input.interactions.candidateToTargetComment.status === 'observed') return 'comment';
     if (input.interactions.candidateToTargetTag.status === 'observed'
         || input.interactions.targetToCandidateTag.status === 'observed') return 'tag';
@@ -388,6 +567,7 @@ function observedInteraction(input: HighRiskNarrativeInput): 'like' | 'comment' 
 
 async function generateGeminiCopy(scope: V214ExactScope) {
     const profiles = await loadRetainedConciergeProfileArtifacts();
+    const reverseInteractions = await loadReverseInteractionArtifact(scope.order);
     const selectedProfiles = scope.rows.map(row => {
         const profile = profiles.get(normalizedUsername(row.suspect_instagram_id));
         if (!profile) throw new Error('CONCIERGE_COPY_V214_PROFILE_SCOPE_CONFLICT');
@@ -429,9 +609,9 @@ async function generateGeminiCopy(scope: V214ExactScope) {
         fullName: scope.targetFullName,
         followersCount: 0,
         followingCount: 0,
-        postsCount: 0,
-        isPrivate: false,
-        isVerified: false,
+            postsCount: 0,
+            isPrivate: false,
+            isVerified: false,
         latestPosts: [],
     };
     const interactions = interactionRows(scope.targetEvidence);
@@ -488,12 +668,14 @@ async function generateGeminiCopy(scope: V214ExactScope) {
         }
         const candidateFullName = profile.fullName ?? row.suspect_full_name;
         if (!candidateFullName) throw new Error('CONCIERGE_COPY_V214_CANDIDATE_FULL_NAME_REQUIRED');
-        const narrativeInput = createFirstPaymentConciergeHighRiskNarrativeInput({
+        const narrativeInput = buildV214NarrativeInput({
             targetProfile,
             candidateProfile: { ...profile, fullName: candidateFullName },
             capturedProfile: captured,
             feature,
             interactions,
+            targetToCandidateLike: reverseLikeObservation(reverseInteractions, row),
+            targetSelectedPostEvidence: scope.targetSelectedPostEvidence,
         });
         const narrative = await highRiskNarrative(
             narrativeInput,

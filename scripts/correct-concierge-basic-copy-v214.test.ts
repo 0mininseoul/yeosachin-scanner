@@ -3,9 +3,11 @@ import { describe, expect, it, vi } from 'vitest';
 vi.mock('@/lib/supabase/admin', () => ({ supabaseAdmin: {} }));
 
 import {
+    buildV214NarrativeInput,
     buildV214GeminiCopyPayload,
     type V214FrozenResultRow,
 } from './correct-concierge-basic-copy-v214';
+import type { FeatureAnalysisResult } from '@/lib/services/ai/v2-staged-analysis';
 
 const syllables = [
     '가', '나', '다', '라', '마', '바', '사', '아',
@@ -55,6 +57,71 @@ function geminiRows(rows: readonly V214FrozenResultRow[]) {
 }
 
 describe('v2.14 first-payment Gemini copy correction', () => {
+    it('binds the first-result adapter to retained bidirectional evidence without reverse comments', () => {
+        const target = {
+            username: 'target.user', fullName: '김준호', followersCount: 1,
+            followingCount: 1, postsCount: 1, isPrivate: false, isVerified: false,
+            latestPosts: [],
+        };
+        const candidate = {
+            username: 'candidate.user', fullName: '박민지', bio: '여행 기록',
+            followersCount: 1, followingCount: 1, postsCount: 1,
+            isPrivate: false, isVerified: false,
+            latestPosts: [{
+                id: 'candidate-post', shortCode: 'candidate', imageUrl: 'https://example.com/post.jpg',
+                type: 'image' as const, likesCount: 1, commentsCount: 1,
+                timestamp: '2026-01-01T00:00:00.000Z', taggedUsers: ['target.user'],
+                mentionedUsers: ['target.user'],
+            }],
+        };
+        const capturedProfile = {
+            ordinal: 1, isPrivate: false, username: 'candidate.user', fullName: '박민지',
+            hasProfileImage: true, bio: '여행 기록',
+            media: [{ selectionId: 'post:candidate:1', kind: 'feed' as const, postId: 'candidate-post', jpegBase64: 'aGVsbG8=' }],
+            triageSelectionIds: ['post:candidate:1'], featureSelectionIds: ['post:candidate:1'],
+            resolverSelectionIds: ['post:candidate:1'], captions: [],
+            coverage: { selectedCount: 1, normalizedCount: 1, failures: [] },
+        } as Parameters<typeof buildV214NarrativeInput>[0]['capturedProfile'];
+        const feature = {
+            features: {
+                gender: 'female', genderConfidence: 'high', ownerConsistency: 'same_person',
+                appearanceGrade: 4, exposureScore: 2, businessClassification: 'personal',
+                businessConfidence: 'high', accountContext: 'personal', marriageEvidence: 'none',
+                partnerEvidence: 'none', partnerExclusionContext: 'none',
+                evidenceSelectionIds: { gender: [], appearance: ['post:candidate:1'], exposure: [], business: [], accountContext: [], marriagePartner: [] },
+                oneLineOverview: '여행 기록이 또렷하게 남는 계정입니다.',
+            },
+            finalGenderDecision: 'verified_female', analyzedSelectionIds: ['post:candidate:1'],
+        } as FeatureAnalysisResult;
+        const input = buildV214NarrativeInput({
+            targetProfile: target, candidateProfile: candidate, capturedProfile, feature,
+            interactions: [{
+                candidateUsername: 'candidate.user', postId: 'target-post',
+                signal: 'female_target_like', sourceInteractionId: 'like:1',
+            }, {
+                candidateUsername: 'candidate.user', postId: 'target-post',
+                signal: 'female_target_comment', sourceInteractionId: 'comment:1', content: '좋은 기록이에요',
+            }],
+            targetToCandidateLike: { status: 'observed', evidenceRefIds: ['retained:reverse-like:test'] },
+            targetSelectedPostEvidence: [{
+                postId: 'target-post', selectionId: 'retained:target-post-selection:test',
+                taggedUsers: ['candidate.user'], mentionedUsers: ['candidate.user'],
+            }],
+        });
+        expect(input.interactions.candidateToTargetLike.status).toBe('observed');
+        expect(input.interactions.candidateToTargetComment.status).toBe('observed');
+        expect(input.interactions.targetToCandidateLike).toEqual({
+            status: 'observed', evidenceRefIds: ['retained:reverse-like:test'],
+        });
+        expect(input.interactions.candidateToTargetTag.status).toBe('observed');
+        expect(input.interactions.candidateToTargetMention.status).toBe('observed');
+        expect(input.interactions.targetToCandidateTag.status).toBe('observed');
+        expect(input.interactions.targetToCandidateMention.status).toBe('observed');
+        expect(input.interactions.targetToCandidateComment).toEqual({
+            status: 'not_collected', evidenceRefIds: [],
+        });
+    });
+
     it('accepts only Gemini replacement copy and preserves an exact non-copy snapshot for all sixteen v2.13 rows', () => {
         const rows = frozenRows();
         const payload = buildV214GeminiCopyPayload({ rows, generated: geminiRows(rows) });

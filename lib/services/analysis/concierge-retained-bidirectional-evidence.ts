@@ -92,6 +92,9 @@ function validateObservation(value: unknown): RetainedObservation {
 }
 
 function postDirection(input: RetainedNarrativeProfile, subject: string, field: 'taggedUsers' | 'mentionedUsers', direction: 'candidate-to-target' | 'target-to-candidate'): RetainedObservation {
+    if (input.selectedPostEvidence.length === 0) {
+        return { status: 'not_collected', evidenceRefIds: [] };
+    }
     const refs = input.selectedPostEvidence
         .filter(post => post[field].some(value => comparableUsername(value) === subject))
         .map(post => opaque(`post-${direction}-${field}`, post.selectionId));

@@ -274,6 +274,7 @@ function narrativeInput(): HighRiskNarrativeInput {
             candidateToTargetLike: observed('like:candidate-to-target'),
             targetToCandidateLike: observed('like:target-to-candidate'),
             candidateToTargetComment: observed('comment:1'),
+            targetToCandidateComment: { status: 'not_collected', evidenceRefIds: [] },
             candidateToTargetTag: notObserved(),
             targetToCandidateTag: notObserved(),
             candidateToTargetMention: notObserved(),
@@ -294,6 +295,18 @@ function narrativeInput(): HighRiskNarrativeInput {
 describe('V2 staged AI services', () => {
     beforeEach(() => {
         vi.clearAllMocks();
+    });
+
+    it('reserves reverse comments as an explicit not-collected input direction', () => {
+        expect(highRiskNarrativeInputSchema.parse(narrativeInput()).interactions.targetToCandidateComment)
+            .toEqual({ status: 'not_collected', evidenceRefIds: [] });
+        expect(() => highRiskNarrativeInputSchema.parse({
+            ...narrativeInput(),
+            interactions: {
+                ...narrativeInput().interactions,
+                targetToCandidateComment: observed('reverse-comment:1'),
+            },
+        })).toThrow('Reverse comments are not collected');
     });
 
     it('keeps derived gender and feature results inside the current request', () => {
@@ -2272,6 +2285,32 @@ describe('V2 staged AI services', () => {
                     'comment:1',
                     'coverage:target-interactions',
                 ],
+            }],
+        }));
+
+        await expect(highRiskNarrative(
+            input,
+            audit('highRiskNarrative', input, AI_STAGE_POLICY_V211_VERSION),
+            { aiStagePolicyVersion: AI_STAGE_POLICY_V211_VERSION },
+        )).rejects.toThrow('AI_GENERATION_RESPONSE_REJECTED_ERROR');
+    });
+
+    it.each([
+        '박민지님이 김준호님 게시물에 좋아요와 댓글을 남겼고, 김준호님이 박민지님 게시물에 좋아요와 댓글을 남겼다는 점도 확인됩니다.',
+        '박민지님이 김준호님 게시물에 좋아요와 댓글을 남겼고, 김준호님이 박민지님 게시물에 좋아요를 남겼지만 댓글을 남기지 않았습니다.',
+    ])('rejects a v2.11 claim about unavailable reverse comments: %s', async text => {
+        const input = narrativeInput();
+        mocks.analyzeWithGemini.mockImplementationOnce(async (
+            _prompt: string,
+            _images: string[],
+            options: { schema: { parse(value: unknown): unknown } },
+        ) => options.schema.parse({
+            lines: [{
+                text: '박민지님의 여행과 일상 기록은 꽤 차분하게 이어지는 피드입니다.',
+                evidenceRefs: ['profile:bio'],
+            }, {
+                text,
+                evidenceRefs: ['like:candidate-to-target', 'like:target-to-candidate', 'coverage:target-interactions'],
             }],
         }));
 

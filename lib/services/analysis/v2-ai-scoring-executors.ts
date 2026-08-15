@@ -1258,6 +1258,10 @@ function narrativeInput(input: {
                     : [],
             },
             candidateToTargetComment: candidateCommentObservation,
+            targetToCandidateComment: {
+                status: 'not_collected',
+                evidenceRefIds: [],
+            },
             candidateToTargetTag: profileMentionObservation({
                 posts: input.outcome.profile?.latestPosts ?? [],
                 username: input.targetUsername,
