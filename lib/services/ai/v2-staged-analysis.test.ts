@@ -2383,6 +2383,48 @@ describe('V2 staged AI services', () => {
         expect(prompt).toContain('tag:candidate-to-target');
     });
 
+    it('masks digits in canonical username subjects while requiring exact evidence refs', async () => {
+        const input: HighRiskNarrativeInput = {
+            ...narrativeInput(),
+            forbiddenIdentifiers: {
+                targetUsername: 'target7',
+                candidateUsername: 'candidate4',
+            },
+            publicSubjects: {
+                targetFullName: null,
+                candidateFullName: null,
+            },
+        };
+        mocks.analyzeWithGemini.mockImplementationOnce(async (
+            _prompt: string,
+            _images: string[],
+            options: { schema: { parse(value: unknown): unknown } },
+        ) => options.schema.parse({
+            lines: [{
+                text: 'candidate4의 여행과 일상 기록은 꽤 선명하게 이어지는 피드입니다.',
+                evidenceRefs: ['profile:bio'],
+            }, {
+                text: 'candidate4가 target7에게 좋아요와 댓글의 반가워 표현을 남겼고 target7이 candidate4에게 좋아요를 남긴 흔적은 확인되지만, 수집 표본 밖 누락 가능성은 남습니다.',
+                evidenceRefs: [
+                    'like:candidate-to-target',
+                    'like:target-to-candidate',
+                    'comment:1',
+                    'coverage:target-interactions',
+                ],
+            }],
+        }));
+
+        const result = await highRiskNarrative(
+            input,
+            audit('highRiskNarrative', input, AI_STAGE_POLICY_V211_VERSION),
+            { aiStagePolicyVersion: AI_STAGE_POLICY_V211_VERSION },
+        );
+
+        expect(result.source).toBe('gemini');
+        const [prompt] = mocks.analyzeWithGemini.mock.calls[0]!;
+        expect(prompt).toContain('evidenceRefs 값은 evidenceReferences JSON에 있는 문자열을 한 글자도 바꾸지 말고 그대로 복사');
+    });
+
     it.each([
         'ANALYSIS_V2_AI_RESULT_REPLAY_BLOCKED',
         'AI_AMBIGUOUS_GENERATION_ERROR: generation status is unknown.',

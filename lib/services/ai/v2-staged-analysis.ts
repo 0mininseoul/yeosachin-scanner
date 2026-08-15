@@ -36,6 +36,7 @@ import {
 } from '@/lib/services/analysis/v2-ai-fallback-policy';
 import {
     buildV211EvidenceSpecificOverview,
+    parseV211NarrativeWithSubjects,
     v211CopySubjectNames,
 } from '@/lib/services/analysis/public-copy-quality';
 import {
@@ -935,14 +936,16 @@ export const highRiskNarrativeModelResponseSchema = z.object({
     lines: z.tuple([narrativeLineObjectSchema, narrativeLineObjectSchema]),
 }).strict();
 
-export const highRiskNarrativeResultSchema = z.object({
+const highRiskNarrativeResultObjectSchema = z.object({
     lines: z.tuple([z.string().min(1).max(180), z.string().min(1).max(180)]),
     evidenceRefs: z.tuple([
         z.array(evidenceRefIdSchema).min(1).max(MAX_NARRATIVE_EVIDENCE_REFS),
         z.array(evidenceRefIdSchema).min(1).max(MAX_NARRATIVE_EVIDENCE_REFS),
     ]),
     source: z.enum(['gemini', 'safe_fallback']),
-}).strict().superRefine((value, context) => {
+}).strict();
+
+export const highRiskNarrativeResultSchema = highRiskNarrativeResultObjectSchema.superRefine((value, context) => {
     if (!parseSafePublicRiskNarrative(value.lines)) {
         context.addIssue({
             code: 'custom',
@@ -951,6 +954,25 @@ export const highRiskNarrativeResultSchema = z.object({
         });
     }
 });
+
+function highRiskNarrativeResultSchemaFor(
+    input: ParsedHighRiskNarrativeInput,
+    policyVersion: AiStagePolicyVersion,
+) {
+    if (policyVersion !== AI_STAGE_POLICY_V211_VERSION) {
+        return highRiskNarrativeResultSchema;
+    }
+    const subjects = v211NarrativeSubjects(input);
+    return highRiskNarrativeResultObjectSchema.superRefine((value, context) => {
+        if (!parseV211NarrativeWithSubjects(value.lines, subjects)) {
+            context.addIssue({
+                code: 'custom',
+                path: ['lines'],
+                message: 'Result lines violate the v2.11 public two-line safety contract.',
+            });
+        }
+    });
+}
 
 export type HighRiskNarrativeInput = z.input<typeof highRiskNarrativeInputSchema>;
 export type HighRiskNarrativeResult = z.infer<typeof highRiskNarrativeResultSchema>;
@@ -2433,7 +2455,7 @@ lines 배열에 정확히 두 객체만 반환하고 각 text는 줄바꿈 없�
 첫 문장은 프로필·바이오·피드·캡션으로 보이는 계정 스타일을 구체적이고 위트 있게 설명하세요.
 carouselCaptionDossier는 첫 문장의 페르소나·스타일 묘사에만 사용하고, 관계·상호작용을 단정하거나 둘째 문장의 근거로 사용하지 마세요.
 둘째 문장은 requiredInteractionPhrases를 방향 그대로 포함하고 comments가 있으면 실제 표현을 반영하며 수집 표본 밖 누락 가능성을 밝히세요.
-각 evidenceRefs에는 직접 뒷받침하는 ID만 넣고 둘째 문장에는 coverage와 관측 상호작용 ID를 넣으세요.
+각 evidenceRefs에는 직접 뒷받침하는 ID만 넣고 둘째 문장에는 coverage와 관측 상호작용 ID를 넣으세요. evidenceRefs 값은 evidenceReferences JSON에 있는 문자열을 한 글자도 바꾸지 말고 그대로 복사하며, ID를 요약하거나 새로 만들지 마세요.
 not_observed 또는 not_collected 방향을 만들지 말고 대상이 후보 게시물에 댓글을 남겼다는 문장은 금지합니다.
 자극적인 가설은 가능하지만 외도·불륜·교제·감정을 사실로 단정하지 마세요.
 계정명, URL, 이메일, 전화번호, 원시 건수, 점수, 순위, 등급, 위험 분류는 출력하지 마세요.
@@ -2542,7 +2564,11 @@ function narrativeResponseSchemaFor(
 
     return highRiskNarrativeModelResponseSchema.superRefine((value, context) => {
         const texts: [string, string] = [value.lines[0].text, value.lines[1].text];
-        if (!parseSafePublicRiskNarrative(texts)) {
+        if (!(
+            v211Subjects
+                ? parseV211NarrativeWithSubjects(texts, v211Subjects)
+                : parseSafePublicRiskNarrative(texts)
+        )) {
             context.addIssue({
                 code: 'custom',
                 path: ['lines'],
@@ -2918,13 +2944,13 @@ export async function highRiskNarrative(
             targetLikedCandidate: observed(input.interactions.targetToCandidateLike),
             ...(firstComment ? { commentText: firstComment } : {}),
         });
-        return highRiskNarrativeResultSchema.parse({
+        return highRiskNarrativeResultSchemaFor(input, policyVersion).parse({
             lines,
             evidenceRefs: fallbackEvidenceRefs(input, media, sanitized),
             source: 'safe_fallback',
         });
     }
-    return highRiskNarrativeResultSchema.parse({
+    return highRiskNarrativeResultSchemaFor(input, policyVersion).parse({
         lines: [response.lines[0].text, response.lines[1].text],
         evidenceRefs: [response.lines[0].evidenceRefs, response.lines[1].evidenceRefs],
         source: 'gemini',
