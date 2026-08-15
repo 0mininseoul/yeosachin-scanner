@@ -1183,6 +1183,101 @@ describe('analysis V2 concrete collection executors', () => {
         }));
     });
 
+    it('opens the one fixed replacement for an explicitly authorized incomplete adopted Dataset', async () => {
+        const rows = [{ username: 'alice', isPrivate: false, isVerified: false }];
+        const providers = providerStore();
+        let adoptionCalls = 0;
+        const adoption: AnalysisV2ProviderRunAdoptionStore = {
+            resolve: vi.fn(async (input: AnalysisV2ProviderRunReservationInput) => {
+                adoptionCalls += 1;
+                if (adoptionCalls !== 1) return null;
+                return {
+                    sourceRequestId: '8df77338-2672-4ef2-93fe-13a0683ec9b4',
+                    sourceJobKey: input.jobKey,
+                    operationKey: input.operationKey,
+                    inputHash: input.inputHash,
+                    logicalProvider: input.logicalProvider,
+                    actorId: input.actorId,
+                    credentialSlot: 'senary' as const,
+                    maxChargeUsd: input.maxChargeUsd,
+                    runId: 'AdoptedIncompleteRun123',
+                    actualUsageUsd: 0.01,
+                    usageReconciledAt: capturedAt,
+                    allowRelationshipIncompleteReplacement: true as const,
+                };
+            }),
+        };
+        const getFollowersMock = vi.fn(async (
+            _username: string,
+            _limit?: number,
+            options?: ScrapeRequestOptions,
+        ): Promise<InstagramFollower[]> => {
+            if (options?.providerRun?.resumeRunId === 'AdoptedIncompleteRun123') {
+                throw new Error('SCRAPING_INCOMPLETE_ERROR: adopted Dataset is partial.');
+            }
+            return rows;
+        });
+        const checkpointRelationshipSide = vi.fn(async (input) => ({
+            side: input.side,
+            sourceStatus: input.source.status,
+            revision: 1,
+            declaredCount: input.declaredCount,
+            collectedCount: input.rows.length,
+            coverageBps: 10_000,
+            inputHash: input.source.inputHash,
+            resultHash,
+        }));
+        const executor = createAnalysisV2RelationshipsExecutor({
+            requestContextStore: contextStore(requestContext({
+                followersDeclaredCount: 1,
+                followingDeclaredCount: 0,
+                orderScopedCredentialSlot: 'tertiary',
+            })),
+            providerRunStore: providers.value,
+            providerRunAdoptionStore: adoption,
+            getFollowers: getFollowersMock,
+            evidenceStore: {
+                checkpointRelationshipSide,
+                freezeRelationships: vi.fn(async () => ({
+                    revision: 1,
+                    resultHash,
+                    exclusionDecisionHash: 'f'.repeat(64),
+                    followersResultHash: resultHash,
+                    followingResultHash: resultHash,
+                    mutualCount: 1,
+                    publicCount: 1,
+                    privateCount: 0,
+                    detailedPublicCount: 1,
+                    unscreenedPublicCount: 0,
+                })),
+                loadRelationshipStaging: vi.fn(async () => ({
+                    excludedUsername: 'girlfriend',
+                    detailedPublicUsernames: ['alice'],
+                    privateMutualUsernames: [],
+                })),
+            } as unknown as AnalysisV2EvidenceStore,
+            env: {
+                SELFHOSTED_AUTH_ENABLED: 'false',
+                SCRAPER_FALLBACK: 'false',
+                SCRAPER_FOLLOWERS: 'apify',
+                SCRAPER_FOLLOWING: 'apify',
+                APIFY_TERTIARY_API_TOKEN: 'tertiary-test-token',
+                APIFY_SENARY_API_TOKEN: 'senary-test-token',
+            },
+        });
+
+        await expect(executor(stageContext('relationships', state()))).resolves.toBeDefined();
+
+        expect(getFollowersMock).toHaveBeenCalledTimes(2);
+        expect(providers.bindAdapterCheckpoint).toHaveBeenCalledTimes(1);
+        expect(providers.bindAdapterCheckpoint).toHaveBeenCalledWith(expect.objectContaining({
+            credentialSlot: 'tertiary',
+        }));
+        expect(checkpointRelationshipSide).toHaveBeenCalledWith(expect.objectContaining({
+            side: 'followers',
+        }));
+    });
+
     it('does not replace an incomplete relationship call without a reconciled succeeded run', async () => {
         const providers = providerStore();
         providers.load.mockResolvedValue(null);
