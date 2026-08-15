@@ -2152,7 +2152,7 @@ export async function featureAnalysis(
         ) throw error;
         const invalidValue = (candidate as { oneLineOverview: string }).oneLineOverview;
         const repaired = await analyzeWithGemini(
-            `다음 공개 문구 필드 하나만 수정하세요. 원문: ${JSON.stringify(invalidValue)}\n검증 요구사항: ${issue.message}\n관계 어휘를 어떤 언어·활용형·인용·부정문으로도 쓰지 말고 JSON만 반환하세요.`,
+            `다음 공개 문구 필드 하나만 수정하세요. 원문: ${JSON.stringify(invalidValue)}\n검증 요구사항: ${issue.message}\n관계 어휘를 어떤 언어·활용형·인용·부정문으로도 쓰지 마세요. "담아내"처럼 금지 문자열 "아내"를 포함하는 일반 단어도 쓰지 마세요. JSON만 반환하세요.`,
             [],
             {
                 schema: z.object({ value: safeOverviewSchemaFor(policyVersion) }).strict(),
