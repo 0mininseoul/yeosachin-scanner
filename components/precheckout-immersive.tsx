@@ -22,6 +22,7 @@ const MAX_ANALYTICS_DURATION_MS = 86_400_000;
 type PrecheckoutEventName = typeof PRECHECKOUT_EVENTS[keyof typeof PRECHECKOUT_EVENTS];
 type DemoExit = 'result' | 'fallback';
 type ImmersiveView = 'demo' | 'result' | 'fallback';
+type FallbackReason = 'unresolved_at_90' | 'demo_error';
 
 type BrowserBliteStatus =
     | { state: 'pending'; retryAfterMs: number }
@@ -177,16 +178,22 @@ export function PrecheckoutImmersive({
         setView(finalExit === 'result' && dtoRef.current ? 'result' : 'fallback');
     }, [emitPrecheckoutEvent, startedAtMs]);
 
-    const requestExit = useCallback((nextExit: DemoExit) => {
+    const requestExit = useCallback((
+        nextExit: DemoExit,
+        forceImmediate = false,
+        fallbackReason: FallbackReason = 'unresolved_at_90',
+    ) => {
         if (exitRef.current !== null) return;
         exitRef.current = nextExit;
         if (nextExit === 'fallback') {
             emitPrecheckoutEvent(PRECHECKOUT_EVENTS.BLITE_FALLBACK_SELECTED, {
-                fallback_reason: 'unresolved_at_90',
+                fallback_reason: fallbackReason,
             });
         }
         setExit(nextExit);
-        const targetAtMs = nextGraphTransitionAt(startedAtMs, Date.now());
+        const targetAtMs = forceImmediate
+            ? Date.now()
+            : nextGraphTransitionAt(startedAtMs, Date.now());
         const settle = () => {
             if (exitRef.current === nextExit) finishExit(nextExit);
         };
@@ -203,7 +210,7 @@ export function PrecheckoutImmersive({
 
     const completeFallbackAtDeadline = useCallback(() => {
         if (exitRef.current === 'result') return;
-        requestExit('fallback');
+        requestExit('fallback', true);
     }, [requestExit]);
 
     useEffect(() => {
@@ -267,9 +274,9 @@ export function PrecheckoutImmersive({
             demo_mode: exitRef.current === 'result' ? 'result' : 'fallback',
             duration_ms: boundedDemoDurationMs(startedAtMs, Date.now()),
         });
-        finishExit('fallback');
+        requestExit('fallback', false, 'demo_error');
         onDemoError?.();
-    }, [emitPrecheckoutEvent, finishExit, onDemoError, startedAtMs]);
+    }, [emitPrecheckoutEvent, onDemoError, requestExit, startedAtMs]);
 
     if (view === 'demo') {
         return (

@@ -23,6 +23,7 @@ describe('/analyze precheckout plan gate', () => {
         expect(page).toContain("preflight?.status === 'pending'");
         expect(page).toContain('preflightId={immersivePreflight.preflightId}');
         expect(page).toContain("activePrecheckoutSurface === 'legacy' && readyPreflight");
+        expect(page).toContain("immersiveReleased: activePrecheckoutSurface === 'legacy'");
         expect(page).toContain('data-precheckout-target-card');
     });
 });

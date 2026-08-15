@@ -48,6 +48,8 @@ export function shouldAutoSubmitEarlybirdAction(input: {
     requestedPlanId: PlanId | null;
     planId: PlanId | null;
     exclusionDecided: boolean;
+    /** A local OAuth return URL cannot bypass the four-stage precheckout plan gate. */
+    immersiveReleased: boolean;
     planAvailable: boolean;
     submitting: boolean;
     attemptedKey: string | null;
@@ -63,6 +65,7 @@ export function shouldAutoSubmitEarlybirdAction(input: {
         || input.requestedPreflightId !== input.preflightId
         || input.requestedPlanId !== input.planId
         || !input.exclusionDecided
+        || !input.immersiveReleased
         || !input.planAvailable
         || input.submitting
     ) return false;

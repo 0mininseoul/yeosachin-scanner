@@ -197,6 +197,7 @@ const DISCLOSURE_ACCEPTED = true;
     // selected another plan or started a new preflight.
     const visibleError = activeCheckoutStatusCta?.message ?? error;
     const autoCheckoutTransitionVisible = Boolean(user)
+        && activePrecheckoutSurface === 'legacy'
         && (autoCheckoutUiPending || queryCheckoutPlan !== null);
 
     const removeAutoCheckoutQuery = useCallback(() => {
@@ -687,6 +688,7 @@ const DISCLOSURE_ACCEPTED = true;
             requestedPlanId: autoCheckoutPlan,
             planId: effectiveSelectedPlan,
             exclusionDecided,
+            immersiveReleased: activePrecheckoutSurface === 'legacy',
             planAvailable: selectedPlanAvailable,
             submitting: purchaseSubmitting,
             attemptedKey: autoCheckoutAttemptedRef.current,
@@ -705,6 +707,7 @@ const DISCLOSURE_ACCEPTED = true;
         autoCheckoutPlan,
         autoCheckoutPreflightId,
         autoCheckoutUiPending,
+        activePrecheckoutSurface,
         clearAutoCheckoutContinuation,
         consumeAutoCheckoutContinuation,
         effectiveSelectedPlan,

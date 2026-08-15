@@ -276,6 +276,47 @@ describe('PrecheckoutImmersive', () => {
         expect(onGoToPlans).toHaveBeenCalledOnce();
     });
 
+    it('does not postpone the fallback beyond T+90 when the deadline callback is late', async () => {
+        vi.stubGlobal('fetch', vi.fn().mockResolvedValue(noBody()));
+
+        await act(async () => {
+            root.render(createElement(PrecheckoutImmersive, {
+                preflightId: PREFLIGHT_ID,
+                claimToken: null,
+                submittedAtMs: Date.parse(SUBMITTED_AT),
+                targetUsername: 'target',
+                onGoToPlans: vi.fn(),
+            }));
+        });
+        await settleUi();
+        await advance(90_001);
+
+        expect(container.querySelector('[data-precheckout-fallback]')).not.toBeNull();
+    });
+
+    it('keeps the plan gate closed through a demo runtime error until the initial pass ends', async () => {
+        vi.stubGlobal('fetch', vi.fn().mockResolvedValue(noBody()));
+        vi.stubGlobal('matchMedia', vi.fn(() => {
+            throw new Error('media query unavailable');
+        }));
+
+        await act(async () => {
+            root.render(createElement(PrecheckoutImmersive, {
+                preflightId: PREFLIGHT_ID,
+                claimToken: null,
+                submittedAtMs: Date.parse(SUBMITTED_AT),
+                targetUsername: 'target',
+                onGoToPlans: vi.fn(),
+            }));
+        });
+        await settleUi();
+        await advance(11_999);
+        expect(container.querySelector('[data-precheckout-fallback]')).toBeNull();
+        await advance(1);
+
+        expect(container.querySelector('[data-precheckout-fallback]')).not.toBeNull();
+    });
+
     it('holds a terminal B-lite status behind the same neutral T+90 fallback', async () => {
         vi.stubGlobal('fetch', vi.fn().mockResolvedValue(jsonResponse(failedStatus())));
 
