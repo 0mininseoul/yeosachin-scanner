@@ -5,6 +5,7 @@ import { supabaseAdmin } from '@/lib/supabase/admin';
 import { createAnalysisV2SelectedMediaNormalizer } from '@/lib/services/ai/image-preprocessing';
 import { issueReplayStatelessCapability } from '@/lib/services/ai/replay-stateless-capability';
 import { AI_STAGE_POLICY_V211_VERSION } from '@/lib/services/ai/stage-policy';
+import { isRecoverableGeminiResponseError } from '@/lib/services/ai/gemini-generation-policy';
 import {
     createFeatureAnalysisResultIdentity,
     createHighRiskNarrativeResultIdentity,
@@ -41,6 +42,7 @@ const ORDER_START = '2026-08-12T00:00:00Z';
 const ORDER_END = '2026-08-13T00:00:00Z';
 const SHA256 = /^[a-f0-9]{64}$/;
 const USERNAME = /^[a-z0-9._]{1,30}$/;
+const V214_GEMINI_GENERATION_MAX_ATTEMPTS = 3;
 
 export type V214FrozenResultRow = Readonly<{
     rank: number;
@@ -702,6 +704,22 @@ async function generateGeminiCopy(scope: V214ExactScope) {
     return generated;
 }
 
+export async function generateV214GeminiCopyWithSchemaRetry<T>(
+    generate: () => Promise<T>,
+): Promise<T> {
+    for (let attempt = 1; attempt <= V214_GEMINI_GENERATION_MAX_ATTEMPTS; attempt += 1) {
+        try {
+            return await generate();
+        } catch (error) {
+            if (!isRecoverableGeminiResponseError(error)
+                || attempt === V214_GEMINI_GENERATION_MAX_ATTEMPTS) {
+                throw error;
+            }
+        }
+    }
+    throw new Error('CONCIERGE_COPY_V214_GEMINI_GENERATION_RETRY_EXHAUSTED');
+}
+
 async function verifyV214Correction(input: {
     requestId: string;
     payload: ReturnType<typeof buildV214GeminiCopyPayload>;
@@ -731,7 +749,7 @@ async function main(): Promise<void> {
         throw new Error('CONCIERGE_COPY_V214_CONFIRMATION_REQUIRED');
     }
     const scope = await loadExactV214Scope();
-    const generated = await generateGeminiCopy(scope);
+    const generated = await generateV214GeminiCopyWithSchemaRetry(() => generateGeminiCopy(scope));
     const payload = buildV214GeminiCopyPayload({ rows: scope.rows, generated });
     const correctionResultHash = sha256({
         qualityVersion: payload.qualityVersion,
