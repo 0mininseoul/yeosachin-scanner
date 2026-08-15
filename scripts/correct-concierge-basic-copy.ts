@@ -6,7 +6,9 @@ import {
     areMateriallyNearDuplicatePublicCopies,
     buildV211EvidenceSpecificRiskNarrative,
     buildV213ReviewedOverview,
+    buildV213SparseEvidenceOverview,
     createV213ReviewRecord,
+    hasRetainedPublicText,
     isForbiddenV211Overview,
     isForbiddenV211RiskNarrative,
     validateV213FullReviewRows,
@@ -318,11 +320,6 @@ export function buildCorrectionPayload(input: {
         if (!profile) throw new Error('CONCIERGE_COPY_CORRECTION_PROFILE_SCOPE_CONFLICT');
         const evidence = profileCopyEvidence(profile);
         if (!row.one_line_overview) throw new Error('CONCIERGE_COPY_CORRECTION_PRIOR_COPY_CONFLICT');
-        const composition = buildV213ReviewedOverview({
-            ...evidence,
-            reviewOrdinal: row.rank - 1,
-        });
-        const overview = composition.overview;
         const interaction = interactionEvidence(row, input.targetEvidence);
         const reverseObservation = input.reverseInteractions.observations.find(
             candidate => candidate.rank === row.rank
@@ -344,6 +341,22 @@ export function buildCorrectionPayload(input: {
             candidateFullName: profile.fullName ?? row.suspect_full_name ?? null,
         };
         const appearance = { isReliable: hasReliableAppearanceEvidence(row, profile) };
+        let composition;
+        try {
+            composition = buildV213ReviewedOverview({
+                ...evidence,
+                reviewOrdinal: row.rank - 1,
+            });
+        } catch (error) {
+            if (!(error instanceof Error) || error.message !== 'CONCIERGE_COPY_EVIDENCE_UNAVAILABLE') throw error;
+            composition = buildV213SparseEvidenceOverview({
+                ...enrichedInteraction,
+                subjects,
+                reviewOrdinal: row.rank - 1,
+                textEvidenceAbsent: !hasRetainedPublicText(evidence),
+            });
+        }
+        const overview = composition.overview;
         const riskAnalysis = row.risk_grade === 'high_risk'
             ? buildV211EvidenceSpecificRiskNarrative({
                 ...evidence,
@@ -359,6 +372,7 @@ export function buildCorrectionPayload(input: {
             nextOverview: overview,
             overviewForm: composition.form,
             evidenceTerms: composition.evidenceTerms,
+            overviewEvidenceMode: composition.sparseOverviewMode ?? 'text_evidence',
             previousRiskAnalysis,
             nextRiskAnalysis: riskAnalysis,
         });
@@ -367,6 +381,7 @@ export function buildCorrectionPayload(input: {
             ...enrichedInteraction,
             subjects,
             appearance,
+            ...(composition.sparseOverviewMode ? { sparseOverviewMode: composition.sparseOverviewMode } : {}),
             rank: row.rank,
             previousOverview: row.one_line_overview,
             oneLineOverview: overview,
