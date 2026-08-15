@@ -1,5 +1,6 @@
 import { createHash } from 'node:crypto';
 import type { InstagramPost, InstagramProfile } from '@/lib/types/instagram';
+import type { PrivateNameAnalysisResult } from '@/lib/services/ai/private-name-analysis';
 import {
     buildCanonicalConciergeResult,
     validateCanonicalConciergeCorrection,
@@ -79,6 +80,8 @@ export interface ConciergeStoredReplayFeatures {
         secondPassCompleteMedia: boolean | null;
     }>;
     privateProfiles: readonly InstagramProfile[];
+    /** Exact text-only private-name analysis output for every frozen private mutual. */
+    privateNameResults: readonly PrivateNameAnalysisResult[];
     fetchedCount: number;
     hydratedPublicCount: number;
     hydratedPrivateCount: number;
@@ -335,13 +338,6 @@ function profilesWithCanonicalCandidatePosts(
             : [];
         return [ordinal, { ...profile, latestPosts: [...latestPosts] }] as const;
     }));
-}
-
-function canonicalProfiles(profiles: readonly InstagramProfile[]): readonly InstagramProfile[] {
-    return profiles.map(profile => stableObject(profile) as InstagramProfile).sort((left, right) => (
-        compareStable(normalizeEvidenceUsername(left.username), normalizeEvidenceUsername(right.username))
-        || compareStable(canonicalJson(left), canonicalJson(right))
-    ));
 }
 
 function canonicalRawEvidence(rows: readonly RawTargetInteractionEvidence[]): readonly RawTargetInteractionEvidence[] {
@@ -782,7 +778,6 @@ export function buildConciergeManualPublication(
     const canonicalInteractions = canonicalizeBidirectionalInteractions(
         input.replay.bidirectionalInteractions,
     );
-    const canonicalPrivateProfiles = canonicalProfiles(input.replay.privateProfiles);
     const result = buildCanonicalConciergeResult({
         targetUsername: input.targetUsername,
         profilesByOrdinal: profilesWithCanonicalCandidatePosts(
@@ -795,7 +790,8 @@ export function buildConciergeManualPublication(
             ? canonicalInteractions.targetToCandidate.evidence
             : [],
         targetPosts: canonicalTargetPostMentionEvidence(canonicalInteractions.targetPosts),
-        privateProfiles: canonicalPrivateProfiles,
+        privateProfiles: input.replay.privateProfiles,
+        privateNameResults: input.replay.privateNameResults,
     });
     validateCanonicalConciergeCorrection({
         fetchedCount: input.replay.fetchedCount,
