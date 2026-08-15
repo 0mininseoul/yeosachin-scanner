@@ -184,7 +184,7 @@ function genericRoleLabel(value: string): boolean {
     return /(?:대상\s*계정|후보\s*계정)/u.test(value);
 }
 
-function parseV211NarrativeWithSubjects(
+export function parseV211NarrativeWithSubjects(
     lines: [string, string],
     subjects: { target: string; candidate: string },
 ): [string, string] | null {
