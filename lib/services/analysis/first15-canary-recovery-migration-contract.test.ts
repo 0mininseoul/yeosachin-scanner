@@ -34,6 +34,13 @@ const generationThreeMigrationPath = new URL(
 const generationThreeMigration = existsSync(generationThreeMigrationPath)
     ? readFileSync(generationThreeMigrationPath, 'utf8')
     : '';
+const generationThreeQuotaMigrationPath = new URL(
+    '../../../supabase/migrations/20260816090000_first15_canary_gen3_quota_lineage.sql',
+    import.meta.url,
+);
+const generationThreeQuotaMigration = existsSync(generationThreeQuotaMigrationPath)
+    ? readFileSync(generationThreeQuotaMigrationPath, 'utf8')
+    : '';
 
 describe('first15 terminal provider-canary recovery migration contract', () => {
     it('creates one service-role-only audited replay lineage after the copy-quality migration', () => {
@@ -161,5 +168,35 @@ describe('first15 terminal provider-canary recovery migration contract', () => {
         expect(generationThreeMigration).not.toContain('CREATE TABLE public.');
         expect(generationThreeMigration).not.toContain('GRANT ');
         expect(generationThreeMigration).not.toContain('REVOKE ');
+    });
+
+    it('admits only the exact gen3 quota successor and preserves the RPC-only boundary', () => {
+        expect(generationThreeQuotaMigration).toContain(
+            '-- MIGRATION_PREDECESSOR=20260816060000',
+        );
+        expect(generationThreeQuotaMigration).toContain(
+            'JOB_ATTEMPTS_EXHAUSTED',
+        );
+        expect(generationThreeQuotaMigration).toContain(
+            "parent_rearm.source_failure_code = 'ANALYSIS_V2_MEDIA_ARTIFACT_OBJECT_ERROR'",
+        );
+        expect(generationThreeQuotaMigration).toContain(
+            "receipt.failed_job_key = 'track:profile-ai:batch:2'",
+        );
+        expect(generationThreeQuotaMigration).toContain(
+            "rearm.source_credential_slot = 'quinary'",
+        );
+        expect(generationThreeQuotaMigration).toContain(
+            "rearm.fallback_credential_slot = 'primary'",
+        );
+        expect(generationThreeQuotaMigration).toContain(
+            'rearm.rearm_generation = 2',
+        );
+        expect(generationThreeQuotaMigration).toContain(
+            'rearm.rearm_generation = 3',
+        );
+        expect(generationThreeQuotaMigration).not.toContain('CREATE TABLE public.');
+        expect(generationThreeQuotaMigration).not.toContain('GRANT ');
+        expect(generationThreeQuotaMigration).not.toContain('REVOKE ');
     });
 });

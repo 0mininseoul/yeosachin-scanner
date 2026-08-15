@@ -295,6 +295,99 @@ describe('first15 terminal provider-canary recovery', () => {
         expect(defaultRecoveryMocks.dispatch).not.toHaveBeenCalled();
     });
 
+    it('accepts the exact gen3 quota terminal code before scoped reconciliation', async () => {
+        defaultRecoveryMocks.rpc.mockClear();
+        defaultRecoveryMocks.reconcile.mockClear();
+        defaultRecoveryMocks.dispatch.mockClear();
+        const resumed = candidate(2, 'SCRAPING_PROVIDER_QUOTA_ERROR', 'quinary');
+        const rawRearms = [
+            {
+                order_id: ORDER_A,
+                rearmed_preflight_id: '00000000-0000-4010-8000-000000000001',
+                rearm_generation: 1,
+                source_failure_code: 'SCRAPING_INCOMPLETE_ERROR',
+            },
+            {
+                order_id: ORDER_B,
+                rearmed_preflight_id: '00000000-0000-4010-8000-000000000002',
+                rearm_generation: 1,
+                source_failure_code: 'SCRAPING_PROVIDER_QUOTA_ERROR',
+            },
+            {
+                order_id: ORDER_C,
+                rearmed_preflight_id: '00000000-0000-4010-8000-000000000003',
+                rearm_generation: 1,
+                source_failure_code: 'SCRAPING_PROVIDER_START_REJECTED_ERROR',
+            },
+            {
+                order_id: ORDER_B,
+                rearmed_preflight_id: resumed.preflightId,
+                rearm_generation: 2,
+                source_failure_code: 'ANALYSIS_V2_MEDIA_ARTIFACT_OBJECT_ERROR',
+            },
+            {
+                order_id: ORDER_B,
+                rearmed_preflight_id: '00000000-0000-4012-8000-000000000002',
+                rearm_generation: 3,
+                source_failure_code: 'JOB_ATTEMPTS_EXHAUSTED',
+            },
+        ];
+        const rawRun = providerRun(2);
+        const rawRuns = [{
+            request_id: resumed.requestId,
+            job_key: rawRun.jobKey,
+            operation_key: rawRun.operationKey,
+            input_hash: rawRun.inputHash,
+            reservation_token: rawRun.reservationToken,
+            logical_provider: rawRun.logicalProvider,
+            actor_id: rawRun.actorId,
+            credential_slot: 'quinary',
+            max_charge_usd: rawRun.maxChargeUsd,
+            status: rawRun.status,
+            run_id: rawRun.runId,
+            actual_usage_usd: rawRun.actualUsageUsd,
+            reserved_at: rawRun.reservedAt,
+            run_started_at: rawRun.runStartedAt,
+            terminalized_at: rawRun.terminalizedAt,
+            usage_reconciled_at: rawRun.usageReconciledAt,
+        }];
+
+        defaultRecoveryMocks.workerAvailable.mockReturnValue(true);
+        defaultRecoveryMocks.reconcile.mockResolvedValue({
+            eligible: rawRuns.length,
+            reconciled: rawRuns.length,
+            failed: 0,
+            hasMore: false,
+        });
+        defaultRecoveryMocks.rpc.mockImplementation(async (name: string) => {
+            if (name === 'list_earlybird_first15_canary_provider_recovery_candidates') {
+                return { data: [{
+                    order_id: resumed.orderId,
+                    request_id: resumed.requestId,
+                    preflight_id: '00000000-0000-4012-8000-000000000002',
+                    error_code: resumed.errorCode,
+                    credential_slot: resumed.credentialSlot,
+                }], error: null };
+            }
+            if (name === 'list_earlybird_first15_canary_provider_rearms') {
+                return { data: rawRearms, error: null };
+            }
+            if (name === 'list_earlybird_first15_canary_provider_runs') {
+                return { data: rawRuns, error: null };
+            }
+            if (name === 'rearm_earlybird_first15_canary_provider_failure') {
+                return { data: null, error: { message: 'readiness rejected' } };
+            }
+            throw new Error(`unexpected RPC ${name}`);
+        });
+
+        await expect(runFirst15CanaryProviderRecovery()).rejects.toThrow(
+            'FIRST15_CANARY_RECOVERY_REARM_FAILED',
+        );
+        expect(defaultRecoveryMocks.reconcile).toHaveBeenCalledOnce();
+        expect(defaultRecoveryMocks.dispatch).not.toHaveBeenCalled();
+    });
+
     it('reconciles only the three source ledgers, then rearms them on tertiary sequentially', async () => {
         const deps = dependencies();
 

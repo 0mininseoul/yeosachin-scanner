@@ -28,6 +28,7 @@ const first15RearmSourceFailureCodeSchema = z.enum([
     ...FIRST15_CANARY_PROVIDER_FAILURE_CODES,
     'ANALYSIS_V2_JOB_HANDLER_FAILED',
     'ANALYSIS_V2_MEDIA_ARTIFACT_OBJECT_ERROR',
+    'JOB_ATTEMPTS_EXHAUSTED',
 ]);
 type First15CanaryProviderRearmSourceFailureCode = z.infer<
     typeof first15RearmSourceFailureCodeSchema
