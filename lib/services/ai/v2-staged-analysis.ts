@@ -2481,7 +2481,20 @@ function narrativePrompt(
         const appearanceRule = input.appearance.isReliable
             ? '첫 문장에는 피드·프로필 맥락과 함께 가벼운 외모 농담을 한 번 넣고, "예쁘", "매력", "눈길" 중 하나와 "이미지 인상만으로 관계를 판단할 수는 없습니다"를 그대로 포함하세요.'
             : '외모·이미지에 관한 문구를 만들지 마세요.';
-        return `${legacy}\nv2.11 공개 서사는 첫 문장에 ${subjects.candidate}, 둘째 문장에 ${subjects.candidate}와 ${subjects.target}을 직접 적으세요. \"대상 계정\"이나 \"후보 계정\"이라는 표현은 금지합니다. 각 좋아요·댓글·태그·멘션은 실제 관측 방향을 이름으로 설명하고, 단일 좋아요나 외모만으로 관계를 증명하지 마세요. ${appearanceRule}`;
+        const namedDirections = [
+            [input.interactions.candidateToTargetLike, subjects.candidate, subjects.target, '좋아요'],
+            [input.interactions.targetToCandidateLike, subjects.target, subjects.candidate, '좋아요'],
+            [input.interactions.candidateToTargetComment, subjects.candidate, subjects.target, '댓글'],
+            [input.interactions.candidateToTargetTag, subjects.candidate, subjects.target, '태그'],
+            [input.interactions.targetToCandidateTag, subjects.target, subjects.candidate, '태그'],
+            [input.interactions.candidateToTargetMention, subjects.candidate, subjects.target, '멘션'],
+            [input.interactions.targetToCandidateMention, subjects.target, subjects.candidate, '멘션'],
+        ].flatMap(([observation, actor, receiver, interaction]) => (
+            typeof observation === 'object' && observation.status === 'observed'
+                ? [`${String(actor)}${String(actor).endsWith('님') ? '이' : '가'} ${String(receiver)}에게 남긴 ${interaction}`]
+                : []
+        ));
+        return `${legacy}\nv2.11 공개 서사는 첫 문장에 ${subjects.candidate}, 둘째 문장에 ${subjects.candidate}와 ${subjects.target}을 직접 적으세요. \"대상 계정\"이나 \"후보 계정\"이라는 표현은 금지합니다. 둘째 문장에는 다음 관측 방향 문구를 한 글자도 바꾸지 말고 모두 포함하세요: ${JSON.stringify(namedDirections)}. 단일 좋아요나 외모만으로 관계를 증명하지 마세요. ${appearanceRule}`;
     }
     return `${legacy}\n고위험 서사는 상호작용과 제공된 시각 근거를 구분해 구체적으로 쓰되, ㅋㅋ·자기지칭을 절대 쓰지 마세요. bio·caption 인용을 포함해 관계 관련 용어 자체를 lines에 쓰지 마세요. 보호 특성·신체·외모를 조롱하지 마세요.`;
 }

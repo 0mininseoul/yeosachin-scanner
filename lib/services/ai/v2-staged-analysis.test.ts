@@ -2440,6 +2440,9 @@ describe('V2 staged AI services', () => {
         expect(result.source).toBe('gemini');
         const [prompt] = mocks.analyzeWithGemini.mock.calls[0]!;
         expect(prompt).toContain('evidenceRefs 값은 evidenceReferences JSON에 있는 문자열을 한 글자도 바꾸지 말고 그대로 복사');
+        expect(prompt).toContain('candidate4가 target7에게 남긴 좋아요');
+        expect(prompt).toContain('target7가 candidate4에게 남긴 좋아요');
+        expect(prompt).toContain('candidate4가 target7에게 남긴 댓글');
     });
 
     it.each([
