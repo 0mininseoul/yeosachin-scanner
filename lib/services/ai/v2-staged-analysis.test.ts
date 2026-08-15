@@ -2267,6 +2267,23 @@ describe('V2 staged AI services', () => {
         )).rejects.toThrow('AI_GENERATION_RESPONSE_REJECTED_ERROR');
     });
 
+    it('gives reliable-appearance generation the exact caveat required by validation', async () => {
+        const input = { ...narrativeInput(), appearance: { isReliable: true } };
+        mocks.analyzeWithGemini.mockRejectedValueOnce(new Error(
+            'AI_GENERATION_RESPONSE_REJECTED_ERROR: generated response failed strict validation.'
+        ));
+
+        await expect(highRiskNarrative(
+            input,
+            audit('highRiskNarrative', input, AI_STAGE_POLICY_V211_VERSION),
+            { aiStagePolicyVersion: AI_STAGE_POLICY_V211_VERSION },
+        )).rejects.toThrow('AI_GENERATION_RESPONSE_REJECTED_ERROR');
+
+        const [prompt] = mocks.analyzeWithGemini.mock.calls[0]!;
+        expect(prompt).toContain('"이미지 인상만으로 관계를 판단할 수는 없습니다"를 그대로 포함');
+        expect(prompt).toContain('"예쁘", "매력", "눈길" 중 하나');
+    });
+
     it('rejects an unqualified reciprocal-like claim rather than composing v2.11 fallback copy', async () => {
         const input = narrativeInput();
         mocks.analyzeWithGemini.mockImplementationOnce(async (
