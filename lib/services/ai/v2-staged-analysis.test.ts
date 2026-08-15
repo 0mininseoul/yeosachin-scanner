@@ -1072,6 +1072,8 @@ describe('V2 staged AI services', () => {
         expect(prompt).toContain('관계 용어 금지 목록: 사귀, 썸, 연애, 연인, 애인, 남자친구');
         expect(prompt).toContain('boyfriend, girlfriend, couple, dating, relationship, married');
         expect(prompt).toContain('fiance, fiancee, fiancé, fiancée');
+        expect(prompt).toContain('JSON 반환 직전에 oneLineOverview를 다시 검사하고');
+        expect(prompt).toContain('어떤 언어·활용형·인용·부정문으로든');
     });
 
     it('rejects an invalid v2.11 individual-creator overview rather than publishing fallback copy', async () => {
@@ -2402,6 +2404,8 @@ describe('V2 staged AI services', () => {
         const [prompt] = mocks.analyzeWithGemini.mock.calls[0]!;
         expect(prompt).toContain('candidateToTargetTag":"observed');
         expect(prompt).toContain('tag:candidate-to-target');
+        expect(prompt).toContain('JSON 반환 직전에 lines의 모든 text를 다시 검사하고');
+        expect(prompt).toContain('어떤 언어·활용형·인용·부정문으로든');
     });
 
     it('masks digits in canonical username subjects while requiring exact evidence refs', async () => {
