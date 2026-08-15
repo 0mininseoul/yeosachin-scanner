@@ -49,6 +49,7 @@ import { ResultPagination } from '@/components/result-pagination';
 import { ProfilePreviewDialog, type InternalProfilePreview } from '@/components/profile-preview-dialog';
 import { HighRiskSummary } from '@/components/high-risk-summary';
 import { safeResultImageUrl } from '@/lib/services/result-local-image';
+import { resultPageHeader } from '@/lib/services/analysis/result-page-header';
 
 interface PageProps {
     params: Promise<{ requestId: string }>;
@@ -734,6 +735,7 @@ export default function ResultPage({ params }: PageProps) {
         : null;
     const highCount = summary.v2?.highRiskCount
         ?? countHighRiskGrades(femaleAccounts);
+    const targetHeader = resultPageHeader(summary);
 
     return (
         <div className="min-h-dvh pb-16">
@@ -797,24 +799,30 @@ export default function ResultPage({ params }: PageProps) {
                             <div className="min-w-0">
                                 <h1 className="text-[23px] font-extrabold leading-snug tracking-tight text-fg">
                                     <span className="break-all">
-                                        {summary.targetFullName ?? summary.targetInstagramId}
+                                        {targetHeader.displayName}
                                     </span>
                                     님의 위장 여사친
                                 </h1>
                                 {/* The handle already names the account, so it
                                     carries the link rather than a separate button
                                     competing with the headline beside it. */}
-                                <a
-                                    href={`https://instagram.com/${summary.targetInstagramId}`}
-                                    target="_blank"
-                                    rel="noopener noreferrer"
-                                    className="mt-1 inline-flex max-w-full items-center gap-1.5 text-fg-dim transition-colors hover:text-fg"
-                                >
-                                    <InstagramGlyph className="h-3.5 w-3.5 shrink-0" />
-                                    <span className="num truncate text-[12px]">
+                                {targetHeader.instagramUrl && targetHeader.username ? (
+                                    <a
+                                        href={targetHeader.instagramUrl}
+                                        target="_blank"
+                                        rel="noopener noreferrer"
+                                        className="mt-1 inline-flex max-w-full items-center gap-1.5 text-fg-dim transition-colors hover:text-fg"
+                                    >
+                                        <InstagramGlyph className="h-3.5 w-3.5 shrink-0" />
+                                        <span className="num truncate text-[12px]">
+                                            @{targetHeader.username}
+                                        </span>
+                                    </a>
+                                ) : (
+                                    <p className="num mt-1 truncate text-[12px] text-fg-dim">
                                         @{summary.targetInstagramId}
-                                    </span>
-                                </a>
+                                    </p>
+                                )}
                             </div>
                         </div>
 

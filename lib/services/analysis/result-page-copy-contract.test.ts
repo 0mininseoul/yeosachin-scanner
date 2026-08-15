@@ -50,6 +50,10 @@ const reportHeader = resultPage.slice(
     resultPage.indexOf('<Eyebrow className="shrink-0">판독 리포트</Eyebrow>'),
     resultPage.indexOf('{/* pipeline-specific summary */}'),
 );
+const v2Hero = resultPage.slice(
+    resultPage.indexOf('{summary.v2 && counts ? ('),
+    resultPage.indexOf('<HighRiskSummary'),
+);
 
 describe('result page pagination copy contract', () => {
     it('drops the range/plus counters and the old load-more buttons', () => {
@@ -158,8 +162,22 @@ describe('result page pagination copy contract', () => {
         expect(compactSummary).toContain('님의 위장 여사친');
         // Instagram display names are optional, so the handle backs the headline
         // until (and when) targetFullName is absent.
-        expect(compactSummary).toContain('summary.targetFullName ?? summary.targetInstagramId');
+        expect(compactSummary).toContain('targetHeader.displayName');
         expect(resultPage).toContain('targetFullName?: string | null');
+    });
+
+    it('binds the hero identity and Instagram link to the canonical target summary', () => {
+        // The header must project only the stored target identity. Keeping that
+        // projection in one helper prevents future result-row work from making a
+        // candidate name or handle leak into the hero.
+        expect(resultPage).toContain("import { resultPageHeader } from '@/lib/services/analysis/result-page-header'");
+        expect(resultPage).toContain('const targetHeader = resultPageHeader(summary);');
+        expect(v2Hero).toContain('{targetHeader.displayName}');
+        expect(v2Hero).toContain('님의 위장 여사친');
+        expect(v2Hero).toContain('href={targetHeader.instagramUrl}');
+        expect(v2Hero).toContain('@{targetHeader.username}');
+        expect(v2Hero).toContain('target="_blank"');
+        expect(v2Hero).toContain('rel="noopener noreferrer"');
     });
 
     it('never rebuilds the summary as a grid of bordered cells', () => {
