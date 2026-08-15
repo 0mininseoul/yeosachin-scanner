@@ -1068,6 +1068,9 @@ describe('V2 staged AI services', () => {
 
         const [prompt] = mocks.analyzeWithGemini.mock.calls[0];
         expect(prompt).toContain('분석 방법이나 자료의 한계를 직접 말하지 마세요');
+        expect(prompt).toContain('oneLineOverview 금지 문자열: "개인 계정입니다", "일반 단계로 판독됐어요"');
+        expect(prompt).toContain('관계 용어 금지 목록: 사귀, 썸, 연애, 연인, 애인, 남자친구');
+        expect(prompt).toContain('boyfriend, girlfriend, couple, dating, relationship, married');
     });
 
     it('rejects an invalid v2.11 individual-creator overview rather than publishing fallback copy', async () => {
