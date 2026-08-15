@@ -139,7 +139,10 @@ function normalizedFullName(value: string | null | undefined): string | null {
         .replace(publicIdentifierPattern, ' ')
         .replace(/\s+/g, ' ')
         .trim();
-    return normalized || null;
+    // The two generic role labels are never canonical names.  A malformed
+    // retained full-name field must therefore fall back to the normalized
+    // username rather than leak the forbidden label into public copy.
+    return normalized && !genericRoleLabel(normalized) ? normalized : null;
 }
 
 function subjectName(fullName: string | null | undefined, username: string): string {

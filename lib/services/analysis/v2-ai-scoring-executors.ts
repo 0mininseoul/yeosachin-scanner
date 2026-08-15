@@ -1162,6 +1162,27 @@ function interactionObservation(
         : { status: 'not_observed' as const, evidenceRefIds: [] as string[] };
 }
 
+function profileMentionObservation(input: {
+    posts: readonly Pick<NonNullable<AnalysisV2CheckpointProfile['latestPosts']>[number], 'id' | 'taggedUsers' | 'mentionedUsers'>[];
+    username: string;
+    field: 'taggedUsers' | 'mentionedUsers';
+    domain: string;
+}) {
+    const subject = input.username.trim().replace(/^@/u, '').toLowerCase();
+    const matchingPostIds = input.posts
+        .filter(post => post[input.field].some(value => (
+            value.trim().replace(/^@/u, '').toLowerCase() === subject
+        )))
+        .map(post => post.id)
+        .slice(0, 8);
+    return matchingPostIds.length > 0
+        ? {
+            status: 'observed' as const,
+            evidenceRefIds: matchingPostIds.map(postId => evidenceRef(input.domain, postId)),
+        }
+        : { status: 'not_observed' as const, evidenceRefIds: [] as string[] };
+}
+
 function targetCoverageStatus(snapshot: AnalysisV2TargetEvidenceStagingSnapshot) {
     const sources = [snapshot.likerSource, snapshot.commentSource];
     if (sources.every(source => source.status === 'not_applicable')) return 'unknown' as const;
@@ -1180,6 +1201,7 @@ function narrativeInput(input: {
     media: readonly NormalizedAiMediaSelection[];
     carouselCaptionDossier: Readonly<{ evidenceRefId: string; text: string }> | null;
     targetEvidence: AnalysisV2TargetEvidenceStagingSnapshot;
+    targetPosts: readonly Pick<NonNullable<AnalysisV2CheckpointProfile['latestPosts']>[number], 'id' | 'taggedUsers' | 'mentionedUsers'>[];
     reverse: AnalysisV2ReverseLikeRow | undefined;
 }): HighRiskNarrativeInput {
     const candidateRows = input.targetEvidence.rows.filter(row => (
@@ -1236,6 +1258,30 @@ function narrativeInput(input: {
                     : [],
             },
             candidateToTargetComment: candidateCommentObservation,
+            candidateToTargetTag: profileMentionObservation({
+                posts: input.outcome.profile?.latestPosts ?? [],
+                username: input.targetUsername,
+                field: 'taggedUsers',
+                domain: 'analysis-v2-candidate-to-target-tag-ref-v1',
+            }),
+            targetToCandidateTag: profileMentionObservation({
+                posts: input.targetPosts,
+                username: input.outcome.instagramId,
+                field: 'taggedUsers',
+                domain: 'analysis-v2-target-to-candidate-tag-ref-v1',
+            }),
+            candidateToTargetMention: profileMentionObservation({
+                posts: input.outcome.profile?.latestPosts ?? [],
+                username: input.targetUsername,
+                field: 'mentionedUsers',
+                domain: 'analysis-v2-candidate-to-target-mention-ref-v1',
+            }),
+            targetToCandidateMention: profileMentionObservation({
+                posts: input.targetPosts,
+                username: input.outcome.instagramId,
+                field: 'mentionedUsers',
+                domain: 'analysis-v2-target-to-candidate-mention-ref-v1',
+            }),
             comments: commentRows.map(row => ({
                 evidenceRefId: commentRefs.get(row.sourceInteractionId)!,
                 targetPostEvidenceRefId: evidenceRef(
@@ -3210,6 +3256,7 @@ export function createAnalysisV2AiScoringExecutorRegistry(
                         media,
                         carouselCaptionDossier: captionPolicy.dossier,
                         targetEvidence,
+                        targetPosts: target.latestPosts ?? [],
                         reverse: reverseById.get(candidateId),
                     }), aiJobFence(context));
                     return {

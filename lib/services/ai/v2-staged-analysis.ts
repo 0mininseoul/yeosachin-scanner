@@ -95,6 +95,10 @@ const CANDIDATE_TO_TARGET_LIKE_PHRASE = '후보가 대상 게시물에 남긴 �
 const TARGET_TO_CANDIDATE_LIKE_PHRASE = '대상 계정이 후보 피드에 남긴 좋아요';
 const BIDIRECTIONAL_LIKE_PHRASE = '서로 남긴 좋아요';
 const CANDIDATE_TO_TARGET_COMMENT_PHRASE = '후보가 대상 게시물에 남긴 댓글';
+const CANDIDATE_TO_TARGET_TAG_PHRASE = '후보가 대상을 태그한 흔적';
+const TARGET_TO_CANDIDATE_TAG_PHRASE = '대상이 후보를 태그한 흔적';
+const CANDIDATE_TO_TARGET_MENTION_PHRASE = '후보가 대상을 적은 캡션 멘션';
+const TARGET_TO_CANDIDATE_MENTION_PHRASE = '대상이 후보를 적은 캡션 멘션';
 const IMPOSSIBLE_TARGET_TO_CANDIDATE_COMMENT_PATTERN =
     /대상\s*계정이\s*후보(?:의)?\s*(?:게시물|피드)에\s*남긴\s*댓글/u;
 const INTERNAL_RESULT_TERM_PATTERN =
@@ -780,6 +784,10 @@ const narrativeInteractionsSchema = z.object({
     candidateToTargetLike: interactionObservationSchema,
     targetToCandidateLike: interactionObservationSchema,
     candidateToTargetComment: interactionObservationSchema,
+    candidateToTargetTag: interactionObservationSchema,
+    targetToCandidateTag: interactionObservationSchema,
+    candidateToTargetMention: interactionObservationSchema,
+    targetToCandidateMention: interactionObservationSchema,
     comments: z.array(sanitizedCommentEvidenceSchema).max(12),
     coverage: z.object({
         status: z.enum(['complete', 'partial', 'unknown']),
@@ -870,6 +878,10 @@ export const highRiskNarrativeInputSchema = z.object({
             ...value.interactions.candidateToTargetLike.evidenceRefIds,
             ...value.interactions.targetToCandidateLike.evidenceRefIds,
             ...value.interactions.candidateToTargetComment.evidenceRefIds,
+            ...value.interactions.candidateToTargetTag.evidenceRefIds,
+            ...value.interactions.targetToCandidateTag.evidenceRefIds,
+            ...value.interactions.candidateToTargetMention.evidenceRefIds,
+            ...value.interactions.targetToCandidateMention.evidenceRefIds,
             ...value.interactions.comments.flatMap(comment => [
                 comment.evidenceRefId,
                 comment.targetPostEvidenceRefId,
@@ -2288,6 +2300,18 @@ function requiredInteractionPhrases(input: ParsedHighRiskNarrativeInput): string
         ...(observed(input.interactions.candidateToTargetComment)
             ? [CANDIDATE_TO_TARGET_COMMENT_PHRASE]
             : []),
+        ...(observed(input.interactions.candidateToTargetTag)
+            ? [CANDIDATE_TO_TARGET_TAG_PHRASE]
+            : []),
+        ...(observed(input.interactions.targetToCandidateTag)
+            ? [TARGET_TO_CANDIDATE_TAG_PHRASE]
+            : []),
+        ...(observed(input.interactions.candidateToTargetMention)
+            ? [CANDIDATE_TO_TARGET_MENTION_PHRASE]
+            : []),
+        ...(observed(input.interactions.targetToCandidateMention)
+            ? [TARGET_TO_CANDIDATE_MENTION_PHRASE]
+            : []),
     ];
 }
 
@@ -2296,6 +2320,10 @@ function allObservedInteractionRefs(input: ParsedHighRiskNarrativeInput): string
         ...input.interactions.candidateToTargetLike.evidenceRefIds,
         ...input.interactions.targetToCandidateLike.evidenceRefIds,
         ...input.interactions.candidateToTargetComment.evidenceRefIds,
+        ...input.interactions.candidateToTargetTag.evidenceRefIds,
+        ...input.interactions.targetToCandidateTag.evidenceRefIds,
+        ...input.interactions.candidateToTargetMention.evidenceRefIds,
+        ...input.interactions.targetToCandidateMention.evidenceRefIds,
     ];
 }
 
@@ -2304,6 +2332,10 @@ function observedInteractionRefGroups(input: ParsedHighRiskNarrativeInput): stri
         input.interactions.candidateToTargetLike,
         input.interactions.targetToCandidateLike,
         input.interactions.candidateToTargetComment,
+        input.interactions.candidateToTargetTag,
+        input.interactions.targetToCandidateTag,
+        input.interactions.candidateToTargetMention,
+        input.interactions.targetToCandidateMention,
     ].flatMap(observation => (
         observation.status === 'observed' ? [observation.evidenceRefIds] : []
     ));
@@ -2357,6 +2389,10 @@ function narrativePromptLegacy(
             candidateToTargetLike: input.interactions.candidateToTargetLike.status,
             targetToCandidateLike: input.interactions.targetToCandidateLike.status,
             candidateToTargetComment: input.interactions.candidateToTargetComment.status,
+            candidateToTargetTag: input.interactions.candidateToTargetTag.status,
+            targetToCandidateTag: input.interactions.targetToCandidateTag.status,
+            candidateToTargetMention: input.interactions.candidateToTargetMention.status,
+            targetToCandidateMention: input.interactions.targetToCandidateMention.status,
             coverage: input.interactions.coverage.status,
             requiredInteractionPhrases: requiredInteractionPhrases(input),
         },
@@ -2365,6 +2401,10 @@ function narrativePromptLegacy(
             candidateToTargetLike: input.interactions.candidateToTargetLike.evidenceRefIds,
             targetToCandidateLike: input.interactions.targetToCandidateLike.evidenceRefIds,
             candidateToTargetComment: input.interactions.candidateToTargetComment.evidenceRefIds,
+            candidateToTargetTag: input.interactions.candidateToTargetTag.evidenceRefIds,
+            targetToCandidateTag: input.interactions.targetToCandidateTag.evidenceRefIds,
+            candidateToTargetMention: input.interactions.candidateToTargetMention.evidenceRefIds,
+            targetToCandidateMention: input.interactions.targetToCandidateMention.evidenceRefIds,
             coverage: input.interactions.coverage.evidenceRefId,
         },
     };
@@ -2437,7 +2477,7 @@ function containsNamedInteractionDirection(
     line: string,
     actor: string,
     receiver: string,
-    interaction: '좋아요' | '댓글',
+    interaction: '좋아요' | '댓글' | '태그' | '멘션',
 ): boolean {
     return new RegExp(
         `${escapesRegex(actor)}[^.]{0,80}${escapesRegex(receiver)}[^.]{0,80}${interaction}`,
@@ -2562,7 +2602,6 @@ function narrativeResponseSchemaFor(
                     v211Subjects.target,
                     v211Subjects.candidate,
                     '좋아요')
-                && !second.includes('서로 남긴 좋아요')
             ) {
                 context.addIssue({
                     code: 'custom',
@@ -2584,6 +2623,49 @@ function narrativeResponseSchemaFor(
                     path: ['lines', 1, 'text'],
                     message: 'v2.11 narrative omitted the candidate-to-target comment direction.',
                 });
+            }
+            const namedDirections: ReadonlyArray<readonly [
+                z.infer<typeof interactionObservationSchema>, string, string, '태그' | '멘션', string
+            ]> = [
+                [
+                    input.interactions.candidateToTargetTag,
+                    v211Subjects.candidate,
+                    v211Subjects.target,
+                    '태그',
+                    'candidate-to-target tag',
+                ],
+                [
+                    input.interactions.targetToCandidateTag,
+                    v211Subjects.target,
+                    v211Subjects.candidate,
+                    '태그',
+                    'target-to-candidate tag',
+                ],
+                [
+                    input.interactions.candidateToTargetMention,
+                    v211Subjects.candidate,
+                    v211Subjects.target,
+                    '멘션',
+                    'candidate-to-target mention',
+                ],
+                [
+                    input.interactions.targetToCandidateMention,
+                    v211Subjects.target,
+                    v211Subjects.candidate,
+                    '멘션',
+                    'target-to-candidate mention',
+                ],
+            ];
+            for (const [observation, actor, receiver, interaction, label] of namedDirections) {
+                if (observed(observation) && !containsNamedInteractionDirection(
+                    second, actor, receiver, interaction,
+                )) {
+                    context.addIssue({
+                        code: 'custom',
+                        path: ['lines', 1, 'text'],
+                        message: `v2.11 narrative omitted the ${label} direction.`,
+                    });
+                }
             }
             if (
                 input.appearance.isReliable
@@ -2655,6 +2737,24 @@ function narrativeResponseSchemaFor(
                 code: 'custom',
                 path: ['lines', 1, 'text'],
                 message: 'Narrative introduced unobserved comment evidence.',
+            });
+        }
+        const hasAnyTag = observed(input.interactions.candidateToTargetTag)
+            || observed(input.interactions.targetToCandidateTag);
+        if (!hasAnyTag && value.lines[1].text.includes('태그')) {
+            context.addIssue({
+                code: 'custom',
+                path: ['lines', 1, 'text'],
+                message: 'Narrative introduced unobserved tag evidence.',
+            });
+        }
+        const hasAnyMention = observed(input.interactions.candidateToTargetMention)
+            || observed(input.interactions.targetToCandidateMention);
+        if (!hasAnyMention && value.lines[1].text.includes('멘션')) {
+            context.addIssue({
+                code: 'custom',
+                path: ['lines', 1, 'text'],
+                message: 'Narrative introduced unobserved mention evidence.',
             });
         }
         if (IMPOSSIBLE_TARGET_TO_CANDIDATE_COMMENT_PATTERN.test(value.lines[1].text)) {
@@ -2781,6 +2881,10 @@ export async function highRiskNarrative(
                 candidateLikedTarget: observed(input.interactions.candidateToTargetLike),
                 candidateCommentedOnTarget: observed(input.interactions.candidateToTargetComment),
                 targetLikedCandidate: observed(input.interactions.targetToCandidateLike),
+                candidateTaggedTarget: observed(input.interactions.candidateToTargetTag),
+                targetTaggedCandidate: observed(input.interactions.targetToCandidateTag),
+                candidateMentionedTarget: observed(input.interactions.candidateToTargetMention),
+                targetMentionedCandidate: observed(input.interactions.targetToCandidateMention),
                 ...(firstComment ? { commentText: firstComment } : {}),
                 appearance: input.appearance,
             })

@@ -115,6 +115,25 @@ describe('v2.11 concierge public-copy quality', () => {
         expect(lines.join(' ')).not.toMatch(/(?:대상\s*계정|후보\s*계정)/u);
     });
 
+    it('treats reserved generic role labels in retained full names as absent', () => {
+        const lines = buildV211EvidenceSpecificRiskNarrative({
+            subjects: {
+                targetUsername: 'target.user',
+                targetFullName: '대상 계정',
+                candidateUsername: 'candidate.user',
+                candidateFullName: '후보 계정',
+            },
+            profileEvidence: '주말 전시와 커피 기록',
+            feedEvidence: ['성수동 전시를 둘러본 오후'],
+            candidateLikedTarget: true,
+            candidateCommentedOnTarget: false,
+            targetLikedCandidate: false,
+        });
+
+        expect(lines[1]).toContain('candidate.user가 target.user 게시물에 남긴 좋아요');
+        expect(lines.join(' ')).not.toMatch(/(?:대상\s*계정|후보\s*계정)/u);
+    });
+
     it('keeps a natural grounded overview and refreshes only vague or forbidden overview copy', () => {
         const evidence = {
             profileEvidence: '주말마다 전시와 커피를 기록합니다',

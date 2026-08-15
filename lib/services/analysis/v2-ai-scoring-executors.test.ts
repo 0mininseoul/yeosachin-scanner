@@ -4092,6 +4092,13 @@ describe('V2 AI and scoring executors', () => {
     it('reuses the exact private bundle for narrative grounding and never redownloads Instagram media', async () => {
         const memoryState = memory();
         const candidate = completeCarouselOutcome('woman.one');
+        candidate.profile = {
+            ...candidate.profile!,
+            latestPosts: [{
+                ...candidate.profile!.latestPosts![0]!,
+                taggedUsers: ['target.account'],
+            }],
+        };
         const selectedCaptionIds = [0, 10, 19].map(index => (
             `post:carousel-post:media:${index}:frame-${index + 1}`
         ));
@@ -4143,6 +4150,18 @@ describe('V2 AI and scoring executors', () => {
                     occurredAt: null, content: actualComment,
                 }])),
             },
+            targetProfiles: {
+                loadTargetProfile: vi.fn(async () => {
+                    const target = profile('target.account');
+                    return {
+                        ...target,
+                        latestPosts: [{
+                            ...target.latestPosts![0]!,
+                            mentionedUsers: ['woman.one'],
+                        }],
+                    };
+                }),
+            },
         });
         deps.ai.narrative = narrative;
         deps.mediaStore.loadBundle = vi.fn(async (
@@ -4162,6 +4181,10 @@ describe('V2 AI and scoring executors', () => {
         const narrativeInput = narrative.mock.calls[0]![0];
         expect(narrative).toHaveBeenCalledOnce();
         expect(narrativeInput.interactions.comments[0].text).toBe(actualComment);
+        expect(narrativeInput.interactions.candidateToTargetTag.status).toBe('observed');
+        expect(narrativeInput.interactions.targetToCandidateMention.status).toBe('observed');
+        expect(narrativeInput.interactions.candidateToTargetMention.status).toBe('not_observed');
+        expect(narrativeInput.interactions.targetToCandidateTag.status).toBe('not_observed');
         expect(narrativeInput.captions).toEqual(candidate.captions);
         expect(narrativeInput.carouselCaptionDossier?.text).toContain('[슬라이드 1]');
         expect(narrativeInput.carouselCaptionDossier?.text.length).toBeLessThanOrEqual(2_000);
