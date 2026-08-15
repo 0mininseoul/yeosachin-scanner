@@ -278,6 +278,8 @@ describe('V2 AI stage policy', () => {
             .toMatchObject({ promptVersion: 'gender-triage-microbatch-v2' });
         expect(getAiStagePolicy(AI_STAGE_POLICY_V211_VERSION, 'featureAnalysis'))
             .toMatchObject({ promptVersion: 'feature-analysis-v5' });
+        expect(getAiStagePolicy(AI_STAGE_POLICY_V211_VERSION, 'highRiskNarrative'))
+            .toMatchObject({ promptVersion: 'high-risk-narrative-v4', maxOutputTokens: 8_192 });
         expect(aiStagePolicySupports(AI_STAGE_POLICY_V211_VERSION, 'genderSummaryQualityV211'))
             .toBe(true);
         expect(selectAiStagePolicyVersion({
