@@ -215,6 +215,7 @@ const AI_STAGE_POLICIES_V211 = Object.freeze({
     }),
     highRiskNarrative: Object.freeze({
         ...AI_STAGE_POLICIES_V210.highRiskNarrative,
+        maxOutputTokens: 8_192,
         promptVersion: 'high-risk-narrative-v4',
     }),
 } satisfies Record<AiStageName, Readonly<AiStagePolicy>>);
