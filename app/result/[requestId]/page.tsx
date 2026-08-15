@@ -774,6 +774,44 @@ export default function ResultPage({ params }: PageProps) {
                         shareUrl={shareTarget?.url ?? null}
                     />
                 </div>
+                {/* result subject header */}
+                {/* Profile lockup: the page needs a subject before it states a
+                    number, and the handle confirms which account that display
+                    name belongs to. It is intentionally shared by legacy V1 and
+                    V2 reports so both identify the analysed target. */}
+                <div data-amp-block className="reveal mt-5 flex items-start gap-3" style={{ animationDelay: '80ms' }}>
+                    <div className="relative h-11 w-11 shrink-0 overflow-hidden border border-line-2 bg-panel">
+                        <ProfileImage src={summary.targetProfileImage} variant="person" />
+                    </div>
+                    <div className="min-w-0">
+                        <h1 className="text-[23px] font-extrabold leading-snug tracking-tight text-fg">
+                            <span className="break-all">
+                                {targetHeader.displayName}
+                            </span>
+                            님의 위장 여사친
+                        </h1>
+                        {/* The handle already names the account, so it carries
+                            the link rather than a separate button competing with
+                            the headline beside it. */}
+                        {targetHeader.instagramUrl && targetHeader.username ? (
+                            <a
+                                href={targetHeader.instagramUrl}
+                                target="_blank"
+                                rel="noopener noreferrer"
+                                className="mt-1 inline-flex max-w-full items-center gap-1.5 text-fg-dim transition-colors hover:text-fg"
+                            >
+                                <InstagramGlyph className="h-3.5 w-3.5 shrink-0" />
+                                <span className="num truncate text-[12px]">
+                                    @{targetHeader.username}
+                                </span>
+                            </a>
+                        ) : (
+                            <p className="num mt-1 truncate text-[12px] text-fg-dim">
+                                @{summary.targetInstagramId}
+                            </p>
+                        )}
+                    </div>
+                </div>
                 {/* pipeline-specific summary */}
                 {summary.v2 && counts ? (
                     <>
@@ -788,43 +826,6 @@ export default function ResultPage({ params }: PageProps) {
                                     'linear-gradient(180deg, transparent, rgb(var(--glow-rgb) / 0.16), transparent)',
                             }}
                         />
-
-                        {/* Profile lockup: the page needs a subject before it states
-                            a number, and the handle confirms which account that
-                            display name belongs to. */}
-                        <div data-amp-block className="reveal mt-5 flex items-start gap-3" style={{ animationDelay: '80ms' }}>
-                            <div className="relative h-11 w-11 shrink-0 overflow-hidden border border-line-2 bg-panel">
-                                <ProfileImage src={summary.targetProfileImage} variant="person" />
-                            </div>
-                            <div className="min-w-0">
-                                <h1 className="text-[23px] font-extrabold leading-snug tracking-tight text-fg">
-                                    <span className="break-all">
-                                        {targetHeader.displayName}
-                                    </span>
-                                    님의 위장 여사친
-                                </h1>
-                                {/* The handle already names the account, so it
-                                    carries the link rather than a separate button
-                                    competing with the headline beside it. */}
-                                {targetHeader.instagramUrl && targetHeader.username ? (
-                                    <a
-                                        href={targetHeader.instagramUrl}
-                                        target="_blank"
-                                        rel="noopener noreferrer"
-                                        className="mt-1 inline-flex max-w-full items-center gap-1.5 text-fg-dim transition-colors hover:text-fg"
-                                    >
-                                        <InstagramGlyph className="h-3.5 w-3.5 shrink-0" />
-                                        <span className="num truncate text-[12px]">
-                                            @{targetHeader.username}
-                                        </span>
-                                    </a>
-                                ) : (
-                                    <p className="num mt-1 truncate text-[12px] text-fg-dim">
-                                        @{summary.targetInstagramId}
-                                    </p>
-                                )}
-                            </div>
-                        </div>
 
                         {/* The verdict. It used to sit outside the summary card in
                             13px grey while secondary counts held the frame. Crimson
@@ -855,7 +856,6 @@ export default function ResultPage({ params }: PageProps) {
                     </>
                 ) : gr ? (
                     <>
-                    <h1 className="mt-3 text-[24px] font-extrabold tracking-tight text-fg">판독 결과</h1>
                     <HighRiskSummary
                         count={highCount}
                         context={<>맞팔 <span className="num">{summary.analyzedMutuals.toLocaleString()}</span>명 중 모든 공개 계정들을 판독했습니다.</>}

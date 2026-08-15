@@ -44,16 +44,17 @@ const legacySummary = resultPage.slice(
     resultPage.indexOf(') : gr ? ('),
     resultPage.indexOf('{/* public / private tabs */}'),
 );
-const verdictPresentation = `${compactSummary}\n${highRiskSummary}`;
+const sharedSubjectHeader = resultPage.slice(
+    resultPage.indexOf('{/* result subject header */}'),
+    resultPage.indexOf('{/* pipeline-specific summary */}'),
+);
+const verdictPresentation = `${sharedSubjectHeader}\n${compactSummary}\n${highRiskSummary}`;
 
 const reportHeader = resultPage.slice(
     resultPage.indexOf('<Eyebrow className="shrink-0">판독 리포트</Eyebrow>'),
     resultPage.indexOf('{/* pipeline-specific summary */}'),
 );
-const v2Hero = resultPage.slice(
-    resultPage.indexOf('{summary.v2 && counts ? ('),
-    resultPage.indexOf('<HighRiskSummary'),
-);
+const v2Hero = sharedSubjectHeader;
 
 describe('result page pagination copy contract', () => {
     it('drops the range/plus counters and the old load-more buttons', () => {
@@ -159,10 +160,10 @@ describe('result page pagination copy contract', () => {
     });
 
     it('gives the report a headline naming the analysed account', () => {
-        expect(compactSummary).toContain('님의 위장 여사친');
+        expect(sharedSubjectHeader).toContain('님의 위장 여사친');
         // Instagram display names are optional, so the handle backs the headline
         // until (and when) targetFullName is absent.
-        expect(compactSummary).toContain('targetHeader.displayName');
+        expect(sharedSubjectHeader).toContain('targetHeader.displayName');
         expect(resultPage).toContain('targetFullName?: string | null');
     });
 
