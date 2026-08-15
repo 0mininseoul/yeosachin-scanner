@@ -3,7 +3,7 @@ import { PGlite } from '@electric-sql/pglite';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 
 const migration = readFileSync(new URL(
-    '../../../supabase/migrations/20260815140000_recover_exact_canary_generation_two_pending_idle.sql',
+    '../../../supabase/migrations/20260815141000_fix_exact_canary_generation_two_recovery_admission_dispatch.sql',
     import.meta.url,
 ), 'utf8');
 
@@ -27,6 +27,7 @@ CREATE ROLE service_role NOLOGIN;
 CREATE SCHEMA supabase_migrations;
 CREATE TABLE supabase_migrations.schema_migrations(version TEXT PRIMARY KEY);
 INSERT INTO supabase_migrations.schema_migrations(version) VALUES ('20260815130000');
+INSERT INTO supabase_migrations.schema_migrations(version) VALUES ('20260815140000');
 CREATE SCHEMA extensions;
 CREATE FUNCTION extensions.digest(BYTEA, TEXT) RETURNS BYTEA
 LANGUAGE sql IMMUTABLE AS $$ SELECT decode(repeat('aa', 32), 'hex') $$;
@@ -70,12 +71,23 @@ CREATE TABLE public.analysis_preflights (
     admission_last_error_code TEXT,
     admission_error_code TEXT,
     admission_dispatch_state TEXT NOT NULL,
+    admission_dispatch_generation INTEGER NOT NULL DEFAULT 0,
     admission_dispatch_token UUID,
     admission_dispatch_reserved_at TIMESTAMPTZ,
     admission_dispatched_at TIMESTAMPTZ,
     admission_claim_token UUID,
     admission_lease_expires_at TIMESTAMPTZ,
-    updated_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp()
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
+    CONSTRAINT analysis_preflights_admission_payload_check CHECK (
+        admission_status = 'pending'
+        OR (
+            admission_status = 'ready'
+            AND admission_dispatch_state = 'enqueued'
+            AND admission_dispatch_token IS NOT NULL
+            AND admission_dispatch_reserved_at IS NOT NULL
+            AND admission_dispatched_at IS NOT NULL
+        )
+    )
 );
 CREATE TABLE public.earlybird_orders (
     id UUID PRIMARY KEY,
@@ -197,19 +209,21 @@ async function seed(withGenerationTwoProviderRun = false) {
             admission_refreshed_at,admission_target_followers_count,
             admission_target_following_count,admission_capacity_required_plan_id,
             admission_required_plan_id,admission_plan_cards_snapshot,admission_failure_count,
-            admission_dispatch_state
+            admission_dispatch_state,admission_dispatch_generation,
+            admission_dispatch_token,admission_dispatch_reserved_at,admission_dispatched_at
         ) VALUES (
             '${SOURCE_PREFLIGHT_ID}','${USER_ID}','earlybird.fulfillment.10000000000040008000000000000002',
             'target','skip',NULL,'production','expired',NULL,'${SNAPSHOT}','${SNAPSHOT}','v1',
             '${SNAPSHOT}','${SNAPSHOT}',111,222,'basic','basic','${CARDS}',1,'ready','basic',
             '${ADMISSION_HASH}','${SOURCE_TOKEN}',clock_timestamp()-INTERVAL '4 minutes',
-            clock_timestamp()-INTERVAL '3 minutes',111,222,'basic','basic','${CARDS}',0,'enqueued'
+            clock_timestamp()-INTERVAL '3 minutes',111,222,'basic','basic','${CARDS}',0,'enqueued',1,
+            '${SOURCE_TOKEN}',clock_timestamp()-INTERVAL '3 minutes',clock_timestamp()-INTERVAL '3 minutes'
         ), (
             '${CURRENT_PREFLIGHT_ID}','${USER_ID}','earlybird.fulfillment.10000000000040008000000000000002',
             'target','skip',NULL,'production','ready',NULL,'${SNAPSHOT}','${SNAPSHOT}','v1',
             '${SNAPSHOT}','${SNAPSHOT}',111,222,'basic','basic','${CARDS}',2,'pending','basic',
             '${ADMISSION_HASH}','${SOURCE_TOKEN}',clock_timestamp()-INTERVAL '1 minute',NULL,
-            NULL,NULL,NULL,NULL,NULL,0,'idle'
+            NULL,NULL,NULL,NULL,NULL,0,'idle',1,NULL,NULL,NULL
         );
         INSERT INTO public.earlybird_orders(
             id,user_id,preflight_id,status,seller_reference_confirmed_at,payment_id,

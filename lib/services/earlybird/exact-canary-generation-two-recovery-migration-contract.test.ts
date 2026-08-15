@@ -2,12 +2,12 @@ import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
 
 const migration = readFileSync(new URL(
-    '../../../supabase/migrations/20260815140000_recover_exact_canary_generation_two_pending_idle.sql',
+    '../../../supabase/migrations/20260815141000_fix_exact_canary_generation_two_recovery_admission_dispatch.sql',
     import.meta.url,
 ), 'utf8');
 
 function recoveryDefinition(): string {
-    const marker = 'CREATE FUNCTION public.recover_exact_earlybird_generation_two_pending_idle(';
+    const marker = 'CREATE OR REPLACE FUNCTION public.recover_exact_earlybird_generation_two_pending_idle(';
     const start = migration.indexOf(marker);
     expect(start, 'recovery RPC must exist').toBeGreaterThanOrEqual(0);
     const end = migration.indexOf('\n$$;', start);
@@ -16,9 +16,8 @@ function recoveryDefinition(): string {
 }
 
 describe('exact generation-two pending-idle canary recovery migration contract', () => {
-    it('fences recovery behind the already-applied PR403 prerequisite migration', () => {
-        expect(migration).toContain('-- MIGRATION_PREDECESSOR=20260815130000');
-        expect(migration).toContain("WHERE version = '20260815130000'");
+    it('fences the correction behind the already-applied recovery migration', () => {
+        expect(migration).toContain("WHERE version = '20260815140000'");
     });
 
     it('resumes only the verified no-spend checkpoint and never rebinds or recollects', () => {
@@ -42,6 +41,10 @@ describe('exact generation-two pending-idle canary recovery migration contract',
         expect(recovery).not.toContain('v_source.admission_generation');
         expect(recovery).toContain('public.claim_earlybird_fulfillment');
         expect(recovery).toContain('public.create_or_replay_earlybird_fulfillment_request');
+        expect(recovery).toContain("admission_dispatch_state = 'enqueued'");
+        expect(recovery).toContain('admission_dispatch_token = extensions.gen_random_uuid()');
+        expect(recovery).toContain('admission_dispatch_reserved_at = v_now');
+        expect(recovery).toContain('admission_dispatched_at = v_now');
         expect(recovery).not.toContain('rebind_expired_paid_earlybird_preflight');
         expect(recovery).not.toContain('reserve_analysis_v2_preflight_admission');
         expect(recovery).not.toContain('INSERT INTO public.analysis_preflight_provider_runs');
