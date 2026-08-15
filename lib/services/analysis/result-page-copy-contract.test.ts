@@ -98,6 +98,16 @@ describe('result page pagination copy contract', () => {
         expect(resultPage).toContain('summary.v2.privateMutuals.toLocaleString()');
     });
 
+    it('labels every gender distribution with the exact displayed public-bucket total', () => {
+        expect(resultPage).toContain('genderBreakdownTotal,');
+        expect(resultPage).toContain(
+            'const genderDistributionHeader = gr\n        ? `맞팔 공개 계정 ${genderBreakdownTotal(gr).toLocaleString()}명`\n        : null;',
+        );
+        expect(compactSummary).toContain('{genderDistributionHeader}');
+        expect(legacySummary).toContain('{genderDistributionHeader}');
+        expect(legacySummary).not.toContain('맞팔 {summary.analyzedMutuals}명');
+    });
+
     it('counts the public tab by the rows it actually lists', () => {
         // The public tab lists female-classified accounts only. Counting every
         // public mutual overstated it roughly threefold, so the number has to

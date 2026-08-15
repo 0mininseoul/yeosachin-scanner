@@ -7,6 +7,7 @@ import {
     countHighRiskBands,
     countHighRiskGrades,
     DEFAULT_THREAT_METER_SEGMENTS,
+    genderBreakdownTotal,
     genderBreakdownFromStats,
     OWNER_GENDER_LABELS,
     resolveResultPageCursor,
@@ -157,6 +158,14 @@ describe('owner view presentation behavior', () => {
         const screened = 185;
         const gr = genderBreakdownFromStats({ male: 100, female: 70, unknown: 15 });
         expect(gr.male.count + gr.female.count + gr.unknown.count).toBe(screened);
+    });
+
+    it('uses the displayed gender buckets as the public distribution total', () => {
+        expect(genderBreakdownTotal({
+            male: { count: 81, percentage: 54 },
+            female: { count: 62, percentage: 41 },
+            unknown: { count: 7, percentage: 5 },
+        })).toBe(150);
     });
 
     it('exposes accessible text labels for each gender so icons stay decorative', () => {

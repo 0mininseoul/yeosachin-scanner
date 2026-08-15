@@ -280,6 +280,10 @@ export interface GenderBreakdown {
     unknown: GenderBreakdownSlice;
 }
 
+export function genderBreakdownTotal(breakdown: GenderBreakdown): number {
+    return breakdown.male.count + breakdown.female.count + breakdown.unknown.count;
+}
+
 export const OWNER_GENDER_LABELS = {
     male: '남자',
     female: '여자',

@@ -22,6 +22,7 @@ import {
 } from '@/lib/services/pending-analysis-target';
 import {
     boundedOwnerResultPage,
+    genderBreakdownTotal,
     genderBreakdownFromStats,
     OWNER_GENDER_LABELS,
     OWNER_RESULT_PAGE_SIZE,
@@ -725,6 +726,9 @@ export default function ResultPage({ params }: PageProps) {
 
     const { summary, femaleAccounts, privateAccounts } = data;
     const gr = summary.genderRatio;
+    const genderDistributionHeader = gr
+        ? `맞팔 공개 계정 ${genderBreakdownTotal(gr).toLocaleString()}명`
+        : null;
     const counts = summary.v2
         ? resultSummaryCounts({
             detectedMutuals: summary.mutualFollows,
@@ -843,7 +847,7 @@ export default function ResultPage({ params }: PageProps) {
                                     <div className="flex items-baseline justify-between gap-3">
                                         <span className="label-ko">공개 계정 판독 분포</span>
                                         <span className="num text-[10.5px] text-fg-dim">
-                                            {counts.publicCount.toLocaleString()}명
+                                            {genderDistributionHeader}
                                         </span>
                                     </div>
                                     <div className="mt-2.5">
@@ -863,7 +867,7 @@ export default function ResultPage({ params }: PageProps) {
                     <div className="mt-6 border-t border-line pt-5">
                         <div className="flex items-baseline justify-between gap-3">
                             <span className="label-ko">맞팔 계정 성별 분석</span>
-                            <span className="num text-[10.5px] text-fg-dim">맞팔 {summary.analyzedMutuals}명</span>
+                            <span className="num text-[10.5px] text-fg-dim">{genderDistributionHeader}</span>
                         </div>
                         <div className="mt-2.5">
                             <GenderRatioBreakdown gr={gr} />
