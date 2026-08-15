@@ -24,6 +24,14 @@ type First15CanaryProviderFailureCode =
     typeof FIRST15_CANARY_PROVIDER_FAILURE_CODES[number];
 
 const first15FailureCodeSchema = z.enum(FIRST15_CANARY_PROVIDER_FAILURE_CODES);
+const first15RearmSourceFailureCodeSchema = z.enum([
+    ...FIRST15_CANARY_PROVIDER_FAILURE_CODES,
+    'ANALYSIS_V2_JOB_HANDLER_FAILED',
+    'ANALYSIS_V2_MEDIA_ARTIFACT_OBJECT_ERROR',
+]);
+type First15CanaryProviderRearmSourceFailureCode = z.infer<
+    typeof first15RearmSourceFailureCodeSchema
+>;
 const uuidSchema = z.string().uuid().transform(value => value.toLowerCase());
 const credentialSlotSchema = z.enum([
     'primary', 'secondary', 'tertiary', 'quaternary', 'quinary', 'senary',
@@ -59,7 +67,7 @@ export interface First15CanaryProviderRecoveryRearm {
     orderId: string;
     rearmedPreflightId: string;
     rearmGeneration: number;
-    sourceFailureCode: First15CanaryProviderFailureCode;
+    sourceFailureCode: First15CanaryProviderRearmSourceFailureCode;
 }
 
 export interface First15CanaryProviderRecoveryDependencies {
@@ -102,7 +110,7 @@ const rawRearmSchema = z.object({
     order_id: uuidSchema,
     rearmed_preflight_id: uuidSchema,
     rearm_generation: z.number().int().min(1).max(4),
-    source_failure_code: first15FailureCodeSchema,
+    source_failure_code: first15RearmSourceFailureCodeSchema,
 }).strict();
 
 const rawProviderRunSchema = z.object({
