@@ -690,7 +690,10 @@ async function generateGeminiCopy(scope: V214ExactScope) {
         const narrative = await highRiskNarrative(
             narrativeInput,
             narrativeAudit(narrativeInput, requestId),
-            { aiStagePolicyVersion: AI_STAGE_POLICY_V211_VERSION },
+            {
+                aiStagePolicyVersion: AI_STAGE_POLICY_V211_VERSION,
+                narrativeValidationMode: 'first_order_concierge_correction',
+            },
         );
         if (narrative.source !== 'gemini') {
             throw new Error('CONCIERGE_COPY_V214_GEMINI_NARRATIVE_REQUIRED');
