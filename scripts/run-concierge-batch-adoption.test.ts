@@ -131,6 +131,19 @@ describe('concierge existing relationship artifact resolver', () => {
             .toContain(`후보 이름: ${expected}`);
     });
 
+    it('falls back to unique normalized usernames when formatted subject labels collide', () => {
+        const evidence = {
+            ...copyEvidence([]),
+            targetFullName: '김지민',
+            candidateFullName: '이지민',
+        };
+
+        expect(buildConciergeBatchHighRiskCopyPrompt(evidence))
+            .toContain('대상 이름: target_user');
+        expect(buildConciergeBatchHighRiskCopyPrompt(evidence))
+            .toContain('후보 이름: candidate_user');
+    });
+
     it('states the image availability and bans internal person labels in the prompt', () => {
         const prompt = buildConciergeBatchHighRiskCopyPrompt({
             ...copyEvidence([]),

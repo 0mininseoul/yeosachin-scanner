@@ -255,7 +255,12 @@ function batchCopySubjectLabel(fullName: string | null | undefined, username: st
 function batchCopySubjectLabels(input: ConciergeBatchHighRiskCopyEvidence): BatchCopySubjectLabels {
     const target = batchCopySubjectLabel(input.targetFullName, input.targetUsername);
     const candidate = batchCopySubjectLabel(input.candidateFullName, input.candidateUsername);
-    if (target === candidate) throw new Error('CONCIERGE_BATCH_COPY_SUBJECT_CONFLICT');
+    if (target === candidate) {
+        return {
+            target: normalized(input.targetUsername),
+            candidate: normalized(input.candidateUsername),
+        };
+    }
     return { target, candidate };
 }
 
