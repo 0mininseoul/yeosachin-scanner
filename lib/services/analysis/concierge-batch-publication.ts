@@ -116,6 +116,18 @@ export interface ConciergeManualPublicationInput {
     ledger: ConciergeClassificationLedger;
     manualImport: ConciergeManualClassificationImport;
     replay: ConciergeStoredReplayFeatures;
+    /**
+     * Optional batch-local copy generated after the canonical risk score is
+     * known. This narrow forward-only override leaves first-order and
+     * non-high-risk copy paths unchanged.
+     */
+    batchHighRiskCopy?: readonly ConciergeBatchHighRiskCopy[];
+}
+
+export interface ConciergeBatchHighRiskCopy {
+    candidateUsername: string;
+    oneLineOverview: string;
+    riskAnalysis: readonly [string, string];
 }
 
 export interface ConciergeCanonicalPublication {
@@ -819,8 +831,9 @@ function buildEffectiveDetails(
     });
 }
 
-export function buildConciergeManualPublication(
+function buildConciergeManualPublicationInternal(
     input: ConciergeManualPublicationInput,
+    deferHighRiskCopy: boolean,
 ): ConciergeCanonicalPublication {
     if (!input.orderId || !input.requestId || !input.ownerId || !input.sourceRequestId
         || input.resultRequestId !== input.requestId || input.sourceRequestId === input.requestId
@@ -880,6 +893,7 @@ export function buildConciergeManualPublication(
         targetPosts: canonicalTargetPostMentionEvidence(canonicalInteractions.targetPosts),
         privateProfiles: input.replay.privateProfiles,
         privateNameResults: input.replay.privateNameResults,
+        deferHighRiskCopy,
     });
     validateCanonicalConciergeCorrection({
         fetchedCount: input.replay.fetchedCount,
@@ -895,7 +909,42 @@ export function buildConciergeManualPublication(
     const ledgerHash = createConciergeClassificationLedgerHash(effectiveLedger);
     const interactionLineage = deepCloneAndFreeze(canonicalInteractionLineage(canonicalInteractions));
     const interactionLineageHash = hash(interactionLineage);
-    const rows = deepCloneAndFreeze(result.femaleRows);
+    const batchCopyByUsername = new Map<string, ConciergeBatchHighRiskCopy>();
+    for (const copy of input.batchHighRiskCopy ?? []) {
+        const username = normalizeUsername(copy.candidateUsername);
+        if (!/^[a-z0-9._]{1,30}$/.test(username)
+            || batchCopyByUsername.has(username)
+            || typeof copy.oneLineOverview !== 'string'
+            || copy.oneLineOverview.length < 1
+            || copy.oneLineOverview.length > 180
+            || !Array.isArray(copy.riskAnalysis)
+            || copy.riskAnalysis.length !== 2
+            || copy.riskAnalysis.some(line => typeof line !== 'string' || line.length < 1 || line.length > 180)) {
+            fail('CONCIERGE_PUBLICATION_BATCH_COPY_INVALID');
+        }
+        batchCopyByUsername.set(username, copy);
+    }
+    const matchedBatchCopyUsernames = new Set<string>();
+    const rows = deepCloneAndFreeze(result.femaleRows.map(row => {
+        const copy = batchCopyByUsername.get(normalizeUsername(row.suspect_instagram_id));
+        if (!copy) return row;
+        matchedBatchCopyUsernames.add(normalizeUsername(row.suspect_instagram_id));
+        if (row.risk_grade !== 'high_risk') {
+            fail('CONCIERGE_PUBLICATION_BATCH_COPY_SCOPE_INVALID');
+        }
+        return {
+            ...row,
+            one_line_overview: copy.oneLineOverview,
+            risk_analysis: [copy.riskAnalysis[0], copy.riskAnalysis[1]] as [string, string],
+        };
+    }));
+    if (matchedBatchCopyUsernames.size !== batchCopyByUsername.size) {
+        fail('CONCIERGE_PUBLICATION_BATCH_COPY_INVALID');
+    }
+    if (input.batchHighRiskCopy !== undefined
+        && matchedBatchCopyUsernames.size !== result.femaleRows.filter(row => row.risk_grade === 'high_risk').length) {
+        fail('CONCIERGE_PUBLICATION_BATCH_COPY_REQUIRED');
+    }
     const privateRows = deepCloneAndFreeze(result.privateRows);
     const counts = deepCloneAndFreeze({
         male: result.counts.male,
@@ -947,6 +996,19 @@ export function buildConciergeManualPublication(
         privateRows,
         counts,
     });
+}
+
+export function buildConciergeManualPublication(
+    input: ConciergeManualPublicationInput,
+): ConciergeCanonicalPublication {
+    return buildConciergeManualPublicationInternal(input, input.batchHighRiskCopy !== undefined);
+}
+
+/** Builds a score-bearing draft without evaluating deterministic high-risk copy. */
+export function buildConciergeManualPublicationDraft(
+    input: ConciergeManualPublicationInput,
+): ConciergeCanonicalPublication {
+    return buildConciergeManualPublicationInternal(input, true);
 }
 
 export async function publishConciergeManualOverride(
