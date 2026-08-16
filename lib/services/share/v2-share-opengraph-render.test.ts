@@ -5,6 +5,7 @@ const mocks = vi.hoisted(() => ({
     loadPage: vi.fn(),
     resolve: vi.fn(),
     read: vi.fn(),
+    isResultAuthoritativelyPublished: vi.fn(),
 }));
 
 vi.mock('@/lib/supabase/admin', () => ({ supabaseAdmin: { from: mocks.from } }));
@@ -14,6 +15,9 @@ vi.mock('@/lib/services/share/v2-result-share', () => ({
 vi.mock('@/lib/services/media/result-image-resolver', () => ({
     resolveAnalysisV2ResultImageLocator: mocks.resolve,
     readAnalysisV2ResultImageObject: mocks.read,
+}));
+vi.mock('@/lib/services/analysis/result-publication-authority', () => ({
+    isAnalysisResultAuthoritativelyPublished: mocks.isResultAuthoritativelyPublished,
 }));
 // next/og deliberately NOT mocked — the point is to run the real renderer.
 
@@ -43,6 +47,7 @@ describe('share OG image actually renders', () => {
             share_enabled: true,
         }));
         mocks.resolve.mockResolvedValue(null);
+        mocks.isResultAuthoritativelyPublished.mockResolvedValue(true);
     });
 
     it('produces a real image for a plain Korean name', async () => {

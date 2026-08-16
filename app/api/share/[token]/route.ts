@@ -14,6 +14,7 @@ import {
     ResultPaginationError,
 } from '@/lib/domain/analysis/result-pagination';
 import { v2ShareResultService } from '@/lib/services/share/v2-result-share';
+import { isAnalysisResultAuthoritativelyPublished } from '@/lib/services/analysis/result-publication-authority';
 import { NextResponse } from 'next/server';
 
 const SHARE_TOKEN_PATTERN = /^[0-9a-f]{64}$/;
@@ -108,6 +109,14 @@ export async function GET(
                 { error: '분석이 아직 완료되지 않았습니다.' },
                 400
             );
+        }
+
+        if (!await isAnalysisResultAuthoritativelyPublished(analysisRequest.id)) {
+            return json({
+                error: '분석 결과가 아직 공개 준비 중입니다.',
+                code: 'RESULT_PENDING',
+                status: 'pending',
+            }, 400);
         }
 
         const requestId = analysisRequest.id;

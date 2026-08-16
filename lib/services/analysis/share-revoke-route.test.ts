@@ -9,6 +9,7 @@ const mocks = vi.hoisted(() => ({
     loadPage: vi.fn(),
     resolveImage: vi.fn(),
     readImage: vi.fn(),
+    isResultAuthoritativelyPublished: vi.fn(),
     requireActiveAccountClassification: vi.fn(),
 }));
 
@@ -26,6 +27,9 @@ vi.mock('@/lib/services/share/v2-result-share', () => ({
 vi.mock('@/lib/services/media/result-image-resolver', () => ({
     resolveAnalysisV2ResultImageLocator: mocks.resolveImage,
     readAnalysisV2ResultImageObject: mocks.readImage,
+}));
+vi.mock('@/lib/services/analysis/result-publication-authority', () => ({
+    isAnalysisResultAuthoritativelyPublished: mocks.isResultAuthoritativelyPublished,
 }));
 vi.mock('@/lib/services/identity/account-principal-store', async importOriginal => ({
     ...(await importOriginal<typeof import('@/lib/services/identity/account-principal-store')>()),
@@ -188,6 +192,7 @@ describe('owner share revoke lifecycle', () => {
             error: null,
         });
         mocks.demoFind.mockResolvedValue(null);
+        mocks.isResultAuthoritativelyPublished.mockResolvedValue(true);
         mocks.generateToken.mockReturnValue(newToken);
         mocks.requireActiveAccountClassification.mockResolvedValue({
             userId,

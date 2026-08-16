@@ -1,5 +1,6 @@
 import { z } from 'zod';
 import { supabaseAdmin } from '@/lib/supabase/admin';
+import { isAnalysisResultAuthoritativelyPublished } from '@/lib/services/analysis/result-publication-authority';
 
 export const earlybirdOrderSystemStatusSchema = z.enum([
     'payment_pending',
@@ -33,7 +34,7 @@ const orderRowSchema = z.object({
 const resultRowSchema = z.object({
     id: z.string().uuid(),
     user_id: z.string().uuid(),
-    status: z.literal('completed'),
+    status: z.enum(['pending', 'processing', 'completed', 'failed']),
 });
 
 const fulfillmentStatusSchema = z.enum([
@@ -123,11 +124,7 @@ export async function loadLatestEarlybirdOrder(
         }
     }
 
-    const progressUrl = !requiresSupport
-        && order.status === 'analysis_in_progress'
-        && order.result_request_id
-        ? `/progress/${encodeURIComponent(order.result_request_id)}`
-        : null;
+    let effectiveStatus = order.status;
     let resultUrl: string | null = null;
     if (order.status === 'completed' && order.result_request_id) {
         const result = await supabaseAdmin
@@ -140,9 +137,26 @@ export async function loadLatestEarlybirdOrder(
         if (result.error) throw new EarlybirdOrderLookupError();
         const parsedResult = resultRowSchema.safeParse(result.data);
         if (parsedResult.success && parsedResult.data.user_id === userId) {
-            resultUrl = `/result/${encodeURIComponent(parsedResult.data.id)}`;
+            const published = parsedResult.data.status === 'completed'
+                && await isAnalysisResultAuthoritativelyPublished(parsedResult.data.id);
+            if (published) {
+                resultUrl = `/result/${encodeURIComponent(parsedResult.data.id)}`;
+            } else {
+                // The persisted order can lag the fulfillment publication
+                // contract. Keep this owner-facing snapshot in the waiting
+                // UX until the request is authoritatively published.
+                effectiveStatus = 'analysis_in_progress';
+            }
+        } else {
+            effectiveStatus = 'analysis_in_progress';
         }
     }
+
+    const progressUrl = !requiresSupport
+        && effectiveStatus === 'analysis_in_progress'
+        && order.result_request_id
+        ? `/progress/${encodeURIComponent(order.result_request_id)}`
+        : null;
 
     return Object.freeze({
         orderId: order.id,
@@ -154,8 +168,8 @@ export async function loadLatestEarlybirdOrder(
         acceptedAt: order.paid_at,
         dueAt: order.due_at,
         planSequence: order.plan_sequence,
-        systemStatus: order.status,
-        displayStatus: DISPLAY_STATUS[order.status],
+        systemStatus: effectiveStatus,
+        displayStatus: DISPLAY_STATUS[effectiveStatus],
         requiresSupport,
         progressUrl,
         resultUrl,

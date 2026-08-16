@@ -11,6 +11,7 @@ import {
     readAnalysisV2ResultImageObject,
     resolveAnalysisV2ResultImageLocator,
 } from '@/lib/services/media/result-image-resolver';
+import { isAnalysisResultAuthoritativelyPublished } from '@/lib/services/analysis/result-publication-authority';
 
 export const runtime = 'nodejs';
 
@@ -154,6 +155,9 @@ export async function GET(
         .maybeSingle();
     const shareRecord = error ? null : shareRecordSchema.safeParse(data);
     if (!shareRecord || !shareRecord.success) return notFound();
+    if (!await isAnalysisResultAuthoritativelyPublished(shareRecord.data.id)) {
+        return notFound();
+    }
 
     let page: Awaited<ReturnType<typeof v2ShareResultService.loadPage>>;
     try {

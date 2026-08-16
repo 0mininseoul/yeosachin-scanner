@@ -5,6 +5,7 @@ const mocks = vi.hoisted(() => ({
     from: vi.fn(),
     resolve: vi.fn(),
     read: vi.fn(),
+    isResultAuthoritativelyPublished: vi.fn(),
 }));
 
 vi.mock('@/lib/supabase/admin', () => ({
@@ -13,6 +14,9 @@ vi.mock('@/lib/supabase/admin', () => ({
 vi.mock('@/lib/services/media/result-image-resolver', () => ({
     resolveAnalysisV2ResultImageLocator: mocks.resolve,
     readAnalysisV2ResultImageObject: mocks.read,
+}));
+vi.mock('@/lib/services/analysis/result-publication-authority', () => ({
+    isAnalysisResultAuthoritativelyPublished: mocks.isResultAuthoritativelyPublished,
 }));
 
 import { GET } from '@/app/api/share/[token]/image/route';
@@ -67,6 +71,7 @@ describe('V2 shared result image route', () => {
         }));
         mocks.resolve.mockResolvedValue(locator);
         mocks.read.mockResolvedValue(sourceImage);
+        mocks.isResultAuthoritativelyPublished.mockResolvedValue(true);
     });
 
     it('serves an irreversibly downsampled token-bound image from private R2', async () => {

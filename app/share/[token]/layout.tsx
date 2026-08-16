@@ -4,6 +4,7 @@ import { z } from 'zod';
 import { supabaseAdmin } from '@/lib/supabase/admin';
 import { CANONICAL_APP_ORIGIN } from '@/lib/constants/app-url';
 import { v2ShareResultService } from '@/lib/services/share/v2-result-share';
+import { isAnalysisResultAuthoritativelyPublished } from '@/lib/services/analysis/result-publication-authority';
 
 /* The page itself is a client component and so cannot carry metadata. This
  * layout exists only to give the link its own card.
@@ -42,6 +43,7 @@ async function displayNameFor(token: string): Promise<string | null> {
     if (error) return null;
     const record = shareRecordSchema.safeParse(data);
     if (!record.success) return null;
+    if (!await isAnalysisResultAuthoritativelyPublished(record.data.id)) return null;
 
     const page = await v2ShareResultService.loadPage({
         requestId: record.data.id,
