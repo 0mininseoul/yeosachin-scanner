@@ -149,6 +149,50 @@ describe('v2.14 first-payment Gemini copy correction', () => {
         });
     });
 
+    it('uses the canonical target username when the retained target fullname is absent', () => {
+        const target = {
+            username: 'target.user', followersCount: 1,
+            followingCount: 1, postsCount: 1, isPrivate: false, isVerified: false,
+            latestPosts: [],
+        };
+        const candidate = {
+            username: 'candidate.user', fullName: '박민지', bio: '여행 기록',
+            followersCount: 1, followingCount: 1, postsCount: 1,
+            isPrivate: false, isVerified: false,
+            latestPosts: [],
+        };
+        const capturedProfile = {
+            ordinal: 1, isPrivate: false, username: 'candidate.user', fullName: '박민지',
+            hasProfileImage: true, bio: '여행 기록',
+            media: [{ selectionId: 'post:candidate:1', kind: 'feed' as const, postId: 'candidate-post', jpegBase64: 'aGVsbG8=' }],
+            triageSelectionIds: ['post:candidate:1'], featureSelectionIds: ['post:candidate:1'],
+            resolverSelectionIds: ['post:candidate:1'], captions: [],
+            coverage: { selectedCount: 1, normalizedCount: 1, failures: [] },
+        } as Parameters<typeof buildV214NarrativeInput>[0]['capturedProfile'];
+        const feature = {
+            features: {
+                gender: 'female', genderConfidence: 'high', ownerConsistency: 'same_person',
+                appearanceGrade: 4, exposureScore: 2, businessClassification: 'personal',
+                businessConfidence: 'high', accountContext: 'personal', marriageEvidence: 'none',
+                partnerEvidence: 'none', partnerExclusionContext: 'none',
+                evidenceSelectionIds: { gender: [], appearance: ['post:candidate:1'], exposure: [], business: [], accountContext: [], marriagePartner: [] },
+                oneLineOverview: '여행 기록이 또렷하게 남는 계정입니다.',
+            },
+            finalGenderDecision: 'verified_female', analyzedSelectionIds: ['post:candidate:1'],
+        } as FeatureAnalysisResult;
+
+        const input = buildV214NarrativeInput({
+            targetProfile: target, candidateProfile: candidate, capturedProfile, feature,
+            interactions: [{
+                candidateUsername: 'candidate.user', postId: 'target-post',
+                signal: 'female_target_like', sourceInteractionId: 'like:1',
+            }],
+            targetToCandidateLike: { status: 'observed', evidenceRefIds: ['retained:reverse-like:test'] },
+        });
+
+        expect(input.publicSubjects.targetFullName).toBe('target.user');
+    });
+
     it('accepts only Gemini replacement copy and preserves an exact non-copy snapshot for all sixteen v2.13 rows', () => {
         const rows = frozenRows();
         const payload = buildV214GeminiCopyPayload({ rows, generated: geminiRows(rows) });
