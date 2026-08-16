@@ -34,6 +34,8 @@ import {
 
 const SPARSE_NO_NAME_OVERVIEW = '공개된 소개·캡션 문구가 비어 있어, 사진에서 이야기를 지어내지 않고 확인되는 범위만 차분히 읽어봅니다.';
 const SPARSE_TEXT_PRESENT_OVERVIEW = '보존된 공개 소개·캡션 문구를 바탕으로 확인 가능한 기록의 범위만 차분히 읽어봅니다.';
+const BATCH_HIGH_RISK_COPY_DEFERRED_OVERVIEW = '배치용 고위험 카피를 생성하기 전 점수와 보존 자료를 먼저 확인합니다.';
+const BATCH_HIGH_RISK_COPY_DEFERRED_NARRATIVE = '배치용 고위험 서사가 생성되기 전에는 이 임시 초안을 발행하지 않습니다.';
 const CONCIERGE_PUBLIC_IDENTIFIER_PATTERN = /(?:https?:\/\/|www\.|@[a-z0-9._]+|\b[^\s@]+@[^\s@]+\b)/iu;
 const CONCIERGE_UUID_PATTERN = /\b[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\b/iu;
 
@@ -392,6 +394,8 @@ export function buildCanonicalConciergeResult(input: {
      * profile-only hydration exhausted its approved slots; these are unknown, never
      * female candidates, and must carry provenance in the publication fingerprint. */
     unknownPublicUsernames?: readonly string[];
+    /** Batch-only draft mode defers high-risk copy until the operator Gemini pass. */
+    deferHighRiskCopy?: boolean;
 }): {
     femaleRows: readonly ConciergeLegacyResultRow[];
     privateRows: readonly ConciergePrivateAccountRow[];
@@ -492,8 +496,11 @@ export function buildCanonicalConciergeResult(input: {
             targetTaggedCandidate: score.hasTargetToCandidateTagOrCaptionMention,
             ...(commentText ? { commentText } : {}),
         };
+        const deferHighRiskCopy = input.deferHighRiskCopy === true && score.riskBand === 'high_risk';
         let narrative: readonly string[] = [];
-        if (score.riskBand === 'high_risk') {
+        if (deferHighRiskCopy) {
+            narrative = [BATCH_HIGH_RISK_COPY_DEFERRED_NARRATIVE, BATCH_HIGH_RISK_COPY_DEFERRED_NARRATIVE];
+        } else if (score.riskBand === 'high_risk') {
             try {
                 narrative = buildV211EvidenceSpecificRiskNarrative({
                     ...copyEvidence,
@@ -518,55 +525,59 @@ export function buildCanonicalConciergeResult(input: {
             }
         }
         let overview: string;
-        const retainedOverview = conciergeBoundedOverview(
-            retained.detail.feature.features.oneLineOverview,
-            copyEvidence,
-        );
-        if (retainedOverview) {
-            overview = retainedOverview;
+        if (deferHighRiskCopy) {
+            overview = BATCH_HIGH_RISK_COPY_DEFERRED_OVERVIEW;
         } else {
-            try {
-                overview = needsV211EvidenceSpecificOverview(
-                    retained.detail.feature.features.oneLineOverview,
-                    copyEvidence,
-                )
-                    ? buildV211EvidenceSpecificOverview({
-                        ...copyEvidence,
-                        variation: index,
-                    })
-                    : retained.detail.feature.features.oneLineOverview;
-            } catch (error) {
-                if (!(error instanceof Error) || error.message !== 'CONCIERGE_COPY_EVIDENCE_UNAVAILABLE') {
-                    throw error;
-                }
-                const textEvidenceAbsent = !hasRetainedPublicText(copyEvidence);
+            const retainedOverview = conciergeBoundedOverview(
+                retained.detail.feature.features.oneLineOverview,
+                copyEvidence,
+            );
+            if (retainedOverview) {
+                overview = retainedOverview;
+            } else {
                 try {
-                    overview = buildV213SparseEvidenceOverview({
-                        ...interactionEvidence,
-                        subjects,
-                        reviewOrdinal: index,
-                        textEvidenceAbsent,
-                    }).overview;
-                } catch (sparseError) {
-                    if (sparseError instanceof Error
-                        && [
-                            'CONCIERGE_COPY_INTERACTION_EVIDENCE_UNAVAILABLE',
-                            'CONCIERGE_COPY_EVIDENCE_UNAVAILABLE',
-                            'CONCIERGE_COPY_SPARSE_SUBJECTS_REQUIRED',
-                        ].includes(sparseError.message)
-                        && !textEvidenceAbsent) {
-                        overview = SPARSE_TEXT_PRESENT_OVERVIEW;
-                    } else if (!(sparseError instanceof Error)
-                        || sparseError.message !== 'CONCIERGE_COPY_SPARSE_SUBJECTS_REQUIRED'
-                        || !textEvidenceAbsent) {
-                        throw sparseError;
-                    } else {
-                        // The global v2.13 builder requires a display name because its
-                        // normal sparse copy names the candidate. Concierge can retain
-                        // a valid no-text profile without inventing an identifier in
-                        // the overview, so use the name-free absence statement only
-                        // for this exact no-text branch.
-                        overview = SPARSE_NO_NAME_OVERVIEW;
+                    overview = needsV211EvidenceSpecificOverview(
+                        retained.detail.feature.features.oneLineOverview,
+                        copyEvidence,
+                    )
+                        ? buildV211EvidenceSpecificOverview({
+                            ...copyEvidence,
+                            variation: index,
+                        })
+                        : retained.detail.feature.features.oneLineOverview;
+                } catch (error) {
+                    if (!(error instanceof Error) || error.message !== 'CONCIERGE_COPY_EVIDENCE_UNAVAILABLE') {
+                        throw error;
+                    }
+                    const textEvidenceAbsent = !hasRetainedPublicText(copyEvidence);
+                    try {
+                        overview = buildV213SparseEvidenceOverview({
+                            ...interactionEvidence,
+                            subjects,
+                            reviewOrdinal: index,
+                            textEvidenceAbsent,
+                        }).overview;
+                    } catch (sparseError) {
+                        if (sparseError instanceof Error
+                            && [
+                                'CONCIERGE_COPY_INTERACTION_EVIDENCE_UNAVAILABLE',
+                                'CONCIERGE_COPY_EVIDENCE_UNAVAILABLE',
+                                'CONCIERGE_COPY_SPARSE_SUBJECTS_REQUIRED',
+                            ].includes(sparseError.message)
+                            && !textEvidenceAbsent) {
+                            overview = SPARSE_TEXT_PRESENT_OVERVIEW;
+                        } else if (!(sparseError instanceof Error)
+                            || sparseError.message !== 'CONCIERGE_COPY_SPARSE_SUBJECTS_REQUIRED'
+                            || !textEvidenceAbsent) {
+                            throw sparseError;
+                        } else {
+                            // The global v2.13 builder requires a display name because its
+                            // normal sparse copy names the candidate. Concierge can retain
+                            // a valid no-text profile without inventing an identifier in
+                            // the overview, so use the name-free absence statement only
+                            // for this exact no-text branch.
+                            overview = SPARSE_NO_NAME_OVERVIEW;
+                        }
                     }
                 }
             }
