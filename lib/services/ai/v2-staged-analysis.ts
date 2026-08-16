@@ -3096,17 +3096,41 @@ export async function highRiskNarrative(
             )
         ) {
             const repairedCandidate = structuredClone(repair.candidate) as {
-                lines: Array<{ text: string }>;
+                lines: Array<{ text: string; evidenceRefs?: readonly string[] }>;
                 [key: string]: unknown;
             };
             const invalidLines = repairedCandidate.lines.map(line => line.text) as [string, string];
-            const invalidLineIndexes = v211NarrativeInvalidLineIndexes(
+            const invalidLineIndexes = [...new Set(v211NarrativeInvalidLineIndexes(
                 invalidLines,
                 v211NarrativeSubjects(input),
-            );
+            ))] as Array<0 | 1>;
+            const observedInteractionEvidenceRefs = new Set(allObservedInteractionRefs(input));
+            repairedCandidate.lines.forEach((line, lineIndex) => {
+                const allowsGroundedRelationship = lineIndex === 1
+                    && line.evidenceRefs?.some(ref => observedInteractionEvidenceRefs.has(ref));
+                if (
+                    containsV28UnsupportedRelationshipFact(line.text)
+                    || (
+                        containsV28RelationshipStyle(line.text)
+                        && !allowsGroundedRelationship
+                    )
+                ) {
+                    const normalizedLineIndex = lineIndex as 0 | 1;
+                    if (!invalidLineIndexes.includes(normalizedLineIndex)) {
+                        invalidLineIndexes.push(normalizedLineIndex);
+                    }
+                }
+            });
+            invalidLineIndexes.sort((left, right) => left - right);
             if (invalidLineIndexes.length === 0) throw error;
+            const repairRequirements = [...new Set(
+                (repair.issues ?? [])
+                    .filter(issue => issue.code === 'custom')
+                    .map(issue => issue.message.trim())
+                    .filter(message => message.length > 0 && message.length <= 240),
+            )].join('\n- ');
             const repaired = await analyzeWithGemini(
-                `다음 공개 서사 두 문장만 수정하세요. 원문: ${JSON.stringify(invalidLines)}\n검증 요구사항: ${contractIssue.message}\n정확히 두 문장을 반환하고 각 문장은 180자 이하로 쓰세요. 첫 문장의 근거와 둘째 문장의 인물 이름·관측된 상호작용 방향은 보존하세요. 둘째 문장에는 상호작용 용어와 수집·관측 범위의 누락 가능성을 포함하되 상호작용 수량 표현 없이 간결하게 쓰세요. 새 사실이나 관계 추측을 추가하지 말고 JSON만 반환하세요.`,
+                `다음 공개 서사 두 문장만 수정하세요. 원문: ${JSON.stringify(invalidLines)}\n검증 요구사항:\n- ${repairRequirements || contractIssue.message}\n정확히 두 문장을 반환하고 각 문장은 180자 이하로 쓰세요. 첫 문장의 근거와 둘째 문장의 인물 이름·관측된 상호작용 방향은 보존하세요. 위 검증 요구사항을 모두 해결하고, 관측된 상호작용 방향을 빠짐없이 정확한 이름과 용어로 포함하세요. 관계 관련 표현은 검증된 상호작용에 근거한 둘째 문장의 제한된 해석 외에는 쓰지 마세요. 둘째 문장에는 수집·관측 범위의 누락 가능성을 포함하되 상호작용 수량 표현 없이 간결하게 쓰세요. 새 사실이나 관계 추측을 추가하지 말고 JSON만 반환하세요.`,
                 [],
                 {
                     schema: z.object({
