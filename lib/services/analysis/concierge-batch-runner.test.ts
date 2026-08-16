@@ -60,14 +60,15 @@ describe('concierge batch runner', () => {
         ]);
     });
 
-    it('keeps the paid secondary slot after the approved free-token priority', () => {
+    it('uses only the approved septenary-to-primary token priority', () => {
         expect([...CONCIERGE_BATCH_TOKEN_PRIORITY]).toEqual([
-            'senary',
-            'tertiary',
+            'septenary',
+            'secondary',
             'quinary',
             'primary',
-            'secondary',
         ]);
+        expect(CONCIERGE_BATCH_TOKEN_PRIORITY).not.toContain('senary');
+        expect(CONCIERGE_BATCH_TOKEN_PRIORITY).not.toContain('tertiary');
     });
 
     it('delegates publication to the reviewed PR431 CAS publisher boundary', async () => {

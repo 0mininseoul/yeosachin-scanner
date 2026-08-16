@@ -169,7 +169,7 @@ export interface ConciergePublicationStore {
  */
 export type ConciergePublicationRpc = (args: Readonly<Record<string, unknown>>) => Promise<{
     data: unknown;
-    error: { code?: string | null; message?: string | null } | null;
+    error: { code?: string | null; message?: string | null; details?: string | null; hint?: string | null } | null;
 }>;
 
 export interface ConciergePublicationSupabaseClient {
@@ -178,7 +178,7 @@ export interface ConciergePublicationSupabaseClient {
         args: Readonly<Record<string, unknown>>,
     ): PromiseLike<{
         data: unknown;
-        error: { code?: string | null; message?: string | null } | null;
+        error: { code?: string | null; message?: string | null; details?: string | null; hint?: string | null } | null;
     }>;
 }
 
@@ -255,9 +255,17 @@ export function createConciergePublicationStore(
                 manual_import: manualImport,
             });
             if (response.error) {
+                const guardedError = [
+                    response.error.code,
+                    response.error.message,
+                    response.error.details,
+                    response.error.hint,
+                ]
+                    .flatMap(value => typeof value === 'string' ? value.match(/\bCONCIERGE_[A-Z0-9_]+\b/g) ?? [] : [])
+                    .find(value => /^CONCIERGE_[A-Z0-9_]+$/.test(value));
                 throw new ConciergePublicationError(
-                    response.error.code && /^CONCIERGE_[A-Z0-9_]+$/.test(response.error.code)
-                        ? response.error.code
+                    guardedError
+                        ? guardedError
                         : 'CONCIERGE_PUBLICATION_RPC_FAILED',
                 );
             }
@@ -310,7 +318,29 @@ export function createSupabaseConciergePublicationStore(
     client: ConciergePublicationSupabaseClient = supabaseAdmin,
 ): ConciergePublicationStore {
     return createConciergePublicationStore(async args => {
-        const response = await client.rpc(CONCIERGE_BATCH_PUBLICATION_RPC, args);
+        // The deployed SQL function keeps its parameter names under the
+        // p_* namespace.  Keep the provider-neutral adapter contract above,
+        // but map only at the Supabase boundary so PostgREST resolves the
+        // exact function signature without changing any database guard.
+        const response = await client.rpc(CONCIERGE_BATCH_PUBLICATION_RPC, {
+            p_order_id: args.order_id,
+            p_request_id: args.request_id,
+            p_owner_id: args.owner_id,
+            p_target_username: args.target_username,
+            p_target_input_hash: args.target_input_hash,
+            p_source_request_id: args.source_request_id,
+            p_replay_lineage_hash: args.replay_lineage_hash,
+            p_relationship_manifest_hash: args.relationship_manifest_hash,
+            p_expected_version: args.expected_version,
+            p_expected_result_hash: args.expected_result_hash,
+            p_result_hash: args.result_hash,
+            p_result_url: args.result_url,
+            p_interaction_lineage_hash: args.interaction_lineage_hash,
+            p_interaction_lineage: args.interaction_lineage,
+            p_publication: args.publication,
+            p_classification_ledger: args.classification_ledger,
+            p_manual_import: args.manual_import,
+        });
         return { data: response.data, error: response.error };
     });
 }

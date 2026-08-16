@@ -26,8 +26,16 @@ import { screenAnalysisV2OfficialAccount } from './v2-official-account-screening
 import {
     buildV211EvidenceSpecificRiskNarrative,
     buildV211EvidenceSpecificOverview,
+    buildV213SparseEvidenceOverview,
+    extractV211EvidenceTerms,
+    hasRetainedPublicText,
     needsV211EvidenceSpecificOverview,
 } from './public-copy-quality';
+
+const SPARSE_NO_NAME_OVERVIEW = '공개된 소개·캡션 문구가 비어 있어, 사진에서 이야기를 지어내지 않고 확인되는 범위만 차분히 읽어봅니다.';
+const SPARSE_TEXT_PRESENT_OVERVIEW = '보존된 공개 소개·캡션 문구를 바탕으로 확인 가능한 기록의 범위만 차분히 읽어봅니다.';
+const CONCIERGE_PUBLIC_IDENTIFIER_PATTERN = /(?:https?:\/\/|www\.|@[a-z0-9._]+|\b[^\s@]+@[^\s@]+\b)/iu;
+const CONCIERGE_UUID_PATTERN = /\b[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\b/iu;
 
 export interface ConciergeRelationshipEvidence {
     username: string;
@@ -280,6 +288,51 @@ function retainedPublicCopyEvidence(profile: InstagramProfile): {
     };
 }
 
+function conciergeBoundedOverview(value: unknown, evidence: ReturnType<typeof retainedPublicCopyEvidence>): string | null {
+    if (typeof value !== 'string') return null;
+    const overview = value.trim();
+    const evidenceTerms = extractV211EvidenceTerms(evidence);
+    if (overview.length < 25 || overview.length > 180
+        || CONCIERGE_PUBLIC_IDENTIFIER_PATTERN.test(overview)
+        || CONCIERGE_UUID_PATTERN.test(overview)
+        || !hasRetainedPublicText(evidence)
+        || evidenceTerms.length === 0
+        || !evidenceTerms.some(term => overview.toLowerCase().includes(term.toLowerCase()))) {
+        return null;
+    }
+    return overview;
+}
+
+function conciergeDisplayName(value: string | null | undefined): string | null {
+    if (typeof value !== 'string') return null;
+    const name = value.trim().replace(/\s+/gu, ' ');
+    if (!name || CONCIERGE_PUBLIC_IDENTIFIER_PATTERN.test(name) || CONCIERGE_UUID_PATTERN.test(name)
+        || /(?:대상\s*계정|후보\s*계정)/u.test(name)) {
+        return null;
+    }
+    return name.endsWith('님') ? name : `${name}님`;
+}
+
+function buildConciergeRelaxedRiskNarrative(input: {
+    copyEvidence: ReturnType<typeof retainedPublicCopyEvidence>;
+    candidateFullName?: string | null;
+    interactionObserved: boolean;
+}): [string, string] {
+    const candidate = conciergeDisplayName(input.candidateFullName);
+    const terms = extractV211EvidenceTerms(input.copyEvidence);
+    const first = terms.length >= 2
+        ? `${candidate ? `${candidate}의 ` : ''}공개 기록에서 “${terms[0]}”와 “${terms[1]}” 관련 내용이 확인됩니다.`
+        : terms.length === 1
+            ? `${candidate ? `${candidate}의 ` : ''}공개 기록에서 “${terms[0]}” 관련 내용이 확인됩니다.`
+            : candidate
+                ? `${candidate}의 공개 소개·캡션 문구가 비어 있어, 사진에서 이야기를 지어내지 않고 확인되는 범위만 살펴봅니다.`
+                : SPARSE_NO_NAME_OVERVIEW;
+    const second = input.interactionObserved
+        ? '확인된 공개 상호작용만을 근거로 흐름을 살피며, 관계를 단정하지 않고 수집 범위 밖 기록은 알 수 없습니다.'
+        : '관계를 단정할 공개 상호작용은 확인되지 않았고, 수집 범위 밖 기록은 알 수 없습니다.';
+    return [first, second];
+}
+
 function hasReliableAppearanceEvidence(
     profile: InstagramProfile,
     detail: ReplayAccountAiDetail,
@@ -425,33 +478,99 @@ export function buildCanonicalConciergeResult(input: {
             && row.signal === 'female_target_comment'
         ))?.content;
         const copyEvidence = retainedPublicCopyEvidence(retained.profile);
-        const narrative = score.riskBand === 'high_risk'
-            ? buildV211EvidenceSpecificRiskNarrative({
-                ...copyEvidence,
-                subjects: {
-                    targetUsername: input.targetUsername,
-                    targetFullName: input.targetFullName ?? null,
-                    candidateUsername: retained.profile.username,
-                    candidateFullName: retained.profile.fullName ?? null,
-                },
-                candidateLikedTarget: (interaction?.uniqueTargetPostsLikedByCandidate ?? 0) > 0,
-                candidateCommentedOnTarget: (interaction?.boundedCandidateCommentsOnTarget ?? 0) > 0,
-                targetLikedCandidate: false,
-                candidateTaggedTarget: score.hasCandidateToTargetTagOrCaptionMention,
-                targetTaggedCandidate: score.hasTargetToCandidateTagOrCaptionMention,
-                ...(commentText ? { commentText } : {}),
-                appearance: { isReliable: hasReliableAppearanceEvidence(retained.profile, retained.detail) },
-            })
-            : [];
-        const overview = needsV211EvidenceSpecificOverview(
+        const subjects = {
+            targetUsername: input.targetUsername,
+            targetFullName: input.targetFullName ?? null,
+            candidateUsername: retained.profile.username,
+            candidateFullName: retained.profile.fullName ?? null,
+        };
+        const interactionEvidence = {
+            candidateLikedTarget: (interaction?.uniqueTargetPostsLikedByCandidate ?? 0) > 0,
+            candidateCommentedOnTarget: (interaction?.boundedCandidateCommentsOnTarget ?? 0) > 0,
+            targetLikedCandidate: false,
+            candidateTaggedTarget: score.hasCandidateToTargetTagOrCaptionMention,
+            targetTaggedCandidate: score.hasTargetToCandidateTagOrCaptionMention,
+            ...(commentText ? { commentText } : {}),
+        };
+        let narrative: readonly string[] = [];
+        if (score.riskBand === 'high_risk') {
+            try {
+                narrative = buildV211EvidenceSpecificRiskNarrative({
+                    ...copyEvidence,
+                    subjects,
+                    ...interactionEvidence,
+                    appearance: { isReliable: hasReliableAppearanceEvidence(retained.profile, retained.detail) },
+                });
+            } catch (error) {
+                const code = error instanceof Error ? error.message : '';
+                if (![
+                    'CONCIERGE_COPY_INTERACTION_EVIDENCE_UNAVAILABLE',
+                    'CONCIERGE_COPY_NARRATIVE_CONTRACT_FAILED',
+                    'CONCIERGE_COPY_SUBJECT_REQUIRED',
+                    'CONCIERGE_COPY_SUBJECT_CONFLICT',
+                ].includes(code)) throw error;
+                narrative = buildConciergeRelaxedRiskNarrative({
+                    copyEvidence,
+                    candidateFullName: retained.profile.fullName,
+                    interactionObserved: Object.values(interactionEvidence)
+                        .some(value => typeof value === 'boolean' && value),
+                });
+            }
+        }
+        let overview: string;
+        const retainedOverview = conciergeBoundedOverview(
             retained.detail.feature.features.oneLineOverview,
             copyEvidence,
-        )
-            ? buildV211EvidenceSpecificOverview({
-                ...copyEvidence,
-                variation: index,
-            })
-            : retained.detail.feature.features.oneLineOverview;
+        );
+        if (retainedOverview) {
+            overview = retainedOverview;
+        } else {
+            try {
+                overview = needsV211EvidenceSpecificOverview(
+                    retained.detail.feature.features.oneLineOverview,
+                    copyEvidence,
+                )
+                    ? buildV211EvidenceSpecificOverview({
+                        ...copyEvidence,
+                        variation: index,
+                    })
+                    : retained.detail.feature.features.oneLineOverview;
+            } catch (error) {
+                if (!(error instanceof Error) || error.message !== 'CONCIERGE_COPY_EVIDENCE_UNAVAILABLE') {
+                    throw error;
+                }
+                const textEvidenceAbsent = !hasRetainedPublicText(copyEvidence);
+                try {
+                    overview = buildV213SparseEvidenceOverview({
+                        ...interactionEvidence,
+                        subjects,
+                        reviewOrdinal: index,
+                        textEvidenceAbsent,
+                    }).overview;
+                } catch (sparseError) {
+                    if (sparseError instanceof Error
+                        && [
+                            'CONCIERGE_COPY_INTERACTION_EVIDENCE_UNAVAILABLE',
+                            'CONCIERGE_COPY_EVIDENCE_UNAVAILABLE',
+                            'CONCIERGE_COPY_SPARSE_SUBJECTS_REQUIRED',
+                        ].includes(sparseError.message)
+                        && !textEvidenceAbsent) {
+                        overview = SPARSE_TEXT_PRESENT_OVERVIEW;
+                    } else if (!(sparseError instanceof Error)
+                        || sparseError.message !== 'CONCIERGE_COPY_SPARSE_SUBJECTS_REQUIRED'
+                        || !textEvidenceAbsent) {
+                        throw sparseError;
+                    } else {
+                        // The global v2.13 builder requires a display name because its
+                        // normal sparse copy names the candidate. Concierge can retain
+                        // a valid no-text profile without inventing an identifier in
+                        // the overview, so use the name-free absence statement only
+                        // for this exact no-text branch.
+                        overview = SPARSE_NO_NAME_OVERVIEW;
+                    }
+                }
+            }
+        }
         if (overview.length === 0 || overview.length > 180) {
             throw new Error('CONCIERGE_OVERVIEW_REQUIRED');
         }
