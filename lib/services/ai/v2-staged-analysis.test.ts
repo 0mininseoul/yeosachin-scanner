@@ -1125,6 +1125,59 @@ describe('V2 staged AI services', () => {
         expect(mocks.analyzeWithGemini).toHaveBeenCalledTimes(2);
     });
 
+    it('repairs the proven v2.11 methodological-disclaimer overview violation with one bounded Gemini rewrite', async () => {
+        const invalid = featureResponse({
+            oneLineOverview:
+                '공개 자료만으로는 단정하기 어렵지만, 여행 기록과 주말 산책이 또렷하게 남은 피드입니다.',
+        });
+        const validation = new GeminiResponseValidationError(
+            'schema rejected',
+            {
+                category: 'schema_validation',
+                issues: [{ path: 'oneLineOverview', code: 'custom' }],
+                truncated: false,
+            },
+            {
+                candidate: invalid,
+                issues: [{
+                    code: 'custom',
+                    path: ['oneLineOverview'],
+                    message: 'v2.11 public overview must not expose a methodological disclaimer.',
+                }],
+            },
+        );
+        expect(validation.diagnostics).toEqual({
+            category: 'schema_validation',
+            issues: [{ path: 'oneLineOverview', code: 'custom' }],
+            truncated: false,
+        });
+        mocks.analyzeWithGemini
+            .mockRejectedValueOnce(new Error(
+                'AI_GENERATION_RESPONSE_REJECTED_ERROR: generated response failed strict validation.',
+                { cause: validation },
+            ))
+            .mockImplementationOnce(async (
+                prompt: string,
+                _images: string[],
+                options: { schema: { parse(value: unknown): unknown } },
+            ) => {
+                expect(prompt).toContain('분석 방법이나 자료의 한계를 직접 말하지 마세요');
+                return options.schema.parse({
+                    value: '여행 기록과 주말 산책이 또렷하게 남아 하루의 취향이 보이는 피드입니다.',
+                });
+            });
+
+        const result = await featureAnalysis(
+            featureInput(),
+            audit('featureAnalysis', featureInput(), AI_STAGE_POLICY_V211_VERSION),
+            { aiStagePolicyVersion: AI_STAGE_POLICY_V211_VERSION },
+        );
+
+        expect(result.features.oneLineOverview).toContain('주말 산책');
+        expect(result.features.oneLineOverview).not.toContain('공개 자료만');
+        expect(mocks.analyzeWithGemini).toHaveBeenCalledTimes(2);
+    });
+
     it('does not repair an unrelated custom issue on a v2.11 overview', async () => {
         const invalid = featureResponse({
             oneLineOverview: '여행 사진과 짧은 기록이 일정표처럼 또렷하게 정돈된 피드입니다.',
