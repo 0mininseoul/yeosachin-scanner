@@ -60,15 +60,16 @@ describe('concierge batch runner', () => {
         ]);
     });
 
-    it('uses only the approved septenary-to-primary token priority', () => {
+    it('uses only the approved quinary-to-secondary token priority', () => {
         expect([...CONCIERGE_BATCH_TOKEN_PRIORITY]).toEqual([
-            'septenary',
-            'secondary',
             'quinary',
             'primary',
+            'quaternary',
+            'secondary',
         ]);
         expect(CONCIERGE_BATCH_TOKEN_PRIORITY).not.toContain('senary');
         expect(CONCIERGE_BATCH_TOKEN_PRIORITY).not.toContain('tertiary');
+        expect(CONCIERGE_BATCH_TOKEN_PRIORITY).not.toContain('septenary');
     });
 
     it('delegates publication to the reviewed PR431 CAS publisher boundary', async () => {

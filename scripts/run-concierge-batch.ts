@@ -48,7 +48,7 @@ import type {
 
 const ORDER_ID = z.string().uuid();
 const USERNAME = z.string().regex(/^[a-z0-9._]{1,30}$/);
-const APPROVED_SLOTS = ['septenary', 'secondary', 'quinary', 'primary'] as const;
+const APPROVED_SLOTS = ['quinary', 'primary', 'quaternary', 'secondary'] as const;
 type ApprovedSlot = typeof APPROVED_SLOTS[number];
 const EMPTY_MANUAL_CSV = 'username,instagram_url,ai_classification,ai_confidence/evidence_status,manual_gender,operator_note\n';
 const RETRY_CODE_PATTERN = /^CONCIERGE_[A-Z0-9_]{2,100}$/;
