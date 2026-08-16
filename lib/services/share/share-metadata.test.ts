@@ -1,3 +1,4 @@
+import { readFileSync } from 'node:fs';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 const mocks = vi.hoisted(() => ({
@@ -59,5 +60,13 @@ describe('shared result metadata', () => {
         expect(metadata.openGraph).not.toMatchObject({
             images: [{ url: '/og.png' }],
         });
+        expect(metadata.alternates).toEqual({
+            canonical: `https://yeosachin.com/share/${token}`,
+        });
+    });
+
+    it('uses a lighter avatar blur in shared reports', () => {
+        const caseUi = readFileSync(new URL('../../../components/case-ui.tsx', import.meta.url), 'utf8');
+        expect(caseUi).toMatch(/export const MASK_AVATAR_BLUR_PX = 3;/);
     });
 });

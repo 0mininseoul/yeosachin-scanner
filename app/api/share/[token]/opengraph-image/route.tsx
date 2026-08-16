@@ -41,10 +41,10 @@ const NO_STORE_HEADERS = {
  *
  * Only reachable with the 64-hex share token, and only while the owner keeps
  * sharing enabled — revoking clears the token, so a cached copy can no longer
- * be addressed. Kept off the browser cache so a revoked link does not linger in
- * one, while the CDN absorbs the repeated scrapes. */
+ * be addressed. A short public cache lets DM and chat preview clients reuse a
+ * rendered card instead of timing out while every scrape repeats the full render. */
 const SHARE_IMAGE_CACHE_HEADERS = {
-    'Cache-Control': 'public, no-store, max-age=0',
+    'Cache-Control': 'public, max-age=600',
     'CDN-Cache-Control': 'public, max-age=600',
     'Vercel-CDN-Cache-Control': 'public, max-age=600',
 } as const;

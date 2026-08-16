@@ -87,6 +87,9 @@ export async function generateMetadata(
     return {
         title,
         description,
+        alternates: {
+            canonical: `${CANONICAL_APP_ORIGIN}/share/${token.data}`,
+        },
         openGraph: {
             type: 'website',
             locale: 'ko_KR',

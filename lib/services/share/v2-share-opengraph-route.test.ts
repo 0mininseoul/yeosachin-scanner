@@ -113,6 +113,8 @@ describe('V2 dynamic share Open Graph image', () => {
         );
 
         expect(response.status).toBe(200);
+        expect(response.headers.get('Cache-Control')).toBe('public, max-age=600');
+        expect(response.headers.get('CDN-Cache-Control')).toBe('public, max-age=600');
         expect(mocks.captures[0]?.options).toMatchObject({
             width: 800,
             height: 800,
