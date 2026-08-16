@@ -2632,10 +2632,11 @@ function v211NarrativeInvalidLineIndexes(
     return invalid;
 }
 
-function highRiskNarrativeIssueField(path: readonly (string | number)[]): string {
+function highRiskNarrativeIssueField(path: readonly PropertyKey[]): string {
     if (path.length === 0) return '$';
     return path.map(segment => {
         if (typeof segment === 'number') return '#';
+        if (typeof segment === 'symbol') return '?';
         if (segment === 'lines' || segment === 'text' || segment === 'evidenceRefs') {
             return segment;
         }
