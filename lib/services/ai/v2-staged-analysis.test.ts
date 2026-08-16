@@ -2851,6 +2851,85 @@ describe('V2 staged AI services', () => {
         expect(mocks.analyzeWithGemini).toHaveBeenCalledTimes(2);
     });
 
+    it('repairs the observed v2.11 relationship-style and omitted-like contract violation', async () => {
+        const input = narrativeInput();
+        const candidate = { lines: [{
+            text: '박민지님의 여행 피드에는 커플 기류가 은근히 읽히는 장면이 이어집니다.',
+            evidenceRefs: ['profile:bio'],
+        }, {
+            text: '박민지님이 김준호님에게 남긴 댓글 흔적은 보입니다.',
+            evidenceRefs: [
+                'like:candidate-to-target',
+                'like:target-to-candidate',
+                'comment:1',
+                'coverage:target-interactions',
+            ],
+        }] };
+        const validation = new GeminiResponseValidationError(
+            'schema rejected',
+            {
+                category: 'schema_validation',
+                issues: [
+                    { path: 'lines', code: 'custom' },
+                    { path: '$', code: 'custom' },
+                    { path: 'lines.#.text', code: 'custom' },
+                ],
+                truncated: false,
+            },
+            {
+                candidate,
+                issues: [
+                    {
+                        code: 'custom',
+                        path: ['lines'],
+                        message: 'Narrative violates the public two-line contract.',
+                    },
+                    {
+                        code: 'custom',
+                        path: [],
+                        message: 'v2.8 public copy must not assert or speculate about a relationship.',
+                    },
+                    {
+                        code: 'custom',
+                        path: ['lines', 1, 'text'],
+                        message: 'v2.11 narrative omitted the candidate-to-target like direction.',
+                    },
+                ],
+            },
+        );
+        mocks.analyzeWithGemini
+            .mockRejectedValueOnce(new Error(
+                'AI_GENERATION_RESPONSE_REJECTED_ERROR: generated response failed strict validation.',
+                { cause: validation },
+            ))
+            .mockImplementationOnce(async (
+                prompt: string,
+                _images: string[],
+                options: { schema: { parse(value: unknown): unknown } },
+            ) => {
+                expect(prompt).toContain(
+                    'v2.8 public copy must not assert or speculate about a relationship.',
+                );
+                expect(prompt).toContain(
+                    'v2.11 narrative omitted the candidate-to-target like direction.',
+                );
+                return options.schema.parse({ lines: [
+                    '박민지님의 여행과 일상 기록은 차분하게 이어지는 피드입니다.',
+                    '박민지님이 김준호님에게 남긴 좋아요와 댓글의 반가워 표현, 김준호님이 박민지님에게 남긴 좋아요 흔적은 확인되지만, 수집 표본 밖 누락 가능성은 남습니다.',
+                ] });
+            });
+
+        const result = await highRiskNarrative(
+            input,
+            audit('highRiskNarrative', input, AI_STAGE_POLICY_V211_VERSION),
+            { aiStagePolicyVersion: AI_STAGE_POLICY_V211_VERSION },
+        );
+
+        expect(result.source).toBe('gemini');
+        expect(result.lines[1]).toContain('김준호님이 박민지님에게 남긴 좋아요');
+        expect(mocks.analyzeWithGemini).toHaveBeenCalledTimes(2);
+    });
+
     it('does not repair an unrelated custom issue at the narrative lines path', async () => {
         const input = narrativeInput();
         const candidate = { lines: [{
