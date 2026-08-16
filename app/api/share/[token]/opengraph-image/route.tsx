@@ -22,9 +22,10 @@ const shareTokenSchema = z.string().regex(/^[0-9a-f]{64}$/);
 const shareRecordSchema = z.object({
     id: z.string().uuid(),
     user_id: z.string().uuid(),
-    pipeline_version: z.literal('v2'),
+    pipeline_version: z.union([z.literal('v1'), z.literal('v2'), z.null()]),
     status: z.literal('completed'),
     share_enabled: z.literal(true),
+    target_instagram_id: z.string().min(1).max(255).optional(),
 }).strip();
 
 const NO_STORE_HEADERS = {
@@ -66,7 +67,9 @@ function notFound() {
 
 /* Square, because KakaoTalk renders the feed thumbnail square and centre-crops
    anything wider — a 2:1 card lost its avatar on one edge and its headline on
-   the other. Laying the card out vertically means nothing has to survive a crop. */
+   the other. Laying the card out vertically means nothing has to survive a crop.
+   Legacy V1 shares use the same card, instead of falling back to the site-wide
+   1200x630 landing image. */
 const CARD_PX = 800;
 
 function ogCard(displayName: string, imageDataUrl: string | null) {
@@ -147,11 +150,10 @@ export async function GET(
 
     const { data, error } = await supabaseAdmin
         .from('analysis_requests')
-        .select('id, user_id, pipeline_version, status, share_enabled')
+        .select('id, user_id, pipeline_version, status, share_enabled, target_instagram_id')
         .eq('share_token', token.data)
         .eq('share_enabled', true)
         .eq('status', 'completed')
-        .eq('pipeline_version', 'v2')
         .maybeSingle();
     const shareRecord = error ? null : shareRecordSchema.safeParse(data);
     if (!shareRecord || !shareRecord.success) return notFound();
@@ -159,46 +161,53 @@ export async function GET(
         return notFound();
     }
 
-    let page: Awaited<ReturnType<typeof v2ShareResultService.loadPage>>;
-    try {
-        page = await v2ShareResultService.loadPage({
-            requestId: shareRecord.data.id,
-            ownerUserId: shareRecord.data.user_id,
-            shareToken: token.data,
-            femaleCursor: null,
-            privateCursor: null,
-            pageSize: 1,
-        });
-    } catch {
+    let displayName = shareRecord.data.target_instagram_id ?? '';
+    if (shareRecord.data.pipeline_version !== 'v2' && !displayName) {
         return notFound();
     }
-    if (!page) return notFound();
-
-    const displayName = page.summary.targetFullName?.trim()
-        || page.summary.targetInstagramId;
     let imageDataUrl: string | null = null;
-    const resolved = await resolveAnalysisV2ResultImageLocator(
-        {
-            requestId: shareRecord.data.id,
-            kind: 'target',
-            candidateId: null,
-        },
-        shareRecord.data.user_id
-    );
-    if (resolved?.source === 'r2') {
+    if (shareRecord.data.pipeline_version === 'v2') {
+        let page: Awaited<ReturnType<typeof v2ShareResultService.loadPage>>;
         try {
-            const bytes = await readAnalysisV2ResultImageObject(resolved);
-            /* Result images are stored as WebP, which the OG renderer cannot
-               decode — it fails with "u2 is not iterable" while measuring the
-               image, taking the whole card down with it. Re-encoding as PNG at
-               the size the card actually draws also keeps the data URL small. */
-            const png = await sharp(bytes, { animated: false, failOn: 'error' })
-                .resize(AVATAR_PX, AVATAR_PX, { fit: 'cover' })
-                .png()
-                .toBuffer();
-            imageDataUrl = `data:image/png;base64,${png.toString('base64')}`;
+            page = await v2ShareResultService.loadPage({
+                requestId: shareRecord.data.id,
+                ownerUserId: shareRecord.data.user_id,
+                shareToken: token.data,
+                femaleCursor: null,
+                privateCursor: null,
+                pageSize: 1,
+            });
         } catch {
-            imageDataUrl = null;
+            return notFound();
+        }
+        if (!page) return notFound();
+
+        displayName = page.summary.targetFullName?.trim()
+            || page.summary.targetInstagramId;
+
+        const resolved = await resolveAnalysisV2ResultImageLocator(
+            {
+                requestId: shareRecord.data.id,
+                kind: 'target',
+                candidateId: null,
+            },
+            shareRecord.data.user_id
+        );
+        if (resolved?.source === 'r2') {
+            try {
+                const bytes = await readAnalysisV2ResultImageObject(resolved);
+                /* Result images are stored as WebP, which the OG renderer cannot
+                   decode — it fails with "u2 is not iterable" while measuring the
+                   image, taking the whole card down with it. Re-encoding as PNG at
+                   the size the card actually draws also keeps the data URL small. */
+                const png = await sharp(bytes, { animated: false, failOn: 'error' })
+                    .resize(AVATAR_PX, AVATAR_PX, { fit: 'cover' })
+                    .png()
+                    .toBuffer();
+                imageDataUrl = `data:image/png;base64,${png.toString('base64')}`;
+            } catch {
+                imageDataUrl = null;
+            }
         }
     }
 

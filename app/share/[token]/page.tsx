@@ -149,6 +149,7 @@ interface FemaleAccount {
     bio: string;
     recentMutualRank?: 1 | 2 | 3 | 4 | 5;
     riskAnalysis: string[];
+    oneLineOverview?: string;
 }
 
 interface PrivateAccount {

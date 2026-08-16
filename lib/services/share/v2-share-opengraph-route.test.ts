@@ -143,6 +143,34 @@ describe('V2 dynamic share Open Graph image', () => {
         });
     });
 
+    it('renders a result-specific card for a legacy shared result', async () => {
+        mocks.from.mockReturnValue(record({
+            id: requestId,
+            user_id: userId,
+            pipeline_version: 'v1',
+            status: 'completed',
+            share_enabled: true,
+            target_instagram_id: 'bhaa365p',
+        }));
+
+        const response = await GET(
+            new Request(
+                `https://example.com/api/share/${token}/opengraph-image`
+            ),
+            context()
+        );
+
+        expect(response.status).toBe(200);
+        expect(mocks.captures[0]?.options).toMatchObject({
+            width: 800,
+            height: 800,
+        });
+        expect(textOf(mocks.captures[0]?.element)).toContain(
+            'bhaa365p님의 위장 여사친을 찾았어요'
+        );
+        expect(mocks.loadPage).not.toHaveBeenCalled();
+    });
+
     it('renders a status-200 text fallback when the target image cannot load', async () => {
         mocks.read.mockRejectedValue(new Error('r2 unavailable'));
         const response = await GET(

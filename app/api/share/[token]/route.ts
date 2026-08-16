@@ -5,7 +5,7 @@ import {
 } from '@/lib/services/analysis/recent-mutuals';
 import {
     targetProfileImageFromStepData,
-    toResultInteractionSummary,
+    toOwnerResultInteractionSummary,
 } from '@/lib/services/analysis/result-interactions';
 import { createImageProxyPath } from '@/lib/services/media/image-proxy-token';
 import {
@@ -161,6 +161,7 @@ export async function GET(
                 suspect_profile_image,
                 suspect_full_name,
                 risk_grade,
+                one_line_overview,
                 risk_analysis
             `)
             .eq('request_id', requestId)
@@ -221,10 +222,10 @@ export async function GET(
                 /* Anyone holding the link can call this route, so the bio never
                    leaves the database: it names workplaces, schools and other
                    handles, and identifies at least as readily as the name does.
-                   The share view already discarded it, so it was shipped as JSON
-                   to readers and rendered for no one. */
+                   The bounded one-line overview is the public result copy and is
+                   intentionally retained for the shared report. */
                 recentMutualRank: recentMutualRanks.get(instagramId.toLowerCase()),
-                ...toResultInteractionSummary(result),
+                ...toOwnerResultInteractionSummary(result),
             };
         }) || [];
 
