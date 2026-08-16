@@ -12,7 +12,12 @@ import {
     type ReplayStatelessCapability,
 } from '@/lib/services/ai/replay-stateless-capability';
 import { AI_STAGE_POLICY_V211_VERSION } from '@/lib/services/ai/stage-policy';
-import { isRecoverableGeminiResponseError } from '@/lib/services/ai/gemini-generation-policy';
+import {
+    isAmbiguousGeminiGenerationError,
+    isGeminiRateLimitError,
+    isRecoverableGeminiResponseError,
+} from '@/lib/services/ai/gemini-generation-policy';
+import type { GeminiAttemptTelemetry } from '@/lib/services/ai/gemini';
 import {
     createFeatureAnalysisResultIdentity,
     featureAnalysis,
@@ -48,6 +53,7 @@ const ORDER_END = '2026-08-13T00:00:00Z';
 const SHA256 = /^[a-f0-9]{64}$/;
 const USERNAME = /^[a-z0-9._]{1,30}$/;
 const V214_GEMINI_GENERATION_MAX_ATTEMPTS = 3;
+const V214_PROVIDER_MAX_RETRIES = 1;
 const V214_NARRATIVE_MAX_TEXT_LENGTH = 180;
 const V214_NARRATIVE_MAX_EVIDENCE_REFS = 8;
 const V214_NARRATIVE_MAX_EVIDENCE_REF_LENGTH = 240;
@@ -78,6 +84,23 @@ export type V214GeneratedCopy = Readonly<{
 
 export const V214_COPY_QUALITY_VERSION = 'v214-gemini-first-payment-copy-v1';
 
+export type V214FailureCategory =
+    | 'http_5xx_or_transport'
+    | 'safety'
+    | 'max_tokens'
+    | 'empty_response'
+    | 'json_parse'
+    | 'downstream_mapping';
+
+type V214AttemptDiagnostic = Pick<
+    GeminiAttemptTelemetry,
+    'disposition' | 'finishReason'
+> & {
+    responseRejection?: { category?: string };
+};
+
+type V214DiagnosticSink = { category: V214FailureCategory | null };
+
 const interactionTerms = {
     like: '좋아요',
     comment: '댓글',
@@ -92,11 +115,11 @@ const v214RelaxedNarrativeLineSchema = z.object({
         z.string().trim().min(1).max(V214_NARRATIVE_MAX_EVIDENCE_REF_LENGTH)
             .regex(/^[^\r\n]+$/u, 'CONCIERGE_COPY_V214_NARRATIVE_EVIDENCE_REF_BREAK'),
     ).min(1).max(V214_NARRATIVE_MAX_EVIDENCE_REFS),
-}).strict();
+}).passthrough();
 
 export const v214RelaxedNarrativeModelResponseSchema = z.object({
     lines: z.tuple([v214RelaxedNarrativeLineSchema, v214RelaxedNarrativeLineSchema]),
-}).strict();
+}).passthrough();
 
 export type V214RelaxedNarrativeDto = z.infer<
     typeof v214RelaxedNarrativeModelResponseSchema
@@ -298,14 +321,75 @@ function sha256(value: unknown): string {
     return createHash('sha256').update(canonical(value)).digest('hex');
 }
 
-function v214FailureCode(error: unknown): string {
-    for (let current = error, depth = 0; depth < 3 && current instanceof Error; depth += 1) {
-        const match = /^([A-Z][A-Z0-9_]{2,119})(?::|$)/u.exec(current.message);
-        if (match?.[1]) return match[1];
+export function classifyV214AttemptTelemetry(
+    telemetry: V214AttemptDiagnostic,
+): V214FailureCategory {
+    if (telemetry.disposition === 'ambiguous' || telemetry.disposition === 'rate_limited') {
+        return 'http_5xx_or_transport';
+    }
+    const finishReason = telemetry.finishReason?.toUpperCase() ?? '';
+    if (/MAX[_ ]TOKENS/u.test(finishReason)) return 'max_tokens';
+    if (/SAFETY|BLOCKLIST|PROHIBITED_CONTENT|SPII|RECITATION/u.test(finishReason)) {
+        return 'safety';
+    }
+    switch (telemetry.responseRejection?.category) {
+        case 'invalid_json':
+        case 'missing_json_object':
+            return 'json_parse';
+        case 'candidate_contract':
+            return finishReason === 'STOP' ? 'empty_response' : 'downstream_mapping';
+        default:
+            return 'downstream_mapping';
+    }
+}
+
+function diagnosticCategoryFromError(error: unknown): V214FailureCategory | null {
+    for (let current = error, depth = 0; depth < 4 && current instanceof Error; depth += 1) {
+        const diagnostics = (current as Error & {
+            diagnostics?: { category?: unknown };
+        }).diagnostics;
+        if (
+            diagnostics
+            && typeof diagnostics.category === 'string'
+        ) {
+            return classifyV214AttemptTelemetry({
+                disposition: 'response_rejected',
+                finishReason: current.message.includes('did not include text') ? 'STOP' : null,
+                responseRejection: { category: diagnostics.category },
+            });
+        }
+        if (isAmbiguousGeminiGenerationError(current) || isGeminiRateLimitError(current)) {
+            return 'http_5xx_or_transport';
+        }
+        if (/MAX[_ ]TOKENS/u.test(current.message)) return 'max_tokens';
+        if (/SAFETY|BLOCKLIST|PROHIBITED_CONTENT|SPII|RECITATION/u.test(current.message)) {
+            return 'safety';
+        }
+        if (/did not include text|empty response/iu.test(current.message)) {
+            return 'empty_response';
+        }
+        if (/invalid JSON|JSON parse|did not contain a JSON object/iu.test(current.message)) {
+            return 'json_parse';
+        }
         current = current.cause;
     }
-    if (error instanceof z.ZodError) return 'CONCIERGE_COPY_V214_GEMINI_VALIDATION_REJECTED';
-    return 'CONCIERGE_COPY_V214_GENERATION_FAILED';
+    return null;
+}
+
+export function classifyV214FailureCategory(
+    error: unknown,
+    observedCategory: V214FailureCategory | null = null,
+): V214FailureCategory {
+    return diagnosticCategoryFromError(error) ?? observedCategory ?? 'downstream_mapping';
+}
+
+function recordV214AttemptDiagnostic(
+    sink: V214DiagnosticSink | undefined,
+    telemetry: V214AttemptDiagnostic,
+): void {
+    if (sink) sink.category = telemetry.disposition === 'success'
+        ? null
+        : classifyV214AttemptTelemetry(telemetry);
 }
 
 function exactTargetFullName(stepData: unknown, fallbackUsername: string): string | null {
@@ -435,7 +519,11 @@ async function loadExactV214Scope(): Promise<V214ExactScope> {
     };
 }
 
-function featureAudit(input: FeatureAnalysisInput, requestId: string): StagedAiAuditContext {
+function featureAudit(
+    input: FeatureAnalysisInput,
+    requestId: string,
+    diagnostic?: V214DiagnosticSink,
+): StagedAiAuditContext {
     const resultIdentity = createFeatureAnalysisResultIdentity(input, AI_STAGE_POLICY_V211_VERSION);
     return {
         requestId,
@@ -443,7 +531,9 @@ function featureAudit(input: FeatureAnalysisInput, requestId: string): StagedAiA
         resultIdentity,
         prepare: async () => ({ result: null, source: null, startingAttempt: 1 }),
         onBeforeAttempt: () => undefined,
-        onAttemptTelemetry: () => undefined,
+        onAttemptTelemetry: telemetry => {
+            recordV214AttemptDiagnostic(diagnostic, telemetry);
+        },
     };
 }
 
@@ -966,6 +1056,7 @@ export async function generateV214RelaxedNarrative(input: {
     targetFullName: string;
     requestId: string;
     replayCapability?: ReplayStatelessCapability;
+    diagnostic?: V214DiagnosticSink;
 }): Promise<V214RelaxedNarrativeDto> {
     const promptInput = {
         narrativeInput: input.narrativeInput,
@@ -983,12 +1074,17 @@ export async function generateV214RelaxedNarrative(input: {
             replayCapability: input.replayCapability,
             skipTokenLog: true,
             onBeforeAttempt: () => undefined,
-            onAttemptTelemetry: () => undefined,
+            onAttemptTelemetry: telemetry => {
+                recordV214AttemptDiagnostic(input.diagnostic, telemetry);
+            },
         }
         : {
             schema: v214RelaxedNarrativeModelResponseSchema,
             analysisType: 'v2_high_risk_narrative_v214_direct',
             requestId: input.requestId,
+            onAttemptTelemetry: telemetry => {
+                recordV214AttemptDiagnostic(input.diagnostic, telemetry);
+            },
         };
     const generated = await analyzeWithGemini<V214RelaxedNarrativeDto>(
         v214RelaxedNarrativePrompt(promptInput),
@@ -1007,7 +1103,10 @@ function observedInteraction(input: HighRiskNarrativeInput): V214InteractionType
     ).type;
 }
 
-async function generateGeminiCopy(scope: V214ExactScope) {
+async function generateGeminiCopy(
+    scope: V214ExactScope,
+    diagnostic?: V214DiagnosticSink,
+) {
     const profiles = await loadRetainedConciergeProfileArtifacts();
     const reverseInteractions = await loadReverseInteractionArtifact(scope.order);
     const selectedProfiles = scope.rows.map(row => {
@@ -1095,7 +1194,7 @@ async function generateGeminiCopy(scope: V214ExactScope) {
         };
         const feature = await featureAnalysis(
             featureInput,
-            featureAudit(featureInput, requestId),
+            featureAudit(featureInput, requestId, diagnostic),
             { aiStagePolicyVersion: AI_STAGE_POLICY_V211_VERSION, replayCapability },
         );
         if (row.risk_grade !== 'high_risk') {
@@ -1125,6 +1224,7 @@ async function generateGeminiCopy(scope: V214ExactScope) {
             targetFullName: scope.targetFullName,
             requestId,
             replayCapability,
+            diagnostic,
         });
         generated.push({
             rank: row.rank,
@@ -1145,10 +1245,18 @@ async function generateGeminiCopy(scope: V214ExactScope) {
 export async function generateV214GeminiCopyWithSchemaRetry<T>(
     generate: () => Promise<T>,
 ): Promise<T> {
+    let providerRetries = 0;
     for (let attempt = 1; attempt <= V214_GEMINI_GENERATION_MAX_ATTEMPTS; attempt += 1) {
         try {
             return await generate();
         } catch (error) {
+            const providerFailure = isAmbiguousGeminiGenerationError(error)
+                || isGeminiRateLimitError(error);
+            if (providerFailure) {
+                if (providerRetries >= V214_PROVIDER_MAX_RETRIES) throw error;
+                providerRetries += 1;
+                continue;
+            }
             const recoverableFeatureOverviewRepair = error instanceof z.ZodError
                 && error.issues.some(issue => (
                     issue.path.length === 1
@@ -1191,12 +1299,14 @@ async function verifyV214Correction(input: {
     }
 }
 
-async function main(): Promise<void> {
+async function main(diagnostic: V214DiagnosticSink = { category: null }): Promise<void> {
     if (process.argv.slice(2).join(' ') !== '--confirm-v214-gemini-copy-correction') {
         throw new Error('CONCIERGE_COPY_V214_CONFIRMATION_REQUIRED');
     }
     const scope = await loadExactV214Scope();
-    const generated = await generateV214GeminiCopyWithSchemaRetry(() => generateGeminiCopy(scope));
+    const generated = await generateV214GeminiCopyWithSchemaRetry(
+        () => generateGeminiCopy(scope, diagnostic),
+    );
     const payload = buildV214GeminiCopyPayload({ rows: scope.rows, generated });
     const correctionResultHash = sha256({
         qualityVersion: payload.qualityVersion,
@@ -1232,8 +1342,12 @@ async function main(): Promise<void> {
 }
 
 if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) {
-    main().catch(error => {
-        console.error(JSON.stringify({ state: 'failed', code: v214FailureCode(error) }));
+    const diagnostic: V214DiagnosticSink = { category: null };
+    main(diagnostic).catch(error => {
+        console.error(JSON.stringify({
+            state: 'failed',
+            category: classifyV214FailureCategory(error, diagnostic.category),
+        }));
         process.exitCode = 1;
     });
 }

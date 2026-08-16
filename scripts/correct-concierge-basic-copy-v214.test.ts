@@ -19,8 +19,11 @@ vi.mock('@/lib/services/ai/v2-staged-analysis', async importOriginal => ({
 import {
     buildV214NarrativeInput,
     buildV214GeminiCopyPayload,
+    classifyV214FailureCategory,
+    classifyV214AttemptTelemetry,
     generateV214RelaxedNarrative,
     generateV214GeminiCopyWithSchemaRetry,
+    v214RelaxedNarrativeModelResponseSchema,
     type V214FrozenResultRow,
 } from './correct-concierge-basic-copy-v214';
 import { issueReplayStatelessCapability } from '@/lib/services/ai/replay-stateless-capability';
@@ -74,6 +77,81 @@ function geminiRows(rows: readonly V214FrozenResultRow[]) {
 }
 
 describe('v2.14 first-payment Gemini copy correction', () => {
+    it.each([
+        [
+            'ambiguous provider failure',
+            { disposition: 'ambiguous', finishReason: null },
+            'http_5xx_or_transport',
+        ],
+        [
+            'rate-limited provider failure',
+            { disposition: 'rate_limited', finishReason: null },
+            'http_5xx_or_transport',
+        ],
+        [
+            'safety block',
+            { disposition: 'response_rejected', finishReason: 'SAFETY' },
+            'safety',
+        ],
+        [
+            'max tokens',
+            { disposition: 'response_rejected', finishReason: 'MAX_TOKENS' },
+            'max_tokens',
+        ],
+        [
+            'empty response',
+            {
+                disposition: 'response_rejected',
+                finishReason: 'STOP',
+                responseRejection: { category: 'candidate_contract' },
+            },
+            'empty_response',
+        ],
+        [
+            'invalid JSON',
+            {
+                disposition: 'response_rejected',
+                finishReason: 'STOP',
+                responseRejection: { category: 'invalid_json' },
+            },
+            'json_parse',
+        ],
+        [
+            'schema mapping failure',
+            {
+                disposition: 'response_rejected',
+                finishReason: 'STOP',
+                responseRejection: { category: 'schema_validation' },
+            },
+            'downstream_mapping',
+        ],
+    ] as const)('maps %s to one closed category', (_label, telemetry, expected) => {
+        expect(classifyV214AttemptTelemetry(telemetry)).toBe(expected);
+    });
+
+    it('maps unknown failures to downstream_mapping without exposing the error', () => {
+        const category = classifyV214FailureCategory(new Error(
+            'CONCIERGE_COPY_V214_GENERATION_FAILED: private model text and https://secret.example',
+        ));
+        expect(category).toBe('downstream_mapping');
+        expect([
+            'http_5xx_or_transport', 'safety', 'max_tokens', 'empty_response',
+            'json_parse', 'downstream_mapping',
+        ]).toContain(category);
+    });
+
+    it('accepts extra structural JSON fields before existing narrative fences run', () => {
+        expect(v214RelaxedNarrativeModelResponseSchema.parse({
+            trace: 'ignored',
+            lines: [
+                { text: '첫 문장', evidenceRefs: ['profile:bio'], modelNote: 'ignored' },
+                { text: '둘째 문장', evidenceRefs: ['coverage'], modelNote: 'ignored' },
+            ],
+        })).toMatchObject({
+            lines: [{ text: '첫 문장' }, { text: '둘째 문장' }],
+        });
+    });
+
     it('retries schema-rejected Gemini copy generation up to three total attempts', async () => {
         const generate = vi.fn()
             .mockRejectedValueOnce(new Error('AI_GENERATION_RESPONSE_REJECTED_ERROR: generated response failed strict validation.'))
@@ -84,6 +162,24 @@ describe('v2.14 first-payment Gemini copy correction', () => {
         expect(generate).toHaveBeenCalledTimes(3);
     });
 
+    it('retries one bounded provider or transport failure', async () => {
+        const failure = new Error('AI_AMBIGUOUS_GENERATION_ERROR: generation status is unknown.');
+        const generate = vi.fn()
+            .mockRejectedValueOnce(failure)
+            .mockResolvedValueOnce('valid-copy');
+
+        await expect(generateV214GeminiCopyWithSchemaRetry(generate)).resolves.toBe('valid-copy');
+        expect(generate).toHaveBeenCalledTimes(2);
+    });
+
+    it('does not retry provider or transport failure more than once', async () => {
+        const failure = new Error('AI_AMBIGUOUS_GENERATION_ERROR: generation status is unknown.');
+        const generate = vi.fn().mockRejectedValue(failure);
+
+        await expect(generateV214GeminiCopyWithSchemaRetry(generate)).rejects.toBe(failure);
+        expect(generate).toHaveBeenCalledTimes(2);
+    });
+
     it('fails closed after the third schema-rejected generation attempt', async () => {
         const rejection = new Error('AI_GENERATION_RESPONSE_REJECTED_ERROR: generated response failed strict validation.');
         const generate = vi.fn().mockRejectedValue(rejection);
@@ -92,8 +188,8 @@ describe('v2.14 first-payment Gemini copy correction', () => {
         expect(generate).toHaveBeenCalledTimes(3);
     });
 
-    it('does not retry non-schema generation errors', async () => {
-        const failure = new Error('AI_RATE_LIMIT_ERROR: quota unavailable.');
+    it('does not retry unrelated generation errors', async () => {
+        const failure = new Error('AI_ATTEMPT_AUDIT_PERSISTENCE_ERROR: audit unavailable.');
         const generate = vi.fn().mockRejectedValue(failure);
 
         await expect(generateV214GeminiCopyWithSchemaRetry(generate)).rejects.toBe(failure);
