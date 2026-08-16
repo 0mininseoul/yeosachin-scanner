@@ -9,6 +9,7 @@ import {
     createSupabaseConciergePublicationStore,
     publishConciergeManualOverride,
     type ConciergeManualPublicationInput,
+    type ConciergeBatchCandidateCopy,
     type ConciergePublicationStore,
 } from './concierge-batch-publication';
 import {
@@ -149,6 +150,26 @@ describe('concierge manual publication', () => {
         expect(publication.rows).toHaveLength(2);
         expect(publication.counts).toMatchObject({ male: 0, female: 2, unknown: 0, public: 2, private: 1, mutual: 3, authoritativeMutual: 3, hydrated: 3, analyzed: 2 });
         expect(publication.resultHash).toMatch(/^[a-f0-9]{64}$/);
+    });
+
+    it('replaces every displayed candidate overview with the full batch copy contract', () => {
+        const input = makeInput();
+        const scored = buildConciergeManualPublication(input);
+        const batchCandidateCopy: ConciergeBatchCandidateCopy[] = scored.rows.map((row, index) => ({
+            candidateUsername: row.suspect_instagram_id,
+            oneLineOverview: `${row.suspect_instagram_id}의 보존된 기록이 ${index === 0 ? '여행' : '필름'} 장면마다 다른 결로 이어져 호기심을 남깁니다.`,
+            riskAnalysis: [
+                `${row.suspect_instagram_id}의 공개 기록에서 실제 장면의 결이 가볍게 이어집니다.`,
+                `${row.suspect_instagram_id}의 피드가 남긴 분위기가 시선을 붙잡습니다.`,
+            ],
+        }));
+        const publication = buildConciergeManualPublication({ ...input, batchCandidateCopy });
+        expect(publication.rows.map(row => row.one_line_overview)).toEqual(
+            batchCandidateCopy.map(copy => copy.oneLineOverview),
+        );
+        expect(publication.rows.every(row => row.risk_grade === 'high_risk'
+            ? row.risk_analysis.length === 2
+            : row.risk_analysis.length === 0)).toBe(true);
     });
 
     it('carries text-only private-name likelihoods through the atomic publication payload in display order', async () => {
