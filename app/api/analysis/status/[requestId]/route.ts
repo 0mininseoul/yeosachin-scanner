@@ -18,6 +18,7 @@ import {
     AccountPrincipalAdmissionError,
     requireActiveAccountClassification,
 } from '@/lib/services/identity/account-principal-store';
+import { isAnalysisResultAuthoritativelyPublished } from '@/lib/services/analysis/result-publication-authority';
 
 const STATUS_COLUMNS = 'id, user_id, pipeline_version, status, current_step, progress, progress_step, error_message, background_processing, created_at, completed_at, idempotency_key';
 
@@ -102,8 +103,12 @@ export async function GET(
             });
         }
 
+        const publicationAuthorized = analysisRequest.status !== 'completed'
+            || await isAnalysisResultAuthoritativelyPublished(analysisRequest.id);
+
         if (
-            isV1Pipeline(analysisRequest.pipeline_version)
+            publicationAuthorized
+            && isV1Pipeline(analysisRequest.pipeline_version)
             && ['pending', 'processing'].includes(analysisRequest.status)
             && isAnalysisRequestStale(analysisRequest.created_at)
         ) {
@@ -150,10 +155,10 @@ export async function GET(
         return NextResponse.json({
             requestId: analysisRequest.id,
             pipelineVersion: 'v1',
-            status: analysisRequest.status,
-            progress: analysisRequest.progress,
-            progressStep: analysisRequest.progress_step,
-            errorMessage: analysisRequest.error_message,
+            status: publicationAuthorized ? analysisRequest.status : 'pending',
+            progress: publicationAuthorized ? analysisRequest.progress : 0,
+            progressStep: publicationAuthorized ? analysisRequest.progress_step : '분석 대기 중...',
+            errorMessage: publicationAuthorized ? analysisRequest.error_message : null,
             backgroundProcessing: analysisRequest.background_processing === true,
             createdAt: analysisRequest.created_at,
             completedAt: analysisRequest.completed_at,

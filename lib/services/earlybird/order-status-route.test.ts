@@ -5,6 +5,7 @@ const mocks = vi.hoisted(() => ({
     createServerClient: vi.fn(),
     from: vi.fn(),
     rpc: vi.fn(),
+    isResultAuthoritativelyPublished: vi.fn(),
     orderQuery: null as ReturnType<typeof queryBuilder> | null,
     resultQuery: null as ReturnType<typeof queryBuilder> | null,
     requireActiveAccountClassification: vi.fn(),
@@ -30,6 +31,9 @@ vi.mock('@/lib/supabase/server', () => ({
 }));
 vi.mock('@/lib/supabase/admin', () => ({
     supabaseAdmin: { from: mocks.from, rpc: mocks.rpc },
+}));
+vi.mock('@/lib/services/analysis/result-publication-authority', () => ({
+    isAnalysisResultAuthoritativelyPublished: mocks.isResultAuthoritativelyPublished,
 }));
 vi.mock('@/lib/services/identity/account-principal-store', async importOriginal => ({
     ...(await importOriginal<typeof import('@/lib/services/identity/account-principal-store')>()),
@@ -102,6 +106,7 @@ describe('earlybird owner order status route', () => {
         vi.clearAllMocks();
         authenticate();
         installQueries(orderRow());
+        mocks.isResultAuthoritativelyPublished.mockResolvedValue(true);
         mocks.requireActiveAccountClassification.mockResolvedValue({
             userId: USER_ID,
             accountClass: 'production',
@@ -240,6 +245,30 @@ describe('earlybird owner order status route', () => {
         }), null);
         const blocked = await GET(new Request('https://example.com/api/earlybird/orders/latest'));
         await expect(blocked.json()).resolves.toMatchObject({ order: { resultUrl: null } });
+    });
+
+    it('keeps an order in the waiting UX when its completed request is not published', async () => {
+        installQueries(orderRow({
+            status: 'completed',
+            result_request_id: RESULT_ID,
+        }), {
+            id: RESULT_ID,
+            user_id: USER_ID,
+            status: 'completed',
+        });
+        mocks.isResultAuthoritativelyPublished.mockResolvedValue(false);
+
+        const response = await GET(new Request('https://example.com/api/earlybird/orders/latest'));
+
+        await expect(response.json()).resolves.toMatchObject({
+            order: {
+                systemStatus: 'analysis_in_progress',
+                displayStatus: '판독 중',
+                progressUrl: `/progress/${RESULT_ID}`,
+                resultUrl: null,
+            },
+        });
+        expect(mocks.isResultAuthoritativelyPublished).toHaveBeenCalledWith(RESULT_ID);
     });
 
     it('returns an owner-scoped progress path only while automatic analysis is in progress', async () => {

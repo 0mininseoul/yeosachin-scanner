@@ -3,11 +3,15 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 const mocks = vi.hoisted(() => ({
     from: vi.fn(),
     loadV2Page: vi.fn(),
+    isResultAuthoritativelyPublished: vi.fn(),
 }));
 
 vi.mock('@/lib/supabase/admin', () => ({ supabaseAdmin: { from: mocks.from } }));
 vi.mock('@/lib/services/share/v2-result-share', () => ({
     v2ShareResultService: { loadPage: mocks.loadV2Page },
+}));
+vi.mock('@/lib/services/analysis/result-publication-authority', () => ({
+    isAnalysisResultAuthoritativelyPublished: mocks.isResultAuthoritativelyPublished,
 }));
 
 import { GET as sharedResult } from '@/app/api/share/[token]/route';
@@ -116,6 +120,7 @@ describe('legacy share payload privacy', () => {
     beforeEach(() => {
         vi.clearAllMocks();
         vi.stubEnv('IMAGE_PROXY_SIGNING_SECRET', IMAGE_SECRET);
+        mocks.isResultAuthoritativelyPublished.mockResolvedValue(true);
     });
 
     afterEach(() => {

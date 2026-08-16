@@ -7,6 +7,7 @@ const mocks = vi.hoisted(() => ({
     loadForOwner: vi.fn(),
     demoFindForOwner: vi.fn(),
     loadFixture: vi.fn(),
+    isResultAuthoritativelyPublished: vi.fn(),
     requireActiveAccountClassification: vi.fn(),
 }));
 
@@ -19,6 +20,9 @@ vi.mock('@/lib/services/demo-analysis/store', () => ({
 }));
 vi.mock('@/lib/services/demo-analysis/fixture-store', () => ({
     loadDemoFixtureForVersion: mocks.loadFixture,
+}));
+vi.mock('@/lib/services/analysis/result-publication-authority', () => ({
+    isAnalysisResultAuthoritativelyPublished: mocks.isResultAuthoritativelyPublished,
 }));
 vi.mock('@/lib/services/identity/account-principal-store', async importOriginal => ({
     ...(await importOriginal<typeof import('@/lib/services/identity/account-principal-store')>()),
@@ -112,6 +116,7 @@ describe('analysis V2 owner progress route', () => {
         });
         mocks.demoFindForOwner.mockResolvedValue(null);
         mocks.loadFixture.mockImplementation(async (version: string) => loadedFixture(version));
+        mocks.isResultAuthoritativelyPublished.mockResolvedValue(true);
         mocks.requireActiveAccountClassification.mockResolvedValue({
             userId,
             accountClass: 'production',

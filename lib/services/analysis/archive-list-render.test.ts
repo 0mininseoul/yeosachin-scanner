@@ -32,6 +32,18 @@ function awaitingDeliveryEntry(): ArchiveEntry {
     };
 }
 
+function pendingAnalysisEntry(): ArchiveEntry {
+    const item: OwnerAnalysisHistoryItemV1 = {
+        id: '323e4567-e89b-42d3-a456-426614174000',
+        targetInstagramId: 'pending.account',
+        status: 'pending',
+        createdAt: '2026-08-12T09:00:00.000Z',
+        planType: 'basic',
+        pipelineVersion: 'v1',
+    };
+    return { kind: 'analysis', item };
+}
+
 describe('mypage archive list rendering', () => {
     it('renders an awaiting-delivery entry as 결과 대기 중', () => {
         const markup = renderToStaticMarkup(createElement(AnalysisList, {
@@ -56,5 +68,14 @@ describe('mypage archive list rendering', () => {
 
         expect(markup).toContain('<button');
         expect(markup).toContain('@target.account');
+    });
+
+    it('renders an incomplete analysis as 대기 중 while keeping it off the result route', () => {
+        const markup = renderToStaticMarkup(createElement(AnalysisList, {
+            initialEntries: [pendingAnalysisEntry()],
+        }));
+
+        expect(markup).toContain('대기 중');
+        expect(markup).not.toContain('/result/');
     });
 });

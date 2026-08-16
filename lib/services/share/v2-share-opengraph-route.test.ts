@@ -5,6 +5,7 @@ const mocks = vi.hoisted(() => ({
     loadPage: vi.fn(),
     resolve: vi.fn(),
     read: vi.fn(),
+    isResultAuthoritativelyPublished: vi.fn(),
     captures: [] as Array<{ element: unknown; options: unknown }>,
 }));
 
@@ -17,6 +18,9 @@ vi.mock('@/lib/services/share/v2-result-share', () => ({
 vi.mock('@/lib/services/media/result-image-resolver', () => ({
     resolveAnalysisV2ResultImageLocator: mocks.resolve,
     readAnalysisV2ResultImageObject: mocks.read,
+}));
+vi.mock('@/lib/services/analysis/result-publication-authority', () => ({
+    isAnalysisResultAuthoritativelyPublished: mocks.isResultAuthoritativelyPublished,
 }));
 vi.mock('next/og', () => ({
     ImageResponse: class extends Response {
@@ -97,6 +101,7 @@ describe('V2 dynamic share Open Graph image', () => {
             expiresAt: '2026-08-28T00:00:00.000Z',
         });
         mocks.read.mockResolvedValue(TINY_WEBP);
+        mocks.isResultAuthoritativelyPublished.mockResolvedValue(true);
     });
 
     it('renders an 800x800 result-specific card with an inline R2 target image', async () => {

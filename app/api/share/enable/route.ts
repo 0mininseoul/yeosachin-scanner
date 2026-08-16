@@ -9,6 +9,7 @@ import {
     AccountPrincipalAdmissionError,
     requireActiveAccountClassification,
 } from '@/lib/services/identity/account-principal-store';
+import { isAnalysisResultAuthoritativelyPublished } from '@/lib/services/analysis/result-publication-authority';
 
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const SHARE_TOKEN_PATTERN = /^[0-9a-f]{64}$/;
@@ -257,6 +258,17 @@ export async function POST(request: Request) {
             return NextResponse.json(
                 { error: '분석이 완료된 후에 공유할 수 있습니다.' },
                 { status: 400 }
+            );
+        }
+
+        if (!await isAnalysisResultAuthoritativelyPublished(analysisRequest.id)) {
+            return NextResponse.json(
+                {
+                    error: '분석 결과가 아직 공개 준비 중입니다.',
+                    code: 'RESULT_PENDING',
+                    status: 'pending',
+                },
+                { status: 409 }
             );
         }
 
