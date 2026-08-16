@@ -114,6 +114,16 @@ describe('v2.14 first-payment Gemini copy correction', () => {
         expect(generate).toHaveBeenCalledTimes(2);
     });
 
+    it('retries only the scoped narrative privacy rejection', async () => {
+        const failure = new Error('CONCIERGE_COPY_V214_NARRATIVE_PRIVACY_INVALID');
+        const generate = vi.fn()
+            .mockRejectedValueOnce(failure)
+            .mockResolvedValueOnce('valid-copy');
+
+        await expect(generateV214GeminiCopyWithSchemaRetry(generate)).resolves.toBe('valid-copy');
+        expect(generate).toHaveBeenCalledTimes(2);
+    });
+
     it('binds the first-result adapter to retained bidirectional evidence without reverse comments', () => {
         const target = {
             username: 'target.user', fullName: '김준호', followersCount: 1,
