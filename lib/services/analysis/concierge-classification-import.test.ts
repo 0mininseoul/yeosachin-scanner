@@ -109,6 +109,20 @@ describe('concierge manual classification import', () => {
         expect(createConciergeClassificationLedgerHash(next)).toMatch(/^[a-f0-9]{64}$/);
     });
 
+    it('accepts a reviewed header-only snapshot when there are no manual overrides', () => {
+        const csv = 'username,instagram_url,ai_classification,ai_confidence/evidence_status,manual_gender,operator_note\n';
+        const input = parseConciergeClassificationCsv(
+            csv,
+            'order',
+            'request',
+            HASH,
+            OPERATOR_HASH,
+            '2026-08-14T00:00:00.000Z',
+        );
+        expect(input.rows).toHaveLength(0);
+        expect(input.csvContent).toBe(csv);
+    });
+
     it('rejects the legacy four-column format and malformed RFC quoting', () => {
         expect(() => parseConciergeClassificationCsv(
             'username,effective_classification,reason_code,source_row_identifier\none,male,review,1\n',
