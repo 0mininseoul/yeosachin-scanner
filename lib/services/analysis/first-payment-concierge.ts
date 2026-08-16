@@ -49,6 +49,7 @@ import {
     type ReplaySourceLineage,
 } from './replay/replay-source-lineage';
 import type { FirstPaymentConciergeSource } from './first-payment-concierge-source';
+import { assertDistinctGeminiCandidateCopyOverviews } from './gemini-candidate-copy-contract';
 
 const SHA256 = /^[a-f0-9]{64}$/;
 const USERNAME = /^[a-z0-9._]{1,30}$/;
@@ -667,6 +668,10 @@ export async function createFirstPaymentConciergePublication(input: {
             narrativeLineTwo: narrative?.lines[1] ?? null,
         };
     }));
+    assertDistinctGeminiCandidateCopyOverviews(femaleRows.map(row => ({
+        candidateKey: row.instagramId,
+        overview: row.oneLineOverview,
+    })));
     const privateRows = input.source.privateRows.map((row, index) => ({
         candidateId: analysisV2CandidateId(row.username),
         sortOrdinal: index + 1,
