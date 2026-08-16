@@ -7,6 +7,7 @@ const mocks = vi.hoisted(() => ({
     readResultImageObject: vi.fn(),
     createClient: vi.fn(),
     getUser: vi.fn(),
+    isResultAuthoritativelyPublished: vi.fn(),
 }));
 
 vi.mock('@/lib/services/media/secure-image-fetch', async (importOriginal) => {
@@ -24,6 +25,9 @@ vi.mock('@/lib/services/media/result-image-resolver', () => ({
     readAnalysisV2ResultImageObject: mocks.readResultImageObject,
 }));
 vi.mock('@/lib/supabase/server', () => ({ createClient: mocks.createClient }));
+vi.mock('@/lib/services/analysis/result-publication-authority', () => ({
+    isAnalysisResultAuthoritativelyPublished: mocks.isResultAuthoritativelyPublished,
+}));
 
 import { GET } from '@/app/api/image-proxy/route';
 import {
@@ -68,6 +72,7 @@ describe('image proxy route authorization', () => {
         mocks.readResultImageObject.mockResolvedValue(
             Buffer.from([7, 8, 9])
         );
+        mocks.isResultAuthoritativelyPublished.mockResolvedValue(true);
     });
 
     it('does not fetch unsigned or tampered URLs', async () => {
@@ -154,6 +159,18 @@ describe('image proxy route authorization', () => {
         expect(response.status).toBe(403);
         expect(mocks.resolveResultImage).not.toHaveBeenCalled();
         expect(mocks.downloadSecureImage).not.toHaveBeenCalled();
+    });
+
+    it('rejects a result image token when the paid publication is still pending', async () => {
+        mocks.isResultAuthoritativelyPublished.mockResolvedValue(false);
+
+        const response = await GET(signedResultRequest());
+
+        expect(response.status).toBe(403);
+        expect(mocks.isResultAuthoritativelyPublished).toHaveBeenCalledWith(
+            '123e4567-e89b-42d3-a456-426614174000'
+        );
+        expect(mocks.resolveResultImage).not.toHaveBeenCalled();
     });
 
     it('never sends an owner-scoped result CDN URL to the third-party fallback', async () => {

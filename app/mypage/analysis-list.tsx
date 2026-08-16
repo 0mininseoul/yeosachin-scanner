@@ -124,7 +124,7 @@ export default function AnalysisList({ initialEntries }: Props) {
                                             done ? 'bg-jade' : 'anim-blink bg-amber'
                                         }`}
                                     />
-                                    {done ? '완료' : item.status === 'processing' ? '판독중' : '대기중'}
+                                    {done ? '완료' : item.status === 'processing' ? '판독중' : '대기 중'}
                                 </span>
                             </span>
                             <span className="num mt-1.5 block text-[11.5px] text-fg-dim">

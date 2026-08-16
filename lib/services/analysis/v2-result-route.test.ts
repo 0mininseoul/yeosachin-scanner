@@ -15,6 +15,7 @@ const mocks = vi.hoisted(() => ({
     loadFixture: vi.fn(),
     isResultOperator: vi.fn(),
     resolveResultOwner: vi.fn(),
+    isResultAuthoritativelyPublished: vi.fn(),
     requireActiveAccountClassification: vi.fn(),
 }));
 
@@ -37,6 +38,9 @@ vi.mock('@/lib/services/demo-analysis/fixture-store', () => ({
 vi.mock('@/lib/services/analysis/result-operator-access', () => ({
     isAnalysisResultOperator: mocks.isResultOperator,
     resolveAnalysisResultOwner: mocks.resolveResultOwner,
+}));
+vi.mock('@/lib/services/analysis/result-publication-authority', () => ({
+    isAnalysisResultAuthoritativelyPublished: mocks.isResultAuthoritativelyPublished,
 }));
 vi.mock('@/lib/services/identity/account-principal-store', async importOriginal => ({
     ...(await importOriginal<typeof import('@/lib/services/identity/account-principal-store')>()),
@@ -128,6 +132,7 @@ describe('analysis V2 owner result route', () => {
         mocks.demoFindForOwner.mockResolvedValue(null);
         mocks.isResultOperator.mockReturnValue(false);
         mocks.resolveResultOwner.mockResolvedValue(null);
+        mocks.isResultAuthoritativelyPublished.mockResolvedValue(true);
         mocks.requireActiveAccountClassification.mockResolvedValue({
             userId,
             accountClass: 'production',
@@ -376,6 +381,23 @@ describe('analysis V2 owner result route', () => {
         });
         expect(mocks.operationalEmit).not.toHaveBeenCalled();
         expect(mocks.resolveResultOwner).not.toHaveBeenCalled();
+    });
+
+    it('fails closed to the pending UX before reading any result rows when publication is not authoritative', async () => {
+        mocks.isResultAuthoritativelyPublished.mockResolvedValue(false);
+
+        const response = await GET(
+            new Request(`https://example.com/api/analysis/v2/result/${requestId}`),
+            context(),
+        );
+
+        expect(response.status).toBe(404);
+        await expect(response.json()).resolves.toMatchObject({
+            code: 'RESULT_PENDING',
+            status: 'pending',
+        });
+        expect(mocks.isResultAuthoritativelyPublished).toHaveBeenCalledWith(requestId);
+        expect(mocks.loadPage).not.toHaveBeenCalled();
     });
 
     it('lets the authenticated result operator read a completed result through its real owner boundary', async () => {

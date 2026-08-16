@@ -12,6 +12,7 @@ import type {
 import {
     openV2SharedImageLocator,
 } from '@/lib/services/share/v2-share-privacy';
+import { isAnalysisResultAuthoritativelyPublished } from '@/lib/services/analysis/result-publication-authority';
 
 export const runtime = 'nodejs';
 
@@ -96,6 +97,9 @@ export async function GET(
         .maybeSingle();
     const shareRecord = error ? null : shareRecordSchema.safeParse(data);
     if (!shareRecord || !shareRecord.success) return jsonError(404);
+    if (!await isAnalysisResultAuthoritativelyPublished(shareRecord.data.id)) {
+        return jsonError(404);
+    }
 
     const resolved = await resolveAnalysisV2ResultImageLocator(
         {

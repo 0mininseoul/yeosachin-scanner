@@ -9,6 +9,7 @@ const mocks = vi.hoisted(() => ({
     demoDeleteForOwner: vi.fn(),
     isResultOperator: vi.fn(),
     resolveResultOwner: vi.fn(),
+    isResultAuthoritativelyPublished: vi.fn(),
     requireActiveAccountClassification: vi.fn(),
 }));
 
@@ -40,6 +41,9 @@ vi.mock('@/lib/services/demo-analysis/store', () => ({
 vi.mock('@/lib/services/analysis/result-operator-access', () => ({
     isAnalysisResultOperator: mocks.isResultOperator,
     resolveAnalysisResultOwner: mocks.resolveResultOwner,
+}));
+vi.mock('@/lib/services/analysis/result-publication-authority', () => ({
+    isAnalysisResultAuthoritativelyPublished: mocks.isResultAuthoritativelyPublished,
 }));
 vi.mock('@/lib/services/identity/account-principal-store', async importOriginal => ({
     ...(await importOriginal<typeof import('@/lib/services/identity/account-principal-store')>()),
@@ -90,6 +94,7 @@ describe('owner-facing V1/V2 route selection', () => {
         mocks.demoFindForOwner.mockResolvedValue(null);
         mocks.isResultOperator.mockReturnValue(false);
         mocks.resolveResultOwner.mockResolvedValue(null);
+        mocks.isResultAuthoritativelyPublished.mockResolvedValue(true);
         mocks.requireActiveAccountClassification.mockResolvedValue({
             userId,
             accountClass: 'production',
@@ -127,6 +132,38 @@ describe('owner-facing V1/V2 route selection', () => {
             code: 'V2_ROUTE_REQUIRED',
             pipelineVersion: 'v2',
             progressUrl: `/api/analysis/progress/${requestId}`,
+        });
+        expect(mocks.expireStale).not.toHaveBeenCalled();
+    });
+
+    it('projects a stale completed V1 request as pending in the owner status response', async () => {
+        mocks.from.mockReturnValue(ownerQuery({
+            id: requestId,
+            user_id: userId,
+            pipeline_version: 'v1',
+            status: 'completed',
+            current_step: 'completed',
+            progress: 100,
+            progress_step: '완료',
+            error_message: null,
+            background_processing: false,
+            created_at: '2026-08-14T00:00:00.000Z',
+            completed_at: '2026-08-14T00:10:00.000Z',
+            idempotency_key: 'concierge-batch-result:test',
+        }));
+        mocks.isResultAuthoritativelyPublished.mockResolvedValue(false);
+
+        const response = await getLegacyStatus(
+            new Request(`https://example.com/api/analysis/status/${requestId}`),
+            context(),
+        );
+
+        expect(response.status).toBe(200);
+        await expect(response.json()).resolves.toMatchObject({
+            status: 'pending',
+            progress: 0,
+            progressStep: '분석 대기 중...',
+            errorMessage: null,
         });
         expect(mocks.expireStale).not.toHaveBeenCalled();
     });
@@ -201,6 +238,36 @@ describe('owner-facing V1/V2 route selection', () => {
             resultUrl: `/api/analysis/v2/result/${requestId}`,
         });
         expect(mocks.from).toHaveBeenCalledOnce();
+        expect(mocks.from).toHaveBeenCalledWith('analysis_requests');
+    });
+
+    it('fails closed before reading legacy result rows when paid publication is still pending', async () => {
+        mocks.from.mockReturnValue(ownerQuery({
+            id: requestId,
+            user_id: userId,
+            pipeline_version: 'v1',
+            target_instagram_id: 'target',
+            status: 'completed',
+            progress: 100,
+            mutual_follows: 10,
+            gender_stats: { male: 5, female: 5, unknown: 0 },
+            step_data: {},
+        }));
+        mocks.isResultAuthoritativelyPublished.mockResolvedValue(false);
+
+        const response = await getLegacyResult(
+            new Request(`https://example.com/api/analysis/result/${requestId}`),
+            context(),
+        );
+
+        expect(response.status).toBe(400);
+        await expect(response.json()).resolves.toMatchObject({
+            code: 'RESULT_PENDING',
+            status: 'pending',
+            progress: 0,
+        });
+        expect(mocks.isResultAuthoritativelyPublished).toHaveBeenCalledWith(requestId);
+        expect(mocks.from).toHaveBeenCalledTimes(1);
         expect(mocks.from).toHaveBeenCalledWith('analysis_requests');
     });
 

@@ -11,6 +11,7 @@ const mocks = vi.hoisted(() => ({
     demoFind: vi.fn(),
     generateToken: vi.fn(),
     loadV2Page: vi.fn(),
+    isResultAuthoritativelyPublished: vi.fn(),
     requireActiveAccountClassification: vi.fn(),
 }));
 
@@ -24,6 +25,9 @@ vi.mock('@/lib/services/share/generate-token', () => ({
 }));
 vi.mock('@/lib/services/share/v2-result-share', () => ({
     v2ShareResultService: { loadPage: mocks.loadV2Page },
+}));
+vi.mock('@/lib/services/analysis/result-publication-authority', () => ({
+    isAnalysisResultAuthoritativelyPublished: mocks.isResultAuthoritativelyPublished,
 }));
 vi.mock('@/lib/services/identity/account-principal-store', async importOriginal => ({
     ...(await importOriginal<typeof import('@/lib/services/identity/account-principal-store')>()),
@@ -188,6 +192,7 @@ describe('V2 share isolation', () => {
             classificationVersion: 'account-ledger-v1',
         });
         mocks.demoFind.mockResolvedValue(null);
+        mocks.isResultAuthoritativelyPublished.mockResolvedValue(true);
         mocks.generateToken.mockReturnValue('b'.repeat(64));
     });
 

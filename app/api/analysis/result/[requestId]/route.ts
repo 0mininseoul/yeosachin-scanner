@@ -23,6 +23,7 @@ import {
     AccountPrincipalAdmissionError,
     requireActiveAccountClassification,
 } from '@/lib/services/identity/account-principal-store';
+import { isAnalysisResultAuthoritativelyPublished } from '@/lib/services/analysis/result-publication-authority';
 
 export async function GET(
     request: Request,
@@ -124,6 +125,18 @@ export async function GET(
                     error: '분석이 아직 완료되지 않았습니다.',
                     status: analysisRequest.status,
                     progress: analysisRequest.progress,
+                },
+                { status: 400 }
+            );
+        }
+
+        if (!await isAnalysisResultAuthoritativelyPublished(requestId)) {
+            return NextResponse.json(
+                {
+                    error: '분석 결과가 아직 공개 준비 중입니다.',
+                    code: 'RESULT_PENDING',
+                    status: 'pending',
+                    progress: 0,
                 },
                 { status: 400 }
             );

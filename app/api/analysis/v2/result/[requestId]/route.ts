@@ -21,6 +21,7 @@ import {
     isAnalysisResultOperator,
     resolveAnalysisResultOwner,
 } from '@/lib/services/analysis/result-operator-access';
+import { isAnalysisResultAuthoritativelyPublished } from '@/lib/services/analysis/result-publication-authority';
 import {
     AccountPrincipalAdmissionError,
     requireActiveAccountClassification,
@@ -122,6 +123,14 @@ async function handleGET(
             : user.id;
         if (!authorizedOwnerId) {
             return json({ error: 'Analysis result not found.' }, 404);
+        }
+
+        if (!await isAnalysisResultAuthoritativelyPublished(requestId.data)) {
+            return json({
+                error: 'Analysis result is still pending publication.',
+                code: 'RESULT_PENDING',
+                status: 'pending',
+            }, 404);
         }
 
         const result = await analysisV2ResultStore.loadPage({

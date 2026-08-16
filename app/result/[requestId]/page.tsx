@@ -332,6 +332,10 @@ export default function ResultPage({ params }: PageProps) {
                 const responseAnalyticsEligible = response.headers.get('x-analytics-eligible') !== '0';
                 if (!response.ok) {
                     if (isV2Request) {
+                        if (result.code === 'RESULT_PENDING' || result.status === 'pending') {
+                            router.replace(`/progress/${requestId}`);
+                            return;
+                        }
                         let progressStatus: OwnerProgressStatus | null = null;
                         if (response.status === 404) {
                             const progressResponse = await fetch(

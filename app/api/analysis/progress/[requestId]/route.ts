@@ -10,6 +10,7 @@ import {
     AccountPrincipalAdmissionError,
     requireActiveAccountClassification,
 } from '@/lib/services/identity/account-principal-store';
+import { isAnalysisResultAuthoritativelyPublished } from '@/lib/services/analysis/result-publication-authority';
 
 const requestIdSchema = z.string().uuid();
 const sequenceSchema = z.string().regex(/^\d{1,16}$/).transform(Number)
@@ -102,9 +103,48 @@ export async function GET(
             return json({ error: 'Analysis progress not found.' }, 404);
         }
 
+        const publicationAuthorized = progress.snapshot.status !== 'completed'
+            || await isAnalysisResultAuthoritativelyPublished(requestId.data);
+        const pendingProgress = !publicationAuthorized && progress.snapshot.status === 'completed'
+            ? {
+                ...progress,
+                snapshot: {
+                    ...progress.snapshot,
+                    status: 'queued' as const,
+                    progressBp: 0,
+                    backgroundProcessing: true,
+                    tracks: {
+                        relationshipAi: {
+                            state: 'pending' as const,
+                            stageCode: 'PENDING',
+                            done: 0,
+                            total: 0,
+                            progressBp: 0,
+                        },
+                        interactions: {
+                            state: 'pending' as const,
+                            stageCode: 'PENDING',
+                            done: 0,
+                            total: 0,
+                            progressBp: 0,
+                        },
+                        finalization: {
+                            state: 'pending' as const,
+                            stageCode: 'PENDING',
+                            done: 0,
+                            total: 0,
+                            progressBp: 0,
+                        },
+                    },
+                    activeProfile: null,
+                    etaRange: null,
+                },
+                events: [],
+            }
+            : progress;
         const response = progressReadV1Schema.parse({
             schemaVersion: ANALYSIS_V2_SCHEMA_VERSION,
-            ...progress,
+            ...pendingProgress,
         });
         return json(response, 200);
     } catch {

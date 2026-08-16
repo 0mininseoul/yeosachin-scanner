@@ -13,6 +13,7 @@ import {
     resolveAnalysisV2ResultImageLocator,
     type ResolvedResultImage,
 } from '@/lib/services/media/result-image-resolver';
+import { isAnalysisResultAuthoritativelyPublished } from '@/lib/services/analysis/result-publication-authority';
 import { createClient } from '@/lib/supabase/server';
 
 const IMAGE_PROXY_MAX_BYTES = 3 * 1024 * 1024;
@@ -178,6 +179,13 @@ export async function GET(request: NextRequest) {
         const supabase = await createClient();
         const { data: { user }, error } = await supabase.auth.getUser();
         if (error || !user) {
+            return errorResponse('Image proxy token rejected', 403);
+        }
+        try {
+            if (!await isAnalysisResultAuthoritativelyPublished(locator.requestId)) {
+                return errorResponse('Image proxy token rejected', 403);
+            }
+        } catch {
             return errorResponse('Image proxy token rejected', 403);
         }
         resolvedResult = await resolveAnalysisV2ResultImageLocator(
