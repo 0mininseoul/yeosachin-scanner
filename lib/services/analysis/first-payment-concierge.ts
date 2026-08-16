@@ -330,7 +330,9 @@ export async function captureFirstPaymentConciergeAiBundle(input: {
             mediaUnavailable.add(item.ordinal);
         }
     });
-    if (captured.size + mediaUnavailable.size + fetchUnavailable.size !== 134) {
+    const expectedPublicCount = input.source.publicProfiles.length
+        + input.source.publicUnavailableRows.length;
+    if (captured.size + mediaUnavailable.size + fetchUnavailable.size !== expectedPublicCount) {
         throw new Error('FIRST_PAYMENT_CONCIERGE_CAPTURE_COUNT_DRIFT');
     }
     const now = input.now ?? Date.now();

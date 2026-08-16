@@ -5,6 +5,11 @@ import {
     type AppearanceGrade,
 } from '@/lib/domain/analysis/risk-policy';
 import type { FeatureAnalysisResult } from '@/lib/services/ai/v2-staged-analysis';
+import {
+    createPrivateNameBatchResponseSchema,
+    privateNameAccountsInputSchema,
+    type PrivateNameAnalysisResult,
+} from '@/lib/services/ai/private-name-analysis';
 import type { ReplayAccountAiDetail } from './replay/replay-runner';
 import type { InstagramPost, InstagramProfile } from '@/lib/types/instagram';
 import {
@@ -65,12 +70,13 @@ export interface ConciergeLegacyResultRow {
 }
 
 export interface ConciergePrivateAccountRow {
+    sort_ordinal: number;
     instagram_id: string;
     profile_image: string | null;
     full_name: string | null;
-    name_female_score: null;
-    name_is_name: null;
-    name_confidence: null;
+    name_female_score: number;
+    name_is_name: boolean;
+    name_confidence: number;
 }
 
 export type ConciergeTargetPostMentionEvidence = Readonly<Pick<
@@ -288,6 +294,36 @@ function hasReliableAppearanceEvidence(
     return appearanceGrade >= 4 && hasAnalyzableImage;
 }
 
+function privateNameResultsByUsername(
+    privateProfiles: readonly InstagramProfile[],
+    rawResults: readonly PrivateNameAnalysisResult[],
+): ReadonlyMap<string, PrivateNameAnalysisResult> {
+    try {
+        const accounts = privateNameAccountsInputSchema.parse(privateProfiles.map(profile => ({
+            id: normalizedUsername(profile.username),
+            username: profile.username,
+            fullName: profile.fullName ?? undefined,
+        })));
+        const results = createPrivateNameBatchResponseSchema(accounts.map(account => account.id))
+            .parse(rawResults);
+        return new Map(accounts.map((account, index) => [
+            account.username,
+            results[index]!,
+        ]));
+    } catch {
+        throw new Error('CONCIERGE_PRIVATE_NAME_CONTRACT_MISMATCH');
+    }
+}
+
+function compareNormalizedUsername(left: string, right: string): number {
+    return left < right ? -1 : left > right ? 1 : 0;
+}
+
+/** `private_accounts` persists these fields as PostgreSQL REAL values. */
+function privateNameScoreForStorage(value: number): number {
+    return Math.fround(value);
+}
+
 /** Builds legacy rows only from canonical V2 final scores and canonical safe narratives. */
 export function buildCanonicalConciergeResult(input: {
     targetUsername: string;
@@ -298,6 +334,7 @@ export function buildCanonicalConciergeResult(input: {
     targetInteractions: readonly RawTargetInteractionEvidence[];
     targetPosts: readonly ConciergeTargetPostMentionEvidence[];
     privateProfiles: readonly InstagramProfile[];
+    privateNameResults?: readonly PrivateNameAnalysisResult[];
     /** Public usernames whose exact relationship identity is known but whose bounded
      * profile-only hydration exhausted its approved slots; these are unknown, never
      * female candidates, and must carry provenance in the publication fingerprint. */
@@ -440,14 +477,27 @@ export function buildCanonicalConciergeResult(input: {
             risk_analysis: score.riskBand === 'high_risk' ? narrative : [],
         };
     });
-    const privateRows = input.privateProfiles.map(profile => ({
-        instagram_id: normalizedUsername(profile.username),
-        profile_image: profile.profilePicUrl ?? null,
-        full_name: profile.fullName ?? null,
-        name_female_score: null,
-        name_is_name: null,
-        name_confidence: null,
-    }));
+    const privateNames = privateNameResultsByUsername(
+        input.privateProfiles,
+        input.privateNameResults ?? [],
+    );
+    const privateRows = input.privateProfiles.map(profile => {
+        const instagramId = normalizedUsername(profile.username);
+        const name = privateNames.get(instagramId);
+        if (!name) throw new Error('CONCIERGE_PRIVATE_NAME_CONTRACT_MISMATCH');
+        return {
+            instagram_id: instagramId,
+            profile_image: profile.profilePicUrl ?? null,
+            full_name: profile.fullName ?? null,
+            name_female_score: privateNameScoreForStorage(name.femaleScore),
+            name_is_name: name.isName,
+            name_confidence: privateNameScoreForStorage(name.confidence),
+        };
+    }).sort((left, right) => (
+        right.name_female_score - left.name_female_score
+        || right.name_confidence - left.name_confidence
+        || compareNormalizedUsername(left.instagram_id, right.instagram_id)
+    )).map((row, index) => ({ ...row, sort_ordinal: index + 1 }));
     if (new Set(femaleRows.map(row => row.suspect_instagram_id)).size !== femaleRows.length) {
         throw new Error('CONCIERGE_GENDER_RESULT_IDENTITY_CONFLICT');
     }
