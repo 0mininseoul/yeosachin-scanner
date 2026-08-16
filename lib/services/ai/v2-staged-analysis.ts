@@ -347,16 +347,24 @@ export const genderResolutionResultSchema = z.object({
 export type GenderResolutionInput = z.input<typeof genderResolutionInputSchema>;
 export type GenderResolutionResult = z.infer<typeof genderResolutionResultSchema>;
 
-const safeOverviewSchema = z.string()
-    .transform(value => sanitizePublicRiskNarrativeLine(value) ?? '')
-    .pipe(z.string()
+function overviewProseWithoutCanonicalSubject(value: string, canonicalSubject?: string | null): string {
+    const subject = canonicalSubject?.normalize('NFKC').trim();
+    return subject ? value.replaceAll(subject, 'PERSON') : value;
+}
+
+function safeOverviewBaseSchema(canonicalSubject?: string | null) {
+    return z.string()
+        .transform(value => sanitizePublicRiskNarrativeLine(value) ?? '')
+        .pipe(z.string()
         .min(MIN_ONE_LINE_OVERVIEW_LENGTH)
         .max(MAX_ONE_LINE_OVERVIEW_LENGTH)
         .regex(/[가-힣]/u, 'The overview must contain Korean text.')
         .refine(value => !/[\r\n]/u.test(value), 'The overview must be one line.')
         .refine(value => !containsExposedInteractionMetric(value), 'The overview exposes metrics.')
         .refine(
-            value => !containsDefinitiveRelationshipAccusation(value),
+            value => !containsDefinitiveRelationshipAccusation(
+                overviewProseWithoutCanonicalSubject(value, canonicalSubject),
+            ),
             'The overview makes a definitive relationship accusation.'
         )
         .refine(value => !PUBLIC_IDENTIFIER_PATTERN.test(value), 'The overview exposes an identifier.')
@@ -365,6 +373,9 @@ const safeOverviewSchema = z.string()
             value => !GENERIC_FEATURE_OVERVIEW_PATTERN.test(value),
             'The overview uses generic repeated copy.'
         ));
+}
+
+const safeOverviewSchema = safeOverviewBaseSchema();
 
 function containsV28UnsupportedRelationshipStyle(value: string): boolean {
     const normalized = value.normalize('NFKC');
@@ -405,10 +416,16 @@ function addV28PublicStyleIssues(
     }
 }
 
-function safeOverviewSchemaFor(policyVersion: AiStagePolicyVersion) {
+function safeOverviewSchemaFor(
+    policyVersion: AiStagePolicyVersion,
+    canonicalSubject?: string | null,
+) {
     if (!usesSafePublicPresentation(policyVersion)) return safeOverviewSchema;
-    return safeOverviewSchema.superRefine((value, context) => {
-        addV28PublicStyleIssues(value, context);
+    return safeOverviewBaseSchema(canonicalSubject).superRefine((value, context) => {
+        addV28PublicStyleIssues(
+            overviewProseWithoutCanonicalSubject(value, canonicalSubject),
+            context,
+        );
         if (
             (policyVersion === AI_STAGE_POLICY_V210_VERSION
                 || policyVersion === AI_STAGE_POLICY_V211_VERSION)
@@ -478,11 +495,12 @@ const featureAnalysisStructuralResponseSchema = z.object({
 }).strict();
 
 function featureAnalysisModelResponseSchemaFor(
-    policyVersion: AiStagePolicyVersion
+    policyVersion: AiStagePolicyVersion,
+    canonicalSubject?: string | null,
 ) {
     return z.object({
         ...featureAnalysisResponseShape,
-        oneLineOverview: safeOverviewSchemaFor(policyVersion),
+        oneLineOverview: safeOverviewSchemaFor(policyVersion, canonicalSubject),
     }).strict().superRefine((value, context) => {
     if (
         value.accountContext !== 'uncertain'
@@ -1291,9 +1309,10 @@ function featureResponseSchemaFor(
         profileEvidence: string | null;
         feedEvidence: readonly string[];
     },
+    canonicalSubject?: string | null,
 ) {
     const allowedIds = new Set(media.map(item => item.selectionId));
-    const groundedSchema = featureAnalysisModelResponseSchemaFor(policyVersion)
+    const groundedSchema = featureAnalysisModelResponseSchemaFor(policyVersion, canonicalSubject)
         .superRefine((value, context) => {
         Object.entries(value.evidenceSelectionIds).forEach(([key, ids]) => {
             assertEvidenceSelectionIds(ids, allowedIds, ['evidenceSelectionIds', key], context);
@@ -2121,7 +2140,7 @@ export async function featureAnalysis(
     const responseSchema = featureResponseSchemaFor(media, policyVersion, {
         profileEvidence: input.bio,
         feedEvidence: input.captions.map(caption => caption.text),
-    });
+    }, input.accountProfile?.fullName);
     const prepared = await prepareStagedResult(audit, responseSchema);
     let features;
     try {
@@ -2166,7 +2185,9 @@ export async function featureAnalysis(
             `다음 공개 문구 필드 하나만 수정하세요. 원문: ${JSON.stringify(invalidValue)}\n검증 요구사항: ${issue.message}\n금지 부분 문자열 목록: ${V28_RELATIONSHIP_FORBIDDEN_SUBSTRINGS.join(', ')}. 이 목록은 일반 단어의 일부로도 쓰지 말고, 바람을 피우다·바람이 났다 계열 및 영어 관계 용어도 쓰지 마세요. JSON만 반환하세요.`,
             [],
             {
-                schema: z.object({ value: safeOverviewSchemaFor(policyVersion) }).strict(),
+                schema: z.object({
+                    value: safeOverviewSchemaFor(policyVersion, input.accountProfile?.fullName),
+                }).strict(),
                 analysisType: 'v2_feature_analysis',
                 requestId: audit.requestId,
                 ...(options.replayCapability

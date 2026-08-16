@@ -1121,6 +1121,86 @@ describe('V2 staged AI services', () => {
         expect(mocks.analyzeWithGemini).toHaveBeenCalledTimes(2);
     });
 
+    it('allows a relationship substring only inside the exact canonical account full name', async () => {
+        const input = {
+            ...featureInput(),
+            accountProfile: { fullName: '김부부', hasProfileImage: true },
+        };
+        const overview = '김부부님의 축구 관람과 교육 현장 기록이 활동적인 일상을 또렷하게 보여주는 피드입니다.';
+        mocks.analyzeWithGemini.mockImplementationOnce(async (
+            _prompt: string,
+            _images: string[],
+            options: { schema: { parse(value: unknown): unknown } },
+        ) => options.schema.parse(featureResponse({ oneLineOverview: overview })));
+
+        const result = await featureAnalysis(
+            input,
+            audit('featureAnalysis', input, AI_STAGE_POLICY_V211_VERSION),
+            { aiStagePolicyVersion: AI_STAGE_POLICY_V211_VERSION },
+        );
+
+        expect(result.features.oneLineOverview).toBe(overview);
+        expect(mocks.analyzeWithGemini).toHaveBeenCalledTimes(1);
+    });
+
+    it('still rejects the same relationship word outside the exact canonical account full name', async () => {
+        const input = {
+            ...featureInput(),
+            accountProfile: { fullName: '김부부', hasProfileImage: true },
+        };
+        mocks.analyzeWithGemini.mockImplementationOnce(async (
+            _prompt: string,
+            _images: string[],
+            options: { schema: { parse(value: unknown): unknown } },
+        ) => options.schema.parse(featureResponse({
+            oneLineOverview: '김부부님의 여행 기록은 부부의 다정한 일상을 보여주는 피드입니다.',
+        })));
+
+        await expect(featureAnalysis(
+            input,
+            audit('featureAnalysis', input, AI_STAGE_POLICY_V211_VERSION),
+            { aiStagePolicyVersion: AI_STAGE_POLICY_V211_VERSION },
+        )).rejects.toThrow('v2.8 public copy must not assert or speculate about a relationship.');
+        expect(mocks.analyzeWithGemini).toHaveBeenCalledTimes(1);
+    });
+
+    it('fails closed after one overview repair when relationship prose remains outside the canonical name', async () => {
+        const input = {
+            ...featureInput(),
+            accountProfile: { fullName: '김부부', hasProfileImage: true },
+        };
+        const invalid = featureResponse({
+            oneLineOverview: '김부부님의 여행 기록은 관계의 맥락을 단정하기 어려운 피드입니다.',
+        });
+        const validation = new GeminiResponseValidationError(
+            'schema rejected',
+            { category: 'schema_validation', issues: [{ path: 'oneLineOverview', code: 'custom' }], truncated: false },
+            {
+                candidate: invalid,
+                issues: [{ code: 'custom', path: ['oneLineOverview'], message: 'v2.8 public copy must not assert or speculate about a relationship.' }],
+            },
+        );
+        mocks.analyzeWithGemini
+            .mockRejectedValueOnce(new Error(
+                'AI_GENERATION_RESPONSE_REJECTED_ERROR: generated response failed strict validation.',
+                { cause: validation },
+            ))
+            .mockImplementationOnce(async (
+                _prompt: string,
+                _images: string[],
+                options: { schema: { parse(value: unknown): unknown } },
+            ) => options.schema.parse({
+                value: '김부부님의 여행 기록은 부부의 다정한 일상을 보여주는 피드입니다.',
+            }));
+
+        await expect(featureAnalysis(
+            input,
+            audit('featureAnalysis', input, AI_STAGE_POLICY_V211_VERSION),
+            { aiStagePolicyVersion: AI_STAGE_POLICY_V211_VERSION },
+        )).rejects.toThrow('v2.8 public copy must not assert or speculate about a relationship.');
+        expect(mocks.analyzeWithGemini).toHaveBeenCalledTimes(2);
+    });
+
     it('does not repair a non-custom v2.11 overview schema rejection', async () => {
         const invalid = featureResponse({ oneLineOverview: '짧음' });
         const validation = new GeminiResponseValidationError(
