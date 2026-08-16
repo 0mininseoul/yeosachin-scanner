@@ -3,8 +3,10 @@ import {
     CONCIERGE_BATCH_ACTOR_CONCURRENCY,
     CONCIERGE_BATCH_MAX_ORDERS,
     CONCIERGE_BATCH_TOKEN_PRIORITY,
+    assertConciergeRelationshipCoverage,
     createConciergeBatchCasPublisher,
     runConciergeBatch,
+    selectConciergeBatchRetryOrders,
     type ConciergeBatchOrder,
 } from './concierge-batch-runner';
 import type { ConciergeManualPublicationInput } from './concierge-batch-publication';
@@ -22,6 +24,29 @@ function order(index: number): ConciergeBatchOrder {
 }
 
 describe('concierge batch runner', () => {
+    it('fails closed when a declared non-zero relationship list is empty', () => {
+        expect(() => assertConciergeRelationshipCoverage('followers', 1, 0))
+            .toThrow('CONCIERGE_RELATIONSHIP_FOLLOWERS_EMPTY');
+        expect(() => assertConciergeRelationshipCoverage('following', 0, 0))
+            .not.toThrow();
+    });
+
+    it('selects only the explicitly allowlisted retry classes from the frozen cohort', () => {
+        const orders = [
+            { ...order(0), retryCode: 'CONCIERGE_BATCH_RETRYABLE' },
+            { ...order(1), retryCode: 'CONCIERGE_TARGET_PROFILE_PRIVATE' },
+            { ...order(2), retryCode: 'CONCIERGE_PROVIDER_ARTIFACT_INVALID' },
+            { ...order(3), retryCode: null },
+        ];
+
+        expect(selectConciergeBatchRetryOrders(
+            orders,
+            new Set(['CONCIERGE_BATCH_RETRYABLE']),
+        ).map(value => value.orderId)).toEqual([
+            orders[0]!.orderId,
+        ]);
+    });
+
     it('delegates publication to the reviewed PR431 CAS publisher boundary', async () => {
         const calls: ConciergeManualPublicationInput[] = [];
         const input = {} as ConciergeManualPublicationInput;

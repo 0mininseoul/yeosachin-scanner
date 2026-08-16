@@ -33,7 +33,9 @@ import {
 } from '@/lib/services/analysis/concierge-classification-import';
 import {
     createConciergeBatchCasPublisher,
+    assertConciergeRelationshipCoverage,
     runConciergeBatch,
+    selectConciergeBatchRetryOrders,
     type ConciergeBatchOrder,
     type ConciergeBatchPreparedOrder,
     type ConciergeBatchStageContext,
@@ -48,11 +50,17 @@ const USERNAME = z.string().regex(/^[a-z0-9._]{1,30}$/);
 const APPROVED_SLOTS = ['senary', 'tertiary', 'quinary', 'primary'] as const;
 type ApprovedSlot = typeof APPROVED_SLOTS[number];
 const EMPTY_MANUAL_CSV = 'username,instagram_url,ai_classification,ai_confidence/evidence_status,manual_gender,operator_note\n';
+const RETRY_CODE_PATTERN = /^CONCIERGE_[A-Z0-9_]{2,100}$/;
+const PROTECTED_RETRY_CODES = new Set([
+    'CONCIERGE_PROVIDER_ARTIFACT_INVALID',
+    'CONCIERGE_TARGET_PROFILE_PRIVATE',
+]);
 
 type OrderRow = ConciergeBatchOrder & {
     preflightId: string;
     targetFollowers: number | null;
     targetFollowing: number | null;
+    retryCode?: string | null;
 };
 
 type FrozenCohort = {
@@ -60,6 +68,7 @@ type FrozenCohort = {
     total: number;
     published: number;
     running: number;
+    excluded: number;
     orders: OrderRow[];
     evidenceHashByOrder: ReadonlyMap<string, string>;
 };
@@ -297,6 +306,8 @@ async function collectOrder(
             );
         }),
     ]);
+    assertConciergeRelationshipCoverage('followers', followersLimit, followers.length);
+    assertConciergeRelationshipCoverage('following', followingLimit, following.length);
     const followerByUsername = new Map(followers.map(row => [normalized(row.username), row]));
     const mutualRows = following.flatMap((row: InstagramFollower, index) => {
         const username = normalized(row.username);
@@ -552,6 +563,77 @@ async function classifyOrder(collected: CollectedOrder): Promise<ClassifiedOrder
     return { input };
 }
 
+function retryCodeAllowlist(): ReadonlySet<string> {
+    const raw = process.env.CONCIERGE_BATCH_RETRY_CODES?.trim();
+    if (!raw) throw new Error('CONCIERGE_BATCH_RETRY_ALLOWLIST_REQUIRED');
+    const values = [...new Set(raw.split(',').map(value => value.trim()).filter(Boolean))];
+    if (values.length === 0 || values.some(value => (
+        !RETRY_CODE_PATTERN.test(value) || PROTECTED_RETRY_CODES.has(value)
+    ))) {
+        throw new Error('CONCIERGE_BATCH_RETRY_ALLOWLIST_INVALID');
+    }
+    return new Set(values);
+}
+
+type ConciergeRetryRequestRow = {
+    id: string;
+    status: string;
+    error_message: string | null;
+    step_data: unknown;
+};
+
+async function loadRetryCodeByOrder(
+    orderIds: readonly string[],
+): Promise<ReadonlyMap<string, string | null>> {
+    const { data: orderRows, error: orderError } = await supabaseAdmin
+        .from('earlybird_orders')
+        .select('id,result_request_id')
+        .in('id', [...orderIds]);
+    if (orderError || !Array.isArray(orderRows) || orderRows.length !== orderIds.length) {
+        throw new Error('CONCIERGE_BATCH_RETRY_STATE_LOOKUP_FAILED');
+    }
+    const requestIdByOrder = new Map<string, string | null>(
+        orderRows.map(row => [String(row.id), typeof row.result_request_id === 'string' ? row.result_request_id : null]),
+    );
+    const requestIds = [...new Set(
+        orderRows
+            .map(row => row.result_request_id)
+            .filter((value): value is string => typeof value === 'string'),
+    )];
+    const requestById = new Map<string, ConciergeRetryRequestRow>();
+    if (requestIds.length > 0) {
+        const { data: requests, error: requestError } = await supabaseAdmin
+            .from('analysis_requests')
+            .select('id,status,error_message,step_data')
+            .in('id', requestIds);
+        if (requestError || !Array.isArray(requests) || requests.length !== requestIds.length) {
+            throw new Error('CONCIERGE_BATCH_RETRY_STATE_LOOKUP_FAILED');
+        }
+        for (const request of requests as ConciergeRetryRequestRow[]) {
+            requestById.set(request.id, request);
+        }
+    }
+    const result = new Map<string, string | null>();
+    for (const orderId of orderIds) {
+        const requestId = requestIdByOrder.get(orderId);
+        const request = requestId ? requestById.get(requestId) : undefined;
+        const stepData = request?.step_data;
+        const retry = stepData && typeof stepData === 'object' && !Array.isArray(stepData)
+            ? (stepData as Record<string, unknown>).conciergeBatchRetry
+            : null;
+        const code = retry && typeof retry === 'object' && !Array.isArray(retry)
+            && (retry as Record<string, unknown>).eligible === true
+            && typeof (retry as Record<string, unknown>).code === 'string'
+            && RETRY_CODE_PATTERN.test((retry as Record<string, unknown>).code as string)
+            && request?.status === 'failed'
+            && request.error_message === 'CONCIERGE_BATCH_RETRYABLE'
+            ? (retry as Record<string, unknown>).code as string
+            : null;
+        result.set(orderId, code);
+    }
+    return result;
+}
+
 async function loadCohort(): Promise<FrozenCohort> {
     const expectedManifestHash = process.env.CONCIERGE_BATCH_EXPECTED_MANIFEST_HASH?.trim();
     if (!expectedManifestHash || !/^[a-f0-9]{64}$/.test(expectedManifestHash)) {
@@ -579,9 +661,11 @@ async function loadCohort(): Promise<FrozenCohort> {
         || members.filter(member => member.cohort === 'failed_canary').length !== 3) {
         throw new Error('CONCIERGE_COHORT_MANIFEST_INVALID');
     }
+    const allowlist = retryCodeAllowlist();
+    const retryCodeByOrder = await loadRetryCodeByOrder(members.map(member => member.orderId));
     let published = 0;
     let running = 0;
-    const orders: OrderRow[] = [];
+    const candidateOrders: OrderRow[] = [];
     for (const member of members) {
         if (['cancelled', 'refund_pending', 'refunded', 'payment_failed', 'overflow_refund_required'].includes(member.currentOrderStatus)) {
             throw new Error('CONCIERGE_COHORT_REFUND_CONFLICT');
@@ -602,7 +686,7 @@ async function loadCohort(): Promise<FrozenCohort> {
             && member.currentRequestStatus !== 'failed') {
             throw new Error('CONCIERGE_COHORT_RETRY_STATE_CONFLICT');
         }
-        orders.push({
+        candidateOrders.push({
             orderId: member.orderId,
             ownerId: member.ownerId,
             targetUsername: member.targetUsername,
@@ -611,13 +695,17 @@ async function loadCohort(): Promise<FrozenCohort> {
             preflightId: member.preflightId,
             targetFollowers: member.targetFollowersCount,
             targetFollowing: member.targetFollowingCount,
+            retryCode: retryCodeByOrder.get(member.orderId) ?? null,
         });
     }
+    const orders = selectConciergeBatchRetryOrders(candidateOrders, allowlist);
+    if (orders.length === 0) throw new Error('CONCIERGE_BATCH_RETRY_SUBSET_EMPTY');
     return {
         manifestHash: root.manifestHash,
         total: members.length,
         published,
         running,
+        excluded: candidateOrders.length - orders.length,
         orders,
         evidenceHashByOrder: new Map(members.map(member => [member.orderId, member.evidenceHash])),
     };
@@ -633,6 +721,17 @@ function retryableFailureCode(error: unknown): string {
 
 async function main(): Promise<void> {
     const frozen = await loadCohort();
+    if (process.env.CONCIERGE_BATCH_DRY_RUN === 'true') {
+        process.stdout.write(`${JSON.stringify({
+            status: 'dry_run',
+            total: frozen.total,
+            eligible: frozen.orders.length,
+            published: frozen.published,
+            running: frozen.running,
+            excluded: frozen.excluded,
+        })}\n`);
+        return;
+    }
     const cohort = frozen.orders;
     const preparedByOrder = new Map<string, ConciergeBatchPreparedOrder>();
     const bootstrap = {
@@ -721,6 +820,7 @@ async function main(): Promise<void> {
         completed: frozen.published + result.completed,
         failed: result.failed,
         running: frozen.running,
+        excluded: frozen.excluded,
     })}\n`);
 }
 
