@@ -2579,6 +2579,37 @@ describe('V2 staged AI services', () => {
         expect(result.lines[1]).toContain('커플 기류');
     });
 
+    it('allows a grounded relationship interpretation on the first line when it cites style and interaction evidence', async () => {
+        const input = narrativeInput();
+        const lines = [{
+            text: '박민지님의 여행 피드에는 커플 기류가 은근히 읽히지만, 이미지 인상만으로 관계를 판단할 수는 없습니다.',
+            evidenceRefs: ['profile:bio', 'like:candidate-to-target'],
+        }, {
+            text: '박민지님이 김준호님에게 남긴 좋아요와 댓글의 반가워 표현, 김준호님이 박민지님에게 남긴 좋아요가 확인되며 수집 표본 밖 누락 가능성은 남습니다.',
+            evidenceRefs: [
+                'like:candidate-to-target',
+                'like:target-to-candidate',
+                'comment:1',
+                'coverage:target-interactions',
+            ],
+        }] as const;
+        mocks.analyzeWithGemini.mockImplementationOnce(async (
+            _prompt: string,
+            _images: string[],
+            options: { schema: { parse(value: unknown): unknown } },
+        ) => options.schema.parse({ lines }));
+
+        const result = await highRiskNarrative(
+            input,
+            audit('highRiskNarrative', input, AI_STAGE_POLICY_V211_VERSION),
+            { aiStagePolicyVersion: AI_STAGE_POLICY_V211_VERSION },
+        );
+
+        expect(result.source).toBe('gemini');
+        expect(result.lines).toEqual([lines[0].text, lines[1].text]);
+        expect(result.evidenceRefs).toEqual([lines[0].evidenceRefs, lines[1].evidenceRefs]);
+    });
+
     it('rejects a relationship interpretation when no interaction direction was observed', async () => {
         const base = narrativeInput();
         const input: HighRiskNarrativeInput = {
@@ -2928,6 +2959,111 @@ describe('V2 staged AI services', () => {
         expect(result.source).toBe('gemini');
         expect(result.lines[1]).toContain('김준호님이 박민지님에게 남긴 좋아요');
         expect(mocks.analyzeWithGemini).toHaveBeenCalledTimes(2);
+    });
+
+    it('emits PII-free high-risk validator predicate and affected-field diagnostics', async () => {
+        const consoleWarn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+        const input = narrativeInput();
+        const candidate = { lines: [{
+            text: '박민지님의 여행 피드에는 커플 기류가 은근히 읽히는 장면이 이어집니다.',
+            evidenceRefs: ['profile:bio'],
+        }, {
+            text: '박민지님이 김준호님에게 남긴 댓글 흔적은 보입니다.',
+            evidenceRefs: ['comment:1', 'coverage:target-interactions'],
+        }] };
+        const validation = new GeminiResponseValidationError(
+            'schema rejected',
+            {
+                category: 'schema_validation',
+                issues: [{ path: '$', code: 'custom' }],
+                truncated: false,
+            },
+            {
+                candidate,
+                issues: [{
+                    code: 'custom',
+                    path: [],
+                    message: 'v2.8 public copy must not assert or speculate about a relationship.',
+                }],
+            },
+        );
+        mocks.analyzeWithGemini.mockRejectedValueOnce(new Error(
+            'AI_GENERATION_RESPONSE_REJECTED_ERROR: generated response failed strict validation.',
+            { cause: validation },
+        ));
+
+        await expect(highRiskNarrative(
+            input,
+            audit('highRiskNarrative', input, AI_STAGE_POLICY_V211_VERSION),
+            { aiStagePolicyVersion: AI_STAGE_POLICY_V211_VERSION },
+        )).rejects.toThrow('AI_GENERATION_RESPONSE_REJECTED_ERROR');
+
+        const diagnostic = consoleWarn.mock.calls.find(call => (
+            call[0] === 'ANALYSIS_V2_AI_HIGH_RISK_VALIDATION_DIAGNOSTIC'
+        ));
+        expect(diagnostic).toBeDefined();
+        expect(JSON.parse(String(diagnostic?.[1]))).toEqual({
+            stage: 'highRiskNarrative',
+            issues: [{ field: '$', code: 'custom', subpredicate: 'relationship_inference' }],
+            truncated: false,
+        });
+        expect(JSON.stringify(diagnostic)).not.toContain('박민지');
+        expect(JSON.stringify(diagnostic)).not.toContain('김준호');
+    });
+
+    it('emits the post-repair high-risk predicate when full revalidation rejects the repair', async () => {
+        const consoleWarn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+        const input = narrativeInput();
+        const candidate = { lines: [{
+            text: '박민지님과 김준호님은 연애 중으로 보입니다.',
+            evidenceRefs: ['profile:bio'],
+        }, {
+            text: '박민지님이 김준호님에게 남긴 좋아요와 댓글은 확인되지만, 수집 표본 밖 누락 가능성은 남습니다.',
+            evidenceRefs: ['like:candidate-to-target', 'comment:1', 'coverage:target-interactions'],
+        }] };
+        const validation = new GeminiResponseValidationError(
+            'schema rejected',
+            { category: 'schema_validation', issues: [{ path: 'lines', code: 'custom' }], truncated: false },
+            {
+                candidate,
+                issues: [{ code: 'custom', path: ['lines'], message: 'Narrative violates the public two-line contract.' }],
+            },
+        );
+        mocks.analyzeWithGemini
+            .mockRejectedValueOnce(new Error(
+                'AI_GENERATION_RESPONSE_REJECTED_ERROR: generated response failed strict validation.',
+                { cause: validation },
+            ))
+            .mockImplementationOnce(async (
+                _prompt: string,
+                _images: string[],
+                options: { schema: { parse(value: unknown): unknown } },
+            ) => options.schema.parse({ lines: [
+                '박민지님과 김준호님은 연애 중입니다.',
+                candidate.lines[1].text,
+            ] }));
+
+        await expect(highRiskNarrative(
+            input,
+            audit('highRiskNarrative', input, AI_STAGE_POLICY_V211_VERSION),
+            { aiStagePolicyVersion: AI_STAGE_POLICY_V211_VERSION },
+        )).rejects.toThrow();
+
+        const diagnostics = consoleWarn.mock.calls
+            .filter(call => call[0] === 'ANALYSIS_V2_AI_HIGH_RISK_VALIDATION_DIAGNOSTIC')
+            .map(call => JSON.parse(String(call[1])));
+        expect(diagnostics.at(-1)).toEqual({
+            stage: 'highRiskNarrative',
+            issues: [
+                { field: '$', code: 'custom', subpredicate: 'relationship_inference' },
+                { field: 'lines.#.text', code: 'custom', subpredicate: 'v211_missing_target_to_candidate_like' },
+                { field: 'lines.#.evidenceRefs', code: 'custom', subpredicate: 'interaction_direction_evidence_refs' },
+                { field: 'lines.#.text', code: 'custom', subpredicate: 'sanitized_comment_content' },
+            ],
+            truncated: false,
+        });
+        expect(JSON.stringify(diagnostics)).not.toContain('박민지');
+        expect(JSON.stringify(diagnostics)).not.toContain('김준호');
     });
 
     it('does not repair an unrelated custom issue at the narrative lines path', async () => {

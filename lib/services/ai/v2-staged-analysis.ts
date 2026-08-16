@@ -2601,7 +2601,7 @@ function narrativePrompt(
                 ? [`${String(actor)}${String(actor).endsWith('님') ? '이' : '가'} ${String(receiver)}에게 남긴 ${interaction}`]
                 : []
         ));
-        return `${legacy}\nv2.11 공개 서사는 첫 문장에 ${subjects.candidate}, 둘째 문장에 ${subjects.candidate}와 ${subjects.target}을 직접 적으세요. \"대상 계정\"이나 \"후보 계정\"이라는 표현은 금지합니다. 둘째 문장에는 다음 관측 방향 문구를 한 글자도 바꾸지 말고 모두 포함하세요: ${JSON.stringify(namedDirections)}. 단일 좋아요나 외모만으로 관계를 증명하지 마세요. 실제로 수집된 좋아요·댓글·태그·멘션 방향과 그 evidenceRefs가 둘째 문장에 있으면 그 상호작용에서 읽히는 가벼운 관계 해석은 허용하지만, 사귀는 중·연애 중·데이트·연인·배우자·외도·불륜 같은 데이트·친밀도 사실을 추측하거나 단정하지 마세요. ${appearanceRule} JSON 반환 직전에 lines의 모든 text를 다시 검사하고, 수집된 상호작용에 근거하지 않은 관계 주장은 관계 어휘 없이 다시 쓰세요.`;
+        return `${legacy}\nv2.11 공개 서사는 첫 문장에 ${subjects.candidate}, 둘째 문장에 ${subjects.candidate}와 ${subjects.target}을 직접 적으세요. \"대상 계정\"이나 \"후보 계정\"이라는 표현은 금지합니다. 둘째 문장에는 다음 관측 방향 문구를 한 글자도 바꾸지 말고 모두 포함하세요: ${JSON.stringify(namedDirections)}. 단일 좋아요나 외모만으로 관계를 증명하지 마세요. 실제로 수집된 좋아요·댓글·태그·멘션 방향과 그 evidenceRefs를 직접 인용한 문장에서는 그 상호작용에서 읽히는 가벼운 관계 해석을 허용하지만, 사귀는 중·연애 중·데이트·연인·배우자·외도·불륜 같은 데이트·친밀도 사실을 추측하거나 단정하지 마세요. ${appearanceRule} JSON 반환 직전에 lines의 모든 text를 다시 검사하고, 수집된 상호작용에 근거하지 않은 관계 주장은 관계 어휘 없이 다시 쓰세요.`;
     }
     return `${legacy}\n고위험 서사는 상호작용과 제공된 시각 근거를 구분해 구체적으로 쓰되, ㅋㅋ·자기지칭을 절대 쓰지 마세요. bio·caption 인용을 포함해 관계 관련 용어 자체를 lines에 쓰지 마세요. 보호 특성·신체·외모를 조롱하지 마세요. JSON 반환 직전에 lines의 모든 text를 다시 검사하고, 관계 어휘가 어떤 언어·활용형·인용·부정문으로든 있으면 해당 필드를 관계 어휘 없이 다시 쓰세요.`;
 }
@@ -2630,6 +2630,140 @@ function v211NarrativeInvalidLineIndexes(
         || masked[0] === masked[1]
     ) invalid.push(1);
     return invalid;
+}
+
+function highRiskNarrativeIssueField(path: readonly (string | number)[]): string {
+    if (path.length === 0) return '$';
+    return path.map(segment => {
+        if (typeof segment === 'number') return '#';
+        if (segment === 'lines' || segment === 'text' || segment === 'evidenceRefs') {
+            return segment;
+        }
+        return '?';
+    }).join('.');
+}
+
+function highRiskNarrativeIssueSubpredicate(message: string): string {
+    if (message === 'Narrative violates the public two-line contract.') {
+        return 'public_two_line_contract';
+    }
+    if (message === V28_RELATIONSHIP_ASSERTION_ISSUE_MESSAGE) {
+        return 'relationship_inference';
+    }
+    if (message === 'v2.8 high-risk narrative cannot use laughter.') {
+        return 'laughter_forbidden';
+    }
+    if (message === 'Narrative exposes an identifier or internal result.') {
+        return 'identifier_or_internal_result';
+    }
+    if (message === 'Narrative references evidence that was not supplied.') {
+        return 'evidence_ref_unsupplied';
+    }
+    if (message === 'v2.11 narrative must use canonical subject names, not generic role labels.') {
+        return 'canonical_subject_names';
+    }
+    if (message === 'v2.11 narrative cannot assert or deny target-to-candidate comments.') {
+        return 'target_to_candidate_comment_forbidden';
+    }
+    if (message === 'v2.11 reliable appearance copy requires a light, non-probative caveat.') {
+        return 'reliable_appearance_caveat';
+    }
+    if (message === 'First line requires profile or feed evidence.') {
+        return 'first_line_style_evidence';
+    }
+    if (message === 'Second line requires the coverage reference.') {
+        return 'coverage_reference';
+    }
+    if (message === 'Carousel caption dossier is restricted to first-line style evidence.') {
+        return 'carousel_dossier_first_line_only';
+    }
+    if (message === 'Second line must cite every asserted interaction direction.') {
+        return 'interaction_direction_evidence_refs';
+    }
+    if (message === 'Narrative introduced unobserved like evidence.') {
+        return 'unobserved_like';
+    }
+    if (message === 'Narrative introduced unobserved comment evidence.') {
+        return 'unobserved_comment';
+    }
+    if (message === 'Narrative introduced unobserved tag evidence.') {
+        return 'unobserved_tag';
+    }
+    if (message === 'Narrative introduced unobserved mention evidence.') {
+        return 'unobserved_mention';
+    }
+    if (message === 'Narrative introduced an unsupported comment direction.') {
+        return 'unsupported_comment_direction';
+    }
+    if (message === 'Narrative omitted sanitized real comment content.') {
+        return 'sanitized_comment_content';
+    }
+    if (message === 'Narrative omitted the sanitized comment reference.') {
+        return 'sanitized_comment_reference';
+    }
+    if (message.startsWith('v2.11 narrative omitted the candidate-to-target like direction.')) {
+        return 'v211_missing_candidate_to_target_like';
+    }
+    if (message.startsWith('v2.11 narrative omitted the target-to-candidate like direction.')) {
+        return 'v211_missing_target_to_candidate_like';
+    }
+    if (message.startsWith('v2.11 narrative omitted the candidate-to-target comment direction.')) {
+        return 'v211_missing_candidate_to_target_comment';
+    }
+    if (message.startsWith('v2.11 narrative omitted the candidate-to-target tag direction.')) {
+        return 'v211_missing_candidate_to_target_tag';
+    }
+    if (message.startsWith('v2.11 narrative omitted the target-to-candidate tag direction.')) {
+        return 'v211_missing_target_to_candidate_tag';
+    }
+    if (message.startsWith('v2.11 narrative omitted the candidate-to-target mention direction.')) {
+        return 'v211_missing_candidate_to_target_mention';
+    }
+    if (message.startsWith('v2.11 narrative omitted the target-to-candidate mention direction.')) {
+        return 'v211_missing_target_to_candidate_mention';
+    }
+    if (message.startsWith('Missing verified direction phrase:')) {
+        return 'missing_verified_direction_phrase';
+    }
+    return 'unknown';
+}
+
+function emitHighRiskNarrativeIssueDiagnostic(
+    issues: readonly z.ZodIssue[],
+    truncated: boolean,
+): void {
+    console.warn(
+        'ANALYSIS_V2_AI_HIGH_RISK_VALIDATION_DIAGNOSTIC',
+        JSON.stringify({
+            stage: 'highRiskNarrative',
+            issues: issues.slice(0, 12).map(issue => ({
+                field: highRiskNarrativeIssueField(issue.path),
+                code: issue.code,
+                subpredicate: highRiskNarrativeIssueSubpredicate(issue.message),
+            })),
+            truncated: truncated || issues.length > 12,
+        }),
+    );
+}
+
+function emitHighRiskNarrativeValidationDiagnostic(
+    validation: GeminiResponseValidationError,
+): void {
+    emitHighRiskNarrativeIssueDiagnostic(
+        validation.repairContext?.issues ?? [],
+        validation.diagnostics.truncated,
+    );
+}
+
+function parseRepairedHighRiskNarrative<T>(schema: z.ZodType<T>, candidate: unknown): T {
+    try {
+        return schema.parse(candidate);
+    } catch (error) {
+        if (error instanceof z.ZodError) {
+            emitHighRiskNarrativeIssueDiagnostic(error.issues, false);
+        }
+        throw error;
+    }
 }
 
 function containsForbiddenPublicIdentifier(
@@ -2704,6 +2838,9 @@ function narrativeResponseSchemaFor(
 
     return highRiskNarrativeModelResponseSchema.superRefine((value, context) => {
         const texts: [string, string] = [value.lines[0].text, value.lines[1].text];
+        const hasObservedInteractionEvidence = value.lines.some(line => (
+            line.evidenceRefs.some(ref => observedInteractionEvidenceRefs.has(ref))
+        ));
         if (!(
             v211Subjects
                 ? parseV211NarrativeWithSubjects(texts, v211Subjects)
@@ -2719,8 +2856,7 @@ function narrativeResponseSchemaFor(
             if (usesSafePublicPresentation(policyVersion)) {
                 addV28PublicStyleIssues(line.text, context, {
                     allowGroundedRelationship: v211Subjects !== null
-                        && lineIndex === 1
-                        && line.evidenceRefs.some(ref => observedInteractionEvidenceRefs.has(ref)),
+                        && hasObservedInteractionEvidence,
                 });
                 if (V28_LAUGH_PATTERN.test(line.text)) {
                     context.addIssue({
@@ -3069,6 +3205,7 @@ export async function highRiskNarrative(
         const validation = error instanceof Error && error.cause instanceof GeminiResponseValidationError
             ? error.cause
             : null;
+        if (validation) emitHighRiskNarrativeValidationDiagnostic(validation);
         const repair = validation?.repairContext;
         const contractIssue = repair?.issues.find(issue => (
             issue.code === 'custom'
@@ -3105,9 +3242,11 @@ export async function highRiskNarrative(
                 v211NarrativeSubjects(input),
             ))] as Array<0 | 1>;
             const observedInteractionEvidenceRefs = new Set(allObservedInteractionRefs(input));
+            const hasObservedInteractionEvidence = repairedCandidate.lines.some(line => (
+                line.evidenceRefs?.some(ref => observedInteractionEvidenceRefs.has(ref)) ?? false
+            ));
             repairedCandidate.lines.forEach((line, lineIndex) => {
-                const allowsGroundedRelationship = lineIndex === 1
-                    && line.evidenceRefs?.some(ref => observedInteractionEvidenceRefs.has(ref));
+                const allowsGroundedRelationship = hasObservedInteractionEvidence;
                 if (
                     containsV28UnsupportedRelationshipFact(line.text)
                     || (
@@ -3130,7 +3269,7 @@ export async function highRiskNarrative(
                     .filter(message => message.length > 0 && message.length <= 240),
             )].join('\n- ');
             const repaired = await analyzeWithGemini(
-                `다음 공개 서사 두 문장만 수정하세요. 원문: ${JSON.stringify(invalidLines)}\n검증 요구사항:\n- ${repairRequirements || contractIssue.message}\n정확히 두 문장을 반환하고 각 문장은 180자 이하로 쓰세요. 첫 문장의 근거와 둘째 문장의 인물 이름·관측된 상호작용 방향은 보존하세요. 위 검증 요구사항을 모두 해결하고, 관측된 상호작용 방향을 빠짐없이 정확한 이름과 용어로 포함하세요. 관계 관련 표현은 검증된 상호작용에 근거한 둘째 문장의 제한된 해석 외에는 쓰지 마세요. 둘째 문장에는 수집·관측 범위의 누락 가능성을 포함하되 상호작용 수량 표현 없이 간결하게 쓰세요. 새 사실이나 관계 추측을 추가하지 말고 JSON만 반환하세요.`,
+                `다음 공개 서사 두 문장만 수정하세요. 원문: ${JSON.stringify(invalidLines)}\n검증 요구사항:\n- ${repairRequirements || contractIssue.message}\n정확히 두 문장을 반환하고 각 문장은 180자 이하로 쓰세요. 첫 문장의 근거와 둘째 문장의 인물 이름·관측된 상호작용 방향은 보존하세요. 위 검증 요구사항을 모두 해결하고, 관측된 상호작용 방향을 빠짐없이 정확한 이름과 용어로 포함하세요. 관계 관련 표현은 해당 문장이 직접 인용한 검증된 상호작용에 근거한 제한된 해석만 허용하고, 그 밖의 관계 추측은 쓰지 마세요. 둘째 문장에는 수집·관측 범위의 누락 가능성을 포함하되 상호작용 수량 표현 없이 간결하게 쓰세요. 새 사실이나 관계 추측을 추가하지 말고 JSON만 반환하세요.`,
                 [],
                 {
                     schema: z.object({
@@ -3146,7 +3285,7 @@ export async function highRiskNarrative(
             for (const lineIndex of invalidLineIndexes) {
                 repairedCandidate.lines[lineIndex]!.text = repaired.lines[lineIndex];
             }
-            response = responseSchema.parse(repairedCandidate);
+            response = parseRepairedHighRiskNarrative(responseSchema, repairedCandidate);
         } else if (
             policyVersion === AI_STAGE_POLICY_V211_VERSION
             && textIssues.length > 0
@@ -3174,7 +3313,7 @@ export async function highRiskNarrative(
                 );
                 repairedCandidate.lines[lineIndex]!.text = repaired.value;
             }
-            response = responseSchema.parse(repairedCandidate);
+            response = parseRepairedHighRiskNarrative(responseSchema, repairedCandidate);
         } else {
             if (
                 !isAnalysisV2AiDeterministicFallbackError(error)
