@@ -303,10 +303,9 @@ export function Redaction({ className = "", style }: { className?: string; style
  * Blur is applied to the rendered image, so the underlying source is still in
  * the payload — treat this as presentation, not as a privacy boundary. */
 
-/* Tuned on a 40px avatar. 9px left nothing at all, which reads as a failed
-   image; 4px over a server-downsampled source left more than it should. The
-   point is to show that a real account is behind this without saying which. */
-export const MASK_AVATAR_BLUR_PX = 6;
+/* Tuned on a 40px avatar. Keep the shared profile visible as an account while
+   reducing the previous blur by roughly half. */
+export const MASK_AVATAR_BLUR_PX = 3;
 
 /** Text needs less: shapes stay unreadable well before they stop being letters. */
 const MASK_TEXT_BLUR_PX = 5;
