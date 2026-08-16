@@ -553,7 +553,13 @@ async function classifyOrder(collected: CollectedOrder): Promise<ClassifiedOrder
 }
 
 async function loadCohort(): Promise<FrozenCohort> {
-    const { data, error } = await supabaseAdmin.rpc('freeze_concierge_batch_cohort');
+    const expectedManifestHash = process.env.CONCIERGE_BATCH_EXPECTED_MANIFEST_HASH?.trim();
+    if (!expectedManifestHash || !/^[a-f0-9]{64}$/.test(expectedManifestHash)) {
+        throw new Error('CONCIERGE_COHORT_EXPECTED_HASH_REQUIRED');
+    }
+    const { data, error } = await supabaseAdmin.rpc('freeze_concierge_batch_cohort', {
+        p_expected_manifest_hash: expectedManifestHash,
+    });
     if (error || !data || typeof data !== 'object' || Array.isArray(data)) {
         throw new Error('CONCIERGE_COHORT_FREEZE_FAILED');
     }

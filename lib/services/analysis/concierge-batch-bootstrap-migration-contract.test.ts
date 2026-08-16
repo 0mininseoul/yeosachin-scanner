@@ -7,10 +7,21 @@ const migrationPath = new URL(
 );
 
 describe('concierge batch bootstrap migration contract', () => {
+    it('rejects cohort substitutions or newly-paid rows without the preapproved hash', () => {
+        const migration = readFileSync(migrationPath, 'utf8');
+        expect(migration).toContain('CREATE FUNCTION public.freeze_concierge_batch_cohort(\n    p_expected_manifest_hash TEXT');
+        expect(migration).toContain("p_expected_manifest_hash IS NULL");
+        expect(migration).toContain("p_expected_manifest_hash !~ '^[a-f0-9]{64}$'");
+        expect(migration).toContain('v_manifest_hash IS DISTINCT FROM p_expected_manifest_hash');
+        expect(migration).toContain('v_existing_hash IS DISTINCT FROM p_expected_manifest_hash');
+        expect(migration).toContain('earlybird_order.result_request_id IS NULL');
+        expect(migration).toContain('CONCIERGE_BATCH_COHORT_EXPECTED_HASH_CONFLICT');
+    });
+
     it('creates only a service-role request-pair bootstrap and never advances fulfillment', () => {
         const migration = readFileSync(migrationPath, 'utf8');
         expect(migration).toContain('CREATE TABLE public.earlybird_concierge_batch_cohort_members');
-        expect(migration).toContain('CREATE FUNCTION public.freeze_concierge_batch_cohort()');
+        expect(migration).toContain('CREATE FUNCTION public.freeze_concierge_batch_cohort(\n    p_expected_manifest_hash TEXT');
         expect(migration).toContain('CONCIERGE_BATCH_COHORT_COUNT_CONFLICT');
         expect(migration).toContain('FOR UPDATE OF earlybird_order, fulfillment');
         expect(migration).toContain('payment_id_fingerprint');
@@ -26,6 +37,7 @@ describe('concierge batch bootstrap migration contract', () => {
         expect(migration).not.toContain('auto_admit');
         expect(migration).not.toContain('advance_earlybird');
         expect(migration).toMatch(/REVOKE ALL ON FUNCTION public\.prepare_concierge_batch_order\(/);
+        expect(migration).toMatch(/REVOKE ALL ON FUNCTION public\.freeze_concierge_batch_cohort\(TEXT\)/);
         expect(migration).toMatch(/GRANT EXECUTE ON FUNCTION public\.prepare_concierge_batch_order\([^)]*\)\s+TO service_role/);
     });
 });

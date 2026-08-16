@@ -69,7 +69,9 @@ BEFORE UPDATE OR DELETE ON public.earlybird_concierge_batch_cohort_members
 FOR EACH ROW
 EXECUTE FUNCTION public.prevent_earlybird_concierge_batch_cohort_mutation();
 
-CREATE FUNCTION public.freeze_concierge_batch_cohort()
+CREATE FUNCTION public.freeze_concierge_batch_cohort(
+    p_expected_manifest_hash TEXT
+)
 RETURNS JSONB
 LANGUAGE plpgsql
 SECURITY DEFINER
@@ -82,13 +84,20 @@ DECLARE
     v_existing_hash TEXT;
     v_now TIMESTAMP WITH TIME ZONE := pg_catalog.clock_timestamp();
 BEGIN
+    IF p_expected_manifest_hash IS NULL
+       OR p_expected_manifest_hash !~ '^[a-f0-9]{64}$' THEN
+        RAISE EXCEPTION USING MESSAGE = 'CONCIERGE_BATCH_EXPECTED_HASH_REQUIRED', ERRCODE = 'P0001';
+    END IF;
     LOCK TABLE public.earlybird_concierge_batch_cohort_members IN SHARE ROW EXCLUSIVE MODE;
     SELECT pg_catalog.count(*), pg_catalog.min(member.manifest_hash), pg_catalog.max(member.manifest_hash)
       INTO v_count, v_existing_hash, v_manifest_hash
     FROM public.earlybird_concierge_batch_cohort_members AS member
     WHERE member.cohort_key = v_cohort_key;
     IF v_count > 0 THEN
-        IF v_count <> 30 OR v_existing_hash IS NULL OR v_existing_hash IS DISTINCT FROM v_manifest_hash THEN
+        IF v_count <> 30
+           OR v_existing_hash IS NULL
+           OR v_existing_hash IS DISTINCT FROM v_manifest_hash
+           OR v_existing_hash IS DISTINCT FROM p_expected_manifest_hash THEN
             RAISE EXCEPTION USING MESSAGE = 'CONCIERGE_BATCH_COHORT_MANIFEST_INVALID', ERRCODE = 'P0001';
         END IF;
         RETURN (
@@ -226,6 +235,10 @@ BEGIN
       );
     IF v_count <> 30 THEN
         RAISE EXCEPTION USING MESSAGE = 'CONCIERGE_BATCH_COHORT_COUNT_CONFLICT', ERRCODE = 'P0001';
+    END IF;
+
+    IF v_manifest_hash IS DISTINCT FROM p_expected_manifest_hash THEN
+        RAISE EXCEPTION USING MESSAGE = 'CONCIERGE_BATCH_COHORT_EXPECTED_HASH_CONFLICT', ERRCODE = 'P0001';
     END IF;
 
     SELECT pg_catalog.encode(extensions.digest(pg_catalog.convert_to(
@@ -399,9 +412,9 @@ BEGIN
 END;
 $$;
 
-REVOKE ALL ON FUNCTION public.freeze_concierge_batch_cohort()
+REVOKE ALL ON FUNCTION public.freeze_concierge_batch_cohort(TEXT)
     FROM PUBLIC, anon, authenticated, service_role;
-GRANT EXECUTE ON FUNCTION public.freeze_concierge_batch_cohort()
+GRANT EXECUTE ON FUNCTION public.freeze_concierge_batch_cohort(TEXT)
     TO service_role;
 
 CREATE OR REPLACE FUNCTION public.prepare_concierge_batch_order(
