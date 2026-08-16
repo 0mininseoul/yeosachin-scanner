@@ -3,9 +3,11 @@ import {
     CONCIERGE_BATCH_ACTOR_CONCURRENCY,
     CONCIERGE_BATCH_MAX_ORDERS,
     CONCIERGE_BATCH_TOKEN_PRIORITY,
+    createConciergeBatchCasPublisher,
     runConciergeBatch,
     type ConciergeBatchOrder,
 } from './concierge-batch-runner';
+import type { ConciergeManualPublicationInput } from './concierge-batch-publication';
 
 const ownerId = '00000000-0000-4000-8000-000000000001';
 
@@ -20,6 +22,25 @@ function order(index: number): ConciergeBatchOrder {
 }
 
 describe('concierge batch runner', () => {
+    it('delegates publication to the reviewed PR431 CAS publisher boundary', async () => {
+        const calls: ConciergeManualPublicationInput[] = [];
+        const input = {} as ConciergeManualPublicationInput;
+        const publisher = createConciergeBatchCasPublisher(async value => {
+            calls.push(value);
+            return {
+                published: true,
+                idempotent: false,
+                resultHash: 'a'.repeat(64),
+                resultUrl: '/result/request',
+                counts: {} as never,
+            };
+        });
+
+        await publisher(input);
+
+        expect(calls).toEqual([input]);
+    });
+
     it('keeps a true sliding window at seven orders and isolates terminal failures', async () => {
         const orders = Array.from({ length: 12 }, (_, index) => order(index));
         const active: string[] = [];

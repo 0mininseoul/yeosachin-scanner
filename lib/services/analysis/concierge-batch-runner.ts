@@ -1,4 +1,8 @@
 import type { ApifyCredentialSlot } from '@/lib/services/instagram/providers/types';
+import {
+    publishConciergeManualOverride,
+    type ConciergeManualPublicationInput,
+} from './concierge-batch-publication';
 
 /**
  * The fallback runner is intentionally only an execution fence.  Collection,
@@ -35,6 +39,22 @@ export interface ConciergeBatchPreparedOrder {
     readonly sourceRequestId: string;
     readonly requestId: string;
     readonly preflightId?: string | null;
+}
+
+export type ConciergeBatchCasPublisher = (
+    input: ConciergeManualPublicationInput,
+) => ReturnType<typeof publishConciergeManualOverride>;
+
+/**
+ * Binds the batch publication stage to the reviewed PR431 CAS publisher.  The
+ * caller still assembles and validates the frozen replay/classification input;
+ * this adapter only fixes the durable publication boundary and never admits or
+ * advances Earlybird fulfillment.
+ */
+export function createConciergeBatchCasPublisher(
+    publish: typeof publishConciergeManualOverride = publishConciergeManualOverride,
+): ConciergeBatchCasPublisher {
+    return input => publish(input);
 }
 
 export interface ConciergeBatchPipeline<Collected, Classified, Published extends { status: 'completed' }> {
