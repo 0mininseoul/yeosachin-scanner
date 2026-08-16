@@ -520,6 +520,12 @@ export function buildV214NarrativeInput(input: {
     targetToCandidateLike: RetainedObservation;
     targetSelectedPostEvidence?: V214ExactScope['targetSelectedPostEvidence'];
 }): HighRiskNarrativeInput {
+    const targetProfile = (
+        typeof input.targetProfile.fullName === 'string'
+        && input.targetProfile.fullName.trim().length > 0
+    )
+        ? input.targetProfile
+        : { ...input.targetProfile, fullName: input.targetProfile.username };
     const selected = new Set(input.capturedProfile.featureSelectionIds);
     const media = input.capturedProfile.media
         .filter(item => selected.has(item.selectionId))
@@ -532,7 +538,7 @@ export function buildV214NarrativeInput(input: {
     const selectedMediaIds = new Set(media.map(item => item.selectionId));
     const retained = buildRetainedBidirectionalNarrativeInput({
         target: {
-            profile: input.targetProfile,
+            profile: targetProfile,
             selectedPostEvidence: input.targetSelectedPostEvidence
                 ?? retainedProfilePostEvidence(input.targetProfile),
         },
