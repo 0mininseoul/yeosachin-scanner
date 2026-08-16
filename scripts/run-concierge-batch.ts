@@ -265,6 +265,27 @@ function batchCopyKindWord(kind: ConciergeBatchHighRiskCopyFact['kind']): string
             : kind === 'tag' ? '태그' : '멘션';
 }
 
+function uniqueBatchCopyFacts(
+    facts: readonly ConciergeBatchHighRiskCopyFact[],
+): readonly ConciergeBatchHighRiskCopyFact[] {
+    const seen = new Set<string>();
+    return facts.filter(fact => {
+        const key = `${fact.direction}:${fact.kind}`;
+        if (seen.has(key)) return false;
+        seen.add(key);
+        return true;
+    });
+}
+
+function strongestBatchCopyFact(
+    facts: readonly ConciergeBatchHighRiskCopyFact[],
+): ConciergeBatchHighRiskCopyFact | undefined {
+    const unique = uniqueBatchCopyFacts(facts);
+    return unique.find(fact => fact.kind === 'comment')
+        ?? unique.find(fact => fact.kind === 'like')
+        ?? unique[0];
+}
+
 function batchCopyFactGrounded(
     text: string,
     fact: ConciergeBatchHighRiskCopyFact,
@@ -361,12 +382,14 @@ export function validateConciergeBatchHighRiskCopy(
         throw new Error('CONCIERGE_BATCH_COPY_SUBJECT_GROUNDING_INVALID');
     }
 
-    if (evidence.facts.length > 0) {
-        if (!evidence.facts.some(fact => batchCopyFactGrounded(parsed.data.oneLineOverview, fact, subjects))) {
+    const uniqueFacts = uniqueBatchCopyFacts(evidence.facts);
+    if (uniqueFacts.length > 0) {
+        const strongestFact = strongestBatchCopyFact(uniqueFacts);
+        if (!strongestFact || !batchCopyFactGrounded(parsed.data.oneLineOverview, strongestFact, subjects)) {
             throw new Error('CONCIERGE_BATCH_COPY_OVERVIEW_INTERACTION_GROUNDING_INVALID');
         }
         const detailText = parsed.data.riskAnalysis.join('\n');
-        if (!evidence.facts.every(fact => batchCopyFactGrounded(detailText, fact, subjects))) {
+        if (!uniqueFacts.every(fact => batchCopyFactGrounded(detailText, fact, subjects))) {
             throw new Error('CONCIERGE_BATCH_COPY_INTERACTION_GROUNDING_INVALID');
         }
     } else {
@@ -394,9 +417,10 @@ export function buildConciergeBatchHighRiskCopyPrompt(
     evidence: ConciergeBatchHighRiskCopyEvidence,
 ): string {
     const subjects = batchCopySubjectLabels(evidence);
-    const facts = evidence.facts.length === 0
+    const uniqueFacts = uniqueBatchCopyFacts(evidence.facts);
+    const facts = uniqueFacts.length === 0
         ? '관측된 상호작용 없음'
-        : evidence.facts.map(fact => {
+        : uniqueFacts.map(fact => {
             const from = fact.direction === 'candidate_to_target' ? subjects.candidate : subjects.target;
             const to = fact.direction === 'candidate_to_target' ? subjects.target : subjects.candidate;
             const content = fact.content ? `; 댓글 내용 단서=${JSON.stringify(fact.content)}` : '';
@@ -420,7 +444,7 @@ export function buildConciergeBatchHighRiskCopyPrompt(
         `- oneLineOverview는 ${BATCH_COPY_MIN_LENGTH}~${BATCH_COPY_MAX_LENGTH}자 한 문장입니다.`,
         '- riskAnalysis는 정확히 두 문장 배열이며 각 문장은 25~180자입니다.',
         '- 이름은 위에 제공된 이름을 그대로 사용하고, 다른 식별자·URL·아이디·숫자·상호작용 수량은 쓰지 마세요.',
-        '- 보존된 상호작용이 있으면 overview와 두 riskAnalysis 문장 모두 실제 방향과 유형을 이름으로 구체적으로 설명하세요. 관측하지 않은 방향을 뒤집거나 추가하지 마세요.',
+        '- 보존된 상호작용이 있으면 overview는 댓글, 좋아요, 태그·멘션 순으로 가장 강한 관측 상호작용 중 하나를 실제 방향과 유형으로 이름을 붙여 설명하고, 두 riskAnalysis 문장을 합쳐 각 고유 방향·유형을 빠짐없이 설명하세요. 관측하지 않은 방향을 뒤집거나 추가하지 마세요.',
         '- 보존된 상호작용이 없으면 bio·캡션·외모 자료에만 기대어 장난스럽고 도발적인 관계 해석을 허용합니다. 상호작용이 있었다고 만들지 말고, 확인되지 않았다, 알 수 없다, 수집 범위, 공개 자료만으로는 같은 신뢰를 떨어뜨리는 표현은 쓰지 마세요.',
         '- 고정된 일반론이나 다른 후보와 돌려 쓰는 문장 틀, 대상 계정·후보 계정이라는 역할 라벨, 바람·불륜을 단정하는 표현은 쓰지 마세요.',
         '- JSON 키는 정확히 oneLineOverview와 riskAnalysis만 사용하세요.',
@@ -437,7 +461,7 @@ async function defaultConciergeBatchHighRiskCopyGenerator(
         analysisType: 'concierge_batch_candidate_copy',
         requestId: evidence.requestId,
         model: 'gemini-3-flash-preview',
-        maxOutputTokens: 768,
+        maxOutputTokens: 1536,
         maxAttempts: 1,
     });
 }
@@ -508,7 +532,7 @@ function addBatchCopyFact(
     fact: ConciergeBatchHighRiskCopyFact,
 ): void {
     const content = fact.content?.trim() ?? '';
-    const key = `${fact.direction}:${fact.kind}:${content}`;
+    const key = `${fact.direction}:${fact.kind}`;
     if (seen.has(key)) return;
     seen.add(key);
     facts.push(content ? { ...fact, content } : fact);
@@ -809,12 +833,21 @@ async function loadTargetProfileArtifact(order: OrderRow): Promise<InstagramProf
     } catch {
         throw new Error('CONCIERGE_PROVIDER_ARTIFACT_LOOKUP_FAILED');
     }
-    if (!run || run.id !== row.run_id || run.actId !== APIFY_PROFILE_ACTOR_ID || run.status !== 'SUCCEEDED' || !run.defaultDatasetId) {
+    let canonicalActorId: string | null = null;
+    try {
+        const actor = await client.actor(APIFY_PROFILE_ACTOR_ID).get();
+        canonicalActorId = typeof actor?.id === 'string' ? actor.id : null;
+    } catch {
+        throw new Error('CONCIERGE_PROVIDER_ARTIFACT_LOOKUP_FAILED');
+    }
+    if (!isMatchingTargetProfileArtifactRun(run, row.run_id, canonicalActorId ?? '')) {
         throw new Error('CONCIERGE_PROVIDER_ARTIFACT_INVALID');
     }
+    const datasetId = run?.defaultDatasetId;
+    if (!datasetId) throw new Error('CONCIERGE_PROVIDER_ARTIFACT_INVALID');
     let page: { items: unknown[] };
     try {
-        page = await client.dataset(run.defaultDatasetId).listItems({ limit: 2 });
+        page = await client.dataset(datasetId).listItems({ limit: 2 });
     } catch {
         throw new Error('CONCIERGE_PROVIDER_ARTIFACT_LOOKUP_FAILED');
     }
@@ -828,6 +861,25 @@ async function loadTargetProfileArtifact(order: OrderRow): Promise<InstagramProf
         throw new Error('CONCIERGE_PROVIDER_ARTIFACT_INVALID');
     }
     return parsed.profilesByUsername.get(order.targetUsername) ?? null;
+}
+
+export function isMatchingTargetProfileArtifactRun(
+    run: {
+        id?: string;
+        actId?: string;
+        status?: string;
+        defaultDatasetId?: string;
+    } | null | undefined,
+    expectedRunId: string,
+    expectedCanonicalActorId: string,
+): boolean {
+    return Boolean(
+        run
+        && run.id === expectedRunId
+        && run.actId === expectedCanonicalActorId
+        && run.status === 'SUCCEEDED'
+        && run.defaultDatasetId,
+    );
 }
 
 export function isRecoverableTargetProfileArtifactError(error: unknown): boolean {

@@ -1,11 +1,14 @@
 import { describe, expect, it } from 'vitest';
 import {
+    buildConciergeBatchHighRiskCopyPrompt,
     generateConciergeBatchCandidateCopies,
     generateConciergeBatchHighRiskCopy,
     isRecoverableTargetProfileArtifactError,
+    isMatchingTargetProfileArtifactRun,
     parseConciergeExistingRelationshipArtifacts,
     relationshipArtifactProviderContext,
     type ConciergeBatchHighRiskCopyEvidence,
+    validateConciergeBatchHighRiskCopy,
 } from './run-concierge-batch';
 import { runConciergeBatch } from '@/lib/services/analysis/concierge-batch-runner';
 
@@ -73,6 +76,26 @@ describe('concierge existing relationship artifact resolver', () => {
         expect(isRecoverableTargetProfileArtifactError(new Error('CONCIERGE_PROVIDER_ARTIFACT_INVALID_EXTRA'))).toBe(false);
     });
 
+    it('matches the opaque canonical actor id returned by Apify, not the actor slug', () => {
+        const run = {
+            id: 'Abcdef12',
+            actId: 'opaqueCanonicalActorId123',
+            status: 'SUCCEEDED',
+            defaultDatasetId: 'dataset123',
+        };
+
+        expect(isMatchingTargetProfileArtifactRun(
+            run,
+            'Abcdef12',
+            'opaqueCanonicalActorId123',
+        )).toBe(true);
+        expect(isMatchingTargetProfileArtifactRun(
+            run,
+            'Abcdef12',
+            'apify/instagram-profile-scraper',
+        )).toBe(false);
+    });
+
     const copyEvidence = (facts: ConciergeBatchHighRiskCopyEvidence['facts']): ConciergeBatchHighRiskCopyEvidence => ({
         requestId: '00000000-0000-4000-8000-000000000001',
         targetUsername: 'target_user',
@@ -103,6 +126,35 @@ describe('concierge existing relationship artifact resolver', () => {
         expect(result.candidateUsername).toBe('candidate_user');
         expect(result.oneLineOverview).toContain('좋아요');
         expect(result.riskAnalysis).toHaveLength(2);
+    });
+
+    it('requires the overview to ground the strongest interaction while details cover each unique direction and kind', () => {
+        const evidence = copyEvidence([
+            { direction: 'candidate_to_target', kind: 'like' },
+            { direction: 'candidate_to_target', kind: 'comment', content: '첫 번째 댓글' },
+            { direction: 'candidate_to_target', kind: 'comment', content: '두 번째 댓글' },
+            { direction: 'target_to_candidate', kind: 'like' },
+        ]);
+
+        expect(() => validateConciergeBatchHighRiskCopy({
+            oneLineOverview: '후보 이름이 대상 이름 게시물에 좋아요를 남긴 장면이 먼저 눈에 들어와 가벼운 긴장감을 남깁니다.',
+            riskAnalysis: [
+                '후보 이름이 대상 이름 게시물에 좋아요와 댓글을 남긴 흐름이 공개 기록의 결을 바꿔 보입니다.',
+                '대상 이름이 후보 이름 게시물에 좋아요를 남긴 장면까지 이어져 두 사람의 온도를 읽게 합니다.',
+            ],
+        }, evidence)).toThrow('CONCIERGE_BATCH_COPY_OVERVIEW_INTERACTION_GROUNDING_INVALID');
+    });
+
+    it('deduplicates repeated raw facts by direction and kind before prompting Gemini', () => {
+        const prompt = buildConciergeBatchHighRiskCopyPrompt(copyEvidence([
+            { direction: 'candidate_to_target', kind: 'comment', content: '첫 번째 댓글' },
+            { direction: 'candidate_to_target', kind: 'comment', content: '두 번째 댓글' },
+            { direction: 'candidate_to_target', kind: 'like' },
+        ]));
+
+        expect(prompt.match(/방향=후보 이름 -> 대상 이름; 유형=댓글/gu)).toHaveLength(1);
+        expect(prompt).toContain('첫 번째 댓글');
+        expect(prompt).not.toContain('두 번째 댓글');
     });
 
     it('allows provocative no-interaction copy without trust-eroding wording', async () => {
