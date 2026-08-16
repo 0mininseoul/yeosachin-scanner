@@ -843,9 +843,11 @@ async function loadTargetProfileArtifact(order: OrderRow): Promise<InstagramProf
     if (!isMatchingTargetProfileArtifactRun(run, row.run_id, canonicalActorId ?? '')) {
         throw new Error('CONCIERGE_PROVIDER_ARTIFACT_INVALID');
     }
+    const datasetId = run?.defaultDatasetId;
+    if (!datasetId) throw new Error('CONCIERGE_PROVIDER_ARTIFACT_INVALID');
     let page: { items: unknown[] };
     try {
-        page = await client.dataset(run.defaultDatasetId).listItems({ limit: 2 });
+        page = await client.dataset(datasetId).listItems({ limit: 2 });
     } catch {
         throw new Error('CONCIERGE_PROVIDER_ARTIFACT_LOOKUP_FAILED');
     }
