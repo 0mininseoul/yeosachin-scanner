@@ -43,21 +43,30 @@ describe('concierge batch runner', () => {
 
     it('keeps a true sliding window at seven orders and isolates terminal failures', async () => {
         const orders = Array.from({ length: 12 }, (_, index) => order(index));
-        const active: string[] = [];
-        let peak = 0;
+        const activeOrders = new Set<string>();
+        let peakOrders = 0;
+        let activeActors = 0;
+        let peakActors = 0;
         const started: string[] = [];
         const terminal: string[] = [];
+        const retryable: string[] = [];
         const result = await runConciergeBatch(orders, {
             async collect(current, context) {
-                return context.withActorSlot(async () => {
-                    active.push(current.orderId);
-                    started.push(current.orderId);
-                    peak = Math.max(peak, active.length);
-                    await new Promise(resolve => setTimeout(resolve, current.orderId.endsWith('000000000001') ? 15 : 2));
-                    active.splice(active.indexOf(current.orderId), 1);
-                    if (current.orderId.endsWith('000000000004')) throw new Error('COLLECTION_FAILED');
-                    return { order: current };
-                });
+                activeOrders.add(current.orderId);
+                peakOrders = Math.max(peakOrders, activeOrders.size);
+                try {
+                    return await context.withActorSlot(async () => {
+                        activeActors += 1;
+                        peakActors = Math.max(peakActors, activeActors);
+                        started.push(current.orderId);
+                        await new Promise(resolve => setTimeout(resolve, current.orderId.endsWith('000000000001') ? 15 : 2));
+                        activeActors -= 1;
+                        if (current.orderId.endsWith('000000000004')) throw new Error('COLLECTION_FAILED');
+                        return { order: current };
+                    });
+                } finally {
+                    activeOrders.delete(current.orderId);
+                }
             },
             async classify(collected) {
                 return collected;
@@ -66,14 +75,19 @@ describe('concierge batch runner', () => {
                 terminal.push(classified.order.orderId);
                 return { status: 'completed' as const };
             },
+            async onFailure(current) {
+                retryable.push(current.orderId);
+            },
         });
 
-        expect(peak).toBeLessThanOrEqual(CONCIERGE_BATCH_MAX_ORDERS);
+        expect(peakOrders).toBeLessThanOrEqual(CONCIERGE_BATCH_MAX_ORDERS);
+        expect(peakActors).toBeLessThanOrEqual(CONCIERGE_BATCH_ACTOR_CONCURRENCY);
         expect(started).toHaveLength(orders.length);
         expect(result.completed).toBe(orders.length - 1);
         expect(result.failed).toBe(1);
         expect(result.running).toBe(0);
         expect(terminal).toHaveLength(orders.length - 1);
+        expect(retryable).toEqual([orders[4]!.orderId]);
         expect(started.indexOf(orders[7]!.orderId)).toBeGreaterThan(-1);
     });
 

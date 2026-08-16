@@ -62,6 +62,8 @@ export interface ConciergeBatchPipeline<Collected, Classified, Published extends
     collect(order: ConciergeBatchOrder, context: ConciergeBatchStageContext, prepared?: ConciergeBatchPreparedOrder): Promise<Collected>;
     classify(collected: Collected, order: ConciergeBatchOrder, context: ConciergeBatchStageContext): Promise<Classified>;
     publish(classified: Classified, order: ConciergeBatchOrder, context: ConciergeBatchStageContext): Promise<Published>;
+    /** Persist a retry-eligible terminal failure before the order leaves the window. */
+    onFailure?(order: ConciergeBatchOrder, error: unknown): Promise<void>;
 }
 
 export interface ConciergeBatchRunSummary {
@@ -204,9 +206,14 @@ export async function runConciergeBatch<Collected, Classified, Published extends
     let running = 0;
     let completed = 0;
     let failed = 0;
+    let persistenceError: unknown = null;
 
-    await new Promise<void>(resolve => {
+    await new Promise<void>((resolve, reject) => {
         const launch = (): void => {
+            if (persistenceError) {
+                if (running === 0) reject(persistenceError);
+                return;
+            }
             while (running < CONCIERGE_BATCH_MAX_ORDERS && nextIndex < orders.length) {
                 const order = orders[nextIndex++]!;
                 running += 1;
@@ -225,16 +232,24 @@ export async function runConciergeBatch<Collected, Classified, Published extends
                         const published = await pipeline.publish(classified, order, context);
                         if (published.status !== 'completed') throw new Error('CONCIERGE_BATCH_PUBLICATION_NOT_TERMINAL');
                         completed += 1;
-                    } catch {
+                    } catch (error) {
                         failed += 1;
+                        if (pipeline.onFailure) {
+                            try {
+                                await pipeline.onFailure(order, error);
+                            } catch (persistError) {
+                                persistenceError ??= persistError;
+                            }
+                        }
                     } finally {
                         running -= 1;
-                        if (nextIndex >= orders.length && running === 0) resolve();
+                        if (persistenceError && running === 0) reject(persistenceError);
+                        else if (!persistenceError && nextIndex >= orders.length && running === 0) resolve();
                         else launch();
                     }
                 })();
             }
-            if (orders.length === 0) resolve();
+            if (!persistenceError && orders.length === 0) resolve();
         };
         launch();
     });

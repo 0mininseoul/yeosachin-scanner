@@ -55,6 +55,51 @@ type OrderRow = ConciergeBatchOrder & {
     targetFollowing: number | null;
 };
 
+type FrozenCohort = {
+    manifestHash: string;
+    total: number;
+    published: number;
+    running: number;
+    orders: OrderRow[];
+    evidenceHashByOrder: ReadonlyMap<string, string>;
+};
+
+const frozenCohortMemberSchema = z.object({
+    orderId: ORDER_ID,
+    ownerId: ORDER_ID,
+    targetUsername: USERNAME,
+    planId: z.enum(['basic', 'standard']),
+    cohort: z.enum(['awaiting_operator', 'failed_canary']),
+    preflightId: ORDER_ID,
+    originalResultRequestId: ORDER_ID.nullable(),
+    targetFollowersCount: z.number().int().min(0).max(10_000_000),
+    targetFollowingCount: z.number().int().min(0).max(10_000_000),
+    snapshotOrderStatus: z.enum(['paid', 'analysis_in_progress']),
+    snapshotFulfillmentStatus: z.enum(['awaiting_operator', 'analysis_in_progress']),
+    snapshotRequestStatus: z.literal('failed').nullable(),
+    snapshotErrorCode: z.enum([
+        'SCRAPING_INCOMPLETE_ERROR',
+        'SCRAPING_PROVIDER_QUOTA_ERROR',
+        'SCRAPING_PROVIDER_START_REJECTED_ERROR',
+    ]).nullable(),
+    paymentIdFingerprint: z.string().regex(/^[a-f0-9]{64}$/),
+    expectedAmountKrw: z.number().int().positive(),
+    expectedProductId: z.string().min(1),
+    actualAmountKrw: z.number().int().nullable(),
+    actualProductId: z.string().nullable(),
+    paidAt: z.string().min(1),
+    evidenceHash: z.string().regex(/^[a-f0-9]{64}$/),
+    manifestHash: z.string().regex(/^[a-f0-9]{64}$/),
+    frozenAt: z.string().min(1),
+    currentOrderStatus: z.enum([
+        'paid', 'analysis_in_progress', 'completed', 'cancelled', 'refund_pending',
+        'refunded', 'payment_failed', 'overflow_refund_required',
+    ]),
+    currentFulfillmentStatus: z.string().min(1),
+    currentRequestStatus: z.enum(['pending', 'processing', 'completed', 'failed']).nullable(),
+    published: z.boolean(),
+}).strict();
+
 type ProviderRunRow = {
     operation_key: string;
     actor_id: string;
@@ -507,54 +552,105 @@ async function classifyOrder(collected: CollectedOrder): Promise<ClassifiedOrder
     return { input };
 }
 
-async function loadCohort(): Promise<OrderRow[]> {
-    const [{ data: orders, error: orderError }, { data: fulfillments, error: fulfillmentError }] = await Promise.all([
-        supabaseAdmin.from('earlybird_orders').select('id,user_id,preflight_id,target_instagram_id,plan_id,status,result_request_id,target_followers_count,target_following_count'),
-        supabaseAdmin.from('earlybird_fulfillments').select('order_id,status'),
-    ]);
-    if (orderError || fulfillmentError) throw new Error('CONCIERGE_COHORT_READ_FAILED');
-    const fulfillmentByOrder = new Map((fulfillments ?? []).map(row => [String(row.order_id), String(row.status)]));
-    const candidates = (orders ?? []).filter(row => (
-        ['paid', 'analysis_in_progress'].includes(String(row.status))
-        && fulfillmentByOrder.has(String(row.id))
-    ));
-    const requestIds = candidates.flatMap(row => typeof row.result_request_id === 'string' ? [row.result_request_id] : []);
-    const { data: requests, error: requestError } = requestIds.length > 0
-        ? await supabaseAdmin.from('analysis_requests').select('id,status').in('id', requestIds)
-        : { data: [], error: null };
-    if (requestError) throw new Error('CONCIERGE_COHORT_REQUEST_READ_FAILED');
-    const requestStatus = new Map((requests ?? []).map(row => [String(row.id), String(row.status)]));
-    const selected = candidates.flatMap(row => {
-        const fulfillment = fulfillmentByOrder.get(String(row.id));
-        const awaiting = row.status === 'paid' && fulfillment === 'awaiting_operator';
-        const canary = row.status === 'analysis_in_progress' && fulfillment === 'analysis_in_progress'
-            && typeof row.result_request_id === 'string' && requestStatus.get(row.result_request_id) === 'failed';
-        if (!awaiting && !canary) return [];
-        const targetUsername = normalized(String(row.target_instagram_id));
-        const planId: OrderRow['planId'] | null = row.plan_id === 'standard' ? 'standard' : row.plan_id === 'basic' ? 'basic' : null;
-        if (!planId || !ORDER_ID.safeParse(row.id).success || !ORDER_ID.safeParse(row.user_id).success || !ORDER_ID.safeParse(row.preflight_id).success) throw new Error('CONCIERGE_COHORT_SCOPE_CONFLICT');
-        return [{
-            orderId: String(row.id), ownerId: String(row.user_id), targetUsername, planId,
-            cohort: canary ? 'failed_canary' as const : 'awaiting_operator' as const,
-            preflightId: String(row.preflight_id),
-            targetFollowers: typeof row.target_followers_count === 'number' ? row.target_followers_count : null,
-            targetFollowing: typeof row.target_following_count === 'number' ? row.target_following_count : null,
-        }];
-    });
-    if (selected.length !== 30 || selected.filter(row => row.cohort === 'awaiting_operator').length !== 27 || selected.filter(row => row.cohort === 'failed_canary').length !== 3) throw new Error('CONCIERGE_COHORT_COUNT_CONFLICT');
-    return selected;
+async function loadCohort(): Promise<FrozenCohort> {
+    const { data, error } = await supabaseAdmin.rpc('freeze_concierge_batch_cohort');
+    if (error || !data || typeof data !== 'object' || Array.isArray(data)) {
+        throw new Error('CONCIERGE_COHORT_FREEZE_FAILED');
+    }
+    const root = data as Record<string, unknown>;
+    if (root.cohortKey !== 'concierge-fallback-20260816'
+        || typeof root.manifestHash !== 'string'
+        || !/^[a-f0-9]{64}$/.test(root.manifestHash)
+        || !Array.isArray(root.members)
+        || root.members.length !== 30) {
+        throw new Error('CONCIERGE_COHORT_MANIFEST_INVALID');
+    }
+    const members = root.members.map(member => frozenCohortMemberSchema.parse(member));
+    const hashes = new Set(members.map(member => member.manifestHash));
+    if (hashes.size !== 1 || [...hashes][0] !== root.manifestHash
+        || new Set(members.map(member => member.orderId)).size !== 30
+        || members.filter(member => member.cohort === 'awaiting_operator').length !== 27
+        || members.filter(member => member.cohort === 'failed_canary').length !== 3) {
+        throw new Error('CONCIERGE_COHORT_MANIFEST_INVALID');
+    }
+    let published = 0;
+    let running = 0;
+    const orders: OrderRow[] = [];
+    for (const member of members) {
+        if (['cancelled', 'refund_pending', 'refunded', 'payment_failed', 'overflow_refund_required'].includes(member.currentOrderStatus)) {
+            throw new Error('CONCIERGE_COHORT_REFUND_CONFLICT');
+        }
+        if (member.published) {
+            published += 1;
+            continue;
+        }
+        if (member.currentRequestStatus === 'processing') {
+            running += 1;
+            continue;
+        }
+        if (member.currentOrderStatus === 'completed') {
+            throw new Error('CONCIERGE_COHORT_PUBLICATION_STATE_CONFLICT');
+        }
+        if (member.currentRequestStatus !== null
+            && member.currentRequestStatus !== 'pending'
+            && member.currentRequestStatus !== 'failed') {
+            throw new Error('CONCIERGE_COHORT_RETRY_STATE_CONFLICT');
+        }
+        orders.push({
+            orderId: member.orderId,
+            ownerId: member.ownerId,
+            targetUsername: member.targetUsername,
+            planId: member.planId,
+            cohort: member.cohort,
+            preflightId: member.preflightId,
+            targetFollowers: member.targetFollowersCount,
+            targetFollowing: member.targetFollowingCount,
+        });
+    }
+    return {
+        manifestHash: root.manifestHash,
+        total: members.length,
+        published,
+        running,
+        orders,
+        evidenceHashByOrder: new Map(members.map(member => [member.orderId, member.evidenceHash])),
+    };
+}
+
+function retryableFailureCode(error: unknown): string {
+    const message = error instanceof Error ? error.message : '';
+    const candidate = message.match(/^[A-Z][A-Z0-9_]{2,100}/)?.[0];
+    return candidate && candidate.startsWith('CONCIERGE_')
+        ? candidate
+        : 'CONCIERGE_BATCH_RETRYABLE';
 }
 
 async function main(): Promise<void> {
-    const cohort = await loadCohort();
+    const frozen = await loadCohort();
+    const cohort = frozen.orders;
+    const preparedByOrder = new Map<string, ConciergeBatchPreparedOrder>();
     const bootstrap = {
         async prepare(order: ConciergeBatchOrder) {
             const row = cohort.find(candidate => candidate.orderId === order.orderId)!;
+            if (!row) throw new Error('CONCIERGE_BATCH_SCOPE_CONFLICT');
             const response = await supabaseAdmin.rpc('prepare_concierge_batch_order', { p_order_id: row.orderId });
             if (response.error || !response.data || typeof response.data !== 'object') throw new Error('CONCIERGE_BATCH_BOOTSTRAP_FAILED');
             const value = response.data as Record<string, unknown>;
-            if (value.orderId !== row.orderId || value.ownerId !== row.ownerId || value.targetUsername !== row.targetUsername || value.planId !== row.planId) throw new Error('CONCIERGE_BATCH_BOOTSTRAP_SCOPE_CONFLICT');
-            return { sourceRequestId: String(value.sourceRequestId), requestId: String(value.requestId), preflightId: typeof value.preflightId === 'string' ? value.preflightId : null };
+            if (value.orderId !== row.orderId
+                || value.ownerId !== row.ownerId
+                || value.targetUsername !== row.targetUsername
+                || value.planId !== row.planId
+                || value.manifestHash !== frozen.manifestHash
+                || value.evidenceHash !== frozen.evidenceHashByOrder.get(row.orderId)) {
+                throw new Error('CONCIERGE_BATCH_BOOTSTRAP_SCOPE_CONFLICT');
+            }
+            const prepared = {
+                sourceRequestId: String(value.sourceRequestId),
+                requestId: String(value.requestId),
+                preflightId: typeof value.preflightId === 'string' ? value.preflightId : null,
+            } satisfies ConciergeBatchPreparedOrder;
+            preparedByOrder.set(row.orderId, prepared);
+            return prepared;
         },
     };
     const casPublish = createConciergeBatchCasPublisher();
@@ -562,15 +658,64 @@ async function main(): Promise<void> {
         prepare: bootstrap.prepare,
         async collect(order, context, prepared) {
             if (!prepared) throw new Error('CONCIERGE_BATCH_BOOTSTRAP_REQUIRED');
-            return collectOrder(cohort.find(candidate => candidate.orderId === order.orderId)!, prepared, context);
+            const row = cohort.find(candidate => candidate.orderId === order.orderId);
+            if (!row) throw new Error('CONCIERGE_BATCH_SCOPE_CONFLICT');
+            return collectOrder(row, prepared, context);
         },
         async classify(collected) { return classifyOrder(collected); },
         async publish(classified) {
             await casPublish(classified.input);
             return { status: 'completed' as const };
         },
+        async onFailure(order, error) {
+            const prepared = preparedByOrder.get(order.orderId);
+            if (!prepared) return;
+            const { data: current, error: readError } = await supabaseAdmin
+                .from('analysis_requests')
+                .select('status,step_data')
+                .eq('id', prepared.requestId)
+                .maybeSingle();
+            if (readError || !current || !['pending', 'processing', 'failed'].includes(String(current.status))) {
+                throw new Error('CONCIERGE_BATCH_FAILURE_NOT_DURABLE');
+            }
+            const existingStepData = current.step_data && typeof current.step_data === 'object' && !Array.isArray(current.step_data)
+                ? current.step_data as Record<string, unknown>
+                : {};
+            const { data: updated, error: updateError } = await supabaseAdmin
+                .from('analysis_requests')
+                .update({
+                    status: 'failed',
+                    progress: 100,
+                    progress_step: 'concierge batch retryable failure',
+                    current_step: 'failed',
+                    error_message: 'CONCIERGE_BATCH_RETRYABLE',
+                    completed_at: null,
+                    step_data: {
+                        ...existingStepData,
+                        conciergeBatchRetry: {
+                            eligible: true,
+                            code: retryableFailureCode(error),
+                            recordedAt: new Date().toISOString(),
+                        },
+                    },
+                })
+                .eq('id', prepared.requestId)
+                .in('status', ['pending', 'processing', 'failed'])
+                .select('id,status')
+                .maybeSingle();
+            if (updateError || !updated || updated.status !== 'failed') {
+                throw new Error('CONCIERGE_BATCH_FAILURE_NOT_DURABLE');
+            }
+        },
     });
-    process.stdout.write(`${JSON.stringify(result)}\n`);
+    process.stdout.write(`${JSON.stringify({
+        status: result.failed === 0 && frozen.running === 0 ? 'completed' : 'partial',
+        total: frozen.total,
+        attempted: result.total,
+        completed: frozen.published + result.completed,
+        failed: result.failed,
+        running: frozen.running,
+    })}\n`);
 }
 
 if (import.meta.url === `file://${process.argv[1]}`) {
