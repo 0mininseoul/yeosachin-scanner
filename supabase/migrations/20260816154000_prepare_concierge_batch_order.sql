@@ -237,10 +237,6 @@ BEGIN
         RAISE EXCEPTION USING MESSAGE = 'CONCIERGE_BATCH_COHORT_COUNT_CONFLICT', ERRCODE = 'P0001';
     END IF;
 
-    IF v_manifest_hash IS DISTINCT FROM p_expected_manifest_hash THEN
-        RAISE EXCEPTION USING MESSAGE = 'CONCIERGE_BATCH_COHORT_EXPECTED_HASH_CONFLICT', ERRCODE = 'P0001';
-    END IF;
-
     SELECT pg_catalog.encode(extensions.digest(pg_catalog.convert_to(
         pg_catalog.string_agg(
             pg_catalog.concat_ws('|',
@@ -296,6 +292,10 @@ BEGIN
               )
           )
       );
+
+    IF v_manifest_hash IS DISTINCT FROM p_expected_manifest_hash THEN
+        RAISE EXCEPTION USING MESSAGE = 'CONCIERGE_BATCH_COHORT_EXPECTED_HASH_CONFLICT', ERRCODE = 'P0001';
+    END IF;
 
     INSERT INTO public.earlybird_concierge_batch_cohort_members (
         cohort_key, order_id, owner_id, target_username, plan_id, cohort,

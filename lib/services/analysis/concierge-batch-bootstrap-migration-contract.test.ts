@@ -18,6 +18,21 @@ describe('concierge batch bootstrap migration contract', () => {
         expect(migration).toContain('CONCIERGE_BATCH_COHORT_EXPECTED_HASH_CONFLICT');
     });
 
+    it('orders candidate hash computation before expected-hash comparison and insert', () => {
+        const migration = readFileSync(migrationPath, 'utf8');
+        const freezeStart = migration.indexOf('CREATE FUNCTION public.freeze_concierge_batch_cohort(');
+        const prepareStart = migration.indexOf('CREATE OR REPLACE FUNCTION public.prepare_concierge_batch_order(', freezeStart);
+        expect(freezeStart).toBeGreaterThanOrEqual(0);
+        expect(prepareStart).toBeGreaterThan(freezeStart);
+        const freezeBody = migration.slice(freezeStart, prepareStart);
+        const candidateHashAssignment = freezeBody.indexOf('INTO v_manifest_hash\n    FROM public.earlybird_orders');
+        const expectedHashGuard = freezeBody.indexOf('IF v_manifest_hash IS DISTINCT FROM p_expected_manifest_hash THEN');
+        const cohortInsert = freezeBody.indexOf('INSERT INTO public.earlybird_concierge_batch_cohort_members (');
+        expect(candidateHashAssignment).toBeGreaterThanOrEqual(0);
+        expect(expectedHashGuard).toBeGreaterThan(candidateHashAssignment);
+        expect(cohortInsert).toBeGreaterThan(expectedHashGuard);
+    });
+
     it('creates only a service-role request-pair bootstrap and never advances fulfillment', () => {
         const migration = readFileSync(migrationPath, 'utf8');
         expect(migration).toContain('CREATE TABLE public.earlybird_concierge_batch_cohort_members');
