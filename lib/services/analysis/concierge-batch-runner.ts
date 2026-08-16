@@ -28,6 +28,34 @@ export interface ConciergeBatchOrder {
     cohort: 'awaiting_operator' | 'failed_canary';
 }
 
+export type ConciergeBatchRetryOrder = ConciergeBatchOrder & {
+    retryCode?: string | null;
+};
+
+/**
+ * Selects a reviewed retry class from the immutable cohort.  Missing retry
+ * evidence is intentionally excluded so an operator cannot accidentally turn
+ * a whole-cohort rerun into the default behavior.
+ */
+export function selectConciergeBatchRetryOrders<T extends ConciergeBatchRetryOrder>(
+    orders: readonly T[],
+    allowlist: ReadonlySet<string>,
+): T[] {
+    return orders.filter(order => (
+        typeof order.retryCode === 'string' && allowlist.has(order.retryCode)
+    ));
+}
+
+export function assertConciergeRelationshipCoverage(
+    side: 'followers' | 'following',
+    declaredCount: number,
+    collectedCount: number,
+): void {
+    if (declaredCount > 0 && collectedCount === 0) {
+        throw new Error(`CONCIERGE_RELATIONSHIP_${side.toUpperCase()}_EMPTY`);
+    }
+}
+
 export interface ConciergeBatchStageContext {
     readonly actorConcurrency: typeof CONCIERGE_BATCH_ACTOR_CONCURRENCY;
     readonly tokenPriority: readonly ConciergeBatchTokenSlot[];
