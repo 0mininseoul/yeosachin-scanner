@@ -81,6 +81,8 @@ const frozenCohortMemberSchema = z.object({
         'SCRAPING_INCOMPLETE_ERROR',
         'SCRAPING_PROVIDER_QUOTA_ERROR',
         'SCRAPING_PROVIDER_START_REJECTED_ERROR',
+        'ANALYSIS_V2_JOB_HANDLER_FAILED',
+        'ANALYSIS_V2_STAGE_SCHEMA_VALIDATION_ERROR',
     ]).nullable(),
     paymentIdFingerprint: z.string().regex(/^[a-f0-9]{64}$/),
     expectedAmountKrw: z.number().int().positive(),
