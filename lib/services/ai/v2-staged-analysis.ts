@@ -136,6 +136,8 @@ const V28_PROTECTED_OR_APPEARANCE_TERM_PATTERN =
     /(?:인종|피부색|국적|출신|종교|장애|성적\s*지향|성별\s*정체성|나이|체형|몸매|얼굴|외모|키|체중)/u;
 const V28_MOCKERY_MARKER_PATTERN =
     /(?:조롱|비웃|한심|우습|웃기|볼품없|못생|괴상|혐오|추하|꼴사납|돼지|멸치|괴물|뭘까요|뭐냐)/u;
+const V28_RELATIONSHIP_ASSERTION_ISSUE_MESSAGE =
+    'v2.8 public copy must not assert or speculate about a relationship.';
 const STAGED_OPERATION_PREFIX = Object.freeze({
     genderTriage: 'gender-triage',
     genderResolution: 'gender-resolution',
@@ -411,7 +413,7 @@ function addV28PublicStyleIssues(
     if (containsV28UnsupportedRelationshipStyle(value)) {
         context.addIssue({
             code: 'custom',
-            message: 'v2.8 public copy must not assert or speculate about a relationship.',
+            message: V28_RELATIONSHIP_ASSERTION_ISSUE_MESSAGE,
         });
     }
 }
@@ -2170,6 +2172,7 @@ export async function featureAnalysis(
             candidate.code === 'custom'
             && candidate.path.length === 1
             && candidate.path[0] === 'oneLineOverview'
+            && candidate.message === V28_RELATIONSHIP_ASSERTION_ISSUE_MESSAGE
         ));
         const candidate = repair?.candidate;
         if (

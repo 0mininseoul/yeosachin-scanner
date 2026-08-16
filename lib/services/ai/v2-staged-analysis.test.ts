@@ -1118,7 +1118,36 @@ describe('V2 staged AI services', () => {
         );
 
         expect(result.features.oneLineOverview).toContain('일정표처럼');
+        expect(result.features).toEqual({
+            ...invalid,
+            oneLineOverview: '여행 사진과 짧은 기록이 일정표처럼 또렷하게 정돈된 피드입니다.',
+        });
         expect(mocks.analyzeWithGemini).toHaveBeenCalledTimes(2);
+    });
+
+    it('does not repair an unrelated custom issue on a v2.11 overview', async () => {
+        const invalid = featureResponse({
+            oneLineOverview: '여행 사진과 짧은 기록이 일정표처럼 또렷하게 정돈된 피드입니다.',
+        });
+        const validation = new GeminiResponseValidationError(
+            'schema rejected',
+            { category: 'schema_validation', issues: [{ path: 'oneLineOverview', code: 'custom' }], truncated: false },
+            {
+                candidate: invalid,
+                issues: [{ code: 'custom', path: ['oneLineOverview'], message: 'Unrelated custom overview issue.' }],
+            },
+        );
+        mocks.analyzeWithGemini.mockRejectedValueOnce(new Error(
+            'AI_GENERATION_RESPONSE_REJECTED_ERROR: generated response failed strict validation.',
+            { cause: validation },
+        ));
+
+        await expect(featureAnalysis(
+            featureInput(),
+            audit('featureAnalysis', featureInput(), AI_STAGE_POLICY_V211_VERSION),
+            { aiStagePolicyVersion: AI_STAGE_POLICY_V211_VERSION },
+        )).rejects.toThrow('AI_GENERATION_RESPONSE_REJECTED_ERROR');
+        expect(mocks.analyzeWithGemini).toHaveBeenCalledTimes(1);
     });
 
     it('allows a relationship substring only inside the exact canonical account full name', async () => {
