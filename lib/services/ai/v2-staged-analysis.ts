@@ -135,7 +135,11 @@ const V28_ENGLISH_RELATIONSHIP_TERM_PATTERN =
 const V28_PROTECTED_OR_APPEARANCE_TERM_PATTERN =
     /(?:인종|피부색|국적|출신|종교|장애|성적\s*지향|성별\s*정체성|나이|체형|몸매|얼굴|외모|키|체중)/u;
 const V28_MOCKERY_MARKER_PATTERN =
-    /(?:조롱|비웃|한심|우습|웃기|볼품없|못생|괴상|혐오|추하|꼴사납|돼지|멸치|괴물|뭘까요|뭐냐)/u;
+    /(?:조롱|비웃|한심|우습|볼품없|못생|괴상|혐오|추하|꼴사납|돼지|멸치|괴물|뭘까요|뭐냐)/u;
+const V28_GROUNDED_RELATIONSHIP_INTERPRETATION_PATTERN =
+    /(?:관계\s*(?:의\s*)?(?:기류|온도|흐름|신호|맥락|단서)|커플\s*(?:기류|분위기|신호)|썸\s*(?:기류|분위기|신호)|연애\s*(?:기류|분위기|신호)|호감\s*(?:기류|분위기|신호))/u;
+const V28_UNSUPPORTED_RELATIONSHIP_FACT_PATTERN =
+    /(?:(?<![\p{Script=Latin}\p{N}_])(?:boyfriend|girlfriend|couple|dating|relationship|married|husband|wife|spouse|fianc(?:e|ee|é|ée)|engaged|divorced)(?![\p{Script=Latin}\p{N}_])|남자친구|여자친구|남친|여친|애인|배우자|남편|아내|부부|결혼|혼인|기혼|미혼|약혼|동거|이혼|재혼|불륜|외도|밀회|데이트|바람(?:을\s*)?(?:피우|피웠|폈|난|났다)|사귀(?:는|고)?\s*(?:것\s*)?(?:같|듯|중|있|다|네요|사이|관계)|연애\s*(?:중|하|한다|했다|하네요|한다는|하는\s*(?:것\s*)?(?:같|듯)|로\s*(?:보|읽))|교제\s*(?:중|하|한다|했다|하네요|하는\s*(?:것\s*)?(?:같|듯)|로\s*(?:보|읽))|커플\s*(?:확정|인\s*(?:것\s*)?(?:같|듯)|같|이다|이네요|처럼\s*보)|썸\s*(?:타|중|이다|이네요|처럼\s*보)|관계\s*(?:를\s*(?:맺|시작)|가\s*(?:연애|특별|친밀)))/iu;
 const V28_RELATIONSHIP_ASSERTION_ISSUE_MESSAGE =
     'v2.8 public copy must not assert or speculate about a relationship.';
 const STAGED_OPERATION_PREFIX = Object.freeze({
@@ -385,6 +389,18 @@ function containsV28UnsupportedRelationshipStyle(value: string): boolean {
         || V28_ENGLISH_RELATIONSHIP_TERM_PATTERN.test(normalized);
 }
 
+function containsV28RelationshipStyle(value: string): boolean {
+    const normalized = value.normalize('NFKC');
+    return containsV28UnsupportedRelationshipStyle(normalized)
+        || V28_GROUNDED_RELATIONSHIP_INTERPRETATION_PATTERN.test(normalized);
+}
+
+function containsV28UnsupportedRelationshipFact(value: string): boolean {
+    const normalized = value.normalize('NFKC');
+    return containsDefinitiveRelationshipAccusation(normalized)
+        || V28_UNSUPPORTED_RELATIONSHIP_FACT_PATTERN.test(normalized);
+}
+
 function containsV28ProtectedOrAppearanceMockery(value: string): boolean {
     const normalized = value.normalize('NFKC');
     return /(?:돼지|멸치)(?:네요|같|라고|취급|취급하)/u.test(normalized)
@@ -397,6 +413,7 @@ function containsV28ProtectedOrAppearanceMockery(value: string): boolean {
 function addV28PublicStyleIssues(
     value: string,
     context: z.RefinementCtx,
+    options: { allowGroundedRelationship?: boolean } = {},
 ): void {
     if (V28_SELF_REFERENCE_PATTERN.test(value)) {
         context.addIssue({
@@ -410,7 +427,12 @@ function addV28PublicStyleIssues(
             message: 'v2.8 public copy must not mock protected traits, bodies, or appearance.',
         });
     }
-    if (containsV28UnsupportedRelationshipStyle(value)) {
+    const groundedRelationship = options.allowGroundedRelationship
+        && V28_GROUNDED_RELATIONSHIP_INTERPRETATION_PATTERN.test(value);
+    if (containsV28UnsupportedRelationshipFact(value) || (
+        containsV28RelationshipStyle(value)
+        && !groundedRelationship
+    )) {
         context.addIssue({
             code: 'custom',
             message: V28_RELATIONSHIP_ASSERTION_ISSUE_MESSAGE,
@@ -2571,7 +2593,7 @@ function narrativePrompt(
                 ? [`${String(actor)}${String(actor).endsWith('님') ? '이' : '가'} ${String(receiver)}에게 남긴 ${interaction}`]
                 : []
         ));
-        return `${legacy}\nv2.11 공개 서사는 첫 문장에 ${subjects.candidate}, 둘째 문장에 ${subjects.candidate}와 ${subjects.target}을 직접 적으세요. \"대상 계정\"이나 \"후보 계정\"이라는 표현은 금지합니다. 둘째 문장에는 다음 관측 방향 문구를 한 글자도 바꾸지 말고 모두 포함하세요: ${JSON.stringify(namedDirections)}. 단일 좋아요나 외모만으로 관계를 증명하지 마세요. ${appearanceRule} JSON 반환 직전에 lines의 모든 text를 다시 검사하고, 관계 어휘가 어떤 언어·활용형·인용·부정문으로든 있으면 해당 필드를 관계 어휘 없이 다시 쓰세요.`;
+        return `${legacy}\nv2.11 공개 서사는 첫 문장에 ${subjects.candidate}, 둘째 문장에 ${subjects.candidate}와 ${subjects.target}을 직접 적으세요. \"대상 계정\"이나 \"후보 계정\"이라는 표현은 금지합니다. 둘째 문장에는 다음 관측 방향 문구를 한 글자도 바꾸지 말고 모두 포함하세요: ${JSON.stringify(namedDirections)}. 단일 좋아요나 외모만으로 관계를 증명하지 마세요. 실제로 수집된 좋아요·댓글·태그·멘션 방향과 그 evidenceRefs가 둘째 문장에 있으면 그 상호작용에서 읽히는 가벼운 관계 해석은 허용하지만, 사귀는 중·연애 중·데이트·연인·배우자·외도·불륜 같은 데이트·친밀도 사실을 추측하거나 단정하지 마세요. ${appearanceRule} JSON 반환 직전에 lines의 모든 text를 다시 검사하고, 수집된 상호작용에 근거하지 않은 관계 주장은 관계 어휘 없이 다시 쓰세요.`;
     }
     return `${legacy}\n고위험 서사는 상호작용과 제공된 시각 근거를 구분해 구체적으로 쓰되, ㅋㅋ·자기지칭을 절대 쓰지 마세요. bio·caption 인용을 포함해 관계 관련 용어 자체를 lines에 쓰지 마세요. 보호 특성·신체·외모를 조롱하지 마세요. JSON 반환 직전에 lines의 모든 text를 다시 검사하고, 관계 어휘가 어떤 언어·활용형·인용·부정문으로든 있으면 해당 필드를 관계 어휘 없이 다시 쓰세요.`;
 }
@@ -2670,6 +2692,7 @@ function narrativeResponseSchemaFor(
             .filter(term => !REDACTION_COMMENT_TERMS.has(term))
     )].slice(0, 8);
     const requiredPhrases = v211Subjects ? [] : requiredInteractionPhrases(input);
+    const observedInteractionEvidenceRefs = new Set(allObservedInteractionRefs(input));
 
     return highRiskNarrativeModelResponseSchema.superRefine((value, context) => {
         const texts: [string, string] = [value.lines[0].text, value.lines[1].text];
@@ -2686,7 +2709,11 @@ function narrativeResponseSchemaFor(
         }
         value.lines.forEach((line, lineIndex) => {
             if (usesSafePublicPresentation(policyVersion)) {
-                addV28PublicStyleIssues(line.text, context);
+                addV28PublicStyleIssues(line.text, context, {
+                    allowGroundedRelationship: v211Subjects !== null
+                        && lineIndex === 1
+                        && line.evidenceRefs.some(ref => observedInteractionEvidenceRefs.has(ref)),
+                });
                 if (V28_LAUGH_PATTERN.test(line.text)) {
                     context.addIssue({
                         code: 'custom',
