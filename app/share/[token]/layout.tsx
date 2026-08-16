@@ -18,9 +18,10 @@ const shareTokenSchema = z.string().regex(/^[0-9a-f]{64}$/);
 const shareRecordSchema = z.object({
     id: z.string().uuid(),
     user_id: z.string().uuid(),
-    pipeline_version: z.literal('v2'),
+    pipeline_version: z.union([z.literal('v1'), z.literal('v2'), z.null()]),
     status: z.literal('completed'),
     share_enabled: z.literal(true),
+    target_instagram_id: z.string().min(1).max(255).optional(),
 }).strip();
 
 const FALLBACK: Metadata = {
@@ -34,16 +35,19 @@ const FALLBACK: Metadata = {
 async function displayNameFor(token: string): Promise<string | null> {
     const { data, error } = await supabaseAdmin
         .from('analysis_requests')
-        .select('id, user_id, pipeline_version, status, share_enabled')
+        .select('id, user_id, pipeline_version, status, share_enabled, target_instagram_id')
         .eq('share_token', token)
         .eq('share_enabled', true)
         .eq('status', 'completed')
-        .eq('pipeline_version', 'v2')
         .maybeSingle();
     if (error) return null;
     const record = shareRecordSchema.safeParse(data);
     if (!record.success) return null;
     if (!await isAnalysisResultAuthoritativelyPublished(record.data.id)) return null;
+
+    if (record.data.pipeline_version !== 'v2') {
+        return record.data.target_instagram_id ?? null;
+    }
 
     const page = await v2ShareResultService.loadPage({
         requestId: record.data.id,

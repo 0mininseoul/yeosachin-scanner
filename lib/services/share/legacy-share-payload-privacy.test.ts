@@ -72,6 +72,7 @@ function installLegacyShare() {
                 suspect_full_name: '김수연',
                 bio: SUSPECT_BIO,
                 risk_grade: 'high_risk',
+                one_line_overview: '프로필과 최근 피드의 특징이 뚜렷한 공개 계정입니다.',
                 risk_analysis: ['프로필과 피드는 꽤 눈에 띕니다.'],
             },
             {
@@ -81,6 +82,7 @@ function installLegacyShare() {
                 suspect_full_name: null,
                 bio: '서울 OO대 재학 · 취미는 클라이밍',
                 risk_grade: 'normal',
+                one_line_overview: '일상 기록과 공개 프로필의 흐름을 중심으로 정리한 계정입니다.',
                 risk_analysis: null,
             },
         ],
@@ -156,6 +158,7 @@ describe('legacy share payload privacy', () => {
         expect(results.select).toHaveBeenCalledTimes(1);
         const selected = results.select.mock.calls[0][0] as string;
         expect(selected).toContain('suspect_instagram_id');
+        expect(selected).toContain('one_line_overview');
         expect(selected).not.toMatch(/\bbio\b/);
     });
 
@@ -171,6 +174,13 @@ describe('legacy share payload privacy', () => {
             instagramUrl: 'https://instagram.com/suspect.one',
             riskGrade: 'high_risk',
             recentMutualRank: 1,
+            oneLineOverview: '프로필과 최근 피드의 특징이 뚜렷한 공개 계정입니다.',
+            riskAnalysis: [],
+        });
+        expect(body.femaleAccounts[1]).toMatchObject({
+            instagramId: 'suspect.two',
+            oneLineOverview: '일상 기록과 공개 프로필의 흐름을 중심으로 정리한 계정입니다.',
+            riskGrade: 'normal',
             riskAnalysis: [],
         });
         expect(body.summary).toMatchObject({
