@@ -142,6 +142,8 @@ const V28_UNSUPPORTED_RELATIONSHIP_FACT_PATTERN =
     /(?:(?<![\p{Script=Latin}\p{N}_])(?:boyfriend|girlfriend|couple|dating|relationship|married|husband|wife|spouse|fianc(?:e|ee|é|ée)|engaged|divorced)(?![\p{Script=Latin}\p{N}_])|남자친구|여자친구|남친|여친|애인|배우자|남편|아내|부부|결혼|혼인|기혼|미혼|약혼|동거|이혼|재혼|불륜|외도|밀회|데이트|바람(?:을\s*)?(?:피우|피웠|폈|난|났다)|사귀(?:는|고)?\s*(?:것\s*)?(?:같|듯|중|있|다|네요|사이|관계)|연애\s*(?:중|하|한다|했다|하네요|한다는|하는\s*(?:것\s*)?(?:같|듯)|로\s*(?:보|읽))|교제\s*(?:중|하|한다|했다|하네요|하는\s*(?:것\s*)?(?:같|듯)|로\s*(?:보|읽))|커플\s*(?:확정|인\s*(?:것\s*)?(?:같|듯)|같|이다|이네요|처럼\s*보)|썸\s*(?:타|중|이다|이네요|처럼\s*보)|관계\s*(?:를\s*(?:맺|시작)|가\s*(?:연애|특별|친밀)))/iu;
 const V28_RELATIONSHIP_ASSERTION_ISSUE_MESSAGE =
     'v2.8 public copy must not assert or speculate about a relationship.';
+const V211_METHODOLOGICAL_DISCLAIMER_ISSUE_MESSAGE =
+    'v2.11 public overview must not expose a methodological disclaimer.';
 const STAGED_OPERATION_PREFIX = Object.freeze({
     genderTriage: 'gender-triage',
     genderResolution: 'gender-resolution',
@@ -2194,7 +2196,10 @@ export async function featureAnalysis(
             candidate.code === 'custom'
             && candidate.path.length === 1
             && candidate.path[0] === 'oneLineOverview'
-            && candidate.message === V28_RELATIONSHIP_ASSERTION_ISSUE_MESSAGE
+            && (
+                candidate.message === V28_RELATIONSHIP_ASSERTION_ISSUE_MESSAGE
+                || candidate.message === V211_METHODOLOGICAL_DISCLAIMER_ISSUE_MESSAGE
+            )
         ));
         const candidate = repair?.candidate;
         if (
@@ -2206,8 +2211,11 @@ export async function featureAnalysis(
             || typeof (candidate as { oneLineOverview?: unknown }).oneLineOverview !== 'string'
         ) throw error;
         const invalidValue = (candidate as { oneLineOverview: string }).oneLineOverview;
+        const repairRequirements = issue.message === V211_METHODOLOGICAL_DISCLAIMER_ISSUE_MESSAGE
+            ? '분석 방법이나 자료의 한계를 직접 말하지 마세요. 원문에 드러난 실제 단서만 유지하고 새로운 사실이나 근거를 만들지 마세요.'
+            : '관계 어휘를 어떤 언어·활용형·인용·부정문으로도 쓰지 마세요.';
         const repaired = await analyzeWithGemini(
-            `다음 공개 문구 필드 하나만 수정하세요. 원문: ${JSON.stringify(invalidValue)}\n검증 요구사항: ${issue.message}\n금지 부분 문자열 목록: ${V28_RELATIONSHIP_FORBIDDEN_SUBSTRINGS.join(', ')}. 이 목록은 일반 단어의 일부로도 쓰지 말고, 바람을 피우다·바람이 났다 계열 및 영어 관계 용어도 쓰지 마세요. JSON만 반환하세요.`,
+            `다음 공개 문구 필드 하나만 수정하세요. 원문: ${JSON.stringify(invalidValue)}\n검증 요구사항: ${issue.message}\n${repairRequirements}\n금지 부분 문자열 목록: ${V28_RELATIONSHIP_FORBIDDEN_SUBSTRINGS.join(', ')}. 이 목록은 일반 단어의 일부로도 쓰지 말고, 바람을 피우다·바람이 났다 계열 및 영어 관계 용어도 쓰지 마세요. JSON만 반환하세요.`,
             [],
             {
                 schema: z.object({
