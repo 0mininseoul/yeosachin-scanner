@@ -2525,6 +2525,90 @@ describe('V2 staged AI services', () => {
         expect(mocks.analyzeWithGemini).toHaveBeenCalledTimes(2);
     });
 
+    it('repairs an invalid v2.11 two-line narrative with one Gemini call and preserves evidence refs', async () => {
+        const input = {
+            ...narrativeInput(),
+            interactions: {
+                ...narrativeInput().interactions,
+                targetToCandidateLike: notObserved(),
+                candidateToTargetComment: notObserved(),
+                comments: [],
+            },
+        };
+        const candidate = { lines: [{
+            text: '박민지님의 여행과 일상 기록은 꽤 차분하게 이어지는 피드입니다.',
+            evidenceRefs: ['profile:bio'],
+        }, {
+            text: '박민지님이 김준호님에게 남긴 좋아요 내역이 관측되었으나 이는 한정된 표본에 기초한 부분적인 결과이므로 수집 범위 밖에서 발생했을 다른 상호작용들이 누락되었을 가능성을 배제할 수 없습니다.',
+            evidenceRefs: ['like:candidate-to-target', 'coverage:target-interactions'],
+        }] };
+        const validation = new GeminiResponseValidationError(
+            'schema rejected',
+            { category: 'schema_validation', issues: [{ path: 'lines', code: 'custom' }], truncated: false },
+            {
+                candidate,
+                issues: [{ code: 'custom', path: ['lines'], message: 'Narrative violates the public two-line contract.' }],
+            },
+        );
+        mocks.analyzeWithGemini
+            .mockRejectedValueOnce(new Error('AI_GENERATION_RESPONSE_REJECTED_ERROR: generated response failed strict validation.', { cause: validation }))
+            .mockImplementationOnce(async (
+                prompt: string,
+                _images: string[],
+                options: { schema: { parse(value: unknown): unknown } },
+            ) => {
+                expect(prompt).toContain(candidate.lines[0].text);
+                expect(prompt).toContain(candidate.lines[1].text);
+                expect(prompt).toContain('각 문장은 180자 이하');
+                expect(prompt).toContain('상호작용 수량 표현 없이');
+                return options.schema.parse({ lines: [
+                    'Gemini가 바꾸려 한 첫 문장입니다.',
+                    '박민지님이 김준호님에게 남긴 좋아요가 관측되었고, 수집 표본 밖의 다른 상호작용은 누락될 수 있습니다.',
+                ] });
+            });
+
+        const result = await highRiskNarrative(
+            input,
+            audit('highRiskNarrative', input, AI_STAGE_POLICY_V211_VERSION),
+            { aiStagePolicyVersion: AI_STAGE_POLICY_V211_VERSION },
+        );
+
+        expect(result.lines[0]).toBe(candidate.lines[0].text);
+        expect(result.lines[1]).toContain('수집 표본 밖');
+        expect(result.evidenceRefs).toEqual(candidate.lines.map(line => line.evidenceRefs));
+        expect(mocks.analyzeWithGemini).toHaveBeenCalledTimes(2);
+    });
+
+    it('does not repair an unrelated custom issue at the narrative lines path', async () => {
+        const input = narrativeInput();
+        const candidate = { lines: [{
+            text: '박민지님의 여행과 일상 기록은 꽤 차분하게 이어지는 피드입니다.',
+            evidenceRefs: ['profile:bio'],
+        }, {
+            text: '박민지님이 김준호님에게 남긴 좋아요와 댓글은 확인되지만, 수집 표본 밖 누락 가능성은 남습니다.',
+            evidenceRefs: ['like:candidate-to-target', 'comment:1', 'coverage:target-interactions'],
+        }] };
+        const validation = new GeminiResponseValidationError(
+            'schema rejected',
+            { category: 'schema_validation', issues: [{ path: 'lines', code: 'custom' }], truncated: false },
+            {
+                candidate,
+                issues: [{ code: 'custom', path: ['lines'], message: 'Narrative must use canonical public subjects.' }],
+            },
+        );
+        mocks.analyzeWithGemini.mockRejectedValueOnce(new Error(
+            'AI_GENERATION_RESPONSE_REJECTED_ERROR: generated response failed strict validation.',
+            { cause: validation },
+        ));
+
+        await expect(highRiskNarrative(
+            input,
+            audit('highRiskNarrative', input, AI_STAGE_POLICY_V211_VERSION),
+            { aiStagePolicyVersion: AI_STAGE_POLICY_V211_VERSION },
+        )).rejects.toThrow('AI_GENERATION_RESPONSE_REJECTED_ERROR');
+        expect(mocks.analyzeWithGemini).toHaveBeenCalledTimes(1);
+    });
+
     it('fails closed when a targeted narrative repair still violates the full contract', async () => {
         const input = narrativeInput();
         const candidate = { lines: [{
@@ -2536,10 +2620,10 @@ describe('V2 staged AI services', () => {
         }] };
         const validation = new GeminiResponseValidationError(
             'schema rejected',
-            { category: 'schema_validation', issues: [{ path: 'lines.#.text', code: 'custom' }], truncated: false },
+            { category: 'schema_validation', issues: [{ path: 'lines', code: 'custom' }], truncated: false },
             {
                 candidate,
-                issues: [{ code: 'custom', path: ['lines', 1, 'text'], message: 'Narrative violates the public two-line contract.' }],
+                issues: [{ code: 'custom', path: ['lines'], message: 'Narrative violates the public two-line contract.' }],
             },
         );
         mocks.analyzeWithGemini
@@ -2548,7 +2632,7 @@ describe('V2 staged AI services', () => {
                 _prompt: string,
                 _images: string[],
                 options: { schema: { parse(value: unknown): unknown } },
-            ) => options.schema.parse({ value: candidate.lines[1].text }));
+            ) => options.schema.parse({ lines: candidate.lines.map(line => line.text) }));
 
         await expect(highRiskNarrative(
             input,
