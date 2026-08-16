@@ -22,6 +22,7 @@ import {
 import type { AnalysisV2ReplayBundle } from './replay-bundle';
 import { historicalPartialSourceUniverseDigest } from './historical-partial-available-artifact';
 import { parseReplayCliArgs } from '../../../../scripts/replay-analysis-v2';
+import { FIRST_PAYMENT_BASIC_V211_CONCIERGE_CAPABILITY } from './replay-source-lineage';
 
 function v27Runner(operations: ReplayAiRunner): ReplayAiRunner {
     const runner = Object.freeze({ ...operations });
@@ -98,6 +99,79 @@ const bundle = {
         { ordinal: 2, isPrivate: true, username: 'private', fullName: null, hasProfileImage: false, bio: null, media: [], triageSelectionIds: [], featureSelectionIds: [], resolverSelectionIds: [], captions: [], coverage: { selectedCount: 0, normalizedCount: 0, failures: [] } },
     ], evidence: { relationship: [], targetInteractions: [], reverseInteractions: [] },
 };
+
+const firstPaymentBundle = {
+    ...bundle,
+    capture: {
+        ...bundle.capture,
+        sourceLineage: {
+            selectedPlanId: 'basic' as const,
+            policyVersions: {
+                pipeline: 'v2' as const,
+                aiStage: 'ai-stage-policy-v2.11' as const,
+                risk: 'risk-policy-v2.5' as const,
+                scheduler: 'ai-scheduler-v1' as const,
+            },
+        },
+        evaluationPolicy: {
+            capability: FIRST_PAYMENT_BASIC_V211_CONCIERGE_CAPABILITY,
+            aiStage: 'ai-stage-policy-v2.11' as const,
+        },
+    },
+    profiles: [
+        {
+            ordinal: 1,
+            isPrivate: false,
+            username: 'female_candidate',
+            fullName: '김수연',
+            hasProfileImage: true,
+            bio: null,
+            media: [
+                { selectionId: 'profile:female', kind: 'profile' as const, caption: null, jpegBase64: '/9j/2Q==' },
+                { selectionId: 'feed:female', kind: 'feed' as const, postId: 'pf', caption: 'feed', jpegBase64: '/9j/2Q==' },
+            ],
+            triageSelectionIds: ['profile:female', 'feed:female'],
+            featureSelectionIds: ['profile:female', 'feed:female'],
+            resolverSelectionIds: ['profile:female', 'feed:female'],
+            captions: [{ evidenceRefId: 'caption:female', selectionId: 'feed:female', text: 'feed' }],
+            coverage: { selectedCount: 2, normalizedCount: 2, failures: [] },
+        },
+        {
+            ordinal: 2,
+            isPrivate: false,
+            username: 'unknown_candidate',
+            fullName: '박지민',
+            hasProfileImage: true,
+            bio: null,
+            media: [
+                { selectionId: 'profile:unknown', kind: 'profile' as const, caption: null, jpegBase64: '/9j/2Q==' },
+                { selectionId: 'feed:unknown', kind: 'feed' as const, postId: 'pu', caption: 'feed', jpegBase64: '/9j/2Q==' },
+            ],
+            triageSelectionIds: ['profile:unknown', 'feed:unknown'],
+            featureSelectionIds: ['profile:unknown', 'feed:unknown'],
+            resolverSelectionIds: ['profile:unknown', 'feed:unknown'],
+            captions: [{ evidenceRefId: 'caption:unknown', selectionId: 'feed:unknown', text: 'feed' }],
+            coverage: { selectedCount: 2, normalizedCount: 2, failures: [] },
+        },
+        {
+            ordinal: 3,
+            isPrivate: false,
+            username: 'male_candidate',
+            fullName: '김민수',
+            hasProfileImage: true,
+            bio: null,
+            media: [
+                { selectionId: 'profile:male', kind: 'profile' as const, caption: null, jpegBase64: '/9j/2Q==' },
+                { selectionId: 'feed:male', kind: 'feed' as const, postId: 'pm', caption: 'feed', jpegBase64: '/9j/2Q==' },
+            ],
+            triageSelectionIds: ['profile:male', 'feed:male'],
+            featureSelectionIds: ['profile:male', 'feed:male'],
+            resolverSelectionIds: ['profile:male', 'feed:male'],
+            captions: [{ evidenceRefId: 'caption:male', selectionId: 'feed:male', text: 'feed' }],
+            coverage: { selectedCount: 2, normalizedCount: 2, failures: [] },
+        },
+    ],
+} satisfies AnalysisV2ReplayBundle;
 
 describe('AI-only replay runner', () => {
     it('text-only maintenance skips retained public accounts without usable triage media and emits only the analyzed subset', async () => {
@@ -761,6 +835,117 @@ describe('AI-only replay runner', () => {
         });
         expect(feature).not.toHaveBeenCalled();
         expect(report.gender).toEqual({ male: 1, female: 0, unknown: 0, unknownRate: 0 });
+    });
+
+    it('uses the paid concierge first-pass contract and sends feed media to female and unknown candidates only', async () => {
+        const firstPass = vi.fn(async (input: {
+            ordinal: number;
+            fullName: string;
+            media: readonly { selectionId: string; kind: string }[];
+        }) => ({
+            outcome: 'ok' as const,
+            attempts: 1,
+            retries: 0,
+            elapsedMs: 1,
+            value: input.ordinal === 1
+                ? {
+                    assessment: {
+                        inferredGender: 'female' as const,
+                        confidence: 'high' as const,
+                        ownerConsistency: 'not_visible' as const,
+                        evidenceSelectionIds: ['profile:female'],
+                    },
+                    routingDecision: 'route_to_feature_analysis' as const,
+                    routingReason: 'conserve_female_recall' as const,
+                    analyzedSelectionIds: ['profile:female'],
+                }
+                : input.ordinal === 2
+                ? {
+                    assessment: {
+                        inferredGender: 'unknown' as const,
+                        confidence: 'low' as const,
+                        ownerConsistency: 'not_visible' as const,
+                        evidenceSelectionIds: [],
+                    },
+                    routingDecision: 'route_to_feature_analysis' as const,
+                    routingReason: 'conserve_female_recall' as const,
+                    analyzedSelectionIds: ['profile:unknown'],
+                }
+                : {
+                    assessment: {
+                        inferredGender: 'male' as const,
+                        confidence: 'high' as const,
+                        ownerConsistency: 'same_person' as const,
+                        evidenceSelectionIds: ['profile:male'],
+                    },
+                    routingDecision: 'exclude_high_confidence_male' as const,
+                    routingReason: 'high_confidence_same_owner_male' as const,
+                    analyzedSelectionIds: ['profile:male'],
+                },
+        }));
+        const feature = vi.fn(async () => ({
+            outcome: 'ok' as const,
+            attempts: 1,
+            retries: 0,
+            elapsedMs: 2,
+            value: {
+                features: {
+                    gender: 'female' as const,
+                    genderConfidence: 'high' as const,
+                    ownerConsistency: 'same_person' as const,
+                    appearanceGrade: 3,
+                    exposureScore: 1,
+                    businessClassification: 'personal' as const,
+                    businessConfidence: 'medium' as const,
+                    accountContext: 'personal' as const,
+                    marriageEvidence: 'none' as const,
+                    partnerEvidence: 'none' as const,
+                    partnerExclusionContext: 'none' as const,
+                    evidenceSelectionIds: {
+                        gender: ['feed:female'], appearance: ['feed:female'], exposure: ['feed:female'],
+                        business: ['feed:female'], accountContext: ['feed:female'], marriagePartner: [],
+                    },
+                    oneLineOverview: '구체적인 공개 단서를 바탕으로 계정의 분위기와 맥락을 정리한 충분히 긴 한국어 총평입니다.',
+                },
+                finalGenderDecision: 'verified_female' as const,
+                analyzedSelectionIds: ['profile:female', 'feed:female'],
+            } satisfies FeatureAnalysisResult,
+        }));
+
+        const report = await runAnalysisV2AiReplay({
+            bundle: firstPaymentBundle,
+            runner: v211Runner({ firstPass, feature }),
+            mode: 'paid-ai',
+            paidAiOptIn: true,
+            evaluationPolicy: firstPaymentBundle.capture.evaluationPolicy,
+        });
+
+        expect(firstPass).toHaveBeenCalledTimes(3);
+        const firstPassCalls = firstPass.mock.calls as Array<[{
+            fullName: string;
+            media: readonly { kind: string }[];
+        }] >;
+        expect(firstPassCalls.map(([input]) => ({
+            fullName: input.fullName,
+            media: input.media.map(item => item.kind),
+        }))).toEqual([
+            { fullName: '김수연', media: ['profile'] },
+            { fullName: '박지민', media: ['profile'] },
+            { fullName: '김민수', media: ['profile'] },
+        ]);
+        expect(feature).toHaveBeenCalledTimes(2);
+        const featureCalls = feature.mock.calls as unknown as Array<[{
+            media: readonly { kind: string }[];
+            triage: { assessment: { inferredGender: string } };
+        }] >;
+        expect(featureCalls.map(([input]) => ({
+            gender: input.triage.assessment.inferredGender,
+            media: input.media.map(item => item.kind),
+        }))).toEqual([
+            { gender: 'female', media: ['profile', 'feed'] },
+            { gender: 'unknown', media: ['profile', 'feed'] },
+        ]);
+        expect(report.gender).toEqual({ male: 1, female: 2, unknown: 0, unknownRate: 0 });
     });
 
     it('starts feature and resolver together and applies the production reconciliation to final gender', async () => {

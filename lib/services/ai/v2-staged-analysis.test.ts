@@ -37,6 +37,7 @@ import {
 import {
     applyGenderResolution,
     createFeatureAnalysisResultIdentity,
+    createGenderFirstPassResultIdentity,
     createGenderResolutionResultIdentity,
     createGenderTriageResultIdentity,
     createGenderTriageMicrobatchAccountId,
@@ -46,6 +47,7 @@ import {
     featureAnalysis,
     featureAnalysisModelResponseSchema,
     genderResolution,
+    genderFirstPass,
     genderResolutionModelResponseSchemaFor,
     genderTriage,
     genderTriageMicrobatch,
@@ -125,6 +127,25 @@ function audit(
                     >[0], policyVersion
                 );
     if (!resultIdentity) throw new Error('Test audit requires a generated stage identity.');
+    return {
+        requestId,
+        operationKey: resultIdentity.operationKey,
+        resultIdentity,
+        prepare: vi.fn().mockResolvedValue({
+            result: null,
+            source: null,
+            startingAttempt: 1,
+        }),
+        onBeforeAttempt: vi.fn(),
+        onAttemptTelemetry: vi.fn(),
+    };
+}
+
+function firstPassAudit(
+    rawInput: Parameters<typeof createGenderFirstPassResultIdentity>[0],
+    policyVersion: AiStagePolicyVersion = AI_STAGE_POLICY_V211_VERSION,
+): StagedAiAuditContext {
+    const resultIdentity = createGenderFirstPassResultIdentity(rawInput, policyVersion);
     return {
         requestId,
         operationKey: resultIdentity.operationKey,
@@ -645,6 +666,55 @@ describe('V2 staged AI services', () => {
             onBeforeAttempt: hooks.onBeforeAttempt,
             onAttemptTelemetry: hooks.onAttemptTelemetry,
         });
+    });
+
+    it('first-pass classifies from full name plus profile image without requiring multi-image owner evidence', async () => {
+        const input = {
+            fullName: '김수연',
+            media: [media()[0]!],
+        };
+        mocks.analyzeWithGemini.mockImplementation(async (
+            _prompt: string,
+            _images: string[],
+            options: { schema: { parse(value: unknown): unknown } }
+        ) => options.schema.parse({
+            inferredGender: 'female',
+            confidence: 'high',
+            ownerConsistency: 'not_visible',
+            evidenceSelectionIds: ['profile:candidate'],
+        }));
+
+        const result = await genderFirstPass(
+            input,
+            firstPassAudit(input),
+            { aiStagePolicyVersion: AI_STAGE_POLICY_V211_VERSION },
+        );
+
+        expect(result.assessment).toEqual({
+            inferredGender: 'female',
+            confidence: 'high',
+            ownerConsistency: 'not_visible',
+            evidenceSelectionIds: ['profile:candidate'],
+        });
+        expect(result.routingDecision).toBe('route_to_feature_analysis');
+        const [prompt, images] = mocks.analyzeWithGemini.mock.calls[0]!;
+        expect(images).toHaveLength(1);
+        expect(prompt).toContain('김수연');
+        expect(prompt).toContain('first-pass');
+    });
+
+    it('rejects a first-pass request unless full name and one profile image are both supplied', async () => {
+        const input = {
+            fullName: '김수연',
+            media: [media()[1]!],
+        };
+
+        await expect(genderFirstPass(
+            input,
+            {} as StagedAiAuditContext,
+            { aiStagePolicyVersion: AI_STAGE_POLICY_V211_VERSION },
+        )).rejects.toThrow();
+        expect(mocks.analyzeWithGemini).not.toHaveBeenCalled();
     });
 
     it('routes uncertain male and all female or unknown triage results to preserve female recall', async () => {
