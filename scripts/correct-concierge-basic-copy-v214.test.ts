@@ -1,13 +1,28 @@
 import { describe, expect, it, vi } from 'vitest';
 
+const scopedMocks = vi.hoisted(() => ({
+    analyzeWithGemini: vi.fn(),
+    strictHighRiskNarrative: vi.fn(),
+}));
+
 vi.mock('@/lib/supabase/admin', () => ({ supabaseAdmin: {} }));
+vi.mock('@/lib/services/ai/gemini', async importOriginal => ({
+    ...await importOriginal<typeof import('@/lib/services/ai/gemini')>(),
+    analyzeWithGemini: scopedMocks.analyzeWithGemini,
+}));
+vi.mock('@/lib/services/ai/v2-staged-analysis', async importOriginal => ({
+    ...await importOriginal<typeof import('@/lib/services/ai/v2-staged-analysis')>(),
+    highRiskNarrative: scopedMocks.strictHighRiskNarrative,
+}));
 
 import {
     buildV214NarrativeInput,
     buildV214GeminiCopyPayload,
+    generateV214RelaxedNarrative,
     generateV214GeminiCopyWithSchemaRetry,
     type V214FrozenResultRow,
 } from './correct-concierge-basic-copy-v214';
+import { issueReplayStatelessCapability } from '@/lib/services/ai/replay-stateless-capability';
 import type { FeatureAnalysisResult } from '@/lib/services/ai/v2-staged-analysis';
 
 const syllables = [
@@ -251,5 +266,111 @@ describe('v2.14 first-payment Gemini copy correction', () => {
             generated: unchangedNarrative,
         }))
             .toThrow('CONCIERGE_COPY_V214_HIGH_RISK_NARRATIVE_UNCHANGED');
+    });
+
+    it('uses only the scoped relaxed DTO and never calls the strict global narrative wrapper', async () => {
+        const target = {
+            username: 'target.user', fullName: '김준호', followersCount: 1,
+            followingCount: 1, postsCount: 1, isPrivate: false, isVerified: false,
+            latestPosts: [],
+        };
+        const candidate = {
+            username: 'candidate.user', fullName: '박민지',
+            bio: '여행 기록 https://private.example @other.user 010-1234-5678',
+            followersCount: 1, followingCount: 1, postsCount: 1,
+            isPrivate: false, isVerified: false,
+            latestPosts: [],
+        };
+        const capturedProfile = {
+            ordinal: 1, isPrivate: false, username: 'candidate.user', fullName: '박민지',
+            hasProfileImage: true, bio: '여행 기록',
+            media: [{ selectionId: 'post:candidate:1', kind: 'feed' as const, postId: 'candidate-post', jpegBase64: 'aGVsbG8=' }],
+            triageSelectionIds: ['post:candidate:1'], featureSelectionIds: ['post:candidate:1'],
+            resolverSelectionIds: ['post:candidate:1'], captions: [],
+            coverage: { selectedCount: 1, normalizedCount: 1, failures: [] },
+        } as Parameters<typeof buildV214NarrativeInput>[0]['capturedProfile'];
+        const feature = {
+            features: {
+                gender: 'female', genderConfidence: 'high', ownerConsistency: 'same_person',
+                appearanceGrade: 4, exposureScore: 2, businessClassification: 'personal',
+                businessConfidence: 'high', accountContext: 'personal', marriageEvidence: 'none',
+                partnerEvidence: 'none', partnerExclusionContext: 'none',
+                evidenceSelectionIds: { gender: [], appearance: [], exposure: [], business: [], accountContext: [], marriagePartner: [] },
+                oneLineOverview: '여행 기록이 또렷하게 남는 계정입니다.',
+            },
+            finalGenderDecision: 'verified_female', analyzedSelectionIds: ['post:candidate:1'],
+        } as FeatureAnalysisResult;
+        const narrativeInput = buildV214NarrativeInput({
+            targetProfile: target, candidateProfile: candidate, capturedProfile, feature,
+            interactions: [{
+                candidateUsername: 'candidate.user', postId: 'target-post',
+                signal: 'female_target_like', sourceInteractionId: 'like:1',
+            }],
+            targetToCandidateLike: { status: 'not_observed', evidenceRefIds: [] },
+        });
+        const likeRef = narrativeInput.interactions.candidateToTargetLike.evidenceRefIds[0]!;
+        const coverageRef = narrativeInput.interactions.coverage.evidenceRefId;
+        scopedMocks.strictHighRiskNarrative.mockImplementation(() => {
+            throw new Error('STRICT_WRAPPER_MUST_NOT_BE_CALLED');
+        });
+        let capturedPrompt = '';
+        scopedMocks.analyzeWithGemini.mockImplementationOnce(async (
+            prompt: string,
+            _images: readonly string[],
+            options: { schema: { parse(value: unknown): unknown } },
+        ) => {
+            capturedPrompt = prompt;
+            return options.schema.parse({
+                lines: [{
+                    text: '박민지님의 여행 기록은 연애 맥락으로도 읽힙니다.',
+                    evidenceRefs: ['profile:bio'],
+                }, {
+                    text: '박민지님이 김준호님에게 좋아요를 남긴 흐름은 연애 중으로 보입니다.',
+                    evidenceRefs: [likeRef, coverageRef],
+                }],
+            });
+        });
+
+        const result = await generateV214RelaxedNarrative({
+            narrativeInput,
+            candidateFullName: '박민지',
+            targetFullName: '김준호',
+            requestId: '11111111-1111-4111-8111-111111111111',
+            replayCapability: issueReplayStatelessCapability(),
+        });
+
+        expect(scopedMocks.strictHighRiskNarrative).not.toHaveBeenCalled();
+        expect(scopedMocks.analyzeWithGemini).toHaveBeenCalledOnce();
+        expect(result.lines).toHaveLength(2);
+        expect(result.lines[0]?.text).toContain('연애 맥락');
+        expect(result.lines[1]?.text).toContain('연애 중');
+        expect(result.lines[1]?.evidenceRefs).toEqual([likeRef, coverageRef]);
+        expect(capturedPrompt).not.toContain('private.example');
+        expect(capturedPrompt).not.toContain('@other.user');
+        expect(capturedPrompt).not.toContain('010-1234-5678');
+        expect(capturedPrompt).toContain('[링크 제거]');
+        expect(capturedPrompt).toContain('[계정명 제거]');
+        expect(capturedPrompt).toContain('[연락처 제거]');
+
+        scopedMocks.analyzeWithGemini.mockImplementationOnce(async (
+            _prompt: string,
+            _images: readonly string[],
+            options: { schema: { parse(value: unknown): unknown } },
+        ) => options.schema.parse({
+            lines: [{
+                text: '박민지님의 여행 기록은 2026년에도 이어집니다.',
+                evidenceRefs: ['profile:bio'],
+            }, {
+                text: '박민지님이 김준호님에게 좋아요를 남긴 흐름은 확인됩니다.',
+                evidenceRefs: [likeRef, coverageRef],
+            }],
+        }));
+        await expect(generateV214RelaxedNarrative({
+            narrativeInput,
+            candidateFullName: '박민지',
+            targetFullName: '김준호',
+            requestId: '11111111-1111-4111-8111-111111111111',
+            replayCapability: issueReplayStatelessCapability(),
+        })).rejects.toThrow('CONCIERGE_COPY_V214_NARRATIVE_PRIVACY_INVALID');
     });
 });
