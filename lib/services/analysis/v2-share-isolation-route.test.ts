@@ -13,6 +13,8 @@ const mocks = vi.hoisted(() => ({
     loadV2Page: vi.fn(),
     isResultAuthoritativelyPublished: vi.fn(),
     requireActiveAccountClassification: vi.fn(),
+    isAnalysisResultOperator: vi.fn(),
+    resolveAnalysisResultOwner: vi.fn(),
 }));
 
 vi.mock('@/lib/supabase/server', () => ({ createClient: mocks.createClient }));
@@ -28,6 +30,10 @@ vi.mock('@/lib/services/share/v2-result-share', () => ({
 }));
 vi.mock('@/lib/services/analysis/result-publication-authority', () => ({
     isAnalysisResultAuthoritativelyPublished: mocks.isResultAuthoritativelyPublished,
+}));
+vi.mock('@/lib/services/analysis/result-operator-access', () => ({
+    isAnalysisResultOperator: mocks.isAnalysisResultOperator,
+    resolveAnalysisResultOwner: mocks.resolveAnalysisResultOwner,
 }));
 vi.mock('@/lib/services/identity/account-principal-store', async importOriginal => ({
     ...(await importOriginal<typeof import('@/lib/services/identity/account-principal-store')>()),
@@ -194,6 +200,8 @@ describe('V2 share isolation', () => {
         mocks.demoFind.mockResolvedValue(null);
         mocks.isResultAuthoritativelyPublished.mockResolvedValue(true);
         mocks.generateToken.mockReturnValue('b'.repeat(64));
+        mocks.isAnalysisResultOperator.mockReturnValue(false);
+        mocks.resolveAnalysisResultOwner.mockResolvedValue(null);
     });
 
     it('enables a completed V2 owner result and returns absolute page and OG URLs', async () => {
@@ -231,6 +239,39 @@ describe('V2 share isolation', () => {
         expect(request.select).toHaveBeenCalledWith(
             'id, user_id, pipeline_version, status, share_token, share_enabled'
         );
+    });
+
+    it('enables a completed V1 result for the trusted result operator', async () => {
+        const ownerId = '323e4567-e89b-42d3-a456-426614174000';
+        mocks.getUser.mockResolvedValue({
+            data: { user: { id: userId, email: 'ym1113@kakao.com' } },
+            error: null,
+        });
+        mocks.isAnalysisResultOperator.mockReturnValue(true);
+        mocks.resolveAnalysisResultOwner.mockResolvedValue(ownerId);
+        const request = requestChain({
+            id: requestId,
+            user_id: ownerId,
+            pipeline_version: 'v1',
+            status: 'completed',
+            share_token: null,
+            share_enabled: false,
+        });
+        mocks.from.mockReturnValue(request);
+
+        const response = await enableShare(new Request('https://example.com/api/share/enable', {
+            method: 'POST',
+            body: JSON.stringify({ requestId }),
+        }));
+
+        expect(response.status).toBe(200);
+        await expect(response.json()).resolves.toMatchObject({
+            success: true,
+            shareToken: 'b'.repeat(64),
+            shareUrl: `https://yeosachin.com/share/${'b'.repeat(64)}`,
+        });
+        expect(mocks.resolveAnalysisResultOwner).toHaveBeenCalled();
+        expect(request.eq).toHaveBeenCalledWith('user_id', ownerId);
     });
 
     it('fails closed before enabling a share for a retired account', async () => {
