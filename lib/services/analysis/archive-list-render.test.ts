@@ -70,12 +70,13 @@ describe('mypage archive list rendering', () => {
         expect(markup).toContain('@target.account');
     });
 
-    it('renders an incomplete analysis as 대기 중 while keeping it off the result route', () => {
+    it('renders a paid-but-unpublished analysis as 대기 중 and non-clickable', () => {
         const markup = renderToStaticMarkup(createElement(AnalysisList, {
             initialEntries: [pendingAnalysisEntry()],
         }));
 
         expect(markup).toContain('대기 중');
         expect(markup).not.toContain('/result/');
+        expect(markup).not.toContain('<button');
     });
 });
