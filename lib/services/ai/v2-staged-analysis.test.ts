@@ -2495,6 +2495,116 @@ describe('V2 staged AI services', () => {
         )).rejects.toThrow('AI_GENERATION_RESPONSE_REJECTED_ERROR');
     });
 
+    it('allows a relationship interpretation when the interaction line cites collected directions', async () => {
+        const input = narrativeInput();
+        mocks.analyzeWithGemini.mockImplementationOnce(async (
+            _prompt: string,
+            _images: string[],
+            options: { schema: { parse(value: unknown): unknown } },
+        ) => options.schema.parse({
+            lines: [{
+                text: '박민지님의 여행과 일상 기록은 꽤 차분하게 이어지는 피드입니다.',
+                evidenceRefs: ['profile:bio'],
+            }, {
+                text: '박민지님이 김준호님에게 남긴 좋아요와 댓글의 반가워 표현, 김준호님이 박민지님에게 남긴 좋아요가 이어져 커플 기류처럼 읽히지만, 수집 표본 밖 누락 가능성은 남습니다.',
+                evidenceRefs: [
+                    'like:candidate-to-target',
+                    'like:target-to-candidate',
+                    'comment:1',
+                    'coverage:target-interactions',
+                ],
+            }],
+        }));
+
+        const result = await highRiskNarrative(
+            input,
+            audit('highRiskNarrative', input, AI_STAGE_POLICY_V211_VERSION),
+            { aiStagePolicyVersion: AI_STAGE_POLICY_V211_VERSION },
+        );
+
+        expect(result.source).toBe('gemini');
+        expect(result.lines[1]).toContain('커플 기류');
+    });
+
+    it('rejects a relationship interpretation when no interaction direction was observed', async () => {
+        const base = narrativeInput();
+        const input: HighRiskNarrativeInput = {
+            ...base,
+            interactions: {
+                ...base.interactions,
+                candidateToTargetLike: notObserved(),
+                targetToCandidateLike: notObserved(),
+                candidateToTargetComment: notObserved(),
+                comments: [],
+            },
+        };
+        mocks.analyzeWithGemini.mockImplementationOnce(async (
+            _prompt: string,
+            _images: string[],
+            options: { schema: { parse(value: unknown): unknown } },
+        ) => options.schema.parse({
+            lines: [{
+                text: '박민지님의 여행과 일상 기록은 꽤 차분하게 이어지는 피드입니다.',
+                evidenceRefs: ['profile:bio'],
+            }, {
+                text: '박민지님과 김준호님 사이의 커플 기류가 읽히지만, 공개 상호작용은 수집 표본 밖 누락 가능성이 남습니다.',
+                evidenceRefs: ['coverage:target-interactions'],
+            }],
+        }));
+
+        await expect(highRiskNarrative(
+            input,
+            audit('highRiskNarrative', input, AI_STAGE_POLICY_V211_VERSION),
+            { aiStagePolicyVersion: AI_STAGE_POLICY_V211_VERSION },
+        )).rejects.toThrow('AI_GENERATION_RESPONSE_REJECTED_ERROR');
+    });
+
+    it('continues rejecting an unsupported dating fact even when likes and comments are collected', async () => {
+        const input = narrativeInput();
+        mocks.analyzeWithGemini.mockImplementationOnce(async (
+            _prompt: string,
+            _images: string[],
+            options: { schema: { parse(value: unknown): unknown } },
+        ) => options.schema.parse({
+            lines: [{
+                text: '박민지님의 여행과 일상 기록은 꽤 차분하게 이어지는 피드입니다.',
+                evidenceRefs: ['profile:bio'],
+            }, {
+                text: '박민지님이 김준호님에게 남긴 좋아요와 댓글, 김준호님이 박민지님에게 남긴 좋아요가 이어져 두 사람은 연애 중입니다.',
+                evidenceRefs: [
+                    'like:candidate-to-target',
+                    'like:target-to-candidate',
+                    'comment:1',
+                    'coverage:target-interactions',
+                ],
+            }],
+        }));
+
+        await expect(highRiskNarrative(
+            input,
+            audit('highRiskNarrative', input, AI_STAGE_POLICY_V211_VERSION),
+            { aiStagePolicyVersion: AI_STAGE_POLICY_V211_VERSION },
+        )).rejects.toThrow('AI_GENERATION_RESPONSE_REJECTED_ERROR');
+    });
+
+    it('allows concrete non-derogatory humorous appearance wording in a v2.11 overview', async () => {
+        const input = featureInput();
+        const overview = '얼굴이 웃기게 잡힌 순간에도 귀여운 표정이 살아 있고, 주말 러닝 기록까지 부지런한 피드입니다.';
+        mocks.analyzeWithGemini.mockImplementationOnce(async (
+            _prompt: string,
+            _images: string[],
+            options: { schema: { parse(value: unknown): unknown } },
+        ) => options.schema.parse(featureResponse({ oneLineOverview: overview })));
+
+        const result = await featureAnalysis(
+            input,
+            audit('featureAnalysis', input, AI_STAGE_POLICY_V211_VERSION),
+            { aiStagePolicyVersion: AI_STAGE_POLICY_V211_VERSION },
+        );
+
+        expect(result.features.oneLineOverview).toBe(overview);
+    });
+
     it.each([
         '박민지님이 김준호님 게시물에 좋아요와 댓글을 남겼고, 김준호님이 박민지님 게시물에 좋아요와 댓글을 남겼다는 점도 확인됩니다.',
         '박민지님이 김준호님 게시물에 좋아요와 댓글을 남겼고, 김준호님이 박민지님 게시물에 좋아요를 남겼지만 댓글을 남기지 않았습니다.',
@@ -2582,7 +2692,7 @@ describe('V2 staged AI services', () => {
         expect(prompt).toContain('candidateToTargetTag":"observed');
         expect(prompt).toContain('tag:candidate-to-target');
         expect(prompt).toContain('JSON 반환 직전에 lines의 모든 text를 다시 검사하고');
-        expect(prompt).toContain('어떤 언어·활용형·인용·부정문으로든');
+        expect(prompt).toContain('실제로 수집된 좋아요·댓글·태그·멘션 방향');
     });
 
     it('repairs only a custom-invalid v2.11 narrative field with Gemini and revalidates both lines', async () => {
