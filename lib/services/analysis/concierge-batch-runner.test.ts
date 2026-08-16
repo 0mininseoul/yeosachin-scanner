@@ -4,6 +4,7 @@ import {
     CONCIERGE_BATCH_MAX_ORDERS,
     CONCIERGE_BATCH_TOKEN_PRIORITY,
     assertConciergeRelationshipCoverage,
+    isConciergeBatchRelationshipCoverageError,
     createConciergeBatchCasPublisher,
     runConciergeBatch,
     selectConciergeBatchRetryOrders,
@@ -31,6 +32,18 @@ describe('concierge batch runner', () => {
             .not.toThrow();
     });
 
+    it('marks only the relationship coverage errors as token-fallback retryable', () => {
+        expect(isConciergeBatchRelationshipCoverageError(
+            new Error('CONCIERGE_RELATIONSHIP_FOLLOWERS_EMPTY'),
+        )).toBe(true);
+        expect(isConciergeBatchRelationshipCoverageError(
+            new Error('CONCIERGE_RELATIONSHIP_FOLLOWING_EMPTY'),
+        )).toBe(true);
+        expect(isConciergeBatchRelationshipCoverageError(
+            new Error('CONCIERGE_TARGET_PROFILE_PRIVATE'),
+        )).toBe(false);
+    });
+
     it('selects only the explicitly allowlisted retry classes from the frozen cohort', () => {
         const orders = [
             { ...order(0), retryCode: 'CONCIERGE_BATCH_RETRYABLE' },
@@ -44,6 +57,16 @@ describe('concierge batch runner', () => {
             new Set(['CONCIERGE_BATCH_RETRYABLE']),
         ).map(value => value.orderId)).toEqual([
             orders[0]!.orderId,
+        ]);
+    });
+
+    it('keeps the paid secondary slot after the approved free-token priority', () => {
+        expect([...CONCIERGE_BATCH_TOKEN_PRIORITY]).toEqual([
+            'senary',
+            'tertiary',
+            'quinary',
+            'primary',
+            'secondary',
         ]);
     });
 

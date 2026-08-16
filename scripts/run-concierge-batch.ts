@@ -34,6 +34,7 @@ import {
 import {
     createConciergeBatchCasPublisher,
     assertConciergeRelationshipCoverage,
+    isConciergeBatchRelationshipCoverageError,
     runConciergeBatch,
     selectConciergeBatchRetryOrders,
     type ConciergeBatchOrder,
@@ -47,7 +48,7 @@ import type {
 
 const ORDER_ID = z.string().uuid();
 const USERNAME = z.string().regex(/^[a-z0-9._]{1,30}$/);
-const APPROVED_SLOTS = ['senary', 'tertiary', 'quinary', 'primary'] as const;
+const APPROVED_SLOTS = ['senary', 'tertiary', 'quinary', 'primary', 'secondary'] as const;
 type ApprovedSlot = typeof APPROVED_SLOTS[number];
 const EMPTY_MANUAL_CSV = 'username,instagram_url,ai_classification,ai_confidence/evidence_status,manual_gender,operator_note\n';
 const RETRY_CODE_PATTERN = /^CONCIERGE_[A-Z0-9_]{2,100}$/;
@@ -178,7 +179,8 @@ function providerContext(requestId: string, slot: ApprovedSlot): ProviderCallCon
 
 function retryableProviderError(error: unknown): boolean {
     const message = error instanceof Error ? error.message : '';
-    return message.includes('SCRAPING_PROVIDER_QUOTA_ERROR')
+    return isConciergeBatchRelationshipCoverageError(error)
+        || message.includes('SCRAPING_PROVIDER_QUOTA_ERROR')
         || message.includes('SCRAPING_PROVIDER_START_REJECTED_ERROR')
         || message.includes('SCRAPING_INCOMPLETE_ERROR')
         || message.includes('SCRAPING_RUN_PENDING_ERROR');
@@ -291,19 +293,23 @@ async function collectOrder(
     const [followers, following] = await Promise.all([
         withProvider(prepared.sourceRequestId, context, async (slot, provider) => {
             if (!provider.getFollowers) throw new Error('CONCIERGE_RELATIONSHIP_PROVIDER_UNAVAILABLE');
-            return provider.getFollowers(
+            const followers = await provider.getFollowers(
                 order.targetUsername,
                 followersLimit,
                 providerContext(prepared.sourceRequestId, slot),
             );
+            assertConciergeRelationshipCoverage('followers', followersLimit, followers.length);
+            return followers;
         }),
         withProvider(prepared.sourceRequestId, context, async (slot, provider) => {
             if (!provider.getFollowing) throw new Error('CONCIERGE_RELATIONSHIP_PROVIDER_UNAVAILABLE');
-            return provider.getFollowing(
+            const following = await provider.getFollowing(
                 order.targetUsername,
                 followingLimit,
                 providerContext(prepared.sourceRequestId, slot),
             );
+            assertConciergeRelationshipCoverage('following', followingLimit, following.length);
+            return following;
         }),
     ]);
     assertConciergeRelationshipCoverage('followers', followersLimit, followers.length);

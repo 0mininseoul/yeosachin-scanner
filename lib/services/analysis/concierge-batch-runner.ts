@@ -16,6 +16,7 @@ export const CONCIERGE_BATCH_TOKEN_PRIORITY = Object.freeze([
     'tertiary',
     'quinary',
     'primary',
+    'secondary',
 ] as const satisfies readonly ApifyCredentialSlot[]);
 
 export type ConciergeBatchTokenSlot = typeof CONCIERGE_BATCH_TOKEN_PRIORITY[number];
@@ -54,6 +55,14 @@ export function assertConciergeRelationshipCoverage(
     if (declaredCount > 0 && collectedCount === 0) {
         throw new Error(`CONCIERGE_RELATIONSHIP_${side.toUpperCase()}_EMPTY`);
     }
+}
+
+export function isConciergeBatchRelationshipCoverageError(error: unknown): boolean {
+    return error instanceof Error
+        && (
+            error.message === 'CONCIERGE_RELATIONSHIP_FOLLOWERS_EMPTY'
+            || error.message === 'CONCIERGE_RELATIONSHIP_FOLLOWING_EMPTY'
+        );
 }
 
 export interface ConciergeBatchStageContext {
@@ -156,8 +165,8 @@ function createActorGate(limit: number): ConciergeBatchStageContext['withActorSl
 
 /**
  * Selects only an approved token slot by presence; token values are never
- * returned or logged.  SECONDARY and all unapproved slots are intentionally
- * excluded from this fallback.
+ * returned or logged.  SECONDARY is the paid fallback after the approved
+ * free-token priority; all other slots remain excluded.
  */
 export function selectConciergeApifyTokenSlot(
     env: Readonly<Record<string, string | undefined>> = process.env,
