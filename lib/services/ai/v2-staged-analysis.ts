@@ -117,8 +117,15 @@ const V28_SELF_REFERENCE_PATTERN =
 // Public-copy sanitization normalizes compatibility jamo (ㅋ) to choseong jamo (ᄏ).
 // Accept either representation so the policy cannot be bypassed by normalization order.
 const V28_LAUGH_PATTERN = /(?:ㅋ|ᄏ)+/u;
-const V28_RELATIONSHIP_TERM_PATTERN =
-    /(?:사귀|썸|연애|연인|애인|남자친구|여자친구|남친|여친|커플|교제|결혼|혼인|기혼|미혼|약혼|부부|배우자|남편|아내|신랑|신부|돌싱|동거|이혼|재혼|불륜|외도|밀회|데이트|바람(?:을\s*)?(?:피우|피웠|폈|난|났다|기))/u;
+const V28_RELATIONSHIP_FORBIDDEN_SUBSTRINGS = Object.freeze([
+    '사귀', '썸', '연애', '연인', '애인', '남자친구', '여자친구', '남친', '여친',
+    '커플', '교제', '결혼', '혼인', '기혼', '미혼', '약혼', '부부', '배우자', '남편',
+    '아내', '신랑', '신부', '돌싱', '동거', '이혼', '재혼', '불륜', '외도', '밀회', '데이트',
+] as const);
+const V28_RELATIONSHIP_TERM_PATTERN = new RegExp(
+    `(?:${V28_RELATIONSHIP_FORBIDDEN_SUBSTRINGS.join('|')}|바람(?:을\\s*)?(?:피우|피웠|폈|난|났다|기))`,
+    'u',
+);
 const V28_ENGLISH_RELATIONSHIP_TERM_PATTERN =
     /(?<![\p{Script=Latin}\p{N}_])(?:boyfriend|girlfriend|couple|dating|relationship|married|husband|wife|spouse|fianc(?:e|ee|é|ée)|engaged|divorced)(?![\p{Script=Latin}\p{N}_])/iu;
 const V28_PROTECTED_OR_APPEARANCE_TERM_PATTERN =
@@ -1607,7 +1614,7 @@ function featureAnalysisPromptV28(
             instructions.indexOf('가볍게 위트 있거나 살짝 도발적일 수 있지만, 판독관·제가·저는·나는처럼 화자를 세우지 마세요.') + 1,
             0,
             '총평에 "맥락이 부족하다", "판단하기 어렵다", "단정할 수 없다", "제약", "한계", "공개 자료만"처럼 분석 방법이나 자료의 한계를 직접 말하지 마세요. 실제로 보이는 단서를 짚어 단호하고 유용하게 쓰세요.',
-            'oneLineOverview 금지 문자열: "개인 계정입니다", "일반 단계로 판독됐어요". 관계 용어 금지 목록: 사귀, 썸, 연애, 연인, 애인, 남자친구, 여자친구, 남친, 여친, 커플, 교제, 결혼, 혼인, 기혼, 미혼, 약혼, 부부, 배우자, 남편, 아내, 신랑, 신부, 돌싱, 동거, 이혼, 재혼, 불륜, 외도, 밀회, 데이트, 바람, boyfriend, girlfriend, couple, dating, relationship, married, husband, wife, spouse, fiance, fiancee, fiancé, fiancée, engaged, divorced. bio·caption 인용이나 부정문에서도 이 문자열을 쓰지 마세요.',
+            `oneLineOverview 금지 문자열: "개인 계정입니다", "일반 단계로 판독됐어요". 관계 용어 금지 목록: ${V28_RELATIONSHIP_FORBIDDEN_SUBSTRINGS.join(', ')}, 바람, boyfriend, girlfriend, couple, dating, relationship, married, husband, wife, spouse, fiance, fiancee, fiancé, fiancée, engaged, divorced. bio·caption 인용이나 부정문에서도 이 문자열을 쓰지 마세요.`,
             'JSON 반환 직전에 oneLineOverview를 다시 검사하고, 관계 어휘가 어떤 언어·활용형·인용·부정문으로든 있으면 해당 필드를 관계 어휘 없이 다시 쓰세요.',
         );
     }
@@ -2152,7 +2159,7 @@ export async function featureAnalysis(
         ) throw error;
         const invalidValue = (candidate as { oneLineOverview: string }).oneLineOverview;
         const repaired = await analyzeWithGemini(
-            `다음 공개 문구 필드 하나만 수정하세요. 원문: ${JSON.stringify(invalidValue)}\n검증 요구사항: ${issue.message}\n관계 어휘를 어떤 언어·활용형·인용·부정문으로도 쓰지 마세요. "담아내"처럼 금지 문자열 "아내"를 포함하는 일반 단어도 쓰지 마세요. JSON만 반환하세요.`,
+            `다음 공개 문구 필드 하나만 수정하세요. 원문: ${JSON.stringify(invalidValue)}\n검증 요구사항: ${issue.message}\n금지 부분 문자열 목록: ${V28_RELATIONSHIP_FORBIDDEN_SUBSTRINGS.join(', ')}. 이 목록은 일반 단어의 일부로도 쓰지 말고, 바람을 피우다·바람이 났다 계열 및 영어 관계 용어도 쓰지 마세요. JSON만 반환하세요.`,
             [],
             {
                 schema: z.object({ value: safeOverviewSchemaFor(policyVersion) }).strict(),

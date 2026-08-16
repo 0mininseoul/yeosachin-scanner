@@ -1077,9 +1077,15 @@ describe('V2 staged AI services', () => {
         expect(prompt).toContain('어떤 언어·활용형·인용·부정문으로든');
     });
 
-    it('repairs only a custom-invalid v2.11 overview with Gemini and revalidates the full feature contract', async () => {
+    it.each([
+        ['여행과 활동적 순간을 조화롭게 담아내고 있는 피드입니다.', '아내'],
+        ['국내뿐 아니라 해외도 오가며 공연의 여운을 기록하는 피드입니다.', '외도'],
+    ])('repairs a v2.11 overview whose ordinary wording contains the forbidden substring %s', async (
+        invalidOverview,
+        forbiddenSubstring,
+    ) => {
         const invalid = featureResponse({
-            oneLineOverview: '여행과 활동적 순간을 조화롭게 담아내고 있는 피드입니다.',
+            oneLineOverview: invalidOverview,
         });
         const validation = new GeminiResponseValidationError(
             'schema rejected',
@@ -1098,7 +1104,10 @@ describe('V2 staged AI services', () => {
             ) => {
                 expect(prompt).toContain(invalid.oneLineOverview);
                 expect(prompt).toContain('v2.8 public copy must not assert or speculate about a relationship.');
-                expect(prompt).toContain('"담아내"처럼 금지 문자열 "아내"를 포함하는 일반 단어도 쓰지 마세요.');
+                expect(prompt).toContain('금지 부분 문자열 목록:');
+                expect(prompt).toContain(forbiddenSubstring);
+                expect(prompt).toContain('아내');
+                expect(prompt).toContain('외도');
                 return options.schema.parse({ value: '여행 사진과 짧은 기록이 일정표처럼 또렷하게 정돈된 피드입니다.' });
             });
 
