@@ -249,6 +249,24 @@ export const genderTriageInputSchema = z.object({
     accountProfile: accountProfileEvidenceSchema.optional(),
 }).strict();
 
+/**
+ * The paid concierge first pass is intentionally narrower than ordinary triage:
+ * the model receives the display name and exactly one normalized profile image.
+ * Feed media is admitted only by the replay runner's second-stage feature call.
+ */
+export const genderFirstPassInputSchema = z.object({
+    fullName: z.string().trim().min(1).max(240),
+    media: z.array(normalizedAiMediaSelectionSchema).length(1),
+}).strict().superRefine((value, context) => {
+    if (value.media[0]?.kind !== 'profile') {
+        context.addIssue({
+            code: 'custom',
+            path: ['media'],
+            message: 'First-pass gender evidence must contain exactly one profile image.',
+        });
+    }
+});
+
 const genderAssessmentSchema = z.object({
     inferredGender: inferredGenderSchema,
     confidence: confidenceSchema,
@@ -290,6 +308,7 @@ export const genderTriageResultSchema = z.object({
 
 export type NormalizedAiMediaSelection = z.infer<typeof normalizedAiMediaSelectionSchema>;
 export type GenderTriageInput = z.input<typeof genderTriageInputSchema>;
+export type GenderFirstPassInput = z.input<typeof genderFirstPassInputSchema>;
 export type GenderTriageResult = z.infer<typeof genderTriageResultSchema>;
 
 /** Two accounts × the existing five triage images stays below the durable 11-media audit cap. */
@@ -1201,6 +1220,42 @@ function genderResponseSchemaFor(media: readonly NormalizedAiMediaSelection[]) {
         }));
 }
 
+/**
+ * First-pass output may use one profile image together with an obvious display
+ * name. It is a provisional routing signal, so the normal multi-image/high-
+ * confidence downgrade does not apply here; final publication still requires
+ * the existing feature-stage contract.
+ */
+function genderFirstPassResponseSchemaFor(
+    media: readonly NormalizedAiMediaSelection[],
+) {
+    const allowedIds = new Set(media.map(item => item.selectionId));
+    return genderTriageModelResponseSchema
+        .transform(value => {
+            const evidenceSelectionIds = distinctAllowedEvidenceIds(
+                value.evidenceSelectionIds,
+                allowedIds,
+            );
+            if (evidenceSelectionIds.length === 0) {
+                return {
+                    inferredGender: 'unknown' as const,
+                    confidence: 'low' as const,
+                    ownerConsistency: 'not_visible' as const,
+                    evidenceSelectionIds,
+                };
+            }
+            return { ...value, evidenceSelectionIds };
+        })
+        .pipe(genderTriageModelResponseSchema.superRefine((value, context) => {
+            assertEvidenceSelectionIds(
+                value.evidenceSelectionIds,
+                allowedIds,
+                ['evidenceSelectionIds'],
+                context,
+            );
+        }));
+}
+
 export function genderResolutionModelResponseSchemaFor(
     media: readonly NormalizedAiMediaSelection[]
 ) {
@@ -1544,6 +1599,22 @@ function genderTriagePrompt(
         : genderTriagePromptLegacy(media);
 }
 
+function genderFirstPassPrompt(
+    input: z.output<typeof genderFirstPassInputSchema>,
+    media: readonly NormalizedAiMediaSelection[],
+): string {
+    return [
+        'gender-first-pass-v1',
+        'Classify this account in a first-pass using only the supplied full name and attached profile image.',
+        'The full name is an allowed direct name signal for provisional routing; an obvious name may be classified without high-confidence same-owner visual evidence or feed images.',
+        'Do not use a username, bio, captions, or any feed evidence. Do not infer details beyond the supplied name and profile image.',
+        'If the name and image do not support a provisional classification, return unknown with low confidence and not_visible owner consistency.',
+        'Return JSON only and use the supplied profile selectionId when it is actual evidence.',
+        `fullName(JSON): ${JSON.stringify(normalizeUntrustedText(input.fullName, 240))}`,
+        `mediaManifest(JSON): ${JSON.stringify(mediaManifest(media))}`,
+    ].join('\n');
+}
+
 export function genderResolutionCheckpointAssessment(
     rawInput: GenderResolutionInput,
     rawAssessment: GenderResolutionResult['assessment']
@@ -1707,6 +1778,20 @@ function resolveFinalGenderDecision(
     if (feature.gender === 'female') return 'verified_female';
     if (feature.gender === 'male') return 'verified_non_female';
     return 'unresolved';
+}
+
+export function createGenderFirstPassResultIdentity(
+    rawInput: GenderFirstPassInput,
+    policyVersion: AiStagePolicyVersion = AI_STAGE_POLICY_VERSION,
+): AnalysisV2AiResultIdentity {
+    const input = genderFirstPassInputSchema.parse(rawInput);
+    return stagedResultIdentity(
+        'genderTriage',
+        genderFirstPassPrompt(input, input.media),
+        input.media,
+        'request',
+        policyVersion,
+    );
 }
 
 export function createGenderTriageResultIdentity(
@@ -2020,6 +2105,56 @@ export function createFeatureAnalysisResultIdentity(
         'request',
         policyVersion,
     );
+}
+
+export async function genderFirstPass(
+    rawInput: GenderFirstPassInput,
+    rawAuditContext: StagedAiAuditContext,
+    options: {
+        aiStagePolicyVersion?: AiStagePolicyVersion;
+        replayCapability?: ReplayStatelessCapability;
+    } = {},
+): Promise<GenderTriageResult> {
+    const input = genderFirstPassInputSchema.parse(rawInput);
+    const media = input.media;
+    const policyVersion = options.aiStagePolicyVersion ?? AI_STAGE_POLICY_VERSION;
+    const prompt = genderFirstPassPrompt(input, media);
+    const identity = stagedResultIdentity(
+        'genderTriage',
+        prompt,
+        media,
+        'request',
+        policyVersion,
+    );
+    const audit = parseAuditContext(rawAuditContext, identity);
+    const responseSchema = genderFirstPassResponseSchemaFor(media);
+    const prepared = await prepareStagedResult(audit, responseSchema);
+    const assessment = prepared.cached ?? responseSchema.parse(await analyzeWithGemini(
+        prompt,
+        media.map(item => item.normalizedJpegBase64),
+        {
+            schema: responseSchema,
+            analysisType: 'v2_gender_first_pass',
+            stage: 'genderTriage',
+            aiStagePolicyVersion: policyVersion,
+            requestId: audit.requestId,
+            startingAttempt: prepared.startingAttempt,
+            onBeforeAttempt: audit.onBeforeAttempt,
+            onAttemptTelemetry: audit.onAttemptTelemetry,
+            ...(options.replayCapability
+                ? { skipTokenLog: true, replayCapability: options.replayCapability }
+                : {}),
+        },
+    ));
+    const exclude = assessment.inferredGender === 'male'
+        && assessment.confidence === 'high'
+        && assessment.ownerConsistency === 'same_person';
+    return genderTriageResultSchema.parse({
+        assessment,
+        routingDecision: exclude ? 'exclude_high_confidence_male' : 'route_to_feature_analysis',
+        routingReason: exclude ? 'high_confidence_same_owner_male' : 'conserve_female_recall',
+        analyzedSelectionIds: media.map(item => item.selectionId),
+    });
 }
 
 export async function genderTriage(

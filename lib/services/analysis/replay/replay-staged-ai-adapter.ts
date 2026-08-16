@@ -1,11 +1,13 @@
 import { randomUUID } from 'node:crypto';
 import {
     createFeatureAnalysisResultIdentity,
+    createGenderFirstPassResultIdentity,
     createGenderTriageMicrobatchAccountId,
     createGenderTriageMicrobatchResultIdentity,
     createGenderResolutionResultIdentity,
     createGenderTriageResultIdentity,
     featureAnalysis,
+    genderFirstPass,
     genderResolution,
     genderTriage,
     genderTriageMicrobatch,
@@ -21,6 +23,7 @@ import { aiStagePolicySupports } from '@/lib/services/ai/stage-policy';
 import { ANALYSIS_V2_SCHEDULER_V1_POLICY } from '@/lib/services/analysis/v2-ai-scheduler-runtime';
 import type {
     ReplayAiRunner,
+    ReplayFirstPassInput,
     ReplayInvocation,
     ReplayMedia,
     ReplayOutcome,
@@ -35,6 +38,7 @@ import {
 interface IssuedReplayRunner {
     policyVersion: ReplaySupportedAiStagePolicyVersion;
     featureAnalysisConcurrency: 3 | 4;
+    firstPass: ReplayAiRunner['firstPass'];
     triage: ReplayAiRunner['triage'];
     feature: ReplayAiRunner['feature'];
     privateNames: ReplayAiRunner['privateNames'];
@@ -51,6 +55,7 @@ export function lookupReplayStagedAiAdapterPolicy(
     if (
         !issued
         || !Object.isFrozen(runner)
+        || runner.firstPass !== issued.firstPass
         || runner.triage !== issued.triage
         || runner.feature !== issued.feature
         || runner.privateNames !== issued.privateNames
@@ -326,6 +331,21 @@ export function createReplayStagedAiAdapter(
         });
     };
     const runner: ReplayAiRunner = {
+        firstPass: (input: ReplayFirstPassInput) => invoke(async state => {
+            const aiInput = {
+                fullName: input.fullName,
+                media: normalized(input.media),
+            };
+            const identity = createGenderFirstPassResultIdentity(
+                aiInput,
+                aiStagePolicyVersion,
+            );
+            return genderFirstPass(
+                aiInput,
+                statelessAudit(requestId, identity, state),
+                { aiStagePolicyVersion, replayCapability },
+            );
+        }),
         ...(supportsGenderTriageMicrobatch ? {
             triage: queueTriage,
         } : {
@@ -399,6 +419,7 @@ export function createReplayStagedAiAdapter(
         policyVersion: aiStagePolicyVersion,
         featureAnalysisConcurrency: experiment?.featureAnalysisConcurrency
             ?? ANALYSIS_V2_SCHEDULER_V1_POLICY.featureAnalysisConcurrency,
+        firstPass: runner.firstPass,
         triage: runner.triage,
         feature: runner.feature,
         privateNames: runner.privateNames,

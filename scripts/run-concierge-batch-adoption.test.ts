@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import {
+    generateConciergeBatchCandidateCopies,
     generateConciergeBatchHighRiskCopy,
     isRecoverableTargetProfileArtifactError,
     isMatchingTargetProfileArtifactRun,
@@ -139,6 +140,85 @@ describe('concierge existing relationship artifact resolver', () => {
         const text = [result.oneLineOverview, ...result.riskAnalysis].join(' ');
         expect(text).not.toMatch(/확인되지 않았다|알 수 없다|수집 범위|공개 자료만으로는/u);
         expect(text).not.toMatch(/좋아요|댓글|태그|멘션/u);
+    });
+
+    it('rejects sparse deterministic prose and retries Gemini once', async () => {
+        let attempts = 0;
+        await expect(generateConciergeBatchHighRiskCopy(
+            copyEvidence([]),
+            async () => {
+                attempts += 1;
+                return {
+                    oneLineOverview: '후보 이름의 공개된 소개·캡션 문구가 비어 있어, 사진에서 이야기를 지어내지 않고 이름으로 확인되는 범위만 차분히 읽어봅니다.',
+                    riskAnalysis: [
+                        '후보 이름의 공개 기록에서 사진과 소개의 결을 중심으로 장난스러운 분위기를 읽습니다.',
+                        '후보 이름의 피드에 남은 장면이 가벼운 긴장감을 만들어 시선을 붙잡습니다.',
+                    ],
+                };
+            },
+        )).rejects.toThrow('CONCIERGE_BATCH_COPY_GENERATION_FAILED');
+        expect(attempts).toBe(2);
+    });
+
+    it('retries a cross-candidate template once and rejects it when it repeats', async () => {
+        const first = copyEvidence([]);
+        const second = {
+            ...first,
+            candidateUsername: 'second_candidate',
+            candidateFullName: '두번째 이름',
+        };
+        let attempts = 0;
+        const template = (candidate: string) => ({
+            oneLineOverview: `${candidate}부터 대상 이름까지 여행과 커피 기록이 사진마다 같은 결로 이어집니다.`,
+            riskAnalysis: [
+                `${candidate}부터 대상 이름까지 여행과 커피 기록이 가벼운 긴장감을 만듭니다.`,
+                `${candidate}부터 대상 이름까지 여행과 커피 기록을 장난스럽게 읽습니다.`,
+            ],
+        });
+        await expect(generateConciergeBatchCandidateCopies(
+            [first, second],
+            async prompt => {
+                attempts += 1;
+                return template(prompt.includes('두번째 이름') ? '두번째 이름' : '후보 이름');
+            },
+        )).rejects.toThrow('CONCIERGE_BATCH_COPY_GENERATION_FAILED');
+        expect(attempts).toBe(3);
+    });
+
+    it('accepts distinct Gemini copy for every candidate in one batch', async () => {
+        const first = copyEvidence([]);
+        const second = {
+            ...first,
+            candidateUsername: 'second_candidate',
+            candidateFullName: '두번째 이름',
+            bio: '산책과 음악을 즐기는 기록',
+        };
+        let calls = 0;
+        const copies = await generateConciergeBatchCandidateCopies(
+            [first, second],
+            async prompt => {
+                calls += 1;
+                if (prompt.includes('두번째 이름')) {
+                    return {
+                        oneLineOverview: '두번째 이름의 산책과 음악 기록이 사진마다 다른 리듬으로 이어져 자연스러운 호기심을 남깁니다.',
+                        riskAnalysis: [
+                            '두번째 이름의 산책 장면과 음악 취향이 피드의 분위기를 가볍게 끌어당깁니다.',
+                            '두번째 이름의 기록에서 일상과 취향이 섞인 결이 은근한 긴장감을 만듭니다.',
+                        ],
+                    };
+                }
+                return {
+                    oneLineOverview: '후보 이름의 여행과 커피 기록이 사진마다 다른 온도로 이어져 장난스러운 호기심을 남깁니다.',
+                    riskAnalysis: [
+                        '후보 이름의 여행 장면과 커피 취향이 피드의 분위기를 가볍게 끌어당깁니다.',
+                        '후보 이름의 기록에서 주말의 결이 은근한 긴장감을 만들어 시선을 붙잡습니다.',
+                    ],
+                };
+            },
+        );
+        expect(calls).toBe(2);
+        expect(copies).toHaveLength(2);
+        expect(new Set(copies.map(copy => copy.oneLineOverview)).size).toBe(2);
     });
 
     it('keeps an order retryable after the second copy contract failure', async () => {
