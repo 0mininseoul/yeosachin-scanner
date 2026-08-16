@@ -6,6 +6,10 @@ const migration = readFileSync(
     new URL('../../../supabase/migrations/20260816153000_publish_concierge_batch_manual_override.sql', import.meta.url),
     'utf8',
 );
+const exposureLevelMigration = readFileSync(
+    new URL('../../../supabase/migrations/20260816230100_allow_medium_exposure_level.sql', import.meta.url),
+    'utf8',
+);
 
 const ORDER_ID = '123e4567-e89b-42d3-a456-426614174000';
 const REQUEST_ID = '223e4567-e89b-42d3-a456-426614174000';
@@ -49,7 +53,8 @@ beforeEach(async () => {
             bio TEXT,
             risk_score INTEGER NOT NULL,
             photogenic_grade INTEGER,
-            exposure_level TEXT,
+            exposure_level TEXT CONSTRAINT analysis_results_exposure_level_check
+                CHECK (exposure_level IN ('high', 'low')),
             is_tagged BOOLEAN,
             risk_grade TEXT,
             gender_confidence DOUBLE PRECISION,
@@ -72,6 +77,7 @@ beforeEach(async () => {
             UNIQUE (request_id, instagram_id)
         );
     `);
+    await db.exec(exposureLevelMigration);
     await db.exec(migration);
     await db.query(
         `INSERT INTO public.analysis_requests(id, user_id, target_instagram_id, status)
@@ -130,6 +136,16 @@ async function publish(payload = publicationPayload()) {
 }
 
 describe('future concierge batch publication RPC', () => {
+    it('publishes the medium exposure band accepted by the production contract', async () => {
+        const response = await publish();
+
+        expect(response.rows[0]!.result).toMatchObject({ published: true });
+        await expect(db.query<{ exposure_level: string }>(
+            `SELECT exposure_level FROM public.analysis_results WHERE request_id = $1`,
+            [REQUEST_ID],
+        )).resolves.toMatchObject({ rows: [{ exposure_level: 'medium' }] });
+    });
+
     it('atomically persists and reads text-only private-name fields in display order', async () => {
         const response = await publish();
 
