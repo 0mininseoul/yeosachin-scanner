@@ -278,7 +278,7 @@ export default function ResultPage({ params }: PageProps) {
     const [kakaoShareLoading, setKakaoShareLoading] = useState(false);
     // In-flight token mint, and its result once resolved, so the tap handler can
     // read the destination without awaiting anything.
-    const sharePrepRef = useRef<Promise<Omit<ResultShareContent, 'title'>> | null>(null);
+    const sharePrepRef = useRef<Promise<Omit<ResultShareContent, 'title'> | null> | null>(null);
     const sharePreparedRef = useRef<Omit<ResultShareContent, 'title'> | null>(null);
     // Mirrors the ref so the menu can hold the Kakao item back until the link
     // exists. The ref stays the source of truth for the tap itself.
@@ -567,16 +567,16 @@ export default function ResultPage({ params }: PageProps) {
                                 url: payload.shareUrl as string,
                                 // Kakao ignores the page's OG tags, so the per-result
                                 // card has to be handed over explicitly.
-                                imageUrl: typeof payload.shareToken === 'string'
-                                    ? `${CANONICAL_APP_ORIGIN}/api/share/${payload.shareToken}/opengraph-image`
+                                imageUrl: typeof payload.ogImageUrl === 'string'
+                                    ? payload.ogImageUrl
                                     : `${CANONICAL_APP_ORIGIN}/og.png`,
                             };
                         }
                     } catch {
-                        // fall through to the service link
+                        // fall through to the failed-preparation path
                     }
                     sharePrepRef.current = null; // let a later attempt retry
-                    return { url: CANONICAL_APP_ORIGIN, imageUrl: `${CANONICAL_APP_ORIGIN}/og.png` };
+                    return null;
                 })(),
             ]);
             sharePreparedRef.current = link;
@@ -620,7 +620,12 @@ export default function ResultPage({ params }: PageProps) {
            for a button that says 카카오톡 — it is only correct when Kakao was
            never on the table (no key configured), where the button reads 공유. */
         if (kakaoJavascriptKey() !== null) {
-            const link = target?.url ?? (await prepareShare()).url;
+            const prepared = target ?? await prepareShare();
+            const link = prepared?.url;
+            if (!link) {
+                alert('결과 공유 링크를 만들지 못했습니다. 잠시 후 다시 시도해 주세요.');
+                return;
+            }
             const copied = await navigator.clipboard?.writeText(link).then(() => true, () => false);
             const detail = kakaoError ? `\n(${kakaoError})` : '';
             alert((copied
@@ -635,6 +640,10 @@ export default function ResultPage({ params }: PageProps) {
         setKakaoShareLoading(true);
         try {
             const resolved = target ?? await prepareShare();
+            if (!resolved) {
+                alert('결과 공유 링크를 만들지 못했습니다. 잠시 후 다시 시도해 주세요.');
+                return;
+            }
             const channel = await shareResultToKakao(
                 { ...resolved, ...card },
                 {
@@ -778,7 +787,6 @@ export default function ResultPage({ params }: PageProps) {
                         onPrepare={prepareShare}
                         kakaoBusy={kakaoShareLoading}
                         kakaoAvailable={kakaoJavascriptKey() !== null}
-                        copyUrl={CANONICAL_APP_ORIGIN}
                         shareUrl={shareTarget?.url ?? null}
                     />
                 </div>
