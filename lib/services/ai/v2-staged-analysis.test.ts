@@ -2610,6 +2610,98 @@ describe('V2 staged AI services', () => {
         expect(result.evidenceRefs).toEqual([lines[0].evidenceRefs, lines[1].evidenceRefs]);
     });
 
+    it('keeps the global relationship validator strict outside the concierge correction mode', async () => {
+        const input = narrativeInput();
+        const lines = [{
+            text: '박민지님의 여행 피드에는 연애 맥락이 스쳐 보이지만, 이미지 인상만으로 관계를 판단할 수는 없습니다.',
+            evidenceRefs: ['profile:bio'],
+        }, {
+            text: '박민지님이 김준호님에게 남긴 좋아요와 댓글의 반가워 표현, 김준호님이 박민지님에게 남긴 좋아요가 확인되며 수집 표본 밖 누락 가능성은 남습니다.',
+            evidenceRefs: [
+                'like:candidate-to-target',
+                'like:target-to-candidate',
+                'comment:1',
+                'coverage:target-interactions',
+            ],
+        }] as const;
+        mocks.analyzeWithGemini.mockImplementationOnce(async (
+            _prompt: string,
+            _images: string[],
+            options: { schema: { parse(value: unknown): unknown } },
+        ) => options.schema.parse({ lines }));
+
+        await expect(highRiskNarrative(
+            input,
+            audit('highRiskNarrative', input, AI_STAGE_POLICY_V211_VERSION),
+            { aiStagePolicyVersion: AI_STAGE_POLICY_V211_VERSION },
+        )).rejects.toThrow('AI_GENERATION_RESPONSE_REJECTED_ERROR');
+    });
+
+    it('accepts only relationship-style semantics in the scoped concierge correction mode', async () => {
+        const input = narrativeInput();
+        const lines = [{
+            text: '박민지님의 여행 피드에는 연애 맥락이 스쳐 보이지만, 이미지 인상만으로 관계를 판단할 수는 없습니다.',
+            evidenceRefs: ['profile:bio'],
+        }, {
+            text: '박민지님이 김준호님에게 남긴 좋아요와 댓글의 반가워 표현, 김준호님이 박민지님에게 남긴 좋아요가 확인되며 수집 표본 밖 누락 가능성은 남습니다.',
+            evidenceRefs: [
+                'like:candidate-to-target',
+                'like:target-to-candidate',
+                'comment:1',
+                'coverage:target-interactions',
+            ],
+        }] as const;
+        mocks.analyzeWithGemini.mockImplementationOnce(async (
+            _prompt: string,
+            _images: string[],
+            options: { schema: { parse(value: unknown): unknown } },
+        ) => options.schema.parse({ lines }));
+
+        const result = await highRiskNarrative(
+            input,
+            audit('highRiskNarrative', input, AI_STAGE_POLICY_V211_VERSION),
+            {
+                aiStagePolicyVersion: AI_STAGE_POLICY_V211_VERSION,
+                narrativeValidationMode: 'first_order_concierge_correction',
+            },
+        );
+
+        expect(result.source).toBe('gemini');
+        expect(result.lines).toEqual([lines[0].text, lines[1].text]);
+        expect(result.evidenceRefs).toEqual([lines[0].evidenceRefs, lines[1].evidenceRefs]);
+    });
+
+    it('keeps definitive relationship facts rejected in the scoped concierge correction mode', async () => {
+        const input = narrativeInput();
+        mocks.analyzeWithGemini.mockImplementationOnce(async (
+            _prompt: string,
+            _images: string[],
+            options: { schema: { parse(value: unknown): unknown } },
+        ) => options.schema.parse({
+            lines: [{
+                text: '박민지님의 여행과 일상 기록은 꽤 차분하게 이어지는 피드입니다.',
+                evidenceRefs: ['profile:bio'],
+            }, {
+                text: '박민지님이 김준호님에게 남긴 좋아요와 댓글, 김준호님이 박민지님에게 남긴 좋아요가 이어져 두 사람은 연애 중입니다.',
+                evidenceRefs: [
+                    'like:candidate-to-target',
+                    'like:target-to-candidate',
+                    'comment:1',
+                    'coverage:target-interactions',
+                ],
+            }],
+        }));
+
+        await expect(highRiskNarrative(
+            input,
+            audit('highRiskNarrative', input, AI_STAGE_POLICY_V211_VERSION),
+            {
+                aiStagePolicyVersion: AI_STAGE_POLICY_V211_VERSION,
+                narrativeValidationMode: 'first_order_concierge_correction',
+            },
+        )).rejects.toThrow('AI_GENERATION_RESPONSE_REJECTED_ERROR');
+    });
+
     it('rejects a relationship interpretation when no interaction direction was observed', async () => {
         const base = narrativeInput();
         const input: HighRiskNarrativeInput = {

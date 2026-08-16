@@ -415,7 +415,10 @@ function containsV28ProtectedOrAppearanceMockery(value: string): boolean {
 function addV28PublicStyleIssues(
     value: string,
     context: z.RefinementCtx,
-    options: { allowGroundedRelationship?: boolean } = {},
+    options: {
+        allowGroundedRelationship?: boolean;
+        skipRelationshipInference?: boolean;
+    } = {},
 ): void {
     if (V28_SELF_REFERENCE_PATTERN.test(value)) {
         context.addIssue({
@@ -433,6 +436,7 @@ function addV28PublicStyleIssues(
         && V28_GROUNDED_RELATIONSHIP_INTERPRETATION_PATTERN.test(value);
     if (containsV28UnsupportedRelationshipFact(value) || (
         containsV28RelationshipStyle(value)
+        && !options.skipRelationshipInference
         && !groundedRelationship
     )) {
         context.addIssue({
@@ -1032,6 +1036,9 @@ function highRiskNarrativeResultSchemaFor(
 
 export type HighRiskNarrativeInput = z.input<typeof highRiskNarrativeInputSchema>;
 export type HighRiskNarrativeResult = z.infer<typeof highRiskNarrativeResultSchema>;
+export type HighRiskNarrativeValidationMode =
+    | 'strict'
+    | 'first_order_concierge_correction';
 
 export interface StagedAiAuditContext {
     requestId: string;
@@ -2804,6 +2811,7 @@ function narrativeResponseSchemaFor(
     media: readonly NormalizedAiMediaSelection[],
     sanitized: SanitizedNarrativeEvidence,
     policyVersion: AiStagePolicyVersion,
+    validationMode: HighRiskNarrativeValidationMode,
 ) {
     const v211Subjects = policyVersion === AI_STAGE_POLICY_V211_VERSION
         ? v211NarrativeSubjects(input)
@@ -2858,6 +2866,8 @@ function narrativeResponseSchemaFor(
                 addV28PublicStyleIssues(line.text, context, {
                     allowGroundedRelationship: v211Subjects !== null
                         && hasObservedInteractionEvidence,
+                    skipRelationshipInference: v211Subjects !== null
+                        && validationMode === 'first_order_concierge_correction',
                 });
                 if (V28_LAUGH_PATTERN.test(line.text)) {
                     context.addIssue({
@@ -3169,12 +3179,16 @@ export function createHighRiskNarrativeResultIdentity(
 export async function highRiskNarrative(
     rawInput: HighRiskNarrativeInput,
     rawAuditContext: StagedAiAuditContext,
-    options: { aiStagePolicyVersion?: AiStagePolicyVersion } = {},
+    options: {
+        aiStagePolicyVersion?: AiStagePolicyVersion;
+        narrativeValidationMode?: HighRiskNarrativeValidationMode;
+    } = {},
 ): Promise<HighRiskNarrativeResult> {
     const input = highRiskNarrativeInputSchema.parse(rawInput);
     const media = selectedMedia(input.media, MAX_FEATURE_FEED_MEDIA);
     const sanitized = sanitizedNarrativeEvidence(input);
     const policyVersion = options.aiStagePolicyVersion ?? AI_STAGE_POLICY_VERSION;
+    const validationMode = options.narrativeValidationMode ?? 'strict';
     const prompt = narrativePrompt(input, media, sanitized, policyVersion);
     const identity = stagedResultIdentity(
         'highRiskNarrative',
@@ -3184,7 +3198,13 @@ export async function highRiskNarrative(
         policyVersion,
     );
     const audit = parseAuditContext(rawAuditContext, identity);
-    const responseSchema = narrativeResponseSchemaFor(input, media, sanitized, policyVersion);
+    const responseSchema = narrativeResponseSchemaFor(
+        input,
+        media,
+        sanitized,
+        policyVersion,
+        validationMode,
+    );
     let response: z.infer<typeof highRiskNarrativeModelResponseSchema>;
     try {
         const prepared = await prepareStagedResult(audit, responseSchema);
@@ -3246,12 +3266,15 @@ export async function highRiskNarrative(
             const hasObservedInteractionEvidence = repairedCandidate.lines.some(line => (
                 line.evidenceRefs?.some(ref => observedInteractionEvidenceRefs.has(ref)) ?? false
             ));
+            const skipRelationshipInference = policyVersion === AI_STAGE_POLICY_V211_VERSION
+                && validationMode === 'first_order_concierge_correction';
             repairedCandidate.lines.forEach((line, lineIndex) => {
                 const allowsGroundedRelationship = hasObservedInteractionEvidence;
                 if (
                     containsV28UnsupportedRelationshipFact(line.text)
                     || (
                         containsV28RelationshipStyle(line.text)
+                        && !skipRelationshipInference
                         && !allowsGroundedRelationship
                     )
                 ) {
