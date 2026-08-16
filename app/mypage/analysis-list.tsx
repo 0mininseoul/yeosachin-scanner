@@ -91,6 +91,50 @@ export default function AnalysisList({ initialEntries }: Props) {
                 const { item } = entry;
                 const planBadge = analysisPlanBadgePresentation(item.planType);
                 const done = item.status === 'completed';
+                const rowContent = (
+                    <span className="min-w-0 flex-1">
+                        <span className="flex items-center gap-2">
+                            <span className="truncate text-[15px] font-bold text-fg">
+                                {ownerHistoryTargetLabel(item)}
+                            </span>
+                            <span
+                                className={`num shrink-0 text-[10px] font-bold tracking-[0.12em] ${planBadge.className}`}
+                            >
+                                {planBadge.label}
+                            </span>
+                            <span
+                                className={`ml-auto inline-flex shrink-0 items-center gap-1.5 text-[10.5px] font-extrabold tracking-[0.14em] ${
+                                    done ? 'text-jade' : 'text-amber'
+                                }`}
+                            >
+                                <span
+                                    aria-hidden="true"
+                                    className={`h-[5px] w-[5px] rotate-45 ${
+                                        done ? 'bg-jade' : 'anim-blink bg-amber'
+                                    }`}
+                                />
+                                {done ? '완료' : item.status === 'processing' ? '판독중' : '대기 중'}
+                            </span>
+                        </span>
+                        <span className="num mt-1.5 block text-[11.5px] text-fg-dim">
+                            {item.createdAt ? formatKstDateTime(item.createdAt) : '날짜 미상'}
+                        </span>
+                    </span>
+                );
+
+                if (!done) {
+                    return (
+                        <div
+                            key={item.id}
+                            data-amp-block
+                            className="flex w-full gap-3.5 border-b border-line py-5 pr-1 text-left"
+                        >
+                            <span aria-hidden="true" className="w-0.5 shrink-0 self-stretch bg-amber" />
+                            {rowContent}
+                        </div>
+                    );
+                }
+
                 return (
                     <button
                         key={item.id}
@@ -99,38 +143,8 @@ export default function AnalysisList({ initialEntries }: Props) {
                         onClick={() => handleCardClick(item)}
                         className="group flex w-full gap-3.5 border-b border-line py-5 pr-1 text-left transition-colors hover:bg-panel/60"
                     >
-                        <span
-                            aria-hidden="true"
-                            className={`w-0.5 shrink-0 self-stretch ${done ? 'bg-jade' : 'bg-amber'}`}
-                        />
-                        <span className="min-w-0 flex-1">
-                            <span className="flex items-center gap-2">
-                                <span className="truncate text-[15px] font-bold text-fg">
-                                    {ownerHistoryTargetLabel(item)}
-                                </span>
-                                <span
-                                    className={`num shrink-0 text-[10px] font-bold tracking-[0.12em] ${planBadge.className}`}
-                                >
-                                    {planBadge.label}
-                                </span>
-                                <span
-                                    className={`ml-auto inline-flex shrink-0 items-center gap-1.5 text-[10.5px] font-extrabold tracking-[0.14em] ${
-                                        done ? 'text-jade' : 'text-amber'
-                                    }`}
-                                >
-                                    <span
-                                        aria-hidden="true"
-                                        className={`h-[5px] w-[5px] rotate-45 ${
-                                            done ? 'bg-jade' : 'anim-blink bg-amber'
-                                        }`}
-                                    />
-                                    {done ? '완료' : item.status === 'processing' ? '판독중' : '대기 중'}
-                                </span>
-                            </span>
-                            <span className="num mt-1.5 block text-[11.5px] text-fg-dim">
-                                {item.createdAt ? formatKstDateTime(item.createdAt) : '날짜 미상'}
-                            </span>
-                        </span>
+                        <span aria-hidden="true" className="w-0.5 shrink-0 self-stretch bg-jade" />
+                        {rowContent}
                     </button>
                 );
             })}
