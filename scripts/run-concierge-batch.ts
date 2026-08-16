@@ -224,14 +224,12 @@ async function withInteractions<T>(
 }
 
 async function loadTargetProfileArtifact(order: OrderRow): Promise<InstagramProfile | null> {
-    const { data, error } = await supabaseAdmin
-        .from('analysis_preflight_provider_runs')
-        .select('operation_key,actor_id,credential_slot,run_id,status')
-        .eq('preflight_id', order.preflightId)
-        .eq('status', 'succeeded')
-        .like('operation_key', 'target-profile%');
-    if (error) throw new Error('CONCIERGE_PROVIDER_ARTIFACT_LOOKUP_FAILED');
-    const rows = (data ?? []) as ProviderRunRow[];
+    const { data, error } = await supabaseAdmin.rpc(
+        'list_concierge_batch_target_profile_artifacts',
+        { p_preflight_id: order.preflightId },
+    );
+    if (error || !Array.isArray(data)) throw new Error('CONCIERGE_PROVIDER_ARTIFACT_LOOKUP_FAILED');
+    const rows = data as ProviderRunRow[];
     const candidates = rows
         .filter(row => row.actor_id === APIFY_PROFILE_ACTOR_ID && /^[A-Za-z0-9]{8,64}$/.test(row.run_id))
         .sort((left, right) => right.operation_key.localeCompare(left.operation_key));
