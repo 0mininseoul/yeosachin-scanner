@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
 import { z } from 'zod';
 
-const scopedMocks = vi.hoisted(() => ({
+const v214TestMocks = vi.hoisted(() => ({
     analyzeWithGemini: vi.fn(),
     strictHighRiskNarrative: vi.fn(),
 }));
@@ -9,11 +9,11 @@ const scopedMocks = vi.hoisted(() => ({
 vi.mock('@/lib/supabase/admin', () => ({ supabaseAdmin: {} }));
 vi.mock('@/lib/services/ai/gemini', async importOriginal => ({
     ...await importOriginal<typeof import('@/lib/services/ai/gemini')>(),
-    analyzeWithGemini: scopedMocks.analyzeWithGemini,
+    analyzeWithGemini: v214TestMocks.analyzeWithGemini,
 }));
 vi.mock('@/lib/services/ai/v2-staged-analysis', async importOriginal => ({
     ...await importOriginal<typeof import('@/lib/services/ai/v2-staged-analysis')>(),
-    highRiskNarrative: scopedMocks.strictHighRiskNarrative,
+    highRiskNarrative: v214TestMocks.strictHighRiskNarrative,
 }));
 
 import {
@@ -325,11 +325,11 @@ describe('v2.14 first-payment Gemini copy correction', () => {
         });
         const likeRef = narrativeInput.interactions.candidateToTargetLike.evidenceRefIds[0]!;
         const coverageRef = narrativeInput.interactions.coverage.evidenceRefId;
-        scopedMocks.strictHighRiskNarrative.mockImplementation(() => {
+        v214TestMocks.strictHighRiskNarrative.mockImplementation(() => {
             throw new Error('STRICT_WRAPPER_MUST_NOT_BE_CALLED');
         });
         let capturedPrompt = '';
-        scopedMocks.analyzeWithGemini.mockImplementationOnce(async (
+        v214TestMocks.analyzeWithGemini.mockImplementationOnce(async (
             prompt: string,
             _images: readonly string[],
             options: { schema: { parse(value: unknown): unknown } },
@@ -354,8 +354,8 @@ describe('v2.14 first-payment Gemini copy correction', () => {
             replayCapability: issueReplayStatelessCapability(),
         });
 
-        expect(scopedMocks.strictHighRiskNarrative).not.toHaveBeenCalled();
-        expect(scopedMocks.analyzeWithGemini).toHaveBeenCalledOnce();
+        expect(v214TestMocks.strictHighRiskNarrative).not.toHaveBeenCalled();
+        expect(v214TestMocks.analyzeWithGemini).toHaveBeenCalledOnce();
         expect(result.lines).toHaveLength(2);
         expect(result.lines[0]?.text).toContain('연애 맥락');
         expect(result.lines[1]?.text).toContain('연애 중');
@@ -367,7 +367,7 @@ describe('v2.14 first-payment Gemini copy correction', () => {
         expect(capturedPrompt).toContain('[계정명 제거]');
         expect(capturedPrompt).toContain('[연락처 제거]');
 
-        scopedMocks.analyzeWithGemini.mockImplementationOnce(async (
+        v214TestMocks.analyzeWithGemini.mockImplementationOnce(async (
             _prompt: string,
             _images: readonly string[],
             options: { schema: { parse(value: unknown): unknown } },
