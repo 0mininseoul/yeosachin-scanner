@@ -329,7 +329,11 @@ export function buildV213ReviewedOverview(input: V211CopyEvidence & {
     if (
         overview.length < 25
         || overview.length > MAX_OVERVIEW_LENGTH
-        || needsV211EvidenceSpecificOverview(overview, input)
+        || needsV211EvidenceSpecificOverview(overview, {
+            ...input,
+            profileEvidence: profile ?? null,
+            feedEvidence: [feed, secondFeed].filter((term): term is string => Boolean(term)),
+        })
         || !usedTerms.some(term => overview.toLowerCase().includes(term.toLowerCase()))
     ) {
         throw new Error('CONCIERGE_COPY_OVERVIEW_CONTRACT_FAILED');

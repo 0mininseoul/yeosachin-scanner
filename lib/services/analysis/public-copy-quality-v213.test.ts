@@ -128,6 +128,19 @@ describe('v2.13 concierge full public-copy review', () => {
         expect(narrative[1]).not.toContain('캡션');
     });
 
+    it('accepts feed-grounded review forms when profile evidence fills the global term limit', () => {
+        for (const reviewOrdinal of [8, 9, 11, 13]) {
+            const composition = buildV213ReviewedOverview({
+                profileEvidence: '가나다라마바자차카타파하 기록과 소개',
+                feedEvidence: ['여행 장면', '커피 기록'],
+                reviewOrdinal,
+            });
+
+            expect(composition.overview).toContain('여행');
+            expect(composition.overview).toContain('커피');
+        }
+    });
+
     it('uses only a named observed interaction or the observed absence of text for sparse v2.13 profiles', () => {
         const interactionOverview = buildV213SparseEvidenceOverview({
             reviewOrdinal: 1,
