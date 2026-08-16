@@ -61,6 +61,14 @@ export interface ReplayTriageInput {
     accountProfile?: ReplayAccountProfile;
 }
 
+export interface ReplayFirstPassInput {
+    ordinal: number;
+    /** The first pass is never invoked without a non-empty display name. */
+    fullName: string;
+    /** Exactly one profile image; feed media is admitted by the second stage. */
+    media: readonly ReplayMedia[];
+}
+
 export interface ReplayAccountProfile {
     fullName: string | null;
     hasProfileImage: boolean;
@@ -68,6 +76,7 @@ export interface ReplayAccountProfile {
 }
 
 export interface ReplayAiRunner {
+    firstPass?(input: ReplayFirstPassInput): Promise<ReplayInvocation<GenderTriageResult>>;
     triage?(input: ReplayTriageInput): Promise<ReplayInvocation<GenderTriageResult>>;
     feature?(input: { ordinal: number; bio: string | null; accountProfile?: ReplayAccountProfile; media: readonly ReplayMedia[]; captions: readonly ReplayCaption[]; triage: GenderTriageResult }): Promise<ReplayInvocation<FeatureAnalysisResult>>;
     privateNames?(input: readonly PrivateNameAccountInput[]): Promise<ReplayInvocation<unknown>>;
@@ -673,6 +682,9 @@ export async function runAnalysisV2AiReplay(input: {
         const textOnly = input.bundle.schemaVersion === 1
             && input.bundle.capture.evaluationPolicy?.capability
                 === TEST_ENTITLEMENT_STANDARD_V211_LEGACY_SECONDARY_TEXT_ONLY_REPLAY_CAPABILITY;
+        const usesConciergeFirstPass = input.bundle.schemaVersion === 1
+            && input.evaluationPolicy?.capability
+                === FIRST_PAYMENT_BASIC_V211_CONCIERGE_CAPABILITY;
         // The text-only capability intentionally retains the source universe even
         // when old public media is unavailable. Those accounts must not enter AI.
         const publicProfiles = input.bundle.profiles.filter(profile => (
@@ -754,6 +766,22 @@ export async function runAnalysisV2AiReplay(input: {
                     ordinal: profile.ordinal,
                     finalClassification: 'verified_non_female',
                     classificationSource: 'triage',
+                    featureOverview: null,
+                }, { triage, feature: null });
+                return;
+            }
+            // The paid concierge first pass is a provisional name+profile-image
+            // gate. Only male provisional results stop here; female and unknown
+            // results spend the feed-validation call.
+            if (
+                usesConciergeFirstPass
+                && triage.assessment.inferredGender === 'male'
+            ) {
+                gender.unknown++;
+                await appendAccountOutput({
+                    ordinal: profile.ordinal,
+                    finalClassification: 'unresolved',
+                    classificationSource: 'unknown',
                     featureOverview: null,
                 }, { triage, feature: null });
                 return;
@@ -873,14 +901,42 @@ export async function runAnalysisV2AiReplay(input: {
             supportsGenderTriageMicrobatch ? 6 : 4,
             async profile => {
                 if (replayWorkFailed) return;
-                if (!runner.triage) return;
-                const triage = await runner.triage({
-                    ordinal: profile.ordinal,
-                    media: mediaFor(profile, profile.triageSelectionIds),
-                    ...(supportsGenderTriageMicrobatch
-                        ? { accountProfile: v29AccountProfile(profile) }
+                let triage: ReplayInvocation<GenderTriageResult> | undefined;
+                if (usesConciergeFirstPass) {
+                    const fullName = profile.fullName?.trim() ?? '';
+                    const firstPassMedia = mediaFor(profile, profile.triageSelectionIds)
+                        .filter(item => item.kind === 'profile');
+                    if (
+                        !runner.firstPass
+                        || !fullName
+                        || profile.hasProfileImage !== true
+                        || firstPassMedia.length !== 1
+                    ) {
+                        gender.unknown++;
+                        await appendAccountOutput({
+                            ordinal: profile.ordinal,
+                            finalClassification: 'analysis_unavailable',
+                            classificationSource: 'unknown',
+                            featureOverview: null,
+                        }, { triage: null, feature: null });
+                        return;
+                    }
+                    triage = await runner.firstPass({
+                        ordinal: profile.ordinal,
+                        fullName,
+                        media: firstPassMedia,
+                    });
+                } else {
+                    if (!runner.triage) return;
+                    triage = await runner.triage({
+                        ordinal: profile.ordinal,
+                        media: mediaFor(profile, profile.triageSelectionIds),
+                        ...(supportsGenderTriageMicrobatch
+                            ? { accountProfile: v29AccountProfile(profile) }
                         : {}),
-                });
+                    });
+                }
+                if (!triage) return;
                 if (replayWorkFailed) return;
                 collect(stages.genderTriage, durations.genderTriage, triage);
                 if (triage.outcome !== 'ok' || !triage.value) {

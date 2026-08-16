@@ -3,11 +3,13 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 const mocks = vi.hoisted(() => ({
     privateNames: vi.fn(),
     createFeatureAnalysisResultIdentity: vi.fn(),
+    createGenderFirstPassResultIdentity: vi.fn(),
     createGenderResolutionResultIdentity: vi.fn(),
     createGenderTriageMicrobatchAccountId: vi.fn(),
     createGenderTriageMicrobatchResultIdentity: vi.fn(),
     createGenderTriageResultIdentity: vi.fn(),
     featureAnalysis: vi.fn(),
+    genderFirstPass: vi.fn(),
     genderResolution: vi.fn(),
     genderTriage: vi.fn(),
     genderTriageMicrobatch: vi.fn(),
@@ -20,11 +22,13 @@ vi.mock('@/lib/services/ai/private-name-analysis', () => ({
 vi.mock('@/lib/services/ai/v2-staged-analysis', () => ({
     GENDER_TRIAGE_V29_MAX_ACCOUNTS_PER_BATCH: 2,
     createFeatureAnalysisResultIdentity: mocks.createFeatureAnalysisResultIdentity,
+    createGenderFirstPassResultIdentity: mocks.createGenderFirstPassResultIdentity,
     createGenderResolutionResultIdentity: mocks.createGenderResolutionResultIdentity,
     createGenderTriageMicrobatchAccountId: mocks.createGenderTriageMicrobatchAccountId,
     createGenderTriageMicrobatchResultIdentity: mocks.createGenderTriageMicrobatchResultIdentity,
     createGenderTriageResultIdentity: mocks.createGenderTriageResultIdentity,
     featureAnalysis: mocks.featureAnalysis,
+    genderFirstPass: mocks.genderFirstPass,
     genderResolution: mocks.genderResolution,
     genderTriage: mocks.genderTriage,
     genderTriageMicrobatch: mocks.genderTriageMicrobatch,
@@ -174,6 +178,54 @@ describe('replay staged AI adapter telemetry', () => {
             );
         },
     );
+
+    it('routes the first-pass adapter through full name and profile media only', async () => {
+        const identity = { operationKey: 'gender-triage:first-pass-identity' };
+        mocks.createGenderFirstPassResultIdentity.mockReturnValue(identity);
+        mocks.genderFirstPass.mockResolvedValue({
+            assessment: {
+                inferredGender: 'female',
+                confidence: 'high',
+                ownerConsistency: 'not_visible',
+                evidenceSelectionIds: ['profile:1'],
+            },
+            routingDecision: 'route_to_feature_analysis',
+            routingReason: 'conserve_female_recall',
+            analyzedSelectionIds: ['profile:1'],
+        });
+
+        const adapter = createReplayStagedAiAdapter('ai-stage-policy-v2.11');
+        await adapter.firstPass?.({
+            ordinal: 1,
+            fullName: 'First Pass Name',
+            media: [{
+                selectionId: 'profile:1',
+                kind: 'profile',
+                jpegBase64: 'cHJvZmlsZQ==',
+            }],
+        });
+
+        expect(mocks.createGenderFirstPassResultIdentity).toHaveBeenCalledWith({
+            fullName: 'First Pass Name',
+            media: [{
+                selectionId: 'profile:1',
+                kind: 'profile',
+                normalizedJpegBase64: 'cHJvZmlsZQ==',
+            }],
+        }, 'ai-stage-policy-v2.11');
+        expect(mocks.genderFirstPass).toHaveBeenCalledWith(
+            {
+                fullName: 'First Pass Name',
+                media: [{
+                    selectionId: 'profile:1',
+                    kind: 'profile',
+                    normalizedJpegBase64: 'cHJvZmlsZQ==',
+                }],
+            },
+            expect.any(Object),
+            expect.objectContaining({ aiStagePolicyVersion: 'ai-stage-policy-v2.11' }),
+        );
+    });
 
     it('uses the v2.9 batch identity and never substitutes the ambient single-account policy', async () => {
         const identity = { operationKey: 'gender-triage:batch-identity' };

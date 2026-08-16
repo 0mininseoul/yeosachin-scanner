@@ -971,13 +971,40 @@ function pass(profile: InstagramProfile, evidenceHash: string) {
     const collected = (profile.latestPosts ?? []).length;
     return {
         status: 'collected' as const,
-        fullNamePresent: Boolean(profile.fullName),
-        profilePicPresent: Boolean(profile.profilePicUrl),
+        fullNamePresent: Boolean(profile.fullName?.trim()),
+        profilePicPresent: Boolean(profile.profilePicUrl?.trim()),
         feedDeclared: declared,
         feedCollected: Math.min(declared, collected),
         completeMedia: true,
         evidenceHash: declared === 0 ? createConciergeZeroPostEvidenceHash() : evidenceHash,
         ...(declared === 0 ? { evidenceMarker: 'zero-post-complete-v1' as const } : {}),
+    };
+}
+
+function failedPass(
+    profile: InstagramProfile | undefined,
+    evidenceHash: string,
+) {
+    return {
+        status: 'failed' as const,
+        fullNamePresent: profile ? Boolean(profile.fullName?.trim()) : null,
+        profilePicPresent: profile ? Boolean(profile.profilePicUrl?.trim()) : null,
+        feedDeclared: null,
+        feedCollected: null,
+        completeMedia: null,
+        evidenceHash,
+    };
+}
+
+function notCollectedPass(profile: InstagramProfile) {
+    return {
+        status: 'not_collected' as const,
+        fullNamePresent: Boolean(profile.fullName?.trim()),
+        profilePicPresent: Boolean(profile.profilePicUrl?.trim()),
+        feedDeclared: null,
+        feedCollected: null,
+        completeMedia: null,
+        evidenceHash: null,
     };
 }
 
@@ -1024,11 +1051,24 @@ async function classifyOrder(collected: CollectedOrder): Promise<ClassifiedOrder
                 row,
                 status: profile && detail ? 'feature_unavailable' : 'unavailable',
             });
+            const firstPassReady = Boolean(
+                profile
+                && detail?.triage
+                && profile.fullName?.trim()
+                && profile.profilePicUrl?.trim(),
+            );
+            const firstPass = firstPassReady
+                ? pass(profile!, hash({ profile, triage: detail!.triage }))
+                : failedPass(profile, evidenceHash);
+            const secondPass = firstPassReady && detail?.triage?.assessment.inferredGender !== 'male'
+                ? failedPass(profile, evidenceHash)
+                : profile
+                    ? notCollectedPass(profile)
+                    : failedPass(profile, evidenceHash);
             return {
                 candidateId: analysisV2CandidateId(row.username), instagramId: row.username,
                 mutualOrdinal: row.mutualOrdinal, partition: 'unresolved', profileFetchStatus: 'unavailable',
-                firstPass: { status: 'failed', fullNamePresent: null, profilePicPresent: null, feedDeclared: null, feedCollected: null, completeMedia: null, evidenceHash },
-                secondPass: { status: 'failed', fullNamePresent: null, profilePicPresent: null, feedDeclared: null, feedCollected: null, completeMedia: null, evidenceHash },
+                firstPass, secondPass,
                 originalAiClassification: 'unknown', effectiveClassification: 'unknown', confidence: 'low',
                 evidenceCoverage: { declared: 0, collected: 0, selected: 0, complete: false, basisPoints: 0, hash: evidenceHash },
                 classifier: 'gemini-v2.14', modelName: 'gemini-v2.14', promptVersion: 'ai-stage-policy-v2.11', schemaVersion: 'concierge-batch-v1',
@@ -1045,7 +1085,8 @@ async function classifyOrder(collected: CollectedOrder): Promise<ClassifiedOrder
         return {
             candidateId: analysisV2CandidateId(row.username), instagramId: row.username,
             mutualOrdinal: row.mutualOrdinal, partition: 'public', profileFetchStatus: 'success',
-            firstPass: pass(profile, evidenceHash), secondPass: pass(profile, evidenceHash),
+            firstPass: pass(profile, hash({ profile, triage: detail.triage })),
+            secondPass: pass(profile, evidenceHash),
             originalAiClassification: classification, effectiveClassification: classification, confidence,
             evidenceCoverage: { declared: profile.postsCount, collected: (profile.latestPosts ?? []).length, selected: Math.min(8, (profile.latestPosts ?? []).length), complete: true, basisPoints: 10_000, hash: evidenceHash },
             classifier: 'gemini-v2.14', modelName: 'gemini-v2.14', promptVersion: 'ai-stage-policy-v2.11', schemaVersion: 'concierge-batch-v1',
