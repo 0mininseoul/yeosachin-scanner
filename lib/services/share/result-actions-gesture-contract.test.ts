@@ -85,4 +85,24 @@ describe('the Kakao path never degrades to the OS share sheet', () => {
         // These were sequential once; the round trip alone outran the tap.
         expect(page).toMatch(/await Promise\.all\(\[\s*\n\s*readyKakao\(\),/);
     });
+
+    it('fails closed when the result share link cannot be prepared', () => {
+        // A failed enable request must not turn the card into a link to the
+        // landing page, because Kakao's "결과 보기" button uses this URL too.
+        expect(page).toMatch(/sharePrepRef\.current = null;[\s\S]*?return null;/);
+        expect(page).not.toMatch(/return \{ url: CANONICAL_APP_ORIGIN/);
+    });
+
+    it('does not use a landing-page fallback for result actions', () => {
+        const actions = source('components/result-actions.tsx');
+
+        expect(actions).toContain('const linkToShare = shareUrl;');
+        expect(actions).not.toContain('shareUrl ?? copyUrl');
+        expect(actions).not.toContain('copyUrl');
+        expect(actions).toMatch(/if \(!linkToShare\)/);
+    });
+
+    it('uses the API-provided result card image when available', () => {
+        expect(page).toMatch(/typeof payload\.ogImageUrl === 'string'/);
+    });
 });

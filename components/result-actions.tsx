@@ -82,15 +82,12 @@ export function ResultActions({
   onKakaoShare,
   kakaoBusy,
   kakaoAvailable,
-  copyUrl,
   shareUrl,
   onPrepare,
 }: {
   onKakaoShare: () => void;
   kakaoBusy: boolean;
   kakaoAvailable: boolean;
-  /** Where the links point until this result's own share link is minted. */
-  copyUrl: string;
   /** This result's share link; null while it is still being minted. */
   shareUrl: string | null;
   /** Fired on intent, so the slow work is done before the tap. */
@@ -143,11 +140,14 @@ export function ResultActions({
     };
   }, [notice]);
 
-  // Falls back to the service link only while this result's own link is still
-  // being minted, so a share is never silently pointed at the wrong page.
-  const linkToShare = shareUrl ?? copyUrl;
+  const linkToShare = shareUrl;
 
   const copy = async () => {
+    if (!linkToShare) {
+      setOpen(false);
+      setNotice({ text: '결과 공유 링크를 만들지 못했습니다. 잠시 후 다시 시도해 주세요.' });
+      return;
+    }
     let ok = false;
     if (navigator.clipboard?.writeText) {
       // A rejection here is the real answer; copyTextSync would only paper over
@@ -178,6 +178,11 @@ export function ResultActions({
      the browser; there is no reliable signal that a scheme hand-off succeeded,
      so the platform decides instead of a guess. */
   const shareToInstagramDm = () => {
+    if (!linkToShare) {
+      setOpen(false);
+      setNotice({ text: '결과 공유 링크를 만들지 못했습니다. 잠시 후 다시 시도해 주세요.' });
+      return;
+    }
     /* The clipboard write must not be awaited — it is *started* inside the
        gesture and left to settle on its own, so nothing delays what follows. */
     const write = navigator.clipboard?.writeText(linkToShare);
