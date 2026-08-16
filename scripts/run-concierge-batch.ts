@@ -36,6 +36,7 @@ import {
     runConciergeBatch,
     type ConciergeBatchOrder,
     type ConciergeBatchPreparedOrder,
+    type ConciergeBatchStageContext,
 } from '@/lib/services/analysis/concierge-batch-runner';
 import type {
     ConciergeManualPublicationInput,
@@ -129,6 +130,7 @@ function retryableProviderError(error: unknown): boolean {
 
 async function withProvider<T>(
     requestId: string,
+    context: ConciergeBatchStageContext,
     operation: (slot: ApprovedSlot, provider: ReturnType<typeof makeApifyProvider>, env: Record<string, string | undefined>) => Promise<T>,
 ): Promise<T> {
     let lastError: unknown = null;
@@ -141,7 +143,7 @@ async function withProvider<T>(
             client: new ApifyClient({ token, maxRetries: 0 }),
         });
         try {
-            return await operation(slot, provider, env);
+            return await context.withActorSlot(() => operation(slot, provider, env));
         } catch (error) {
             lastError = error;
             if (!retryableProviderError(error)) throw error;
@@ -152,6 +154,7 @@ async function withProvider<T>(
 
 async function withInteractions<T>(
     requestId: string,
+    context: ConciergeBatchStageContext,
     operation: (slot: ApprovedSlot, adapter: typeof apifyInteractionAdapter, env: Record<string, string | undefined>) => Promise<T>,
 ): Promise<T> {
     let lastError: unknown = null;
@@ -164,7 +167,7 @@ async function withInteractions<T>(
             client: new ApifyClient({ token, maxRetries: 0 }),
         });
         try {
-            return await operation(slot, adapter, env);
+            return await context.withActorSlot(() => operation(slot, adapter, env));
         } catch (error) {
             lastError = error;
             if (!retryableProviderError(error)) throw error;
@@ -209,9 +212,13 @@ function sourcePosts(profile: InstagramProfile): readonly InstagramPost[] {
     return profile.latestPosts ?? [];
 }
 
-async function collectOrder(order: OrderRow, prepared: ConciergeBatchPreparedOrder): Promise<CollectedOrder> {
+async function collectOrder(
+    order: OrderRow,
+    prepared: ConciergeBatchPreparedOrder,
+    context: ConciergeBatchStageContext,
+): Promise<CollectedOrder> {
     const targetProfile = await (await loadTargetProfileArtifact(order))
-        ?? await withProvider(prepared.sourceRequestId, async (slot, provider) => {
+        ?? await withProvider(prepared.sourceRequestId, context, async (slot, provider) => {
             const profile = await provider.getProfile?.(order.targetUsername, providerContext(prepared.sourceRequestId, slot));
             if (!profile) throw new Error('CONCIERGE_TARGET_PROFILE_UNAVAILABLE');
             return profile;
@@ -228,7 +235,7 @@ async function collectOrder(order: OrderRow, prepared: ConciergeBatchPreparedOrd
         Math.max(targetProfile.followingCount, order.targetFollowing ?? 0),
     );
     const [followers, following] = await Promise.all([
-        withProvider(prepared.sourceRequestId, async (slot, provider) => {
+        withProvider(prepared.sourceRequestId, context, async (slot, provider) => {
             if (!provider.getFollowers) throw new Error('CONCIERGE_RELATIONSHIP_PROVIDER_UNAVAILABLE');
             return provider.getFollowers(
                 order.targetUsername,
@@ -236,7 +243,7 @@ async function collectOrder(order: OrderRow, prepared: ConciergeBatchPreparedOrd
                 providerContext(prepared.sourceRequestId, slot),
             );
         }),
-        withProvider(prepared.sourceRequestId, async (slot, provider) => {
+        withProvider(prepared.sourceRequestId, context, async (slot, provider) => {
             if (!provider.getFollowing) throw new Error('CONCIERGE_RELATIONSHIP_PROVIDER_UNAVAILABLE');
             return provider.getFollowing(
                 order.targetUsername,
@@ -266,7 +273,7 @@ async function collectOrder(order: OrderRow, prepared: ConciergeBatchPreparedOrd
     const hydrated = new Map<string, InstagramProfile>();
     for (let index = 0; index < selectedNames.length; index += 30) {
         const batch = selectedNames.slice(index, index + 30);
-        const outcomes = await withProvider(prepared.sourceRequestId, async (slot, provider) => {
+        const outcomes = await withProvider(prepared.sourceRequestId, context, async (slot, provider) => {
             if (!provider.getProfilesBatchOutcomes) throw new Error('CONCIERGE_PROFILE_BATCH_UNAVAILABLE');
             return provider.getProfilesBatchOutcomes(
                 batch,
@@ -293,10 +300,10 @@ async function collectOrder(order: OrderRow, prepared: ConciergeBatchPreparedOrd
         const likerPosts = selectRecentInteractionPosts([...targetPosts], 4);
         const commentPosts = selectRecentInteractionPosts([...targetPosts], 6);
         const [likers, comments] = await Promise.all([
-            withInteractions(prepared.sourceRequestId, async (slot, adapter) => adapter.getPostLikers(
+            withInteractions(prepared.sourceRequestId, context, async (slot, adapter) => adapter.getPostLikers(
                 likerPosts.map(instagramPostUrl), 150, providerContext(prepared.sourceRequestId, slot),
             )),
-            withInteractions(prepared.sourceRequestId, async (slot, adapter) => adapter.getPostComments(
+            withInteractions(prepared.sourceRequestId, context, async (slot, adapter) => adapter.getPostComments(
                 commentPosts.map(instagramPostUrl), 15, providerContext(prepared.sourceRequestId, slot),
             )),
         ]);
@@ -553,9 +560,9 @@ async function main(): Promise<void> {
     const casPublish = createConciergeBatchCasPublisher();
     const result = await runConciergeBatch(cohort, {
         prepare: bootstrap.prepare,
-        async collect(order, _context, prepared) {
+        async collect(order, context, prepared) {
             if (!prepared) throw new Error('CONCIERGE_BATCH_BOOTSTRAP_REQUIRED');
-            return collectOrder(cohort.find(candidate => candidate.orderId === order.orderId)!, prepared);
+            return collectOrder(cohort.find(candidate => candidate.orderId === order.orderId)!, prepared, context);
         },
         async classify(collected) { return classifyOrder(collected); },
         async publish(classified) {

@@ -215,17 +215,12 @@ export async function runConciergeBatch<Collected, Classified, Published extends
                         const prepared = pipeline.prepare
                             ? await pipeline.prepare(order)
                             : undefined;
-                        // Treat one order's collection phase as the bounded
-                        // provider unit.  The scoped callback avoids a nested
-                        // deadlock if a collector uses withActorSlot for a
-                        // sub-operation; the outer gate is the global fence.
-                        const collectionContext = Object.freeze({
-                            ...context,
-                            withActorSlot: async <T>(operation: () => Promise<T>) => operation(),
-                        });
-                        const collected = await context.withActorSlot(
-                            () => pipeline.collect(order, collectionContext, prepared),
-                        );
+                        // Collection callers acquire the shared gate around
+                        // each provider Actor operation. This keeps the
+                        // physical Apify start/read concurrency at the same
+                        // bound even when one order runs independent stages
+                        // in parallel.
+                        const collected = await pipeline.collect(order, context, prepared);
                         const classified = await pipeline.classify(collected, order, context);
                         const published = await pipeline.publish(classified, order, context);
                         if (published.status !== 'completed') throw new Error('CONCIERGE_BATCH_PUBLICATION_NOT_TERMINAL');

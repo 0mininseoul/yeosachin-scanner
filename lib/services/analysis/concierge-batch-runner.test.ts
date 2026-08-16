@@ -48,14 +48,16 @@ describe('concierge batch runner', () => {
         const started: string[] = [];
         const terminal: string[] = [];
         const result = await runConciergeBatch(orders, {
-            async collect(current) {
-                active.push(current.orderId);
-                started.push(current.orderId);
-                peak = Math.max(peak, active.length);
-                await new Promise(resolve => setTimeout(resolve, current.orderId.endsWith('000000000001') ? 15 : 2));
-                active.splice(active.indexOf(current.orderId), 1);
-                if (current.orderId.endsWith('000000000004')) throw new Error('COLLECTION_FAILED');
-                return { order: current };
+            async collect(current, context) {
+                return context.withActorSlot(async () => {
+                    active.push(current.orderId);
+                    started.push(current.orderId);
+                    peak = Math.max(peak, active.length);
+                    await new Promise(resolve => setTimeout(resolve, current.orderId.endsWith('000000000001') ? 15 : 2));
+                    active.splice(active.indexOf(current.orderId), 1);
+                    if (current.orderId.endsWith('000000000004')) throw new Error('COLLECTION_FAILED');
+                    return { order: current };
+                });
             },
             async classify(collected) {
                 return collected;
@@ -105,12 +107,14 @@ describe('concierge batch runner', () => {
         let activeCollections = 0;
         let peakCollections = 0;
         const result = await runConciergeBatch(orders, {
-            async collect(current) {
-                activeCollections += 1;
-                peakCollections = Math.max(peakCollections, activeCollections);
-                await new Promise(resolve => setTimeout(resolve, 3));
-                activeCollections -= 1;
-                return { order: current };
+            async collect(current, context) {
+                return context.withActorSlot(async () => {
+                    activeCollections += 1;
+                    peakCollections = Math.max(peakCollections, activeCollections);
+                    await new Promise(resolve => setTimeout(resolve, 3));
+                    activeCollections -= 1;
+                    return { order: current };
+                });
             },
             async classify(collected) {
                 return collected;
