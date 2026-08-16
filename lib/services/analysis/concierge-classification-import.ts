@@ -299,7 +299,7 @@ function parseCsvRows(csv: string): string[][] {
         finishField();
         rows.push(row);
     }
-    if (rows.length < 2 || rows.some(item => item.some(value => value.includes('\0')))) {
+    if (rows.length < 1 || rows.some(item => item.some(value => value.includes('\0')))) {
         fail('CONCIERGE_CLASSIFICATION_IMPORT_CSV_FORMAT');
     }
     return rows;
