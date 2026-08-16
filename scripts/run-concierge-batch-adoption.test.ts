@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import {
     generateConciergeBatchHighRiskCopy,
     isRecoverableTargetProfileArtifactError,
+    isMatchingTargetProfileArtifactRun,
     parseConciergeExistingRelationshipArtifacts,
     relationshipArtifactProviderContext,
     type ConciergeBatchHighRiskCopyEvidence,
@@ -70,6 +71,26 @@ describe('concierge existing relationship artifact resolver', () => {
         expect(isRecoverableTargetProfileArtifactError(new Error('CONCIERGE_PROVIDER_ARTIFACT_LOOKUP_FAILED'))).toBe(true);
         expect(isRecoverableTargetProfileArtifactError(new Error('CONCIERGE_TARGET_PROFILE_PRIVATE'))).toBe(false);
         expect(isRecoverableTargetProfileArtifactError(new Error('CONCIERGE_PROVIDER_ARTIFACT_INVALID_EXTRA'))).toBe(false);
+    });
+
+    it('matches the opaque canonical actor id returned by Apify, not the actor slug', () => {
+        const run = {
+            id: 'Abcdef12',
+            actId: 'opaqueCanonicalActorId123',
+            status: 'SUCCEEDED',
+            defaultDatasetId: 'dataset123',
+        };
+
+        expect(isMatchingTargetProfileArtifactRun(
+            run,
+            'Abcdef12',
+            'opaqueCanonicalActorId123',
+        )).toBe(true);
+        expect(isMatchingTargetProfileArtifactRun(
+            run,
+            'Abcdef12',
+            'apify/instagram-profile-scraper',
+        )).toBe(false);
     });
 
     const copyEvidence = (facts: ConciergeBatchHighRiskCopyEvidence['facts']): ConciergeBatchHighRiskCopyEvidence => ({

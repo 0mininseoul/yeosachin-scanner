@@ -746,7 +746,14 @@ async function loadTargetProfileArtifact(order: OrderRow): Promise<InstagramProf
     } catch {
         throw new Error('CONCIERGE_PROVIDER_ARTIFACT_LOOKUP_FAILED');
     }
-    if (!run || run.id !== row.run_id || run.actId !== APIFY_PROFILE_ACTOR_ID || run.status !== 'SUCCEEDED' || !run.defaultDatasetId) {
+    let canonicalActorId: string | null = null;
+    try {
+        const actor = await client.actor(APIFY_PROFILE_ACTOR_ID).get();
+        canonicalActorId = typeof actor?.id === 'string' ? actor.id : null;
+    } catch {
+        throw new Error('CONCIERGE_PROVIDER_ARTIFACT_LOOKUP_FAILED');
+    }
+    if (!isMatchingTargetProfileArtifactRun(run, row.run_id, canonicalActorId ?? '')) {
         throw new Error('CONCIERGE_PROVIDER_ARTIFACT_INVALID');
     }
     let page: { items: unknown[] };
@@ -765,6 +772,25 @@ async function loadTargetProfileArtifact(order: OrderRow): Promise<InstagramProf
         throw new Error('CONCIERGE_PROVIDER_ARTIFACT_INVALID');
     }
     return parsed.profilesByUsername.get(order.targetUsername) ?? null;
+}
+
+export function isMatchingTargetProfileArtifactRun(
+    run: {
+        id?: string;
+        actId?: string;
+        status?: string;
+        defaultDatasetId?: string;
+    } | null | undefined,
+    expectedRunId: string,
+    expectedCanonicalActorId: string,
+): boolean {
+    return Boolean(
+        run
+        && run.id === expectedRunId
+        && run.actId === expectedCanonicalActorId
+        && run.status === 'SUCCEEDED'
+        && run.defaultDatasetId,
+    );
 }
 
 export function isRecoverableTargetProfileArtifactError(error: unknown): boolean {
