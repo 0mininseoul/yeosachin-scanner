@@ -1148,7 +1148,13 @@ export async function generateV214GeminiCopyWithSchemaRetry<T>(
         try {
             return await generate();
         } catch (error) {
-            if (!isRecoverableGeminiResponseError(error)
+            const recoverableFeatureOverviewRepair = error instanceof z.ZodError
+                && error.issues.some(issue => (
+                    issue.path.length === 1
+                    && issue.path[0] === 'oneLineOverview'
+                ));
+            if ((!isRecoverableGeminiResponseError(error)
+                && !recoverableFeatureOverviewRepair)
                 || attempt === V214_GEMINI_GENERATION_MAX_ATTEMPTS) {
                 throw error;
             }

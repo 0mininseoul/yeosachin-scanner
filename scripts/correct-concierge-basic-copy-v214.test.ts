@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
+import { z } from 'zod';
 
 const scopedMocks = vi.hoisted(() => ({
     analyzeWithGemini: vi.fn(),
@@ -97,6 +98,20 @@ describe('v2.14 first-payment Gemini copy correction', () => {
 
         await expect(generateV214GeminiCopyWithSchemaRetry(generate)).rejects.toBe(failure);
         expect(generate).toHaveBeenCalledTimes(1);
+    });
+
+    it('retries only a repaired feature overview Zod rejection', async () => {
+        const failure = new z.ZodError([{
+            code: 'custom',
+            path: ['oneLineOverview'],
+            message: 'overview repair rejected',
+        }]);
+        const generate = vi.fn()
+            .mockRejectedValueOnce(failure)
+            .mockResolvedValueOnce('valid-copy');
+
+        await expect(generateV214GeminiCopyWithSchemaRetry(generate)).resolves.toBe('valid-copy');
+        expect(generate).toHaveBeenCalledTimes(2);
     });
 
     it('binds the first-result adapter to retained bidirectional evidence without reverse comments', () => {
