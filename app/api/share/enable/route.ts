@@ -10,6 +10,10 @@ import {
     requireActiveAccountClassification,
 } from '@/lib/services/identity/account-principal-store';
 import { isAnalysisResultAuthoritativelyPublished } from '@/lib/services/analysis/result-publication-authority';
+import {
+    isAnalysisResultOperator,
+    resolveAnalysisResultOwner,
+} from '@/lib/services/analysis/result-operator-access';
 
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const SHARE_TOKEN_PATTERN = /^[0-9a-f]{64}$/;
@@ -226,12 +230,19 @@ export async function POST(request: Request) {
                 );
         }
 
+        const operator = isAnalysisResultOperator({ id: user.id, email: user.email });
+        const authorizedUserId = operator
+            ? await resolveAnalysisResultOwner(requestId, 'v2')
+                ?? await resolveAnalysisResultOwner(requestId, 'v1')
+                ?? user.id
+            : user.id;
+
         // 2. 분석 요청 조회 및 소유자 확인
         const { data: analysisRequest, error: requestError } = await supabaseAdmin
             .from('analysis_requests')
             .select(SHARE_REQUEST_SELECT)
             .eq('id', requestId)
-            .eq('user_id', user.id)
+            .eq('user_id', authorizedUserId)
             .single();
 
         if (requestError || !analysisRequest) {
@@ -242,7 +253,7 @@ export async function POST(request: Request) {
         }
 
         // 3. 소유자 확인
-        if (analysisRequest.user_id !== user.id) {
+        if (analysisRequest.user_id !== authorizedUserId) {
             return NextResponse.json(
                 { error: '권한이 없습니다.' },
                 { status: 403 }
@@ -281,7 +292,7 @@ export async function POST(request: Request) {
                 : null;
             const mutation = await compareAndSetShareEnabled(
                 requestId,
-                user.id,
+                authorizedUserId,
                 expectedToken,
                 analysisRequest.pipeline_version
             );
