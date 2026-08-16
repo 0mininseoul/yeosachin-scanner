@@ -1,13 +1,32 @@
 import { describe, expect, it, vi } from 'vitest';
+import { z } from 'zod';
+
+const v214TestMocks = vi.hoisted(() => ({
+    analyzeWithGemini: vi.fn(),
+    strictHighRiskNarrative: vi.fn(),
+}));
 
 vi.mock('@/lib/supabase/admin', () => ({ supabaseAdmin: {} }));
+vi.mock('@/lib/services/ai/gemini', async importOriginal => ({
+    ...await importOriginal<typeof import('@/lib/services/ai/gemini')>(),
+    analyzeWithGemini: v214TestMocks.analyzeWithGemini,
+}));
+vi.mock('@/lib/services/ai/v2-staged-analysis', async importOriginal => ({
+    ...await importOriginal<typeof import('@/lib/services/ai/v2-staged-analysis')>(),
+    highRiskNarrative: v214TestMocks.strictHighRiskNarrative,
+}));
 
 import {
     buildV214NarrativeInput,
     buildV214GeminiCopyPayload,
+    classifyV214FailureCategory,
+    classifyV214AttemptTelemetry,
+    generateV214RelaxedNarrative,
     generateV214GeminiCopyWithSchemaRetry,
+    v214RelaxedNarrativeModelResponseSchema,
     type V214FrozenResultRow,
 } from './correct-concierge-basic-copy-v214';
+import { issueReplayStatelessCapability } from '@/lib/services/ai/replay-stateless-capability';
 import type { FeatureAnalysisResult } from '@/lib/services/ai/v2-staged-analysis';
 
 const syllables = [
@@ -58,6 +77,81 @@ function geminiRows(rows: readonly V214FrozenResultRow[]) {
 }
 
 describe('v2.14 first-payment Gemini copy correction', () => {
+    it.each([
+        [
+            'ambiguous provider failure',
+            { disposition: 'ambiguous', finishReason: null },
+            'http_5xx_or_transport',
+        ],
+        [
+            'rate-limited provider failure',
+            { disposition: 'rate_limited', finishReason: null },
+            'http_5xx_or_transport',
+        ],
+        [
+            'safety block',
+            { disposition: 'response_rejected', finishReason: 'SAFETY' },
+            'safety',
+        ],
+        [
+            'max tokens',
+            { disposition: 'response_rejected', finishReason: 'MAX_TOKENS' },
+            'max_tokens',
+        ],
+        [
+            'empty response',
+            {
+                disposition: 'response_rejected',
+                finishReason: 'STOP',
+                responseRejection: { category: 'candidate_contract' },
+            },
+            'empty_response',
+        ],
+        [
+            'invalid JSON',
+            {
+                disposition: 'response_rejected',
+                finishReason: 'STOP',
+                responseRejection: { category: 'invalid_json' },
+            },
+            'json_parse',
+        ],
+        [
+            'schema mapping failure',
+            {
+                disposition: 'response_rejected',
+                finishReason: 'STOP',
+                responseRejection: { category: 'schema_validation' },
+            },
+            'downstream_mapping',
+        ],
+    ] as const)('maps %s to one closed category', (_label, telemetry, expected) => {
+        expect(classifyV214AttemptTelemetry(telemetry)).toBe(expected);
+    });
+
+    it('maps unknown failures to downstream_mapping without exposing the error', () => {
+        const category = classifyV214FailureCategory(new Error(
+            'CONCIERGE_COPY_V214_GENERATION_FAILED: private model text and https://secret.example',
+        ));
+        expect(category).toBe('downstream_mapping');
+        expect([
+            'http_5xx_or_transport', 'safety', 'max_tokens', 'empty_response',
+            'json_parse', 'downstream_mapping',
+        ]).toContain(category);
+    });
+
+    it('accepts extra structural JSON fields before existing narrative fences run', () => {
+        expect(v214RelaxedNarrativeModelResponseSchema.parse({
+            trace: 'ignored',
+            lines: [
+                { text: '첫 문장', evidenceRefs: ['profile:bio'], modelNote: 'ignored' },
+                { text: '둘째 문장', evidenceRefs: ['coverage'], modelNote: 'ignored' },
+            ],
+        })).toMatchObject({
+            lines: [{ text: '첫 문장' }, { text: '둘째 문장' }],
+        });
+    });
+
     it('retries schema-rejected Gemini copy generation up to three total attempts', async () => {
         const generate = vi.fn()
             .mockRejectedValueOnce(new Error('AI_GENERATION_RESPONSE_REJECTED_ERROR: generated response failed strict validation.'))
@@ -68,6 +162,24 @@ describe('v2.14 first-payment Gemini copy correction', () => {
         expect(generate).toHaveBeenCalledTimes(3);
     });
 
+    it('retries one bounded provider or transport failure', async () => {
+        const failure = new Error('AI_AMBIGUOUS_GENERATION_ERROR: generation status is unknown.');
+        const generate = vi.fn()
+            .mockRejectedValueOnce(failure)
+            .mockResolvedValueOnce('valid-copy');
+
+        await expect(generateV214GeminiCopyWithSchemaRetry(generate)).resolves.toBe('valid-copy');
+        expect(generate).toHaveBeenCalledTimes(2);
+    });
+
+    it('does not retry provider or transport failure more than once', async () => {
+        const failure = new Error('AI_AMBIGUOUS_GENERATION_ERROR: generation status is unknown.');
+        const generate = vi.fn().mockRejectedValue(failure);
+
+        await expect(generateV214GeminiCopyWithSchemaRetry(generate)).rejects.toBe(failure);
+        expect(generate).toHaveBeenCalledTimes(2);
+    });
+
     it('fails closed after the third schema-rejected generation attempt', async () => {
         const rejection = new Error('AI_GENERATION_RESPONSE_REJECTED_ERROR: generated response failed strict validation.');
         const generate = vi.fn().mockRejectedValue(rejection);
@@ -76,12 +188,36 @@ describe('v2.14 first-payment Gemini copy correction', () => {
         expect(generate).toHaveBeenCalledTimes(3);
     });
 
-    it('does not retry non-schema generation errors', async () => {
-        const failure = new Error('AI_RATE_LIMIT_ERROR: quota unavailable.');
+    it('does not retry unrelated generation errors', async () => {
+        const failure = new Error('AI_ATTEMPT_AUDIT_PERSISTENCE_ERROR: audit unavailable.');
         const generate = vi.fn().mockRejectedValue(failure);
 
         await expect(generateV214GeminiCopyWithSchemaRetry(generate)).rejects.toBe(failure);
         expect(generate).toHaveBeenCalledTimes(1);
+    });
+
+    it('retries only a repaired feature overview Zod rejection', async () => {
+        const failure = new z.ZodError([{
+            code: 'custom',
+            path: ['oneLineOverview'],
+            message: 'overview repair rejected',
+        }]);
+        const generate = vi.fn()
+            .mockRejectedValueOnce(failure)
+            .mockResolvedValueOnce('valid-copy');
+
+        await expect(generateV214GeminiCopyWithSchemaRetry(generate)).resolves.toBe('valid-copy');
+        expect(generate).toHaveBeenCalledTimes(2);
+    });
+
+    it('retries only the scoped narrative privacy rejection', async () => {
+        const failure = new Error('CONCIERGE_COPY_V214_NARRATIVE_PRIVACY_INVALID');
+        const generate = vi.fn()
+            .mockRejectedValueOnce(failure)
+            .mockResolvedValueOnce('valid-copy');
+
+        await expect(generateV214GeminiCopyWithSchemaRetry(generate)).resolves.toBe('valid-copy');
+        expect(generate).toHaveBeenCalledTimes(2);
     });
 
     it('binds the first-result adapter to retained bidirectional evidence without reverse comments', () => {
@@ -251,5 +387,111 @@ describe('v2.14 first-payment Gemini copy correction', () => {
             generated: unchangedNarrative,
         }))
             .toThrow('CONCIERGE_COPY_V214_HIGH_RISK_NARRATIVE_UNCHANGED');
+    });
+
+    it('uses only the scoped relaxed DTO and never calls the strict global narrative wrapper', async () => {
+        const target = {
+            username: 'target.user', fullName: '김준호', followersCount: 1,
+            followingCount: 1, postsCount: 1, isPrivate: false, isVerified: false,
+            latestPosts: [],
+        };
+        const candidate = {
+            username: 'candidate.user', fullName: '박민지',
+            bio: '여행 기록 https://private.example @other.user 010-1234-5678',
+            followersCount: 1, followingCount: 1, postsCount: 1,
+            isPrivate: false, isVerified: false,
+            latestPosts: [],
+        };
+        const capturedProfile = {
+            ordinal: 1, isPrivate: false, username: 'candidate.user', fullName: '박민지',
+            hasProfileImage: true, bio: '여행 기록',
+            media: [{ selectionId: 'post:candidate:1', kind: 'feed' as const, postId: 'candidate-post', jpegBase64: 'aGVsbG8=' }],
+            triageSelectionIds: ['post:candidate:1'], featureSelectionIds: ['post:candidate:1'],
+            resolverSelectionIds: ['post:candidate:1'], captions: [],
+            coverage: { selectedCount: 1, normalizedCount: 1, failures: [] },
+        } as Parameters<typeof buildV214NarrativeInput>[0]['capturedProfile'];
+        const feature = {
+            features: {
+                gender: 'female', genderConfidence: 'high', ownerConsistency: 'same_person',
+                appearanceGrade: 4, exposureScore: 2, businessClassification: 'personal',
+                businessConfidence: 'high', accountContext: 'personal', marriageEvidence: 'none',
+                partnerEvidence: 'none', partnerExclusionContext: 'none',
+                evidenceSelectionIds: { gender: [], appearance: [], exposure: [], business: [], accountContext: [], marriagePartner: [] },
+                oneLineOverview: '여행 기록이 또렷하게 남는 계정입니다.',
+            },
+            finalGenderDecision: 'verified_female', analyzedSelectionIds: ['post:candidate:1'],
+        } as FeatureAnalysisResult;
+        const narrativeInput = buildV214NarrativeInput({
+            targetProfile: target, candidateProfile: candidate, capturedProfile, feature,
+            interactions: [{
+                candidateUsername: 'candidate.user', postId: 'target-post',
+                signal: 'female_target_like', sourceInteractionId: 'like:1',
+            }],
+            targetToCandidateLike: { status: 'not_observed', evidenceRefIds: [] },
+        });
+        const likeRef = narrativeInput.interactions.candidateToTargetLike.evidenceRefIds[0]!;
+        const coverageRef = narrativeInput.interactions.coverage.evidenceRefId;
+        v214TestMocks.strictHighRiskNarrative.mockImplementation(() => {
+            throw new Error('STRICT_WRAPPER_MUST_NOT_BE_CALLED');
+        });
+        let capturedPrompt = '';
+        v214TestMocks.analyzeWithGemini.mockImplementationOnce(async (
+            prompt: string,
+            _images: readonly string[],
+            options: { schema: { parse(value: unknown): unknown } },
+        ) => {
+            capturedPrompt = prompt;
+            return options.schema.parse({
+                lines: [{
+                    text: '박민지님의 여행 기록은 연애 맥락으로도 읽힙니다.',
+                    evidenceRefs: ['profile:bio'],
+                }, {
+                    text: '박민지님이 김준호님에게 좋아요를 남긴 흐름은 연애 중으로 보입니다.',
+                    evidenceRefs: [likeRef, coverageRef],
+                }],
+            });
+        });
+
+        const result = await generateV214RelaxedNarrative({
+            narrativeInput,
+            candidateFullName: '박민지',
+            targetFullName: '김준호',
+            requestId: '11111111-1111-4111-8111-111111111111',
+            replayCapability: issueReplayStatelessCapability(),
+        });
+
+        expect(v214TestMocks.strictHighRiskNarrative).not.toHaveBeenCalled();
+        expect(v214TestMocks.analyzeWithGemini).toHaveBeenCalledOnce();
+        expect(result.lines).toHaveLength(2);
+        expect(result.lines[0]?.text).toContain('연애 맥락');
+        expect(result.lines[1]?.text).toContain('연애 중');
+        expect(result.lines[1]?.evidenceRefs).toEqual([likeRef, coverageRef]);
+        expect(capturedPrompt).not.toContain('private.example');
+        expect(capturedPrompt).not.toContain('@other.user');
+        expect(capturedPrompt).not.toContain('010-1234-5678');
+        expect(capturedPrompt).toContain('[링크 제거]');
+        expect(capturedPrompt).toContain('[계정명 제거]');
+        expect(capturedPrompt).toContain('[연락처 제거]');
+
+        v214TestMocks.analyzeWithGemini.mockImplementationOnce(async (
+            _prompt: string,
+            _images: readonly string[],
+            options: { schema: { parse(value: unknown): unknown } },
+        ) => options.schema.parse({
+            lines: [{
+                text: '박민지님의 여행 기록은 2026년에도 이어집니다.',
+                evidenceRefs: ['profile:bio'],
+            }, {
+                text: '박민지님이 김준호님에게 좋아요를 남긴 흐름은 확인됩니다.',
+                evidenceRefs: [likeRef, coverageRef],
+            }],
+        }));
+        await expect(generateV214RelaxedNarrative({
+            narrativeInput,
+            candidateFullName: '박민지',
+            targetFullName: '김준호',
+            requestId: '11111111-1111-4111-8111-111111111111',
+            replayCapability: issueReplayStatelessCapability(),
+        })).rejects.toThrow('CONCIERGE_COPY_V214_NARRATIVE_PRIVACY_INVALID');
     });
 });

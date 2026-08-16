@@ -243,7 +243,7 @@ describe('concierge manual publication', () => {
             manualImport: publicationInput.manualImport,
         })).resolves.toEqual({ published: true, idempotent: false });
         expect(forwarded).toMatchObject({
-            publication: {
+            p_publication: {
                 privateRows: publication.privateRows,
             },
         });
@@ -501,10 +501,12 @@ describe('concierge manual publication', () => {
         });
         expect(result).toEqual({ published: true, idempotent: false });
         expect(forwarded).toMatchObject({
-            order_id: 'order', request_id: 'request', expected_version: 7,
-            expected_result_hash: 'e'.repeat(64), result_hash: expect.any(String),
-            interaction_lineage_hash: expect.any(String), interaction_lineage: expect.any(Object),
+            p_order_id: 'order', p_request_id: 'request', p_expected_version: 7,
+            p_expected_result_hash: 'e'.repeat(64), p_result_hash: expect.any(String),
+            p_interaction_lineage_hash: expect.any(String), p_interaction_lineage: expect.any(Object),
         });
+        expect(forwarded).not.toHaveProperty('order_id');
+        expect(forwarded).not.toHaveProperty('request_id');
         const lying = createConciergePublicationStore(async () => ({
             data: {
                 published: true, idempotent: false,
