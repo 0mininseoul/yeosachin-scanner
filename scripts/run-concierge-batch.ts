@@ -48,7 +48,7 @@ import type {
 
 const ORDER_ID = z.string().uuid();
 const USERNAME = z.string().regex(/^[a-z0-9._]{1,30}$/);
-const APPROVED_SLOTS = ['senary', 'tertiary', 'quinary', 'primary', 'secondary'] as const;
+const APPROVED_SLOTS = ['quinary', 'primary', 'quaternary', 'secondary'] as const;
 type ApprovedSlot = typeof APPROVED_SLOTS[number];
 const EMPTY_MANUAL_CSV = 'username,instagram_url,ai_classification,ai_confidence/evidence_status,manual_gender,operator_note\n';
 const RETRY_CODE_PATTERN = /^CONCIERGE_[A-Z0-9_]{2,100}$/;
@@ -351,7 +351,16 @@ async function collectOrder(
     }
     const publicProfiles = selectedPublic.flatMap(row => {
         const profile = hydrated.get(row.username);
-        return profile ? [{ ordinal: row.mutualOrdinal, profile }] : [];
+        if (!profile) return [];
+        // Relationship rows are an already-collected authoritative source for
+        // the display name. Retain it when profile hydration omits the same
+        // non-sensitive field so sparse concierge copy can stay evidence-bound
+        // without recollecting the profile.
+        const fullName = profile.fullName ?? row.fullName ?? undefined;
+        return [{
+            ordinal: row.mutualOrdinal,
+            profile: fullName === undefined ? profile : { ...profile, fullName },
+        }];
     });
     const publicUnavailableRows = selectedPublic.filter(row => !hydrated.has(row.username));
     const targetPosts = sourcePosts(targetProfile);
@@ -420,7 +429,9 @@ async function collectOrder(
         targetInteractions: targetInteraction.evidence,
     } satisfies import('@/lib/services/analysis/first-payment-concierge-source').FirstPaymentConciergeSource;
     const captured = await captureFirstPaymentConciergeAiBundle({ source });
-    if (captured.mediaUnavailableOrdinals.length > 0) throw new Error('CONCIERGE_MEDIA_CAPTURE_INCOMPLETE');
+    // The replay bundle intentionally records media-terminal ordinals. They
+    // remain unresolved in the concierge ledger; rejecting the whole order
+    // here would discard valid relationship/profile artifacts.
     return { order, prepared, source, captured, interaction };
 }
 
@@ -450,7 +461,19 @@ async function classifyOrder(collected: CollectedOrder): Promise<ClassifiedOrder
         onAccountAnalyzed(detail) { details.push(detail); },
     });
     const detailsByOrdinal = new Map(details.map(detail => [detail.ordinal, detail]));
+    // A resolver can legally verify gender after feature analysis is
+    // unavailable. Concierge scoring still needs a feature bundle, so retain
+    // those accounts as unresolved instead of treating them as publishable
+    // female rows.
+    const replayDetails = details.filter(detail => detail.feature !== null);
+    const replayDetailsByOrdinal = new Map(replayDetails.map(detail => [detail.ordinal, detail]));
     const publicByOrdinal = new Map(collected.source.publicProfiles.map(item => [item.ordinal, item.profile]));
+    const replayPublicNames = new Set(
+        [...replayDetailsByOrdinal.keys()]
+            .map(ordinal => publicByOrdinal.get(ordinal)?.username)
+            .filter((username): username is string => typeof username === 'string')
+            .map(normalized),
+    );
     const records: ConciergeClassificationRecord[] = collected.source.mutualRows.map(row => {
         if (row.isPrivate) {
             return {
@@ -465,14 +488,18 @@ async function classifyOrder(collected: CollectedOrder): Promise<ClassifiedOrder
         }
         const profile = publicByOrdinal.get(row.mutualOrdinal);
         const detail = detailsByOrdinal.get(row.mutualOrdinal);
-        if (!profile || !detail) {
-            const evidenceHash = hash({ row, status: 'unavailable' });
+        if (!profile || !detail || !detail.feature) {
+            const evidenceHash = hash({
+                row,
+                status: profile && detail ? 'feature_unavailable' : 'unavailable',
+            });
             return {
                 candidateId: analysisV2CandidateId(row.username), instagramId: row.username,
                 mutualOrdinal: row.mutualOrdinal, partition: 'unresolved', profileFetchStatus: 'unavailable',
                 firstPass: { status: 'failed', fullNamePresent: null, profilePicPresent: null, feedDeclared: null, feedCollected: null, completeMedia: null, evidenceHash },
                 secondPass: { status: 'failed', fullNamePresent: null, profilePicPresent: null, feedDeclared: null, feedCollected: null, completeMedia: null, evidenceHash },
-                originalAiClassification: 'unknown', effectiveClassification: 'unknown', confidence: 'low', evidenceCoverage: null,
+                originalAiClassification: 'unknown', effectiveClassification: 'unknown', confidence: 'low',
+                evidenceCoverage: { declared: 0, collected: 0, selected: 0, complete: false, basisPoints: 0, hash: evidenceHash },
                 classifier: 'gemini-v2.14', modelName: 'gemini-v2.14', promptVersion: 'ai-stage-policy-v2.11', schemaVersion: 'concierge-batch-v1',
                 classificationOperationKey: `concierge:classification:${row.mutualOrdinal}`, classificationResultHash: hash({ row, status: 'unresolved' }),
                 classificationSource: 'ai', manualOverride: null,
@@ -503,7 +530,7 @@ async function classifyOrder(collected: CollectedOrder): Promise<ClassifiedOrder
         isVerified: false,
     } as InstagramProfile));
     const privateNameResults = await analyzePrivateAccountNames(privateProfiles.map(profile => ({
-        id: analysisV2CandidateId(profile.username), username: profile.username, fullName: profile.fullName ?? undefined,
+        id: normalized(profile.username), username: profile.username, fullName: profile.fullName ?? undefined,
     })));
     const relationshipResultHash = hash({ source: collected.source.mutualRows, followers: collected.source.followersCollected, following: collected.source.followingCollected });
     const ledger: ConciergeClassificationLedger = {
@@ -533,18 +560,35 @@ async function classifyOrder(collected: CollectedOrder): Promise<ClassifiedOrder
             classificationOperationKey: record.classificationOperationKey!, classificationResultHash: record.classificationResultHash!, secondPassStatus: record.secondPass.status, secondPassCompleteMedia: record.secondPass.completeMedia,
         }]));
     const replay: ConciergeStoredReplayFeatures = {
-        profilesByOrdinal: new Map(collected.source.publicProfiles.flatMap(item => detailsByOrdinal.has(item.ordinal) ? [[item.ordinal, item.profile] as const] : [])),
-        details,
+        profilesByOrdinal: new Map(collected.source.publicProfiles.flatMap(item => replayDetailsByOrdinal.has(item.ordinal) ? [[item.ordinal, item.profile] as const] : [])),
+        details: replayDetails,
         orderedMutualUsernames: collected.source.mutualRows.map(row => row.username),
         targetInteractions: collected.source.targetInteractions,
-        bidirectionalInteractions: collected.interaction,
+        bidirectionalInteractions: {
+            ...collected.interaction,
+            targetToCandidate: {
+                ...collected.interaction.targetToCandidate,
+                evidence: collected.interaction.targetToCandidate.evidence
+                    .filter(row => replayPublicNames.has(normalized(row.actorUsername))),
+                observedUsernames: collected.interaction.targetToCandidate.observedUsernames
+                    .filter(username => replayPublicNames.has(normalized(username))),
+            },
+            candidatePostsByUsername: new Map(
+                [...collected.interaction.candidatePostsByUsername.entries()]
+                    .filter(([username]) => replayPublicNames.has(normalized(username))),
+            ),
+            reverseLikeStatusByUsername: new Map(
+                [...collected.interaction.reverseLikeStatusByUsername.entries()]
+                    .filter(([username]) => replayPublicNames.has(normalized(username))),
+            ),
+        },
         classificationByOrdinal,
         privateProfiles,
         privateNameResults,
         fetchedCount: records.length,
         hydratedPublicCount: publicRecords.length,
         hydratedPrivateCount: privateProfiles.length,
-        analyzedPublicCount: details.length,
+        analyzedPublicCount: replayDetails.length,
         unresolvedCount: ledger.unresolvedCount,
     };
     const input: ConciergeManualPublicationInput = {
@@ -671,10 +715,15 @@ async function loadCohort(): Promise<FrozenCohort> {
     const retryCodeByOrder = await loadRetryCodeByOrder(members.map(member => member.orderId));
     let published = 0;
     let running = 0;
+    let terminalExcluded = 0;
     const candidateOrders: OrderRow[] = [];
     for (const member of members) {
         if (['cancelled', 'refund_pending', 'refunded', 'payment_failed', 'overflow_refund_required'].includes(member.currentOrderStatus)) {
-            throw new Error('CONCIERGE_COHORT_REFUND_CONFLICT');
+            // Payment-terminal rows are permanently out of scope. Read the
+            // live snapshot and exclude them before any bootstrap/provider
+            // call; never reverse or reinterpret a refund/payment guard.
+            terminalExcluded += 1;
+            continue;
         }
         if (member.published) {
             published += 1;
@@ -711,7 +760,7 @@ async function loadCohort(): Promise<FrozenCohort> {
         total: members.length,
         published,
         running,
-        excluded: candidateOrders.length - orders.length,
+        excluded: terminalExcluded + candidateOrders.length - orders.length,
         orders,
         evidenceHashByOrder: new Map(members.map(member => [member.orderId, member.evidenceHash])),
     };

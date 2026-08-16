@@ -7,6 +7,16 @@ const migrationPath = new URL(
 );
 
 describe('concierge batch bootstrap migration contract', () => {
+    it('bounds preparation row-lock waits at the RPC boundary', () => {
+        const migration = readFileSync(new URL(
+            '../../../supabase/migrations/20260816160000_bound_concierge_batch_prepare_lock_wait.sql',
+            import.meta.url,
+        ), 'utf8');
+        expect(migration).toMatch(
+            /ALTER FUNCTION public\.prepare_concierge_batch_order\(UUID\)\s+SET lock_timeout = '5s';/,
+        );
+    });
+
     it('rejects cohort substitutions or newly-paid rows without the preapproved hash', () => {
         const migration = readFileSync(migrationPath, 'utf8');
         expect(migration).toContain('CREATE FUNCTION public.freeze_concierge_batch_cohort(\n    p_expected_manifest_hash TEXT');

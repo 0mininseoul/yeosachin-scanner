@@ -527,6 +527,16 @@ describe('concierge manual publication', () => {
             requestId: 'request', ownerId: 'owner', targetUsername: 'target',
             classificationLedger: makeLedger(), manualImport: makeInput().manualImport,
         })).rejects.toThrow('CONCIERGE_PUBLICATION_RPC_INVALID_RESPONSE');
+
+        const guardedFailure = createConciergePublicationStore(async () => ({
+            data: null,
+            error: { code: 'P0001', message: 'CONCIERGE_PUBLICATION_COUNTS_MISMATCH' },
+        }));
+        await expect(guardedFailure.publishAtomic({
+            publication, expectedVersion: 7, expectedResultHash: 'e'.repeat(64), orderId: 'order',
+            requestId: 'request', ownerId: 'owner', targetUsername: 'target',
+            classificationLedger: makeLedger(), manualImport: makeInput().manualImport,
+        })).rejects.toThrow('CONCIERGE_PUBLICATION_COUNTS_MISMATCH');
     });
 
     it('binds future batches to the service-role RPC and verifies its ordered private readback', async () => {

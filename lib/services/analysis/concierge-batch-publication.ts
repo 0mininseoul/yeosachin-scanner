@@ -169,7 +169,7 @@ export interface ConciergePublicationStore {
  */
 export type ConciergePublicationRpc = (args: Readonly<Record<string, unknown>>) => Promise<{
     data: unknown;
-    error: { code?: string | null; message?: string | null } | null;
+    error: { code?: string | null; message?: string | null; details?: string | null; hint?: string | null } | null;
 }>;
 
 export interface ConciergePublicationSupabaseClient {
@@ -178,7 +178,7 @@ export interface ConciergePublicationSupabaseClient {
         args: Readonly<Record<string, unknown>>,
     ): PromiseLike<{
         data: unknown;
-        error: { code?: string | null; message?: string | null } | null;
+        error: { code?: string | null; message?: string | null; details?: string | null; hint?: string | null } | null;
     }>;
 }
 
@@ -255,9 +255,17 @@ export function createConciergePublicationStore(
                 p_manual_import: manualImport,
             });
             if (response.error) {
+                const guardedError = [
+                    response.error.code,
+                    response.error.message,
+                    response.error.details,
+                    response.error.hint,
+                ]
+                    .flatMap(value => typeof value === 'string' ? value.match(/\bCONCIERGE_[A-Z0-9_]+\b/g) ?? [] : [])
+                    .find(value => /^CONCIERGE_[A-Z0-9_]+$/.test(value));
                 throw new ConciergePublicationError(
-                    response.error.code && /^CONCIERGE_[A-Z0-9_]+$/.test(response.error.code)
-                        ? response.error.code
+                    guardedError
+                        ? guardedError
                         : 'CONCIERGE_PUBLICATION_RPC_FAILED',
                 );
             }

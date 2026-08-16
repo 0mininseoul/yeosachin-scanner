@@ -63,6 +63,143 @@ function femaleDetail(ordinal: number, username: string, overview: string, appea
 }
 
 describe('concierge basic correction', () => {
+    it('accepts private-name results keyed by the concierge analyzer username identity', () => {
+        const privateProfile = {
+            ...profile('private.one', true),
+            fullName: '박민지',
+        };
+
+        expect(() => buildCanonicalConciergeResult({
+            targetUsername: 'target',
+            profilesByOrdinal: new Map(),
+            details: [],
+            orderedMutualUsernames: ['private.one'],
+            targetInteractions: [],
+            targetPosts: [],
+            privateProfiles: [privateProfile],
+            privateNameResults: [{
+                id: privateProfile.username,
+                femaleScore: 0.8,
+                isName: true,
+                confidence: 0.9,
+            }],
+        })).not.toThrow();
+    });
+
+    it('uses the concierge sparse-copy contract when a retained profile has no text evidence', () => {
+        const sparseProfile = {
+            ...profile('public.one', false),
+            bio: undefined,
+            fullName: '박민지',
+            postsCount: 0,
+            latestPosts: [],
+        };
+
+        const result = buildCanonicalConciergeResult({
+            targetUsername: 'target',
+            targetFullName: '김준호',
+            profilesByOrdinal: new Map([[1, sparseProfile]]),
+            details: [femaleDetail(1, sparseProfile.username, '공개 계정의 특징을 중심으로 정리한 계정입니다.', 1)],
+            orderedMutualUsernames: [sparseProfile.username],
+            targetInteractions: [],
+            targetPosts: [],
+            privateProfiles: [],
+        });
+
+        expect(result.femaleRows[0]?.one_line_overview).toContain('박민지님');
+        expect(result.femaleRows[0]?.one_line_overview).toContain('소개·캡션 문구가 비어 있어');
+    });
+
+    it('keeps a no-text profile publishable without inventing an identifier in sparse copy', () => {
+        const sparseProfile = {
+            ...profile('public.one', false),
+            bio: undefined,
+            fullName: undefined,
+            postsCount: 0,
+            latestPosts: [],
+        };
+
+        const result = buildCanonicalConciergeResult({
+            targetUsername: 'target',
+            targetFullName: '김준호',
+            profilesByOrdinal: new Map([[1, sparseProfile]]),
+            details: [femaleDetail(1, sparseProfile.username, '공개 계정의 특징을 중심으로 정리한 계정입니다.', 1)],
+            orderedMutualUsernames: [sparseProfile.username],
+            targetInteractions: [],
+            targetPosts: [],
+            privateProfiles: [],
+        });
+
+        expect(result.femaleRows[0]?.one_line_overview).toBe('공개된 소개·캡션 문구가 비어 있어, 사진에서 이야기를 지어내지 않고 확인되는 범위만 차분히 읽어봅니다.');
+        expect(result.femaleRows[0]?.one_line_overview).not.toContain('public.one');
+    });
+
+    it('keeps bounded Gemini overview wording when retained text is present', () => {
+        const retainedProfile = {
+            ...profile('public.one', false),
+            bio: '주말마다 전시와 커피를 기록합니다',
+        };
+        const generatedOverview = '공개 프로필에 담긴 전시 기록을 바탕으로 계정의 분위기와 흐름을 차분하게 정리한 결과입니다.';
+
+        const result = buildCanonicalConciergeResult({
+            targetUsername: 'target',
+            profilesByOrdinal: new Map([[1, retainedProfile]]),
+            details: [femaleDetail(1, retainedProfile.username, generatedOverview, 1)],
+            orderedMutualUsernames: [retainedProfile.username],
+            targetInteractions: [],
+            targetPosts: [],
+            privateProfiles: [],
+        });
+
+        expect(result.femaleRows[0]?.one_line_overview).toBe(generatedOverview);
+    });
+
+    it('keeps a no-interaction row bounded when no risk narrative is required', () => {
+        const retainedProfile = {
+            ...profile('public.one', false),
+            fullName: '박민지',
+            bio: '주말마다 전시와 커피를 기록합니다',
+        };
+
+        const result = buildCanonicalConciergeResult({
+            targetUsername: 'target',
+            targetFullName: '김준호',
+            profilesByOrdinal: new Map([[1, retainedProfile]]),
+            details: [femaleDetail(1, retainedProfile.username, '공개 프로필과 피드에서 확인된 특징을 중심으로 정리한 계정입니다.', 5)],
+            orderedMutualUsernames: [retainedProfile.username],
+            targetInteractions: [],
+            targetPosts: [],
+            privateProfiles: [],
+        });
+
+        const row = result.femaleRows[0]!;
+        expect(row.risk_grade).toBe('normal');
+        expect(row.risk_analysis).toHaveLength(0);
+    });
+
+    it('uses text-present sparse copy when retained text has no extractable evidence term', () => {
+        const retainedProfile = {
+            ...profile('public.one', false),
+            fullName: '박민지',
+            bio: '123',
+        };
+
+        const result = buildCanonicalConciergeResult({
+            targetUsername: 'target',
+            targetFullName: '김준호',
+            profilesByOrdinal: new Map([[1, retainedProfile]]),
+            details: [femaleDetail(1, retainedProfile.username, '공개 계정의 특징을 중심으로 정리한 계정입니다.', 1)],
+            orderedMutualUsernames: [retainedProfile.username],
+            targetInteractions: [],
+            targetPosts: [],
+            privateProfiles: [],
+        });
+
+        expect(result.femaleRows[0]?.one_line_overview).toBe(
+            '보존된 공개 소개·캡션 문구를 바탕으로 확인 가능한 기록의 범위만 차분히 읽어봅니다.',
+        );
+    });
+
     it('persists canonical overviews for normal and caution rows without replacing high-risk narratives', () => {
         const overviews = Array.from({ length: 10 }, (_, index) => (
             `${['첫', '두', '세', '네', '다섯', '여섯', '일곱', '여덟', '아홉', '열'][index]} 번째 공개 계정의 기록과 분위기를 중심으로 정리한 계정입니다.`
