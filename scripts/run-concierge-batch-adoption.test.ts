@@ -157,7 +157,7 @@ describe('concierge existing relationship artifact resolver', () => {
         expect(prompt).toContain('대상 계정·후보·후보 계정 같은 내부 역할명은 쓰지 마세요.');
         expect(prompt).toContain('이미지에서 실제로 보이는 요소만 묘사하세요');
         expect(prompt).toContain('이미지가 없으면 실루엣·이목구비·얼굴·표정·헤어스타일·체형·옷차림·포즈를 만들지 마세요.');
-        expect(prompt).toContain('드러난 단서가 적다는 한계를 솔직하게 쓰되 다른 후보와 같은 문장을 반복하지 마세요.');
+        expect(prompt).toContain('유용한 단서가 없었다는 내용만 쓰세요.');
     });
 
     it('rejects visual claims when no candidate image exists', () => {
@@ -200,6 +200,27 @@ describe('concierge existing relationship artifact resolver', () => {
         }, evidence)).toMatchObject({ candidateUsername: 'candidate_user' });
     });
 
+    it('does not treat a retained placeholder image as visual evidence', () => {
+        const evidence = {
+            ...copyEvidence([]),
+            targetFullName: null,
+            candidateFullName: null,
+            bio: null,
+            captions: [],
+            images: ['placeholder-image'],
+            visualEvidenceAvailable: false,
+            appearanceGrade: 0,
+        };
+
+        expect(() => validateConciergeBatchHighRiskCopy({
+            oneLineOverview: 'candidate_user는 선명한 이목구비와 차분한 실루엣으로 묘한 긴장감을 남깁니다.',
+            riskAnalysis: [
+                'candidate_user는 얼굴 표정만으로 주변 시선을 붙드는 인상을 선명하게 보여줍니다.',
+                'candidate_user는 헤어스타일과 체형에서 도발적인 분위기를 자연스럽게 드러냅니다.',
+            ],
+        }, evidence)).toThrow('CONCIERGE_BATCH_COPY_UNOBSERVED_APPEARANCE');
+    });
+
     it('accepts varied honest copy when every evidence source is absent', () => {
         const evidence = {
             ...copyEvidence([]),
@@ -212,10 +233,10 @@ describe('concierge existing relationship artifact resolver', () => {
         };
 
         expect(validateConciergeBatchHighRiskCopy({
-            oneLineOverview: 'candidate_user는 현재 남겨진 정보가 적어 단정할 재료보다 조심스러운 여지를 남기는 계정입니다.',
+            oneLineOverview: 'candidate_user는 현재 확인할 수 있는 유용한 단서와 판단 재료가 거의 남아 있지 않습니다.',
             riskAnalysis: [
-                'candidate_user의 공개 기록이 많지 않아 지금 드러난 단서만으로 관계의 온도를 섣불리 읽기는 어렵습니다.',
-                'candidate_user는 추가로 확인되는 소개나 기록이 쌓일 때까지 열린 가능성으로 바라보는 편이 자연스럽습니다.',
+                'candidate_user에 대해 지금 확인할 수 있는 정보와 근거가 부족해 더 읽어낼 만한 단서가 없습니다.',
+                'candidate_user는 현재 남겨진 자료만으로 유용한 재료를 찾기 어려워 판단을 덧붙이지 않습니다.',
             ],
         }, evidence)).toMatchObject({ candidateUsername: 'candidate_user' });
     });
