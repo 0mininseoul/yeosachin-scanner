@@ -12,9 +12,10 @@ import {
 export const CONCIERGE_BATCH_MAX_ORDERS = 7;
 export const CONCIERGE_BATCH_ACTOR_CONCURRENCY = 2;
 export const CONCIERGE_BATCH_TOKEN_PRIORITY = Object.freeze([
-    'quinary',
-    'primary',
-    'quaternary',
+    'octonary',
+    'secondary',
+] as const satisfies readonly ApifyCredentialSlot[]);
+export const CONCIERGE_BATCH_RELATIONSHIP_TOKEN_PRIORITY = Object.freeze([
     'secondary',
 ] as const satisfies readonly ApifyCredentialSlot[]);
 
