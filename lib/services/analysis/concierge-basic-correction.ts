@@ -371,7 +371,10 @@ function privateNameResultsByUsername(
 }
 
 function compareNormalizedUsername(left: string, right: string): number {
-    return left < right ? -1 : left > right ? 1 : 0;
+    // Match the live publication RPC's en_US.UTF-8 text ordering for the
+    // final tie-breaker. PostgreSQL places punctuation such as `_` before
+    // `.` under that collation, unlike a JavaScript code-unit comparison.
+    return left.localeCompare(right, 'en-US');
 }
 
 /** `private_accounts` persists these fields as PostgreSQL REAL values. */
