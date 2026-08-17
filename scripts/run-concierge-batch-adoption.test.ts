@@ -325,6 +325,22 @@ describe('concierge existing relationship artifact resolver', () => {
         expect(text).not.toMatch(/좋아요|댓글|태그|멘션/u);
     });
 
+    it('does not require an exact retained-evidence term echo for no-interaction copy', () => {
+        expect(validateConciergeBatchHighRiskCopy({
+            oneLineOverview: '후보 이름님이 대상 이름님과 주고받은 결이 은근한 긴장감을 만들며 장난스러운 상상을 부릅니다.',
+            riskAnalysis: [
+                '후보 이름님과 대상 이름님의 결이 단순한 일상보다 조금 더 도발적인 관계극처럼 읽힙니다.',
+                '후보 이름님은 말보다 여운으로 대상 이름님의 시선을 오래 붙잡는 인상을 남깁니다.',
+            ],
+        }, {
+            ...copyEvidence([]),
+            bio: '등산과 재즈 공연을 좋아하는 기록',
+            captions: ['산길과 재즈 무대의 순간을 담은 기록'],
+            appearanceGrade: 0,
+            images: [],
+        })).toMatchObject({ candidateUsername: 'candidate_user' });
+    });
+
     it('rejects sparse deterministic prose and retries Gemini once', async () => {
         let attempts = 0;
         await expect(generateConciergeBatchHighRiskCopy(
