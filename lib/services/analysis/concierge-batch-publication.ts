@@ -269,6 +269,8 @@ export function createConciergePublicationStore(
                 p_publication: publication,
                 p_classification_ledger: classificationLedger,
                 p_manual_import: manualImport,
+            }).catch(() => {
+                throw new ConciergePublicationError('CONCIERGE_PUBLICATION_RPC_FAILED');
             });
             if (response.error) {
                 const guardedError = [
