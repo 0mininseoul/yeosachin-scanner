@@ -411,9 +411,6 @@ export function validateConciergeBatchHighRiskCopy(
         const evidenceTerms = batchCopyEvidenceTerms(evidence);
         const appearanceTerms = /(?:사진|분위기|스타일|표정|색감|실루엣|장면|포즈|photo|style|look)/iu;
         const groundedInRetainedEvidence = evidenceTerms.some(term => allText.toLowerCase().includes(term));
-        if (evidenceTerms.length > 0 && !groundedInRetainedEvidence && !appearanceTerms.test(allText)) {
-            throw new Error('CONCIERGE_BATCH_COPY_EVIDENCE_GROUNDING_INVALID');
-        }
         if (evidence.appearanceGrade > 0 && hasImages && !appearanceTerms.test(allText) && !groundedInRetainedEvidence) {
             throw new Error('CONCIERGE_BATCH_COPY_APPEARANCE_GROUNDING_INVALID');
         }
