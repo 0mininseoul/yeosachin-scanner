@@ -66,6 +66,9 @@ type ApprovedSlot = typeof APPROVED_SLOTS[number];
 const APIFY_RUN_ID = z.string().regex(/^[A-Za-z0-9]{8,64}$/);
 const EMPTY_MANUAL_CSV = 'username,instagram_url,ai_classification,ai_confidence/evidence_status,manual_gender,operator_note\n';
 const RETRY_CODE_PATTERN = /^CONCIERGE_[A-Z0-9_]{2,100}$/;
+export const CONCIERGE_BATCH_ACTIVE_SCOPE_SIZE = 25;
+const CONCIERGE_BATCH_ACTIVE_SCOPE_START_MS = Date.parse('2026-08-07T00:00:00.000Z');
+const CONCIERGE_BATCH_EXCLUDED_TARGET = 'che.rish_0.0_';
 const PROTECTED_RETRY_CODES = new Set([
     'CONCIERGE_PROVIDER_ARTIFACT_INVALID',
     'CONCIERGE_TARGET_PROFILE_PRIVATE',
@@ -255,6 +258,34 @@ const frozenCohortMemberSchema = z.object({
     currentRequestStatus: z.enum(['pending', 'processing', 'completed', 'failed']).nullable(),
     published: z.boolean(),
 }).strict();
+
+type ConciergeBatchActiveScopeMember = Readonly<{
+    paidAt: string;
+    currentOrderStatus: string;
+    targetUsername: string;
+}>;
+
+/**
+ * Reuses the immutable 30-row audit manifest while selecting only the
+ * user-confirmed active-25 order scope. The order status is deliberately an
+ * exact match, which excludes completed/refunded/payment-terminal rows before
+ * any retry-code or provider decision is made.
+ */
+export function selectConciergeBatchActiveScope<T extends ConciergeBatchActiveScopeMember>(
+    members: readonly T[],
+): T[] {
+    const selected = members.filter(member => {
+        const paidAtMs = Date.parse(member.paidAt);
+        return Number.isFinite(paidAtMs)
+            && paidAtMs >= CONCIERGE_BATCH_ACTIVE_SCOPE_START_MS
+            && member.currentOrderStatus === 'analysis_in_progress'
+            && member.targetUsername !== CONCIERGE_BATCH_EXCLUDED_TARGET;
+    });
+    if (selected.length !== CONCIERGE_BATCH_ACTIVE_SCOPE_SIZE) {
+        throw new Error('CONCIERGE_ACTIVE_SCOPE_COUNT_CONFLICT');
+    }
+    return selected;
+}
 
 type ProviderRunRow = {
     operation_key: string;
@@ -1484,6 +1515,7 @@ async function loadRetryCodeByOrder(
 }
 
 async function loadCohort(): Promise<FrozenCohort> {
+    const activeScope = process.env.CONCIERGE_BATCH_ACTIVE_SCOPE === 'true';
     const expectedManifestHash = process.env.CONCIERGE_BATCH_EXPECTED_MANIFEST_HASH?.trim();
     if (!expectedManifestHash || !/^[a-f0-9]{64}$/.test(expectedManifestHash)) {
         throw new Error('CONCIERGE_COHORT_EXPECTED_HASH_REQUIRED');
@@ -1510,16 +1542,19 @@ async function loadCohort(): Promise<FrozenCohort> {
         || members.filter(member => member.cohort === 'failed_canary').length !== 3) {
         throw new Error('CONCIERGE_COHORT_MANIFEST_INVALID');
     }
+    const scopeMembers = activeScope
+        ? selectConciergeBatchActiveScope(members)
+        : members;
     const allowlist = retryCodeAllowlist();
     const existingRelationshipArtifacts = parseConciergeExistingRelationshipArtifacts(
         process.env.CONCIERGE_BATCH_EXISTING_RELATIONSHIP_RUNS,
     );
-    const retryCodeByOrder = await loadRetryCodeByOrder(members.map(member => member.orderId));
+    const retryCodeByOrder = await loadRetryCodeByOrder(scopeMembers.map(member => member.orderId));
     let published = 0;
     let running = 0;
     let terminalExcluded = 0;
     const candidateOrders: OrderRow[] = [];
-    for (const member of members) {
+    for (const member of scopeMembers) {
         if (['cancelled', 'refund_pending', 'refunded', 'payment_failed', 'overflow_refund_required'].includes(member.currentOrderStatus)) {
             // Payment-terminal rows are permanently out of scope. Read the
             // live snapshot and exclude them before any bootstrap/provider
@@ -1559,16 +1594,23 @@ async function loadCohort(): Promise<FrozenCohort> {
         existingRelationshipArtifacts.has(order.targetUsername)
         && !PROTECTED_RETRY_CODES.has(order.retryCode ?? '')
     ));
-    const orders = existingRelationshipArtifacts.size > 0
-        ? mappedOrders
-        : selectConciergeBatchRetryOrders(candidateOrders, allowlist);
+    // The active-25 path is a fresh, exact order-scope admission rather than
+    // historical failure-class replay. It does not add retry codes to the
+    // bounded allowlist; invalid prior profile artifacts remain
+    // non-authoritative because collectOrder discards them and recollects
+    // before any CAS publication can run.
+    const orders = activeScope
+        ? candidateOrders
+        : existingRelationshipArtifacts.size > 0
+            ? mappedOrders
+            : selectConciergeBatchRetryOrders(candidateOrders, allowlist);
     if (orders.length === 0) throw new Error('CONCIERGE_BATCH_RETRY_SUBSET_EMPTY');
     return {
         manifestHash: root.manifestHash,
-        total: members.length,
+        total: scopeMembers.length,
         published,
         running,
-        excluded: terminalExcluded + candidateOrders.length - orders.length,
+        excluded: (members.length - scopeMembers.length) + terminalExcluded + candidateOrders.length - orders.length,
         orders,
         evidenceHashByOrder: new Map(members.map(member => [member.orderId, member.evidenceHash])),
         existingRelationshipArtifacts,
