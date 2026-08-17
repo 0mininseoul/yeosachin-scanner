@@ -560,6 +560,24 @@ describe('concierge manual publication', () => {
         })).rejects.toThrow('CONCIERGE_PUBLICATION_COUNTS_MISMATCH');
     });
 
+    it('sanitizes a publication transport failure without exposing its raw message', async () => {
+        const publication = buildConciergeManualPublication(makeInput());
+        const store = createConciergePublicationStore(async () => {
+            throw new Error('secret transport detail');
+        });
+
+        await expect(store.publishAtomic({
+            publication,
+            expectedVersion: 7,
+            expectedResultHash: 'e'.repeat(64),
+            orderId: 'order', requestId: 'request', ownerId: 'owner', targetUsername: 'target',
+            classificationLedger: makeLedger(), manualImport: makeInput().manualImport,
+        })).rejects.toMatchObject({
+            name: 'ConciergePublicationError',
+            message: 'CONCIERGE_PUBLICATION_RPC_FAILED',
+        });
+    });
+
     it('binds future batches to the service-role RPC and verifies its ordered private readback', async () => {
         const publication = buildConciergeManualPublication(makeInput());
         const calls: string[] = [];
