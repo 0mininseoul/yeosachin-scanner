@@ -77,6 +77,7 @@ import {
     nameOnlySecondPass,
     parseConciergeProfilePack,
     parseConciergeExistingRelationshipArtifacts,
+    capConciergeRelationshipDestinationLimit,
     relationshipArtifactProviderContext,
     retryableFailureCode,
     sanitizeConciergeBatchDiagnostic,
@@ -1160,6 +1161,51 @@ describe('concierge existing relationship artifact resolver', () => {
                 },
             },
         }))).toThrow('CONCIERGE_BATCH_EXISTING_ARTIFACT_MAP_INVALID');
+    });
+
+    it('adopts the read-only prefetch handoff and uses its actual usable counts', () => {
+        const artifacts = parseConciergeExistingRelationshipArtifacts(JSON.stringify({
+            schemaVersion: 'active27-apify-prefetch-handoff.v1',
+            relationshipPrefetch: [{
+                targetInstagramUsername: '___dkfka',
+                status: 'both_sides_content_backed',
+                sides: [
+                    {
+                        relationshipSide: 'followers',
+                        accountSlot: 'secondary',
+                        actorId: 'scraping_solutions/instagram-scraper-followers-following-no-cookies',
+                        runId: 'WgdKRv6sQa328V73k',
+                        status: 'SUCCEEDED',
+                        inputUsername: '___dkfka',
+                        usableItemCount: 601,
+                    },
+                    {
+                        relationshipSide: 'following',
+                        accountSlot: 'secondary',
+                        actorId: 'scraping_solutions/instagram-scraper-followers-following-no-cookies',
+                        runId: 'BF8NL1ITnZ2rlOv4p',
+                        status: 'SUCCEEDED',
+                        inputUsername: '___dkfka',
+                        usableItemCount: 381,
+                    },
+                ],
+            }],
+        }));
+
+        expect(artifacts.get('___dkfka')).toEqual({
+            followers: {
+                runId: 'WgdKRv6sQa328V73k',
+                credentialSlot: 'secondary',
+                sourceDeclaredCount: 601,
+            },
+            following: {
+                runId: 'BF8NL1ITnZ2rlOv4p',
+                credentialSlot: 'secondary',
+                sourceDeclaredCount: 381,
+            },
+        });
+        expect(capConciergeRelationshipDestinationLimit(607, artifacts.get('___dkfka')!.followers))
+            .toBe(601);
     });
 
     it('falls back only for target-profile artifact lineage failures', () => {
