@@ -18,12 +18,60 @@ import {
     parseConciergeExistingRelationshipArtifacts,
     relationshipArtifactProviderContext,
     retryableFailureCode,
+    selectConciergeBatchActiveScope,
     type ConciergeBatchHighRiskCopyEvidence,
     validateConciergeBatchHighRiskCopy,
 } from './run-concierge-batch';
 import { runConciergeBatch } from '@/lib/services/analysis/concierge-batch-runner';
 
 describe('concierge existing relationship artifact resolver', () => {
+    it('selects exactly the audited active-25 order scope and excludes outside statuses/target', () => {
+        const members = [
+            ...Array.from({ length: 25 }, (_, index) => ({
+                id: `active-${index}`,
+                paidAt: '2026-08-07T00:00:00.000Z',
+                currentOrderStatus: 'analysis_in_progress',
+                targetUsername: `target_${index}`,
+            })),
+            {
+                id: 'outside-before-window',
+                paidAt: '2026-08-06T23:59:59.999Z',
+                currentOrderStatus: 'analysis_in_progress',
+                targetUsername: 'target_before',
+            },
+            {
+                id: 'outside-excluded-target',
+                paidAt: '2026-08-07T00:00:00.000Z',
+                currentOrderStatus: 'analysis_in_progress',
+                targetUsername: 'che.rish_0.0_',
+            },
+            {
+                id: 'outside-completed',
+                paidAt: '2026-08-07T00:00:00.000Z',
+                currentOrderStatus: 'completed',
+                targetUsername: 'target_completed',
+            },
+            {
+                id: 'outside-refunded',
+                paidAt: '2026-08-07T00:00:00.000Z',
+                currentOrderStatus: 'refunded',
+                targetUsername: 'target_refunded',
+            },
+            {
+                id: 'outside-paid-status',
+                paidAt: '2026-08-07T00:00:00.000Z',
+                currentOrderStatus: 'paid',
+                targetUsername: 'target_paid',
+            },
+        ];
+
+        expect(selectConciergeBatchActiveScope(members)).toEqual(members.slice(0, 25));
+    });
+
+    it('fails closed when the audited active scope is not exactly 25 rows', () => {
+        expect(() => selectConciergeBatchActiveScope([])).toThrow('CONCIERGE_ACTIVE_SCOPE_COUNT_CONFLICT');
+    });
+
     it('keeps only bounded retry codes and drops unknown or raw failure details', () => {
         expect(retryableFailureCode(new Error('CONCIERGE_PUBLICATION_RPC_FAILED')))
             .toBe('CONCIERGE_PUBLICATION_RPC_FAILED');
