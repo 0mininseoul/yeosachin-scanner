@@ -797,6 +797,7 @@ function providerContext(requestId: string, slot: ApprovedSlot): ProviderCallCon
     return {
         requestId,
         credentialSlot: slot,
+        ...(slot === 'octonary' ? { allowConciergeBatchOctonary: true as const } : {}),
         maxChargeUsd: 100,
         invocationWaitLimitSecs: 240,
         recordUsage: () => undefined,

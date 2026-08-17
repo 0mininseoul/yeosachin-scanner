@@ -32,8 +32,7 @@ export type ApifyCredentialSlot = typeof APIFY_CREDENTIAL_SLOTS[number] | 'octon
 
 export function isApifyCredentialSlot(value: unknown): value is ApifyCredentialSlot {
     return typeof value === 'string'
-        && (APIFY_CREDENTIAL_SLOTS.includes(value as typeof APIFY_CREDENTIAL_SLOTS[number])
-            || value === 'octonary');
+        && APIFY_CREDENTIAL_SLOTS.includes(value as typeof APIFY_CREDENTIAL_SLOTS[number]);
 }
 export type ProviderCostTerminalStatus = 'succeeded' | 'failed' | 'aborted' | 'timed_out';
 
@@ -233,6 +232,8 @@ export interface ProviderCallContext
     allowAdoptedRelationshipTruncation?: true;
     /** Source declared count paired with the adopted-only allowance above. */
     adoptedRelationshipSourceDeclaredCount?: number;
+    /** Explicit concierge-only opt-in for the operator-scoped octonary slot. */
+    allowConciergeBatchOctonary?: true;
     onProfileStart?(username: string): void | Promise<void>;
     onProfileResolved?(profile: InstagramProfile): void | Promise<void>;
     onSelfHostedAuthRunFinished?(receipt: SelfHostedAuthRunReceipt): void | Promise<void>;

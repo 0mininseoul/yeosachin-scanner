@@ -387,7 +387,8 @@ export async function startOrResumeApifyActor(
     const maxTotalChargeUsd = context?.maxChargeUsd ?? options.maxTotalChargeUsd;
     const executionMaxTotalChargeUsd = options.executionMaxTotalChargeUsd
         ?? maxTotalChargeUsd;
-    if (!isApifyCredentialSlot(credentialSlot)) {
+    if (!isApifyCredentialSlot(credentialSlot)
+        && !(credentialSlot === 'octonary' && context?.allowConciergeBatchOctonary === true)) {
         throw new Error('SCRAPING_RUN_CHECKPOINT_ERROR: stored credential slot is invalid.');
     }
     if (
