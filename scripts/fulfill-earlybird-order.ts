@@ -88,7 +88,9 @@ export function parseEarlybirdFulfillmentCliArgs(
             if (credentialSlot !== null) throw new Error('--credential-slot must be provided exactly once');
             const value = args[index + 1];
             if (!value || value.startsWith('--')) throw new Error('--credential-slot requires an allowlisted slot');
-            if (!APIFY_CREDENTIAL_SLOTS.includes(value.trim().toLowerCase() as ApifyCredentialSlot)) {
+            if (!APIFY_CREDENTIAL_SLOTS.includes(
+                value.trim().toLowerCase() as typeof APIFY_CREDENTIAL_SLOTS[number]
+            )) {
                 throw new Error('--credential-slot requires an allowlisted slot');
             }
             credentialSlot = value.trim().toLowerCase() as ApifyCredentialSlot;

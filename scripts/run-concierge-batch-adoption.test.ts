@@ -77,6 +77,15 @@ describe('concierge existing relationship artifact resolver', () => {
                 },
             },
         }))).toThrow('CONCIERGE_BATCH_EXISTING_ARTIFACT_MAP_INVALID');
+        expect(() => parseConciergeExistingRelationshipArtifacts(JSON.stringify({
+            target_user: {
+                following: {
+                    runId: 'Abcdef12',
+                    credentialSlot: 'octonary',
+                    sourceDeclaredCount: 80,
+                },
+            },
+        }))).toThrow('CONCIERGE_BATCH_EXISTING_ARTIFACT_MAP_INVALID');
     });
 
     it('falls back only for target-profile artifact lineage failures', () => {

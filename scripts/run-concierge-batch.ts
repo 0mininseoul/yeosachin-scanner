@@ -37,6 +37,8 @@ import {
 import {
     createConciergeBatchCasPublisher,
     assertConciergeRelationshipCoverage,
+    CONCIERGE_BATCH_RELATIONSHIP_TOKEN_PRIORITY,
+    CONCIERGE_BATCH_TOKEN_PRIORITY,
     isConciergeBatchRelationshipCoverageError,
     runConciergeBatch,
     selectConciergeBatchRetryOrders,
@@ -58,7 +60,8 @@ import { assertGeminiCandidateCopyOverview } from '@/lib/services/analysis/gemin
 
 const ORDER_ID = z.string().uuid();
 const USERNAME = z.string().regex(/^[a-z0-9._]{1,30}$/);
-const APPROVED_SLOTS = ['quinary', 'primary', 'quaternary', 'secondary'] as const;
+const APPROVED_SLOTS = CONCIERGE_BATCH_TOKEN_PRIORITY;
+const RELATIONSHIP_SLOTS = CONCIERGE_BATCH_RELATIONSHIP_TOKEN_PRIORITY;
 type ApprovedSlot = typeof APPROVED_SLOTS[number];
 const APIFY_RUN_ID = z.string().regex(/^[A-Za-z0-9]{8,64}$/);
 const EMPTY_MANUAL_CSV = 'username,instagram_url,ai_classification,ai_confidence/evidence_status,manual_gender,operator_note\n';
@@ -71,7 +74,7 @@ const PROTECTED_RETRY_CODES = new Set([
 
 const relationshipArtifactSchema = z.object({
     runId: APIFY_RUN_ID,
-    credentialSlot: z.enum(APPROVED_SLOTS),
+    credentialSlot: z.literal('secondary'),
     sourceDeclaredCount: z.number().int().min(1).max(1_200),
 }).strict();
 
@@ -772,6 +775,10 @@ function newCollectionSlots(): readonly ApprovedSlot[] {
     return slots as ApprovedSlot[];
 }
 
+function relationshipCollectionSlots(): readonly ApprovedSlot[] {
+    return RELATIONSHIP_SLOTS;
+}
+
 function providerEnv(slot: ApprovedSlot, token: string): Record<string, string | undefined> {
     return {
         ...process.env,
@@ -790,6 +797,7 @@ function providerContext(requestId: string, slot: ApprovedSlot): ProviderCallCon
     return {
         requestId,
         credentialSlot: slot,
+        ...(slot === 'octonary' ? { allowConciergeBatchOctonary: true as const } : {}),
         maxChargeUsd: 100,
         invocationWaitLimitSecs: 240,
         recordUsage: () => undefined,
@@ -836,7 +844,7 @@ async function withInteractions<T>(
     operation: (slot: ApprovedSlot, adapter: typeof apifyInteractionAdapter, env: Record<string, string | undefined>) => Promise<T>,
 ): Promise<T> {
     let lastError: unknown = null;
-    for (const slot of newCollectionSlots()) {
+    for (const slot of relationshipCollectionSlots()) {
         const token = tokenFor(slot);
         if (!token) continue;
         const env = providerEnv(slot, token);
@@ -990,7 +998,7 @@ async function collectOrder(
             );
             assertConciergeRelationshipCoverage('followers', followersLimit, followers.length);
             return followers;
-        }, followersArtifact?.credentialSlot),
+        }, followersArtifact?.credentialSlot ?? 'secondary'),
         withProvider(prepared.sourceRequestId, context, async (slot, provider) => {
             if (!provider.getFollowing) throw new Error('CONCIERGE_RELATIONSHIP_PROVIDER_UNAVAILABLE');
             const following = await provider.getFollowing(
@@ -1006,7 +1014,7 @@ async function collectOrder(
             );
             assertConciergeRelationshipCoverage('following', followingLimit, following.length);
             return following;
-        }, followingArtifact?.credentialSlot),
+        }, followingArtifact?.credentialSlot ?? 'secondary'),
     ]);
     assertConciergeRelationshipCoverage('followers', followersLimit, followers.length);
     assertConciergeRelationshipCoverage('following', followingLimit, following.length);
