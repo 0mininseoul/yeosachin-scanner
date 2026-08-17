@@ -86,6 +86,26 @@ describe('concierge basic correction', () => {
         })).not.toThrow();
     });
 
+    it('orders private-name ties like the live publication RPC collation', () => {
+        const dotted = { ...profile('a.b', true), fullName: '도트' };
+        const underscored = { ...profile('a_b', true), fullName: '언더스코어' };
+        const result = buildCanonicalConciergeResult({
+            targetUsername: 'target',
+            profilesByOrdinal: new Map(),
+            details: [],
+            orderedMutualUsernames: ['a.b', 'a_b'],
+            targetInteractions: [],
+            targetPosts: [],
+            privateProfiles: [dotted, underscored],
+            privateNameResults: [
+                { id: 'a.b', femaleScore: 0.8, isName: true, confidence: 0.9 },
+                { id: 'a_b', femaleScore: 0.8, isName: true, confidence: 0.9 },
+            ],
+        });
+
+        expect(result.privateRows.map(row => row.instagram_id)).toEqual(['a_b', 'a.b']);
+    });
+
     it('uses the concierge sparse-copy contract when a retained profile has no text evidence', () => {
         const sparseProfile = {
             ...profile('public.one', false),
