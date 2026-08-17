@@ -71,6 +71,17 @@ const RETRY_CODE_PATTERN = /^CONCIERGE_[A-Z0-9_]{2,100}$/;
 export const CONCIERGE_BATCH_ACTIVE_SCOPE_SIZE = 25;
 const CONCIERGE_BATCH_ACTIVE_SCOPE_START_MS = Date.parse('2026-08-07T00:00:00.000Z');
 const CONCIERGE_BATCH_EXCLUDED_TARGET = 'che.rish_0.0_';
+
+function expectedActiveScopeCount(): number {
+    const raw = process.env.CONCIERGE_BATCH_EXPECTED_SCOPE_COUNT?.trim();
+    if (!raw) return CONCIERGE_BATCH_ACTIVE_SCOPE_SIZE;
+    if (!/^\d+$/.test(raw)) throw new Error('CONCIERGE_ACTIVE_SCOPE_COUNT_INVALID');
+    const value = Number(raw);
+    if (!Number.isSafeInteger(value) || value < 1 || value > 30) {
+        throw new Error('CONCIERGE_ACTIVE_SCOPE_COUNT_INVALID');
+    }
+    return value;
+}
 const PROTECTED_RETRY_CODES = new Set([
     'CONCIERGE_PROVIDER_ARTIFACT_INVALID',
     'CONCIERGE_TARGET_PROFILE_PRIVATE',
@@ -269,7 +280,7 @@ type ConciergeBatchActiveScopeMember = Readonly<{
 
 /**
  * Reuses the immutable 30-row audit manifest while selecting only the
- * user-confirmed active-25 order scope. The order status is deliberately an
+ * user-confirmed active order scope. The order status is deliberately an
  * exact match, which excludes completed/refunded/payment-terminal rows before
  * any retry-code or provider decision is made.
  */
@@ -283,7 +294,7 @@ export function selectConciergeBatchActiveScope<T extends ConciergeBatchActiveSc
             && member.currentOrderStatus === 'analysis_in_progress'
             && member.targetUsername !== CONCIERGE_BATCH_EXCLUDED_TARGET;
     });
-    if (selected.length !== CONCIERGE_BATCH_ACTIVE_SCOPE_SIZE) {
+    if (selected.length !== expectedActiveScopeCount()) {
         throw new Error('CONCIERGE_ACTIVE_SCOPE_COUNT_CONFLICT');
     }
     return selected;
