@@ -16,6 +16,7 @@ export const CONCIERGE_BATCH_TOKEN_PRIORITY = Object.freeze([
     'secondary',
 ] as const satisfies readonly ApifyCredentialSlot[]);
 export const CONCIERGE_BATCH_RELATIONSHIP_TOKEN_PRIORITY = Object.freeze([
+    'nonary',
     'secondary',
 ] as const satisfies readonly ApifyCredentialSlot[]);
 

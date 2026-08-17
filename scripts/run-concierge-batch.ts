@@ -63,6 +63,8 @@ const USERNAME = z.string().regex(/^[a-z0-9._]{1,30}$/);
 const APPROVED_SLOTS = CONCIERGE_BATCH_TOKEN_PRIORITY;
 const RELATIONSHIP_SLOTS = CONCIERGE_BATCH_RELATIONSHIP_TOKEN_PRIORITY;
 type ApprovedSlot = typeof APPROVED_SLOTS[number];
+type RelationshipSlot = typeof RELATIONSHIP_SLOTS[number];
+type ConciergeProviderSlot = ApprovedSlot | RelationshipSlot;
 const APIFY_RUN_ID = z.string().regex(/^[A-Za-z0-9]{8,64}$/);
 const EMPTY_MANUAL_CSV = 'username,instagram_url,ai_classification,ai_confidence/evidence_status,manual_gender,operator_note\n';
 const RETRY_CODE_PATTERN = /^CONCIERGE_[A-Z0-9_]{2,100}$/;
@@ -123,7 +125,7 @@ const BOUNDED_RETRY_FAILURE_CODES = new Set([
 
 const relationshipArtifactSchema = z.object({
     runId: APIFY_RUN_ID,
-    credentialSlot: z.literal('secondary'),
+    credentialSlot: z.enum(['nonary', 'secondary']),
     sourceDeclaredCount: z.number().int().min(1).max(1_200),
 }).strict();
 
@@ -816,6 +818,9 @@ export function relationshipArtifactProviderContext(
         credentialSlot: artifact.credentialSlot,
         maxChargeUsd: 100,
         invocationWaitLimitSecs: 240,
+        ...(artifact.credentialSlot === 'nonary' ? {
+            allowConciergeBatchNonary: true as const,
+        } : {}),
         ...(allowTruncation ? {
             allowAdoptedRelationshipTruncation: true as const,
             adoptedRelationshipSourceDeclaredCount: artifact.sourceDeclaredCount,
@@ -824,12 +829,12 @@ export function relationshipArtifactProviderContext(
     };
 }
 
-function tokenFor(slot: ApprovedSlot): string | null {
+function tokenFor(slot: ConciergeProviderSlot): string | null {
     const value = process.env[`APIFY_${slot.toUpperCase()}_API_TOKEN`]?.trim();
     return value || null;
 }
 
-function readOnlyTokenFor(slot: ApprovedSlot): string | null {
+function readOnlyTokenFor(slot: ConciergeProviderSlot): string | null {
     const raw = process.env.CONCIERGE_BATCH_READ_ONLY_PROVIDER_TOKENS?.trim();
     if (!raw) return tokenFor(slot);
     try {
@@ -852,11 +857,11 @@ function newCollectionSlots(): readonly ApprovedSlot[] {
     return slots as ApprovedSlot[];
 }
 
-function relationshipCollectionSlots(): readonly ApprovedSlot[] {
+function relationshipCollectionSlots(): readonly RelationshipSlot[] {
     return RELATIONSHIP_SLOTS;
 }
 
-function providerEnv(slot: ApprovedSlot, token: string): Record<string, string | undefined> {
+function providerEnv(slot: ConciergeProviderSlot, token: string): Record<string, string | undefined> {
     return {
         ...process.env,
         APIFY_API_TOKEN: token,
@@ -870,11 +875,12 @@ function providerEnv(slot: ApprovedSlot, token: string): Record<string, string |
     };
 }
 
-function providerContext(requestId: string, slot: ApprovedSlot): ProviderCallContext {
+function providerContext(requestId: string, slot: ConciergeProviderSlot): ProviderCallContext {
     return {
         requestId,
         credentialSlot: slot,
         ...(slot === 'octonary' ? { allowConciergeBatchOctonary: true as const } : {}),
+        ...(slot === 'nonary' ? { allowConciergeBatchNonary: true as const } : {}),
         maxChargeUsd: 100,
         invocationWaitLimitSecs: 240,
         recordUsage: () => undefined,
@@ -893,11 +899,13 @@ function retryableProviderError(error: unknown): boolean {
 async function withProvider<T>(
     requestId: string,
     context: ConciergeBatchStageContext,
-    operation: (slot: ApprovedSlot, provider: ReturnType<typeof makeApifyProvider>, env: Record<string, string | undefined>) => Promise<T>,
-    preferredSlot?: ApprovedSlot,
+    operation: (slot: ConciergeProviderSlot, provider: ReturnType<typeof makeApifyProvider>, env: Record<string, string | undefined>) => Promise<T>,
+    preferredSlot?: ConciergeProviderSlot,
+    fallbackSlots?: readonly ConciergeProviderSlot[],
 ): Promise<T> {
     let lastError: unknown = null;
-    for (const slot of preferredSlot ? [preferredSlot] : newCollectionSlots()) {
+    const slots = preferredSlot ? [preferredSlot] : (fallbackSlots ?? newCollectionSlots());
+    for (const slot of slots) {
         const token = tokenFor(slot);
         if (!token) continue;
         const env = providerEnv(slot, token);
@@ -918,7 +926,7 @@ async function withProvider<T>(
 async function withInteractions<T>(
     requestId: string,
     context: ConciergeBatchStageContext,
-    operation: (slot: ApprovedSlot, adapter: typeof apifyInteractionAdapter, env: Record<string, string | undefined>) => Promise<T>,
+    operation: (slot: ConciergeProviderSlot, adapter: typeof apifyInteractionAdapter, env: Record<string, string | undefined>) => Promise<T>,
 ): Promise<T> {
     let lastError: unknown = null;
     for (const slot of relationshipCollectionSlots()) {
@@ -1075,7 +1083,7 @@ async function collectOrder(
             );
             assertConciergeRelationshipCoverage('followers', followersLimit, followers.length);
             return followers;
-        }, followersArtifact?.credentialSlot ?? 'secondary'),
+        }, followersArtifact?.credentialSlot, RELATIONSHIP_SLOTS),
         withProvider(prepared.sourceRequestId, context, async (slot, provider) => {
             if (!provider.getFollowing) throw new Error('CONCIERGE_RELATIONSHIP_PROVIDER_UNAVAILABLE');
             const following = await provider.getFollowing(
@@ -1091,7 +1099,7 @@ async function collectOrder(
             );
             assertConciergeRelationshipCoverage('following', followingLimit, following.length);
             return following;
-        }, followingArtifact?.credentialSlot ?? 'secondary'),
+        }, followingArtifact?.credentialSlot, RELATIONSHIP_SLOTS),
     ]);
     assertConciergeRelationshipCoverage('followers', followersLimit, followers.length);
     assertConciergeRelationshipCoverage('following', followingLimit, following.length);

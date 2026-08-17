@@ -62,7 +62,7 @@ describe('concierge batch runner', () => {
         ]);
     });
 
-    it('uses octonary first and secondary as the only batch token priority', () => {
+    it('keeps general batch tokens narrow and prioritizes nonary for relationships', () => {
         expect([...CONCIERGE_BATCH_TOKEN_PRIORITY]).toEqual([
             'octonary',
             'secondary',
@@ -76,7 +76,10 @@ describe('concierge batch runner', () => {
         expect(CONCIERGE_BATCH_TOKEN_PRIORITY).not.toContain('senary');
         expect(CONCIERGE_BATCH_TOKEN_PRIORITY).not.toContain('tertiary');
         expect(CONCIERGE_BATCH_TOKEN_PRIORITY).not.toContain('septenary');
-        expect([...CONCIERGE_BATCH_RELATIONSHIP_TOKEN_PRIORITY]).toEqual(['secondary']);
+        expect([...CONCIERGE_BATCH_RELATIONSHIP_TOKEN_PRIORITY]).toEqual([
+            'nonary',
+            'secondary',
+        ]);
     });
 
     it('delegates publication to the reviewed PR431 CAS publisher boundary', async () => {

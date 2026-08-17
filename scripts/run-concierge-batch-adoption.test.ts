@@ -93,7 +93,7 @@ describe('concierge existing relationship artifact resolver', () => {
                 },
                 following: {
                     runId: 'Zyxwvu98',
-                    credentialSlot: 'secondary',
+                    credentialSlot: 'nonary',
                     sourceDeclaredCount: 80,
                 },
             },
@@ -107,7 +107,7 @@ describe('concierge existing relationship artifact resolver', () => {
             },
             following: {
                 runId: 'Zyxwvu98',
-                credentialSlot: 'secondary',
+                credentialSlot: 'nonary',
                 sourceDeclaredCount: 80,
             },
         });
@@ -124,6 +124,14 @@ describe('concierge existing relationship artifact resolver', () => {
             maxChargeUsd: 100,
             allowAdoptedRelationshipTruncation: true,
             adoptedRelationshipSourceDeclaredCount: 120,
+        });
+        expect(relationshipArtifactProviderContext(
+            'request-id',
+            artifacts.get('target_user')!.following!,
+            80,
+        )).toMatchObject({
+            credentialSlot: 'nonary',
+            allowConciergeBatchNonary: true,
         });
     });
 
