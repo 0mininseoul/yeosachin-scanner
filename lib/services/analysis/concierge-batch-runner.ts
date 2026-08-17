@@ -13,6 +13,9 @@ export const CONCIERGE_BATCH_MAX_ORDERS = 7;
 export const CONCIERGE_BATCH_ACTOR_CONCURRENCY = 2;
 export const CONCIERGE_BATCH_TOKEN_PRIORITY = Object.freeze([
     'octonary',
+    'quaternary',
+    'primary',
+    'quinary',
     'secondary',
 ] as const satisfies readonly ApifyCredentialSlot[]);
 export const CONCIERGE_BATCH_RELATIONSHIP_TOKEN_PRIORITY = Object.freeze([

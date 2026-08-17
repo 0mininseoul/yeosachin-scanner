@@ -62,17 +62,24 @@ describe('concierge batch runner', () => {
         ]);
     });
 
-    it('keeps general batch tokens narrow and prioritizes nonary for relationships', () => {
+    it('keeps concierge profile priority scoped and prioritizes nonary for relationships', () => {
         expect([...CONCIERGE_BATCH_TOKEN_PRIORITY]).toEqual([
             'octonary',
+            'quaternary',
+            'primary',
+            'quinary',
             'secondary',
         ]);
         expect(selectConciergeApifyTokenSlot({ APIFY_OCTONARY_API_TOKEN: 'configured' }))
             .toBe('octonary');
+        expect(selectConciergeApifyTokenSlot({ APIFY_QUATERNARY_API_TOKEN: 'configured' }))
+            .toBe('quaternary');
+        expect(selectConciergeApifyTokenSlot({ APIFY_PRIMARY_API_TOKEN: 'configured' }))
+            .toBe('primary');
+        expect(selectConciergeApifyTokenSlot({ APIFY_QUINARY_API_TOKEN: 'configured' }))
+            .toBe('quinary');
         expect(selectConciergeApifyTokenSlot({ APIFY_SECONDARY_API_TOKEN: 'configured' }))
             .toBe('secondary');
-        expect(selectConciergeApifyTokenSlot({ APIFY_QUINARY_API_TOKEN: 'configured' }))
-            .toBeNull();
         expect(CONCIERGE_BATCH_TOKEN_PRIORITY).not.toContain('senary');
         expect(CONCIERGE_BATCH_TOKEN_PRIORITY).not.toContain('tertiary');
         expect(CONCIERGE_BATCH_TOKEN_PRIORITY).not.toContain('septenary');
