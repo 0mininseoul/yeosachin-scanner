@@ -70,6 +70,53 @@ const PROTECTED_RETRY_CODES = new Set([
     'CONCIERGE_PROVIDER_ARTIFACT_INVALID',
     'CONCIERGE_TARGET_PROFILE_PRIVATE',
 ]);
+const BOUNDED_RETRY_FAILURE_CODES = new Set([
+    ...PROTECTED_RETRY_CODES,
+    'CONCIERGE_BATCH_COPY_APPEARANCE_GROUNDING_INVALID',
+    'CONCIERGE_BATCH_COPY_DUPLICATE',
+    'CONCIERGE_BATCH_COPY_EVIDENCE_MISSING',
+    'CONCIERGE_BATCH_COPY_GENERATION_FAILED',
+    'CONCIERGE_BATCH_COPY_INTERACTION_GROUNDING_INVALID',
+    'CONCIERGE_BATCH_COPY_NO_EVIDENCE_REQUIRED',
+    'CONCIERGE_BATCH_COPY_OVERVIEW_INTERACTION_GROUNDING_INVALID',
+    'CONCIERGE_BATCH_COPY_SCHEMA_INVALID',
+    'CONCIERGE_BATCH_COPY_SUBJECT_GROUNDING_INVALID',
+    'CONCIERGE_BATCH_COPY_UNOBSERVED_APPEARANCE',
+    'CONCIERGE_BATCH_COPY_UNOBSERVED_INTERACTION',
+    'CONCIERGE_BATCH_COPY_UNSAFE',
+    'CONCIERGE_PUBLICATION_AI_CLASSIFICATION_DRIFT',
+    'CONCIERGE_PUBLICATION_ANALYZED_COUNT_MISMATCH',
+    'CONCIERGE_PUBLICATION_BATCH_COPY_INVALID',
+    'CONCIERGE_PUBLICATION_BATCH_COPY_REQUIRED',
+    'CONCIERGE_PUBLICATION_BATCH_COPY_SCOPE_INVALID',
+    'CONCIERGE_PUBLICATION_CLASSIFICATION_MISSING',
+    'CONCIERGE_PUBLICATION_COUNTS_MISMATCH',
+    'CONCIERGE_PUBLICATION_FEATURE_PROFILE_MISSING',
+    'CONCIERGE_PUBLICATION_FIRST_ORDER_IMMUTABLE',
+    'CONCIERGE_PUBLICATION_INTERACTION_COVERAGE_MISMATCH',
+    'CONCIERGE_PUBLICATION_INTERACTION_DIRECTION_MISMATCH',
+    'CONCIERGE_PUBLICATION_INTERACTION_LINEAGE_MISMATCH',
+    'CONCIERGE_PUBLICATION_INTERACTION_POST_MISMATCH',
+    'CONCIERGE_PUBLICATION_LINEAGE_HASH_MISMATCH',
+    'CONCIERGE_PUBLICATION_MANUAL_FEATURE_MISSING',
+    'CONCIERGE_PUBLICATION_PARTITION_BINDING_MISMATCH',
+    'CONCIERGE_PUBLICATION_PARTITION_COUNT_MISMATCH',
+    'CONCIERGE_PUBLICATION_PRIVATE_ORDER_MISMATCH',
+    'CONCIERGE_PUBLICATION_PRIVATE_PARTITION_MISMATCH',
+    'CONCIERGE_PUBLICATION_READ_CONTRACT_FAILED',
+    'CONCIERGE_PUBLICATION_REPLAY_AI_BINDING_MISMATCH',
+    'CONCIERGE_PUBLICATION_RESULT_URL_MISMATCH',
+    'CONCIERGE_PUBLICATION_ROLLBACK',
+    'CONCIERGE_PUBLICATION_RPC_ECHO_MISMATCH',
+    'CONCIERGE_PUBLICATION_RPC_FAILED',
+    'CONCIERGE_PUBLICATION_RPC_INVALID_RESPONSE',
+    'CONCIERGE_PUBLICATION_SCOPE_CONFLICT',
+    'CONCIERGE_PUBLICATION_SECOND_PASS_INCOMPLETE',
+    'CONCIERGE_PUBLICATION_STALE_VERSION',
+    'CONCIERGE_RELATIONSHIP_FOLLOWERS_EMPTY',
+    'CONCIERGE_RELATIONSHIP_FOLLOWING_EMPTY',
+    'CONCIERGE_PROVIDER_ARTIFACT_LOOKUP_FAILED',
+]);
 
 const relationshipArtifactSchema = z.object({
     runId: APIFY_RUN_ID,
@@ -1425,8 +1472,10 @@ async function loadRetryCodeByOrder(
             && (retry as Record<string, unknown>).eligible === true
             && typeof (retry as Record<string, unknown>).code === 'string'
             && RETRY_CODE_PATTERN.test((retry as Record<string, unknown>).code as string)
+            && BOUNDED_RETRY_FAILURE_CODES.has((retry as Record<string, unknown>).code as string)
             && request?.status === 'failed'
-            && request.error_message === 'CONCIERGE_BATCH_RETRYABLE'
+            && (request.error_message === 'CONCIERGE_BATCH_RETRYABLE'
+                || request.error_message === (retry as Record<string, unknown>).code)
             ? (retry as Record<string, unknown>).code as string
             : null;
         result.set(orderId, code);
@@ -1526,10 +1575,10 @@ async function loadCohort(): Promise<FrozenCohort> {
     };
 }
 
-function retryableFailureCode(error: unknown): string {
+export function retryableFailureCode(error: unknown): string {
     const message = error instanceof Error ? error.message : '';
     const candidate = message.match(/^[A-Z][A-Z0-9_]{2,100}/)?.[0];
-    return candidate && candidate.startsWith('CONCIERGE_')
+    return candidate && BOUNDED_RETRY_FAILURE_CODES.has(candidate)
         ? candidate
         : 'CONCIERGE_BATCH_RETRYABLE';
 }
@@ -1601,6 +1650,7 @@ async function main(): Promise<void> {
         async onFailure(order, error) {
             const prepared = preparedByOrder.get(order.orderId);
             if (!prepared) return;
+            const failureCode = retryableFailureCode(error);
             const { data: current, error: readError } = await supabaseAdmin
                 .from('analysis_requests')
                 .select('status,step_data')
@@ -1619,13 +1669,13 @@ async function main(): Promise<void> {
                     progress: 100,
                     progress_step: 'concierge batch retryable failure',
                     current_step: 'failed',
-                    error_message: 'CONCIERGE_BATCH_RETRYABLE',
+                    error_message: failureCode,
                     completed_at: null,
                     step_data: {
                         ...existingStepData,
                         conciergeBatchRetry: {
                             eligible: true,
-                            code: retryableFailureCode(error),
+                            code: failureCode,
                             recordedAt: new Date().toISOString(),
                         },
                     },

@@ -17,12 +17,24 @@ import {
     isMatchingTargetProfileArtifactRun,
     parseConciergeExistingRelationshipArtifacts,
     relationshipArtifactProviderContext,
+    retryableFailureCode,
     type ConciergeBatchHighRiskCopyEvidence,
     validateConciergeBatchHighRiskCopy,
 } from './run-concierge-batch';
 import { runConciergeBatch } from '@/lib/services/analysis/concierge-batch-runner';
 
 describe('concierge existing relationship artifact resolver', () => {
+    it('keeps only bounded retry codes and drops unknown or raw failure details', () => {
+        expect(retryableFailureCode(new Error('CONCIERGE_PUBLICATION_RPC_FAILED')))
+            .toBe('CONCIERGE_PUBLICATION_RPC_FAILED');
+        expect(retryableFailureCode(new Error('CONCIERGE_BATCH_COPY_GENERATION_FAILED')))
+            .toBe('CONCIERGE_BATCH_COPY_GENERATION_FAILED');
+        expect(retryableFailureCode(new Error('CONCIERGE_UNKNOWN_INTERNAL_FAILURE')))
+            .toBe('CONCIERGE_BATCH_RETRYABLE');
+        expect(retryableFailureCode(new Error('provider secret for user@example.com')))
+            .toBe('CONCIERGE_BATCH_RETRYABLE');
+    });
+
     it('accepts only approved callback-free resume identities', () => {
         const artifacts = parseConciergeExistingRelationshipArtifacts(JSON.stringify({
             target_user: {
