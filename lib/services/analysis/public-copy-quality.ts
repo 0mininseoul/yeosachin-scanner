@@ -5,6 +5,10 @@ import {
 } from './narrative-privacy';
 
 const MAX_OVERVIEW_LENGTH = 110;
+// The sparse draft is replaced by the required Gemini candidate narrative
+// before publication. Keep its final-row envelope aligned with the Gemini
+// copy limit so a long retained display name cannot block evidence-backed copy.
+const MAX_SPARSE_OVERVIEW_LENGTH = 180;
 
 /**
  * These strings were previously used as v2.11 fallbacks.  They remain listed
@@ -450,7 +454,7 @@ export function buildV213SparseEvidenceOverview(input: V211InteractionEvidence &
         .replaceAll(candidate, 'PERSON');
     if (
         overview.length < 25
-        || overview.length > MAX_OVERVIEW_LENGTH
+        || overview.length > MAX_SPARSE_OVERVIEW_LENGTH
         || isForbiddenV211Overview(overview)
         || containsDefinitiveRelationshipAccusation(masked)
         || containsExposedInteractionMetric(masked)
@@ -683,7 +687,7 @@ export function validateV213FullReviewRows(input: {
                 .replaceAll(subjects.target, 'PERSON');
             if (
                 overview.length < 25
-                || overview.length > MAX_OVERVIEW_LENGTH
+                || overview.length > MAX_SPARSE_OVERVIEW_LENGTH
                 || isForbiddenV211Overview(overview)
                 || containsDefinitiveRelationshipAccusation(masked)
                 || containsExposedInteractionMetric(masked)

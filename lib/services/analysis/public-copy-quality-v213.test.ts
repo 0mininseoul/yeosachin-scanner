@@ -188,4 +188,23 @@ describe('v2.13 concierge full public-copy review', () => {
             textEvidenceAbsent: false,
         })).toThrow('CONCIERGE_COPY_SPARSE_SUBJECTS_REQUIRED');
     });
+
+    it('keeps long retained names within the final Gemini copy envelope for sparse drafts', () => {
+        const overview = buildV213SparseEvidenceOverview({
+            reviewOrdinal: 0,
+            subjects: {
+                targetUsername: 'target.user',
+                targetFullName: '김준호',
+                candidateUsername: 'candidate_user',
+                candidateFullName: '가'.repeat(58),
+            },
+            candidateLikedTarget: false,
+            candidateCommentedOnTarget: false,
+            targetLikedCandidate: false,
+            textEvidenceAbsent: true,
+        });
+
+        expect(overview.overview.length).toBeGreaterThan(110);
+        expect(overview.overview.length).toBeLessThanOrEqual(180);
+    });
 });
