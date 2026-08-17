@@ -13,8 +13,11 @@ import {
     buildConciergeBatchHighRiskCopyPrompt,
     generateConciergeBatchCandidateCopies,
     generateConciergeBatchHighRiskCopy,
+    hydrateConciergeProfilesFromPack,
     isRecoverableTargetProfileArtifactError,
     isMatchingTargetProfileArtifactRun,
+    loadConciergeProfilePack,
+    parseConciergeProfilePack,
     parseConciergeExistingRelationshipArtifacts,
     relationshipArtifactProviderContext,
     retryableFailureCode,
@@ -23,6 +26,63 @@ import {
     validateConciergeBatchHighRiskCopy,
 } from './run-concierge-batch';
 import { runConciergeBatch } from '@/lib/services/analysis/concierge-batch-runner';
+
+function profilePackItem(username: string, overrides: Record<string, unknown> = {}) {
+    return {
+        username,
+        private: false,
+        followersCount: 10,
+        followsCount: 10,
+        postsCount: 0,
+        biography: 'profile pack fixture',
+        fullName: `${username} name`,
+        profilePicUrl: 'https://example.com/profile.jpg',
+        verified: false,
+        latestPosts: [],
+        ...overrides,
+    };
+}
+
+describe('concierge profile pack adapter', () => {
+    it('hydrates pack hits and sends only pack misses to the provider', () => {
+        const pack = parseConciergeProfilePack({
+            version: 1,
+            profiles: { packed_user: profilePackItem('packed_user') },
+        });
+
+        const result = hydrateConciergeProfilesFromPack(
+            ['packed_user', 'provider_user'],
+            pack,
+        );
+
+        expect([...result.profilesByUsername.keys()]).toEqual(['packed_user']);
+        expect(result.providerUsernames).toEqual(['provider_user']);
+    });
+
+    it('keeps the existing provider path when the pack path is not configured', () => {
+        const pack = loadConciergeProfilePack('');
+        const result = hydrateConciergeProfilesFromPack(['provider_user'], pack);
+
+        expect(pack).toBeNull();
+        expect(result.profilesByUsername).toEqual(new Map());
+        expect(result.providerUsernames).toEqual(['provider_user']);
+    });
+
+    it('downgrades a contaminated pack item to a provider miss for that username only', () => {
+        const pack = parseConciergeProfilePack({
+            version: 1,
+            profiles: {
+                bad_user: profilePackItem('bad_user', { postsCount: 1 }),
+                good_user: profilePackItem('good_user'),
+            },
+        });
+
+        const result = hydrateConciergeProfilesFromPack(['bad_user', 'good_user'], pack);
+
+        expect([...result.profilesByUsername.keys()]).toEqual(['good_user']);
+        expect(result.providerUsernames).toEqual(['bad_user']);
+    });
+});
 
 describe('concierge existing relationship artifact resolver', () => {
     it('selects exactly the audited active-25 order scope and excludes outside statuses/target', () => {

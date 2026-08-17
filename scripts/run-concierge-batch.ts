@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto';
+import { readFileSync } from 'node:fs';
 import { ApifyClient } from 'apify-client';
 import { z } from 'zod';
 import { supabaseAdmin } from '@/lib/supabase/admin';
@@ -131,6 +132,7 @@ const BOUNDED_RETRY_FAILURE_CODES = new Set([
     'CONCIERGE_PUBLICATION_STALE_VERSION',
     'CONCIERGE_RELATIONSHIP_FOLLOWERS_EMPTY',
     'CONCIERGE_RELATIONSHIP_FOLLOWING_EMPTY',
+    'CONCIERGE_BATCH_RELATIONSHIP_ARTIFACT_REQUIRED',
     'CONCIERGE_PROVIDER_ARTIFACT_LOOKUP_FAILED',
 ]);
 
@@ -153,6 +155,81 @@ export type ConciergeExistingRelationshipArtifacts = ReadonlyMap<
         following?: ConciergeExistingRelationshipArtifact;
     }>
 >;
+
+export type ConciergeProfilePack = ReadonlyMap<string, unknown>;
+
+/**
+ * Validates only the pack envelope. Individual profile rows are deliberately
+ * parsed below, one username at a time, so a bad row falls back to the
+ * provider without invalidating the rest of the pack.
+ */
+export function parseConciergeProfilePack(raw: unknown): ConciergeProfilePack {
+    if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
+        throw new Error('CONCIERGE_PROFILE_PACK_INVALID');
+    }
+    const envelope = raw as Record<string, unknown>;
+    if (envelope.version !== 1 || !envelope.profiles || typeof envelope.profiles !== 'object'
+        || Array.isArray(envelope.profiles)) {
+        throw new Error('CONCIERGE_PROFILE_PACK_INVALID');
+    }
+    const profiles = envelope.profiles as Record<string, unknown>;
+    const result = new Map<string, unknown>();
+    for (const [rawUsername, item] of Object.entries(profiles)) {
+        let username: string;
+        try {
+            username = normalized(rawUsername);
+        } catch {
+            throw new Error('CONCIERGE_PROFILE_PACK_INVALID');
+        }
+        if (result.has(username)) throw new Error('CONCIERGE_PROFILE_PACK_INVALID');
+        result.set(username, item);
+    }
+    return result;
+}
+
+export function loadConciergeProfilePack(path = process.env.CONCIERGE_BATCH_PROFILE_PACK_PATH): ConciergeProfilePack | null {
+    const resolvedPath = path?.trim();
+    if (!resolvedPath) return null;
+    let raw: unknown;
+    try {
+        raw = JSON.parse(readFileSync(resolvedPath, 'utf8'));
+    } catch {
+        throw new Error('CONCIERGE_PROFILE_PACK_INVALID');
+    }
+    return parseConciergeProfilePack(raw);
+}
+
+export function hydrateConciergeProfilesFromPack(
+    usernames: readonly string[],
+    pack: ConciergeProfilePack | null,
+): {
+    profilesByUsername: Map<string, InstagramProfile>;
+    providerUsernames: string[];
+} {
+    const profilesByUsername = new Map<string, InstagramProfile>();
+    const providerUsernames: string[] = [];
+    for (const rawUsername of usernames) {
+        const username = normalized(rawUsername);
+        if (!pack?.has(username)) {
+            providerUsernames.push(username);
+            continue;
+        }
+        try {
+            const parsed = parseApifyProfileDataset([pack.get(username)], [username]);
+            const profile = parsed.profilesByUsername.get(username);
+            if (profile && !parsed.datasetContaminated
+                && !parsed.failuresByUsername.has(username)
+                && !parsed.notFoundUsernames.has(username)) {
+                profilesByUsername.set(username, profile);
+                continue;
+            }
+        } catch {
+            // A single malformed pack row is a pack miss, not an order-wide failure.
+        }
+        providerUsernames.push(username);
+    }
+    return { profilesByUsername, providerUsernames };
+}
 
 type OrderRow = ConciergeBatchOrder & {
     preflightId: string;
@@ -1052,6 +1129,14 @@ async function collectOrder(
     context: ConciergeBatchStageContext,
     existingRelationshipArtifacts: ConciergeExistingRelationshipArtifacts,
 ): Promise<CollectedOrder> {
+    const existingRelationshipArtifact = existingRelationshipArtifacts.get(order.targetUsername);
+    const followersArtifact = existingRelationshipArtifact?.followers;
+    const followingArtifact = existingRelationshipArtifact?.following;
+    if (process.env.CONCIERGE_BATCH_REQUIRE_RELATIONSHIP_ARTIFACT === 'true'
+        && (!followersArtifact || !followingArtifact)) {
+        throw new Error('CONCIERGE_BATCH_RELATIONSHIP_ARTIFACT_REQUIRED');
+    }
+
     let existingTargetProfile: InstagramProfile | null = null;
     try {
         existingTargetProfile = await loadTargetProfileArtifact(order);
@@ -1075,9 +1160,6 @@ async function collectOrder(
         plan.relationshipCapacity.following,
         Math.max(targetProfile.followingCount, order.targetFollowing ?? 0),
     );
-    const existingRelationshipArtifact = existingRelationshipArtifacts.get(order.targetUsername);
-    const followersArtifact = existingRelationshipArtifact?.followers;
-    const followingArtifact = existingRelationshipArtifact?.following;
     const [followers, following] = await Promise.all([
         withProvider(prepared.sourceRequestId, context, async (slot, provider) => {
             if (!provider.getFollowers) throw new Error('CONCIERGE_RELATIONSHIP_PROVIDER_UNAVAILABLE');
@@ -1133,19 +1215,26 @@ async function collectOrder(
     const selectedPublic = publicMutuals.slice(0, plan.detailedMutualLimit);
     const selectedNames = selectedPublic.map(row => row.username);
     const hydrated = new Map<string, InstagramProfile>();
+    const profilePack = loadConciergeProfilePack();
     for (let index = 0; index < selectedNames.length; index += 30) {
         const batch = selectedNames.slice(index, index + 30);
-        const outcomes = await withProvider(prepared.sourceRequestId, context, async (slot, provider) => {
-            if (!provider.getProfilesBatchOutcomes) throw new Error('CONCIERGE_PROFILE_BATCH_UNAVAILABLE');
-            return provider.getProfilesBatchOutcomes(
-                batch,
-                batch.length,
-                providerContext(prepared.sourceRequestId, slot),
-            );
-        });
-        for (const outcome of outcomes) {
-            if (outcome.outcome.status === 'success' && 'profile' in outcome) {
-                hydrated.set(normalized(outcome.profile.username), outcome.profile);
+        const packed = hydrateConciergeProfilesFromPack(batch, profilePack);
+        for (const [username, profile] of packed.profilesByUsername) {
+            hydrated.set(username, profile);
+        }
+        if (packed.providerUsernames.length > 0) {
+            const outcomes = await withProvider(prepared.sourceRequestId, context, async (slot, provider) => {
+                if (!provider.getProfilesBatchOutcomes) throw new Error('CONCIERGE_PROFILE_BATCH_UNAVAILABLE');
+                return provider.getProfilesBatchOutcomes(
+                    packed.providerUsernames,
+                    packed.providerUsernames.length,
+                    providerContext(prepared.sourceRequestId, slot),
+                );
+            });
+            for (const outcome of outcomes) {
+                if (outcome.outcome.status === 'success' && 'profile' in outcome) {
+                    hydrated.set(normalized(outcome.profile.username), outcome.profile);
+                }
             }
         }
     }
