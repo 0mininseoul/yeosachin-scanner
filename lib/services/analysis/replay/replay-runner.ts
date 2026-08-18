@@ -385,6 +385,9 @@ function assertReplayInput(bundle: AnalysisV2ReplayBundle): void {
         && bundle.capture.evaluationPolicy?.capability
             === TEST_ENTITLEMENT_STANDARD_V211_LEGACY_SECONDARY_TEXT_ONLY_REPLAY_CAPABILITY
         && Boolean(bundle.capture.legacySecondary?.textOnly);
+    const conciergeNameOnly = bundle.schemaVersion === 1
+        && bundle.capture.evaluationPolicy?.capability
+            === FIRST_PAYMENT_BASIC_V211_CONCIERGE_CAPABILITY;
     const ordinals = new Set<number>();
     const usernames = new Set<string>();
     for (const profile of bundle.profiles) {
@@ -410,7 +413,7 @@ function assertReplayInput(bundle: AnalysisV2ReplayBundle): void {
         }
         const featureIds = new Set(profile.featureSelectionIds);
         const invalidPublic = !profile.isPrivate && (
-            (!textOnly && (!profile.media.length || !profile.triageSelectionIds.length))
+            (!textOnly && !conciergeNameOnly && (!profile.media.length || !profile.triageSelectionIds.length))
             || new Set(profile.triageSelectionIds).size !== profile.triageSelectionIds.length
             || featureIds.size !== profile.featureSelectionIds.length
             || new Set(profile.resolverSelectionIds).size !== profile.resolverSelectionIds.length
@@ -433,7 +436,7 @@ function assertReplayInput(bundle: AnalysisV2ReplayBundle): void {
             || profile.coverage.normalizedCount !== profile.media.length
             || failureIds.size !== profile.coverage.failures.length
             || [...failureIds].some(id => ids.has(id))
-            || (!textOnly && !profile.isPrivate && (
+            || (!textOnly && !conciergeNameOnly && !profile.isPrivate && (
                 profile.coverage.normalizedCount < 1
                 || profile.coverage.failures.length * 5 > profile.coverage.selectedCount
             ));
@@ -914,12 +917,22 @@ export async function runAnalysisV2AiReplay(input: {
                     const fullName = profile.fullName?.trim() ?? '';
                     const firstPassMedia = mediaFor(profile, profile.triageSelectionIds)
                         .filter(item => item.kind === 'profile');
-                    if (
-                        !runner.firstPass
-                        || !fullName
-                        || profile.hasProfileImage !== true
-                        || firstPassMedia.length !== 1
-                    ) {
+                    if (runner.firstPass && fullName && profile.hasProfileImage === true && firstPassMedia.length === 1) {
+                        triage = await runner.firstPass({
+                            ordinal: profile.ordinal,
+                            fullName,
+                            media: firstPassMedia,
+                        });
+                    } else if (runner.triage && fullName) {
+                        triage = await runner.triage({
+                            ordinal: profile.ordinal,
+                            media: mediaFor(profile, profile.triageSelectionIds)
+                                .filter(item => item.kind === 'feed'),
+                            ...(supportsGenderTriageMicrobatch
+                                ? { accountProfile: v29AccountProfile(profile) }
+                            : {}),
+                        });
+                    } else {
                         gender.unknown++;
                         await appendAccountOutput({
                             ordinal: profile.ordinal,
@@ -929,11 +942,6 @@ export async function runAnalysisV2AiReplay(input: {
                         }, { triage: null, feature: null });
                         return;
                     }
-                    triage = await runner.firstPass({
-                        ordinal: profile.ordinal,
-                        fullName,
-                        media: firstPassMedia,
-                    });
                 } else {
                     if (!runner.triage) return;
                     triage = await runner.triage({

@@ -274,8 +274,10 @@ describe('V2 AI stage policy', () => {
 
     it('adds v2.11 as an immutable quality successor that is rollout-gated', () => {
         expect(AI_STAGE_POLICY_V211_VERSION).toBe('ai-stage-policy-v2.11');
+        expect(getAiStagePolicy(AI_STAGE_POLICY_V210_VERSION, 'genderTriage'))
+            .toMatchObject({ mediaResolution: 'LOW' });
         expect(getAiStagePolicy(AI_STAGE_POLICY_V211_VERSION, 'genderTriage'))
-            .toMatchObject({ promptVersion: 'gender-triage-microbatch-v3' });
+            .toMatchObject({ promptVersion: 'gender-triage-microbatch-v3', mediaResolution: 'MEDIUM' });
         expect(getAiStagePolicy(AI_STAGE_POLICY_V211_VERSION, 'featureAnalysis'))
             .toMatchObject({ promptVersion: 'feature-analysis-v5' });
         expect(getAiStagePolicy(AI_STAGE_POLICY_V211_VERSION, 'highRiskNarrative'))

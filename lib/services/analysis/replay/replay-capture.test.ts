@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
 import { captureAnalysisV2ReplayBundle } from './replay-capture';
 import { AnalysisImagePreparationError } from '@/lib/services/ai/image-preprocessing';
+import { INSTAGRAM_DEFAULT_PROFILE_IMAGE_MEDIA_ID } from '../profile-image-evidence';
 import type { ReplaySourceLineage } from './replay-source-lineage';
 
 const STANDARD_SOURCE_LINEAGE = {
@@ -129,6 +130,63 @@ describe('analysis V2 replay capture', () => {
             bio: 'bio',
         });
         expect(normalize).toHaveBeenCalledTimes(2);
+    });
+
+    it('drops the known default avatar as image evidence while retaining feed media', async () => {
+        const normalize = vi.fn(async () => Buffer.from([0xff, 0xd8, 0xff, 0xd9]));
+        const defaultAvatarProfile = {
+            ...profile,
+            profilePicUrl: `https://scontent.cdninstagram.com/v/t51.2885-19/${INSTAGRAM_DEFAULT_PROFILE_IMAGE_MEDIA_ID}?stp=dst-jpg_e0_s150x150_tt6`,
+        };
+        const bundle = await captureAnalysisV2ReplayBundle({
+            selector: { targetUsername: 'target' },
+            repository: {
+                findCompletedReplaySourceExact: async () => ({
+                    requestFingerprint: 'b'.repeat(64), sourceLineage: STANDARD_SOURCE_LINEAGE, completed: true,
+                }),
+                loadReplaySource: async () => ({
+                    profiles: [defaultAvatarProfile],
+                    evidence: { relationship: [], targetInteractions: [], reverseInteractions: [] },
+                    providerRuns: [],
+                }),
+            },
+            normalizeMedia: normalize,
+        });
+        expect(normalize).toHaveBeenCalledTimes(1);
+        expect(bundle.profiles[0]).toMatchObject({
+            hasProfileImage: false,
+            media: [expect.objectContaining({ kind: 'feed', postId: 'post1' })],
+            triageSelectionIds: [expect.stringMatching(/^post:/)],
+        });
+        expect(bundle.profiles[0]?.media.some(item => item.kind === 'profile')).toBe(false);
+    });
+
+    it('uses profilePicUrlHD when it differs from the standard profile image URL', async () => {
+        const normalizedUrls: string[] = [];
+        const bundle = await captureAnalysisV2ReplayBundle({
+            selector: { targetUsername: 'target' },
+            repository: {
+                findCompletedReplaySourceExact: async () => ({
+                    requestFingerprint: 'c'.repeat(64), sourceLineage: STANDARD_SOURCE_LINEAGE, completed: true,
+                }),
+                loadReplaySource: async () => ({
+                    profiles: [{
+                        ...profile,
+                        profilePicUrl: 'https://cdninstagram.com/profile-150.jpg',
+                        profilePicUrlHD: 'https://cdninstagram.com/profile-320.jpg',
+                    }],
+                    evidence: { relationship: [], targetInteractions: [], reverseInteractions: [] },
+                    providerRuns: [],
+                }),
+            },
+            normalizeMedia: async media => {
+                normalizedUrls.push(media.imageUrl);
+                return Buffer.from([0xff, 0xd8, 0xff, 0xd9]);
+            },
+        });
+        expect(normalizedUrls).toContain('https://cdninstagram.com/profile-320.jpg');
+        expect(normalizedUrls).not.toContain('https://cdninstagram.com/profile-150.jpg');
+        expect(bundle.profiles[0]?.hasProfileImage).toBe(true);
     });
 
     it('captures an explicit v2.7-to-v2.9 evaluation intent without changing source lineage', async () => {

@@ -21,6 +21,7 @@ import {
 import { extractRawTargetInteractions } from '@/lib/services/analysis/v2-target-interactions';
 import { instagramPostUrl, selectRecentInteractionPosts } from '@/lib/services/analysis/interaction-posts';
 import { analysisV2CandidateId } from '@/lib/services/analysis/v2-ai-scoring-executors';
+import { isDefaultInstagramProfileImage, preferredInstagramProfileImageUrl } from '@/lib/services/analysis/profile-image-evidence';
 import {
     captureFirstPaymentConciergeAiBundle,
     firstPaymentConciergeEvaluationPolicy,
@@ -389,6 +390,7 @@ const ANONYMOUS_PROFILE_IMAGE_MARKER = /(?:anonymous_profile_pic|YW5vbnltb3VzX3B
 /** Instagram's anonymous avatar URL is media-shaped but carries no subject evidence. */
 export function isUsableProfileImageUrl(value: string | null | undefined): boolean {
     if (!value?.trim()) return false;
+    if (isDefaultInstagramProfileImage({ url: value })) return false;
     const candidates = [value];
     try {
         candidates.push(decodeURIComponent(value));
@@ -1031,7 +1033,7 @@ function batchCopyEvidenceForRow(
     }
     const profile = retained[1];
     const selectedMediaIds = new Set(capturedProfile.featureSelectionIds);
-    const hasUsableProfileImage = isUsableProfileImageUrl(profile.profilePicUrl);
+    const hasUsableProfileImage = Boolean(preferredInstagramProfileImageUrl(profile));
     const images = capturedProfile.media
         .filter(media => selectedMediaIds.has(media.selectionId))
         .filter(media => media.kind !== 'profile' || hasUsableProfileImage)
@@ -1595,7 +1597,7 @@ function pass(profile: InstagramProfile, evidenceHash: string) {
     return {
         status: 'collected' as const,
         fullNamePresent: Boolean(profile.fullName?.trim()),
-        profilePicPresent: Boolean(profile.profilePicUrl?.trim()),
+        profilePicPresent: Boolean(preferredInstagramProfileImageUrl(profile)),
         feedDeclared: declared,
         feedCollected: Math.min(declared, collected),
         completeMedia: true,
@@ -1611,7 +1613,7 @@ function failedPass(
     return {
         status: 'failed' as const,
         fullNamePresent: profile ? Boolean(profile.fullName?.trim()) : null,
-        profilePicPresent: profile ? Boolean(profile.profilePicUrl?.trim()) : null,
+        profilePicPresent: profile ? Boolean(preferredInstagramProfileImageUrl(profile)) : null,
         feedDeclared: null,
         feedCollected: null,
         completeMedia: null,
@@ -1623,7 +1625,7 @@ function notCollectedPass(profile: InstagramProfile) {
     return {
         status: 'not_collected' as const,
         fullNamePresent: Boolean(profile.fullName?.trim()),
-        profilePicPresent: Boolean(profile.profilePicUrl?.trim()),
+        profilePicPresent: Boolean(preferredInstagramProfileImageUrl(profile)),
         feedDeclared: null,
         feedCollected: null,
         completeMedia: null,
@@ -1678,7 +1680,7 @@ async function classifyOrder(collected: CollectedOrder): Promise<ClassifiedOrder
                 profile
                 && detail?.triage
                 && profile.fullName?.trim()
-                && profile.profilePicUrl?.trim(),
+                && preferredInstagramProfileImageUrl(profile),
             );
             const firstPass = firstPassReady
                 ? pass(profile!, hash({ profile, triage: detail!.triage }))

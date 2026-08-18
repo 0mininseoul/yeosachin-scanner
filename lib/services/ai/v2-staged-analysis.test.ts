@@ -3611,6 +3611,48 @@ describe('V2 staged AI services', () => {
         expect(prompt).not.toContain('confidence를 낮게 유지');
     });
 
+    it('directs v2.11 microbatch triage to use names when the profile image is absent', async () => {
+        const input = {
+            media: media().slice(1, 3),
+            accountProfile: { fullName: '김수연', hasProfileImage: false, bio: null },
+        };
+        const accounts = [{
+            accountId: createGenderTriageMicrobatchAccountId(input, AI_STAGE_POLICY_V211_VERSION),
+            input,
+        }];
+        const identity = createGenderTriageMicrobatchResultIdentity(
+            accounts,
+            AI_STAGE_POLICY_V211_VERSION,
+        );
+        mocks.analyzeWithGemini.mockResolvedValueOnce({
+            accounts: [{
+                accountId: accounts[0]!.accountId,
+                status: 'ok',
+                assessment: {
+                    inferredGender: 'unknown',
+                    confidence: 'low',
+                    ownerConsistency: 'not_visible',
+                    evidenceSelectionIds: [],
+                },
+                accountContext: 'personal',
+            }],
+        });
+
+        await genderTriageMicrobatch(accounts, {
+            requestId,
+            operationKey: identity.operationKey,
+            resultIdentity: identity,
+            prepare: vi.fn().mockResolvedValue({ result: null, source: null, startingAttempt: 1 }),
+            onBeforeAttempt: vi.fn(),
+            onAttemptTelemetry: vi.fn(),
+        }, { aiStagePolicyVersion: AI_STAGE_POLICY_V211_VERSION });
+
+        const [prompt] = mocks.analyzeWithGemini.mock.calls[0]!;
+        expect(prompt).toContain(
+            '프로필 이미지가 없으니 명확한 이름 성별 신호로 판정하고, 첨부된 피드 이미지가 있으면 함께 사용하세요.',
+        );
+    });
+
     it('does not retry a rejected v2.9 batch and marks every affected item uncertain', async () => {
         const input = { media: media().slice(0, 2) };
         const accounts = [{

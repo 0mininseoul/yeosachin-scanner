@@ -1040,6 +1040,61 @@ describe('AI-only replay runner', () => {
         expect(report.gender).toEqual({ male: 1, female: 2, unknown: 0, unknownRate: 0 });
     });
 
+    it('routes a profile-image-less concierge candidate through triage with retained feed media', async () => {
+        const triage = vi.fn(async () => ({
+            outcome: 'ok' as const,
+            attempts: 1,
+            retries: 0,
+            elapsedMs: 1,
+            value: {
+                assessment: {
+                    inferredGender: 'male' as const,
+                    confidence: 'high' as const,
+                    ownerConsistency: 'same_person' as const,
+                    evidenceSelectionIds: ['feed:missing-profile'],
+                },
+                routingDecision: 'exclude_high_confidence_male' as const,
+                routingReason: 'high_confidence_same_owner_male' as const,
+                analyzedSelectionIds: ['feed:missing-profile'],
+                v29AccountContext: 'personal' as const,
+            },
+        }));
+        const firstPass = vi.fn();
+        const noProfileBundle = {
+            ...firstPaymentBundle,
+            profiles: [{
+                ...firstPaymentBundle.profiles[0]!,
+                hasProfileImage: false,
+                media: [{
+                    selectionId: 'feed:missing-profile',
+                    kind: 'feed' as const,
+                    postId: 'post:missing-profile',
+                    caption: null,
+                    jpegBase64: '/9j/2Q==',
+                }],
+                triageSelectionIds: ['feed:missing-profile'],
+                featureSelectionIds: ['feed:missing-profile'],
+                resolverSelectionIds: ['feed:missing-profile'],
+                captions: [],
+                coverage: { selectedCount: 1, normalizedCount: 1, failures: [] },
+            }],
+        } satisfies AnalysisV2ReplayBundle;
+        const report = await runAnalysisV2AiReplay({
+            bundle: noProfileBundle,
+            runner: v211Runner({ firstPass, triage }),
+            mode: 'paid-ai',
+            paidAiOptIn: true,
+            evaluationPolicy: noProfileBundle.capture.evaluationPolicy,
+        });
+        expect(firstPass).not.toHaveBeenCalled();
+        expect(triage).toHaveBeenCalledOnce();
+        expect(triage).toHaveBeenCalledWith(expect.objectContaining({
+            media: [expect.objectContaining({ kind: 'feed' })],
+            accountProfile: { fullName: '김수연', hasProfileImage: false, bio: null },
+        }));
+        expect(report.gender).toEqual({ male: 1, female: 0, unknown: 0, unknownRate: 0 });
+    });
+
     it('starts feature and resolver together and applies the production reconciliation to final gender', async () => {
         let resolverStarted = false;
         const featureResult = {

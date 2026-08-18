@@ -96,6 +96,7 @@ const checkpointProfileBase = z.object({
     bio: z.string().max(2_200).optional(),
     externalUrl: boundedUrlSchema.optional(),
     profilePicUrl: boundedUrlSchema.optional(),
+    profilePicUrlHD: boundedUrlSchema.optional(),
     followersCount: boundedCountSchema,
     followingCount: boundedCountSchema,
     postsCount: boundedCountSchema,

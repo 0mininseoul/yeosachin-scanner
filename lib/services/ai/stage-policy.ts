@@ -207,6 +207,7 @@ const AI_STAGE_POLICIES_V211 = Object.freeze({
     ...AI_STAGE_POLICIES_V210,
     genderTriage: Object.freeze({
         ...AI_STAGE_POLICIES_V210.genderTriage,
+        mediaResolution: 'MEDIUM',
         promptVersion: 'gender-triage-microbatch-v3',
     }),
     featureAnalysis: Object.freeze({

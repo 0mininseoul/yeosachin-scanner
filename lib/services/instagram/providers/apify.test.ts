@@ -2887,6 +2887,22 @@ describe('apifyProvider', () => {
             .getProfilesBatch!(['target'], 1)).rejects.toThrow('latestPosts');
     });
 
+    it('preserves the optional HD profile image URL for downstream evidence selection', async () => {
+        const provider = makeApifyProvider({
+            client: mockClient([{
+                ...profileItem('target'),
+                profilePicUrl: 'https://cdn.example/profile-150.jpg',
+                profilePicUrlHD: 'https://cdn.example/profile-320.jpg',
+            }]).client,
+            env: {},
+        });
+
+        await expect(provider.getProfilesBatch!(['target'], 1)).resolves.toMatchObject([{
+            profilePicUrl: 'https://cdn.example/profile-150.jpg',
+            profilePicUrlHD: 'https://cdn.example/profile-320.jpg',
+        }]);
+    });
+
     it('normalizes the documented -1 hidden engagement-count sentinel without losing visibility', async () => {
         const { client } = mockClient([{
             ...profileItem('target'),
