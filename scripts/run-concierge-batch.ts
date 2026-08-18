@@ -1295,6 +1295,40 @@ function sourcePosts(profile: InstagramProfile): readonly InstagramPost[] {
     return profile.latestPosts ?? [];
 }
 
+function sanitizeConciergeInteractionPosts(
+    posts: readonly InstagramPost[],
+    kind: 'candidate' | 'target',
+    username: string,
+): readonly InstagramPost[] {
+    const seenIds = new Set<string>();
+    const sanitized: InstagramPost[] = [];
+    let missingIdCount = 0;
+    let duplicateIdCount = 0;
+    for (const post of posts) {
+        const id = typeof post.id === 'string' ? post.id.trim() : '';
+        if (!id) {
+            missingIdCount += 1;
+            continue;
+        }
+        if (seenIds.has(id)) {
+            duplicateIdCount += 1;
+            continue;
+        }
+        seenIds.add(id);
+        sanitized.push(post);
+    }
+    const droppedCount = missingIdCount + duplicateIdCount;
+    if (droppedCount > 0) {
+        const safeUsername = sanitizeConciergeBatchDiagnostic(username, 100)
+            .replace(/[\r\n]+/g, ' ');
+        process.stderr.write(
+            `sanitized ${kind} posts for ${safeUsername}: dropped ${droppedCount} `
+            + `(no-id ${missingIdCount}, dup ${duplicateIdCount})\n`,
+        );
+    }
+    return sanitized;
+}
+
 export async function collectOrder(
     order: OrderRow,
     prepared: ConciergeBatchPreparedOrder,
@@ -1429,7 +1463,11 @@ export async function collectOrder(
         }];
     });
     const publicUnavailableRows = selectedPublic.filter(row => !hydrated.has(row.username));
-    const targetPosts = sourcePosts(targetProfile);
+    const targetPosts = sanitizeConciergeInteractionPosts(
+        sourcePosts(targetProfile),
+        'target',
+        order.targetUsername,
+    );
     let targetInteraction: ReturnType<typeof extractRawTargetInteractions> = {
         evidence: [], observedUsernames: [], likerCoverage: [], commentCoverage: [],
     };
@@ -1485,7 +1523,14 @@ export async function collectOrder(
         },
         candidateToTarget: { status: 'not_collected' as const, evidence: [], coverage: [] },
         targetPosts,
-        candidatePostsByUsername: new Map(publicProfiles.map(item => [item.profile.username, sourcePosts(item.profile)])),
+        candidatePostsByUsername: new Map(publicProfiles.map(item => [
+            item.profile.username,
+            sanitizeConciergeInteractionPosts(
+                sourcePosts(item.profile),
+                'candidate',
+                item.profile.username,
+            ),
+        ])),
         reverseLikeStatusByUsername: new Map(publicProfiles.map(item => [item.profile.username, 'not_collected' as const])),
         targetInputHash,
         candidateInputHash,

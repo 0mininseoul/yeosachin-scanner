@@ -249,6 +249,185 @@ describe('concierge profile pack adapter', () => {
         }
     });
 
+    it('drops candidate posts without ids before interaction evidence is forwarded', async () => {
+        const previousPackPath = process.env.CONCIERGE_BATCH_PROFILE_PACK_PATH;
+        const previousSecondaryToken = process.env.APIFY_SECONDARY_API_TOKEN;
+        process.env.CONCIERGE_BATCH_PROFILE_PACK_PATH = '/tmp/concierge-invalid-interaction-post-pack.json';
+        process.env.APIFY_SECONDARY_API_TOKEN = 'test-token';
+        conciergeBatchTestMocks.readFileSync.mockReset().mockReturnValue(JSON.stringify({
+            version: 1,
+            profiles: {
+                interaction_target: profilePackItem('interaction_target', {
+                    followersCount: 1,
+                    followsCount: 1,
+                    postsCount: 0,
+                    latestPosts: [],
+                }),
+            },
+        }));
+        conciergeBatchTestMocks.supabaseRpc.mockReset().mockResolvedValue({ data: [], error: null });
+        conciergeBatchTestMocks.provider.getProfile.mockReset().mockResolvedValue(null);
+        conciergeBatchTestMocks.provider.getFollowers.mockReset().mockResolvedValue([{
+            username: 'candidate_user', fullName: 'Candidate Name', profilePicUrl: null,
+            isPrivate: false, isVerified: false,
+        }]);
+        conciergeBatchTestMocks.provider.getFollowing.mockReset().mockResolvedValue([{
+            username: 'candidate_user', fullName: 'Candidate Name', profilePicUrl: null,
+            isPrivate: false, isVerified: false,
+        }]);
+        conciergeBatchTestMocks.provider.getProfilesBatchOutcomes.mockReset().mockResolvedValue([{
+            outcome: { status: 'success' },
+            profile: {
+                username: 'candidate_user', isPrivate: false, isVerified: false,
+                followersCount: 1, followingCount: 1, postsCount: 2,
+                profilePicUrl: 'https://example.com/candidate.jpg', fullName: 'Candidate Name',
+                bio: 'candidate profile',
+                latestPosts: [
+                    {
+                        id: 'candidate-post-1', shortCode: 'candidate-1', type: 'image',
+                        displayUrl: 'https://example.com/candidate-1.jpg', likesCount: 1,
+                        commentsCount: 0, timestamp: '2026-08-17T00:00:00.000Z',
+                    },
+                    {
+                        id: '', shortCode: 'candidate-no-id', type: 'image',
+                        displayUrl: 'https://example.com/candidate-no-id.jpg', likesCount: 1,
+                        commentsCount: 0, timestamp: '2026-08-16T00:00:00.000Z',
+                    },
+                ],
+            },
+        }]);
+        conciergeBatchTestMocks.makeApifyProvider.mockReset().mockReturnValue(conciergeBatchTestMocks.provider);
+        conciergeBatchTestMocks.captureFirstPaymentConciergeAiBundle.mockReset().mockResolvedValue({
+            bundle: { capture: {} },
+        });
+        const stderrSpy = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+
+        try {
+            const fixture = interactionCollectOrderFixture();
+            fixture.order.targetFollowers = 1;
+            fixture.order.targetFollowing = 1;
+            const result = await collectOrder(
+                fixture.order,
+                fixture.prepared,
+                fixture.context,
+                fixture.artifacts,
+            );
+            expect(result.interaction.candidatePostsByUsername.get('candidate_user')).toMatchObject([
+                { id: 'candidate-post-1' },
+            ]);
+            expect(stderrSpy.mock.calls.some(([chunk]) => (
+                String(chunk).includes(
+                    'sanitized candidate posts for candidate_user: dropped 1 (no-id 1, dup 0)',
+                )
+            ))).toBe(true);
+        } finally {
+            stderrSpy.mockRestore();
+            if (previousPackPath === undefined) delete process.env.CONCIERGE_BATCH_PROFILE_PACK_PATH;
+            else process.env.CONCIERGE_BATCH_PROFILE_PACK_PATH = previousPackPath;
+            if (previousSecondaryToken === undefined) delete process.env.APIFY_SECONDARY_API_TOKEN;
+            else process.env.APIFY_SECONDARY_API_TOKEN = previousSecondaryToken;
+        }
+    });
+
+    it('keeps the first post when candidate and target post ids are duplicated', async () => {
+        const previousPackPath = process.env.CONCIERGE_BATCH_PROFILE_PACK_PATH;
+        const previousSecondaryToken = process.env.APIFY_SECONDARY_API_TOKEN;
+        process.env.CONCIERGE_BATCH_PROFILE_PACK_PATH = '/tmp/concierge-duplicate-interaction-post-pack.json';
+        process.env.APIFY_SECONDARY_API_TOKEN = 'test-token';
+        const targetPost = {
+            id: 'target-duplicate', shortCode: 'target-duplicate', type: 'image',
+            displayUrl: 'https://example.com/target.jpg', likesCount: 1, commentsCount: 0,
+            timestamp: '2026-08-17T00:00:00.000Z',
+        };
+        conciergeBatchTestMocks.readFileSync.mockReset().mockReturnValue(JSON.stringify({
+            version: 1,
+            profiles: {
+                interaction_target: profilePackItem('interaction_target', {
+                    followersCount: 1,
+                    followsCount: 1,
+                    postsCount: 2,
+                    latestPosts: [targetPost, { ...targetPost, shortCode: 'target-duplicate-copy' }],
+                }),
+            },
+        }));
+        conciergeBatchTestMocks.supabaseRpc.mockReset().mockResolvedValue({ data: [], error: null });
+        conciergeBatchTestMocks.provider.getProfile.mockReset().mockResolvedValue(null);
+        conciergeBatchTestMocks.provider.getFollowers.mockReset().mockResolvedValue([{
+            username: 'candidate_user', fullName: 'Candidate Name', profilePicUrl: null,
+            isPrivate: false, isVerified: false,
+        }]);
+        conciergeBatchTestMocks.provider.getFollowing.mockReset().mockResolvedValue([{
+            username: 'candidate_user', fullName: 'Candidate Name', profilePicUrl: null,
+            isPrivate: false, isVerified: false,
+        }]);
+        conciergeBatchTestMocks.provider.getProfilesBatchOutcomes.mockReset().mockResolvedValue([{
+            outcome: { status: 'success' },
+            profile: {
+                username: 'candidate_user', isPrivate: false, isVerified: false,
+                followersCount: 1, followingCount: 1, postsCount: 3,
+                profilePicUrl: 'https://example.com/candidate.jpg', fullName: 'Candidate Name',
+                bio: 'candidate profile',
+                latestPosts: [
+                    {
+                        id: 'candidate-duplicate', shortCode: 'candidate-duplicate-1', type: 'image',
+                        displayUrl: 'https://example.com/candidate-duplicate-1.jpg', likesCount: 1,
+                        commentsCount: 0, timestamp: '2026-08-17T00:00:00.000Z',
+                    },
+                    {
+                        id: 'candidate-duplicate', shortCode: 'candidate-duplicate-2', type: 'image',
+                        displayUrl: 'https://example.com/candidate-duplicate-2.jpg', likesCount: 1,
+                        commentsCount: 0, timestamp: '2026-08-16T00:00:00.000Z',
+                    },
+                    {
+                        id: 'candidate-unique', shortCode: 'candidate-unique', type: 'image',
+                        displayUrl: 'https://example.com/candidate-unique.jpg', likesCount: 1,
+                        commentsCount: 0, timestamp: '2026-08-15T00:00:00.000Z',
+                    },
+                ],
+            },
+        }]);
+        conciergeBatchTestMocks.makeApifyProvider.mockReset().mockReturnValue(conciergeBatchTestMocks.provider);
+        conciergeBatchTestMocks.makeApifyInteractionAdapter.mockReset()
+            .mockReturnValue(conciergeBatchTestMocks.interactionAdapter);
+        conciergeBatchTestMocks.interactionAdapter.getPostLikers.mockReset().mockResolvedValue([]);
+        conciergeBatchTestMocks.interactionAdapter.getPostComments.mockReset().mockResolvedValue([]);
+        conciergeBatchTestMocks.captureFirstPaymentConciergeAiBundle.mockReset().mockResolvedValue({
+            bundle: { capture: {} },
+        });
+        const stderrSpy = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+
+        try {
+            const fixture = interactionCollectOrderFixture();
+            fixture.order.targetFollowers = 1;
+            fixture.order.targetFollowing = 1;
+            const result = await collectOrder(
+                fixture.order,
+                fixture.prepared,
+                fixture.context,
+                fixture.artifacts,
+            );
+            expect(result.interaction.targetPosts.map(post => post.id)).toEqual(['target-duplicate']);
+            expect(result.interaction.candidatePostsByUsername.get('candidate_user')?.map(post => post.id))
+                .toEqual(['candidate-duplicate', 'candidate-unique']);
+            expect(stderrSpy.mock.calls.some(([chunk]) => (
+                String(chunk).includes(
+                    'sanitized target posts for interaction_target: dropped 1 (no-id 0, dup 1)',
+                )
+            ))).toBe(true);
+            expect(stderrSpy.mock.calls.some(([chunk]) => (
+                String(chunk).includes(
+                    'sanitized candidate posts for candidate_user: dropped 1 (no-id 0, dup 1)',
+                )
+            ))).toBe(true);
+        } finally {
+            stderrSpy.mockRestore();
+            if (previousPackPath === undefined) delete process.env.CONCIERGE_BATCH_PROFILE_PACK_PATH;
+            else process.env.CONCIERGE_BATCH_PROFILE_PACK_PATH = previousPackPath;
+            if (previousSecondaryToken === undefined) delete process.env.APIFY_SECONDARY_API_TOKEN;
+            else process.env.APIFY_SECONDARY_API_TOKEN = previousSecondaryToken;
+        }
+    });
+
     it('continues the order with empty comments when comment collection fails', async () => {
         const previousPackPath = process.env.CONCIERGE_BATCH_PROFILE_PACK_PATH;
         const previousSecondaryToken = process.env.APIFY_SECONDARY_API_TOKEN;
