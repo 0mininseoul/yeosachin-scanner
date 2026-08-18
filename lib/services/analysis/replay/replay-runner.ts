@@ -987,7 +987,14 @@ export async function runAnalysisV2AiReplay(input: {
                             fullName,
                             media: firstPassMedia,
                         });
-                    } else if (runner.triage && fullName) {
+                    } else if (runner.triage && (fullName || profile.hasProfileImage === true)) {
+                        // An image-having candidate must still reach triage even
+                        // without a display name (e.g. its triage-selected media
+                        // didn't happen to include exactly one profile image for
+                        // the fast firstPass shape): accountProfile.hasProfileImage
+                        // still carries that signal. Requiring fullName here as
+                        // well silently dropped every nameless image-having
+                        // candidate to "unknown" with zero triage calls.
                         triage = await runner.triage({
                             ordinal: profile.ordinal,
                             media: [],

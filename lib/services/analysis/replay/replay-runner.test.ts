@@ -1213,6 +1213,121 @@ describe('AI-only replay runner', () => {
         expect(nameOnly).toHaveBeenCalledWith([{ candidateId: 'ordinal:4', fullName: '이서연' }]);
     });
 
+    it('still routes an image-having candidate without a display name through triage, and both paths run together with exact call counts', async () => {
+        // Regression for the outage where image-having candidates lacking a
+        // fullName were silently dropped to "unknown" with zero AI calls,
+        // because the fallback branch required fullName even for candidates
+        // whose only problem was not fitting the narrow single-profile-image
+        // firstPass shape. genderTriage call count must track the number of
+        // image-having candidates exactly, independent of name presence.
+        const nameOnly = vi.fn(async (candidates: readonly { candidateId: string; fullName: string }[]) => ({
+            outcome: 'ok' as const,
+            attempts: 1,
+            retries: 0,
+            elapsedMs: 1,
+            value: candidates.map(candidate => ({
+                candidateId: candidate.candidateId,
+                gender: 'female' as const,
+                confidence: 'medium' as const,
+            })),
+        }));
+        const firstPass = vi.fn(async (input: { ordinal: number; fullName: string }) => ({
+            outcome: 'ok' as const,
+            attempts: 1,
+            retries: 0,
+            elapsedMs: 1,
+            value: {
+                assessment: {
+                    inferredGender: 'unknown' as const,
+                    confidence: 'low' as const,
+                    ownerConsistency: 'not_visible' as const,
+                    evidenceSelectionIds: [],
+                },
+                routingDecision: 'route_to_feature_analysis' as const,
+                routingReason: 'conserve_female_recall' as const,
+                analyzedSelectionIds: [`profile:${input.ordinal}`],
+            },
+        }));
+        const triage = vi.fn(async (input: { ordinal: number }) => ({
+            outcome: 'ok' as const,
+            attempts: 1,
+            retries: 0,
+            elapsedMs: 1,
+            value: {
+                assessment: {
+                    inferredGender: 'unknown' as const,
+                    confidence: 'low' as const,
+                    ownerConsistency: 'not_visible' as const,
+                    evidenceSelectionIds: [],
+                },
+                routingDecision: 'route_to_feature_analysis' as const,
+                routingReason: 'conserve_female_recall' as const,
+                analyzedSelectionIds: [`profile:${input.ordinal}`],
+                v29AccountContext: 'personal' as const,
+            },
+        }));
+        const nameOnlyProfile = {
+            ordinal: 4,
+            isPrivate: false,
+            username: 'name_only_candidate',
+            fullName: '이서연',
+            hasProfileImage: false,
+            bio: null,
+            media: [],
+            triageSelectionIds: [],
+            featureSelectionIds: [],
+            resolverSelectionIds: [],
+            captions: [],
+            coverage: { selectedCount: 0, normalizedCount: 0, failures: [] },
+        };
+        // Image-having, but no display name: must still reach triage (not the
+        // firstPass path, since it lacks a name), not be silently skipped.
+        const namelessImageProfile = {
+            ordinal: 5,
+            isPrivate: false,
+            username: 'nameless_image_candidate',
+            fullName: null,
+            hasProfileImage: true,
+            bio: null,
+            media: [],
+            triageSelectionIds: [],
+            featureSelectionIds: [],
+            resolverSelectionIds: [],
+            captions: [],
+            coverage: { selectedCount: 0, normalizedCount: 0, failures: [] },
+        };
+        const mixedBundle = {
+            ...firstPaymentBundle,
+            profiles: [...firstPaymentBundle.profiles, nameOnlyProfile, namelessImageProfile],
+        } satisfies AnalysisV2ReplayBundle;
+
+        const report = await runAnalysisV2AiReplay({
+            bundle: mixedBundle,
+            runner: v211Runner({ firstPass, triage, nameOnly }),
+            mode: 'paid-ai',
+            paidAiOptIn: true,
+            evaluationPolicy: mixedBundle.capture.evaluationPolicy,
+        });
+
+        // Exactly the 3 image-having, named candidates (ordinals 1-3) use firstPass.
+        expect(firstPass).toHaveBeenCalledTimes(3);
+        expect(firstPass.mock.calls.map(([input]) => input.ordinal).sort())
+            .toEqual([1, 2, 3]);
+        // The image-having, nameless candidate (ordinal 5) still reaches triage.
+        expect(triage).toHaveBeenCalledTimes(1);
+        // Together, every image-having candidate (4 of them: 1, 2, 3, 5) reaches
+        // an individual genderTriage-stage call - the exact count, not just "some".
+        expect(report.stages.genderTriage.calls).toBe(
+            firstPass.mock.calls.length + triage.mock.calls.length + nameOnly.mock.calls.length,
+        );
+        expect(firstPass.mock.calls.length + triage.mock.calls.length).toBe(4);
+        // Only the one true image-less, named candidate (ordinal 4) goes into
+        // the name-only batch; the image-having nameless candidate must not.
+        expect(nameOnly).toHaveBeenCalledOnce();
+        expect(nameOnly).toHaveBeenCalledWith([{ candidateId: 'ordinal:4', fullName: '이서연' }]);
+        expect(triage.mock.calls[0]?.[0]).toMatchObject({ ordinal: 5 });
+    });
+
     it('routes every candidate through the pre-name-only path when nameOnlyEnabled is explicitly false', async () => {
         const nameOnly = vi.fn();
         const firstPass = vi.fn(async (input: { ordinal: number; fullName: string }) => ({
