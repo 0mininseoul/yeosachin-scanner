@@ -350,6 +350,71 @@ describe('concierge basic correction', () => {
             .toBeGreaterThan(withoutMention.femaleRows[0]!.risk_score);
     });
 
+    it('carries collected target-post like/comment evidence into a verified-female row\'s likes_count and intimate_comments_count', () => {
+        // Regression: this exact combination (a verified-female candidate who
+        // also appears in the collected target-post interaction evidence) had
+        // no fixture before, and likes_count/intimate_comments_count were
+        // never asserted directly by any existing test.
+        const likedOnly = profile('liked.only', false);
+        const commentedOnly = profile('commented.only', false);
+        const both = profile('both.signals', false);
+        const noEvidence = profile('no.evidence', false);
+        const profiles = [likedOnly, commentedOnly, both, noEvidence];
+        const result = buildCanonicalConciergeResult({
+            targetUsername: 'target',
+            profilesByOrdinal: new Map(profiles.map((account, index) => [index + 1, account])),
+            details: profiles.map((account, index) => femaleDetail(
+                index + 1,
+                account.username,
+                `${index + 1}번째 공개 계정의 기록이 남아 있는 계정입니다.`,
+                1,
+            )),
+            orderedMutualUsernames: profiles.map(account => account.username),
+            targetInteractions: [
+                {
+                    actorUsername: 'liked.only',
+                    postId: 'target-post-1',
+                    signal: 'target_post_like' as const,
+                    sourceInteractionId: 'like-liked-only-1',
+                },
+                {
+                    actorUsername: 'commented.only',
+                    postId: 'target-post-1',
+                    signal: 'target_post_comment' as const,
+                    sourceInteractionId: 'comment-commented-only-1',
+                    content: '너무 예쁘세요',
+                },
+                {
+                    actorUsername: 'both.signals',
+                    postId: 'target-post-1',
+                    signal: 'target_post_like' as const,
+                    sourceInteractionId: 'like-both-1',
+                },
+                {
+                    actorUsername: 'both.signals',
+                    postId: 'target-post-2',
+                    signal: 'target_post_like' as const,
+                    sourceInteractionId: 'like-both-2',
+                },
+                {
+                    actorUsername: 'both.signals',
+                    postId: 'target-post-1',
+                    signal: 'target_post_comment' as const,
+                    sourceInteractionId: 'comment-both-1',
+                    content: '저도 가고 싶어요',
+                },
+            ],
+            targetPosts: [],
+            privateProfiles: [],
+        });
+
+        const rowByUsername = new Map(result.femaleRows.map(row => [row.suspect_instagram_id, row]));
+        expect(rowByUsername.get('liked.only')).toMatchObject({ likes_count: 1, intimate_comments_count: 0 });
+        expect(rowByUsername.get('commented.only')).toMatchObject({ likes_count: 0, intimate_comments_count: 1 });
+        expect(rowByUsername.get('both.signals')).toMatchObject({ likes_count: 2, intimate_comments_count: 1 });
+        expect(rowByUsername.get('no.evidence')).toMatchObject({ likes_count: 0, intimate_comments_count: 0 });
+    });
+
     it('accepts the canonical target-post checkpoint while preserving optional mention evidence', () => {
         expect(targetPostMentionEvidenceFromStepData({
             targetPosts: [{ id: 'post-1', taggedUsers: ['female.1'], mentionedUsers: [] }],

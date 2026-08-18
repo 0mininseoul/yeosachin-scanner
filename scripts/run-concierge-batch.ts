@@ -978,7 +978,7 @@ function addBatchCopyFact(
     facts.push(content ? { ...fact, content } : fact);
 }
 
-function collectBatchCopyFacts(
+export function collectBatchCopyFacts(
     input: ConciergeManualPublicationInput,
     targetProfile: InstagramProfile,
     candidateProfile: InstagramProfile,

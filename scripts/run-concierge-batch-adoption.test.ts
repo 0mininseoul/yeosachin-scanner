@@ -50,6 +50,7 @@ vi.mock('@/lib/services/analysis/first-payment-concierge', async importOriginal 
 
 import {
     buildConciergeBatchHighRiskCopyPrompt,
+    collectBatchCopyFacts,
     conciergeBatchAiClassificationFields,
     conciergeBatchNameOnlyEnabled,
     collectOrder,
@@ -1129,6 +1130,110 @@ describe('concierge existing relationship artifact resolver', () => {
         expect(prompt.match(/방향=후보 이름님 -> 대상 이름님; 유형=댓글/gu)).toHaveLength(1);
         expect(prompt).toContain('첫 번째 댓글');
         expect(prompt).not.toContain('두 번째 댓글');
+    });
+
+    // Regression for the previously-unexercised wiring path: a verified-female
+    // candidate whose username also appears in the collected
+    // targetToCandidate (target's own posts, liked/commented on by mutuals)
+    // evidence. Real production data had never produced this overlap, so the
+    // machinery below (collectBatchCopyFacts -> facts -> the prompt/validator
+    // contract already covered above) had no fixture proving it actually
+    // fires end to end.
+    function targetToCandidateEvidenceInput(
+        rows: readonly {
+            actorUsername: string;
+            postId: string;
+            signal: 'target_post_like' | 'target_post_comment';
+            sourceInteractionId: string;
+            content?: string;
+        }[],
+    ): Parameters<typeof collectBatchCopyFacts>[0] {
+        return {
+            replay: {
+                bidirectionalInteractions: {
+                    targetToCandidate: { status: 'collected', evidence: rows },
+                    candidateToTarget: { status: 'not_collected', evidence: [] },
+                    reverseLikeStatusByUsername: new Map(),
+                },
+            },
+        } as unknown as Parameters<typeof collectBatchCopyFacts>[0];
+    }
+
+    it('collectBatchCopyFacts turns a collected target-post like into a grounded candidate_to_target fact', () => {
+        const facts = collectBatchCopyFacts(
+            targetToCandidateEvidenceInput([{
+                actorUsername: 'candidate_user',
+                postId: 'target-post-1',
+                signal: 'target_post_like',
+                sourceInteractionId: 'like-1',
+            }]),
+            { username: 'target_user', latestPosts: [] } as unknown as InstagramProfile,
+            { username: 'candidate_user', latestPosts: [] } as unknown as InstagramProfile,
+        );
+
+        expect(facts).toEqual([{ direction: 'candidate_to_target', kind: 'like' }]);
+    });
+
+    it('collectBatchCopyFacts carries a collected target-post comment and its content', () => {
+        const facts = collectBatchCopyFacts(
+            targetToCandidateEvidenceInput([{
+                actorUsername: 'candidate_user',
+                postId: 'target-post-1',
+                signal: 'target_post_comment',
+                sourceInteractionId: 'comment-1',
+                content: '너무 예쁘세요',
+            }]),
+            { username: 'target_user', latestPosts: [] } as unknown as InstagramProfile,
+            { username: 'candidate_user', latestPosts: [] } as unknown as InstagramProfile,
+        );
+
+        expect(facts).toEqual([{ direction: 'candidate_to_target', kind: 'comment', content: '너무 예쁘세요' }]);
+    });
+
+    it('collectBatchCopyFacts ignores target-post evidence belonging to a different actor', () => {
+        const facts = collectBatchCopyFacts(
+            targetToCandidateEvidenceInput([{
+                actorUsername: 'someone_else',
+                postId: 'target-post-1',
+                signal: 'target_post_like',
+                sourceInteractionId: 'like-1',
+            }]),
+            { username: 'target_user', latestPosts: [] } as unknown as InstagramProfile,
+            { username: 'candidate_user', latestPosts: [] } as unknown as InstagramProfile,
+        );
+
+        expect(facts).toEqual([]);
+    });
+
+    it('produces a Gemini prompt and passes validation for a verified-female candidate grounded in real collected like evidence', async () => {
+        // End-to-end: real collected targetToCandidate evidence -> collectBatchCopyFacts
+        // -> buildConciergeBatchHighRiskCopyPrompt -> a well-formed grounded
+        // response passes validateConciergeBatchHighRiskCopy, exactly the path
+        // that had never been exercised together before.
+        const facts = collectBatchCopyFacts(
+            targetToCandidateEvidenceInput([{
+                actorUsername: 'candidate_user',
+                postId: 'target-post-1',
+                signal: 'target_post_like',
+                sourceInteractionId: 'like-1',
+            }]),
+            { username: 'target_user', latestPosts: [] } as unknown as InstagramProfile,
+            { username: 'candidate_user', latestPosts: [] } as unknown as InstagramProfile,
+        );
+        const evidence = copyEvidence(facts);
+
+        const prompt = buildConciergeBatchHighRiskCopyPrompt(evidence);
+        expect(prompt).toContain('방향=후보 이름님 -> 대상 이름님; 유형=좋아요');
+
+        const result = validateConciergeBatchHighRiskCopy({
+            oneLineOverview: '후보 이름님이 대상 이름님 게시물에 좋아요를 남긴 장면이 먼저 눈에 들어와 흐름이 장난스럽게 번집니다.',
+            riskAnalysis: [
+                '후보 이름님이 대상 이름님 게시물에 좋아요를 남긴 흐름이 공개 기록의 분위기와 겹쳐 보입니다.',
+                '후보 이름님이 대상 이름님 게시물에 좋아요를 남긴 사실을 중심으로 두 사람의 장난스러운 결을 읽습니다.',
+            ],
+        }, evidence);
+
+        expect(result.candidateUsername).toBe('candidate_user');
     });
 
     it('allows provocative no-interaction copy without trust-eroding wording', async () => {
