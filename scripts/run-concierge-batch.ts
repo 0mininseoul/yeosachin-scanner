@@ -21,7 +21,7 @@ import {
 import { extractRawTargetInteractions } from '@/lib/services/analysis/v2-target-interactions';
 import { instagramPostUrl, selectRecentInteractionPosts } from '@/lib/services/analysis/interaction-posts';
 import { analysisV2CandidateId } from '@/lib/services/analysis/v2-ai-scoring-executors';
-import { isDefaultInstagramProfileImage, preferredInstagramProfileImageUrl } from '@/lib/services/analysis/profile-image-evidence';
+import { hasUsableInstagramProfileImage, isDefaultInstagramProfileImage } from '@/lib/services/analysis/profile-image-evidence';
 import {
     captureFirstPaymentConciergeAiBundle,
     firstPaymentConciergeEvaluationPolicy,
@@ -1132,7 +1132,7 @@ function batchCopyEvidenceForRow(
     }
     const profile = retained[1];
     const selectedMediaIds = new Set(capturedProfile.featureSelectionIds);
-    const hasUsableProfileImage = Boolean(preferredInstagramProfileImageUrl(profile));
+    const hasUsableProfileImage = hasUsableInstagramProfileImage(profile);
     const images = capturedProfile.media
         .filter(media => selectedMediaIds.has(media.selectionId))
         .filter(media => media.kind !== 'profile' || hasUsableProfileImage)
@@ -1696,7 +1696,7 @@ function pass(profile: InstagramProfile, evidenceHash: string) {
     return {
         status: 'collected' as const,
         fullNamePresent: Boolean(profile.fullName?.trim()),
-        profilePicPresent: Boolean(preferredInstagramProfileImageUrl(profile)),
+        profilePicPresent: hasUsableInstagramProfileImage(profile),
         feedDeclared: declared,
         feedCollected: Math.min(declared, collected),
         completeMedia: true,
@@ -1712,7 +1712,7 @@ function failedPass(
     return {
         status: 'failed' as const,
         fullNamePresent: profile ? Boolean(profile.fullName?.trim()) : null,
-        profilePicPresent: profile ? Boolean(preferredInstagramProfileImageUrl(profile)) : null,
+        profilePicPresent: profile ? hasUsableInstagramProfileImage(profile) : null,
         feedDeclared: null,
         feedCollected: null,
         completeMedia: null,
@@ -1724,7 +1724,7 @@ function notCollectedPass(profile: InstagramProfile) {
     return {
         status: 'not_collected' as const,
         fullNamePresent: Boolean(profile.fullName?.trim()),
-        profilePicPresent: Boolean(preferredInstagramProfileImageUrl(profile)),
+        profilePicPresent: hasUsableInstagramProfileImage(profile),
         feedDeclared: null,
         feedCollected: null,
         completeMedia: null,
@@ -1743,6 +1743,22 @@ export function conciergeBatchAiClassificationFields(detail: ReplayAccountAiDeta
     };
 }
 
+export function isConciergeNameOnlyCandidate(input: {
+    profile: Pick<InstagramProfile, 'fullName' | 'profilePicUrl' | 'profilePicUrlHD'>;
+    detail: Pick<ReplayAccountAiDetail, 'feature' | 'triage' | 'finalClassification'>;
+}): boolean {
+    const assessment = input.detail.triage?.assessment;
+    const classification = conciergeDetailClassification(input.detail as ReplayAccountAiDetail);
+    return Boolean(
+        input.profile.fullName?.trim()
+        && assessment
+        && input.detail.feature === null
+        && !hasUsableInstagramProfileImage(input.profile)
+        && classification === 'unknown'
+        && (assessment.inferredGender === 'female' || assessment.inferredGender === 'male'),
+    );
+}
+
 async function classifyOrder(collected: CollectedOrder): Promise<ClassifiedOrder> {
     const details: ReplayAccountAiDetail[] = [];
     await runAnalysisV2AiReplay({
@@ -1754,9 +1770,9 @@ async function classifyOrder(collected: CollectedOrder): Promise<ClassifiedOrder
         onAccountAnalyzed(detail) { details.push(detail); },
     });
     const detailsByOrdinal = new Map(details.map(detail => [detail.ordinal, detail]));
-    // Feature-unavailable public profiles remain visible as unknown; only the
-    // explicit name-only promotions below may turn a no-feature row into a
-    // publishable gender classification.
+    // Feature-unavailable public profiles remain visible; only the explicit
+    // name-only promotions below may turn a final-unknown no-feature row into
+    // a publishable gender classification.
     const publicByOrdinal = new Map(collected.source.publicProfiles.map(item => [item.ordinal, item.profile]));
     const publicCount = collected.source.publicProfiles.length;
     const initialUnknownCount = collected.source.publicProfiles.reduce((count, item) => {
@@ -1770,10 +1786,8 @@ async function classifyOrder(collected: CollectedOrder): Promise<ClassifiedOrder
         minimumConfidence: conciergeBatchNameOnlyMinConfidence(),
         candidates: details.flatMap(detail => {
             const profile = publicByOrdinal.get(detail.ordinal);
-            const assessment = detail.triage?.assessment;
-            if (!profile || !assessment || detail.feature !== null
-                || preferredInstagramProfileImageUrl(profile)
-                || conciergeDetailClassification(detail) !== 'unknown') return [];
+            if (!profile || !isConciergeNameOnlyCandidate({ profile, detail })) return [];
+            const assessment = detail.triage!.assessment;
             return [{
                 ordinal: detail.ordinal,
                 username: normalized(profile.username),
@@ -1809,7 +1823,7 @@ async function classifyOrder(collected: CollectedOrder): Promise<ClassifiedOrder
                 profile
                 && detail?.triage
                 && profile.fullName?.trim()
-                && preferredInstagramProfileImageUrl(profile),
+                && hasUsableInstagramProfileImage(profile),
             );
             const firstPass = firstPassReady
                 ? pass(profile!, hash({ profile, triage: detail!.triage }))
@@ -1854,7 +1868,7 @@ async function classifyOrder(collected: CollectedOrder): Promise<ClassifiedOrder
                 profile
                 && detail?.triage
                 && profile.fullName?.trim()
-                && !preferredInstagramProfileImageUrl(profile)
+                && !hasUsableInstagramProfileImage(profile)
                 && aiClassificationFields.originalAiClassification === 'unknown'
                 && (triageClassification === 'female' || triageClassification === 'male'),
             );

@@ -88,3 +88,21 @@ export function preferredInstagramProfileImageUrl(profile: {
         ? preferred
         : undefined;
 }
+
+/**
+ * Returns whether a profile has a usable subject image, rather than merely an
+ * avatar-shaped URL.  Check both provider URLs: a transformed HD URL can lose
+ * the anonymous-avatar media id that is still present in the original URL.
+ */
+export function hasUsableInstagramProfileImage(profile: {
+    profilePicUrl?: string | null;
+    profilePicUrlHD?: string | null;
+}): boolean {
+    const urls = [profile.profilePicUrl, profile.profilePicUrlHD]
+        .map(value => value?.trim())
+        .filter((value): value is string => Boolean(value));
+    if (urls.length === 0 || urls.some(url => isDefaultInstagramProfileImage({ url }))) {
+        return false;
+    }
+    return Boolean(preferredInstagramProfileImageUrl(profile));
+}

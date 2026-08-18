@@ -12,6 +12,7 @@ import {
 } from '@/lib/services/ai/private-name-analysis';
 import type { ReplayAccountAiDetail } from './replay/replay-runner';
 import type { InstagramPost, InstagramProfile } from '@/lib/types/instagram';
+import { hasUsableInstagramProfileImage } from './profile-image-evidence';
 import {
     calculateV2FinalScores,
     calculateV2PreliminaryScores,
@@ -280,7 +281,7 @@ function retainedPublicCopyEvidence(profile: InstagramProfile): {
         profileEvidence: profile.bio ?? null,
         feedEvidence,
         structuralEvidence: [
-            ...(profile.profilePicUrl ? ['프로필 이미지'] : []),
+            ...(hasUsableInstagramProfileImage(profile) ? ['프로필 이미지'] : []),
             ...((profile.latestPosts ?? []).some(post => (
                 Boolean(post.imageUrl || post.thumbnailUrl || post.mediaItems?.some(item => (
                     item.imageUrl || item.thumbnailUrl
@@ -340,7 +341,7 @@ function hasReliableAppearanceEvidence(
     detail: ReplayAccountAiDetail,
 ): boolean {
     const appearanceGrade = detail.feature?.features.appearanceGrade ?? 0;
-    const hasAnalyzableImage = Boolean(profile.profilePicUrl)
+    const hasAnalyzableImage = hasUsableInstagramProfileImage(profile)
         || (profile.latestPosts ?? []).some(post => (
             Boolean(post.imageUrl || post.thumbnailUrl || post.mediaItems?.some(item => (
                 item.imageUrl || item.thumbnailUrl

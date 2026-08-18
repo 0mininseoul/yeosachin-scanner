@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import {
     INSTAGRAM_DEFAULT_PROFILE_IMAGE_MEDIA_ID,
     INSTAGRAM_DEFAULT_PROFILE_IMAGE_NORMALIZED_SHA256,
+    hasUsableInstagramProfileImage,
     isDefaultInstagramProfileImage,
     preferredInstagramProfileImageUrl,
 } from './profile-image-evidence';
@@ -40,5 +41,16 @@ describe('Instagram profile image evidence', () => {
         expect(preferredInstagramProfileImageUrl({
             profilePicUrl: `https://cdn.example/${INSTAGRAM_DEFAULT_PROFILE_IMAGE_MEDIA_ID}`,
         })).toBeUndefined();
+    });
+
+    it('uses the original URL to reject an anonymous avatar even when HD is transformed', () => {
+        expect(hasUsableInstagramProfileImage({
+            profilePicUrl: `https://cdn.example/${INSTAGRAM_DEFAULT_PROFILE_IMAGE_MEDIA_ID}`,
+            profilePicUrlHD: 'https://cdn.example/default-hd.jpg',
+        })).toBe(false);
+        expect(hasUsableInstagramProfileImage({
+            profilePicUrl: 'https://cdn.example/profile-150.jpg',
+            profilePicUrlHD: 'https://cdn.example/profile-320.jpg',
+        })).toBe(true);
     });
 });

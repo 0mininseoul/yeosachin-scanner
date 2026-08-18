@@ -51,6 +51,7 @@ vi.mock('@/lib/services/analysis/first-payment-concierge', async importOriginal 
 import {
     buildConciergeBatchHighRiskCopyPrompt,
     conciergeBatchAiClassificationFields,
+    isConciergeNameOnlyCandidate,
     collectOrder,
     conciergeBatchMaxUnknownRatio,
     conciergeBatchNameOnlyMinConfidence,
@@ -74,6 +75,7 @@ import {
     type ConciergeBatchHighRiskCopyEvidence,
     validateConciergeBatchHighRiskCopy,
 } from './run-concierge-batch';
+import { INSTAGRAM_DEFAULT_PROFILE_IMAGE_MEDIA_ID } from '@/lib/services/analysis/profile-image-evidence';
 import { runConciergeBatch, type ConciergeBatchStageContext } from '@/lib/services/analysis/concierge-batch-runner';
 
 function profilePackItem(username: string, overrides: Record<string, unknown> = {}) {
@@ -561,6 +563,32 @@ describe('concierge batch only-order allowlist', () => {
 });
 
 describe('concierge name-only gender promotions', () => {
+    it('treats default-avatar profiles with names as name-only candidates, but excludes real profile images', () => {
+        const detail = {
+            finalClassification: 'unresolved',
+            feature: null,
+            triage: { assessment: { inferredGender: 'female', confidence: 'high' } },
+        } as never;
+        expect(isConciergeNameOnlyCandidate({
+            profile: {
+                fullName: 'Jane Default',
+                profilePicUrl: `https://cdn.example/${INSTAGRAM_DEFAULT_PROFILE_IMAGE_MEDIA_ID}`,
+                // A transformed HD URL can obscure the media id; the original
+                // provider URL still establishes that this is the anonymous avatar.
+                profilePicUrlHD: 'https://cdn.example/default-hd.jpg',
+            },
+            detail,
+        })).toBe(true);
+        expect(isConciergeNameOnlyCandidate({
+            profile: {
+                fullName: 'Jane Photo',
+                profilePicUrl: 'https://cdn.example/real.jpg',
+                profilePicUrlHD: 'https://cdn.example/real-hd.jpg',
+            },
+            detail,
+        })).toBe(false);
+    });
+
     it('derives ledger AI and effective classifications from replay final classification', () => {
         expect(conciergeBatchAiClassificationFields({
             finalClassification: 'verified_non_female',
