@@ -354,6 +354,8 @@ export interface AnalyzeWithGeminiOptions<T> {
     startingAttempt?: number;
     /** Optional caller budget; counts attempts from startingAttempt and never exceeds four. */
     maxAttempts?: number;
+    /** Feature analysis may explicitly retry strict response rejections; all other stages remain fail-fast. */
+    retryResponseRejections?: boolean;
     onTelemetry?: (telemetry: GeminiRequestTelemetry) => void | Promise<void>;
     /** Reserve a durable, PII-free generation intent before the SDK request starts. */
     onBeforeAttempt?: (telemetry: GeminiAttemptStartTelemetry) => void | Promise<void>;
@@ -803,6 +805,7 @@ export async function analyzeWithGemini<T>(
         maxImages,
         startingAttempt = 1,
         maxAttempts,
+        retryResponseRejections = false,
         onTelemetry,
         onBeforeAttempt,
         onAttemptTelemetry,
@@ -825,6 +828,9 @@ export async function analyzeWithGemini<T>(
         && (!Number.isSafeInteger(maxAttempts) || maxAttempts < 1 || maxAttempts > 4)
     ) {
         throw new Error('Gemini maxAttempts must be an integer from 1 to 4');
+    }
+    if (retryResponseRejections && stage !== 'featureAnalysis') {
+        throw new Error('Gemini response-rejection retries are restricted to featureAnalysis');
     }
     if (!stage && startingAttempt !== 1) {
         throw new Error('Gemini attempt resumption is available only for durable stage calls');
@@ -1167,8 +1173,13 @@ export async function analyzeWithGemini<T>(
             console.error(`Gemini API Error (attempt ${attemptNumber}):`, lastError.message);
 
             // 재시도 불가능한 에러거나 마지막 시도면 throw
-            if (!(error instanceof RetryableGeminiRateLimitError)
-                || attemptNumber >= finalAttemptNumber) {
+            const retryableResponseRejection = retryResponseRejections
+                && error instanceof Error
+                && error.message.startsWith(AI_GENERATION_RESPONSE_REJECTED_ERROR_PREFIX);
+            if (
+                (!(error instanceof RetryableGeminiRateLimitError) && !retryableResponseRejection)
+                || attemptNumber >= finalAttemptNumber
+            ) {
                 console.error('--- AnalyzeWithGemini End (Failed) ---');
                 throw lastError;
             }

@@ -290,6 +290,30 @@ describe('analyzeWithGemini generation retry policy', () => {
         expect(mocks.generateContent).toHaveBeenCalledTimes(1);
     });
 
+    it('retries schema-invalid responses only for the opted-in feature stage', async () => {
+        vi.spyOn(console, 'error').mockImplementation(() => undefined);
+        vi.spyOn(console, 'log').mockImplementation(() => undefined);
+        const attemptTelemetry = vi.fn();
+        mocks.generateContent
+            .mockResolvedValueOnce(responseWithText(JSON.stringify({ wrong: true })))
+            .mockResolvedValueOnce(successfulResponse());
+
+        const result = await analyzeWithGemini('prompt', undefined, {
+            schema: responseSchema,
+            analysisType: 'feature_analysis_retry_test',
+            stage: 'featureAnalysis',
+            maxAttempts: 2,
+            retryResponseRejections: true,
+            ...stageAuditOptions(),
+            onAttemptTelemetry: attemptTelemetry,
+        });
+
+        expect(result).toEqual({ value: 'ok' });
+        expect(mocks.generateContent).toHaveBeenCalledTimes(2);
+        expect(attemptTelemetry.mock.calls.map(call => call[0].disposition))
+            .toEqual(['response_rejected', 'success']);
+    });
+
     it('emits PII-free feature response rejection diagnostics for aggregation', async () => {
         const rawSecret = 'private-profile-value';
         const consoleWarn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
