@@ -456,6 +456,39 @@ function assertReplayInput(bundle: AnalysisV2ReplayBundle): void {
     }
 }
 
+function sleep(ms: number): Promise<void> {
+    return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+/**
+ * Individual triage/firstPass calls share a small, non-queueing per-stage
+ * Gemini admission slot (gemini.ts's inputQualityV28 tryAcquire) with the
+ * name-only batch calls that run concurrently in the same replay. A capacity
+ * rejection there returns almost instantly (no real network round trip) and
+ * was previously treated as a permanent failure after exactly one attempt;
+ * because the rejection is so fast, the affected worker could race far ahead
+ * through the remaining candidate queue, instantly failing every item before
+ * any real in-flight call had a chance to finish and free its slot. A short
+ * backoff before retrying gives those in-flight calls time to release their
+ * slot so the retry can actually succeed.
+ */
+const INDIVIDUAL_TRIAGE_MAX_ATTEMPTS = 3;
+const INDIVIDUAL_TRIAGE_RETRY_DELAY_MS = 250;
+
+async function withIndividualTriageRetry<T>(
+    call: () => Promise<ReplayInvocation<T>>,
+): Promise<ReplayInvocation<T>> {
+    let last: ReplayInvocation<T> | undefined;
+    for (let attempt = 0; attempt < INDIVIDUAL_TRIAGE_MAX_ATTEMPTS; attempt += 1) {
+        if (attempt > 0) {
+            await sleep(INDIVIDUAL_TRIAGE_RETRY_DELAY_MS * attempt);
+        }
+        last = await call();
+        if (last.outcome === 'ok') return last;
+    }
+    return last!;
+}
+
 async function runBounded<T>(values: readonly T[], concurrency: number, fn: (value: T) => Promise<void>): Promise<void> {
     let next = 0;
     await Promise.all(Array.from(
@@ -982,11 +1015,12 @@ export async function runAnalysisV2AiReplay(input: {
                     const firstPassMedia = mediaFor(profile, profile.triageSelectionIds)
                         .filter(item => item.kind === 'profile');
                     if (runner.firstPass && fullName && profile.hasProfileImage === true && firstPassMedia.length === 1) {
-                        triage = await runner.firstPass({
+                        const call = runner.firstPass;
+                        triage = await withIndividualTriageRetry(() => call({
                             ordinal: profile.ordinal,
                             fullName,
                             media: firstPassMedia,
-                        });
+                        }));
                     } else if (runner.triage && (fullName || profile.hasProfileImage === true)) {
                         // An image-having candidate must still reach triage even
                         // without a display name (e.g. its triage-selected media
@@ -995,13 +1029,14 @@ export async function runAnalysisV2AiReplay(input: {
                         // still carries that signal. Requiring fullName here as
                         // well silently dropped every nameless image-having
                         // candidate to "unknown" with zero triage calls.
-                        triage = await runner.triage({
+                        const call = runner.triage;
+                        triage = await withIndividualTriageRetry(() => call({
                             ordinal: profile.ordinal,
                             media: [],
                             ...(supportsGenderTriageMicrobatch
                                 ? { accountProfile: v29AccountProfile(profile) }
                             : {}),
-                        });
+                        }));
                     } else {
                         gender.unknown++;
                         await appendAccountOutput({
@@ -1014,13 +1049,14 @@ export async function runAnalysisV2AiReplay(input: {
                     }
                 } else {
                     if (!runner.triage) return;
-                    triage = await runner.triage({
+                    const call = runner.triage;
+                    triage = await withIndividualTriageRetry(() => call({
                         ordinal: profile.ordinal,
                         media: mediaFor(profile, profile.triageSelectionIds),
                         ...(supportsGenderTriageMicrobatch
                             ? { accountProfile: v29AccountProfile(profile) }
                         : {}),
-                    });
+                    }));
                 }
                 if (!triage) return;
                 if (replayWorkFailed) return;

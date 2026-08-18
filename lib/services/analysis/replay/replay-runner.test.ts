@@ -1213,6 +1213,122 @@ describe('AI-only replay runner', () => {
         expect(nameOnly).toHaveBeenCalledWith([{ candidateId: 'ordinal:4', fullName: '이서연' }]);
     });
 
+    it('retries an image-having candidate whose triage call is rejected once by shared stage capacity, instead of losing it permanently', async () => {
+        // Reproduces the outage where enabling the name-only path (which runs
+        // concurrently with individual triage/firstPass calls, sharing the
+        // same non-queueing genderTriage-stage admission slot) caused a
+        // capacity-rejected individual candidate to be marked
+        // analysis_unavailable forever after exactly one attempt. On
+        // unfixed code this test fails: firstPass is called exactly once per
+        // ordinal and the capacity-rejected candidate never recovers.
+        const nameOnly = vi.fn(async (candidates: readonly { candidateId: string; fullName: string }[]) => ({
+            outcome: 'ok' as const,
+            attempts: 1,
+            retries: 0,
+            elapsedMs: 1,
+            value: candidates.map(candidate => ({
+                candidateId: candidate.candidateId,
+                gender: 'female' as const,
+                confidence: 'medium' as const,
+            })),
+        }));
+        let ordinal1Attempts = 0;
+        const firstPass = vi.fn(async (input: { ordinal: number; fullName: string }) => {
+            if (input.ordinal === 1) {
+                ordinal1Attempts += 1;
+                if (ordinal1Attempts === 1) {
+                    // Simulates a rejected shared-stage capacity acquisition:
+                    // returns almost instantly, no real Gemini round trip.
+                    return {
+                        outcome: 'failed' as const,
+                        attempts: 1,
+                        retries: 0,
+                        elapsedMs: 0,
+                    };
+                }
+                // The retry succeeds with a confident, high-signal result -
+                // proving the retried call's real result is actually used
+                // (excluded via triage alone, no feature dependency needed),
+                // not just that a second attempt merely happened.
+                return {
+                    outcome: 'ok' as const,
+                    attempts: 1,
+                    retries: 0,
+                    elapsedMs: 1,
+                    value: {
+                        assessment: {
+                            inferredGender: 'male' as const,
+                            confidence: 'high' as const,
+                            ownerConsistency: 'same_person' as const,
+                            evidenceSelectionIds: [`profile:${input.ordinal}`],
+                        },
+                        routingDecision: 'exclude_high_confidence_male' as const,
+                        routingReason: 'high_confidence_same_owner_male' as const,
+                        analyzedSelectionIds: [`profile:${input.ordinal}`],
+                    },
+                };
+            }
+            return {
+                outcome: 'ok' as const,
+                attempts: 1,
+                retries: 0,
+                elapsedMs: 1,
+                value: {
+                    assessment: {
+                        inferredGender: 'unknown' as const,
+                        confidence: 'low' as const,
+                        ownerConsistency: 'not_visible' as const,
+                        evidenceSelectionIds: [],
+                    },
+                    routingDecision: 'route_to_feature_analysis' as const,
+                    routingReason: 'conserve_female_recall' as const,
+                    analyzedSelectionIds: [`profile:${input.ordinal}`],
+                },
+            };
+        });
+        const mixedBundle = {
+            ...firstPaymentBundle,
+            profiles: [
+                ...firstPaymentBundle.profiles,
+                {
+                    ordinal: 4,
+                    isPrivate: false,
+                    username: 'name_only_candidate',
+                    fullName: '이서연',
+                    hasProfileImage: false,
+                    bio: null,
+                    media: [],
+                    triageSelectionIds: [],
+                    featureSelectionIds: [],
+                    resolverSelectionIds: [],
+                    captions: [],
+                    coverage: { selectedCount: 0, normalizedCount: 0, failures: [] },
+                },
+            ],
+        } satisfies AnalysisV2ReplayBundle;
+
+        const report = await runAnalysisV2AiReplay({
+            bundle: mixedBundle,
+            runner: v211Runner({ firstPass, nameOnly }),
+            mode: 'paid-ai',
+            paidAiOptIn: true,
+            evaluationPolicy: mixedBundle.capture.evaluationPolicy,
+        });
+
+        // The rejected candidate (ordinal 1) must be retried, not abandoned
+        // after one attempt.
+        expect(ordinal1Attempts).toBeGreaterThan(1);
+        // The retried call's real (confident) result is what gets used -
+        // not a permanent "unknown" fallback from giving up after one
+        // transient capacity rejection.
+        const ordinal1Output = report.accountOutputs.find(output => output.ordinal === 1);
+        expect(ordinal1Output).toMatchObject({
+            finalClassification: 'verified_non_female',
+            classificationSource: 'triage',
+        });
+        expect(nameOnly).toHaveBeenCalledOnce();
+    });
+
     it('still routes an image-having candidate without a display name through triage, and both paths run together with exact call counts', async () => {
         // Regression for the outage where image-having candidates lacking a
         // fullName were silently dropped to "unknown" with zero AI calls,
