@@ -216,6 +216,9 @@ const AI_STAGE_POLICIES_V211 = Object.freeze({
         // constraint violations); a stronger instruction-following model fixes this directly.
         model: 'gemini-3.7-flash',
         thinkingLevel: 'HIGH',
+        // HIGH thinking spends the same output budget as the answer, so the v2.10
+        // ceiling of 2_048 truncated every call with finishReason MAX_TOKENS.
+        maxOutputTokens: 8_192,
         promptVersion: 'feature-analysis-v5',
     }),
     highRiskNarrative: Object.freeze({
