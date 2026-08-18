@@ -374,6 +374,17 @@ describe('concierge batch failure diagnostics', () => {
         expect(sanitizeConciergeBatchDiagnostic('x'.repeat(20), 7)).toHaveLength(7);
     });
 
+    it('records nested error causes in order from the immediate cause to the root', () => {
+        const root = new Error('CONCIERGE_BATCH_COPY_INTERACTION_GROUNDING_INVALID');
+        const middle = new Error('CONCIERGE_BATCH_COPY_CONTRACT_INVALID', { cause: root });
+        const outer = new Error('CONCIERGE_BATCH_COPY_GENERATION_FAILED', { cause: middle });
+
+        expect(conciergeBatchFailureDiagnostic(outer, 'publish').causes).toEqual([
+            { name: 'Error', message: 'CONCIERGE_BATCH_COPY_CONTRACT_INVALID' },
+            { name: 'Error', message: 'CONCIERGE_BATCH_COPY_INTERACTION_GROUNDING_INVALID' },
+        ]);
+    });
+
     it('passes the failing pipeline stage to the durable failure callback', async () => {
         let stage: string | undefined;
         const summary = await runConciergeBatch([{

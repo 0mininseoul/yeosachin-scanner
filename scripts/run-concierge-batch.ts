@@ -101,6 +101,50 @@ function conciergeBatchErrorName(error: unknown): string {
     return typeof error === 'string' ? 'String' : 'UnknownError';
 }
 
+function conciergeBatchErrorMessage(error: unknown): string {
+    return error instanceof Error
+        ? error.message
+        : typeof error === 'string'
+            ? error
+            : 'Unknown failure';
+}
+
+type ConciergeBatchDiagnosticCause = Readonly<{
+    message: string;
+    name: string;
+}>;
+
+function conciergeBatchErrorCauses(error: unknown): readonly ConciergeBatchDiagnosticCause[] {
+    const causes: ConciergeBatchDiagnosticCause[] = [];
+    const visited = new Set<object>();
+    let current: unknown = error;
+    for (let depth = 0; depth < 5; depth += 1) {
+        if (!current || (typeof current !== 'object' && typeof current !== 'function')) break;
+        const currentObject = current as object;
+        if (visited.has(currentObject)) break;
+        visited.add(currentObject);
+
+        let cause: unknown;
+        try {
+            cause = (current as { cause?: unknown }).cause;
+        } catch {
+            break;
+        }
+        if (cause === undefined || cause === null) break;
+        if ((typeof cause === 'object' || typeof cause === 'function') && visited.has(cause)) break;
+
+        causes.push({
+            message: sanitizeConciergeBatchDiagnostic(
+                conciergeBatchErrorMessage(cause),
+                CONCIERGE_DIAGNOSTIC_MESSAGE_MAX,
+            ),
+            name: sanitizeConciergeBatchDiagnostic(conciergeBatchErrorName(cause), 100),
+        });
+        current = cause;
+    }
+    return causes;
+}
+
 export function conciergeBatchFailureDiagnostic(
     error: unknown,
     stage?: ConciergeBatchFailureStage,
@@ -109,19 +153,19 @@ export function conciergeBatchFailureDiagnostic(
     name: string;
     stage: ConciergeBatchFailureStage | null;
     stack?: string;
+    causes: readonly ConciergeBatchDiagnosticCause[];
 }> {
-    const rawMessage = error instanceof Error
-        ? error.message
-        : typeof error === 'string'
-            ? error
-            : 'Unknown failure';
     const stack = error instanceof Error && typeof error.stack === 'string'
         ? error.stack.split(/\r?\n/).slice(0, 6).join('\n')
         : null;
     return {
-        message: sanitizeConciergeBatchDiagnostic(rawMessage, CONCIERGE_DIAGNOSTIC_MESSAGE_MAX),
+        message: sanitizeConciergeBatchDiagnostic(
+            conciergeBatchErrorMessage(error),
+            CONCIERGE_DIAGNOSTIC_MESSAGE_MAX,
+        ),
         name: sanitizeConciergeBatchDiagnostic(conciergeBatchErrorName(error), 100),
         stage: stage ?? null,
+        causes: conciergeBatchErrorCauses(error),
         ...(stack ? {
             stack: sanitizeConciergeBatchDiagnostic(stack, CONCIERGE_DIAGNOSTIC_STACK_MAX),
         } : {}),
@@ -133,10 +177,13 @@ function writeConciergeBatchFailureSummary(
     error: unknown,
     stage?: ConciergeBatchFailureStage,
 ): void {
+    const diagnostic = conciergeBatchFailureDiagnostic(error, stage);
+    const rootCause = diagnostic.causes.at(-1)?.message;
     process.stderr.write(`${JSON.stringify({
         status: 'failed',
         code,
-        ...conciergeBatchFailureDiagnostic(error, stage),
+        ...(rootCause ? { summary: `${code} (root: ${rootCause})` } : {}),
+        ...diagnostic,
     })}\n`);
 }
 
@@ -810,6 +857,15 @@ async function generateConciergeBatchCopy(
             return copy;
         } catch (error) {
             lastError = error;
+            const diagnostic = conciergeBatchFailureDiagnostic(error);
+            const candidate = typeof evidence.candidateUsername === 'string'
+                ? sanitizeConciergeBatchDiagnostic(evidence.candidateUsername, 100)
+                    .replace(/[\r\n]+/g, ' ')
+                : '';
+            const warning = diagnostic.message.replace(/[\r\n]+/g, ' ');
+            process.stderr.write(
+                `batch copy attempt ${attempt + 1} failed${candidate ? ` for ${candidate}` : ''}: ${warning}\n`,
+            );
             const retryable = isBatchCopyContractFailure(error) || isRecoverableGeminiResponseError(error);
             if (!retryable || attempt === 1) break;
         }
