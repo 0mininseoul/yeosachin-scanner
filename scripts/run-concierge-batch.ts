@@ -58,6 +58,7 @@ import type {
 import {
     buildConciergeManualPublicationDraft,
 } from '@/lib/services/analysis/concierge-batch-publication';
+import { writeConciergePublicationDryRunDump } from './verify-concierge-publication';
 import { areMateriallyNearDuplicatePublicCopies } from '@/lib/services/analysis/public-copy-quality';
 import { assertGeminiCandidateCopyOverview } from '@/lib/services/analysis/gemini-candidate-copy-contract';
 
@@ -2274,10 +2275,30 @@ async function main(): Promise<void> {
             // Gemini copy call is intentionally deferred until after scoring;
             // every displayed candidate overview is then replaced by the
             // contract output, including normal/caution rows.
+            // Dump before entering the production builder so a validation
+            // failure still leaves the exact in-memory input for an offline,
+            // read-only publication dry-run.
+            writeConciergePublicationDryRunDump(
+                classified.input,
+                process.env.CONCIERGE_BATCH_PUBLICATION_DUMP_PATH,
+            );
             const scored = buildConciergeManualPublicationDraft(classified.input);
             const copyEvidence = scored.rows.map(row => batchCopyEvidenceForRow(classified, row));
+            writeConciergePublicationDryRunDump(
+                classified.input,
+                process.env.CONCIERGE_BATCH_PUBLICATION_DUMP_PATH,
+                { copyEvidence },
+            );
             const batchCandidateCopy: readonly ConciergeBatchCandidateCopy[] =
                 await generateConciergeBatchCandidateCopies(copyEvidence);
+            // Preserve the copy-bearing input as well when the deferred copy
+            // stage completes; a subsequent dry-run then exercises the full
+            // publication builder without another Gemini call.
+            writeConciergePublicationDryRunDump(
+                { ...classified.input, batchCandidateCopy },
+                process.env.CONCIERGE_BATCH_PUBLICATION_DUMP_PATH,
+                { copyEvidence },
+            );
             // A contract failure above is allowed to escape to onFailure. It
             // records this order as retryable and prevents the deterministic
             // baseline from being published as a fallback.

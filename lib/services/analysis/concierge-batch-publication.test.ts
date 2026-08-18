@@ -1,3 +1,6 @@
+import { mkdtempSync, rmSync } from 'node:fs';
+import { join } from 'node:path';
+import { tmpdir } from 'node:os';
 import { describe, expect, it } from 'vitest';
 import type { FeatureAnalysisResult } from '@/lib/services/ai/v2-staged-analysis';
 import type { InstagramProfile } from '@/lib/types/instagram';
@@ -18,6 +21,11 @@ import {
     type ConciergeClassificationLedger,
 } from './concierge-classification-import';
 import type { ReplayAccountAiDetail } from './replay/replay-runner';
+import {
+    runConciergePublicationDryRunCli,
+    verifyConciergePublicationInput,
+    writeConciergePublicationDryRunDump,
+} from '../../../scripts/verify-concierge-publication';
 
 const HASH = 'a'.repeat(64);
 
@@ -594,6 +602,67 @@ describe('concierge manual publication', () => {
             unknownRatio: 0.4,
             targetUnknownRatio: 0.2,
         });
+    });
+
+    it('reports the compared values when the dry-run publication boundary finds an AI binding mismatch', () => {
+        const input = makeInput();
+        const replay = {
+            ...input.replay,
+            details: input.replay.details.map(detail => detail.ordinal === 1
+                ? { ...detail, finalClassification: 'verified_female' }
+                : detail.ordinal === 2
+                    ? { ...detail, finalClassification: 'verified_non_female' }
+                    : detail),
+        } as unknown as ConciergeManualPublicationInput['replay'];
+
+        const result = verifyConciergePublicationInput({ ...input, replay });
+
+        expect(result).toMatchObject({
+            passed: false,
+            code: 'CONCIERGE_PUBLICATION_REPLAY_AI_BINDING_MISMATCH',
+            diagnostic: {
+                check: 'buildEffectiveDetails.detailAiBinding',
+                ordinal: 1,
+                username: 'one',
+                compared: {
+                    detailClassification: 'female',
+                    bindingOriginalAiClassification: 'unknown',
+                },
+            },
+        });
+        if (result.passed) throw new Error('expected dry-run binding mismatch');
+        expect(result.diagnostics).toHaveLength(2);
+        expect(result.diagnostics[1]).toMatchObject({
+            ordinal: 2,
+            username: 'two',
+            compared: {
+                detailClassification: 'male',
+                bindingOriginalAiClassification: 'female',
+            },
+        });
+    });
+
+    it('round-trips a dumped input through the CLI without a provider, AI, or publication-store call', () => {
+        const base = makeInput();
+        const orderId = '123e4567-e89b-42d3-a456-426614174000';
+        const requestId = '223e4567-e89b-42d3-a456-426614174000';
+        const input: ConciergeManualPublicationInput = {
+            ...base,
+            orderId,
+            requestId,
+            resultRequestId: requestId,
+            ownerId: '323e4567-e89b-42d3-a456-426614174000',
+            sourceRequestId: '423e4567-e89b-42d3-a456-426614174000',
+            currentPublication: { ...base.currentPublication, resultUrl: `/result/${requestId}` },
+            manualImport: { ...base.manualImport, orderId, requestId },
+        };
+        const directory = mkdtempSync(join(tmpdir(), 'concierge-publication-dry-run-'));
+        try {
+            writeConciergePublicationDryRunDump(input, directory);
+            expect(runConciergePublicationDryRunCli(['--input', directory])).toBe(0);
+        } finally {
+            rmSync(directory, { recursive: true, force: true });
+        }
     });
 
     it('recomputes from exact bidirectional evidence, coverage status, and per-account overview', () => {

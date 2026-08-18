@@ -53,12 +53,42 @@ interface ConciergeBidirectionalInteractionEvidence {
 
 export class ConciergePublicationError extends Error {
     readonly code: string;
+    readonly diagnostic: ConciergePublicationFailureDiagnostic;
+    readonly diagnostics: readonly ConciergePublicationFailureDiagnostic[];
 
-    constructor(code: string) {
+    constructor(
+        code: string,
+        diagnostic?: Partial<ConciergePublicationFailureDiagnostic>,
+        diagnostics?: readonly Partial<ConciergePublicationFailureDiagnostic>[],
+    ) {
         super(code);
         this.name = 'ConciergePublicationError';
         this.code = code;
+        this.diagnostic = {
+            check: diagnostic?.check ?? code,
+            ...(diagnostic?.ordinal === undefined ? {} : { ordinal: diagnostic.ordinal }),
+            ...(diagnostic?.username === undefined ? {} : { username: diagnostic.username }),
+            ...(diagnostic?.compared === undefined ? {} : { compared: diagnostic.compared }),
+        };
+        this.diagnostics = (diagnostics && diagnostics.length > 0 ? diagnostics : [this.diagnostic]).map(entry => ({
+            check: entry.check ?? code,
+            ...(entry.ordinal === undefined ? {} : { ordinal: entry.ordinal }),
+            ...(entry.username === undefined ? {} : { username: entry.username }),
+            ...(entry.compared === undefined ? {} : { compared: entry.compared }),
+        }));
     }
+}
+
+/**
+ * Bounded, non-PII context attached to a publication contract failure.
+ * Values are intentionally limited to the comparison needed by an operator;
+ * the dry-run verifier applies an additional username allowlist before output.
+ */
+export interface ConciergePublicationFailureDiagnostic {
+    check: string;
+    ordinal?: number;
+    username?: string;
+    compared?: Readonly<Record<string, string | number | boolean | null>>;
 }
 
 export interface ConciergeStoredReplayFeatures {
@@ -361,8 +391,18 @@ function normalizeUsername(value: string): string {
     return value.trim().replace(/^@/, '').toLowerCase();
 }
 
-function fail(code: string): never {
-    throw new ConciergePublicationError(code);
+function fail(
+    code: string,
+    diagnostic?: Partial<ConciergePublicationFailureDiagnostic>,
+): never {
+    throw new ConciergePublicationError(code, diagnostic);
+}
+
+function failMany(
+    code: string,
+    diagnostics: readonly Partial<ConciergePublicationFailureDiagnostic>[],
+): never {
+    throw new ConciergePublicationError(code, diagnostics[0], diagnostics);
 }
 
 function hash(value: unknown): string {
@@ -731,6 +771,7 @@ function validateReplayBindings(
     if (replay.classificationByOrdinal.size !== aiRecords.length) {
         fail('CONCIERGE_PUBLICATION_REPLAY_AI_BINDING_MISMATCH');
     }
+    const bindingMismatches: Partial<ConciergePublicationFailureDiagnostic>[] = [];
     for (const record of aiRecords) {
         const binding = replay.classificationByOrdinal.get(record.mutualOrdinal);
         if (!binding
@@ -745,8 +786,21 @@ function validateReplayBindings(
             || binding.classificationResultHash !== record.classificationResultHash
             || binding.secondPassStatus !== record.secondPass.status
             || binding.secondPassCompleteMedia !== record.secondPass.completeMedia) {
-            fail('CONCIERGE_PUBLICATION_REPLAY_AI_BINDING_MISMATCH');
+            bindingMismatches.push({
+                check: 'validateReplayBindings.classificationBinding',
+                ordinal: record.mutualOrdinal,
+                username: record.instagramId,
+                compared: {
+                    ledgerOriginalAiClassification: record.originalAiClassification,
+                    replayOriginalAiClassification: binding?.originalAiClassification ?? null,
+                    ledgerClassificationSource: record.classificationSource,
+                    replayClassificationSource: binding?.classificationSource ?? 'ai',
+                },
+            });
         }
+    }
+    if (bindingMismatches.length > 0) {
+        failMany('CONCIERGE_PUBLICATION_REPLAY_AI_BINDING_MISMATCH', bindingMismatches);
     }
     if (replay.profilesByOrdinal.size !== ledger.hydratedPublicCount
         || replay.details.length !== ledger.hydratedPublicCount) {
@@ -811,7 +865,8 @@ function buildEffectiveDetails(
     const recordByUsername = new Map(ledger.records.map(record => [
         normalizeUsername(record.instagramId), record,
     ]));
-    return replay.details.map(detail => {
+    const bindingMismatches: Partial<ConciergePublicationFailureDiagnostic>[] = [];
+    const effectiveDetails = replay.details.map(detail => {
         const profile = profileByOrdinal.get(detail.ordinal);
         if (!profile) fail('CONCIERGE_PUBLICATION_FEATURE_PROFILE_MISSING');
         const username = normalizeUsername(profile.username);
@@ -820,10 +875,35 @@ function buildEffectiveDetails(
         if (!record || !binding || record.partition !== 'public' || !record.effectiveClassification) {
             fail('CONCIERGE_PUBLICATION_CLASSIFICATION_MISSING');
         }
-        if (detailClassification(detail) !== binding.originalAiClassification) {
-            fail('CONCIERGE_PUBLICATION_REPLAY_AI_BINDING_MISMATCH');
-        }
         const effective = record.effectiveClassification;
+        const bindingMismatch = detailClassification(detail) !== binding.originalAiClassification;
+        if (bindingMismatch) {
+            bindingMismatches.push({
+                check: 'buildEffectiveDetails.detailAiBinding',
+                ordinal: detail.ordinal,
+                username: profile.username,
+                compared: {
+                    detailClassification: detailClassification(detail),
+                    detailFinalClassification: detail.finalClassification,
+                    bindingOriginalAiClassification: binding.originalAiClassification,
+                    effectiveClassification: record.effectiveClassification,
+                    classificationSource: record.classificationSource,
+                    hasFeature: Boolean(detail.feature),
+                    triageInferredGender: detail.triage?.assessment.inferredGender ?? null,
+                },
+            });
+        }
+        if (bindingMismatch) {
+            const finalClassification = effective === 'female'
+                ? 'verified_female'
+                : effective === 'male' ? 'verified_non_female' : 'unresolved';
+            return {
+                ...detail,
+                finalClassification: finalClassification as ReplayAccountAiDetail['finalClassification'],
+                classificationSource: detail.classificationSource,
+                featureOverview: detail.feature?.features.oneLineOverview ?? null,
+            };
+        }
         const nameOnly = record.classificationSource === 'name_only';
         if (nameOnly && (detail.feature
             || record.secondPass.status === 'collected'
@@ -850,13 +930,17 @@ function buildEffectiveDetails(
             : effective === 'male' ? 'verified_non_female' : 'unresolved';
         return {
             ...detail,
-            finalClassification,
+            finalClassification: finalClassification as ReplayAccountAiDetail['finalClassification'],
             // This remains the original AI source. Manual provenance is held in
             // the immutable classification ledger, never disguised as AI output.
             classificationSource: detail.classificationSource,
             featureOverview: detail.feature?.features.oneLineOverview ?? null,
         };
     });
+    if (bindingMismatches.length > 0) {
+        failMany('CONCIERGE_PUBLICATION_REPLAY_AI_BINDING_MISMATCH', bindingMismatches);
+    }
+    return effectiveDetails;
 }
 
 function buildConciergeManualPublicationInternal(
