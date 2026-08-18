@@ -46,6 +46,7 @@ import {
     type ConciergeBatchOrder,
     type ConciergeBatchPreparedOrder,
     type ConciergeBatchStageContext,
+    type ConciergeBatchFailureStage,
 } from '@/lib/services/analysis/concierge-batch-runner';
 import type {
     ConciergeBatchCandidateCopy,
@@ -72,6 +73,72 @@ const RETRY_CODE_PATTERN = /^CONCIERGE_[A-Z0-9_]{2,100}$/;
 export const CONCIERGE_BATCH_ACTIVE_SCOPE_SIZE = 25;
 const CONCIERGE_BATCH_ACTIVE_SCOPE_START_MS = Date.parse('2026-08-07T00:00:00.000Z');
 const CONCIERGE_BATCH_EXCLUDED_TARGET = 'che.rish_0.0_';
+const CONCIERGE_DIAGNOSTIC_REDACTIONS: readonly [RegExp, string][] = [
+    [/\bpostgres(?:ql)?:\/\/[^\s"'<>]+/giu, '[REDACTED_DATABASE_URL]'],
+    [/\bapify_api_[A-Za-z0-9]+/giu, '[REDACTED_APIFY_TOKEN]'],
+    [/\beyJ[A-Za-z0-9._-]+/gu, '[REDACTED_JWT]'],
+    [/\b(?:https?|wss?):\/\/[^\s"'<>?#]+\?[^\s"'<>]*/giu, '[REDACTED_URL]'],
+];
+const CONCIERGE_DIAGNOSTIC_MESSAGE_MAX = 500;
+const CONCIERGE_DIAGNOSTIC_STACK_MAX = 2_000;
+
+export function sanitizeConciergeBatchDiagnostic(value: string, maximum: number): string {
+    let sanitized = value;
+    for (const [pattern, replacement] of CONCIERGE_DIAGNOSTIC_REDACTIONS) {
+        sanitized = sanitized.replace(pattern, replacement);
+    }
+    return sanitized.slice(0, maximum);
+}
+
+function conciergeBatchErrorName(error: unknown): string {
+    if (error instanceof Error && error.name.trim()) return error.name;
+    if (error && typeof error === 'object') {
+        const named = (error as { name?: unknown }).name;
+        if (typeof named === 'string' && named.trim()) return named;
+        const constructorName = (error as { constructor?: { name?: unknown } }).constructor?.name;
+        if (typeof constructorName === 'string' && constructorName.trim()) return constructorName;
+    }
+    return typeof error === 'string' ? 'String' : 'UnknownError';
+}
+
+export function conciergeBatchFailureDiagnostic(
+    error: unknown,
+    stage?: ConciergeBatchFailureStage,
+): Readonly<{
+    message: string;
+    name: string;
+    stage: ConciergeBatchFailureStage | null;
+    stack?: string;
+}> {
+    const rawMessage = error instanceof Error
+        ? error.message
+        : typeof error === 'string'
+            ? error
+            : 'Unknown failure';
+    const stack = error instanceof Error && typeof error.stack === 'string'
+        ? error.stack.split(/\r?\n/).slice(0, 6).join('\n')
+        : null;
+    return {
+        message: sanitizeConciergeBatchDiagnostic(rawMessage, CONCIERGE_DIAGNOSTIC_MESSAGE_MAX),
+        name: sanitizeConciergeBatchDiagnostic(conciergeBatchErrorName(error), 100),
+        stage: stage ?? null,
+        ...(stack ? {
+            stack: sanitizeConciergeBatchDiagnostic(stack, CONCIERGE_DIAGNOSTIC_STACK_MAX),
+        } : {}),
+    };
+}
+
+function writeConciergeBatchFailureSummary(
+    code: string,
+    error: unknown,
+    stage?: ConciergeBatchFailureStage,
+): void {
+    process.stderr.write(`${JSON.stringify({
+        status: 'failed',
+        code,
+        ...conciergeBatchFailureDiagnostic(error, stage),
+    })}\n`);
+}
 
 function expectedActiveScopeCount(): number {
     const raw = process.env.CONCIERGE_BATCH_EXPECTED_SCOPE_COUNT?.trim();
@@ -1834,10 +1901,12 @@ async function main(): Promise<void> {
             await casPublish({ ...classified.input, batchCandidateCopy });
             return { status: 'completed' as const };
         },
-        async onFailure(order, error) {
+        async onFailure(order, error, stage) {
+            const failureCode = retryableFailureCode(error);
+            const diagnostic = conciergeBatchFailureDiagnostic(error, stage);
+            writeConciergeBatchFailureSummary(failureCode, error, stage);
             const prepared = preparedByOrder.get(order.orderId);
             if (!prepared) return;
-            const failureCode = retryableFailureCode(error);
             const { data: current, error: readError } = await supabaseAdmin
                 .from('analysis_requests')
                 .select('status,step_data')
@@ -1864,6 +1933,7 @@ async function main(): Promise<void> {
                             eligible: true,
                             code: failureCode,
                             recordedAt: new Date().toISOString(),
+                            ...diagnostic,
                         },
                     },
                 })
@@ -1888,7 +1958,8 @@ async function main(): Promise<void> {
 }
 
 if (import.meta.url === `file://${process.argv[1]}`) {
-    main().catch(() => {
+    main().catch(error => {
+        writeConciergeBatchFailureSummary('CONCIERGE_BATCH_FAILED', error);
         process.stderr.write('{"status":"failed","code":"CONCIERGE_BATCH_FAILED"}\n');
         process.exitCode = 1;
     });

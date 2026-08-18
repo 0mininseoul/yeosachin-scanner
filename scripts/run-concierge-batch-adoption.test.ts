@@ -41,6 +41,7 @@ vi.mock('@/lib/services/analysis/first-payment-concierge', async importOriginal 
 import {
     buildConciergeBatchHighRiskCopyPrompt,
     collectOrder,
+    conciergeBatchFailureDiagnostic,
     generateConciergeBatchCandidateCopies,
     generateConciergeBatchHighRiskCopy,
     hydrateConciergeProfilesFromPack,
@@ -51,6 +52,7 @@ import {
     parseConciergeExistingRelationshipArtifacts,
     relationshipArtifactProviderContext,
     retryableFailureCode,
+    sanitizeConciergeBatchDiagnostic,
     selectConciergeBatchOnlyOrders,
     selectConciergeBatchActiveScope,
     type ConciergeBatchHighRiskCopyEvidence,
@@ -201,6 +203,46 @@ describe('concierge batch only-order allowlist', () => {
         expect(selectConciergeBatchOnlyOrders(scope, `${second}`)).toEqual([{ orderId: second }]);
         expect(() => selectConciergeBatchOnlyOrders(scope, `${first},${outside}`))
             .toThrow('CONCIERGE_BATCH_ONLY_ORDERS_INVALID');
+    });
+});
+
+describe('concierge batch failure diagnostics', () => {
+    it('redacts credentials and bounds durable diagnostic fields', () => {
+        const message = [
+            'apify_api_AbC123',
+            'eyJheader.payload.signature',
+            'postgresql://user:password@example.test/db?secret=value',
+            'https://example.test/path?token=value',
+        ].join(' ');
+        const diagnostic = conciergeBatchFailureDiagnostic(new Error(message), 'collect');
+
+        expect(diagnostic.stage).toBe('collect');
+        expect(diagnostic.message).not.toContain('apify_api_AbC123');
+        expect(diagnostic.message).not.toContain('eyJheader.payload.signature');
+        expect(diagnostic.message).not.toContain('postgresql://');
+        expect(diagnostic.message).not.toContain('?token=value');
+        expect(diagnostic.message.length).toBeLessThanOrEqual(500);
+        expect(diagnostic.stack?.split('\n').length).toBeLessThanOrEqual(6);
+        expect(sanitizeConciergeBatchDiagnostic('x'.repeat(20), 7)).toHaveLength(7);
+    });
+
+    it('passes the failing pipeline stage to the durable failure callback', async () => {
+        let stage: string | undefined;
+        const summary = await runConciergeBatch([{
+            orderId: '00000000-0000-4000-8000-000000000001',
+            ownerId: '00000000-0000-4000-8000-000000000002',
+            targetUsername: 'target_user',
+            planId: 'basic',
+            cohort: 'awaiting_operator',
+        }], {
+            async collect() { throw new Error('CONCIERGE_COLLECTION_TEST_FAILURE'); },
+            async classify() { return null; },
+            async publish() { return { status: 'completed' as const }; },
+            async onFailure(_order, _error, failedStage) { stage = failedStage; },
+        });
+
+        expect(summary).toMatchObject({ total: 1, completed: 0, failed: 1 });
+        expect(stage).toBe('collect');
     });
 });
 
