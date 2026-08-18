@@ -703,7 +703,7 @@ describe('V2 staged AI services', () => {
         expect(prompt).toContain('first-pass');
     });
 
-    it('keeps first-pass direct name routing and adds a unisex/brand guard on v2.11', async () => {
+    it('keeps the A11 baseline first-pass prompt bytes on v2.11', async () => {
         const input = {
             fullName: '김수연',
             media: [media()[0]!],
@@ -729,11 +729,17 @@ describe('V2 staged AI services', () => {
         expect(prompt).toContain(
             'The full name is an allowed direct name signal for provisional routing; an obvious name may be classified without high-confidence same-owner visual evidence or feed images.'
         );
-        expect(prompt).toContain(
+        expect(prompt).not.toContain(
             'Treat unisex, neutral, and brand names as no gender evidence.'
         );
         expect(prompt).not.toContain('only as a secondary clue');
         expect(prompt).not.toContain('Keep confidence low when the name is the main support.');
+
+        const baselineInput = { fullName: '김수연', media: [media()[0]!] };
+        expect(createGenderFirstPassResultIdentity(baselineInput, AI_STAGE_POLICY_V211_VERSION).inputHash)
+            .toBe('e454d8c3938802aca7c7292d7889850b22591eef000e4e571f7f4d5384fd019a');
+        expect(createGenderFirstPassResultIdentity(baselineInput, 'ai-stage-policy-v2.10').inputHash)
+            .toBe('e454d8c3938802aca7c7292d7889850b22591eef000e4e571f7f4d5384fd019a');
     });
 
     it('updates only the current triage guidance while preserving legacy identity bytes', async () => {
@@ -760,12 +766,20 @@ describe('V2 staged AI services', () => {
 
         const [prompt] = mocks.analyzeWithGemini.mock.calls[0]!;
         expect(prompt).toContain(
-            '이미지가 명확하면 이미지를 우선하고 이름은 이미지가 애매할 때만 성별 판단의 보조 근거로 사용하세요.'
+            '명확한 이름 성별 신호(한국어 이름 포함)는 이름만으로 판정하세요.'
         );
         expect(prompt).toContain(
-            '이름이 주된 근거이면 confidence를 낮게 유지하며 유니섹스·중성적·비인명(브랜드·상호) 이름만으로 성별을 추측하지 마세요.'
+            '유일한 근거면 confidence는 medium 이하로 두세요.'
+        );
+        expect(prompt).toContain(
+            '이름과 이미지가 충돌할 때만 이미지를 우선하고 그 외에는 함께 사용하세요.'
+        );
+        expect(prompt).toContain(
+            '유니섹스이거나 사람 이름이 아닌 브랜드·상호·단체 이름은 성별 근거로 쓰지 마세요.'
         );
         expect(prompt).not.toContain('이름이나 고정관념으로 추측하지 말고');
+        expect(prompt).not.toContain('이미지가 명확하면 이미지를 우선하고 이름은 이미지가 애매할 때만');
+        expect(prompt).not.toContain('confidence를 낮게 유지');
 
         const legacyIdentity = createGenderTriageResultIdentity(
             { media: media().slice(0, 5) },
@@ -3578,12 +3592,20 @@ describe('V2 staged AI services', () => {
 
         const [prompt] = mocks.analyzeWithGemini.mock.calls[0]!;
         expect(prompt).toContain(
-            '이름은 이미지가 애매할 때만 성별 판단의 보조 근거로 사용할 수 있습니다.'
+            '명확한 이름 성별 신호(한국어 이름 포함)는 이름만으로 판정하세요.'
         );
         expect(prompt).toContain(
-            '유니섹스·중성적·비인명(브랜드·상호) 이름은 성별 근거로 쓰지 마세요.'
+            '유일한 근거면 confidence는 medium 이하로 두세요.'
+        );
+        expect(prompt).toContain(
+            '이름과 이미지가 충돌할 때만 이미지를 우선하고 그 외에는 함께 사용하세요.'
+        );
+        expect(prompt).toContain(
+            '유니섹스이거나 사람 이름이 아닌 브랜드·상호·단체 이름은 성별 근거로 쓰지 마세요.'
         );
         expect(prompt).not.toContain('이름만으로 성별을 추측하지 말고');
+        expect(prompt).not.toContain('이미지가 명확하면 이미지를 우선하고 이름이 이미지가 애매할 때만');
+        expect(prompt).not.toContain('confidence를 낮게 유지');
     });
 
     it('does not retry a rejected v2.9 batch and marks every affected item uncertain', async () => {

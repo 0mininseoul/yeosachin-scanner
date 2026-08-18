@@ -1571,7 +1571,7 @@ function genderTriagePromptV28(
     const promptBase = allowNameGenderEvidence
         ? legacyPrompt.replace(
             '이름이나 고정관념으로 추측하지 말고 중복 selectionId 없이 실제 사용한 ID만 근거로 반환하세요.',
-            '이미지가 명확하면 이미지를 우선하고 이름은 이미지가 애매할 때만 성별 판단의 보조 근거로 사용하세요. 이름이 주된 근거이면 confidence를 낮게 유지하며 유니섹스·중성적·비인명(브랜드·상호) 이름만으로 성별을 추측하지 마세요.',
+            '명확한 이름 성별 신호(한국어 이름 포함)는 이름만으로 판정하세요. 이름만 유일한 근거면 confidence는 medium 이하로 두세요. 이름과 이미지가 충돌할 때만 이미지를 우선하고 그 외에는 함께 사용하세요. 유니섹스이거나 사람 이름이 아닌 브랜드·상호·단체 이름은 성별 근거로 쓰지 마세요.',
         )
         : legacyPrompt;
     return [
@@ -1616,18 +1616,11 @@ function genderTriagePrompt(
 function genderFirstPassPrompt(
     input: z.output<typeof genderFirstPassInputSchema>,
     media: readonly NormalizedAiMediaSelection[],
-    allowNameGenderEvidence = false,
 ): string {
-    const nameGuidance = [
-        'The full name is an allowed direct name signal for provisional routing; an obvious name may be classified without high-confidence same-owner visual evidence or feed images.',
-        ...(allowNameGenderEvidence
-            ? ['Treat unisex, neutral, and brand names as no gender evidence.']
-            : []),
-    ];
     return [
         'gender-first-pass-v1',
         'Classify this account in a first-pass using only the supplied full name and attached profile image.',
-        ...nameGuidance,
+        'The full name is an allowed direct name signal for provisional routing; an obvious name may be classified without high-confidence same-owner visual evidence or feed images.',
         'Do not use a username, bio, captions, or any feed evidence. Do not infer details beyond the supplied name and profile image.',
         'If the name and image do not support a provisional classification, return unknown with low confidence and not_visible owner consistency.',
         'Return JSON only and use the supplied profile selectionId when it is actual evidence.',
@@ -1808,7 +1801,7 @@ export function createGenderFirstPassResultIdentity(
     const input = genderFirstPassInputSchema.parse(rawInput);
     return stagedResultIdentity(
         'genderTriage',
-        genderFirstPassPrompt(input, input.media, policyVersion === AI_STAGE_POLICY_V211_VERSION),
+        genderFirstPassPrompt(input, input.media),
         input.media,
         'request',
         policyVersion,
@@ -1906,13 +1899,13 @@ function genderTriageMicrobatchPrompt(
         '성별은 계정 소유자만 판단하고 확실하지 않으면 unknown을 사용하세요. high는 같은 소유자를 뒷받침하는 서로 다른 이미지 근거가 둘 이상일 때만 사용하세요.',
         'accountContext는 personal, individual_creator, official_group_or_brand, uncertain 중 하나입니다. 밴드·팀·회사·상점·기관·브랜드 공식 페이지는 official_group_or_brand로, 개인 창작 활동 계정은 individual_creator로 분류하세요.',
         policyVersion === AI_STAGE_POLICY_V211_VERSION
-            ? '이름은 이미지가 애매할 때만 성별 판단의 보조 근거로 사용할 수 있습니다. 이미지를 우선하고 이름이 주된 근거이면 confidence를 낮게 유지하며, 유니섹스·중성적·비인명(브랜드·상호) 이름은 성별 근거로 쓰지 마세요.'
+            ? '명확한 이름 성별 신호(한국어 이름 포함)는 이름만으로 판정하세요. 이름만 유일한 근거면 confidence는 medium 이하로 두세요. 이름과 이미지가 충돌할 때만 이미지를 우선하고 그 외에는 함께 사용하세요. 유니섹스이거나 사람 이름이 아닌 브랜드·상호·단체 이름은 성별 근거로 쓰지 마세요.'
             : '이름만으로 성별을 추측하지 말고, JSON 이외의 텍스트를 반환하지 마세요.',
     ];
     if (usesDecisiveSummaryPresentation(policyVersion)) {
         instructions[4] = 'status=ok이면 assessment와 accountContext를 모두 반환하세요. 로고·단체·브랜드로 개인 소유자를 확인할 수 없으면 status=uncertain만 반환하세요. 개인 계정으로 보이면 시각 근거가 약해도 status=ok으로 반환하고, 성별 근거가 없을 때만 assessment를 unknown/low/not_visible로 두세요.';
         instructions[instructions.length - 1] = policyVersion === AI_STAGE_POLICY_V211_VERSION
-            ? '이름은 이미지가 애매할 때만 성별 판단의 보조 근거로 사용할 수 있습니다. 이미지를 우선하고 이름이 주된 근거이면 confidence를 낮게 유지하며, 유니섹스·중성적·비인명(브랜드·상호) 이름은 성별 근거로 쓰지 마세요. fullName은 사람 개인인지 조직·브랜드인지 가늠하는 기존 보조 단서로 유지하세요. bio의 she/her·he/him·여성/남성·딸/아들·엄마/아빠처럼 계정 소유자를 직접 가리키는 자기소개도 시각 단서와 함께 보조 근거로 사용할 수 있습니다. 이름만으로 단정하지 말고 JSON 이외의 텍스트를 반환하지 마세요.'
+            ? '명확한 이름 성별 신호(한국어 이름 포함)는 이름만으로 판정하세요. 이름만 유일한 근거면 confidence는 medium 이하로 두세요. 이름과 이미지가 충돌할 때만 이미지를 우선하고 그 외에는 함께 사용하세요. 유니섹스이거나 사람 이름이 아닌 브랜드·상호·단체 이름은 성별 근거로 쓰지 마세요. JSON 이외의 텍스트를 반환하지 마세요.'
             : '이름만으로 성별을 추측하지 마세요. 다만 bio의 she/her·he/him·여성/남성·딸/아들·엄마/아빠처럼 계정 소유자를 직접 가리키는 자기소개는 시각 단서와 함께 보조 근거로 사용할 수 있습니다. JSON 이외의 텍스트를 반환하지 마세요.';
     }
     return [...instructions, `accounts(JSON): ${JSON.stringify(evidence)}`].join('\n');
@@ -2143,11 +2136,7 @@ export async function genderFirstPass(
     const input = genderFirstPassInputSchema.parse(rawInput);
     const media = input.media;
     const policyVersion = options.aiStagePolicyVersion ?? AI_STAGE_POLICY_VERSION;
-    const prompt = genderFirstPassPrompt(
-        input,
-        media,
-        policyVersion === AI_STAGE_POLICY_V211_VERSION,
-    );
+    const prompt = genderFirstPassPrompt(input, media);
     const identity = stagedResultIdentity(
         'genderTriage',
         prompt,
