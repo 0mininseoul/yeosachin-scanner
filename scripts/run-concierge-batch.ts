@@ -828,7 +828,18 @@ async function defaultConciergeBatchHighRiskCopyGenerator(
     });
 }
 
-/** Runs one model call and permits exactly one retry for any copy-contract failure. */
+function conciergeBatchCopyMaxAttempts(): number {
+    const raw = process.env.CONCIERGE_BATCH_COPY_MAX_ATTEMPTS?.trim();
+    if (!raw) return 2;
+    if (!/^\d+$/.test(raw)) throw new Error('CONCIERGE_BATCH_COPY_MAX_ATTEMPTS_INVALID');
+    const value = Number(raw);
+    if (!Number.isSafeInteger(value) || value < 1 || value > 10) {
+        throw new Error('CONCIERGE_BATCH_COPY_MAX_ATTEMPTS_INVALID');
+    }
+    return value;
+}
+
+/** Runs one model call and retries contract failures up to the configured limit. */
 async function generateConciergeBatchCopy(
     evidence: ConciergeBatchHighRiskCopyEvidence,
     generator?: ConciergeBatchHighRiskCopyGenerator,
@@ -837,10 +848,13 @@ async function generateConciergeBatchCopy(
         evidence: ConciergeBatchHighRiskCopyEvidence;
     }[] = [],
 ): Promise<ConciergeBatchHighRiskCopy> {
+    const maxAttempts = conciergeBatchCopyMaxAttempts();
     const prompt = buildConciergeBatchHighRiskCopyPrompt(evidence);
     const images = [...(evidence.images ?? [])];
     let lastError: unknown = null;
-    for (let attempt = 0; attempt < 2; attempt += 1) {
+    let attemptsMade = 0;
+    for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
+        attemptsMade = attempt + 1;
         try {
             const raw = generator
                 ? await generator(prompt, images)
@@ -867,9 +881,13 @@ async function generateConciergeBatchCopy(
                 `batch copy attempt ${attempt + 1} failed${candidate ? ` for ${candidate}` : ''}: ${warning}\n`,
             );
             const retryable = isBatchCopyContractFailure(error) || isRecoverableGeminiResponseError(error);
-            if (!retryable || attempt === 1) break;
+            if (!retryable || attempt === maxAttempts - 1) break;
         }
     }
+    const finalDiagnostic = conciergeBatchFailureDiagnostic(lastError);
+    process.stderr.write(
+        `batch copy failed after ${attemptsMade} attempts: ${finalDiagnostic.message.replace(/[\r\n]+/g, ' ')}\n`,
+    );
     throw new Error('CONCIERGE_BATCH_COPY_GENERATION_FAILED', { cause: lastError });
 }
 

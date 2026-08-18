@@ -838,6 +838,49 @@ describe('concierge existing relationship artifact resolver', () => {
         expect(attempts).toBe(2);
     });
 
+    it('keeps two copy attempts when the max-attempts env is not configured', async () => {
+        const previousMaxAttempts = process.env.CONCIERGE_BATCH_COPY_MAX_ATTEMPTS;
+        delete process.env.CONCIERGE_BATCH_COPY_MAX_ATTEMPTS;
+        let attempts = 0;
+        try {
+            await expect(generateConciergeBatchHighRiskCopy(
+                copyEvidence([]),
+                async () => {
+                    attempts += 1;
+                    return { oneLineOverview: '짧음', riskAnalysis: ['짧음', '짧음'] };
+                },
+            )).rejects.toThrow('CONCIERGE_BATCH_COPY_GENERATION_FAILED');
+            expect(attempts).toBe(2);
+        } finally {
+            if (previousMaxAttempts === undefined) delete process.env.CONCIERGE_BATCH_COPY_MAX_ATTEMPTS;
+            else process.env.CONCIERGE_BATCH_COPY_MAX_ATTEMPTS = previousMaxAttempts;
+        }
+    });
+
+    it('uses the configured copy max-attempts value and reports the final count', async () => {
+        const previousMaxAttempts = process.env.CONCIERGE_BATCH_COPY_MAX_ATTEMPTS;
+        const stderrSpy = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+        process.env.CONCIERGE_BATCH_COPY_MAX_ATTEMPTS = '4';
+        let attempts = 0;
+        try {
+            await expect(generateConciergeBatchHighRiskCopy(
+                copyEvidence([]),
+                async () => {
+                    attempts += 1;
+                    return { oneLineOverview: '짧음', riskAnalysis: ['짧음', '짧음'] };
+                },
+            )).rejects.toThrow('CONCIERGE_BATCH_COPY_GENERATION_FAILED');
+            expect(attempts).toBe(4);
+            expect(stderrSpy.mock.calls.some(([message]) => (
+                typeof message === 'string' && message.includes('after 4 attempts')
+            ))).toBe(true);
+        } finally {
+            stderrSpy.mockRestore();
+            if (previousMaxAttempts === undefined) delete process.env.CONCIERGE_BATCH_COPY_MAX_ATTEMPTS;
+            else process.env.CONCIERGE_BATCH_COPY_MAX_ATTEMPTS = previousMaxAttempts;
+        }
+    });
+
     it('retries a cross-candidate template once and rejects it when it repeats', async () => {
         const first = copyEvidence([]);
         const second = {
