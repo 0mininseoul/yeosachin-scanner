@@ -3603,6 +3603,9 @@ describe('V2 staged AI services', () => {
         expect(prompt).toContain(
             '유니섹스이거나 사람 이름이 아닌 브랜드·상호·단체 이름은 성별 근거로 쓰지 마세요.'
         );
+        expect(prompt).toContain(
+            'bio의 she/her·he/him·여성/남성·딸/아들·엄마/아빠처럼 계정 소유자를 직접 가리키는 자기소개도 성별 근거로 사용할 수 있습니다.'
+        );
         expect(prompt).not.toContain('이름만으로 성별을 추측하지 말고');
         expect(prompt).not.toContain('이미지가 명확하면 이미지를 우선하고 이름이 이미지가 애매할 때만');
         expect(prompt).not.toContain('confidence를 낮게 유지');

@@ -1905,7 +1905,7 @@ function genderTriageMicrobatchPrompt(
     if (usesDecisiveSummaryPresentation(policyVersion)) {
         instructions[4] = 'status=ok이면 assessment와 accountContext를 모두 반환하세요. 로고·단체·브랜드로 개인 소유자를 확인할 수 없으면 status=uncertain만 반환하세요. 개인 계정으로 보이면 시각 근거가 약해도 status=ok으로 반환하고, 성별 근거가 없을 때만 assessment를 unknown/low/not_visible로 두세요.';
         instructions[instructions.length - 1] = policyVersion === AI_STAGE_POLICY_V211_VERSION
-            ? '명확한 이름 성별 신호(한국어 이름 포함)는 이름만으로 판정하세요. 이름만 유일한 근거면 confidence는 medium 이하로 두세요. 이름과 이미지가 충돌할 때만 이미지를 우선하고 그 외에는 함께 사용하세요. 유니섹스이거나 사람 이름이 아닌 브랜드·상호·단체 이름은 성별 근거로 쓰지 마세요. JSON 이외의 텍스트를 반환하지 마세요.'
+            ? '명확한 이름 성별 신호(한국어 이름 포함)는 이름만으로 판정하세요. 이름만 유일한 근거면 confidence는 medium 이하로 두세요. 이름과 이미지가 충돌할 때만 이미지를 우선하고 그 외에는 함께 사용하세요. 유니섹스이거나 사람 이름이 아닌 브랜드·상호·단체 이름은 성별 근거로 쓰지 마세요. bio의 she/her·he/him·여성/남성·딸/아들·엄마/아빠처럼 계정 소유자를 직접 가리키는 자기소개도 성별 근거로 사용할 수 있습니다. JSON 이외의 텍스트를 반환하지 마세요.'
             : '이름만으로 성별을 추측하지 마세요. 다만 bio의 she/her·he/him·여성/남성·딸/아들·엄마/아빠처럼 계정 소유자를 직접 가리키는 자기소개는 시각 단서와 함께 보조 근거로 사용할 수 있습니다. JSON 이외의 텍스트를 반환하지 마세요.';
     }
     return [...instructions, `accounts(JSON): ${JSON.stringify(evidence)}`].join('\n');
