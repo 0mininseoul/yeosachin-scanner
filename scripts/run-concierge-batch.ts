@@ -57,6 +57,7 @@ import type {
 } from '@/lib/services/analysis/concierge-batch-publication';
 import {
     buildConciergeManualPublicationDraft,
+    conciergeDetailClassification,
 } from '@/lib/services/analysis/concierge-batch-publication';
 import { writeConciergePublicationDryRunDump } from './verify-concierge-publication';
 import { areMateriallyNearDuplicatePublicCopies } from '@/lib/services/analysis/public-copy-quality';
@@ -1731,6 +1732,17 @@ function notCollectedPass(profile: InstagramProfile) {
     };
 }
 
+export function conciergeBatchAiClassificationFields(detail: ReplayAccountAiDetail): {
+    originalAiClassification: 'male' | 'female' | 'unknown';
+    effectiveClassification: 'male' | 'female' | 'unknown';
+} {
+    const classification = conciergeDetailClassification(detail);
+    return {
+        originalAiClassification: classification,
+        effectiveClassification: classification,
+    };
+}
+
 async function classifyOrder(collected: CollectedOrder): Promise<ClassifiedOrder> {
     const details: ReplayAccountAiDetail[] = [];
     await runAnalysisV2AiReplay({
@@ -1747,21 +1759,21 @@ async function classifyOrder(collected: CollectedOrder): Promise<ClassifiedOrder
     // publishable gender classification.
     const publicByOrdinal = new Map(collected.source.publicProfiles.map(item => [item.ordinal, item.profile]));
     const publicCount = collected.source.publicProfiles.length;
-    const knownPublicCount = details.filter(detail => (
-        detail.feature !== null
-        && (detail.finalClassification === 'verified_female'
-            || detail.finalClassification === 'verified_non_female')
-    )).length;
+    const initialUnknownCount = collected.source.publicProfiles.reduce((count, item) => {
+        const detail = detailsByOrdinal.get(item.ordinal);
+        return count + (!detail || conciergeDetailClassification(detail) === 'unknown' ? 1 : 0);
+    }, 0);
     const nameOnlyPromotions = selectConciergeNameOnlyPromotions({
         publicCount,
-        initialUnknownCount: Math.max(0, publicCount - knownPublicCount),
+        initialUnknownCount,
         maxUnknownRatio: conciergeBatchMaxUnknownRatio(),
         minimumConfidence: conciergeBatchNameOnlyMinConfidence(),
         candidates: details.flatMap(detail => {
             const profile = publicByOrdinal.get(detail.ordinal);
             const assessment = detail.triage?.assessment;
             if (!profile || !assessment || detail.feature !== null
-                || preferredInstagramProfileImageUrl(profile)) return [];
+                || preferredInstagramProfileImageUrl(profile)
+                || conciergeDetailClassification(detail) !== 'unknown') return [];
             return [{
                 ordinal: detail.ordinal,
                 username: normalized(profile.username),
@@ -1809,7 +1821,7 @@ async function classifyOrder(collected: CollectedOrder): Promise<ClassifiedOrder
                     : failedPass(profile, evidenceHash);
             const nameOnlyPromotion = nameOnlyPromotionByOrdinal.get(row.mutualOrdinal);
             if (nameOnlyPromotion && profile && detail?.triage) {
-                const originalAiClassification = detail.triage.assessment.inferredGender;
+                const { originalAiClassification } = conciergeBatchAiClassificationFields(detail);
                 const nameOnlyEvidenceHash = hash({
                     row,
                     profile,
@@ -1834,17 +1846,18 @@ async function classifyOrder(collected: CollectedOrder): Promise<ClassifiedOrder
                     sourceSnapshot: { instagramUrl: `https://instagram.com/${row.username}`, originalAiClassification, confidenceEvidence: `confidence=${nameOnlyPromotion.confidence};evidence=name_only`, operatorNote: '' },
                 };
             }
+            const aiClassificationFields = detail
+                ? conciergeBatchAiClassificationFields(detail)
+                : { originalAiClassification: 'unknown' as const, effectiveClassification: 'unknown' as const };
             const triageClassification = detail?.triage?.assessment.inferredGender;
             const hasNameOnlyGenderSignal = Boolean(
                 profile
                 && detail?.triage
                 && profile.fullName?.trim()
                 && !preferredInstagramProfileImageUrl(profile)
+                && aiClassificationFields.originalAiClassification === 'unknown'
                 && (triageClassification === 'female' || triageClassification === 'male'),
             );
-            const fallbackOriginalAiClassification = hasNameOnlyGenderSignal
-                ? triageClassification!
-                : 'unknown';
             const fallbackConfidence = hasNameOnlyGenderSignal
                 ? detail!.triage!.assessment.confidence
                 : 'low';
@@ -1857,17 +1870,17 @@ async function classifyOrder(collected: CollectedOrder): Promise<ClassifiedOrder
                 partition: profile && detail ? 'public' : 'unresolved',
                 profileFetchStatus: profile && detail ? 'success' : 'unavailable',
                 firstPass, secondPass,
-                originalAiClassification: fallbackOriginalAiClassification, effectiveClassification: 'unknown', confidence: fallbackConfidence,
+                originalAiClassification: aiClassificationFields.originalAiClassification,
+                effectiveClassification: aiClassificationFields.effectiveClassification,
+                confidence: fallbackConfidence,
                 evidenceCoverage: { declared: 0, collected: 0, selected: 0, complete: false, basisPoints: 0, hash: evidenceHash },
                 classifier: 'gemini-v2.14', modelName: 'gemini-v2.14', promptVersion: 'ai-stage-policy-v2.11', schemaVersion: 'concierge-batch-v1',
                 classificationOperationKey: `concierge:classification:${row.mutualOrdinal}`, classificationResultHash: hash({ row, status: 'unresolved' }),
                 classificationSource: fallbackClassificationSource, manualOverride: null,
-                sourceSnapshot: { instagramUrl: `https://instagram.com/${row.username}`, originalAiClassification: fallbackOriginalAiClassification, confidenceEvidence: `confidence=${fallbackConfidence};evidence=${hasNameOnlyGenderSignal ? 'name_only' : 'unavailable'}`, operatorNote: '' },
+                sourceSnapshot: { instagramUrl: `https://instagram.com/${row.username}`, originalAiClassification: aiClassificationFields.originalAiClassification, confidenceEvidence: `confidence=${fallbackConfidence};evidence=${hasNameOnlyGenderSignal ? 'name_only' : 'unavailable'}`, operatorNote: '' },
             };
         }
-        const classification = detail.finalClassification === 'verified_female'
-            ? 'female' as const
-            : detail.finalClassification === 'verified_non_female' ? 'male' as const : 'unknown' as const;
+        const { originalAiClassification, effectiveClassification } = conciergeBatchAiClassificationFields(detail);
         const confidence = detail.triage?.assessment.confidence ?? 'low';
         const evidenceHash = hash({ profile, detail });
         return {
@@ -1875,12 +1888,12 @@ async function classifyOrder(collected: CollectedOrder): Promise<ClassifiedOrder
             mutualOrdinal: row.mutualOrdinal, partition: 'public', profileFetchStatus: 'success',
             firstPass: pass(profile, hash({ profile, triage: detail.triage })),
             secondPass: pass(profile, evidenceHash),
-            originalAiClassification: classification, effectiveClassification: classification, confidence,
+            originalAiClassification, effectiveClassification, confidence,
             evidenceCoverage: { declared: profile.postsCount, collected: (profile.latestPosts ?? []).length, selected: Math.min(8, (profile.latestPosts ?? []).length), complete: true, basisPoints: 10_000, hash: evidenceHash },
             classifier: 'gemini-v2.14', modelName: 'gemini-v2.14', promptVersion: 'ai-stage-policy-v2.11', schemaVersion: 'concierge-batch-v1',
             classificationOperationKey: `concierge:classification:${row.mutualOrdinal}`, classificationResultHash: hash({ row, detail }),
             classificationSource: 'ai', manualOverride: null,
-            sourceSnapshot: { instagramUrl: `https://instagram.com/${row.username}`, originalAiClassification: classification, confidenceEvidence: `confidence=${confidence};evidence=gemini_v214`, operatorNote: '' },
+            sourceSnapshot: { instagramUrl: `https://instagram.com/${row.username}`, originalAiClassification, confidenceEvidence: `confidence=${confidence};evidence=gemini_v214`, operatorNote: '' },
         };
     });
     const publicRecords = records.filter(record => record.partition === 'public');

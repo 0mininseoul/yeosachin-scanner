@@ -50,6 +50,7 @@ vi.mock('@/lib/services/analysis/first-payment-concierge', async importOriginal 
 
 import {
     buildConciergeBatchHighRiskCopyPrompt,
+    conciergeBatchAiClassificationFields,
     collectOrder,
     conciergeBatchMaxUnknownRatio,
     conciergeBatchNameOnlyMinConfidence,
@@ -560,6 +561,27 @@ describe('concierge batch only-order allowlist', () => {
 });
 
 describe('concierge name-only gender promotions', () => {
+    it('derives ledger AI and effective classifications from replay final classification', () => {
+        expect(conciergeBatchAiClassificationFields({
+            finalClassification: 'verified_non_female',
+        } as never)).toEqual({
+            originalAiClassification: 'male',
+            effectiveClassification: 'male',
+        });
+        expect(conciergeBatchAiClassificationFields({
+            finalClassification: 'verified_female',
+        } as never)).toEqual({
+            originalAiClassification: 'female',
+            effectiveClassification: 'female',
+        });
+        expect(conciergeBatchAiClassificationFields({
+            finalClassification: 'unresolved',
+        } as never)).toEqual({
+            originalAiClassification: 'unknown',
+            effectiveClassification: 'unknown',
+        });
+    });
+
     it('uses the documented defaults and validates environment overrides', () => {
         expect(conciergeBatchMaxUnknownRatio(undefined)).toBe(0.2);
         expect(conciergeBatchMaxUnknownRatio('0.35')).toBe(0.35);

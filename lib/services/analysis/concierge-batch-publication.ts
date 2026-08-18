@@ -598,7 +598,8 @@ function canonicalInteractionLineage(interaction: ConciergeBidirectionalInteract
     };
 }
 
-function detailClassification(detail: ReplayAccountAiDetail): 'male' | 'female' | 'unknown' {
+/** Maps the replay's final AI classification to the immutable ledger vocabulary. */
+export function conciergeDetailClassification(detail: ReplayAccountAiDetail): 'male' | 'female' | 'unknown' {
     if (detail.finalClassification === 'verified_female') return 'female';
     if (detail.finalClassification === 'verified_non_female') return 'male';
     return 'unknown';
@@ -876,14 +877,14 @@ function buildEffectiveDetails(
             fail('CONCIERGE_PUBLICATION_CLASSIFICATION_MISSING');
         }
         const effective = record.effectiveClassification;
-        const bindingMismatch = detailClassification(detail) !== binding.originalAiClassification;
+        const bindingMismatch = conciergeDetailClassification(detail) !== binding.originalAiClassification;
         if (bindingMismatch) {
             bindingMismatches.push({
                 check: 'buildEffectiveDetails.detailAiBinding',
                 ordinal: detail.ordinal,
                 username: profile.username,
                 compared: {
-                    detailClassification: detailClassification(detail),
+                    detailClassification: conciergeDetailClassification(detail),
                     detailFinalClassification: detail.finalClassification,
                     bindingOriginalAiClassification: binding.originalAiClassification,
                     effectiveClassification: record.effectiveClassification,
@@ -921,7 +922,7 @@ function buildEffectiveDetails(
                 fail('CONCIERGE_PUBLICATION_SECOND_PASS_INCOMPLETE');
             }
         }
-        const original = detailClassification(detail);
+        const original = conciergeDetailClassification(detail);
         if (!record.manualOverride && !nameOnly && original !== effective) {
             fail('CONCIERGE_PUBLICATION_AI_CLASSIFICATION_DRIFT');
         }
