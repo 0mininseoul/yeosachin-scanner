@@ -1146,6 +1146,103 @@ describe('AI-only replay runner', () => {
         });
     });
 
+    it('routes every image-having candidate through individual triage and only image-less candidates through the name-only batch', async () => {
+        const nameOnly = vi.fn(async (candidates: readonly { candidateId: string; fullName: string }[]) => ({
+            outcome: 'ok' as const,
+            attempts: 1,
+            retries: 0,
+            elapsedMs: 1,
+            value: candidates.map(candidate => ({
+                candidateId: candidate.candidateId,
+                gender: 'female' as const,
+                confidence: 'medium' as const,
+            })),
+        }));
+        const firstPass = vi.fn(async (input: { ordinal: number; fullName: string }) => ({
+            outcome: 'ok' as const,
+            attempts: 1,
+            retries: 0,
+            elapsedMs: 1,
+            value: {
+                assessment: {
+                    inferredGender: 'unknown' as const,
+                    confidence: 'low' as const,
+                    ownerConsistency: 'not_visible' as const,
+                    evidenceSelectionIds: [],
+                },
+                routingDecision: 'route_to_feature_analysis' as const,
+                routingReason: 'conserve_female_recall' as const,
+                analyzedSelectionIds: [`profile:${input.ordinal}`],
+            },
+        }));
+        const mixedBundle = {
+            ...firstPaymentBundle,
+            profiles: [
+                ...firstPaymentBundle.profiles,
+                {
+                    ordinal: 4,
+                    isPrivate: false,
+                    username: 'name_only_candidate',
+                    fullName: '이서연',
+                    hasProfileImage: false,
+                    bio: null,
+                    media: [],
+                    triageSelectionIds: [],
+                    featureSelectionIds: [],
+                    resolverSelectionIds: [],
+                    captions: [],
+                    coverage: { selectedCount: 0, normalizedCount: 0, failures: [] },
+                },
+            ],
+        } satisfies AnalysisV2ReplayBundle;
+
+        await runAnalysisV2AiReplay({
+            bundle: mixedBundle,
+            runner: v211Runner({ firstPass, nameOnly }),
+            mode: 'paid-ai',
+            paidAiOptIn: true,
+            evaluationPolicy: mixedBundle.capture.evaluationPolicy,
+        });
+
+        // All 3 image-having candidates (ordinals 1-3) get an individual triage call each.
+        expect(firstPass).toHaveBeenCalledTimes(3);
+        expect(firstPass.mock.calls.map(([input]) => input.ordinal).sort())
+            .toEqual([1, 2, 3]);
+        // Only the image-less candidate (ordinal 4) goes into the name-only batch.
+        expect(nameOnly).toHaveBeenCalledOnce();
+        expect(nameOnly).toHaveBeenCalledWith([{ candidateId: 'ordinal:4', fullName: '이서연' }]);
+    });
+
+    it('fails the whole replay instead of silently marking every name-only candidate unknown when the batch fails', async () => {
+        const nameOnly = vi.fn(async () => ({
+            outcome: 'rejected' as const,
+            attempts: 4,
+            retries: 3,
+            elapsedMs: 1,
+        }));
+        const noProfileBundle = {
+            ...firstPaymentBundle,
+            profiles: [{
+                ...firstPaymentBundle.profiles[0]!,
+                hasProfileImage: false,
+                media: [],
+                triageSelectionIds: [],
+                featureSelectionIds: [],
+                resolverSelectionIds: [],
+                captions: [],
+                coverage: { selectedCount: 0, normalizedCount: 0, failures: [] },
+            }],
+        } satisfies AnalysisV2ReplayBundle;
+
+        await expect(runAnalysisV2AiReplay({
+            bundle: noProfileBundle,
+            runner: v211Runner({ nameOnly }),
+            mode: 'paid-ai',
+            paidAiOptIn: true,
+            evaluationPolicy: noProfileBundle.capture.evaluationPolicy,
+        })).rejects.toThrow();
+    });
+
     it('skips concierge feature analysis when the final candidate media set is empty', async () => {
         const nameOnly = vi.fn(async (candidates: readonly { candidateId: string; fullName: string }[]) => ({
             outcome: 'ok' as const,

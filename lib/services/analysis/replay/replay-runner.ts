@@ -791,6 +791,16 @@ export async function runAnalysisV2AiReplay(input: {
                 }))).then(result => {
                     nameOnlyInvocation = result;
                     collect(stages.genderTriage, durations.genderTriage, result);
+                    // A name-only batch covers many candidates at once. Reporting its
+                    // failure as "unknown" for every covered candidate is the silent
+                    // fallback that previously zeroed out an entire order's results.
+                    // Fail the order closed instead so it is retried, with the cause
+                    // recorded in the batch failure diagnostic.
+                    if (result.outcome !== 'ok') {
+                        throw new Error(
+                            `ANALYSIS_V2_REPLAY_NAME_ONLY_BATCH_FAILED: outcome=${result.outcome}`,
+                        );
+                    }
                 })
                 : Promise.resolve(),
         );

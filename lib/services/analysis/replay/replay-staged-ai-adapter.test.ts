@@ -23,7 +23,7 @@ vi.mock('@/lib/services/ai/private-name-analysis', () => ({
 
 vi.mock('@/lib/services/ai/v2-staged-analysis', () => ({
     GENDER_TRIAGE_V29_MAX_ACCOUNTS_PER_BATCH: 2,
-    GENDER_NAME_ONLY_MAX_CANDIDATES_PER_BATCH: 80,
+    GENDER_NAME_ONLY_MAX_CANDIDATES_PER_BATCH: 20,
     createFeatureAnalysisResultIdentity: mocks.createFeatureAnalysisResultIdentity,
     createGenderFirstPassResultIdentity: mocks.createGenderFirstPassResultIdentity,
     createGenderResolutionResultIdentity: mocks.createGenderResolutionResultIdentity,
@@ -406,14 +406,102 @@ describe('replay staged AI adapter telemetry', () => {
         const result = await createReplayStagedAiAdapter('ai-stage-policy-v2.11')
             .nameOnly?.(candidates);
 
-        expect(mocks.genderNameOnlyBatch).toHaveBeenCalledTimes(3);
+        expect(mocks.genderNameOnlyBatch).toHaveBeenCalledTimes(9);
         expect(mocks.genderNameOnlyBatch.mock.calls.map(call => call[0].length))
-            .toEqual([80, 80, 1]);
+            .toEqual([20, 20, 20, 20, 20, 20, 20, 20, 1]);
         expect(mocks.genderNameOnlyBatch.mock.calls.flatMap(call => call[0]))
             .not.toContainEqual(expect.objectContaining({ media: expect.anything() }));
         expect(mocks.genderTriage).not.toHaveBeenCalled();
         expect(result).toMatchObject({ outcome: 'ok', value: expect.any(Array) });
         expect(result?.value).toHaveLength(161);
+    });
+
+    it('splits a MAX_TOKENS name-only batch into halves and retries instead of discarding it', async () => {
+        mocks.createGenderNameOnlyBatchResultIdentity.mockImplementation(
+            (candidates: Array<{ candidateId: string }>) => ({
+                operationKey: `gender-triage:${candidates.map(item => item.candidateId).join(',')}`,
+            }),
+        );
+        mocks.genderNameOnlyBatch.mockImplementation(async (
+            candidates: Array<{ candidateId: string }>,
+            auditContext: { onAttemptTelemetry(value: { finishReason: string | null }): void },
+        ) => {
+            if (candidates.length > 2) {
+                auditContext.onAttemptTelemetry({ finishReason: 'MAX_TOKENS' });
+                throw new Error('AI_GENERATION_RESPONSE_REJECTED_ERROR: generated response failed strict validation.');
+            }
+            return candidates.map(candidate => ({
+                candidateId: candidate.candidateId,
+                gender: 'unknown',
+                confidence: 'low',
+            }));
+        });
+
+        const candidates = Array.from({ length: 4 }, (_, index) => ({
+            candidateId: `ordinal:${index + 1}`,
+            fullName: `Name ${index + 1}`,
+        }));
+        const result = await createReplayStagedAiAdapter('ai-stage-policy-v2.11')
+            .nameOnly?.(candidates);
+
+        // One failed 4-wide attempt, then two successful 2-wide halves.
+        expect(mocks.genderNameOnlyBatch).toHaveBeenCalledTimes(3);
+        expect(mocks.genderNameOnlyBatch.mock.calls.map(call => call[0].length))
+            .toEqual([4, 2, 2]);
+        expect(result).toMatchObject({ outcome: 'ok', value: expect.any(Array) });
+        expect(result?.value).toHaveLength(4);
+    });
+
+    it('fails closed without a value after exhausting bounded MAX_TOKENS split retries', async () => {
+        mocks.createGenderNameOnlyBatchResultIdentity.mockImplementation(
+            (candidates: Array<{ candidateId: string }>) => ({
+                operationKey: `gender-triage:${candidates.map(item => item.candidateId).join(',')}`,
+            }),
+        );
+        mocks.genderNameOnlyBatch.mockImplementation(async (
+            _candidates: unknown,
+            auditContext: { onAttemptTelemetry(value: { finishReason: string | null }): void },
+        ) => {
+            auditContext.onAttemptTelemetry({ finishReason: 'MAX_TOKENS' });
+            throw new Error('AI_GENERATION_RESPONSE_REJECTED_ERROR: generated response failed strict validation.');
+        });
+
+        const candidates = Array.from({ length: 4 }, (_, index) => ({
+            candidateId: `ordinal:${index + 1}`,
+            fullName: `Name ${index + 1}`,
+        }));
+        const result = await createReplayStagedAiAdapter('ai-stage-policy-v2.11')
+            .nameOnly?.(candidates);
+
+        // Bounded at depth 2: 4 -> {2,2} -> {1,1},{1,1} = 1 + 2 + 4 = 7 attempts, never more.
+        expect(mocks.genderNameOnlyBatch).toHaveBeenCalledTimes(7);
+        expect(result?.outcome).not.toBe('ok');
+        expect(result?.value ?? []).toHaveLength(0);
+    });
+
+    it('does not split a name-only batch failure that is not a MAX_TOKENS truncation', async () => {
+        mocks.createGenderNameOnlyBatchResultIdentity.mockImplementation(
+            (candidates: Array<{ candidateId: string }>) => ({
+                operationKey: `gender-triage:${candidates.map(item => item.candidateId).join(',')}`,
+            }),
+        );
+        mocks.genderNameOnlyBatch.mockImplementation(async (
+            _candidates: unknown,
+            auditContext: { onAttemptTelemetry(value: { finishReason: string | null }): void },
+        ) => {
+            auditContext.onAttemptTelemetry({ finishReason: 'STOP' });
+            throw new Error('AI_GENERATION_RESPONSE_REJECTED_ERROR: generated response failed strict validation.');
+        });
+
+        const candidates = Array.from({ length: 4 }, (_, index) => ({
+            candidateId: `ordinal:${index + 1}`,
+            fullName: `Name ${index + 1}`,
+        }));
+        const result = await createReplayStagedAiAdapter('ai-stage-policy-v2.11')
+            .nameOnly?.(candidates);
+
+        expect(mocks.genderNameOnlyBatch).toHaveBeenCalledTimes(1);
+        expect(result?.outcome).not.toBe('ok');
     });
 
     it('coalesces six same-tick profile pipelines into three active paired provider calls', async () => {

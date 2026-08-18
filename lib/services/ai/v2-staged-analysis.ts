@@ -355,10 +355,15 @@ export interface GenderTriageMicrobatchResult {
     readonly source: 'checkpoint' | 'safe_fallback';
 }
 
-export const GENDER_NAME_ONLY_MAX_CANDIDATES_PER_BATCH = 80;
+// 80 candidates in one response regularly hit Gemini's MAX_TOKENS finish reason and were
+// silently discarded. 20 keeps the per-candidate output budget generous and leaves room for
+// the caller's bounded MAX_TOKENS split-retry (see replay-staged-ai-adapter.ts) to still work.
+export const GENDER_NAME_ONLY_MAX_CANDIDATES_PER_BATCH = 20;
 const GENDER_NAME_ONLY_PROMPT_VERSION = 'gender-name-only-v1';
 const GENDER_NAME_ONLY_SCHEMA_VERSION = 1;
 const GENDER_NAME_ONLY_MAX_OUTPUT_TOKENS = 4_096;
+/** v2.11-only: this model's structured-JSON-schema adherence is the point of the name-only batch. */
+const GENDER_NAME_ONLY_V211_MODEL = 'gemini-3.7-flash';
 const genderNameOnlyCandidateIdSchema = z.string().trim().min(1).max(128);
 const genderNameOnlyCandidateSchema = z.object({
     candidateId: genderNameOnlyCandidateIdSchema,
@@ -2118,24 +2123,42 @@ export function createGenderTriageMicrobatchAccountId(
     return `account:${identity.operationKey.slice('gender-triage:'.length)}`;
 }
 
+/**
+ * v2.11 runs the name-only batch on a dedicated model, independent of whatever model the
+ * shared genderTriage stage policy carries (image-based triage is untouched by this choice).
+ * Earlier policy versions keep the genderTriage stage's own model.
+ */
+function genderNameOnlyModelFor(policyVersion: AiStagePolicyVersion): string {
+    return policyVersion === AI_STAGE_POLICY_V211_VERSION
+        ? GENDER_NAME_ONLY_V211_MODEL
+        : getAiStagePolicy(policyVersion, 'genderTriage').model;
+}
+
+function genderNameOnlyResultIdentity(
+    candidates: readonly z.output<typeof genderNameOnlyCandidateSchema>[],
+    policyVersion: AiStagePolicyVersion,
+): AnalysisV2AiResultIdentity {
+    const policy = getAiStagePolicy(policyVersion, 'genderTriage');
+    const prompt = genderNameOnlyPrompt(candidates);
+    return createAnalysisV2AiResultIdentity({
+        stage: 'genderTriage',
+        modelName: genderNameOnlyModelFor(policyVersion),
+        thinkingLevel: policy.thinkingLevel,
+        mediaResolution: policy.mediaResolution,
+        promptVersion: GENDER_NAME_ONLY_PROMPT_VERSION,
+        schemaVersion: GENDER_NAME_ONLY_SCHEMA_VERSION,
+        maxOutputTokens: GENDER_NAME_ONLY_MAX_OUTPUT_TOKENS,
+        inputHash: createAnalysisV2AiResultInputHash(prompt),
+        mediaSnapshotHash: createAnalysisV2AiMediaSnapshotHashFromParts([]),
+        cacheScope: 'request',
+    });
+}
+
 export function createGenderNameOnlyBatchResultIdentity(
     rawCandidates: readonly GenderNameOnlyCandidateInput[],
     policyVersion: AiStagePolicyVersion = AI_STAGE_POLICY_V211_VERSION,
 ): AnalysisV2AiResultIdentity {
-    const candidates = parseGenderNameOnlyCandidates(rawCandidates);
-    const prompt = genderNameOnlyPrompt(candidates);
-    return stagedResultIdentity(
-        'genderTriage',
-        prompt,
-        [],
-        'request',
-        policyVersion,
-        {
-            promptVersion: GENDER_NAME_ONLY_PROMPT_VERSION,
-            schemaVersion: GENDER_NAME_ONLY_SCHEMA_VERSION,
-            maxOutputTokens: GENDER_NAME_ONLY_MAX_OUTPUT_TOKENS,
-        },
-    );
+    return genderNameOnlyResultIdentity(parseGenderNameOnlyCandidates(rawCandidates), policyVersion);
 }
 
 export async function genderNameOnlyBatch(
@@ -2149,18 +2172,7 @@ export async function genderNameOnlyBatch(
     const candidates = parseGenderNameOnlyCandidates(rawCandidates);
     const policyVersion = options.aiStagePolicyVersion ?? AI_STAGE_POLICY_V211_VERSION;
     const prompt = genderNameOnlyPrompt(candidates);
-    const identity = stagedResultIdentity(
-        'genderTriage',
-        prompt,
-        [],
-        'request',
-        policyVersion,
-        {
-            promptVersion: GENDER_NAME_ONLY_PROMPT_VERSION,
-            schemaVersion: GENDER_NAME_ONLY_SCHEMA_VERSION,
-            maxOutputTokens: GENDER_NAME_ONLY_MAX_OUTPUT_TOKENS,
-        },
-    );
+    const identity = genderNameOnlyResultIdentity(candidates, policyVersion);
     const audit = parseAuditContext(rawAuditContext, identity);
     const responseSchema = genderNameOnlyResponseSchemaFor(
         candidates.map(candidate => candidate.candidateId),
@@ -2176,6 +2188,7 @@ export async function genderNameOnlyBatch(
             aiStagePolicyVersion: policyVersion,
             requestId: audit.requestId,
             startingAttempt: prepared.startingAttempt,
+            model: genderNameOnlyModelFor(policyVersion),
             maxOutputTokens: GENDER_NAME_ONLY_MAX_OUTPUT_TOKENS,
             promptVersion: GENDER_NAME_ONLY_PROMPT_VERSION,
             schemaVersion: GENDER_NAME_ONLY_SCHEMA_VERSION,

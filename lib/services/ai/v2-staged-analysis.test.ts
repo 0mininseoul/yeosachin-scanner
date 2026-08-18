@@ -43,6 +43,7 @@ import {
     createGenderTriageMicrobatchAccountId,
     createGenderTriageMicrobatchResultIdentity,
     createGenderNameOnlyBatchResultIdentity,
+    GENDER_NAME_ONLY_MAX_CANDIDATES_PER_BATCH,
     createHighRiskNarrativeResultIdentity,
     conciergeBatchFeatureAnalysisMaxAttempts,
     createPartnerSafetyResultIdentity,
@@ -3832,7 +3833,45 @@ describe('V2 staged AI services', () => {
             promptVersion: 'gender-name-only-v1',
             schemaVersion: 1,
             maxOutputTokens: 4_096,
+            model: 'gemini-3.7-flash',
         });
+        expect(identity.modelName).toBe('gemini-3.7-flash');
+    });
+
+    it('caps a name-only batch request at the reduced 20-candidate size', () => {
+        expect(GENDER_NAME_ONLY_MAX_CANDIDATES_PER_BATCH).toBe(20);
+        const tooMany: GenderNameOnlyCandidateInput[] = Array.from(
+            { length: GENDER_NAME_ONLY_MAX_CANDIDATES_PER_BATCH + 1 },
+            (_, index) => ({ candidateId: `ordinal:${index + 1}`, fullName: `Name ${index + 1}` }),
+        );
+        expect(() => createGenderNameOnlyBatchResultIdentity(tooMany, AI_STAGE_POLICY_V211_VERSION))
+            .toThrow();
+    });
+
+    it('keeps the shared genderTriage stage model for name-only batches on a pre-v2.11 policy', async () => {
+        const candidates: GenderNameOnlyCandidateInput[] = [
+            { candidateId: 'ordinal:1', fullName: '김수연' },
+        ];
+        const identity = createGenderNameOnlyBatchResultIdentity(
+            candidates,
+            AI_STAGE_POLICY_V210_VERSION,
+        );
+        expect(identity.modelName).toBe('gemini-3.1-flash-lite');
+        mocks.analyzeWithGemini.mockResolvedValueOnce([
+            { candidateId: 'ordinal:1', gender: 'female', confidence: 'medium' },
+        ]);
+
+        await genderNameOnlyBatch(candidates, {
+            requestId,
+            operationKey: identity.operationKey,
+            resultIdentity: identity,
+            prepare: vi.fn().mockResolvedValue({ result: null, source: null, startingAttempt: 1 }),
+            onBeforeAttempt: vi.fn(),
+            onAttemptTelemetry: vi.fn(),
+        }, { aiStagePolicyVersion: AI_STAGE_POLICY_V210_VERSION });
+
+        const [, , options] = mocks.analyzeWithGemini.mock.calls[0]!;
+        expect(options).toMatchObject({ model: 'gemini-3.1-flash-lite' });
     });
 
     it('rejects an unknown candidate ID and high confidence from a name-only response', async () => {

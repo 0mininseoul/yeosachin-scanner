@@ -17,7 +17,7 @@ export type AiThinkingLevel = 'MINIMAL' | 'LOW' | 'MEDIUM' | 'HIGH';
 export type AiMediaResolution = 'LOW' | 'MEDIUM' | 'HIGH';
 
 export interface AiStagePolicy {
-    model: 'gemini-3.1-flash-lite' | 'gemini-3-flash-preview';
+    model: 'gemini-3.1-flash-lite' | 'gemini-3-flash-preview' | 'gemini-3.7-flash';
     thinkingLevel: AiThinkingLevel;
     mediaResolution: AiMediaResolution;
     profileImageLimit: 0 | 1;
@@ -212,6 +212,10 @@ const AI_STAGE_POLICIES_V211 = Object.freeze({
     }),
     featureAnalysis: Object.freeze({
         ...AI_STAGE_POLICIES_V210.featureAnalysis,
+        // The oneLineOverview schema was rejected on 11.5% of calls (methodology/length
+        // constraint violations); a stronger instruction-following model fixes this directly.
+        model: 'gemini-3.7-flash',
+        thinkingLevel: 'HIGH',
         promptVersion: 'feature-analysis-v5',
     }),
     highRiskNarrative: Object.freeze({
