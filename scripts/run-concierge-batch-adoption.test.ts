@@ -59,6 +59,7 @@ import {
     isMatchingTargetProfileArtifactRun,
     loadConciergeProfilePack,
     mergeConciergeBatchTargetFullNameStepData,
+    CONCIERGE_BATCH_MUTABLE_REQUEST_STATUSES,
     parseConciergeProfilePack,
     parseConciergeExistingRelationshipArtifacts,
     relationshipArtifactProviderContext,
@@ -146,6 +147,14 @@ describe('concierge profile pack adapter', () => {
             targetFullName: '임태욱',
         });
         expect(mergeConciergeBatchTargetFullNameStepData(merged, '   ')).toEqual(merged);
+    });
+
+    it('treats a failed request as mutable so retried orders can publish', () => {
+        // loadRetryCodeByOrder only admits an order whose request sits at
+        // 'failed', so the publish-stage guards must accept that status.
+        expect([...CONCIERGE_BATCH_MUTABLE_REQUEST_STATUSES]).toEqual(
+            ['pending', 'processing', 'failed'],
+        );
     });
 
     it('loads the profile pack once for repeated order loads at the same path', () => {

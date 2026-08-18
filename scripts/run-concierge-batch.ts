@@ -558,6 +558,15 @@ function hash(value: unknown): string {
     return createHash('sha256').update(canonical(value), 'utf8').digest('hex');
 }
 
+/**
+ * Statuses a concierge batch run may still mutate in place. A retried order
+ * sits at 'failed' by contract (loadRetryCodeByOrder requires it), so omitting
+ * it here rejects every retry at the publish stage.
+ */
+export const CONCIERGE_BATCH_MUTABLE_REQUEST_STATUSES = Object.freeze(
+    ['pending', 'processing', 'failed'] as const,
+);
+
 export function mergeConciergeBatchTargetFullNameStepData(
     stepData: unknown,
     targetFullName: string | null | undefined,
@@ -1827,7 +1836,10 @@ async function persistConciergeBatchTargetFullName(
         .select('status,step_data')
         .eq('id', requestId)
         .maybeSingle();
-    if (readError || !current || !['pending', 'processing'].includes(String(current.status))) {
+    if (readError || !current
+        || !CONCIERGE_BATCH_MUTABLE_REQUEST_STATUSES.includes(
+            String(current.status) as typeof CONCIERGE_BATCH_MUTABLE_REQUEST_STATUSES[number],
+        )) {
         throw new Error('CONCIERGE_BATCH_TARGET_FULL_NAME_READ_FAILED');
     }
     const stepData = mergeConciergeBatchTargetFullNameStepData(
@@ -1838,7 +1850,7 @@ async function persistConciergeBatchTargetFullName(
         .from('analysis_requests')
         .update({ step_data: stepData })
         .eq('id', requestId)
-        .in('status', ['pending', 'processing'])
+        .in('status', [...CONCIERGE_BATCH_MUTABLE_REQUEST_STATUSES])
         .select('id,status')
         .maybeSingle();
     if (updateError || !updated || updated.status !== current.status) {
