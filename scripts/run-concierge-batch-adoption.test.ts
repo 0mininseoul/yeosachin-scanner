@@ -55,6 +55,7 @@ import {
     collectOrder,
     conciergeBatchMaxUnknownRatio,
     conciergeBatchNameOnlyMinConfidence,
+    conciergeNameOnlyPromotionDiagnosticMessage,
     conciergeBatchFailureDiagnostic,
     generateConciergeBatchCandidateCopies,
     generateConciergeBatchHighRiskCopy,
@@ -644,6 +645,46 @@ describe('concierge name-only gender promotions', () => {
             ['low_female', 'female'],
         ]);
         expect(result.achievedUnknownRatio).toBe(0.7);
+        expect(result.funnel).toMatchObject({
+            candidateCount: 5,
+            droppedNoFullName: 1,
+            droppedInferredUnknown: 1,
+            droppedBelowMinConfidence: 0,
+            eligibleCount: 3,
+            eligibleMaleCount: 1,
+            eligibleFemaleCount: 2,
+            promotionBudget: 8,
+            promotedCount: 3,
+        });
+    });
+
+    it('formats a redacted, count-only funnel diagnostic for the execution log', () => {
+        const message = conciergeNameOnlyPromotionDiagnosticMessage({
+            totalPublicDetails: 10,
+            droppedNoProfile: 1,
+            droppedNoTriageAssessment: 1,
+            droppedHasFeature: 1,
+            droppedUsableProfileImage: 1,
+            droppedNotUnknown: 1,
+            candidateCount: 5,
+            droppedNoFullName: 1,
+            droppedInferredUnknown: 1,
+            droppedBelowMinConfidence: 1,
+            eligibleCount: 1,
+            eligibleMaleCount: 1,
+            eligibleFemaleCount: 0,
+            promotionBudget: 0,
+            promotedCount: 0,
+            noPromotionReason: 'promotion_budget_zero',
+        });
+
+        expect(message).toContain('concierge name-only promotion funnel:');
+        expect(message).toContain('"totalPublicDetails":10');
+        expect(message).toContain('"droppedNoProfile":1');
+        expect(message).toContain('"promotionBudget":0');
+        expect(message).toContain('"promotedCount":0');
+        expect(message).toContain('"noPromotionReason":"promotion_budget_zero"');
+        expect(message).not.toContain('https://');
     });
 
     it('stops when the eligible name-only pool is exhausted even if unknown exceeds the target', () => {

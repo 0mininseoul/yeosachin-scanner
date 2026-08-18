@@ -53,6 +53,7 @@ import type {
     ConciergeBatchCandidateCopy,
     ConciergeBatchHighRiskCopy,
     ConciergeManualPublicationInput,
+    ConciergeNameOnlyPromotionFunnel,
     ConciergeStoredReplayFeatures,
 } from '@/lib/services/analysis/concierge-batch-publication';
 import {
@@ -109,6 +110,12 @@ export interface ConciergeNameOnlyPromotion {
     classificationSource: 'name_only';
 }
 
+export function conciergeNameOnlyPromotionDiagnosticMessage(
+    funnel: ConciergeNameOnlyPromotionFunnel,
+): string {
+    return `concierge name-only promotion funnel: ${JSON.stringify(funnel)}\n`;
+}
+
 /** Reads CONCIERGE_BATCH_MAX_UNKNOWN_RATIO; default 0.20, inclusive range 0..1. */
 export function conciergeBatchMaxUnknownRatio(raw = process.env.CONCIERGE_BATCH_MAX_UNKNOWN_RATIO): number {
     if (raw === undefined || raw.trim() === '') return CONCIERGE_BATCH_DEFAULT_MAX_UNKNOWN_RATIO;
@@ -140,6 +147,17 @@ export function selectConciergeNameOnlyPromotions(input: {
     promoted: readonly ConciergeNameOnlyPromotion[];
     achievedUnknownRatio: number;
     targetUnknownRatio: number;
+    funnel: Pick<ConciergeNameOnlyPromotionFunnel,
+        'candidateCount'
+        | 'droppedNoFullName'
+        | 'droppedInferredUnknown'
+        | 'droppedBelowMinConfidence'
+        | 'eligibleCount'
+        | 'eligibleMaleCount'
+        | 'eligibleFemaleCount'
+        | 'promotionBudget'
+        | 'promotedCount'
+    >;
 } {
     if (!Number.isInteger(input.publicCount) || input.publicCount < 0
         || !Number.isInteger(input.initialUnknownCount) || input.initialUnknownCount < 0
@@ -149,12 +167,15 @@ export function selectConciergeNameOnlyPromotions(input: {
         throw new Error('CONCIERGE_BATCH_NAME_ONLY_SCOPE_INVALID');
     }
     const minimumRank = CONCIERGE_CONFIDENCE_RANK[input.minimumConfidence];
-    const eligible = input.candidates
+    const withName = input.candidates.filter(candidate => Boolean(candidate.fullName?.trim()));
+    const withGender = withName.filter(candidate => candidate.inferredGender !== 'unknown');
+    const withConfidence = withGender.filter(candidate => (
+        CONCIERGE_CONFIDENCE_RANK[candidate.confidence] >= minimumRank
+    ));
+    const eligible = withConfidence
         .filter((candidate): candidate is ConciergeNameOnlyCandidate & {
             inferredGender: 'female' | 'male';
-        } => Boolean(candidate.fullName?.trim())
-            && candidate.inferredGender !== 'unknown'
-            && CONCIERGE_CONFIDENCE_RANK[candidate.confidence] >= minimumRank)
+        } => candidate.inferredGender === 'female' || candidate.inferredGender === 'male')
         .sort((left, right) => (
             CONCIERGE_CONFIDENCE_RANK[right.confidence] - CONCIERGE_CONFIDENCE_RANK[left.confidence]
             || left.ordinal - right.ordinal
@@ -175,7 +196,22 @@ export function selectConciergeNameOnlyPromotions(input: {
     const achievedUnknownRatio = input.publicCount === 0
         ? 0
         : (input.initialUnknownCount - promoted.length) / input.publicCount;
-    return { promoted, achievedUnknownRatio, targetUnknownRatio: input.maxUnknownRatio };
+    return {
+        promoted,
+        achievedUnknownRatio,
+        targetUnknownRatio: input.maxUnknownRatio,
+        funnel: {
+            candidateCount: input.candidates.length,
+            droppedNoFullName: input.candidates.length - withName.length,
+            droppedInferredUnknown: withName.length - withGender.length,
+            droppedBelowMinConfidence: withGender.length - withConfidence.length,
+            eligibleCount: eligible.length,
+            eligibleMaleCount: male.length,
+            eligibleFemaleCount: female.length,
+            promotionBudget: totalPromotionBudget,
+            promotedCount: promoted.length,
+        },
+    };
 }
 
 export function sanitizeConciergeBatchDiagnostic(value: string, maximum: number): string {
@@ -1779,23 +1815,49 @@ async function classifyOrder(collected: CollectedOrder): Promise<ClassifiedOrder
         const detail = detailsByOrdinal.get(item.ordinal);
         return count + (!detail || conciergeDetailClassification(detail) === 'unknown' ? 1 : 0);
     }, 0);
+    let droppedNoProfile = 0;
+    let droppedNoTriageAssessment = 0;
+    let droppedHasFeature = 0;
+    let droppedUsableProfileImage = 0;
+    let droppedNotUnknown = 0;
+    const nameOnlyCandidates: ConciergeNameOnlyCandidate[] = [];
+    for (const detail of details) {
+        const profile = publicByOrdinal.get(detail.ordinal);
+        if (!profile) {
+            droppedNoProfile += 1;
+            continue;
+        }
+        const assessment = detail.triage?.assessment;
+        if (!assessment) {
+            droppedNoTriageAssessment += 1;
+            continue;
+        }
+        if (detail.feature !== null) {
+            droppedHasFeature += 1;
+            continue;
+        }
+        if (hasUsableInstagramProfileImage(profile)) {
+            droppedUsableProfileImage += 1;
+            continue;
+        }
+        if (conciergeDetailClassification(detail) !== 'unknown') {
+            droppedNotUnknown += 1;
+            continue;
+        }
+        nameOnlyCandidates.push({
+            ordinal: detail.ordinal,
+            username: normalized(profile.username),
+            fullName: profile.fullName,
+            inferredGender: assessment.inferredGender,
+            confidence: assessment.confidence,
+        });
+    }
     const nameOnlyPromotions = selectConciergeNameOnlyPromotions({
         publicCount,
         initialUnknownCount,
         maxUnknownRatio: conciergeBatchMaxUnknownRatio(),
         minimumConfidence: conciergeBatchNameOnlyMinConfidence(),
-        candidates: details.flatMap(detail => {
-            const profile = publicByOrdinal.get(detail.ordinal);
-            if (!profile || !isConciergeNameOnlyCandidate({ profile, detail })) return [];
-            const assessment = detail.triage!.assessment;
-            return [{
-                ordinal: detail.ordinal,
-                username: normalized(profile.username),
-                fullName: profile.fullName,
-                inferredGender: assessment.inferredGender,
-                confidence: assessment.confidence,
-            }];
-        }),
+        candidates: nameOnlyCandidates,
     });
     const nameOnlyPromotionByOrdinal = new Map(
         nameOnlyPromotions.promoted.map(promotion => [promotion.ordinal, promotion]),
@@ -1911,12 +1973,33 @@ async function classifyOrder(collected: CollectedOrder): Promise<ClassifiedOrder
         };
     });
     const publicRecords = records.filter(record => record.partition === 'public');
+    const promotedCount = records.filter(record => (
+        record.classificationSource === 'name_only'
+        && record.effectiveClassification !== 'unknown'
+    )).length;
+    const noPromotionReason = nameOnlyPromotions.funnel.eligibleCount > 0 && promotedCount === 0
+        ? nameOnlyPromotions.funnel.promotionBudget === 0
+            ? 'promotion_budget_zero' as const
+            : 'promotion_records_missing' as const
+        : undefined;
+    const nameOnlyFunnel: ConciergeNameOnlyPromotionFunnel = {
+        totalPublicDetails: details.length,
+        droppedNoProfile,
+        droppedNoTriageAssessment,
+        droppedHasFeature,
+        droppedUsableProfileImage,
+        droppedNotUnknown,
+        ...nameOnlyPromotions.funnel,
+        promotedCount,
+        ...(noPromotionReason ? { noPromotionReason } : {}),
+    };
     const achievedUnknownRatio = publicRecords.length === 0
         ? 0
         : publicRecords.filter(record => record.effectiveClassification === 'unknown').length / publicRecords.length;
     process.stderr.write(
         `concierge name-only promotions: ${nameOnlyPromotions.promoted.length}; unknown ratio: ${achievedUnknownRatio.toFixed(4)}; target: ${nameOnlyPromotions.targetUnknownRatio.toFixed(4)}\n`,
     );
+    process.stderr.write(conciergeNameOnlyPromotionDiagnosticMessage(nameOnlyFunnel));
     const replayDetails = details.filter(detail => (
         publicRecords.some(record => record.mutualOrdinal === detail.ordinal)
     ));
@@ -2020,6 +2103,7 @@ async function classifyOrder(collected: CollectedOrder): Promise<ClassifiedOrder
                 .map(record => normalized(record.instagramId)),
             achievedUnknownRatio,
             targetUnknownRatio: nameOnlyPromotions.targetUnknownRatio,
+            funnel: nameOnlyFunnel,
         },
     };
     return {

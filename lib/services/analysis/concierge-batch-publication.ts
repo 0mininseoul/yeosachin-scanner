@@ -160,7 +160,27 @@ export interface ConciergeManualPublicationInput {
         promotedUsernames: readonly string[];
         achievedUnknownRatio: number;
         targetUnknownRatio: number;
+        funnel?: ConciergeNameOnlyPromotionFunnel;
     }>;
+}
+
+export interface ConciergeNameOnlyPromotionFunnel {
+    totalPublicDetails: number;
+    droppedNoProfile: number;
+    droppedNoTriageAssessment: number;
+    droppedHasFeature: number;
+    droppedUsableProfileImage: number;
+    droppedNotUnknown: number;
+    candidateCount: number;
+    droppedNoFullName: number;
+    droppedInferredUnknown: number;
+    droppedBelowMinConfidence: number;
+    eligibleCount: number;
+    eligibleMaleCount: number;
+    eligibleFemaleCount: number;
+    promotionBudget: number;
+    promotedCount: number;
+    noPromotionReason?: 'promotion_budget_zero' | 'promotion_records_missing';
 }
 
 export interface ConciergeBatchCandidateCopy {
@@ -200,7 +220,7 @@ export interface ConciergeCanonicalPublication {
             promotedUsernames: readonly string[];
             unknownRatio: number;
             targetUnknownRatio: number;
-        }>;
+        } & Partial<ConciergeNameOnlyPromotionFunnel>>;
     };
 }
 
@@ -1115,6 +1135,7 @@ function buildConciergeManualPublicationInternal(
                 promotedUsernames: [...input.nameOnlyProvenance.promotedUsernames].map(normalizeUsername),
                 unknownRatio: input.nameOnlyProvenance.achievedUnknownRatio,
                 targetUnknownRatio: input.nameOnlyProvenance.targetUnknownRatio,
+                ...(input.nameOnlyProvenance.funnel ?? {}),
             },
         } : {}),
     });
