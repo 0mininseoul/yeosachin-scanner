@@ -1,4 +1,5 @@
 import type { FeatureAnalysisResult, GenderResolutionResult, GenderTriageResult } from '@/lib/services/ai/v2-staged-analysis';
+import { MAX_FEATURE_MEDIA } from '@/lib/domain/analysis/media-policy';
 import { applyGenderResolution, type GenderBaselineClassification } from '@/lib/services/ai/gender-resolution-reconciliation';
 import { aiStagePolicySupports } from '@/lib/services/ai/stage-policy';
 import type { PrivateNameAccountInput } from '@/lib/services/ai/private-name-analysis';
@@ -455,9 +456,32 @@ async function runBounded<T>(values: readonly T[], concurrency: number, fn: (val
     ));
 }
 
-function mediaFor(profile: AnalysisV2ReplayBundle['profiles'][number], ids: readonly string[]): ReplayMedia[] {
+function mediaFor(
+    profile: Pick<AnalysisV2ReplayBundle['profiles'][number], 'media'>,
+    ids: readonly string[],
+): ReplayMedia[] {
     const allowed = new Set(ids);
     return profile.media.filter(item => allowed.has(item.selectionId));
+}
+
+/**
+ * Feature analysis always receives the captured profile image when one exists.
+ * Keep the feed order from the feature selection while reserving one slot for
+ * the profile image so the profile cannot be displaced by a full feed set.
+ */
+export function selectReplayFeatureMedia(
+    profile: Pick<AnalysisV2ReplayBundle['profiles'][number], 'media'>,
+    ids: readonly string[],
+): ReplayMedia[] {
+    const selected = mediaFor(profile, ids);
+    const profileMedia = profile.media.find(item => item.kind === 'profile');
+    if (!profileMedia) return selected.slice(0, MAX_FEATURE_MEDIA);
+    return [
+        profileMedia,
+        ...selected
+            .filter(item => item.kind === 'feed')
+            .slice(0, MAX_FEATURE_MEDIA - 1),
+    ];
 }
 
 function safeLine(report: AnalysisV2AiReplayReport): string {
@@ -770,22 +794,6 @@ export async function runAnalysisV2AiReplay(input: {
                 }, { triage, feature: null });
                 return;
             }
-            // The paid concierge first pass is a provisional name+profile-image
-            // gate. Only male provisional results stop here; female and unknown
-            // results spend the feed-validation call.
-            if (
-                usesConciergeFirstPass
-                && triage.assessment.inferredGender === 'male'
-            ) {
-                gender.unknown++;
-                await appendAccountOutput({
-                    ordinal: profile.ordinal,
-                    finalClassification: 'unresolved',
-                    classificationSource: 'unknown',
-                    featureOverview: null,
-                }, { triage, feature: null });
-                return;
-            }
             const featureAdmitted = !supportsGenderTriageMicrobatch
                 || (
                     aiStagePolicySupports(replayAiPolicy, 'genderSummaryQualityV211')
@@ -798,7 +806,7 @@ export async function runAnalysisV2AiReplay(input: {
                 ...(supportsGenderTriageMicrobatch ? {
                     accountProfile: v29AccountProfile(profile),
                 } : {}),
-                media: mediaFor(profile, profile.featureSelectionIds),
+                media: selectReplayFeatureMedia(profile, profile.featureSelectionIds),
                 captions: profile.captions,
                 triage,
             }) : undefined;

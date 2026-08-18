@@ -17,6 +17,7 @@ vi.mock('./replay-staged-ai-adapter', () => ({
 import {
     analysisV2ReplayResolverReadyOutcome,
     runAnalysisV2AiReplay,
+    selectReplayFeatureMedia,
     type ReplayAiRunner,
 } from './replay-runner';
 import type { AnalysisV2ReplayBundle } from './replay-bundle';
@@ -837,7 +838,98 @@ describe('AI-only replay runner', () => {
         expect(report.gender).toEqual({ male: 1, female: 0, unknown: 0, unknownRate: 0 });
     });
 
-    it('uses the paid concierge first-pass contract and sends feed media to female and unknown candidates only', async () => {
+    it('routes a low-confidence concierge male through feature analysis', async () => {
+        const firstPass = vi.fn(async () => ({
+            outcome: 'ok' as const,
+            attempts: 1,
+            retries: 0,
+            elapsedMs: 1,
+            value: {
+                assessment: {
+                    inferredGender: 'male' as const,
+                    confidence: 'medium' as const,
+                    ownerConsistency: 'not_visible' as const,
+                    evidenceSelectionIds: ['profile:male'],
+                },
+                routingDecision: 'route_to_feature_analysis' as const,
+                routingReason: 'conserve_female_recall' as const,
+                analyzedSelectionIds: ['profile:male'],
+            },
+        }));
+        const feature = vi.fn(async () => ({
+            outcome: 'ok' as const,
+            attempts: 1,
+            retries: 0,
+            elapsedMs: 2,
+            value: {
+                features: {
+                    gender: 'female' as const,
+                    genderConfidence: 'high' as const,
+                    ownerConsistency: 'same_person' as const,
+                    appearanceGrade: 3,
+                    exposureScore: 1,
+                    businessClassification: 'personal' as const,
+                    businessConfidence: 'medium' as const,
+                    accountContext: 'personal' as const,
+                    marriageEvidence: 'none' as const,
+                    partnerEvidence: 'none' as const,
+                    partnerExclusionContext: 'none' as const,
+                    evidenceSelectionIds: {
+                        gender: ['profile:male'],
+                        appearance: ['profile:male'],
+                        exposure: ['profile:male'],
+                        business: ['profile:male'],
+                        accountContext: ['profile:male'],
+                        marriagePartner: [],
+                    },
+                    oneLineOverview: '프로필과 피드에서 확인된 단서를 중심으로 계정의 분위기를 정리한 충분한 총평입니다.',
+                },
+                finalGenderDecision: 'verified_female' as const,
+                analyzedSelectionIds: ['profile:male', 'feed:male'],
+            } satisfies FeatureAnalysisResult,
+        }));
+        const report = await runAnalysisV2AiReplay({
+            bundle: {
+                ...firstPaymentBundle,
+                profiles: [{ ...firstPaymentBundle.profiles[2]!, ordinal: 1 }],
+            },
+            runner: v211Runner({ firstPass, feature }),
+            mode: 'paid-ai',
+            paidAiOptIn: true,
+            evaluationPolicy: firstPaymentBundle.capture.evaluationPolicy,
+        });
+
+        expect(firstPass).toHaveBeenCalledOnce();
+        expect(feature).toHaveBeenCalledOnce();
+        expect(report.gender).toEqual({ male: 0, female: 1, unknown: 0, unknownRate: 0 });
+    });
+
+    it('keeps the profile image in feature media when feed selections fill the cap', () => {
+        const profile = {
+            media: [
+                { selectionId: 'profile:one', kind: 'profile' as const, jpegBase64: '/9j/2Q==' },
+                ...Array.from({ length: 11 }, (_, index) => ({
+                    selectionId: `feed:${index + 1}`,
+                    kind: 'feed' as const,
+                    postId: `post:${index + 1}`,
+                    jpegBase64: '/9j/2Q==',
+                })),
+            ],
+        } as Parameters<typeof selectReplayFeatureMedia>[0];
+
+        const selected = selectReplayFeatureMedia(
+            profile,
+            profile.media.slice(1).map(item => item.selectionId),
+        );
+
+        expect(selected).toHaveLength(11);
+        expect(selected[0]).toMatchObject({ selectionId: 'profile:one', kind: 'profile' });
+        expect(selected.slice(1).map(item => item.selectionId)).toEqual(
+            Array.from({ length: 10 }, (_, index) => `feed:${index + 1}`),
+        );
+    });
+
+    it('uses the paid concierge first-pass contract and sends media to every non-excluded candidate', async () => {
         const firstPass = vi.fn(async (input: {
             ordinal: number;
             fullName: string;

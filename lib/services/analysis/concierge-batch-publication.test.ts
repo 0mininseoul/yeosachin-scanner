@@ -152,6 +152,70 @@ describe('concierge manual publication', () => {
         expect(publication.resultHash).toMatch(/^[a-f0-9]{64}$/);
     });
 
+    it('keeps unresolved mutuals in the partition counts without promoting them to gender rows', () => {
+        const input = makeInput();
+        const unresolvedHash = 'c'.repeat(64);
+        const unresolvedSource = input.ledger.records[0]!;
+        const unresolvedRecord = {
+            ...unresolvedSource,
+            candidateId: 'candidate:unresolved',
+            instagramId: 'unresolved',
+            mutualOrdinal: 4,
+            partition: 'unresolved' as const,
+            profileFetchStatus: 'unavailable' as const,
+            originalAiClassification: 'unknown' as const,
+            effectiveClassification: 'unknown' as const,
+            confidence: 'low' as const,
+            classificationOperationKey: 'op:unresolved',
+            classificationResultHash: unresolvedHash,
+            sourceSnapshot: {
+                ...unresolvedSource.sourceSnapshot!,
+                instagramUrl: 'https://instagram.com/unresolved',
+                originalAiClassification: 'unknown' as const,
+                confidenceEvidence: 'confidence=low;evidence=unavailable',
+            },
+        };
+        const classificationByOrdinal = new Map(input.replay.classificationByOrdinal);
+        classificationByOrdinal.set(4, {
+            ...classificationByOrdinal.get(1)!,
+            originalAiClassification: 'unknown',
+            confidence: 'low',
+            classificationOperationKey: 'op:unresolved',
+            classificationResultHash: unresolvedHash,
+        });
+        const publication = buildConciergeManualPublication({
+            ...input,
+            expectedMutualCount: 4,
+            ledger: {
+                ...input.ledger,
+                mutualCount: 4,
+                unresolvedCount: 1,
+                records: [...input.ledger.records, unresolvedRecord],
+            },
+            replay: {
+                ...input.replay,
+                orderedMutualUsernames: [...input.replay.orderedMutualUsernames, 'unresolved'],
+                classificationByOrdinal,
+                fetchedCount: 4,
+                unresolvedCount: 1,
+            },
+        });
+
+        expect(publication.rows).toHaveLength(2);
+        expect(publication.counts).toMatchObject({
+            public: 2,
+            private: 1,
+            unresolved: 1,
+            mutual: 4,
+            authoritativeMutual: 4,
+            hydrated: 3,
+            analyzed: 2,
+            male: 0,
+            female: 2,
+            unknown: 0,
+        });
+    });
+
     it('replaces every displayed candidate overview with the full batch copy contract', () => {
         const input = makeInput();
         const scored = buildConciergeManualPublication(input);
