@@ -43,8 +43,8 @@ function downloaded(bytes = png): SecureImageDownload {
 describe('revenue gender-routing input preparer', () => {
     it('uses the approved profile/feed evidence image policy', () => {
         expect(REVENUE_GENDER_ROUTING_IMAGE_POLICY).toEqual({
-            maxImages: 4,
-            maxPostImages: 3,
+            maxImages: 1,
+            maxPostImages: 0,
             maxDimension: 768,
             jpegQuality: 85,
         });

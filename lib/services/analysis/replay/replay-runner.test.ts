@@ -1040,7 +1040,7 @@ describe('AI-only replay runner', () => {
         expect(report.gender).toEqual({ male: 1, female: 2, unknown: 0, unknownRate: 0 });
     });
 
-    it('routes a profile-image-less concierge candidate through triage with retained feed media', async () => {
+    it('routes a profile-image-less concierge candidate through name-only triage without feed media', async () => {
         const triage = vi.fn(async () => ({
             outcome: 'ok' as const,
             attempts: 1,
@@ -1089,7 +1089,7 @@ describe('AI-only replay runner', () => {
         expect(firstPass).not.toHaveBeenCalled();
         expect(triage).toHaveBeenCalledOnce();
         expect(triage).toHaveBeenCalledWith(expect.objectContaining({
-            media: [expect.objectContaining({ kind: 'feed' })],
+            media: [],
             accountProfile: { fullName: '김수연', hasProfileImage: false, bio: null },
         }));
         expect(report.gender).toEqual({ male: 1, female: 0, unknown: 0, unknownRate: 0 });

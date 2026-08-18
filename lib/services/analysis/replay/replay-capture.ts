@@ -182,10 +182,15 @@ export async function captureAnalysisV2ReplayBundle(input: {
         const profileImageUrl = profile.isPrivate
             ? undefined
             : preferredInstagramProfileImageUrl(profile);
+        const mediaSelectionOptions = conciergeNameOnly
+            ? { carouselEnds: true }
+            : carouselDiversity
+                ? { carouselDiversity: true }
+                : undefined;
         const policy = profile.isPrivate ? null : selectAnalysisMedia({
             profile: profileImageUrl ? { id: profile.username, imageUrl: profileImageUrl } : undefined,
             posts: profile.latestPosts ?? [],
-        }, carouselDiversity ? { carouselDiversity: true } : undefined);
+        }, mediaSelectionOptions);
         if (!textOnly && !conciergeNameOnly && policy?.carouselCoverage.incompletePostIds.length) {
             fail('ANALYSIS_V2_REPLAY_MEDIA_STRUCTURAL_INCOMPLETE');
         }

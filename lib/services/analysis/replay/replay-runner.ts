@@ -926,8 +926,7 @@ export async function runAnalysisV2AiReplay(input: {
                     } else if (runner.triage && fullName) {
                         triage = await runner.triage({
                             ordinal: profile.ordinal,
-                            media: mediaFor(profile, profile.triageSelectionIds)
-                                .filter(item => item.kind === 'feed'),
+                            media: [],
                             ...(supportsGenderTriageMicrobatch
                                 ? { accountProfile: v29AccountProfile(profile) }
                             : {}),

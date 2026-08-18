@@ -24,8 +24,8 @@ export const REVENUE_GENDER_ROUTING_IMAGE_MAX_CONCURRENCY = 4;
 export const REVENUE_GENDER_ROUTING_MAX_AGGREGATE_NORMALIZED_IMAGE_BYTES = 8 * 1024 * 1024;
 
 export const REVENUE_GENDER_ROUTING_IMAGE_POLICY: AnalysisImagePolicy = Object.freeze({
-    maxImages: 4,
-    maxPostImages: 3,
+    maxImages: 1,
+    maxPostImages: 0,
     maxDimension: 768,
     jpegQuality: 85,
 });

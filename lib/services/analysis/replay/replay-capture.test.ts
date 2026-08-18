@@ -2,7 +2,10 @@ import { describe, expect, it, vi } from 'vitest';
 import { captureAnalysisV2ReplayBundle } from './replay-capture';
 import { AnalysisImagePreparationError } from '@/lib/services/ai/image-preprocessing';
 import { INSTAGRAM_DEFAULT_PROFILE_IMAGE_MEDIA_ID } from '../profile-image-evidence';
-import type { ReplaySourceLineage } from './replay-source-lineage';
+import {
+    FIRST_PAYMENT_BASIC_V211_CONCIERGE_CAPABILITY,
+    type ReplaySourceLineage,
+} from './replay-source-lineage';
 
 const STANDARD_SOURCE_LINEAGE = {
     selectedPlanId: 'standard' as const,
@@ -424,5 +427,66 @@ describe('analysis V2 replay capture', () => {
         } });
         expect(legacy.profiles[0]?.featureSelectionIds).toHaveLength(5);
         expect(v28.profiles[0]?.featureSelectionIds).toHaveLength(9);
+    });
+
+    it('uses first and last carousel children for concierge candidate feature media', async () => {
+        const candidate = {
+            ...profile,
+            username: 'candidate',
+            profilePicUrl: undefined,
+            postsCount: 3,
+            latestPosts: Array.from({ length: 3 }, (_, index) => ({
+                ...profile.latestPosts[0],
+                id: `carousel-${index}`,
+                shortCode: `carousel-${index}`,
+                type: 'carousel' as const,
+                declaredMediaCount: 3,
+                childrenComplete: true,
+                mediaItems: Array.from({ length: 3 }, (_child, child) => ({
+                    id: `${index}-${child}`,
+                    type: 'image' as const,
+                    imageUrl: `https://cdninstagram.com/${index}-${child}.jpg`,
+                })),
+            })),
+        };
+        const sourceLineage = {
+            selectedPlanId: 'basic' as const,
+            policyVersions: {
+                pipeline: 'v2' as const,
+                aiStage: 'ai-stage-policy-v2.11' as const,
+                risk: 'risk-policy-v2.5' as const,
+                scheduler: 'ai-scheduler-v1' as const,
+            },
+        };
+        const bundle = await captureAnalysisV2ReplayBundle({
+            selector: { targetUsername: 'candidate' },
+            repository: {
+                findCompletedReplaySourceExact: async () => ({
+                    requestFingerprint: '2'.repeat(64),
+                    sourceLineage,
+                    completed: true,
+                }),
+                loadReplaySource: async () => ({
+                    profiles: [candidate],
+                    evidence: { relationship: [], targetInteractions: [], reverseInteractions: [] },
+                    providerRuns: [],
+                }),
+            },
+            evaluationPolicy: {
+                capability: FIRST_PAYMENT_BASIC_V211_CONCIERGE_CAPABILITY,
+                aiStage: 'ai-stage-policy-v2.11',
+            },
+            normalizeMedia: async () => Buffer.from([0xff, 0xd8, 0xff, 0xd9]),
+        });
+
+        expect(bundle.profiles[0]?.featureSelectionIds).toEqual([
+            'post:carousel-0:media:0:0-0',
+            'post:carousel-1:media:0:1-0',
+            'post:carousel-2:media:0:2-0',
+            'post:carousel-0:media:2:0-2',
+            'post:carousel-1:media:2:1-2',
+            'post:carousel-2:media:2:2-2',
+        ]);
+        expect(bundle.profiles[0]?.featureSelectionIds).toHaveLength(6);
     });
 });
