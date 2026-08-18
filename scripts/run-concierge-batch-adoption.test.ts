@@ -2,6 +2,16 @@ import { describe, expect, it, vi } from 'vitest';
 
 const conciergeBatchTestMocks = vi.hoisted(() => ({
     analyzeWithGemini: vi.fn(),
+    readFileSync: vi.fn(),
+    supabaseRpc: vi.fn(),
+    provider: {
+        getProfile: vi.fn(),
+        getFollowers: vi.fn(),
+        getFollowing: vi.fn(),
+        getProfilesBatchOutcomes: vi.fn(),
+    },
+    makeApifyProvider: vi.fn(),
+    captureFirstPaymentConciergeAiBundle: vi.fn(),
 }));
 
 vi.mock('@/lib/services/ai/gemini', async importOriginal => ({
@@ -9,8 +19,28 @@ vi.mock('@/lib/services/ai/gemini', async importOriginal => ({
     analyzeWithGemini: conciergeBatchTestMocks.analyzeWithGemini,
 }));
 
+vi.mock('node:fs', async importOriginal => ({
+    ...await importOriginal<typeof import('node:fs')>(),
+    readFileSync: conciergeBatchTestMocks.readFileSync,
+}));
+
+vi.mock('@/lib/supabase/admin', () => ({
+    supabaseAdmin: { rpc: conciergeBatchTestMocks.supabaseRpc },
+}));
+
+vi.mock('@/lib/services/instagram/providers/apify', async importOriginal => ({
+    ...await importOriginal<typeof import('@/lib/services/instagram/providers/apify')>(),
+    makeApifyProvider: conciergeBatchTestMocks.makeApifyProvider,
+}));
+
+vi.mock('@/lib/services/analysis/first-payment-concierge', async importOriginal => ({
+    ...await importOriginal<typeof import('@/lib/services/analysis/first-payment-concierge')>(),
+    captureFirstPaymentConciergeAiBundle: conciergeBatchTestMocks.captureFirstPaymentConciergeAiBundle,
+}));
+
 import {
     buildConciergeBatchHighRiskCopyPrompt,
+    collectOrder,
     generateConciergeBatchCandidateCopies,
     generateConciergeBatchHighRiskCopy,
     hydrateConciergeProfilesFromPack,
@@ -21,11 +51,12 @@ import {
     parseConciergeExistingRelationshipArtifacts,
     relationshipArtifactProviderContext,
     retryableFailureCode,
+    selectConciergeBatchOnlyOrders,
     selectConciergeBatchActiveScope,
     type ConciergeBatchHighRiskCopyEvidence,
     validateConciergeBatchHighRiskCopy,
 } from './run-concierge-batch';
-import { runConciergeBatch } from '@/lib/services/analysis/concierge-batch-runner';
+import { runConciergeBatch, type ConciergeBatchStageContext } from '@/lib/services/analysis/concierge-batch-runner';
 
 function profilePackItem(username: string, overrides: Record<string, unknown> = {}) {
     return {
@@ -44,6 +75,19 @@ function profilePackItem(username: string, overrides: Record<string, unknown> = 
 }
 
 describe('concierge profile pack adapter', () => {
+    it('loads the profile pack once for repeated order loads at the same path', () => {
+        conciergeBatchTestMocks.readFileSync.mockReset().mockReturnValue(JSON.stringify({
+            version: 1,
+            profiles: { packed_user: profilePackItem('packed_user') },
+        }));
+
+        const first = loadConciergeProfilePack('/tmp/concierge-profile-pack-memo.json');
+        const second = loadConciergeProfilePack('/tmp/concierge-profile-pack-memo.json');
+
+        expect(second).toBe(first);
+        expect(conciergeBatchTestMocks.readFileSync).toHaveBeenCalledTimes(1);
+    });
+
     it('hydrates pack hits and sends only pack misses to the provider', () => {
         const pack = parseConciergeProfilePack({
             version: 1,
@@ -81,6 +125,82 @@ describe('concierge profile pack adapter', () => {
 
         expect([...result.profilesByUsername.keys()]).toEqual(['good_user']);
         expect(result.providerUsernames).toEqual(['bad_user']);
+    });
+
+    it('does not call provider.getProfile when collectOrder finds the target in the pack', async () => {
+        const previousPackPath = process.env.CONCIERGE_BATCH_PROFILE_PACK_PATH;
+        const previousSecondaryToken = process.env.APIFY_SECONDARY_API_TOKEN;
+        process.env.CONCIERGE_BATCH_PROFILE_PACK_PATH = '/tmp/concierge-target-profile-pack.json';
+        process.env.APIFY_SECONDARY_API_TOKEN = 'test-token';
+        conciergeBatchTestMocks.readFileSync.mockReset().mockReturnValue(JSON.stringify({
+            version: 1,
+            profiles: {
+                target_user: profilePackItem('target_user', {
+                    followersCount: 0,
+                    followsCount: 0,
+                    postsCount: 0,
+                    latestPosts: [],
+                }),
+            },
+        }));
+        conciergeBatchTestMocks.supabaseRpc.mockResolvedValue({ data: [], error: null });
+        conciergeBatchTestMocks.provider.getProfile.mockReset().mockResolvedValue(null);
+        conciergeBatchTestMocks.provider.getFollowers.mockReset().mockResolvedValue([]);
+        conciergeBatchTestMocks.provider.getFollowing.mockReset().mockResolvedValue([]);
+        conciergeBatchTestMocks.makeApifyProvider.mockReset().mockReturnValue(conciergeBatchTestMocks.provider);
+        conciergeBatchTestMocks.captureFirstPaymentConciergeAiBundle.mockReset().mockResolvedValue({
+            bundle: { capture: {} },
+        });
+
+        const artifacts = parseConciergeExistingRelationshipArtifacts(JSON.stringify({
+            target_user: {
+                followers: { runId: 'Abcdef12', credentialSlot: 'secondary', sourceDeclaredCount: 1 },
+                following: { runId: 'Zyxwvu98', credentialSlot: 'secondary', sourceDeclaredCount: 1 },
+            },
+        }));
+        const order = {
+            orderId: '00000000-0000-4000-8000-000000000001',
+            ownerId: '00000000-0000-4000-8000-000000000002',
+            targetUsername: 'target_user',
+            planId: 'basic' as const,
+            cohort: 'awaiting_operator' as const,
+            preflightId: '00000000-0000-4000-8000-000000000003',
+            targetFollowers: 0,
+            targetFollowing: 0,
+        };
+        const prepared = {
+            sourceRequestId: '00000000-0000-4000-8000-000000000004',
+            requestId: '00000000-0000-4000-8000-000000000005',
+            preflightId: order.preflightId,
+        };
+        const context: ConciergeBatchStageContext = {
+            actorConcurrency: 2,
+            tokenPriority: [],
+            withActorSlot: operation => operation(),
+        };
+
+        try {
+            await collectOrder(order, prepared, context, artifacts);
+            expect(conciergeBatchTestMocks.provider.getProfile).not.toHaveBeenCalled();
+        } finally {
+            if (previousPackPath === undefined) delete process.env.CONCIERGE_BATCH_PROFILE_PACK_PATH;
+            else process.env.CONCIERGE_BATCH_PROFILE_PACK_PATH = previousPackPath;
+            if (previousSecondaryToken === undefined) delete process.env.APIFY_SECONDARY_API_TOKEN;
+            else process.env.APIFY_SECONDARY_API_TOKEN = previousSecondaryToken;
+        }
+    });
+});
+
+describe('concierge batch only-order allowlist', () => {
+    it('keeps only allowlisted orders and rejects an id outside the frozen scope', () => {
+        const first = '00000000-0000-4000-8000-000000000001';
+        const second = '00000000-0000-4000-8000-000000000002';
+        const outside = '00000000-0000-4000-8000-000000000003';
+        const scope = [{ orderId: first }, { orderId: second }];
+
+        expect(selectConciergeBatchOnlyOrders(scope, `${second}`)).toEqual([{ orderId: second }]);
+        expect(() => selectConciergeBatchOnlyOrders(scope, `${first},${outside}`))
+            .toThrow('CONCIERGE_BATCH_ONLY_ORDERS_INVALID');
     });
 });
 

@@ -158,6 +158,11 @@ export type ConciergeExistingRelationshipArtifacts = ReadonlyMap<
 
 export type ConciergeProfilePack = ReadonlyMap<string, unknown>;
 
+let profilePackMemo: {
+    path: string;
+    pack: ConciergeProfilePack | null;
+} | undefined;
+
 /**
  * Validates only the pack envelope. Individual profile rows are deliberately
  * parsed below, one username at a time, so a bad row falls back to the
@@ -189,14 +194,21 @@ export function parseConciergeProfilePack(raw: unknown): ConciergeProfilePack {
 
 export function loadConciergeProfilePack(path = process.env.CONCIERGE_BATCH_PROFILE_PACK_PATH): ConciergeProfilePack | null {
     const resolvedPath = path?.trim();
-    if (!resolvedPath) return null;
+    const memoPath = resolvedPath ?? '';
+    if (profilePackMemo?.path === memoPath) return profilePackMemo.pack;
+    if (!resolvedPath) {
+        profilePackMemo = { path: memoPath, pack: null };
+        return null;
+    }
     let raw: unknown;
     try {
         raw = JSON.parse(readFileSync(resolvedPath, 'utf8'));
     } catch {
         throw new Error('CONCIERGE_PROFILE_PACK_INVALID');
     }
-    return parseConciergeProfilePack(raw);
+    const pack = parseConciergeProfilePack(raw);
+    profilePackMemo = { path: memoPath, pack };
+    return pack;
 }
 
 export function hydrateConciergeProfilesFromPack(
@@ -375,6 +387,25 @@ export function selectConciergeBatchActiveScope<T extends ConciergeBatchActiveSc
         throw new Error('CONCIERGE_ACTIVE_SCOPE_COUNT_CONFLICT');
     }
     return selected;
+}
+
+export function selectConciergeBatchOnlyOrders<T extends Readonly<{ orderId: string }>>(
+    scopeMembers: readonly T[],
+    raw = process.env.CONCIERGE_BATCH_ONLY_ORDERS,
+): T[] {
+    const value = raw?.trim();
+    if (!value) return [...scopeMembers];
+    const orderIds = value.split(',').map(orderId => orderId.trim());
+    if (orderIds.some(orderId => !ORDER_ID.safeParse(orderId).success)
+        || new Set(orderIds).size !== orderIds.length) {
+        throw new Error('CONCIERGE_BATCH_ONLY_ORDERS_INVALID');
+    }
+    const scopeOrderIds = new Set(scopeMembers.map(member => member.orderId));
+    if (orderIds.some(orderId => !scopeOrderIds.has(orderId))) {
+        throw new Error('CONCIERGE_BATCH_ONLY_ORDERS_INVALID');
+    }
+    const selectedOrderIds = new Set(orderIds);
+    return scopeMembers.filter(member => selectedOrderIds.has(member.orderId));
 }
 
 type ProviderRunRow = {
@@ -1123,7 +1154,7 @@ function sourcePosts(profile: InstagramProfile): readonly InstagramPost[] {
     return profile.latestPosts ?? [];
 }
 
-async function collectOrder(
+export async function collectOrder(
     order: OrderRow,
     prepared: ConciergeBatchPreparedOrder,
     context: ConciergeBatchStageContext,
@@ -1143,7 +1174,13 @@ async function collectOrder(
     } catch (error) {
         if (!isRecoverableTargetProfileArtifactError(error)) throw error;
     }
+    const profilePack = loadConciergeProfilePack();
+    const packedTargetProfile = existingTargetProfile
+        ? null
+        : (hydrateConciergeProfilesFromPack([order.targetUsername], profilePack)
+            .profilesByUsername.get(normalized(order.targetUsername)) ?? null);
     const targetProfile = existingTargetProfile
+        ?? packedTargetProfile
         ?? await withProvider(prepared.sourceRequestId, context, async (slot, provider) => {
                 const profile = await provider.getProfile?.(order.targetUsername, providerContext(prepared.sourceRequestId, slot));
                 if (!profile) throw new Error('CONCIERGE_TARGET_PROFILE_UNAVAILABLE');
@@ -1215,7 +1252,6 @@ async function collectOrder(
     const selectedPublic = publicMutuals.slice(0, plan.detailedMutualLimit);
     const selectedNames = selectedPublic.map(row => row.username);
     const hydrated = new Map<string, InstagramProfile>();
-    const profilePack = loadConciergeProfilePack();
     for (let index = 0; index < selectedNames.length; index += 30) {
         const batch = selectedNames.slice(index, index + 30);
         const packed = hydrateConciergeProfilesFromPack(batch, profilePack);
@@ -1650,9 +1686,10 @@ async function loadCohort(): Promise<FrozenCohort> {
         || members.filter(member => member.cohort === 'failed_canary').length !== 3) {
         throw new Error('CONCIERGE_COHORT_MANIFEST_INVALID');
     }
-    const scopeMembers = activeScope
+    const frozenScopeMembers = activeScope
         ? selectConciergeBatchActiveScope(members)
         : members;
+    const scopeMembers = selectConciergeBatchOnlyOrders(frozenScopeMembers);
     const allowlist = retryCodeAllowlist();
     const existingRelationshipArtifacts = parseConciergeExistingRelationshipArtifacts(
         process.env.CONCIERGE_BATCH_EXISTING_RELATIONSHIP_RUNS,
