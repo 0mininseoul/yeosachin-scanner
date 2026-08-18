@@ -34,6 +34,7 @@ import {
     getAiStagePolicy,
     type AiStageName,
     type AiStagePolicyVersion,
+    type AiThinkingLevel,
 } from './stage-policy';
 import type { ReplayStatelessCapability } from './replay-stateless-capability';
 import {
@@ -364,6 +365,12 @@ const GENDER_NAME_ONLY_SCHEMA_VERSION = 1;
 const GENDER_NAME_ONLY_MAX_OUTPUT_TOKENS = 4_096;
 /** v2.11-only: this model's structured-JSON-schema adherence is the point of the name-only batch. */
 const GENDER_NAME_ONLY_V211_MODEL = 'gemini-3.7-flash';
+/**
+ * gemini-3.7-flash rejects THINKING_LEVEL_MINIMAL with a 400, and the shared genderTriage
+ * policy carries MINIMAL for the image path. The name-only batch therefore pins its own
+ * level alongside its own model; naming a gender from a name is a reasoning task anyway.
+ */
+const GENDER_NAME_ONLY_V211_THINKING_LEVEL = 'LOW' as const;
 const genderNameOnlyCandidateIdSchema = z.string().trim().min(1).max(128);
 const genderNameOnlyCandidateSchema = z.object({
     candidateId: genderNameOnlyCandidateIdSchema,
@@ -2134,6 +2141,13 @@ function genderNameOnlyModelFor(policyVersion: AiStagePolicyVersion): string {
         : getAiStagePolicy(policyVersion, 'genderTriage').model;
 }
 
+/** Must move with genderNameOnlyModelFor: the model constrains the admissible level. */
+function genderNameOnlyThinkingLevelFor(policyVersion: AiStagePolicyVersion): AiThinkingLevel {
+    return policyVersion === AI_STAGE_POLICY_V211_VERSION
+        ? GENDER_NAME_ONLY_V211_THINKING_LEVEL
+        : getAiStagePolicy(policyVersion, 'genderTriage').thinkingLevel;
+}
+
 function genderNameOnlyResultIdentity(
     candidates: readonly z.output<typeof genderNameOnlyCandidateSchema>[],
     policyVersion: AiStagePolicyVersion,
@@ -2143,7 +2157,7 @@ function genderNameOnlyResultIdentity(
     return createAnalysisV2AiResultIdentity({
         stage: 'genderTriage',
         modelName: genderNameOnlyModelFor(policyVersion),
-        thinkingLevel: policy.thinkingLevel,
+        thinkingLevel: genderNameOnlyThinkingLevelFor(policyVersion),
         mediaResolution: policy.mediaResolution,
         promptVersion: GENDER_NAME_ONLY_PROMPT_VERSION,
         schemaVersion: GENDER_NAME_ONLY_SCHEMA_VERSION,
@@ -2189,6 +2203,7 @@ export async function genderNameOnlyBatch(
             requestId: audit.requestId,
             startingAttempt: prepared.startingAttempt,
             model: genderNameOnlyModelFor(policyVersion),
+            thinkingLevel: genderNameOnlyThinkingLevelFor(policyVersion),
             maxOutputTokens: GENDER_NAME_ONLY_MAX_OUTPUT_TOKENS,
             promptVersion: GENDER_NAME_ONLY_PROMPT_VERSION,
             schemaVersion: GENDER_NAME_ONLY_SCHEMA_VERSION,
