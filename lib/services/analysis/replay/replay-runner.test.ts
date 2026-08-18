@@ -1796,6 +1796,143 @@ describe('AI-only replay runner', () => {
         });
     });
 
+    // The genderResolution stage's global concurrent-slot cap (2, no
+    // request_id filter - shared across every concurrent replay) throws
+    // ANALYSIS_V2_AI_RESOLVER_CAPACITY_SKIPPED when contended, surfaced here
+    // as outcome 'capacity_skipped'. Symmetric with 971b29ac's genderTriage
+    // fix: only this transient outcome is retried, with the same bounded
+    // attempt count and backoff.
+    function v29PersonalAmbiguousRunner(operations: Partial<ReplayAiRunner>): ReplayAiRunner {
+        return v29Runner({
+            triage: async () => ({
+                outcome: 'ok', attempts: 1, retries: 0, elapsedMs: 1,
+                value: {
+                    assessment: {
+                        inferredGender: 'unknown', confidence: 'low',
+                        ownerConsistency: 'multiple_or_unclear', evidenceSelectionIds: ['m1'],
+                    },
+                    routingDecision: 'route_to_feature_analysis',
+                    routingReason: 'conserve_female_recall',
+                    analyzedSelectionIds: ['m1', 'm2'],
+                    v29AccountContext: 'personal',
+                },
+            }),
+            feature: vi.fn(),
+            ...operations,
+        });
+    }
+    const v29Ai29BundleOverride: AnalysisV2ReplayBundle = {
+        ...bundle,
+        capture: {
+            ...bundle.capture,
+            sourceLineage: {
+                ...bundle.capture.sourceLineage,
+                policyVersions: {
+                    ...bundle.capture.sourceLineage.policyVersions,
+                    aiStage: 'ai-stage-policy-v2.9',
+                    scheduler: 'ai-scheduler-v1',
+                },
+            },
+        },
+    };
+    const resolvedFemaleValue = {
+        outcome: 'ok' as const,
+        attempts: 1, retries: 0, elapsedMs: 3,
+        value: {
+            assessment: {
+                inferredGender: 'female' as const, confidence: 'high' as const,
+                ownerConsistency: 'same_person' as const, evidenceSelectionIds: ['m1', 'm2'],
+            },
+            analyzedSelectionIds: ['m1', 'm2'],
+        },
+    };
+    /**
+     * The resolver's promise is tracked (not awaited) while the rest of the
+     * replay's required work continues; once every required task settles, any
+     * resolver not yet settled is cut off (see abortAndObserveResolvers /
+     * resolver.cutoff). In production a batch of many real Gemini calls keeps
+     * that barrier open long enough for an early-launched resolver's retry to
+     * land; a single-candidate test with instant mocks does not, so this fixture
+     * bundle's one private account is given an artificially slow privateNames
+     * response to hold the barrier open past the resolver's real retry backoff -
+     * the same "real work in flight elsewhere" cover the retry relies on in
+     * production, not a relaxation of the cutoff mechanism itself.
+     */
+    function slowPrivateNames(delayMs: number): NonNullable<ReplayAiRunner['privateNames']> {
+        return async () => {
+            await new Promise(resolve => setTimeout(resolve, delayMs));
+            return { outcome: 'ok', attempts: 1, retries: 0, elapsedMs: delayMs, value: [] };
+        };
+    }
+
+    it('retries the resolver once after a transient capacity_skipped rejection, and applies the recovered result', async () => {
+        // Criterion 1: capacity_skipped once, then ok -> final outcome 'ok',
+        // resolver.ready increments (the candidate is not permanently lost).
+        let attempts = 0;
+        const resolveGender = vi.fn(async () => {
+            attempts += 1;
+            if (attempts === 1) {
+                return { outcome: 'capacity_skipped' as const, attempts: 1, retries: 0, elapsedMs: 0 };
+            }
+            return resolvedFemaleValue;
+        });
+        const report = await runAnalysisV2AiReplay({
+            bundle: v29Ai29BundleOverride,
+            mode: 'paid-ai',
+            paidAiOptIn: true,
+            runner: v29PersonalAmbiguousRunner({
+                resolveGender,
+                privateNames: slowPrivateNames(500),
+            }),
+        });
+
+        expect(resolveGender).toHaveBeenCalledTimes(2);
+        expect(report.resolver).toMatchObject({ ready: 1, applied: 1, cutoff: 0, capacitySkipped: 0 });
+    });
+
+    it('drops the candidate after exhausting resolver capacity_skipped retries, without exceeding the attempt cap', async () => {
+        // Criterion 2 + 4: capacity_skipped every time -> eventually dropped
+        // (same as today's worst case), resolver.capacitySkipped increments,
+        // and the retry loop is bounded (no infinite loop).
+        const resolveGender = vi.fn(async () => (
+            { outcome: 'capacity_skipped' as const, attempts: 1, retries: 0, elapsedMs: 0 }
+        ));
+        const report = await runAnalysisV2AiReplay({
+            bundle: v29Ai29BundleOverride,
+            mode: 'paid-ai',
+            paidAiOptIn: true,
+            runner: v29PersonalAmbiguousRunner({
+                resolveGender,
+                privateNames: slowPrivateNames(1_000),
+            }),
+        });
+
+        // Same retry cap as 971b29ac's genderTriage fix (3 attempts total).
+        expect(resolveGender).toHaveBeenCalledTimes(3);
+        expect(report.resolver.capacitySkipped).toBe(1);
+        expect(report.resolver.outcomes.capacitySkipped).toBe(1);
+        expect(report.resolver.ready).toBe(0);
+        expect(report.resolver.cutoff).toBe(0);
+    });
+
+    it('does not retry a genuinely rejected (non-capacity) resolver outcome', async () => {
+        // Criterion 3: rejected/failed outcomes are not transient capacity
+        // contention, so they must not be retried.
+        const resolveGender = vi.fn(async () => (
+            { outcome: 'rejected' as const, attempts: 1, retries: 0, elapsedMs: 5 }
+        ));
+        const report = await runAnalysisV2AiReplay({
+            bundle: v29Ai29BundleOverride,
+            mode: 'paid-ai',
+            paidAiOptIn: true,
+            runner: v29PersonalAmbiguousRunner({ resolveGender }),
+        });
+
+        expect(resolveGender).toHaveBeenCalledTimes(1);
+        expect(report.resolver.capacitySkipped).toBe(0);
+        expect(report.resolver.ready).toBe(0);
+    });
+
     it('counts a verified-looking official account as official rather than already verified', async () => {
         const feature = vi.fn();
         const resolveGender = vi.fn();

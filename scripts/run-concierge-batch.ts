@@ -93,6 +93,35 @@ export function conciergeNameOnlyDiagnosticMessage(
     return `concierge name-only classification: ${JSON.stringify(diagnostics)}\n`;
 }
 
+/**
+ * The v2.9 gender-resolver admission gate silently dropped most of the batch's
+ * "unknown" outcomes with no record of why. Surface the per-reason tally so a
+ * canary run's drop-off is auditable after the fact instead of only visible as
+ * an aggregate unknown ratio.
+ *
+ * uncertain_or_absent only ever gets a nonzero count when
+ * CONCIERGE_BATCH_RESOLVER_WIDE_ADMISSION is rolled back to 'false'/'0' (the
+ * legacy account-context gate) - it has to stay in the shape so a rollback's
+ * drop-off is observable too, not just the wide-admission default's.
+ */
+export function conciergeGenderResolverAdmissionDiagnosticMessage(
+    admission: Readonly<{
+        eligible: number;
+        alreadyVerified: number;
+        officialOrGroup: number;
+        uncertainOrAbsent: number;
+        insufficientMedia: number;
+    }>,
+): string {
+    return `concierge gender-resolver admission: ${JSON.stringify({
+        eligible: admission.eligible,
+        already_verified: admission.alreadyVerified,
+        official_or_group: admission.officialOrGroup,
+        uncertain_or_absent: admission.uncertainOrAbsent,
+        insufficient_media: admission.insufficientMedia,
+    })}\n`;
+}
+
 export function sanitizeConciergeBatchDiagnostic(value: string, maximum: number): string {
     let sanitized = value;
     for (const [pattern, replacement] of CONCIERGE_DIAGNOSTIC_REDACTIONS) {
@@ -396,6 +425,11 @@ const BATCH_COPY_NUMBER = /\b\d+(?:[.,]\d+)?\b/u;
 const BATCH_COPY_NO_EVIDENCE_SIGNAL = /(?:단서|재료|정보|근거|확인|판단|드러난|남겨진|찾을|읽을|없|부족|어렵|제한|적)/u;
 const BATCH_COPY_NO_EVIDENCE_FORBIDDEN = /(?:실루엣|이목구비|얼굴|표정|헤어스타일|머리카락|체형|옷차림|포즈|외모|분위기|스타일|사진|이미지|장면|행동|태도|성격|관계|호감|긴장|시선|매력)/u;
 const ANONYMOUS_PROFILE_IMAGE_MARKER = /(?:anonymous_profile_pic|YW5vbnltb3VzX3Byb2ZpbGVfcGlj)/iu;
+// Characters that render as blank space but aren't matched by String#trim():
+// braille pattern blank, Hangul filler/jamo fillers, zero-width and BOM chars.
+// A profile with one of these as its whole "full name" must fall back to the
+// username subject, not a blank-looking "님은 ..." sentence.
+const BATCH_COPY_BLANK_LOOKING_CHARS = /[\u115F\u1160\u200B\u200C\u200D\u2800\u3164\uFEFF]/gu;
 
 /** Instagram's anonymous avatar URL is media-shaped but carries no subject evidence. */
 export function isUsableProfileImageUrl(value: string | null | undefined): boolean {
@@ -617,12 +651,15 @@ function cleanBatchCopyText(value: string | null | undefined, maximum: number): 
 
 function batchCopySubjectLabel(fullName: string | null | undefined, username: string): string {
     const cleanFullName = cleanBatchCopyText(fullName, 200);
-    if (cleanFullName
-        && !BATCH_COPY_PUBLIC_IDENTIFIER.test(cleanFullName)
-        && !BATCH_COPY_ROLE_LABELS.test(cleanFullName)) {
-        return /^[가-힣]{3}$/u.test(cleanFullName)
-            ? `${[...cleanFullName].slice(1).join('')}님`
-            : `${cleanFullName}님`;
+    const visibleFullName = cleanFullName
+        ? cleanFullName.replace(BATCH_COPY_BLANK_LOOKING_CHARS, ' ').replace(/\s+/g, ' ').trim()
+        : '';
+    if (visibleFullName
+        && !BATCH_COPY_PUBLIC_IDENTIFIER.test(visibleFullName)
+        && !BATCH_COPY_ROLE_LABELS.test(visibleFullName)) {
+        return /^[가-힣]{3}$/u.test(visibleFullName)
+            ? `${[...visibleFullName].slice(1).join('')}님`
+            : `${visibleFullName}님`;
     }
     return normalized(username);
 }
@@ -1716,7 +1753,7 @@ export function conciergeBatchNameOnlyEnabled(
 
 async function classifyOrder(collected: CollectedOrder): Promise<ClassifiedOrder> {
     const details: ReplayAccountAiDetail[] = [];
-    await runAnalysisV2AiReplay({
+    const replayReport = await runAnalysisV2AiReplay({
         bundle: collected.captured.bundle,
         runner: createReplayStagedAiAdapter('ai-stage-policy-v2.11'),
         mode: 'paid-ai',
@@ -1725,6 +1762,9 @@ async function classifyOrder(collected: CollectedOrder): Promise<ClassifiedOrder
         nameOnlyEnabled: conciergeBatchNameOnlyEnabled(),
         onAccountAnalyzed(detail) { details.push(detail); },
     });
+    process.stderr.write(
+        conciergeGenderResolverAdmissionDiagnosticMessage(replayReport.resolver.admission),
+    );
     const detailsByOrdinal = new Map(details.map(detail => [detail.ordinal, detail]));
     const publicByOrdinal = new Map(collected.source.publicProfiles.map(item => [item.ordinal, item.profile]));
     const publicCount = collected.source.publicProfiles.length;

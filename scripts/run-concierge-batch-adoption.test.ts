@@ -54,6 +54,7 @@ import {
     conciergeBatchAiClassificationFields,
     conciergeBatchNameOnlyEnabled,
     collectOrder,
+    conciergeGenderResolverAdmissionDiagnosticMessage,
     conciergeNameOnlyDiagnosticMessage,
     conciergeBatchFailureDiagnostic,
     generateConciergeBatchCandidateCopies,
@@ -616,6 +617,29 @@ describe('concierge name-only gender classification', () => {
         expect(message).not.toContain('https://');
     });
 
+    it('formats a gender-resolver admission diagnostic covering all 5 reasons for the execution log', () => {
+        // Criterion 6: the 45-of-88 image-path resolver drop-off had no
+        // post-hoc reason breakdown; this line is what makes it auditable.
+        // uncertain_or_absent stays in the shape even though it is normally
+        // zero (wide admission default) - it is the only reason that becomes
+        // nonzero when CONCIERGE_BATCH_RESOLVER_WIDE_ADMISSION is rolled back,
+        // and a rollback's drop-off needs to be observable too.
+        const message = conciergeGenderResolverAdmissionDiagnosticMessage({
+            eligible: 43,
+            alreadyVerified: 5,
+            officialOrGroup: 2,
+            uncertainOrAbsent: 7,
+            insufficientMedia: 38,
+        });
+
+        expect(message).toContain('concierge gender-resolver admission:');
+        expect(message).toContain('"eligible":43');
+        expect(message).toContain('"already_verified":5');
+        expect(message).toContain('"official_or_group":2');
+        expect(message).toContain('"uncertain_or_absent":7');
+        expect(message).toContain('"insufficient_media":38');
+    });
+
     it('records a name-only ledger pass as no-image even when the raw profile URL looks like a real photo', () => {
         // Name-only routing already decided (via the AI pipeline's byte-verified
         // hasProfileImage signal) that this candidate has no usable profile image.
@@ -875,6 +899,13 @@ describe('concierge existing relationship artifact resolver', () => {
         ['수경', '수경님'],
         ['Alex Kim', 'Alex Kim님'],
         [null, 'candidate_user'],
+        // Canary rank 9 (@imm.h_l): a full name of nothing but a braille-pattern
+        // blank (U+2800) isn't caught by String#trim(), so it used to pass the
+        // "has a full name" check and produce a subject-less "⠀님은 ..." line.
+        ['⠀', 'candidate_user'],
+        ['ㅤ', 'candidate_user'],
+        ['​', 'candidate_user'],
+        ['   ⠀ㅤ   ', 'candidate_user'],
     ])('formats %s as %s', (fullName, expected) => {
         const evidence = { ...copyEvidence([]), candidateFullName: fullName };
         expect(buildConciergeBatchHighRiskCopyPrompt(evidence))

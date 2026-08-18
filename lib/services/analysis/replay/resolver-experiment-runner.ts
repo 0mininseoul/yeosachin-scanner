@@ -275,9 +275,15 @@ export async function runStrongUncertainResolverExperiment(input: {
         const resolverMedia = selectAnalysisV2GenderResolverMedia(
             mediaFor(profile, profile.resolverSelectionIds),
         );
+        // This experiment's whole premise is comparing the "existing" admitted
+        // cohort against a separate "uncertain" pilot cohort, which requires the
+        // narrow account-context gate regardless of the production kill switch -
+        // otherwise 'uncertain_or_absent' never fires and there is no cohort to
+        // pilot.
         const admission = v29GenderResolverAdmission(
             triage.value as GenderTriageResult,
             resolverMedia.length,
+            false,
         );
         if (admission === 'eligible') {
             diagnostics.accountContextAdmission.eligible++;

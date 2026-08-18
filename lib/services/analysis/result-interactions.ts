@@ -89,7 +89,8 @@ export function toResultInteractionSummary(
  * high-risk narrative contract.
  */
 export function toOwnerResultInteractionSummary(
-    row: Record<string, unknown>
+    row: Record<string, unknown>,
+    targetUsername?: string
 ): OwnerResultInteractionSummary {
     if (
         row.risk_grade !== 'normal'
@@ -102,7 +103,13 @@ export function toOwnerResultInteractionSummary(
         ? toSafeRiskAnalysis(row.risk_analysis)
         : [];
     const overview = sanitizePublicRiskNarrativeLine(row.one_line_overview);
-    if (!overview || !isSafePublicRiskNarrativeLine(overview)) {
+    const candidateUsername = typeof row.suspect_instagram_id === 'string'
+        ? row.suspect_instagram_id
+        : undefined;
+    // The candidate's own handle and the target's handle are operator-approved
+    // exceptions to the public-copy digit block (see narrative-privacy.ts) -
+    // without them, any digit in either handle silently drops the whole overview.
+    if (!overview || !isSafePublicRiskNarrativeLine(overview, [candidateUsername, targetUsername])) {
         // The additive overview is optional for historical rows. Never let a
         // missing or malformed overview erase a complete legacy high-risk
         // narrative that already satisfies the public contract.

@@ -221,7 +221,7 @@ export async function GET(
                     : undefined,
                 bio: result.bio || '',
                 recentMutualRank: recentMutualRanks.get(instagramId.toLowerCase()),
-                ...toOwnerResultInteractionSummary(result),
+                ...toOwnerResultInteractionSummary(result, analysisRequest.target_instagram_id),
             };
         }) || [];
 

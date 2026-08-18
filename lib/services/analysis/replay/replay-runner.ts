@@ -472,21 +472,45 @@ function sleep(ms: number): Promise<void> {
  * backoff before retrying gives those in-flight calls time to release their
  * slot so the retry can actually succeed.
  */
-const INDIVIDUAL_TRIAGE_MAX_ATTEMPTS = 3;
-const INDIVIDUAL_TRIAGE_RETRY_DELAY_MS = 250;
+const TRANSIENT_STAGE_RETRY_MAX_ATTEMPTS = 3;
+const TRANSIENT_STAGE_RETRY_DELAY_MS = 250;
+
+async function withTransientStageRetry<T>(
+    call: () => Promise<ReplayInvocation<T>>,
+    shouldRetry: (result: ReplayInvocation<T>) => boolean,
+): Promise<ReplayInvocation<T>> {
+    let last: ReplayInvocation<T> | undefined;
+    for (let attempt = 0; attempt < TRANSIENT_STAGE_RETRY_MAX_ATTEMPTS; attempt += 1) {
+        if (attempt > 0) {
+            await sleep(TRANSIENT_STAGE_RETRY_DELAY_MS * attempt);
+        }
+        last = await call();
+        if (!shouldRetry(last)) return last;
+    }
+    return last!;
+}
 
 async function withIndividualTriageRetry<T>(
     call: () => Promise<ReplayInvocation<T>>,
 ): Promise<ReplayInvocation<T>> {
-    let last: ReplayInvocation<T> | undefined;
-    for (let attempt = 0; attempt < INDIVIDUAL_TRIAGE_MAX_ATTEMPTS; attempt += 1) {
-        if (attempt > 0) {
-            await sleep(INDIVIDUAL_TRIAGE_RETRY_DELAY_MS * attempt);
-        }
-        last = await call();
-        if (last.outcome === 'ok') return last;
-    }
-    return last!;
+    return withTransientStageRetry(call, result => result.outcome !== 'ok');
+}
+
+/**
+ * The genderResolution stage's global concurrent-slot cap (2, enforced in
+ * the reserve/lease RPC - see 20260725010000_add_analysis_v2_gender_resolution_stage.sql)
+ * has no request_id filter, so it is contended by every concurrent replay,
+ * not just this one. A rejected lease throws ANALYSIS_V2_AI_RESOLVER_CAPACITY_SKIPPED
+ * (surfaced here as outcome 'capacity_skipped') and, like the genderTriage
+ * capacity rejection above, was previously treated as a permanent failure
+ * after exactly one attempt - even though the two global slots free up
+ * quickly. Only capacity_skipped is transient here; a real rejected/failed
+ * resolution is not retried.
+ */
+async function withResolverCapacityRetry(
+    call: () => Promise<ReplayInvocation<GenderResolutionResult>>,
+): Promise<ReplayInvocation<GenderResolutionResult>> {
+    return withTransientStageRetry(call, result => result.outcome === 'capacity_skipped');
 }
 
 async function runBounded<T>(values: readonly T[], concurrency: number, fn: (value: T) => Promise<void>): Promise<void> {
@@ -944,7 +968,8 @@ export async function runAnalysisV2AiReplay(input: {
                     },
                 };
                 launchedResolvers.push(trackedResolver);
-                const resolverPromise = runner.resolveGender({
+                const resolveGender = runner.resolveGender;
+                const resolverPromise = withResolverCapacityRetry(() => resolveGender({
                     ordinal: profile.ordinal,
                     media: resolverMedia,
                     signal: abort.signal,
@@ -974,7 +999,7 @@ export async function runAnalysisV2AiReplay(input: {
                                 (failures[value.disposition] ?? 0) + 1;
                         }
                     },
-                });
+                }));
                 trackedResolver.promise = resolverPromise.then(value => {
                     trackedResolver!.settled = true;
                     trackedResolver!.value = value;

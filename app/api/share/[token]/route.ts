@@ -225,7 +225,7 @@ export async function GET(
                    The bounded one-line overview is the public result copy and is
                    intentionally retained for the shared report. */
                 recentMutualRank: recentMutualRanks.get(instagramId.toLowerCase()),
-                ...toOwnerResultInteractionSummary(result),
+                ...toOwnerResultInteractionSummary(result, analysisRequest.target_instagram_id),
             };
         }) || [];
 

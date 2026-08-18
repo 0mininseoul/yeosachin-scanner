@@ -378,6 +378,7 @@ export default function ShareResultPage({ params }: PageProps) {
                                         }
                                         externalProfileLinks={false}
                                         maskHandle={data.maskedByClient}
+                                        targetInstagramId={summary.targetInstagramId}
                                     />
                                 </div>
                             ))}
