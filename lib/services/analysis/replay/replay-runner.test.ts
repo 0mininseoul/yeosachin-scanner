@@ -1115,7 +1115,7 @@ describe('AI-only replay runner', () => {
             },
         }));
         const feature = vi.fn();
-        const details: Array<{ feature: unknown }> = [];
+        const details: Array<{ feature: unknown; finalClassification: string }> = [];
         const noMediaBundle = {
             ...firstPaymentBundle,
             profiles: [{
@@ -1136,13 +1136,85 @@ describe('AI-only replay runner', () => {
             mode: 'paid-ai',
             paidAiOptIn: true,
             evaluationPolicy: noMediaBundle.capture.evaluationPolicy,
-            onAccountAnalyzed(detail) { details.push(detail); },
+            onAccountAnalyzed(detail) {
+                details.push({
+                    feature: detail.feature,
+                    finalClassification: detail.finalClassification,
+                });
+            },
         });
 
         expect(feature).not.toHaveBeenCalled();
         expect(details).toHaveLength(1);
-        expect(details[0]).toMatchObject({ feature: null });
+        expect(details[0]).toMatchObject({ feature: null, finalClassification: 'unresolved' });
         expect(report.stages.featureAnalysis.calls).toBe(0);
+        expect(report.gender.unknown).toBe(1);
+    });
+
+    it('does not promote a concierge candidate to female without a feature result', async () => {
+        const triage = vi.fn(async () => ({
+            outcome: 'ok' as const,
+            attempts: 1,
+            retries: 0,
+            elapsedMs: 1,
+            value: {
+                assessment: {
+                    inferredGender: 'unknown' as const,
+                    confidence: 'low' as const,
+                    ownerConsistency: 'not_visible' as const,
+                    evidenceSelectionIds: [],
+                },
+                routingDecision: 'route_to_feature_analysis' as const,
+                routingReason: 'conserve_female_recall' as const,
+                analyzedSelectionIds: ['profile:female'],
+                v29AccountContext: 'personal' as const,
+            },
+        }));
+        const feature = vi.fn(async () => ({
+            outcome: 'failed' as const,
+            attempts: 1,
+            retries: 0,
+            elapsedMs: 1,
+        }));
+        const resolveGender = vi.fn(async () => ({
+            outcome: 'ok' as const,
+            attempts: 1,
+            retries: 0,
+            elapsedMs: 1,
+            value: {
+                assessment: {
+                    inferredGender: 'female' as const,
+                    confidence: 'high' as const,
+                    ownerConsistency: 'same_person' as const,
+                    evidenceSelectionIds: ['profile:female', 'feed:female'],
+                },
+                analyzedSelectionIds: ['profile:female', 'feed:female'],
+            },
+        }));
+        const details: Array<{ feature: unknown; finalClassification: string }> = [];
+        const singleCandidateBundle = {
+            ...firstPaymentBundle,
+            profiles: [firstPaymentBundle.profiles[0]!],
+        } satisfies AnalysisV2ReplayBundle;
+
+        const report = await runAnalysisV2AiReplay({
+            bundle: singleCandidateBundle,
+            runner: v211Runner({ triage, feature, resolveGender }),
+            mode: 'paid-ai',
+            paidAiOptIn: true,
+            evaluationPolicy: singleCandidateBundle.capture.evaluationPolicy,
+            onAccountAnalyzed(detail) {
+                details.push({
+                    feature: detail.feature,
+                    finalClassification: detail.finalClassification,
+                });
+            },
+        });
+
+        expect(feature).toHaveBeenCalledOnce();
+        expect(resolveGender).toHaveBeenCalledOnce();
+        expect(details[0]).toMatchObject({ feature: null, finalClassification: 'unresolved' });
+        expect(report.gender.female).toBe(0);
         expect(report.gender.unknown).toBe(1);
     });
 

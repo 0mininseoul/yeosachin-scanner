@@ -1026,7 +1026,7 @@ export async function runAnalysisV2AiReplay(input: {
                     }
                 }
             }
-            const reconciliation = applyGenderResolution({
+            const reconciled = applyGenderResolution({
                 baselineClassification: outcome.baseline,
                 baselineSource: outcome.baseline === 'verified_female'
                     || outcome.baseline === 'verified_non_female'
@@ -1036,6 +1036,15 @@ export async function runAnalysisV2AiReplay(input: {
                 feature: outcome.feature?.value ?? null,
                 resolver: resolved?.outcome === 'ok' ? resolved.value ?? null : null,
             });
+            const reconciliation = usesConciergeFirstPass
+                && reconciled.finalClassification === 'verified_female'
+                && outcome.feature?.value === undefined
+                ? {
+                    finalClassification: 'unresolved' as const,
+                    classificationSource: 'unknown' as const,
+                    resolverApplied: false,
+                }
+                : reconciled;
             if (resolved?.outcome === 'ok') {
                 if (reconciliation.resolverApplied) {
                     resolver.applied++;
