@@ -1,4 +1,10 @@
-import type { FeatureAnalysisResult, GenderResolutionResult, GenderTriageResult } from '@/lib/services/ai/v2-staged-analysis';
+import type {
+    FeatureAnalysisResult,
+    GenderNameOnlyCandidateInput,
+    GenderNameOnlyResult,
+    GenderResolutionResult,
+    GenderTriageResult,
+} from '@/lib/services/ai/v2-staged-analysis';
 import { MAX_FEATURE_MEDIA } from '@/lib/domain/analysis/media-policy';
 import { applyGenderResolution, type GenderBaselineClassification } from '@/lib/services/ai/gender-resolution-reconciliation';
 import { aiStagePolicySupports } from '@/lib/services/ai/stage-policy';
@@ -62,6 +68,9 @@ export interface ReplayTriageInput {
     accountProfile?: ReplayAccountProfile;
 }
 
+export type ReplayNameOnlyInput = GenderNameOnlyCandidateInput;
+export type ReplayNameOnlyResult = GenderNameOnlyResult;
+
 export interface ReplayFirstPassInput {
     ordinal: number;
     /** The first pass is never invoked without a non-empty display name. */
@@ -79,6 +88,7 @@ export interface ReplayAccountProfile {
 export interface ReplayAiRunner {
     firstPass?(input: ReplayFirstPassInput): Promise<ReplayInvocation<GenderTriageResult>>;
     triage?(input: ReplayTriageInput): Promise<ReplayInvocation<GenderTriageResult>>;
+    nameOnly?(input: readonly ReplayNameOnlyInput[]): Promise<ReplayInvocation<readonly ReplayNameOnlyResult[]>>;
     feature?(input: { ordinal: number; bio: string | null; accountProfile?: ReplayAccountProfile; media: readonly ReplayMedia[]; captions: readonly ReplayCaption[]; triage: GenderTriageResult }): Promise<ReplayInvocation<FeatureAnalysisResult>>;
     privateNames?(input: readonly PrivateNameAccountInput[]): Promise<ReplayInvocation<unknown>>;
     resolveGender?(input: {
@@ -182,7 +192,7 @@ export interface AnalysisV2AiReplayReport {
 export interface ReplayAccountAiOutput {
     ordinal: number;
     finalClassification: GenderBaselineClassification;
-    classificationSource: 'triage' | 'feature' | 'gender_resolution' | 'unknown' | 'unavailable';
+    classificationSource: 'triage' | 'feature' | 'gender_resolution' | 'name_only' | 'unknown' | 'unavailable';
     featureOverview: string | null;
 }
 
@@ -487,6 +497,22 @@ export function selectReplayFeatureMedia(
     ];
 }
 
+function replayNameOnlyTriageResult(
+    result: ReplayNameOnlyResult,
+): GenderTriageResult {
+    return {
+        assessment: {
+            inferredGender: result.gender,
+            confidence: result.confidence,
+            ownerConsistency: 'not_visible',
+            evidenceSelectionIds: [],
+        },
+        routingDecision: 'route_to_feature_analysis',
+        routingReason: 'conserve_female_recall',
+        analyzedSelectionIds: [],
+    };
+}
+
 function safeLine(report: AnalysisV2AiReplayReport): string {
     return JSON.stringify({
         status: 'ok',
@@ -749,6 +775,26 @@ export async function runAnalysisV2AiReplay(input: {
             })
             : Promise.resolve());
 
+        const nameOnlyProfiles = usesConciergeFirstPass
+            ? publicProfiles.filter(profile => (
+                profile.hasProfileImage === false
+                && Boolean(profile.fullName?.trim())
+            ))
+            : [];
+        const nameOnlyOrdinals = new Set(nameOnlyProfiles.map(profile => profile.ordinal));
+        let nameOnlyInvocation: ReplayInvocation<readonly ReplayNameOnlyResult[]> | null = null;
+        const nameOnlyTask = observeRequiredTask(
+            nameOnlyProfiles.length > 0 && runner.nameOnly
+                ? runner.nameOnly(nameOnlyProfiles.map(profile => ({
+                    candidateId: `ordinal:${profile.ordinal}`,
+                    fullName: profile.fullName!.trim(),
+                }))).then(result => {
+                    nameOnlyInvocation = result;
+                    collect(stages.genderTriage, durations.genderTriage, result);
+                })
+                : Promise.resolve(),
+        );
+
         const prepared: PreparedPublicReplay[] = [];
         const v29AccountProfile = (
             profile: typeof publicProfiles[number],
@@ -909,7 +955,7 @@ export async function runAnalysisV2AiReplay(input: {
             });
         };
         const publicTask = observeRequiredTask(runBounded(
-            publicProfiles,
+            publicProfiles.filter(profile => !nameOnlyOrdinals.has(profile.ordinal)),
             supportsGenderTriageMicrobatch ? 6 : 4,
             async profile => {
                 if (replayWorkFailed) return;
@@ -969,11 +1015,48 @@ export async function runAnalysisV2AiReplay(input: {
             },
         ));
         try {
-            await Promise.all([privateTask, publicTask]);
+            await Promise.all([privateTask, publicTask, nameOnlyTask]);
         } catch (error) {
             await abortAndObserveResolvers(launchedResolvers, cutoffBookkeepingMs);
             throw error;
         }
+
+        // The value is assigned by the observed promise callback above; keep
+        // the snapshot explicit because TypeScript cannot follow that
+        // assignment across the Promise.all boundary.
+        const nameOnlyInvocationSnapshot = nameOnlyInvocation as unknown as
+            ReplayInvocation<readonly ReplayNameOnlyResult[]> | null;
+        const nameOnlyResults: readonly ReplayNameOnlyResult[] =
+            nameOnlyInvocationSnapshot?.value ?? [];
+        const nameOnlyResultsByCandidateId = new Map<string, ReplayNameOnlyResult>(
+            nameOnlyResults.map(result => [result.candidateId, result] as const),
+        );
+        await Promise.all(nameOnlyProfiles.map(async profile => {
+            const result = nameOnlyResultsByCandidateId.get(`ordinal:${profile.ordinal}`);
+            if (!result) {
+                gender.unknown++;
+                await appendAccountOutput({
+                    ordinal: profile.ordinal,
+                    finalClassification: 'analysis_unavailable',
+                    classificationSource: 'unavailable',
+                    featureOverview: null,
+                }, { triage: null, feature: null });
+                return;
+            }
+            const triage = replayNameOnlyTriageResult(result);
+            const finalClassification = result.gender === 'female'
+                ? result.confidence === 'low' ? 'unresolved' : 'verified_female'
+                : result.gender === 'male' ? 'verified_non_female' : 'unresolved';
+            await appendAccountOutput({
+                ordinal: profile.ordinal,
+                finalClassification,
+                classificationSource: 'name_only',
+                featureOverview: null,
+            }, { triage, feature: null });
+            if (finalClassification === 'verified_female') gender.female++;
+            else if (finalClassification === 'verified_non_female') gender.male++;
+            else gender.unknown++;
+        }));
 
         await Promise.all(prepared.map(async outcome => {
             let resolved: ReplayInvocation<GenderResolutionResult> | undefined;

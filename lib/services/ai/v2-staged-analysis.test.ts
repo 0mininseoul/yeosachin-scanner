@@ -42,6 +42,7 @@ import {
     createGenderTriageResultIdentity,
     createGenderTriageMicrobatchAccountId,
     createGenderTriageMicrobatchResultIdentity,
+    createGenderNameOnlyBatchResultIdentity,
     createHighRiskNarrativeResultIdentity,
     conciergeBatchFeatureAnalysisMaxAttempts,
     createPartnerSafetyResultIdentity,
@@ -52,6 +53,7 @@ import {
     genderResolutionModelResponseSchemaFor,
     genderTriage,
     genderTriageMicrobatch,
+    genderNameOnlyBatch,
     highRiskNarrative,
     highRiskNarrativeInputSchema,
     highRiskNarrativeModelResponseSchema,
@@ -63,6 +65,7 @@ import {
     type FeatureAnalysisResult,
     type GenderResolutionResult,
     type GenderTriageResult,
+    type GenderNameOnlyCandidateInput,
     type HighRiskNarrativeInput,
     type NormalizedAiMediaSelection,
     type StagedAiAuditContext,
@@ -3784,6 +3787,75 @@ describe('V2 staged AI services', () => {
         );
         expect(prompt).not.toContain('미디어가 없는 account를 이름만으로 판정할 때는 빈 배열을 반환하세요.');
         expect(prompt).not.toContain('evidenceSelectionIds는 빈 배열을 허용합니다.');
+    });
+
+    it('classifies a bounded name-only batch from pure text with no visual evidence fields', async () => {
+        const candidates: GenderNameOnlyCandidateInput[] = [
+            { candidateId: 'ordinal:1', fullName: '김수연' },
+            { candidateId: 'ordinal:2', fullName: '박지민' },
+            { candidateId: 'ordinal:3', fullName: 'Brand Store' },
+        ];
+        const identity = createGenderNameOnlyBatchResultIdentity(
+            candidates,
+            AI_STAGE_POLICY_V211_VERSION,
+        );
+        mocks.analyzeWithGemini.mockResolvedValueOnce([
+            { candidateId: 'ordinal:1', gender: 'female', confidence: 'medium' },
+            { candidateId: 'ordinal:2', gender: 'male', confidence: 'low' },
+            { candidateId: 'ordinal:3', gender: 'unknown', confidence: 'low' },
+        ]);
+
+        const result = await genderNameOnlyBatch(candidates, {
+            requestId,
+            operationKey: identity.operationKey,
+            resultIdentity: identity,
+            prepare: vi.fn().mockResolvedValue({ result: null, source: null, startingAttempt: 1 }),
+            onBeforeAttempt: vi.fn(),
+            onAttemptTelemetry: vi.fn(),
+        }, { aiStagePolicyVersion: AI_STAGE_POLICY_V211_VERSION });
+
+        expect(result).toEqual([
+            { candidateId: 'ordinal:1', gender: 'female', confidence: 'medium' },
+            { candidateId: 'ordinal:2', gender: 'male', confidence: 'low' },
+            { candidateId: 'ordinal:3', gender: 'unknown', confidence: 'low' },
+        ]);
+        const [prompt, images, options] = mocks.analyzeWithGemini.mock.calls[0]!;
+        expect(images).toEqual([]);
+        expect(prompt).toContain('candidates(JSON)');
+        expect(prompt).toContain('김수연');
+        expect(prompt).not.toContain('mediaManifest');
+        expect(prompt).not.toContain('evidenceSelectionIds');
+        expect(options).toMatchObject({
+            stage: 'genderTriage',
+            analysisType: 'v2_gender_name_only_batch',
+            aiStagePolicyVersion: AI_STAGE_POLICY_V211_VERSION,
+            promptVersion: 'gender-name-only-v1',
+            schemaVersion: 1,
+            maxOutputTokens: 4_096,
+        });
+    });
+
+    it('rejects an unknown candidate ID and high confidence from a name-only response', async () => {
+        const candidates: GenderNameOnlyCandidateInput[] = [{
+            candidateId: 'ordinal:1',
+            fullName: '김수연',
+        }];
+        const identity = createGenderNameOnlyBatchResultIdentity(
+            candidates,
+            AI_STAGE_POLICY_V211_VERSION,
+        );
+        mocks.analyzeWithGemini.mockResolvedValueOnce([
+            { candidateId: 'ordinal:999', gender: 'female', confidence: 'high' },
+        ]);
+
+        await expect(genderNameOnlyBatch(candidates, {
+            requestId,
+            operationKey: identity.operationKey,
+            resultIdentity: identity,
+            prepare: vi.fn().mockResolvedValue({ result: null, source: null, startingAttempt: 1 }),
+            onBeforeAttempt: vi.fn(),
+            onAttemptTelemetry: vi.fn(),
+        }, { aiStagePolicyVersion: AI_STAGE_POLICY_V211_VERSION })).rejects.toThrow();
     });
 
     it('does not retry a rejected v2.9 batch and marks every affected item uncertain', async () => {

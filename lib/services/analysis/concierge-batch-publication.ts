@@ -14,6 +14,7 @@ import type { InteractionEvidenceRow, StoredInteractionCoverage } from './intera
 import type { ReverseLikeStatus } from '@/lib/domain/analysis/risk-policy';
 import type { ReplayAccountAiDetail } from './replay/replay-runner';
 import { supabaseAdmin } from '@/lib/supabase/admin';
+import { hasUsableInstagramProfileImage } from './profile-image-evidence';
 import {
     applyConciergeManualClassificationImport,
     createConciergeClassificationLedgerHash,
@@ -22,6 +23,11 @@ import {
 } from './concierge-classification-import';
 
 const HASH_PATTERN = /^[a-f0-9]{64}$/;
+const NAME_ONLY_CONFIDENCE_RANK: Record<'low' | 'medium' | 'high', number> = {
+    low: 1,
+    medium: 2,
+    high: 3,
+};
 
 type ConciergeInteractionCollectionStatus = 'collected' | 'not_collected' | 'failed';
 
@@ -157,14 +163,19 @@ export interface ConciergeManualPublicationInput {
     batchHighRiskCopy?: readonly ConciergeBatchHighRiskCopy[];
     /** Name-only classifications are an explicit, auditable concierge-only path. */
     nameOnlyProvenance?: Readonly<{
-        promotedUsernames: readonly string[];
-        achievedUnknownRatio: number;
-        targetUnknownRatio: number;
-        funnel?: ConciergeNameOnlyPromotionFunnel;
+        classifiedUsernames: readonly string[];
+        unknownRatio: number;
+        diagnostics?: ConciergeNameOnlyDiagnostics;
     }>;
 }
 
-export interface ConciergeNameOnlyPromotionFunnel {
+/**
+ * Bounded diagnostics for the independent name-only classifier.  The
+ * counters describe admission/classification, not a ranking or quota: the
+ * path reports its achieved unknown ratio and never promotes rows to meet a
+ * target.
+ */
+export interface ConciergeNameOnlyDiagnostics {
     totalPublicDetails: number;
     droppedNoProfile: number;
     droppedNoTriageAssessment: number;
@@ -178,9 +189,12 @@ export interface ConciergeNameOnlyPromotionFunnel {
     eligibleCount: number;
     eligibleMaleCount: number;
     eligibleFemaleCount: number;
-    promotionBudget: number;
-    promotedCount: number;
-    noPromotionReason?: 'promotion_budget_zero' | 'promotion_records_missing';
+    batchCount: number;
+    classifiedCount: number;
+    femaleCount: number;
+    maleCount: number;
+    unknownCount: number;
+    unknownRatio: number;
 }
 
 export interface ConciergeBatchCandidateCopy {
@@ -216,11 +230,10 @@ export interface ConciergeCanonicalPublication {
         hydrated: number;
         analyzed: number;
         nameOnly?: Readonly<{
-            promoted: number;
-            promotedUsernames: readonly string[];
+            classified: number;
+            classifiedUsernames: readonly string[];
             unknownRatio: number;
-            targetUnknownRatio: number;
-        } & Partial<ConciergeNameOnlyPromotionFunnel>>;
+        } & Partial<ConciergeNameOnlyDiagnostics>>;
     };
 }
 
@@ -926,12 +939,21 @@ function buildEffectiveDetails(
             };
         }
         const nameOnly = record.classificationSource === 'name_only';
+        if (nameOnly && hasUsableInstagramProfileImage(profile)) {
+            fail('CONCIERGE_PUBLICATION_NAME_ONLY_IMAGE_CONFLICT');
+        }
         if (nameOnly && (detail.feature
             || record.secondPass.status === 'collected'
             || record.secondPass.completeMedia === true
             || binding.secondPassStatus === 'collected'
             || binding.secondPassCompleteMedia === true)) {
             fail('CONCIERGE_PUBLICATION_NAME_ONLY_MEDIA_CONFLICT');
+        }
+        if (nameOnly && (!record.confidence
+            || NAME_ONLY_CONFIDENCE_RANK[record.confidence] > NAME_ONLY_CONFIDENCE_RANK.medium
+            || (effective === 'female'
+                && NAME_ONLY_CONFIDENCE_RANK[record.confidence] < NAME_ONLY_CONFIDENCE_RANK.medium))) {
+            fail('CONCIERGE_PUBLICATION_NAME_ONLY_CONFIDENCE_INVALID');
         }
         if (effective === 'female' && !nameOnly) {
             if (!detail.feature) fail('CONCIERGE_PUBLICATION_MANUAL_FEATURE_MISSING');
@@ -1009,19 +1031,21 @@ function buildConciergeManualPublicationInternal(
     validateReplayBindings(input.ledger, input.replay);
     const effectiveLedger = applyConciergeManualClassificationImport(input.ledger, input.manualImport);
     const nameOnlyRecords = effectiveLedger.records.filter(record => record.classificationSource === 'name_only');
-    const promotedNameOnlyRecords = nameOnlyRecords.filter(record => record.effectiveClassification !== 'unknown');
     if (input.nameOnlyProvenance) {
-        const promotedUsernames = input.nameOnlyProvenance.promotedUsernames.map(normalizeUsername);
-        const promotedSet = new Set(promotedUsernames);
-        if (promotedSet.size !== promotedUsernames.length
-            || promotedSet.size !== promotedNameOnlyRecords.length
-            || promotedNameOnlyRecords.some(record => !promotedSet.has(normalizeUsername(record.instagramId)))
-            || !Number.isFinite(input.nameOnlyProvenance.achievedUnknownRatio)
-            || input.nameOnlyProvenance.achievedUnknownRatio < 0
-            || input.nameOnlyProvenance.achievedUnknownRatio > 1
-            || !Number.isFinite(input.nameOnlyProvenance.targetUnknownRatio)
-            || input.nameOnlyProvenance.targetUnknownRatio < 0
-            || input.nameOnlyProvenance.targetUnknownRatio > 1) {
+        const classifiedUsernames = input.nameOnlyProvenance.classifiedUsernames.map(normalizeUsername);
+        const classifiedSet = new Set(classifiedUsernames);
+        if (classifiedSet.size !== classifiedUsernames.length
+            || classifiedSet.size !== nameOnlyRecords.length
+            || nameOnlyRecords.some(record => !classifiedSet.has(normalizeUsername(record.instagramId)))
+            || !Number.isFinite(input.nameOnlyProvenance.unknownRatio)
+            || input.nameOnlyProvenance.unknownRatio < 0
+            || input.nameOnlyProvenance.unknownRatio > 1
+            || (input.nameOnlyProvenance.diagnostics !== undefined
+                && (!Number.isInteger(input.nameOnlyProvenance.diagnostics.classifiedCount)
+                    || input.nameOnlyProvenance.diagnostics.classifiedCount !== nameOnlyRecords.length
+                    || !Number.isFinite(input.nameOnlyProvenance.diagnostics.unknownRatio)
+                    || input.nameOnlyProvenance.diagnostics.unknownRatio < 0
+                    || input.nameOnlyProvenance.diagnostics.unknownRatio > 1))) {
             fail('CONCIERGE_PUBLICATION_NAME_ONLY_PROVENANCE_INVALID');
         }
     } else if (nameOnlyRecords.length > 0) {
@@ -1065,7 +1089,7 @@ function buildConciergeManualPublicationInternal(
         const achievedUnknownRatio = effectiveLedger.hydratedPublicCount === 0
             ? 0
             : result.counts.unknown / effectiveLedger.hydratedPublicCount;
-        if (Math.abs(achievedUnknownRatio - input.nameOnlyProvenance.achievedUnknownRatio) > 1e-9) {
+        if (Math.abs(achievedUnknownRatio - input.nameOnlyProvenance.unknownRatio) > 1e-9) {
             fail('CONCIERGE_PUBLICATION_NAME_ONLY_PROVENANCE_INVALID');
         }
     }
@@ -1131,11 +1155,10 @@ function buildConciergeManualPublicationInternal(
         analyzed: input.replay.analyzedPublicCount,
         ...(input.nameOnlyProvenance ? {
             nameOnly: {
-                promoted: promotedNameOnlyRecords.length,
-                promotedUsernames: [...input.nameOnlyProvenance.promotedUsernames].map(normalizeUsername),
-                unknownRatio: input.nameOnlyProvenance.achievedUnknownRatio,
-                targetUnknownRatio: input.nameOnlyProvenance.targetUnknownRatio,
-                ...(input.nameOnlyProvenance.funnel ?? {}),
+                classified: nameOnlyRecords.length,
+                classifiedUsernames: [...input.nameOnlyProvenance.classifiedUsernames].map(normalizeUsername),
+                unknownRatio: input.nameOnlyProvenance.unknownRatio,
+                ...(input.nameOnlyProvenance.diagnostics ?? {}),
             },
         } : {}),
     });

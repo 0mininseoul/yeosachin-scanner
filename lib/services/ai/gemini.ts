@@ -348,6 +348,9 @@ export interface AnalyzeWithGeminiOptions<T> {
     thinkingLevel?: AiThinkingLevel;
     mediaResolution?: AiMediaResolution;
     maxOutputTokens?: number;
+    /** Staged callers may reuse a stage while binding a distinct prompt contract. */
+    promptVersion?: string;
+    schemaVersion?: number;
     /** v2.9 gender microbatches are the sole staged caller allowed above one-account media. */
     maxImages?: number;
     /** Resume only after a durably terminalized explicit 429. Attempts are globally bounded at 4. */
@@ -802,6 +805,8 @@ export async function analyzeWithGemini<T>(
         thinkingLevel,
         mediaResolution,
         maxOutputTokens,
+        promptVersion,
+        schemaVersion,
         maxImages,
         startingAttempt = 1,
         maxAttempts,
@@ -819,6 +824,18 @@ export async function analyzeWithGemini<T>(
         && (!Number.isSafeInteger(maxOutputTokens) || maxOutputTokens < 1 || maxOutputTokens > 65_536)
     ) {
         throw new Error('Gemini maxOutputTokens must be an integer from 1 to 65536');
+    }
+    if (
+        promptVersion !== undefined
+        && (!/^[A-Za-z0-9._:-]{1,64}$/.test(promptVersion))
+    ) {
+        throw new Error('Gemini promptVersion must be a bounded version identifier');
+    }
+    if (
+        schemaVersion !== undefined
+        && (!Number.isSafeInteger(schemaVersion) || schemaVersion < 1 || schemaVersion > 9_999)
+    ) {
+        throw new Error('Gemini schemaVersion must be an integer from 1 to 9999');
     }
     if (!Number.isSafeInteger(startingAttempt) || startingAttempt < 1 || startingAttempt > 4) {
         throw new Error('Gemini startingAttempt must be an integer from 1 to 4');
@@ -890,6 +907,8 @@ export async function analyzeWithGemini<T>(
     const resolvedMaxOutputTokens = maxOutputTokens
         ?? stagePolicy?.maxOutputTokens
         ?? (costOptimized ? 1_024 : undefined);
+    const resolvedPromptVersion = promptVersion ?? stagePolicy?.promptVersion;
+    const resolvedSchemaVersion = schemaVersion ?? stagePolicy?.schemaVersion;
     const imagePolicy = getAnalysisImagePolicy(costOptimized);
     const policyMaxImages = stagePolicy
         ? stagePolicy.profileImageLimit + stagePolicy.feedImageLimit
@@ -987,8 +1006,8 @@ export async function analyzeWithGemini<T>(
                                     thinkingLevel: resolvedThinkingLevel,
                                     mediaCount: selectedImages.length,
                                     mediaResolution: resolvedMediaResolution,
-                                    promptVersion: stagePolicy.promptVersion,
-                                    schemaVersion: stagePolicy.schemaVersion,
+                                    promptVersion: resolvedPromptVersion!,
+                                    schemaVersion: resolvedSchemaVersion!,
                                     maxOutputTokens: resolvedMaxOutputTokens
                                         ?? stagePolicy.maxOutputTokens,
                                     attempt: attemptNumber,
@@ -1050,8 +1069,8 @@ export async function analyzeWithGemini<T>(
                     thinkingLevel: resolvedThinkingLevel,
                     mediaCount: selectedImages.length,
                     mediaResolution: resolvedMediaResolution,
-                    promptVersion: stagePolicy?.promptVersion ?? null,
-                    schemaVersion: stagePolicy?.schemaVersion ?? null,
+                    promptVersion: resolvedPromptVersion ?? null,
+                    schemaVersion: resolvedSchemaVersion ?? null,
                     maxOutputTokens: resolvedMaxOutputTokens ?? null,
                     latencyMs: Math.max(0, Math.round(performance.now() - attemptStartedAt)),
                     estimatedCostUsd: null,
@@ -1091,8 +1110,8 @@ export async function analyzeWithGemini<T>(
                 thinkingLevel: resolvedThinkingLevel,
                 mediaCount: selectedImages.length,
                 mediaResolution: resolvedMediaResolution,
-                promptVersion: stagePolicy?.promptVersion ?? null,
-                schemaVersion: stagePolicy?.schemaVersion ?? null,
+                promptVersion: resolvedPromptVersion ?? null,
+                schemaVersion: resolvedSchemaVersion ?? null,
                 maxOutputTokens: resolvedMaxOutputTokens ?? null,
                 latencyMs: Math.max(0, Math.round(performance.now() - attemptStartedAt)),
                 estimatedCostUsd: costEstimate?.totalCostUsd ?? null,

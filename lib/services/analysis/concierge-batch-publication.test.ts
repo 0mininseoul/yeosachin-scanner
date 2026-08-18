@@ -180,7 +180,7 @@ function makeNameOnlyPublicationBoundaryInput(): ConciergeManualPublicationInput
         [4, { username: 'unpromoted_female', isPrivate: false, profilePicUrl: null, fullName: 'Unpromoted Female', bio: null, followersCount: 1, followingCount: 1, postsCount: 0, latestPosts: [] } as unknown as InstagramProfile],
         [5, { username: 'nameless', isPrivate: false, profilePicUrl: null, fullName: null, bio: null, followersCount: 1, followingCount: 1, postsCount: 0, latestPosts: [] } as unknown as InstagramProfile],
     ]);
-    const noFeatureRecord = (ordinal: number, username: string, fullName: string | null, original: 'male' | 'female' | 'unknown', effective: 'male' | 'female' | 'unknown', source: 'ai' | 'name_only') => ({
+    const noFeatureRecord = (ordinal: number, username: string, fullName: string | null, original: 'male' | 'female' | 'unknown', effective: 'male' | 'female' | 'unknown', source: 'ai' | 'name_only', confidence: 'low' | 'medium' | 'high' = 'medium') => ({
         candidateId: `candidate:${username}`,
         instagramId: username,
         mutualOrdinal: ordinal,
@@ -190,7 +190,7 @@ function makeNameOnlyPublicationBoundaryInput(): ConciergeManualPublicationInput
         secondPass: noFeatureSecondPass(fullName),
         originalAiClassification: original,
         effectiveClassification: effective,
-        confidence: 'high' as const,
+        confidence,
         evidenceCoverage: { declared: 0, collected: 0, selected: 0, complete: false, basisPoints: 0, hash: HASH },
         classifier: 'replay',
         modelName: 'model',
@@ -203,7 +203,7 @@ function makeNameOnlyPublicationBoundaryInput(): ConciergeManualPublicationInput
         sourceSnapshot: {
             instagramUrl: `https://instagram.com/${username}`,
             originalAiClassification: original,
-            confidenceEvidence: `confidence=high;evidence=${source === 'name_only' ? 'name_only' : 'model_ambiguous'}`,
+            confidenceEvidence: `confidence=${confidence};evidence=${source === 'name_only' ? 'name_only' : 'model_ambiguous'}`,
             operatorNote: '',
         },
     });
@@ -226,27 +226,27 @@ function makeNameOnlyPublicationBoundaryInput(): ConciergeManualPublicationInput
         mutualOrdinal: 6,
     };
     const records = [
-        noFeatureRecord(1, 'one', 'Jane One', 'female', 'female', 'name_only'),
+        noFeatureRecord(1, 'one', 'Jane One', 'female', 'female', 'name_only', 'medium'),
         imageRecord,
-        noFeatureRecord(3, 'male_name', 'Male Name', 'male', 'male', 'name_only'),
-        noFeatureRecord(4, 'unpromoted_female', 'Unpromoted Female', 'female', 'unknown', 'name_only'),
+        noFeatureRecord(3, 'male_name', 'Male Name', 'male', 'male', 'name_only', 'low'),
+        noFeatureRecord(4, 'unpromoted_female', 'Unpromoted Female', 'unknown', 'unknown', 'name_only', 'low'),
         noFeatureRecord(5, 'nameless', null, 'unknown', 'unknown', 'ai'),
         privateRecord,
     ];
-    const triageDetail = (ordinal: number, finalClassification: 'verified_female' | 'verified_non_female' | 'unresolved', inferredGender: 'female' | 'male' | 'unknown') => ({
+    const triageDetail = (ordinal: number, finalClassification: 'verified_female' | 'verified_non_female' | 'unresolved', inferredGender: 'female' | 'male' | 'unknown', confidence: 'low' | 'medium' | 'high' = 'medium') => ({
         ordinal,
         finalClassification,
         classificationSource: finalClassification === 'unresolved' ? 'unknown' : 'triage',
         featureOverview: null,
-        triage: { assessment: { inferredGender, confidence: 'high' } },
+        triage: { assessment: { inferredGender, confidence } },
         feature: null,
     });
     const details = [
-        triageDetail(1, 'verified_female', 'female'),
+        triageDetail(1, 'verified_female', 'female', 'medium'),
         { ordinal: 2, finalClassification: 'verified_female', classificationSource: 'feature', featureOverview: 'x', triage: null, feature: makeFeature() },
-        triageDetail(3, 'verified_non_female', 'male'),
-        triageDetail(4, 'verified_female', 'female'),
-        triageDetail(5, 'unresolved', 'unknown'),
+        triageDetail(3, 'verified_non_female', 'male', 'low'),
+        triageDetail(4, 'unresolved', 'unknown', 'low'),
+        triageDetail(5, 'unresolved', 'unknown', 'low'),
     ] as unknown as readonly ReplayAccountAiDetail[];
     const classificationByOrdinal = new Map(publicUsernames.map(username => {
         const record = records.find(item => item.instagramId === username)!;
@@ -298,9 +298,8 @@ function makeNameOnlyPublicationBoundaryInput(): ConciergeManualPublicationInput
             unresolvedCount: 0,
         },
         nameOnlyProvenance: {
-            promotedUsernames: ['one', 'male_name'],
-            achievedUnknownRatio: 0.4,
-            targetUnknownRatio: 0.2,
+            classifiedUsernames: ['one', 'male_name', 'unpromoted_female'],
+            unknownRatio: 0.4,
         },
     };
 }
@@ -530,20 +529,20 @@ describe('concierge manual publication', () => {
                 secondPass: { ...record.secondPass, status: 'not_collected' as const, completeMedia: null, evidenceHash: null },
                 originalAiClassification: 'female' as const,
                 effectiveClassification: 'female' as const,
-                confidence: 'high' as const,
+                confidence: 'medium' as const,
                 evidenceCoverage: { declared: 0, collected: 0, selected: 0, complete: false, basisPoints: 0, hash: HASH },
                 classificationSource: 'name_only' as const,
                 sourceSnapshot: {
                     ...record.sourceSnapshot!,
                     originalAiClassification: 'female' as const,
-                    confidenceEvidence: 'confidence=high;evidence=name_only',
+                    confidenceEvidence: 'confidence=medium;evidence=name_only',
                 },
             }
             : record);
         const classificationByOrdinal = new Map(input.replay.classificationByOrdinal);
         classificationByOrdinal.set(1, {
             ...classificationByOrdinal.get(1)!,
-            originalAiClassification: 'female', confidence: 'high',
+            originalAiClassification: 'female', confidence: 'medium',
             classificationSource: 'name_only' as const,
             secondPassStatus: 'not_collected', secondPassCompleteMedia: null,
         });
@@ -558,55 +557,21 @@ describe('concierge manual publication', () => {
                     [1, { ...input.replay.profilesByOrdinal.get(1)!, fullName: 'Jane Doe' } as unknown as InstagramProfile],
                 ]),
                 details: input.replay.details.map(detail => detail.ordinal === 1
-                    ? { ...detail, finalClassification: 'verified_female', feature: null, triage: { assessment: { inferredGender: 'female', confidence: 'high' } } } as unknown as ReplayAccountAiDetail
+                    ? { ...detail, finalClassification: 'verified_female', feature: null, triage: { assessment: { inferredGender: 'female', confidence: 'medium' } } } as unknown as ReplayAccountAiDetail
                     : detail),
                 classificationByOrdinal,
             },
             nameOnlyProvenance: {
-                promotedUsernames: ['one'],
-                achievedUnknownRatio: 0,
-                targetUnknownRatio: 0.2,
-                funnel: {
-                    totalPublicDetails: 2,
-                    droppedNoProfile: 0,
-                    droppedNoTriageAssessment: 0,
-                    droppedHasFeature: 0,
-                    droppedUsableProfileImage: 0,
-                    droppedNotUnknown: 0,
-                    candidateCount: 1,
-                    droppedNoFullName: 0,
-                    droppedInferredUnknown: 0,
-                    droppedBelowMinConfidence: 0,
-                    eligibleCount: 1,
-                    eligibleMaleCount: 0,
-                    eligibleFemaleCount: 1,
-                    promotionBudget: 1,
-                    promotedCount: 1,
-                },
+                classifiedUsernames: ['one'],
+                unknownRatio: 0,
             },
         });
 
         expect(publication.rows.map(row => row.suspect_instagram_id)).toEqual(expect.arrayContaining(['one', 'two']));
         expect(publication.counts.nameOnly).toEqual({
-            promoted: 1,
-            promotedUsernames: ['one'],
+            classified: 1,
+            classifiedUsernames: ['one'],
             unknownRatio: 0,
-            targetUnknownRatio: 0.2,
-            totalPublicDetails: 2,
-            droppedNoProfile: 0,
-            droppedNoTriageAssessment: 0,
-            droppedHasFeature: 0,
-            droppedUsableProfileImage: 0,
-            droppedNotUnknown: 0,
-            candidateCount: 1,
-            droppedNoFullName: 0,
-            droppedInferredUnknown: 0,
-            droppedBelowMinConfidence: 0,
-            eligibleCount: 1,
-            eligibleMaleCount: 0,
-            eligibleFemaleCount: 1,
-            promotionBudget: 1,
-            promotedCount: 1,
         });
     });
 
@@ -629,11 +594,50 @@ describe('concierge manual publication', () => {
             analyzed: 5,
         });
         expect(publication.counts.nameOnly).toEqual({
-            promoted: 2,
-            promotedUsernames: ['one', 'male_name'],
+            classified: 3,
+            classifiedUsernames: ['one', 'male_name', 'unpromoted_female'],
             unknownRatio: 0.4,
-            targetUnknownRatio: 0.2,
         });
+    });
+
+    it('rejects a name-only female when a usable profile image is present', () => {
+        const input = makeNameOnlyPublicationBoundaryInput();
+        const profile = input.replay.profilesByOrdinal.get(1)!;
+        const replay = {
+            ...input.replay,
+            profilesByOrdinal: new Map([
+                ...input.replay.profilesByOrdinal.entries(),
+                [1, { ...profile, profilePicUrl: 'https://example.com/real.jpg' } as unknown as InstagramProfile],
+            ]),
+        };
+
+        expect(() => buildConciergeManualPublicationDraft({ ...input, replay }))
+            .toThrow('CONCIERGE_PUBLICATION_NAME_ONLY_IMAGE_CONFLICT');
+    });
+
+    it('rejects a low-confidence name-only female while preserving the image contract', () => {
+        const input = makeNameOnlyPublicationBoundaryInput();
+        const records = input.ledger.records.map(record => record.instagramId === 'one'
+            ? {
+                ...record,
+                confidence: 'low' as const,
+                sourceSnapshot: {
+                    ...record.sourceSnapshot!,
+                    confidenceEvidence: 'confidence=low;evidence=name_only',
+                },
+            }
+            : record);
+        const classificationByOrdinal = new Map(input.replay.classificationByOrdinal);
+        classificationByOrdinal.set(1, {
+            ...classificationByOrdinal.get(1)!,
+            confidence: 'low',
+        });
+
+        expect(() => buildConciergeManualPublicationDraft({
+            ...input,
+            ledger: { ...input.ledger, records },
+            replay: { ...input.replay, classificationByOrdinal },
+        })).toThrow('CONCIERGE_PUBLICATION_NAME_ONLY_CONFIDENCE_INVALID');
     });
 
     it('reports the compared values when the dry-run publication boundary finds an AI binding mismatch', () => {

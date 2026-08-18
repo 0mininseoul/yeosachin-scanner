@@ -638,6 +638,34 @@ describe('analyzeWithGemini stage request policy', () => {
         }));
     });
 
+    it('allows a staged caller to bind a distinct prompt and schema version while reusing its stage', async () => {
+        const audit = stageAuditOptions();
+        const onTelemetry = vi.fn();
+        await analyzeWithGemini('name-only prompt', [], {
+            schema: responseSchema,
+            stage: 'genderTriage',
+            aiStagePolicyVersion: 'ai-stage-policy-v2.11',
+            promptVersion: 'gender-name-only-v1',
+            schemaVersion: 1,
+            maxOutputTokens: 4_096,
+            ...audit,
+            onTelemetry,
+        });
+
+        expect(audit.onBeforeAttempt).toHaveBeenCalledWith(expect.objectContaining({
+            promptVersion: 'gender-name-only-v1',
+            schemaVersion: 1,
+            mediaCount: 0,
+            maxOutputTokens: 4_096,
+        }));
+        expect(onTelemetry).toHaveBeenCalledWith(expect.objectContaining({
+            promptVersion: 'gender-name-only-v1',
+            schemaVersion: 1,
+            mediaCount: 0,
+            maxOutputTokens: 4_096,
+        }));
+    });
+
     it('composes one explicit field with unrelated V1 cost-optimized defaults', async () => {
         await analyzeWithGemini('prompt', Array.from({ length: 11 }, () => 'image'), {
             schema: responseSchema,

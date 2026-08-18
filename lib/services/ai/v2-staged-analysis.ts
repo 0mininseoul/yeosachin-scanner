@@ -355,6 +355,100 @@ export interface GenderTriageMicrobatchResult {
     readonly source: 'checkpoint' | 'safe_fallback';
 }
 
+export const GENDER_NAME_ONLY_MAX_CANDIDATES_PER_BATCH = 80;
+const GENDER_NAME_ONLY_PROMPT_VERSION = 'gender-name-only-v1';
+const GENDER_NAME_ONLY_SCHEMA_VERSION = 1;
+const GENDER_NAME_ONLY_MAX_OUTPUT_TOKENS = 4_096;
+const genderNameOnlyCandidateIdSchema = z.string().trim().min(1).max(128);
+const genderNameOnlyCandidateSchema = z.object({
+    candidateId: genderNameOnlyCandidateIdSchema,
+    fullName: z.string().trim().min(1).max(240),
+}).strict();
+const genderNameOnlyCandidatesSchema = z.array(genderNameOnlyCandidateSchema)
+    .min(1)
+    .max(GENDER_NAME_ONLY_MAX_CANDIDATES_PER_BATCH);
+const genderNameOnlyResultSchema = z.object({
+    candidateId: genderNameOnlyCandidateIdSchema,
+    gender: inferredGenderSchema,
+    confidence: confidenceSchema,
+}).strict();
+
+const genderNameOnlyResponseSchemaFor = (expectedCandidateIds: readonly string[]) => (
+    z.array(genderNameOnlyResultSchema)
+        .max(GENDER_NAME_ONLY_MAX_CANDIDATES_PER_BATCH)
+        .superRefine((rows, context) => {
+            if (rows.length !== expectedCandidateIds.length) {
+                context.addIssue({
+                    code: 'custom',
+                    message: 'A name-only response must include every requested candidate exactly once.',
+                });
+                return;
+            }
+            const seen = new Set<string>();
+            rows.forEach((row, index) => {
+                if (seen.has(row.candidateId)) {
+                    context.addIssue({
+                        code: 'custom',
+                        path: [index, 'candidateId'],
+                        message: 'Name-only response candidate IDs must be unique.',
+                    });
+                }
+                seen.add(row.candidateId);
+                if (row.candidateId !== expectedCandidateIds[index]) {
+                    context.addIssue({
+                        code: 'custom',
+                        path: [index, 'candidateId'],
+                        message: 'Name-only response candidate IDs must preserve deterministic order.',
+                    });
+                }
+                if (row.confidence === 'high') {
+                    context.addIssue({
+                        code: 'custom',
+                        path: [index, 'confidence'],
+                        message: 'Name-only gender confidence cannot exceed medium.',
+                    });
+                }
+            });
+        })
+);
+
+export type GenderNameOnlyCandidateInput = z.input<typeof genderNameOnlyCandidateSchema>;
+export type GenderNameOnlyResult = z.infer<typeof genderNameOnlyResultSchema>;
+
+function parseGenderNameOnlyCandidates(
+    rawCandidates: readonly GenderNameOnlyCandidateInput[],
+): z.output<typeof genderNameOnlyCandidatesSchema> {
+    const candidates = genderNameOnlyCandidatesSchema.parse(rawCandidates);
+    const seen = new Set<string>();
+    for (const candidate of candidates) {
+        if (seen.has(candidate.candidateId)) {
+            throw new Error('ANALYSIS_V2_GENDER_NAME_ONLY_DUPLICATE_CANDIDATE');
+        }
+        seen.add(candidate.candidateId);
+    }
+    return [...candidates].sort((left, right) => (
+        left.candidateId.localeCompare(right.candidateId)
+    ));
+}
+
+function genderNameOnlyPrompt(
+    candidates: readonly z.output<typeof genderNameOnlyCandidateSchema>[],
+): string {
+    return [
+        'gender-name-only-v1',
+        '한국어 이름의 성별 신호만 활용하는 보수적인 분류기입니다.',
+        '각 candidateId의 fullName만 근거로 female, male, unknown 중 하나를 분류하세요.',
+        '유니섹스·중성 이름, 비인명·브랜드·상호·단체·기호 이름은 반드시 unknown으로 두세요.',
+        '이름만이 유일한 근거이므로 confidence는 low 또는 medium만 사용하고 high는 사용하지 마세요.',
+        '입력 candidateId를 빠짐없이 정확히 한 번씩, 입력 정렬 순서 그대로 반환하세요. 모르는 ID를 만들거나 누락하지 마세요.',
+        'JSON 배열 이외의 텍스트는 반환하지 마세요.',
+        `candidates(JSON): ${JSON.stringify(candidates.map(candidate => ({
+            candidateId: candidate.candidateId,
+            fullName: normalizeUntrustedText(candidate.fullName, 240),
+        })))}`,
+    ].join('\n');
+}
+
 export const genderResolutionInputSchema = z.object({
     media: normalizedMediaListSchema,
 }).strict();
@@ -1118,6 +1212,11 @@ function stagedResultIdentity(
     media: readonly AnalysisV2AiIdentityMediaPart[],
     cacheScope: 'request' | 'global_ttl',
     policyVersion: AiStagePolicyVersion = AI_STAGE_POLICY_VERSION,
+    overrides: Readonly<{
+        promptVersion?: string;
+        schemaVersion?: number;
+        maxOutputTokens?: number;
+    }> = {},
 ): AnalysisV2AiResultIdentity {
     const policy = getAiStagePolicy(policyVersion, stage);
     return createAnalysisV2AiResultIdentity({
@@ -1125,9 +1224,9 @@ function stagedResultIdentity(
         modelName: policy.model,
         thinkingLevel: policy.thinkingLevel,
         mediaResolution: policy.mediaResolution,
-        promptVersion: policy.promptVersion,
-        schemaVersion: policy.schemaVersion,
-        maxOutputTokens: policy.maxOutputTokens,
+        promptVersion: overrides.promptVersion ?? policy.promptVersion,
+        schemaVersion: overrides.schemaVersion ?? policy.schemaVersion,
+        maxOutputTokens: overrides.maxOutputTokens ?? policy.maxOutputTokens,
         inputHash: createAnalysisV2AiResultInputHash(prompt),
         mediaSnapshotHash: createAnalysisV2AiMediaSnapshotHashFromParts(media),
         cacheScope,
@@ -2017,6 +2116,76 @@ export function createGenderTriageMicrobatchAccountId(
 ): string {
     const identity = createGenderTriageResultIdentity(rawInput, policyVersion);
     return `account:${identity.operationKey.slice('gender-triage:'.length)}`;
+}
+
+export function createGenderNameOnlyBatchResultIdentity(
+    rawCandidates: readonly GenderNameOnlyCandidateInput[],
+    policyVersion: AiStagePolicyVersion = AI_STAGE_POLICY_V211_VERSION,
+): AnalysisV2AiResultIdentity {
+    const candidates = parseGenderNameOnlyCandidates(rawCandidates);
+    const prompt = genderNameOnlyPrompt(candidates);
+    return stagedResultIdentity(
+        'genderTriage',
+        prompt,
+        [],
+        'request',
+        policyVersion,
+        {
+            promptVersion: GENDER_NAME_ONLY_PROMPT_VERSION,
+            schemaVersion: GENDER_NAME_ONLY_SCHEMA_VERSION,
+            maxOutputTokens: GENDER_NAME_ONLY_MAX_OUTPUT_TOKENS,
+        },
+    );
+}
+
+export async function genderNameOnlyBatch(
+    rawCandidates: readonly GenderNameOnlyCandidateInput[],
+    rawAuditContext: StagedAiAuditContext,
+    options: {
+        aiStagePolicyVersion?: AiStagePolicyVersion;
+        replayCapability?: ReplayStatelessCapability;
+    } = {},
+): Promise<readonly GenderNameOnlyResult[]> {
+    const candidates = parseGenderNameOnlyCandidates(rawCandidates);
+    const policyVersion = options.aiStagePolicyVersion ?? AI_STAGE_POLICY_V211_VERSION;
+    const prompt = genderNameOnlyPrompt(candidates);
+    const identity = stagedResultIdentity(
+        'genderTriage',
+        prompt,
+        [],
+        'request',
+        policyVersion,
+        {
+            promptVersion: GENDER_NAME_ONLY_PROMPT_VERSION,
+            schemaVersion: GENDER_NAME_ONLY_SCHEMA_VERSION,
+            maxOutputTokens: GENDER_NAME_ONLY_MAX_OUTPUT_TOKENS,
+        },
+    );
+    const audit = parseAuditContext(rawAuditContext, identity);
+    const responseSchema = genderNameOnlyResponseSchemaFor(
+        candidates.map(candidate => candidate.candidateId),
+    );
+    const prepared = await prepareStagedResult(audit, responseSchema);
+    return prepared.cached ?? responseSchema.parse(await analyzeWithGemini(
+        prompt,
+        [],
+        {
+            schema: responseSchema,
+            analysisType: 'v2_gender_name_only_batch',
+            stage: 'genderTriage',
+            aiStagePolicyVersion: policyVersion,
+            requestId: audit.requestId,
+            startingAttempt: prepared.startingAttempt,
+            maxOutputTokens: GENDER_NAME_ONLY_MAX_OUTPUT_TOKENS,
+            promptVersion: GENDER_NAME_ONLY_PROMPT_VERSION,
+            schemaVersion: GENDER_NAME_ONLY_SCHEMA_VERSION,
+            onBeforeAttempt: audit.onBeforeAttempt,
+            onAttemptTelemetry: audit.onAttemptTelemetry,
+            ...(options.replayCapability
+                ? { skipTokenLog: true, replayCapability: options.replayCapability }
+                : {}),
+        },
+    ));
 }
 
 function uncertainGenderTriageResult(

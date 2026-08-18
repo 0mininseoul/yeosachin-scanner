@@ -2,15 +2,20 @@ import { randomUUID } from 'node:crypto';
 import {
     createFeatureAnalysisResultIdentity,
     createGenderFirstPassResultIdentity,
+    GENDER_NAME_ONLY_MAX_CANDIDATES_PER_BATCH,
+    createGenderNameOnlyBatchResultIdentity,
     createGenderTriageMicrobatchAccountId,
     createGenderTriageMicrobatchResultIdentity,
     createGenderResolutionResultIdentity,
     createGenderTriageResultIdentity,
     featureAnalysis,
     genderFirstPass,
+    genderNameOnlyBatch,
     genderResolution,
     genderTriage,
     genderTriageMicrobatch,
+    type GenderNameOnlyCandidateInput,
+    type GenderNameOnlyResult,
     type GenderTriageResult,
     type StagedAiAuditContext,
 } from '@/lib/services/ai/v2-staged-analysis';
@@ -40,6 +45,7 @@ interface IssuedReplayRunner {
     featureAnalysisConcurrency: 3 | 4;
     firstPass: ReplayAiRunner['firstPass'];
     triage: ReplayAiRunner['triage'];
+    nameOnly: ReplayAiRunner['nameOnly'];
     feature: ReplayAiRunner['feature'];
     privateNames: ReplayAiRunner['privateNames'];
     resolveGender: ReplayAiRunner['resolveGender'];
@@ -57,6 +63,7 @@ export function lookupReplayStagedAiAdapterPolicy(
         || !Object.isFrozen(runner)
         || runner.firstPass !== issued.firstPass
         || runner.triage !== issued.triage
+        || runner.nameOnly !== issued.nameOnly
         || runner.feature !== issued.feature
         || runner.privateNames !== issued.privateNames
         || runner.resolveGender !== issued.resolveGender
@@ -181,6 +188,28 @@ async function invoke<T>(task: (state: InvocationTelemetry) => Promise<T>): Prom
             elapsedMs: Math.round(performance.now() - started),
         };
     }
+}
+
+function combineInvocations<T>(
+    invocations: readonly ReplayInvocation<readonly T[]>[],
+): ReplayInvocation<readonly T[]> {
+    const firstFailure = invocations.find(invocation => invocation.outcome !== 'ok');
+    return {
+        outcome: firstFailure?.outcome ?? 'ok',
+        value: invocations.flatMap(invocation => invocation.value ?? []),
+        calls: invocations.reduce((sum, invocation) => sum + (invocation.calls ?? 0), 0),
+        rateLimited: invocations.reduce((sum, invocation) => sum + (invocation.rateLimited ?? 0), 0),
+        failureDisposition: invocations.reduce<Record<string, number>>((result, invocation) => {
+            for (const [key, value] of Object.entries(invocation.failureDisposition ?? {})) {
+                result[key] = (result[key] ?? 0) + value;
+            }
+            return result;
+        }, {}),
+        attemptLatenciesMs: invocations.flatMap(invocation => invocation.attemptLatenciesMs ?? []),
+        attempts: invocations.reduce((sum, invocation) => sum + invocation.attempts, 0),
+        retries: invocations.reduce((sum, invocation) => sum + invocation.retries, 0),
+        elapsedMs: invocations.reduce((sum, invocation) => sum + invocation.elapsedMs, 0),
+    };
 }
 
 function createSemaphore(limit: number) {
@@ -362,6 +391,34 @@ export function createReplayStagedAiAdapter(
                 );
             }),
         }),
+        nameOnly: async (rawCandidates: readonly GenderNameOnlyCandidateInput[]) => {
+            const candidates = [...rawCandidates].sort((left, right) => (
+                left.candidateId.localeCompare(right.candidateId)
+            ));
+            const batches: GenderNameOnlyCandidateInput[][] = [];
+            for (
+                let index = 0;
+                index < candidates.length;
+                index += GENDER_NAME_ONLY_MAX_CANDIDATES_PER_BATCH
+            ) {
+                batches.push(candidates.slice(
+                    index,
+                    index + GENDER_NAME_ONLY_MAX_CANDIDATES_PER_BATCH,
+                ));
+            }
+            const invocations = await Promise.all(batches.map(batch => invoke(async state => {
+                const identity = createGenderNameOnlyBatchResultIdentity(
+                    batch,
+                    aiStagePolicyVersion,
+                );
+                return genderNameOnlyBatch(
+                    batch,
+                    statelessAudit(requestId, identity, state),
+                    { aiStagePolicyVersion, replayCapability },
+                );
+            })));
+            return combineInvocations<GenderNameOnlyResult>(invocations);
+        },
         feature: input => runFeature(() => invoke(async state => {
             const aiInput = {
                 triage: input.triage,
@@ -421,6 +478,7 @@ export function createReplayStagedAiAdapter(
             ?? ANALYSIS_V2_SCHEDULER_V1_POLICY.featureAnalysisConcurrency,
         firstPass: runner.firstPass,
         triage: runner.triage,
+        nameOnly: runner.nameOnly,
         feature: runner.feature,
         privateNames: runner.privateNames,
         resolveGender: runner.resolveGender,

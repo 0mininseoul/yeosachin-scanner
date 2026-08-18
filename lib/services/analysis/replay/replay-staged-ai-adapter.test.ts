@@ -7,12 +7,14 @@ const mocks = vi.hoisted(() => ({
     createGenderResolutionResultIdentity: vi.fn(),
     createGenderTriageMicrobatchAccountId: vi.fn(),
     createGenderTriageMicrobatchResultIdentity: vi.fn(),
+    createGenderNameOnlyBatchResultIdentity: vi.fn(),
     createGenderTriageResultIdentity: vi.fn(),
     featureAnalysis: vi.fn(),
     genderFirstPass: vi.fn(),
     genderResolution: vi.fn(),
     genderTriage: vi.fn(),
     genderTriageMicrobatch: vi.fn(),
+    genderNameOnlyBatch: vi.fn(),
 }));
 
 vi.mock('@/lib/services/ai/private-name-analysis', () => ({
@@ -21,17 +23,20 @@ vi.mock('@/lib/services/ai/private-name-analysis', () => ({
 
 vi.mock('@/lib/services/ai/v2-staged-analysis', () => ({
     GENDER_TRIAGE_V29_MAX_ACCOUNTS_PER_BATCH: 2,
+    GENDER_NAME_ONLY_MAX_CANDIDATES_PER_BATCH: 80,
     createFeatureAnalysisResultIdentity: mocks.createFeatureAnalysisResultIdentity,
     createGenderFirstPassResultIdentity: mocks.createGenderFirstPassResultIdentity,
     createGenderResolutionResultIdentity: mocks.createGenderResolutionResultIdentity,
     createGenderTriageMicrobatchAccountId: mocks.createGenderTriageMicrobatchAccountId,
     createGenderTriageMicrobatchResultIdentity: mocks.createGenderTriageMicrobatchResultIdentity,
+    createGenderNameOnlyBatchResultIdentity: mocks.createGenderNameOnlyBatchResultIdentity,
     createGenderTriageResultIdentity: mocks.createGenderTriageResultIdentity,
     featureAnalysis: mocks.featureAnalysis,
     genderFirstPass: mocks.genderFirstPass,
     genderResolution: mocks.genderResolution,
     genderTriage: mocks.genderTriage,
     genderTriageMicrobatch: mocks.genderTriageMicrobatch,
+    genderNameOnlyBatch: mocks.genderNameOnlyBatch,
 }));
 
 import {
@@ -378,6 +383,37 @@ describe('replay staged AI adapter telemetry', () => {
             marker: `account:${'b'.repeat(64)}`,
         });
         expect(mocks.genderTriage).not.toHaveBeenCalled();
+    });
+
+    it('packs name-only candidates into bounded pure-text calls instead of individual triage calls', async () => {
+        mocks.createGenderNameOnlyBatchResultIdentity.mockImplementation(
+            (candidates: Array<{ candidateId: string }>, policy: string) => ({
+                operationKey: `gender-triage:${candidates.map(item => item.candidateId).join(',')}:${policy}`,
+            }),
+        );
+        mocks.genderNameOnlyBatch.mockImplementation(async (
+            candidates: Array<{ candidateId: string; fullName: string }>,
+        ) => candidates.map(candidate => ({
+            candidateId: candidate.candidateId,
+            gender: 'unknown',
+            confidence: 'low',
+        })));
+
+        const candidates = Array.from({ length: 161 }, (_, index) => ({
+            candidateId: `ordinal:${index + 1}`,
+            fullName: `Name ${index + 1}`,
+        }));
+        const result = await createReplayStagedAiAdapter('ai-stage-policy-v2.11')
+            .nameOnly?.(candidates);
+
+        expect(mocks.genderNameOnlyBatch).toHaveBeenCalledTimes(3);
+        expect(mocks.genderNameOnlyBatch.mock.calls.map(call => call[0].length))
+            .toEqual([80, 80, 1]);
+        expect(mocks.genderNameOnlyBatch.mock.calls.flatMap(call => call[0]))
+            .not.toContainEqual(expect.objectContaining({ media: expect.anything() }));
+        expect(mocks.genderTriage).not.toHaveBeenCalled();
+        expect(result).toMatchObject({ outcome: 'ok', value: expect.any(Array) });
+        expect(result?.value).toHaveLength(161);
     });
 
     it('coalesces six same-tick profile pipelines into three active paired provider calls', async () => {

@@ -51,11 +51,8 @@ vi.mock('@/lib/services/analysis/first-payment-concierge', async importOriginal 
 import {
     buildConciergeBatchHighRiskCopyPrompt,
     conciergeBatchAiClassificationFields,
-    isConciergeNameOnlyCandidate,
     collectOrder,
-    conciergeBatchMaxUnknownRatio,
-    conciergeBatchNameOnlyMinConfidence,
-    conciergeNameOnlyPromotionDiagnosticMessage,
+    conciergeNameOnlyDiagnosticMessage,
     conciergeBatchFailureDiagnostic,
     generateConciergeBatchCandidateCopies,
     generateConciergeBatchHighRiskCopy,
@@ -72,11 +69,9 @@ import {
     sanitizeConciergeBatchDiagnostic,
     selectConciergeBatchOnlyOrders,
     selectConciergeBatchActiveScope,
-    selectConciergeNameOnlyPromotions,
     type ConciergeBatchHighRiskCopyEvidence,
     validateConciergeBatchHighRiskCopy,
 } from './run-concierge-batch';
-import { INSTAGRAM_DEFAULT_PROFILE_IMAGE_MEDIA_ID } from '@/lib/services/analysis/profile-image-evidence';
 import { runConciergeBatch, type ConciergeBatchStageContext } from '@/lib/services/analysis/concierge-batch-runner';
 
 function profilePackItem(username: string, overrides: Record<string, unknown> = {}) {
@@ -563,33 +558,7 @@ describe('concierge batch only-order allowlist', () => {
     });
 });
 
-describe('concierge name-only gender promotions', () => {
-    it('treats default-avatar profiles with names as name-only candidates, but excludes real profile images', () => {
-        const detail = {
-            finalClassification: 'unresolved',
-            feature: null,
-            triage: { assessment: { inferredGender: 'female', confidence: 'high' } },
-        } as never;
-        expect(isConciergeNameOnlyCandidate({
-            profile: {
-                fullName: 'Jane Default',
-                profilePicUrl: `https://cdn.example/${INSTAGRAM_DEFAULT_PROFILE_IMAGE_MEDIA_ID}`,
-                // A transformed HD URL can obscure the media id; the original
-                // provider URL still establishes that this is the anonymous avatar.
-                profilePicUrlHD: 'https://cdn.example/default-hd.jpg',
-            },
-            detail,
-        })).toBe(true);
-        expect(isConciergeNameOnlyCandidate({
-            profile: {
-                fullName: 'Jane Photo',
-                profilePicUrl: 'https://cdn.example/real.jpg',
-                profilePicUrlHD: 'https://cdn.example/real-hd.jpg',
-            },
-            detail,
-        })).toBe(false);
-    });
-
+describe('concierge name-only gender classification', () => {
     it('derives ledger AI and effective classifications from replay final classification', () => {
         expect(conciergeBatchAiClassificationFields({
             finalClassification: 'verified_non_female',
@@ -611,55 +580,8 @@ describe('concierge name-only gender promotions', () => {
         });
     });
 
-    it('uses the documented defaults and validates environment overrides', () => {
-        expect(conciergeBatchMaxUnknownRatio(undefined)).toBe(0.2);
-        expect(conciergeBatchMaxUnknownRatio('0.35')).toBe(0.35);
-        expect(conciergeBatchNameOnlyMinConfidence(undefined)).toBe('low');
-        expect(conciergeBatchNameOnlyMinConfidence('HIGH')).toBe('high');
-        expect(() => conciergeBatchMaxUnknownRatio('1.1')).toThrow(
-            'CONCIERGE_BATCH_MAX_UNKNOWN_RATIO_INVALID',
-        );
-        expect(() => conciergeBatchNameOnlyMinConfidence('urgent')).toThrow(
-            'CONCIERGE_BATCH_NAME_ONLY_MIN_CONFIDENCE_INVALID',
-        );
-    });
-
-    it('does not promote missing, neutral, or non-female names and ranks eligible women by confidence', () => {
-        const result = selectConciergeNameOnlyPromotions({
-            publicCount: 10,
-            initialUnknownCount: 10,
-            maxUnknownRatio: 0.2,
-            minimumConfidence: 'low',
-            candidates: [
-                { ordinal: 1, username: 'missing_name', fullName: null, inferredGender: 'female', confidence: 'high' },
-                { ordinal: 2, username: 'neutral_name', fullName: 'Alex', inferredGender: 'unknown', confidence: 'high' },
-                { ordinal: 3, username: 'male_name', fullName: 'John', inferredGender: 'male', confidence: 'high' },
-                { ordinal: 4, username: 'low_female', fullName: 'Jane', inferredGender: 'female', confidence: 'low' },
-                { ordinal: 5, username: 'high_female', fullName: 'Sophie', inferredGender: 'female', confidence: 'high' },
-            ],
-        });
-
-        expect(result.promoted.map(candidate => [candidate.username, candidate.classification])).toEqual([
-            ['male_name', 'male'],
-            ['high_female', 'female'],
-            ['low_female', 'female'],
-        ]);
-        expect(result.achievedUnknownRatio).toBe(0.7);
-        expect(result.funnel).toMatchObject({
-            candidateCount: 5,
-            droppedNoFullName: 1,
-            droppedInferredUnknown: 1,
-            droppedBelowMinConfidence: 0,
-            eligibleCount: 3,
-            eligibleMaleCount: 1,
-            eligibleFemaleCount: 2,
-            promotionBudget: 8,
-            promotedCount: 3,
-        });
-    });
-
-    it('formats a redacted, count-only funnel diagnostic for the execution log', () => {
-        const message = conciergeNameOnlyPromotionDiagnosticMessage({
+    it('formats a redacted, count-only classification diagnostic for the execution log', () => {
+        const message = conciergeNameOnlyDiagnosticMessage({
             totalPublicDetails: 10,
             droppedNoProfile: 1,
             droppedNoTriageAssessment: 1,
@@ -673,33 +595,20 @@ describe('concierge name-only gender promotions', () => {
             eligibleCount: 1,
             eligibleMaleCount: 1,
             eligibleFemaleCount: 0,
-            promotionBudget: 0,
-            promotedCount: 0,
-            noPromotionReason: 'promotion_budget_zero',
+            batchCount: 1,
+            classifiedCount: 1,
+            femaleCount: 0,
+            maleCount: 1,
+            unknownCount: 0,
+            unknownRatio: 0.9,
         });
 
-        expect(message).toContain('concierge name-only promotion funnel:');
+        expect(message).toContain('concierge name-only classification:');
         expect(message).toContain('"totalPublicDetails":10');
         expect(message).toContain('"droppedNoProfile":1');
-        expect(message).toContain('"promotionBudget":0');
-        expect(message).toContain('"promotedCount":0');
-        expect(message).toContain('"noPromotionReason":"promotion_budget_zero"');
+        expect(message).toContain('"batchCount":1');
+        expect(message).toContain('"unknownRatio":0.9');
         expect(message).not.toContain('https://');
-    });
-
-    it('stops when the eligible name-only pool is exhausted even if unknown exceeds the target', () => {
-        const result = selectConciergeNameOnlyPromotions({
-            publicCount: 10,
-            initialUnknownCount: 10,
-            maxUnknownRatio: 0.2,
-            minimumConfidence: 'low',
-            candidates: [
-                { ordinal: 1, username: 'only_female', fullName: 'Jane', inferredGender: 'female', confidence: 'high' },
-            ],
-        });
-
-        expect(result.promoted.map(candidate => candidate.username)).toEqual(['only_female']);
-        expect(result.achievedUnknownRatio).toBe(0.9);
     });
 });
 
