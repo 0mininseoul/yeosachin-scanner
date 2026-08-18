@@ -11,6 +11,11 @@ const conciergeBatchTestMocks = vi.hoisted(() => ({
         getProfilesBatchOutcomes: vi.fn(),
     },
     makeApifyProvider: vi.fn(),
+    interactionAdapter: {
+        getPostLikers: vi.fn(),
+        getPostComments: vi.fn(),
+    },
+    makeApifyInteractionAdapter: vi.fn(),
     captureFirstPaymentConciergeAiBundle: vi.fn(),
 }));
 
@@ -31,6 +36,11 @@ vi.mock('@/lib/supabase/admin', () => ({
 vi.mock('@/lib/services/instagram/providers/apify', async importOriginal => ({
     ...await importOriginal<typeof import('@/lib/services/instagram/providers/apify')>(),
     makeApifyProvider: conciergeBatchTestMocks.makeApifyProvider,
+}));
+
+vi.mock('@/lib/services/instagram/providers/apify-interactions', async importOriginal => ({
+    ...await importOriginal<typeof import('@/lib/services/instagram/providers/apify-interactions')>(),
+    makeApifyInteractionAdapter: conciergeBatchTestMocks.makeApifyInteractionAdapter,
 }));
 
 vi.mock('@/lib/services/analysis/first-payment-concierge', async importOriginal => ({
@@ -74,6 +84,53 @@ function profilePackItem(username: string, overrides: Record<string, unknown> = 
         latestPosts: [],
         ...overrides,
     };
+}
+
+function interactionProfilePackItem(username: string) {
+    return profilePackItem(username, {
+        followersCount: 0,
+        followsCount: 0,
+        postsCount: 1,
+        latestPosts: [{
+            id: 'post-1',
+            shortCode: 'post1',
+            type: 'image',
+            displayUrl: 'https://example.com/post.jpg',
+            likesCount: 1,
+            commentsCount: 1,
+            timestamp: '2026-08-17T00:00:00.000Z',
+        }],
+    });
+}
+
+function interactionCollectOrderFixture() {
+    const order = {
+        orderId: '00000000-0000-4000-8000-000000000011',
+        ownerId: '00000000-0000-4000-8000-000000000012',
+        targetUsername: 'interaction_target',
+        planId: 'basic' as const,
+        cohort: 'awaiting_operator' as const,
+        preflightId: '00000000-0000-4000-8000-000000000013',
+        targetFollowers: 0,
+        targetFollowing: 0,
+    };
+    const prepared = {
+        sourceRequestId: '00000000-0000-4000-8000-000000000014',
+        requestId: '00000000-0000-4000-8000-000000000015',
+        preflightId: order.preflightId,
+    };
+    const context: ConciergeBatchStageContext = {
+        actorConcurrency: 2,
+        tokenPriority: [],
+        withActorSlot: operation => operation(),
+    };
+    const artifacts = parseConciergeExistingRelationshipArtifacts(JSON.stringify({
+        interaction_target: {
+            followers: { runId: 'Abcdef12', credentialSlot: 'secondary', sourceDeclaredCount: 1 },
+            following: { runId: 'Zyxwvu98', credentialSlot: 'secondary', sourceDeclaredCount: 1 },
+        },
+    }));
+    return { order, prepared, context, artifacts };
 }
 
 describe('concierge profile pack adapter', () => {
@@ -184,6 +241,97 @@ describe('concierge profile pack adapter', () => {
         try {
             await collectOrder(order, prepared, context, artifacts);
             expect(conciergeBatchTestMocks.provider.getProfile).not.toHaveBeenCalled();
+        } finally {
+            if (previousPackPath === undefined) delete process.env.CONCIERGE_BATCH_PROFILE_PACK_PATH;
+            else process.env.CONCIERGE_BATCH_PROFILE_PACK_PATH = previousPackPath;
+            if (previousSecondaryToken === undefined) delete process.env.APIFY_SECONDARY_API_TOKEN;
+            else process.env.APIFY_SECONDARY_API_TOKEN = previousSecondaryToken;
+        }
+    });
+
+    it('continues the order with empty comments when comment collection fails', async () => {
+        const previousPackPath = process.env.CONCIERGE_BATCH_PROFILE_PACK_PATH;
+        const previousSecondaryToken = process.env.APIFY_SECONDARY_API_TOKEN;
+        process.env.CONCIERGE_BATCH_PROFILE_PACK_PATH = '/tmp/concierge-comments-best-effort-pack.json';
+        process.env.APIFY_SECONDARY_API_TOKEN = 'test-token';
+        conciergeBatchTestMocks.readFileSync.mockReset().mockReturnValue(JSON.stringify({
+            version: 1,
+            profiles: {
+                interaction_target: interactionProfilePackItem('interaction_target'),
+            },
+        }));
+        conciergeBatchTestMocks.supabaseRpc.mockReset().mockResolvedValue({ data: [], error: null });
+        conciergeBatchTestMocks.provider.getProfile.mockReset().mockResolvedValue(null);
+        conciergeBatchTestMocks.provider.getFollowers.mockReset().mockResolvedValue([]);
+        conciergeBatchTestMocks.provider.getFollowing.mockReset().mockResolvedValue([]);
+        conciergeBatchTestMocks.makeApifyProvider.mockReset().mockReturnValue(conciergeBatchTestMocks.provider);
+        conciergeBatchTestMocks.makeApifyInteractionAdapter.mockReset()
+            .mockReturnValue(conciergeBatchTestMocks.interactionAdapter);
+        conciergeBatchTestMocks.interactionAdapter.getPostLikers.mockReset().mockResolvedValue([]);
+        conciergeBatchTestMocks.interactionAdapter.getPostComments.mockReset()
+            .mockRejectedValue(new Error('SCRAPING_PROVIDER_START_REJECTED_ERROR'));
+        conciergeBatchTestMocks.captureFirstPaymentConciergeAiBundle.mockReset().mockResolvedValue({
+            bundle: { capture: {} },
+        });
+        const stderrSpy = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+
+        try {
+            const fixture = interactionCollectOrderFixture();
+            const result = await collectOrder(
+                fixture.order,
+                fixture.prepared,
+                fixture.context,
+                fixture.artifacts,
+            );
+
+            expect(result.interaction.targetToCandidate.commentCoverage).toEqual([]);
+            expect(stderrSpy.mock.calls.some(([chunk]) => (
+                String(chunk).includes(
+                    'comments unavailable for interaction_target: SCRAPING_PROVIDER_START_REJECTED_ERROR',
+                )
+            ))).toBe(true);
+        } finally {
+            stderrSpy.mockRestore();
+            if (previousPackPath === undefined) delete process.env.CONCIERGE_BATCH_PROFILE_PACK_PATH;
+            else process.env.CONCIERGE_BATCH_PROFILE_PACK_PATH = previousPackPath;
+            if (previousSecondaryToken === undefined) delete process.env.APIFY_SECONDARY_API_TOKEN;
+            else process.env.APIFY_SECONDARY_API_TOKEN = previousSecondaryToken;
+        }
+    });
+
+    it('keeps liker collection failures fatal to the order', async () => {
+        const previousPackPath = process.env.CONCIERGE_BATCH_PROFILE_PACK_PATH;
+        const previousSecondaryToken = process.env.APIFY_SECONDARY_API_TOKEN;
+        process.env.CONCIERGE_BATCH_PROFILE_PACK_PATH = '/tmp/concierge-likers-fatal-pack.json';
+        process.env.APIFY_SECONDARY_API_TOKEN = 'test-token';
+        conciergeBatchTestMocks.readFileSync.mockReset().mockReturnValue(JSON.stringify({
+            version: 1,
+            profiles: {
+                interaction_target: interactionProfilePackItem('interaction_target'),
+            },
+        }));
+        conciergeBatchTestMocks.supabaseRpc.mockReset().mockResolvedValue({ data: [], error: null });
+        conciergeBatchTestMocks.provider.getProfile.mockReset().mockResolvedValue(null);
+        conciergeBatchTestMocks.provider.getFollowers.mockReset().mockResolvedValue([]);
+        conciergeBatchTestMocks.provider.getFollowing.mockReset().mockResolvedValue([]);
+        conciergeBatchTestMocks.makeApifyProvider.mockReset().mockReturnValue(conciergeBatchTestMocks.provider);
+        conciergeBatchTestMocks.makeApifyInteractionAdapter.mockReset()
+            .mockReturnValue(conciergeBatchTestMocks.interactionAdapter);
+        conciergeBatchTestMocks.interactionAdapter.getPostLikers.mockReset()
+            .mockRejectedValue(new Error('LIKERS_COLLECTION_FAILURE'));
+        conciergeBatchTestMocks.interactionAdapter.getPostComments.mockReset().mockResolvedValue([]);
+        conciergeBatchTestMocks.captureFirstPaymentConciergeAiBundle.mockReset().mockResolvedValue({
+            bundle: { capture: {} },
+        });
+
+        try {
+            const fixture = interactionCollectOrderFixture();
+            await expect(collectOrder(
+                fixture.order,
+                fixture.prepared,
+                fixture.context,
+                fixture.artifacts,
+            )).rejects.toThrow('LIKERS_COLLECTION_FAILURE');
         } finally {
             if (previousPackPath === undefined) delete process.env.CONCIERGE_BATCH_PROFILE_PACK_PATH;
             else process.env.CONCIERGE_BATCH_PROFILE_PACK_PATH = previousPackPath;

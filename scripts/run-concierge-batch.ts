@@ -1362,20 +1362,32 @@ export async function collectOrder(
     if (targetPosts.length > 0) {
         const likerPosts = selectRecentInteractionPosts([...targetPosts], 4);
         const commentPosts = selectRecentInteractionPosts([...targetPosts], 6);
+        let commentsUnavailable = false;
         const [likers, comments] = await Promise.all([
             withInteractions(prepared.sourceRequestId, context, async (slot, adapter) => adapter.getPostLikers(
                 likerPosts.map(instagramPostUrl), 150, providerContext(prepared.sourceRequestId, slot),
             )),
             withInteractions(prepared.sourceRequestId, context, async (slot, adapter) => adapter.getPostComments(
                 commentPosts.map(instagramPostUrl), 15, providerContext(prepared.sourceRequestId, slot),
-            )),
+            )).catch(error => {
+                commentsUnavailable = true;
+                const diagnostic = conciergeBatchFailureDiagnostic(error, 'collect');
+                const warning = diagnostic.message.replace(/[\r\n]+/g, ' ').slice(0, 200);
+                process.stderr.write(
+                    `comments unavailable for ${order.targetUsername}: ${warning}\n`,
+                );
+                return [];
+            }),
         ]);
-        targetInteraction = extractRawTargetInteractions({
+        const extractedTargetInteraction = extractRawTargetInteractions({
             targetPosts,
             likers,
             comments,
             excludedUsernames: [order.targetUsername],
         });
+        targetInteraction = commentsUnavailable
+            ? { ...extractedTargetInteraction, commentCoverage: [] }
+            : extractedTargetInteraction;
     }
     const hydratedNames = new Set(publicProfiles.map(item => normalized(item.profile.username)));
     const retainedTargetEvidence = targetInteraction.evidence.filter(row => hydratedNames.has(normalized(row.actorUsername)));
