@@ -70,6 +70,7 @@ export interface ConciergeStoredReplayFeatures {
     bidirectionalInteractions: ConciergeBidirectionalInteractionEvidence;
     classificationByOrdinal: ReadonlyMap<number, {
         originalAiClassification: 'male' | 'female' | 'unknown';
+        classificationSource?: 'ai' | 'name_only' | 'manual';
         confidence: 'low' | 'medium' | 'high';
         classifier: string;
         modelName: string;
@@ -124,6 +125,12 @@ export interface ConciergeManualPublicationInput {
     batchCandidateCopy?: readonly ConciergeBatchCandidateCopy[];
     /** @deprecated Retained as a source-compatible alias for older callers. */
     batchHighRiskCopy?: readonly ConciergeBatchHighRiskCopy[];
+    /** Name-only classifications are an explicit, auditable concierge-only path. */
+    nameOnlyProvenance?: Readonly<{
+        promotedUsernames: readonly string[];
+        achievedUnknownRatio: number;
+        targetUnknownRatio: number;
+    }>;
 }
 
 export interface ConciergeBatchCandidateCopy {
@@ -158,6 +165,12 @@ export interface ConciergeCanonicalPublication {
         authoritativeMutual: number;
         hydrated: number;
         analyzed: number;
+        nameOnly?: Readonly<{
+            promoted: number;
+            promotedUsernames: readonly string[];
+            unknownRatio: number;
+            targetUnknownRatio: number;
+        }>;
     };
 }
 
@@ -722,6 +735,7 @@ function validateReplayBindings(
         const binding = replay.classificationByOrdinal.get(record.mutualOrdinal);
         if (!binding
             || binding.originalAiClassification !== record.originalAiClassification
+            || (binding.classificationSource ?? 'ai') !== record.classificationSource
             || binding.confidence !== record.confidence
             || binding.classifier !== record.classifier
             || binding.modelName !== record.modelName
@@ -810,7 +824,15 @@ function buildEffectiveDetails(
             fail('CONCIERGE_PUBLICATION_REPLAY_AI_BINDING_MISMATCH');
         }
         const effective = record.effectiveClassification;
-        if (effective === 'female') {
+        const nameOnly = record.classificationSource === 'name_only';
+        if (nameOnly && (detail.feature
+            || record.secondPass.status === 'collected'
+            || record.secondPass.completeMedia === true
+            || binding.secondPassStatus === 'collected'
+            || binding.secondPassCompleteMedia === true)) {
+            fail('CONCIERGE_PUBLICATION_NAME_ONLY_MEDIA_CONFLICT');
+        }
+        if (effective === 'female' && !nameOnly) {
             if (!detail.feature) fail('CONCIERGE_PUBLICATION_MANUAL_FEATURE_MISSING');
             if (record.secondPass.status !== 'collected'
                 || record.secondPass.completeMedia !== true
@@ -820,7 +842,7 @@ function buildEffectiveDetails(
             }
         }
         const original = detailClassification(detail);
-        if (!record.manualOverride && original !== effective) {
+        if (!record.manualOverride && !nameOnly && original !== effective) {
             fail('CONCIERGE_PUBLICATION_AI_CLASSIFICATION_DRIFT');
         }
         const finalClassification = effective === 'female'
@@ -881,6 +903,24 @@ function buildConciergeManualPublicationInternal(
     }
     validateReplayBindings(input.ledger, input.replay);
     const effectiveLedger = applyConciergeManualClassificationImport(input.ledger, input.manualImport);
+    const nameOnlyRecords = effectiveLedger.records.filter(record => record.classificationSource === 'name_only');
+    if (input.nameOnlyProvenance) {
+        const promotedUsernames = input.nameOnlyProvenance.promotedUsernames.map(normalizeUsername);
+        const promotedSet = new Set(promotedUsernames);
+        if (promotedSet.size !== promotedUsernames.length
+            || promotedSet.size !== nameOnlyRecords.length
+            || nameOnlyRecords.some(record => !promotedSet.has(normalizeUsername(record.instagramId)))
+            || !Number.isFinite(input.nameOnlyProvenance.achievedUnknownRatio)
+            || input.nameOnlyProvenance.achievedUnknownRatio < 0
+            || input.nameOnlyProvenance.achievedUnknownRatio > 1
+            || !Number.isFinite(input.nameOnlyProvenance.targetUnknownRatio)
+            || input.nameOnlyProvenance.targetUnknownRatio < 0
+            || input.nameOnlyProvenance.targetUnknownRatio > 1) {
+            fail('CONCIERGE_PUBLICATION_NAME_ONLY_PROVENANCE_INVALID');
+        }
+    } else if (nameOnlyRecords.length > 0) {
+        fail('CONCIERGE_PUBLICATION_NAME_ONLY_PROVENANCE_MISSING');
+    }
     const details = buildEffectiveDetails(effectiveLedger, input.replay);
     const canonicalInteractions = canonicalizeBidirectionalInteractions(
         input.replay.bidirectionalInteractions,
@@ -892,6 +932,9 @@ function buildConciergeManualPublicationInternal(
             canonicalInteractions,
         ),
         details,
+        nameOnlyOrdinals: new Set(effectiveLedger.records
+            .filter(record => record.classificationSource === 'name_only')
+            .map(record => record.mutualOrdinal)),
         orderedMutualUsernames: input.replay.orderedMutualUsernames,
         targetInteractions: canonicalInteractions.targetToCandidate.status === 'collected'
             ? canonicalInteractions.targetToCandidate.evidence
@@ -912,6 +955,14 @@ function buildConciergeManualPublicationInternal(
         },
         result,
     });
+    if (input.nameOnlyProvenance) {
+        const achievedUnknownRatio = effectiveLedger.hydratedPublicCount === 0
+            ? 0
+            : result.counts.unknown / effectiveLedger.hydratedPublicCount;
+        if (Math.abs(achievedUnknownRatio - input.nameOnlyProvenance.achievedUnknownRatio) > 1e-9) {
+            fail('CONCIERGE_PUBLICATION_NAME_ONLY_PROVENANCE_INVALID');
+        }
+    }
     const ledgerHash = createConciergeClassificationLedgerHash(effectiveLedger);
     const interactionLineage = deepCloneAndFreeze(canonicalInteractionLineage(canonicalInteractions));
     const interactionLineageHash = hash(interactionLineage);
@@ -972,6 +1023,14 @@ function buildConciergeManualPublicationInternal(
         authoritativeMutual: effectiveLedger.mutualCount,
         hydrated: effectiveLedger.hydratedPublicCount + effectiveLedger.hydratedPrivateCount,
         analyzed: input.replay.analyzedPublicCount,
+        ...(input.nameOnlyProvenance ? {
+            nameOnly: {
+                promoted: nameOnlyRecords.length,
+                promotedUsernames: [...input.nameOnlyProvenance.promotedUsernames].map(normalizeUsername),
+                unknownRatio: input.nameOnlyProvenance.achievedUnknownRatio,
+                targetUnknownRatio: input.nameOnlyProvenance.targetUnknownRatio,
+            },
+        } : {}),
     });
     const resultHash = hash({
         schema: 'concierge-manual-publication-v1',

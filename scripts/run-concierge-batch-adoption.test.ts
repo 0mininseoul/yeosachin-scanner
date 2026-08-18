@@ -51,6 +51,8 @@ vi.mock('@/lib/services/analysis/first-payment-concierge', async importOriginal 
 import {
     buildConciergeBatchHighRiskCopyPrompt,
     collectOrder,
+    conciergeBatchMaxUnknownRatio,
+    conciergeBatchNameOnlyMinConfidence,
     conciergeBatchFailureDiagnostic,
     generateConciergeBatchCandidateCopies,
     generateConciergeBatchHighRiskCopy,
@@ -67,6 +69,7 @@ import {
     sanitizeConciergeBatchDiagnostic,
     selectConciergeBatchOnlyOrders,
     selectConciergeBatchActiveScope,
+    selectConciergeNameOnlyPromotions,
     type ConciergeBatchHighRiskCopyEvidence,
     validateConciergeBatchHighRiskCopy,
 } from './run-concierge-batch';
@@ -553,6 +556,59 @@ describe('concierge batch only-order allowlist', () => {
         expect(selectConciergeBatchOnlyOrders(scope, `${second}`)).toEqual([{ orderId: second }]);
         expect(() => selectConciergeBatchOnlyOrders(scope, `${first},${outside}`))
             .toThrow('CONCIERGE_BATCH_ONLY_ORDERS_INVALID');
+    });
+});
+
+describe('concierge name-only gender promotions', () => {
+    it('uses the documented defaults and validates environment overrides', () => {
+        expect(conciergeBatchMaxUnknownRatio(undefined)).toBe(0.2);
+        expect(conciergeBatchMaxUnknownRatio('0.35')).toBe(0.35);
+        expect(conciergeBatchNameOnlyMinConfidence(undefined)).toBe('low');
+        expect(conciergeBatchNameOnlyMinConfidence('HIGH')).toBe('high');
+        expect(() => conciergeBatchMaxUnknownRatio('1.1')).toThrow(
+            'CONCIERGE_BATCH_MAX_UNKNOWN_RATIO_INVALID',
+        );
+        expect(() => conciergeBatchNameOnlyMinConfidence('urgent')).toThrow(
+            'CONCIERGE_BATCH_NAME_ONLY_MIN_CONFIDENCE_INVALID',
+        );
+    });
+
+    it('does not promote missing, neutral, or non-female names and ranks eligible women by confidence', () => {
+        const result = selectConciergeNameOnlyPromotions({
+            publicCount: 10,
+            initialUnknownCount: 10,
+            maxUnknownRatio: 0.2,
+            minimumConfidence: 'low',
+            candidates: [
+                { ordinal: 1, username: 'missing_name', fullName: null, inferredGender: 'female', confidence: 'high' },
+                { ordinal: 2, username: 'neutral_name', fullName: 'Alex', inferredGender: 'unknown', confidence: 'high' },
+                { ordinal: 3, username: 'male_name', fullName: 'John', inferredGender: 'male', confidence: 'high' },
+                { ordinal: 4, username: 'low_female', fullName: 'Jane', inferredGender: 'female', confidence: 'low' },
+                { ordinal: 5, username: 'high_female', fullName: 'Sophie', inferredGender: 'female', confidence: 'high' },
+            ],
+        });
+
+        expect(result.promoted.map(candidate => [candidate.username, candidate.classification])).toEqual([
+            ['male_name', 'male'],
+            ['high_female', 'female'],
+            ['low_female', 'female'],
+        ]);
+        expect(result.achievedUnknownRatio).toBe(0.7);
+    });
+
+    it('stops when the eligible name-only pool is exhausted even if unknown exceeds the target', () => {
+        const result = selectConciergeNameOnlyPromotions({
+            publicCount: 10,
+            initialUnknownCount: 10,
+            maxUnknownRatio: 0.2,
+            minimumConfidence: 'low',
+            candidates: [
+                { ordinal: 1, username: 'only_female', fullName: 'Jane', inferredGender: 'female', confidence: 'high' },
+            ],
+        });
+
+        expect(result.promoted.map(candidate => candidate.username)).toEqual(['only_female']);
+        expect(result.achievedUnknownRatio).toBe(0.9);
     });
 });
 

@@ -399,6 +399,8 @@ export function buildCanonicalConciergeResult(input: {
     unknownPublicUsernames?: readonly string[];
     /** Batch-only draft mode defers high-risk copy until the operator Gemini pass. */
     deferHighRiskCopy?: boolean;
+    /** Ordinals explicitly promoted through the concierge name-only path. */
+    nameOnlyOrdinals?: ReadonlySet<number>;
 }): {
     femaleRows: readonly ConciergeLegacyResultRow[];
     privateRows: readonly ConciergePrivateAccountRow[];
@@ -406,7 +408,8 @@ export function buildCanonicalConciergeResult(input: {
 } {
     const maleDetails = input.details.filter(detail => detail.finalClassification === 'verified_non_female');
     const femaleDetails = input.details.filter(detail => (
-        detail.finalClassification === 'verified_female' && detail.feature !== null
+        detail.finalClassification === 'verified_female'
+        && (detail.feature !== null || input.nameOnlyOrdinals?.has(detail.ordinal) === true)
     ));
     const unknownPublic = input.details.length - maleDetails.length - femaleDetails.length
         + (input.unknownPublicUsernames?.length ?? 0);
@@ -434,7 +437,8 @@ export function buildCanonicalConciergeResult(input: {
     const candidates = femaleDetails.map(detail => {
         const profile = input.profilesByOrdinal.get(detail.ordinal);
         const feature = detail.feature;
-        if (!profile || !feature) throw new Error('CONCIERGE_GENDER_FEATURE_MISSING');
+        const nameOnly = input.nameOnlyOrdinals?.has(detail.ordinal) === true;
+        if (!profile || (!feature && !nameOnly)) throw new Error('CONCIERGE_GENDER_FEATURE_MISSING');
         const username = normalizedUsername(profile.username);
         const interaction = interactions.get(username);
         const mentions = hasCandidateTargetMention({
@@ -446,11 +450,11 @@ export function buildCanonicalConciergeResult(input: {
         return {
             candidateId: canonicalCandidateId(username),
             username,
-            appearanceGrade: feature.features.appearanceGrade as AppearanceGrade,
-            exposureScore: feature.features.exposureScore,
-            accountContext: accountContext(feature, profile),
-            hasWeakPartnerEvidence: weakPartner(feature),
-            hasStrongPartnerEvidence: strongPartner(feature),
+            appearanceGrade: (feature?.features.appearanceGrade ?? 1) as AppearanceGrade,
+            exposureScore: feature?.features.exposureScore ?? 0,
+            accountContext: feature ? accountContext(feature, profile) : 'uncertain',
+            hasWeakPartnerEvidence: feature ? weakPartner(feature) : false,
+            hasStrongPartnerEvidence: feature ? strongPartner(feature) : false,
             uniqueTargetPostsLikedByCandidate: interaction?.uniqueTargetPostsLikedByCandidate ?? 0,
             boundedCandidateCommentsOnTarget: interaction?.boundedCandidateCommentsOnTarget ?? 0,
             hasCandidateToTargetTagOrCaptionMention: mentions.candidateToTargetTagOrCaptionMention,
@@ -478,7 +482,9 @@ export function buildCanonicalConciergeResult(input: {
     }));
     const femaleRows = finalScores.map((score, index) => {
         const retained = detailByCandidate.get(score.candidateId);
-        if (!retained?.detail.feature) throw new Error('CONCIERGE_GENDER_RESULT_MISSING');
+        if (!retained) throw new Error('CONCIERGE_GENDER_RESULT_MISSING');
+        const nameOnly = input.nameOnlyOrdinals?.has(retained.detail.ordinal) === true;
+        const feature = retained.detail.feature;
         const interaction = interactions.get(normalizedUsername(retained.profile.username));
         const commentText = joined.find(row => (
             row.candidateUsername === normalizedUsername(retained.profile.username)
@@ -503,6 +509,13 @@ export function buildCanonicalConciergeResult(input: {
         let narrative: readonly string[] = [];
         if (deferHighRiskCopy) {
             narrative = [BATCH_HIGH_RISK_COPY_DEFERRED_NARRATIVE, BATCH_HIGH_RISK_COPY_DEFERRED_NARRATIVE];
+        } else if (score.riskBand === 'high_risk' && nameOnly) {
+            narrative = buildConciergeRelaxedRiskNarrative({
+                copyEvidence,
+                candidateFullName: retained.profile.fullName,
+                interactionObserved: Object.values(interactionEvidence)
+                    .some(value => typeof value === 'boolean' && value),
+            });
         } else if (score.riskBand === 'high_risk') {
             try {
                 narrative = buildV211EvidenceSpecificRiskNarrative({
@@ -530,9 +543,11 @@ export function buildCanonicalConciergeResult(input: {
         let overview: string;
         if (deferHighRiskCopy) {
             overview = BATCH_HIGH_RISK_COPY_DEFERRED_OVERVIEW;
+        } else if (nameOnly) {
+            overview = SPARSE_NO_NAME_OVERVIEW;
         } else {
             const retainedOverview = conciergeBoundedOverview(
-                retained.detail.feature.features.oneLineOverview,
+                feature!.features.oneLineOverview,
                 copyEvidence,
             );
             if (retainedOverview) {
@@ -540,14 +555,14 @@ export function buildCanonicalConciergeResult(input: {
             } else {
                 try {
                     overview = needsV211EvidenceSpecificOverview(
-                        retained.detail.feature.features.oneLineOverview,
+                        feature!.features.oneLineOverview,
                         copyEvidence,
                     )
                         ? buildV211EvidenceSpecificOverview({
                             ...copyEvidence,
                             variation: index,
                         })
-                        : retained.detail.feature.features.oneLineOverview;
+                        : feature!.features.oneLineOverview;
                 } catch (error) {
                     if (!(error instanceof Error) || error.message !== 'CONCIERGE_COPY_EVIDENCE_UNAVAILABLE') {
                         throw error;
@@ -595,8 +610,8 @@ export function buildCanonicalConciergeResult(input: {
             suspect_full_name: retained.profile.fullName ?? null,
             bio: retained.profile.bio ?? null,
             risk_score: Math.round(score.displayScore * 10),
-            photogenic_grade: retained.detail.feature.features.appearanceGrade as AppearanceGrade,
-            exposure_level: exposureLevel(retained.detail.feature.features.exposureScore),
+            photogenic_grade: (feature?.features.appearanceGrade ?? 1) as AppearanceGrade,
+            exposure_level: feature ? exposureLevel(feature.features.exposureScore) : 'low',
             is_tagged: score.hasCandidateToTargetTagOrCaptionMention,
             risk_grade: score.riskBand,
             gender_confidence: genderConfidence(retained.detail),

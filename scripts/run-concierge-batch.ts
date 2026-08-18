@@ -83,6 +83,99 @@ const CONCIERGE_DIAGNOSTIC_REDACTIONS: readonly [RegExp, string][] = [
 const CONCIERGE_DIAGNOSTIC_MESSAGE_MAX = 500;
 const CONCIERGE_DIAGNOSTIC_STACK_MAX = 2_000;
 
+const CONCIERGE_BATCH_DEFAULT_MAX_UNKNOWN_RATIO = 0.20;
+const CONCIERGE_BATCH_DEFAULT_NAME_ONLY_MIN_CONFIDENCE = 'low' as const;
+const CONCIERGE_CONFIDENCE_RANK: Record<'low' | 'medium' | 'high', number> = {
+    low: 1,
+    medium: 2,
+    high: 3,
+};
+
+export interface ConciergeNameOnlyCandidate {
+    ordinal: number;
+    username: string;
+    fullName: string | null | undefined;
+    inferredGender: 'female' | 'male' | 'unknown';
+    confidence: 'low' | 'medium' | 'high';
+}
+
+export interface ConciergeNameOnlyPromotion {
+    ordinal: number;
+    username: string;
+    classification: 'female' | 'male';
+    confidence: 'low' | 'medium' | 'high';
+    classificationSource: 'name_only';
+}
+
+/** Reads CONCIERGE_BATCH_MAX_UNKNOWN_RATIO; default 0.20, inclusive range 0..1. */
+export function conciergeBatchMaxUnknownRatio(raw = process.env.CONCIERGE_BATCH_MAX_UNKNOWN_RATIO): number {
+    if (raw === undefined || raw.trim() === '') return CONCIERGE_BATCH_DEFAULT_MAX_UNKNOWN_RATIO;
+    const value = Number(raw.trim());
+    if (!Number.isFinite(value) || value < 0 || value > 1) {
+        throw new Error('CONCIERGE_BATCH_MAX_UNKNOWN_RATIO_INVALID');
+    }
+    return value;
+}
+
+/** Reads CONCIERGE_BATCH_NAME_ONLY_MIN_CONFIDENCE; default low. */
+export function conciergeBatchNameOnlyMinConfidence(
+    raw = process.env.CONCIERGE_BATCH_NAME_ONLY_MIN_CONFIDENCE,
+): 'low' | 'medium' | 'high' {
+    const value = (raw ?? CONCIERGE_BATCH_DEFAULT_NAME_ONLY_MIN_CONFIDENCE).trim().toLowerCase();
+    if (!(value in CONCIERGE_CONFIDENCE_RANK)) {
+        throw new Error('CONCIERGE_BATCH_NAME_ONLY_MIN_CONFIDENCE_INVALID');
+    }
+    return value as 'low' | 'medium' | 'high';
+}
+
+export function selectConciergeNameOnlyPromotions(input: {
+    publicCount: number;
+    initialUnknownCount: number;
+    maxUnknownRatio: number;
+    minimumConfidence: 'low' | 'medium' | 'high';
+    candidates: readonly ConciergeNameOnlyCandidate[];
+}): {
+    promoted: readonly ConciergeNameOnlyPromotion[];
+    achievedUnknownRatio: number;
+    targetUnknownRatio: number;
+} {
+    if (!Number.isInteger(input.publicCount) || input.publicCount < 0
+        || !Number.isInteger(input.initialUnknownCount) || input.initialUnknownCount < 0
+        || input.initialUnknownCount > input.publicCount
+        || !Number.isFinite(input.maxUnknownRatio)
+        || input.maxUnknownRatio < 0 || input.maxUnknownRatio > 1) {
+        throw new Error('CONCIERGE_BATCH_NAME_ONLY_SCOPE_INVALID');
+    }
+    const minimumRank = CONCIERGE_CONFIDENCE_RANK[input.minimumConfidence];
+    const eligible = input.candidates
+        .filter((candidate): candidate is ConciergeNameOnlyCandidate & {
+            inferredGender: 'female' | 'male';
+        } => Boolean(candidate.fullName?.trim())
+            && candidate.inferredGender !== 'unknown'
+            && CONCIERGE_CONFIDENCE_RANK[candidate.confidence] >= minimumRank)
+        .sort((left, right) => (
+            CONCIERGE_CONFIDENCE_RANK[right.confidence] - CONCIERGE_CONFIDENCE_RANK[left.confidence]
+            || left.ordinal - right.ordinal
+            || left.username.localeCompare(right.username, 'en-US')
+        ));
+    const targetUnknownCount = Math.floor(input.publicCount * input.maxUnknownRatio);
+    const totalPromotionBudget = Math.max(0, input.initialUnknownCount - targetUnknownCount);
+    const male = eligible.filter(candidate => candidate.inferredGender === 'male');
+    const female = eligible.filter(candidate => candidate.inferredGender === 'female');
+    const selected = [...male, ...female].slice(0, totalPromotionBudget);
+    const promoted = selected.map(candidate => ({
+        ordinal: candidate.ordinal,
+        username: candidate.username,
+        classification: candidate.inferredGender,
+        confidence: candidate.confidence,
+        classificationSource: 'name_only' as const,
+    }));
+    const achievedUnknownRatio = input.publicCount === 0
+        ? 0
+        : (input.initialUnknownCount - promoted.length) / input.publicCount;
+    return { promoted, achievedUnknownRatio, targetUnknownRatio: input.maxUnknownRatio };
+}
+
 export function sanitizeConciergeBatchDiagnostic(value: string, maximum: number): string {
     let sanitized = value;
     for (const [pattern, replacement] of CONCIERGE_DIAGNOSTIC_REDACTIONS) {
@@ -1028,7 +1121,11 @@ function batchCopyEvidenceForRow(
     const capturedProfile = retained
         ? classified.copyContext.capturedBundle.profiles.find(profile => profile.ordinal === retained[0])
         : undefined;
-    if (!retained || !detail?.feature || !capturedProfile) {
+    const classificationRecord = retained
+        ? classified.input.ledger.records.find(record => record.mutualOrdinal === retained[0])
+        : undefined;
+    const nameOnly = classificationRecord?.classificationSource === 'name_only';
+    if (!retained || !detail || (!detail.feature && !nameOnly) || !capturedProfile) {
         throw new Error('CONCIERGE_BATCH_COPY_EVIDENCE_MISSING');
     }
     const profile = retained[1];
@@ -1047,7 +1144,7 @@ function batchCopyEvidenceForRow(
         candidateFullName: profile.fullName ?? null,
         bio: profile.bio ?? null,
         captions: capturedProfile.captions.map(caption => caption.text).filter(Boolean).slice(0, 8),
-        appearanceGrade: detail.feature.features.appearanceGrade,
+        appearanceGrade: detail.feature?.features.appearanceGrade ?? 1,
         facts: collectBatchCopyFacts(
             classified.input,
             classified.copyContext.targetProfile,
@@ -1644,18 +1741,37 @@ async function classifyOrder(collected: CollectedOrder): Promise<ClassifiedOrder
         onAccountAnalyzed(detail) { details.push(detail); },
     });
     const detailsByOrdinal = new Map(details.map(detail => [detail.ordinal, detail]));
-    // A resolver can legally verify gender after feature analysis is
-    // unavailable. Concierge scoring still needs a feature bundle, so retain
-    // those accounts as unresolved instead of treating them as publishable
-    // female rows.
-    const replayDetails = details.filter(detail => detail.feature !== null);
-    const replayDetailsByOrdinal = new Map(replayDetails.map(detail => [detail.ordinal, detail]));
+    // Feature-unavailable public profiles remain visible as unknown; only the
+    // explicit name-only promotions below may turn a no-feature row into a
+    // publishable gender classification.
     const publicByOrdinal = new Map(collected.source.publicProfiles.map(item => [item.ordinal, item.profile]));
-    const replayPublicNames = new Set(
-        [...replayDetailsByOrdinal.keys()]
-            .map(ordinal => publicByOrdinal.get(ordinal)?.username)
-            .filter((username): username is string => typeof username === 'string')
-            .map(normalized),
+    const publicCount = collected.source.publicProfiles.length;
+    const knownPublicCount = details.filter(detail => (
+        detail.feature !== null
+        && (detail.finalClassification === 'verified_female'
+            || detail.finalClassification === 'verified_non_female')
+    )).length;
+    const nameOnlyPromotions = selectConciergeNameOnlyPromotions({
+        publicCount,
+        initialUnknownCount: Math.max(0, publicCount - knownPublicCount),
+        maxUnknownRatio: conciergeBatchMaxUnknownRatio(),
+        minimumConfidence: conciergeBatchNameOnlyMinConfidence(),
+        candidates: details.flatMap(detail => {
+            const profile = publicByOrdinal.get(detail.ordinal);
+            const assessment = detail.triage?.assessment;
+            if (!profile || !assessment || detail.feature !== null
+                || preferredInstagramProfileImageUrl(profile)) return [];
+            return [{
+                ordinal: detail.ordinal,
+                username: normalized(profile.username),
+                fullName: profile.fullName,
+                inferredGender: assessment.inferredGender,
+                confidence: assessment.confidence,
+            }];
+        }),
+    });
+    const nameOnlyPromotionByOrdinal = new Map(
+        nameOnlyPromotions.promoted.map(promotion => [promotion.ordinal, promotion]),
     );
     const records: ConciergeClassificationRecord[] = collected.source.mutualRows.map(row => {
         if (row.isPrivate) {
@@ -1690,9 +1806,37 @@ async function classifyOrder(collected: CollectedOrder): Promise<ClassifiedOrder
                 : profile
                     ? notCollectedPass(profile)
                     : failedPass(profile, evidenceHash);
+            const nameOnlyPromotion = nameOnlyPromotionByOrdinal.get(row.mutualOrdinal);
+            if (nameOnlyPromotion && profile && detail?.triage) {
+                const nameOnlyEvidenceHash = hash({
+                    row,
+                    profile,
+                    triage: detail.triage,
+                    classification: nameOnlyPromotion.classification,
+                    source: nameOnlyPromotion.classificationSource,
+                });
+                return {
+                    candidateId: analysisV2CandidateId(row.username), instagramId: row.username,
+                    mutualOrdinal: row.mutualOrdinal, partition: 'public', profileFetchStatus: 'success',
+                    firstPass: failedPass(profile, nameOnlyEvidenceHash),
+                    secondPass: notCollectedPass(profile),
+                    originalAiClassification: 'unknown',
+                    effectiveClassification: nameOnlyPromotion.classification,
+                    confidence: nameOnlyPromotion.confidence,
+                    evidenceCoverage: { declared: 0, collected: 0, selected: 0, complete: false, basisPoints: 0, hash: nameOnlyEvidenceHash },
+                    classifier: 'gemini-v2.14', modelName: 'gemini-v2.14', promptVersion: 'ai-stage-policy-v2.11', schemaVersion: 'concierge-batch-v1',
+                    classificationOperationKey: `concierge:classification:${row.mutualOrdinal}`,
+                    classificationResultHash: hash({ row, detail, source: nameOnlyPromotion.classificationSource }),
+                    classificationSource: nameOnlyPromotion.classificationSource,
+                    manualOverride: null,
+                    sourceSnapshot: { instagramUrl: `https://instagram.com/${row.username}`, originalAiClassification: 'unknown', confidenceEvidence: `confidence=${nameOnlyPromotion.confidence};evidence=name_only`, operatorNote: '' },
+                };
+            }
             return {
                 candidateId: analysisV2CandidateId(row.username), instagramId: row.username,
-                mutualOrdinal: row.mutualOrdinal, partition: 'unresolved', profileFetchStatus: 'unavailable',
+                mutualOrdinal: row.mutualOrdinal,
+                partition: profile && detail ? 'public' : 'unresolved',
+                profileFetchStatus: profile && detail ? 'success' : 'unavailable',
                 firstPass, secondPass,
                 originalAiClassification: 'unknown', effectiveClassification: 'unknown', confidence: 'low',
                 evidenceCoverage: { declared: 0, collected: 0, selected: 0, complete: false, basisPoints: 0, hash: evidenceHash },
@@ -1721,6 +1865,22 @@ async function classifyOrder(collected: CollectedOrder): Promise<ClassifiedOrder
         };
     });
     const publicRecords = records.filter(record => record.partition === 'public');
+    const achievedUnknownRatio = publicRecords.length === 0
+        ? 0
+        : publicRecords.filter(record => record.effectiveClassification === 'unknown').length / publicRecords.length;
+    process.stderr.write(
+        `concierge name-only promotions: ${nameOnlyPromotions.promoted.length}; unknown ratio: ${achievedUnknownRatio.toFixed(4)}; target: ${nameOnlyPromotions.targetUnknownRatio.toFixed(4)}\n`,
+    );
+    const replayDetails = details.filter(detail => (
+        publicRecords.some(record => record.mutualOrdinal === detail.ordinal)
+    ));
+    const replayDetailsByOrdinal = new Map(replayDetails.map(detail => [detail.ordinal, detail]));
+    const replayPublicNames = new Set(
+        [...replayDetailsByOrdinal.keys()]
+            .map(ordinal => publicByOrdinal.get(ordinal)?.username)
+            .filter((username): username is string => typeof username === 'string')
+            .map(normalized),
+    );
     const privateProfiles = collected.source.privateRows.map(row => ({
         username: row.username, isPrivate: true, fullName: row.fullName, profilePicUrl: row.profilePicUrl,
         followersCount: 0, followingCount: 0, postsCount: 0, latestPosts: [],
@@ -1753,6 +1913,7 @@ async function classifyOrder(collected: CollectedOrder): Promise<ClassifiedOrder
         .filter(record => record.partition !== 'private')
         .map(record => [record.mutualOrdinal, {
             originalAiClassification: record.originalAiClassification!,
+            classificationSource: record.classificationSource === 'name_only' ? 'name_only' as const : 'ai' as const,
             confidence: record.confidence!, classifier: record.classifier!, modelName: record.modelName!, promptVersion: record.promptVersion!, schemaVersion: record.schemaVersion!,
             classificationOperationKey: record.classificationOperationKey!, classificationResultHash: record.classificationResultHash!, secondPassStatus: record.secondPass.status, secondPassCompleteMedia: record.secondPass.completeMedia,
         }]));
@@ -1806,6 +1967,13 @@ async function classifyOrder(collected: CollectedOrder): Promise<ClassifiedOrder
         ledger,
         manualImport,
         replay,
+        nameOnlyProvenance: {
+            promotedUsernames: records
+                .filter(record => record.classificationSource === 'name_only')
+                .map(record => normalized(record.instagramId)),
+            achievedUnknownRatio,
+            targetUnknownRatio: nameOnlyPromotions.targetUnknownRatio,
+        },
     };
     return {
         input,
