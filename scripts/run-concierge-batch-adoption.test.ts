@@ -906,7 +906,14 @@ describe('concierge existing relationship artifact resolver', () => {
         expect(prompt).toContain('대상 계정·후보·후보 계정 같은 내부 역할명은 쓰지 마세요.');
         expect(prompt).toContain('이미지에서 실제로 보이는 요소만 묘사하세요');
         expect(prompt).toContain('이미지가 없으면 실루엣·이목구비·얼굴·표정·헤어스타일·체형·옷차림·포즈를 만들지 마세요.');
-        expect(prompt).toContain('유용한 단서가 없었다는 내용만 쓰세요.');
+        // The no-evidence branch must explicitly ban 사진/이미지 as literal words
+        // (not just "don't fabricate visuals"), spell out the full forbidden set,
+        // and give the required-signal-word list plus safe worked examples so
+        // the model isn't left to guess how to phrase "no usable evidence".
+        expect(prompt).toContain('사진이 없다", "이미지가 없다"처럼 사진·이미지라는 낱말 자체를 절대 쓰지 마세요.');
+        expect(prompt).toContain('실루엣, 이목구비, 얼굴, 표정, 헤어스타일, 머리카락, 체형, 옷차림, 포즈, 외모, 분위기, 스타일, 사진, 이미지, 장면, 행동, 태도, 성격, 관계, 호감, 긴장, 시선, 매력');
+        expect(prompt).toContain('단서, 재료, 정보, 근거, 확인, 판단, 드러난, 남겨진, 찾을, 읽을, 없다, 부족, 어렵다, 제한, 적다');
+        expect(prompt).toContain('참고할 안전한 문장 예시입니다');
     });
 
     it('rejects visual claims when no candidate image exists', () => {
@@ -988,6 +995,51 @@ describe('concierge existing relationship artifact resolver', () => {
                 'candidate_user는 현재 남겨진 자료만으로 유용한 재료를 찾기 어려워 판단을 덧붙이지 않습니다.',
             ],
         }, evidence)).toMatchObject({ candidateUsername: 'candidate_user' });
+    });
+
+    it('accepts the exact no-evidence worked examples the prompt itself suggests', () => {
+        // These mirror the safe-example sentences embedded in the no-evidence
+        // prompt branch verbatim (with the candidate name substituted). If the
+        // model follows the prompt's own worked examples, the response must
+        // pass validation: it must hit BATCH_COPY_NO_EVIDENCE_SIGNAL and must
+        // never hit BATCH_COPY_NO_EVIDENCE_FORBIDDEN.
+        const evidence = {
+            ...copyEvidence([]),
+            targetFullName: null,
+            candidateFullName: null,
+            bio: null,
+            captions: [],
+            images: [],
+            appearanceGrade: 0,
+        };
+
+        expect(validateConciergeBatchHighRiskCopy({
+            oneLineOverview: 'candidate_user에 대해 확인할 만한 공개 단서가 남지 않아 뚜렷한 판단을 내리기엔 정보가 부족합니다.',
+            riskAnalysis: [
+                '겉으로 드러난 단서가 거의 없어 candidate_user을(를) 자신 있게 짚어낼 근거를 찾기가 쉽지 않습니다.',
+                '남겨진 정보가 적어 candidate_user에 대해 더 깊이 판단하기는 제한적입니다.',
+            ],
+        }, evidence)).toMatchObject({ candidateUsername: 'candidate_user' });
+    });
+
+    it('still rejects a no-evidence copy that leaks a banned appearance word like 이미지 or 사진', () => {
+        const evidence = {
+            ...copyEvidence([]),
+            targetFullName: null,
+            candidateFullName: null,
+            bio: null,
+            captions: [],
+            images: [],
+            appearanceGrade: 0,
+        };
+
+        expect(() => validateConciergeBatchHighRiskCopy({
+            oneLineOverview: 'candidate_user는 이미지가 없어 확인할 단서가 부족합니다.',
+            riskAnalysis: [
+                'candidate_user에 대해 확인할 정보와 근거가 부족해 판단을 내리기 어렵습니다.',
+                'candidate_user는 남겨진 자료가 적어 더 판단하기는 제한적입니다.',
+            ],
+        }, evidence)).toThrow('CONCIERGE_BATCH_COPY_NO_EVIDENCE_REQUIRED');
     });
 
     it('keeps the existing nonempty Zod guard for blank copy', () => {
