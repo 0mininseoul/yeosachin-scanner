@@ -211,7 +211,7 @@ export async function captureAnalysisV2ReplayBundle(input: {
             fail('ANALYSIS_V2_REPLAY_MEDIA_INVALID');
         }
         const normalized = textOnly
-            ? mergeNormalizedMedia(triageMedia, [usableTriageNormalized])
+            ? mergeNormalizedMedia(triageMedia, [triageNormalized])
             : await (async () => {
                 const triageIds = new Set(policy?.triage.selectionIds ?? []);
                 const featureRemainder = (policy?.feature.media ?? []).filter(media => !triageIds.has(media.selectionId));
@@ -220,7 +220,7 @@ export async function captureAnalysisV2ReplayBundle(input: {
                     input.normalizeMedia,
                     request.sourceLineage.policyVersions.aiStage,
                 );
-                return mergeNormalizedMedia(policy?.feature.media ?? [], [usableTriageNormalized, remainderNormalized]);
+                return mergeNormalizedMedia(policy?.feature.media ?? [], [triageNormalized, remainderNormalized]);
             })();
         const usableNormalized = removeDefaultProfileMediaFromMerged(normalized);
         if (
