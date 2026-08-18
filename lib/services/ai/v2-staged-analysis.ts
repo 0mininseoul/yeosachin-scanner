@@ -1618,15 +1618,12 @@ function genderFirstPassPrompt(
     media: readonly NormalizedAiMediaSelection[],
     allowNameGenderEvidence = false,
 ): string {
-    const nameGuidance = allowNameGenderEvidence
-        ? [
-            'Use the full name only as a secondary clue when image evidence is ambiguous.',
-            'Keep confidence low when the name is the main support.',
-            'Treat unisex, neutral, and brand names as no gender evidence.',
-        ]
-        : [
-            'The full name is an allowed direct name signal for provisional routing; an obvious name may be classified without high-confidence same-owner visual evidence or feed images.',
-        ];
+    const nameGuidance = [
+        'The full name is an allowed direct name signal for provisional routing; an obvious name may be classified without high-confidence same-owner visual evidence or feed images.',
+        ...(allowNameGenderEvidence
+            ? ['Treat unisex, neutral, and brand names as no gender evidence.']
+            : []),
+    ];
     return [
         'gender-first-pass-v1',
         'Classify this account in a first-pass using only the supplied full name and attached profile image.',

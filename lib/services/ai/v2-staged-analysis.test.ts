@@ -703,7 +703,7 @@ describe('V2 staged AI services', () => {
         expect(prompt).toContain('first-pass');
     });
 
-    it('frames a first-pass full name as cautious secondary gender evidence', async () => {
+    it('keeps first-pass direct name routing and adds a unisex/brand guard on v2.11', async () => {
         const input = {
             fullName: '김수연',
             media: [media()[0]!],
@@ -727,14 +727,13 @@ describe('V2 staged AI services', () => {
 
         const [prompt] = mocks.analyzeWithGemini.mock.calls[0]!;
         expect(prompt).toContain(
-            'Use the full name only as a secondary clue when image evidence is ambiguous.'
-        );
-        expect(prompt).toContain(
-            'Keep confidence low when the name is the main support.'
+            'The full name is an allowed direct name signal for provisional routing; an obvious name may be classified without high-confidence same-owner visual evidence or feed images.'
         );
         expect(prompt).toContain(
             'Treat unisex, neutral, and brand names as no gender evidence.'
         );
+        expect(prompt).not.toContain('only as a secondary clue');
+        expect(prompt).not.toContain('Keep confidence low when the name is the main support.');
     });
 
     it('updates only the current triage guidance while preserving legacy identity bytes', async () => {
