@@ -7,6 +7,7 @@ import {
     orderedMutualUsernamesFromStepData,
 } from '@/lib/services/analysis/recent-mutuals';
 import {
+    targetProfileFullNameFromStepData,
     targetProfileImageFromStepData,
     toOwnerResultInteractionSummary,
 } from '@/lib/services/analysis/result-interactions';
@@ -240,6 +241,7 @@ export async function GET(
             status: analysisRequest.status,
             summary: {
                 targetInstagramId: analysisRequest.target_instagram_id,
+                targetFullName: targetProfileFullNameFromStepData(analysisRequest.step_data),
                 targetProfileImage: createImageProxyPath(
                     targetProfileImageFromStepData(analysisRequest.step_data)
                 ),

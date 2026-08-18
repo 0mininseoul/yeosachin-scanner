@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import {
+    targetProfileFullNameFromStepData,
     targetProfileImageFromStepData,
     toOwnerResultInteractionSummary,
     toResultInteractionSummary,
@@ -165,5 +166,17 @@ describe('toResultInteractionSummary', () => {
         })).toBeUndefined();
         expect(targetProfileImageFromStepData({ targetProfileImage: 42 })).toBeUndefined();
         expect(targetProfileImageFromStepData(null)).toBeUndefined();
+    });
+
+    it('reads a bounded concierge target full name and falls back across legacy step-data shapes', () => {
+        expect(targetProfileFullNameFromStepData({
+            conciergeBatchPublication: { targetFullName: '  임태욱  ' },
+        })).toBe('임태욱');
+        expect(targetProfileFullNameFromStepData({ targetFullName: '  임태욱  ' })).toBe('임태욱');
+        expect(targetProfileFullNameFromStepData({
+            conciergeBatchPublication: { targetFullName: '   ' },
+            targetFullName: '임태욱',
+        })).toBe('임태욱');
+        expect(targetProfileFullNameFromStepData({ targetFullName: 'x'.repeat(201) })).toBeUndefined();
     });
 });

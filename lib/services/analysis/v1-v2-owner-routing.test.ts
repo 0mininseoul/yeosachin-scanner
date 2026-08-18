@@ -313,6 +313,7 @@ describe('owner-facing V1/V2 route selection', () => {
             step_data: {
                 mutualFollows: ['candidate_1'],
                 conciergeEvidence: { hydration: { hydrated: 149, unresolved: 1 } },
+                conciergeBatchPublication: { targetFullName: 'Target Full Name' },
             },
         };
         const resultRows = Array.from({ length: 5 }, (_, index) => ({
@@ -387,7 +388,11 @@ describe('owner-facing V1/V2 route selection', () => {
             summary?: { mutualFollows?: number; analyzedMutuals?: number };
         };
         expect(payload.femaleAccounts).toHaveLength(5);
-        expect(payload.summary).toMatchObject({ mutualFollows: 150, analyzedMutuals: 149 });
+        expect(payload.summary).toMatchObject({
+            mutualFollows: 150,
+            analyzedMutuals: 149,
+            targetFullName: 'Target Full Name',
+        });
         expect(payload.femaleAccounts).toEqual(expect.arrayContaining([
             expect.objectContaining({
                 instagramId: 'candidate_1',

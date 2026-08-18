@@ -558,6 +558,28 @@ function hash(value: unknown): string {
     return createHash('sha256').update(canonical(value), 'utf8').digest('hex');
 }
 
+export function mergeConciergeBatchTargetFullNameStepData(
+    stepData: unknown,
+    targetFullName: string | null | undefined,
+): Record<string, unknown> {
+    const existing = stepData && typeof stepData === 'object' && !Array.isArray(stepData)
+        ? stepData as Record<string, unknown>
+        : {};
+    const cleanName = cleanBatchCopyText(targetFullName, 200);
+    if (!cleanName) return { ...existing };
+    const publication = existing.conciergeBatchPublication;
+    const publicationRecord = publication && typeof publication === 'object' && !Array.isArray(publication)
+        ? publication as Record<string, unknown>
+        : null;
+    return {
+        ...existing,
+        targetFullName: cleanName,
+        ...(publicationRecord
+            ? { conciergeBatchPublication: { ...publicationRecord, targetFullName: cleanName } }
+            : {}),
+    };
+}
+
 function normalized(value: string): string {
     return USERNAME.parse(value.trim().replace(/^@/, '').toLowerCase());
 }
@@ -1795,6 +1817,35 @@ function retryCodeAllowlist(): ReadonlySet<string> {
     return new Set(values);
 }
 
+async function persistConciergeBatchTargetFullName(
+    requestId: string,
+    targetFullName: string | null | undefined,
+): Promise<void> {
+    if (!cleanBatchCopyText(targetFullName, 200)) return;
+    const { data: current, error: readError } = await supabaseAdmin
+        .from('analysis_requests')
+        .select('status,step_data')
+        .eq('id', requestId)
+        .maybeSingle();
+    if (readError || !current || !['pending', 'processing'].includes(String(current.status))) {
+        throw new Error('CONCIERGE_BATCH_TARGET_FULL_NAME_READ_FAILED');
+    }
+    const stepData = mergeConciergeBatchTargetFullNameStepData(
+        current.step_data,
+        targetFullName,
+    );
+    const { data: updated, error: updateError } = await supabaseAdmin
+        .from('analysis_requests')
+        .update({ step_data: stepData })
+        .eq('id', requestId)
+        .in('status', ['pending', 'processing'])
+        .select('id,status')
+        .maybeSingle();
+    if (updateError || !updated || updated.status !== current.status) {
+        throw new Error('CONCIERGE_BATCH_TARGET_FULL_NAME_WRITE_FAILED');
+    }
+}
+
 type ConciergeRetryRequestRow = {
     id: string;
     status: string;
@@ -2029,6 +2080,10 @@ async function main(): Promise<void> {
             // A contract failure above is allowed to escape to onFailure. It
             // records this order as retryable and prevents the deterministic
             // baseline from being published as a fallback.
+            await persistConciergeBatchTargetFullName(
+                classified.input.requestId,
+                classified.copyContext.targetProfile.fullName,
+            );
             await casPublish({ ...classified.input, batchCandidateCopy });
             return { status: 'completed' as const };
         },

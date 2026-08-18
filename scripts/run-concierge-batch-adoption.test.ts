@@ -58,6 +58,7 @@ import {
     isRecoverableTargetProfileArtifactError,
     isMatchingTargetProfileArtifactRun,
     loadConciergeProfilePack,
+    mergeConciergeBatchTargetFullNameStepData,
     parseConciergeProfilePack,
     parseConciergeExistingRelationshipArtifacts,
     relationshipArtifactProviderContext,
@@ -134,6 +135,19 @@ function interactionCollectOrderFixture() {
 }
 
 describe('concierge profile pack adapter', () => {
+    it('retains existing request step data while storing the target full name', () => {
+        const merged = mergeConciergeBatchTargetFullNameStepData({
+            conciergeBatchBootstrap: { orderId: 'order' },
+            targetFullName: 'old name',
+        }, '  임태욱  ');
+
+        expect(merged).toMatchObject({
+            conciergeBatchBootstrap: { orderId: 'order' },
+            targetFullName: '임태욱',
+        });
+        expect(mergeConciergeBatchTargetFullNameStepData(merged, '   ')).toEqual(merged);
+    });
+
     it('loads the profile pack once for repeated order loads at the same path', () => {
         conciergeBatchTestMocks.readFileSync.mockReset().mockReturnValue(JSON.stringify({
             version: 1,

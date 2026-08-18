@@ -14,6 +14,7 @@ export interface OwnerResultInteractionSummary extends ResultInteractionSummary 
 }
 
 const MAX_IMAGE_URL_LENGTH = 8_192;
+const MAX_TARGET_FULL_NAME_LENGTH = 200;
 
 export function toSafeRiskAnalysis(value: unknown): string[] {
     return parseSafePublicRiskNarrative(value) ?? [];
@@ -52,6 +53,24 @@ export function targetProfileImageFromStepData(stepData: unknown): string | unde
     } catch {
         return undefined;
     }
+}
+
+export function targetProfileFullNameFromStepData(stepData: unknown): string | undefined {
+    if (!stepData || typeof stepData !== 'object' || Array.isArray(stepData)) return undefined;
+
+    const root = stepData as Record<string, unknown>;
+    const publication = root.conciergeBatchPublication;
+    const publicationRecord = publication && typeof publication === 'object' && !Array.isArray(publication)
+        ? publication as Record<string, unknown>
+        : null;
+    for (const value of [publicationRecord?.targetFullName, root.targetFullName]) {
+        if (typeof value !== 'string') continue;
+        const name = value.trim().replace(/\s+/gu, ' ');
+        if (name.length === 0 || name.length > MAX_TARGET_FULL_NAME_LENGTH
+            || /[\u0000-\u001f\u007f]/u.test(name)) continue;
+        return name;
+    }
+    return undefined;
 }
 
 export function toResultInteractionSummary(
