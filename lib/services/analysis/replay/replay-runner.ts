@@ -797,19 +797,20 @@ export async function runAnalysisV2AiReplay(input: {
                 }, { triage, feature: null });
                 return;
             }
-            const featureAdmitted = !supportsGenderTriageMicrobatch
+            const featureMedia = selectReplayFeatureMedia(profile, profile.featureSelectionIds);
+            const featureAdmitted = featureMedia.length > 0 && (!supportsGenderTriageMicrobatch
                 || (
                     aiStagePolicySupports(replayAiPolicy, 'genderSummaryQualityV211')
                         ? v211FeatureAdmission(triage, profile)
                         : v29FeatureAdmission(triage, profile)
-                ) === 'eligible';
+                ) === 'eligible');
             const featurePromise = featureAdmitted ? runner.feature?.({
                 ordinal: profile.ordinal,
                 bio: profile.bio ?? null,
                 ...(supportsGenderTriageMicrobatch ? {
                     accountProfile: v29AccountProfile(profile),
                 } : {}),
-                media: selectReplayFeatureMedia(profile, profile.featureSelectionIds),
+                media: featureMedia,
                 captions: profile.captions,
                 triage,
             }) : undefined;

@@ -1095,6 +1095,57 @@ describe('AI-only replay runner', () => {
         expect(report.gender).toEqual({ male: 1, female: 0, unknown: 0, unknownRate: 0 });
     });
 
+    it('skips concierge feature analysis when the final candidate media set is empty', async () => {
+        const triage = vi.fn(async () => ({
+            outcome: 'ok' as const,
+            attempts: 1,
+            retries: 0,
+            elapsedMs: 1,
+            value: {
+                assessment: {
+                    inferredGender: 'female' as const,
+                    confidence: 'low' as const,
+                    ownerConsistency: 'not_visible' as const,
+                    evidenceSelectionIds: [],
+                },
+                routingDecision: 'route_to_feature_analysis' as const,
+                routingReason: 'conserve_female_recall' as const,
+                analyzedSelectionIds: [],
+                v29AccountContext: 'personal' as const,
+            },
+        }));
+        const feature = vi.fn();
+        const details: Array<{ feature: unknown }> = [];
+        const noMediaBundle = {
+            ...firstPaymentBundle,
+            profiles: [{
+                ...firstPaymentBundle.profiles[0]!,
+                hasProfileImage: false,
+                media: [],
+                triageSelectionIds: [],
+                featureSelectionIds: [],
+                resolverSelectionIds: [],
+                captions: [],
+                coverage: { selectedCount: 0, normalizedCount: 0, failures: [] },
+            }],
+        } satisfies AnalysisV2ReplayBundle;
+
+        const report = await runAnalysisV2AiReplay({
+            bundle: noMediaBundle,
+            runner: v211Runner({ triage, feature }),
+            mode: 'paid-ai',
+            paidAiOptIn: true,
+            evaluationPolicy: noMediaBundle.capture.evaluationPolicy,
+            onAccountAnalyzed(detail) { details.push(detail); },
+        });
+
+        expect(feature).not.toHaveBeenCalled();
+        expect(details).toHaveLength(1);
+        expect(details[0]).toMatchObject({ feature: null });
+        expect(report.stages.featureAnalysis.calls).toBe(0);
+        expect(report.gender.unknown).toBe(1);
+    });
+
     it('starts feature and resolver together and applies the production reconciliation to final gender', async () => {
         let resolverStarted = false;
         const featureResult = {
