@@ -1213,6 +1213,81 @@ describe('AI-only replay runner', () => {
         expect(nameOnly).toHaveBeenCalledWith([{ candidateId: 'ordinal:4', fullName: '이서연' }]);
     });
 
+    it('routes every candidate through the pre-name-only path when nameOnlyEnabled is explicitly false', async () => {
+        const nameOnly = vi.fn();
+        const firstPass = vi.fn(async (input: { ordinal: number; fullName: string }) => ({
+            outcome: 'ok' as const,
+            attempts: 1,
+            retries: 0,
+            elapsedMs: 1,
+            value: {
+                assessment: {
+                    inferredGender: 'unknown' as const,
+                    confidence: 'low' as const,
+                    ownerConsistency: 'not_visible' as const,
+                    evidenceSelectionIds: [],
+                },
+                routingDecision: 'route_to_feature_analysis' as const,
+                routingReason: 'conserve_female_recall' as const,
+                analyzedSelectionIds: [`profile:${input.ordinal}`],
+            },
+        }));
+        const triage = vi.fn(async () => ({
+            outcome: 'ok' as const,
+            attempts: 1,
+            retries: 0,
+            elapsedMs: 1,
+            value: {
+                assessment: {
+                    inferredGender: 'unknown' as const,
+                    confidence: 'low' as const,
+                    ownerConsistency: 'not_visible' as const,
+                    evidenceSelectionIds: [],
+                },
+                routingDecision: 'route_to_feature_analysis' as const,
+                routingReason: 'conserve_female_recall' as const,
+                analyzedSelectionIds: [],
+                v29AccountContext: 'personal' as const,
+            },
+        }));
+        const mixedBundle = {
+            ...firstPaymentBundle,
+            profiles: [
+                ...firstPaymentBundle.profiles,
+                {
+                    ordinal: 4,
+                    isPrivate: false,
+                    username: 'name_only_candidate',
+                    fullName: '이서연',
+                    hasProfileImage: false,
+                    bio: null,
+                    media: [],
+                    triageSelectionIds: [],
+                    featureSelectionIds: [],
+                    resolverSelectionIds: [],
+                    captions: [],
+                    coverage: { selectedCount: 0, normalizedCount: 0, failures: [] },
+                },
+            ],
+        } satisfies AnalysisV2ReplayBundle;
+
+        const report = await runAnalysisV2AiReplay({
+            bundle: mixedBundle,
+            runner: v211Runner({ firstPass, triage, nameOnly }),
+            mode: 'paid-ai',
+            paidAiOptIn: true,
+            evaluationPolicy: mixedBundle.capture.evaluationPolicy,
+            nameOnlyEnabled: false,
+        });
+
+        expect(nameOnly).not.toHaveBeenCalled();
+        // The image-less candidate falls back through the pre-name-only path
+        // (individual triage using its accountProfile name hint), not the batch.
+        expect(triage).toHaveBeenCalledOnce();
+        expect(firstPass).toHaveBeenCalledTimes(3);
+        expect(report.accountOutputs.every(output => output.classificationSource !== 'name_only')).toBe(true);
+    });
+
     it('fails the whole replay instead of silently marking every name-only candidate unknown when the batch fails', async () => {
         const nameOnly = vi.fn(async () => ({
             outcome: 'rejected' as const,

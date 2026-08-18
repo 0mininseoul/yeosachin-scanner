@@ -14,7 +14,6 @@ import type { InteractionEvidenceRow, StoredInteractionCoverage } from './intera
 import type { ReverseLikeStatus } from '@/lib/domain/analysis/risk-policy';
 import type { ReplayAccountAiDetail } from './replay/replay-runner';
 import { supabaseAdmin } from '@/lib/supabase/admin';
-import { hasUsableInstagramProfileImage } from './profile-image-evidence';
 import {
     applyConciergeManualClassificationImport,
     createConciergeClassificationLedgerHash,
@@ -939,7 +938,13 @@ function buildEffectiveDetails(
             };
         }
         const nameOnly = record.classificationSource === 'name_only';
-        if (nameOnly && hasUsableInstagramProfileImage(profile)) {
+        // Check the ledger's own already-validated firstPass field rather than
+        // re-deriving "has image" from hasUsableInstagramProfileImage on the raw
+        // profile: that URL-only heuristic can disagree with the byte-verified
+        // check the AI pipeline actually used to route this candidate to
+        // name-only, which produced false-positive conflicts here. The ledger
+        // validator already enforces this same invariant on firstPass.
+        if (nameOnly && record.firstPass.profilePicPresent === true) {
             fail('CONCIERGE_PUBLICATION_NAME_ONLY_IMAGE_CONFLICT');
         }
         if (nameOnly && (detail.feature

@@ -572,6 +572,13 @@ export async function runAnalysisV2AiReplay(input: {
     write?: (line: string) => void;
     /** Bounded post-abort telemetry bookkeeping only; it never grants resolver wait time. */
     resolverCutoffMs?: number;
+    /**
+     * Concierge shipping safety valve (CONCIERGE_BATCH_NAME_ONLY_ENABLED). When
+     * explicitly false, no candidate is routed to the name-only text batch;
+     * every public candidate goes through the same individual triage/feature
+     * path used before that batch existed. Defaults to true.
+     */
+    nameOnlyEnabled?: boolean;
     /** Incident-scoped consumers may retain full in-memory feature evidence without stdout. */
     onAccountAnalyzed?: (
         detail: ReplayAccountAiDetail,
@@ -775,7 +782,7 @@ export async function runAnalysisV2AiReplay(input: {
             })
             : Promise.resolve());
 
-        const nameOnlyProfiles = usesConciergeFirstPass
+        const nameOnlyProfiles = usesConciergeFirstPass && input.nameOnlyEnabled !== false
             ? publicProfiles.filter(profile => (
                 profile.hasProfileImage === false
                 && Boolean(profile.fullName?.trim())

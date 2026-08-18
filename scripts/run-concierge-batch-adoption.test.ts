@@ -51,6 +51,7 @@ vi.mock('@/lib/services/analysis/first-payment-concierge', async importOriginal 
 import {
     buildConciergeBatchHighRiskCopyPrompt,
     conciergeBatchAiClassificationFields,
+    conciergeBatchNameOnlyEnabled,
     collectOrder,
     conciergeNameOnlyDiagnosticMessage,
     conciergeBatchFailureDiagnostic,
@@ -62,6 +63,8 @@ import {
     loadConciergeProfilePack,
     mergeConciergeBatchTargetFullNameStepData,
     CONCIERGE_BATCH_MUTABLE_REQUEST_STATUSES,
+    nameOnlyFirstPass,
+    nameOnlySecondPass,
     parseConciergeProfilePack,
     parseConciergeExistingRelationshipArtifacts,
     relationshipArtifactProviderContext,
@@ -73,6 +76,7 @@ import {
     validateConciergeBatchHighRiskCopy,
 } from './run-concierge-batch';
 import { runConciergeBatch, type ConciergeBatchStageContext } from '@/lib/services/analysis/concierge-batch-runner';
+import type { InstagramProfile } from '@/lib/types/instagram';
 
 function profilePackItem(username: string, overrides: Record<string, unknown> = {}) {
     return {
@@ -609,6 +613,35 @@ describe('concierge name-only gender classification', () => {
         expect(message).toContain('"batchCount":1');
         expect(message).toContain('"unknownRatio":0.9');
         expect(message).not.toContain('https://');
+    });
+
+    it('records a name-only ledger pass as no-image even when the raw profile URL looks like a real photo', () => {
+        // Name-only routing already decided (via the AI pipeline's byte-verified
+        // hasProfileImage signal) that this candidate has no usable profile image.
+        // The ledger record must assert that directly instead of re-deriving it
+        // from hasUsableInstagramProfileImage, a weaker URL-only heuristic that
+        // can disagree with the byte-verified check and produce a false
+        // CONCIERGE_CLASSIFICATION_LEDGER_OVERRIDE_INVALID rejection.
+        const profile = {
+            username: 'candidate',
+            fullName: 'Jane Doe',
+            profilePicUrl: 'https://example.com/definitely-a-real-photo.jpg',
+            profilePicUrlHD: null,
+        } as unknown as InstagramProfile;
+
+        const firstPass = nameOnlyFirstPass(profile, 'a'.repeat(64));
+        const secondPass = nameOnlySecondPass(profile);
+
+        expect(firstPass).toMatchObject({ status: 'failed', profilePicPresent: false });
+        expect(secondPass).toMatchObject({ status: 'not_collected', profilePicPresent: false, completeMedia: null });
+    });
+
+    it('reads CONCIERGE_BATCH_NAME_ONLY_ENABLED with a default-enabled, explicit-false-only flag', () => {
+        expect(conciergeBatchNameOnlyEnabled(undefined)).toBe(true);
+        expect(conciergeBatchNameOnlyEnabled('')).toBe(true);
+        expect(conciergeBatchNameOnlyEnabled('true')).toBe(true);
+        expect(conciergeBatchNameOnlyEnabled('anything-else')).toBe(true);
+        expect(conciergeBatchNameOnlyEnabled('false')).toBe(false);
     });
 });
 

@@ -1647,6 +1647,42 @@ function notCollectedPass(profile: InstagramProfile) {
     };
 }
 
+/**
+ * Name-only classification is routed exclusively to candidates the AI pipeline
+ * already determined have no usable profile image (see the bundle's
+ * hasProfileImage gate in replay-runner.ts, a byte-verified, post-normalization
+ * check). Assert that fact directly instead of re-deriving profilePicPresent
+ * from hasUsableInstagramProfileImage, a weaker URL-only heuristic that can
+ * disagree with the byte-level check the AI pipeline actually used (it neither
+ * catches every default-avatar CDN variant nor accounts for a normalization
+ * failure the AI pipeline treats as "no usable image"). Recomputing here
+ * produced spurious CONCIERGE_CLASSIFICATION_LEDGER_OVERRIDE_INVALID failures
+ * for legitimately name-only candidates.
+ */
+export function nameOnlyFirstPass(profile: InstagramProfile, evidenceHash: string) {
+    return {
+        status: 'failed' as const,
+        fullNamePresent: Boolean(profile.fullName?.trim()),
+        profilePicPresent: false,
+        feedDeclared: null,
+        feedCollected: null,
+        completeMedia: null,
+        evidenceHash,
+    };
+}
+
+export function nameOnlySecondPass(profile: InstagramProfile) {
+    return {
+        status: 'not_collected' as const,
+        fullNamePresent: Boolean(profile.fullName?.trim()),
+        profilePicPresent: false,
+        feedDeclared: null,
+        feedCollected: null,
+        completeMedia: null,
+        evidenceHash: null,
+    };
+}
+
 export function conciergeBatchAiClassificationFields(detail: ReplayAccountAiDetail): {
     originalAiClassification: 'male' | 'female' | 'unknown';
     effectiveClassification: 'male' | 'female' | 'unknown';
@@ -1658,6 +1694,18 @@ export function conciergeBatchAiClassificationFields(detail: ReplayAccountAiDeta
     };
 }
 
+/**
+ * Reads CONCIERGE_BATCH_NAME_ONLY_ENABLED; default true. Set to 'false' as a
+ * shipping safety valve to disable only the name-only text-batch gender path
+ * (image-less candidates fall back to their pre-name-only unknown outcome)
+ * while every other improvement (model upgrades, etc.) keeps operating.
+ */
+export function conciergeBatchNameOnlyEnabled(
+    raw = process.env.CONCIERGE_BATCH_NAME_ONLY_ENABLED,
+): boolean {
+    return raw !== 'false';
+}
+
 async function classifyOrder(collected: CollectedOrder): Promise<ClassifiedOrder> {
     const details: ReplayAccountAiDetail[] = [];
     await runAnalysisV2AiReplay({
@@ -1666,6 +1714,7 @@ async function classifyOrder(collected: CollectedOrder): Promise<ClassifiedOrder
         mode: 'paid-ai',
         paidAiOptIn: true,
         evaluationPolicy: firstPaymentConciergeEvaluationPolicy,
+        nameOnlyEnabled: conciergeBatchNameOnlyEnabled(),
         onAccountAnalyzed(detail) { details.push(detail); },
     });
     const detailsByOrdinal = new Map(details.map(detail => [detail.ordinal, detail]));
@@ -1702,8 +1751,8 @@ async function classifyOrder(collected: CollectedOrder): Promise<ClassifiedOrder
             return {
                 candidateId: analysisV2CandidateId(row.username), instagramId: row.username,
                 mutualOrdinal: row.mutualOrdinal, partition: 'public', profileFetchStatus: 'success',
-                firstPass: failedPass(profile, evidenceHash),
-                secondPass: notCollectedPass(profile),
+                firstPass: nameOnlyFirstPass(profile, evidenceHash),
+                secondPass: nameOnlySecondPass(profile),
                 originalAiClassification,
                 effectiveClassification,
                 confidence,

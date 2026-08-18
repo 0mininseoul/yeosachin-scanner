@@ -600,7 +600,28 @@ describe('concierge manual publication', () => {
         });
     });
 
-    it('rejects a name-only female when a usable profile image is present', () => {
+    it('rejects a name-only female whose ledger record retains a usable profile image', () => {
+        // The immutable classification ledger (concierge-classification-import.ts)
+        // already rejects this shape before the publication boundary is ever
+        // reached, so a corrupted firstPass.profilePicPresent fails closed here too.
+        const input = makeNameOnlyPublicationBoundaryInput();
+        const records = input.ledger.records.map(record => record.instagramId === 'one'
+            ? { ...record, firstPass: { ...record.firstPass, profilePicPresent: true } }
+            : record);
+
+        expect(() => buildConciergeManualPublicationDraft({
+            ...input,
+            ledger: { ...input.ledger, records },
+        })).toThrow('CONCIERGE_CLASSIFICATION_LEDGER_OVERRIDE_INVALID');
+    });
+
+    it('does not reject a name-only female merely because the raw profile URL looks non-default', () => {
+        // The AI pipeline routes to name-only using a byte-verified, post-normalization
+        // signal (bundle hasProfileImage), which can legitimately diverge from a raw
+        // profilePicUrl pattern check (e.g. a fetch/normalization failure on a real
+        // photo, or a default-avatar CDN variant the URL heuristic doesn't recognize).
+        // The publication contract must trust the ledger's own recorded firstPass
+        // field, not re-derive "has image" from the raw profile.
         const input = makeNameOnlyPublicationBoundaryInput();
         const profile = input.replay.profilesByOrdinal.get(1)!;
         const replay = {
@@ -611,8 +632,7 @@ describe('concierge manual publication', () => {
             ]),
         };
 
-        expect(() => buildConciergeManualPublicationDraft({ ...input, replay }))
-            .toThrow('CONCIERGE_PUBLICATION_NAME_ONLY_IMAGE_CONFLICT');
+        expect(() => buildConciergeManualPublicationDraft({ ...input, replay })).not.toThrow();
     });
 
     it('rejects a low-confidence name-only female while preserving the image contract', () => {
