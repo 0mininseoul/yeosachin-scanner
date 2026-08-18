@@ -703,6 +703,80 @@ describe('V2 staged AI services', () => {
         expect(prompt).toContain('first-pass');
     });
 
+    it('frames a first-pass full name as cautious secondary gender evidence', async () => {
+        const input = {
+            fullName: '김수연',
+            media: [media()[0]!],
+        };
+        mocks.analyzeWithGemini.mockImplementation(async (
+            _prompt: string,
+            _images: string[],
+            options: { schema: { parse(value: unknown): unknown } }
+        ) => options.schema.parse({
+            inferredGender: 'female',
+            confidence: 'medium',
+            ownerConsistency: 'same_person',
+            evidenceSelectionIds: ['profile:candidate'],
+        }));
+
+        await genderFirstPass(
+            input,
+            firstPassAudit(input),
+            { aiStagePolicyVersion: AI_STAGE_POLICY_V211_VERSION },
+        );
+
+        const [prompt] = mocks.analyzeWithGemini.mock.calls[0]!;
+        expect(prompt).toContain(
+            'Use the full name only as a secondary clue when image evidence is ambiguous.'
+        );
+        expect(prompt).toContain(
+            'Keep confidence low when the name is the main support.'
+        );
+        expect(prompt).toContain(
+            'Treat unisex, neutral, and brand names as no gender evidence.'
+        );
+    });
+
+    it('updates only the current triage guidance while preserving legacy identity bytes', async () => {
+        const input = {
+            media: media().slice(0, 5),
+            accountProfile: { fullName: '김수연', hasProfileImage: true },
+        };
+        mocks.analyzeWithGemini.mockImplementation(async (
+            _prompt: string,
+            _images: string[],
+            options: { schema: { parse(value: unknown): unknown } }
+        ) => options.schema.parse({
+            inferredGender: 'unknown',
+            confidence: 'low',
+            ownerConsistency: 'not_visible',
+            evidenceSelectionIds: [],
+        }));
+
+        await genderTriage(
+            input,
+            audit('genderTriage', input, AI_STAGE_POLICY_V211_VERSION),
+            { aiStagePolicyVersion: AI_STAGE_POLICY_V211_VERSION },
+        );
+
+        const [prompt] = mocks.analyzeWithGemini.mock.calls[0]!;
+        expect(prompt).toContain(
+            '이미지가 명확하면 이미지를 우선하고 이름은 이미지가 애매할 때만 성별 판단의 보조 근거로 사용하세요.'
+        );
+        expect(prompt).toContain(
+            '이름이 주된 근거이면 confidence를 낮게 유지하며 유니섹스·중성적·비인명(브랜드·상호) 이름만으로 성별을 추측하지 마세요.'
+        );
+        expect(prompt).not.toContain('이름이나 고정관념으로 추측하지 말고');
+
+        const legacyIdentity = createGenderTriageResultIdentity(
+            { media: media().slice(0, 5) },
+            'ai-stage-policy-v2.7',
+        );
+        expect(legacyIdentity.promptVersion).toBe('gender-triage-v2');
+        expect(legacyIdentity.operationKey)
+            .toBe('gender-triage:2b7b13cff9e0ada00e7052a74cf1b7c2d11d3b39c9491a21235d43e13eb0b16e');
+    });
+
     it('rejects a first-pass request unless full name and one profile image are both supplied', async () => {
         const input = {
             fullName: '김수연',
@@ -3465,6 +3539,52 @@ describe('V2 staged AI services', () => {
         );
         expect(result[1]!.result.assessment.inferredGender).toBe('unknown');
         expect(result[1]!.source).toBe('checkpoint');
+    });
+
+    it('allows fullName as cautious secondary evidence in the v2.11 gender microbatch prompt', async () => {
+        const input = {
+            media: media().slice(0, 2),
+            accountProfile: { fullName: '김수연', hasProfileImage: true, bio: null },
+        };
+        const accounts = [{
+            accountId: createGenderTriageMicrobatchAccountId(input, AI_STAGE_POLICY_V211_VERSION),
+            input,
+        }];
+        const identity = createGenderTriageMicrobatchResultIdentity(
+            accounts,
+            AI_STAGE_POLICY_V211_VERSION,
+        );
+        mocks.analyzeWithGemini.mockResolvedValueOnce({
+            accounts: [{
+                accountId: accounts[0]!.accountId,
+                status: 'ok',
+                assessment: {
+                    inferredGender: 'unknown',
+                    confidence: 'low',
+                    ownerConsistency: 'not_visible',
+                    evidenceSelectionIds: [],
+                },
+                accountContext: 'personal',
+            }],
+        });
+
+        await genderTriageMicrobatch(accounts, {
+            requestId,
+            operationKey: identity.operationKey,
+            resultIdentity: identity,
+            prepare: vi.fn().mockResolvedValue({ result: null, source: null, startingAttempt: 1 }),
+            onBeforeAttempt: vi.fn(),
+            onAttemptTelemetry: vi.fn(),
+        }, { aiStagePolicyVersion: AI_STAGE_POLICY_V211_VERSION });
+
+        const [prompt] = mocks.analyzeWithGemini.mock.calls[0]!;
+        expect(prompt).toContain(
+            '이름은 이미지가 애매할 때만 성별 판단의 보조 근거로 사용할 수 있습니다.'
+        );
+        expect(prompt).toContain(
+            '유니섹스·중성적·비인명(브랜드·상호) 이름은 성별 근거로 쓰지 마세요.'
+        );
+        expect(prompt).not.toContain('이름만으로 성별을 추측하지 말고');
     });
 
     it('does not retry a rejected v2.9 batch and marks every affected item uncertain', async () => {
