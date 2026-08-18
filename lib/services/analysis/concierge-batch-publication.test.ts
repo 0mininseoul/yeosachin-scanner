@@ -3,6 +3,7 @@ import type { FeatureAnalysisResult } from '@/lib/services/ai/v2-staged-analysis
 import type { InstagramProfile } from '@/lib/types/instagram';
 import {
     buildConciergeManualPublication,
+    buildConciergeManualPublicationDraft,
     CONCIERGE_BATCH_PUBLICATION_RPC,
     ConciergePublicationError,
     createConciergePublicationStore,
@@ -139,6 +140,159 @@ function makeInput(): ConciergeManualPublicationInput {
             privateProfiles: [{ username: 'private', isPrivate: true, profilePicUrl: null, fullName: null, followersCount: 1, followingCount: 1, postsCount: 0, latestPosts: [] } as unknown as InstagramProfile],
             privateNameResults: [{ id: 'private', femaleScore: 0.5, isName: false, confidence: 0 }],
             fetchedCount: 3, hydratedPublicCount: 2, hydratedPrivateCount: 1, analyzedPublicCount: 2, unresolvedCount: 0,
+        },
+    };
+}
+
+function makeNameOnlyPublicationBoundaryInput(): ConciergeManualPublicationInput {
+    const base = makeInput();
+    const publicUsernames = ['one', 'two', 'male_name', 'unpromoted_female', 'nameless'];
+    const noFeaturePass = (fullName: string | null) => ({
+        status: 'failed' as const,
+        fullNamePresent: Boolean(fullName?.trim()),
+        profilePicPresent: false,
+        feedDeclared: null,
+        feedCollected: null,
+        completeMedia: null,
+        evidenceHash: HASH,
+    });
+    const noFeatureSecondPass = (fullName: string | null) => ({
+        status: 'not_collected' as const,
+        fullNamePresent: Boolean(fullName?.trim()),
+        profilePicPresent: false,
+        feedDeclared: null,
+        feedCollected: null,
+        completeMedia: null,
+        evidenceHash: null,
+    });
+    const publicProfiles = new Map<number, InstagramProfile>([
+        [1, { username: 'one', isPrivate: false, profilePicUrl: null, fullName: 'Jane One', bio: null, followersCount: 1, followingCount: 1, postsCount: 0, latestPosts: [] } as unknown as InstagramProfile],
+        [2, { username: 'two', isPrivate: false, profilePicUrl: null, fullName: 'Image Female', bio: null, followersCount: 1, followingCount: 1, postsCount: 0, latestPosts: [] } as unknown as InstagramProfile],
+        [3, { username: 'male_name', isPrivate: false, profilePicUrl: null, fullName: 'Male Name', bio: null, followersCount: 1, followingCount: 1, postsCount: 0, latestPosts: [] } as unknown as InstagramProfile],
+        [4, { username: 'unpromoted_female', isPrivate: false, profilePicUrl: null, fullName: 'Unpromoted Female', bio: null, followersCount: 1, followingCount: 1, postsCount: 0, latestPosts: [] } as unknown as InstagramProfile],
+        [5, { username: 'nameless', isPrivate: false, profilePicUrl: null, fullName: null, bio: null, followersCount: 1, followingCount: 1, postsCount: 0, latestPosts: [] } as unknown as InstagramProfile],
+    ]);
+    const noFeatureRecord = (ordinal: number, username: string, fullName: string | null, original: 'male' | 'female' | 'unknown', effective: 'male' | 'female' | 'unknown', source: 'ai' | 'name_only') => ({
+        candidateId: `candidate:${username}`,
+        instagramId: username,
+        mutualOrdinal: ordinal,
+        partition: 'public' as const,
+        profileFetchStatus: 'success' as const,
+        firstPass: noFeaturePass(fullName),
+        secondPass: noFeatureSecondPass(fullName),
+        originalAiClassification: original,
+        effectiveClassification: effective,
+        confidence: 'high' as const,
+        evidenceCoverage: { declared: 0, collected: 0, selected: 0, complete: false, basisPoints: 0, hash: HASH },
+        classifier: 'replay',
+        modelName: 'model',
+        promptVersion: 'prompt',
+        schemaVersion: 'schema',
+        classificationOperationKey: `op:boundary:${ordinal}`,
+        classificationResultHash: HASH,
+        classificationSource: source,
+        manualOverride: null,
+        sourceSnapshot: {
+            instagramUrl: `https://instagram.com/${username}`,
+            originalAiClassification: original,
+            confidenceEvidence: `confidence=high;evidence=${source === 'name_only' ? 'name_only' : 'model_ambiguous'}`,
+            operatorNote: '',
+        },
+    });
+    const imageRecord = {
+        ...base.ledger.records[1]!,
+        candidateId: 'candidate:two',
+        instagramId: 'two',
+        mutualOrdinal: 2,
+        originalAiClassification: 'female' as const,
+        effectiveClassification: 'female' as const,
+        classificationOperationKey: 'op:boundary:2',
+        sourceSnapshot: {
+            ...base.ledger.records[1]!.sourceSnapshot!,
+            instagramUrl: 'https://instagram.com/two',
+            originalAiClassification: 'female' as const,
+        },
+    };
+    const privateRecord = {
+        ...base.ledger.records[2]!,
+        mutualOrdinal: 6,
+    };
+    const records = [
+        noFeatureRecord(1, 'one', 'Jane One', 'female', 'female', 'name_only'),
+        imageRecord,
+        noFeatureRecord(3, 'male_name', 'Male Name', 'male', 'male', 'name_only'),
+        noFeatureRecord(4, 'unpromoted_female', 'Unpromoted Female', 'female', 'unknown', 'name_only'),
+        noFeatureRecord(5, 'nameless', null, 'unknown', 'unknown', 'ai'),
+        privateRecord,
+    ];
+    const triageDetail = (ordinal: number, finalClassification: 'verified_female' | 'verified_non_female' | 'unresolved', inferredGender: 'female' | 'male' | 'unknown') => ({
+        ordinal,
+        finalClassification,
+        classificationSource: finalClassification === 'unresolved' ? 'unknown' : 'triage',
+        featureOverview: null,
+        triage: { assessment: { inferredGender, confidence: 'high' } },
+        feature: null,
+    });
+    const details = [
+        triageDetail(1, 'verified_female', 'female'),
+        { ordinal: 2, finalClassification: 'verified_female', classificationSource: 'feature', featureOverview: 'x', triage: null, feature: makeFeature() },
+        triageDetail(3, 'verified_non_female', 'male'),
+        triageDetail(4, 'verified_female', 'female'),
+        triageDetail(5, 'unresolved', 'unknown'),
+    ] as unknown as readonly ReplayAccountAiDetail[];
+    const classificationByOrdinal = new Map(publicUsernames.map(username => {
+        const record = records.find(item => item.instagramId === username)!;
+        return [record.mutualOrdinal, {
+            originalAiClassification: record.originalAiClassification!,
+            classificationSource: record.classificationSource === 'name_only' ? 'name_only' as const : 'ai' as const,
+            confidence: record.confidence!,
+            classifier: record.classifier!,
+            modelName: record.modelName!,
+            promptVersion: record.promptVersion!,
+            schemaVersion: record.schemaVersion!,
+            classificationOperationKey: record.classificationOperationKey!,
+            classificationResultHash: record.classificationResultHash!,
+            secondPassStatus: record.secondPass.status,
+            secondPassCompleteMedia: record.secondPass.completeMedia,
+        }] as const;
+    }));
+    const emptyImport = parseConciergeClassificationCsv(
+        'username,instagram_url,ai_classification,ai_confidence/evidence_status,manual_gender,operator_note\n',
+        base.orderId,
+        base.requestId,
+        HASH,
+        'b'.repeat(64),
+        '2026-08-14T00:00:00.000Z',
+    );
+    return {
+        ...base,
+        expectedMutualCount: 6,
+        expectedHydratedCount: 6,
+        manualImport: emptyImport,
+        ledger: {
+            ...base.ledger,
+            mutualCount: 6,
+            hydratedPublicCount: 5,
+            hydratedPrivateCount: 1,
+            records,
+        },
+        replay: {
+            ...base.replay,
+            profilesByOrdinal: publicProfiles,
+            details,
+            orderedMutualUsernames: [...publicUsernames, 'private'],
+            classificationByOrdinal,
+            privateProfiles: [{ username: 'private', isPrivate: true, profilePicUrl: null, fullName: null, followersCount: 1, followingCount: 1, postsCount: 0, latestPosts: [] } as unknown as InstagramProfile],
+            fetchedCount: 6,
+            hydratedPublicCount: 5,
+            hydratedPrivateCount: 1,
+            analyzedPublicCount: 5,
+            unresolvedCount: 0,
+        },
+        nameOnlyProvenance: {
+            promotedUsernames: ['one', 'male_name'],
+            achievedUnknownRatio: 0.4,
+            targetUnknownRatio: 0.2,
         },
     };
 }
@@ -366,14 +520,14 @@ describe('concierge manual publication', () => {
                 ...record,
                 firstPass: { ...record.firstPass, status: 'failed' as const, profilePicPresent: false, completeMedia: null, evidenceHash: HASH },
                 secondPass: { ...record.secondPass, status: 'not_collected' as const, completeMedia: null, evidenceHash: null },
-                originalAiClassification: 'unknown' as const,
+                originalAiClassification: 'female' as const,
                 effectiveClassification: 'female' as const,
                 confidence: 'high' as const,
                 evidenceCoverage: { declared: 0, collected: 0, selected: 0, complete: false, basisPoints: 0, hash: HASH },
                 classificationSource: 'name_only' as const,
                 sourceSnapshot: {
                     ...record.sourceSnapshot!,
-                    originalAiClassification: 'unknown' as const,
+                    originalAiClassification: 'female' as const,
                     confidenceEvidence: 'confidence=high;evidence=name_only',
                 },
             }
@@ -381,7 +535,7 @@ describe('concierge manual publication', () => {
         const classificationByOrdinal = new Map(input.replay.classificationByOrdinal);
         classificationByOrdinal.set(1, {
             ...classificationByOrdinal.get(1)!,
-            originalAiClassification: 'unknown', confidence: 'high',
+            originalAiClassification: 'female', confidence: 'high',
             classificationSource: 'name_only' as const,
             secondPassStatus: 'not_collected', secondPassCompleteMedia: null,
         });
@@ -396,7 +550,7 @@ describe('concierge manual publication', () => {
                     [1, { ...input.replay.profilesByOrdinal.get(1)!, fullName: 'Jane Doe' } as unknown as InstagramProfile],
                 ]),
                 details: input.replay.details.map(detail => detail.ordinal === 1
-                    ? { ...detail, finalClassification: 'unresolved', feature: null, triage: { assessment: { inferredGender: 'female', confidence: 'high' } } } as unknown as ReplayAccountAiDetail
+                    ? { ...detail, finalClassification: 'verified_female', feature: null, triage: { assessment: { inferredGender: 'female', confidence: 'high' } } } as unknown as ReplayAccountAiDetail
                     : detail),
                 classificationByOrdinal,
             },
@@ -412,6 +566,32 @@ describe('concierge manual publication', () => {
             promoted: 1,
             promotedUsernames: ['one'],
             unknownRatio: 0,
+            targetUnknownRatio: 0.2,
+        });
+    });
+
+    it('crosses the publication boundary with every name-only and image-backed classification shape', () => {
+        const publication = buildConciergeManualPublicationDraft(makeNameOnlyPublicationBoundaryInput());
+
+        expect(publication.rows.map(row => row.suspect_instagram_id)).toEqual(
+            expect.arrayContaining(['one', 'two']),
+        );
+        expect(publication.rows.map(row => row.suspect_instagram_id)).not.toEqual(
+            expect.arrayContaining(['male_name', 'unpromoted_female', 'nameless']),
+        );
+        expect(publication.counts).toMatchObject({
+            male: 1,
+            female: 2,
+            unknown: 2,
+            public: 5,
+            private: 1,
+            mutual: 6,
+            analyzed: 5,
+        });
+        expect(publication.counts.nameOnly).toEqual({
+            promoted: 2,
+            promotedUsernames: ['one', 'male_name'],
+            unknownRatio: 0.4,
             targetUnknownRatio: 0.2,
         });
     });

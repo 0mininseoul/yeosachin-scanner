@@ -1808,6 +1808,7 @@ async function classifyOrder(collected: CollectedOrder): Promise<ClassifiedOrder
                     : failedPass(profile, evidenceHash);
             const nameOnlyPromotion = nameOnlyPromotionByOrdinal.get(row.mutualOrdinal);
             if (nameOnlyPromotion && profile && detail?.triage) {
+                const originalAiClassification = detail.triage.assessment.inferredGender;
                 const nameOnlyEvidenceHash = hash({
                     row,
                     profile,
@@ -1820,7 +1821,7 @@ async function classifyOrder(collected: CollectedOrder): Promise<ClassifiedOrder
                     mutualOrdinal: row.mutualOrdinal, partition: 'public', profileFetchStatus: 'success',
                     firstPass: failedPass(profile, nameOnlyEvidenceHash),
                     secondPass: notCollectedPass(profile),
-                    originalAiClassification: 'unknown',
+                    originalAiClassification,
                     effectiveClassification: nameOnlyPromotion.classification,
                     confidence: nameOnlyPromotion.confidence,
                     evidenceCoverage: { declared: 0, collected: 0, selected: 0, complete: false, basisPoints: 0, hash: nameOnlyEvidenceHash },
@@ -1829,21 +1830,38 @@ async function classifyOrder(collected: CollectedOrder): Promise<ClassifiedOrder
                     classificationResultHash: hash({ row, detail, source: nameOnlyPromotion.classificationSource }),
                     classificationSource: nameOnlyPromotion.classificationSource,
                     manualOverride: null,
-                    sourceSnapshot: { instagramUrl: `https://instagram.com/${row.username}`, originalAiClassification: 'unknown', confidenceEvidence: `confidence=${nameOnlyPromotion.confidence};evidence=name_only`, operatorNote: '' },
+                    sourceSnapshot: { instagramUrl: `https://instagram.com/${row.username}`, originalAiClassification, confidenceEvidence: `confidence=${nameOnlyPromotion.confidence};evidence=name_only`, operatorNote: '' },
                 };
             }
+            const triageClassification = detail?.triage?.assessment.inferredGender;
+            const hasNameOnlyGenderSignal = Boolean(
+                profile
+                && detail?.triage
+                && profile.fullName?.trim()
+                && !preferredInstagramProfileImageUrl(profile)
+                && (triageClassification === 'female' || triageClassification === 'male'),
+            );
+            const fallbackOriginalAiClassification = hasNameOnlyGenderSignal
+                ? triageClassification!
+                : 'unknown';
+            const fallbackConfidence = hasNameOnlyGenderSignal
+                ? detail!.triage!.assessment.confidence
+                : 'low';
+            const fallbackClassificationSource = hasNameOnlyGenderSignal
+                ? 'name_only' as const
+                : 'ai' as const;
             return {
                 candidateId: analysisV2CandidateId(row.username), instagramId: row.username,
                 mutualOrdinal: row.mutualOrdinal,
                 partition: profile && detail ? 'public' : 'unresolved',
                 profileFetchStatus: profile && detail ? 'success' : 'unavailable',
                 firstPass, secondPass,
-                originalAiClassification: 'unknown', effectiveClassification: 'unknown', confidence: 'low',
+                originalAiClassification: fallbackOriginalAiClassification, effectiveClassification: 'unknown', confidence: fallbackConfidence,
                 evidenceCoverage: { declared: 0, collected: 0, selected: 0, complete: false, basisPoints: 0, hash: evidenceHash },
                 classifier: 'gemini-v2.14', modelName: 'gemini-v2.14', promptVersion: 'ai-stage-policy-v2.11', schemaVersion: 'concierge-batch-v1',
                 classificationOperationKey: `concierge:classification:${row.mutualOrdinal}`, classificationResultHash: hash({ row, status: 'unresolved' }),
-                classificationSource: 'ai', manualOverride: null,
-                sourceSnapshot: { instagramUrl: `https://instagram.com/${row.username}`, originalAiClassification: 'unknown', confidenceEvidence: 'confidence=low;evidence=unavailable', operatorNote: '' },
+                classificationSource: fallbackClassificationSource, manualOverride: null,
+                sourceSnapshot: { instagramUrl: `https://instagram.com/${row.username}`, originalAiClassification: fallbackOriginalAiClassification, confidenceEvidence: `confidence=${fallbackConfidence};evidence=${hasNameOnlyGenderSignal ? 'name_only' : 'unavailable'}`, operatorNote: '' },
             };
         }
         const classification = detail.finalClassification === 'verified_female'
@@ -1969,7 +1987,8 @@ async function classifyOrder(collected: CollectedOrder): Promise<ClassifiedOrder
         replay,
         nameOnlyProvenance: {
             promotedUsernames: records
-                .filter(record => record.classificationSource === 'name_only')
+                .filter(record => record.classificationSource === 'name_only'
+                    && record.effectiveClassification !== 'unknown')
                 .map(record => normalized(record.instagramId)),
             achievedUnknownRatio,
             targetUnknownRatio: nameOnlyPromotions.targetUnknownRatio,

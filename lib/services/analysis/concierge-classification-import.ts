@@ -491,7 +491,8 @@ function validateRecord(record: ConciergeClassificationRecord): void {
     }
     if (record.classificationSource === 'name_only'
         && (record.partition !== 'public'
-            || record.effectiveClassification === 'unknown'
+            || (record.effectiveClassification === 'unknown'
+                && record.originalAiClassification === 'unknown')
             || record.firstPass.profilePicPresent === true
             || record.secondPass.status === 'collected'
             || record.secondPass.completeMedia === true)) {

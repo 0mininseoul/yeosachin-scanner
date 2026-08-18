@@ -904,12 +904,13 @@ function buildConciergeManualPublicationInternal(
     validateReplayBindings(input.ledger, input.replay);
     const effectiveLedger = applyConciergeManualClassificationImport(input.ledger, input.manualImport);
     const nameOnlyRecords = effectiveLedger.records.filter(record => record.classificationSource === 'name_only');
+    const promotedNameOnlyRecords = nameOnlyRecords.filter(record => record.effectiveClassification !== 'unknown');
     if (input.nameOnlyProvenance) {
         const promotedUsernames = input.nameOnlyProvenance.promotedUsernames.map(normalizeUsername);
         const promotedSet = new Set(promotedUsernames);
         if (promotedSet.size !== promotedUsernames.length
-            || promotedSet.size !== nameOnlyRecords.length
-            || nameOnlyRecords.some(record => !promotedSet.has(normalizeUsername(record.instagramId)))
+            || promotedSet.size !== promotedNameOnlyRecords.length
+            || promotedNameOnlyRecords.some(record => !promotedSet.has(normalizeUsername(record.instagramId)))
             || !Number.isFinite(input.nameOnlyProvenance.achievedUnknownRatio)
             || input.nameOnlyProvenance.achievedUnknownRatio < 0
             || input.nameOnlyProvenance.achievedUnknownRatio > 1
@@ -1025,7 +1026,7 @@ function buildConciergeManualPublicationInternal(
         analyzed: input.replay.analyzedPublicCount,
         ...(input.nameOnlyProvenance ? {
             nameOnly: {
-                promoted: nameOnlyRecords.length,
+                promoted: promotedNameOnlyRecords.length,
                 promotedUsernames: [...input.nameOnlyProvenance.promotedUsernames].map(normalizeUsername),
                 unknownRatio: input.nameOnlyProvenance.achievedUnknownRatio,
                 targetUnknownRatio: input.nameOnlyProvenance.targetUnknownRatio,
