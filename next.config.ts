@@ -8,6 +8,9 @@ import {
 const nextConfig: NextConfig = {
   serverExternalPackages: ["@google-cloud/tasks", "google-auth-library", "google-gax", "sharp"],
   outputFileTracingIncludes: {
+    "/mypage": ["./node_modules/sharp/**/*", "./node_modules/@img/**/*"],
+    "/api/share/[token]/image": ["./node_modules/sharp/**/*", "./node_modules/@img/**/*"],
+    "/api/share/[token]/opengraph-image": ["./node_modules/sharp/**/*", "./node_modules/@img/**/*"],
     "/api/analysis/start": ["./node_modules/@google-cloud/tasks/build/protos/**/*"],
     "/api/analysis/step": ["./node_modules/@google-cloud/tasks/build/protos/**/*"],
     "/api/analysis/preflight": ["./node_modules/@google-cloud/tasks/build/protos/**/*"],
