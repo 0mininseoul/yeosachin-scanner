@@ -26,15 +26,47 @@ export function sanitizePublicRiskNarrativeLine(value: unknown): string | null {
     return sanitized || null;
 }
 
-export function containsExposedInteractionMetric(value: string): boolean {
+function escapeRegExpLiteral(value: string): string {
+    return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+/**
+ * The candidate's own username and the target's username are operator-approved
+ * exceptions to the digit block (they're allowed to appear in public copy), so
+ * they're stripped before the digit/quantity checks run rather than being
+ * treated as disclosed metrics.
+ */
+function maskAllowedIdentifiers(
+    value: string,
+    allowedIdentifiers?: readonly (string | null | undefined)[]
+): string {
+    if (!allowedIdentifiers || allowedIdentifiers.length === 0) return value;
+    const tokens = [...new Set(
+        allowedIdentifiers
+            .filter((identifier): identifier is string => typeof identifier === 'string')
+            .map(identifier => identifier.normalize('NFKC').trim())
+            .filter(identifier => identifier.length > 0)
+    )];
+    if (tokens.length === 0) return value;
+
+    const pattern = new RegExp(tokens.map(escapeRegExpLiteral).join('|'), 'giu');
+    return value.replace(pattern, '');
+}
+
+export function containsExposedInteractionMetric(
+    value: string,
+    allowedIdentifiers?: readonly (string | null | undefined)[]
+): boolean {
     const normalized = value.normalize('NFKC');
-    if (/\p{N}/u.test(value) || /\p{N}/u.test(normalized)) return true;
+    const maskedValue = maskAllowedIdentifiers(value, allowedIdentifiers);
+    const maskedNormalized = maskAllowedIdentifiers(normalized, allowedIdentifiers);
+    if (/\p{N}/u.test(maskedValue) || /\p{N}/u.test(maskedNormalized)) return true;
 
     // Model copy can split the interaction term and its count across adjacent
     // sentences. Treat the whole public line as the disclosure boundary, while
     // still allowing ordinary time expressions with no interaction context.
-    return interactionMetricContextPattern.test(normalized)
-        && (koreanQuantityPattern.test(normalized) || englishQuantityPattern.test(normalized));
+    return interactionMetricContextPattern.test(maskedNormalized)
+        && (koreanQuantityPattern.test(maskedNormalized) || englishQuantityPattern.test(maskedNormalized));
 }
 
 export function containsDefinitiveRelationshipAccusation(value: string): boolean {
@@ -55,12 +87,15 @@ export function extractSafePublicCommentTerms(value: unknown): string[] {
     )].slice(0, 8);
 }
 
-export function isSafePublicRiskNarrativeLine(value: string): boolean {
+export function isSafePublicRiskNarrativeLine(
+    value: string,
+    allowedIdentifiers?: readonly (string | null | undefined)[]
+): boolean {
     return value.length > 0
         && value.length <= MAX_PUBLIC_RISK_NARRATIVE_LINE_LENGTH
         && /[가-힣]/u.test(value)
         && !containsDefinitiveRelationshipAccusation(value)
-        && !containsExposedInteractionMetric(value);
+        && !containsExposedInteractionMetric(value, allowedIdentifiers);
 }
 
 export function hasPublicRiskInteractionReference(value: string): boolean {
@@ -84,7 +119,7 @@ export function parseSafePublicRiskNarrative(value: unknown): [string, string] |
 
     if (
         parsed[0] === parsed[1]
-        || !parsed.every(isSafePublicRiskNarrativeLine)
+        || !parsed.every(line => isSafePublicRiskNarrativeLine(line))
         || !hasPublicRiskInteractionReference(parsed[1])
         || !hasPublicRiskCoverageCaveat(parsed[1])
     ) {

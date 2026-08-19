@@ -14,6 +14,7 @@ export interface OwnerResultInteractionSummary extends ResultInteractionSummary 
 }
 
 const MAX_IMAGE_URL_LENGTH = 8_192;
+const MAX_TARGET_FULL_NAME_LENGTH = 200;
 
 export function toSafeRiskAnalysis(value: unknown): string[] {
     return parseSafePublicRiskNarrative(value) ?? [];
@@ -54,6 +55,24 @@ export function targetProfileImageFromStepData(stepData: unknown): string | unde
     }
 }
 
+export function targetProfileFullNameFromStepData(stepData: unknown): string | undefined {
+    if (!stepData || typeof stepData !== 'object' || Array.isArray(stepData)) return undefined;
+
+    const root = stepData as Record<string, unknown>;
+    const publication = root.conciergeBatchPublication;
+    const publicationRecord = publication && typeof publication === 'object' && !Array.isArray(publication)
+        ? publication as Record<string, unknown>
+        : null;
+    for (const value of [publicationRecord?.targetFullName, root.targetFullName]) {
+        if (typeof value !== 'string') continue;
+        const name = value.trim().replace(/\s+/gu, ' ');
+        if (name.length === 0 || name.length > MAX_TARGET_FULL_NAME_LENGTH
+            || /[\u0000-\u001f\u007f]/u.test(name)) continue;
+        return name;
+    }
+    return undefined;
+}
+
 export function toResultInteractionSummary(
     row: Record<string, unknown>
 ): ResultInteractionSummary {
@@ -70,7 +89,8 @@ export function toResultInteractionSummary(
  * high-risk narrative contract.
  */
 export function toOwnerResultInteractionSummary(
-    row: Record<string, unknown>
+    row: Record<string, unknown>,
+    targetUsername?: string
 ): OwnerResultInteractionSummary {
     if (
         row.risk_grade !== 'normal'
@@ -83,7 +103,13 @@ export function toOwnerResultInteractionSummary(
         ? toSafeRiskAnalysis(row.risk_analysis)
         : [];
     const overview = sanitizePublicRiskNarrativeLine(row.one_line_overview);
-    if (!overview || !isSafePublicRiskNarrativeLine(overview)) {
+    const candidateUsername = typeof row.suspect_instagram_id === 'string'
+        ? row.suspect_instagram_id
+        : undefined;
+    // The candidate's own handle and the target's handle are operator-approved
+    // exceptions to the public-copy digit block (see narrative-privacy.ts) -
+    // without them, any digit in either handle silently drops the whole overview.
+    if (!overview || !isSafePublicRiskNarrativeLine(overview, [candidateUsername, targetUsername])) {
         // The additive overview is optional for historical rows. Never let a
         // missing or malformed overview erase a complete legacy high-risk
         // narrative that already satisfies the public contract.

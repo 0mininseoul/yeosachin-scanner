@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import {
     buildSafeFallbackRiskNarrative,
     containsExposedInteractionMetric,
+    isSafePublicRiskNarrativeLine,
     parseSafePublicRiskNarrative,
 } from './narrative-privacy';
 
@@ -70,6 +71,54 @@ describe('public risk narrative privacy', () => {
             '프로필과 피드는 굳이 눈에 띕니다.',
             '좋아요 흔적은 보입니다. 관측치는 세 번이며 수집 표본 밖 누락은 가능합니다.',
         ])).toBeNull();
+    });
+
+    it('allows the candidate and target handles as digit exceptions without loosening other digit blocks', () => {
+        // The approved exception: the row's own handle and the target's handle
+        // may contain digits and still pass, once explicitly allow-listed.
+        expect(containsExposedInteractionMetric(
+            '채은님은 일본 여행의 추억을 공유하며 9ad8fa.01의 게시물에 좋아요를 눌렀습니다.',
+            ['chan__0.o', '9ad8fa.01']
+        )).toBe(false);
+        expect(containsExposedInteractionMetric(
+            '2ynbiu는 9ad8fa.01의 게시물에 좋아요를 눌러 관심을 표현했습니다.',
+            ['2ynbiu', '9ad8fa.01']
+        )).toBe(false);
+        expect(containsExposedInteractionMetric(
+            'asuka1200cc는 서브컬처 아이템과 파격적인 의상을 즐깁니다.',
+            ['asuka1200cc', '9ad8fa.01']
+        )).toBe(false);
+
+        // Unrelated digits are still blocked even when identifiers are supplied.
+        expect(containsExposedInteractionMetric(
+            '좋아요 3건을 남겼고 9ad8fa.01의 게시물에도 반응했습니다.',
+            ['chan__0.o', '9ad8fa.01']
+        )).toBe(true);
+        expect(containsExposedInteractionMetric(
+            '댓글 5개가 확인됐습니다.',
+            ['chan__0.o', '9ad8fa.01']
+        )).toBe(true);
+        expect(containsExposedInteractionMetric(
+            '좋아요를 세 번 남겼습니다.',
+            ['chan__0.o', '9ad8fa.01']
+        )).toBe(true);
+
+        // Matching ignores case and normalizes width variants (NFKC) before comparing.
+        expect(containsExposedInteractionMetric(
+            'CHAN__0.O는 9AD8FA.01의 게시물에 좋아요를 눌렀습니다.',
+            ['chan__0.o', '9ad8fa.01']
+        )).toBe(false);
+
+        // A single-argument call must behave exactly as before the exception was added.
+        expect(containsExposedInteractionMetric(
+            '채은님은 일본 여행의 추억을 공유하며 9ad8fa.01의 게시물에 좋아요를 눌렀습니다.'
+        )).toBe(true);
+    });
+
+    it('threads the identifier exception through isSafePublicRiskNarrativeLine', () => {
+        const line = '채은님은 일본 여행의 추억을 공유하며 9ad8fa.01의 게시물에 좋아요를 눌렀습니다.';
+        expect(isSafePublicRiskNarrativeLine(line, ['chan__0.o', '9ad8fa.01'])).toBe(true);
+        expect(isSafePublicRiskNarrativeLine(line)).toBe(false);
     });
 
     it('keeps fallback like directions accurate and never copies raw comment text', () => {

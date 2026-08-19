@@ -26,6 +26,33 @@ export interface SuspectRowAccount {
   instagramUrl?: string;
 }
 
+/**
+ * The one-line overview is public copy generated with the candidate's own
+ * handle and the target's handle as allowed exceptions to the digit block
+ * (see narrative-privacy.ts), so either can appear verbatim in the text. On a
+ * shared view that already blurs the row's handle and name, leaving those
+ * same identifiers legible inside the overview would defeat the mask.
+ */
+function maskIdentifiersInOverview(
+  text: string,
+  identifiers: readonly (string | undefined)[]
+): ReactNode {
+  const tokens = [...new Set(
+    identifiers
+      .filter((identifier): identifier is string => Boolean(identifier && identifier.trim()))
+      .map((identifier) => identifier.normalize("NFKC"))
+  )];
+  if (tokens.length === 0) return text;
+
+  const pattern = new RegExp(
+    `(${tokens.map((token) => token.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")).join("|")})`,
+    "giu"
+  );
+  return text.normalize("NFKC").split(pattern).map((part, index) => (
+    index % 2 === 1 ? <MaskedText key={index} value={part} /> : part
+  ));
+}
+
 /* One screened account.
  *
  * Container tier encodes severity rather than decorating every row equally:
@@ -41,6 +68,7 @@ export function SuspectRow({
   externalProfileLinks,
   onPreview,
   maskHandle = false,
+  targetInstagramId,
 }: {
   account: SuspectRowAccount;
   rank: number;
@@ -57,6 +85,8 @@ export function SuspectRow({
    * built, not here.
    */
   maskHandle?: boolean;
+  /** The analyzed target's handle, used to mask its occurrences inside oneLineOverview when maskHandle is set. */
+  targetInstagramId?: string;
 }) {
   const isHighRisk = account.riskGrade === "high_risk";
   // A masked handle plus a link whose href *is* that handle would cancel out, so
@@ -116,7 +146,11 @@ export function SuspectRow({
       {account.recentMutualRank && <RecentMutualBadge rank={account.recentMutualRank} />}
 
       {account.oneLineOverview && (
-        <p className="text-[12.5px] leading-[1.7] text-fg-dim">{account.oneLineOverview}</p>
+        <p className="text-[12.5px] leading-[1.7] text-fg-dim">
+          {maskHandle
+            ? maskIdentifiersInOverview(account.oneLineOverview, [account.instagramId, targetInstagramId])
+            : account.oneLineOverview}
+        </p>
       )}
 
       {isHighRisk && account.riskAnalysis.length > 0 && (
