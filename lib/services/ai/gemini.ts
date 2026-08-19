@@ -348,6 +348,8 @@ export interface AnalyzeWithGeminiOptions<T> {
     thinkingLevel?: AiThinkingLevel;
     mediaResolution?: AiMediaResolution;
     maxOutputTokens?: number;
+    /** Omitted by default (model default applies). Callers needing deterministic output (e.g. the name-only gender batch) pass 0. */
+    temperature?: number;
     /** Staged callers may reuse a stage while binding a distinct prompt contract. */
     promptVersion?: string;
     schemaVersion?: number;
@@ -805,6 +807,7 @@ export async function analyzeWithGemini<T>(
         thinkingLevel,
         mediaResolution,
         maxOutputTokens,
+        temperature,
         promptVersion,
         schemaVersion,
         maxImages,
@@ -824,6 +827,12 @@ export async function analyzeWithGemini<T>(
         && (!Number.isSafeInteger(maxOutputTokens) || maxOutputTokens < 1 || maxOutputTokens > 65_536)
     ) {
         throw new Error('Gemini maxOutputTokens must be an integer from 1 to 65536');
+    }
+    if (
+        temperature !== undefined
+        && (!Number.isFinite(temperature) || temperature < 0 || temperature > 2)
+    ) {
+        throw new Error('Gemini temperature must be a number from 0 to 2');
     }
     if (
         promptVersion !== undefined
@@ -977,6 +986,7 @@ export async function analyzeWithGemini<T>(
                     ...(resolvedMaxOutputTokens !== undefined
                         ? { maxOutputTokens: resolvedMaxOutputTokens }
                         : {}),
+                    ...(temperature !== undefined ? { temperature } : {}),
                     ...(resolvedMediaResolution
                         ? { mediaResolution: MEDIA_RESOLUTION_CONFIG[resolvedMediaResolution] }
                         : {}),

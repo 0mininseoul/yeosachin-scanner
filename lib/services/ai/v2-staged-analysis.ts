@@ -360,9 +360,51 @@ export interface GenderTriageMicrobatchResult {
 // silently discarded. 20 keeps the per-candidate output budget generous and leaves room for
 // the caller's bounded MAX_TOKENS split-retry (see replay-staged-ai-adapter.ts) to still work.
 export const GENDER_NAME_ONLY_MAX_CANDIDATES_PER_BATCH = 20;
-const GENDER_NAME_ONLY_PROMPT_VERSION = 'gender-name-only-v1';
+const GENDER_NAME_ONLY_PROMPT_VERSION_V1 = 'gender-name-only-v1';
+const GENDER_NAME_ONLY_PROMPT_VERSION_V2 = 'gender-name-only-v2';
 const GENDER_NAME_ONLY_SCHEMA_VERSION = 1;
+
+/**
+ * 2026-08-10 approved a deliberately conservative name-gender classifier:
+ * unisex/non-person names forced to unknown, and (for the name-only batch)
+ * confidence capped below high. Canary data later showed Gemini reliably
+ * knows Korean name gender leanings and this conservatism - not model
+ * capability - was the dominant cause of the inflated "unknown" rate. This
+ * flag relaxes the name-only batch prompt and the triage stage's name-signal
+ * cap to let a statistically dominant Korean name gender lean classify.
+ * Default OFF preserves the approved conservative prompts byte-for-byte
+ * (including their embedded version strings) - see the parity tests.
+ */
+export function conciergeBatchNameGenderAssertiveEnabled(
+    raw = process.env.CONCIERGE_BATCH_NAME_GENDER_ASSERTIVE,
+): boolean {
+    return raw === 'true' || raw === '1';
+}
+
+function genderNameOnlyPromptVersion(
+    assertive = conciergeBatchNameGenderAssertiveEnabled(),
+): string {
+    return assertive ? GENDER_NAME_ONLY_PROMPT_VERSION_V2 : GENDER_NAME_ONLY_PROMPT_VERSION_V1;
+}
+
+/**
+ * Shared by the triage-stage name-signal instruction (genderTriagePromptV28,
+ * genderTriageMicrobatchPrompt) wherever it appears verbatim. Off keeps the
+ * exact 2026-08-10-approved sentence; on swaps in the same operator-approved
+ * relaxation as the name-only batch prompt, gated by the same flag.
+ */
+function nameGenderTriageInstructionClause(assertive: boolean): string {
+    return assertive
+        ? '명확한 이름 성별 신호(한국어 이름 포함)는 이름만으로 판정하세요. 이름만 유일한 근거면 confidence는 medium 이하로 두세요. 이름과 이미지가 충돌할 때만 이미지를 우선하고 그 외에는 함께 사용하세요. 한국어 이름에 통계적으로 우세한 성별 경향이 뚜렷하면 그 성별로 분류하세요(예: 지훈·건우·성진→남, 지은·소정·민정→여). 확률이 진짜 반반이거나 사람 이름이 아닌 브랜드·상호·단체·기호 이름만 성별 근거에서 제외하세요.'
+        : '명확한 이름 성별 신호(한국어 이름 포함)는 이름만으로 판정하세요. 이름만 유일한 근거면 confidence는 medium 이하로 두세요. 이름과 이미지가 충돌할 때만 이미지를 우선하고 그 외에는 함께 사용하세요. 유니섹스이거나 사람 이름이 아닌 브랜드·상호·단체 이름은 성별 근거로 쓰지 마세요.';
+}
 const GENDER_NAME_ONLY_MAX_OUTPUT_TOKENS = 4_096;
+/**
+ * Pinned to the model's minimum for reproducibility: this classifier has no
+ * visual grounding to anchor sampling variance the way the image-based
+ * stages do, and its output feeds a deterministic checkpoint/replay identity.
+ */
+const GENDER_NAME_ONLY_TEMPERATURE = 0;
 /** v2.11-only: this model's structured-JSON-schema adherence is the point of the name-only batch. */
 const GENDER_NAME_ONLY_V211_MODEL = 'gemini-3.7-flash';
 /**
@@ -445,12 +487,15 @@ function parseGenderNameOnlyCandidates(
 
 function genderNameOnlyPrompt(
     candidates: readonly z.output<typeof genderNameOnlyCandidateSchema>[],
+    assertive = conciergeBatchNameGenderAssertiveEnabled(),
 ): string {
     return [
-        'gender-name-only-v1',
+        genderNameOnlyPromptVersion(assertive),
         '한국어 이름의 성별 신호만 활용하는 보수적인 분류기입니다.',
         '각 candidateId의 fullName만 근거로 female, male, unknown 중 하나를 분류하세요.',
-        '유니섹스·중성 이름, 비인명·브랜드·상호·단체·기호 이름은 반드시 unknown으로 두세요.',
+        assertive
+            ? '한국어 이름에 통계적으로 우세한 성별 경향이 뚜렷하면 그 성별로 분류하세요(예: 지훈·건우·성진→남, 지은·소정·민정→여). 확률이 진짜 반반이거나 사람 이름이 아닌 브랜드·상호·단체·기호 이름만 unknown으로 남기세요.'
+            : '유니섹스·중성 이름, 비인명·브랜드·상호·단체·기호 이름은 반드시 unknown으로 두세요.',
         '이름만이 유일한 근거이므로 confidence는 low 또는 medium만 사용하고 high는 사용하지 마세요.',
         '입력 candidateId를 빠짐없이 정확히 한 번씩, 입력 정렬 순서 그대로 반환하세요. 모르는 ID를 만들거나 누락하지 마세요.',
         'JSON 배열 이외의 텍스트는 반환하지 마세요.',
@@ -1671,6 +1716,7 @@ function genderTriagePromptV28(
     media: readonly NormalizedAiMediaSelection[],
     accountProfile?: z.output<typeof accountProfileEvidenceSchema>,
     allowNameGenderEvidence = false,
+    assertiveNameGender = conciergeBatchNameGenderAssertiveEnabled(),
 ): string {
     const profileEvidence = accountProfile
         ? {
@@ -1683,7 +1729,7 @@ function genderTriagePromptV28(
     const promptBase = allowNameGenderEvidence
         ? legacyPrompt.replace(
             '이름이나 고정관념으로 추측하지 말고 중복 selectionId 없이 실제 사용한 ID만 근거로 반환하세요.',
-            '명확한 이름 성별 신호(한국어 이름 포함)는 이름만으로 판정하세요. 이름만 유일한 근거면 confidence는 medium 이하로 두세요. 이름과 이미지가 충돌할 때만 이미지를 우선하고 그 외에는 함께 사용하세요. 유니섹스이거나 사람 이름이 아닌 브랜드·상호·단체 이름은 성별 근거로 쓰지 마세요.',
+            nameGenderTriageInstructionClause(assertiveNameGender),
         ).replace(
             'confidence=high는 여러 이미지가 같은 소유자를 일관되게 뒷받침할 때만 사용하세요.',
             mediaFreeNameRoute
@@ -1692,7 +1738,9 @@ function genderTriagePromptV28(
         ).replace(
             '근거가 하나뿐이면 confidence=high를 쓰지 말고, 유효한 근거가 없으면 unknown, low, not_visible을 반환하세요.',
             mediaFreeNameRoute
-                ? '이름이 유니섹스이거나 사람 이름이 아니면 성별 근거로 쓰지 말고, 명확한 이름이 없으면 unknown, low, not_visible을 반환하세요.'
+                ? (assertiveNameGender
+                    ? '한국어 이름에 통계적으로 우세한 성별 경향이 뚜렷하면 그 성별로 분류하고, 확률이 진짜 반반이거나 사람 이름이 아니면 unknown, low, not_visible을 반환하세요.'
+                    : '이름이 유니섹스이거나 사람 이름이 아니면 성별 근거로 쓰지 말고, 명확한 이름이 없으면 unknown, low, not_visible을 반환하세요.')
                 : '근거가 하나뿐이면 confidence=high를 쓰지 말고, 유효한 근거가 없으면 unknown, low, not_visible을 반환하세요.',
         )
         : legacyPrompt;
@@ -1705,7 +1753,9 @@ function genderTriagePromptV28(
             : []),
         ...(mediaFreeNameRoute
             ? [
-                '미디어가 없어도 fullName의 명확한 성별 신호로 판정하세요. 이름이 없거나 유니섹스·비인명 이름이면 unknown으로 남기세요.',
+                assertiveNameGender
+                    ? '미디어가 없어도 fullName의 통계적으로 우세한 성별 경향으로 판정하세요. 확률이 진짜 반반이거나 사람 이름이 아니면 unknown으로 남기세요.'
+                    : '미디어가 없어도 fullName의 명확한 성별 신호로 판정하세요. 이름이 없거나 유니섹스·비인명 이름이면 unknown으로 남기세요.',
                 'evidenceSelectionIds는 빈 배열을 허용하며, 이름만으로 판정한 경우 시각 evidenceSelectionIds를 만들지 마세요.',
             ]
             : []),
@@ -2005,6 +2055,7 @@ function projectGenderTriageMicrobatch(
 function genderTriageMicrobatchPrompt(
     accounts: readonly ProjectedGenderTriageMicrobatchAccount[],
     policyVersion: AiStagePolicyVersion,
+    assertiveNameGender = conciergeBatchNameGenderAssertiveEnabled(),
 ): string {
     const hasMediaFreeV211Account = policyVersion === AI_STAGE_POLICY_V211_VERSION
         && accounts.some(account => account.projectedMedia.length === 0);
@@ -2032,13 +2083,13 @@ function genderTriageMicrobatchPrompt(
         '성별은 계정 소유자만 판단하고 확실하지 않으면 unknown을 사용하세요. high는 같은 소유자를 뒷받침하는 서로 다른 이미지 근거가 둘 이상일 때만 사용하세요.',
         'accountContext는 personal, individual_creator, official_group_or_brand, uncertain 중 하나입니다. 밴드·팀·회사·상점·기관·브랜드 공식 페이지는 official_group_or_brand로, 개인 창작 활동 계정은 individual_creator로 분류하세요.',
         policyVersion === AI_STAGE_POLICY_V211_VERSION
-            ? '명확한 이름 성별 신호(한국어 이름 포함)는 이름만으로 판정하세요. 이름만 유일한 근거면 confidence는 medium 이하로 두세요. 이름과 이미지가 충돌할 때만 이미지를 우선하고 그 외에는 함께 사용하세요. 유니섹스이거나 사람 이름이 아닌 브랜드·상호·단체 이름은 성별 근거로 쓰지 마세요.'
+            ? nameGenderTriageInstructionClause(assertiveNameGender)
             : '이름만으로 성별을 추측하지 말고, JSON 이외의 텍스트를 반환하지 마세요.',
     ];
     if (usesDecisiveSummaryPresentation(policyVersion)) {
         instructions[4] = 'status=ok이면 assessment와 accountContext를 모두 반환하세요. 로고·단체·브랜드로 개인 소유자를 확인할 수 없으면 status=uncertain만 반환하세요. 개인 계정으로 보이면 시각 근거가 약해도 status=ok으로 반환하고, 성별 근거가 없을 때만 assessment를 unknown/low/not_visible로 두세요.';
         instructions[instructions.length - 1] = policyVersion === AI_STAGE_POLICY_V211_VERSION
-            ? '명확한 이름 성별 신호(한국어 이름 포함)는 이름만으로 판정하세요. 이름만 유일한 근거면 confidence는 medium 이하로 두세요. 이름과 이미지가 충돌할 때만 이미지를 우선하고 그 외에는 함께 사용하세요. 유니섹스이거나 사람 이름이 아닌 브랜드·상호·단체 이름은 성별 근거로 쓰지 마세요. bio의 she/her·he/him·여성/남성·딸/아들·엄마/아빠처럼 계정 소유자를 직접 가리키는 자기소개도 성별 근거로 사용할 수 있습니다. JSON 이외의 텍스트를 반환하지 마세요.'
+            ? `${nameGenderTriageInstructionClause(assertiveNameGender)} bio의 she/her·he/him·여성/남성·딸/아들·엄마/아빠처럼 계정 소유자를 직접 가리키는 자기소개도 성별 근거로 사용할 수 있습니다. JSON 이외의 텍스트를 반환하지 마세요.`
             : '이름만으로 성별을 추측하지 마세요. 다만 bio의 she/her·he/him·여성/남성·딸/아들·엄마/아빠처럼 계정 소유자를 직접 가리키는 자기소개는 시각 단서와 함께 보조 근거로 사용할 수 있습니다. JSON 이외의 텍스트를 반환하지 마세요.';
         if (hasMediaFreeV211Account) {
             instructions[4] = 'status=ok이면 assessment와 accountContext를 모두 반환하세요. 미디어가 없는 account도 명확한 fullName 성별 신호가 있으면 status=ok으로 판정하고, 이름이 없거나 유니섹스·비인명이면 unknown/low/not_visible로 남기세요.';
@@ -2053,9 +2104,13 @@ function genderTriageMicrobatchPrompt(
         }
         if (hasMediaFreeV211Account) {
             instructions.push(
-                '미디어가 없어도 fullName의 명확한 성별 신호로 판정하세요.',
+                assertiveNameGender
+                    ? '미디어가 없어도 fullName의 통계적으로 우세한 성별 경향으로 판정하세요.'
+                    : '미디어가 없어도 fullName의 명확한 성별 신호로 판정하세요.',
                 '이름만 유일한 근거이면 confidence는 medium을 넘지 마세요.',
-                '유니섹스이거나 사람 이름이 아닌 이름은 성별 근거로 쓰지 마세요.',
+                assertiveNameGender
+                    ? '한국어 이름에 통계적으로 우세한 성별 경향이 뚜렷하면 그 성별로 분류하세요. 확률이 진짜 반반이거나 사람 이름이 아니면 성별 근거로 쓰지 마세요.'
+                    : '유니섹스이거나 사람 이름이 아닌 이름은 성별 근거로 쓰지 마세요.',
                 'evidenceSelectionIds는 빈 배열을 허용하며 이름만으로 판정한 경우 시각 evidenceSelectionIds를 만들지 마세요.',
             );
         }
@@ -2153,13 +2208,14 @@ function genderNameOnlyResultIdentity(
     policyVersion: AiStagePolicyVersion,
 ): AnalysisV2AiResultIdentity {
     const policy = getAiStagePolicy(policyVersion, 'genderTriage');
-    const prompt = genderNameOnlyPrompt(candidates);
+    const assertive = conciergeBatchNameGenderAssertiveEnabled();
+    const prompt = genderNameOnlyPrompt(candidates, assertive);
     return createAnalysisV2AiResultIdentity({
         stage: 'genderTriage',
         modelName: genderNameOnlyModelFor(policyVersion),
         thinkingLevel: genderNameOnlyThinkingLevelFor(policyVersion),
         mediaResolution: policy.mediaResolution,
-        promptVersion: GENDER_NAME_ONLY_PROMPT_VERSION,
+        promptVersion: genderNameOnlyPromptVersion(assertive),
         schemaVersion: GENDER_NAME_ONLY_SCHEMA_VERSION,
         maxOutputTokens: GENDER_NAME_ONLY_MAX_OUTPUT_TOKENS,
         inputHash: createAnalysisV2AiResultInputHash(prompt),
@@ -2185,7 +2241,8 @@ export async function genderNameOnlyBatch(
 ): Promise<readonly GenderNameOnlyResult[]> {
     const candidates = parseGenderNameOnlyCandidates(rawCandidates);
     const policyVersion = options.aiStagePolicyVersion ?? AI_STAGE_POLICY_V211_VERSION;
-    const prompt = genderNameOnlyPrompt(candidates);
+    const assertive = conciergeBatchNameGenderAssertiveEnabled();
+    const prompt = genderNameOnlyPrompt(candidates, assertive);
     const identity = genderNameOnlyResultIdentity(candidates, policyVersion);
     const audit = parseAuditContext(rawAuditContext, identity);
     const responseSchema = genderNameOnlyResponseSchemaFor(
@@ -2205,7 +2262,9 @@ export async function genderNameOnlyBatch(
             model: genderNameOnlyModelFor(policyVersion),
             thinkingLevel: genderNameOnlyThinkingLevelFor(policyVersion),
             maxOutputTokens: GENDER_NAME_ONLY_MAX_OUTPUT_TOKENS,
-            promptVersion: GENDER_NAME_ONLY_PROMPT_VERSION,
+            // Reproducibility for a batch classifier with no visual grounding to anchor it.
+            temperature: GENDER_NAME_ONLY_TEMPERATURE,
+            promptVersion: genderNameOnlyPromptVersion(assertive),
             schemaVersion: GENDER_NAME_ONLY_SCHEMA_VERSION,
             onBeforeAttempt: audit.onBeforeAttempt,
             onAttemptTelemetry: audit.onAttemptTelemetry,
