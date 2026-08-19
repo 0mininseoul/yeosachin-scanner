@@ -6,7 +6,7 @@ import {
 } from './lib/observability/sentry-build-options';
 
 const nextConfig: NextConfig = {
-  serverExternalPackages: ["@google-cloud/tasks", "google-auth-library", "google-gax"],
+  serverExternalPackages: ["@google-cloud/tasks", "google-auth-library", "google-gax", "sharp"],
   outputFileTracingIncludes: {
     "/api/analysis/start": ["./node_modules/@google-cloud/tasks/build/protos/**/*"],
     "/api/analysis/step": ["./node_modules/@google-cloud/tasks/build/protos/**/*"],
