@@ -45,10 +45,10 @@ vi.mock('@/lib/services/analysis/v2-worker', () => ({
 }));
 
 import {
-    ANALYSIS_V2_WORKER_HANDLER_WINDOW_MS,
     maxDuration,
     POST,
 } from '@/app/api/analysis/v2/worker/route';
+import { ANALYSIS_V2_WORKER_HANDLER_WINDOW_MS } from '@/lib/services/analysis/v2-worker-task-contract';
 
 const config = {
     project: 'example-project',
