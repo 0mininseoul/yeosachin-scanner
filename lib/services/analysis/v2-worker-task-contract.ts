@@ -28,3 +28,8 @@ export function analysisV2WorkerTaskContractFromHeader(
         ? ANALYSIS_V2_CURRENT_WORKER_TASK_CONTRACT
         : ANALYSIS_V2_LEGACY_WORKER_TASK_CONTRACT;
 }
+
+// Derived alias kept out of the worker route module so that route file only
+// exports Next.js route handlers (webpack build validates this strictly).
+export const ANALYSIS_V2_WORKER_HANDLER_WINDOW_MS =
+    ANALYSIS_V2_CURRENT_WORKER_TASK_CONTRACT.handlerWindowMs;
