@@ -28,15 +28,12 @@ import {
     signOutAndClearPendingAnalysisTarget,
 } from '@/lib/services/pending-analysis-target';
 import {
-    boundedOwnerResultPage,
     genderBreakdownTotal,
-    genderBreakdownFromStats,
     OWNER_GENDER_LABELS,
     OWNER_RESULT_PAGE_SIZE,
     resolveResultPageCursor,
     resultPaginationModel,
     resultSummaryCounts,
-    countHighRiskBands,
     countHighRiskGrades,
     v2ResultFailureAction,
     type OwnerProgressStatus,

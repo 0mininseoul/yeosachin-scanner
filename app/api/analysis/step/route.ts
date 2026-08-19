@@ -1,6 +1,6 @@
 import { supabaseAdmin } from '@/lib/supabase/admin';
 import { createClient } from '@/lib/supabase/server';
-import { after, NextResponse } from 'next/server';
+import { NextResponse } from 'next/server';
 import {
     getInstagramProfile,
     getFollowers,
