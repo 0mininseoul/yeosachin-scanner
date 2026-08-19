@@ -29,6 +29,18 @@ describe('public risk narrative privacy', () => {
         expect(containsExposedInteractionMetric('댓글 흔적은 제법 선명합니다.')).toBe(false);
     });
 
+    it('does not read a number syllable embedded in an ordinary Korean word as a count', () => {
+        // '스타일을' ends in '일'(one) + '을', '목걸이를' ends in '이'(two) + '를'; with an
+        // interaction verb like '좋아요' in the same line the old pattern misread these as an
+        // exposed interaction metric and silently dropped the whole overview.
+        expect(containsExposedInteractionMetric(
+            '과감한 스타일을 선보이며 게시물에 좋아요를 눌러 긍정적인 관심을 표현합니다.'
+        )).toBe(false);
+        expect(containsExposedInteractionMetric(
+            '진주 목걸이를 즐겨 착용하며 콘텐츠에 좋아요를 누르며 우호적인 관심을 표현합니다.'
+        )).toBe(false);
+    });
+
     it('allows an ordinary time expression when it does not expose an interaction count', () => {
         expect(containsExposedInteractionMetric(
             '한 번 본 뒤에도 은근히 기억에 남습니다.'
