@@ -71,6 +71,15 @@ describe('Amplitude caller privacy contract', () => {
         );
     });
 
+    it('tracks confirmed DM and clipboard actions from the result menu', () => {
+        const result = source('app/result/[requestId]/page.tsx');
+        const usage = result.match(/<ResultActions[\s\S]*?\/>/)?.[0] ?? '';
+
+        expect(usage).toMatch(
+            /onShare=\{\(channel\) => \{[\s\S]*?trackEvent\(EVENTS\.RESULT_SHARED,[\s\S]*?request_id:\s*requestId,[\s\S]*?share_channel:\s*channel/,
+        );
+    });
+
     it('uses the shared result request UUID without exposing the share token', () => {
         const shared = source('app/share/[token]/page.tsx');
         // `display` is the payload after the v2 shape is mapped onto this view's

@@ -684,6 +684,12 @@ export default function ResultPage({ params }: PageProps) {
                     <ResultActions
                         onKakaoShare={handleKakaoShare}
                         onPrepare={prepareShare}
+                        onShare={(channel) => {
+                            trackEvent(EVENTS.RESULT_SHARED, {
+                                request_id: requestId,
+                                share_channel: channel,
+                            });
+                        }}
                         kakaoBusy={kakaoShareLoading}
                         kakaoAvailable={kakaoJavascriptKey() !== null}
                         shareUrl={shareTarget?.url ?? null}
