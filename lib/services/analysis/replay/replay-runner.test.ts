@@ -1600,6 +1600,316 @@ describe('AI-only replay runner', () => {
         expect(report.gender.unknown).toBe(1);
     });
 
+    describe('(A) name-fallback for image-path unknowns (CONCIERGE_BATCH_NAME_FALLBACK_ENABLED)', () => {
+        function unresolvableImageProfile(ordinal: number, fullName: string) {
+            return {
+                ordinal,
+                isPrivate: false,
+                username: `image_unknown_${ordinal}`,
+                fullName,
+                hasProfileImage: true,
+                bio: null,
+                // No media at all: featureMedia/resolverMedia end up empty, so
+                // the candidate deterministically falls through to "unknown"
+                // regardless of the (unrelated to this test) admission rules.
+                media: [],
+                triageSelectionIds: [],
+                featureSelectionIds: [],
+                resolverSelectionIds: [],
+                captions: [],
+                coverage: { selectedCount: 0, normalizedCount: 0, failures: [] },
+            };
+        }
+        const confidentMaleProfile = {
+            ordinal: 12,
+            isPrivate: false,
+            username: 'already_male',
+            fullName: '문창현',
+            hasProfileImage: true,
+            bio: null,
+            media: [{ selectionId: 'profile:12', kind: 'profile' as const, caption: null, jpegBase64: '/9j/2Q==' }],
+            triageSelectionIds: ['profile:12'],
+            featureSelectionIds: ['profile:12'],
+            resolverSelectionIds: ['profile:12'],
+            captions: [],
+            coverage: { selectedCount: 1, normalizedCount: 1, failures: [] },
+        };
+        const fallbackBundle = {
+            ...firstPaymentBundle,
+            profiles: [
+                unresolvableImageProfile(10, '박찬주'),
+                unresolvableImageProfile(11, '김가람'),
+                confidentMaleProfile,
+            ],
+        } satisfies AnalysisV2ReplayBundle;
+
+        function fallbackRunner() {
+            const triage = vi.fn(async () => ({
+                outcome: 'ok' as const,
+                attempts: 1,
+                retries: 0,
+                elapsedMs: 1,
+                value: {
+                    assessment: {
+                        inferredGender: 'unknown' as const,
+                        confidence: 'low' as const,
+                        ownerConsistency: 'not_visible' as const,
+                        evidenceSelectionIds: [],
+                    },
+                    routingDecision: 'route_to_feature_analysis' as const,
+                    routingReason: 'conserve_female_recall' as const,
+                    analyzedSelectionIds: [],
+                    v29AccountContext: 'uncertain' as const,
+                },
+            }));
+            const firstPass = vi.fn(async (input: { ordinal: number }) => ({
+                outcome: 'ok' as const,
+                attempts: 1,
+                retries: 0,
+                elapsedMs: 1,
+                value: {
+                    assessment: {
+                        inferredGender: 'male' as const,
+                        confidence: 'high' as const,
+                        ownerConsistency: 'same_person' as const,
+                        evidenceSelectionIds: [`profile:${input.ordinal}`],
+                    },
+                    routingDecision: 'exclude_high_confidence_male' as const,
+                    routingReason: 'high_confidence_same_owner_male' as const,
+                    analyzedSelectionIds: [`profile:${input.ordinal}`],
+                },
+            }));
+            // Only the two truly-unknown candidates (박찬주 leans male, 김가람 is
+            // a genuine unisex/no-lean name) are ever offered to the fallback
+            // batch; 문창현 (already verified male via firstPass) never appears.
+            const nameOnly = vi.fn(async (candidates: readonly { candidateId: string; fullName: string }[]) => ({
+                outcome: 'ok' as const,
+                attempts: 1,
+                retries: 0,
+                elapsedMs: 1,
+                value: candidates.map(candidate => ({
+                    candidateId: candidate.candidateId,
+                    gender: candidate.fullName === '박찬주' ? 'male' as const : 'unknown' as const,
+                    confidence: candidate.fullName === '박찬주' ? 'medium' as const : 'low' as const,
+                })),
+            }));
+            return { triage, firstPass, nameOnly };
+        }
+
+        it('fills only genuine unknowns from the name-only fallback, leaves a no-lean name unknown, and never revisits an already-verified candidate', async () => {
+            const { triage, firstPass, nameOnly } = fallbackRunner();
+
+            const report = await runAnalysisV2AiReplay({
+                bundle: fallbackBundle,
+                runner: v211Runner({ triage, firstPass, nameOnly }),
+                mode: 'paid-ai',
+                paidAiOptIn: true,
+                evaluationPolicy: fallbackBundle.capture.evaluationPolicy,
+                nameFallbackEnabled: true,
+            });
+
+            expect(nameOnly).toHaveBeenCalledOnce();
+            const fallbackCandidates = (nameOnly.mock.calls[0]?.[0] ?? []) as Array<{ candidateId: string; fullName: string }>;
+            expect([...fallbackCandidates].sort((left, right) => left.candidateId.localeCompare(right.candidateId)))
+                .toEqual([
+                    { candidateId: 'ordinal:10', fullName: '박찬주' },
+                    { candidateId: 'ordinal:11', fullName: '김가람' },
+                ]);
+
+            expect(report.accountOutputs.find(output => output.ordinal === 10)).toMatchObject({
+                finalClassification: 'verified_non_female',
+                classificationSource: 'name_only',
+            });
+            expect(report.accountOutputs.find(output => output.ordinal === 11)).toMatchObject({
+                finalClassification: 'unresolved',
+                classificationSource: 'unknown',
+            });
+            // Already classified male via firstPass/triage alone; the
+            // fallback must never overwrite it (and never even saw it).
+            expect(report.accountOutputs.find(output => output.ordinal === 12)).toMatchObject({
+                finalClassification: 'verified_non_female',
+                classificationSource: 'triage',
+            });
+            expect(report.gender).toEqual({ male: 2, female: 0, unknown: 1, unknownRate: 0.3333 });
+        });
+
+        it('off (default) leaves image-path unknowns untouched - byte parity', async () => {
+            const { triage, firstPass, nameOnly } = fallbackRunner();
+
+            const report = await runAnalysisV2AiReplay({
+                bundle: fallbackBundle,
+                runner: v211Runner({ triage, firstPass, nameOnly }),
+                mode: 'paid-ai',
+                paidAiOptIn: true,
+                evaluationPolicy: fallbackBundle.capture.evaluationPolicy,
+                // nameFallbackEnabled intentionally omitted (defaults to off).
+            });
+
+            expect(nameOnly).not.toHaveBeenCalled();
+            expect(report.accountOutputs.find(output => output.ordinal === 10)).toMatchObject({
+                finalClassification: 'unresolved',
+                classificationSource: 'unknown',
+            });
+            expect(report.accountOutputs.find(output => output.ordinal === 11)).toMatchObject({
+                finalClassification: 'unresolved',
+                classificationSource: 'unknown',
+            });
+            expect(report.gender).toEqual({ male: 1, female: 0, unknown: 2, unknownRate: 0.6667 });
+        });
+    });
+
+    describe('(B) feed-image triage for avatar-less candidates (CONCIERGE_BATCH_FEED_TRIAGE_ENABLED)', () => {
+        // A name that leans female (per the assertive name-only classifier)
+        // must not decide gender for a candidate whose feed photo is
+        // available - this is the 강태연/제성-style regression: avatar-less,
+        // but a real feed image exists and shows the account is male.
+        function avatarlessFeedProfile(overrides: { fullName: string }) {
+            return {
+                ordinal: 20,
+                isPrivate: false,
+                username: 'avatarless_with_feed',
+                fullName: overrides.fullName,
+                hasProfileImage: false,
+                bio: null,
+                media: [
+                    { selectionId: 'feed:20', kind: 'feed' as const, postId: 'p20', caption: null, jpegBase64: '/9j/2Q==' },
+                ],
+                triageSelectionIds: ['feed:20'],
+                featureSelectionIds: ['feed:20'],
+                resolverSelectionIds: ['feed:20'],
+                captions: [],
+                coverage: { selectedCount: 1, normalizedCount: 1, failures: [] },
+            };
+        }
+        function avatarlessNoFeedProfile(fullName: string) {
+            return {
+                ordinal: 21,
+                isPrivate: false,
+                username: 'avatarless_no_feed',
+                fullName,
+                hasProfileImage: false,
+                bio: null,
+                media: [],
+                triageSelectionIds: [],
+                featureSelectionIds: [],
+                resolverSelectionIds: [],
+                captions: [],
+                coverage: { selectedCount: 0, normalizedCount: 0, failures: [] },
+            };
+        }
+        function confidentMaleFeedTriage() {
+            return vi.fn(async (input: { ordinal: number; media: readonly { kind: string }[] }) => ({
+                outcome: 'ok' as const,
+                attempts: 1,
+                retries: 0,
+                elapsedMs: 1,
+                value: {
+                    assessment: {
+                        inferredGender: 'male' as const,
+                        confidence: 'high' as const,
+                        ownerConsistency: 'same_person' as const,
+                        evidenceSelectionIds: [`feed:${input.ordinal}`],
+                    },
+                    routingDecision: 'exclude_high_confidence_male' as const,
+                    routingReason: 'high_confidence_same_owner_male' as const,
+                    analyzedSelectionIds: [`feed:${input.ordinal}`],
+                },
+            }));
+        }
+
+        it('routes an avatar-less candidate with a female-leaning name but a real feed photo through feed-image triage, decided by the photo not the name', async () => {
+            const triage = confidentMaleFeedTriage();
+            const nameOnly = vi.fn();
+            const bundle20 = {
+                ...firstPaymentBundle,
+                profiles: [avatarlessFeedProfile({ fullName: '강태연' })],
+            } satisfies AnalysisV2ReplayBundle;
+
+            const report = await runAnalysisV2AiReplay({
+                bundle: bundle20,
+                runner: v211Runner({ triage, nameOnly }),
+                mode: 'paid-ai',
+                paidAiOptIn: true,
+                evaluationPolicy: bundle20.capture.evaluationPolicy,
+                feedTriageEnabled: true,
+            });
+
+            expect(nameOnly).not.toHaveBeenCalled();
+            expect(triage).toHaveBeenCalledOnce();
+            const [triageInput] = triage.mock.calls[0]!;
+            expect((triageInput as { media: readonly { kind: string }[] }).media.map(item => item.kind))
+                .toEqual(['feed']);
+            expect(report.accountOutputs[0]).toMatchObject({
+                finalClassification: 'verified_non_female',
+                classificationSource: 'triage',
+            });
+        });
+
+        it('leaves an avatar-less candidate with no feed media on the name-only path when feed triage is enabled', async () => {
+            const triage = vi.fn();
+            const nameOnly = vi.fn(async (candidates: readonly { candidateId: string; fullName: string }[]) => ({
+                outcome: 'ok' as const,
+                attempts: 1,
+                retries: 0,
+                elapsedMs: 1,
+                value: candidates.map(candidate => ({
+                    candidateId: candidate.candidateId,
+                    gender: 'female' as const,
+                    confidence: 'medium' as const,
+                })),
+            }));
+            const bundle21 = {
+                ...firstPaymentBundle,
+                profiles: [avatarlessNoFeedProfile('최윤교')],
+            } satisfies AnalysisV2ReplayBundle;
+
+            const report = await runAnalysisV2AiReplay({
+                bundle: bundle21,
+                runner: v211Runner({ triage, nameOnly }),
+                mode: 'paid-ai',
+                paidAiOptIn: true,
+                evaluationPolicy: bundle21.capture.evaluationPolicy,
+                feedTriageEnabled: true,
+            });
+
+            expect(triage).not.toHaveBeenCalled();
+            expect(nameOnly).toHaveBeenCalledWith([{ candidateId: 'ordinal:21', fullName: '최윤교' }]);
+            expect(report.accountOutputs[0]).toMatchObject({ classificationSource: 'name_only' });
+        });
+
+        it('off (default) still routes an avatar-less-with-feed candidate through the name-only batch - byte parity', async () => {
+            const triage = vi.fn();
+            const nameOnly = vi.fn(async (candidates: readonly { candidateId: string; fullName: string }[]) => ({
+                outcome: 'ok' as const,
+                attempts: 1,
+                retries: 0,
+                elapsedMs: 1,
+                value: candidates.map(candidate => ({
+                    candidateId: candidate.candidateId,
+                    gender: 'female' as const,
+                    confidence: 'medium' as const,
+                })),
+            }));
+            const bundle20 = {
+                ...firstPaymentBundle,
+                profiles: [avatarlessFeedProfile({ fullName: '강태연' })],
+            } satisfies AnalysisV2ReplayBundle;
+
+            const report = await runAnalysisV2AiReplay({
+                bundle: bundle20,
+                runner: v211Runner({ triage, nameOnly }),
+                mode: 'paid-ai',
+                paidAiOptIn: true,
+                evaluationPolicy: bundle20.capture.evaluationPolicy,
+                // feedTriageEnabled intentionally omitted (defaults to off).
+            });
+
+            expect(triage).not.toHaveBeenCalled();
+            expect(nameOnly).toHaveBeenCalledOnce();
+            expect(report.accountOutputs[0]).toMatchObject({ classificationSource: 'name_only' });
+        });
+    });
+
     it('does not promote a concierge candidate to female without a feature result', async () => {
         const triage = vi.fn(async () => ({
             outcome: 'ok' as const,

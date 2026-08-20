@@ -7,8 +7,9 @@ import { analyzeWithGemini } from '@/lib/services/ai';
 import { GENDER_NAME_ONLY_MAX_CANDIDATES_PER_BATCH } from '@/lib/services/ai/v2-staged-analysis';
 import { isRecoverableGeminiResponseError } from '@/lib/services/ai/gemini-generation-policy';
 import { getAnalysisPlan } from '@/lib/domain/analysis/plan-catalog';
+import { INSTAGRAM_MEDIA_HOST_SUFFIXES } from '@/lib/services/media/secure-image-fetch';
 import type { InstagramFollower, InstagramPost, InstagramProfile } from '@/lib/types/instagram';
-import type { ProviderCallContext } from '@/lib/services/instagram/providers/types';
+import { APIFY_CREDENTIAL_SLOTS, type ApifyCredentialSlot, type ProviderCallContext } from '@/lib/services/instagram/providers/types';
 import {
     APIFY_PROFILE_ACTOR_ID,
     APIFY_RELATIONSHIP_ACTOR_ID,
@@ -70,8 +71,21 @@ const USERNAME = z.string().regex(/^[a-z0-9._]{1,30}$/);
 const APPROVED_SLOTS = CONCIERGE_BATCH_TOKEN_PRIORITY;
 const RELATIONSHIP_SLOTS = CONCIERGE_BATCH_RELATIONSHIP_TOKEN_PRIORITY;
 type ApprovedSlot = typeof APPROVED_SLOTS[number];
-type RelationshipSlot = typeof RELATIONSHIP_SLOTS[number];
+// Widened beyond RELATIONSHIP_SLOTS' own [nonary, secondary] default so
+// CONCIERGE_BATCH_RELATIONSHIP_SLOTS (see relationshipCollectionSlots) can
+// fail over to any balance-holding Apify slot, not just those two.
+type RelationshipSlot = ApifyCredentialSlot;
 type ConciergeProviderSlot = ApprovedSlot | RelationshipSlot;
+// isApifyCredentialSlot (providers/types.ts) deliberately excludes
+// octonary/nonary from its general V2 catalog check; both are valid
+// concierge-batch slots here, so validate against the full slot universe.
+// tenth (a fresh-quota operator slot) is batch-scoped the same way.
+const ALL_APIFY_CREDENTIAL_SLOTS: readonly ApifyCredentialSlot[] = [
+    ...APIFY_CREDENTIAL_SLOTS,
+    'octonary',
+    'nonary',
+    'tenth',
+];
 const APIFY_RUN_ID = z.string().regex(/^[A-Za-z0-9]{8,64}$/);
 const EMPTY_MANUAL_CSV = 'username,instagram_url,ai_classification,ai_confidence/evidence_status,manual_gender,operator_note\n';
 const RETRY_CODE_PATTERN = /^CONCIERGE_[A-Z0-9_]{2,100}$/;
@@ -430,6 +444,15 @@ const ANONYMOUS_PROFILE_IMAGE_MARKER = /(?:anonymous_profile_pic|YW5vbnltb3VzX3B
 // A profile with one of these as its whole "full name" must fall back to the
 // username subject, not a blank-looking "님은 ..." sentence.
 const BATCH_COPY_BLANK_LOOKING_CHARS = /[\u115F\u1160\u200B\u200C\u200D\u2800\u3164\uFEFF]/gu;
+// Instagram display names routinely append a job title or affiliation after a
+// separator ("송하빈 | 청소년상담사 • 청소년지도사") or wrap the name in decoration
+// ("👑한채연✿ᑕᕼᗩEYEOᑎ"). The copy contract makes the formatted subject label a
+// literal the model must reproduce verbatim in two separate sentences, and a
+// title-laden or decorated label is one no model reliably echoes - the observed
+// failure was six consecutive CONCIERGE_BATCH_COPY_SUBJECT_GROUNDING_INVALID
+// attempts for rabbisseu_. Keep the leading name segment instead.
+const BATCH_COPY_NAME_SEPARATORS = /[|｜/\\•·∙⋅ㅣ]/u;
+const BATCH_COPY_HANGUL_NAME_RUN = /[가-힣][가-힣\s]*/u;
 
 /** Instagram's anonymous avatar URL is media-shaped but carries no subject evidence. */
 export function isUsableProfileImageUrl(value: string | null | undefined): boolean {
@@ -528,6 +551,19 @@ type ConciergeBatchActiveScopeMember = Readonly<{
 }>;
 
 /**
+ * Reads CONCIERGE_BATCH_INCLUDE_EXCLUDED_TARGET; default false. On, only the
+ * CONCIERGE_BATCH_EXCLUDED_TARGET ('che.rish_0.0_') condition in
+ * selectConciergeBatchActiveScope is disabled - the paidAt-range and
+ * currentOrderStatus guards are untouched. Off is byte-for-byte identical to
+ * before (che.rish_0.0_ stays excluded).
+ */
+export function conciergeBatchIncludeExcludedTargetEnabled(
+    raw = process.env.CONCIERGE_BATCH_INCLUDE_EXCLUDED_TARGET,
+): boolean {
+    return raw === 'true' || raw === '1';
+}
+
+/**
  * Reuses the immutable 30-row audit manifest while selecting only the
  * user-confirmed active order scope. The order status is deliberately an
  * exact match, which excludes completed/refunded/payment-terminal rows before
@@ -536,12 +572,13 @@ type ConciergeBatchActiveScopeMember = Readonly<{
 export function selectConciergeBatchActiveScope<T extends ConciergeBatchActiveScopeMember>(
     members: readonly T[],
 ): T[] {
+    const includeExcludedTarget = conciergeBatchIncludeExcludedTargetEnabled();
     const selected = members.filter(member => {
         const paidAtMs = Date.parse(member.paidAt);
         return Number.isFinite(paidAtMs)
             && paidAtMs >= CONCIERGE_BATCH_ACTIVE_SCOPE_START_MS
             && member.currentOrderStatus === 'analysis_in_progress'
-            && member.targetUsername !== CONCIERGE_BATCH_EXCLUDED_TARGET;
+            && (includeExcludedTarget || member.targetUsername !== CONCIERGE_BATCH_EXCLUDED_TARGET);
     });
     if (selected.length !== expectedActiveScopeCount()) {
         throw new Error('CONCIERGE_ACTIVE_SCOPE_COUNT_CONFLICT');
@@ -613,24 +650,78 @@ export const CONCIERGE_BATCH_MUTABLE_REQUEST_STATUSES = Object.freeze(
     ['pending', 'processing', 'failed'] as const,
 );
 
+const MAX_TARGET_PROFILE_IMAGE_URL_LENGTH = 8_192;
+
+function matchesConciergeAllowedImageHost(hostname: string): boolean {
+    return INSTAGRAM_MEDIA_HOST_SUFFIXES.some(suffix => (
+        hostname === suffix || hostname.endsWith(`.${suffix}`)
+    ));
+}
+
+/**
+ * Mirrors targetProfileImageFromStepData's (lib/services/analysis/result-
+ * interactions.ts) accept criteria exactly, so only a URL that reader will
+ * actually render is ever persisted: https, no embedded userinfo, no port
+ * other than 443, hostname on the Instagram media allowlist, length-bounded.
+ * A non-Instagram or malformed URL is skipped (returns null), never stored.
+ */
+function conciergeBatchTargetProfileImageUrl(
+    candidate: string | null | undefined,
+): string | null {
+    if (
+        typeof candidate !== 'string'
+        || candidate.length === 0
+        || candidate.length > MAX_TARGET_PROFILE_IMAGE_URL_LENGTH
+    ) {
+        return null;
+    }
+    try {
+        const parsed = new URL(candidate);
+        const hostname = parsed.hostname.toLowerCase().replace(/\.$/, '');
+        if (
+            parsed.protocol !== 'https:'
+            || parsed.username
+            || parsed.password
+            || (parsed.port && parsed.port !== '443')
+            || !matchesConciergeAllowedImageHost(hostname)
+        ) {
+            return null;
+        }
+        parsed.hostname = hostname;
+        parsed.hash = '';
+        return parsed.href;
+    } catch {
+        return null;
+    }
+}
+
 export function mergeConciergeBatchTargetFullNameStepData(
     stepData: unknown,
     targetFullName: string | null | undefined,
+    targetProfileImageUrl?: string | null,
 ): Record<string, unknown> {
     const existing = stepData && typeof stepData === 'object' && !Array.isArray(stepData)
         ? stepData as Record<string, unknown>
         : {};
     const cleanName = cleanBatchCopyText(targetFullName, 200);
-    if (!cleanName) return { ...existing };
+    const cleanImageUrl = conciergeBatchTargetProfileImageUrl(targetProfileImageUrl);
+    if (!cleanName && !cleanImageUrl) return { ...existing };
     const publication = existing.conciergeBatchPublication;
     const publicationRecord = publication && typeof publication === 'object' && !Array.isArray(publication)
         ? publication as Record<string, unknown>
         : null;
     return {
         ...existing,
-        targetFullName: cleanName,
+        ...(cleanName ? { targetFullName: cleanName } : {}),
+        ...(cleanImageUrl ? { targetProfileImage: cleanImageUrl } : {}),
         ...(publicationRecord
-            ? { conciergeBatchPublication: { ...publicationRecord, targetFullName: cleanName } }
+            ? {
+                conciergeBatchPublication: {
+                    ...publicationRecord,
+                    ...(cleanName ? { targetFullName: cleanName } : {}),
+                    ...(cleanImageUrl ? { targetProfileImage: cleanImageUrl } : {}),
+                },
+            }
             : {}),
     };
 }
@@ -649,10 +740,26 @@ function cleanBatchCopyText(value: string | null | undefined, maximum: number): 
     return clean ? [...clean].slice(0, maximum).join('') : null;
 }
 
+/**
+ * Reduces a retained display name to the part that actually reads as a name.
+ * The separator segment is taken first, then the leading Hangul run, so a
+ * "name + title" or "decoration + name + decoration" string collapses to the
+ * name the model can repeat. A name that is already plain (pure Hangul, or a
+ * Latin name with no separator) is returned unchanged.
+ */
+function batchCopySubjectNameCore(value: string): string {
+    const [head = ''] = value.split(BATCH_COPY_NAME_SEPARATORS);
+    const segment = head.replace(/\s+/g, ' ').trim() || value;
+    const hangulRun = BATCH_COPY_HANGUL_NAME_RUN.exec(segment)?.[0].trim();
+    return hangulRun || segment;
+}
+
 function batchCopySubjectLabel(fullName: string | null | undefined, username: string): string {
     const cleanFullName = cleanBatchCopyText(fullName, 200);
     const visibleFullName = cleanFullName
-        ? cleanFullName.replace(BATCH_COPY_BLANK_LOOKING_CHARS, ' ').replace(/\s+/g, ' ').trim()
+        ? batchCopySubjectNameCore(
+            cleanFullName.replace(BATCH_COPY_BLANK_LOOKING_CHARS, ' ').replace(/\s+/g, ' ').trim(),
+        )
         : '';
     if (visibleFullName
         && !BATCH_COPY_PUBLIC_IDENTIFIER.test(visibleFullName)
@@ -878,6 +985,7 @@ export function buildConciergeBatchHighRiskCopyPrompt(
         `- oneLineOverview는 ${BATCH_COPY_MIN_LENGTH}~${BATCH_COPY_MAX_LENGTH}자 한 문장입니다.`,
         '- riskAnalysis는 정확히 두 문장 배열이며 각 문장은 25~180자입니다.',
         '- 이름은 위에 제공된 이름을 그대로 사용하고, 다른 식별자·URL·아이디·숫자·상호작용 수량은 쓰지 마세요.',
+        `- oneLineOverview에 후보 이름 "${subjects.candidate}"을(를) 글자 그대로 반드시 포함하고, riskAnalysis 두 문장 중 최소 한 문장에도 똑같이 글자 그대로 포함하세요. 줄이거나 바꾸거나 생략하면 실패합니다.`,
         '- 대상 계정·후보·후보 계정 같은 내부 역할명은 쓰지 마세요. 위에서 미리 계산한 이름만 사람을 가리키는 데 사용하세요.',
         '- 이미지가 있으면 이미지에서 실제로 보이는 요소만 묘사하세요.',
         '- 이미지가 없으면 실루엣·이목구비·얼굴·표정·헤어스타일·체형·옷차림·포즈를 만들지 마세요.',
@@ -927,6 +1035,79 @@ function conciergeBatchCopyMaxAttempts(): number {
     return value;
 }
 
+/**
+ * Reads CONCIERGE_BATCH_COPY_RETRY_FEEDBACK_ENABLED; default false. Off
+ * preserves the retry prompt byte-for-byte across every attempt (the
+ * contract itself never changes). On, a retry after a recognized contract
+ * failure appends a targeted correction instruction to the next attempt's
+ * prompt, so a retry is not just a re-roll of the exact prompt that just
+ * failed the exact same way - the observed cause of candidates failing
+ * every retry attempt identically.
+ */
+export function conciergeBatchCopyRetryFeedbackEnabled(
+    raw = process.env.CONCIERGE_BATCH_COPY_RETRY_FEEDBACK_ENABLED,
+): boolean {
+    return raw === 'true' || raw === '1';
+}
+
+/**
+ * One correction line per contract-failure code, appended to the next
+ * attempt's prompt when CONCIERGE_BATCH_COPY_RETRY_FEEDBACK_ENABLED is on.
+ * The contract's assert/throw logic in validateConciergeBatchHighRiskCopy
+ * is untouched by this - only the generation input is strengthened. A code
+ * with no entry here (schema/duplicate/unobserved-appearance/no-evidence-
+ * required) gets no injected feedback and simply retries with the
+ * unmodified base prompt, as before.
+ */
+const CONCIERGE_BATCH_COPY_RETRY_FEEDBACK: Readonly<Record<string, string>> = {
+    CONCIERGE_BATCH_COPY_UNOBSERVED_INTERACTION:
+        '직전 출력이 관측되지 않은 상호작용을 언급해 실패했습니다. 이 후보는 관측된 상호작용이 전혀 없습니다. \'좋아요\',\'댓글\',\'태그\',\'멘션\'과 그 파생·유사 표현(호감 표시, 반응, 소통, 주고받은 등)을 단 한 번도 쓰지 마세요. 오직 사진에서 실제로 보이는 외모·분위기·스타일·색감·장면·포즈만으로 세 문장을 쓰고, 각 문장에 후보 이름을 넣으세요.',
+    CONCIERGE_BATCH_COPY_APPEARANCE_GROUNDING_INVALID:
+        '이미지에서 실제로 보이는 요소를 사진/분위기/스타일/표정/색감/장면/포즈 같은 외모 어휘로 최소 한 번 명시하세요.',
+    CONCIERGE_BATCH_COPY_OVERVIEW_INTERACTION_GROUNDING_INVALID:
+        'overview·riskAnalysis에 수집된 상호작용 방향·유형을 직접 근거로 인용하세요.',
+    CONCIERGE_BATCH_COPY_INTERACTION_GROUNDING_INVALID:
+        'overview·riskAnalysis에 수집된 상호작용 방향·유형을 직접 근거로 인용하세요.',
+    CONCIERGE_BATCH_COPY_SUBJECT_GROUNDING_INVALID:
+        'overview와 riskAnalysis 각각에 후보 이름을 그대로 포함하세요.',
+    CONCIERGE_BATCH_COPY_UNSAFE:
+        '역할 라벨·금지 표현·숫자·공개식별자를 제거하고 다시 쓰세요.',
+};
+
+export function conciergeBatchCopyRetryFeedbackInstruction(error: unknown): string | null {
+    if (!(error instanceof Error)) return null;
+    return CONCIERGE_BATCH_COPY_RETRY_FEEDBACK[error.message] ?? null;
+}
+
+/**
+ * Fixing one contract violation must not silently regress an already-
+ * corrected one (e.g. an UNOBSERVED_INTERACTION fix that drops the
+ * candidate name and reintroduces SUBJECT_GROUNDING_INVALID) - so this is
+ * appended alongside every accumulated correction, not just when its own
+ * code was observed.
+ */
+const CONCIERGE_BATCH_COPY_RETRY_FEEDBACK_COMMON_REMINDER =
+    'overview와 riskAnalysis 각각에 후보 이름을 그대로 포함하고, 관측되지 않은 상호작용은 언급하지 마세요.';
+
+/**
+ * Appends the correction instruction for every distinct contract-failure
+ * code observed so far for this candidate (not just the most recent one),
+ * deduped and in first-observed order, plus the always-on common reminder.
+ * A code with no mapped instruction (e.g. schema/duplicate) is silently
+ * skipped rather than producing an empty bullet.
+ */
+function conciergeBatchCopyPromptWithFeedback(
+    basePrompt: string,
+    observedFeedbackCodes: readonly string[],
+): string {
+    const instructions = observedFeedbackCodes
+        .map(code => CONCIERGE_BATCH_COPY_RETRY_FEEDBACK[code])
+        .filter((line): line is string => Boolean(line));
+    if (instructions.length === 0) return basePrompt;
+    const lines = [...instructions, CONCIERGE_BATCH_COPY_RETRY_FEEDBACK_COMMON_REMINDER];
+    return `${basePrompt}\n\n[재시도 교정 지시]\n${lines.map(line => `- ${line}`).join('\n')}`;
+}
+
 /** Runs one model call and retries contract failures up to the configured limit. */
 async function generateConciergeBatchCopy(
     evidence: ConciergeBatchHighRiskCopyEvidence,
@@ -937,12 +1118,19 @@ async function generateConciergeBatchCopy(
     }[] = [],
 ): Promise<ConciergeBatchHighRiskCopy> {
     const maxAttempts = conciergeBatchCopyMaxAttempts();
-    const prompt = buildConciergeBatchHighRiskCopyPrompt(evidence);
+    const basePrompt = buildConciergeBatchHighRiskCopyPrompt(evidence);
+    const retryFeedbackEnabled = conciergeBatchCopyRetryFeedbackEnabled();
     const images = [...(evidence.images ?? [])];
     let lastError: unknown = null;
     let attemptsMade = 0;
+    // Deduped, first-observed-order accumulation across every attempt so
+    // far for this candidate - see conciergeBatchCopyPromptWithFeedback.
+    const observedFeedbackCodes: string[] = [];
     for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
         attemptsMade = attempt + 1;
+        const prompt = retryFeedbackEnabled
+            ? conciergeBatchCopyPromptWithFeedback(basePrompt, observedFeedbackCodes)
+            : basePrompt;
         try {
             const raw = generator
                 ? await generator(prompt, images)
@@ -959,6 +1147,14 @@ async function generateConciergeBatchCopy(
             return copy;
         } catch (error) {
             lastError = error;
+            if (
+                retryFeedbackEnabled
+                && error instanceof Error
+                && CONCIERGE_BATCH_COPY_RETRY_FEEDBACK[error.message] !== undefined
+                && !observedFeedbackCodes.includes(error.message)
+            ) {
+                observedFeedbackCodes.push(error.message);
+            }
             const diagnostic = conciergeBatchFailureDiagnostic(error);
             const candidate = typeof evidence.candidateUsername === 'string'
                 ? sanitizeConciergeBatchDiagnostic(evidence.candidateUsername, 100)
@@ -1209,8 +1405,23 @@ function newCollectionSlots(): readonly ApprovedSlot[] {
     return slots as ApprovedSlot[];
 }
 
-function relationshipCollectionSlots(): readonly RelationshipSlot[] {
-    return RELATIONSHIP_SLOTS;
+/**
+ * Reads CONCIERGE_BATCH_RELATIONSHIP_SLOTS (comma-separated); default the
+ * frozen CONCIERGE_BATCH_RELATIONSHIP_TOKEN_PRIORITY ([nonary, secondary]).
+ * Mirrors newCollectionSlots' parse -> validate -> throw shape: an operator
+ * override for when the default relationship slots are all balance-exhausted
+ * (SCRAPING_PROVIDER_START_REJECTED) and interaction/relationship collection
+ * (withInteractions' getPostLikers/getPostComments) needs to fail over to a
+ * slot with remaining balance.
+ */
+export function relationshipCollectionSlots(): readonly RelationshipSlot[] {
+    const raw = process.env.CONCIERGE_BATCH_RELATIONSHIP_SLOTS?.trim();
+    if (!raw) return RELATIONSHIP_SLOTS;
+    const slots = [...new Set(raw.split(',').map(value => value.trim()).filter(Boolean))];
+    if (slots.length === 0 || slots.some(value => !ALL_APIFY_CREDENTIAL_SLOTS.includes(value as ApifyCredentialSlot))) {
+        throw new Error('CONCIERGE_BATCH_RELATIONSHIP_SLOTS_INVALID');
+    }
+    return slots as RelationshipSlot[];
 }
 
 function providerEnv(slot: ConciergeProviderSlot, token: string): Record<string, string | undefined> {
@@ -1751,6 +1962,106 @@ export function conciergeBatchNameOnlyEnabled(
     return raw !== 'false';
 }
 
+/**
+ * Reads CONCIERGE_BATCH_FEED_TRIAGE_ENABLED; default false (off preserves
+ * routing byte-for-byte). On, an avatar-less public candidate whose bundle
+ * still carries feed media is judged from that feed image instead of the
+ * name-only text batch - see replay-runner.ts's feedTriageEnabled.
+ */
+export function conciergeBatchFeedTriageEnabled(
+    raw = process.env.CONCIERGE_BATCH_FEED_TRIAGE_ENABLED,
+): boolean {
+    return raw === 'true' || raw === '1';
+}
+
+/**
+ * Reads CONCIERGE_BATCH_NAME_FALLBACK_ENABLED; default false (off preserves
+ * accountOutputs/gender counters byte-for-byte). On, an image-path public
+ * candidate that ends the run with no gender evidence at all is re-judged
+ * once by the assertive name-only classifier - see replay-runner.ts's
+ * nameFallbackEnabled.
+ */
+export function conciergeBatchNameFallbackEnabled(
+    raw = process.env.CONCIERGE_BATCH_NAME_FALLBACK_ENABLED,
+): boolean {
+    return raw === 'true' || raw === '1';
+}
+
+/**
+ * Reads CONCIERGE_BATCH_CANDIDATE_HYGIENE_ENABLED; default false. On, the
+ * gender roster diagnostic (conciergeGenderRosterCounts below) also excludes
+ * 'unresolved' ledger records (private/fetch-unavailable candidates with no
+ * gender evidence at all) from the unknown bucket, alongside the always-
+ * excluded 'private' partition.
+ */
+export function conciergeBatchCandidateHygieneEnabled(
+    raw = process.env.CONCIERGE_BATCH_CANDIDATE_HYGIENE_ENABLED,
+): boolean {
+    return raw === 'true' || raw === '1';
+}
+
+export interface ConciergeGenderRosterCounts {
+    male: number;
+    female: number;
+    unknown: number;
+    unknownRate: number;
+    excludedPrivateCount: number;
+    excludedUnresolvedCount: number;
+}
+
+/**
+ * A ledger record's 'unresolved' partition (private or fetch-unavailable,
+ * see the classifyOrder branch that builds it) carries no gender evidence at
+ * all - it is a data-collection gap, not an observed unknown gender. Folding
+ * it into the same unknown bucket as a genuinely AI-classified-unknown
+ * public candidate inflates the roster's unknown rate. This is purely a
+ * partition-based diagnostic; it never inspects username or identity.
+ */
+export function conciergeGenderRosterCounts(
+    records: readonly ConciergeClassificationRecord[],
+    hygieneEnabled: boolean,
+): ConciergeGenderRosterCounts {
+    const excludedPrivateCount = records.filter(record => record.partition === 'private').length;
+    const excludedUnresolvedCount = hygieneEnabled
+        ? records.filter(record => record.partition === 'unresolved').length
+        : 0;
+    const roster = records.filter(record => (
+        record.partition !== 'private'
+        && (!hygieneEnabled || record.partition !== 'unresolved')
+    ));
+    const male = roster.filter(record => record.effectiveClassification === 'male').length;
+    const female = roster.filter(record => record.effectiveClassification === 'female').length;
+    const unknown = roster.filter(record => record.effectiveClassification === 'unknown').length;
+    const total = male + female + unknown;
+    return {
+        male,
+        female,
+        unknown,
+        unknownRate: total ? Number((unknown / total).toFixed(4)) : 0,
+        excludedPrivateCount,
+        excludedUnresolvedCount,
+    };
+}
+
+/**
+ * The (A) name-fallback path (replay-runner.ts's nameFallbackEnabled) can
+ * re-emit onAccountAnalyzed for an ordinal it already emitted once - it is
+ * an update to that candidate's post-fallback classification, not a newly
+ * analyzed candidate. Upsert by ordinal so the collected details array keeps
+ * exactly one entry per candidate; a blind push would double-count that
+ * ordinal in replayDetails/analyzedPublicCount and fail
+ * CONCIERGE_PUBLICATION_ANALYZED_COUNT_MISMATCH at publish time even though
+ * classification itself is correct.
+ */
+export function conciergeUpsertAccountDetail(
+    details: ReplayAccountAiDetail[],
+    detail: ReplayAccountAiDetail,
+): void {
+    const index = details.findIndex(existing => existing.ordinal === detail.ordinal);
+    if (index >= 0) details[index] = detail;
+    else details.push(detail);
+}
+
 async function classifyOrder(collected: CollectedOrder): Promise<ClassifiedOrder> {
     const details: ReplayAccountAiDetail[] = [];
     const replayReport = await runAnalysisV2AiReplay({
@@ -1760,7 +2071,9 @@ async function classifyOrder(collected: CollectedOrder): Promise<ClassifiedOrder
         paidAiOptIn: true,
         evaluationPolicy: firstPaymentConciergeEvaluationPolicy,
         nameOnlyEnabled: conciergeBatchNameOnlyEnabled(),
-        onAccountAnalyzed(detail) { details.push(detail); },
+        feedTriageEnabled: conciergeBatchFeedTriageEnabled(),
+        nameFallbackEnabled: conciergeBatchNameFallbackEnabled(),
+        onAccountAnalyzed(detail) { conciergeUpsertAccountDetail(details, detail); },
     });
     process.stderr.write(
         conciergeGenderResolverAdmissionDiagnosticMessage(replayReport.resolver.admission),
@@ -1947,6 +2260,12 @@ async function classifyOrder(collected: CollectedOrder): Promise<ClassifiedOrder
         records,
     };
     createConciergeClassificationLedgerHash(ledger);
+    const genderRoster = conciergeGenderRosterCounts(records, conciergeBatchCandidateHygieneEnabled());
+    process.stderr.write(
+        `concierge gender roster: male=${genderRoster.male} female=${genderRoster.female} `
+        + `unknown=${genderRoster.unknown} unknownRate=${genderRoster.unknownRate.toFixed(4)} `
+        + `excludedPrivate=${genderRoster.excludedPrivateCount} excludedUnresolved=${genderRoster.excludedUnresolvedCount}\n`,
+    );
     const manualImport = parseConciergeClassificationCsv(
         EMPTY_MANUAL_CSV,
         collected.order.orderId,
@@ -2045,8 +2364,11 @@ function retryCodeAllowlist(): ReadonlySet<string> {
 async function persistConciergeBatchTargetFullName(
     requestId: string,
     targetFullName: string | null | undefined,
+    targetProfileImageUrl?: string | null,
 ): Promise<void> {
-    if (!cleanBatchCopyText(targetFullName, 200)) return;
+    if (!cleanBatchCopyText(targetFullName, 200) && !conciergeBatchTargetProfileImageUrl(targetProfileImageUrl)) {
+        return;
+    }
     const { data: current, error: readError } = await supabaseAdmin
         .from('analysis_requests')
         .select('status,step_data')
@@ -2061,6 +2383,7 @@ async function persistConciergeBatchTargetFullName(
     const stepData = mergeConciergeBatchTargetFullNameStepData(
         current.step_data,
         targetFullName,
+        targetProfileImageUrl,
     );
     const { data: updated, error: updateError } = await supabaseAdmin
         .from('analysis_requests')
@@ -2331,6 +2654,8 @@ async function main(): Promise<void> {
             await persistConciergeBatchTargetFullName(
                 classified.input.requestId,
                 classified.copyContext.targetProfile.fullName,
+                classified.copyContext.targetProfile.profilePicUrlHD
+                    ?? classified.copyContext.targetProfile.profilePicUrl,
             );
             await casPublish({ ...classified.input, batchCandidateCopy });
             return { status: 'completed' as const };

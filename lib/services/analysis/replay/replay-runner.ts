@@ -570,6 +570,21 @@ function replayNameOnlyTriageResult(
     };
 }
 
+/**
+ * Shared by the organic name-only batch and the (A) unknown-fallback batch:
+ * a low-confidence "female" lean stays unresolved (conserve_female_recall -
+ * the same conservatism the organic batch already applies), while any other
+ * confident lean is taken as-is. A name-only result never produces high
+ * confidence (see the name-only prompt), so this only ever excludes low.
+ */
+function nameOnlyFinalClassification(
+    result: ReplayNameOnlyResult,
+): ReplayBaselineClassification {
+    return result.gender === 'female'
+        ? result.confidence === 'low' ? 'unresolved' : 'verified_female'
+        : result.gender === 'male' ? 'verified_non_female' : 'unresolved';
+}
+
 function safeLine(report: AnalysisV2AiReplayReport): string {
     return JSON.stringify({
         status: 'ok',
@@ -636,6 +651,31 @@ export async function runAnalysisV2AiReplay(input: {
      * path used before that batch existed. Defaults to true.
      */
     nameOnlyEnabled?: boolean;
+    /**
+     * CONCIERGE_BATCH_FEED_TRIAGE_ENABLED (default false, off is byte-parity).
+     * An avatar-less public candidate (hasProfileImage === false) whose bundle
+     * still carries feed media is routed through image triage on that feed
+     * media instead of the name-only text batch - purely by that structural
+     * condition (hasProfileImage + presence of 'feed'-kind media), never by
+     * identity. This keeps a female-leaning Korean name backed by a male feed
+     * photo from being decided by the name alone.
+     */
+    feedTriageEnabled?: boolean;
+    /**
+     * CONCIERGE_BATCH_NAME_FALLBACK_ENABLED (default false, off is byte-parity).
+     * A public image-path candidate (hasProfileImage === true) that ends the
+     * run with no gender evidence at all (classificationSource 'unknown',
+     * for any reason - a failed AI call, an inadmissible feature/resolver
+     * stage, an inconclusive account-context read, etc.) and carries a
+     * fullName is re-judged once with the same assertive name-only
+     * classifier the name-only batch uses. A confident lean fills the
+     * unknown; a genuinely unisex/non-person name, or no name-only signal at
+     * all, leaves it unknown. An account already classified male/female is
+     * never revisited - only genuine unknowns are eligible, so this can only
+     * ever move a candidate out of "unknown", never flip an existing
+     * classification.
+     */
+    nameFallbackEnabled?: boolean;
     /** Incident-scoped consumers may retain full in-memory feature evidence without stdout. */
     onAccountAnalyzed?: (
         detail: ReplayAccountAiDetail,
@@ -802,6 +842,7 @@ export async function runAnalysisV2AiReplay(input: {
         const usesConciergeFirstPass = input.bundle.schemaVersion === 1
             && input.evaluationPolicy?.capability
                 === FIRST_PAYMENT_BASIC_V211_CONCIERGE_CAPABILITY;
+        const feedTriageEnabled = usesConciergeFirstPass && input.feedTriageEnabled === true;
         // The text-only capability intentionally retains the source universe even
         // when old public media is unavailable. Those accounts must not enter AI.
         const publicProfiles = input.bundle.profiles.filter(profile => (
@@ -843,6 +884,10 @@ export async function runAnalysisV2AiReplay(input: {
             ? publicProfiles.filter(profile => (
                 profile.hasProfileImage === false
                 && Boolean(profile.fullName?.trim())
+                // (B) An avatar-less candidate whose bundle still carries feed
+                // media is routed through feed-image triage instead (below),
+                // never decided from the name alone.
+                && !(feedTriageEnabled && profile.media.some(item => item.kind === 'feed'))
             ))
             : [];
         const nameOnlyOrdinals = new Set(nameOnlyProfiles.map(profile => profile.ordinal));
@@ -1039,12 +1084,28 @@ export async function runAnalysisV2AiReplay(input: {
                     const fullName = profile.fullName?.trim() ?? '';
                     const firstPassMedia = mediaFor(profile, profile.triageSelectionIds)
                         .filter(item => item.kind === 'profile');
+                    const feedTriageMedia = feedTriageEnabled && profile.hasProfileImage === false
+                        ? mediaFor(profile, profile.triageSelectionIds).filter(item => item.kind === 'feed')
+                        : [];
                     if (runner.firstPass && fullName && profile.hasProfileImage === true && firstPassMedia.length === 1) {
                         const call = runner.firstPass;
                         triage = await withIndividualTriageRetry(() => call({
                             ordinal: profile.ordinal,
                             fullName,
                             media: firstPassMedia,
+                        }));
+                    } else if (runner.triage && feedTriageMedia.length > 0) {
+                        // (B) Avatar-less but fed: judge from the actual feed
+                        // image instead of the name-only text route, so a
+                        // female-leaning name backed by a male feed photo is
+                        // decided by the photo, not the name.
+                        const call = runner.triage;
+                        triage = await withIndividualTriageRetry(() => call({
+                            ordinal: profile.ordinal,
+                            media: feedTriageMedia,
+                            ...(supportsGenderTriageMicrobatch
+                                ? { accountProfile: v29AccountProfile(profile) }
+                            : {}),
                         }));
                     } else if (runner.triage && (fullName || profile.hasProfileImage === true)) {
                         // An image-having candidate must still reach triage even
@@ -1129,9 +1190,7 @@ export async function runAnalysisV2AiReplay(input: {
                 return;
             }
             const triage = replayNameOnlyTriageResult(result);
-            const finalClassification = result.gender === 'female'
-                ? result.confidence === 'low' ? 'unresolved' : 'verified_female'
-                : result.gender === 'male' ? 'verified_non_female' : 'unresolved';
+            const finalClassification = nameOnlyFinalClassification(result);
             await appendAccountOutput({
                 ordinal: profile.ordinal,
                 finalClassification,
@@ -1241,6 +1300,61 @@ export async function runAnalysisV2AiReplay(input: {
             else if (reconciliation.finalClassification === 'verified_non_female') gender.male++;
             else gender.unknown++;
         }));
+
+        // (A) Name-fallback: purely structural (hasProfileImage, fullName
+        // presence, ended up with classificationSource 'unknown') - never by
+        // identity. Applies to every image-path public candidate that ended
+        // with no gender evidence at all, whatever the reason (a failed AI
+        // call, an inadmissible feature/resolver stage, an inconclusive
+        // account-context read, ...). hasProfileImage === true excludes every
+        // (B) feed-triage candidate by construction, so a name lean never
+        // overrides a feed-image judgment.
+        if (input.nameFallbackEnabled === true && usesConciergeFirstPass && runner.nameOnly) {
+            const publicProfilesByOrdinal = new Map(
+                publicProfiles.map(profile => [profile.ordinal, profile] as const),
+            );
+            const fallbackCandidates = accountOutputs.filter(output => {
+                if (output.classificationSource !== 'unknown') return false;
+                const profile = publicProfilesByOrdinal.get(output.ordinal);
+                return profile?.hasProfileImage === true && Boolean(profile.fullName?.trim());
+            });
+            if (fallbackCandidates.length > 0) {
+                const fallbackInvocation = await runner.nameOnly(fallbackCandidates.map(output => ({
+                    candidateId: `ordinal:${output.ordinal}`,
+                    fullName: publicProfilesByOrdinal.get(output.ordinal)!.fullName!.trim(),
+                })));
+                collect(stages.genderTriage, durations.genderTriage, fallbackInvocation);
+                // Mirrors the organic name-only batch: a batch failure must not
+                // silently leave every covered candidate at "unknown" - fail
+                // the order closed so it is retried instead.
+                if (fallbackInvocation.outcome !== 'ok') {
+                    throw new Error(
+                        `ANALYSIS_V2_REPLAY_NAME_FALLBACK_BATCH_FAILED: outcome=${fallbackInvocation.outcome}`,
+                    );
+                }
+                const fallbackByCandidateId = new Map(
+                    (fallbackInvocation.value ?? []).map(result => [result.candidateId, result] as const),
+                );
+                for (const output of fallbackCandidates) {
+                    const result = fallbackByCandidateId.get(`ordinal:${output.ordinal}`);
+                    if (!result) continue;
+                    const finalClassification = nameOnlyFinalClassification(result);
+                    // A unisex/non-person name (or a low-confidence female lean)
+                    // stays unknown - fallback only ever fills a genuine unknown.
+                    if (finalClassification === 'unresolved') continue;
+                    output.finalClassification = finalClassification;
+                    output.classificationSource = 'name_only';
+                    gender.unknown--;
+                    if (finalClassification === 'verified_female') gender.female++;
+                    else gender.male++;
+                    await input.onAccountAnalyzed?.({
+                        ...output,
+                        triage: replayNameOnlyTriageResult(result),
+                        feature: null,
+                    });
+                }
+            }
+        }
     }
     // Stable ordinal order is required before a preview can be sealed.
     accountOutputs.sort((left, right) => left.ordinal - right.ordinal);

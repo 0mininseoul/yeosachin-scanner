@@ -53,12 +53,20 @@ import {
     collectBatchCopyFacts,
     conciergeBatchAiClassificationFields,
     conciergeBatchNameOnlyEnabled,
+    conciergeBatchFeedTriageEnabled,
+    conciergeBatchNameFallbackEnabled,
+    conciergeBatchCandidateHygieneEnabled,
+    conciergeGenderRosterCounts,
+    conciergeUpsertAccountDetail,
+    relationshipCollectionSlots,
     collectOrder,
     conciergeGenderResolverAdmissionDiagnosticMessage,
     conciergeNameOnlyDiagnosticMessage,
     conciergeBatchFailureDiagnostic,
     generateConciergeBatchCandidateCopies,
     generateConciergeBatchHighRiskCopy,
+    conciergeBatchCopyRetryFeedbackEnabled,
+    conciergeBatchCopyRetryFeedbackInstruction,
     hydrateConciergeProfilesFromPack,
     isRecoverableTargetProfileArtifactError,
     isMatchingTargetProfileArtifactRun,
@@ -74,11 +82,14 @@ import {
     sanitizeConciergeBatchDiagnostic,
     selectConciergeBatchOnlyOrders,
     selectConciergeBatchActiveScope,
+    conciergeBatchIncludeExcludedTargetEnabled,
     type ConciergeBatchHighRiskCopyEvidence,
     validateConciergeBatchHighRiskCopy,
 } from './run-concierge-batch';
 import { runConciergeBatch, type ConciergeBatchStageContext } from '@/lib/services/analysis/concierge-batch-runner';
 import type { InstagramProfile } from '@/lib/types/instagram';
+import type { ConciergeClassificationRecord } from '@/lib/services/analysis/concierge-classification-import';
+import type { ReplayAccountAiDetail } from '@/lib/services/analysis/replay/replay-runner';
 
 function profilePackItem(username: string, overrides: Record<string, unknown> = {}) {
     return {
@@ -155,6 +166,47 @@ describe('concierge profile pack adapter', () => {
             targetFullName: '임태욱',
         });
         expect(mergeConciergeBatchTargetFullNameStepData(merged, '   ')).toEqual(merged);
+    });
+
+    it('stores a valid Instagram-hosted target profile image URL', () => {
+        const merged = mergeConciergeBatchTargetFullNameStepData(
+            { conciergeBatchBootstrap: { orderId: 'order' } },
+            null,
+            'https://scontent.cdninstagram.com/v/target-profile.jpg?_nc_ht=1',
+        );
+
+        expect(merged).toMatchObject({
+            targetProfileImage: 'https://scontent.cdninstagram.com/v/target-profile.jpg?_nc_ht=1',
+        });
+        expect(merged.targetFullName).toBeUndefined();
+    });
+
+    it('skips a non-Instagram-hosted or blank target profile image URL instead of storing it', () => {
+        const existing = { conciergeBatchBootstrap: { orderId: 'order' } };
+
+        expect(mergeConciergeBatchTargetFullNameStepData(
+            existing, null, 'https://evil.example.com/steal.jpg',
+        )).toEqual(existing);
+        expect(mergeConciergeBatchTargetFullNameStepData(existing, null, '')).toEqual(existing);
+        expect(mergeConciergeBatchTargetFullNameStepData(existing, null, null)).toEqual(existing);
+        expect(mergeConciergeBatchTargetFullNameStepData(existing, null, undefined)).toEqual(existing);
+        // http (not https) must also be rejected, even on an allowed host.
+        expect(mergeConciergeBatchTargetFullNameStepData(
+            existing, null, 'http://scontent.cdninstagram.com/v/target.jpg',
+        )).toEqual(existing);
+    });
+
+    it('stores the target full name and profile image together in one merge/persist pass', () => {
+        const merged = mergeConciergeBatchTargetFullNameStepData(
+            { conciergeBatchBootstrap: { orderId: 'order' } },
+            '  임태욱  ',
+            'https://scontent.fbcdn.net/v/target-profile.jpg',
+        );
+
+        expect(merged).toMatchObject({
+            targetFullName: '임태욱',
+            targetProfileImage: 'https://scontent.fbcdn.net/v/target-profile.jpg',
+        });
     });
 
     it('treats a failed request as mutable so retried orders can publish', () => {
@@ -668,6 +720,205 @@ describe('concierge name-only gender classification', () => {
         expect(conciergeBatchNameOnlyEnabled('anything-else')).toBe(true);
         expect(conciergeBatchNameOnlyEnabled('false')).toBe(false);
     });
+
+    it('reads CONCIERGE_BATCH_FEED_TRIAGE_ENABLED with a default-off, explicit-true-only flag', () => {
+        expect(conciergeBatchFeedTriageEnabled(undefined)).toBe(false);
+        expect(conciergeBatchFeedTriageEnabled('')).toBe(false);
+        expect(conciergeBatchFeedTriageEnabled('false')).toBe(false);
+        expect(conciergeBatchFeedTriageEnabled('anything-else')).toBe(false);
+        expect(conciergeBatchFeedTriageEnabled('true')).toBe(true);
+        expect(conciergeBatchFeedTriageEnabled('1')).toBe(true);
+    });
+
+    it('reads CONCIERGE_BATCH_NAME_FALLBACK_ENABLED with a default-off, explicit-true-only flag', () => {
+        expect(conciergeBatchNameFallbackEnabled(undefined)).toBe(false);
+        expect(conciergeBatchNameFallbackEnabled('')).toBe(false);
+        expect(conciergeBatchNameFallbackEnabled('false')).toBe(false);
+        expect(conciergeBatchNameFallbackEnabled('true')).toBe(true);
+        expect(conciergeBatchNameFallbackEnabled('1')).toBe(true);
+    });
+
+    it('reads CONCIERGE_BATCH_CANDIDATE_HYGIENE_ENABLED with a default-off, explicit-true-only flag', () => {
+        expect(conciergeBatchCandidateHygieneEnabled(undefined)).toBe(false);
+        expect(conciergeBatchCandidateHygieneEnabled('')).toBe(false);
+        expect(conciergeBatchCandidateHygieneEnabled('false')).toBe(false);
+        expect(conciergeBatchCandidateHygieneEnabled('true')).toBe(true);
+        expect(conciergeBatchCandidateHygieneEnabled('1')).toBe(true);
+    });
+});
+
+describe('relationshipCollectionSlots (CONCIERGE_BATCH_RELATIONSHIP_SLOTS override)', () => {
+    function withEnv(value: string | undefined, run: () => void): void {
+        const previous = process.env.CONCIERGE_BATCH_RELATIONSHIP_SLOTS;
+        if (value === undefined) delete process.env.CONCIERGE_BATCH_RELATIONSHIP_SLOTS;
+        else process.env.CONCIERGE_BATCH_RELATIONSHIP_SLOTS = value;
+        try {
+            run();
+        } finally {
+            if (previous === undefined) delete process.env.CONCIERGE_BATCH_RELATIONSHIP_SLOTS;
+            else process.env.CONCIERGE_BATCH_RELATIONSHIP_SLOTS = previous;
+        }
+    }
+
+    it('defaults to [nonary, secondary] when unset - byte parity with the frozen priority', () => {
+        withEnv(undefined, () => {
+            expect(relationshipCollectionSlots()).toEqual(['nonary', 'secondary']);
+        });
+        withEnv('', () => {
+            expect(relationshipCollectionSlots()).toEqual(['nonary', 'secondary']);
+        });
+    });
+
+    it('overrides to a balance-holding slot outside the default pair when set', () => {
+        withEnv('tertiary', () => {
+            expect(relationshipCollectionSlots()).toEqual(['tertiary']);
+        });
+        withEnv('septenary, primary', () => {
+            expect(relationshipCollectionSlots()).toEqual(['septenary', 'primary']);
+        });
+    });
+
+    it('accepts the tenth slot (a fresh-quota operator token) once the other two default slots run out of balance', () => {
+        withEnv('tenth', () => {
+            expect(relationshipCollectionSlots()).toEqual(['tenth']);
+        });
+        withEnv('tenth, nonary', () => {
+            expect(relationshipCollectionSlots()).toEqual(['tenth', 'nonary']);
+        });
+    });
+
+    it('rejects an unknown slot name and a blank/whitespace-only list, but dedups a repeated valid slot instead of rejecting it', () => {
+        withEnv('not_a_real_slot', () => {
+            expect(() => relationshipCollectionSlots()).toThrow('CONCIERGE_BATCH_RELATIONSHIP_SLOTS_INVALID');
+        });
+        withEnv(' , ', () => {
+            expect(() => relationshipCollectionSlots()).toThrow('CONCIERGE_BATCH_RELATIONSHIP_SLOTS_INVALID');
+        });
+        withEnv('secondary,secondary', () => {
+            expect(relationshipCollectionSlots()).toEqual(['secondary']);
+        });
+    });
+});
+
+describe('concierge account-detail collection dedupes by ordinal (CONCIERGE_PUBLICATION_ANALYZED_COUNT_MISMATCH regression)', () => {
+    function fixtureDetail(
+        ordinal: number,
+        overrides: Partial<ReplayAccountAiDetail> = {},
+    ): ReplayAccountAiDetail {
+        return {
+            ordinal,
+            finalClassification: 'unresolved',
+            classificationSource: 'unknown',
+            featureOverview: null,
+            triage: null,
+            feature: null,
+            ...overrides,
+        };
+    }
+
+    it('a second onAccountAnalyzed emission for an already-seen ordinal replaces it in place instead of appending a duplicate', () => {
+        const details: ReplayAccountAiDetail[] = [];
+
+        conciergeUpsertAccountDetail(details, fixtureDetail(1, { finalClassification: 'verified_female', classificationSource: 'triage' }));
+        conciergeUpsertAccountDetail(details, fixtureDetail(2, { finalClassification: 'unresolved', classificationSource: 'unknown' }));
+        conciergeUpsertAccountDetail(details, fixtureDetail(3, { finalClassification: 'verified_non_female', classificationSource: 'triage' }));
+        // (A) name-fallback re-emits ordinal 2's update to its post-fallback
+        // classification, exactly like replay-runner.ts's fallback loop does
+        // for a candidate it already emitted once.
+        conciergeUpsertAccountDetail(details, fixtureDetail(2, { finalClassification: 'verified_non_female', classificationSource: 'name_only' }));
+
+        // Three distinct public candidates were analyzed - details.length
+        // must equal that (the ledger's hydratedPublicCount analog), not 4.
+        expect(details).toHaveLength(3);
+        expect(details.map(detail => detail.ordinal).sort((a, b) => a - b)).toEqual([1, 2, 3]);
+        expect(details.find(detail => detail.ordinal === 2)).toMatchObject({
+            finalClassification: 'verified_non_female',
+            classificationSource: 'name_only',
+        });
+    });
+
+    it('a first-time emission for a new ordinal still appends normally', () => {
+        const details: ReplayAccountAiDetail[] = [fixtureDetail(1)];
+
+        conciergeUpsertAccountDetail(details, fixtureDetail(2, { finalClassification: 'verified_female', classificationSource: 'feature' }));
+
+        expect(details).toHaveLength(2);
+        expect(details[1]).toMatchObject({ ordinal: 2, finalClassification: 'verified_female' });
+    });
+});
+
+describe('(B3.1) concierge gender roster counts - private/unresolved exclusion', () => {
+    function record(
+        partition: 'public' | 'private' | 'unresolved',
+        effectiveClassification: 'male' | 'female' | 'unknown' | null,
+    ): ConciergeClassificationRecord {
+        return {
+            candidateId: `candidate:${partition}:${effectiveClassification}:${Math.random()}`,
+            instagramId: 'fixture_user',
+            mutualOrdinal: 1,
+            partition,
+            profileFetchStatus: partition === 'unresolved' ? 'unavailable' : 'success',
+            firstPass: { status: 'not_applicable', fullNamePresent: null, profilePicPresent: null, feedDeclared: null, feedCollected: null, completeMedia: null, evidenceHash: null },
+            secondPass: { status: 'not_applicable', fullNamePresent: null, profilePicPresent: null, feedDeclared: null, feedCollected: null, completeMedia: null, evidenceHash: null },
+            originalAiClassification: effectiveClassification,
+            effectiveClassification,
+            confidence: null,
+            evidenceCoverage: null,
+            classifier: null,
+            modelName: null,
+            promptVersion: null,
+            schemaVersion: null,
+            classificationOperationKey: null,
+            classificationResultHash: null,
+            classificationSource: 'ai',
+            manualOverride: null,
+        };
+    }
+
+    it('always excludes private candidates - they carry no AI gender evidence', () => {
+        const records = [
+            record('public', 'male'),
+            record('public', 'unknown'),
+            record('private', null),
+        ];
+
+        expect(conciergeGenderRosterCounts(records, false)).toMatchObject({
+            male: 1, female: 0, unknown: 1, excludedPrivateCount: 1, excludedUnresolvedCount: 0,
+        });
+        expect(conciergeGenderRosterCounts(records, true)).toMatchObject({
+            male: 1, female: 0, unknown: 1, excludedPrivateCount: 1, excludedUnresolvedCount: 0,
+        });
+    });
+
+    it('hygiene off (default) counts an unresolved (private/fetch-unavailable) candidate as unknown - byte parity with the pre-fix roster', () => {
+        const records = [
+            record('public', 'male'),
+            record('public', 'female'),
+            record('unresolved', 'unknown'),
+        ];
+
+        const roster = conciergeGenderRosterCounts(records, false);
+
+        expect(roster).toMatchObject({
+            male: 1, female: 1, unknown: 1, excludedUnresolvedCount: 0,
+        });
+        expect(roster.unknownRate).toBeCloseTo(1 / 3, 4);
+    });
+
+    it('hygiene on excludes an unresolved candidate from the unknown roster entirely', () => {
+        const records = [
+            record('public', 'male'),
+            record('public', 'female'),
+            record('unresolved', 'unknown'),
+        ];
+
+        const roster = conciergeGenderRosterCounts(records, true);
+
+        expect(roster).toMatchObject({
+            male: 1, female: 1, unknown: 0, excludedUnresolvedCount: 1,
+        });
+        expect(roster.unknownRate).toBe(0);
+    });
 });
 
 describe('concierge batch failure diagnostics', () => {
@@ -722,8 +973,8 @@ describe('concierge batch failure diagnostics', () => {
 });
 
 describe('concierge existing relationship artifact resolver', () => {
-    it('selects exactly the audited active-25 order scope and excludes outside statuses/target', () => {
-        const members = [
+    function activeScopeMembers() {
+        return [
             ...Array.from({ length: 25 }, (_, index) => ({
                 id: `active-${index}`,
                 paidAt: '2026-08-07T00:00:00.000Z',
@@ -761,12 +1012,70 @@ describe('concierge existing relationship artifact resolver', () => {
                 targetUsername: 'target_paid',
             },
         ];
+    }
+
+    it('selects exactly the audited active-25 order scope and excludes outside statuses/target', () => {
+        const members = activeScopeMembers();
 
         expect(selectConciergeBatchActiveScope(members)).toEqual(members.slice(0, 25));
     });
 
     it('fails closed when the audited active scope is not exactly 25 rows', () => {
         expect(() => selectConciergeBatchActiveScope([])).toThrow('CONCIERGE_ACTIVE_SCOPE_COUNT_CONFLICT');
+    });
+
+    describe('CONCIERGE_BATCH_INCLUDE_EXCLUDED_TARGET', () => {
+        function withEnv(name: string, value: string | undefined, run: () => void): void {
+            const previous = process.env[name];
+            if (value === undefined) delete process.env[name];
+            else process.env[name] = value;
+            try {
+                run();
+            } finally {
+                if (previous === undefined) delete process.env[name];
+                else process.env[name] = previous;
+            }
+        }
+
+        it('reads the flag with a default-off, explicit-true/1-only shape', () => {
+            expect(conciergeBatchIncludeExcludedTargetEnabled(undefined)).toBe(false);
+            expect(conciergeBatchIncludeExcludedTargetEnabled('')).toBe(false);
+            expect(conciergeBatchIncludeExcludedTargetEnabled('false')).toBe(false);
+            expect(conciergeBatchIncludeExcludedTargetEnabled('true')).toBe(true);
+            expect(conciergeBatchIncludeExcludedTargetEnabled('1')).toBe(true);
+        });
+
+        it('on: includes che.rish_0.0_ in the selected active scope once the expected count accounts for it', () => {
+            withEnv('CONCIERGE_BATCH_INCLUDE_EXCLUDED_TARGET', 'true', () => {
+                withEnv('CONCIERGE_BATCH_EXPECTED_SCOPE_COUNT', '26', () => {
+                    const members = activeScopeMembers();
+
+                    const selected = selectConciergeBatchActiveScope(members);
+
+                    expect(selected).toHaveLength(26);
+                    expect(selected.some(member => member.targetUsername === 'che.rish_0.0_')).toBe(true);
+                    // Every other guard (before-window/completed/refunded/paid)
+                    // must stay untouched - only the target exclusion lifts.
+                    expect(selected.some(member => member.targetUsername === 'target_before')).toBe(false);
+                    expect(selected.some(member => member.targetUsername === 'target_completed')).toBe(false);
+                    expect(selected.some(member => member.targetUsername === 'target_refunded')).toBe(false);
+                    expect(selected.some(member => member.targetUsername === 'target_paid')).toBe(false);
+                });
+            });
+        });
+
+        it('off (unset and explicit false): excludes che.rish_0.0_ exactly as before - byte parity', () => {
+            const members = activeScopeMembers();
+            const baseline = selectConciergeBatchActiveScope(members);
+            expect(baseline).toEqual(members.slice(0, 25));
+
+            withEnv('CONCIERGE_BATCH_INCLUDE_EXCLUDED_TARGET', undefined, () => {
+                expect(selectConciergeBatchActiveScope(members)).toEqual(baseline);
+            });
+            withEnv('CONCIERGE_BATCH_INCLUDE_EXCLUDED_TARGET', 'false', () => {
+                expect(selectConciergeBatchActiveScope(members)).toEqual(baseline);
+            });
+        });
     });
 
     it('keeps only bounded retry codes and drops unknown or raw failure details', () => {
@@ -906,6 +1215,24 @@ describe('concierge existing relationship artifact resolver', () => {
         ['ㅤ', 'candidate_user'],
         ['​', 'candidate_user'],
         ['   ⠀ㅤ   ', 'candidate_user'],
+        // A display name that appends a job title/affiliation after a separator
+        // used to become the literal the model had to echo verbatim twice, which
+        // it never did: rabbisseu_ burned six attempts on
+        // CONCIERGE_BATCH_COPY_SUBJECT_GROUNDING_INVALID before the order failed.
+        ['송하빈 | 청소년상담사 • 청소년지도사', '하빈님'],
+        ['인정 | Travel • DJ SARAH', '인정님'],
+        ['약당당 | 약사 이현정', '당당님'],
+        ['Alex Kim | Photographer', 'Alex Kim님'],
+        // Decoration around the name is dropped the same way.
+        ['👑한채연✿ᑕᕼᗩEYEOᑎ(ᒍEᑎᑎY)', '채연님'],
+        ['ʜᴇɪᴢᴇ👯혜주', '혜주님'],
+        ['이쑤•スジン', '이쑤님'],
+        ['Jiyoon Park  박지윤', '지윤님'],
+        ['박지예 朴 志 芮', '지예님'],
+        // Names that already read as a name are returned unchanged.
+        ['세 연', '세 연님'],
+        ['Kim Jihee', 'Kim Jihee님'],
+        ['후보 이름', '후보 이름님'],
     ])('formats %s as %s', (fullName, expected) => {
         const evidence = { ...copyEvidence([]), candidateFullName: fullName };
         expect(buildConciergeBatchHighRiskCopyPrompt(evidence))
@@ -923,6 +1250,16 @@ describe('concierge existing relationship artifact resolver', () => {
             .toContain('대상 이름: target_user');
         expect(buildConciergeBatchHighRiskCopyPrompt(evidence))
             .toContain('후보 이름: candidate_user');
+    });
+
+    it('states the verbatim candidate-name requirement the validator enforces', () => {
+        // validateConciergeBatchHighRiskCopy requires the exact candidate label in
+        // oneLineOverview and in at least one riskAnalysis sentence. That rule used
+        // to appear only in the retry feedback, so every first attempt had to guess
+        // it; state it in the base prompt instead.
+        const prompt = buildConciergeBatchHighRiskCopyPrompt(copyEvidence([]));
+
+        expect(prompt).toContain('oneLineOverview에 후보 이름 "후보 이름님"을(를) 글자 그대로 반드시 포함하고, riskAnalysis 두 문장 중 최소 한 문장에도 똑같이 글자 그대로 포함하세요.');
     });
 
     it('states the image availability and bans internal person labels in the prompt', () => {
@@ -1358,6 +1695,153 @@ describe('concierge existing relationship artifact resolver', () => {
             if (previousMaxAttempts === undefined) delete process.env.CONCIERGE_BATCH_COPY_MAX_ATTEMPTS;
             else process.env.CONCIERGE_BATCH_COPY_MAX_ATTEMPTS = previousMaxAttempts;
         }
+    });
+
+    describe('CONCIERGE_BATCH_COPY_RETRY_FEEDBACK_ENABLED', () => {
+        function withRetryFeedbackEnv(value: string | undefined, run: () => Promise<void>): Promise<void> {
+            const previous = process.env.CONCIERGE_BATCH_COPY_RETRY_FEEDBACK_ENABLED;
+            if (value === undefined) delete process.env.CONCIERGE_BATCH_COPY_RETRY_FEEDBACK_ENABLED;
+            else process.env.CONCIERGE_BATCH_COPY_RETRY_FEEDBACK_ENABLED = value;
+            return run().finally(() => {
+                if (previous === undefined) delete process.env.CONCIERGE_BATCH_COPY_RETRY_FEEDBACK_ENABLED;
+                else process.env.CONCIERGE_BATCH_COPY_RETRY_FEEDBACK_ENABLED = previous;
+            });
+        }
+
+        const validCopy = {
+            oneLineOverview: '후보 이름님의 여행과 커피 취향이 사진마다 은근한 신호처럼 번져 장난스러운 상상을 부릅니다.',
+            riskAnalysis: [
+                '후보 이름님의 여행 기록과 커피 장면이 한 편의 가벼운 관계극처럼 이어져 시선을 잡습니다.',
+                '후보 이름님의 사진 속 분위기가 평범한 일상보다 조금 더 도발적인 여운을 남깁니다.',
+            ],
+        };
+
+        it('reads the flag with a default-off, explicit-true/1-only shape', () => {
+            expect(conciergeBatchCopyRetryFeedbackEnabled(undefined)).toBe(false);
+            expect(conciergeBatchCopyRetryFeedbackEnabled('')).toBe(false);
+            expect(conciergeBatchCopyRetryFeedbackEnabled('false')).toBe(false);
+            expect(conciergeBatchCopyRetryFeedbackEnabled('true')).toBe(true);
+            expect(conciergeBatchCopyRetryFeedbackEnabled('1')).toBe(true);
+        });
+
+        it('maps each covered contract-failure code to its correction instruction, and leaves an uncovered code/non-error unmapped', () => {
+            expect(conciergeBatchCopyRetryFeedbackInstruction(new Error('CONCIERGE_BATCH_COPY_UNOBSERVED_INTERACTION')))
+                .toBe('직전 출력이 관측되지 않은 상호작용을 언급해 실패했습니다. 이 후보는 관측된 상호작용이 전혀 없습니다. \'좋아요\',\'댓글\',\'태그\',\'멘션\'과 그 파생·유사 표현(호감 표시, 반응, 소통, 주고받은 등)을 단 한 번도 쓰지 마세요. 오직 사진에서 실제로 보이는 외모·분위기·스타일·색감·장면·포즈만으로 세 문장을 쓰고, 각 문장에 후보 이름을 넣으세요.');
+            expect(conciergeBatchCopyRetryFeedbackInstruction(new Error('CONCIERGE_BATCH_COPY_APPEARANCE_GROUNDING_INVALID')))
+                .toBe('이미지에서 실제로 보이는 요소를 사진/분위기/스타일/표정/색감/장면/포즈 같은 외모 어휘로 최소 한 번 명시하세요.');
+            expect(conciergeBatchCopyRetryFeedbackInstruction(new Error('CONCIERGE_BATCH_COPY_OVERVIEW_INTERACTION_GROUNDING_INVALID')))
+                .toBe('overview·riskAnalysis에 수집된 상호작용 방향·유형을 직접 근거로 인용하세요.');
+            expect(conciergeBatchCopyRetryFeedbackInstruction(new Error('CONCIERGE_BATCH_COPY_INTERACTION_GROUNDING_INVALID')))
+                .toBe('overview·riskAnalysis에 수집된 상호작용 방향·유형을 직접 근거로 인용하세요.');
+            expect(conciergeBatchCopyRetryFeedbackInstruction(new Error('CONCIERGE_BATCH_COPY_SUBJECT_GROUNDING_INVALID')))
+                .toBe('overview와 riskAnalysis 각각에 후보 이름을 그대로 포함하세요.');
+            expect(conciergeBatchCopyRetryFeedbackInstruction(new Error('CONCIERGE_BATCH_COPY_UNSAFE')))
+                .toBe('역할 라벨·금지 표현·숫자·공개식별자를 제거하고 다시 쓰세요.');
+            expect(conciergeBatchCopyRetryFeedbackInstruction(new Error('CONCIERGE_BATCH_COPY_SCHEMA_INVALID'))).toBeNull();
+            expect(conciergeBatchCopyRetryFeedbackInstruction(null)).toBeNull();
+        });
+
+        it.each([
+            ['CONCIERGE_BATCH_COPY_UNOBSERVED_INTERACTION', "'좋아요','댓글','태그','멘션'과 그 파생·유사 표현"],
+            ['CONCIERGE_BATCH_COPY_APPEARANCE_GROUNDING_INVALID', '외모 어휘로 최소 한 번 명시'],
+            ['CONCIERGE_BATCH_COPY_SUBJECT_GROUNDING_INVALID', 'overview와 riskAnalysis 각각에 후보 이름을 그대로 포함'],
+            ['CONCIERGE_BATCH_COPY_UNSAFE', '역할 라벨·금지 표현·숫자·공개식별자를 제거'],
+        ])('on: appends the %s correction to the next attempt prompt, not the first', async (code, expectedSnippet) => {
+            await withRetryFeedbackEnv('true', async () => {
+                const prompts: string[] = [];
+                const result = await generateConciergeBatchHighRiskCopy(
+                    copyEvidence([]),
+                    async prompt => {
+                        prompts.push(prompt);
+                        if (prompts.length === 1) throw new Error(code);
+                        return validCopy;
+                    },
+                );
+                expect(result.candidateUsername).toBe('candidate_user');
+                expect(prompts).toHaveLength(2);
+                expect(prompts[0]).not.toContain(expectedSnippet);
+                expect(prompts[1]).toContain(expectedSnippet);
+            });
+        });
+
+        it('on: accumulates two distinct contract failures instead of whack-a-mole - the third attempt prompt keeps both corrections', async () => {
+            const previousMaxAttempts = process.env.CONCIERGE_BATCH_COPY_MAX_ATTEMPTS;
+            process.env.CONCIERGE_BATCH_COPY_MAX_ATTEMPTS = '3';
+            try {
+                await withRetryFeedbackEnv('true', async () => {
+                    const prompts: string[] = [];
+                    const result = await generateConciergeBatchHighRiskCopy(
+                        copyEvidence([]),
+                        async prompt => {
+                            prompts.push(prompt);
+                            // Mirrors the reported regression: correcting the
+                            // interaction mention on attempt 2 then drops the
+                            // candidate name and fails a different contract.
+                            if (prompts.length === 1) throw new Error('CONCIERGE_BATCH_COPY_UNOBSERVED_INTERACTION');
+                            if (prompts.length === 2) throw new Error('CONCIERGE_BATCH_COPY_SUBJECT_GROUNDING_INVALID');
+                            return validCopy;
+                        },
+                    );
+                    expect(result.candidateUsername).toBe('candidate_user');
+                    expect(prompts).toHaveLength(3);
+                    expect(prompts[0]).not.toContain("'좋아요','댓글','태그','멘션'과 그 파생·유사 표현");
+                    expect(prompts[1]).toContain("'좋아요','댓글','태그','멘션'과 그 파생·유사 표현");
+                    // Not yet observed on attempt 2's prompt (built before the
+                    // SUBJECT_GROUNDING_INVALID failure happened).
+                    expect(prompts[1]).not.toContain('overview와 riskAnalysis 각각에 후보 이름을 그대로 포함하세요');
+                    // Attempt 3 must retain BOTH corrections cumulatively.
+                    expect(prompts[2]).toContain("'좋아요','댓글','태그','멘션'과 그 파생·유사 표현");
+                    expect(prompts[2]).toContain('overview와 riskAnalysis 각각에 후보 이름을 그대로 포함하세요');
+                });
+            } finally {
+                if (previousMaxAttempts === undefined) delete process.env.CONCIERGE_BATCH_COPY_MAX_ATTEMPTS;
+                else process.env.CONCIERGE_BATCH_COPY_MAX_ATTEMPTS = previousMaxAttempts;
+            }
+        });
+
+        it('on: always includes the candidate-name/no-unobserved-interaction common reminder alongside any specific correction', async () => {
+            await withRetryFeedbackEnv('true', async () => {
+                const prompts: string[] = [];
+                await generateConciergeBatchHighRiskCopy(
+                    copyEvidence([]),
+                    async prompt => {
+                        prompts.push(prompt);
+                        if (prompts.length === 1) throw new Error('CONCIERGE_BATCH_COPY_UNSAFE');
+                        return validCopy;
+                    },
+                );
+                expect(prompts).toHaveLength(2);
+                expect(prompts[1]).toContain(
+                    'overview와 riskAnalysis 각각에 후보 이름을 그대로 포함하고, 관측되지 않은 상호작용은 언급하지 마세요.',
+                );
+            });
+        });
+
+        it('off (default): the retry prompt is byte-identical to the first attempt even after two distinct covered contract failures', async () => {
+            const previousMaxAttempts = process.env.CONCIERGE_BATCH_COPY_MAX_ATTEMPTS;
+            process.env.CONCIERGE_BATCH_COPY_MAX_ATTEMPTS = '3';
+            try {
+                await withRetryFeedbackEnv(undefined, async () => {
+                    const prompts: string[] = [];
+                    await generateConciergeBatchHighRiskCopy(
+                        copyEvidence([]),
+                        async prompt => {
+                            prompts.push(prompt);
+                            if (prompts.length === 1) throw new Error('CONCIERGE_BATCH_COPY_UNOBSERVED_INTERACTION');
+                            if (prompts.length === 2) throw new Error('CONCIERGE_BATCH_COPY_SUBJECT_GROUNDING_INVALID');
+                            return validCopy;
+                        },
+                    );
+                    expect(prompts).toHaveLength(3);
+                    expect(prompts[1]).toBe(prompts[0]);
+                    expect(prompts[2]).toBe(prompts[0]);
+                    expect(prompts[0]).toBe(buildConciergeBatchHighRiskCopyPrompt(copyEvidence([])));
+                });
+            } finally {
+                if (previousMaxAttempts === undefined) delete process.env.CONCIERGE_BATCH_COPY_MAX_ATTEMPTS;
+                else process.env.CONCIERGE_BATCH_COPY_MAX_ATTEMPTS = previousMaxAttempts;
+            }
+        });
     });
 
     it('retries a cross-candidate template once and rejects it when it repeats', async () => {
