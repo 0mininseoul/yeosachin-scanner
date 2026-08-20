@@ -192,17 +192,54 @@ export function ResultActions({
     const write = navigator.clipboard?.writeText(linkToShare);
     setOpen(false);
     const failed = () => setNotice({ text: '링크를 복사하지 못했어요. 결과 페이지에서 다시 시도해 주세요.' });
+    let copied = false;
+    let destinationReady = false;
+    const reportIfReady = () => {
+      if (copied && destinationReady) onShare?.('instagram_dm');
+    };
+    const markCopied = () => {
+      copied = true;
+      reportIfReady();
+    };
     if (write) {
-      write.then(() => onShare?.('instagram_dm'), failed);
+      write.then(markCopied, failed);
     } else if (!copyTextSync(linkToShare)) {
       failed();
     } else {
-      onShare?.('instagram_dm');
+      markCopied();
     }
 
     if (!isPhone()) {
-      setNotice({ text: '링크를 복사했어요. DM 입력창에 붙여넣어 주세요.' });
-      window.open(INSTAGRAM_DM_WEB_URL, '_blank', 'noopener,noreferrer');
+      let opened: Window | null = null;
+      try {
+        opened = window.open(INSTAGRAM_DM_WEB_URL, '_blank', 'noopener,noreferrer');
+      } catch {
+        // Treat a browser popup exception like a blocked hand-off.
+      }
+      if (opened) {
+        destinationReady = true;
+        setNotice({ text: '링크를 복사했어요. DM 입력창에 붙여넣어 주세요.' });
+        reportIfReady();
+      } else {
+        setNotice({
+          text: '링크를 복사했어요. 인스타그램을 열어 DM 입력창에 붙여넣어 주세요.',
+          action: {
+            label: '인스타그램 열기',
+            run: () => {
+              let retry: Window | null = null;
+              try {
+                retry = window.open(INSTAGRAM_DM_WEB_URL, '_blank', 'noopener,noreferrer');
+              } catch {
+                // Keep the notice open; no share event is emitted on failure.
+              }
+              if (retry) {
+                destinationReady = true;
+                reportIfReady();
+              }
+            },
+          },
+        });
+      }
       return;
     }
 
@@ -219,6 +256,8 @@ export function ResultActions({
         run: () => { window.location.href = INSTAGRAM_DM_APP_URL; },
       },
     });
+    destinationReady = true;
+    reportIfReady();
   };
 
   return (

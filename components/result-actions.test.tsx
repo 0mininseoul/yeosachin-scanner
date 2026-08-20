@@ -45,7 +45,7 @@ beforeEach(() => {
         configurable: true,
         value: { writeText },
     });
-    vi.spyOn(window, 'open').mockImplementation(() => null);
+    vi.spyOn(window, 'open').mockImplementation(() => window);
     container = document.createElement('div');
     document.body.appendChild(container);
     root = createRoot(container);
@@ -98,5 +98,56 @@ describe('ResultActions share analytics callbacks', () => {
         });
 
         expect(onShare).not.toHaveBeenCalled();
+    });
+
+    it('does not report a DM share when the desktop destination is blocked', async () => {
+        const onShare = vi.fn();
+        vi.mocked(window.open).mockReturnValue(null);
+        render(onShare);
+        openMenu();
+
+        await act(async () => {
+            buttonByText('DM 공유').click();
+            await Promise.resolve();
+        });
+
+        expect(writeText).toHaveBeenCalledWith(shareUrl);
+        expect(onShare).not.toHaveBeenCalled();
+    });
+
+    it('does not report a DM share when copying fails', async () => {
+        const onShare = vi.fn();
+        writeText.mockRejectedValue(new Error('denied'));
+        render(onShare);
+        openMenu();
+
+        await act(async () => {
+            buttonByText('DM 공유').click();
+            await Promise.resolve();
+        });
+
+        expect(onShare).not.toHaveBeenCalled();
+    });
+
+    it('reports a DM share after synchronous fallback copy and destination open', () => {
+        const onShare = vi.fn();
+        const originalClipboard = Object.getOwnPropertyDescriptor(navigator, 'clipboard');
+        const originalExecCommand = Object.getOwnPropertyDescriptor(document, 'execCommand');
+        Object.defineProperty(navigator, 'clipboard', { configurable: true, value: undefined });
+        Object.defineProperty(document, 'execCommand', {
+            configurable: true,
+            value: vi.fn().mockReturnValue(true),
+        });
+
+        try {
+            render(onShare);
+            openMenu();
+            act(() => buttonByText('DM 공유').click());
+            expect(onShare).toHaveBeenCalledWith('instagram_dm');
+        } finally {
+            if (originalClipboard) Object.defineProperty(navigator, 'clipboard', originalClipboard);
+            if (originalExecCommand) Object.defineProperty(document, 'execCommand', originalExecCommand);
+            else delete (document as Document & { execCommand?: unknown }).execCommand;
+        }
     });
 });

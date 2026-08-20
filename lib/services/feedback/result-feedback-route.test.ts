@@ -68,6 +68,8 @@ describe('result feedback account admission', () => {
             }),
         });
         mocks.insert.mockResolvedValue(undefined);
+        mocks.operationalEmit.mockImplementation(() => undefined);
+        mocks.flushOperationalLogs.mockResolvedValue(undefined);
     });
 
     it('emits a sanitized operational success event after persistence', async () => {
@@ -97,6 +99,38 @@ describe('result feedback account admission', () => {
             },
         });
         expect(JSON.stringify(mocks.operationalEmit.mock.calls)).not.toContain('private database detail');
+    });
+
+    it('maps an unexpected insert exception to INTERNAL_ERROR without leaking its message', async () => {
+        mocks.insert.mockRejectedValue(new Error('private database detail'));
+
+        const response = await POST(request());
+
+        expect(response.status).toBe(500);
+        expect(mocks.operationalEmit).toHaveBeenCalledWith({
+            event: 'result_feedback.persistence_failed',
+            severity: 'error',
+            fields: {
+                request_id: requestId,
+                error_code: 'INTERNAL_ERROR',
+            },
+        });
+        expect(JSON.stringify(mocks.operationalEmit.mock.calls)).not.toContain('private database detail');
+    });
+
+    it('keeps a logger failure fail-open for a successful feedback response', async () => {
+        mocks.operationalEmit.mockImplementation(() => {
+            throw new Error('logger unavailable');
+        });
+
+        await expect(POST(request())).resolves.toMatchObject({ status: 201 });
+    });
+
+    it('keeps a deferred flush failure fail-open for a successful feedback response', async () => {
+        mocks.flushOperationalLogs.mockRejectedValue(new Error('flush unavailable'));
+
+        await expect(POST(request())).resolves.toMatchObject({ status: 201 });
+        await new Promise(resolve => setTimeout(resolve, 0));
     });
 
     it('fails closed before an owner feedback write for a retired account', async () => {
