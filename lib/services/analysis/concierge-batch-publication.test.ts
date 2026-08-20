@@ -1080,4 +1080,87 @@ describe('concierge manual publication', () => {
             name_confidence: Math.fround(preciseConfidence),
         }]);
     });
+
+    describe('operator-confirmed featureless female rows', () => {
+        const overrideImport = (
+            input: ConciergeManualPublicationInput,
+            username: string,
+            manualGender: 'male' | 'female',
+        ) => {
+            const record = input.ledger.records.find(item => item.instagramId === username)!;
+            const snapshot = record.sourceSnapshot!;
+            const csv = 'username,instagram_url,ai_classification,ai_confidence/evidence_status,manual_gender,operator_note\n'
+                + `${username},${snapshot.instagramUrl},${snapshot.originalAiClassification},`
+                + `${snapshot.confidenceEvidence},${manualGender},${snapshot.operatorNote}\n`;
+            return parseConciergeClassificationCsv(
+                csv, input.orderId, input.requestId, HASH, 'b'.repeat(64), '2026-08-20T00:00:00.000Z',
+            );
+        };
+
+        it('promotes an operator-confirmed candidate with no feature to a female row', () => {
+            const base = makeNameOnlyPublicationBoundaryInput();
+            const publication = buildConciergeManualPublication({
+                ...base,
+                manualImport: overrideImport(base, 'unpromoted_female', 'female'),
+                // The override retires this row from the name-only path, so the
+                // provenance list and the achieved unknown ratio both shrink.
+                nameOnlyProvenance: { classifiedUsernames: ['one', 'male_name'], unknownRatio: 0.2 },
+            });
+
+            const promoted = publication.rows.find(row => row.suspect_instagram_id === 'unpromoted_female');
+            expect(promoted).toBeDefined();
+            expect(publication.counts).toMatchObject({ male: 1, female: 3, unknown: 1 });
+            // The evidence-free row contract: no invented appearance or exposure.
+            expect(promoted!.photogenic_grade).toBe(1);
+            expect(promoted!.exposure_level).toBe('low');
+            expect(promoted!.risk_grade).not.toBe('high_risk');
+            expect(promoted!.risk_analysis).toEqual([]);
+            expect(promoted!.one_line_overview.length).toBeGreaterThan(0);
+            expect(promoted!.gender_status).toBe('confirmed');
+            // Manual provenance is never disguised as name-only classifier output.
+            expect(publication.counts.nameOnly?.classifiedUsernames).toEqual(['one', 'male_name']);
+        });
+
+        // The AI path keeps its full evidence requirement: only an operator
+        // override buys the featureless exemption.
+        it('still rejects a featureless female that no operator confirmed', () => {
+            const base = makeNameOnlyPublicationBoundaryInput();
+            const records = base.ledger.records.map(record => (
+                record.instagramId === 'nameless'
+                    ? { ...record, effectiveClassification: 'female' as const }
+                    : record
+            ));
+
+            expect(() => buildConciergeManualPublication({
+                ...base,
+                ledger: { ...base.ledger, records },
+                nameOnlyProvenance: { classifiedUsernames: ['one', 'male_name', 'unpromoted_female'], unknownRatio: 0.2 },
+            })).toThrow('CONCIERGE_PUBLICATION_MANUAL_FEATURE_MISSING');
+        });
+
+        it('still rejects an operator-confirmed female whose feature was only half collected', () => {
+            const base = makeNameOnlyPublicationBoundaryInput();
+            const records = base.ledger.records.map(record => (
+                record.instagramId === 'two'
+                    ? {
+                        ...record,
+                        secondPass: { ...record.secondPass, status: 'not_collected' as const, completeMedia: null },
+                    }
+                    : record
+            ));
+            const classificationByOrdinal = new Map(base.replay.classificationByOrdinal);
+            classificationByOrdinal.set(2, {
+                ...classificationByOrdinal.get(2)!,
+                secondPassStatus: 'not_collected',
+                secondPassCompleteMedia: null,
+            });
+            const input = { ...base, ledger: { ...base.ledger, records } };
+
+            expect(() => buildConciergeManualPublication({
+                ...input,
+                replay: { ...input.replay, classificationByOrdinal },
+                manualImport: overrideImport(input, 'two', 'female'),
+            })).toThrow('CONCIERGE_PUBLICATION_SECOND_PASS_INCOMPLETE');
+        });
+    });
 });

@@ -960,7 +960,14 @@ function buildEffectiveDetails(
                 && NAME_ONLY_CONFIDENCE_RANK[record.confidence] < NAME_ONLY_CONFIDENCE_RANK.medium))) {
             fail('CONCIERGE_PUBLICATION_NAME_ONLY_CONFIDENCE_INVALID');
         }
-        if (effective === 'female' && !nameOnly) {
+        // An operator override is an independent authority for gender, so a
+        // confirmed female may stand without collected media exactly like the
+        // name-only path: both render through the same evidence-free row
+        // contract (grade 1, low exposure, no invented narrative). A manual
+        // row that *does* carry a feature keeps the full requirement below;
+        // a half-collected feature remains the untrusted middle.
+        const operatorConfirmedFeatureless = record.manualOverride !== null && !detail.feature;
+        if (effective === 'female' && !nameOnly && !operatorConfirmedFeatureless) {
             if (!detail.feature) fail('CONCIERGE_PUBLICATION_MANUAL_FEATURE_MISSING');
             if (record.secondPass.status !== 'collected'
                 || record.secondPass.completeMedia !== true
@@ -1057,6 +1064,11 @@ function buildConciergeManualPublicationInternal(
         fail('CONCIERGE_PUBLICATION_NAME_ONLY_PROVENANCE_MISSING');
     }
     const details = buildEffectiveDetails(effectiveLedger, input.replay);
+    // Ordinals the row builder must render without feature evidence: the
+    // name-only path, plus operator-confirmed rows that carry no feature.
+    const featurelessOrdinals = new Set(details
+        .filter(detail => !detail.feature)
+        .map(detail => detail.ordinal));
     const canonicalInteractions = canonicalizeBidirectionalInteractions(
         input.replay.bidirectionalInteractions,
     );
@@ -1068,7 +1080,8 @@ function buildConciergeManualPublicationInternal(
         ),
         details,
         nameOnlyOrdinals: new Set(effectiveLedger.records
-            .filter(record => record.classificationSource === 'name_only')
+            .filter(record => record.classificationSource === 'name_only'
+                || (record.manualOverride !== null && featurelessOrdinals.has(record.mutualOrdinal)))
             .map(record => record.mutualOrdinal)),
         orderedMutualUsernames: input.replay.orderedMutualUsernames,
         targetInteractions: canonicalInteractions.targetToCandidate.status === 'collected'
