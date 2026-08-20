@@ -84,6 +84,7 @@ export function ResultActions({
   kakaoAvailable,
   shareUrl,
   onPrepare,
+  onShare,
 }: {
   onKakaoShare: () => void;
   kakaoBusy: boolean;
@@ -92,6 +93,8 @@ export function ResultActions({
   shareUrl: string | null;
   /** Fired on intent, so the slow work is done before the tap. */
   onPrepare?: () => void;
+  /** Fired only after a clipboard-backed share action has confirmed success. */
+  onShare?: (channel: 'clipboard' | 'instagram_dm') => void;
 }) {
   const [open, setOpen] = useState(false);
   const [copied, setCopied] = useState(false);
@@ -162,6 +165,7 @@ export function ResultActions({
       return;
     }
     setCopied(true);
+    onShare?.('clipboard');
     // Let the confirmation register before the menu disappears.
     window.setTimeout(() => {
       setOpen(false);
@@ -188,8 +192,13 @@ export function ResultActions({
     const write = navigator.clipboard?.writeText(linkToShare);
     setOpen(false);
     const failed = () => setNotice({ text: '링크를 복사하지 못했어요. 결과 페이지에서 다시 시도해 주세요.' });
-    if (write) write.catch(failed);
-    else if (!copyTextSync(linkToShare)) failed();
+    if (write) {
+      write.then(() => onShare?.('instagram_dm'), failed);
+    } else if (!copyTextSync(linkToShare)) {
+      failed();
+    } else {
+      onShare?.('instagram_dm');
+    }
 
     if (!isPhone()) {
       setNotice({ text: '링크를 복사했어요. DM 입력창에 붙여넣어 주세요.' });
