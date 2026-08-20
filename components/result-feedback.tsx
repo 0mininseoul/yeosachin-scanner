@@ -2,6 +2,7 @@
 
 import { useId, useRef, useState } from 'react';
 import { RESULT_FEEDBACK_MAX_LENGTH } from '@/lib/services/feedback/contracts';
+import { EVENTS, trackEvent } from '@/lib/services/analytics';
 
 type Phase = 'closed' | 'open' | 'sending' | 'sent';
 
@@ -41,6 +42,7 @@ export function ResultFeedback({ requestId }: { requestId: string }) {
         const payload = await response.json().catch(() => null);
         throw new Error(payload?.error ?? '의견을 저장하지 못했습니다.');
       }
+      trackEvent(EVENTS.RESULT_FEEDBACK_SUBMITTED, { request_id: requestId });
       setPhase('sent');
       setBody('');
     } catch (err) {
