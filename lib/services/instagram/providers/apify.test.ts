@@ -165,6 +165,19 @@ describe('apifyProvider', () => {
         }
     });
 
+    it('honors an explicit funded V2 slot before legacy preflight sharding', () => {
+        expect(selectPreflightApifyCredentialSlot(
+            '123e4567-e89b-42d3-a456-426614174000',
+            {
+                APIFY_PRIMARY_API_TOKEN: 'primary-token',
+                APIFY_SECONDARY_API_TOKEN: 'secondary-token',
+                APIFY_QUATERNARY_API_TOKEN: 'quaternary-token',
+                APIFY_TENTH_API_TOKEN: 'tenth-token',
+                ANALYSIS_V2_APIFY_API_TOKEN_SLOT: 'tenth',
+            },
+        )).toBe('tenth');
+    });
+
     it.each([
         { missing: 'primary', APIFY_PRIMARY_API_TOKEN: '' },
         { missing: 'secondary', APIFY_SECONDARY_API_TOKEN: ' ' },
@@ -191,6 +204,7 @@ describe('apifyProvider', () => {
             'quinary',
             'senary',
             'septenary',
+            'tenth',
         ]);
         const env = {
             APIFY_PRIMARY_API_TOKEN: 'primary-token',
@@ -200,6 +214,7 @@ describe('apifyProvider', () => {
             APIFY_QUINARY_API_TOKEN: 'quinary-token',
             APIFY_SENARY_API_TOKEN: 'senary-token',
             APIFY_SEPTENARY_API_TOKEN: 'septenary-token',
+            APIFY_TENTH_API_TOKEN: 'tenth-token',
         };
         expect(selectApifyApiToken(env)).toBe('primary-token');
         expect(selectApifyCredentialSlot(env)).toBe('primary');
@@ -219,6 +234,7 @@ describe('apifyProvider', () => {
             'quinary',
             'senary',
             'septenary',
+            'tenth',
         ] as const) {
             const selected = { ...env, ANALYSIS_V2_APIFY_API_TOKEN_SLOT: slot };
             expect(selectAnalysisV2ApifyCredentialSlot(selected)).toBe(slot);

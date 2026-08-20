@@ -345,7 +345,7 @@ export async function createPaidReplayRunner(
 
 export function tokenForSlot(slot: string, legacySecondary = false): string {
     const allowed = new Set([
-        'primary', 'tertiary', 'quaternary', 'quinary', 'senary', 'septenary',
+        'primary', 'tertiary', 'quaternary', 'quinary', 'senary', 'septenary', 'tenth',
     ]);
     if (legacySecondary) allowed.add('secondary');
     if (!allowed.has(slot)) {

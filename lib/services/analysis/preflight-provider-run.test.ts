@@ -123,8 +123,8 @@ describe('preflight provider-run adapter', () => {
         expect(JSON.stringify(rpc.mock.calls)).not.toContain('target.name');
     });
 
-    it('loads stored senary and septenary identities and rejects octonary', async () => {
-        for (const credentialSlot of ['senary', 'septenary'] as const) {
+    it('loads stored senary, septenary, and tenth identities and rejects octonary', async () => {
+        for (const credentialSlot of ['senary', 'septenary', 'tenth'] as const) {
             const store = createPreflightProviderRunStore({
                 rpc: vi.fn(async () => ({
                     data: row('running', { credentialSlot }),

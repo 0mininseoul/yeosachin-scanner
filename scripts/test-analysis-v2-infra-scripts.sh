@@ -910,7 +910,7 @@ case "$command_line" in
       beta_free_pool_enabled="${BETATEST_FREE_POOL_ENABLED:-false}"
       beta_free_pool_max_snapshot_age_seconds="${BETATEST_FREE_POOL_MAX_SNAPSHOT_AGE_SECONDS:-300}"
       beta_free_pool_refresh_interval_seconds="${BETATEST_FREE_POOL_REFRESH_INTERVAL_SECONDS:-60}"
-      apify_secret_slots="${FAKE_GCLOUD_APIFY_SECRET_SLOTS:-primary,secondary,tertiary,quaternary,quinary,senary,septenary}"
+      apify_secret_slots="${FAKE_GCLOUD_APIFY_SECRET_SLOTS:-primary,secondary,tertiary,quaternary,quinary,senary,septenary,tenth}"
       apify_secret_version="${FAKE_GCLOUD_APIFY_SECRET_VERSION:-7}"
       apify_plaintext_slot="${FAKE_GCLOUD_APIFY_PLAINTEXT_SLOT:-}"
       apify_bad_ref_slot="${FAKE_GCLOUD_APIFY_BAD_REF_SLOT:-}"
@@ -1224,7 +1224,7 @@ case "$command_line" in
     fi
     known_good_recovery="${FAKE_GCLOUD_KNOWN_GOOD_RECOVERY_ENABLED:-false}"
     active_runtime_slot="${FAKE_GCLOUD_ACTIVE_RUNTIME_SLOT:-quinary}"
-    active_apify_secret_slots="${FAKE_GCLOUD_ACTIVE_APIFY_SECRET_SLOTS:-${FAKE_GCLOUD_APIFY_SECRET_SLOTS:-primary,secondary,tertiary,quaternary,quinary,senary,septenary}}"
+    active_apify_secret_slots="${FAKE_GCLOUD_ACTIVE_APIFY_SECRET_SLOTS:-${FAKE_GCLOUD_APIFY_SECRET_SLOTS:-primary,secondary,tertiary,quaternary,quinary,senary,septenary,tenth}}"
     active_apify_secret_version="${FAKE_GCLOUD_ACTIVE_APIFY_SECRET_VERSION:-${FAKE_GCLOUD_APIFY_SECRET_VERSION:-7}}"
     active_identity_hmac_mode="${FAKE_GCLOUD_ACTIVE_IDENTITY_HMAC_MODE:-${FAKE_GCLOUD_IDENTITY_HMAC_MODE:-canonical}}"
     active_identity_hmac_version="${FAKE_GCLOUD_ACTIVE_IDENTITY_HMAC_VERSION:-${FAKE_GCLOUD_IDENTITY_HMAC_VERSION:-7}}"
@@ -1803,7 +1803,7 @@ common_env=(
   'ANALYSIS_V2_APIFY_API_TOKEN_SLOT=quinary'
   'ANALYSIS_V2_SUPABASE_SERVICE_ROLE_SECRET_VERSION=7'
   'ANALYSIS_V2_APIFY_API_TOKEN_SECRET_VERSION=7'
-  'ANALYSIS_V2_APIFY_ADDITIONAL_SECRET_VERSIONS=primary:7,secondary:7,tertiary:7,quaternary:7,senary:7,septenary:7'
+  'ANALYSIS_V2_APIFY_ADDITIONAL_SECRET_VERSIONS=primary:7,secondary:7,tertiary:7,quaternary:7,senary:7,septenary:7,tenth:7'
   'ANALYSIS_V2_IMAGE_PROXY_SIGNING_SECRET_VERSION=7'
   'ANALYSIS_V2_PREFLIGHT_IDENTITY_HMAC_SECRET_VERSION=7'
   'ANALYSIS_V2_GENDER_ROUTING_HMAC_SECRET_VERSION=7'
@@ -2223,7 +2223,7 @@ assert_contains "$temp_dir/worker.out" \
 assert_contains "$temp_dir/worker.out" \
   "--build-service-account=projects/test-project/serviceAccounts/analysis-build@test-project.iam.gserviceaccount.com"
 assert_contains "$temp_dir/worker.out" \
-  "--set-secrets=SUPABASE_SERVICE_ROLE_KEY=ai-baram-v2-supabase-service-role:7\\,APIFY_PRIMARY_API_TOKEN=ai-baram-v2-apify-primary:7\\,APIFY_QUATERNARY_API_TOKEN=ai-baram-v2-apify-quaternary:7\\,APIFY_QUINARY_API_TOKEN=ai-baram-v2-apify-quinary:7\\,APIFY_SECONDARY_API_TOKEN=ai-baram-v2-apify-secondary:7\\,APIFY_SENARY_API_TOKEN=ai-baram-v2-apify-senary:7\\,APIFY_SEPTENARY_API_TOKEN=ai-baram-v2-apify-septenary:7\\,APIFY_TERTIARY_API_TOKEN=ai-baram-v2-apify-tertiary:7\\,IMAGE_PROXY_SIGNING_SECRET=ai-baram-v2-image-proxy-signing:7\\,ANALYSIS_V2_PREFLIGHT_IDENTITY_HMAC_SECRET=ai-baram-v2-preflight-identity-hmac:7\\,ANALYSIS_V2_GENDER_ROUTING_HMAC_SECRET=ai-baram-v2-gender-routing-hmac:7"
+  "--set-secrets=SUPABASE_SERVICE_ROLE_KEY=ai-baram-v2-supabase-service-role:7\\,APIFY_PRIMARY_API_TOKEN=ai-baram-v2-apify-primary:7\\,APIFY_QUATERNARY_API_TOKEN=ai-baram-v2-apify-quaternary:7\\,APIFY_QUINARY_API_TOKEN=ai-baram-v2-apify-quinary:7\\,APIFY_SECONDARY_API_TOKEN=ai-baram-v2-apify-secondary:7\\,APIFY_SENARY_API_TOKEN=ai-baram-v2-apify-senary:7\\,APIFY_SEPTENARY_API_TOKEN=ai-baram-v2-apify-septenary:7\\,APIFY_TENTH_API_TOKEN=ai-baram-v2-apify-tenth:7\\,APIFY_TERTIARY_API_TOKEN=ai-baram-v2-apify-tertiary:7\\,IMAGE_PROXY_SIGNING_SECRET=ai-baram-v2-image-proxy-signing:7\\,ANALYSIS_V2_PREFLIGHT_IDENTITY_HMAC_SECRET=ai-baram-v2-preflight-identity-hmac:7\\,ANALYSIS_V2_GENDER_ROUTING_HMAC_SECRET=ai-baram-v2-gender-routing-hmac:7"
 assert_contains "$temp_dir/worker.out" "roles/run.invoker will contain only task and maintenance OIDC identities"
 assert_not_contains "$temp_dir/worker.out" "SECRET_SENTINEL_MUST_NOT_BE_PRINTED"
 assert_not_contains "$temp_dir/worker.out" "PUBLIC_BUILD_SENTINEL_MUST_NOT_BE_PRINTED"
@@ -2481,7 +2481,7 @@ printf 'ready\n' >"$temp_dir/slot-staging-state"
 : >"$temp_dir/slot-staging-traffic.out"
 env -u ANALYSIS_V2_WORKER_ENV_VARS_FILE "${common_env[@]}" \
   'ANALYSIS_V2_APIFY_API_TOKEN_SLOT=primary' \
-  'ANALYSIS_V2_APIFY_ADDITIONAL_SECRET_VERSIONS=secondary:7,tertiary:7,quaternary:7,quinary:7,senary:7,septenary:7' \
+  'ANALYSIS_V2_APIFY_ADDITIONAL_SECRET_VERSIONS=secondary:7,tertiary:7,quaternary:7,quinary:7,senary:7,septenary:7,tenth:7' \
   "ANALYSIS_V2_WORKER_SOURCE_DIR=$deploy_source_repo" \
   "ANALYSIS_V2_WORKER_BUILD_ENV_VARS_FILE=$temp_dir/build.yaml" \
   "FAKE_GCLOUD_STATE_FILE=$temp_dir/slot-staging-state" \
@@ -2910,15 +2910,15 @@ if env "${common_env[@]}" 'FAKE_GCLOUD_STATE=prerequisites_ready' \
   "ANALYSIS_V2_WORKER_ENV_VARS_FILE=$temp_dir/runtime-beta-secondary-slot.env" \
   bash "$script_dir/deploy-analysis-v2-worker.sh" --dry-run \
   >"$temp_dir/beta-incomplete-secret-inventory.out" 2>&1; then
-  fail "beta worker accepted an incomplete seven-slot Secret Manager inventory"
+  fail "beta worker accepted an incomplete eight-slot Secret Manager inventory"
 fi
 assert_contains "$temp_dir/beta-incomplete-secret-inventory.out" \
-  "canonical analysis-worker requires exactly all seven Apify Secret Manager refs"
+  "canonical analysis-worker requires exactly all eight Apify Secret Manager refs"
 
 env "${common_env[@]}" 'FAKE_GCLOUD_STATE=prerequisites_ready' \
   'BETATEST_FREE_POOL_ENABLED=true' \
   'ANALYSIS_V2_APIFY_API_TOKEN_SLOT=secondary' \
-  'ANALYSIS_V2_APIFY_ADDITIONAL_SECRET_VERSIONS=primary:6,tertiary:6,quaternary:6,quinary:6,senary:6,septenary:6' \
+  'ANALYSIS_V2_APIFY_ADDITIONAL_SECRET_VERSIONS=primary:6,tertiary:6,quaternary:6,quinary:6,senary:6,septenary:6,tenth:6' \
   "ANALYSIS_V2_WORKER_ENV_VARS_FILE=$temp_dir/runtime-beta-secondary-slot.env" \
   bash "$script_dir/deploy-analysis-v2-worker.sh" --dry-run \
   >"$temp_dir/beta-seven-secret-inventory.out"
@@ -2929,7 +2929,8 @@ for beta_inventory_assignment in \
   'APIFY_QUATERNARY_API_TOKEN=ai-baram-v2-apify-quaternary:6' \
   'APIFY_QUINARY_API_TOKEN=ai-baram-v2-apify-quinary:6' \
   'APIFY_SENARY_API_TOKEN=ai-baram-v2-apify-senary:6' \
-  'APIFY_SEPTENARY_API_TOKEN=ai-baram-v2-apify-septenary:6'; do
+  'APIFY_SEPTENARY_API_TOKEN=ai-baram-v2-apify-septenary:6' \
+  'APIFY_TENTH_API_TOKEN=ai-baram-v2-apify-tenth:6'; do
   assert_contains "$temp_dir/beta-seven-secret-inventory.out" \
     "$beta_inventory_assignment"
 done
@@ -2979,11 +2980,11 @@ if env "${common_env[@]}" 'FAKE_GCLOUD_STATE=prerequisites_ready' \
   fail "canonical worker accepted a beta-disabled incomplete Apify inventory"
 fi
 assert_contains "$temp_dir/worker-secondary-slot.out" \
-  'canonical analysis-worker requires exactly all seven Apify Secret Manager refs'
+  'canonical analysis-worker requires exactly all eight Apify Secret Manager refs'
 
 env "${common_env[@]}" 'FAKE_GCLOUD_STATE=prerequisites_ready' \
   'ANALYSIS_V2_APIFY_API_TOKEN_SLOT=secondary' \
-  'ANALYSIS_V2_APIFY_ADDITIONAL_SECRET_VERSIONS=primary:6,tertiary:6,quaternary:6,quinary:6,senary:6,septenary:6' \
+  'ANALYSIS_V2_APIFY_ADDITIONAL_SECRET_VERSIONS=primary:6,tertiary:6,quaternary:6,quinary:6,senary:6,septenary:6,tenth:6' \
   "ANALYSIS_V2_WORKER_ENV_VARS_FILE=$temp_dir/runtime-secondary-slot.env" \
   bash "$script_dir/deploy-analysis-v2-worker.sh" --dry-run \
   >"$temp_dir/worker-secondary-slot-additional-refs.out"
@@ -2994,7 +2995,8 @@ for additional_assignment in \
   'APIFY_QUATERNARY_API_TOKEN=ai-baram-v2-apify-quaternary:6' \
   'APIFY_QUINARY_API_TOKEN=ai-baram-v2-apify-quinary:6' \
   'APIFY_SENARY_API_TOKEN=ai-baram-v2-apify-senary:6' \
-  'APIFY_SEPTENARY_API_TOKEN=ai-baram-v2-apify-septenary:6'; do
+  'APIFY_SEPTENARY_API_TOKEN=ai-baram-v2-apify-septenary:6' \
+  'APIFY_TENTH_API_TOKEN=ai-baram-v2-apify-tenth:6'; do
   assert_contains "$temp_dir/worker-secondary-slot-additional-refs.out" \
     "$additional_assignment"
 done
@@ -3031,7 +3033,7 @@ env "${common_env[@]}" 'FAKE_GCLOUD_STATE=ready' \
   'FAKE_GCLOUD_APIFY_SECRET_SLOTS=primary,tertiary,quaternary,quinary' \
   'FAKE_GCLOUD_APIFY_SECRET_VERSION=6' \
   'ANALYSIS_V2_APIFY_API_TOKEN_SLOT=secondary' \
-  'ANALYSIS_V2_APIFY_ADDITIONAL_SECRET_VERSIONS=senary:6,septenary:6' \
+  'ANALYSIS_V2_APIFY_ADDITIONAL_SECRET_VERSIONS=senary:6,septenary:6,tenth:6' \
   "ANALYSIS_V2_WORKER_ENV_VARS_FILE=$temp_dir/runtime-secondary-slot.env" \
   bash "$script_dir/deploy-analysis-v2-worker.sh" --dry-run \
   >"$temp_dir/worker-secondary-slot-recovery.out"
@@ -3041,7 +3043,8 @@ for retained_assignment in \
   'APIFY_QUATERNARY_API_TOKEN=ai-baram-v2-apify-quaternary:6' \
   'APIFY_QUINARY_API_TOKEN=ai-baram-v2-apify-quinary:6' \
   'APIFY_SENARY_API_TOKEN=ai-baram-v2-apify-senary:6' \
-  'APIFY_SEPTENARY_API_TOKEN=ai-baram-v2-apify-septenary:6'; do
+  'APIFY_SEPTENARY_API_TOKEN=ai-baram-v2-apify-septenary:6' \
+  'APIFY_TENTH_API_TOKEN=ai-baram-v2-apify-tenth:6'; do
   assert_contains "$temp_dir/worker-secondary-slot-recovery.out" \
     "$retained_assignment"
 done
@@ -3060,7 +3063,7 @@ env "${common_env[@]}" 'FAKE_GCLOUD_STATE=ready' \
   'FAKE_GCLOUD_APIFY_SECRET_VERSION=7' \
   'ANALYSIS_V2_APIFY_API_TOKEN_SLOT=primary' \
   'ANALYSIS_V2_APIFY_API_TOKEN_SECRET_VERSION=3' \
-  'ANALYSIS_V2_APIFY_ADDITIONAL_SECRET_VERSIONS=secondary:7,tertiary:7,quaternary:7,quinary:7,senary:7,septenary:7' \
+  'ANALYSIS_V2_APIFY_ADDITIONAL_SECRET_VERSIONS=secondary:7,tertiary:7,quaternary:7,quinary:7,senary:7,septenary:7,tenth:7' \
   "ANALYSIS_V2_WORKER_ENV_VARS_FILE=$temp_dir/runtime-primary-slot.env" \
   bash "$script_dir/deploy-analysis-v2-worker.sh" --dry-run \
   >"$temp_dir/worker-primary-retained-cutover.out"
@@ -3071,7 +3074,8 @@ for retained_cutover_assignment in \
   'APIFY_QUATERNARY_API_TOKEN=ai-baram-v2-apify-quaternary:7' \
   'APIFY_QUINARY_API_TOKEN=ai-baram-v2-apify-quinary:7' \
   'APIFY_SENARY_API_TOKEN=ai-baram-v2-apify-senary:7' \
-  'APIFY_SEPTENARY_API_TOKEN=ai-baram-v2-apify-septenary:7'; do
+  'APIFY_SEPTENARY_API_TOKEN=ai-baram-v2-apify-septenary:7' \
+  'APIFY_TENTH_API_TOKEN=ai-baram-v2-apify-tenth:7'; do
   assert_contains "$temp_dir/worker-primary-retained-cutover.out" \
     "$retained_cutover_assignment"
 done

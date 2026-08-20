@@ -22,6 +22,7 @@ export const APIFY_CREDENTIAL_SLOTS = [
     'quinary',
     'senary',
     'septenary',
+    'tenth',
 ] as const;
 /**
  * Octonary and nonary are operator-scoped concierge batch slots. Keep them

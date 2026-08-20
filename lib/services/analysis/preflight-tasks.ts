@@ -39,11 +39,150 @@ interface CloudTasksClientLike {
 
 export type PreflightTaskEnqueueFailureDisposition = 'terminal' | 'replayable';
 
+export type PreflightEnqueueFailureCode =
+    | 'OIDC_TOKEN_UNAVAILABLE'
+    | 'VERCEL_OIDC_EXCHANGE_REJECTED'
+    | 'WIF_STS_REJECTED'
+    | 'SERVICE_ACCOUNT_IMPERSONATION_REJECTED'
+    | 'CLOUD_TASKS_PERMISSION_DENIED'
+    | 'CLOUD_TASKS_UNAUTHENTICATED'
+    | 'CLOUD_TASKS_DEADLINE'
+    | 'CLOUD_TASKS_UNAVAILABLE'
+    | 'UNKNOWN';
+
+export interface PreflightEnqueueFailureMetadata {
+    readonly errorName: string;
+    readonly providerCode: string;
+    readonly missingModule: string;
+}
+
 export class PreflightTaskEnqueueError extends Error {
-    constructor(readonly disposition: PreflightTaskEnqueueFailureDisposition) {
+    constructor(
+        readonly disposition: PreflightTaskEnqueueFailureDisposition,
+        readonly failureCode: PreflightEnqueueFailureCode = 'UNKNOWN',
+        readonly failureMetadata: PreflightEnqueueFailureMetadata = {
+            errorName: 'UnknownError',
+            providerCode: 'ABSENT',
+            missingModule: 'ABSENT',
+        },
+    ) {
         super('PREFLIGHT_TASKS_ENQUEUE_ERROR: task creation failed.');
         this.name = 'PreflightTaskEnqueueError';
     }
+}
+
+/** Keeps only bounded machine-readable provider metadata; messages are discarded. */
+export function preflightEnqueueFailureMetadata(
+    error: unknown,
+): PreflightEnqueueFailureMetadata {
+    const seen = new Set<unknown>();
+    let current = error;
+    let errorName = 'UnknownError';
+    let providerCode = 'ABSENT';
+    let missingModule = 'ABSENT';
+    for (let depth = 0; depth < 5 && current && !seen.has(current); depth += 1) {
+        seen.add(current);
+        if (typeof current !== 'object') break;
+        const value = current as {
+            name?: unknown;
+            code?: unknown;
+            message?: unknown;
+            cause?: unknown;
+        };
+        if (
+            typeof value.name === 'string'
+            && /^[A-Za-z][A-Za-z0-9]{0,39}$/.test(value.name)
+            && (errorName === 'UnknownError' || errorName === 'Error')
+        ) {
+            errorName = value.name;
+        }
+        if (providerCode === 'ABSENT') {
+            if (typeof value.code === 'number' && Number.isSafeInteger(value.code)) {
+                providerCode = String(value.code);
+            } else if (
+                typeof value.code === 'string'
+                && /^[A-Z][A-Z0-9_]{0,39}$/.test(value.code)
+            ) {
+                providerCode = value.code;
+            }
+        }
+        if (
+            missingModule === 'ABSENT'
+            && value.code === 'MODULE_NOT_FOUND'
+            && typeof value.message === 'string'
+        ) {
+            const match = /Cannot find module ['"]([^'"]+)['"]/.exec(value.message);
+            if (match) {
+                const requested = match[1];
+                if (requested.startsWith('.') || requested.startsWith('/')) {
+                    const basename = requested.split('/').at(-1) ?? '';
+                    missingModule = /^[A-Za-z0-9_.-]{1,80}\.(?:js|cjs|mjs|json|node|proto)$/.test(
+                        basename,
+                    )
+                        ? basename
+                        : 'REDACTED';
+                } else {
+                    const parts = requested.split('/');
+                    const root = requested.startsWith('@')
+                        ? parts.slice(0, 2).join('/')
+                        : parts[0];
+                    missingModule = /^@?[A-Za-z0-9_-]+(?:\/[A-Za-z0-9_-]+)?$/.test(root)
+                        ? root
+                        : 'REDACTED';
+                }
+            }
+        }
+        current = value.cause;
+    }
+    return { errorName, providerCode, missingModule };
+}
+
+/** Returns a fixed diagnostic enum without retaining or logging provider error text. */
+export function preflightEnqueueFailureCode(error: unknown): PreflightEnqueueFailureCode {
+    const seen = new Set<unknown>();
+    let current = error;
+    for (let depth = 0; depth < 5 && current && !seen.has(current); depth += 1) {
+        seen.add(current);
+        if (typeof current !== 'object') break;
+        const value = current as { code?: unknown; message?: unknown; cause?: unknown };
+        const message = typeof value.message === 'string'
+            ? value.message.toLowerCase()
+            : '';
+        if (message.includes('x-vercel-oidc-token') && message.includes('missing')) {
+            return 'OIDC_TOKEN_UNAVAILABLE';
+        }
+        if (message.includes('failed to exchange token')) {
+            return 'VERCEL_OIDC_EXCHANGE_REJECTED';
+        }
+        if (
+            message.includes('iamcredentials.googleapis.com')
+            || message.includes('generateaccesstoken')
+            || message.includes('impersonat')
+        ) {
+            return 'SERVICE_ACCOUNT_IMPERSONATION_REJECTED';
+        }
+        if (
+            message.includes('sts.googleapis.com')
+            || message.includes('invalid_grant')
+            || message.includes('subject token')
+        ) {
+            return 'WIF_STS_REJECTED';
+        }
+        if (value.code === 7 || value.code === 'PERMISSION_DENIED') {
+            return 'CLOUD_TASKS_PERMISSION_DENIED';
+        }
+        if (value.code === 16 || value.code === 'UNAUTHENTICATED') {
+            return 'CLOUD_TASKS_UNAUTHENTICATED';
+        }
+        if (value.code === 4 || value.code === 'DEADLINE_EXCEEDED') {
+            return 'CLOUD_TASKS_DEADLINE';
+        }
+        if (value.code === 14 || value.code === 'UNAVAILABLE') {
+            return 'CLOUD_TASKS_UNAVAILABLE';
+        }
+        current = value.cause;
+    }
+    return 'UNKNOWN';
 }
 
 interface IdTokenTicketLike {
@@ -309,11 +448,19 @@ export async function enqueuePreflightTask(
         } catch (error) {
             if (isAlreadyExists(error)) return 'exists';
             if (attempt === 0 && isTerminalCreateFailure(error)) {
-                throw new PreflightTaskEnqueueError('terminal');
+                throw new PreflightTaskEnqueueError(
+                    'terminal',
+                    preflightEnqueueFailureCode(error),
+                    preflightEnqueueFailureMetadata(error),
+                );
             }
             if (attempt === 1) {
                 // Do not terminalize retryable or outcome-ambiguous failures.
-                throw new PreflightTaskEnqueueError('replayable');
+                throw new PreflightTaskEnqueueError(
+                    'replayable',
+                    preflightEnqueueFailureCode(error),
+                    preflightEnqueueFailureMetadata(error),
+                );
             }
         }
     }

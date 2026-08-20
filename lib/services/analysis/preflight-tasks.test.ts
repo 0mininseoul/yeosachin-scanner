@@ -5,6 +5,8 @@ import {
     enqueueBetaPreflightPrepareTask,
     enqueueFreshAdmissionTask,
     enqueuePreflightTask,
+    preflightEnqueueFailureCode,
+    preflightEnqueueFailureMetadata,
     freshAdmissionTaskId,
     enqueuePrecheckoutBliteTask,
     precheckoutBliteTaskId,
@@ -42,6 +44,59 @@ function configEnv(): Record<string, string> {
 }
 
 describe('preflight Cloud Tasks', () => {
+    it('reduces enqueue failures to bounded non-sensitive diagnostic codes', () => {
+        expect(preflightEnqueueFailureCode(new Error(
+            "The 'x-vercel-oidc-token' header is missing from the request."
+        ))).toBe('OIDC_TOKEN_UNAVAILABLE');
+        expect(preflightEnqueueFailureCode(new Error(
+            'Failed to exchange token: rejected'
+        ))).toBe('VERCEL_OIDC_EXCHANGE_REJECTED');
+        expect(preflightEnqueueFailureCode({
+            code: 7,
+            message: 'caller lacks cloudtasks.tasks.create',
+        })).toBe('CLOUD_TASKS_PERMISSION_DENIED');
+        expect(preflightEnqueueFailureCode({
+            cause: { message: 'iamcredentials.googleapis.com generateAccessToken failed' },
+        })).toBe('SERVICE_ACCOUNT_IMPERSONATION_REJECTED');
+        expect(preflightEnqueueFailureCode(new Error('opaque provider error')))
+            .toBe('UNKNOWN');
+        expect(preflightEnqueueFailureMetadata({
+            name: 'GoogleError',
+            code: 3,
+            message: 'must not escape',
+        })).toEqual({
+            errorName: 'GoogleError',
+            providerCode: '3',
+            missingModule: 'ABSENT',
+        });
+        expect(preflightEnqueueFailureMetadata({
+            cause: { name: 'GaxiosError', code: 'INVALID_TARGET' },
+        })).toEqual({
+            errorName: 'GaxiosError',
+            providerCode: 'INVALID_TARGET',
+            missingModule: 'ABSENT',
+        });
+        expect(preflightEnqueueFailureMetadata({
+            name: 'unsafe name!', code: 'secret:value',
+        })).toEqual({
+            errorName: 'UnknownError',
+            providerCode: 'ABSENT',
+            missingModule: 'ABSENT',
+        });
+        expect(preflightEnqueueFailureMetadata({
+            code: 'MODULE_NOT_FOUND',
+            message: "Cannot find module '@grpc/grpc-js/build/src/index'",
+        }).missingModule).toBe('@grpc/grpc-js');
+        expect(preflightEnqueueFailureMetadata({
+            code: 'MODULE_NOT_FOUND',
+            message: "Cannot find module '../../private/customer-id'",
+        }).missingModule).toBe('REDACTED');
+        expect(preflightEnqueueFailureMetadata({
+            code: 'MODULE_NOT_FOUND',
+            message: "Cannot find module '../../build/protos/protos.json'",
+        }).missingModule).toBe('protos.json');
+    });
+
     it('validates the full HTTPS path, audience, and service account configuration', () => {
         expect(getPreflightTasksConfig(configEnv())).toEqual(config);
         expect(() => getPreflightTasksConfig({
