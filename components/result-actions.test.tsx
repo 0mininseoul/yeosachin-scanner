@@ -147,7 +147,7 @@ describe('ResultActions share analytics callbacks', () => {
         } finally {
             if (originalClipboard) Object.defineProperty(navigator, 'clipboard', originalClipboard);
             if (originalExecCommand) Object.defineProperty(document, 'execCommand', originalExecCommand);
-            else delete (document as Document & { execCommand?: unknown }).execCommand;
+            else delete (document as Omit<Document, 'execCommand'> & { execCommand?: unknown }).execCommand;
         }
     });
 });
