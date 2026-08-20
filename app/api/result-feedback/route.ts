@@ -1,4 +1,4 @@
-import { NextResponse } from 'next/server';
+import { after, NextResponse } from 'next/server';
 import { createClient } from '@/lib/supabase/server';
 import { supabaseAdmin } from '@/lib/supabase/admin';
 import {
@@ -7,11 +7,19 @@ import {
     normalizeResultFeedbackBody,
     resultFeedbackRequestSchema,
 } from '@/lib/services/feedback/contracts';
-import { insertResultFeedback } from '@/lib/services/feedback/store';
+import {
+    insertResultFeedback,
+    ResultFeedbackPersistenceError,
+} from '@/lib/services/feedback/store';
 import {
     AccountPrincipalAdmissionError,
     requireActiveAccountClassification,
 } from '@/lib/services/identity/account-principal-store';
+import {
+    flushOperationalLogs,
+    operationalLogger,
+    type OperationalEvent,
+} from '@/lib/observability/server';
 
 const PRIVATE_NO_STORE_HEADERS = {
     'Cache-Control': 'private, no-store, max-age=0',
@@ -20,6 +28,22 @@ const PRIVATE_NO_STORE_HEADERS = {
 
 function errorResponse(status: number, code: string, error: string): NextResponse {
     return NextResponse.json({ code, error }, { status, headers: PRIVATE_NO_STORE_HEADERS });
+}
+
+function emitFeedbackOperationalEvent(event: OperationalEvent): void {
+    try {
+        operationalLogger.emit(event);
+    } catch {
+        // Observability must never change the feedback outcome.
+    }
+}
+
+function scheduleFeedbackLogFlush(): void {
+    try {
+        after(() => flushOperationalLogs());
+    } catch {
+        void flushOperationalLogs();
+    }
 }
 
 // 결과 소유자가 "결과가 정확하지 않나요?"로 남긴 자유 서술을 수집한다.
@@ -75,17 +99,37 @@ export async function POST(request: Request): Promise<NextResponse> {
             return errorResponse(404, 'NOT_FOUND', '판독 기록을 찾을 수 없습니다.');
         }
 
-        await insertResultFeedback({
-            requestId: parsed.data.requestId,
-            userId: user.id,
-            body,
-            userAgent: request.headers.get('user-agent')?.slice(0, 500) || undefined,
+        try {
+            await insertResultFeedback({
+                requestId: parsed.data.requestId,
+                userId: user.id,
+                body,
+                userAgent: request.headers.get('user-agent')?.slice(0, 500) || undefined,
+            });
+        } catch (error) {
+            emitFeedbackOperationalEvent({
+                event: 'result_feedback.persistence_failed',
+                severity: 'error',
+                fields: {
+                    request_id: parsed.data.requestId,
+                    error_code: error instanceof ResultFeedbackPersistenceError
+                        ? error.code
+                        : 'INTERNAL_ERROR',
+                },
+            });
+            scheduleFeedbackLogFlush();
+            throw error;
+        }
+
+        emitFeedbackOperationalEvent({
+            event: 'result_feedback.persisted',
+            severity: 'info',
+            fields: { request_id: parsed.data.requestId },
         });
+        scheduleFeedbackLogFlush();
 
         return NextResponse.json({ ok: true }, { status: 201, headers: PRIVATE_NO_STORE_HEADERS });
     } catch {
-        // The body can contain anything the user typed, so it never reaches the log.
-        console.error('[result-feedback] feedback persistence failed');
         return errorResponse(500, 'PERSISTENCE_FAILED', '의견을 저장하지 못했습니다. 잠시 후 다시 시도해 주세요.');
     }
 }

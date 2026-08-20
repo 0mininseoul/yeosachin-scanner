@@ -136,6 +136,8 @@ export const OPERATIONAL_EVENT_NAMES = [
     'shared_result_opened',
     'result_share_cancelled',
     'result_share_failed',
+    'result_feedback.persisted',
+    'result_feedback.persistence_failed',
 ] as const;
 
 export const OPERATIONAL_ERROR_CODES = [
@@ -148,6 +150,7 @@ export const OPERATIONAL_ERROR_CODES = [
     'OVER_PLUS_CAPACITY',
     'PREFLIGHT_PERSISTENCE_ERROR',
     'PROVIDER_ERROR',
+    'RESULT_FEEDBACK_INSERT_FAILED',
     'RATE_LIMITED',
     'TARGET_NOT_FOUND',
     'TARGET_PRIVATE',
