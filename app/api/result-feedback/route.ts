@@ -18,8 +18,8 @@ import {
 import {
     flushOperationalLogs,
     operationalLogger,
-    type OperationalEvent,
 } from '@/lib/observability/server';
+import type { OperationalEvent } from '@/lib/observability/schema';
 
 const PRIVATE_NO_STORE_HEADERS = {
     'Cache-Control': 'private, no-store, max-age=0',
