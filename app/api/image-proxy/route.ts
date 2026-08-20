@@ -15,11 +15,27 @@ import {
 } from '@/lib/services/media/result-image-resolver';
 import { isAnalysisResultAuthoritativelyPublished } from '@/lib/services/analysis/result-publication-authority';
 import { createClient } from '@/lib/supabase/server';
+import {
+    conciergeImageProxyCacheEnabled,
+    imageProxyCacheKey,
+    readImageProxyCacheObject,
+    writeImageProxyCacheObject,
+} from '@/lib/services/media/image-proxy-cache';
 
 const IMAGE_PROXY_MAX_BYTES = 3 * 1024 * 1024;
 const IMAGE_PROXY_TOTAL_TIMEOUT_MS = 6_000;
 const IMAGE_PROXY_DIRECT_TIMEOUT_MS = 4_000;
+const IMAGE_PROXY_CACHE_TIMEOUT_MS = 1_500;
 const IMAGE_ACCEPT = 'image/jpeg,image/png,image/webp,image/avif,image/*;q=0.8';
+
+function withTimeout<T>(promise: Promise<T>, timeoutMs: number): Promise<T | undefined> {
+    return Promise.race([
+        promise,
+        new Promise<undefined>(resolve => {
+            setTimeout(() => resolve(undefined), timeoutMs);
+        }),
+    ]);
+}
 
 const PLACEHOLDER_SVG = `<svg xmlns="http://www.w3.org/2000/svg" width="150" height="150" viewBox="0 0 150 150">
   <rect width="150" height="150" fill="#1f2937"/>
@@ -222,6 +238,9 @@ export async function GET(request: NextRequest) {
         IMAGE_PROXY_TOTAL_TIMEOUT_MS - (Date.now() - startedAt)
     );
 
+    const cacheEnabled = !isResult && conciergeImageProxyCacheEnabled();
+    const cacheKey = cacheEnabled ? imageProxyCacheKey(authorizedUrl) : null;
+
     try {
         const direct = await downloadSecureImage(authorizedUrl, {
             allowedHostSuffixes: INSTAGRAM_MEDIA_HOST_SUFFIXES,
@@ -233,9 +252,30 @@ export async function GET(request: NextRequest) {
                 Referer: 'https://www.instagram.com/',
             },
         });
+        if (cacheKey) {
+            // Fire-and-forget: never delays or affects this response. The
+            // helper itself never throws, so this can't produce an
+            // unhandled rejection either.
+            void writeImageProxyCacheObject(cacheKey, direct.bytes, direct.contentType);
+        }
         return imageResponse(direct.bytes, direct.contentType, expires, isResult);
     } catch {
         // A trusted image proxy is a compatibility fallback for CDN-region failures.
+    }
+
+    // The signed CDN URL expired (~48h Instagram signature window) or the
+    // origin is otherwise unreachable: a cached copy of the same image
+    // (keyed by origin+pathname, independent of the expiring signature)
+    // takes priority over the third-party compatibility proxy and the
+    // placeholder.
+    if (cacheKey) {
+        const cached = await withTimeout(
+            readImageProxyCacheObject(cacheKey),
+            Math.min(IMAGE_PROXY_CACHE_TIMEOUT_MS, remainingTimeoutMs()),
+        );
+        if (cached) {
+            return imageResponse(cached.bytes, cached.contentType, expires, false);
+        }
     }
 
     if (Date.now() - startedAt >= IMAGE_PROXY_TOTAL_TIMEOUT_MS) {

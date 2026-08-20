@@ -8,6 +8,8 @@ const mocks = vi.hoisted(() => ({
     createClient: vi.fn(),
     getUser: vi.fn(),
     isResultAuthoritativelyPublished: vi.fn(),
+    readImageProxyCacheObject: vi.fn(),
+    writeImageProxyCacheObject: vi.fn(),
 }));
 
 vi.mock('@/lib/services/media/secure-image-fetch', async (importOriginal) => {
@@ -28,6 +30,16 @@ vi.mock('@/lib/supabase/server', () => ({ createClient: mocks.createClient }));
 vi.mock('@/lib/services/analysis/result-publication-authority', () => ({
     isAnalysisResultAuthoritativelyPublished: mocks.isResultAuthoritativelyPublished,
 }));
+vi.mock('@/lib/services/media/image-proxy-cache', async (importOriginal) => {
+    const original = await importOriginal<
+        typeof import('@/lib/services/media/image-proxy-cache')
+    >();
+    return {
+        ...original,
+        readImageProxyCacheObject: mocks.readImageProxyCacheObject,
+        writeImageProxyCacheObject: mocks.writeImageProxyCacheObject,
+    };
+});
 
 import { GET } from '@/app/api/image-proxy/route';
 import {
@@ -73,6 +85,9 @@ describe('image proxy route authorization', () => {
             Buffer.from([7, 8, 9])
         );
         mocks.isResultAuthoritativelyPublished.mockResolvedValue(true);
+        mocks.readImageProxyCacheObject.mockResolvedValue(null);
+        mocks.writeImageProxyCacheObject.mockResolvedValue(undefined);
+        delete process.env.CONCIERGE_IMAGE_PROXY_CACHE_ENABLED;
     });
 
     it('does not fetch unsigned or tampered URLs', async () => {
@@ -245,5 +260,126 @@ describe('image proxy route authorization', () => {
         expect(mocks.downloadSecureImage).toHaveBeenCalledTimes(2);
         expect(mocks.downloadSecureImage.mock.calls[1]?.[0])
             .toContain('https://images.weserv.nl/?url=');
+    });
+});
+
+describe('image proxy R2 cache (CONCIERGE_IMAGE_PROXY_CACHE_ENABLED)', () => {
+    beforeEach(() => {
+        vi.clearAllMocks();
+        process.env.IMAGE_PROXY_SIGNING_SECRET = SECRET;
+        mocks.createClient.mockResolvedValue({ auth: { getUser: mocks.getUser } });
+        mocks.getUser.mockResolvedValue({
+            data: { user: { id: '223e4567-e89b-42d3-a456-426614174000' } },
+            error: null,
+        });
+        mocks.resolveResultImage.mockResolvedValue({
+            source: 'legacy_url',
+            url: 'https://cdninstagram.com/result-photo.jpg?oe=abc',
+        });
+        mocks.readResultImageObject.mockResolvedValue(Buffer.from([7, 8, 9]));
+        mocks.isResultAuthoritativelyPublished.mockResolvedValue(true);
+        mocks.readImageProxyCacheObject.mockResolvedValue(null);
+        mocks.writeImageProxyCacheObject.mockResolvedValue(undefined);
+    });
+
+    it('off (default): never touches the cache helper even on a direct-fetch failure', async () => {
+        delete process.env.CONCIERGE_IMAGE_PROXY_CACHE_ENABLED;
+        mocks.downloadSecureImage.mockRejectedValue(new Error('origin unavailable'));
+
+        const response = await GET(signedRequest());
+
+        expect(response.status).toBe(200);
+        expect(response.headers.get('content-type')).toBe('image/svg+xml');
+        expect(mocks.readImageProxyCacheObject).not.toHaveBeenCalled();
+        expect(mocks.writeImageProxyCacheObject).not.toHaveBeenCalled();
+    });
+
+    it('off (default): a successful direct fetch never triggers a cache write', async () => {
+        delete process.env.CONCIERGE_IMAGE_PROXY_CACHE_ENABLED;
+        mocks.downloadSecureImage.mockResolvedValue({
+            bytes: Buffer.from([1, 2, 3]),
+            contentType: 'image/jpeg',
+            finalUrl: 'https://cdninstagram.com/photo.jpg?oe=abc',
+        });
+
+        const response = await GET(signedRequest());
+
+        expect(response.status).toBe(200);
+        expect(mocks.writeImageProxyCacheObject).not.toHaveBeenCalled();
+    });
+
+    it('on: writes the fetched bytes to the cache (keyed by origin+pathname) after a successful direct fetch', async () => {
+        process.env.CONCIERGE_IMAGE_PROXY_CACHE_ENABLED = 'true';
+        mocks.downloadSecureImage.mockResolvedValue({
+            bytes: Buffer.from([1, 2, 3]),
+            contentType: 'image/jpeg',
+            finalUrl: 'https://cdninstagram.com/photo.jpg?oe=abc',
+        });
+
+        const response = await GET(signedRequest('https://cdninstagram.com/photo.jpg?oe=abc'));
+        // The write is fire-and-forget; let its microtask run before asserting.
+        await new Promise(resolve => setTimeout(resolve, 0));
+
+        expect(response.status).toBe(200);
+        expect(mocks.writeImageProxyCacheObject).toHaveBeenCalledOnce();
+        const [cacheKey, bytes, contentType] = mocks.writeImageProxyCacheObject.mock.calls[0]!;
+        expect(cacheKey).toEqual(expect.any(String));
+        expect(bytes).toEqual(Buffer.from([1, 2, 3]));
+        expect(contentType).toBe('image/jpeg');
+    });
+
+    it('on: serves the cached bytes when the direct fetch fails (e.g. an expired signed URL), instead of falling through to the third-party proxy', async () => {
+        process.env.CONCIERGE_IMAGE_PROXY_CACHE_ENABLED = 'true';
+        mocks.downloadSecureImage.mockRejectedValue(new Error('403 expired signature'));
+        mocks.readImageProxyCacheObject.mockResolvedValue({
+            bytes: Buffer.from([9, 9, 9]),
+            contentType: 'image/webp',
+        });
+
+        const response = await GET(signedRequest());
+        const body = Buffer.from(await response.arrayBuffer());
+
+        expect(response.status).toBe(200);
+        expect(response.headers.get('content-type')).toBe('image/webp');
+        expect(body).toEqual(Buffer.from([9, 9, 9]));
+        // Cache hit takes priority - never falls through to the third-party
+        // compatibility proxy.
+        expect(mocks.downloadSecureImage).toHaveBeenCalledOnce();
+    });
+
+    it('on: falls back to the existing weserv/placeholder chain on a cache miss, unchanged', async () => {
+        process.env.CONCIERGE_IMAGE_PROXY_CACHE_ENABLED = 'true';
+        mocks.downloadSecureImage
+            .mockRejectedValueOnce(new Error('403 expired signature'))
+            .mockResolvedValueOnce({
+                bytes: Buffer.from([4, 5, 6]),
+                contentType: 'image/jpeg',
+                finalUrl: 'https://images.weserv.nl/proxied.jpg',
+            });
+        mocks.readImageProxyCacheObject.mockResolvedValue(null);
+
+        const response = await GET(signedRequest());
+
+        expect(response.status).toBe(200);
+        expect(mocks.readImageProxyCacheObject).toHaveBeenCalledOnce();
+        expect(mocks.downloadSecureImage).toHaveBeenCalledTimes(2);
+        expect(mocks.downloadSecureImage.mock.calls[1]?.[0])
+            .toContain('https://images.weserv.nl/?url=');
+    });
+
+    it('never touches the cache for a V2 result-image request, even when enabled', async () => {
+        process.env.CONCIERGE_IMAGE_PROXY_CACHE_ENABLED = 'true';
+        mocks.downloadSecureImage.mockResolvedValue({
+            bytes: Buffer.from([1, 2, 3]),
+            contentType: 'image/jpeg',
+            finalUrl: 'https://cdninstagram.com/result-photo.jpg?oe=abc',
+        });
+
+        const response = await GET(signedResultRequest());
+        await new Promise(resolve => setTimeout(resolve, 0));
+
+        expect(response.status).toBe(200);
+        expect(mocks.readImageProxyCacheObject).not.toHaveBeenCalled();
+        expect(mocks.writeImageProxyCacheObject).not.toHaveBeenCalled();
     });
 });
