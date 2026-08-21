@@ -315,6 +315,25 @@ const relationshipArtifactTargetSchema = z.object({
     following: relationshipArtifactSchema.optional(),
 }).strict().refine(value => Boolean(value.followers || value.following));
 
+const prefetchHandoffSideSchema = z.object({
+    relationshipSide: z.enum(['followers', 'following']),
+    accountSlot: z.literal('secondary'),
+    actorId: z.literal(APIFY_RELATIONSHIP_ACTOR_ID),
+    runId: APIFY_RUN_ID,
+    status: z.literal('SUCCEEDED'),
+    inputUsername: USERNAME,
+    usableItemCount: z.number().int().min(1).max(1_200),
+}).passthrough();
+
+const prefetchHandoffSchema = z.object({
+    schemaVersion: z.literal('active27-apify-prefetch-handoff.v1'),
+    relationshipPrefetch: z.array(z.object({
+        targetInstagramUsername: USERNAME,
+        status: z.literal('both_sides_content_backed'),
+        sides: z.array(prefetchHandoffSideSchema).length(2),
+    }).passthrough()),
+}).passthrough();
+
 export type ConciergeExistingRelationshipArtifact = z.infer<typeof relationshipArtifactSchema>;
 export type ConciergeExistingRelationshipArtifacts = ReadonlyMap<
     string,
@@ -323,6 +342,38 @@ export type ConciergeExistingRelationshipArtifacts = ReadonlyMap<
         following?: ConciergeExistingRelationshipArtifact;
     }>
 >;
+
+function relationshipArtifactsFromPrefetchHandoff(
+    parsed: z.infer<typeof prefetchHandoffSchema>,
+): ConciergeExistingRelationshipArtifacts {
+    const result = new Map<string, {
+        followers?: ConciergeExistingRelationshipArtifact;
+        following?: ConciergeExistingRelationshipArtifact;
+    }>();
+    for (const target of parsed.relationshipPrefetch) {
+        const username = normalized(target.targetInstagramUsername);
+        if (result.has(username)) throw new Error('CONCIERGE_BATCH_EXISTING_ARTIFACT_MAP_INVALID');
+        const bySide = new Map<string, ConciergeExistingRelationshipArtifact>();
+        for (const side of target.sides) {
+            if (normalized(side.inputUsername) !== username || bySide.has(side.relationshipSide)) {
+                throw new Error('CONCIERGE_BATCH_EXISTING_ARTIFACT_MAP_INVALID');
+            }
+            bySide.set(side.relationshipSide, {
+                runId: side.runId,
+                credentialSlot: 'secondary',
+                sourceDeclaredCount: side.usableItemCount,
+            });
+        }
+        if (!bySide.has('followers') || !bySide.has('following')) {
+            throw new Error('CONCIERGE_BATCH_EXISTING_ARTIFACT_MAP_INVALID');
+        }
+        result.set(username, {
+            followers: bySide.get('followers'),
+            following: bySide.get('following'),
+        });
+    }
+    return result;
+}
 
 export type ConciergeProfilePack = ReadonlyMap<string, unknown>;
 
@@ -1332,6 +1383,8 @@ export function parseConciergeExistingRelationshipArtifacts(
     if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
         throw new Error('CONCIERGE_BATCH_EXISTING_ARTIFACT_MAP_INVALID');
     }
+    const handoff = prefetchHandoffSchema.safeParse(parsed);
+    if (handoff.success) return relationshipArtifactsFromPrefetchHandoff(handoff.data);
     const result = new Map<string, {
         followers?: ConciergeExistingRelationshipArtifact;
         following?: ConciergeExistingRelationshipArtifact;
@@ -1350,6 +1403,13 @@ export function parseConciergeExistingRelationshipArtifacts(
         result.set(username, target.data);
     }
     return result;
+}
+
+export function capConciergeRelationshipDestinationLimit(
+    destinationLimit: number,
+    artifact?: ConciergeExistingRelationshipArtifact,
+): number {
+    return artifact ? Math.min(destinationLimit, artifact.sourceDeclaredCount) : destinationLimit;
 }
 
 export function relationshipArtifactProviderContext(
@@ -1669,11 +1729,17 @@ export async function collectOrder(
     const plan = getAnalysisPlan(order.planId);
     const followersLimit = Math.min(
         plan.relationshipCapacity.followers,
-        Math.max(targetProfile.followersCount, order.targetFollowers ?? 0),
+        capConciergeRelationshipDestinationLimit(
+            Math.max(targetProfile.followersCount, order.targetFollowers ?? 0),
+            followersArtifact,
+        ),
     );
     const followingLimit = Math.min(
         plan.relationshipCapacity.following,
-        Math.max(targetProfile.followingCount, order.targetFollowing ?? 0),
+        capConciergeRelationshipDestinationLimit(
+            Math.max(targetProfile.followingCount, order.targetFollowing ?? 0),
+            followingArtifact,
+        ),
     );
     const [followers, following] = await Promise.all([
         withProvider(prepared.sourceRequestId, context, async (slot, provider) => {
@@ -1844,9 +1910,11 @@ export async function collectOrder(
     const source = {
         descriptorHash,
         targetProfile,
-        followersDeclared: Math.max(targetProfile.followersCount, followers.length),
+        followersDeclared: followersArtifact?.sourceDeclaredCount
+            ?? Math.max(targetProfile.followersCount, followers.length),
         followersCollected: followers.length,
-        followingDeclared: Math.max(targetProfile.followingCount, following.length),
+        followingDeclared: followingArtifact?.sourceDeclaredCount
+            ?? Math.max(targetProfile.followingCount, following.length),
         followingCollected: following.length,
         mutualRows,
         publicProfiles,
