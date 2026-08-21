@@ -17,7 +17,7 @@
 
 - [ ] **Step 1: Reference the new migration after the two existing guard migrations**
 
-Add a `readFileSync` for `supabase/migrations/20260821120000_allow_completed_results_after_refund.sql` and execute its extracted authority function last.
+Add a `readFileSync` for `supabase/migrations/20260821080948_allow_completed_results_after_refund.sql` and execute its extracted authority function last.
 
 - [ ] **Step 2: Add paid-order fixtures for refund states**
 
@@ -41,13 +41,13 @@ Expected: FAIL because the new migration does not exist yet.
 ### Task 2: Implement the minimal forward-only migration
 
 **Files:**
-- Create with `supabase migration new`, then name exactly: `supabase/migrations/20260821120000_allow_completed_results_after_refund.sql`
+- Create with `supabase migration new`: `supabase/migrations/20260821080948_allow_completed_results_after_refund.sql`
 
 - [ ] **Step 1: Create the migration through the Supabase CLI**
 
 Run: `supabase migration new allow_completed_results_after_refund`
 
-Expected: one empty migration file; if its generated timestamp differs, update this plan and the test reference to that exact generated path before continuing.
+Expected: one empty migration file at `supabase/migrations/20260821080948_allow_completed_results_after_refund.sql`.
 
 - [ ] **Step 2: Replace only the authority function**
 
@@ -76,14 +76,14 @@ Expected: all tests PASS.
 
 ```bash
 git add lib/services/analysis/result-publication-authority-pglite.test.ts \
-  supabase/migrations/20260821120000_allow_completed_results_after_refund.sql
+  supabase/migrations/20260821080948_allow_completed_results_after_refund.sql
 git commit -m "fix: preserve completed results after refund"
 ```
 
 ### Task 3: Apply exactly one production migration
 
 **Files:**
-- Apply only: `supabase/migrations/20260821120000_allow_completed_results_after_refund.sql`
+- Apply only: `supabase/migrations/20260821080948_allow_completed_results_after_refund.sql`
 
 - [ ] **Step 1: Create an isolated temporary Supabase workdir**
 
@@ -93,7 +93,7 @@ Use `mktemp -d` and copy only `supabase/config.toml` plus the new migration into
 
 Run `supabase db push --linked --project-ref ddfugwqninkkofkgnbve --dry-run` from the isolated workdir.
 
-Expected: exactly `20260821120000_allow_completed_results_after_refund.sql` is listed.
+Expected: exactly `20260821080948_allow_completed_results_after_refund.sql` is listed.
 
 - [ ] **Step 3: Push once and verify remote history**
 
