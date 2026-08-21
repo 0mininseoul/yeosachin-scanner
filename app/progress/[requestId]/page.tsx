@@ -259,7 +259,7 @@ export default function ProgressPage({ params }: PageProps) {
     if (error || !data) {
         return (
             <div className="flex min-h-dvh flex-col items-center justify-center px-5">
-                <p className="mb-5 text-[14px] text-blood">{error || '판독 요청을 찾을 수 없습니다.'}</p>
+                <p data-amp-mask className="mb-5 text-[14px] text-blood">{error || '판독 요청을 찾을 수 없습니다.'}</p>
                 <button
                     onClick={() => router.push('/analyze')}
                     className="border border-line-2 px-5 py-2.5 text-[13px] font-bold text-fg transition-colors hover:border-fg-dim hover:bg-panel"
@@ -276,7 +276,7 @@ export default function ProgressPage({ params }: PageProps) {
                 <CaseCard bracket="var(--color-blood)" className="w-full max-w-[400px] p-8 text-center">
                     <Eyebrow className="justify-center">판독 중단</Eyebrow>
                     <h1 className="mt-4 text-[22px] font-extrabold tracking-tight text-fg">판독에 실패했습니다</h1>
-                    <p className="mt-3 text-[13px] leading-relaxed text-fg-dim">
+                    <p data-amp-mask className="mt-3 text-[13px] leading-relaxed text-fg-dim">
                         {data.errorMessage || '판독 중 오류가 발생했습니다.'}
                     </p>
                     <div className="mt-7">
@@ -312,7 +312,7 @@ export default function ProgressPage({ params }: PageProps) {
                 }
             />
 
-            <main data-amp-mask className="mx-auto flex max-w-[460px] flex-col px-5 pt-4">
+            <main className="mx-auto flex max-w-[460px] flex-col px-5 pt-4">
                 <Eyebrow className="self-start">판독 진행 중</Eyebrow>
 
                 {/* The scope is the gauge.
@@ -367,7 +367,9 @@ export default function ProgressPage({ params }: PageProps) {
 
                 {/* Who is being read right now, and how far in. */}
                 {data.pipelineVersion === 'v2' && (
-                    <ProgressFaces active={data.activeProfile} />
+                    <div data-amp-block>
+                        <ProgressFaces active={data.activeProfile} />
+                    </div>
                 )}
 
                 <p className="mt-3.5 text-center text-[12px] leading-relaxed text-fg-dim" aria-live="polite">

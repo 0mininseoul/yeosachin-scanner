@@ -83,6 +83,7 @@ export function ResultFeedback({ requestId }: { requestId: string }) {
         판독이 어긋난 부분을 적어 주시면 개선에 반영합니다.
       </p>
       <textarea
+        data-amp-mask
         id={fieldId}
         ref={fieldRef}
         value={body}
@@ -97,7 +98,7 @@ export function ResultFeedback({ requestId }: { requestId: string }) {
         className="mt-3 w-full resize-y border border-line bg-ink px-3 py-2.5 text-[13px] leading-relaxed text-fg placeholder-fg-mute transition-colors focus:border-blood focus:outline-none disabled:opacity-50"
       />
       <div className="mt-1.5 flex items-baseline justify-between gap-3">
-        <span className="text-[11px] text-blood-2" role="alert">
+        <span data-amp-mask className="text-[11px] text-blood-2" role="alert">
           {error ?? ' '}
         </span>
         <span className="num shrink-0 text-[11px] text-fg-dim">{remaining}</span>

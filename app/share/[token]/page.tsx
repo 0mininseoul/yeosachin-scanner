@@ -232,7 +232,7 @@ export default function ShareResultPage({ params }: PageProps) {
     if (error || !data) {
         return (
             <div className="flex min-h-dvh flex-col items-center justify-center px-5">
-                <p className="mb-5 text-[14px] text-blood">{error}</p>
+                <p data-amp-mask className="mb-5 text-[14px] text-blood">{error}</p>
                 <Link href="/" className={`${primaryCls} max-w-[220px]`}>
                     서비스 이용하기
                 </Link>
@@ -254,11 +254,11 @@ export default function ShareResultPage({ params }: PageProps) {
                 }
             />
 
-            <main data-amp-mask className="mx-auto max-w-[480px] px-5 pt-8">
+            <main className="mx-auto max-w-[480px] px-5 pt-8">
                 <Eyebrow>판독 리포트 · 공유본</Eyebrow>
 
                 {/* Profile lockup — mirrors the owner result page. */}
-                <div className="mt-5 flex items-start gap-3">
+                <div data-amp-block className="mt-5 flex items-start gap-3">
                     <div className="relative h-11 w-11 shrink-0 overflow-hidden border border-line-2 bg-panel">
                         <ProfileImage src={summary.targetProfileImage} variant="person" />
                     </div>
@@ -359,18 +359,19 @@ export default function ShareResultPage({ params }: PageProps) {
                                 /* Anyone holding the link can open this page, and the
                                    accounts listed here never agreed to appear on it,
                                    so their handles are masked. */
-                                <SuspectRow
-                                    key={account.accountKey ?? account.instagramId}
-                                    account={account}
-                                    rank={i + 1}
-                                    avatar={
-                                        <MaskedAvatar>
-                                            <ProfileImage src={account.profileImage} variant="person" />
-                                        </MaskedAvatar>
-                                    }
-                                    externalProfileLinks={false}
-                                    maskHandle={data.maskedByClient}
-                                />
+                                <div data-amp-block key={account.accountKey ?? account.instagramId}>
+                                    <SuspectRow
+                                        account={account}
+                                        rank={i + 1}
+                                        avatar={
+                                            <MaskedAvatar>
+                                                <ProfileImage src={account.profileImage} variant="person" />
+                                            </MaskedAvatar>
+                                        }
+                                        externalProfileLinks={false}
+                                        maskHandle={data.maskedByClient}
+                                    />
+                                </div>
                             ))}
                         </div>
                     )}
@@ -387,7 +388,7 @@ export default function ShareResultPage({ params }: PageProps) {
                     ) : (
                         <div className="mt-5">
                             {privateAccounts.map((account) => (
-                                <div key={account.accountKey ?? account.instagramId} className="flex items-center gap-3.5 border-b border-line py-3.5">
+                                <div data-amp-block key={account.accountKey ?? account.instagramId} className="flex items-center gap-3.5 border-b border-line py-3.5">
                                     <div className="relative h-10 w-10 shrink-0 overflow-hidden border border-line bg-panel">
                                         <MaskedAvatar>
                                             <ProfileImage src={account.profileImage} variant="private" />

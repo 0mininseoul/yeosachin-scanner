@@ -24,9 +24,9 @@ Session Replay 허용 경로 템플릿은 `/`, `/privacy`, `/terms`, `/login`, `
 
 DNT 또는 GPC(Global Privacy Control) opt-out이면 fail-closed로 `sampleRate: 0`, `capture_enabled: false`로 Replay를 차단한다. Vercel의 enable·sample 환경변수가 rollout 활성화와 표본율을 권위 있게 결정한다. 신뢰한 Amplitude remote config는 `capture_enabled: true`인지 확인하는 emergency veto로만 사용하며, upstream `sample_rate`와 다른 설정은 적용하거나 전달하지 않는다. Amplitude가 `capture_enabled: false`를 반환하면 Replay를 차단하고, remote config 응답 오류·실패·형식 오류도 fail-closed `sampleRate: 0`으로 처리한다. Replay의 click·scroll interaction은 batching을 켜서 수집하지만 network·console·performance·document title 수집은 끈다. 일반 Analytics autocapture도 page URL·view, form·element·frustration interaction을 포함해 계속 끈 상태다.
 
-Replay는 conservative 기본 수준으로 모든 text와 input을 마스킹하고, `form`, `input`, `select`, `textarea`, `option`, `[contenteditable]`, `.amp-mask`, `[data-amp-mask]`도 명시적으로 마스킹한다. DOM attribute의 `href`, `src`, `alt`, `title`, `aria-label`, `value`, `placeholder` 값 역시 직렬화 전에 마스킹하며 unmask selector는 두지 않는다. `img`, `video`, `audio`, `canvas`, `svg` 전체와 `.amp-block`, `[data-amp-block]`, `[data-amp-sensitive]`, `[data-amp-private]`는 차단한다.
+Replay는 설치된 SDK가 지원하는 가장 낮은 기본 수준인 `light`를 사용한다. 일반 static text·레이아웃·비민감 media는 Replay에서 보이므로 실제 사용자 화면에 가깝게 확인할 수 있다. 전역 `form`/`input`/media/DOM attribute 마스킹·차단은 사용하지 않는다. 대신 `[data-amp-mask]`는 인스타그램 아이디·이메일처럼 명시한 입력·식별 텍스트에만, `[data-amp-block]`는 프로필 이미지·UGC 결과처럼 명시한 식별 영역에만 사용한다.
 
-명시 이벤트와 속성은 닫힌 allowlist를 통과하며 명시 이벤트에는 페이지 URL을 보내지 않는다. Replay URL은 local UGC filter rule으로 정규화하고, DOM의 URL·접근성·입력 관련 attribute는 위 명시 allowlist로 마스킹한다. 생 인스타그램 식별자, 이름, bio/소개글, 댓글/comment, caption/캡션, 이미지·미디어와 고객 또는 사용자 입력 이메일·전화번호·연락처, 결제 연락처, raw 오류·응답 같은 민감 개인정보는 replay 또는 event에 보내지 않는다. 허용 핵심 경로의 page/container는 구조와 흐름만 보이도록 마스킹하며, 실제 private/sensitive 영역과 미디어는 계속 차단한다.
+명시 이벤트와 속성은 닫힌 allowlist를 통과하며 명시 이벤트에는 페이지 URL을 보내지 않는다. Replay URL은 local UGC filter rule으로 정규화한다. 고객 또는 사용자가 입력한 이메일·전화번호·연락처와 결제 연락처, 인스타그램 식별자, 이름, bio/소개글, 댓글/comment, caption/캡션, 프로필 이미지·미디어 같은 UGC 결과는 해당 UI의 `[data-amp-mask]` 또는 `[data-amp-block]`으로 보호하고, event·user property에는 보내지 않는다. 허용 핵심 경로의 일반 page/container는 마스킹하지 않아 실제 흐름과 레이아웃을 확인할 수 있다.
 
 ## 3. 이벤트와 허용 속성
 
@@ -65,7 +65,7 @@ Replay는 conservative 기본 수준으로 모든 text와 input을 마스킹하�
 - 각 이벤트 상세의 properties 탭에서 schema에 없는 값이 제거되는지 확인한다.
 - 합성 query·hash·request ID·share token으로 허용 경로를 이동하고, 수신된 Replay에서 meta와 batched click·scroll interaction의 page URL이 각각 식별자 없는 정적 경로 템플릿으로만 표시되는지 확인한다. click과 scroll을 실제로 발생시켜 beta 세션에서 interaction이 연결되는지도 확인한다.
 - 알 수 없는 경로와 admin·API 경로에서는 Replay가 수신되지 않는지 확인한다. DNT/GPC opt-out 브라우저도 수신되지 않아야 한다.
-- 금지 속성 검사: `email`, `phone`, `name`, `instagram`, `username`, `profile`, `bio`, `comment`, `caption`, `image`, `media`, `url`, `token`, `cookie`, `signature`, `body`, `response` 이름이나 실제 민감 값이 event·user properties에 없는지 검사한다. Replay에는 고객 또는 사용자 입력 이메일·연락처와 민감 개인정보가 없어야 하며, text/input과 `href`, `src`, `alt`, `title`, `aria-label`, `value`, `placeholder`가 마스킹되고 private/sensitive 노드와 모든 `img`, `video`, `audio`, `canvas`, `svg`가 차단됐는지 확인한다.
+- 금지 속성 검사: `email`, `phone`, `name`, `instagram`, `username`, `profile`, `bio`, `comment`, `caption`, `image`, `media`, `url`, `token`, `cookie`, `signature`, `body`, `response` 이름이나 실제 민감 값이 event·user properties에 없는지 검사한다. Replay UI에서는 일반 static text·레이아웃·비민감 media가 실제 화면처럼 보이고, 고객·사용자 입력값과 식별·UGC 영역만 `[data-amp-mask]` 또는 `[data-amp-block]`으로 보호되는지 확인한다.
 - Replay payload와 UI에서 network·console·performance·document title 수집 및 일반 Analytics autocapture가 활성화되지 않았는지 확인한다.
 
 검증 중 민감 속성이 발견되면 대시보드 작성과 Production rollout을 중단한다. allowlist 또는 caller를 수정하고 잘못 수집된 데이터의 삭제 절차를 Amplitude 프로젝트 관리자와 확인한 뒤 다시 검증한다.
