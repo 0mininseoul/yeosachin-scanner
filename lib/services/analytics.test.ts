@@ -132,6 +132,7 @@ describe('Amplitude analytics adapter', () => {
             ANALYSIS_FAILED: 'analysis_failed',
             RESULT_VIEWED: 'result_viewed',
             RESULT_SHARED: 'result_shared',
+            RESULT_FEEDBACK_SUBMITTED: 'result_feedback_submitted',
         });
         expect((EVENTS as Record<string, string>).CLICK_CTA_START).toBeUndefined();
         expect((EVENTS as Record<string, string>).VIEW_RESULT).toBeUndefined();
@@ -1849,6 +1850,14 @@ describe('Amplitude analytics adapter', () => {
             share_channel: 'web_share',
             result_count: 8,
         });
+        analytics.trackEvent(analytics.EVENTS.RESULT_SHARED, {
+            request_id: VALID_USER_ID,
+            share_channel: 'instagram_dm',
+        });
+        analytics.trackEvent(analytics.EVENTS.RESULT_FEEDBACK_SUBMITTED, {
+            request_id: SECOND_UUID,
+            body: '비공개 의견은 전송하지 않아야 한다',
+        });
 
         expect(amplitudeMocks.track.mock.calls).toEqual([
             ['auth_started', { provider: 'kakao' }],
@@ -1861,7 +1870,15 @@ describe('Amplitude analytics adapter', () => {
                 request_id: SECOND_UUID,
                 share_channel: 'web_share',
             }],
+            ['result_shared', {
+                request_id: VALID_USER_ID,
+                share_channel: 'instagram_dm',
+            }],
+            ['result_feedback_submitted', {
+                request_id: SECOND_UUID,
+            }],
         ]);
+        expect(JSON.stringify(amplitudeMocks.track.mock.calls)).not.toContain('비공개 의견');
     });
 
     it.each([
