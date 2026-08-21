@@ -69,6 +69,7 @@ describe('concierge batch runner', () => {
             'primary',
             'quinary',
             'secondary',
+            'tenth',
         ]);
         expect(selectConciergeApifyTokenSlot({ APIFY_OCTONARY_API_TOKEN: 'configured' }))
             .toBe('octonary');
@@ -80,6 +81,8 @@ describe('concierge batch runner', () => {
             .toBe('quinary');
         expect(selectConciergeApifyTokenSlot({ APIFY_SECONDARY_API_TOKEN: 'configured' }))
             .toBe('secondary');
+        expect(selectConciergeApifyTokenSlot({ APIFY_TENTH_API_TOKEN: 'configured' }))
+            .toBe('tenth');
         expect(CONCIERGE_BATCH_TOKEN_PRIORITY).not.toContain('senary');
         expect(CONCIERGE_BATCH_TOKEN_PRIORITY).not.toContain('tertiary');
         expect(CONCIERGE_BATCH_TOKEN_PRIORITY).not.toContain('septenary');
