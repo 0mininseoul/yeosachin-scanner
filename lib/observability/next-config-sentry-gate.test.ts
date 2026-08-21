@@ -30,4 +30,21 @@ describe('Next config Sentry build gate', () => {
         expect(mocks.withSentryConfig).toHaveBeenCalledOnce();
         expect(config.compiler?.runAfterProductionCompile).toBeTypeOf('function');
     });
+
+    it('traces the complete Cloud Tasks build for every Vercel enqueue route', async () => {
+        const config = (await import('../../next.config')).default;
+        const includes = config.outputFileTracingIncludes ?? {};
+        const taskBuild = './node_modules/@google-cloud/tasks/build/**/*';
+        for (const route of [
+            '/api/analysis/start',
+            '/api/analysis/step',
+            '/api/analysis/preflight',
+            '/api/analysis/preflight/[preflightId]/entitle',
+            '/api/analysis/betatest/preflight/[preflightId]/admit',
+            '/api/analysis/v2/recover',
+            '/api/analysis/v2/worker',
+        ]) {
+            expect(includes[route]).toContain(taskBuild);
+        }
+    });
 });

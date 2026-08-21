@@ -57,8 +57,8 @@ describe('ambiguous preflight start resolution CLI options', () => {
         });
     });
 
-    it('accepts senary and septenary as V2 slots and rejects octonary', () => {
-        for (const credentialSlot of ['senary', 'septenary'] as const) {
+    it('accepts senary, septenary, and tenth as V2 slots and rejects octonary', () => {
+        for (const credentialSlot of ['senary', 'septenary', 'tenth'] as const) {
             expect(parseAmbiguousStartOptions(resolveArguments.map((argument) =>
                 argument === '--credential-slot=quinary'
                     ? `--credential-slot=${credentialSlot}`

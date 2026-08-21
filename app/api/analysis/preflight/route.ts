@@ -19,6 +19,8 @@ import {
 import {
     PreflightTaskEnqueueError,
     enqueuePreflightTask,
+    preflightEnqueueFailureCode,
+    preflightEnqueueFailureMetadata,
     resolvePreflightDispatchPolicy,
 } from '@/lib/services/analysis/preflight-tasks';
 import {
@@ -254,6 +256,17 @@ async function handleAnonymousPOST(
                     reservationToken: reservation.reservationToken,
                 }, { env, client });
             } catch (error) {
+                const metadata = error instanceof PreflightTaskEnqueueError
+                    ? error.failureMetadata
+                    : preflightEnqueueFailureMetadata(error);
+                console.error('Preflight Cloud Tasks enqueue failed.', {
+                    failure_code: error instanceof PreflightTaskEnqueueError
+                        ? error.failureCode
+                        : preflightEnqueueFailureCode(error),
+                    error_name: metadata.errorName,
+                    missing_module: metadata.missingModule,
+                    provider_code: metadata.providerCode,
+                });
                 if (error instanceof PreflightTaskEnqueueError
                     && error.disposition === 'replayable') {
                     return failed(503, 'QUEUE_UNAVAILABLE', '사전 점검 작업 큐를 사용할 수 없습니다.');
@@ -511,6 +524,17 @@ async function handlePOST(
                     config: dispatchPolicy.config,
                 });
             } catch (error) {
+                const metadata = error instanceof PreflightTaskEnqueueError
+                    ? error.failureMetadata
+                    : preflightEnqueueFailureMetadata(error);
+                console.error('Preflight Cloud Tasks enqueue failed.', {
+                    failure_code: error instanceof PreflightTaskEnqueueError
+                        ? error.failureCode
+                        : preflightEnqueueFailureCode(error),
+                    error_name: metadata.errorName,
+                    missing_module: metadata.missingModule,
+                    provider_code: metadata.providerCode,
+                });
                 if (
                     error instanceof PreflightTaskEnqueueError
                     && error.disposition === 'terminal'

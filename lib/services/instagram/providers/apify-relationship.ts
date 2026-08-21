@@ -299,6 +299,9 @@ export function selectPreflightApifyCredentialSlot(
     preflightId: string,
     env: Record<string, string | undefined> = process.env,
 ): ApifyCredentialSlot {
+    if (env.ANALYSIS_V2_APIFY_API_TOKEN_SLOT?.trim()) {
+        return selectAnalysisV2ApifyCredentialSlot(env);
+    }
     const hasPrimary = Boolean(
         env.APIFY_PRIMARY_API_TOKEN?.trim() || env.APIFY_API_TOKEN?.trim()
     );
@@ -329,9 +332,9 @@ export function selectApifyApiToken(
         quinary: 'APIFY_QUINARY_API_TOKEN',
         senary: 'APIFY_SENARY_API_TOKEN',
         septenary: 'APIFY_SEPTENARY_API_TOKEN',
+        tenth: 'APIFY_TENTH_API_TOKEN',
         octonary: 'APIFY_OCTONARY_API_TOKEN',
         nonary: 'APIFY_NONARY_API_TOKEN',
-        tenth: 'APIFY_TENTH_API_TOKEN',
     }[slot];
     const token = slot === 'primary'
         ? env[key]?.trim() || env.APIFY_API_TOKEN?.trim()
