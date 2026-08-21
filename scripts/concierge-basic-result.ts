@@ -1,7 +1,7 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { z } from 'zod';
 import { supabaseAdmin } from '@/lib/supabase/admin';
-import { getAnalysisPlan } from '@/lib/domain/analysis/plan-catalog';
+import type { AccountContext, AppearanceGrade } from '@/lib/domain/analysis/risk-policy';
 import { calculateV2FinalScores, calculateV2PreliminaryScores, hasCandidateTargetMention } from '@/lib/services/analysis/v2-candidate-scoring';
 import { analysisV2CandidateId } from '@/lib/services/analysis/v2-ai-scoring-executors';
 import { joinVerifiedFemaleTargetInteractions, summarizeCandidateTargetInteractions } from '@/lib/services/analysis/v2-target-interactions';
@@ -11,17 +11,17 @@ import { createReplayStagedAiAdapter } from '@/lib/services/analysis/replay/repl
 import { captureAnalysisV2ReplayBundle } from '@/lib/services/analysis/replay/replay-capture';
 import { runAnalysisV2AiReplay, type ReplayAccountAiDetail } from '@/lib/services/analysis/replay/replay-runner';
 import { FIRST_PAYMENT_BASIC_V211_CONCIERGE_CAPABILITY } from '@/lib/services/analysis/replay/replay-source-lineage';
-import { analysisV2ProviderRunStore, createAnalysisV2ProviderInputHash, createAnalysisV2ProviderOperationKey } from '@/lib/services/analysis/v2-provider-run-store';
+import { analysisV2ProviderRunStore, createAnalysisV2ProviderInputHash, createAnalysisV2ProviderOperationKey, type StoredAnalysisV2ProviderRun } from '@/lib/services/analysis/v2-provider-run-store';
 import { getProfilesBatchV2, type ProfilesBatchV2AttemptSnapshot } from '@/lib/services/instagram/scraper';
 import { APIFY_PROFILE_ACTOR_ID } from '@/lib/services/instagram/providers/apify';
 import { profileMaximumCharge } from '@/lib/services/analysis/v2-apify-operation-costs';
 import { firstPaymentConciergeCheckpointProfile } from '@/lib/services/analysis/first-payment-concierge';
 import type { InstagramProfile } from '@/lib/types/instagram';
+import type { FeatureAnalysisResult } from '@/lib/services/ai/v2-staged-analysis';
 
 const ORDER_ID = 'bb3ddb08-f8fa-42d9-b1f6-92621be18e38';
 const OLD_REQUEST_ID = 'd88bf426-2295-44d9-b4b4-dcbf79b775b7';
 const BATCH_SIZE = 30;
-const BASIC_PLAN = getAnalysisPlan('basic');
 const EVALUATION_POLICY = {
     capability: FIRST_PAYMENT_BASIC_V211_CONCIERGE_CAPABILITY,
     aiStage: AI_STAGE_POLICY_V211_VERSION,
@@ -59,7 +59,7 @@ function safeError(error: unknown): string {
     return /^([A-Z][A-Z0-9_]{2,119})/.exec(text)?.[1] ?? 'CONCIERGE_BASIC_FAILED';
 }
 
-function accountContext(feature: any, profile: InstagramProfile): any {
+function accountContext(feature: FeatureAnalysisResult, profile: InstagramProfile): AccountContext {
     if (feature.features.accountContext !== 'official_group_or_brand') return feature.features.accountContext;
     const bio = `${profile.fullName ?? ''} ${profile.bio ?? ''}`.toLowerCase();
     return /official|official account|공식|브랜드|brand|company|회사/.test(bio)
@@ -67,12 +67,12 @@ function accountContext(feature: any, profile: InstagramProfile): any {
         : 'personal';
 }
 
-function strongPartner(feature: any): boolean {
+function strongPartner(feature: FeatureAnalysisResult): boolean {
     return feature.features.partnerExclusionContext === 'none'
         && (feature.features.marriageEvidence === 'strong' || feature.features.partnerEvidence === 'strong');
 }
 
-function weakPartner(feature: any): boolean {
+function weakPartner(feature: FeatureAnalysisResult): boolean {
     return feature.features.partnerExclusionContext === 'none'
         && !strongPartner(feature)
         && (feature.features.marriageEvidence === 'possible' || feature.features.partnerEvidence === 'weak');
@@ -82,10 +82,10 @@ function exposureLevel(score: number): 'high' | 'medium' | 'low' {
     return score >= 0.66 ? 'high' : score >= 0.33 ? 'medium' : 'low';
 }
 
-async function rpc(name: string, params: Record<string, unknown> = {}): Promise<any> {
+async function rpc<T>(name: string, params: Record<string, unknown> = {}): Promise<T> {
     const { data, error } = await supabaseAdmin.rpc(name, params);
     if (error) die(`CONCIERGE_BASIC_RPC_${name.toUpperCase()}_FAILED`);
-    return data;
+    return data as T;
 }
 
 async function loadOrder(): Promise<{ userId: string; targetUsername: string }> {
@@ -174,13 +174,15 @@ async function collectProfiles(targetUsername: string, rows: readonly EvidenceRo
 async function reconcileProfileRuns(): Promise<void> {
     const { data, error } = await supabaseAdmin.rpc('list_analysis_v2_unreconciled_provider_runs', { p_limit: 64 });
     if (error || !Array.isArray(data)) return;
-    for (const run of data as any[]) {
+    for (const run of data as StoredAnalysisV2ProviderRun[]) {
         if (run.requestId !== OLD_REQUEST_ID || !String(run.jobKey).startsWith('manual:concierge:profiles:')) continue;
+        if (!run.runId || !['succeeded', 'failed', 'aborted', 'timed_out'].includes(run.status)) continue;
         await analysisV2ProviderRunStore.reconcileUsage({
             reservationToken: run.reservationToken, runId: run.runId,
             logicalProvider: run.logicalProvider, actorId: run.actorId,
             credentialSlot: run.credentialSlot, maxChargeUsd: Number(run.maxChargeUsd),
-            status: run.status, actualUsageUsd: Number(run.actualUsageUsd ?? 0),
+            status: run.status as 'succeeded' | 'failed' | 'aborted' | 'timed_out',
+            actualUsageUsd: Number(run.actualUsageUsd ?? 0),
         }).catch(() => undefined);
     }
 }
@@ -188,7 +190,10 @@ async function reconcileProfileRuns(): Promise<void> {
 async function main(): Promise<void> {
     const startedAt = Date.now();
     const order = await loadOrder();
-    const evidencePayload = await rpc('load_analysis_v2_target_evidence', {
+    const evidencePayload = await rpc<{
+        rows?: unknown;
+        manifest?: { interactorCount?: number; resultHash?: string };
+    }>('load_analysis_v2_target_evidence', {
         p_request_id: OLD_REQUEST_ID, p_job_key: 'track:target-evidence:collect',
     });
     const rows = z.array(rowSchema).parse(evidencePayload?.rows ?? []);
@@ -202,6 +207,7 @@ async function main(): Promise<void> {
         targetInteractions: rows.map(row => ({ actorUsername: row.actorUsername, postId: row.postId, signal: row.signal, sourceInteractionId: row.sourceInteractionId, occurredAt: row.occurredAt, content: row.content })),
         reverseInteractions: [],
     };
+    if (!evidencePayload.manifest?.resultHash) die('CONCIERGE_BASIC_TARGET_EVIDENCE_SCOPE_CONFLICT');
     const descriptorHash = sha256(['concierge-basic-descriptor-v1', OLD_REQUEST_ID, evidencePayload.manifest.resultHash].join('\n'));
     const bundle = await captureAnalysisV2ReplayBundle({
         selector: { targetUsername: order.targetUsername },
@@ -230,7 +236,7 @@ async function main(): Promise<void> {
         const username = profile.username.toLowerCase();
         const interaction = interactionByUsername.get(username);
         const mention = hasCandidateTargetMention({ targetUsername: order.targetUsername, candidateUsername: username, targetPosts: [], candidatePosts: profile.latestPosts ?? [] });
-        return { candidateId: analysisV2CandidateId(username), username, appearanceGrade: feature.features.appearanceGrade as any, exposureScore: feature.features.exposureScore, accountContext: accountContext(feature, profile), hasWeakPartnerEvidence: weakPartner(feature), hasStrongPartnerEvidence: strongPartner(feature), uniqueTargetPostsLikedByCandidate: interaction?.uniqueTargetPostsLikedByCandidate ?? 0, boundedCandidateCommentsOnTarget: interaction?.boundedCandidateCommentsOnTarget ?? 0, hasCandidateToTargetTagOrCaptionMention: mention.candidateToTargetTagOrCaptionMention, hasTargetToCandidateTagOrCaptionMention: mention.targetToCandidateTagOrCaptionMention };
+        return { candidateId: analysisV2CandidateId(username), username, appearanceGrade: feature.features.appearanceGrade as AppearanceGrade, exposureScore: feature.features.exposureScore, accountContext: accountContext(feature, profile), hasWeakPartnerEvidence: weakPartner(feature), hasStrongPartnerEvidence: strongPartner(feature), uniqueTargetPostsLikedByCandidate: interaction?.uniqueTargetPostsLikedByCandidate ?? 0, boundedCandidateCommentsOnTarget: interaction?.boundedCandidateCommentsOnTarget ?? 0, hasCandidateToTargetTagOrCaptionMention: mention.candidateToTargetTagOrCaptionMention, hasTargetToCandidateTagOrCaptionMention: mention.targetToCandidateTagOrCaptionMention };
     });
     const preliminary = calculateV2PreliminaryScores({ candidates, orderedMutualUsernames: rows.map(row => row.actorUsername), excludedUsername: null, riskPolicyVersion: 'risk-policy-v2.5' });
     const finalScores = calculateV2FinalScores({ preliminary, observedReverseLikeCandidateIds: new Set(), notCollectedCandidateIds: new Set(preliminary.map(row => row.candidateId)), riskPolicyVersion: 'risk-policy-v2.5' }).sort((a, b) => b.displayScore - a.displayScore || a.candidateId.localeCompare(b.candidateId));
