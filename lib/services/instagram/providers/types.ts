@@ -30,11 +30,11 @@ export const APIFY_CREDENTIAL_SLOTS = [
  * not silently broaden, while still allowing the batch runner to bind its
  * provider ledger.
  */
-export type ApifyCredentialSlot = typeof APIFY_CREDENTIAL_SLOTS[number] | 'octonary' | 'nonary' | 'tenth';
+export type ApifyCredentialSlot = typeof APIFY_CREDENTIAL_SLOTS[number] | 'octonary' | 'nonary';
 
 export function isApifyCredentialSlot(value: unknown): value is ApifyCredentialSlot {
     return typeof value === 'string'
-        && (value === 'tenth' || APIFY_CREDENTIAL_SLOTS.includes(value as typeof APIFY_CREDENTIAL_SLOTS[number]));
+        && APIFY_CREDENTIAL_SLOTS.includes(value as typeof APIFY_CREDENTIAL_SLOTS[number]);
 }
 export type ProviderCostTerminalStatus = 'succeeded' | 'failed' | 'aborted' | 'timed_out';
 
