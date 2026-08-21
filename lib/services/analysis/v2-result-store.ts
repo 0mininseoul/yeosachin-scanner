@@ -184,7 +184,7 @@ export interface AnalysisV2ProfileClassificationRow {
     featureOperationKey: string | null;
     featureResultHash: string | null;
     baselineClassification?: string;
-    classificationSource?: 'triage' | 'feature' | 'gender_resolution' | 'unknown' | 'unavailable';
+    classificationSource?: 'triage' | 'feature' | 'gender_resolution' | 'name_only' | 'unknown' | 'unavailable';
     genderResolutionStatus?: 'disabled' | 'not_eligible' | 'ready_applied'
         | 'ready_not_needed' | 'ready_inconclusive' | 'cutoff'
         | 'capacity_skipped' | 'terminal_unavailable';
@@ -499,7 +499,7 @@ const featureRowSchema = z.object({
         'media_unavailable', 'analysis_unavailable',
     ]).optional(),
     classificationSource: z.enum([
-        'triage', 'feature', 'gender_resolution', 'unknown', 'unavailable',
+        'triage', 'feature', 'gender_resolution', 'name_only', 'unknown', 'unavailable',
     ]).optional(),
     genderResolutionStatus: z.enum([
         'disabled', 'not_eligible', 'ready_applied', 'ready_not_needed',
@@ -521,6 +521,7 @@ const featureRowSchema = z.object({
 }).strict().superRefine((value, context) => {
     const genderPair = value.genderOperationKey !== null && value.genderResultHash !== null;
     const featurePair = value.featureOperationKey !== null && value.featureResultHash !== null;
+    const nameOnly = value.classificationSource === 'name_only';
     if ((value.genderOperationKey === null) !== (value.genderResultHash === null)) {
         context.addIssue({ code: 'custom', message: 'Gender operation/result must be paired.' });
     }
@@ -574,14 +575,28 @@ const featureRowSchema = z.object({
             message: 'Pre-feature admission only permits an unresolved triage-only outcome.',
         });
     }
+    if (nameOnly && (
+        !['verified_female', 'verified_non_female'].includes(value.classification)
+        || value.feature !== null
+        || featurePair
+        || value.mediaContext?.featureAnalyzedSelectionIds.length !== 0
+        || (value.preFeaturePolicyVersion ?? null) !== null
+        || (value.preFeatureAdmission ?? null) !== null
+    )) {
+        context.addIssue({
+            code: 'custom',
+            message: 'Name-only classifications cannot retain feature evidence or pre-feature admission.',
+        });
+    }
     if (
         !preFeatureSkip
         && ['verified_female', 'unresolved', 'unresolved_stage_conflict'].includes(value.classification)
         && !featurePair
+        && !nameOnly
     ) {
         context.addIssue({ code: 'custom', message: 'This classification requires feature analysis.' });
     }
-    if ((value.classification === 'verified_female') !== (value.feature !== null)) {
+    if (!nameOnly && (value.classification === 'verified_female') !== (value.feature !== null)) {
         context.addIssue({ code: 'custom', message: 'Only verified women retain scoring features.' });
     }
 });

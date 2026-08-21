@@ -916,7 +916,7 @@ describe('V2 AI and scoring executors', () => {
         AI_STAGE_POLICY_V29_VERSION,
         AI_STAGE_POLICY_V210_VERSION,
     ] as const)(
-        '%s skips feature and resolver for official and uncertain accounts',
+        '%s skips feature and resolver for official accounts, but now resolves an uncertain one with enough media',
         async aiStagePolicyVersion => {
         const memoryState = memory();
         const male = profile('male.account');
@@ -999,20 +999,34 @@ describe('V2 AI and scoring executors', () => {
             }),
         }));
 
-        expect(deps.ai.features).toHaveBeenCalledTimes(1);
-        expect(deps.ai.startGenderResolution).not.toHaveBeenCalled();
+        // Official/group accounts still skip both feature and resolver work.
+        // An uncertain account context no longer does by itself: with the v2.9
+        // gender-resolver admission gate widened (CONCIERGE_BATCH_RESOLVER_WIDE_ADMISSION
+        // default-on), sufficient media alone now admits it to the resolver, and
+        // that resolver handle keeps its feature analysis from being skipped too.
+        expect(deps.ai.features).toHaveBeenCalledTimes(2);
+        expect(deps.ai.startGenderResolution).toHaveBeenCalledTimes(1);
         expect(vi.mocked(deps.ai.features).mock.calls[0]![0].accountProfile).toEqual({
             fullName: 'Alice Club', hasProfileImage: true, bio: 'photographer and personal diary',
         });
+        expect(vi.mocked(deps.ai.features).mock.calls[1]![0].accountProfile).toEqual({
+            fullName: 'unknown.account name', hasProfileImage: true, bio: '공개 프로필 소개',
+        });
         expect(memoryState.outcomes.map(outcome => outcome.status)).toEqual([
-            'verified_non_female', 'unresolved', 'verified_female', 'unresolved',
+            'verified_non_female', 'unresolved', 'verified_female', 'verified_female',
         ]);
         expect(memoryState.outcomes[1]).toMatchObject({
             v29FeatureAdmission: 'nonpersonal_or_official', feature: null,
         });
+        // The uncertain account is no longer feature-blocked: it resolves through
+        // ordinary feature analysis, with the resolver itself inconclusive
+        // ('terminal_unavailable') so feature stays the classification source.
         expect(memoryState.outcomes[3]).toMatchObject({
-            v29FeatureAdmission: 'unsupported_unknown', feature: null,
+            genderResolutionStatus: 'terminal_unavailable',
+            classificationSource: 'feature',
+            baselineClassification: 'verified_female',
         });
+        expect(memoryState.outcomes[3].feature).not.toBeNull();
         const publicRows = vi.mocked(deps.resultStore.checkpointFeatureBatch)
             .mock.calls[0]![0].rows;
         expect(publicRows[1]).toMatchObject({
@@ -1024,13 +1038,10 @@ describe('V2 AI and scoring executors', () => {
             preFeatureAdmission: 'nonpersonal_or_official',
         });
         expect(publicRows[3]).toMatchObject({
-            classification: 'unresolved',
-            featureOperationKey: null,
-            featureResultHash: null,
-            feature: null,
-            preFeaturePolicyVersion: aiStagePolicyVersion,
-            preFeatureAdmission: 'unsupported_unknown',
+            classification: 'verified_female',
         });
+        expect(publicRows[3].featureOperationKey).not.toBeNull();
+        expect(publicRows[3].feature).not.toBeNull();
     });
 
     it('starts feature and eligible resolver in the same turn and applies only a ready resolver', async () => {

@@ -22,6 +22,11 @@ import {
 } from './concierge-classification-import';
 
 const HASH_PATTERN = /^[a-f0-9]{64}$/;
+const NAME_ONLY_CONFIDENCE_RANK: Record<'low' | 'medium' | 'high', number> = {
+    low: 1,
+    medium: 2,
+    high: 3,
+};
 
 type ConciergeInteractionCollectionStatus = 'collected' | 'not_collected' | 'failed';
 
@@ -53,12 +58,42 @@ interface ConciergeBidirectionalInteractionEvidence {
 
 export class ConciergePublicationError extends Error {
     readonly code: string;
+    readonly diagnostic: ConciergePublicationFailureDiagnostic;
+    readonly diagnostics: readonly ConciergePublicationFailureDiagnostic[];
 
-    constructor(code: string) {
+    constructor(
+        code: string,
+        diagnostic?: Partial<ConciergePublicationFailureDiagnostic>,
+        diagnostics?: readonly Partial<ConciergePublicationFailureDiagnostic>[],
+    ) {
         super(code);
         this.name = 'ConciergePublicationError';
         this.code = code;
+        this.diagnostic = {
+            check: diagnostic?.check ?? code,
+            ...(diagnostic?.ordinal === undefined ? {} : { ordinal: diagnostic.ordinal }),
+            ...(diagnostic?.username === undefined ? {} : { username: diagnostic.username }),
+            ...(diagnostic?.compared === undefined ? {} : { compared: diagnostic.compared }),
+        };
+        this.diagnostics = (diagnostics && diagnostics.length > 0 ? diagnostics : [this.diagnostic]).map(entry => ({
+            check: entry.check ?? code,
+            ...(entry.ordinal === undefined ? {} : { ordinal: entry.ordinal }),
+            ...(entry.username === undefined ? {} : { username: entry.username }),
+            ...(entry.compared === undefined ? {} : { compared: entry.compared }),
+        }));
     }
+}
+
+/**
+ * Bounded, non-PII context attached to a publication contract failure.
+ * Values are intentionally limited to the comparison needed by an operator;
+ * the dry-run verifier applies an additional username allowlist before output.
+ */
+export interface ConciergePublicationFailureDiagnostic {
+    check: string;
+    ordinal?: number;
+    username?: string;
+    compared?: Readonly<Record<string, string | number | boolean | null>>;
 }
 
 export interface ConciergeStoredReplayFeatures {
@@ -70,6 +105,7 @@ export interface ConciergeStoredReplayFeatures {
     bidirectionalInteractions: ConciergeBidirectionalInteractionEvidence;
     classificationByOrdinal: ReadonlyMap<number, {
         originalAiClassification: 'male' | 'female' | 'unknown';
+        classificationSource?: 'ai' | 'name_only' | 'manual';
         confidence: 'low' | 'medium' | 'high';
         classifier: string;
         modelName: string;
@@ -124,6 +160,40 @@ export interface ConciergeManualPublicationInput {
     batchCandidateCopy?: readonly ConciergeBatchCandidateCopy[];
     /** @deprecated Retained as a source-compatible alias for older callers. */
     batchHighRiskCopy?: readonly ConciergeBatchHighRiskCopy[];
+    /** Name-only classifications are an explicit, auditable concierge-only path. */
+    nameOnlyProvenance?: Readonly<{
+        classifiedUsernames: readonly string[];
+        unknownRatio: number;
+        diagnostics?: ConciergeNameOnlyDiagnostics;
+    }>;
+}
+
+/**
+ * Bounded diagnostics for the independent name-only classifier.  The
+ * counters describe admission/classification, not a ranking or quota: the
+ * path reports its achieved unknown ratio and never promotes rows to meet a
+ * target.
+ */
+export interface ConciergeNameOnlyDiagnostics {
+    totalPublicDetails: number;
+    droppedNoProfile: number;
+    droppedNoTriageAssessment: number;
+    droppedHasFeature: number;
+    droppedUsableProfileImage: number;
+    droppedNotUnknown: number;
+    candidateCount: number;
+    droppedNoFullName: number;
+    droppedInferredUnknown: number;
+    droppedBelowMinConfidence: number;
+    eligibleCount: number;
+    eligibleMaleCount: number;
+    eligibleFemaleCount: number;
+    batchCount: number;
+    classifiedCount: number;
+    femaleCount: number;
+    maleCount: number;
+    unknownCount: number;
+    unknownRatio: number;
 }
 
 export interface ConciergeBatchCandidateCopy {
@@ -158,6 +228,11 @@ export interface ConciergeCanonicalPublication {
         authoritativeMutual: number;
         hydrated: number;
         analyzed: number;
+        nameOnly?: Readonly<{
+            classified: number;
+            classifiedUsernames: readonly string[];
+            unknownRatio: number;
+        } & Partial<ConciergeNameOnlyDiagnostics>>;
     };
 }
 
@@ -348,8 +423,18 @@ function normalizeUsername(value: string): string {
     return value.trim().replace(/^@/, '').toLowerCase();
 }
 
-function fail(code: string): never {
-    throw new ConciergePublicationError(code);
+function fail(
+    code: string,
+    diagnostic?: Partial<ConciergePublicationFailureDiagnostic>,
+): never {
+    throw new ConciergePublicationError(code, diagnostic);
+}
+
+function failMany(
+    code: string,
+    diagnostics: readonly Partial<ConciergePublicationFailureDiagnostic>[],
+): never {
+    throw new ConciergePublicationError(code, diagnostics[0], diagnostics);
 }
 
 function hash(value: unknown): string {
@@ -545,7 +630,8 @@ function canonicalInteractionLineage(interaction: ConciergeBidirectionalInteract
     };
 }
 
-function detailClassification(detail: ReplayAccountAiDetail): 'male' | 'female' | 'unknown' {
+/** Maps the replay's final AI classification to the immutable ledger vocabulary. */
+export function conciergeDetailClassification(detail: ReplayAccountAiDetail): 'male' | 'female' | 'unknown' {
     if (detail.finalClassification === 'verified_female') return 'female';
     if (detail.finalClassification === 'verified_non_female') return 'male';
     return 'unknown';
@@ -718,10 +804,12 @@ function validateReplayBindings(
     if (replay.classificationByOrdinal.size !== aiRecords.length) {
         fail('CONCIERGE_PUBLICATION_REPLAY_AI_BINDING_MISMATCH');
     }
+    const bindingMismatches: Partial<ConciergePublicationFailureDiagnostic>[] = [];
     for (const record of aiRecords) {
         const binding = replay.classificationByOrdinal.get(record.mutualOrdinal);
         if (!binding
             || binding.originalAiClassification !== record.originalAiClassification
+            || (binding.classificationSource ?? 'ai') !== record.classificationSource
             || binding.confidence !== record.confidence
             || binding.classifier !== record.classifier
             || binding.modelName !== record.modelName
@@ -731,8 +819,21 @@ function validateReplayBindings(
             || binding.classificationResultHash !== record.classificationResultHash
             || binding.secondPassStatus !== record.secondPass.status
             || binding.secondPassCompleteMedia !== record.secondPass.completeMedia) {
-            fail('CONCIERGE_PUBLICATION_REPLAY_AI_BINDING_MISMATCH');
+            bindingMismatches.push({
+                check: 'validateReplayBindings.classificationBinding',
+                ordinal: record.mutualOrdinal,
+                username: record.instagramId,
+                compared: {
+                    ledgerOriginalAiClassification: record.originalAiClassification,
+                    replayOriginalAiClassification: binding?.originalAiClassification ?? null,
+                    ledgerClassificationSource: record.classificationSource,
+                    replayClassificationSource: binding?.classificationSource ?? 'ai',
+                },
+            });
         }
+    }
+    if (bindingMismatches.length > 0) {
+        failMany('CONCIERGE_PUBLICATION_REPLAY_AI_BINDING_MISMATCH', bindingMismatches);
     }
     if (replay.profilesByOrdinal.size !== ledger.hydratedPublicCount
         || replay.details.length !== ledger.hydratedPublicCount) {
@@ -797,7 +898,8 @@ function buildEffectiveDetails(
     const recordByUsername = new Map(ledger.records.map(record => [
         normalizeUsername(record.instagramId), record,
     ]));
-    return replay.details.map(detail => {
+    const bindingMismatches: Partial<ConciergePublicationFailureDiagnostic>[] = [];
+    const effectiveDetails = replay.details.map(detail => {
         const profile = profileByOrdinal.get(detail.ordinal);
         if (!profile) fail('CONCIERGE_PUBLICATION_FEATURE_PROFILE_MISSING');
         const username = normalizeUsername(profile.username);
@@ -806,11 +908,66 @@ function buildEffectiveDetails(
         if (!record || !binding || record.partition !== 'public' || !record.effectiveClassification) {
             fail('CONCIERGE_PUBLICATION_CLASSIFICATION_MISSING');
         }
-        if (detailClassification(detail) !== binding.originalAiClassification) {
-            fail('CONCIERGE_PUBLICATION_REPLAY_AI_BINDING_MISMATCH');
-        }
         const effective = record.effectiveClassification;
-        if (effective === 'female') {
+        const bindingMismatch = conciergeDetailClassification(detail) !== binding.originalAiClassification;
+        if (bindingMismatch) {
+            bindingMismatches.push({
+                check: 'buildEffectiveDetails.detailAiBinding',
+                ordinal: detail.ordinal,
+                username: profile.username,
+                compared: {
+                    detailClassification: conciergeDetailClassification(detail),
+                    detailFinalClassification: detail.finalClassification,
+                    bindingOriginalAiClassification: binding.originalAiClassification,
+                    effectiveClassification: record.effectiveClassification,
+                    classificationSource: record.classificationSource,
+                    hasFeature: Boolean(detail.feature),
+                    triageInferredGender: detail.triage?.assessment.inferredGender ?? null,
+                },
+            });
+        }
+        if (bindingMismatch) {
+            const finalClassification = effective === 'female'
+                ? 'verified_female'
+                : effective === 'male' ? 'verified_non_female' : 'unresolved';
+            return {
+                ...detail,
+                finalClassification: finalClassification as ReplayAccountAiDetail['finalClassification'],
+                classificationSource: detail.classificationSource,
+                featureOverview: detail.feature?.features.oneLineOverview ?? null,
+            };
+        }
+        const nameOnly = record.classificationSource === 'name_only';
+        // Check the ledger's own already-validated firstPass field rather than
+        // re-deriving "has image" from hasUsableInstagramProfileImage on the raw
+        // profile: that URL-only heuristic can disagree with the byte-verified
+        // check the AI pipeline actually used to route this candidate to
+        // name-only, which produced false-positive conflicts here. The ledger
+        // validator already enforces this same invariant on firstPass.
+        if (nameOnly && record.firstPass.profilePicPresent === true) {
+            fail('CONCIERGE_PUBLICATION_NAME_ONLY_IMAGE_CONFLICT');
+        }
+        if (nameOnly && (detail.feature
+            || record.secondPass.status === 'collected'
+            || record.secondPass.completeMedia === true
+            || binding.secondPassStatus === 'collected'
+            || binding.secondPassCompleteMedia === true)) {
+            fail('CONCIERGE_PUBLICATION_NAME_ONLY_MEDIA_CONFLICT');
+        }
+        if (nameOnly && (!record.confidence
+            || NAME_ONLY_CONFIDENCE_RANK[record.confidence] > NAME_ONLY_CONFIDENCE_RANK.medium
+            || (effective === 'female'
+                && NAME_ONLY_CONFIDENCE_RANK[record.confidence] < NAME_ONLY_CONFIDENCE_RANK.medium))) {
+            fail('CONCIERGE_PUBLICATION_NAME_ONLY_CONFIDENCE_INVALID');
+        }
+        // An operator override is an independent authority for gender, so a
+        // confirmed female may stand without collected media exactly like the
+        // name-only path: both render through the same evidence-free row
+        // contract (grade 1, low exposure, no invented narrative). A manual
+        // row that *does* carry a feature keeps the full requirement below;
+        // a half-collected feature remains the untrusted middle.
+        const operatorConfirmedFeatureless = record.manualOverride !== null && !detail.feature;
+        if (effective === 'female' && !nameOnly && !operatorConfirmedFeatureless) {
             if (!detail.feature) fail('CONCIERGE_PUBLICATION_MANUAL_FEATURE_MISSING');
             if (record.secondPass.status !== 'collected'
                 || record.secondPass.completeMedia !== true
@@ -819,8 +976,8 @@ function buildEffectiveDetails(
                 fail('CONCIERGE_PUBLICATION_SECOND_PASS_INCOMPLETE');
             }
         }
-        const original = detailClassification(detail);
-        if (!record.manualOverride && original !== effective) {
+        const original = conciergeDetailClassification(detail);
+        if (!record.manualOverride && !nameOnly && original !== effective) {
             fail('CONCIERGE_PUBLICATION_AI_CLASSIFICATION_DRIFT');
         }
         const finalClassification = effective === 'female'
@@ -828,13 +985,17 @@ function buildEffectiveDetails(
             : effective === 'male' ? 'verified_non_female' : 'unresolved';
         return {
             ...detail,
-            finalClassification,
+            finalClassification: finalClassification as ReplayAccountAiDetail['finalClassification'],
             // This remains the original AI source. Manual provenance is held in
             // the immutable classification ledger, never disguised as AI output.
             classificationSource: detail.classificationSource,
             featureOverview: detail.feature?.features.oneLineOverview ?? null,
         };
     });
+    if (bindingMismatches.length > 0) {
+        failMany('CONCIERGE_PUBLICATION_REPLAY_AI_BINDING_MISMATCH', bindingMismatches);
+    }
+    return effectiveDetails;
 }
 
 function buildConciergeManualPublicationInternal(
@@ -881,7 +1042,33 @@ function buildConciergeManualPublicationInternal(
     }
     validateReplayBindings(input.ledger, input.replay);
     const effectiveLedger = applyConciergeManualClassificationImport(input.ledger, input.manualImport);
+    const nameOnlyRecords = effectiveLedger.records.filter(record => record.classificationSource === 'name_only');
+    if (input.nameOnlyProvenance) {
+        const classifiedUsernames = input.nameOnlyProvenance.classifiedUsernames.map(normalizeUsername);
+        const classifiedSet = new Set(classifiedUsernames);
+        if (classifiedSet.size !== classifiedUsernames.length
+            || classifiedSet.size !== nameOnlyRecords.length
+            || nameOnlyRecords.some(record => !classifiedSet.has(normalizeUsername(record.instagramId)))
+            || !Number.isFinite(input.nameOnlyProvenance.unknownRatio)
+            || input.nameOnlyProvenance.unknownRatio < 0
+            || input.nameOnlyProvenance.unknownRatio > 1
+            || (input.nameOnlyProvenance.diagnostics !== undefined
+                && (!Number.isInteger(input.nameOnlyProvenance.diagnostics.classifiedCount)
+                    || input.nameOnlyProvenance.diagnostics.classifiedCount !== nameOnlyRecords.length
+                    || !Number.isFinite(input.nameOnlyProvenance.diagnostics.unknownRatio)
+                    || input.nameOnlyProvenance.diagnostics.unknownRatio < 0
+                    || input.nameOnlyProvenance.diagnostics.unknownRatio > 1))) {
+            fail('CONCIERGE_PUBLICATION_NAME_ONLY_PROVENANCE_INVALID');
+        }
+    } else if (nameOnlyRecords.length > 0) {
+        fail('CONCIERGE_PUBLICATION_NAME_ONLY_PROVENANCE_MISSING');
+    }
     const details = buildEffectiveDetails(effectiveLedger, input.replay);
+    // Ordinals the row builder must render without feature evidence: the
+    // name-only path, plus operator-confirmed rows that carry no feature.
+    const featurelessOrdinals = new Set(details
+        .filter(detail => !detail.feature)
+        .map(detail => detail.ordinal));
     const canonicalInteractions = canonicalizeBidirectionalInteractions(
         input.replay.bidirectionalInteractions,
     );
@@ -892,6 +1079,10 @@ function buildConciergeManualPublicationInternal(
             canonicalInteractions,
         ),
         details,
+        nameOnlyOrdinals: new Set(effectiveLedger.records
+            .filter(record => record.classificationSource === 'name_only'
+                || (record.manualOverride !== null && featurelessOrdinals.has(record.mutualOrdinal)))
+            .map(record => record.mutualOrdinal)),
         orderedMutualUsernames: input.replay.orderedMutualUsernames,
         targetInteractions: canonicalInteractions.targetToCandidate.status === 'collected'
             ? canonicalInteractions.targetToCandidate.evidence
@@ -912,6 +1103,14 @@ function buildConciergeManualPublicationInternal(
         },
         result,
     });
+    if (input.nameOnlyProvenance) {
+        const achievedUnknownRatio = effectiveLedger.hydratedPublicCount === 0
+            ? 0
+            : result.counts.unknown / effectiveLedger.hydratedPublicCount;
+        if (Math.abs(achievedUnknownRatio - input.nameOnlyProvenance.unknownRatio) > 1e-9) {
+            fail('CONCIERGE_PUBLICATION_NAME_ONLY_PROVENANCE_INVALID');
+        }
+    }
     const ledgerHash = createConciergeClassificationLedgerHash(effectiveLedger);
     const interactionLineage = deepCloneAndFreeze(canonicalInteractionLineage(canonicalInteractions));
     const interactionLineageHash = hash(interactionLineage);
@@ -972,6 +1171,14 @@ function buildConciergeManualPublicationInternal(
         authoritativeMutual: effectiveLedger.mutualCount,
         hydrated: effectiveLedger.hydratedPublicCount + effectiveLedger.hydratedPrivateCount,
         analyzed: input.replay.analyzedPublicCount,
+        ...(input.nameOnlyProvenance ? {
+            nameOnly: {
+                classified: nameOnlyRecords.length,
+                classifiedUsernames: [...input.nameOnlyProvenance.classifiedUsernames].map(normalizeUsername),
+                unknownRatio: input.nameOnlyProvenance.unknownRatio,
+                ...(input.nameOnlyProvenance.diagnostics ?? {}),
+            },
+        } : {}),
     });
     const resultHash = hash({
         schema: 'concierge-manual-publication-v1',

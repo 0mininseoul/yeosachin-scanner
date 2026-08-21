@@ -2,22 +2,30 @@ import { randomUUID } from 'node:crypto';
 import {
     createFeatureAnalysisResultIdentity,
     createGenderFirstPassResultIdentity,
+    GENDER_NAME_ONLY_MAX_CANDIDATES_PER_BATCH,
+    createGenderNameOnlyBatchResultIdentity,
     createGenderTriageMicrobatchAccountId,
     createGenderTriageMicrobatchResultIdentity,
     createGenderResolutionResultIdentity,
     createGenderTriageResultIdentity,
     featureAnalysis,
     genderFirstPass,
+    genderNameOnlyBatch,
     genderResolution,
     genderTriage,
     genderTriageMicrobatch,
+    type GenderNameOnlyCandidateInput,
+    type GenderNameOnlyResult,
     type GenderTriageResult,
     type StagedAiAuditContext,
 } from '@/lib/services/ai/v2-staged-analysis';
 import { analyzePrivateAccountNames, type PrivateNameAnalysisAudit } from '@/lib/services/ai/private-name-analysis';
 import { classifyGeminiGenerationError } from '@/lib/services/ai/gemini-generation-policy';
 import type { GeminiAttemptStartTelemetry, GeminiAttemptTelemetry } from '@/lib/services/ai/gemini';
-import { issueReplayStatelessCapability } from '@/lib/services/ai/replay-stateless-capability';
+import {
+    issueReplayStatelessCapability,
+    type ReplayStatelessCapability,
+} from '@/lib/services/ai/replay-stateless-capability';
 import { planGenderTriageMicrobatches } from '@/lib/services/ai/gender-triage-microbatch-plan';
 import { aiStagePolicySupports } from '@/lib/services/ai/stage-policy';
 import { ANALYSIS_V2_SCHEDULER_V1_POLICY } from '@/lib/services/analysis/v2-ai-scheduler-runtime';
@@ -40,6 +48,7 @@ interface IssuedReplayRunner {
     featureAnalysisConcurrency: 3 | 4;
     firstPass: ReplayAiRunner['firstPass'];
     triage: ReplayAiRunner['triage'];
+    nameOnly: ReplayAiRunner['nameOnly'];
     feature: ReplayAiRunner['feature'];
     privateNames: ReplayAiRunner['privateNames'];
     resolveGender: ReplayAiRunner['resolveGender'];
@@ -57,6 +66,7 @@ export function lookupReplayStagedAiAdapterPolicy(
         || !Object.isFrozen(runner)
         || runner.firstPass !== issued.firstPass
         || runner.triage !== issued.triage
+        || runner.nameOnly !== issued.nameOnly
         || runner.feature !== issued.feature
         || runner.privateNames !== issued.privateNames
         || runner.resolveGender !== issued.resolveGender
@@ -181,6 +191,75 @@ async function invoke<T>(task: (state: InvocationTelemetry) => Promise<T>): Prom
             elapsedMs: Math.round(performance.now() - started),
         };
     }
+}
+
+function combineInvocations<T>(
+    invocations: readonly ReplayInvocation<readonly T[]>[],
+): ReplayInvocation<readonly T[]> {
+    const firstFailure = invocations.find(invocation => invocation.outcome !== 'ok');
+    return {
+        outcome: firstFailure?.outcome ?? 'ok',
+        value: invocations.flatMap(invocation => invocation.value ?? []),
+        calls: invocations.reduce((sum, invocation) => sum + (invocation.calls ?? 0), 0),
+        rateLimited: invocations.reduce((sum, invocation) => sum + (invocation.rateLimited ?? 0), 0),
+        failureDisposition: invocations.reduce<Record<string, number>>((result, invocation) => {
+            for (const [key, value] of Object.entries(invocation.failureDisposition ?? {})) {
+                result[key] = (result[key] ?? 0) + value;
+            }
+            return result;
+        }, {}),
+        attemptLatenciesMs: invocations.flatMap(invocation => invocation.attemptLatenciesMs ?? []),
+        attempts: invocations.reduce((sum, invocation) => sum + invocation.attempts, 0),
+        retries: invocations.reduce((sum, invocation) => sum + invocation.retries, 0),
+        elapsedMs: invocations.reduce((sum, invocation) => sum + invocation.elapsedMs, 0),
+    };
+}
+
+/** Bounds how many times a MAX_TOKENS name-only batch is halved before failing closed. */
+const GENDER_NAME_ONLY_MAX_TOKENS_SPLIT_DEPTH = 2;
+
+/**
+ * Runs one name-only batch. A response truncated by Gemini's MAX_TOKENS finish reason is
+ * retried on two half-sized batches (bounded by depth) instead of being silently discarded;
+ * any other failure, or a failure that survives the bounded splits, is returned as-is so the
+ * caller can fail the whole order closed rather than quietly reporting fewer results.
+ */
+async function runGenderNameOnlyBatch(
+    batch: GenderNameOnlyCandidateInput[],
+    requestId: string,
+    aiStagePolicyVersion: ReplaySupportedAiStagePolicyVersion,
+    replayCapability: ReplayStatelessCapability,
+    depth: number,
+): Promise<ReplayInvocation<readonly GenderNameOnlyResult[]>> {
+    let lastFinishReason: string | null = null;
+    const invocation = await invoke(async state => {
+        const identity = createGenderNameOnlyBatchResultIdentity(batch, aiStagePolicyVersion);
+        return genderNameOnlyBatch(
+            batch,
+            statelessAudit(requestId, identity, state, {
+                onAttemptTelemetry: telemetry => { lastFinishReason = telemetry.finishReason; },
+            }),
+            { aiStagePolicyVersion, replayCapability },
+        );
+    });
+    if (
+        invocation.outcome === 'ok'
+        || lastFinishReason !== 'MAX_TOKENS'
+        || batch.length <= 1
+        || depth >= GENDER_NAME_ONLY_MAX_TOKENS_SPLIT_DEPTH
+    ) {
+        return invocation;
+    }
+    const mid = Math.ceil(batch.length / 2);
+    const [left, right] = await Promise.all([
+        runGenderNameOnlyBatch(
+            batch.slice(0, mid), requestId, aiStagePolicyVersion, replayCapability, depth + 1,
+        ),
+        runGenderNameOnlyBatch(
+            batch.slice(mid), requestId, aiStagePolicyVersion, replayCapability, depth + 1,
+        ),
+    ]);
+    return combineInvocations([left, right]);
 }
 
 function createSemaphore(limit: number) {
@@ -362,6 +441,30 @@ export function createReplayStagedAiAdapter(
                 );
             }),
         }),
+        nameOnly: async (rawCandidates: readonly GenderNameOnlyCandidateInput[]) => {
+            const candidates = [...rawCandidates].sort((left, right) => (
+                left.candidateId.localeCompare(right.candidateId)
+            ));
+            const batches: GenderNameOnlyCandidateInput[][] = [];
+            for (
+                let index = 0;
+                index < candidates.length;
+                index += GENDER_NAME_ONLY_MAX_CANDIDATES_PER_BATCH
+            ) {
+                batches.push(candidates.slice(
+                    index,
+                    index + GENDER_NAME_ONLY_MAX_CANDIDATES_PER_BATCH,
+                ));
+            }
+            const invocations = await Promise.all(batches.map(batch => runGenderNameOnlyBatch(
+                batch,
+                requestId,
+                aiStagePolicyVersion,
+                replayCapability,
+                0,
+            )));
+            return combineInvocations<GenderNameOnlyResult>(invocations);
+        },
         feature: input => runFeature(() => invoke(async state => {
             const aiInput = {
                 triage: input.triage,
@@ -421,6 +524,7 @@ export function createReplayStagedAiAdapter(
             ?? ANALYSIS_V2_SCHEDULER_V1_POLICY.featureAnalysisConcurrency,
         firstPass: runner.firstPass,
         triage: runner.triage,
+        nameOnly: runner.nameOnly,
         feature: runner.feature,
         privateNames: runner.privateNames,
         resolveGender: runner.resolveGender,

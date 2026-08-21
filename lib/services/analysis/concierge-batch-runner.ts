@@ -13,9 +13,14 @@ export const CONCIERGE_BATCH_MAX_ORDERS = 7;
 export const CONCIERGE_BATCH_ACTOR_CONCURRENCY = 2;
 export const CONCIERGE_BATCH_TOKEN_PRIORITY = Object.freeze([
     'octonary',
+    'quaternary',
+    'primary',
+    'quinary',
     'secondary',
+    'tenth',
 ] as const satisfies readonly ApifyCredentialSlot[]);
 export const CONCIERGE_BATCH_RELATIONSHIP_TOKEN_PRIORITY = Object.freeze([
+    'nonary',
     'secondary',
 ] as const satisfies readonly ApifyCredentialSlot[]);
 
@@ -78,6 +83,8 @@ export interface ConciergeBatchPreparedOrder {
     readonly preflightId?: string | null;
 }
 
+export type ConciergeBatchFailureStage = 'prepare' | 'collect' | 'classify' | 'publish';
+
 export type ConciergeBatchCasPublisher = (
     input: ConciergeManualPublicationInput,
 ) => ReturnType<typeof publishConciergeManualOverride>;
@@ -100,7 +107,11 @@ export interface ConciergeBatchPipeline<Collected, Classified, Published extends
     classify(collected: Collected, order: ConciergeBatchOrder, context: ConciergeBatchStageContext): Promise<Classified>;
     publish(classified: Classified, order: ConciergeBatchOrder, context: ConciergeBatchStageContext): Promise<Published>;
     /** Persist a retry-eligible terminal failure before the order leaves the window. */
-    onFailure?(order: ConciergeBatchOrder, error: unknown): Promise<void>;
+    onFailure?(
+        order: ConciergeBatchOrder,
+        error: unknown,
+        stage?: ConciergeBatchFailureStage,
+    ): Promise<void>;
 }
 
 export interface ConciergeBatchRunSummary {
@@ -255,17 +266,21 @@ export async function runConciergeBatch<Collected, Classified, Published extends
                 const order = orders[nextIndex++]!;
                 running += 1;
                 void (async () => {
+                    let stage: ConciergeBatchFailureStage = pipeline.prepare ? 'prepare' : 'collect';
                     try {
                         const prepared = pipeline.prepare
                             ? await pipeline.prepare(order)
                             : undefined;
+                        stage = 'collect';
                         // Collection callers acquire the shared gate around
                         // each provider Actor operation. This keeps the
                         // physical Apify start/read concurrency at the same
                         // bound even when one order runs independent stages
                         // in parallel.
                         const collected = await pipeline.collect(order, context, prepared);
+                        stage = 'classify';
                         const classified = await pipeline.classify(collected, order, context);
+                        stage = 'publish';
                         const published = await pipeline.publish(classified, order, context);
                         if (published.status !== 'completed') throw new Error('CONCIERGE_BATCH_PUBLICATION_NOT_TERMINAL');
                         completed += 1;
@@ -273,7 +288,7 @@ export async function runConciergeBatch<Collected, Classified, Published extends
                         failed += 1;
                         if (pipeline.onFailure) {
                             try {
-                                await pipeline.onFailure(order, error);
+                                await pipeline.onFailure(order, error, stage);
                             } catch (persistError) {
                                 persistenceError ??= persistError;
                             }

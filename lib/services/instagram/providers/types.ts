@@ -24,15 +24,16 @@ export const APIFY_CREDENTIAL_SLOTS = [
     'septenary',
 ] as const;
 /**
- * Octonary is an operator-scoped concierge batch slot.  Keep it out of the
- * general V2 slot catalog so deployment/admission validators do not silently
- * broaden, while still allowing the batch runner to bind its provider ledger.
+ * Octonary and nonary are operator-scoped concierge batch slots. Keep them
+ * out of the general V2 slot catalog so deployment/admission validators do
+ * not silently broaden, while still allowing the batch runner to bind its
+ * provider ledger.
  */
-export type ApifyCredentialSlot = typeof APIFY_CREDENTIAL_SLOTS[number] | 'octonary';
+export type ApifyCredentialSlot = typeof APIFY_CREDENTIAL_SLOTS[number] | 'octonary' | 'nonary' | 'tenth';
 
 export function isApifyCredentialSlot(value: unknown): value is ApifyCredentialSlot {
     return typeof value === 'string'
-        && APIFY_CREDENTIAL_SLOTS.includes(value as typeof APIFY_CREDENTIAL_SLOTS[number]);
+        && (value === 'tenth' || APIFY_CREDENTIAL_SLOTS.includes(value as typeof APIFY_CREDENTIAL_SLOTS[number]));
 }
 export type ProviderCostTerminalStatus = 'succeeded' | 'failed' | 'aborted' | 'timed_out';
 
@@ -234,6 +235,8 @@ export interface ProviderCallContext
     adoptedRelationshipSourceDeclaredCount?: number;
     /** Explicit concierge-only opt-in for the operator-scoped octonary slot. */
     allowConciergeBatchOctonary?: true;
+    /** Explicit concierge-only opt-in for the operator-scoped nonary slot. */
+    allowConciergeBatchNonary?: true;
     onProfileStart?(username: string): void | Promise<void>;
     onProfileResolved?(profile: InstagramProfile): void | Promise<void>;
     onSelfHostedAuthRunFinished?(receipt: SelfHostedAuthRunReceipt): void | Promise<void>;

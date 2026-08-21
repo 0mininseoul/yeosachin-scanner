@@ -23,6 +23,7 @@ export interface RevenueRoutingCandidate {
     readonly candidateKey: string;
     /** A fetch locator only. It is never passed to the assessor or persistence RPC. */
     readonly profilePicUrl: string | null;
+    readonly profilePicUrlHD?: string | null;
     readonly fullname: string | null;
 }
 
@@ -45,6 +46,7 @@ export interface RevenueGenderRoutingModelCandidate {
 export interface RevenueGenderRoutingPreparationSource {
     readonly candidateKey: string;
     readonly profilePicUrl: string | null;
+    readonly profilePicUrlHD?: string | null;
     readonly fullname: string | null;
 }
 
@@ -164,6 +166,9 @@ async function prepareRevenueRoutingPopulation(
     const sources = Object.freeze(input.candidates.map(candidate => Object.freeze({
         candidateKey: candidate.candidateKey,
         profilePicUrl: candidate.profilePicUrl,
+        ...(candidate.profilePicUrlHD === undefined
+            ? {}
+            : { profilePicUrlHD: candidate.profilePicUrlHD }),
         fullname: candidate.fullname,
     })));
     const prepared = await (input.inputPreparer ?? prepareRevenueGenderRoutingInputs)(sources);

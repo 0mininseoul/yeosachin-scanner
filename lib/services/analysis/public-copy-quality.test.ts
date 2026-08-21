@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import {
     buildV211EvidenceSpecificOverview,
     buildV211EvidenceSpecificRiskNarrative,
+    extractV211EvidenceTerms,
     needsV211EvidenceSpecificOverview,
     isForbiddenV211Overview,
     isForbiddenV211RiskNarrative,
@@ -31,6 +32,24 @@ describe('v2.11 concierge public-copy quality', () => {
             feedEvidence: [],
             variation: 0,
         })).toThrow('CONCIERGE_COPY_EVIDENCE_UNAVAILABLE');
+    });
+
+    it('strips every public identifier from a bio, not just the first one', () => {
+        // gina0_013's retained bio was three @handles and emoji. Only the first
+        // handle was scrubbed, so "infinitecompany"/"official"/"kim" became
+        // publishable evidence terms - and because the quoted term is sliced to
+        // 14 characters, the built sentence no longer contained its own term and
+        // the whole order failed with CONCIERGE_COPY_OVERVIEW_CONTRACT_FAILED.
+        const evidence = {
+            profileEvidence: '🦊🔒@wlsdk0821\n♾️ @infinitecompany_official ❤️\n🐈‍⬛ @kim_msl 🖤',
+            feedEvidence: [],
+        };
+
+        expect(extractV211EvidenceTerms(evidence)).toEqual([]);
+        expect(() => buildV211EvidenceSpecificOverview({ ...evidence, variation: 0 }))
+            .toThrow('CONCIERGE_COPY_EVIDENCE_UNAVAILABLE');
+        expect(needsV211EvidenceSpecificOverview('전시와 커피 장면이 이어지는 기록입니다', evidence))
+            .toBe(true);
     });
 
     it('rejects exact and materially near-duplicate copy but permits distinct evidence', () => {

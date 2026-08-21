@@ -127,6 +127,67 @@ describe('selectAnalysisMedia', () => {
         expect(v28.feature.media).toHaveLength(MAX_FEATURE_FEED_MEDIA);
     });
 
+    it('selects the first and last child for candidate carousel context', () => {
+        const carousel = (id: string, timestamp: number, childCount: number): AnalysisPostMediaInput => ({
+            id,
+            timestamp,
+            type: 'carousel',
+            declaredMediaCount: childCount,
+            childrenComplete: true,
+            mediaItems: Array.from({ length: childCount }, (_, index) => ({
+                id: `${id}-${index}`,
+                type: 'image' as const,
+                imageUrl: `https://cdn.example/${id}-${index}.jpg`,
+            })),
+        });
+
+        const result = selectAnalysisMedia({
+            posts: [carousel('two-child', 20, 2), carousel('one-child', 19, 1)],
+        }, { carouselEnds: true });
+
+        expect(result.feed.media.filter(media => media.postId === 'two-child'))
+            .toMatchObject([
+                { mediaIndex: 0, role: 'post_representative' },
+                { mediaIndex: 1, role: 'carousel_context' },
+            ]);
+        expect(result.feed.media.filter(media => media.postId === 'one-child'))
+            .toMatchObject([{ mediaIndex: 0, role: 'post_representative' }]);
+        expect(result.feed.media.some(media => media.mediaIndex === 0 && media.role === 'carousel_context'))
+            .toBe(false);
+    });
+
+    it('fills one representative per candidate post before carousel last-child context', () => {
+        const carousel = (id: string, timestamp: number): AnalysisPostMediaInput => ({
+            id,
+            timestamp,
+            type: 'carousel',
+            declaredMediaCount: 3,
+            childrenComplete: true,
+            mediaItems: Array.from({ length: 3 }, (_, index) => ({
+                id: `${id}-${index}`,
+                type: 'image' as const,
+                imageUrl: `https://cdn.example/${id}-${index}.jpg`,
+            })),
+        });
+        const result = selectAnalysisMedia({
+            posts: [
+                carousel('carousel-a', 20),
+                carousel('carousel-b', 19),
+                ...Array.from({ length: 6 }, (_, index) => imagePost(`image-${index}`, 18 - index)),
+            ],
+        }, { carouselEnds: true });
+
+        expect(result.feed.media).toHaveLength(MAX_FEED_MEDIA);
+        expect(result.feed.media.slice(0, 8).every(media => media.role === 'post_representative'))
+            .toBe(true);
+        expect(result.feed.media.filter(media => media.role === 'carousel_context'))
+            .toMatchObject([
+                { postId: 'carousel-a', mediaIndex: 2 },
+                { postId: 'carousel-b', mediaIndex: 2 },
+            ]);
+        expect(result.feature.media).toHaveLength(MAX_FEATURE_FEED_MEDIA);
+    });
+
     it('selects first, middle, and last from every complete carousel when the fixed cap permits', () => {
         const carousel = (id: string, timestamp: number): AnalysisPostMediaInput => ({
             id,

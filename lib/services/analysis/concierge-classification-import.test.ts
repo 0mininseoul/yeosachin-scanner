@@ -270,4 +270,67 @@ describe('concierge manual classification import', () => {
         );
         expect(() => applyConciergeManualClassificationImport(first, changed)).toThrow('CONCIERGE_CLASSIFICATION_IMPORT_CONFLICT');
     });
+
+    function nameOnlyLedger(overrides: {
+        partition?: 'public' | 'private' | 'unresolved';
+        profilePicPresent?: boolean | null;
+        secondPassStatus?: 'collected' | 'not_collected' | 'failed' | 'not_applicable';
+        secondPassCompleteMedia?: boolean | null;
+    } = {}): ConciergeClassificationLedger {
+        const base = ledger();
+        const collectedSecondPass = overrides.secondPassStatus === 'collected';
+        const nameOnlyRecord = {
+            ...base.records[0]!,
+            partition: overrides.partition ?? 'public',
+            firstPass: {
+                status: 'failed' as const,
+                fullNamePresent: true,
+                profilePicPresent: overrides.profilePicPresent ?? false,
+                feedDeclared: null,
+                feedCollected: null,
+                completeMedia: null,
+                evidenceHash: '1'.repeat(64),
+            },
+            secondPass: {
+                status: overrides.secondPassStatus ?? 'not_collected',
+                fullNamePresent: true,
+                profilePicPresent: false,
+                feedDeclared: collectedSecondPass ? 8 : null,
+                feedCollected: collectedSecondPass ? 8 : null,
+                completeMedia: overrides.secondPassCompleteMedia ?? null,
+                evidenceHash: collectedSecondPass ? 'f'.repeat(64) : null,
+            },
+            originalAiClassification: 'female' as const,
+            effectiveClassification: 'female' as const,
+            confidence: 'medium' as const,
+            classificationSource: 'name_only' as const,
+            sourceSnapshot: {
+                instagramUrl: 'https://instagram.com/one',
+                originalAiClassification: 'female' as const,
+                confidenceEvidence: 'confidence=medium;evidence=name_only',
+                operatorNote: '',
+            },
+        };
+        return { ...base, records: [nameOnlyRecord, ...base.records.slice(1)] };
+    }
+
+    it('accepts a definitionally correct name-only record: no image, no collected second pass', () => {
+        expect(() => validateConciergeClassificationLedger(nameOnlyLedger())).not.toThrow();
+    });
+
+    it('rejects a name-only record whose recorded firstPass retains a usable profile image', () => {
+        expect(() => validateConciergeClassificationLedger(nameOnlyLedger({ profilePicPresent: true })))
+            .toThrow('CONCIERGE_CLASSIFICATION_LEDGER_OVERRIDE_INVALID');
+    });
+
+    it('rejects a name-only record whose second pass claims collected media', () => {
+        expect(() => validateConciergeClassificationLedger(
+            nameOnlyLedger({ secondPassStatus: 'collected', secondPassCompleteMedia: true }),
+        )).toThrow('CONCIERGE_CLASSIFICATION_LEDGER_OVERRIDE_INVALID');
+    });
+
+    it('rejects a name-only record outside the public partition', () => {
+        expect(() => validateConciergeClassificationLedger(nameOnlyLedger({ partition: 'unresolved' })))
+            .toThrow();
+    });
 });

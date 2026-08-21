@@ -779,7 +779,7 @@ export default function ResultPage({ params }: PageProps) {
                     <>
                     <HighRiskSummary
                         count={highCount}
-                        context={<>맞팔 <span className="num">{summary.analyzedMutuals.toLocaleString()}</span>명 중 모든 공개 계정들을 판독했습니다.</>}
+                        context={<>맞팔 <span className="num">{summary.mutualFollows.toLocaleString()}</span>명 중 공개 계정들을 판독했습니다.</>}
                     />
                     <div className="mt-6 border-t border-line pt-5">
                         <div className="flex items-baseline justify-between gap-3">

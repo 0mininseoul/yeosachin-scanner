@@ -337,6 +337,30 @@ describe('analysis V2 result checkpoint store', () => {
         expect(fake.rpc).not.toHaveBeenCalled();
     });
 
+    it('admits only the explicit name-only provenance without feature analysis', async () => {
+        const fake = rpcClient({
+            data: { ...manifest(), itemCount: 1, rowCount: 1 },
+            error: null,
+        });
+        const store = createSupabaseAnalysisV2ResultStore(fake.client);
+        const row = {
+            ...terminalRow('verified_female', 14),
+            classificationSource: 'name_only' as const,
+            mediaContext: {
+                ...mediaContext(),
+                featureAnalyzedSelectionIds: [],
+            },
+            featureOperationKey: null,
+            featureResultHash: null,
+            feature: null,
+        };
+
+        await expect(store.checkpointFeatureBatch({
+            ...claim(), batch: 0, analyzedCount: 1, rows: [row],
+        })).resolves.toMatchObject({ rowCount: 1 });
+        expect(fake.rpc).toHaveBeenCalledTimes(1);
+    });
+
     it('rejects duplicate candidates, incomplete batches, and malformed terminal payloads', async () => {
         const fake = rpcClient();
         const store = createSupabaseAnalysisV2ResultStore(fake.client);

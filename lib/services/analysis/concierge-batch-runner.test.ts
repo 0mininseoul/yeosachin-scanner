@@ -62,21 +62,34 @@ describe('concierge batch runner', () => {
         ]);
     });
 
-    it('uses octonary first and secondary as the only batch token priority', () => {
+    it('keeps concierge profile priority scoped and prioritizes nonary for relationships', () => {
         expect([...CONCIERGE_BATCH_TOKEN_PRIORITY]).toEqual([
             'octonary',
+            'quaternary',
+            'primary',
+            'quinary',
             'secondary',
+            'tenth',
         ]);
         expect(selectConciergeApifyTokenSlot({ APIFY_OCTONARY_API_TOKEN: 'configured' }))
             .toBe('octonary');
+        expect(selectConciergeApifyTokenSlot({ APIFY_QUATERNARY_API_TOKEN: 'configured' }))
+            .toBe('quaternary');
+        expect(selectConciergeApifyTokenSlot({ APIFY_PRIMARY_API_TOKEN: 'configured' }))
+            .toBe('primary');
+        expect(selectConciergeApifyTokenSlot({ APIFY_QUINARY_API_TOKEN: 'configured' }))
+            .toBe('quinary');
         expect(selectConciergeApifyTokenSlot({ APIFY_SECONDARY_API_TOKEN: 'configured' }))
             .toBe('secondary');
-        expect(selectConciergeApifyTokenSlot({ APIFY_QUINARY_API_TOKEN: 'configured' }))
-            .toBeNull();
+        expect(selectConciergeApifyTokenSlot({ APIFY_TENTH_API_TOKEN: 'configured' }))
+            .toBe('tenth');
         expect(CONCIERGE_BATCH_TOKEN_PRIORITY).not.toContain('senary');
         expect(CONCIERGE_BATCH_TOKEN_PRIORITY).not.toContain('tertiary');
         expect(CONCIERGE_BATCH_TOKEN_PRIORITY).not.toContain('septenary');
-        expect([...CONCIERGE_BATCH_RELATIONSHIP_TOKEN_PRIORITY]).toEqual(['secondary']);
+        expect([...CONCIERGE_BATCH_RELATIONSHIP_TOKEN_PRIORITY]).toEqual([
+            'nonary',
+            'secondary',
+        ]);
     });
 
     it('delegates publication to the reviewed PR431 CAS publisher boundary', async () => {

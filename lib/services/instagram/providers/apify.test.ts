@@ -235,6 +235,40 @@ describe('apifyProvider', () => {
             .toBe('legacy-primary-token');
     });
 
+    it('keeps nonary outside global slot validation unless concierge opts in', async () => {
+        const options = {
+            logicalProvider: 'apify' as const,
+            credentialSlot: 'primary' as const,
+            timeoutSecs: 120,
+            maxItems: 1,
+            maxTotalChargeUsd: 0.1,
+        };
+        const { client: rejectedClient } = mockClient([]);
+        await expect(startOrResumeApifyActor(
+            rejectedClient,
+            APIFY_RELATIONSHIP_ACTOR_ID,
+            {},
+            options,
+            {
+                credentialSlot: 'nonary',
+                recordUsage: vi.fn(),
+            },
+        )).rejects.toThrow('SCRAPING_RUN_CHECKPOINT_ERROR: stored credential slot is invalid.');
+
+        const { client: allowedClient } = mockClient([]);
+        await expect(startOrResumeApifyActor(
+            allowedClient,
+            APIFY_RELATIONSHIP_ACTOR_ID,
+            {},
+            options,
+            {
+                credentialSlot: 'nonary',
+                allowConciergeBatchNonary: true,
+                recordUsage: vi.fn(),
+            },
+        )).resolves.toMatchObject({ status: 'SUCCEEDED' });
+    });
+
     it('checkpoints a new Actor run before waiting for its result', async () => {
         const { client, call, waitForFinish } = mockClient([], 'SUCCEEDED', 0.40205);
         const onRunStarted = vi.fn().mockResolvedValue(undefined);
@@ -2851,6 +2885,22 @@ describe('apifyProvider', () => {
         }]);
         await expect(makeApifyProvider({ client: badPost.client, env: {} })
             .getProfilesBatch!(['target'], 1)).rejects.toThrow('latestPosts');
+    });
+
+    it('preserves the optional HD profile image URL for downstream evidence selection', async () => {
+        const provider = makeApifyProvider({
+            client: mockClient([{
+                ...profileItem('target'),
+                profilePicUrl: 'https://cdn.example/profile-150.jpg',
+                profilePicUrlHD: 'https://cdn.example/profile-320.jpg',
+            }]).client,
+            env: {},
+        });
+
+        await expect(provider.getProfilesBatch!(['target'], 1)).resolves.toMatchObject([{
+            profilePicUrl: 'https://cdn.example/profile-150.jpg',
+            profilePicUrlHD: 'https://cdn.example/profile-320.jpg',
+        }]);
     });
 
     it('normalizes the documented -1 hidden engagement-count sentinel without losing visibility', async () => {

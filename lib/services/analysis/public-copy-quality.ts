@@ -35,6 +35,10 @@ const genericEvidenceTerms = new Set([
 ]);
 const forbiddenEvidenceTerms = /(?:바람|불륜|외도|연인|애인|남자친구|여자친구|남친|여친|커플|교제|사귀|데이트|관계|점수|순위|등급|위험|좋아요|댓글|태그|멘션|퍼센트|건수|횟수)/u;
 const publicIdentifierPattern = /(?:https?:\/\/|www\.|@[a-z0-9._]+|\b[^\s@]+@[^\s@]+\b)/iu;
+// The same shape with /g, used only where every identifier must be removed.
+// A single non-global replace strips just the first match, which previously
+// let a second/third @handle survive into published evidence terms.
+const publicIdentifierStripPattern = /(?:https?:\/\/|www\.|@[a-z0-9._]+|\b[^\s@]+@[^\s@]+\b)/giu;
 
 export type V211CopyEvidence = {
     profileEvidence?: string | null;
@@ -89,7 +93,7 @@ function normalizeCopy(value: string): string {
 function scrubEvidence(value: string | null | undefined): string | null {
     if (typeof value !== 'string') return null;
     const normalized = normalizeCopy(value)
-        .replace(publicIdentifierPattern, ' ')
+        .replace(publicIdentifierStripPattern, ' ')
         .replace(/\b\d+(?:[.,]\d+)?\b/gu, ' ')
         .replace(/\s+/g, ' ')
         .trim();
@@ -150,7 +154,7 @@ function normalizedUsername(value: string): string {
 
 function normalizedFullName(value: string | null | undefined): string | null {
     const normalized = normalizeCopy(value ?? '')
-        .replace(publicIdentifierPattern, ' ')
+        .replace(publicIdentifierStripPattern, ' ')
         .replace(/\s+/g, ' ')
         .trim();
     // The two generic role labels are never canonical names.  A malformed

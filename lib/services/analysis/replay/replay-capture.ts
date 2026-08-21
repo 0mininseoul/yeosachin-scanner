@@ -15,7 +15,14 @@ import {
     type ReplaySourceLineage,
 } from './replay-source-lineage';
 import { aiStagePolicySupports } from '@/lib/services/ai/stage-policy';
-import { TEST_ENTITLEMENT_STANDARD_V211_LEGACY_SECONDARY_TEXT_ONLY_REPLAY_CAPABILITY } from './replay-source-lineage';
+import {
+    FIRST_PAYMENT_BASIC_V211_CONCIERGE_CAPABILITY,
+    TEST_ENTITLEMENT_STANDARD_V211_LEGACY_SECONDARY_TEXT_ONLY_REPLAY_CAPABILITY,
+} from './replay-source-lineage';
+import {
+    isDefaultInstagramProfileImage,
+    preferredInstagramProfileImageUrl,
+} from '../profile-image-evidence';
 
 /**
  * Account-level text-only maintenance updates only feature copy. Retain at most
@@ -71,6 +78,54 @@ function mergeNormalizedMedia(
     };
 }
 
+type NormalizedMediaSelections = Awaited<ReturnType<typeof normalizeAnalysisV2MediaSelections>>;
+type MergedNormalizedMedia = ReturnType<typeof mergeNormalizedMedia>;
+
+function removeDefaultProfileMediaFromNormalized(
+    normalized: Awaited<ReturnType<typeof normalizeAnalysisV2MediaSelections>>,
+): NormalizedMediaSelections {
+    const defaultProfileIds = new Set(normalized.media.flatMap(media => {
+        if (media.kind !== 'profile') return [];
+        const bytes = normalized.bytes.get(media.selectionId);
+        return bytes && isDefaultInstagramProfileImage({ normalizedBytes: bytes })
+            ? [media.selectionId]
+            : [];
+    }));
+    if (defaultProfileIds.size === 0) return normalized;
+    const media = normalized.media.filter(item => !defaultProfileIds.has(item.selectionId));
+    const bytes = new Map([...normalized.bytes.entries()]
+        .filter(([selectionId]) => !defaultProfileIds.has(selectionId)));
+    return {
+        media,
+        bytes,
+        coverage: {
+            ...normalized.coverage,
+            selectedCount: normalized.coverage.selectedCount - defaultProfileIds.size,
+            normalizedCount: normalized.coverage.normalizedCount - defaultProfileIds.size,
+        },
+    };
+}
+
+function removeDefaultProfileMediaFromMerged(
+    normalized: MergedNormalizedMedia,
+): MergedNormalizedMedia {
+    const defaultProfileIds = new Set(normalized.media.flatMap(media => (
+        media.role === 'profile'
+        && isDefaultInstagramProfileImage({ normalizedBytes: media.bytes })
+            ? [media.selectionId]
+            : []
+    )));
+    if (defaultProfileIds.size === 0) return normalized;
+    return {
+        media: normalized.media.filter(item => !defaultProfileIds.has(item.selectionId)),
+        coverage: {
+            ...normalized.coverage,
+            selectedCount: normalized.coverage.selectedCount - defaultProfileIds.size,
+            normalizedCount: normalized.coverage.normalizedCount - defaultProfileIds.size,
+        },
+    };
+}
+
 /**
  * Converts an exact completed V2 source to an in-memory, encrypted-bundle-ready value.
  * Dataset loading is intentionally outside this pure adapter and must use replay-readonly-apify.
@@ -111,6 +166,8 @@ export async function captureAnalysisV2ReplayBundle(input: {
     resolveReplayAiStagePolicyVersion(request.sourceLineage, input.evaluationPolicy);
     const textOnly = input.evaluationPolicy?.capability
         === TEST_ENTITLEMENT_STANDARD_V211_LEGACY_SECONDARY_TEXT_ONLY_REPLAY_CAPABILITY;
+    const conciergeNameOnly = input.evaluationPolicy?.capability
+        === FIRST_PAYMENT_BASIC_V211_CONCIERGE_CAPABILITY;
     const carouselDiversity = aiStagePolicySupports(
         request.sourceLineage.policyVersions.aiStage as Parameters<typeof aiStagePolicySupports>[0],
         'inputQualityV28',
@@ -118,14 +175,25 @@ export async function captureAnalysisV2ReplayBundle(input: {
     const source = await input.repository.loadReplaySource(request);
     const profiles: AnalysisV2ReplayBundle['profiles'] = [];
     for (const [index, profile] of source.profiles.entries()) {
-        if (!textOnly && !profile.isPrivate && (profile.latestPosts?.length ?? 0) < Math.min(profile.postsCount, MAX_RECENT_POSTS)) {
+        if (!textOnly && !conciergeNameOnly && !profile.isPrivate
+            && (profile.latestPosts?.length ?? 0) < Math.min(profile.postsCount, MAX_RECENT_POSTS)) {
             fail('ANALYSIS_V2_REPLAY_MEDIA_STRUCTURAL_INCOMPLETE');
         }
+        const profileImageUrl = profile.isPrivate
+            ? undefined
+            : preferredInstagramProfileImageUrl(profile);
+        const mediaSelectionOptions = conciergeNameOnly
+            ? { carouselEnds: true }
+            : carouselDiversity
+                ? { carouselDiversity: true }
+                : undefined;
         const policy = profile.isPrivate ? null : selectAnalysisMedia({
-            profile: profile.profilePicUrl ? { id: profile.username, imageUrl: profile.profilePicUrl } : undefined,
+            profile: profileImageUrl ? { id: profile.username, imageUrl: profileImageUrl } : undefined,
             posts: profile.latestPosts ?? [],
-        }, carouselDiversity ? { carouselDiversity: true } : undefined);
-        if (!textOnly && policy?.carouselCoverage.incompletePostIds.length) fail('ANALYSIS_V2_REPLAY_MEDIA_STRUCTURAL_INCOMPLETE');
+        }, mediaSelectionOptions);
+        if (!textOnly && !conciergeNameOnly && policy?.carouselCoverage.incompletePostIds.length) {
+            fail('ANALYSIS_V2_REPLAY_MEDIA_STRUCTURAL_INCOMPLETE');
+        }
         const triageMedia = textOnly
             ? (policy?.triage.media ?? []).slice(0, TEXT_ONLY_MAX_TRIAGE_MEDIA)
             : policy?.triage.media ?? [];
@@ -134,9 +202,11 @@ export async function captureAnalysisV2ReplayBundle(input: {
             input.normalizeMedia,
             request.sourceLineage.policyVersions.aiStage,
         );
+        const usableTriageNormalized = removeDefaultProfileMediaFromNormalized(triageNormalized);
         if (
-            (!textOnly && !profile.isPrivate && !isAnalysisV2PartialMediaCoverageAllowed(triageNormalized.coverage))
-            || triageNormalized.media.some(item => !jpeg(triageNormalized.bytes.get(item.selectionId)!))
+            (!textOnly && !conciergeNameOnly && !profile.isPrivate
+                && !isAnalysisV2PartialMediaCoverageAllowed(usableTriageNormalized.coverage))
+            || usableTriageNormalized.media.some(item => !jpeg(usableTriageNormalized.bytes.get(item.selectionId)!))
         ) {
             fail('ANALYSIS_V2_REPLAY_MEDIA_INVALID');
         }
@@ -152,11 +222,13 @@ export async function captureAnalysisV2ReplayBundle(input: {
                 );
                 return mergeNormalizedMedia(policy?.feature.media ?? [], [triageNormalized, remainderNormalized]);
             })();
+        const usableNormalized = removeDefaultProfileMediaFromMerged(normalized);
         if (
-            (!textOnly && !profile.isPrivate && !isAnalysisV2PartialMediaCoverageAllowed(normalized.coverage))
-            || normalized.media.some(item => !jpeg(item.bytes))
+            (!textOnly && !conciergeNameOnly && !profile.isPrivate
+                && !isAnalysisV2PartialMediaCoverageAllowed(usableNormalized.coverage))
+            || usableNormalized.media.some(item => !jpeg(item.bytes))
         ) fail('ANALYSIS_V2_REPLAY_MEDIA_INVALID');
-        const normalizedSelectionIds = new Set(normalized.media.map(item => item.selectionId));
+        const normalizedSelectionIds = new Set(usableNormalized.media.map(item => item.selectionId));
         const retainedTriageSelectionIds = textOnly
             ? triageMedia.map(media => media.selectionId)
                 .filter(id => normalizedSelectionIds.has(id))
@@ -167,9 +239,9 @@ export async function captureAnalysisV2ReplayBundle(input: {
             isPrivate: profile.isPrivate,
             username: profile.username.toLowerCase(),
             fullName: profile.fullName ?? null,
-            hasProfileImage: Boolean(profile.profilePicUrl?.trim()),
+            hasProfileImage: usableNormalized.media.some(item => item.role === 'profile'),
             bio: profile.isPrivate ? undefined : profile.bio ?? null,
-            media: normalized.media.map(media => ({
+            media: usableNormalized.media.map(media => ({
                 selectionId: media.selectionId,
                 kind: media.role === 'profile' ? 'profile' as const : 'feed' as const,
                 ...(media.postId ? { postId: media.postId } : {}),
@@ -194,9 +266,9 @@ export async function captureAnalysisV2ReplayBundle(input: {
                 partnerSelections: policy.partnerSafetyContactSheetCandidates.media,
             }).featureCaptions.filter(caption => normalizedSelectionIds.has(caption.selectionId)) : [],
             coverage: {
-                selectedCount: normalized.coverage.selectedCount,
-                normalizedCount: normalized.coverage.normalizedCount,
-                failures: normalized.coverage.failures.map(failure => ({ ...failure })),
+                selectedCount: usableNormalized.coverage.selectedCount,
+                normalizedCount: usableNormalized.coverage.normalizedCount,
+                failures: usableNormalized.coverage.failures.map(failure => ({ ...failure })),
             },
         });
     }

@@ -274,10 +274,16 @@ describe('V2 AI stage policy', () => {
 
     it('adds v2.11 as an immutable quality successor that is rollout-gated', () => {
         expect(AI_STAGE_POLICY_V211_VERSION).toBe('ai-stage-policy-v2.11');
+        expect(getAiStagePolicy(AI_STAGE_POLICY_V210_VERSION, 'genderTriage'))
+            .toMatchObject({ mediaResolution: 'LOW' });
         expect(getAiStagePolicy(AI_STAGE_POLICY_V211_VERSION, 'genderTriage'))
-            .toMatchObject({ promptVersion: 'gender-triage-microbatch-v2' });
+            .toMatchObject({ promptVersion: 'gender-triage-microbatch-v3', mediaResolution: 'MEDIUM' });
         expect(getAiStagePolicy(AI_STAGE_POLICY_V211_VERSION, 'featureAnalysis'))
-            .toMatchObject({ promptVersion: 'feature-analysis-v5' });
+            .toMatchObject({
+                promptVersion: 'feature-analysis-v5',
+                model: 'gemini-3.7-flash',
+                thinkingLevel: 'HIGH',
+            });
         expect(getAiStagePolicy(AI_STAGE_POLICY_V211_VERSION, 'highRiskNarrative'))
             .toMatchObject({ promptVersion: 'high-risk-narrative-v4', maxOutputTokens: 8_192 });
         expect(aiStagePolicySupports(AI_STAGE_POLICY_V211_VERSION, 'genderSummaryQualityV211'))
@@ -289,6 +295,30 @@ describe('V2 AI stage policy', () => {
             genderSummaryQualityV211RolloutMode: 'production',
             accessMode: 'production',
         })).toBe(AI_STAGE_POLICY_V211_VERSION);
+    });
+
+    it('moves featureAnalysis to gemini-3.7-flash only on v2.11, leaving v2.6 through v2.10 untouched', () => {
+        for (const version of [
+            AI_STAGE_POLICY_VERSION,
+            AI_STAGE_POLICY_LATEST_VERSION,
+            AI_STAGE_POLICY_V28_VERSION,
+            AI_STAGE_POLICY_V29_VERSION,
+            AI_STAGE_POLICY_V210_VERSION,
+        ] as const) {
+            expect(getAiStagePolicy(version, 'featureAnalysis')).toMatchObject({
+                model: 'gemini-3.1-flash-lite',
+                thinkingLevel: 'MEDIUM',
+            });
+        }
+        expect(getAiStagePolicy(AI_STAGE_POLICY_V211_VERSION, 'featureAnalysis')).toMatchObject({
+            model: 'gemini-3.7-flash',
+            thinkingLevel: 'HIGH',
+        });
+        // Every other stage keeps its v2.10 model on v2.11; only featureAnalysis moved.
+        for (const stage of ['genderTriage', 'partnerSafety', 'highRiskNarrative', 'privateAccountName'] as const) {
+            expect(getAiStagePolicy(AI_STAGE_POLICY_V211_VERSION, stage).model)
+                .toBe(getAiStagePolicy(AI_STAGE_POLICY_V210_VERSION, stage).model);
+        }
     });
 
     it('lowers only v2.7 scheduling concurrency for rate-limited early stages', () => {

@@ -6,6 +6,7 @@ export interface InstagramProfile {
     bio?: string;
     externalUrl?: string; // 프로필 링크 (bio가 없을 때 대체용)
     profilePicUrl?: string;
+    profilePicUrlHD?: string;
     followersCount: number;
     followingCount: number;
     postsCount: number;

@@ -348,12 +348,19 @@ export interface AnalyzeWithGeminiOptions<T> {
     thinkingLevel?: AiThinkingLevel;
     mediaResolution?: AiMediaResolution;
     maxOutputTokens?: number;
+    /** Omitted by default (model default applies). Callers needing deterministic output (e.g. the name-only gender batch) pass 0. */
+    temperature?: number;
+    /** Staged callers may reuse a stage while binding a distinct prompt contract. */
+    promptVersion?: string;
+    schemaVersion?: number;
     /** v2.9 gender microbatches are the sole staged caller allowed above one-account media. */
     maxImages?: number;
     /** Resume only after a durably terminalized explicit 429. Attempts are globally bounded at 4. */
     startingAttempt?: number;
     /** Optional caller budget; counts attempts from startingAttempt and never exceeds four. */
     maxAttempts?: number;
+    /** Feature analysis may explicitly retry strict response rejections; all other stages remain fail-fast. */
+    retryResponseRejections?: boolean;
     onTelemetry?: (telemetry: GeminiRequestTelemetry) => void | Promise<void>;
     /** Reserve a durable, PII-free generation intent before the SDK request starts. */
     onBeforeAttempt?: (telemetry: GeminiAttemptStartTelemetry) => void | Promise<void>;
@@ -800,9 +807,13 @@ export async function analyzeWithGemini<T>(
         thinkingLevel,
         mediaResolution,
         maxOutputTokens,
+        temperature,
+        promptVersion,
+        schemaVersion,
         maxImages,
         startingAttempt = 1,
         maxAttempts,
+        retryResponseRejections = false,
         onTelemetry,
         onBeforeAttempt,
         onAttemptTelemetry,
@@ -817,6 +828,24 @@ export async function analyzeWithGemini<T>(
     ) {
         throw new Error('Gemini maxOutputTokens must be an integer from 1 to 65536');
     }
+    if (
+        temperature !== undefined
+        && (!Number.isFinite(temperature) || temperature < 0 || temperature > 2)
+    ) {
+        throw new Error('Gemini temperature must be a number from 0 to 2');
+    }
+    if (
+        promptVersion !== undefined
+        && (!/^[A-Za-z0-9._:-]{1,64}$/.test(promptVersion))
+    ) {
+        throw new Error('Gemini promptVersion must be a bounded version identifier');
+    }
+    if (
+        schemaVersion !== undefined
+        && (!Number.isSafeInteger(schemaVersion) || schemaVersion < 1 || schemaVersion > 9_999)
+    ) {
+        throw new Error('Gemini schemaVersion must be an integer from 1 to 9999');
+    }
     if (!Number.isSafeInteger(startingAttempt) || startingAttempt < 1 || startingAttempt > 4) {
         throw new Error('Gemini startingAttempt must be an integer from 1 to 4');
     }
@@ -825,6 +854,9 @@ export async function analyzeWithGemini<T>(
         && (!Number.isSafeInteger(maxAttempts) || maxAttempts < 1 || maxAttempts > 4)
     ) {
         throw new Error('Gemini maxAttempts must be an integer from 1 to 4');
+    }
+    if (retryResponseRejections && stage !== 'featureAnalysis') {
+        throw new Error('Gemini response-rejection retries are restricted to featureAnalysis');
     }
     if (!stage && startingAttempt !== 1) {
         throw new Error('Gemini attempt resumption is available only for durable stage calls');
@@ -884,6 +916,8 @@ export async function analyzeWithGemini<T>(
     const resolvedMaxOutputTokens = maxOutputTokens
         ?? stagePolicy?.maxOutputTokens
         ?? (costOptimized ? 1_024 : undefined);
+    const resolvedPromptVersion = promptVersion ?? stagePolicy?.promptVersion;
+    const resolvedSchemaVersion = schemaVersion ?? stagePolicy?.schemaVersion;
     const imagePolicy = getAnalysisImagePolicy(costOptimized);
     const policyMaxImages = stagePolicy
         ? stagePolicy.profileImageLimit + stagePolicy.feedImageLimit
@@ -952,6 +986,7 @@ export async function analyzeWithGemini<T>(
                     ...(resolvedMaxOutputTokens !== undefined
                         ? { maxOutputTokens: resolvedMaxOutputTokens }
                         : {}),
+                    ...(temperature !== undefined ? { temperature } : {}),
                     ...(resolvedMediaResolution
                         ? { mediaResolution: MEDIA_RESOLUTION_CONFIG[resolvedMediaResolution] }
                         : {}),
@@ -981,8 +1016,8 @@ export async function analyzeWithGemini<T>(
                                     thinkingLevel: resolvedThinkingLevel,
                                     mediaCount: selectedImages.length,
                                     mediaResolution: resolvedMediaResolution,
-                                    promptVersion: stagePolicy.promptVersion,
-                                    schemaVersion: stagePolicy.schemaVersion,
+                                    promptVersion: resolvedPromptVersion!,
+                                    schemaVersion: resolvedSchemaVersion!,
                                     maxOutputTokens: resolvedMaxOutputTokens
                                         ?? stagePolicy.maxOutputTokens,
                                     attempt: attemptNumber,
@@ -1044,8 +1079,8 @@ export async function analyzeWithGemini<T>(
                     thinkingLevel: resolvedThinkingLevel,
                     mediaCount: selectedImages.length,
                     mediaResolution: resolvedMediaResolution,
-                    promptVersion: stagePolicy?.promptVersion ?? null,
-                    schemaVersion: stagePolicy?.schemaVersion ?? null,
+                    promptVersion: resolvedPromptVersion ?? null,
+                    schemaVersion: resolvedSchemaVersion ?? null,
                     maxOutputTokens: resolvedMaxOutputTokens ?? null,
                     latencyMs: Math.max(0, Math.round(performance.now() - attemptStartedAt)),
                     estimatedCostUsd: null,
@@ -1085,8 +1120,8 @@ export async function analyzeWithGemini<T>(
                 thinkingLevel: resolvedThinkingLevel,
                 mediaCount: selectedImages.length,
                 mediaResolution: resolvedMediaResolution,
-                promptVersion: stagePolicy?.promptVersion ?? null,
-                schemaVersion: stagePolicy?.schemaVersion ?? null,
+                promptVersion: resolvedPromptVersion ?? null,
+                schemaVersion: resolvedSchemaVersion ?? null,
                 maxOutputTokens: resolvedMaxOutputTokens ?? null,
                 latencyMs: Math.max(0, Math.round(performance.now() - attemptStartedAt)),
                 estimatedCostUsd: costEstimate?.totalCostUsd ?? null,
@@ -1167,8 +1202,13 @@ export async function analyzeWithGemini<T>(
             console.error(`Gemini API Error (attempt ${attemptNumber}):`, lastError.message);
 
             // 재시도 불가능한 에러거나 마지막 시도면 throw
-            if (!(error instanceof RetryableGeminiRateLimitError)
-                || attemptNumber >= finalAttemptNumber) {
+            const retryableResponseRejection = retryResponseRejections
+                && error instanceof Error
+                && error.message.startsWith(AI_GENERATION_RESPONSE_REJECTED_ERROR_PREFIX);
+            if (
+                (!(error instanceof RetryableGeminiRateLimitError) && !retryableResponseRejection)
+                || attemptNumber >= finalAttemptNumber
+            ) {
                 console.error('--- AnalyzeWithGemini End (Failed) ---');
                 throw lastError;
             }

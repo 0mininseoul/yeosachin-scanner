@@ -1,8 +1,12 @@
+import { mkdtempSync, rmSync } from 'node:fs';
+import { join } from 'node:path';
+import { tmpdir } from 'node:os';
 import { describe, expect, it } from 'vitest';
 import type { FeatureAnalysisResult } from '@/lib/services/ai/v2-staged-analysis';
 import type { InstagramProfile } from '@/lib/types/instagram';
 import {
     buildConciergeManualPublication,
+    buildConciergeManualPublicationDraft,
     CONCIERGE_BATCH_PUBLICATION_RPC,
     ConciergePublicationError,
     createConciergePublicationStore,
@@ -17,6 +21,11 @@ import {
     type ConciergeClassificationLedger,
 } from './concierge-classification-import';
 import type { ReplayAccountAiDetail } from './replay/replay-runner';
+import {
+    runConciergePublicationDryRunCli,
+    verifyConciergePublicationInput,
+    writeConciergePublicationDryRunDump,
+} from '../../../scripts/verify-concierge-publication';
 
 const HASH = 'a'.repeat(64);
 
@@ -143,6 +152,158 @@ function makeInput(): ConciergeManualPublicationInput {
     };
 }
 
+function makeNameOnlyPublicationBoundaryInput(): ConciergeManualPublicationInput {
+    const base = makeInput();
+    const publicUsernames = ['one', 'two', 'male_name', 'unpromoted_female', 'nameless'];
+    const noFeaturePass = (fullName: string | null) => ({
+        status: 'failed' as const,
+        fullNamePresent: Boolean(fullName?.trim()),
+        profilePicPresent: false,
+        feedDeclared: null,
+        feedCollected: null,
+        completeMedia: null,
+        evidenceHash: HASH,
+    });
+    const noFeatureSecondPass = (fullName: string | null) => ({
+        status: 'not_collected' as const,
+        fullNamePresent: Boolean(fullName?.trim()),
+        profilePicPresent: false,
+        feedDeclared: null,
+        feedCollected: null,
+        completeMedia: null,
+        evidenceHash: null,
+    });
+    const publicProfiles = new Map<number, InstagramProfile>([
+        [1, { username: 'one', isPrivate: false, profilePicUrl: null, fullName: 'Jane One', bio: null, followersCount: 1, followingCount: 1, postsCount: 0, latestPosts: [] } as unknown as InstagramProfile],
+        [2, { username: 'two', isPrivate: false, profilePicUrl: null, fullName: 'Image Female', bio: null, followersCount: 1, followingCount: 1, postsCount: 0, latestPosts: [] } as unknown as InstagramProfile],
+        [3, { username: 'male_name', isPrivate: false, profilePicUrl: null, fullName: 'Male Name', bio: null, followersCount: 1, followingCount: 1, postsCount: 0, latestPosts: [] } as unknown as InstagramProfile],
+        [4, { username: 'unpromoted_female', isPrivate: false, profilePicUrl: null, fullName: 'Unpromoted Female', bio: null, followersCount: 1, followingCount: 1, postsCount: 0, latestPosts: [] } as unknown as InstagramProfile],
+        [5, { username: 'nameless', isPrivate: false, profilePicUrl: null, fullName: null, bio: null, followersCount: 1, followingCount: 1, postsCount: 0, latestPosts: [] } as unknown as InstagramProfile],
+    ]);
+    const noFeatureRecord = (ordinal: number, username: string, fullName: string | null, original: 'male' | 'female' | 'unknown', effective: 'male' | 'female' | 'unknown', source: 'ai' | 'name_only', confidence: 'low' | 'medium' | 'high' = 'medium') => ({
+        candidateId: `candidate:${username}`,
+        instagramId: username,
+        mutualOrdinal: ordinal,
+        partition: 'public' as const,
+        profileFetchStatus: 'success' as const,
+        firstPass: noFeaturePass(fullName),
+        secondPass: noFeatureSecondPass(fullName),
+        originalAiClassification: original,
+        effectiveClassification: effective,
+        confidence,
+        evidenceCoverage: { declared: 0, collected: 0, selected: 0, complete: false, basisPoints: 0, hash: HASH },
+        classifier: 'replay',
+        modelName: 'model',
+        promptVersion: 'prompt',
+        schemaVersion: 'schema',
+        classificationOperationKey: `op:boundary:${ordinal}`,
+        classificationResultHash: HASH,
+        classificationSource: source,
+        manualOverride: null,
+        sourceSnapshot: {
+            instagramUrl: `https://instagram.com/${username}`,
+            originalAiClassification: original,
+            confidenceEvidence: `confidence=${confidence};evidence=${source === 'name_only' ? 'name_only' : 'model_ambiguous'}`,
+            operatorNote: '',
+        },
+    });
+    const imageRecord = {
+        ...base.ledger.records[1]!,
+        candidateId: 'candidate:two',
+        instagramId: 'two',
+        mutualOrdinal: 2,
+        originalAiClassification: 'female' as const,
+        effectiveClassification: 'female' as const,
+        classificationOperationKey: 'op:boundary:2',
+        sourceSnapshot: {
+            ...base.ledger.records[1]!.sourceSnapshot!,
+            instagramUrl: 'https://instagram.com/two',
+            originalAiClassification: 'female' as const,
+        },
+    };
+    const privateRecord = {
+        ...base.ledger.records[2]!,
+        mutualOrdinal: 6,
+    };
+    const records = [
+        noFeatureRecord(1, 'one', 'Jane One', 'female', 'female', 'name_only', 'medium'),
+        imageRecord,
+        noFeatureRecord(3, 'male_name', 'Male Name', 'male', 'male', 'name_only', 'low'),
+        noFeatureRecord(4, 'unpromoted_female', 'Unpromoted Female', 'unknown', 'unknown', 'name_only', 'low'),
+        noFeatureRecord(5, 'nameless', null, 'unknown', 'unknown', 'ai'),
+        privateRecord,
+    ];
+    const triageDetail = (ordinal: number, finalClassification: 'verified_female' | 'verified_non_female' | 'unresolved', inferredGender: 'female' | 'male' | 'unknown', confidence: 'low' | 'medium' | 'high' = 'medium') => ({
+        ordinal,
+        finalClassification,
+        classificationSource: finalClassification === 'unresolved' ? 'unknown' : 'triage',
+        featureOverview: null,
+        triage: { assessment: { inferredGender, confidence } },
+        feature: null,
+    });
+    const details = [
+        triageDetail(1, 'verified_female', 'female', 'medium'),
+        { ordinal: 2, finalClassification: 'verified_female', classificationSource: 'feature', featureOverview: 'x', triage: null, feature: makeFeature() },
+        triageDetail(3, 'verified_non_female', 'male', 'low'),
+        triageDetail(4, 'unresolved', 'unknown', 'low'),
+        triageDetail(5, 'unresolved', 'unknown', 'low'),
+    ] as unknown as readonly ReplayAccountAiDetail[];
+    const classificationByOrdinal = new Map(publicUsernames.map(username => {
+        const record = records.find(item => item.instagramId === username)!;
+        return [record.mutualOrdinal, {
+            originalAiClassification: record.originalAiClassification!,
+            classificationSource: record.classificationSource === 'name_only' ? 'name_only' as const : 'ai' as const,
+            confidence: record.confidence!,
+            classifier: record.classifier!,
+            modelName: record.modelName!,
+            promptVersion: record.promptVersion!,
+            schemaVersion: record.schemaVersion!,
+            classificationOperationKey: record.classificationOperationKey!,
+            classificationResultHash: record.classificationResultHash!,
+            secondPassStatus: record.secondPass.status,
+            secondPassCompleteMedia: record.secondPass.completeMedia,
+        }] as const;
+    }));
+    const emptyImport = parseConciergeClassificationCsv(
+        'username,instagram_url,ai_classification,ai_confidence/evidence_status,manual_gender,operator_note\n',
+        base.orderId,
+        base.requestId,
+        HASH,
+        'b'.repeat(64),
+        '2026-08-14T00:00:00.000Z',
+    );
+    return {
+        ...base,
+        expectedMutualCount: 6,
+        expectedHydratedCount: 6,
+        manualImport: emptyImport,
+        ledger: {
+            ...base.ledger,
+            mutualCount: 6,
+            hydratedPublicCount: 5,
+            hydratedPrivateCount: 1,
+            records,
+        },
+        replay: {
+            ...base.replay,
+            profilesByOrdinal: publicProfiles,
+            details,
+            orderedMutualUsernames: [...publicUsernames, 'private'],
+            classificationByOrdinal,
+            privateProfiles: [{ username: 'private', isPrivate: true, profilePicUrl: null, fullName: null, followersCount: 1, followingCount: 1, postsCount: 0, latestPosts: [] } as unknown as InstagramProfile],
+            fetchedCount: 6,
+            hydratedPublicCount: 5,
+            hydratedPrivateCount: 1,
+            analyzedPublicCount: 5,
+            unresolvedCount: 0,
+        },
+        nameOnlyProvenance: {
+            classifiedUsernames: ['one', 'male_name', 'unpromoted_female'],
+            unknownRatio: 0.4,
+        },
+    };
+}
+
 describe('concierge manual publication', () => {
     it('recomputes canonical candidates while preserving the existing result URL', () => {
         const publication = buildConciergeManualPublication(makeInput());
@@ -150,6 +311,70 @@ describe('concierge manual publication', () => {
         expect(publication.rows).toHaveLength(2);
         expect(publication.counts).toMatchObject({ male: 0, female: 2, unknown: 0, public: 2, private: 1, mutual: 3, authoritativeMutual: 3, hydrated: 3, analyzed: 2 });
         expect(publication.resultHash).toMatch(/^[a-f0-9]{64}$/);
+    });
+
+    it('keeps unresolved mutuals in the partition counts without promoting them to gender rows', () => {
+        const input = makeInput();
+        const unresolvedHash = 'c'.repeat(64);
+        const unresolvedSource = input.ledger.records[0]!;
+        const unresolvedRecord = {
+            ...unresolvedSource,
+            candidateId: 'candidate:unresolved',
+            instagramId: 'unresolved',
+            mutualOrdinal: 4,
+            partition: 'unresolved' as const,
+            profileFetchStatus: 'unavailable' as const,
+            originalAiClassification: 'unknown' as const,
+            effectiveClassification: 'unknown' as const,
+            confidence: 'low' as const,
+            classificationOperationKey: 'op:unresolved',
+            classificationResultHash: unresolvedHash,
+            sourceSnapshot: {
+                ...unresolvedSource.sourceSnapshot!,
+                instagramUrl: 'https://instagram.com/unresolved',
+                originalAiClassification: 'unknown' as const,
+                confidenceEvidence: 'confidence=low;evidence=unavailable',
+            },
+        };
+        const classificationByOrdinal = new Map(input.replay.classificationByOrdinal);
+        classificationByOrdinal.set(4, {
+            ...classificationByOrdinal.get(1)!,
+            originalAiClassification: 'unknown',
+            confidence: 'low',
+            classificationOperationKey: 'op:unresolved',
+            classificationResultHash: unresolvedHash,
+        });
+        const publication = buildConciergeManualPublication({
+            ...input,
+            expectedMutualCount: 4,
+            ledger: {
+                ...input.ledger,
+                mutualCount: 4,
+                unresolvedCount: 1,
+                records: [...input.ledger.records, unresolvedRecord],
+            },
+            replay: {
+                ...input.replay,
+                orderedMutualUsernames: [...input.replay.orderedMutualUsernames, 'unresolved'],
+                classificationByOrdinal,
+                fetchedCount: 4,
+                unresolvedCount: 1,
+            },
+        });
+
+        expect(publication.rows).toHaveLength(2);
+        expect(publication.counts).toMatchObject({
+            public: 2,
+            private: 1,
+            unresolved: 1,
+            mutual: 4,
+            authoritativeMutual: 4,
+            hydrated: 3,
+            analyzed: 2,
+            male: 0,
+            female: 2,
+            unknown: 0,
+        });
     });
 
     it('replaces every displayed candidate overview with the full batch copy contract', () => {
@@ -285,6 +510,215 @@ describe('concierge manual publication', () => {
         expect(() => buildConciergeManualPublication({
             ...input, ledger: { ...input.ledger, records }, replay: { ...input.replay, classificationByOrdinal },
         })).toThrow('CONCIERGE_PUBLICATION_SECOND_PASS_INCOMPLETE');
+    });
+
+    it('publishes a name-only female with distinct provenance and no feature media', () => {
+        const input = makeInput();
+        const emptyManualImport = parseConciergeClassificationCsv(
+            'username,instagram_url,ai_classification,ai_confidence/evidence_status,manual_gender,operator_note\n',
+            input.orderId,
+            input.requestId,
+            HASH,
+            'b'.repeat(64),
+            '2026-08-14T00:00:00.000Z',
+        );
+        const records = input.ledger.records.map(record => record.instagramId === 'one'
+            ? {
+                ...record,
+                firstPass: { ...record.firstPass, status: 'failed' as const, profilePicPresent: false, completeMedia: null, evidenceHash: HASH },
+                secondPass: { ...record.secondPass, status: 'not_collected' as const, completeMedia: null, evidenceHash: null },
+                originalAiClassification: 'female' as const,
+                effectiveClassification: 'female' as const,
+                confidence: 'medium' as const,
+                evidenceCoverage: { declared: 0, collected: 0, selected: 0, complete: false, basisPoints: 0, hash: HASH },
+                classificationSource: 'name_only' as const,
+                sourceSnapshot: {
+                    ...record.sourceSnapshot!,
+                    originalAiClassification: 'female' as const,
+                    confidenceEvidence: 'confidence=medium;evidence=name_only',
+                },
+            }
+            : record);
+        const classificationByOrdinal = new Map(input.replay.classificationByOrdinal);
+        classificationByOrdinal.set(1, {
+            ...classificationByOrdinal.get(1)!,
+            originalAiClassification: 'female', confidence: 'medium',
+            classificationSource: 'name_only' as const,
+            secondPassStatus: 'not_collected', secondPassCompleteMedia: null,
+        });
+        const publication = buildConciergeManualPublication({
+            ...input,
+            manualImport: emptyManualImport,
+            ledger: { ...input.ledger, records },
+            replay: {
+                ...input.replay,
+                profilesByOrdinal: new Map([
+                    ...input.replay.profilesByOrdinal.entries(),
+                    [1, { ...input.replay.profilesByOrdinal.get(1)!, fullName: 'Jane Doe' } as unknown as InstagramProfile],
+                ]),
+                details: input.replay.details.map(detail => detail.ordinal === 1
+                    ? { ...detail, finalClassification: 'verified_female', feature: null, triage: { assessment: { inferredGender: 'female', confidence: 'medium' } } } as unknown as ReplayAccountAiDetail
+                    : detail),
+                classificationByOrdinal,
+            },
+            nameOnlyProvenance: {
+                classifiedUsernames: ['one'],
+                unknownRatio: 0,
+            },
+        });
+
+        expect(publication.rows.map(row => row.suspect_instagram_id)).toEqual(expect.arrayContaining(['one', 'two']));
+        expect(publication.counts.nameOnly).toEqual({
+            classified: 1,
+            classifiedUsernames: ['one'],
+            unknownRatio: 0,
+        });
+    });
+
+    it('crosses the publication boundary with every name-only and image-backed classification shape', () => {
+        const publication = buildConciergeManualPublicationDraft(makeNameOnlyPublicationBoundaryInput());
+
+        expect(publication.rows.map(row => row.suspect_instagram_id)).toEqual(
+            expect.arrayContaining(['one', 'two']),
+        );
+        expect(publication.rows.map(row => row.suspect_instagram_id)).not.toEqual(
+            expect.arrayContaining(['male_name', 'unpromoted_female', 'nameless']),
+        );
+        expect(publication.counts).toMatchObject({
+            male: 1,
+            female: 2,
+            unknown: 2,
+            public: 5,
+            private: 1,
+            mutual: 6,
+            analyzed: 5,
+        });
+        expect(publication.counts.nameOnly).toEqual({
+            classified: 3,
+            classifiedUsernames: ['one', 'male_name', 'unpromoted_female'],
+            unknownRatio: 0.4,
+        });
+    });
+
+    it('rejects a name-only female whose ledger record retains a usable profile image', () => {
+        // The immutable classification ledger (concierge-classification-import.ts)
+        // already rejects this shape before the publication boundary is ever
+        // reached, so a corrupted firstPass.profilePicPresent fails closed here too.
+        const input = makeNameOnlyPublicationBoundaryInput();
+        const records = input.ledger.records.map(record => record.instagramId === 'one'
+            ? { ...record, firstPass: { ...record.firstPass, profilePicPresent: true } }
+            : record);
+
+        expect(() => buildConciergeManualPublicationDraft({
+            ...input,
+            ledger: { ...input.ledger, records },
+        })).toThrow('CONCIERGE_CLASSIFICATION_LEDGER_OVERRIDE_INVALID');
+    });
+
+    it('does not reject a name-only female merely because the raw profile URL looks non-default', () => {
+        // The AI pipeline routes to name-only using a byte-verified, post-normalization
+        // signal (bundle hasProfileImage), which can legitimately diverge from a raw
+        // profilePicUrl pattern check (e.g. a fetch/normalization failure on a real
+        // photo, or a default-avatar CDN variant the URL heuristic doesn't recognize).
+        // The publication contract must trust the ledger's own recorded firstPass
+        // field, not re-derive "has image" from the raw profile.
+        const input = makeNameOnlyPublicationBoundaryInput();
+        const profile = input.replay.profilesByOrdinal.get(1)!;
+        const replay = {
+            ...input.replay,
+            profilesByOrdinal: new Map([
+                ...input.replay.profilesByOrdinal.entries(),
+                [1, { ...profile, profilePicUrl: 'https://example.com/real.jpg' } as unknown as InstagramProfile],
+            ]),
+        };
+
+        expect(() => buildConciergeManualPublicationDraft({ ...input, replay })).not.toThrow();
+    });
+
+    it('rejects a low-confidence name-only female while preserving the image contract', () => {
+        const input = makeNameOnlyPublicationBoundaryInput();
+        const records = input.ledger.records.map(record => record.instagramId === 'one'
+            ? {
+                ...record,
+                confidence: 'low' as const,
+                sourceSnapshot: {
+                    ...record.sourceSnapshot!,
+                    confidenceEvidence: 'confidence=low;evidence=name_only',
+                },
+            }
+            : record);
+        const classificationByOrdinal = new Map(input.replay.classificationByOrdinal);
+        classificationByOrdinal.set(1, {
+            ...classificationByOrdinal.get(1)!,
+            confidence: 'low',
+        });
+
+        expect(() => buildConciergeManualPublicationDraft({
+            ...input,
+            ledger: { ...input.ledger, records },
+            replay: { ...input.replay, classificationByOrdinal },
+        })).toThrow('CONCIERGE_PUBLICATION_NAME_ONLY_CONFIDENCE_INVALID');
+    });
+
+    it('reports the compared values when the dry-run publication boundary finds an AI binding mismatch', () => {
+        const input = makeInput();
+        const replay = {
+            ...input.replay,
+            details: input.replay.details.map(detail => detail.ordinal === 1
+                ? { ...detail, finalClassification: 'verified_female' }
+                : detail.ordinal === 2
+                    ? { ...detail, finalClassification: 'verified_non_female' }
+                    : detail),
+        } as unknown as ConciergeManualPublicationInput['replay'];
+
+        const result = verifyConciergePublicationInput({ ...input, replay });
+
+        expect(result).toMatchObject({
+            passed: false,
+            code: 'CONCIERGE_PUBLICATION_REPLAY_AI_BINDING_MISMATCH',
+            diagnostic: {
+                check: 'buildEffectiveDetails.detailAiBinding',
+                ordinal: 1,
+                username: 'one',
+                compared: {
+                    detailClassification: 'female',
+                    bindingOriginalAiClassification: 'unknown',
+                },
+            },
+        });
+        if (result.passed) throw new Error('expected dry-run binding mismatch');
+        expect(result.diagnostics).toHaveLength(2);
+        expect(result.diagnostics[1]).toMatchObject({
+            ordinal: 2,
+            username: 'two',
+            compared: {
+                detailClassification: 'male',
+                bindingOriginalAiClassification: 'female',
+            },
+        });
+    });
+
+    it('round-trips a dumped input through the CLI without a provider, AI, or publication-store call', () => {
+        const base = makeInput();
+        const orderId = '123e4567-e89b-42d3-a456-426614174000';
+        const requestId = '223e4567-e89b-42d3-a456-426614174000';
+        const input: ConciergeManualPublicationInput = {
+            ...base,
+            orderId,
+            requestId,
+            resultRequestId: requestId,
+            ownerId: '323e4567-e89b-42d3-a456-426614174000',
+            sourceRequestId: '423e4567-e89b-42d3-a456-426614174000',
+            currentPublication: { ...base.currentPublication, resultUrl: `/result/${requestId}` },
+            manualImport: { ...base.manualImport, orderId, requestId },
+        };
+        const directory = mkdtempSync(join(tmpdir(), 'concierge-publication-dry-run-'));
+        try {
+            writeConciergePublicationDryRunDump(input, directory);
+            expect(runConciergePublicationDryRunCli(['--input', directory])).toBe(0);
+        } finally {
+            rmSync(directory, { recursive: true, force: true });
+        }
     });
 
     it('recomputes from exact bidirectional evidence, coverage status, and per-account overview', () => {
@@ -645,5 +1079,88 @@ describe('concierge manual publication', () => {
             name_is_name: true,
             name_confidence: Math.fround(preciseConfidence),
         }]);
+    });
+
+    describe('operator-confirmed featureless female rows', () => {
+        const overrideImport = (
+            input: ConciergeManualPublicationInput,
+            username: string,
+            manualGender: 'male' | 'female',
+        ) => {
+            const record = input.ledger.records.find(item => item.instagramId === username)!;
+            const snapshot = record.sourceSnapshot!;
+            const csv = 'username,instagram_url,ai_classification,ai_confidence/evidence_status,manual_gender,operator_note\n'
+                + `${username},${snapshot.instagramUrl},${snapshot.originalAiClassification},`
+                + `${snapshot.confidenceEvidence},${manualGender},${snapshot.operatorNote}\n`;
+            return parseConciergeClassificationCsv(
+                csv, input.orderId, input.requestId, HASH, 'b'.repeat(64), '2026-08-20T00:00:00.000Z',
+            );
+        };
+
+        it('promotes an operator-confirmed candidate with no feature to a female row', () => {
+            const base = makeNameOnlyPublicationBoundaryInput();
+            const publication = buildConciergeManualPublication({
+                ...base,
+                manualImport: overrideImport(base, 'unpromoted_female', 'female'),
+                // The override retires this row from the name-only path, so the
+                // provenance list and the achieved unknown ratio both shrink.
+                nameOnlyProvenance: { classifiedUsernames: ['one', 'male_name'], unknownRatio: 0.2 },
+            });
+
+            const promoted = publication.rows.find(row => row.suspect_instagram_id === 'unpromoted_female');
+            expect(promoted).toBeDefined();
+            expect(publication.counts).toMatchObject({ male: 1, female: 3, unknown: 1 });
+            // The evidence-free row contract: no invented appearance or exposure.
+            expect(promoted!.photogenic_grade).toBe(1);
+            expect(promoted!.exposure_level).toBe('low');
+            expect(promoted!.risk_grade).not.toBe('high_risk');
+            expect(promoted!.risk_analysis).toEqual([]);
+            expect(promoted!.one_line_overview.length).toBeGreaterThan(0);
+            expect(promoted!.gender_status).toBe('confirmed');
+            // Manual provenance is never disguised as name-only classifier output.
+            expect(publication.counts.nameOnly?.classifiedUsernames).toEqual(['one', 'male_name']);
+        });
+
+        // The AI path keeps its full evidence requirement: only an operator
+        // override buys the featureless exemption.
+        it('still rejects a featureless female that no operator confirmed', () => {
+            const base = makeNameOnlyPublicationBoundaryInput();
+            const records = base.ledger.records.map(record => (
+                record.instagramId === 'nameless'
+                    ? { ...record, effectiveClassification: 'female' as const }
+                    : record
+            ));
+
+            expect(() => buildConciergeManualPublication({
+                ...base,
+                ledger: { ...base.ledger, records },
+                nameOnlyProvenance: { classifiedUsernames: ['one', 'male_name', 'unpromoted_female'], unknownRatio: 0.2 },
+            })).toThrow('CONCIERGE_PUBLICATION_MANUAL_FEATURE_MISSING');
+        });
+
+        it('still rejects an operator-confirmed female whose feature was only half collected', () => {
+            const base = makeNameOnlyPublicationBoundaryInput();
+            const records = base.ledger.records.map(record => (
+                record.instagramId === 'two'
+                    ? {
+                        ...record,
+                        secondPass: { ...record.secondPass, status: 'not_collected' as const, completeMedia: null },
+                    }
+                    : record
+            ));
+            const classificationByOrdinal = new Map(base.replay.classificationByOrdinal);
+            classificationByOrdinal.set(2, {
+                ...classificationByOrdinal.get(2)!,
+                secondPassStatus: 'not_collected',
+                secondPassCompleteMedia: null,
+            });
+            const input = { ...base, ledger: { ...base.ledger, records } };
+
+            expect(() => buildConciergeManualPublication({
+                ...input,
+                replay: { ...input.replay, classificationByOrdinal },
+                manualImport: overrideImport(input, 'two', 'female'),
+            })).toThrow('CONCIERGE_PUBLICATION_SECOND_PASS_INCOMPLETE');
+        });
     });
 });

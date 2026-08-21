@@ -330,6 +330,8 @@ export function selectApifyApiToken(
         senary: 'APIFY_SENARY_API_TOKEN',
         septenary: 'APIFY_SEPTENARY_API_TOKEN',
         octonary: 'APIFY_OCTONARY_API_TOKEN',
+        nonary: 'APIFY_NONARY_API_TOKEN',
+        tenth: 'APIFY_TENTH_API_TOKEN',
     }[slot];
     const token = slot === 'primary'
         ? env[key]?.trim() || env.APIFY_API_TOKEN?.trim()
@@ -388,7 +390,8 @@ export async function startOrResumeApifyActor(
     const executionMaxTotalChargeUsd = options.executionMaxTotalChargeUsd
         ?? maxTotalChargeUsd;
     if (!isApifyCredentialSlot(credentialSlot)
-        && !(credentialSlot === 'octonary' && context?.allowConciergeBatchOctonary === true)) {
+        && !(credentialSlot === 'octonary' && context?.allowConciergeBatchOctonary === true)
+        && !(credentialSlot === 'nonary' && context?.allowConciergeBatchNonary === true)) {
         throw new Error('SCRAPING_RUN_CHECKPOINT_ERROR: stored credential slot is invalid.');
     }
     if (

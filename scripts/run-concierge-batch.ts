@@ -1,12 +1,15 @@
 import { createHash } from 'node:crypto';
+import { readFileSync } from 'node:fs';
 import { ApifyClient } from 'apify-client';
 import { z } from 'zod';
 import { supabaseAdmin } from '@/lib/supabase/admin';
 import { analyzeWithGemini } from '@/lib/services/ai';
+import { GENDER_NAME_ONLY_MAX_CANDIDATES_PER_BATCH } from '@/lib/services/ai/v2-staged-analysis';
 import { isRecoverableGeminiResponseError } from '@/lib/services/ai/gemini-generation-policy';
 import { getAnalysisPlan } from '@/lib/domain/analysis/plan-catalog';
+import { INSTAGRAM_MEDIA_HOST_SUFFIXES } from '@/lib/services/media/secure-image-fetch';
 import type { InstagramFollower, InstagramPost, InstagramProfile } from '@/lib/types/instagram';
-import type { ProviderCallContext } from '@/lib/services/instagram/providers/types';
+import { APIFY_CREDENTIAL_SLOTS, type ApifyCredentialSlot, type ProviderCallContext } from '@/lib/services/instagram/providers/types';
 import {
     APIFY_PROFILE_ACTOR_ID,
     APIFY_RELATIONSHIP_ACTOR_ID,
@@ -20,6 +23,7 @@ import {
 import { extractRawTargetInteractions } from '@/lib/services/analysis/v2-target-interactions';
 import { instagramPostUrl, selectRecentInteractionPosts } from '@/lib/services/analysis/interaction-posts';
 import { analysisV2CandidateId } from '@/lib/services/analysis/v2-ai-scoring-executors';
+import { hasUsableInstagramProfileImage, isDefaultInstagramProfileImage } from '@/lib/services/analysis/profile-image-evidence';
 import {
     captureFirstPaymentConciergeAiBundle,
     firstPaymentConciergeEvaluationPolicy,
@@ -45,16 +49,20 @@ import {
     type ConciergeBatchOrder,
     type ConciergeBatchPreparedOrder,
     type ConciergeBatchStageContext,
+    type ConciergeBatchFailureStage,
 } from '@/lib/services/analysis/concierge-batch-runner';
 import type {
     ConciergeBatchCandidateCopy,
     ConciergeBatchHighRiskCopy,
     ConciergeManualPublicationInput,
+    ConciergeNameOnlyDiagnostics,
     ConciergeStoredReplayFeatures,
 } from '@/lib/services/analysis/concierge-batch-publication';
 import {
     buildConciergeManualPublicationDraft,
+    conciergeDetailClassification,
 } from '@/lib/services/analysis/concierge-batch-publication';
+import { writeConciergePublicationDryRunDump } from './verify-concierge-publication';
 import { areMateriallyNearDuplicatePublicCopies } from '@/lib/services/analysis/public-copy-quality';
 import { assertGeminiCandidateCopyOverview } from '@/lib/services/analysis/gemini-candidate-copy-contract';
 
@@ -63,12 +71,186 @@ const USERNAME = z.string().regex(/^[a-z0-9._]{1,30}$/);
 const APPROVED_SLOTS = CONCIERGE_BATCH_TOKEN_PRIORITY;
 const RELATIONSHIP_SLOTS = CONCIERGE_BATCH_RELATIONSHIP_TOKEN_PRIORITY;
 type ApprovedSlot = typeof APPROVED_SLOTS[number];
+// Widened beyond RELATIONSHIP_SLOTS' own [nonary, secondary] default so
+// CONCIERGE_BATCH_RELATIONSHIP_SLOTS (see relationshipCollectionSlots) can
+// fail over to any balance-holding Apify slot, not just those two.
+type RelationshipSlot = ApifyCredentialSlot;
+type ConciergeProviderSlot = ApprovedSlot | RelationshipSlot;
+// isApifyCredentialSlot (providers/types.ts) deliberately excludes
+// octonary/nonary from its general V2 catalog check; both are valid
+// concierge-batch slots here, so validate against the full slot universe.
+// tenth (a fresh-quota operator slot) is batch-scoped the same way.
+const ALL_APIFY_CREDENTIAL_SLOTS: readonly ApifyCredentialSlot[] = [
+    ...APIFY_CREDENTIAL_SLOTS,
+    'octonary',
+    'nonary',
+    'tenth',
+];
 const APIFY_RUN_ID = z.string().regex(/^[A-Za-z0-9]{8,64}$/);
 const EMPTY_MANUAL_CSV = 'username,instagram_url,ai_classification,ai_confidence/evidence_status,manual_gender,operator_note\n';
 const RETRY_CODE_PATTERN = /^CONCIERGE_[A-Z0-9_]{2,100}$/;
 export const CONCIERGE_BATCH_ACTIVE_SCOPE_SIZE = 25;
 const CONCIERGE_BATCH_ACTIVE_SCOPE_START_MS = Date.parse('2026-08-07T00:00:00.000Z');
 const CONCIERGE_BATCH_EXCLUDED_TARGET = 'che.rish_0.0_';
+const CONCIERGE_DIAGNOSTIC_REDACTIONS: readonly [RegExp, string][] = [
+    [/\bpostgres(?:ql)?:\/\/[^\s"'<>]+/giu, '[REDACTED_DATABASE_URL]'],
+    [/\bapify_api_[A-Za-z0-9]+/giu, '[REDACTED_APIFY_TOKEN]'],
+    [/\beyJ[A-Za-z0-9._-]+/gu, '[REDACTED_JWT]'],
+    [/\b(?:https?|wss?):\/\/[^\s"'<>?#]+\?[^\s"'<>]*/giu, '[REDACTED_URL]'],
+];
+const CONCIERGE_DIAGNOSTIC_MESSAGE_MAX = 500;
+const CONCIERGE_DIAGNOSTIC_STACK_MAX = 2_000;
+
+export function conciergeNameOnlyDiagnosticMessage(
+    diagnostics: ConciergeNameOnlyDiagnostics,
+): string {
+    return `concierge name-only classification: ${JSON.stringify(diagnostics)}\n`;
+}
+
+/**
+ * The v2.9 gender-resolver admission gate silently dropped most of the batch's
+ * "unknown" outcomes with no record of why. Surface the per-reason tally so a
+ * canary run's drop-off is auditable after the fact instead of only visible as
+ * an aggregate unknown ratio.
+ *
+ * uncertain_or_absent only ever gets a nonzero count when
+ * CONCIERGE_BATCH_RESOLVER_WIDE_ADMISSION is rolled back to 'false'/'0' (the
+ * legacy account-context gate) - it has to stay in the shape so a rollback's
+ * drop-off is observable too, not just the wide-admission default's.
+ */
+export function conciergeGenderResolverAdmissionDiagnosticMessage(
+    admission: Readonly<{
+        eligible: number;
+        alreadyVerified: number;
+        officialOrGroup: number;
+        uncertainOrAbsent: number;
+        insufficientMedia: number;
+    }>,
+): string {
+    return `concierge gender-resolver admission: ${JSON.stringify({
+        eligible: admission.eligible,
+        already_verified: admission.alreadyVerified,
+        official_or_group: admission.officialOrGroup,
+        uncertain_or_absent: admission.uncertainOrAbsent,
+        insufficient_media: admission.insufficientMedia,
+    })}\n`;
+}
+
+export function sanitizeConciergeBatchDiagnostic(value: string, maximum: number): string {
+    let sanitized = value;
+    for (const [pattern, replacement] of CONCIERGE_DIAGNOSTIC_REDACTIONS) {
+        sanitized = sanitized.replace(pattern, replacement);
+    }
+    return sanitized.slice(0, maximum);
+}
+
+function conciergeBatchErrorName(error: unknown): string {
+    if (error instanceof Error && error.name.trim()) return error.name;
+    if (error && typeof error === 'object') {
+        const named = (error as { name?: unknown }).name;
+        if (typeof named === 'string' && named.trim()) return named;
+        const constructorName = (error as { constructor?: { name?: unknown } }).constructor?.name;
+        if (typeof constructorName === 'string' && constructorName.trim()) return constructorName;
+    }
+    return typeof error === 'string' ? 'String' : 'UnknownError';
+}
+
+function conciergeBatchErrorMessage(error: unknown): string {
+    return error instanceof Error
+        ? error.message
+        : typeof error === 'string'
+            ? error
+            : 'Unknown failure';
+}
+
+type ConciergeBatchDiagnosticCause = Readonly<{
+    message: string;
+    name: string;
+}>;
+
+function conciergeBatchErrorCauses(error: unknown): readonly ConciergeBatchDiagnosticCause[] {
+    const causes: ConciergeBatchDiagnosticCause[] = [];
+    const visited = new Set<object>();
+    let current: unknown = error;
+    for (let depth = 0; depth < 5; depth += 1) {
+        if (!current || (typeof current !== 'object' && typeof current !== 'function')) break;
+        const currentObject = current as object;
+        if (visited.has(currentObject)) break;
+        visited.add(currentObject);
+
+        let cause: unknown;
+        try {
+            cause = (current as { cause?: unknown }).cause;
+        } catch {
+            break;
+        }
+        if (cause === undefined || cause === null) break;
+        if ((typeof cause === 'object' || typeof cause === 'function') && visited.has(cause)) break;
+
+        causes.push({
+            message: sanitizeConciergeBatchDiagnostic(
+                conciergeBatchErrorMessage(cause),
+                CONCIERGE_DIAGNOSTIC_MESSAGE_MAX,
+            ),
+            name: sanitizeConciergeBatchDiagnostic(conciergeBatchErrorName(cause), 100),
+        });
+        current = cause;
+    }
+    return causes;
+}
+
+export function conciergeBatchFailureDiagnostic(
+    error: unknown,
+    stage?: ConciergeBatchFailureStage,
+): Readonly<{
+    message: string;
+    name: string;
+    stage: ConciergeBatchFailureStage | null;
+    stack?: string;
+    causes: readonly ConciergeBatchDiagnosticCause[];
+}> {
+    const stack = error instanceof Error && typeof error.stack === 'string'
+        ? error.stack.split(/\r?\n/).slice(0, 6).join('\n')
+        : null;
+    return {
+        message: sanitizeConciergeBatchDiagnostic(
+            conciergeBatchErrorMessage(error),
+            CONCIERGE_DIAGNOSTIC_MESSAGE_MAX,
+        ),
+        name: sanitizeConciergeBatchDiagnostic(conciergeBatchErrorName(error), 100),
+        stage: stage ?? null,
+        causes: conciergeBatchErrorCauses(error),
+        ...(stack ? {
+            stack: sanitizeConciergeBatchDiagnostic(stack, CONCIERGE_DIAGNOSTIC_STACK_MAX),
+        } : {}),
+    };
+}
+
+function writeConciergeBatchFailureSummary(
+    code: string,
+    error: unknown,
+    stage?: ConciergeBatchFailureStage,
+): void {
+    const diagnostic = conciergeBatchFailureDiagnostic(error, stage);
+    const rootCause = diagnostic.causes.at(-1)?.message;
+    process.stderr.write(`${JSON.stringify({
+        status: 'failed',
+        code,
+        ...(rootCause ? { summary: `${code} (root: ${rootCause})` } : {}),
+        ...diagnostic,
+    })}\n`);
+}
+
+function expectedActiveScopeCount(): number {
+    const raw = process.env.CONCIERGE_BATCH_EXPECTED_SCOPE_COUNT?.trim();
+    if (!raw) return CONCIERGE_BATCH_ACTIVE_SCOPE_SIZE;
+    if (!/^\d+$/.test(raw)) throw new Error('CONCIERGE_ACTIVE_SCOPE_COUNT_INVALID');
+    const value = Number(raw);
+    if (!Number.isSafeInteger(value) || value < 1 || value > 30) {
+        throw new Error('CONCIERGE_ACTIVE_SCOPE_COUNT_INVALID');
+    }
+    return value;
+}
 const PROTECTED_RETRY_CODES = new Set([
     'CONCIERGE_PROVIDER_ARTIFACT_INVALID',
     'CONCIERGE_TARGET_PROFILE_PRIVATE',
@@ -118,12 +300,13 @@ const BOUNDED_RETRY_FAILURE_CODES = new Set([
     'CONCIERGE_PUBLICATION_STALE_VERSION',
     'CONCIERGE_RELATIONSHIP_FOLLOWERS_EMPTY',
     'CONCIERGE_RELATIONSHIP_FOLLOWING_EMPTY',
+    'CONCIERGE_BATCH_RELATIONSHIP_ARTIFACT_REQUIRED',
     'CONCIERGE_PROVIDER_ARTIFACT_LOOKUP_FAILED',
 ]);
 
 const relationshipArtifactSchema = z.object({
     runId: APIFY_RUN_ID,
-    credentialSlot: z.literal('secondary'),
+    credentialSlot: z.enum(['nonary', 'secondary']),
     sourceDeclaredCount: z.number().int().min(1).max(1_200),
 }).strict();
 
@@ -140,6 +323,93 @@ export type ConciergeExistingRelationshipArtifacts = ReadonlyMap<
         following?: ConciergeExistingRelationshipArtifact;
     }>
 >;
+
+export type ConciergeProfilePack = ReadonlyMap<string, unknown>;
+
+let profilePackMemo: {
+    path: string;
+    pack: ConciergeProfilePack | null;
+} | undefined;
+
+/**
+ * Validates only the pack envelope. Individual profile rows are deliberately
+ * parsed below, one username at a time, so a bad row falls back to the
+ * provider without invalidating the rest of the pack.
+ */
+export function parseConciergeProfilePack(raw: unknown): ConciergeProfilePack {
+    if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
+        throw new Error('CONCIERGE_PROFILE_PACK_INVALID');
+    }
+    const envelope = raw as Record<string, unknown>;
+    if (envelope.version !== 1 || !envelope.profiles || typeof envelope.profiles !== 'object'
+        || Array.isArray(envelope.profiles)) {
+        throw new Error('CONCIERGE_PROFILE_PACK_INVALID');
+    }
+    const profiles = envelope.profiles as Record<string, unknown>;
+    const result = new Map<string, unknown>();
+    for (const [rawUsername, item] of Object.entries(profiles)) {
+        let username: string;
+        try {
+            username = normalized(rawUsername);
+        } catch {
+            throw new Error('CONCIERGE_PROFILE_PACK_INVALID');
+        }
+        if (result.has(username)) throw new Error('CONCIERGE_PROFILE_PACK_INVALID');
+        result.set(username, item);
+    }
+    return result;
+}
+
+export function loadConciergeProfilePack(path = process.env.CONCIERGE_BATCH_PROFILE_PACK_PATH): ConciergeProfilePack | null {
+    const resolvedPath = path?.trim();
+    const memoPath = resolvedPath ?? '';
+    if (profilePackMemo?.path === memoPath) return profilePackMemo.pack;
+    if (!resolvedPath) {
+        profilePackMemo = { path: memoPath, pack: null };
+        return null;
+    }
+    let raw: unknown;
+    try {
+        raw = JSON.parse(readFileSync(resolvedPath, 'utf8'));
+    } catch {
+        throw new Error('CONCIERGE_PROFILE_PACK_INVALID');
+    }
+    const pack = parseConciergeProfilePack(raw);
+    profilePackMemo = { path: memoPath, pack };
+    return pack;
+}
+
+export function hydrateConciergeProfilesFromPack(
+    usernames: readonly string[],
+    pack: ConciergeProfilePack | null,
+): {
+    profilesByUsername: Map<string, InstagramProfile>;
+    providerUsernames: string[];
+} {
+    const profilesByUsername = new Map<string, InstagramProfile>();
+    const providerUsernames: string[] = [];
+    for (const rawUsername of usernames) {
+        const username = normalized(rawUsername);
+        if (!pack?.has(username)) {
+            providerUsernames.push(username);
+            continue;
+        }
+        try {
+            const parsed = parseApifyProfileDataset([pack.get(username)], [username]);
+            const profile = parsed.profilesByUsername.get(username);
+            if (profile && !parsed.datasetContaminated
+                && !parsed.failuresByUsername.has(username)
+                && !parsed.notFoundUsernames.has(username)) {
+                profilesByUsername.set(username, profile);
+                continue;
+            }
+        } catch {
+            // A single malformed pack row is a pack miss, not an order-wide failure.
+        }
+        providerUsernames.push(username);
+    }
+    return { profilesByUsername, providerUsernames };
+}
 
 type OrderRow = ConciergeBatchOrder & {
     preflightId: string;
@@ -169,10 +439,25 @@ const BATCH_COPY_NUMBER = /\b\d+(?:[.,]\d+)?\b/u;
 const BATCH_COPY_NO_EVIDENCE_SIGNAL = /(?:단서|재료|정보|근거|확인|판단|드러난|남겨진|찾을|읽을|없|부족|어렵|제한|적)/u;
 const BATCH_COPY_NO_EVIDENCE_FORBIDDEN = /(?:실루엣|이목구비|얼굴|표정|헤어스타일|머리카락|체형|옷차림|포즈|외모|분위기|스타일|사진|이미지|장면|행동|태도|성격|관계|호감|긴장|시선|매력)/u;
 const ANONYMOUS_PROFILE_IMAGE_MARKER = /(?:anonymous_profile_pic|YW5vbnltb3VzX3Byb2ZpbGVfcGlj)/iu;
+// Characters that render as blank space but aren't matched by String#trim():
+// braille pattern blank, Hangul filler/jamo fillers, zero-width and BOM chars.
+// A profile with one of these as its whole "full name" must fall back to the
+// username subject, not a blank-looking "님은 ..." sentence.
+const BATCH_COPY_BLANK_LOOKING_CHARS = /[\u115F\u1160\u200B\u200C\u200D\u2800\u3164\uFEFF]/gu;
+// Instagram display names routinely append a job title or affiliation after a
+// separator ("송하빈 | 청소년상담사 • 청소년지도사") or wrap the name in decoration
+// ("👑한채연✿ᑕᕼᗩEYEOᑎ"). The copy contract makes the formatted subject label a
+// literal the model must reproduce verbatim in two separate sentences, and a
+// title-laden or decorated label is one no model reliably echoes - the observed
+// failure was six consecutive CONCIERGE_BATCH_COPY_SUBJECT_GROUNDING_INVALID
+// attempts for rabbisseu_. Keep the leading name segment instead.
+const BATCH_COPY_NAME_SEPARATORS = /[|｜/\\•·∙⋅ㅣ]/u;
+const BATCH_COPY_HANGUL_NAME_RUN = /[가-힣][가-힣\s]*/u;
 
 /** Instagram's anonymous avatar URL is media-shaped but carries no subject evidence. */
 export function isUsableProfileImageUrl(value: string | null | undefined): boolean {
     if (!value?.trim()) return false;
+    if (isDefaultInstagramProfileImage({ url: value })) return false;
     const candidates = [value];
     try {
         candidates.push(decodeURIComponent(value));
@@ -266,25 +551,58 @@ type ConciergeBatchActiveScopeMember = Readonly<{
 }>;
 
 /**
+ * Reads CONCIERGE_BATCH_INCLUDE_EXCLUDED_TARGET; default false. On, only the
+ * CONCIERGE_BATCH_EXCLUDED_TARGET ('che.rish_0.0_') condition in
+ * selectConciergeBatchActiveScope is disabled - the paidAt-range and
+ * currentOrderStatus guards are untouched. Off is byte-for-byte identical to
+ * before (che.rish_0.0_ stays excluded).
+ */
+export function conciergeBatchIncludeExcludedTargetEnabled(
+    raw = process.env.CONCIERGE_BATCH_INCLUDE_EXCLUDED_TARGET,
+): boolean {
+    return raw === 'true' || raw === '1';
+}
+
+/**
  * Reuses the immutable 30-row audit manifest while selecting only the
- * user-confirmed active-25 order scope. The order status is deliberately an
+ * user-confirmed active order scope. The order status is deliberately an
  * exact match, which excludes completed/refunded/payment-terminal rows before
  * any retry-code or provider decision is made.
  */
 export function selectConciergeBatchActiveScope<T extends ConciergeBatchActiveScopeMember>(
     members: readonly T[],
 ): T[] {
+    const includeExcludedTarget = conciergeBatchIncludeExcludedTargetEnabled();
     const selected = members.filter(member => {
         const paidAtMs = Date.parse(member.paidAt);
         return Number.isFinite(paidAtMs)
             && paidAtMs >= CONCIERGE_BATCH_ACTIVE_SCOPE_START_MS
             && member.currentOrderStatus === 'analysis_in_progress'
-            && member.targetUsername !== CONCIERGE_BATCH_EXCLUDED_TARGET;
+            && (includeExcludedTarget || member.targetUsername !== CONCIERGE_BATCH_EXCLUDED_TARGET);
     });
-    if (selected.length !== CONCIERGE_BATCH_ACTIVE_SCOPE_SIZE) {
+    if (selected.length !== expectedActiveScopeCount()) {
         throw new Error('CONCIERGE_ACTIVE_SCOPE_COUNT_CONFLICT');
     }
     return selected;
+}
+
+export function selectConciergeBatchOnlyOrders<T extends Readonly<{ orderId: string }>>(
+    scopeMembers: readonly T[],
+    raw = process.env.CONCIERGE_BATCH_ONLY_ORDERS,
+): T[] {
+    const value = raw?.trim();
+    if (!value) return [...scopeMembers];
+    const orderIds = value.split(',').map(orderId => orderId.trim());
+    if (orderIds.some(orderId => !ORDER_ID.safeParse(orderId).success)
+        || new Set(orderIds).size !== orderIds.length) {
+        throw new Error('CONCIERGE_BATCH_ONLY_ORDERS_INVALID');
+    }
+    const scopeOrderIds = new Set(scopeMembers.map(member => member.orderId));
+    if (orderIds.some(orderId => !scopeOrderIds.has(orderId))) {
+        throw new Error('CONCIERGE_BATCH_ONLY_ORDERS_INVALID');
+    }
+    const selectedOrderIds = new Set(orderIds);
+    return scopeMembers.filter(member => selectedOrderIds.has(member.orderId));
 }
 
 type ProviderRunRow = {
@@ -323,6 +641,91 @@ function hash(value: unknown): string {
     return createHash('sha256').update(canonical(value), 'utf8').digest('hex');
 }
 
+/**
+ * Statuses a concierge batch run may still mutate in place. A retried order
+ * sits at 'failed' by contract (loadRetryCodeByOrder requires it), so omitting
+ * it here rejects every retry at the publish stage.
+ */
+export const CONCIERGE_BATCH_MUTABLE_REQUEST_STATUSES = Object.freeze(
+    ['pending', 'processing', 'failed'] as const,
+);
+
+const MAX_TARGET_PROFILE_IMAGE_URL_LENGTH = 8_192;
+
+function matchesConciergeAllowedImageHost(hostname: string): boolean {
+    return INSTAGRAM_MEDIA_HOST_SUFFIXES.some(suffix => (
+        hostname === suffix || hostname.endsWith(`.${suffix}`)
+    ));
+}
+
+/**
+ * Mirrors targetProfileImageFromStepData's (lib/services/analysis/result-
+ * interactions.ts) accept criteria exactly, so only a URL that reader will
+ * actually render is ever persisted: https, no embedded userinfo, no port
+ * other than 443, hostname on the Instagram media allowlist, length-bounded.
+ * A non-Instagram or malformed URL is skipped (returns null), never stored.
+ */
+function conciergeBatchTargetProfileImageUrl(
+    candidate: string | null | undefined,
+): string | null {
+    if (
+        typeof candidate !== 'string'
+        || candidate.length === 0
+        || candidate.length > MAX_TARGET_PROFILE_IMAGE_URL_LENGTH
+    ) {
+        return null;
+    }
+    try {
+        const parsed = new URL(candidate);
+        const hostname = parsed.hostname.toLowerCase().replace(/\.$/, '');
+        if (
+            parsed.protocol !== 'https:'
+            || parsed.username
+            || parsed.password
+            || (parsed.port && parsed.port !== '443')
+            || !matchesConciergeAllowedImageHost(hostname)
+        ) {
+            return null;
+        }
+        parsed.hostname = hostname;
+        parsed.hash = '';
+        return parsed.href;
+    } catch {
+        return null;
+    }
+}
+
+export function mergeConciergeBatchTargetFullNameStepData(
+    stepData: unknown,
+    targetFullName: string | null | undefined,
+    targetProfileImageUrl?: string | null,
+): Record<string, unknown> {
+    const existing = stepData && typeof stepData === 'object' && !Array.isArray(stepData)
+        ? stepData as Record<string, unknown>
+        : {};
+    const cleanName = cleanBatchCopyText(targetFullName, 200);
+    const cleanImageUrl = conciergeBatchTargetProfileImageUrl(targetProfileImageUrl);
+    if (!cleanName && !cleanImageUrl) return { ...existing };
+    const publication = existing.conciergeBatchPublication;
+    const publicationRecord = publication && typeof publication === 'object' && !Array.isArray(publication)
+        ? publication as Record<string, unknown>
+        : null;
+    return {
+        ...existing,
+        ...(cleanName ? { targetFullName: cleanName } : {}),
+        ...(cleanImageUrl ? { targetProfileImage: cleanImageUrl } : {}),
+        ...(publicationRecord
+            ? {
+                conciergeBatchPublication: {
+                    ...publicationRecord,
+                    ...(cleanName ? { targetFullName: cleanName } : {}),
+                    ...(cleanImageUrl ? { targetProfileImage: cleanImageUrl } : {}),
+                },
+            }
+            : {}),
+    };
+}
+
 function normalized(value: string): string {
     return USERNAME.parse(value.trim().replace(/^@/, '').toLowerCase());
 }
@@ -337,14 +740,33 @@ function cleanBatchCopyText(value: string | null | undefined, maximum: number): 
     return clean ? [...clean].slice(0, maximum).join('') : null;
 }
 
+/**
+ * Reduces a retained display name to the part that actually reads as a name.
+ * The separator segment is taken first, then the leading Hangul run, so a
+ * "name + title" or "decoration + name + decoration" string collapses to the
+ * name the model can repeat. A name that is already plain (pure Hangul, or a
+ * Latin name with no separator) is returned unchanged.
+ */
+function batchCopySubjectNameCore(value: string): string {
+    const [head = ''] = value.split(BATCH_COPY_NAME_SEPARATORS);
+    const segment = head.replace(/\s+/g, ' ').trim() || value;
+    const hangulRun = BATCH_COPY_HANGUL_NAME_RUN.exec(segment)?.[0].trim();
+    return hangulRun || segment;
+}
+
 function batchCopySubjectLabel(fullName: string | null | undefined, username: string): string {
     const cleanFullName = cleanBatchCopyText(fullName, 200);
-    if (cleanFullName
-        && !BATCH_COPY_PUBLIC_IDENTIFIER.test(cleanFullName)
-        && !BATCH_COPY_ROLE_LABELS.test(cleanFullName)) {
-        return /^[가-힣]{3}$/u.test(cleanFullName)
-            ? `${[...cleanFullName].slice(1).join('')}님`
-            : `${cleanFullName}님`;
+    const visibleFullName = cleanFullName
+        ? batchCopySubjectNameCore(
+            cleanFullName.replace(BATCH_COPY_BLANK_LOOKING_CHARS, ' ').replace(/\s+/g, ' ').trim(),
+        )
+        : '';
+    if (visibleFullName
+        && !BATCH_COPY_PUBLIC_IDENTIFIER.test(visibleFullName)
+        && !BATCH_COPY_ROLE_LABELS.test(visibleFullName)) {
+        return /^[가-힣]{3}$/u.test(visibleFullName)
+            ? `${[...visibleFullName].slice(1).join('')}님`
+            : `${visibleFullName}님`;
     }
     return normalized(username);
 }
@@ -563,6 +985,7 @@ export function buildConciergeBatchHighRiskCopyPrompt(
         `- oneLineOverview는 ${BATCH_COPY_MIN_LENGTH}~${BATCH_COPY_MAX_LENGTH}자 한 문장입니다.`,
         '- riskAnalysis는 정확히 두 문장 배열이며 각 문장은 25~180자입니다.',
         '- 이름은 위에 제공된 이름을 그대로 사용하고, 다른 식별자·URL·아이디·숫자·상호작용 수량은 쓰지 마세요.',
+        `- oneLineOverview에 후보 이름 "${subjects.candidate}"을(를) 글자 그대로 반드시 포함하고, riskAnalysis 두 문장 중 최소 한 문장에도 똑같이 글자 그대로 포함하세요. 줄이거나 바꾸거나 생략하면 실패합니다.`,
         '- 대상 계정·후보·후보 계정 같은 내부 역할명은 쓰지 마세요. 위에서 미리 계산한 이름만 사람을 가리키는 데 사용하세요.',
         '- 이미지가 있으면 이미지에서 실제로 보이는 요소만 묘사하세요.',
         '- 이미지가 없으면 실루엣·이목구비·얼굴·표정·헤어스타일·체형·옷차림·포즈를 만들지 마세요.',
@@ -571,7 +994,15 @@ export function buildConciergeBatchHighRiskCopyPrompt(
         ] : hasAnyEvidence ? [
             '- 보존된 상호작용이 없으면 bio·캡션·실제로 보이는 이미지 요소에만 기대어 장난스럽고 도발적인 해석을 허용합니다. 상호작용이 있었다고 만들지 말고, 확인되지 않았다, 알 수 없다, 수집 범위, 공개 자료만으로는 같은 신뢰를 떨어뜨리는 표현은 쓰지 마세요.',
         ] : [
-            '- 이미지·bio·캡션·보존된 상호작용이 모두 없으면 유용한 단서가 없었다는 내용만 쓰세요. 실루엣·이목구비·얼굴·표정·분위기·스타일·행동·성격·관계 해석을 만들지 말고, 같은 문장을 반복하지 마세요.',
+            '- 이미지·bio·캡션·보존된 상호작용이 모두 없으면 아래 규칙을 그대로 따르세요.',
+            '  1) "사진이 없다", "이미지가 없다"처럼 사진·이미지라는 낱말 자체를 절대 쓰지 마세요.',
+            '  2) 다음 낱말을 단 하나도 쓰지 마세요: 실루엣, 이목구비, 얼굴, 표정, 헤어스타일, 머리카락, 체형, 옷차림, 포즈, 외모, 분위기, 스타일, 사진, 이미지, 장면, 행동, 태도, 성격, 관계, 호감, 긴장, 시선, 매력.',
+            '  3) 대신 다음 낱말 중 하나 이상을 자연스럽게 넣으세요: 단서, 재료, 정보, 근거, 확인, 판단, 드러난, 남겨진, 찾을, 읽을, 없다, 부족, 어렵다, 제한, 적다.',
+            '  4) 참고할 안전한 문장 예시입니다(그대로 베끼지 말고 세 문장을 서로 다르게 바꿔 쓰세요, {후보 이름} 자리에는 실제 후보 이름을 넣으세요):',
+            '     - "{후보 이름}에 대해 확인할 만한 공개 단서가 남지 않아 뚜렷한 판단을 내리기엔 정보가 부족합니다."',
+            '     - "겉으로 드러난 단서가 거의 없어 {후보 이름}을(를) 자신 있게 짚어낼 근거를 찾기가 쉽지 않습니다."',
+            '     - "남겨진 정보가 적어 {후보 이름}에 대해 더 깊이 판단하기는 제한적입니다."',
+            '  5) 외모·분위기·관계·행동에 대한 해석이나 서술은 절대로 만들지 말고, 세 문장(overview, riskAnalysis 두 개)이 서로 똑같은 문장이 되지 않게 하세요.',
         ]),
         '- 고정된 일반론이나 다른 후보와 돌려 쓰는 문장 틀, 대상 계정·후보 계정이라는 역할 라벨, 바람·불륜을 단정하는 표현은 쓰지 마세요.',
         '- JSON 키는 정확히 oneLineOverview와 riskAnalysis만 사용하세요.',
@@ -593,7 +1024,91 @@ async function defaultConciergeBatchHighRiskCopyGenerator(
     });
 }
 
-/** Runs one model call and permits exactly one retry for any copy-contract failure. */
+function conciergeBatchCopyMaxAttempts(): number {
+    const raw = process.env.CONCIERGE_BATCH_COPY_MAX_ATTEMPTS?.trim();
+    if (!raw) return 2;
+    if (!/^\d+$/.test(raw)) throw new Error('CONCIERGE_BATCH_COPY_MAX_ATTEMPTS_INVALID');
+    const value = Number(raw);
+    if (!Number.isSafeInteger(value) || value < 1 || value > 10) {
+        throw new Error('CONCIERGE_BATCH_COPY_MAX_ATTEMPTS_INVALID');
+    }
+    return value;
+}
+
+/**
+ * Reads CONCIERGE_BATCH_COPY_RETRY_FEEDBACK_ENABLED; default false. Off
+ * preserves the retry prompt byte-for-byte across every attempt (the
+ * contract itself never changes). On, a retry after a recognized contract
+ * failure appends a targeted correction instruction to the next attempt's
+ * prompt, so a retry is not just a re-roll of the exact prompt that just
+ * failed the exact same way - the observed cause of candidates failing
+ * every retry attempt identically.
+ */
+export function conciergeBatchCopyRetryFeedbackEnabled(
+    raw = process.env.CONCIERGE_BATCH_COPY_RETRY_FEEDBACK_ENABLED,
+): boolean {
+    return raw === 'true' || raw === '1';
+}
+
+/**
+ * One correction line per contract-failure code, appended to the next
+ * attempt's prompt when CONCIERGE_BATCH_COPY_RETRY_FEEDBACK_ENABLED is on.
+ * The contract's assert/throw logic in validateConciergeBatchHighRiskCopy
+ * is untouched by this - only the generation input is strengthened. A code
+ * with no entry here (schema/duplicate/unobserved-appearance/no-evidence-
+ * required) gets no injected feedback and simply retries with the
+ * unmodified base prompt, as before.
+ */
+const CONCIERGE_BATCH_COPY_RETRY_FEEDBACK: Readonly<Record<string, string>> = {
+    CONCIERGE_BATCH_COPY_UNOBSERVED_INTERACTION:
+        '직전 출력이 관측되지 않은 상호작용을 언급해 실패했습니다. 이 후보는 관측된 상호작용이 전혀 없습니다. \'좋아요\',\'댓글\',\'태그\',\'멘션\'과 그 파생·유사 표현(호감 표시, 반응, 소통, 주고받은 등)을 단 한 번도 쓰지 마세요. 오직 사진에서 실제로 보이는 외모·분위기·스타일·색감·장면·포즈만으로 세 문장을 쓰고, 각 문장에 후보 이름을 넣으세요.',
+    CONCIERGE_BATCH_COPY_APPEARANCE_GROUNDING_INVALID:
+        '이미지에서 실제로 보이는 요소를 사진/분위기/스타일/표정/색감/장면/포즈 같은 외모 어휘로 최소 한 번 명시하세요.',
+    CONCIERGE_BATCH_COPY_OVERVIEW_INTERACTION_GROUNDING_INVALID:
+        'overview·riskAnalysis에 수집된 상호작용 방향·유형을 직접 근거로 인용하세요.',
+    CONCIERGE_BATCH_COPY_INTERACTION_GROUNDING_INVALID:
+        'overview·riskAnalysis에 수집된 상호작용 방향·유형을 직접 근거로 인용하세요.',
+    CONCIERGE_BATCH_COPY_SUBJECT_GROUNDING_INVALID:
+        'overview와 riskAnalysis 각각에 후보 이름을 그대로 포함하세요.',
+    CONCIERGE_BATCH_COPY_UNSAFE:
+        '역할 라벨·금지 표현·숫자·공개식별자를 제거하고 다시 쓰세요.',
+};
+
+export function conciergeBatchCopyRetryFeedbackInstruction(error: unknown): string | null {
+    if (!(error instanceof Error)) return null;
+    return CONCIERGE_BATCH_COPY_RETRY_FEEDBACK[error.message] ?? null;
+}
+
+/**
+ * Fixing one contract violation must not silently regress an already-
+ * corrected one (e.g. an UNOBSERVED_INTERACTION fix that drops the
+ * candidate name and reintroduces SUBJECT_GROUNDING_INVALID) - so this is
+ * appended alongside every accumulated correction, not just when its own
+ * code was observed.
+ */
+const CONCIERGE_BATCH_COPY_RETRY_FEEDBACK_COMMON_REMINDER =
+    'overview와 riskAnalysis 각각에 후보 이름을 그대로 포함하고, 관측되지 않은 상호작용은 언급하지 마세요.';
+
+/**
+ * Appends the correction instruction for every distinct contract-failure
+ * code observed so far for this candidate (not just the most recent one),
+ * deduped and in first-observed order, plus the always-on common reminder.
+ * A code with no mapped instruction (e.g. schema/duplicate) is silently
+ * skipped rather than producing an empty bullet.
+ */
+function conciergeBatchCopyPromptWithFeedback(
+    basePrompt: string,
+    observedFeedbackCodes: readonly string[],
+): string {
+    const instructions = observedFeedbackCodes
+        .map(code => CONCIERGE_BATCH_COPY_RETRY_FEEDBACK[code])
+        .filter((line): line is string => Boolean(line));
+    if (instructions.length === 0) return basePrompt;
+    const lines = [...instructions, CONCIERGE_BATCH_COPY_RETRY_FEEDBACK_COMMON_REMINDER];
+    return `${basePrompt}\n\n[재시도 교정 지시]\n${lines.map(line => `- ${line}`).join('\n')}`;
+}
+
+/** Runs one model call and retries contract failures up to the configured limit. */
 async function generateConciergeBatchCopy(
     evidence: ConciergeBatchHighRiskCopyEvidence,
     generator?: ConciergeBatchHighRiskCopyGenerator,
@@ -602,10 +1117,20 @@ async function generateConciergeBatchCopy(
         evidence: ConciergeBatchHighRiskCopyEvidence;
     }[] = [],
 ): Promise<ConciergeBatchHighRiskCopy> {
-    const prompt = buildConciergeBatchHighRiskCopyPrompt(evidence);
+    const maxAttempts = conciergeBatchCopyMaxAttempts();
+    const basePrompt = buildConciergeBatchHighRiskCopyPrompt(evidence);
+    const retryFeedbackEnabled = conciergeBatchCopyRetryFeedbackEnabled();
     const images = [...(evidence.images ?? [])];
     let lastError: unknown = null;
-    for (let attempt = 0; attempt < 2; attempt += 1) {
+    let attemptsMade = 0;
+    // Deduped, first-observed-order accumulation across every attempt so
+    // far for this candidate - see conciergeBatchCopyPromptWithFeedback.
+    const observedFeedbackCodes: string[] = [];
+    for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
+        attemptsMade = attempt + 1;
+        const prompt = retryFeedbackEnabled
+            ? conciergeBatchCopyPromptWithFeedback(basePrompt, observedFeedbackCodes)
+            : basePrompt;
         try {
             const raw = generator
                 ? await generator(prompt, images)
@@ -622,10 +1147,31 @@ async function generateConciergeBatchCopy(
             return copy;
         } catch (error) {
             lastError = error;
+            if (
+                retryFeedbackEnabled
+                && error instanceof Error
+                && CONCIERGE_BATCH_COPY_RETRY_FEEDBACK[error.message] !== undefined
+                && !observedFeedbackCodes.includes(error.message)
+            ) {
+                observedFeedbackCodes.push(error.message);
+            }
+            const diagnostic = conciergeBatchFailureDiagnostic(error);
+            const candidate = typeof evidence.candidateUsername === 'string'
+                ? sanitizeConciergeBatchDiagnostic(evidence.candidateUsername, 100)
+                    .replace(/[\r\n]+/g, ' ')
+                : '';
+            const warning = diagnostic.message.replace(/[\r\n]+/g, ' ');
+            process.stderr.write(
+                `batch copy attempt ${attempt + 1} failed${candidate ? ` for ${candidate}` : ''}: ${warning}\n`,
+            );
             const retryable = isBatchCopyContractFailure(error) || isRecoverableGeminiResponseError(error);
-            if (!retryable || attempt === 1) break;
+            if (!retryable || attempt === maxAttempts - 1) break;
         }
     }
+    const finalDiagnostic = conciergeBatchFailureDiagnostic(lastError);
+    process.stderr.write(
+        `batch copy failed after ${attemptsMade} attempts: ${finalDiagnostic.message.replace(/[\r\n]+/g, ' ')}\n`,
+    );
     throw new Error('CONCIERGE_BATCH_COPY_GENERATION_FAILED', { cause: lastError });
 }
 
@@ -665,7 +1211,7 @@ function addBatchCopyFact(
     facts.push(content ? { ...fact, content } : fact);
 }
 
-function collectBatchCopyFacts(
+export function collectBatchCopyFacts(
     input: ConciergeManualPublicationInput,
     targetProfile: InstagramProfile,
     candidateProfile: InstagramProfile,
@@ -733,12 +1279,16 @@ function batchCopyEvidenceForRow(
     const capturedProfile = retained
         ? classified.copyContext.capturedBundle.profiles.find(profile => profile.ordinal === retained[0])
         : undefined;
-    if (!retained || !detail?.feature || !capturedProfile) {
+    const classificationRecord = retained
+        ? classified.input.ledger.records.find(record => record.mutualOrdinal === retained[0])
+        : undefined;
+    const nameOnly = classificationRecord?.classificationSource === 'name_only';
+    if (!retained || !detail || (!detail.feature && !nameOnly) || !capturedProfile) {
         throw new Error('CONCIERGE_BATCH_COPY_EVIDENCE_MISSING');
     }
     const profile = retained[1];
     const selectedMediaIds = new Set(capturedProfile.featureSelectionIds);
-    const hasUsableProfileImage = isUsableProfileImageUrl(profile.profilePicUrl);
+    const hasUsableProfileImage = hasUsableInstagramProfileImage(profile);
     const images = capturedProfile.media
         .filter(media => selectedMediaIds.has(media.selectionId))
         .filter(media => media.kind !== 'profile' || hasUsableProfileImage)
@@ -752,7 +1302,7 @@ function batchCopyEvidenceForRow(
         candidateFullName: profile.fullName ?? null,
         bio: profile.bio ?? null,
         captions: capturedProfile.captions.map(caption => caption.text).filter(Boolean).slice(0, 8),
-        appearanceGrade: detail.feature.features.appearanceGrade,
+        appearanceGrade: detail.feature?.features.appearanceGrade ?? 1,
         facts: collectBatchCopyFacts(
             classified.input,
             classified.copyContext.targetProfile,
@@ -816,6 +1366,9 @@ export function relationshipArtifactProviderContext(
         credentialSlot: artifact.credentialSlot,
         maxChargeUsd: 100,
         invocationWaitLimitSecs: 240,
+        ...(artifact.credentialSlot === 'nonary' ? {
+            allowConciergeBatchNonary: true as const,
+        } : {}),
         ...(allowTruncation ? {
             allowAdoptedRelationshipTruncation: true as const,
             adoptedRelationshipSourceDeclaredCount: artifact.sourceDeclaredCount,
@@ -824,12 +1377,12 @@ export function relationshipArtifactProviderContext(
     };
 }
 
-function tokenFor(slot: ApprovedSlot): string | null {
+function tokenFor(slot: ConciergeProviderSlot): string | null {
     const value = process.env[`APIFY_${slot.toUpperCase()}_API_TOKEN`]?.trim();
     return value || null;
 }
 
-function readOnlyTokenFor(slot: ApprovedSlot): string | null {
+function readOnlyTokenFor(slot: ConciergeProviderSlot): string | null {
     const raw = process.env.CONCIERGE_BATCH_READ_ONLY_PROVIDER_TOKENS?.trim();
     if (!raw) return tokenFor(slot);
     try {
@@ -852,11 +1405,26 @@ function newCollectionSlots(): readonly ApprovedSlot[] {
     return slots as ApprovedSlot[];
 }
 
-function relationshipCollectionSlots(): readonly ApprovedSlot[] {
-    return RELATIONSHIP_SLOTS;
+/**
+ * Reads CONCIERGE_BATCH_RELATIONSHIP_SLOTS (comma-separated); default the
+ * frozen CONCIERGE_BATCH_RELATIONSHIP_TOKEN_PRIORITY ([nonary, secondary]).
+ * Mirrors newCollectionSlots' parse -> validate -> throw shape: an operator
+ * override for when the default relationship slots are all balance-exhausted
+ * (SCRAPING_PROVIDER_START_REJECTED) and interaction/relationship collection
+ * (withInteractions' getPostLikers/getPostComments) needs to fail over to a
+ * slot with remaining balance.
+ */
+export function relationshipCollectionSlots(): readonly RelationshipSlot[] {
+    const raw = process.env.CONCIERGE_BATCH_RELATIONSHIP_SLOTS?.trim();
+    if (!raw) return RELATIONSHIP_SLOTS;
+    const slots = [...new Set(raw.split(',').map(value => value.trim()).filter(Boolean))];
+    if (slots.length === 0 || slots.some(value => !ALL_APIFY_CREDENTIAL_SLOTS.includes(value as ApifyCredentialSlot))) {
+        throw new Error('CONCIERGE_BATCH_RELATIONSHIP_SLOTS_INVALID');
+    }
+    return slots as RelationshipSlot[];
 }
 
-function providerEnv(slot: ApprovedSlot, token: string): Record<string, string | undefined> {
+function providerEnv(slot: ConciergeProviderSlot, token: string): Record<string, string | undefined> {
     return {
         ...process.env,
         APIFY_API_TOKEN: token,
@@ -870,11 +1438,12 @@ function providerEnv(slot: ApprovedSlot, token: string): Record<string, string |
     };
 }
 
-function providerContext(requestId: string, slot: ApprovedSlot): ProviderCallContext {
+function providerContext(requestId: string, slot: ConciergeProviderSlot): ProviderCallContext {
     return {
         requestId,
         credentialSlot: slot,
         ...(slot === 'octonary' ? { allowConciergeBatchOctonary: true as const } : {}),
+        ...(slot === 'nonary' ? { allowConciergeBatchNonary: true as const } : {}),
         maxChargeUsd: 100,
         invocationWaitLimitSecs: 240,
         recordUsage: () => undefined,
@@ -893,11 +1462,13 @@ function retryableProviderError(error: unknown): boolean {
 async function withProvider<T>(
     requestId: string,
     context: ConciergeBatchStageContext,
-    operation: (slot: ApprovedSlot, provider: ReturnType<typeof makeApifyProvider>, env: Record<string, string | undefined>) => Promise<T>,
-    preferredSlot?: ApprovedSlot,
+    operation: (slot: ConciergeProviderSlot, provider: ReturnType<typeof makeApifyProvider>, env: Record<string, string | undefined>) => Promise<T>,
+    preferredSlot?: ConciergeProviderSlot,
+    fallbackSlots?: readonly ConciergeProviderSlot[],
 ): Promise<T> {
     let lastError: unknown = null;
-    for (const slot of preferredSlot ? [preferredSlot] : newCollectionSlots()) {
+    const slots = preferredSlot ? [preferredSlot] : (fallbackSlots ?? newCollectionSlots());
+    for (const slot of slots) {
         const token = tokenFor(slot);
         if (!token) continue;
         const env = providerEnv(slot, token);
@@ -918,7 +1489,7 @@ async function withProvider<T>(
 async function withInteractions<T>(
     requestId: string,
     context: ConciergeBatchStageContext,
-    operation: (slot: ApprovedSlot, adapter: typeof apifyInteractionAdapter, env: Record<string, string | undefined>) => Promise<T>,
+    operation: (slot: ConciergeProviderSlot, adapter: typeof apifyInteractionAdapter, env: Record<string, string | undefined>) => Promise<T>,
 ): Promise<T> {
     let lastError: unknown = null;
     for (const slot of relationshipCollectionSlots()) {
@@ -1027,19 +1598,67 @@ function sourcePosts(profile: InstagramProfile): readonly InstagramPost[] {
     return profile.latestPosts ?? [];
 }
 
-async function collectOrder(
+function sanitizeConciergeInteractionPosts(
+    posts: readonly InstagramPost[],
+    kind: 'candidate' | 'target',
+    username: string,
+): readonly InstagramPost[] {
+    const seenIds = new Set<string>();
+    const sanitized: InstagramPost[] = [];
+    let missingIdCount = 0;
+    let duplicateIdCount = 0;
+    for (const post of posts) {
+        const id = typeof post.id === 'string' ? post.id.trim() : '';
+        if (!id) {
+            missingIdCount += 1;
+            continue;
+        }
+        if (seenIds.has(id)) {
+            duplicateIdCount += 1;
+            continue;
+        }
+        seenIds.add(id);
+        sanitized.push(post);
+    }
+    const droppedCount = missingIdCount + duplicateIdCount;
+    if (droppedCount > 0) {
+        const safeUsername = sanitizeConciergeBatchDiagnostic(username, 100)
+            .replace(/[\r\n]+/g, ' ');
+        process.stderr.write(
+            `sanitized ${kind} posts for ${safeUsername}: dropped ${droppedCount} `
+            + `(no-id ${missingIdCount}, dup ${duplicateIdCount})\n`,
+        );
+    }
+    return sanitized;
+}
+
+export async function collectOrder(
     order: OrderRow,
     prepared: ConciergeBatchPreparedOrder,
     context: ConciergeBatchStageContext,
     existingRelationshipArtifacts: ConciergeExistingRelationshipArtifacts,
 ): Promise<CollectedOrder> {
+    const existingRelationshipArtifact = existingRelationshipArtifacts.get(order.targetUsername);
+    const followersArtifact = existingRelationshipArtifact?.followers;
+    const followingArtifact = existingRelationshipArtifact?.following;
+    if (process.env.CONCIERGE_BATCH_REQUIRE_RELATIONSHIP_ARTIFACT === 'true'
+        && (!followersArtifact || !followingArtifact)) {
+        throw new Error('CONCIERGE_BATCH_RELATIONSHIP_ARTIFACT_REQUIRED');
+    }
+
     let existingTargetProfile: InstagramProfile | null = null;
     try {
         existingTargetProfile = await loadTargetProfileArtifact(order);
     } catch (error) {
         if (!isRecoverableTargetProfileArtifactError(error)) throw error;
     }
+    const profilePack = loadConciergeProfilePack();
+    const packedTargetProfile = existingTargetProfile
+        ? null
+        : (hydrateConciergeProfilesFromPack([order.targetUsername], profilePack)
+            .profilesByUsername.get(normalized(order.targetUsername)) ?? null);
     const targetProfile = existingTargetProfile
+        ?? packedTargetProfile
         ?? await withProvider(prepared.sourceRequestId, context, async (slot, provider) => {
                 const profile = await provider.getProfile?.(order.targetUsername, providerContext(prepared.sourceRequestId, slot));
                 if (!profile) throw new Error('CONCIERGE_TARGET_PROFILE_UNAVAILABLE');
@@ -1056,9 +1675,6 @@ async function collectOrder(
         plan.relationshipCapacity.following,
         Math.max(targetProfile.followingCount, order.targetFollowing ?? 0),
     );
-    const existingRelationshipArtifact = existingRelationshipArtifacts.get(order.targetUsername);
-    const followersArtifact = existingRelationshipArtifact?.followers;
-    const followingArtifact = existingRelationshipArtifact?.following;
     const [followers, following] = await Promise.all([
         withProvider(prepared.sourceRequestId, context, async (slot, provider) => {
             if (!provider.getFollowers) throw new Error('CONCIERGE_RELATIONSHIP_PROVIDER_UNAVAILABLE');
@@ -1075,7 +1691,7 @@ async function collectOrder(
             );
             assertConciergeRelationshipCoverage('followers', followersLimit, followers.length);
             return followers;
-        }, followersArtifact?.credentialSlot ?? 'secondary'),
+        }, followersArtifact?.credentialSlot, RELATIONSHIP_SLOTS),
         withProvider(prepared.sourceRequestId, context, async (slot, provider) => {
             if (!provider.getFollowing) throw new Error('CONCIERGE_RELATIONSHIP_PROVIDER_UNAVAILABLE');
             const following = await provider.getFollowing(
@@ -1091,7 +1707,7 @@ async function collectOrder(
             );
             assertConciergeRelationshipCoverage('following', followingLimit, following.length);
             return following;
-        }, followingArtifact?.credentialSlot ?? 'secondary'),
+        }, followingArtifact?.credentialSlot, RELATIONSHIP_SLOTS),
     ]);
     assertConciergeRelationshipCoverage('followers', followersLimit, followers.length);
     assertConciergeRelationshipCoverage('following', followingLimit, following.length);
@@ -1116,17 +1732,23 @@ async function collectOrder(
     const hydrated = new Map<string, InstagramProfile>();
     for (let index = 0; index < selectedNames.length; index += 30) {
         const batch = selectedNames.slice(index, index + 30);
-        const outcomes = await withProvider(prepared.sourceRequestId, context, async (slot, provider) => {
-            if (!provider.getProfilesBatchOutcomes) throw new Error('CONCIERGE_PROFILE_BATCH_UNAVAILABLE');
-            return provider.getProfilesBatchOutcomes(
-                batch,
-                batch.length,
-                providerContext(prepared.sourceRequestId, slot),
-            );
-        });
-        for (const outcome of outcomes) {
-            if (outcome.outcome.status === 'success' && 'profile' in outcome) {
-                hydrated.set(normalized(outcome.profile.username), outcome.profile);
+        const packed = hydrateConciergeProfilesFromPack(batch, profilePack);
+        for (const [username, profile] of packed.profilesByUsername) {
+            hydrated.set(username, profile);
+        }
+        if (packed.providerUsernames.length > 0) {
+            const outcomes = await withProvider(prepared.sourceRequestId, context, async (slot, provider) => {
+                if (!provider.getProfilesBatchOutcomes) throw new Error('CONCIERGE_PROFILE_BATCH_UNAVAILABLE');
+                return provider.getProfilesBatchOutcomes(
+                    packed.providerUsernames,
+                    packed.providerUsernames.length,
+                    providerContext(prepared.sourceRequestId, slot),
+                );
+            });
+            for (const outcome of outcomes) {
+                if (outcome.outcome.status === 'success' && 'profile' in outcome) {
+                    hydrated.set(normalized(outcome.profile.username), outcome.profile);
+                }
             }
         }
     }
@@ -1144,27 +1766,43 @@ async function collectOrder(
         }];
     });
     const publicUnavailableRows = selectedPublic.filter(row => !hydrated.has(row.username));
-    const targetPosts = sourcePosts(targetProfile);
+    const targetPosts = sanitizeConciergeInteractionPosts(
+        sourcePosts(targetProfile),
+        'target',
+        order.targetUsername,
+    );
     let targetInteraction: ReturnType<typeof extractRawTargetInteractions> = {
         evidence: [], observedUsernames: [], likerCoverage: [], commentCoverage: [],
     };
     if (targetPosts.length > 0) {
         const likerPosts = selectRecentInteractionPosts([...targetPosts], 4);
         const commentPosts = selectRecentInteractionPosts([...targetPosts], 6);
+        let commentsUnavailable = false;
         const [likers, comments] = await Promise.all([
             withInteractions(prepared.sourceRequestId, context, async (slot, adapter) => adapter.getPostLikers(
                 likerPosts.map(instagramPostUrl), 150, providerContext(prepared.sourceRequestId, slot),
             )),
             withInteractions(prepared.sourceRequestId, context, async (slot, adapter) => adapter.getPostComments(
                 commentPosts.map(instagramPostUrl), 15, providerContext(prepared.sourceRequestId, slot),
-            )),
+            )).catch(error => {
+                commentsUnavailable = true;
+                const diagnostic = conciergeBatchFailureDiagnostic(error, 'collect');
+                const warning = diagnostic.message.replace(/[\r\n]+/g, ' ').slice(0, 200);
+                process.stderr.write(
+                    `comments unavailable for ${order.targetUsername}: ${warning}\n`,
+                );
+                return [];
+            }),
         ]);
-        targetInteraction = extractRawTargetInteractions({
+        const extractedTargetInteraction = extractRawTargetInteractions({
             targetPosts,
             likers,
             comments,
             excludedUsernames: [order.targetUsername],
         });
+        targetInteraction = commentsUnavailable
+            ? { ...extractedTargetInteraction, commentCoverage: [] }
+            : extractedTargetInteraction;
     }
     const hydratedNames = new Set(publicProfiles.map(item => normalized(item.profile.username)));
     const retainedTargetEvidence = targetInteraction.evidence.filter(row => hydratedNames.has(normalized(row.actorUsername)));
@@ -1188,7 +1826,14 @@ async function collectOrder(
         },
         candidateToTarget: { status: 'not_collected' as const, evidence: [], coverage: [] },
         targetPosts,
-        candidatePostsByUsername: new Map(publicProfiles.map(item => [item.profile.username, sourcePosts(item.profile)])),
+        candidatePostsByUsername: new Map(publicProfiles.map(item => [
+            item.profile.username,
+            sanitizeConciergeInteractionPosts(
+                sourcePosts(item.profile),
+                'candidate',
+                item.profile.username,
+            ),
+        ])),
         reverseLikeStatusByUsername: new Map(publicProfiles.map(item => [item.profile.username, 'not_collected' as const])),
         targetInputHash,
         candidateInputHash,
@@ -1222,7 +1867,7 @@ function pass(profile: InstagramProfile, evidenceHash: string) {
     return {
         status: 'collected' as const,
         fullNamePresent: Boolean(profile.fullName?.trim()),
-        profilePicPresent: Boolean(profile.profilePicUrl?.trim()),
+        profilePicPresent: hasUsableInstagramProfileImage(profile),
         feedDeclared: declared,
         feedCollected: Math.min(declared, collected),
         completeMedia: true,
@@ -1238,7 +1883,7 @@ function failedPass(
     return {
         status: 'failed' as const,
         fullNamePresent: profile ? Boolean(profile.fullName?.trim()) : null,
-        profilePicPresent: profile ? Boolean(profile.profilePicUrl?.trim()) : null,
+        profilePicPresent: profile ? hasUsableInstagramProfileImage(profile) : null,
         feedDeclared: null,
         feedCollected: null,
         completeMedia: null,
@@ -1250,7 +1895,7 @@ function notCollectedPass(profile: InstagramProfile) {
     return {
         status: 'not_collected' as const,
         fullNamePresent: Boolean(profile.fullName?.trim()),
-        profilePicPresent: Boolean(profile.profilePicUrl?.trim()),
+        profilePicPresent: hasUsableInstagramProfileImage(profile),
         feedDeclared: null,
         feedCollected: null,
         completeMedia: null,
@@ -1258,30 +1903,194 @@ function notCollectedPass(profile: InstagramProfile) {
     };
 }
 
+/**
+ * Name-only classification is routed exclusively to candidates the AI pipeline
+ * already determined have no usable profile image (see the bundle's
+ * hasProfileImage gate in replay-runner.ts, a byte-verified, post-normalization
+ * check). Assert that fact directly instead of re-deriving profilePicPresent
+ * from hasUsableInstagramProfileImage, a weaker URL-only heuristic that can
+ * disagree with the byte-level check the AI pipeline actually used (it neither
+ * catches every default-avatar CDN variant nor accounts for a normalization
+ * failure the AI pipeline treats as "no usable image"). Recomputing here
+ * produced spurious CONCIERGE_CLASSIFICATION_LEDGER_OVERRIDE_INVALID failures
+ * for legitimately name-only candidates.
+ */
+export function nameOnlyFirstPass(profile: InstagramProfile, evidenceHash: string) {
+    return {
+        status: 'failed' as const,
+        fullNamePresent: Boolean(profile.fullName?.trim()),
+        profilePicPresent: false,
+        feedDeclared: null,
+        feedCollected: null,
+        completeMedia: null,
+        evidenceHash,
+    };
+}
+
+export function nameOnlySecondPass(profile: InstagramProfile) {
+    return {
+        status: 'not_collected' as const,
+        fullNamePresent: Boolean(profile.fullName?.trim()),
+        profilePicPresent: false,
+        feedDeclared: null,
+        feedCollected: null,
+        completeMedia: null,
+        evidenceHash: null,
+    };
+}
+
+export function conciergeBatchAiClassificationFields(detail: ReplayAccountAiDetail): {
+    originalAiClassification: 'male' | 'female' | 'unknown';
+    effectiveClassification: 'male' | 'female' | 'unknown';
+} {
+    const classification = conciergeDetailClassification(detail);
+    return {
+        originalAiClassification: classification,
+        effectiveClassification: classification,
+    };
+}
+
+/**
+ * Reads CONCIERGE_BATCH_NAME_ONLY_ENABLED; default true. Set to 'false' as a
+ * shipping safety valve to disable only the name-only text-batch gender path
+ * (image-less candidates fall back to their pre-name-only unknown outcome)
+ * while every other improvement (model upgrades, etc.) keeps operating.
+ */
+export function conciergeBatchNameOnlyEnabled(
+    raw = process.env.CONCIERGE_BATCH_NAME_ONLY_ENABLED,
+): boolean {
+    return raw !== 'false';
+}
+
+/**
+ * Reads CONCIERGE_BATCH_FEED_TRIAGE_ENABLED; default false (off preserves
+ * routing byte-for-byte). On, an avatar-less public candidate whose bundle
+ * still carries feed media is judged from that feed image instead of the
+ * name-only text batch - see replay-runner.ts's feedTriageEnabled.
+ */
+export function conciergeBatchFeedTriageEnabled(
+    raw = process.env.CONCIERGE_BATCH_FEED_TRIAGE_ENABLED,
+): boolean {
+    return raw === 'true' || raw === '1';
+}
+
+/**
+ * Reads CONCIERGE_BATCH_NAME_FALLBACK_ENABLED; default false (off preserves
+ * accountOutputs/gender counters byte-for-byte). On, an image-path public
+ * candidate that ends the run with no gender evidence at all is re-judged
+ * once by the assertive name-only classifier - see replay-runner.ts's
+ * nameFallbackEnabled.
+ */
+export function conciergeBatchNameFallbackEnabled(
+    raw = process.env.CONCIERGE_BATCH_NAME_FALLBACK_ENABLED,
+): boolean {
+    return raw === 'true' || raw === '1';
+}
+
+/**
+ * Reads CONCIERGE_BATCH_CANDIDATE_HYGIENE_ENABLED; default false. On, the
+ * gender roster diagnostic (conciergeGenderRosterCounts below) also excludes
+ * 'unresolved' ledger records (private/fetch-unavailable candidates with no
+ * gender evidence at all) from the unknown bucket, alongside the always-
+ * excluded 'private' partition.
+ */
+export function conciergeBatchCandidateHygieneEnabled(
+    raw = process.env.CONCIERGE_BATCH_CANDIDATE_HYGIENE_ENABLED,
+): boolean {
+    return raw === 'true' || raw === '1';
+}
+
+export interface ConciergeGenderRosterCounts {
+    male: number;
+    female: number;
+    unknown: number;
+    unknownRate: number;
+    excludedPrivateCount: number;
+    excludedUnresolvedCount: number;
+}
+
+/**
+ * A ledger record's 'unresolved' partition (private or fetch-unavailable,
+ * see the classifyOrder branch that builds it) carries no gender evidence at
+ * all - it is a data-collection gap, not an observed unknown gender. Folding
+ * it into the same unknown bucket as a genuinely AI-classified-unknown
+ * public candidate inflates the roster's unknown rate. This is purely a
+ * partition-based diagnostic; it never inspects username or identity.
+ */
+export function conciergeGenderRosterCounts(
+    records: readonly ConciergeClassificationRecord[],
+    hygieneEnabled: boolean,
+): ConciergeGenderRosterCounts {
+    const excludedPrivateCount = records.filter(record => record.partition === 'private').length;
+    const excludedUnresolvedCount = hygieneEnabled
+        ? records.filter(record => record.partition === 'unresolved').length
+        : 0;
+    const roster = records.filter(record => (
+        record.partition !== 'private'
+        && (!hygieneEnabled || record.partition !== 'unresolved')
+    ));
+    const male = roster.filter(record => record.effectiveClassification === 'male').length;
+    const female = roster.filter(record => record.effectiveClassification === 'female').length;
+    const unknown = roster.filter(record => record.effectiveClassification === 'unknown').length;
+    const total = male + female + unknown;
+    return {
+        male,
+        female,
+        unknown,
+        unknownRate: total ? Number((unknown / total).toFixed(4)) : 0,
+        excludedPrivateCount,
+        excludedUnresolvedCount,
+    };
+}
+
+/**
+ * The (A) name-fallback path (replay-runner.ts's nameFallbackEnabled) can
+ * re-emit onAccountAnalyzed for an ordinal it already emitted once - it is
+ * an update to that candidate's post-fallback classification, not a newly
+ * analyzed candidate. Upsert by ordinal so the collected details array keeps
+ * exactly one entry per candidate; a blind push would double-count that
+ * ordinal in replayDetails/analyzedPublicCount and fail
+ * CONCIERGE_PUBLICATION_ANALYZED_COUNT_MISMATCH at publish time even though
+ * classification itself is correct.
+ */
+export function conciergeUpsertAccountDetail(
+    details: ReplayAccountAiDetail[],
+    detail: ReplayAccountAiDetail,
+): void {
+    const index = details.findIndex(existing => existing.ordinal === detail.ordinal);
+    if (index >= 0) details[index] = detail;
+    else details.push(detail);
+}
+
 async function classifyOrder(collected: CollectedOrder): Promise<ClassifiedOrder> {
     const details: ReplayAccountAiDetail[] = [];
-    await runAnalysisV2AiReplay({
+    const replayReport = await runAnalysisV2AiReplay({
         bundle: collected.captured.bundle,
         runner: createReplayStagedAiAdapter('ai-stage-policy-v2.11'),
         mode: 'paid-ai',
         paidAiOptIn: true,
         evaluationPolicy: firstPaymentConciergeEvaluationPolicy,
-        onAccountAnalyzed(detail) { details.push(detail); },
+        nameOnlyEnabled: conciergeBatchNameOnlyEnabled(),
+        feedTriageEnabled: conciergeBatchFeedTriageEnabled(),
+        nameFallbackEnabled: conciergeBatchNameFallbackEnabled(),
+        onAccountAnalyzed(detail) { conciergeUpsertAccountDetail(details, detail); },
     });
-    const detailsByOrdinal = new Map(details.map(detail => [detail.ordinal, detail]));
-    // A resolver can legally verify gender after feature analysis is
-    // unavailable. Concierge scoring still needs a feature bundle, so retain
-    // those accounts as unresolved instead of treating them as publishable
-    // female rows.
-    const replayDetails = details.filter(detail => detail.feature !== null);
-    const replayDetailsByOrdinal = new Map(replayDetails.map(detail => [detail.ordinal, detail]));
-    const publicByOrdinal = new Map(collected.source.publicProfiles.map(item => [item.ordinal, item.profile]));
-    const replayPublicNames = new Set(
-        [...replayDetailsByOrdinal.keys()]
-            .map(ordinal => publicByOrdinal.get(ordinal)?.username)
-            .filter((username): username is string => typeof username === 'string')
-            .map(normalized),
+    process.stderr.write(
+        conciergeGenderResolverAdmissionDiagnosticMessage(replayReport.resolver.admission),
     );
+    const detailsByOrdinal = new Map(details.map(detail => [detail.ordinal, detail]));
+    const publicByOrdinal = new Map(collected.source.publicProfiles.map(item => [item.ordinal, item.profile]));
+    const publicCount = collected.source.publicProfiles.length;
+    const nameOnlyCandidateProfiles = collected.source.publicProfiles.filter(({ profile }) => (
+        !hasUsableInstagramProfileImage(profile) && Boolean(profile.fullName?.trim())
+    ));
+    const nameOnlyDetails = details.filter(detail => detail.classificationSource === 'name_only');
+    const nameOnlyDetailByOrdinal = new Map(nameOnlyDetails.map(detail => [detail.ordinal, detail]));
+    const nameOnlyConfidenceRank: Record<'low' | 'medium' | 'high', number> = {
+        low: 1,
+        medium: 2,
+        high: 3,
+    };
     const records: ConciergeClassificationRecord[] = collected.source.mutualRows.map(row => {
         if (row.isPrivate) {
             return {
@@ -1296,6 +2105,26 @@ async function classifyOrder(collected: CollectedOrder): Promise<ClassifiedOrder
         }
         const profile = publicByOrdinal.get(row.mutualOrdinal);
         const detail = detailsByOrdinal.get(row.mutualOrdinal);
+        if (profile && detail?.classificationSource === 'name_only') {
+            const { originalAiClassification, effectiveClassification } = conciergeBatchAiClassificationFields(detail);
+            const confidence = detail.triage?.assessment.confidence ?? 'low';
+            const evidenceHash = hash({ row, profile, detail, source: 'name_only' });
+            return {
+                candidateId: analysisV2CandidateId(row.username), instagramId: row.username,
+                mutualOrdinal: row.mutualOrdinal, partition: 'public', profileFetchStatus: 'success',
+                firstPass: nameOnlyFirstPass(profile, evidenceHash),
+                secondPass: nameOnlySecondPass(profile),
+                originalAiClassification,
+                effectiveClassification,
+                confidence,
+                evidenceCoverage: { declared: 0, collected: 0, selected: 0, complete: false, basisPoints: 0, hash: evidenceHash },
+                classifier: 'gemini-name-only-v1', modelName: 'gemini-3.1-flash-lite', promptVersion: 'gender-name-only-v1', schemaVersion: '1',
+                classificationOperationKey: `concierge:classification:${row.mutualOrdinal}`,
+                classificationResultHash: hash({ row, detail, source: 'name_only' }),
+                classificationSource: 'name_only', manualOverride: null,
+                sourceSnapshot: { instagramUrl: `https://instagram.com/${row.username}`, originalAiClassification, confidenceEvidence: `confidence=${confidence};evidence=name_only`, operatorNote: '' },
+            };
+        }
         if (!profile || !detail || !detail.feature) {
             const evidenceHash = hash({
                 row,
@@ -1305,7 +2134,7 @@ async function classifyOrder(collected: CollectedOrder): Promise<ClassifiedOrder
                 profile
                 && detail?.triage
                 && profile.fullName?.trim()
-                && profile.profilePicUrl?.trim(),
+                && hasUsableInstagramProfileImage(profile),
             );
             const firstPass = firstPassReady
                 ? pass(profile!, hash({ profile, triage: detail!.triage }))
@@ -1315,21 +2144,26 @@ async function classifyOrder(collected: CollectedOrder): Promise<ClassifiedOrder
                 : profile
                     ? notCollectedPass(profile)
                     : failedPass(profile, evidenceHash);
+            const aiClassificationFields = detail
+                ? conciergeBatchAiClassificationFields(detail)
+                : { originalAiClassification: 'unknown' as const, effectiveClassification: 'unknown' as const };
             return {
                 candidateId: analysisV2CandidateId(row.username), instagramId: row.username,
-                mutualOrdinal: row.mutualOrdinal, partition: 'unresolved', profileFetchStatus: 'unavailable',
+                mutualOrdinal: row.mutualOrdinal,
+                partition: profile && detail ? 'public' : 'unresolved',
+                profileFetchStatus: profile && detail ? 'success' : 'unavailable',
                 firstPass, secondPass,
-                originalAiClassification: 'unknown', effectiveClassification: 'unknown', confidence: 'low',
+                originalAiClassification: aiClassificationFields.originalAiClassification,
+                effectiveClassification: aiClassificationFields.effectiveClassification,
+                confidence: 'low',
                 evidenceCoverage: { declared: 0, collected: 0, selected: 0, complete: false, basisPoints: 0, hash: evidenceHash },
                 classifier: 'gemini-v2.14', modelName: 'gemini-v2.14', promptVersion: 'ai-stage-policy-v2.11', schemaVersion: 'concierge-batch-v1',
                 classificationOperationKey: `concierge:classification:${row.mutualOrdinal}`, classificationResultHash: hash({ row, status: 'unresolved' }),
                 classificationSource: 'ai', manualOverride: null,
-                sourceSnapshot: { instagramUrl: `https://instagram.com/${row.username}`, originalAiClassification: 'unknown', confidenceEvidence: 'confidence=low;evidence=unavailable', operatorNote: '' },
+                sourceSnapshot: { instagramUrl: `https://instagram.com/${row.username}`, originalAiClassification: aiClassificationFields.originalAiClassification, confidenceEvidence: 'confidence=low;evidence=unavailable', operatorNote: '' },
             };
         }
-        const classification = detail.finalClassification === 'verified_female'
-            ? 'female' as const
-            : detail.finalClassification === 'verified_non_female' ? 'male' as const : 'unknown' as const;
+        const { originalAiClassification, effectiveClassification } = conciergeBatchAiClassificationFields(detail);
         const confidence = detail.triage?.assessment.confidence ?? 'low';
         const evidenceHash = hash({ profile, detail });
         return {
@@ -1337,15 +2171,75 @@ async function classifyOrder(collected: CollectedOrder): Promise<ClassifiedOrder
             mutualOrdinal: row.mutualOrdinal, partition: 'public', profileFetchStatus: 'success',
             firstPass: pass(profile, hash({ profile, triage: detail.triage })),
             secondPass: pass(profile, evidenceHash),
-            originalAiClassification: classification, effectiveClassification: classification, confidence,
+            originalAiClassification, effectiveClassification, confidence,
             evidenceCoverage: { declared: profile.postsCount, collected: (profile.latestPosts ?? []).length, selected: Math.min(8, (profile.latestPosts ?? []).length), complete: true, basisPoints: 10_000, hash: evidenceHash },
             classifier: 'gemini-v2.14', modelName: 'gemini-v2.14', promptVersion: 'ai-stage-policy-v2.11', schemaVersion: 'concierge-batch-v1',
             classificationOperationKey: `concierge:classification:${row.mutualOrdinal}`, classificationResultHash: hash({ row, detail }),
             classificationSource: 'ai', manualOverride: null,
-            sourceSnapshot: { instagramUrl: `https://instagram.com/${row.username}`, originalAiClassification: classification, confidenceEvidence: `confidence=${confidence};evidence=gemini_v214`, operatorNote: '' },
+            sourceSnapshot: { instagramUrl: `https://instagram.com/${row.username}`, originalAiClassification, confidenceEvidence: `confidence=${confidence};evidence=gemini_v214`, operatorNote: '' },
         };
     });
     const publicRecords = records.filter(record => record.partition === 'public');
+    const achievedUnknownRatio = publicRecords.length === 0
+        ? 0
+        : publicRecords.filter(record => record.effectiveClassification === 'unknown').length / publicRecords.length;
+    const nameOnlyFemaleCount = nameOnlyDetails.filter(detail => conciergeDetailClassification(detail) === 'female').length;
+    const nameOnlyMaleCount = nameOnlyDetails.filter(detail => conciergeDetailClassification(detail) === 'male').length;
+    const nameOnlyUnknownCount = nameOnlyDetails.length - nameOnlyFemaleCount - nameOnlyMaleCount;
+    const eligibleFemaleCount = nameOnlyDetails.filter(detail => (
+        conciergeDetailClassification(detail) === 'female'
+        && Boolean(detail.triage?.assessment)
+        && nameOnlyConfidenceRank[detail.triage!.assessment.confidence] >= nameOnlyConfidenceRank.medium
+    )).length;
+    const eligibleMaleCount = nameOnlyMaleCount;
+    const nameOnlyDiagnostics: ConciergeNameOnlyDiagnostics = {
+        totalPublicDetails: publicCount,
+        droppedNoProfile: collected.source.publicProfiles.filter(item => !publicByOrdinal.has(item.ordinal)).length,
+        droppedNoTriageAssessment: nameOnlyCandidateProfiles.filter(item => !nameOnlyDetailByOrdinal.get(item.ordinal)?.triage?.assessment).length,
+        droppedHasFeature: nameOnlyCandidateProfiles.filter(item => {
+            const detail = detailsByOrdinal.get(item.ordinal);
+            return detail?.feature !== null && detail?.feature !== undefined;
+        }).length,
+        droppedUsableProfileImage: collected.source.publicProfiles.filter(item => hasUsableInstagramProfileImage(item.profile)).length,
+        // Name-only classification is direct; an existing gender result is not
+        // a reason to suppress a name-only candidate, so this legacy funnel
+        // stage is intentionally zero in the independent path.
+        droppedNotUnknown: 0,
+        candidateCount: nameOnlyCandidateProfiles.length,
+        droppedNoFullName: collected.source.publicProfiles.filter(item => (
+            !hasUsableInstagramProfileImage(item.profile) && !item.profile.fullName?.trim()
+        )).length,
+        droppedInferredUnknown: nameOnlyUnknownCount,
+        droppedBelowMinConfidence: nameOnlyDetails.filter(detail => (
+            detail.triage?.assessment.inferredGender === 'female'
+            && detail.triage?.assessment.confidence === 'low'
+        )).length,
+        eligibleCount: eligibleFemaleCount + eligibleMaleCount,
+        eligibleMaleCount,
+        eligibleFemaleCount,
+        batchCount: nameOnlyCandidateProfiles.length === 0
+            ? 0
+            : Math.ceil(nameOnlyCandidateProfiles.length / GENDER_NAME_ONLY_MAX_CANDIDATES_PER_BATCH),
+        classifiedCount: nameOnlyDetails.length,
+        femaleCount: nameOnlyFemaleCount,
+        maleCount: nameOnlyMaleCount,
+        unknownCount: nameOnlyUnknownCount,
+        unknownRatio: achievedUnknownRatio,
+    };
+    process.stderr.write(
+        `concierge name-only classification: ${nameOnlyDiagnostics.classifiedCount}; unknown ratio: ${achievedUnknownRatio.toFixed(4)}\n`,
+    );
+    process.stderr.write(conciergeNameOnlyDiagnosticMessage(nameOnlyDiagnostics));
+    const replayDetails = details.filter(detail => (
+        publicRecords.some(record => record.mutualOrdinal === detail.ordinal)
+    ));
+    const replayDetailsByOrdinal = new Map(replayDetails.map(detail => [detail.ordinal, detail]));
+    const replayPublicNames = new Set(
+        [...replayDetailsByOrdinal.keys()]
+            .map(ordinal => publicByOrdinal.get(ordinal)?.username)
+            .filter((username): username is string => typeof username === 'string')
+            .map(normalized),
+    );
     const privateProfiles = collected.source.privateRows.map(row => ({
         username: row.username, isPrivate: true, fullName: row.fullName, profilePicUrl: row.profilePicUrl,
         followersCount: 0, followingCount: 0, postsCount: 0, latestPosts: [],
@@ -1366,6 +2260,12 @@ async function classifyOrder(collected: CollectedOrder): Promise<ClassifiedOrder
         records,
     };
     createConciergeClassificationLedgerHash(ledger);
+    const genderRoster = conciergeGenderRosterCounts(records, conciergeBatchCandidateHygieneEnabled());
+    process.stderr.write(
+        `concierge gender roster: male=${genderRoster.male} female=${genderRoster.female} `
+        + `unknown=${genderRoster.unknown} unknownRate=${genderRoster.unknownRate.toFixed(4)} `
+        + `excludedPrivate=${genderRoster.excludedPrivateCount} excludedUnresolved=${genderRoster.excludedUnresolvedCount}\n`,
+    );
     const manualImport = parseConciergeClassificationCsv(
         EMPTY_MANUAL_CSV,
         collected.order.orderId,
@@ -1378,6 +2278,7 @@ async function classifyOrder(collected: CollectedOrder): Promise<ClassifiedOrder
         .filter(record => record.partition !== 'private')
         .map(record => [record.mutualOrdinal, {
             originalAiClassification: record.originalAiClassification!,
+            classificationSource: record.classificationSource === 'name_only' ? 'name_only' as const : 'ai' as const,
             confidence: record.confidence!, classifier: record.classifier!, modelName: record.modelName!, promptVersion: record.promptVersion!, schemaVersion: record.schemaVersion!,
             classificationOperationKey: record.classificationOperationKey!, classificationResultHash: record.classificationResultHash!, secondPassStatus: record.secondPass.status, secondPassCompleteMedia: record.secondPass.completeMedia,
         }]));
@@ -1431,6 +2332,13 @@ async function classifyOrder(collected: CollectedOrder): Promise<ClassifiedOrder
         ledger,
         manualImport,
         replay,
+        nameOnlyProvenance: {
+            classifiedUsernames: records
+                .filter(record => record.classificationSource === 'name_only')
+                .map(record => normalized(record.instagramId)),
+            unknownRatio: achievedUnknownRatio,
+            diagnostics: nameOnlyDiagnostics,
+        },
     };
     return {
         input,
@@ -1451,6 +2359,42 @@ function retryCodeAllowlist(): ReadonlySet<string> {
         throw new Error('CONCIERGE_BATCH_RETRY_ALLOWLIST_INVALID');
     }
     return new Set(values);
+}
+
+async function persistConciergeBatchTargetFullName(
+    requestId: string,
+    targetFullName: string | null | undefined,
+    targetProfileImageUrl?: string | null,
+): Promise<void> {
+    if (!cleanBatchCopyText(targetFullName, 200) && !conciergeBatchTargetProfileImageUrl(targetProfileImageUrl)) {
+        return;
+    }
+    const { data: current, error: readError } = await supabaseAdmin
+        .from('analysis_requests')
+        .select('status,step_data')
+        .eq('id', requestId)
+        .maybeSingle();
+    if (readError || !current
+        || !CONCIERGE_BATCH_MUTABLE_REQUEST_STATUSES.includes(
+            String(current.status) as typeof CONCIERGE_BATCH_MUTABLE_REQUEST_STATUSES[number],
+        )) {
+        throw new Error('CONCIERGE_BATCH_TARGET_FULL_NAME_READ_FAILED');
+    }
+    const stepData = mergeConciergeBatchTargetFullNameStepData(
+        current.step_data,
+        targetFullName,
+        targetProfileImageUrl,
+    );
+    const { data: updated, error: updateError } = await supabaseAdmin
+        .from('analysis_requests')
+        .update({ step_data: stepData })
+        .eq('id', requestId)
+        .in('status', [...CONCIERGE_BATCH_MUTABLE_REQUEST_STATUSES])
+        .select('id,status')
+        .maybeSingle();
+    if (updateError || !updated || updated.status !== current.status) {
+        throw new Error('CONCIERGE_BATCH_TARGET_FULL_NAME_WRITE_FAILED');
+    }
 }
 
 type ConciergeRetryRequestRow = {
@@ -1542,9 +2486,10 @@ async function loadCohort(): Promise<FrozenCohort> {
         || members.filter(member => member.cohort === 'failed_canary').length !== 3) {
         throw new Error('CONCIERGE_COHORT_MANIFEST_INVALID');
     }
-    const scopeMembers = activeScope
+    const frozenScopeMembers = activeScope
         ? selectConciergeBatchActiveScope(members)
         : members;
+    const scopeMembers = selectConciergeBatchOnlyOrders(frozenScopeMembers);
     const allowlist = retryCodeAllowlist();
     const existingRelationshipArtifacts = parseConciergeExistingRelationshipArtifacts(
         process.env.CONCIERGE_BATCH_EXISTING_RELATIONSHIP_RUNS,
@@ -1679,20 +2624,48 @@ async function main(): Promise<void> {
             // Gemini copy call is intentionally deferred until after scoring;
             // every displayed candidate overview is then replaced by the
             // contract output, including normal/caution rows.
+            // Dump before entering the production builder so a validation
+            // failure still leaves the exact in-memory input for an offline,
+            // read-only publication dry-run.
+            writeConciergePublicationDryRunDump(
+                classified.input,
+                process.env.CONCIERGE_BATCH_PUBLICATION_DUMP_PATH,
+            );
             const scored = buildConciergeManualPublicationDraft(classified.input);
             const copyEvidence = scored.rows.map(row => batchCopyEvidenceForRow(classified, row));
+            writeConciergePublicationDryRunDump(
+                classified.input,
+                process.env.CONCIERGE_BATCH_PUBLICATION_DUMP_PATH,
+                { copyEvidence },
+            );
             const batchCandidateCopy: readonly ConciergeBatchCandidateCopy[] =
                 await generateConciergeBatchCandidateCopies(copyEvidence);
+            // Preserve the copy-bearing input as well when the deferred copy
+            // stage completes; a subsequent dry-run then exercises the full
+            // publication builder without another Gemini call.
+            writeConciergePublicationDryRunDump(
+                { ...classified.input, batchCandidateCopy },
+                process.env.CONCIERGE_BATCH_PUBLICATION_DUMP_PATH,
+                { copyEvidence },
+            );
             // A contract failure above is allowed to escape to onFailure. It
             // records this order as retryable and prevents the deterministic
             // baseline from being published as a fallback.
+            await persistConciergeBatchTargetFullName(
+                classified.input.requestId,
+                classified.copyContext.targetProfile.fullName,
+                classified.copyContext.targetProfile.profilePicUrlHD
+                    ?? classified.copyContext.targetProfile.profilePicUrl,
+            );
             await casPublish({ ...classified.input, batchCandidateCopy });
             return { status: 'completed' as const };
         },
-        async onFailure(order, error) {
+        async onFailure(order, error, stage) {
+            const failureCode = retryableFailureCode(error);
+            const diagnostic = conciergeBatchFailureDiagnostic(error, stage);
+            writeConciergeBatchFailureSummary(failureCode, error, stage);
             const prepared = preparedByOrder.get(order.orderId);
             if (!prepared) return;
-            const failureCode = retryableFailureCode(error);
             const { data: current, error: readError } = await supabaseAdmin
                 .from('analysis_requests')
                 .select('status,step_data')
@@ -1719,6 +2692,7 @@ async function main(): Promise<void> {
                             eligible: true,
                             code: failureCode,
                             recordedAt: new Date().toISOString(),
+                            ...diagnostic,
                         },
                     },
                 })
@@ -1743,7 +2717,8 @@ async function main(): Promise<void> {
 }
 
 if (import.meta.url === `file://${process.argv[1]}`) {
-    main().catch(() => {
+    main().catch(error => {
+        writeConciergeBatchFailureSummary('CONCIERGE_BATCH_FAILED', error);
         process.stderr.write('{"status":"failed","code":"CONCIERGE_BATCH_FAILED"}\n');
         process.exitCode = 1;
     });

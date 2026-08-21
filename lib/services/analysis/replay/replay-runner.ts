@@ -1,4 +1,11 @@
-import type { FeatureAnalysisResult, GenderResolutionResult, GenderTriageResult } from '@/lib/services/ai/v2-staged-analysis';
+import type {
+    FeatureAnalysisResult,
+    GenderNameOnlyCandidateInput,
+    GenderNameOnlyResult,
+    GenderResolutionResult,
+    GenderTriageResult,
+} from '@/lib/services/ai/v2-staged-analysis';
+import { MAX_FEATURE_MEDIA } from '@/lib/domain/analysis/media-policy';
 import { applyGenderResolution, type GenderBaselineClassification } from '@/lib/services/ai/gender-resolution-reconciliation';
 import { aiStagePolicySupports } from '@/lib/services/ai/stage-policy';
 import type { PrivateNameAccountInput } from '@/lib/services/ai/private-name-analysis';
@@ -61,6 +68,9 @@ export interface ReplayTriageInput {
     accountProfile?: ReplayAccountProfile;
 }
 
+export type ReplayNameOnlyInput = GenderNameOnlyCandidateInput;
+export type ReplayNameOnlyResult = GenderNameOnlyResult;
+
 export interface ReplayFirstPassInput {
     ordinal: number;
     /** The first pass is never invoked without a non-empty display name. */
@@ -78,6 +88,7 @@ export interface ReplayAccountProfile {
 export interface ReplayAiRunner {
     firstPass?(input: ReplayFirstPassInput): Promise<ReplayInvocation<GenderTriageResult>>;
     triage?(input: ReplayTriageInput): Promise<ReplayInvocation<GenderTriageResult>>;
+    nameOnly?(input: readonly ReplayNameOnlyInput[]): Promise<ReplayInvocation<readonly ReplayNameOnlyResult[]>>;
     feature?(input: { ordinal: number; bio: string | null; accountProfile?: ReplayAccountProfile; media: readonly ReplayMedia[]; captions: readonly ReplayCaption[]; triage: GenderTriageResult }): Promise<ReplayInvocation<FeatureAnalysisResult>>;
     privateNames?(input: readonly PrivateNameAccountInput[]): Promise<ReplayInvocation<unknown>>;
     resolveGender?(input: {
@@ -181,7 +192,7 @@ export interface AnalysisV2AiReplayReport {
 export interface ReplayAccountAiOutput {
     ordinal: number;
     finalClassification: GenderBaselineClassification;
-    classificationSource: 'triage' | 'feature' | 'gender_resolution' | 'unknown' | 'unavailable';
+    classificationSource: 'triage' | 'feature' | 'gender_resolution' | 'name_only' | 'unknown' | 'unavailable';
     featureOverview: string | null;
 }
 
@@ -384,6 +395,9 @@ function assertReplayInput(bundle: AnalysisV2ReplayBundle): void {
         && bundle.capture.evaluationPolicy?.capability
             === TEST_ENTITLEMENT_STANDARD_V211_LEGACY_SECONDARY_TEXT_ONLY_REPLAY_CAPABILITY
         && Boolean(bundle.capture.legacySecondary?.textOnly);
+    const conciergeNameOnly = bundle.schemaVersion === 1
+        && bundle.capture.evaluationPolicy?.capability
+            === FIRST_PAYMENT_BASIC_V211_CONCIERGE_CAPABILITY;
     const ordinals = new Set<number>();
     const usernames = new Set<string>();
     for (const profile of bundle.profiles) {
@@ -409,7 +423,7 @@ function assertReplayInput(bundle: AnalysisV2ReplayBundle): void {
         }
         const featureIds = new Set(profile.featureSelectionIds);
         const invalidPublic = !profile.isPrivate && (
-            (!textOnly && (!profile.media.length || !profile.triageSelectionIds.length))
+            (!textOnly && !conciergeNameOnly && (!profile.media.length || !profile.triageSelectionIds.length))
             || new Set(profile.triageSelectionIds).size !== profile.triageSelectionIds.length
             || featureIds.size !== profile.featureSelectionIds.length
             || new Set(profile.resolverSelectionIds).size !== profile.resolverSelectionIds.length
@@ -432,7 +446,7 @@ function assertReplayInput(bundle: AnalysisV2ReplayBundle): void {
             || profile.coverage.normalizedCount !== profile.media.length
             || failureIds.size !== profile.coverage.failures.length
             || [...failureIds].some(id => ids.has(id))
-            || (!textOnly && !profile.isPrivate && (
+            || (!textOnly && !conciergeNameOnly && !profile.isPrivate && (
                 profile.coverage.normalizedCount < 1
                 || profile.coverage.failures.length * 5 > profile.coverage.selectedCount
             ));
@@ -440,6 +454,63 @@ function assertReplayInput(bundle: AnalysisV2ReplayBundle): void {
             throw new Error('ANALYSIS_V2_REPLAY_INPUT_INVALID');
         }
     }
+}
+
+function sleep(ms: number): Promise<void> {
+    return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+/**
+ * Individual triage/firstPass calls share a small, non-queueing per-stage
+ * Gemini admission slot (gemini.ts's inputQualityV28 tryAcquire) with the
+ * name-only batch calls that run concurrently in the same replay. A capacity
+ * rejection there returns almost instantly (no real network round trip) and
+ * was previously treated as a permanent failure after exactly one attempt;
+ * because the rejection is so fast, the affected worker could race far ahead
+ * through the remaining candidate queue, instantly failing every item before
+ * any real in-flight call had a chance to finish and free its slot. A short
+ * backoff before retrying gives those in-flight calls time to release their
+ * slot so the retry can actually succeed.
+ */
+const TRANSIENT_STAGE_RETRY_MAX_ATTEMPTS = 3;
+const TRANSIENT_STAGE_RETRY_DELAY_MS = 250;
+
+async function withTransientStageRetry<T>(
+    call: () => Promise<ReplayInvocation<T>>,
+    shouldRetry: (result: ReplayInvocation<T>) => boolean,
+): Promise<ReplayInvocation<T>> {
+    let last: ReplayInvocation<T> | undefined;
+    for (let attempt = 0; attempt < TRANSIENT_STAGE_RETRY_MAX_ATTEMPTS; attempt += 1) {
+        if (attempt > 0) {
+            await sleep(TRANSIENT_STAGE_RETRY_DELAY_MS * attempt);
+        }
+        last = await call();
+        if (!shouldRetry(last)) return last;
+    }
+    return last!;
+}
+
+async function withIndividualTriageRetry<T>(
+    call: () => Promise<ReplayInvocation<T>>,
+): Promise<ReplayInvocation<T>> {
+    return withTransientStageRetry(call, result => result.outcome !== 'ok');
+}
+
+/**
+ * The genderResolution stage's global concurrent-slot cap (2, enforced in
+ * the reserve/lease RPC - see 20260725010000_add_analysis_v2_gender_resolution_stage.sql)
+ * has no request_id filter, so it is contended by every concurrent replay,
+ * not just this one. A rejected lease throws ANALYSIS_V2_AI_RESOLVER_CAPACITY_SKIPPED
+ * (surfaced here as outcome 'capacity_skipped') and, like the genderTriage
+ * capacity rejection above, was previously treated as a permanent failure
+ * after exactly one attempt - even though the two global slots free up
+ * quickly. Only capacity_skipped is transient here; a real rejected/failed
+ * resolution is not retried.
+ */
+async function withResolverCapacityRetry(
+    call: () => Promise<ReplayInvocation<GenderResolutionResult>>,
+): Promise<ReplayInvocation<GenderResolutionResult>> {
+    return withTransientStageRetry(call, result => result.outcome === 'capacity_skipped');
 }
 
 async function runBounded<T>(values: readonly T[], concurrency: number, fn: (value: T) => Promise<void>): Promise<void> {
@@ -455,9 +526,63 @@ async function runBounded<T>(values: readonly T[], concurrency: number, fn: (val
     ));
 }
 
-function mediaFor(profile: AnalysisV2ReplayBundle['profiles'][number], ids: readonly string[]): ReplayMedia[] {
+function mediaFor(
+    profile: Pick<AnalysisV2ReplayBundle['profiles'][number], 'media'>,
+    ids: readonly string[],
+): ReplayMedia[] {
     const allowed = new Set(ids);
     return profile.media.filter(item => allowed.has(item.selectionId));
+}
+
+/**
+ * Feature analysis always receives the captured profile image when one exists.
+ * Keep the feed order from the feature selection while reserving one slot for
+ * the profile image so the profile cannot be displaced by a full feed set.
+ */
+export function selectReplayFeatureMedia(
+    profile: Pick<AnalysisV2ReplayBundle['profiles'][number], 'media'>,
+    ids: readonly string[],
+): ReplayMedia[] {
+    const selected = mediaFor(profile, ids);
+    const profileMedia = profile.media.find(item => item.kind === 'profile');
+    if (!profileMedia) return selected.slice(0, MAX_FEATURE_MEDIA);
+    return [
+        profileMedia,
+        ...selected
+            .filter(item => item.kind === 'feed')
+            .slice(0, MAX_FEATURE_MEDIA - 1),
+    ];
+}
+
+function replayNameOnlyTriageResult(
+    result: ReplayNameOnlyResult,
+): GenderTriageResult {
+    return {
+        assessment: {
+            inferredGender: result.gender,
+            confidence: result.confidence,
+            ownerConsistency: 'not_visible',
+            evidenceSelectionIds: [],
+        },
+        routingDecision: 'route_to_feature_analysis',
+        routingReason: 'conserve_female_recall',
+        analyzedSelectionIds: [],
+    };
+}
+
+/**
+ * Shared by the organic name-only batch and the (A) unknown-fallback batch:
+ * a low-confidence "female" lean stays unresolved (conserve_female_recall -
+ * the same conservatism the organic batch already applies), while any other
+ * confident lean is taken as-is. A name-only result never produces high
+ * confidence (see the name-only prompt), so this only ever excludes low.
+ */
+function nameOnlyFinalClassification(
+    result: ReplayNameOnlyResult,
+): ReplayBaselineClassification {
+    return result.gender === 'female'
+        ? result.confidence === 'low' ? 'unresolved' : 'verified_female'
+        : result.gender === 'male' ? 'verified_non_female' : 'unresolved';
 }
 
 function safeLine(report: AnalysisV2AiReplayReport): string {
@@ -519,6 +644,38 @@ export async function runAnalysisV2AiReplay(input: {
     write?: (line: string) => void;
     /** Bounded post-abort telemetry bookkeeping only; it never grants resolver wait time. */
     resolverCutoffMs?: number;
+    /**
+     * Concierge shipping safety valve (CONCIERGE_BATCH_NAME_ONLY_ENABLED). When
+     * explicitly false, no candidate is routed to the name-only text batch;
+     * every public candidate goes through the same individual triage/feature
+     * path used before that batch existed. Defaults to true.
+     */
+    nameOnlyEnabled?: boolean;
+    /**
+     * CONCIERGE_BATCH_FEED_TRIAGE_ENABLED (default false, off is byte-parity).
+     * An avatar-less public candidate (hasProfileImage === false) whose bundle
+     * still carries feed media is routed through image triage on that feed
+     * media instead of the name-only text batch - purely by that structural
+     * condition (hasProfileImage + presence of 'feed'-kind media), never by
+     * identity. This keeps a female-leaning Korean name backed by a male feed
+     * photo from being decided by the name alone.
+     */
+    feedTriageEnabled?: boolean;
+    /**
+     * CONCIERGE_BATCH_NAME_FALLBACK_ENABLED (default false, off is byte-parity).
+     * A public image-path candidate (hasProfileImage === true) that ends the
+     * run with no gender evidence at all (classificationSource 'unknown',
+     * for any reason - a failed AI call, an inadmissible feature/resolver
+     * stage, an inconclusive account-context read, etc.) and carries a
+     * fullName is re-judged once with the same assertive name-only
+     * classifier the name-only batch uses. A confident lean fills the
+     * unknown; a genuinely unisex/non-person name, or no name-only signal at
+     * all, leaves it unknown. An account already classified male/female is
+     * never revisited - only genuine unknowns are eligible, so this can only
+     * ever move a candidate out of "unknown", never flip an existing
+     * classification.
+     */
+    nameFallbackEnabled?: boolean;
     /** Incident-scoped consumers may retain full in-memory feature evidence without stdout. */
     onAccountAnalyzed?: (
         detail: ReplayAccountAiDetail,
@@ -685,6 +842,7 @@ export async function runAnalysisV2AiReplay(input: {
         const usesConciergeFirstPass = input.bundle.schemaVersion === 1
             && input.evaluationPolicy?.capability
                 === FIRST_PAYMENT_BASIC_V211_CONCIERGE_CAPABILITY;
+        const feedTriageEnabled = usesConciergeFirstPass && input.feedTriageEnabled === true;
         // The text-only capability intentionally retains the source universe even
         // when old public media is unavailable. Those accounts must not enter AI.
         const publicProfiles = input.bundle.profiles.filter(profile => (
@@ -721,6 +879,40 @@ export async function runAnalysisV2AiReplay(input: {
                 collect(stages.privateAccountName, durations.privateAccountName, result);
             })
             : Promise.resolve());
+
+        const nameOnlyProfiles = usesConciergeFirstPass && input.nameOnlyEnabled !== false
+            ? publicProfiles.filter(profile => (
+                profile.hasProfileImage === false
+                && Boolean(profile.fullName?.trim())
+                // (B) An avatar-less candidate whose bundle still carries feed
+                // media is routed through feed-image triage instead (below),
+                // never decided from the name alone.
+                && !(feedTriageEnabled && profile.media.some(item => item.kind === 'feed'))
+            ))
+            : [];
+        const nameOnlyOrdinals = new Set(nameOnlyProfiles.map(profile => profile.ordinal));
+        let nameOnlyInvocation: ReplayInvocation<readonly ReplayNameOnlyResult[]> | null = null;
+        const nameOnlyTask = observeRequiredTask(
+            nameOnlyProfiles.length > 0 && runner.nameOnly
+                ? runner.nameOnly(nameOnlyProfiles.map(profile => ({
+                    candidateId: `ordinal:${profile.ordinal}`,
+                    fullName: profile.fullName!.trim(),
+                }))).then(result => {
+                    nameOnlyInvocation = result;
+                    collect(stages.genderTriage, durations.genderTriage, result);
+                    // A name-only batch covers many candidates at once. Reporting its
+                    // failure as "unknown" for every covered candidate is the silent
+                    // fallback that previously zeroed out an entire order's results.
+                    // Fail the order closed instead so it is retried, with the cause
+                    // recorded in the batch failure diagnostic.
+                    if (result.outcome !== 'ok') {
+                        throw new Error(
+                            `ANALYSIS_V2_REPLAY_NAME_ONLY_BATCH_FAILED: outcome=${result.outcome}`,
+                        );
+                    }
+                })
+                : Promise.resolve(),
+        );
 
         const prepared: PreparedPublicReplay[] = [];
         const v29AccountProfile = (
@@ -770,35 +962,20 @@ export async function runAnalysisV2AiReplay(input: {
                 }, { triage, feature: null });
                 return;
             }
-            // The paid concierge first pass is a provisional name+profile-image
-            // gate. Only male provisional results stop here; female and unknown
-            // results spend the feed-validation call.
-            if (
-                usesConciergeFirstPass
-                && triage.assessment.inferredGender === 'male'
-            ) {
-                gender.unknown++;
-                await appendAccountOutput({
-                    ordinal: profile.ordinal,
-                    finalClassification: 'unresolved',
-                    classificationSource: 'unknown',
-                    featureOverview: null,
-                }, { triage, feature: null });
-                return;
-            }
-            const featureAdmitted = !supportsGenderTriageMicrobatch
+            const featureMedia = selectReplayFeatureMedia(profile, profile.featureSelectionIds);
+            const featureAdmitted = featureMedia.length > 0 && (!supportsGenderTriageMicrobatch
                 || (
                     aiStagePolicySupports(replayAiPolicy, 'genderSummaryQualityV211')
                         ? v211FeatureAdmission(triage, profile)
                         : v29FeatureAdmission(triage, profile)
-                ) === 'eligible';
+                ) === 'eligible');
             const featurePromise = featureAdmitted ? runner.feature?.({
                 ordinal: profile.ordinal,
                 bio: profile.bio ?? null,
                 ...(supportsGenderTriageMicrobatch ? {
                     accountProfile: v29AccountProfile(profile),
                 } : {}),
-                media: mediaFor(profile, profile.featureSelectionIds),
+                media: featureMedia,
                 captions: profile.captions,
                 triage,
             }) : undefined;
@@ -836,7 +1013,8 @@ export async function runAnalysisV2AiReplay(input: {
                     },
                 };
                 launchedResolvers.push(trackedResolver);
-                const resolverPromise = runner.resolveGender({
+                const resolveGender = runner.resolveGender;
+                const resolverPromise = withResolverCapacityRetry(() => resolveGender({
                     ordinal: profile.ordinal,
                     media: resolverMedia,
                     signal: abort.signal,
@@ -866,7 +1044,7 @@ export async function runAnalysisV2AiReplay(input: {
                                 (failures[value.disposition] ?? 0) + 1;
                         }
                     },
-                });
+                }));
                 trackedResolver.promise = resolverPromise.then(value => {
                     trackedResolver!.settled = true;
                     trackedResolver!.value = value;
@@ -897,7 +1075,7 @@ export async function runAnalysisV2AiReplay(input: {
             });
         };
         const publicTask = observeRequiredTask(runBounded(
-            publicProfiles,
+            publicProfiles.filter(profile => !nameOnlyOrdinals.has(profile.ordinal)),
             supportsGenderTriageMicrobatch ? 6 : 4,
             async profile => {
                 if (replayWorkFailed) return;
@@ -906,12 +1084,46 @@ export async function runAnalysisV2AiReplay(input: {
                     const fullName = profile.fullName?.trim() ?? '';
                     const firstPassMedia = mediaFor(profile, profile.triageSelectionIds)
                         .filter(item => item.kind === 'profile');
-                    if (
-                        !runner.firstPass
-                        || !fullName
-                        || profile.hasProfileImage !== true
-                        || firstPassMedia.length !== 1
-                    ) {
+                    const feedTriageMedia = feedTriageEnabled && profile.hasProfileImage === false
+                        ? mediaFor(profile, profile.triageSelectionIds).filter(item => item.kind === 'feed')
+                        : [];
+                    if (runner.firstPass && fullName && profile.hasProfileImage === true && firstPassMedia.length === 1) {
+                        const call = runner.firstPass;
+                        triage = await withIndividualTriageRetry(() => call({
+                            ordinal: profile.ordinal,
+                            fullName,
+                            media: firstPassMedia,
+                        }));
+                    } else if (runner.triage && feedTriageMedia.length > 0) {
+                        // (B) Avatar-less but fed: judge from the actual feed
+                        // image instead of the name-only text route, so a
+                        // female-leaning name backed by a male feed photo is
+                        // decided by the photo, not the name.
+                        const call = runner.triage;
+                        triage = await withIndividualTriageRetry(() => call({
+                            ordinal: profile.ordinal,
+                            media: feedTriageMedia,
+                            ...(supportsGenderTriageMicrobatch
+                                ? { accountProfile: v29AccountProfile(profile) }
+                            : {}),
+                        }));
+                    } else if (runner.triage && (fullName || profile.hasProfileImage === true)) {
+                        // An image-having candidate must still reach triage even
+                        // without a display name (e.g. its triage-selected media
+                        // didn't happen to include exactly one profile image for
+                        // the fast firstPass shape): accountProfile.hasProfileImage
+                        // still carries that signal. Requiring fullName here as
+                        // well silently dropped every nameless image-having
+                        // candidate to "unknown" with zero triage calls.
+                        const call = runner.triage;
+                        triage = await withIndividualTriageRetry(() => call({
+                            ordinal: profile.ordinal,
+                            media: [],
+                            ...(supportsGenderTriageMicrobatch
+                                ? { accountProfile: v29AccountProfile(profile) }
+                            : {}),
+                        }));
+                    } else {
                         gender.unknown++;
                         await appendAccountOutput({
                             ordinal: profile.ordinal,
@@ -921,20 +1133,16 @@ export async function runAnalysisV2AiReplay(input: {
                         }, { triage: null, feature: null });
                         return;
                     }
-                    triage = await runner.firstPass({
-                        ordinal: profile.ordinal,
-                        fullName,
-                        media: firstPassMedia,
-                    });
                 } else {
                     if (!runner.triage) return;
-                    triage = await runner.triage({
+                    const call = runner.triage;
+                    triage = await withIndividualTriageRetry(() => call({
                         ordinal: profile.ordinal,
                         media: mediaFor(profile, profile.triageSelectionIds),
                         ...(supportsGenderTriageMicrobatch
                             ? { accountProfile: v29AccountProfile(profile) }
                         : {}),
-                    });
+                    }));
                 }
                 if (!triage) return;
                 if (replayWorkFailed) return;
@@ -953,11 +1161,46 @@ export async function runAnalysisV2AiReplay(input: {
             },
         ));
         try {
-            await Promise.all([privateTask, publicTask]);
+            await Promise.all([privateTask, publicTask, nameOnlyTask]);
         } catch (error) {
             await abortAndObserveResolvers(launchedResolvers, cutoffBookkeepingMs);
             throw error;
         }
+
+        // The value is assigned by the observed promise callback above; keep
+        // the snapshot explicit because TypeScript cannot follow that
+        // assignment across the Promise.all boundary.
+        const nameOnlyInvocationSnapshot = nameOnlyInvocation as unknown as
+            ReplayInvocation<readonly ReplayNameOnlyResult[]> | null;
+        const nameOnlyResults: readonly ReplayNameOnlyResult[] =
+            nameOnlyInvocationSnapshot?.value ?? [];
+        const nameOnlyResultsByCandidateId = new Map<string, ReplayNameOnlyResult>(
+            nameOnlyResults.map(result => [result.candidateId, result] as const),
+        );
+        await Promise.all(nameOnlyProfiles.map(async profile => {
+            const result = nameOnlyResultsByCandidateId.get(`ordinal:${profile.ordinal}`);
+            if (!result) {
+                gender.unknown++;
+                await appendAccountOutput({
+                    ordinal: profile.ordinal,
+                    finalClassification: 'analysis_unavailable',
+                    classificationSource: 'unavailable',
+                    featureOverview: null,
+                }, { triage: null, feature: null });
+                return;
+            }
+            const triage = replayNameOnlyTriageResult(result);
+            const finalClassification = nameOnlyFinalClassification(result);
+            await appendAccountOutput({
+                ordinal: profile.ordinal,
+                finalClassification,
+                classificationSource: 'name_only',
+                featureOverview: null,
+            }, { triage, feature: null });
+            if (finalClassification === 'verified_female') gender.female++;
+            else if (finalClassification === 'verified_non_female') gender.male++;
+            else gender.unknown++;
+        }));
 
         await Promise.all(prepared.map(async outcome => {
             let resolved: ReplayInvocation<GenderResolutionResult> | undefined;
@@ -1010,7 +1253,7 @@ export async function runAnalysisV2AiReplay(input: {
                     }
                 }
             }
-            const reconciliation = applyGenderResolution({
+            const reconciled = applyGenderResolution({
                 baselineClassification: outcome.baseline,
                 baselineSource: outcome.baseline === 'verified_female'
                     || outcome.baseline === 'verified_non_female'
@@ -1020,6 +1263,15 @@ export async function runAnalysisV2AiReplay(input: {
                 feature: outcome.feature?.value ?? null,
                 resolver: resolved?.outcome === 'ok' ? resolved.value ?? null : null,
             });
+            const reconciliation = usesConciergeFirstPass
+                && reconciled.finalClassification === 'verified_female'
+                && outcome.feature?.value === undefined
+                ? {
+                    finalClassification: 'unresolved' as const,
+                    classificationSource: 'unknown' as const,
+                    resolverApplied: false,
+                }
+                : reconciled;
             if (resolved?.outcome === 'ok') {
                 if (reconciliation.resolverApplied) {
                     resolver.applied++;
@@ -1048,6 +1300,61 @@ export async function runAnalysisV2AiReplay(input: {
             else if (reconciliation.finalClassification === 'verified_non_female') gender.male++;
             else gender.unknown++;
         }));
+
+        // (A) Name-fallback: purely structural (hasProfileImage, fullName
+        // presence, ended up with classificationSource 'unknown') - never by
+        // identity. Applies to every image-path public candidate that ended
+        // with no gender evidence at all, whatever the reason (a failed AI
+        // call, an inadmissible feature/resolver stage, an inconclusive
+        // account-context read, ...). hasProfileImage === true excludes every
+        // (B) feed-triage candidate by construction, so a name lean never
+        // overrides a feed-image judgment.
+        if (input.nameFallbackEnabled === true && usesConciergeFirstPass && runner.nameOnly) {
+            const publicProfilesByOrdinal = new Map(
+                publicProfiles.map(profile => [profile.ordinal, profile] as const),
+            );
+            const fallbackCandidates = accountOutputs.filter(output => {
+                if (output.classificationSource !== 'unknown') return false;
+                const profile = publicProfilesByOrdinal.get(output.ordinal);
+                return profile?.hasProfileImage === true && Boolean(profile.fullName?.trim());
+            });
+            if (fallbackCandidates.length > 0) {
+                const fallbackInvocation = await runner.nameOnly(fallbackCandidates.map(output => ({
+                    candidateId: `ordinal:${output.ordinal}`,
+                    fullName: publicProfilesByOrdinal.get(output.ordinal)!.fullName!.trim(),
+                })));
+                collect(stages.genderTriage, durations.genderTriage, fallbackInvocation);
+                // Mirrors the organic name-only batch: a batch failure must not
+                // silently leave every covered candidate at "unknown" - fail
+                // the order closed so it is retried instead.
+                if (fallbackInvocation.outcome !== 'ok') {
+                    throw new Error(
+                        `ANALYSIS_V2_REPLAY_NAME_FALLBACK_BATCH_FAILED: outcome=${fallbackInvocation.outcome}`,
+                    );
+                }
+                const fallbackByCandidateId = new Map(
+                    (fallbackInvocation.value ?? []).map(result => [result.candidateId, result] as const),
+                );
+                for (const output of fallbackCandidates) {
+                    const result = fallbackByCandidateId.get(`ordinal:${output.ordinal}`);
+                    if (!result) continue;
+                    const finalClassification = nameOnlyFinalClassification(result);
+                    // A unisex/non-person name (or a low-confidence female lean)
+                    // stays unknown - fallback only ever fills a genuine unknown.
+                    if (finalClassification === 'unresolved') continue;
+                    output.finalClassification = finalClassification;
+                    output.classificationSource = 'name_only';
+                    gender.unknown--;
+                    if (finalClassification === 'verified_female') gender.female++;
+                    else gender.male++;
+                    await input.onAccountAnalyzed?.({
+                        ...output,
+                        triage: replayNameOnlyTriageResult(result),
+                        feature: null,
+                    });
+                }
+            }
+        }
     }
     // Stable ordinal order is required before a preview can be sealed.
     accountOutputs.sort((left, right) => left.ordinal - right.ordinal);

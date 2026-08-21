@@ -1,7 +1,12 @@
 import { describe, expect, it, vi } from 'vitest';
 import { captureAnalysisV2ReplayBundle } from './replay-capture';
+import { runAnalysisV2AiReplay } from './replay-runner';
 import { AnalysisImagePreparationError } from '@/lib/services/ai/image-preprocessing';
-import type { ReplaySourceLineage } from './replay-source-lineage';
+import { INSTAGRAM_DEFAULT_PROFILE_IMAGE_MEDIA_ID } from '../profile-image-evidence';
+import {
+    FIRST_PAYMENT_BASIC_V211_CONCIERGE_CAPABILITY,
+    type ReplaySourceLineage,
+} from './replay-source-lineage';
 
 const STANDARD_SOURCE_LINEAGE = {
     selectedPlanId: 'standard' as const,
@@ -17,6 +22,8 @@ const profile = {
     isPrivate: false, isVerified: false, profilePicUrl: 'https://cdninstagram.com/profile.jpg',
     latestPosts: [{ id: 'post1', shortCode: 'post1', type: 'image' as const, imageUrl: 'https://cdninstagram.com/post.jpg', likesCount: 0, commentsCount: 0, timestamp: '2026-07-27T00:00:00.000Z', taggedUsers: [], mentionedUsers: [] }],
 };
+
+const DEFAULT_AVATAR_JPEG_BASE64 = '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';
 
 describe('analysis V2 replay capture', () => {
     it('permits a retained public no-media account only for the sealed legacy-secondary text-only capability', async () => {
@@ -129,6 +136,63 @@ describe('analysis V2 replay capture', () => {
             bio: 'bio',
         });
         expect(normalize).toHaveBeenCalledTimes(2);
+    });
+
+    it('drops the known default avatar as image evidence while retaining feed media', async () => {
+        const normalize = vi.fn(async () => Buffer.from([0xff, 0xd8, 0xff, 0xd9]));
+        const defaultAvatarProfile = {
+            ...profile,
+            profilePicUrl: `https://scontent.cdninstagram.com/v/t51.2885-19/${INSTAGRAM_DEFAULT_PROFILE_IMAGE_MEDIA_ID}?stp=dst-jpg_e0_s150x150_tt6`,
+        };
+        const bundle = await captureAnalysisV2ReplayBundle({
+            selector: { targetUsername: 'target' },
+            repository: {
+                findCompletedReplaySourceExact: async () => ({
+                    requestFingerprint: 'b'.repeat(64), sourceLineage: STANDARD_SOURCE_LINEAGE, completed: true,
+                }),
+                loadReplaySource: async () => ({
+                    profiles: [defaultAvatarProfile],
+                    evidence: { relationship: [], targetInteractions: [], reverseInteractions: [] },
+                    providerRuns: [],
+                }),
+            },
+            normalizeMedia: normalize,
+        });
+        expect(normalize).toHaveBeenCalledTimes(1);
+        expect(bundle.profiles[0]).toMatchObject({
+            hasProfileImage: false,
+            media: [expect.objectContaining({ kind: 'feed', postId: 'post1' })],
+            triageSelectionIds: [expect.stringMatching(/^post:/)],
+        });
+        expect(bundle.profiles[0]?.media.some(item => item.kind === 'profile')).toBe(false);
+    });
+
+    it('uses profilePicUrlHD when it differs from the standard profile image URL', async () => {
+        const normalizedUrls: string[] = [];
+        const bundle = await captureAnalysisV2ReplayBundle({
+            selector: { targetUsername: 'target' },
+            repository: {
+                findCompletedReplaySourceExact: async () => ({
+                    requestFingerprint: 'c'.repeat(64), sourceLineage: STANDARD_SOURCE_LINEAGE, completed: true,
+                }),
+                loadReplaySource: async () => ({
+                    profiles: [{
+                        ...profile,
+                        profilePicUrl: 'https://cdninstagram.com/profile-150.jpg',
+                        profilePicUrlHD: 'https://cdninstagram.com/profile-320.jpg',
+                    }],
+                    evidence: { relationship: [], targetInteractions: [], reverseInteractions: [] },
+                    providerRuns: [],
+                }),
+            },
+            normalizeMedia: async media => {
+                normalizedUrls.push(media.imageUrl);
+                return Buffer.from([0xff, 0xd8, 0xff, 0xd9]);
+            },
+        });
+        expect(normalizedUrls).toContain('https://cdninstagram.com/profile-320.jpg');
+        expect(normalizedUrls).not.toContain('https://cdninstagram.com/profile-150.jpg');
+        expect(bundle.profiles[0]?.hasProfileImage).toBe(true);
     });
 
     it('captures an explicit v2.7-to-v2.9 evaluation intent without changing source lineage', async () => {
@@ -366,5 +430,162 @@ describe('analysis V2 replay capture', () => {
         } });
         expect(legacy.profiles[0]?.featureSelectionIds).toHaveLength(5);
         expect(v28.profiles[0]?.featureSelectionIds).toHaveLength(9);
+    });
+
+    it('uses first and last carousel children for concierge candidate feature media', async () => {
+        const candidate = {
+            ...profile,
+            username: 'candidate',
+            profilePicUrl: undefined,
+            postsCount: 3,
+            latestPosts: Array.from({ length: 3 }, (_, index) => ({
+                ...profile.latestPosts[0],
+                id: `carousel-${index}`,
+                shortCode: `carousel-${index}`,
+                type: 'carousel' as const,
+                declaredMediaCount: 3,
+                childrenComplete: true,
+                mediaItems: Array.from({ length: 3 }, (_child, child) => ({
+                    id: `${index}-${child}`,
+                    type: 'image' as const,
+                    imageUrl: `https://cdninstagram.com/${index}-${child}.jpg`,
+                })),
+            })),
+        };
+        const sourceLineage = {
+            selectedPlanId: 'basic' as const,
+            policyVersions: {
+                pipeline: 'v2' as const,
+                aiStage: 'ai-stage-policy-v2.11' as const,
+                risk: 'risk-policy-v2.5' as const,
+                scheduler: 'ai-scheduler-v1' as const,
+            },
+        };
+        const bundle = await captureAnalysisV2ReplayBundle({
+            selector: { targetUsername: 'candidate' },
+            repository: {
+                findCompletedReplaySourceExact: async () => ({
+                    requestFingerprint: '2'.repeat(64),
+                    sourceLineage,
+                    completed: true,
+                }),
+                loadReplaySource: async () => ({
+                    profiles: [candidate],
+                    evidence: { relationship: [], targetInteractions: [], reverseInteractions: [] },
+                    providerRuns: [],
+                }),
+            },
+            evaluationPolicy: {
+                capability: FIRST_PAYMENT_BASIC_V211_CONCIERGE_CAPABILITY,
+                aiStage: 'ai-stage-policy-v2.11',
+            },
+            normalizeMedia: async () => Buffer.from([0xff, 0xd8, 0xff, 0xd9]),
+        });
+
+        expect(bundle.profiles[0]?.featureSelectionIds).toEqual([
+            'post:carousel-0:media:0:0-0',
+            'post:carousel-1:media:0:1-0',
+            'post:carousel-2:media:0:2-0',
+            'post:carousel-0:media:2:0-2',
+            'post:carousel-1:media:2:1-2',
+            'post:carousel-2:media:2:2-2',
+        ]);
+        expect(bundle.profiles[0]?.featureSelectionIds).toHaveLength(6);
+    });
+
+    it('captures a mixed concierge batch that survives replay validation', async () => {
+        const sourceLineage = {
+            selectedPlanId: 'basic' as const,
+            policyVersions: {
+                pipeline: 'v2' as const,
+                aiStage: 'ai-stage-policy-v2.11' as const,
+                risk: 'risk-policy-v2.5' as const,
+                scheduler: 'ai-scheduler-v1' as const,
+            },
+        };
+        const evaluationPolicy = {
+            capability: FIRST_PAYMENT_BASIC_V211_CONCIERGE_CAPABILITY,
+            aiStage: 'ai-stage-policy-v2.11' as const,
+        };
+        const carousel = {
+            id: 'carousel', shortCode: 'carousel', type: 'carousel' as const,
+            imageUrl: 'https://cdninstagram.com/carousel.jpg', likesCount: 1,
+            commentsCount: 0, timestamp: '2026-07-27T00:00:00.000Z',
+            taggedUsers: [], mentionedUsers: [], declaredMediaCount: 2,
+            childrenComplete: true,
+            mediaItems: [0, 1].map(index => ({
+                id: `child-${index}`, type: 'image' as const,
+                imageUrl: `https://cdninstagram.com/child-${index}.jpg`,
+            })),
+        };
+        const profiles = [
+            {
+                ...profile,
+                username: 'default_avatar',
+                fullName: '기본 아바타',
+                profilePicUrl: `https://scontent.cdninstagram.com/v/t51.2885-19/${INSTAGRAM_DEFAULT_PROFILE_IMAGE_MEDIA_ID}?stp=dst-jpg_e0_s150x150_tt6`,
+                profilePicUrlHD: 'https://cdninstagram.com/default-avatar-hd.jpg',
+                postsCount: 1,
+                latestPosts: [carousel],
+            },
+            {
+                ...profile,
+                username: 'zero_posts',
+                fullName: '게시물 없음',
+                profilePicUrl: undefined,
+                profilePicUrlHD: undefined,
+                postsCount: 0,
+                latestPosts: [],
+            },
+            {
+                ...profile,
+                username: 'normal_candidate',
+                fullName: '일반 후보',
+                profilePicUrl: 'https://cdninstagram.com/normal.jpg',
+                profilePicUrlHD: 'https://cdninstagram.com/normal-hd.jpg',
+                postsCount: 1,
+                latestPosts: [{ ...carousel, id: 'normal-post', shortCode: 'normal-post' }],
+            },
+        ];
+        const bundle = await captureAnalysisV2ReplayBundle({
+            selector: { targetUsername: 'target' },
+            repository: {
+                findCompletedReplaySourceExact: async () => ({
+                    requestFingerprint: '3'.repeat(64), sourceLineage, completed: true,
+                }),
+                loadReplaySource: async () => ({
+                    profiles,
+                    evidence: { relationship: [], targetInteractions: [], reverseInteractions: [] },
+                    providerRuns: [],
+                }),
+            },
+            evaluationPolicy,
+            normalizeMedia: async media => media.imageUrl.includes('default-avatar-hd')
+                ? Buffer.from(DEFAULT_AVATAR_JPEG_BASE64, 'base64')
+                : Buffer.from([0xff, 0xd8, 0xff, 0xd9]),
+        });
+        expect(bundle.profiles[0]).toMatchObject({
+            hasProfileImage: false,
+            media: [
+                expect.objectContaining({ selectionId: 'post:carousel:media:0:child-0' }),
+                expect.objectContaining({ selectionId: 'post:carousel:media:1:child-1' }),
+            ],
+            coverage: { selectedCount: 2, normalizedCount: 2, failures: [] },
+        });
+        expect(bundle.profiles[1]).toMatchObject({
+            media: [], triageSelectionIds: [], featureSelectionIds: [],
+            coverage: { selectedCount: 0, normalizedCount: 0, failures: [] },
+        });
+        expect(bundle.profiles[2]?.featureSelectionIds).toEqual([
+            'profile:normal_candidate',
+            'post:normal-post:media:0:child-0',
+            'post:normal-post:media:1:child-1',
+        ]);
+
+        await expect(runAnalysisV2AiReplay({
+            bundle,
+            mode: 'dry-run',
+            evaluationPolicy,
+        })).resolves.toBeDefined();
     });
 });

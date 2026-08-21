@@ -259,7 +259,7 @@ describe('analysis V2 replay CLI', () => {
         expect(result.status).toBe(0);
         expect(JSON.parse(result.stdout)).toEqual({
             frozen: true,
-            stages: ['feature', 'firstPass', 'privateNames', 'resolveGender', 'triage'],
+            stages: ['feature', 'firstPass', 'nameOnly', 'privateNames', 'resolveGender', 'triage'],
         });
         expect(result.stderr).toBe('');
     });

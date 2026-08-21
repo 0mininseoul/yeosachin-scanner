@@ -210,7 +210,7 @@ describe('result page pagination copy contract', () => {
 
     it('keeps the V1 verdict scoped to the authoritative mutual count', () => {
         expect(legacySummary).toMatch(
-            /<HighRiskSummary[\s\S]*?count=\{highCount\}[\s\S]*?context=\{<>\s*맞팔[\s\S]*?summary\.analyzedMutuals\.toLocaleString\(\)[\s\S]*?모든 공개 계정들을 판독했습니다\.\s*<\/>\}\s*\/>/,
+            /<HighRiskSummary[\s\S]*?count=\{highCount\}[\s\S]*?context=\{<>\s*맞팔[\s\S]*?summary\.mutualFollows\.toLocaleString\(\)[\s\S]*?공개 계정들을 판독했습니다\.\s*<\/>\}\s*\/>/,
         );
     });
 

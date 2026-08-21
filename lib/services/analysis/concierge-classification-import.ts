@@ -63,7 +63,7 @@ export interface ConciergeClassificationRecord {
     schemaVersion: string | null;
     classificationOperationKey: string | null;
     classificationResultHash: string | null;
-    classificationSource: 'ai' | 'manual' | 'not_applicable';
+    classificationSource: 'ai' | 'name_only' | 'manual' | 'not_applicable';
     manualOverride: ConciergeManualOverrideProvenance | null;
     /** Exact immutable fields retained from the operator review source when available. */
     sourceSnapshot?: Readonly<{
@@ -444,7 +444,7 @@ function validateRecord(record: ConciergeClassificationRecord): void {
         || !record.classifier || !record.modelName || !record.promptVersion
         || !record.schemaVersion || !record.classificationOperationKey
         || !record.classificationResultHash
-        || !['ai', 'manual'].includes(record.classificationSource)) {
+        || !['ai', 'name_only', 'manual'].includes(record.classificationSource)) {
         fail('CONCIERGE_CLASSIFICATION_LEDGER_PUBLIC_AI_DATA');
     }
     requireHash(record.classificationResultHash, 'CONCIERGE_CLASSIFICATION_LEDGER_AI_PROVENANCE_INVALID');
@@ -484,7 +484,16 @@ function validateRecord(record: ConciergeClassificationRecord): void {
     } else if (record.classificationSource === 'manual') {
         fail('CONCIERGE_CLASSIFICATION_LEDGER_OVERRIDE_INVALID');
     }
-    if (record.classificationSource === 'ai' && record.manualOverride !== null) {
+    if (record.classificationSource === 'ai' || record.classificationSource === 'name_only') {
+        if (record.manualOverride !== null) {
+            fail('CONCIERGE_CLASSIFICATION_LEDGER_OVERRIDE_INVALID');
+        }
+    }
+    if (record.classificationSource === 'name_only'
+        && (record.partition !== 'public'
+            || record.firstPass.profilePicPresent === true
+            || record.secondPass.status === 'collected'
+            || record.secondPass.completeMedia === true)) {
         fail('CONCIERGE_CLASSIFICATION_LEDGER_OVERRIDE_INVALID');
     }
 }

@@ -6,6 +6,7 @@ import {
     REVENUE_GENDER_ROUTING_IMAGE_MAX_CONCURRENCY,
     REVENUE_GENDER_ROUTING_IMAGE_MAX_REDIRECTS,
     REVENUE_GENDER_ROUTING_IMAGE_TIMEOUT_MS,
+    REVENUE_GENDER_ROUTING_IMAGE_POLICY,
     createRevenueGenderRoutingInputPreparer,
 } from './revenue-gender-routing-input-preparer';
 import type { GenderRoutingAssessment } from './gender-routing';
@@ -23,9 +24,11 @@ const source = (
     candidateKey: string,
     profilePicUrl: string | null,
     fullname: string | null = '  A\u030Ada  ',
+    profilePicUrlHD?: string | null,
 ) => ({
     candidateKey,
     profilePicUrl,
+    ...(profilePicUrlHD === undefined ? {} : { profilePicUrlHD }),
     fullname,
 });
 
@@ -38,6 +41,15 @@ function downloaded(bytes = png): SecureImageDownload {
 }
 
 describe('revenue gender-routing input preparer', () => {
+    it('uses the approved profile/feed evidence image policy', () => {
+        expect(REVENUE_GENDER_ROUTING_IMAGE_POLICY).toEqual({
+            maxImages: 1,
+            maxPostImages: 0,
+            maxDimension: 768,
+            jpegQuality: 85,
+        });
+    });
+
     it('deduplicates exact request-local URLs while preserving input key and order', async () => {
         const download = vi.fn(async () => downloaded());
         const normalize = vi.fn(async (bytes: Buffer) => Buffer.from(bytes));
@@ -81,6 +93,33 @@ describe('revenue gender-routing input preparer', () => {
             }),
         );
         expect(Buffer.compare(Buffer.from(output.imageBytes!), png)).toBe(0);
+    });
+
+    it('prefers a distinct HD profile URL and treats the known anonymous asset as no image', async () => {
+        const download = vi.fn(async () => downloaded());
+        const prepare = createRevenueGenderRoutingInputPreparer({
+            download,
+            normalize: async bytes => Buffer.from(bytes),
+        });
+        const [hd] = await prepare([source(
+            'candidate:hd',
+            'https://cdninstagram.com/profile-150.jpg',
+            'Name',
+            'https://cdninstagram.com/profile-320.jpg',
+        )]);
+        expect(download).toHaveBeenCalledWith(
+            'https://cdninstagram.com/profile-320.jpg',
+            expect.any(Object),
+        );
+        expect(hd.imageBytes).not.toBeNull();
+        download.mockClear();
+        const [anonymous] = await prepare([source(
+            'candidate:anonymous',
+            'https://cdninstagram.com/573323465_1219825463302212_7278921664109726296_n.png',
+            'Name',
+        )]);
+        expect(download).not.toHaveBeenCalled();
+        expect(anonymous.imageBytes).toBeNull();
     });
 
     it('degrades malformed, failed, decoded-invalid, and over-limit images without logging raw values', async () => {

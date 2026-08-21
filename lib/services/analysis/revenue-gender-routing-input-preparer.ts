@@ -13,6 +13,7 @@ import type {
     RevenueGenderRoutingPreparationSource,
     RevenueGenderRoutingPreparedCandidate,
 } from './revenue-routing-runtime';
+import { preferredInstagramProfileImageUrl } from './profile-image-evidence';
 
 /** The stage-one input is deliberately smaller than general analysis media. */
 export const REVENUE_GENDER_ROUTING_IMAGE_MAX_BYTES = 256 * 1024;
@@ -22,11 +23,11 @@ export const REVENUE_GENDER_ROUTING_IMAGE_MAX_CONCURRENCY = 4;
 /** Bounds all distinct normalized request-local evidence, before assessor batching. */
 export const REVENUE_GENDER_ROUTING_MAX_AGGREGATE_NORMALIZED_IMAGE_BYTES = 8 * 1024 * 1024;
 
-const REVENUE_GENDER_ROUTING_IMAGE_POLICY: AnalysisImagePolicy = Object.freeze({
+export const REVENUE_GENDER_ROUTING_IMAGE_POLICY: AnalysisImagePolicy = Object.freeze({
     maxImages: 1,
     maxPostImages: 0,
-    maxDimension: 384,
-    jpegQuality: 75,
+    maxDimension: 768,
+    jpegQuality: 85,
 });
 
 type Download = (
@@ -56,10 +57,7 @@ function isSupportedSourceImage(bytes: Buffer): boolean {
 }
 
 function profileImageUrl(source: RevenueGenderRoutingPreparationSource): string | null {
-    if (typeof source.profilePicUrl !== 'string' || source.profilePicUrl.trim().length === 0) {
-        return null;
-    }
-    return source.profilePicUrl;
+    return preferredInstagramProfileImageUrl(source) ?? null;
 }
 
 function boundedConcurrency(value: number | undefined): number {
