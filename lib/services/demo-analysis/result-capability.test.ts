@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { readFileSync } from 'node:fs';
-import { mapV2Result } from '@/app/result/[requestId]/page';
+import { mapV2Result } from '@/app/result/[requestId]/result-view-model';
 import { demoResultPage } from './demo-analysis';
 
 const requestId = '223e4567-e89b-42d3-a456-426614174000';

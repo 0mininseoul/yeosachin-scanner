@@ -82,10 +82,8 @@ vi.mock('@/lib/services/identity/account-principal-store', async importOriginal 
     requireActiveAccountClassification: mocks.requireActiveAccountClassification,
 }));
 
-import {
-    POST,
-    scheduleBrowserFallbackCostReconciliation,
-} from '@/app/api/analysis/step/route';
+import { POST } from '@/app/api/analysis/step/route';
+import { scheduleBrowserFallbackCostReconciliation } from '@/lib/services/analysis/browser-fallback-cost-reconciliation';
 import { AccountPrincipalAdmissionError } from '@/lib/services/identity/account-principal-store';
 
 const requestId = '123e4567-e89b-42d3-a456-426614174000';

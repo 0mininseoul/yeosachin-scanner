@@ -25,6 +25,7 @@ export const EVENTS = {
     ANALYSIS_FAILED: 'analysis_failed',
     RESULT_VIEWED: 'result_viewed',
     RESULT_SHARED: 'result_shared',
+    RESULT_FEEDBACK_SUBMITTED: 'result_feedback_submitted',
 } as const;
 
 /**
@@ -65,7 +66,7 @@ export type AnalyticsEvent = (typeof EVENTS)[keyof typeof EVENTS]
     | (typeof REVENUE_SHARE_EVENTS)[keyof typeof REVENUE_SHARE_EVENTS]
     | (typeof ARCHIVE_NOTICE_EVENTS)[keyof typeof ARCHIVE_NOTICE_EVENTS];
 export type AnalyticsAuthProvider = 'google' | 'kakao';
-export type AnalyticsShareChannel = 'clipboard' | 'kakao' | 'web_share';
+export type AnalyticsShareChannel = 'clipboard' | 'instagram_dm' | 'kakao' | 'web_share';
 export type PrecheckoutAnalyticsEvent =
     (typeof PRECHECKOUT_EVENTS)[keyof typeof PRECHECKOUT_EVENTS];
 
@@ -248,7 +249,7 @@ const PROPERTY_VALIDATORS: Record<PropertyName, PropertyValidator> = {
     request_id: uuidValidator,
     required_plan_id: enumValidator(['basic', 'standard', 'plus']),
     result_count: integerValidator(0, 10_000),
-    share_channel: enumValidator(['clipboard', 'kakao', 'web_share']),
+    share_channel: enumValidator(['clipboard', 'instagram_dm', 'kakao', 'web_share']),
     share_outcome: enumValidator(['started', 'succeeded', 'cancelled', 'failed', 'confirmed', 'opened']),
     source: enumValidator(['direct', 'google', 'instagram', 'kakao', 'chatgpt', 'shared']),
     stage: enumValidator([
@@ -307,6 +308,7 @@ const EVENT_SCHEMAS: Record<AnalyticsEvent, readonly PropertyName[]> = {
     [EVENTS.ANALYSIS_FAILED]: ['request_id', 'duration_ms', 'error_code'],
     [EVENTS.RESULT_VIEWED]: ['request_id', 'result_count', 'is_shared'],
     [EVENTS.RESULT_SHARED]: ['request_id', 'share_channel'],
+    [EVENTS.RESULT_FEEDBACK_SUBMITTED]: ['request_id'],
     [PRECHECKOUT_EVENTS.BLITE_AVAILABLE]: ['preflight_id'],
     [PRECHECKOUT_EVENTS.BLITE_RESULT_VIEWED]: ['preflight_id'],
     [PRECHECKOUT_EVENTS.BLITE_FALLBACK_SELECTED]: ['preflight_id', 'fallback_reason'],

@@ -4,7 +4,10 @@ import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..', '..', '..');
-const resultPage = readFileSync(join(root, 'app', 'result', '[requestId]', 'page.tsx'), 'utf8');
+const resultPage = readFileSync(join(root, 'app', 'result', '[requestId]', 'page.tsx'), 'utf8')
+    // The V2 result view-model (mapper + types) lives in a co-located module so the
+    // page file only exports its default component; the page contract spans both.
+    + '\n' + readFileSync(join(root, 'app', 'result', '[requestId]', 'result-view-model.ts'), 'utf8');
 const highRiskSummary = readFileSync(join(root, 'components', 'high-risk-summary.tsx'), 'utf8');
 const pagination = readFileSync(join(root, 'components', 'result-pagination.tsx'), 'utf8');
 const presentation = readFileSync(
