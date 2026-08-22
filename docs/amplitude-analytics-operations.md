@@ -87,9 +87,9 @@ preflight 실패 사유의 원인 확인 결과, 현재 POST 경로는 인증·�
 
 ### 활성 코호트 시작일 근거
 
-- 익명 preflight의 핵심 구조는 2026-08-05의 `a2cdfd3e…` 커밋에서 들어왔지만, landing/analyze의 잔여 로그인 gate 때문에 당시에는 공개 익명 landing → preflight-before-login 흐름이 완전히 열리지 않았다.
-- 실제 공개 전환은 canonical commit `1bb8051ed6473a36a119574aa75dd61bba557cff`(`fix: allow anonymous landing preflight handoff (#296)`)가 2026-08-06 15:54:57 KST에 반영하면서 이루어졌다.
-- 2026-08-06은 전환 전후가 섞인 부분 일자이고 이후 익명 preflight runtime DB hotfix도 이어졌으므로, 활성 5개 차트의 clean inclusive cohort는 `2026-08-07 00:00 KST 이후`다. 8월 7~8일의 checkout/OAuth 안정화는 로그인 지연 순서를 바꾸지 않았으며, 필요하면 8월 9일 시작을 민감도 분석에만 사용한다.
+- 익명 preflight의 핵심 구조는 2026-08-05의 `a2cdfd3e2b92ff6546d54480cabd150d5f22390a` 커밋에서 들어왔지만, landing/analyze의 잔여 로그인 gate 때문에 당시 저장소의 공개 UI 정의에는 익명 landing → preflight-before-login 흐름이 완전히 반영되지 않았다.
+- 저장소상 공개 UI 전환 기준은 canonical main commit history의 `1bb8051ed6473a36a119574aa75dd61bba557cff`(`fix: allow anonymous landing preflight handoff (#296)`)이며, 커밋 시각은 2026-08-06 15:54:57 KST다. 해당 시각의 Production 배포 완료나 실제 공개 트래픽 전환 시점은 별도로 검증하지 않았다.
+- canonical main commit history 기준으로 UI 정의가 하루 중 바뀐 2026-08-06에는 이후 익명 preflight runtime DB hotfix도 이어졌다. 따라서 활성 5개 차트의 funnel-definition-consistent inclusive cohort는 `2026-08-07 00:00 KST 이후`다. 8월 7~8일의 checkout/OAuth 안정화는 로그인 지연 순서를 바꾸지 않았으며, 필요하면 8월 9일 시작 민감도 분석으로 해당 안정화 이후의 성능을 분리해 본다.
 
 ### 역사적 대시보드 정리
 
