@@ -67,6 +67,12 @@ describe('Amplitude funnel helpers', () => {
         expect(readAttribution('?utm_source=New%20Partner')).toEqual({
             source: 'new partner',
         });
+        expect(readAttribution(`?utm_source=%20%20${'A'.repeat(64)}%20%20`)).toEqual({
+            source: 'a'.repeat(64),
+        });
+        expect(readAttribution('?utm_source=%20%20MiXeD%20Partner%20%20')).toEqual({
+            source: 'mixed partner',
+        });
         expect(readAttribution('?utm_source=constructor')).toEqual({
             source: 'constructor',
         });
@@ -98,6 +104,7 @@ describe('Amplitude funnel helpers', () => {
 
     it('drops a normalized source longer than 64 characters', () => {
         expect(readAttribution(`?utm_source=${'a'.repeat(65)}`)).toEqual({});
+        expect(readAttribution('?utm_source=%20%20%20')).toEqual({});
     });
 
     it('maps operational failures to the registered error vocabulary', () => {
