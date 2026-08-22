@@ -47,12 +47,21 @@ Replay는 설치된 SDK가 지원하는 가장 낮은 기본 수준인 `light`�
 
 - 유입·인증: `landing_viewed`, `target_submitted`, `auth_started`, `auth_completed`, `login_prompted`
 - 사전 검사·demo: `preflight_started`, `preflight_succeeded`, `preflight_blocked`, `preflight_failed`, `exclusion_decided`, `demo_result_viewed`, `demo_result_expanded`
+- precheckout UX: `precheckout_blite_available`, `precheckout_blite_result_viewed`, `precheckout_blite_fallback_selected`, `precheckout_blite_gender_confirmation_completed`, `precheckout_blite_preview_cta_clicked`, `precheckout_demo_started`, `precheckout_demo_completed`, `precheckout_demo_failed`, `precheckout_plan_gate_reached`
 - 플랜·결제 이동: `plan_viewed`, `plan_selected`, `checkout_started`, `checkout_redirected`
 - 결제 확인: `payment_confirmed_viewed`, `earlybird_status_viewed`
 - 분석·결과: `analysis_started`, `analysis_completed`, `analysis_failed`, `result_viewed`
 - 공유: `result_share_initiated`, `result_share_copy_succeeded`, `result_share_handoff_completed`, `result_share_cancelled`, `result_share_failed`, `result_shared_confirmed`, `shared_result_opened`
 
-허용 properties는 `plan_id`, `required_plan_id`, `amount_krw`, `stage`, `status`, `duration_ms`, 닫힌 `error_code`, 구간화한 followers/following 수, 제한된 UTM source·medium·campaign·content·term, 내부 preflight/order/request UUID, 결과 수, `share_channel`, `share_outcome`, 서버가 정한 `traffic_class`로 제한한다. 공유 링크 유입은 토큰이 아닌 닫힌 `source=shared` 표식으로만 이어진다. `error_code`의 사전 검사 하위 사유는 `HANDLE_FORMAT_INVALID`, `TARGET_NOT_FOUND`, `TARGET_PRIVATE`, `PLAN_CAPACITY_EXCEEDED`, `EXCLUSION_RULE_VIOLATION`, `PROVIDER_TEMPORARY_FAILURE`를 사용한다. `plan_id`에 `plus`가 존재하는 것은 공통 스키마 호환을 위한 것이며 Plus 대기 신청 전용 분석을 뜻하지 않는다.
+허용 properties는 `plan_id`, `required_plan_id`, `amount_krw`, `stage`, `status`, `duration_ms`, 닫힌 `error_code`, 구간화한 followers/following 수, 아래 계약을 따르는 UTM source·medium·campaign·content·term, 내부 preflight/order/request UUID, 결과 수, `share_channel`, `share_outcome`, 서버가 정한 `traffic_class`로 제한한다. 공유 링크 유입은 토큰이 아닌 `source=shared` 표식으로만 이어진다. `error_code`의 사전 검사 하위 사유는 `HANDLE_FORMAT_INVALID`, `TARGET_NOT_FOUND`, `TARGET_PRIVATE`, `PLAN_CAPACITY_EXCEEDED`, `EXCLUSION_RULE_VIOLATION`, `PROVIDER_TEMPORARY_FAILURE`를 사용한다. `plan_id`에 `plus`가 존재하는 것은 공통 스키마 호환을 위한 것이며 Plus 대기 신청 전용 분석을 뜻하지 않는다.
+
+### Acquisition `source` 계약
+
+- `source`는 앞뒤 공백을 제거하고 영문을 소문자로 정규화한 값을 받는다. 빈 값과 64자를 초과한 값은 버리고, 1자 이상 64자 이하만 수집한다.
+- 정확히 일치하는 별칭은 `chatgpt.com` → `chatgpt`, `thread`·`threads.net` → `threads`, `twitter`·`twitter.com`·`x.com` → `x`, `everytime.kr` → `everytime`로 변환한다.
+- 위 경계를 통과한 처음 보는 값은 코드 변경 없이 향후 유입 차트에 새 breakdown 값으로 나타난다. 사용자는 이 bounded arbitrary `source` 계약과 개인적이거나 예상하지 못한 문자열이 수집될 수 있는 위험을 명시적으로 승인했다. 이 예외는 `source`에만 해당하며, 연락처·Instagram 식별자·자유 입력·원문 등 기존 속성 개인정보 제한은 그대로다.
+- `medium`은 기존의 닫힌 vocabulary로 계속 수집하지만 acquisition 차트의 breakdown에는 사용하지 않는다.
+- **역사적 한계:** 이전 closed parser가 버린 알 수 없는 `source` 값은 사후에 복원할 수 없다. `landing_leads`도 같은 parser를 사용했다. 다만 제출된 lead 일부는 referrer가 남아 있을 수 있어 domain 단위의 부분적인 offline 분석은 가능할 수 있다. 이는 손실된 `source` 원값의 복원으로 간주하지 않는다.
 
 공유 사건은 의미를 합치지 않는다. clipboard resolve는 링크 복사, Web Share resolve는 OS handoff, Kakao의 `result_shared_confirmed`는 공식 Share webhook이 확인한 전송이다. 버튼 click, URL prewarm, `/api/share/enable` 성공은 confirmed share가 아니다. 같은 사건을 인증된 서버 endpoint가 Axiom에도 best-effort로 기록한다.
 
@@ -64,23 +73,21 @@ preflight 실패 사유의 원인 확인 결과, 현재 POST 경로는 인증·�
 
 로그인 시점을 결제 클릭으로 늦추는 익명 preflight는 다음 경계를 따른다. 익명 행은 `user_id IS NULL`로 만들고, 짧은 만료의 서명 claim token을 발급한다. token은 OAuth `next` 상태에 포함하고 callback 서버가 검증·일회성 claim한 뒤에만 `earlybird_orders`를 만들 수 있다. token은 이벤트나 user property에 보내지 않는다. `analysis_preflights`의 브라우저 읽기·갱신은 authenticated owner 정책 또는 claim hash와 만료를 transaction-local context로 제시한 anon/authenticated RLS 정책만 통과하며, 이 경로에서 service role로 소유권을 우회하지 않는다. 익명 profile summary와 현재 유료 분석 selector는 Apify이며 selfhosted_auth는 별도 canary다. 동일 target snapshot은 PII-free input hash로 24시간 재사용하고, IP·디바이스 해시 기준 10분당 5회 및 일일 기본 300회의 상한을 둔다. 상한을 넘으면 새 외부 요청 대신 로그인 계속하기 경로로 폴백한다. preflight가 확정한 적격성·플랜 카드·가격 snapshot을 그대로 반환하므로 비로그인 화면도 현재 카탈로그 가격을 사용한다. `/api/analysis/start`, `/api/earlybird/checkout`, 진행·결과·마이페이지는 계속 인증을 요구하며, 익명 preflight는 분석을 시작할 수 없다. ready 화면의 예시 결과는 사용자 UUID 기반 demo run이 아니라 published synthetic fixture의 읽기 전용 projection이다.
 
-## 4. 대시보드 생성
+## 4. 활성 대시보드 운영 계약
 
 실제 이벤트가 한 건 이상 수신된 뒤, 아래 운영 대시보드가 없을 때만 로그인된 Comet 브라우저의 Amplitude UI에서 Production API key가 연결된 프로젝트를 선택하고 `얼리버드 전환 대시보드`를 만든다. 차트 생성 API를 사용하지 않고 기존 대시보드를 중복 생성하지 않는다. Preview도 같은 프로젝트를 쓴다면 알려진 테스트 Supabase UUID를 user segment에서 제외한다. 이메일이나 전화번호로 테스트 사용자를 구분하지 않는다.
 
-현재 운영 대시보드는 [Amplitude `얼리버드 전환 대시보드`](https://app.amplitude.com/analytics/shiny-disk-989835/dashboard/p7w87cf8)이다. 저장된 전체 차트에서 taxonomy seed user ID `00000000-0000-4000-8000-000000000001`을 제외한다.
+현재 운영 대시보드는 [Amplitude `얼리버드 전환 대시보드`](https://app.amplitude.com/analytics/shiny-disk-989835/dashboard/p7w87cf8)이다. 저장된 전체 차트에서 taxonomy seed user ID `00000000-0000-4000-8000-000000000001`을 제외한다. 활성 인벤토리는 아래 다섯 차트만 유지한다.
 
-1. 일별 유입과 UTM 채널: `landing_viewed` 추이와 source·medium·campaign breakdown
-2. 핵심 전환 funnel: `landing_viewed` → `target_submitted` → `auth_completed` → `preflight_succeeded` → `plan_selected` → `checkout_redirected` → `payment_confirmed_viewed`
-3. 단계별 이탈률: 같은 funnel의 단계 전환율과 median conversion time
-4. Basic·Standard 수요: `plan_viewed`, `plan_selected`, `checkout_started`, `checkout_redirected`를 `plan_id`로 breakdown하고 각 플랜 전환율 비교
-5. 사전 검사 품질: `preflight_succeeded`, `preflight_blocked`, `preflight_failed` 비율과 `error_code` breakdown, `duration_ms` p50·p90. `preflight_blocked`는 비공개·미존재·지원 범위 밖·플랜/베타 수용량 제한처럼 정상적으로 판정된 비즈니스 차단이고, `preflight_failed`는 provider·queue 등 기술 실패와 분류되지 않은 비정상 종료만 포함한다.
-6. 결제 확인: `payment_confirmed_viewed`의 distinct user·event 수와 화면에 표시된 금액의 참고 breakdown. 매출 확정은 `earlybird_orders.payment_id`, `actual_amount_krw`, `paid_at`이 모두 있는 행만 Supabase와 대조
-7. 결과 사용: `result_viewed`와 공유 initiated/copy/handoff/Kakao-confirmed/open을 채널별로 분리해 추이 확인
-8. 이벤트 기반 핵심 이탈 세그먼트: 같은 세션에서 `target_submitted` 후 `preflight_succeeded`가 없거나 `plan_selected` 후 `checkout_redirected`가 없는 사용자. Replay 링크 없이 후속 이벤트 유무로만 구성
-9. 공유 유입 전환: `result_viewed`의 `is_shared=true` 조회 수를 분모로 삼고, 같은 익명/인증 흐름에서 `source=shared`가 붙은 후속 `target_submitted` 수를 세어 공유 조회 1건당 신규 의뢰 수를 계산한다. 공유 토큰이나 외부 식별자는 breakdown에 사용하지 않는다.
+1. **유입 추이 및 채널:** `landing_viewed`의 일별 unique users를 `source`로만 breakdown한다. `medium`이나 campaign을 이 차트의 grouping에 추가하지 않는다.
+2. **핵심 UX 퍼널:** `preflight_succeeded`는 provider/profile 사전 조회가 기술적으로 성공했다는 신호일 뿐, 사용자가 데모 결과를 끝까지 본 visible-result 단계가 아니다. 그 화면 경험의 완료는 `precheckout_demo_completed`로 측정한다. 차트는 unique users, conversion window 7일, 순서 고정으로 `landing_viewed` → `preflight_started` → `exclusion_decided` → `precheckout_demo_completed` → `precheckout_plan_gate_reached` → `plan_selected` → `auth_completed` → `checkout_redirected` → `payment_confirmed_viewed`를 사용한다.
+3. **단계별 이탈:** 핵심 UX 퍼널과 정확히 같은 `landing_viewed` → `preflight_started` → `exclusion_decided` → `precheckout_demo_completed` → `precheckout_plan_gate_reached` → `plan_selected` → `auth_completed` → `checkout_redirected` → `payment_confirmed_viewed`의 아홉 개 이벤트를 같은 순서로 사용하여 단계별 drop-off와 conversion time을 본다.
+4. **사전 조회 실패:** `preflight_failed` event totals를 일별로 보고 `error_code`로 breakdown한다. unique users가 아닌 실패 사건 수를 측정한다. `preflight_succeeded`는 제외하고, 비공개·지원 범위·플랜/베타 수용량 등을 정상적으로 판정한 `preflight_blocked` business block도 제외한다.
+5. **결제 확인:** `payment_confirmed_viewed` event totals를 일별로 보고 `plan_id`로 breakdown하되, `basic`과 `standard`만 filter한다. unique users나 `amount_krw`를 측정하지 않는다. 이 차트는 결제 확인 화면 조회 관측용이며 revenue ledger가 아니다. 매출 원장은 Supabase다.
 
-기존 9개 이벤트 대시보드 패널은 유지한다. Replay는 이 대시보드의 대체 지표나 별도 민감 화면 패널이 아니며, 허용 핵심 경로에서 수신된 beta 세션의 문제를 조사할 때만 보조적으로 확인한다. Plus 대기 신청 전용 차트도 만들지 않고 대시보드에서 제외한다.
+### 역사적 대시보드 정리
+
+이전 9개 패널 계약과 구형 funnel 순서는 현재 운영 기준이 아니며 위 다섯 차트 계약으로 대체됐다. `플랜 수요`와 `결과 이용`은 삭제된 saved charts이며 활성 인벤토리에 포함하지 않는다. Replay는 대시보드의 대체 지표나 별도 민감 화면 패널이 아니며, 허용 핵심 경로에서 수신된 beta 세션의 문제를 조사할 때만 보조적으로 확인한다. Plus 대기 신청 전용 차트도 만들지 않는다.
 
 ## 5. Live 검증
 
