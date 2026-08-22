@@ -1,6 +1,10 @@
 'use client';
 
-import { availableAnalyticsStorage, tryClaimAnalyticsEvent } from './analytics-funnel';
+import {
+    availableAnalyticsStorage,
+    normalizeAttributionSource,
+    tryClaimAnalyticsEvent,
+} from './analytics-funnel';
 
 export const EVENTS = {
     LANDING_VIEWED: 'landing_viewed',
@@ -251,7 +255,7 @@ const PROPERTY_VALIDATORS: Record<PropertyName, PropertyValidator> = {
     result_count: integerValidator(0, 10_000),
     share_channel: enumValidator(['clipboard', 'instagram_dm', 'kakao', 'web_share']),
     share_outcome: enumValidator(['started', 'succeeded', 'cancelled', 'failed', 'confirmed', 'opened']),
-    source: enumValidator(['direct', 'google', 'instagram', 'kakao', 'chatgpt', 'shared']),
+    source: normalizeAttributionSource,
     stage: enumValidator([
         'analysis',
         'anonymous',

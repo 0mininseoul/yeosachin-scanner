@@ -90,12 +90,21 @@ const DOMAIN_ERROR_CODES: Readonly<Record<string, AnalyticsErrorCode>> = {
 };
 
 const ATTRIBUTION_VALUES = {
-    source: new Set(['direct', 'google', 'instagram', 'kakao', 'shared']),
     medium: new Set(['direct', 'organic', 'paid_social', 'referral']),
     campaign: new Set(['launch_2026']),
     content: new Set(['hero-a']),
     term: new Set(['detector']),
 } as const;
+
+const ATTRIBUTION_SOURCE_ALIASES = new Map<string, string>([
+    ['chatgpt.com', 'chatgpt'],
+    ['thread', 'threads'],
+    ['threads.net', 'threads'],
+    ['twitter', 'x'],
+    ['twitter.com', 'x'],
+    ['x.com', 'x'],
+    ['everytime.kr', 'everytime'],
+]);
 
 const SHARED_ATTRIBUTION_KEY = 'amplitude:attribution:shared_result';
 
@@ -128,6 +137,13 @@ export function relationshipBucket(value: number | null | undefined): Relationsh
     return 'over_1200';
 }
 
+export function normalizeAttributionSource(value: unknown): string | undefined {
+    if (typeof value !== 'string') return undefined;
+    const normalized = value.trim().toLowerCase();
+    if (!normalized || normalized.length > 64) return undefined;
+    return ATTRIBUTION_SOURCE_ALIASES.get(normalized) ?? normalized;
+}
+
 export function readAttribution(search: string): {
     source?: string;
     medium?: string;
@@ -146,11 +162,10 @@ export function readAttribution(search: string): {
     if (!hasAttribution) return { source: 'direct', medium: 'direct' };
 
     const result: ReturnType<typeof readAttribution> = {};
-    const isChatGptReferral = params.get('utm_source')?.trim().toLowerCase() === 'chatgpt.com';
-    if (isChatGptReferral) result.source = 'chatgpt';
+    const source = normalizeAttributionSource(params.get('utm_source'));
+    if (source) result.source = source;
 
     for (const [property, queryKey] of [
-        ['source', 'utm_source'],
         ['medium', 'utm_medium'],
         ['campaign', 'utm_campaign'],
         ['content', 'utm_content'],
@@ -161,7 +176,7 @@ export function readAttribution(search: string): {
             result[property] = value;
         }
     }
-    if (isChatGptReferral && !params.has('utm_medium')) result.medium = 'referral';
+    if (source === 'chatgpt' && !params.has('utm_medium')) result.medium = 'referral';
     return result;
 }
 

@@ -259,10 +259,10 @@ describe('analytics and observability disclosure contract', () => {
         expect(operations).toMatch(/internal checkout body[^\n]*post-drain/);
     });
 
-    it('documents fail-closed 100% beta Amplitude Session Replay with eight event panels', () => {
+    it('documents fail-closed 100% beta Amplitude Session Replay with the five current charts', () => {
         const operations = source('docs/amplitude-analytics-operations.md');
         const env = source('.env.example');
-        const dashboardSection = operations.match(/## 4\. 대시보드 생성[\s\S]*?(?=## 5\. Live 검증)/)?.[0] ?? '';
+        const dashboardSection = operations.match(/## 4\. 활성 대시보드 운영 계약[\s\S]*?(?=## 5\. Live 검증)/)?.[0] ?? '';
 
         expect(operations).toContain('NEXT_PUBLIC_AMPLITUDE_API_KEY');
         expect(operations).toContain('Supabase UUID');
@@ -329,8 +329,19 @@ describe('analytics and observability disclosure contract', () => {
         expect(env).not.toContain('NEXT_PUBLIC_DEMO_ANALYSIS_ENABLED');
         expect(operations).toContain('닫힌 allowlist');
         expect(operations).toContain('얼리버드 전환 대시보드');
-        expect(dashboardSection.match(/^\d+\. /gm)).toHaveLength(9);
-        expect(operations).toMatch(/이벤트 기반[^\n]*이탈/);
+        expect(dashboardSection.match(/^\d+\. /gm)).toHaveLength(5);
+        for (const chart of [
+            '유입 추이 및 채널',
+            '핵심 UX 퍼널',
+            '전환 시간 분포',
+            '사전 조회 실패',
+            '결제 확인',
+        ]) expect(dashboardSection).toContain(chart);
+        expect(dashboardSection).toContain('2026-08-07 00:00 KST 이후');
+        expect(dashboardSection).toMatch(
+            /landing_viewed[^\n]*preflight_started[^\n]*exclusion_decided[^\n]*precheckout_demo_completed[^\n]*precheckout_plan_gate_reached[^\n]*plan_selected[^\n]*auth_completed[^\n]*checkout_redirected[^\n]*payment_confirmed_viewed/
+        );
+        expect(dashboardSection).toMatch(/플랜 수요[^\n]*결과 이용[^\n]*(삭제|포함하지 않)/);
         expect(operations).toMatch(/Plus[^\n]*대기 신청[^\n]*(만들지|제외)/);
         expect(operations).toMatch(/Comet[^\n]*UI/);
         expect(operations).toMatch(/금지 (속성|프로퍼티)[^\n]*검사/);
