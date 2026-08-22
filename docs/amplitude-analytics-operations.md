@@ -77,13 +77,19 @@ preflight 실패 사유의 원인 확인 결과, 현재 POST 경로는 인증·�
 
 실제 이벤트가 한 건 이상 수신된 뒤, 아래 운영 대시보드가 없을 때만 로그인된 Comet 브라우저의 Amplitude UI에서 Production API key가 연결된 프로젝트를 선택하고 `얼리버드 전환 대시보드`를 만든다. 차트 생성 API를 사용하지 않고 기존 대시보드를 중복 생성하지 않는다. Preview도 같은 프로젝트를 쓴다면 알려진 테스트 Supabase UUID를 user segment에서 제외한다. 이메일이나 전화번호로 테스트 사용자를 구분하지 않는다.
 
-현재 운영 대시보드는 [Amplitude `얼리버드 전환 대시보드`](https://app.amplitude.com/analytics/shiny-disk-989835/dashboard/p7w87cf8)이다. 저장된 전체 차트에서 taxonomy seed user ID `00000000-0000-4000-8000-000000000001`을 제외한다. 운영에서 유지할 정본 인벤토리는 아래 5개다.
+현재 운영 대시보드는 [Amplitude `얼리버드 전환 대시보드`](https://app.amplitude.com/analytics/shiny-disk-989835/dashboard/p7w87cf8)이다. 저장된 전체 차트에서 taxonomy seed user ID `00000000-0000-4000-8000-000000000001`을 제외한다. 아래 정본 5개 차트는 모두 `Asia/Seoul`(KST) 시간대를 사용하고, 해당 시각을 포함하는 동일한 시작일 필터 `2026-08-07 00:00 KST 이후`를 적용한다.
 
 1. **유입 추이 및 채널:** `landing_viewed`의 일별 unique users를 `source`로만 breakdown한다. `medium`이나 campaign을 이 차트의 grouping에 추가하지 않는다.
 2. **핵심 UX 퍼널:** `preflight_succeeded`는 provider/profile 사전 조회가 기술적으로 성공했다는 신호일 뿐, 사용자가 데모 결과를 끝까지 본 visible-result 단계가 아니다. 그 화면 경험의 완료는 `precheckout_demo_completed`로 측정한다. 차트는 unique users, conversion window 7일, 순서 고정으로 `landing_viewed` → `preflight_started` → `exclusion_decided` → `precheckout_demo_completed` → `precheckout_plan_gate_reached` → `plan_selected` → `auth_completed` → `checkout_redirected` → `payment_confirmed_viewed`를 사용한다.
-3. **단계별 이탈:** 핵심 UX 퍼널과 정확히 같은 `landing_viewed` → `preflight_started` → `exclusion_decided` → `precheckout_demo_completed` → `precheckout_plan_gate_reached` → `plan_selected` → `auth_completed` → `checkout_redirected` → `payment_confirmed_viewed`의 아홉 개 이벤트를 같은 순서로 사용하여 단계별 drop-off와 conversion time을 본다.
+3. **전환 시간 분포:** 핵심 UX 퍼널과 정확히 같은 `landing_viewed` → `preflight_started` → `exclusion_decided` → `precheckout_demo_completed` → `precheckout_plan_gate_reached` → `plan_selected` → `auth_completed` → `checkout_redirected` → `payment_confirmed_viewed`의 아홉 개 이벤트를 같은 순서로 사용한다. unique users 기준, 7일 이내 완료 조건에서 metric은 `전환 시간`, visualization은 `분포`로 설정하고 첫 이벤트부터 마지막 이벤트까지 걸린 전환 시간의 중앙값을 표시한다. 총 전환율은 별도 `핵심 UX 퍼널`에서 본다.
 4. **사전 조회 실패:** `preflight_failed` event totals를 일별로 보고 `error_code`로 breakdown한다. unique users가 아닌 실패 사건 수를 측정한다. `preflight_succeeded`는 제외하고, 비공개·지원 범위·플랜/베타 수용량 등을 정상적으로 판정한 `preflight_blocked` business block도 제외한다.
 5. **결제 확인:** `payment_confirmed_viewed` event totals를 일별로 보고 `plan_id`로 breakdown하되, `basic`과 `standard`만 filter한다. unique users나 `amount_krw`를 측정하지 않는다. 이 차트는 결제 확인 화면 조회 관측용이며 revenue ledger가 아니다. 매출 원장은 Supabase다.
+
+### 활성 코호트 시작일 근거
+
+- 익명 preflight의 핵심 구조는 2026-08-05의 `a2cdfd3e…` 커밋에서 들어왔지만, landing/analyze의 잔여 로그인 gate 때문에 당시에는 공개 익명 landing → preflight-before-login 흐름이 완전히 열리지 않았다.
+- 실제 공개 전환은 canonical commit `1bb8051ed6473a36a119574aa75dd61bba557cff`(`fix: allow anonymous landing preflight handoff (#296)`)가 2026-08-06 15:54:57 KST에 반영하면서 이루어졌다.
+- 2026-08-06은 전환 전후가 섞인 부분 일자이고 이후 익명 preflight runtime DB hotfix도 이어졌으므로, 활성 5개 차트의 clean inclusive cohort는 `2026-08-07 00:00 KST 이후`다. 8월 7~8일의 checkout/OAuth 안정화는 로그인 지연 순서를 바꾸지 않았으며, 필요하면 8월 9일 시작을 민감도 분석에만 사용한다.
 
 ### 역사적 대시보드 정리
 
