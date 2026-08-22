@@ -122,7 +122,8 @@ Document exactly these definitions:
 핵심 UX 퍼널: landing_viewed → preflight_started → exclusion_decided →
   precheckout_demo_completed → precheckout_plan_gate_reached → plan_selected →
   auth_completed → checkout_redirected → payment_confirmed_viewed
-단계별 이탈: the same nine ordered events
+전환 시간 분포: the same nine ordered events, unique users completed within
+  seven days, shown as a first-to-final conversion-time distribution with median
 사전 조회 실패: daily preflight_failed event totals grouped by error_code
 결제 확인: daily payment_confirmed_viewed event totals grouped by plan_id,
   filtered to basic and standard
@@ -143,7 +144,7 @@ Commit only the operations document with message `docs: update Amplitude dashboa
 **Files:**
 - Remote project: Amplitude `yeosachin`
 - Dashboard: `얼리버드 전환 대시보드` (`p7w87cf8`)
-- Modify charts: `유입 추이 및 채널`, `핵심 결제 퍼널`, `사전 조회 품질`, `결제 확인`, `단계별 이탈`
+- Modify charts: `유입 추이 및 채널`, `핵심 결제 퍼널`, `사전 조회 품질`, `결제 확인`, `단계별 이탈` (renamed to `전환 시간 분포`)
 - Delete charts: `플랜 수요`, `결과 이용`
 
 - [ ] **Step 1: Confirm the production scope**
@@ -162,9 +163,9 @@ landing_viewed 일별 고유 사용자 수를 source별로 확인합니다. 정�
 
 Rename `핵심 결제 퍼널` to `핵심 UX 퍼널`. Configure the approved nine events in exact order, unique users, completed within seven days. Save a description listing the same order and identifying preview completion and plan-gate entry as visible UX transitions.
 
-- [ ] **Step 4: Update `단계별 이탈`**
+- [ ] **Step 4: Replace `단계별 이탈` with `전환 시간 분포`**
 
-Configure the same nine ordered events and retain its drop-off and conversion-time purpose. Save a description listing the same event order.
+Configure the same nine ordered events, unique users, and completion within seven days. Set the metric to conversion time and the visualization to distribution, display the first-to-final median, and save a description listing the same event order. Keep total conversion in `핵심 UX 퍼널`.
 
 - [ ] **Step 5: Replace `사전 조회 품질`**
 

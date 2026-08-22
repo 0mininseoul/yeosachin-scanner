@@ -55,9 +55,9 @@ Use the current visible journey in this order, completed within seven days and m
 
 `precheckout_demo_completed` represents completion of either the result or fallback preview. `precheckout_plan_gate_reached` represents the explicit transition from the preview into the plan surface. The funnel does not use `preflight_succeeded` as a visible result step because its emission order is backend-driven.
 
-### 단계별 이탈
+### 전환 시간 분포
 
-Use the same nine ordered events as the core UX funnel. Preserve the chart's drop-off and conversion-time purpose so the two funnel charts cannot disagree about the product journey.
+Use the same nine ordered events as the core UX funnel. Configure unique users completed within seven days, use the conversion-time distribution visualization, and show the median time from the first event to the final event. Total conversion remains in the core UX funnel so the two charts have distinct purposes without disagreeing about the product journey.
 
 ### 사전 조회 실패
 
