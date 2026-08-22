@@ -37,7 +37,7 @@ describe('Amplitude funnel helpers', () => {
         expect(relationshipBucket(value)).toBe(expected);
     });
 
-    it('accepts only the closed attribution vocabulary', () => {
+    it('preserves existing direct and closed non-source attribution behavior', () => {
         expect(readAttribution('')).toEqual({ source: 'direct', medium: 'direct' });
         expect(readAttribution('?utm_source=google&utm_medium=organic')).toEqual({
             source: 'google',
@@ -60,10 +60,30 @@ describe('Amplitude funnel helpers', () => {
         expect(readAttribution(
             '?utm_source=person%40example.com&utm_medium=https%3A%2F%2Fevil.test'
             + '&utm_campaign=secret&utm_content=%40raw_target&utm_term=token',
-        )).toEqual({});
+        )).toEqual({ source: 'person@example.com' });
     });
 
-    it('normalizes ChatGPT Search referrals and supplies only a missing medium', () => {
+    it('accepts bounded normalized dynamic sources', () => {
+        expect(readAttribution('?utm_source=New%20Partner')).toEqual({
+            source: 'new partner',
+        });
+        expect(readAttribution('?utm_source=constructor')).toEqual({
+            source: 'constructor',
+        });
+    });
+
+    it.each([
+        ['thread', 'threads'],
+        ['threads.net', 'threads'],
+        ['twitter', 'x'],
+        ['twitter.com', 'x'],
+        ['x.com', 'x'],
+        ['everytime.kr', 'everytime'],
+    ])('normalizes source alias %s to %s', (source, expected) => {
+        expect(readAttribution(`?utm_source=${source}`)).toEqual({ source: expected });
+    });
+
+    it('normalizes ChatGPT referrals and supplies only a missing medium', () => {
         expect(readAttribution('?utm_source=chatgpt.com')).toEqual({
             source: 'chatgpt',
             medium: 'referral',
@@ -76,18 +96,8 @@ describe('Amplitude funnel helpers', () => {
         });
     });
 
-    it('never returns raw or arbitrary attribution values', () => {
-        const attribution = readAttribution(
-            '?utm_source=https%3A%2F%2Fchatgpt.com%2Fshare%2Fsecret'
-            + '&utm_medium=private-referrer&utm_campaign=raw-query'
-            + '&utm_content=person%40example.com&utm_term=token',
-        );
-
-        expect(attribution).toEqual({});
-        expect(Object.keys(attribution)).toEqual([]);
-        expect(JSON.stringify(attribution)).not.toMatch(
-            /https?:|chatgpt\.com|private-referrer|raw-query|person@|token/,
-        );
+    it('drops a normalized source longer than 64 characters', () => {
+        expect(readAttribution(`?utm_source=${'a'.repeat(65)}`)).toEqual({});
     });
 
     it('maps operational failures to the registered error vocabulary', () => {
