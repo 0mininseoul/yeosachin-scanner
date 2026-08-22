@@ -53,7 +53,7 @@ Replay는 설치된 SDK가 지원하는 가장 낮은 기본 수준인 `light`�
 - 분석·결과: `analysis_started`, `analysis_completed`, `analysis_failed`, `result_viewed`
 - 공유: `result_share_initiated`, `result_share_copy_succeeded`, `result_share_handoff_completed`, `result_share_cancelled`, `result_share_failed`, `result_shared_confirmed`, `shared_result_opened`
 
-허용 properties는 `plan_id`, `required_plan_id`, `amount_krw`, `stage`, `status`, `duration_ms`, 닫힌 `error_code`, 구간화한 followers/following 수, 아래 계약을 따르는 UTM source·medium·campaign·content·term, 내부 preflight/order/request UUID, 결과 수, `share_channel`, `share_outcome`, 서버가 정한 `traffic_class`로 제한한다. 공유 링크 유입은 토큰이 아닌 `source=shared` 표식으로만 이어진다. `error_code`의 사전 검사 하위 사유는 `HANDLE_FORMAT_INVALID`, `TARGET_NOT_FOUND`, `TARGET_PRIVATE`, `PLAN_CAPACITY_EXCEEDED`, `EXCLUSION_RULE_VIOLATION`, `PROVIDER_TEMPORARY_FAILURE`를 사용한다. `plan_id`에 `plus`가 존재하는 것은 공통 스키마 호환을 위한 것이며 Plus 대기 신청 전용 분석을 뜻하지 않는다.
+허용 properties는 `plan_id`, `required_plan_id`, `amount_krw`, `stage`, `status`, `duration_ms`, 닫힌 `error_code`, 구간화한 followers/following 수, UTM `source`·`medium`·`campaign`·`content`·`term`, 내부 preflight/order/request UUID, 결과 수, `share_channel`, `share_outcome`, 서버가 정한 `traffic_class`로 제한한다. UTM 속성 중 bounded dynamic 계약은 아래의 `source`에만 적용하며, `medium`·`campaign`·`content`·`term`은 각각 기존의 닫힌 vocabulary를 유지한다. 공유 링크 유입은 토큰이 아닌 `source=shared` 표식으로만 이어진다. `error_code`의 사전 검사 하위 사유는 `HANDLE_FORMAT_INVALID`, `TARGET_NOT_FOUND`, `TARGET_PRIVATE`, `PLAN_CAPACITY_EXCEEDED`, `EXCLUSION_RULE_VIOLATION`, `PROVIDER_TEMPORARY_FAILURE`를 사용한다. `plan_id`에 `plus`가 존재하는 것은 공통 스키마 호환을 위한 것이며 Plus 대기 신청 전용 분석을 뜻하지 않는다.
 
 ### Acquisition `source` 계약
 
@@ -77,7 +77,7 @@ preflight 실패 사유의 원인 확인 결과, 현재 POST 경로는 인증·�
 
 실제 이벤트가 한 건 이상 수신된 뒤, 아래 운영 대시보드가 없을 때만 로그인된 Comet 브라우저의 Amplitude UI에서 Production API key가 연결된 프로젝트를 선택하고 `얼리버드 전환 대시보드`를 만든다. 차트 생성 API를 사용하지 않고 기존 대시보드를 중복 생성하지 않는다. Preview도 같은 프로젝트를 쓴다면 알려진 테스트 Supabase UUID를 user segment에서 제외한다. 이메일이나 전화번호로 테스트 사용자를 구분하지 않는다.
 
-현재 운영 대시보드는 [Amplitude `얼리버드 전환 대시보드`](https://app.amplitude.com/analytics/shiny-disk-989835/dashboard/p7w87cf8)이다. 저장된 전체 차트에서 taxonomy seed user ID `00000000-0000-4000-8000-000000000001`을 제외한다. 활성 인벤토리는 아래 다섯 차트만 유지한다.
+현재 운영 대시보드는 [Amplitude `얼리버드 전환 대시보드`](https://app.amplitude.com/analytics/shiny-disk-989835/dashboard/p7w87cf8)이다. 저장된 전체 차트에서 taxonomy seed user ID `00000000-0000-4000-8000-000000000001`을 제외한다. 운영에서 유지할 정본 인벤토리는 아래 5개다.
 
 1. **유입 추이 및 채널:** `landing_viewed`의 일별 unique users를 `source`로만 breakdown한다. `medium`이나 campaign을 이 차트의 grouping에 추가하지 않는다.
 2. **핵심 UX 퍼널:** `preflight_succeeded`는 provider/profile 사전 조회가 기술적으로 성공했다는 신호일 뿐, 사용자가 데모 결과를 끝까지 본 visible-result 단계가 아니다. 그 화면 경험의 완료는 `precheckout_demo_completed`로 측정한다. 차트는 unique users, conversion window 7일, 순서 고정으로 `landing_viewed` → `preflight_started` → `exclusion_decided` → `precheckout_demo_completed` → `precheckout_plan_gate_reached` → `plan_selected` → `auth_completed` → `checkout_redirected` → `payment_confirmed_viewed`를 사용한다.
@@ -87,7 +87,7 @@ preflight 실패 사유의 원인 확인 결과, 현재 POST 경로는 인증·�
 
 ### 역사적 대시보드 정리
 
-이전 9개 패널 계약과 구형 funnel 순서는 현재 운영 기준이 아니며 위 다섯 차트 계약으로 대체됐다. `플랜 수요`와 `결과 이용`은 삭제된 saved charts이며 활성 인벤토리에 포함하지 않는다. Replay는 대시보드의 대체 지표나 별도 민감 화면 패널이 아니며, 허용 핵심 경로에서 수신된 beta 세션의 문제를 조사할 때만 보조적으로 확인한다. Plus 대기 신청 전용 차트도 만들지 않는다.
+이전 9개 패널 계약과 구형 funnel 순서는 현재 운영 기준이 아니며 위 다섯 차트 계약으로 대체됐다. 삭제 대상 saved charts는 `플랜 수요`와 `결과 이용`이며 정본 인벤토리에 포함하지 않는다. Replay는 대시보드의 대체 지표나 별도 민감 화면 패널이 아니며, 허용 핵심 경로에서 수신된 beta 세션의 문제를 조사할 때만 보조적으로 확인한다. Plus 대기 신청 전용 차트도 만들지 않는다.
 
 ## 5. Live 검증
 
