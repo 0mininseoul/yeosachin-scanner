@@ -1887,7 +1887,7 @@ describe('Amplitude analytics adapter', () => {
         '01012345678',
         'person@example.com',
         'https://example.com/private',
-    ])('rejects adversarial string %j under every string property catalog', async (value) => {
+    ])('keeps bounded source %j while rejecting it under closed property catalogs', async (value) => {
         enableBrowser();
         const analytics = await loadAnalytics();
         await analytics.initAmplitude(null);
@@ -1933,7 +1933,7 @@ describe('Amplitude analytics adapter', () => {
         } as never);
 
         expect(amplitudeMocks.track.mock.calls).toEqual([
-            ['landing_viewed', {}],
+            ['landing_viewed', { source: value.toLowerCase() }],
             ['auth_started', {}],
             ['preflight_succeeded', {}],
             ['preflight_failed', { error_code: 'UNKNOWN' }],
@@ -1942,7 +1942,7 @@ describe('Amplitude analytics adapter', () => {
             ['result_shared', {}],
             ['analysis_duration_estimate_shown', {}],
         ]);
-        expect(JSON.stringify(amplitudeMocks.track.mock.calls)).not.toContain(value);
+        expect(JSON.stringify(amplitudeMocks.track.mock.calls.slice(1))).not.toContain(value);
     });
 
     it('accepts only registered product and lifecycle values', async () => {
@@ -2017,7 +2017,26 @@ describe('Amplitude analytics adapter', () => {
         ]);
     });
 
-    it('accepts normalized ChatGPT referral attribution but rejects its raw source', async () => {
+    it('accepts bounded dynamic sources and drops overlong sources', async () => {
+        enableBrowser();
+        const analytics = await loadAnalytics();
+        await analytics.initAmplitude(null);
+        analytics.markAnalyticsIdentityReady();
+
+        analytics.trackEvent(analytics.EVENTS.LANDING_VIEWED, {
+            source: 'new partner',
+        });
+        analytics.trackEvent(analytics.EVENTS.LANDING_VIEWED, {
+            source: 'a'.repeat(65),
+        });
+
+        expect(amplitudeMocks.track.mock.calls).toEqual([
+            ['landing_viewed', { source: 'new partner' }],
+            ['landing_viewed', {}],
+        ]);
+    });
+
+    it('normalizes ChatGPT source aliases and strips unapproved raw fields', async () => {
         enableBrowser();
         const analytics = await loadAnalytics();
         await analytics.initAmplitude(null);
@@ -2041,6 +2060,7 @@ describe('Amplitude analytics adapter', () => {
                 medium: 'referral',
             }],
             ['landing_viewed', {
+                source: 'chatgpt',
                 medium: 'referral',
             }],
         ]);
