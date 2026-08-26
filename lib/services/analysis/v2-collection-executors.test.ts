@@ -483,7 +483,12 @@ function inMemoryProfileStore(initial: AnalysisV2ProfileFetchResume | null) {
         checkpointRepair: vi.fn(async (input: {
             results: readonly AnalysisV2ProfileAttemptResultInput[];
         }) => {
-            if (!current || current.fallbackCapturedAt === null) {
+            const directApify = current
+                && current.primaryResults.length > 0
+                && current.primaryResults.every(result => result.outcome.source === 'apify')
+                && current.fallbackResults.length === 0
+                && current.fallbackCapturedAt === null;
+            if (!current || (current.fallbackCapturedAt === null && !directApify)) {
                 throw new Error('ANALYSIS_V2_PROFILE_CHECKPOINT_NOT_READY');
             }
             const results = input.results as AnalysisV2ProfileFetchResume['repairResults'];
@@ -2659,6 +2664,140 @@ describe('analysis V2 concrete collection executors', () => {
         expect(providers.bindAdapterCheckpoint).toHaveBeenCalledWith(
             expect.objectContaining({ credentialSlot: 'secondary' })
         );
+    });
+
+    it('replays an incomplete ordinary Apify batch through one same-provider repair on secondary', async () => {
+        const usernames = ['alice', 'bob'];
+        const topology = createAnalysisV2CollectionTopology('profiles', usernames);
+        const profileStore = inMemoryProfileStore(null);
+        const providers = providerStore();
+        const replayBind = async (input: AnalysisV2ProviderRunReservationInput) => {
+            const stored = storedRun(input);
+            return {
+                stored,
+                checkpoint: {
+                    logicalProvider: stored.logicalProvider,
+                    actorId: stored.actorId,
+                    credentialSlot: stored.credentialSlot,
+                    maxChargeUsd: stored.maxChargeUsd,
+                    resumeRunId: stored.runId!,
+                },
+            };
+        };
+        providers.bindAdapterCheckpoint.mockImplementation(
+            replayBind as unknown as typeof providers.bindAdapterCheckpoint
+        );
+        const primary = [
+            success('alice', 'apify'),
+            incompleteFailure('bob', 'apify'),
+        ] as ProfileAttemptResult[];
+        const directFetcher = vi.fn(async (
+            requested: readonly string[],
+            options: Parameters<typeof import('@/lib/services/instagram/scraper').getProfilesBatchV2>[1]
+        ) => {
+            expect(options).toMatchObject({
+                freshApifyOnly: true,
+                allowApifyFallback: false,
+                providerRun: { credentialSlot: 'secondary' },
+            });
+            await options.persistAttemptOutcomes({
+                attempt: 'fresh_apify',
+                source: 'apify',
+                requestedUsernames: requested,
+                results: primary,
+            });
+            return {
+                results: primary,
+                profiles: [profile('alice')],
+                primaryResults: primary,
+                fallbackResults: [],
+                frozenUnresolvedUsernames: ['bob'],
+            };
+        });
+        const runProfileRepair = repairRunner(repairSuccess);
+        const executor = createAnalysisV2ProfileFetchExecutor({
+            requestContextStore: contextStore(requestContext({
+                providerExecutionPolicy: null,
+            })),
+            profileCheckpointStore: profileStore.store,
+            providerRunStore: providers.value,
+            evidenceStore: relationshipEvidence(usernames),
+            getProfilesBatchV2: directFetcher as unknown as typeof import('@/lib/services/instagram/scraper').getProfilesBatchV2,
+            runProfileRepair,
+            env: {
+                ANALYSIS_V2_INSTAGRAM_ROUTE: 'apify_v1',
+                ANALYSIS_V2_APIFY_API_TOKEN_SLOT: 'secondary',
+                SELFHOSTED_AUTH_ENABLED: 'true',
+                SCRAPER_PROFILE: 'selfhosted',
+                SCRAPER_PROFILES_BATCH: 'selfhosted',
+                SCRAPER_FOLLOWERS: 'selfhosted_auth',
+                SCRAPER_FOLLOWING: 'apify',
+                SCRAPER_LIKERS: 'selfhosted_auth',
+                SCRAPER_COMMENTS: 'apify',
+            },
+        });
+        const stage = stageContext(
+            'profile_fetch',
+            state({ relationships: relationshipManifest(topology) }),
+            0
+        );
+
+        await expect(executor(stage)).resolves.toMatchObject({
+            checkpoint: { manifest: { itemCount: 2 } },
+        });
+        await expect(executor(stage)).resolves.toMatchObject({
+            checkpoint: { manifest: { itemCount: 2 } },
+        });
+
+        expect(directFetcher).toHaveBeenCalledOnce();
+        expect(runProfileRepair).toHaveBeenCalledOnce();
+        expect(runProfileRepair.mock.calls[0]![0].usernames).toEqual(['bob']);
+        expect(profileStore.store.checkpointFreshApify).toHaveBeenCalledOnce();
+        expect(profileStore.store.checkpointRepair).toHaveBeenCalledOnce();
+        expect(providers.bindAdapterCheckpoint).toHaveBeenCalledTimes(3);
+        expect(providers.bindAdapterCheckpoint.mock.calls.map(([input]) => input)).toEqual([
+            expect.objectContaining({
+                operationKey: expect.stringMatching(/^profile-fallback:/),
+                credentialSlot: 'secondary',
+            }),
+            expect.objectContaining({
+                operationKey: expect.stringMatching(/^profile-repair:/),
+                credentialSlot: 'secondary',
+            }),
+            expect.objectContaining({
+                operationKey: expect.stringMatching(/^profile-fallback:/),
+                credentialSlot: 'secondary',
+            }),
+        ]);
+    });
+
+    it('rejects a foreign fallback checkpoint before ordinary Apify provider work', async () => {
+        const usernames = ['alice', 'bob'];
+        const topology = createAnalysisV2CollectionTopology('profiles', usernames);
+        const providers = providerStore();
+        const directFetcher = vi.fn();
+        const executor = createAnalysisV2ProfileFetchExecutor({
+            requestContextStore: contextStore(requestContext()),
+            profileCheckpointStore: inMemoryProfileStore({
+                ...completedFallbackResume(usernames, [success('bob', 'apify')]),
+                jobKey: 'track:profiles:batch:0',
+            }).store,
+            providerRunStore: providers.value,
+            evidenceStore: relationshipEvidence(usernames),
+            getProfilesBatchV2: directFetcher,
+            env: {
+                ANALYSIS_V2_INSTAGRAM_ROUTE: 'apify_v1',
+                ANALYSIS_V2_APIFY_API_TOKEN_SLOT: 'secondary',
+            },
+        });
+
+        await expect(executor(stageContext(
+            'profile_fetch',
+            state({ relationships: relationshipManifest(topology) }),
+            0
+        ))).rejects.toThrow('FRESH_PROVENANCE_PROFILE_CHECKPOINT_UNPROVEN');
+        expect(directFetcher).not.toHaveBeenCalled();
+        expect(providers.bindAdapterCheckpoint).not.toHaveBeenCalled();
     });
 
     it('persists all primary outcomes before binding and freezes exactly unresolved fallback input', async () => {

@@ -967,15 +967,21 @@ function selfHostedAuthProfileIdentity(
     });
 }
 
-function isFreshApifyProfileResume(
+function isDirectApifyProfileResume(
     resume: AnalysisV2ProfileFetchResume,
+    allowRepair: boolean,
 ): boolean {
+    const hasOnlyApifyRepairResults = resume.repairResults.every(
+        result => result.outcome.source === 'apify'
+    );
+    const hasNoRepair = resume.repairResults.length === 0
+        && resume.repairCapturedAt === null;
     return resume.primaryResults.length > 0
         && resume.primaryResults.every(result => result.outcome.source === 'apify')
         && resume.fallbackResults.length === 0
         && resume.fallbackCapturedAt === null
-        && resume.repairResults.length === 0
-        && resume.repairCapturedAt === null;
+        && hasOnlyApifyRepairResults
+        && (allowRepair || hasNoRepair);
 }
 
 function requiresUnauthorizedFreshProfileRepair(
@@ -1005,12 +1011,12 @@ async function durableFreshApifyProfiles(input: {
     } = input;
     assertFreshRevenueCollectionRuntime(request, dependencies);
     const identity = profileIdentity(claim);
-    // Inspect a retained strict checkpoint before binding a provider row. A
-    // profile-repair source is deliberately outside the fresh operation
-    // family, so a replay that would enter that path must stop before any
-    // provider binding or external boundary.
+    const allowRepair = !isRevenueCostLedgerRequest(request);
+    // Inspect a retained direct-Apify checkpoint before binding a provider
+    // row. Strict revenue requests reject repair state; ordinary production
+    // requests may resume same-provider repair state.
     const resume = await dependencies.profileCheckpointStore.load(identity);
-    if (resume && !isFreshApifyProfileResume(resume)) {
+    if (resume && !isDirectApifyProfileResume(resume, allowRepair)) {
         throw new Error('FRESH_PROVENANCE_PROFILE_CHECKPOINT_UNPROVEN');
     }
     if (resume && requiresUnauthorizedFreshProfileRepair(resume, usernames)) {
@@ -1073,7 +1079,7 @@ async function durableFreshApifyProfiles(input: {
     }
 
     const stored = await dependencies.profileCheckpointStore.load(identity);
-    if (!stored || !isFreshApifyProfileResume(stored)) {
+    if (!stored || !isDirectApifyProfileResume(stored, allowRepair)) {
         throw new Error('FRESH_PROVENANCE_PROFILE_CHECKPOINT_MISSING');
     }
     return stored;
