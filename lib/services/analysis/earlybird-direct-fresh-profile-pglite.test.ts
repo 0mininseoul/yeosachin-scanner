@@ -26,6 +26,33 @@ const BATCH_PROVIDER_HASH = 'c'.repeat(64);
 const TARGET_OPERATION = `target-profile:${'d'.repeat(64)}`;
 const BATCH_OPERATION = `profile-fallback:${'e'.repeat(64)}`;
 const TARGET = 'target.account';
+const PLAN_CARDS = JSON.stringify({
+    basic: {
+        launchStatus: 'production',
+        relationshipCapacity: { followers: 400, following: 400 },
+        detailedMutualLimit: 300,
+        selectionState: 'required',
+        unavailableReason: null,
+    },
+    standard: {
+        launchStatus: 'production',
+        relationshipCapacity: { followers: 800, following: 800 },
+        detailedMutualLimit: 600,
+        selectionState: 'available_upgrade',
+        unavailableReason: null,
+    },
+    plus: {
+        launchStatus: 'production',
+        relationshipCapacity: { followers: 1200, following: 1200 },
+        detailedMutualLimit: 900,
+        selectionState: 'available_upgrade',
+        unavailableReason: null,
+    },
+});
+const BASIC_SCOPE = JSON.stringify({
+    relationshipCapacity: { followers: 400, following: 400 },
+    detailedMutualLimit: 300,
+});
 
 const profile = (username: string) => ({
     username,
@@ -70,7 +97,9 @@ CREATE TABLE public.analysis_requests (
     plan_access_mode_snapshot TEXT,
     analysis_entry_channel TEXT,
     test_entitlement_jti_hash TEXT,
-    provider_execution_policy_id UUID
+    provider_execution_policy_id UUID,
+    plan_cards_snapshot JSONB,
+    analysis_scope_snapshot JSONB
 );
 CREATE TABLE public.analysis_preflights (
     id UUID PRIMARY KEY,
@@ -91,7 +120,8 @@ CREATE TABLE public.analysis_preflights (
     admission_capacity_required_plan_id TEXT,
     access_mode TEXT,
     analysis_entry_channel TEXT,
-    order_scoped_apify_credential_slot TEXT
+    order_scoped_apify_credential_slot TEXT,
+    plan_cards_snapshot JSONB
 );
 CREATE TABLE public.earlybird_orders (
     id UUID PRIMARY KEY,
@@ -231,6 +261,18 @@ RETURNS BOOLEAN LANGUAGE sql IMMUTABLE SET search_path = '' AS $$
               OR item.value->>'source' IS DISTINCT FROM 'apify'
        );
 $$;
+CREATE OR REPLACE FUNCTION public.analysis_v2_valid_plan_cards_snapshot(JSONB)
+RETURNS BOOLEAN LANGUAGE sql IMMUTABLE SET search_path = '' AS $$
+    SELECT $1 IS NOT NULL
+       AND jsonb_typeof($1) = 'object'
+       AND $1 ?& ARRAY['basic', 'standard', 'plus'];
+$$;
+CREATE OR REPLACE FUNCTION public.analysis_v2_valid_scope_snapshot(JSONB)
+RETURNS BOOLEAN LANGUAGE sql IMMUTABLE SET search_path = '' AS $$
+    SELECT $1 IS NOT NULL
+       AND jsonb_typeof($1) = 'object'
+       AND $1 ?& ARRAY['relationshipCapacity', 'detailedMutualLimit'];
+$$;
 CREATE OR REPLACE FUNCTION public.analysis_v2_profile_checkpoint_snapshot(UUID, TEXT)
 RETURNS JSONB LANGUAGE sql STABLE SECURITY DEFINER SET search_path = '' AS $$
     SELECT jsonb_build_object(
@@ -328,17 +370,20 @@ beforeEach(async () => {
             id,user_id,status,pipeline_version,target_instagram_id,preflight_id,
             capacity_required_plan_id_snapshot,required_plan_id_snapshot,
             excluded_instagram_id,exclusion_decision_snapshot,selected_plan_id_snapshot,
-            plan_access_mode_snapshot,analysis_entry_channel,test_entitlement_jti_hash)
+            plan_access_mode_snapshot,analysis_entry_channel,test_entitlement_jti_hash,
+            plan_cards_snapshot,analysis_scope_snapshot)
         VALUES ('${REQUEST_ID}','${USER_ID}','processing','v2','${TARGET}','${PREFLIGHT_ID}',
-            'basic','basic',NULL,'none','basic','production','standard',NULL);
+            'basic','basic',NULL,'none','basic','production','standard',NULL,
+            '${PLAN_CARDS}'::jsonb,'${BASIC_SCOPE}'::jsonb);
         INSERT INTO public.analysis_preflights(
             id,user_id,status,consumed_request_id,target_instagram_id,target_followers_count,
             target_following_count,admission_target_followers_count,admission_target_following_count,
             excluded_instagram_id,exclusion_decision,required_plan_id,capacity_required_plan_id,
             admission_selected_plan_id,admission_required_plan_id,admission_capacity_required_plan_id,access_mode,
-            analysis_entry_channel,order_scoped_apify_credential_slot)
+            analysis_entry_channel,order_scoped_apify_credential_slot,plan_cards_snapshot)
         VALUES ('${PREFLIGHT_ID}','${USER_ID}','consumed','${REQUEST_ID}','${TARGET}',10,10,10,10,
-            NULL,'none','basic','basic','basic','basic','basic','production','standard','secondary');
+            NULL,'none','basic','basic','basic','basic','basic','production','standard','secondary',
+            '${PLAN_CARDS}'::jsonb);
         INSERT INTO public.earlybird_orders(
             id,user_id,preflight_id,target_instagram_id,target_followers_count,target_following_count,
             exclusion_decision,excluded_instagram_id,
@@ -413,6 +458,173 @@ describe('paid Earlybird direct fresh-Apify checkpoint RPC', () => {
             [REQUEST_ID, BATCH_JOB, 'missing.account', ['missing.account']],
         );
         expect(terminal.rows[0]?.attempt).toBe('fresh_apify');
+    });
+
+    it('accepts bounded recovered count drift independently from the preflight snapshot', async () => {
+        await db.query(
+            `UPDATE public.earlybird_orders
+             SET target_followers_count = 120, target_following_count = 140
+             WHERE id = $1`, [ORDER_ID],
+        );
+        await db.query(
+            `UPDATE public.analysis_preflights
+             SET target_followers_count = 200,
+                 target_following_count = 220,
+                 admission_target_followers_count = 200,
+                 admission_target_following_count = 220
+             WHERE id = $1`, [PREFLIGHT_ID],
+        );
+
+        const persisted = await checkpoint({
+            jobKey: BATCH_JOB,
+            operationKey: BATCH_OPERATION,
+            providerInputHash: BATCH_PROVIDER_HASH,
+            requestedUsernames: [TARGET, 'missing.account'],
+            outcomes: [outcome(TARGET), outcome('missing.account', 'failed')],
+        });
+        const replay = await checkpoint({
+            jobKey: BATCH_JOB,
+            operationKey: BATCH_OPERATION,
+            providerInputHash: BATCH_PROVIDER_HASH,
+            requestedUsernames: [TARGET, 'missing.account'],
+            outcomes: [outcome(TARGET), outcome('missing.account', 'failed')],
+        });
+        expect(replay.rows).toEqual(persisted.rows);
+    });
+
+    it('accepts a Standard available upgrade while required and capacity lineage remains Basic', async () => {
+        const standardScope = JSON.stringify({
+            relationshipCapacity: { followers: 800, following: 800 },
+            detailedMutualLimit: 600,
+        });
+        await db.query(
+            `UPDATE public.earlybird_orders
+             SET plan_id = 'standard', expected_groble_product_id = 'groble-standard',
+                 actual_groble_product_id = 'groble-standard', expected_amount_krw = 2000,
+                 actual_amount_krw = 2000, target_followers_count = 120,
+                 target_following_count = 140
+             WHERE id = $1`, [ORDER_ID],
+        );
+        await db.query(
+            `UPDATE public.analysis_preflights
+             SET target_followers_count = 200,
+                 target_following_count = 220,
+                 admission_target_followers_count = 200,
+                 admission_target_following_count = 220,
+                 admission_selected_plan_id = 'standard'
+             WHERE id = $1`, [PREFLIGHT_ID],
+        );
+        await db.query(
+            `UPDATE public.analysis_requests
+             SET selected_plan_id_snapshot = 'standard', analysis_scope_snapshot = $1
+             WHERE id = $2`, [standardScope, REQUEST_ID],
+        );
+
+        const persisted = await checkpoint({
+            jobKey: TARGET_JOB,
+            operationKey: TARGET_OPERATION,
+            providerInputHash: TARGET_PROVIDER_HASH,
+            requestedUsernames: [TARGET],
+            outcomes: [outcome(TARGET)],
+        });
+        const replay = await checkpoint({
+            jobKey: TARGET_JOB,
+            operationKey: TARGET_OPERATION,
+            providerInputHash: TARGET_PROVIDER_HASH,
+            requestedUsernames: [TARGET],
+            outcomes: [outcome(TARGET)],
+        });
+        expect(replay.rows).toEqual(persisted.rows);
+    });
+
+    it('rejects order or current preflight counts above the selected plan capacity', async () => {
+        await db.query(
+            `UPDATE public.earlybird_orders SET target_followers_count = 401
+             WHERE id = $1`, [ORDER_ID],
+        );
+        await expect(checkpoint({
+            jobKey: TARGET_JOB,
+            operationKey: TARGET_OPERATION,
+            providerInputHash: TARGET_PROVIDER_HASH,
+            requestedUsernames: [TARGET],
+            outcomes: [outcome(TARGET)],
+        })).rejects.toThrow();
+
+        await db.query(
+            `UPDATE public.earlybird_orders SET target_followers_count = 10
+             WHERE id = $1`, [ORDER_ID],
+        );
+        await db.query(
+            `UPDATE public.analysis_preflights
+             SET target_followers_count = 401, admission_target_followers_count = 401
+             WHERE id = $1`, [PREFLIGHT_ID],
+        );
+        await expect(checkpoint({
+            jobKey: TARGET_JOB,
+            operationKey: TARGET_OPERATION,
+            providerInputHash: TARGET_PROVIDER_HASH,
+            requestedUsernames: [TARGET],
+            outcomes: [outcome(TARGET)],
+        })).rejects.toThrow();
+    });
+
+    it('rejects selected-plan or independent required/capacity lineage drift', async () => {
+        await db.query(
+            `UPDATE public.earlybird_orders SET plan_id = 'standard'
+             WHERE id = $1`, [ORDER_ID],
+        );
+        await db.query(
+            `UPDATE public.analysis_preflights SET admission_selected_plan_id = 'standard'
+             WHERE id = $1`, [PREFLIGHT_ID],
+        );
+        await db.query(
+            `UPDATE public.analysis_requests SET selected_plan_id_snapshot = 'standard'
+             WHERE id = $1`, [REQUEST_ID],
+        );
+
+        await db.query(
+            `UPDATE public.analysis_requests SET selected_plan_id_snapshot = 'basic'
+             WHERE id = $1`, [REQUEST_ID],
+        );
+        await expect(checkpoint({
+            jobKey: TARGET_JOB,
+            operationKey: TARGET_OPERATION,
+            providerInputHash: TARGET_PROVIDER_HASH,
+            requestedUsernames: [TARGET],
+            outcomes: [outcome(TARGET)],
+        })).rejects.toThrow();
+        await db.query(
+            `UPDATE public.analysis_requests SET selected_plan_id_snapshot = 'standard'
+             WHERE id = $1`, [REQUEST_ID],
+        );
+
+        await db.query(
+            `UPDATE public.analysis_requests SET required_plan_id_snapshot = 'standard'
+             WHERE id = $1`, [REQUEST_ID],
+        );
+        await expect(checkpoint({
+            jobKey: TARGET_JOB,
+            operationKey: TARGET_OPERATION,
+            providerInputHash: TARGET_PROVIDER_HASH,
+            requestedUsernames: [TARGET],
+            outcomes: [outcome(TARGET)],
+        })).rejects.toThrow();
+        await db.query(
+            `UPDATE public.analysis_requests SET required_plan_id_snapshot = 'basic'
+             WHERE id = $1`, [REQUEST_ID],
+        );
+
+        await db.query(
+            `UPDATE public.analysis_requests SET capacity_required_plan_id_snapshot = 'standard'
+             WHERE id = $1`, [REQUEST_ID],
+        );
+        await expect(checkpoint({
+            jobKey: TARGET_JOB,
+            operationKey: TARGET_OPERATION,
+            providerInputHash: TARGET_PROVIDER_HASH,
+            requestedUsernames: [TARGET],
+            outcomes: [outcome(TARGET)],
+        })).rejects.toThrow();
     });
 
     it('rejects order and preflight slot drift before writing', async () => {

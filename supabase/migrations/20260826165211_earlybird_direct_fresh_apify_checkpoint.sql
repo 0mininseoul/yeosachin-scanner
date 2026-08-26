@@ -157,6 +157,8 @@ DECLARE
     v_job public.analysis_pipeline_jobs%ROWTYPE;
     v_provider public.analysis_v2_provider_runs%ROWTYPE;
     v_batch public.analysis_v2_profile_fetch_batches%ROWTYPE;
+    v_selected_card JSONB;
+    v_expected_scope JSONB;
     v_unresolved TEXT[];
     v_payload_hash TEXT;
     v_now TIMESTAMP WITH TIME ZONE;
@@ -276,22 +278,47 @@ BEGIN
        OR v_preflight.status IS DISTINCT FROM 'consumed'
        OR v_order.target_instagram_id IS DISTINCT FROM v_preflight.target_instagram_id
        OR v_order.target_instagram_id IS DISTINCT FROM v_request.target_instagram_id
-       OR v_order.target_followers_count IS DISTINCT FROM v_preflight.target_followers_count
-       OR v_order.target_following_count IS DISTINCT FROM v_preflight.target_following_count
        OR v_preflight.admission_target_followers_count IS DISTINCT FROM v_preflight.target_followers_count
        OR v_preflight.admission_target_following_count IS DISTINCT FROM v_preflight.target_following_count
        OR v_order.excluded_instagram_id IS DISTINCT FROM v_preflight.excluded_instagram_id
        OR v_order.excluded_instagram_id IS DISTINCT FROM v_request.excluded_instagram_id
        OR v_order.exclusion_decision IS DISTINCT FROM v_preflight.exclusion_decision
        OR v_order.exclusion_decision IS DISTINCT FROM v_request.exclusion_decision_snapshot
-       OR v_order.plan_id IS DISTINCT FROM v_preflight.required_plan_id
        OR v_preflight.admission_required_plan_id IS DISTINCT FROM v_preflight.required_plan_id
        OR v_preflight.admission_capacity_required_plan_id IS DISTINCT FROM v_preflight.capacity_required_plan_id
        OR v_order.plan_id IS DISTINCT FROM v_preflight.admission_selected_plan_id
-       OR v_order.plan_id IS DISTINCT FROM v_preflight.capacity_required_plan_id
+       OR v_preflight.admission_selected_plan_id IS DISTINCT FROM v_request.selected_plan_id_snapshot
        OR v_preflight.capacity_required_plan_id IS DISTINCT FROM v_request.capacity_required_plan_id_snapshot
        OR v_preflight.required_plan_id IS DISTINCT FROM v_request.required_plan_id_snapshot
        OR v_order.plan_id IS DISTINCT FROM v_request.selected_plan_id_snapshot
+       OR v_preflight.required_plan_id IS NULL
+       OR v_preflight.required_plan_id NOT IN ('basic', 'standard', 'plus')
+       OR v_preflight.capacity_required_plan_id IS NULL
+       OR v_preflight.capacity_required_plan_id NOT IN ('basic', 'standard', 'plus')
+       OR v_preflight.admission_required_plan_id IS NULL
+       OR v_preflight.admission_required_plan_id NOT IN ('basic', 'standard', 'plus')
+       OR v_preflight.admission_capacity_required_plan_id IS NULL
+       OR v_preflight.admission_capacity_required_plan_id NOT IN ('basic', 'standard', 'plus')
+       OR v_request.required_plan_id_snapshot IS NULL
+       OR v_request.required_plan_id_snapshot NOT IN ('basic', 'standard', 'plus')
+       OR v_request.capacity_required_plan_id_snapshot IS NULL
+       OR v_request.capacity_required_plan_id_snapshot NOT IN ('basic', 'standard', 'plus')
+       OR v_request.selected_plan_id_snapshot IS NULL
+       OR v_request.selected_plan_id_snapshot NOT IN ('basic', 'standard')
+       OR (
+            CASE v_preflight.required_plan_id
+                WHEN 'basic' THEN 1 WHEN 'standard' THEN 2 ELSE 3
+            END < CASE v_preflight.capacity_required_plan_id
+                WHEN 'basic' THEN 1 WHEN 'standard' THEN 2 ELSE 3
+            END
+       )
+       OR (
+            CASE v_order.plan_id
+                WHEN 'basic' THEN 1 WHEN 'standard' THEN 2 ELSE 3
+            END < CASE v_preflight.required_plan_id
+                WHEN 'basic' THEN 1 WHEN 'standard' THEN 2 ELSE 3
+            END
+       )
        OR v_request.preflight_id IS DISTINCT FROM v_preflight.id
        OR v_request.pipeline_version IS DISTINCT FROM 'v2'
        OR v_request.status IS DISTINCT FROM 'processing'
@@ -317,6 +344,45 @@ BEGIN
             FROM public.analysis_revenue_run_ledgers AS ledger
             WHERE ledger.request_id = p_request_id
        ) THEN
+        RAISE EXCEPTION USING
+            MESSAGE = 'ANALYSIS_V2_PROFILE_CHECKPOINT_FENCE_MISMATCH',
+            ERRCODE = 'P0001';
+    END IF;
+
+    v_selected_card := v_preflight.plan_cards_snapshot->v_order.plan_id;
+    v_expected_scope := pg_catalog.jsonb_build_object(
+        'relationshipCapacity', v_selected_card->'relationshipCapacity',
+        'detailedMutualLimit', v_selected_card->'detailedMutualLimit'
+    );
+    IF v_preflight.plan_cards_snapshot IS NULL
+       OR NOT public.analysis_v2_valid_plan_cards_snapshot(
+            v_preflight.plan_cards_snapshot
+       )
+       OR v_selected_card IS NULL
+       OR v_selected_card->>'launchStatus' IS DISTINCT FROM 'production'
+       OR v_selected_card->>'selectionState' NOT IN ('required', 'available_upgrade')
+       OR COALESCE(v_selected_card->'relationshipCapacity'->>'followers', '')
+            !~ '^[0-9]+$'
+       OR COALESCE(v_selected_card->'relationshipCapacity'->>'following', '')
+            !~ '^[0-9]+$'
+       OR v_order.target_followers_count IS NULL
+       OR v_order.target_followers_count < 0
+       OR v_order.target_following_count IS NULL
+       OR v_order.target_following_count < 0
+       OR v_preflight.target_followers_count IS NULL
+       OR v_preflight.target_followers_count < 0
+       OR v_preflight.target_following_count IS NULL
+       OR v_preflight.target_following_count < 0
+       OR v_order.target_followers_count
+            > (v_selected_card->'relationshipCapacity'->>'followers')::INTEGER
+       OR v_order.target_following_count
+            > (v_selected_card->'relationshipCapacity'->>'following')::INTEGER
+       OR v_preflight.target_followers_count
+            > (v_selected_card->'relationshipCapacity'->>'followers')::INTEGER
+       OR v_preflight.target_following_count
+            > (v_selected_card->'relationshipCapacity'->>'following')::INTEGER
+       OR NOT public.analysis_v2_valid_scope_snapshot(v_expected_scope)
+       OR v_request.analysis_scope_snapshot IS DISTINCT FROM v_expected_scope THEN
         RAISE EXCEPTION USING
             MESSAGE = 'ANALYSIS_V2_PROFILE_CHECKPOINT_FENCE_MISMATCH',
             ERRCODE = 'P0001';

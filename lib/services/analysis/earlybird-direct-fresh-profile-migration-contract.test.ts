@@ -62,10 +62,24 @@ describe('Earlybird direct fresh-Apify checkpoint migration contract', () => {
             'v_order.actual_amount_krw < 0',
             'v_order.actual_amount_krw > v_order.expected_amount_krw',
             'v_order.actual_groble_product_id IS DISTINCT FROM v_order.expected_groble_product_id',
-            'v_order.target_followers_count IS DISTINCT FROM v_preflight.target_followers_count',
-            'v_order.target_following_count IS DISTINCT FROM v_preflight.target_following_count',
-            'v_preflight.capacity_required_plan_id IS DISTINCT FROM v_request.capacity_required_plan_id_snapshot',
+            'v_order.plan_id IS DISTINCT FROM v_preflight.admission_selected_plan_id',
+            'v_preflight.admission_selected_plan_id IS DISTINCT FROM v_request.selected_plan_id_snapshot',
+            'v_preflight.admission_required_plan_id IS DISTINCT FROM v_preflight.required_plan_id',
             'v_preflight.required_plan_id IS DISTINCT FROM v_request.required_plan_id_snapshot',
+            'v_preflight.admission_capacity_required_plan_id IS DISTINCT FROM v_preflight.capacity_required_plan_id',
+            'v_preflight.capacity_required_plan_id IS DISTINCT FROM v_request.capacity_required_plan_id_snapshot',
+            'v_selected_card := v_preflight.plan_cards_snapshot->v_order.plan_id',
+            'public.analysis_v2_valid_plan_cards_snapshot',
+            'v_order.target_followers_count IS NULL',
+            'v_order.target_following_count IS NULL',
+            'v_preflight.target_followers_count IS NULL',
+            'v_preflight.target_following_count IS NULL',
+            'v_order.target_followers_count\n            > (v_selected_card->\'relationshipCapacity\'->>\'followers\')::INTEGER',
+            'v_order.target_following_count\n            > (v_selected_card->\'relationshipCapacity\'->>\'following\')::INTEGER',
+            'v_preflight.target_followers_count\n            > (v_selected_card->\'relationshipCapacity\'->>\'followers\')::INTEGER',
+            'v_preflight.target_following_count\n            > (v_selected_card->\'relationshipCapacity\'->>\'following\')::INTEGER',
+            'v_request.analysis_scope_snapshot IS DISTINCT FROM v_expected_scope',
+            'public.analysis_v2_valid_scope_snapshot',
             "v_preflight.analysis_entry_channel IS DISTINCT FROM 'standard'",
             "v_request.analysis_entry_channel IS DISTINCT FROM 'standard'",
             'v_request.test_entitlement_jti_hash IS NOT NULL',
@@ -77,6 +91,18 @@ describe('Earlybird direct fresh-Apify checkpoint migration contract', () => {
         ]) {
             expect(rpc, fragment).toContain(fragment);
         }
+        expect(rpc).not.toContain(
+            'v_order.target_followers_count IS DISTINCT FROM v_preflight.target_followers_count'
+        );
+        expect(rpc).not.toContain(
+            'v_order.target_following_count IS DISTINCT FROM v_preflight.target_following_count'
+        );
+        expect(rpc).not.toContain(
+            'v_order.plan_id IS DISTINCT FROM v_preflight.required_plan_id'
+        );
+        expect(rpc).not.toContain(
+            'v_order.plan_id IS DISTINCT FROM v_preflight.capacity_required_plan_id'
+        );
     });
 
     it('pins target and profile-batch job/provider identities and rejects adoption or drift', () => {
