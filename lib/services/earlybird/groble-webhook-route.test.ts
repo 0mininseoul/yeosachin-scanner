@@ -4,7 +4,8 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 const mocks = vi.hoisted(() => ({
     after: vi.fn(),
-    admitAndAdvanceFulfillment: vi.fn(),
+    admitFulfillment: vi.fn(),
+    advanceAdmittedFulfillment: vi.fn(),
     deliverPayment: vi.fn(),
     rpc: vi.fn(),
     emit: vi.fn(),
@@ -31,7 +32,8 @@ vi.mock('@/lib/services/earlybird/payment-discord', () => ({
     deliverEarlybirdPaymentDiscordNotifications: mocks.deliverPayment,
 }));
 vi.mock('@/lib/services/earlybird/fulfillment-store', () => ({
-    admitAndAdvanceEarlybirdFulfillment: mocks.admitAndAdvanceFulfillment,
+    earlybirdFulfillmentStore: { admit: mocks.admitFulfillment },
+    advanceAdmittedEarlybirdFulfillment: mocks.advanceAdmittedFulfillment,
 }));
 vi.mock('@/lib/observability/request', () => ({ observeRoute: mocks.observeRoute }));
 vi.mock('@/lib/observability/server', () => ({
@@ -42,6 +44,15 @@ import { POST } from '@/app/api/webhooks/groble/route';
 
 const SECRET = 'webhook-secret';
 const SELLER_REFERENCE = 'ord.0123456789abcdef0123456789abcdef';
+const ORDER_ID = '123e4567-e89b-42d3-a456-426614174000';
+const ADMITTED_IDENTITY = {
+    orderId: ORDER_ID,
+    status: 'admission_pending',
+    preflightId: '623e4567-e89b-42d3-a456-426614174002',
+    userId: '723e4567-e89b-42d3-a456-426614174003',
+    planId: 'basic',
+    requestId: null,
+} as const;
 
 function payload(overrides: Record<string, unknown> = {}) {
     return {
@@ -132,11 +143,12 @@ describe('signed Groble webhook route', () => {
     beforeEach(() => {
         vi.clearAllMocks();
         mocks.after.mockImplementation(() => undefined);
-        mocks.admitAndAdvanceFulfillment.mockResolvedValue({
-            orderId: '123e4567-e89b-42d3-a456-426614174000',
+        mocks.admitFulfillment.mockResolvedValue(ADMITTED_IDENTITY);
+        mocks.advanceAdmittedFulfillment.mockResolvedValue({
+            orderId: ORDER_ID,
             status: 'analysis_in_progress',
             requestId: '523e4567-e89b-42d3-a456-426614174001',
-            disposition: 'monitor_analysis',
+            nextAction: 'monitor_analysis',
         });
         mocks.deliverPayment.mockResolvedValue(0);
         process.env.GROBLE_BASIC_PRODUCT_ID = 'basic_product-01';
@@ -156,29 +168,47 @@ describe('signed Groble webhook route', () => {
         });
     });
 
-    it('schedules Discord delivery and exactly one fulfillment kickoff for an accepted payment', async () => {
+    it('admits an accepted payment before 200 and advances exactly once after the response', async () => {
+        const sequence: string[] = [];
+        mocks.admitFulfillment.mockImplementationOnce(async (orderId: string) => {
+            sequence.push(`admit:${orderId}`);
+            await Promise.resolve();
+            sequence.push('admitted');
+            return ADMITTED_IDENTITY;
+        });
+
         const acceptedResponse = await POST(request(JSON.stringify(payload())));
+        sequence.push('response');
 
         expect(acceptedResponse.status).toBe(200);
+        expect(sequence).toEqual([
+            `admit:${ORDER_ID}`,
+            'admitted',
+            'response',
+        ]);
+        expect(mocks.admitFulfillment).toHaveBeenCalledTimes(1);
+        expect(mocks.admitFulfillment).toHaveBeenCalledWith(ORDER_ID);
         expect(mocks.after).toHaveBeenCalledTimes(1);
         expect(mocks.after).toHaveBeenCalledWith(expect.any(Function));
+        expect(mocks.advanceAdmittedFulfillment).not.toHaveBeenCalled();
         expect(mocks.deliverPayment).not.toHaveBeenCalled();
 
         const [drain] = mocks.after.mock.calls[0] as [() => Promise<unknown>];
         await drain();
         expect(mocks.deliverPayment).toHaveBeenCalledWith({ limit: 10 });
-        expect(mocks.admitAndAdvanceFulfillment).toHaveBeenCalledTimes(1);
-        expect(mocks.admitAndAdvanceFulfillment).toHaveBeenCalledWith(
-            '123e4567-e89b-42d3-a456-426614174000'
+        expect(mocks.advanceAdmittedFulfillment).toHaveBeenCalledTimes(1);
+        expect(mocks.advanceAdmittedFulfillment).toHaveBeenCalledWith(
+            ADMITTED_IDENTITY
         );
 
         mocks.after.mockClear();
-        mocks.admitAndAdvanceFulfillment.mockClear();
+        mocks.admitFulfillment.mockClear();
+        mocks.advanceAdmittedFulfillment.mockClear();
         mocks.deliverPayment.mockClear();
         mocks.rpc.mockResolvedValue({
             data: [{
                 disposition: 'duplicate_event',
-                order_id: '123e4567-e89b-42d3-a456-426614174000',
+                order_id: ORDER_ID,
                 status: 'paid',
                 plan_sequence: 1,
             }],
@@ -188,38 +218,91 @@ describe('signed Groble webhook route', () => {
         const duplicateResponse = await POST(request(JSON.stringify(payload())));
 
         expect(duplicateResponse.status).toBe(200);
-        expect(mocks.after).not.toHaveBeenCalled();
-        expect(mocks.admitAndAdvanceFulfillment).not.toHaveBeenCalled();
+        expect(mocks.admitFulfillment).toHaveBeenCalledWith(ORDER_ID);
+        expect(mocks.after).toHaveBeenCalledTimes(1);
+        const [duplicateDrain] = mocks.after.mock.calls[0] as [() => Promise<unknown>];
+        await duplicateDrain();
+        expect(mocks.advanceAdmittedFulfillment).toHaveBeenCalledWith(
+            ADMITTED_IDENTITY
+        );
         expect(mocks.deliverPayment).not.toHaveBeenCalled();
     });
 
-    it('swallows a rejected fulfillment kickoff while keeping the accepted response and Discord delivery', async () => {
-        mocks.admitAndAdvanceFulfillment.mockRejectedValueOnce(new Error('kickoff failed'));
+    it('returns a bounded 500 when synchronous fulfillment admission rejects', async () => {
+        mocks.admitFulfillment.mockRejectedValueOnce(new Error('admission failed'));
+
+        const acceptedResponse = await POST(request(JSON.stringify(payload())));
+
+        expect(acceptedResponse.status).toBe(500);
+        await expect(acceptedResponse.json()).resolves.toEqual({
+            received: false,
+            code: 'PERSISTENCE_FAILED',
+        });
+        expect(mocks.admitFulfillment).toHaveBeenCalledWith(ORDER_ID);
+        expect(mocks.after).not.toHaveBeenCalled();
+        expect(mocks.advanceAdmittedFulfillment).not.toHaveBeenCalled();
+        expect(mocks.deliverPayment).not.toHaveBeenCalled();
+    });
+
+    it.each(['duplicate_event', 'duplicate_payment'] as const)(
+        'retries fulfillment admission for a payment.completed %s disposition',
+        async disposition => {
+            mocks.rpc.mockResolvedValueOnce({
+                data: [{
+                    disposition,
+                    order_id: ORDER_ID,
+                    status: 'paid',
+                    plan_sequence: 1,
+                }],
+                error: null,
+            });
+
+            const response = await POST(request(JSON.stringify(payload())));
+
+            expect(response.status).toBe(200);
+            expect(mocks.admitFulfillment).toHaveBeenCalledTimes(1);
+            expect(mocks.admitFulfillment).toHaveBeenCalledWith(ORDER_ID);
+            expect(mocks.after).toHaveBeenCalledTimes(1);
+            expect(mocks.deliverPayment).not.toHaveBeenCalled();
+
+            const [drain] = mocks.after.mock.calls[0] as [() => Promise<unknown>];
+            await drain();
+            expect(mocks.advanceAdmittedFulfillment).toHaveBeenCalledTimes(1);
+            expect(mocks.advanceAdmittedFulfillment).toHaveBeenCalledWith(
+                ADMITTED_IDENTITY
+            );
+        }
+    );
+
+    it('swallows an after-response advance rejection while keeping 200 and Discord delivery', async () => {
+        mocks.advanceAdmittedFulfillment.mockRejectedValueOnce(new Error('advance failed'));
 
         const acceptedResponse = await POST(request(JSON.stringify(payload())));
 
         expect(acceptedResponse.status).toBe(200);
+        expect(mocks.admitFulfillment).toHaveBeenCalledWith(ORDER_ID);
         const [drain] = mocks.after.mock.calls[0] as [() => Promise<unknown>];
         await expect(drain()).resolves.toBeUndefined();
-        expect(mocks.admitAndAdvanceFulfillment).toHaveBeenCalledWith(
-            '123e4567-e89b-42d3-a456-426614174000'
+        expect(mocks.advanceAdmittedFulfillment).toHaveBeenCalledWith(
+            ADMITTED_IDENTITY
         );
         expect(mocks.deliverPayment).toHaveBeenCalledWith({ limit: 10 });
     });
 
-    it('does not kick off fulfillment for non-accepted or accepted payments without an order', async () => {
+    it('does not admit or advance non-accepted or accepted payments without an order', async () => {
         mocks.rpc.mockResolvedValueOnce({
             data: [{
-                disposition: 'duplicate_event',
-                order_id: '123e4567-e89b-42d3-a456-426614174000',
-                status: 'paid',
-                plan_sequence: 1,
+                disposition: 'unmatched',
+                order_id: ORDER_ID,
+                status: null,
+                plan_sequence: null,
             }],
             error: null,
         });
 
-        const duplicateResponse = await POST(request(JSON.stringify(payload())));
-        expect(duplicateResponse.status).toBe(200);
+        const unmatchedResponse = await POST(request(JSON.stringify(payload())));
+        expect(unmatchedResponse.status).toBe(200);
+        expect(mocks.admitFulfillment).not.toHaveBeenCalled();
         expect(mocks.after).not.toHaveBeenCalled();
 
         mocks.rpc.mockResolvedValueOnce({
@@ -236,24 +319,90 @@ describe('signed Groble webhook route', () => {
             idempotencyKey: 'delivery_0002',
         }));
         expect(missingOrderResponse.status).toBe(200);
+        expect(mocks.admitFulfillment).not.toHaveBeenCalled();
         expect(mocks.after).toHaveBeenCalledTimes(1);
         const [drain] = mocks.after.mock.calls[0] as [() => Promise<unknown>];
         await drain();
-        expect(mocks.admitAndAdvanceFulfillment).not.toHaveBeenCalled();
+        expect(mocks.advanceAdmittedFulfillment).not.toHaveBeenCalled();
         expect(mocks.deliverPayment).toHaveBeenCalledWith({ limit: 10 });
     });
 
-    it('still kicks off fulfillment when Discord delivery rejects', async () => {
+    it('fences accepted cancellation and refund finalizations from fulfillment', async () => {
+        const completed = payload();
+        const cancelBody = JSON.stringify({
+            ...completed,
+            type: 'payment.cancel_requested',
+            data: {
+                object: {
+                    ...completed.data.object,
+                    cancelRequest: {
+                        requestedBy: 'BUYER',
+                        requestedAt: '2026-07-18T09:00:00+09:00',
+                    },
+                },
+            },
+        });
+        mocks.rpc.mockResolvedValueOnce({
+            data: [{
+                disposition: 'accepted',
+                order_id: ORDER_ID,
+                status: 'paid',
+                plan_sequence: 1,
+            }],
+            error: null,
+        });
+
+        const cancelResponse = await POST(request(cancelBody));
+        expect(cancelResponse.status).toBe(200);
+        expect(mocks.admitFulfillment).not.toHaveBeenCalled();
+        for (const [drain] of mocks.after.mock.calls as [() => Promise<unknown>][]) {
+            await drain();
+        }
+        expect(mocks.advanceAdmittedFulfillment).not.toHaveBeenCalled();
+
+        vi.clearAllMocks();
+        mocks.after.mockImplementation(() => undefined);
+        mocks.admitFulfillment.mockResolvedValue(ADMITTED_IDENTITY);
+        mocks.advanceAdmittedFulfillment.mockResolvedValue({
+            orderId: ORDER_ID,
+            status: 'analysis_in_progress',
+            requestId: '523e4567-e89b-42d3-a456-426614174001',
+            nextAction: 'monitor_analysis',
+        });
+        mocks.deliverPayment.mockResolvedValue(0);
+        mocks.rpc.mockResolvedValueOnce({
+            data: [{
+                disposition: 'accepted',
+                order_id: ORDER_ID,
+                status: 'paid',
+                plan_sequence: 1,
+            }],
+            error: null,
+        });
+
+        const refundResponse = await POST(request(JSON.stringify(refundedPayload()), {
+            idempotencyKey: 'delivery_0002',
+        }));
+        expect(refundResponse.status).toBe(200);
+        expect(mocks.admitFulfillment).not.toHaveBeenCalled();
+        for (const [drain] of mocks.after.mock.calls as [() => Promise<unknown>][]) {
+            await drain();
+        }
+        expect(mocks.advanceAdmittedFulfillment).not.toHaveBeenCalled();
+    });
+
+    it('still advances when Discord delivery rejects', async () => {
         mocks.deliverPayment.mockRejectedValueOnce(new Error('Discord unavailable'));
 
         const acceptedResponse = await POST(request(JSON.stringify(payload())));
 
         expect(acceptedResponse.status).toBe(200);
+        expect(mocks.admitFulfillment).toHaveBeenCalledWith(ORDER_ID);
         const [drain] = mocks.after.mock.calls[0] as [() => Promise<unknown>];
         await expect(drain()).resolves.toBeUndefined();
         expect(mocks.deliverPayment).toHaveBeenCalledWith({ limit: 10 });
-        expect(mocks.admitAndAdvanceFulfillment).toHaveBeenCalledWith(
-            '123e4567-e89b-42d3-a456-426614174000'
+        expect(mocks.advanceAdmittedFulfillment).toHaveBeenCalledWith(
+            ADMITTED_IDENTITY
         );
     });
 

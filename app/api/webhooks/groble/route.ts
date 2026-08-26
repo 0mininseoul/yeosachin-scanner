@@ -3,7 +3,10 @@ import { after, NextResponse } from 'next/server';
 import { supabaseAdmin } from '@/lib/supabase/admin';
 import { isJsonRequest } from '@/lib/services/earlybird/contracts';
 import { deliverEarlybirdPaymentDiscordNotifications } from '@/lib/services/earlybird/payment-discord';
-import { admitAndAdvanceEarlybirdFulfillment } from '@/lib/services/earlybird/fulfillment-store';
+import {
+    advanceAdmittedEarlybirdFulfillment,
+    earlybirdFulfillmentStore,
+} from '@/lib/services/earlybird/fulfillment-store';
 import {
     readGrobleConfig,
     type GrobleConfig,
@@ -399,25 +402,52 @@ async function handlePOST(
     }
 
     const finalization = parsed.data[0];
+    const orderId = finalization.order_id;
+    const shouldAdmit = envelope.type === 'payment.completed'
+        && orderId !== null
+        && (
+            finalization.disposition === 'accepted'
+            || finalization.disposition === 'duplicate_event'
+            || finalization.disposition === 'duplicate_payment'
+        );
+    let admittedIdentity: Awaited<
+        ReturnType<typeof earlybirdFulfillmentStore.admit>
+    > | null = null;
+    if (shouldAdmit) {
+        try {
+            admittedIdentity = await earlybirdFulfillmentStore.admit(orderId);
+        } catch {
+            return reject(
+                500,
+                { received: false, code: 'PERSISTENCE_FAILED' },
+                'INTERNAL_ERROR',
+                { ...state, orderId },
+            );
+        }
+    }
     operationalLogger.emit({
         event: 'groble.webhook_finalized',
         severity: finalization.disposition === 'accepted' ? 'info' : 'warn',
         fields: {
             ...webhookFields(context, {
                 ...state,
-                orderId: finalization.order_id,
+                orderId,
             }),
             disposition: finalization.disposition,
         },
     });
 
-    if (finalization.disposition === 'accepted') {
+    if (finalization.disposition === 'accepted' || admittedIdentity !== null) {
+        const admitted = admittedIdentity;
         const deliver = async () => {
-            await deliverEarlybirdPaymentDiscordNotifications({ limit: 10 }).catch(() => undefined);
+            if (finalization.disposition !== 'accepted') return;
+            await deliverEarlybirdPaymentDiscordNotifications({ limit: 10 })
+                .catch(() => undefined);
         };
         const advance = async () => {
-            if (!finalization.order_id) return;
-            await admitAndAdvanceEarlybirdFulfillment(finalization.order_id).catch(() => undefined);
+            if (!admitted) return;
+            await advanceAdmittedEarlybirdFulfillment(admitted)
+                .catch(() => undefined);
         };
         const runAfter = async () => {
             await Promise.all([deliver(), advance()]);
