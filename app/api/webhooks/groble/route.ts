@@ -3,6 +3,7 @@ import { after, NextResponse } from 'next/server';
 import { supabaseAdmin } from '@/lib/supabase/admin';
 import { isJsonRequest } from '@/lib/services/earlybird/contracts';
 import { deliverEarlybirdPaymentDiscordNotifications } from '@/lib/services/earlybird/payment-discord';
+import { admitAndAdvanceEarlybirdFulfillment } from '@/lib/services/earlybird/fulfillment-store';
 import {
     readGrobleConfig,
     type GrobleConfig,
@@ -414,10 +415,17 @@ async function handlePOST(
         const deliver = async () => {
             await deliverEarlybirdPaymentDiscordNotifications({ limit: 10 }).catch(() => undefined);
         };
+        const advance = async () => {
+            if (!finalization.order_id) return;
+            await admitAndAdvanceEarlybirdFulfillment(finalization.order_id).catch(() => undefined);
+        };
+        const runAfter = async () => {
+            await Promise.all([deliver(), advance()]);
+        };
         try {
-            after(deliver);
+            after(runAfter);
         } catch {
-            void deliver();
+            void runAfter();
         }
     }
 
