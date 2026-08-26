@@ -325,6 +325,76 @@ describe('analysis V2 profile fetch checkpoint store', () => {
         );
     });
 
+    it('keeps omitted fresh admission on the strict test-entitlement RPC', async () => {
+        const directResume = {
+            requestId,
+            jobKey,
+            requestedUsernames: ['alice'],
+            frozenUnresolvedUsernames: [],
+            primaryResults: [apifySuccess('alice')],
+            fallbackResults: [],
+            primaryCapturedAt: capturedAt,
+            fallbackCapturedAt: null,
+        };
+        const fake = clientWith({ data: directResume, error: null });
+        const store = createAnalysisV2ProfileFetchCheckpointStore(fake.client);
+
+        await store.checkpointFreshApify({
+            ...checkpointIdentity,
+            requestedUsernames: ['alice'],
+            results: [apifySuccess('alice')],
+            operationKey,
+            providerInputHash,
+        });
+
+        expect(fake.rpc.mock.calls[0]?.[0]).toBe(
+            ANALYSIS_V2_PROFILE_FETCH_DATABASE_NAMES.freshApifyRpc
+        );
+    });
+
+    it('uses the paid Earlybird fresh checkpoint RPC only for its explicit discriminator', async () => {
+        const directResume = {
+            requestId,
+            jobKey,
+            requestedUsernames: ['alice'],
+            frozenUnresolvedUsernames: [],
+            primaryResults: [apifySuccess('alice')],
+            fallbackResults: [],
+            primaryCapturedAt: capturedAt,
+            fallbackCapturedAt: null,
+        };
+        const fake = clientWith({ data: directResume, error: null });
+        const store = createAnalysisV2ProfileFetchCheckpointStore(fake.client);
+
+        await store.checkpointFreshApify({
+            ...checkpointIdentity,
+            requestedUsernames: ['alice'],
+            results: [apifySuccess('alice')],
+            operationKey,
+            providerInputHash,
+            freshAdmission: 'paid_earlybird',
+        });
+
+        expect(fake.rpc.mock.calls[0]?.[0]).toBe(
+            ANALYSIS_V2_PROFILE_FETCH_DATABASE_NAMES.freshApifyEarlybirdRpc
+        );
+    });
+
+    it('rejects an unknown fresh admission discriminator before any RPC', async () => {
+        const fake = clientWith();
+        const store = createAnalysisV2ProfileFetchCheckpointStore(fake.client);
+
+        await expect(store.checkpointFreshApify({
+            ...checkpointIdentity,
+            requestedUsernames: ['alice'],
+            results: [apifySuccess('alice')],
+            operationKey,
+            providerInputHash,
+            freshAdmission: 'legacy' as never,
+        })).rejects.toThrow('invalid fresh Apify admission');
+        expect(fake.rpc).not.toHaveBeenCalled();
+    });
+
     it('accepts mapper-shaped undefined optionals and preserves carousel child order', async () => {
         const mappedProfile = profile('alice', 10);
         mappedProfile.fullName = undefined;

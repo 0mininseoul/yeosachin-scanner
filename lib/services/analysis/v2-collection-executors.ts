@@ -382,6 +382,7 @@ async function bindApifyRun(input: {
     inputHash: string;
     actorId: string;
     maxChargeUsd: number;
+    requireCurrentProviderRun?: boolean;
 }) {
     const freshRevenueRequest = isRevenueCostLedgerRequest(input.request);
     if (freshRevenueRequest) {
@@ -406,15 +407,20 @@ async function bindApifyRun(input: {
         credentialSlot: providerBinding.credentialSlot,
         maxChargeUsd: input.maxChargeUsd,
     } as const;
-    if (freshRevenueRequest) {
+    if (freshRevenueRequest || input.requireCurrentProviderRun) {
         // Fresh provenance rejects any adoption before it can select an external
         // Dataset. The only resumable path is the exact durable provider row.
-        const fallback = await input.dependencies.providerRunStore.bindAdapterCheckpoint(identity, {
-            revenueCostOperationStore: input.dependencies.revenueCostOperationStore,
-            freshProvenanceStore: input.dependencies.freshProvenanceStore
-                ?? analysisRevenueFreshProvenanceStore,
-            jobInputHash: input.claim.jobInputHash,
-        });
+        // Ordinary Earlybird direct-fresh requests use the same immutable
+        // current-row binding, but do not opt into the revenue ledger/evidence
+        // side effects reserved for strict test-entitlement requests.
+        const fallback = freshRevenueRequest
+            ? await input.dependencies.providerRunStore.bindAdapterCheckpoint(identity, {
+                revenueCostOperationStore: input.dependencies.revenueCostOperationStore,
+                freshProvenanceStore: input.dependencies.freshProvenanceStore
+                    ?? analysisRevenueFreshProvenanceStore,
+                jobInputHash: input.claim.jobInputHash,
+            })
+            : await input.dependencies.providerRunStore.bindAdapterCheckpoint(identity);
         return { ...fallback, evidenceRun: null };
     }
     const binding = await bindAdoptedProviderRunOrFallback({
@@ -969,19 +975,13 @@ function selfHostedAuthProfileIdentity(
 
 function isDirectApifyProfileResume(
     resume: AnalysisV2ProfileFetchResume,
-    allowRepair: boolean,
 ): boolean {
-    const hasOnlyApifyRepairResults = resume.repairResults.every(
-        result => result.outcome.source === 'apify'
-    );
-    const hasNoRepair = resume.repairResults.length === 0
-        && resume.repairCapturedAt === null;
     return resume.primaryResults.length > 0
         && resume.primaryResults.every(result => result.outcome.source === 'apify')
         && resume.fallbackResults.length === 0
         && resume.fallbackCapturedAt === null
-        && hasOnlyApifyRepairResults
-        && (allowRepair || hasNoRepair);
+        && resume.repairResults.length === 0
+        && resume.repairCapturedAt === null;
 }
 
 function requiresUnauthorizedFreshProfileRepair(
@@ -1011,15 +1011,18 @@ async function durableFreshApifyProfiles(input: {
     } = input;
     assertFreshRevenueCollectionRuntime(request, dependencies);
     const identity = profileIdentity(claim);
-    const allowRepair = !isRevenueCostLedgerRequest(request);
-    // Inspect a retained direct-Apify checkpoint before binding a provider
-    // row. Strict revenue requests reject repair state; ordinary production
-    // requests may resume same-provider repair state.
+    // Inspect a retained direct-Apify checkpoint before binding a provider row.
+    // Both strict and paid Earlybird direct-fresh admissions reject any mixed
+    // fallback/repair state before provider work.
     const resume = await dependencies.profileCheckpointStore.load(identity);
-    if (resume && !isDirectApifyProfileResume(resume, allowRepair)) {
+    if (resume && !isDirectApifyProfileResume(resume)) {
         throw new Error('FRESH_PROVENANCE_PROFILE_CHECKPOINT_UNPROVEN');
     }
-    if (resume && requiresUnauthorizedFreshProfileRepair(resume, usernames)) {
+    if (
+        resume
+        && isRevenueCostLedgerRequest(request)
+        && requiresUnauthorizedFreshProfileRepair(resume, usernames)
+    ) {
         throw new Error('FRESH_PROVENANCE_PROFILE_REPAIR_UNAUTHORIZED');
     }
     const freshOperation = freshProfileOperation({ claim, request, usernames });
@@ -1041,6 +1044,7 @@ async function durableFreshApifyProfiles(input: {
         inputHash: providerInputHash,
         actorId: PROFILE_ACTOR_ID,
         maxChargeUsd: profileMaximumCharge(usernames.length, dependencies.env),
+        requireCurrentProviderRun: true,
     });
     if (resume) {
         if (
@@ -1070,6 +1074,9 @@ async function durableFreshApifyProfiles(input: {
                     results: checkpointAttemptResults(snapshot.results),
                     operationKey,
                     providerInputHash,
+                    freshAdmission: isRevenueCostLedgerRequest(request)
+                        ? 'strict_test_entitlement'
+                        : 'paid_earlybird',
                 });
             },
         });
@@ -1079,7 +1086,7 @@ async function durableFreshApifyProfiles(input: {
     }
 
     const stored = await dependencies.profileCheckpointStore.load(identity);
-    if (!stored || !isDirectApifyProfileResume(stored, allowRepair)) {
+    if (!stored || !isDirectApifyProfileResume(stored)) {
         throw new Error('FRESH_PROVENANCE_PROFILE_CHECKPOINT_MISSING');
     }
     return stored;
@@ -1221,11 +1228,11 @@ async function durableProfiles(input: {
 }
 
 /**
- * One at-most-once repair pass over a profile batch that the primary+fallback merge left short of
- * the 90% gate. It runs the pinned replacement Actor over only the still-failed frozen-unresolved
- * subset, checkpoints those outcomes as the third `repair` attempt, and returns the merged resume
- * for the gate to re-evaluate. Every non-repair path is a no-op that returns `resume` untouched and
- * spends nothing.
+ * One at-most-once repair pass over a legacy beta/test profile batch that the primary+fallback
+ * merge left short of the 90% gate. Paid production direct-fresh batches return before this
+ * function can bind the replacement Actor. The repair path runs only over the still-failed
+ * frozen-unresolved subset, checkpoints those outcomes as the third `repair` attempt, and returns
+ * the merged resume for the gate to re-evaluate.
  */
 async function repairProfileBatch(input: {
     dependencies: ResolvedDependencies;
@@ -1237,6 +1244,16 @@ async function repairProfileBatch(input: {
     const { dependencies, claim, request, usernames, resume } = input;
     if (!isBetaFreePoolRequest(request)
         && collectionProviderForRequest(request, dependencies) === 'selfhosted_auth') {
+        return resume;
+    }
+    // The 12-hour paid Earlybird launch intentionally has no profile repair
+    // admission.  The direct fresh batch remains durable and the shared
+    // completeness gate fails closed until an operator retry/recovery policy
+    // is introduced. Beta and authorized test requests retain their legacy
+    // repair behavior below.
+    if (!isBetaFreePoolRequest(request)
+        && !isAuthorizedTestOperationRequest(request)
+        && collectionProviderForRequest(request, dependencies) === 'apify') {
         return resume;
     }
     // A completed repair is terminal for the batch. This short-circuit mirrors durableProfiles'

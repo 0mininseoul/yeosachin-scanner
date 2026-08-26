@@ -197,6 +197,10 @@ export interface AnalysisV2ProfileFetchCheckpointIdentity {
     jobInputHash: string;
 }
 
+export type AnalysisV2FreshApifyAdmission =
+    | 'strict_test_entitlement'
+    | 'paid_earlybird';
+
 export interface AnalysisV2ProfileFetchCheckpointStore {
     checkpointPrimary(input: AnalysisV2ProfileFetchCheckpointIdentity & {
         requestedUsernames: readonly string[];
@@ -207,6 +211,8 @@ export interface AnalysisV2ProfileFetchCheckpointStore {
         results: readonly AnalysisV2ProfileAttemptResultInput[];
         operationKey: string;
         providerInputHash: string;
+        /** Omitted keeps the historical strict test-entitlement admission. */
+        freshAdmission?: AnalysisV2FreshApifyAdmission;
     }): Promise<AnalysisV2ProfileFetchResume>;
     checkpointFallback(input: AnalysisV2ProfileFetchCheckpointIdentity & {
         results: readonly AnalysisV2ProfileAttemptResultInput[];
@@ -238,6 +244,7 @@ export const ANALYSIS_V2_PROFILE_FETCH_DATABASE_NAMES = Object.freeze({
     outcomeTable: 'analysis_v2_profile_fetch_outcomes',
     primaryRpc: 'checkpoint_analysis_v2_profile_primary',
     freshApifyRpc: 'checkpoint_analysis_v2_profile_fresh_apify_v1',
+    freshApifyEarlybirdRpc: 'checkpoint_analysis_v2_profile_fresh_apify_earlybird_v1',
     fallbackRpc: 'checkpoint_analysis_v2_profile_fallback',
     repairRpc: 'checkpoint_analysis_v2_profile_repair',
     loadRpc: 'load_analysis_v2_profile_fetch_checkpoint',
@@ -554,6 +561,15 @@ export function createAnalysisV2ProfileFetchCheckpointStore(
 
         async checkpointFreshApify(input) {
             validateIdentity(input);
+            const freshAdmission = input.freshAdmission ?? 'strict_test_entitlement';
+            if (
+                freshAdmission !== 'strict_test_entitlement'
+                && freshAdmission !== 'paid_earlybird'
+            ) {
+                throw new Error(
+                    'ANALYSIS_V2_PROFILE_CHECKPOINT_ERROR: invalid fresh Apify admission.'
+                );
+            }
             if (
                 !PROVIDER_OPERATION_KEY_PATTERN.test(input.operationKey)
                 || !SHA256_PATTERN.test(input.providerInputHash)
@@ -569,7 +585,9 @@ export function createAnalysisV2ProfileFetchCheckpointStore(
                 ['apify']
             );
             const { data, error } = await client.rpc(
-                ANALYSIS_V2_PROFILE_FETCH_DATABASE_NAMES.freshApifyRpc,
+                freshAdmission === 'paid_earlybird'
+                    ? ANALYSIS_V2_PROFILE_FETCH_DATABASE_NAMES.freshApifyEarlybirdRpc
+                    : ANALYSIS_V2_PROFILE_FETCH_DATABASE_NAMES.freshApifyRpc,
                 {
                     p_request_id: input.requestId,
                     p_job_key: input.jobKey,

@@ -483,12 +483,7 @@ function inMemoryProfileStore(initial: AnalysisV2ProfileFetchResume | null) {
         checkpointRepair: vi.fn(async (input: {
             results: readonly AnalysisV2ProfileAttemptResultInput[];
         }) => {
-            const directApify = current
-                && current.primaryResults.length > 0
-                && current.primaryResults.every(result => result.outcome.source === 'apify')
-                && current.fallbackResults.length === 0
-                && current.fallbackCapturedAt === null;
-            if (!current || (current.fallbackCapturedAt === null && !directApify)) {
+            if (!current || current.fallbackCapturedAt === null) {
                 throw new Error('ANALYSIS_V2_PROFILE_CHECKPOINT_NOT_READY');
             }
             const results = input.results as AnalysisV2ProfileFetchResume['repairResults'];
@@ -2666,7 +2661,7 @@ describe('analysis V2 concrete collection executors', () => {
         );
     });
 
-    it('replays an incomplete ordinary Apify batch through one same-provider repair on secondary', async () => {
+    it('fails an incomplete ordinary Apify batch closed without fallback or repair spend', async () => {
         const usernames = ['alice', 'bob'];
         const topology = createAnalysisV2CollectionTopology('profiles', usernames);
         const profileStore = inMemoryProfileStore(null);
@@ -2684,6 +2679,17 @@ describe('analysis V2 concrete collection executors', () => {
                 },
             };
         };
+        providers.bindAdapterCheckpoint.mockImplementationOnce(async input => ({
+            stored: null,
+            checkpoint: {
+                logicalProvider: input.logicalProvider,
+                actorId: input.actorId,
+                credentialSlot: input.credentialSlot,
+                maxChargeUsd: input.maxChargeUsd,
+                onBeforeRunStart: vi.fn(),
+                onRunStarted: vi.fn(),
+            },
+        }));
         providers.bindAdapterCheckpoint.mockImplementation(
             replayBind as unknown as typeof providers.bindAdapterCheckpoint
         );
@@ -2742,26 +2748,20 @@ describe('analysis V2 concrete collection executors', () => {
             0
         );
 
-        await expect(executor(stage)).resolves.toMatchObject({
-            checkpoint: { manifest: { itemCount: 2 } },
-        });
-        await expect(executor(stage)).resolves.toMatchObject({
-            checkpoint: { manifest: { itemCount: 2 } },
-        });
+        await expect(executor(stage)).rejects.toThrow('ANALYSIS_V2_PROFILE_EVIDENCE_INCOMPLETE');
+        await expect(executor(stage)).rejects.toThrow('ANALYSIS_V2_PROFILE_EVIDENCE_INCOMPLETE');
 
         expect(directFetcher).toHaveBeenCalledOnce();
-        expect(runProfileRepair).toHaveBeenCalledOnce();
-        expect(runProfileRepair.mock.calls[0]![0].usernames).toEqual(['bob']);
+        expect(runProfileRepair).not.toHaveBeenCalled();
         expect(profileStore.store.checkpointFreshApify).toHaveBeenCalledOnce();
-        expect(profileStore.store.checkpointRepair).toHaveBeenCalledOnce();
-        expect(providers.bindAdapterCheckpoint).toHaveBeenCalledTimes(3);
+        expect(profileStore.store.checkpointRepair).not.toHaveBeenCalled();
+        expect(vi.mocked(profileStore.store.checkpointFreshApify).mock.calls[0]![0]).toMatchObject({
+            freshAdmission: 'paid_earlybird',
+        });
+        expect(providers.bindAdapterCheckpoint).toHaveBeenCalledTimes(2);
         expect(providers.bindAdapterCheckpoint.mock.calls.map(([input]) => input)).toEqual([
             expect.objectContaining({
                 operationKey: expect.stringMatching(/^profile-fallback:/),
-                credentialSlot: 'secondary',
-            }),
-            expect.objectContaining({
-                operationKey: expect.stringMatching(/^profile-repair:/),
                 credentialSlot: 'secondary',
             }),
             expect.objectContaining({
