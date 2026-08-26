@@ -279,7 +279,7 @@ case "$state" in
     enqueuer_identity_ready="true"
     bucket_ready="true"
     ;;
-  broad|storage_broad|secret_broad|vertex_admin|keyed|build_broad|build_keyed|enqueuer_broad|enqueuer_keyed|failed_latest|old_traffic|unpromoted_latest|runtime_env_drift|runtime_blite_missing|runtime_blite_enabled_drift|runtime_blite_rollout_drift|runtime_admission_env|runtime_legacy_gate_env|runtime_selfhosted_global_gate_drift|runtime_selfhosted_global_interval_drift|runtime_selfhosted_response_guard_drift|credential_override|credential_key_base64|plaintext_secret|secret_ref_drift|slot_drift|runtime_sidecar|runtime_placement|runtime_duplicate_env)
+  broad|storage_broad|secret_broad|vertex_admin|keyed|build_broad|build_keyed|enqueuer_broad|enqueuer_keyed|failed_latest|old_traffic|unpromoted_latest|runtime_env_drift|runtime_preflight_pool_drift|runtime_instagram_route_drift|runtime_blite_missing|runtime_blite_enabled_drift|runtime_blite_rollout_drift|runtime_admission_env|runtime_legacy_gate_env|runtime_selfhosted_global_gate_drift|runtime_selfhosted_global_interval_drift|runtime_selfhosted_response_guard_drift|credential_override|credential_key_base64|plaintext_secret|secret_ref_drift|slot_drift|runtime_sidecar|runtime_placement|runtime_duplicate_env)
     identity_ready="true"
     vertex_ready="true"
     build_identity_ready="true"
@@ -289,7 +289,9 @@ case "$state" in
     enqueuer_identity_ready="true"
     if [[ "$state" == "failed_latest" || "$state" == "old_traffic" \
       || "$state" == "unpromoted_latest" \
-      || "$state" == "runtime_env_drift" || "$state" == "runtime_blite_missing" \
+      || "$state" == "runtime_env_drift" || "$state" == "runtime_preflight_pool_drift" \
+      || "$state" == "runtime_instagram_route_drift" \
+      || "$state" == "runtime_blite_missing" \
       || "$state" == "runtime_blite_enabled_drift" || "$state" == "runtime_blite_rollout_drift" \
       || "$state" == "credential_override" \
       || "$state" == "credential_key_base64" || "$state" == "plaintext_secret" \
@@ -676,6 +678,10 @@ case "$command_line" in
         --set-secrets=*) secret_assignments="${argument#--set-secrets=}" ;;
       esac
     done
+    if [[ "$source_runtime_env" == '^|^'* ]]; then
+      source_runtime_env="${source_runtime_env:3}"
+      source_runtime_env="${source_runtime_env//|/,}"
+    fi
     [[ "$deploy_source_count" -eq 1 ]] || exit 92
     [[ -n "$deploy_source" && -d "$deploy_source" ]] || exit 92
     [[ "$secret_assignments" == *"ANALYSIS_V2_GENDER_ROUTING_HMAC_SECRET=ai-baram-v2-gender-routing-hmac:${ANALYSIS_V2_GENDER_ROUTING_HMAC_SECRET_VERSION:-}"* ]] \
@@ -695,10 +701,14 @@ case "$command_line" in
         && ! -w "$runtime_manifest" ]] || exit 93
       jq -e \
         --arg slot "${ANALYSIS_V2_APIFY_API_TOKEN_SLOT:-}" \
+        --arg preflight_apify_token_slots "${PREFLIGHT_APIFY_API_TOKEN_SLOTS:-}" \
+        --arg instagram_route "${ANALYSIS_V2_INSTAGRAM_ROUTE:-}" \
         --arg blite_enabled "${PRECHECKOUT_BLITE_ENABLED:-false}" \
         --arg blite_rollout_percent "${PRECHECKOUT_BLITE_ROLLOUT_PERCENT:-0}" '
         .ANALYSIS_V2_MEDIA_ARTIFACT_BUCKET == "test-project-analysis-v2-media"
           and .ANALYSIS_V2_APIFY_API_TOKEN_SLOT == $slot
+          and .PREFLIGHT_APIFY_API_TOKEN_SLOTS == $preflight_apify_token_slots
+          and .ANALYSIS_V2_INSTAGRAM_ROUTE == $instagram_route
           and .BETATEST_FREE_POOL_ENABLED == "false"
           and .BETATEST_FREE_POOL_MAX_SNAPSHOT_AGE_SECONDS == "300"
           and .BETATEST_FREE_POOL_REFRESH_INTERVAL_SECONDS == "60"
@@ -713,6 +723,10 @@ case "$command_line" in
       source_runtime_slot_applied='true'
     else
       [[ ",$source_runtime_env," == *",ANALYSIS_V2_MEDIA_ARTIFACT_BUCKET=test-project-analysis-v2-media,"* ]] \
+        || exit 93
+      [[ ",$source_runtime_env," == *",PREFLIGHT_APIFY_API_TOKEN_SLOTS=${PREFLIGHT_APIFY_API_TOKEN_SLOTS:-},"* ]] \
+        || exit 93
+      [[ ",$source_runtime_env," == *",ANALYSIS_V2_INSTAGRAM_ROUTE=${ANALYSIS_V2_INSTAGRAM_ROUTE:-},"* ]] \
         || exit 93
       [[ ",$source_runtime_env," == *",PRECHECKOUT_BLITE_ENABLED=${PRECHECKOUT_BLITE_ENABLED:-false},"* ]] \
         || exit 93
@@ -899,6 +913,8 @@ case "$command_line" in
       runtime_queue='analysis-v2-pipeline'
       credential_name=''
       runtime_slot="${FAKE_GCLOUD_RUNTIME_SLOT:-quinary}"
+      preflight_apify_token_slots="${PREFLIGHT_APIFY_API_TOKEN_SLOTS:-primary,quinary,senary}"
+      instagram_route="${ANALYSIS_V2_INSTAGRAM_ROUTE:-apify_v1}"
       worker_gate='false'
       recovery_gate='false'
       precheckout_blite_enabled="${FAKE_GCLOUD_PRECHECKOUT_BLITE_ENABLED:-false}"
@@ -929,6 +945,8 @@ case "$command_line" in
       [[ "$state" != "old_traffic" ]] || traffic_revision='analysis-worker-00001'
       [[ "$state" != "unpromoted_latest" ]] || latest_created='analysis-worker-unpromoted'
       [[ "$state" != "runtime_env_drift" ]] || runtime_queue='wrong-v2-queue'
+      [[ "$state" != "runtime_preflight_pool_drift" ]] || preflight_apify_token_slots='primary,quinary,tenth'
+      [[ "$state" != "runtime_instagram_route_drift" ]] || instagram_route='selfhosted_auth_v1'
       [[ "$state" != "runtime_blite_missing" ]] || precheckout_blite_enabled=''
       [[ "$state" != "runtime_blite_enabled_drift" ]] || precheckout_blite_enabled='true'
       [[ "$state" != "runtime_blite_rollout_drift" ]] || precheckout_blite_rollout_percent='1'
@@ -993,6 +1011,8 @@ case "$command_line" in
         --arg runtime_queue "$runtime_queue" \
         --arg credential_name "$credential_name" \
         --arg runtime_slot "$runtime_slot" \
+        --arg preflight_apify_token_slots "$preflight_apify_token_slots" \
+        --arg instagram_route "$instagram_route" \
         --arg worker_gate "$worker_gate" \
         --arg recovery_gate "$recovery_gate" \
         --arg precheckout_blite_enabled "$precheckout_blite_enabled" \
@@ -1072,6 +1092,8 @@ case "$command_line" in
                   {name: "ANALYSIS_V2_TASKS_SERVICE_ACCOUNT_EMAIL", value: "analysis-task@test-project.iam.gserviceaccount.com"},
                   {name: "ANALYSIS_V2_TASKS_CALLER_AUTH_MODE", value: "adc"},
                   {name: "ANALYSIS_V2_APIFY_API_TOKEN_SLOT", value: $runtime_slot},
+                  {name: "PREFLIGHT_APIFY_API_TOKEN_SLOTS", value: $preflight_apify_token_slots},
+                  {name: "ANALYSIS_V2_INSTAGRAM_ROUTE", value: $instagram_route},
                   {name: "ANALYSIS_V2_TASKS_TARGET_URL", value: "https://analysis-worker-test.asia-northeast3.run.app/api/analysis/v2/worker"},
                   {name: "ANALYSIS_V2_TASKS_OIDC_AUDIENCE", value: "https://analysis-worker-test.asia-northeast3.run.app"},
                   {name: "PREFLIGHT_TASKS_ENABLED", value: "true"},
@@ -1232,6 +1254,7 @@ case "$command_line" in
     active_gender_routing_hmac_version="${FAKE_GCLOUD_ACTIVE_GENDER_ROUTING_HMAC_VERSION:-${FAKE_GCLOUD_GENDER_ROUTING_HMAC_VERSION:-7}}"
     active_supabase_public_url="${FAKE_GCLOUD_ACTIVE_SUPABASE_URL:-${FAKE_GCLOUD_SUPABASE_URL:-https://abcdefghijklmnopqrst.supabase.co}}"
     active_authorized_test_sharding="${FAKE_GCLOUD_ACTIVE_SHARDING_ENABLED:-${FAKE_GCLOUD_SHARDING_ENABLED:-false}}"
+    active_instagram_route="${FAKE_GCLOUD_ACTIVE_INSTAGRAM_ROUTE:-${FAKE_GCLOUD_INSTAGRAM_ROUTE:-apify_v1}}"
     revision_image='asia-northeast3-docker.pkg.dev/test-project/cloud-run-source-deploy/analysis-worker@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
     bootstrap_revision='false'
     if [[ "$revision" == analysis-worker-b* \
@@ -1253,6 +1276,7 @@ case "$command_line" in
       --arg source_commit "$source_commit" \
       --arg known_good_recovery "$known_good_recovery" \
       --arg active_runtime_slot "$active_runtime_slot" \
+      --arg preflight_apify_token_slots "${PREFLIGHT_APIFY_API_TOKEN_SLOTS:-primary,quinary,senary}" \
       --arg active_apify_secret_slots "$active_apify_secret_slots" \
       --arg active_apify_secret_version "$active_apify_secret_version" \
       --arg active_identity_hmac_mode "$active_identity_hmac_mode" \
@@ -1261,6 +1285,7 @@ case "$command_line" in
       --arg active_gender_routing_hmac_version "$active_gender_routing_hmac_version" \
       --arg active_supabase_public_url "$active_supabase_public_url" \
       --arg active_authorized_test_sharding "$active_authorized_test_sharding" \
+      --arg active_instagram_route "$active_instagram_route" \
       --arg revision_image "$revision_image" \
       --arg revision_ready "$revision_ready" \
       --argjson bootstrap_revision "$bootstrap_revision" '{
@@ -1274,6 +1299,8 @@ case "$command_line" in
             {name: "ANALYSIS_V2_RECOVERY_ENABLED", value: "false"},
             {name: "EARLYBIRD_AUTOMATIC_FULFILLMENT_ENABLED", value: "false"},
             {name: "ANALYSIS_V2_APIFY_API_TOKEN_SLOT", value: $active_runtime_slot},
+            {name: "PREFLIGHT_APIFY_API_TOKEN_SLOTS", value: $preflight_apify_token_slots},
+            {name: "ANALYSIS_V2_INSTAGRAM_ROUTE", value: $active_instagram_route},
             {name: "ANALYSIS_V2_AUTHORIZED_TEST_SHARDING_ENABLED", value: $active_authorized_test_sharding},
             {name: "NEXT_PUBLIC_SUPABASE_URL", value: $active_supabase_public_url}
           ] else [
@@ -1282,6 +1309,8 @@ case "$command_line" in
             {name: "ANALYSIS_V2_RECOVERY_ENABLED", value: $known_good_recovery},
             {name: "EARLYBIRD_AUTOMATIC_FULFILLMENT_ENABLED", value: "false"},
             {name: "ANALYSIS_V2_APIFY_API_TOKEN_SLOT", value: $active_runtime_slot},
+            {name: "PREFLIGHT_APIFY_API_TOKEN_SLOTS", value: $preflight_apify_token_slots},
+            {name: "ANALYSIS_V2_INSTAGRAM_ROUTE", value: $active_instagram_route},
             {name: "ANALYSIS_V2_AUTHORIZED_TEST_SHARDING_ENABLED", value: $active_authorized_test_sharding},
             {name: "NEXT_PUBLIC_SUPABASE_URL", value: $active_supabase_public_url},
             {name: "PREFLIGHT_TASKS_ENABLED", value: "true"},
@@ -1621,6 +1650,8 @@ assert_contains "$temp_dir/unsupported-queue-condition.out" \
 cat >"$temp_dir/runtime.env" <<'EOF'
 ANALYSIS_V2_MEDIA_ARTIFACT_BUCKET="test-project-analysis-v2-media"
 ANALYSIS_V2_APIFY_API_TOKEN_SLOT="quinary"
+PREFLIGHT_APIFY_API_TOKEN_SLOTS="primary,quinary,senary"
+ANALYSIS_V2_INSTAGRAM_ROUTE="apify_v1"
 BETATEST_FREE_POOL_ENABLED="false"
 BETATEST_FREE_POOL_MAX_SNAPSHOT_AGE_SECONDS="300"
 BETATEST_FREE_POOL_REFRESH_INTERVAL_SECONDS="60"
@@ -1641,29 +1672,39 @@ EOF
 cat >"$temp_dir/runtime-provider-secret.env" <<'EOF'
 ANALYSIS_V2_MEDIA_ARTIFACT_BUCKET="test-project-analysis-v2-media"
 ANALYSIS_V2_APIFY_API_TOKEN_SLOT="quinary"
+PREFLIGHT_APIFY_API_TOKEN_SLOTS="primary,quinary,senary"
+ANALYSIS_V2_INSTAGRAM_ROUTE="apify_v1"
 APIFY_QUINARY_API_TOKEN="SECRET_SENTINEL_MUST_NOT_BE_PRINTED"
 EOF
 
 cat >"$temp_dir/runtime-quoted-secret.yaml" <<'EOF'
 ANALYSIS_V2_MEDIA_ARTIFACT_BUCKET: "test-project-analysis-v2-media"
 ANALYSIS_V2_APIFY_API_TOKEN_SLOT: "quinary"
+PREFLIGHT_APIFY_API_TOKEN_SLOTS: "primary,quinary,senary"
+ANALYSIS_V2_INSTAGRAM_ROUTE: "apify_v1"
 "APIFY_QUINARY_API_TOKEN": "QUOTED_SECRET_SENTINEL_MUST_NOT_BE_PRINTED"
 EOF
 
 cat >"$temp_dir/runtime-quoted-gate.yaml" <<'EOF'
 ANALYSIS_V2_MEDIA_ARTIFACT_BUCKET: "test-project-analysis-v2-media"
 ANALYSIS_V2_APIFY_API_TOKEN_SLOT: "quinary"
+PREFLIGHT_APIFY_API_TOKEN_SLOTS: "primary,quinary,senary"
+ANALYSIS_V2_INSTAGRAM_ROUTE: "apify_v1"
 "ANALYSIS_V2_TASKS_ENABLED": "true"
 EOF
 
 cat >"$temp_dir/runtime-wrong-slot.env" <<'EOF'
 ANALYSIS_V2_MEDIA_ARTIFACT_BUCKET="test-project-analysis-v2-media"
 ANALYSIS_V2_APIFY_API_TOKEN_SLOT="primary"
+PREFLIGHT_APIFY_API_TOKEN_SLOTS="primary,quinary,senary"
+ANALYSIS_V2_INSTAGRAM_ROUTE="apify_v1"
 EOF
 
 cat >"$temp_dir/runtime-secondary-slot.env" <<'EOF'
 ANALYSIS_V2_MEDIA_ARTIFACT_BUCKET="test-project-analysis-v2-media"
 ANALYSIS_V2_APIFY_API_TOKEN_SLOT="secondary"
+PREFLIGHT_APIFY_API_TOKEN_SLOTS="primary,quinary,senary"
+ANALYSIS_V2_INSTAGRAM_ROUTE="apify_v1"
 BETATEST_FREE_POOL_ENABLED="false"
 BETATEST_FREE_POOL_MAX_SNAPSHOT_AGE_SECONDS="300"
 BETATEST_FREE_POOL_REFRESH_INTERVAL_SECONDS="60"
@@ -1681,6 +1722,8 @@ EOF
 cat >"$temp_dir/runtime-beta-secondary-slot.env" <<'EOF'
 ANALYSIS_V2_MEDIA_ARTIFACT_BUCKET="test-project-analysis-v2-media"
 ANALYSIS_V2_APIFY_API_TOKEN_SLOT="secondary"
+PREFLIGHT_APIFY_API_TOKEN_SLOTS="primary,quinary,senary"
+ANALYSIS_V2_INSTAGRAM_ROUTE="apify_v1"
 BETATEST_FREE_POOL_ENABLED="true"
 BETATEST_FREE_POOL_MAX_SNAPSHOT_AGE_SECONDS="300"
 BETATEST_FREE_POOL_REFRESH_INTERVAL_SECONDS="60"
@@ -1698,6 +1741,8 @@ EOF
 cat >"$temp_dir/runtime-primary-slot.env" <<'EOF'
 ANALYSIS_V2_MEDIA_ARTIFACT_BUCKET="test-project-analysis-v2-media"
 ANALYSIS_V2_APIFY_API_TOKEN_SLOT="primary"
+PREFLIGHT_APIFY_API_TOKEN_SLOTS="primary,quinary,senary"
+ANALYSIS_V2_INSTAGRAM_ROUTE="apify_v1"
 ANALYSIS_V2_AUTHORIZED_TEST_SHARDING_ENABLED="false"
 BETATEST_FREE_POOL_ENABLED="false"
 BETATEST_FREE_POOL_MAX_SNAPSHOT_AGE_SECONDS="300"
@@ -1755,29 +1800,39 @@ cp "$temp_dir/build.yaml" "$temp_dir/build.env"
 
 cat >"$temp_dir/runtime-credential.env" <<'EOF'
 ANALYSIS_V2_MEDIA_ARTIFACT_BUCKET="test-project-analysis-v2-media"
+PREFLIGHT_APIFY_API_TOKEN_SLOTS="primary,quinary,senary"
+ANALYSIS_V2_INSTAGRAM_ROUTE="apify_v1"
 GOOGLE_APPLICATION_CREDENTIALS="RUNTIME_CREDENTIAL_SENTINEL_MUST_NOT_BE_PRINTED"
 EOF
 
 cat >"$temp_dir/runtime-r2-credential.env" <<'EOF'
 ANALYSIS_V2_MEDIA_ARTIFACT_BUCKET="test-project-analysis-v2-media"
+PREFLIGHT_APIFY_API_TOKEN_SLOTS="primary,quinary,senary"
+ANALYSIS_V2_INSTAGRAM_ROUTE="apify_v1"
 ANALYSIS_V2_RESULT_IMAGE_R2_SECRET_ACCESS_KEY="R2_RUNTIME_CREDENTIAL_SENTINEL_MUST_NOT_BE_PRINTED"
 EOF
 
 cat >"$temp_dir/runtime-admission.env" <<'EOF'
 ANALYSIS_V2_MEDIA_ARTIFACT_BUCKET="test-project-analysis-v2-media"
 ANALYSIS_V2_APIFY_API_TOKEN_SLOT="quinary"
+PREFLIGHT_APIFY_API_TOKEN_SLOTS="primary,quinary,senary"
+ANALYSIS_V2_INSTAGRAM_ROUTE="apify_v1"
 ANALYSIS_V2_ADMISSION_ENABLED="true"
 EOF
 
 cat >"$temp_dir/runtime-legacy-gate.env" <<'EOF'
 ANALYSIS_V2_MEDIA_ARTIFACT_BUCKET="test-project-analysis-v2-media"
 ANALYSIS_V2_APIFY_API_TOKEN_SLOT="quinary"
+PREFLIGHT_APIFY_API_TOKEN_SLOTS="primary,quinary,senary"
+ANALYSIS_V2_INSTAGRAM_ROUTE="apify_v1"
 ANALYSIS_V2_WORKER_EXECUTION_ENABLED="true"
 EOF
 
 cat >"$temp_dir/runtime-blite-gate.env" <<'EOF'
 ANALYSIS_V2_MEDIA_ARTIFACT_BUCKET="test-project-analysis-v2-media"
 ANALYSIS_V2_APIFY_API_TOKEN_SLOT="quinary"
+PREFLIGHT_APIFY_API_TOKEN_SLOTS="primary,quinary,senary"
+ANALYSIS_V2_INSTAGRAM_ROUTE="apify_v1"
 PRECHECKOUT_BLITE_ENABLED="true"
 PRECHECKOUT_BLITE_ROLLOUT_PERCENT="1"
 EOF
@@ -1801,6 +1856,8 @@ common_env=(
   'ANALYSIS_V2_MEDIA_ARTIFACT_BUCKET=test-project-analysis-v2-media'
   'ANALYSIS_V2_DEPLOY_LOCK_BUCKET=analysis-v2-lock-0123456789abcdef0123456789abcdef'
   'ANALYSIS_V2_APIFY_API_TOKEN_SLOT=quinary'
+  'PREFLIGHT_APIFY_API_TOKEN_SLOTS=primary,quinary,senary'
+  'ANALYSIS_V2_INSTAGRAM_ROUTE=apify_v1'
   'ANALYSIS_V2_SUPABASE_SERVICE_ROLE_SECRET_VERSION=7'
   'ANALYSIS_V2_APIFY_API_TOKEN_SECRET_VERSION=7'
   'ANALYSIS_V2_APIFY_ADDITIONAL_SECRET_VERSIONS=primary:7,secondary:7,tertiary:7,quaternary:7,senary:7,septenary:7,tenth:7'
@@ -1813,6 +1870,50 @@ common_env=(
   "FAKE_GCLOUD_SOURCE_COMMIT=$repo_source_commit"
   "ANALYSIS_V2_WORKER_BUILD_ENV_VARS_FILE=$temp_dir/build.yaml"
 )
+
+for invalid_preflight_pool in \
+  '' \
+  'primary,senary,quinary' \
+  'primary,quinary,senary,secondary' \
+  ' primary,quinary,senary' \
+  'primary,quinary,tenth'; do
+  if env "${common_env[@]}" \
+    "PREFLIGHT_APIFY_API_TOKEN_SLOTS=$invalid_preflight_pool" \
+    'FAKE_GCLOUD_STATE=ready' \
+    bash "$script_dir/deploy-analysis-v2-worker.sh" --dry-run \
+    >"$temp_dir/invalid-preflight-pool-${#invalid_preflight_pool}.out" 2>&1; then
+    fail "invalid PREFLIGHT_APIFY_API_TOKEN_SLOTS was accepted: $invalid_preflight_pool"
+  fi
+  if [[ -n "$invalid_preflight_pool" ]]; then
+    assert_contains "$temp_dir/invalid-preflight-pool-${#invalid_preflight_pool}.out" \
+      "PREFLIGHT_APIFY_API_TOKEN_SLOTS must be exactly primary,quinary,senary"
+  else
+    assert_contains "$temp_dir/invalid-preflight-pool-${#invalid_preflight_pool}.out" \
+      "PREFLIGHT_APIFY_API_TOKEN_SLOTS is required"
+  fi
+done
+
+for invalid_instagram_route in \
+  '' \
+  'apify' \
+  'APIFY_V1' \
+  'selfhosted_auth' \
+  'selfhosted_auth_v2'; do
+  if env "${common_env[@]}" \
+    "ANALYSIS_V2_INSTAGRAM_ROUTE=$invalid_instagram_route" \
+    'FAKE_GCLOUD_STATE=ready' \
+    bash "$script_dir/deploy-analysis-v2-worker.sh" --dry-run \
+    >"$temp_dir/invalid-instagram-route-${#invalid_instagram_route}.out" 2>&1; then
+    fail "invalid ANALYSIS_V2_INSTAGRAM_ROUTE was accepted: $invalid_instagram_route"
+  fi
+  if [[ -n "$invalid_instagram_route" ]]; then
+    assert_contains "$temp_dir/invalid-instagram-route-${#invalid_instagram_route}.out" \
+      "ANALYSIS_V2_INSTAGRAM_ROUTE must be apify_v1 or selfhosted_auth_v1"
+  else
+    assert_contains "$temp_dir/invalid-instagram-route-${#invalid_instagram_route}.out" \
+      "ANALYSIS_V2_INSTAGRAM_ROUTE is required"
+  fi
+done
 
 if env "${common_env[@]}" \
   'FAKE_GCLOUD_STATE=ready' \
@@ -2499,11 +2600,17 @@ assert_not_contains "$temp_dir/slot-staging-deploy.out" ' --env-vars-file='
 assert_contains "$temp_dir/slot-staging-deploy.out" \
   "--build-env-vars-file="
 assert_contains "$temp_dir/slot-staging-deploy.out" \
-  "--update-env-vars=ANALYSIS_V2_MEDIA_ARTIFACT_BUCKET=test-project-analysis-v2-media,ANALYSIS_V2_APIFY_API_TOKEN_SLOT=primary"
+  "--update-env-vars=^|^ANALYSIS_V2_MEDIA_ARTIFACT_BUCKET=test-project-analysis-v2-media|ANALYSIS_V2_APIFY_API_TOKEN_SLOT=primary|PREFLIGHT_APIFY_API_TOKEN_SLOTS=primary,quinary,senary"
+assert_contains "$temp_dir/slot-staging-deploy.out" \
+  'PREFLIGHT_APIFY_API_TOKEN_SLOTS='
+assert_contains "$temp_dir/slot-staging-deploy.out" \
+  'ANALYSIS_V2_INSTAGRAM_ROUTE=apify_v1'
 assert_contains "$temp_dir/slot-staging.out" \
   "verified: source-build revision staged without live traffic"
 assert_contains "$temp_dir/slot-staging-endpoint.out" \
   "--image=asia-northeast3-docker.pkg.dev/test-project/cloud-run-source-deploy/analysis-worker@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+assert_contains "$temp_dir/slot-staging-endpoint.out" \
+  'ANALYSIS_V2_INSTAGRAM_ROUTE=apify_v1'
 assert_contains "$temp_dir/slot-staging.out" \
   "verified: final worker revision is staged without receiving live traffic"
 assert_contains "$temp_dir/slot-staging-traffic.out" \
@@ -2853,12 +2960,12 @@ env "${common_env[@]}" 'FAKE_GCLOUD_STATE=ready' \
   bash "$script_dir/deploy-analysis-v2-worker.sh" --dry-run \
   >"$temp_dir/worker-independent-gates.out"
 assert_contains "$temp_dir/worker-independent-gates.out" \
-  "ANALYSIS_V2_WORKER_ENABLED=true\\,ANALYSIS_V2_RECOVERY_ENABLED=false"
+  "ANALYSIS_V2_WORKER_ENABLED=true\\|ANALYSIS_V2_RECOVERY_ENABLED=false"
 assert_contains "$temp_dir/worker-independent-gates.out" "--no-traffic"
 assert_contains "$temp_dir/worker-independent-gates.out" \
   "--remove-env-vars=ANALYSIS_V2_ADMISSION_ENABLED\\,ANALYSIS_V2_WORKER_EXECUTION_ENABLED"
 assert_not_contains "$temp_dir/worker-independent-gates.out" \
-  "ANALYSIS_V2_WORKER_ENABLED=true\\,ANALYSIS_V2_RECOVERY_ENABLED=true"
+  "ANALYSIS_V2_WORKER_ENABLED=true\\|ANALYSIS_V2_RECOVERY_ENABLED=true"
 
 # B-lite is a nonsecret worker contract, not a Vercel-only setting. Its default
 # must be made explicit on the final immutable-image update so a source deploy
@@ -2867,9 +2974,9 @@ env "${common_env[@]}" 'FAKE_GCLOUD_STATE=ready' \
   bash "$script_dir/deploy-analysis-v2-worker.sh" --dry-run \
   >"$temp_dir/worker-blite-default-contract.out"
 assert_contains "$temp_dir/worker-blite-default-contract.out" \
-  "PRECHECKOUT_BLITE_ENABLED=false\\,PRECHECKOUT_BLITE_ROLLOUT_PERCENT=0"
+  "PRECHECKOUT_BLITE_ENABLED=false\\|PRECHECKOUT_BLITE_ROLLOUT_PERCENT=0"
 blite_default_contract_count="$(LC_ALL=C grep -Fc -- \
-  'PRECHECKOUT_BLITE_ENABLED=false\,PRECHECKOUT_BLITE_ROLLOUT_PERCENT=0' \
+  'PRECHECKOUT_BLITE_ENABLED=false\|PRECHECKOUT_BLITE_ROLLOUT_PERCENT=0' \
   "$temp_dir/worker-blite-default-contract.out" || true)"
 [[ "$blite_default_contract_count" == "2" ]] \
   || fail "B-lite defaults were not present in both source deploy and final update commands"
@@ -2882,7 +2989,7 @@ env "${common_env[@]}" 'FAKE_GCLOUD_STATE=ready' \
   bash "$script_dir/deploy-analysis-v2-worker.sh" --dry-run \
   >"$temp_dir/worker-blite-custom-contract.out"
 assert_contains "$temp_dir/worker-blite-custom-contract.out" \
-  "PRECHECKOUT_BLITE_ENABLED=true\\,PRECHECKOUT_BLITE_ROLLOUT_PERCENT=1"
+  "PRECHECKOUT_BLITE_ENABLED=true\\|PRECHECKOUT_BLITE_ROLLOUT_PERCENT=1"
 
 if env "${common_env[@]}" 'FAKE_GCLOUD_STATE=prerequisites_ready' \
   'ANALYSIS_V2_WORKER_EXECUTION_ENABLED=true' \
@@ -4801,6 +4908,22 @@ if env "${common_env[@]}" 'FAKE_GCLOUD_STATE=runtime_env_drift' \
 fi
 assert_contains "$temp_dir/worker-runtime-env-drift.out" \
   "Cloud Run worker queue, gate, target, or OIDC runtime configuration has drifted"
+
+if env "${common_env[@]}" 'FAKE_GCLOUD_STATE=runtime_preflight_pool_drift' \
+  bash "$script_dir/deploy-analysis-v2-worker.sh" --check \
+  >"$temp_dir/worker-runtime-preflight-pool-drift.out" 2>&1; then
+  fail "Cloud Run preflight Apify pool drift was accepted"
+fi
+assert_contains "$temp_dir/worker-runtime-preflight-pool-drift.out" \
+  "Cloud Run worker runtime, scaling, egress, or artifact config has drifted"
+
+if env "${common_env[@]}" 'FAKE_GCLOUD_STATE=runtime_instagram_route_drift' \
+  bash "$script_dir/deploy-analysis-v2-worker.sh" --check \
+  >"$temp_dir/worker-runtime-instagram-route-drift.out" 2>&1; then
+  fail "Cloud Run Instagram route drift was accepted"
+fi
+assert_contains "$temp_dir/worker-runtime-instagram-route-drift.out" \
+  "Cloud Run worker runtime, scaling, egress, or artifact config has drifted"
 
 for blite_drift_state in runtime_blite_missing runtime_blite_enabled_drift runtime_blite_rollout_drift; do
   if env "${common_env[@]}" "FAKE_GCLOUD_STATE=$blite_drift_state" \

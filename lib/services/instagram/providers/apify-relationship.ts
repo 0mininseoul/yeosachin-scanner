@@ -15,6 +15,19 @@ export type ApifyRelationshipKind = 'followers' | 'following';
 
 const APIFY_RUN_ID_PATTERN = /^[A-Za-z0-9]{8,64}$/;
 const MAX_INVOCATION_WAIT_SECS = 240;
+const PREFLIGHT_APIFY_API_TOKEN_SLOTS_VALUE = 'primary,quinary,senary';
+const PREFLIGHT_APIFY_API_TOKEN_SLOTS = [
+    'primary',
+    'quinary',
+    'senary',
+] as const;
+const PREFLIGHT_APIFY_API_TOKEN_ENV: Readonly<Record<
+    (typeof PREFLIGHT_APIFY_API_TOKEN_SLOTS)[number], string
+>> = Object.freeze({
+    primary: 'APIFY_PRIMARY_API_TOKEN',
+    quinary: 'APIFY_QUINARY_API_TOKEN',
+    senary: 'APIFY_SENARY_API_TOKEN',
+});
 export const APIFY_PROVIDER_QUOTA_ERROR_CODE = 'SCRAPING_PROVIDER_QUOTA_ERROR';
 export const APIFY_PROVIDER_START_REJECTED_ERROR_CODE =
     'SCRAPING_PROVIDER_START_REJECTED_ERROR';
@@ -299,21 +312,25 @@ export function selectPreflightApifyCredentialSlot(
     preflightId: string,
     env: Record<string, string | undefined> = process.env,
 ): ApifyCredentialSlot {
-    if (env.ANALYSIS_V2_APIFY_API_TOKEN_SLOT?.trim()) {
-        return selectAnalysisV2ApifyCredentialSlot(env);
+    if (env.PREFLIGHT_APIFY_API_TOKEN_SLOTS !== PREFLIGHT_APIFY_API_TOKEN_SLOTS_VALUE) {
+        throw new Error(
+            'SCRAPING_CONFIG_ERROR: PREFLIGHT_APIFY_API_TOKEN_SLOTS must be exactly primary,quinary,senary.'
+        );
     }
-    const hasPrimary = Boolean(
-        env.APIFY_PRIMARY_API_TOKEN?.trim() || env.APIFY_API_TOKEN?.trim()
-    );
-    const hasSecondary = Boolean(env.APIFY_SECONDARY_API_TOKEN?.trim());
-    const hasQuaternary = Boolean(env.APIFY_QUATERNARY_API_TOKEN?.trim());
-    if (!hasPrimary || !hasSecondary || !hasQuaternary) {
-        return selectAnalysisV2ApifyCredentialSlot(env);
+
+    for (const slot of PREFLIGHT_APIFY_API_TOKEN_SLOTS) {
+        const tokenEnv = PREFLIGHT_APIFY_API_TOKEN_ENV[slot];
+        if (!env[tokenEnv]?.trim()) {
+            throw new Error(
+                `SCRAPING_CONFIG_ERROR: ${tokenEnv} is required for the preflight Apify pool.`
+            );
+        }
     }
+
     const firstByte = createHash('sha256')
         .update(preflightId.toLowerCase(), 'utf8')
         .digest()[0];
-    return (['primary', 'secondary', 'quaternary'] as const)[firstByte % 3];
+    return PREFLIGHT_APIFY_API_TOKEN_SLOTS[firstByte % PREFLIGHT_APIFY_API_TOKEN_SLOTS.length];
 }
 
 export function selectApifyApiToken(

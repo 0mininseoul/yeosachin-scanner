@@ -2066,10 +2066,11 @@ export async function processPreflight(
                     startedAtMs: Date.parse(bliteClock.submittedAt),
                 });
             const identity = preflightProviderIdentity(
-                selectPreflightApifyCredentialSlot(
-                    claim.preflightId,
-                    dependencies.env,
-                )
+                existingRun?.credentialSlot
+                    ?? selectPreflightApifyCredentialSlot(
+                        claim.preflightId,
+                        dependencies.env,
+                    )
             );
             const bound = await bindPreflightProviderRunCheckpoint({
                 store: providerRuns,

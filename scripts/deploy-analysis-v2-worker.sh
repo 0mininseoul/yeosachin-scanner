@@ -33,6 +33,7 @@ readonly -a APIFY_TOKEN_SLOTS=(
   septenary
   tenth
 )
+readonly PREFLIGHT_APIFY_API_TOKEN_SLOTS_VALUE="primary,quinary,senary"
 
 mode="apply"
 reconcile_iam="false"
@@ -71,6 +72,8 @@ Required environment variables:
   ANALYSIS_V2_MEDIA_ARTIFACT_BUCKET
   ANALYSIS_V2_DEPLOY_LOCK_BUCKET
   ANALYSIS_V2_APIFY_API_TOKEN_SLOT
+  PREFLIGHT_APIFY_API_TOKEN_SLOTS
+  ANALYSIS_V2_INSTAGRAM_ROUTE
   ANALYSIS_V2_SUPABASE_SERVICE_ROLE_SECRET_VERSION
   ANALYSIS_V2_APIFY_API_TOKEN_SECRET_VERSION
   ANALYSIS_V2_IMAGE_PROXY_SIGNING_SECRET_VERSION
@@ -257,6 +260,16 @@ validate_slot() {
     [[ "$1" != "$allowed" ]] || return 0
   done
   die "ANALYSIS_V2_APIFY_API_TOKEN_SLOT must be primary, secondary, tertiary, quaternary, quinary, senary, septenary, or tenth"
+}
+
+validate_preflight_apify_token_slots() {
+  [[ "$1" == "$PREFLIGHT_APIFY_API_TOKEN_SLOTS_VALUE" ]] \
+    || die "PREFLIGHT_APIFY_API_TOKEN_SLOTS must be exactly primary,quinary,senary"
+}
+
+validate_instagram_route() {
+  [[ "$1" == "apify_v1" || "$1" == "selfhosted_auth_v1" ]] \
+    || die "ANALYSIS_V2_INSTAGRAM_ROUTE must be apify_v1 or selfhosted_auth_v1"
 }
 
 validate_numeric_version() {
@@ -564,6 +577,8 @@ service_runtime_config_matches() {
     --arg runtime_sa "$ANALYSIS_V2_WORKER_RUNTIME_SERVICE_ACCOUNT_EMAIL" \
     --arg bucket "$ANALYSIS_V2_MEDIA_ARTIFACT_BUCKET" \
     --arg slot "$ANALYSIS_V2_APIFY_API_TOKEN_SLOT" \
+    --arg preflight_apify_token_slots "$preflight_apify_token_slots" \
+    --arg instagram_route "$instagram_route" \
     --arg precheckout_blite_enabled "$precheckout_blite_enabled" \
     --arg precheckout_blite_rollout_percent "$precheckout_blite_rollout_percent" \
     --arg selfhosted_global_gate "$SELFHOSTED_PROFILE_GLOBAL_GATE_ENABLED" \
@@ -679,6 +694,8 @@ service_runtime_config_matches() {
         and ([.spec.template.spec.containers[0].env[]? |
           select(.name == "ANALYSIS_V2_MEDIA_ARTIFACT_BUCKET") | .value] == [$bucket])
         and value("ANALYSIS_V2_APIFY_API_TOKEN_SLOT") == [$slot]
+        and value("PREFLIGHT_APIFY_API_TOKEN_SLOTS") == [$preflight_apify_token_slots]
+        and value("ANALYSIS_V2_INSTAGRAM_ROUTE") == [$instagram_route]
         and value("PRECHECKOUT_BLITE_ENABLED") == [$precheckout_blite_enabled]
         and value("PRECHECKOUT_BLITE_ROLLOUT_PERCENT") == [$precheckout_blite_rollout_percent]
         and value("SELFHOSTED_PROFILE_GLOBAL_GATE_ENABLED") == [$selfhosted_global_gate]
@@ -1663,6 +1680,8 @@ worker_endpoint_env_matches() {
     --arg task_sa "$ANALYSIS_V2_TASKS_SERVICE_ACCOUNT_EMAIL" \
     --arg maintenance_sa "$ANALYSIS_V2_MAINTENANCE_SERVICE_ACCOUNT_EMAIL" \
     --arg slot "$ANALYSIS_V2_APIFY_API_TOKEN_SLOT" \
+    --arg preflight_apify_token_slots "$preflight_apify_token_slots" \
+    --arg instagram_route "$instagram_route" \
     --arg worker_enabled "$worker_enabled" \
     --arg recovery_enabled "$recovery_enabled" \
     --arg precheckout_blite_enabled "$precheckout_blite_enabled" \
@@ -1711,6 +1730,8 @@ worker_endpoint_env_matches() {
         and value("ANALYSIS_V2_TASKS_SERVICE_ACCOUNT_EMAIL") == [$task_sa]
         and value("ANALYSIS_V2_TASKS_CALLER_AUTH_MODE") == ["adc"]
         and value("ANALYSIS_V2_APIFY_API_TOKEN_SLOT") == [$slot]
+        and value("PREFLIGHT_APIFY_API_TOKEN_SLOTS") == [$preflight_apify_token_slots]
+        and value("ANALYSIS_V2_INSTAGRAM_ROUTE") == [$instagram_route]
         and value("PREFLIGHT_TASKS_ENABLED") == ["true"]
         and value("PREFLIGHT_TASKS_PROJECT") == [$project]
         and value("PREFLIGHT_TASKS_LOCATION") == [$location]
@@ -1724,11 +1745,21 @@ worker_endpoint_env_matches() {
     <<<"$config" >/dev/null
 }
 
+format_update_env_vars() {
+  local assignments="$1"
+  local delimiter='|'
+  local pool_delimited="${preflight_apify_token_slots//,/$delimiter}"
+  assignments="${assignments//,/$delimiter}"
+  assignments="${assignments/PREFLIGHT_APIFY_API_TOKEN_SLOTS=$pool_delimited/PREFLIGHT_APIFY_API_TOKEN_SLOTS=$preflight_apify_token_slots}"
+  printf '^%s^%s' "$delimiter" "$assignments"
+}
+
 ensure_worker_endpoint_env() {
   local config
   local origin
   local -a staging_args=(--no-traffic)
   local result_image_env_assignments="ANALYSIS_V2_RESULT_IMAGES_ENABLED=$result_images_enabled"
+  local endpoint_env_assignments
   local remove_env_vars="ANALYSIS_V2_ADMISSION_ENABLED,ANALYSIS_V2_WORKER_EXECUTION_ENABLED"
   if [[ "$result_images_enabled" == "true" ]]; then
     result_image_env_assignments="$result_image_env_assignments,ANALYSIS_V2_RESULT_IMAGE_R2_ENDPOINT=$result_image_r2_endpoint,ANALYSIS_V2_RESULT_IMAGE_R2_BUCKET=$result_image_r2_bucket"
@@ -1761,6 +1792,8 @@ ensure_worker_endpoint_env() {
     log "[dry-run] final revision will pin the immutable image digest from the staged source-build revision"
   fi
 
+    endpoint_env_assignments="$(format_update_env_vars "ANALYSIS_V2_TASKS_ENABLED=true,ANALYSIS_V2_WORKER_ENABLED=$worker_enabled,ANALYSIS_V2_RECOVERY_ENABLED=$recovery_enabled,PRECHECKOUT_BLITE_ENABLED=$precheckout_blite_enabled,PRECHECKOUT_BLITE_ROLLOUT_PERCENT=$precheckout_blite_rollout_percent,EARLYBIRD_AUTOMATIC_FULFILLMENT_ENABLED=$automatic_fulfillment_enabled,BETATEST_FREE_POOL_ENABLED=$beta_free_pool_enabled,BETATEST_FREE_POOL_MAX_SNAPSHOT_AGE_SECONDS=$beta_free_pool_max_snapshot_age_seconds,BETATEST_FREE_POOL_REFRESH_INTERVAL_SECONDS=$beta_free_pool_refresh_interval_seconds,ANALYSIS_V2_TASKS_PROJECT=$ANALYSIS_V2_TASKS_PROJECT,ANALYSIS_V2_TASKS_LOCATION=$ANALYSIS_V2_TASKS_LOCATION,ANALYSIS_V2_TASKS_QUEUE=$ANALYSIS_V2_TASKS_QUEUE,ANALYSIS_V2_TASKS_SERVICE_ACCOUNT_EMAIL=$ANALYSIS_V2_TASKS_SERVICE_ACCOUNT_EMAIL,ANALYSIS_V2_TASKS_CALLER_AUTH_MODE=adc,ANALYSIS_V2_APIFY_API_TOKEN_SLOT=$ANALYSIS_V2_APIFY_API_TOKEN_SLOT,PREFLIGHT_APIFY_API_TOKEN_SLOTS=$preflight_apify_token_slots,ANALYSIS_V2_INSTAGRAM_ROUTE=$instagram_route,ANALYSIS_V2_TASKS_TARGET_URL=$origin/api/analysis/v2/worker,ANALYSIS_V2_TASKS_OIDC_AUDIENCE=$origin,PREFLIGHT_TASKS_ENABLED=true,PREFLIGHT_TASKS_PROJECT=$ANALYSIS_V2_TASKS_PROJECT,PREFLIGHT_TASKS_LOCATION=$ANALYSIS_V2_TASKS_LOCATION,PREFLIGHT_TASKS_QUEUE=$preflight_queue,PREFLIGHT_TASKS_SERVICE_ACCOUNT_EMAIL=$ANALYSIS_V2_TASKS_SERVICE_ACCOUNT_EMAIL,PREFLIGHT_TASKS_CALLER_AUTH_MODE=adc,PREFLIGHT_TASKS_TARGET_URL=$origin/api/analysis/preflight/worker,PREFLIGHT_TASKS_OIDC_AUDIENCE=$origin,PREFLIGHT_LOCAL_AFTER_ENABLED=false,ANALYSIS_V2_MAINTENANCE_SERVICE_ACCOUNT_EMAIL=$ANALYSIS_V2_MAINTENANCE_SERVICE_ACCOUNT_EMAIL,ANALYSIS_V2_MAINTENANCE_OIDC_AUDIENCE=$origin,$result_image_env_assignments")"
+
   run_mutation gcloud run services update \
     "$ANALYSIS_V2_TASKS_CLOUD_RUN_SERVICE" \
     "--project=$ANALYSIS_V2_TASKS_PROJECT" \
@@ -1768,7 +1801,7 @@ ensure_worker_endpoint_env() {
     "${staging_args[@]}" \
     "--revision-suffix=$final_revision_suffix" \
     "--update-labels=$PROVENANCE_LABEL_KEY=$source_commit_sha" \
-    "--update-env-vars=ANALYSIS_V2_TASKS_ENABLED=true,ANALYSIS_V2_WORKER_ENABLED=$worker_enabled,ANALYSIS_V2_RECOVERY_ENABLED=$recovery_enabled,PRECHECKOUT_BLITE_ENABLED=$precheckout_blite_enabled,PRECHECKOUT_BLITE_ROLLOUT_PERCENT=$precheckout_blite_rollout_percent,EARLYBIRD_AUTOMATIC_FULFILLMENT_ENABLED=$automatic_fulfillment_enabled,BETATEST_FREE_POOL_ENABLED=$beta_free_pool_enabled,BETATEST_FREE_POOL_MAX_SNAPSHOT_AGE_SECONDS=$beta_free_pool_max_snapshot_age_seconds,BETATEST_FREE_POOL_REFRESH_INTERVAL_SECONDS=$beta_free_pool_refresh_interval_seconds,ANALYSIS_V2_TASKS_PROJECT=$ANALYSIS_V2_TASKS_PROJECT,ANALYSIS_V2_TASKS_LOCATION=$ANALYSIS_V2_TASKS_LOCATION,ANALYSIS_V2_TASKS_QUEUE=$ANALYSIS_V2_TASKS_QUEUE,ANALYSIS_V2_TASKS_SERVICE_ACCOUNT_EMAIL=$ANALYSIS_V2_TASKS_SERVICE_ACCOUNT_EMAIL,ANALYSIS_V2_TASKS_CALLER_AUTH_MODE=adc,ANALYSIS_V2_APIFY_API_TOKEN_SLOT=$ANALYSIS_V2_APIFY_API_TOKEN_SLOT,ANALYSIS_V2_TASKS_TARGET_URL=$origin/api/analysis/v2/worker,ANALYSIS_V2_TASKS_OIDC_AUDIENCE=$origin,PREFLIGHT_TASKS_ENABLED=true,PREFLIGHT_TASKS_PROJECT=$ANALYSIS_V2_TASKS_PROJECT,PREFLIGHT_TASKS_LOCATION=$ANALYSIS_V2_TASKS_LOCATION,PREFLIGHT_TASKS_QUEUE=$preflight_queue,PREFLIGHT_TASKS_SERVICE_ACCOUNT_EMAIL=$ANALYSIS_V2_TASKS_SERVICE_ACCOUNT_EMAIL,PREFLIGHT_TASKS_CALLER_AUTH_MODE=adc,PREFLIGHT_TASKS_TARGET_URL=$origin/api/analysis/preflight/worker,PREFLIGHT_TASKS_OIDC_AUDIENCE=$origin,PREFLIGHT_LOCAL_AFTER_ENABLED=false,ANALYSIS_V2_MAINTENANCE_SERVICE_ACCOUNT_EMAIL=$ANALYSIS_V2_MAINTENANCE_SERVICE_ACCOUNT_EMAIL,ANALYSIS_V2_MAINTENANCE_OIDC_AUDIENCE=$origin,$result_image_env_assignments" \
+    "--update-env-vars=$endpoint_env_assignments" \
     "--remove-env-vars=$remove_env_vars" \
     --quiet
 
@@ -1968,6 +2001,7 @@ verify_worker_prerequisites() {
 
 build_deploy_args() {
   local result_image_env_assignments="ANALYSIS_V2_RESULT_IMAGES_ENABLED=$result_images_enabled"
+  local runtime_env_assignments
   if [[ "$result_images_enabled" == "true" ]]; then
     result_image_env_assignments="$result_image_env_assignments,ANALYSIS_V2_RESULT_IMAGE_R2_ENDPOINT=$result_image_r2_endpoint,ANALYSIS_V2_RESULT_IMAGE_R2_BUCKET=$result_image_r2_bucket"
   fi
@@ -2006,7 +2040,8 @@ build_deploy_args() {
   if [[ -n "$worker_env_deploy_file" ]]; then
     deploy_args+=("--env-vars-file=$worker_env_deploy_file")
   else
-    deploy_args+=("--update-env-vars=ANALYSIS_V2_MEDIA_ARTIFACT_BUCKET=$ANALYSIS_V2_MEDIA_ARTIFACT_BUCKET,ANALYSIS_V2_APIFY_API_TOKEN_SLOT=$ANALYSIS_V2_APIFY_API_TOKEN_SLOT,PRECHECKOUT_BLITE_ENABLED=$precheckout_blite_enabled,PRECHECKOUT_BLITE_ROLLOUT_PERCENT=$precheckout_blite_rollout_percent,EARLYBIRD_AUTOMATIC_FULFILLMENT_ENABLED=$automatic_fulfillment_enabled,BETATEST_FREE_POOL_ENABLED=$beta_free_pool_enabled,BETATEST_FREE_POOL_MAX_SNAPSHOT_AGE_SECONDS=$beta_free_pool_max_snapshot_age_seconds,BETATEST_FREE_POOL_REFRESH_INTERVAL_SECONDS=$beta_free_pool_refresh_interval_seconds,$result_image_env_assignments")
+    runtime_env_assignments="$(format_update_env_vars "ANALYSIS_V2_MEDIA_ARTIFACT_BUCKET=$ANALYSIS_V2_MEDIA_ARTIFACT_BUCKET,ANALYSIS_V2_APIFY_API_TOKEN_SLOT=$ANALYSIS_V2_APIFY_API_TOKEN_SLOT,PREFLIGHT_APIFY_API_TOKEN_SLOTS=$preflight_apify_token_slots,ANALYSIS_V2_INSTAGRAM_ROUTE=$instagram_route,PRECHECKOUT_BLITE_ENABLED=$precheckout_blite_enabled,PRECHECKOUT_BLITE_ROLLOUT_PERCENT=$precheckout_blite_rollout_percent,EARLYBIRD_AUTOMATIC_FULFILLMENT_ENABLED=$automatic_fulfillment_enabled,BETATEST_FREE_POOL_ENABLED=$beta_free_pool_enabled,BETATEST_FREE_POOL_MAX_SNAPSHOT_AGE_SECONDS=$beta_free_pool_max_snapshot_age_seconds,BETATEST_FREE_POOL_REFRESH_INTERVAL_SECONDS=$beta_free_pool_refresh_interval_seconds,$result_image_env_assignments")"
+    deploy_args+=("--update-env-vars=$runtime_env_assignments")
   fi
   if [[ "$initial_deployment" != "true" ]]; then
     deploy_args+=('--no-traffic')
@@ -2623,6 +2658,8 @@ for name in \
   ANALYSIS_V2_MEDIA_ARTIFACT_BUCKET \
   ANALYSIS_V2_DEPLOY_LOCK_BUCKET \
   ANALYSIS_V2_APIFY_API_TOKEN_SLOT \
+  PREFLIGHT_APIFY_API_TOKEN_SLOTS \
+  ANALYSIS_V2_INSTAGRAM_ROUTE \
   ANALYSIS_V2_SUPABASE_SERVICE_ROLE_SECRET_VERSION \
   ANALYSIS_V2_APIFY_API_TOKEN_SECRET_VERSION \
   ANALYSIS_V2_IMAGE_PROXY_SIGNING_SECRET_VERSION \
@@ -2670,6 +2707,8 @@ readonly r2_access_key_id_secret_version="${ANALYSIS_V2_RESULT_IMAGE_R2_ACCESS_K
 readonly r2_secret_access_key_secret_version="${ANALYSIS_V2_RESULT_IMAGE_R2_SECRET_ACCESS_KEY_SECRET_VERSION:-}"
 readonly result_image_object_hmac_secret_version="${ANALYSIS_V2_RESULT_IMAGE_OBJECT_HMAC_SECRET_VERSION:-}"
 readonly preflight_queue="${PREFLIGHT_TASKS_QUEUE:-analysis-preflight}"
+readonly preflight_apify_token_slots="$PREFLIGHT_APIFY_API_TOKEN_SLOTS"
+readonly instagram_route="$ANALYSIS_V2_INSTAGRAM_ROUTE"
 readonly task_member="serviceAccount:$ANALYSIS_V2_TASKS_SERVICE_ACCOUNT_EMAIL"
 readonly maintenance_member="serviceAccount:$ANALYSIS_V2_MAINTENANCE_SERVICE_ACCOUNT_EMAIL"
 readonly slot_upper="$(printf '%s' "$ANALYSIS_V2_APIFY_API_TOKEN_SLOT" | tr '[:lower:]' '[:upper:]')"
@@ -2694,6 +2733,8 @@ validate_bucket "$ANALYSIS_V2_MEDIA_ARTIFACT_BUCKET" \
   "ANALYSIS_V2_MEDIA_ARTIFACT_BUCKET"
 validate_deploy_lock_bucket "$ANALYSIS_V2_DEPLOY_LOCK_BUCKET"
 validate_slot "$ANALYSIS_V2_APIFY_API_TOKEN_SLOT"
+validate_preflight_apify_token_slots "$preflight_apify_token_slots"
+validate_instagram_route "$instagram_route"
 validate_numeric_version "$supabase_secret_version" \
   ANALYSIS_V2_SUPABASE_SERVICE_ROLE_SECRET_VERSION
 validate_numeric_version "$apify_secret_version" \
@@ -2843,6 +2884,12 @@ if [[ -n "$worker_env_file" ]]; then
   env_json_value_equals "$runtime_env_json" ANALYSIS_V2_APIFY_API_TOKEN_SLOT \
     "$ANALYSIS_V2_APIFY_API_TOKEN_SLOT" \
     || die "runtime env file must set the exact selected ANALYSIS_V2_APIFY_API_TOKEN_SLOT"
+  env_json_value_equals "$runtime_env_json" PREFLIGHT_APIFY_API_TOKEN_SLOTS \
+    "$preflight_apify_token_slots" \
+    || die "runtime env file must set the exact PREFLIGHT_APIFY_API_TOKEN_SLOTS"
+  env_json_value_equals "$runtime_env_json" ANALYSIS_V2_INSTAGRAM_ROUTE \
+    "$instagram_route" \
+    || die "runtime env file must set the exact ANALYSIS_V2_INSTAGRAM_ROUTE"
   env_json_value_equals "$runtime_env_json" SELFHOSTED_PROFILE_GLOBAL_GATE_ENABLED \
     "$SELFHOSTED_PROFILE_GLOBAL_GATE_ENABLED" \
     || die "runtime env file must set SELFHOSTED_PROFILE_GLOBAL_GATE_ENABLED=true"

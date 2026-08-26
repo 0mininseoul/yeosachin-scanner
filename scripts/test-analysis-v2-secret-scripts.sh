@@ -221,6 +221,8 @@ GOOGLE_CLOUD_PROJECT=test-project
 GOOGLE_CLOUD_LOCATION=global
 ANALYSIS_V2_MEDIA_ARTIFACT_BUCKET=test-project-analysis-v2-media
 ANALYSIS_V2_APIFY_API_TOKEN_SLOT=quinary
+PREFLIGHT_APIFY_API_TOKEN_SLOTS=primary,quinary,senary
+ANALYSIS_V2_INSTAGRAM_ROUTE=apify_v1
 ANALYSIS_V2_AUTHORIZED_TEST_SHARDING_ENABLED=false
 BETATEST_FREE_POOL_ENABLED=false
 BETATEST_FREE_POOL_MAX_SNAPSHOT_AGE_SECONDS=300
@@ -925,7 +927,11 @@ env \
 assert_contains "$temp_dir/generated/analysis-v2-runtime.yaml" \
   'ANALYSIS_V2_APIFY_API_TOKEN_SLOT: "senary"'
 assert_contains "$temp_dir/generated/analysis-v2-runtime.yaml" \
+  'PREFLIGHT_APIFY_API_TOKEN_SLOTS: "primary,quinary,senary"'
+assert_contains "$temp_dir/generated/analysis-v2-runtime.yaml" \
   'ANALYSIS_V2_AUTHORIZED_TEST_SHARDING_ENABLED: "false"'
+assert_contains "$temp_dir/generated/analysis-v2-runtime.yaml" \
+  'ANALYSIS_V2_INSTAGRAM_ROUTE: "apify_v1"'
 for beta_runtime_control in \
   'BETATEST_FREE_POOL_ENABLED: "false"' \
   'BETATEST_FREE_POOL_MAX_SNAPSHOT_AGE_SECONDS: "300"' \
@@ -945,6 +951,72 @@ env \
   >"$temp_dir/septenary-generator.out"
 assert_contains "$temp_dir/generated/analysis-v2-runtime.yaml" \
   'ANALYSIS_V2_APIFY_API_TOKEN_SLOT: "septenary"'
+
+sed 's/^ANALYSIS_V2_INSTAGRAM_ROUTE=.*/ANALYSIS_V2_INSTAGRAM_ROUTE=selfhosted_auth_v1/' \
+  "$temp_dir/source.env" >"$temp_dir/selfhosted-route-manifest.env"
+env \
+  "PATH=$PATH" \
+  "ANALYSIS_V2_MANIFEST_SOURCE_ENV_FILE=$temp_dir/selfhosted-route-manifest.env" \
+  "ANALYSIS_V2_ENV_OUTPUT_DIR=$temp_dir/generated" \
+  "ANALYSIS_V2_WORKER_SOURCE_DIR=$repo_dir" \
+  bash "$script_dir/generate-analysis-v2-env-files.sh" \
+  >"$temp_dir/selfhosted-route-generator.out"
+assert_contains "$temp_dir/generated/analysis-v2-runtime.yaml" \
+  'ANALYSIS_V2_INSTAGRAM_ROUTE: "selfhosted_auth_v1"'
+
+for invalid_instagram_route in \
+  '' \
+  'apify' \
+  'APIFY_V1' \
+  'selfhosted_auth' \
+  'selfhosted_auth_v2'; do
+  invalid_route_source_file="$temp_dir/invalid-instagram-route-${#invalid_instagram_route}.env"
+  sed "s/^ANALYSIS_V2_INSTAGRAM_ROUTE=.*/ANALYSIS_V2_INSTAGRAM_ROUTE=$invalid_instagram_route/" \
+    "$temp_dir/source.env" >"$invalid_route_source_file"
+  if env \
+    "PATH=$PATH" \
+    "ANALYSIS_V2_MANIFEST_SOURCE_ENV_FILE=$invalid_route_source_file" \
+    "ANALYSIS_V2_ENV_OUTPUT_DIR=$temp_dir/generated" \
+    "ANALYSIS_V2_WORKER_SOURCE_DIR=$repo_dir" \
+    bash "$script_dir/generate-analysis-v2-env-files.sh" \
+    >"$temp_dir/invalid-instagram-route-${#invalid_instagram_route}.out" 2>&1; then
+    fail "invalid ANALYSIS_V2_INSTAGRAM_ROUTE value was accepted: $invalid_instagram_route"
+  fi
+  if [[ -n "$invalid_instagram_route" ]]; then
+    assert_contains "$temp_dir/invalid-instagram-route-${#invalid_instagram_route}.out" \
+      "ANALYSIS_V2_INSTAGRAM_ROUTE must be apify_v1 or selfhosted_auth_v1"
+  else
+    assert_contains "$temp_dir/invalid-instagram-route-${#invalid_instagram_route}.out" \
+      "required manifest value is missing or invalid: ANALYSIS_V2_INSTAGRAM_ROUTE"
+  fi
+done
+
+for invalid_preflight_pool in \
+  '' \
+  'primary,senary,quinary' \
+  'primary,quinary,senary,secondary' \
+  'primary,quinary,senary,senary' \
+  'primary,quinary,tenth'; do
+  invalid_pool_source_file="$temp_dir/invalid-preflight-pool-${#invalid_preflight_pool}.env"
+  sed "s/^PREFLIGHT_APIFY_API_TOKEN_SLOTS=.*/PREFLIGHT_APIFY_API_TOKEN_SLOTS=$invalid_preflight_pool/" \
+    "$temp_dir/source.env" >"$invalid_pool_source_file"
+  if env \
+    "PATH=$PATH" \
+    "ANALYSIS_V2_MANIFEST_SOURCE_ENV_FILE=$invalid_pool_source_file" \
+    "ANALYSIS_V2_ENV_OUTPUT_DIR=$temp_dir/generated" \
+    "ANALYSIS_V2_WORKER_SOURCE_DIR=$repo_dir" \
+    bash "$script_dir/generate-analysis-v2-env-files.sh" \
+    >"$temp_dir/invalid-preflight-pool-${#invalid_preflight_pool}.out" 2>&1; then
+    fail "invalid PREFLIGHT_APIFY_API_TOKEN_SLOTS value was accepted: $invalid_preflight_pool"
+  fi
+  if [[ -n "$invalid_preflight_pool" ]]; then
+    assert_contains "$temp_dir/invalid-preflight-pool-${#invalid_preflight_pool}.out" \
+      "PREFLIGHT_APIFY_API_TOKEN_SLOTS must be exactly primary,quinary,senary"
+  else
+    assert_contains "$temp_dir/invalid-preflight-pool-${#invalid_preflight_pool}.out" \
+      "required manifest value is missing or invalid: PREFLIGHT_APIFY_API_TOKEN_SLOTS"
+  fi
+done
 
 sed 's/^ANALYSIS_V2_AUTHORIZED_TEST_SHARDING_ENABLED=.*/ANALYSIS_V2_AUTHORIZED_TEST_SHARDING_ENABLED=true/' \
   "$temp_dir/senary-manifest.env" >"$temp_dir/sharding-enabled-manifest.env"
@@ -975,6 +1047,8 @@ build_file="$temp_dir/generated/analysis-v2-build.yaml"
 runtime_keys="$(sed -n 's/^\([A-Z0-9_]*\):.*/\1/p' "$runtime_file" | sort)"
 expected_runtime_keys="$(printf '%s\n' \
   ANALYSIS_V2_APIFY_API_TOKEN_SLOT \
+  PREFLIGHT_APIFY_API_TOKEN_SLOTS \
+  ANALYSIS_V2_INSTAGRAM_ROUTE \
   ANALYSIS_V2_AUTHORIZED_TEST_SHARDING_ENABLED \
   BETATEST_FREE_POOL_ENABLED \
   BETATEST_FREE_POOL_MAX_SNAPSHOT_AGE_SECONDS \

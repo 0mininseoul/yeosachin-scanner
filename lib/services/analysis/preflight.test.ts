@@ -45,6 +45,12 @@ const imageProxySigningSecret = Buffer.alloc(32, 15).toString('base64url');
 const preflightInputHash = preflightTargetInputHash('target.name', {
     ANALYSIS_V2_PREFLIGHT_IDENTITY_HMAC_SECRET: preflightIdentitySecret,
 });
+const preflightApifyPoolEnv = {
+    APIFY_PRIMARY_API_TOKEN: 'primary-token',
+    APIFY_QUINARY_API_TOKEN: 'quinary-token',
+    APIFY_SENARY_API_TOKEN: 'senary-token',
+    PREFLIGHT_APIFY_API_TOKEN_SLOTS: 'primary,quinary,senary',
+} as const;
 
 describe('betatest preflight credit fence', () => {
     it.each(['production', 'test_entitlement'] as const)(
@@ -119,6 +125,50 @@ describe('betatest preflight credit fence', () => {
 });
 
 describe('B-lite single-collection preflight', () => {
+    it.each(['secondary', 'tenth'] as const)(
+        'resumes a persisted B-lite run on its stored %s slot without the new pool',
+        async credentialSlot => {
+            const claimed = claim();
+            const store = workerStore(claimed);
+            const persistedRun = {
+                ...storedRun('succeeded'),
+                credentialSlot,
+            };
+            const runs = providerRunStore();
+            vi.mocked(runs.load).mockResolvedValue(persistedRun);
+            const getFullProfile = vi.fn(async (
+                _username: string,
+                context?: ProviderCallContext,
+            ) => {
+                expect(context).toMatchObject({
+                    resumeRunId: 'StoredRun12345678',
+                    credentialSlot,
+                });
+                return profile();
+            });
+
+            await expect(processPreflight(preflightId, {
+                store,
+                providerRunStore: runs,
+                getFullProfile,
+                activateBliteCohort: vi.fn(async () => ({
+                    submittedAt: new Date(Date.now() - 1_000).toISOString(),
+                    deadlineAt: new Date(Date.now() + 59_000).toISOString(),
+                    expiresAt: new Date(Date.now() + 29 * 60_000).toISOString(),
+                })),
+                finalizeReadyWithSource: vi.fn(async () => false),
+                env: {
+                    PRECHECKOUT_BLITE_ENABLED: 'true',
+                    PRECHECKOUT_BLITE_ROLLOUT_PERCENT: '100',
+                    ANALYSIS_V2_PREFLIGHT_IDENTITY_HMAC_SECRET: preflightIdentitySecret,
+                },
+            })).resolves.toBe('ready');
+
+            expect(getFullProfile).toHaveBeenCalledOnce();
+            expect(runs.reserve).not.toHaveBeenCalled();
+        },
+    );
+
     it('preserves the authoritative DB expiry through an exact 44-microsecond reproduction', () => {
         expect(boundPrecheckoutBliteSourceExpiry(
             '2030-07-13T12:00:00.000Z',
@@ -158,6 +208,7 @@ describe('B-lite single-collection preflight', () => {
         const run = {
             ...storedRun('succeeded'),
             credentialSlot: selectPreflightApifyCredentialSlot(preflightId, {
+                ...preflightApifyPoolEnv,
                 PRECHECKOUT_BLITE_ENABLED: 'true',
                 PRECHECKOUT_BLITE_ROLLOUT_PERCENT: '100',
                 ANALYSIS_V2_PREFLIGHT_IDENTITY_HMAC_SECRET: preflightIdentitySecret,
@@ -178,6 +229,7 @@ describe('B-lite single-collection preflight', () => {
             activateBliteCohort,
             finalizeReadyWithSource,
             env: {
+                ...preflightApifyPoolEnv,
                 PRECHECKOUT_BLITE_ENABLED: 'true',
                 PRECHECKOUT_BLITE_ROLLOUT_PERCENT: '100',
                 ANALYSIS_V2_PREFLIGHT_IDENTITY_HMAC_SECRET: preflightIdentitySecret,
@@ -214,6 +266,7 @@ describe('B-lite single-collection preflight', () => {
             activateBliteCohort,
             finalizeReadyWithSource,
             env: {
+                ...preflightApifyPoolEnv,
                 PRECHECKOUT_BLITE_ENABLED: 'true',
                 PRECHECKOUT_BLITE_ROLLOUT_PERCENT: '100',
                 ANALYSIS_V2_PREFLIGHT_IDENTITY_HMAC_SECRET: preflightIdentitySecret,
@@ -258,6 +311,7 @@ describe('B-lite single-collection preflight', () => {
             activateBliteCohort,
             bliteObservability,
             env: {
+                ...preflightApifyPoolEnv,
                 PRECHECKOUT_BLITE_ENABLED: 'true',
                 PRECHECKOUT_BLITE_ROLLOUT_PERCENT: '100',
                 ANALYSIS_V2_PREFLIGHT_IDENTITY_HMAC_SECRET: preflightIdentitySecret,
@@ -301,6 +355,7 @@ describe('B-lite single-collection preflight', () => {
             activateBliteCohort,
             bliteObservability,
             env: {
+                ...preflightApifyPoolEnv,
                 PRECHECKOUT_BLITE_ENABLED: 'true',
                 PRECHECKOUT_BLITE_ROLLOUT_PERCENT: '100',
                 ANALYSIS_V2_PREFLIGHT_IDENTITY_HMAC_SECRET: preflightIdentitySecret,
@@ -339,6 +394,7 @@ describe('B-lite single-collection preflight', () => {
             activateBliteCohort,
             bliteObservability,
             env: {
+                ...preflightApifyPoolEnv,
                 PRECHECKOUT_BLITE_ENABLED: 'true',
                 PRECHECKOUT_BLITE_ROLLOUT_PERCENT: '100',
                 ANALYSIS_V2_PREFLIGHT_IDENTITY_HMAC_SECRET: preflightIdentitySecret,
@@ -361,6 +417,7 @@ describe('B-lite single-collection preflight', () => {
         });
         const runs = providerRunStore();
         const env = {
+            ...preflightApifyPoolEnv,
             PRECHECKOUT_BLITE_ENABLED: 'true',
             PRECHECKOUT_BLITE_ROLLOUT_PERCENT: '100',
             ANALYSIS_V2_PREFLIGHT_IDENTITY_HMAC_SECRET: preflightIdentitySecret,
@@ -424,6 +481,7 @@ describe('B-lite single-collection preflight', () => {
         });
         const store = workerStore(claimed);
         const env = {
+            ...preflightApifyPoolEnv,
             PRECHECKOUT_BLITE_ENABLED: 'true',
             PRECHECKOUT_BLITE_ROLLOUT_PERCENT: '100',
             ANALYSIS_V2_PREFLIGHT_IDENTITY_HMAC_SECRET: preflightIdentitySecret,
@@ -482,6 +540,7 @@ describe('B-lite single-collection preflight', () => {
             ...storedRun('succeeded'),
             inputHash: persistedTargetHash,
             credentialSlot: selectPreflightApifyCredentialSlot(preflightId, {
+                ...preflightApifyPoolEnv,
                 PRECHECKOUT_BLITE_ENABLED: 'true',
                 PRECHECKOUT_BLITE_ROLLOUT_PERCENT: '100',
                 ANALYSIS_V2_PREFLIGHT_IDENTITY_HMAC_SECRET: preflightIdentitySecret,
@@ -496,6 +555,7 @@ describe('B-lite single-collection preflight', () => {
         };
         const finalizeReadyWithSource = vi.fn(async () => true);
         const env = {
+            ...preflightApifyPoolEnv,
             PRECHECKOUT_BLITE_ENABLED: 'true',
             PRECHECKOUT_BLITE_ROLLOUT_PERCENT: '100',
             ANALYSIS_V2_PREFLIGHT_IDENTITY_HMAC_SECRET: preflightIdentitySecret,
@@ -532,6 +592,7 @@ describe('B-lite single-collection preflight', () => {
         });
         const store = workerStore(claimed);
         const env = {
+            ...preflightApifyPoolEnv,
             PRECHECKOUT_BLITE_ENABLED: 'true',
             PRECHECKOUT_BLITE_ROLLOUT_PERCENT: '100',
             ANALYSIS_V2_PREFLIGHT_IDENTITY_HMAC_SECRET: preflightIdentitySecret,
@@ -605,6 +666,7 @@ describe('B-lite single-collection preflight', () => {
         const run = {
             ...storedRun('succeeded'),
             credentialSlot: selectPreflightApifyCredentialSlot(preflightId, {
+                ...preflightApifyPoolEnv,
                 PRECHECKOUT_BLITE_ENABLED: 'true',
                 PRECHECKOUT_BLITE_ROLLOUT_PERCENT: '100',
                 ANALYSIS_V2_PREFLIGHT_IDENTITY_HMAC_SECRET: preflightIdentitySecret,
@@ -855,24 +917,25 @@ async function completeFallbackRun(
     context: ProviderCallContext | undefined,
     result: InstagramProfile | null = profile()
 ) {
+    const credentialSlot = context?.credentialSlot ?? 'quinary';
     await context?.onBeforeRunStart?.({
         logicalProvider: 'apify',
         actorId: APIFY_PROFILE_ACTOR_ID,
-        credentialSlot: 'quinary',
+        credentialSlot,
         maxChargeUsd: 0.0026,
     });
     await context?.onRunStarted?.('StartedRun1234567');
     await context?.onCostRunStarted?.({
         logicalProvider: 'apify',
         actorId: APIFY_PROFILE_ACTOR_ID,
-        credentialSlot: 'quinary',
+        credentialSlot,
         maxChargeUsd: 0.0026,
         runId: 'StartedRun1234567',
     });
     await context?.onCostRunFinished?.({
         logicalProvider: 'apify',
         actorId: APIFY_PROFILE_ACTOR_ID,
-        credentialSlot: 'quinary',
+        credentialSlot,
         maxChargeUsd: 0.0026,
         runId: 'StartedRun1234567',
         status: 'succeeded',
@@ -1470,9 +1533,7 @@ describe('preflight worker domain', () => {
     it('selects the deterministic three-account slot for a new anonymous fallback', async () => {
         const selectedPreflightId = '123e4567-e89b-42d3-a456-000000000001';
         const env = {
-            APIFY_API_TOKEN: 'primary-token',
-            APIFY_SECONDARY_API_TOKEN: 'secondary-token',
-            APIFY_QUATERNARY_API_TOKEN: 'quaternary-token',
+            ...preflightApifyPoolEnv,
             ANALYSIS_V2_PREFLIGHT_IDENTITY_HMAC_SECRET: preflightIdentitySecret,
         };
         const baseClaim = claim();
@@ -1535,9 +1596,7 @@ describe('preflight worker domain', () => {
     it('selects the deterministic three-account slot for a new standard fallback', async () => {
         const selectedPreflightId = '123e4567-e89b-42d3-a456-000000000001';
         const env = {
-            APIFY_API_TOKEN: 'primary-token',
-            APIFY_SECONDARY_API_TOKEN: 'secondary-token',
-            APIFY_QUATERNARY_API_TOKEN: 'quaternary-token',
+            ...preflightApifyPoolEnv,
             ANALYSIS_V2_PREFLIGHT_IDENTITY_HMAC_SECRET: preflightIdentitySecret,
         };
         const selectedClaim = claim({ preflightId: selectedPreflightId });
@@ -1582,6 +1641,29 @@ describe('preflight worker domain', () => {
         }));
     });
 
+    it('rejects a misconfigured preflight pool before reserving or starting paid work', async () => {
+        const store = workerStore();
+        const runs = providerRunStore();
+        const fallback = vi.fn();
+
+        await expect(processPreflight(preflightId, {
+            store,
+            getProfile: vi.fn(async () => {
+                throw new Error('SCRAPING_SCHEMA_ERROR: trigger paid fallback');
+            }),
+            getFallbackProfile: fallback,
+            providerRunStore: runs,
+            env: {
+                ...preflightApifyPoolEnv,
+                PREFLIGHT_APIFY_API_TOKEN_SLOTS: 'primary,quinary,tenth',
+                ANALYSIS_V2_PREFLIGHT_IDENTITY_HMAC_SECRET: preflightIdentitySecret,
+            },
+        })).resolves.toBe('blocked');
+
+        expect(fallback).not.toHaveBeenCalled();
+        expect(runs.reserve).not.toHaveBeenCalled();
+    });
+
     it('routes anonymous profile summaries to Apify and reuses the global summary cache', async () => {
         const baseAnonymousClaim = claim();
         const anonymousPlans = Object.fromEntries(
@@ -1615,6 +1697,7 @@ describe('preflight worker domain', () => {
             getFallbackProfile: apify,
             providerRunStore: providerRunStore(),
             anonymousProfileCache: cache,
+            env: preflightApifyPoolEnv,
         })).resolves.toBe('ready');
         await expect(processPreflight(preflightId, {
             store: secondStore,
@@ -1622,6 +1705,7 @@ describe('preflight worker domain', () => {
             getFallbackProfile: apify,
             providerRunStore: providerRunStore(),
             anonymousProfileCache: cache,
+            env: preflightApifyPoolEnv,
         })).resolves.toBe('ready');
 
         expect(apify).toHaveBeenCalledOnce();
@@ -1944,6 +2028,7 @@ describe('preflight worker domain', () => {
             getFallbackProfile: fallback,
             providerRunStore: runs,
             env: {
+                ...preflightApifyPoolEnv,
                 ANALYSIS_V2_APIFY_API_TOKEN_SLOT: 'quinary',
                 ANALYSIS_V2_PREFLIGHT_IDENTITY_HMAC_SECRET: preflightIdentitySecret,
             },

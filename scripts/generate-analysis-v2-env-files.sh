@@ -23,6 +23,8 @@ Required source dotenv keys:
   GOOGLE_CLOUD_LOCATION
   ANALYSIS_V2_MEDIA_ARTIFACT_BUCKET
   ANALYSIS_V2_APIFY_API_TOKEN_SLOT
+  PREFLIGHT_APIFY_API_TOKEN_SLOTS=primary,quinary,senary
+  ANALYSIS_V2_INSTAGRAM_ROUTE=apify_v1|selfhosted_auth_v1
   ANALYSIS_V2_AUTHORIZED_TEST_SHARDING_ENABLED=true|false
   BETATEST_FREE_POOL_ENABLED=true|false
   BETATEST_FREE_POOL_MAX_SNAPSHOT_AGE_SECONDS=1..900
@@ -137,6 +139,8 @@ const project = required('GOOGLE_CLOUD_PROJECT');
 const location = required('GOOGLE_CLOUD_LOCATION');
 const bucket = required('ANALYSIS_V2_MEDIA_ARTIFACT_BUCKET');
 const slot = required('ANALYSIS_V2_APIFY_API_TOKEN_SLOT');
+const preflightApifyTokenSlots = required('PREFLIGHT_APIFY_API_TOKEN_SLOTS');
+const instagramRoute = required('ANALYSIS_V2_INSTAGRAM_ROUTE');
 const authorizedTestShardingEnabled = required(
   'ANALYSIS_V2_AUTHORIZED_TEST_SHARDING_ENABLED',
 );
@@ -171,6 +175,12 @@ if (!/^[a-z0-9]([a-z0-9-]{1,61}[a-z0-9])$/.test(bucket)) {
 }
 if (!['primary', 'secondary', 'tertiary', 'quaternary', 'quinary', 'senary', 'septenary', 'tenth'].includes(slot)) {
   throw new Error('ANALYSIS_V2_APIFY_API_TOKEN_SLOT must be explicit and valid');
+}
+if (process.env.PREFLIGHT_APIFY_API_TOKEN_SLOTS !== 'primary,quinary,senary') {
+  throw new Error('PREFLIGHT_APIFY_API_TOKEN_SLOTS must be exactly primary,quinary,senary');
+}
+if (!['apify_v1', 'selfhosted_auth_v1'].includes(instagramRoute)) {
+  throw new Error('ANALYSIS_V2_INSTAGRAM_ROUTE must be apify_v1 or selfhosted_auth_v1');
 }
 if (!['true', 'false'].includes(authorizedTestShardingEnabled)) {
   throw new Error('ANALYSIS_V2_AUTHORIZED_TEST_SHARDING_ENABLED must be true or false');
@@ -225,6 +235,9 @@ if (!['true', 'false'].includes(scraperFallback)) {
 if (scraperFollowers === 'selfhosted_auth' && scraperFallback !== 'false') {
   throw new Error('SCRAPER_FALLBACK must be false for selfhosted_auth paid collection');
 }
+if (instagramRoute === 'selfhosted_auth_v1' && selfHostedAuthEnabled !== 'true') {
+  throw new Error('SELFHOSTED_AUTH_ENABLED must be true for selfhosted_auth_v1');
+}
 let selfHostedAuthWorker: Record<string, string> = {};
 if (scraperFollowers === 'selfhosted_auth') {
   if (selfHostedAuthEnabled !== 'true') {
@@ -259,6 +272,8 @@ const runtime = {
   GOOGLE_CLOUD_LOCATION: location,
   ANALYSIS_V2_MEDIA_ARTIFACT_BUCKET: bucket,
   ANALYSIS_V2_APIFY_API_TOKEN_SLOT: slot,
+  PREFLIGHT_APIFY_API_TOKEN_SLOTS: preflightApifyTokenSlots,
+  ANALYSIS_V2_INSTAGRAM_ROUTE: instagramRoute,
   ANALYSIS_V2_AUTHORIZED_TEST_SHARDING_ENABLED: authorizedTestShardingEnabled,
   BETATEST_FREE_POOL_ENABLED: betaFreePoolEnabled,
   BETATEST_FREE_POOL_MAX_SNAPSHOT_AGE_SECONDS: betaFreePoolMaxSnapshotAgeSeconds,
