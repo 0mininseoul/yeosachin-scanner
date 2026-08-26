@@ -44,8 +44,8 @@ describe('Earlybird direct fresh-Apify checkpoint migration contract', () => {
         const rpc = functionDefinition('checkpoint_analysis_v2_profile_fresh_apify_earlybird_v1');
         expectInOrder(rpc, [
             'FROM public.earlybird_fulfillments',
-            'FROM public.earlybird_orders',
             'FROM public.earlybird_fulfillments',
+            'FROM public.earlybird_orders',
             'FROM public.analysis_preflights',
             'FROM public.analysis_requests',
             'FROM public.analysis_pipeline_jobs',

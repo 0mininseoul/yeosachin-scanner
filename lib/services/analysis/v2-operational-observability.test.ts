@@ -100,6 +100,14 @@ describe('analysis V2 operational observability reader', () => {
         expect(result?.summary.profileOutcomes[0]!.source).toBe('repair');
     });
 
+    it('accepts the direct fresh-Apify telemetry source', async () => {
+        const result = await loadAnalysisV2OperationalObservability(
+            clientReturning(payload('fresh_apify')),
+            REQUEST_ID
+        );
+        expect(result?.summary.profileOutcomes[0]!.source).toBe('fresh_apify');
+    });
+
     it('still accepts the pre-repair telemetry sources', async () => {
         for (const source of ['cache', 'selfhosted', 'fallback']) {
             const result = await loadAnalysisV2OperationalObservability(
@@ -112,7 +120,7 @@ describe('analysis V2 operational observability reader', () => {
 
     it('rejects an unknown telemetry source', async () => {
         // The outcome-level source is never surfaced raw: the trigger maps every attempt to one of
-        // the four telemetry sources, so anything else is a contract violation, not a repair row.
+        // the five telemetry sources, so anything else is a contract violation, not a repair row.
         await expect(loadAnalysisV2OperationalObservability(
             clientReturning(payload('apify')),
             REQUEST_ID

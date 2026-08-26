@@ -194,7 +194,7 @@ BEGIN
     END IF;
 
     -- Resolve without taking a child lock.  All subsequent locks follow the
-    -- deterministic order order -> fulfillment -> preflight -> request ->
+    -- reconciliation order fulfillment -> order -> preflight -> request ->
     -- job -> provider -> batch.
     SELECT fulfillment.order_id
     INTO v_order_id
@@ -206,15 +206,15 @@ BEGIN
             ERRCODE = 'P0001';
     END IF;
 
-    SELECT earlybird_order.*
-    INTO v_order
-    FROM public.earlybird_orders AS earlybird_order
-    WHERE earlybird_order.id = v_order_id
-    FOR UPDATE;
     SELECT fulfillment.*
     INTO v_fulfillment
     FROM public.earlybird_fulfillments AS fulfillment
     WHERE fulfillment.order_id = v_order_id
+    FOR UPDATE;
+    SELECT earlybird_order.*
+    INTO v_order
+    FROM public.earlybird_orders AS earlybird_order
+    WHERE earlybird_order.id = v_order_id
     FOR UPDATE;
     SELECT preflight.*
     INTO v_preflight
