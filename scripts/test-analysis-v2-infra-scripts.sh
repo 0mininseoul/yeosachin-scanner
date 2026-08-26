@@ -916,7 +916,17 @@ case "$command_line" in
       credential_name=''
       runtime_slot="${FAKE_GCLOUD_RUNTIME_SLOT:-quinary}"
       preflight_apify_token_slots="${PREFLIGHT_APIFY_API_TOKEN_SLOTS:-primary,quinary,senary}"
-      instagram_route="${ANALYSIS_V2_INSTAGRAM_ROUTE:-apify_v1}"
+      instagram_route="${FAKE_GCLOUD_SERVICE_INSTAGRAM_ROUTE:-${ANALYSIS_V2_INSTAGRAM_ROUTE:-apify_v1}}"
+      selfhosted_auth_enabled="${FAKE_GCLOUD_SELFHOSTED_AUTH_ENABLED:-false}"
+      selfhosted_auth_worker_url="${FAKE_GCLOUD_SELFHOSTED_AUTH_WORKER_URL:-}"
+      selfhosted_auth_worker_audience="${FAKE_GCLOUD_SELFHOSTED_AUTH_WORKER_AUDIENCE:-}"
+      selfhosted_auth_worker_timeout="${FAKE_GCLOUD_SELFHOSTED_AUTH_WORKER_TIMEOUT_MS:-}"
+      selfhosted_auth_worker_auth_mode="${FAKE_GCLOUD_SELFHOSTED_AUTH_WORKER_AUTH_MODE:-}"
+      scraper_followers="${FAKE_GCLOUD_SCRAPER_FOLLOWERS:-apify}"
+      scraper_following="${FAKE_GCLOUD_SCRAPER_FOLLOWING:-apify}"
+      scraper_likers="${FAKE_GCLOUD_SCRAPER_LIKERS:-apify}"
+      scraper_comments="${FAKE_GCLOUD_SCRAPER_COMMENTS:-apify}"
+      scraper_fallback="${FAKE_GCLOUD_SCRAPER_FALLBACK:-false}"
       worker_gate='false'
       recovery_gate='false'
       precheckout_blite_enabled="${FAKE_GCLOUD_PRECHECKOUT_BLITE_ENABLED:-false}"
@@ -1015,6 +1025,16 @@ case "$command_line" in
         --arg runtime_slot "$runtime_slot" \
         --arg preflight_apify_token_slots "$preflight_apify_token_slots" \
         --arg instagram_route "$instagram_route" \
+        --arg selfhosted_auth_enabled "$selfhosted_auth_enabled" \
+        --arg selfhosted_auth_worker_url "$selfhosted_auth_worker_url" \
+        --arg selfhosted_auth_worker_audience "$selfhosted_auth_worker_audience" \
+        --arg selfhosted_auth_worker_timeout "$selfhosted_auth_worker_timeout" \
+        --arg selfhosted_auth_worker_auth_mode "$selfhosted_auth_worker_auth_mode" \
+        --arg scraper_followers "$scraper_followers" \
+        --arg scraper_following "$scraper_following" \
+        --arg scraper_likers "$scraper_likers" \
+        --arg scraper_comments "$scraper_comments" \
+        --arg scraper_fallback "$scraper_fallback" \
         --arg worker_gate "$worker_gate" \
         --arg recovery_gate "$recovery_gate" \
         --arg precheckout_blite_enabled "$precheckout_blite_enabled" \
@@ -1096,6 +1116,20 @@ case "$command_line" in
                   {name: "ANALYSIS_V2_APIFY_API_TOKEN_SLOT", value: $runtime_slot},
                   {name: "PREFLIGHT_APIFY_API_TOKEN_SLOTS", value: $preflight_apify_token_slots},
                   {name: "ANALYSIS_V2_INSTAGRAM_ROUTE", value: $instagram_route},
+                  {name: "SELFHOSTED_AUTH_ENABLED", value: $selfhosted_auth_enabled},
+                  (if $selfhosted_auth_worker_url == "" then [] else
+                    {name: "SELFHOSTED_AUTH_WORKER_URL", value: $selfhosted_auth_worker_url} end),
+                  (if $selfhosted_auth_worker_audience == "" then [] else
+                    {name: "SELFHOSTED_AUTH_WORKER_OIDC_AUDIENCE", value: $selfhosted_auth_worker_audience} end),
+                  (if $selfhosted_auth_worker_timeout == "" then [] else
+                    {name: "SELFHOSTED_AUTH_WORKER_TIMEOUT_MS", value: $selfhosted_auth_worker_timeout} end),
+                  (if $selfhosted_auth_worker_auth_mode == "" then [] else
+                    {name: "SELFHOSTED_AUTH_WORKER_AUTH_MODE", value: $selfhosted_auth_worker_auth_mode} end),
+                  {name: "SCRAPER_FOLLOWERS", value: $scraper_followers},
+                  {name: "SCRAPER_FOLLOWING", value: $scraper_following},
+                  {name: "SCRAPER_LIKERS", value: $scraper_likers},
+                  {name: "SCRAPER_COMMENTS", value: $scraper_comments},
+                  {name: "SCRAPER_FALLBACK", value: $scraper_fallback},
                   {name: "ANALYSIS_V2_TASKS_TARGET_URL", value: "https://analysis-worker-test.asia-northeast3.run.app/api/analysis/v2/worker"},
                   {name: "ANALYSIS_V2_TASKS_OIDC_AUDIENCE", value: "https://analysis-worker-test.asia-northeast3.run.app"},
                   {name: "PREFLIGHT_TASKS_ENABLED", value: "true"},
@@ -1258,6 +1292,16 @@ case "$command_line" in
     active_supabase_public_url="${FAKE_GCLOUD_ACTIVE_SUPABASE_URL:-${FAKE_GCLOUD_SUPABASE_URL:-https://abcdefghijklmnopqrst.supabase.co}}"
     active_authorized_test_sharding="${FAKE_GCLOUD_ACTIVE_SHARDING_ENABLED:-${FAKE_GCLOUD_SHARDING_ENABLED:-false}}"
     active_instagram_route="${FAKE_GCLOUD_ACTIVE_INSTAGRAM_ROUTE:-${FAKE_GCLOUD_INSTAGRAM_ROUTE:-apify_v1}}"
+    active_selfhosted_auth_enabled="${FAKE_GCLOUD_ACTIVE_SELFHOSTED_AUTH_ENABLED:-${FAKE_GCLOUD_SELFHOSTED_AUTH_ENABLED:-false}}"
+    active_selfhosted_auth_worker_url="${FAKE_GCLOUD_ACTIVE_SELFHOSTED_AUTH_WORKER_URL:-${FAKE_GCLOUD_SELFHOSTED_AUTH_WORKER_URL:-}}"
+    active_selfhosted_auth_worker_audience="${FAKE_GCLOUD_ACTIVE_SELFHOSTED_AUTH_WORKER_AUDIENCE:-${FAKE_GCLOUD_SELFHOSTED_AUTH_WORKER_AUDIENCE:-}}"
+    active_selfhosted_auth_worker_timeout="${FAKE_GCLOUD_ACTIVE_SELFHOSTED_AUTH_WORKER_TIMEOUT_MS:-${FAKE_GCLOUD_SELFHOSTED_AUTH_WORKER_TIMEOUT_MS:-}}"
+    active_selfhosted_auth_worker_auth_mode="${FAKE_GCLOUD_ACTIVE_SELFHOSTED_AUTH_WORKER_AUTH_MODE:-${FAKE_GCLOUD_SELFHOSTED_AUTH_WORKER_AUTH_MODE:-}}"
+    active_scraper_followers="${FAKE_GCLOUD_ACTIVE_SCRAPER_FOLLOWERS:-${FAKE_GCLOUD_SCRAPER_FOLLOWERS:-apify}}"
+    active_scraper_following="${FAKE_GCLOUD_ACTIVE_SCRAPER_FOLLOWING:-${FAKE_GCLOUD_SCRAPER_FOLLOWING:-apify}}"
+    active_scraper_likers="${FAKE_GCLOUD_ACTIVE_SCRAPER_LIKERS:-${FAKE_GCLOUD_SCRAPER_LIKERS:-apify}}"
+    active_scraper_comments="${FAKE_GCLOUD_ACTIVE_SCRAPER_COMMENTS:-${FAKE_GCLOUD_SCRAPER_COMMENTS:-apify}}"
+    active_scraper_fallback="${FAKE_GCLOUD_ACTIVE_SCRAPER_FALLBACK:-${FAKE_GCLOUD_SCRAPER_FALLBACK:-false}}"
     revision_image='asia-northeast3-docker.pkg.dev/test-project/cloud-run-source-deploy/analysis-worker@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
     bootstrap_revision='false'
     cloud_run_service="${ANALYSIS_V2_TASKS_CLOUD_RUN_SERVICE:-analysis-worker}"
@@ -1290,6 +1334,16 @@ case "$command_line" in
       --arg active_supabase_public_url "$active_supabase_public_url" \
       --arg active_authorized_test_sharding "$active_authorized_test_sharding" \
       --arg active_instagram_route "$active_instagram_route" \
+      --arg active_selfhosted_auth_enabled "$active_selfhosted_auth_enabled" \
+      --arg active_selfhosted_auth_worker_url "$active_selfhosted_auth_worker_url" \
+      --arg active_selfhosted_auth_worker_audience "$active_selfhosted_auth_worker_audience" \
+      --arg active_selfhosted_auth_worker_timeout "$active_selfhosted_auth_worker_timeout" \
+      --arg active_selfhosted_auth_worker_auth_mode "$active_selfhosted_auth_worker_auth_mode" \
+      --arg active_scraper_followers "$active_scraper_followers" \
+      --arg active_scraper_following "$active_scraper_following" \
+      --arg active_scraper_likers "$active_scraper_likers" \
+      --arg active_scraper_comments "$active_scraper_comments" \
+      --arg active_scraper_fallback "$active_scraper_fallback" \
       --arg revision_image "$revision_image" \
       --arg revision_ready "$revision_ready" \
       --argjson bootstrap_revision "$bootstrap_revision" '{
@@ -1320,6 +1374,22 @@ case "$command_line" in
             {name: "PREFLIGHT_TASKS_ENABLED", value: "true"},
             {name: "PREFLIGHT_LOCAL_AFTER_ENABLED", value: "false"}
           ] end)
+          + [{name: "SELFHOSTED_AUTH_ENABLED", value: $active_selfhosted_auth_enabled}]
+          + (if $active_selfhosted_auth_worker_url == "" then [] else
+              [{name: "SELFHOSTED_AUTH_WORKER_URL", value: $active_selfhosted_auth_worker_url}] end)
+          + (if $active_selfhosted_auth_worker_audience == "" then [] else
+              [{name: "SELFHOSTED_AUTH_WORKER_OIDC_AUDIENCE", value: $active_selfhosted_auth_worker_audience}] end)
+          + (if $active_selfhosted_auth_worker_timeout == "" then [] else
+              [{name: "SELFHOSTED_AUTH_WORKER_TIMEOUT_MS", value: $active_selfhosted_auth_worker_timeout}] end)
+          + (if $active_selfhosted_auth_worker_auth_mode == "" then [] else
+              [{name: "SELFHOSTED_AUTH_WORKER_AUTH_MODE", value: $active_selfhosted_auth_worker_auth_mode}] end)
+          + [
+            {name: "SCRAPER_FOLLOWERS", value: $active_scraper_followers},
+            {name: "SCRAPER_FOLLOWING", value: $active_scraper_following},
+            {name: "SCRAPER_LIKERS", value: $active_scraper_likers},
+            {name: "SCRAPER_COMMENTS", value: $active_scraper_comments},
+            {name: "SCRAPER_FALLBACK", value: $active_scraper_fallback}
+          ]
           + ($active_apify_secret_slots
             | split(",")
             | map(select(length > 0))
@@ -1673,6 +1743,32 @@ SCRAPER_COMMENTS="selfhosted_auth"
 SCRAPER_FALLBACK="false"
 EOF
 
+# The route is authoritative for Analysis V2 paid collection. Keep a direct
+# selfhosted route fixture with all-Apify legacy selectors to prove the deploy
+# contract is validated independently of those selectors.
+sed \
+  -e 's/^ANALYSIS_V2_INSTAGRAM_ROUTE=.*/ANALYSIS_V2_INSTAGRAM_ROUTE="selfhosted_auth_v1"/' \
+  -e 's/^SCRAPER_FOLLOWERS=.*/SCRAPER_FOLLOWERS="apify"/' \
+  -e 's/^SCRAPER_FOLLOWING=.*/SCRAPER_FOLLOWING="apify"/' \
+  -e 's/^SCRAPER_LIKERS=.*/SCRAPER_LIKERS="apify"/' \
+  -e 's/^SCRAPER_COMMENTS=.*/SCRAPER_COMMENTS="apify"/' \
+  "$temp_dir/runtime.env" >"$temp_dir/runtime-selfhosted-route.env"
+sed \
+  -e '/^SELFHOSTED_AUTH_WORKER_URL=/d' \
+  -e '/^SELFHOSTED_AUTH_WORKER_OIDC_AUDIENCE=/d' \
+  -e '/^SELFHOSTED_AUTH_WORKER_TIMEOUT_MS=/d' \
+  "$temp_dir/runtime-selfhosted-route.env" >"$temp_dir/runtime-selfhosted-route-missing-worker.env"
+sed 's/^SELFHOSTED_AUTH_ENABLED=.*/SELFHOSTED_AUTH_ENABLED="false"/' \
+  "$temp_dir/runtime-selfhosted-route.env" >"$temp_dir/runtime-selfhosted-route-auth-disabled.env"
+sed 's|^SELFHOSTED_AUTH_WORKER_URL=.*|SELFHOSTED_AUTH_WORKER_URL="https://user:pass@instagram-auth-worker.example.run.app"|' \
+  "$temp_dir/runtime-selfhosted-route.env" >"$temp_dir/runtime-selfhosted-route-bad-url.env"
+sed 's|^SELFHOSTED_AUTH_WORKER_OIDC_AUDIENCE=.*|SELFHOSTED_AUTH_WORKER_OIDC_AUDIENCE="https://different-auth-worker.example.run.app"|' \
+  "$temp_dir/runtime-selfhosted-route.env" >"$temp_dir/runtime-selfhosted-route-bad-audience.env"
+sed 's/^SELFHOSTED_AUTH_WORKER_TIMEOUT_MS=.*/SELFHOSTED_AUTH_WORKER_TIMEOUT_MS="999"/' \
+  "$temp_dir/runtime-selfhosted-route.env" >"$temp_dir/runtime-selfhosted-route-bad-timeout.env"
+sed 's/^SCRAPER_FOLLOWERS=.*/SCRAPER_FOLLOWERS="selfhosted_auth"/' \
+  "$temp_dir/runtime-selfhosted-route.env" >"$temp_dir/runtime-selfhosted-route-mixed-selectors.env"
+
 cat >"$temp_dir/runtime-provider-secret.env" <<'EOF'
 ANALYSIS_V2_MEDIA_ARTIFACT_BUCKET="test-project-analysis-v2-media"
 ANALYSIS_V2_APIFY_API_TOKEN_SLOT="quinary"
@@ -1918,6 +2014,65 @@ for invalid_instagram_route in \
       "ANALYSIS_V2_INSTAGRAM_ROUTE is required"
   fi
 done
+
+# A selfhosted-auth route must carry a complete nonsecret worker contract even
+# when every legacy selector remains Apify. The deployment script validates the
+# supplied manifest itself before invoking any Cloud Run operation.
+env "${common_env[@]}" \
+  'FAKE_GCLOUD_STATE=prerequisites_ready' \
+  'ANALYSIS_V2_INSTAGRAM_ROUTE=selfhosted_auth_v1' \
+  "ANALYSIS_V2_WORKER_ENV_VARS_FILE=$temp_dir/runtime-selfhosted-route.env" \
+  bash "$script_dir/deploy-analysis-v2-worker.sh" --dry-run \
+  >"$temp_dir/worker-selfhosted-route-explicit.out"
+assert_contains "$temp_dir/worker-selfhosted-route-explicit.out" \
+  'gcloud run deploy analysis-worker'
+
+for invalid_selfhosted_route in \
+  missing-worker \
+  auth-disabled \
+  bad-url \
+  bad-audience \
+  bad-timeout \
+  mixed-selectors; do
+  : >"$temp_dir/worker-selfhosted-route-$invalid_selfhosted_route-events.out"
+  if env "${common_env[@]}" \
+    'FAKE_GCLOUD_STATE=prerequisites_ready' \
+    'ANALYSIS_V2_INSTAGRAM_ROUTE=selfhosted_auth_v1' \
+    "ANALYSIS_V2_WORKER_ENV_VARS_FILE=$temp_dir/runtime-selfhosted-route-$invalid_selfhosted_route.env" \
+    "FAKE_GCLOUD_EVENT_LOG=$temp_dir/worker-selfhosted-route-$invalid_selfhosted_route-events.out" \
+    bash "$script_dir/deploy-analysis-v2-worker.sh" --dry-run \
+    >"$temp_dir/worker-selfhosted-route-$invalid_selfhosted_route.out" 2>&1; then
+    fail "invalid selfhosted-auth route manifest was accepted: $invalid_selfhosted_route"
+  fi
+  assert_not_contains "$temp_dir/worker-selfhosted-route-$invalid_selfhosted_route.out" \
+    'SECRET_SENTINEL'
+  [[ ! -s "$temp_dir/worker-selfhosted-route-$invalid_selfhosted_route-events.out" ]] \
+    || fail "invalid selfhosted-auth route manifest reached a Cloud Run mutation: $invalid_selfhosted_route"
+done
+for invalid_selfhosted_route in missing-worker auth-disabled bad-url bad-audience bad-timeout; do
+  assert_contains "$temp_dir/worker-selfhosted-route-$invalid_selfhosted_route.out" \
+    'runtime env file must set selfhosted_auth_v1 with SELFHOSTED_AUTH_ENABLED=true'
+done
+assert_contains "$temp_dir/worker-selfhosted-route-mixed-selectors.out" \
+  'runtime env file must select one paid provider across followers, following, likers, and comments'
+
+# A canonical first deployment cannot infer a selfhosted worker contract from
+# defaults. With no service and no runtime manifest it fails before a deploy or
+# any other Cloud Run mutation.
+: >"$temp_dir/worker-selfhosted-route-first-deploy-events.out"
+if env "${common_env[@]}" \
+  'FAKE_GCLOUD_STATE=prerequisites_ready' \
+  'ANALYSIS_V2_INSTAGRAM_ROUTE=selfhosted_auth_v1' \
+  'ANALYSIS_V2_WORKER_ENV_VARS_FILE=' \
+  "FAKE_GCLOUD_EVENT_LOG=$temp_dir/worker-selfhosted-route-first-deploy-events.out" \
+  bash "$script_dir/deploy-analysis-v2-worker.sh" --dry-run \
+  >"$temp_dir/worker-selfhosted-route-first-deploy.out" 2>&1; then
+  fail "canonical first selfhosted-auth deployment without a manifest was accepted"
+fi
+assert_contains "$temp_dir/worker-selfhosted-route-first-deploy.out" \
+  'selfhosted_auth_v1 requires a complete runtime manifest for a first deployment'
+[[ ! -s "$temp_dir/worker-selfhosted-route-first-deploy-events.out" ]] \
+  || fail "first selfhosted-auth deployment without a manifest reached a Cloud Run mutation"
 
 if env "${common_env[@]}" \
   'FAKE_GCLOUD_STATE=ready' \
@@ -4666,6 +4821,77 @@ assert_contains "$temp_dir/worker-check.out" \
   "task OIDC identity has exact actAs principals and no token-creator role"
 assert_contains "$temp_dir/worker-check.out" \
   "Analysis V2 recovery and preflight retention schedulers verified"
+
+# A no-manifest update/check retains the service's nonsecret selfhosted-auth
+# contract. The active known-good revision must carry the exact same projection.
+retained_selfhosted_env=(
+  "${common_env[@]}"
+  'FAKE_GCLOUD_STATE=ready'
+  'ANALYSIS_V2_INSTAGRAM_ROUTE=selfhosted_auth_v1'
+  'ANALYSIS_V2_WORKER_ENV_VARS_FILE='
+  'FAKE_GCLOUD_SERVICE_INSTAGRAM_ROUTE=selfhosted_auth_v1'
+  'FAKE_GCLOUD_ACTIVE_INSTAGRAM_ROUTE=selfhosted_auth_v1'
+  'FAKE_GCLOUD_SELFHOSTED_AUTH_ENABLED=true'
+  'FAKE_GCLOUD_SELFHOSTED_AUTH_WORKER_URL=https://instagram-auth-worker.example.run.app'
+  'FAKE_GCLOUD_SELFHOSTED_AUTH_WORKER_AUDIENCE=https://instagram-auth-worker.example.run.app'
+  'FAKE_GCLOUD_SELFHOSTED_AUTH_WORKER_TIMEOUT_MS=240000'
+  'FAKE_GCLOUD_SCRAPER_FOLLOWERS=apify'
+  'FAKE_GCLOUD_SCRAPER_FOLLOWING=apify'
+  'FAKE_GCLOUD_SCRAPER_LIKERS=apify'
+  'FAKE_GCLOUD_SCRAPER_COMMENTS=apify'
+  'FAKE_GCLOUD_SCRAPER_FALLBACK=false'
+  'FAKE_GCLOUD_ACTIVE_SCRAPER_FOLLOWERS=apify'
+  'FAKE_GCLOUD_ACTIVE_SCRAPER_FOLLOWING=apify'
+  'FAKE_GCLOUD_ACTIVE_SCRAPER_LIKERS=apify'
+  'FAKE_GCLOUD_ACTIVE_SCRAPER_COMMENTS=apify'
+  'FAKE_GCLOUD_ACTIVE_SCRAPER_FALLBACK=false'
+)
+env "${retained_selfhosted_env[@]}" \
+  bash "$script_dir/deploy-analysis-v2-worker.sh" --check \
+  >"$temp_dir/worker-selfhosted-route-retained-check.out"
+assert_contains "$temp_dir/worker-selfhosted-route-retained-check.out" \
+  'Analysis V2 Cloud Run worker and Cloud Tasks integration verified'
+
+for retained_selfhosted_invalid in \
+  missing-worker \
+  auth-disabled; do
+  case "$retained_selfhosted_invalid" in
+    missing-worker)
+      retained_override='FAKE_GCLOUD_SELFHOSTED_AUTH_WORKER_URL='
+      ;;
+    auth-disabled)
+      retained_override='FAKE_GCLOUD_SELFHOSTED_AUTH_ENABLED=false'
+      ;;
+    *) fail "unknown retained selfhosted-auth fixture: $retained_selfhosted_invalid" ;;
+  esac
+  : >"$temp_dir/worker-selfhosted-route-retained-$retained_selfhosted_invalid-events.out"
+  if env "${retained_selfhosted_env[@]}" \
+    "$retained_override" \
+    "FAKE_GCLOUD_EVENT_LOG=$temp_dir/worker-selfhosted-route-retained-$retained_selfhosted_invalid-events.out" \
+    bash "$script_dir/deploy-analysis-v2-worker.sh" --check \
+    >"$temp_dir/worker-selfhosted-route-retained-$retained_selfhosted_invalid.out" 2>&1; then
+    fail "invalid retained selfhosted-auth service contract was accepted: $retained_selfhosted_invalid"
+  fi
+  assert_contains "$temp_dir/worker-selfhosted-route-retained-$retained_selfhosted_invalid.out" \
+    'retained Cloud Run service template must set selfhosted_auth_v1 with SELFHOSTED_AUTH_ENABLED=true'
+  [[ ! -s "$temp_dir/worker-selfhosted-route-retained-$retained_selfhosted_invalid-events.out" ]] \
+    || fail "invalid retained selfhosted-auth service reached a mutation: $retained_selfhosted_invalid"
+done
+
+# A service/revision mismatch is unsafe even when each individual contract is
+# valid, because rollback would restore a different auth worker.
+: >"$temp_dir/worker-selfhosted-route-retained-mismatch-events.out"
+if env "${retained_selfhosted_env[@]}" \
+  'FAKE_GCLOUD_ACTIVE_SELFHOSTED_AUTH_WORKER_AUDIENCE=https://different-auth-worker.example.run.app' \
+  "FAKE_GCLOUD_EVENT_LOG=$temp_dir/worker-selfhosted-route-retained-mismatch-events.out" \
+  bash "$script_dir/deploy-analysis-v2-worker.sh" --check \
+  >"$temp_dir/worker-selfhosted-route-retained-mismatch.out" 2>&1; then
+  fail "retained selfhosted-auth service/revision contract mismatch was accepted"
+fi
+assert_contains "$temp_dir/worker-selfhosted-route-retained-mismatch.out" \
+  'retained Cloud Run known-good revision must set selfhosted_auth_v1 with SELFHOSTED_AUTH_ENABLED=true'
+[[ ! -s "$temp_dir/worker-selfhosted-route-retained-mismatch-events.out" ]] \
+  || fail "retained selfhosted-auth mismatch reached a mutation"
 
 printf 'ENABLED\n' >"$temp_dir/recovery-scheduler-state"
 : >"$temp_dir/recovery-scheduler-mutations.out"

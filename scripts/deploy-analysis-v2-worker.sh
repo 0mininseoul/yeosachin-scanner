@@ -582,6 +582,9 @@ service_runtime_config_matches() {
   local config="$1"
   # A ready --no-traffic revision advances latestCreated but not service-level latestReady.
   # The exact staged revision readiness and provenance are verified separately below.
+  if [[ "$instagram_route" == "selfhosted_auth_v1" ]]; then
+    selfhosted_auth_runtime_contract_matches_config "$config" || return 1
+  fi
   jq -e \
     --arg runtime_sa "$ANALYSIS_V2_WORKER_RUNTIME_SERVICE_ACCOUNT_EMAIL" \
     --arg bucket "$ANALYSIS_V2_MEDIA_ARTIFACT_BUCKET" \
@@ -1677,6 +1680,9 @@ verify_revision_provenance() {
 worker_endpoint_env_matches() {
   local config="$1"
   local origin="$2"
+  if [[ "$instagram_route" == "selfhosted_auth_v1" ]]; then
+    selfhosted_auth_runtime_contract_matches_config "$config" || return 1
+  fi
   jq -e \
     --arg v2_target "$origin/api/analysis/v2/worker" \
     --arg preflight_target "$origin/api/analysis/preflight/worker" \
@@ -1886,6 +1892,97 @@ env_json_value_equals() {
     <<<"$env_json" >/dev/null
 }
 
+runtime_env_json_from_config() {
+  local config="$1"
+  jq -cer '
+    def containers: (.spec.template.spec.containers // .spec.containers // []);
+    containers as $containers
+    | if ($containers | length) != 1 then
+        error("expected exactly one runtime container")
+      else
+        ($containers[0].env // []) as $entries
+        | ($entries | map(.name // "")) as $names
+        | if (($names | length) != ($names | unique | length)) then
+            error("duplicate runtime environment name")
+          else
+            reduce $entries[] as $entry ({};
+              .[$entry.name] = ($entry.value // ""))
+          end
+      end
+  ' <<<"$config"
+}
+
+selfhosted_auth_runtime_contract_projection() {
+  local env_json="$1"
+  jq -ce '
+    {
+      route: (.ANALYSIS_V2_INSTAGRAM_ROUTE // ""),
+      enabled: (.SELFHOSTED_AUTH_ENABLED // ""),
+      workerUrl: (.SELFHOSTED_AUTH_WORKER_URL // ""),
+      workerAudience: (.SELFHOSTED_AUTH_WORKER_OIDC_AUDIENCE // ""),
+      workerTimeout: (.SELFHOSTED_AUTH_WORKER_TIMEOUT_MS // ""),
+      workerAuthMode: (.SELFHOSTED_AUTH_WORKER_AUTH_MODE // "oidc"),
+      followers: (.SCRAPER_FOLLOWERS // "apify"),
+      following: (.SCRAPER_FOLLOWING // "apify"),
+      likers: (.SCRAPER_LIKERS // "apify"),
+      comments: (.SCRAPER_COMMENTS // "apify"),
+      fallback: (.SCRAPER_FALLBACK // "true")
+    }
+  ' <<<"$env_json"
+}
+
+selfhosted_auth_runtime_contract_matches_env() {
+  local env_json="$1"
+  jq -e '
+    def setting($name; $default):
+      if has($name) then .[$name] else $default end;
+    [
+      (.SELFHOSTED_AUTH_WORKER_URL // ""),
+      (.SELFHOSTED_AUTH_WORKER_OIDC_AUDIENCE // "")
+    ] as $origins
+    | [
+        (setting("SCRAPER_FOLLOWERS"; "apify")),
+        (setting("SCRAPER_FOLLOWING"; "apify")),
+        (setting("SCRAPER_LIKERS"; "apify")),
+        (setting("SCRAPER_COMMENTS"; "apify"))
+      ] as $providers
+    | .ANALYSIS_V2_INSTAGRAM_ROUTE == "selfhosted_auth_v1"
+      and .SELFHOSTED_AUTH_ENABLED == "true"
+      and ($origins | all(type == "string" and test("^https://[^/?#@[:space:]]+$")))
+      and $origins[0] == $origins[1]
+      and ((.SELFHOSTED_AUTH_WORKER_TIMEOUT_MS // "")
+        | type == "string" and test("^[1-9][0-9]*$")
+        and (tonumber >= 1000 and tonumber <= 300000))
+      and ((.SELFHOSTED_AUTH_WORKER_AUTH_MODE // "oidc") == "oidc")
+      and ($providers | all(. == "apify") or all(. == "selfhosted_auth"))
+      and ((.SCRAPER_FALLBACK // "true") == "true"
+        or (.SCRAPER_FALLBACK // "true") == "false")
+      and (if ($providers | all(. == "selfhosted_auth"))
+        then (.SCRAPER_FALLBACK // "true") == "false"
+        else true end)
+  ' <<<"$env_json" >/dev/null 2>&1
+}
+
+validate_selfhosted_auth_runtime_contract() {
+  local env_json="$1"
+  local label="${2:-runtime env}"
+  selfhosted_auth_runtime_contract_matches_env "$env_json" \
+    || die "$label must set selfhosted_auth_v1 with SELFHOSTED_AUTH_ENABLED=true, a valid HTTPS worker URL, matching OIDC audience, bounded timeout, and consistent paid selectors"
+}
+
+selfhosted_auth_runtime_contract_matches_config() {
+  local config="$1"
+  local env_json
+  local actual_projection
+  [[ "$instagram_route" == "selfhosted_auth_v1" ]] || return 0
+  [[ -n "${selfhosted_auth_expected_env_json:-}" ]] || return 1
+  env_json="$(runtime_env_json_from_config "$config")" || return 1
+  selfhosted_auth_runtime_contract_matches_env "$env_json" || return 1
+  actual_projection="$(selfhosted_auth_runtime_contract_projection "$env_json")" \
+    || return 1
+  [[ "$actual_projection" == "$selfhosted_auth_expected_env_json" ]]
+}
+
 validate_paid_collection_runtime_contract() {
   local env_json="$1"
   jq -e '
@@ -1893,6 +1990,11 @@ validate_paid_collection_runtime_contract() {
     | ($providers | all(. == "apify")) or ($providers | all(. == "selfhosted_auth"))
   ' <<<"$env_json" >/dev/null \
     || die "runtime env file must select one paid provider across followers, following, likers, and comments"
+  if jq -e '.ANALYSIS_V2_INSTAGRAM_ROUTE == "selfhosted_auth_v1"' \
+    <<<"$env_json" >/dev/null; then
+    validate_selfhosted_auth_runtime_contract "$env_json" "runtime env file"
+    return 0
+  fi
   jq -e '
     if .SCRAPER_FOLLOWERS == "selfhosted_auth" then .SCRAPER_FALLBACK == "false"
     else (.SCRAPER_FALLBACK == "true" or .SCRAPER_FALLBACK == "false") end
@@ -2096,11 +2198,31 @@ deploy_or_verify_service() {
   local config=""
   local latest_ready=""
   local lookup_status="0"
+  local retained_service_env_json=""
+  local retained_known_good_env_json=""
   if config="$(service_json)"; then
     existing="true"
     service_has_no_traffic_tags "$config" \
       || die "Cloud Run traffic tags are forbidden while Gemini concurrency is process-local"
+    if [[ "$instagram_route" == "selfhosted_auth_v1" && -z "$worker_env_file" ]]; then
+      retained_service_env_json="$(runtime_env_json_from_config "$config")" \
+        || die "retained Cloud Run service template could not be parsed as a single runtime container"
+      validate_selfhosted_auth_runtime_contract \
+        "$retained_service_env_json" "retained Cloud Run service template"
+      selfhosted_auth_expected_env_json="$(
+        selfhosted_auth_runtime_contract_projection "$retained_service_env_json"
+      )" || die "retained Cloud Run selfhosted-auth contract could not be normalized"
+    fi
     resolve_known_good_service_revision "$config"
+    if [[ "$instagram_route" == "selfhosted_auth_v1" && -z "$worker_env_file" ]]; then
+      retained_known_good_env_json="$(runtime_env_json_from_config "$known_good_config")" \
+        || die "retained Cloud Run known-good revision could not be parsed as a single runtime container"
+      validate_selfhosted_auth_runtime_contract \
+        "$retained_known_good_env_json" "retained Cloud Run known-good revision"
+      [[ "$(selfhosted_auth_runtime_contract_projection \
+        "$retained_known_good_env_json")" == "$selfhosted_auth_expected_env_json" ]] \
+        || die "retained Cloud Run selfhosted-auth contract differs between service template and known-good revision"
+    fi
     if [[ "$prune_apify_secret_refs_enabled" == "true" ]]; then
       verify_prune_apify_secret_inventory "$config" "$known_good_config"
       verify_prune_supabase_destination "$config" "$known_good_config"
@@ -2122,6 +2244,8 @@ deploy_or_verify_service() {
     if [[ "$lookup_status" == "$SERVICE_JSON_NOT_FOUND_STATUS" ]]; then
       [[ "$prune_apify_secret_refs_enabled" != "true" ]] \
         || die "--prune-apify-secret-refs requires an existing Cloud Run service"
+      [[ "$instagram_route" != "selfhosted_auth_v1" || -n "$worker_env_file" ]] \
+        || die "selfhosted_auth_v1 requires a complete runtime manifest for a first deployment"
       initial_deployment="true"
       prepare_apify_secret_assignments
       require_canonical_apify_secret_inventory
@@ -2918,6 +3042,11 @@ if [[ -n "$worker_env_file" ]]; then
     "$beta_free_pool_refresh_interval_seconds" \
     || die "runtime env file must set the exact BETATEST_FREE_POOL_REFRESH_INTERVAL_SECONDS"
   validate_paid_collection_runtime_contract "$runtime_env_json"
+  if [[ "$instagram_route" == "selfhosted_auth_v1" ]]; then
+    selfhosted_auth_expected_env_json="$(
+      selfhosted_auth_runtime_contract_projection "$runtime_env_json"
+    )" || die "runtime env file selfhosted-auth contract could not be normalized"
+  fi
   runtime_env_json="$(jq -c \
     --arg enabled "$result_images_enabled" \
     --arg precheckout_blite_enabled "$precheckout_blite_enabled" \
@@ -3034,6 +3163,7 @@ deploy_lock_url=""
 observed_lock_generation=""
 observed_lock_owner=""
 prune_fence_owner_identity=""
+selfhosted_auth_expected_env_json=""
 
 observe_deploy_lock_generation_owner() {
   local attempt

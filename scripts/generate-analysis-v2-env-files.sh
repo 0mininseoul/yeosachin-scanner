@@ -39,7 +39,8 @@ Required source dotenv keys:
   SCRAPER_COMMENTS=apify|selfhosted_auth
   SCRAPER_FALLBACK=true|false
 
-Required only when all four SCRAPER_* selectors above use selfhosted_auth:
+Required when ANALYSIS_V2_INSTAGRAM_ROUTE=selfhosted_auth_v1 or when all four
+SCRAPER_* selectors above use selfhosted_auth:
   SELFHOSTED_AUTH_WORKER_URL=https://private-worker-origin
   SELFHOSTED_AUTH_WORKER_OIDC_AUDIENCE=https://private-worker-origin
   SELFHOSTED_AUTH_WORKER_TIMEOUT_MS=1000..300000
@@ -235,33 +236,57 @@ if (!['true', 'false'].includes(scraperFallback)) {
 if (scraperFollowers === 'selfhosted_auth' && scraperFallback !== 'false') {
   throw new Error('SCRAPER_FALLBACK must be false for selfhosted_auth paid collection');
 }
-if (instagramRoute === 'selfhosted_auth_v1' && selfHostedAuthEnabled !== 'true') {
-  throw new Error('SELFHOSTED_AUTH_ENABLED must be true for selfhosted_auth_v1');
-}
-let selfHostedAuthWorker: Record<string, string> = {};
-if (scraperFollowers === 'selfhosted_auth') {
+const validateSelfHostedAuthWorker = (errorPrefix) => {
+  const failContract = () => {
+    throw new Error(errorPrefix);
+  };
   if (selfHostedAuthEnabled !== 'true') {
-    throw new Error('SELFHOSTED_AUTH_ENABLED must be true for selfhosted_auth paid collection');
+    failContract();
   }
-  const workerOrigin = privateHttpsOrigin(
-    required('SELFHOSTED_AUTH_WORKER_URL'),
-    'SELFHOSTED_AUTH_WORKER_URL'
-  );
-  if (privateHttpsOrigin(
-    required('SELFHOSTED_AUTH_WORKER_OIDC_AUDIENCE'),
-    'SELFHOSTED_AUTH_WORKER_OIDC_AUDIENCE'
-  ) !== workerOrigin) {
-    throw new Error('SELFHOSTED_AUTH_WORKER_OIDC_AUDIENCE must match SELFHOSTED_AUTH_WORKER_URL');
+  let workerOrigin;
+  let audienceOrigin;
+  let timeout;
+  try {
+    workerOrigin = privateHttpsOrigin(
+      required('SELFHOSTED_AUTH_WORKER_URL'),
+      'SELFHOSTED_AUTH_WORKER_URL'
+    );
+    audienceOrigin = privateHttpsOrigin(
+      required('SELFHOSTED_AUTH_WORKER_OIDC_AUDIENCE'),
+      'SELFHOSTED_AUTH_WORKER_OIDC_AUDIENCE'
+    );
+    timeout = required('SELFHOSTED_AUTH_WORKER_TIMEOUT_MS');
+  } catch {
+    failContract();
   }
-  const timeout = required('SELFHOSTED_AUTH_WORKER_TIMEOUT_MS');
+  if (audienceOrigin !== workerOrigin) {
+    failContract();
+  }
+  if (process.env.SELFHOSTED_AUTH_WORKER_AUTH_MODE !== undefined
+    && process.env.SELFHOSTED_AUTH_WORKER_AUTH_MODE !== 'oidc') {
+    failContract();
+  }
   if (!/^[1-9][0-9]*$/.test(timeout) || Number(timeout) < 1000 || Number(timeout) > 300000) {
-    throw new Error('SELFHOSTED_AUTH_WORKER_TIMEOUT_MS must be an integer from 1000 through 300000');
+    failContract();
   }
-  selfHostedAuthWorker = {
+  return {
     SELFHOSTED_AUTH_WORKER_URL: workerOrigin,
     SELFHOSTED_AUTH_WORKER_OIDC_AUDIENCE: workerOrigin,
     SELFHOSTED_AUTH_WORKER_TIMEOUT_MS: timeout,
   };
+};
+let selfHostedAuthWorker: Record<string, string> = {};
+if (instagramRoute === 'selfhosted_auth_v1') {
+  selfHostedAuthWorker = validateSelfHostedAuthWorker(
+    'selfhosted_auth_v1 requires SELFHOSTED_AUTH_ENABLED=true and a complete HTTPS OIDC worker contract'
+  );
+} else if (scraperFollowers === 'selfhosted_auth') {
+  if (selfHostedAuthEnabled !== 'true') {
+    throw new Error('SELFHOSTED_AUTH_ENABLED must be true for selfhosted_auth paid collection');
+  }
+  selfHostedAuthWorker = validateSelfHostedAuthWorker(
+    'selfhosted_auth paid collection requires a complete HTTPS OIDC worker contract'
+  );
 } else if (selfHostedAuthEnabled !== 'false') {
   throw new Error('SELFHOSTED_AUTH_ENABLED must be false for Apify paid collection');
 }

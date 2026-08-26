@@ -964,6 +964,95 @@ env \
 assert_contains "$temp_dir/generated/analysis-v2-runtime.yaml" \
   'ANALYSIS_V2_INSTAGRAM_ROUTE: "selfhosted_auth_v1"'
 
+# The immutable V2 route owns paid collection independently of the legacy
+# selectors. An explicitly authenticated route with otherwise consistent
+# all-Apify legacy selectors is still valid, provided its worker contract is
+# complete and directly validated.
+sed \
+  -e 's/^SCRAPER_FOLLOWERS=.*/SCRAPER_FOLLOWERS=apify/' \
+  -e 's/^SCRAPER_FOLLOWING=.*/SCRAPER_FOLLOWING=apify/' \
+  -e 's/^SCRAPER_LIKERS=.*/SCRAPER_LIKERS=apify/' \
+  -e 's/^SCRAPER_COMMENTS=.*/SCRAPER_COMMENTS=apify/' \
+  "$temp_dir/selfhosted-route-manifest.env" >"$temp_dir/selfhosted-route-apify-selectors.env"
+env \
+  "PATH=$PATH" \
+  "ANALYSIS_V2_MANIFEST_SOURCE_ENV_FILE=$temp_dir/selfhosted-route-apify-selectors.env" \
+  "ANALYSIS_V2_ENV_OUTPUT_DIR=$temp_dir/generated" \
+  "ANALYSIS_V2_WORKER_SOURCE_DIR=$repo_dir" \
+  bash "$script_dir/generate-analysis-v2-env-files.sh" \
+  >"$temp_dir/selfhosted-route-apify-selectors-generator.out"
+assert_contains "$temp_dir/generated/analysis-v2-runtime.yaml" \
+  'SCRAPER_FOLLOWERS: "apify"'
+assert_contains "$temp_dir/generated/analysis-v2-runtime.yaml" \
+  'SELFHOSTED_AUTH_WORKER_OIDC_AUDIENCE: "https://instagram-auth-worker.example.run.app"'
+
+invalid_selfhosted_route_names=(
+  missing-worker-config
+  auth-disabled
+  bad-worker-url
+  bad-worker-audience
+  bad-worker-timeout
+  bad-worker-auth-mode
+  mixed-legacy-selectors
+)
+sed \
+  -e '/^SELFHOSTED_AUTH_WORKER_URL=/d' \
+  -e '/^SELFHOSTED_AUTH_WORKER_OIDC_AUDIENCE=/d' \
+  -e '/^SELFHOSTED_AUTH_WORKER_TIMEOUT_MS=/d' \
+  "$temp_dir/selfhosted-route-apify-selectors.env" \
+  >"$temp_dir/selfhosted-route-apify-missing-worker.env"
+sed 's/^SELFHOSTED_AUTH_ENABLED=.*/SELFHOSTED_AUTH_ENABLED=false/' \
+  "$temp_dir/selfhosted-route-apify-selectors.env" \
+  >"$temp_dir/selfhosted-route-apify-auth-disabled.env"
+sed 's|^SELFHOSTED_AUTH_WORKER_URL=.*|SELFHOSTED_AUTH_WORKER_URL=https://user:pass@instagram-auth-worker.example.run.app|' \
+  "$temp_dir/selfhosted-route-apify-selectors.env" \
+  >"$temp_dir/selfhosted-route-apify-bad-url.env"
+sed 's|^SELFHOSTED_AUTH_WORKER_OIDC_AUDIENCE=.*|SELFHOSTED_AUTH_WORKER_OIDC_AUDIENCE=https://different-auth-worker.example.run.app|' \
+  "$temp_dir/selfhosted-route-apify-selectors.env" \
+  >"$temp_dir/selfhosted-route-apify-bad-audience.env"
+sed 's/^SELFHOSTED_AUTH_WORKER_TIMEOUT_MS=.*/SELFHOSTED_AUTH_WORKER_TIMEOUT_MS=999/' \
+  "$temp_dir/selfhosted-route-apify-selectors.env" \
+  >"$temp_dir/selfhosted-route-apify-bad-timeout.env"
+cp "$temp_dir/selfhosted-route-apify-selectors.env" \
+  "$temp_dir/selfhosted-route-apify-bad-auth-mode.env"
+printf '%s\n' 'SELFHOSTED_AUTH_WORKER_AUTH_MODE=bearer' \
+  >>"$temp_dir/selfhosted-route-apify-bad-auth-mode.env"
+sed 's/^SCRAPER_FOLLOWERS=.*/SCRAPER_FOLLOWERS=selfhosted_auth/' \
+  "$temp_dir/selfhosted-route-apify-selectors.env" \
+  >"$temp_dir/selfhosted-route-mixed-selectors.env"
+for invalid_selfhosted_route in "${invalid_selfhosted_route_names[@]}"; do
+  case "$invalid_selfhosted_route" in
+    missing-worker-config) invalid_source_file="$temp_dir/selfhosted-route-apify-missing-worker.env" ;;
+    auth-disabled) invalid_source_file="$temp_dir/selfhosted-route-apify-auth-disabled.env" ;;
+    bad-worker-url) invalid_source_file="$temp_dir/selfhosted-route-apify-bad-url.env" ;;
+    bad-worker-audience) invalid_source_file="$temp_dir/selfhosted-route-apify-bad-audience.env" ;;
+    bad-worker-timeout) invalid_source_file="$temp_dir/selfhosted-route-apify-bad-timeout.env" ;;
+    bad-worker-auth-mode) invalid_source_file="$temp_dir/selfhosted-route-apify-bad-auth-mode.env" ;;
+    mixed-legacy-selectors) invalid_source_file="$temp_dir/selfhosted-route-mixed-selectors.env" ;;
+    *) fail "unknown invalid selfhosted route fixture: $invalid_selfhosted_route" ;;
+  esac
+  invalid_output_name="$invalid_selfhosted_route"
+  if env \
+    "PATH=$PATH" \
+    "ANALYSIS_V2_MANIFEST_SOURCE_ENV_FILE=$invalid_source_file" \
+    "ANALYSIS_V2_ENV_OUTPUT_DIR=$temp_dir/generated" \
+    "ANALYSIS_V2_WORKER_SOURCE_DIR=$repo_dir" \
+    bash "$script_dir/generate-analysis-v2-env-files.sh" \
+    >"$temp_dir/selfhosted-route-$invalid_output_name.out" 2>&1; then
+    fail "invalid selfhosted_auth_v1 runtime contract was accepted: $invalid_selfhosted_route"
+  fi
+  assert_not_contains "$temp_dir/selfhosted-route-$invalid_output_name.out" \
+    'SECRET_SENTINEL'
+done
+for invalid_selfhosted_contract in \
+  missing-worker-config auth-disabled bad-worker-url bad-worker-audience \
+  bad-worker-timeout bad-worker-auth-mode; do
+  assert_contains "$temp_dir/selfhosted-route-$invalid_selfhosted_contract.out" \
+    'selfhosted_auth_v1 requires SELFHOSTED_AUTH_ENABLED=true and a complete HTTPS OIDC worker contract'
+done
+assert_contains "$temp_dir/selfhosted-route-mixed-legacy-selectors.out" \
+  'SCRAPER_FOLLOWERS, SCRAPER_FOLLOWING, SCRAPER_LIKERS, and SCRAPER_COMMENTS must select one paid provider'
+
 for invalid_instagram_route in \
   '' \
   'apify' \
