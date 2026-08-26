@@ -19,7 +19,13 @@ export interface InteractionScraperConfig {
     fallback: boolean;
 }
 
+export type AnalysisV2InstagramRoute = 'apify_v1' | 'selfhosted_auth_v1';
 export type AnalysisV2PaidCollectionProvider = 'apify' | 'selfhosted_auth';
+
+const ANALYSIS_V2_INSTAGRAM_ROUTES: readonly AnalysisV2InstagramRoute[] = [
+    'apify_v1',
+    'selfhosted_auth_v1',
+];
 
 /** 기능별 생산 기본 프로바이더. */
 export const DEFAULT_PROVIDERS: Record<Capability, ProviderName> = {
@@ -186,31 +192,43 @@ export function getInteractionScraperConfig(
 }
 
 /**
- * Paid V2 collection is a single route: the four relationship/interaction selectors may not
- * mix Apify and authenticated-worker providers within one request.
+ * Paid Analysis V2 is selected by one immutable whole-request route. Legacy per-capability
+ * selectors remain available to preflight/legacy callers but cannot alter this decision.
+ */
+export function getAnalysisV2InstagramRoute(
+    env: Record<string, string | undefined> = process.env
+): AnalysisV2InstagramRoute {
+    const route = env.ANALYSIS_V2_INSTAGRAM_ROUTE;
+    if (route === undefined) return 'apify_v1';
+    if (!ANALYSIS_V2_INSTAGRAM_ROUTES.includes(route as AnalysisV2InstagramRoute)) {
+        throw new Error(
+            'SCRAPING_CONFIG_ERROR: ANALYSIS_V2_INSTAGRAM_ROUTE must be apify_v1 or selfhosted_auth_v1.'
+        );
+    }
+    if (route === 'selfhosted_auth_v1' && !isSelfHostedAuthEnabled(env)) {
+        throw new Error(
+            'SCRAPING_CONFIG_ERROR: SELFHOSTED_AUTH_ENABLED must be true before selecting selfhosted_auth_v1.'
+        );
+    }
+    return route as AnalysisV2InstagramRoute;
+}
+
+/**
+ * Preserve the provider-oriented name used by callers while deriving it solely from the named
+ * paid route. The legacy SCRAPER_* selectors are intentionally not read here.
  */
 export function getAnalysisV2PaidCollectionProvider(
     env: Record<string, string | undefined> = process.env
 ): AnalysisV2PaidCollectionProvider {
-    const relationships = getScraperConfig(env);
-    const interactions = getInteractionScraperConfig(env);
-    const selected = [
-        relationships.followers,
-        relationships.following,
-        interactions.likers,
-        interactions.comments,
-    ];
-    if (selected.every(provider => provider === 'apify')) return 'apify';
-    if (selected.every(provider => provider === 'selfhosted_auth')) return 'selfhosted_auth';
-    throw new Error(
-        'SCRAPING_CONFIG_ERROR: Analysis V2 paid collection selectors must all be apify or selfhosted_auth.'
-    );
+    return getAnalysisV2InstagramRoute(env) === 'apify_v1'
+        ? 'apify'
+        : 'selfhosted_auth';
 }
 
 /**
  * The trusted Basic/Standard revenue cohort has a deliberately narrower
  * collection envelope than production. Keep this check opt-in at the caller:
- * ordinary requests retain the existing selector and fallback behaviour.
+ * ordinary and beta requests retain their route-specific collection behaviour.
  */
 export function assertAnalysisV2FreshProvenanceConfiguration(
     env: Record<string, string | undefined> = process.env

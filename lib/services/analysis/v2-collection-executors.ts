@@ -282,6 +282,13 @@ function isRevenueCostLedgerRequest(
         && request.providerExecutionPolicy.policyVersion === 'authorized-free-e2e-v1';
 }
 
+function isAuthorizedTestOperationRequest(
+    request: AnalysisV2CollectionRequestContext,
+): boolean {
+    return request.accessMode === 'test_entitlement'
+        && request.providerExecutionPolicy?.mode === 'test_operation_split';
+}
+
 function isRevenueGenderRoutingRequest(
     request: AnalysisV2CollectionRequestContext,
 ): request is AnalysisV2CollectionRequestContext & {
@@ -693,27 +700,9 @@ export function createAnalysisV2RelationshipsExecutor(
             let completed: Awaited<ReturnType<typeof executeApifyWithReplacement>>
                 | Awaited<ReturnType<typeof executeSelfHostedAuth>>;
             if (selectedProvider === 'selfhosted_auth') {
-                // Once a paid fallback identity exists, retries must resume that exact run and
-                // must not spend another authenticated-account request first.
-                const existingFallback = await dependencies.providerRunStore.load({
-                    requestId: claim.requestId,
-                    jobKey: claim.jobKey,
-                    operationKey: createAnalysisV2ProviderOperationKey(
-                        operation,
-                        apifyCanonicalInput
-                    ),
-                });
-                if (existingFallback) {
-                    // A pre-cutover Apify ledger is resumable, but paid authenticated mode
-                    // must never purchase the incomplete-dataset replacement Actor.
-                    completed = await executeApify(apifyCanonicalInput);
-                } else {
-                    try {
-                        completed = await executeSelfHostedAuth();
-                    } catch (error) {
-                        throw error;
-                    }
-                }
+                // The named route is whole-request scoped. An authenticated-worker failure or
+                // a retained Apify row can never switch this operation to another provider.
+                completed = await executeSelfHostedAuth();
             } else {
                 completed = await executeApifyWithReplacement();
             }
@@ -1106,13 +1095,21 @@ async function durableProfiles(input: {
         onProfileStart,
         onProfileResolved,
     } = input;
-    if (isRevenueCostLedgerRequest(request)) {
+    const collectionProvider = collectionProviderForRequest(request, dependencies);
+    if (
+        isRevenueCostLedgerRequest(request)
+        || (
+            !isBetaFreePoolRequest(request)
+            && !isAuthorizedTestOperationRequest(request)
+            && collectionProvider === 'apify'
+        )
+    ) {
         return durableFreshApifyProfiles(input);
     }
     const allowApifyFallback = isBetaFreePoolRequest(request)
-        || collectionProviderForRequest(request, dependencies) === 'apify';
+        || (isAuthorizedTestOperationRequest(request) && collectionProvider === 'apify');
     const authenticatedProfiles = !isBetaFreePoolRequest(request)
-        && collectionProviderForRequest(request, dependencies) === 'selfhosted_auth';
+        && collectionProvider === 'selfhosted_auth';
     const identity = profileIdentity(claim);
     let resume = await dependencies.profileCheckpointStore.load(identity);
     if (
@@ -1527,17 +1524,7 @@ async function collectedTargetSource(input: {
     const selectedProvider = input.collectionProvider;
     if (selectedProvider !== 'selfhosted_auth') return executeApify();
 
-    const existingFallback = await input.dependencies.providerRunStore.load({
-        requestId: input.claim.requestId,
-        jobKey: input.claim.jobKey,
-        operationKey: createAnalysisV2ProviderOperationKey(operation, apifyCanonicalInput),
-    });
-    if (existingFallback) return executeApify();
-    try {
-        return await executeSelfHostedAuth();
-    } catch (error) {
-        throw error;
-    }
+    return executeSelfHostedAuth();
 }
 
 export function createAnalysisV2TargetEvidenceExecutor(

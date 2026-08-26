@@ -17,7 +17,7 @@ import { selfHostedAuthInteractionAdapter } from '@/lib/services/instagram/provi
 import { parseSelfHostedAuthLikerItems } from '@/lib/services/instagram/providers/selfhosted-auth/client';
 import {
     assertAnalysisV2FreshProvenanceConfiguration,
-    getInteractionScraperConfig,
+    getAnalysisV2PaidCollectionProvider,
 } from '@/lib/services/instagram/config';
 import { supabaseAdmin } from '@/lib/supabase/admin';
 import {
@@ -564,7 +564,7 @@ export function createAnalysisV2ReverseLikeCollector(input: {
                 collected = await executeApify();
             } else if (requestContext.providerExecutionPolicy?.mode === 'betatest_free_pool') {
                 collected = await executeApify();
-            } else if (getInteractionScraperConfig(env).likers === 'selfhosted_auth') {
+            } else if (getAnalysisV2PaidCollectionProvider(env) === 'selfhosted_auth') {
                 collected = await executeSelfHostedAuth();
             } else {
                 collected = await executeApify();

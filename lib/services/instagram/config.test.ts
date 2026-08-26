@@ -157,20 +157,57 @@ describe('getInteractionScraperConfig', () => {
 });
 
 describe('getAnalysisV2PaidCollectionProvider', () => {
-    it('requires all paid collection selectors to choose the same provider', () => {
-        const auth = {
+    it('defaults to the versioned Apify route and ignores legacy selectors', () => {
+        expect(getAnalysisV2PaidCollectionProvider({
+            SELFHOSTED_AUTH_ENABLED: 'true',
+            SCRAPER_FOLLOWERS: 'selfhosted_auth',
+            SCRAPER_FOLLOWING: 'apify',
+            SCRAPER_LIKERS: 'selfhosted_auth',
+            SCRAPER_COMMENTS: 'apify',
+        })).toBe('apify');
+    });
+
+    it('accepts the explicit Apify route without consulting legacy selectors', () => {
+        expect(getAnalysisV2PaidCollectionProvider({
+            ANALYSIS_V2_INSTAGRAM_ROUTE: 'apify_v1',
             SELFHOSTED_AUTH_ENABLED: 'true',
             SCRAPER_FOLLOWERS: 'selfhosted_auth',
             SCRAPER_FOLLOWING: 'selfhosted_auth',
             SCRAPER_LIKERS: 'selfhosted_auth',
             SCRAPER_COMMENTS: 'selfhosted_auth',
-        } as const;
-        expect(getAnalysisV2PaidCollectionProvider(auth)).toBe('selfhosted_auth');
-        expect(getAnalysisV2PaidCollectionProvider({})).toBe('apify');
+        })).toBe('apify');
+    });
+
+    it('accepts the enabled authenticated-worker route', () => {
+        expect(getAnalysisV2PaidCollectionProvider({
+            ANALYSIS_V2_INSTAGRAM_ROUTE: 'selfhosted_auth_v1',
+            SELFHOSTED_AUTH_ENABLED: 'true',
+        })).toBe('selfhosted_auth');
+    });
+
+    it('rejects non-versioned, mixed, and unknown route values', () => {
+        for (const value of [
+            'apify',
+            'selfhosted_auth',
+            'apify_v1,selfhosted_auth_v1',
+            'selfhosted_auth_v2',
+            '',
+        ]) {
+            expect(() => getAnalysisV2PaidCollectionProvider({
+                ANALYSIS_V2_INSTAGRAM_ROUTE: value,
+                SELFHOSTED_AUTH_ENABLED: 'true',
+            })).toThrow('ANALYSIS_V2_INSTAGRAM_ROUTE');
+        }
+    });
+
+    it('fails closed when the authenticated-worker route is disabled', () => {
         expect(() => getAnalysisV2PaidCollectionProvider({
-            ...auth,
-            SCRAPER_COMMENTS: 'apify',
-        })).toThrow('paid collection selectors');
+            ANALYSIS_V2_INSTAGRAM_ROUTE: 'selfhosted_auth_v1',
+        })).toThrow('SELFHOSTED_AUTH_ENABLED');
+        expect(() => getAnalysisV2PaidCollectionProvider({
+            ANALYSIS_V2_INSTAGRAM_ROUTE: 'selfhosted_auth_v1',
+            SELFHOSTED_AUTH_ENABLED: 'false',
+        })).toThrow('SELFHOSTED_AUTH_ENABLED');
     });
 });
 

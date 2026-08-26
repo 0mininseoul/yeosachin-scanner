@@ -143,6 +143,15 @@ function requestContext(
     };
 }
 
+function betaRequestContext(
+    overrides: Partial<AnalysisV2CollectionRequestContext> = {}
+): AnalysisV2CollectionRequestContext {
+    return requestContext({
+        providerExecutionPolicy: betaProviderPolicy,
+        ...overrides,
+    });
+}
+
 function contextStore(
     value: AnalysisV2CollectionRequestContext
 ): AnalysisV2CollectionRequestContextStore {
@@ -393,7 +402,7 @@ async function profileBatchResultHashOf(
     const usernames = resume.requestedUsernames;
     const topology = createAnalysisV2CollectionTopology('profiles', usernames);
     const outcome = await createAnalysisV2ProfileFetchExecutor({
-        requestContextStore: contextStore(requestContext()),
+        requestContextStore: contextStore(betaRequestContext()),
         evidenceStore: relationshipEvidence(usernames),
         profileCheckpointStore: inMemoryProfileStore(resume).store,
         // The merge is what is under test, not the seam. A resume that already carries a repair
@@ -401,6 +410,7 @@ async function profileBatchResultHashOf(
         // trigger a real paid run, so a runner that resolves nothing keeps the gate observable.
         runProfileRepair: repairRunner(),
         providerRunStore: providerStore().value,
+        env: betaProviderEnv,
     })(stageContext(
         'profile_fetch',
         state({ relationships: relationshipManifest(topology) }),
@@ -961,10 +971,7 @@ describe('analysis V2 concrete collection executors', () => {
                 })),
             } as unknown as AnalysisV2EvidenceStore,
             env: {
-                SCRAPER_FOLLOWERS: 'selfhosted_auth',
-                SCRAPER_FOLLOWING: 'selfhosted_auth',
-                SCRAPER_LIKERS: 'selfhosted_auth',
-                SCRAPER_COMMENTS: 'selfhosted_auth',
+                ANALYSIS_V2_INSTAGRAM_ROUTE: 'selfhosted_auth_v1',
                 SELFHOSTED_AUTH_ENABLED: 'true',
             },
         });
@@ -1013,11 +1020,7 @@ describe('analysis V2 concrete collection executors', () => {
             getFollowing: getter,
             evidenceStore: {} as AnalysisV2EvidenceStore,
             env: {
-                SCRAPER_FOLLOWERS: 'selfhosted_auth',
-                SCRAPER_FOLLOWING: 'selfhosted_auth',
-                SCRAPER_LIKERS: 'selfhosted_auth',
-                SCRAPER_COMMENTS: 'selfhosted_auth',
-                SCRAPER_FALLBACK: 'true',
+                ANALYSIS_V2_INSTAGRAM_ROUTE: 'selfhosted_auth_v1',
                 SELFHOSTED_AUTH_ENABLED: 'true',
             },
         });
@@ -1309,7 +1312,7 @@ describe('analysis V2 concrete collection executors', () => {
         expect(providers.bindAdapterCheckpoint).toHaveBeenCalledTimes(2);
     });
 
-    it('does not open an Apify replacement for a reconciled legacy run in paid selfhosted_auth mode', async () => {
+    it('does not open an Apify replacement for a retained run in the named auth route', async () => {
         const providers = providerStore();
         const incomplete = new Error(
             'SCRAPING_INCOMPLETE_ERROR: legacy relationship dataset is incomplete.'
@@ -1324,6 +1327,10 @@ describe('analysis V2 concrete collection executors', () => {
         const executor = createAnalysisV2RelationshipsExecutor({
             requestContextStore: contextStore(requestContext()),
             providerRunStore: providers.value,
+            selfHostedAuthRunStore: {
+                load: vi.fn(async () => null),
+                checkpoint: vi.fn(),
+            },
             getFollowers: getter,
             getFollowing: getter,
             evidenceStore: {
@@ -1331,21 +1338,13 @@ describe('analysis V2 concrete collection executors', () => {
                 freezeRelationships: vi.fn(),
             } as unknown as AnalysisV2EvidenceStore,
             env: {
+                ANALYSIS_V2_INSTAGRAM_ROUTE: 'selfhosted_auth_v1',
                 SELFHOSTED_AUTH_ENABLED: 'true',
-                SCRAPER_FOLLOWERS: 'selfhosted_auth',
-                SCRAPER_FOLLOWING: 'selfhosted_auth',
-                SCRAPER_LIKERS: 'selfhosted_auth',
-                SCRAPER_COMMENTS: 'selfhosted_auth',
-                SCRAPER_FALLBACK: 'false',
             },
         });
 
         await expect(executor(stageContext('relationships', state()))).rejects.toBe(incomplete);
-        expect(providers.bindAdapterCheckpoint).toHaveBeenCalledTimes(2);
-        expect(providers.bindAdapterCheckpoint.mock.calls.every(([input]) => (
-            input.operationKey.startsWith('relationship-followers:')
-            || input.operationKey.startsWith('relationship-following:')
-        ))).toBe(true);
+        expect(providers.bindAdapterCheckpoint).not.toHaveBeenCalled();
     });
 
     it('bounds repeated incomplete relationship retries to the same two operation identities', async () => {
@@ -1879,12 +1878,8 @@ describe('analysis V2 concrete collection executors', () => {
             evidenceStore: { checkpointTargetEvidence } as unknown as AnalysisV2EvidenceStore,
             getProfilesBatchV2: vi.fn(),
             env: {
+                ANALYSIS_V2_INSTAGRAM_ROUTE: 'selfhosted_auth_v1',
                 SELFHOSTED_AUTH_ENABLED: 'true',
-                SCRAPER_FOLLOWERS: 'selfhosted_auth',
-                SCRAPER_FOLLOWING: 'selfhosted_auth',
-                SCRAPER_LIKERS: 'selfhosted_auth',
-                SCRAPER_COMMENTS: 'selfhosted_auth',
-                SCRAPER_FALLBACK: 'false',
             },
         });
         await executor(stageContext('target_evidence', state()));
@@ -1939,12 +1934,13 @@ describe('analysis V2 concrete collection executors', () => {
         });
         const checkpointTargetEvidence = vi.fn();
         const executor = createAnalysisV2TargetEvidenceExecutor({
-            requestContextStore: contextStore(requestContext()),
+            requestContextStore: contextStore(betaRequestContext()),
             profileCheckpointStore: profileStore.store,
             providerRunStore: providerStore().value,
             interactionAdapter: { getPostLikers, getPostComments },
             evidenceStore: { checkpointTargetEvidence } as unknown as AnalysisV2EvidenceStore,
             getProfilesBatchV2: vi.fn(),
+            env: betaProviderEnv,
         });
 
         const execution = executor(stageContext('target_evidence', state()));
@@ -1998,12 +1994,13 @@ describe('analysis V2 concrete collection executors', () => {
         });
         const checkpointTargetEvidence = vi.fn();
         const executor = createAnalysisV2TargetEvidenceExecutor({
-            requestContextStore: contextStore(requestContext()),
+            requestContextStore: contextStore(betaRequestContext()),
             profileCheckpointStore: profileStore.store,
             providerRunStore: providerStore().value,
             interactionAdapter: { getPostLikers, getPostComments },
             evidenceStore: { checkpointTargetEvidence } as unknown as AnalysisV2EvidenceStore,
             getProfilesBatchV2: vi.fn(),
+            env: betaProviderEnv,
         });
 
         const execution = executor(stageContext('target_evidence', state()));
@@ -2041,12 +2038,13 @@ describe('analysis V2 concrete collection executors', () => {
         const providers = providerStore();
         const checkpointTargetEvidence = vi.fn();
         const executor = createAnalysisV2TargetEvidenceExecutor({
-            requestContextStore: contextStore(requestContext()),
+            requestContextStore: contextStore(betaRequestContext()),
             profileCheckpointStore: profileStore.store,
             providerRunStore: providers.value,
             interactionAdapter: { getPostLikers, getPostComments },
             evidenceStore: { checkpointTargetEvidence } as unknown as AnalysisV2EvidenceStore,
             getProfilesBatchV2: vi.fn(),
+            env: betaProviderEnv,
         });
 
         const execution = executor(stageContext('target_evidence', state()));
@@ -2103,12 +2101,13 @@ describe('analysis V2 concrete collection executors', () => {
         const getPostLikers = vi.fn();
         const getPostComments = vi.fn();
         await createAnalysisV2TargetEvidenceExecutor({
-            requestContextStore: contextStore(requestContext()),
+            requestContextStore: contextStore(betaRequestContext()),
             profileCheckpointStore: profileStore.store,
             providerRunStore: providerStore().value,
             interactionAdapter: { getPostLikers, getPostComments },
             evidenceStore: { checkpointTargetEvidence } as unknown as AnalysisV2EvidenceStore,
             getProfilesBatchV2: vi.fn(),
+            env: betaProviderEnv,
         })(stageContext('target_evidence', state()));
 
         expect(getPostLikers).not.toHaveBeenCalled();
@@ -2263,7 +2262,7 @@ describe('analysis V2 concrete collection executors', () => {
         expect(revenueRpc).not.toHaveBeenCalled();
     });
 
-    it('keeps ordinary production fallback calls free of revenue-cost RPCs and binding state', async () => {
+    it('keeps beta fallback calls free of revenue-cost RPCs and binding state', async () => {
         const profileStore = inMemoryProfileStore(null);
         const providers = providerStore();
         const reusable = reusableTargetProfileRunStore(null);
@@ -2306,7 +2305,7 @@ describe('analysis V2 concrete collection executors', () => {
         });
 
         await createAnalysisV2TargetEvidenceExecutor({
-            requestContextStore: contextStore(requestContext()),
+            requestContextStore: contextStore(betaRequestContext()),
             profileCheckpointStore: profileStore.store,
             providerRunStore: providers.value,
             targetProfileReuseStore: reusable.value,
@@ -2314,6 +2313,7 @@ describe('analysis V2 concrete collection executors', () => {
             freshProvenanceStore,
             getProfilesBatchV2: fetcher as unknown as typeof import('@/lib/services/instagram/scraper').getProfilesBatchV2,
             interactionAdapter: { getPostLikers: vi.fn(), getPostComments: vi.fn() },
+            env: betaProviderEnv,
             evidenceStore: {
                 checkpointTargetEvidence: vi.fn(async () => ({
                     revision: 1,
@@ -2375,10 +2375,11 @@ describe('analysis V2 concrete collection executors', () => {
             };
         });
         const executor = createAnalysisV2TargetEvidenceExecutor({
-            requestContextStore: contextStore(requestContext()),
+            requestContextStore: contextStore(betaRequestContext()),
             profileCheckpointStore: profileStore.store,
             providerRunStore: providers.value,
             targetProfileReuseStore: reusable.value,
+            env: betaProviderEnv,
             getProfilesBatchV2: fetcher as unknown as typeof import('@/lib/services/instagram/scraper').getProfilesBatchV2,
             interactionAdapter: { getPostLikers: vi.fn(), getPostComments: vi.fn() },
             evidenceStore: {
@@ -2456,10 +2457,11 @@ describe('analysis V2 concrete collection executors', () => {
             };
         });
         const executor = createAnalysisV2TargetEvidenceExecutor({
-            requestContextStore: contextStore(requestContext()),
+            requestContextStore: contextStore(betaRequestContext()),
             profileCheckpointStore: profileStore.store,
             providerRunStore: providers.value,
             targetProfileReuseStore: reusable.value,
+            env: betaProviderEnv,
             getProfilesBatchV2: fetcher as unknown as typeof import('@/lib/services/instagram/scraper').getProfilesBatchV2,
         });
 
@@ -2523,12 +2525,13 @@ describe('analysis V2 concrete collection executors', () => {
         });
 
         await createAnalysisV2ProfileFetchExecutor({
-            requestContextStore: contextStore(requestContext()),
+            requestContextStore: contextStore(betaRequestContext()),
             profileCheckpointStore: profileStore.store,
             providerRunStore: providerStore().value,
             targetProfileReuseStore: reusable.value,
             evidenceStore: relationshipEvidence(usernames),
             getProfilesBatchV2: fetcher as unknown as typeof import('@/lib/services/instagram/scraper').getProfilesBatchV2,
+            env: betaProviderEnv,
         })(stageContext(
             'profile_fetch',
             state({ relationships: relationshipManifest(topology) }),
@@ -2538,7 +2541,7 @@ describe('analysis V2 concrete collection executors', () => {
         expect(reusable.load).not.toHaveBeenCalled();
     });
 
-    it('routes a paid authenticated candidate profile batch to the worker without an Apify binding', async () => {
+    it('routes a named paid authenticated profile route to the worker without an Apify binding', async () => {
         const usernames = ['alice'];
         const topology = createAnalysisV2CollectionTopology('profiles', usernames);
         const profileStore = inMemoryProfileStore(null);
@@ -2579,11 +2582,8 @@ describe('analysis V2 concrete collection executors', () => {
             evidenceStore: relationshipEvidence(usernames),
             getProfilesBatchV2: fetcher as unknown as typeof import('@/lib/services/instagram/scraper').getProfilesBatchV2,
             env: {
+                ANALYSIS_V2_INSTAGRAM_ROUTE: 'selfhosted_auth_v1',
                 SELFHOSTED_AUTH_ENABLED: 'true',
-                SCRAPER_FOLLOWERS: 'selfhosted_auth',
-                SCRAPER_FOLLOWING: 'selfhosted_auth',
-                SCRAPER_LIKERS: 'selfhosted_auth',
-                SCRAPER_COMMENTS: 'selfhosted_auth',
             },
         })(stageContext(
             'profile_fetch',
@@ -2593,6 +2593,72 @@ describe('analysis V2 concrete collection executors', () => {
 
         expect(fetcher).toHaveBeenCalledOnce();
         expect(providers.bindAdapterCheckpoint).not.toHaveBeenCalled();
+    });
+
+    it('hydrates an ordinary paid Apify profile batch directly with the immutable secondary binding', async () => {
+        const usernames = ['alice'];
+        const topology = createAnalysisV2CollectionTopology('profiles', usernames);
+        const profileStore = inMemoryProfileStore(null);
+        const providers = providerStore();
+        const fetcher = vi.fn(async (
+            requested: readonly string[],
+            options: Parameters<typeof import('@/lib/services/instagram/scraper').getProfilesBatchV2>[1]
+        ) => {
+            expect(requested).toEqual(usernames);
+            expect(options).toMatchObject({
+                freshApifyOnly: true,
+                allowApifyFallback: false,
+                providerRun: {
+                    logicalProvider: 'apify',
+                    credentialSlot: 'secondary',
+                },
+            });
+            expect(options).not.toHaveProperty('primaryProvider');
+            expect(options).not.toHaveProperty('selfHostedAuthIdentity');
+            const result = [success('alice', 'apify')] as ProfileAttemptResult[];
+            await options.persistAttemptOutcomes({
+                attempt: 'fresh_apify',
+                source: 'apify',
+                requestedUsernames: requested,
+                results: result,
+            });
+            return {
+                results: result,
+                profiles: [profile('alice')],
+                primaryResults: result,
+                fallbackResults: [],
+                frozenUnresolvedUsernames: [],
+            };
+        });
+
+        await createAnalysisV2ProfileFetchExecutor({
+            requestContextStore: contextStore(requestContext()),
+            profileCheckpointStore: profileStore.store,
+            providerRunStore: providers.value,
+            evidenceStore: relationshipEvidence(usernames),
+            getProfilesBatchV2: fetcher as unknown as typeof import('@/lib/services/instagram/scraper').getProfilesBatchV2,
+            env: {
+                ANALYSIS_V2_APIFY_API_TOKEN_SLOT: 'secondary',
+                SCRAPER_PROFILE: 'selfhosted',
+                SCRAPER_PROFILES_BATCH: 'selfhosted',
+                SCRAPER_FOLLOWERS: 'selfhosted_auth',
+                SCRAPER_FOLLOWING: 'selfhosted_auth',
+                SCRAPER_LIKERS: 'selfhosted_auth',
+                SCRAPER_COMMENTS: 'apify',
+                SELFHOSTED_AUTH_ENABLED: 'true',
+            },
+        })(stageContext(
+            'profile_fetch',
+            state({ relationships: relationshipManifest(topology) }),
+            0
+        ));
+
+        expect(fetcher).toHaveBeenCalledOnce();
+        expect(profileStore.store.checkpointFreshApify).toHaveBeenCalledOnce();
+        expect(profileStore.store.checkpointPrimary).not.toHaveBeenCalled();
+        expect(providers.bindAdapterCheckpoint).toHaveBeenCalledWith(
+            expect.objectContaining({ credentialSlot: 'secondary' })
+        );
     });
 
     it('persists all primary outcomes before binding and freezes exactly unresolved fallback input', async () => {
@@ -2762,12 +2828,12 @@ describe('analysis V2 concrete collection executors', () => {
             };
         });
         const executor = createAnalysisV2ProfileFetchExecutor({
-            requestContextStore: contextStore(requestContext()),
+            requestContextStore: contextStore(betaRequestContext()),
             profileCheckpointStore: profileStore.store,
             providerRunStore: providerStore().value,
             evidenceStore: relationshipEvidence(usernames),
             getProfilesBatchV2: fetcher as unknown as typeof import('@/lib/services/instagram/scraper').getProfilesBatchV2,
-            env: { APIFY_API_TOKEN_SLOT: 'primary' },
+            env: betaProviderEnv,
         });
 
         await executor({
@@ -2791,11 +2857,12 @@ describe('analysis V2 concrete collection executors', () => {
         const topology = createAnalysisV2CollectionTopology('profiles', usernames);
 
         await expect(createAnalysisV2ProfileFetchExecutor({
-            requestContextStore: contextStore(requestContext()),
+            requestContextStore: contextStore(betaRequestContext()),
             evidenceStore: relationshipEvidence(usernames),
             profileCheckpointStore: inMemoryProfileStore(
                 completedFallbackResume(usernames, failures)
             ).store,
+            env: betaProviderEnv,
         })(stageContext(
             'profile_fetch',
             state({ relationships: relationshipManifest(topology) }),
@@ -2811,11 +2878,12 @@ describe('analysis V2 concrete collection executors', () => {
         const topology = createAnalysisV2CollectionTopology('profiles', usernames);
 
         await expect(createAnalysisV2ProfileFetchExecutor({
-            requestContextStore: contextStore(requestContext()),
+            requestContextStore: contextStore(betaRequestContext()),
             evidenceStore: relationshipEvidence(usernames),
             profileCheckpointStore: inMemoryProfileStore(
                 completedFallbackResume(usernames, failures)
             ).store,
+            env: betaProviderEnv,
         })(stageContext(
             'profile_fetch',
             state({ relationships: relationshipManifest(topology) }),
@@ -2834,13 +2902,14 @@ describe('analysis V2 concrete collection executors', () => {
         // that comes back still failing, so the gate must still reject: repair adds a route to
         // success, never budget.
         await expect(createAnalysisV2ProfileFetchExecutor({
-            requestContextStore: contextStore(requestContext()),
+            requestContextStore: contextStore(betaRequestContext()),
             evidenceStore: relationshipEvidence(usernames),
             profileCheckpointStore: inMemoryProfileStore(
                 completedFallbackResume(usernames, failures)
             ).store,
             runProfileRepair: repairRunner(),
             providerRunStore: providerStore().value,
+            env: betaProviderEnv,
         })(stageContext(
             'profile_fetch',
             state({ relationships: relationshipManifest(topology) }),
@@ -2860,11 +2929,12 @@ describe('analysis V2 concrete collection executors', () => {
         // so the gate rejects it; the repair likewise returns a non-incomplete failure and cannot
         // launder it into a pass.
         await expect(createAnalysisV2ProfileFetchExecutor({
-            requestContextStore: contextStore(requestContext()),
+            requestContextStore: contextStore(betaRequestContext()),
             evidenceStore: relationshipEvidence(usernames),
             profileCheckpointStore: inMemoryProfileStore(resume).store,
             runProfileRepair: repairRunner(),
             providerRunStore: providerStore().value,
+            env: betaProviderEnv,
         })(stageContext(
             'profile_fetch',
             state({ relationships: relationshipManifest(topology) }),
@@ -2882,10 +2952,11 @@ describe('analysis V2 concrete collection executors', () => {
         const runProfileRepair = repairRunner();
 
         await expect(createAnalysisV2TargetEvidenceExecutor({
-            requestContextStore: contextStore(requestContext()),
+            requestContextStore: contextStore(betaRequestContext()),
             profileCheckpointStore: profileStore.store,
             interactionAdapter: { getPostLikers, getPostComments },
             runProfileRepair,
+            env: betaProviderEnv,
         })(stageContext('target_evidence', state()))).rejects.toThrow(
             'ANALYSIS_V2_PROFILE_EVIDENCE_INCOMPLETE'
         );
@@ -3123,6 +3194,7 @@ describe('analysis V2 concrete collection executors', () => {
             runProfileRepair,
             providerRunStore: runs.value,
             env: {
+                ANALYSIS_V2_INSTAGRAM_ROUTE: 'selfhosted_auth_v1',
                 SELFHOSTED_AUTH_ENABLED: 'true',
                 SCRAPER_FOLLOWERS: 'selfhosted_auth',
                 SCRAPER_FOLLOWING: 'selfhosted_auth',
@@ -3153,11 +3225,12 @@ describe('analysis V2 concrete collection executors', () => {
         // Two incomplete failures in ten exceed the one-failure budget, so the fallback-only
         // merge fails the gate. The repair resolves both, and only then does the batch pass.
         await expect(createAnalysisV2ProfileFetchExecutor({
-            requestContextStore: contextStore(requestContext()),
+            requestContextStore: contextStore(betaRequestContext()),
             evidenceStore: relationshipEvidence(usernames),
             profileCheckpointStore: store.store,
             runProfileRepair,
             providerRunStore: runs.value,
+            env: betaProviderEnv,
         })(stageContext(
             'profile_fetch',
             state({ relationships: relationshipManifest(topology) }),
@@ -3259,13 +3332,14 @@ describe('analysis V2 concrete collection executors', () => {
         // One incomplete failure in ten is inside the gate, so there is nothing to repair and
         // nothing to spend.
         await expect(createAnalysisV2ProfileFetchExecutor({
-            requestContextStore: contextStore(requestContext()),
+            requestContextStore: contextStore(betaRequestContext()),
             evidenceStore: relationshipEvidence(usernames),
             profileCheckpointStore: inMemoryProfileStore(
                 completedFallbackResume(usernames, [incompleteFailure(usernames.at(-1)!)])
             ).store,
             runProfileRepair,
             providerRunStore: providerStore().value,
+            env: betaProviderEnv,
         })(stageContext(
             'profile_fetch',
             state({ relationships: relationshipManifest(topology) }),
@@ -3289,11 +3363,12 @@ describe('analysis V2 concrete collection executors', () => {
         );
 
         await expect(createAnalysisV2ProfileFetchExecutor({
-            requestContextStore: contextStore(requestContext()),
+            requestContextStore: contextStore(betaRequestContext()),
             evidenceStore: relationshipEvidence(usernames),
             profileCheckpointStore: inMemoryProfileStore(resume).store,
             runProfileRepair,
             providerRunStore: providerStore().value,
+            env: betaProviderEnv,
         })(stageContext(
             'profile_fetch',
             state({ relationships: relationshipManifest(topology) }),
@@ -3316,11 +3391,12 @@ describe('analysis V2 concrete collection executors', () => {
         });
 
         await expect(createAnalysisV2ProfileFetchExecutor({
-            requestContextStore: contextStore(requestContext()),
+            requestContextStore: contextStore(betaRequestContext()),
             evidenceStore: relationshipEvidence(usernames),
             profileCheckpointStore: store.store,
             runProfileRepair,
             providerRunStore: providerStore().value,
+            env: betaProviderEnv,
         })(stageContext(
             'profile_fetch',
             state({ relationships: relationshipManifest(topology) }),
@@ -3337,17 +3413,19 @@ describe('analysis V2 concrete collection executors', () => {
         const complete = inMemoryProfileStore(completedResume(usernames));
 
         await expect(createAnalysisV2ProfileFetchExecutor({
-            requestContextStore: contextStore(requestContext()),
+            requestContextStore: contextStore(betaRequestContext()),
             evidenceStore: relationshipEvidence(usernames),
             profileCheckpointStore: complete.store,
+            env: betaProviderEnv,
         })(stageContext('profile_fetch', dagState, 1))).rejects.toThrow(
             'ANALYSIS_V2_PROFILE_BATCH_MISMATCH'
         );
 
         await expect(createAnalysisV2ProfileFetchExecutor({
-            requestContextStore: contextStore(requestContext()),
+            requestContextStore: contextStore(betaRequestContext()),
             evidenceStore: relationshipEvidence(['alice', 'girlfriend']),
             profileCheckpointStore: complete.store,
+            env: betaProviderEnv,
         })(stageContext(
             'profile_fetch',
             state({ relationships: relationshipManifest(
@@ -3365,9 +3443,10 @@ describe('analysis V2 concrete collection executors', () => {
             fallbackCapturedAt: capturedAt,
         });
         await expect(createAnalysisV2ProfileFetchExecutor({
-            requestContextStore: contextStore(requestContext()),
+            requestContextStore: contextStore(betaRequestContext()),
             evidenceStore: relationshipEvidence(usernames),
             profileCheckpointStore: verifiedUnavailable.store,
+            env: betaProviderEnv,
         })(stageContext('profile_fetch', dagState, 0))).resolves.toMatchObject({
             checkpoint: { manifest: { itemCount: 2 } },
         });
@@ -3381,11 +3460,12 @@ describe('analysis V2 concrete collection executors', () => {
             fallbackCapturedAt: capturedAt,
         });
         await expect(createAnalysisV2ProfileFetchExecutor({
-            requestContextStore: contextStore(requestContext()),
+            requestContextStore: contextStore(betaRequestContext()),
             evidenceStore: relationshipEvidence(usernames),
             profileCheckpointStore: ambiguousTerminal.store,
             runProfileRepair: repairRunner(),
             providerRunStore: providerStore().value,
+            env: betaProviderEnv,
         })(stageContext('profile_fetch', dagState, 0))).rejects.toThrow(
             'ANALYSIS_V2_PROFILE_EVIDENCE_INCOMPLETE'
         );
@@ -3404,11 +3484,12 @@ describe('analysis V2 concrete collection executors', () => {
             throw new Error('SCRAPING_AMBIGUOUS_START_ERROR: unknown Actor start');
         });
         await expect(createAnalysisV2ProfileFetchExecutor({
-            requestContextStore: contextStore(requestContext()),
+            requestContextStore: contextStore(betaRequestContext()),
             evidenceStore: relationshipEvidence(usernames),
             profileCheckpointStore: primaryOnly.store,
             providerRunStore: providerStore().value,
             getProfilesBatchV2: ambiguousFetcher as unknown as typeof import('@/lib/services/instagram/scraper').getProfilesBatchV2,
+            env: betaProviderEnv,
         })(stageContext('profile_fetch', dagState, 0))).rejects.toThrow(
             'SCRAPING_AMBIGUOUS_START_ERROR'
         );
@@ -3423,10 +3504,11 @@ describe('analysis V2 concrete collection executors', () => {
         const fetcher = vi.fn();
         const reportActiveProfile = vi.fn(async () => undefined);
         const executor = createAnalysisV2ProfileFetchExecutor({
-            requestContextStore: contextStore(requestContext()),
+            requestContextStore: contextStore(betaRequestContext()),
             evidenceStore: relationshipEvidence(usernames),
             profileCheckpointStore: complete.store,
             getProfilesBatchV2: fetcher,
+            env: betaProviderEnv,
         });
         const dagState = state({ relationships: relationshipManifest(topology) });
 

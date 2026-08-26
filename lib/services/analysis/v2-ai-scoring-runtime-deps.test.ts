@@ -534,6 +534,52 @@ describe('analysis V2 reverse-like production collector', () => {
         }));
     });
 
+    it('uses the named Apify paid route even when the legacy liker selector requests auth', async () => {
+        const bindAdapterCheckpoint = vi.fn(async () => ({ stored: null, checkpoint: {} }));
+        const apifyLikers = vi.fn(async () => []);
+        const selfHostedLikers = vi.fn(async () => {
+            throw new Error('named Apify route must not call selfhosted auth');
+        });
+        const collector = createAnalysisV2ReverseLikeCollector({
+            providerRunStore: {
+                bindAdapterCheckpoint,
+                load: vi.fn(async () => ({ status: 'succeeded', runId: 'RUN123456' })),
+            } as unknown as AnalysisV2ProviderRunStore,
+            selfHostedAuthRunStore: {
+                load: vi.fn(async () => null),
+                checkpoint: vi.fn(),
+            },
+            contextStore: reverseLikeContext(),
+            adapter: { getPostLikers: apifyLikers, getPostComments: vi.fn() },
+            selfHostedAuthAdapter: {
+                getPostLikers: selfHostedLikers,
+                getPostComments: vi.fn(),
+            },
+            env: {
+                ANALYSIS_V2_INSTAGRAM_ROUTE: 'apify_v1',
+                SELFHOSTED_AUTH_ENABLED: 'true',
+                SCRAPER_LIKERS: 'selfhosted_auth',
+            },
+        });
+
+        await collector.collect({
+            requestId,
+            jobKey: 'track:reverse-likes:collect',
+            claimToken,
+            jobInputHash: consumerInputHash,
+            targetUsername: 'target.account',
+            candidates: [{
+                candidateId: 'candidate:a',
+                postUrl: 'https://instagram.com/p/POST_A/',
+                declaredLikesCount: 1,
+            }],
+            limitPerPost: 100,
+        });
+
+        expect(apifyLikers).toHaveBeenCalledOnce();
+        expect(selfHostedLikers).not.toHaveBeenCalled();
+    });
+
     it('uses one durable provider operation for at most ten posts and keeps per-post attribution', async () => {
         const bindAdapterCheckpoint = vi.fn(async (input: unknown) => {
             void input;
@@ -659,7 +705,10 @@ describe('analysis V2 reverse-like production collector', () => {
             }];
         });
         const collector = createAnalysisV2ReverseLikeCollector({
-            providerRunStore: { bindAdapterCheckpoint, load } as unknown as AnalysisV2ProviderRunStore,
+            providerRunStore: {
+                bindAdapterCheckpoint: vi.fn(async () => ({ stored: null, checkpoint: {} })),
+                load,
+            } as unknown as AnalysisV2ProviderRunStore,
             selfHostedAuthRunStore: {
                 load: vi.fn(async value => receiptCache.get(value.operationKey) ?? null),
                 checkpoint,
@@ -671,9 +720,8 @@ describe('analysis V2 reverse-like production collector', () => {
                 getPostComments: vi.fn(),
             },
             env: {
+                ANALYSIS_V2_INSTAGRAM_ROUTE: 'selfhosted_auth_v1',
                 SELFHOSTED_AUTH_ENABLED: 'true',
-                SCRAPER_LIKERS: 'selfhosted_auth',
-                SCRAPER_FALLBACK: 'false',
             },
         });
 
@@ -725,7 +773,7 @@ describe('analysis V2 reverse-like production collector', () => {
         const collector = createAnalysisV2ReverseLikeCollector({
             providerRunStore: {
                 load: vi.fn(async () => null),
-                bindAdapterCheckpoint: vi.fn(),
+                bindAdapterCheckpoint: vi.fn(async () => ({ stored: null, checkpoint: {} })),
             } as unknown as AnalysisV2ProviderRunStore,
             selfHostedAuthRunStore: {
                 load: vi.fn(async () => null),
@@ -738,9 +786,8 @@ describe('analysis V2 reverse-like production collector', () => {
                 getPostComments: vi.fn(),
             },
             env: {
+                ANALYSIS_V2_INSTAGRAM_ROUTE: 'selfhosted_auth_v1',
                 SELFHOSTED_AUTH_ENABLED: 'true',
-                SCRAPER_LIKERS: 'selfhosted_auth',
-                SCRAPER_FALLBACK: 'true',
             },
         });
 
