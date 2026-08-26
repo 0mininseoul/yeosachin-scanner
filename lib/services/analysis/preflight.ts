@@ -2064,6 +2064,13 @@ export async function processPreflight(
         let bliteProviderRun: StoredPreflightProviderRun | null = null;
         let bliteObservability: PrecheckoutBliteObservability | undefined;
         if (bliteClock !== null) {
+            if (
+                betaHold
+                && existingRun
+                && existingRun.credentialSlot !== betaHold.credentialSlot
+            ) {
+                throw new Error(BETA_APIFY_POOL_CAPACITY_ERROR);
+            }
             bliteObservability = dependencies.bliteObservability
                 ?? createPrecheckoutBliteObservability({
                     preflightId: claim.preflightId,
@@ -2071,6 +2078,7 @@ export async function processPreflight(
                 });
             const identity = preflightProviderIdentity(
                 existingRun?.credentialSlot
+                    ?? betaHold?.credentialSlot
                     ?? selectPreflightApifyCredentialSlot(
                         claim.preflightId,
                         dependencies.env,

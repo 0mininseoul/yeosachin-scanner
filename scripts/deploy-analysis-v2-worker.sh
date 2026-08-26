@@ -1325,7 +1325,6 @@ require_canonical_apify_secret_inventory() {
   # separately validated, execution-disabled E2E fixture.
   [[ "$ANALYSIS_V2_TASKS_CLOUD_RUN_SERVICE" == "analysis-worker" ]] || return 0
   [[ "$prune_apify_secret_refs_enabled" != "true" ]] || return 0
-  [[ "$clear_apify_secret_ref_prune_fence_enabled" != "true" ]] || return 0
   jq -ne --argjson refs "$expected_apify_secret_refs_json" '
     def specs: [
       {env: "APIFY_PRIMARY_API_TOKEN", secret: "ai-baram-v2-apify-primary"},

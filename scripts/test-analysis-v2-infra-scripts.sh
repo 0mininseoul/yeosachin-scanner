@@ -3216,6 +3216,44 @@ assert_contains "$temp_dir/canonical-prune-rejected.out" \
 [[ ! -s "$temp_dir/canonical-prune-events" ]] \
   || fail "canonical prune rejection reached gcloud before failing closed"
 
+if env "${canonical_common_env[@]}" \
+  'FAKE_GCLOUD_STATE=ready' \
+  'FAKE_GCLOUD_APIFY_SECRET_SLOTS=primary,tertiary,quinary,senary' \
+  'FAKE_GCLOUD_ACTIVE_APIFY_SECRET_SLOTS=primary,tertiary,quinary,senary' \
+  'FAKE_GCLOUD_APIFY_SECRET_VERSION=3' \
+  'ANALYSIS_V2_APIFY_API_TOKEN_SLOT=primary' \
+  'ANALYSIS_V2_APIFY_API_TOKEN_SECRET_VERSION=3' \
+  'ANALYSIS_V2_APIFY_ADDITIONAL_SECRET_VERSIONS=tertiary:3,quinary:3,senary:3' \
+  "FAKE_GCLOUD_EVENT_LOG=$temp_dir/canonical-clear-partial-events" \
+  "ANALYSIS_V2_WORKER_ENV_VARS_FILE=$temp_dir/runtime-primary-slot.env" \
+  bash "$script_dir/deploy-analysis-v2-worker.sh" --dry-run \
+    --clear-apify-secret-ref-prune-fence=tertiary,quinary,senary \
+  >"$temp_dir/canonical-clear-partial-rejected.out" 2>&1; then
+  fail "canonical analysis-worker accepted a partial Apify inventory clear"
+fi
+assert_contains "$temp_dir/canonical-clear-partial-rejected.out" \
+  'canonical analysis-worker requires exactly all eight Apify Secret Manager refs'
+[[ ! -s "$temp_dir/canonical-clear-partial-events" ]] \
+  || fail "canonical partial clear reached a gcloud mutation before failing closed"
+
+env "${canonical_common_env[@]}" \
+  'FAKE_GCLOUD_STATE=ready' \
+  'FAKE_GCLOUD_APIFY_SECRET_SLOTS=primary,secondary,tertiary,quaternary,quinary,senary,septenary,tenth' \
+  'FAKE_GCLOUD_ACTIVE_APIFY_SECRET_SLOTS=primary,secondary,tertiary,quaternary,quinary,senary,septenary,tenth' \
+  'FAKE_GCLOUD_APIFY_SECRET_VERSION=3' \
+  'ANALYSIS_V2_APIFY_API_TOKEN_SLOT=primary' \
+  'ANALYSIS_V2_APIFY_API_TOKEN_SECRET_VERSION=3' \
+  'ANALYSIS_V2_APIFY_ADDITIONAL_SECRET_VERSIONS=secondary:3,tertiary:3,quaternary:3,quinary:3,senary:3,septenary:3,tenth:3' \
+  "FAKE_GCLOUD_EVENT_LOG=$temp_dir/canonical-clear-full-events" \
+  "ANALYSIS_V2_WORKER_ENV_VARS_FILE=$temp_dir/runtime-primary-slot.env" \
+  bash "$script_dir/deploy-analysis-v2-worker.sh" --dry-run \
+    --clear-apify-secret-ref-prune-fence=tertiary,quinary,senary \
+  >"$temp_dir/canonical-clear-full.out"
+assert_contains "$temp_dir/canonical-clear-full.out" \
+  'dry-run complete: no mutations were applied'
+[[ ! -s "$temp_dir/canonical-clear-full-events" ]] \
+  || fail "canonical full-inventory dry-run unexpectedly mutated gcloud"
+
 maintenance_common_env=()
 for common_assignment in "${common_env[@]}"; do
   [[ "$common_assignment" == ANALYSIS_V2_APIFY_ADDITIONAL_SECRET_VERSIONS=* \

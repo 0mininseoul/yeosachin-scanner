@@ -125,6 +125,114 @@ describe('betatest preflight credit fence', () => {
 });
 
 describe('B-lite single-collection preflight', () => {
+    it('uses the frozen beta hold before the dedicated selector for a new beta B-lite run', async () => {
+        const claimed = claim({ analysisEntryChannel: 'betatest' });
+        const store = workerStore(claimed);
+        const runs = providerRunStore();
+        expect(selectPreflightApifyCredentialSlot(preflightId, preflightApifyPoolEnv))
+            .toBe('senary');
+        let loadCount = 0;
+        vi.mocked(runs.load).mockImplementation(async () => {
+            loadCount += 1;
+            return loadCount <= 2
+                ? null
+                : { ...storedRun('succeeded'), credentialSlot: 'septenary' };
+        });
+        vi.mocked(runs.reserve).mockImplementation(async input => ({
+            created: true,
+            run: {
+                ...storedRun('starting'),
+                credentialSlot: input.credentialSlot,
+            },
+        }));
+        const getFullProfile = vi.fn(async (
+            _username: string,
+            context?: ProviderCallContext,
+        ) => {
+            expect(context?.credentialSlot).toBe('septenary');
+            await context?.onBeforeRunStart?.({
+                logicalProvider: 'apify',
+                actorId: APIFY_PROFILE_ACTOR_ID,
+                credentialSlot: 'septenary',
+                maxChargeUsd: 0.0026,
+            });
+            return profile();
+        });
+
+        await expect(processPreflight(preflightId, {
+            store,
+            providerRunStore: runs,
+            betaCreditCoordinator: {
+                reuse: vi.fn(async () => ({
+                    allocationId: '423e4567-e89b-42d3-a456-426614174000',
+                    credentialSlot: 'septenary' as const,
+                })),
+                prepare: vi.fn(),
+            },
+            getFullProfile,
+            finalizeReadyWithSource: vi.fn(async () => false),
+            activateBliteCohort: vi.fn(async () => ({
+                submittedAt: new Date(Date.now() - 1_000).toISOString(),
+                deadlineAt: new Date(Date.now() + 59_000).toISOString(),
+                expiresAt: new Date(Date.now() + 29 * 60_000).toISOString(),
+            })),
+            env: {
+                ...preflightApifyPoolEnv,
+                PRECHECKOUT_BLITE_ENABLED: 'true',
+                PRECHECKOUT_BLITE_ROLLOUT_PERCENT: '100',
+                ANALYSIS_V2_PREFLIGHT_IDENTITY_HMAC_SECRET: preflightIdentitySecret,
+            },
+        })).resolves.toBe('ready');
+
+        expect(getFullProfile).toHaveBeenCalledOnce();
+        expect(runs.reserve).toHaveBeenCalledWith(expect.objectContaining({
+            credentialSlot: 'septenary',
+        }));
+    });
+
+    it('blocks an existing beta B-lite run before bind when its hold slot has drifted', async () => {
+        const claimed = claim({ analysisEntryChannel: 'betatest' });
+        const store = workerStore(claimed);
+        const runs = providerRunStore();
+        vi.mocked(runs.load).mockResolvedValue({
+            ...storedRun('succeeded'),
+            credentialSlot: 'senary',
+        });
+        const getFullProfile = vi.fn(async () => profile());
+
+        await expect(processPreflight(preflightId, {
+            store,
+            providerRunStore: runs,
+            betaCreditCoordinator: {
+                reuse: vi.fn(async () => ({
+                    allocationId: '423e4567-e89b-42d3-a456-426614174000',
+                    credentialSlot: 'septenary' as const,
+                })),
+                prepare: vi.fn(),
+            },
+            getFullProfile,
+            finalizeReadyWithSource: vi.fn(async () => false),
+            activateBliteCohort: vi.fn(async () => ({
+                submittedAt: new Date(Date.now() - 1_000).toISOString(),
+                deadlineAt: new Date(Date.now() + 59_000).toISOString(),
+                expiresAt: new Date(Date.now() + 29 * 60_000).toISOString(),
+            })),
+            env: {
+                ...preflightApifyPoolEnv,
+                PRECHECKOUT_BLITE_ENABLED: 'true',
+                PRECHECKOUT_BLITE_ROLLOUT_PERCENT: '100',
+                ANALYSIS_V2_PREFLIGHT_IDENTITY_HMAC_SECRET: preflightIdentitySecret,
+            },
+        })).resolves.toBe('blocked');
+
+        expect(getFullProfile).not.toHaveBeenCalled();
+        expect(runs.reserve).not.toHaveBeenCalled();
+        expect(store.finalizeBlocked).toHaveBeenCalledWith(
+            claimed,
+            'BETA_CAPACITY_UNAVAILABLE',
+        );
+    });
+
     it.each(['secondary', 'tenth'] as const)(
         'resumes a persisted B-lite run on its stored %s slot without the new pool',
         async credentialSlot => {
