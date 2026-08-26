@@ -23,6 +23,7 @@ import {
     createFreshAdmissionProviderRunStore,
     preflightProviderIdentity,
     type FreshAdmissionProviderRunStore,
+    type StoredPreflightProviderRun,
 } from './preflight-provider-run';
 import { preflightTargetInputHash } from './preflight-identity';
 import {
@@ -696,6 +697,22 @@ export async function processAnalysisV2FreshAdmission(
         let profile: Awaited<ReturnType<AnalysisV2FreshProfileFetcher>>;
         let reusableProfileInputHash: string | null = null;
         let useAuthenticatedProfile = false;
+        const paidInputHash = preflightTargetInputHash(
+            claim.targetInstagramId,
+            dependencies.env
+        );
+        // Provider lineage is authoritative on every resume. Load it before
+        // selecting the current route so a route flip cannot strand an Apify run.
+        let existingRun: StoredPreflightProviderRun | null;
+        try {
+            existingRun = await providerRuns.load({
+                preflightId: claim.preflightId,
+                claimToken: claim.claimToken,
+                inputHash: paidInputHash,
+            });
+        } catch (error) {
+            return await settleFailure(error);
+        }
         const assertClaimedProfile = (
             value: Awaited<ReturnType<AnalysisV2FreshProfileFetcher>>
         ): void => {
@@ -716,15 +733,6 @@ export async function processAnalysisV2FreshAdmission(
             profile: Awaited<ReturnType<AnalysisV2FreshProfileFetcher>>;
             inputHash: string;
         }>> => {
-            const inputHash = preflightTargetInputHash(
-                claim.targetInstagramId,
-                dependencies.env
-            );
-            const existingRun = await providerRuns.load({
-                preflightId: claim.preflightId,
-                claimToken: claim.claimToken,
-                inputHash,
-            });
             if (
                 betaHold
                 && existingRun
@@ -743,15 +751,15 @@ export async function processAnalysisV2FreshAdmission(
                 });
             }
             const identity = preflightProviderIdentity(
-                betaHold?.credentialSlot
-                ?? existingRun?.credentialSlot
+                existingRun?.credentialSlot
+                ?? betaHold?.credentialSlot
                 ?? claim.orderScopedCredentialSlot
                 ?? selectAnalysisV2ApifyCredentialSlot(dependencies.env)
             );
             const bound = await bindPreflightProviderRunCheckpoint({
                 store: providerRuns,
                 claim,
-                inputHash,
+                inputHash: paidInputHash,
                 identity,
             });
             const paidProfile = await (
@@ -761,14 +769,15 @@ export async function processAnalysisV2FreshAdmission(
                 fallbackCallContext(bound.checkpoint, workerStartedAt)
             );
             assertClaimedProfile(paidProfile);
-            return Object.freeze({ profile: paidProfile, inputHash });
+            return Object.freeze({ profile: paidProfile, inputHash: paidInputHash });
         };
         try {
             const forcePaidProfile = claim.accessMode === 'test_entitlement';
-            useAuthenticatedProfile = !forcePaidProfile
+            useAuthenticatedProfile = !existingRun
+                && !forcePaidProfile
                 && claim.analysisEntryChannel !== 'betatest'
                 && getAnalysisV2PaidCollectionProvider(dependencies.env) === 'selfhosted_auth';
-            if (forcePaidProfile) {
+            if (existingRun || forcePaidProfile) {
                 const paid = await fetchPaidProfile();
                 profile = paid.profile;
                 reusableProfileInputHash = profile ? paid.inputHash : null;
@@ -780,14 +789,10 @@ export async function processAnalysisV2FreshAdmission(
                         'SCRAPING_CONFIG_ERROR: authenticated profile summary is unavailable.'
                     );
                 }
-                const inputHash = preflightTargetInputHash(
-                    claim.targetInstagramId,
-                    dependencies.env
-                );
                 profile = await authenticatedProvider(claim.targetInstagramId, {
                     selfHostedAuthIdentity: preflightSelfHostedAuthIdentity({
                         preflightId: claim.preflightId,
-                        inputHash,
+                        inputHash: paidInputHash,
                     }),
                     invocationDeadlineAtMs: workerStartedAt + PREFLIGHT_PROVIDER_DEADLINE_MS,
                     recordUsage: () => undefined,

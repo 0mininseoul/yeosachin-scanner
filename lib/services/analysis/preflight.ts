@@ -2024,8 +2024,6 @@ export async function processPreflight(
         if (bliteClock !== null && !Number.isFinite(bliteProviderDeadlineAtMs)) {
             throw new Error('PRECHECKOUT_BLITE_SOURCE_PERSISTENCE_ERROR: invalid cohort clock.');
         }
-        const useAuthenticatedProfile = !isAnonymousPreflight && !isBetatest
-            && getAnalysisV2PaidCollectionProvider(dependencies.env) === 'selfhosted_auth';
         const betaHold = isBetatest
             ? await dependencies.betaCreditCoordinator?.reuse(claim.preflightId)
             : undefined;
@@ -2055,6 +2053,12 @@ export async function processPreflight(
             claimToken: claim.claimToken,
             inputHash,
         });
+        // A persisted Apify run owns provider lineage. Read it before selecting
+        // the current paid route so a route flip cannot strand a reserved run.
+        const useAuthenticatedProfile = !existingRun
+            && !isAnonymousPreflight
+            && !isBetatest
+            && getAnalysisV2PaidCollectionProvider(dependencies.env) === 'selfhosted_auth';
 
         let profile: InstagramProfile | null;
         let bliteProviderRun: StoredPreflightProviderRun | null = null;
@@ -2237,9 +2241,7 @@ export async function processPreflight(
                 store: providerRuns,
                 claim,
                 inputHash,
-                identity: preflightProviderIdentity(
-                    betaHold?.credentialSlot ?? existingRun.credentialSlot
-                ),
+                identity: preflightProviderIdentity(existingRun.credentialSlot),
             });
             profile = await (dependencies.getFallbackProfile ?? getApifyProfileSummary)(
                 claim.targetInstagramId,

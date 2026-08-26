@@ -793,15 +793,16 @@ case "$command_line" in
   "run services update-traffic"*)
     [[ -n "${FAKE_GCLOUD_STATE_FILE:-}" ]] || exit 99
     source_commit="${FAKE_GCLOUD_SOURCE_COMMIT:-}"
+    cloud_run_service="${ANALYSIS_V2_TASKS_CLOUD_RUN_SERVICE:-analysis-worker}"
     target=''
     for argument in "$@"; do
       [[ "$argument" == --to-revisions=* ]] && target="${argument#--to-revisions=}"
     done
-    if [[ "$target" == "analysis-worker-f${source_commit:0:6}${ANALYSIS_V2_DEPLOY_REVISION_NONCE:-}=100" ]]; then
+    if [[ "$target" == "$cloud_run_service-f${source_commit:0:6}${ANALYSIS_V2_DEPLOY_REVISION_NONCE:-}=100" ]]; then
       printf 'promoted\n' >"$FAKE_GCLOUD_STATE_FILE"
-    elif [[ "$target" == 'analysis-worker-00002=100' ]]; then
+    elif [[ "$target" == "$cloud_run_service-00002=100" ]]; then
       printf 'rolled_back\n' >"$FAKE_GCLOUD_STATE_FILE"
-    elif [[ "$target" == "analysis-worker-b${source_commit:0:6}${ANALYSIS_V2_DEPLOY_REVISION_NONCE:-}=100" ]]; then
+    elif [[ "$target" == "$cloud_run_service-b${source_commit:0:6}${ANALYSIS_V2_DEPLOY_REVISION_NONCE:-}=100" ]]; then
       printf 'rolled_back_bootstrap\n' >"$FAKE_GCLOUD_STATE_FILE"
     else
       exit 98
@@ -861,39 +862,40 @@ case "$command_line" in
     if [[ "$infra_ready" != "true" ]]; then
       exit 1
     elif [[ "$command_line" == *"format=json"* ]]; then
-      latest_created='analysis-worker-00002'
-      latest_ready='analysis-worker-00002'
-      traffic_revision='analysis-worker-00002'
+      cloud_run_service="${ANALYSIS_V2_TASKS_CLOUD_RUN_SERVICE:-analysis-worker}"
+      latest_created="$cloud_run_service-00002"
+      latest_ready="$cloud_run_service-00002"
+      traffic_revision="$cloud_run_service-00002"
       # Match Cloud Run: no-traffic staging leaves latestReady on the serving revision.
       source_commit="${FAKE_GCLOUD_SOURCE_COMMIT:-0000000000000000000000000000000000000000}"
       if [[ "$state" == "staged_build" \
         || "$state" == "staged_build_inherited_slot" ]]; then
-        latest_created="analysis-worker-b${source_commit:0:6}${ANALYSIS_V2_DEPLOY_REVISION_NONCE:-}"
+        latest_created="$cloud_run_service-b${source_commit:0:6}${ANALYSIS_V2_DEPLOY_REVISION_NONCE:-}"
         if [[ "${FAKE_GCLOUD_FIRST_DEPLOY:-false}" == "true" \
           || "${FAKE_GCLOUD_ACTIVE_BOOTSTRAP:-false}" == "true" ]]; then
           latest_ready="$latest_created"
           traffic_revision="$latest_created"
         fi
       elif [[ "$state" == "staged_final" ]]; then
-        latest_created="analysis-worker-f${source_commit:0:6}${ANALYSIS_V2_DEPLOY_REVISION_NONCE:-}"
+        latest_created="$cloud_run_service-f${source_commit:0:6}${ANALYSIS_V2_DEPLOY_REVISION_NONCE:-}"
         if [[ "${FAKE_GCLOUD_FIRST_DEPLOY:-false}" == "true" \
           || "${FAKE_GCLOUD_ACTIVE_BOOTSTRAP:-false}" == "true" ]]; then
-          latest_ready="analysis-worker-b${source_commit:0:6}${ANALYSIS_V2_DEPLOY_REVISION_NONCE:-}"
-          traffic_revision="analysis-worker-b${source_commit:0:6}${ANALYSIS_V2_DEPLOY_REVISION_NONCE:-}"
+          latest_ready="$cloud_run_service-b${source_commit:0:6}${ANALYSIS_V2_DEPLOY_REVISION_NONCE:-}"
+          traffic_revision="$cloud_run_service-b${source_commit:0:6}${ANALYSIS_V2_DEPLOY_REVISION_NONCE:-}"
         fi
       elif [[ "$state" == "promoted" ]]; then
-        latest_created="analysis-worker-f${source_commit:0:6}${ANALYSIS_V2_DEPLOY_REVISION_NONCE:-}"
+        latest_created="$cloud_run_service-f${source_commit:0:6}${ANALYSIS_V2_DEPLOY_REVISION_NONCE:-}"
         latest_ready="$latest_created"
         traffic_revision="$latest_created"
       elif [[ "$state" == "rolled_back" ]]; then
-        latest_created="analysis-worker-f${source_commit:0:6}${ANALYSIS_V2_DEPLOY_REVISION_NONCE:-}"
+        latest_created="$cloud_run_service-f${source_commit:0:6}${ANALYSIS_V2_DEPLOY_REVISION_NONCE:-}"
         latest_ready="$latest_created"
       elif [[ "$state" == "rolled_back_bootstrap" ]]; then
-        latest_created="analysis-worker-f${source_commit:0:6}${ANALYSIS_V2_DEPLOY_REVISION_NONCE:-}"
+        latest_created="$cloud_run_service-f${source_commit:0:6}${ANALYSIS_V2_DEPLOY_REVISION_NONCE:-}"
         latest_ready="$latest_created"
-        traffic_revision="analysis-worker-b${source_commit:0:6}${ANALYSIS_V2_DEPLOY_REVISION_NONCE:-}"
+        traffic_revision="$cloud_run_service-b${source_commit:0:6}${ANALYSIS_V2_DEPLOY_REVISION_NONCE:-}"
       elif [[ "$state" == "foreign_promoted" ]]; then
-        latest_created='analysis-worker-foreign'
+        latest_created="$cloud_run_service-foreign"
         latest_ready="$latest_created"
         traffic_revision="$latest_created"
       fi
@@ -941,9 +943,9 @@ case "$command_line" in
       duplicate_env='false'
       admission_env='false'
       legacy_gate_env='false'
-      [[ "$state" != "failed_latest" ]] || latest_ready='analysis-worker-00001'
-      [[ "$state" != "old_traffic" ]] || traffic_revision='analysis-worker-00001'
-      [[ "$state" != "unpromoted_latest" ]] || latest_created='analysis-worker-unpromoted'
+      [[ "$state" != "failed_latest" ]] || latest_ready="$cloud_run_service-00001"
+      [[ "$state" != "old_traffic" ]] || traffic_revision="$cloud_run_service-00001"
+      [[ "$state" != "unpromoted_latest" ]] || latest_created="$cloud_run_service-unpromoted"
       [[ "$state" != "runtime_env_drift" ]] || runtime_queue='wrong-v2-queue'
       [[ "$state" != "runtime_preflight_pool_drift" ]] || preflight_apify_token_slots='primary,quinary,tenth'
       [[ "$state" != "runtime_instagram_route_drift" ]] || instagram_route='selfhosted_auth_v1'
@@ -1202,12 +1204,13 @@ case "$command_line" in
     ;;
   "run revisions describe"*)
     revision="$4"
+    cloud_run_service="${ANALYSIS_V2_TASKS_CLOUD_RUN_SERVICE:-analysis-worker}"
     source_commit="${FAKE_GCLOUD_SOURCE_COMMIT:-0000000000000000000000000000000000000000}"
     revision_ready='True'
     observe_revision='false'
     case "${FAKE_GCLOUD_REVISION_OBSERVATION_TARGET:-source-build}" in
       source-build)
-        [[ "$revision" != analysis-worker-b* ]] || observe_revision='true'
+        [[ "$revision" != "$cloud_run_service-b"* ]] || observe_revision='true'
         ;;
       all)
         observe_revision='true'
@@ -1257,13 +1260,14 @@ case "$command_line" in
     active_instagram_route="${FAKE_GCLOUD_ACTIVE_INSTAGRAM_ROUTE:-${FAKE_GCLOUD_INSTAGRAM_ROUTE:-apify_v1}}"
     revision_image='asia-northeast3-docker.pkg.dev/test-project/cloud-run-source-deploy/analysis-worker@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
     bootstrap_revision='false'
-    if [[ "$revision" == analysis-worker-b* \
+    cloud_run_service="${ANALYSIS_V2_TASKS_CLOUD_RUN_SERVICE:-analysis-worker}"
+    if [[ "$revision" == "$cloud_run_service-b"* \
       || "${FAKE_GCLOUD_ACTIVE_BOOTSTRAP:-false}" == "true" ]]; then
       bootstrap_revision='true'
     fi
     if [[ "${FAKE_GCLOUD_GENDER_ROUTING_HMAC_INITIAL_ADDITION:-false}" == "true" ]]; then
       case "$revision" in
-        analysis-worker-00002)
+        "$cloud_run_service-00002")
           active_gender_routing_hmac_mode="${FAKE_GCLOUD_ACTIVE_GENDER_ROUTING_HMAC_MODE:-absent}"
           ;;
         *)
@@ -1564,7 +1568,7 @@ case "$command_line" in
   "storage cp"*)
     lock_file="${FAKE_GCLOUD_DEPLOY_LOCK_FILE:-${FAKE_GCLOUD_STATE_FILE:-/tmp/analysis-v2-fake}.deploy-lock}"
     [[ "$command_line" == *"--if-generation-match=0"* ]] || exit 98
-    [[ "$command_line" == *"gs://analysis-v2-lock-0123456789abcdef0123456789abcdef/asia-northeast3/analysis-worker.lock"* ]] \
+    [[ "$command_line" == *"gs://analysis-v2-lock-0123456789abcdef0123456789abcdef/asia-northeast3/${ANALYSIS_V2_TASKS_CLOUD_RUN_SERVICE:-analysis-worker}.lock"* ]] \
       || exit 98
     [[ ! -e "$lock_file" ]] || exit 1
     grep -Eq '^[0-9a-f]{40} [a-z0-9]{5} [a-f0-9]{32}$' "$3" \
@@ -3188,14 +3192,40 @@ for retained_cutover_assignment in \
 done
 
 # The remaining cases exercise the explicit prune/fence maintenance protocol,
-# whose legacy contract deliberately prohibits ambient additional references.
+# which is retained only for the execution-disabled E2E fixture. Canonical
+# analysis-worker must reject this mode so a release can never publish a
+# partial Apify inventory needed by new preflights or durable older runs.
 canonical_common_env=("${common_env[@]}")
+
+if env "${canonical_common_env[@]}" \
+  'FAKE_GCLOUD_STATE=ready' \
+  'FAKE_GCLOUD_APIFY_SECRET_SLOTS=primary,tertiary,quinary,senary' \
+  'FAKE_GCLOUD_ACTIVE_APIFY_SECRET_SLOTS=primary,tertiary,quinary,senary' \
+  'ANALYSIS_V2_APIFY_API_TOKEN_SLOT=primary' \
+  'ANALYSIS_V2_APIFY_API_TOKEN_SECRET_VERSION=3' \
+  'ANALYSIS_V2_APIFY_ADDITIONAL_SECRET_VERSIONS=' \
+  "FAKE_GCLOUD_EVENT_LOG=$temp_dir/canonical-prune-events" \
+  "ANALYSIS_V2_WORKER_ENV_VARS_FILE=$temp_dir/runtime-primary-slot.env" \
+  bash "$script_dir/deploy-analysis-v2-worker.sh" --dry-run \
+    --prune-apify-secret-refs=tertiary,quinary,senary \
+  >"$temp_dir/canonical-prune-rejected.out" 2>&1; then
+  fail "canonical analysis-worker accepted partial Apify inventory pruning"
+fi
+assert_contains "$temp_dir/canonical-prune-rejected.out" \
+  'canonical analysis-worker cannot use --prune-apify-secret-refs'
+[[ ! -s "$temp_dir/canonical-prune-events" ]] \
+  || fail "canonical prune rejection reached gcloud before failing closed"
+
 maintenance_common_env=()
 for common_assignment in "${common_env[@]}"; do
-  [[ "$common_assignment" == ANALYSIS_V2_APIFY_ADDITIONAL_SECRET_VERSIONS=* ]] \
+  [[ "$common_assignment" == ANALYSIS_V2_APIFY_ADDITIONAL_SECRET_VERSIONS=* \
+    || "$common_assignment" == ANALYSIS_V2_TASKS_CLOUD_RUN_SERVICE=* ]] \
     || maintenance_common_env+=("$common_assignment")
 done
-common_env=("${maintenance_common_env[@]}")
+common_env=(
+  "${maintenance_common_env[@]}"
+  'ANALYSIS_V2_TASKS_CLOUD_RUN_SERVICE=analysis-worker-secondary-e2e'
+)
 
 # Explicit pruning cannot perform the normal-slot cutover itself. The ordinary
 # preserving deploy must first put primary:3 with sharding off at 100% traffic.
@@ -3683,7 +3713,7 @@ fi
 [[ "$(<"$temp_dir/prune-rollback-fence-clear-count")" == "0" ]] \
   || fail "failed prune or rollback cleared the durable fence"
 assert_contains "$temp_dir/worker-prune-rollback-fence.out" \
-  'rollback verified: analysis-worker-00002 serves 100% of traffic'
+  "rollback verified: analysis-worker-secondary-e2e-00002 serves 100% of traffic"
 
 # Dry-run and check describe or validate reattachment without mutating the
 # durable fence. Check may read the exact identity, but never clears it.

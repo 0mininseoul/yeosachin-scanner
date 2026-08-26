@@ -440,6 +440,8 @@ describe('durable fresh V2 admission worker', () => {
 
         await expect(processAnalysisV2FreshAdmission(client, workerInput(), {
             getProfile,
+            providerRunStore: providerRunStore(),
+            env: FRESH_ENV,
             createClaimToken: () => CLAIM_TOKEN,
         })).resolves.toBe('ready');
 
@@ -501,6 +503,7 @@ describe('durable fresh V2 admission worker', () => {
         const getAuthenticatedProfile = vi.fn().mockResolvedValue(profile());
         const env = {
             ...FRESH_ENV,
+            ANALYSIS_V2_INSTAGRAM_ROUTE: 'selfhosted_auth_v1',
             SELFHOSTED_AUTH_ENABLED: 'true',
             SCRAPER_FOLLOWERS: 'selfhosted_auth',
             SCRAPER_FOLLOWING: 'selfhosted_auth',
@@ -512,6 +515,7 @@ describe('durable fresh V2 admission worker', () => {
             getProfile,
             getAuthenticatedProfile,
             getFallbackProfile,
+            providerRunStore: providerRunStore(),
             env,
             createClaimToken: () => CLAIM_TOKEN,
         })).resolves.toBe('ready');
@@ -689,6 +693,8 @@ describe('durable fresh V2 admission worker', () => {
 
         await expect(processAnalysisV2FreshAdmission(client, workerInput(), {
             getProfile: vi.fn().mockResolvedValue(profile()),
+            providerRunStore: providerRunStore(),
+            env: FRESH_ENV,
             createClaimToken: () => CLAIM_TOKEN,
         })).rejects.toThrow('invalid claim result');
     });
@@ -723,6 +729,8 @@ describe('durable fresh V2 admission worker', () => {
 
         await expect(processAnalysisV2FreshAdmission(client, workerInput(), {
             getProfile: vi.fn().mockResolvedValue(value),
+            providerRunStore: providerRunStore(),
+            env: FRESH_ENV,
             createClaimToken: () => CLAIM_TOKEN,
         })).resolves.toBe('blocked');
         expect(rpc).toHaveBeenLastCalledWith(
@@ -731,8 +739,7 @@ describe('durable fresh V2 admission worker', () => {
         );
     });
 
-    it('rereads an existing successful preflight fallback without a second paid run', async () => {
-        const info = vi.spyOn(console, 'info').mockImplementation(() => undefined);
+    it('resumes an existing successful Apify run before a paid route flip without a second paid run', async () => {
         const callOrder: string[] = [];
         const { client } = clientWith(async (name) => {
             if (name === ANALYSIS_V2_FRESH_ADMISSION_DATABASE_NAMES.claimRpc) {
@@ -756,6 +763,7 @@ describe('durable fresh V2 admission worker', () => {
             throw new Error(`unexpected RPC ${name}`);
         });
         const runs = providerRunStore(storedProviderRun('succeeded'));
+        const getAuthenticatedProfile = vi.fn().mockResolvedValue(profile());
         vi.mocked(runs.markReusableProfileSchemaV1).mockImplementationOnce(async () => {
             callOrder.push('attest');
             return 'already_marked';
@@ -781,13 +789,19 @@ describe('durable fresh V2 admission worker', () => {
             getProfile: vi.fn().mockRejectedValue(
                 new Error('SCRAPING_SCHEMA_ERROR: selfhosted fixture')
             ),
+            getAuthenticatedProfile,
             getFallbackProfile: fallback,
             providerRunStore: runs,
-            env: FRESH_ENV,
+            env: {
+                ...FRESH_ENV,
+                ANALYSIS_V2_INSTAGRAM_ROUTE: 'selfhosted_auth_v1',
+                SELFHOSTED_AUTH_ENABLED: 'true',
+            },
             createClaimToken: () => CLAIM_TOKEN,
         })).resolves.toBe('ready');
 
         expect(fallback).toHaveBeenCalledOnce();
+        expect(getAuthenticatedProfile).not.toHaveBeenCalled();
         expect(runs.reserve).not.toHaveBeenCalled();
         expect(runs.checkpointStarted).not.toHaveBeenCalled();
         expect(runs.markReusableProfileSchemaV1).toHaveBeenCalledWith({
@@ -797,17 +811,6 @@ describe('durable fresh V2 admission worker', () => {
             runId: 'FreshAdmissionRun123',
         });
         expect(callOrder).toEqual(['attest', 'complete']);
-        const record = String(info.mock.calls[0]?.[0]);
-        expect(JSON.parse(record)).toEqual({
-            event: 'preflight_profile_fallback_entered',
-            operation: 'fresh_admission',
-            category: 'schema',
-            httpStatus: null,
-            existingRun: true,
-        });
-        expect(record).not.toContain('target.account');
-        expect(record).not.toContain('FreshAdmissionRun123');
-        info.mockRestore();
     });
 
     it('keeps a pending existing run retryable without consuming the failure budget', async () => {
@@ -1133,7 +1136,7 @@ describe('durable fresh V2 admission worker', () => {
         })).resolves.toBe('blocked');
 
         expect(fallback).not.toHaveBeenCalled();
-        expect(runs.load).not.toHaveBeenCalled();
+        expect(runs.load).toHaveBeenCalledOnce();
         expect(runs.reserve).not.toHaveBeenCalled();
     });
 
@@ -1171,6 +1174,8 @@ describe('durable fresh V2 admission worker', () => {
 
         await expect(processAnalysisV2FreshAdmission(client, workerInput(), {
             getProfile,
+            providerRunStore: providerRunStore(),
+            env: FRESH_ENV,
             createClaimToken: () => CLAIM_TOKEN,
         })).rejects.toMatchObject({
             message: 'PREFLIGHT_WORKER_RETRY',
@@ -1217,6 +1222,8 @@ describe('durable fresh V2 admission worker', () => {
 
         await expect(processAnalysisV2FreshAdmission(client, workerInput(), {
             getProfile: vi.fn().mockRejectedValue(new Error('provider unavailable')),
+            providerRunStore: providerRunStore(),
+            env: FRESH_ENV,
             createClaimToken: () => CLAIM_TOKEN,
         })).resolves.toBe('blocked');
         expect(rpc).toHaveBeenLastCalledWith(
@@ -1272,6 +1279,8 @@ describe('durable fresh V2 admission worker', () => {
                 getProfile,
                 getFallbackProfile,
                 betaCreditCoordinator,
+                providerRunStore: providerRunStore(),
+                env: FRESH_ENV,
                 createClaimToken: () => CLAIM_TOKEN,
             })).rejects.toMatchObject({
                 message: 'PREFLIGHT_WORKER_RETRY',
@@ -1282,6 +1291,8 @@ describe('durable fresh V2 admission worker', () => {
             getProfile,
             getFallbackProfile,
             betaCreditCoordinator,
+            providerRunStore: providerRunStore(),
+            env: FRESH_ENV,
             createClaimToken: () => CLAIM_TOKEN,
         })).resolves.toBe('blocked');
 
@@ -1319,6 +1330,8 @@ describe('durable fresh V2 admission worker', () => {
 
         await expect(processAnalysisV2FreshAdmission(client, workerInput(), {
             getProfile: vi.fn().mockResolvedValue(null),
+            providerRunStore: providerRunStore(),
+            env: FRESH_ENV,
             createClaimToken: () => CLAIM_TOKEN,
         })).rejects.toThrow('block failed');
         expect(rpc).toHaveBeenLastCalledWith(
@@ -1361,6 +1374,12 @@ describe('durable fresh V2 admission worker', () => {
 
             await expect(processAnalysisV2FreshAdmission(client, workerInput(), {
                 getProfile,
+                providerRunStore: providerRunStore(),
+                env: {
+                    ...FRESH_ENV,
+                    SELFHOSTED_PROFILE_RETRIES: '3',
+                    SELFHOSTED_PROFILE_TIMEOUT_MS: '60000',
+                },
                 createClaimToken: () => CLAIM_TOKEN,
             })).rejects.toBeInstanceOf(PreflightWorkerRetryError);
             expect(getProfile).not.toHaveBeenCalled();

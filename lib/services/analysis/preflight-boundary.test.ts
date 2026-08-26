@@ -6,9 +6,11 @@ vi.mock('@/lib/supabase/admin', () => ({ supabaseAdmin: {} }));
 
 import { processPreflight } from './preflight';
 import type { PreflightProviderRunStore } from './preflight-provider-run';
+import { preflightTargetInputHash } from './preflight-identity';
 
 const preflightId = '123e4567-e89b-42d3-a456-426614174000';
 const userId = '223e4567-e89b-42d3-a456-426614174000';
+const routeFlipIdentitySecret = Buffer.alloc(32, 23).toString('base64url');
 
 function store(): PreflightStore {
     return {
@@ -97,6 +99,7 @@ describe('preflight free-provider boundary', () => {
             env: {
                 ANALYSIS_V2_PREFLIGHT_IDENTITY_HMAC_SECRET:
                     Buffer.alloc(32, 22).toString('base64url'),
+                ANALYSIS_V2_INSTAGRAM_ROUTE: 'selfhosted_auth_v1',
                 SELFHOSTED_AUTH_ENABLED: 'true',
                 SCRAPER_FOLLOWERS: 'selfhosted_auth',
                 SCRAPER_FOLLOWING: 'selfhosted_auth',
@@ -110,7 +113,7 @@ describe('preflight free-provider boundary', () => {
         expect(runs.reserve).not.toHaveBeenCalled();
     });
 
-    it('does not resume a legacy Apify run when the current paid route uses authenticated profiles', async () => {
+    it('resumes a persisted Apify run before a paid route flip to authenticated profiles', async () => {
         const getAuthenticatedProfile = vi.fn(async () => ({
             username: 'target.name',
             followersCount: 350,
@@ -120,12 +123,28 @@ describe('preflight free-provider boundary', () => {
             isVerified: false,
             latestPosts: [],
         }));
-        const getFallbackProfile = vi.fn();
+        const getFallbackProfile = vi.fn(async (_username, context) => {
+            expect(context).toMatchObject({
+                resumeRunId: 'LegacyApifyRun123',
+                credentialSlot: 'primary',
+            });
+            return {
+                username: 'target.name',
+                followersCount: 350,
+                followingCount: 300,
+                postsCount: 1,
+                isPrivate: false,
+                isVerified: false,
+                latestPosts: [],
+            };
+        });
         const runs = providerRunStore();
         vi.mocked(runs.load).mockResolvedValue({
             preflightId,
             operationKey: 'target-profile-fallback',
-            inputHash: 'a'.repeat(64),
+            inputHash: preflightTargetInputHash('target.name', {
+                ANALYSIS_V2_PREFLIGHT_IDENTITY_HMAC_SECRET: routeFlipIdentitySecret,
+            }),
             logicalProvider: 'apify',
             actorId: 'apify/instagram-profile-scraper',
             credentialSlot: 'primary',
@@ -146,7 +165,8 @@ describe('preflight free-provider boundary', () => {
             providerRunStore: runs,
             env: {
                 ANALYSIS_V2_PREFLIGHT_IDENTITY_HMAC_SECRET:
-                    Buffer.alloc(32, 23).toString('base64url'),
+                    routeFlipIdentitySecret,
+                ANALYSIS_V2_INSTAGRAM_ROUTE: 'selfhosted_auth_v1',
                 SELFHOSTED_AUTH_ENABLED: 'true',
                 SCRAPER_FOLLOWERS: 'selfhosted_auth',
                 SCRAPER_FOLLOWING: 'selfhosted_auth',
@@ -155,8 +175,8 @@ describe('preflight free-provider boundary', () => {
             },
         })).resolves.toBe('ready');
 
-        expect(getAuthenticatedProfile).toHaveBeenCalledOnce();
-        expect(getFallbackProfile).not.toHaveBeenCalled();
+        expect(getAuthenticatedProfile).not.toHaveBeenCalled();
+        expect(getFallbackProfile).toHaveBeenCalledOnce();
         expect(runs.checkpointStarted).not.toHaveBeenCalled();
     });
 

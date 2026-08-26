@@ -141,8 +141,11 @@ Options:
   --reconcile-iam   Replace reviewed drifted queue/task/Run IAM.
   --reconcile-jobs  Replace reviewed drifted maintenance Scheduler jobs.
   --prune-apify-secret-refs=SLOTS
-              Opt-in removal of the exact comma-separated non-primary refs.
-              Requires selected primary version 3, no additional refs, and
+              Opt-in removal of the exact comma-separated non-primary refs for
+              the execution-disabled E2E fixture only. Canonical
+              analysis-worker rejects this mode to retain the complete Apify
+              inventory for new preflights and durable runs. The E2E path
+              requires selected primary version 3, no additional refs, and
               authoritative zero-active/zero-unreconciled DB evidence twice.
   --clear-apify-secret-ref-prune-fence=SLOTS
               Explicit ordinary-deploy reattachment of every fenced same-named
@@ -377,6 +380,12 @@ parse_clear_apify_secret_ref_prune_fence() {
       --arg slot "$slot" \
       '$slots + [$slot] | sort')"
   done
+}
+
+reject_canonical_apify_secret_prune() {
+  [[ "$ANALYSIS_V2_TASKS_CLOUD_RUN_SERVICE" != "analysis-worker" \
+    || "$prune_apify_secret_refs_enabled" != "true" ]] \
+    || die "canonical analysis-worker cannot use --prune-apify-secret-refs; preserve the complete Apify inventory for new preflight slots and durable runs"
 }
 
 validate_service_account_email() {
@@ -1312,8 +1321,8 @@ prepare_apify_secret_assignments() {
 require_canonical_apify_secret_inventory() {
   # Canonical normal/recovery revisions carry the complete slot inventory before
   # either beta or runtime gates can be enabled. Explicit prune/fence commands
-  # retain their historical narrow inventory contract. The only other allowed
-  # service is the separately validated, execution-disabled E2E fixture.
+  # are rejected for this service; the only other allowed service is the
+  # separately validated, execution-disabled E2E fixture.
   [[ "$ANALYSIS_V2_TASKS_CLOUD_RUN_SERVICE" == "analysis-worker" ]] || return 0
   [[ "$prune_apify_secret_refs_enabled" != "true" ]] || return 0
   [[ "$clear_apify_secret_ref_prune_fence_enabled" != "true" ]] || return 0
@@ -2761,6 +2770,7 @@ parse_clear_apify_secret_ref_prune_fence
 [[ "$prune_apify_secret_refs_enabled" != "true" \
   || "$clear_apify_secret_ref_prune_fence_enabled" != "true" ]] \
   || die "--prune-apify-secret-refs and --clear-apify-secret-ref-prune-fence are mutually exclusive"
+reject_canonical_apify_secret_prune
 if [[ "$prune_apify_secret_refs_enabled" == "true" \
   || "$clear_apify_secret_ref_prune_fence_enabled" == "true" ]]; then
   # The exact source SHA is also the durable fence owner identity. Disable
