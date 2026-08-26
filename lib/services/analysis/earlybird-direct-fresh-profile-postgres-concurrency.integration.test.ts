@@ -5,6 +5,7 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 const databaseUrl = process.env.EARLYBIRD_DIRECT_FRESH_APIFY_POSTGRES_TEST_URL;
 const marker = process.env.EARLYBIRD_DIRECT_FRESH_APIFY_POSTGRES_TEST_MARKER;
 const expectedMarker = 'local-ephemeral-earlybird-direct-fresh-lock-order-only';
+const expectedPort = '55435';
 const describePostgres = isSafeTarget(databaseUrl, marker) ? describe : describe.skip;
 
 const pgliteFixture = readFileSync(new URL('./earlybird-direct-fresh-profile-pglite.test.ts', import.meta.url), 'utf8');
@@ -65,6 +66,10 @@ export function isSafeTarget(
         const url = new URL(connectionString);
         return url.protocol === 'postgresql:'
             && (url.hostname === '127.0.0.1' || url.hostname === 'localhost')
+            && url.port === expectedPort
+            // node-postgres gives URI query parameters precedence over the authority's
+            // host/port (and libpq accepts hostaddr), so no query string is safe here.
+            && url.search === ''
             && url.pathname === '/earlybird_direct_fresh_lock_order_test';
     } catch {
         return false;
@@ -139,8 +144,17 @@ describe('Earlybird direct fresh-Apify PostgreSQL lock order target guard', () =
 
     it.each([
         ['postgresql://tester@db.example.com/earlybird_direct_fresh_lock_order_test', expectedMarker],
+        ['postgresql://tester@127.0.0.1:55434/earlybird_direct_fresh_lock_order_test', expectedMarker],
+        ['postgresql://tester@127.0.0.1/earlybird_direct_fresh_lock_order_test', expectedMarker],
         ['postgresql://tester@127.0.0.1:55435/postgres', expectedMarker],
         ['postgresql://tester@127.0.0.1:55435/earlybird_direct_fresh_lock_order_test', undefined],
+        ['postgresql://tester@127.0.0.1:55435/earlybird_direct_fresh_lock_order_test?host=db.example.com', expectedMarker],
+        ['postgresql://tester@127.0.0.1:55435/earlybird_direct_fresh_lock_order_test?hostaddr=203.0.113.9', expectedMarker],
+        ['postgresql://tester@127.0.0.1:55435/earlybird_direct_fresh_lock_order_test?port=55434', expectedMarker],
+        ['postgresql://tester@127.0.0.1:55435/earlybird_direct_fresh_lock_order_test?%68%6f%73%74=db.example.com', expectedMarker],
+        ['postgresql://tester@127.0.0.1:55435/earlybird_direct_fresh_lock_order_test?%68%6f%73%74%61%64%64%72=203.0.113.9', expectedMarker],
+        ['postgresql://tester@127.0.0.1:55435/earlybird_direct_fresh_lock_order_test?%70%6f%72%74=55434', expectedMarker],
+        ['postgresql://tester@127.0.0.1:55434/earlybird_direct_fresh_lock_order_test?port=55435', expectedMarker],
     ])('rejects an unsafe target or absent marker', (url, supplied) => {
         expect(isSafeTarget(url, supplied)).toBe(false);
     });
