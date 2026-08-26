@@ -6,6 +6,7 @@ import { deliverEarlybirdPaymentDiscordNotifications } from '@/lib/services/earl
 import {
     advanceAdmittedEarlybirdFulfillment,
     earlybirdFulfillmentStore,
+    supabaseEarlybirdFulfillmentOperator,
 } from '@/lib/services/earlybird/fulfillment-store';
 import {
     readGrobleConfig,
@@ -29,6 +30,36 @@ import { operationalLogger } from '@/lib/observability/server';
 
 const MAX_WEBHOOK_BYTES = 256 * 1_024;
 const IDEMPOTENCY_KEY_PATTERN = /^[A-Za-z0-9._:-]{1,256}$/;
+const webhookAutoAdmissionNotBeforeSchema = z.string().datetime({ offset: true });
+
+type WebhookAutoAdmissionConfig = Readonly<{
+    enabled: boolean;
+    notBeforeMs: number | null;
+}>;
+
+function readWebhookAutoAdmissionConfig(
+    environment: Readonly<Record<string, string | undefined>> = process.env
+): WebhookAutoAdmissionConfig {
+    const enabled = environment.EARLYBIRD_WEBHOOK_AUTO_ADMISSION_ENABLED;
+    if (enabled === undefined || enabled === 'false') {
+        return { enabled: false, notBeforeMs: null };
+    }
+    if (enabled !== 'true') {
+        throw new Error('EARLYBIRD_WEBHOOK_AUTO_ADMISSION_ENABLED_INVALID');
+    }
+
+    const parsedNotBefore = webhookAutoAdmissionNotBeforeSchema.safeParse(
+        environment.EARLYBIRD_WEBHOOK_AUTO_ADMISSION_NOT_BEFORE
+    );
+    if (!parsedNotBefore.success) {
+        throw new Error('EARLYBIRD_WEBHOOK_AUTO_ADMISSION_NOT_BEFORE_INVALID');
+    }
+    const notBeforeMs = Date.parse(parsedNotBefore.data);
+    if (!Number.isFinite(notBeforeMs)) {
+        throw new Error('EARLYBIRD_WEBHOOK_AUTO_ADMISSION_NOT_BEFORE_INVALID');
+    }
+    return { enabled: true, notBeforeMs };
+}
 
 const finalizationResultSchema = z.array(z.object({
     disposition: z.enum([
@@ -227,6 +258,7 @@ async function handlePOST(
 
     let persistence;
     let state: WebhookLogState = { webhookEventType };
+    let autoAdmissionEligible = false;
     if (envelope.type === 'payment.completed') {
         let payment;
         try {
@@ -259,6 +291,22 @@ async function handlePOST(
             planId: planForProduct(payment.productId, config),
             amountKrw: payment.amountKrw,
         };
+        let autoAdmissionConfig: WebhookAutoAdmissionConfig;
+        try {
+            autoAdmissionConfig = readWebhookAutoAdmissionConfig();
+        } catch {
+            return reject(
+                503,
+                {
+                    received: false,
+                    code: 'WEBHOOK_CONFIGURATION_UNAVAILABLE',
+                },
+                'INTERNAL_ERROR',
+                state,
+            );
+        }
+        autoAdmissionEligible = autoAdmissionConfig.enabled
+            && Date.parse(payment.paidAt) >= (autoAdmissionConfig.notBeforeMs ?? Infinity);
         const buyerPhoneNormalized = normalizeKoreanMobileNumber(payment.buyerPhoneNumber);
         try {
             const params = {
@@ -404,6 +452,7 @@ async function handlePOST(
     const finalization = parsed.data[0];
     const orderId = finalization.order_id;
     const shouldAdmit = envelope.type === 'payment.completed'
+        && autoAdmissionEligible
         && orderId !== null
         && (
             finalization.disposition === 'accepted'
@@ -415,6 +464,12 @@ async function handlePOST(
     > | null = null;
     if (shouldAdmit) {
         try {
+            if (finalization.status === 'paid') {
+                await supabaseEarlybirdFulfillmentOperator.bindCredentialSlot(
+                    orderId,
+                    'secondary'
+                );
+            }
             admittedIdentity = await earlybirdFulfillmentStore.admit(orderId);
         } catch {
             return reject(

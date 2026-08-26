@@ -1,11 +1,12 @@
 import { createHmac } from 'node:crypto';
 import { readFileSync } from 'node:fs';
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 const mocks = vi.hoisted(() => ({
     after: vi.fn(),
     admitFulfillment: vi.fn(),
     advanceAdmittedFulfillment: vi.fn(),
+    bindCredentialSlot: vi.fn(),
     deliverPayment: vi.fn(),
     rpc: vi.fn(),
     emit: vi.fn(),
@@ -33,6 +34,9 @@ vi.mock('@/lib/services/earlybird/payment-discord', () => ({
 }));
 vi.mock('@/lib/services/earlybird/fulfillment-store', () => ({
     earlybirdFulfillmentStore: { admit: mocks.admitFulfillment },
+    supabaseEarlybirdFulfillmentOperator: {
+        bindCredentialSlot: mocks.bindCredentialSlot,
+    },
     advanceAdmittedEarlybirdFulfillment: mocks.advanceAdmittedFulfillment,
 }));
 vi.mock('@/lib/observability/request', () => ({ observeRoute: mocks.observeRoute }));
@@ -144,6 +148,7 @@ describe('signed Groble webhook route', () => {
         vi.clearAllMocks();
         mocks.after.mockImplementation(() => undefined);
         mocks.admitFulfillment.mockResolvedValue(ADMITTED_IDENTITY);
+        mocks.bindCredentialSlot.mockResolvedValue(undefined);
         mocks.advanceAdmittedFulfillment.mockResolvedValue({
             orderId: ORDER_ID,
             status: 'analysis_in_progress',
@@ -157,6 +162,9 @@ describe('signed Groble webhook route', () => {
         process.env.GROBLE_STANDARD_PAYMENT_ADDRESS = 'standard-checkout-b2';
         process.env.GROBLE_WEBHOOK_SECRET = SECRET;
         delete process.env.GROBLE_WEBHOOK_PREVIOUS_SECRET;
+        process.env.EARLYBIRD_WEBHOOK_AUTO_ADMISSION_ENABLED = 'true';
+        process.env.EARLYBIRD_WEBHOOK_AUTO_ADMISSION_NOT_BEFORE =
+            '2026-07-01T00:00:00+00:00';
         mocks.rpc.mockResolvedValue({
             data: [{
                 disposition: 'accepted',
@@ -167,6 +175,213 @@ describe('signed Groble webhook route', () => {
             error: null,
         });
     });
+
+    afterEach(() => {
+        delete process.env.EARLYBIRD_WEBHOOK_AUTO_ADMISSION_ENABLED;
+        delete process.env.EARLYBIRD_WEBHOOK_AUTO_ADMISSION_NOT_BEFORE;
+    });
+
+    it('keeps an accepted payment disabled when webhook auto-admission is unset', async () => {
+        delete process.env.EARLYBIRD_WEBHOOK_AUTO_ADMISSION_ENABLED;
+        delete process.env.EARLYBIRD_WEBHOOK_AUTO_ADMISSION_NOT_BEFORE;
+
+        const response = await POST(request(JSON.stringify(payload())));
+
+        expect(response.status).toBe(200);
+        await expect(response.json()).resolves.toEqual({
+            received: true,
+            disposition: 'accepted',
+        });
+        expect(mocks.bindCredentialSlot).not.toHaveBeenCalled();
+        expect(mocks.admitFulfillment).not.toHaveBeenCalled();
+        expect(mocks.after).toHaveBeenCalledTimes(1);
+        const [drain] = mocks.after.mock.calls[0] as [() => Promise<unknown>];
+        await drain();
+        expect(mocks.deliverPayment).toHaveBeenCalledWith({ limit: 10 });
+        expect(mocks.advanceAdmittedFulfillment).not.toHaveBeenCalled();
+    });
+
+    it('keeps a pre-cutoff accepted payment finalized without auto-admission', async () => {
+        process.env.EARLYBIRD_WEBHOOK_AUTO_ADMISSION_NOT_BEFORE =
+            '2026-07-18T00:00:00+00:00';
+
+        const response = await POST(request(JSON.stringify(payload())));
+
+        expect(response.status).toBe(200);
+        await expect(response.json()).resolves.toEqual({
+            received: true,
+            disposition: 'accepted',
+        });
+        expect(mocks.bindCredentialSlot).not.toHaveBeenCalled();
+        expect(mocks.admitFulfillment).not.toHaveBeenCalled();
+        expect(mocks.after).toHaveBeenCalledTimes(1);
+        const [drain] = mocks.after.mock.calls[0] as [() => Promise<unknown>];
+        await drain();
+        expect(mocks.deliverPayment).toHaveBeenCalledWith({ limit: 10 });
+        expect(mocks.advanceAdmittedFulfillment).not.toHaveBeenCalled();
+    });
+
+    it.each([
+        ['invalid flag', 'yes', '2026-07-01T00:00:00+00:00'],
+        ['blank flag', '', '2026-07-01T00:00:00+00:00'],
+        ['missing cutoff', 'true', undefined],
+        ['date-only cutoff', 'true', '2026-07-01'],
+        ['no-offset cutoff', 'true', '2026-07-01T00:00:00'],
+        ['blank cutoff', 'true', ''],
+        ['malformed cutoff', 'true', 'not-a-timestamp'],
+    ] as const)('rejects payment.completed for %s webhook auto-admission configuration', async (
+        _label,
+        enabled,
+        notBefore,
+    ) => {
+        process.env.EARLYBIRD_WEBHOOK_AUTO_ADMISSION_ENABLED = enabled;
+        if (notBefore === undefined) {
+            delete process.env.EARLYBIRD_WEBHOOK_AUTO_ADMISSION_NOT_BEFORE;
+        } else {
+            process.env.EARLYBIRD_WEBHOOK_AUTO_ADMISSION_NOT_BEFORE = notBefore;
+        }
+
+        const response = await POST(request(JSON.stringify(payload())));
+
+        expect(response.status).toBe(503);
+        await expect(response.json()).resolves.toEqual({
+            received: false,
+            code: 'WEBHOOK_CONFIGURATION_UNAVAILABLE',
+        });
+        expect(mocks.rpc).not.toHaveBeenCalled();
+        expect(mocks.bindCredentialSlot).not.toHaveBeenCalled();
+        expect(mocks.admitFulfillment).not.toHaveBeenCalled();
+        expect(mocks.after).not.toHaveBeenCalled();
+    });
+
+    it('ignores an invalid cutoff while webhook auto-admission is explicitly disabled', async () => {
+        process.env.EARLYBIRD_WEBHOOK_AUTO_ADMISSION_ENABLED = 'false';
+        process.env.EARLYBIRD_WEBHOOK_AUTO_ADMISSION_NOT_BEFORE = 'not-a-timestamp';
+
+        const response = await POST(request(JSON.stringify(payload())));
+
+        expect(response.status).toBe(200);
+        expect(mocks.rpc).toHaveBeenCalledTimes(1);
+        expect(mocks.bindCredentialSlot).not.toHaveBeenCalled();
+        expect(mocks.admitFulfillment).not.toHaveBeenCalled();
+        expect(mocks.after).toHaveBeenCalledTimes(1);
+    });
+
+    it.each(['duplicate_event', 'duplicate_payment'] as const)(
+        'does not auto-admit a pre-cutoff %s replay',
+        async disposition => {
+            process.env.EARLYBIRD_WEBHOOK_AUTO_ADMISSION_NOT_BEFORE =
+                '2026-07-18T00:00:00+00:00';
+            mocks.rpc.mockResolvedValueOnce({
+                data: [{
+                    disposition,
+                    order_id: ORDER_ID,
+                    status: 'paid',
+                    plan_sequence: 1,
+                }],
+                error: null,
+            });
+
+            const response = await POST(request(JSON.stringify(payload())));
+
+            expect(response.status).toBe(200);
+            expect(mocks.bindCredentialSlot).not.toHaveBeenCalled();
+            expect(mocks.admitFulfillment).not.toHaveBeenCalled();
+            expect(mocks.after).not.toHaveBeenCalled();
+        },
+    );
+
+    it.each([
+        '2026-07-17T21:00:00+09:00',
+        '2026-07-17T12:00:00Z',
+    ])('treats paidAt at the cutoff instant as eligible (%s)', async notBefore => {
+        process.env.EARLYBIRD_WEBHOOK_AUTO_ADMISSION_NOT_BEFORE = notBefore;
+
+        const response = await POST(request(JSON.stringify(payload())));
+
+        expect(response.status).toBe(200);
+        expect(mocks.bindCredentialSlot).toHaveBeenCalledWith(ORDER_ID, 'secondary');
+        expect(mocks.admitFulfillment).toHaveBeenCalledWith(ORDER_ID);
+        expect(mocks.after).toHaveBeenCalledTimes(1);
+    });
+
+    it('runs finalization, secondary-slot binding, admission, and after in order', async () => {
+        const sequence: string[] = [];
+        mocks.rpc.mockImplementationOnce(async () => {
+            sequence.push('finalize');
+            return {
+                data: [{
+                    disposition: 'accepted',
+                    order_id: ORDER_ID,
+                    status: 'paid',
+                    plan_sequence: 1,
+                }],
+                error: null,
+            };
+        });
+        mocks.bindCredentialSlot.mockImplementationOnce(async () => {
+            sequence.push('bind');
+        });
+        mocks.admitFulfillment.mockImplementationOnce(async () => {
+            sequence.push('admit');
+            return ADMITTED_IDENTITY;
+        });
+        mocks.after.mockImplementationOnce(() => {
+            sequence.push('after');
+        });
+
+        const response = await POST(request(JSON.stringify(payload())));
+
+        expect(response.status).toBe(200);
+        expect(sequence).toEqual(['finalize', 'bind', 'admit', 'after']);
+        expect(mocks.bindCredentialSlot).toHaveBeenCalledWith(ORDER_ID, 'secondary');
+    });
+
+    it('returns a persistence failure and does not admit when credential binding fails', async () => {
+        mocks.bindCredentialSlot.mockRejectedValueOnce(new Error('bind failed'));
+
+        const response = await POST(request(JSON.stringify(payload())));
+
+        expect(response.status).toBe(500);
+        await expect(response.json()).resolves.toEqual({
+            received: false,
+            code: 'PERSISTENCE_FAILED',
+        });
+        expect(mocks.bindCredentialSlot).toHaveBeenCalledWith(ORDER_ID, 'secondary');
+        expect(mocks.admitFulfillment).not.toHaveBeenCalled();
+        expect(mocks.after).not.toHaveBeenCalled();
+    });
+
+    it.each(['analysis_in_progress', 'completed'] as const)(
+        'skips credential binding but idempotently admits an already %s payment',
+        async status => {
+            mocks.rpc.mockResolvedValueOnce({
+                data: [{
+                    disposition: 'accepted',
+                    order_id: ORDER_ID,
+                    status,
+                    plan_sequence: 1,
+                }],
+                error: null,
+            });
+            mocks.admitFulfillment.mockResolvedValueOnce({
+                ...ADMITTED_IDENTITY,
+                status,
+            });
+
+            const response = await POST(request(JSON.stringify(payload())));
+
+            expect(response.status).toBe(200);
+            expect(mocks.bindCredentialSlot).not.toHaveBeenCalled();
+            expect(mocks.admitFulfillment).toHaveBeenCalledWith(ORDER_ID);
+            expect(mocks.after).toHaveBeenCalledTimes(1);
+            const [drain] = mocks.after.mock.calls[0] as [() => Promise<unknown>];
+            await drain();
+            expect(mocks.advanceAdmittedFulfillment).toHaveBeenCalledWith(
+                expect.objectContaining({ orderId: ORDER_ID, status })
+            );
+        },
+    );
 
     it('admits an accepted payment before 200 and advances exactly once after the response', async () => {
         const sequence: string[] = [];
