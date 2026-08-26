@@ -1,12 +1,24 @@
 import { readFileSync } from 'node:fs';
 import { Pool, type PoolClient } from 'pg';
+import { parse as parseConnectionString } from 'pg-connection-string';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 
 const databaseUrl = process.env.EARLYBIRD_DIRECT_FRESH_APIFY_POSTGRES_TEST_URL;
 const marker = process.env.EARLYBIRD_DIRECT_FRESH_APIFY_POSTGRES_TEST_MARKER;
 const expectedMarker = 'local-ephemeral-earlybird-direct-fresh-lock-order-only';
 const expectedPort = '55435';
-const describePostgres = isSafeTarget(databaseUrl, marker) ? describe : describe.skip;
+const expectedDatabase = 'earlybird_direct_fresh_lock_order_test';
+
+interface SafePoolConfig {
+    host: string;
+    port: number;
+    database: string;
+    user?: string;
+    password?: string;
+}
+
+const safeDatabaseConfig = getSafeTargetPoolConfig(databaseUrl, marker);
+const describePostgres = safeDatabaseConfig ? describe : describe.skip;
 
 const pgliteFixture = readFileSync(new URL('./earlybird-direct-fresh-profile-pglite.test.ts', import.meta.url), 'utf8');
 const migration = readFileSync(new URL(
@@ -57,23 +69,60 @@ const SCOPE = {
     detailedMutualLimit: 300,
 };
 
+export function getSafeTargetPoolConfig(
+    connectionString: string | undefined,
+    suppliedMarker: string | undefined,
+): SafePoolConfig | null {
+    if (!connectionString || suppliedMarker !== expectedMarker || connectionString !== connectionString.trim()) {
+        return null;
+    }
+    try {
+        const url = new URL(connectionString);
+        const parsed = parseConnectionString(connectionString);
+        const scheme = 'postgresql://';
+        const pathStart = connectionString.indexOf('/', scheme.length);
+        const rawAuthority = pathStart < 0
+            ? ''
+            : connectionString.slice(scheme.length, pathStart);
+        const rawHostPort = rawAuthority.slice(rawAuthority.lastIndexOf('@') + 1);
+        if (
+            !connectionString.startsWith(scheme)
+            || rawHostPort !== `127.0.0.1:${expectedPort}`
+                && rawHostPort !== `localhost:${expectedPort}`
+            || url.protocol !== 'postgresql:'
+            || (url.hostname !== '127.0.0.1' && url.hostname !== 'localhost')
+            || url.port !== expectedPort
+            // node-postgres gives URI query parameters precedence over the authority's
+            // host/port (and libpq accepts hostaddr), so no query string is safe here.
+            || url.search !== ''
+            || url.hash !== ''
+            || url.pathname !== `/${expectedDatabase}`
+            || pathStart < 0
+            || connectionString.slice(pathStart) !== `/${expectedDatabase}`
+            || parsed.host !== url.hostname
+            || parsed.port !== expectedPort
+            || parsed.database !== expectedDatabase
+        ) {
+            return null;
+        }
+        const config: SafePoolConfig = {
+            host: parsed.host,
+            port: Number(parsed.port),
+            database: parsed.database,
+        };
+        if (parsed.user) config.user = parsed.user;
+        if (parsed.password) config.password = parsed.password;
+        return config;
+    } catch {
+        return null;
+    }
+}
+
 export function isSafeTarget(
     connectionString: string | undefined,
     suppliedMarker: string | undefined,
 ): boolean {
-    if (!connectionString || suppliedMarker !== expectedMarker) return false;
-    try {
-        const url = new URL(connectionString);
-        return url.protocol === 'postgresql:'
-            && (url.hostname === '127.0.0.1' || url.hostname === 'localhost')
-            && url.port === expectedPort
-            // node-postgres gives URI query parameters precedence over the authority's
-            // host/port (and libpq accepts hostaddr), so no query string is safe here.
-            && url.search === ''
-            && url.pathname === '/earlybird_direct_fresh_lock_order_test';
-    } catch {
-        return false;
-    }
+    return getSafeTargetPoolConfig(connectionString, suppliedMarker) !== null;
 }
 
 function fixtureBootstrap(): string {
@@ -136,16 +185,42 @@ async function settled<T>(promise: Promise<T>): Promise<{ value: T | null; error
 
 describe('Earlybird direct fresh-Apify PostgreSQL lock order target guard', () => {
     it('accepts only the named loopback disposable target and marker', () => {
+        const connectionString =
+            'postgresql://tester@127.0.0.1:55435/earlybird_direct_fresh_lock_order_test';
         expect(isSafeTarget(
-            'postgresql://tester@127.0.0.1:55435/earlybird_direct_fresh_lock_order_test',
+            connectionString,
             expectedMarker,
         )).toBe(true);
+        expect(getSafeTargetPoolConfig(
+            connectionString,
+            expectedMarker,
+        )).toEqual({
+            host: '127.0.0.1',
+            port: 55435,
+            database: expectedDatabase,
+            user: 'tester',
+        });
+    });
+
+    it('returns no pool configuration for an unsafe target', () => {
+        expect(getSafeTargetPoolConfig(
+            'postgresql://127.0.0.1:55435/earlybird_direct_fresh_lock_order_test?host=db.example.com',
+            expectedMarker,
+        )).toBeNull();
     });
 
     it.each([
         ['postgresql://tester@db.example.com/earlybird_direct_fresh_lock_order_test', expectedMarker],
         ['postgresql://tester@127.0.0.1:55434/earlybird_direct_fresh_lock_order_test', expectedMarker],
         ['postgresql://tester@127.0.0.1/earlybird_direct_fresh_lock_order_test', expectedMarker],
+        [' postgresql://127.0.0.1:55435/../../../../../../earlybird_direct_fresh_lock_order_test', expectedMarker],
+        ['postgresql://127.0.0.1:55435/../../../../../../earlybird_direct_fresh_lock_order_test', expectedMarker],
+        ['postgresql://127.0.0.1:55435/./earlybird_direct_fresh_lock_order_test', expectedMarker],
+        ['postgresql://127.0.0.1:55435/a/../earlybird_direct_fresh_lock_order_test', expectedMarker],
+        ['postgresql://127.0.0.1:55435//earlybird_direct_fresh_lock_order_test', expectedMarker],
+        ['postgresql://127.0.0.1:55435/earlybird_direct_fresh_lock_order_test/', expectedMarker],
+        ['postgresql://127.0.0.1:55435/earlybird_direct_fresh_lock_order_test#fragment', expectedMarker],
+        ['postgresql://127.0.0.1:55435/%65arlybird_direct_fresh_lock_order_test', expectedMarker],
         ['postgresql://tester@127.0.0.1:55435/postgres', expectedMarker],
         ['postgresql://tester@127.0.0.1:55435/earlybird_direct_fresh_lock_order_test', undefined],
         ['postgresql://tester@127.0.0.1:55435/earlybird_direct_fresh_lock_order_test?host=db.example.com', expectedMarker],
@@ -164,7 +239,10 @@ describePostgres('Earlybird direct fresh-Apify PostgreSQL lock order', () => {
     let pool: Pool;
 
     beforeAll(async () => {
-        pool = new Pool({ connectionString: databaseUrl, max: 5 });
+        if (!safeDatabaseConfig) {
+            throw new Error('Refusing destructive PostgreSQL test with an unsafe target.');
+        }
+        pool = new Pool({ ...safeDatabaseConfig, max: 5 });
         const identity = await pool.query<{ database_name: string }>(
             'SELECT pg_catalog.current_database() AS database_name',
         );
