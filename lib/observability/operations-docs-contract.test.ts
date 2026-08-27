@@ -409,19 +409,20 @@ describe('analytics and observability disclosure contract', () => {
             /awaiting_operator[^\n]*(analysis_requests|자동 분석)[^\n]*(만들지 않|시작하지 않)/
         );
         expect(groble).toContain('--confirm-paid-api-call');
-        for (const document of [groble, checklist]) {
-            expect(document).toContain(
-                'EARLYBIRD_AUTOMATIC_FULFILLMENT_ENABLED=false'
-            );
-            expect(document).toMatch(
-                /false[^\n]*(자동 승인|자동 입장)[^\n]*(하지 않|없)/
-            );
-            expect(document).toMatch(
-                /정확히 `true`[^\n]*canonical `analysis-worker`[^\n]*(자동 승인|자동 입장)/
-            );
-        }
-        expect(groble).toMatch(/기존[^\n]*awaiting_operator[^\n]*복구 pass/);
-        expect(groble).toMatch(/false[^\n]*이미 admission_pending[^\n]*계속/);
+        expect(groble).toContain('EARLYBIRD_AUTOMATIC_FULFILLMENT_ENABLED=false');
+        expect(groble).toContain('ANALYSIS_V2_RECOVERY_ENABLED=true');
+        expect(groble).toMatch(
+            /`EARLYBIRD_WEBHOOK_AUTO_ADMISSION_ENABLED=false` 또는 미설정이면[^\n]*concierge의 `awaiting_operator`에 남는다/
+        );
+        expect(groble).toMatch(
+            /값을 정확히 `true`로 설정하려면 `EARLYBIRD_WEBHOOK_AUTO_ADMISSION_NOT_BEFORE`에 고정 RFC3339 시각을 함께 설정해야 한다/
+        );
+        expect(groble).toMatch(
+            /cutoff 이전 결제와 그 duplicate webhook은 이후 재전송돼도 자동 승인하지 않는다/
+        );
+        expect(groble).toMatch(
+            /이미 webhook에서 승인된 `admission_pending`·`retryable_failure` 작업만 계속 drain한다/
+        );
 
         for (const document of [costs, checklist, groble]) {
             expect(document).not.toMatch(/Plus[^\n]*(구매 가능|판매 중)/);

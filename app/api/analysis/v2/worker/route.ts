@@ -13,7 +13,6 @@ import {
 } from '@/lib/services/analysis/v2-tasks';
 import { processAnalysisV2TaskDelivery } from '@/lib/services/analysis/v2-worker';
 import {
-    ANALYSIS_V2_CURRENT_WORKER_TASK_CONTRACT,
     ANALYSIS_V2_WORKER_TASK_CONTRACT_HEADER,
     analysisV2WorkerTaskContractFromHeader,
 } from '@/lib/services/analysis/v2-worker-task-contract';

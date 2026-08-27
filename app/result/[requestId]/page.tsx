@@ -8,8 +8,6 @@ import type { AnalysisResultPageV1 } from '@/lib/contracts/analysis-v2';
 import {
     mapV2Result,
     type GenderRatio,
-    type FemaleAccount,
-    type PrivateAccount,
     type ResultData,
 } from './result-view-model';
 import { trackEvent, EVENTS } from '@/lib/services/analytics';
