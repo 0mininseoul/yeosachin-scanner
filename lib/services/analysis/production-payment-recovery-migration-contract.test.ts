@@ -79,6 +79,12 @@ describe('production payment recovery migration contracts', () => {
         expect(source).not.toMatch(/groble_seller_reference\s+IS\s+NULL/i);
         expect(source).toMatch(/earlybird_fulfillments/i);
         expect(source).toMatch(/analysis_requests/i);
+        expect(source).not.toMatch(
+            /result_request_id\s+IS\s+NULL[\s\S]{0,300}analysis_requests/i,
+        );
+        expect(source).toMatch(
+            /NOT EXISTS\s*\([\s\S]*?analysis_requests[\s\S]*?analysis_request\.id\s*=\s*(?:earlybird_order\.)?result_request_id/i,
+        );
         expect(source).toMatch(/COUNT\(\*\)/i);
         expect(source).toMatch(/RAISE EXCEPTION/i);
         expect(source).not.toMatch(/DELETE\s+FROM\s+public\.users/i);

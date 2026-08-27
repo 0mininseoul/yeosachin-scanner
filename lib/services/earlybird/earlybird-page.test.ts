@@ -46,16 +46,12 @@ vi.mock('@/components/case-ui', () => ({
     ),
 }));
 vi.mock('@/app/earlybird/earlybird-status', () => ({
-    EarlybirdStatus: ({
-        order,
-        suppressCheckoutRecovery,
-    }: {
+    EarlybirdStatus: ({ order }: {
         order: { orderId: string; actualAmountKrw: number | null };
-        suppressCheckoutRecovery?: boolean;
     }) => createElement(
         'div',
         { 'data-testid': 'earlybird-status' },
-        `${order.orderId}:${String(order.actualAmountKrw)}:${String(Boolean(suppressCheckoutRecovery))}`
+        `${order.orderId}:${String(order.actualAmountKrw)}`
     ),
 }));
 
@@ -89,6 +85,8 @@ describe('earlybird status page', () => {
             plan_sequence: 3,
             result_request_id: null,
             created_at: '2026-07-17T11:59:00.000Z',
+            pricing_version: 'earlybird-2026-08-v5',
+            seller_reference_confirmed_at: null,
         });
         mocks.rpc.mockResolvedValue({ data: null, error: null });
         mocks.requireActiveAccountSession.mockResolvedValue({
@@ -111,17 +109,17 @@ describe('earlybird status page', () => {
         const markup = renderToStaticMarkup(page);
 
         expect(markup).toContain(`data-testid="earlybird-status"`);
-        expect(markup).toContain(`${ORDER_ID}:0:false`);
+        expect(markup).toContain(`${ORDER_ID}:0`);
         expect(markup).not.toContain('확인할 내역이 없습니다');
     });
 
-    it('passes the status-only resume guard for superseded lineage navigation', async () => {
+    it('does not let a removable resume query override the server capability', async () => {
         const page = await EarlybirdPage({
             searchParams: Promise.resolve({ resume: '0' }),
         });
         const markup = renderToStaticMarkup(page);
 
-        expect(markup).toContain(`${ORDER_ID}:0:true`);
+        expect(markup).toContain(`${ORDER_ID}:0`);
     });
 
     it('does not expose order status to a retired account', async () => {

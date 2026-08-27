@@ -35,7 +35,6 @@ export default async function EarlybirdPage({
     const planId = requestedPlan === 'basic' || requestedPlan === 'standard'
         ? requestedPlan
         : undefined;
-    const suppressCheckoutRecovery = params.resume === '0';
 
     let order = null;
     try {
@@ -51,7 +50,6 @@ export default async function EarlybirdPage({
                 {order ? (
                     <EarlybirdStatus
                         order={order}
-                        suppressCheckoutRecovery={suppressCheckoutRecovery}
                     />
                 ) : (
                     <>

@@ -2,12 +2,14 @@ import { describe, expect, it, vi } from 'vitest';
 
 const mocks = vi.hoisted(() => ({
     findCheckoutForRecovery: vi.fn(),
+    isCheckoutLineageSuperseded: vi.fn().mockResolvedValue(false),
     getGrobleCheckoutUrl: vi.fn(() => 'https://provider.example/checkout'),
 }));
 
 vi.mock('./store', () => ({
     earlybirdStore: {
         findCheckoutForRecovery: mocks.findCheckoutForRecovery,
+        isCheckoutLineageSuperseded: mocks.isCheckoutLineageSuperseded,
     },
     EarlybirdPersistenceError: class EarlybirdPersistenceError extends Error {},
 }));
@@ -44,6 +46,7 @@ function pendingRecord(createdAt: string) {
             '현재 얼리버드 기간에는 즉시 자동 판독이 아닌, 결제 완료 후 24시간 이내 판독 결과를 제공합니다.',
         disclosureAcceptedAt: new Date().toISOString(),
         sellerReference: 'ord.0123456789abcdef0123456789abcdef',
+        sellerReferenceConfirmedAt: null,
         status: 'payment_pending' as const,
         paymentId: null,
         actualAmountKrw: null,
@@ -116,5 +119,37 @@ describe('earlybird checkout recovery boundary', () => {
                 message: 'EARLYBIRD_CHECKOUT_NOT_RECOVERABLE',
             });
         }
+    });
+
+    it('rejects a server-selected seller reference that already has confirmation evidence', async () => {
+        mocks.findCheckoutForRecovery.mockResolvedValueOnce({
+            ...pendingRecord(new Date(Date.now() - 60 * 60 * 1_000).toISOString()),
+            sellerReferenceConfirmedAt: '2026-08-28T00:00:00.000Z',
+        });
+
+        await expect(recoverEarlybirdCheckout({
+            ...ids,
+            planId: 'standard',
+            targetInstagramId: 'target.account',
+            currentPhone,
+        })).rejects.toMatchObject({
+            message: 'EARLYBIRD_CHECKOUT_NOT_RECOVERABLE',
+        });
+    });
+
+    it('rejects a superseded lineage from the durable store even when the client asks to resume it', async () => {
+        const record = pendingRecord(new Date(Date.now() - 60 * 60 * 1_000).toISOString());
+        mocks.findCheckoutForRecovery.mockResolvedValueOnce(record);
+        mocks.isCheckoutLineageSuperseded.mockResolvedValueOnce(true);
+
+        await expect(recoverEarlybirdCheckout({
+            ...ids,
+            planId: 'standard',
+            targetInstagramId: 'target.account',
+            currentPhone,
+        })).rejects.toMatchObject({
+            message: 'EARLYBIRD_CHECKOUT_NOT_RECOVERABLE',
+        });
+        expect(mocks.isCheckoutLineageSuperseded).toHaveBeenCalledWith(record);
     });
 });

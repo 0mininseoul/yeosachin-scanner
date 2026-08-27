@@ -89,6 +89,8 @@ BEGIN
             -- Internal bounded disposition: ANONYMOUS_PREFLIGHT_OWNER_STALE.
             UPDATE public.analysis_preflights
             SET status = 'expired',
+                claim_token_hash = NULL,
+                claim_expires_at = NULL,
                 lease_token = NULL,
                 lease_expires_at = NULL,
                 updated_at = v_now

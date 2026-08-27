@@ -153,6 +153,11 @@ export async function recoverEarlybirdCheckout(input: {
             'EARLYBIRD_CHECKOUT_RECOVERY_NOT_FOUND'
         );
     }
+    if (await earlybirdStore.isCheckoutLineageSuperseded(record)) {
+        throw new EarlybirdCheckoutRecoveryError(
+            'EARLYBIRD_CHECKOUT_NOT_RECOVERABLE'
+        );
+    }
     if (
         record.status !== 'payment_pending'
         || record.planId !== input.planId
@@ -194,6 +199,7 @@ export async function recoverEarlybirdCheckout(input: {
         || !isRecoverableDisclosure(record)
         || !record.disclosureAcceptedAt
         || !record.sellerReference
+        || record.sellerReferenceConfirmedAt !== null
         || record.paymentId !== null
         || record.actualAmountKrw !== null
         || record.paidAt !== null

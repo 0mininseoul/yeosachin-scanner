@@ -17,7 +17,6 @@ import {
     AccountPrincipalAdmissionError,
     requireActiveAccountClassification,
 } from '@/lib/services/identity/account-principal-store';
-import { preflightStore } from '@/lib/services/analysis/preflight';
 import {
     observeRoute,
     type OperationalRequestContext,
@@ -141,21 +140,12 @@ async function handleGET(
             return unavailable(request, context, 'VALIDATION_ERROR');
         }
 
-        const ownerPreflight = await preflightStore.findForOwner(
-            order.preflightId,
-            user.id,
-        );
-        const preflightTarget = ownerPreflight?.readySnapshot?.target.username;
-        if (!preflightTarget || preflightTarget !== order.targetInstagramId) {
-            return unavailable(request, context, 'VALIDATION_ERROR');
-        }
-
         const currentPhone = await loadCurrentEarlybirdCheckoutPhone(user.id);
         const recovered = await recoverEarlybirdCheckout({
             userId: user.id,
             preflightId: order.preflightId,
             planId: continuation.planId,
-            targetInstagramId: preflightTarget,
+            targetInstagramId: order.targetInstagramId,
             currentPhone,
         });
         if (recovered.orderId !== order.orderId || !order.sellerReference) {

@@ -7,7 +7,6 @@ const mocks = vi.hoisted(() => ({
     loadCurrentEarlybirdCheckoutPhone: vi.fn(),
     recoverEarlybirdCheckout: vi.fn(),
     findCheckoutForRedirect: vi.fn(),
-    findForOwner: vi.fn(),
     getGrobleCheckoutUrl: vi.fn(),
     readGrobleConfig: vi.fn(),
     emit: vi.fn(),
@@ -41,9 +40,6 @@ vi.mock('@/lib/services/earlybird/store', () => ({
 vi.mock('@/lib/services/groble/config', () => ({
     getGrobleCheckoutUrl: mocks.getGrobleCheckoutUrl,
     readGrobleConfig: mocks.readGrobleConfig,
-}));
-vi.mock('@/lib/services/analysis/preflight', () => ({
-    preflightStore: { findForOwner: mocks.findForOwner },
 }));
 vi.mock('@/lib/observability/request', () => ({ observeRoute: mocks.observeRoute }));
 vi.mock('@/lib/observability/server', () => ({
@@ -85,10 +81,6 @@ describe('same-origin earlybird checkout redirect route contract', () => {
             planId: 'standard',
             sellerReference: 'ord.0123456789abcdef0123456789abcdef',
             createdAt: new Date(Date.now() - 60 * 60 * 1_000).toISOString(),
-        });
-        mocks.findForOwner.mockResolvedValue({
-            preflightId,
-            readySnapshot: { target: { username: 'target.account' } },
         });
         mocks.loadCurrentEarlybirdCheckoutPhone.mockResolvedValue({
             normalizedPhone: '+821012345678',
@@ -205,28 +197,16 @@ describe('same-origin earlybird checkout redirect route contract', () => {
         );
     });
 
-    it('does not issue a provider redirect when the owner preflight target differs', async () => {
-        mocks.findForOwner.mockResolvedValueOnce({
-            preflightId,
-            readySnapshot: { target: { username: 'another.account' } },
-        });
+    it('does not require the expiring preflight snapshot for a durable order redirect', async () => {
+        // The order query is the authoritative target/owner binding. A
+        // preflight snapshot may be past its 30-minute TTL while the order is
+        // still inside the 24-hour recovery window.
         const response = await GET(new Request(
             `https://example.com/api/earlybird/checkout/redirect?orderId=${orderId}&planId=standard`,
         ));
         expect(response.status).toBe(303);
-        expect(response.headers.get('location')).toBe(
-            'https://example.com/earlybird?checkout=unavailable',
-        );
-        expect(mocks.loadCurrentEarlybirdCheckoutPhone).not.toHaveBeenCalled();
-        expect(mocks.getGrobleCheckoutUrl).not.toHaveBeenCalled();
-        expect(mocks.emit).toHaveBeenCalledWith(expect.objectContaining({
-            event: 'earlybird.checkout_failed',
-            fields: expect.objectContaining({
-                operation: 'checkout',
-                disposition: 'rejected',
-                error_code: 'VALIDATION_ERROR',
-            }),
-        }));
+        expect(mocks.findCheckoutForRedirect).toHaveBeenCalledOnce();
+        expect(mocks.loadCurrentEarlybirdCheckoutPhone).toHaveBeenCalledOnce();
     });
 
     it('does not block a valid redirect when success telemetry throws', async () => {

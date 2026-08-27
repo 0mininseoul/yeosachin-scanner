@@ -8,6 +8,7 @@ const mocks = vi.hoisted(() => ({
     after: vi.fn(),
     flush: vi.fn(),
     findForOwner: vi.fn(),
+    isCheckoutLineageSuperseded: vi.fn().mockResolvedValue(false),
     demoStore: {
         findForOwner: vi.fn(),
         startForOwner: vi.fn(),
@@ -49,6 +50,16 @@ vi.mock('next/server', async (importOriginal) => {
 vi.mock('@/lib/services/analysis/preflight', () => ({
     preflightStore: { findForOwner: mocks.findForOwner },
 }));
+vi.mock('@/lib/services/earlybird/store', async importOriginal => {
+    const actual = await importOriginal<typeof import('@/lib/services/earlybird/store')>();
+    return {
+        ...actual,
+        earlybirdStore: {
+            ...actual.earlybirdStore,
+            isCheckoutLineageSuperseded: mocks.isCheckoutLineageSuperseded,
+        },
+    };
+});
 vi.mock('@/lib/services/demo-analysis/store', () => ({ demoAnalysisStore: mocks.demoStore }));
 vi.mock('@/lib/services/identity/account-principal-store', async importOriginal => ({
     ...(await importOriginal<typeof import('@/lib/services/identity/account-principal-store')>()),
@@ -113,6 +124,7 @@ function recoveryOrderRow(overrides: Record<string, unknown> = {}) {
             '현재 얼리버드 기간에는 즉시 자동 판독이 아닌, 결제 완료 후 24시간 이내 판독 결과를 제공합니다.',
         disclosure_accepted_at: '2026-07-24T12:00:00.000Z',
         groble_seller_reference: SELLER_REFERENCE,
+        seller_reference_confirmed_at: null,
         status: 'payment_pending',
         payment_id: null,
         actual_amount_krw: null,

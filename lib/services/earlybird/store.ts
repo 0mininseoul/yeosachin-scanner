@@ -26,6 +26,7 @@ const checkoutRecoveryRowSchema = z.object({
     disclosure_text: z.string().min(1).max(1_000),
     disclosure_accepted_at: z.string().datetime({ offset: true }),
     groble_seller_reference: sellerReferenceResultSchema.nullable(),
+    seller_reference_confirmed_at: z.string().datetime({ offset: true }).nullable(),
     status: z.enum([
         'payment_pending',
         'payment_failed',
@@ -42,6 +43,101 @@ const checkoutRecoveryRowSchema = z.object({
     paid_at: z.string().datetime({ offset: true }).nullable(),
     created_at: z.string().datetime({ offset: true }),
 });
+
+const checkoutLineagePreflightSchema = z.object({
+    id: z.string().uuid(),
+    user_id: z.string().uuid(),
+    target_instagram_id: z.string().min(1).max(128),
+    created_at: z.string().datetime({ offset: true }),
+});
+
+export interface EarlybirdCheckoutRecoveryRecord {
+    orderId: string;
+    userId: string;
+    preflightId: string;
+    targetInstagramId: string;
+    planId: 'basic' | 'standard';
+    pricingVersion: string;
+    expectedAmountKrw: number;
+    expectedProductId: string;
+    buyerMatchPolicy: string;
+    expectedBuyerPhoneNumberNormalized: string | null;
+    expectedBuyerPhoneVerificationSource: string | null;
+    disclosureVersion: string;
+    disclosureText: string;
+    disclosureAcceptedAt: string;
+    sellerReference: string | null;
+    sellerReferenceConfirmedAt: string | null;
+    status: 'payment_pending'
+        | 'payment_failed'
+        | 'paid'
+        | 'analysis_in_progress'
+        | 'completed'
+        | 'overflow_refund_required'
+        | 'cancelled'
+        | 'refund_pending'
+        | 'refunded';
+    paymentId: string | null;
+    actualAmountKrw: number | null;
+    paidAt: string | null;
+    createdAt: string;
+}
+
+type CheckoutLineageInput = Pick<
+    EarlybirdCheckoutRecoveryRecord,
+    'userId' | 'preflightId' | 'targetInstagramId'
+>;
+
+/**
+ * A checkout is superseded only when durable preflight state proves that a
+ * newer, ready, unexpired lineage exists for the same owner. The
+ * caller cannot provide this decision: `resume=0` is merely a navigation hint.
+ */
+async function isDurablySuperseded(
+    input: CheckoutLineageInput,
+): Promise<boolean> {
+    const currentResult = await supabaseAdmin
+        .from('analysis_preflights')
+        .select('id, user_id, target_instagram_id, created_at')
+        .eq('id', input.preflightId)
+        .eq('user_id', input.userId)
+        .eq('target_instagram_id', input.targetInstagramId)
+        .maybeSingle();
+    if (currentResult.error) {
+        throw new EarlybirdPersistenceError('EARLYBIRD_PERSISTENCE_FAILED');
+    }
+    const current = checkoutLineagePreflightSchema.safeParse(currentResult.data);
+    if (!current.success || current.data.user_id !== input.userId) return true;
+
+    const latestResult = await supabaseAdmin
+        .from('analysis_preflights')
+        .select('id, user_id, target_instagram_id, created_at')
+        .eq('user_id', input.userId)
+        .eq('status', 'ready')
+        .in('exclusion_decision', ['skip', 'exclude'])
+        .gt('expires_at', new Date().toISOString())
+        .order('created_at', { ascending: false })
+        .order('id', { ascending: false })
+        .limit(1)
+        .maybeSingle();
+    if (latestResult.error) {
+        throw new EarlybirdPersistenceError('EARLYBIRD_PERSISTENCE_FAILED');
+    }
+    if (latestResult.data == null) return false;
+    const latest = checkoutLineagePreflightSchema.safeParse(latestResult.data);
+    if (!latest.success) {
+        throw new EarlybirdPersistenceError('EARLYBIRD_PERSISTENCE_FAILED');
+    }
+    if (latest.data.user_id !== input.userId) {
+        throw new EarlybirdPersistenceError('EARLYBIRD_PERSISTENCE_FAILED');
+    }
+    if (latest.data.id === current.data.id) return false;
+    return latest.data.created_at > current.data.created_at
+        || (
+            latest.data.created_at === current.data.created_at
+            && latest.data.id > current.data.id
+        );
+}
 
 const waitlistResultSchema = z.array(z.object({
     waitlist_id: z.string().uuid(),
@@ -173,6 +269,7 @@ export const earlybirdStore = {
             + 'buyer_match_policy, expected_buyer_phone_number_normalized, '
             + 'expected_buyer_phone_verification_source, disclosure_version, '
             + 'disclosure_text, disclosure_accepted_at, groble_seller_reference, '
+            + 'seller_reference_confirmed_at, '
             + 'status, payment_id, actual_amount_krw, paid_at, created_at';
         const toRecord = (data: unknown, expectedPreflightId?: string) => {
             const parsed = checkoutRecoveryRowSchema.safeParse(data);
@@ -199,6 +296,7 @@ export const earlybirdStore = {
                 disclosureText: parsed.data.disclosure_text,
                 disclosureAcceptedAt: parsed.data.disclosure_accepted_at,
                 sellerReference: parsed.data.groble_seller_reference,
+                sellerReferenceConfirmedAt: parsed.data.seller_reference_confirmed_at,
                 status: parsed.data.status,
                 paymentId: parsed.data.payment_id,
                 actualAmountKrw: parsed.data.actual_amount_krw,
@@ -244,6 +342,7 @@ export const earlybirdStore = {
             + 'buyer_match_policy, expected_buyer_phone_number_normalized, '
             + 'expected_buyer_phone_verification_source, disclosure_version, '
             + 'disclosure_text, disclosure_accepted_at, groble_seller_reference, '
+            + 'seller_reference_confirmed_at, '
             + 'status, payment_id, actual_amount_krw, paid_at, created_at';
         const query = supabaseAdmin
             .from('earlybird_orders')
@@ -260,7 +359,7 @@ export const earlybirdStore = {
         if (!parsed.success || parsed.data.user_id !== userId) {
             throw new EarlybirdPersistenceError('EARLYBIRD_PERSISTENCE_FAILED');
         }
-        return Object.freeze({
+        const record = Object.freeze({
             orderId: parsed.data.id,
             userId: parsed.data.user_id,
             preflightId: parsed.data.preflight_id,
@@ -278,12 +377,21 @@ export const earlybirdStore = {
             disclosureText: parsed.data.disclosure_text,
             disclosureAcceptedAt: parsed.data.disclosure_accepted_at,
             sellerReference: parsed.data.groble_seller_reference,
+            sellerReferenceConfirmedAt: parsed.data.seller_reference_confirmed_at,
             status: parsed.data.status,
             paymentId: parsed.data.payment_id,
             actualAmountKrw: parsed.data.actual_amount_krw,
             paidAt: parsed.data.paid_at,
             createdAt: parsed.data.created_at,
         });
+        if (await isDurablySuperseded(record)) {
+            throw new EarlybirdPersistenceError('EARLYBIRD_CHECKOUT_NOT_RECOVERABLE');
+        }
+        return record;
+    },
+
+    async isCheckoutLineageSuperseded(input: CheckoutLineageInput): Promise<boolean> {
+        return isDurablySuperseded(input);
     },
 
     async findCurrentCheckoutPhone(userId: string) {

@@ -42,10 +42,8 @@ const SUPPORT_COPY =
 
 export function EarlybirdStatus({
     order,
-    suppressCheckoutRecovery = false,
 }: {
     order: EarlybirdOrderStatusDto;
-    suppressCheckoutRecovery?: boolean;
 }) {
     const trackedRef = useRef(new Set<string>());
     const router = useRouter();
@@ -123,7 +121,6 @@ export function EarlybirdStatus({
     }, [nextUrl, router]);
 
     const handleCheckoutRecovery = async () => {
-        if (suppressCheckoutRecovery) return;
         setCheckoutRecoveryError(null);
         await recoverPendingEarlybirdCheckout(
             order.preflightId,
@@ -235,8 +232,7 @@ export function EarlybirdStatus({
                     판독 결과 확인하기
                 </Link>
             ) : order.systemStatus === 'payment_pending'
-                && order.checkoutRecoverable
-                && !suppressCheckoutRecovery ? (
+                && order.checkoutRecoverable ? (
                 <>
                     <PrimaryButton
                         className="mt-5"

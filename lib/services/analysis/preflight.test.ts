@@ -131,6 +131,16 @@ describe('B-lite single-collection preflight', () => {
         const activateBliteCohort = vi.fn();
         const getFullProfile = vi.fn();
         const getProfile = vi.fn(async () => profile());
+        const bliteObservability = {
+            completed: vi.fn(),
+            profileCollectionFailed: vi.fn(),
+            inferenceFailed: vi.fn(),
+            inferenceAttempt: vi.fn(),
+            sourceFinalizerFailed: vi.fn(),
+            fallbackLatched: vi.fn(),
+            demoCompleted: vi.fn(),
+            demoFailed: vi.fn(),
+        };
         const env = {
             ...preflightApifyPoolEnv,
             PRECHECKOUT_BLITE_ENABLED: 'true',
@@ -145,6 +155,7 @@ describe('B-lite single-collection preflight', () => {
             getProfile,
             getFullProfile,
             activateBliteCohort,
+            bliteObservability,
             env,
         })).resolves.toBe('ready');
 
@@ -152,6 +163,7 @@ describe('B-lite single-collection preflight', () => {
         expect(getFullProfile).not.toHaveBeenCalled();
         expect(getProfile).toHaveBeenCalledOnce();
         expect(store.finalizeReady).toHaveBeenCalledOnce();
+        expect(bliteObservability.fallbackLatched).not.toHaveBeenCalled();
     });
 
     it('uses the frozen beta hold before the dedicated selector for a new beta B-lite run', async () => {

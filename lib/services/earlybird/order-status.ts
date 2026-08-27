@@ -6,6 +6,7 @@ import {
     readEarlybirdAutoAdmissionConfig,
 } from './auto-admission-config';
 import { isEarlybirdCheckoutRecoverableAt } from './recovery-window';
+import { earlybirdStore } from './store';
 
 export const earlybirdOrderSystemStatusSchema = z.enum([
     'payment_pending',
@@ -27,6 +28,8 @@ const orderRowSchema = z.object({
     preflight_id: z.string().uuid(),
     target_instagram_id: z.string().min(1).max(30),
     plan_id: z.enum(['basic', 'standard']),
+    pricing_version: z.string().min(1).max(64),
+    seller_reference_confirmed_at: z.string().datetime({ offset: true }).nullable(),
     actual_amount_krw: z.number().int().nonnegative().nullable(),
     status: earlybirdOrderSystemStatusSchema,
     paid_at: z.string().datetime({ offset: true }).nullable(),
@@ -40,7 +43,7 @@ const checkoutRecoverablePreflightSchema = z.object({
     id: z.string().uuid(),
     user_id: z.string().uuid(),
     target_instagram_id: z.string().min(1).max(30),
-    status: z.literal('ready'),
+    status: z.enum(['ready', 'expired']),
     expires_at: z.string().datetime({ offset: true }),
 });
 
@@ -119,7 +122,7 @@ export async function loadLatestEarlybirdOrder(
 ): Promise<EarlybirdOrderStatusDto | null> {
     let query = supabaseAdmin
         .from('earlybird_orders')
-        .select('id, user_id, preflight_id, target_instagram_id, plan_id, actual_amount_krw, status, paid_at, due_at, plan_sequence, result_request_id, created_at')
+        .select('id, user_id, preflight_id, target_instagram_id, plan_id, pricing_version, seller_reference_confirmed_at, actual_amount_krw, status, paid_at, due_at, plan_sequence, result_request_id, created_at')
         .eq('user_id', userId);
     if (planId) query = query.eq('plan_id', planId);
     const { data, error } = await query
@@ -141,30 +144,42 @@ export async function loadLatestEarlybirdOrder(
     ) {
         // Recovery is a server-computed capability, not a client-side age
         // decision. Prove that this order still points at the same owner's
-        // ready, unexpired preflight for the exact target before exposing the
-        // continuation CTA.
+        // bound, non-blocked preflight for the exact target before exposing the
+        // continuation CTA. The preflight's 30-minute TTL is not the checkout
+        // recovery window: the durable order may be resumed for 24 hours.
         const preflight = await supabaseAdmin
             .from('analysis_preflights')
             .select('id, user_id, target_instagram_id, status, expires_at')
             .eq('id', order.preflight_id)
             .eq('user_id', userId)
             .eq('target_instagram_id', order.target_instagram_id)
-            .eq('status', 'ready')
-            .gt('expires_at', new Date().toISOString())
             .maybeSingle();
         if (!preflight.error) {
             const parsedPreflight = checkoutRecoverablePreflightSchema.safeParse(
                 preflight.data,
             );
-            const expiresAtMs = parsedPreflight.success
-                ? Date.parse(parsedPreflight.data.expires_at)
-                : Number.NaN;
-            checkoutRecoverable = parsedPreflight.success
+            if (
+                parsedPreflight.success
+                && (
+                    parsedPreflight.data.status === 'ready'
+                    || parsedPreflight.data.status === 'expired'
+                )
                 && parsedPreflight.data.id === order.preflight_id
                 && parsedPreflight.data.user_id === userId
                 && parsedPreflight.data.target_instagram_id === order.target_instagram_id
-                && Number.isFinite(expiresAtMs)
-                && expiresAtMs > Date.now();
+                && order.seller_reference_confirmed_at === null
+            ) {
+                try {
+                    checkoutRecoverable = !await earlybirdStore.isCheckoutLineageSuperseded({
+                        userId,
+                        preflightId: order.preflight_id,
+                        targetInstagramId: order.target_instagram_id,
+                    });
+                } catch {
+                    // A lineage read failure must never expose a recovery CTA.
+                    checkoutRecoverable = false;
+                }
+            }
         }
     }
 

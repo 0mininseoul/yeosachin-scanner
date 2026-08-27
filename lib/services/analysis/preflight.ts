@@ -2022,18 +2022,6 @@ export async function processPreflight(
         const selectedBliteCohort = bliteCohortSelected && Boolean(claim.targetInputHash);
         let bliteObservability: PrecheckoutBliteObservability | undefined =
             dependencies.bliteObservability;
-        if (bliteCohortSelected && !claim.targetInputHash) {
-            try {
-                bliteObservability ??= createPrecheckoutBliteObservability({
-                    preflightId: claim.preflightId,
-                    startedAtMs: workerStartedAt,
-                });
-                bliteObservability.fallbackLatched('legacy_missing_target_hash');
-            } catch {
-                // The skip reason is diagnostic only and must never alter the
-                // ordinary provider outcome.
-            }
-        }
         let bliteClock: Awaited<
             ReturnType<typeof precheckoutBliteSourceStore.activateCohort>
         > | null = null;

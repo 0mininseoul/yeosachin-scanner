@@ -56,15 +56,14 @@ describe('earlybird cancelled order status', () => {
         expect(markup).not.toContain('이메일 알림 받기');
     });
 
-    it('keeps a superseded lineage status-only even while the ledger row is pending', () => {
+    it('keeps a server-denied pending lineage status-only without a client guard prop', () => {
         const markup = renderToStaticMarkup(createElement(EarlybirdStatus, {
             order: {
                 ...cancelledOrder(),
                 systemStatus: 'payment_pending',
                 displayStatus: '결제 확인',
-                checkoutRecoverable: true,
+                checkoutRecoverable: false,
             },
-            suppressCheckoutRecovery: true,
         }));
 
         expect(markup).not.toContain('결제 계속하기');

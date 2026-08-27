@@ -48,7 +48,6 @@ BEGIN
       AND earlybird_order.paid_at IS NULL
       AND earlybird_order.actual_amount_krw IS NULL
       AND earlybird_order.seller_reference_confirmed_at IS NULL
-      AND earlybird_order.result_request_id IS NULL
       AND NOT EXISTS (
           SELECT 1
           FROM public.earlybird_fulfillments AS fulfillment
@@ -82,7 +81,6 @@ BEGIN
       AND earlybird_order.paid_at IS NULL
       AND earlybird_order.actual_amount_krw IS NULL
       AND earlybird_order.seller_reference_confirmed_at IS NULL
-      AND earlybird_order.result_request_id IS NULL
       AND NOT EXISTS (
           SELECT 1
           FROM public.earlybird_fulfillments AS fulfillment
@@ -118,7 +116,11 @@ BEGIN
       AND paid_at IS NULL
       AND actual_amount_krw IS NULL
       AND seller_reference_confirmed_at IS NULL
-      AND result_request_id IS NULL
+      AND NOT EXISTS (
+          SELECT 1
+          FROM public.analysis_requests AS analysis_request
+          WHERE analysis_request.id = result_request_id
+      )
       AND NOT EXISTS (
           SELECT 1
           FROM public.earlybird_fulfillments AS fulfillment
