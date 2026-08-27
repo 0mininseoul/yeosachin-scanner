@@ -1,6 +1,10 @@
 import { z } from 'zod';
 import { supabaseAdmin } from '@/lib/supabase/admin';
 import { isAnalysisResultAuthoritativelyPublished } from '@/lib/services/analysis/result-publication-authority';
+import {
+    isEarlybirdAutoAdmissionEligible,
+    readEarlybirdAutoAdmissionConfig,
+} from './auto-admission-config';
 
 export const earlybirdOrderSystemStatusSchema = z.enum([
     'payment_pending',
@@ -149,6 +153,29 @@ export async function loadLatestEarlybirdOrder(
                 AUTOMATIC_FULFILLMENT_STATUSES.has(parsedFulfillmentStatus.data)
             ) {
                 deliveryMode = 'automatic';
+            } else if (parsedFulfillmentStatus.data === 'completed') {
+                // The completion publisher can commit fulfillment before the
+                // order projection catches up. Keep that observable lag in
+                // the owner-scoped automatic progress UX.
+                deliveryMode = 'automatic';
+            } else if (parsedFulfillmentStatus.data === 'awaiting_operator') {
+                try {
+                    const autoAdmissionConfig = readEarlybirdAutoAdmissionConfig();
+                    if (isEarlybirdAutoAdmissionEligible(
+                        order.paid_at,
+                        autoAdmissionConfig,
+                    )) {
+                        // The payment finalizer commits awaiting_operator before
+                        // the webhook's synchronous admission call. Keep this
+                        // eligible handoff in the automatic polling UX.
+                        deliveryMode = 'automatic';
+                    }
+                } catch {
+                    // An invalid gate must never silently widen automatic
+                    // admission. Stop polling and use the generic support UX.
+                    requiresSupport = true;
+                    deliveryMode = 'support';
+                }
             }
         }
     }

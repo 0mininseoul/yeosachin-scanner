@@ -101,7 +101,7 @@ npm run dev
 ## 프로젝트 구조
 
 ```
-ai-baram-detector/
+yeosachin-scanner/
 ├── app/                          # Next.js App Router 페이지 & API
 │   ├── page.tsx                  # 홈/랜딩 페이지
 │   ├── login/page.tsx            # 로그인 페이지 (카카오/구글)

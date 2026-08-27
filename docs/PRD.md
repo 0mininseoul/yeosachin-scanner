@@ -9,7 +9,7 @@ AI가 남자친구의 인스타그램 맞팔 중 위장 여사친을 찾아주�
 ## 1. 프로젝트 구조
 
 ```
-ai-baram-detector/
+yeosachin-scanner/
 ├── app/
 │   ├── page.tsx                      # 랜딩 페이지
 │   ├── login/page.tsx                # 로그인

@@ -12,6 +12,12 @@
 - 결제 후 정식 `apify_v1` 분석의 팔로워·팔로잉 및 기타 provider work는 주문별 `secondary` 슬롯으로 고정되며 preflight 풀로 회전하거나 폴백하지 않는다. 검증용 `analysis-worker-secondary-e2e`는 보존하되 worker/recovery/tasks/preflight/automatic fulfillment를 모두 `false`로 유지한다. 그것은 production queue의 대체 대상이 아니다.
 - `junho_dem`은 로그인한 allowlisted operator에게만 제공되는 synthetic fixture다. 서버에서 username을 정규화한 뒤 정확히 일치하면 owner-bound demo run을 idempotent하게 시작하고 run별 HttpOnly marker로 결과를 즉시 연다. 비로그인은 로그인 경계, 비운영자는 403으로 닫히며 production reservation, Cloud Tasks, provider, Gemini, 운영 telemetry를 우회한다. 비슷한 다른 username은 일반 admission을 따른다.
 
+## Canonical Vercel project contract
+
+- 운영 Vercel 프로젝트의 정확한 CLI slug은 `yeosachin-scanner`이며 `yeosachin.com`에 연결한다.
+- retired slug `ai-baram-detector`는 다시 link·create·deploy하지 않는다. 해당 slug로 연결된 로컬 설정은 유효한 운영 대상이 아니다.
+- Vercel 환경변수 또는 배포 명령을 실행하기 전에 로컬 `.vercel/project.json`을 확인해 canonical 프로젝트(`yeosachin-scanner`)에 연결되어 있는지 검증한다. 파일이 없거나 대상이 다르면 명령을 중단하고 먼저 연결을 바로잡는다.
+
 ## 사전 점검, checkout, webhook, outbox
 
 여기서 **사전 점검(preflight)** 은 결제·분석 전에 대상과 플랜 가능성을 확인하고 불변 snapshot을 만드는 단계다. preflight는 분석 요청과 별개이며, 실행 시 snapshot을 다시 검증한다.
