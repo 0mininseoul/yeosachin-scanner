@@ -365,6 +365,12 @@ const DISCLOSURE_ACCEPTED = true;
             if (user) clearPendingAnalysisTarget(sessionStorage);
             return;
         }
+        if (accepted.demo === true) {
+            // The server-issued demo marker is schema-validated by the hook;
+            // derive a fixed owner result path from its UUID, never a URL field.
+            router.replace(`/result/${encodeURIComponent(accepted.preflightId)}?pipeline=v2`);
+            return;
+        }
         if (user) {
             bindPendingAnalysisTarget(sessionStorage, {
                 ownerId: user.id,

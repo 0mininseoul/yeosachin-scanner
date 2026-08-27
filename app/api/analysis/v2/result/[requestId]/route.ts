@@ -9,7 +9,12 @@ import {
 } from '@/lib/domain/analysis/result-pagination';
 import { analysisV2ResultStore } from '@/lib/services/analysis/v2-result-store';
 import { createClient } from '@/lib/supabase/server';
-import { demoResponseHeaders, demoResultPageFromFixture, isDemoOperator } from '@/lib/services/demo-analysis/demo-analysis';
+import {
+    demoResponseHeaders,
+    demoResultCookieName,
+    demoResultPageFromFixture,
+    isDemoOperator,
+} from '@/lib/services/demo-analysis/demo-analysis';
 import { demoAnalysisStore } from '@/lib/services/demo-analysis/store';
 import {
     observeRoute,
@@ -45,6 +50,16 @@ function json(body: unknown, status: number) {
 
 function demoJson(body: unknown, status: number) {
     return NextResponse.json(body, { status, headers: demoResponseHeaders() });
+}
+
+function readCookie(request: Request, name: string): string | null {
+    const prefix = `${name}=`;
+    return request.headers.get('cookie')
+        ?.split(';')
+        .map(cookie => cookie.trim())
+        .find(cookie => cookie.startsWith(prefix))
+        ?.slice(prefix.length)
+        ?? null;
 }
 
 function parseCursor(value: string | null, list: ResultListKind): string | null {
@@ -104,7 +119,16 @@ async function handleGET(
         }
 
         if (demo) {
-            if (demo.user_id !== user.id || !isDemoOperator(user.id) || !demo.started_at || Date.now() < new Date(demo.started_at).getTime() + demo.duration_seconds * 1_000) {
+            const directMarker = readCookie(request, demoResultCookieName(demo.id));
+            if (
+                demo.user_id !== user.id
+                || !isDemoOperator(user.id)
+                || !demo.started_at
+                || (
+                    directMarker !== demo.idempotency_key
+                    && Date.now() < new Date(demo.started_at).getTime() + demo.duration_seconds * 1_000
+                )
+            ) {
                 return demoJson({ error: 'Analysis result not found.' }, 404);
             }
             const fixture = await loadDemoFixtureForVersion(demo.fixture_version);

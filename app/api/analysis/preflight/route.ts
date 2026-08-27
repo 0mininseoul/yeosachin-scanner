@@ -2,6 +2,7 @@ import { after, NextResponse } from 'next/server';
 import { createClient } from '@/lib/supabase/server';
 import {
     ANALYSIS_V2_SCHEMA_VERSION,
+    preflightAcceptedV1Schema,
     preflightRequestV1Schema,
 } from '@/lib/contracts/analysis-v2';
 import {
@@ -39,7 +40,13 @@ import {
     operationalLogger,
 } from '@/lib/observability/server';
 import { emitPreflightProcessObservation } from '@/lib/observability/preflight-events';
-import { demoResponseHeaders, isDemoEligible } from '@/lib/services/demo-analysis/demo-analysis';
+import {
+    demoResponseHeaders,
+    demoResultCookieName,
+    demoResultCookiePath,
+    isDemoEligible,
+    isDemoTarget,
+} from '@/lib/services/demo-analysis/demo-analysis';
 import { demoAnalysisStore } from '@/lib/services/demo-analysis/store';
 import { supabaseAdmin } from '@/lib/supabase/admin';
 import {
@@ -80,6 +87,14 @@ function errorResponse(status: number, code: string, message: string): NextRespo
         code,
         error: message,
     }, { status });
+}
+
+function demoErrorResponse(status: number, code: string, message: string): NextResponse {
+    return NextResponse.json({
+        schemaVersion: ANALYSIS_V2_SCHEMA_VERSION,
+        code,
+        error: message,
+    }, { status, headers: demoResponseHeaders() });
 }
 
 function authProvider(
@@ -171,6 +186,18 @@ async function handleAnonymousPOST(
             body = await request.json();
         } catch {
             return failed(400, 'INVALID_REQUEST', '요청 형식이 올바르지 않습니다.');
+        }
+        const rawTargetInstagramId = body && typeof body === 'object'
+            ? Reflect.get(body, 'targetInstagramId')
+            : undefined;
+        // The reserved demo target must never enter anonymous admission, even
+        // when the feature is disabled or the body is otherwise malformed.
+        if (isDemoTarget(rawTargetInstagramId)) {
+            return suppressOperationalObservation(demoErrorResponse(
+                401,
+                'DEMO_LOGIN_REQUIRED',
+                '이 데모 판독은 로그인 후 승인된 운영자만 이용할 수 있습니다.',
+            ));
         }
         const parsed = preflightRequestV1Schema.safeParse(body);
         if (!parsed.success) {
@@ -342,12 +369,6 @@ async function handlePOST(
     let provider: PreflightAuthProvider | null = null;
     let preflightId: string | undefined;
     let demoCandidate = false;
-    const demoErrorResponse = (status: number, code: string, message: string): NextResponse =>
-        NextResponse.json({
-            schemaVersion: ANALYSIS_V2_SCHEMA_VERSION,
-            code,
-            error: message,
-        }, { status, headers: demoResponseHeaders() });
     const failed = (status: number, code: string, message: string): NextResponse => {
         void recordPreflightFailure({
             ...(userId ? { userId } : {}),
@@ -404,7 +425,15 @@ async function handlePOST(
             : undefined;
         // This is intentionally evaluated before validation failures can be logged. The
         // demo target is never an operational analytics/logging subject.
+        const demoTarget = isDemoTarget(rawTargetInstagramId);
         demoCandidate = isDemoEligible(user.id, rawTargetInstagramId);
+        if (demoTarget && !demoCandidate) {
+            return suppressOperationalObservation(demoErrorResponse(
+                403,
+                'DEMO_OPERATOR_REQUIRED',
+                '이 데모 판독은 승인된 운영자만 이용할 수 있습니다.',
+            ));
+        }
         const parsed = preflightRequestV1Schema.safeParse(body);
         if (!parsed.success) {
             return demoCandidate
@@ -419,8 +448,6 @@ async function handlePOST(
                 ? suppressOperationalObservation(demoErrorResponse(400, 'INVALID_IDEMPOTENCY_KEY', '올바른 Idempotency-Key가 필요합니다.'))
                 : failed(400, 'INVALID_IDEMPOTENCY_KEY', '올바른 Idempotency-Key가 필요합니다.');
         }
-        // Demo recognition canonicalizes the presented browser value inside the server-only
-        // gate. All production validation continues to receive the canonical parsed value below.
         if (demoCandidate) {
             const createdDemo = await demoAnalysisStore.createOrReplay({
                 userId: user.id,
@@ -429,13 +456,36 @@ async function handlePOST(
             if (!createdDemo) {
                 return suppressOperationalObservation(demoErrorResponse(503, 'ANALYSIS_FAILED', '사전 점검 요청 생성에 실패했습니다.'));
             }
-            return suppressOperationalObservation(NextResponse.json({
-                schemaVersion: ANALYSIS_V2_SCHEMA_VERSION,
-                preflightId: createdDemo.run.id,
-                expiresAt: new Date(new Date(createdDemo.run.created_at).getTime() + 30 * 60_000).toISOString(),
-                status: 'pending',
-                exclusionDecision: 'pending',
-            }, { status: createdDemo.created ? 202 : 200, headers: demoResponseHeaders() }));
+            const startedDemo = await demoAnalysisStore.startForOwner(
+                createdDemo.run.id,
+                user.id,
+            );
+            if (!startedDemo) {
+                return suppressOperationalObservation(demoErrorResponse(
+                    503,
+                    'ANALYSIS_FAILED',
+                    '사전 점검 요청 생성에 실패했습니다.',
+                ));
+            }
+            const response = NextResponse.json(
+                preflightAcceptedV1Schema.parse({
+                    schemaVersion: ANALYSIS_V2_SCHEMA_VERSION,
+                    preflightId: startedDemo.id,
+                    expiresAt: new Date(new Date(startedDemo.created_at).getTime() + 30 * 60_000).toISOString(),
+                    status: 'pending',
+                    exclusionDecision: 'pending',
+                    demo: true,
+                }),
+                { status: createdDemo.created ? 202 : 200, headers: demoResponseHeaders() },
+            );
+            response.cookies.set(demoResultCookieName(startedDemo.id), startedDemo.idempotency_key, {
+                httpOnly: true,
+                maxAge: 10 * 60,
+                path: demoResultCookiePath(startedDemo.id),
+                sameSite: 'lax',
+                secure: new URL(request.url).protocol === 'https:',
+            });
+            return suppressOperationalObservation(response);
         }
         const publicAdmission = isAnalysisV2AdmissionAvailable();
         const signedTestAdmission = signedTestAdmissionState(

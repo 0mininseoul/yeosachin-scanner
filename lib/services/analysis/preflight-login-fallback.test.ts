@@ -16,6 +16,13 @@ describe('anonymous preflight login fallback', () => {
         )).toBe(true);
     });
 
+    it('offers login for the reserved demo target without exposing operator details', () => {
+        expect(shouldOfferAnonymousPreflightLogin(
+            { code: 'DEMO_LOGIN_REQUIRED' },
+            401,
+        )).toBe(true);
+    });
+
     it('does not turn beta-test failures into a paid-flow login fallback', () => {
         expect(shouldOfferAnonymousPreflightLogin(
             { code: 'PREFLIGHT_RATE_LIMITED' },

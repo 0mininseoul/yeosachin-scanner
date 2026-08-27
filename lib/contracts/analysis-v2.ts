@@ -197,6 +197,10 @@ export const preflightAcceptedV1Schema = z.object({
     expiresAt: timestampSchema,
     status: z.literal('pending'),
     exclusionDecision: z.literal('pending'),
+    // Only a server-authorized demo run may ask the client to
+    // navigate directly to the owner-bound fixture result. The client never
+    // accepts a URL from this response.
+    demo: z.literal(true).optional(),
     // Anonymous preflight ownership is transferred after OAuth. This signed,
     // short-lived value is transport state only and is never analytics data.
     claimToken: z.string().min(32).max(512).optional(),

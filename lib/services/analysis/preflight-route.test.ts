@@ -56,6 +56,7 @@ const mocks = vi.hoisted(() => ({
     },
     demoStore: {
         createOrReplay: vi.fn(),
+        startForOwner: vi.fn(),
         findForOwner: vi.fn(),
     },
     loadFixture: vi.fn(),
@@ -239,6 +240,16 @@ describe('preflight owner routes', () => {
             created: true,
             status: 'pending',
         });
+        mocks.demoStore.startForOwner.mockResolvedValue({
+            id: preflightId,
+            user_id: userId,
+            target_instagram_id: 'junho_dem',
+            fixture_version: LEGACY_DEMO_FIXTURE_VERSION,
+            idempotency_key: 'preflight-key-000000000000',
+            duration_seconds: 75,
+            created_at: '2030-07-13T12:30:00.000Z',
+            started_at: '2030-07-13T12:30:01.000Z',
+        });
         mocks.store.findForOwner.mockResolvedValue({
             preflightId,
             status: 'pending',
@@ -421,6 +432,42 @@ describe('preflight owner routes', () => {
             generation: 1,
         }), expect.any(Object));
         expect(JSON.stringify(mocks.emit.mock.calls)).not.toContain('target.name');
+    });
+
+    it('fails closed for the reserved demo target before anonymous admission or dispatch', async () => {
+        mocks.getUser.mockResolvedValue({ data: { user: null }, error: null });
+
+        const response = await createPreflight(postRequest({ targetInstagramId: 'junho_dem' }));
+
+        expect(response.status).toBe(401);
+        await expect(response.json()).resolves.toMatchObject({
+            code: 'DEMO_LOGIN_REQUIRED',
+        });
+        expect(response.headers.get('x-analytics-eligible')).toBe('0');
+        expect(mocks.suppressOperationalObservation).toHaveBeenCalledWith(response);
+        expect(mocks.anonymousBudget).not.toHaveBeenCalled();
+        expect(mocks.anonymousCreate).not.toHaveBeenCalled();
+        expect(mocks.enqueue).not.toHaveBeenCalled();
+        expect(mocks.emit).not.toHaveBeenCalled();
+    });
+
+    it('fails closed for an authenticated non-operator before production admission', async () => {
+        vi.stubEnv('DEMO_ANALYSIS_ENABLED', 'true');
+        vi.stubEnv('DEMO_ANALYSIS_OPERATOR_USER_IDS', '323e4567-e89b-42d3-a456-426614174000');
+
+        const response = await createPreflight(postRequest({ targetInstagramId: 'junho_dem' }));
+
+        expect(response.status).toBe(403);
+        await expect(response.json()).resolves.toMatchObject({
+            code: 'DEMO_OPERATOR_REQUIRED',
+        });
+        expect(response.headers.get('x-analytics-eligible')).toBe('0');
+        expect(mocks.suppressOperationalObservation).toHaveBeenCalledWith(response);
+        expect(mocks.requireActiveAccountClassification).toHaveBeenCalledWith(userId);
+        expect(mocks.store.createOrReplay).not.toHaveBeenCalled();
+        expect(mocks.store.reserveDispatch).not.toHaveBeenCalled();
+        expect(mocks.enqueue).not.toHaveBeenCalled();
+        expect(mocks.emit).not.toHaveBeenCalled();
     });
 
     it('strictly validates the body and idempotency key', async () => {
@@ -1423,8 +1470,17 @@ describe('preflight owner routes', () => {
 
         const response = await createPreflight(postRequest({ targetInstagramId: 'junho_dem' }));
         expect(response.status).toBe(202);
+        await expect(response.json()).resolves.toMatchObject({ demo: true, preflightId });
         expect(response.headers.get('x-analytics-eligible')).toBe('0');
         expect(mocks.demoStore.createOrReplay).toHaveBeenCalledOnce();
+        expect(mocks.demoStore.startForOwner).toHaveBeenCalledWith(preflightId, userId);
+        expect(response.headers.get('set-cookie')).toContain(
+            `demo-analysis-result-${preflightId}=preflight-key-000000000000`,
+        );
+        expect(response.headers.get('set-cookie')).toContain(
+            `Path=/api/analysis/v2/result/${preflightId}`,
+        );
+        expect(response.headers.get('set-cookie')).toContain('HttpOnly');
         expect(mocks.store.createOrReplay).not.toHaveBeenCalled();
         expect(mocks.store.reserveDispatch).not.toHaveBeenCalled();
         expect(mocks.enqueue).not.toHaveBeenCalled();
@@ -1433,6 +1489,45 @@ describe('preflight owner routes', () => {
         expect(mocks.emit).not.toHaveBeenCalled();
         expect(mocks.suppressOperationalObservation).toHaveBeenCalledWith(response);
         vi.unstubAllEnvs();
+    });
+
+    it('replays an exact demo preflight with an idempotent start, marker, and scoped cookie', async () => {
+        vi.stubEnv('DEMO_ANALYSIS_ENABLED', 'true');
+        vi.stubEnv('DEMO_ANALYSIS_OPERATOR_USER_IDS', userId);
+        mocks.demoStore.createOrReplay.mockResolvedValue({
+            run: {
+                id: preflightId, user_id: userId, target_instagram_id: 'junho_dem',
+                fixture_version: 'synthetic-fixture-v1', idempotency_key: 'preflight-key-replay-000000',
+                duration_seconds: 75, created_at: expiresAt,
+                started_at: '2030-07-13T12:30:01.000Z',
+            },
+            created: false,
+        });
+        mocks.demoStore.startForOwner.mockResolvedValue({
+            id: preflightId, user_id: userId, target_instagram_id: 'junho_dem',
+            fixture_version: 'synthetic-fixture-v1', idempotency_key: 'preflight-key-replay-000000',
+            duration_seconds: 75, created_at: expiresAt,
+            started_at: '2030-07-13T12:30:01.000Z',
+        });
+
+        const response = await createPreflight(postRequest(
+            { targetInstagramId: 'junho_dem' },
+            'preflight-key-replay-000000',
+        ));
+
+        expect(response.status).toBe(200);
+        await expect(response.json()).resolves.toMatchObject({ demo: true, preflightId });
+        expect(mocks.demoStore.startForOwner).toHaveBeenCalledWith(preflightId, userId);
+        expect(response.headers.get('set-cookie')).toContain(
+            `demo-analysis-result-${preflightId}=preflight-key-replay-000000`,
+        );
+        expect(response.headers.get('set-cookie')).toContain(
+            `Path=/api/analysis/v2/result/${preflightId}`,
+        );
+        expect(response.headers.get('set-cookie')).toContain('HttpOnly');
+        expect(mocks.store.createOrReplay).not.toHaveBeenCalled();
+        expect(mocks.enqueue).not.toHaveBeenCalled();
+        expect(mocks.emit).not.toHaveBeenCalled();
     });
 
     it('routes the normalized demo target to the fixture while a nearby username stays on production admission', async () => {
@@ -1447,7 +1542,7 @@ describe('preflight owner routes', () => {
             created: true,
         });
 
-        const demoResponse = await createPreflight(postRequest({ targetInstagramId: ' JUNHO_DEM ' }));
+        const demoResponse = await createPreflight(postRequest({ targetInstagramId: 'junho_dem' }));
         expect(demoResponse.status).toBe(202);
         expect(demoResponse.headers.get('x-analytics-eligible')).toBe('0');
         expect(mocks.demoStore.createOrReplay).toHaveBeenCalledOnce();
@@ -1466,6 +1561,7 @@ describe('preflight owner routes', () => {
         expect(mocks.store.createOrReplay).toHaveBeenCalledOnce();
         expect(mocks.store.reserveDispatch).toHaveBeenCalledOnce();
         expect(mocks.enqueue).toHaveBeenCalledOnce();
+        expect(mocks.demoStore.startForOwner).toHaveBeenCalledOnce();
     });
 
     it('does not emit an operational failure event for a demo request with an invalid idempotency key', async () => {

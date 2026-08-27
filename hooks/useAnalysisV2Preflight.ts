@@ -96,6 +96,7 @@ export function betaAdmissionFailureMessage(payload: unknown): string | null {
 const ANONYMOUS_LOGIN_FALLBACK_CODES = new Set([
     'PREFLIGHT_RATE_LIMITED',
     'ANONYMOUS_PREFLIGHT_UNAVAILABLE',
+    'DEMO_LOGIN_REQUIRED',
 ]);
 
 export function shouldOfferAnonymousPreflightLogin(
@@ -621,9 +622,7 @@ export function useAnalysisV2Preflight({
                 : await fetch('/api/analysis/preflight', {
                 method: 'POST',
                 headers,
-                // Preserve the presented value for the server-only exact demo gate.
-                // The server still applies canonical normalization for production preflight.
-                body: JSON.stringify({ targetInstagramId: rawTargetInstagramId }),
+                body: JSON.stringify({ targetInstagramId: normalized }),
                 signal: scope.signal,
             });
             const payload = await readPayload(response);

@@ -61,6 +61,15 @@ export function demoResponseHeaders() {
     } as const;
 }
 
+/** Keep each direct-result marker isolated to its own owner-scoped API run. */
+export function demoResultCookieName(runId: string): string {
+    return `demo-analysis-result-${runId}`;
+}
+
+export function demoResultCookiePath(runId: string): string {
+    return `/api/analysis/v2/result/${encodeURIComponent(runId)}`;
+}
+
 /** Deployment/test guard: demo profiles may only reference these local rasters. */
 export async function validateDemoAssetManifest(): Promise<string[]> {
     const assets = [
@@ -120,11 +129,19 @@ export function isDemoEligible(
     rawTargetInstagramId: unknown,
     env: DemoEnvironment = process.env as DemoEnvironment,
 ): boolean {
+    if (!isDemoTarget(rawTargetInstagramId)) return false;
+    return isDemoOperator(userId, env);
+}
+
+/**
+ * Recognize the reserved target independently from operator eligibility so every
+ * caller can fail closed before ordinary admission/provider work.
+ */
+export function isDemoTarget(rawTargetInstagramId: unknown): boolean {
     const normalizedTarget = typeof rawTargetInstagramId === 'string'
         ? normalizeInstagramUsername(rawTargetInstagramId)
         : null;
-    if (normalizedTarget !== DEMO_TARGET_USERNAME) return false;
-    return isDemoOperator(userId, env);
+    return normalizedTarget === DEMO_TARGET_USERNAME;
 }
 
 export function isDemoOperator(userId: string, env: DemoEnvironment = process.env as DemoEnvironment): boolean {

@@ -233,6 +233,38 @@ describe('analysis V2 owner result route', () => {
         vi.unstubAllEnvs();
     });
 
+    it('renders a newly-started demo immediately only with its matching run cookie', async () => {
+        vi.stubEnv('DEMO_ANALYSIS_ENABLED', 'true');
+        vi.stubEnv('DEMO_ANALYSIS_OPERATOR_USER_IDS', userId);
+        mocks.demoFindForOwner.mockResolvedValue({
+            id: requestId, user_id: userId, target_instagram_id: 'junho_dem', fixture_version: 'synthetic-fixture-v1',
+            idempotency_key: 'demo-result-key-direct-00000', duration_seconds: 300,
+            created_at: '2026-01-01T00:00:00.000Z', started_at: new Date().toISOString(),
+        });
+
+        const direct = await GET(new Request(
+            `https://example.com/api/analysis/v2/result/${requestId}`,
+            { headers: { Cookie: `demo-analysis-result-${requestId}=demo-result-key-direct-00000` } },
+        ), context());
+        expect(direct.status).toBe(200);
+        expect(mocks.loadPage).not.toHaveBeenCalled();
+
+        const withoutCapability = await GET(
+            new Request(`https://example.com/api/analysis/v2/result/${requestId}`),
+            context(),
+        );
+        expect(withoutCapability.status).toBe(404);
+        const wrongMarker = await GET(
+            new Request(
+                `https://example.com/api/analysis/v2/result/${requestId}`,
+                { headers: { Cookie: `demo-analysis-result-${requestId}=wrong-marker-000000` } },
+            ),
+            context(),
+        );
+        expect(wrongMarker.status).toBe(404);
+        vi.unstubAllEnvs();
+    });
+
     it.each([
         `femaleCursor=${cursor('private')}`,
         `privateCursor=${cursor('public')}`,
