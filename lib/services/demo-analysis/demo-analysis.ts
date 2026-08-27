@@ -12,6 +12,7 @@ import type {
 } from '@/lib/contracts/analysis-v2';
 import { paginateAnalysisResults } from '@/lib/domain/analysis/result-pagination';
 import { ANALYSIS_PLAN_CATALOG, PLAN_PRICING_VERSION, buildPlanSelectionCards } from '@/lib/domain/analysis/plan-catalog';
+import { normalizeInstagramUsername } from '@/lib/services/analysis/v2-client-credentials';
 import { DEMO_V3_SOURCE_FIXTURE } from './demo-v3-source-fixture';
 import { DEMO_V4_SOURCE_FIXTURE } from './demo-v4-source-fixture';
 
@@ -119,7 +120,10 @@ export function isDemoEligible(
     rawTargetInstagramId: unknown,
     env: DemoEnvironment = process.env as DemoEnvironment,
 ): boolean {
-    if (rawTargetInstagramId !== DEMO_TARGET_USERNAME) return false;
+    const normalizedTarget = typeof rawTargetInstagramId === 'string'
+        ? normalizeInstagramUsername(rawTargetInstagramId)
+        : null;
+    if (normalizedTarget !== DEMO_TARGET_USERNAME) return false;
     return isDemoOperator(userId, env);
 }
 

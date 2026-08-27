@@ -419,8 +419,8 @@ async function handlePOST(
                 ? suppressOperationalObservation(demoErrorResponse(400, 'INVALID_IDEMPOTENCY_KEY', '올바른 Idempotency-Key가 필요합니다.'))
                 : failed(400, 'INVALID_IDEMPOTENCY_KEY', '올바른 Idempotency-Key가 필요합니다.');
         }
-        // This check intentionally uses the un-normalized browser value. All production
-        // validation continues to receive the canonical parsed value below.
+        // Demo recognition canonicalizes the presented browser value inside the server-only
+        // gate. All production validation continues to receive the canonical parsed value below.
         if (demoCandidate) {
             const createdDemo = await demoAnalysisStore.createOrReplay({
                 userId: user.id,

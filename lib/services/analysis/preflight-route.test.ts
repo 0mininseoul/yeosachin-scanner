@@ -1435,6 +1435,39 @@ describe('preflight owner routes', () => {
         vi.unstubAllEnvs();
     });
 
+    it('routes the normalized demo target to the fixture while a nearby username stays on production admission', async () => {
+        vi.stubEnv('DEMO_ANALYSIS_ENABLED', 'true');
+        vi.stubEnv('DEMO_ANALYSIS_OPERATOR_USER_IDS', userId);
+        mocks.demoStore.createOrReplay.mockResolvedValue({
+            run: {
+                id: preflightId, user_id: userId, target_instagram_id: 'junho_dem',
+                fixture_version: 'synthetic-fixture-v1', idempotency_key: 'preflight-key-000000000000',
+                duration_seconds: 75, created_at: expiresAt, started_at: null,
+            },
+            created: true,
+        });
+
+        const demoResponse = await createPreflight(postRequest({ targetInstagramId: ' JUNHO_DEM ' }));
+        expect(demoResponse.status).toBe(202);
+        expect(demoResponse.headers.get('x-analytics-eligible')).toBe('0');
+        expect(mocks.demoStore.createOrReplay).toHaveBeenCalledOnce();
+        expect(mocks.store.createOrReplay).not.toHaveBeenCalled();
+        expect(mocks.store.reserveDispatch).not.toHaveBeenCalled();
+        expect(mocks.enqueue).not.toHaveBeenCalled();
+        expect(mocks.process).not.toHaveBeenCalled();
+        expect(mocks.resolveDispatch).not.toHaveBeenCalled();
+        expect(mocks.emit).not.toHaveBeenCalled();
+
+        const nearbyResponse = await createPreflight(
+            postRequest({ targetInstagramId: 'junho_dem2' }, 'preflight-key-nearby-000000000000'),
+        );
+        expect(nearbyResponse.status).toBe(202);
+        expect(mocks.demoStore.createOrReplay).toHaveBeenCalledOnce();
+        expect(mocks.store.createOrReplay).toHaveBeenCalledOnce();
+        expect(mocks.store.reserveDispatch).toHaveBeenCalledOnce();
+        expect(mocks.enqueue).toHaveBeenCalledOnce();
+    });
+
     it('does not emit an operational failure event for a demo request with an invalid idempotency key', async () => {
         vi.stubEnv('DEMO_ANALYSIS_ENABLED', 'true');
         vi.stubEnv('DEMO_ANALYSIS_OPERATOR_USER_IDS', userId);

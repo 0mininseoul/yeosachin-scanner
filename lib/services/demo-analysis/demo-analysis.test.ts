@@ -29,13 +29,13 @@ const externalFixtureReferencePattern = /(?:https?:)?\/\/|www\.|(?:^|[\s(\[{'":,
 const unsafeFixtureIdentifierPattern = /(?:https?:)?\/\/|www\.|@|[\r\n]/iu;
 
 describe('synthetic demo analysis policy', () => {
-    it('requires strict flag, allowlisted owner, and the exact raw target', () => {
+    it('requires strict flag, allowlisted owner, and the exact normalized target', () => {
         const env = { DEMO_ANALYSIS_ENABLED: 'true', DEMO_ANALYSIS_OPERATOR_USER_IDS: ownerId };
         expect(DEMO_TARGET_USERNAME).toBe('junho_dem');
         expect(isDemoEligible(ownerId, 'junho_dem', env)).toBe(true);
-        expect(isDemoEligible(ownerId, 'Junho_dem', env)).toBe(false);
-        expect(isDemoEligible(ownerId, ' junho_dem', env)).toBe(false);
-        expect(isDemoEligible(ownerId, '@junho_dem', env)).toBe(false);
+        expect(isDemoEligible(ownerId, 'Junho_dem', env)).toBe(true);
+        expect(isDemoEligible(ownerId, ' junho_dem', env)).toBe(true);
+        expect(isDemoEligible(ownerId, '@junho_dem', env)).toBe(true);
         expect(isDemoEligible(ownerId, 'junho_dem_', env)).toBe(false);
         expect(isDemoEligible('323e4567-e89b-42d3-a456-426614174000', 'junho_dem', env)).toBe(false);
         expect(isDemoEligible(ownerId, 'junho_dem', { ...env, DEMO_ANALYSIS_ENABLED: 'TRUE' })).toBe(false);
