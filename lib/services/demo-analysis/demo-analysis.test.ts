@@ -84,7 +84,7 @@ describe('isolated demo fixtures', () => {
         expect(JSON.stringify(preflight.target)).not.toContain('모의 분석용 공개 계정');
     });
 
-    it('uses distinct natural-looking V2 handles and neutral public-scope copy', () => {
+    it('uses distinct natural-looking V2 handles and contract-safe public copy', () => {
         const fixture = createDemoFixture(requestId);
         const accounts = [...fixture.publicAccounts, ...fixture.privateAccounts];
         const visibleText = [
@@ -103,6 +103,34 @@ describe('isolated demo fixtures', () => {
         expect(visibleText).not.toMatch(/(?:합성|데모|fixture)/iu);
         expect(visibleText).toContain('공개 범위');
         expect(visibleText).toContain('단정할 수 없습니다');
+    });
+
+    it('gives the first ten ranked accounts concrete copy tied to each synthetic identity', () => {
+        const fixture = createDemoFixture(requestId);
+        const firstTen = fixture.publicAccounts
+            .filter(account => account.recentMutualRank !== null && account.recentMutualRank <= 10)
+            .sort((left, right) => (left.recentMutualRank ?? 0) - (right.recentMutualRank ?? 0));
+
+        expect(firstTen).toHaveLength(10);
+        expect(new Set(firstTen.map(account => account.oneLineOverview))).toHaveLength(10);
+        const translatedHandles = [
+            '보랏빛 도서관', '새벽 정원', '구리빛 엽서', '캔버스와 피크닉', '주머니 속 편지',
+            '지평선 창문', '귤빛 공책', '종이와 날씨', '현관 아카이브', '느긋한 테라스',
+        ];
+        firstTen.forEach(account => {
+            expect(account.fullName).not.toBeNull();
+            const rankIndex = (account.recentMutualRank ?? 1) - 1;
+            expect(account.oneLineOverview).toContain(`${account.fullName}님`);
+            expect(account.oneLineOverview).toContain(translatedHandles[rankIndex]!);
+        });
+
+        const highRisk = firstTen.find(account => account.riskBand === 'high_risk');
+        expect(highRisk).toBeDefined();
+        expect(highRisk?.highRiskNarrative).not.toBeNull();
+        expect(highRisk?.highRiskNarrative?.[0]).toContain('류하늘님');
+        expect(highRisk?.highRiskNarrative?.[1]).toContain('김도윤님');
+        expect(highRisk?.highRiskNarrative?.[1]).toMatch(/좋아요|댓글/u);
+        expect(highRisk?.highRiskNarrative?.[1]).toMatch(/공개 범위|확인된 범위|수집 범위/u);
     });
 
     it('dispatches legacy and current runs to distinct static fixtures', () => {

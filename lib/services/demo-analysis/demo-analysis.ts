@@ -939,12 +939,45 @@ function syntheticV2NamePermutation(index: number): string {
     return syntheticV2Name((index * 97 + 41) % 230);
 }
 
+type SyntheticV2CopyInput = Readonly<{
+    name: string;
+}>;
+
+const SYNTHETIC_V2_RANKED_OVERVIEWS: readonly ((input: SyntheticV2CopyInput) => string)[] = [
+    ({ name }) => `${name}님, 보랏빛 도서관을 자처하는 이름에 최근 맞팔 최전선까지 겹치니 감성 서재인지 비밀 회의실인지 알리바이가 제법 치밀하군요.`,
+    ({ name }) => `${name}님, 새벽 정원 같은 고요함을 두른 채 최근 맞팔 앞줄에 서 있으니 산책 기록인지 야간 작전 브리핑인지 레이더가 먼저 켜집니다.`,
+    ({ name }) => `${name}님, 구리빛 엽서 한 장 같은 분위기로 최근 맞팔 상단에 올라와 우편함보다 비밀 연락망이 먼저 떠오릅니다.`,
+    ({ name }) => `${name}님, 캔버스와 피크닉을 펼친 평온한 무드인데 최근 맞팔 상위권에 걸리니 소풍인지 위장 회의인지 돗자리를 다시 보게 됩니다.`,
+    ({ name }) => `${name}님, 주머니 속 편지 같은 이름으로 최근 맞팔 앞쪽에 보여 봉투보다 알리바이가 먼저 열리는군요.`,
+    ({ name }) => `${name}님, 지평선 창문을 열어둔 듯한 이름인데 최근 맞팔 목록 전면에 보여 전망대인지 관측소인지 경계가 흐려집니다.`,
+    ({ name }) => `${name}님, 귤빛 공책을 펼친 듯한 이름으로 최근 맞팔 상단권에 포착돼 일기장인지 작전 노트인지 형광펜이 괜히 바빠집니다.`,
+    ({ name }) => `${name}님, 종이와 날씨를 적어둔 듯한 이름인데 최근 맞팔 앞줄에 보여 기상일지인지 분위기 조작 보고서인지 흐릿합니다.`,
+    ({ name }) => `${name}님, 현관 아카이브를 연상시키는 이름으로 최근 맞팔 첫머리에 놓여 출입대장까지 상상하게 합니다.`,
+    ({ name }) => `${name}님, 느긋한 테라스라는 이름과 달리 최근 맞팔 상위 줄에 보여 휴식처인지 은밀한 관측소인지 의심이 커집니다.`,
+] as const;
+
+function syntheticV2RankedOverview(index: number, input: SyntheticV2CopyInput): string | null {
+    return index < SYNTHETIC_V2_RANKED_OVERVIEWS.length
+        ? SYNTHETIC_V2_RANKED_OVERVIEWS[index]!(input)
+        : null;
+}
+
+function syntheticV2HighRiskNarrative(name: string): [string, string] {
+    return [
+        `${name}님은 보랏빛 도서관 같은 이름과 최근 맞팔 최전선의 위치가 겹치며, 평온한 서사 뒤에 별도 회의실 하나쯤 숨겨둔 듯한 인상을 남깁니다.`,
+        `${name}님이 김도윤님 게시물에 남긴 좋아요와 댓글은 수집 범위에서 확인된 신호라 결정적 단서는 아니지만, 이 흔적은 우연치고는 알리바이가 제법 친절합니다.`,
+    ];
+}
+
 function syntheticV2PublicAccount(index: number): FemaleResultRowV1 {
     const riskBand = index === 0 ? 'high_risk' : index < 3 ? 'caution' : 'normal';
     const displayScore = index === 0 ? 8 : index === 1 ? 6 : index === 2 ? 5 : 1 + (index % 3);
+    const instagramId = syntheticV2Handle(index);
+    const fullName = syntheticV2NamePermutation(index);
+    const rankedOverview = syntheticV2RankedOverview(index, { name: fullName });
     return {
-        instagramId: syntheticV2Handle(index),
-        fullName: syntheticV2NamePermutation(index),
+        instagramId,
+        fullName,
         profileImage: v3Avatar('female', index + 1),
         bio: null,
         displayScore,
@@ -952,12 +985,10 @@ function syntheticV2PublicAccount(index: number): FemaleResultRowV1 {
         featuredRank: index < 3 ? index + 1 : null,
         recentMutualRank: index < 10 ? index + 1 : null,
         analysisDepth: index === 0 ? 'narrative' : 'features',
-        oneLineOverview: '공개 범위에서 최근 좋아요와 댓글 흐름을 함께 확인했습니다. 수집 범위 밖의 맥락은 포함하지 않아 단정할 수 없습니다.',
+        oneLineOverview: rankedOverview
+            ?? '공개 범위에서 최근 좋아요와 댓글 흐름을 함께 확인했습니다. 수집 범위 밖의 맥락은 포함하지 않아 단정할 수 없습니다.',
         highRiskNarrative: index === 0
-            ? [
-                '공개 범위에서 최근 맞팔 흐름과 프로필 정보를 함께 확인했습니다.',
-                '좋아요와 댓글 등 공개 상호작용은 수집 범위 밖의 맥락을 담지 않으므로 관계나 의도를 단정할 수 없습니다.',
-            ]
+            ? syntheticV2HighRiskNarrative(fullName)
             : null,
     };
 }
