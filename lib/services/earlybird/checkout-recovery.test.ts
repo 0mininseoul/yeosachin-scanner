@@ -49,8 +49,11 @@ function pendingRecord(createdAt: string) {
         sellerReferenceConfirmedAt: null,
         status: 'payment_pending' as const,
         paymentId: null,
+        actualGrobleProductId: null,
         actualAmountKrw: null,
         paidAt: null,
+        checkoutBlockedAt: null,
+        checkoutBlockedReason: null,
         createdAt,
     };
 }
@@ -92,6 +95,21 @@ describe('earlybird checkout recovery boundary', () => {
             planId: 'standard',
             targetInstagramId: 'target.account',
             currentPhone,
+        })).rejects.toMatchObject({ message: 'EARLYBIRD_CHECKOUT_NOT_RECOVERABLE' });
+    });
+
+    it('treats the exact 24-hour boundary as expired', async () => {
+        const now = new Date('2026-08-28T00:00:00.000Z');
+        mocks.findCheckoutForRecovery.mockResolvedValueOnce(
+            pendingRecord(new Date(now.getTime() - 24 * 60 * 60 * 1_000).toISOString())
+        );
+
+        await expect(recoverEarlybirdCheckout({
+            ...ids,
+            planId: 'standard',
+            targetInstagramId: 'target.account',
+            currentPhone,
+            now,
         })).rejects.toMatchObject({ message: 'EARLYBIRD_CHECKOUT_NOT_RECOVERABLE' });
     });
 
@@ -151,5 +169,40 @@ describe('earlybird checkout recovery boundary', () => {
             message: 'EARLYBIRD_CHECKOUT_NOT_RECOVERABLE',
         });
         expect(mocks.isCheckoutLineageSuperseded).toHaveBeenCalledWith(record);
+    });
+
+    it('rejects a durable supersession marker even if mutable lineage data looks current', async () => {
+        const record = {
+            ...pendingRecord(new Date(Date.now() - 60 * 60 * 1_000).toISOString()),
+            checkoutBlockedAt: '2026-08-28T00:00:00.000Z',
+            checkoutBlockedReason: 'SUPERSEDED_LINEAGE' as const,
+        };
+        mocks.findCheckoutForRecovery.mockResolvedValueOnce(record);
+
+        await expect(recoverEarlybirdCheckout({
+            ...ids,
+            planId: 'standard',
+            targetInstagramId: 'target.account',
+            currentPhone,
+        })).rejects.toMatchObject({
+            message: 'EARLYBIRD_CHECKOUT_NOT_RECOVERABLE',
+        });
+        expect(mocks.isCheckoutLineageSuperseded).toHaveBeenCalledWith(record);
+    });
+
+    it('rejects any actual provider product evidence as non-recoverable payment evidence', async () => {
+        mocks.findCheckoutForRecovery.mockResolvedValueOnce({
+            ...pendingRecord(new Date(Date.now() - 60 * 60 * 1_000).toISOString()),
+            actualGrobleProductId: 'standard-product',
+        });
+
+        await expect(recoverEarlybirdCheckout({
+            ...ids,
+            planId: 'standard',
+            targetInstagramId: 'target.account',
+            currentPhone,
+        })).rejects.toMatchObject({
+            message: 'EARLYBIRD_CHECKOUT_NOT_RECOVERABLE',
+        });
     });
 });

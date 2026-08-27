@@ -11,6 +11,7 @@ const mocks = vi.hoisted(() => ({
     resultQuery: null as ReturnType<typeof queryBuilder> | null,
     requireActiveAccountClassification: vi.fn(),
     isCheckoutLineageSuperseded: vi.fn().mockResolvedValue(false),
+    findCurrentCheckoutPhone: vi.fn(),
 }));
 
 function queryBuilder(data: unknown) {
@@ -39,6 +40,11 @@ vi.mock('@/lib/supabase/admin', () => ({
 vi.mock('@/lib/services/analysis/result-publication-authority', () => ({
     isAnalysisResultAuthoritativelyPublished: mocks.isResultAuthoritativelyPublished,
 }));
+vi.mock('@/lib/services/groble/config', () => ({
+    readGrobleConfig: () => ({
+        productIds: { basic: 'basic-product', standard: 'standard-product' },
+    }),
+}));
 vi.mock('@/lib/services/identity/account-principal-store', async importOriginal => ({
     ...(await importOriginal<typeof import('@/lib/services/identity/account-principal-store')>()),
     requireActiveAccountClassification: mocks.requireActiveAccountClassification,
@@ -46,6 +52,7 @@ vi.mock('@/lib/services/identity/account-principal-store', async importOriginal 
 vi.mock('@/lib/services/earlybird/store', () => ({
     earlybirdStore: {
         isCheckoutLineageSuperseded: mocks.isCheckoutLineageSuperseded,
+        findCurrentCheckoutPhone: mocks.findCurrentCheckoutPhone,
     },
 }));
 
@@ -72,10 +79,20 @@ function orderRow(overrides: Record<string, unknown> = {}) {
         result_request_id: null,
         created_at: '2026-07-17T11:59:00.000Z',
         pricing_version: 'earlybird-2026-08-v5',
+        expected_amount_krw: 9_900,
+        expected_groble_product_id: 'basic-product',
+        buyer_match_policy: 'verified_kakao_phone',
+        expected_buyer_phone_number_normalized: '+821012345678',
+        expected_buyer_phone_verification_source: 'kakao_rest_api',
+        disclosure_version: 'earlybird-auto-start-v2',
+        disclosure_text: '결제 확인 후 판독이 자동으로 시작됩니다.',
+        disclosure_accepted_at: '2026-07-17T11:59:00.000Z',
+        groble_seller_reference: 'ord.0123456789abcdef0123456789abcdef',
         seller_reference_confirmed_at: null,
-        payment_id: 'must-not-be-selected',
-        expected_groble_product_id: 'must-not-be-selected',
-        disclosure_text: 'must-not-be-selected',
+        payment_id: null,
+        actual_groble_product_id: null,
+        checkout_blocked_at: null,
+        checkout_blocked_reason: null,
         ...overrides,
     };
 }
@@ -130,6 +147,13 @@ describe('earlybird owner order status route', () => {
         authenticate();
         installQueries(orderRow(), null, { status: 'awaiting_operator' });
         mocks.isResultAuthoritativelyPublished.mockResolvedValue(true);
+        mocks.findCurrentCheckoutPhone.mockResolvedValue({
+            provider: 'kakao',
+            phoneNumber: '010-1234-5678',
+            phoneNumberNormalized: '+821012345678',
+            verificationSource: 'kakao_rest_api',
+            verifiedAt: new Date().toISOString(),
+        });
         mocks.requireActiveAccountClassification.mockResolvedValue({
             userId: USER_ID,
             accountClass: 'production',
@@ -160,7 +184,7 @@ describe('earlybird owner order status route', () => {
         expect(mocks.orderQuery?.eq).toHaveBeenCalledWith('user_id', USER_ID);
         expect(mocks.orderQuery?.eq).toHaveBeenCalledWith('plan_id', 'basic');
         expect(mocks.orderQuery?.select).toHaveBeenCalledWith(
-            'id, user_id, preflight_id, target_instagram_id, plan_id, pricing_version, seller_reference_confirmed_at, actual_amount_krw, status, paid_at, due_at, plan_sequence, result_request_id, created_at'
+            'id, user_id, preflight_id, target_instagram_id, plan_id, pricing_version, expected_amount_krw, expected_groble_product_id, buyer_match_policy, expected_buyer_phone_number_normalized, expected_buyer_phone_verification_source, disclosure_version, disclosure_text, disclosure_accepted_at, groble_seller_reference, seller_reference_confirmed_at, actual_groble_product_id, payment_id, actual_amount_krw, status, paid_at, due_at, plan_sequence, result_request_id, checkout_blocked_at, checkout_blocked_reason, created_at'
         );
         const body = await response.json();
         expect(body).toEqual({
@@ -279,7 +303,7 @@ describe('earlybird owner order status route', () => {
         ['not ready', { status: 'processing' }],
         ['different target', { target_instagram_id: 'different.account' }],
         ['different owner', { user_id: '123e4567-e89b-42d3-a456-426614174099' }],
-    ] as const)('requires a server-authoritative ready, target-bound preflight (%s)', async (_label, preflightOverrides) => {
+    ] as const)('does not let mutable preflight state alter checkout recovery parity (%s)', async (_label, preflightOverrides) => {
         installQueries(
             orderRow({
                 status: 'payment_pending',
@@ -304,7 +328,7 @@ describe('earlybird owner order status route', () => {
         const response = await GET(new Request('https://example.com/api/earlybird/orders/latest'));
 
         await expect(response.json()).resolves.toMatchObject({
-            order: { checkoutRecoverable: false },
+            order: { checkoutRecoverable: true },
         });
     });
 
@@ -374,6 +398,43 @@ describe('earlybird owner order status route', () => {
             due_at: null,
             plan_sequence: null,
             seller_reference_confirmed_at: '2026-08-28T00:00:00.000Z',
+            created_at: new Date(Date.now() - 60 * 60 * 1_000).toISOString(),
+        }));
+
+        const response = await GET(new Request('https://example.com/api/earlybird/orders/latest'));
+
+        await expect(response.json()).resolves.toMatchObject({
+            order: { checkoutRecoverable: false },
+        });
+    });
+
+    it('does not advertise recovery when the authoritative product snapshot is invalid', async () => {
+        installQueries(orderRow({
+            status: 'payment_pending',
+            actual_amount_krw: null,
+            paid_at: null,
+            due_at: null,
+            plan_sequence: null,
+            expected_groble_product_id: 'attacker-product',
+            created_at: new Date(Date.now() - 60 * 60 * 1_000).toISOString(),
+        }));
+
+        const response = await GET(new Request('https://example.com/api/earlybird/orders/latest'));
+
+        await expect(response.json()).resolves.toMatchObject({
+            order: { checkoutRecoverable: false },
+        });
+    });
+
+    it('does not advertise recovery when the durable supersession marker is present', async () => {
+        installQueries(orderRow({
+            status: 'payment_pending',
+            actual_amount_krw: null,
+            paid_at: null,
+            due_at: null,
+            plan_sequence: null,
+            checkout_blocked_at: '2026-08-28T00:00:00.000Z',
+            checkout_blocked_reason: 'SUPERSEDED_LINEAGE',
             created_at: new Date(Date.now() - 60 * 60 * 1_000).toISOString(),
         }));
 

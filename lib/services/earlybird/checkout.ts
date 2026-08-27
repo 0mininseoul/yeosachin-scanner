@@ -11,6 +11,7 @@ import { normalizeKoreanMobileNumber } from '@/lib/services/identity/phone-numbe
 import {
     earlybirdStore,
     EarlybirdPersistenceError,
+    type EarlybirdCheckoutRecoveryRecord,
 } from './store';
 import { isEarlybirdCheckoutRecoverableAt } from './recovery-window';
 
@@ -72,6 +73,59 @@ function isRecoverableDisclosure(record: {
     ) || (
         record.disclosureVersion === LEGACY_EARLYBIRD_DISCLOSURE_VERSION
         && record.disclosureText === LEGACY_EARLYBIRD_DISCLOSURE_TEXT
+    );
+}
+
+export function isEarlybirdCheckoutRecordRecoverable(
+    record: EarlybirdCheckoutRecoveryRecord,
+    input: {
+        userId: string;
+        planId: 'basic' | 'standard';
+        targetInstagramId: string | null;
+        currentPhone: CurrentEarlybirdCheckoutPhone;
+        now?: Date;
+    },
+): boolean {
+    if (
+        record.userId !== input.userId
+        || record.status !== 'payment_pending'
+        || record.planId !== input.planId
+        || (
+            input.targetInstagramId !== null
+            && record.targetInstagramId !== input.targetInstagramId
+        )
+        || record.checkoutBlockedAt !== null
+        || record.checkoutBlockedReason !== null
+        || !isEarlybirdCheckoutRecoverableAt(
+            record.createdAt,
+            (input.now ?? new Date()).getTime(),
+        )
+    ) return false;
+
+    const config = readGrobleConfig();
+    const amountKrw = recoverableAmount(record.pricingVersion, record.planId);
+    const currentAmountKrw =
+        EARLYBIRD_PLAN_CATALOG[record.planId].earlybirdAmountKrw;
+    return (
+        amountKrw !== null
+        && record.expectedAmountKrw === amountKrw
+        && record.expectedAmountKrw >= currentAmountKrw
+        && record.expectedProductId === config.productIds[record.planId]
+        && record.buyerMatchPolicy === 'verified_kakao_phone'
+        && Boolean(record.expectedBuyerPhoneNumberNormalized)
+        && record.expectedBuyerPhoneVerificationSource === 'kakao_rest_api'
+        && record.expectedBuyerPhoneNumberNormalized
+            === input.currentPhone.normalizedPhone
+        && record.expectedBuyerPhoneVerificationSource
+            === input.currentPhone.verificationSource
+        && isRecoverableDisclosure(record)
+        && Boolean(record.disclosureAcceptedAt)
+        && Boolean(record.sellerReference)
+        && record.sellerReferenceConfirmedAt === null
+        && record.paymentId === null
+        && record.actualGrobleProductId === null
+        && record.actualAmountKrw === null
+        && record.paidAt === null
     );
 }
 
@@ -158,52 +212,7 @@ export async function recoverEarlybirdCheckout(input: {
             'EARLYBIRD_CHECKOUT_NOT_RECOVERABLE'
         );
     }
-    if (
-        record.status !== 'payment_pending'
-        || record.planId !== input.planId
-        || (
-            input.targetInstagramId !== null
-            && record.targetInstagramId !== input.targetInstagramId
-        )
-    ) {
-        throw new EarlybirdCheckoutRecoveryError(
-            'EARLYBIRD_CHECKOUT_NOT_RECOVERABLE'
-        );
-    }
-
-    if (!isEarlybirdCheckoutRecoverableAt(
-        record.createdAt,
-        (input.now ?? new Date()).getTime(),
-    )) {
-        throw new EarlybirdCheckoutRecoveryError(
-            'EARLYBIRD_CHECKOUT_NOT_RECOVERABLE'
-        );
-    }
-
-    const config = readGrobleConfig();
-    const amountKrw = recoverableAmount(record.pricingVersion, record.planId);
-    const currentAmountKrw =
-        EARLYBIRD_PLAN_CATALOG[record.planId].earlybirdAmountKrw;
-    if (
-        amountKrw === null
-        || record.expectedAmountKrw !== amountKrw
-        || record.expectedAmountKrw < currentAmountKrw
-        || record.expectedProductId !== config.productIds[record.planId]
-        || record.buyerMatchPolicy !== 'verified_kakao_phone'
-        || !record.expectedBuyerPhoneNumberNormalized
-        || record.expectedBuyerPhoneVerificationSource !== 'kakao_rest_api'
-        || record.expectedBuyerPhoneNumberNormalized
-            !== input.currentPhone.normalizedPhone
-        || record.expectedBuyerPhoneVerificationSource
-            !== input.currentPhone.verificationSource
-        || !isRecoverableDisclosure(record)
-        || !record.disclosureAcceptedAt
-        || !record.sellerReference
-        || record.sellerReferenceConfirmedAt !== null
-        || record.paymentId !== null
-        || record.actualAmountKrw !== null
-        || record.paidAt !== null
-    ) {
+    if (!isEarlybirdCheckoutRecordRecoverable(record, input)) {
         throw new EarlybirdCheckoutRecoveryError(
             'EARLYBIRD_CHECKOUT_NOT_RECOVERABLE'
         );

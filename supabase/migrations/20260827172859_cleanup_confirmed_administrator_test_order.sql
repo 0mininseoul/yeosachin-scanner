@@ -1,7 +1,7 @@
 -- One-shot fail-closed cleanup for the confirmed administrator test blocker.
--- Keep the ledger row as an auditable cancelled test order; never delete the
--- account, preflight, or any external-user order. Supabase runs this DO block
--- inside one transaction, so every precondition failure rolls back the update.
+-- Delete only the exact test order; never delete the account, preflight, or any
+-- external-user order. Supabase runs this DO block inside one transaction, so
+-- every precondition failure rolls back the delete.
 SET LOCAL lock_timeout = '5s';
 SET LOCAL statement_timeout = '2min';
 SET LOCAL search_path = pg_catalog, public, auth;
@@ -12,7 +12,7 @@ DECLARE
     v_admin_count INTEGER;
     v_candidate_count INTEGER;
     v_order_id UUID;
-    v_updated_count INTEGER;
+    v_deleted_count INTEGER;
 BEGIN
     SELECT pg_catalog.count(*)::INTEGER
     INTO v_admin_count
@@ -46,6 +46,7 @@ BEGIN
       AND earlybird_order.status = 'payment_pending'
       AND earlybird_order.payment_id IS NULL
       AND earlybird_order.paid_at IS NULL
+      AND earlybird_order.actual_groble_product_id IS NULL
       AND earlybird_order.actual_amount_krw IS NULL
       AND earlybird_order.seller_reference_confirmed_at IS NULL
       AND NOT EXISTS (
@@ -79,6 +80,7 @@ BEGIN
       AND earlybird_order.status = 'payment_pending'
       AND earlybird_order.payment_id IS NULL
       AND earlybird_order.paid_at IS NULL
+      AND earlybird_order.actual_groble_product_id IS NULL
       AND earlybird_order.actual_amount_krw IS NULL
       AND earlybird_order.seller_reference_confirmed_at IS NULL
       AND NOT EXISTS (
@@ -104,9 +106,7 @@ BEGIN
             ERRCODE = 'P0001';
     END IF;
 
-    UPDATE public.earlybird_orders
-    SET status = 'cancelled',
-        updated_at = pg_catalog.clock_timestamp()
+    DELETE FROM public.earlybird_orders
     WHERE id = v_order_id
       AND user_id = v_admin_id
       AND pg_catalog.lower(target_instagram_id) = '0_min._.00'
@@ -114,6 +114,7 @@ BEGIN
       AND status = 'payment_pending'
       AND payment_id IS NULL
       AND paid_at IS NULL
+      AND actual_groble_product_id IS NULL
       AND actual_amount_krw IS NULL
       AND seller_reference_confirmed_at IS NULL
       AND NOT EXISTS (
@@ -130,12 +131,13 @@ BEGIN
           SELECT 1
           FROM public.earlybird_webhook_events AS webhook_event
           WHERE webhook_event.order_id = v_order_id
-      );
+      )
+    RETURNING id INTO v_order_id;
 
-    GET DIAGNOSTICS v_updated_count = ROW_COUNT;
-    IF v_updated_count <> 1 THEN
+    GET DIAGNOSTICS v_deleted_count = ROW_COUNT;
+    IF v_deleted_count <> 1 THEN
         RAISE EXCEPTION USING
-            MESSAGE = 'EARLYBIRD_ADMIN_TEST_CLEANUP_UPDATE_PRECONDITION_FAILED',
+            MESSAGE = 'EARLYBIRD_ADMIN_TEST_CLEANUP_DELETE_PRECONDITION_FAILED',
             ERRCODE = 'P0001';
     END IF;
 END;

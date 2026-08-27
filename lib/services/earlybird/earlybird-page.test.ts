@@ -86,7 +86,20 @@ describe('earlybird status page', () => {
             result_request_id: null,
             created_at: '2026-07-17T11:59:00.000Z',
             pricing_version: 'earlybird-2026-08-v5',
+            expected_amount_krw: 9_900,
+            expected_groble_product_id: 'basic-product-01',
+            buyer_match_policy: 'verified_kakao_phone',
+            expected_buyer_phone_number_normalized: null,
+            expected_buyer_phone_verification_source: null,
+            disclosure_version: 'earlybird-auto-start-v2',
+            disclosure_text: '결제 확인 후 판독이 자동으로 시작됩니다.',
+            disclosure_accepted_at: '2026-07-17T11:59:00.000Z',
+            groble_seller_reference: null,
             seller_reference_confirmed_at: null,
+            actual_groble_product_id: null,
+            payment_id: null,
+            checkout_blocked_at: null,
+            checkout_blocked_reason: null,
         });
         mocks.rpc.mockResolvedValue({ data: null, error: null });
         mocks.requireActiveAccountSession.mockResolvedValue({

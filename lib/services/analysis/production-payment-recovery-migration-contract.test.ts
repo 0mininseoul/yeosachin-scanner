@@ -66,6 +66,42 @@ describe('production payment recovery migration contracts', () => {
         );
     });
 
+    it('adds a durable supersession marker and an atomic checkout wrapper without removing the legacy RPC', () => {
+        const source = readMigration('production_preflight_checkout_recovery');
+
+        expect(source).toMatch(
+            /ALTER TABLE public\.earlybird_orders[\s\S]*?ADD COLUMN IF NOT EXISTS checkout_blocked_at TIMESTAMP WITH TIME ZONE/i,
+        );
+        expect(source).toMatch(
+            /ALTER TABLE public\.earlybird_orders[\s\S]*?ADD COLUMN IF NOT EXISTS checkout_blocked_reason TEXT/i,
+        );
+        expect(source).toMatch(/SUPERSEDED_LINEAGE/);
+        expect(source).toMatch(
+            /CONSTRAINT earlybird_orders_checkout_block_check CHECK[\s\S]*?checkout_blocked_at/i,
+        );
+        expect(source).toContain('create_earlybird_checkout_with_lineage_marker');
+        expect(source).toMatch(
+            /create_earlybird_checkout_with_lineage_marker[\s\S]*?FROM public\.create_earlybird_checkout\(/i,
+        );
+        expect(source).toMatch(
+            /EARLYBIRD_CHECKOUT_ACTIVE_PENDING_LINEAGE:SUPERSEDED_LINEAGE[\s\S]*?UPDATE public\.earlybird_orders/i,
+        );
+        expect(source).toMatch(
+            /SET checkout_blocked_at[\s\S]*?checkout_blocked_reason = 'SUPERSEDED_LINEAGE'/i,
+        );
+        expect(source).toMatch(
+            /Reacquire its exact[\s\S]*?earlybird:groble:product:[\s\S]*?hashtextextended\(p_user_id::TEXT, 0\)[\s\S]*?FROM public\.users[\s\S]*?FOR UPDATE/i,
+        );
+        expect(source).not.toContain('earlybird_orders_checkout_blocked_idx');
+        expect(source).toMatch(
+            /REVOKE ALL ON FUNCTION public\.create_earlybird_checkout_with_lineage_marker/i,
+        );
+        expect(source).toMatch(
+            /GRANT EXECUTE ON FUNCTION public\.create_earlybird_checkout_with_lineage_marker[\s\S]*?service_role/i,
+        );
+        expect(source).toContain('FROM public.create_earlybird_checkout(');
+    });
+
     it('fails closed before touching anything except the confirmed administrator test order', () => {
         const source = readMigration('cleanup_confirmed_administrator_test_order');
 
@@ -74,6 +110,7 @@ describe('production payment recovery migration contracts', () => {
         expect(source).toMatch(/status\s*=\s*'payment_pending'/i);
         expect(source).toMatch(/payment_id\s+IS\s+NULL/i);
         expect(source).toMatch(/paid_at\s+IS\s+NULL/i);
+        expect(source).toMatch(/actual_groble_product_id\s+IS\s+NULL/i);
         expect(source).toMatch(/actual_amount_krw\s+IS\s+NULL/i);
         expect(source).toMatch(/seller_reference_confirmed_at\s+IS\s+NULL/i);
         expect(source).not.toMatch(/groble_seller_reference\s+IS\s+NULL/i);
@@ -87,6 +124,8 @@ describe('production payment recovery migration contracts', () => {
         );
         expect(source).toMatch(/COUNT\(\*\)/i);
         expect(source).toMatch(/RAISE EXCEPTION/i);
+        expect(source).toMatch(/DELETE\s+FROM\s+public\.earlybird_orders/i);
+        expect(source).not.toMatch(/UPDATE\s+public\.earlybird_orders[\s\S]*?status\s*=\s*'cancelled'/i);
         expect(source).not.toMatch(/DELETE\s+FROM\s+public\.users/i);
         expect(source).not.toMatch(/UPDATE\s+public\.users/i);
         expect(source).toMatch(/ROLLBACK|transaction/i);

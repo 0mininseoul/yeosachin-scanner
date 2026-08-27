@@ -38,10 +38,17 @@ BEGIN
         RETURN;
     END IF;
 
-    -- Match the create/replay RPC's lock order: serialize the owner row before
-    -- taking any preflight row lock. This prevents claim/create transactions
-    -- from acquiring the users and analysis_preflights locks in opposite
-    -- orders while the advisory lock below serializes same-owner claims.
+    -- Match the checkout create RPC's lock order: take the owner advisory lock
+    -- before the users row lock and any preflight row lock. Claim/create
+    -- transactions therefore cannot acquire the users and advisory locks in
+    -- opposite orders.
+    PERFORM pg_catalog.pg_advisory_xact_lock(
+        pg_catalog.hashtextextended(
+            'analysis-anonymous-preflight:' || p_user_id::TEXT,
+            0
+        )
+    );
+
     PERFORM 1
     FROM public.users AS owner_user
     WHERE owner_user.id = p_user_id
@@ -50,15 +57,6 @@ BEGIN
         RETURN QUERY SELECT FALSE, 'invalid'::TEXT, NULL::UUID;
         RETURN;
     END IF;
-
-    -- Serialize every claim for one authenticated owner. The anonymous row
-    -- lock below also fences cross-owner races for a replayed claim token.
-    PERFORM pg_catalog.pg_advisory_xact_lock(
-        pg_catalog.hashtextextended(
-            'analysis-anonymous-preflight:' || p_user_id::TEXT,
-            0
-        )
-    );
 
     SELECT preflight.* INTO v_anonymous
     FROM public.analysis_preflights AS preflight
@@ -270,6 +268,248 @@ REVOKE ALL ON FUNCTION public.create_or_replay_analysis_v2_preflight_with_target
 ) FROM PUBLIC, anon, authenticated, service_role;
 GRANT EXECUTE ON FUNCTION public.create_or_replay_analysis_v2_preflight_with_target_hash(
     UUID, TEXT, TEXT, TEXT, TEXT, TEXT, JSONB, JSONB, TEXT, JSONB, JSONB, TEXT
+) TO service_role;
+
+-- A pending order remains payment truth, even when a newer checkout attempt
+-- makes its checkout lineage unusable. Keep that disposition on the order so
+-- it survives preflight expiry, consumption, scrubbing, and retention of the
+-- newer preflight row.
+ALTER TABLE public.earlybird_orders
+    ADD COLUMN IF NOT EXISTS checkout_blocked_at TIMESTAMP WITH TIME ZONE,
+    ADD COLUMN IF NOT EXISTS checkout_blocked_reason TEXT;
+
+DO $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1
+        FROM pg_catalog.pg_constraint
+        WHERE conrelid = 'public.earlybird_orders'::pg_catalog.regclass
+          AND conname = 'earlybird_orders_checkout_block_check'
+    ) THEN
+        ALTER TABLE public.earlybird_orders
+            ADD CONSTRAINT earlybird_orders_checkout_block_check CHECK (
+                (checkout_blocked_at IS NULL AND checkout_blocked_reason IS NULL)
+                OR (
+                    checkout_blocked_at IS NOT NULL
+                    AND checkout_blocked_reason = 'SUPERSEDED_LINEAGE'
+                )
+            );
+    END IF;
+END;
+$$;
+
+-- The legacy create RPC remains available for rollback compatibility. This
+-- service-only wrapper catches only the database-authoritative superseded
+-- lineage result, records a durable marker in the outer transaction, and
+-- returns a bounded disposition so the caller does not have to rewrite the
+-- payment ledger status (or rely on mutable preflight state).
+CREATE OR REPLACE FUNCTION public.create_earlybird_checkout_with_lineage_marker(
+    p_user_id UUID,
+    p_preflight_id UUID,
+    p_plan_id TEXT,
+    p_expected_product_id TEXT,
+    p_expected_amount_krw INTEGER,
+    p_pricing_version TEXT,
+    p_disclosure_version TEXT,
+    p_disclosure_text TEXT,
+    p_disclosure_accepted_at TIMESTAMP WITH TIME ZONE
+)
+RETURNS TABLE(order_id UUID, created BOOLEAN, disposition TEXT)
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = ''
+SET lock_timeout = '5s'
+SET statement_timeout = '2min'
+AS $$
+DECLARE
+    v_order_id UUID;
+    v_created BOOLEAN;
+    v_error_message TEXT;
+    v_pending_count INTEGER;
+    v_pending public.earlybird_orders%ROWTYPE;
+    v_current_preflight public.analysis_preflights%ROWTYPE;
+    v_pending_preflight public.analysis_preflights%ROWTYPE;
+    v_blocked_at TIMESTAMP WITH TIME ZONE;
+    v_blocked_reason TEXT;
+    v_updated_count INTEGER;
+BEGIN
+    BEGIN
+        SELECT created_row.order_id, created_row.created
+        INTO v_order_id, v_created
+        FROM public.create_earlybird_checkout(
+            p_user_id,
+            p_preflight_id,
+            p_plan_id,
+            p_expected_product_id,
+            p_expected_amount_krw,
+            p_pricing_version,
+            p_disclosure_version,
+            p_disclosure_text,
+            p_disclosure_accepted_at
+        ) AS created_row;
+    EXCEPTION WHEN OTHERS THEN
+        GET STACKED DIAGNOSTICS v_error_message = MESSAGE_TEXT;
+        IF v_error_message <> 'EARLYBIRD_CHECKOUT_ACTIVE_PENDING_LINEAGE:SUPERSEDED_LINEAGE' THEN
+            RAISE;
+        END IF;
+
+        -- Locks acquired by the legacy call were held in the failed inner
+        -- subtransaction and were rolled back with it. Reacquire its exact
+        -- product/user/user-row lock order before reproving any rows, so a
+        -- competing create cannot change the candidate between checks.
+        PERFORM pg_catalog.pg_advisory_xact_lock(
+            pg_catalog.hashtextextended(
+                'earlybird:groble:product:' || p_expected_product_id,
+                0
+            )
+        );
+        PERFORM pg_catalog.pg_advisory_xact_lock(
+            pg_catalog.hashtextextended(p_user_id::TEXT, 0)
+        );
+        PERFORM 1
+        FROM public.users AS buyer
+        WHERE buyer.id = p_user_id
+        FOR UPDATE;
+        IF NOT FOUND THEN
+            RAISE EXCEPTION USING
+                MESSAGE = 'EARLYBIRD_CHECKOUT_SUPERSESSION_MARKER_FAILED',
+                ERRCODE = 'P0001';
+        END IF;
+
+        SELECT current_preflight.*
+        INTO v_current_preflight
+        FROM public.analysis_preflights AS current_preflight
+        WHERE current_preflight.id = p_preflight_id
+          AND current_preflight.user_id = p_user_id
+        FOR UPDATE;
+        IF NOT FOUND THEN
+            RAISE EXCEPTION USING
+                MESSAGE = 'EARLYBIRD_CHECKOUT_SUPERSESSION_MARKER_FAILED',
+                ERRCODE = 'P0001';
+        END IF;
+
+        SELECT pg_catalog.count(*)::INTEGER
+        INTO v_pending_count
+        FROM public.earlybird_orders AS pending_order
+        WHERE pending_order.user_id = p_user_id
+          AND pending_order.expected_groble_product_id = p_expected_product_id
+          AND pending_order.status = 'payment_pending';
+        IF v_pending_count <> 1 THEN
+            RAISE EXCEPTION USING
+                MESSAGE = 'EARLYBIRD_CHECKOUT_SUPERSESSION_MARKER_FAILED',
+                ERRCODE = 'P0001';
+        END IF;
+
+        SELECT pending_order.*
+        INTO v_pending
+        FROM public.earlybird_orders AS pending_order
+        WHERE pending_order.user_id = p_user_id
+          AND pending_order.expected_groble_product_id = p_expected_product_id
+          AND pending_order.status = 'payment_pending'
+        ORDER BY pending_order.created_at, pending_order.id
+        LIMIT 1
+        FOR UPDATE;
+        IF NOT FOUND THEN
+            RAISE EXCEPTION USING
+                MESSAGE = 'EARLYBIRD_CHECKOUT_SUPERSESSION_MARKER_FAILED',
+                ERRCODE = 'P0001';
+        END IF;
+
+        SELECT pending_preflight.*
+        INTO v_pending_preflight
+        FROM public.analysis_preflights AS pending_preflight
+        WHERE pending_preflight.id = v_pending.preflight_id
+          AND pending_preflight.user_id = p_user_id
+        FOR UPDATE;
+        IF NOT FOUND OR NOT (
+            v_current_preflight.created_at > v_pending_preflight.created_at
+            OR (
+                v_current_preflight.created_at = v_pending_preflight.created_at
+                AND v_current_preflight.id::TEXT > v_pending_preflight.id::TEXT
+            )
+        ) THEN
+            -- The old RPC's error is only durable evidence of supersession if
+            -- the requested preflight is actually newer than the pending row.
+            RAISE EXCEPTION USING
+                MESSAGE = v_error_message,
+                ERRCODE = 'P0001';
+        END IF;
+
+        IF v_pending.payment_id IS NOT NULL
+           OR v_pending.actual_groble_product_id IS NOT NULL
+           OR v_pending.actual_amount_krw IS NOT NULL
+           OR v_pending.paid_at IS NOT NULL
+           OR v_pending.seller_reference_confirmed_at IS NOT NULL THEN
+            -- Never turn ambiguous provider/payment evidence into a checkout
+            -- marker. Abort the wrapper instead.
+            RAISE EXCEPTION USING
+                MESSAGE = 'EARLYBIRD_CHECKOUT_SUPERSESSION_MARKER_FAILED',
+                ERRCODE = 'P0001';
+        END IF;
+
+        UPDATE public.earlybird_orders AS superseded_order
+        SET checkout_blocked_at = COALESCE(
+                superseded_order.checkout_blocked_at,
+                pg_catalog.clock_timestamp()
+            ),
+            checkout_blocked_reason = 'SUPERSEDED_LINEAGE',
+            updated_at = pg_catalog.clock_timestamp()
+        WHERE superseded_order.id = v_pending.id
+          AND superseded_order.user_id = p_user_id
+          AND superseded_order.expected_groble_product_id = p_expected_product_id
+          AND superseded_order.status = 'payment_pending'
+          AND superseded_order.payment_id IS NULL
+          AND superseded_order.actual_groble_product_id IS NULL
+          AND superseded_order.actual_amount_krw IS NULL
+          AND superseded_order.paid_at IS NULL
+          AND superseded_order.seller_reference_confirmed_at IS NULL
+          AND (
+              superseded_order.checkout_blocked_reason IS NULL
+              OR superseded_order.checkout_blocked_reason = 'SUPERSEDED_LINEAGE'
+          );
+        GET DIAGNOSTICS v_updated_count = ROW_COUNT;
+        IF v_updated_count <> 1 THEN
+            RAISE EXCEPTION USING
+                MESSAGE = 'EARLYBIRD_CHECKOUT_SUPERSESSION_MARKER_FAILED',
+                ERRCODE = 'P0001';
+        END IF;
+
+        RETURN QUERY SELECT v_pending.id, FALSE, 'superseded'::TEXT;
+        RETURN;
+    END;
+
+    IF v_order_id IS NULL OR v_created IS NULL THEN
+        RAISE EXCEPTION USING
+            MESSAGE = 'EARLYBIRD_CHECKOUT_SUPERSESSION_MARKER_FAILED',
+            ERRCODE = 'P0001';
+    END IF;
+
+    SELECT checkout_blocked_at, checkout_blocked_reason
+    INTO v_blocked_at, v_blocked_reason
+    FROM public.earlybird_orders
+    WHERE id = v_order_id
+      AND user_id = p_user_id;
+    IF NOT FOUND THEN
+        RAISE EXCEPTION USING
+            MESSAGE = 'EARLYBIRD_CHECKOUT_SUPERSESSION_MARKER_FAILED',
+            ERRCODE = 'P0001';
+    END IF;
+
+    IF v_blocked_at IS NOT NULL OR v_blocked_reason IS NOT NULL THEN
+        RETURN QUERY SELECT v_order_id, FALSE, 'superseded'::TEXT;
+        RETURN;
+    END IF;
+
+    RETURN QUERY SELECT v_order_id, v_created,
+        CASE WHEN v_created THEN 'created' ELSE 'replayed' END;
+END;
+$$;
+
+REVOKE ALL ON FUNCTION public.create_earlybird_checkout_with_lineage_marker(
+    UUID, UUID, TEXT, TEXT, INTEGER, TEXT, TEXT, TEXT, TIMESTAMP WITH TIME ZONE
+) FROM PUBLIC, anon, authenticated, service_role;
+GRANT EXECUTE ON FUNCTION public.create_earlybird_checkout_with_lineage_marker(
+    UUID, UUID, TEXT, TEXT, INTEGER, TEXT, TEXT, TEXT, TIMESTAMP WITH TIME ZONE
 ) TO service_role;
 
 NOTIFY pgrst, 'reload schema';

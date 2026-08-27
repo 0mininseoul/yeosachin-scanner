@@ -5,6 +5,7 @@ import { loadAccountCheckoutPhone } from '@/lib/services/identity/account-princi
 const checkoutResultSchema = z.array(z.object({
     order_id: z.string().uuid(),
     created: z.boolean(),
+    disposition: z.enum(['created', 'replayed', 'superseded']),
 })).length(1);
 
 const sellerReferenceResultSchema = z.string()
@@ -27,6 +28,7 @@ const checkoutRecoveryRowSchema = z.object({
     disclosure_accepted_at: z.string().datetime({ offset: true }),
     groble_seller_reference: sellerReferenceResultSchema.nullable(),
     seller_reference_confirmed_at: z.string().datetime({ offset: true }).nullable(),
+    actual_groble_product_id: z.string().min(1).max(128).nullable(),
     status: z.enum([
         'payment_pending',
         'payment_failed',
@@ -41,13 +43,8 @@ const checkoutRecoveryRowSchema = z.object({
     payment_id: z.string().nullable(),
     actual_amount_krw: z.number().int().nonnegative().nullable(),
     paid_at: z.string().datetime({ offset: true }).nullable(),
-    created_at: z.string().datetime({ offset: true }),
-});
-
-const checkoutLineagePreflightSchema = z.object({
-    id: z.string().uuid(),
-    user_id: z.string().uuid(),
-    target_instagram_id: z.string().min(1).max(128),
+    checkout_blocked_at: z.string().datetime({ offset: true }).nullable(),
+    checkout_blocked_reason: z.literal('SUPERSEDED_LINEAGE').nullable(),
     created_at: z.string().datetime({ offset: true }),
 });
 
@@ -78,65 +75,34 @@ export interface EarlybirdCheckoutRecoveryRecord {
         | 'refund_pending'
         | 'refunded';
     paymentId: string | null;
+    actualGrobleProductId: string | null;
     actualAmountKrw: number | null;
     paidAt: string | null;
+    checkoutBlockedAt: string | null;
+    checkoutBlockedReason: 'SUPERSEDED_LINEAGE' | null;
     createdAt: string;
 }
 
 type CheckoutLineageInput = Pick<
     EarlybirdCheckoutRecoveryRecord,
-    'userId' | 'preflightId' | 'targetInstagramId'
+    | 'userId'
+    | 'preflightId'
+    | 'targetInstagramId'
+    | 'checkoutBlockedAt'
+    | 'checkoutBlockedReason'
 >;
 
 /**
- * A checkout is superseded only when durable preflight state proves that a
- * newer, ready, unexpired lineage exists for the same owner. The
- * caller cannot provide this decision: `resume=0` is merely a navigation hint.
+ * The checkout row is the durable authority for supersession. Preflight
+ * freshness is intentionally not consulted: a newer preflight may expire,
+ * be consumed, scrubbed, or retained away while the older order must remain
+ * permanently blocked once this marker is present.
  */
 async function isDurablySuperseded(
     input: CheckoutLineageInput,
 ): Promise<boolean> {
-    const currentResult = await supabaseAdmin
-        .from('analysis_preflights')
-        .select('id, user_id, target_instagram_id, created_at')
-        .eq('id', input.preflightId)
-        .eq('user_id', input.userId)
-        .eq('target_instagram_id', input.targetInstagramId)
-        .maybeSingle();
-    if (currentResult.error) {
-        throw new EarlybirdPersistenceError('EARLYBIRD_PERSISTENCE_FAILED');
-    }
-    const current = checkoutLineagePreflightSchema.safeParse(currentResult.data);
-    if (!current.success || current.data.user_id !== input.userId) return true;
-
-    const latestResult = await supabaseAdmin
-        .from('analysis_preflights')
-        .select('id, user_id, target_instagram_id, created_at')
-        .eq('user_id', input.userId)
-        .eq('status', 'ready')
-        .in('exclusion_decision', ['skip', 'exclude'])
-        .gt('expires_at', new Date().toISOString())
-        .order('created_at', { ascending: false })
-        .order('id', { ascending: false })
-        .limit(1)
-        .maybeSingle();
-    if (latestResult.error) {
-        throw new EarlybirdPersistenceError('EARLYBIRD_PERSISTENCE_FAILED');
-    }
-    if (latestResult.data == null) return false;
-    const latest = checkoutLineagePreflightSchema.safeParse(latestResult.data);
-    if (!latest.success) {
-        throw new EarlybirdPersistenceError('EARLYBIRD_PERSISTENCE_FAILED');
-    }
-    if (latest.data.user_id !== input.userId) {
-        throw new EarlybirdPersistenceError('EARLYBIRD_PERSISTENCE_FAILED');
-    }
-    if (latest.data.id === current.data.id) return false;
-    return latest.data.created_at > current.data.created_at
-        || (
-            latest.data.created_at === current.data.created_at
-            && latest.data.id > current.data.id
-        );
+    return input.checkoutBlockedAt !== null
+        || input.checkoutBlockedReason !== null;
 }
 
 const waitlistResultSchema = z.array(z.object({
@@ -214,17 +180,20 @@ export interface CreateCheckoutRecordInput {
 
 export const earlybirdStore = {
     async createCheckout(input: CreateCheckoutRecordInput) {
-        const { data, error } = await supabaseAdmin.rpc('create_earlybird_checkout', {
-            p_user_id: input.userId,
-            p_preflight_id: input.preflightId,
-            p_plan_id: input.planId,
-            p_expected_product_id: input.productId,
-            p_expected_amount_krw: input.amountKrw,
-            p_pricing_version: input.pricingVersion,
-            p_disclosure_version: input.disclosureVersion,
-            p_disclosure_text: input.disclosureText,
-            p_disclosure_accepted_at: input.disclosureAcceptedAt,
-        });
+        const { data, error } = await supabaseAdmin.rpc(
+            'create_earlybird_checkout_with_lineage_marker',
+            {
+                p_user_id: input.userId,
+                p_preflight_id: input.preflightId,
+                p_plan_id: input.planId,
+                p_expected_product_id: input.productId,
+                p_expected_amount_krw: input.amountKrw,
+                p_pricing_version: input.pricingVersion,
+                p_disclosure_version: input.disclosureVersion,
+                p_disclosure_text: input.disclosureText,
+                p_disclosure_accepted_at: input.disclosureAcceptedAt,
+            },
+        );
         if (error) {
             const failure = boundedDatabaseFailure(error);
             throw new EarlybirdPersistenceError(failure.code, failure.subreason);
@@ -232,6 +201,12 @@ export const earlybirdStore = {
         const parsed = checkoutResultSchema.safeParse(data);
         if (!parsed.success) {
             throw new EarlybirdPersistenceError('EARLYBIRD_PERSISTENCE_FAILED');
+        }
+        if (parsed.data[0].disposition === 'superseded') {
+            throw new EarlybirdPersistenceError(
+                'EARLYBIRD_CHECKOUT_ACTIVE_PENDING_LINEAGE',
+                'SUPERSEDED_LINEAGE',
+            );
         }
         const { data: referenceData, error: referenceError } =
             await supabaseAdmin.rpc(
@@ -269,8 +244,9 @@ export const earlybirdStore = {
             + 'buyer_match_policy, expected_buyer_phone_number_normalized, '
             + 'expected_buyer_phone_verification_source, disclosure_version, '
             + 'disclosure_text, disclosure_accepted_at, groble_seller_reference, '
-            + 'seller_reference_confirmed_at, '
-            + 'status, payment_id, actual_amount_krw, paid_at, created_at';
+            + 'seller_reference_confirmed_at, actual_groble_product_id, '
+            + 'status, payment_id, actual_amount_krw, paid_at, '
+            + 'checkout_blocked_at, checkout_blocked_reason, created_at';
         const toRecord = (data: unknown, expectedPreflightId?: string) => {
             const parsed = checkoutRecoveryRowSchema.safeParse(data);
             if (!parsed.success
@@ -299,8 +275,11 @@ export const earlybirdStore = {
                 sellerReferenceConfirmedAt: parsed.data.seller_reference_confirmed_at,
                 status: parsed.data.status,
                 paymentId: parsed.data.payment_id,
+                actualGrobleProductId: parsed.data.actual_groble_product_id,
                 actualAmountKrw: parsed.data.actual_amount_krw,
                 paidAt: parsed.data.paid_at,
+                checkoutBlockedAt: parsed.data.checkout_blocked_at,
+                checkoutBlockedReason: parsed.data.checkout_blocked_reason,
                 createdAt: parsed.data.created_at,
             });
         };
@@ -342,8 +321,9 @@ export const earlybirdStore = {
             + 'buyer_match_policy, expected_buyer_phone_number_normalized, '
             + 'expected_buyer_phone_verification_source, disclosure_version, '
             + 'disclosure_text, disclosure_accepted_at, groble_seller_reference, '
-            + 'seller_reference_confirmed_at, '
-            + 'status, payment_id, actual_amount_krw, paid_at, created_at';
+            + 'seller_reference_confirmed_at, actual_groble_product_id, '
+            + 'status, payment_id, actual_amount_krw, paid_at, '
+            + 'checkout_blocked_at, checkout_blocked_reason, created_at';
         const query = supabaseAdmin
             .from('earlybird_orders')
             .select(select)
@@ -380,8 +360,11 @@ export const earlybirdStore = {
             sellerReferenceConfirmedAt: parsed.data.seller_reference_confirmed_at,
             status: parsed.data.status,
             paymentId: parsed.data.payment_id,
+            actualGrobleProductId: parsed.data.actual_groble_product_id,
             actualAmountKrw: parsed.data.actual_amount_krw,
             paidAt: parsed.data.paid_at,
+            checkoutBlockedAt: parsed.data.checkout_blocked_at,
+            checkoutBlockedReason: parsed.data.checkout_blocked_reason,
             createdAt: parsed.data.created_at,
         });
         if (await isDurablySuperseded(record)) {

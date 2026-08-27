@@ -127,8 +127,11 @@ function recoveryOrderRow(overrides: Record<string, unknown> = {}) {
         seller_reference_confirmed_at: null,
         status: 'payment_pending',
         payment_id: null,
+        actual_groble_product_id: null,
         actual_amount_krw: null,
         paid_at: null,
+        checkout_blocked_at: null,
+        checkout_blocked_reason: null,
         created_at: new Date(Date.now() - 60 * 60 * 1_000).toISOString(),
         ...overrides,
     };
@@ -187,9 +190,13 @@ function authenticate(userId: string | null = USER_ID): void {
 
 function mockCheckoutRecord(created: boolean): void {
     mocks.rpc.mockImplementation(async (name: string) => {
-        if (name === 'create_earlybird_checkout') {
+        if (name === 'create_earlybird_checkout_with_lineage_marker') {
             return {
-                data: [{ order_id: ORDER_ID, created }],
+                data: [{
+                    order_id: ORDER_ID,
+                    created,
+                    disposition: created ? 'created' : 'replayed',
+                }],
                 error: null,
             };
         }
@@ -346,7 +353,7 @@ describe('earlybird checkout and waitlist routes', () => {
             orderId: ORDER_ID,
             nextUrl: `/api/earlybird/checkout/redirect?orderId=${ORDER_ID}&planId=basic`,
         });
-        expect(mocks.rpc).toHaveBeenCalledWith('create_earlybird_checkout', expect.objectContaining({
+        expect(mocks.rpc).toHaveBeenCalledWith('create_earlybird_checkout_with_lineage_marker', expect.objectContaining({
             p_user_id: USER_ID,
             p_preflight_id: PREFLIGHT_ID,
             p_plan_id: 'basic',
@@ -425,6 +432,37 @@ describe('earlybird checkout and waitlist routes', () => {
             entry as { event?: string }).event === 'earlybird.checkout_created'
         )).toHaveLength(1);
         expect(mocks.flush).toHaveBeenCalledOnce();
+    });
+
+    it('keeps a database-authoritative superseded disposition status-only without issuing a seller reference', async () => {
+        mocks.rpc.mockImplementation(async (name: string) => {
+            if (name === 'create_earlybird_checkout_with_lineage_marker') {
+                return {
+                    data: [{
+                        order_id: ORDER_ID,
+                        created: false,
+                        disposition: 'superseded',
+                    }],
+                    error: null,
+                };
+            }
+            return { data: null, error: { message: 'unexpected rpc' } };
+        });
+
+        const response = await checkout(request('/api/earlybird/checkout', {
+            preflightId: PREFLIGHT_ID,
+            planId: 'standard',
+            disclosureAccepted: true,
+        }));
+
+        expect(response.status).toBe(409);
+        await expect(response.json()).resolves.toMatchObject({
+            code: 'EARLYBIRD_CHECKOUT_ACTIVE_PENDING_LINEAGE',
+        });
+        expect(mocks.rpc).not.toHaveBeenCalledWith(
+            'issue_earlybird_groble_seller_reference',
+            expect.anything(),
+        );
     });
 
     it('recovers the same owner-scoped pending checkout after preflight expiry without trusting client commerce fields', async () => {
