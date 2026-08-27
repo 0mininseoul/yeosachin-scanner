@@ -28,18 +28,6 @@ export type PrecheckoutBliteInferenceFailureReason = 'provider' | 'timeout' | 'i
 
 export type PrecheckoutBliteFinalizerFailureReason = 'schema_cache_miss' | 'fence_lost';
 
-export const PRECHECKOUT_BLITE_FALLBACK_REASONS = [
-    'terminal_before_48',
-    'unresolved_at_48',
-    'demo_error',
-    'legacy_missing_target_hash',
-] as const;
-
-export type PrecheckoutBliteFallbackReason =
-    (typeof PRECHECKOUT_BLITE_FALLBACK_REASONS)[number];
-
-const FALLBACK_REASONS = new Set<string>(PRECHECKOUT_BLITE_FALLBACK_REASONS);
-
 interface CreatePrecheckoutBliteObservabilityOptions {
     preflightId: string;
     startedAtMs: number;
@@ -117,7 +105,6 @@ export function createPrecheckoutBliteObservability({
     now = Date.now,
 }: CreatePrecheckoutBliteObservabilityOptions) {
     let terminalEmitted = false;
-    let fallbackLatchEmitted = false;
     let demoOutcomeEmitted = false;
 
     const emitTerminal = (
@@ -153,11 +140,10 @@ export function createPrecheckoutBliteObservability({
 
     const emitOutcome = (
         event:
-            | 'precheckout_blite.fallback_latched'
             | 'precheckout_blite.demo_completed'
             | 'precheckout_blite.demo_failed',
         severity: 'info' | 'error',
-        disposition: PrecheckoutBliteFallbackReason | 'completed' | 'failed',
+        disposition: 'completed' | 'failed',
     ): void => {
         try {
             operationalLogger.emit({
@@ -239,11 +225,6 @@ export function createPrecheckoutBliteObservability({
                     attempt: telemetry.attempt,
                 },
             );
-        },
-        fallbackLatched(reason: PrecheckoutBliteFallbackReason): void {
-            if (fallbackLatchEmitted || !FALLBACK_REASONS.has(reason)) return;
-            fallbackLatchEmitted = true;
-            emitOutcome('precheckout_blite.fallback_latched', 'info', reason);
         },
         demoCompleted(): void {
             if (demoOutcomeEmitted) return;

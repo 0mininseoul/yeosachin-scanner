@@ -72,31 +72,15 @@ describe('precheckout B-lite observability', () => {
         );
     });
 
-    it.each([
-        'terminal_before_48',
-        'unresolved_at_48',
-        'demo_error',
-    ] as const)('emits a bounded fallback latch for %s', reason => {
+    it('leaves browser-owned fallback latch telemetry out of the server sink', () => {
         const observability = createPrecheckoutBliteObservability({
             preflightId,
             startedAtMs: 100,
             now: () => 225,
         });
 
-        observability.fallbackLatched(reason);
-
-        expect(mocks.emit).toHaveBeenCalledWith({
-            event: 'precheckout_blite.fallback_latched',
-            severity: 'info',
-            fields: {
-                preflight_id: preflightId,
-                operation: 'precheckout_blite',
-                duration_ms: 125,
-                disposition: reason,
-            },
-        });
-        const serialized = JSON.stringify(mocks.emit.mock.calls);
-        expect(serialized).not.toMatch(/username|full_name|bio|caption|url|token|email/i);
+        expect(observability).not.toHaveProperty('fallbackLatched');
+        expect(mocks.emit).not.toHaveBeenCalled();
     });
 
     it('emits a bounded fallback demo completion outcome', () => {

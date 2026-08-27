@@ -53,7 +53,6 @@ export const ALLOWED_FIELD_NAMES = [
     'progress',
     'plan_id',
     'amount_krw',
-    'checkout_mode',
     'webhook_event_type',
     'credential_slot',
     'total_effective_headroom_usd',
@@ -359,7 +358,6 @@ export const OPERATIONAL_DISPOSITIONS = [
     'terminal_before_48',
     'unresolved_at_48',
     'demo_error',
-    'legacy_missing_target_hash',
     'redirected',
 ] as const;
 
@@ -555,8 +553,6 @@ function sanitizeField(name: string, value: unknown): SanitizedValue | undefined
             return safeLowercaseRegistryValue(value, REGISTERED_PLAN_IDS);
         case 'amount_krw':
             return safeFiniteNumber(value, 0, 1_000_000_000, true);
-        case 'checkout_mode':
-            return safeExactRegistryValue(value, new Set(['new', 'recovery']));
         case 'webhook_event_type':
             return safeExactRegistryValue(value, REGISTERED_WEBHOOK_EVENT_TYPES);
         case 'credential_slot':

@@ -19,11 +19,18 @@ const recoveryMigration = readFileSync(
     new URL('20260827172857_production_preflight_checkout_recovery.sql', migrationsDirectory),
     'utf8',
 );
+const cleanupOperation = readFileSync(
+    new URL('20260828_cleanup_confirmed_administrator_test_order.sql', new URL('../../../supabase/operations/', import.meta.url)),
+    'utf8',
+);
 
 const USER_ID = '41000000-0000-4000-8000-000000000001';
 const ANONYMOUS_PREFLIGHT_ID = '41000000-0000-4000-8000-000000000002';
 const OWNER_PREFLIGHT_ID = '41000000-0000-4000-8000-000000000003';
 const CLAIM_TOKEN_HASH = 'a'.repeat(64);
+const ADMIN_ID = '41000000-0000-4000-8000-000000000004';
+const ADMIN_PREFLIGHT_ID = '41000000-0000-4000-8000-000000000005';
+const ADMIN_ORDER_ID = '41000000-0000-4000-8000-000000000006';
 
 const bootstrap = `
 DROP SCHEMA IF EXISTS public CASCADE;
@@ -53,6 +60,11 @@ RETURNS UUID LANGUAGE sql STABLE AS $$
 $$;
 GRANT USAGE ON SCHEMA auth TO authenticated;
 GRANT EXECUTE ON FUNCTION auth.uid() TO authenticated;
+
+CREATE TABLE auth.users (
+    id UUID PRIMARY KEY,
+    email TEXT
+);
 
 CREATE FUNCTION extensions.gen_random_uuid()
 RETURNS UUID LANGUAGE sql VOLATILE AS $$
@@ -86,6 +98,8 @@ CREATE TABLE public.analysis_preflights (
     claim_token_hash VARCHAR(64),
     claim_expires_at TIMESTAMPTZ,
     claimed_at TIMESTAMPTZ,
+    error_code TEXT,
+    blocked_at TIMESTAMPTZ,
     target_instagram_id TEXT NOT NULL,
     status TEXT NOT NULL,
     expires_at TIMESTAMPTZ NOT NULL,
@@ -104,8 +118,15 @@ CREATE TABLE public.analysis_preflights (
     lease_token UUID,
     lease_expires_at TIMESTAMPTZ,
     updated_at TIMESTAMPTZ NOT NULL DEFAULT pg_catalog.clock_timestamp(),
-    created_at TIMESTAMPTZ NOT NULL DEFAULT pg_catalog.clock_timestamp()
+    created_at TIMESTAMPTZ NOT NULL DEFAULT pg_catalog.clock_timestamp(),
+    CONSTRAINT analysis_preflights_blocked_payload_check CHECK (
+        (status = 'blocked' AND error_code IS NOT NULL AND blocked_at IS NOT NULL)
+        OR (status <> 'blocked' AND error_code IS NULL AND blocked_at IS NULL)
+    )
 );
+CREATE UNIQUE INDEX analysis_preflights_user_idempotency_idx
+    ON public.analysis_preflights(user_id, idempotency_key)
+    WHERE user_id IS NOT NULL;
 
 CREATE TABLE public.earlybird_orders (
     id UUID PRIMARY KEY DEFAULT extensions.gen_random_uuid(),
@@ -137,12 +158,17 @@ CREATE TABLE public.earlybird_orders (
     due_at TIMESTAMPTZ,
     plan_sequence SMALLINT,
     result_request_id UUID,
+    checkout_blocked_at TIMESTAMPTZ,
+    checkout_blocked_reason TEXT,
     created_at TIMESTAMPTZ NOT NULL DEFAULT pg_catalog.clock_timestamp(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT pg_catalog.clock_timestamp()
 );
 CREATE UNIQUE INDEX earlybird_orders_one_pending_per_user
     ON public.earlybird_orders(user_id)
     WHERE status = 'payment_pending';
+CREATE TABLE public.analysis_requests (id UUID PRIMARY KEY);
+CREATE TABLE public.earlybird_fulfillments (order_id UUID PRIMARY KEY);
+CREATE TABLE public.earlybird_webhook_events (order_id UUID PRIMARY KEY);
 
 -- The migration under test keeps this previous RPC available and wraps it.
 -- The function is replaced by the effective v5 checkout migration below.
@@ -165,10 +191,48 @@ RETURNS TABLE(
     preflight_status TEXT,
     expires_at TIMESTAMPTZ
 )
-LANGUAGE sql
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = ''
 AS $$
-    SELECT NULL::UUID, FALSE, NULL::TEXT, NULL::TIMESTAMPTZ
-    WHERE FALSE
+DECLARE
+    v_existing public.analysis_preflights%ROWTYPE;
+    v_id UUID;
+    v_expires TIMESTAMPTZ;
+BEGIN
+    -- Match the production create wrapper's user-scoped serialization so the
+    -- target-hash wrapper race exercises the real lock boundary.
+    PERFORM pg_catalog.pg_advisory_xact_lock(
+        pg_catalog.hashtextextended(p_user_id::TEXT, 0)
+    );
+    SELECT preflight.* INTO v_existing
+    FROM public.analysis_preflights AS preflight
+    WHERE preflight.user_id = p_user_id
+      AND preflight.idempotency_key = p_idempotency_key
+    FOR UPDATE;
+    IF FOUND THEN
+        RETURN QUERY SELECT v_existing.id, FALSE, v_existing.status, v_existing.expires_at;
+        RETURN;
+    END IF;
+
+    v_id := pg_catalog.gen_random_uuid();
+    v_expires := pg_catalog.clock_timestamp() + INTERVAL '30 minutes';
+    INSERT INTO public.analysis_preflights(
+        id, user_id, idempotency_key, provider_selector, target_instagram_id,
+        status, expires_at, exclusion_decision, access_mode,
+        launch_status_snapshot, plan_catalog_snapshot, plan_cards_snapshot,
+        pricing_version, pricing_snapshot, required_plan_id,
+        created_at, updated_at
+    ) VALUES (
+        v_id, p_user_id, p_idempotency_key, 'authenticated_apify',
+        p_target_instagram_id, 'ready', v_expires, 'skip', p_access_mode,
+        p_launch_status_snapshot, p_plan_catalog_snapshot,
+        '{"standard":{"selectionState":"required"}}'::jsonb,
+        p_pricing_version, p_pricing_snapshot, 'standard',
+        pg_catalog.clock_timestamp(), pg_catalog.clock_timestamp()
+    );
+    RETURN QUERY SELECT v_id, TRUE, 'ready'::TEXT, v_expires;
+END;
 $$;
 GRANT EXECUTE ON FUNCTION public.create_or_replay_analysis_v2_preflight(
     UUID, TEXT, TEXT, TEXT, TEXT, TEXT, JSONB, JSONB, TEXT, JSONB, JSONB
@@ -247,6 +311,42 @@ async function waitForAdvisoryLockWait(
     throw new Error('PRODUCTION_PAYMENT_RECOVERY_ADVISORY_LOCK_WAIT_TIMEOUT');
 }
 
+async function waitForAnalysisAnonymousPreflightAdvisoryWait(
+    pool: Pool,
+    blockedPid: number,
+    userId: string,
+): Promise<void> {
+    const keyResult = await pool.query<{ lock_key: string }>(
+        `SELECT pg_catalog.hashtextextended(
+             'analysis-anonymous-preflight:' || $1,
+             0
+         )::TEXT AS lock_key`,
+        [userId],
+    );
+    const lockKey = BigInt(keyResult.rows[0]?.lock_key ?? '0');
+    const unsignedKey = BigInt.asUintN(64, lockKey);
+    const classId = (unsignedKey >> BigInt(32)) & BigInt(0xffffffff);
+    const objectId = unsignedKey & BigInt(0xffffffff);
+
+    for (let attempt = 0; attempt < 200; attempt += 1) {
+        const result = await pool.query(
+            `SELECT 1
+             FROM pg_catalog.pg_locks
+             WHERE pid = $1
+               AND locktype = 'advisory'
+               AND mode = 'ExclusiveLock'
+               AND NOT granted
+               AND classid::BIGINT = $2::BIGINT
+               AND objid::BIGINT = $3::BIGINT
+             LIMIT 1`,
+            [blockedPid, classId.toString(), objectId.toString()],
+        );
+        if (result.rowCount === 1) return;
+        await new Promise(resolve => setTimeout(resolve, 10));
+    }
+    throw new Error('PRODUCTION_PAYMENT_RECOVERY_ANALYSIS_PREFLIGHT_ADVISORY_LOCK_WAIT_TIMEOUT');
+}
+
 async function setSessionRole(
     client: PoolClient,
     role: 'authenticated' | 'service_role',
@@ -284,19 +384,41 @@ async function claimOnClient(
     return result.rows[0];
 }
 
-async function createOnClient(
+async function createPreflightWithTargetHashOnClient(
     client: PoolClient,
-    preflightId: string,
-): Promise<{ order_id: string; created: boolean }> {
+    idempotencyKey: string,
+    targetInputHash: string,
+): Promise<{
+    preflight_id: string;
+    created: boolean;
+    preflight_status: string;
+    expires_at: string;
+}> {
     await client.query('BEGIN');
     await setSessionRole(client, 'service_role');
-    const result = await client.query<{ order_id: string; created: boolean }>(
-        `SELECT * FROM public.create_earlybird_checkout(
-             $1, $2, 'standard', 'standard-product-01', 19900,
-             'earlybird-2026-08-v5', 'earlybird-auto-start-v2',
-             '결제 확인 후 판독이 자동으로 시작됩니다.', pg_catalog.clock_timestamp()
+    const result = await client.query<{
+        preflight_id: string;
+        created: boolean;
+        preflight_status: string;
+        expires_at: string;
+    }>(
+        `SELECT * FROM public.create_or_replay_analysis_v2_preflight_with_target_hash(
+             $1, $2, $3, $4, $5, $6, $7::jsonb, $8::jsonb, $9, $10::jsonb, $11::jsonb, $12
          )`,
-        [USER_ID, preflightId],
+        [
+            USER_ID,
+            'native-owner@example.test',
+            'kakao',
+            'target.account',
+            idempotencyKey,
+            'production',
+            JSON.stringify({ version: 1 }),
+            JSON.stringify({ version: 1 }),
+            'earlybird-2026-08-v5',
+            JSON.stringify({ version: 1 }),
+            JSON.stringify({ version: 1 }),
+            targetInputHash,
+        ],
     );
     return result.rows[0];
 }
@@ -350,7 +472,7 @@ describePostgres('production payment recovery migration two-session concurrency'
 
     beforeEach(async () => {
         await pool.query(
-            `TRUNCATE public.earlybird_orders, public.analysis_preflights, public.users`,
+            `TRUNCATE public.earlybird_orders, public.analysis_preflights, public.users, auth.users`,
         );
     });
 
@@ -358,113 +480,226 @@ describePostgres('production payment recovery migration two-session concurrency'
         await pool?.end();
     });
 
-    it.each([
-        ['same target, claim first', true, true],
-        ['same target, create first', true, false],
-        ['different target, claim first', false, true],
-        ['different target, create first', false, false],
-    ] as const)(
-        'serializes %s without deadlock or dual active ownership',
-        async (_label, sameTarget, claimFirst) => {
-            const anonymousTarget = sameTarget ? 'same.account' : 'anonymous.account';
-            const ownerTarget = sameTarget ? 'same.account' : 'owner.account';
-            await pool.query(
-                `INSERT INTO public.users(
-                     id, email, provider, phone_number, phone_number_normalized,
-                     phone_number_verification_source, phone_number_verified_at
-                 ) VALUES (
-                     $1, 'native-owner@example.test', 'kakao', '010-1234-5678',
-                     '+821012345678', 'kakao_rest_api', pg_catalog.clock_timestamp()
+    it('serializes concurrent target-hash preflight creation through the create wrapper', async () => {
+        await pool.query(
+            `INSERT INTO public.users(
+                 id, email, provider, phone_number, phone_number_normalized,
+                 phone_number_verification_source, phone_number_verified_at
+             ) VALUES (
+                 $1, 'native-owner@example.test', 'kakao', '010-1234-5678',
+                 '+821012345678', 'kakao_rest_api', pg_catalog.clock_timestamp()
+             )`,
+            [USER_ID],
+        );
+
+        const first = await pool.connect();
+        const second = await pool.connect();
+        try {
+            const secondPid = await second.query<{ pid: number }>(
+                'SELECT pg_catalog.pg_backend_pid() AS pid',
+            );
+            const firstResult = await createPreflightWithTargetHashOnClient(
+                first,
+                'native-target-hash-idempotency',
+                'b'.repeat(64),
+            );
+            const secondResultPromise = createPreflightWithTargetHashOnClient(
+                second,
+                'native-target-hash-idempotency',
+                'b'.repeat(64),
+            );
+            await waitForLockWait(pool, secondPid.rows[0].pid);
+            await first.query('COMMIT');
+            const secondResult = await secondResultPromise;
+            await second.query('COMMIT');
+
+            expect(firstResult).toMatchObject({ created: true, preflight_status: 'ready' });
+            expect(secondResult).toMatchObject({
+                created: false,
+                preflight_id: firstResult.preflight_id,
+                preflight_status: 'ready',
+            });
+            await expect(pool.query<{ count: number; target_input_hash: string }>(
+                `SELECT count(*)::INTEGER AS count,
+                        max(target_input_hash) AS target_input_hash
+                 FROM public.analysis_preflights
+                 WHERE user_id = $1 AND idempotency_key = $2`,
+                [USER_ID, 'native-target-hash-idempotency'],
+            )).resolves.toMatchObject({
+                rows: [{ count: 1, target_input_hash: 'b'.repeat(64) }],
+            });
+        } catch (error) {
+            await first.query('ROLLBACK').catch(() => undefined);
+            await second.query('ROLLBACK').catch(() => undefined);
+            throw error;
+        } finally {
+            await first.query('ROLLBACK').catch(() => undefined);
+            await second.query('ROLLBACK').catch(() => undefined);
+            first.release();
+            second.release();
+        }
+    });
+
+    it('observes the exact ungranted analysis-anonymous-preflight advisory wait', async () => {
+        await pool.query(
+            `INSERT INTO public.users(
+                 id, email, provider, phone_number, phone_number_normalized,
+                 phone_number_verification_source, phone_number_verified_at
+             ) VALUES (
+                 $1, 'native-claim@example.test', 'kakao', '010-1234-5678',
+                 '+821012345678', 'kakao_rest_api', pg_catalog.clock_timestamp()
+             )`,
+            [USER_ID],
+        );
+        await pool.query(
+            `INSERT INTO public.analysis_preflights(
+                 id, user_id, provider_selector, claim_token_hash,
+                 claim_expires_at, target_instagram_id, status, expires_at,
+                 exclusion_decision, access_mode, plan_cards_snapshot,
+                 pricing_version, pricing_snapshot, target_followers_count,
+                 target_following_count, required_plan_id, created_at, updated_at
+             ) VALUES (
+                 $1, NULL, 'anonymous_apify', $2,
+                 pg_catalog.clock_timestamp() + INTERVAL '10 minutes',
+                 'same.account', 'ready',
+                 pg_catalog.clock_timestamp() + INTERVAL '30 minutes',
+                 'skip', 'anonymous',
+                 '{"basic":{"selectionState":"available_upgrade"},"standard":{"selectionState":"required"}}'::jsonb,
+                 'earlybird-2026-08-v5',
+                 '{"standard":{"status":"quoted","currency":"KRW","amountKrw":19900}}'::jsonb,
+                 300, 100, 'standard',
+                 pg_catalog.clock_timestamp(), pg_catalog.clock_timestamp()
+             )`,
+            [ANONYMOUS_PREFLIGHT_ID, CLAIM_TOKEN_HASH],
+        );
+
+        const first = await pool.connect();
+        const second = await pool.connect();
+        try {
+            const secondPid = await second.query<{ pid: number }>(
+                'SELECT pg_catalog.pg_backend_pid() AS pid',
+            );
+            const firstResult = await claimOnClient(first, ANONYMOUS_PREFLIGHT_ID);
+            const secondResultPromise = claimOnClient(second, ANONYMOUS_PREFLIGHT_ID);
+            await waitForAnalysisAnonymousPreflightAdvisoryWait(
+                pool,
+                secondPid.rows[0].pid,
+                USER_ID,
+            );
+            await first.query('COMMIT');
+            const secondResult = await secondResultPromise;
+            await second.query('COMMIT');
+
+            expect(firstResult).toMatchObject({ claimed: true, preflight_status: 'claimed' });
+            expect(secondResult).toMatchObject({ claimed: false, preflight_status: 'rejected' });
+        } catch (error) {
+            await first.query('ROLLBACK').catch(() => undefined);
+            await second.query('ROLLBACK').catch(() => undefined);
+            throw error;
+        } finally {
+            await first.query('ROLLBACK').catch(() => undefined);
+            await second.query('ROLLBACK').catch(() => undefined);
+            first.release();
+            second.release();
+        }
+    });
+
+    it('waits for the canonical product lock before the administrator cleanup operation deletes', async () => {
+        await pool.query(
+            `INSERT INTO auth.users(id, email)
+             VALUES ($1, 'ym1113@kakao.com')`,
+            [ADMIN_ID],
+        );
+        await pool.query(
+            `INSERT INTO public.users(
+                 id, email, provider, phone_number, phone_number_normalized,
+                 phone_number_verification_source, phone_number_verified_at
+             ) VALUES (
+                 $1, 'ym1113@kakao.com', 'kakao', '010-1234-5678',
+                 '+821012345678', 'kakao_rest_api', pg_catalog.clock_timestamp()
+             )`,
+            [ADMIN_ID],
+        );
+        await pool.query(
+            `INSERT INTO public.analysis_preflights(
+                 id, user_id, target_instagram_id, status, expires_at,
+                 exclusion_decision, plan_cards_snapshot, pricing_version,
+                 pricing_snapshot, target_followers_count, target_following_count,
+                 required_plan_id, created_at, updated_at
+             ) VALUES (
+                 $1, $2, '0_min._.00', 'ready',
+                 pg_catalog.clock_timestamp() + INTERVAL '30 minutes', 'skip',
+                 '{"standard":{"selectionState":"required"}}'::jsonb,
+                 'earlybird-2026-08-v5',
+                 '{"standard":{"status":"quoted","currency":"KRW","amountKrw":19900}}'::jsonb,
+                 300, 100, 'standard',
+                 pg_catalog.clock_timestamp(), pg_catalog.clock_timestamp()
+             )`,
+            [ADMIN_PREFLIGHT_ID, ADMIN_ID],
+        );
+        await pool.query(
+            `INSERT INTO public.earlybird_orders(
+                 id, user_id, preflight_id, target_instagram_id,
+                 target_followers_count, target_following_count, exclusion_decision,
+                 plan_id, pricing_version, expected_amount_krw,
+                 expected_groble_product_id, buyer_match_policy,
+                 disclosure_version, disclosure_text, disclosure_accepted_at,
+                 status, payment_id, actual_groble_product_id, actual_amount_krw,
+                 paid_at, groble_seller_reference, seller_reference_confirmed_at
+             ) VALUES (
+                 $1, $2, $3, '0_min._.00', 300, 100, 'skip', 'standard',
+                 'earlybird-2026-08-v5', 19900, 'cleanup-product-v1',
+                 'verified_kakao_phone', 'earlybird-auto-start-v2',
+                 '결제 확인 후 판독이 자동으로 시작됩니다.', pg_catalog.clock_timestamp(),
+                 'payment_pending', NULL, NULL, NULL, NULL,
+                 'ord.0123456789abcdef0123456789abcdef', NULL
+             )`,
+            [ADMIN_ORDER_ID, ADMIN_ID, ADMIN_PREFLIGHT_ID],
+        );
+
+        const first = await pool.connect();
+        const second = await pool.connect();
+        try {
+            const secondPid = await second.query<{ pid: number }>(
+                'SELECT pg_catalog.pg_backend_pid() AS pid',
+            );
+            await first.query('BEGIN');
+            await first.query(
+                `SELECT pg_catalog.pg_advisory_xact_lock(
+                     pg_catalog.hashtextextended('earlybird:groble:product:cleanup-product-v1', 0)
                  )`,
-                [USER_ID],
             );
-            await pool.query(
-                `INSERT INTO public.analysis_preflights(
-                     id, user_id, provider_selector, claim_token_hash,
-                     claim_expires_at, target_instagram_id, status, expires_at,
-                     exclusion_decision, access_mode, plan_cards_snapshot,
-                     pricing_version, pricing_snapshot, target_followers_count,
-                     target_following_count, required_plan_id, created_at, updated_at
-                 ) VALUES
-                     ($1, NULL, 'anonymous_apify', $2,
-                      pg_catalog.clock_timestamp() + INTERVAL '10 minutes', $3,
-                      'ready', pg_catalog.clock_timestamp() + INTERVAL '30 minutes',
-                      'skip', 'anonymous',
-                      '{"basic":{"selectionState":"available_upgrade"},"standard":{"selectionState":"required"}}'::jsonb,
-                      'earlybird-2026-08-v5',
-                      '{"standard":{"status":"quoted","currency":"KRW","amountKrw":19900}}'::jsonb,
-                      300, 100, 'standard',
-                      pg_catalog.clock_timestamp() - INTERVAL '2 minutes',
-                      pg_catalog.clock_timestamp() - INTERVAL '2 minutes'),
-                     ($4, $5, 'authenticated_apify', NULL, NULL, $6,
-                      'ready', pg_catalog.clock_timestamp() + INTERVAL '30 minutes',
-                      'skip', 'production',
-                      '{"basic":{"selectionState":"available_upgrade"},"standard":{"selectionState":"required"}}'::jsonb,
-                      'earlybird-2026-08-v5',
-                      '{"standard":{"status":"quoted","currency":"KRW","amountKrw":19900}}'::jsonb,
-                      300, 100, 'standard',
-                      pg_catalog.clock_timestamp() - INTERVAL '1 minute',
-                      pg_catalog.clock_timestamp() - INTERVAL '1 minute')`,
-                [
-                    ANONYMOUS_PREFLIGHT_ID,
-                    CLAIM_TOKEN_HASH,
-                    anonymousTarget,
-                    OWNER_PREFLIGHT_ID,
-                    USER_ID,
-                    ownerTarget,
-                ],
+            const operationPromise = second.query(cleanupOperation);
+            await waitForAdvisoryLockWait(pool, secondPid.rows[0].pid);
+            await first.query('COMMIT');
+            const operationResult = await operationPromise;
+            expect(JSON.stringify(operationResult)).toMatch(
+                /earlybird-admin-test-order-cleanup:v1[\s\S]*1|1[\s\S]*earlybird-admin-test-order-cleanup:v1/,
             );
 
-            const first = await pool.connect();
-            const second = await pool.connect();
-            try {
-                const secondPid = await second.query<{ pid: number }>(
-                    'SELECT pg_catalog.pg_backend_pid() AS pid',
-                );
-                const firstResult = claimFirst
-                    ? await claimOnClient(first, ANONYMOUS_PREFLIGHT_ID)
-                    : await createOnClient(first, OWNER_PREFLIGHT_ID);
-                const secondResultPromise = claimFirst
-                    ? createOnClient(second, OWNER_PREFLIGHT_ID)
-                    : claimOnClient(second, ANONYMOUS_PREFLIGHT_ID);
-                await waitForLockWait(pool, secondPid.rows[0].pid);
-                await first.query('COMMIT');
-                const secondResult = await secondResultPromise;
-                await second.query('COMMIT');
-
-                const claimResult = claimFirst ? firstResult : secondResult;
-                const createResult = claimFirst ? secondResult : firstResult;
-                expect(claimResult).toMatchObject({
-                    claimed: false,
-                    preflight_status: sameTarget
-                        ? 'owner_active'
-                        : 'owner_active_other_target',
-                });
-                expect(createResult).toMatchObject({ created: true });
-                await expect(pool.query<{ count: number }>(
-                    `SELECT count(*)::INTEGER AS count
-                     FROM public.analysis_preflights
-                     WHERE user_id = $1 AND status IN ('pending', 'processing', 'ready')`,
-                    [USER_ID],
-                )).resolves.toMatchObject({ rows: [{ count: 1 }] });
-                await expect(pool.query<{ count: number }>(
-                    `SELECT count(*)::INTEGER AS count
-                     FROM public.earlybird_orders
-                     WHERE user_id = $1 AND status = 'payment_pending'`,
-                    [USER_ID],
-                )).resolves.toMatchObject({ rows: [{ count: 1 }] });
-            } catch (error) {
-                await first.query('ROLLBACK').catch(() => undefined);
-                await second.query('ROLLBACK').catch(() => undefined);
-                throw error;
-            } finally {
-                await first.query('ROLLBACK').catch(() => undefined);
-                await second.query('ROLLBACK').catch(() => undefined);
-                first.release();
-                second.release();
-            }
-        },
-    );
+            await expect(pool.query(
+                `SELECT id FROM public.earlybird_orders WHERE id = $1`,
+                [ADMIN_ORDER_ID],
+            )).resolves.toMatchObject({ rows: [] });
+            await expect(pool.query(
+                `SELECT id FROM public.users WHERE id = $1`,
+                [ADMIN_ID],
+            )).resolves.toMatchObject({ rows: [{ id: ADMIN_ID }] });
+            await expect(pool.query(
+                `SELECT id FROM public.analysis_preflights WHERE id = $1`,
+                [ADMIN_PREFLIGHT_ID],
+            )).resolves.toMatchObject({ rows: [{ id: ADMIN_PREFLIGHT_ID }] });
+        } catch (error) {
+            await first.query('ROLLBACK').catch(() => undefined);
+            await second.query('ROLLBACK').catch(() => undefined);
+            throw error;
+        } finally {
+            await first.query('ROLLBACK').catch(() => undefined);
+            await second.query('ROLLBACK').catch(() => undefined);
+            first.release();
+            second.release();
+        }
+    });
 
     it('serializes concurrent supersession marker writes and preserves payment truth', async () => {
         await pool.query(
@@ -511,6 +746,12 @@ describePostgres('production payment recovery migration two-session concurrency'
             [USER_ID, OWNER_PREFLIGHT_ID],
         );
         expect(seed.rows[0]).toMatchObject({ created: true });
+        await pool.query(
+            `UPDATE public.earlybird_orders
+             SET groble_seller_reference = 'ord.0123456789abcdef0123456789abcdef'
+             WHERE id = $1`,
+            [seed.rows[0]?.order_id],
+        );
         await pool.query(
             `UPDATE public.analysis_preflights
              SET status = 'ready'

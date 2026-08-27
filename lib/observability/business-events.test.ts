@@ -114,13 +114,12 @@ describe('business operational event contract', () => {
         );
     });
 
-    it('keeps checkout redirect observability bounded to plan and mode dimensions', () => {
+    it('keeps checkout redirect observability bounded to plan dimensions', () => {
         const sanitized = sanitizeOperationalEvent({
             event: 'earlybird.checkout_redirected',
             severity: 'info',
             fields: {
                 plan_id: 'standard',
-                checkout_mode: 'recovery',
                 disposition: 'redirected',
                 operation: 'checkout',
                 checkout_url: 'https://provider.example/private',
@@ -131,7 +130,6 @@ describe('business operational event contract', () => {
 
         expect(sanitized.fields).toMatchObject({
             plan_id: 'standard',
-            checkout_mode: 'recovery',
             disposition: 'redirected',
             operation: 'checkout',
         });

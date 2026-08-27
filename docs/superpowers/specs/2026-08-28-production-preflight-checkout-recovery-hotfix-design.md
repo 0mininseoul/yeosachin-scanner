@@ -171,23 +171,36 @@ proved to need it; product UI must not depend on the raw external URL response.
 This deliberately separates “the user may reuse this checkout session” from
 “the payment ledger has provider evidence that no sale occurred.”
 
-### 5. Administrator test-order cleanup
+### 5. Administrator test-order cleanup operation
 
 The user explicitly confirmed that the administrator's historical orders are
 test records and that the current `0_min._.00` Standard pending order is not a
-real sale. A one-shot migration may remove or terminalize only the exact
-blocking administrator test row under strict semantic preconditions:
+real sale. An explicitly invoked production operation outside the universal
+migration set deletes only the exact blocking administrator test row under
+strict semantic preconditions:
 
 - administrator email matches the known administrator account;
 - normalized target is `0_min._.00` and plan is Standard;
 - status is `payment_pending`;
-- payment ID, paid timestamp, actual payment amount, and confirmed seller
-  reference evidence are absent; and
-- no paid/fulfillment/result child record exists.
+- the expected Groble product is a single non-empty bounded identifier resolved
+  from that exact candidate row, not a hardcoded product value;
+- payment ID, paid timestamp, actual Groble product, actual payment amount, and
+  confirmed seller reference timestamp are absent; an issued but unconfirmed
+  seller reference is allowed and is not payment evidence; and
+- no fulfillment, result, or webhook child record exists.
 
-The migration must fail closed if the expected row count or any precondition is
-different. It must not delete or disable the administrator account and must not
-touch external-user orders.
+The operation takes a static operation advisory lock, then the canonical
+product advisory lock, raw-user advisory lock, administrator `public.users` row
+lock, and exact order lock. It rechecks every predicate after those waits,
+deletes exactly one row, and emits only a static operation/count/timestamp
+receipt after commit. The SQL owns an explicit `BEGIN`/`COMMIT` transaction and
+uses `SET LOCAL` for bounded timeouts. It must fail closed if the expected row
+count or any precondition is different; it must not delete or disable the
+administrator account or preflight and must not touch external-user orders.
+
+The release owner invokes it separately with `psql --set=ON_ERROR_STOP=1
+--file supabase/operations/20260828_cleanup_confirmed_administrator_test_order.sql
+"$DATABASE_URL"` and archives only the bounded receipt.
 
 The other external `payment_pending` rows remain unchanged. Their eventual
 cleanup continues to require the existing Groble dashboard no-sale
@@ -197,7 +210,7 @@ reconciliation contract or a future provider verification integration.
 
 Add the server business event `earlybird.checkout_redirected` to the bounded
 observability schema and operations contract. Safe properties may include the
-plan, recovery-vs-new mode, and a non-sensitive outcome classification. Do not
+plan and a non-sensitive outcome classification. Do not
 log checkout URLs, seller references, phone numbers, tokens, user UUIDs, or raw
 provider payloads.
 
@@ -217,7 +230,7 @@ in either redirect event.
 
 - Claim conflicts return stable public codes without PostgreSQL details.
 - Hash mismatch is a permanent persistence-contract error; missing legacy hash
-  is an ordinary-provider fallback.
+  is an ordinary-provider fallback without a server fallback-latch event.
 - Redirect validation failures return a bounded same-origin UX and emit a safe
   reason code.
 - An observability failure must not prevent an otherwise valid checkout
@@ -249,8 +262,14 @@ in either redirect event.
 - one caller cannot claim for another `auth.uid()`;
 - v2 create-or-replay always returns a hash-bound row;
 - mismatched replay hash fails atomically;
-- the administrator cleanup affects exactly the authorized test row and fails
-  closed for any payment evidence.
+- the administrator operation affects exactly the authorized test row and fails
+  closed for any payment/provider/confirmed-seller/fulfillment/result/webhook
+  evidence while allowing an issued but unconfirmed seller reference;
+- an empty database can replay the schema migration without creating rows;
+- the marker constraint and append-only trigger reject clearing or changing a
+  durable marker; and
+- supersession reproof without a newer preflight raises `MARKER_FAILED` and
+  leaves the order unmarked.
 
 ### Regression suite
 
@@ -262,13 +281,15 @@ database contract suites, then lint, production build, and migration validation.
 1. Verify migration history against the linked production project.
 2. Use an isolated Supabase workdir with an explicit migration allowlist.
 3. Run migration dry-run and inspect every pending statement.
-4. Apply only the approved hotfix migrations and verify remote history before
+4. Apply only the approved schema migration and verify remote history before
    repeating any command.
-5. Deploy the existing `yeosachin_scanner` Vercel project.
-6. Canary the administrator flow: anonymous preflight, Standard selection,
+5. Separately dry-run and explicitly invoke the administrator cleanup operation;
+   archive its non-sensitive receipt and verify only one order was deleted.
+6. Deploy the existing `yeosachin-scanner` Vercel project.
+7. Canary the administrator flow: anonymous preflight, Standard selection,
    Kakao sign-in, state restoration, same-origin continuation, Groble test
    checkout, webhook admission, progress, and result.
-7. Keep the concierge path available. If automatic admission is unsafe, disable
+8. Keep the concierge path available. If automatic admission is unsafe, disable
    its existing reversible gate without rolling back payment finalization.
 
 Application rollback may restore the previous RPC caller because the old

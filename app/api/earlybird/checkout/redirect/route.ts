@@ -8,6 +8,7 @@ import {
 import { earlybirdStore, EarlybirdPersistenceError } from '@/lib/services/earlybird/store';
 import {
     parseEarlybirdCheckoutContinuationQuery,
+    type EarlybirdCheckoutPlanId,
 } from '@/lib/services/earlybird/checkout-continuation';
 import {
     getGrobleCheckoutUrl,
@@ -66,9 +67,11 @@ function unavailable(
     request: Request,
     context: OperationalRequestContext,
     errorCode: RedirectFailureCode = 'VALIDATION_ERROR',
+    planId?: EarlybirdCheckoutPlanId,
 ): NextResponse {
     emitRedirectFailure(context, errorCode);
-    return noStoreRedirect(request, '/earlybird?checkout=unavailable');
+    const planQuery = planId ? `plan=${encodeURIComponent(planId)}&` : '';
+    return noStoreRedirect(request, `/earlybird?${planQuery}checkout=unavailable`);
 }
 
 async function flushRedirectEventWithinDeadline(): Promise<void> {
@@ -92,9 +95,16 @@ async function handleGET(
     request: Request,
     context: OperationalRequestContext,
 ): Promise<NextResponse> {
+    let validatedPlanId: EarlybirdCheckoutPlanId | undefined;
     try {
         const url = new URL(request.url);
+        const requestedPlanId = url.searchParams.get('planId');
         const queryEntries = Array.from(url.searchParams.keys());
+        if (url.searchParams.getAll('planId').length === 1) {
+            validatedPlanId = requestedPlanId === 'basic' || requestedPlanId === 'standard'
+                ? requestedPlanId
+                : undefined;
+        }
         if (
             queryEntries.length !== 2
             || queryEntries[0] !== 'orderId'
@@ -102,7 +112,7 @@ async function handleGET(
             || url.searchParams.getAll('orderId').length !== 1
             || url.searchParams.getAll('planId').length !== 1
         ) {
-            return unavailable(request, context, 'INVALID_REQUEST');
+            return unavailable(request, context, 'INVALID_REQUEST', validatedPlanId);
         }
         const continuation = parseEarlybirdCheckoutContinuationQuery(
             url.searchParams.get('orderId'),
@@ -113,12 +123,14 @@ async function handleGET(
             || url.search
                 !== `?orderId=${continuation.orderId}&planId=${continuation.planId}`
         ) {
-            return unavailable(request, context, 'INVALID_REQUEST');
+            return unavailable(request, context, 'INVALID_REQUEST', continuation?.planId ?? validatedPlanId);
         }
 
         const supabase = await createClient();
         const { data: { user }, error: authError } = await supabase.auth.getUser();
-        if (authError || !user) return unavailable(request, context, 'UNAUTHORIZED');
+        if (authError || !user) {
+            return unavailable(request, context, 'UNAUTHORIZED', continuation.planId);
+        }
         try {
             await requireActiveAccountClassification(user.id);
         } catch (error) {
@@ -128,6 +140,7 @@ async function handleGET(
                 error instanceof AccountPrincipalAdmissionError
                     ? 'UNAUTHORIZED'
                     : 'INTERNAL_ERROR',
+                continuation.planId,
             );
         }
 
@@ -137,7 +150,7 @@ async function handleGET(
             continuation.planId,
         );
         if (!order || order.planId !== continuation.planId) {
-            return unavailable(request, context, 'VALIDATION_ERROR');
+            return unavailable(request, context, 'VALIDATION_ERROR', continuation.planId);
         }
 
         const currentPhone = await loadCurrentEarlybirdCheckoutPhone(user.id);
@@ -149,7 +162,7 @@ async function handleGET(
             currentPhone,
         });
         if (recovered.orderId !== order.orderId || !order.sellerReference) {
-            return unavailable(request, context, 'VALIDATION_ERROR');
+            return unavailable(request, context, 'VALIDATION_ERROR', continuation.planId);
         }
 
         const checkoutUrl = getGrobleCheckoutUrl(
@@ -180,15 +193,15 @@ async function handleGET(
         return response;
     } catch (error) {
         if (error instanceof AccountPrincipalAdmissionError) {
-            return unavailable(request, context, 'UNAUTHORIZED');
+            return unavailable(request, context, 'UNAUTHORIZED', validatedPlanId);
         }
         if (
             error instanceof EarlybirdCheckoutRecoveryError
             || error instanceof EarlybirdPersistenceError
         ) {
-            return unavailable(request, context, 'VALIDATION_ERROR');
+            return unavailable(request, context, 'VALIDATION_ERROR', validatedPlanId);
         }
-        return unavailable(request, context, 'INTERNAL_ERROR');
+        return unavailable(request, context, 'INTERNAL_ERROR', validatedPlanId);
     }
 }
 

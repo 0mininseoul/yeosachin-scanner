@@ -137,7 +137,6 @@ describe('B-lite single-collection preflight', () => {
             inferenceFailed: vi.fn(),
             inferenceAttempt: vi.fn(),
             sourceFinalizerFailed: vi.fn(),
-            fallbackLatched: vi.fn(),
             demoCompleted: vi.fn(),
             demoFailed: vi.fn(),
         };
@@ -163,7 +162,6 @@ describe('B-lite single-collection preflight', () => {
         expect(getFullProfile).not.toHaveBeenCalled();
         expect(getProfile).toHaveBeenCalledOnce();
         expect(store.finalizeReady).toHaveBeenCalledOnce();
-        expect(bliteObservability.fallbackLatched).not.toHaveBeenCalled();
     });
 
     it('uses the frozen beta hold before the dedicated selector for a new beta B-lite run', async () => {
@@ -439,7 +437,6 @@ describe('B-lite single-collection preflight', () => {
             inferenceFailed: vi.fn(),
             inferenceAttempt: vi.fn(),
             sourceFinalizerFailed: vi.fn(),
-            fallbackLatched: vi.fn(),
             demoCompleted: vi.fn(),
             demoFailed: vi.fn(),
         };
@@ -484,7 +481,6 @@ describe('B-lite single-collection preflight', () => {
             inferenceFailed: vi.fn(),
             inferenceAttempt: vi.fn(),
             sourceFinalizerFailed: vi.fn(),
-            fallbackLatched: vi.fn(),
             demoCompleted: vi.fn(),
             demoFailed: vi.fn(),
         };
@@ -523,7 +519,6 @@ describe('B-lite single-collection preflight', () => {
             inferenceFailed: vi.fn(),
             inferenceAttempt: vi.fn(),
             sourceFinalizerFailed: vi.fn(),
-            fallbackLatched: vi.fn(),
             demoCompleted: vi.fn(),
             demoFailed: vi.fn(),
         };
@@ -660,7 +655,6 @@ describe('B-lite single-collection preflight', () => {
             inferenceFailed: vi.fn(),
             inferenceAttempt: vi.fn(),
             sourceFinalizerFailed: vi.fn(),
-            fallbackLatched: vi.fn(),
             demoCompleted: vi.fn(),
             demoFailed: vi.fn(),
         };

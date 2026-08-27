@@ -3,11 +3,14 @@ import { PGlite } from '@electric-sql/pglite';
 import { afterAll, describe, expect, it } from 'vitest';
 
 const migrationsDirectory = new URL('../../../supabase/migrations/', import.meta.url);
+const operationsDirectory = new URL('../../../supabase/operations/', import.meta.url);
 const migration = (name: string): string =>
     readFileSync(new URL(name, migrationsDirectory), 'utf8');
+const operation = (name: string): string =>
+    readFileSync(new URL(name, operationsDirectory), 'utf8');
 
 const recoveryMigration = migration('20260827172857_production_preflight_checkout_recovery.sql');
-const cleanupMigration = migration('20260827172859_cleanup_confirmed_administrator_test_order.sql');
+const cleanupOperation = operation('20260828_cleanup_confirmed_administrator_test_order.sql');
 const effectiveV5CheckoutMigration = migration('20260812122517_update_earlybird_pricing_v5.sql');
 
 const USER_ID = '10000000-0000-4000-8000-000000000001';
@@ -28,6 +31,8 @@ const ADMIN_PREFLIGHT_ID = '20000000-0000-4000-8000-000000000006';
 const EXTERNAL_PREFLIGHT_ID = '20000000-0000-4000-8000-000000000007';
 const LINEAGE_OLDER_PREFLIGHT_ID = '30000000-0000-4000-8000-000000000001';
 const LINEAGE_NEWER_PREFLIGHT_ID = '30000000-0000-4000-8000-000000000002';
+const LINEAGE_STALE_PREFLIGHT_ID = '30000000-0000-4000-8000-000000000003';
+const BLOCKED_PREFLIGHT_ID = '10000000-0000-4000-8000-000000000006';
 
 const recoveryBootstrap = `
 CREATE ROLE anon NOLOGIN;
@@ -56,6 +61,8 @@ CREATE TABLE public.analysis_preflights (
     claim_token_hash VARCHAR(64),
     claim_expires_at TIMESTAMPTZ,
     claimed_at TIMESTAMPTZ,
+    error_code TEXT,
+    blocked_at TIMESTAMPTZ,
     target_instagram_id TEXT NOT NULL,
     status TEXT NOT NULL,
     expires_at TIMESTAMPTZ NOT NULL,
@@ -63,7 +70,11 @@ CREATE TABLE public.analysis_preflights (
     lease_expires_at TIMESTAMPTZ,
     target_input_hash TEXT,
     updated_at TIMESTAMPTZ NOT NULL DEFAULT pg_catalog.clock_timestamp(),
-    created_at TIMESTAMPTZ NOT NULL DEFAULT pg_catalog.clock_timestamp()
+    created_at TIMESTAMPTZ NOT NULL DEFAULT pg_catalog.clock_timestamp(),
+    CONSTRAINT analysis_preflights_blocked_payload_check CHECK (
+        (status = 'blocked' AND error_code IS NOT NULL AND blocked_at IS NOT NULL)
+        OR (status <> 'blocked' AND error_code IS NULL AND blocked_at IS NULL)
+    )
 );
 
 CREATE TABLE public.earlybird_orders (
@@ -89,9 +100,14 @@ CREATE TABLE public.earlybird_orders (
     actual_groble_product_id TEXT,
     actual_amount_krw INTEGER,
     paid_at TIMESTAMPTZ,
+    result_request_id UUID,
     created_at TIMESTAMPTZ NOT NULL DEFAULT pg_catalog.clock_timestamp(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT pg_catalog.clock_timestamp()
 );
+
+CREATE TABLE public.analysis_requests (id UUID PRIMARY KEY);
+CREATE TABLE public.earlybird_fulfillments (order_id UUID PRIMARY KEY);
+CREATE TABLE public.earlybird_webhook_events (order_id UUID PRIMARY KEY);
 
 CREATE FUNCTION public.create_or_replay_analysis_v2_preflight(
     p_user_id UUID,
@@ -382,6 +398,23 @@ describe('production preflight recovery migrations: executable PostgreSQL behavi
         await Promise.all(databases.map(database => database.close()));
     });
 
+    it('replays the recovery migration on an empty database without creating data', async () => {
+        const db = await createRecoveryDatabase();
+        await db.exec(recoveryMigration);
+
+        await expect(db.query<{ orders: number; preflights: number }>(
+            `SELECT
+                 (SELECT count(*)::INTEGER FROM public.earlybird_orders) AS orders,
+                 (SELECT count(*)::INTEGER FROM public.analysis_preflights) AS preflights`,
+        )).resolves.toMatchObject({ rows: [{ orders: 0, preflights: 0 }] });
+        await expect(db.query<{ trigger_count: number }>(
+            `SELECT count(*)::INTEGER AS trigger_count
+             FROM pg_catalog.pg_trigger
+             WHERE tgrelid = 'public.earlybird_orders'::pg_catalog.regclass
+               AND tgname = 'earlybird_orders_checkout_block_marker_guard'`,
+        )).resolves.toMatchObject({ rows: [{ trigger_count: 1 }] });
+    });
+
     it('enforces auth.uid and role/grant boundaries while serializing owner claims', async () => {
         const db = await createRecoveryDatabase();
         await seedClaimRows(db);
@@ -472,6 +505,43 @@ describe('production preflight recovery migrations: executable PostgreSQL behavi
         });
     });
 
+    it('clears blocked payload fields when an active owner expires an anonymous row', async () => {
+        const db = await createRecoveryDatabase();
+        await seedClaimRows(db);
+        await db.query(
+            `UPDATE public.analysis_preflights
+             SET expires_at = clock_timestamp() + INTERVAL '10 minutes',
+                 status = 'ready'
+             WHERE id = $1`,
+            [STALE_OWNER_PREFLIGHT_ID],
+        );
+        await db.query(
+            `INSERT INTO public.analysis_preflights(
+                 id, user_id, provider_selector, claim_token_hash, claim_expires_at,
+                 target_instagram_id, status, error_code, blocked_at, expires_at
+             ) VALUES ($1, NULL, 'anonymous_apify', $2,
+                       clock_timestamp() + INTERVAL '10 minutes',
+                       'blocked.account', 'blocked', 'TARGET_NOT_FOUND',
+                       clock_timestamp(), clock_timestamp() + INTERVAL '30 minutes')`,
+            [BLOCKED_PREFLIGHT_ID, CLAIM_TOKEN_HASH],
+        );
+
+        await expect(claim(db, BLOCKED_PREFLIGHT_ID, USER_ID)).resolves.toMatchObject({
+            rows: [{ claimed: false, preflight_status: 'owner_active_other_target' }],
+        });
+        await expect(db.query<{
+            status: string;
+            error_code: string | null;
+            blocked_at: string | null;
+        }>(
+            `SELECT status, error_code, blocked_at
+             FROM public.analysis_preflights WHERE id = $1`,
+            [BLOCKED_PREFLIGHT_ID],
+        )).resolves.toMatchObject({
+            rows: [{ status: 'expired', error_code: null, blocked_at: null }],
+        });
+    });
+
     it('binds a target hash exactly once and rejects a conflicting replay atomically', async () => {
         const db = await createRecoveryDatabase();
         await db.query(
@@ -544,6 +614,15 @@ describe('durable earlybird checkout supersession marker', () => {
     it('keeps same-preflight replay valid, marks the older order, and survives newer-preflight deletion', async () => {
         const db = await createLineageDatabase();
 
+        await expect(db.query(
+            `INSERT INTO public.earlybird_orders(
+                 user_id, target_instagram_id, plan_id,
+                 checkout_blocked_at, checkout_blocked_reason
+             ) VALUES ($1, 'inserted.marker', 'standard',
+                       clock_timestamp(), 'SUPERSEDED_LINEAGE')`,
+            [ADMIN_ID],
+        )).rejects.toThrow('EARLYBIRD_CHECKOUT_SUPERSESSION_MARKER_FAILED');
+
         const created = await createLineageCheckout(db, LINEAGE_OLDER_PREFLIGHT_ID);
         expect(created.rows[0]).toMatchObject({
             created: true,
@@ -551,6 +630,15 @@ describe('durable earlybird checkout supersession marker', () => {
         });
         const orderId = created.rows[0]?.order_id;
         expect(orderId).toBeTruthy();
+
+        // Groble issues this reference before payment confirmation. It must
+        // not block the evidence-free supersession marker transition.
+        await db.query(
+            `UPDATE public.earlybird_orders
+             SET groble_seller_reference = 'ord.0123456789abcdef0123456789abcdef'
+             WHERE id = $1`,
+            [orderId],
+        );
 
         const replay = await createLineageCheckout(db, LINEAGE_OLDER_PREFLIGHT_ID);
         expect(replay.rows[0]).toMatchObject({
@@ -617,6 +705,59 @@ describe('durable earlybird checkout supersession marker', () => {
         )).resolves.toMatchObject({
             rows: [{ status: 'payment_pending', checkout_blocked_reason: 'SUPERSEDED_LINEAGE' }],
         });
+
+        await expect(db.query(
+            `UPDATE public.earlybird_orders
+             SET checkout_blocked_at = NULL
+             WHERE id = $1`,
+            [orderId],
+        )).rejects.toThrow('EARLYBIRD_CHECKOUT_SUPERSESSION_MARKER_IMMUTABLE');
+        await expect(db.query(
+            `UPDATE public.earlybird_orders
+             SET checkout_blocked_reason = 'OTHER'
+             WHERE id = $1`,
+            [orderId],
+        )).rejects.toThrow('EARLYBIRD_CHECKOUT_SUPERSESSION_MARKER_IMMUTABLE');
+    });
+
+    it('fails closed with MARKER_FAILED when supersession reproof has no newer lineage', async () => {
+        const db = await createLineageDatabase();
+        const created = await createLineageCheckout(db, LINEAGE_OLDER_PREFLIGHT_ID);
+        const orderId = created.rows[0]?.order_id;
+        expect(orderId).toBeTruthy();
+
+        await db.query(
+            `UPDATE public.analysis_preflights SET status = 'expired' WHERE id = $1`,
+            [LINEAGE_OLDER_PREFLIGHT_ID],
+        );
+        await db.query(
+            `INSERT INTO public.analysis_preflights(
+                 id, user_id, target_instagram_id, status, expires_at,
+                 exclusion_decision, target_followers_count, target_following_count,
+                 required_plan_id, pricing_version, pricing_snapshot,
+                 plan_cards_snapshot, created_at, updated_at
+             ) VALUES (
+                 $1, $2, '0_min._.00', 'ready', clock_timestamp() + INTERVAL '30 minutes',
+                 'skip', 300, 100, 'standard', 'earlybird-2026-08-v5',
+                 '{"basic":{"status":"quoted","currency":"KRW","amountKrw":9900},"standard":{"status":"quoted","currency":"KRW","amountKrw":19900}}'::jsonb,
+                 '{"basic":{"selectionState":"available_upgrade"},"standard":{"selectionState":"required"}}'::jsonb,
+                 clock_timestamp() - INTERVAL '2 minutes', clock_timestamp() - INTERVAL '2 minutes')`,
+            [LINEAGE_STALE_PREFLIGHT_ID, ADMIN_ID],
+        );
+
+        await expect(createLineageCheckout(db, LINEAGE_STALE_PREFLIGHT_ID)).rejects.toThrow(
+            'EARLYBIRD_CHECKOUT_SUPERSESSION_MARKER_FAILED',
+        );
+        await expect(db.query<{
+            checkout_blocked_at: string | null;
+            checkout_blocked_reason: string | null;
+        }>(
+            `SELECT checkout_blocked_at, checkout_blocked_reason
+             FROM public.earlybird_orders WHERE id = $1`,
+            [orderId],
+        )).resolves.toMatchObject({
+            rows: [{ checkout_blocked_at: null, checkout_blocked_reason: null }],
+        });
     });
 });
 
@@ -645,14 +786,18 @@ async function createCleanupDatabase(): Promise<PGlite> {
     await db.query(
         `INSERT INTO public.earlybird_orders(
              id, user_id, preflight_id, target_instagram_id, plan_id, status,
+             expected_groble_product_id,
              payment_id, paid_at, actual_amount_krw,
-             seller_reference_confirmed_at, result_request_id
+             groble_seller_reference, seller_reference_confirmed_at,
+             result_request_id
          ) VALUES (
              $1, $2, $5, '0_min._.00', 'standard', 'payment_pending',
-             NULL, NULL, NULL, NULL, NULL
+             'cleanup-product-v1',
+             NULL, NULL, NULL, 'ord.0123456789abcdef0123456789abcdef', NULL, NULL
          ), (
              $3, $4, $6, 'external.account', 'standard', 'payment_pending',
-             NULL, NULL, NULL, NULL, NULL
+             'external-product-v1',
+             NULL, NULL, NULL, NULL, NULL, NULL
          )`,
         [
             ADMIN_ORDER_ID,
@@ -725,10 +870,27 @@ async function orderStatus(db: PGlite, orderId: string) {
     );
 }
 
-describe('administrator test-order cleanup migration behavior', () => {
+describe('administrator test-order cleanup production operation behavior', () => {
     it('deletes exactly the confirmed administrator test order and preserves users/preflights/external orders', async () => {
         const db = await createCleanupDatabase();
-        await db.exec(cleanupMigration);
+        await expect(db.query<{
+            groble_seller_reference: string | null;
+            seller_reference_confirmed_at: string | null;
+        }>(
+            `SELECT groble_seller_reference, seller_reference_confirmed_at
+             FROM public.earlybird_orders WHERE id = $1`,
+            [ADMIN_ORDER_ID],
+        )).resolves.toMatchObject({
+            rows: [{
+                groble_seller_reference: 'ord.0123456789abcdef0123456789abcdef',
+                seller_reference_confirmed_at: null,
+            }],
+        });
+        const operationResult = await db.exec(cleanupOperation);
+
+        expect(JSON.stringify(operationResult)).toMatch(
+            /earlybird-admin-test-order-cleanup:v1[\s\S]*deleted_count[\s\S]*1|deleted_count[\s\S]*1[\s\S]*earlybird-admin-test-order-cleanup:v1/,
+        );
 
         await expect(orderStatus(db, ADMIN_ORDER_ID)).resolves.toMatchObject({
             rows: [],
@@ -747,7 +909,7 @@ describe('administrator test-order cleanup migration behavior', () => {
 
     it('allows the preserved administrator to create a fresh same-product Standard checkout under v5', async () => {
         const db = await createCleanupDatabase();
-        await db.exec(cleanupMigration);
+        await db.exec(cleanupOperation);
 
         const fresh = await db.query<{
             order_id: string;
@@ -848,7 +1010,8 @@ describe('administrator test-order cleanup migration behavior', () => {
         const db = await createCleanupDatabase();
         await setup(db);
 
-        await expect(db.exec(cleanupMigration)).rejects.toThrow(/EARLYBIRD_ADMIN_TEST_CLEANUP/);
+        await expect(db.exec(cleanupOperation)).rejects.toThrow(/EARLYBIRD_ADMIN_TEST_CLEANUP/);
+        await db.exec('ROLLBACK');
         await expect(orderStatus(db, ADMIN_ORDER_ID)).resolves.toMatchObject({
             rows: [{ status: 'payment_pending' }],
         });

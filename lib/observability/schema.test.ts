@@ -1,6 +1,8 @@
 import { afterEach, describe, expect, it } from 'vitest';
 
 import {
+    ALLOWED_FIELD_NAMES,
+    OPERATIONAL_ERROR_NAMES,
     sanitizeOperationalEvent,
     type OperationalEvent,
 } from './schema';
@@ -25,6 +27,21 @@ afterEach(() => {
 });
 
 describe('sanitizeOperationalEvent', () => {
+    it('does not register the retired checkout mode or server legacy fallback dimension', () => {
+        expect(ALLOWED_FIELD_NAMES).not.toContain('checkout_mode');
+        expect(OPERATIONAL_ERROR_NAMES).not.toContain('legacy_missing_target_hash');
+        const sanitized = sanitizeOperationalEvent({
+            event: 'earlybird.checkout_redirected',
+            severity: 'info',
+            fields: {
+                checkout_mode: 'recovery',
+                operation: 'checkout',
+                disposition: 'redirected',
+            },
+        });
+        expect(sanitized.fields).not.toHaveProperty('checkout_mode');
+    });
+
     it.each([
         ['precheckout_blite.completed', 'apify', 'success', undefined],
         ['precheckout_blite.profile_collection_failed', 'apify', 'failure', 'PROVIDER_ERROR'],

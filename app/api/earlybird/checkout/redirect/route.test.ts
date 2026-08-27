@@ -138,7 +138,7 @@ describe('same-origin earlybird checkout redirect route contract', () => {
         expect(malformed.status).toBe(303);
         expect(malformed.headers.get('cache-control')).toBe('no-store');
         expect(malformed.headers.get('location')).toBe(
-            'https://example.com/earlybird?checkout=unavailable',
+            'https://example.com/earlybird?plan=standard&checkout=unavailable',
         );
         expect(mocks.createClient).not.toHaveBeenCalled();
 
@@ -150,7 +150,7 @@ describe('same-origin earlybird checkout redirect route contract', () => {
         ));
         expect(expired.status).toBe(303);
         expect(expired.headers.get('location')).toBe(
-            'https://example.com/earlybird?checkout=unavailable',
+            'https://example.com/earlybird?plan=standard&checkout=unavailable',
         );
         expect(mocks.emit).toHaveBeenCalledWith(expect.objectContaining({
             event: 'earlybird.checkout_failed',
@@ -182,7 +182,7 @@ describe('same-origin earlybird checkout redirect route contract', () => {
 
         expect(response.status).toBe(303);
         expect(response.headers.get('location')).toBe(
-            'https://example.com/earlybird?checkout=unavailable',
+            'https://example.com/earlybird?plan=standard&checkout=unavailable',
         );
         expect(mocks.emit).toHaveBeenCalledWith(expect.objectContaining({
             event: 'earlybird.checkout_failed',

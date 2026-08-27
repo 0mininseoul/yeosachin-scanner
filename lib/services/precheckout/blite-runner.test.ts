@@ -27,7 +27,6 @@ describe('runPrecheckoutBlite', () => {
             profileCollectionFailed: vi.fn(),
             inferenceFailed: vi.fn(),
             inferenceAttempt: vi.fn(),
-            fallbackLatched: vi.fn(),
             demoCompleted: vi.fn(),
             demoFailed: vi.fn(),
         };
