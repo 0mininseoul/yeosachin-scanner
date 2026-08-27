@@ -201,10 +201,24 @@ npm run report:earlybird-demand -- --start 2026-07-24 --end 2026-08-01
 
 ### 유료 주문 이행 gate
 
-reference가 확인된 `paid` 주문은 webhook transaction에서 `earlybird_fulfillments.awaiting_operator` 행만 만든다. 이 시점에는 `analysis_requests`, provider run, Gemini attempt, Cloud Task를 만들지 않는다.
-기본 설정 `EARLYBIRD_AUTOMATIC_FULFILLMENT_ENABLED=false`에서는 recovery가 `awaiting_operator`를 자동 승인하지 않는다. 값이 정확히 `true`일 때만 canonical `analysis-worker` recovery가 검증된 Basic/Standard 주문을 bounded batch로 자동 승인한다. `analysis-worker-secondary-e2e`에서는 항상 `false`여야 한다.
+reference가 확인된 `paid` 주문은 webhook transaction에서 먼저 `earlybird_fulfillments.awaiting_operator` 행을 만든다. 이 결제 transaction 자체는 `analysis_requests`, provider run, Gemini attempt, Cloud Task를 만들지 않는다.
 
-자동 gate는 webhook 동작을 바꾸지 않는다. reference 확인, `paid` 상태, payment ID, 금액과 상품 일치, 불변 preflight 소유권·production access·미소비 상태·launch/catalog/pricing/policy snapshot을 모두 통과한 행만 `admission_pending`으로 전진한다. 기존의 유효한 `awaiting_operator` 행도 다음 bounded 복구 pass에서 처리된다. gate를 false로 되돌리면 새 자동 승인은 멈추지만 이미 admission_pending인 작업은 기존 recovery에서 계속 drain된다.
+신규 자동 분석의 승인 경계는 Vercel webhook의 두 변수다.
+
+- `EARLYBIRD_WEBHOOK_AUTO_ADMISSION_ENABLED=false` 또는 미설정이면 결제는 정상 확정·알림되지만 concierge의 `awaiting_operator`에 남는다.
+- 값을 정확히 `true`로 설정하려면 `EARLYBIRD_WEBHOOK_AUTO_ADMISSION_NOT_BEFORE`에 고정 RFC3339 시각을 함께 설정해야 한다. signed `payment.completed.paidAt`이 그 시각 이상인 주문만 `secondary` token slot을 주문·preflight에 원자적으로 고정한 뒤 durable admission한다.
+- cutoff 이전 결제와 그 duplicate webhook은 이후 재전송돼도 자동 승인하지 않는다. cutoff를 rollout 중 과거로 이동하지 않는다.
+
+자동 분석 출시 시 canonical `analysis-worker`는 다음 값을 사용한다.
+
+```dotenv
+EARLYBIRD_AUTOMATIC_FULFILLMENT_ENABLED=false
+ANALYSIS_V2_RECOVERY_ENABLED=true
+```
+
+첫 번째 설정은 별도 recovery sweep가 cutoff와 무관하게 과거의 유효한 `awaiting_operator` 행까지 자동 승인하지 않게 한다. 두 번째 설정은 이미 webhook에서 승인된 `admission_pending`·`retryable_failure` 작업만 계속 drain한다. webhook gate를 false로 되돌리면 신규 자동 승인은 즉시 멈추고 기존 concierge 경로와 이미 승인된 작업의 recovery는 유지된다.
+
+preflight는 새 run에 한해 `primary`, `quinary`, `senary`를 결정적으로 분배한다. 이미 provider run이 있는 preflight는 `tenth`를 포함한 저장된 슬롯을 그대로 재개한다. 결제 후 정식 `apify_v1` 분석은 주문별 `secondary`만 사용하며 다른 슬롯으로 회전하거나 폴백하지 않는다.
 
 기본값이 `false`이거나 플래그가 없을 때는 아래 운영자 명령 경계가 그대로 유지된다.
 아래 명령의 exact flag가 결제 API 호출 가능성을 인지한 운영자의 명시적 승인 경계다.

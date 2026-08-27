@@ -1,34 +1,50 @@
 # Earlybird automatic fulfillment
 
-현재 production 상태·queue·rollback의 정본은 [Analysis V2 프로덕션 운영 정본](./analysis-v2-production-operations.md)이다. 현재 canonical `analysis-worker`에서 automatic fulfillment가 열려 있으며, 이 문서는 그 기능의 좁은 실행·rollback 경계만 보충한다.
+The production source of truth is [Analysis V2 production operations](./analysis-v2-production-operations.md). This runbook defines the narrower payment-to-analysis admission and rollback boundary.
 
-## Authorized launch behavior
+## Launch contract
 
-`EARLYBIRD_AUTOMATIC_FULFILLMENT_ENABLED=true` opens automatic fulfillment only
-on the canonical `analysis-worker` service. On each bounded Analysis V2 recovery
-pass, the worker atomically admits eligible `awaiting_operator` earlybird rows and
-then uses the existing fresh-admission, request, job, and task recovery flow.
+Automatic fulfillment is admitted by the signed Groble `payment.completed` webhook, not by a historical database sweep.
 
-The payment webhook remains enqueue-only. Automatic fulfillment does not create an
-analysis request directly and returns only opaque fulfillment identities to the
-worker.
+- `EARLYBIRD_WEBHOOK_AUTO_ADMISSION_ENABLED` is a Vercel-only kill switch. Missing or `false` preserves concierge handling.
+- When the switch is `true`, `EARLYBIRD_WEBHOOK_AUTO_ADMISSION_NOT_BEFORE` must be a fixed RFC3339 instant. Only a payment whose signed `paidAt` is at or after that instant is eligible.
+- An eligible order is finalized first, bound durably to the `secondary` Apify credential slot, and then admitted. Request creation remains in the existing fulfillment advance/recovery path.
+- Signed payments before the cutoff are still finalized and notified, but remain `awaiting_operator` for concierge handling.
+- Duplicate webhook deliveries apply the same original `paidAt` cutoff. They cannot make an older payment newly eligible.
 
-An order is eligible only when it is still `paid`, reference-confirmed, has a
-payment ID, has an amount within its immutable expected amount, matches its expected
-product, uses Basic or Standard, and passes the existing immutable preflight snapshot
-checks. Cancelled, refund-pending, payment-pending, manual-review, invalid, and
-ambiguous rows stay out of the automatic path.
+The canonical Cloud Run worker must use:
 
-Existing eligible `awaiting_operator` rows are included on later bounded recovery
-passes; they do not require a new webhook. The `analysis-worker-secondary-e2e`
-service must always set the flag to `false`.
+```dotenv
+EARLYBIRD_AUTOMATIC_FULFILLMENT_ENABLED=false
+ANALYSIS_V2_RECOVERY_ENABLED=true
+```
+
+The first setting prevents the independent recovery sweep from admitting historical `awaiting_operator` rows outside the webhook cutoff. Recovery remains enabled so webhook-admitted `admission_pending` and `retryable_failure` rows continue to drain.
+
+Manual concierge fulfillment remains available throughout. Its operator-selected immutable token slot is not rewritten by the webhook path.
+
+## Token boundary
+
+- New preflights select deterministically from `primary`, `quinary`, and `senary` through `PREFLIGHT_APIFY_API_TOKEN_SLOTS=primary,quinary,senary`.
+- Existing preflight provider runs always resume their stored slot, including historical `tenth` rows.
+- Formal paid `apify_v1` work uses the order-scoped `secondary` slot. It does not rotate or fall back to a preflight credential.
+- Keep existing secret references while durable old runs can still reference them. A token being excluded from new selection is not permission to delete its secret.
+
+## Rollout
+
+1. Deploy the database migration before application or worker code that calls its new RPC.
+2. Deploy Vercel with webhook auto-admission disabled.
+3. Deploy the canonical worker with recovery enabled, historical automatic admission disabled, and the exact preflight token pool configured.
+4. Confirm the request, job, provider-run, fulfillment, and task queues are quiescent twice before opening the gate.
+5. Set a fixed future cutoff, enable webhook auto-admission, and use the first post-cutoff payment as the canary.
+6. Verify that the order is bound to `secondary`, produces exactly one V2 request and bootstrap job, reaches a published result, and retains the recent-mutual badge metadata.
+
+Do not move the cutoff backward during the rollout. Do not change paid-order state as a deployment control.
 
 ## Rollback
 
-Set `EARLYBIRD_AUTOMATIC_FULFILLMENT_ENABLED=false` and deploy the canonical worker.
-This immediately stops new automatic admissions while already admitted rows continue
-through the durable recovery flow. The prior operator admission path remains
-available throughout.
+Set `EARLYBIRD_WEBHOOK_AUTO_ADMISSION_ENABLED=false` in Vercel. This immediately returns new payments to concierge handling without closing checkout or changing payment finalization.
 
-Do not change paid-order state to perform a rollback. Use the normal recovery and
-reconciliation telemetry to confirm the admitted queue drains.
+Keep `ANALYSIS_V2_RECOVERY_ENABLED=true` until already admitted work drains. If the worker itself is unsafe, disable only the worker/dispatch gate after recording aggregate queue state; do not mutate payment status or delete provider-run evidence.
+
+After rollback, verify that no new post-disable fulfillment moved from `awaiting_operator`, while existing durable admissions either completed or remain recoverable.

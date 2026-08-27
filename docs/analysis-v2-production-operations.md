@@ -1,23 +1,25 @@
 # Analysis V2 프로덕션 운영 정본
 
-기준일: 2026-07-28. 이 문서는 Analysis V2의 현재 운영 상태와 장애·배포 판단의 정본이다. 과거 계획은 [최종 출시 준비 계획](./superpowers/plans/2026-07-28-final-launch-readiness.md), 비용 측정 상태는 [운영 비용 모델](./operations-cost-model.md)을 따른다. 아래의 운영 사실은 코드와 forward migration을 함께 근거로 한다.
+기준일: 2026-08-27. 이 문서는 Analysis V2의 현재 운영 상태와 장애·배포 판단의 정본이다. 과거 계획은 [최종 출시 준비 계획](./superpowers/plans/2026-07-28-final-launch-readiness.md), 결제 자동 입장과 rollback은 [Earlybird automatic fulfillment](./earlybird-automatic-fulfillment-runbook.md), 비용 측정 상태는 [운영 비용 모델](./operations-cost-model.md)을 따른다. 아래의 운영 사실은 코드, forward migration, 배포 실측을 함께 근거로 한다.
 
 ## 현재 배포·실행 상태
 
-- result-sharing 배포의 canonical Cloud Run worker는 revision `analysis-worker-ff4492c63756`, SHA `f4492c1`, traffic 100%다.
-- 공개 admission은 Vercel의 `ANALYSIS_V2_ADMISSION_ENABLED=true` gate다. canonical Cloud Run worker는 이 admission 변수를 갖지 않으며 `ANALYSIS_V2_WORKER_ENABLED=true`, `ANALYSIS_V2_RECOVERY_ENABLED=true`, `ANALYSIS_V2_TASKS_ENABLED=true`, `PREFLIGHT_TASKS_ENABLED=true`, `EARLYBIRD_AUTOMATIC_FULFILLMENT_ENABLED=true`를 맡는다([`lib/services/analysis/v2-execution-gate.ts`](../lib/services/analysis/v2-execution-gate.ts), [`scripts/deploy-analysis-v2-worker.sh`](../scripts/deploy-analysis-v2-worker.sh)).
+- 2026-08-27 preflight 장애 복구 뒤 canonical Cloud Run worker는 revision `analysis-worker-00318-xql`이 traffic 100%를 받는다. 기존 immutable image를 유지하고 새 일반 preflight의 선택 슬롯만 `primary`로 바꾼 임시 복구다. 이전 revision은 0% traffic으로 rollback용 보존 상태다.
+- 이 임시 복구는 최종 3개 풀 배포가 아니다. canonical 릴리스는 코드와 worker 환경을 함께 배포해 `PREFLIGHT_APIFY_API_TOKEN_SLOTS=primary,quinary,senary`를 활성화해야 한다. 새 run만 이 풀에서 결정적으로 선택하고, 이미 durable provider run이 있는 요청은 `tenth`를 포함해 저장된 슬롯을 그대로 재개한다.
+- 공개 preflight/분석 생성은 Vercel의 `ANALYSIS_V2_ADMISSION_ENABLED` gate다. 신규 결제 자동 입장은 별도 Vercel gate인 `EARLYBIRD_WEBHOOK_AUTO_ADMISSION_ENABLED`와 고정 RFC3339 cutoff `EARLYBIRD_WEBHOOK_AUTO_ADMISSION_NOT_BEFORE`를 함께 사용한다. 두 gate를 동일한 의미로 취급하지 않는다.
+- 자동 분석 출시 전 현재 결제 자동 입장과 canonical recovery는 닫혀 있다. 출시 target은 canonical worker의 `ANALYSIS_V2_WORKER_ENABLED=true`, `ANALYSIS_V2_RECOVERY_ENABLED=true`, `ANALYSIS_V2_TASKS_ENABLED=true`, `PREFLIGHT_TASKS_ENABLED=true`, `EARLYBIRD_AUTOMATIC_FULFILLMENT_ENABLED=false`다. historical `awaiting_operator` sweep는 열지 않는다([`lib/services/analysis/v2-execution-gate.ts`](../lib/services/analysis/v2-execution-gate.ts), [`scripts/deploy-analysis-v2-worker.sh`](../scripts/deploy-analysis-v2-worker.sh)).
 - canonical Cloud Tasks target은 V2 job queue의 정확한 `/api/analysis/v2/worker`와 preflight queue의 정확한 `/api/analysis/preflight/worker`다. 두 설정 모두 query 없는 HTTPS target을 요구하고 OIDC audience는 해당 target과 같은 origin의 `/`이어야 한다([`lib/services/analysis/v2-tasks.ts`](../lib/services/analysis/v2-tasks.ts), [`lib/services/analysis/preflight-tasks.ts`](../lib/services/analysis/preflight-tasks.ts)).
-- secondary Apify 계정이 선택되어 있다. 검증용 `analysis-worker-secondary-e2e`는 보존하되 worker/recovery/tasks/preflight/automatic fulfillment를 모두 `false`로 유지한다. 그것은 production queue의 대체 대상이 아니다.
-- 자동 분석 공개 입장은 소유자 결정으로 이미 열려 있다. 이 사실은 비용 완전성이나 UI 시간대 SLA가 증명됐다는 뜻이 아니다.
+- 결제 후 정식 `apify_v1` 분석의 팔로워·팔로잉 및 기타 provider work는 주문별 `secondary` 슬롯으로 고정되며 preflight 풀로 회전하거나 폴백하지 않는다. 검증용 `analysis-worker-secondary-e2e`는 보존하되 worker/recovery/tasks/preflight/automatic fulfillment를 모두 `false`로 유지한다. 그것은 production queue의 대체 대상이 아니다.
+- `junho_dem`은 allowlisted operator에게만 제공되는 synthetic fixture다. 서버에서 username을 정규화한 뒤 정확히 일치할 때 production preflight reservation, Cloud Tasks, provider, Gemini, 운영 telemetry를 우회한다. 비슷한 다른 username은 일반 admission을 따른다.
 
 ## 사전 점검, checkout, webhook, outbox
 
 여기서 **사전 점검(preflight)** 은 결제·분석 전에 대상과 플랜 가능성을 확인하고 불변 snapshot을 만드는 단계다. preflight는 분석 요청과 별개이며, 실행 시 snapshot을 다시 검증한다.
 
 1. checkout은 서버 카탈로그 및 preflight snapshot에서만 Basic/Standard를 만들며, 현재 가격 버전은 `earlybird-2026-08-v5`다. 기존 v1/v2/v3/v4 payment lineage는 새 checkout으로 바꾸지 않고 immutable snapshot을 보존한다. 단, 기존 기대금액이 현재 결제액보다 낮아 Groble 가격 변경 뒤 불일치할 pending 링크는 복구하지 않는다([`20260812122517_update_earlybird_pricing_v5.sql`](../supabase/migrations/20260812122517_update_earlybird_pricing_v5.sql), [`app/api/earlybird/checkout/route.ts`](../app/api/earlybird/checkout/route.ts)).
-2. Groble webhook은 결제를 검증하고 `earlybird_fulfillments.awaiting_operator` outbox 행만 만든다. webhook이 직접 `analysis_requests`나 Task를 만들지 않는다([`20260724123300_add_earlybird_fulfillment_outbox.sql`](../supabase/migrations/20260724123300_add_earlybird_fulfillment_outbox.sql)).
-3. canonical recovery가 `EARLYBIRD_AUTOMATIC_FULFILLMENT_ENABLED=true`일 때만 bounded 자동 입장을 실행한다. paid/reference-confirmed/payment ID/금액·상품/소유자/production preflight 및 불변 launch·catalog·pricing·policy snapshot을 모두 다시 검증한다([`20260728120000_add_earlybird_automatic_fulfillment.sql`](../supabase/migrations/20260728120000_add_earlybird_automatic_fulfillment.sql), [`lib/services/earlybird/fulfillment-store.ts`](../lib/services/earlybird/fulfillment-store.ts)).
-4. 복구는 이미 `admission_pending`인 작업을 drain하며, 불일치·실패는 새 유료 요청을 임의로 만들지 않고 `manual_review` 또는 기존 재시도 경계로 남긴다. `payment_pending` 주문 두 건은 독립된 provider 증거가 없는 한 변경하지 않는다.
+2. Groble webhook은 signed payment를 검증하고 먼저 `earlybird_fulfillments.awaiting_operator`를 만든다. `EARLYBIRD_WEBHOOK_AUTO_ADMISSION_ENABLED`가 정확히 `true`이고 signed `paidAt`이 고정 cutoff 이상일 때만 같은 요청 경계에서 주문과 preflight를 `secondary`에 고정하고 durable admission을 시도한다. cutoff 이전 결제와 duplicate delivery는 자동 입장하지 않는다.
+3. canonical worker의 `EARLYBIRD_AUTOMATIC_FULFILLMENT_ENABLED=false`는 historical `awaiting_operator` sweep를 막는다. `ANALYSIS_V2_RECOVERY_ENABLED=true`는 webhook이 이미 승인한 `admission_pending`·`retryable_failure`만 drain한다([`20260728120000_add_earlybird_automatic_fulfillment.sql`](../supabase/migrations/20260728120000_add_earlybird_automatic_fulfillment.sql), [`lib/services/earlybird/fulfillment-store.ts`](../lib/services/earlybird/fulfillment-store.ts)).
+4. gate가 false거나 cutoff 이전이면 결제 확정과 notification은 유지하면서 concierge `awaiting_operator`에 남는다. 불일치·실패는 새 유료 요청을 임의로 만들지 않고 `manual_review` 또는 기존 재시도 경계로 남긴다. 독립된 provider 증거 없는 `payment_pending`은 상태 변경 근거로 사용하지 않는다.
 
 ## canonical queue와 복구
 
@@ -98,10 +100,10 @@ score audit는 결과 확정 이후의 background 작업이다. final score chec
 
 ## Rollout, rollback, privacy·secret 경계
 
-- **Fresh provenance activation gate (미통과):** `fresh-provenance-pglite.test.ts`는 immutable predecessor shape, source hash, ACL, and deterministic SQL lock-order contract를 검증하지만 실제 PostgreSQL의 다중 connection row-lock 동작을 증명하지 않는다. `20260811090000_harden_fresh_provenance.sql`을 production에서 strict fresh admission cohort에 활성화하기 전에는, 격리된 disposable PostgreSQL에서 exact predecessor chain을 적용하고 two-session barrier로 fresh admission/record/bind/checkpoint 경로와 dispatch-guard/scheduler wrapper 경로를 교차 실행해야 한다. 각 교차 실행은 `lock_timeout` 안에 deadlock 없이 끝나고, `pg_stat_activity`에 잔류 lock wait가 없으며, canonical `preflight → request → job → provider/source → revenue parent → guard` 순서를 벗어나지 않는다는 것을 확인해야 한다. 이 gate는 paid provider call, production Supabase, real runner identity 없이 실행하며, pass/fail aggregate만 rollout record에 남긴다.
-- rollout은 reviewed migration history 확인 → 허용된 migration만 dry-run → DB migration/ACL 검증 → application 및 canonical worker 배포 → queue/recovery/preflight/automatic fulfillment 상태 확인 순서다. dirty/mixed worktree에서 `supabase db push --include-all`은 사용하지 않는다.
+- **Fresh provenance activation gate (통과):** 격리된 disposable PostgreSQL 17에서 exact predecessor chain과 two-session barrier를 사용한 23/23 concurrency 검증이 통과했다. fresh admission/record/bind/checkpoint와 dispatch-guard/scheduler wrapper 교차 실행이 bounded lock timeout 안에서 deadlock과 잔류 lock wait 없이 끝났다. production Supabase나 paid provider call은 사용하지 않았다. PGlite contract와 이 실제 PostgreSQL 증거를 함께 rollout 근거로 사용한다.
+- rollout은 reviewed migration history 확인 → exact migration allowlist dry-run → DB migration/ACL 검증 → Vercel gate-off 배포 → canonical worker 3개 preflight pool 및 recovery 배포 → queue를 두 번 확인 → 고정 future webhook cutoff 설정 → 신규 결제 gate 활성화 순서다. dirty/mixed worktree에서 `supabase db push --include-all`은 사용하지 않는다.
 - reviewed Basic/Standard `test_entitlement` gender routing은 전용 Secret Manager resource `ai-baram-v2-gender-routing-hmac`만 사용한다. outside-source dotenv의 `ANALYSIS_V2_GENDER_ROUTING_HMAC_SECRET`을 `configure-analysis-v2-secrets.sh`로 provision하고, 반환된 exact numeric version을 protected deploy configuration의 `ANALYSIS_V2_GENDER_ROUTING_HMAC_SECRET_VERSION`에 고정한 뒤 같은 pin으로 deploy `--dry-run`, apply, `--check`를 실행한다. 값·`latest`·다른 identity/provider/Supabase secret 재사용은 금지하며, 최초 rollout 전에는 current template와 active revision 모두 cleanly absent여야 하고 이후 두 surface는 같은 exact ref여야 한다. 이 wiring은 일반 production/Plus routing 동작을 바꾸지 않는다.
-- rollback은 Vercel admission gate와 Cloud Run worker/recovery/automatic-fulfillment gate를 각각 필요한 범위에서 끈다. 이미 durable admission 상태인 작업은 recovery로 drain하며, 결제 상태를 rollback 수단으로 바꾸지 않는다.
+- 결제 자동 분석 rollback은 먼저 Vercel의 `EARLYBIRD_WEBHOOK_AUTO_ADMISSION_ENABLED=false`로 신규 admission만 닫는다. 이미 durable admission 상태인 작업은 `ANALYSIS_V2_RECOVERY_ENABLED=true`로 drain하고, checkout·결제 확정·concierge를 유지한다. worker 자체가 unsafe할 때만 별도 worker/dispatch gate를 닫으며 결제 상태를 rollback 수단으로 바꾸지 않는다.
 - R2 capture/purge, provider reconciliation, Gemini quarantine, task delivery fence의 오류는 각각의 durable ledger를 먼저 조사한다. ambiguous provider start에 replacement run을 만들지 않는다.
 - token, DB password, cookie, request/order/user UUID, provider hidden data, prompt/evidence/media URL을 문서·console·telemetry에 기록하지 않는다. server-only secret은 `NEXT_PUBLIC_`에 넣지 않는다. 공유 token은 접근 권한이므로 로그에 남기지 않는다.
 # Betatest free-credit pool

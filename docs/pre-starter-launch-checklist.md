@@ -1,6 +1,6 @@
 # Apify Starter 전환 체크리스트 (역사적·완료된 의사결정 맥락)
 
-기준 기록일: 2026-07-24. 이 문서는 Secondary Apify 계정의 Starter 전환을 검토하던 당시의 read-only gate를 보존한다. Secondary는 이미 Starter이며, automatic fulfillment와 공개 자동 분석은 현재 열려 있다. 따라서 이 문서는 현재 launch gate나 credential 변경 승인서가 아니다. 현재 worker·queue·결제 이행·rollback의 정본은 [Analysis V2 프로덕션 운영 정본](./analysis-v2-production-operations.md)이다.
+기준 기록일: 2026-07-24. 이 문서는 Secondary Apify 계정의 Starter 전환을 검토하던 당시의 read-only gate를 보존한다. Secondary는 이미 Starter이며, 당시의 worker recovery 기반 automatic fulfillment 설계는 현재 출시 경계가 아니다. 따라서 이 문서는 현재 launch gate나 credential 변경 승인서가 아니다. 현재 worker·queue·결제 이행·rollback의 정본은 [Analysis V2 프로덕션 운영 정본](./analysis-v2-production-operations.md)이다.
 
 과거 checklist의 목적은 “통과해도 구독 구매·secret 교체·자동 입장 활성화를 뜻하지 않는다”는 경계를 보존하는 것이었다. 아래 사실은 당시의 판단 근거이며, 역사적 사실을 현재와 다르게 고치지 않는다.
 
@@ -45,6 +45,6 @@ Plus 통제 표본의 provider actual `$3.33835`, Gemini 모델 추정 `$0.58586
 
 ## 현재와의 차이
 
-당시에는 `EARLYBIRD_AUTOMATIC_FULFILLMENT_ENABLED=false`를 cutover 기본값으로 보았고, 정확히 `true`일 때만 canonical `analysis-worker`가 유효한 paid Basic/Standard `awaiting_operator` 행을 자동 입장시키는 설계였다. 현재 canonical production worker는 automatic fulfillment를 켰고, `analysis-worker-secondary-e2e`는 worker/recovery/tasks/preflight 및 automatic fulfillment를 모두 `false`로 유지한다. webhook이 enqueue-only이고 payment evidence 없는 상태를 임의로 바꾸지 않는 경계는 그대로다.
+당시에는 `EARLYBIRD_AUTOMATIC_FULFILLMENT_ENABLED=false`를 cutover 기본값으로 보았고, 정확히 `true`일 때만 canonical `analysis-worker`가 유효한 paid Basic/Standard `awaiting_operator` 행을 자동 입장시키는 설계였다. 현재 출시 설계는 이 worker sweep를 사용하지 않는다. canonical worker는 `EARLYBIRD_AUTOMATIC_FULFILLMENT_ENABLED=false`를 유지하고, Vercel의 `EARLYBIRD_WEBHOOK_AUTO_ADMISSION_ENABLED=true`와 고정된 `EARLYBIRD_WEBHOOK_AUTO_ADMISSION_NOT_BEFORE` cutoff를 함께 만족하는 신규 signed payment만 자동 입장시킨다. gate가 false면 신규 자동 입장은 없고 concierge가 유지된다. `analysis-worker-secondary-e2e`는 worker/recovery/tasks/preflight 및 automatic fulfillment를 모두 `false`로 유지한다. payment evidence 없는 상태를 임의로 바꾸지 않는 경계도 그대로다.
 
 당시 “Starter 구매 또는 `APIFY_SECONDARY_API_TOKEN` 변경에는 명시적 승인 필요”라는 문구는 이미 끝난 전환의 안전 경계였다. 새로운 credential/secret 변경, 실제 결제 생성, migration 적용, 별도 deployment는 여전히 각각의 정확한 대상과 승인 범위를 요구한다.

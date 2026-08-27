@@ -1,5 +1,10 @@
 # Preflight Apify Three-Way Distribution Design
 
+> Historical design, superseded on 2026-08-27. The launch contract uses
+> `PREFLIGHT_APIFY_API_TOKEN_SLOTS=primary,quinary,senary`. New runs select only
+> from that exact pool; retries always resume their stored slot. The former
+> `primary,secondary,quaternary` proposal below is retained only as decision history.
+
 ## Goal
 
 Distribute new preflight Apify profile fallbacks evenly and deterministically across the primary, secondary, and quaternary credentials without changing retry identity or adding cross-account failover.
