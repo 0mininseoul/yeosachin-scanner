@@ -221,6 +221,13 @@ const freshAdmissionProviderRecoveryMigration = readFileSync(
     ),
     'utf8'
 );
+const completedAfterRefundMigration = readFileSync(
+    new URL(
+        '../../../supabase/migrations/20260821080948_allow_completed_results_after_refund.sql',
+        import.meta.url
+    ),
+    'utf8'
+);
 
 const USER = '123e4567-e89b-42d3-a456-426614174001';
 const PREFLIGHT = '223e4567-e89b-42d3-a456-426614174001';
@@ -1270,6 +1277,7 @@ describe('operator-approved earlybird fulfillment migration', () => {
         await db.exec(relationshipAdoptionChargeDriftMigration);
         await db.exec(relationshipAdoptionChargeDriftMigration);
         await db.exec(freshAdmissionProviderRecoveryMigration);
+        await db.exec(completedAfterRefundMigration);
     });
 
     beforeEach(async () => {
@@ -2381,6 +2389,39 @@ describe('operator-approved earlybird fulfillment migration', () => {
             fulfillment_status: 'analysis_in_progress',
             request_id: first.request_id,
         });
+        expect((await db.query<{ count: number }>(
+            `SELECT COUNT(*)::INTEGER AS count
+             FROM public.analysis_pipeline_jobs
+             WHERE request_id = $1::UUID
+               AND job_key = 'coordinator:bootstrap'`,
+            [first.request_id],
+        )).rows).toEqual([{ count: 1 }]);
+        await db.query(
+            `UPDATE public.analysis_requests
+             SET status = 'completed'
+             WHERE id = $1::UUID`,
+            [first.request_id],
+        );
+        expect((await asService<{ authorized: boolean }>(
+            `SELECT public.analysis_result_publication_authorized($1::UUID)
+                AS authorized`,
+            [first.request_id],
+        )).rows).toEqual([{ authorized: false }]);
+        await expect(asService<{
+            scanned: number;
+            completed: number;
+            manual_review: number;
+            retryable: number;
+        }>(
+            'SELECT * FROM public.reconcile_earlybird_fulfillments(100)',
+        )).resolves.toMatchObject({
+            rows: [expect.objectContaining({ completed: 1 })],
+        });
+        expect((await asService<{ authorized: boolean }>(
+            `SELECT public.analysis_result_publication_authorized($1::UUID)
+                AS authorized`,
+            [first.request_id],
+        )).rows).toEqual([{ authorized: true }]);
         expect((await db.query<{
             count: number;
             access_mode: string;

@@ -56,7 +56,7 @@ describe('SuspectRow shared-view overview masking', () => {
     it('renders the overview verbatim on the owner view (maskHandle=false)', () => {
         const markup = renderToStaticMarkup(
             <SuspectRow
-                account={account}
+                account={{ ...account, recentMutualRank: 2 }}
                 rank={1}
                 avatar={<span />}
                 externalProfileLinks={false}
@@ -64,6 +64,7 @@ describe('SuspectRow shared-view overview masking', () => {
         );
 
         expect(markup).toContain('채은님은 일본 여행의 추억을 공유하며 9ad8fa.01의 게시물에 좋아요를 눌렀습니다.');
+        expect(markup).toContain('가장 최근 맞팔한 여자 2번째');
         expect(markup).not.toContain('filter:blur(5px)');
     });
 });

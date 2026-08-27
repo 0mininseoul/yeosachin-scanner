@@ -382,6 +382,53 @@ describe('account-principal Phase A+B migration semantics', () => {
         expect((await db.query<{ count: number }>(
             'SELECT COUNT(*)::INTEGER AS count FROM public.account_paid_evidence',
         )).rows).toEqual([{ count: 5 }]);
+
+        await db.query(
+            `INSERT INTO public.earlybird_webhook_events(
+                event_id, event_type, payment_id, product_id, amount_krw,
+                disposition, order_id
+            ) VALUES
+                ($1, 'payment.cancel_requested', $2, 'product-basic', 14900,
+                    'accepted', $3::UUID),
+                ($4, 'payment.refunded', $2, 'product-basic', 14900,
+                    'accepted', $3::UUID)`,
+            [
+                'event-external-cancel-requested',
+                'payment-external-late',
+                EXTERNAL_LATE_ORDER_ID,
+                'event-external-refunded',
+            ],
+        );
+        for (const eventId of [
+            'event-external-cancel-requested',
+            'event-external-refunded',
+        ]) {
+            await expect(asService<{ recorded: boolean }>(
+                db,
+                `SELECT public.record_external_paid_ever($1::UUID, $2)
+                    AS recorded`,
+                [EXTERNAL_LATE_ORDER_ID, eventId],
+            )).rejects.toThrow('ACCOUNT_PAID_EVIDENCE_INVALID');
+        }
+        expect((await db.query<{
+            first_paid_at_is_earliest: boolean;
+            first_paid_at_is_null: boolean;
+            evidence_count: number;
+        }>(
+            `SELECT
+                first_paid_at = '2026-08-01T00:00:00Z'::TIMESTAMP WITH TIME ZONE
+                    AS first_paid_at_is_earliest,
+                first_paid_at IS NULL AS first_paid_at_is_null,
+                (SELECT COUNT(*)::INTEGER FROM public.account_paid_evidence)
+                    AS evidence_count
+             FROM public.users
+             WHERE id = $1::UUID`,
+            [EXTERNAL_ACCOUNT_ID],
+        )).rows).toEqual([{
+            first_paid_at_is_earliest: true,
+            first_paid_at_is_null: false,
+            evidence_count: 5,
+        }]);
     }, PGLITE_TEST_TIMEOUT_MS);
 
     it('replays an already-active classification command without duplicating audit transitions', async () => {
