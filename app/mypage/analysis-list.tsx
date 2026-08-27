@@ -1,6 +1,7 @@
 'use client';
 
 import { useState } from 'react';
+import Link from 'next/link';
 import { useRouter } from 'next/navigation';
 import { PrimaryButton } from '@/components/case-ui';
 import {
@@ -124,14 +125,15 @@ export default function AnalysisList({ initialEntries }: Props) {
 
                 if (!done) {
                     return (
-                        <div
+                        <Link
                             key={item.id}
+                            href={`/progress/${encodeURIComponent(item.id)}`}
                             data-amp-block
                             className="flex w-full gap-3.5 border-b border-line py-5 pr-1 text-left"
                         >
                             <span aria-hidden="true" className="w-0.5 shrink-0 self-stretch bg-amber" />
                             {rowContent}
-                        </div>
+                        </Link>
                     );
                 }
 

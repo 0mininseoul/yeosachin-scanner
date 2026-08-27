@@ -59,6 +59,7 @@ describe('mypage archive list rendering', () => {
         }));
 
         expect(markup).not.toContain('<button');
+        expect(markup).not.toContain('<a');
     });
 
     it('still renders a completed analysis entry as a button', () => {
@@ -79,4 +80,26 @@ describe('mypage archive list rendering', () => {
         expect(markup).not.toContain('/result/');
         expect(markup).not.toContain('<button');
     });
+
+    it.each(['pending', 'processing'] as const)(
+        'renders a %s owner-history row as a keyboard-accessible progress link',
+        status => {
+            const item: OwnerAnalysisHistoryItemV1 = {
+                id: '423e4567-e89b-42d3-a456-426614174000',
+                targetInstagramId: 'running.account',
+                status,
+                createdAt: '2026-08-12T09:00:00.000Z',
+                planType: 'basic',
+                pipelineVersion: 'v1',
+            };
+
+            const markup = renderToStaticMarkup(createElement(AnalysisList, {
+                initialEntries: [{ kind: 'analysis', item }],
+            }));
+
+            expect(markup).toContain(`href="/progress/${item.id}"`);
+            expect(markup).toContain('@running.account');
+            expect(markup).not.toContain('<button');
+        }
+    );
 });
