@@ -212,7 +212,7 @@ export function EarlybirdStatus({ order }: { order: EarlybirdOrderStatusDto }) {
 
             {order.resultUrl && order.systemStatus === 'completed' && nextUrl ? (
                 <Link
-                    href={nextUrl}
+                    href={order.resultUrl}
                     data-amp-block
                     className="mt-5 flex w-full items-center justify-center bg-blood px-5 py-4 text-[14px] font-bold text-white transition-opacity hover:opacity-90"
                 >

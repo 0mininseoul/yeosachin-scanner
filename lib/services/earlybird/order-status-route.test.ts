@@ -1,5 +1,5 @@
 import { readFileSync } from 'node:fs';
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 const mocks = vi.hoisted(() => ({
     createServerClient: vi.fn(),
@@ -104,6 +104,8 @@ function authenticate(userId: string | null = USER_ID) {
 describe('earlybird owner order status route', () => {
     beforeEach(() => {
         vi.clearAllMocks();
+        delete process.env.EARLYBIRD_WEBHOOK_AUTO_ADMISSION_ENABLED;
+        delete process.env.EARLYBIRD_WEBHOOK_AUTO_ADMISSION_NOT_BEFORE;
         authenticate();
         installQueries(orderRow(), null, { status: 'awaiting_operator' });
         mocks.isResultAuthoritativelyPublished.mockResolvedValue(true);
@@ -114,6 +116,11 @@ describe('earlybird owner order status route', () => {
             lifecycle: 'active',
             classificationVersion: 'account-ledger-v1',
         });
+    });
+
+    afterEach(() => {
+        delete process.env.EARLYBIRD_WEBHOOK_AUTO_ADMISSION_ENABLED;
+        delete process.env.EARLYBIRD_WEBHOOK_AUTO_ADMISSION_NOT_BEFORE;
     });
 
     it('requires authentication and returns no cached owner data', async () => {
@@ -289,6 +296,24 @@ describe('earlybird owner order status route', () => {
         });
     });
 
+    it('keeps completion projection lag automatic while the order remains in progress', async () => {
+        installQueries(orderRow({
+            status: 'analysis_in_progress',
+            result_request_id: RESULT_ID,
+        }), null, { status: 'completed' });
+
+        const response = await GET(new Request('https://example.com/api/earlybird/orders/latest'));
+        await expect(response.json()).resolves.toMatchObject({
+            order: {
+                systemStatus: 'analysis_in_progress',
+                deliveryMode: 'automatic',
+                requiresSupport: false,
+                progressUrl: `/progress/${RESULT_ID}`,
+                resultUrl: null,
+            },
+        });
+    });
+
     it('classifies an admitted automatic paid order without exposing internal fulfillment status', async () => {
         installQueries(orderRow({ status: 'paid' }), null, { status: 'admission_pending' });
 
@@ -308,7 +333,50 @@ describe('earlybird owner order status route', () => {
         );
     });
 
+    it('keeps a newly eligible awaiting-operator order automatic during the webhook handoff', async () => {
+        process.env.EARLYBIRD_WEBHOOK_AUTO_ADMISSION_ENABLED = 'true';
+        process.env.EARLYBIRD_WEBHOOK_AUTO_ADMISSION_NOT_BEFORE =
+            '2026-08-27T04:40:00Z';
+        installQueries(orderRow({
+            status: 'paid',
+            paid_at: '2026-08-27T04:40:00Z',
+        }), null, { status: 'awaiting_operator' });
+
+        const response = await GET(new Request('https://example.com/api/earlybird/orders/latest'));
+
+        await expect(response.json()).resolves.toMatchObject({
+            order: {
+                systemStatus: 'paid',
+                deliveryMode: 'automatic',
+                progressUrl: null,
+                resultUrl: null,
+            },
+        });
+    });
+
+    it('fails closed to support when the automatic-admission cutoff is invalid', async () => {
+        process.env.EARLYBIRD_WEBHOOK_AUTO_ADMISSION_ENABLED = 'true';
+        process.env.EARLYBIRD_WEBHOOK_AUTO_ADMISSION_NOT_BEFORE = 'not-a-timestamp';
+        installQueries(orderRow({
+            status: 'paid',
+            paid_at: '2026-08-27T04:40:00Z',
+        }), null, { status: 'awaiting_operator' });
+
+        const response = await GET(new Request('https://example.com/api/earlybird/orders/latest'));
+
+        await expect(response.json()).resolves.toMatchObject({
+            order: {
+                requiresSupport: true,
+                deliveryMode: 'support',
+                progressUrl: null,
+            },
+        });
+    });
+
     it('keeps a pre-cutoff awaiting-operator paid order on concierge delivery', async () => {
+        process.env.EARLYBIRD_WEBHOOK_AUTO_ADMISSION_ENABLED = 'true';
+        process.env.EARLYBIRD_WEBHOOK_AUTO_ADMISSION_NOT_BEFORE =
+            '2026-08-27T04:40:01Z';
         installQueries(orderRow({ status: 'paid' }), null, { status: 'awaiting_operator' });
 
         const response = await GET(new Request('https://example.com/api/earlybird/orders/latest'));

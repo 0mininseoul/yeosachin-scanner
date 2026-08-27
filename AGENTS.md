@@ -42,7 +42,7 @@ supabase db reset
 ### Project Structure
 
 ```
-ai-baram-detector/
+yeosachin-scanner/
 ├── app/                    # Next.js App Router 페이지 및 API
 │   ├── api/analysis/       # 분석 API (start, run, status, result)
 │   ├── analyze/            # 분석 입력 페이지

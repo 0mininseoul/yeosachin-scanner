@@ -9,6 +9,11 @@ import {
     supabaseEarlybirdFulfillmentOperator,
 } from '@/lib/services/earlybird/fulfillment-store';
 import {
+    isEarlybirdAutoAdmissionEligible,
+    readEarlybirdAutoAdmissionConfig,
+    type EarlybirdAutoAdmissionConfig,
+} from '@/lib/services/earlybird/auto-admission-config';
+import {
     readGrobleConfig,
     type GrobleConfig,
 } from '@/lib/services/groble/config';
@@ -30,36 +35,6 @@ import { operationalLogger } from '@/lib/observability/server';
 
 const MAX_WEBHOOK_BYTES = 256 * 1_024;
 const IDEMPOTENCY_KEY_PATTERN = /^[A-Za-z0-9._:-]{1,256}$/;
-const webhookAutoAdmissionNotBeforeSchema = z.string().datetime({ offset: true });
-
-type WebhookAutoAdmissionConfig = Readonly<{
-    enabled: boolean;
-    notBeforeMs: number | null;
-}>;
-
-function readWebhookAutoAdmissionConfig(
-    environment: Readonly<Record<string, string | undefined>> = process.env
-): WebhookAutoAdmissionConfig {
-    const enabled = environment.EARLYBIRD_WEBHOOK_AUTO_ADMISSION_ENABLED;
-    if (enabled === undefined || enabled === 'false') {
-        return { enabled: false, notBeforeMs: null };
-    }
-    if (enabled !== 'true') {
-        throw new Error('EARLYBIRD_WEBHOOK_AUTO_ADMISSION_ENABLED_INVALID');
-    }
-
-    const parsedNotBefore = webhookAutoAdmissionNotBeforeSchema.safeParse(
-        environment.EARLYBIRD_WEBHOOK_AUTO_ADMISSION_NOT_BEFORE
-    );
-    if (!parsedNotBefore.success) {
-        throw new Error('EARLYBIRD_WEBHOOK_AUTO_ADMISSION_NOT_BEFORE_INVALID');
-    }
-    const notBeforeMs = Date.parse(parsedNotBefore.data);
-    if (!Number.isFinite(notBeforeMs)) {
-        throw new Error('EARLYBIRD_WEBHOOK_AUTO_ADMISSION_NOT_BEFORE_INVALID');
-    }
-    return { enabled: true, notBeforeMs };
-}
 
 const finalizationResultSchema = z.array(z.object({
     disposition: z.enum([
@@ -291,9 +266,9 @@ async function handlePOST(
             planId: planForProduct(payment.productId, config),
             amountKrw: payment.amountKrw,
         };
-        let autoAdmissionConfig: WebhookAutoAdmissionConfig;
+        let autoAdmissionConfig: EarlybirdAutoAdmissionConfig;
         try {
-            autoAdmissionConfig = readWebhookAutoAdmissionConfig();
+            autoAdmissionConfig = readEarlybirdAutoAdmissionConfig();
         } catch {
             return reject(
                 503,
@@ -305,8 +280,10 @@ async function handlePOST(
                 state,
             );
         }
-        autoAdmissionEligible = autoAdmissionConfig.enabled
-            && Date.parse(payment.paidAt) >= (autoAdmissionConfig.notBeforeMs ?? Infinity);
+        autoAdmissionEligible = isEarlybirdAutoAdmissionEligible(
+            payment.paidAt,
+            autoAdmissionConfig,
+        );
         const buyerPhoneNormalized = normalizeKoreanMobileNumber(payment.buyerPhoneNumber);
         try {
             const params = {
