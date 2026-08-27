@@ -4,13 +4,13 @@
 
 ## 현재 배포·실행 상태
 
-- 2026-08-27 preflight 장애 복구 뒤 canonical Cloud Run worker는 revision `analysis-worker-00318-xql`이 traffic 100%를 받는다. 기존 immutable image를 유지하고 새 일반 preflight의 선택 슬롯만 `primary`로 바꾼 임시 복구다. 이전 revision은 0% traffic으로 rollback용 보존 상태다.
-- 이 임시 복구는 최종 3개 풀 배포가 아니다. canonical 릴리스는 코드와 worker 환경을 함께 배포해 `PREFLIGHT_APIFY_API_TOKEN_SLOTS=primary,quinary,senary`를 활성화해야 한다. 새 run만 이 풀에서 결정적으로 선택하고, 이미 durable provider run이 있는 요청은 `tenth`를 포함해 저장된 슬롯을 그대로 재개한다.
+- 2026-08-27 canonical Cloud Run worker는 revision `analysis-worker-fd70251r827a`가 traffic 100%를 받는다. worker/recovery/V2 tasks/preflight tasks는 활성화되어 있고 `PREFLIGHT_APIFY_API_TOKEN_SLOTS=primary,quinary,senary`다. 새 preflight run만 이 풀에서 결정적으로 선택하며, 이미 durable provider run이 있는 요청은 저장된 슬롯을 그대로 재개한다.
+- Vercel production은 exact source commit `5511a6ca`를 배포해 `yeosachin.com`에 연결했다. 신규 결제 자동 입장은 `EARLYBIRD_WEBHOOK_AUTO_ADMISSION_ENABLED=true`와 고정 cutoff `2026-08-27T04:40:00Z`를 함께 요구하므로, cutoff 이전 signed payment는 계속 concierge `awaiting_operator` 경계를 따른다.
 - 공개 preflight/분석 생성은 Vercel의 `ANALYSIS_V2_ADMISSION_ENABLED` gate다. 신규 결제 자동 입장은 별도 Vercel gate인 `EARLYBIRD_WEBHOOK_AUTO_ADMISSION_ENABLED`와 고정 RFC3339 cutoff `EARLYBIRD_WEBHOOK_AUTO_ADMISSION_NOT_BEFORE`를 함께 사용한다. 두 gate를 동일한 의미로 취급하지 않는다.
-- 자동 분석 출시 전 현재 결제 자동 입장과 canonical recovery는 닫혀 있다. 출시 target은 canonical worker의 `ANALYSIS_V2_WORKER_ENABLED=true`, `ANALYSIS_V2_RECOVERY_ENABLED=true`, `ANALYSIS_V2_TASKS_ENABLED=true`, `PREFLIGHT_TASKS_ENABLED=true`, `EARLYBIRD_AUTOMATIC_FULFILLMENT_ENABLED=false`다. historical `awaiting_operator` sweep는 열지 않는다([`lib/services/analysis/v2-execution-gate.ts`](../lib/services/analysis/v2-execution-gate.ts), [`scripts/deploy-analysis-v2-worker.sh`](../scripts/deploy-analysis-v2-worker.sh)).
+- canonical worker의 `ANALYSIS_V2_WORKER_ENABLED=true`, `ANALYSIS_V2_RECOVERY_ENABLED=true`, `ANALYSIS_V2_TASKS_ENABLED=true`, `PREFLIGHT_TASKS_ENABLED=true`, `EARLYBIRD_AUTOMATIC_FULFILLMENT_ENABLED=false`를 유지한다. Vercel cutoff 이후 새 signed payment만 webhook 경계에서 자동 입장하고 historical `awaiting_operator` sweep는 열지 않는다([`lib/services/analysis/v2-execution-gate.ts`](../lib/services/analysis/v2-execution-gate.ts), [`scripts/deploy-analysis-v2-worker.sh`](../scripts/deploy-analysis-v2-worker.sh)).
 - canonical Cloud Tasks target은 V2 job queue의 정확한 `/api/analysis/v2/worker`와 preflight queue의 정확한 `/api/analysis/preflight/worker`다. 두 설정 모두 query 없는 HTTPS target을 요구하고 OIDC audience는 해당 target과 같은 origin의 `/`이어야 한다([`lib/services/analysis/v2-tasks.ts`](../lib/services/analysis/v2-tasks.ts), [`lib/services/analysis/preflight-tasks.ts`](../lib/services/analysis/preflight-tasks.ts)).
 - 결제 후 정식 `apify_v1` 분석의 팔로워·팔로잉 및 기타 provider work는 주문별 `secondary` 슬롯으로 고정되며 preflight 풀로 회전하거나 폴백하지 않는다. 검증용 `analysis-worker-secondary-e2e`는 보존하되 worker/recovery/tasks/preflight/automatic fulfillment를 모두 `false`로 유지한다. 그것은 production queue의 대체 대상이 아니다.
-- `junho_dem`은 allowlisted operator에게만 제공되는 synthetic fixture다. 서버에서 username을 정규화한 뒤 정확히 일치할 때 production preflight reservation, Cloud Tasks, provider, Gemini, 운영 telemetry를 우회한다. 비슷한 다른 username은 일반 admission을 따른다.
+- `junho_dem`은 로그인한 allowlisted operator에게만 제공되는 synthetic fixture다. 서버에서 username을 정규화한 뒤 정확히 일치하면 owner-bound demo run을 idempotent하게 시작하고 run별 HttpOnly marker로 결과를 즉시 연다. 비로그인은 로그인 경계, 비운영자는 403으로 닫히며 production reservation, Cloud Tasks, provider, Gemini, 운영 telemetry를 우회한다. 비슷한 다른 username은 일반 admission을 따른다.
 
 ## 사전 점검, checkout, webhook, outbox
 
