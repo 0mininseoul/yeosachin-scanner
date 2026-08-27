@@ -4681,6 +4681,39 @@ fi
 assert_contains "$temp_dir/runtime-auth-userinfo.out" \
   "runtime env file must set a private HTTPS selfhosted-auth worker URL"
 
+# Legacy Apify-route manifests may still select selfhosted_auth for the
+# profile/relationship providers. They must use the same strict worker
+# origin/auth-mode contract as the named selfhosted route, before any mutation.
+cp "$temp_dir/runtime.env" "$temp_dir/runtime-legacy-selfhosted.env"
+printf '%s\n' \
+  'SCRAPER_PROFILE="selfhosted_auth"' \
+  'SCRAPER_PROFILES_BATCH="selfhosted_auth"' \
+  >>"$temp_dir/runtime-legacy-selfhosted.env"
+sed \
+  -e 's|^SELFHOSTED_AUTH_WORKER_URL=.*|SELFHOSTED_AUTH_WORKER_URL="https://:"|' \
+  -e 's|^SELFHOSTED_AUTH_WORKER_OIDC_AUDIENCE=.*|SELFHOSTED_AUTH_WORKER_OIDC_AUDIENCE="https://:"|' \
+  "$temp_dir/runtime-legacy-selfhosted.env" \
+  >"$temp_dir/runtime-legacy-selfhosted-bad-origin.env"
+cp "$temp_dir/runtime-legacy-selfhosted.env" \
+  "$temp_dir/runtime-legacy-selfhosted-bad-mode.env"
+printf '%s\n' 'SELFHOSTED_AUTH_WORKER_AUTH_MODE=bearer' \
+  >>"$temp_dir/runtime-legacy-selfhosted-bad-mode.env"
+for invalid_legacy_selfhosted in bad-origin bad-mode; do
+  : >"$temp_dir/runtime-legacy-selfhosted-$invalid_legacy_selfhosted-events.out"
+  if env "${common_env[@]}" \
+    'FAKE_GCLOUD_STATE=prerequisites_ready' \
+    "ANALYSIS_V2_WORKER_ENV_VARS_FILE=$temp_dir/runtime-legacy-selfhosted-$invalid_legacy_selfhosted.env" \
+    "FAKE_GCLOUD_EVENT_LOG=$temp_dir/runtime-legacy-selfhosted-$invalid_legacy_selfhosted-events.out" \
+    bash "$script_dir/deploy-analysis-v2-worker.sh" --dry-run \
+    >"$temp_dir/runtime-legacy-selfhosted-$invalid_legacy_selfhosted.out" 2>&1; then
+    fail "invalid legacy selfhosted-auth runtime contract was accepted: $invalid_legacy_selfhosted"
+  fi
+  assert_contains "$temp_dir/runtime-legacy-selfhosted-$invalid_legacy_selfhosted.out" \
+    'runtime env file must set a private HTTPS selfhosted-auth worker URL'
+  [[ ! -s "$temp_dir/runtime-legacy-selfhosted-$invalid_legacy_selfhosted-events.out" ]] \
+    || fail "invalid legacy selfhosted-auth runtime reached a mutation: $invalid_legacy_selfhosted"
+done
+
 if env "${common_env[@]}" 'FAKE_GCLOUD_STATE=prerequisites_ready' \
   "ANALYSIS_V2_WORKER_ENV_VARS_FILE=$temp_dir/runtime.env" \
   "ANALYSIS_V2_WORKER_BUILD_ENV_VARS_FILE=$temp_dir/build-secret.yaml" \

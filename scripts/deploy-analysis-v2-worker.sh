@@ -1914,8 +1914,10 @@ runtime_env_json_from_config() {
 
 selfhosted_auth_runtime_contract_projection() {
   local env_json="$1"
+  local contract_kind="${2:-route}"
   local normalized
-  normalized="$(printf '%s\n' "$env_json" | node -e '
+  normalized="$(printf '%s\n' "$env_json" | \
+    ANALYSIS_V2_SELFHOSTED_AUTH_CONTRACT_KIND="$contract_kind" node -e '
     const fs = require("node:fs");
     let env;
     try {
@@ -1946,7 +1948,11 @@ selfhosted_auth_runtime_contract_projection() {
       return parsed.origin;
     };
     try {
-      if (env.ANALYSIS_V2_INSTAGRAM_ROUTE !== "selfhosted_auth_v1"
+      const contractKind = process.env.ANALYSIS_V2_SELFHOSTED_AUTH_CONTRACT_KIND;
+      const expectedRoute = contractKind === "legacy"
+        ? "apify_v1" : "selfhosted_auth_v1";
+      if ((contractKind !== "route" && contractKind !== "legacy")
+        || env.ANALYSIS_V2_INSTAGRAM_ROUTE !== expectedRoute
         || env.SELFHOSTED_AUTH_ENABLED !== "true") {
         throw new Error("invalid route or auth gate");
       }
@@ -1970,12 +1976,15 @@ selfhosted_auth_runtime_contract_projection() {
       ];
       const allApify = providers.every(value => value === "apify");
       const allSelfHosted = providers.every(value => value === "selfhosted_auth");
-      if (!allApify && !allSelfHosted) throw new Error("mixed selectors");
+      if ((!allApify && !allSelfHosted)
+        || (contractKind === "legacy" && !allSelfHosted)) {
+        throw new Error("mixed selectors");
+      }
       const fallback = env.SCRAPER_FALLBACK === undefined ? "true" : env.SCRAPER_FALLBACK;
       if (fallback !== "true" && fallback !== "false") throw new Error("invalid fallback");
       if (allSelfHosted && fallback !== "false") throw new Error("selfhosted fallback");
       process.stdout.write(JSON.stringify({
-        route: "selfhosted_auth_v1",
+        route: env.ANALYSIS_V2_INSTAGRAM_ROUTE,
         enabled: "true",
         workerUrl,
         workerAudience,
@@ -1996,14 +2005,21 @@ selfhosted_auth_runtime_contract_projection() {
 
 selfhosted_auth_runtime_contract_matches_env() {
   local env_json="$1"
-  selfhosted_auth_runtime_contract_projection "$env_json" >/dev/null 2>&1
+  local contract_kind="${2:-route}"
+  selfhosted_auth_runtime_contract_projection "$env_json" "$contract_kind" >/dev/null 2>&1
 }
 
 validate_selfhosted_auth_runtime_contract() {
   local env_json="$1"
   local label="${2:-runtime env}"
-  selfhosted_auth_runtime_contract_matches_env "$env_json" \
-    || die "$label must set selfhosted_auth_v1 with SELFHOSTED_AUTH_ENABLED=true, a valid HTTPS worker URL, matching OIDC audience, bounded timeout, and consistent paid selectors"
+  local contract_kind="${3:-route}"
+  if [[ "$contract_kind" == "legacy" ]]; then
+    selfhosted_auth_runtime_contract_matches_env "$env_json" "$contract_kind" \
+      || die "$label must set a private HTTPS selfhosted-auth worker URL, matching OIDC audience, bounded timeout, and enabled kill switch"
+  else
+    selfhosted_auth_runtime_contract_matches_env "$env_json" "$contract_kind" \
+      || die "$label must set selfhosted_auth_v1 with SELFHOSTED_AUTH_ENABLED=true, a valid HTTPS worker URL, matching OIDC audience, bounded timeout, and consistent paid selectors"
+  fi
 }
 
 selfhosted_auth_runtime_contract_matches_config() {
@@ -2037,18 +2053,7 @@ validate_paid_collection_runtime_contract() {
   ' <<<"$env_json" >/dev/null \
     || die "runtime env file must keep SCRAPER_FALLBACK=false for selfhosted_auth"
   if jq -e '.SCRAPER_FOLLOWERS == "selfhosted_auth"' <<<"$env_json" >/dev/null; then
-    jq -e '
-      .SELFHOSTED_AUTH_ENABLED as $enabled
-      | .SELFHOSTED_AUTH_WORKER_URL as $url
-      | .SELFHOSTED_AUTH_WORKER_OIDC_AUDIENCE as $audience
-      | .SELFHOSTED_AUTH_WORKER_TIMEOUT_MS as $timeout
-      | ($enabled == "true")
-      and ([$url, $audience] | all(type == "string" and test("^https://[^/?#@]+$")))
-      and ($url == $audience)
-      and ($timeout | type == "string" and test("^[1-9][0-9]*$")
-        and (tonumber >= 1000 and tonumber <= 300000))
-    ' <<<"$env_json" >/dev/null \
-      || die "runtime env file must set a private HTTPS selfhosted-auth worker URL, matching OIDC audience, bounded timeout, and enabled kill switch"
+    validate_selfhosted_auth_runtime_contract "$env_json" "runtime env file" "legacy"
   else
     jq -e '.SELFHOSTED_AUTH_ENABLED == "false"' <<<"$env_json" >/dev/null \
       || die "runtime env file must set SELFHOSTED_AUTH_ENABLED=false for Apify paid collection"
