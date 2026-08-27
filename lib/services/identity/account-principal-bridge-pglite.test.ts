@@ -10,6 +10,10 @@ const entitlementMigration = readFileSync(new URL(
     '../../../supabase/migrations/20260814130000_allow_active_paid_entitlement_revocation.sql',
     import.meta.url,
 ), 'utf8');
+const zeroCouponFinalizationMigration = readFileSync(new URL(
+    '../../../supabase/migrations/20260827055155_allow_zero_coupon_paid_order_finalization.sql',
+    import.meta.url,
+), 'utf8');
 
 const PGLITE_TEST_TIMEOUT_MS = 30_000;
 const databases: PGlite[] = [];
@@ -152,6 +156,7 @@ async function createDatabase(): Promise<PGlite> {
     `);
     await db.exec(migration);
     await db.exec(entitlementMigration);
+    await db.exec(zeroCouponFinalizationMigration);
     return db;
 }
 
@@ -680,12 +685,68 @@ describe('account-principal Phase A+B migration semantics', () => {
                      AS recorded`,
                 [candidate.orderId, candidate.eventId],
             );
-            if (candidate.recordable) {
+            if (candidate.recordable || candidate.amountKrw === 0) {
                 expect((await record).rows).toEqual([{ recorded: false }]);
             } else {
                 await expect(record).rejects.toThrow('ACCOUNT_PAID_EVIDENCE_INVALID');
             }
         }
+    }, PGLITE_TEST_TIMEOUT_MS);
+
+    it('treats an accepted zero-value completion as a valid non-paid-ever event', async () => {
+        const db = await createDatabase();
+        await db.exec(`
+            INSERT INTO public.users(
+                id, email, provider, account_class, traffic_class,
+                lifecycle, classification_version
+            ) VALUES (
+                '30000000-0000-4000-8000-000000000006',
+                'zero-coupon@invalid.test', 'kakao', 'production', 'external',
+                'active', 'account-ledger-v1'
+            );
+            INSERT INTO public.earlybird_orders(
+                id, user_id, status, payment_id, actual_groble_product_id,
+                actual_amount_krw, paid_at
+            ) VALUES (
+                '40000000-0000-4000-8000-000000000006',
+                '30000000-0000-4000-8000-000000000006', 'paid',
+                'payment-zero-coupon', 'product-basic', 0,
+                '2026-08-27T00:00:00Z'
+            );
+            INSERT INTO public.earlybird_webhook_events(
+                event_id, event_type, payment_id, product_id, amount_krw,
+                disposition, order_id
+            ) VALUES (
+                'event-zero-coupon', 'payment.completed',
+                'payment-zero-coupon', 'product-basic', 0, 'accepted',
+                '40000000-0000-4000-8000-000000000006'
+            );
+            UPDATE public.account_ledger_rollout_state
+            SET paid_ever_state = 'active',
+                classification_command_version = 'account-ledger-v1',
+                classification_completed_at = '2026-08-27T00:00:00Z';
+        `);
+
+        await expect(asService<{ recorded: boolean }>(
+            db,
+            `SELECT public.record_external_paid_ever($1::UUID, $2)
+                AS recorded`,
+            [
+                '40000000-0000-4000-8000-000000000006',
+                'event-zero-coupon',
+            ],
+        )).resolves.toMatchObject({ rows: [{ recorded: false }] });
+        expect((await db.query<{ count: number }>(
+            'SELECT COUNT(*)::INTEGER AS count FROM public.account_paid_evidence',
+        )).rows).toEqual([{ count: 0 }]);
+        expect((await db.query<{
+            is_paid_user: boolean;
+            first_paid_at: string | null;
+        }>(
+            `SELECT is_paid_user, first_paid_at
+             FROM public.users
+             WHERE id = '30000000-0000-4000-8000-000000000006'`,
+        )).rows).toEqual([{ is_paid_user: false, first_paid_at: null }]);
     }, PGLITE_TEST_TIMEOUT_MS);
 
     it('allows active entitlement revocation while preserving first-paid history monotonicity', async () => {
