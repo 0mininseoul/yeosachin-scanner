@@ -6,7 +6,9 @@ import {
     EARLYBIRD_PLAN_CATALOG,
     isPaidEarlybirdPlanId,
 } from '@/lib/domain/earlybird/catalog';
-import { parseGrobleSellerReference } from '@/lib/services/earlybird/seller-reference';
+import {
+    isSafeEarlybirdCheckoutContinuationUrl,
+} from '@/lib/services/earlybird/checkout-continuation';
 import type { PreflightStatusV1 } from '@/lib/contracts/analysis-v2';
 import {
     availableAnalyticsStorage,
@@ -40,7 +42,7 @@ interface StaleEarlybirdRecoveryDependencies {
         input: RequestInfo | URL,
         init?: RequestInit
     ) => Promise<Response>;
-    redirectCheckout: (checkoutUrl: string) => void;
+    redirectCheckout: (nextUrl: string) => void;
     refreshActions: EarlybirdPricingRefreshActions;
 }
 
@@ -80,14 +82,14 @@ interface PendingEarlybirdRecoveryDependencies {
         input: RequestInfo | URL,
         init?: RequestInit
     ) => Promise<Response>;
-    redirectCheckout: (checkoutUrl: string) => void;
+    redirectCheckout: (nextUrl: string) => void;
     setPending: (pending: boolean) => void;
     showError: (message: string) => void;
 }
 
 export interface EarlybirdCheckoutLineageStatusAction {
     path: string;
-    kind: 'active_pending' | 'cancelled_unresolved';
+    kind: 'active_pending' | 'status_only';
 }
 
 function isEarlybirdCheckoutLineageSubreason(value: unknown): boolean {
@@ -115,10 +117,12 @@ export function earlybirdCheckoutLineageStatusAction(
         return null;
     }
     if (payload.code === 'EARLYBIRD_CHECKOUT_ACTIVE_PENDING_LINEAGE') {
-        return { path: `/earlybird?plan=${planId}`, kind: 'active_pending' };
+        return payload.subreason === 'SUPERSEDED_LINEAGE'
+            ? { path: `/earlybird?plan=${planId}&resume=0`, kind: 'status_only' }
+            : { path: `/earlybird?plan=${planId}`, kind: 'active_pending' };
     }
     if (payload.code === 'EARLYBIRD_CHECKOUT_CANCELLED_UNRESOLVED_LINEAGE') {
-        return { path: `/earlybird?plan=${planId}`, kind: 'cancelled_unresolved' };
+        return { path: `/earlybird?plan=${planId}&resume=0`, kind: 'status_only' };
     }
     return null;
 }
@@ -188,11 +192,11 @@ export async function recoverOrRefreshStaleEarlybirdPricing(
             response.ok
             && payload
             && typeof payload === 'object'
-            && 'checkoutUrl' in payload
-            && typeof payload.checkoutUrl === 'string'
-            && isSafeGrobleCheckoutUrl(payload.checkoutUrl)
+            && 'nextUrl' in payload
+            && typeof payload.nextUrl === 'string'
+            && isSafeEarlybirdCheckoutContinuationUrl(payload.nextUrl)
         ) {
-            dependencies.redirectCheckout(payload.checkoutUrl);
+            dependencies.redirectCheckout(payload.nextUrl);
             return 'checkout_recovered';
         }
     } catch {
@@ -240,11 +244,11 @@ export async function recoverPendingEarlybirdCheckout(
             response.ok
             && payload
             && typeof payload === 'object'
-            && 'checkoutUrl' in payload
-            && typeof payload.checkoutUrl === 'string'
-            && isSafeGrobleCheckoutUrl(payload.checkoutUrl)
+            && 'nextUrl' in payload
+            && typeof payload.nextUrl === 'string'
+            && isSafeEarlybirdCheckoutContinuationUrl(payload.nextUrl)
         ) {
-            dependencies.redirectCheckout(payload.checkoutUrl);
+            dependencies.redirectCheckout(payload.nextUrl);
             return 'checkout_recovered';
         }
         const code = payload
@@ -352,25 +356,4 @@ export function buildEarlybirdPlanPresentation(planId: PlanId) {
     });
 }
 
-export function isSafeGrobleCheckoutUrl(value: string): boolean {
-    try {
-        const url = new URL(value);
-        const queryEntries = Array.from(url.searchParams.entries());
-        const [queryKey, queryValue] = queryEntries[0] ?? [];
-        const canonicalReference = parseGrobleSellerReference(queryValue);
-        const rawQuery = url.search.slice(1);
-
-        return url.origin === 'https://groble.im'
-            && url.username === ''
-            && url.password === ''
-            && url.hash === ''
-            && /^\/payment\/[A-Za-z0-9_-]{1,128}$/.test(url.pathname)
-            && queryEntries.length === 1
-            && queryKey === 'ref'
-            && url.searchParams.getAll('ref').length === 1
-            && canonicalReference !== null
-            && rawQuery === `ref=${canonicalReference}`;
-    } catch {
-        return false;
-    }
-}
+export { isSafeEarlybirdCheckoutContinuationUrl } from '@/lib/services/earlybird/checkout-continuation';

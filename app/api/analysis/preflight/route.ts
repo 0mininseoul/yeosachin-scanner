@@ -554,6 +554,10 @@ async function handlePOST(
             email,
             authProvider: provider,
             targetInstagramId: parsed.data.targetInstagramId,
+            targetInputHash: preflightTargetInputHash(
+                parsed.data.targetInstagramId,
+                process.env,
+            ),
             idempotencyKey,
             accessMode,
         });

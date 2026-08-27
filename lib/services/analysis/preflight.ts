@@ -156,6 +156,8 @@ export function boundPrecheckoutBliteSourceExpiry(
 export const PREFLIGHT_DATABASE_NAMES = Object.freeze({
     table: 'analysis_preflights',
     createOrReplayRpc: 'create_or_replay_analysis_v2_preflight',
+    createOrReplayWithTargetHashRpc:
+        'create_or_replay_analysis_v2_preflight_with_target_hash',
     createOrReplayBetaRpc: 'create_or_replay_analysis_v2_betatest_preflight',
     markBetaPrepareDispatchedRpc: 'mark_analysis_beta_preflight_prepare_dispatched',
     markBetaPrepareRetryExhaustedRpc:
@@ -216,9 +218,17 @@ export interface CreatePreflightInput {
     email: string;
     authProvider: PreflightAuthProvider;
     targetInstagramId: string;
+    targetInputHash: string;
     idempotencyKey: string;
     accessMode: PlanAccessMode;
 }
+
+/** Beta entry has an explicit persistence contract and does not use the
+ * production hash-bound create/replay RPC. */
+export type CreateBetaPreflightInput = Omit<
+    CreatePreflightInput,
+    'accessMode' | 'targetInputHash'
+>;
 
 export interface CreatedPreflight {
     preflightId: string;
@@ -548,7 +558,7 @@ export interface PreflightStore {
 
 export interface BetaPreflightEntryStore {
     createOrReplayBeta(
-        input: Omit<CreatePreflightInput, 'accessMode'>
+        input: CreateBetaPreflightInput
     ): Promise<CreatedBetaPreflight>;
     markBetaPrepareDispatched(input: {
         preflightId: string;
@@ -951,19 +961,23 @@ export function createSupabasePreflightStore(
 ): SupabasePreflightStore {
     return {
         async createOrReplay(input) {
-            const { data, error } = await client.rpc(PREFLIGHT_DATABASE_NAMES.createOrReplayRpc, {
-                p_user_id: input.userId,
-                p_email: input.email,
-                p_auth_provider: input.authProvider,
-                p_target_instagram_id: input.targetInstagramId,
-                p_idempotency_key: input.idempotencyKey,
-                p_access_mode: input.accessMode,
-                p_launch_status_snapshot: launchStatusSnapshot(),
-                p_plan_catalog_snapshot: planCatalogSnapshot(),
-                p_pricing_version: PLAN_PRICING_VERSION,
-                p_pricing_snapshot: pricingSnapshot(),
-                p_policy_versions_snapshot: preflightPolicyVersions(input.accessMode),
-            });
+            const { data, error } = await client.rpc(
+                PREFLIGHT_DATABASE_NAMES.createOrReplayWithTargetHashRpc,
+                {
+                    p_user_id: input.userId,
+                    p_email: input.email,
+                    p_auth_provider: input.authProvider,
+                    p_target_instagram_id: input.targetInstagramId,
+                    p_target_input_hash: input.targetInputHash,
+                    p_idempotency_key: input.idempotencyKey,
+                    p_access_mode: input.accessMode,
+                    p_launch_status_snapshot: launchStatusSnapshot(),
+                    p_plan_catalog_snapshot: planCatalogSnapshot(),
+                    p_pricing_version: PLAN_PRICING_VERSION,
+                    p_pricing_snapshot: pricingSnapshot(),
+                    p_policy_versions_snapshot: preflightPolicyVersions(input.accessMode),
+                }
+            );
             if (error) throwRpcError(error, 'create');
             const row = rpcRow(data, 'create');
             if (!row || typeof row.created !== 'boolean') {
@@ -1996,11 +2010,30 @@ export async function processPreflight(
     try {
         const isBetatest = claim.analysisEntryChannel === 'betatest';
         const isAnonymousPreflight = claim.userId === null;
-        const selectedBliteCohort = selectBliteCohort(
+        const bliteCohortSelected = selectBliteCohort(
             claim.preflightId,
             dependencies.env ?? process.env,
             { signedTestEntitlement: claim.accessMode === 'test_entitlement' },
         );
+        // Hash-complete identity is a prerequisite for B-lite's durable
+        // provider lineage. Legacy rows remain valid ordinary preflights, but
+        // they must bypass activation immediately rather than consuming the
+        // B-lite timeout and failing on a persistence invariant.
+        const selectedBliteCohort = bliteCohortSelected && Boolean(claim.targetInputHash);
+        let bliteObservability: PrecheckoutBliteObservability | undefined =
+            dependencies.bliteObservability;
+        if (bliteCohortSelected && !claim.targetInputHash) {
+            try {
+                bliteObservability ??= createPrecheckoutBliteObservability({
+                    preflightId: claim.preflightId,
+                    startedAtMs: workerStartedAt,
+                });
+                bliteObservability.fallbackLatched('legacy_missing_target_hash');
+            } catch {
+                // The skip reason is diagnostic only and must never alter the
+                // ordinary provider outcome.
+            }
+        }
         let bliteClock: Awaited<
             ReturnType<typeof precheckoutBliteSourceStore.activateCohort>
         > | null = null;
@@ -2062,7 +2095,6 @@ export async function processPreflight(
 
         let profile: InstagramProfile | null;
         let bliteProviderRun: StoredPreflightProviderRun | null = null;
-        let bliteObservability: PrecheckoutBliteObservability | undefined;
         if (bliteClock !== null) {
             if (
                 betaHold
@@ -2071,11 +2103,10 @@ export async function processPreflight(
             ) {
                 throw new Error(BETA_APIFY_POOL_CAPACITY_ERROR);
             }
-            bliteObservability = dependencies.bliteObservability
-                ?? createPrecheckoutBliteObservability({
-                    preflightId: claim.preflightId,
-                    startedAtMs: Date.parse(bliteClock.submittedAt),
-                });
+            bliteObservability ??= createPrecheckoutBliteObservability({
+                preflightId: claim.preflightId,
+                startedAtMs: Date.parse(bliteClock.submittedAt),
+            });
             const identity = preflightProviderIdentity(
                 existingRun?.credentialSlot
                     ?? betaHold?.credentialSlot

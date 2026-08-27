@@ -48,12 +48,14 @@ vi.mock('@/components/case-ui', () => ({
 vi.mock('@/app/earlybird/earlybird-status', () => ({
     EarlybirdStatus: ({
         order,
+        suppressCheckoutRecovery,
     }: {
         order: { orderId: string; actualAmountKrw: number | null };
+        suppressCheckoutRecovery?: boolean;
     }) => createElement(
         'div',
         { 'data-testid': 'earlybird-status' },
-        `${order.orderId}:${String(order.actualAmountKrw)}`
+        `${order.orderId}:${String(order.actualAmountKrw)}:${String(Boolean(suppressCheckoutRecovery))}`
     ),
 }));
 
@@ -109,8 +111,17 @@ describe('earlybird status page', () => {
         const markup = renderToStaticMarkup(page);
 
         expect(markup).toContain(`data-testid="earlybird-status"`);
-        expect(markup).toContain(`${ORDER_ID}:0`);
+        expect(markup).toContain(`${ORDER_ID}:0:false`);
         expect(markup).not.toContain('확인할 내역이 없습니다');
+    });
+
+    it('passes the status-only resume guard for superseded lineage navigation', async () => {
+        const page = await EarlybirdPage({
+            searchParams: Promise.resolve({ resume: '0' }),
+        });
+        const markup = renderToStaticMarkup(page);
+
+        expect(markup).toContain(`${ORDER_ID}:0:true`);
     });
 
     it('does not expose order status to a retired account', async () => {

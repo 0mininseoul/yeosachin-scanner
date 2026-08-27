@@ -35,6 +35,7 @@ export default async function EarlybirdPage({
     const planId = requestedPlan === 'basic' || requestedPlan === 'standard'
         ? requestedPlan
         : undefined;
+    const suppressCheckoutRecovery = params.resume === '0';
 
     let order = null;
     try {
@@ -48,7 +49,10 @@ export default async function EarlybirdPage({
             <TopBar />
             <main className="mx-auto max-w-[500px] px-5 pb-16 pt-10">
                 {order ? (
-                    <EarlybirdStatus order={order} />
+                    <EarlybirdStatus
+                        order={order}
+                        suppressCheckoutRecovery={suppressCheckoutRecovery}
+                    />
                 ) : (
                     <>
                         <Eyebrow>얼리버드 사전 구매 현황</Eyebrow>

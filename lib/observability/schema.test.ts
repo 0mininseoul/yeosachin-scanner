@@ -575,6 +575,7 @@ describe('sanitizeOperationalEvent', () => {
             'preflight.exclusion_decided',
             'earlybird.checkout_created',
             'earlybird.checkout_failed',
+            'earlybird.checkout_redirected',
             'groble.webhook_received',
             'groble.webhook_finalized',
             'groble.webhook_rejected',

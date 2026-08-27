@@ -13,6 +13,7 @@ const BUSINESS_EVENTS = [
     'preflight.exclusion_decided',
     'earlybird.checkout_created',
     'earlybird.checkout_failed',
+    'earlybird.checkout_redirected',
     'earlybird.waitlist_created',
     'earlybird.waitlist_failed',
     'groble.webhook_received',
@@ -110,6 +111,32 @@ describe('business operational event contract', () => {
         });
         expect(JSON.stringify(sanitized)).not.toMatch(
             /private@example|010-1234|Private Buyer|merchant-private|product-private|delivery-private|signature-private|body-private/
+        );
+    });
+
+    it('keeps checkout redirect observability bounded to plan and mode dimensions', () => {
+        const sanitized = sanitizeOperationalEvent({
+            event: 'earlybird.checkout_redirected',
+            severity: 'info',
+            fields: {
+                plan_id: 'standard',
+                checkout_mode: 'recovery',
+                disposition: 'redirected',
+                operation: 'checkout',
+                checkout_url: 'https://provider.example/private',
+                groble_seller_reference: 'ord.private',
+                buyer_phone: '010-0000-0000',
+            },
+        });
+
+        expect(sanitized.fields).toMatchObject({
+            plan_id: 'standard',
+            checkout_mode: 'recovery',
+            disposition: 'redirected',
+            operation: 'checkout',
+        });
+        expect(JSON.stringify(sanitized)).not.toMatch(
+            /provider\.example|private|010-0000/
         );
     });
 });

@@ -38,6 +38,7 @@ function cancelledOrder(): EarlybirdOrderStatusDto {
         displayStatus: '취소됨',
         requiresSupport: false,
         deliveryMode: 'concierge',
+        checkoutRecoverable: false,
         progressUrl: null,
         resultUrl: null,
     };
@@ -53,6 +54,20 @@ describe('earlybird cancelled order status', () => {
         expect(markup).toContain('새로 결제하지 말고');
         expect(markup).not.toContain('결제 계속하기');
         expect(markup).not.toContain('이메일 알림 받기');
+    });
+
+    it('keeps a superseded lineage status-only even while the ledger row is pending', () => {
+        const markup = renderToStaticMarkup(createElement(EarlybirdStatus, {
+            order: {
+                ...cancelledOrder(),
+                systemStatus: 'payment_pending',
+                displayStatus: '결제 확인',
+                checkoutRecoverable: true,
+            },
+            suppressCheckoutRecovery: true,
+        }));
+
+        expect(markup).not.toContain('결제 계속하기');
     });
 });
 

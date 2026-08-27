@@ -9,7 +9,7 @@ import {
     isEarlybirdPlanSelectable,
     isEarlybirdPlanSoldOut,
     isCurrentEarlybirdCheckoutStatusCta,
-    isSafeGrobleCheckoutUrl,
+    isSafeEarlybirdCheckoutContinuationUrl,
     parseEarlybirdPlanParam,
     pendingEarlybirdCheckoutStatusPath,
     resolveAvailableEarlybirdPlan,
@@ -17,7 +17,10 @@ import {
 } from './ui-state';
 import * as earlybirdUiState from './ui-state';
 import { EARLYBIRD_DISCLOSURE_TEXT } from '@/lib/domain/earlybird/catalog';
-import { getGrobleCheckoutUrl, readGrobleConfig } from '@/lib/services/groble/config';
+import {
+    buildEarlybirdCheckoutContinuationUrl,
+    isSafeEarlybirdDemoProgressUrl,
+} from '@/lib/services/earlybird/checkout-continuation';
 import type { PreflightStatusV1 } from '@/lib/contracts/analysis-v2';
 
 const planCards = [
@@ -89,6 +92,46 @@ function readyPreflight(
 }
 
 describe('earlybird analyze UI state', () => {
+    it('accepts only the bounded same-origin continuation payload for recovery', async () => {
+        const recover = (
+            earlybirdUiState as unknown as {
+                recoverPendingEarlybirdCheckout?: (
+                    preflightId: string,
+                    planId: 'basic' | 'standard',
+                    guard: { inFlight: boolean },
+                    dependencies: Record<string, unknown>
+                ) => Promise<string>;
+            }
+        ).recoverPendingEarlybirdCheckout;
+        expect(recover).toBeTypeOf('function');
+
+        const request = vi.fn().mockResolvedValue(new Response(JSON.stringify({
+            orderId: '20000000-0000-4000-8000-000000000001',
+            nextUrl: '/api/earlybird/checkout/redirect?orderId=20000000-0000-4000-8000-000000000001&planId=basic',
+        }), {
+            status: 200,
+            headers: { 'content-type': 'application/json' },
+        }));
+        const redirectCheckout = vi.fn();
+        const dependencies = {
+            request,
+            redirectCheckout,
+            setPending: vi.fn(),
+            showError: vi.fn(),
+        };
+
+        await expect(recover!(
+            '10000000-0000-4000-8000-000000000001',
+            'basic',
+            { inFlight: false },
+            dependencies,
+        )).resolves.toBe('checkout_recovered');
+        expect(redirectCheckout).toHaveBeenCalledWith(
+            '/api/earlybird/checkout/redirect?orderId=20000000-0000-4000-8000-000000000001&planId=basic'
+        );
+        expect(dependencies.showError).not.toHaveBeenCalled();
+    });
+
     it('accepts only known deep-link plan values', () => {
         expect(parseEarlybirdPlanParam('basic')).toBe('basic');
         expect(parseEarlybirdPlanParam('standard')).toBe('standard');
@@ -170,48 +213,34 @@ describe('earlybird analyze UI state', () => {
         });
     });
 
-    it('allows browser navigation to Basic and Standard checkout URLs emitted by the server', () => {
-        const config = readGrobleConfig({
-            GROBLE_BASIC_PRODUCT_ID: 'basic_product-01',
-            GROBLE_STANDARD_PRODUCT_ID: 'standard_product-01',
-            GROBLE_BASIC_PAYMENT_ADDRESS: 'basic-checkout-a1',
-            GROBLE_STANDARD_PAYMENT_ADDRESS: 'standard-checkout-b2',
-            GROBLE_WEBHOOK_SECRET: 'test-secret',
-        });
-
-        expect(isSafeGrobleCheckoutUrl(getGrobleCheckoutUrl(
-            'basic',
-            'ord.0123456789abcdef0123456789abcdef',
-            config
-        ))).toBe(true);
-        expect(isSafeGrobleCheckoutUrl(getGrobleCheckoutUrl(
-            'standard',
-            'ord.fedcba9876543210fedcba9876543210',
-            config
-        ))).toBe(true);
+    it('allows browser navigation only to a server-owned Basic or Standard continuation', () => {
+        expect(isSafeEarlybirdCheckoutContinuationUrl(buildEarlybirdCheckoutContinuationUrl({
+            orderId: '10000000-0000-4000-8000-000000000001',
+            planId: 'basic',
+        }))).toBe(true);
+        expect(isSafeEarlybirdCheckoutContinuationUrl(buildEarlybirdCheckoutContinuationUrl({
+            orderId: '20000000-0000-4000-8000-000000000001',
+            planId: 'standard',
+        }))).toBe(true);
     });
 
     it.each([
-        ['a missing seller reference', 'https://groble.im/payment/basic-checkout-a1'],
-        ['a duplicate seller reference', 'https://groble.im/payment/basic-checkout-a1?ref=ord.0123456789abcdef0123456789abcdef&ref=ord.fedcba9876543210fedcba9876543210'],
-        ['an extra query parameter', 'https://groble.im/payment/basic-checkout-a1?ref=ord.0123456789abcdef0123456789abcdef&utm_source=test'],
-        ['the wrong query key casing', 'https://groble.im/payment/basic-checkout-a1?Ref=ord.0123456789abcdef0123456789abcdef'],
-        ['an encoded query key', 'https://groble.im/payment/basic-checkout-a1?%72ef=ord.0123456789abcdef0123456789abcdef'],
-        ['an encoded seller-reference value', 'https://groble.im/payment/basic-checkout-a1?ref=ord.0123456789abcdef0123456789abcde%66'],
-        ['a trailing query separator', 'https://groble.im/payment/basic-checkout-a1?ref=ord.0123456789abcdef0123456789abcdef&'],
-        ['repeated trailing query separators', 'https://groble.im/payment/basic-checkout-a1?ref=ord.0123456789abcdef0123456789abcdef&&'],
-        ['a malformed seller reference', 'https://groble.im/payment/basic-checkout-a1?ref=buyer%40example.com'],
-        ['an uppercase seller reference', 'https://groble.im/payment/basic-checkout-a1?ref=ord.0123456789ABCDEF0123456789ABCDEF'],
-        ['a short seller reference', 'https://groble.im/payment/basic-checkout-a1?ref=ord.0123456789abcdef'],
-        ['the wrong origin', 'https://www.groble.im/payment/basic-checkout-a1?ref=ord.0123456789abcdef0123456789abcdef'],
-        ['a deceptive subdomain', 'https://groble.im.evil.example/payment/basic-checkout-a1?ref=ord.0123456789abcdef0123456789abcdef'],
-        ['the wrong path', 'https://groble.im/products/basic-checkout-a1?ref=ord.0123456789abcdef0123456789abcdef'],
-        ['the wrong protocol', 'http://groble.im/payment/basic-checkout-a1?ref=ord.0123456789abcdef0123456789abcdef'],
-        ['embedded credentials', 'https://buyer:secret@groble.im/payment/basic-checkout-a1?ref=ord.0123456789abcdef0123456789abcdef'],
-        ['a hash', 'https://groble.im/payment/basic-checkout-a1?ref=ord.0123456789abcdef0123456789abcdef#receipt'],
+        ['a missing order id', '/api/earlybird/checkout/redirect?planId=basic'],
+        ['a duplicate order id', '/api/earlybird/checkout/redirect?orderId=10000000-0000-4000-8000-000000000001&orderId=20000000-0000-4000-8000-000000000001&planId=basic'],
+        ['an extra query parameter', '/api/earlybird/checkout/redirect?orderId=10000000-0000-4000-8000-000000000001&planId=basic&utm_source=test'],
+        ['the wrong query key casing', '/api/earlybird/checkout/redirect?orderId=10000000-0000-4000-8000-000000000001&PlanId=basic'],
+        ['an encoded query key', '/api/earlybird/checkout/redirect?%6frderId=10000000-0000-4000-8000-000000000001&planId=basic'],
+        ['an encoded order id', '/api/earlybird/checkout/redirect?orderId=10000000-0000-4000-8000-00000000000%31&planId=basic'],
+        ['a trailing query separator', '/api/earlybird/checkout/redirect?orderId=10000000-0000-4000-8000-000000000001&planId=basic&'],
+        ['a malformed order id', '/api/earlybird/checkout/redirect?orderId=not-an-id&planId=basic'],
+        ['an unsupported plan', '/api/earlybird/checkout/redirect?orderId=10000000-0000-4000-8000-000000000001&planId=plus'],
+        ['an uppercase order id', '/api/earlybird/checkout/redirect?orderId=10000000-0000-4000-8000-00000000000A&planId=basic'],
+        ['an absolute URL', 'https://provider.example/checkout?orderId=10000000-0000-4000-8000-000000000001&planId=basic'],
+        ['a wrong path', '/earlybird?orderId=10000000-0000-4000-8000-000000000001&planId=basic'],
+        ['a hash', '/api/earlybird/checkout/redirect?orderId=10000000-0000-4000-8000-000000000001&planId=basic#receipt'],
         ['a non-URL protocol', 'javascript:alert(1)'],
-    ])('rejects a Groble checkout URL with %s', (_case, url) => {
-        expect(isSafeGrobleCheckoutUrl(url)).toBe(false);
+    ])('rejects a checkout continuation URL with %s', (_case, url) => {
+        expect(isSafeEarlybirdCheckoutContinuationUrl(url)).toBe(false);
     });
 
     it('removes the old automatic-analysis action and banned copy from the purchase page', () => {
@@ -324,8 +353,7 @@ describe('earlybird analyze UI state', () => {
         }
         const request = vi.fn().mockResolvedValue(new Response(JSON.stringify({
             orderId: '20000000-0000-4000-8000-000000000001',
-            checkoutUrl: 'https://groble.im/payment/basic-checkout-a1'
-                + '?ref=ord.0123456789abcdef0123456789abcdef',
+            nextUrl: '/api/earlybird/checkout/redirect?orderId=20000000-0000-4000-8000-000000000001&planId=basic',
         }), {
             status: 200,
             headers: { 'content-type': 'application/json' },
@@ -351,8 +379,7 @@ describe('earlybird analyze UI state', () => {
             body: JSON.stringify({ preflightId: stale.preflightId }),
         });
         expect(redirectCheckout).toHaveBeenCalledWith(
-            'https://groble.im/payment/basic-checkout-a1'
-                + '?ref=ord.0123456789abcdef0123456789abcdef'
+            '/api/earlybird/checkout/redirect?orderId=20000000-0000-4000-8000-000000000001&planId=basic'
         );
         expect(emit).not.toHaveBeenCalled();
         for (const action of Object.values(refreshActions)) {
@@ -452,8 +479,8 @@ describe('earlybird analyze UI state', () => {
         expect(source).toContain(
             'recoverOrRefreshStaleEarlybirdPricing(stalePricingPreflightId'
         );
-        expect(source).toContain(
-            'redirectCheckout: checkoutUrl => window.location.assign(checkoutUrl)'
+        expect(source).toMatch(
+            /redirectCheckout: nextUrl => \{[\s\S]*?window\.location\.assign\(nextUrl\)/
         );
     });
 
@@ -496,8 +523,7 @@ describe('earlybird analyze UI state', () => {
 
         resolveRequest(new Response(JSON.stringify({
             orderId: '20000000-0000-4000-8000-000000000001',
-            checkoutUrl: 'https://groble.im/payment/basic-checkout-a1'
-                + '?ref=ord.0123456789abcdef0123456789abcdef',
+            nextUrl: '/api/earlybird/checkout/redirect?orderId=20000000-0000-4000-8000-000000000001&planId=basic',
         }), {
             status: 200,
             headers: { 'content-type': 'application/json' },
@@ -526,6 +552,10 @@ describe('earlybird analyze UI state', () => {
             subreason: 'SUPERSEDED_LINEAGE',
         }, 'standard')).toBeNull();
         expect(pendingEarlybirdCheckoutStatusPath(409, {
+            code: 'EARLYBIRD_CHECKOUT_ACTIVE_PENDING_LINEAGE',
+            subreason: 'SUPERSEDED_LINEAGE',
+        }, 'standard')).toBeNull();
+        expect(pendingEarlybirdCheckoutStatusPath(409, {
             code: 'EARLYBIRD_PRICING_REFRESH_REQUIRED',
         }, 'standard')).toBeNull();
         expect(pendingEarlybirdCheckoutStatusPath(409, {
@@ -547,19 +577,26 @@ describe('earlybird analyze UI state', () => {
             code: 'EARLYBIRD_CHECKOUT_ACTIVE_PENDING_LINEAGE',
             subreason: 'SUPERSEDED_LINEAGE',
         }, 'basic')).toEqual({
-            path: '/earlybird?plan=basic',
-            kind: 'active_pending',
+            path: '/earlybird?plan=basic&resume=0',
+            kind: 'status_only',
         });
         expect(earlybirdCheckoutLineageStatusAction(409, {
             code: 'EARLYBIRD_CHECKOUT_CANCELLED_UNRESOLVED_LINEAGE',
             subreason: 'STALE_PRICING_LINEAGE',
         }, 'basic')).toEqual({
-            path: '/earlybird?plan=basic',
-            kind: 'cancelled_unresolved',
+            path: '/earlybird?plan=basic&resume=0',
+            kind: 'status_only',
         });
         expect(earlybirdCheckoutLineageStatusAction(409, {
             code: 'EARLYBIRD_CHECKOUT_CANCELLED_UNRESOLVED_LINEAGE',
         }, 'basic')).toBeNull();
+    });
+
+    it('gates the status-page recovery button on the server capability DTO', () => {
+        const source = readFileSync(new URL('../../../app/earlybird/earlybird-status.tsx', import.meta.url), 'utf8');
+        expect(source).toContain('order.checkoutRecoverable');
+        expect(source).toContain('redirectCheckout: nextUrl =>');
+        expect(source).not.toContain('redirectCheckout: checkoutUrl => window.location.assign(checkoutUrl)');
     });
 
     it('hides a late Standard pending-checkout CTA and its bound message after selection changes', () => {
@@ -587,6 +624,26 @@ describe('earlybird analyze UI state', () => {
             targetInstagramId: lateStandardCta.targetInstagramId,
             planId: 'standard',
         })).toBe(true);
+    });
+
+    it('preserves the strict operator demo progress continuation without payment telemetry', () => {
+        expect(isSafeEarlybirdDemoProgressUrl(
+            '/progress/10000000-0000-4000-8000-000000000001',
+        )).toBe(true);
+        expect(isSafeEarlybirdDemoProgressUrl(
+            'https://provider.example/progress/10000000-0000-4000-8000-000000000001',
+        )).toBe(false);
+        expect(isSafeEarlybirdDemoProgressUrl(
+            '/progress/10000000-0000-4000-8000-000000000001?checkout=1',
+        )).toBe(false);
+
+        const source = readFileSync(new URL('../../../app/analyze/page.tsx', import.meta.url), 'utf8');
+        const demoBranch = source.indexOf('isSafeEarlybirdDemoProgressUrl(payload.nextUrl)');
+        const checkoutEvent = source.indexOf('EVENTS.CHECKOUT_REDIRECTED', demoBranch);
+        const continuationBranch = source.indexOf('isSafeEarlybirdCheckoutContinuationUrl(payload.nextUrl)');
+        expect(demoBranch).toBeGreaterThan(-1);
+        expect(demoBranch).toBeLessThan(continuationBranch);
+        expect(checkoutEvent).toBeGreaterThan(continuationBranch);
     });
 
     it('hides a late Standard pending-checkout CTA and message after target or preflight changes', () => {

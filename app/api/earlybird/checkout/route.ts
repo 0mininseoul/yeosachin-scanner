@@ -36,6 +36,7 @@ import {
 } from '@/lib/observability/server';
 import { demoResponseHeaders, isDemoOperator } from '@/lib/services/demo-analysis/demo-analysis';
 import { demoAnalysisStore } from '@/lib/services/demo-analysis/store';
+import { buildEarlybirdCheckoutContinuationUrl } from '@/lib/services/earlybird/checkout-continuation';
 
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
@@ -294,7 +295,10 @@ async function handlePOST(
         });
         return NextResponse.json({
             orderId: result.orderId,
-            checkoutUrl: result.checkoutUrl,
+            nextUrl: buildEarlybirdCheckoutContinuationUrl({
+                orderId: result.orderId,
+                planId: parsed.data.planId as 'basic' | 'standard',
+            }),
         }, { status: result.created ? 201 : 200 });
     } catch (error) {
         if (error instanceof EarlybirdWaitlistRequiredError) {
@@ -405,7 +409,10 @@ async function handlePUT(request: Request): Promise<NextResponse> {
         });
         return NextResponse.json({
             orderId: result.orderId,
-            checkoutUrl: result.checkoutUrl,
+            nextUrl: buildEarlybirdCheckoutContinuationUrl({
+                orderId: result.orderId,
+                planId: result.planId,
+            }),
         });
     } catch (error) {
         if (error instanceof EarlybirdCheckoutRecoveryError) {

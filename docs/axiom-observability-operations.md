@@ -43,7 +43,7 @@ AXIOM_ORG_ID=<UI에서 확인한 실제 조직 ID>
 - HTTP·Next: `http.route_completed`, `http.route_failed`, `next.request_error`
 - 인증·사전 검사: `auth.*`, `preflight.*`
 - 결제 전 B-lite 서버 결과: `precheckout_blite.completed`, `precheckout_blite.profile_collection_failed`, `precheckout_blite.inference_failed`, `precheckout_blite.finalizer_failed`; 브라우저 결과 `precheckout_blite.fallback_latched`·`precheckout_blite.demo_started`·`precheckout_blite.demo_completed`·`precheckout_blite.demo_failed`는 Amplitude
-- 결제: `earlybird.checkout_*`, `earlybird.waitlist_*`, `groble.webhook_*`
+- 결제: `earlybird.checkout_*` (생성·실패·검증 완료 후 redirect), `earlybird.waitlist_*`, `groble.webhook_*`
 - 수집: `scraper.batch_*`, `scraper.fallback_selected`, `scraper.candidate_failed`
 - 작업 큐·분석: `cloud_task.enqueue_*`, `analysis_v2.fresh_admission_enqueued`, `analysis_v2.request_queued`, `analysis_v2.worker_*`, `analysis_v2.result_viewed`
 - 결과 공유: `result_share_initiated`, `result_share_copy_succeeded`, `result_share_handoff_completed`, `result_share_cancelled`, `result_share_failed`, `result_shared_confirmed`, `shared_result_opened`

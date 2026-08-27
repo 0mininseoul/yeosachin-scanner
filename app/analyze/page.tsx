@@ -23,11 +23,12 @@ import {
     isEarlybirdPlanSelectable,
     isEarlybirdPlanSoldOut,
     isCurrentEarlybirdCheckoutStatusCta,
-    isSafeGrobleCheckoutUrl,
+    isSafeEarlybirdCheckoutContinuationUrl,
     recoverPendingEarlybirdCheckout,
     recoverOrRefreshStaleEarlybirdPricing,
     resolveEarlybirdPricingBoundary,
 } from '@/lib/services/earlybird/ui-state';
+import { isSafeEarlybirdDemoProgressUrl } from '@/lib/services/earlybird/checkout-continuation';
 import {
     availablePendingTargetStorage,
     bindPendingAnalysisTarget,
@@ -40,7 +41,7 @@ import {
     signOutAndClearPendingAnalysisTarget,
     storePendingAnalysisTarget,
 } from '@/lib/services/pending-analysis-target';
-import { EVENTS, flushAnalytics, trackEvent } from '@/lib/services/analytics';
+import { EVENTS, trackEvent } from '@/lib/services/analytics';
 import {
     availableAnalyticsStorage,
     currentAttributionSource,
@@ -80,7 +81,7 @@ interface CheckoutStatusCta {
     preflightId: string;
     targetInstagramId: string | null;
     planId: PlanId;
-    kind: 'active_pending' | 'cancelled_unresolved';
+    kind: 'active_pending' | 'status_only';
     navigating: boolean;
 }
 
@@ -234,7 +235,19 @@ const DISCLOSURE_ACCEPTED = true;
         clearAutoCheckoutContinuation();
         void recoverOrRefreshStaleEarlybirdPricing(stalePricingPreflightId, {
             request: fetch,
-            redirectCheckout: checkoutUrl => window.location.assign(checkoutUrl),
+            redirectCheckout: nextUrl => {
+                if (
+                    analyticsEligible
+                    && effectiveSelectedPlan
+                    && isPaidEarlybirdPlanId(effectiveSelectedPlan)
+                ) {
+                    trackEvent(EVENTS.CHECKOUT_REDIRECTED, {
+                        plan_id: effectiveSelectedPlan,
+                        preflight_id: stalePricingPreflightId,
+                    });
+                }
+                window.location.assign(nextUrl);
+            },
             refreshActions: {
                 reset,
                 clearGirlfriendInstagramId: () => setGirlfriendInstagramId(''),
@@ -246,7 +259,15 @@ const DISCLOSURE_ACCEPTED = true;
                 ),
             },
         });
-    }, [clearAutoCheckoutContinuation, reset, router, setError, stalePricingPreflightId]);
+    }, [
+        analyticsEligible,
+        clearAutoCheckoutContinuation,
+        effectiveSelectedPlan,
+        reset,
+        router,
+        setError,
+        stalePricingPreflightId,
+    ]);
 
     useEffect(() => {
         if (
@@ -553,14 +574,12 @@ const DISCLOSURE_ACCEPTED = true;
                             checkoutRecoveryGuardRef.current,
                             {
                                 request: fetch,
-                                redirectCheckout: checkoutUrl => {
+                                redirectCheckout: nextUrl => {
                                     checkoutRedirectStarted = true;
                                     if (analyticsEligible) {
                                         trackEvent(EVENTS.CHECKOUT_REDIRECTED, analyticsProperties);
-                                        void flushAnalytics().finally(() => window.location.assign(checkoutUrl));
-                                        return;
                                     }
-                                    window.location.assign(checkoutUrl);
+                                    window.location.assign(nextUrl);
                                 },
                                 setPending: setPurchaseSubmitting,
                                 showError: setError,
@@ -618,26 +637,30 @@ const DISCLOSURE_ACCEPTED = true;
                 setWaitlistComplete(true);
                 return;
             }
-            if (payload && typeof payload === 'object'
+            // The operator-only synthetic checkout is the one compatibility
+            // response that intentionally points at local progress. Keep it
+            // strictly same-origin and do not count it as a payment redirect.
+            if (
+                payload
+                && typeof payload === 'object'
                 && 'nextUrl' in payload
                 && typeof payload.nextUrl === 'string'
-                && /^\/progress\/[0-9a-f-]{36}$/i.test(payload.nextUrl)) {
+                && isSafeEarlybirdDemoProgressUrl(payload.nextUrl)
+            ) {
                 checkoutRedirectStarted = true;
-                await flushAnalytics();
                 window.location.assign(payload.nextUrl);
                 return;
             }
             if (!payload || typeof payload !== 'object'
-                || !('checkoutUrl' in payload)
-                || typeof payload.checkoutUrl !== 'string'
-                || !isSafeGrobleCheckoutUrl(payload.checkoutUrl)) {
+                || !('nextUrl' in payload)
+                || typeof payload.nextUrl !== 'string'
+                || !isSafeEarlybirdCheckoutContinuationUrl(payload.nextUrl)) {
                 setError('결제창 주소를 확인하지 못했습니다. 잠시 후 다시 시도해주세요.');
                 return;
             }
             if (analyticsEligible) trackEvent(EVENTS.CHECKOUT_REDIRECTED, analyticsProperties);
-            if (analyticsEligible) await flushAnalytics();
             checkoutRedirectStarted = true;
-            window.location.assign(payload.checkoutUrl);
+            window.location.assign(payload.nextUrl);
         } catch {
             setError('요청을 처리하지 못했습니다. 잠시 후 다시 시도해주세요.');
         } finally {

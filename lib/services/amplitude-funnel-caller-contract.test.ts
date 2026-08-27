@@ -52,11 +52,9 @@ describe('Amplitude product funnel caller contract', () => {
             /trackEvent\(EVENTS\.CHECKOUT_STARTED[\s\S]*?fetch\([\s\S]*?'\/api\/earlybird\/checkout'/,
         );
         expect(analyze).toMatch(
-            /isSafeGrobleCheckoutUrl\(payload\.checkoutUrl\)[\s\S]*?trackEvent\(EVENTS\.CHECKOUT_REDIRECTED[\s\S]*?await flushAnalytics\(\)[\s\S]*?window\.location\.assign\(payload\.checkoutUrl\)/,
+            /isSafeEarlybirdCheckoutContinuationUrl\(payload\.nextUrl\)[\s\S]*?trackEvent\(EVENTS\.CHECKOUT_REDIRECTED[\s\S]*?window\.location\.assign\(payload\.nextUrl\)/,
         );
-        expect(analyze).toMatch(
-            /payload\.nextUrl[\s\S]*?await flushAnalytics\(\)[\s\S]*?window\.location\.assign\(payload\.nextUrl\)/,
-        );
+        expect(analyze).not.toContain('flushAnalytics');
     });
 
     it('tracks preflight and analysis only at accepted lifecycle boundaries', () => {

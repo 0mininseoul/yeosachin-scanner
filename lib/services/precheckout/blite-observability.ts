@@ -32,6 +32,7 @@ export const PRECHECKOUT_BLITE_FALLBACK_REASONS = [
     'terminal_before_48',
     'unresolved_at_48',
     'demo_error',
+    'legacy_missing_target_hash',
 ] as const;
 
 export type PrecheckoutBliteFallbackReason =

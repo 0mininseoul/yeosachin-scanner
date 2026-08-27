@@ -5,6 +5,7 @@ import {
     isEarlybirdAutoAdmissionEligible,
     readEarlybirdAutoAdmissionConfig,
 } from './auto-admission-config';
+import { isEarlybirdCheckoutRecoverableAt } from './recovery-window';
 
 export const earlybirdOrderSystemStatusSchema = z.enum([
     'payment_pending',
@@ -33,6 +34,14 @@ const orderRowSchema = z.object({
     plan_sequence: z.number().int().min(1).max(10).nullable(),
     result_request_id: z.string().uuid().nullable(),
     created_at: z.string().datetime({ offset: true }),
+});
+
+const checkoutRecoverablePreflightSchema = z.object({
+    id: z.string().uuid(),
+    user_id: z.string().uuid(),
+    target_instagram_id: z.string().min(1).max(30),
+    status: z.literal('ready'),
+    expires_at: z.string().datetime({ offset: true }),
 });
 
 const resultRowSchema = z.object({
@@ -92,6 +101,7 @@ export interface EarlybirdOrderStatusDto {
     displayStatus: string;
     requiresSupport: boolean;
     deliveryMode: EarlybirdDeliveryMode;
+    checkoutRecoverable: boolean;
     progressUrl: string | null;
     resultUrl: string | null;
 }
@@ -124,6 +134,39 @@ export async function loadLatestEarlybirdOrder(
         throw new EarlybirdOrderLookupError();
     }
     const order = parsed.data;
+    let checkoutRecoverable = false;
+    if (
+        order.status === 'payment_pending'
+        && isEarlybirdCheckoutRecoverableAt(order.created_at)
+    ) {
+        // Recovery is a server-computed capability, not a client-side age
+        // decision. Prove that this order still points at the same owner's
+        // ready, unexpired preflight for the exact target before exposing the
+        // continuation CTA.
+        const preflight = await supabaseAdmin
+            .from('analysis_preflights')
+            .select('id, user_id, target_instagram_id, status, expires_at')
+            .eq('id', order.preflight_id)
+            .eq('user_id', userId)
+            .eq('target_instagram_id', order.target_instagram_id)
+            .eq('status', 'ready')
+            .gt('expires_at', new Date().toISOString())
+            .maybeSingle();
+        if (!preflight.error) {
+            const parsedPreflight = checkoutRecoverablePreflightSchema.safeParse(
+                preflight.data,
+            );
+            const expiresAtMs = parsedPreflight.success
+                ? Date.parse(parsedPreflight.data.expires_at)
+                : Number.NaN;
+            checkoutRecoverable = parsedPreflight.success
+                && parsedPreflight.data.id === order.preflight_id
+                && parsedPreflight.data.user_id === userId
+                && parsedPreflight.data.target_instagram_id === order.target_instagram_id
+                && Number.isFinite(expiresAtMs)
+                && expiresAtMs > Date.now();
+        }
+    }
 
     let requiresSupport = false;
     let deliveryMode: EarlybirdDeliveryMode = 'concierge';
@@ -231,6 +274,7 @@ export async function loadLatestEarlybirdOrder(
         displayStatus: DISPLAY_STATUS[effectiveStatus],
         requiresSupport,
         deliveryMode,
+        checkoutRecoverable,
         progressUrl,
         resultUrl,
     });

@@ -40,6 +40,7 @@ const checkoutRecoveryRowSchema = z.object({
     payment_id: z.string().nullable(),
     actual_amount_krw: z.number().int().nonnegative().nullable(),
     paid_at: z.string().datetime({ offset: true }).nullable(),
+    created_at: z.string().datetime({ offset: true }),
 });
 
 const waitlistResultSchema = z.array(z.object({
@@ -172,7 +173,7 @@ export const earlybirdStore = {
             + 'buyer_match_policy, expected_buyer_phone_number_normalized, '
             + 'expected_buyer_phone_verification_source, disclosure_version, '
             + 'disclosure_text, disclosure_accepted_at, groble_seller_reference, '
-            + 'status, payment_id, actual_amount_krw, paid_at';
+            + 'status, payment_id, actual_amount_krw, paid_at, created_at';
         const toRecord = (data: unknown, expectedPreflightId?: string) => {
             const parsed = checkoutRecoveryRowSchema.safeParse(data);
             if (!parsed.success
@@ -202,6 +203,7 @@ export const earlybirdStore = {
                 paymentId: parsed.data.payment_id,
                 actualAmountKrw: parsed.data.actual_amount_krw,
                 paidAt: parsed.data.paid_at,
+                createdAt: parsed.data.created_at,
             });
         };
 
@@ -229,6 +231,59 @@ export const earlybirdStore = {
             throw new EarlybirdPersistenceError('EARLYBIRD_PERSISTENCE_FAILED');
         }
         return lineageResult.data ? toRecord(lineageResult.data) : null;
+    },
+
+    async findCheckoutForRedirect(
+        userId: string,
+        orderId: string,
+        planId: 'basic' | 'standard',
+    ) {
+        const select =
+            'id, user_id, preflight_id, target_instagram_id, plan_id, pricing_version, '
+            + 'expected_amount_krw, expected_groble_product_id, '
+            + 'buyer_match_policy, expected_buyer_phone_number_normalized, '
+            + 'expected_buyer_phone_verification_source, disclosure_version, '
+            + 'disclosure_text, disclosure_accepted_at, groble_seller_reference, '
+            + 'status, payment_id, actual_amount_krw, paid_at, created_at';
+        const query = supabaseAdmin
+            .from('earlybird_orders')
+            .select(select)
+            .eq('id', orderId)
+            .eq('user_id', userId)
+            .eq('plan_id', planId);
+        const result = await query.maybeSingle();
+        if (result.error) {
+            throw new EarlybirdPersistenceError('EARLYBIRD_PERSISTENCE_FAILED');
+        }
+        if (!result.data) return null;
+        const parsed = checkoutRecoveryRowSchema.safeParse(result.data);
+        if (!parsed.success || parsed.data.user_id !== userId) {
+            throw new EarlybirdPersistenceError('EARLYBIRD_PERSISTENCE_FAILED');
+        }
+        return Object.freeze({
+            orderId: parsed.data.id,
+            userId: parsed.data.user_id,
+            preflightId: parsed.data.preflight_id,
+            targetInstagramId: parsed.data.target_instagram_id,
+            planId: parsed.data.plan_id,
+            pricingVersion: parsed.data.pricing_version,
+            expectedAmountKrw: parsed.data.expected_amount_krw,
+            expectedProductId: parsed.data.expected_groble_product_id,
+            buyerMatchPolicy: parsed.data.buyer_match_policy,
+            expectedBuyerPhoneNumberNormalized:
+                parsed.data.expected_buyer_phone_number_normalized,
+            expectedBuyerPhoneVerificationSource:
+                parsed.data.expected_buyer_phone_verification_source,
+            disclosureVersion: parsed.data.disclosure_version,
+            disclosureText: parsed.data.disclosure_text,
+            disclosureAcceptedAt: parsed.data.disclosure_accepted_at,
+            sellerReference: parsed.data.groble_seller_reference,
+            status: parsed.data.status,
+            paymentId: parsed.data.payment_id,
+            actualAmountKrw: parsed.data.actual_amount_krw,
+            paidAt: parsed.data.paid_at,
+            createdAt: parsed.data.created_at,
+        });
     },
 
     async findCurrentCheckoutPhone(userId: string) {

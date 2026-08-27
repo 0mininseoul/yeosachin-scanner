@@ -213,6 +213,10 @@ function loadedFixture(version: string) {
 describe('preflight owner routes', () => {
     beforeEach(() => {
         vi.clearAllMocks();
+        vi.stubEnv(
+            'ANALYSIS_V2_PREFLIGHT_IDENTITY_HMAC_SECRET',
+            Buffer.alloc(32, 7).toString('base64url'),
+        );
         mocks.createClient.mockResolvedValue({
             auth: { getUser: mocks.getUser },
             from: mocks.admin.from,
@@ -512,7 +516,10 @@ describe('preflight owner routes', () => {
         ));
         expect(response.status).toBe(202);
         expect(mocks.store.createOrReplay).toHaveBeenCalledWith(
-            expect.objectContaining({ accessMode: 'production' })
+            expect.objectContaining({
+                accessMode: 'production',
+                targetInputHash: expect.stringMatching(/^[0-9a-f]{64}$/),
+            })
         );
         expect(mocks.enqueue).toHaveBeenCalledWith(
             preflightId, 1, expect.any(Object)
@@ -903,6 +910,7 @@ describe('preflight owner routes', () => {
             email: 'owner@example.com',
             authProvider: 'google',
             targetInstagramId: 'target.name',
+            targetInputHash: expect.any(String),
             idempotencyKey: 'preflight-key-000000000000',
             accessMode: 'test_entitlement',
         });

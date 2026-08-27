@@ -117,6 +117,7 @@ function recoveryOrderRow(overrides: Record<string, unknown> = {}) {
         payment_id: null,
         actual_amount_krw: null,
         paid_at: null,
+        created_at: new Date(Date.now() - 60 * 60 * 1_000).toISOString(),
         ...overrides,
     };
 }
@@ -192,6 +193,8 @@ describe('earlybird checkout and waitlist routes', () => {
         vi.clearAllMocks();
         mocks.after.mockReset();
         mocks.from.mockReset();
+        mocks.demoStore.findForOwner.mockReset();
+        mocks.demoStore.startForOwner.mockReset();
         mocks.loadAccountCheckoutPhone.mockReset();
         mocks.loadAccountCheckoutPhone.mockResolvedValue(currentPhoneRow());
         mocks.requireActiveAccountClassification.mockReset();
@@ -329,8 +332,7 @@ describe('earlybird checkout and waitlist routes', () => {
         expect(response.status).toBe(201);
         await expect(response.json()).resolves.toEqual({
             orderId: ORDER_ID,
-            checkoutUrl: 'https://groble.im/payment/basic-checkout-a1'
-                + `?ref=${SELLER_REFERENCE}`,
+            nextUrl: `/api/earlybird/checkout/redirect?orderId=${ORDER_ID}&planId=basic`,
         });
         expect(mocks.rpc).toHaveBeenCalledWith('create_earlybird_checkout', expect.objectContaining({
             p_user_id: USER_ID,
@@ -423,8 +425,7 @@ describe('earlybird checkout and waitlist routes', () => {
         expect(response.status).toBe(200);
         await expect(response.json()).resolves.toEqual({
             orderId: ORDER_ID,
-            checkoutUrl: 'https://groble.im/payment/basic-checkout-a1'
-                + `?ref=${SELLER_REFERENCE}`,
+            nextUrl: `/api/earlybird/checkout/redirect?orderId=${ORDER_ID}&planId=basic`,
         });
         expect(mocks.from).toHaveBeenCalledWith('earlybird_orders');
         expect(ownerFilter).toHaveBeenCalledWith('preflight_id', PREFLIGHT_ID);
@@ -671,8 +672,7 @@ describe('earlybird checkout and waitlist routes', () => {
         expect(response.status).toBe(201);
         await expect(response.json()).resolves.toEqual({
             orderId: ORDER_ID,
-            checkoutUrl: 'https://groble.im/payment/basic-checkout-a1'
-                + `?ref=${SELLER_REFERENCE}`,
+            nextUrl: `/api/earlybird/checkout/redirect?orderId=${ORDER_ID}&planId=basic`,
         });
         expect(mocks.findForOwner).not.toHaveBeenCalled();
         const createdEvents = mocks.emit.mock.calls.filter(([entry]) => (
@@ -710,8 +710,7 @@ describe('earlybird checkout and waitlist routes', () => {
         expect(response.status).toBe(200);
         await expect(response.json()).resolves.toEqual({
             orderId: ORDER_ID,
-            checkoutUrl: 'https://groble.im/payment/standard-checkout-b2'
-                + `?ref=${SELLER_REFERENCE}`,
+            nextUrl: `/api/earlybird/checkout/redirect?orderId=${ORDER_ID}&planId=standard`,
         });
         expect(mocks.findForOwner).not.toHaveBeenCalled();
         const createdEvents = mocks.emit.mock.calls.filter(([entry]) => (
@@ -752,8 +751,7 @@ describe('earlybird checkout and waitlist routes', () => {
         expect(response.status).toBe(201);
         await expect(response.json()).resolves.toEqual({
             orderId: ORDER_ID,
-            checkoutUrl: 'https://groble.im/payment/basic-checkout-a1'
-                + `?ref=${SELLER_REFERENCE}`,
+            nextUrl: `/api/earlybird/checkout/redirect?orderId=${ORDER_ID}&planId=basic`,
         });
         expect(mocks.from).not.toHaveBeenCalledWith('earlybird_plan_inventory');
     });
@@ -971,6 +969,25 @@ describe('earlybird checkout and waitlist routes', () => {
             readFileSync(new URL('../../../app/api/earlybird/waitlist/route.ts', import.meta.url), 'utf8'),
         ].join('\n');
         expect(source).not.toMatch(/analysis_requests|Cloud Tasks|dispatchAnalysis|enqueue/i);
+    });
+
+    it('returns only a same-origin continuation URL and never a raw provider URL', async () => {
+        mockCheckoutRecord(true);
+
+        const response = await checkout(request('/api/earlybird/checkout', {
+            preflightId: PREFLIGHT_ID,
+            planId: 'basic',
+            disclosureAccepted: true,
+        }));
+
+        expect(response.status).toBe(201);
+        const body = await response.json();
+        expect(body).toEqual({
+            orderId: ORDER_ID,
+            nextUrl: `/api/earlybird/checkout/redirect?orderId=${ORDER_ID}&planId=basic`,
+        });
+        expect(body).not.toHaveProperty('checkoutUrl');
+        expect(JSON.stringify(body)).not.toContain('groble.im');
     });
 
     it('starts the exact synthetic run before Groble, order, inventory, or commercial events', async () => {

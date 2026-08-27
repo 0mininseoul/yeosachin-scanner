@@ -6,12 +6,13 @@ import {
     isPaidEarlybirdPlanId,
 } from '@/lib/domain/earlybird/catalog';
 import type { PlanId } from '@/lib/domain/analysis/plan-catalog';
-import { getGrobleCheckoutUrl, readGrobleConfig } from '@/lib/services/groble/config';
+import { readGrobleConfig } from '@/lib/services/groble/config';
 import { normalizeKoreanMobileNumber } from '@/lib/services/identity/phone-number';
 import {
     earlybirdStore,
     EarlybirdPersistenceError,
 } from './store';
+import { isEarlybirdCheckoutRecoverableAt } from './recovery-window';
 
 export class EarlybirdWaitlistRequiredError extends Error {
     constructor() {
@@ -130,11 +131,6 @@ export async function createEarlybirdCheckout(input: {
     return Object.freeze({
         orderId: record.orderId,
         created: record.created,
-        checkoutUrl: getGrobleCheckoutUrl(
-            input.planId,
-            record.sellerReference,
-            config
-        ),
     });
 }
 
@@ -144,6 +140,7 @@ export async function recoverEarlybirdCheckout(input: {
     planId: 'basic' | 'standard';
     targetInstagramId: string | null;
     currentPhone: CurrentEarlybirdCheckoutPhone;
+    now?: Date;
 }) {
     const record = await earlybirdStore.findCheckoutForRecovery(
         input.userId,
@@ -164,6 +161,15 @@ export async function recoverEarlybirdCheckout(input: {
             && record.targetInstagramId !== input.targetInstagramId
         )
     ) {
+        throw new EarlybirdCheckoutRecoveryError(
+            'EARLYBIRD_CHECKOUT_NOT_RECOVERABLE'
+        );
+    }
+
+    if (!isEarlybirdCheckoutRecoverableAt(
+        record.createdAt,
+        (input.now ?? new Date()).getTime(),
+    )) {
         throw new EarlybirdCheckoutRecoveryError(
             'EARLYBIRD_CHECKOUT_NOT_RECOVERABLE'
         );
@@ -201,11 +207,6 @@ export async function recoverEarlybirdCheckout(input: {
         orderId: record.orderId,
         planId: record.planId,
         expectedAmountKrw: record.expectedAmountKrw,
-        checkoutUrl: getGrobleCheckoutUrl(
-            record.planId,
-            record.sellerReference,
-            config
-        ),
     });
 }
 

@@ -40,7 +40,13 @@ const CONCIERGE_ANALYSIS_COPY =
 const SUPPORT_COPY =
     '결제 확인이 지연되고 있어요. 같은 화면이 계속되면 고객센터로 문의해주세요.';
 
-export function EarlybirdStatus({ order }: { order: EarlybirdOrderStatusDto }) {
+export function EarlybirdStatus({
+    order,
+    suppressCheckoutRecovery = false,
+}: {
+    order: EarlybirdOrderStatusDto;
+    suppressCheckoutRecovery?: boolean;
+}) {
     const trackedRef = useRef(new Set<string>());
     const router = useRouter();
     const { user, loading: authLoading } = useAuth();
@@ -117,6 +123,7 @@ export function EarlybirdStatus({ order }: { order: EarlybirdOrderStatusDto }) {
     }, [nextUrl, router]);
 
     const handleCheckoutRecovery = async () => {
+        if (suppressCheckoutRecovery) return;
         setCheckoutRecoveryError(null);
         await recoverPendingEarlybirdCheckout(
             order.preflightId,
@@ -124,7 +131,16 @@ export function EarlybirdStatus({ order }: { order: EarlybirdOrderStatusDto }) {
             checkoutRecoveryGuardRef.current,
             {
                 request: fetch,
-                redirectCheckout: checkoutUrl => window.location.assign(checkoutUrl),
+                redirectCheckout: nextUrl => {
+                    trackEvent(EVENTS.CHECKOUT_REDIRECTED, {
+                        plan_id: order.planId,
+                        preflight_id: order.preflightId,
+                        ...(order.actualAmountKrw === null
+                            ? {}
+                            : { amount_krw: order.actualAmountKrw }),
+                    });
+                    window.location.assign(nextUrl);
+                },
                 setPending: setCheckoutRecoveryPending,
                 showError: setCheckoutRecoveryError,
             }
@@ -218,7 +234,9 @@ export function EarlybirdStatus({ order }: { order: EarlybirdOrderStatusDto }) {
                 >
                     판독 결과 확인하기
                 </Link>
-            ) : order.systemStatus === 'payment_pending' ? (
+            ) : order.systemStatus === 'payment_pending'
+                && order.checkoutRecoverable
+                && !suppressCheckoutRecovery ? (
                 <>
                     <PrimaryButton
                         className="mt-5"

@@ -7,6 +7,7 @@ const mocks = vi.hoisted(() => ({
     rpc: vi.fn(),
     isResultAuthoritativelyPublished: vi.fn(),
     orderQuery: null as ReturnType<typeof queryBuilder> | null,
+    preflightQuery: null as ReturnType<typeof queryBuilder> | null,
     resultQuery: null as ReturnType<typeof queryBuilder> | null,
     requireActiveAccountClassification: vi.fn(),
 }));
@@ -15,12 +16,14 @@ function queryBuilder(data: unknown) {
     const query = {
         select: vi.fn(),
         eq: vi.fn(),
+        gt: vi.fn(),
         order: vi.fn(),
         limit: vi.fn(),
         maybeSingle: vi.fn().mockResolvedValue({ data, error: null }),
     };
     query.select.mockReturnValue(query);
     query.eq.mockReturnValue(query);
+    query.gt.mockReturnValue(query);
     query.order.mockReturnValue(query);
     query.limit.mockReturnValue(query);
     return query;
@@ -72,9 +75,17 @@ function orderRow(overrides: Record<string, unknown> = {}) {
 function installQueries(
     order: unknown,
     result: unknown = null,
-    fulfillment: unknown = { status: 'awaiting_operator' }
+    fulfillment: unknown = { status: 'awaiting_operator' },
+    preflight: unknown = {
+        id: PREFLIGHT_ID,
+        user_id: USER_ID,
+        target_instagram_id: 'target.account',
+        status: 'ready',
+        expires_at: new Date(Date.now() + 30 * 60 * 1_000).toISOString(),
+    },
 ) {
     mocks.orderQuery = queryBuilder(order);
+    mocks.preflightQuery = queryBuilder(preflight);
     mocks.resultQuery = queryBuilder(result);
     mocks.rpc.mockResolvedValue({
         data: typeof fulfillment === 'object' && fulfillment !== null
@@ -85,6 +96,7 @@ function installQueries(
     });
     mocks.from.mockImplementation((table: string) => {
         if (table === 'earlybird_orders') return mocks.orderQuery;
+        if (table === 'analysis_preflights') return mocks.preflightQuery;
         if (table === 'analysis_requests') return mocks.resultQuery;
         throw new Error(`unexpected table: ${table}`);
     });
@@ -156,6 +168,7 @@ describe('earlybird owner order status route', () => {
                 systemStatus: 'paid',
                 displayStatus: '판독 대기',
                 requiresSupport: false,
+                checkoutRecoverable: false,
                 deliveryMode: 'concierge',
                 progressUrl: null,
                 resultUrl: null,
@@ -216,6 +229,74 @@ describe('earlybird owner order status route', () => {
                 acceptedAt: null,
                 displayStatus: '결제 확인',
             },
+        });
+    });
+
+    it('keeps a newly-created pending checkout recoverable across bounded clock skew', async () => {
+        installQueries(orderRow({
+            status: 'payment_pending',
+            actual_amount_krw: null,
+            paid_at: null,
+            due_at: null,
+            plan_sequence: null,
+            created_at: new Date(Date.now() + 2 * 60 * 1_000).toISOString(),
+        }));
+
+        const response = await GET(new Request('https://example.com/api/earlybird/orders/latest'));
+
+        await expect(response.json()).resolves.toMatchObject({
+            order: { checkoutRecoverable: true },
+        });
+    });
+
+    it('fails closed for materially future pending checkout timestamps', async () => {
+        installQueries(orderRow({
+            status: 'payment_pending',
+            actual_amount_krw: null,
+            paid_at: null,
+            due_at: null,
+            plan_sequence: null,
+            created_at: new Date(Date.now() + 6 * 60 * 1_000).toISOString(),
+        }));
+
+        const response = await GET(new Request('https://example.com/api/earlybird/orders/latest'));
+
+        await expect(response.json()).resolves.toMatchObject({
+            order: { checkoutRecoverable: false },
+        });
+    });
+
+    it.each([
+        ['not ready', { status: 'processing' }],
+        ['expired', { expires_at: new Date(Date.now() - 1_000).toISOString() }],
+        ['different target', { target_instagram_id: 'different.account' }],
+        ['different owner', { user_id: '123e4567-e89b-42d3-a456-426614174099' }],
+    ] as const)('requires a server-authoritative ready, unexpired, target-bound preflight (%s)', async (_label, preflightOverrides) => {
+        installQueries(
+            orderRow({
+                status: 'payment_pending',
+                actual_amount_krw: null,
+                paid_at: null,
+                due_at: null,
+                plan_sequence: null,
+                created_at: new Date(Date.now() - 60 * 60 * 1_000).toISOString(),
+            }),
+            null,
+            { status: 'awaiting_operator' },
+            {
+                id: PREFLIGHT_ID,
+                user_id: USER_ID,
+                target_instagram_id: 'target.account',
+                status: 'ready',
+                expires_at: new Date(Date.now() + 30 * 60 * 1_000).toISOString(),
+                ...preflightOverrides,
+            },
+        );
+
+        const response = await GET(new Request('https://example.com/api/earlybird/orders/latest'));
+
+        await expect(response.json()).resolves.toMatchObject({
+            order: { checkoutRecoverable: false },
         });
     });
 

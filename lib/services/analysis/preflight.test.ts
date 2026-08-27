@@ -125,6 +125,35 @@ describe('betatest preflight credit fence', () => {
 });
 
 describe('B-lite single-collection preflight', () => {
+    it('bypasses B-lite immediately for a legacy claim without a persisted target hash', async () => {
+        const claimed = claim({ targetInputHash: null });
+        const store = workerStore(claimed);
+        const activateBliteCohort = vi.fn();
+        const getFullProfile = vi.fn();
+        const getProfile = vi.fn(async () => profile());
+        const env = {
+            ...preflightApifyPoolEnv,
+            PRECHECKOUT_BLITE_ENABLED: 'true',
+            PRECHECKOUT_BLITE_ROLLOUT_PERCENT: '100',
+            ANALYSIS_V2_PREFLIGHT_IDENTITY_HMAC_SECRET: preflightIdentitySecret,
+            ANALYSIS_V2_INSTAGRAM_ROUTE: 'apify_v1',
+        };
+
+        await expect(processPreflight(preflightId, {
+            store,
+            providerRunStore: providerRunStore(),
+            getProfile,
+            getFullProfile,
+            activateBliteCohort,
+            env,
+        })).resolves.toBe('ready');
+
+        expect(activateBliteCohort).not.toHaveBeenCalled();
+        expect(getFullProfile).not.toHaveBeenCalled();
+        expect(getProfile).toHaveBeenCalledOnce();
+        expect(store.finalizeReady).toHaveBeenCalledOnce();
+    });
+
     it('uses the frozen beta hold before the dedicated selector for a new beta B-lite run', async () => {
         const claimed = claim({ analysisEntryChannel: 'betatest' });
         const store = workerStore(claimed);
@@ -1126,14 +1155,16 @@ describe('preflight persistence adapter', () => {
             email: 'owner@example.com',
             authProvider: 'google',
             targetInstagramId: 'target.name',
+            targetInputHash: 'a'.repeat(64),
             idempotencyKey: 'preflight-key-000000000000',
             accessMode: 'test_entitlement',
         })).resolves.toEqual({ preflightId, expiresAt, created: true, status: 'pending' });
-        expect(rpc).toHaveBeenCalledWith(PREFLIGHT_DATABASE_NAMES.createOrReplayRpc, {
+        expect(rpc).toHaveBeenCalledWith('create_or_replay_analysis_v2_preflight_with_target_hash', {
             p_user_id: userId,
             p_email: 'owner@example.com',
             p_auth_provider: 'google',
             p_target_instagram_id: 'target.name',
+            p_target_input_hash: 'a'.repeat(64),
             p_idempotency_key: 'preflight-key-000000000000',
             p_access_mode: 'test_entitlement',
             p_launch_status_snapshot: {
