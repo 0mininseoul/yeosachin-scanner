@@ -16,8 +16,9 @@ import {
     paymentConfirmationEventKey,
 } from '@/lib/services/earlybird/analytics-state';
 import {
+    earlybirdStatusNavigationTarget,
+    earlybirdStatusRefreshMode,
     scheduleEarlybirdStatusSnapshotRefresh,
-    shouldAutomaticallyRedirectEarlybirdStatus,
     shouldRefreshEarlybirdStatusSnapshot,
 } from '@/lib/services/earlybird/payment-pending-status-refresh';
 import { recoverPendingEarlybirdCheckout } from '@/lib/services/earlybird/ui-state';
@@ -32,6 +33,13 @@ function DetailRow({ label, value }: { label: string; value: string }) {
     );
 }
 
+const AUTOMATIC_ANALYSIS_COPY =
+    '결제 확인 후 판독이 자동으로 시작됩니다. 진행 화면이 준비되면 바로 연결해드릴게요.';
+const CONCIERGE_ANALYSIS_COPY =
+    '판독 결과가 완성되면 2일 이내에 가입하신 이메일로 결과 링크를 보내드릴게요.';
+const SUPPORT_COPY =
+    '결제 확인이 지연되고 있어요. 같은 화면이 계속되면 고객센터로 문의해주세요.';
+
 export function EarlybirdStatus({ order }: { order: EarlybirdOrderStatusDto }) {
     const trackedRef = useRef(new Set<string>());
     const router = useRouter();
@@ -42,15 +50,21 @@ export function EarlybirdStatus({ order }: { order: EarlybirdOrderStatusDto }) {
     const checkoutRecoveryGuardRef = useRef({ inFlight: false });
     const shouldRefreshPaymentPendingStatus =
         shouldRefreshEarlybirdStatusSnapshot(order);
-    const isAutomaticFulfillmentBridge =
-        shouldAutomaticallyRedirectEarlybirdStatus(order);
+    const refreshMode = earlybirdStatusRefreshMode(order);
+    const nextUrl = earlybirdStatusNavigationTarget(order);
+    const isAutomaticFulfillmentBridge = order.deliveryMode === 'automatic'
+        && Boolean(nextUrl);
     const isPaidDeliveryPending = order.systemStatus === 'paid'
         || order.systemStatus === 'analysis_in_progress';
+    const navigationTargetRef = useRef<string | null>(null);
 
     useEffect(() => {
-        if (!shouldRefreshPaymentPendingStatus) return;
-        return scheduleEarlybirdStatusSnapshotRefresh(() => router.refresh());
-    }, [router, shouldRefreshPaymentPendingStatus]);
+        if (!shouldRefreshPaymentPendingStatus || !refreshMode) return;
+        return scheduleEarlybirdStatusSnapshotRefresh(
+            () => router.refresh(),
+            refreshMode,
+        );
+    }, [refreshMode, router, shouldRefreshPaymentPendingStatus]);
 
     useEffect(() => {
         if (!notifyModalOpen) return;
@@ -90,20 +104,17 @@ export function EarlybirdStatus({ order }: { order: EarlybirdOrderStatusDto }) {
     }, [authLoading, order, user?.id]);
 
     useEffect(() => {
-        if (!isAutomaticFulfillmentBridge) return;
-        const nextUrl = order.resultUrl ?? order.progressUrl;
-        if (nextUrl) {
-            let active = true;
-            void flushAnalytics().finally(() => {
-                if (active) router.replace(nextUrl);
-            });
-            return () => {
-                active = false;
-            };
-        }
-        const timer = window.setTimeout(() => router.refresh(), 1_500);
-        return () => window.clearTimeout(timer);
-    }, [isAutomaticFulfillmentBridge, order.progressUrl, order.resultUrl, router]);
+        if (!nextUrl) return;
+        if (navigationTargetRef.current === nextUrl) return;
+        navigationTargetRef.current = nextUrl;
+        let active = true;
+        void flushAnalytics().finally(() => {
+            if (active) router.replace(nextUrl);
+        });
+        return () => {
+            active = false;
+        };
+    }, [nextUrl, router]);
 
     const handleCheckoutRecovery = async () => {
         setCheckoutRecoveryError(null);
@@ -128,9 +139,30 @@ export function EarlybirdStatus({ order }: { order: EarlybirdOrderStatusDto }) {
                     판독 상태를 확인하고 있어요
                 </h1>
                 <p className="mt-3 text-[13px] leading-relaxed text-fg-dim">
-                    판독 결과가 완성되면 2일 이내에 가입하신 이메일로 결과 링크를 보내드릴게요.
+                    {SUPPORT_COPY}
                 </p>
             </CaseCard>
+        );
+    }
+
+    if (nextUrl) {
+        const isResultNavigation = nextUrl.startsWith('/result/');
+        return (
+            <div role="status">
+                <CaseCard className="mt-8 p-7 text-center">
+                    <Eyebrow className="justify-center">결제 확인</Eyebrow>
+                    <h1 className="mt-3 text-[22px] font-extrabold tracking-tight text-fg">
+                        {isAutomaticFulfillmentBridge
+                            ? '판독을 자동으로 시작하고 있어요'
+                            : isResultNavigation
+                                ? '판독 결과로 이동하고 있어요'
+                                : '판독 진행 화면으로 이동하고 있어요'}
+                    </h1>
+                    <p className="mt-3 text-[13px] leading-relaxed text-fg-dim">
+                        잠시만 기다리면 진행 화면으로 이어집니다.
+                    </p>
+                </CaseCard>
+            </div>
         );
     }
 
@@ -143,23 +175,9 @@ export function EarlybirdStatus({ order }: { order: EarlybirdOrderStatusDto }) {
                         결제가 완료되었어요
                     </h1>
                     <p className="mt-3 text-[13px] leading-relaxed text-fg-dim">
-                        판독 결과가 완성되면 2일 이내에 가입하신 이메일로 결과 링크를 보내드릴게요.
-                    </p>
-                </CaseCard>
-            </div>
-        );
-    }
-
-    if (isAutomaticFulfillmentBridge) {
-        return (
-            <div role="status">
-                <CaseCard className="mt-8 p-7 text-center">
-                    <Eyebrow className="justify-center">결제 확인</Eyebrow>
-                    <h1 className="mt-3 text-[22px] font-extrabold tracking-tight text-fg">
-                        판독을 자동으로 시작하고 있어요
-                    </h1>
-                    <p className="mt-3 text-[13px] leading-relaxed text-fg-dim">
-                        잠시만 기다리면 진행 화면으로 이어집니다.
+                        {order.deliveryMode === 'automatic'
+                            ? AUTOMATIC_ANALYSIS_COPY
+                            : CONCIERGE_ANALYSIS_COPY}
                     </p>
                 </CaseCard>
             </div>
@@ -192,9 +210,9 @@ export function EarlybirdStatus({ order }: { order: EarlybirdOrderStatusDto }) {
                 </dl>
             </CaseCard>
 
-            {order.resultUrl ? (
+            {order.resultUrl && order.systemStatus === 'completed' && nextUrl ? (
                 <Link
-                    href={order.resultUrl}
+                    href={nextUrl}
                     data-amp-block
                     className="mt-5 flex w-full items-center justify-center bg-blood px-5 py-4 text-[14px] font-bold text-white transition-opacity hover:opacity-90"
                 >

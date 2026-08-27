@@ -46,6 +46,20 @@ const fulfillmentStatusSchema = z.enum([
     'manual_review',
 ]);
 
+const AUTOMATIC_FULFILLMENT_STATUSES = new Set([
+    'admission_pending',
+    'analysis_in_progress',
+    'retryable_failure',
+]);
+
+export const earlybirdDeliveryModeSchema = z.enum([
+    'automatic',
+    'concierge',
+    'support',
+]);
+
+export type EarlybirdDeliveryMode = z.infer<typeof earlybirdDeliveryModeSchema>;
+
 const DISPLAY_STATUS: Readonly<Record<EarlybirdOrderSystemStatus, string>> = {
     payment_pending: '결제 확인',
     payment_failed: '결제 확인 실패',
@@ -73,6 +87,7 @@ export interface EarlybirdOrderStatusDto {
     systemStatus: EarlybirdOrderSystemStatus;
     displayStatus: string;
     requiresSupport: boolean;
+    deliveryMode: EarlybirdDeliveryMode;
     progressUrl: string | null;
     resultUrl: string | null;
 }
@@ -107,6 +122,8 @@ export async function loadLatestEarlybirdOrder(
     const order = parsed.data;
 
     let requiresSupport = false;
+    let deliveryMode: EarlybirdDeliveryMode = 'concierge';
+    let publicationLag = false;
     if (order.status === 'paid' || order.status === 'analysis_in_progress') {
         const fulfillment = await supabaseAdmin.rpc(
             'load_earlybird_fulfillment_status',
@@ -117,10 +134,22 @@ export async function loadLatestEarlybirdOrder(
         // no internal failure state reaches the owner-facing DTO.
         if (fulfillment.error) {
             requiresSupport = true;
+            deliveryMode = 'support';
         } else {
-            requiresSupport = fulfillmentStatusSchema.safeParse(
+            const parsedFulfillmentStatus = fulfillmentStatusSchema.safeParse(
                 fulfillment.data
-            ).data === 'manual_review';
+            );
+            if (!parsedFulfillmentStatus.success) {
+                requiresSupport = true;
+                deliveryMode = 'support';
+            } else if (parsedFulfillmentStatus.data === 'manual_review') {
+                requiresSupport = true;
+                deliveryMode = 'support';
+            } else if (
+                AUTOMATIC_FULFILLMENT_STATUSES.has(parsedFulfillmentStatus.data)
+            ) {
+                deliveryMode = 'automatic';
+            }
         }
     }
 
@@ -146,14 +175,17 @@ export async function loadLatestEarlybirdOrder(
                 // contract. Keep this owner-facing snapshot in the waiting
                 // UX until the request is authoritatively published.
                 effectiveStatus = 'analysis_in_progress';
+                publicationLag = true;
             }
         } else {
             effectiveStatus = 'analysis_in_progress';
+            publicationLag = true;
         }
     }
 
-    const progressUrl = !requiresSupport
-        && effectiveStatus === 'analysis_in_progress'
+    const progressUrl = (deliveryMode === 'automatic' || publicationLag)
+        && !requiresSupport
+        && (effectiveStatus === 'paid' || effectiveStatus === 'analysis_in_progress')
         && order.result_request_id
         ? `/progress/${encodeURIComponent(order.result_request_id)}`
         : null;
@@ -171,6 +203,7 @@ export async function loadLatestEarlybirdOrder(
         systemStatus: effectiveStatus,
         displayStatus: DISPLAY_STATUS[effectiveStatus],
         requiresSupport,
+        deliveryMode,
         progressUrl,
         resultUrl,
     });

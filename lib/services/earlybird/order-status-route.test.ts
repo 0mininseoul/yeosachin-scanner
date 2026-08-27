@@ -72,7 +72,7 @@ function orderRow(overrides: Record<string, unknown> = {}) {
 function installQueries(
     order: unknown,
     result: unknown = null,
-    fulfillment: unknown = null
+    fulfillment: unknown = { status: 'awaiting_operator' }
 ) {
     mocks.orderQuery = queryBuilder(order);
     mocks.resultQuery = queryBuilder(result);
@@ -105,7 +105,7 @@ describe('earlybird owner order status route', () => {
     beforeEach(() => {
         vi.clearAllMocks();
         authenticate();
-        installQueries(orderRow());
+        installQueries(orderRow(), null, { status: 'awaiting_operator' });
         mocks.isResultAuthoritativelyPublished.mockResolvedValue(true);
         mocks.requireActiveAccountClassification.mockResolvedValue({
             userId: USER_ID,
@@ -149,6 +149,7 @@ describe('earlybird owner order status route', () => {
                 systemStatus: 'paid',
                 displayStatus: '판독 대기',
                 requiresSupport: false,
+                deliveryMode: 'concierge',
                 progressUrl: null,
                 resultUrl: null,
             },
@@ -264,6 +265,7 @@ describe('earlybird owner order status route', () => {
             order: {
                 systemStatus: 'analysis_in_progress',
                 displayStatus: '판독 중',
+                deliveryMode: 'concierge',
                 progressUrl: `/progress/${RESULT_ID}`,
                 resultUrl: null,
             },
@@ -275,15 +277,71 @@ describe('earlybird owner order status route', () => {
         installQueries(orderRow({
             status: 'analysis_in_progress',
             result_request_id: RESULT_ID,
-        }));
+        }), null, { status: 'analysis_in_progress' });
 
         const response = await GET(new Request('https://example.com/api/earlybird/orders/latest'));
         await expect(response.json()).resolves.toMatchObject({
             order: {
+                deliveryMode: 'automatic',
                 progressUrl: `/progress/${RESULT_ID}`,
                 resultUrl: null,
             },
         });
+    });
+
+    it('classifies an admitted automatic paid order without exposing internal fulfillment status', async () => {
+        installQueries(orderRow({ status: 'paid' }), null, { status: 'admission_pending' });
+
+        const response = await GET(new Request('https://example.com/api/earlybird/orders/latest'));
+        const body = await response.json();
+
+        expect(body).toMatchObject({
+            order: {
+                systemStatus: 'paid',
+                deliveryMode: 'automatic',
+                requiresSupport: false,
+                progressUrl: null,
+            },
+        });
+        expect(JSON.stringify(body)).not.toMatch(
+            /awaiting_operator|admission_pending|analysis_in_progress|retryable_failure|manual_review/
+        );
+    });
+
+    it('keeps a pre-cutoff awaiting-operator paid order on concierge delivery', async () => {
+        installQueries(orderRow({ status: 'paid' }), null, { status: 'awaiting_operator' });
+
+        const response = await GET(new Request('https://example.com/api/earlybird/orders/latest'));
+        const body = await response.json();
+
+        expect(body).toMatchObject({
+            order: {
+                systemStatus: 'paid',
+                deliveryMode: 'concierge',
+                requiresSupport: false,
+                progressUrl: null,
+            },
+        });
+        expect(JSON.stringify(body)).not.toContain('awaiting_operator');
+    });
+
+    it.each([
+        ['successful-but-null', null],
+        ['invalid', { status: 'not-a-valid-fulfillment-status' }],
+    ] as const)('fails closed to support when paid fulfillment status is %s', async (_label, fulfillment) => {
+        installQueries(orderRow({ status: 'paid' }), null, fulfillment);
+
+        const response = await GET(new Request('https://example.com/api/earlybird/orders/latest'));
+        const body = await response.json();
+
+        expect(body).toMatchObject({
+            order: {
+                requiresSupport: true,
+                deliveryMode: 'support',
+                progressUrl: null,
+            },
+        });
+        expect(JSON.stringify(body)).not.toMatch(/not-a-valid-fulfillment-status|manual_review/);
     });
 
     it('returns only a generic support fallback for manual-review fulfillment', async () => {
@@ -297,6 +355,7 @@ describe('earlybird owner order status route', () => {
         expect(body).toMatchObject({
             order: {
                 requiresSupport: true,
+                deliveryMode: 'support',
                 progressUrl: null,
                 resultUrl: null,
             },
