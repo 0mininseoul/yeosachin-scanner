@@ -1760,7 +1760,7 @@ sed \
   "$temp_dir/runtime-selfhosted-route.env" >"$temp_dir/runtime-selfhosted-route-missing-worker.env"
 sed 's/^SELFHOSTED_AUTH_ENABLED=.*/SELFHOSTED_AUTH_ENABLED="false"/' \
   "$temp_dir/runtime-selfhosted-route.env" >"$temp_dir/runtime-selfhosted-route-auth-disabled.env"
-sed 's|^SELFHOSTED_AUTH_WORKER_URL=.*|SELFHOSTED_AUTH_WORKER_URL="https://user:pass@instagram-auth-worker.example.run.app"|' \
+sed 's|^SELFHOSTED_AUTH_WORKER_URL=.*|SELFHOSTED_AUTH_WORKER_URL="https://:"|' \
   "$temp_dir/runtime-selfhosted-route.env" >"$temp_dir/runtime-selfhosted-route-bad-url.env"
 sed 's|^SELFHOSTED_AUTH_WORKER_OIDC_AUDIENCE=.*|SELFHOSTED_AUTH_WORKER_OIDC_AUDIENCE="https://different-auth-worker.example.run.app"|' \
   "$temp_dir/runtime-selfhosted-route.env" >"$temp_dir/runtime-selfhosted-route-bad-audience.env"
@@ -2017,15 +2017,28 @@ done
 
 # A selfhosted-auth route must carry a complete nonsecret worker contract even
 # when every legacy selector remains Apify. The deployment script validates the
-# supplied manifest itself before invoking any Cloud Run operation.
+# supplied manifest itself and reuses its projection during a real state check.
+: >"$temp_dir/worker-selfhosted-route-explicit-events.out"
 env "${common_env[@]}" \
-  'FAKE_GCLOUD_STATE=prerequisites_ready' \
+  'FAKE_GCLOUD_STATE=ready' \
   'ANALYSIS_V2_INSTAGRAM_ROUTE=selfhosted_auth_v1' \
+  'FAKE_GCLOUD_SELFHOSTED_AUTH_ENABLED=true' \
+  'FAKE_GCLOUD_SELFHOSTED_AUTH_WORKER_URL=https://instagram-auth-worker.example.run.app' \
+  'FAKE_GCLOUD_SELFHOSTED_AUTH_WORKER_AUDIENCE=https://instagram-auth-worker.example.run.app' \
+  'FAKE_GCLOUD_SELFHOSTED_AUTH_WORKER_TIMEOUT_MS=240000' \
+  'FAKE_GCLOUD_SCRAPER_FOLLOWERS=apify' \
+  'FAKE_GCLOUD_SCRAPER_FOLLOWING=apify' \
+  'FAKE_GCLOUD_SCRAPER_LIKERS=apify' \
+  'FAKE_GCLOUD_SCRAPER_COMMENTS=apify' \
+  'FAKE_GCLOUD_SCRAPER_FALLBACK=false' \
   "ANALYSIS_V2_WORKER_ENV_VARS_FILE=$temp_dir/runtime-selfhosted-route.env" \
-  bash "$script_dir/deploy-analysis-v2-worker.sh" --dry-run \
+  "FAKE_GCLOUD_EVENT_LOG=$temp_dir/worker-selfhosted-route-explicit-events.out" \
+  bash "$script_dir/deploy-analysis-v2-worker.sh" --check \
   >"$temp_dir/worker-selfhosted-route-explicit.out"
 assert_contains "$temp_dir/worker-selfhosted-route-explicit.out" \
-  'gcloud run deploy analysis-worker'
+  'Analysis V2 Cloud Run worker and Cloud Tasks integration verified'
+[[ ! -s "$temp_dir/worker-selfhosted-route-explicit-events.out" ]] \
+  || fail "explicit selfhosted-auth check reached a Cloud Run mutation"
 
 for invalid_selfhosted_route in \
   missing-worker \
@@ -4854,13 +4867,13 @@ assert_contains "$temp_dir/worker-selfhosted-route-retained-check.out" \
 
 for retained_selfhosted_invalid in \
   missing-worker \
-  auth-disabled; do
+  bad-url; do
   case "$retained_selfhosted_invalid" in
     missing-worker)
       retained_override='FAKE_GCLOUD_SELFHOSTED_AUTH_WORKER_URL='
       ;;
-    auth-disabled)
-      retained_override='FAKE_GCLOUD_SELFHOSTED_AUTH_ENABLED=false'
+    bad-url)
+      retained_override='FAKE_GCLOUD_SELFHOSTED_AUTH_WORKER_URL=https://:'
       ;;
     *) fail "unknown retained selfhosted-auth fixture: $retained_selfhosted_invalid" ;;
   esac

@@ -1004,7 +1004,7 @@ sed \
 sed 's/^SELFHOSTED_AUTH_ENABLED=.*/SELFHOSTED_AUTH_ENABLED=false/' \
   "$temp_dir/selfhosted-route-apify-selectors.env" \
   >"$temp_dir/selfhosted-route-apify-auth-disabled.env"
-sed 's|^SELFHOSTED_AUTH_WORKER_URL=.*|SELFHOSTED_AUTH_WORKER_URL=https://user:pass@instagram-auth-worker.example.run.app|' \
+sed 's|^SELFHOSTED_AUTH_WORKER_URL=.*|SELFHOSTED_AUTH_WORKER_URL=https://:|' \
   "$temp_dir/selfhosted-route-apify-selectors.env" \
   >"$temp_dir/selfhosted-route-apify-bad-url.env"
 sed 's|^SELFHOSTED_AUTH_WORKER_OIDC_AUDIENCE=.*|SELFHOSTED_AUTH_WORKER_OIDC_AUDIENCE=https://different-auth-worker.example.run.app|' \

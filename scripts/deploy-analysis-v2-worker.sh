@@ -1914,53 +1914,89 @@ runtime_env_json_from_config() {
 
 selfhosted_auth_runtime_contract_projection() {
   local env_json="$1"
-  jq -ce '
-    {
-      route: (.ANALYSIS_V2_INSTAGRAM_ROUTE // ""),
-      enabled: (.SELFHOSTED_AUTH_ENABLED // ""),
-      workerUrl: (.SELFHOSTED_AUTH_WORKER_URL // ""),
-      workerAudience: (.SELFHOSTED_AUTH_WORKER_OIDC_AUDIENCE // ""),
-      workerTimeout: (.SELFHOSTED_AUTH_WORKER_TIMEOUT_MS // ""),
-      workerAuthMode: (.SELFHOSTED_AUTH_WORKER_AUTH_MODE // "oidc"),
-      followers: (.SCRAPER_FOLLOWERS // "apify"),
-      following: (.SCRAPER_FOLLOWING // "apify"),
-      likers: (.SCRAPER_LIKERS // "apify"),
-      comments: (.SCRAPER_COMMENTS // "apify"),
-      fallback: (.SCRAPER_FALLBACK // "true")
+  local normalized
+  normalized="$(printf '%s\n' "$env_json" | node -e '
+    const fs = require("node:fs");
+    let env;
+    try {
+      env = JSON.parse(fs.readFileSync(0, "utf8"));
+    } catch {
+      process.exit(1);
     }
-  ' <<<"$env_json"
+    const required = name => {
+      const value = env[name];
+      if (typeof value !== "string" || value.trim() === "" || /[\r\n]/.test(value)) {
+        throw new Error("invalid runtime value");
+      }
+      return value.trim();
+    };
+    const privateHttpsOrigin = name => {
+      let parsed;
+      try {
+        parsed = new URL(required(name));
+      } catch {
+        throw new Error("invalid HTTPS origin");
+      }
+      if (parsed.protocol !== "https:"
+        || parsed.username || parsed.password || parsed.search || parsed.hash
+        || (parsed.pathname !== "" && parsed.pathname !== "/")
+        || parsed.origin === "null") {
+        throw new Error("invalid HTTPS origin");
+      }
+      return parsed.origin;
+    };
+    try {
+      if (env.ANALYSIS_V2_INSTAGRAM_ROUTE !== "selfhosted_auth_v1"
+        || env.SELFHOSTED_AUTH_ENABLED !== "true") {
+        throw new Error("invalid route or auth gate");
+      }
+      const workerUrl = privateHttpsOrigin("SELFHOSTED_AUTH_WORKER_URL");
+      const workerAudience = privateHttpsOrigin("SELFHOSTED_AUTH_WORKER_OIDC_AUDIENCE");
+      if (workerUrl !== workerAudience) throw new Error("audience mismatch");
+      const workerTimeout = required("SELFHOSTED_AUTH_WORKER_TIMEOUT_MS");
+      if (!/^[1-9][0-9]*$/.test(workerTimeout)
+        || Number(workerTimeout) < 1000 || Number(workerTimeout) > 300000) {
+        throw new Error("invalid timeout");
+      }
+      const workerAuthMode = env.SELFHOSTED_AUTH_WORKER_AUTH_MODE === undefined
+        ? "oidc" : env.SELFHOSTED_AUTH_WORKER_AUTH_MODE;
+      if (workerAuthMode !== "oidc") throw new Error("invalid auth mode");
+      const selector = name => env[name] === undefined ? "apify" : env[name];
+      const providers = [
+        selector("SCRAPER_FOLLOWERS"),
+        selector("SCRAPER_FOLLOWING"),
+        selector("SCRAPER_LIKERS"),
+        selector("SCRAPER_COMMENTS"),
+      ];
+      const allApify = providers.every(value => value === "apify");
+      const allSelfHosted = providers.every(value => value === "selfhosted_auth");
+      if (!allApify && !allSelfHosted) throw new Error("mixed selectors");
+      const fallback = env.SCRAPER_FALLBACK === undefined ? "true" : env.SCRAPER_FALLBACK;
+      if (fallback !== "true" && fallback !== "false") throw new Error("invalid fallback");
+      if (allSelfHosted && fallback !== "false") throw new Error("selfhosted fallback");
+      process.stdout.write(JSON.stringify({
+        route: "selfhosted_auth_v1",
+        enabled: "true",
+        workerUrl,
+        workerAudience,
+        workerTimeout,
+        workerAuthMode,
+        followers: providers[0],
+        following: providers[1],
+        likers: providers[2],
+        comments: providers[3],
+        fallback,
+      }));
+    } catch {
+      process.exit(1);
+    }
+  ' 2>/dev/null)" || return 1
+  printf '%s\n' "$normalized"
 }
 
 selfhosted_auth_runtime_contract_matches_env() {
   local env_json="$1"
-  jq -e '
-    def setting($name; $default):
-      if has($name) then .[$name] else $default end;
-    [
-      (.SELFHOSTED_AUTH_WORKER_URL // ""),
-      (.SELFHOSTED_AUTH_WORKER_OIDC_AUDIENCE // "")
-    ] as $origins
-    | [
-        (setting("SCRAPER_FOLLOWERS"; "apify")),
-        (setting("SCRAPER_FOLLOWING"; "apify")),
-        (setting("SCRAPER_LIKERS"; "apify")),
-        (setting("SCRAPER_COMMENTS"; "apify"))
-      ] as $providers
-    | .ANALYSIS_V2_INSTAGRAM_ROUTE == "selfhosted_auth_v1"
-      and .SELFHOSTED_AUTH_ENABLED == "true"
-      and ($origins | all(type == "string" and test("^https://[^/?#@[:space:]]+$")))
-      and $origins[0] == $origins[1]
-      and ((.SELFHOSTED_AUTH_WORKER_TIMEOUT_MS // "")
-        | type == "string" and test("^[1-9][0-9]*$")
-        and (tonumber >= 1000 and tonumber <= 300000))
-      and ((.SELFHOSTED_AUTH_WORKER_AUTH_MODE // "oidc") == "oidc")
-      and ($providers | all(. == "apify") or all(. == "selfhosted_auth"))
-      and ((.SCRAPER_FALLBACK // "true") == "true"
-        or (.SCRAPER_FALLBACK // "true") == "false")
-      and (if ($providers | all(. == "selfhosted_auth"))
-        then (.SCRAPER_FALLBACK // "true") == "false"
-        else true end)
-  ' <<<"$env_json" >/dev/null 2>&1
+  selfhosted_auth_runtime_contract_projection "$env_json" >/dev/null 2>&1
 }
 
 validate_selfhosted_auth_runtime_contract() {
@@ -2815,6 +2851,7 @@ readonly worker_build_env_file="${ANALYSIS_V2_WORKER_BUILD_ENV_VARS_FILE:-}"
 manifest_snapshot_dir=""
 worker_env_deploy_file=""
 worker_build_env_deploy_file=""
+selfhosted_auth_expected_env_json=""
 trap '[[ -z "${manifest_snapshot_dir:-}" ]] || rm -rf "$manifest_snapshot_dir"' EXIT
 readonly worker_build_service_account="$ANALYSIS_V2_WORKER_BUILD_SERVICE_ACCOUNT"
 readonly worker_build_service_account_resource="projects/$ANALYSIS_V2_TASKS_PROJECT/serviceAccounts/$worker_build_service_account"
@@ -3163,7 +3200,6 @@ deploy_lock_url=""
 observed_lock_generation=""
 observed_lock_owner=""
 prune_fence_owner_identity=""
-selfhosted_auth_expected_env_json=""
 
 observe_deploy_lock_generation_owner() {
   local attempt
