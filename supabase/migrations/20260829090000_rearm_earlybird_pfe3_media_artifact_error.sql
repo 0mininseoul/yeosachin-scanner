@@ -43,6 +43,23 @@
 -- with the existing architecture, at the cost of re-incurring their
 -- provider-side cost (the order itself already settled at
 -- actual_amount_krw = 0, so there is no customer-facing charge either way).
+--
+-- Pre-apply correction: the real incident's paid-order relationship counts
+-- (earlybird_orders.target_followers_count/target_following_count, frozen at
+-- checkout) are both greater than this consumed r2 preflight's own
+-- target_followers_count/target_following_count -- the same legitimate
+-- checkout-vs-later-observation drift 20260731030000_allow_capacity_safe_
+-- earlybird_admission_count_drift.sql, 20260808240000_allow_v211_policy_
+-- replay_capacity_safe_count_drift.sql, and 20260826165211_earlybird_direct_
+-- fresh_apify_checkpoint.sql already authorize elsewhere in this same
+-- Earlybird admission surface. An exact byte-for-byte equality between the
+-- two would reject this exact production candidate. The eligibility gate
+-- below therefore replaces that equality with the same independently-
+-- bounded, fully-witnessed capacity-safe drift check those precedents use:
+-- the preflight's own fresh-admission witness must still match its current
+-- target counts and plan/card snapshots exactly, and both the order's and
+-- the preflight's own observations must be non-negative and independently
+-- fit inside the capacity of the one card the order's paid plan selects.
 
 SET LOCAL lock_timeout = '5s';
 SET LOCAL statement_timeout = '2min';
@@ -133,6 +150,7 @@ DECLARE
     v_preflight public.analysis_preflights%ROWTYPE;
     v_pfe2_lineage public.earlybird_pfe_target_evidence_start_rejection_rearms%ROWTYPE;
     v_existing public.earlybird_pfe3_media_artifact_rearms%ROWTYPE;
+    v_selected_card JSONB;
     v_new_preflight_id UUID;
     v_new_preflight_key CONSTANT TEXT := 'earlybird.fulfillment.'
         || pg_catalog.replace(p_order_id::TEXT, '-', '') || '.r2';
@@ -237,6 +255,11 @@ BEGIN
     FROM public.earlybird_pfe_target_evidence_start_rejection_rearms AS lineage
     WHERE lineage.order_id = p_order_id;
 
+    -- The one card the order's own paid plan actually selects, resolved
+    -- once up front so both the admission-witness comparison and the
+    -- capacity bound below read the exact same value.
+    v_selected_card := v_preflight.plan_cards_snapshot -> v_order.plan_id;
+
     IF v_pfe2_lineage.order_id IS NULL
        OR v_pfe2_lineage.rearmed_preflight_id IS DISTINCT FROM v_preflight.id
        OR v_order.status <> 'analysis_in_progress'
@@ -299,12 +322,68 @@ BEGIN
        OR v_order.concierge_apify_credential_slot IS DISTINCT FROM 'secondary'
        OR v_preflight.order_scoped_apify_credential_slot
             IS DISTINCT FROM v_order.concierge_apify_credential_slot
+       -- Checkout froze the paid order's own relationship-count observation
+       -- (earlybird_orders.target_followers_count/target_following_count) at
+       -- admission time, while this consumed preflight can carry a later,
+       -- independent observation from its own fresh-admission pass; the two
+       -- are not required to be byte-identical (see 20260731030000_allow_
+       -- capacity_safe_earlybird_admission_count_drift.sql, 20260808240000_
+       -- allow_v211_policy_replay_capacity_safe_count_drift.sql, and
+       -- 20260826165211_earlybird_direct_fresh_apify_checkpoint.sql, all of
+       -- which already authorize this exact independently-bounded drift for
+       -- other Earlybird admission paths). What must still hold, byte for
+       -- byte: the preflight's own fresh-admission witness has not itself
+       -- drifted from its current target counts, the admission-time selected
+       -- plan matches the plan the order actually paid for, and the
+       -- admission-time capacity/required-plan/card witnesses still match
+       -- the preflight's current snapshots -- then both the order's and the
+       -- preflight's own observations must be non-negative and
+       -- independently fit inside the capacity of the one card the paid
+       -- plan actually selects.
        OR v_preflight.target_followers_count IS NULL
+       OR v_preflight.target_followers_count < 0
        OR v_preflight.target_following_count IS NULL
-       OR v_preflight.target_followers_count
-            IS DISTINCT FROM v_order.target_followers_count
-       OR v_preflight.target_following_count
-            IS DISTINCT FROM v_order.target_following_count
+       OR v_preflight.target_following_count < 0
+       OR v_order.target_followers_count IS NULL
+       OR v_order.target_followers_count < 0
+       OR v_order.target_following_count IS NULL
+       OR v_order.target_following_count < 0
+       OR v_preflight.admission_target_followers_count IS NULL
+       OR v_preflight.admission_target_followers_count
+            IS DISTINCT FROM v_preflight.target_followers_count
+       OR v_preflight.admission_target_following_count IS NULL
+       OR v_preflight.admission_target_following_count
+            IS DISTINCT FROM v_preflight.target_following_count
+       OR v_preflight.admission_selected_plan_id
+            IS DISTINCT FROM v_order.plan_id
+       OR v_preflight.admission_capacity_required_plan_id
+            IS DISTINCT FROM v_preflight.capacity_required_plan_id
+       OR v_preflight.admission_required_plan_id
+            IS DISTINCT FROM v_preflight.required_plan_id
+       OR v_preflight.admission_plan_cards_snapshot
+            IS DISTINCT FROM v_preflight.plan_cards_snapshot
+       OR v_selected_card IS NULL
+       OR v_selected_card ->> 'launchStatus' <> 'production'
+       OR v_selected_card ->> 'selectionState'
+            NOT IN ('required', 'available_upgrade')
+       OR COALESCE(
+            v_selected_card -> 'relationshipCapacity' ->> 'followers', ''
+          ) !~ '^[0-9]+$'
+       OR COALESCE(
+            v_selected_card -> 'relationshipCapacity' ->> 'following', ''
+          ) !~ '^[0-9]+$'
+       OR v_order.target_followers_count > (
+            v_selected_card -> 'relationshipCapacity' ->> 'followers'
+          )::INTEGER
+       OR v_order.target_following_count > (
+            v_selected_card -> 'relationshipCapacity' ->> 'following'
+          )::INTEGER
+       OR v_preflight.target_followers_count > (
+            v_selected_card -> 'relationshipCapacity' ->> 'followers'
+          )::INTEGER
+       OR v_preflight.target_following_count > (
+            v_selected_card -> 'relationshipCapacity' ->> 'following'
+          )::INTEGER
        OR v_preflight.target_is_private IS DISTINCT FROM FALSE
        OR v_preflight.capacity_required_plan_id IS NULL
        OR v_preflight.required_plan_id IS NULL

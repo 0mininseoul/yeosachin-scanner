@@ -133,6 +133,17 @@ CREATE TABLE public.analysis_preflights (
     policy_versions_snapshot JSONB,
     capacity_required_plan_id TEXT,
     required_plan_id TEXT,
+    -- The real fresh-admission witness columns from 20260714030000_add_
+    -- analysis_v2_fresh_admission_gate.sql: captured once at the preflight's
+    -- own fresh-admission pass, and never touched again -- the capacity-safe
+    -- count-drift gate under test compares against these, not against a
+    -- second live read of the current target counts.
+    admission_target_followers_count INTEGER,
+    admission_target_following_count INTEGER,
+    admission_selected_plan_id TEXT,
+    admission_capacity_required_plan_id TEXT,
+    admission_required_plan_id TEXT,
+    admission_plan_cards_snapshot JSONB,
     consumed_request_id UUID REFERENCES public.analysis_requests(id),
     pii_scrubbed_at TIMESTAMP WITH TIME ZONE,
     order_scoped_apify_credential_slot TEXT
@@ -741,7 +752,42 @@ type FixtureOverrides = {
     aiAttempts?: AiAttemptOverride[];
     schedulerOperations?: SchedulerOperationOverride[];
     insertRevenueRunLedger?: boolean;
+    planCardsSnapshot?: string;
+    adminPlanCardsSnapshot?: string;
 };
+
+type StandardCardOverrides = {
+    omit?: boolean;
+    launchStatus?: string;
+    selectionState?: string;
+    followersCapacity?: number | string | null;
+    followingCapacity?: number | string | null;
+};
+
+// The 'standard' card is the plan the fixture's paid order always selects
+// (earlybird_orders.plan_id = 'standard' below). Defaults give it generous
+// capacity so every test that does not care about the capacity-safe
+// count-drift gate keeps passing unmodified; capacity-focused tests override
+// individual fields to build the exact invalid/boundary shape they need.
+function planCardsSnapshot(standard: StandardCardOverrides = {}): string {
+    if (standard.omit) {
+        return JSON.stringify({ basic: { launchStatus: 'production' } });
+    }
+    return JSON.stringify({
+        basic: { launchStatus: 'production' },
+        standard: {
+            launchStatus: standard.launchStatus ?? 'production',
+            selectionState: standard.selectionState ?? 'required',
+            relationshipCapacity: {
+                followers: standard.followersCapacity === undefined
+                    ? 5000 : standard.followersCapacity,
+                following: standard.followingCapacity === undefined
+                    ? 5000 : standard.followingCapacity,
+            },
+        },
+    });
+}
+const DEFAULT_PLAN_CARDS_SNAPSHOT = planCardsSnapshot();
 
 const DEFAULT_PROVIDER_RUNS: ProviderRunOverride[] = [
     { operation_key: 'target-likers:c001', run_id: 'run-c1' },
@@ -920,8 +966,19 @@ async function buildValidFixture(
         required_plan_id: 'basic',
         pii_scrubbed_at: '2026-08-28T00:00:00.000Z',
         order_scoped_apify_credential_slot: 'secondary',
+        // Defaults match target_followers_count/target_following_count
+        // above exactly -- the preflight's own fresh-admission witness has
+        // not drifted from itself. admission_selected_plan_id matches the
+        // order's own plan_id ('standard' below) for the same reason.
+        admission_target_followers_count: 300,
+        admission_target_following_count: 100,
+        admission_selected_plan_id: 'standard',
+        admission_capacity_required_plan_id: 'basic',
+        admission_required_plan_id: 'basic',
         ...overrides.preflight,
     };
+    const planCards = overrides.planCardsSnapshot ?? DEFAULT_PLAN_CARDS_SNAPSHOT;
+    const adminPlanCards = overrides.adminPlanCardsSnapshot ?? planCards;
     await db.query(
         `INSERT INTO public.analysis_preflights(
              id, user_id, idempotency_key, target_instagram_id, status, access_mode,
@@ -929,19 +986,29 @@ async function buildValidFixture(
              pricing_version, pricing_snapshot, policy_versions_snapshot,
              target_followers_count, target_following_count, target_is_private,
              capacity_required_plan_id, required_plan_id,
-             pii_scrubbed_at, order_scoped_apify_credential_slot
+             pii_scrubbed_at, order_scoped_apify_credential_slot,
+             admission_target_followers_count, admission_target_following_count,
+             admission_selected_plan_id, admission_capacity_required_plan_id,
+             admission_required_plan_id, admission_plan_cards_snapshot
          ) VALUES (
              $1, $2, $3, $4, 'consumed', 'production',
-             $5::jsonb, $5::jsonb, $5::jsonb, 'v1', $5::jsonb, $5::jsonb,
-             $6, $7, $8, $9, $10, $11, $12
+             $5::jsonb, $5::jsonb, $6::jsonb, 'v1', $5::jsonb, $5::jsonb,
+             $7, $8, $9, $10, $11, $12, $13,
+             $14, $15, $16, $17, $18, $19::jsonb
          )`,
         [
             PFE2_PREFLIGHT_ID, USER_ID, `earlybird.fulfillment.${ORDER_HEX}.r1`,
-            PFE2_PREFLIGHT_RETAINED_TARGET_ID, snapshot,
+            PFE2_PREFLIGHT_RETAINED_TARGET_ID, snapshot, planCards,
             preflight.target_followers_count, preflight.target_following_count,
             preflight.target_is_private, preflight.capacity_required_plan_id,
             preflight.required_plan_id, preflight.pii_scrubbed_at,
             preflight.order_scoped_apify_credential_slot,
+            preflight.admission_target_followers_count,
+            preflight.admission_target_following_count,
+            preflight.admission_selected_plan_id,
+            preflight.admission_capacity_required_plan_id,
+            preflight.admission_required_plan_id,
+            adminPlanCards,
         ]
     );
 
@@ -984,6 +1051,10 @@ async function buildValidFixture(
         actual_amount_krw: 0,
         actual_groble_product_id: 'standard-product-01',
         concierge_apify_credential_slot: 'secondary',
+        // Matches the preflight's own default target counts above -- tests
+        // that exercise capacity-safe count drift override these directly.
+        target_followers_count: 300,
+        target_following_count: 100,
         ...overrides.order,
     };
     await db.query(
@@ -999,7 +1070,8 @@ async function buildValidFixture(
              'standard-product-01', 19900, $8, $9, $10, $11, $12, $13, $14
          )`,
         [
-            ORDER_ID, USER_ID, PFE2_PREFLIGHT_ID, ORDER_TARGET_INSTAGRAM_ID, 300, 100,
+            ORDER_ID, USER_ID, PFE2_PREFLIGHT_ID, ORDER_TARGET_INSTAGRAM_ID,
+            order.target_followers_count, order.target_following_count,
             order.status, order.payment_id, order.paid_at, order.actual_groble_product_id,
             order.actual_amount_krw, order.seller_reference_confirmed_at,
             order.concierge_apify_credential_slot, MEDIA_FAILED_REQUEST_ID,
@@ -1224,6 +1296,29 @@ function rearm(
     );
 }
 
+async function expectNoRearmMutation(db: PGlite): Promise<void> {
+    const ledger = await db.query<{ count: string }>(
+        `SELECT pg_catalog.count(*)::TEXT AS count
+         FROM public.earlybird_pfe3_media_artifact_rearms WHERE order_id = $1`,
+        [ORDER_ID]
+    );
+    expect(ledger.rows[0].count).toBe('0');
+
+    const order = await db.query<{ status: string; preflight_id: string; result_request_id: string | null }>(
+        `SELECT status, preflight_id, result_request_id FROM public.earlybird_orders WHERE id = $1`,
+        [ORDER_ID]
+    );
+    expect(order.rows[0]).toEqual({
+        status: 'analysis_in_progress', preflight_id: PFE2_PREFLIGHT_ID, result_request_id: MEDIA_FAILED_REQUEST_ID,
+    });
+
+    const fulfillment = await db.query<{ status: string; request_id: string | null }>(
+        `SELECT status, request_id FROM public.earlybird_fulfillments WHERE order_id = $1`,
+        [ORDER_ID]
+    );
+    expect(fulfillment.rows[0]).toEqual({ status: 'manual_review', request_id: MEDIA_FAILED_REQUEST_ID });
+}
+
 describe('rearm_earlybird_pfe3_media_artifact_error', () => {
     afterAll(async () => {
         await Promise.all(databases.map(database => database.close()));
@@ -1443,6 +1538,147 @@ describe('rearm_earlybird_pfe3_media_artifact_error', () => {
         const overpaid = await createDb();
         await buildValidFixture(overpaid, { order: { actual_amount_krw: 999999 } });
         await expect(rearm(overpaid)).rejects.toThrow('EARLYBIRD_PFE3_MEDIA_ARTIFACT_REARM_INELIGIBLE');
+    });
+
+    it('accepts fully witnessed capacity-safe count drift between the paid order and the consumed preflight, and the resulting rearm admits an exact .r3 successor', async () => {
+        const db = await createDb();
+        // The exact production shape: checkout froze higher order-level
+        // relationship counts than this consumed preflight's own later,
+        // independent observation. Neither is required to equal the other
+        // any more -- only to each independently fit inside the selected
+        // 'standard' card's default 5000/5000 capacity.
+        await buildValidFixture(db, {
+            order: { target_followers_count: 450, target_following_count: 180 },
+        });
+
+        await expect(rearm(db)).resolves.toMatchObject({
+            rows: [{ fulfillment_status: 'admission_pending' }],
+        });
+
+        const created = await asRole<{ request_id: string; created: boolean }>(
+            db, 'service_role',
+            `SELECT * FROM public.create_or_replay_earlybird_fulfillment_request($1, $2, 1)`,
+            [ORDER_ID, '50000000-0000-4000-8000-000000000099']
+        );
+        expect(created.rows[0].created).toBe(true);
+        const request = await db.query<{ idempotency_key: string }>(
+            `SELECT idempotency_key FROM public.analysis_requests WHERE id = $1`,
+            [created.rows[0].request_id]
+        );
+        // Base ('.'-less), '.r1' (B), and '.r2' (C) are already taken on the
+        // shared 'earlybird:<order>' base key, so the bounded generation
+        // computation must mint exactly '.r3'.
+        expect(request.rows[0].idempotency_key).toBe('earlybird:' + ORDER_ID.toLowerCase() + '.r3');
+    });
+
+    it('rejects when the paid order or the consumed preflight observes a negative relationship count', async () => {
+        const negativeOrderFollowers = await createDb();
+        await buildValidFixture(negativeOrderFollowers, { order: { target_followers_count: -1 } });
+        await expect(rearm(negativeOrderFollowers)).rejects.toThrow('EARLYBIRD_PFE3_MEDIA_ARTIFACT_REARM_INELIGIBLE');
+        await expectNoRearmMutation(negativeOrderFollowers);
+
+        const negativePreflightFollowing = await createDb();
+        await buildValidFixture(negativePreflightFollowing, {
+            preflight: { target_following_count: -1, admission_target_following_count: -1 },
+        });
+        await expect(rearm(negativePreflightFollowing)).rejects.toThrow('EARLYBIRD_PFE3_MEDIA_ARTIFACT_REARM_INELIGIBLE');
+        await expectNoRearmMutation(negativePreflightFollowing);
+    });
+
+    it("rejects when the preflight's own fresh-admission target-count witness is missing or has drifted from its current counts", async () => {
+        const missingWitness = await createDb();
+        await buildValidFixture(missingWitness, { preflight: { admission_target_followers_count: null } });
+        await expect(rearm(missingWitness)).rejects.toThrow('EARLYBIRD_PFE3_MEDIA_ARTIFACT_REARM_INELIGIBLE');
+        await expectNoRearmMutation(missingWitness);
+
+        const driftedWitness = await createDb();
+        await buildValidFixture(driftedWitness, { preflight: { admission_target_following_count: 999 } });
+        await expect(rearm(driftedWitness)).rejects.toThrow('EARLYBIRD_PFE3_MEDIA_ARTIFACT_REARM_INELIGIBLE');
+        await expectNoRearmMutation(driftedWitness);
+    });
+
+    it("rejects when the preflight's admission-time selected plan does not match the order's paid plan", async () => {
+        const db = await createDb();
+        await buildValidFixture(db, { preflight: { admission_selected_plan_id: 'basic' } });
+        await expect(rearm(db)).rejects.toThrow('EARLYBIRD_PFE3_MEDIA_ARTIFACT_REARM_INELIGIBLE');
+        await expectNoRearmMutation(db);
+    });
+
+    it("rejects when the admission-time capacity/required-plan or plan-cards witnesses no longer match the preflight's current snapshots", async () => {
+        const capacityPlanDrift = await createDb();
+        await buildValidFixture(capacityPlanDrift, { preflight: { admission_capacity_required_plan_id: 'standard' } });
+        await expect(rearm(capacityPlanDrift)).rejects.toThrow('EARLYBIRD_PFE3_MEDIA_ARTIFACT_REARM_INELIGIBLE');
+        await expectNoRearmMutation(capacityPlanDrift);
+
+        const requiredPlanDrift = await createDb();
+        await buildValidFixture(requiredPlanDrift, { preflight: { admission_required_plan_id: 'standard' } });
+        await expect(rearm(requiredPlanDrift)).rejects.toThrow('EARLYBIRD_PFE3_MEDIA_ARTIFACT_REARM_INELIGIBLE');
+        await expectNoRearmMutation(requiredPlanDrift);
+
+        const cardsSnapshotDrift = await createDb();
+        await buildValidFixture(cardsSnapshotDrift, {
+            adminPlanCardsSnapshot: planCardsSnapshot({ followersCapacity: 9000 }),
+        });
+        await expect(rearm(cardsSnapshotDrift)).rejects.toThrow('EARLYBIRD_PFE3_MEDIA_ARTIFACT_REARM_INELIGIBLE');
+        await expectNoRearmMutation(cardsSnapshotDrift);
+    });
+
+    it('rejects when the plan-selected card is missing, not launched to production, or not in a selectable state', async () => {
+        const missingCard = await createDb();
+        const missingCardCards = planCardsSnapshot({ omit: true });
+        await buildValidFixture(missingCard, {
+            planCardsSnapshot: missingCardCards, adminPlanCardsSnapshot: missingCardCards,
+        });
+        await expect(rearm(missingCard)).rejects.toThrow('EARLYBIRD_PFE3_MEDIA_ARTIFACT_REARM_INELIGIBLE');
+        await expectNoRearmMutation(missingCard);
+
+        const notProduction = await createDb();
+        const notProductionCards = planCardsSnapshot({ launchStatus: 'beta' });
+        await buildValidFixture(notProduction, {
+            planCardsSnapshot: notProductionCards, adminPlanCardsSnapshot: notProductionCards,
+        });
+        await expect(rearm(notProduction)).rejects.toThrow('EARLYBIRD_PFE3_MEDIA_ARTIFACT_REARM_INELIGIBLE');
+        await expectNoRearmMutation(notProduction);
+
+        const notSelectable = await createDb();
+        const notSelectableCards = planCardsSnapshot({ selectionState: 'excluded' });
+        await buildValidFixture(notSelectable, {
+            planCardsSnapshot: notSelectableCards, adminPlanCardsSnapshot: notSelectableCards,
+        });
+        await expect(rearm(notSelectable)).rejects.toThrow('EARLYBIRD_PFE3_MEDIA_ARTIFACT_REARM_INELIGIBLE');
+        await expectNoRearmMutation(notSelectable);
+    });
+
+    it('rejects when the selected card capacity is missing or not a plain non-negative integer', async () => {
+        const missingFollowers = await createDb();
+        const missingFollowersCards = planCardsSnapshot({ followersCapacity: null });
+        await buildValidFixture(missingFollowers, {
+            planCardsSnapshot: missingFollowersCards, adminPlanCardsSnapshot: missingFollowersCards,
+        });
+        await expect(rearm(missingFollowers)).rejects.toThrow('EARLYBIRD_PFE3_MEDIA_ARTIFACT_REARM_INELIGIBLE');
+        await expectNoRearmMutation(missingFollowers);
+
+        const nonNumericFollowing = await createDb();
+        const nonNumericCards = planCardsSnapshot({ followingCapacity: 'unlimited' });
+        await buildValidFixture(nonNumericFollowing, {
+            planCardsSnapshot: nonNumericCards, adminPlanCardsSnapshot: nonNumericCards,
+        });
+        await expect(rearm(nonNumericFollowing)).rejects.toThrow('EARLYBIRD_PFE3_MEDIA_ARTIFACT_REARM_INELIGIBLE');
+        await expectNoRearmMutation(nonNumericFollowing);
+    });
+
+    it('rejects when either the paid order or the consumed preflight observes a count above the selected card capacity', async () => {
+        const orderAboveCapacity = await createDb();
+        await buildValidFixture(orderAboveCapacity, { order: { target_followers_count: 6000 } });
+        await expect(rearm(orderAboveCapacity)).rejects.toThrow('EARLYBIRD_PFE3_MEDIA_ARTIFACT_REARM_INELIGIBLE');
+        await expectNoRearmMutation(orderAboveCapacity);
+
+        const preflightAboveCapacity = await createDb();
+        await buildValidFixture(preflightAboveCapacity, {
+            preflight: { target_following_count: 6000, admission_target_following_count: 6000 },
+        });
+        await expect(rearm(preflightAboveCapacity)).rejects.toThrow('EARLYBIRD_PFE3_MEDIA_ARTIFACT_REARM_INELIGIBLE');
+        await expectNoRearmMutation(preflightAboveCapacity);
     });
 
     it('rejects when the order has an active competing request or preflight for the same user', async () => {
