@@ -59,7 +59,7 @@ AS $$
        AND batch.repair_usernames IS NULL
        AND pg_catalog.cardinality(batch.requested_usernames) = p_expected_item_count
        AND batch.frozen_unresolved_usernames = COALESCE((
-            SELECT pg_catalog.array_agg(outcome.username ORDER BY outcome.ordinal)
+            SELECT pg_catalog.array_agg(outcome.username::TEXT ORDER BY outcome.ordinal)
             FROM public.analysis_v2_profile_fetch_outcomes AS outcome
             WHERE outcome.request_id = batch.request_id
               AND outcome.job_key = batch.job_key

@@ -109,7 +109,7 @@ CREATE TABLE public.analysis_v2_profile_fetch_outcomes (
     job_key TEXT NOT NULL,
     attempt TEXT NOT NULL,
     ordinal SMALLINT NOT NULL,
-    username TEXT NOT NULL,
+    username VARCHAR(30) NOT NULL,
     source TEXT NOT NULL,
     status TEXT NOT NULL,
     failure_category TEXT,
@@ -516,6 +516,30 @@ function buildOutcomes(
 }
 
 describe('bounded direct fresh_apify consumer (PGlite)', () => {
+    // Regression guard: production's analysis_v2_profile_fetch_outcomes.username
+    // is VARCHAR(30) (20260713164030_add_analysis_v2_profile_fetch_checkpoints.sql),
+    // not TEXT. array_agg() over a VARCHAR(30) column yields character
+    // varying[], which has no `=` operator against the TEXT[]
+    // frozen_unresolved_usernames column -- a mismatch this fixture must keep
+    // reproducing. If this column type ever drifts back to TEXT, the
+    // fixture stops exercising that real production type boundary and could
+    // silently hide a regression of the ::TEXT cast in the migration itself.
+    it('keeps the fixture schema-faithful to production: outcomes.username is VARCHAR(30), not TEXT', async () => {
+        const db = await createDb();
+        const result = await db.query<{
+            data_type: string;
+            character_maximum_length: number | null;
+        }>(
+            `SELECT data_type, character_maximum_length
+             FROM information_schema.columns
+             WHERE table_schema = 'public'
+               AND table_name = 'analysis_v2_profile_fetch_outcomes'
+               AND column_name = 'username'`
+        );
+        expect(result.rows[0]?.data_type).toBe('character varying');
+        expect(result.rows[0]?.character_maximum_length).toBe(30);
+    });
+
     it('accepts an all-success direct fresh_apify batch (baseline, unaffected by this change)', async () => {
         const db = await createDb();
         await seedRequestAndJobs(db);
