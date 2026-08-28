@@ -660,13 +660,13 @@ interface StageDef {
 }
 
 const STAGES: readonly StageDef[] = [
-    { no: 'S1', tag: 'ORBIT', title: '관계 궤도 정렬', sub: '맞팔 후보를 대상 중심 궤도에 배치합니다', dur: 2600, build: buildOrbitalEngine },
-    { no: 'S2', tag: 'CONSTELLATION', title: '성좌 교차 판독', sub: '화면 전체에서 겹치는 연결을 동시에 훑습니다', dur: 2700, build: buildConstellationEngine },
-    { no: 'S3', tag: 'SIGNAL', title: '신호 누적 스캔', sub: '좋아요 방향·댓글 친밀도·맞팔을 누적합니다', dur: 2500, build: buildWaveformEngine },
-    { no: 'S4', tag: 'CLUSTER', title: '군집 분류', sub: '후보를 정상·주의·고위험 군집으로 분리합니다', dur: 2600, build: buildMatrixEngine },
+    { no: 'S1', tag: 'ORBIT', title: '관계 궤도 정렬', sub: '맞팔 후보를 대상 중심 궤도에 배치합니다', dur: 4500, build: buildOrbitalEngine },
+    { no: 'S2', tag: 'CONSTELLATION', title: '성좌 교차 판독', sub: '화면 전체에서 겹치는 연결을 동시에 훑습니다', dur: 4500, build: buildConstellationEngine },
+    { no: 'S3', tag: 'SIGNAL', title: '신호 누적 스캔', sub: '좋아요 방향·댓글 친밀도·맞팔을 누적합니다', dur: 4500, build: buildWaveformEngine },
+    { no: 'S4', tag: 'CLUSTER', title: '군집 분류', sub: '후보를 정상·주의·고위험 군집으로 분리합니다', dur: 4500, build: buildMatrixEngine },
 ];
-/** 2600 + 2700 + 2500 + 2600 + 1600 = 12000ms total, matching the approved prototype. */
-const REVEAL_MS = 1600;
+/** 4500 + 4500 + 4500 + 4500 + 2000 = 20000ms total, matching the approved prototype. */
+const REVEAL_MS = 2000;
 export const PRECHECKOUT_DEMO_STAGE_DURATIONS_MS = STAGES.map(stage => stage.dur);
 export const PRECHECKOUT_DEMO_DURATION_MS = PRECHECKOUT_DEMO_STAGE_DURATIONS_MS.reduce(
     (sum, duration) => sum + duration,
@@ -791,6 +791,10 @@ export function PrecheckoutStageGraphs({
                 const nextSlowCycle = Math.floor(slowElapsed / cycleDurationMs);
                 if (nextSlowCycle !== slowCycle) {
                     slowCycle = nextSlowCycle;
+                    if (activeIndex >= 0) {
+                        engines[activeIndex].svg.style.opacity = '0';
+                    }
+                    activeIndex = -1;
                     railRefs.current.forEach(bar => {
                         if (bar) bar.style.width = '0';
                     });
@@ -833,7 +837,7 @@ export function PrecheckoutStageGraphs({
         }
 
         if (reduced) {
-            // Remove visual motion. PrecheckoutDemo owns the exact 12-second completion.
+            // Remove visual motion. PrecheckoutDemo owns the exact 20-second completion.
             try {
                 const lastIndex = STAGES.length - 1;
                 setActive(lastIndex);

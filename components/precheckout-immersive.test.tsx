@@ -187,7 +187,7 @@ describe('PrecheckoutImmersive', () => {
         await settleUi();
 
         expect(container.querySelector('[data-precheckout-demo-mode="waiting"]')).not.toBeNull();
-        await advance(11_999);
+        await advance(19_999);
         expect(container.querySelector('[data-precheckout-demo-mode="waiting"]')).not.toBeNull();
         expect(container.querySelector('[data-precheckout-result-card]')).toBeNull();
     });
@@ -206,13 +206,13 @@ describe('PrecheckoutImmersive', () => {
             }));
         });
         await settleUi();
-        await advance(12_000);
+        await advance(20_000);
 
         expect(analyticsMocks.trackPrecheckoutEvent).toHaveBeenCalledWith(
             'precheckout_blite_available', PREFLIGHT_ID,
         );
         expect(analyticsMocks.trackPrecheckoutEvent).toHaveBeenCalledWith(
-            'precheckout_demo_completed', PREFLIGHT_ID, { demo_mode: 'result', duration_ms: 12_000 },
+            'precheckout_demo_completed', PREFLIGHT_ID, { demo_mode: 'result', duration_ms: 20_000 },
         );
         expect(container.querySelector('[data-precheckout-fallback]')).toBeNull();
         expect(container.querySelector('[data-precheckout-demo-mode="waiting"]')).toBeNull();
@@ -244,7 +244,7 @@ describe('PrecheckoutImmersive', () => {
             }));
         });
         await settleUi();
-        await advance(12_000);
+        await advance(20_000);
         const firstCopy = container.querySelector('[data-precheckout-progress]')?.textContent;
         await advance(6_000);
         const secondCopy = container.querySelector('[data-precheckout-progress]')?.textContent;
@@ -316,7 +316,7 @@ describe('PrecheckoutImmersive', () => {
             }));
         });
         await settleUi();
-        await advance(11_999);
+        await advance(19_999);
         expect(container.querySelector('[data-precheckout-fallback]')).toBeNull();
         await advance(1);
 
@@ -397,7 +397,7 @@ describe('PrecheckoutImmersive', () => {
         expect(container.querySelector('[data-precheckout-progress]')).toBeNull();
         expect(container.textContent).toContain('1/4');
 
-        await advance(11_999);
+        await advance(19_999);
         expect(container.querySelector('[data-precheckout-demo-phase="initial"]')).not.toBeNull();
         await advance(1);
         expect(container.querySelector('[data-precheckout-demo-phase="waiting"]')).not.toBeNull();
@@ -435,7 +435,7 @@ describe('PrecheckoutImmersive', () => {
     it('settles a mid-pass deadline at the next transition instead of cutting the fresh pass short', async () => {
         vi.stubGlobal('fetch', vi.fn().mockResolvedValue(noBody()));
         // submittedAtMs + BLITE_UX_DEADLINE_MS(90s) lands 8s after this mount's visible entry,
-        // i.e. inside the freshly-restarted 12s initial pass.
+        // i.e. inside the freshly-restarted 20s initial pass.
         const staleSubmittedAtMs = Date.parse(SUBMITTED_AT) - 82_000;
         const onGoToPlans = vi.fn();
 
@@ -454,7 +454,7 @@ describe('PrecheckoutImmersive', () => {
         expect(container.querySelector('[data-precheckout-fallback]')).toBeNull();
         expect(container.querySelector('[data-precheckout-demo-mode="waiting"]')).not.toBeNull();
 
-        await advance(3_999);
+        await advance(11_999);
         expect(container.querySelector('[data-precheckout-fallback]')).toBeNull();
 
         await advance(1);
@@ -481,7 +481,7 @@ describe('PrecheckoutImmersive', () => {
             }));
         });
         await settleUi();
-        await advance(12_000);
+        await advance(20_000);
 
         expect(container.textContent).toContain('여성일 가능성이 높다는 고신뢰 판독');
         expect(container.textContent).toContain('근거 하나');
@@ -519,7 +519,7 @@ describe('PrecheckoutImmersive', () => {
             }));
         });
         await settleUi();
-        await advance(12_000);
+        await advance(20_000);
 
         clickButton(container, '아니오');
         expect(analyticsMocks.trackPrecheckoutEvent).toHaveBeenCalledWith(
@@ -558,7 +558,7 @@ describe('PrecheckoutImmersive', () => {
             }));
         });
         await settleUi();
-        await advance(12_000);
+        await advance(20_000);
 
         expect(container.textContent).not.toContain('판독 방향 확인');
         expect(container.querySelectorAll('[data-precheckout-result-card]')).toHaveLength(4);
@@ -581,7 +581,7 @@ describe('PrecheckoutImmersive', () => {
             }));
         });
         await settleUi();
-        await advance(12_000);
+        await advance(20_000);
 
         expect(container.textContent).toContain('34~80명');
         expect(container.textContent).not.toContain('34 – 80명');

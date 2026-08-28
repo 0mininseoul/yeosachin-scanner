@@ -8,6 +8,7 @@ import {
     PRECHECKOUT_DEMO_STAGE_DURATIONS_MS,
     PrecheckoutDemo,
 } from './precheckout-demo';
+import { PRECHECKOUT_WAIT_STAGE_DURATION_MS } from './precheckout-stage-graphs';
 import { reduceBlitePage, type BlitePageState } from '@/lib/services/precheckout/blite-page-flow';
 
 (globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT: boolean })
@@ -70,8 +71,8 @@ describe('PrecheckoutDemo', () => {
         const onComplete = vi.fn();
         const onError = vi.fn();
 
-        expect(PRECHECKOUT_DEMO_STAGE_DURATIONS_MS).toEqual([2_600, 2_700, 2_500, 2_600]);
-        expect(PRECHECKOUT_DEMO_DURATION_MS).toBe(12_000);
+        expect(PRECHECKOUT_DEMO_STAGE_DURATIONS_MS).toEqual([4_500, 4_500, 4_500, 4_500]);
+        expect(PRECHECKOUT_DEMO_DURATION_MS).toBe(20_000);
 
         await act(async () => {
             root.render(createElement(PrecheckoutDemo, {
@@ -97,26 +98,26 @@ describe('PrecheckoutDemo', () => {
             vi.setSystemTime(0);
             monotonicTimeMs = 0;
             rafCallback?.(0);
-            vi.setSystemTime(2_600);
-            monotonicTimeMs = 2_600;
-            rafCallback?.(2_600);
+            vi.setSystemTime(4_500);
+            monotonicTimeMs = 4_500;
+            rafCallback?.(4_500);
         });
         expect(status?.textContent).toContain('2/4');
         await act(async () => {
-            vi.setSystemTime(5_300);
-            monotonicTimeMs = 5_300;
-            rafCallback?.(5_300);
+            vi.setSystemTime(9_000);
+            monotonicTimeMs = 9_000;
+            rafCallback?.(9_000);
         });
         expect(status?.textContent).toContain('3/4');
         await act(async () => {
-            vi.setSystemTime(7_800);
-            monotonicTimeMs = 7_800;
-            rafCallback?.(7_800);
+            vi.setSystemTime(13_500);
+            monotonicTimeMs = 13_500;
+            rafCallback?.(13_500);
         });
         expect(status?.textContent).toContain('4/4');
     });
 
-    it('runs both modes for exactly 12,000ms and completes exactly once without Instagram work', async () => {
+    it('runs both modes for exactly 20,000ms and completes exactly once without Instagram work', async () => {
         const onComplete = vi.fn();
         const onError = vi.fn();
         const fetchMock = vi.fn();
@@ -188,13 +189,13 @@ describe('PrecheckoutDemo', () => {
             })));
         });
 
-        await advanceTimersBy(10_000);
+        await advanceTimersBy(15_000);
         await act(async () => {
-            monotonicTimeMs = 10_000;
+            monotonicTimeMs = 15_000;
             rafCallback?.(0);
         });
         expect(container.querySelector('[role="status"]')?.textContent).toContain('4/4');
-        await advanceTimersBy(DEMO_DURATION_MS - 10_001);
+        await advanceTimersBy(DEMO_DURATION_MS - 15_001);
         expect(onComplete).not.toHaveBeenCalled();
         await advanceTimersBy(1);
         expect(onComplete).toHaveBeenCalledTimes(1);
@@ -210,7 +211,7 @@ describe('PrecheckoutDemo', () => {
                 onError: vi.fn(),
             }));
         });
-        await advanceTimersBy(10_000);
+        await advanceTimersBy(15_000);
         expect(firstComplete).not.toHaveBeenCalled();
 
         act(() => root.unmount());
@@ -225,7 +226,7 @@ describe('PrecheckoutDemo', () => {
             }));
         });
         expect(container.querySelector('[role="status"]')?.textContent).toContain('4/4');
-        await advanceTimersBy(DEMO_DURATION_MS - 10_001);
+        await advanceTimersBy(DEMO_DURATION_MS - 15_001);
         expect(remountComplete).not.toHaveBeenCalled();
         await advanceTimersBy(1);
         expect(remountComplete).toHaveBeenCalledTimes(1);
@@ -247,7 +248,7 @@ describe('PrecheckoutDemo', () => {
         const startedAtMs = fallback.demoStartedAtMs;
         if (startedAtMs === null) throw new Error('reducer did not start fallback demo');
 
-        vi.setSystemTime(startedAtMs + 10_000);
+        vi.setSystemTime(startedAtMs + 15_000);
         const onComplete = vi.fn();
         await act(async () => {
             root.render(createElement(PrecheckoutDemo, {
@@ -259,7 +260,7 @@ describe('PrecheckoutDemo', () => {
         });
 
         expect(container.querySelector('[role="status"]')?.textContent).toContain('4/4');
-        await advanceTimersBy(DEMO_DURATION_MS - 10_001);
+        await advanceTimersBy(DEMO_DURATION_MS - 15_001);
         expect(onComplete).not.toHaveBeenCalled();
         await advanceTimersBy(1);
         expect(onComplete).toHaveBeenCalledTimes(1);
@@ -316,7 +317,7 @@ describe('PrecheckoutDemo', () => {
         expect(document.body.style.overflow).toBe('scroll');
     });
 
-    it('keeps the 12-second contract under reduced motion', async () => {
+    it('keeps the 20-second contract under reduced motion', async () => {
         stubMatchMedia(query => query.includes('prefers-reduced-motion'));
         const onComplete = vi.fn();
 
@@ -357,7 +358,7 @@ describe('PrecheckoutDemo', () => {
         vi.resetModules();
         vi.doMock('./precheckout-stage-graphs', () => ({
             PRECHECKOUT_DEMO_DURATION_MS: DEMO_DURATION_MS,
-            PRECHECKOUT_DEMO_STAGE_DURATIONS_MS: [2_600, 2_700, 2_500, 2_600],
+            PRECHECKOUT_DEMO_STAGE_DURATIONS_MS: [4_500, 4_500, 4_500, 4_500],
             PrecheckoutStageGraphs: () => {
                 throw new Error('demo asset unavailable');
             },
@@ -453,5 +454,51 @@ describe('PrecheckoutDemo', () => {
         expect(onComplete).not.toHaveBeenCalled();
         await advanceTimersBy(1);
         expect(onComplete).toHaveBeenCalledOnce();
+    });
+
+    it('empties every rail at each new waiting cycle instead of leaving stage 4 full', async () => {
+        const onComplete = vi.fn();
+        await act(async () => {
+            root.render(createElement(PrecheckoutDemo, {
+                mode: 'waiting',
+                startedAtMs: 0,
+                finishRequested: false,
+                onComplete,
+                onError: vi.fn(),
+            }));
+        });
+
+        async function paintAt(ms: number) {
+            await act(async () => {
+                vi.setSystemTime(ms);
+                monotonicTimeMs = ms;
+                rafCallback?.(ms);
+            });
+        }
+        function railWidths() {
+            return [...container.querySelectorAll('.precheckout-stage-graphs i span')]
+                .map(el => (el as HTMLSpanElement).style.width);
+        }
+        const status = container.querySelector('[role="status"]');
+
+        // Drive through the initial four-stage pass so stage 4 (rail index 3) fills before the wrap.
+        await paintAt(13_500);
+        await paintAt(18_000);
+
+        // First waiting boundary: elapsed === PRECHECKOUT_DEMO_DURATION_MS (20,000ms).
+        await paintAt(DEMO_DURATION_MS);
+        expect(status?.textContent).toContain('1/4');
+        expect(railWidths()[0]).toBe('0%');
+        expect(railWidths()[3]).toBe('0px');
+
+        // Drive through the rest of the cycle so stage 4 fills again before the next wrap.
+        await paintAt(DEMO_DURATION_MS + 3 * PRECHECKOUT_WAIT_STAGE_DURATION_MS);
+        await paintAt(DEMO_DURATION_MS + 4 * PRECHECKOUT_WAIT_STAGE_DURATION_MS - 1);
+
+        // Next full waiting-cycle boundary: elapsed === 20,000 + 4*6,000ms (44,000ms).
+        await paintAt(DEMO_DURATION_MS + 4 * PRECHECKOUT_WAIT_STAGE_DURATION_MS);
+        expect(status?.textContent).toContain('1/4');
+        expect(railWidths()[0]).toBe('0%');
+        expect(railWidths()[3]).toBe('0px');
     });
 });
