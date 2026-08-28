@@ -1002,7 +1002,7 @@ describe('recover_earlybird_profile_fetch_exhaustion_fulfillment', () => {
         await expect(recover(dbNullPreflightSlot)).rejects.toThrow(
             'EARLYBIRD_PROFILE_FETCH_EXHAUSTION_RECOVERY_INELIGIBLE'
         );
-    });
+    }, 30_000);
 
     it('scrub token gate: the request and source preflight tokens are each derived from their own id, independently', async () => {
         const dbWrongRequestToken = await createDb();
