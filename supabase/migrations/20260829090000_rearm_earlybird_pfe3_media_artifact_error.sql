@@ -344,6 +344,13 @@ BEGIN
        -- though the job_key segment stays hyphenated
        -- ('track:profile-ai:batch:3'); a hyphenated track value must not
        -- satisfy the gate.
+       -- attempt_count = 3 matches the production incident exactly. Its
+       -- own analysis_pipeline_jobs_lease_check / _completion_check /
+       -- _error_check / _failed_error_check constraints already force a
+       -- 'failed' row's lease_token/lease_expires_at to NULL and its
+       -- completed_at/last_error_at to NOT NULL, so no separate gate clause
+       -- is needed for those; only the exact attempt count is not implied by
+       -- any constraint and must be checked explicitly.
        OR NOT EXISTS (
             SELECT 1
             FROM public.analysis_pipeline_jobs AS pipeline_job
@@ -353,6 +360,7 @@ BEGIN
               AND pipeline_job.status = 'failed'
               AND pipeline_job.last_error_code
                     = 'ANALYSIS_V2_MEDIA_ARTIFACT_OBJECT_ERROR'
+              AND pipeline_job.attempt_count = 3
        )
        -- Every provider run this successor made must exist, be fully
        -- succeeded and usage-reconciled, and run on the order's own
@@ -374,6 +382,62 @@ BEGIN
                   OR provider_run.usage_reconciled_at IS NULL
                   OR provider_run.credential_slot IS DISTINCT FROM 'secondary'
               )
+       )
+       -- analysis_v2_ai_attempts is the distinct Gemini AI-attempt ledger --
+       -- separate from analysis_v2_provider_runs above, which records only
+       -- third-party Instagram scraper calls (logical_provider values like
+       -- 'apify' or 'coderx', never Gemini). Require at least one AI attempt
+       -- exists for this successor, and that every one of them is terminal
+       -- ('reserved' is the ledger's sole non-terminal status; every other
+       -- status -- 'success', 'rate_limited', 'ambiguous', 'rejected',
+       -- 'response_rejected', 'cutoff' -- is terminal, matching
+       -- analysis_v2_ai_attempt_status_check and the application's own
+       -- TERMINAL_STATUSES constant) with a fully accounted usage/terminal
+       -- shape, matching the production precheck that every r2 AI attempt
+       -- is already terminal and accounted for.
+       OR NOT EXISTS (
+            SELECT 1
+            FROM public.analysis_v2_ai_attempts AS ai_attempt
+            WHERE ai_attempt.request_id = v_request.id
+       )
+       OR EXISTS (
+            SELECT 1
+            FROM public.analysis_v2_ai_attempts AS ai_attempt
+            WHERE ai_attempt.request_id = v_request.id
+              AND (
+                  ai_attempt.status = 'reserved'
+                  OR ai_attempt.usage_metadata_status IS NULL
+                  OR ai_attempt.usage_complete IS NULL
+                  OR ai_attempt.terminalized_at IS NULL
+              )
+       )
+       -- analysis_v2_scheduler_operations' sole non-terminal status is
+       -- 'claimed' ('ready' and 'terminal_unavailable' are both terminal,
+       -- per its own analysis_v2_scheduler_operation_status_check); no
+       -- operation for this successor may still be actively claimed.
+       OR EXISTS (
+            SELECT 1
+            FROM public.analysis_v2_scheduler_operations AS operation
+            WHERE operation.request_id = v_request.id
+              AND operation.status = 'claimed'
+       )
+       -- analysis_revenue_run_ledgers is exclusively a test_entitlement-mode
+       -- ledger: its own CHECK constraint pins access_mode to
+       -- 'test_entitlement', and begin_analysis_revenue_cost_ledger_v1 (the
+       -- table's only inserter) rejects any request whose
+       -- plan_access_mode_snapshot is not 'test_entitlement'. A production
+       -- access_mode='production' earlybird successor can therefore never
+       -- have one -- see 20260826165211_earlybird_direct_fresh_apify_
+       -- checkpoint.sql's own identical
+       -- "OR EXISTS (... analysis_revenue_run_ledgers ...)" fence -- and,
+       -- because analysis_revenue_cost_operations' only foreign key cascades
+       -- from this ledger's own primary key, no cost-operation child could
+       -- exist without it either. Fail closed if one is ever found instead
+       -- of assuming applicability either way.
+       OR EXISTS (
+            SELECT 1
+            FROM public.analysis_revenue_run_ledgers AS ledger
+            WHERE ledger.request_id = v_request.id
        )
        -- Zero adoption: neither prior recovery's own resolver wrapper ever
        -- let this successor adopt anything.

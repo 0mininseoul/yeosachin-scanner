@@ -231,7 +231,54 @@ CREATE TABLE public.analysis_pipeline_jobs (
     track TEXT NOT NULL,
     status TEXT NOT NULL,
     last_error_code TEXT,
+    -- The real production column (20260713155145_add_analysis_v2_job_
+    -- foundation.sql) is unconstrained beyond BETWEEN 0 AND 100; only the
+    -- PFE3 rearm's own exact-incident check narrows it further.
+    attempt_count SMALLINT NOT NULL DEFAULT 0,
     PRIMARY KEY (request_id, job_key)
+);
+
+-- Trimmed to exactly the columns the PFE3 rearm's eligibility gate reads.
+-- Mirrors 20260713170859_add_analysis_v2_ai_attempt_ledger.sql's Gemini
+-- AI-attempt ledger -- a distinct table from analysis_v2_provider_runs
+-- above, which records only third-party Instagram scraper calls. No FK to
+-- analysis_pipeline_jobs(request_id, job_key) is modeled, exactly like the
+-- trimmed analysis_v2_provider_runs table above.
+CREATE TABLE public.analysis_v2_ai_attempts (
+    request_id UUID NOT NULL REFERENCES public.analysis_requests(id),
+    job_key TEXT NOT NULL,
+    operation_key TEXT NOT NULL,
+    attempt SMALLINT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'reserved'
+        CHECK (status IN (
+            'reserved', 'success', 'rate_limited', 'ambiguous', 'rejected',
+            'response_rejected', 'cutoff'
+        )),
+    usage_metadata_status TEXT,
+    usage_complete BOOLEAN,
+    terminalized_at TIMESTAMP WITH TIME ZONE,
+    PRIMARY KEY (request_id, operation_key, attempt)
+);
+
+-- Trimmed to exactly the columns the PFE3 rearm's eligibility gate reads.
+-- Mirrors 20260727034000_add_analysis_v2_scheduler_live_operations.sql.
+CREATE TABLE public.analysis_v2_scheduler_operations (
+    request_id UUID NOT NULL REFERENCES public.analysis_requests(id),
+    job_key TEXT NOT NULL,
+    operation_key TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'claimed'
+        CHECK (status IN ('claimed', 'ready', 'terminal_unavailable')),
+    completed_at TIMESTAMP WITH TIME ZONE,
+    PRIMARY KEY (request_id, operation_key)
+);
+
+-- Trimmed to exactly the column the PFE3 rearm's eligibility gate reads.
+-- Mirrors 20260810090000_add_revenue_e2e_observability_ledgers.sql, whose
+-- own access_mode CHECK pins every row to access_mode = 'test_entitlement'
+-- (never 'production'): a production-access-mode earlybird successor can
+-- never have a row here, so the gate only ever needs to prove absence.
+CREATE TABLE public.analysis_revenue_run_ledgers (
+    request_id UUID PRIMARY KEY REFERENCES public.analysis_requests(id)
 );
 
 CREATE TABLE public.analysis_v2_provider_runs (
@@ -659,6 +706,23 @@ type MediaArtifactOverride = {
     deleted_at?: string | null;
 };
 
+type AiAttemptOverride = {
+    job_key?: string;
+    operation_key?: string;
+    attempt?: number;
+    status?: string;
+    usage_metadata_status?: string | null;
+    usage_complete?: boolean | null;
+    terminalized_at?: string | null;
+};
+
+type SchedulerOperationOverride = {
+    job_key?: string;
+    operation_key?: string;
+    status?: string;
+    completed_at?: string | null;
+};
+
 type FixtureOverrides = {
     order?: Record<string, unknown>;
     fulfillment?: Record<string, unknown>;
@@ -674,6 +738,9 @@ type FixtureOverrides = {
     failureReceiptOverrides?: Record<string, unknown>;
     mediaArtifacts?: MediaArtifactOverride[];
     webhookEvents?: string[];
+    aiAttempts?: AiAttemptOverride[];
+    schedulerOperations?: SchedulerOperationOverride[];
+    insertRevenueRunLedger?: boolean;
 };
 
 const DEFAULT_PROVIDER_RUNS: ProviderRunOverride[] = [
@@ -685,6 +752,33 @@ const DEFAULT_PROVIDER_RUNS: ProviderRunOverride[] = [
 const DEFAULT_MEDIA_ARTIFACTS: MediaArtifactOverride[] = [
     { artifact_key: 'a'.repeat(64), deleted_at: '2026-08-29T00:10:00.000Z' },
     { artifact_key: 'b'.repeat(64), deleted_at: '2026-08-29T00:10:05.000Z' },
+];
+
+// The two profile_ai batches (1, 2) that already completed their Gemini
+// calls before batch:3's own media-artifact fetch failed -- batch:3 itself
+// never reaches an AI attempt, exactly matching the production incident.
+const DEFAULT_AI_ATTEMPTS: AiAttemptOverride[] = [
+    {
+        job_key: 'track:profile-ai:batch:1', operation_key: 'gender-triage-op-1',
+        attempt: 1, status: 'success', usage_metadata_status: 'complete',
+        usage_complete: true, terminalized_at: '2026-08-29T00:02:00.000Z',
+    },
+    {
+        job_key: 'track:profile-ai:batch:2', operation_key: 'feature-analysis-op-1',
+        attempt: 1, status: 'success', usage_metadata_status: 'complete',
+        usage_complete: true, terminalized_at: '2026-08-29T00:03:00.000Z',
+    },
+];
+
+const DEFAULT_SCHEDULER_OPERATIONS: SchedulerOperationOverride[] = [
+    {
+        job_key: 'track:profile-ai:batch:1', operation_key: 'sched-op-1',
+        status: 'ready', completed_at: '2026-08-29T00:02:05.000Z',
+    },
+    {
+        job_key: 'track:profile-ai:batch:2', operation_key: 'sched-op-2',
+        status: 'ready', completed_at: '2026-08-29T00:03:05.000Z',
+    },
 ];
 
 // Builds the exact end-state this migration targets: an order already
@@ -974,12 +1068,71 @@ async function buildValidFixture(
             status: 'failed',
             track: 'profile_ai',
             last_error_code: 'ANALYSIS_V2_MEDIA_ARTIFACT_OBJECT_ERROR',
+            // The exact production fact: the job-level counter had already
+            // reached 3 when the media-artifact-object error terminally
+            // failed it.
+            attempt_count: 3,
             ...overrides.profileAiJobOverrides,
         };
         await db.query(
-            `INSERT INTO public.analysis_pipeline_jobs(request_id, job_key, track, status, last_error_code)
-             VALUES ($1, 'track:profile-ai:batch:3', $2, $3, $4)`,
-            [MEDIA_FAILED_REQUEST_ID, job.track, job.status, job.last_error_code]
+            `INSERT INTO public.analysis_pipeline_jobs(request_id, job_key, track, status, last_error_code, attempt_count)
+             VALUES ($1, 'track:profile-ai:batch:3', $2, $3, $4, $5)`,
+            [MEDIA_FAILED_REQUEST_ID, job.track, job.status, job.last_error_code, job.attempt_count]
+        );
+    }
+
+    const aiAttempts = overrides.aiAttempts ?? DEFAULT_AI_ATTEMPTS;
+    for (const attemptOverride of aiAttempts) {
+        // Object-spread merge (not `??` per field): an override that
+        // explicitly sets a field to null (e.g. terminalized_at: null) must
+        // survive, which `defaultValue ?? override` would silently discard.
+        const attempt = {
+            job_key: 'track:profile-ai:batch:1',
+            operation_key: 'gender-triage-op-1',
+            attempt: 1,
+            status: 'success',
+            usage_metadata_status: 'complete' as string | null,
+            usage_complete: true as boolean | null,
+            terminalized_at: '2026-08-29T00:02:00.000Z' as string | null,
+            ...attemptOverride,
+        };
+        await db.query(
+            `INSERT INTO public.analysis_v2_ai_attempts(
+                 request_id, job_key, operation_key, attempt, status,
+                 usage_metadata_status, usage_complete, terminalized_at
+             ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
+            [
+                MEDIA_FAILED_REQUEST_ID, attempt.job_key, attempt.operation_key,
+                attempt.attempt, attempt.status, attempt.usage_metadata_status,
+                attempt.usage_complete, attempt.terminalized_at,
+            ]
+        );
+    }
+
+    const schedulerOperations = overrides.schedulerOperations ?? DEFAULT_SCHEDULER_OPERATIONS;
+    for (const operationOverride of schedulerOperations) {
+        const operation = {
+            job_key: 'track:profile-ai:batch:1',
+            operation_key: 'sched-op-1',
+            status: 'ready',
+            completed_at: '2026-08-29T00:02:05.000Z' as string | null,
+            ...operationOverride,
+        };
+        await db.query(
+            `INSERT INTO public.analysis_v2_scheduler_operations(
+                 request_id, job_key, operation_key, status, completed_at
+             ) VALUES ($1, $2, $3, $4, $5)`,
+            [
+                MEDIA_FAILED_REQUEST_ID, operation.job_key, operation.operation_key,
+                operation.status, operation.completed_at,
+            ]
+        );
+    }
+
+    if (overrides.insertRevenueRunLedger) {
+        await db.query(
+            `INSERT INTO public.analysis_revenue_run_ledgers(request_id) VALUES ($1)`,
+            [MEDIA_FAILED_REQUEST_ID]
         );
     }
 
@@ -1352,6 +1505,93 @@ describe('rearm_earlybird_pfe3_media_artifact_error', () => {
             ],
         });
         await expect(rearm(wrongJob)).rejects.toThrow('EARLYBIRD_PFE3_MEDIA_ARTIFACT_REARM_INELIGIBLE');
+    });
+
+    it('rejects when the exact failing job attempt_count does not match the production incident (3)', async () => {
+        const tooFew = await createDb();
+        await buildValidFixture(tooFew, { profileAiJobOverrides: { attempt_count: 2 } });
+        await expect(rearm(tooFew)).rejects.toThrow('EARLYBIRD_PFE3_MEDIA_ARTIFACT_REARM_INELIGIBLE');
+
+        const tooMany = await createDb();
+        await buildValidFixture(tooMany, { profileAiJobOverrides: { attempt_count: 4 } });
+        await expect(rearm(tooMany)).rejects.toThrow('EARLYBIRD_PFE3_MEDIA_ARTIFACT_REARM_INELIGIBLE');
+    });
+
+    it('requires at least one AI attempt for the successor, distinct from the Instagram-scraper analysis_v2_provider_runs ledger', async () => {
+        const db = await createDb();
+        await buildValidFixture(db, { aiAttempts: [] });
+        await expect(rearm(db)).rejects.toThrow('EARLYBIRD_PFE3_MEDIA_ARTIFACT_REARM_INELIGIBLE');
+    });
+
+    it('rejects when any AI attempt for the successor is still reserved (non-terminal)', async () => {
+        const db = await createDb();
+        await buildValidFixture(db, {
+            aiAttempts: [
+                ...DEFAULT_AI_ATTEMPTS,
+                {
+                    job_key: 'track:profile-ai:batch:2', operation_key: 'feature-analysis-op-2',
+                    attempt: 1, status: 'reserved', usage_metadata_status: null,
+                    usage_complete: null, terminalized_at: null,
+                },
+            ],
+        });
+        await expect(rearm(db)).rejects.toThrow('EARLYBIRD_PFE3_MEDIA_ARTIFACT_REARM_INELIGIBLE');
+    });
+
+    it('rejects when a terminal AI attempt is missing its usage-accounting shape', async () => {
+        const missingUsageStatus = await createDb();
+        await buildValidFixture(missingUsageStatus, {
+            aiAttempts: [{ ...DEFAULT_AI_ATTEMPTS[0], usage_metadata_status: null }, DEFAULT_AI_ATTEMPTS[1]],
+        });
+        await expect(rearm(missingUsageStatus)).rejects.toThrow('EARLYBIRD_PFE3_MEDIA_ARTIFACT_REARM_INELIGIBLE');
+
+        const missingUsageComplete = await createDb();
+        await buildValidFixture(missingUsageComplete, {
+            aiAttempts: [{ ...DEFAULT_AI_ATTEMPTS[0], usage_complete: null }, DEFAULT_AI_ATTEMPTS[1]],
+        });
+        await expect(rearm(missingUsageComplete)).rejects.toThrow('EARLYBIRD_PFE3_MEDIA_ARTIFACT_REARM_INELIGIBLE');
+
+        const missingTerminalizedAt = await createDb();
+        await buildValidFixture(missingTerminalizedAt, {
+            aiAttempts: [{ ...DEFAULT_AI_ATTEMPTS[0], terminalized_at: null }, DEFAULT_AI_ATTEMPTS[1]],
+        });
+        await expect(rearm(missingTerminalizedAt)).rejects.toThrow('EARLYBIRD_PFE3_MEDIA_ARTIFACT_REARM_INELIGIBLE');
+    });
+
+    it('rejects when a scheduler operation for the successor is still actively claimed', async () => {
+        const db = await createDb();
+        await buildValidFixture(db, {
+            schedulerOperations: [
+                ...DEFAULT_SCHEDULER_OPERATIONS,
+                {
+                    job_key: 'track:profile-ai:batch:2', operation_key: 'sched-op-3',
+                    status: 'claimed', completed_at: null,
+                },
+            ],
+        });
+        await expect(rearm(db)).rejects.toThrow('EARLYBIRD_PFE3_MEDIA_ARTIFACT_REARM_INELIGIBLE');
+    });
+
+    it('accepts a terminal_unavailable scheduler operation: only "claimed" is non-terminal', async () => {
+        const db = await createDb();
+        await buildValidFixture(db, {
+            schedulerOperations: [
+                ...DEFAULT_SCHEDULER_OPERATIONS,
+                {
+                    job_key: 'track:profile-ai:batch:2', operation_key: 'sched-op-3',
+                    status: 'terminal_unavailable', completed_at: null,
+                },
+            ],
+        });
+        await expect(rearm(db)).resolves.toMatchObject({
+            rows: [{ fulfillment_status: 'admission_pending' }],
+        });
+    });
+
+    it('rejects when a revenue run ledger row exists for the successor: production access_mode requests can never have one', async () => {
+        const db = await createDb();
+        await buildValidFixture(db, { insertRevenueRunLedger: true });
+        await expect(rearm(db)).rejects.toThrow('EARLYBIRD_PFE3_MEDIA_ARTIFACT_REARM_INELIGIBLE');
     });
 
     it('restrictive ACL: only service_role may execute, and no other role can read or write the audit table', async () => {
