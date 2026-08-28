@@ -22,6 +22,7 @@ import {
     isSafeEarlybirdDemoProgressUrl,
 } from '@/lib/services/earlybird/checkout-continuation';
 import type { PreflightStatusV1 } from '@/lib/contracts/analysis-v2';
+import { earlybirdCheckoutRecoveryRequestSchema } from './contracts';
 
 const planCards = [
     { planId: 'basic', selectionState: 'unavailable' },
@@ -357,13 +358,9 @@ describe('earlybird analyze UI state', () => {
             init?: RequestInit,
         ): Promise<Response> => {
             const body = typeof init?.body === 'string'
-                ? JSON.parse(init.body) as { preflightId?: unknown; planId?: unknown }
+                ? JSON.parse(init.body) as unknown
                 : null;
-            if (
-                !body
-                || body.preflightId !== stale.preflightId
-                || (body.planId !== 'basic' && body.planId !== 'standard')
-            ) {
+            if (!earlybirdCheckoutRecoveryRequestSchema.safeParse(body).success) {
                 return new Response(JSON.stringify({ code: 'INVALID_REQUEST' }), { status: 400 });
             }
             return new Response(JSON.stringify({
