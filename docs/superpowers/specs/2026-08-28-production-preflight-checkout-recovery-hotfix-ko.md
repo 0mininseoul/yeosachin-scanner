@@ -33,14 +33,22 @@
   전혀 없다는 엄격한 조건을 만족할 때, universal migration과 분리된 명시적
   프로덕션 operation으로 정리합니다. 관리자 계정과 preflight는 보존합니다.
 
-  operation은 고정된 operation advisory lock을 먼저 잡고, 후보 행에서
-  bounded 형식의 Groble 상품을 동적으로 확인한 뒤 상품 advisory → raw user
-  advisory → `public.users` 행 → 주문 행 순서로 잠급니다. 모든 결제·상품·확정된
-  seller reference·fulfillment·result·webhook 조건을 다시 확인하고 정확히 한
-  건을 삭제하며, 발급됐지만 아직 확인되지 않은 `groble_seller_reference`는
-  결제 증거로 보지 않습니다. 명시적 BEGIN/COMMIT과 SET LOCAL을 사용하고,
-  커밋 뒤 민감하지 않은 operation/count/timestamp 영수증만 출력합니다. 조건이
-  하나라도 다르면 아무것도 바꾸지 않고 실패합니다.
+  operation은 이미 읽은 운영 주문의 id·`groble_seller_reference`·`created_at`을
+  묶은 비가역 SHA-256 지문으로 대상을 고정합니다. 입력은
+  `earlybird-admin-cleanup:v1|` + `id::text` + `|` + seller reference + `|` +
+  UTC 기준 `YYYY-MM-DD"T"HH24:MI:SS.US"Z"` 형식의 생성 시각을 UTF-8로
+  변환한 값이며, 비교값은 소문자 hex입니다. 세 원천 필드는 모두 NOT NULL이어야
+  하고, 지문 조건은 최초 후보 해석·잠금 후 MATERIALIZED 후보·최종 증거 재확인·
+  DELETE WHERE 네 경계에 반복해서 적용합니다. 고정된 operation advisory lock을
+  먼저 잡고, 후보 행에서 bounded 형식의 Groble 상품을 동적으로 확인한 뒤 상품
+  advisory → raw user advisory → `public.users` 행 → 주문 행 순서로 잠급니다.
+  모든 결제·상품·확정된 seller reference·fulfillment·result·webhook 조건을
+  다시 확인하고 정확히 한 건을 삭제하며, 발급됐지만 아직 확인되지 않은
+  `groble_seller_reference`는 결제 증거로 보지 않습니다. 같은 operation의 즉시
+  재실행이나 이후 새로 만든 겉보기 일치 주문은 지문이 다르므로 삭제하지 않고
+  실패합니다. 명시적 BEGIN/COMMIT과 SET LOCAL을 사용하고, 커밋 뒤 민감하지 않은
+  operation/count/timestamp 영수증만 출력합니다. 조건이 하나라도 다르면 아무것도
+  바꾸지 않고 실패합니다.
 
   release owner만 다음처럼 `ON_ERROR_STOP`을 켜고 별도 실행합니다:
   `psql --set=ON_ERROR_STOP=1 --file

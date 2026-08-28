@@ -20,6 +20,7 @@ import {
     canSubmitEarlybirdSelection,
     emitCurrentEarlybirdPricingEvent,
     earlybirdCheckoutLineageStatusAction,
+    applyEarlybirdPricingRefreshBoundary,
     isEarlybirdPlanSelectable,
     isEarlybirdPlanSoldOut,
     isCurrentEarlybirdCheckoutStatusCta,
@@ -233,7 +234,21 @@ const DISCLOSURE_ACCEPTED = true;
         ) return;
         stalePricingRefreshHandledRef.current = stalePricingPreflightId;
         clearAutoCheckoutContinuation();
-        void recoverOrRefreshStaleEarlybirdPricing(stalePricingPreflightId, {
+        const refreshActions = {
+            reset,
+            clearGirlfriendInstagramId: () => setGirlfriendInstagramId(''),
+            clearSelectedPlan: () => setSelectedPlan(null),
+            clearWaitlistComplete: () => setWaitlistComplete(false),
+            replaceAnalyzeRoute: () => router.replace('/analyze'),
+            showRefreshError: () => setError(
+                '가격이 변경되어 대상 계정을 다시 확인해주세요.'
+            ),
+        };
+        if (!effectiveSelectedPlan || !isPaidEarlybirdPlanId(effectiveSelectedPlan)) {
+            applyEarlybirdPricingRefreshBoundary(stalePricingPreflightId, refreshActions);
+            return;
+        }
+        void recoverOrRefreshStaleEarlybirdPricing(stalePricingPreflightId, effectiveSelectedPlan, {
             request: fetch,
             redirectCheckout: nextUrl => {
                 if (
@@ -248,16 +263,7 @@ const DISCLOSURE_ACCEPTED = true;
                 }
                 window.location.assign(nextUrl);
             },
-            refreshActions: {
-                reset,
-                clearGirlfriendInstagramId: () => setGirlfriendInstagramId(''),
-                clearSelectedPlan: () => setSelectedPlan(null),
-                clearWaitlistComplete: () => setWaitlistComplete(false),
-                replaceAnalyzeRoute: () => router.replace('/analyze'),
-                showRefreshError: () => setError(
-                    '가격이 변경되어 대상 계정을 다시 확인해주세요.'
-                ),
-            },
+            refreshActions,
         });
     }, [
         analyticsEligible,

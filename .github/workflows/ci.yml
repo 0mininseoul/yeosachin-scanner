@@ -38,6 +38,39 @@ jobs:
       - run: npm run build
       - run: npm audit --audit-level=high
 
+  production-payment-recovery-postgres:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: production_payment_recovery_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d production_payment_recovery_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - name: Run the required native payment-recovery concurrency suite
+        env:
+          PRODUCTION_PAYMENT_RECOVERY_POSTGRES_TEST_URL: postgresql://postgres:postgres@127.0.0.1:5432/production_payment_recovery_test
+          PRODUCTION_PAYMENT_RECOVERY_POSTGRES_TEST_MARKER: local-ephemeral-production-payment-recovery-only
+          PRODUCTION_PAYMENT_RECOVERY_POSTGRES_TEST_REQUIRED: 'true'
+        run: >-
+          npx vitest run
+          lib/services/analysis/production-payment-recovery-postgres-concurrency.integration.test.ts
+
   score-audit-postgres:
     runs-on: ubuntu-latest
     timeout-minutes: 10

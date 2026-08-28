@@ -5,9 +5,10 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 const databaseUrl = process.env.PRODUCTION_PAYMENT_RECOVERY_POSTGRES_TEST_URL;
 const suppliedMarker = process.env.PRODUCTION_PAYMENT_RECOVERY_POSTGRES_TEST_MARKER;
 const destructiveTestMarker = 'local-ephemeral-production-payment-recovery-only';
-const describePostgres = isSafeProductionPaymentRecoveryPostgresTestTarget(
-    databaseUrl,
-    suppliedMarker,
+const nativePostgresRequired = process.env.PRODUCTION_PAYMENT_RECOVERY_POSTGRES_TEST_REQUIRED === 'true';
+const describePostgres = (
+    isSafeProductionPaymentRecoveryPostgresTestTarget(databaseUrl, suppliedMarker)
+    || nativePostgresRequired
 ) ? describe : describe.skip;
 
 const migrationsDirectory = new URL('../../../supabase/migrations/', import.meta.url);
@@ -23,6 +24,8 @@ const cleanupOperation = readFileSync(
     new URL('20260828_cleanup_confirmed_administrator_test_order.sql', new URL('../../../supabase/operations/', import.meta.url)),
     'utf8',
 );
+const productionCleanupFingerprint =
+    'ca805b0332bcbf8a263c4ffcfa7bd792226f555d8f2d37f928b30544912b6a52';
 
 const USER_ID = '41000000-0000-4000-8000-000000000001';
 const ANONYMOUS_PREFLIGHT_ID = '41000000-0000-4000-8000-000000000002';
@@ -40,6 +43,7 @@ DROP SCHEMA IF EXISTS extensions CASCADE;
 CREATE SCHEMA public;
 CREATE SCHEMA auth;
 CREATE SCHEMA extensions;
+CREATE EXTENSION pgcrypto;
 DO $$ BEGIN
     CREATE ROLE anon NOLOGIN;
 EXCEPTION WHEN duplicate_object THEN NULL;
@@ -69,6 +73,11 @@ CREATE TABLE auth.users (
 CREATE FUNCTION extensions.gen_random_uuid()
 RETURNS UUID LANGUAGE sql VOLATILE AS $$
     SELECT pg_catalog.gen_random_uuid()
+$$;
+
+CREATE FUNCTION extensions.digest(data BYTEA, algorithm TEXT)
+RETURNS BYTEA LANGUAGE sql IMMUTABLE AS $$
+    SELECT public.digest(data, algorithm)
 $$;
 
 CREATE FUNCTION public.normalize_kr_mobile_e164(raw_phone TEXT)
@@ -200,11 +209,17 @@ DECLARE
     v_id UUID;
     v_expires TIMESTAMPTZ;
 BEGIN
-    -- Match the production create wrapper's user-scoped serialization so the
-    -- target-hash wrapper race exercises the real lock boundary.
-    PERFORM pg_catalog.pg_advisory_xact_lock(
-        pg_catalog.hashtextextended(p_user_id::TEXT, 0)
-    );
+    -- Match the effective production create RPC: the public.users row is the
+    -- serialization boundary shared with the anonymous claim helper. Do not
+    -- add a synthetic advisory lock that production does not acquire.
+    PERFORM 1
+    FROM public.users AS owner_user
+    WHERE owner_user.id = p_user_id
+    FOR UPDATE;
+    IF NOT FOUND THEN
+        RAISE EXCEPTION 'ANALYSIS_V2_INVALID_AUTH_INPUT';
+    END IF;
+
     SELECT preflight.* INTO v_existing
     FROM public.analysis_preflights AS preflight
     WHERE preflight.user_id = p_user_id
@@ -214,6 +229,14 @@ BEGIN
         RETURN QUERY SELECT v_existing.id, FALSE, v_existing.status, v_existing.expires_at;
         RETURN;
     END IF;
+
+    -- A fresh create supersedes unfinished active preflights only after the
+    -- user row has serialized it against a concurrent anonymous claim.
+    UPDATE public.analysis_preflights
+    SET status = 'expired',
+        updated_at = pg_catalog.clock_timestamp()
+    WHERE user_id = p_user_id
+      AND status IN ('pending', 'processing', 'ready');
 
     v_id := pg_catalog.gen_random_uuid();
     v_expires := pg_catalog.clock_timestamp() + INTERVAL '30 minutes';
@@ -269,6 +292,15 @@ describe('production payment recovery PostgreSQL destructive-test target guard',
     ])('rejects an unsafe target or missing marker', (connectionString, marker) => {
         expect(isSafeProductionPaymentRecoveryPostgresTestTarget(connectionString, marker)).toBe(false);
     });
+
+    it('does not silently skip a native run when the CI gate is required', () => {
+        if (nativePostgresRequired) {
+            expect(isSafeProductionPaymentRecoveryPostgresTestTarget(
+                databaseUrl,
+                suppliedMarker,
+            )).toBe(true);
+        }
+    });
 });
 
 async function waitForLockWait(
@@ -288,6 +320,27 @@ async function waitForLockWait(
         await new Promise(resolve => setTimeout(resolve, 10));
     }
     throw new Error('PRODUCTION_PAYMENT_RECOVERY_LOCK_WAIT_TIMEOUT');
+}
+
+async function waitForUsersRowLockWait(
+    pool: Pool,
+    blockedPid: number,
+): Promise<void> {
+    for (let attempt = 0; attempt < 200; attempt += 1) {
+        const result = await pool.query<{ wait_event_type: string | null; blocker_count: number }>(
+            `SELECT activity.wait_event_type,
+                    pg_catalog.cardinality(pg_catalog.pg_blocking_pids(activity.pid))::INTEGER AS blocker_count
+             FROM pg_catalog.pg_stat_activity AS activity
+             WHERE activity.pid = $1`,
+            [blockedPid],
+        );
+        if (
+            result.rows[0]?.wait_event_type === 'Lock'
+            && result.rows[0].blocker_count > 0
+        ) return;
+        await new Promise(resolve => setTimeout(resolve, 10));
+    }
+    throw new Error('PRODUCTION_PAYMENT_RECOVERY_USERS_ROW_LOCK_WAIT_TIMEOUT');
 }
 
 async function waitForAdvisoryLockWait(
@@ -444,6 +497,37 @@ async function createWithLineageMarkerOnClient(
     return result.rows[0];
 }
 
+async function cleanupOperationForFixture(pool: Pool): Promise<string> {
+    const result = await pool.query<{ fingerprint: string }>(
+        `SELECT pg_catalog.encode(
+             extensions.digest(
+                 pg_catalog.convert_to(
+                     'earlybird-admin-cleanup:v1|'
+                     || id::TEXT
+                     || '|'
+                     || groble_seller_reference
+                     || '|'
+                     || pg_catalog.to_char(
+                         created_at AT TIME ZONE 'UTC',
+                         'YYYY-MM-DD"T"HH24:MI:SS.US"Z"'
+                     ),
+                     'UTF8'
+                 ),
+                 'sha256'
+             ),
+             'hex'
+         ) AS fingerprint
+         FROM public.earlybird_orders
+         WHERE id = $1
+           AND groble_seller_reference IS NOT NULL
+           AND created_at IS NOT NULL`,
+        [ADMIN_ORDER_ID],
+    );
+    const fingerprint = result.rows[0]?.fingerprint;
+    if (!fingerprint) throw new Error('CLEANUP_FIXTURE_FINGERPRINT_MISSING');
+    return cleanupOperation.replaceAll(productionCleanupFingerprint, fingerprint);
+}
+
 describePostgres('production payment recovery migration two-session concurrency', () => {
     let pool: Pool;
 
@@ -528,6 +612,104 @@ describePostgres('production payment recovery migration two-session concurrency'
             )).resolves.toMatchObject({
                 rows: [{ count: 1, target_input_hash: 'b'.repeat(64) }],
             });
+        } catch (error) {
+            await first.query('ROLLBACK').catch(() => undefined);
+            await second.query('ROLLBACK').catch(() => undefined);
+            throw error;
+        } finally {
+            await first.query('ROLLBACK').catch(() => undefined);
+            await second.query('ROLLBACK').catch(() => undefined);
+            first.release();
+            second.release();
+        }
+    });
+
+    it('blocks target-hash creation behind an anonymous claim at the public.users row and proves the final owner state', async () => {
+        await pool.query(
+            `INSERT INTO public.users(
+                 id, email, provider, phone_number, phone_number_normalized,
+                 phone_number_verification_source, phone_number_verified_at
+             ) VALUES (
+                 $1, 'native-claim-create@example.test', 'kakao', '010-1234-5678',
+                 '+821012345678', 'kakao_rest_api', pg_catalog.clock_timestamp()
+             )`,
+            [USER_ID],
+        );
+        await pool.query(
+            `INSERT INTO public.analysis_preflights(
+                 id, user_id, provider_selector, claim_token_hash,
+                 claim_expires_at, target_instagram_id, status, expires_at,
+                 exclusion_decision, access_mode, plan_cards_snapshot,
+                 pricing_version, pricing_snapshot, target_followers_count,
+                 target_following_count, required_plan_id, created_at, updated_at
+             ) VALUES (
+                 $1, NULL, 'anonymous_apify', $2,
+                 pg_catalog.clock_timestamp() + INTERVAL '10 minutes',
+                 'target.account', 'ready',
+                 pg_catalog.clock_timestamp() + INTERVAL '30 minutes',
+                 'skip', 'anonymous',
+                 '{"basic":{"selectionState":"available_upgrade"},"standard":{"selectionState":"required"}}'::jsonb,
+                 'earlybird-2026-08-v5',
+                 '{"standard":{"status":"quoted","currency":"KRW","amountKrw":19900}}'::jsonb,
+                 300, 100, 'standard',
+                 pg_catalog.clock_timestamp(), pg_catalog.clock_timestamp()
+             )`,
+            [ANONYMOUS_PREFLIGHT_ID, CLAIM_TOKEN_HASH],
+        );
+
+        const first = await pool.connect();
+        const second = await pool.connect();
+        try {
+            const secondPid = await second.query<{ pid: number }>(
+                'SELECT pg_catalog.pg_backend_pid() AS pid',
+            );
+            const claimResult = await claimOnClient(first, ANONYMOUS_PREFLIGHT_ID);
+            const createResultPromise = createPreflightWithTargetHashOnClient(
+                second,
+                'native-claim-create-idempotency',
+                'b'.repeat(64),
+            );
+            await waitForUsersRowLockWait(pool, secondPid.rows[0].pid);
+            await first.query('COMMIT');
+            const createResult = await createResultPromise;
+            await second.query('COMMIT');
+
+            expect(claimResult).toMatchObject({
+                claimed: true,
+                preflight_status: 'claimed',
+            });
+            expect(createResult).toMatchObject({
+                created: true,
+                preflight_status: 'ready',
+            });
+            await expect(pool.query<{
+                status: string;
+                user_id: string;
+                target_input_hash: string | null;
+            }>(
+                `SELECT status, user_id, target_input_hash
+                 FROM public.analysis_preflights
+                 WHERE id = $1`,
+                [ANONYMOUS_PREFLIGHT_ID],
+            )).resolves.toMatchObject({
+                rows: [{
+                    status: 'expired',
+                    user_id: USER_ID,
+                    target_input_hash: null,
+                }],
+            });
+            await expect(pool.query<{ count: number }>(
+                `SELECT count(*)::INTEGER AS count
+                 FROM public.analysis_preflights
+                 WHERE user_id = $1 AND status IN ('pending', 'processing', 'ready')`,
+                [USER_ID],
+            )).resolves.toMatchObject({ rows: [{ count: 1 }] });
+            await expect(pool.query<{ target_input_hash: string | null }>(
+                `SELECT target_input_hash
+                 FROM public.analysis_preflights
+                 WHERE id = $1`,
+                [createResult.preflight_id],
+            )).resolves.toMatchObject({ rows: [{ target_input_hash: 'b'.repeat(64) }] });
         } catch (error) {
             await first.query('ROLLBACK').catch(() => undefined);
             await second.query('ROLLBACK').catch(() => undefined);
@@ -669,7 +851,7 @@ describePostgres('production payment recovery migration two-session concurrency'
                      pg_catalog.hashtextextended('earlybird:groble:product:cleanup-product-v1', 0)
                  )`,
             );
-            const operationPromise = second.query(cleanupOperation);
+            const operationPromise = cleanupOperationForFixture(pool).then(operation => second.query(operation));
             await waitForAdvisoryLockWait(pool, secondPid.rows[0].pid);
             await first.query('COMMIT');
             const operationResult = await operationPromise;

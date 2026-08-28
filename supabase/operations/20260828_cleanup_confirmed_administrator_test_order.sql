@@ -18,6 +18,8 @@ DO $$
 DECLARE
     v_operation_key CONSTANT TEXT :=
         'operation:production:earlybird-admin-test-order-cleanup:v1';
+    v_target_fingerprint CONSTANT TEXT :=
+        'ca805b0332bcbf8a263c4ffcfa7bd792226f555d8f2d37f928b30544912b6a52';
     v_admin_id UUID;
     v_admin_count INTEGER;
     v_candidate_count INTEGER;
@@ -77,6 +79,27 @@ BEGIN
       AND earlybird_order.actual_groble_product_id IS NULL
       AND earlybird_order.actual_amount_krw IS NULL
       AND earlybird_order.seller_reference_confirmed_at IS NULL
+      AND earlybird_order.id IS NOT NULL
+      AND earlybird_order.groble_seller_reference IS NOT NULL
+      AND earlybird_order.created_at IS NOT NULL
+      AND pg_catalog.encode(
+          extensions.digest(
+              pg_catalog.convert_to(
+                  'earlybird-admin-cleanup:v1|'
+                  || earlybird_order.id::TEXT
+                  || '|'
+                  || earlybird_order.groble_seller_reference
+                  || '|'
+                  || pg_catalog.to_char(
+                      earlybird_order.created_at AT TIME ZONE 'UTC',
+                      'YYYY-MM-DD"T"HH24:MI:SS.US"Z"'
+                  ),
+                  'UTF8'
+              ),
+              'sha256'
+          ),
+          'hex'
+      ) = v_target_fingerprint
       AND NOT EXISTS (
           SELECT 1
           FROM public.earlybird_fulfillments AS fulfillment
@@ -139,6 +162,27 @@ BEGIN
           AND earlybird_order.actual_groble_product_id IS NULL
           AND earlybird_order.actual_amount_krw IS NULL
           AND earlybird_order.seller_reference_confirmed_at IS NULL
+          AND earlybird_order.id IS NOT NULL
+          AND earlybird_order.groble_seller_reference IS NOT NULL
+          AND earlybird_order.created_at IS NOT NULL
+          AND pg_catalog.encode(
+              extensions.digest(
+                  pg_catalog.convert_to(
+                      'earlybird-admin-cleanup:v1|'
+                      || earlybird_order.id::TEXT
+                      || '|'
+                      || earlybird_order.groble_seller_reference
+                      || '|'
+                      || pg_catalog.to_char(
+                          earlybird_order.created_at AT TIME ZONE 'UTC',
+                          'YYYY-MM-DD"T"HH24:MI:SS.US"Z"'
+                      ),
+                      'UTF8'
+                  ),
+                  'sha256'
+              ),
+              'hex'
+          ) = v_target_fingerprint
           AND NOT EXISTS (
               SELECT 1
               FROM public.earlybird_fulfillments AS fulfillment
@@ -188,6 +232,27 @@ BEGIN
       AND earlybird_order.actual_groble_product_id IS NULL
       AND earlybird_order.actual_amount_krw IS NULL
       AND earlybird_order.seller_reference_confirmed_at IS NULL
+      AND earlybird_order.id IS NOT NULL
+      AND earlybird_order.groble_seller_reference IS NOT NULL
+      AND earlybird_order.created_at IS NOT NULL
+      AND pg_catalog.encode(
+          extensions.digest(
+              pg_catalog.convert_to(
+                  'earlybird-admin-cleanup:v1|'
+                  || earlybird_order.id::TEXT
+                  || '|'
+                  || earlybird_order.groble_seller_reference
+                  || '|'
+                  || pg_catalog.to_char(
+                      earlybird_order.created_at AT TIME ZONE 'UTC',
+                      'YYYY-MM-DD"T"HH24:MI:SS.US"Z"'
+                  ),
+                  'UTF8'
+              ),
+              'sha256'
+          ),
+          'hex'
+      ) = v_target_fingerprint
       AND NOT EXISTS (
           SELECT 1
           FROM public.earlybird_fulfillments AS fulfillment
@@ -221,6 +286,27 @@ BEGIN
       AND earlybird_order.actual_groble_product_id IS NULL
       AND earlybird_order.actual_amount_krw IS NULL
       AND earlybird_order.seller_reference_confirmed_at IS NULL
+      AND earlybird_order.id IS NOT NULL
+      AND earlybird_order.groble_seller_reference IS NOT NULL
+      AND earlybird_order.created_at IS NOT NULL
+      AND pg_catalog.encode(
+          extensions.digest(
+              pg_catalog.convert_to(
+                  'earlybird-admin-cleanup:v1|'
+                  || earlybird_order.id::TEXT
+                  || '|'
+                  || earlybird_order.groble_seller_reference
+                  || '|'
+                  || pg_catalog.to_char(
+                      earlybird_order.created_at AT TIME ZONE 'UTC',
+                      'YYYY-MM-DD"T"HH24:MI:SS.US"Z"'
+                  ),
+                  'UTF8'
+              ),
+              'sha256'
+          ),
+          'hex'
+      ) = v_target_fingerprint
       AND NOT EXISTS (
           SELECT 1
           FROM public.earlybird_fulfillments AS fulfillment

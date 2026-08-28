@@ -336,6 +336,7 @@ describe('earlybird analyze UI state', () => {
             earlybirdUiState as unknown as {
                 recoverOrRefreshStaleEarlybirdPricing?: (
                     preflightId: string,
+                    planId: 'basic' | 'standard',
                     dependencies: Record<string, unknown>
                 ) => Promise<string>;
             }
@@ -351,13 +352,28 @@ describe('earlybird analyze UI state', () => {
         ] as const) {
             emitCurrentEarlybirdPricingEvent(event, stale, 'basic', emit);
         }
-        const request = vi.fn().mockResolvedValue(new Response(JSON.stringify({
-            orderId: '20000000-0000-4000-8000-000000000001',
-            nextUrl: '/api/earlybird/checkout/redirect?orderId=20000000-0000-4000-8000-000000000001&planId=basic',
-        }), {
-            status: 200,
-            headers: { 'content-type': 'application/json' },
-        }));
+        const request = vi.fn(async (
+            _input: RequestInfo | URL,
+            init?: RequestInit,
+        ): Promise<Response> => {
+            const body = typeof init?.body === 'string'
+                ? JSON.parse(init.body) as { preflightId?: unknown; planId?: unknown }
+                : null;
+            if (
+                !body
+                || body.preflightId !== stale.preflightId
+                || (body.planId !== 'basic' && body.planId !== 'standard')
+            ) {
+                return new Response(JSON.stringify({ code: 'INVALID_REQUEST' }), { status: 400 });
+            }
+            return new Response(JSON.stringify({
+                orderId: '20000000-0000-4000-8000-000000000001',
+                nextUrl: '/api/earlybird/checkout/redirect?orderId=20000000-0000-4000-8000-000000000001&planId=basic',
+            }), {
+                status: 200,
+                headers: { 'content-type': 'application/json' },
+            });
+        });
         const redirectCheckout = vi.fn();
         const refreshActions = {
             reset: vi.fn(),
@@ -368,7 +384,7 @@ describe('earlybird analyze UI state', () => {
             showRefreshError: vi.fn(),
         };
 
-        await expect(recover!(stale.preflightId, {
+        await expect(recover!(stale.preflightId, 'basic', {
             request,
             redirectCheckout,
             refreshActions,
@@ -376,7 +392,7 @@ describe('earlybird analyze UI state', () => {
         expect(request).toHaveBeenCalledWith('/api/earlybird/checkout', {
             method: 'PUT',
             headers: { 'content-type': 'application/json' },
-            body: JSON.stringify({ preflightId: stale.preflightId }),
+            body: JSON.stringify({ preflightId: stale.preflightId, planId: 'basic' }),
         });
         expect(redirectCheckout).toHaveBeenCalledWith(
             '/api/earlybird/checkout/redirect?orderId=20000000-0000-4000-8000-000000000001&planId=basic'
@@ -392,6 +408,7 @@ describe('earlybird analyze UI state', () => {
             earlybirdUiState as unknown as {
                 recoverOrRefreshStaleEarlybirdPricing: (
                     preflightId: string,
+                    planId: 'basic' | 'standard',
                     dependencies: Record<string, unknown>
                 ) => Promise<string>;
             }
@@ -413,7 +430,7 @@ describe('earlybird analyze UI state', () => {
             showRefreshError: vi.fn(),
         };
 
-        await expect(recover('10000000-0000-4000-8000-000000000001', {
+        await expect(recover('10000000-0000-4000-8000-000000000001', 'standard', {
             request,
             redirectCheckout,
             refreshActions,
@@ -481,6 +498,19 @@ describe('earlybird analyze UI state', () => {
         );
         expect(source).toMatch(
             /redirectCheckout: nextUrl => \{[\s\S]*?window\.location\.assign\(nextUrl\)/
+        );
+    });
+
+    it('attempts stale checkout recovery only for a paid effective selection', () => {
+        const source = readFileSync(new URL('../../../app/analyze/page.tsx', import.meta.url), 'utf8');
+        const staleEffectStart = source.indexOf('stalePricingRefreshHandledRef.current = stalePricingPreflightId;');
+        const staleEffectEnd = source.indexOf('    }, [', staleEffectStart);
+        const staleEffect = source.slice(staleEffectStart, staleEffectEnd);
+        expect(staleEffect).toMatch(
+            /if \(!effectiveSelectedPlan \|\| !isPaidEarlybirdPlanId\(effectiveSelectedPlan\)\)[\s\S]*?applyEarlybirdPricingRefreshBoundary\(stalePricingPreflightId, refreshActions\)[\s\S]*?return;/
+        );
+        expect(staleEffect).toContain(
+            'recoverOrRefreshStaleEarlybirdPricing(stalePricingPreflightId, effectiveSelectedPlan,'
         );
     });
 

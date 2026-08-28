@@ -111,7 +111,6 @@ describe('production payment recovery migration contracts', () => {
         );
         expect(source).toContain('EARLYBIRD_CHECKOUT_SUPERSESSION_MARKER_FAILED');
         expect(source).toMatch(/v_pending_preflight\.created_at[\s\S]*?EARLYBIRD_CHECKOUT_SUPERSESSION_MARKER_FAILED/i);
-        expect(source).not.toContain('groble_seller_reference');
         expect(source).toMatch(
             /Reacquire its exact[\s\S]*?earlybird:groble:product:[\s\S]*?hashtextextended\(p_user_id::TEXT, 0\)[\s\S]*?FROM public\.users[\s\S]*?FOR UPDATE/i,
         );
@@ -129,6 +128,16 @@ describe('production payment recovery migration contracts', () => {
         const source = readOperation('cleanup_confirmed_administrator_test_order');
 
         expect(source).toContain("operation:production:earlybird-admin-test-order-cleanup:v1");
+        expect(source).toContain(
+            'ca805b0332bcbf8a263c4ffcfa7bd792226f555d8f2d37f928b30544912b6a52',
+        );
+        expect(source).toMatch(
+            /'earlybird-admin-cleanup:v1\|'[\s\S]*?earlybird_order\.id::TEXT[\s\S]*?earlybird_order\.groble_seller_reference[\s\S]*?created_at AT TIME ZONE 'UTC'[\s\S]*?'YYYY-MM-DD"T"HH24:MI:SS\.US"Z"'[\s\S]*?'UTF8'[\s\S]*?'sha256'[\s\S]*?'hex'/i,
+        );
+        expect(source.match(/extensions\.digest\(/g)).toHaveLength(4);
+        expect(source.match(/earlybird_order\.id IS NOT NULL/g)).toHaveLength(4);
+        expect(source.match(/earlybird_order\.groble_seller_reference IS NOT NULL/g)).toHaveLength(4);
+        expect(source.match(/earlybird_order\.created_at IS NOT NULL/g)).toHaveLength(4);
         expect(source).toMatch(/pg_advisory_xact_lock[\s\S]*hashtextextended[\s\S]*operation:production:earlybird-admin-test-order-cleanup:v1/i);
         expect(source).toContain("v_operation_key CONSTANT TEXT :=\n        'operation:production:earlybird-admin-test-order-cleanup:v1';");
         expect(source).toMatch(/BEGIN;[\s\S]*SET LOCAL lock_timeout[\s\S]*SET LOCAL statement_timeout[\s\S]*SET LOCAL search_path/i);
@@ -136,7 +145,6 @@ describe('production payment recovery migration contracts', () => {
         expect(source).toMatch(/expected_groble_product_id\s+IS NOT NULL/i);
         expect(source).toMatch(/v_product_id\s+!~\s*'\^\[A-Za-z0-9\]/i);
         expect(source).not.toContain('standard-product-01');
-        expect(source).not.toContain('groble_seller_reference');
         expect(source).toMatch(/earlybird:groble:product:[\s\S]*hashtextextended[\s\S]*v_admin_id::TEXT[\s\S]*FROM public\.users[\s\S]*FOR UPDATE/i);
         expect(source).toContain('0_min._.00');
         expect(source).toMatch(/plan_id\s*=\s*'standard'/i);

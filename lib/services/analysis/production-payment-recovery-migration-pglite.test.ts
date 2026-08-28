@@ -1,5 +1,6 @@
 import { readFileSync } from 'node:fs';
 import { PGlite } from '@electric-sql/pglite';
+import { pgcrypto } from '@electric-sql/pglite/contrib/pgcrypto';
 import { afterAll, describe, expect, it } from 'vitest';
 
 const migrationsDirectory = new URL('../../../supabase/migrations/', import.meta.url);
@@ -12,6 +13,8 @@ const operation = (name: string): string =>
 const recoveryMigration = migration('20260827172857_production_preflight_checkout_recovery.sql');
 const cleanupOperation = operation('20260828_cleanup_confirmed_administrator_test_order.sql');
 const effectiveV5CheckoutMigration = migration('20260812122517_update_earlybird_pricing_v5.sql');
+const productionCleanupFingerprint =
+    'ca805b0332bcbf8a263c4ffcfa7bd792226f555d8f2d37f928b30544912b6a52';
 
 const USER_ID = '10000000-0000-4000-8000-000000000001';
 const OTHER_USER_ID = '10000000-0000-4000-8000-000000000002';
@@ -171,12 +174,15 @@ CREATE ROLE authenticated NOLOGIN;
 CREATE ROLE service_role NOLOGIN;
 CREATE SCHEMA auth;
 CREATE SCHEMA extensions;
+CREATE EXTENSION pgcrypto;
 CREATE FUNCTION auth.uid()
 RETURNS UUID LANGUAGE sql STABLE AS $$
     SELECT NULLIF(pg_catalog.current_setting('request.jwt.claim.sub', TRUE), '')::UUID
 $$;
 CREATE FUNCTION extensions.gen_random_uuid()
 RETURNS UUID LANGUAGE sql VOLATILE AS $$ SELECT pg_catalog.gen_random_uuid() $$;
+CREATE FUNCTION extensions.digest(data BYTEA, algorithm TEXT)
+RETURNS BYTEA LANGUAGE sql IMMUTABLE AS $$ SELECT public.digest(data, algorithm) $$;
 CREATE FUNCTION public.normalize_kr_mobile_e164(raw_phone TEXT)
 RETURNS TEXT LANGUAGE sql IMMUTABLE AS $$
     SELECT CASE
@@ -762,7 +768,7 @@ describe('durable earlybird checkout supersession marker', () => {
 });
 
 async function createCleanupDatabase(): Promise<PGlite> {
-    const db = await PGlite.create();
+    const db = await PGlite.create({ extensions: { pgcrypto } });
     databases.push(db);
     await db.exec(cleanupBootstrap);
     await db.exec(effectiveV5CheckoutMigration);
@@ -811,8 +817,39 @@ async function createCleanupDatabase(): Promise<PGlite> {
     return db;
 }
 
+async function cleanupOperationForFixture(db: PGlite): Promise<string> {
+    const result = await db.query<{ fingerprint: string }>(
+        `SELECT pg_catalog.encode(
+             extensions.digest(
+                 pg_catalog.convert_to(
+                     'earlybird-admin-cleanup:v1|'
+                     || id::TEXT
+                     || '|'
+                     || groble_seller_reference
+                     || '|'
+                     || pg_catalog.to_char(
+                         created_at AT TIME ZONE 'UTC',
+                         'YYYY-MM-DD"T"HH24:MI:SS.US"Z"'
+                     ),
+                     'UTF8'
+                 ),
+                 'sha256'
+             ),
+             'hex'
+         ) AS fingerprint
+         FROM public.earlybird_orders
+         WHERE id = $1
+           AND groble_seller_reference IS NOT NULL
+           AND created_at IS NOT NULL`,
+        [ADMIN_ORDER_ID],
+    );
+    const fingerprint = result.rows[0]?.fingerprint;
+    if (!fingerprint) throw new Error('CLEANUP_FIXTURE_FINGERPRINT_MISSING');
+    return cleanupOperation.replaceAll(productionCleanupFingerprint, fingerprint);
+}
+
 async function createLineageDatabase(): Promise<PGlite> {
-    const db = await PGlite.create();
+    const db = await PGlite.create({ extensions: { pgcrypto } });
     databases.push(db);
     await db.exec(cleanupBootstrap);
     await db.exec(effectiveV5CheckoutMigration);
@@ -886,7 +923,7 @@ describe('administrator test-order cleanup production operation behavior', () =>
                 seller_reference_confirmed_at: null,
             }],
         });
-        const operationResult = await db.exec(cleanupOperation);
+        const operationResult = await db.exec(await cleanupOperationForFixture(db));
 
         expect(JSON.stringify(operationResult)).toMatch(
             /earlybird-admin-test-order-cleanup:v1[\s\S]*deleted_count[\s\S]*1|deleted_count[\s\S]*1[\s\S]*earlybird-admin-test-order-cleanup:v1/,
@@ -907,9 +944,13 @@ describe('administrator test-order cleanup production operation behavior', () =>
         )).resolves.toMatchObject({ rows: [{ count: 2 }] });
     });
 
-    it('allows the preserved administrator to create a fresh same-product Standard checkout under v5', async () => {
+    it('fails closed on replay and on a later same-product administrator checkout', async () => {
         const db = await createCleanupDatabase();
-        await db.exec(cleanupOperation);
+        const fixtureOperation = await cleanupOperationForFixture(db);
+        await db.exec(fixtureOperation);
+
+        await expect(db.exec(fixtureOperation)).rejects.toThrow(/EARLYBIRD_ADMIN_TEST_CLEANUP/);
+        await db.exec('ROLLBACK');
 
         const fresh = await db.query<{
             order_id: string;
@@ -924,6 +965,15 @@ describe('administrator test-order cleanup production operation behavior', () =>
         );
 
         expect(fresh.rows[0]).toMatchObject({ created: true });
+        await db.query(
+            `UPDATE public.earlybird_orders
+             SET groble_seller_reference = 'ord.0123456789abcdef0123456789abcdef'
+             WHERE id = $1`,
+            [fresh.rows[0]?.order_id],
+        );
+        await expect(db.exec(fixtureOperation)).rejects.toThrow(/EARLYBIRD_ADMIN_TEST_CLEANUP/);
+        await db.exec('ROLLBACK');
+
         await expect(db.query<{
             user_id: string;
             target_instagram_id: string;
@@ -947,21 +997,31 @@ describe('administrator test-order cleanup production operation behavior', () =>
         });
     });
 
+    it('uses the fingerprint to leave a later matching-looking candidate untouched', async () => {
+        const db = await createCleanupDatabase();
+        await db.query(
+            `INSERT INTO public.earlybird_orders(
+                 id, user_id, preflight_id, target_instagram_id, plan_id, status,
+                 expected_groble_product_id, payment_id, paid_at, actual_amount_krw,
+                 groble_seller_reference, seller_reference_confirmed_at, result_request_id
+             ) VALUES ($1, $2, $3, '0_min._.00', 'standard', 'payment_pending',
+                       'cleanup-product-v1', NULL, NULL, NULL,
+                       'ord.fixture.second', NULL, NULL)`,
+            [
+                '20000000-0000-4000-8000-000000000008',
+                ADMIN_ID,
+                ADMIN_PREFLIGHT_ID,
+            ],
+        );
+
+        await expect(db.exec(await cleanupOperationForFixture(db))).resolves.toBeDefined();
+        await expect(orderStatus(db, ADMIN_ORDER_ID)).resolves.toMatchObject({ rows: [] });
+        await expect(orderStatus(db, '20000000-0000-4000-8000-000000000008')).resolves.toMatchObject({
+            rows: [{ status: 'payment_pending' }],
+        });
+    });
+
     it.each([
-        ['multiple candidates', async (db: PGlite) => {
-            await db.query(
-                `INSERT INTO public.earlybird_orders(
-                     id, user_id, preflight_id, target_instagram_id, plan_id, status,
-                     payment_id, paid_at, actual_amount_krw,
-                     seller_reference_confirmed_at, result_request_id
-                 ) VALUES ($1, $2, $3, '0_min._.00', 'standard', 'payment_pending', NULL, NULL, NULL, NULL, NULL)`,
-                [
-                    '20000000-0000-4000-8000-000000000008',
-                    ADMIN_ID,
-                    ADMIN_PREFLIGHT_ID,
-                ],
-            );
-        }],
         ['payment evidence', async (db: PGlite) => {
             await db.query(
                 `UPDATE public.earlybird_orders SET payment_id = 'payment-evidence' WHERE id = $1`,
@@ -1010,7 +1070,7 @@ describe('administrator test-order cleanup production operation behavior', () =>
         const db = await createCleanupDatabase();
         await setup(db);
 
-        await expect(db.exec(cleanupOperation)).rejects.toThrow(/EARLYBIRD_ADMIN_TEST_CLEANUP/);
+        await expect(db.exec(await cleanupOperationForFixture(db))).rejects.toThrow(/EARLYBIRD_ADMIN_TEST_CLEANUP/);
         await db.exec('ROLLBACK');
         await expect(orderStatus(db, ADMIN_ORDER_ID)).resolves.toMatchObject({
             rows: [{ status: 'payment_pending' }],

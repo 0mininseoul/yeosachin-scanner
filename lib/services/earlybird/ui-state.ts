@@ -179,13 +179,14 @@ export function applyEarlybirdPricingRefreshBoundary(
 
 export async function recoverOrRefreshStaleEarlybirdPricing(
     stalePricingPreflightId: string,
+    planId: 'basic' | 'standard',
     dependencies: StaleEarlybirdRecoveryDependencies
 ): Promise<'checkout_recovered' | 'pricing_refresh_required'> {
     try {
         const response = await dependencies.request('/api/earlybird/checkout', {
             method: 'PUT',
             headers: { 'content-type': 'application/json' },
-            body: JSON.stringify({ preflightId: stalePricingPreflightId }),
+            body: JSON.stringify({ preflightId: stalePricingPreflightId, planId }),
         });
         const payload: unknown = await response.json().catch(() => null);
         if (

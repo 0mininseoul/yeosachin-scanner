@@ -189,14 +189,23 @@ strict semantic preconditions:
   seller reference is allowed and is not payment evidence; and
 - no fulfillment, result, or webhook child record exists.
 
-The operation takes a static operation advisory lock, then the canonical
-product advisory lock, raw-user advisory lock, administrator `public.users` row
-lock, and exact order lock. It rechecks every predicate after those waits,
-deletes exactly one row, and emits only a static operation/count/timestamp
-receipt after commit. The SQL owns an explicit `BEGIN`/`COMMIT` transaction and
-uses `SET LOCAL` for bounded timeouts. It must fail closed if the expected row
-count or any precondition is different; it must not delete or disable the
-administrator account or preflight and must not touch external-user orders.
+The operation pins the already-read production row with a non-reversible
+SHA-256 fingerprint. The canonical input is the UTF-8 encoding of
+`earlybird-admin-cleanup:v1|` + `id::text` + `|` +
+`groble_seller_reference` + `|` + `created_at` formatted in UTC as
+`YYYY-MM-DD"T"HH24:MI:SS.US"Z"`; the stored comparison is lower-case hex.
+The operation requires all three source fields (`id`, seller reference, and
+creation time) to be non-null and repeats the fingerprint predicate during
+initial resolution, post-lock candidate locking, final evidence recheck, and
+the `DELETE` boundary. It takes a static operation advisory lock, then the
+canonical product advisory lock, raw-user advisory lock, administrator
+`public.users` row lock, and exact order lock. It rechecks every predicate
+after those waits, deletes exactly one row, and emits only a static
+operation/count/timestamp receipt after commit. The SQL owns an explicit
+`BEGIN`/`COMMIT` transaction and uses `SET LOCAL` for bounded timeouts. A
+replay, or a later matching-looking checkout with a different fingerprint,
+fails closed without deletion; it must not delete or disable the administrator
+account or preflight and must not touch external-user orders.
 
 The release owner invokes it separately with `psql --set=ON_ERROR_STOP=1
 --file supabase/operations/20260828_cleanup_confirmed_administrator_test_order.sql
