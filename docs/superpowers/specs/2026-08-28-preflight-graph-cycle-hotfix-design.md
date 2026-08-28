@@ -22,17 +22,20 @@ cycle after the first with stage 1 running while the fourth rail is red.
 - At every transition into a new waiting cycle, explicitly clear the active
   stage, hide its graph, and reset all four rails before activating stage 1.
   Normal transitions inside a cycle still complete the preceding rail.
-- Preserve the current result and fallback handoff rule: the UI exits only on a
-  graph-stage boundary. Extending the initial pass changes that first boundary
-  from 12 seconds to 20 seconds but does not change the 90-second preflight
-  deadline, polling, provider work, or fallback authority.
+- Preserve graph-stage-boundary handoff for results and non-deadline exits. The
+  hard 90-second fallback is the only terminal-boundary exception: once the
+  initial pass has finished it settles immediately at T+90, while a deadline
+  that lands inside a freshly restarted initial pass waits only for that
+  guaranteed 20-second pass to finish. This keeps both the complete S1-S4 first
+  pass and the existing 90-second fallback authority intact.
 
 ## Scope
 
-The implementation is limited to the precheckout graph player and its focused
-component/immersive tests. It does not change preflight collection, Apify token
-selection, checkout/payment logic, Supabase data, analytics schemas, landing
-copy, or the graph artwork itself.
+The implementation is limited to the precheckout graph player, the immersive
+deadline handoff condition, and their focused component/immersive tests. It
+does not change preflight collection, Apify token selection, checkout/payment
+logic, Supabase data, analytics schemas, landing copy, or the graph artwork
+itself.
 
 ## Verification
 
@@ -40,6 +43,8 @@ copy, or the graph artwork itself.
   durations remain ordered and deterministic.
 - Regress the reported failure by crossing the first and a later waiting-cycle
   boundary, proving stage 1 is active and stage 4 remains empty at each reset.
+- Keep the exact T+90 fallback assertions green while also proving a deadline
+  inside a fresh initial pass waits for that pass rather than cutting it short.
 - Update only existing timing assertions that encode the old 12-second
   contract, then run the focused precheckout component and immersive suites,
   TypeScript, lint, build, and `git diff --check`.

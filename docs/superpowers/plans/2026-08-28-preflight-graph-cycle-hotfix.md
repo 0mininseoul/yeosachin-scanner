@@ -4,7 +4,7 @@
 
 **Goal:** Make the first four-graph preflight pass exactly 20 seconds and prevent the fourth progress rail from carrying into later waiting cycles.
 
-**Architecture:** Keep the existing imperative SVG player and absolute timeline. Change only its timing constants and add an explicit cycle-boundary reset before the normal stage transition helper runs; preserve the 24-second waiting loop, stage-boundary handoff, and 90-second preflight deadline.
+**Architecture:** Keep the existing imperative SVG player and absolute timeline. Change its timing constants, add an explicit cycle-boundary reset before the normal stage transition helper runs, and preserve the hard 90-second fallback while allowing a deadline inside a fresh initial pass to wait only for that pass. The 24-second waiting loop and ordinary stage-boundary handoffs remain unchanged.
 
 **Tech Stack:** Next.js 16, React 19, TypeScript, Vitest, JSDOM
 
@@ -12,7 +12,7 @@
 
 ## Scope guard
 
-- In scope: `components/precheckout-stage-graphs.tsx` and the two focused precheckout test files listed below.
+- In scope: `components/precheckout-stage-graphs.tsx`, the immersive deadline handoff condition in `components/precheckout-immersive.tsx`, and the two focused precheckout test files listed below.
 - Out of scope: preflight collection, Apify tokens, checkout/payment, Supabase, Amplitude event schemas, landing copy, and graph artwork.
 - Production data and database migrations are not involved.
 
@@ -82,6 +82,7 @@ Expected before implementation: failures on the 20-second timing contract and th
 
 **Files:**
 - Modify: `components/precheckout-stage-graphs.tsx`
+- Modify: `components/precheckout-immersive.tsx`
 - Test: `components/precheckout-demo.test.tsx`
 - Test: `components/precheckout-immersive.test.tsx`
 
@@ -118,7 +119,11 @@ In the `nextSlowCycle !== slowCycle` branch, update `slowCycle` and call this he
 
 Change only the reduced-motion comment from an exact 12-second deadline to an exact 20-second deadline. Reduced-motion behavior and completion ownership remain unchanged.
 
-- [ ] **Step 4: Run the focused tests to GREEN**
+- [ ] **Step 4: Preserve the hard T+90 fallback without cutting short a fresh first pass**
+
+In `components/precheckout-immersive.tsx`, keep ordinary result and non-deadline exits on graph-stage boundaries. In `completeFallbackAtDeadline`, compare `Date.now()` with `visibleEntryAtMs + PRECHECKOUT_DEMO_DURATION_MS`: if the deadline lands inside the fresh initial pass, use the existing boundary path; after that pass, use the existing immediate-settlement path so the fallback remains exact at T+90. Keep the existing exact T+90 and mid-initial-pass tests unchanged.
+
+- [ ] **Step 5: Run the focused tests to GREEN**
 
 Run:
 
@@ -128,14 +133,15 @@ npm test -- components/precheckout-demo.test.tsx components/precheckout-immersiv
 
 Expected: both files pass, including the new first- and second-waiting-cycle rail assertions.
 
-- [ ] **Step 5: Commit the coherent application change**
+- [ ] **Step 6: Commit the coherent application change**
 
 Review `git diff --check` and commit the implementation plus focused tests together:
 
 ```bash
 git add components/precheckout-stage-graphs.tsx \
   components/precheckout-demo.test.tsx \
-  components/precheckout-immersive.test.tsx
+  components/precheckout-immersive.test.tsx \
+  components/precheckout-immersive.tsx
 git commit -m "fix: reset preflight graph waiting cycles"
 ```
 
@@ -145,6 +151,7 @@ git commit -m "fix: reset preflight graph waiting cycles"
 - Verify: `components/precheckout-stage-graphs.tsx`
 - Verify: `components/precheckout-demo.test.tsx`
 - Verify: `components/precheckout-immersive.test.tsx`
+- Verify: `components/precheckout-immersive.tsx`
 - Verify only: repository build and lint configuration
 
 - [ ] **Step 1: Run the focused regression suites**
@@ -167,7 +174,7 @@ Run `npm run build` using the worktree's existing non-secret environment. If pub
 
 - [ ] **Step 4: Audit the final change boundary**
 
-Use `git status --short` and `git show --stat --oneline HEAD`. Confirm that the application commit touches exactly the graph player and the two focused tests. Confirm no payment, Supabase, Apify, analytics, landing-page, or migration file changed.
+Use `git status --short` and `git show --stat --oneline HEAD`. Confirm that the application commit touches exactly the graph player, immersive deadline handoff condition, and the two focused tests. Confirm no payment, Supabase, Apify, analytics, landing-page, or migration file changed.
 
 ### Task 4: Review, land, deploy, and observe
 
@@ -177,7 +184,7 @@ Use `git status --short` and `git show --stat --oneline HEAD`. Confirm that the 
 
 - [ ] **Step 1: Perform independent spec and quality review**
 
-Verify the implementation matches the approved design, the regression test fails on the parent commit and passes on the implementation commit, and the reset helper does not alter intra-cycle transitions or the 90-second fallback authority. Fix only confirmed issues, then rerun Task 3.
+Verify the implementation matches the approved design, the regression test fails on the parent commit and passes on the implementation commit, the reset does not alter intra-cycle transitions, and the deadline exception preserves both the first pass and exact T+90 fallback authority. Fix only confirmed issues, then rerun Task 3.
 
 - [ ] **Step 2: Land by ancestry-safe fast-forward**
 
