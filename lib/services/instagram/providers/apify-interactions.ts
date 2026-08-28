@@ -19,7 +19,7 @@ export const APIFY_LIKERS_ACTOR_ID = 'datadoping/instagram-likes-scraper';
 export const APIFY_COMMENTS_ACTOR_ID = 'apify/instagram-comment-scraper';
 
 const DEFAULT_LIKERS_BUILD = '0.0.9';
-const DEFAULT_COMMENTS_BUILD = '0.0.498';
+const DEFAULT_COMMENTS_BUILD = '0.0.588';
 const MAX_DATASET_PAGE_SIZE = 1_000;
 
 export interface ApifyPostLiker {

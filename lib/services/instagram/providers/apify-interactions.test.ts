@@ -384,13 +384,27 @@ describe('Apify interaction adapter', () => {
                 includeNestedComments: false,
             },
             expect.objectContaining({
-                build: '0.0.498',
+                build: '0.0.588',
                 maxItems: 30,
                 maxTotalChargeUsd: 0.078,
                 timeout: 300,
                 restartOnError: false,
             })
         );
+    });
+
+    it('rejects an unpinned comments build and never falls back to latest', async () => {
+        const { client, call } = mockClient([]);
+        const adapter = makeApifyInteractionAdapter({
+            client,
+            env: { ...BASE_ENV, APIFY_COMMENTS_BUILD: 'latest' },
+        });
+
+        await expect(adapter.getPostComments(
+            ['https://www.instagram.com/p/PostA/'],
+            1
+        )).rejects.toThrow('exact x.y.z');
+        expect(call).not.toHaveBeenCalled();
     });
 
     it('supports 6 URLs x 15 comments and rejects any larger comment batch', async () => {
