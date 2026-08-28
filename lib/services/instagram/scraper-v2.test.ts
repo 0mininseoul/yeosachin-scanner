@@ -517,6 +517,32 @@ describe('getProfilesBatchV2', () => {
         expect(fallback).not.toHaveBeenCalled();
     });
 
+    it.each([
+        'ANALYSIS_V2_PROFILE_CHECKPOINT_INVALID',
+        'ANALYSIS_V2_PROFILE_CHECKPOINT_FENCE_MISMATCH',
+        'ANALYSIS_V2_PROFILE_CHECKPOINT_NOT_READY',
+        'ANALYSIS_V2_PROFILE_PRIMARY_CONFLICT',
+        'ANALYSIS_V2_PROFILE_CHECKPOINT_ERROR: checkpoint primary failed (23514).',
+    ])(
+        'propagates the deterministic checkpoint error %s instead of a generic persistence error, and does not start the paid fallback',
+        async message => {
+            const fallback = vi.fn();
+            __setProvidersForTest({}, {
+                selfhosted: makeSelfHostedProvider({
+                    fetchUser: vi.fn().mockResolvedValue(null),
+                    concurrency: 1,
+                    retries: 0,
+                }),
+                apify: provider({ name: 'apify', paid: true, getProfilesBatch: fallback }),
+            });
+
+            await expect(getProfilesBatchV2(['alice'], {
+                persistAttemptOutcomes: vi.fn().mockRejectedValue(new Error(message)),
+            })).rejects.toThrow(message);
+            expect(fallback).not.toHaveBeenCalled();
+        }
+    );
+
     it('propagates a start-heartbeat persistence failure before any paid fallback', async () => {
         const fetchUser = vi.fn(async username => rawUser(username));
         const fallback = vi.fn();
