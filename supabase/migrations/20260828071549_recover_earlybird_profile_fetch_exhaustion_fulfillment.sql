@@ -2,8 +2,10 @@
 -- with JOB_ATTEMPTS_EXHAUSTED following repeated PROFILE_FETCH_PERSISTENCE_ERROR
 -- profile-batch failures. The original payment, request, job, and provider-run
 -- ledgers remain immutable; the replacement preflight is the only new work
--- admitted for the already-paid order. This is purely additive: it creates a
--- new table/function and does not modify any existing object.
+-- admitted for the already-paid order. It also renames and re-fronts the
+-- existing resolve_analysis_v2_recovery_provider_run RPC so the fresh
+-- successor request this recovery mints can never adopt a pre-exhaustion
+-- provider Dataset (see the resolver wrapper below for details).
 
 SET LOCAL lock_timeout = '5s';
 SET LOCAL statement_timeout = '2min';
@@ -167,20 +169,26 @@ BEGIN
        OR v_order.user_id IS DISTINCT FROM v_user_id
        OR v_order.seller_reference_confirmed_at IS NULL
        OR v_order.payment_id IS NULL
+       OR v_order.paid_at IS NULL
        OR v_order.actual_amount_krw IS NULL
        OR v_order.actual_amount_krw < 0
        OR v_order.actual_amount_krw > v_order.expected_amount_krw
        OR v_order.actual_groble_product_id
             IS DISTINCT FROM v_order.expected_groble_product_id
-       OR EXISTS (
+       OR 1 <> (
+            SELECT pg_catalog.count(*)
+            FROM public.earlybird_webhook_events AS webhook_event
+            WHERE webhook_event.order_id = v_order.id
+       )
+       OR NOT EXISTS (
             SELECT 1
             FROM public.earlybird_webhook_events AS webhook_event
             WHERE webhook_event.order_id = v_order.id
-              AND webhook_event.event_type <> 'payment.completed'
+              AND webhook_event.event_type = 'payment.completed'
        )
        OR v_fulfillment.status <> 'manual_review'
        OR v_fulfillment.request_id IS DISTINCT FROM v_request.id
-       OR v_fulfillment.last_error_code <> 'ANALYSIS_FAILED'
+       OR v_fulfillment.last_error_code IS DISTINCT FROM 'ANALYSIS_FAILED'
        OR v_fulfillment.manual_review_at
             IS DISTINCT FROM p_expected_manual_review_at
        OR v_fulfillment.attempt_count NOT BETWEEN 1 AND 10
@@ -188,15 +196,30 @@ BEGIN
        OR v_request.preflight_id IS DISTINCT FROM v_preflight.id
        OR v_request.pipeline_version <> 'v2'
        OR v_request.status <> 'failed'
-       OR v_request.current_step <> 'failed'
-       OR v_request.error_message <> 'JOB_ATTEMPTS_EXHAUSTED'
+       OR v_request.current_step IS DISTINCT FROM 'failed'
+       OR v_request.error_message IS DISTINCT FROM 'JOB_ATTEMPTS_EXHAUSTED'
        OR v_preflight.status <> 'consumed'
        OR v_preflight.consumed_request_id IS DISTINCT FROM v_request.id
        OR v_preflight.user_id IS DISTINCT FROM v_order.user_id
        OR v_preflight.access_mode <> 'production'
        OR v_preflight.pii_scrubbed_at IS NULL
-       OR v_preflight.target_instagram_id IS NULL
-       OR v_preflight.target_instagram_id !~ '^retained[.][0-9a-f]{20}$'
+       -- Each scrub token is derived from -- and only from -- the id of the
+       -- row that carries it: the failed request's own canonical token, and
+       -- the consumed preflight's own canonical token. They are never
+       -- required to equal each other.
+       OR v_request.target_instagram_id IS DISTINCT FROM (
+            'retained.' || pg_catalog.substr(
+                pg_catalog.replace(v_request.id::TEXT, '-', ''), 1, 20
+            )
+       )
+       OR v_preflight.target_instagram_id IS DISTINCT FROM (
+            'retained.' || pg_catalog.substr(
+                pg_catalog.replace(v_preflight.id::TEXT, '-', ''), 1, 20
+            )
+       )
+       OR v_order.concierge_apify_credential_slot IS DISTINCT FROM 'secondary'
+       OR v_preflight.order_scoped_apify_credential_slot
+            IS DISTINCT FROM v_order.concierge_apify_credential_slot
        OR v_preflight.target_followers_count IS NULL
        OR v_preflight.target_following_count IS NULL
        OR v_preflight.target_followers_count
@@ -222,22 +245,22 @@ BEGIN
        OR NOT public.analysis_v2_valid_policy_versions_snapshot(
             v_preflight.policy_versions_snapshot
        )
+       -- analysis_v2_failure_receipts.request_id is the table's own primary
+       -- key, so at most one row can ever exist per request; this is
+       -- therefore both the "exactly one" and the "matches this exact
+       -- failure" gate in a single check.
        OR NOT EXISTS (
             SELECT 1
             FROM public.analysis_v2_failure_receipts AS receipt
             WHERE receipt.request_id = v_request.id
+              AND receipt.failed_job_key = 'track:target-evidence:collect'
               AND receipt.error_code = 'JOB_ATTEMPTS_EXHAUSTED'
-       )
-       OR 1 <> (
-            SELECT pg_catalog.count(*)
-            FROM public.analysis_v2_failure_receipts AS receipt
-            WHERE receipt.request_id = v_request.id
        )
        OR EXISTS (
             SELECT 1
             FROM public.analysis_pipeline_jobs AS pipeline_job
             WHERE pipeline_job.request_id = v_request.id
-              AND pipeline_job.status IN ('pending', 'processing')
+              AND pipeline_job.status IN ('pending', 'processing', 'retryable')
        )
        OR NOT EXISTS (
             SELECT 1
@@ -247,14 +270,21 @@ BEGIN
               AND pipeline_job.status = 'cancelled'
               AND pipeline_job.last_error_code = 'PROFILE_FETCH_PERSISTENCE_ERROR'
        )
+       -- This exact incident requires at least one provider run, and every
+       -- one of them must have fully succeeded and reconciled -- narrower
+       -- than "terminal", so the resolver wrapper below can treat every
+       -- source run for this lineage as adoption-ready.
+       OR NOT EXISTS (
+            SELECT 1
+            FROM public.analysis_v2_provider_runs AS provider_run
+            WHERE provider_run.request_id = v_request.id
+       )
        OR EXISTS (
             SELECT 1
             FROM public.analysis_v2_provider_runs AS provider_run
             WHERE provider_run.request_id = v_request.id
               AND (
-                  provider_run.status NOT IN (
-                      'succeeded', 'failed', 'aborted', 'timed_out'
-                  )
+                  provider_run.status IS DISTINCT FROM 'succeeded'
                   OR provider_run.run_id IS NULL
                   OR provider_run.actual_usage_usd IS NULL
                   OR provider_run.usage_reconciled_at IS NULL
@@ -280,7 +310,10 @@ BEGIN
     END IF;
 
     v_new_preflight_id := extensions.gen_random_uuid();
-    v_recovery_key := 'earlybird.profile-fetch-exhaustion-recovery.'
+    -- Canonical key so the existing create_or_replay_earlybird_fulfillment_request
+    -- request-generation guard recognizes this fresh-admitted lineage exactly
+    -- the way it already recognizes every other earlybird recovery lineage.
+    v_recovery_key := 'earlybird.schema-recovery.'
         || pg_catalog.replace(v_order.id::TEXT, '-', '');
 
     -- The fresh preflight is built only from the paid order's own immutable
@@ -366,4 +399,88 @@ REVOKE ALL ON FUNCTION public.recover_earlybird_profile_fetch_exhaustion_fulfill
 ) FROM PUBLIC, anon, authenticated, service_role;
 GRANT EXECUTE ON FUNCTION public.recover_earlybird_profile_fetch_exhaustion_fulfillment(
     UUID, UUID, TIMESTAMP WITH TIME ZONE
+) TO service_role;
+
+-- The task contract for this recovery forbids reusing any pre-exhaustion
+-- provider Dataset: the fresh successor request minted above must never
+-- adopt a stale run recorded against the terminally failed request. Rename
+-- the current resolver and reinstall its exact original signature as a thin
+-- router in front of it, exactly like the existing first15-canary router
+-- (resolve_analysis_v2_recovery_provider_run_first15): return NULL only for
+-- the exact successor request this recovery lineage produced -- so the
+-- current-request provider store makes a brand-new external call -- and
+-- delegate byte-for-byte to the renamed resolver for every other caller,
+-- including a request resuming its own earlier provider run.
+ALTER FUNCTION public.resolve_analysis_v2_recovery_provider_run(
+    UUID, TEXT, UUID, TEXT, TEXT, TEXT, TEXT, TEXT, NUMERIC
+) RENAME TO resolve_analysis_v2_recovery_provider_run_pre_pfe;
+REVOKE ALL ON FUNCTION public.resolve_analysis_v2_recovery_provider_run_pre_pfe(
+    UUID, TEXT, UUID, TEXT, TEXT, TEXT, TEXT, TEXT, NUMERIC
+) FROM PUBLIC, anon, authenticated, service_role;
+
+CREATE FUNCTION public.resolve_analysis_v2_recovery_provider_run(
+    p_request_id UUID,
+    p_job_key TEXT,
+    p_claim_token UUID,
+    p_operation_key TEXT,
+    p_input_hash TEXT,
+    p_logical_provider TEXT,
+    p_actor_id TEXT,
+    p_credential_slot TEXT,
+    p_max_charge_usd NUMERIC
+)
+RETURNS JSONB
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = ''
+AS $$
+DECLARE
+    v_request public.analysis_requests%ROWTYPE;
+    v_recovery public.earlybird_profile_fetch_exhaustion_recoveries%ROWTYPE;
+    v_order public.earlybird_orders%ROWTYPE;
+    v_fulfillment public.earlybird_fulfillments%ROWTYPE;
+BEGIN
+    SELECT request.* INTO v_request
+    FROM public.analysis_requests AS request
+    WHERE request.id = p_request_id;
+
+    SELECT recovery.* INTO v_recovery
+    FROM public.earlybird_profile_fetch_exhaustion_recoveries AS recovery
+    WHERE recovery.recovery_preflight_id = v_request.preflight_id;
+
+    SELECT earlybird_order.* INTO v_order
+    FROM public.earlybird_orders AS earlybird_order
+    WHERE earlybird_order.id = v_recovery.order_id;
+
+    SELECT fulfillment.* INTO v_fulfillment
+    FROM public.earlybird_fulfillments AS fulfillment
+    WHERE fulfillment.order_id = v_recovery.order_id;
+
+    -- Only the exact successor this recovery lineage produced short-circuits
+    -- to NULL: the same order's preflight and result_request_id, and the
+    -- same order's fulfillment request_id, must all still point at this
+    -- exact p_request_id.
+    IF v_request.id IS NOT NULL
+       AND v_recovery.order_id IS NOT NULL
+       AND v_order.id IS NOT NULL
+       AND v_order.preflight_id = v_recovery.recovery_preflight_id
+       AND v_order.result_request_id = p_request_id
+       AND v_fulfillment.order_id IS NOT NULL
+       AND v_fulfillment.request_id = p_request_id
+    THEN
+        RETURN NULL;
+    END IF;
+
+    RETURN public.resolve_analysis_v2_recovery_provider_run_pre_pfe(
+        p_request_id, p_job_key, p_claim_token, p_operation_key, p_input_hash,
+        p_logical_provider, p_actor_id, p_credential_slot, p_max_charge_usd
+    );
+END;
+$$;
+
+REVOKE ALL ON FUNCTION public.resolve_analysis_v2_recovery_provider_run(
+    UUID, TEXT, UUID, TEXT, TEXT, TEXT, TEXT, TEXT, NUMERIC
+) FROM PUBLIC, anon, authenticated, service_role;
+GRANT EXECUTE ON FUNCTION public.resolve_analysis_v2_recovery_provider_run(
+    UUID, TEXT, UUID, TEXT, TEXT, TEXT, TEXT, TEXT, NUMERIC
 ) TO service_role;

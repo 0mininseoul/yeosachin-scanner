@@ -10,17 +10,27 @@ const recoveryMigration = readFileSync(
     'utf8'
 );
 
+function retainedScrubToken(id: string): string {
+    return `retained.${id.replace(/-/g, '').slice(0, 20)}`;
+}
+
 const USER_ID = '10000000-0000-4000-8000-000000000001';
-const OTHER_USER_ID = '10000000-0000-4000-8000-000000000002';
 const OLD_PREFLIGHT_ID = '20000000-0000-4000-8000-000000000001';
+const OTHER_PREFLIGHT_ID = '20000000-0000-4000-8000-000000000002';
 const ORDER_ID = '30000000-0000-4000-8000-000000000001';
 const FAILED_REQUEST_ID = '40000000-0000-4000-8000-000000000001';
 const OTHER_REQUEST_ID = '40000000-0000-4000-8000-000000000002';
-const OTHER_PREFLIGHT_ID = '20000000-0000-4000-8000-000000000002';
-const CREDENTIAL_SLOT = 'primary';
+const SUCCESSOR_REQUEST_ID = '40000000-0000-4000-8000-000000000003';
+const CLAIM_TOKEN = '50000000-0000-4000-8000-000000000001';
+const CREDENTIAL_SLOT = 'secondary';
+const WRONG_CREDENTIAL_SLOT = 'primary';
 const EXPECTED_MANUAL_REVIEW_AT = '2026-08-20T00:00:00.000Z';
+// The order's own target handle -- never a scrub token, never checked against
+// either recovered row's retained token.
+const ORDER_TARGET_INSTAGRAM_ID = 'sample_target_01';
 
-const RETAINED_TARGET_ID = 'retained.0123456789abcdef0123';
+const FAILED_REQUEST_RETAINED_TARGET_ID = retainedScrubToken(FAILED_REQUEST_ID);
+const OLD_PREFLIGHT_RETAINED_TARGET_ID = retainedScrubToken(OLD_PREFLIGHT_ID);
 
 const bootstrap = `
 CREATE ROLE anon NOLOGIN;
@@ -68,6 +78,7 @@ CREATE TABLE public.analysis_requests (
     id UUID PRIMARY KEY,
     user_id UUID NOT NULL REFERENCES public.users(id),
     preflight_id UUID,
+    target_instagram_id TEXT,
     pipeline_version TEXT NOT NULL,
     status TEXT NOT NULL,
     current_step TEXT,
@@ -85,6 +96,7 @@ CREATE TABLE public.analysis_preflights (
     exclusion_decision TEXT,
     excluded_instagram_id TEXT,
     status TEXT NOT NULL,
+    admission_status TEXT NOT NULL DEFAULT 'idle',
     access_mode TEXT NOT NULL,
     launch_status_snapshot JSONB,
     plan_catalog_snapshot JSONB,
@@ -129,6 +141,7 @@ CREATE TABLE public.earlybird_orders (
     expected_groble_product_id TEXT NOT NULL,
     expected_amount_krw INTEGER NOT NULL,
     payment_id TEXT,
+    paid_at TIMESTAMP WITH TIME ZONE,
     actual_groble_product_id TEXT,
     actual_amount_krw INTEGER,
     seller_reference_confirmed_at TIMESTAMP WITH TIME ZONE,
@@ -205,10 +218,14 @@ CREATE TABLE public.analysis_v2_provider_runs (
     PRIMARY KEY (request_id, job_key, operation_key)
 );
 
+-- Mirrors the real schema (20260713185711_add_analysis_v2_result_finalization.sql):
+-- request_id is the table's own primary key, so at most one receipt can ever
+-- exist per request -- this is what lets the target migration's NOT EXISTS
+-- check double as the "exactly one, and it's this exact failure" gate.
 CREATE TABLE public.analysis_v2_failure_receipts (
-    request_id UUID NOT NULL REFERENCES public.analysis_requests(id),
-    error_code TEXT NOT NULL,
-    PRIMARY KEY (request_id, error_code)
+    request_id UUID PRIMARY KEY REFERENCES public.analysis_requests(id),
+    failed_job_key TEXT NOT NULL,
+    error_code TEXT NOT NULL
 );
 
 CREATE TABLE public.earlybird_webhook_events (
@@ -255,6 +272,36 @@ CREATE TRIGGER prevent_earlybird_schema_failure_recovery_mutation
 BEFORE UPDATE OR DELETE ON public.earlybird_schema_failure_recoveries
 FOR EACH ROW
 EXECUTE FUNCTION public.prevent_earlybird_schema_failure_recovery_mutation();
+
+-- The pre-existing production RPC the target migration renames and re-fronts
+-- (see 20260815170000_rearm_first15_canary_provider_failures.sql). The stub
+-- return value is a distinguishable marker so tests can prove the target
+-- migration's wrapper delegates to it byte-for-byte for every caller that
+-- isn't this exact recovery lineage's successor request.
+CREATE FUNCTION public.resolve_analysis_v2_recovery_provider_run(
+    p_request_id UUID,
+    p_job_key TEXT,
+    p_claim_token UUID,
+    p_operation_key TEXT,
+    p_input_hash TEXT,
+    p_logical_provider TEXT,
+    p_actor_id TEXT,
+    p_credential_slot TEXT,
+    p_max_charge_usd NUMERIC
+)
+RETURNS JSONB LANGUAGE sql STABLE AS $$
+    SELECT pg_catalog.jsonb_build_object(
+        'source', 'pre_pfe_stub',
+        'request_id', p_request_id,
+        'job_key', p_job_key
+    )
+$$;
+REVOKE ALL ON FUNCTION public.resolve_analysis_v2_recovery_provider_run(
+    UUID, TEXT, UUID, TEXT, TEXT, TEXT, TEXT, TEXT, NUMERIC
+) FROM PUBLIC, anon, authenticated, service_role;
+GRANT EXECUTE ON FUNCTION public.resolve_analysis_v2_recovery_provider_run(
+    UUID, TEXT, UUID, TEXT, TEXT, TEXT, TEXT, TEXT, NUMERIC
+) TO service_role;
 `;
 
 type RecoveryRow = {
@@ -294,11 +341,17 @@ type FixtureOverrides = {
     request?: Record<string, unknown>;
     preflight?: Record<string, unknown>;
     skipCancelledProfileJob?: boolean;
+    extraPipelineJob?: {
+        job_key: string;
+        track: string;
+        status: string;
+        last_error_code?: string | null;
+    };
     skipProviderRun?: boolean;
     providerRunOverrides?: Record<string, unknown>;
     skipFailureReceipt?: boolean;
-    extraFailureReceipt?: boolean;
-    webhookEventType?: string;
+    failureReceiptOverrides?: Record<string, unknown>;
+    webhookEvents?: string[];
 };
 
 async function buildValidFixture(
@@ -309,9 +362,9 @@ async function buildValidFixture(
 
     await db.query(
         `INSERT INTO public.analysis_requests(
-             id, user_id, pipeline_version, status, current_step, error_message
-         ) VALUES ($1, $2, 'v2', 'pending', 'pending', NULL)`,
-        [FAILED_REQUEST_ID, USER_ID]
+             id, user_id, target_instagram_id, pipeline_version, status, current_step, error_message
+         ) VALUES ($1, $2, $3, 'v2', 'pending', 'pending', NULL)`,
+        [FAILED_REQUEST_ID, USER_ID, FAILED_REQUEST_RETAINED_TARGET_ID]
     );
 
     const snapshot = JSON.stringify({ basic: { launchStatus: 'production' } });
@@ -320,13 +373,14 @@ async function buildValidFixture(
         status: 'consumed',
         access_mode: 'production',
         pii_scrubbed_at: '2026-08-19T00:00:00.000Z',
-        target_instagram_id: RETAINED_TARGET_ID,
+        target_instagram_id: OLD_PREFLIGHT_RETAINED_TARGET_ID,
         target_followers_count: 300,
         target_following_count: 100,
         target_is_private: false,
         capacity_required_plan_id: 'basic',
         required_plan_id: 'basic',
         consumed_request_id: FAILED_REQUEST_ID,
+        order_scoped_apify_credential_slot: CREDENTIAL_SLOT,
         ...overrides.preflight,
     };
     await db.query(
@@ -336,11 +390,11 @@ async function buildValidFixture(
              pricing_version, pricing_snapshot, policy_versions_snapshot,
              target_followers_count, target_following_count, target_is_private,
              capacity_required_plan_id, required_plan_id, consumed_request_id,
-             pii_scrubbed_at
+             pii_scrubbed_at, order_scoped_apify_credential_slot
          ) VALUES (
              $1, $2, 'old-preflight-key', $3, $4, $5,
              $6::jsonb, $6::jsonb, $6::jsonb, 'v1', $6::jsonb, $6::jsonb,
-             $7, $8, $9, $10, $11, $12, $13
+             $7, $8, $9, $10, $11, $12, $13, $14
          )`,
         [
             preflight.id, USER_ID, preflight.target_instagram_id,
@@ -348,7 +402,7 @@ async function buildValidFixture(
             preflight.target_followers_count, preflight.target_following_count,
             preflight.target_is_private, preflight.capacity_required_plan_id,
             preflight.required_plan_id, preflight.consumed_request_id,
-            preflight.pii_scrubbed_at,
+            preflight.pii_scrubbed_at, preflight.order_scoped_apify_credential_slot,
         ]
     );
 
@@ -373,6 +427,7 @@ async function buildValidFixture(
         status: 'analysis_in_progress',
         seller_reference_confirmed_at: '2026-08-18T00:00:00.000Z',
         payment_id: 'pay_123',
+        paid_at: '2026-08-18T00:00:05.000Z',
         actual_amount_krw: 19900,
         actual_groble_product_id: 'standard-product-01',
         concierge_apify_credential_slot: CREDENTIAL_SLOT,
@@ -382,27 +437,28 @@ async function buildValidFixture(
         `INSERT INTO public.earlybird_orders(
              id, user_id, preflight_id, target_instagram_id, target_followers_count,
              target_following_count, exclusion_decision, plan_id, status,
-             expected_groble_product_id, expected_amount_krw, payment_id,
+             expected_groble_product_id, expected_amount_krw, payment_id, paid_at,
              actual_groble_product_id, actual_amount_krw,
              seller_reference_confirmed_at, concierge_apify_credential_slot,
              result_request_id
          ) VALUES (
              $1, $2, $3, $4, $5, $6, 'skip', 'standard', $7,
-             'standard-product-01', 19900, $8, $9, $10, $11, $12, $13
+             'standard-product-01', 19900, $8, $9, $10, $11, $12, $13, $14
          )`,
         [
-            ORDER_ID, USER_ID, OLD_PREFLIGHT_ID, RETAINED_TARGET_ID, 300, 100,
-            order.status, order.payment_id, order.actual_groble_product_id,
+            ORDER_ID, USER_ID, OLD_PREFLIGHT_ID, ORDER_TARGET_INSTAGRAM_ID, 300, 100,
+            order.status, order.payment_id, order.paid_at, order.actual_groble_product_id,
             order.actual_amount_krw, order.seller_reference_confirmed_at,
             order.concierge_apify_credential_slot, FAILED_REQUEST_ID,
         ]
     );
 
-    if (overrides.webhookEventType) {
+    const webhookEvents = overrides.webhookEvents ?? ['payment.completed'];
+    for (const eventType of webhookEvents) {
         await db.query(
             `INSERT INTO public.earlybird_webhook_events(order_id, event_type)
              VALUES ($1, $2)`,
-            [ORDER_ID, overrides.webhookEventType]
+            [ORDER_ID, eventType]
         );
     }
 
@@ -427,7 +483,7 @@ async function buildValidFixture(
 
     await db.query(
         `INSERT INTO public.analysis_pipeline_jobs(request_id, job_key, track, status, last_error_code)
-         VALUES ($1, 'track:profiles:batch:1', 'profiles', 'failed', 'JOB_ATTEMPTS_EXHAUSTED')`,
+         VALUES ($1, 'track:target-evidence:collect', 'target-evidence', 'failed', 'JOB_ATTEMPTS_EXHAUSTED')`,
         [FAILED_REQUEST_ID]
     );
     if (!overrides.skipCancelledProfileJob) {
@@ -435,6 +491,14 @@ async function buildValidFixture(
             `INSERT INTO public.analysis_pipeline_jobs(request_id, job_key, track, status, last_error_code)
              VALUES ($1, 'track:profiles:batch:2', 'profiles', 'cancelled', 'PROFILE_FETCH_PERSISTENCE_ERROR')`,
             [FAILED_REQUEST_ID]
+        );
+    }
+    if (overrides.extraPipelineJob) {
+        const job = overrides.extraPipelineJob;
+        await db.query(
+            `INSERT INTO public.analysis_pipeline_jobs(request_id, job_key, track, status, last_error_code)
+             VALUES ($1, $2, $3, $4, $5)`,
+            [FAILED_REQUEST_ID, job.job_key, job.track, job.status, job.last_error_code ?? null]
         );
     }
 
@@ -450,7 +514,7 @@ async function buildValidFixture(
             `INSERT INTO public.analysis_v2_provider_runs(
                  request_id, job_key, operation_key, status, run_id,
                  actual_usage_usd, usage_reconciled_at
-             ) VALUES ($1, 'track:profiles:batch:1', 'profile-fallback:aaaa', $2, $3, $4, $5)`,
+             ) VALUES ($1, 'track:target-evidence:collect', 'profile-fallback:aaaa', $2, $3, $4, $5)`,
             [
                 FAILED_REQUEST_ID, providerRun.status, providerRun.run_id,
                 providerRun.actual_usage_usd, providerRun.usage_reconciled_at,
@@ -459,17 +523,15 @@ async function buildValidFixture(
     }
 
     if (!overrides.skipFailureReceipt) {
+        const receipt = {
+            failed_job_key: 'track:target-evidence:collect',
+            error_code: 'JOB_ATTEMPTS_EXHAUSTED',
+            ...overrides.failureReceiptOverrides,
+        };
         await db.query(
-            `INSERT INTO public.analysis_v2_failure_receipts(request_id, error_code)
-             VALUES ($1, 'JOB_ATTEMPTS_EXHAUSTED')`,
-            [FAILED_REQUEST_ID]
-        );
-    }
-    if (overrides.extraFailureReceipt) {
-        await db.query(
-            `INSERT INTO public.analysis_v2_failure_receipts(request_id, error_code)
-             VALUES ($1, 'SOME_OTHER_ERROR')`,
-            [FAILED_REQUEST_ID]
+            `INSERT INTO public.analysis_v2_failure_receipts(request_id, failed_job_key, error_code)
+             VALUES ($1, $2, $3)`,
+            [FAILED_REQUEST_ID, receipt.failed_job_key, receipt.error_code]
         );
     }
 }
@@ -505,15 +567,22 @@ describe('recover_earlybird_profile_fetch_exhaustion_fulfillment', () => {
         expect(row.failed_request_id).toBe(FAILED_REQUEST_ID);
         expect(row.preflight_id).not.toBe(OLD_PREFLIGHT_ID);
         const newPreflightId = row.preflight_id;
+        const expectedIdempotencyKey =
+            `earlybird.schema-recovery.${ORDER_ID.replace(/-/g, '')}`;
 
         await expect(db.query(
-            `SELECT status, access_mode, order_scoped_apify_credential_slot,
+            `SELECT status, admission_status, idempotency_key, access_mode,
+                    order_scoped_apify_credential_slot,
                     target_followers_count, target_following_count
              FROM public.analysis_preflights WHERE id = $1`,
             [newPreflightId]
         )).resolves.toMatchObject({
             rows: [{
                 status: 'ready',
+                // Fresh-admission idle by default: the operator's own
+                // admitAndAdvance reserves/enqueues admission later.
+                admission_status: 'idle',
+                idempotency_key: expectedIdempotencyKey,
                 access_mode: 'production',
                 order_scoped_apify_credential_slot: CREDENTIAL_SLOT,
                 target_followers_count: 300,
@@ -617,9 +686,31 @@ describe('recover_earlybird_profile_fetch_exhaustion_fulfillment', () => {
             'EARLYBIRD_PROFILE_FETCH_EXHAUSTION_RECOVERY_INELIGIBLE'
         );
 
+        const dbUnpaid = await createDb();
+        await buildValidFixture(dbUnpaid, { order: { paid_at: null } });
+        await expect(recover(dbUnpaid)).rejects.toThrow(
+            'EARLYBIRD_PROFILE_FETCH_EXHAUSTION_RECOVERY_INELIGIBLE'
+        );
+
         const dbCancelled = await createDb();
-        await buildValidFixture(dbCancelled, { webhookEventType: 'payment.cancel_requested' });
+        await buildValidFixture(dbCancelled, { webhookEvents: ['payment.cancel_requested'] });
         await expect(recover(dbCancelled)).rejects.toThrow(
+            'EARLYBIRD_PROFILE_FETCH_EXHAUSTION_RECOVERY_INELIGIBLE'
+        );
+    });
+
+    it('webhook event count gate: rejects unless the order has exactly one payment.completed event', async () => {
+        const dbNone = await createDb();
+        await buildValidFixture(dbNone, { webhookEvents: [] });
+        await expect(recover(dbNone)).rejects.toThrow(
+            'EARLYBIRD_PROFILE_FETCH_EXHAUSTION_RECOVERY_INELIGIBLE'
+        );
+
+        const dbDuplicate = await createDb();
+        await buildValidFixture(dbDuplicate, {
+            webhookEvents: ['payment.completed', 'payment.completed'],
+        });
+        await expect(recover(dbDuplicate)).rejects.toThrow(
             'EARLYBIRD_PROFILE_FETCH_EXHAUSTION_RECOVERY_INELIGIBLE'
         );
     });
@@ -644,6 +735,41 @@ describe('recover_earlybird_profile_fetch_exhaustion_fulfillment', () => {
         );
     });
 
+    it('narrows adoption-readiness to fully-succeeded runs: a reconciled but non-succeeded terminal run is still ineligible', async () => {
+        const db = await createDb();
+        await buildValidFixture(db, {
+            providerRunOverrides: { status: 'failed' },
+        });
+        await expect(recover(db)).rejects.toThrow(
+            'EARLYBIRD_PROFILE_FETCH_EXHAUSTION_RECOVERY_INELIGIBLE'
+        );
+    });
+
+    it('requires at least one provider run to exist', async () => {
+        const db = await createDb();
+        await buildValidFixture(db, { skipProviderRun: true });
+        await expect(recover(db)).rejects.toThrow(
+            'EARLYBIRD_PROFILE_FETCH_EXHAUSTION_RECOVERY_INELIGIBLE'
+        );
+    });
+
+    it('requires every source provider run to be fully succeeded, not just one of several', async () => {
+        const db = await createDb();
+        await buildValidFixture(db, { skipProviderRun: true });
+        await db.query(
+            `INSERT INTO public.analysis_v2_provider_runs(
+                 request_id, job_key, operation_key, status, run_id,
+                 actual_usage_usd, usage_reconciled_at
+             ) VALUES
+                 ($1, 'track:target-evidence:collect', 'op-a', 'succeeded', 'run-a', 0.5, $2),
+                 ($1, 'track:target-evidence:collect', 'op-b', 'succeeded', NULL, NULL, NULL)`,
+            [FAILED_REQUEST_ID, '2026-08-19T12:00:00.000Z']
+        );
+        await expect(recover(db)).rejects.toThrow(
+            'EARLYBIRD_PROFILE_FETCH_EXHAUSTION_RECOVERY_INELIGIBLE'
+        );
+    });
+
     it('rejects when the terminal profile-batch cancellation evidence is missing', async () => {
         const db = await createDb();
         await buildValidFixture(db, { skipCancelledProfileJob: true });
@@ -652,29 +778,124 @@ describe('recover_earlybird_profile_fetch_exhaustion_fulfillment', () => {
         );
     });
 
-    it('rejects when the failure receipt is missing or not exactly one', async () => {
+    it('rejects when the failure receipt is missing or does not match the exact job key and error code', async () => {
         const dbMissing = await createDb();
         await buildValidFixture(dbMissing, { skipFailureReceipt: true });
         await expect(recover(dbMissing)).rejects.toThrow(
             'EARLYBIRD_PROFILE_FETCH_EXHAUSTION_RECOVERY_INELIGIBLE'
         );
 
-        const dbExtra = await createDb();
-        await buildValidFixture(dbExtra, { extraFailureReceipt: true });
-        await expect(recover(dbExtra)).rejects.toThrow(
+        const dbWrongJobKey = await createDb();
+        await buildValidFixture(dbWrongJobKey, {
+            failureReceiptOverrides: { failed_job_key: 'track:profiles:batch:2' },
+        });
+        await expect(recover(dbWrongJobKey)).rejects.toThrow(
+            'EARLYBIRD_PROFILE_FETCH_EXHAUSTION_RECOVERY_INELIGIBLE'
+        );
+
+        const dbWrongErrorCode = await createDb();
+        await buildValidFixture(dbWrongErrorCode, {
+            failureReceiptOverrides: { error_code: 'SOME_OTHER_ERROR' },
+        });
+        await expect(recover(dbWrongErrorCode)).rejects.toThrow(
             'EARLYBIRD_PROFILE_FETCH_EXHAUSTION_RECOVERY_INELIGIBLE'
         );
     });
 
+    it.each(['pending', 'processing', 'retryable'] as const)(
+        'rejects when another job on the request is still active with status %s',
+        async (status) => {
+            const db = await createDb();
+            await buildValidFixture(db, {
+                extraPipelineJob: {
+                    job_key: `track:extra:${status}`,
+                    track: 'profiles',
+                    status,
+                },
+            });
+            await expect(recover(db)).rejects.toThrow(
+                'EARLYBIRD_PROFILE_FETCH_EXHAUSTION_RECOVERY_INELIGIBLE'
+            );
+        }
+    );
+
+    it('credential slot gate: requires the order slot to be exactly secondary and the source preflight slot to match it', async () => {
+        const dbWrongOrderSlot = await createDb();
+        await buildValidFixture(dbWrongOrderSlot, {
+            order: { concierge_apify_credential_slot: WRONG_CREDENTIAL_SLOT },
+        });
+        await expect(recover(dbWrongOrderSlot)).rejects.toThrow(
+            'EARLYBIRD_PROFILE_FETCH_EXHAUSTION_RECOVERY_INELIGIBLE'
+        );
+
+        const dbNullOrderSlot = await createDb();
+        await buildValidFixture(dbNullOrderSlot, {
+            order: { concierge_apify_credential_slot: null },
+        });
+        await expect(recover(dbNullOrderSlot)).rejects.toThrow(
+            'EARLYBIRD_PROFILE_FETCH_EXHAUSTION_RECOVERY_INELIGIBLE'
+        );
+
+        const dbMismatchedPreflightSlot = await createDb();
+        await buildValidFixture(dbMismatchedPreflightSlot, {
+            preflight: { order_scoped_apify_credential_slot: WRONG_CREDENTIAL_SLOT },
+        });
+        await expect(recover(dbMismatchedPreflightSlot)).rejects.toThrow(
+            'EARLYBIRD_PROFILE_FETCH_EXHAUSTION_RECOVERY_INELIGIBLE'
+        );
+
+        const dbNullPreflightSlot = await createDb();
+        await buildValidFixture(dbNullPreflightSlot, {
+            preflight: { order_scoped_apify_credential_slot: null },
+        });
+        await expect(recover(dbNullPreflightSlot)).rejects.toThrow(
+            'EARLYBIRD_PROFILE_FETCH_EXHAUSTION_RECOVERY_INELIGIBLE'
+        );
+    });
+
+    it('scrub token gate: the request and source preflight tokens are each derived from their own id, independently', async () => {
+        const dbWrongRequestToken = await createDb();
+        await buildValidFixture(dbWrongRequestToken, {
+            request: { target_instagram_id: 'retained.deadbeefdeadbeefdead' },
+        });
+        await expect(recover(dbWrongRequestToken)).rejects.toThrow(
+            'EARLYBIRD_PROFILE_FETCH_EXHAUSTION_RECOVERY_INELIGIBLE'
+        );
+
+        const dbWrongPreflightToken = await createDb();
+        await buildValidFixture(dbWrongPreflightToken, {
+            preflight: { target_instagram_id: 'retained.deadbeefdeadbeefdead' },
+        });
+        await expect(recover(dbWrongPreflightToken)).rejects.toThrow(
+            'EARLYBIRD_PROFILE_FETCH_EXHAUSTION_RECOVERY_INELIGIBLE'
+        );
+
+        // The happy path above is the positive proof that the two tokens
+        // (derived from two different ids) are never required to match each
+        // other.
+    });
+
     it('rejects when the order has an active competing request or preflight for the same user', async () => {
-        const db = await createDb();
-        await buildValidFixture(db);
-        await db.query(
+        const dbActiveRequest = await createDb();
+        await buildValidFixture(dbActiveRequest);
+        await dbActiveRequest.query(
             `INSERT INTO public.analysis_requests(id, user_id, pipeline_version, status)
              VALUES ($1, $2, 'v2', 'processing')`,
             [OTHER_REQUEST_ID, USER_ID]
         );
-        await expect(recover(db)).rejects.toThrow(
+        await expect(recover(dbActiveRequest)).rejects.toThrow(
+            'EARLYBIRD_PROFILE_FETCH_EXHAUSTION_RECOVERY_INELIGIBLE'
+        );
+
+        const dbActivePreflight = await createDb();
+        await buildValidFixture(dbActivePreflight);
+        await dbActivePreflight.query(
+            `INSERT INTO public.analysis_preflights(
+                 id, user_id, idempotency_key, status, access_mode
+             ) VALUES ($1, $2, 'other-active-preflight-key', 'ready', 'production')`,
+            [OTHER_PREFLIGHT_ID, USER_ID]
+        );
+        await expect(recover(dbActivePreflight)).rejects.toThrow(
             'EARLYBIRD_PROFILE_FETCH_EXHAUSTION_RECOVERY_INELIGIBLE'
         );
     });
@@ -736,5 +957,139 @@ describe('recover_earlybird_profile_fetch_exhaustion_fulfillment', () => {
              SET prior_attempt_count = 9 WHERE order_id = $1`,
             [ORDER_ID]
         )).rejects.toThrow(/EARLYBIRD_SCHEMA_FAILURE_RECOVERY_IMMUTABLE|permission denied/i);
+    });
+});
+
+describe('resolve_analysis_v2_recovery_provider_run (post-recovery successor resolver wrapper)', () => {
+    const RESOLVER_SQL = `SELECT public.resolve_analysis_v2_recovery_provider_run(
+        $1, $2, $3, $4, $5, $6, $7, $8, $9
+    ) AS result`;
+
+    async function setUpSuccessorLineage(db: PGlite): Promise<void> {
+        await buildValidFixture(db);
+        await recover(db);
+        const { rows } = await db.query<{ preflight_id: string }>(
+            `SELECT preflight_id FROM public.earlybird_orders WHERE id = $1`,
+            [ORDER_ID]
+        );
+        const newPreflightId = rows[0].preflight_id;
+        await db.query(
+            `INSERT INTO public.analysis_requests(id, user_id, preflight_id, pipeline_version, status)
+             VALUES ($1, $2, $3, 'v2', 'pending')`,
+            [SUCCESSOR_REQUEST_ID, USER_ID, newPreflightId]
+        );
+        await db.query(
+            `UPDATE public.earlybird_orders SET result_request_id = $2 WHERE id = $1`,
+            [ORDER_ID, SUCCESSOR_REQUEST_ID]
+        );
+        await db.query(
+            `UPDATE public.earlybird_fulfillments SET request_id = $2 WHERE order_id = $1`,
+            [ORDER_ID, SUCCESSOR_REQUEST_ID]
+        );
+    }
+
+    it('returns NULL for the exact successor request this recovery lineage produced, forcing a brand-new provider call', async () => {
+        const db = await createDb();
+        await setUpSuccessorLineage(db);
+
+        await expect(asRole<{ result: unknown }>(
+            db, 'service_role', RESOLVER_SQL,
+            [
+                SUCCESSOR_REQUEST_ID, 'track:target-evidence:collect', CLAIM_TOKEN,
+                'op', 'a'.repeat(64), 'apify', 'actor', 'secondary', 10,
+            ]
+        )).resolves.toMatchObject({ rows: [{ result: null }] });
+    });
+
+    it('delegates byte-for-byte to the renamed resolver for a request that is not this lineage\'s successor', async () => {
+        const db = await createDb();
+        await setUpSuccessorLineage(db);
+
+        await expect(asRole<{ result: { source: string; request_id: string; job_key: string } }>(
+            db, 'service_role', RESOLVER_SQL,
+            [
+                FAILED_REQUEST_ID, 'track:target-evidence:collect', CLAIM_TOKEN,
+                'op', 'a'.repeat(64), 'apify', 'actor', 'secondary', 10,
+            ]
+        )).resolves.toMatchObject({
+            rows: [{
+                result: {
+                    source: 'pre_pfe_stub',
+                    request_id: FAILED_REQUEST_ID,
+                    job_key: 'track:target-evidence:collect',
+                },
+            }],
+        });
+    });
+
+    it('delegates for a request id that does not exist at all, without erroring', async () => {
+        const db = await createDb();
+        await setUpSuccessorLineage(db);
+        const bogusRequestId = '40000000-0000-4000-8000-000000009999';
+
+        await expect(asRole<{ result: { source: string } }>(
+            db, 'service_role', RESOLVER_SQL,
+            [
+                bogusRequestId, 'track:target-evidence:collect', CLAIM_TOKEN,
+                'op', 'a'.repeat(64), 'apify', 'actor', 'secondary', 10,
+            ]
+        )).resolves.toMatchObject({
+            rows: [{ result: { source: 'pre_pfe_stub' } }],
+        });
+    });
+
+    it('restrictive ACL: only service_role may execute the wrapper, and the renamed resolver is not directly callable', async () => {
+        const db = await createDb();
+        await setUpSuccessorLineage(db);
+
+        await expect(db.query<{
+            wrapper_service_execute: boolean;
+            wrapper_authenticated_execute: boolean;
+            wrapper_anon_execute: boolean;
+            renamed_service_execute: boolean;
+            renamed_authenticated_execute: boolean;
+        }>(`SELECT
+            has_function_privilege(
+                'service_role',
+                'public.resolve_analysis_v2_recovery_provider_run(uuid,text,uuid,text,text,text,text,text,numeric)',
+                'EXECUTE'
+            ) AS wrapper_service_execute,
+            has_function_privilege(
+                'authenticated',
+                'public.resolve_analysis_v2_recovery_provider_run(uuid,text,uuid,text,text,text,text,text,numeric)',
+                'EXECUTE'
+            ) AS wrapper_authenticated_execute,
+            has_function_privilege(
+                'anon',
+                'public.resolve_analysis_v2_recovery_provider_run(uuid,text,uuid,text,text,text,text,text,numeric)',
+                'EXECUTE'
+            ) AS wrapper_anon_execute,
+            has_function_privilege(
+                'service_role',
+                'public.resolve_analysis_v2_recovery_provider_run_pre_pfe(uuid,text,uuid,text,text,text,text,text,numeric)',
+                'EXECUTE'
+            ) AS renamed_service_execute,
+            has_function_privilege(
+                'authenticated',
+                'public.resolve_analysis_v2_recovery_provider_run_pre_pfe(uuid,text,uuid,text,text,text,text,text,numeric)',
+                'EXECUTE'
+            ) AS renamed_authenticated_execute
+        `)).resolves.toMatchObject({
+            rows: [{
+                wrapper_service_execute: true,
+                wrapper_authenticated_execute: false,
+                wrapper_anon_execute: false,
+                renamed_service_execute: false,
+                renamed_authenticated_execute: false,
+            }],
+        });
+
+        await expect(asRole(
+            db, 'authenticated', RESOLVER_SQL,
+            [
+                SUCCESSOR_REQUEST_ID, 'track:target-evidence:collect', CLAIM_TOKEN,
+                'op', 'a'.repeat(64), 'apify', 'actor', 'secondary', 10,
+            ]
+        )).rejects.toThrow(/permission denied/i);
     });
 });
