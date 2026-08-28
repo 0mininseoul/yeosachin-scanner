@@ -39,6 +39,13 @@ export function shouldClearAutoCheckoutUiPending(input: {
     return input.autoCheckoutAttempt && !input.checkoutRedirectStarted;
 }
 
+/**
+ * A checkout continuation is authorized by an exact match — the same preflight,
+ * the same plan the user picked before login, an authenticated session, and a
+ * ready/available snapshot — not by whether the four-stage immersive demo was
+ * re-shown. The demo is a marketing surface; the checkout endpoint itself is
+ * still the authority on the claim, target, and plan before any order is made.
+ */
 export function shouldAutoSubmitEarlybirdAction(input: {
     requested: boolean;
     authenticated: boolean;
@@ -48,8 +55,6 @@ export function shouldAutoSubmitEarlybirdAction(input: {
     requestedPlanId: PlanId | null;
     planId: PlanId | null;
     exclusionDecided: boolean;
-    /** A local OAuth return URL cannot bypass the four-stage precheckout plan gate. */
-    immersiveReleased: boolean;
     planAvailable: boolean;
     submitting: boolean;
     attemptedKey: string | null;
@@ -65,7 +70,6 @@ export function shouldAutoSubmitEarlybirdAction(input: {
         || input.requestedPreflightId !== input.preflightId
         || input.requestedPlanId !== input.planId
         || !input.exclusionDecided
-        || !input.immersiveReleased
         || !input.planAvailable
         || input.submitting
     ) return false;

@@ -23,8 +23,19 @@ describe('/analyze precheckout plan gate', () => {
         expect(page).toContain("preflight?.status === 'pending'");
         expect(page).toContain('preflightId={immersivePreflight.preflightId}');
         expect(page).toContain("activePrecheckoutSurface === 'legacy' && readyPreflight");
-        expect(page).toContain("immersiveReleased: activePrecheckoutSurface === 'legacy'");
         expect(page).toContain('data-precheckout-target-card');
+    });
+
+    it('resumes an authenticated exact-match OAuth checkout continuation without the immersive gate, and hides the demo during hydration', () => {
+        const page = readFileSync(join(process.cwd(), 'app/analyze/page.tsx'), 'utf8');
+
+        expect(page).not.toContain('immersiveReleased');
+        expect(page).toContain(
+            'const autoCheckoutTransitionVisible = Boolean(user)\n        && (autoCheckoutUiPending || queryCheckoutPlan !== null);',
+        );
+        expect(page).toContain("setPrecheckoutSurface({ preflightId, surface: 'legacy' });");
+        expect(page.indexOf("setPrecheckoutSurface({ preflightId, surface: 'legacy' });"))
+            .toBeLessThan(page.indexOf('consumeAutoCheckoutContinuation();\n        autoCheckoutRecoveryRequestedRef'));
     });
 
     it('resets the viewport to the top on the explicit immersive CTA transition instead of scrolling to plans', () => {

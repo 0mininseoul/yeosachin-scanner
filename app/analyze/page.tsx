@@ -198,8 +198,11 @@ const DISCLOSURE_ACCEPTED = true;
     // CTA. A late 409 must not leave this message behind after the user has
     // selected another plan or started a new preflight.
     const visibleError = activeCheckoutStatusCta?.message ?? error;
+    // Must not wait on activePrecheckoutSurface: on the very first hydration
+    // after an OAuth reload the surface is still 'awaiting', and gating on
+    // 'legacy' here is exactly what let the initial form and the four-stage
+    // demo flash before this transition screen could take over.
     const autoCheckoutTransitionVisible = Boolean(user)
-        && activePrecheckoutSurface === 'legacy'
         && (autoCheckoutUiPending || queryCheckoutPlan !== null);
 
     const removeAutoCheckoutQuery = useCallback(() => {
@@ -719,7 +722,6 @@ const DISCLOSURE_ACCEPTED = true;
             requestedPlanId: autoCheckoutPlan,
             planId: effectiveSelectedPlan,
             exclusionDecided,
-            immersiveReleased: activePrecheckoutSurface === 'legacy',
             planAvailable: selectedPlanAvailable,
             submitting: purchaseSubmitting,
             attemptedKey: autoCheckoutAttemptedRef.current,
@@ -730,6 +732,10 @@ const DISCLOSURE_ACCEPTED = true;
             preflightId,
             effectiveSelectedPlan,
         );
+        // Only after every exact check above has passed: release the legacy
+        // surface so a failed submission still lands on the plan/error screen
+        // instead of replaying the four-stage demo.
+        setPrecheckoutSurface({ preflightId, surface: 'legacy' });
         consumeAutoCheckoutContinuation();
         autoCheckoutRecoveryRequestedRef.current = true;
         void handleEarlybirdAction();
@@ -738,7 +744,6 @@ const DISCLOSURE_ACCEPTED = true;
         autoCheckoutPlan,
         autoCheckoutPreflightId,
         autoCheckoutUiPending,
-        activePrecheckoutSurface,
         clearAutoCheckoutContinuation,
         consumeAutoCheckoutContinuation,
         effectiveSelectedPlan,
