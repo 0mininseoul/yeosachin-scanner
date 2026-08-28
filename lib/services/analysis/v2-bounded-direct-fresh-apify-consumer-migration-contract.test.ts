@@ -66,9 +66,18 @@ describe('bounded direct fresh_apify consumer migration', () => {
         );
         expect(ready).toContain('batch.frozen_unresolved_usernames = COALESCE((');
         expect(ready).toContain(
-            "pg_catalog.array_agg(outcome.username ORDER BY outcome.ordinal)"
+            "pg_catalog.array_agg(outcome.username::TEXT ORDER BY outcome.ordinal)"
         );
         expect(ready).toContain("outcome.status <> 'success'");
+        // outcome.username is VARCHAR(30) in production; array_agg over it
+        // yields character varying[], which has no `=` operator against
+        // frozen_unresolved_usernames' TEXT[] (Postgres does not implicitly
+        // cast array element types the way it does bare scalars). The
+        // explicit ::TEXT cast keeps both sides exact TEXT[] without
+        // changing which usernames are compared.
+        expect(ready).not.toMatch(
+            /pg_catalog\.array_agg\(outcome\.username ORDER BY outcome\.ordinal\)/
+        );
         // frozen_unresolved_usernames covers both 'unavailable' and 'failed'
         // rows, but cardinality(frozen_unresolved_usernames) is never bounded
         // -- only the count of 'failed' rows is (see the next test). This
