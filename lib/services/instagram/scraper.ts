@@ -600,13 +600,30 @@ async function runProfileOutcomeAttempt(
     }
 }
 
+// Conflict-family checkpoint errors that do not carry the CHECKPOINT_ prefix (see
+// throwRpcError's knownConflict list in v2-profile-fetch-store.ts).
+const KNOWN_PROFILE_CHECKPOINT_CONFLICT_MESSAGES = new Set([
+    'ANALYSIS_V2_PROFILE_PRIMARY_CONFLICT',
+    'ANALYSIS_V2_PROFILE_FRESH_APIFY_CONFLICT',
+    'ANALYSIS_V2_PROFILE_FALLBACK_CONFLICT',
+    'ANALYSIS_V2_PROFILE_REPAIR_CONFLICT',
+]);
+
+function isKnownProfileCheckpointError(error: unknown): error is Error {
+    return error instanceof Error && (
+        error.message.startsWith('ANALYSIS_V2_PROFILE_CHECKPOINT_')
+        || KNOWN_PROFILE_CHECKPOINT_CONFLICT_MESSAGES.has(error.message)
+    );
+}
+
 async function persistProfileAttempt(
     options: ProfilesBatchV2Options,
     snapshot: ProfilesBatchV2AttemptSnapshot
 ): Promise<void> {
     try {
         await options.persistAttemptOutcomes(snapshot);
-    } catch {
+    } catch (error) {
+        if (isKnownProfileCheckpointError(error)) throw error;
         throw new Error(
             `PROFILE_FETCH_PERSISTENCE_ERROR: ${snapshot.attempt} outcomes were not persisted.`
         );
