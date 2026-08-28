@@ -221,11 +221,13 @@ export function PrecheckoutImmersive({
 
     const completeFallbackAtDeadline = useCallback(() => {
         if (exitRef.current === 'result') return;
-        // Settle at the next graph transition (from visibleEntryAtMs), never mid-sequence: a
-        // reload can make the accepted-preflight deadline land inside the freshly-restarted
-        // initial pass, and that pass must still finish its guaranteed 1->2->3->4 order.
-        requestExit('fallback');
-    }, [requestExit]);
+        // A reload can make the accepted-preflight deadline land inside the freshly-restarted
+        // initial pass; that pass must still finish its guaranteed 1->2->3->4 order, so only then
+        // defer to its boundary. Once the initial pass has already finished, the deadline is the
+        // fallback authority and settles immediately rather than waiting on a waiting-loop stage.
+        const initialPassEndsAtMs = visibleEntryAtMs + PRECHECKOUT_DEMO_DURATION_MS;
+        requestExit('fallback', Date.now() >= initialPassEndsAtMs);
+    }, [requestExit, visibleEntryAtMs]);
 
     useEffect(() => {
         emitPrecheckoutEvent(PRECHECKOUT_EVENTS.DEMO_STARTED, { demo_mode: 'waiting' });
