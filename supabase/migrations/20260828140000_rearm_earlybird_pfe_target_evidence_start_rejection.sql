@@ -16,22 +16,42 @@
 SET LOCAL lock_timeout = '5s';
 SET LOCAL statement_timeout = '2min';
 
+-- The table name itself (52 bytes) pushes Postgres's default
+-- "<table>_<column>_fkey/key/check" auto-naming past the 63-byte NAMEDATALEN
+-- identifier limit for every multi-word column below (e.g. the implicit name
+-- for pfe_original_failed_request_id's FK would be 88 bytes), which Postgres
+-- would silently truncate. Every PK/UNIQUE/FK/CHECK constraint is therefore
+-- given a short, explicit, unique-per-table name instead.
 CREATE TABLE public.earlybird_pfe_target_evidence_start_rejection_rearms (
-    order_id UUID PRIMARY KEY REFERENCES public.earlybird_orders(id)
-        ON DELETE RESTRICT,
-    pfe_original_failed_request_id UUID NOT NULL UNIQUE
-        REFERENCES public.analysis_requests(id) ON DELETE RESTRICT,
-    rejected_successor_request_id UUID NOT NULL UNIQUE
-        REFERENCES public.analysis_requests(id) ON DELETE RESTRICT,
-    rearmed_preflight_id UUID NOT NULL UNIQUE
-        REFERENCES public.analysis_preflights(id) ON DELETE RESTRICT,
-    prior_attempt_count SMALLINT NOT NULL CHECK (
-        prior_attempt_count BETWEEN 0 AND 10
-    ),
+    order_id UUID
+        CONSTRAINT pfe2_rearms_pkey PRIMARY KEY,
+    pfe_original_failed_request_id UUID NOT NULL,
+    rejected_successor_request_id UUID NOT NULL,
+    rearmed_preflight_id UUID NOT NULL,
+    prior_attempt_count SMALLINT NOT NULL,
     expected_manual_review_at TIMESTAMP WITH TIME ZONE NOT NULL,
     created_at TIMESTAMP WITH TIME ZONE NOT NULL
         DEFAULT pg_catalog.clock_timestamp(),
-    CHECK (pfe_original_failed_request_id <> rejected_successor_request_id)
+    CONSTRAINT pfe2_rearms_order_fk FOREIGN KEY (order_id)
+        REFERENCES public.earlybird_orders(id) ON DELETE RESTRICT,
+    CONSTRAINT pfe2_rearms_pfe_failed_req_fk
+        FOREIGN KEY (pfe_original_failed_request_id)
+        REFERENCES public.analysis_requests(id) ON DELETE RESTRICT,
+    CONSTRAINT pfe2_rearms_pfe_failed_req_key
+        UNIQUE (pfe_original_failed_request_id),
+    CONSTRAINT pfe2_rearms_rejected_req_fk
+        FOREIGN KEY (rejected_successor_request_id)
+        REFERENCES public.analysis_requests(id) ON DELETE RESTRICT,
+    CONSTRAINT pfe2_rearms_rejected_req_key
+        UNIQUE (rejected_successor_request_id),
+    CONSTRAINT pfe2_rearms_preflight_fk FOREIGN KEY (rearmed_preflight_id)
+        REFERENCES public.analysis_preflights(id) ON DELETE RESTRICT,
+    CONSTRAINT pfe2_rearms_preflight_key UNIQUE (rearmed_preflight_id),
+    CONSTRAINT pfe2_rearms_prior_attempt_chk CHECK (
+        prior_attempt_count BETWEEN 0 AND 10
+    ),
+    CONSTRAINT pfe2_rearms_distinct_chk
+        CHECK (pfe_original_failed_request_id <> rejected_successor_request_id)
 );
 
 ALTER TABLE public.earlybird_pfe_target_evidence_start_rejection_rearms

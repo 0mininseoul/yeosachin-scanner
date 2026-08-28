@@ -91,6 +91,12 @@ CREATE TABLE public.analysis_requests (
     current_step TEXT,
     error_message TEXT
 );
+-- The exact production constraint from 010_transactional_analysis_start.sql:
+-- without it a trimmed creator stub can silently mint a colliding
+-- idempotency_key that real Postgres would reject.
+CREATE UNIQUE INDEX IF NOT EXISTS idx_analysis_requests_user_idempotency
+    ON public.analysis_requests(user_id, idempotency_key)
+    WHERE idempotency_key IS NOT NULL;
 
 CREATE TABLE public.analysis_preflights (
     id UUID PRIMARY KEY,
@@ -357,7 +363,11 @@ DECLARE
     v_order public.earlybird_orders%ROWTYPE;
     v_preflight public.analysis_preflights%ROWTYPE;
     v_request_id UUID;
+    c_max_request_generations CONSTANT INTEGER := 10;
     v_request_base_key TEXT;
+    v_request_generation_prefix TEXT;
+    v_request_last_generation INTEGER;
+    v_request_generation INTEGER;
     v_request_idempotency_key TEXT;
     v_conflicting_request public.analysis_requests%ROWTYPE;
     v_recovery public.earlybird_schema_failure_recoveries%ROWTYPE;
@@ -486,7 +496,50 @@ BEGIN
             RETURN;
         END IF;
 
-        v_request_idempotency_key := v_request_base_key || '.r1';
+        -- Bounded generation computation copied verbatim from the real
+        -- creator (20260731050000_bound_recovered_earlybird_request_
+        -- generation.sql): the base key counts as generation 0, every
+        -- '.r<n>' sibling contributes its own n, and the new request always
+        -- takes MAX(existing generations) + 1 -- never a fixed '.r1' -- so
+        -- it can never collide with an already-minted generation.
+        v_request_generation_prefix := v_request_base_key || '.r';
+        SELECT pg_catalog.max(
+            CASE
+                WHEN analysis_request.idempotency_key = v_request_base_key THEN 0
+                ELSE (pg_catalog.substr(
+                    analysis_request.idempotency_key,
+                    pg_catalog.char_length(v_request_generation_prefix) + 1
+                ))::INTEGER
+            END
+        ) INTO v_request_last_generation
+        FROM public.analysis_requests AS analysis_request
+        WHERE analysis_request.user_id = v_order.user_id
+          AND (
+              analysis_request.idempotency_key = v_request_base_key
+              OR (
+                  pg_catalog.left(
+                      analysis_request.idempotency_key,
+                      pg_catalog.char_length(v_request_generation_prefix)
+                  ) = v_request_generation_prefix
+                  AND pg_catalog.substr(
+                      analysis_request.idempotency_key,
+                      pg_catalog.char_length(v_request_generation_prefix) + 1
+                  ) ~ '^[0-9]{1,3}$'
+              )
+          );
+        v_request_generation := COALESCE(v_request_last_generation + 1, 1);
+        IF v_request_generation >= c_max_request_generations THEN
+            UPDATE public.earlybird_fulfillments AS fulfillment
+            SET status = 'manual_review',
+                last_error_code = 'REQUEST_IDEMPOTENCY_EXHAUSTED',
+                manual_review_at = v_now, updated_at = v_now
+            WHERE fulfillment.order_id = p_order_id;
+            RETURN QUERY SELECT p_order_id, 'manual_review'::TEXT,
+                NULL::UUID, FALSE, NULL::TEXT;
+            RETURN;
+        END IF;
+        v_request_idempotency_key := v_request_generation_prefix
+            || v_request_generation::TEXT;
     END IF;
 
     v_request_id := extensions.gen_random_uuid();
@@ -711,7 +764,11 @@ async function buildValidFixture(
         seller_reference_confirmed_at: '2026-08-18T00:00:00.000Z',
         payment_id: 'pay_123',
         paid_at: '2026-08-18T00:00:05.000Z',
-        actual_amount_krw: 19900,
+        // The exact zero-coupon incident: a 100%-off coupon settles the
+        // order at actual_amount_krw = 0 against a positive
+        // expected_amount_krw (19900 below), which the migration's
+        // eligibility gate must still accept (0 <= actual <= expected).
+        actual_amount_krw: 0,
         actual_groble_product_id: 'standard-product-01',
         concierge_apify_credential_slot: 'secondary',
         ...overrides.order,
@@ -1313,5 +1370,92 @@ describe('create_or_replay_earlybird_fulfillment_request (post-rearm successor a
             [created.rows[0].request_id]
         );
         expect(preflight.rows[0].idempotency_key).toBe(REARMED_PREFLIGHT_KEY);
+
+        // Request B (the rejected successor) already owns generation
+        // '.r1' on the shared 'earlybird:<order>' base key; the real
+        // creator's bounded generation computation must mint the next
+        // free generation ('.r2'), never re-mint '.r1'.
+        const request = await db.query<{ idempotency_key: string }>(
+            `SELECT idempotency_key FROM public.analysis_requests WHERE id = $1`,
+            [created.rows[0].request_id]
+        );
+        expect(request.rows[0].idempotency_key).toBe(
+            `earlybird:${ORDER_ID.toLowerCase()}.r2`
+        );
+
+        // Proves the production unique index on
+        // analysis_requests(user_id, idempotency_key) never sees a
+        // collision: A ('.'-less base key), B ('.r1'), and the new
+        // successor ('.r2') are all distinct keys for this user.
+        const duplicates = await db.query<{ count: string }>(
+            `SELECT pg_catalog.count(*)::TEXT AS count
+             FROM (
+                 SELECT idempotency_key
+                 FROM public.analysis_requests
+                 WHERE user_id = $1
+                 GROUP BY idempotency_key
+                 HAVING pg_catalog.count(*) > 1
+             ) AS duplicate_key`,
+            [USER_ID]
+        );
+        expect(duplicates.rows[0].count).toBe('0');
+    });
+
+    it('enforces the production unique index on analysis_requests(user_id, idempotency_key), rejecting a duplicate key outright', async () => {
+        const db = await createDb();
+        await buildValidFixture(db);
+
+        // REJECTED_REQUEST_ID already owns 'earlybird:<order>.r1' for
+        // USER_ID; a second row with the exact same (user_id,
+        // idempotency_key) pair must be rejected by the index itself,
+        // independent of any application-level generation logic.
+        await expect(
+            db.query(
+                `INSERT INTO public.analysis_requests(
+                     id, user_id, preflight_id, idempotency_key, target_instagram_id,
+                     pipeline_version, status, current_step
+                 ) VALUES ($1, $2, $3, $4, 'dup_target', 'v2', 'pending', 'pending')`,
+                [
+                    '40000000-0000-4000-8000-000000000099', USER_ID, PFE_PREFLIGHT_ID,
+                    `earlybird:${ORDER_ID.toLowerCase()}.r1`,
+                ]
+            )
+        ).rejects.toThrow(/duplicate key|unique constraint/i);
+    });
+});
+
+describe('earlybird_pfe_target_evidence_start_rejection_rearms (explicit constraint naming)', () => {
+    it('names every PK/UNIQUE/FK/CHECK constraint explicitly, each within the 63-byte Postgres identifier limit', async () => {
+        const db = await createDb();
+
+        const constraints = await db.query<{ conname: string; contype: string }>(
+            `SELECT pg_constraint.conname, pg_constraint.contype
+             FROM pg_catalog.pg_constraint
+             JOIN pg_catalog.pg_class ON pg_class.oid = pg_constraint.conrelid
+             WHERE pg_class.relname = 'earlybird_pfe_target_evidence_start_rejection_rearms'
+             ORDER BY pg_constraint.conname`
+        );
+
+        // p = PRIMARY KEY, u = UNIQUE, f = FOREIGN KEY, c = CHECK.
+        expect(constraints.rows.map(row => row.conname).sort()).toEqual(
+            [
+                'pfe2_rearms_distinct_chk',
+                'pfe2_rearms_order_fk',
+                'pfe2_rearms_pfe_failed_req_fk',
+                'pfe2_rearms_pfe_failed_req_key',
+                'pfe2_rearms_pkey',
+                'pfe2_rearms_preflight_fk',
+                'pfe2_rearms_preflight_key',
+                'pfe2_rearms_prior_attempt_chk',
+                'pfe2_rearms_rejected_req_fk',
+                'pfe2_rearms_rejected_req_key',
+            ].sort()
+        );
+        expect(constraints.rows.map(row => row.contype).sort()).toEqual(
+            ['c', 'c', 'f', 'f', 'f', 'f', 'p', 'u', 'u', 'u'].sort()
+        );
+        for (const row of constraints.rows) {
+            expect(Buffer.byteLength(row.conname, 'utf8')).toBeLessThanOrEqual(63);
+        }
     });
 });
