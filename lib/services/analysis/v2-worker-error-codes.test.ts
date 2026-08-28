@@ -197,4 +197,14 @@ describe('analysis V2 worker error codes', () => {
             retryable: false,
         });
     });
+
+    it('recognizes a fresh-Apify profile checkpoint conflict as a permanent conflict', () => {
+        const code = 'ANALYSIS_V2_PROFILE_FRESH_APIFY_CONFLICT';
+        expect(isAnalysisV2WorkerErrorCode(code)).toBe(true);
+        expect(classifyAnalysisV2JobFailure(new Error(code))).toMatchObject({
+            code,
+            disposition: 'permanent',
+            retryable: false,
+        });
+    });
 });
