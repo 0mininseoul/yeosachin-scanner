@@ -77,8 +77,10 @@ BEGIN
 
     -- User-first lock ordering: learn the owning user without a row lock,
     -- take the same plain user advisory-lock key the checkout/claim paths
-    -- use, then lock order -> fulfillment -> request -> preflight in that
-    -- fixed order so this function can never deadlock against them.
+    -- use, then lock fulfillment -> order -> recovery -> request -> preflight
+    -- in that fixed order -- matching create_or_replay_earlybird_fulfillment_
+    -- request's own fulfillment-then-order-then-preflight prefix -- so this
+    -- function can never deadlock against it.
     SELECT earlybird_order.user_id INTO v_user_id
     FROM public.earlybird_orders AS earlybird_order
     WHERE earlybird_order.id = p_order_id;
@@ -90,6 +92,16 @@ BEGIN
     PERFORM pg_catalog.pg_advisory_xact_lock(
         pg_catalog.hashtextextended(v_user_id::TEXT, 0)
     );
+
+    SELECT fulfillment.* INTO v_fulfillment
+    FROM public.earlybird_fulfillments AS fulfillment
+    WHERE fulfillment.order_id = p_order_id
+    FOR UPDATE;
+    IF NOT FOUND THEN
+        RAISE EXCEPTION USING
+            MESSAGE = 'EARLYBIRD_PROFILE_FETCH_EXHAUSTION_RECOVERY_NOT_FOUND',
+            ERRCODE = 'P0001';
+    END IF;
 
     SELECT earlybird_order.* INTO v_order
     FROM public.earlybird_orders AS earlybird_order
@@ -114,12 +126,7 @@ BEGIN
                 ERRCODE = 'P0001';
         END IF;
 
-        SELECT fulfillment.* INTO v_fulfillment
-        FROM public.earlybird_fulfillments AS fulfillment
-        WHERE fulfillment.order_id = p_order_id
-        FOR UPDATE;
-        IF NOT FOUND
-           OR v_order.preflight_id IS DISTINCT FROM v_existing.recovery_preflight_id
+        IF v_order.preflight_id IS DISTINCT FROM v_existing.recovery_preflight_id
            OR v_order.status <> 'paid'
            OR v_order.result_request_id IS NOT NULL
            OR v_fulfillment.request_id IS NOT NULL
@@ -136,15 +143,6 @@ BEGIN
         RETURN;
     END IF;
 
-    SELECT fulfillment.* INTO v_fulfillment
-    FROM public.earlybird_fulfillments AS fulfillment
-    WHERE fulfillment.order_id = p_order_id
-    FOR UPDATE;
-    IF NOT FOUND THEN
-        RAISE EXCEPTION USING
-            MESSAGE = 'EARLYBIRD_PROFILE_FETCH_EXHAUSTION_RECOVERY_NOT_FOUND',
-            ERRCODE = 'P0001';
-    END IF;
     SELECT analysis_request.* INTO v_request
     FROM public.analysis_requests AS analysis_request
     WHERE analysis_request.id = p_expected_failed_request_id
@@ -309,6 +307,21 @@ BEGIN
             ERRCODE = 'P0001';
     END IF;
 
+    -- The shared, append-only admission ledger below is keyed one row per
+    -- order. An unrelated, earlier recovery (e.g. the original schema-
+    -- failure path) may already hold that row; fail closed with a
+    -- descriptive error instead of surfacing a raw unique-constraint
+    -- violation from the bridge INSERT further down.
+    IF EXISTS (
+        SELECT 1
+        FROM public.earlybird_schema_failure_recoveries AS shared_recovery
+        WHERE shared_recovery.order_id = v_order.id
+    ) THEN
+        RAISE EXCEPTION USING
+            MESSAGE = 'EARLYBIRD_PROFILE_FETCH_EXHAUSTION_RECOVERY_SHARED_LEDGER_CONFLICT',
+            ERRCODE = 'P0001';
+    END IF;
+
     v_new_preflight_id := extensions.gen_random_uuid();
     -- Canonical key so the existing create_or_replay_earlybird_fulfillment_request
     -- request-generation guard recognizes this fresh-admitted lineage exactly
@@ -400,6 +413,111 @@ REVOKE ALL ON FUNCTION public.recover_earlybird_profile_fetch_exhaustion_fulfill
 GRANT EXECUTE ON FUNCTION public.recover_earlybird_profile_fetch_exhaustion_fulfillment(
     UUID, UUID, TIMESTAMP WITH TIME ZONE
 ) TO service_role;
+
+-- The bridge insert above means create_or_replay_earlybird_fulfillment_
+-- request's own request-generation guard already recognizes this lineage's
+-- preserved, terminally-failed request as a conflicting request via the
+-- shared earlybird_schema_failure_recoveries ledger. Its separate
+-- provider-run adoption gate does not yet know this exact lineage is safe
+-- to adopt, though: rename it and re-front it with a narrow, exact helper,
+-- exactly like the existing first15-canary rearm
+-- (earlybird_first15_canary_provider_rearm_request_ready).
+ALTER FUNCTION public.earlybird_provider_run_adoption_ready(
+    UUID, UUID, UUID
+) RENAME TO earlybird_provider_run_adoption_ready_pre_pfe;
+REVOKE ALL ON FUNCTION public.earlybird_provider_run_adoption_ready_pre_pfe(
+    UUID, UUID, UUID
+) FROM PUBLIC, anon, authenticated, service_role;
+
+CREATE FUNCTION public.earlybird_profile_fetch_exhaustion_provider_run_adoption_ready(
+    p_order_id UUID,
+    p_failed_request_id UUID,
+    p_recovery_preflight_id UUID
+)
+RETURNS BOOLEAN
+LANGUAGE sql
+STABLE
+SECURITY DEFINER
+SET search_path = ''
+AS $$
+    -- earlybird_profile_fetch_exhaustion_recoveries is immutable (see the
+    -- mutation-preventing trigger above), so matching it exactly -- order,
+    -- failed request, and recovery preflight all at once -- is sufficient:
+    -- unlike schema-failure recovery's own multi-generation rearms, this
+    -- lineage never produces a second preflight generation to drift to.
+    SELECT EXISTS (
+        SELECT 1
+        FROM public.earlybird_profile_fetch_exhaustion_recoveries AS recovery
+        JOIN public.earlybird_orders AS earlybird_order
+          ON earlybird_order.id = recovery.order_id
+        JOIN public.analysis_preflights AS recovery_preflight
+          ON recovery_preflight.id = recovery.recovery_preflight_id
+        WHERE recovery.order_id = p_order_id
+          AND recovery.failed_request_id = p_failed_request_id
+          AND recovery.recovery_preflight_id = p_recovery_preflight_id
+          AND earlybird_order.preflight_id = recovery.recovery_preflight_id
+          -- Same paid order the recovery admitted: still paid, and not yet
+          -- bound to any result request -- exactly the state the creator's
+          -- own admission checks already guarantee before it ever reaches
+          -- this readiness gate.
+          AND earlybird_order.status = 'paid'
+          AND earlybird_order.result_request_id IS NULL
+          AND recovery_preflight.status = 'ready'
+          AND recovery_preflight.access_mode = 'production'
+          AND recovery_preflight.idempotency_key =
+              'earlybird.schema-recovery.'
+              || pg_catalog.replace(earlybird_order.id::TEXT, '-', '')
+          -- At least one source provider run must exist, and every one of
+          -- them must be fully succeeded and reconciled: the same narrower-
+          -- than-terminal bar the admitting recover_earlybird_profile_fetch_
+          -- exhaustion_fulfillment function itself enforced at admission
+          -- time. A plain NOT EXISTS(bad row) alone would be vacuously true
+          -- for zero runs, so the existence half is required too.
+          AND EXISTS (
+              SELECT 1
+              FROM public.analysis_v2_provider_runs AS source_run
+              WHERE source_run.request_id = recovery.failed_request_id
+          )
+          AND NOT EXISTS (
+              SELECT 1
+              FROM public.analysis_v2_provider_runs AS source_run
+              WHERE source_run.request_id = recovery.failed_request_id
+                AND (
+                    source_run.status IS DISTINCT FROM 'succeeded'
+                    OR source_run.run_id IS NULL
+                    OR source_run.actual_usage_usd IS NULL
+                    OR source_run.usage_reconciled_at IS NULL
+                )
+          )
+    );
+$$;
+
+REVOKE ALL ON FUNCTION public.earlybird_profile_fetch_exhaustion_provider_run_adoption_ready(
+    UUID, UUID, UUID
+) FROM PUBLIC, anon, authenticated, service_role;
+
+CREATE FUNCTION public.earlybird_provider_run_adoption_ready(
+    p_order_id UUID,
+    p_failed_request_id UUID,
+    p_recovery_preflight_id UUID
+)
+RETURNS BOOLEAN
+LANGUAGE sql
+STABLE
+SECURITY DEFINER
+SET search_path = ''
+AS $$
+    SELECT public.earlybird_provider_run_adoption_ready_pre_pfe(
+        p_order_id, p_failed_request_id, p_recovery_preflight_id
+    )
+    OR public.earlybird_profile_fetch_exhaustion_provider_run_adoption_ready(
+        p_order_id, p_failed_request_id, p_recovery_preflight_id
+    );
+$$;
+
+REVOKE ALL ON FUNCTION public.earlybird_provider_run_adoption_ready(
+    UUID, UUID, UUID
+) FROM PUBLIC, anon, authenticated, service_role;
 
 -- The task contract for this recovery forbids reusing any pre-exhaustion
 -- provider Dataset: the fresh successor request minted above must never

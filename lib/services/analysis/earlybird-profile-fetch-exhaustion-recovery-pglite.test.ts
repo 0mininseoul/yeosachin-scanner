@@ -78,6 +78,7 @@ CREATE TABLE public.analysis_requests (
     id UUID PRIMARY KEY,
     user_id UUID NOT NULL REFERENCES public.users(id),
     preflight_id UUID,
+    idempotency_key TEXT,
     target_instagram_id TEXT,
     pipeline_version TEXT NOT NULL,
     status TEXT NOT NULL,
@@ -272,6 +273,156 @@ CREATE TRIGGER prevent_earlybird_schema_failure_recovery_mutation
 BEFORE UPDATE OR DELETE ON public.earlybird_schema_failure_recoveries
 FOR EACH ROW
 EXECUTE FUNCTION public.prevent_earlybird_schema_failure_recovery_mutation();
+
+-- The pre-existing production stub from 20260731050000_bound_recovered_
+-- earlybird_request_generation.sql: always-false until a later incident
+-- teaches it a narrow, exact readiness rule. The target migration renames
+-- this one and re-fronts it too, exactly like the resolver stub below.
+CREATE FUNCTION public.earlybird_provider_run_adoption_ready(
+    p_order_id UUID,
+    p_failed_request_id UUID,
+    p_recovery_preflight_id UUID
+)
+RETURNS BOOLEAN LANGUAGE sql STABLE SECURITY DEFINER SET search_path = '' AS $$
+    SELECT FALSE;
+$$;
+REVOKE ALL ON FUNCTION public.earlybird_provider_run_adoption_ready(
+    UUID, UUID, UUID
+) FROM PUBLIC, anon, authenticated, service_role;
+
+-- A faithful-minimal stand-in for the real create_or_replay_earlybird_
+-- fulfillment_request RPC (20260731050000_bound_recovered_earlybird_
+-- request_generation.sql): just enough of its request-generation guard --
+-- idempotency-key conflict detection against the preserved, terminally
+-- failed request, the shared schema-failure-recovery lineage lookup, and
+-- the provider-run adoption gate -- to prove the target migration's fix
+-- threads a profile-fetch-exhaustion lineage through it correctly.
+CREATE FUNCTION public.create_or_replay_earlybird_fulfillment_request(
+    p_order_id UUID,
+    p_lease_token UUID,
+    p_lease_fence BIGINT
+)
+RETURNS TABLE(
+    order_id UUID,
+    fulfillment_status TEXT,
+    request_id UUID,
+    created BOOLEAN,
+    initial_job_key TEXT
+)
+LANGUAGE plpgsql SECURITY DEFINER SET search_path = '' AS $$
+DECLARE
+    v_now TIMESTAMP WITH TIME ZONE := pg_catalog.clock_timestamp();
+    v_initial_job_key CONSTANT TEXT := 'coordinator:bootstrap';
+    v_fulfillment public.earlybird_fulfillments%ROWTYPE;
+    v_order public.earlybird_orders%ROWTYPE;
+    v_preflight public.analysis_preflights%ROWTYPE;
+    v_request_id UUID;
+    v_request_base_key TEXT;
+    v_request_idempotency_key TEXT;
+    v_conflicting_request public.analysis_requests%ROWTYPE;
+    v_recovery public.earlybird_schema_failure_recoveries%ROWTYPE;
+BEGIN
+    IF p_order_id IS NULL OR p_lease_token IS NULL OR p_lease_fence IS NULL
+       OR p_lease_fence < 1 THEN
+        RAISE EXCEPTION USING
+            MESSAGE = 'EARLYBIRD_FULFILLMENT_INVALID', ERRCODE = 'P0001';
+    END IF;
+
+    SELECT fulfillment.* INTO v_fulfillment
+    FROM public.earlybird_fulfillments AS fulfillment
+    WHERE fulfillment.order_id = p_order_id
+    FOR UPDATE;
+    IF NOT FOUND THEN
+        RAISE EXCEPTION USING
+            MESSAGE = 'EARLYBIRD_FULFILLMENT_NOT_FOUND', ERRCODE = 'P0001';
+    END IF;
+    SELECT earlybird_order.* INTO v_order
+    FROM public.earlybird_orders AS earlybird_order
+    WHERE earlybird_order.id = p_order_id
+    FOR UPDATE;
+    SELECT preflight.* INTO v_preflight
+    FROM public.analysis_preflights AS preflight
+    WHERE preflight.id = v_order.preflight_id
+    FOR UPDATE;
+
+    v_request_base_key := 'earlybird:' || pg_catalog.lower(v_order.id::TEXT);
+    v_request_idempotency_key := v_request_base_key;
+
+    SELECT analysis_request.* INTO v_conflicting_request
+    FROM public.analysis_requests AS analysis_request
+    WHERE analysis_request.user_id = v_order.user_id
+      AND analysis_request.idempotency_key = v_request_base_key
+    FOR UPDATE;
+    IF FOUND THEN
+        SELECT recovery.* INTO v_recovery
+        FROM public.earlybird_schema_failure_recoveries AS recovery
+        WHERE recovery.order_id = v_order.id
+          AND recovery.failed_request_id = v_conflicting_request.id
+        FOR UPDATE;
+        IF v_recovery.order_id IS NULL
+           OR v_preflight.id IS DISTINCT FROM v_recovery.recovery_preflight_id THEN
+            UPDATE public.earlybird_fulfillments AS fulfillment
+            SET status = 'manual_review', last_error_code = 'REQUEST_CONFLICT',
+                manual_review_at = v_now, updated_at = v_now
+            WHERE fulfillment.order_id = p_order_id;
+            RETURN QUERY SELECT p_order_id, 'manual_review'::TEXT,
+                NULL::UUID, FALSE, NULL::TEXT;
+            RETURN;
+        END IF;
+
+        IF EXISTS (
+            SELECT 1 FROM public.analysis_v2_provider_runs AS provider_run
+            WHERE provider_run.request_id = v_conflicting_request.id
+        ) AND NOT public.earlybird_provider_run_adoption_ready(
+            v_order.id, v_conflicting_request.id, v_preflight.id
+        ) THEN
+            UPDATE public.earlybird_fulfillments AS fulfillment
+            SET status = 'manual_review',
+                last_error_code = 'PROVIDER_RUN_ADOPTION_REQUIRED',
+                manual_review_at = v_now, updated_at = v_now
+            WHERE fulfillment.order_id = p_order_id;
+            RETURN QUERY SELECT p_order_id, 'manual_review'::TEXT,
+                NULL::UUID, FALSE, NULL::TEXT;
+            RETURN;
+        END IF;
+
+        v_request_idempotency_key := v_request_base_key || '.r1';
+    END IF;
+
+    v_request_id := extensions.gen_random_uuid();
+    INSERT INTO public.analysis_requests(
+        id, user_id, preflight_id, target_instagram_id, pipeline_version,
+        status, current_step, idempotency_key
+    ) VALUES (
+        v_request_id, v_order.user_id, v_preflight.id, v_order.target_instagram_id,
+        'v2', 'pending', 'pending', v_request_idempotency_key
+    );
+    UPDATE public.analysis_preflights AS preflight
+    SET status = 'consumed', consumed_request_id = v_request_id
+    WHERE preflight.id = v_preflight.id;
+    INSERT INTO public.analysis_pipeline_jobs(
+        request_id, job_key, track, status
+    ) VALUES (
+        v_request_id, v_initial_job_key, 'coordinator', 'pending'
+    );
+    UPDATE public.earlybird_orders AS earlybird_order
+    SET status = 'analysis_in_progress', result_request_id = v_request_id,
+        updated_at = v_now
+    WHERE earlybird_order.id = p_order_id;
+    UPDATE public.earlybird_fulfillments AS fulfillment
+    SET status = 'analysis_in_progress', request_id = v_request_id,
+        updated_at = v_now
+    WHERE fulfillment.order_id = p_order_id;
+    RETURN QUERY SELECT p_order_id, 'analysis_in_progress'::TEXT,
+        v_request_id, TRUE, v_initial_job_key;
+END;
+$$;
+REVOKE ALL ON FUNCTION public.create_or_replay_earlybird_fulfillment_request(
+    UUID, UUID, BIGINT
+) FROM PUBLIC, anon, authenticated, service_role;
+GRANT EXECUTE ON FUNCTION public.create_or_replay_earlybird_fulfillment_request(
+    UUID, UUID, BIGINT
+) TO service_role;
 
 -- The pre-existing production RPC the target migration renames and re-fronts
 -- (see 20260815170000_rearm_first15_canary_provider_failures.sql). The stub
@@ -900,6 +1051,45 @@ describe('recover_earlybird_profile_fetch_exhaustion_fulfillment', () => {
         );
     });
 
+    it('rejects when the order status is not analysis_in_progress', async () => {
+        const db = await createDb();
+        await buildValidFixture(db, { order: { status: 'paid' } });
+        await expect(recover(db)).rejects.toThrow(
+            'EARLYBIRD_PROFILE_FETCH_EXHAUSTION_RECOVERY_INELIGIBLE'
+        );
+    });
+
+    it('fails closed with a descriptive error when the shared schema-recovery ledger already holds a row for this order', async () => {
+        const db = await createDb();
+        await buildValidFixture(db);
+
+        // An unrelated recovery lineage (a different failed request and
+        // preflight) already occupies this order's row in the shared,
+        // append-only ledger the target migration's own bridge insert must
+        // also write to.
+        await db.query(
+            `INSERT INTO public.analysis_requests(id, user_id, pipeline_version, status)
+             VALUES ($1, $2, 'v2', 'failed')`,
+            [OTHER_REQUEST_ID, USER_ID]
+        );
+        await db.query(
+            `INSERT INTO public.analysis_preflights(
+                 id, user_id, idempotency_key, status, access_mode
+             ) VALUES ($1, $2, 'unrelated-shared-recovery-preflight-key', 'consumed', 'production')`,
+            [OTHER_PREFLIGHT_ID, USER_ID]
+        );
+        await db.query(
+            `INSERT INTO public.earlybird_schema_failure_recoveries(
+                 order_id, failed_request_id, recovery_preflight_id, prior_attempt_count
+             ) VALUES ($1, $2, $3, 0)`,
+            [ORDER_ID, OTHER_REQUEST_ID, OTHER_PREFLIGHT_ID]
+        );
+
+        await expect(recover(db)).rejects.toThrow(
+            'EARLYBIRD_PROFILE_FETCH_EXHAUSTION_RECOVERY_SHARED_LEDGER_CONFLICT'
+        );
+    });
+
     it('restrictive ACL: only service_role may execute, and no other role can read or write the audit table', async () => {
         const db = await createDb();
         await buildValidFixture(db);
@@ -1091,5 +1281,211 @@ describe('resolve_analysis_v2_recovery_provider_run (post-recovery successor res
                 'op', 'a'.repeat(64), 'apify', 'actor', 'secondary', 10,
             ]
         )).rejects.toThrow(/permission denied/i);
+    });
+});
+
+describe('earlybird_provider_run_adoption_ready (profile-fetch-exhaustion lineage readiness helper)', () => {
+    async function recoveredPreflightId(db: PGlite): Promise<string> {
+        const { rows } = await db.query<{ preflight_id: string }>(
+            `SELECT preflight_id FROM public.earlybird_orders WHERE id = $1`,
+            [ORDER_ID]
+        );
+        return rows[0].preflight_id;
+    }
+
+    // Called directly as the connection's owning role (not via asRole/SET
+    // ROLE): the function's REVOKE ALL ... FROM PUBLIC, anon, authenticated,
+    // service_role matches its real production ACL, where it is only ever
+    // reached internally, from another SECURITY DEFINER function executing
+    // as its owner -- never called directly by an exposed role. The
+    // restrictive-ACL test below proves service_role itself has no EXECUTE.
+    function readinessReady(db: PGlite, preflightId: string) {
+        return db.query<{ ready: boolean }>(
+            `SELECT public.earlybird_provider_run_adoption_ready($1, $2, $3) AS ready`,
+            [ORDER_ID, FAILED_REQUEST_ID, preflightId]
+        );
+    }
+
+    it('is ready once the recovered lineage matches the order/failed-request/preflight triple exactly', async () => {
+        const db = await createDb();
+        await buildValidFixture(db);
+        await recover(db);
+        const preflightId = await recoveredPreflightId(db);
+
+        await expect(readinessReady(db, preflightId)).resolves.toMatchObject({
+            rows: [{ ready: true }],
+        });
+    });
+
+    it('is not ready once every source provider run has been removed', async () => {
+        const db = await createDb();
+        await buildValidFixture(db);
+        await recover(db);
+        const preflightId = await recoveredPreflightId(db);
+
+        await db.query(
+            `DELETE FROM public.analysis_v2_provider_runs WHERE request_id = $1`,
+            [FAILED_REQUEST_ID]
+        );
+
+        await expect(readinessReady(db, preflightId)).resolves.toMatchObject({
+            rows: [{ ready: false }],
+        });
+    });
+
+    it('is not ready once the order has moved off the paid state the recovery admitted it into', async () => {
+        const db = await createDb();
+        await buildValidFixture(db);
+        await recover(db);
+        const preflightId = await recoveredPreflightId(db);
+
+        await db.query(
+            `UPDATE public.earlybird_orders SET status = 'analysis_in_progress' WHERE id = $1`,
+            [ORDER_ID]
+        );
+
+        await expect(readinessReady(db, preflightId)).resolves.toMatchObject({
+            rows: [{ ready: false }],
+        });
+    });
+
+    it('is not ready once the order already has a result request bound', async () => {
+        const db = await createDb();
+        await buildValidFixture(db);
+        await recover(db);
+        const preflightId = await recoveredPreflightId(db);
+
+        await db.query(
+            `UPDATE public.earlybird_orders SET result_request_id = $2 WHERE id = $1`,
+            [ORDER_ID, FAILED_REQUEST_ID]
+        );
+
+        await expect(readinessReady(db, preflightId)).resolves.toMatchObject({
+            rows: [{ ready: false }],
+        });
+    });
+
+    it('restrictive ACL: no exposed role may execute either readiness helper directly', async () => {
+        const db = await createDb();
+        await buildValidFixture(db);
+        await recover(db);
+
+        await expect(db.query<{
+            top_service_execute: boolean;
+            top_authenticated_execute: boolean;
+            top_anon_execute: boolean;
+            pfe_service_execute: boolean;
+            pre_pfe_service_execute: boolean;
+        }>(`SELECT
+            has_function_privilege(
+                'service_role',
+                'public.earlybird_provider_run_adoption_ready(uuid,uuid,uuid)',
+                'EXECUTE'
+            ) AS top_service_execute,
+            has_function_privilege(
+                'authenticated',
+                'public.earlybird_provider_run_adoption_ready(uuid,uuid,uuid)',
+                'EXECUTE'
+            ) AS top_authenticated_execute,
+            has_function_privilege(
+                'anon',
+                'public.earlybird_provider_run_adoption_ready(uuid,uuid,uuid)',
+                'EXECUTE'
+            ) AS top_anon_execute,
+            has_function_privilege(
+                'service_role',
+                'public.earlybird_profile_fetch_exhaustion_provider_run_adoption_ready(uuid,uuid,uuid)',
+                'EXECUTE'
+            ) AS pfe_service_execute,
+            has_function_privilege(
+                'service_role',
+                'public.earlybird_provider_run_adoption_ready_pre_pfe(uuid,uuid,uuid)',
+                'EXECUTE'
+            ) AS pre_pfe_service_execute
+        `)).resolves.toMatchObject({
+            rows: [{
+                top_service_execute: false,
+                top_authenticated_execute: false,
+                top_anon_execute: false,
+                pfe_service_execute: false,
+                pre_pfe_service_execute: false,
+            }],
+        });
+
+        const preflightId = await recoveredPreflightId(db);
+        await expect(asRole(
+            db, 'service_role',
+            `SELECT public.earlybird_provider_run_adoption_ready($1, $2, $3)`,
+            [ORDER_ID, FAILED_REQUEST_ID, preflightId]
+        )).rejects.toThrow(/permission denied/i);
+    });
+});
+
+describe('create_or_replay_earlybird_fulfillment_request (post-recovery successor admission gate)', () => {
+    type AdmissionRow = {
+        order_id: string;
+        fulfillment_status: string;
+        request_id: string | null;
+        created: boolean;
+        initial_job_key: string | null;
+    };
+
+    function admitSuccessor(db: PGlite) {
+        return asRole<AdmissionRow>(
+            db, 'service_role',
+            `SELECT * FROM public.create_or_replay_earlybird_fulfillment_request($1, $2, $3)`,
+            [ORDER_ID, CLAIM_TOKEN, 1]
+        );
+    }
+
+    it('admits exactly one distinct successor request once the profile-fetch-exhaustion lineage is provider-run adoption ready', async () => {
+        const db = await createDb();
+        await buildValidFixture(db);
+        await recover(db);
+
+        // The preserved, terminally-failed request still owns the order's
+        // base idempotency key -- exactly as create_or_replay_earlybird_
+        // fulfillment_request's own request-generation guard expects, and
+        // exactly what makes it a "conflicting request" this incident's
+        // fresh successor must be threaded past rather than blocked by.
+        await db.query(
+            `UPDATE public.analysis_requests SET idempotency_key = $2 WHERE id = $1`,
+            [FAILED_REQUEST_ID, `earlybird:${ORDER_ID.toLowerCase()}`]
+        );
+
+        const result = await admitSuccessor(db);
+        expect(result.rows).toHaveLength(1);
+        const row = result.rows[0];
+        expect(row.fulfillment_status).toBe('analysis_in_progress');
+        expect(row.created).toBe(true);
+        expect(row.request_id).not.toBeNull();
+        expect(row.request_id).not.toBe(FAILED_REQUEST_ID);
+
+        await expect(db.query<{ count: number }>(
+            `SELECT count(*)::INTEGER AS count FROM public.analysis_requests
+             WHERE id <> $1`,
+            [FAILED_REQUEST_ID]
+        )).resolves.toMatchObject({ rows: [{ count: 1 }] });
+
+        await expect(db.query(
+            `SELECT job_key, track, status FROM public.analysis_pipeline_jobs
+             WHERE request_id = $1`,
+            [row.request_id]
+        )).resolves.toMatchObject({
+            rows: [{ job_key: 'coordinator:bootstrap', track: 'coordinator', status: 'pending' }],
+        });
+
+        await expect(db.query(
+            `SELECT status, result_request_id FROM public.earlybird_orders WHERE id = $1`,
+            [ORDER_ID]
+        )).resolves.toMatchObject({
+            rows: [{ status: 'analysis_in_progress', result_request_id: row.request_id }],
+        });
+        await expect(db.query(
+            `SELECT status, request_id FROM public.earlybird_fulfillments WHERE order_id = $1`,
+            [ORDER_ID]
+        )).resolves.toMatchObject({
+            rows: [{ status: 'analysis_in_progress', request_id: row.request_id }],
+        });
     });
 });
