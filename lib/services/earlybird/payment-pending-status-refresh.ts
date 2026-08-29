@@ -2,8 +2,10 @@ import type { EarlybirdOrderStatusDto } from './order-status';
 
 const PAYMENT_PENDING_REFRESH_DELAYS_MS = [1_000, 2_000, 4_000] as const;
 const AUTOMATIC_REFRESH_DELAYS_MS = [1_000, 2_000, 4_000, 8_000, 15_000, 30_000, 60_000] as const;
+const AUTOMATIC_TAIL_INTERVAL_MS = 60_000;
+const AUTOMATIC_TAIL_MAX_REFRESHES = 30;
 
-export type EarlybirdStatusRefreshMode = 'payment_pending' | 'automatic' | 'support';
+export type EarlybirdStatusRefreshMode = 'payment_pending' | 'automatic';
 
 type StatusRefreshOrder = Pick<
     EarlybirdOrderStatusDto,
@@ -56,7 +58,7 @@ export function earlybirdStatusRefreshMode(
         order.systemStatus !== 'paid'
         && order.systemStatus !== 'analysis_in_progress'
     ) return null;
-    if (order.requiresSupport) return 'support';
+    if (order.requiresSupport) return null;
     if (order.deliveryMode !== 'automatic') return null;
     return earlybirdStatusNavigationTarget(order) ? null : 'automatic';
 }
@@ -70,11 +72,13 @@ export function shouldAutomaticallyRedirectEarlybirdStatus(
 /**
  * Re-reads the dynamic server order snapshot for the short interval in which
  * Groble can confirm payment and automatic fulfillment can materialize a request.
- * Automatic fulfillment gets a bounded roughly 60-second low-load window;
- * payment confirmation and support recovery retain the shorter canary window.
+ * Automatic fulfillment keeps a bounded low-frequency tail after the burst so
+ * a delayed request materialization can still recover without an unbounded
+ * stream of browser requests. Payment confirmation retains the short canary
+ * window; support and all other terminal states do not poll.
  */
 export function scheduleEarlybirdStatusSnapshotRefresh(
-    refresh: () => void,
+    refresh: () => void | PromiseLike<void>,
     mode: EarlybirdStatusRefreshMode = 'payment_pending'
 ): () => void {
     let cancelled = false;
@@ -82,13 +86,90 @@ export function scheduleEarlybirdStatusSnapshotRefresh(
     const delays = mode === 'automatic'
         ? AUTOMATIC_REFRESH_DELAYS_MS
         : PAYMENT_PENDING_REFRESH_DELAYS_MS;
+    let lifecycleRefreshPending = false;
+    let refreshInFlight: Promise<void> | null = null;
+
+    const clearLifecycleRefreshPending = () => {
+        lifecycleRefreshPending = false;
+    };
+
+    const triggerRefresh = (source: 'scheduled' | 'lifecycle') => {
+        if (cancelled || refreshInFlight) return;
+        if (lifecycleRefreshPending) return;
+        if (source === 'lifecycle') lifecycleRefreshPending = true;
+
+        let result: void | PromiseLike<void>;
+        try {
+            result = refresh();
+        } catch {
+            if (source === 'lifecycle') queueMicrotask(clearLifecycleRefreshPending);
+            return;
+        }
+
+        if (result && typeof result.then === 'function') {
+            const pending = Promise.resolve(result);
+            refreshInFlight = pending;
+            void pending.then(
+                () => {
+                    if (refreshInFlight === pending) refreshInFlight = null;
+                    if (source === 'lifecycle') clearLifecycleRefreshPending();
+                },
+                () => {
+                    if (refreshInFlight === pending) refreshInFlight = null;
+                    if (source === 'lifecycle') clearLifecycleRefreshPending();
+                },
+            );
+        } else if (source === 'lifecycle') {
+            queueMicrotask(clearLifecycleRefreshPending);
+        }
+    };
+
+    const scheduleTail = (delayMs: number, remaining: number) => {
+        if (cancelled || remaining <= 0) return;
+        const timer = setTimeout(() => {
+            timers.delete(timer);
+            if (cancelled) return;
+            triggerRefresh('scheduled');
+            scheduleTail(AUTOMATIC_TAIL_INTERVAL_MS, remaining - 1);
+        }, delayMs);
+        timers.add(timer);
+    };
 
     for (const delayMs of delays) {
         const timer = setTimeout(() => {
             timers.delete(timer);
-            if (!cancelled) refresh();
+            if (!cancelled) triggerRefresh('scheduled');
         }, delayMs);
         timers.add(timer);
+    }
+
+    if (mode === 'automatic') {
+        scheduleTail(
+            AUTOMATIC_REFRESH_DELAYS_MS[AUTOMATIC_REFRESH_DELAYS_MS.length - 1]
+                + AUTOMATIC_TAIL_INTERVAL_MS,
+            AUTOMATIC_TAIL_MAX_REFRESHES,
+        );
+    }
+
+    if (typeof window !== 'undefined' && typeof document !== 'undefined') {
+        const handleVisibilityChange = () => {
+            if (document.visibilityState === 'visible') triggerRefresh('lifecycle');
+        };
+        const handleFocus = () => triggerRefresh('lifecycle');
+        const handlePageShow = () => triggerRefresh('lifecycle');
+
+        document.addEventListener('visibilitychange', handleVisibilityChange);
+        window.addEventListener('focus', handleFocus);
+        window.addEventListener('pageshow', handlePageShow);
+
+        return () => {
+            cancelled = true;
+            for (const timer of timers) clearTimeout(timer);
+            timers.clear();
+            document.removeEventListener('visibilitychange', handleVisibilityChange);
+            window.removeEventListener('focus', handleFocus);
+            window.removeEventListener('pageshow', handlePageShow);
+        };
     }
 
     return () => {

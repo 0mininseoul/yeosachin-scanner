@@ -1,21 +1,32 @@
-import { createElement } from 'react';
+// @vitest-environment jsdom
+
+import { act, createElement } from 'react';
+import { createRoot, type Root } from 'react-dom/client';
 import { renderToStaticMarkup } from 'react-dom/server';
-import { describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { EarlybirdOrderStatusDto } from './order-status';
 
-vi.mock('next/navigation', () => ({
-    useRouter: () => ({ push: vi.fn(), replace: vi.fn(), refresh: vi.fn() }),
+const routerMock = vi.hoisted(() => ({
+    push: vi.fn(),
+    replace: vi.fn(),
+    refresh: vi.fn(),
 }));
-vi.mock('@/hooks/useAuth', () => ({
-    useAuth: () => ({ user: { id: '123e4567-e89b-42d3-a456-426614174000' }, loading: false }),
-}));
-vi.mock('@/lib/services/analytics', () => ({
+const analyticsMocks = vi.hoisted(() => ({
     EVENTS: {
         EARLYBIRD_STATUS_VIEWED: 'earlybird_status_viewed',
         PAYMENT_CONFIRMED_VIEWED: 'payment_confirmed_viewed',
     },
+    flushAnalytics: vi.fn().mockResolvedValue(undefined),
     trackEvent: vi.fn(),
 }));
+
+vi.mock('next/navigation', () => ({
+    useRouter: () => routerMock,
+}));
+vi.mock('@/hooks/useAuth', () => ({
+    useAuth: () => ({ user: { id: '123e4567-e89b-42d3-a456-426614174000' }, loading: false }),
+}));
+vi.mock('@/lib/services/analytics', () => analyticsMocks);
 vi.mock('@/lib/services/analytics-funnel', () => ({
     availableAnalyticsStorage: () => undefined,
     tryClaimAnalyticsEvent: () => false,
@@ -174,5 +185,156 @@ describe('earlybird paid delivery notice', () => {
         expect(markup).toContain('결제가 완료되었어요');
         expect(markup).toContain('판독 결과가 완성되면 2일 이내에 가입하신 이메일로 결과 링크를 보내드릴게요.');
         expect(markup).not.toContain('결제 확인 후 판독이 자동으로 시작됩니다');
+    });
+});
+
+(globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT: boolean })
+    .IS_REACT_ACT_ENVIRONMENT = true;
+
+describe('earlybird mounted payment return recovery', () => {
+    let container: HTMLDivElement;
+    let root: Root;
+
+    beforeEach(() => {
+        vi.useFakeTimers();
+        routerMock.push.mockReset();
+        routerMock.replace.mockReset();
+        routerMock.refresh.mockReset();
+        analyticsMocks.flushAnalytics.mockReset();
+        analyticsMocks.flushAnalytics.mockResolvedValue(undefined);
+        analyticsMocks.trackEvent.mockReset();
+        container = document.createElement('div');
+        document.body.appendChild(container);
+        root = createRoot(container);
+    });
+
+    afterEach(() => {
+        act(() => root.unmount());
+        container.remove();
+        vi.useRealTimers();
+    });
+
+    function render(order: EarlybirdOrderStatusDto) {
+        act(() => {
+            root.render(createElement(EarlybirdStatus, { order }));
+        });
+    }
+
+    function automaticPendingOrder(
+        overrides: Partial<EarlybirdOrderStatusDto> = {},
+    ): EarlybirdOrderStatusDto {
+        return {
+            ...cancelledOrder(),
+            systemStatus: 'analysis_in_progress',
+            displayStatus: '판독 중',
+            deliveryMode: 'automatic',
+            ...overrides,
+        };
+    }
+
+    it('keeps polling after the fast burst so a late request materialization resumes automatically', () => {
+        render(automaticPendingOrder());
+
+        act(() => {
+            vi.advanceTimersByTime(60_000);
+        });
+        expect(routerMock.refresh).toHaveBeenCalledTimes(7);
+
+        act(() => {
+            vi.advanceTimersByTime(60_000);
+        });
+        expect(routerMock.refresh).toHaveBeenCalledTimes(8);
+    });
+
+    it('refreshes once when the browser returns from the background', async () => {
+        render(automaticPendingOrder());
+
+        Object.defineProperty(document, 'visibilityState', {
+            configurable: true,
+            value: 'visible',
+        });
+        act(() => {
+            document.dispatchEvent(new Event('visibilitychange'));
+            window.dispatchEvent(new Event('focus'));
+            window.dispatchEvent(new Event('pageshow'));
+        });
+        expect(routerMock.refresh).toHaveBeenCalledTimes(1);
+
+        await act(async () => {
+            await Promise.resolve();
+        });
+        act(() => window.dispatchEvent(new Event('focus')));
+        expect(routerMock.refresh).toHaveBeenCalledTimes(2);
+    });
+
+    it('stops polling and navigates once when the progress path materializes', async () => {
+        const requestId = '123e4567-e89b-42d3-a456-426614174000';
+        const pendingOrder = automaticPendingOrder();
+        render(pendingOrder);
+
+        act(() => {
+            vi.advanceTimersByTime(120_000);
+        });
+        expect(routerMock.refresh).toHaveBeenCalledTimes(8);
+
+        render({
+            ...pendingOrder,
+            progressUrl: `/progress/${requestId}`,
+        });
+        await act(async () => {
+            await Promise.resolve();
+        });
+        expect(routerMock.replace).toHaveBeenCalledTimes(1);
+        expect(routerMock.replace).toHaveBeenCalledWith(`/progress/${requestId}`);
+
+        act(() => {
+            vi.advanceTimersByTime(600_000);
+            document.dispatchEvent(new Event('visibilitychange'));
+            window.dispatchEvent(new Event('focus'));
+            window.dispatchEvent(new Event('pageshow'));
+        });
+        expect(routerMock.refresh).toHaveBeenCalledTimes(8);
+
+        render({
+            ...pendingOrder,
+            progressUrl: `/progress/${requestId}`,
+        });
+        await act(async () => {
+            await Promise.resolve();
+        });
+        expect(routerMock.replace).toHaveBeenCalledTimes(1);
+    });
+
+    it('removes polling and lifecycle listeners when support or another no-refresh state arrives', () => {
+        render(automaticPendingOrder());
+        act(() => vi.advanceTimersByTime(1_000));
+        expect(routerMock.refresh).toHaveBeenCalledTimes(1);
+
+        render({
+            ...automaticPendingOrder(),
+            requiresSupport: true,
+            deliveryMode: 'support',
+        });
+        act(() => {
+            vi.advanceTimersByTime(600_000);
+            document.dispatchEvent(new Event('visibilitychange'));
+            window.dispatchEvent(new Event('focus'));
+            window.dispatchEvent(new Event('pageshow'));
+        });
+        expect(routerMock.refresh).toHaveBeenCalledTimes(1);
+
+        render(automaticPendingOrder());
+        act(() => vi.advanceTimersByTime(1_000));
+        expect(routerMock.refresh).toHaveBeenCalledTimes(2);
+
+        render({
+            ...automaticPendingOrder(),
+            deliveryMode: 'concierge',
+        });
+        act(() => {
+            vi.advanceTimersByTime(600_000);
+            window.dispatchEvent(new Event('focus'));
+        });
+        expect(routerMock.refresh).toHaveBeenCalledTimes(2);
     });
 });

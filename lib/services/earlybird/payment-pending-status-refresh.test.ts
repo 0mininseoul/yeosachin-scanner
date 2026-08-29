@@ -69,7 +69,7 @@ describe('earlybird payment-pending status refresh', () => {
             deliveryMode: 'support',
             progressUrl: null,
             resultUrl: null,
-        })).toBe(true);
+        })).toBe(false);
         expect(shouldRefreshEarlybirdStatusSnapshot({
             systemStatus: 'analysis_in_progress',
             requiresSupport: false,
@@ -86,7 +86,7 @@ describe('earlybird payment-pending status refresh', () => {
         })).toBe(false);
     });
 
-    it('keeps manual-review support on the page after its bounded refreshes', () => {
+    it('keeps manual-review support on the page without polling', () => {
         const manualReview = {
             systemStatus: 'analysis_in_progress' as const,
             requiresSupport: true,
@@ -95,7 +95,8 @@ describe('earlybird payment-pending status refresh', () => {
             resultUrl: null,
         };
 
-        expect(shouldRefreshEarlybirdStatusSnapshot(manualReview)).toBe(true);
+        expect(shouldRefreshEarlybirdStatusSnapshot(manualReview)).toBe(false);
+        expect(earlybirdStatusRefreshMode(manualReview)).toBe(null);
         expect(shouldAutomaticallyRedirectEarlybirdStatus(manualReview)).toBe(false);
     });
 
@@ -218,6 +219,26 @@ describe('earlybird payment-pending status refresh', () => {
         vi.advanceTimersByTime(30_000);
         expect(refresh).toHaveBeenCalledTimes(7);
         vi.runAllTimers();
+        expect(refresh).toHaveBeenCalledTimes(37);
+    });
+
+    it('continues automatic fulfillment with a bounded low-frequency tail', () => {
+        vi.useFakeTimers();
+        const refresh = vi.fn();
+
+        scheduleEarlybirdStatusSnapshotRefresh(refresh, 'automatic');
+
+        vi.advanceTimersByTime(60_000);
         expect(refresh).toHaveBeenCalledTimes(7);
+        vi.advanceTimersByTime(59_999);
+        expect(refresh).toHaveBeenCalledTimes(7);
+        vi.advanceTimersByTime(1);
+        expect(refresh).toHaveBeenCalledTimes(8);
+
+        vi.runAllTimers();
+        expect(refresh.mock.calls.length).toBeGreaterThan(8);
+        const tailCalls = refresh.mock.calls.length;
+        vi.runAllTimers();
+        expect(refresh).toHaveBeenCalledTimes(tailCalls);
     });
 });
