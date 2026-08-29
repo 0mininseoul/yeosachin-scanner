@@ -2,17 +2,19 @@
 
 **Audit date:** 2026-08-30 (Asia/Seoul)
 
+**Correction base:** `c507254f68a72bc3de8e243fdb6827eb25710031`
+
 **Source baseline:** `origin/main` at `2a28326462bf636f92368dc894b5ea76911d79bb`
 
-**Audit mode:** read-only catalog metadata, schema metadata, and aggregate count headers; no row payloads were collected.
+**Audit mode:** read-only API/catalog metadata, source-schema metadata, and aggregate count headers; no row payloads were collected.
 
 ## Executive decision
 
-There is no safe immediate drop candidate in the evidence available for this audit. The live API exposes 165 named definitions, the source tree has active references to 152 of those relation names, and the remaining names include history, recovery, and protected service-owned surfaces; absence of a direct text reference is not evidence of absence of a trigger, foreign key, function, job, or historical-read dependency.
+There is no safe immediate drop candidate in the evidence available for this audit. The live API exposes 165 named PostgREST definitions (164 CRUD-capable relation paths and one read-only view path), while the source tree has text references to 152 of those relation names. Every one of the 165 definitions is assigned exactly one classification in the ledger below; a missing text reference, an HTTP 403, or a source/live naming mismatch is never treated as proof that an object is unused or empty.
 
 The paid Analysis V2 path is the canonical execution path: preflight and entitlement/admission lead to Cloud Tasks, the V2 worker writes staged durable state, finalization publishes an owner-scoped result, and result images use the private R2 registry. The V1/step compatibility surface remains a migration-only or owner-history read boundary, but it must be consolidated only after traffic, database dependencies, and historical-result compatibility are proven. The intentional Apify/RapidAPI/self-hosted provider switching is retained; it is not a cleanup target.
 
-The live endpoint and expected schema fingerprint were verified without printing credentials or row data. The Supabase management-plane project identity could not be independently proven in this environment: the linked CLI query was blocked by network/privilege limitations and the account-visible project list did not identify the endpoint. The live evidence is therefore labeled “canonical endpoint/schema fingerprint” rather than owner-level project proof, and every destructive decision remains blocked on an owner-authorized catalog snapshot.
+The endpoint/schema fingerprint was verified without printing credentials or row data. Supabase management-plane project identity could not be independently proven in this environment: the linked CLI query was blocked by network/privilege limitations and the account-visible project list did not identify the endpoint. Live evidence is therefore labeled “canonical endpoint/schema fingerprint,” not owner-level project proof, and every destructive decision remains blocked on an owner-authorized catalog snapshot.
 
 ## Scope and safety boundary
 
@@ -22,48 +24,49 @@ This audit intentionally did **not**:
 - call a mutation-capable RPC, perform DDL or DML, repair migration history, or run `supabase db push`;
 - edit a migration, executable SQL, application code, provider configuration, or the protected reconciliation migration;
 - make any conclusion from a `403` relation response that the relation is empty;
+- call Apify, RapidAPI, Gemini, Instagram, R2, GCS, or any other provider;
 - recommend deleting the Apify/RapidAPI/self-hosted route switch.
 
-The live relation count was collected with HTTP HEAD/count metadata requests only. The exact-count pass returned `Content-Range` totals and no response bodies. PostgREST OpenAPI metadata was used to enumerate exposed relation and RPC paths. Supabase Storage bucket metadata was counted without retaining bucket names. Static inspection covered `app/`, `lib/`, `hooks/`, `components/`, `scripts/`, `docs/`, and `supabase/migrations/`.
+The live relation count was collected with HTTP HEAD/count metadata requests only. The exact-count pass returned `Content-Range` totals and no response bodies. PostgREST OpenAPI metadata was used to enumerate relation definitions and RPC paths. Supabase Storage bucket metadata was counted without retaining bucket names. Static inspection covered `app/`, `lib/`, `hooks/`, `components/`, `scripts/`, `docs/`, and `supabase/migrations/`.
 
 ### Identity and evidence limitation
 
-The URL was taken from the canonical main worktree's environment file by key-name lookup without sourcing or printing the file. Its host was checked as a Supabase HTTPS host, and the endpoint returned a standard public schema OpenAPI document with 165 definitions and 805 paths. The CLI reported version 2.114.0; its project listing exposed two account-visible projects that did not match the endpoint-derived project identity, while the linked database query was unavailable because the current network did not support the project's IPv6 route. A separate link attempt was rejected by the account's endpoint privilege. No project reference, token, secret, database password, or authorization header is included in this report.
+The URL was taken from the canonical main worktree environment file by key-name lookup without sourcing or printing the file. Its host was checked as a Supabase HTTPS host, and the endpoint returned a standard public schema OpenAPI document with 165 definitions and 805 paths. The CLI reported version 2.114.0; its project listing exposed two account-visible projects that did not match the endpoint-derived project identity, while the linked database query was unavailable because the current network did not support the project's IPv6 route. A separate link attempt was rejected by the account's endpoint privilege. No project reference, token, secret, database password, Authorization header, cookie, or user identifier is included in this report.
 
-This is enough to establish that the expected production schema is reachable at the configured endpoint, but not enough to claim management-plane ownership or a complete `pg_catalog` snapshot. The follow-up gate is an owner-authorized, read-only catalog export for the same endpoint.
+This establishes reachability of the expected production schema at the configured endpoint, but not management-plane ownership or a complete `pg_catalog` snapshot. The follow-up gate is an owner-authorized, read-only catalog export for the same endpoint.
 
-## Sanitized inventory totals
+## Corrected sanitized inventory totals
 
 | Surface | Observed total | Evidence and qualification |
 |---|---:|---|
-| PostgREST named definitions | 165 | OpenAPI definitions; exposed API surface, not a complete database catalog |
-| Exposed relation paths | 165 | 164 CRUD-capable relations plus one read-only view path |
-| Exposed CRUD relations | 164 | A `403` on a relation means direct role access was denied, not zero rows |
-| Exposed read-only views | 1 | `analysis_operational_cost_summary` |
-| Exposed materialized views | 0 observed | No matview path in OpenAPI; owner-level `pg_class` confirmation is still required |
-| Exposed RPC paths | 639 | Unique `/rpc/` names in OpenAPI; some long PostgreSQL identifiers are truncated and overloads exist |
+| PostgREST named definitions | 165 | Exact OpenAPI definition count; exposed API surface, not a complete database catalog |
+| Exposed CRUD-capable relation paths | 164 | Exact OpenAPI path classification; underlying `pg_class` kind is not asserted for every path |
+| Exposed read-only view paths | 1 | `analysis_operational_cost_summary`; view path, not a table requiring RLS |
+| Exposed materialized-view paths | 0 observed | No matview path in OpenAPI; owner-level `pg_class` confirmation is still required |
+| Exposed RPC paths | 639 | Unique `/rpc/` names in OpenAPI; long PostgreSQL identifiers can be truncated and overloads exist |
 | Relations with exact-count headers | 60 | HEAD requests only; zero row bodies read |
 | Exact-count total for accessible relations | 48,931 | Sum of 60 `Content-Range` values; not a PII export |
-| Relations with direct-read denial | 105 | HTTP 403; likely internal/forced-RLS or revoked surfaces; do not treat as absent |
+| Relations with direct-read denial | 105 | HTTP 403; not a zero-row or absence signal |
 | Local migration files | 354 | Git-tracked SQL files; newest timestamp is `20260829120000` |
 | Unique table names created in current migration source | 161 | Declaration scan; not proof that every migration is applied remotely |
-| Unique view names in migration source | 2 | Three create/replace events: `analysis_operational_cost_summary` and `daily_token_usage` |
-| Explicit materialized-view declarations in source | 0 | Declaration scan |
-| Explicit sequence declarations in source | 0 | Declaration scan; serial/identity-owned sequences still need catalog proof |
+| Unique view names in migration source | 2 | `analysis_operational_cost_summary` and `daily_token_usage`; source history, not current live kind |
+| Explicit materialized-view declarations in source | 0 | Declaration scan; live catalog kind still requires owner evidence |
+| Explicit sequence declarations in source | 0 | Declaration scan; serial/identity-owned sequences still require catalog evidence |
 | Function declaration events / unique names | 951 / 646 | Replacements, overloads, and historical definitions make event count non-canonical |
 | Trigger declaration events / unique names | 83 / 78 | Source declaration scan; current enabled state unverified |
 | Policy create events / drop events | 19 / 5 | Source history, not current `pg_policy` state |
-| RLS enable events / unique relations | 153 / 148 | Source history; 110 unique relations also have force-RLS events |
-| Force-RLS events / unique relations | 113 / 110 | Source history; all forced names were also in the enabled set |
-| Public FK reference lines / distinct targets | 243 / 34 | Source scan of `REFERENCES public.*`; current constraint state unverified |
-| Guarded realtime publication-add events | 2 | `analysis_progress_state` and `analysis_progress_events` in migration source; live membership unverified |
+| Whitespace-normalized explicit RLS enable events / unique names | 165 / 161 | Comments removed and arbitrary whitespace normalized for the source scan; source history, not current `pg_class.relrowsecurity` |
+| Whitespace-normalized explicit force-RLS events / unique names | 126 / 123 | Source history, not current `pg_class.relforcerowsecurity` |
+| Dynamic RLS-boundary target names | 4 / 2 additional | `payments`, `payment_orders`, `users`, `ai_analysis_cache`; the first two add names beyond the 161 explicit set |
+| Public-or-unqualified FK reference clauses / distinct targets | 263 / 35 | 243 schema-qualified `public.*` clauses plus 20 syntactically unqualified clauses; current constraints unverified |
+| Realtime publication-add events / distinct source names | 3 / 3 | Initial `analysis_requests`, then guarded `analysis_progress_state` and `analysis_progress_events`; live membership unverified |
 | Supabase Storage buckets | 0 | Storage API bucket count; result-image path is external R2 and source media uses private GCS |
 
-The migration source contains 161 unique current table names. The live exposed table set is 164, so four live names are not explained by a current `CREATE TABLE` declaration: one view (`analysis_operational_cost_summary`) and the legacy relations `payment_orders`, `payments`, and `pending_analysis`. `daily_token_usage` is declared in the old source but is not in the current exposed relation list. The three extra legacy relations must remain `unknown` until the owner-level catalog and dependency pass explains their provenance.
+The migration source contains 161 unique current table names. Compared with the 164 CRUD-capable live definitions, three live names are not explained by a current `CREATE TABLE` declaration: `payment_orders`, `payments`, and `pending_analysis`. The fourth live definition outside that table comparison is the `analysis_operational_cost_summary` view. `daily_token_usage` is declared in older source but is not in the current exposed definition list. These differences are provenance questions, not deletion evidence.
 
 ## Aggregate live counts
 
-The following are sanitized exact counts from accessible relation headers. They are counts only; no row data was read. Forty of the 60 exact-count relations were non-zero and the other 20 returned zero; the 105 denied relations were not inferred to be zero.
+The following are sanitized exact counts from accessible relation headers. Forty of the 60 exact-count relations were non-zero and the other 20 returned zero; the 105 denied relations were not inferred to be zero.
 
 | Family / relation | Exact rows |
 |---|---:|
@@ -108,21 +111,43 @@ The following are sanitized exact counts from accessible relation headers. They 
 | `sentry_discord_alert_outbox` | 1 |
 | `users` | 482 |
 
-Useful family roll-ups for the accessible 60-relation subset are: `account_*` 5 relations / 134 rows; non-V2 `analysis_*` 27 / 16,185; `analysis_v2_*` 3 / 3,915; `earlybird_*` 6 / 300; `precheckout_*` 3 / 8; the legacy/core set including `ai_analysis_cache` 14 / 28,373; and `demo_*` 2 / 16. These are operational prioritization signals only, not deletion authorization.
+Useful family roll-ups for the accessible 60-relation subset are: `account_*` 5 relations / 134 rows; non-V2 `analysis_*` 27 / 16,185; `analysis_v2_*` 3 / 3,915; `earlybird_*` 6 / 300; `precheckout_*` 3 / 8; the legacy/core set including `ai_analysis_cache` 14 / 28,373; and `demo_*` 2 / 16. These are operational prioritization signals only, not deletion authorization. All values in this section are exact header totals, not estimates; no denied-relation row count is supplied.
 
-## RLS, policies, FK, trigger, and publication assessment
+## Catalog evidence boundary: partitioning, sizes, columns, and keys
+
+This audit does not claim a current catalog inventory for metadata that is not exposed by the safe API pass. The evidence limit is explicit for all 165 definitions:
+
+| Metadata | Evidence available in this audit | Required owner-authorized evidence |
+|---|---|---|
+| Partitioned-table status | Source scan found zero `CREATE TABLE ... PARTITION BY` and zero `CREATE TABLE ... PARTITION OF` declarations. SQL/window `PARTITION BY` clauses were excluded because they are query syntax. Live partition status is unknown. | For every exposed definition, read-only `pg_class.relkind`, `relispartition`, `pg_partitioned_table`, and parent/child relation metadata; return booleans and sanitized names only. |
+| Relation sizes | No `pg_relation_size`, `pg_indexes_size`, `pg_total_relation_size`, or `reltuples` data was collected. The 60 `Content-Range` totals are exact row counts, not disk-size measurements or estimates. | For all 165 definitions, including the 105 denied relations, provide size bytes or coarse size buckets and state whether any row estimate is exact or estimated. |
+| Current columns | OpenAPI definitions are an API shape, not a guaranteed current `pg_attribute`/`information_schema.columns` inventory; no per-column export was retained. Current columns are unknown, including hidden or server-only columns. | For all 165 definitions, export sanitized column metadata: name, type, nullability, default/generated/identity flags, and ordinal position. Do not export values. |
+| Primary/unique keys | Source declarations contain key text and FK references, but source history cannot prove current constraints after replacements or drops. No live `pg_constraint`/`pg_index` inventory was collected. | For all 165 definitions, export current PK/UNIQUE/index membership and ordered columns, plus FK validation/actions; names and booleans are sufficient. |
+| Relation kind | One read-only view path is identified by OpenAPI; the other 164 paths are CRUD-capable API relations, but ordinary table, foreign table, view, partition, and sequence-owned status is not claimed without `pg_class`. | Return current `pg_class.relkind` and dependency/ownership metadata for every definition. |
+
+The absence of a source partition declaration is not proof that the live database has no partitioned table, and a `403` does not exempt a relation from this owner catalog request.
+
+## RLS, policies, foreign keys, triggers, and realtime
 
 ### RLS and policies
 
-The migration history enables RLS on 148 unique relations and force-RLS on 110 of them; there are 38 source-declared enabled-but-not-forced relations. The direct-read pass returned 105 HTTP 403 responses, which is consistent with internal service-owned or force-RLS surfaces and revoked Data API grants. It is not a row absence signal.
+The whitespace-tolerant source scan normalized arbitrary whitespace across all 354 migration files and found 165 explicit `ALTER TABLE ... ENABLE ROW LEVEL SECURITY` events covering 161 unique relation names. The source also has 126 explicit force-RLS events covering 123 unique names; the 38-name difference inside the explicit set is source-declared enable-only history, not current state.
 
-Seventeen exposed names had no local `ALTER TABLE ... ENABLE ROW LEVEL SECURITY` declaration in the scanned migration source: `analysis_operational_cost_summary`, `analysis_v2_apify_secret_ref_prune_guard`, `earlybird_concierge_batch_target_lineage_repairs`, `earlybird_concierge_snapshot_conflict_recoveries`, `earlybird_pfe3_media_artifact_rearms`, `earlybird_pfe_target_evidence_start_rejection_rearms`, `earlybird_profile_evidence_failure_recoveries`, `earlybird_profile_fetch_exhaustion_recoveries`, `earlybird_terminal_unavailable_exhaustion_rearms`, `earlybird_v211_apify_transient_admission_resumes`, `earlybird_v211_apify_transient_replays`, `earlybird_v211_lease_policy_failure_rearms`, `earlybird_v211_profile_ai_diagnostic_replays`, `earlybird_v211_relationship_lineage_failure_rearms`, `payment_orders`, `payments`, and `pending_analysis`. Several recovery relations intentionally revoke Data API privileges; the three legacy relations are not explained by current table-create declarations. The owner-level `pg_class`, `pg_policy`, and `information_schema.role_table_grants` snapshot must resolve these before any retention or removal decision.
+The internal data API boundary migration contains a dynamic, conditional target array with exactly four names: `payments`, `payment_orders`, `users`, and `ai_analysis_cache`. `users` and `ai_analysis_cache` are already in the 161 explicit names; `payments` and `payment_orders` add two names. Therefore the union of explicit and dynamic source RLS coverage is 163 unique names. Against the 164 live CRUD-capable definitions, the only exposed table without source RLS-enable evidence is `pending_analysis`. `analysis_operational_cost_summary` is the sole read-only view and is not reported as a false missing-RLS table. The earlier 17-name missing list was a regex artifact caused by multiline whitespace and failure to account for the conditional target array.
 
-The source has 19 policy-create events and 5 policy-drop events. This history is especially important for `users`, `analysis_requests`, `analysis_results`, `comment_details`, `interaction_logs`, `private_accounts`, anonymous preflight, and earlybird surfaces. The internal data boundary migration explicitly keeps server-owned access for `users`, `payments`, `payment_orders`, and `ai_analysis_cache` while removing client object access; this is a security boundary, not evidence that these relations can be deleted.
+This is a source-coverage inventory, not a claim about current live RLS. The direct-read pass returned 105 HTTP 403 responses, which is consistent with internal service-owned or force-RLS surfaces and revoked Data API grants. It is not a row absence signal. Current `pg_class`, `pg_policy`, and `information_schema.role_table_grants` state must be obtained from the owner-authorized catalog export before any retention or removal decision.
 
-### Foreign keys and triggers
+The source has 19 policy-create events and 5 policy-drop events. This history is especially important for `users`, `analysis_requests`, `analysis_results`, `comment_details`, `interaction_logs`, `private_accounts`, anonymous preflight, and earlybird surfaces. The internal data-boundary migration explicitly keeps server-owned access for `users`, `payments`, `payment_orders`, and `ai_analysis_cache` while removing client object access; this is a security boundary, not evidence that these relations can be deleted.
 
-The source contains 243 `REFERENCES public.*` lines targeting 34 distinct public relations. The most frequent target names are `analysis_requests` (88), `analysis_preflights` (40), `earlybird_orders` (27), `analysis_pipeline_jobs` (25), and `users` (15). Inline source clauses include both `CASCADE` and `RESTRICT` semantics; the current database constraint list, validation state, and all referenced columns still require owner-level catalog proof.
+### Foreign keys
+
+The source scan distinguishes schema-qualified and unqualified clauses:
+
+- 243 clauses explicitly target `public.*`, across 34 distinct target names.
+- 20 clauses use unqualified `REFERENCES <name>` syntax, across exactly five target names: `analysis_preflights`, `analysis_requests`, `analysis_results`, `earlybird_orders`, and `users`.
+- The combined textual total is therefore 263 public-or-unqualified clauses across 35 distinct target names.
+
+The 20 unqualified clauses are not silently counted as schema-qualified: their migration context makes public resolution plausible, but the live schema, referenced columns, validation state, and delete actions still require catalog proof. Inline source clauses include `CASCADE`, `RESTRICT`, `SET NULL`, and `NO ACTION` semantics.
 
 The dependency shape is not a flat legacy schema:
 
@@ -132,9 +157,17 @@ The dependency shape is not a flat legacy schema:
 - `earlybird_orders` and webhook/fulfillment/reconciliation relations are the commercial lifecycle and must stay separate from result execution.
 - `users` and the account-principal bridge own identity classification and paid evidence; the auth identity must not be replaced by a new analytics identity as part of cleanup.
 
+### Triggers and realtime publication
+
 There are 83 trigger declaration events (78 source names). Many are immutability/recovery guards for payment, account, V2, precheckout, and concierge rows. Replacing a table without first reproducing those trigger invariants would weaken the safety boundary. Live `pg_trigger` enabled state and trigger-to-function dependencies were not queried.
 
-The source has two guarded additions to the `supabase_realtime` publication for progress state/events. The current publication membership and replica identity were not queried; realtime rows must not be dropped merely because the browser currently polls or because direct service-role reads are denied.
+The source contains exactly three `supabase_realtime` publication-add events across two migrations, with complete source membership:
+
+1. Initial schema: `analysis_requests` (unqualified `ALTER PUBLICATION` statement).
+2. V2 progress migration: guarded addition of `analysis_progress_state`.
+3. V2 progress migration: guarded addition of `analysis_progress_events`.
+
+The guarded additions check that `supabase_realtime` exists and that each table is not already a member. Current publication membership, replica identity, and live publication settings were not queried. Realtime rows must not be dropped merely because the browser currently polls or because direct service-role reads are denied.
 
 ## Code and documentation map
 
@@ -172,40 +205,49 @@ Supabase Storage has zero buckets in the verified endpoint. V2 result images use
 
 ### Static reference scan
 
-Across `app`, `lib`, `hooks`, `components`, `scripts`, and `docs`, 152 of 165 live relation names appeared in text references. Thirteen names did not appear in that scan: `analysis_gemini_usage_expectations`, `analysis_provider_usage_expectations`, `analysis_revenue_ai_routing_attempt_lineages`, `analysis_revenue_final_coverage_gates`, `analysis_revenue_primary_quality_checkpoints`, `analysis_revenue_resolver_passes`, `analysis_v2_result_revision_female_rows`, `analysis_v2_result_revisions`, `comment_details`, `earlybird_profile_evidence_failure_recoveries`, `earlybird_v211_concierge_publications`, `interaction_logs`, and `pending_analysis`.
+Across `app`, `lib`, `hooks`, `components`, `scripts`, and `docs`, 152 of 165 live definition names appeared in text references. Thirteen names did not appear in that scan: `analysis_gemini_usage_expectations`, `analysis_provider_usage_expectations`, `analysis_revenue_ai_routing_attempt_lineages`, `analysis_revenue_final_coverage_gates`, `analysis_revenue_primary_quality_checkpoints`, `analysis_revenue_resolver_passes`, `analysis_v2_result_revision_female_rows`, `analysis_v2_result_revisions`, `comment_details`, `earlybird_profile_evidence_failure_recoveries`, `earlybird_v211_concierge_publications`, `interaction_logs`, and `pending_analysis`.
 
-This scan is intentionally conservative. It does not resolve dynamic RPC names, SQL bodies, triggers, scheduled jobs, external dashboards, Cloud Tasks, Vercel cron configuration, or historical clients. The thirteen names are `unknown`, not drop candidates.
+This scan is intentionally conservative. It does not resolve dynamic RPC names, SQL bodies, triggers, scheduled jobs, external dashboards, Cloud Tasks, Vercel cron configuration, or historical clients. The 13 names are not drop candidates; each is classified exactly once in the ledger below.
 
-## Classification matrix
+## Classification ledger for all 165 exposed definitions
 
-The classes below mean:
+The ledger covers the 165 PostgREST definitions only: 164 CRUD-capable relation paths plus the one read-only view path. RPC paths are a separately counted routine surface (639 names); routine dependency proof remains an owner-catalog gate and is not misclassified as a relation. The labels are mutually exclusive and have exactly one meaning:
 
-- **keep:** active or protected; no cleanup proposal now;
-- **consolidate:** move behind one canonical contract only after compatibility and traffic proof;
-- **archive-then-drop:** possible future retirement after a bounded archive, retention proof, and separate approval;
-- **drop-candidate:** no current item meets this bar;
-- **unknown:** evidence is incomplete or an owner-level dependency may exist.
+- `keep`: active or protected; no cleanup proposal now.
+- `consolidate`: move behind one canonical contract or equivalent projection only after compatibility and traffic proof.
+- `archive-then-drop`: a future retirement path after bounded archive, restore proof, retention checks, and separate approval; it is not a current deletion instruction.
+- `drop-candidate`: all current proof bars pass; there are none.
+- `unknown`: evidence is incomplete or an owner-level dependency may exist; no deletion action follows.
 
-| Surface | Classification | Evidence | Confidence |
-|---|---|---|---|
-| `users`, Auth identity, account classification, admin/operator identity | keep | Live `users` count; account-principal bridge; server-owned access boundary; admin identity is a protected control plane | High |
-| `analysis_requests`, `analysis_results`, `private_accounts`, progress/result compatibility | keep | Non-zero counts, owner-history/result routes, broad code references, historical data requirement | High |
-| V2 jobs, staged evidence, provider/Gemini/revenue ledgers, recovery/replay/audit | keep | 105 restricted internal relations plus active counts and trigger/FK fences | High |
-| Preflight, anonymous cache/claims, B-lite, admission and retention | keep | Active routes, queue worker, retention routine, non-zero exact counts | High |
-| `earlybird_orders`, fulfillment/webhook/reconciliation, `earlybird_waitlist` | keep | Commercial lifecycle and provider-evidence state are separate from analysis execution | High |
-| Apify/RapidAPI/self-hosted switching and authenticated worker | keep | Explicit router/configuration and rollback/manual-provider contract | High |
-| R2 result-image registry and private GCS source workspace | keep | V2 result route and media store; Supabase Storage is empty | High |
-| V1 write/start/step implementation and duplicate DTO/store projections | consolidate | `/run` is 410/admin-gated, but `/start`, status/result compatibility, scripts, and historical reads remain | Medium |
-| `analysis_operational_cost_summary` and older observability projections | consolidate only after proof | Live view has 391 accessible rows and a code reference; replace only with an equivalent canonical projection | Medium |
-| Short-lived anonymous/precheckout source evidence | archive-then-drop | Retention RPCs exist, but current counts are non-zero and provider-cost reconciliation must precede purge | Medium |
-| `pending_analysis` | unknown; archive-then-drop only later | 11 exact rows, no static text reference, but live relation and legacy behavior are not explained by current migrations | Low |
-| `payments`, `payment_orders` | unknown; archive-then-drop only later | Server-owned legacy boundary and unknown live catalog state; no direct app reference is not enough | Low |
-| `demo_analysis_*`, E2E runner rows, admin test artifacts | archive-then-drop only under a separate approval | Small live demo counts; operator/test routes and identity classification remain active; 22 E2E identities were not read | Medium |
-| Thirteen live relations without static text references | unknown | Could be trigger/RPC/recovery/history dependencies; no owner-level `pg_depend` proof | Low |
-| Long-tail function overloads and old RPC names | unknown | 951 declaration events, 646 source names, 639 exposed paths; PostgreSQL identifier truncation/overloads make name-only comparison unsafe | Low |
-| Any current relation as an immediate drop-candidate | drop-candidate: none | No item has simultaneous zero traffic, zero code/DB dependency, archive proof, and rollback proof | High |
+Every exposed definition appears in exactly one complete membership set below. The sets are disjoint and their counts sum to 165.
 
-No classification authorizes DDL. `archive-then-drop` is a future gate, not an instruction to delete data now.
+### `keep` (158)
+
+`account_classification_audit`, `account_deletion_jobs`, `account_ledger_rollout_state`, `account_paid_evidence`, `ai_analysis_cache`, `analysis_anonymous_preflight_attempts`, `analysis_anonymous_profile_cache`, `analysis_anonymous_profile_cache_locks`, `analysis_apify_credit_snapshots`, `analysis_beta_access_grants`, `analysis_beta_access_policy`, `analysis_beta_pool_allocations`, `analysis_beta_pool_local_debits`, `analysis_beta_pool_reservation_archive`, `analysis_beta_pool_reservations`, `analysis_beta_runtime_gate`, `analysis_gemini_usage_expectations`, `analysis_interaction_evidence`, `analysis_interaction_jobs`, `analysis_interaction_scores`, `analysis_lifecycle_events`, `analysis_pipeline_jobs`, `analysis_preflight_acquisition_cost_events`, `analysis_preflight_failures`, `analysis_preflight_provider_runs`, `analysis_preflights`, `analysis_progress_events`, `analysis_progress_state`, `analysis_provider_cost_ledger`, `analysis_provider_runs`, `analysis_provider_usage_expectations`, `analysis_requests`, `analysis_result_share_observations`, `analysis_results`, `analysis_revenue_ai_routing_attempt_lineages`, `analysis_revenue_cost_operations`, `analysis_revenue_dispatch_guards`, `analysis_revenue_final_coverage_gates`, `analysis_revenue_fresh_provider_evidence`, `analysis_revenue_primary_quality_checkpoints`, `analysis_revenue_resolver_capacity_reservations`, `analysis_revenue_resolver_outcome_overlays`, `analysis_revenue_resolver_passes`, `analysis_revenue_run_ledgers`, `analysis_step_events`, `analysis_target_interactors`, `analysis_v2_active_profile_heartbeats`, `analysis_v2_ai_attempts`, `analysis_v2_ai_global_result_cache`, `analysis_v2_ai_result_checkpoints`, `analysis_v2_ai_scoring_stage_checkpoints`, `analysis_v2_apify_secret_ref_prune_guard`, `analysis_v2_candidate_feature_manifests`, `analysis_v2_candidate_feature_rows`, `analysis_v2_candidate_score_manifests`, `analysis_v2_candidate_score_rows`, `analysis_v2_dag_batch_results`, `analysis_v2_dag_batch_topology`, `analysis_v2_dag_scopes`, `analysis_v2_dag_stage_manifests`, `analysis_v2_failure_receipts`, `analysis_v2_female_results`, `analysis_v2_gemini_leases`, `analysis_v2_gender_resolution_metrics`, `analysis_v2_gender_routing_candidates`, `analysis_v2_gender_routing_manifests`, `analysis_v2_media_artifacts`, `analysis_v2_mutual_rows`, `analysis_v2_narrative_manifests`, `analysis_v2_narrative_rows`, `analysis_v2_partner_safety_manifests`, `analysis_v2_partner_safety_rows`, `analysis_v2_preliminary_score_manifests`, `analysis_v2_preliminary_score_rows`, `analysis_v2_private_name_manifests`, `analysis_v2_private_name_rows`, `analysis_v2_private_results`, `analysis_v2_profile_fetch_batches`, `analysis_v2_profile_fetch_outcomes`, `analysis_v2_profile_fetch_telemetry`, `analysis_v2_profile_provider_canary_experiments`, `analysis_v2_profile_provider_canary_runs`, `analysis_v2_profile_repair_canary_runs`, `analysis_v2_provider_cleanup_intents`, `analysis_v2_provider_execution_policies`, `analysis_v2_provider_runs`, `analysis_v2_recovery_provider_run_adoptions`, `analysis_v2_relationship_manifests`, `analysis_v2_relationship_rows`, `analysis_v2_relationship_sides`, `analysis_v2_replay_capture_audit_events`, `analysis_v2_replay_capture_authorizations`, `analysis_v2_replay_capture_fragments`, `analysis_v2_result_coverage_telemetry`, `analysis_v2_result_image_manifests`, `analysis_v2_result_image_objects`, `analysis_v2_result_image_purge_outbox`, `analysis_v2_result_revision_female_rows`, `analysis_v2_result_revisions`, `analysis_v2_result_summaries`, `analysis_v2_reverse_like_manifests`, `analysis_v2_reverse_like_rows`, `analysis_v2_scheduler_operations`, `analysis_v2_score_audit_intents`, `analysis_v2_score_audit_rows`, `analysis_v2_score_audit_runs`, `analysis_v2_score_audit_scan_locators`, `analysis_v2_score_audit_source_rows`, `analysis_v2_score_audit_sources`, `analysis_v2_selfhosted_auth_runs`, `analysis_v2_target_evidence_manifests`, `analysis_v2_test_entitlement_consumptions`, `analysis_v2_unconfirmed_start_resolutions`, `comment_details`, `earlybird_adoption_policy_failure_rearms`, `earlybird_checkout_reconciliations`, `earlybird_concierge_batch_cohort_members`, `earlybird_concierge_batch_target_lineage_repairs`, `earlybird_concierge_snapshot_conflict_recoveries`, `earlybird_first15_canary_provider_rearms`, `earlybird_fulfillments`, `earlybird_orders`, `earlybird_partial_adoption_second_rearms`, `earlybird_payment_discord_outbox`, `earlybird_pfe3_media_artifact_rearms`, `earlybird_pfe_target_evidence_start_rejection_rearms`, `earlybird_plan_inventory`, `earlybird_profile_evidence_failure_recoveries`, `earlybird_profile_fetch_exhaustion_recoveries`, `earlybird_schema_failure_recoveries`, `earlybird_terminal_unavailable_exhaustion_rearms`, `earlybird_v211_apify_transient_admission_resumes`, `earlybird_v211_apify_transient_replays`, `earlybird_v211_concierge_copy_corrections`, `earlybird_v211_concierge_publications`, `earlybird_v211_concierge_replays`, `earlybird_v211_lease_policy_failure_rearms`, `earlybird_v211_policy_identity_replays`, `earlybird_v211_profile_ai_diagnostic_replays`, `earlybird_v211_relationship_lineage_failure_rearms`, `earlybird_v212_concierge_copy_corrections`, `earlybird_v213_concierge_copy_corrections`, `earlybird_v214_concierge_gemini_copy_corrections`, `earlybird_waitlist`, `earlybird_webhook_events`, `gemini_token_usage`, `interaction_logs`, `kakao_signup_discord_outbox`, `landing_leads`, `precheckout_blite_cache`, `precheckout_blite_dispatches`, `precheckout_blite_sources`, `private_accounts`, `result_feedback`, `scraper_provider_usage`, `selfhosted_profile_request_start_gate`, `sentry_discord_alert_outbox`, `users`
+
+### `consolidate` (1)
+
+`analysis_operational_cost_summary`
+
+This view remains live and had 391 exact accessible rows. Any replacement must preserve equivalent columns, authorization, historical reads, and aggregate semantics before the view is retired.
+
+### `archive-then-drop` (3)
+
+`account_e2e_test_runners`, `demo_analysis_fixtures`, `demo_analysis_runs`
+
+This is a future, separately approved path only. It requires a sanitized aggregate preflight, an explicit identity allowlist, archive and restore proof, Auth deletion proof where applicable, and post-operation verification. Current small counts do not authorize deletion.
+
+### `unknown` (3)
+
+`payment_orders`, `payments`, `pending_analysis`
+
+These remain unresolved live definitions. `payments` and `payment_orders` are server-owned legacy boundaries and are covered by the conditional source RLS target array; `pending_analysis` has 11 exact rows and no current source RLS-enable evidence. Obtain owner-level relation kind, grants, policies, dependencies, and historical provenance before deciding retention.
+
+### `drop-candidate` (0)
+
+No exposed definition.
+
+No classification authorizes DDL. The three future-retirement definitions are not current drop candidates. The three unresolved definitions receive no cleanup instruction.
 
 ## Required data and identity policy
 
@@ -213,9 +255,9 @@ The cleanup design must preserve the following invariants:
 
 1. **Retention floor:** preserve user and analysis data dated 2026-07-24 or later. Do not use a table-wide delete to remove “legacy” rows. Earlier data also needs an owner-approved archive policy; age alone is not enough.
 2. **Admin identity:** preserve the admin/operator account and its classification. Admin/test cleanup is a separate approved operation, never an inferred side effect of table consolidation.
-3. **Test identities:** the 22 E2E identities and admin test artifacts are not in scope for this audit. Remove them only with a separately approved identity allowlist, aggregate preflight, auth deletion proof, and post-delete verification.
+3. **Test identities:** the 22 E2E identities and admin test artifacts are not in scope for this audit. Remove them only with a separately approved identity allowlist, aggregate preflight, Auth deletion proof, and post-delete verification.
 4. **Landing target/excluded split:** `landing_leads` currently has an input plus attribution fields and is service-owned. Future funnel metrics must distinguish an analysis target from an explicitly excluded target; do not reinterpret one mixed column or use paid metrics for both.
-5. **Waitlist versus withdrawn archive:** keep `earlybird_waitlist` as the active waitlist. Create a separate, access-controlled withdrawn archive or equivalent immutable lifecycle boundary; do not fold withdrawn records into waitlist state. No dedicated live withdrawn relation was observed in this audit, so its future design is `unknown` until approved.
+5. **Waitlist versus withdrawn archive:** keep `earlybird_waitlist` as the active waitlist. Create a separate, access-controlled withdrawn archive or equivalent immutable lifecycle boundary; do not fold withdrawn records into waitlist state. No dedicated live withdrawn relation was observed in this audit, so its future design is unknown until approved.
 6. **Stable anonymous-to-auth mapping:** preserve the existing opaque claim/hash and device boundary. Claim a preflight to an authenticated owner once, without using a mutable email, username, or raw token as the analytics identity. Preserve the owner row if a repeated claim resolves to an already-owned preflight.
 7. **Paid-only `first_paid_at`:** use the account-principal bridge's external classification plus immutable provider/payment evidence. A status string, positive amount, E2E order, admin order, `payment_pending`, or refund alone must not set paid-ever or `first_paid_at`; when valid evidence exists, retain the earliest paid timestamp monotonically.
 8. **Abandoned `payment_pending`:** retain a short bounded pending window, but never change or delete a pending order without independent provider evidence and an auditable disposition. Preserve immutable pricing/payment lineage and do not manufacture a new order to work around an unresolved one.
@@ -236,8 +278,8 @@ This sequence is intentionally procedural and contains no executable SQL:
 
 ## Open questions blocking deletion
 
-- Can the owner provide management-plane confirmation that the configured endpoint is the intended production `yeosachin` project, plus a read-only catalog snapshot? The current environment could verify the endpoint/schema fingerprint but not owner-level project identity.
-- What are the exact live relation kinds, sizes, row estimates, policies, grants, triggers, publication membership, and `pg_depend` edges for the 105 denied relations and the 13 no-static-reference names?
+- Can the owner provide management-plane confirmation that the configured endpoint is the intended production `yeosachin` project, plus a read-only catalog snapshot? The current environment verified only the endpoint/schema fingerprint.
+- What are the exact live relation kinds, partition flags, sizes, row estimates, current columns, primary/unique keys, foreign keys, policies, grants, triggers, publication membership, and `pg_depend` edges for all 165 definitions, especially the 105 denied relations and the 13 no-static-reference names?
 - Which migration versions are applied remotely, and does remote history exactly align with the 354-file source set? The protected reconciliation migration must remain untouched.
 - Which external jobs, dashboards, cron tasks, operators, and historical clients call long-tail RPCs or V1 endpoints dynamically?
 - What are the date-bounded aggregate counts, by account classification and lifecycle, for data before and after 2026-07-24? Do not answer this by exporting rows.
@@ -252,10 +294,10 @@ The 105 HTTP 403 responses are a positive signal that direct Data API access is 
 
 ## Audit ledger and verification
 
-- Baseline checked: `HEAD == origin/main == 2a28326462bf636f92368dc894b5ea76911d79bb`.
+- Correction work is based on `c507254f68a72bc3de8e243fdb6827eb25710031`; the audit's source baseline remains `origin/main` at `2a28326462bf636f92368dc894b5ea76911d79bb`.
 - Protected migration `supabase/migrations/20260719190000_reconcile_stuck_groble_earlybird_order.sql` remained tracked and unchanged.
 - Existing unrelated `package-lock.json` worktree change was preserved and not staged.
 - Live checks were aggregate/metadata-only: OpenAPI definitions and paths, HEAD relation count headers, exact counts for accessible relations, forbidden-status totals, and Storage bucket count.
-- Static checks included migration declaration counts, source-to-live table alignment, relation/RPC text references, route/store/provider mapping, and documentation cross-reference.
+- Static checks included whitespace-normalized RLS declaration counts, dynamic RLS target coverage, source-to-live table alignment, qualified and unqualified FK reference counts, complete realtime publication-add membership, relation/RPC text references, route/store/provider mapping, and documentation cross-reference.
 - The report pair was secret-scanned for service-role/password/connection-string/Bearer/JWT patterns and identifier-like email/UUID patterns before commit.
-- No production mutation, migration repair, DDL, DML, RPC mutation, provider call, or deployment was performed.
+- No production mutation, migration repair, DDL, DML, mutation RPC, provider call, or deployment was performed.
