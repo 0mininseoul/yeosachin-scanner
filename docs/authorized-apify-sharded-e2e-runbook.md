@@ -312,6 +312,8 @@ teardown의 최종 selected baseline은 exact `primary:3`이다.
 
 ```bash
 set +x
+# Apply-mode invocations require GITHUB_TOKEN or GH_TOKEN with GitHub Actions read permission.
+# Never print or commit the token value.
 unset ANALYSIS_V2_APIFY_ADDITIONAL_SECRET_VERSIONS
 export ANALYSIS_V2_APIFY_API_TOKEN_SLOT=primary
 export ANALYSIS_V2_APIFY_API_TOKEN_SECRET_VERSION=3
