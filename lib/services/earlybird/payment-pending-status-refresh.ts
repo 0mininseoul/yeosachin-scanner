@@ -3,6 +3,7 @@ import type { EarlybirdOrderStatusDto } from './order-status';
 const PAYMENT_PENDING_REFRESH_DELAYS_MS = [1_000, 2_000, 4_000] as const;
 const AUTOMATIC_REFRESH_DELAYS_MS = [1_000, 2_000, 4_000, 8_000, 15_000, 30_000, 60_000] as const;
 const AUTOMATIC_TAIL_INTERVAL_MS = 60_000;
+const LIFECYCLE_REFRESH_COOLDOWN_MS = 250;
 
 export type EarlybirdStatusRefreshMode = 'payment_pending' | 'automatic';
 
@@ -86,23 +87,22 @@ export function scheduleEarlybirdStatusSnapshotRefresh(
         ? AUTOMATIC_REFRESH_DELAYS_MS
         : PAYMENT_PENDING_REFRESH_DELAYS_MS;
     let tailTimer: ReturnType<typeof setInterval> | null = null;
-    let lifecycleRefreshPending = false;
+    let lifecycleCooldownTimer: ReturnType<typeof setTimeout> | null = null;
     let refreshInFlight: Promise<void> | null = null;
-
-    const clearLifecycleRefreshPending = () => {
-        lifecycleRefreshPending = false;
-    };
 
     const triggerRefresh = (source: 'scheduled' | 'lifecycle') => {
         if (cancelled || refreshInFlight) return;
-        if (lifecycleRefreshPending) return;
-        if (source === 'lifecycle') lifecycleRefreshPending = true;
+        if (source === 'lifecycle' && lifecycleCooldownTimer !== null) return;
+        if (source === 'lifecycle') {
+            lifecycleCooldownTimer = setTimeout(() => {
+                lifecycleCooldownTimer = null;
+            }, LIFECYCLE_REFRESH_COOLDOWN_MS);
+        }
 
         let result: void | PromiseLike<void>;
         try {
             result = refresh();
         } catch {
-            if (source === 'lifecycle') queueMicrotask(clearLifecycleRefreshPending);
             return;
         }
 
@@ -112,15 +112,11 @@ export function scheduleEarlybirdStatusSnapshotRefresh(
             void pending.then(
                 () => {
                     if (refreshInFlight === pending) refreshInFlight = null;
-                    if (source === 'lifecycle') clearLifecycleRefreshPending();
                 },
                 () => {
                     if (refreshInFlight === pending) refreshInFlight = null;
-                    if (source === 'lifecycle') clearLifecycleRefreshPending();
                 },
             );
-        } else if (source === 'lifecycle') {
-            queueMicrotask(clearLifecycleRefreshPending);
         }
     };
 
@@ -159,6 +155,10 @@ export function scheduleEarlybirdStatusSnapshotRefresh(
         if (tailTimer !== null) {
             clearInterval(tailTimer);
             tailTimer = null;
+        }
+        if (lifecycleCooldownTimer !== null) {
+            clearTimeout(lifecycleCooldownTimer);
+            lifecycleCooldownTimer = null;
         }
     };
 

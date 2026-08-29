@@ -29,7 +29,7 @@ vi.mock('@/hooks/useAuth', () => ({
 vi.mock('@/lib/services/analytics', () => analyticsMocks);
 vi.mock('@/lib/services/analytics-funnel', () => ({
     availableAnalyticsStorage: () => undefined,
-    tryClaimAnalyticsEvent: () => false,
+    tryClaimAnalyticsEvent: () => true,
 }));
 
 import { EarlybirdStatus } from '@/app/earlybird/earlybird-status';
@@ -266,10 +266,72 @@ describe('earlybird mounted payment return recovery', () => {
         expect(routerMock.refresh).toHaveBeenCalledTimes(1);
 
         await act(async () => {
-            await Promise.resolve();
+            await vi.advanceTimersByTimeAsync(300);
         });
         act(() => window.dispatchEvent(new Event('focus')));
         expect(routerMock.refresh).toHaveBeenCalledTimes(2);
+    });
+
+    it('coalesces lifecycle refreshes across separate tasks and cleans up after unmount', async () => {
+        render(automaticPendingOrder());
+
+        Object.defineProperty(document, 'visibilityState', {
+            configurable: true,
+            value: 'visible',
+        });
+        act(() => document.dispatchEvent(new Event('visibilitychange')));
+        await act(async () => {
+            await vi.advanceTimersByTimeAsync(50);
+            window.dispatchEvent(new Event('focus'));
+        });
+        await act(async () => {
+            await vi.advanceTimersByTimeAsync(50);
+            window.dispatchEvent(new Event('pageshow'));
+        });
+        expect(routerMock.refresh).toHaveBeenCalledTimes(1);
+
+        await act(async () => {
+            await vi.advanceTimersByTimeAsync(300);
+            window.dispatchEvent(new Event('focus'));
+        });
+        expect(routerMock.refresh).toHaveBeenCalledTimes(2);
+
+        await act(async () => {
+            await vi.advanceTimersByTimeAsync(600);
+        });
+        expect(routerMock.refresh).toHaveBeenCalledTimes(3);
+
+        act(() => root.unmount());
+        await act(async () => {
+            await vi.advanceTimersByTimeAsync(600_000);
+            document.dispatchEvent(new Event('visibilitychange'));
+            window.dispatchEvent(new Event('focus'));
+            window.dispatchEvent(new Event('pageshow'));
+        });
+        expect(routerMock.refresh).toHaveBeenCalledTimes(3);
+    });
+
+    it('emits status and payment analytics at most once across order rerenders', () => {
+        const order = automaticPendingOrder({
+            systemStatus: 'paid',
+            displayStatus: '결제 완료',
+            actualAmountKrw: 990,
+        });
+
+        render(order);
+        render({ ...order });
+
+        expect(analyticsMocks.trackEvent).toHaveBeenCalledTimes(2);
+        expect(analyticsMocks.trackEvent).toHaveBeenNthCalledWith(
+            1,
+            analyticsMocks.EVENTS.EARLYBIRD_STATUS_VIEWED,
+            expect.objectContaining({ status: 'paid' }),
+        );
+        expect(analyticsMocks.trackEvent).toHaveBeenNthCalledWith(
+            2,
+            analyticsMocks.EVENTS.PAYMENT_CONFIRMED_VIEWED,
+            expect.objectContaining({ status: 'paid' }),
+        );
     });
 
     it('stops polling and navigates once when the progress path materializes', async () => {
