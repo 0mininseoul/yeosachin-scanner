@@ -1758,22 +1758,42 @@ export function createAnalysisV2ProfileFetchExecutor(
             throw new Error('ANALYSIS_V2_GIRLFRIEND_EXCLUSION_LEAK');
         }
 
-        const resume = await durableProfiles({
-            dependencies,
-            claim,
-            request,
-            usernames,
-            onProfileStart: context.reportActiveProfile,
-            onProfileResolved: async (profile) => {
-                if (profile.isPrivate || !context.reportActiveProfile) return;
+        const profileOrdinal = (username: string) => {
+            const ordinal = usernames.indexOf(username) + 1;
+            return ordinal > 0 ? ordinal : 0;
+        };
+        const reportProfileStart = context.reportActiveProfile
+            ? async (username: string) => {
+                await context.reportActiveProfile!(username, undefined, {
+                    currentOrdinal: profileOrdinal(username),
+                    totalCount: usernames.length,
+                    callPhase: 'fetching',
+                });
+            }
+            : undefined;
+        const reportProfileResolved = context.reportActiveProfile
+            ? async (profile: InstagramProfile) => {
+                if (profile.isPrivate) return;
                 let preview;
                 try {
                     preview = selectAnalysisV2ProgressCandidateMedia(profile);
                 } catch {
                     preview = undefined;
                 }
-                await context.reportActiveProfile(profile.username, preview);
-            },
+                await context.reportActiveProfile!(profile.username, preview, {
+                    currentOrdinal: profileOrdinal(profile.username),
+                    totalCount: usernames.length,
+                    callPhase: 'persisting',
+                });
+            }
+            : undefined;
+        const resume = await durableProfiles({
+            dependencies,
+            claim,
+            request,
+            usernames,
+            onProfileStart: reportProfileStart,
+            onProfileResolved: reportProfileResolved,
         });
         const repaired = await repairProfileBatch({
             dependencies,

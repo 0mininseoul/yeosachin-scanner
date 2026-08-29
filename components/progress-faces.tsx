@@ -1,18 +1,22 @@
 'use client';
 
 import Image from 'next/image';
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import {
     activeCandidateMediaKey,
     appendScreenedCandidate,
     candidateCopyKey,
     candidateTileKey,
+    flattenScreenedCandidateMedia,
+    mergeScreenedCandidateHistory,
     MIN_SCREENED_CANDIDATES_TO_SHOW,
     nextDriftOffset,
     progressCopyDistance,
     type ActiveCandidateMedia,
+    type ScreenedCandidateMediaTile,
     type ScreenedCandidate,
 } from '@/lib/services/analysis/progress-faces';
+import type { ProgressCandidateMediaV1 } from '@/lib/contracts/analysis-v2';
 import { safeResultImageUrl } from '@/lib/services/result-local-image';
 
 const TILE_PX = 84;
@@ -20,9 +24,16 @@ const TILE_PX = 84;
 // Slow enough to read a face, fast enough that the row is never still.
 const DRIFT_PX_PER_SECOND = 26;
 
-function FaceTile({ src, current }: { src: string; current: boolean }) {
+function FaceTile({
+    src,
+    current,
+    label,
+}: {
+    src: string | undefined;
+    current: boolean;
+    label: string;
+}) {
     const [failed, setFailed] = useState(false);
-    if (failed) return null;
     return (
         <div
             className={`relative shrink-0 overflow-hidden border bg-panel ${
@@ -32,26 +43,35 @@ function FaceTile({ src, current }: { src: string; current: boolean }) {
             }`}
             style={{ width: TILE_PX, height: TILE_PX }}
         >
-            <Image
-                src={src}
-                alt=""
-                width={TILE_PX}
-                height={TILE_PX}
-                unoptimized
-                loading="lazy"
-                className="h-full w-full object-cover"
-                onError={() => setFailed(true)}
-            />
+            {src && !failed ? (
+                <Image
+                    src={src}
+                    alt=""
+                    width={TILE_PX}
+                    height={TILE_PX}
+                    unoptimized
+                    loading="lazy"
+                    className="h-full w-full object-cover"
+                    onError={() => setFailed(true)}
+                />
+            ) : (
+                <div
+                    aria-hidden="true"
+                    className="flex h-full w-full items-center justify-center bg-panel-2 text-[20px] font-bold text-fg-mute"
+                >
+                    {label.replace(/\*/g, '').charAt(0).toUpperCase() || '?'}
+                </div>
+            )}
         </div>
     );
 }
 
-function CandidateMedia({
-    candidate,
+function CandidateMediaTile({
+    tile,
     copyIndex,
     current,
 }: {
-    candidate: ScreenedCandidate;
+    tile: ScreenedCandidateMediaTile;
     copyIndex: number;
     current: boolean;
 }) {
@@ -59,27 +79,15 @@ function CandidateMedia({
        boundary defensive too: a malformed heartbeat must not turn the browser
        into a raw Instagram-CDN client, and demo fallback art is not real
        progress media. */
-    const imageUrls: readonly (string | undefined)[] = [
-        candidate.imageUrl ?? undefined,
-        ...candidate.feedImageUrls,
-    ];
-    const images = imageUrls
-        .map(imageUrl => {
-            const src = safeResultImageUrl(imageUrl);
-            return src?.startsWith('/api/image-proxy?') ? src : undefined;
-        })
-        .filter((src): src is string => src !== undefined);
-    return (
-        <div className="flex shrink-0 gap-2.5">
-            {images.map((src, index) => (
-                <FaceTile
-                    key={candidateTileKey(candidate.occurrence, copyIndex, index, src)}
-                    src={src}
-                    current={current && index === 0}
-                />
-            ))}
-        </div>
-    );
+    const imageUrl = tile.imageUrl ?? undefined;
+    const src = safeResultImageUrl(imageUrl);
+    const safeSrc = src?.startsWith('/api/image-proxy?') ? src : undefined;
+    return <FaceTile
+        key={candidateTileKey(tile.occurrence, copyIndex, tile.mediaIndex, safeSrc)}
+        src={safeSrc}
+        current={current && tile.mediaIndex === 0}
+        label={tile.username}
+    />;
 }
 
 /* Drifts the row sideways forever by wrapping through three copies of itself.
@@ -156,20 +164,41 @@ function useFaceDrift(faceCount: number) {
 
 /* The accounts already screened.
  *
- * The snapshot names only the profile being read right now, so the history is
- * kept here rather than asked for. That also bounds it: the page can forget, the
- * server never has to remember.
+ * The snapshot names the profile being read right now and the owner read can
+ * include a bounded outcome history. The browser still retains its own merged
+ * view so a transient empty read cannot erase a tile already on screen.
  *
- * Each candidate is one grouped bundle: profile first, then up to three feeds.
+ * Each candidate is flattened into a bounded profile/feed tile pool. A server
+ * history is merged before the active heartbeat, so a transient empty read
+ * cannot erase an image that was already good.
  */
 export function ProgressFaces({
     active,
+    candidateMedia = [],
 }: {
     active: ActiveCandidateMedia | null;
+    candidateMedia?: readonly ProgressCandidateMediaV1[];
 }) {
     const [candidates, setCandidates] = useState<readonly ScreenedCandidate[]>([]);
     const [lastSnapshotKey, setLastSnapshotKey] = useState<string | null>(null);
-    const snapshotKey = active ? activeCandidateMediaKey(active) : null;
+    const serverCandidates = useMemo(() => candidateMedia.map(({
+        candidateKey,
+        maskedUsername,
+        imageUrl,
+        feedImageUrls,
+    }) => ({
+        ...(candidateKey !== undefined
+            ? { candidateKey }
+            : {}),
+        username: maskedUsername,
+        occurrence: 0,
+        imageUrl,
+        feedImageUrls,
+    })), [candidateMedia]);
+    const snapshotKey = useMemo(() => JSON.stringify([
+        active ? activeCandidateMediaKey(active) : null,
+        serverCandidates,
+    ]), [active, serverCandidates]);
 
     /* Adjusted during render rather than in an effect: the list is derived from
        a prop that changes over time, and an effect would paint the old row once
@@ -177,23 +206,32 @@ export function ProgressFaces({
        no-op while allowing the same candidate to be enriched with feed media. */
     if (active && snapshotKey !== lastSnapshotKey) {
         setLastSnapshotKey(snapshotKey);
-        setCandidates(current => appendScreenedCandidate(current, active));
+        setCandidates(current => {
+            const merged = mergeScreenedCandidateHistory(current, serverCandidates);
+            return appendScreenedCandidate(merged, active);
+        });
     }
 
-    const mediaCandidates = candidates.filter(candidate => {
-        const imageUrls: readonly (string | undefined)[] = [
-            candidate.imageUrl ?? undefined,
-            ...candidate.feedImageUrls,
-        ];
-        return imageUrls.some(imageUrl => (
-            safeResultImageUrl(imageUrl)?.startsWith('/api/image-proxy?')
-        ));
-    });
-    const railRef = useFaceDrift(mediaCandidates.length);
+    if (!active && candidateMedia.length > 0 && snapshotKey !== lastSnapshotKey) {
+        setLastSnapshotKey(snapshotKey);
+        setCandidates(current => mergeScreenedCandidateHistory(current, serverCandidates));
+    }
 
-    if (mediaCandidates.length < MIN_SCREENED_CANDIDATES_TO_SHOW) return null;
+    const mediaTiles = useMemo(
+        () => flattenScreenedCandidateMedia(candidates),
+        [candidates],
+    );
+    const hasRealMedia = useMemo(() => mediaTiles.some(tile => {
+        const imageUrl = tile.imageUrl ?? undefined;
+        return safeResultImageUrl(imageUrl)?.startsWith('/api/image-proxy?');
+    }), [mediaTiles]);
+    // Let the drift effect initialize when a fallback-only snapshot is enriched
+    // into real media without changing the tile count.
+    const railRef = useFaceDrift(hasRealMedia ? mediaTiles.length : 0);
 
-    const newestOccurrence = mediaCandidates.at(-1)?.occurrence;
+    if (!hasRealMedia || mediaTiles.length < MIN_SCREENED_CANDIDATES_TO_SHOW) return null;
+
+    const newestOccurrence = candidates.at(-1)?.occurrence;
 
     return (
         /* Faded at both edges so the row reads as a window onto something longer
@@ -217,12 +255,12 @@ export function ProgressFaces({
                         data-progress-copy
                         className="flex shrink-0 gap-2.5"
                     >
-                        {mediaCandidates.map(candidate => (
-                            <CandidateMedia
-                                key={candidateCopyKey(candidate.occurrence, copyIndex)}
-                                candidate={candidate}
+                        {mediaTiles.map(tile => (
+                            <CandidateMediaTile
+                                key={`${candidateCopyKey(tile.occurrence, copyIndex)}:${tile.mediaIndex}`}
+                                tile={tile}
                                 copyIndex={copyIndex}
-                                current={candidate.occurrence === newestOccurrence}
+                                current={tile.occurrence === newestOccurrence}
                             />
                         ))}
                     </div>

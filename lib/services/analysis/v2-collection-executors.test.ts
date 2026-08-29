@@ -2892,13 +2892,13 @@ describe('analysis V2 concrete collection executors', () => {
             checkpoint: { manifest: { itemCount: 2, producerInputHash: inputHash } },
         });
         expect(reportActiveProfile.mock.calls).toEqual([
-            ['alice'],
+            ['alice', undefined, { currentOrdinal: 1, totalCount: 2, callPhase: 'fetching' }],
             ['alice', {
                 profilePicUrl: 'https://images.example/alice.jpg',
                 feedImageUrls: ['https://images.example/0.jpg'],
-            }],
-            ['bob'],
-            ['bob'],
+            }, { currentOrdinal: 1, totalCount: 2, callPhase: 'persisting' }],
+            ['bob', undefined, { currentOrdinal: 2, totalCount: 2, callPhase: 'fetching' }],
+            ['bob', undefined, { currentOrdinal: 2, totalCount: 2, callPhase: 'fetching' }],
         ]);
         expect(snapshots).toEqual([
             { attempt: 'primary', requested: ['alice', 'bob'] },
@@ -2985,7 +2985,11 @@ describe('analysis V2 concrete collection executors', () => {
         });
 
         expect(fetcher).toHaveBeenCalledOnce();
-        expect(reportActiveProfile.mock.calls).toEqual([['bob']]);
+        expect(reportActiveProfile.mock.calls).toEqual([[
+            'bob',
+            undefined,
+            { currentOrdinal: 2, totalCount: 2, callPhase: 'fetching' },
+        ]]);
         expect(profileStore.store.checkpointPrimary).not.toHaveBeenCalled();
         expect(profileStore.store.checkpointFallback).toHaveBeenCalledOnce();
     });

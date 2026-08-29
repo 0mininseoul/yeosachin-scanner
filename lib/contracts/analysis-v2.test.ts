@@ -474,6 +474,38 @@ describe('analysis V2 public contracts', () => {
             ...activeProfileWithCandidateKey,
             activeProfile: {
                 ...activeProfileWithCandidateKey.activeProfile,
+                currentOrdinal: 4,
+                totalCount: 10,
+                callPhase: 'analyzing',
+            },
+            candidateMedia: [{
+                maskedUsername: 'a***e',
+                imageUrl: '/api/image-proxy?token=history-profile',
+                feedImageUrls: ['/api/image-proxy?token=history-feed'],
+                candidateKey: 'c'.repeat(64),
+            }],
+        }).success).toBe(true);
+        expect(progressSnapshotV1Schema.safeParse({
+            ...activeProfileWithCandidateKey,
+            activeProfile: {
+                ...activeProfileWithCandidateKey.activeProfile,
+                currentOrdinal: 11,
+                totalCount: 10,
+                callPhase: 'fetching',
+            },
+        }).success).toBe(false);
+        expect(progressSnapshotV1Schema.safeParse({
+            ...activeProfileWithCandidateKey,
+            candidateMedia: [{
+                maskedUsername: 'candidate.name',
+                imageUrl: 'https://raw.example/profile.jpg',
+                feedImageUrls: [],
+            }],
+        }).success).toBe(false);
+        expect(progressSnapshotV1Schema.safeParse({
+            ...activeProfileWithCandidateKey,
+            activeProfile: {
+                ...activeProfileWithCandidateKey.activeProfile,
                 candidateKey: 'B'.repeat(64),
             },
         }).success).toBe(false);

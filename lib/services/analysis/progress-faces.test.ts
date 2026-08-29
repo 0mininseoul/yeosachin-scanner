@@ -4,7 +4,9 @@ import {
     appendScreenedCandidate,
     candidateCopyKey,
     candidateTileKey,
+    flattenScreenedCandidateMedia,
     MAX_SCREENED_CANDIDATES,
+    mergeScreenedCandidateHistory,
     nextDriftOffset,
     progressCopyDistance,
     signedProgressCandidateMedia,
@@ -332,6 +334,67 @@ describe('screened candidate accumulation', () => {
 });
 
 describe('screened candidate presentation keys and drift', () => {
+    it('retains prior good media when a fresh server history is transiently empty', () => {
+        const existing = appendScreenedCandidate([], {
+            candidateKey: 'a'.repeat(64),
+            maskedUsername: 'a***',
+            imageUrl: '/api/image-proxy?token=old-profile',
+            feedImageUrls: ['/api/image-proxy?token=old-feed'],
+        });
+        const merged = mergeScreenedCandidateHistory(existing, [{
+            candidateKey: 'a'.repeat(64),
+            username: 'a***',
+            occurrence: 0,
+            imageUrl: null,
+            feedImageUrls: [],
+        }]);
+
+        expect(merged).toBe(existing);
+        expect(merged[0]?.imageUrl).toBe('/api/image-proxy?token=old-profile');
+        expect(merged[0]?.feedImageUrls).toEqual(['/api/image-proxy?token=old-feed']);
+    });
+
+    it('flattens variable-length candidate media into a stable pool with fallbacks', () => {
+        expect(flattenScreenedCandidateMedia([
+            {
+                candidateKey: 'a'.repeat(64),
+                username: 'a***',
+                occurrence: 4,
+                imageUrl: '/api/image-proxy?token=profile-a',
+                feedImageUrls: ['/api/image-proxy?token=feed-a'],
+            },
+            {
+                candidateKey: 'b'.repeat(64),
+                username: 'b***',
+                occurrence: 5,
+                imageUrl: null,
+                feedImageUrls: [],
+            },
+        ])).toEqual([
+            {
+                candidateKey: 'a'.repeat(64),
+                username: 'a***',
+                occurrence: 4,
+                mediaIndex: 0,
+                imageUrl: '/api/image-proxy?token=profile-a',
+            },
+            {
+                candidateKey: 'a'.repeat(64),
+                username: 'a***',
+                occurrence: 4,
+                mediaIndex: 1,
+                imageUrl: '/api/image-proxy?token=feed-a',
+            },
+            {
+                candidateKey: 'b'.repeat(64),
+                username: 'b***',
+                occurrence: 5,
+                mediaIndex: 0,
+                imageUrl: null,
+            },
+        ]);
+    });
+
     it('separates rail copies and nonadjacent occurrences without changing survivor keys', () => {
         const survivorKey = candidateCopyKey(7, 0);
 

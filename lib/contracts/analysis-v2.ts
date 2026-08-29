@@ -68,6 +68,24 @@ const progressFeedImageUrlsSchema = z.array(imageProxyPathSchema)
         }
     });
 const stageCodeSchema = z.string().min(1).max(64).regex(/^[A-Z][A-Z0-9_]*$/);
+export const progressCallPhaseSchema = z.enum([
+    'fetching',
+    'analyzing',
+    'persisting',
+]);
+const progressCandidateMediaSchema = z.object({
+    maskedUsername: z.string()
+        .min(1)
+        .max(30)
+        .regex(/^[A-Za-z0-9._*]+$/)
+        .regex(/\*/, 'Candidate username must be masked.'),
+    imageUrl: imageProxyPathSchema.nullable(),
+    feedImageUrls: progressFeedImageUrlsSchema.default([]),
+    candidateKey: z.string().regex(/^[0-9a-f]{64}$/).optional(),
+}).strict();
+
+export type ProgressCallPhase = z.infer<typeof progressCallPhaseSchema>;
+export type ProgressCandidateMediaV1 = z.infer<typeof progressCandidateMediaSchema>;
 
 const FORBIDDEN_PUBLIC_COPY_PATTERNS = [
     /https?:\/\//iu,
@@ -548,7 +566,11 @@ export const progressSnapshotV1Schema = z.object({
         imageUrl: boundedImageUrlSchema,
         feedImageUrls: progressFeedImageUrlsSchema.optional(),
         candidateKey: z.string().regex(/^[0-9a-f]{64}$/).optional(),
+        currentOrdinal: z.number().int().nonnegative().max(30).optional(),
+        totalCount: z.number().int().positive().max(30).optional(),
+        callPhase: progressCallPhaseSchema.optional(),
     }).strict().nullable(),
+    candidateMedia: z.array(progressCandidateMediaSchema).max(60).default([]),
     etaRange: z.object({
         lowSeconds: z.number().int().nonnegative().max(3_600),
         highSeconds: z.number().int().nonnegative().max(3_600),
@@ -557,6 +579,18 @@ export const progressSnapshotV1Schema = z.object({
     }).nullable(),
     lastEventSeq: z.number().int().nonnegative(),
 }).strict().superRefine((value, context) => {
+    if (
+        value.activeProfile !== null
+        && value.activeProfile.currentOrdinal !== undefined
+        && value.activeProfile.totalCount !== undefined
+        && value.activeProfile.currentOrdinal > value.activeProfile.totalCount
+    ) {
+        context.addIssue({
+            code: 'custom',
+            message: 'Current profile ordinal cannot exceed the total.',
+            path: ['activeProfile', 'currentOrdinal'],
+        });
+    }
     if (value.status === 'completed' && value.progressBp !== 10_000) {
         context.addIssue({
             code: 'custom',

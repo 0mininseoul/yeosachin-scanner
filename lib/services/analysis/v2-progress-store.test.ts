@@ -199,6 +199,8 @@ describe('V2 progress persistence adapter', () => {
                     '/api/image-proxy?token=feed-1',
                     '/api/image-proxy?token=feed-2',
                 ],
+                p_current_ordinal: 0,
+                p_call_phase: 'fetching',
             }
         );
         expect(mock.rpc).toHaveBeenCalledOnce();
@@ -238,6 +240,11 @@ describe('V2 progress persistence adapter', () => {
             feedImageUrls: Array.from({ length: 4 }, (_, index) => (
                 `/api/image-proxy?token=${index}`
             )),
+        })).rejects.toThrow();
+        await expect(store.heartbeatActiveProfile!({
+            ...heartbeat,
+            totalCount: 1,
+            currentOrdinal: 2,
         })).rejects.toThrow();
         await expect(store.heartbeatActiveProfile!({
             ...heartbeat,
@@ -419,6 +426,55 @@ describe('V2 progress persistence adapter', () => {
             p_after_sequence: 1,
             p_event_limit: 50,
         });
+    });
+
+    it('masks and freshly signs bounded profile-outcome history on owner reads', async () => {
+        const mock = client({
+            snapshot: snapshot({
+                candidateMediaRaw: [{
+                    username: 'candidate.name',
+                    profile: {
+                        username: 'candidate.name',
+                        fullName: 'Candidate Name',
+                        bio: 'bio',
+                        profilePicUrl: 'https://cdn.example/profile.jpg',
+                        followersCount: 10,
+                        followingCount: 8,
+                        postsCount: 1,
+                        isPrivate: false,
+                        isVerified: false,
+                        latestPosts: [{
+                            id: 'post-1',
+                            shortCode: 'post-1',
+                            imageUrl: 'https://cdn.example/post.jpg',
+                            type: 'image',
+                            likesCount: 1,
+                            commentsCount: 0,
+                            timestamp: '2026-07-13T10:00:00.000Z',
+                            taggedUsers: [],
+                            mentionedUsers: [],
+                        }],
+                    },
+                }],
+            }),
+            events: [],
+        });
+        const sign = vi.fn((raw: string) => `/api/image-proxy?token=${raw === 'https://cdn.example/profile.jpg' ? 'profile' : 'feed'}`);
+        const store = createAnalysisV2ProgressStore(mock, {
+            imageProxySigner: sign,
+            candidateKeyDeriver: () => candidateKey,
+        });
+
+        const result = await store.loadForOwner({ requestId, userId });
+
+        expect(result?.snapshot.candidateMedia).toEqual([{
+            maskedUsername: 'c************e',
+            imageUrl: '/api/image-proxy?token=profile',
+            feedImageUrls: ['/api/image-proxy?token=feed'],
+            candidateKey,
+        }]);
+        expect(JSON.stringify(result)).not.toContain('candidate.name');
+        expect(sign).toHaveBeenCalledTimes(2);
     });
 
     it('fails closed on event gaps and future revisions', async () => {

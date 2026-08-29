@@ -13,12 +13,20 @@ export interface ActiveCandidateMedia {
     feedImageUrls?: readonly string[];
 }
 
+export interface ScreenedCandidateMediaTile {
+    candidateKey?: string;
+    username: string;
+    occurrence: number;
+    mediaIndex: number;
+    imageUrl: string | null;
+}
+
 /* The progress snapshot names only the candidate being read right now, so the
    history of already screened candidates is accumulated on the client. */
 export const MAX_SCREENED_CANDIDATES = 20;
 
-/** Below this the row reads as a loading placeholder rather than as people. */
-export const MIN_SCREENED_CANDIDATES_TO_SHOW = 3;
+/** One real tile is enough to make the continuous rail useful. */
+export const MIN_SCREENED_CANDIDATES_TO_SHOW = 1;
 
 function feedImages(active: ActiveCandidateMedia): readonly string[] {
     return active.feedImageUrls?.slice(0, 3) ?? [];
@@ -31,7 +39,98 @@ export function signedProgressCandidateMedia(
     return [candidate.imageUrl, ...candidate.feedImageUrls]
         .filter((url): url is string => (
             typeof url === 'string' && url.startsWith('/api/image-proxy?')
+    ));
+}
+
+/**
+ * Flattens each candidate's variable-sized media bundle into tile-sized items.
+ * A candidate with no usable media still gets one item, so a failed image can
+ * retain its width and render the same fallback as a not-yet-loaded tile.
+ */
+export function flattenScreenedCandidateMedia(
+    candidates: readonly ScreenedCandidate[],
+): readonly ScreenedCandidateMediaTile[] {
+    return candidates.flatMap(candidate => {
+        const media = signedProgressCandidateMedia(candidate);
+        if (media.length === 0) {
+            return [{
+                ...(candidate.candidateKey !== undefined
+                    ? { candidateKey: candidate.candidateKey }
+                    : {}),
+                username: candidate.username,
+                occurrence: candidate.occurrence,
+                mediaIndex: 0,
+                imageUrl: null,
+            }] satisfies ScreenedCandidateMediaTile[];
+        }
+        return media.map<ScreenedCandidateMediaTile>((imageUrl, mediaIndex) => ({
+            ...(candidate.candidateKey !== undefined
+                ? { candidateKey: candidate.candidateKey }
+                : {}),
+            username: candidate.username,
+            occurrence: candidate.occurrence,
+            mediaIndex,
+            imageUrl,
+        }));
+    });
+}
+
+function matchingScreenedCandidateIndex(
+    current: readonly ScreenedCandidate[],
+    candidate: ScreenedCandidate,
+): number {
+    if (candidate.candidateKey !== undefined) {
+        const keyedIndex = current.findIndex(item => item.candidateKey === candidate.candidateKey);
+        if (keyedIndex >= 0) return keyedIndex;
+        return current.findIndex(item => (
+            item.candidateKey === undefined && item.username === candidate.username
         ));
+    }
+    return current.findIndex(item => (
+        item.candidateKey === undefined && item.username === candidate.username
+    ));
+}
+
+/** Merges server history without moving older candidates on every fresh read. */
+export function mergeScreenedCandidateHistory(
+    current: readonly ScreenedCandidate[],
+    incoming: readonly ScreenedCandidate[],
+): readonly ScreenedCandidate[] {
+    let next: readonly ScreenedCandidate[] = current;
+    for (const candidate of incoming) {
+        const index = matchingScreenedCandidateIndex(next, candidate);
+        if (index < 0) {
+            next = [...next, {
+                ...candidate,
+                occurrence: nextOccurrence(next),
+            }];
+            if (next.length > MAX_SCREENED_CANDIDATES) {
+                next = next.slice(next.length - MAX_SCREENED_CANDIDATES);
+            }
+            continue;
+        }
+        const existing = next[index]!;
+        const nextCandidate = {
+            ...(candidate.candidateKey !== undefined
+                ? { candidateKey: candidate.candidateKey }
+                : existing.candidateKey !== undefined
+                    ? { candidateKey: existing.candidateKey }
+                    : {}),
+            username: candidate.username,
+            imageUrl: candidate.imageUrl ?? existing.imageUrl,
+            feedImageUrls: candidate.feedImageUrls.length >= existing.feedImageUrls.length
+                ? candidate.feedImageUrls
+                : existing.feedImageUrls,
+        };
+        if (!sameCandidateData(existing, nextCandidate)) {
+            next = [
+                ...next.slice(0, index),
+                { ...nextCandidate, occurrence: existing.occurrence },
+                ...next.slice(index + 1),
+            ];
+        }
+    }
+    return next;
 }
 
 function sameCandidate(
@@ -50,7 +149,12 @@ function matchingCandidateIndex(
     active: ActiveCandidateMedia,
 ): number {
     if (active.candidateKey !== undefined) {
-        return current.findIndex(candidate => candidate.candidateKey === active.candidateKey);
+        const keyedIndex = current.findIndex(candidate => candidate.candidateKey === active.candidateKey);
+        if (keyedIndex >= 0) return keyedIndex;
+        return current.findIndex(candidate => (
+            candidate.candidateKey === undefined
+            && candidate.username === active.maskedUsername
+        ));
     }
     const lastIndex = current.length - 1;
     return lastIndex >= 0 && sameCandidate(current[lastIndex], active) ? lastIndex : -1;

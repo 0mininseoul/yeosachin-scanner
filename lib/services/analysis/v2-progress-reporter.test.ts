@@ -169,6 +169,33 @@ describe('analysis V2 progress reporter', () => {
         expect(JSON.stringify(heartbeatActiveProfile.mock.calls)).not.toContain('Candidate.Name');
     });
 
+    it('forwards bounded in-stage ordinal and call-phase signals', async () => {
+        const heartbeatActiveProfile = vi.fn(async () => true);
+        const store = progressStore();
+        store.heartbeatActiveProfile = heartbeatActiveProfile;
+        const reporter = createAnalysisV2ProgressReporter({ store });
+
+        await reporter.heartbeat!({
+            claim: claim({
+                jobKey: 'track:profile-ai:batch:0',
+                track: 'profile_ai',
+                kind: 'ai',
+                batch: 0,
+            }),
+            stage: 'profile_ai',
+            username: 'candidate.name',
+            startedAt: '2026-07-14T02:00:00.000Z',
+            totalCount: 10,
+            currentOrdinal: 99,
+            callPhase: 'analyzing',
+        });
+
+        expect(heartbeatActiveProfile).toHaveBeenCalledWith(expect.objectContaining({
+            currentOrdinal: 10,
+            callPhase: 'analyzing',
+        }));
+    });
+
     it('signs an already-selected candidate preview before one heartbeat persistence call', async () => {
         const heartbeatActiveProfile = vi.fn(async () => true);
         const candidateKeyDeriver = vi.fn(() => candidateKey);

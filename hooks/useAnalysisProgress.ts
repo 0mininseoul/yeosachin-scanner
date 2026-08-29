@@ -11,6 +11,14 @@ import {
     mergeProgressEvents,
     shouldApplyProgressRevision,
 } from '@/lib/services/analysis/v2-progress-client-state';
+import {
+    createProgressDisplayState,
+    nextProgressCheckpointBp,
+    pauseProgressDisplay,
+    updateProgressDisplay,
+    type ProgressDisplayInput,
+    type ProgressDisplayState,
+} from '@/lib/services/analysis/v2-progress-display';
 import { createClient } from '@/lib/supabase/client';
 import { captureExceptionSafely } from '@/lib/observability/sentry-capture';
 
@@ -25,6 +33,7 @@ interface AnalysisProgress {
     demo: boolean;
     tracks: ProgressSnapshotV1['tracks'] | null;
     activeProfile: ProgressSnapshotV1['activeProfile'];
+    candidateMedia: ProgressSnapshotV1['candidateMedia'];
     etaRange: ProgressSnapshotV1['etaRange'];
     events: ProgressEventV1[];
 }
@@ -42,6 +51,33 @@ function isAbortError(error: unknown): boolean {
         && error !== null
         && 'name' in error
         && error.name === 'AbortError';
+}
+
+function displayInputForSnapshot(
+    snapshot: ProgressSnapshotV1,
+    nowMs: number,
+    visible: boolean,
+): ProgressDisplayInput {
+    const active = snapshot.activeProfile;
+    return {
+        confirmedProgressBp: snapshot.progressBp,
+        nextCheckpointBp: nextProgressCheckpointBp(snapshot.tracks),
+        status: snapshot.status,
+        nowMs,
+        visible,
+        signalKey: JSON.stringify([
+            snapshot.revision,
+            active?.candidateKey ?? null,
+            active?.maskedUsername ?? null,
+            active?.currentOrdinal ?? null,
+            active?.totalCount ?? null,
+            active?.callPhase ?? null,
+        ]),
+    };
+}
+
+function progressPercentFromBasisPoints(progressBp: number): number {
+    return Math.min(100, Math.floor(progressBp / 100));
 }
 
 // Supabase can reject channel removal while React is tearing down the page.
@@ -79,6 +115,10 @@ export function useAnalysisProgress(requestId: string) {
     const v2LastEventSeqRef = useRef(0);
     const v2RevisionRef = useRef(-1);
     const fetchQueuedRef = useRef(false);
+    const v2DisplayStateRef = useRef<ProgressDisplayState>(
+        createProgressDisplayState()
+    );
+    const v2DisplayInputRef = useRef<Omit<ProgressDisplayInput, 'nowMs' | 'visible'> | null>(null);
     const analyticsEligibleRef = useRef(true);
     const activeRequestIdRef = useRef<string | null>(null);
     const fetchInFlightRef = useRef<{
@@ -152,11 +192,23 @@ export function useAnalysisProgress(requestId: string) {
                         return;
                     }
                     v2RevisionRef.current = progress.snapshot.revision;
+                    const displayInput = displayInputForSnapshot(
+                        progress.snapshot,
+                        Date.now(),
+                        document.visibilityState === 'visible',
+                    );
+                    v2DisplayInputRef.current = displayInput;
+                    v2DisplayStateRef.current = updateProgressDisplay(
+                        v2DisplayStateRef.current,
+                        displayInput,
+                    );
                     setData({
                         id: progress.snapshot.requestId,
                         pipelineVersion: 'v2',
                         status: mapV2Status(progress.snapshot.status),
-                        progress: Math.round(progress.snapshot.progressBp / 10) / 10,
+                        progress: progressPercentFromBasisPoints(
+                            v2DisplayStateRef.current.displayProgressBp
+                        ),
                         progressStep: analysisV2ProgressCopy({
                             status: progress.snapshot.status,
                             tracks: progress.snapshot.tracks,
@@ -172,6 +224,7 @@ export function useAnalysisProgress(requestId: string) {
                         demo: response.headers.get('x-analytics-eligible') === '0',
                         tracks: progress.snapshot.tracks,
                         activeProfile: progress.snapshot.activeProfile,
+                        candidateMedia: progress.snapshot.candidateMedia,
                         etaRange: progress.snapshot.etaRange,
                         events: retainedEvents,
                     });
@@ -201,6 +254,7 @@ export function useAnalysisProgress(requestId: string) {
                     demo: false,
                     tracks: null,
                     activeProfile: null,
+                    candidateMedia: [],
                     etaRange: null,
                     events: [],
                 });
@@ -245,6 +299,8 @@ export function useAnalysisProgress(requestId: string) {
         v2LastEventSeqRef.current = 0;
         v2RevisionRef.current = -1;
         fetchQueuedRef.current = false;
+        v2DisplayStateRef.current = createProgressDisplayState();
+        v2DisplayInputRef.current = null;
         void fetchData();
         return () => {
             if (activeRequestIdRef.current === requestId) {
@@ -291,17 +347,60 @@ export function useAnalysisProgress(requestId: string) {
         };
     }, [currentData?.pipelineVersion, currentData?.status, fetchData, requestId, supabase]);
 
+    // Ease the presentation between durable checkpoints. This timer is local
+    // display work only: it never changes the server snapshot or its revision.
+    useEffect(() => {
+        if (
+            currentData?.pipelineVersion !== 'v2'
+            || currentData.status === 'completed'
+            || currentData.status === 'failed'
+        ) return;
+        const tick = () => {
+            const base = v2DisplayInputRef.current;
+            if (!base) return;
+            const previous = v2DisplayStateRef.current;
+            const next = updateProgressDisplay(
+                previous,
+                {
+                    ...base,
+                    nowMs: Date.now(),
+                    visible: document.visibilityState === 'visible',
+                },
+            );
+            v2DisplayStateRef.current = next;
+            if (next.displayProgressBp === previous.displayProgressBp) return;
+            setData(previous => previous?.id === requestId
+                ? {
+                    ...previous,
+                    progress: progressPercentFromBasisPoints(next.displayProgressBp),
+                }
+                : previous);
+        };
+        const interval = window.setInterval(tick, 250);
+        return () => window.clearInterval(interval);
+    }, [currentData?.pipelineVersion, currentData?.status, requestId]);
+
     // Realtime accelerates visible updates; this bounded poll closes any reconnect/event gaps.
     useEffect(() => {
         if (currentData?.status === 'completed' || currentData?.status === 'failed') return;
+        const handleVisibility = () => {
+            if (document.visibilityState === 'visible') {
+                void fetchData();
+                return;
+            }
+            v2DisplayStateRef.current = pauseProgressDisplay(
+                v2DisplayStateRef.current,
+                Date.now(),
+            );
+        };
         const refreshIfVisible = () => {
             if (document.visibilityState === 'visible') void fetchData();
         };
         const interval = window.setInterval(refreshIfVisible, 5_000);
-        document.addEventListener('visibilitychange', refreshIfVisible);
+        document.addEventListener('visibilitychange', handleVisibility);
         return () => {
             window.clearInterval(interval);
-            document.removeEventListener('visibilitychange', refreshIfVisible);
+            document.removeEventListener('visibilitychange', handleVisibility);
         };
     }, [currentData?.status, fetchData]);
 

@@ -1,4 +1,5 @@
 import { calculateWeightedProgress } from '@/lib/domain/analysis/progress-policy';
+import type { ProgressCallPhase } from '@/lib/contracts/analysis-v2';
 import type { ClaimedAnalysisV2Job } from './v2-job-store';
 import type { AnalysisV2DagState } from './v2-dag-planner';
 import {
@@ -40,6 +41,8 @@ export interface AnalysisV2ProgressReporter {
         startedAt: string;
         totalCount: number;
         preview?: AnalysisV2ProgressCandidateMediaPreview;
+        currentOrdinal?: number;
+        callPhase?: ProgressCallPhase;
     }): Promise<boolean>;
 }
 
@@ -197,7 +200,15 @@ export function createAnalysisV2ProgressReporter(input: {
     }
 
     return {
-        async heartbeat({ claim, username, startedAt, totalCount, preview }) {
+        async heartbeat({
+            claim,
+            username,
+            startedAt,
+            totalCount,
+            preview,
+            currentOrdinal,
+            callPhase,
+        }) {
             if (!store.heartbeatActiveProfile) {
                 throw new Error('ANALYSIS_V2_ACTIVE_PROFILE_HEARTBEAT_UNAVAILABLE');
             }
@@ -217,6 +228,9 @@ export function createAnalysisV2ProgressReporter(input: {
             } catch {
                 candidateKey = undefined;
             }
+            const ordinal = Number.isInteger(currentOrdinal)
+                ? Math.max(0, Math.min(totalCount, currentOrdinal ?? 0))
+                : 0;
             return store.heartbeatActiveProfile({
                 requestId: claim.requestId,
                 jobKey: claim.jobKey,
@@ -227,6 +241,8 @@ export function createAnalysisV2ProgressReporter(input: {
                 maskedUsername: maskAnalysisV2ProgressUsername(username),
                 imageUrl: media.imageUrl,
                 feedImageUrls: media.feedImageUrls,
+                currentOrdinal: ordinal,
+                callPhase: callPhase ?? 'fetching',
                 ...(candidateKey ? { candidateKey } : {}),
             });
         },

@@ -914,6 +914,8 @@ describe('analysis V2 durable DAG worker', () => {
             username: 'Candidate.One',
             startedAt: expect.stringMatching(/^\d{4}-\d{2}-\d{2}T/),
             totalCount: 30,
+            currentOrdinal: 0,
+            callPhase: 'fetching',
         });
         expect(Object.hasOwn(calls[0]![0], 'preview')).toBe(false);
         expect(Date.parse(calls[1]![0].startedAt)).toBeGreaterThan(

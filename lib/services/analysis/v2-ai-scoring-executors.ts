@@ -1947,7 +1947,12 @@ export function createAnalysisV2AiScoringExecutorRegistry(
                 preparedOutcomes = await runBounded(
                     results,
                     profileConcurrency,
-                    async (item): Promise<AnalysisV2PreparedProfileAiOutcome> => {
+                    async (item, index): Promise<AnalysisV2PreparedProfileAiOutcome> => {
+                        const signal = {
+                            currentOrdinal: index + 1,
+                            totalCount: results.length,
+                            callPhase: 'analyzing' as const,
+                        };
                         let preview;
                         if (
                             item.status === 'success'
@@ -1960,9 +1965,9 @@ export function createAnalysisV2AiScoringExecutorRegistry(
                                 // Progress presentation must never affect candidate analysis.
                                 preview = undefined;
                             }
-                            await context.reportActiveProfile?.(item.username, preview);
+                            await context.reportActiveProfile?.(item.username, preview, signal);
                         } else {
-                            await context.reportActiveProfile?.(item.username);
+                            await context.reportActiveProfile?.(item.username, undefined, signal);
                         }
                     const candidateId = analysisV2CandidateId(item.username);
                     if (item.status !== 'success' || !item.profile || item.profile.isPrivate) {

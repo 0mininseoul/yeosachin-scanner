@@ -48,6 +48,7 @@ import {
     cleanupConfiguredAnalysisV2TerminalMedia,
 } from './v2-media-artifact-store';
 import type { AnalysisV2ProgressCandidateMediaPreview } from './progress-candidate-media';
+import type { ProgressCallPhase } from '@/lib/contracts/analysis-v2';
 import { analysisV2ResultStore } from './v2-result-store';
 import { assertSupportedAiStagePolicyVersion } from '@/lib/services/ai/stage-policy';
 import {
@@ -154,7 +155,12 @@ export interface AnalysisV2StageExecutorContext<S extends AnalysisV2StageId> {
     /** Reports the exact profile whose work is starting; persistence masks the handle. */
     reportActiveProfile?: (
         username: string,
-        preview?: AnalysisV2ProgressCandidateMediaPreview
+        preview?: AnalysisV2ProgressCandidateMediaPreview,
+        signal?: {
+            currentOrdinal: number;
+            totalCount: number;
+            callPhase: ProgressCallPhase;
+        },
     ) => Promise<void>;
 }
 
@@ -630,7 +636,7 @@ export async function executeAnalysisV2DagJob(
         riskPolicyVersion,
         handlerDeadlineAtMs,
         ...(progressReporter?.heartbeat && activeProfileStage ? {
-            reportActiveProfile: async (username: string, preview) => {
+            reportActiveProfile: async (username: string, preview, signal) => {
                 const startedAtMs = Math.max(
                     Date.now(),
                     lastActiveProfileStartedAtMs + 1
@@ -642,6 +648,8 @@ export async function executeAnalysisV2DagJob(
                     username,
                     startedAt: new Date(startedAtMs).toISOString(),
                     totalCount: activeProfileBatchTotal!,
+                    currentOrdinal: signal?.currentOrdinal ?? 0,
+                    callPhase: signal?.callPhase ?? 'fetching',
                     ...(preview === undefined ? {} : { preview }),
                 });
             },

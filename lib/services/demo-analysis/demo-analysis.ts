@@ -1239,6 +1239,7 @@ export function projectDemoProgress(input: {
                         : demoProgressProfileId(progressBp),
                 imageUrl: input.fixture?.summary.targetProfileImage ?? (isRedactedFixture(input.fixtureVersion) ? v3Avatar('target', 0) : avatar(0)),
             },
+            candidateMedia: [],
             etaRange: completed ? null : { lowSeconds: Math.ceil((10_000 - progressBp) / 10_000 * input.durationSeconds), highSeconds: Math.ceil((10_000 - progressBp) / 10_000 * input.durationSeconds) },
             lastEventSeq: allEvents.length,
         },

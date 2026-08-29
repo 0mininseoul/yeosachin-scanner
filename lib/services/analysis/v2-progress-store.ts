@@ -2,6 +2,7 @@ import { createHash } from 'node:crypto';
 import { z } from 'zod';
 import {
     ANALYSIS_V2_SCHEMA_VERSION,
+    progressCallPhaseSchema,
     progressEventV1Schema,
     progressSnapshotV1Schema,
     type ProgressEventV1,
@@ -15,7 +16,11 @@ import {
     type ProgressTrackId,
 } from '@/lib/domain/analysis/progress-policy';
 import { supabaseAdmin } from '@/lib/supabase/admin';
+import { createImageProxyPath } from '@/lib/services/media/image-proxy-token';
 import { canonicalizeAnalysisV2ProgressUsername } from './progress-username';
+import { selectAnalysisV2ProgressCandidateMedia } from './progress-candidate-media';
+import { analysisV2CheckpointProfileSchema } from './v2-profile-fetch-store';
+import { analysisV2ProgressCandidateKey } from './preflight-identity';
 
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const JOB_KEY_PATTERN = /^[a-z0-9][a-z0-9:._-]{0,159}$/;
@@ -125,7 +130,17 @@ const activeProfileHeartbeatInputSchema = z.object({
         .nullable(),
     feedImageUrls: heartbeatFeedImageUrlsSchema,
     candidateKey: z.string().regex(SHA256_PATTERN).optional(),
-}).strict();
+    currentOrdinal: z.number().int().nonnegative().max(30).default(0),
+    callPhase: progressCallPhaseSchema.default('fetching'),
+}).strict().superRefine((value, context) => {
+    if (value.currentOrdinal > value.totalCount) {
+        context.addIssue({
+            code: 'custom',
+            path: ['currentOrdinal'],
+            message: 'Heartbeat ordinal cannot exceed the total count.',
+        });
+    }
+});
 
 const etaInputSchema = z.object({
     lowSeconds: z.number().int().min(0).max(3_600),
@@ -257,6 +272,18 @@ const loadResponseSchema = z.object({
     }
 });
 
+const rawCandidateMediaSchema = z.object({
+    username: z.string().trim().min(1).max(30).regex(/^[a-z0-9._]+$/),
+    profile: z.unknown(),
+}).strict();
+const rawLoadSnapshotSchema = z.object({
+    candidateMediaRaw: z.array(rawCandidateMediaSchema).max(60).optional(),
+}).passthrough();
+const rawLoadResponseSchema = z.object({
+    snapshot: rawLoadSnapshotSchema,
+    events: z.array(z.unknown()).max(200),
+}).strict();
+
 export interface AnalysisV2ProgressTrackInput {
     state: AnalysisV2ProgressTrackState;
     stageCode: string;
@@ -330,6 +357,8 @@ export interface AnalysisV2ProgressStore {
         imageUrl: string | null;
         feedImageUrls: string[];
         candidateKey?: string;
+        currentOrdinal?: number;
+        callPhase?: z.infer<typeof progressCallPhaseSchema>;
     }): Promise<boolean>;
     loadForOwner(input: {
         requestId: string;
@@ -351,6 +380,14 @@ export class AnalysisV2ProgressConflictError extends Error {
         super(message);
         this.name = 'AnalysisV2ProgressConflictError';
     }
+}
+
+type ImageProxySigner = (rawUrl: string) => string | undefined;
+type CandidateKeyDeriver = (requestId: string, rawUsername: string) => string;
+
+interface AnalysisV2ProgressStoreOptions {
+    imageProxySigner?: ImageProxySigner;
+    candidateKeyDeriver?: CandidateKeyDeriver;
 }
 
 function maskCharacters(value: string): string {
@@ -480,9 +517,64 @@ function throwRpcError(error: RpcError, operation: string): never {
     );
 }
 
+function signedProgressImage(
+    rawUrl: string,
+    sign: ImageProxySigner,
+): string | undefined {
+    try {
+        const signed = sign(rawUrl);
+        return typeof signed === 'string'
+            && signed.length <= 2_048
+            && signed.startsWith('/api/image-proxy?')
+            ? signed
+            : undefined;
+    } catch {
+        return undefined;
+    }
+}
+
+function sanitizeCandidateMedia(
+    rawCandidates: readonly z.infer<typeof rawCandidateMediaSchema>[] | undefined,
+    requestId: string,
+    sign: ImageProxySigner,
+    deriveCandidateKey: CandidateKeyDeriver,
+): ProgressSnapshotV1['candidateMedia'] {
+    return (rawCandidates ?? []).flatMap(rawCandidate => {
+        const parsedProfile = analysisV2CheckpointProfileSchema.safeParse(rawCandidate.profile);
+        if (!parsedProfile.success) return [];
+
+        const preview = selectAnalysisV2ProgressCandidateMedia(parsedProfile.data);
+        const imageUrl = preview.profilePicUrl
+            ? signedProgressImage(preview.profilePicUrl, sign) ?? null
+            : null;
+        const feedImageUrls = preview.feedImageUrls
+            .map(url => signedProgressImage(url, sign))
+            .filter((url): url is string => url !== undefined)
+            .filter((url, index, values) => values.indexOf(url) === index);
+        let candidateKey: string | undefined;
+        try {
+            const derived = deriveCandidateKey(requestId, rawCandidate.username);
+            if (SHA256_PATTERN.test(derived)) candidateKey = derived;
+        } catch {
+            candidateKey = undefined;
+        }
+
+        return [{
+            maskedUsername: maskAnalysisV2ProgressUsername(rawCandidate.username),
+            imageUrl,
+            feedImageUrls,
+            ...(candidateKey ? { candidateKey } : {}),
+        }];
+    });
+}
+
 export function createAnalysisV2ProgressStore(
-    client: AnalysisV2ProgressSupabaseClient = supabaseAdmin
+    client: AnalysisV2ProgressSupabaseClient = supabaseAdmin,
+    options: AnalysisV2ProgressStoreOptions = {},
 ): AnalysisV2ProgressStore {
+    const imageProxySigner = options.imageProxySigner ?? createImageProxyPath;
+    const candidateKeyDeriver = options.candidateKeyDeriver
+        ?? analysisV2ProgressCandidateKey;
     return {
         async heartbeatActiveProfile(rawInput) {
             const input = activeProfileHeartbeatInputSchema.parse(rawInput);
@@ -499,6 +591,8 @@ export function createAnalysisV2ProgressStore(
                     p_image_url: input.imageUrl,
                     p_feed_image_urls: input.feedImageUrls,
                     p_candidate_key: input.candidateKey ?? null,
+                    p_current_ordinal: input.currentOrdinal,
+                    p_call_phase: input.callPhase,
                 }
             );
             if (error) throwRpcError(error, 'active profile heartbeat');
@@ -589,7 +683,28 @@ export function createAnalysisV2ProgressStore(
             );
             if (error) throwRpcError(error, 'owner load');
             if (data === null) return null;
-            const parsed = loadResponseSchema.safeParse(data);
+            const rawParsed = rawLoadResponseSchema.safeParse(data);
+            if (!rawParsed.success) {
+                throw new Error(
+                    'ANALYSIS_V2_PROGRESS_PERSISTENCE_ERROR: invalid owner load response.'
+                );
+            }
+            const { candidateMediaRaw, ...snapshot } = rawParsed.data.snapshot;
+            const candidateMedia = candidateMediaRaw !== undefined
+                ? sanitizeCandidateMedia(
+                    candidateMediaRaw,
+                    input.requestId.toLowerCase(),
+                    imageProxySigner,
+                    candidateKeyDeriver,
+                )
+                : snapshot.candidateMedia;
+            const parsed = loadResponseSchema.safeParse({
+                snapshot: {
+                    ...snapshot,
+                    candidateMedia,
+                },
+                events: rawParsed.data.events,
+            });
             if (
                 !parsed.success
                 || parsed.data.snapshot.requestId !== input.requestId.toLowerCase()

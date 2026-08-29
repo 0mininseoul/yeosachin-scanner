@@ -293,10 +293,19 @@ export default function ProgressPage({ params }: PageProps) {
         ? V2_TRACK_PRESENTATION.find(({ key }) => data.tracks![key].state === 'running')
         : undefined;
     const activeTrackLabel = runningTrack?.label ?? '판독 준비 중';
-    /* done/total of whatever is running: the one count that answers "how much
-       is left" without the reader having to translate a percentage. */
+    /* Prefer the exact profile ordinal while a provider call is in flight;
+       fall back to the durable track count for stages without an item signal. */
     const runningCounts = runningTrack ? data.tracks![runningTrack.key] : null;
-    const screenedCount = runningCounts && runningCounts.total > 0 ? runningCounts : null;
+    const activeProfileCount = data.activeProfile
+        && data.activeProfile.currentOrdinal !== undefined
+        && data.activeProfile.totalCount !== undefined
+        ? {
+            done: data.activeProfile.currentOrdinal,
+            total: data.activeProfile.totalCount,
+        }
+        : null;
+    const screenedCount = activeProfileCount
+        ?? (runningCounts && runningCounts.total > 0 ? runningCounts : null);
     const narration = preferredProgressNarration(data.progressStep, data.events);
 
     return (
@@ -368,7 +377,11 @@ export default function ProgressPage({ params }: PageProps) {
                 {/* Who is being read right now, and how far in. */}
                 {data.pipelineVersion === 'v2' && (
                     <div data-amp-block>
-                        <ProgressFaces active={data.activeProfile} />
+                        <ProgressFaces
+                            key={requestId}
+                            active={data.activeProfile}
+                            candidateMedia={data.candidateMedia}
+                        />
                     </div>
                 )}
 
@@ -426,7 +439,7 @@ export default function ProgressPage({ params }: PageProps) {
                                         {isComplete
                                             ? '완료'
                                             : isRunning
-                                                ? `${Math.round(track.progressBp / 100)}%`
+                                                ? `${Math.floor(track.progressBp / 100)}%`
                                                 : '대기'}
                                     </span>
                                 </div>

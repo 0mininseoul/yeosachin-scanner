@@ -2313,6 +2313,10 @@ describe('V2 AI and scoring executors', () => {
                 'https://cdninstagram.com/woman.parallel/post-0.jpg',
                 'https://cdninstagram.com/woman.parallel/post-1.jpg',
             ],
+        }, {
+            currentOrdinal: 1,
+            totalCount: 1,
+            callPhase: 'analyzing',
         });
     });
 
@@ -2357,7 +2361,11 @@ describe('V2 AI and scoring executors', () => {
         expect(deps.normalizeMedia).not.toHaveBeenCalled();
         expect(deps.ai.gender).not.toHaveBeenCalled();
         expect(reportActiveProfile).toHaveBeenCalledOnce();
-        expect(reportActiveProfile.mock.calls[0]).toEqual(['private.preview']);
+        expect(reportActiveProfile.mock.calls[0]).toEqual([
+            'private.preview',
+            undefined,
+            { currentOrdinal: 1, totalCount: 1, callPhase: 'analyzing' },
+        ]);
     });
 
     it('reports an unavailable checkpoint once without selector, media, or AI work', async () => {
@@ -2398,7 +2406,11 @@ describe('V2 AI and scoring executors', () => {
         expect(deps.normalizeMedia).not.toHaveBeenCalled();
         expect(deps.ai.gender).not.toHaveBeenCalled();
         expect(reportActiveProfile).toHaveBeenCalledOnce();
-        expect(reportActiveProfile.mock.calls[0]).toEqual(['unavailable.preview']);
+        expect(reportActiveProfile.mock.calls[0]).toEqual([
+            'unavailable.preview',
+            undefined,
+            { currentOrdinal: 1, totalCount: 1, callPhase: 'analyzing' },
+        ]);
     });
 
     it('continues candidate analysis when progress-media derivation unexpectedly fails', async () => {
@@ -2437,7 +2449,11 @@ describe('V2 AI and scoring executors', () => {
 
         expect(deps.profileBatches.loadExactBatch).toHaveBeenCalledOnce();
         expect(deps.ai.gender).toHaveBeenCalledOnce();
-        expect(reportActiveProfile).toHaveBeenCalledExactlyOnceWith('media.failure', undefined);
+        expect(reportActiveProfile).toHaveBeenCalledExactlyOnceWith(
+            'media.failure',
+            undefined,
+            { currentOrdinal: 1, totalCount: 1, callPhase: 'analyzing' },
+        );
     });
 
     it('drains in-flight Gemini work before surfacing the first bounded worker failure', async () => {
