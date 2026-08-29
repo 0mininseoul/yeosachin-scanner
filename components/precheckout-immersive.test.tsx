@@ -254,7 +254,7 @@ describe('PrecheckoutImmersive', () => {
         expect(container.querySelector('[data-precheckout-demo-mode="waiting"]')).not.toBeNull();
     });
 
-    it('ends naturally at T+90 with a neutral fallback CTA and no early plan release', async () => {
+    it('holds unresolved fresh entries through T+90 and settles at the next graph boundary', async () => {
         vi.stubGlobal('fetch', vi.fn().mockResolvedValue(noBody()));
         const onGoToPlans = vi.fn();
 
@@ -272,6 +272,11 @@ describe('PrecheckoutImmersive', () => {
         expect(container.textContent).not.toContain('상세 분석 보기');
         await advance(90_000);
 
+        expect(container.querySelector('[data-precheckout-fallback]')).toBeNull();
+        await advance(1_999);
+        expect(container.querySelector('[data-precheckout-fallback]')).toBeNull();
+        await advance(1);
+
         expect(analyticsMocks.trackPrecheckoutEvent).toHaveBeenCalledWith(
             'precheckout_blite_fallback_selected', PREFLIGHT_ID, { fallback_reason: 'unresolved_at_90' },
         );
@@ -282,7 +287,7 @@ describe('PrecheckoutImmersive', () => {
         expect(onGoToPlans).toHaveBeenCalledOnce();
     });
 
-    it('does not postpone the fallback beyond T+90 when the deadline callback is late', async () => {
+    it('does not exit mid-stage when the T+90 deadline callback is late', async () => {
         vi.stubGlobal('fetch', vi.fn().mockResolvedValue(noBody()));
 
         await act(async () => {
@@ -297,6 +302,8 @@ describe('PrecheckoutImmersive', () => {
         await settleUi();
         await advance(90_001);
 
+        expect(container.querySelector('[data-precheckout-fallback]')).toBeNull();
+        await advance(1_999);
         expect(container.querySelector('[data-precheckout-fallback]')).not.toBeNull();
     });
 
@@ -323,7 +330,7 @@ describe('PrecheckoutImmersive', () => {
         expect(container.querySelector('[data-precheckout-fallback]')).not.toBeNull();
     });
 
-    it('holds a terminal B-lite status behind the same neutral T+90 fallback', async () => {
+    it('holds a terminal B-lite status through T+90 and settles at the next graph boundary', async () => {
         vi.stubGlobal('fetch', vi.fn().mockResolvedValue(jsonResponse(failedStatus())));
 
         await act(async () => {
@@ -340,6 +347,8 @@ describe('PrecheckoutImmersive', () => {
         expect(container.querySelector('[data-precheckout-demo-mode="waiting"]')).not.toBeNull();
         await advance(1);
 
+        expect(container.querySelector('[data-precheckout-fallback]')).toBeNull();
+        await advance(2_000);
         expect(container.querySelector('[data-precheckout-fallback]')).not.toBeNull();
         expect(container.textContent).not.toContain('B-lite');
         expect(container.textContent).not.toContain('실패');
@@ -584,6 +593,8 @@ describe('PrecheckoutImmersive', () => {
         await advance(1);
 
         expect(fetchMock).toHaveBeenCalledTimes(1);
+        expect(container.querySelector('[data-precheckout-fallback]')).toBeNull();
+        await advance(2_000);
         expect(container.querySelector('[data-precheckout-fallback]')).not.toBeNull();
         expect(container.querySelector('[data-precheckout-result-card]')).toBeNull();
         expect(analyticsMocks.trackPrecheckoutEvent).toHaveBeenCalledWith(

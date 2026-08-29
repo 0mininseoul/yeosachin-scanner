@@ -252,13 +252,7 @@ export function PrecheckoutImmersive({
 
         const settleFallback = () => {
             if (!active || exitRef.current !== null) return;
-            // A reload can make the accepted-preflight deadline land inside the freshly-restarted
-            // initial pass; that pass must still finish its guaranteed 1->2->3->4 order, so only
-            // then defer to its boundary. Once the initial pass has already finished, the
-            // deadline is the fallback authority and settles immediately rather than waiting on a
-            // waiting-loop stage.
-            const initialPassEndsAtMs = visibleEntryAtMs + PRECHECKOUT_DEMO_DURATION_MS;
-            requestExit('fallback', Date.now() >= initialPassEndsAtMs);
+            requestExit('fallback');
         };
 
         const schedulePoll = (delayMs: number) => {
