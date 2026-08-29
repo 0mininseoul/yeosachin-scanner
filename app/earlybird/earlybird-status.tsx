@@ -6,7 +6,7 @@ import { useEffect, useRef, useState } from 'react';
 import { BrandMark, CaseCard, Eyebrow, PrimaryButton } from '@/components/case-ui';
 import { useAuth } from '@/hooks/useAuth';
 import type { EarlybirdOrderStatusDto } from '@/lib/services/earlybird/order-status';
-import { EVENTS, flushAnalytics, trackEvent } from '@/lib/services/analytics';
+import { EVENTS, flushAnalytics as flushAnalyticsNow, trackEvent } from '@/lib/services/analytics';
 import {
     availableAnalyticsStorage,
     tryClaimAnalyticsEvent,
@@ -119,6 +119,10 @@ export function EarlybirdStatus({
         && isPaidDeliveryPending
         && !nextUrl;
     const navigationTargetRef = useRef<string | null>(null);
+    const navigationFlushRef = useRef<{
+        target: string;
+        promise: Promise<void>;
+    } | null>(null);
 
     useEffect(() => {
         setOwnerOrder(order);
@@ -185,8 +189,24 @@ export function EarlybirdStatus({
         if (!nextUrl) return;
         if (navigationTargetRef.current === nextUrl) return;
         let active = true;
+        let flushEntry: {
+            target: string;
+            promise: Promise<void>;
+        } | null = null;
+        const flushAnalytics = () => {
+            const inFlightFlush = navigationFlushRef.current;
+            if (inFlightFlush?.target === nextUrl) {
+                flushEntry = inFlightFlush;
+                return inFlightFlush.promise;
+            }
+            const promise = flushAnalyticsNow();
+            flushEntry = { target: nextUrl, promise };
+            navigationFlushRef.current = flushEntry;
+            return promise;
+        };
         void flushAnalytics().finally(() => {
-            if (active) navigationTargetRef.current = nextUrl;
+            if (!active || navigationFlushRef.current !== flushEntry) return;
+            navigationTargetRef.current = nextUrl;
             if (active) router.replace(nextUrl);
         });
         return () => {

@@ -559,14 +559,16 @@ describe('earlybird mounted payment return recovery', () => {
         expect(routerMock.replace).toHaveBeenCalledOnce();
     });
 
-    it('replays the active paid-return bridge effect under StrictMode without duplicate analytics', async () => {
+    it('shares a pending same-target flush across StrictMode replay before navigating', async () => {
         const requestId = '123e4567-e89b-42d3-a456-426614174000';
         const nextUrl = `/progress/${requestId}`;
         let resolveFlush!: () => void;
         const flushPromise = new Promise<void>(resolve => {
             resolveFlush = resolve;
         });
-        analyticsMocks.flushAnalytics.mockReturnValue(flushPromise);
+        analyticsMocks.flushAnalytics
+            .mockImplementationOnce(() => flushPromise)
+            .mockImplementationOnce(() => Promise.resolve());
 
         await act(async () => {
             root.render(createElement(
@@ -584,6 +586,7 @@ describe('earlybird mounted payment return recovery', () => {
             await Promise.resolve();
         });
 
+        expect(analyticsMocks.flushAnalytics).toHaveBeenCalledOnce();
         expect(routerMock.replace).not.toHaveBeenCalled();
         expect(analyticsMocks.trackEvent).toHaveBeenCalledTimes(2);
 
@@ -594,6 +597,72 @@ describe('earlybird mounted payment return recovery', () => {
 
         expect(routerMock.replace).toHaveBeenCalledOnce();
         expect(routerMock.replace).toHaveBeenCalledWith(nextUrl);
+        expect(analyticsMocks.flushAnalytics).toHaveBeenCalledOnce();
         expect(analyticsMocks.trackEvent).toHaveBeenCalledTimes(2);
+    });
+
+    it('does not navigate when the owner truly unmounts before its flush resolves', async () => {
+        let resolveFlush!: () => void;
+        const flushPromise = new Promise<void>(resolve => {
+            resolveFlush = resolve;
+        });
+        analyticsMocks.flushAnalytics.mockReturnValue(flushPromise);
+
+        render(automaticPendingOrder({
+            progressUrl: '/progress/123e4567-e89b-42d3-a456-426614174000',
+        }));
+        await act(async () => {
+            await Promise.resolve();
+        });
+        expect(analyticsMocks.flushAnalytics).toHaveBeenCalledOnce();
+
+        act(() => root.unmount());
+        await act(async () => {
+            resolveFlush();
+            await flushPromise;
+        });
+
+        expect(routerMock.replace).not.toHaveBeenCalled();
+    });
+
+    it('does not let an old target completion navigate after the target changes', async () => {
+        const firstTarget = '/progress/123e4567-e89b-42d3-a456-426614174000';
+        const secondTarget = '/progress/123e4567-e89b-42d3-a456-426614174002';
+        let resolveFirstFlush!: () => void;
+        let resolveSecondFlush!: () => void;
+        const firstFlush = new Promise<void>(resolve => {
+            resolveFirstFlush = resolve;
+        });
+        const secondFlush = new Promise<void>(resolve => {
+            resolveSecondFlush = resolve;
+        });
+        analyticsMocks.flushAnalytics
+            .mockImplementationOnce(() => firstFlush)
+            .mockImplementationOnce(() => secondFlush);
+
+        render(automaticPendingOrder({ progressUrl: firstTarget }));
+        await act(async () => {
+            await Promise.resolve();
+        });
+        expect(analyticsMocks.flushAnalytics).toHaveBeenCalledOnce();
+
+        render(automaticPendingOrder({ progressUrl: secondTarget }));
+        await act(async () => {
+            await Promise.resolve();
+        });
+        expect(analyticsMocks.flushAnalytics).toHaveBeenCalledTimes(2);
+
+        await act(async () => {
+            resolveFirstFlush();
+            await firstFlush;
+        });
+        expect(routerMock.replace).not.toHaveBeenCalled();
+
+        await act(async () => {
+            resolveSecondFlush();
+            await secondFlush;
+        });
+        expect(routerMock.replace).toHaveBeenCalledOnce();
+        expect(routerMock.replace).toHaveBeenCalledWith(secondTarget);
     });
 });
