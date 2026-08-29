@@ -6,7 +6,7 @@ import { useEffect, useRef, useState } from 'react';
 import { BrandMark, CaseCard, Eyebrow, PrimaryButton } from '@/components/case-ui';
 import { useAuth } from '@/hooks/useAuth';
 import type { EarlybirdOrderStatusDto } from '@/lib/services/earlybird/order-status';
-import { EVENTS, trackEvent } from '@/lib/services/analytics';
+import { EVENTS, flushAnalytics, trackEvent } from '@/lib/services/analytics';
 import {
     availableAnalyticsStorage,
     tryClaimAnalyticsEvent,
@@ -185,7 +185,13 @@ export function EarlybirdStatus({
         if (!nextUrl) return;
         if (navigationTargetRef.current === nextUrl) return;
         navigationTargetRef.current = nextUrl;
-        router.replace(nextUrl);
+        let active = true;
+        void flushAnalytics().finally(() => {
+            if (active) router.replace(nextUrl);
+        });
+        return () => {
+            active = false;
+        };
     }, [nextUrl, router]);
 
     const handleCheckoutRecovery = async () => {

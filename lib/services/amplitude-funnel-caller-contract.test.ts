@@ -78,16 +78,16 @@ describe('Amplitude product funnel caller contract', () => {
         const status = source('app/earlybird/earlybird-status.tsx');
         expect(status).toContain('const { user, loading: authLoading } = useAuth();');
         expect(status).toMatch(/if \(authLoading \|\| !user\?\.id\) return;/);
-        const effect = status.match(/useEffect\(\(\) => \{[\s\S]*?\}, \[authLoading, order, user\?\.id\]\);/)?.[0] ?? '';
-        expect(effect).toContain('order_id: order.orderId');
-        expect(effect).toContain('status: order.systemStatus');
+        const effect = status.match(/useEffect\(\(\) => \{[\s\S]*?\}, \[authLoading, currentOrder, user\?\.id\]\);/)?.[0] ?? '';
+        expect(effect).toContain('order_id: currentOrder.orderId');
+        expect(effect).toContain('status: currentOrder.systemStatus');
         expect(effect).not.toMatch(/targetInstagramId|email|phone|buyer|groble/i);
     });
 
     it('flushes status and payment analytics before the automatic fulfillment bridge navigates', () => {
         const status = source('app/earlybird/earlybird-status.tsx');
         expect(status).toMatch(
-            /trackEvent\(EVENTS\.PAYMENT_CONFIRMED_VIEWED[\s\S]*?\}, \[authLoading, order, user\?\.id\]\);[\s\S]*?flushAnalytics\(\)[\s\S]*?router\.replace\(nextUrl\)/,
+            /trackEvent\(EVENTS\.PAYMENT_CONFIRMED_VIEWED[\s\S]*?\}, \[authLoading, currentOrder, user\?\.id\]\);[\s\S]*?let active = true;[\s\S]*?void flushAnalytics\(\)\.finally\(\(\) => \{[\s\S]*?if \(active\) router\.replace\(nextUrl\);[\s\S]*?return \(\) => \{[\s\S]*?active = false;/,
         );
     });
 

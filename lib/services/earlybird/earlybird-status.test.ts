@@ -530,9 +530,11 @@ describe('earlybird mounted payment return recovery', () => {
         expect(routerMock.replace).toHaveBeenCalledOnce();
     });
 
-    it('navigates as soon as a request-scoped progress URL arrives without waiting for analytics', async () => {
+    it('waits for the bounded analytics flush before navigating to a request-scoped progress URL', async () => {
         const requestId = '123e4567-e89b-42d3-a456-426614174000';
-        analyticsMocks.flushAnalytics.mockReturnValue(new Promise<void>(() => {}));
+        analyticsMocks.flushAnalytics.mockImplementation(
+            () => new Promise<void>(resolve => setTimeout(resolve, 500)),
+        );
         render(automaticPendingOrder());
 
         render(automaticPendingOrder({
@@ -542,9 +544,14 @@ describe('earlybird mounted payment return recovery', () => {
         await act(async () => {
             await Promise.resolve();
         });
+        expect(analyticsMocks.flushAnalytics).toHaveBeenCalledOnce();
+        expect(routerMock.replace).not.toHaveBeenCalled();
+
+        await act(async () => {
+            await vi.advanceTimersByTimeAsync(500);
+        });
         expect(routerMock.replace).toHaveBeenCalledOnce();
         expect(routerMock.replace).toHaveBeenCalledWith(`/progress/${requestId}`);
-        expect(analyticsMocks.flushAnalytics).not.toHaveBeenCalled();
 
         render(automaticPendingOrder({
             progressUrl: `/progress/${requestId}`,

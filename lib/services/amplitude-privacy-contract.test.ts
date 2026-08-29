@@ -78,7 +78,7 @@ describe('Amplitude replay privacy contract', () => {
         expect(betaTest).toMatch(/id="beta-target-instagram"[\s\S]*?data-amp-mask/);
         expect(betaTest).toMatch(/id="beta-excluded-instagram"[\s\S]*?data-amp-mask/);
         expect(feedback).toMatch(/<textarea[\s\S]*?data-amp-mask/);
-        expect(earlybird).toMatch(/href=\{order\.resultUrl\}[\s\S]*?data-amp-block/);
+        expect(earlybird).toMatch(/href=\{currentOrder\.resultUrl\}[\s\S]*?data-amp-block/);
         expect(profilePreview).toMatch(/data-amp-block[\s\S]*?profile\.instagramId/);
         expect(profilePreview).toMatch(/data-amp-block[\s\S]*?profile\.(?:overview|bio)/);
         expect((analyze.match(/data-amp-mask[\s\S]{0,400}\{error\}/g)?.length ?? 0)).toBeGreaterThanOrEqual(2);

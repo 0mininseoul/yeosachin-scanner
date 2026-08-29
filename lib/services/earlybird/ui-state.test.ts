@@ -621,7 +621,7 @@ describe('earlybird analyze UI state', () => {
 
     it('gates the status-page recovery button on the server capability DTO', () => {
         const source = readFileSync(new URL('../../../app/earlybird/earlybird-status.tsx', import.meta.url), 'utf8');
-        expect(source).toContain('order.checkoutRecoverable');
+        expect(source).toContain('currentOrder.checkoutRecoverable');
         expect(source).toContain('redirectCheckout: nextUrl =>');
         expect(source).not.toContain('redirectCheckout: checkoutUrl => window.location.assign(checkoutUrl)');
     });
@@ -751,8 +751,8 @@ describe('earlybird analyze UI state', () => {
             new URL('../../../app/earlybird/earlybird-status.tsx', import.meta.url),
             'utf8'
         );
-        expect(source).toContain("order.systemStatus === 'payment_pending'");
-        expect(source).toContain('order.preflightId');
+        expect(source).toContain("currentOrder.systemStatus === 'payment_pending'");
+        expect(source).toContain('currentOrder.preflightId');
         expect(source).toContain('recoverPendingEarlybirdCheckout(');
         expect(source).toContain('disabled={checkoutRecoveryPending}');
         expect(source).toContain('결제 계속하기');

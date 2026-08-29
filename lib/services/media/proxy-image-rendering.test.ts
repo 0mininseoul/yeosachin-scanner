@@ -12,13 +12,13 @@ const proxyImageUsages = [
     },
     {
         // The progress page hands the active profile to the screened-faces
-        // strip, which is where the signed URL is now rendered.
-        name: 'progress screened faces',
+        // strip, which is where the signed URL is now rendered visibly.
+        name: 'progress visible screened faces',
         source: readFileSync(
             new URL('../../../components/progress-faces.tsx', import.meta.url),
             'utf8'
         ),
-        srcExpression: 'src',
+        srcExpression: 'displaySrc',
     },
 ] as const;
 
@@ -49,5 +49,20 @@ describe('signed image proxy rendering contract', () => {
         expect(source).toContain('Array.from({ length: copyCount');
         expect(source).toContain('copyElements[1].offsetLeft');
         expect(source).toContain('copyElements[0].offsetLeft');
+    });
+
+    it('keeps the visible image lazy and the retry probe eager', () => {
+        const source = proxyImageUsages[1].source;
+        const imageTags = source.match(/<Image\b[\s\S]*?\/>/g) ?? [];
+        const displayTags = imageTags.filter(tag => tag.includes('src={displaySrc}'));
+        const probeTags = imageTags.filter(tag => tag.includes('src={probeSrc}'));
+
+        expect(displayTags).toHaveLength(1);
+        expect(displayTags[0]).toMatch(/\bunoptimized(?:\s|\/>)/);
+        expect(displayTags[0]).toContain('loading="lazy"');
+        expect(probeTags).toHaveLength(1);
+        expect(probeTags[0]).toMatch(/\bunoptimized(?:\s|\/>)/);
+        expect(probeTags[0]).toContain('loading="eager"');
+        expect(probeTags[0]).toContain('data-progress-retry="true"');
     });
 });
