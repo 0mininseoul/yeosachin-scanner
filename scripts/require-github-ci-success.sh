@@ -80,6 +80,7 @@ if ! jq -e '
   type == "object"
     and (.total_count | type == "number" and . >= 0 and floor == .)
     and (.workflow_runs | type == "array")
+    and (.total_count == (.workflow_runs | length))
     and all(.workflow_runs[]?;
       type == "object"
         and (.path | type == "string")

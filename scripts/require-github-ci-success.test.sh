@@ -122,6 +122,23 @@ assert_contains "$output" 'GitHub Actions CI gate passed'
 assert_not_contains "$output" "$github_token"
 assert_not_contains "$output" "$response_sentinel"
 
+export FAKE_RESPONSE="{\"total_count\":2,\"workflow_runs\":[{\"path\":\".github/workflows/ci.yml\",\"head_sha\":\"$expected_sha\",\"event\":\"push\",\"head_branch\":\"main\",\"status\":\"completed\",\"conclusion\":\"success\"}]}"
+run_rejected 'total_count greater than returned workflow runs' \
+  'GitHub Actions API returned malformed JSON'
+
+export FAKE_RESPONSE="{\"total_count\":0,\"workflow_runs\":[{\"path\":\".github/workflows/ci.yml\",\"head_sha\":\"$expected_sha\",\"event\":\"push\",\"head_branch\":\"main\",\"status\":\"completed\",\"conclusion\":\"success\"}]}"
+run_rejected 'total_count less than returned workflow runs' \
+  'GitHub Actions API returned malformed JSON'
+
+matching_workflow_run="{\"path\":\".github/workflows/ci.yml\",\"head_sha\":\"$expected_sha\",\"event\":\"push\",\"head_branch\":\"main\",\"status\":\"completed\",\"conclusion\":\"success\"}"
+truncated_workflow_runs="$matching_workflow_run"
+for ((run_index = 1; run_index < 100; run_index++)); do
+  truncated_workflow_runs+=",$matching_workflow_run"
+done
+export FAKE_RESPONSE="{\"total_count\":101,\"workflow_runs\":[$truncated_workflow_runs]}"
+run_rejected '101-total truncated successful response' \
+  'GitHub Actions API returned malformed JSON'
+
 export FAKE_RESPONSE="{\"total_count\":2,\"workflow_runs\":[{\"path\":\".github/workflows/ci.yml\",\"head_sha\":\"$expected_sha\",\"event\":\"pull_request\",\"head_branch\":\"feature\",\"status\":\"completed\",\"conclusion\":\"success\"},{\"path\":\".github/workflows/ci.yml\",\"head_sha\":\"$expected_sha\",\"event\":\"push\",\"head_branch\":\"main\",\"status\":\"in_progress\",\"conclusion\":null}]}"
 run_rejected 'successful pull-request plus pending main push' \
   'CI run for source SHA is not completed successfully'
