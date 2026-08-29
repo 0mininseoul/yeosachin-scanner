@@ -576,6 +576,38 @@ describe('sanitizeOperationalEvent', () => {
         expect(JSON.stringify(sanitized)).not.toContain('secret-token');
     });
 
+    it('keeps progress fail-open diagnostics structured without raw transport details', () => {
+        const sanitized = sanitizeOperationalEvent({
+            event: 'analysis_v2.progress_fail_open',
+            severity: 'warn',
+            fields: {
+                request_id: UUIDS.request,
+                job_key: 'track:profiles:batch:0',
+                operation: 'worker',
+                phase: 'progress',
+                error_code: 'ANALYSIS_V2_PROGRESS_REPORT_FAIL_OPEN',
+                correlation: 'transport',
+                disposition: 'fallback',
+                retryable: true,
+                error_message: 'connect ECONNREFUSED 127.0.0.1:5432',
+            },
+        });
+
+        expect(sanitized.message).toBe('analysis_v2.progress_fail_open');
+        expect(sanitized.fields).toMatchObject({
+            request_id: UUIDS.request,
+            job_key: 'track:profiles:batch:0',
+            operation: 'worker',
+            phase: 'progress',
+            error_code: 'ANALYSIS_V2_PROGRESS_REPORT_FAIL_OPEN',
+            correlation: 'transport',
+            disposition: 'fallback',
+            retryable: true,
+        });
+        expect(sanitized.fields).not.toHaveProperty('error_message');
+        expect(JSON.stringify(sanitized)).not.toContain('ECONNREFUSED');
+    });
+
     it('accepts the complete planned operational event vocabulary', () => {
         const eventNames = [
             'operational.invalid_event',

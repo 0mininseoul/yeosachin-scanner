@@ -42,6 +42,9 @@ import {
 } from './v2-progress-store';
 import {
     createAnalysisV2ProgressReporter,
+    emitAnalysisV2ProgressFailOpen,
+    isAnalysisV2ProgressFenceFailure,
+    isAnalysisV2ProgressNonFenceFailure,
     type AnalysisV2ProgressReporter,
 } from './v2-progress-reporter';
 import {
@@ -507,6 +510,32 @@ async function executeRegisteredStage<S extends AnalysisV2StageId>(
 }
 
 /**
+ * Progress is a projection of the durable DAG, not the stage's correctness
+ * boundary. Keep non-fence persistence/transport drift out of task failure
+ * handling, including while an older reporter implementation is rolling out.
+ */
+async function invokeProgressOperation<T>(input: {
+    claim: ClaimedAnalysisV2Job;
+    operation: 'initialize' | 'report' | 'heartbeat';
+    run: () => Promise<T>;
+    reporter?: AnalysisV2ProgressReporter | null;
+}): Promise<T | undefined> {
+    if (!input.reporter) return undefined;
+    try {
+        return await input.run();
+    } catch (error) {
+        if (isAnalysisV2ProgressFenceFailure(error)) throw error;
+        if (!isAnalysisV2ProgressNonFenceFailure(error)) throw error;
+        emitAnalysisV2ProgressFailOpen({
+            claim: input.claim,
+            operation: input.operation,
+            error,
+        });
+        return undefined;
+    }
+}
+
+/**
  * Executes one durable DAG stage. The worker owns the manifest fence and derives fanout only
  * from a fresh canonical state, so provider retries cannot invent topology.
  */
@@ -561,18 +590,28 @@ export async function executeAnalysisV2DagJob(
             if (error instanceof AnalysisV2JobExecutionError) throw error;
             return executionError('ANALYSIS_V2_DAG_PLAN_INVALID', 'permanent');
         }
-        await progressReporter?.initialize({ claim, state });
+        await invokeProgressOperation({
+            claim,
+            operation: 'initialize',
+            reporter: progressReporter,
+            run: () => progressReporter!.initialize({ claim, state }),
+        });
         return successorsForAnalysisV2Job(plan, claim);
     }
 
     const state = await loadDagState(claim, stateStore);
     const current = canonicalPlan(claim, state);
     if (hasPersistedCheckpoint(current.stage, current.job, state)) {
-        await progressReporter?.report({
+        await invokeProgressOperation({
             claim,
-            state,
-            stage: current.stage,
-            includeStageEvent: false,
+            operation: 'report',
+            reporter: progressReporter,
+            run: () => progressReporter!.report({
+                claim,
+                state,
+                stage: current.stage,
+                includeStageEvent: false,
+            }),
         });
         return successorsForAnalysisV2Job(current.plan, claim);
     }
@@ -630,11 +669,16 @@ export async function executeAnalysisV2DagJob(
     // Fence an idempotent stage-start checkpoint before entering provider/AI work. This keeps
     // long unresolved executors observable without emitting a duplicate stage event; the
     // completion report below remains responsible for the durable stage transition.
-    await progressReporter?.report({
+    await invokeProgressOperation({
         claim,
-        state,
-        stage: current.stage,
-        includeStageEvent: false,
+        operation: 'report',
+        reporter: progressReporter,
+        run: () => progressReporter!.report({
+            claim,
+            state,
+            stage: current.stage,
+            includeStageEvent: false,
+        }),
     });
     const checkpoint = await executeRegisteredStage(current.stage, executors, {
         claim,
@@ -651,15 +695,20 @@ export async function executeAnalysisV2DagJob(
                     lastActiveProfileStartedAtMs + 1
                 );
                 lastActiveProfileStartedAtMs = startedAtMs;
-                await progressReporter.heartbeat!({
+                await invokeProgressOperation({
                     claim,
-                    stage: activeProfileStage,
-                    username,
-                    startedAt: new Date(startedAtMs).toISOString(),
-                    totalCount: activeProfileBatchTotal!,
-                    currentOrdinal: signal?.currentOrdinal ?? 0,
-                    callPhase: signal?.callPhase ?? 'fetching',
-                    ...(preview === undefined ? {} : { preview }),
+                    operation: 'heartbeat',
+                    reporter: progressReporter,
+                    run: () => progressReporter.heartbeat!({
+                        claim,
+                        stage: activeProfileStage,
+                        username,
+                        startedAt: new Date(startedAtMs).toISOString(),
+                        totalCount: activeProfileBatchTotal!,
+                        currentOrdinal: signal?.currentOrdinal ?? 0,
+                        callPhase: signal?.callPhase ?? 'fetching',
+                        ...(preview === undefined ? {} : { preview }),
+                    }),
                 });
             },
         } : {}),
@@ -676,10 +725,15 @@ export async function executeAnalysisV2DagJob(
         executionError('ANALYSIS_V2_STAGE_CHECKPOINT_NOT_VISIBLE', 'transient');
     }
     if (current.stage !== 'finalize') {
-        await progressReporter?.report({
+        await invokeProgressOperation({
             claim,
-            state: persistedState,
-            stage: current.stage,
+            operation: 'report',
+            reporter: progressReporter,
+            run: () => progressReporter!.report({
+                claim,
+                state: persistedState,
+                stage: current.stage,
+            }),
         });
     }
     return successorsForAnalysisV2Job(persisted.plan, claim);

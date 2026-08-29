@@ -205,18 +205,94 @@ function stateStore(
 
 function progressReporter(): AnalysisV2ProgressReporter {
     return {
-        initialize: vi.fn(async () => ({
-            snapshot: {} as never,
-            event: null,
-            advanced: true,
-        })),
-        report: vi.fn(async () => ({
-            snapshot: {} as never,
-            event: null,
-            advanced: true,
-        })),
+        initialize: vi.fn(async () => null),
+        report: vi.fn(async () => null),
     };
 }
+
+describe('analysis V2 progress failure isolation', () => {
+    it('keeps a paid task successful when bootstrap progress persistence drifts', async () => {
+        const jobStore = store(bootstrapClaim);
+        const progress = progressReporter();
+        progress.initialize = vi.fn(async () => {
+            throw new Error(
+                'ANALYSIS_V2_PROGRESS_PERSISTENCE_ERROR: checkpoint response drift.'
+            );
+        });
+        const terminalFailureFinalizer = vi.fn(async () => undefined);
+
+        await expect(processAnalysisV2TaskDelivery(delivery, {
+            store: jobStore,
+            stateStore: stateStore(baseState()),
+            progressReporter: progress,
+            terminalFailureFinalizer,
+        })).resolves.toMatchObject({ status: 'completed' });
+
+        expect(terminalFailureFinalizer).not.toHaveBeenCalled();
+        expect(jobStore.completeAndFanout).toHaveBeenCalledOnce();
+    });
+
+    it('keeps bootstrap successful when initialize transport fails', async () => {
+        const jobStore = store(bootstrapClaim);
+        const progress = progressReporter();
+        progress.initialize = vi.fn(async () => {
+            throw new TypeError('fetch failed: ECONNREFUSED');
+        });
+
+        await expect(processAnalysisV2TaskDelivery(delivery, {
+            store: jobStore,
+            stateStore: stateStore(baseState()),
+            progressReporter: progress,
+        })).resolves.toMatchObject({ status: 'completed' });
+
+        expect(jobStore.completeAndFanout).toHaveBeenCalledOnce();
+    });
+
+    it('keeps a true progress fence fatal so a stale claim cannot advance', async () => {
+        const progress = progressReporter();
+        progress.initialize = vi.fn(async () => {
+            throw new Error('ANALYSIS_V2_PROGRESS_FENCE_MISMATCH');
+        });
+
+        await expect(executeAnalysisV2DagJob(bootstrapClaim, {
+            stateStore: stateStore(baseState()),
+            progressReporter: progress,
+        })).rejects.toThrow('ANALYSIS_V2_PROGRESS_FENCE_MISMATCH');
+    });
+
+    it('keeps a stage successful when report transport fails before and after execution', async () => {
+        const initial = baseState();
+        const relationshipClaim = claimFor(initial, ANALYSIS_V2_RELATIONSHIPS_JOB_KEY);
+        const completed = { ...initial, relationships: relationshipManifest() };
+        let current = initial;
+        const dagStore = stateStore(initial, {
+            load: vi.fn(async () => current),
+            checkpointManifest: vi.fn(async () => {
+                current = completed;
+                return current;
+            }),
+        });
+        const progress = progressReporter();
+        progress.report = vi.fn(async () => {
+            throw new TypeError('fetch failed: ECONNREFUSED');
+        });
+        const executor = vi.fn(async () => ({
+            checkpoint: {
+                kind: 'relationships' as const,
+                manifest: relationshipManifest(),
+            },
+        }));
+
+        await expect(executeAnalysisV2DagJob(relationshipClaim, {
+            stateStore: dagStore,
+            executors: { relationships: executor },
+            progressReporter: progress,
+        })).resolves.toEqual(expect.any(Array));
+
+        expect(executor).toHaveBeenCalledOnce();
+        expect(progress.report).toHaveBeenCalledTimes(2);
+    });
+});
 
 describe('analysis V2 durable DAG worker', () => {
     it('passes the route-selected durable lease to the exact claim', async () => {

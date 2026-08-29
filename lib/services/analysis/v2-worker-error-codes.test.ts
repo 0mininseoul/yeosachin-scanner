@@ -5,6 +5,7 @@ import {
     APIFY_DURABLE_PROVIDER_CALLBACK_ERROR_CODES,
 } from '@/lib/services/instagram/providers/apify-relationship';
 import { AnalysisV2AiResultRecoveryPendingError } from './v2-ai-result-store';
+import { OPERATIONAL_ERROR_CODES } from '@/lib/observability/schema';
 
 vi.mock('@/lib/supabase/admin', () => ({ supabaseAdmin: {} }));
 
@@ -42,6 +43,22 @@ const PROFILE_AI_RUNTIME_CODES = [
 ] as const;
 
 describe('analysis V2 worker error codes', () => {
+    it('keeps progress fail-open codes telemetry-only', () => {
+        for (const code of [
+            'ANALYSIS_V2_PROGRESS_HEARTBEAT_FAIL_OPEN',
+            'ANALYSIS_V2_PROGRESS_INITIALIZE_FAIL_OPEN',
+            'ANALYSIS_V2_PROGRESS_REPORT_FAIL_OPEN',
+        ]) {
+            expect(OPERATIONAL_ERROR_CODES).toContain(code);
+            expect(isAnalysisV2WorkerErrorCode(code)).toBe(false);
+            expect(classifyAnalysisV2JobFailure(new Error(code))).toMatchObject({
+                code: 'ANALYSIS_V2_JOB_HANDLER_FAILED',
+                disposition: 'permanent',
+                retryable: false,
+            });
+        }
+    });
+
     it('accepts every immutable Apify provider callback code', () => {
         expect(Array.isArray(APIFY_DURABLE_PROVIDER_CALLBACK_ERROR_CODES)).toBe(true);
         expect(Object.isFrozen(APIFY_DURABLE_PROVIDER_CALLBACK_ERROR_CODES)).toBe(true);

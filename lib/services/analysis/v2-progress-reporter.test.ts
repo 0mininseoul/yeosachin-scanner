@@ -1,9 +1,13 @@
 import { createHash } from 'node:crypto';
 import { describe, expect, it, vi } from 'vitest';
-import type { AnalysisV2DagState } from './v2-dag-planner';
+import type {
+    AnalysisV2DagBatchResultManifest,
+    AnalysisV2DagState,
+} from './v2-dag-planner';
 import type { ClaimedAnalysisV2Job } from './v2-job-store';
 import {
     AnalysisV2ProgressConflictError,
+    AnalysisV2ProgressFenceError,
     type AnalysisV2ProgressCheckpointInput,
     type AnalysisV2ProgressStore,
 } from './v2-progress-store';
@@ -46,6 +50,16 @@ function claim(overrides: Partial<ClaimedAnalysisV2Job> = {}): ClaimedAnalysisV2
     };
 }
 
+function batchResult(label: string): AnalysisV2DagBatchResultManifest {
+    return {
+        batch: 0,
+        itemCount: 1,
+        producerInputHash: hash(`producer:${label}`),
+        revision: 1,
+        resultHash: hash(`result:${label}`),
+    };
+}
+
 function progressStore(checkpoint = vi.fn(async (input) => ({
     snapshot: input,
     event: input.event ?? null,
@@ -85,6 +99,37 @@ describe('analysis V2 progress reporter', () => {
                 highSeconds: expect.any(Number),
             }),
         }));
+    });
+
+    it('fails open with a nullable result when initialize transport is unavailable', async () => {
+        const checkpoint = vi.fn(async () => {
+            throw new TypeError('fetch failed: ECONNREFUSED');
+        });
+        const onFailOpen = vi.fn();
+        const reporter = createAnalysisV2ProgressReporter({
+            store: progressStore(checkpoint),
+            onFailOpen,
+        });
+
+        await expect(reporter.initialize({ claim: claim(), state: state() }))
+            .resolves.toBeNull();
+        expect(onFailOpen).toHaveBeenCalledWith(expect.objectContaining({
+            operation: 'initialize',
+            code: 'ANALYSIS_V2_PROGRESS_INITIALIZE_FAIL_OPEN',
+            correlation: 'transport',
+        }));
+    });
+
+    it('keeps initialize progress fences fatal', async () => {
+        const checkpoint = vi.fn(async () => {
+            throw new AnalysisV2ProgressFenceError();
+        });
+        const reporter = createAnalysisV2ProgressReporter({
+            store: progressStore(checkpoint),
+        });
+
+        await expect(reporter.initialize({ claim: claim(), state: state() }))
+            .rejects.toBeInstanceOf(AnalysisV2ProgressFenceError);
     });
 
     it('reports only sanitized DAG-derived aggregate progress', async () => {
@@ -132,6 +177,62 @@ describe('analysis V2 progress reporter', () => {
         });
         expect(payload.tracks.relationshipAi.done).toBe(1);
         expect(JSON.stringify(payload)).not.toContain('instagram');
+    });
+
+    it('retries a stale worker stage against newer canonical DAG counters', async () => {
+        const staleState = state({
+            relationships: {
+                revision: 1,
+                resultHash: hash('relationships'),
+                detectedMutualCount: 1,
+                publicCount: 1,
+                privateCount: 0,
+                detailedSelectedPublicCount: 1,
+                notScreenedPublicCount: 0,
+                profileBatches: [{
+                    batch: 0,
+                    itemCount: 1,
+                    inputHash: hash('profile-topology'),
+                }],
+                privateNameBatches: [],
+            },
+            profileFetchBatches: [batchResult('fetch')],
+        });
+        const newerCanonicalState = {
+            ...staleState,
+            profileAiBatches: [batchResult('ai')],
+        };
+        const checkpoint = vi.fn()
+            .mockRejectedValueOnce(new Error(
+                'ANALYSIS_V2_PROGRESS_PERSISTENCE_ERROR: checkpoint response drift against newer canonical DAG state.'
+            ))
+            .mockResolvedValueOnce({ snapshot: {} as never, event: null, advanced: true });
+        const reloadState = vi.fn(async () => newerCanonicalState);
+        const reporter = createAnalysisV2ProgressReporter({
+            store: progressStore(checkpoint),
+            reloadState,
+        });
+
+        await expect(reporter.report({
+            claim: claim({
+                jobKey: 'track:profiles:batch:0',
+                track: 'profiles',
+                kind: 'profile_fetch',
+                batch: 0,
+            }),
+            state: staleState,
+            stage: 'profile_fetch',
+            includeStageEvent: false,
+        })).resolves.toMatchObject({ advanced: true });
+
+        const retryInput = (checkpoint.mock.calls as unknown as [
+            [AnalysisV2ProgressCheckpointInput],
+            [AnalysisV2ProgressCheckpointInput],
+        ])[1][0];
+        expect(reloadState).toHaveBeenCalledOnce();
+        expect(retryInput.tracks.relationshipAi.done).toBe(3);
+        expect(retryInput.tracks.relationshipAi.stageCode)
+            .toBe('PUBLIC_PROFILES_COLLECTING');
     });
 
     it('masks the actual executor-start username before heartbeat persistence', async () => {
@@ -338,15 +439,19 @@ describe('analysis V2 progress reporter', () => {
         }));
     });
 
-    it('keeps heartbeat persistence failures fatal after preparing preview media', async () => {
+    it('fails open on heartbeat persistence drift and reports a safe subcode', async () => {
         const store = progressStore();
         store.heartbeatActiveProfile = vi.fn(async () => {
-            throw new Error('HEARTBEAT_PERSISTENCE_FAILED');
+            throw new Error(
+                'ANALYSIS_V2_PROGRESS_PERSISTENCE_ERROR: heartbeat failed (PGRST000).'
+            );
         });
+        const onFailOpen = vi.fn();
         const reporter = createAnalysisV2ProgressReporter({
             store,
             imageProxySigner: () => '/api/image-proxy?token=signed',
             candidateKeyDeriver: () => candidateKey,
+            onFailOpen,
         });
 
         await expect(reporter.heartbeat!({
@@ -359,8 +464,90 @@ describe('analysis V2 progress reporter', () => {
                 profilePicUrl: 'https://cdninstagram.com/candidate/profile.jpg',
                 feedImageUrls: [],
             },
-        })).rejects.toThrow('HEARTBEAT_PERSISTENCE_FAILED');
+        })).resolves.toBe(false);
         expect(store.heartbeatActiveProfile).toHaveBeenCalledOnce();
+        expect(onFailOpen).toHaveBeenCalledWith(expect.objectContaining({
+            operation: 'heartbeat',
+            code: 'ANALYSIS_V2_PROGRESS_HEARTBEAT_FAIL_OPEN',
+            correlation: 'persistence',
+        }));
+    });
+
+    it('fails open on a low-level transport failure and classifies it safely', async () => {
+        const store = progressStore();
+        store.heartbeatActiveProfile = vi.fn(async () => {
+            throw new Error('connect ECONNREFUSED 127.0.0.1:5432');
+        });
+        const logger = { emit: vi.fn() };
+        const onFailOpen = vi.fn();
+        const reporter = createAnalysisV2ProgressReporter({ store, logger, onFailOpen });
+
+        await expect(reporter.heartbeat!({
+            claim: claim(),
+            stage: 'profile_ai',
+            username: 'candidate.name',
+            startedAt: '2026-07-14T02:00:00.000Z',
+            totalCount: 30,
+        })).resolves.toBe(false);
+
+        expect(onFailOpen).toHaveBeenCalledWith(expect.objectContaining({
+            operation: 'heartbeat',
+            correlation: 'transport',
+        }));
+        expect(logger.emit).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({
+            event: 'analysis_v2.progress_fail_open',
+            severity: 'warn',
+            fields: expect.objectContaining({
+                request_id: requestId,
+                job_key: 'coordinator:bootstrap',
+                error_code: 'ANALYSIS_V2_PROGRESS_HEARTBEAT_FAIL_OPEN',
+                correlation: 'transport',
+                disposition: 'fallback',
+                retryable: true,
+            }),
+        }));
+        expect(JSON.stringify(logger.emit.mock.calls)).not.toContain('ECONNREFUSED');
+    });
+
+    it('never fails open on a progress fence mismatch', async () => {
+        const store = progressStore();
+        store.heartbeatActiveProfile = vi.fn(async () => {
+            throw new AnalysisV2ProgressFenceError();
+        });
+        const reporter = createAnalysisV2ProgressReporter({ store });
+
+        await expect(reporter.heartbeat!({
+            claim: claim(),
+            stage: 'profile_ai',
+            username: 'candidate.name',
+            startedAt: '2026-07-14T02:00:00.000Z',
+            totalCount: 30,
+        })).rejects.toBeInstanceOf(AnalysisV2ProgressFenceError);
+    });
+
+    it('fails open when a concurrent progress conflict cannot be reconciled', async () => {
+        const checkpoint = vi.fn().mockRejectedValue(new AnalysisV2ProgressConflictError());
+        const onFailOpen = vi.fn();
+        const reloadState = vi.fn(async () => null);
+        const reporter = createAnalysisV2ProgressReporter({
+            store: progressStore(checkpoint),
+            reloadState,
+            onFailOpen,
+        });
+
+        await expect(reporter.report({
+            claim: claim({
+                jobKey: 'track:relationships:collect',
+                track: 'relationships',
+                kind: 'collection',
+            }),
+            state: state(),
+            stage: 'relationships',
+        })).resolves.toBeNull();
+        expect(reloadState).toHaveBeenCalledOnce();
+        expect(onFailOpen).toHaveBeenCalledWith(expect.objectContaining({
+            correlation: 'conflict',
+        }));
     });
 
     it('reloads current DAG state once when a parallel completion makes counters stale', async () => {

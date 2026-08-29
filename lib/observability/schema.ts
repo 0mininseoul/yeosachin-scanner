@@ -118,6 +118,7 @@ export const OPERATIONAL_EVENT_NAMES = [
     'analysis_v2.worker_completed',
     'analysis_v2.worker_retry',
     'analysis_v2.worker_failed',
+    'analysis_v2.progress_fail_open',
     'analysis_v2.fresh_admission_enqueued',
     'analysis_v2.request_queued',
     'analysis_v2.result_viewed',
@@ -143,6 +144,9 @@ export const OPERATIONAL_EVENT_NAMES = [
 
 export const OPERATIONAL_ERROR_CODES = [
     'AUTH_USERNAME_INVALID',
+    'ANALYSIS_V2_PROGRESS_HEARTBEAT_FAIL_OPEN',
+    'ANALYSIS_V2_PROGRESS_INITIALIZE_FAIL_OPEN',
+    'ANALYSIS_V2_PROGRESS_REPORT_FAIL_OPEN',
     'INTERNAL_ERROR',
     'INVALID_REQUEST',
     'JOB_DISPATCH_NOT_READY',
@@ -309,6 +313,7 @@ export const OPERATIONAL_PHASES = [
     'features',
     'enqueue',
     'dispatch',
+    'progress',
     'terminalize',
 ] as const;
 
