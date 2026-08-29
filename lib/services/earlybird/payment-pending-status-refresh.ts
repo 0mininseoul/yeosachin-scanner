@@ -3,7 +3,6 @@ import type { EarlybirdOrderStatusDto } from './order-status';
 const PAYMENT_PENDING_REFRESH_DELAYS_MS = [1_000, 2_000, 4_000] as const;
 const AUTOMATIC_REFRESH_DELAYS_MS = [1_000, 2_000, 4_000, 8_000, 15_000, 30_000, 60_000] as const;
 const AUTOMATIC_TAIL_INTERVAL_MS = 60_000;
-const AUTOMATIC_TAIL_MAX_REFRESHES = 30;
 
 export type EarlybirdStatusRefreshMode = 'payment_pending' | 'automatic';
 
@@ -72,9 +71,9 @@ export function shouldAutomaticallyRedirectEarlybirdStatus(
 /**
  * Re-reads the dynamic server order snapshot for the short interval in which
  * Groble can confirm payment and automatic fulfillment can materialize a request.
- * Automatic fulfillment keeps a bounded low-frequency tail after the burst so
- * a delayed request materialization can still recover without an unbounded
- * stream of browser requests. Payment confirmation retains the short canary
+ * Automatic fulfillment keeps a bounded-rate low-frequency tail after the
+ * burst so a delayed request materialization can still recover while this
+ * refresh mode remains active. Payment confirmation retains the short canary
  * window; support and all other terminal states do not poll.
  */
 export function scheduleEarlybirdStatusSnapshotRefresh(
@@ -86,6 +85,7 @@ export function scheduleEarlybirdStatusSnapshotRefresh(
     const delays = mode === 'automatic'
         ? AUTOMATIC_REFRESH_DELAYS_MS
         : PAYMENT_PENDING_REFRESH_DELAYS_MS;
+    let tailTimer: ReturnType<typeof setInterval> | null = null;
     let lifecycleRefreshPending = false;
     let refreshInFlight: Promise<void> | null = null;
 
@@ -124,13 +124,16 @@ export function scheduleEarlybirdStatusSnapshotRefresh(
         }
     };
 
-    const scheduleTail = (delayMs: number, remaining: number) => {
-        if (cancelled || remaining <= 0) return;
+    const scheduleTail = (delayMs: number) => {
+        if (cancelled) return;
         const timer = setTimeout(() => {
             timers.delete(timer);
             if (cancelled) return;
             triggerRefresh('scheduled');
-            scheduleTail(AUTOMATIC_TAIL_INTERVAL_MS, remaining - 1);
+            if (cancelled) return;
+            tailTimer = setInterval(() => {
+                if (!cancelled) triggerRefresh('scheduled');
+            }, AUTOMATIC_TAIL_INTERVAL_MS);
         }, delayMs);
         timers.add(timer);
     };
@@ -147,9 +150,17 @@ export function scheduleEarlybirdStatusSnapshotRefresh(
         scheduleTail(
             AUTOMATIC_REFRESH_DELAYS_MS[AUTOMATIC_REFRESH_DELAYS_MS.length - 1]
                 + AUTOMATIC_TAIL_INTERVAL_MS,
-            AUTOMATIC_TAIL_MAX_REFRESHES,
         );
     }
+
+    const stopTimers = () => {
+        for (const timer of timers) clearTimeout(timer);
+        timers.clear();
+        if (tailTimer !== null) {
+            clearInterval(tailTimer);
+            tailTimer = null;
+        }
+    };
 
     if (typeof window !== 'undefined' && typeof document !== 'undefined') {
         const handleVisibilityChange = () => {
@@ -164,8 +175,7 @@ export function scheduleEarlybirdStatusSnapshotRefresh(
 
         return () => {
             cancelled = true;
-            for (const timer of timers) clearTimeout(timer);
-            timers.clear();
+            stopTimers();
             document.removeEventListener('visibilitychange', handleVisibilityChange);
             window.removeEventListener('focus', handleFocus);
             window.removeEventListener('pageshow', handlePageShow);
@@ -174,7 +184,6 @@ export function scheduleEarlybirdStatusSnapshotRefresh(
 
     return () => {
         cancelled = true;
-        for (const timer of timers) clearTimeout(timer);
-        timers.clear();
+        stopTimers();
     };
 }

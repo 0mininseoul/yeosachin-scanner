@@ -25,7 +25,7 @@ describe('earlybird payment-pending status refresh', () => {
         expect(refresh).toHaveBeenCalledTimes(2);
         vi.advanceTimersByTime(4_000);
         expect(refresh).toHaveBeenCalledTimes(3);
-        vi.runAllTimers();
+        vi.advanceTimersByTime(10_000);
         expect(refresh).toHaveBeenCalledTimes(3);
     });
 
@@ -36,12 +36,12 @@ describe('earlybird payment-pending status refresh', () => {
         const stop = scheduleEarlybirdStatusSnapshotRefresh(refresh);
         vi.advanceTimersByTime(1_000);
         stop();
-        vi.runAllTimers();
+        vi.advanceTimersByTime(10 * 60_000);
 
         expect(refresh).toHaveBeenCalledTimes(1);
     });
 
-    it('refreshes only the pending snapshot window and stale support fallback', () => {
+    it('refreshes only the pending snapshot window and stops at support fallback', () => {
         expect(shouldRefreshEarlybirdStatusSnapshot({
             systemStatus: 'payment_pending',
             requiresSupport: true,
@@ -196,7 +196,7 @@ describe('earlybird payment-pending status refresh', () => {
         expect(shouldAutomaticallyRedirectEarlybirdStatus(concierge)).toBe(false);
     });
 
-    it('gives automatic fulfillment a longer bounded low-load polling window', () => {
+    it('keeps the automatic fulfillment fast burst cadence', () => {
         vi.useFakeTimers();
         const refresh = vi.fn();
 
@@ -218,8 +218,6 @@ describe('earlybird payment-pending status refresh', () => {
         expect(refresh).toHaveBeenCalledTimes(6);
         vi.advanceTimersByTime(30_000);
         expect(refresh).toHaveBeenCalledTimes(7);
-        vi.runAllTimers();
-        expect(refresh).toHaveBeenCalledTimes(37);
     });
 
     it('continues automatic fulfillment with a bounded low-frequency tail', () => {
@@ -234,11 +232,20 @@ describe('earlybird payment-pending status refresh', () => {
         expect(refresh).toHaveBeenCalledTimes(7);
         vi.advanceTimersByTime(1);
         expect(refresh).toHaveBeenCalledTimes(8);
+        vi.advanceTimersByTime(31 * 60_000);
+        expect(refresh).toHaveBeenCalledTimes(39);
+    });
 
-        vi.runAllTimers();
-        expect(refresh.mock.calls.length).toBeGreaterThan(8);
-        const tailCalls = refresh.mock.calls.length;
-        vi.runAllTimers();
-        expect(refresh).toHaveBeenCalledTimes(tailCalls);
+    it('cancels the recurring automatic tail when the status view stops refreshing', () => {
+        vi.useFakeTimers();
+        const refresh = vi.fn();
+
+        const stop = scheduleEarlybirdStatusSnapshotRefresh(refresh, 'automatic');
+        vi.advanceTimersByTime(120_000);
+        expect(refresh).toHaveBeenCalledTimes(8);
+
+        stop();
+        vi.advanceTimersByTime(10 * 60_000);
+        expect(refresh).toHaveBeenCalledTimes(8);
     });
 });

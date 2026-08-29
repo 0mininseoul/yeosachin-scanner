@@ -244,6 +244,11 @@ describe('earlybird mounted payment return recovery', () => {
             vi.advanceTimersByTime(60_000);
         });
         expect(routerMock.refresh).toHaveBeenCalledTimes(8);
+
+        act(() => {
+            vi.advanceTimersByTime(31 * 60_000);
+        });
+        expect(routerMock.refresh).toHaveBeenCalledTimes(39);
     });
 
     it('refreshes once when the browser returns from the background', async () => {
