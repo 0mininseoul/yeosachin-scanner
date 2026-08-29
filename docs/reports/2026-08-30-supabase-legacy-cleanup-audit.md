@@ -16,6 +16,8 @@ The paid Analysis V2 path is the canonical execution path: preflight and entitle
 
 The endpoint/schema fingerprint was verified without printing credentials or row data. Supabase management-plane project identity could not be independently proven in this environment: the linked CLI query was blocked by network/privilege limitations and the account-visible project list did not identify the endpoint. Live evidence is therefore labeled “canonical endpoint/schema fingerprint,” not owner-level project proof, and every destructive decision remains blocked on an owner-authorized catalog snapshot.
 
+A separately owner-authorized exact administrator test-order cleanup operation is historical and specially scoped. It was not authorized or executed by this audit, does not authorize any future mutation here, and does not weaken the rule that an external-user `payment_pending` order may be changed or deleted only with independent provider evidence and an auditable disposition.
+
 ## Scope and safety boundary
 
 This audit intentionally did **not**:
@@ -34,6 +36,12 @@ The live relation count was collected with HTTP HEAD/count metadata requests onl
 The URL was taken from the canonical main worktree environment file by key-name lookup without sourcing or printing the file. Its host was checked as a Supabase HTTPS host, and the endpoint returned a standard public schema OpenAPI document with 165 definitions and 805 paths. The CLI reported version 2.114.0; its project listing exposed two account-visible projects that did not match the endpoint-derived project identity, while the linked database query was unavailable because the current network did not support the project's IPv6 route. A separate link attempt was rejected by the account's endpoint privilege. No project reference, token, secret, database password, Authorization header, cookie, or user identifier is included in this report.
 
 This establishes reachability of the expected production schema at the configured endpoint, but not management-plane ownership or a complete `pg_catalog` snapshot. The follow-up gate is an owner-authorized, read-only catalog export for the same endpoint.
+
+The exact OpenAPI path arithmetic is `805 = 1 root path + 165 relation/view paths + 639 RPC paths`; therefore the relation/RPC subset is `804 = 165 + 639`. The root path is not a relation or RPC. Within the 165 relation/view paths, 164 are CRUD-capable and one is the read-only view.
+
+### Destructive-action hold
+
+This report authorizes no execution. Any future row deletion or status mutation, Auth deletion, storage/object purge, DDL/DML, migration, or mutation-capable RPC remains blocked behind the existing owner-catalog, traffic/compatibility, exact-ownership/identity, provider/payment, and external-media gates. The separately authorized historical administrator test-order operation is not a bypass for any of those gates.
 
 ## Corrected sanitized inventory totals
 
@@ -66,7 +74,7 @@ The migration source contains 161 unique current table names. Compared with the 
 
 ## Aggregate live counts
 
-The following are sanitized exact counts from accessible relation headers. Forty of the 60 exact-count relations were non-zero and the other 20 returned zero; the 105 denied relations were not inferred to be zero.
+The following table intentionally lists the 40 non-zero relations among the 60 exact-count relations. The other 20 exact-count relations returned zero and are omitted from the table, not missing from the pass; the 105 denied relations were not inferred to be zero.
 
 | Family / relation | Exact rows |
 |---|---:|
@@ -237,6 +245,8 @@ This view remains live and had 391 exact accessible rows. Any replacement must p
 
 This is a future, separately approved path only. It requires a sanitized aggregate preflight, an explicit identity allowlist, archive and restore proof, Auth deletion proof where applicable, and post-operation verification. Current small counts do not authorize deletion.
 
+The 22 E2E identities are an owner-provided expected set, not a newly proven live count: 20 Kakao users whose email begins with `e2e` plus 2 users with `provider=e2e`. This audit did not read those identities or prove live membership. Before any future mutation, run a sanitized aggregate exact-count and exact-membership preflight against that expected set; any count or membership mismatch is a hard stop.
+
 ### `unknown` (3)
 
 `payment_orders`, `payments`, `pending_analysis`
@@ -253,14 +263,14 @@ No classification authorizes DDL. The three future-retirement definitions are no
 
 The cleanup design must preserve the following invariants:
 
-1. **Retention floor:** preserve user and analysis data dated 2026-07-24 or later. Do not use a table-wide delete to remove “legacy” rows. Earlier data also needs an owner-approved archive policy; age alone is not enough.
-2. **Admin identity:** preserve the admin/operator account and its classification. Admin/test cleanup is a separate approved operation, never an inferred side effect of table consolidation.
-3. **Test identities:** the 22 E2E identities and admin test artifacts are not in scope for this audit. Remove them only with a separately approved identity allowlist, aggregate preflight, Auth deletion proof, and post-delete verification.
+1. **Retention floor:** for persistent non-admin, non-E2E user-linked records, the conservative inclusive floor is `2026-07-24 00:00 Asia/Seoul`: preserve records at or after that instant. Do not use a table-wide delete to remove “legacy” rows. A timestamp before the floor does not itself authorize cleanup; records with unknown timestamp, ownership, or identity classification remain blocked pending exact evidence.
+2. **Admin identity and test scope:** preserve the admin/operator account and its classification. The separately owner-authorized exact administrator test-order cleanup operation is historical and specially scoped, was not authorized or executed by this audit, and must not be generalized to other admin, E2E, or external records.
+3. **E2E identity set:** the 22 E2E identities are an owner-provided expected set, not a newly proven live count: 20 Kakao users whose email begins with `e2e` plus 2 users with `provider=e2e`. They remain outside this audit's mutation scope. Before any future mutation, require a sanitized aggregate exact-count and exact-membership preflight; any mismatch is a hard stop, followed by the separately approved identity allowlist, Auth deletion proof, and post-delete verification gates.
 4. **Landing target/excluded split:** `landing_leads` currently has an input plus attribution fields and is service-owned. Future funnel metrics must distinguish an analysis target from an explicitly excluded target; do not reinterpret one mixed column or use paid metrics for both.
 5. **Waitlist versus withdrawn archive:** keep `earlybird_waitlist` as the active waitlist. Create a separate, access-controlled withdrawn archive or equivalent immutable lifecycle boundary; do not fold withdrawn records into waitlist state. No dedicated live withdrawn relation was observed in this audit, so its future design is unknown until approved.
 6. **Stable anonymous-to-auth mapping:** preserve the existing opaque claim/hash and device boundary. Claim a preflight to an authenticated owner once, without using a mutable email, username, or raw token as the analytics identity. Preserve the owner row if a repeated claim resolves to an already-owned preflight.
 7. **Paid-only `first_paid_at`:** use the account-principal bridge's external classification plus immutable provider/payment evidence. A status string, positive amount, E2E order, admin order, `payment_pending`, or refund alone must not set paid-ever or `first_paid_at`; when valid evidence exists, retain the earliest paid timestamp monotonically.
-8. **Abandoned `payment_pending`:** retain a short bounded pending window, but never change or delete a pending order without independent provider evidence and an auditable disposition. Preserve immutable pricing/payment lineage and do not manufacture a new order to work around an unresolved one.
+8. **Short-lived TTL artifacts and abandoned `payment_pending`:** previously approved short-lived TTL artifacts, such as abandoned `payment_pending` orders and expired preflight/source/cache rows, are a separate class from persistent user-linked records and are not cleaned by age alone. Their cleanup requires exact artifact ownership and identity classification, exact TTL expiry, applicable terminal provider/payment/media evidence, and an auditable disposition. For an external user, never change or delete a pending order without independent provider evidence; TTL expiry alone is never sufficient. Preserve immutable pricing/payment lineage and do not manufacture a new order to work around an unresolved one.
 9. **Media and provider evidence:** preserve result-image registry rows until the external R2 deletion is confirmed; preserve ambiguous provider-start ledgers until the provider outcome is resolved. Never infer “not executed” from a missing response or missing object.
 
 ## Safe future cleanup sequence
@@ -270,9 +280,9 @@ This sequence is intentionally procedural and contains no executable SQL:
 1. **Owner proof:** obtain a read-only catalog snapshot for the verified endpoint covering relations, columns, primary/unique keys, foreign keys, views/materialized views, sequences, routines, triggers, policies, RLS/force-RLS, grants, publications, `pg_depend`, and migration history. Export only object metadata and aggregate counts.
 2. **Traffic proof:** instrument or inspect route/job/RPC access counts for a complete observation window. Prove V1 write quietness separately from V1 historical reads. Include Cloud Tasks, cron, scripts, dashboards, and external operators.
 3. **Compatibility boundary:** make the canonical V2 owner-history/result projection able to serve every retained V1 result. Preserve request IDs and owner authorization; do not rewrite historical row identity.
-4. **Archive proof:** create an encrypted, access-controlled archive with aggregate manifests and restore verification. Exclude all data dated 2026-07-24 or later from destructive scope, and separately preserve admin/auth identity. Archive pending payment and provider evidence before considering retention.
+4. **Archive proof:** create an encrypted, access-controlled archive with aggregate manifests and restore verification. Exclude all persistent non-admin, non-E2E user-linked records dated `2026-07-24 00:00 Asia/Seoul` or later from destructive scope, and separately preserve admin/auth identity. Handle separately approved short-lived TTL artifacts only after exact ownership/identity and provider/payment/media gates pass; archive pending payment and provider evidence before considering retention.
 5. **Reference migration:** move callers one surface at a time, with dual-read comparison that records only sanitized aggregate mismatches. Keep the old path read-only during the rollback window.
-6. **Retention gate:** expire only short-lived source/cache rows whose provider costs, leases, and external objects are terminal and reconciled. Keep payment evidence, account identity, result ownership, and legal/operational audit rows.
+6. **Retention gate:** expire only separately approved short-lived TTL artifacts (for example, abandoned `payment_pending` and preflight/source/cache rows) whose exact ownership/scope, TTL, provider costs, payment disposition, leases, and external objects are terminal and reconciled. Keep persistent user-linked records at or after the retention floor, payment evidence, account identity, result ownership, and legal/operational audit rows.
 7. **Object-removal approval:** only after the prior gates pass should an owner approve a small, exact migration allowlist for an object. Review migration order, dependent routines, triggers, policies, publications, grants, and rollback before applying it. This audit supplies no migration file or executable SQL.
 8. **Post-removal verification:** re-run catalog and aggregate checks, route smoke tests, owner-history reads, payment/recovery reconciliation, media access/purge checks, and secret scans. Retain the archive and rollback evidence for the agreed window.
 
@@ -282,7 +292,8 @@ This sequence is intentionally procedural and contains no executable SQL:
 - What are the exact live relation kinds, partition flags, sizes, row estimates, current columns, primary/unique keys, foreign keys, policies, grants, triggers, publication membership, and `pg_depend` edges for all 165 definitions, especially the 105 denied relations and the 13 no-static-reference names?
 - Which migration versions are applied remotely, and does remote history exactly align with the 354-file source set? The protected reconciliation migration must remain untouched.
 - Which external jobs, dashboards, cron tasks, operators, and historical clients call long-tail RPCs or V1 endpoints dynamically?
-- What are the date-bounded aggregate counts, by account classification and lifecycle, for data before and after 2026-07-24? Do not answer this by exporting rows.
+- What are the date-bounded aggregate counts, separated between persistent non-admin/non-E2E user-linked records and separately approved short-lived TTL artifacts, before and after `2026-07-24 00:00 Asia/Seoul`? Do not answer this by exporting rows.
+- Does the owner-provided E2E expected set (20 Kakao email-prefix `e2e` users plus 2 `provider=e2e` users) pass an exact-count and exact-membership preflight? Any mismatch must stop a future mutation.
 - Which payment records have independent provider evidence, and which `payment_pending` records are abandoned versus still recoverable? No payment status was changed in this audit.
 - What is the external R2/GCS object count and terminal/orphan status by request age? Read object metadata only after the storage owner approves a sanitized aggregate report.
 
@@ -300,4 +311,5 @@ The 105 HTTP 403 responses are a positive signal that direct Data API access is 
 - Live checks were aggregate/metadata-only: OpenAPI definitions and paths, HEAD relation count headers, exact counts for accessible relations, forbidden-status totals, and Storage bucket count.
 - Static checks included whitespace-normalized RLS declaration counts, dynamic RLS target coverage, source-to-live table alignment, qualified and unqualified FK reference counts, complete realtime publication-add membership, relation/RPC text references, route/store/provider mapping, and documentation cross-reference.
 - The report pair was secret-scanned for service-role/password/connection-string/Bearer/JWT patterns and identifier-like email/UUID patterns before commit.
+- The separately owner-authorized exact administrator test-order cleanup operation is recorded only as historical/specially scoped context; it was not authorized or executed by this audit and does not relax external-user `payment_pending` provider-evidence gates.
 - No production mutation, migration repair, DDL, DML, mutation RPC, provider call, or deployment was performed.

@@ -16,6 +16,8 @@
 
 Endpoint/schema fingerprint는 credential과 행 데이터를 출력하지 않고 확인했다. 다만 이 환경에서는 Supabase management-plane project identity를 독립 증명하지 못했다. linked CLI query는 네트워크/권한 제약으로 막혔고 계정에 보이는 project 목록에도 endpoint와 일치하는 항목이 없었다. 따라서 운영 근거는 “canonical endpoint/schema fingerprint”로만 표시하며 owner-authorized catalog snapshot 전에는 파괴적 결정을 하지 않는다.
 
+별도로 owner가 승인한 정확히 지정된 administrator test-order cleanup operation은 과거의 특수 범위 작업이다. 이 감사에서는 이를 승인하거나 실행하지 않았으며, 이 작업의 과거 승인은 여기서 어떤 미래 mutation도 승인하지 않는다. 또한 external-user `payment_pending` 주문은 independent provider evidence와 auditable disposition 없이는 변경·삭제하지 않는다는 규칙을 완화하지 않는다.
+
 ## 범위와 안전 경계
 
 이 감사에서는 다음을 하지 않았다.
@@ -34,6 +36,12 @@ live relation 수는 HTTP HEAD/count 메타데이터 요청으로만 확인했�
 canonical main worktree 환경 파일은 key 이름으로만 읽었고 `source`하거나 출력하지 않았다. 구성된 Supabase HTTPS endpoint는 표준 public schema OpenAPI를 반환하여 definition 165개와 path 805개를 보였다. CLI 버전은 2.114.0이었다. 계정에 보이는 두 project는 endpoint-derived identity와 일치하지 않았고, linked database query는 현재 네트워크의 IPv6 route를 사용할 수 없어 실패했으며 별도 link 시도도 endpoint 권한으로 거부됐다. project reference, token, secret, DB password, Authorization header, cookie, 사용자 식별자는 보고서에 넣지 않았다.
 
 이는 구성 endpoint에서 기대한 production schema가 응답한다는 사실만 증명하며 management-plane ownership이나 완전한 `pg_catalog` snapshot을 증명하지 않는다. 후속 gate는 같은 endpoint에 대한 owner-authorized read-only catalog export다.
+
+OpenAPI path의 정확한 산식은 `805 = root path 1 + relation/view path 165 + RPC path 639`이다. 따라서 relation/RPC subset은 `804 = 165 + 639`이고, root path 1개는 relation이나 RPC가 아니다. 165개 relation/view path 중 164개는 CRUD-capable이고 1개는 read-only view다.
+
+### 파괴적 작업 보류
+
+이 보고서는 어떠한 실행도 승인하지 않는다. 향후 row 삭제·status mutation, Auth 삭제, storage/object purge, DDL/DML, migration, mutation-capable RPC는 기존 owner-catalog, traffic/compatibility, exact ownership/identity, provider/payment, external-media gate를 모두 통과하기 전까지 차단한다. 별도 승인된 과거 administrator test-order 작업도 이 gate들의 우회 수단이 아니다.
 
 ## 수정된 비식별 총계
 
@@ -66,7 +74,7 @@ Migration source에는 고유 table create 이름 161개가 있다. 164개 CRUD-
 
 ## 접근 가능한 relation의 exact aggregate count
 
-다음은 row를 읽지 않고 HEAD/count metadata만 읽어 얻은 값이다. 접근 가능한 60개 중 40개는 non-zero이고 20개는 0행이었다. 403인 105개는 0행으로 추정하지 않았다.
+다음 표에는 exact-count를 얻은 60개 중 non-zero인 40개 relation만 의도적으로 나열했다. 나머지 20개 exact-count relation은 0행이어서 표에서 생략했으며 누락된 것이 아니다. 403인 105개는 0행으로 추정하지 않았다.
 
 | relation | exact rows | relation | exact rows |
 |---|---:|---|---:|
@@ -211,6 +219,8 @@ Verified endpoint의 Supabase Storage bucket은 0개다. V2 result image는 priv
 
 이는 미래의 별도 승인 경로다. sanitized aggregate preflight, explicit identity allowlist, archive/restore proof, 필요한 경우 Auth deletion proof, post-operation verification이 모두 필요하다. 현재 작은 count는 삭제를 승인하지 않는다.
 
+22개 E2E identity는 owner가 제공한 expected set이며 새로 입증한 live count가 아니다. 구성은 email이 `e2e`로 시작하는 Kakao user 20명과 `provider=e2e` user 2명이다. 이 감사에서는 해당 identity를 읽거나 live membership을 증명하지 않았다. 향후 어떤 mutation을 하기 전에도 이 expected set에 대한 sanitized aggregate exact-count 및 exact-membership preflight를 실행해야 하며, count 또는 membership이 하나라도 다르면 즉시 중단한다.
+
 ### `unknown` (3)
 
 `payment_orders`, `payments`, `pending_analysis`
@@ -225,14 +235,14 @@ Verified endpoint의 Supabase Storage bucket은 0개다. V2 result image는 priv
 
 ## 반드시 보존할 데이터 및 identity 정책
 
-1. **Retention floor:** 2026-07-24 이후 user/analysis data는 모두 보존한다. “legacy”라는 이유로 table-wide delete를 하지 않는다. 그 이전 데이터도 owner-approved archive policy가 필요하며 age만으로 결정하지 않는다.
-2. **Admin identity:** admin/operator account와 classification을 보존한다. admin/test cleanup은 별도 승인 작업이며 table consolidation의 부수 효과로 수행하지 않는다.
-3. **Test identity:** 22개 E2E identity와 admin test artifact는 이번 범위가 아니다. 별도 identity allowlist, aggregate preflight, Auth deletion proof, post-delete verification 뒤에만 제거한다.
+1. **Retention floor:** persistent non-admin, non-E2E user-linked record에 대한 보수적이고 inclusive한 floor는 `2026-07-24 00:00 Asia/Seoul`이다. 해당 시각 이후 및 그 시각을 포함하는 record는 보존한다. “legacy”라는 이유로 table-wide delete를 하지 않는다. floor 이전 timestamp도 그 자체로 cleanup을 승인하지 않으며, timestamp·ownership·identity classification이 불명확한 record는 exact evidence가 확인될 때까지 차단한다.
+2. **Admin identity 및 test 범위:** admin/operator account와 classification을 보존한다. 별도로 owner가 승인한 정확히 지정된 administrator test-order cleanup operation은 과거의 특수 범위 작업이며, 이 감사에서는 승인하거나 실행하지 않았다. 이를 다른 admin, E2E 또는 external record로 일반화하지 않는다.
+3. **E2E identity set:** 22개 E2E identity는 owner가 제공한 expected set이며 새로 입증한 live count가 아니다. email이 `e2e`로 시작하는 Kakao user 20명과 `provider=e2e` user 2명으로 구성된다. 이들은 이번 감사의 mutation 범위 밖에 있다. 향후 mutation 전에는 sanitized aggregate exact-count 및 exact-membership preflight를 요구하고, mismatch이면 즉시 중단한 뒤 별도 승인된 identity allowlist, Auth deletion proof, post-delete verification gate를 적용한다.
 4. **Landing target/excluded 분리:** `landing_leads`는 input과 attribution field를 가지며 service-owned다. funnel metric에서 analysis target과 명시적 excluded target을 구분하고 paid metric에 섞지 않는다.
 5. **Waitlist와 withdrawn archive:** `earlybird_waitlist`는 active waitlist로 유지한다. withdrawn는 별도 access-controlled archive 또는 immutable lifecycle 경계로 분리하고 waitlist state에 덮어쓰지 않는다. 이 감사에서는 dedicated live withdrawn relation을 확인하지 못했으므로 future design은 승인 전까지 unknown이다.
 6. **Stable anonymous-to-auth mapping:** 기존 opaque claim/hash와 device boundary를 보존한다. mutable email, username, raw token을 analytics identity로 사용하지 않고 preflight를 authenticated owner에 한 번만 claim한다. 이미 owner가 있는 preflight를 재claim할 때 owner row를 보존한다.
 7. **Paid-only `first_paid_at`:** account-principal bridge의 external classification과 immutable provider/payment evidence가 있을 때만 earliest timestamp를 monotonic하게 기록한다. status string, 양수 금액, E2E/admin order, `payment_pending`, refund만으로 paid-ever 또는 `first_paid_at`을 만들지 않는다.
-8. **Abandoned `payment_pending`:** 짧은 bounded pending window를 유지할 수 있지만 independent provider evidence와 auditable disposition 없이 pending order를 변경·삭제하지 않는다. immutable pricing/payment lineage를 보존하고 unresolved order를 피하려고 새 order를 만들지 않는다.
+8. **Short-lived TTL artifact 및 abandoned `payment_pending`:** abandoned `payment_pending` order와 expired preflight/source/cache row처럼 이전에 승인된 short-lived TTL artifact는 persistent user-linked record와 별도 class이며 age만으로 정리하지 않는다. 정리하려면 exact artifact ownership 및 identity classification, exact TTL 만료, 해당되는 terminal provider/payment/media evidence, auditable disposition이 필요하다. External user의 pending order는 independent provider evidence 없이 절대 변경·삭제하지 않으며 TTL 만료만으로는 충분하지 않다. Immutable pricing/payment lineage를 보존하고 unresolved order를 피하려고 새 order를 만들지 않는다.
 9. **Media와 provider evidence:** external R2 deletion이 확인될 때까지 result-image registry row를 보존한다. ambiguous provider-start ledger는 provider outcome이 resolve될 때까지 보존한다. missing response/object를 “not executed”로 추정하지 않는다.
 
 ## 안전한 향후 cleanup 순서
@@ -242,9 +252,9 @@ Verified endpoint의 Supabase Storage bucket은 0개다. V2 result image는 priv
 1. **Owner proof:** 같은 endpoint의 read-only catalog snapshot으로 relation, column, PK/UNIQUE, FK, view/matview, sequence, routine, trigger, policy, RLS/force-RLS, grant, publication, `pg_depend`, migration history를 확인한다. object metadata와 aggregate count만 export한다.
 2. **Traffic proof:** 완전한 observation window에서 route/job/RPC access를 측정한다. V1 write quietness와 V1 historical read를 분리하고 Cloud Tasks, cron, script, dashboard, external operator를 포함한다.
 3. **Compatibility boundary:** canonical V2 owner-history/result projection이 보존 대상 V1 result를 모두 제공하게 한다. request ID와 owner authorization을 보존하고 historical row identity를 다시 쓰지 않는다.
-4. **Archive proof:** encrypted access-controlled archive, aggregate manifest, restore verification을 만든다. 2026-07-24 이후 데이터와 admin/auth identity를 destructive scope에서 제외하고 payment/provider evidence를 별도로 보존한다.
+4. **Archive proof:** encrypted access-controlled archive, aggregate manifest, restore verification을 만든다. `2026-07-24 00:00 Asia/Seoul` 이후 및 해당 시각을 포함하는 persistent non-admin, non-E2E user-linked record를 destructive scope에서 제외하고 admin/auth identity를 별도로 보존한다. 별도 승인된 short-lived TTL artifact는 exact ownership/identity와 provider/payment/media gate를 통과한 뒤에만 따로 처리하며, payment/provider evidence는 retention을 검토하기 전에 archive한다.
 5. **Reference migration:** caller를 surface별로 옮기며 sanitized aggregate mismatch만 기록한다. rollback window 동안 old path는 read-only로 둔다.
-6. **Retention gate:** provider cost, lease, external object가 terminal/reconciled인 short-lived source/cache row만 만료한다. payment evidence, account identity, result ownership, legal/operational audit row는 보존한다.
+6. **Retention gate:** 별도 승인된 short-lived TTL artifact(예: abandoned `payment_pending`, preflight/source/cache row) 중 exact ownership/scope, TTL, provider cost, payment disposition, lease, external object가 terminal/reconciled인 것만 정리한다. retention floor 이상인 persistent user-linked record, payment evidence, account identity, result ownership, legal/operational audit row는 보존한다.
 7. **Object-removal approval:** 이전 gate가 통과한 뒤에만 owner가 정확한 migration allowlist를 승인한다. migration order, dependent routine, trigger, policy, publication, grant, rollback을 검토한다. 이 감사에는 migration file이나 executable SQL이 없다.
 8. **Post-removal verification:** catalog·aggregate, route smoke test, owner-history, payment/recovery, media access/purge, secret scan을 다시 확인하고 합의된 기간 archive와 rollback evidence를 보존한다.
 
@@ -254,7 +264,8 @@ Verified endpoint의 Supabase Storage bucket은 0개다. V2 result image는 priv
 - 165개 전체 definition, 특히 105개 denied와 13개 static-ref 부재 이름의 live relation kind, partition flag, size, row estimate, current column, PK/UNIQUE, FK, policy, grant, trigger, publication membership, `pg_depend`가 필요하다.
 - 원격에 적용된 migration version이 무엇이며 354개 source와 정확히 일치하는지 확인해야 한다. 보호된 reconciliation migration은 변경하지 않는다.
 - dynamic RPC, external job, cron, dashboard, historical client가 long-tail RPC나 V1 endpoint를 호출하는지 확인해야 한다.
-- 2026-07-24 전후 data를 account classification/lifecycle별 aggregate로 확인해야 하며 row export는 하지 않는다.
+- `2026-07-24 00:00 Asia/Seoul` 전후 data를 persistent non-admin/non-E2E user-linked record와 별도 승인된 short-lived TTL artifact로 나누고 account classification/lifecycle별 aggregate로 확인해야 하며 row export는 하지 않는다.
+- owner가 제공한 E2E expected set(email prefix `e2e`인 Kakao user 20명과 `provider=e2e` user 2명)이 exact-count 및 exact-membership preflight를 통과하는지 확인해야 한다. mismatch이면 향후 mutation을 중단한다.
 - independent provider evidence가 있는 payment와 abandoned/recoverable `payment_pending`을 구분해야 한다. 이 감사에서는 payment 상태를 변경하지 않았다.
 - R2/GCS object의 age/terminal/orphan aggregate가 필요하다. object name/path는 남기지 않고 storage owner 승인 뒤 metadata만 읽는다.
 
@@ -272,4 +283,5 @@ HTTP 403 105개는 internal surface의 direct Data API 접근이 제한된다는
 - live 확인은 OpenAPI definition/path, relation HEAD count header, accessible exact count, 403 총계, Storage bucket count의 aggregate/metadata pass만 사용했다.
 - whitespace-normalized RLS count, dynamic RLS target coverage, source/live table alignment, qualified/unqualified FK count, complete realtime publication membership, relation/RPC reference, route/store/provider map, 문서 cross-reference를 점검했다.
 - 두 보고서는 service-role/password/connection-string/Bearer/JWT 및 identifier-like email/UUID pattern을 secret-scan했다.
+- 별도 owner 승인 administrator test-order cleanup operation은 과거의 특수 범위 context로만 기록했으며, 이 감사에서는 승인하거나 실행하지 않았고 external-user `payment_pending` provider-evidence gate를 완화하지 않는다.
 - production mutation, migration repair, DDL, DML, mutation RPC, provider call, deployment는 없었다.
