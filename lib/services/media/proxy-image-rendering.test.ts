@@ -46,7 +46,7 @@ describe('signed image proxy rendering contract', () => {
         expect(source).not.toMatch(/<Image\b[\s\S]*?src=\{imageUrl\}/);
         expect(source).not.toContain('.candidateKey');
         expect(source).toContain('data-progress-copy');
-        expect(source).toContain('Array.from({ length: 3');
+        expect(source).toContain('Array.from({ length: copyCount');
         expect(source).toContain('copyElements[1].offsetLeft');
         expect(source).toContain('copyElements[0].offsetLeft');
     });

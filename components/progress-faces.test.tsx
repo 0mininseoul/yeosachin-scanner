@@ -28,7 +28,7 @@ vi.mock('@/lib/services/result-local-image', () => ({
     safeResultImageUrl: (url: string | null | undefined) => url,
 }));
 
-import { ProgressFaces } from './progress-faces';
+import { ProgressFaces, progressRailCopyGeometry } from './progress-faces';
 
 const CANDIDATE_KEY = 'a'.repeat(64);
 
@@ -58,6 +58,18 @@ function media(imageUrl: string): ProgressCandidateMediaV1[] {
     }];
 }
 
+function renderSnapshot(
+    root: Root,
+    activeMedia: ActiveCandidateMedia,
+    candidateMedia: readonly ProgressCandidateMediaV1[],
+) {
+    act(() => {
+        root.render(
+            <ProgressFaces active={activeMedia} candidateMedia={candidateMedia} />
+        );
+    });
+}
+
 describe('ProgressFaces stable rail identity', () => {
     let root: Root;
     let container: HTMLDivElement;
@@ -78,12 +90,65 @@ describe('ProgressFaces stable rail identity', () => {
     });
 
     function render(imageUrl: string) {
-        act(() => {
-            root.render(
-                <ProgressFaces active={active(imageUrl)} candidateMedia={media(imageUrl)} />
-            );
-        });
+        renderSnapshot(root, active(imageUrl), media(imageUrl));
     }
+
+    it('renders enough one-tile copies for one full wrap to remain scrollable', () => {
+        const imageUrl = '/api/image-proxy?token=one-tile';
+        const candidateMedia = [{
+            candidateKey: CANDIDATE_KEY,
+            maskedUsername: 'a***e',
+            imageUrl,
+            feedImageUrls: [],
+        }];
+        const geometry = progressRailCopyGeometry(1);
+
+        renderSnapshot(root, active(imageUrl), candidateMedia);
+
+        const copyCount = container.querySelectorAll('[data-progress-copy]').length;
+        expect(geometry.copyCount).toBe(6);
+        expect(geometry.copyDistance).toBe(94);
+        expect(geometry.maxScrollLeft).toBe(134);
+        expect(geometry.maxScrollLeft).toBeGreaterThanOrEqual(geometry.copyDistance);
+        expect(copyCount).toBe(geometry.copyCount);
+    });
+
+    it('renders enough two-tile copies for one full wrap to remain scrollable', () => {
+        const imageUrl = '/api/image-proxy?token=two-tile';
+        const candidateMedia = [{
+            candidateKey: CANDIDATE_KEY,
+            maskedUsername: 'a***e',
+            imageUrl,
+            feedImageUrls: ['/api/image-proxy?token=two-tile-feed'],
+        }];
+        const geometry = progressRailCopyGeometry(2);
+
+        renderSnapshot(root, active(imageUrl), candidateMedia);
+
+        const copyCount = container.querySelectorAll('[data-progress-copy]').length;
+        expect(geometry.copyCount).toBe(4);
+        expect(geometry.copyDistance).toBe(188);
+        expect(geometry.maxScrollLeft).toBe(322);
+        expect(geometry.maxScrollLeft).toBeGreaterThanOrEqual(geometry.copyDistance);
+        expect(copyCount).toBe(geometry.copyCount);
+    });
+
+    it('keeps three copies for larger histories', () => {
+        const imageUrl = '/api/image-proxy?token=larger-history';
+        const candidateMedia = [{
+            candidateKey: CANDIDATE_KEY,
+            maskedUsername: 'a***e',
+            imageUrl,
+            feedImageUrls: [
+                '/api/image-proxy?token=larger-history-feed-1',
+                '/api/image-proxy?token=larger-history-feed-2',
+            ],
+        }];
+
+        renderSnapshot(root, active(imageUrl), candidateMedia);
+
+        expect(container.querySelectorAll('[data-progress-copy]')).toHaveLength(3);
+    });
 
     it('keeps repeated history occurrences, fallback width, and tile nodes stable across signed URL refreshes', () => {
         const firstUrl = '/api/image-proxy?token=first';
@@ -102,7 +167,7 @@ describe('ProgressFaces stable rail identity', () => {
         expect(firstCopy.children).toHaveLength(2);
         expect(firstImage?.getAttribute('data-progress-image')).toContain('token=first');
         expect((fallbackTile as HTMLElement).style.width).toBe('84px');
-        expect(container.querySelectorAll('[data-progress-copy]')).toHaveLength(3);
+        expect(container.querySelectorAll('[data-progress-copy]')).toHaveLength(4);
 
         render(firstUrl);
         const repeatedCopy = container.querySelector<HTMLElement>('[data-progress-copy]');
@@ -128,7 +193,7 @@ describe('ProgressFaces stable rail identity', () => {
         expect(refreshedImage).not.toBe(firstImage);
         expect(refreshedImage?.getAttribute('data-progress-image')).toContain('token=refreshed');
         expect(refreshedCopy?.children).toHaveLength(2);
-        expect(container.querySelectorAll('[data-progress-copy]')).toHaveLength(3);
+        expect(container.querySelectorAll('[data-progress-copy]')).toHaveLength(4);
     });
 
     it('prefers equal-richness re-signed server history over a stale active URL', () => {

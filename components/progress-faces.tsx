@@ -20,6 +20,40 @@ import type { ProgressCandidateMediaV1 } from '@/lib/contracts/analysis-v2';
 import { safeResultImageUrl } from '@/lib/services/result-local-image';
 
 const TILE_PX = 84;
+const RAIL_GAP_PX = 10; // Tailwind gap-2.5.
+const RAIL_HORIZONTAL_PADDING_PX = 40; // Tailwind px-5 on both sides.
+const PROGRESS_RAIL_MAX_WIDTH_PX = 460;
+const DEFAULT_PROGRESS_COPY_COUNT = 3;
+
+/**
+ * Size the repeated rail copies so the max-width progress viewport can scroll
+ * through at least one whole copy before the browser reaches its clamp.
+ * Larger histories naturally need only the default three copies.
+ */
+export function progressRailCopyGeometry(tileCount: number) {
+    const normalizedTileCount = Math.max(1, Math.floor(tileCount));
+    const copyWidth = normalizedTileCount * TILE_PX
+        + Math.max(0, normalizedTileCount - 1) * RAIL_GAP_PX;
+    const copyDistance = copyWidth + RAIL_GAP_PX;
+    const minimumCopySpan = PROGRESS_RAIL_MAX_WIDTH_PX
+        + copyDistance
+        + RAIL_GAP_PX
+        - RAIL_HORIZONTAL_PADDING_PX;
+    const copyCount = Math.max(
+        DEFAULT_PROGRESS_COPY_COUNT,
+        Math.ceil(minimumCopySpan / copyDistance),
+    );
+    const scrollWidth = RAIL_HORIZONTAL_PADDING_PX
+        + copyCount * copyWidth
+        + Math.max(0, copyCount - 1) * RAIL_GAP_PX;
+
+    return {
+        copyCount,
+        copyDistance,
+        scrollWidth,
+        maxScrollLeft: scrollWidth - PROGRESS_RAIL_MAX_WIDTH_PX,
+    };
+}
 
 // Slow enough to read a face, fast enough that the row is never still.
 const DRIFT_PX_PER_SECOND = 26;
@@ -94,7 +128,7 @@ function CandidateMediaTile({
     />;
 }
 
-/* Drifts the row sideways forever by wrapping through three copies of itself.
+/* Drifts the row sideways forever by wrapping through repeated copies of itself.
  *
  * A strip that only moved when a face arrived sat still between polls, which is
  * most of the time. Wrapping keeps it alive without pretending more accounts
@@ -238,6 +272,7 @@ export function ProgressFaces({
     // Let the drift effect initialize when a fallback-only snapshot is enriched
     // into real media without changing the tile count.
     const railRef = useFaceDrift(hasRealMedia ? mediaTiles.length : 0);
+    const { copyCount } = progressRailCopyGeometry(mediaTiles.length);
 
     if (!hasRealMedia || mediaTiles.length < MIN_SCREENED_CANDIDATES_TO_SHOW) return null;
 
@@ -258,8 +293,8 @@ export function ProgressFaces({
                 aria-hidden="true"
                 className="scroll-thin flex gap-2.5 overflow-x-auto px-5"
             >
-                {/* Three explicit copies cover the viewport while one wraps. */}
-                {Array.from({ length: 3 }, (_, copyIndex) => (
+                {/* Enough explicit copies cover the viewport while one wraps. */}
+                {Array.from({ length: copyCount }, (_, copyIndex) => (
                     <div
                         key={`copy-${copyIndex}`}
                         data-progress-copy
