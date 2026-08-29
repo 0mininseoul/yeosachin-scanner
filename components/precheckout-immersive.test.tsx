@@ -432,10 +432,11 @@ describe('PrecheckoutImmersive', () => {
         expect(container.querySelector('[data-precheckout-demo-phase="waiting"]')).toBeNull();
     });
 
-    it('settles a mid-pass deadline at the next transition instead of cutting the fresh pass short', async () => {
+    it('gives a partially elapsed submission clock the whole guaranteed pass and waiting loop', async () => {
         vi.stubGlobal('fetch', vi.fn().mockResolvedValue(noBody()));
-        // submittedAtMs + BLITE_UX_DEADLINE_MS(90s) lands 8s after this mount's visible entry,
-        // i.e. inside the freshly-restarted 20s initial pass.
+        // submittedAtMs + BLITE_UX_DEADLINE_MS(90s) leaves only 8s after this mount's visible
+        // entry, so the submission deadline expires inside the freshly-restarted 20s pass and
+        // on its own would buy far less than the guaranteed visible grace.
         const staleSubmittedAtMs = Date.parse(SUBMITTED_AT) - 82_000;
         const onGoToPlans = vi.fn();
 
@@ -457,9 +458,118 @@ describe('PrecheckoutImmersive', () => {
         await advance(11_999);
         expect(container.querySelector('[data-precheckout-fallback]')).toBeNull();
 
+        // The initial pass alone is not the whole guarantee: one complete waiting loop follows it.
+        await advance(24_000);
+        expect(container.querySelector('[data-precheckout-fallback]')).toBeNull();
         await advance(1);
+
         expect(container.querySelector('[data-precheckout-fallback]')).not.toBeNull();
         expect(onGoToPlans).not.toHaveBeenCalled();
+    });
+
+    it('shows a durable complete result after the initial pass for a stale exclusion-screen entry', async () => {
+        vi.stubGlobal('fetch', vi.fn().mockResolvedValue(jsonResponse(completeStatus())));
+        // Five minutes parked on the exclusion screen: the original T+90 UX deadline is already
+        // long past at mount, but the durable DTO is still the truthful thing to show.
+        const staleSubmittedAtMs = Date.parse(SUBMITTED_AT) - 300_000;
+
+        await act(async () => {
+            root.render(createElement(PrecheckoutImmersive, {
+                preflightId: PREFLIGHT_ID,
+                claimToken: null,
+                submittedAtMs: staleSubmittedAtMs,
+                targetUsername: 'target',
+                onGoToPlans: vi.fn(),
+            }));
+        });
+        await settleUi();
+
+        await advance(19_999);
+        expect(container.querySelector('[data-precheckout-result-card]')).toBeNull();
+        expect(container.querySelector('[data-precheckout-fallback]')).toBeNull();
+        await advance(1);
+
+        expect(container.querySelector('[data-precheckout-fallback]')).toBeNull();
+        expect(container.querySelectorAll('[data-precheckout-result-card]')).toHaveLength(4);
+        expect(container.textContent).toContain('@target');
+    });
+
+    it('grants a stale unresolved entry exactly one waiting loop before the fallback', async () => {
+        const fetchMock = vi.fn().mockResolvedValue(jsonResponse(pendingStatus(), 202));
+        vi.stubGlobal('fetch', fetchMock);
+        const staleSubmittedAtMs = Date.parse(SUBMITTED_AT) - 300_000;
+
+        await act(async () => {
+            root.render(createElement(PrecheckoutImmersive, {
+                preflightId: PREFLIGHT_ID,
+                claimToken: null,
+                submittedAtMs: staleSubmittedAtMs,
+                targetUsername: 'target',
+                onGoToPlans: vi.fn(),
+            }));
+        });
+        await settleUi();
+
+        await advance(20_000);
+        expect(container.querySelector('[data-precheckout-fallback]')).toBeNull();
+        expect(container.querySelector('[data-precheckout-demo-phase="waiting"]')).not.toBeNull();
+
+        // One full four-stage waiting loop at 6s per stage still owes 24s after the initial pass.
+        await advance(23_999);
+        expect(container.querySelector('[data-precheckout-fallback]')).toBeNull();
+        await advance(1);
+
+        expect(container.querySelector('[data-precheckout-fallback]')).not.toBeNull();
+        expect(fetchMock.mock.calls.length).toBeGreaterThan(1);
+    });
+
+    it('falls back at the first graph boundary for a stale terminal failure, without the extra loop', async () => {
+        vi.stubGlobal('fetch', vi.fn().mockResolvedValue(jsonResponse(failedStatus())));
+        const staleSubmittedAtMs = Date.parse(SUBMITTED_AT) - 300_000;
+
+        await act(async () => {
+            root.render(createElement(PrecheckoutImmersive, {
+                preflightId: PREFLIGHT_ID,
+                claimToken: null,
+                submittedAtMs: staleSubmittedAtMs,
+                targetUsername: 'target',
+                onGoToPlans: vi.fn(),
+            }));
+        });
+        await settleUi();
+
+        await advance(19_999);
+        expect(container.querySelector('[data-precheckout-demo-mode="waiting"]')).not.toBeNull();
+        expect(container.querySelector('[data-precheckout-fallback]')).toBeNull();
+        await advance(1);
+
+        expect(container.querySelector('[data-precheckout-fallback]')).not.toBeNull();
+        expect(container.textContent).not.toContain('실패');
+    });
+
+    it('does not hold a terminal failure through the loop granted to a partially elapsed clock', async () => {
+        vi.stubGlobal('fetch', vi.fn().mockResolvedValue(jsonResponse(failedStatus())));
+        // Only 8s of the submission clock is left, so this mount is granted the extra visible
+        // loop; a terminal failure has nothing to spend it on.
+        const staleSubmittedAtMs = Date.parse(SUBMITTED_AT) - 82_000;
+
+        await act(async () => {
+            root.render(createElement(PrecheckoutImmersive, {
+                preflightId: PREFLIGHT_ID,
+                claimToken: null,
+                submittedAtMs: staleSubmittedAtMs,
+                targetUsername: 'target',
+                onGoToPlans: vi.fn(),
+            }));
+        });
+        await settleUi();
+
+        await advance(19_999);
+        expect(container.querySelector('[data-precheckout-demo-mode="waiting"]')).not.toBeNull();
+        expect(container.querySelector('[data-precheckout-fallback]')).toBeNull();
+        await advance(1);
+
+        expect(container.querySelector('[data-precheckout-fallback]')).not.toBeNull();
     });
 
     it('gates a high-confidence female read behind a confirmation screen before revealing the result', async () => {

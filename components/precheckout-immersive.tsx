@@ -11,12 +11,18 @@ import { CaseCard, Eyebrow, PrimaryButton } from '@/components/case-ui';
 import { PrecheckoutDemo } from '@/components/precheckout-demo';
 import {
     PRECHECKOUT_DEMO_DURATION_MS,
+    PRECHECKOUT_WAIT_LOOP_DURATION_MS,
     PRECHECKOUT_WAIT_STAGE_DURATION_MS,
 } from '@/components/precheckout-stage-graphs';
 import { PRECHECKOUT_EVENTS, trackPrecheckoutEvent } from '@/lib/services/analytics';
 import { BLITE_UX_DEADLINE_MS } from '@/lib/services/precheckout/blite-deadline';
 
 const FETCH_DEADLINE_MS = 5_000;
+/**
+ * The visible grace every mount is guaranteed from its own entry: the initial four-stage pass
+ * plus exactly one complete slow waiting loop. It is the only definition of that duration.
+ */
+const MINIMUM_VISIBLE_GRACE_MS = PRECHECKOUT_DEMO_DURATION_MS + PRECHECKOUT_WAIT_LOOP_DURATION_MS;
 const TRANSIENT_STATUS_RETRY_MS = 1_000;
 const MAX_ANALYTICS_DURATION_MS = 86_400_000;
 
@@ -159,6 +165,19 @@ export function PrecheckoutImmersive({
     const settledExitRef = useRef(false);
     const emittedEventKeysRef = useRef(new Set<string>());
     const deadlineAtMs = startedAtMs + BLITE_UX_DEADLINE_MS;
+    /**
+     * Waiting on the exclusion screen spends the submission-anchored deadline before this screen
+     * ever renders, so whatever is left of it can be less than one watchable run. The browser
+     * display deadline is therefore never earlier than the guaranteed grace, however little of
+     * the submission clock remains. Server, provider, and inference budgets stay anchored to
+     * submission and are untouched.
+     */
+    const visibleFallbackAtMs = Math.max(
+        deadlineAtMs,
+        visibleEntryAtMs + MINIMUM_VISIBLE_GRACE_MS,
+    );
+    /** Whether this mount waits past the submission deadline purely to keep a result possible. */
+    const hasExtendedVisibleGrace = visibleFallbackAtMs > deadlineAtMs;
 
     const emitPrecheckoutEvent = useCallback((
         eventName: PrecheckoutEventName,
@@ -236,25 +255,23 @@ export function PrecheckoutImmersive({
     useEffect(() => {
         const timeout = setTimeout(
             completeFallbackAtDeadline,
-            Math.max(0, deadlineAtMs - Date.now()),
+            Math.max(0, visibleFallbackAtMs - Date.now()),
         );
         return () => clearTimeout(timeout);
-    }, [completeFallbackAtDeadline, deadlineAtMs]);
+    }, [completeFallbackAtDeadline, visibleFallbackAtMs]);
 
     useEffect(() => {
         let active = true;
         let pollTimer: ReturnType<typeof setTimeout> | undefined;
         const schedulePoll = (delayMs: number) => {
-            if (!active || exitRef.current !== null || Date.now() >= deadlineAtMs) return;
+            if (!active || exitRef.current !== null || Date.now() >= visibleFallbackAtMs) return;
             pollTimer = setTimeout(() => { void poll(); }, delayMs);
         };
         const poll = async (): Promise<void> => {
             const status = await fetchPrecheckoutBlite(preflightId, claimToken);
             if (!active || exitRef.current !== null) return;
-            if (Date.now() >= deadlineAtMs) {
-                completeFallbackAtDeadline();
-                return;
-            }
+            // A durable result is read before any deadline is applied: once it exists it is the
+            // truthful screen, and the graph boundary still decides when it becomes visible.
             if (status.state === 'complete') {
                 dtoRef.current = status.dto;
                 setDto(status.dto);
@@ -262,7 +279,17 @@ export function PrecheckoutImmersive({
                 requestExit('result');
                 return;
             }
-            if (status.state === 'failed') return;
+            if (Date.now() >= visibleFallbackAtMs) {
+                completeFallbackAtDeadline();
+                return;
+            }
+            if (status.state === 'failed') {
+                // Nothing is left to poll for, and the extra visible grace exists only for a
+                // result that can still arrive, so a terminal failure leaves at the next safe
+                // graph boundary instead of playing that loop out.
+                if (hasExtendedVisibleGrace) requestExit('fallback');
+                return;
+            }
             const delayMs = status.state === 'pending'
                 ? Math.max(250, Math.min(status.retryAfterMs, 5_000))
                 : TRANSIENT_STATUS_RETRY_MS;
@@ -273,7 +300,7 @@ export function PrecheckoutImmersive({
             active = false;
             if (pollTimer) clearTimeout(pollTimer);
         };
-    }, [claimToken, completeFallbackAtDeadline, deadlineAtMs, emitPrecheckoutEvent, preflightId, requestExit]);
+    }, [claimToken, completeFallbackAtDeadline, emitPrecheckoutEvent, hasExtendedVisibleGrace, preflightId, requestExit, visibleFallbackAtMs]);
 
     useEffect(() => {
         if (view === 'result' && dtoRef.current) {

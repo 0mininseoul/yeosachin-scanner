@@ -673,6 +673,8 @@ export const PRECHECKOUT_DEMO_DURATION_MS = PRECHECKOUT_DEMO_STAGE_DURATIONS_MS.
     REVEAL_MS,
 );
 export const PRECHECKOUT_WAIT_STAGE_DURATION_MS = 6_000;
+/** One complete slow waiting cycle: every stage plays once at the waiting-stage duration. */
+export const PRECHECKOUT_WAIT_LOOP_DURATION_MS = PRECHECKOUT_WAIT_STAGE_DURATION_MS * STAGES.length;
 const TOTAL_MS = PRECHECKOUT_DEMO_DURATION_MS;
 
 function monotonicNowMs(): number {
@@ -787,7 +789,7 @@ export function PrecheckoutStageGraphs({
         function paint(elapsed: number) {
             if (continueAfterFirstPassRef.current && elapsed >= TOTAL_MS) {
                 const slowElapsed = elapsed - TOTAL_MS;
-                const cycleDurationMs = PRECHECKOUT_WAIT_STAGE_DURATION_MS * STAGES.length;
+                const cycleDurationMs = PRECHECKOUT_WAIT_LOOP_DURATION_MS;
                 const nextSlowCycle = Math.floor(slowElapsed / cycleDurationMs);
                 if (nextSlowCycle !== slowCycle) {
                     slowCycle = nextSlowCycle;
