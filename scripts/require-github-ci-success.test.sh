@@ -96,7 +96,7 @@ run_rejected() {
   assert_not_contains "$output" "$response_sentinel"
 }
 
-export FAKE_RESPONSE="{\"total_count\":1,\"workflow_runs\":[{\"path\":\".github/workflows/ci.yml\",\"head_sha\":\"$expected_sha\",\"status\":\"completed\",\"conclusion\":\"success\"}]}"
+export FAKE_RESPONSE="{\"total_count\":1,\"workflow_runs\":[{\"path\":\".github/workflows/ci.yml\",\"head_sha\":\"$expected_sha\",\"event\":\"push\",\"head_branch\":\"main\",\"status\":\"completed\",\"conclusion\":\"success\"}]}"
 : >"$command_log"
 if ! output="$(run_gate 2>&1)"; then
   printf '%s\n' "$output" >&2
@@ -110,6 +110,45 @@ assert_contains "$(<"$command_log")" \
   'https://api.github.com/repos/0mininseoul/yeosachin-scanner/actions/workflows/ci.yml/runs'
 assert_contains "$(<"$command_log")" "$expected_sha"
 assert_contains "$(<"$command_log")" 'per_page=100'
+assert_contains "$(<"$command_log")" 'event=push'
+assert_contains "$(<"$command_log")" 'branch=main'
+
+export FAKE_RESPONSE="{\"total_count\":1,\"workflow_runs\":[{\"path\":\".github/workflows/ci.yml@refs/heads/main\",\"head_sha\":\"$expected_sha\",\"event\":\"push\",\"head_branch\":\"main\",\"status\":\"completed\",\"conclusion\":\"success\"}]}"
+if ! output="$(run_gate 2>&1)"; then
+  printf '%s\n' "$output" >&2
+  fail 'workflow path with an at-ref suffix was rejected'
+fi
+assert_contains "$output" 'GitHub Actions CI gate passed'
+assert_not_contains "$output" "$github_token"
+assert_not_contains "$output" "$response_sentinel"
+
+export FAKE_RESPONSE="{\"total_count\":2,\"workflow_runs\":[{\"path\":\".github/workflows/ci.yml\",\"head_sha\":\"$expected_sha\",\"event\":\"pull_request\",\"head_branch\":\"feature\",\"status\":\"completed\",\"conclusion\":\"success\"},{\"path\":\".github/workflows/ci.yml\",\"head_sha\":\"$expected_sha\",\"event\":\"push\",\"head_branch\":\"main\",\"status\":\"in_progress\",\"conclusion\":null}]}"
+run_rejected 'successful pull-request plus pending main push' \
+  'CI run for source SHA is not completed successfully'
+
+export FAKE_RESPONSE="{\"total_count\":2,\"workflow_runs\":[{\"path\":\".github/workflows/ci.yml\",\"head_sha\":\"$expected_sha\",\"event\":\"pull_request\",\"head_branch\":\"feature\",\"status\":\"completed\",\"conclusion\":\"success\"},{\"path\":\".github/workflows/ci.yml\",\"head_sha\":\"$expected_sha\",\"event\":\"push\",\"head_branch\":\"main\",\"status\":\"completed\",\"conclusion\":\"failure\"}]}"
+run_rejected 'successful pull-request plus failed main push' \
+  'CI run for source SHA is not completed successfully'
+
+export FAKE_RESPONSE="{\"total_count\":2,\"workflow_runs\":[{\"path\":\".github/workflows/ci.yml\",\"head_sha\":\"$expected_sha\",\"event\":\"push\",\"head_branch\":\"main\",\"status\":\"completed\",\"conclusion\":\"success\"},{\"path\":\".github/workflows/ci.yml\",\"head_sha\":\"$expected_sha\",\"event\":\"push\",\"head_branch\":\"main\",\"status\":\"in_progress\",\"conclusion\":null}]}"
+run_rejected 'successful plus pending exact-SHA main pushes' \
+  'CI run for source SHA is not completed successfully'
+
+export FAKE_RESPONSE="{\"total_count\":2,\"workflow_runs\":[{\"path\":\".github/workflows/ci.yml\",\"head_sha\":\"$expected_sha\",\"event\":\"push\",\"head_branch\":\"main\",\"status\":\"completed\",\"conclusion\":\"success\"},{\"path\":\".github/workflows/ci.yml\",\"head_sha\":\"$expected_sha\",\"event\":\"push\",\"head_branch\":\"main\",\"status\":\"completed\",\"conclusion\":\"failure\"}]}"
+run_rejected 'successful plus failed exact-SHA main pushes' \
+  'CI run for source SHA is not completed successfully'
+
+export FAKE_RESPONSE="{\"total_count\":1,\"workflow_runs\":[{\"path\":\".github/workflows/ci.yml\",\"head_sha\":\"$expected_sha\",\"event\":\"push\",\"head_branch\":\"release\",\"status\":\"completed\",\"conclusion\":\"success\"}]}"
+run_rejected 'successful non-main branch push' \
+  'no completed successful CI run was found for source SHA'
+
+export FAKE_RESPONSE="{\"total_count\":1,\"workflow_runs\":[{\"path\":\".github/workflows/ci.yml\",\"head_sha\":\"$expected_sha\",\"event\":\"workflow_dispatch\",\"head_branch\":\"main\",\"status\":\"completed\",\"conclusion\":\"success\"}]}"
+run_rejected 'successful non-push main run' \
+  'no completed successful CI run was found for source SHA'
+
+export FAKE_RESPONSE="{\"total_count\":1,\"workflow_runs\":[{\"path\":\".github/workflows/ci.yml\",\"head_sha\":\"$expected_sha\",\"head_branch\":\"main\",\"status\":\"completed\",\"conclusion\":\"success\"}]}"
+run_rejected 'malformed workflow run' \
+  'GitHub Actions API returned malformed JSON'
 
 if PATH="$bin_dir:/usr/bin:/bin" GITHUB_TOKEN="$github_token" GH_TOKEN='' \
   /bin/bash "$gate" "${expected_sha:0:39}" >"$temp_dir/malformed-sha.out" 2>&1; then
@@ -122,22 +161,22 @@ assert_not_contains "$(<"$temp_dir/malformed-sha.out")" "$github_token"
 export FAKE_RESPONSE='{"total_count":0,"workflow_runs":[]}'
 run_rejected 'absent CI run' 'no completed successful CI run was found for source SHA'
 
-export FAKE_RESPONSE="{\"total_count\":1,\"workflow_runs\":[{\"path\":\".github/workflows/ci.yml\",\"head_sha\":\"$expected_sha\",\"status\":\"in_progress\",\"conclusion\":null}]}"
+export FAKE_RESPONSE="{\"total_count\":1,\"workflow_runs\":[{\"path\":\".github/workflows/ci.yml\",\"head_sha\":\"$expected_sha\",\"event\":\"push\",\"head_branch\":\"main\",\"status\":\"in_progress\",\"conclusion\":null}]}"
 run_rejected 'pending CI run' 'CI run for source SHA is not completed successfully'
 
-export FAKE_RESPONSE="{\"total_count\":1,\"workflow_runs\":[{\"path\":\".github/workflows/ci.yml\",\"head_sha\":\"$expected_sha\",\"status\":\"completed\",\"conclusion\":\"failure\"}]}"
+export FAKE_RESPONSE="{\"total_count\":1,\"workflow_runs\":[{\"path\":\".github/workflows/ci.yml\",\"head_sha\":\"$expected_sha\",\"event\":\"push\",\"head_branch\":\"main\",\"status\":\"completed\",\"conclusion\":\"failure\"}]}"
 run_rejected 'failed CI run' 'CI run for source SHA is not completed successfully'
 
-export FAKE_RESPONSE="{\"total_count\":1,\"workflow_runs\":[{\"path\":\".github/workflows/ci.yml\",\"head_sha\":\"$wrong_sha\",\"status\":\"completed\",\"conclusion\":\"success\"}]}"
+export FAKE_RESPONSE="{\"total_count\":1,\"workflow_runs\":[{\"path\":\".github/workflows/ci.yml\",\"head_sha\":\"$wrong_sha\",\"event\":\"push\",\"head_branch\":\"main\",\"status\":\"completed\",\"conclusion\":\"success\"}]}"
 run_rejected 'other-SHA CI run' 'no completed successful CI run was found for source SHA'
 
-export FAKE_RESPONSE="{\"total_count\":1,\"workflow_runs\":[{\"path\":\".github/workflows/other.yml\",\"head_sha\":\"$expected_sha\",\"status\":\"completed\",\"conclusion\":\"success\"}]}"
+export FAKE_RESPONSE="{\"total_count\":1,\"workflow_runs\":[{\"path\":\".github/workflows/other.yml\",\"head_sha\":\"$expected_sha\",\"event\":\"push\",\"head_branch\":\"main\",\"status\":\"completed\",\"conclusion\":\"success\"}]}"
 run_rejected 'other-workflow CI run' 'no completed successful CI run was found for source SHA'
 
 export FAKE_RESPONSE="{\"message\":\"$response_sentinel\"}"
 run_rejected 'malformed API response' 'GitHub Actions API returned malformed JSON'
 
-export FAKE_RESPONSE="{\"total_count\":1,\"workflow_runs\":[{\"path\":\".github/workflows/ci.yml\",\"head_sha\":\"$expected_sha\",\"status\":\"completed\",\"conclusion\":\"success\"}]}"
+export FAKE_RESPONSE="{\"total_count\":1,\"workflow_runs\":[{\"path\":\".github/workflows/ci.yml\",\"head_sha\":\"$expected_sha\",\"event\":\"push\",\"head_branch\":\"main\",\"status\":\"completed\",\"conclusion\":\"success\"}]}"
 export FAKE_HTTP_STATUS=500
 run_rejected 'API failure' 'GitHub Actions API request failed'
 

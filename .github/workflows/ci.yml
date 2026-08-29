@@ -27,6 +27,8 @@ jobs:
       RESEND_FROM_EMAIL: noreply@example.com
     steps:
       - uses: actions/checkout@v4
+      - name: Run offline exact-SHA release gate contract test
+        run: bash scripts/require-github-ci-success.test.sh
       - uses: actions/setup-node@v4
         with:
           node-version: 22

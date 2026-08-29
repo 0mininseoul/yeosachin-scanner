@@ -89,6 +89,11 @@ Required for apply and dry-run source builds:
     Outside-source YAML containing exactly non-empty NEXT_PUBLIC_SUPABASE_URL
     and NEXT_PUBLIC_SUPABASE_ANON_KEY. Build secrets are forbidden.
 
+Required only for apply:
+  GITHUB_TOKEN or GH_TOKEN
+    Read-only GitHub Actions token for the exact source-SHA ci.yml push gate.
+    The token is consumed through the environment and is never printed.
+
 The V2 enqueuer must be a dedicated identity with queue-scoped access. Do not
 reuse a V1 enqueuer that still needs project-wide Cloud Tasks access.
 

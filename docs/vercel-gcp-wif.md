@@ -49,6 +49,18 @@ workload identity pool에는 구성된 provider 하나만 존재해야 한다. `
 6. `scripts/deploy-analysis-v2-worker.sh`를 실행한다. 기존 서비스에서는 새 source와 최종 runtime 설정을 모두 무트래픽 revision으로 만들고, V2/preflight queue, 정확한 Cloud Run invoker, 유지보수 Scheduler를 검증한 뒤 검증된 revision만 100%로 승격한다. 최초 생성의 비활성 bootstrap 예외는 아래 rollback 계약을 따른다.
 7. 각 스크립트를 `--check`로 다시 실행해 실제 상태와 선언 상태가 같은지 확인한다. 최소 권한 deployer의 `roles/storage.objectUser`에는 bucket metadata/IAM 조회 권한이 없으므로, deploy-lock 스크립트 검사는 구성 운영자가 별도로 수행한다.
 
+`deploy-analysis-v2-worker.sh`의 exact-SHA GitHub CI 확인은 `apply`에서만 실행된다. 따라서
+실제 적용을 시작하기 전에 운영자 배포 환경에 GitHub Actions read 권한을 가진
+`GITHUB_TOKEN` 또는 `GH_TOKEN`을 apply-only prerequisite로 제공해야 한다. 값은 환경에서만
+읽고 출력·기록하지 않는다. `--dry-run`과 `--check`는 이 토큰이나 GitHub release gate를
+요구하지 않는 read-only 모드다.
+
+이 스크립트의 gate는 호출 범위 밖의 직접 배포를 통제하지 않는다. 직접 실행하는
+`gcloud run deploy`·`gcloud run services update`와 Vercel CLI/API 또는 Git provider의
+직접 배포·보호 우회는 external controls로 분류하며, 별도 IAM·Vercel project protection과
+감사 정책으로 제한한다. 이 문서의 절차는 해당 우회를 수행하거나 provider 설정을 바꾸지
+않는다.
+
 WIF 단계의 예시는 다음과 같다.
 
 ```bash

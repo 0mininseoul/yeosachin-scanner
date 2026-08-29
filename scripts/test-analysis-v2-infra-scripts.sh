@@ -63,7 +63,7 @@ done
   exit 86
 }
 config="$(cat)"
-if [[ "$request_url" == *'/repos/0mininseoul/yeosachin-scanner/actions/workflows/ci.yml/runs?head_sha='* ]]; then
+if [[ "$request_url" == *'/repos/0mininseoul/yeosachin-scanner/actions/workflows/ci.yml/runs?event=push&branch=main&head_sha='* ]]; then
   [[ "$config" == *'Authorization: Bearer GITHUB_TOKEN_SENTINEL'* ]] \
     || exit 89
   output_file=''
@@ -75,7 +75,7 @@ if [[ "$request_url" == *'/repos/0mininseoul/yeosachin-scanner/actions/workflows
   github_ci_sha="${request_url##*head_sha=}"
   github_ci_sha="${github_ci_sha%%&*}"
   [[ "$github_ci_sha" =~ ^[0-9a-f]{40}$ ]] || exit 90
-  github_ci_response="{\"total_count\":1,\"workflow_runs\":[{\"path\":\".github/workflows/ci.yml\",\"head_sha\":\"$github_ci_sha\",\"status\":\"completed\",\"conclusion\":\"success\"}]}"
+  github_ci_response="{\"total_count\":1,\"workflow_runs\":[{\"path\":\".github/workflows/ci.yml\",\"head_sha\":\"$github_ci_sha\",\"event\":\"push\",\"head_branch\":\"main\",\"status\":\"completed\",\"conclusion\":\"success\"}]}"
   if [[ -n "$output_file" ]]; then
     printf '%s' "$github_ci_response" >"$output_file"
     printf '200'

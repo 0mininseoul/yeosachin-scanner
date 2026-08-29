@@ -46,7 +46,7 @@ response_file="$(mktemp "${TMPDIR:-/tmp}/require-github-ci-success.XXXXXX")" \
 trap 'rm -f "$response_file"' EXIT
 
 escaped_github_token="$(escape_curl_config_value "$github_token")"
-request_url="$github_api_url?head_sha=$source_sha&per_page=100"
+request_url="$github_api_url?event=push&branch=main&head_sha=$source_sha&per_page=100"
 if ! http_status="$(curl --disable --proto '=https' --tlsv1.2 \
   --max-redirs 0 --connect-timeout 10 --max-time 30 \
   --silent --show-error \
@@ -84,6 +84,8 @@ if ! jq -e '
       type == "object"
         and (.path | type == "string")
         and (.head_sha | type == "string" and test("^[0-9a-f]{40}$"))
+        and (.event | type == "string")
+        and (.head_branch | type == "string")
         and (.status | type == "string")
         and has("conclusion")
         and (
@@ -99,11 +101,25 @@ fi
 ci_state="$(jq -r -e \
   --arg expected_sha "$source_sha" \
   --arg expected_path "$expected_workflow_path" '
+    def normalized_ci_path($base):
+      if . == $base then
+        $base
+      elif startswith($base + "@") and length > (($base | length) + 1) then
+        $base
+      else
+        .
+      end;
+
     [.workflow_runs[]
-      | select(.path == $expected_path and .head_sha == $expected_sha)] as $matches
+      | select(
+          ((.path | normalized_ci_path($expected_path)) == $expected_path)
+          and .head_sha == $expected_sha
+          and .event == "push"
+          and .head_branch == "main"
+        )] as $matches
     | if ($matches | length) == 0 then
         "absent"
-      elif any($matches[]; .status == "completed" and .conclusion == "success") then
+      elif all($matches[]; .status == "completed" and .conclusion == "success") then
         "success"
       elif any($matches[]; .status != "completed") then
         "pending"
