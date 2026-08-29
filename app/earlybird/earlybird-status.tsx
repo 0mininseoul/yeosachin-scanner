@@ -184,9 +184,9 @@ export function EarlybirdStatus({
     useEffect(() => {
         if (!nextUrl) return;
         if (navigationTargetRef.current === nextUrl) return;
-        navigationTargetRef.current = nextUrl;
         let active = true;
         void flushAnalytics().finally(() => {
+            if (active) navigationTargetRef.current = nextUrl;
             if (active) router.replace(nextUrl);
         });
         return () => {

@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 
-import { act, createElement } from 'react';
+import { act, createElement, StrictMode } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -557,5 +557,43 @@ describe('earlybird mounted payment return recovery', () => {
             progressUrl: `/progress/${requestId}`,
         }));
         expect(routerMock.replace).toHaveBeenCalledOnce();
+    });
+
+    it('replays the active paid-return bridge effect under StrictMode without duplicate analytics', async () => {
+        const requestId = '123e4567-e89b-42d3-a456-426614174000';
+        const nextUrl = `/progress/${requestId}`;
+        let resolveFlush!: () => void;
+        const flushPromise = new Promise<void>(resolve => {
+            resolveFlush = resolve;
+        });
+        analyticsMocks.flushAnalytics.mockReturnValue(flushPromise);
+
+        await act(async () => {
+            root.render(createElement(
+                StrictMode,
+                null,
+                createElement(EarlybirdStatus, {
+                    order: automaticPendingOrder({
+                        systemStatus: 'paid',
+                        displayStatus: '결제 완료',
+                        actualAmountKrw: 990,
+                        progressUrl: nextUrl,
+                    }),
+                }),
+            ));
+            await Promise.resolve();
+        });
+
+        expect(routerMock.replace).not.toHaveBeenCalled();
+        expect(analyticsMocks.trackEvent).toHaveBeenCalledTimes(2);
+
+        await act(async () => {
+            resolveFlush();
+            await flushPromise;
+        });
+
+        expect(routerMock.replace).toHaveBeenCalledOnce();
+        expect(routerMock.replace).toHaveBeenCalledWith(nextUrl);
+        expect(analyticsMocks.trackEvent).toHaveBeenCalledTimes(2);
     });
 });
