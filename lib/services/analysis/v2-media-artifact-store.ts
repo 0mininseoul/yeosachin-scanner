@@ -206,8 +206,12 @@ export function analysisV2MediaBundleArtifactKeyV2(
             'ANALYSIS_V2_MEDIA_ARTIFACT_VALIDATION_ERROR: duplicate bundle selection.'
         );
     }
+    // JSON framing escapes delimiters and records the bundle id and ordered
+    // selection-key array as separate values. This keeps the hashed selection
+    // identity private while avoiding collisions from embedded newlines.
+    const framedIdentity = JSON.stringify([normalizedBundleId, selectionKeys]);
     return sha256(
-        `analysis-v2-media-bundle-key:v2\n${normalizedBundleId}\n${selectionKeys.join('\n')}`
+        `analysis-v2-media-bundle-key:v2\n${framedIdentity}`
     );
 }
 
@@ -1156,9 +1160,22 @@ function isDeterministicRegistrationRejection(error: unknown): boolean {
     return error instanceof Error && DETERMINISTIC_REGISTRATION_REJECTIONS.has(error.message);
 }
 
+function isRegistrationConflict(error: unknown): boolean {
+    return error instanceof Error
+        && error.message === 'ANALYSIS_V2_MEDIA_ARTIFACT_CONFLICT';
+}
+
 function isBundleSelectionMismatch(error: unknown): boolean {
     return error instanceof Error && error.message === MEDIA_BUNDLE_SELECTION_MISMATCH_ERROR;
 }
+
+class AnalysisV2MediaBundleRegistrationRetryError extends Error {
+    constructor() {
+        super('ANALYSIS_V2_MEDIA_ARTIFACT_REGISTRATION_RETRY');
+    }
+}
+
+type RegistrationConflictReconciler = () => Promise<AnalysisV2MediaArtifactRef | null>;
 
 export function createAnalysisV2MediaArtifactStore(input: {
     registry?: AnalysisV2MediaArtifactRegistry;
@@ -1177,11 +1194,27 @@ export function createAnalysisV2MediaArtifactStore(input: {
     async function registerObject(
         fence: AnalysisV2MediaArtifactJobFence,
         reference: AnalysisV2MediaArtifactRef,
-        created: boolean
+        created: boolean,
+        reconcileConflict?: RegistrationConflictReconciler,
     ): Promise<AnalysisV2MediaArtifactRef> {
         try {
             return await registry.register({ ...fence, ...reference });
         } catch (error) {
+            if (reconcileConflict && isRegistrationConflict(error)) {
+                let stored: AnalysisV2MediaArtifactRef | null;
+                try {
+                    stored = await reconcileConflict();
+                } catch (reconciliationError) {
+                    if (created) await deleteCreatedObject(reference);
+                    throw reconciliationError;
+                }
+                if (created) await deleteCreatedObject(reference);
+                if (stored) return stored;
+                // The losing writer must not turn an otherwise recoverable
+                // first-write race into a permanent conflict. The bundle
+                // caller pivots to its selection-scoped key below.
+                throw new AnalysisV2MediaBundleRegistrationRetryError();
+            }
             if (!created) throw error;
             if (isDeterministicRegistrationRejection(error)) {
                 await deleteCreatedObject(reference);
@@ -1220,6 +1253,62 @@ export function createAnalysisV2MediaArtifactStore(input: {
             throw new Error('ANALYSIS_V2_MEDIA_ARTIFACT_OBJECT_ERROR: content mismatch.');
         }
         return deserializeAnalysisV2MediaBundle(bytes, expectedSelectionIds);
+    }
+
+    async function persistBundleWithKey(bundleInput: {
+        fence: AnalysisV2MediaArtifactJobFence;
+        artifactKey: string;
+        bytes: Buffer;
+        selectionIds: readonly string[];
+        legacyArtifactKey: string;
+    }): Promise<AnalysisV2MediaArtifactRef> {
+        const contentSha256 = sha256(bundleInput.bytes);
+        const objectName = analysisV2MediaArtifactObjectName({
+            requestId: bundleInput.fence.requestId,
+            artifactKey: bundleInput.artifactKey,
+            contentSha256,
+            artifactKind: 'media_bundle',
+        });
+        const object = await input.objects.create({
+            objectName,
+            bytes: bundleInput.bytes,
+            artifactKey: bundleInput.artifactKey,
+            artifactKind: 'media_bundle',
+            contentSha256,
+            contentType: 'application/octet-stream',
+        });
+        const reference: AnalysisV2MediaArtifactRef = {
+            requestId: bundleInput.fence.requestId,
+            artifactKey: bundleInput.artifactKey,
+            artifactKind: 'media_bundle',
+            contentSha256,
+            contentType: 'application/octet-stream',
+            objectName,
+            objectGeneration: object.generation,
+            byteSize: bundleInput.bytes.length,
+        };
+        const reconcileConflict = bundleInput.artifactKey === bundleInput.legacyArtifactKey
+            ? async (): Promise<AnalysisV2MediaArtifactRef | null> => {
+                const stored = await registry.load({
+                    ...bundleInput.fence,
+                    artifactKey: bundleInput.legacyArtifactKey,
+                });
+                if (!stored) return null;
+                try {
+                    await readValidatedBundle(stored, bundleInput.selectionIds);
+                    return stored;
+                } catch (error) {
+                    if (isBundleSelectionMismatch(error)) return null;
+                    throw error;
+                }
+            }
+            : undefined;
+        return registerObject(
+            bundleInput.fence,
+            reference,
+            object.created,
+            reconcileConflict,
+        );
     }
 
     return {
@@ -1308,32 +1397,26 @@ export function createAnalysisV2MediaArtifactStore(input: {
                     artifactKey = selectionScopedArtifactKey;
                 }
             }
-            const contentSha256 = sha256(bytes);
-            const objectName = analysisV2MediaArtifactObjectName({
-                requestId: fence.requestId,
-                artifactKey,
-                contentSha256,
-                artifactKind: 'media_bundle',
-            });
-            const object = await input.objects.create({
-                objectName,
-                bytes,
-                artifactKey,
-                artifactKind: 'media_bundle',
-                contentSha256,
-                contentType: 'application/octet-stream',
-            });
-            const reference: AnalysisV2MediaArtifactRef = {
-                requestId: fence.requestId,
-                artifactKey,
-                artifactKind: 'media_bundle',
-                contentSha256,
-                contentType: 'application/octet-stream',
-                objectName,
-                objectGeneration: object.generation,
-                byteSize: bytes.length,
-            };
-            return registerObject(fence, reference, object.created);
+            try {
+                return await persistBundleWithKey({
+                    fence,
+                    artifactKey,
+                    bytes,
+                    selectionIds,
+                    legacyArtifactKey,
+                });
+            } catch (error) {
+                if (!(error instanceof AnalysisV2MediaBundleRegistrationRetryError)) {
+                    throw error;
+                }
+                return persistBundleWithKey({
+                    fence,
+                    artifactKey: selectionScopedArtifactKey,
+                    bytes,
+                    selectionIds,
+                    legacyArtifactKey,
+                });
+            }
         },
 
         async loadBundle(value) {

@@ -5,6 +5,7 @@ import {
     FEATURED_RISK_LIMITS,
     STRONG_PARTNER_PUBLIC_SCORE_CAP,
 } from '@/lib/domain/analysis/risk-policy';
+import { selectAnalysisMedia } from '@/lib/domain/analysis/media-policy';
 import type {
     FeatureAnalysisResult,
     GenderTriageResult,
@@ -4200,6 +4201,174 @@ describe('V2 AI and scoring executors', () => {
         expect(narrativeInput.carouselCaptionDossier?.text).toContain('[슬라이드 1]');
         expect(narrativeInput.carouselCaptionDossier?.text.length).toBeLessThanOrEqual(2_000);
         expect(memoryState.narrative?.rows[0].lines[1]).toContain(actualComment);
+    });
+
+    it('keeps revenue retry bundle order aligned with the narrative reload contract', async () => {
+        const memoryState = memory();
+        const strictState = state({
+            relationships: {
+                revision: 1,
+                resultHash: digest('revenue-order-relationships'),
+                detectedMutualCount: 10,
+                publicCount: 10,
+                privateCount: 0,
+                detailedSelectedPublicCount: 10,
+                notScreenedPublicCount: 0,
+                profileBatches: [{
+                    batch: 0,
+                    itemCount: 10,
+                    inputHash: digest('revenue-order-profile'),
+                }],
+                privateNameBatches: [],
+                relationshipSelectionPolicy: {
+                    policyVersion: 'gender-routing-v1',
+                    relationshipCheckpointId: digest('revenue-order-relationships'),
+                    relationshipJobInputHash: digest('revenue-order-input'),
+                    planId: 'basic',
+                    publicPopulationCount: 10,
+                    selectedCount: 10,
+                },
+            },
+        });
+        const unresolvedForOrder = (username: string): AnalysisV2ProfileAiOutcome => {
+            const baseline = verifiedOutcome(username);
+            const mediaIds = baseline.normalizedSelectionIds;
+            return {
+                ...baseline,
+                status: 'unresolved',
+                baselineClassification: 'unresolved',
+                classificationSource: 'unknown',
+                feature: feature(mediaIds, 'unresolved'),
+                genderResolutionStatus: 'not_eligible',
+                genderResolutionOperationKey: null,
+                genderResolutionResultHash: null,
+                mediaBundlePersisted: false,
+            };
+        };
+        const target = unresolvedForOrder('revenue.order');
+        const selected = selectAnalysisMedia({
+            profile: {
+                id: target.profile!.username,
+                imageUrl: target.profile!.profilePicUrl!,
+            },
+            posts: target.profile!.latestPosts!,
+        });
+        const currentOrder = selected.feature.media.map(item => item.selectionId);
+        const checkpointOrder = [...currentOrder].reverse();
+        expect(checkpointOrder).not.toEqual(currentOrder);
+        target.feature = feature(checkpointOrder, 'unresolved');
+        target.triage = triage(checkpointOrder, 'unknown');
+        target.normalizedSelectionIds = checkpointOrder;
+        target.mediaCoverage = {
+            selectedCount: checkpointOrder.length,
+            normalizedCount: checkpointOrder.length,
+            failures: [],
+        };
+        memoryState.outcomes = [
+            ...Array.from({ length: 6 }, (_, index) => verifiedOutcome(`revenue.verified.${index}`)),
+            target,
+            ...Array.from({ length: 3 }, (_, index) => unresolvedForOrder(`revenue.unknown.${index}`)),
+        ];
+        memoryState.final = {
+            revision: 1,
+            resultHash: digest('revenue-order-final'),
+            riskPolicyVersion: 'risk-policy-v2.4',
+            candidates: [],
+            narrativeCandidateIds: [target.candidateId],
+            narrativeBatchHash: digest('revenue-order-narrative-batch'),
+        };
+        memoryState.reverse = {
+            revision: 1,
+            resultHash: digest('revenue-order-reverse'),
+            rows: [],
+        };
+
+        const persistedOrders = new Map<string, string[]>();
+        const admission = {
+            capacityLimit: 20 as const,
+            begin: vi.fn(async () => 'accepted' as const),
+            reserve: vi.fn(async () => 'accepted' as const),
+            complete: vi.fn(async (): Promise<'approved' | 'manual_review'> => 'approved'),
+        };
+        const deps = dependencies(memoryState, {
+            revenueResolverCapacity: { bind: vi.fn(async () => admission) },
+        } as never);
+        deps.ai.startGenderResolution = vi.fn((
+            input: Parameters<AnalysisV2AiStageRuntime['startGenderResolution']>[0],
+        ) => {
+            const operationKey = `gender-resolution:${digest(input.media[0]!.selectionId)}`;
+            return {
+                operationKey,
+                completion: Promise.resolve(),
+                peek: () => ({
+                    status: 'ready' as const,
+                    value: {
+                        result: {
+                            assessment: {
+                                inferredGender: 'female' as const,
+                                confidence: 'high' as const,
+                                ownerConsistency: 'same_person' as const,
+                                evidenceSelectionIds: input.media.slice(0, 2)
+                                    .map(row => row.selectionId),
+                            },
+                            analyzedSelectionIds: input.media.map(row => row.selectionId),
+                        },
+                        operationKey,
+                        resultHash: digest(`revenue-order:${input.media[0]!.selectionId}`),
+                        source: 'checkpoint' as const,
+                    },
+                }),
+                cutoff: vi.fn(async () => undefined),
+            };
+        });
+        deps.mediaStore.persistBundle = vi.fn(async (
+            input: Parameters<AnalysisV2MediaArtifactStore['persistBundle']>[0],
+        ) => {
+            persistedOrders.set(
+                input.bundleId,
+                input.media.map(item => item.selectionId),
+            );
+            return {
+                requestId: input.requestId,
+                artifactKey: digest(input.bundleId),
+                artifactKind: 'media_bundle' as const,
+                contentSha256: digest('revenue-order-bundle'),
+                contentType: 'application/octet-stream' as const,
+                objectName: 'revenue-order-object',
+                objectGeneration: '1',
+                byteSize: 4,
+            };
+        });
+        deps.mediaStore.loadBundle = vi.fn(async (
+            input: Parameters<AnalysisV2MediaArtifactStore['loadBundle']>[0],
+        ) => {
+            const persisted = persistedOrders.get(input.bundleId);
+            if (!persisted) return null;
+            expect(persisted).toEqual(input.expectedSelectionIds);
+            return input.expectedSelectionIds.map(selectionId => ({
+                selectionId,
+                normalizedJpeg: Buffer.from([0xff, 0xd8, 0xff, 0xd9]),
+            }));
+        });
+        const registry = createAnalysisV2AiScoringExecutorRegistry(deps);
+
+        await registry.primary_join!(context('primary_join', {
+            jobKey: 'coordinator:join:primary-evidence',
+            state: strictState,
+            aiStagePolicyVersion: AI_STAGE_POLICY_LATEST_VERSION,
+        }));
+        await registry.narrative!(context('narrative', {
+            jobKey: 'coordinator:narrative',
+            state: strictState,
+            aiStagePolicyVersion: AI_STAGE_POLICY_LATEST_VERSION,
+        }));
+
+        expect(persistedOrders.get(analysisV2CandidateBundleId(target.candidateId)))
+            .toEqual(checkpointOrder);
+        expect(deps.mediaStore.loadBundle).toHaveBeenCalledWith(expect.objectContaining({
+            bundleId: analysisV2CandidateBundleId(target.candidateId),
+            expectedSelectionIds: checkpointOrder,
+        }));
     });
 });
 

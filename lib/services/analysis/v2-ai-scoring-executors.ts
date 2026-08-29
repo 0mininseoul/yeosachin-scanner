@@ -1510,15 +1510,10 @@ async function finalRevenueResolverMedia(input: {
         // two-distinct-image minimum. A one-image or failed download is an
         // explicit skip, never a fabricated classification.
         if (resolverMedia.length < 2) return null;
-        const featureSelectionIds = new Set(
-            input.outcome.feature?.analyzedSelectionIds ?? [],
-        );
-        const bundleMedia = normalized.media.flatMap(media => {
-            if (!featureSelectionIds.has(media.selectionId)) return [];
-            const normalizedJpeg = normalized.bytes.get(media.selectionId);
-            return normalizedJpeg
-                ? [{ selectionId: media.selectionId, normalizedJpeg }]
-                : [];
+        const featureSelectionIds = input.outcome.feature?.analyzedSelectionIds ?? [];
+        const bundleMedia = featureSelectionIds.flatMap(selectionId => {
+            const normalizedJpeg = normalized.bytes.get(selectionId);
+            return normalizedJpeg ? [{ selectionId, normalizedJpeg }] : [];
         });
         // A missing retained feature bundle must not turn a valid
         // analysis/media-unavailable resolver input into an artificial skip.
@@ -1526,8 +1521,9 @@ async function finalRevenueResolverMedia(input: {
         // later eligible for detail materialization.
         return {
             media: resolverMedia,
-            bundleMedia: featureSelectionIds.size > 0
-                && bundleMedia.length === featureSelectionIds.size
+            bundleMedia: featureSelectionIds.length > 0
+                && new Set(featureSelectionIds).size === featureSelectionIds.length
+                && bundleMedia.length === featureSelectionIds.length
                 ? bundleMedia
                 : null,
         };

@@ -89,6 +89,86 @@ AnalysisV2PrivateMediaObjectClient {
     };
 }
 
+function concurrentFirstWriteHarness(bundleId: string) {
+    const legacyArtifactKey = analysisV2MediaBundleArtifactKey(bundleId);
+    const references = new Map<string, AnalysisV2MediaArtifactRef>();
+    const objectBytes = new Map<string, Buffer>();
+    const objectGenerations = new Map<string, string>();
+    const deletedObjectNames: string[] = [];
+    let legacyLoadCount = 0;
+    let releaseLegacyLoads!: () => void;
+    const legacyLoadsReleased = new Promise<void>(resolve => {
+        releaseLegacyLoads = resolve;
+    });
+    let registrationTail = Promise.resolve();
+
+    const objectClient = objects({
+        create: vi.fn(async input => {
+            const existing = objectBytes.get(input.objectName);
+            if (existing) {
+                if (!existing.equals(input.bytes)) {
+                    throw new Error('OBJECT_PRECONDITION_CONTENT_MISMATCH');
+                }
+                return {
+                    created: false,
+                    generation: objectGenerations.get(input.objectName)!,
+                };
+            }
+            const generation = String(objectBytes.size + 1);
+            objectBytes.set(input.objectName, input.bytes);
+            objectGenerations.set(input.objectName, generation);
+            return { created: true, generation };
+        }),
+        read: vi.fn(async input => objectBytes.get(input.objectName) ?? Buffer.alloc(0)),
+        delete: vi.fn(async input => {
+            deletedObjectNames.push(input.objectName);
+            objectBytes.delete(input.objectName);
+        }),
+    });
+    const registryClient = registry({
+        load: vi.fn(async input => {
+            if (input.artifactKey === legacyArtifactKey && legacyLoadCount < 2) {
+                legacyLoadCount += 1;
+                if (legacyLoadCount === 2) releaseLegacyLoads();
+                await legacyLoadsReleased;
+            }
+            return references.get(input.artifactKey) ?? null;
+        }),
+        register: vi.fn(async input => {
+            const waitFor = registrationTail;
+            let release!: () => void;
+            registrationTail = new Promise<void>(resolve => {
+                release = resolve;
+            });
+            await waitFor;
+            try {
+                const existing = references.get(input.artifactKey);
+                if (existing) {
+                    if (JSON.stringify(existing) === JSON.stringify(input)) return existing;
+                    throw new Error('ANALYSIS_V2_MEDIA_ARTIFACT_CONFLICT');
+                }
+                references.set(input.artifactKey, input);
+                return input;
+            } finally {
+                release();
+            }
+        }),
+    });
+
+    return {
+        store: createAnalysisV2MediaArtifactStore({
+            objects: objectClient,
+            registry: registryClient,
+        }),
+        objectClient,
+        objectBytes,
+        deletedObjectNames,
+        references,
+        registryClient,
+        legacyArtifactKey,
+    };
+}
+
 describe('analysis V2 media artifact identities', () => {
     it('uses PII-free deterministic hashes and object paths', () => {
         const key = analysisV2MediaArtifactKey('post:opaque:media:0');
@@ -125,6 +205,20 @@ describe('analysis V2 media artifact identities', () => {
         expect(() => analysisV2MediaBundleArtifactKeyV2('candidate:private', [])).toThrow(
             'invalid bundle size'
         );
+    });
+
+    it('uses unambiguous framing for bundle ids containing delimiter characters', () => {
+        const profileKey = analysisV2MediaArtifactKey('profile:1');
+        const bundleWithEmbeddedSelectionKey = analysisV2MediaBundleArtifactKeyV2(
+            `candidate\n${profileKey}`,
+            ['post:1'],
+        );
+        const separateBundleAndSelections = analysisV2MediaBundleArtifactKeyV2(
+            'candidate',
+            ['profile:1', 'post:1'],
+        );
+
+        expect(bundleWithEmbeddedSelectionKey).not.toBe(separateBundleAndSelections);
     });
 
     it('validates private artifact bucket configuration without exposing a default', () => {
@@ -756,6 +850,94 @@ describe('analysis V2 media artifact orchestration', () => {
         expect(reordered.artifactKey).not.toBe(first.artifactKey);
         expect(objectClient.create).toHaveBeenCalledTimes(2);
         expect(registryClient.register).toHaveBeenCalledTimes(2);
+    });
+
+    it('converges concurrent first writes with content drift on the exact winning legacy row', async () => {
+        const bundleId = 'candidate:concurrent-content-drift';
+        const harness = concurrentFirstWriteHarness(bundleId);
+        const base = { requestId, jobKey, claimToken, bundleId };
+        const firstMedia = [{ selectionId: 'profile:1', normalizedJpeg: jpeg }];
+        const secondMedia = [{ selectionId: 'profile:1', normalizedJpeg: jpeg2 }];
+
+        const results = await Promise.allSettled([
+            harness.store.persistBundle({ ...base, media: firstMedia }),
+            harness.store.persistBundle({ ...base, media: secondMedia }),
+        ]);
+
+        expect(results).toHaveLength(2);
+        if (!results.every(result => result.status === 'fulfilled')) {
+            throw new Error('Concurrent content-drift writes did not converge.');
+        }
+        const fulfilledResults = results as PromiseFulfilledResult<AnalysisV2MediaArtifactRef>[];
+        expect(fulfilledResults[0]!.value).toEqual(fulfilledResults[1]!.value);
+        expect(fulfilledResults[0]!.value.artifactKey).toBe(harness.legacyArtifactKey);
+        expect(harness.references.size).toBe(1);
+        expect(harness.objectBytes.size).toBe(1);
+        expect(harness.deletedObjectNames).toHaveLength(1);
+        expect(harness.objectClient.create).toHaveBeenCalledTimes(2);
+        expect(harness.registryClient.register).toHaveBeenCalledTimes(2);
+    });
+
+    it('converges concurrent first writes with selection drift by pivoting the loser to v2', async () => {
+        const bundleId = 'candidate:concurrent-selection-drift';
+        const harness = concurrentFirstWriteHarness(bundleId);
+        const base = { requestId, jobKey, claimToken, bundleId };
+        const firstMedia = [
+            { selectionId: 'profile:1', normalizedJpeg: jpeg },
+            { selectionId: 'post:1', normalizedJpeg: jpeg2 },
+        ];
+        const secondMedia = [
+            { selectionId: 'post:1', normalizedJpeg: jpeg2 },
+            { selectionId: 'profile:1', normalizedJpeg: jpeg },
+        ];
+
+        const results = await Promise.allSettled([
+            harness.store.persistBundle({ ...base, media: firstMedia }),
+            harness.store.persistBundle({ ...base, media: secondMedia }),
+        ]);
+
+        expect(results).toHaveLength(2);
+        if (!results.every(result => result.status === 'fulfilled')) {
+            throw new Error('Concurrent selection-drift writes did not converge.');
+        }
+        const fulfilledResults = results as PromiseFulfilledResult<AnalysisV2MediaArtifactRef>[];
+        const keys = fulfilledResults.map(result => result.value.artifactKey);
+        const v2Key = analysisV2MediaBundleArtifactKeyV2(
+            bundleId,
+            secondMedia.map(item => item.selectionId),
+        );
+        expect(keys).toContain(harness.legacyArtifactKey);
+        expect(keys).toContain(v2Key);
+        expect(harness.references.get(harness.legacyArtifactKey)).toBeDefined();
+        expect(harness.references.get(v2Key)).toBeDefined();
+        expect(harness.references.size).toBe(2);
+        expect(harness.objectBytes.size).toBe(2);
+        expect(harness.deletedObjectNames).toHaveLength(1);
+        expect(harness.objectClient.create).toHaveBeenCalledTimes(3);
+        expect(harness.registryClient.register).toHaveBeenCalledTimes(3);
+    });
+
+    it('converges identical concurrent first writes through the object precondition', async () => {
+        const bundleId = 'candidate:concurrent-identical';
+        const harness = concurrentFirstWriteHarness(bundleId);
+        const base = { requestId, jobKey, claimToken, bundleId };
+        const media = [
+            { selectionId: 'profile:1', normalizedJpeg: jpeg },
+            { selectionId: 'post:1', normalizedJpeg: jpeg2 },
+        ];
+
+        const results = await Promise.all([
+            harness.store.persistBundle({ ...base, media }),
+            harness.store.persistBundle({ ...base, media }),
+        ]);
+
+        expect(results[0]).toEqual(results[1]);
+        expect(results[0]!.artifactKey).toBe(harness.legacyArtifactKey);
+        expect(harness.references.size).toBe(1);
+        expect(harness.objectBytes.size).toBe(1);
+        expect(harness.deletedObjectNames).toHaveLength(0);
+        expect(harness.objectClient.create).toHaveBeenCalledTimes(2);
+        expect(harness.registryClient.register).toHaveBeenCalledTimes(2);
     });
 
     it('rejects an invalid retry JPEG before registry or object operations', async () => {
