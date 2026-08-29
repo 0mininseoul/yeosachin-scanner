@@ -29,6 +29,8 @@ const IMAGE_PROXY_DIRECT_TIMEOUT_MS = 4_000;
 const IMAGE_PROXY_CACHE_TIMEOUT_MS = 1_500;
 const IMAGE_ACCEPT = 'image/jpeg,image/png,image/webp,image/avif,image/*;q=0.8';
 const IMAGE_RETRY_AFTER_SECONDS = 3;
+const IMAGE_PROXY_FAILURE_LOG_THROTTLE_MS = 60_000;
+const imageProxyFailureLogAt = new Map<string, number>();
 
 type ImagePayload = {
     bytes: Buffer;
@@ -105,12 +107,24 @@ function retryableImageUnavailableResponse() {
 
 function logImageProxyOutcome(outcome: {
     scope: 'generic' | 'result';
-    outcome: 'cache_hit' | 'direct_success' | 'proxy_success' | 'unavailable';
+    outcome: 'unavailable' | 'rejected';
     cacheEnabled: boolean;
     elapsedMs: number;
-    source?: 'cache' | 'direct' | 'trusted_proxy';
     error?: unknown;
 }) {
+    // The progress rail can request dozens of images at once. Success records
+    // add no release-actionable signal, so keep only privacy-safe rejection
+    // and final-unavailable warnings for 403/503 monitoring.
+    if (outcome.outcome !== 'unavailable' && outcome.outcome !== 'rejected') return;
+    if (process.env.NODE_ENV === 'production') {
+        const key = `${outcome.scope}:${outcome.outcome}`;
+        const now = Date.now();
+        const previous = imageProxyFailureLogAt.get(key);
+        if (previous !== undefined && now - previous < IMAGE_PROXY_FAILURE_LOG_THROTTLE_MS) {
+            return;
+        }
+        imageProxyFailureLogAt.set(key, now);
+    }
     const safeError = outcome.error instanceof SecureImageFetchError
         ? {
             reason: outcome.error.reason,
@@ -119,15 +133,11 @@ function logImageProxyOutcome(outcome: {
         : outcome.error
             ? { reason: 'unknown', disposition: 'transient' as const }
             : undefined;
-    const log = outcome.outcome === 'unavailable'
-        ? console.warn
-        : console.info;
-    log('[image-proxy]', {
+    console.warn('[image-proxy]', {
         scope: outcome.scope,
         outcome: outcome.outcome,
         cacheEnabled: outcome.cacheEnabled,
         elapsedMs: Math.max(0, Math.round(outcome.elapsedMs)),
-        ...(outcome.source ? { source: outcome.source } : {}),
         ...(safeError ? { error: safeError } : {}),
     });
 }
@@ -271,18 +281,42 @@ export async function GET(request: NextRequest) {
             expires
         );
         if (!locator) {
+            logImageProxyOutcome({
+                scope: 'result',
+                outcome: 'rejected',
+                cacheEnabled: false,
+                elapsedMs: 0,
+            });
             return errorResponse('Image proxy token rejected', 403);
         }
         const supabase = await createClient();
         const { data: { user }, error } = await supabase.auth.getUser();
         if (error || !user) {
+            logImageProxyOutcome({
+                scope: 'result',
+                outcome: 'rejected',
+                cacheEnabled: false,
+                elapsedMs: 0,
+            });
             return errorResponse('Image proxy token rejected', 403);
         }
         try {
             if (!await isAnalysisResultAuthoritativelyPublished(locator.requestId)) {
+                logImageProxyOutcome({
+                    scope: 'result',
+                    outcome: 'rejected',
+                    cacheEnabled: false,
+                    elapsedMs: 0,
+                });
                 return errorResponse('Image proxy token rejected', 403);
             }
         } catch {
+            logImageProxyOutcome({
+                scope: 'result',
+                outcome: 'rejected',
+                cacheEnabled: false,
+                elapsedMs: 0,
+            });
             return errorResponse('Image proxy token rejected', 403);
         }
         resolvedResult = await resolveAnalysisV2ResultImageLocator(
@@ -296,6 +330,12 @@ export async function GET(request: NextRequest) {
                 : null;
     }
     if (!authorizedUrl) {
+        logImageProxyOutcome({
+            scope: isResult ? 'result' : 'generic',
+            outcome: 'rejected',
+            cacheEnabled: false,
+            elapsedMs: 0,
+        });
         return errorResponse('Image proxy token rejected', 403);
     }
     if (resolvedResult?.source === 'r2') {
@@ -346,13 +386,6 @@ export async function GET(request: NextRequest) {
                 Math.min(IMAGE_PROXY_CACHE_TIMEOUT_MS, remainingTimeoutMs()),
             );
             if (cached && isSafeImagePayload(cached)) {
-                logImageProxyOutcome({
-                    scope: 'generic',
-                    outcome: 'cache_hit',
-                    cacheEnabled: true,
-                    source: 'cache',
-                    elapsedMs: Date.now() - startedAt,
-                });
                 return imageResponse(cached.bytes, cached.contentType, expires, false);
             }
         }
@@ -399,7 +432,6 @@ export async function GET(request: NextRequest) {
             ));
 
         if (successful?.kind === 'success' && isSafeImagePayload(successful.result)) {
-            const source = successful.source;
             if (cacheKey) {
                 void writeImageProxyCacheObject(
                     cacheKey,
@@ -407,13 +439,6 @@ export async function GET(request: NextRequest) {
                     successful.result.contentType,
                 );
             }
-            logImageProxyOutcome({
-                scope: isResult ? 'result' : 'generic',
-                outcome: source === 'direct' ? 'direct_success' : 'proxy_success',
-                cacheEnabled: Boolean(cacheKey),
-                source,
-                elapsedMs: Date.now() - startedAt,
-            });
             return imageResponse(
                 successful.result.bytes,
                 successful.result.contentType,

@@ -5,6 +5,7 @@ readonly repo_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 readonly expected_progress_migration_version='20260829120000'
 readonly progress_migration_path="$repo_dir/supabase/migrations/${expected_progress_migration_version}_add_analysis_v2_progress_signals_history.sql"
 readonly cloud_run_provenance_label='analysis-v2-source-commit'
+readonly image_proxy_probe_script="$repo_dir/scripts/check-image-proxy-signing-secret-compatibility.ts"
 
 die() {
   printf 'error: %s\n' "$*" >&2
@@ -30,7 +31,7 @@ validate_identifier() {
     || die "$name contains unsupported characters"
 }
 
-for command_name in jq gcloud curl supabase; do
+for command_name in jq gcloud curl supabase npx; do
   command -v "$command_name" >/dev/null 2>&1 \
     || die "$command_name CLI is required"
 done
@@ -41,6 +42,8 @@ required_env ANALYSIS_V2_TASKS_CLOUD_RUN_SERVICE
 required_env ANALYSIS_V2_TASKS_CLOUD_RUN_REGION
 required_env VERCEL_PROJECT_ID
 required_env VERCEL_TOKEN
+required_env IMAGE_PROXY_SIGNING_SECRET
+required_env ANALYSIS_V2_IMAGE_PROXY_PROBE_BASE_URL
 
 expected_sha="$ANALYSIS_V2_EXPECTED_GIT_SHA"
 cloud_project="$ANALYSIS_V2_TASKS_PROJECT"
@@ -59,6 +62,8 @@ validate_identifier VERCEL_PROJECT_ID "$vercel_project_id"
   || die 'ANALYSIS_V2_TASKS_CLOUD_RUN_SERVICE is invalid'
 [[ "$cloud_region" =~ ^[a-z]+-[a-z]+[0-9]$ ]] \
   || die 'ANALYSIS_V2_TASKS_CLOUD_RUN_REGION is invalid'
+[[ -f "$image_proxy_probe_script" ]] \
+  || die 'image proxy signing compatibility probe is missing'
 
 [[ -f "$progress_migration_path" ]] \
   || die "expected DB progress migration is missing: $expected_progress_migration_version"
@@ -126,12 +131,26 @@ if [[ -n "${VERCEL_TEAM_ID:-}" ]]; then
   vercel_url="$vercel_url&teamId=$VERCEL_TEAM_ID"
 fi
 
+escape_curl_config_value() {
+  local value="$1"
+  value="${value//\\/\\\\}"
+  value="${value//\"/\\\"}"
+  printf '%s' "$value"
+}
+
+# Keep only the bearer token in curl's stdin config. A command-line header
+# exposes the token to process listings while the request itself is otherwise
+# read-only; the validated, non-sensitive Vercel URL remains a normal argv.
+escaped_vercel_token="$(escape_curl_config_value "$vercel_token")"
 if ! vercel_json="$(curl --disable --proto '=https' --tlsv1.2 \
   --max-redirs 0 --connect-timeout 10 --max-time 30 \
   --fail --silent --show-error \
-  --header "Authorization: Bearer $vercel_token" \
+  --url "$vercel_url" \
   --header 'Accept: application/json' \
-  --url "$vercel_url" 2>/dev/null)"; then
+  --config - 2>/dev/null <<EOF
+header = "Authorization: Bearer $escaped_vercel_token"
+EOF
+)"; then
   die 'Vercel production deployment lookup failed'
 fi
 if ! vercel_sha="$(jq -er '
@@ -169,5 +188,20 @@ jq -e --arg version "$expected_progress_migration_version" '
 ' <<<"$migration_list" >/dev/null 2>&1 \
   || die "DB progress migration $expected_progress_migration_version is not applied"
 
-printf 'release readiness passed for expected SHA %s (Cloud Run, Vercel production, DB progress contract)\n' \
+if ! image_proxy_probe_output="$(
+  cd "$repo_dir"
+  npx --no-install tsx "$image_proxy_probe_script" 2>/dev/null
+)"; then
+  die 'IMAGE_PROXY_SIGNING_SECRET compatibility probe failed'
+fi
+case "$image_proxy_probe_output" in
+  'PASS: image-proxy-signing compatibility signature_accepted_200' \
+  | 'PASS: image-proxy-signing compatibility signature_accepted_503_retryable')
+    ;;
+  *)
+    die 'IMAGE_PROXY_SIGNING_SECRET compatibility probe returned an invalid result'
+    ;;
+esac
+
+printf 'release readiness passed for expected SHA %s (Cloud Run, Vercel production, DB progress contract, image proxy signing compatibility)\n' \
   "$expected_sha"

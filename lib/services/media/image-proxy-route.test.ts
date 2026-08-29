@@ -66,6 +66,7 @@ function signedResultRequest() {
 describe('image proxy route authorization', () => {
     afterEach(() => {
         vi.useRealTimers();
+        vi.unstubAllEnvs();
     });
 
     beforeEach(() => {
@@ -148,9 +149,7 @@ describe('image proxy route authorization', () => {
             }));
             expect(options.timeoutMs).toBeGreaterThan(0);
             expect(options.timeoutMs).toBeLessThanOrEqual(4_000);
-            expect(info.mock.calls.some(([, details]) => (
-                (details as { source?: string } | undefined)?.source === 'direct'
-            ))).toBe(true);
+            expect(info).not.toHaveBeenCalled();
         } finally {
             info.mockRestore();
         }
@@ -278,9 +277,7 @@ describe('image proxy route authorization', () => {
                 .toContain('https://images.weserv.nl/?url=');
             const trustedProxyUrl = new URL(mocks.downloadSecureImage.mock.calls[1]?.[0]);
             expect(trustedProxyUrl.searchParams.has('default')).toBe(false);
-            expect(info.mock.calls.some(([, details]) => (
-                (details as { source?: string } | undefined)?.source === 'trusted_proxy'
-            ))).toBe(true);
+            expect(info).not.toHaveBeenCalled();
             expect(warning).not.toHaveBeenCalled();
         } finally {
             info.mockRestore();
@@ -324,6 +321,31 @@ describe('image proxy route authorization', () => {
         expect(response.status).toBe(503);
         expect(response.headers.get('content-type')).toContain('application/json');
         expect(response.headers.get('cache-control')).toContain('no-store');
+    });
+
+    it('throttles production failure logs per scope and outcome', async () => {
+        vi.stubEnv('NODE_ENV', 'production');
+        const warning = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+        mocks.downloadSecureImage.mockRejectedValue(new Error('upstream unavailable'));
+
+        try {
+            const responses = await Promise.all(
+                Array.from({ length: 20 }, () => GET(signedRequest()))
+            );
+
+            expect(responses.every(response => response.status === 503)).toBe(true);
+            expect(warning).toHaveBeenCalledOnce();
+
+            mocks.isResultAuthoritativelyPublished.mockResolvedValue(false);
+            const rejectedResponses = await Promise.all(
+                Array.from({ length: 20 }, () => GET(signedResultRequest()))
+            );
+
+            expect(rejectedResponses.every(response => response.status === 403)).toBe(true);
+            expect(warning).toHaveBeenCalledTimes(2);
+        } finally {
+            warning.mockRestore();
+        }
     });
 });
 
