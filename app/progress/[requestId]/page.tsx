@@ -382,6 +382,7 @@ export default function ProgressPage({ params }: PageProps) {
                             key={requestId}
                             active={data.activeProfile}
                             candidateMedia={data.candidateMedia}
+                            publicationLagReset={data.publicationLagReset}
                         />
                     </div>
                 )}

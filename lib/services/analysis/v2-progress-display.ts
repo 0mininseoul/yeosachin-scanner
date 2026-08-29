@@ -43,6 +43,8 @@ export interface ProgressDisplayInput {
     currentOrdinal?: number | null;
     totalCount?: number | null;
     callPhase?: ProgressCallPhase | null;
+    /** Explicitly resets local display state when publication is catching up. */
+    publicationLagReset?: boolean;
     /** Changes when a new server signal or stage arrives. */
     signalKey?: string | null;
 }
@@ -276,6 +278,14 @@ export function updateProgressDisplay(
     input: ProgressDisplayInput,
 ): ProgressDisplayState {
     const nowMs = safeNow(input.nowMs, previous.lastNowMs);
+    if (input.publicationLagReset === true) {
+        return {
+            ...createProgressDisplayState(),
+            lastSignalKey: input.signalKey ?? null,
+            easingStartedAtMs: nowMs,
+            lastNowMs: nowMs,
+        };
+    }
     const confirmedProgressBp = input.status === 'completed'
         ? 10_000
         : Math.min(

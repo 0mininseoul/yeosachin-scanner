@@ -130,4 +130,63 @@ describe('ProgressFaces stable rail identity', () => {
         expect(refreshedCopy?.children).toHaveLength(2);
         expect(container.querySelectorAll('[data-progress-copy]')).toHaveLength(3);
     });
+
+    it('prefers equal-richness re-signed server history over a stale active URL', () => {
+        const staleActiveUrl = '/api/image-proxy?token=stale-active';
+        const freshServerUrl = '/api/image-proxy?token=fresh-server';
+
+        render(staleActiveUrl);
+        const firstCopy = container.querySelector<HTMLElement>('[data-progress-copy]');
+        if (!firstCopy) throw new Error('progress copy not rendered');
+
+        expect(firstCopy.querySelector('[data-progress-image]')?.getAttribute('data-progress-image'))
+            .toContain('token=stale-active');
+
+        act(() => {
+            root.render(
+                <ProgressFaces
+                    active={{
+                        candidateKey: 'b'.repeat(64),
+                        maskedUsername: 'b***e',
+                        imageUrl: '/api/image-proxy?token=active-only',
+                        feedImageUrls: [],
+                    }}
+                    candidateMedia={[{
+                        candidateKey: CANDIDATE_KEY,
+                        maskedUsername: 'a***e',
+                        imageUrl: freshServerUrl,
+                        feedImageUrls: [],
+                    }]}
+                />
+            );
+        });
+
+        const refreshedCopy = container.querySelector<HTMLElement>('[data-progress-copy]');
+        const refreshedImage = refreshedCopy?.querySelector('[data-progress-image]');
+        expect(refreshedImage?.getAttribute('data-progress-image')).toContain('token=fresh-server');
+        expect(refreshedCopy?.children).toHaveLength(2);
+        expect(refreshedCopy?.querySelectorAll('[data-progress-image]')[1]
+            ?.getAttribute('data-progress-image')).toContain('token=active-only');
+        expect([...refreshedCopy!.children].every(child => (
+            (child as HTMLElement).style.width === '84px'
+        ))).toBe(true);
+    });
+
+    it('clears retained media only for an explicit publication-lag reset', () => {
+        render('/api/image-proxy?token=before-reset');
+        expect(container.querySelector('[data-progress-image]')).toBeTruthy();
+
+        act(() => {
+            root.render(
+                <ProgressFaces
+                    active={null}
+                    candidateMedia={[]}
+                    publicationLagReset
+                />
+            );
+        });
+
+        expect(container.querySelector('[data-progress-image]')).toBeNull();
+        expect(container.querySelector('[data-progress-copy]')).toBeNull();
+    });
 });

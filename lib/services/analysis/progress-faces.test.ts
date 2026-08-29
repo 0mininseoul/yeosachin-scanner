@@ -334,6 +334,25 @@ describe('screened candidate accumulation', () => {
 });
 
 describe('screened candidate presentation keys and drift', () => {
+    it('replaces equal-richness history with a freshly signed server URL', () => {
+        const existing = appendScreenedCandidate([], {
+            candidateKey: 'a'.repeat(64),
+            maskedUsername: 'a***',
+            imageUrl: '/api/image-proxy?token=old',
+            feedImageUrls: ['/api/image-proxy?token=old-feed'],
+        });
+        const merged = mergeScreenedCandidateHistory(existing, [{
+            candidateKey: 'a'.repeat(64),
+            username: 'a***',
+            occurrence: 0,
+            imageUrl: '/api/image-proxy?token=new',
+            feedImageUrls: ['/api/image-proxy?token=new-feed'],
+        }]);
+
+        expect(merged[0]?.imageUrl).toBe('/api/image-proxy?token=new');
+        expect(merged[0]?.feedImageUrls).toEqual(['/api/image-proxy?token=new-feed']);
+    });
+
     it('retains prior good media when a fresh server history is transiently empty', () => {
         const existing = appendScreenedCandidate([], {
             candidateKey: 'a'.repeat(64),

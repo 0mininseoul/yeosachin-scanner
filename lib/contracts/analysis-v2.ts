@@ -571,6 +571,8 @@ export const progressSnapshotV1Schema = z.object({
         callPhase: progressCallPhaseSchema.optional(),
     }).strict().nullable(),
     candidateMedia: z.array(progressCandidateMediaSchema).max(20).default([]),
+    /** True only when a completed snapshot is temporarily hidden by publication lag. */
+    publicationLagReset: z.boolean().optional(),
     etaRange: z.object({
         lowSeconds: z.number().int().nonnegative().max(3_600),
         highSeconds: z.number().int().nonnegative().max(3_600),
@@ -623,6 +625,24 @@ export const progressSnapshotV1Schema = z.object({
             code: 'custom',
             message: 'Active V2 work must be server-owned background processing.',
             path: ['backgroundProcessing'],
+        });
+    }
+    if (value.publicationLagReset === true && (
+        value.status !== 'queued'
+        || value.progressBp !== 0
+        || !value.backgroundProcessing
+        || value.activeProfile !== null
+        || value.candidateMedia.length !== 0
+        || value.etaRange !== null
+        || value.lastEventSeq !== 0
+        || Object.values(value.tracks).some(track => (
+            track.state !== 'pending' || track.done !== 0 || track.total !== 0
+        ))
+    )) {
+        context.addIssue({
+            code: 'custom',
+            message: 'Publication-lag reset must be an empty queued snapshot.',
+            path: ['publicationLagReset'],
         });
     }
 });

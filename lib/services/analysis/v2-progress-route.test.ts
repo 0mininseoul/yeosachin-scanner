@@ -95,6 +95,47 @@ function snapshot() {
     };
 }
 
+function completedSnapshot() {
+    return {
+        ...snapshot(),
+        revision: 3,
+        status: 'completed' as const,
+        progressBp: 10_000,
+        backgroundProcessing: false,
+        tracks: {
+            relationshipAi: {
+                state: 'completed' as const,
+                stageCode: 'RELATIONSHIP_AI_COMPLETE',
+                done: 4,
+                total: 4,
+                progressBp: 10_000,
+            },
+            interactions: {
+                state: 'completed' as const,
+                stageCode: 'INTERACTIONS_COMPLETE',
+                done: 2,
+                total: 2,
+                progressBp: 10_000,
+            },
+            finalization: {
+                state: 'completed' as const,
+                stageCode: 'FINALIZATION_COMPLETE',
+                done: 1,
+                total: 1,
+                progressBp: 10_000,
+            },
+        },
+        activeProfile: null,
+        candidateMedia: [{
+            candidateKey: 'a'.repeat(64),
+            maskedUsername: 'a***e',
+            imageUrl: '/api/image-proxy?token=completed',
+            feedImageUrls: [],
+        }],
+        etaRange: null,
+    };
+}
+
 describe('analysis V2 owner progress route', () => {
     beforeEach(() => {
         vi.clearAllMocks();
@@ -367,6 +408,32 @@ describe('analysis V2 owner progress route', () => {
             context()
         );
         expect(response.status).toBe(404);
+    });
+
+    it('marks an unpublished completed snapshot as a publication-lag reset', async () => {
+        mocks.loadForOwner.mockResolvedValue({
+            snapshot: completedSnapshot(),
+            events: [],
+        });
+        mocks.isResultAuthoritativelyPublished.mockResolvedValue(false);
+
+        const response = await GET(
+            new Request(`https://example.com/api/analysis/progress/${requestId}`),
+            context(),
+        );
+
+        expect(response.status).toBe(200);
+        await expect(response.json()).resolves.toMatchObject({
+            snapshot: {
+                status: 'queued',
+                progressBp: 0,
+                backgroundProcessing: true,
+                publicationLagReset: true,
+                activeProfile: null,
+                candidateMedia: [],
+                lastEventSeq: 0,
+            },
+        });
     });
 
     it('fails closed when the store response violates the public contract', async () => {

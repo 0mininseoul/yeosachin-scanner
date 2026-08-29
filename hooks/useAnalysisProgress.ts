@@ -36,6 +36,7 @@ interface AnalysisProgress {
     activeProfile: ProgressSnapshotV1['activeProfile'];
     candidateMedia: ProgressSnapshotV1['candidateMedia'];
     etaRange: ProgressSnapshotV1['etaRange'];
+    publicationLagReset: boolean;
     events: ProgressEventV1[];
 }
 
@@ -74,6 +75,7 @@ function displayInputForSnapshot(
         currentOrdinal: active?.currentOrdinal ?? null,
         totalCount: active?.totalCount ?? null,
         callPhase: active?.callPhase ?? null,
+        publicationLagReset: snapshot.publicationLagReset === true,
         signalKey: JSON.stringify([
             snapshot.revision,
             active?.candidateKey ?? null,
@@ -183,7 +185,14 @@ export function useAnalysisProgress(requestId: string) {
                         throw new Error('Analysis progress response did not match the V2 contract.');
                     }
                     const progress = parsed.data;
-                    if (progress.events.length > 0) {
+                    if (progress.snapshot.publicationLagReset === true) {
+                        // The route deliberately hides a completed snapshot
+                        // while publication catches up. Drop local history and
+                        // reset the cursor with the queued snapshot so a later
+                        // authoritative read starts from the reset boundary.
+                        v2EventsRef.current = [];
+                        v2LastEventSeqRef.current = 0;
+                    } else if (progress.events.length > 0) {
                         v2LastEventSeqRef.current = Math.max(
                             v2LastEventSeqRef.current,
                             progress.events.at(-1)!.seq
@@ -235,6 +244,7 @@ export function useAnalysisProgress(requestId: string) {
                         activeProfile: progress.snapshot.activeProfile,
                         candidateMedia: progress.snapshot.candidateMedia,
                         etaRange: progress.snapshot.etaRange,
+                        publicationLagReset: progress.snapshot.publicationLagReset === true,
                         events: retainedEvents,
                     });
                     hasDataRef.current = true;
@@ -265,6 +275,7 @@ export function useAnalysisProgress(requestId: string) {
                     activeProfile: null,
                     candidateMedia: [],
                     etaRange: null,
+                    publicationLagReset: false,
                     events: [],
                 });
                 hasDataRef.current = true;

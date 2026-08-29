@@ -157,9 +157,16 @@ describe('V2 progress candidate-media migration PGlite contract', () => {
             CREATE FUNCTION public.analysis_v2_progress_event_json(
                 p_event public.analysis_progress_events
             ) RETURNS JSONB LANGUAGE sql AS $$ SELECT p_event.event_json $$;
+            CREATE FUNCTION public.analysis_v2_valid_progress_tracks(
+                p_tracks JSONB
+            ) RETURNS BOOLEAN LANGUAGE sql AS $$ SELECT TRUE $$;
             CREATE FUNCTION public.checkpoint_analysis_v2_active_profile_heartbeat(
                 UUID, TEXT, UUID, TEXT, TIMESTAMP WITH TIME ZONE, INTEGER, TEXT, TEXT
             ) RETURNS BOOLEAN LANGUAGE sql AS $$ SELECT TRUE $$;
+            CREATE FUNCTION public.checkpoint_analysis_v2_progress(
+                UUID, TEXT, UUID, TEXT, TEXT, INTEGER, BOOLEAN, JSONB, JSONB, JSONB, TEXT,
+                JSONB, TEXT
+            ) RETURNS JSONB LANGUAGE sql AS $$ SELECT '{}'::JSONB $$;
             CREATE OR REPLACE FUNCTION public.analysis_v2_purge_terminal_active_profile_heartbeat()
             RETURNS TRIGGER LANGUAGE plpgsql SECURITY DEFINER SET search_path = '' AS $$
             BEGIN

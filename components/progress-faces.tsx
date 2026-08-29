@@ -172,16 +172,18 @@ function useFaceDrift(faceCount: number) {
  * include a bounded outcome history. The browser still retains its own merged
  * view so a transient empty read cannot erase a tile already on screen.
  *
- * Each candidate is flattened into a bounded profile/feed tile pool. A server
- * history is merged before the active heartbeat, so a transient empty read
- * cannot erase an image that was already good.
+ * Each candidate is flattened into a bounded profile/feed tile pool. The
+ * active heartbeat is merged first and the freshly signed server history last,
+ * so equal-richness history wins while active-only candidates are retained.
  */
 export function ProgressFaces({
     active,
     candidateMedia = [],
+    publicationLagReset = false,
 }: {
     active: ActiveCandidateMedia | null;
     candidateMedia?: readonly ProgressCandidateMediaV1[];
+    publicationLagReset?: boolean;
 }) {
     const [candidates, setCandidates] = useState<readonly ScreenedCandidate[]>([]);
     const [lastSnapshotKey, setLastSnapshotKey] = useState<string | null>(null);
@@ -200,23 +202,27 @@ export function ProgressFaces({
         feedImageUrls,
     })), [candidateMedia]);
     const snapshotKey = useMemo(() => JSON.stringify([
+        publicationLagReset,
         active ? activeCandidateMediaKey(active) : null,
         serverCandidates,
-    ]), [active, serverCandidates]);
+    ]), [active, publicationLagReset, serverCandidates]);
 
     /* Adjusted during render rather than in an effect: the list is derived from
        a prop that changes over time, and an effect would paint the old row once
        before correcting it. The stable snapshot key makes repeated heartbeats a
        no-op while allowing the same candidate to be enriched with feed media. */
-    if (active && snapshotKey !== lastSnapshotKey) {
+    if (publicationLagReset && snapshotKey !== lastSnapshotKey) {
+        setLastSnapshotKey(snapshotKey);
+        setCandidates([]);
+    } else if (active && snapshotKey !== lastSnapshotKey) {
         setLastSnapshotKey(snapshotKey);
         setCandidates(current => {
-            const merged = mergeScreenedCandidateHistory(current, serverCandidates);
-            return appendScreenedCandidate(merged, active);
+            const withActive = appendScreenedCandidate(current, active);
+            return mergeScreenedCandidateHistory(withActive, serverCandidates);
         });
     }
 
-    if (!active && candidateMedia.length > 0 && snapshotKey !== lastSnapshotKey) {
+    if (!publicationLagReset && !active && candidateMedia.length > 0 && snapshotKey !== lastSnapshotKey) {
         setLastSnapshotKey(snapshotKey);
         setCandidates(current => mergeScreenedCandidateHistory(current, serverCandidates));
     }

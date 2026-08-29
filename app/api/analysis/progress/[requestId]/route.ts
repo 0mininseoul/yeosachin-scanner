@@ -138,7 +138,10 @@ export async function GET(
                         },
                     },
                     activeProfile: null,
+                    candidateMedia: [],
                     etaRange: null,
+                    lastEventSeq: 0,
+                    publicationLagReset: true,
                 },
                 events: [],
             }

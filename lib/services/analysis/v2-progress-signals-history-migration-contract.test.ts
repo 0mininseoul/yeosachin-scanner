@@ -64,4 +64,24 @@ describe('V2 progress signals and history migration contract', () => {
         expect(migration).toContain("'callPhase', heartbeat.call_phase");
         expect(migration).not.toMatch(/raw_username|instagram_username/i);
     });
+
+    it('keeps same-track stage metadata DB-authoritative across overlapping workers', () => {
+        const migration = readFileSync(migrationPath, 'utf8');
+        expect(migration).toContain(
+            'ALTER FUNCTION public.checkpoint_analysis_v2_progress('
+        );
+        expect(migration).toContain(
+            'RENAME TO checkpoint_analysis_v2_progress_v1'
+        );
+        expect(migration).toContain('analysis_v2_progress_stage_rank');
+        expect(migration).toContain('analysis_v2_progress_merge_track_stage');
+        expect(migration).toContain('analysis_v2_progress_canonical_tracks');
+        expect(migration).toContain("WHEN public.analysis_v2_progress_stage_rank(");
+        expect(migration).toContain('THEN p_previous');
+        expect(migration).toContain('v_previous_progress_bp');
+        expect(migration).toContain('v_stage_canonicalized');
+        expect(migration).toContain('FOR UPDATE');
+        expect(migration).not.toMatch(/pg_advisory_(?:xact_)?lock/i);
+        expect(migration).not.toMatch(/CREATE\s+TABLE/i);
+    });
 });

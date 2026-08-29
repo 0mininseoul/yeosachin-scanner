@@ -314,6 +314,63 @@ describe('V2 progress persistence adapter', () => {
         })).checkpoint(input())).rejects.toThrow('checkpoint response drift');
     });
 
+    it.each([
+        ['profile fetch', 'relationshipAi', 'PUBLIC_PROFILES_COLLECTING', 'PROFILE_SCREENING'],
+        ['profile AI', 'relationshipAi', 'PROFILE_SCREENING', 'CANDIDATES_RANKING'],
+        ['finalization', 'finalization', 'FINAL_SCORE_CALCULATING', 'HIGH_RISK_NARRATIVES_WRITING'],
+    ] as const)('accepts a DB-canonicalized newer %s stage from an overlapping worker', async (
+        _label,
+        trackId,
+        staleStageCode,
+        currentStageCode,
+    ) => {
+        const checkpointInput = input();
+        const currentSnapshot = snapshot();
+        const staleTrack = {
+            ...checkpointInput.tracks[trackId],
+            stageCode: staleStageCode,
+            ...(trackId === 'finalization' ? { state: 'running' as const } : {}),
+        };
+        const currentTrack = {
+            ...currentSnapshot.tracks[trackId],
+            stageCode: currentStageCode,
+            ...(trackId === 'finalization' ? { state: 'running' as const } : {}),
+        };
+        const tracks = {
+            ...checkpointInput.tracks,
+            [trackId]: staleTrack,
+        } as AnalysisV2ProgressCheckpointInput['tracks'];
+        const currentTracks = {
+            ...currentSnapshot.tracks,
+            [trackId]: currentTrack,
+        };
+        const mock = client({
+            snapshot: snapshot({ tracks: currentTracks }),
+            event: event(),
+            advanced: false,
+        });
+
+        await expect(createAnalysisV2ProgressStore(mock).checkpoint(input({ tracks })))
+            .resolves.toMatchObject({ snapshot: { tracks: currentTracks } });
+    });
+
+    it('fails closed when a response contains an unknown stage rank', async () => {
+        const drifted = snapshot({
+            tracks: {
+                ...snapshot().tracks,
+                relationshipAi: {
+                    ...snapshot().tracks.relationshipAi,
+                    stageCode: 'UNKNOWN_STAGE',
+                },
+            },
+        });
+        await expect(createAnalysisV2ProgressStore(client({
+            snapshot: drifted,
+            event: event(),
+            advanced: true,
+        })).checkpoint(input())).rejects.toThrow('checkpoint response drift');
+    });
+
     it('rejects raw active handles and active foreground-only work', async () => {
         const store = createAnalysisV2ProgressStore(client(null));
         await expect(store.checkpoint(input({

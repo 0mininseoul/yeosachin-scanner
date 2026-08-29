@@ -394,6 +394,254 @@ AS $$
     );
 $$;
 
+/*
+ * Progress stage metadata is owned by the durable state row, not by whichever
+ * distributed worker happens to report last.  Keep the order explicit for
+ * each track because a generic lexical comparison would make an older stage
+ * such as PROFILE_SCREENING appear newer than RESULT_FINALIZING.
+ */
+CREATE OR REPLACE FUNCTION public.analysis_v2_progress_stage_rank(
+    p_track_id TEXT,
+    p_stage_code TEXT
+)
+RETURNS INTEGER
+LANGUAGE sql
+IMMUTABLE
+SET search_path = ''
+AS $$
+    SELECT CASE p_track_id
+        WHEN 'relationshipAi' THEN CASE p_stage_code
+            WHEN 'RELATIONSHIP_AI_QUEUED' THEN 0
+            WHEN 'RELATIONSHIPS_COLLECTING' THEN 1
+            WHEN 'RELATIONSHIP_AI_RUNNING' THEN 2
+            WHEN 'PUBLIC_PROFILES_COLLECTING' THEN 3
+            WHEN 'PROFILE_SCREENING' THEN 4
+            WHEN 'EVIDENCE_JOINING' THEN 5
+            WHEN 'CANDIDATES_RANKING' THEN 6
+            WHEN 'PARTNER_CONTEXT_CHECKING' THEN 7
+            WHEN 'RELATIONSHIP_AI_COMPLETE' THEN 8
+            ELSE -1
+        END
+        WHEN 'interactions' THEN CASE p_stage_code
+            WHEN 'INTERACTIONS_QUEUED' THEN 0
+            WHEN 'TARGET_INTERACTIONS_COLLECTING' THEN 1
+            WHEN 'INTERACTIONS_RUNNING' THEN 2
+            WHEN 'SHORTLIST_INTERACTIONS_COLLECTING' THEN 3
+            WHEN 'INTERACTIONS_COMPLETE' THEN 4
+            ELSE -1
+        END
+        WHEN 'finalization' THEN CASE p_stage_code
+            WHEN 'FINALIZATION_QUEUED' THEN 0
+            WHEN 'FINALIZATION_RUNNING' THEN 1
+            WHEN 'PRIVATE_NAMES_SCREENING' THEN 2
+            WHEN 'FINAL_SCORE_CALCULATING' THEN 3
+            WHEN 'HIGH_RISK_NARRATIVES_WRITING' THEN 4
+            WHEN 'RESULT_FINALIZING' THEN 5
+            WHEN 'FINALIZATION_COMPLETE' THEN 6
+            ELSE -1
+        END
+        ELSE -1
+    END;
+$$;
+
+CREATE OR REPLACE FUNCTION public.analysis_v2_progress_merge_track_stage(
+    p_track_id TEXT,
+    p_previous JSONB,
+    p_next JSONB
+)
+RETURNS JSONB
+LANGUAGE sql
+IMMUTABLE
+SET search_path = ''
+AS $$
+    SELECT CASE
+        WHEN public.analysis_v2_progress_stage_rank(
+                p_track_id, p_previous->>'stageCode'
+             ) < 0
+          OR public.analysis_v2_progress_stage_rank(
+                p_track_id, p_next->>'stageCode'
+             ) < 0
+        THEN p_previous
+        WHEN public.analysis_v2_progress_stage_rank(
+                p_track_id, p_next->>'stageCode'
+             ) < public.analysis_v2_progress_stage_rank(
+                p_track_id, p_previous->>'stageCode'
+             )
+        THEN pg_catalog.jsonb_set(
+            p_next,
+            ARRAY['stageCode'],
+            pg_catalog.to_jsonb(p_previous->>'stageCode'),
+            TRUE
+        )
+        ELSE p_next
+    END;
+$$;
+
+CREATE OR REPLACE FUNCTION public.analysis_v2_progress_canonical_tracks(
+    p_previous JSONB,
+    p_next JSONB
+)
+RETURNS JSONB
+LANGUAGE sql
+IMMUTABLE
+SET search_path = ''
+AS $$
+    SELECT pg_catalog.jsonb_set(
+        pg_catalog.jsonb_set(
+            pg_catalog.jsonb_set(
+                p_next,
+                '{relationshipAi}',
+                public.analysis_v2_progress_merge_track_stage(
+                    'relationshipAi',
+                    p_previous->'relationshipAi',
+                    p_next->'relationshipAi'
+                ),
+                TRUE
+            ),
+            '{interactions}',
+            public.analysis_v2_progress_merge_track_stage(
+                'interactions',
+                p_previous->'interactions',
+                p_next->'interactions'
+            ),
+            TRUE
+        ),
+        '{finalization}',
+        public.analysis_v2_progress_merge_track_stage(
+            'finalization',
+            p_previous->'finalization',
+            p_next->'finalization'
+        ),
+        TRUE
+    );
+$$;
+
+/* The historical checkpoint remains the implementation of fencing, counter
+   monotonicity, revision/event idempotence, and conflict recovery. Rename it
+   once, then put the stage canonicalization boundary in front of it. The
+   dynamic lock queries keep this migration installable in narrow contract
+   harnesses while production calls acquire the exact same lock order as the
+   historical function: preflight, request, job, then state. */
+ALTER FUNCTION public.checkpoint_analysis_v2_progress(
+    UUID, TEXT, UUID, TEXT, TEXT, INTEGER, BOOLEAN, JSONB, JSONB, JSONB, TEXT, JSONB, TEXT
+) RENAME TO checkpoint_analysis_v2_progress_v1;
+
+CREATE FUNCTION public.checkpoint_analysis_v2_progress(
+    p_request_id UUID,
+    p_job_key TEXT,
+    p_claim_token UUID,
+    p_job_input_hash TEXT,
+    p_status TEXT,
+    p_progress_bp INTEGER,
+    p_background_processing BOOLEAN,
+    p_tracks JSONB,
+    p_active_profile JSONB,
+    p_eta_range JSONB,
+    p_snapshot_fingerprint TEXT,
+    p_event JSONB DEFAULT NULL,
+    p_event_key TEXT DEFAULT NULL
+)
+RETURNS JSONB
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = ''
+AS $$
+DECLARE
+    v_lock INTEGER;
+    v_previous_tracks JSONB;
+    v_previous_status TEXT;
+    v_previous_progress_bp INTEGER;
+    v_previous_background_processing BOOLEAN;
+    v_previous_active_profile JSONB;
+    v_previous_eta_range JSONB;
+    v_previous_fingerprint TEXT;
+    v_canonical_tracks JSONB := p_tracks;
+    v_canonical_progress_bp INTEGER := p_progress_bp;
+    v_stage_canonicalized BOOLEAN := FALSE;
+    v_effective_fingerprint TEXT := p_snapshot_fingerprint;
+    v_effective_event JSONB := p_event;
+    v_effective_event_key TEXT := p_event_key;
+BEGIN
+    EXECUTE 'SELECT 1
+             FROM public.analysis_preflights AS preflight
+             WHERE preflight.consumed_request_id = $1
+             FOR UPDATE'
+        INTO v_lock USING p_request_id;
+    EXECUTE 'SELECT 1
+             FROM public.analysis_requests AS analysis_request
+             WHERE analysis_request.id = $1
+             FOR UPDATE'
+        INTO v_lock USING p_request_id;
+    EXECUTE 'SELECT 1
+             FROM public.analysis_pipeline_jobs AS job
+             WHERE job.request_id = $1 AND job.job_key = $2
+             FOR UPDATE'
+        INTO v_lock USING p_request_id, p_job_key;
+    EXECUTE 'SELECT progress_state.status,
+                    progress_state.progress_bp,
+                    progress_state.background_processing,
+                    progress_state.tracks,
+                    progress_state.active_profile,
+                    progress_state.eta_range,
+                    progress_state.snapshot_fingerprint
+             FROM public.analysis_progress_state AS progress_state
+             WHERE progress_state.request_id = $1
+             FOR UPDATE'
+        INTO v_previous_status,
+             v_previous_progress_bp,
+             v_previous_background_processing,
+             v_previous_tracks,
+             v_previous_active_profile,
+             v_previous_eta_range,
+             v_previous_fingerprint
+        USING p_request_id;
+
+    IF v_previous_tracks IS NOT NULL
+       AND public.analysis_v2_valid_progress_tracks(p_tracks) THEN
+        v_canonical_tracks := public.analysis_v2_progress_canonical_tracks(
+            v_previous_tracks,
+            p_tracks
+        );
+        v_stage_canonicalized := v_canonical_tracks IS DISTINCT FROM p_tracks;
+        v_canonical_progress_bp := CASE
+            WHEN p_progress_bp > v_previous_progress_bp THEN p_progress_bp
+            ELSE v_previous_progress_bp
+        END;
+        IF v_canonical_tracks IS NOT DISTINCT FROM v_previous_tracks
+           AND v_canonical_progress_bp IS NOT DISTINCT FROM v_previous_progress_bp
+           AND v_previous_status IS NOT DISTINCT FROM p_status
+           AND v_previous_background_processing IS NOT DISTINCT FROM p_background_processing
+           AND v_previous_active_profile IS NOT DISTINCT FROM p_active_profile
+           AND v_previous_eta_range IS NOT DISTINCT FROM p_eta_range THEN
+            -- Reuse the fingerprint when the full canonical payload is already
+            -- durable. Suppress only an event attached to a stage that was
+            -- actually rewritten; a current-stage no-op may carry a new event.
+            v_effective_fingerprint := v_previous_fingerprint;
+            IF v_stage_canonicalized THEN
+                v_effective_event := NULL;
+                v_effective_event_key := NULL;
+            END IF;
+        END IF;
+    END IF;
+
+    RETURN public.checkpoint_analysis_v2_progress_v1(
+        p_request_id,
+        p_job_key,
+        p_claim_token,
+        p_job_input_hash,
+        p_status,
+        p_progress_bp,
+        p_background_processing,
+        v_canonical_tracks,
+        p_active_profile,
+        p_eta_range,
+        v_effective_fingerprint,
+        v_effective_event,
+        v_effective_event_key
+    );
+END;
+$$;
+
 -- The dedupe order is request/username-first; this partial index avoids
 -- scanning failed/private rows before selecting the bounded newest window.
 CREATE INDEX IF NOT EXISTS analysis_v2_progress_media_outcomes_idx
@@ -417,5 +665,20 @@ REVOKE ALL ON FUNCTION public.load_analysis_v2_progress_with_candidate_media(UUI
     FROM PUBLIC, anon, authenticated, service_role;
 GRANT EXECUTE ON FUNCTION public.load_analysis_v2_progress_with_candidate_media(UUID, UUID, BIGINT, INTEGER)
     TO service_role;
+REVOKE ALL ON FUNCTION public.analysis_v2_progress_stage_rank(TEXT, TEXT)
+    FROM PUBLIC, anon, authenticated, service_role;
+REVOKE ALL ON FUNCTION public.analysis_v2_progress_merge_track_stage(TEXT, JSONB, JSONB)
+    FROM PUBLIC, anon, authenticated, service_role;
+REVOKE ALL ON FUNCTION public.analysis_v2_progress_canonical_tracks(JSONB, JSONB)
+    FROM PUBLIC, anon, authenticated, service_role;
+REVOKE ALL ON FUNCTION public.checkpoint_analysis_v2_progress_v1(
+    UUID, TEXT, UUID, TEXT, TEXT, INTEGER, BOOLEAN, JSONB, JSONB, JSONB, TEXT, JSONB, TEXT
+) FROM PUBLIC, anon, authenticated, service_role;
+REVOKE ALL ON FUNCTION public.checkpoint_analysis_v2_progress(
+    UUID, TEXT, UUID, TEXT, TEXT, INTEGER, BOOLEAN, JSONB, JSONB, JSONB, TEXT, JSONB, TEXT
+) FROM PUBLIC, anon, authenticated, service_role;
+GRANT EXECUTE ON FUNCTION public.checkpoint_analysis_v2_progress(
+    UUID, TEXT, UUID, TEXT, TEXT, INTEGER, BOOLEAN, JSONB, JSONB, JSONB, TEXT, JSONB, TEXT
+) TO service_role;
 
 COMMIT;

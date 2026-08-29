@@ -469,6 +469,51 @@ function nullableObjectsMatch(
         ));
 }
 
+/* The database canonicalizes these stages while holding the progress-state
+   row lock. This mirror only accepts the canonical response when a stale
+   worker reports an older stage; it does not serialize workers in process. */
+const PROGRESS_STAGE_ORDER: Readonly<Record<ProgressTrackId, readonly string[]>> = {
+    relationshipAi: [
+        'RELATIONSHIP_AI_QUEUED',
+        'RELATIONSHIPS_COLLECTING',
+        'RELATIONSHIP_AI_RUNNING',
+        'PUBLIC_PROFILES_COLLECTING',
+        'PROFILE_SCREENING',
+        'EVIDENCE_JOINING',
+        'CANDIDATES_RANKING',
+        'PARTNER_CONTEXT_CHECKING',
+        'RELATIONSHIP_AI_COMPLETE',
+    ],
+    interactions: [
+        'INTERACTIONS_QUEUED',
+        'TARGET_INTERACTIONS_COLLECTING',
+        'INTERACTIONS_RUNNING',
+        'SHORTLIST_INTERACTIONS_COLLECTING',
+        'INTERACTIONS_COMPLETE',
+    ],
+    finalization: [
+        'FINALIZATION_QUEUED',
+        'FINALIZATION_RUNNING',
+        'PRIVATE_NAMES_SCREENING',
+        'FINAL_SCORE_CALCULATING',
+        'HIGH_RISK_NARRATIVES_WRITING',
+        'RESULT_FINALIZING',
+        'FINALIZATION_COMPLETE',
+    ],
+};
+
+function stageCodeIsCurrentOrLater(
+    trackId: ProgressTrackId,
+    actualStageCode: string,
+    expectedStageCode: string,
+): boolean {
+    if (actualStageCode === expectedStageCode) return true;
+    const order = PROGRESS_STAGE_ORDER[trackId];
+    const actualRank = order.indexOf(actualStageCode);
+    const expectedRank = order.indexOf(expectedStageCode);
+    return actualRank >= 0 && expectedRank >= 0 && actualRank > expectedRank;
+}
+
 function snapshotMatchesCheckpoint(
     snapshot: ProgressSnapshotV1,
     input: z.infer<typeof checkpointInputSchema>
@@ -486,7 +531,7 @@ function snapshotMatchesCheckpoint(
         const actual = snapshot.tracks[trackId];
         const expected = input.tracks[trackId];
         return actual.state === expected.state
-            && actual.stageCode === expected.stageCode
+            && stageCodeIsCurrentOrLater(trackId, actual.stageCode, expected.stageCode)
             && actual.done === expected.done
             && actual.total === expected.total
             && actual.progressBp === calculateTrackProgressBp(expected);

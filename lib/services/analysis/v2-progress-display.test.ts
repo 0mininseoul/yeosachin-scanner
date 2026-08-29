@@ -546,4 +546,44 @@ describe('V2 progress display easing', () => {
         expect(completed.displayProgressBp).toBe(10_000);
         expect(completed.targetProgressBp).toBe(10_000);
     });
+
+    it('resets a publication-lag snapshot explicitly without weakening normal monotonic progress', () => {
+        const high = updateProgressDisplay(
+            createProgressDisplayState(),
+            input({
+                confirmedProgressBp: 9_900,
+                nextCheckpointBp: 9_999,
+                nowMs: 0,
+            }),
+        );
+        const ordinaryQueued = updateProgressDisplay(high, input({
+            status: 'queued',
+            confirmedProgressBp: 0,
+            nextCheckpointBp: undefined,
+            nowMs: 100,
+            signalKey: 'ordinary-queued',
+        }));
+        expect(ordinaryQueued.displayProgressBp).toBe(high.displayProgressBp);
+
+        const reset = updateProgressDisplay(high, input({
+            status: 'queued',
+            confirmedProgressBp: 0,
+            nextCheckpointBp: undefined,
+            nowMs: 200,
+            signalKey: 'publication-lag-reset',
+            publicationLagReset: true,
+        }));
+        expect(reset.displayProgressBp).toBe(0);
+        expect(reset.targetProgressBp).toBe(0);
+        expect(reset.capProgressBp).toBe(0);
+
+        const resumed = updateProgressDisplay(reset, input({
+            confirmedProgressBp: 100,
+            nextCheckpointBp: 300,
+            nowMs: 300,
+            signalKey: 'resumed-processing',
+        }));
+        expect(resumed.displayProgressBp).toBeGreaterThanOrEqual(0);
+        expect(resumed.displayProgressBp).toBeLessThan(10_000);
+    });
 });
