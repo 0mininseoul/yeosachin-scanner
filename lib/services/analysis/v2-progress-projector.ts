@@ -55,6 +55,11 @@ const TRACK_COMPLETE_CODES: Readonly<Record<ProgressTrackId, string>> = Object.f
     finalization: 'FINALIZATION_COMPLETE',
 });
 
+// The DAG schema bounds profile fan-out to thirty batches. Holding this
+// denominator until relationship topology is durable prevents an early
+// provisional display from overshooting when the real topology expands.
+export const ANALYSIS_V2_MAX_PROFILE_BATCHES = 30;
+
 export interface AnalysisV2ProgressWorkTotals {
     relationshipAi: number;
     interactions: number;
@@ -69,7 +74,8 @@ export interface AnalysisV2ProjectedProgress {
 export function getAnalysisV2ProgressWorkTotals(
     state: AnalysisV2DagState
 ): AnalysisV2ProgressWorkTotals {
-    const profileBatches = state.relationships?.profileBatches.length ?? 0;
+    const profileBatches = state.relationships?.profileBatches.length
+        ?? ANALYSIS_V2_MAX_PROFILE_BATCHES;
     const privateNameBatches = state.relationships?.privateNameBatches.length ?? 0;
     return Object.freeze({
         relationshipAi: profileBatches * 2 + 4,

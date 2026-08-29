@@ -33,7 +33,11 @@ function FaceTile({
     current: boolean;
     label: string;
 }) {
-    const [failed, setFailed] = useState(false);
+    // Remember the source that failed instead of resetting state in an effect.
+    // A refreshed signed proxy path then naturally becomes a new attempt while
+    // preserving this tile's React identity.
+    const [failedSrc, setFailedSrc] = useState<string | null>(null);
+    const failed = src !== undefined && failedSrc === src;
     return (
         <div
             className={`relative shrink-0 overflow-hidden border bg-panel ${
@@ -52,7 +56,7 @@ function FaceTile({
                     unoptimized
                     loading="lazy"
                     className="h-full w-full object-cover"
-                    onError={() => setFailed(true)}
+                    onError={() => setFailedSrc(src ?? null)}
                 />
             ) : (
                 <div

@@ -2,9 +2,16 @@ import { readFileSync } from 'node:fs';
 import { PGlite, type Results } from '@electric-sql/pglite';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 
-const migration = readFileSync(
+const baseMigration = readFileSync(
     new URL(
         '../../../supabase/migrations/20260801010000_add_progress_candidate_media.sql',
+        import.meta.url
+    ),
+    'utf8'
+);
+const migration = readFileSync(
+    new URL(
+        '../../../supabase/migrations/20260829120000_add_analysis_v2_progress_signals_history.sql',
         import.meta.url
     ),
     'utf8'
@@ -41,6 +48,10 @@ async function heartbeat(input: {
     inputHash?: string;
     startedAt?: string;
     totalCount?: number;
+    currentOrdinal?: number;
+    callPhase?: 'fetching' | 'analyzing' | 'persisting';
+    maskedUsername?: string;
+    imageUrl?: string | null;
     feedImageUrls?: string[];
     candidateKey?: string | null;
     omitFeedImageUrls?: boolean;
@@ -52,26 +63,15 @@ async function heartbeat(input: {
         input.inputHash ?? HASH,
         input.startedAt ?? at(),
         input.totalCount ?? 2,
-        'c******e',
-        '/api/image-proxy?token=profile',
+        input.maskedUsername ?? 'c******e',
+        input.imageUrl ?? '/api/image-proxy?token=profile',
     ];
-    const result = input.omitFeedImageUrls
-        ? await asService<{ checkpoint_analysis_v2_active_profile_heartbeat: boolean }>(
-            `SELECT public.checkpoint_analysis_v2_active_profile_heartbeat(
-                $1, $2, $3, $4, $5, $6, $7, $8
-            )`, values
-        )
-        : Object.hasOwn(input, 'candidateKey')
-            ? await asService<{ checkpoint_analysis_v2_active_profile_heartbeat: boolean }>(
-                `SELECT public.checkpoint_analysis_v2_active_profile_heartbeat(
-                    $1, $2, $3, $4, $5, $6, $7, $8, $9, $10
-                )`, [...values, input.feedImageUrls ?? [], input.candidateKey]
-            )
-            : await asService<{ checkpoint_analysis_v2_active_profile_heartbeat: boolean }>(
-            `SELECT public.checkpoint_analysis_v2_active_profile_heartbeat(
-                $1, $2, $3, $4, $5, $6, $7, $8, $9
-            )`, [...values, input.feedImageUrls ?? []]
-            );
+    const result = await asService<{ checkpoint_analysis_v2_active_profile_heartbeat: boolean }>(
+        `SELECT public.checkpoint_analysis_v2_active_profile_heartbeat(
+            $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12
+        )`, [...values, input.feedImageUrls ?? [], input.candidateKey ?? null,
+            input.currentOrdinal ?? 0, input.callPhase ?? 'fetching']
+    );
     return result.rows[0]!.checkpoint_analysis_v2_active_profile_heartbeat;
 }
 
@@ -135,6 +135,11 @@ describe('V2 progress candidate-media migration PGlite contract', () => {
                 FOREIGN KEY (request_id, job_key)
                     REFERENCES public.analysis_pipeline_jobs(request_id, job_key)
             );
+            CREATE TABLE public.analysis_v2_profile_fetch_outcomes (
+                request_id UUID NOT NULL, job_key TEXT NOT NULL, attempt TEXT NOT NULL,
+                ordinal SMALLINT NOT NULL, username TEXT NOT NULL, status TEXT NOT NULL,
+                captured_at TIMESTAMP WITH TIME ZONE NOT NULL, profile_snapshot JSONB
+            );
             ALTER TABLE public.analysis_v2_active_profile_heartbeats ENABLE ROW LEVEL SECURITY;
             ALTER TABLE public.analysis_v2_active_profile_heartbeats FORCE ROW LEVEL SECURITY;
             REVOKE ALL ON TABLE public.analysis_v2_active_profile_heartbeats
@@ -170,6 +175,7 @@ describe('V2 progress candidate-media migration PGlite contract', () => {
             AFTER UPDATE OF status ON public.analysis_pipeline_jobs
             FOR EACH ROW EXECUTE FUNCTION public.analysis_v2_purge_terminal_active_profile_heartbeat();
         `);
+        await db.exec(baseMigration);
         await db.exec(migration);
     }, 30_000);
 
@@ -216,6 +222,7 @@ describe('V2 progress candidate-media migration PGlite contract', () => {
             'analysis_requests',
             'analysis_v2_active_profile_heartbeats',
             'analysis_v2_dag_batch_topology',
+            'analysis_v2_profile_fetch_outcomes',
         ]);
     });
 
@@ -330,6 +337,136 @@ describe('V2 progress candidate-media migration PGlite contract', () => {
         await expect(heartbeat({ claimToken: CLAIM_B })).rejects.toThrow(/ANALYSIS_V2_PROGRESS_FENCE_MISMATCH/);
     });
 
+    it('rejects a stale lower ordinal without breaking its higher ordinal identity', async () => {
+        await expect(heartbeat({
+            startedAt: at(1_000),
+            currentOrdinal: 2,
+            maskedUsername: 'h******r',
+            imageUrl: '/api/image-proxy?token=high',
+            feedImageUrls: ['/api/image-proxy?token=high-feed'],
+            candidateKey: 'a'.repeat(64),
+            callPhase: 'analyzing',
+        })).resolves.toBe(true);
+        await expect(heartbeat({
+            startedAt: at(2_000),
+            currentOrdinal: 1,
+            maskedUsername: 'l******r',
+            imageUrl: '/api/image-proxy?token=low',
+            feedImageUrls: ['/api/image-proxy?token=low-feed'],
+            candidateKey: 'b'.repeat(64),
+            callPhase: 'fetching',
+        })).resolves.toBe(false);
+
+        await expect(db.query<{
+            completed_count: number;
+            masked_username: string;
+            image_url: string;
+            call_phase: string;
+            candidate_key: string;
+        }>(`SELECT completed_count, masked_username, image_url, call_phase, candidate_key
+            FROM public.analysis_v2_active_profile_heartbeats
+            WHERE request_id = $1 AND job_key = $2`, [REQUEST_ID, JOB_A])).resolves.toMatchObject({
+            rows: [{
+                completed_count: 2,
+                masked_username: 'h******r',
+                image_url: '/api/image-proxy?token=high',
+                call_phase: 'analyzing',
+                candidate_key: 'a'.repeat(64),
+            }],
+        });
+    });
+
+    it('allows same-ordinal phase enrichment and resets identity for a new claim', async () => {
+        await expect(heartbeat({
+            startedAt: at(1_000),
+            currentOrdinal: 2,
+            maskedUsername: 'h******r',
+            callPhase: 'fetching',
+        })).resolves.toBe(true);
+        await expect(heartbeat({
+            startedAt: at(1_000),
+            currentOrdinal: 2,
+            maskedUsername: 'h******r',
+            callPhase: 'persisting',
+        })).resolves.toBe(true);
+        await expect(db.query<{ call_phase: string }>(
+            `SELECT call_phase FROM public.analysis_v2_active_profile_heartbeats
+             WHERE request_id = $1 AND job_key = $2`, [REQUEST_ID, JOB_A]
+        )).resolves.toMatchObject({ rows: [{ call_phase: 'persisting' }] });
+
+        await db.query(
+            'UPDATE public.analysis_pipeline_jobs SET lease_token = $1 WHERE request_id = $2 AND job_key = $3',
+            [CLAIM_B, REQUEST_ID, JOB_A]
+        );
+        await expect(heartbeat({
+            claimToken: CLAIM_B,
+            startedAt: at(-1_000),
+            currentOrdinal: 1,
+            maskedUsername: 'n******w',
+            imageUrl: '/api/image-proxy?token=new-claim',
+            callPhase: 'fetching',
+        })).resolves.toBe(true);
+        await expect(db.query<{ completed_count: number; masked_username: string; image_url: string }>(
+            `SELECT completed_count, masked_username, image_url
+             FROM public.analysis_v2_active_profile_heartbeats
+             WHERE request_id = $1 AND job_key = $2`, [REQUEST_ID, JOB_A]
+        )).resolves.toMatchObject({ rows: [{
+            completed_count: 1,
+            masked_username: 'n******w',
+            image_url: '/api/image-proxy?token=new-claim',
+        }] });
+    });
+
+    it('keeps four-argument loads media-free and only includes newest twenty in the opt-in RPC', async () => {
+        const profile = (username: string, index: number) => ({
+            username,
+            isPrivate: false,
+            profilePicUrl: `https://cdn.example/${username}.jpg`,
+            secret: `do-not-expose-${index}`,
+            latestPosts: [{
+                type: 'image',
+                imageUrl: `https://cdn.example/${username}-post.jpg`,
+            }],
+        });
+        for (let index = 0; index < 21; index += 1) {
+            await db.query(`INSERT INTO public.analysis_v2_profile_fetch_outcomes (
+                request_id, job_key, attempt, ordinal, username, status, captured_at, profile_snapshot
+            ) VALUES ($1, $2, 'primary', $3, $4, 'success', $5, $6)`, [
+                REQUEST_ID,
+                JOB_B,
+                index + 1,
+                `candidate-${String(index).padStart(2, '0')}`,
+                new Date(Date.now() + index * 1_000).toISOString(),
+                profile(`candidate-${String(index).padStart(2, '0')}`, index),
+            ]);
+        }
+
+        const legacy = await asService<{ load_analysis_v2_progress: { snapshot: Record<string, unknown> } }>(
+            'SELECT public.load_analysis_v2_progress($1, $2)', [REQUEST_ID, OWNER_ID]
+        );
+        expect(legacy.rows[0]!.load_analysis_v2_progress.snapshot)
+            .not.toHaveProperty('candidateMediaRaw');
+
+        const media = await asService<{
+            load_analysis_v2_progress_with_candidate_media: {
+                snapshot: { candidateMediaRaw: Array<{ username: string; profile: Record<string, unknown> }> };
+            };
+        }>('SELECT public.load_analysis_v2_progress_with_candidate_media($1, $2)', [REQUEST_ID, OWNER_ID]);
+        const candidates = media.rows[0]!.load_analysis_v2_progress_with_candidate_media.snapshot.candidateMediaRaw;
+        expect(candidates).toHaveLength(20);
+        expect(candidates.map(candidate => candidate.username)).toEqual(
+            Array.from({ length: 20 }, (_, index) => `candidate-${String(index + 1).padStart(2, '0')}`)
+        );
+        expect(candidates[0]!.profile).toEqual({
+            profilePicUrl: 'https://cdn.example/candidate-01.jpg',
+            latestPosts: [{
+                type: 'image',
+                imageUrl: 'https://cdn.example/candidate-01-post.jpg',
+            }],
+        });
+        expect(JSON.stringify(candidates)).not.toContain('do-not-expose');
+    });
+
     it('owner-scopes the loader and overlays media from only the latest live heartbeat', async () => {
         await heartbeat({ omitFeedImageUrls: true });
         const legacy = await asService<{ load_analysis_v2_progress: {
@@ -357,6 +494,7 @@ describe('V2 progress candidate-media migration PGlite contract', () => {
         expect(owner.rows[0]!.load_analysis_v2_progress.snapshot.activeProfile).toEqual({
             maskedUsername: 'c******e', imageUrl: '/api/image-proxy?token=profile',
             feedImageUrls: ['/api/image-proxy?token=latest'],
+            currentOrdinal: 0, totalCount: 2, callPhase: 'fetching',
             candidateKey: CANDIDATE_KEY,
         });
         expect(owner.rows[0]!.load_analysis_v2_progress.events).toEqual([
@@ -370,6 +508,13 @@ describe('V2 progress candidate-media migration PGlite contract', () => {
             'SELECT public.load_analysis_v2_progress($1, $2)', [REQUEST_ID, OTHER_USER_ID]
         );
         expect(other.rows[0]!.load_analysis_v2_progress).toBeNull();
+        const otherMedia = await asService<{
+            load_analysis_v2_progress_with_candidate_media: unknown;
+        }>(
+            'SELECT public.load_analysis_v2_progress_with_candidate_media($1, $2)',
+            [REQUEST_ID, OTHER_USER_ID]
+        );
+        expect(otherMedia.rows[0]!.load_analysis_v2_progress_with_candidate_media).toBeNull();
         await db.query(`UPDATE public.analysis_pipeline_jobs
             SET lease_expires_at = pg_catalog.clock_timestamp() - INTERVAL '1 second'
             WHERE request_id = $1 AND job_key = $2`, [REQUEST_ID, JOB_B]);
@@ -379,6 +524,7 @@ describe('V2 progress candidate-media migration PGlite contract', () => {
         expect(expired.rows[0]!.load_analysis_v2_progress.snapshot.activeProfile).toEqual({
             maskedUsername: 'c******e', imageUrl: '/api/image-proxy?token=profile',
             feedImageUrls: ['/api/image-proxy?token=older'],
+            currentOrdinal: 0, totalCount: 2, callPhase: 'fetching',
             candidateKey: 'c'.repeat(64),
         });
     });
@@ -394,11 +540,12 @@ describe('V2 progress candidate-media migration PGlite contract', () => {
             rpc_service: boolean; rpc_auth: boolean; table_auth: boolean;
             helper_service: boolean; helper_auth: boolean; helper_anon: boolean;
             load_service: boolean; load_auth: boolean; load_anon: boolean;
+            media_load_service: boolean; media_load_auth: boolean; media_load_anon: boolean;
         }>(`
             SELECT pg_catalog.has_function_privilege('service_role',
-                       'public.checkpoint_analysis_v2_active_profile_heartbeat(uuid,text,uuid,text,timestamptz,integer,text,text,text[],text)', 'EXECUTE') AS rpc_service,
+                       'public.checkpoint_analysis_v2_active_profile_heartbeat(uuid,text,uuid,text,timestamptz,integer,text,text,text[],text,integer,text)', 'EXECUTE') AS rpc_service,
                    pg_catalog.has_function_privilege('authenticated',
-                       'public.checkpoint_analysis_v2_active_profile_heartbeat(uuid,text,uuid,text,timestamptz,integer,text,text,text[],text)', 'EXECUTE') AS rpc_auth,
+                       'public.checkpoint_analysis_v2_active_profile_heartbeat(uuid,text,uuid,text,timestamptz,integer,text,text,text[],text,integer,text)', 'EXECUTE') AS rpc_auth,
                    pg_catalog.has_table_privilege('authenticated',
                        'public.analysis_v2_active_profile_heartbeats', 'SELECT') AS table_auth,
                    pg_catalog.has_function_privilege('service_role',
@@ -412,12 +559,19 @@ describe('V2 progress candidate-media migration PGlite contract', () => {
                    pg_catalog.has_function_privilege('authenticated',
                        'public.load_analysis_v2_progress(uuid,uuid,bigint,integer)', 'EXECUTE') AS load_auth,
                    pg_catalog.has_function_privilege('anon',
-                       'public.load_analysis_v2_progress(uuid,uuid,bigint,integer)', 'EXECUTE') AS load_anon
+                       'public.load_analysis_v2_progress(uuid,uuid,bigint,integer)', 'EXECUTE') AS load_anon,
+                   pg_catalog.has_function_privilege('service_role',
+                       'public.load_analysis_v2_progress_with_candidate_media(uuid,uuid,bigint,integer)', 'EXECUTE') AS media_load_service,
+                   pg_catalog.has_function_privilege('authenticated',
+                       'public.load_analysis_v2_progress_with_candidate_media(uuid,uuid,bigint,integer)', 'EXECUTE') AS media_load_auth,
+                   pg_catalog.has_function_privilege('anon',
+                       'public.load_analysis_v2_progress_with_candidate_media(uuid,uuid,bigint,integer)', 'EXECUTE') AS media_load_anon
         `);
         expect(privileges.rows[0]).toEqual({
             rpc_service: true, rpc_auth: false, table_auth: false,
             helper_service: false, helper_auth: false, helper_anon: false,
             load_service: true, load_auth: false, load_anon: false,
+            media_load_service: true, media_load_auth: false, media_load_anon: false,
         });
         const rls = await db.query<{ relrowsecurity: boolean; relforcerowsecurity: boolean }>(`
             SELECT relrowsecurity, relforcerowsecurity

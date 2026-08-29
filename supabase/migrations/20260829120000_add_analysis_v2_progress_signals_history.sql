@@ -105,16 +105,11 @@ BEGIN
     SET job_input_hash = EXCLUDED.job_input_hash,
         claim_token = EXCLUDED.claim_token,
         started_at = EXCLUDED.started_at,
-        completed_count = CASE
-            WHEN EXCLUDED.claim_token IS DISTINCT FROM
-                public.analysis_v2_active_profile_heartbeats.claim_token THEN
-                EXCLUDED.completed_count
-            ELSE GREATEST(
-                public.analysis_v2_active_profile_heartbeats.completed_count,
-                EXCLUDED.completed_count
-            )
-        END,
+        completed_count = EXCLUDED.completed_count,
         total_count = EXCLUDED.total_count,
+        -- Identity and media are updated as one ordinal-paired record. A
+        -- lower ordinal from a concurrent provider call is rejected below,
+        -- so it can never overwrite the higher ordinal's label or phase.
         masked_username = EXCLUDED.masked_username,
         image_url = EXCLUDED.image_url,
         feed_image_urls = EXCLUDED.feed_image_urls,
@@ -126,8 +121,30 @@ BEGIN
        OR (
             EXCLUDED.claim_token
                 IS NOT DISTINCT FROM public.analysis_v2_active_profile_heartbeats.claim_token
-            AND EXCLUDED.started_at
-                > public.analysis_v2_active_profile_heartbeats.started_at
+            AND EXCLUDED.completed_count
+                >= public.analysis_v2_active_profile_heartbeats.completed_count
+            AND (
+                EXCLUDED.started_at
+                    > public.analysis_v2_active_profile_heartbeats.started_at
+                OR (
+                    EXCLUDED.started_at
+                        = public.analysis_v2_active_profile_heartbeats.started_at
+                    AND (
+                        EXCLUDED.completed_count
+                            > public.analysis_v2_active_profile_heartbeats.completed_count
+                        OR EXCLUDED.masked_username IS DISTINCT FROM
+                            public.analysis_v2_active_profile_heartbeats.masked_username
+                        OR EXCLUDED.image_url IS DISTINCT FROM
+                            public.analysis_v2_active_profile_heartbeats.image_url
+                        OR EXCLUDED.feed_image_urls IS DISTINCT FROM
+                            public.analysis_v2_active_profile_heartbeats.feed_image_urls
+                        OR EXCLUDED.candidate_key IS DISTINCT FROM
+                            public.analysis_v2_active_profile_heartbeats.candidate_key
+                        OR EXCLUDED.call_phase IS DISTINCT FROM
+                            public.analysis_v2_active_profile_heartbeats.call_phase
+                    )
+                )
+            )
        )
     RETURNING TRUE INTO v_advanced;
 
@@ -144,11 +161,18 @@ GRANT EXECUTE ON FUNCTION public.checkpoint_analysis_v2_active_profile_heartbeat
     INTEGER, TEXT
 ) TO service_role;
 
-CREATE OR REPLACE FUNCTION public.load_analysis_v2_progress(
+COMMENT ON COLUMN public.analysis_v2_active_profile_heartbeats.completed_count IS
+    'Current 1-based profile ordinal for the active batch; retained column name preserves rolling compatibility.';
+
+-- The old four-argument RPC intentionally remains a no-media path. The
+-- progress page opts into the sibling RPC below so duration and other owner
+-- reads do not scan, aggregate, or sign candidate outcomes.
+CREATE OR REPLACE FUNCTION public.analysis_v2_load_progress_internal(
     p_request_id UUID,
     p_user_id UUID,
-    p_after_sequence BIGINT DEFAULT 0,
-    p_event_limit INTEGER DEFAULT 100
+    p_after_sequence BIGINT,
+    p_event_limit INTEGER,
+    p_include_candidate_media BOOLEAN
 )
 RETURNS JSONB
 LANGUAGE plpgsql
@@ -169,7 +193,8 @@ BEGIN
        OR p_after_sequence > 9007199254740991
        OR p_event_limit IS NULL
        OR p_event_limit < 1
-       OR p_event_limit > 200 THEN
+       OR p_event_limit > 200
+       OR p_include_candidate_media IS NULL THEN
         RAISE EXCEPTION USING MESSAGE = 'ANALYSIS_V2_PROGRESS_INVALID', ERRCODE = 'P0001';
     END IF;
 
@@ -217,46 +242,93 @@ BEGIN
         ORDER BY heartbeat.started_at DESC, heartbeat.updated_at DESC, heartbeat.job_key DESC
         LIMIT 1;
 
-        -- Profile snapshots are already bounded by the private checkpoint
-        -- table. Keep the internal envelope raw only inside this SECURITY
-        -- DEFINER function; the application owner-load sanitizes and signs it
-        -- before it can cross the public progress contract.
-        SELECT COALESCE(pg_catalog.jsonb_agg(
-            pg_catalog.jsonb_build_object(
-                'username', candidate.username,
-                'profile', candidate.profile_snapshot
-            )
-            ORDER BY candidate.captured_at ASC, candidate.ordinal, candidate.username
-        ), '[]'::JSONB)
-        INTO v_candidate_media
-        FROM (
-            SELECT candidate.username, candidate.profile_snapshot, candidate.captured_at, candidate.ordinal
+        IF p_include_candidate_media THEN
+            -- Emit only the image-bearing projection needed by the owner rail;
+            -- never aggregate the full private profile snapshot.
+            SELECT COALESCE(pg_catalog.jsonb_agg(
+                pg_catalog.jsonb_build_object(
+                    'username', candidate.username,
+                    'profile', pg_catalog.jsonb_strip_nulls(
+                        pg_catalog.jsonb_build_object(
+                            'profilePicUrl', candidate.profile_snapshot->'profilePicUrl',
+                            'latestPosts', (
+                                SELECT COALESCE(pg_catalog.jsonb_agg(
+                                    pg_catalog.jsonb_strip_nulls(
+                                        pg_catalog.jsonb_build_object(
+                                            'type', post.value->'type',
+                                            'imageUrl', post.value->'imageUrl',
+                                            'thumbnailUrl', post.value->'thumbnailUrl',
+                                            'videoUrl', post.value->'videoUrl',
+                                            'mediaItems', CASE
+                                                WHEN post.value->>'type' = 'carousel' THEN (
+                                                    SELECT COALESCE(pg_catalog.jsonb_agg(
+                                                        pg_catalog.jsonb_strip_nulls(
+                                                            pg_catalog.jsonb_build_object(
+                                                                'type', child.value->'type',
+                                                                'imageUrl', child.value->'imageUrl',
+                                                                'thumbnailUrl', child.value->'thumbnailUrl',
+                                                                'videoUrl', child.value->'videoUrl'
+                                                            )
+                                                        ) ORDER BY child.ordinality
+                                                    ), '[]'::JSONB)
+                                                    FROM pg_catalog.jsonb_array_elements(
+                                                        CASE
+                                                            WHEN pg_catalog.jsonb_typeof(post.value->'mediaItems') = 'array'
+                                                                THEN post.value->'mediaItems'
+                                                            ELSE '[]'::JSONB
+                                                        END
+                                                    ) WITH ORDINALITY AS child(value, ordinality)
+                                                    WHERE child.ordinality <= 20
+                                                )
+                                                ELSE NULL
+                                            END
+                                        )
+                                    ) ORDER BY post.ordinality
+                                ), '[]'::JSONB)
+                                FROM pg_catalog.jsonb_array_elements(
+                                    CASE
+                                        WHEN pg_catalog.jsonb_typeof(candidate.profile_snapshot->'latestPosts') = 'array'
+                                            THEN candidate.profile_snapshot->'latestPosts'
+                                        ELSE '[]'::JSONB
+                                    END
+                                ) WITH ORDINALITY AS post(value, ordinality)
+                                WHERE post.ordinality <= 8
+                            )
+                        )
+                    )
+                )
+                ORDER BY candidate.captured_at ASC, candidate.ordinal, candidate.username
+            ), '[]'::JSONB)
+            INTO v_candidate_media
             FROM (
-                SELECT DISTINCT ON (outcome.username)
-                    outcome.username,
-                    outcome.profile_snapshot,
-                    outcome.captured_at,
-                    outcome.ordinal
-                FROM public.analysis_v2_profile_fetch_outcomes AS outcome
-                WHERE outcome.request_id = p_request_id
-                  AND outcome.job_key LIKE 'track:profiles:batch:%'
-                  AND outcome.status = 'success'
-                  AND outcome.profile_snapshot IS NOT NULL
-                  AND outcome.profile_snapshot->>'isPrivate' = 'false'
-                ORDER BY outcome.username,
-                    CASE outcome.attempt
-                        WHEN 'repair' THEN 0
-                        WHEN 'fallback' THEN 1
-                        ELSE 2
-                    END,
-                    outcome.captured_at DESC,
-                    outcome.ordinal DESC
-            ) AS candidate
-            -- Keep the newest bounded window, then emit it oldest-first so the
-            -- client rail receives a stable chronological order.
-            ORDER BY candidate.captured_at DESC, candidate.ordinal DESC, candidate.username DESC
-            LIMIT 60
-        ) AS candidate;
+                SELECT candidate.username, candidate.profile_snapshot, candidate.captured_at, candidate.ordinal
+                FROM (
+                    SELECT DISTINCT ON (outcome.username)
+                        outcome.username,
+                        outcome.profile_snapshot,
+                        outcome.captured_at,
+                        outcome.ordinal
+                    FROM public.analysis_v2_profile_fetch_outcomes AS outcome
+                    WHERE outcome.request_id = p_request_id
+                      AND outcome.job_key LIKE 'track:profiles:batch:%'
+                      AND outcome.status = 'success'
+                      AND outcome.profile_snapshot IS NOT NULL
+                      AND outcome.profile_snapshot->>'isPrivate' = 'false'
+                    ORDER BY outcome.username,
+                        outcome.captured_at DESC,
+                        outcome.ordinal DESC,
+                        CASE outcome.attempt
+                            WHEN 'repair' THEN 0
+                            WHEN 'fallback' THEN 1
+                            ELSE 2
+                        END
+                ) AS candidate
+                -- Select newest unique candidates, then emit oldest-first for
+                -- deterministic client reconciliation and rail motion.
+                ORDER BY candidate.captured_at DESC, candidate.ordinal DESC, candidate.username DESC
+                LIMIT 20
+            ) AS candidate;
+        END IF;
     END IF;
 
     SELECT COALESCE(pg_catalog.jsonb_agg(page.event_json ORDER BY page.seq), '[]'::JSONB)
@@ -278,19 +350,72 @@ BEGIN
         COALESCE(v_active_profile, 'null'::JSONB),
         TRUE
     );
-    v_snapshot := pg_catalog.jsonb_set(
-        v_snapshot,
-        '{candidateMediaRaw}',
-        v_candidate_media,
-        TRUE
-    );
+    IF p_include_candidate_media THEN
+        v_snapshot := pg_catalog.jsonb_set(
+            v_snapshot,
+            '{candidateMediaRaw}',
+            v_candidate_media,
+            TRUE
+        );
+    END IF;
     RETURN pg_catalog.jsonb_build_object('snapshot', v_snapshot, 'events', v_events);
 END;
 $$;
 
+CREATE OR REPLACE FUNCTION public.load_analysis_v2_progress(
+    p_request_id UUID,
+    p_user_id UUID,
+    p_after_sequence BIGINT DEFAULT 0,
+    p_event_limit INTEGER DEFAULT 100
+)
+RETURNS JSONB
+LANGUAGE sql
+SECURITY DEFINER
+SET search_path = ''
+AS $$
+    SELECT public.analysis_v2_load_progress_internal(
+        p_request_id, p_user_id, p_after_sequence, p_event_limit, FALSE
+    );
+$$;
+
+CREATE FUNCTION public.load_analysis_v2_progress_with_candidate_media(
+    p_request_id UUID,
+    p_user_id UUID,
+    p_after_sequence BIGINT DEFAULT 0,
+    p_event_limit INTEGER DEFAULT 100
+)
+RETURNS JSONB
+LANGUAGE sql
+SECURITY DEFINER
+SET search_path = ''
+AS $$
+    SELECT public.analysis_v2_load_progress_internal(
+        p_request_id, p_user_id, p_after_sequence, p_event_limit, TRUE
+    );
+$$;
+
+-- The dedupe order is request/username-first; this partial index avoids
+-- scanning failed/private rows before selecting the bounded newest window.
+CREATE INDEX IF NOT EXISTS analysis_v2_progress_media_outcomes_idx
+    ON public.analysis_v2_profile_fetch_outcomes (
+        request_id, username, captured_at DESC, ordinal DESC, attempt DESC
+    )
+    WHERE status = 'success'
+      AND job_key LIKE 'track:profiles:batch:%'
+      AND profile_snapshot IS NOT NULL
+      AND profile_snapshot->>'isPrivate' = 'false';
+
+REVOKE ALL ON FUNCTION public.analysis_v2_load_progress_internal(UUID, UUID, BIGINT, INTEGER, BOOLEAN)
+    FROM PUBLIC, anon, authenticated, service_role;
+GRANT EXECUTE ON FUNCTION public.analysis_v2_load_progress_internal(UUID, UUID, BIGINT, INTEGER, BOOLEAN)
+    TO service_role;
 REVOKE ALL ON FUNCTION public.load_analysis_v2_progress(UUID, UUID, BIGINT, INTEGER)
     FROM PUBLIC, anon, authenticated, service_role;
 GRANT EXECUTE ON FUNCTION public.load_analysis_v2_progress(UUID, UUID, BIGINT, INTEGER)
+    TO service_role;
+REVOKE ALL ON FUNCTION public.load_analysis_v2_progress_with_candidate_media(UUID, UUID, BIGINT, INTEGER)
+    FROM PUBLIC, anon, authenticated, service_role;
+GRANT EXECUTE ON FUNCTION public.load_analysis_v2_progress_with_candidate_media(UUID, UUID, BIGINT, INTEGER)
     TO service_role;
 
 COMMIT;

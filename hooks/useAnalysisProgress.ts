@@ -13,6 +13,7 @@ import {
 } from '@/lib/services/analysis/v2-progress-client-state';
 import {
     createProgressDisplayState,
+    activeProgressTrackId,
     nextProgressCheckpointBp,
     pauseProgressDisplay,
     updateProgressDisplay,
@@ -59,12 +60,20 @@ function displayInputForSnapshot(
     visible: boolean,
 ): ProgressDisplayInput {
     const active = snapshot.activeProfile;
+    const activeTrackId = activeProgressTrackId(snapshot.tracks);
+    const activeTrack = activeTrackId ? snapshot.tracks[activeTrackId] : null;
     return {
         confirmedProgressBp: snapshot.progressBp,
-        nextCheckpointBp: nextProgressCheckpointBp(snapshot.tracks),
+        tracks: snapshot.tracks,
+        nextCheckpointBp: nextProgressCheckpointBp(snapshot.tracks, activeTrackId),
         status: snapshot.status,
         nowMs,
         visible,
+        activeTrackId,
+        activeStageCode: activeTrack?.stageCode ?? null,
+        currentOrdinal: active?.currentOrdinal ?? null,
+        totalCount: active?.totalCount ?? null,
+        callPhase: active?.callPhase ?? null,
         signalKey: JSON.stringify([
             snapshot.revision,
             active?.candidateKey ?? null,

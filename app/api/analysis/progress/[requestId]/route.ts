@@ -98,6 +98,7 @@ export async function GET(
             userId: user.id,
             afterSequence: afterSequence.data,
             eventLimit: eventLimit.data,
+            includeCandidateMedia: true,
         });
         if (!progress) {
             return json({ error: 'Analysis progress not found.' }, 404);

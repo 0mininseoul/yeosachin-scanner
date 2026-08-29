@@ -193,16 +193,17 @@ export function candidateCopyKey(occurrence: number, copyIndex: number): string 
 }
 
 /**
- * Stable tile identity. A refreshed safe source deliberately changes this key
- * so React drops any image-error state belonging to the previous signed URL.
+ * Stable tile identity. Signed proxy URLs rotate independently of the
+ * candidate/media identity, so URL refreshes must not remount or flash tiles.
  */
 export function candidateTileKey(
     occurrence: number,
     copyIndex: number,
     mediaIndex: number,
-    safeSrc: string | undefined,
+    _safeSrc: string | undefined,
 ): string {
-    return `${occurrence}:${copyIndex}:${mediaIndex}:${safeSrc ?? 'fallback'}`;
+    void _safeSrc;
+    return `${occurrence}:${copyIndex}:${mediaIndex}`;
 }
 
 export function progressCopyDistance(firstStart: number, secondStart: number): number {

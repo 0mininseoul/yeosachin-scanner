@@ -18,8 +18,10 @@ import {
 import { supabaseAdmin } from '@/lib/supabase/admin';
 import { createImageProxyPath } from '@/lib/services/media/image-proxy-token';
 import { canonicalizeAnalysisV2ProgressUsername } from './progress-username';
-import { selectAnalysisV2ProgressCandidateMedia } from './progress-candidate-media';
-import { analysisV2CheckpointProfileSchema } from './v2-profile-fetch-store';
+import {
+    analysisV2ProgressCandidateMediaProfileSchema,
+    selectAnalysisV2ProgressCandidateMedia,
+} from './progress-candidate-media';
 import { analysisV2ProgressCandidateKey } from './preflight-identity';
 
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
@@ -35,6 +37,7 @@ export const ANALYSIS_V2_PROGRESS_DATABASE_NAMES = Object.freeze({
     checkpointRpc: 'checkpoint_analysis_v2_progress',
     heartbeatRpc: 'checkpoint_analysis_v2_active_profile_heartbeat',
     loadRpc: 'load_analysis_v2_progress',
+    loadCandidateMediaRpc: 'load_analysis_v2_progress_with_candidate_media',
 });
 
 export const ANALYSIS_V2_PROGRESS_EVENT_CODES = [
@@ -274,6 +277,9 @@ const loadResponseSchema = z.object({
 
 const rawCandidateMediaSchema = z.object({
     username: z.string().trim().min(1).max(30).regex(/^[a-z0-9._]+$/),
+    // The four-argument legacy RPC may still return full snapshots while a
+    // rolling deploy is in flight. The default no-media path must be able to
+    // discard that field without parsing or signing it.
     profile: z.unknown(),
 }).strict();
 const rawLoadSnapshotSchema = z.object({
@@ -365,6 +371,7 @@ export interface AnalysisV2ProgressStore {
         userId: string;
         afterSequence?: number;
         eventLimit?: number;
+        includeCandidateMedia?: boolean;
     }): Promise<AnalysisV2ProgressReadResult | null>;
 }
 
@@ -540,7 +547,9 @@ function sanitizeCandidateMedia(
     deriveCandidateKey: CandidateKeyDeriver,
 ): ProgressSnapshotV1['candidateMedia'] {
     return (rawCandidates ?? []).flatMap(rawCandidate => {
-        const parsedProfile = analysisV2CheckpointProfileSchema.safeParse(rawCandidate.profile);
+        const parsedProfile = analysisV2ProgressCandidateMediaProfileSchema.safeParse(
+            rawCandidate.profile
+        );
         if (!parsedProfile.success) return [];
 
         const preview = selectAnalysisV2ProgressCandidateMedia(parsedProfile.data);
@@ -671,9 +680,12 @@ export function createAnalysisV2ProgressStore(
                 userId: z.string().regex(UUID_PATTERN),
                 afterSequence: z.number().int().min(0).max(Number.MAX_SAFE_INTEGER).default(0),
                 eventLimit: z.number().int().min(1).max(200).default(100),
+                includeCandidateMedia: z.boolean().default(false),
             }).strict().parse(rawInput);
             const { data, error } = await client.rpc(
-                ANALYSIS_V2_PROGRESS_DATABASE_NAMES.loadRpc,
+                input.includeCandidateMedia
+                    ? ANALYSIS_V2_PROGRESS_DATABASE_NAMES.loadCandidateMediaRpc
+                    : ANALYSIS_V2_PROGRESS_DATABASE_NAMES.loadRpc,
                 {
                     p_request_id: input.requestId.toLowerCase(),
                     p_user_id: input.userId.toLowerCase(),
@@ -690,14 +702,19 @@ export function createAnalysisV2ProgressStore(
                 );
             }
             const { candidateMediaRaw, ...snapshot } = rawParsed.data.snapshot;
-            const candidateMedia = candidateMediaRaw !== undefined
+            if (input.includeCandidateMedia && (candidateMediaRaw?.length ?? 0) > 20) {
+                throw new Error(
+                    'ANALYSIS_V2_PROGRESS_PERSISTENCE_ERROR: candidate media exceeded the bounded window.'
+                );
+            }
+            const candidateMedia = input.includeCandidateMedia && candidateMediaRaw !== undefined
                 ? sanitizeCandidateMedia(
                     candidateMediaRaw,
                     input.requestId.toLowerCase(),
                     imageProxySigner,
                     candidateKeyDeriver,
                 )
-                : snapshot.candidateMedia;
+                : [];
             const parsed = loadResponseSchema.safeParse({
                 snapshot: {
                     ...snapshot,

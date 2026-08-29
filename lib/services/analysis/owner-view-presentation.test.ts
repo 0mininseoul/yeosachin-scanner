@@ -43,6 +43,19 @@ describe('owner view presentation behavior', () => {
         })).toBe('맞팔 계정을 판독하고 있습니다.');
     });
 
+    it('uses the concrete active stage when an earlier track is still generic-running', () => {
+        expect(analysisV2ProgressCopy({
+            status: 'processing',
+            tracks: {
+                relationshipAi: { state: 'running', stageCode: 'RELATIONSHIP_AI_RUNNING' },
+                interactions: { state: 'running', stageCode: 'TARGET_INTERACTIONS_COLLECTING' },
+                finalization: { state: 'pending', stageCode: 'FINALIZATION_QUEUED' },
+            },
+            events: historicalEvent,
+            activeProfile: null,
+        })).toBe('대상 계정의 상호작용을 확인하고 있습니다.');
+    });
+
     it('uses a historical milestone only when no work is currently running', () => {
         expect(analysisV2ProgressCopy({
             status: 'queued',

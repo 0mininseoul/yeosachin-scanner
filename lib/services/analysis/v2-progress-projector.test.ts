@@ -24,7 +24,7 @@ function state(overrides: Partial<AnalysisV2DagState> = {}): AnalysisV2DagState 
 describe('analysis V2 progress projector', () => {
     it('uses the frozen fan-out topology instead of a plan-capacity estimate', () => {
         expect(getAnalysisV2ProgressWorkTotals(state())).toEqual({
-            relationshipAi: 4,
+            relationshipAi: 64,
             interactions: 2,
             finalization: 3,
         });
@@ -45,6 +45,32 @@ describe('analysis V2 progress projector', () => {
             interactions: 2,
             finalization: 4,
         });
+    });
+
+    it('keeps the bootstrap denominator equal to the maximum later fan-out', () => {
+        const profileBatches = Array.from({ length: 30 }, (_, batch) => ({
+            batch,
+            itemCount: 30,
+            inputHash: hash(`profile-${batch}`),
+        }));
+        const topologyKnownAtMaximum = getAnalysisV2ProgressWorkTotals(state({
+            planId: 'plus',
+            relationships: {
+                revision: 1,
+                resultHash: hash('relationships-max'),
+                detectedMutualCount: 900,
+                publicCount: 900,
+                privateCount: 0,
+                detailedSelectedPublicCount: 900,
+                notScreenedPublicCount: 0,
+                profileBatches,
+                privateNameBatches: [],
+            },
+        }));
+
+        expect(topologyKnownAtMaximum.relationshipAi).toBe(64);
+        expect(getAnalysisV2ProgressWorkTotals(state()).relationshipAi)
+            .toBe(topologyKnownAtMaximum.relationshipAi);
     });
 
     it('starts only the active parallel track and exposes no profile identity', () => {

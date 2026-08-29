@@ -428,7 +428,7 @@ describe('V2 progress persistence adapter', () => {
         });
     });
 
-    it('masks and freshly signs bounded profile-outcome history on owner reads', async () => {
+    it('keeps candidate media opt-in so duration-style reads do not sign or return history', async () => {
         const mock = client({
             snapshot: snapshot({
                 candidateMediaRaw: [{
@@ -436,23 +436,44 @@ describe('V2 progress persistence adapter', () => {
                     profile: {
                         username: 'candidate.name',
                         fullName: 'Candidate Name',
-                        bio: 'bio',
+                        bio: 'legacy snapshot',
                         profilePicUrl: 'https://cdn.example/profile.jpg',
                         followersCount: 10,
                         followingCount: 8,
                         postsCount: 1,
                         isPrivate: false,
                         isVerified: false,
+                        latestPosts: [],
+                    },
+                }],
+            }),
+            events: [],
+        });
+        const sign = vi.fn((raw: string) => `/api/image-proxy?token=${raw}`);
+        const store = createAnalysisV2ProgressStore(mock, { imageProxySigner: sign });
+
+        const result = await store.loadForOwner({ requestId, userId });
+
+        expect(result?.snapshot.candidateMedia).toEqual([]);
+        expect(sign).not.toHaveBeenCalled();
+        expect(mock.rpc).toHaveBeenCalledWith('load_analysis_v2_progress', {
+            p_request_id: requestId,
+            p_user_id: userId,
+            p_after_sequence: 0,
+            p_event_limit: 100,
+        });
+    });
+
+    it('masks and freshly signs bounded profile-outcome history on owner reads', async () => {
+        const mock = client({
+            snapshot: snapshot({
+                candidateMediaRaw: [{
+                    username: 'candidate.name',
+                    profile: {
+                        profilePicUrl: 'https://cdn.example/profile.jpg',
                         latestPosts: [{
-                            id: 'post-1',
-                            shortCode: 'post-1',
                             imageUrl: 'https://cdn.example/post.jpg',
                             type: 'image',
-                            likesCount: 1,
-                            commentsCount: 0,
-                            timestamp: '2026-07-13T10:00:00.000Z',
-                            taggedUsers: [],
-                            mentionedUsers: [],
                         }],
                     },
                 }],
@@ -465,7 +486,11 @@ describe('V2 progress persistence adapter', () => {
             candidateKeyDeriver: () => candidateKey,
         });
 
-        const result = await store.loadForOwner({ requestId, userId });
+        const result = await store.loadForOwner({
+            requestId,
+            userId,
+            includeCandidateMedia: true,
+        });
 
         expect(result?.snapshot.candidateMedia).toEqual([{
             maskedUsername: 'c************e',
@@ -475,6 +500,15 @@ describe('V2 progress persistence adapter', () => {
         }]);
         expect(JSON.stringify(result)).not.toContain('candidate.name');
         expect(sign).toHaveBeenCalledTimes(2);
+        expect(mock.rpc).toHaveBeenCalledWith(
+            'load_analysis_v2_progress_with_candidate_media',
+            {
+                p_request_id: requestId,
+                p_user_id: userId,
+                p_after_sequence: 0,
+                p_event_limit: 100,
+            }
+        );
     });
 
     it('fails closed on event gaps and future revisions', async () => {

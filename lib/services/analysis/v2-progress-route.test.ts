@@ -175,6 +175,7 @@ describe('analysis V2 owner progress route', () => {
             userId,
             afterSequence: 0,
             eventLimit: 25,
+            includeCandidateMedia: true,
         });
         await expect(response.json()).resolves.toMatchObject({
             schemaVersion: 1,

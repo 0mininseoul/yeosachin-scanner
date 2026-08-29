@@ -47,6 +47,12 @@ const V2_PROGRESS_COPY: Readonly<Record<string, string>> = {
     FINALIZATION_COMPLETE: '최종 결과 정리를 마쳤습니다.',
 };
 
+const GENERIC_RUNNING_STAGE_CODES = new Set([
+    'RELATIONSHIP_AI_RUNNING',
+    'INTERACTIONS_RUNNING',
+    'FINALIZATION_RUNNING',
+]);
+
 export function analysisV2EventCopy(copyCode: string): string {
     return V2_PROGRESS_COPY[copyCode] ?? '새로운 판독 단서를 확인하고 있습니다.';
 }
@@ -57,8 +63,20 @@ export function analysisV2ProgressCopy(input: OwnerProgressPresentationInput): s
     if (input.status === 'upgrade_required') {
         return '현재 계정 규모에 맞는 플랜을 다시 확인해주세요.';
     }
-    const activeStageCode = Object.values(input.tracks)
-        .find(track => track.state === 'running')?.stageCode;
+    // A completed/previously-running track may remain in the snapshot while a
+    // concrete stage is active elsewhere. Prefer that concrete stage, then use
+    // the same finalization/interactions/relationship fallback as the ring.
+    const trackIds = ['relationshipAi', 'interactions', 'finalization'] as const;
+    const concreteTrackId = trackIds.find(trackId => {
+        const track = input.tracks[trackId];
+        return track?.state === 'running'
+            && !GENERIC_RUNNING_STAGE_CODES.has(track.stageCode);
+    });
+    const activeTrackId = concreteTrackId
+        ?? [...trackIds].reverse().find(trackId => input.tracks[trackId]?.state === 'running');
+    const activeStageCode = activeTrackId
+        ? input.tracks[activeTrackId]?.stageCode
+        : undefined;
     const activeStageCopy = activeStageCode
         ? V2_PROGRESS_COPY[activeStageCode]
         : null;

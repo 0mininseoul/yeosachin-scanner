@@ -570,7 +570,7 @@ export const progressSnapshotV1Schema = z.object({
         totalCount: z.number().int().positive().max(30).optional(),
         callPhase: progressCallPhaseSchema.optional(),
     }).strict().nullable(),
-    candidateMedia: z.array(progressCandidateMediaSchema).max(60).default([]),
+    candidateMedia: z.array(progressCandidateMediaSchema).max(20).default([]),
     etaRange: z.object({
         lowSeconds: z.number().int().nonnegative().max(3_600),
         highSeconds: z.number().int().nonnegative().max(3_600),

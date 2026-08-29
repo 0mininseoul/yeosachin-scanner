@@ -61,6 +61,33 @@ describe('image proxy tokens', () => {
         expect(first).not.toContain(encodeURIComponent('https://cdninstagram.com'));
     });
 
+    it('changes exactly at the bucket boundary and remains deterministic after rollover', () => {
+        const bucketSeconds = 15 * 60;
+        const bucketStartSeconds = Math.floor(NOW_MS / 1_000 / bucketSeconds) * bucketSeconds;
+        const beforeBoundary = createImageProxyPath(
+            'https://cdninstagram.com/a.jpg?oe=123',
+            { nowMs: (bucketStartSeconds + bucketSeconds - 1) * 1_000, secret: SECRET }
+        );
+        const afterBoundary = createImageProxyPath(
+            'https://cdninstagram.com/a.jpg?oe=123',
+            { nowMs: (bucketStartSeconds + bucketSeconds) * 1_000, secret: SECRET }
+        );
+        const repeatedAfterBoundary = createImageProxyPath(
+            'https://cdninstagram.com/a.jpg?oe=123',
+            { nowMs: (bucketStartSeconds + bucketSeconds + 30) * 1_000, secret: SECRET }
+        );
+
+        expect(beforeBoundary).not.toBe(afterBoundary);
+        expect(afterBoundary).toBe(repeatedAfterBoundary);
+        expect(Number(parseProxyPath(afterBoundary!).expires))
+            .toBe(Number(parseProxyPath(beforeBoundary!).expires) + bucketSeconds);
+        expect(verifyImageProxyToken(
+            parseProxyPath(beforeBoundary!).token,
+            parseProxyPath(beforeBoundary!).expires,
+            { nowMs: (bucketStartSeconds + bucketSeconds) * 1_000, secret: SECRET }
+        )).toBe('https://cdninstagram.com/a.jpg?oe=123');
+    });
+
     it('rejects tampering, noncanonical URLs, expired tokens, and excessive lifetimes', () => {
         const token = parseProxyPath(createImageProxyPath(
             'https://cdninstagram.com/a.jpg?oe=123',

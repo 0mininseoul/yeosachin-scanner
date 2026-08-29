@@ -16,6 +16,7 @@ import {
     analysisV2EventCopy,
 } from '@/lib/services/analysis/owner-view-presentation';
 import { preferredProgressNarration } from '@/lib/services/analysis/v2-progress-client-state';
+import { activeProgressTrackId } from '@/lib/services/analysis/v2-progress-display';
 import {
     availablePendingTargetStorage,
     clearPendingAnalysisTargetForTerminalState,
@@ -290,7 +291,7 @@ export default function ProgressPage({ params }: PageProps) {
     /* The ring already carries the number, so the words under it name the stage
        rather than repeating the percentage in prose. */
     const runningTrack = data.tracks
-        ? V2_TRACK_PRESENTATION.find(({ key }) => data.tracks![key].state === 'running')
+        ? V2_TRACK_PRESENTATION.find(({ key }) => key === activeProgressTrackId(data.tracks))
         : undefined;
     const activeTrackLabel = runningTrack?.label ?? '판독 준비 중';
     /* Prefer the exact profile ordinal while a provider call is in flight;
@@ -304,7 +305,7 @@ export default function ProgressPage({ params }: PageProps) {
             total: data.activeProfile.totalCount,
         }
         : null;
-    const screenedCount = activeProfileCount
+    const activeProfileCountLabel = activeProfileCount
         ?? (runningCounts && runningCounts.total > 0 ? runningCounts : null);
     const narration = preferredProgressNarration(data.progressStep, data.events);
 
@@ -391,9 +392,9 @@ export default function ProgressPage({ params }: PageProps) {
                             ? narration
                             : analysisV2EventCopy(narration)
                         : '판독을 준비하고 있습니다.'}
-                    {screenedCount && (
+                    {activeProfileCountLabel && (
                         <span className="num text-fg-mute">
-                            {' · '}{screenedCount.done} / {screenedCount.total}
+                            {' · '}{activeProfileCount ? '현재 ' : ''}{activeProfileCountLabel.done} / {activeProfileCountLabel.total}
                         </span>
                     )}
                 </p>

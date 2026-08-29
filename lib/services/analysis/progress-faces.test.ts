@@ -403,12 +403,30 @@ describe('screened candidate presentation keys and drift', () => {
         expect(candidateCopyKey(8, 0)).not.toBe(survivorKey);
     });
 
-    it('changes a tile key when its safe image source is refreshed', () => {
+    it('keeps a tile key stable when its signed image source is refreshed', () => {
         const oldKey = candidateTileKey(7, 1, 0, '/api/image-proxy?token=old');
         const newKey = candidateTileKey(7, 1, 0, '/api/image-proxy?token=new');
 
-        expect(newKey).not.toBe(oldKey);
+        expect(newKey).toBe(oldKey);
         expect(candidateTileKey(7, 1, 0, '/api/image-proxy?token=old')).toBe(oldKey);
+    });
+
+    it('preserves survivor object identity when the same newest history is merged repeatedly', () => {
+        const history = Array.from({ length: MAX_SCREENED_CANDIDATES }, (_, index) => ({
+            candidateKey: `candidate-${index}`,
+            username: `u${index}***`,
+            occurrence: 0,
+            imageUrl: `/api/image-proxy?token=${index}`,
+            feedImageUrls: [],
+        }));
+        const first = mergeScreenedCandidateHistory([], history);
+        const second = mergeScreenedCandidateHistory(first, history);
+
+        expect(second).toBe(first);
+        expect(second.map(item => item.occurrence)).toEqual(
+            first.map(item => item.occurrence)
+        );
+        expect(second.every((item, index) => item === first[index])).toBe(true);
     });
 
     it('measures copy starts and wraps without relying on total scroll width', () => {

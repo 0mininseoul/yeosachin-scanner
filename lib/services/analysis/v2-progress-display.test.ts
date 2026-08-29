@@ -1,7 +1,9 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
     createProgressDisplayState,
+    activeProgressTrackId,
     pauseProgressDisplay,
+    nextProgressCheckpointBp,
     updateProgressDisplay,
     type ProgressDisplayInput,
 } from './v2-progress-display';
@@ -21,6 +23,165 @@ function input(overrides: Partial<ProgressDisplayInput> = {}): ProgressDisplayIn
 describe('V2 progress display easing', () => {
     afterEach(() => {
         vi.useRealTimers();
+    });
+
+    it('selects the actual active stage instead of the earliest previously-running track', () => {
+        const tracks = {
+            relationshipAi: {
+                state: 'running' as const,
+                done: 0,
+                total: 100,
+                stageCode: 'RELATIONSHIP_AI_RUNNING',
+            },
+            interactions: {
+                state: 'running' as const,
+                done: 0,
+                total: 1,
+                stageCode: 'TARGET_INTERACTIONS_COLLECTING',
+            },
+            finalization: {
+                state: 'pending' as const,
+                done: 0,
+                total: 1,
+                stageCode: 'FINALIZATION_QUEUED',
+            },
+        };
+
+        expect(activeProgressTrackId(tracks)).toBe('interactions');
+        expect(nextProgressCheckpointBp(tracks, 'interactions')).toBe(1_700);
+    });
+
+    it('uses ordinal and call phase to raise a bounded provisional sub-checkpoint', () => {
+        const initial = updateProgressDisplay(
+            createProgressDisplayState(),
+            input({
+                confirmedProgressBp: 0,
+                nextCheckpointBp: 7_200,
+                activeTrackId: 'relationshipAi',
+                activeStageCode: 'PROFILE_SCREENING',
+                currentOrdinal: 1,
+                totalCount: 30,
+                callPhase: 'fetching',
+                tracks: {
+                    relationshipAi: {
+                        state: 'running',
+                        done: 0,
+                        total: 1,
+                    },
+                    interactions: {
+                        state: 'pending',
+                        done: 0,
+                        total: 1,
+                    },
+                    finalization: {
+                        state: 'pending',
+                        done: 0,
+                        total: 1,
+                    },
+                },
+                nowMs: 0,
+            }),
+        );
+        const later = updateProgressDisplay(
+            initial,
+            input({
+                confirmedProgressBp: 0,
+                nextCheckpointBp: 7_200,
+                activeTrackId: 'relationshipAi',
+                activeStageCode: 'PROFILE_SCREENING',
+                currentOrdinal: 20,
+                totalCount: 30,
+                callPhase: 'analyzing',
+                tracks: {
+                    relationshipAi: {
+                        state: 'running',
+                        done: 0,
+                        total: 1,
+                    },
+                    interactions: {
+                        state: 'pending',
+                        done: 0,
+                        total: 1,
+                    },
+                    finalization: {
+                        state: 'pending',
+                        done: 0,
+                        total: 1,
+                    },
+                },
+                nowMs: 0,
+            }),
+        );
+
+        expect(later.provisionalTargetProgressBp).toBeGreaterThan(
+            initial.provisionalTargetProgressBp
+        );
+        expect(later.displayProgressBp).toBeGreaterThan(initial.displayProgressBp);
+        expect(later.capProgressBp).toBeLessThan(7_200);
+    });
+
+    it('makes each profile call phase a distinct bounded sub-checkpoint', () => {
+        const tracks = {
+            relationshipAi: { state: 'running' as const, done: 0, total: 1 },
+            interactions: { state: 'pending' as const, done: 0, total: 1 },
+            finalization: { state: 'pending' as const, done: 0, total: 1 },
+        };
+        const targets = (['fetching', 'analyzing', 'persisting'] as const).map(callPhase => (
+            updateProgressDisplay(
+                createProgressDisplayState(),
+                input({
+                    confirmedProgressBp: 0,
+                    nextCheckpointBp: 7_200,
+                    tracks,
+                    activeTrackId: 'relationshipAi',
+                    activeStageCode: 'PROFILE_SCREENING',
+                    currentOrdinal: 1,
+                    totalCount: 30,
+                    callPhase,
+                }),
+            ).provisionalTargetProgressBp
+        ));
+
+        expect(targets[0]).toBeLessThan(targets[1]!);
+        expect(targets[1]).toBeLessThan(targets[2]!);
+    });
+
+    it('does not regress or overshoot when a provisional denominator expands', () => {
+        const tracks = {
+            relationshipAi: { state: 'running' as const, done: 0, total: 1 },
+            interactions: { state: 'pending' as const, done: 0, total: 1 },
+            finalization: { state: 'pending' as const, done: 0, total: 1 },
+        };
+        const earlier = updateProgressDisplay(
+            createProgressDisplayState(),
+            input({
+                confirmedProgressBp: 0,
+                nextCheckpointBp: 7_200,
+                tracks,
+                activeTrackId: 'relationshipAi',
+                activeStageCode: 'PROFILE_SCREENING',
+                currentOrdinal: 9,
+                totalCount: 10,
+                callPhase: 'analyzing',
+            }),
+        );
+        const expanded = updateProgressDisplay(
+            earlier,
+            input({
+                confirmedProgressBp: 0,
+                nextCheckpointBp: 7_200,
+                tracks,
+                activeTrackId: 'relationshipAi',
+                activeStageCode: 'PROFILE_SCREENING',
+                currentOrdinal: 9,
+                totalCount: 30,
+                callPhase: 'analyzing',
+            }),
+        );
+
+        expect(expanded.displayProgressBp).toBeGreaterThanOrEqual(earlier.displayProgressBp);
+        expect(expanded.provisionalTargetProgressBp).toBeLessThan(7_200);
+        expect(expanded.displayProgressBp).toBeLessThan(7_200);
     });
 
     it('moves during a long visible plateau but decelerates before the next checkpoint', () => {

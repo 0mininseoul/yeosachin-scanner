@@ -1,8 +1,10 @@
 import {
     calculateWeightedProgress,
+    PROGRESS_TRACK_WEIGHTS_BP,
     type AnalysisProgressStatus,
     type ProgressTrackId,
 } from '@/lib/domain/analysis/progress-policy';
+import type { ProgressCallPhase } from '@/lib/contracts/analysis-v2';
 
 /** Keep the provisional motion visibly below the next durable checkpoint. */
 export const PROGRESS_DISPLAY_CHECKPOINT_GUARD_BP = 1;
@@ -15,6 +17,7 @@ export type ProgressDisplayStatus = AnalysisProgressStatus;
 
 export interface ProgressDisplayTrack {
     state: 'pending' | 'running' | 'completed' | 'failed';
+    stageCode?: string;
     done: number;
     total: number;
 }
@@ -28,10 +31,19 @@ export interface ProgressDisplayInput {
     confirmedProgressBp: number;
     /** The next progress value that can only be shown after a durable checkpoint. */
     nextCheckpointBp?: number;
+    tracks?: ProgressDisplayTracks | null;
     status: ProgressDisplayStatus;
     nowMs: number;
     visible: boolean;
-    /** Changes only when a new server signal or stage arrives. */
+    /** The track that owns the current stage, not merely any running track. */
+    activeTrackId?: ProgressTrackId | null;
+    /** The concrete projector stage code for the active track. */
+    activeStageCode?: string | null;
+    /** Current item signals are presentation hints below the next checkpoint. */
+    currentOrdinal?: number | null;
+    totalCount?: number | null;
+    callPhase?: ProgressCallPhase | null;
+    /** Changes when a new server signal or stage arrives. */
     signalKey?: string | null;
 }
 
@@ -43,6 +55,8 @@ export interface ProgressDisplayState {
     lastSignalKey: string | null;
     easingStartedAtMs: number;
     easingStartProgressBp: number;
+    provisionalTargetProgressBp: number;
+    easingRate: number;
     lastNowMs: number;
     paused: boolean;
 }
@@ -65,6 +79,8 @@ export function createProgressDisplayState(): ProgressDisplayState {
         lastSignalKey: null,
         easingStartedAtMs: 0,
         easingStartProgressBp: 0,
+        provisionalTargetProgressBp: 0,
+        easingRate: 1,
         lastNowMs: 0,
         paused: false,
     };
@@ -78,10 +94,16 @@ export function createProgressDisplayState(): ProgressDisplayState {
  */
 export function nextProgressCheckpointBp(
     tracks: ProgressDisplayTracks | null | undefined,
+    activeTrackId?: ProgressTrackId | null,
 ): number | undefined {
     if (!tracks) return undefined;
+    const activeTrack = activeTrackId ? tracks[activeTrackId] : undefined;
+    const trackIds = activeTrack?.state === 'running'
+        ? [activeTrackId]
+        : ['relationshipAi', 'interactions', 'finalization'] as const;
     const candidates: number[] = [];
-    for (const trackId of ['relationshipAi', 'interactions', 'finalization'] as const) {
+    for (const trackId of trackIds) {
+        if (!trackId) continue;
         const track = tracks[trackId];
         if (track.state !== 'running' || track.done >= track.total) continue;
         const work = {
@@ -96,6 +118,115 @@ export function nextProgressCheckpointBp(
         candidates.push(calculateWeightedProgress(work, 'processing').overallProgressBp);
     }
     return candidates.length > 0 ? Math.min(...candidates) : undefined;
+}
+
+const GENERIC_RUNNING_STAGE_CODES = new Set([
+    'RELATIONSHIP_AI_RUNNING',
+    'INTERACTIONS_RUNNING',
+    'FINALIZATION_RUNNING',
+]);
+
+/** Selects the projector's concrete active stage over historical running rails. */
+export function activeProgressTrackId(
+    tracks: ProgressDisplayTracks | null | undefined,
+): ProgressTrackId | undefined {
+    if (!tracks) return undefined;
+    const concrete = (['relationshipAi', 'interactions', 'finalization'] as const)
+        .find(trackId => (
+            tracks[trackId].state === 'running'
+            && !GENERIC_RUNNING_STAGE_CODES.has(tracks[trackId].stageCode ?? '')
+        ));
+    if (concrete) return concrete;
+    return (['finalization', 'interactions', 'relationshipAi'] as const)
+        .find(trackId => tracks[trackId].state === 'running');
+}
+
+const PHASE_PROGRESS_FRACTIONS: Readonly<Record<ProgressCallPhase, number>> = {
+    fetching: 0.2,
+    analyzing: 0.55,
+    persisting: 0.85,
+};
+
+function boundedFraction(value: number, fallback = 0.5): number {
+    if (!Number.isFinite(value)) return fallback;
+    return Math.max(0, Math.min(0.995, value));
+}
+
+function stageProgressFraction(
+    stageCode: string | null | undefined,
+    currentOrdinal: number | null | undefined,
+    totalCount: number | null | undefined,
+    callPhase: ProgressCallPhase | null | undefined,
+): number {
+    const phaseFraction = callPhase ? PHASE_PROGRESS_FRACTIONS[callPhase] : undefined;
+    const hasProfileSignals = Number.isSafeInteger(currentOrdinal)
+        && Number.isSafeInteger(totalCount)
+        && (totalCount ?? 0) > 0
+        && (currentOrdinal ?? 0) >= 1
+        && (currentOrdinal ?? 0) <= (totalCount ?? 0);
+    if (hasProfileSignals && (
+        stageCode === 'PUBLIC_PROFILES_COLLECTING'
+        || stageCode === 'PROFILE_SCREENING'
+    )) {
+        const ordinal = currentOrdinal as number;
+        const total = totalCount as number;
+        const phase = phaseFraction ?? 0.5;
+        return boundedFraction((ordinal - 1 + phase) / total);
+    }
+    return boundedFraction(phaseFraction ?? 0.5);
+}
+
+function weightedProgressWithActiveFraction(
+    tracks: ProgressDisplayTracks,
+    activeTrackId: ProgressTrackId,
+    fraction: number,
+): number {
+    let weighted = 0;
+    for (const trackId of ['relationshipAi', 'interactions', 'finalization'] as const) {
+        const track = tracks[trackId];
+        const done = trackId === activeTrackId && track.state === 'running'
+            ? Math.min(track.total, track.done + fraction)
+            : track.done;
+        weighted += PROGRESS_TRACK_WEIGHTS_BP[trackId]
+            * (track.total === 0 ? 0 : done / track.total);
+    }
+    return Math.min(9_999, Math.max(0, Math.floor(weighted)));
+}
+
+/**
+ * Returns a bounded, signal-derived floor. It is always inside the current
+ * active work unit and therefore cannot cross the next durable checkpoint.
+ */
+export function provisionalProgressTargetBp(
+    tracks: ProgressDisplayTracks | null | undefined,
+    activeTrackId: ProgressTrackId | null | undefined,
+    activeStageCode: string | null | undefined,
+    currentOrdinal: number | null | undefined,
+    totalCount: number | null | undefined,
+    callPhase: ProgressCallPhase | null | undefined,
+): number | undefined {
+    if (!tracks) return undefined;
+    const trackId = activeTrackId ?? activeProgressTrackId(tracks);
+    if (!trackId || tracks[trackId].state !== 'running') return undefined;
+    return weightedProgressWithActiveFraction(
+        tracks,
+        trackId,
+        stageProgressFraction(activeStageCode, currentOrdinal, totalCount, callPhase),
+    );
+}
+
+function signalEasingRate(
+    currentOrdinal: number | null | undefined,
+    totalCount: number | null | undefined,
+    callPhase: ProgressCallPhase | null | undefined,
+): number {
+    const phase = callPhase ? PHASE_PROGRESS_FRACTIONS[callPhase] : 0.5;
+    const position = Number.isFinite(currentOrdinal)
+        && Number.isFinite(totalCount)
+        && (totalCount ?? 0) > 0
+        ? Math.max(0, Math.min(1, (currentOrdinal as number) / (totalCount as number)))
+        : 0;
+    return 1 + phase * 0.35 + position * 0.15;
 }
 
 function easingCap(
@@ -121,9 +252,12 @@ function easedProgress(
     startProgressBp: number,
     capProgressBp: number,
     elapsedMs: number,
+    easingRate = 1,
 ): number {
     if (capProgressBp <= startProgressBp || elapsedMs <= 0) return startProgressBp;
-    const fraction = 1 - Math.exp(-elapsedMs / PROGRESS_DISPLAY_EASING_TIME_MS);
+    const fraction = 1 - Math.exp(
+        -(elapsedMs * Math.max(1, easingRate)) / PROGRESS_DISPLAY_EASING_TIME_MS
+    );
     return Math.min(
         capProgressBp,
         Math.floor(startProgressBp + (capProgressBp - startProgressBp) * fraction),
@@ -161,6 +295,8 @@ export function updateProgressDisplay(
             lastSignalKey: signalKey,
             easingStartedAtMs: nowMs,
             easingStartProgressBp: 10_000,
+            provisionalTargetProgressBp: 10_000,
+            easingRate: 1,
             lastNowMs: nowMs,
             paused: false,
         };
@@ -173,10 +309,33 @@ export function updateProgressDisplay(
             easingCap(confirmedProgressBp, input.nextCheckpointBp),
         )
         : confirmedProgressBp;
-    const signalChanged = signalKey !== previous.lastSignalKey;
-    const startProgressBp = checkpointJump
+    const provisionalTrackTarget = input.status === 'processing'
+        ? provisionalProgressTargetBp(
+            input.tracks,
+            input.activeTrackId,
+            input.activeStageCode,
+            input.currentOrdinal,
+            input.totalCount,
+            input.callPhase,
+        )
+        : undefined;
+    const provisionalTargetProgressBp = input.status === 'processing'
+        ? Math.max(
+            confirmedProgressBp,
+            Math.min(capProgressBp, provisionalTrackTarget ?? confirmedProgressBp),
+        )
+        : confirmedProgressBp;
+    const checkpointStartProgressBp = checkpointJump
         ? confirmedProgressBp
-        : Math.max(previous.displayProgressBp, confirmedProgressBp);
+        : Math.max(
+            previous.displayProgressBp,
+            confirmedProgressBp,
+            provisionalTargetProgressBp,
+        );
+    const signalEasingProgressRate = input.status === 'processing'
+        ? signalEasingRate(input.currentOrdinal, input.totalCount, input.callPhase)
+        : 1;
+    const startProgressBp = checkpointStartProgressBp;
     const targetProgressBp = input.status === 'processing'
         ? capProgressBp
         : startProgressBp;
@@ -193,6 +352,8 @@ export function updateProgressDisplay(
             lastSignalKey: signalKey,
             easingStartedAtMs: nowMs,
             easingStartProgressBp: startProgressBp,
+            provisionalTargetProgressBp,
+            easingRate: signalEasingProgressRate,
             lastNowMs: nowMs,
             paused: false,
         };
@@ -208,6 +369,8 @@ export function updateProgressDisplay(
             lastSignalKey: signalKey,
             easingStartedAtMs: nowMs,
             easingStartProgressBp: startProgressBp,
+            provisionalTargetProgressBp,
+            easingRate: signalEasingProgressRate,
             lastNowMs: nowMs,
             paused: true,
         };
@@ -223,22 +386,28 @@ export function updateProgressDisplay(
             lastSignalKey: signalKey,
             easingStartedAtMs: nowMs,
             easingStartProgressBp: startProgressBp,
+            provisionalTargetProgressBp,
+            easingRate: signalEasingProgressRate,
             lastNowMs: nowMs,
             paused: false,
         };
     }
 
-    const easingStartedAtMs = checkpointJump || signalChanged
+    const easingStartedAtMs = checkpointJump || previous.lastSignalKey === null
         ? nowMs
         : previous.easingStartedAtMs;
-    const easingStartProgressBp = checkpointJump || signalChanged
+    const easingStartProgressBp = checkpointJump || previous.lastSignalKey === null
         ? startProgressBp
         : previous.easingStartProgressBp;
     const elapsedMs = Math.max(0, nowMs - easingStartedAtMs);
-    const displayProgressBp = easedProgress(
-        easingStartProgressBp,
-        targetProgressBp,
-        elapsedMs,
+    const displayProgressBp = Math.max(
+        startProgressBp,
+        easedProgress(
+            easingStartProgressBp,
+            targetProgressBp,
+            elapsedMs,
+            signalEasingProgressRate,
+        ),
     );
 
     return {
@@ -250,6 +419,8 @@ export function updateProgressDisplay(
         lastSignalKey: signalKey,
         easingStartedAtMs,
         easingStartProgressBp,
+        provisionalTargetProgressBp,
+        easingRate: signalEasingProgressRate,
         lastNowMs: nowMs,
         paused: false,
     };

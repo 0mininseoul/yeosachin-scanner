@@ -19,7 +19,7 @@ describe('V2 progress signals and history migration contract', () => {
         expect(migration).toContain('p_call_phase TEXT DEFAULT');
         expect(migration).toContain('p_current_ordinal NOT BETWEEN 0 AND p_total_count');
         expect(migration).toContain('p_call_phase NOT IN');
-        expect(migration).toContain('GREATEST(');
+        expect(migration).not.toContain('GREATEST(');
         expect(migration).not.toMatch(/CREATE\s+TABLE/i);
     });
 
@@ -33,6 +33,10 @@ describe('V2 progress signals and history migration contract', () => {
         expect(migration).toContain('v_job.lease_expires_at <= v_now');
         expect(migration).toContain('ANALYSIS_V2_PROGRESS_TOPOLOGY_MISMATCH');
         expect(migration).toContain('call_phase = EXCLUDED.call_phase');
+        expect(migration).toContain('EXCLUDED.completed_count\n                >=');
+        expect(migration).toContain(
+            'Identity and media are updated as one ordinal-paired record'
+        );
         expect(migration).toContain('REVOKE ALL ON FUNCTION public.load_analysis_v2_progress');
         expect(migration).toContain('GRANT EXECUTE ON FUNCTION public.load_analysis_v2_progress');
     });
@@ -47,10 +51,14 @@ describe('V2 progress signals and history migration contract', () => {
         expect(migration).toContain("outcome.status = 'success'");
         expect(migration).toContain("outcome.profile_snapshot->>'isPrivate' = 'false'");
         expect(migration).toContain('candidateMediaRaw');
-        expect(migration).toContain('profile_snapshot');
-        expect(migration).toContain('LIMIT 60');
+        expect(migration).toContain("'profilePicUrl'");
+        expect(migration).toContain("'latestPosts'");
+        expect(migration).not.toContain("'profile', candidate.profile_snapshot");
+        expect(migration).toContain('LIMIT 20');
         expect(migration).toContain('ORDER BY candidate.captured_at DESC, candidate.ordinal DESC, candidate.username DESC');
         expect(migration).toContain('ORDER BY candidate.captured_at ASC, candidate.ordinal, candidate.username');
+        expect(migration).toContain('CREATE INDEX IF NOT EXISTS analysis_v2_progress_media_outcomes_idx');
+        expect(migration).toContain('load_analysis_v2_progress_with_candidate_media');
         expect(migration).toContain("'currentOrdinal', heartbeat.completed_count");
         expect(migration).toContain("'totalCount', heartbeat.total_count");
         expect(migration).toContain("'callPhase', heartbeat.call_phase");
