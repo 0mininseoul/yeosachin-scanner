@@ -21,7 +21,7 @@ const V2_PROGRESS_COPY: Readonly<Record<string, string>> = {
     PUBLIC_PROFILES_COLLECTING: '공개 프로필을 확인하고 있습니다.',
     PROFILE_SCREENING: '맞팔 계정을 판독하고 있습니다.',
     PROFILES_SCREENED: '계정 특징 판독을 진행했습니다.',
-    PRIVATE_NAMES_SCREENING: '비공개 계정의 이름 단서를 확인하고 있습니다.',
+    PRIVATE_NAMES_SCREENING: '수집한 단서를 정리하고 있습니다.',
     EVIDENCE_JOINING: '수집한 단서를 서로 맞춰보고 있습니다.',
     TARGET_INTERACTIONS_COLLECTING: '대상 계정의 상호작용을 확인하고 있습니다.',
     SHORTLIST_INTERACTIONS_COLLECTING: '주요 후보와의 상호작용을 비교하고 있습니다.',

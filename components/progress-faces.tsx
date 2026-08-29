@@ -24,6 +24,8 @@ const RAIL_GAP_PX = 10; // Tailwind gap-2.5.
 const RAIL_HORIZONTAL_PADDING_PX = 40; // Tailwind px-5 on both sides.
 const PROGRESS_RAIL_MAX_WIDTH_PX = 460;
 const DEFAULT_PROGRESS_COPY_COUNT = 3;
+const MAX_FACE_TILE_RETRIES = 2;
+const FACE_TILE_RETRY_DELAY_MS = 1_000;
 
 /**
  * Size the repeated rail copies so the max-width progress viewport can scroll
@@ -61,45 +63,134 @@ const DRIFT_PX_PER_SECOND = 26;
 function FaceTile({
     src,
     current,
-    label,
 }: {
     src: string | undefined;
     current: boolean;
-    label: string;
 }) {
-    // Remember the source that failed instead of resetting state in an effect.
-    // A refreshed signed proxy path then naturally becomes a new attempt while
-    // preserving this tile's React identity.
-    const [failedSrc, setFailedSrc] = useState<string | null>(null);
-    const failed = src !== undefined && failedSrc === src;
+    /*
+     * Signed image URLs rotate independently of a tile's identity. Keep the
+     * last image that actually loaded in the visible slot while probing a new
+     * URL off-screen. A transient 403/timeout therefore cannot replace a
+     * useful face with initials or a broken-image/placeholder tile.
+     */
+    const [lastGoodSrc, setLastGoodSrc] = useState<string | undefined>();
+    const [pendingSrc, setPendingSrc] = useState<string | undefined>();
+    const [exhaustedSrc, setExhaustedSrc] = useState<string | undefined>();
+    const [retryVersion, setRetryVersion] = useState(0);
+    const retryStateRef = useRef(new Map<string, {
+        attempts: number;
+        timer: ReturnType<typeof setTimeout> | undefined;
+    }>());
+
+    useEffect(() => {
+        for (const [candidate, state] of retryStateRef.current) {
+            if (candidate === src) continue;
+            if (state.timer !== undefined) clearTimeout(state.timer);
+            retryStateRef.current.delete(candidate);
+        }
+    }, [src]);
+
+    useEffect(() => () => {
+        for (const state of retryStateRef.current.values()) {
+            if (state.timer !== undefined) clearTimeout(state.timer);
+        }
+        retryStateRef.current.clear();
+    }, []);
+
+    const scheduleRetry = (candidate: string) => {
+        const state = retryStateRef.current.get(candidate) ?? {
+            attempts: 0,
+            timer: undefined,
+        };
+        if (state.timer !== undefined) clearTimeout(state.timer);
+        if (state.attempts >= MAX_FACE_TILE_RETRIES) {
+            setExhaustedSrc(candidate);
+            setPendingSrc(currentPending => (
+                currentPending === candidate ? undefined : currentPending
+            ));
+            retryStateRef.current.set(candidate, state);
+            return;
+        }
+
+        state.attempts += 1;
+        state.timer = setTimeout(() => {
+            state.timer = undefined;
+            setRetryVersion(version => version + 1);
+        }, FACE_TILE_RETRY_DELAY_MS * state.attempts);
+        retryStateRef.current.set(candidate, state);
+    };
+
+    const onImageLoad = (loadedSrc: string) => {
+        if (loadedSrc !== src) return;
+        const retryState = retryStateRef.current.get(loadedSrc);
+        if (retryState?.timer !== undefined) clearTimeout(retryState.timer);
+        retryStateRef.current.delete(loadedSrc);
+        setExhaustedSrc(currentExhausted => (
+            currentExhausted === loadedSrc ? undefined : currentExhausted
+        ));
+        setLastGoodSrc(loadedSrc);
+        setPendingSrc(currentPending => (
+            currentPending === loadedSrc ? undefined : currentPending
+        ));
+    };
+
+    const onImageError = (failedImageSrc: string) => {
+        if (failedImageSrc === lastGoodSrc) setLastGoodSrc(undefined);
+        setPendingSrc(currentPending => currentPending ?? failedImageSrc);
+        scheduleRetry(failedImageSrc);
+    };
+
+    const exhaustedCurrentSrc = exhaustedSrc === src;
+    // A source with no prior good image stays invisible while its first probe
+    // loads. Once it errors, only the invisible probe is retried; an exhausted
+    // source stays blank instead of looping a broken image forever.
+    const sourceChanged = src !== undefined && src !== lastGoodSrc;
+    const activePendingSrc = pendingSrc === src ? pendingSrc : undefined;
+    const displaySrc = lastGoodSrc;
+    const probeSrc = exhaustedCurrentSrc
+        ? undefined
+        : activePendingSrc ?? (sourceChanged ? src : undefined);
+    const hasVisibleImage = displaySrc !== undefined;
     return (
         <div
-            className={`relative shrink-0 overflow-hidden border bg-panel ${
-                current
-                    ? 'border-blood shadow-[0_0_16px_-2px_rgba(228,19,42,0.45)]'
-                    : 'border-line-2'
+            className={`relative shrink-0 overflow-hidden ${
+                hasVisibleImage
+                    ? `border bg-panel ${current
+                        ? 'border-blood shadow-[0_0_16px_-2px_rgba(228,19,42,0.45)]'
+                        : 'border-line-2'}`
+                    : 'border-transparent bg-transparent'
             }`}
             style={{ width: TILE_PX, height: TILE_PX }}
         >
-            {src && !failed ? (
+            {displaySrc ? (
                 <Image
-                    src={src}
+                    src={displaySrc}
                     alt=""
                     width={TILE_PX}
                     height={TILE_PX}
                     unoptimized
                     loading="lazy"
                     className="h-full w-full object-cover"
-                    onError={() => setFailedSrc(src ?? null)}
+                    onLoad={() => onImageLoad(displaySrc)}
+                    onError={() => onImageError(displaySrc)}
                 />
-            ) : (
-                <div
+            ) : null}
+            {probeSrc && probeSrc !== displaySrc ? (
+                <Image
+                    key={`probe:${retryVersion}`}
+                    src={probeSrc}
+                    alt=""
+                    width={TILE_PX}
+                    height={TILE_PX}
+                    unoptimized
+                    loading="eager"
                     aria-hidden="true"
-                    className="flex h-full w-full items-center justify-center bg-panel-2 text-[20px] font-bold text-fg-mute"
-                >
-                    {label.replace(/\*/g, '').charAt(0).toUpperCase() || '?'}
-                </div>
-            )}
+                    data-progress-retry="true"
+                    className="pointer-events-none absolute h-px w-px opacity-0"
+                    onLoad={() => onImageLoad(probeSrc)}
+                    onError={() => onImageError(probeSrc)}
+                />
+            ) : null}
         </div>
     );
 }
@@ -115,16 +206,15 @@ function CandidateMediaTile({
 }) {
     /* Heartbeats contain signed, owner-scoped proxy paths. Keep the rendering
        boundary defensive too: a malformed heartbeat must not turn the browser
-       into a raw Instagram-CDN client, and demo fallback art is not real
-       progress media. */
+       into a raw Instagram-CDN client or a blank placeholder tile. */
     const imageUrl = tile.imageUrl ?? undefined;
     const src = safeResultImageUrl(imageUrl);
     const safeSrc = src?.startsWith('/api/image-proxy?') ? src : undefined;
+    if (!safeSrc) return null;
     return <FaceTile
-        key={candidateTileKey(tile.occurrence, copyIndex, tile.mediaIndex, safeSrc)}
+        key={candidateTileKey(tile.occurrence, copyIndex, tile.mediaIndex)}
         src={safeSrc}
         current={current && tile.mediaIndex === 0}
-        label={tile.username}
     />;
 }
 
@@ -261,20 +351,18 @@ export function ProgressFaces({
         setCandidates(current => mergeScreenedCandidateHistory(current, serverCandidates));
     }
 
-    const mediaTiles = useMemo(
-        () => flattenScreenedCandidateMedia(candidates),
-        [candidates],
-    );
-    const hasRealMedia = useMemo(() => mediaTiles.some(tile => {
-        const imageUrl = tile.imageUrl ?? undefined;
-        return safeResultImageUrl(imageUrl)?.startsWith('/api/image-proxy?');
-    }), [mediaTiles]);
-    // Let the drift effect initialize when a fallback-only snapshot is enriched
-    // into real media without changing the tile count.
-    const railRef = useFaceDrift(hasRealMedia ? mediaTiles.length : 0);
+    const mediaTiles = useMemo(() => (
+        flattenScreenedCandidateMedia(candidates).filter(tile => {
+            const imageUrl = tile.imageUrl ?? undefined;
+            return safeResultImageUrl(imageUrl)?.startsWith('/api/image-proxy?') ?? false;
+        })
+    ), [candidates]);
+    // Geometry, drift, and rendering all use the same safe real-media pool;
+    // media-less or malformed candidates cannot create invisible gaps.
+    const railRef = useFaceDrift(mediaTiles.length);
     const { copyCount } = progressRailCopyGeometry(mediaTiles.length);
 
-    if (!hasRealMedia || mediaTiles.length < MIN_SCREENED_CANDIDATES_TO_SHOW) return null;
+    if (mediaTiles.length < MIN_SCREENED_CANDIDATES_TO_SHOW) return null;
 
     const newestOccurrence = candidates.at(-1)?.occurrence;
 

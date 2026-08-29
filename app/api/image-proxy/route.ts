@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import {
     downloadSecureImage,
     INSTAGRAM_MEDIA_HOST_SUFFIXES,
+    SecureImageFetchError,
     TRUSTED_IMAGE_PROXY_HOST_SUFFIXES,
 } from '@/lib/services/media/secure-image-fetch';
 import {
@@ -27,32 +28,107 @@ const IMAGE_PROXY_TOTAL_TIMEOUT_MS = 6_000;
 const IMAGE_PROXY_DIRECT_TIMEOUT_MS = 4_000;
 const IMAGE_PROXY_CACHE_TIMEOUT_MS = 1_500;
 const IMAGE_ACCEPT = 'image/jpeg,image/png,image/webp,image/avif,image/*;q=0.8';
+const IMAGE_RETRY_AFTER_SECONDS = 3;
+
+type ImagePayload = {
+    bytes: Buffer;
+    contentType: string;
+};
+
+type ImageAttempt =
+    | { source: 'direct' | 'trusted_proxy'; kind: 'success'; result: ImagePayload }
+    | { source: 'direct' | 'trusted_proxy'; kind: 'failure'; error: unknown };
 
 function withTimeout<T>(promise: Promise<T>, timeoutMs: number): Promise<T | undefined> {
-    return Promise.race([
-        promise,
-        new Promise<undefined>(resolve => {
-            setTimeout(() => resolve(undefined), timeoutMs);
-        }),
-    ]);
+    return new Promise(resolve => {
+        let settled = false;
+        const timeoutId = setTimeout(() => {
+            if (settled) return;
+            settled = true;
+            resolve(undefined);
+        }, timeoutMs);
+        promise.then(value => {
+            if (settled) return;
+            settled = true;
+            clearTimeout(timeoutId);
+            resolve(value);
+        }).catch(() => {
+            if (settled) return;
+            settled = true;
+            clearTimeout(timeoutId);
+            resolve(undefined);
+        });
+    });
 }
 
-const PLACEHOLDER_SVG = `<svg xmlns="http://www.w3.org/2000/svg" width="150" height="150" viewBox="0 0 150 150">
-  <rect width="150" height="150" fill="#1f2937"/>
-  <circle cx="75" cy="55" r="25" fill="#4b5563"/>
-  <ellipse cx="75" cy="120" rx="40" ry="30" fill="#4b5563"/>
-</svg>`;
+function withTimeoutReject<T>(promise: Promise<T>, timeoutMs: number): Promise<T> {
+    return new Promise((resolve, reject) => {
+        const timeoutId = setTimeout(() => reject(new SecureImageFetchError(
+            'timeout',
+            'transient',
+            'Image proxy source timed out',
+        )), timeoutMs);
+        promise.then(value => {
+            clearTimeout(timeoutId);
+            resolve(value);
+        }).catch(error => {
+            clearTimeout(timeoutId);
+            reject(error);
+        });
+    });
+}
 
-function getPlaceholderResponse() {
-    return new NextResponse(PLACEHOLDER_SVG, {
+function isSafeImagePayload(payload: ImagePayload): boolean {
+    const contentType = payload.contentType.split(';', 1)[0]?.trim().toLowerCase();
+    return payload.bytes.byteLength > 0
+        && (contentType === 'application/octet-stream'
+            || (contentType?.startsWith('image/') === true
+                && contentType !== 'image/svg+xml'));
+}
+
+function retryableImageUnavailableResponse() {
+    return NextResponse.json({
+        code: 'IMAGE_UNAVAILABLE',
+        error: 'Image temporarily unavailable. Please retry.',
+        retryable: true,
+    }, {
+        status: 503,
         headers: {
-            'Content-Type': 'image/svg+xml',
-            'Cache-Control': 'private, max-age=300',
-            'Content-Length': String(Buffer.byteLength(PLACEHOLDER_SVG)),
-            'Content-Security-Policy': "default-src 'none'; sandbox",
-            'Cross-Origin-Resource-Policy': 'same-origin',
-            'X-Content-Type-Options': 'nosniff',
+            'Cache-Control': 'private, no-store, max-age=0',
+            'CDN-Cache-Control': 'private, no-store',
+            'Vercel-CDN-Cache-Control': 'private, no-store',
+            'Retry-After': String(IMAGE_RETRY_AFTER_SECONDS),
+            Vary: 'Cookie',
         },
+    });
+}
+
+function logImageProxyOutcome(outcome: {
+    scope: 'generic' | 'result';
+    outcome: 'cache_hit' | 'direct_success' | 'proxy_success' | 'unavailable';
+    cacheEnabled: boolean;
+    elapsedMs: number;
+    source?: 'cache' | 'direct' | 'trusted_proxy';
+    error?: unknown;
+}) {
+    const safeError = outcome.error instanceof SecureImageFetchError
+        ? {
+            reason: outcome.error.reason,
+            disposition: outcome.error.disposition,
+        }
+        : outcome.error
+            ? { reason: 'unknown', disposition: 'transient' as const }
+            : undefined;
+    const log = outcome.outcome === 'unavailable'
+        ? console.warn
+        : console.info;
+    log('[image-proxy]', {
+        scope: outcome.scope,
+        outcome: outcome.outcome,
+        cacheEnabled: outcome.cacheEnabled,
+        elapsedMs: Math.max(0, Math.round(outcome.elapsedMs)),
+        ...(outcome.source ? { source: outcome.source } : {}),
+        ...(safeError ? { error: safeError } : {}),
     });
 }
 
@@ -110,7 +186,7 @@ function retainedImageResponse(
     bytes: Buffer,
     tokenExpiresAt: string,
     objectExpiresAt: string
-) {
+): NextResponse | null {
     const nowSeconds = Math.ceil(Date.now() / 1_000);
     const tokenRemaining = Number(tokenExpiresAt) - nowSeconds;
     const objectRemaining = Math.floor(
@@ -120,7 +196,7 @@ function retainedImageResponse(
         0,
         Math.min(tokenRemaining, objectRemaining, 30 * 60)
     );
-    if (maxAge === 0) return getPlaceholderResponse();
+    if (maxAge === 0) return null;
     return new NextResponse(new Uint8Array(bytes), {
         headers: {
             'Content-Type': 'image/webp',
@@ -139,7 +215,12 @@ function retainedImageResponse(
 function errorResponse(error: string, status: number) {
     return NextResponse.json({ error }, {
         status,
-        headers: { 'Cache-Control': 'private, no-store' },
+        headers: {
+            'Cache-Control': 'private, no-store, max-age=0',
+            'CDN-Cache-Control': 'private, no-store',
+            'Vercel-CDN-Cache-Control': 'private, no-store',
+            Vary: 'Cookie',
+        },
     });
 }
 
@@ -147,7 +228,7 @@ function errorResponse(error: string, status: number) {
  * Instagram CDN 이미지 프록시 API
  * Instagram CDN URL은 지역 기반이라 Vercel 서버에서 직접 접근이 불가능할 수 있음
  * 직접 접근 실패 시 weserv.nl 프록시를 통해 재시도
- * 모든 시도 실패 시 placeholder 이미지 반환
+ * 모든 시도 실패 시 재시도 가능한 비캐시 오류 반환
  */
 export async function GET(request: NextRequest) {
     const searchParams = request.nextUrl.searchParams;
@@ -222,13 +303,27 @@ export async function GET(request: NextRequest) {
             const bytes = await readAnalysisV2ResultImageObject(
                 resolvedResult
             );
-            return retainedImageResponse(
+            const response = retainedImageResponse(
                 bytes,
                 expires,
                 resolvedResult.expiresAt
             );
+            if (response) return response;
+            logImageProxyOutcome({
+                scope: 'result',
+                outcome: 'unavailable',
+                cacheEnabled: false,
+                elapsedMs: 0,
+            });
+            return retryableImageUnavailableResponse();
         } catch {
-            return getPlaceholderResponse();
+            logImageProxyOutcome({
+                scope: 'result',
+                outcome: 'unavailable',
+                cacheEnabled: false,
+                elapsedMs: 0,
+            });
+            return retryableImageUnavailableResponse();
         }
     }
 
@@ -242,62 +337,110 @@ export async function GET(request: NextRequest) {
     const cacheKey = cacheEnabled ? imageProxyCacheKey(authorizedUrl) : null;
 
     try {
-        const direct = await downloadSecureImage(authorizedUrl, {
+        if (cacheKey) {
+            // A cache hit should return before touching the origin. A miss is
+            // bounded so a broken object store cannot consume the full image
+            // delivery budget.
+            const cached = await withTimeout(
+                readImageProxyCacheObject(cacheKey),
+                Math.min(IMAGE_PROXY_CACHE_TIMEOUT_MS, remainingTimeoutMs()),
+            );
+            if (cached && isSafeImagePayload(cached)) {
+                logImageProxyOutcome({
+                    scope: 'generic',
+                    outcome: 'cache_hit',
+                    cacheEnabled: true,
+                    source: 'cache',
+                    elapsedMs: Date.now() - startedAt,
+                });
+                return imageResponse(cached.bytes, cached.contentType, expires, false);
+            }
+        }
+
+        const directTimeoutMs = Math.min(IMAGE_PROXY_DIRECT_TIMEOUT_MS, remainingTimeoutMs());
+        const directPromise: Promise<ImageAttempt> = withTimeoutReject(downloadSecureImage(authorizedUrl, {
             allowedHostSuffixes: INSTAGRAM_MEDIA_HOST_SUFFIXES,
             maxBytes: IMAGE_PROXY_MAX_BYTES,
-            timeoutMs: Math.min(IMAGE_PROXY_DIRECT_TIMEOUT_MS, remainingTimeoutMs()),
+            timeoutMs: directTimeoutMs,
             headers: {
                 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
                 Accept: IMAGE_ACCEPT,
                 Referer: 'https://www.instagram.com/',
             },
-        });
-        if (cacheKey) {
-            // Fire-and-forget: never delays or affects this response. The
-            // helper itself never throws, so this can't produce an
-            // unhandled rejection either.
-            void writeImageProxyCacheObject(cacheKey, direct.bytes, direct.contentType);
+        }), directTimeoutMs)
+            .then(result => ({ source: 'direct' as const, kind: 'success' as const, result }))
+            .catch(error => ({ source: 'direct' as const, kind: 'failure' as const, error }));
+        const attempts: Array<Promise<ImageAttempt>> = [directPromise];
+
+        // Result CDN URLs are private server-side data and never enter this
+        // trusted compatibility proxy branch. Generic progress media gets a
+        // concurrent fallback so a slow origin cannot consume all remaining
+        // response time before the safe proxy has a chance to respond.
+        if (!isResult) {
+            const proxyUrl = `https://images.weserv.nl/?url=${encodeURIComponent(authorizedUrl)}`;
+            const proxyTimeoutMs = remainingTimeoutMs();
+            attempts.push(
+                withTimeoutReject(downloadSecureImage(proxyUrl, {
+                    allowedHostSuffixes: TRUSTED_IMAGE_PROXY_HOST_SUFFIXES,
+                    maxBytes: IMAGE_PROXY_MAX_BYTES,
+                    timeoutMs: proxyTimeoutMs,
+                    headers: { Accept: IMAGE_ACCEPT },
+                }), proxyTimeoutMs)
+                    .then(result => ({ source: 'trusted_proxy' as const, kind: 'success' as const, result }))
+                    .catch(error => ({ source: 'trusted_proxy' as const, kind: 'failure' as const, error })),
+            );
         }
-        return imageResponse(direct.bytes, direct.contentType, expires, isResult);
-    } catch {
-        // A trusted image proxy is a compatibility fallback for CDN-region failures.
-    }
 
-    // The signed CDN URL expired (~48h Instagram signature window) or the
-    // origin is otherwise unreachable: a cached copy of the same image
-    // (keyed by origin+pathname, independent of the expiring signature)
-    // takes priority over the third-party compatibility proxy and the
-    // placeholder.
-    if (cacheKey) {
-        const cached = await withTimeout(
-            readImageProxyCacheObject(cacheKey),
-            Math.min(IMAGE_PROXY_CACHE_TIMEOUT_MS, remainingTimeoutMs()),
-        );
-        if (cached) {
-            return imageResponse(cached.bytes, cached.contentType, expires, false);
+        const first = await Promise.race(attempts);
+        const successful = first.kind === 'success' && isSafeImagePayload(first.result)
+            ? first
+            : (await Promise.all(attempts)).find(result => (
+                result.kind === 'success' && isSafeImagePayload(result.result)
+            ));
+
+        if (successful?.kind === 'success' && isSafeImagePayload(successful.result)) {
+            const source = successful.source;
+            if (cacheKey) {
+                void writeImageProxyCacheObject(
+                    cacheKey,
+                    successful.result.bytes,
+                    successful.result.contentType,
+                );
+            }
+            logImageProxyOutcome({
+                scope: isResult ? 'result' : 'generic',
+                outcome: source === 'direct' ? 'direct_success' : 'proxy_success',
+                cacheEnabled: Boolean(cacheKey),
+                source,
+                elapsedMs: Date.now() - startedAt,
+            });
+            return imageResponse(
+                successful.result.bytes,
+                successful.result.contentType,
+                expires,
+                isResult,
+            );
         }
-    }
 
-    if (Date.now() - startedAt >= IMAGE_PROXY_TOTAL_TIMEOUT_MS) {
-        return getPlaceholderResponse();
-    }
-
-    // Result CDN URLs are private server-side data. Never disclose them to a
-    // third-party compatibility proxy when the direct origin is unavailable.
-    if (isResult) {
-        return getPlaceholderResponse();
-    }
-
-    try {
-        const proxyUrl = `https://images.weserv.nl/?url=${encodeURIComponent(authorizedUrl)}&default=1`;
-        const proxied = await downloadSecureImage(proxyUrl, {
-            allowedHostSuffixes: TRUSTED_IMAGE_PROXY_HOST_SUFFIXES,
-            maxBytes: IMAGE_PROXY_MAX_BYTES,
-            timeoutMs: remainingTimeoutMs(),
-            headers: { Accept: IMAGE_ACCEPT },
+        const failure = first.kind === 'failure'
+            ? first.error
+            : (await Promise.all(attempts)).find(result => result.kind === 'failure')?.error;
+        logImageProxyOutcome({
+            scope: isResult ? 'result' : 'generic',
+            outcome: 'unavailable',
+            cacheEnabled: Boolean(cacheKey),
+            elapsedMs: Date.now() - startedAt,
+            ...(failure ? { error: failure } : {}),
         });
-        return imageResponse(proxied.bytes, proxied.contentType, expires, false);
-    } catch {
-        return getPlaceholderResponse();
+        return retryableImageUnavailableResponse();
+    } catch (error) {
+        logImageProxyOutcome({
+            scope: isResult ? 'result' : 'generic',
+            outcome: 'unavailable',
+            cacheEnabled: Boolean(cacheKey),
+            elapsedMs: Date.now() - startedAt,
+            error,
+        });
+        return retryableImageUnavailableResponse();
     }
 }

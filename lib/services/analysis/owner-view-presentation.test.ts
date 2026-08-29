@@ -76,6 +76,13 @@ describe('owner view presentation behavior', () => {
             .toBe('새로운 판독 단서를 확인하고 있습니다.');
     });
 
+    it('uses generic truthful narration for private-name screening', () => {
+        expect(analysisV2EventCopy('PRIVATE_NAMES_SCREENING'))
+            .toBe('수집한 단서를 정리하고 있습니다.');
+        expect(analysisV2EventCopy('PRIVATE_NAMES_SCREENING'))
+            .not.toBe('비공개 계정의 이름 단서를 확인하고 있습니다.');
+    });
+
     it('bounds a result page to the page size without accumulating prior rows', () => {
         expect(boundedOwnerResultPage(Array.from({ length: 900 }, (_, index) => index)))
             .toHaveLength(50);

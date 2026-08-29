@@ -6,7 +6,7 @@ import { useEffect, useRef, useState } from 'react';
 import { BrandMark, CaseCard, Eyebrow, PrimaryButton } from '@/components/case-ui';
 import { useAuth } from '@/hooks/useAuth';
 import type { EarlybirdOrderStatusDto } from '@/lib/services/earlybird/order-status';
-import { EVENTS, flushAnalytics, trackEvent } from '@/lib/services/analytics';
+import { EVENTS, trackEvent } from '@/lib/services/analytics';
 import {
     availableAnalyticsStorage,
     tryClaimAnalyticsEvent,
@@ -16,6 +16,7 @@ import {
     paymentConfirmationEventKey,
 } from '@/lib/services/earlybird/analytics-state';
 import {
+    createSingleFlightEarlybirdStatusRefresh,
     earlybirdStatusNavigationTarget,
     earlybirdStatusRefreshMode,
     scheduleEarlybirdStatusSnapshotRefresh,
@@ -32,12 +33,66 @@ function DetailRow({ label, value }: { label: string; value: string }) {
     );
 }
 
-const AUTOMATIC_ANALYSIS_COPY =
-    '결제 확인 후 판독이 자동으로 시작됩니다. 진행 화면이 준비되면 바로 연결해드릴게요.';
 const CONCIERGE_ANALYSIS_COPY =
     '판독 결과가 완성되면 2일 이내에 가입하신 이메일로 결과 링크를 보내드릴게요.';
 const SUPPORT_COPY =
     '결제 확인이 지연되고 있어요. 같은 화면이 계속되면 고객센터로 문의해주세요.';
+
+const BRIDGE_TRACKS = [
+    '맞팔·AI 판독',
+    '위험 단서 수집',
+    '위험도·총평 정리',
+] as const;
+
+function AutomaticFulfillmentProgressShell() {
+    return (
+        <div role="status" data-earlybird-progress-bridge>
+            <Eyebrow className="mt-8 justify-center">판독 진행 중</Eyebrow>
+            <div className="relative mt-3.5 h-44 w-44 self-center">
+                <div
+                    className="anim-radar absolute inset-0 rounded-full"
+                    style={{
+                        background:
+                            'conic-gradient(from 0deg, transparent 0deg, rgba(228,19,42,0.30) 46deg, transparent 64deg)',
+                    }}
+                />
+                <div
+                    className="absolute inset-0 rounded-full"
+                    style={{
+                        background: 'var(--color-line)',
+                        WebkitMask: 'radial-gradient(circle, transparent 0 76px, #000 76px)',
+                        mask: 'radial-gradient(circle, transparent 0 76px, #000 76px)',
+                    }}
+                />
+                <div className="absolute inset-[24px] rounded-full border border-line" />
+                <div className="absolute inset-[48px] rounded-full border border-line/70" />
+                <div className="absolute inset-0 flex flex-col items-center justify-center">
+                    <span className="text-[24px] font-bold leading-none tracking-[-0.03em] text-fg">
+                        준비 중
+                    </span>
+                </div>
+            </div>
+            <p className="mt-2.5 text-center text-[11px] text-fg-mute">약 5~10분</p>
+            <p className="mt-3.5 text-center text-[12px] leading-relaxed text-fg-dim" aria-live="polite">
+                판독을 자동으로 준비하고 있습니다.
+            </p>
+            <div className="mt-4 w-full">
+                {BRIDGE_TRACKS.map((label, index) => (
+                    <div
+                        key={label}
+                        className={`flex items-center gap-3 py-2.5 ${
+                            index === BRIDGE_TRACKS.length - 1 ? '' : 'border-b border-line'
+                        }`}
+                    >
+                        <span aria-hidden="true" className="w-0.5 self-stretch bg-line-2" />
+                        <span className="text-[13.5px] text-fg-mute">{label}</span>
+                        <span className="num ml-auto text-[11.5px] font-bold text-fg-mute">대기</span>
+                    </div>
+                ))}
+            </div>
+        </div>
+    );
+}
 
 export function EarlybirdStatus({
     order,
@@ -47,25 +102,47 @@ export function EarlybirdStatus({
     const trackedRef = useRef(new Set<string>());
     const router = useRouter();
     const { user, loading: authLoading } = useAuth();
+    const [ownerOrder, setOwnerOrder] = useState(order);
     const [notifyModalOpen, setNotifyModalOpen] = useState(false);
     const [checkoutRecoveryPending, setCheckoutRecoveryPending] = useState(false);
     const [checkoutRecoveryError, setCheckoutRecoveryError] = useState<string | null>(null);
     const checkoutRecoveryGuardRef = useRef({ inFlight: false });
-    const refreshMode = earlybirdStatusRefreshMode(order);
-    const nextUrl = earlybirdStatusNavigationTarget(order);
-    const isAutomaticFulfillmentBridge = order.deliveryMode === 'automatic'
+    const currentOrder = ownerOrder;
+    const refreshMode = earlybirdStatusRefreshMode(currentOrder);
+    const nextUrl = earlybirdStatusNavigationTarget(currentOrder);
+    const isAutomaticFulfillmentBridge = currentOrder.deliveryMode === 'automatic'
         && Boolean(nextUrl);
-    const isPaidDeliveryPending = order.systemStatus === 'paid'
-        || order.systemStatus === 'analysis_in_progress';
+    const isPaidDeliveryPending = currentOrder.systemStatus === 'paid'
+        || currentOrder.systemStatus === 'analysis_in_progress';
+    const isAutomaticPendingBridge = currentOrder.deliveryMode === 'automatic'
+        && !currentOrder.requiresSupport
+        && isPaidDeliveryPending
+        && !nextUrl;
     const navigationTargetRef = useRef<string | null>(null);
 
     useEffect(() => {
+        setOwnerOrder(order);
+    }, [order]);
+
+    useEffect(() => {
         if (!refreshMode) return;
-        return scheduleEarlybirdStatusSnapshotRefresh(
-            () => router.refresh(),
+        const ownerStatus = createSingleFlightEarlybirdStatusRefresh(
+            currentOrder.planId,
+            setOwnerOrder,
+        );
+        const stopSchedule = scheduleEarlybirdStatusSnapshotRefresh(
+            () => { void ownerStatus.refresh(); },
             refreshMode,
         );
-    }, [refreshMode, router]);
+        // A paid return can land in the narrow admission window before the
+        // first scheduled tick. Read once immediately, then keep the bounded
+        // burst and tail cadence for late materialization.
+        void ownerStatus.refresh();
+        return () => {
+            stopSchedule();
+            ownerStatus.stop();
+        };
+    }, [currentOrder.planId, refreshMode]);
 
     useEffect(() => {
         if (!notifyModalOpen) return;
@@ -80,14 +157,14 @@ export function EarlybirdStatus({
         // event's identity.
         if (authLoading || !user?.id) return;
         const properties = {
-            order_id: order.orderId,
-            plan_id: order.planId,
-            ...(order.actualAmountKrw === null
+            order_id: currentOrder.orderId,
+            plan_id: currentOrder.planId,
+            ...(currentOrder.actualAmountKrw === null
                 ? {}
-                : { amount_krw: order.actualAmountKrw }),
-            status: order.systemStatus,
+                : { amount_krw: currentOrder.actualAmountKrw }),
+            status: currentOrder.systemStatus,
         };
-        const statusKey = earlybirdStatusEventKey(order.orderId, order.systemStatus);
+        const statusKey = earlybirdStatusEventKey(currentOrder.orderId, currentOrder.systemStatus);
         if (!trackedRef.current.has(statusKey)) {
             trackedRef.current.add(statusKey);
             if (tryClaimAnalyticsEvent(availableAnalyticsStorage(), statusKey)) {
@@ -95,43 +172,37 @@ export function EarlybirdStatus({
             }
         }
 
-        const paymentKey = paymentConfirmationEventKey(order.orderId, order.systemStatus);
+        const paymentKey = paymentConfirmationEventKey(currentOrder.orderId, currentOrder.systemStatus);
         if (paymentKey && !trackedRef.current.has(paymentKey)) {
             trackedRef.current.add(paymentKey);
             if (tryClaimAnalyticsEvent(availableAnalyticsStorage(), paymentKey)) {
                 trackEvent(EVENTS.PAYMENT_CONFIRMED_VIEWED, properties);
             }
         }
-    }, [authLoading, order, user?.id]);
+    }, [authLoading, currentOrder, user?.id]);
 
     useEffect(() => {
         if (!nextUrl) return;
         if (navigationTargetRef.current === nextUrl) return;
         navigationTargetRef.current = nextUrl;
-        let active = true;
-        void flushAnalytics().finally(() => {
-            if (active) router.replace(nextUrl);
-        });
-        return () => {
-            active = false;
-        };
+        router.replace(nextUrl);
     }, [nextUrl, router]);
 
     const handleCheckoutRecovery = async () => {
         setCheckoutRecoveryError(null);
         await recoverPendingEarlybirdCheckout(
-            order.preflightId,
-            order.planId,
+            currentOrder.preflightId,
+            currentOrder.planId,
             checkoutRecoveryGuardRef.current,
             {
                 request: fetch,
                 redirectCheckout: nextUrl => {
                     trackEvent(EVENTS.CHECKOUT_REDIRECTED, {
-                        plan_id: order.planId,
-                        preflight_id: order.preflightId,
-                        ...(order.actualAmountKrw === null
+                        plan_id: currentOrder.planId,
+                        preflight_id: currentOrder.preflightId,
+                        ...(currentOrder.actualAmountKrw === null
                             ? {}
-                            : { amount_krw: order.actualAmountKrw }),
+                            : { amount_krw: currentOrder.actualAmountKrw }),
                     });
                     window.location.assign(nextUrl);
                 },
@@ -141,7 +212,7 @@ export function EarlybirdStatus({
         );
     };
 
-    if (order.requiresSupport) {
+    if (currentOrder.requiresSupport) {
         return (
             <CaseCard className="mt-8 p-7 text-center" bracket="var(--color-amber)">
                 <Eyebrow className="justify-center">결제 확인</Eyebrow>
@@ -176,6 +247,10 @@ export function EarlybirdStatus({
         );
     }
 
+    if (isAutomaticPendingBridge) {
+        return <AutomaticFulfillmentProgressShell />;
+    }
+
     if (isPaidDeliveryPending) {
         return (
             <div role="status">
@@ -185,9 +260,7 @@ export function EarlybirdStatus({
                         결제가 완료되었어요
                     </h1>
                     <p className="mt-3 text-[13px] leading-relaxed text-fg-dim">
-                        {order.deliveryMode === 'automatic'
-                            ? AUTOMATIC_ANALYSIS_COPY
-                            : CONCIERGE_ANALYSIS_COPY}
+                        {CONCIERGE_ANALYSIS_COPY}
                     </p>
                 </CaseCard>
             </div>
@@ -198,7 +271,7 @@ export function EarlybirdStatus({
         <>
             <Eyebrow>얼리버드 사전 구매 현황</Eyebrow>
             <h1 className="mt-3 text-[26px] font-extrabold tracking-tight text-fg">
-                {order.displayStatus}
+                {currentOrder.displayStatus}
             </h1>
             <p className="mt-2 text-[13px] leading-relaxed text-fg-dim">
                 위장여사친 판독기를 이용해주셔서 감사합니다.
@@ -208,28 +281,28 @@ export function EarlybirdStatus({
 
             <CaseCard className="mt-8 p-5">
                 <dl data-amp-block>
-                    <DetailRow label="대상 계정" value={`@${order.targetInstagramId}`} />
-                    <DetailRow label="구매 플랜" value={order.planName} />
+                    <DetailRow label="대상 계정" value={`@${currentOrder.targetInstagramId}`} />
+                    <DetailRow label="구매 플랜" value={currentOrder.planName} />
                     <DetailRow
                         label="접수 시각"
-                        value={order.acceptedAt
-                            ? formatKstDateTime(order.acceptedAt)
+                        value={currentOrder.acceptedAt
+                            ? formatKstDateTime(currentOrder.acceptedAt)
                             : '결제 확인 후 표시'}
                     />
-                    <DetailRow label="현재 상태" value={order.displayStatus} />
+                    <DetailRow label="현재 상태" value={currentOrder.displayStatus} />
                 </dl>
             </CaseCard>
 
-            {order.resultUrl && order.systemStatus === 'completed' && nextUrl ? (
+            {currentOrder.resultUrl && currentOrder.systemStatus === 'completed' && nextUrl ? (
                 <Link
-                    href={order.resultUrl}
+                    href={currentOrder.resultUrl}
                     data-amp-block
                     className="mt-5 flex w-full items-center justify-center bg-blood px-5 py-4 text-[14px] font-bold text-white transition-opacity hover:opacity-90"
                 >
                     판독 결과 확인하기
                 </Link>
-            ) : order.systemStatus === 'payment_pending'
-                && order.checkoutRecoverable ? (
+            ) : currentOrder.systemStatus === 'payment_pending'
+                && currentOrder.checkoutRecoverable ? (
                 <>
                     <PrimaryButton
                         className="mt-5"
@@ -255,7 +328,7 @@ export function EarlybirdStatus({
                         이메일 알림 받기
                     </button>
                 </>
-            ) : order.systemStatus === 'cancelled' ? (
+            ) : currentOrder.systemStatus === 'cancelled' ? (
                 <CaseCard className="mt-5 p-4" bracket="var(--color-amber)">
                     <p className="text-[13px] font-bold text-amber" role="status">
                         취소된 주문입니다.

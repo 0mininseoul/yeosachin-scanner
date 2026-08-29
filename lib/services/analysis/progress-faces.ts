@@ -44,25 +44,16 @@ export function signedProgressCandidateMedia(
 
 /**
  * Flattens each candidate's variable-sized media bundle into tile-sized items.
- * A candidate with no usable media still gets one item, so a failed image can
- * retain its width and render the same fallback as a not-yet-loaded tile.
+ * Candidates without usable media contribute no tile. The progress rail only
+ * presents collected media, so an incomplete source read cannot flash a
+ * bordered blank or fabricated avatar tile.
  */
 export function flattenScreenedCandidateMedia(
     candidates: readonly ScreenedCandidate[],
 ): readonly ScreenedCandidateMediaTile[] {
     return candidates.flatMap(candidate => {
         const media = signedProgressCandidateMedia(candidate);
-        if (media.length === 0) {
-            return [{
-                ...(candidate.candidateKey !== undefined
-                    ? { candidateKey: candidate.candidateKey }
-                    : {}),
-                username: candidate.username,
-                occurrence: candidate.occurrence,
-                mediaIndex: 0,
-                imageUrl: null,
-            }] satisfies ScreenedCandidateMediaTile[];
-        }
+        if (media.length === 0) return [];
         return media.map<ScreenedCandidateMediaTile>((imageUrl, mediaIndex) => ({
             ...(candidate.candidateKey !== undefined
                 ? { candidateKey: candidate.candidateKey }
@@ -200,9 +191,7 @@ export function candidateTileKey(
     occurrence: number,
     copyIndex: number,
     mediaIndex: number,
-    _safeSrc: string | undefined,
 ): string {
-    void _safeSrc;
     return `${occurrence}:${copyIndex}:${mediaIndex}`;
 }
 

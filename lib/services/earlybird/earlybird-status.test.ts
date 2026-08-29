@@ -19,6 +19,7 @@ const analyticsMocks = vi.hoisted(() => ({
     flushAnalytics: vi.fn().mockResolvedValue(undefined),
     trackEvent: vi.fn(),
 }));
+const fetchMock = vi.hoisted(() => vi.fn());
 
 vi.mock('next/navigation', () => ({
     useRouter: () => routerMock,
@@ -102,7 +103,7 @@ describe('earlybird support fallback', () => {
 
 describe('earlybird paid delivery notice', () => {
     it.each(['paid', 'analysis_in_progress'] as const)(
-        'explains automatic analysis for %s instead of promising concierge email delivery',
+        'shows the same progress shell for %s while the request is materializing',
         systemStatus => {
             const markup = renderToStaticMarkup(createElement(EarlybirdStatus, {
                 order: {
@@ -115,10 +116,11 @@ describe('earlybird paid delivery notice', () => {
                 },
             }));
 
-            expect(markup).toContain('결제가 완료되었어요');
-            expect(markup).toContain('결제 확인 후 판독이 자동으로 시작됩니다. 진행 화면이 준비되면 바로 연결해드릴게요.');
+            expect(markup).toContain('판독 진행 중');
+            expect(markup).toContain('준비 중');
+            expect(markup).toContain('판독을 자동으로 준비하고 있습니다.');
             expect(markup).not.toContain('2일 이내');
-            expect(markup).not.toContain('판독을 자동으로 시작하고 있어요');
+            expect(markup).not.toContain('결제가 완료되었어요');
             expect(markup).not.toContain('잠시만 기다리면 진행 화면으로 이어집니다');
         }
     );
@@ -186,6 +188,26 @@ describe('earlybird paid delivery notice', () => {
         expect(markup).toContain('판독 결과가 완성되면 2일 이내에 가입하신 이메일로 결과 링크를 보내드릴게요.');
         expect(markup).not.toContain('결제 확인 후 판독이 자동으로 시작됩니다');
     });
+
+    it('shows the analysis progress shell while automatic fulfillment is materializing a request', () => {
+        const markup = renderToStaticMarkup(createElement(EarlybirdStatus, {
+            order: {
+                ...cancelledOrder(),
+                systemStatus: 'paid',
+                displayStatus: '판독 대기',
+                deliveryMode: 'automatic',
+                actualAmountKrw: 990,
+                acceptedAt: '2026-08-30T12:41:11.649881+00:00',
+                progressUrl: null,
+            },
+        }));
+
+            expect(markup).toContain('판독 진행 중');
+            expect(markup).toContain('준비 중');
+            expect(markup).toContain('판독을 자동으로 준비하고 있습니다.');
+            expect(markup).not.toContain('0%');
+            expect(markup).not.toContain('결제가 완료되었어요');
+    });
 });
 
 (globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT: boolean })
@@ -203,6 +225,9 @@ describe('earlybird mounted payment return recovery', () => {
         analyticsMocks.flushAnalytics.mockReset();
         analyticsMocks.flushAnalytics.mockResolvedValue(undefined);
         analyticsMocks.trackEvent.mockReset();
+        fetchMock.mockReset();
+        fetchMock.mockResolvedValue(new Response(null, { status: 404 }));
+        vi.stubGlobal('fetch', fetchMock);
         container = document.createElement('div');
         document.body.appendChild(container);
         root = createRoot(container);
@@ -212,6 +237,7 @@ describe('earlybird mounted payment return recovery', () => {
         act(() => root.unmount());
         container.remove();
         vi.useRealTimers();
+        vi.unstubAllGlobals();
     });
 
     function render(order: EarlybirdOrderStatusDto) {
@@ -232,27 +258,33 @@ describe('earlybird mounted payment return recovery', () => {
         };
     }
 
-    it('keeps polling after the fast burst so a late request materialization resumes automatically', () => {
+    it('keeps polling after the fast burst so a late request materialization resumes automatically', async () => {
         render(automaticPendingOrder());
-
-        act(() => {
-            vi.advanceTimersByTime(60_000);
+        await act(async () => {
+            await Promise.resolve();
         });
-        expect(routerMock.refresh).toHaveBeenCalledTimes(7);
 
-        act(() => {
-            vi.advanceTimersByTime(60_000);
+        await act(async () => {
+            await vi.advanceTimersByTimeAsync(60_000);
         });
-        expect(routerMock.refresh).toHaveBeenCalledTimes(8);
+        expect(fetchMock).toHaveBeenCalledTimes(8);
 
-        act(() => {
-            vi.advanceTimersByTime(31 * 60_000);
+        await act(async () => {
+            await vi.advanceTimersByTimeAsync(60_000);
         });
-        expect(routerMock.refresh).toHaveBeenCalledTimes(39);
+        expect(fetchMock).toHaveBeenCalledTimes(9);
+
+        await act(async () => {
+            await vi.advanceTimersByTimeAsync(31 * 60_000);
+        });
+        expect(fetchMock).toHaveBeenCalledTimes(40);
     });
 
     it('refreshes once when the browser returns from the background', async () => {
         render(automaticPendingOrder());
+        await act(async () => {
+            await Promise.resolve();
+        });
 
         Object.defineProperty(document, 'visibilityState', {
             configurable: true,
@@ -263,31 +295,39 @@ describe('earlybird mounted payment return recovery', () => {
             window.dispatchEvent(new Event('focus'));
             window.dispatchEvent(new Event('pageshow'));
         });
-        expect(routerMock.refresh).toHaveBeenCalledTimes(1);
+        expect(fetchMock).toHaveBeenCalledTimes(2);
 
         await act(async () => {
             await vi.advanceTimersByTimeAsync(300);
         });
         act(() => window.dispatchEvent(new Event('focus')));
-        expect(routerMock.refresh).toHaveBeenCalledTimes(2);
+        expect(fetchMock).toHaveBeenCalledTimes(3);
     });
 
-    it('does not let a lifecycle cooldown suppress a scheduled refresh', () => {
-        routerMock.refresh.mockReturnValue(new Promise<void>(() => {}));
+    it('does not let a lifecycle cooldown suppress a scheduled refresh', async () => {
         render(automaticPendingOrder());
+        await act(async () => {
+            await Promise.resolve();
+        });
 
-        act(() => {
+        await act(async () => {
             vi.advanceTimersByTime(900);
             window.dispatchEvent(new Event('focus'));
+            await Promise.resolve();
         });
-        expect(routerMock.refresh).toHaveBeenCalledTimes(1);
+        expect(fetchMock).toHaveBeenCalledTimes(2);
 
-        act(() => vi.advanceTimersByTime(100));
-        expect(routerMock.refresh).toHaveBeenCalledTimes(2);
+        await act(async () => {
+            await vi.advanceTimersByTimeAsync(100);
+        });
+        expect(fetchMock).toHaveBeenCalledTimes(3);
     });
 
     it('coalesces lifecycle refreshes across separate tasks and cleans up after unmount', async () => {
         render(automaticPendingOrder());
+        await act(async () => {
+            await Promise.resolve();
+        });
 
         Object.defineProperty(document, 'visibilityState', {
             configurable: true,
@@ -302,18 +342,18 @@ describe('earlybird mounted payment return recovery', () => {
             await vi.advanceTimersByTimeAsync(50);
             window.dispatchEvent(new Event('pageshow'));
         });
-        expect(routerMock.refresh).toHaveBeenCalledTimes(1);
+        expect(fetchMock).toHaveBeenCalledTimes(2);
 
         await act(async () => {
             await vi.advanceTimersByTimeAsync(300);
             window.dispatchEvent(new Event('focus'));
         });
-        expect(routerMock.refresh).toHaveBeenCalledTimes(2);
+        expect(fetchMock).toHaveBeenCalledTimes(3);
 
         await act(async () => {
             await vi.advanceTimersByTimeAsync(600);
         });
-        expect(routerMock.refresh).toHaveBeenCalledTimes(3);
+        expect(fetchMock).toHaveBeenCalledTimes(4);
 
         act(() => root.unmount());
         await act(async () => {
@@ -322,7 +362,7 @@ describe('earlybird mounted payment return recovery', () => {
             window.dispatchEvent(new Event('focus'));
             window.dispatchEvent(new Event('pageshow'));
         });
-        expect(routerMock.refresh).toHaveBeenCalledTimes(3);
+        expect(fetchMock).toHaveBeenCalledTimes(4);
     });
 
     it('emits status and payment analytics at most once across order rerenders', () => {
@@ -348,15 +388,31 @@ describe('earlybird mounted payment return recovery', () => {
         );
     });
 
+    it('mounts the analysis progress bridge before a request id exists', async () => {
+        render(automaticPendingOrder({ systemStatus: 'paid' }));
+
+        expect(container.querySelector('[data-earlybird-progress-bridge]')).toBeTruthy();
+        expect(container.textContent).toContain('준비 중');
+        expect(container.textContent).not.toContain('0%');
+
+        await act(async () => {
+            await vi.advanceTimersByTimeAsync(2_999);
+        });
+        expect(container.querySelector('[data-earlybird-progress-bridge]')).toBeTruthy();
+    });
+
     it('stops polling and navigates once when the progress path materializes', async () => {
         const requestId = '123e4567-e89b-42d3-a456-426614174000';
         const pendingOrder = automaticPendingOrder();
         render(pendingOrder);
-
-        act(() => {
-            vi.advanceTimersByTime(120_000);
+        await act(async () => {
+            await Promise.resolve();
         });
-        expect(routerMock.refresh).toHaveBeenCalledTimes(8);
+
+        await act(async () => {
+            await vi.advanceTimersByTimeAsync(120_000);
+        });
+        expect(fetchMock).toHaveBeenCalledTimes(9);
 
         render({
             ...pendingOrder,
@@ -368,13 +424,13 @@ describe('earlybird mounted payment return recovery', () => {
         expect(routerMock.replace).toHaveBeenCalledTimes(1);
         expect(routerMock.replace).toHaveBeenCalledWith(`/progress/${requestId}`);
 
-        act(() => {
-            vi.advanceTimersByTime(600_000);
+        await act(async () => {
+            await vi.advanceTimersByTimeAsync(600_000);
             document.dispatchEvent(new Event('visibilitychange'));
             window.dispatchEvent(new Event('focus'));
             window.dispatchEvent(new Event('pageshow'));
         });
-        expect(routerMock.refresh).toHaveBeenCalledTimes(8);
+        expect(fetchMock).toHaveBeenCalledTimes(9);
 
         render({
             ...pendingOrder,
@@ -386,36 +442,113 @@ describe('earlybird mounted payment return recovery', () => {
         expect(routerMock.replace).toHaveBeenCalledTimes(1);
     });
 
-    it('removes polling and lifecycle listeners when support or another no-refresh state arrives', () => {
+    it('removes polling and lifecycle listeners when support or another no-refresh state arrives', async () => {
         render(automaticPendingOrder());
-        act(() => vi.advanceTimersByTime(1_000));
-        expect(routerMock.refresh).toHaveBeenCalledTimes(1);
+        await act(async () => {
+            await Promise.resolve();
+            await vi.advanceTimersByTimeAsync(1_000);
+        });
+        expect(fetchMock).toHaveBeenCalledTimes(2);
 
         render({
             ...automaticPendingOrder(),
             requiresSupport: true,
             deliveryMode: 'support',
         });
-        act(() => {
-            vi.advanceTimersByTime(600_000);
+        await act(async () => {
+            await vi.advanceTimersByTimeAsync(600_000);
             document.dispatchEvent(new Event('visibilitychange'));
             window.dispatchEvent(new Event('focus'));
             window.dispatchEvent(new Event('pageshow'));
         });
-        expect(routerMock.refresh).toHaveBeenCalledTimes(1);
+        expect(fetchMock).toHaveBeenCalledTimes(2);
 
         render(automaticPendingOrder());
-        act(() => vi.advanceTimersByTime(1_000));
-        expect(routerMock.refresh).toHaveBeenCalledTimes(2);
+        await act(async () => {
+            await Promise.resolve();
+            await vi.advanceTimersByTimeAsync(1_000);
+        });
+        expect(fetchMock).toHaveBeenCalledTimes(4);
 
         render({
             ...automaticPendingOrder(),
             deliveryMode: 'concierge',
         });
-        act(() => {
-            vi.advanceTimersByTime(600_000);
+        await act(async () => {
+            await vi.advanceTimersByTimeAsync(600_000);
             window.dispatchEvent(new Event('focus'));
         });
-        expect(routerMock.refresh).toHaveBeenCalledTimes(2);
+        expect(fetchMock).toHaveBeenCalledTimes(4);
+    });
+
+    it('keeps owner status refresh single-flight while a return snapshot is pending', async () => {
+        let resolveRequest: ((response: Response) => void) | undefined;
+        fetchMock.mockImplementation(() => new Promise<Response>(resolve => {
+            resolveRequest = resolve;
+        }));
+
+        render(automaticPendingOrder());
+        act(() => vi.advanceTimersByTime(60_000));
+
+        expect(fetchMock).toHaveBeenCalledOnce();
+        expect(fetchMock.mock.calls[0]?.[0]).toBe('/api/earlybird/orders/latest?plan=standard');
+
+        await act(async () => {
+            resolveRequest?.(new Response(JSON.stringify({
+                order: automaticPendingOrder(),
+            }), { status: 200 }));
+            await Promise.resolve();
+        });
+    });
+
+    it('replaces the pending bridge with the owner progress path once materialized', async () => {
+        const requestId = '123e4567-e89b-42d3-a456-426614174000';
+        const pending = automaticPendingOrder();
+        const materialized = automaticPendingOrder({
+            progressUrl: `/progress/${requestId}`,
+        });
+        fetchMock.mockReset();
+        fetchMock
+            .mockResolvedValueOnce(new Response(JSON.stringify({ order: pending }), { status: 200 }))
+            .mockResolvedValue(new Response(JSON.stringify({ order: materialized }), { status: 200 }));
+
+        render(pending);
+        expect(container.querySelector('[data-earlybird-progress-bridge]')).toBeTruthy();
+        await act(async () => {
+            await Promise.resolve();
+            await vi.advanceTimersByTimeAsync(1_000);
+        });
+
+        expect(fetchMock).toHaveBeenCalledTimes(2);
+        expect(routerMock.replace).toHaveBeenCalledOnce();
+        expect(routerMock.replace).toHaveBeenCalledWith(`/progress/${requestId}`);
+        expect(container.querySelector('[data-earlybird-progress-bridge]')).toBeNull();
+
+        await act(async () => {
+            await vi.advanceTimersByTimeAsync(600_000);
+        });
+        expect(routerMock.replace).toHaveBeenCalledOnce();
+    });
+
+    it('navigates as soon as a request-scoped progress URL arrives without waiting for analytics', async () => {
+        const requestId = '123e4567-e89b-42d3-a456-426614174000';
+        analyticsMocks.flushAnalytics.mockReturnValue(new Promise<void>(() => {}));
+        render(automaticPendingOrder());
+
+        render(automaticPendingOrder({
+            progressUrl: `/progress/${requestId}`,
+        }));
+
+        await act(async () => {
+            await Promise.resolve();
+        });
+        expect(routerMock.replace).toHaveBeenCalledOnce();
+        expect(routerMock.replace).toHaveBeenCalledWith(`/progress/${requestId}`);
+        expect(analyticsMocks.flushAnalytics).not.toHaveBeenCalled();
+
+        render(automaticPendingOrder({
+            progressUrl: `/progress/${requestId}`,
+        }));
+        expect(routerMock.replace).toHaveBeenCalledOnce();
     });
 });

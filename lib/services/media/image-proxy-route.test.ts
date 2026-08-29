@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { NextRequest } from 'next/server';
 
 const mocks = vi.hoisted(() => ({
@@ -64,6 +64,10 @@ function signedResultRequest() {
 }
 
 describe('image proxy route authorization', () => {
+    afterEach(() => {
+        vi.useRealTimers();
+    });
+
     beforeEach(() => {
         vi.clearAllMocks();
         process.env.IMAGE_PROXY_SIGNING_SECRET = SECRET;
@@ -120,28 +124,36 @@ describe('image proxy route authorization', () => {
     });
 
     it('downloads a signed stored URL with strict size, timeout, and cache limits', async () => {
-        const response = await GET(signedRequest());
+        const info = vi.spyOn(console, 'info').mockImplementation(() => undefined);
+        try {
+            const response = await GET(signedRequest());
 
-        expect(response.status).toBe(200);
-        expect(response.headers.get('content-type')).toBe('image/jpeg');
-        expect(response.headers.get('cross-origin-resource-policy')).toBe('same-origin');
-        const cacheControl = response.headers.get('cache-control') ?? '';
-        const cdnCacheControl = response.headers.get('vercel-cdn-cache-control') ?? '';
-        const browserMaxAge = Number(cacheControl.match(/max-age=(\d+)/)?.[1]);
-        const cdnMaxAge = Number(cdnCacheControl.match(/s-maxage=(\d+)/)?.[1]);
-        expect(browserMaxAge).toBeGreaterThan(0);
-        expect(browserMaxAge).toBeLessThanOrEqual(30 * 60);
-        expect(cdnMaxAge).toBe(browserMaxAge);
-        expect(cacheControl).not.toContain('stale-while-revalidate');
-        expect(cdnCacheControl).not.toContain('stale-while-revalidate');
-        expect(mocks.downloadSecureImage).toHaveBeenCalledOnce();
-        const [downloadUrl, options] = mocks.downloadSecureImage.mock.calls[0];
-        expect(downloadUrl).toBe('https://cdninstagram.com/photo.jpg?oe=abc');
-        expect(options).toEqual(expect.objectContaining({
-            maxBytes: 3 * 1024 * 1024,
-        }));
-        expect(options.timeoutMs).toBeGreaterThan(0);
-        expect(options.timeoutMs).toBeLessThanOrEqual(4_000);
+            expect(response.status).toBe(200);
+            expect(response.headers.get('content-type')).toBe('image/jpeg');
+            expect(response.headers.get('cross-origin-resource-policy')).toBe('same-origin');
+            const cacheControl = response.headers.get('cache-control') ?? '';
+            const cdnCacheControl = response.headers.get('vercel-cdn-cache-control') ?? '';
+            const browserMaxAge = Number(cacheControl.match(/max-age=(\d+)/)?.[1]);
+            const cdnMaxAge = Number(cdnCacheControl.match(/s-maxage=(\d+)/)?.[1]);
+            expect(browserMaxAge).toBeGreaterThan(0);
+            expect(browserMaxAge).toBeLessThanOrEqual(30 * 60);
+            expect(cdnMaxAge).toBe(browserMaxAge);
+            expect(cacheControl).not.toContain('stale-while-revalidate');
+            expect(cdnCacheControl).not.toContain('stale-while-revalidate');
+            expect(mocks.downloadSecureImage).toHaveBeenCalled();
+            const [downloadUrl, options] = mocks.downloadSecureImage.mock.calls[0];
+            expect(downloadUrl).toBe('https://cdninstagram.com/photo.jpg?oe=abc');
+            expect(options).toEqual(expect.objectContaining({
+                maxBytes: 3 * 1024 * 1024,
+            }));
+            expect(options.timeoutMs).toBeGreaterThan(0);
+            expect(options.timeoutMs).toBeLessThanOrEqual(4_000);
+            expect(info.mock.calls.some(([, details]) => (
+                (details as { source?: string } | undefined)?.source === 'direct'
+            ))).toBe(true);
+        } finally {
+            info.mockRestore();
+        }
     });
 
     it('resolves a compact result locator without exposing the stored CDN URL', async () => {
@@ -193,8 +205,9 @@ describe('image proxy route authorization', () => {
 
         const response = await GET(signedResultRequest());
 
-        expect(response.status).toBe(200);
-        expect(response.headers.get('content-type')).toBe('image/svg+xml');
+        expect(response.status).toBe(503);
+        expect(response.headers.get('content-type')).toContain('application/json');
+        expect(response.headers.get('cache-control')).toContain('no-store');
         expect(mocks.downloadSecureImage).toHaveBeenCalledOnce();
         expect(mocks.downloadSecureImage.mock.calls[0]?.[0])
             .toBe('https://cdninstagram.com/result-photo.jpg?oe=abc');
@@ -223,7 +236,7 @@ describe('image proxy route authorization', () => {
         expect(mocks.downloadSecureImage).not.toHaveBeenCalled();
     });
 
-    it('returns a private placeholder after an R2 read failure without raw fallback', async () => {
+    it('returns a retryable private error after an R2 read failure without raw fallback', async () => {
         mocks.resolveResultImage.mockResolvedValueOnce({
             source: 'r2',
             objectKey:
@@ -238,13 +251,15 @@ describe('image proxy route authorization', () => {
 
         const response = await GET(signedResultRequest());
 
-        expect(response.status).toBe(200);
+        expect(response.status).toBe(503);
         expect(response.headers.get('content-type'))
-            .toBe('image/svg+xml');
+            .toContain('application/json');
         expect(mocks.downloadSecureImage).not.toHaveBeenCalled();
     });
 
     it('retains the trusted compatibility fallback for generic signed images', async () => {
+        const info = vi.spyOn(console, 'info').mockImplementation(() => undefined);
+        const warning = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
         mocks.downloadSecureImage
             .mockRejectedValueOnce(new Error('origin unavailable'))
             .mockResolvedValueOnce({
@@ -253,13 +268,62 @@ describe('image proxy route authorization', () => {
                 finalUrl: 'https://images.weserv.nl/proxied.jpg',
             });
 
-        const response = await GET(signedRequest());
+        try {
+            const response = await GET(signedRequest());
+
+            expect(response.status).toBe(200);
+            expect(mocks.createClient).not.toHaveBeenCalled();
+            expect(mocks.downloadSecureImage).toHaveBeenCalledTimes(2);
+            expect(mocks.downloadSecureImage.mock.calls[1]?.[0])
+                .toContain('https://images.weserv.nl/?url=');
+            const trustedProxyUrl = new URL(mocks.downloadSecureImage.mock.calls[1]?.[0]);
+            expect(trustedProxyUrl.searchParams.has('default')).toBe(false);
+            expect(info.mock.calls.some(([, details]) => (
+                (details as { source?: string } | undefined)?.source === 'trusted_proxy'
+            ))).toBe(true);
+            expect(warning).not.toHaveBeenCalled();
+        } finally {
+            info.mockRestore();
+            warning.mockRestore();
+        }
+    });
+
+    it('recovers through the trusted proxy after the direct source times out', async () => {
+        vi.useFakeTimers();
+        mocks.downloadSecureImage.mockImplementation((url: string) => {
+            if (url.startsWith('https://images.weserv.nl/')) {
+                return new Promise(resolve => {
+                    setTimeout(() => resolve({
+                        bytes: Buffer.from([4, 5, 6]),
+                        contentType: 'image/jpeg',
+                        finalUrl: 'https://images.weserv.nl/proxied.jpg',
+                    }), 4_500);
+                });
+            }
+            return new Promise(() => undefined);
+        });
+
+        const responsePromise = GET(signedRequest());
+        await vi.advanceTimersByTimeAsync(4_500);
+        const response = await responsePromise;
 
         expect(response.status).toBe(200);
-        expect(mocks.createClient).not.toHaveBeenCalled();
+        expect(response.headers.get('content-type')).toBe('image/jpeg');
         expect(mocks.downloadSecureImage).toHaveBeenCalledTimes(2);
-        expect(mocks.downloadSecureImage.mock.calls[1]?.[0])
-            .toContain('https://images.weserv.nl/?url=');
+    });
+
+    it('rejects SVG payloads instead of treating placeholder art as a successful image', async () => {
+        mocks.downloadSecureImage.mockResolvedValue({
+            bytes: Buffer.from('<svg xmlns="http://www.w3.org/2000/svg" />'),
+            contentType: 'image/svg+xml',
+            finalUrl: 'https://images.weserv.nl/placeholder.svg',
+        });
+
+        const response = await GET(signedRequest());
+
+        expect(response.status).toBe(503);
+        expect(response.headers.get('content-type')).toContain('application/json');
+        expect(response.headers.get('cache-control')).toContain('no-store');
     });
 });
 
@@ -288,8 +352,8 @@ describe('image proxy R2 cache (CONCIERGE_IMAGE_PROXY_CACHE_ENABLED)', () => {
 
         const response = await GET(signedRequest());
 
-        expect(response.status).toBe(200);
-        expect(response.headers.get('content-type')).toBe('image/svg+xml');
+        expect(response.status).toBe(503);
+        expect(response.headers.get('content-type')).toContain('application/json');
         expect(mocks.readImageProxyCacheObject).not.toHaveBeenCalled();
         expect(mocks.writeImageProxyCacheObject).not.toHaveBeenCalled();
     });
@@ -342,12 +406,11 @@ describe('image proxy R2 cache (CONCIERGE_IMAGE_PROXY_CACHE_ENABLED)', () => {
         expect(response.status).toBe(200);
         expect(response.headers.get('content-type')).toBe('image/webp');
         expect(body).toEqual(Buffer.from([9, 9, 9]));
-        // Cache hit takes priority - never falls through to the third-party
-        // compatibility proxy.
-        expect(mocks.downloadSecureImage).toHaveBeenCalledOnce();
+        // Cache hit takes priority - never touches either remote source.
+        expect(mocks.downloadSecureImage).not.toHaveBeenCalled();
     });
 
-    it('on: falls back to the existing weserv/placeholder chain on a cache miss, unchanged', async () => {
+    it('on: falls back to the trusted proxy chain on a cache miss', async () => {
         process.env.CONCIERGE_IMAGE_PROXY_CACHE_ENABLED = 'true';
         mocks.downloadSecureImage
             .mockRejectedValueOnce(new Error('403 expired signature'))
@@ -381,5 +444,76 @@ describe('image proxy R2 cache (CONCIERGE_IMAGE_PROXY_CACHE_ENABLED)', () => {
         expect(response.status).toBe(200);
         expect(mocks.readImageProxyCacheObject).not.toHaveBeenCalled();
         expect(mocks.writeImageProxyCacheObject).not.toHaveBeenCalled();
+    });
+
+    it('starts with a bounded cache read before the generic origin attempt', async () => {
+        process.env.CONCIERGE_IMAGE_PROXY_CACHE_ENABLED = 'true';
+        const order: string[] = [];
+        mocks.readImageProxyCacheObject.mockImplementation(async () => {
+            order.push('cache');
+            return null;
+        });
+        mocks.downloadSecureImage.mockImplementation(async () => {
+            order.push('direct');
+            return {
+                bytes: Buffer.from([1, 2, 3]),
+                contentType: 'image/jpeg',
+                finalUrl: 'https://cdninstagram.com/photo.jpg?oe=abc',
+            };
+        });
+
+        await expect(GET(signedRequest())).resolves.toMatchObject({ status: 200 });
+        expect(order[0]).toBe('cache');
+    });
+
+    it('caches a successful trusted-proxy response and leaves unavailability retryable', async () => {
+        process.env.CONCIERGE_IMAGE_PROXY_CACHE_ENABLED = 'true';
+        mocks.downloadSecureImage
+            .mockRejectedValueOnce(new Error('origin timed out'))
+            .mockResolvedValueOnce({
+                bytes: Buffer.from([4, 5, 6]),
+                contentType: 'image/jpeg',
+                finalUrl: 'https://images.weserv.nl/proxied.jpg',
+            });
+        mocks.readImageProxyCacheObject.mockResolvedValue(null);
+
+        const response = await GET(signedRequest());
+        await new Promise(resolve => setTimeout(resolve, 0));
+
+        expect(response.status).toBe(200);
+        expect(response.headers.get('content-type')).toBe('image/jpeg');
+        expect(mocks.writeImageProxyCacheObject).toHaveBeenCalledOnce();
+
+        mocks.downloadSecureImage.mockRejectedValue(new Error('origin timed out'));
+        mocks.readImageProxyCacheObject.mockResolvedValue(null);
+        const unavailable = await GET(signedRequest());
+        const body = await unavailable.json();
+
+        expect(unavailable.status).toBe(503);
+        expect(unavailable.headers.get('cache-control')).toContain('no-store');
+        expect(body).toEqual(expect.objectContaining({
+            code: 'IMAGE_UNAVAILABLE',
+            retryable: true,
+        }));
+        expect(unavailable.headers.get('content-type')).toContain('application/json');
+    });
+
+    it('emits URL-free structured diagnostics for a generic image outage', async () => {
+        process.env.CONCIERGE_IMAGE_PROXY_CACHE_ENABLED = 'true';
+        mocks.downloadSecureImage.mockRejectedValue(new Error(
+            'https://cdninstagram.com/secret.jpg?signature=private',
+        ));
+        mocks.readImageProxyCacheObject.mockResolvedValue(null);
+        const warning = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+
+        try {
+            const response = await GET(signedRequest());
+            expect(response.status).toBe(503);
+            expect(warning).toHaveBeenCalled();
+            expect(JSON.stringify(warning.mock.calls)).not.toContain('cdninstagram.com');
+            expect(JSON.stringify(warning.mock.calls)).not.toContain('signature=private');
+        } finally {
+            warning.mockRestore();
+        }
     });
 });

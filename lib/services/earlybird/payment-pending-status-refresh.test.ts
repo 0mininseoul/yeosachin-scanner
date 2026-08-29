@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
+    createSingleFlightEarlybirdStatusRefresh,
     earlybirdStatusRefreshMode,
     scheduleEarlybirdStatusSnapshotRefresh,
     shouldAutomaticallyRedirectEarlybirdStatus,
@@ -9,6 +10,35 @@ import {
 describe('earlybird payment-pending status refresh', () => {
     afterEach(() => {
         vi.useRealTimers();
+    });
+
+    it('coalesces overlapping owner status reads and never mutates fulfillment', async () => {
+        let resolveRequest: ((response: Response) => void) | undefined;
+        const request = vi.fn<(
+            input: RequestInfo | URL,
+            init?: RequestInit,
+        ) => Promise<Response>>(() => new Promise<Response>(resolve => {
+            resolveRequest = resolve;
+        }));
+        const onSnapshot = vi.fn();
+        const refresh = createSingleFlightEarlybirdStatusRefresh(
+            'standard',
+            onSnapshot,
+            request,
+        );
+
+        const first = refresh.refresh();
+        const second = refresh.refresh();
+        expect(second).toBe(first);
+        expect(request).toHaveBeenCalledOnce();
+        expect(request.mock.calls[0]?.[0]).toBe('/api/earlybird/orders/latest?plan=standard');
+        expect(request.mock.calls[0]?.[1]).toEqual(expect.objectContaining({ cache: 'no-store' }));
+
+        resolveRequest?.(new Response(JSON.stringify({ order: null }), { status: 200 }));
+        await first;
+        expect(onSnapshot).not.toHaveBeenCalled();
+        refresh.stop();
+        expect(request.mock.calls[0]?.[1]).not.toEqual(expect.objectContaining({ method: 'POST' }));
     });
 
     it('refreshes a pending payment through the full burst', () => {

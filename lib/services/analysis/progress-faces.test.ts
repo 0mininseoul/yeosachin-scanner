@@ -303,7 +303,7 @@ describe('screened candidate accumulation', () => {
         expect(list.at(-1)?.occurrence).toBe(MAX_SCREENED_CANDIDATES + 1);
     });
 
-    it('keeps a profile fallback before feed images when the profile image is absent', () => {
+    it('keeps feed images when the profile image is absent', () => {
         const list = appendScreenedCandidate([], {
             maskedUsername: 'a***',
             imageUrl: null,
@@ -322,7 +322,7 @@ describe('screened candidate accumulation', () => {
         expect(appendScreenedCandidate(seeded, null)).toBe(seeded);
     });
 
-    it('keeps a no-media candidate so the renderer can use its profile fallback', () => {
+    it('keeps a no-media candidate in history until richer media arrives', () => {
         const list = appendScreenedCandidate([], { maskedUsername: 'a***', imageUrl: null });
         expect(list).toEqual([{
             username: 'a***',
@@ -373,7 +373,7 @@ describe('screened candidate presentation keys and drift', () => {
         expect(merged[0]?.feedImageUrls).toEqual(['/api/image-proxy?token=old-feed']);
     });
 
-    it('flattens variable-length candidate media into a stable pool with fallbacks', () => {
+    it('flattens variable-length candidate media into a stable pool of real images', () => {
         expect(flattenScreenedCandidateMedia([
             {
                 candidateKey: 'a'.repeat(64),
@@ -404,13 +404,6 @@ describe('screened candidate presentation keys and drift', () => {
                 mediaIndex: 1,
                 imageUrl: '/api/image-proxy?token=feed-a',
             },
-            {
-                candidateKey: 'b'.repeat(64),
-                username: 'b***',
-                occurrence: 5,
-                mediaIndex: 0,
-                imageUrl: null,
-            },
         ]);
     });
 
@@ -423,11 +416,11 @@ describe('screened candidate presentation keys and drift', () => {
     });
 
     it('keeps a tile key stable when its signed image source is refreshed', () => {
-        const oldKey = candidateTileKey(7, 1, 0, '/api/image-proxy?token=old');
-        const newKey = candidateTileKey(7, 1, 0, '/api/image-proxy?token=new');
+        const oldKey = candidateTileKey(7, 1, 0);
+        const newKey = candidateTileKey(7, 1, 0);
 
         expect(newKey).toBe(oldKey);
-        expect(candidateTileKey(7, 1, 0, '/api/image-proxy?token=old')).toBe(oldKey);
+        expect(candidateTileKey(7, 1, 0)).toBe(oldKey);
     });
 
     it('preserves survivor object identity when the same newest history is merged repeatedly', () => {

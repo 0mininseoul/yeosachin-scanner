@@ -12,6 +12,102 @@ type StatusRefreshOrder = Pick<
     'systemStatus' | 'requiresSupport' | 'deliveryMode' | 'progressUrl' | 'resultUrl'
 >;
 
+const OWNER_STATUS_SYSTEM_STATUSES = new Set([
+    'payment_pending',
+    'payment_failed',
+    'paid',
+    'analysis_in_progress',
+    'completed',
+    'overflow_refund_required',
+    'cancelled',
+    'refund_pending',
+    'refunded',
+]);
+const OWNER_STATUS_DELIVERY_MODES = new Set(['automatic', 'concierge', 'support']);
+
+type OwnerStatusSnapshotHandler = (order: EarlybirdOrderStatusDto) => void;
+type OwnerStatusRequest = (
+    input: RequestInfo | URL,
+    init?: RequestInit,
+) => Promise<Response>;
+
+function isOwnerStatusSnapshot(value: unknown): value is EarlybirdOrderStatusDto {
+    if (typeof value !== 'object' || value === null) return false;
+    const order = value as Partial<EarlybirdOrderStatusDto>;
+    return typeof order.orderId === 'string'
+        && typeof order.preflightId === 'string'
+        && typeof order.targetInstagramId === 'string'
+        && (order.planId === 'basic' || order.planId === 'standard')
+        && (order.planName === 'Basic' || order.planName === 'Standard')
+        && (order.actualAmountKrw === null || typeof order.actualAmountKrw === 'number')
+        && (order.acceptedAt === null || typeof order.acceptedAt === 'string')
+        && (order.dueAt === null || typeof order.dueAt === 'string')
+        && (order.planSequence === null || typeof order.planSequence === 'number')
+        && typeof order.systemStatus === 'string'
+        && OWNER_STATUS_SYSTEM_STATUSES.has(order.systemStatus)
+        && typeof order.displayStatus === 'string'
+        && typeof order.requiresSupport === 'boolean'
+        && typeof order.deliveryMode === 'string'
+        && OWNER_STATUS_DELIVERY_MODES.has(order.deliveryMode)
+        && typeof order.checkoutRecoverable === 'boolean'
+        && (order.progressUrl === null || typeof order.progressUrl === 'string')
+        && (order.resultUrl === null || typeof order.resultUrl === 'string');
+}
+
+export interface SingleFlightEarlybirdStatusRefresh {
+    refresh: () => Promise<void>;
+    stop: () => void;
+}
+
+/**
+ * Polls the owner-scoped order endpoint without allowing scheduled and
+ * lifecycle triggers to overlap. The endpoint is read-only; a response only
+ * replaces the local DTO and never starts or mutates fulfillment.
+ */
+export function createSingleFlightEarlybirdStatusRefresh(
+    planId: 'basic' | 'standard',
+    onSnapshot: OwnerStatusSnapshotHandler,
+    request: OwnerStatusRequest = (input, init) => fetch(input, init),
+): SingleFlightEarlybirdStatusRefresh {
+    let stopped = false;
+    let controller: AbortController | null = null;
+    let inFlight: Promise<void> | null = null;
+
+    const refresh = (): Promise<void> => {
+        if (stopped) return Promise.resolve();
+        if (inFlight) return inFlight;
+
+        const requestController = new AbortController();
+        controller = requestController;
+        const promise = request(
+            `/api/earlybird/orders/latest?plan=${encodeURIComponent(planId)}`,
+            { cache: 'no-store', signal: requestController.signal },
+        ).then(async response => {
+            if (!response.ok) return;
+            const payload = await response.json() as { order?: unknown };
+            if (stopped || requestController.signal.aborted) return;
+            if (isOwnerStatusSnapshot(payload.order)) onSnapshot(payload.order);
+        }).catch(() => {
+            // Preserve the current truthful snapshot on transient read errors;
+            // the bounded scheduler will try again.
+        }).finally(() => {
+            if (inFlight === promise) inFlight = null;
+            if (controller === requestController) controller = null;
+        });
+        inFlight = promise;
+        return promise;
+    };
+
+    const stop = () => {
+        stopped = true;
+        controller?.abort();
+        controller = null;
+        inFlight = null;
+    };
+
+    return { refresh, stop };
+}
+
 const REQUEST_ID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
 function validatedOwnerPath(value: string | null, kind: 'progress' | 'result'): string | null {
