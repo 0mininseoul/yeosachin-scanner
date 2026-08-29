@@ -494,6 +494,104 @@ describe('PrecheckoutImmersive', () => {
         expect(container.textContent).toContain('@target');
     });
 
+    it('lets an in-flight complete read win at the visible deadline before fallback is latched', async () => {
+        let resolveFetch!: (response: Response) => void;
+        const fetchMock = vi.fn().mockImplementation(() => new Promise<Response>(resolve => {
+            resolveFetch = resolve;
+        }));
+        vi.stubGlobal('fetch', fetchMock);
+        const staleSubmittedAtMs = Date.parse(SUBMITTED_AT) - 300_000;
+
+        await act(async () => {
+            root.render(createElement(PrecheckoutImmersive, {
+                preflightId: PREFLIGHT_ID,
+                claimToken: null,
+                submittedAtMs: staleSubmittedAtMs,
+                targetUsername: 'target',
+                onGoToPlans: vi.fn(),
+            }));
+        });
+        await settleUi();
+        expect(fetchMock).toHaveBeenCalledOnce();
+
+        await advance(44_000);
+        expect(container.querySelector('[data-precheckout-fallback]')).toBeNull();
+        expect(analyticsMocks.trackPrecheckoutEvent).not.toHaveBeenCalledWith(
+            'precheckout_blite_fallback_selected', PREFLIGHT_ID, expect.anything(),
+        );
+
+        await act(async () => {
+            resolveFetch(jsonResponse(completeStatus()));
+        });
+        await settleUi();
+
+        expect(container.querySelector('[data-precheckout-fallback]')).toBeNull();
+        expect(container.querySelectorAll('[data-precheckout-result-card]')).toHaveLength(4);
+        expect(analyticsMocks.trackPrecheckoutEvent).not.toHaveBeenCalledWith(
+            'precheckout_blite_fallback_selected', PREFLIGHT_ID, expect.anything(),
+        );
+    });
+
+    it('lets a final deadline read reveal a durable complete result before fallback analytics', async () => {
+        const visibleDeadlineAtMs = Date.parse(SUBMITTED_AT) + 44_000;
+        const fetchMock = vi.fn().mockImplementation(() => (
+            Date.now() < visibleDeadlineAtMs
+                ? Promise.resolve(noBody())
+                : Promise.resolve(jsonResponse(completeStatus()))
+        ));
+        vi.stubGlobal('fetch', fetchMock);
+        const staleSubmittedAtMs = Date.parse(SUBMITTED_AT) - 300_000;
+
+        await act(async () => {
+            root.render(createElement(PrecheckoutImmersive, {
+                preflightId: PREFLIGHT_ID,
+                claimToken: null,
+                submittedAtMs: staleSubmittedAtMs,
+                targetUsername: 'target',
+                onGoToPlans: vi.fn(),
+            }));
+        });
+        await settleUi();
+
+        await advance(44_000);
+        expect(fetchMock.mock.calls.length).toBeGreaterThan(1);
+        expect(container.querySelector('[data-precheckout-fallback]')).toBeNull();
+        expect(container.querySelectorAll('[data-precheckout-result-card]')).toHaveLength(4);
+        expect(analyticsMocks.trackPrecheckoutEvent).not.toHaveBeenCalledWith(
+            'precheckout_blite_fallback_selected', PREFLIGHT_ID, expect.anything(),
+        );
+    });
+
+    it('never upgrades a terminal failure when a later read reports complete', async () => {
+        const fetchMock = vi.fn()
+            .mockResolvedValueOnce(jsonResponse(failedStatus()))
+            .mockResolvedValueOnce(jsonResponse(completeStatus()));
+        vi.stubGlobal('fetch', fetchMock);
+
+        await act(async () => {
+            root.render(createElement(PrecheckoutImmersive, {
+                preflightId: PREFLIGHT_ID,
+                claimToken: null,
+                submittedAtMs: Date.parse(SUBMITTED_AT),
+                targetUsername: 'target',
+                onGoToPlans: vi.fn(),
+            }));
+        });
+        await settleUi();
+
+        await advance(89_999);
+        expect(container.querySelector('[data-precheckout-demo-mode="waiting"]')).not.toBeNull();
+        await advance(1);
+
+        expect(fetchMock).toHaveBeenCalledTimes(1);
+        expect(container.querySelector('[data-precheckout-fallback]')).not.toBeNull();
+        expect(container.querySelector('[data-precheckout-result-card]')).toBeNull();
+        expect(analyticsMocks.trackPrecheckoutEvent).toHaveBeenCalledWith(
+            'precheckout_blite_fallback_selected', PREFLIGHT_ID,
+            { fallback_reason: 'unresolved_at_90' },
+        );
+    });
+
     it('grants a stale unresolved entry exactly one waiting loop before the fallback', async () => {
         const fetchMock = vi.fn().mockResolvedValue(jsonResponse(pendingStatus(), 202));
         vi.stubGlobal('fetch', fetchMock);

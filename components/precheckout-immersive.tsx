@@ -238,37 +238,46 @@ export function PrecheckoutImmersive({
         if (exitTimerRef.current) clearTimeout(exitTimerRef.current);
     }, []);
 
-    const completeFallbackAtDeadline = useCallback(() => {
-        if (exitRef.current === 'result') return;
-        // A reload can make the accepted-preflight deadline land inside the freshly-restarted
-        // initial pass; that pass must still finish its guaranteed 1->2->3->4 order, so only then
-        // defer to its boundary. Once the initial pass has already finished, the deadline is the
-        // fallback authority and settles immediately rather than waiting on a waiting-loop stage.
-        const initialPassEndsAtMs = visibleEntryAtMs + PRECHECKOUT_DEMO_DURATION_MS;
-        requestExit('fallback', Date.now() >= initialPassEndsAtMs);
-    }, [requestExit, visibleEntryAtMs]);
-
     useEffect(() => {
         emitPrecheckoutEvent(PRECHECKOUT_EVENTS.DEMO_STARTED, { demo_mode: 'waiting' });
     }, [emitPrecheckoutEvent]);
 
     useEffect(() => {
-        const timeout = setTimeout(
-            completeFallbackAtDeadline,
-            Math.max(0, visibleFallbackAtMs - Date.now()),
-        );
-        return () => clearTimeout(timeout);
-    }, [completeFallbackAtDeadline, visibleFallbackAtMs]);
-
-    useEffect(() => {
         let active = true;
         let pollTimer: ReturnType<typeof setTimeout> | undefined;
+        let statusReadInFlight = false;
+        let deadlineReached = false;
+        let finalReadStarted = false;
+        let terminalFailureSeen = false;
+
+        const settleFallback = () => {
+            if (!active || exitRef.current !== null) return;
+            // A reload can make the accepted-preflight deadline land inside the freshly-restarted
+            // initial pass; that pass must still finish its guaranteed 1->2->3->4 order, so only
+            // then defer to its boundary. Once the initial pass has already finished, the
+            // deadline is the fallback authority and settles immediately rather than waiting on a
+            // waiting-loop stage.
+            const initialPassEndsAtMs = visibleEntryAtMs + PRECHECKOUT_DEMO_DURATION_MS;
+            requestExit('fallback', Date.now() >= initialPassEndsAtMs);
+        };
+
         const schedulePoll = (delayMs: number) => {
-            if (!active || exitRef.current !== null || Date.now() >= visibleFallbackAtMs) return;
+            if (!active || exitRef.current !== null || deadlineReached
+                || Date.now() >= visibleFallbackAtMs) return;
             pollTimer = setTimeout(() => { void poll(); }, delayMs);
         };
-        const poll = async (): Promise<void> => {
+
+        function startFinalRead(): void {
+            if (!active || exitRef.current !== null || finalReadStarted) return;
+            finalReadStarted = true;
+            void poll(true);
+        }
+
+        async function poll(isFinalRead = false): Promise<void> {
+            if (!active || exitRef.current !== null || (deadlineReached && !isFinalRead)) return;
+            statusReadInFlight = true;
             const status = await fetchPrecheckoutBlite(preflightId, claimToken);
+            statusReadInFlight = false;
             if (!active || exitRef.current !== null) return;
             // A durable result is read before any deadline is applied: once it exists it is the
             // truthful screen, and the graph boundary still decides when it becomes visible.
@@ -279,28 +288,49 @@ export function PrecheckoutImmersive({
                 requestExit('result');
                 return;
             }
-            if (Date.now() >= visibleFallbackAtMs) {
-                completeFallbackAtDeadline();
-                return;
-            }
             if (status.state === 'failed') {
+                terminalFailureSeen = true;
                 // Nothing is left to poll for, and the extra visible grace exists only for a
                 // result that can still arrive, so a terminal failure leaves at the next safe
                 // graph boundary instead of playing that loop out.
-                if (hasExtendedVisibleGrace) requestExit('fallback');
+                if (hasExtendedVisibleGrace || deadlineReached || Date.now() >= visibleFallbackAtMs) {
+                    requestExit('fallback');
+                }
+                return;
+            }
+            if (deadlineReached || Date.now() >= visibleFallbackAtMs) {
+                // Give one last status read a chance to observe a durable completion before the
+                // fallback latch emits analytics. A non-complete final read is authoritative.
+                if (isFinalRead) settleFallback();
+                else startFinalRead();
                 return;
             }
             const delayMs = status.state === 'pending'
                 ? Math.max(250, Math.min(status.retryAfterMs, 5_000))
                 : TRANSIENT_STATUS_RETRY_MS;
             schedulePoll(delayMs);
-        };
+        }
+
+        const deadlineTimer = setTimeout(() => {
+            if (!active || exitRef.current !== null) return;
+            deadlineReached = true;
+            if (terminalFailureSeen) {
+                settleFallback();
+                return;
+            }
+            // A read that crossed the deadline still owns the completion race. Its result is
+            // processed above before this effect can lock fallback or emit its event.
+            if (statusReadInFlight) return;
+            startFinalRead();
+        }, Math.max(0, visibleFallbackAtMs - Date.now()));
+
         void poll();
         return () => {
             active = false;
             if (pollTimer) clearTimeout(pollTimer);
+            if (deadlineTimer) clearTimeout(deadlineTimer);
         };
-    }, [claimToken, completeFallbackAtDeadline, emitPrecheckoutEvent, hasExtendedVisibleGrace, preflightId, requestExit, visibleFallbackAtMs]);
+    }, [claimToken, emitPrecheckoutEvent, hasExtendedVisibleGrace, preflightId, requestExit, visibleEntryAtMs, visibleFallbackAtMs]);
 
     useEffect(() => {
         if (view === 'result' && dtoRef.current) {
