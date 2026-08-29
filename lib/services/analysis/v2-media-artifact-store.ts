@@ -1287,22 +1287,31 @@ export function createAnalysisV2MediaArtifactStore(input: {
             objectGeneration: object.generation,
             byteSize: bundleInput.bytes.length,
         };
-        const reconcileConflict = bundleInput.artifactKey === bundleInput.legacyArtifactKey
-            ? async (): Promise<AnalysisV2MediaArtifactRef | null> => {
-                const stored = await registry.load({
-                    ...bundleInput.fence,
-                    artifactKey: bundleInput.legacyArtifactKey,
-                });
-                if (!stored) return null;
-                try {
-                    await readValidatedBundle(stored, bundleInput.selectionIds);
-                    return stored;
-                } catch (error) {
-                    if (isBundleSelectionMismatch(error)) return null;
-                    throw error;
-                }
+        const reconcileConflict = async (): Promise<AnalysisV2MediaArtifactRef | null> => {
+            const stored = await registry.load({
+                ...bundleInput.fence,
+                artifactKey: bundleInput.artifactKey,
+            });
+            if (!stored) {
+                // A registration conflict without a visible winner cannot be safely reused or
+                // pivoted. Keep the deterministic conflict so the caller fails closed.
+                throw new Error('ANALYSIS_V2_MEDIA_ARTIFACT_CONFLICT');
             }
-            : undefined;
+            try {
+                await readValidatedBundle(stored, bundleInput.selectionIds);
+                return stored;
+            } catch (error) {
+                // Only the legacy key is allowed to pivot: v2 is already scoped to this exact
+                // ordered selection set and must fail closed on any validation drift.
+                if (
+                    bundleInput.artifactKey === bundleInput.legacyArtifactKey
+                    && isBundleSelectionMismatch(error)
+                ) {
+                    return null;
+                }
+                throw error;
+            }
+        };
         return registerObject(
             bundleInput.fence,
             reference,
