@@ -65,7 +65,7 @@ function displayInputForSnapshot(
     return {
         confirmedProgressBp: snapshot.progressBp,
         tracks: snapshot.tracks,
-        nextCheckpointBp: nextProgressCheckpointBp(snapshot.tracks, activeTrackId),
+        nextCheckpointBp: nextProgressCheckpointBp(snapshot.tracks),
         status: snapshot.status,
         nowMs,
         visible,
@@ -377,7 +377,10 @@ export function useAnalysisProgress(requestId: string) {
                 },
             );
             v2DisplayStateRef.current = next;
-            if (next.displayProgressBp === previous.displayProgressBp) return;
+            if (
+                progressPercentFromBasisPoints(next.displayProgressBp)
+                === progressPercentFromBasisPoints(previous.displayProgressBp)
+            ) return;
             setData(previous => previous?.id === requestId
                 ? {
                     ...previous,

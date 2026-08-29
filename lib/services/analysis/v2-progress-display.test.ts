@@ -95,7 +95,72 @@ describe('V2 progress display easing', () => {
         };
 
         expect(activeProgressTrackId(tracks)).toBe('interactions');
-        expect(nextProgressCheckpointBp(tracks, 'interactions')).toBe(1_700);
+    });
+
+    it('uses the sole running track for its next durable checkpoint', () => {
+        const tracks = {
+            relationshipAi: {
+                state: 'pending' as const,
+                done: 0,
+                total: 100,
+                stageCode: 'RELATIONSHIP_AI_QUEUED',
+            },
+            interactions: {
+                state: 'running' as const,
+                done: 0,
+                total: 1,
+                stageCode: 'TARGET_INTERACTIONS_COLLECTING',
+            },
+            finalization: {
+                state: 'pending' as const,
+                done: 0,
+                total: 1,
+                stageCode: 'FINALIZATION_QUEUED',
+            },
+        };
+
+        expect(nextProgressCheckpointBp(tracks)).toBe(1_700);
+    });
+
+    it('guards reverse likes below a hidden partner safety checkpoint across running tracks', () => {
+        const tracks = {
+            relationshipAi: {
+                state: 'running' as const,
+                done: 23,
+                total: 24,
+                stageCode: 'RELATIONSHIP_AI_RUNNING',
+            },
+            interactions: {
+                state: 'running' as const,
+                done: 1,
+                total: 2,
+                stageCode: 'SHORTLIST_INTERACTIONS_COLLECTING',
+            },
+            finalization: {
+                state: 'pending' as const,
+                done: 0,
+                total: 3,
+                stageCode: 'FINALIZATION_QUEUED',
+            },
+        };
+        const safeCheckpointBp = nextProgressCheckpointBp(tracks);
+        const display = updateProgressDisplay(
+            createProgressDisplayState(),
+            input({
+                confirmedProgressBp: 7_750,
+                nextCheckpointBp: safeCheckpointBp,
+                tracks,
+                activeTrackId: 'interactions',
+                activeStageCode: 'SHORTLIST_INTERACTIONS_COLLECTING',
+                nowMs: 0,
+            }),
+        );
+
+        expect(activeProgressTrackId(tracks)).toBe('interactions');
+        expect(safeCheckpointBp).toBe(8_050);
+        expect(display.capProgressBp).toBe(8_049);
+        expect(display.targetProgressBp).toBe(8_049);
+        expect(display.targetProgressBp).toBeLessThan(safeCheckpointBp!);
     });
 
     it('uses ordinal and call phase to raise a bounded provisional sub-checkpoint', () => {

@@ -74,9 +74,18 @@ function response(body: unknown, status = 200): Response {
     });
 }
 
-function Harness({ requestId, onRefetch }: { requestId: string; onRefetch?: (refetch: () => Promise<void>) => void }) {
+function Harness({
+    requestId,
+    onRefetch,
+    onRender,
+}: {
+    requestId: string;
+    onRefetch?: (refetch: () => Promise<void>) => void;
+    onRender?: () => void;
+}) {
     const { data, loading, refetch } = useAnalysisProgress(requestId);
     onRefetch?.(refetch);
+    onRender?.();
     return <output data-testid="progress">{loading ? 'loading' : `${data?.status}:${data?.progress}`}</output>;
 }
 
@@ -156,9 +165,13 @@ describe('useAnalysisProgress V2 display lifecycle', () => {
         vi.clearAllMocks();
     });
 
-    async function render(requestId = REQUEST_A): Promise<void> {
+    async function render(requestId = REQUEST_A, onRender?: () => void): Promise<void> {
         await act(async () => {
-            root.render(<Harness requestId={requestId} onRefetch={value => { refetch = value; }} />);
+            root.render(<Harness
+                requestId={requestId}
+                onRefetch={value => { refetch = value; }}
+                onRender={onRender}
+            />);
             await Promise.resolve();
             await Promise.resolve();
         });
@@ -204,6 +217,27 @@ describe('useAnalysisProgress V2 display lifecycle', () => {
             await Promise.resolve();
         });
         expect(Number(displayed().split(':')[1])).toBeGreaterThan(Number(second.split(':')[1]));
+    });
+
+    it('keeps sub-percent easing ticks out of React renders while integer progress advances', async () => {
+        let renderCount = 0;
+        await render(REQUEST_A, () => { renderCount += 1; });
+        const settledRenderCount = renderCount;
+        const initial = displayed();
+
+        await act(async () => {
+            vi.advanceTimersByTime(250);
+            await Promise.resolve();
+        });
+        expect(displayed()).toBe(initial);
+        expect(renderCount).toBe(settledRenderCount);
+
+        await act(async () => {
+            vi.advanceTimersByTime(2_250);
+            await Promise.resolve();
+        });
+        expect(Number(displayed().split(':')[1])).toBeGreaterThan(0);
+        expect(renderCount).toBeGreaterThan(settledRenderCount);
     });
 
     it('pauses hidden time, freezes a failure, resets by request, and reaches 100 only at completion', async () => {

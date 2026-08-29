@@ -94,16 +94,10 @@ export function createProgressDisplayState(): ProgressDisplayState {
  */
 export function nextProgressCheckpointBp(
     tracks: ProgressDisplayTracks | null | undefined,
-    activeTrackId?: ProgressTrackId | null,
 ): number | undefined {
     if (!tracks) return undefined;
-    const activeTrack = activeTrackId ? tracks[activeTrackId] : undefined;
-    const trackIds = activeTrack?.state === 'running'
-        ? [activeTrackId]
-        : ['relationshipAi', 'interactions', 'finalization'] as const;
     const candidates: number[] = [];
-    for (const trackId of trackIds) {
-        if (!trackId) continue;
+    for (const trackId of ['relationshipAi', 'interactions', 'finalization'] as const) {
         const track = tracks[trackId];
         if (track.state !== 'running' || track.done >= track.total) continue;
         const work = {
