@@ -139,6 +139,7 @@ describe('V2 progress display easing', () => {
                 currentOrdinal: 20,
                 totalCount: 30,
                 callPhase: 'analyzing',
+                signalKey: 'profile:20:30:analyzing',
                 tracks: {
                     relationshipAi: {
                         state: 'running',
@@ -163,6 +164,9 @@ describe('V2 progress display easing', () => {
         expect(later.provisionalTargetProgressBp).toBeGreaterThan(
             initial.provisionalTargetProgressBp
         );
+        expect(later.targetProgressBp).toBeGreaterThan(initial.targetProgressBp);
+        expect(initial.targetProgressBp).toBe(initial.provisionalTargetProgressBp);
+        expect(later.targetProgressBp).toBe(later.provisionalTargetProgressBp);
         expect(later.displayProgressBp).toBe(initial.displayProgressBp);
         const eased = updateProgressDisplay(later, input({
             confirmedProgressBp: 0,
@@ -172,6 +176,7 @@ describe('V2 progress display easing', () => {
             currentOrdinal: 20,
             totalCount: 30,
             callPhase: 'analyzing',
+            signalKey: 'profile:20:30:analyzing',
             tracks: {
                 relationshipAi: {
                     state: 'running',
@@ -226,6 +231,7 @@ describe('V2 progress display easing', () => {
                 currentOrdinal: 20,
                 totalCount: 30,
                 callPhase: 'analyzing',
+                signalKey: 'profile:20:30:analyzing',
                 nowMs: 0,
             }),
         );
@@ -239,6 +245,7 @@ describe('V2 progress display easing', () => {
                 currentOrdinal: 20,
                 totalCount: 30,
                 callPhase: 'analyzing',
+                signalKey: 'profile:20:30:analyzing',
                 nowMs: 1_000,
             }),
         });
@@ -246,6 +253,8 @@ describe('V2 progress display easing', () => {
         expect(changed.displayProgressBp).toBe(initial.displayProgressBp);
         expect(changed.provisionalTargetProgressBp)
             .toBeGreaterThan(initial.provisionalTargetProgressBp);
+        expect(changed.targetProgressBp).toBeGreaterThan(initial.targetProgressBp);
+        expect(changed.targetProgressBp).toBe(changed.provisionalTargetProgressBp);
         expect(eased.displayProgressBp).toBeGreaterThan(changed.displayProgressBp);
         expect(eased.displayProgressBp).toBeLessThan(eased.capProgressBp);
     });
@@ -311,7 +320,55 @@ describe('V2 progress display easing', () => {
 
         expect(expanded.displayProgressBp).toBeGreaterThanOrEqual(earlier.displayProgressBp);
         expect(expanded.provisionalTargetProgressBp).toBeLessThan(7_200);
+        expect(expanded.targetProgressBp).toBeGreaterThanOrEqual(expanded.displayProgressBp);
         expect(expanded.displayProgressBp).toBeLessThan(7_200);
+    });
+
+    it('uses the conservative cap for a generic long stage without structured signals', () => {
+        const tracks = {
+            relationshipAi: {
+                state: 'running' as const,
+                done: 0,
+                total: 10,
+                stageCode: 'RELATIONSHIPS_COLLECTING',
+            },
+            interactions: {
+                state: 'pending' as const,
+                done: 0,
+                total: 2,
+                stageCode: 'INTERACTIONS_QUEUED',
+            },
+            finalization: {
+                state: 'pending' as const,
+                done: 0,
+                total: 3,
+                stageCode: 'FINALIZATION_QUEUED',
+            },
+        };
+        const initial = updateProgressDisplay(
+            createProgressDisplayState(),
+            input({
+                confirmedProgressBp: 0,
+                nextCheckpointBp: 1_700,
+                tracks,
+                activeTrackId: 'relationshipAi',
+                activeStageCode: 'RELATIONSHIPS_COLLECTING',
+                nowMs: 0,
+            }),
+        );
+        const later = updateProgressDisplay(initial, input({
+            confirmedProgressBp: 0,
+            nextCheckpointBp: 1_700,
+            tracks,
+            activeTrackId: 'relationshipAi',
+            activeStageCode: 'RELATIONSHIPS_COLLECTING',
+            nowMs: 5_000,
+        }));
+
+        expect(initial.targetProgressBp).toBe(initial.capProgressBp);
+        expect(later.targetProgressBp).toBe(later.capProgressBp);
+        expect(later.displayProgressBp).toBeGreaterThan(initial.displayProgressBp);
+        expect(later.displayProgressBp).toBeLessThan(1_700);
     });
 
     it('moves during a long visible plateau but decelerates before the next checkpoint', () => {
@@ -346,6 +403,7 @@ describe('V2 progress display easing', () => {
 
         expect(delayed.displayProgressBp).toBeLessThan(5_000);
         expect(delayed.displayProgressBp).toBeLessThanOrEqual(4_999);
+        expect(delayed.targetProgressBp).toBeLessThanOrEqual(4_999);
     });
 
     it('keeps malformed pre-terminal input below completion as a final display guard', () => {

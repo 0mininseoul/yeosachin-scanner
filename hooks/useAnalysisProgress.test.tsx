@@ -56,7 +56,7 @@ function snapshot(
         activeProfile: {
             maskedUsername: 'a***',
             imageUrl: null,
-            currentOrdinal: 1,
+            currentOrdinal: 10,
             totalCount: 30,
             callPhase: 'fetching',
         },

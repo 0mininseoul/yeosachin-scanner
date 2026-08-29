@@ -152,6 +152,22 @@ function boundedFraction(value: number, fallback = 0.5): number {
     return Math.max(0, Math.min(0.995, value));
 }
 
+function hasStructuredProgressSignal(
+    stageCode: string | null | undefined,
+    currentOrdinal: number | null | undefined,
+    totalCount: number | null | undefined,
+): boolean {
+    return (
+        stageCode === 'PUBLIC_PROFILES_COLLECTING'
+        || stageCode === 'PROFILE_SCREENING'
+    )
+        && Number.isSafeInteger(currentOrdinal)
+        && Number.isSafeInteger(totalCount)
+        && (totalCount ?? 0) > 0
+        && (currentOrdinal ?? 0) >= 1
+        && (currentOrdinal ?? 0) <= (totalCount ?? 0);
+}
+
 function stageProgressFraction(
     stageCode: string | null | undefined,
     currentOrdinal: number | null | undefined,
@@ -159,15 +175,7 @@ function stageProgressFraction(
     callPhase: ProgressCallPhase | null | undefined,
 ): number {
     const phaseFraction = callPhase ? PHASE_PROGRESS_FRACTIONS[callPhase] : undefined;
-    const hasProfileSignals = Number.isSafeInteger(currentOrdinal)
-        && Number.isSafeInteger(totalCount)
-        && (totalCount ?? 0) > 0
-        && (currentOrdinal ?? 0) >= 1
-        && (currentOrdinal ?? 0) <= (totalCount ?? 0);
-    if (hasProfileSignals && (
-        stageCode === 'PUBLIC_PROFILES_COLLECTING'
-        || stageCode === 'PROFILE_SCREENING'
-    )) {
+    if (hasStructuredProgressSignal(stageCode, currentOrdinal, totalCount)) {
         const ordinal = currentOrdinal as number;
         const total = totalCount as number;
         const phase = phaseFraction ?? 0.5;
@@ -266,8 +274,8 @@ function easedProgress(
 
 /**
  * Advances only a presentation value. Durable checkpoints remain the source
- * of truth: a fresh checkpoint is adopted immediately, while elapsed time can
- * only ease toward the guarded cap for the current in-flight unit.
+ * of truth: a fresh checkpoint is adopted immediately, structured signals
+ * provide a bounded in-flight target, and generic stages ease toward a cap.
  */
 export function updateProgressDisplay(
     previous: ProgressDisplayState,
@@ -337,8 +345,19 @@ export function updateProgressDisplay(
         && previous.capProgressBp === 0
         && previous.confirmedProgressBp === 0;
     const startProgressBp = checkpointStartProgressBp;
+    const hasStructuredSignal = input.status === 'processing'
+        && hasStructuredProgressSignal(
+            input.activeStageCode,
+            input.currentOrdinal,
+            input.totalCount,
+        );
     const targetProgressBp = input.status === 'processing'
-        ? capProgressBp
+        ? hasStructuredSignal
+            ? Math.max(
+                startProgressBp,
+                Math.min(capProgressBp, provisionalTargetProgressBp),
+            )
+            : capProgressBp
         : startProgressBp;
 
     if (input.status !== 'processing') {
