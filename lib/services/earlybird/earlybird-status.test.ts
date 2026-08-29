@@ -272,6 +272,20 @@ describe('earlybird mounted payment return recovery', () => {
         expect(routerMock.refresh).toHaveBeenCalledTimes(2);
     });
 
+    it('does not let a lifecycle cooldown suppress a scheduled refresh', () => {
+        routerMock.refresh.mockReturnValue(new Promise<void>(() => {}));
+        render(automaticPendingOrder());
+
+        act(() => {
+            vi.advanceTimersByTime(900);
+            window.dispatchEvent(new Event('focus'));
+        });
+        expect(routerMock.refresh).toHaveBeenCalledTimes(1);
+
+        act(() => vi.advanceTimersByTime(100));
+        expect(routerMock.refresh).toHaveBeenCalledTimes(2);
+    });
+
     it('coalesces lifecycle refreshes across separate tasks and cleans up after unmount', async () => {
         render(automaticPendingOrder());
 

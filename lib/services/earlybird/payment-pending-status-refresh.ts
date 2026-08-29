@@ -78,7 +78,7 @@ export function shouldAutomaticallyRedirectEarlybirdStatus(
  * window; support and all other terminal states do not poll.
  */
 export function scheduleEarlybirdStatusSnapshotRefresh(
-    refresh: () => void | PromiseLike<void>,
+    refresh: () => void,
     mode: EarlybirdStatusRefreshMode = 'payment_pending'
 ): () => void {
     let cancelled = false;
@@ -88,10 +88,9 @@ export function scheduleEarlybirdStatusSnapshotRefresh(
         : PAYMENT_PENDING_REFRESH_DELAYS_MS;
     let tailTimer: ReturnType<typeof setInterval> | null = null;
     let lifecycleCooldownTimer: ReturnType<typeof setTimeout> | null = null;
-    let refreshInFlight: Promise<void> | null = null;
 
     const triggerRefresh = (source: 'scheduled' | 'lifecycle') => {
-        if (cancelled || refreshInFlight) return;
+        if (cancelled) return;
         if (source === 'lifecycle' && lifecycleCooldownTimer !== null) return;
         if (source === 'lifecycle') {
             lifecycleCooldownTimer = setTimeout(() => {
@@ -99,24 +98,10 @@ export function scheduleEarlybirdStatusSnapshotRefresh(
             }, LIFECYCLE_REFRESH_COOLDOWN_MS);
         }
 
-        let result: void | PromiseLike<void>;
         try {
-            result = refresh();
+            refresh();
         } catch {
             return;
-        }
-
-        if (result && typeof result.then === 'function') {
-            const pending = Promise.resolve(result);
-            refreshInFlight = pending;
-            void pending.then(
-                () => {
-                    if (refreshInFlight === pending) refreshInFlight = null;
-                },
-                () => {
-                    if (refreshInFlight === pending) refreshInFlight = null;
-                },
-            );
         }
     };
 
