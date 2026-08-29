@@ -163,20 +163,52 @@ function sha256(value: string | Buffer): string {
     return createHash('sha256').update(value).digest('hex');
 }
 
-export function analysisV2MediaArtifactKey(selectionId: string): string {
-    const normalized = selectionId.trim();
+function normalizedOpaqueId(value: string, field: 'bundle id' | 'selection id'): string {
+    const normalized = value.trim();
     if (!normalized || normalized.length > SELECTION_ID_MAX_LENGTH) {
-        throw new Error('ANALYSIS_V2_MEDIA_ARTIFACT_VALIDATION_ERROR: invalid selection id.');
+        throw new Error(`ANALYSIS_V2_MEDIA_ARTIFACT_VALIDATION_ERROR: invalid ${field}.`);
     }
-    return sha256(`analysis-v2-media-artifact-key:v1\n${normalized}`);
+    return normalized;
+}
+
+export function analysisV2MediaArtifactKey(selectionId: string): string {
+    return sha256(
+        `analysis-v2-media-artifact-key:v1\n${normalizedOpaqueId(selectionId, 'selection id')}`
+    );
 }
 
 export function analysisV2MediaBundleArtifactKey(bundleId: string): string {
-    const normalized = bundleId.trim();
-    if (!normalized || normalized.length > SELECTION_ID_MAX_LENGTH) {
-        throw new Error('ANALYSIS_V2_MEDIA_ARTIFACT_VALIDATION_ERROR: invalid bundle id.');
+    return sha256(
+        `analysis-v2-media-bundle-key:v1\n${normalizedOpaqueId(bundleId, 'bundle id')}`
+    );
+}
+
+/**
+ * Identifies a bundle by its normalized logical id and the exact ordered set of
+ * selections it contains. Selection ids are hashed before entering the key so
+ * that this retry identity never writes raw ids to storage paths or metadata.
+ */
+export function analysisV2MediaBundleArtifactKeyV2(
+    bundleId: string,
+    selectionIds: readonly string[]
+): string {
+    const normalizedBundleId = normalizedOpaqueId(bundleId, 'bundle id');
+    if (
+        !Array.isArray(selectionIds)
+        || selectionIds.length < 1
+        || selectionIds.length > ANALYSIS_V2_MEDIA_BUNDLE_MAX_ITEMS
+    ) {
+        throw new Error('ANALYSIS_V2_MEDIA_ARTIFACT_VALIDATION_ERROR: invalid bundle size.');
     }
-    return sha256(`analysis-v2-media-bundle-key:v1\n${normalized}`);
+    const selectionKeys = selectionIds.map(selectionId => analysisV2MediaArtifactKey(selectionId));
+    if (new Set(selectionKeys).size !== selectionKeys.length) {
+        throw new Error(
+            'ANALYSIS_V2_MEDIA_ARTIFACT_VALIDATION_ERROR: duplicate bundle selection.'
+        );
+    }
+    return sha256(
+        `analysis-v2-media-bundle-key:v2\n${normalizedBundleId}\n${selectionKeys.join('\n')}`
+    );
 }
 
 export function analysisV2MediaArtifactObjectName(input: {
@@ -590,6 +622,8 @@ function mediaBytes(value: unknown): Buffer {
 const MEDIA_BUNDLE_MAGIC = Buffer.from('ABMEDIA2', 'ascii');
 const MEDIA_BUNDLE_HEADER_BYTES = 4;
 const MEDIA_BUNDLE_MAX_HEADER_BYTES = 16 * 1024;
+const MEDIA_BUNDLE_SELECTION_MISMATCH_ERROR =
+    'ANALYSIS_V2_MEDIA_ARTIFACT_OBJECT_ERROR: bundle selection mismatch.';
 
 interface MediaBundleHeaderItem {
     artifactKey: string;
@@ -704,7 +738,7 @@ export function deserializeAnalysisV2MediaBundle(
         header.length !== expectedKeys.length
         || header.some((item, index) => item.artifactKey !== expectedKeys[index])
     ) {
-        throw new Error('ANALYSIS_V2_MEDIA_ARTIFACT_OBJECT_ERROR: bundle selection mismatch.');
+        throw new Error(MEDIA_BUNDLE_SELECTION_MISMATCH_ERROR);
     }
     let offset = headerStart + headerLength;
     const result = header.map((item, index) => {
@@ -1122,6 +1156,10 @@ function isDeterministicRegistrationRejection(error: unknown): boolean {
     return error instanceof Error && DETERMINISTIC_REGISTRATION_REJECTIONS.has(error.message);
 }
 
+function isBundleSelectionMismatch(error: unknown): boolean {
+    return error instanceof Error && error.message === MEDIA_BUNDLE_SELECTION_MISMATCH_ERROR;
+}
+
 export function createAnalysisV2MediaArtifactStore(input: {
     registry?: AnalysisV2MediaArtifactRegistry;
     objects: AnalysisV2PrivateMediaObjectClient;
@@ -1165,6 +1203,23 @@ export function createAnalysisV2MediaArtifactStore(input: {
             }
             throw error;
         }
+    }
+
+    async function readValidatedBundle(
+        reference: AnalysisV2MediaArtifactRef,
+        expectedSelectionIds: readonly string[]
+    ): Promise<AnalysisV2LoadedMediaBundleItem[]> {
+        if (
+            reference.artifactKind !== 'media_bundle'
+            || reference.contentType !== 'application/octet-stream'
+        ) {
+            throw new Error('ANALYSIS_V2_MEDIA_ARTIFACT_OBJECT_ERROR: artifact kind mismatch.');
+        }
+        const bytes = await input.objects.read(reference);
+        if (bytes.length !== reference.byteSize || sha256(bytes) !== reference.contentSha256) {
+            throw new Error('ANALYSIS_V2_MEDIA_ARTIFACT_OBJECT_ERROR: content mismatch.');
+        }
+        return deserializeAnalysisV2MediaBundle(bytes, expectedSelectionIds);
     }
 
     return {
@@ -1218,30 +1273,40 @@ export function createAnalysisV2MediaArtifactStore(input: {
 
         async persistBundle(value) {
             const fence = assertFence(value);
-            const artifactKey = analysisV2MediaBundleArtifactKey(value.bundleId);
             // Validate the retry input before any registry/object I/O, even if a prior immutable
             // bundle will ultimately be reused.
             const bytes = serializeAnalysisV2MediaBundle(value.media);
-            const existing = await registry.load({ ...fence, artifactKey });
-            if (existing) {
-                if (
-                    existing.artifactKind !== 'media_bundle'
-                    || existing.contentType !== 'application/octet-stream'
-                ) {
-                    throw new Error('ANALYSIS_V2_MEDIA_ARTIFACT_OBJECT_ERROR: artifact kind mismatch.');
+            const selectionIds = value.media.map(item => item.selectionId);
+            const legacyArtifactKey = analysisV2MediaBundleArtifactKey(value.bundleId);
+            const selectionScopedArtifactKey = analysisV2MediaBundleArtifactKeyV2(
+                value.bundleId,
+                selectionIds,
+            );
+            const selectionScoped = await registry.load({
+                ...fence,
+                artifactKey: selectionScopedArtifactKey,
+            });
+            if (selectionScoped) {
+                await readValidatedBundle(selectionScoped, selectionIds);
+                return selectionScoped;
+            }
+
+            const legacy = await registry.load({ ...fence, artifactKey: legacyArtifactKey });
+            // Keep first-write and exact-legacy retries on the v1 key because downstream
+            // checkpoint contracts identify a bundle by its logical bundle id. A v2 key is
+            // needed only after a legacy row proves to contain a different ordered selection.
+            let artifactKey = legacyArtifactKey;
+            if (legacy) {
+                try {
+                    await readValidatedBundle(legacy, selectionIds);
+                    return legacy;
+                } catch (error) {
+                    // A legacy v1 row is keyed only by bundle id. Keep that immutable row intact
+                    // when retry normalization changes its ordered selection set, then continue
+                    // with the selection-scoped key instead of terminalizing the paid job.
+                    if (!isBundleSelectionMismatch(error)) throw error;
+                    artifactKey = selectionScopedArtifactKey;
                 }
-                const existingBytes = await input.objects.read(existing);
-                if (
-                    existingBytes.length !== existing.byteSize
-                    || sha256(existingBytes) !== existing.contentSha256
-                ) {
-                    throw new Error('ANALYSIS_V2_MEDIA_ARTIFACT_OBJECT_ERROR: content mismatch.');
-                }
-                deserializeAnalysisV2MediaBundle(
-                    existingBytes,
-                    value.media.map(item => item.selectionId),
-                );
-                return existing;
             }
             const contentSha256 = sha256(bytes);
             const objectName = analysisV2MediaArtifactObjectName({
@@ -1273,20 +1338,31 @@ export function createAnalysisV2MediaArtifactStore(input: {
 
         async loadBundle(value) {
             const fence = assertFence(value);
-            const artifactKey = analysisV2MediaBundleArtifactKey(value.bundleId);
-            const reference = await registry.load({ ...fence, artifactKey });
-            if (!reference) return null;
-            if (
-                reference.artifactKind !== 'media_bundle'
-                || reference.contentType !== 'application/octet-stream'
-            ) {
-                throw new Error('ANALYSIS_V2_MEDIA_ARTIFACT_OBJECT_ERROR: artifact kind mismatch.');
+            const selectionScopedArtifactKey = analysisV2MediaBundleArtifactKeyV2(
+                value.bundleId,
+                value.expectedSelectionIds,
+            );
+            const selectionScoped = await registry.load({
+                ...fence,
+                artifactKey: selectionScopedArtifactKey,
+            });
+            if (selectionScoped) {
+                return readValidatedBundle(selectionScoped, value.expectedSelectionIds);
             }
-            const bytes = await input.objects.read(reference);
-            if (bytes.length !== reference.byteSize || sha256(bytes) !== reference.contentSha256) {
-                throw new Error('ANALYSIS_V2_MEDIA_ARTIFACT_OBJECT_ERROR: content mismatch.');
+
+            // Existing v1 rows remain readable only when their immutable ordered selection set
+            // exactly matches this load. A mismatching legacy row is not a candidate for reuse.
+            const legacy = await registry.load({
+                ...fence,
+                artifactKey: analysisV2MediaBundleArtifactKey(value.bundleId),
+            });
+            if (!legacy) return null;
+            try {
+                return await readValidatedBundle(legacy, value.expectedSelectionIds);
+            } catch (error) {
+                if (isBundleSelectionMismatch(error)) return null;
+                throw error;
             }
-            return deserializeAnalysisV2MediaBundle(bytes, value.expectedSelectionIds);
         },
 
         async cleanupTerminal(options = {}) {

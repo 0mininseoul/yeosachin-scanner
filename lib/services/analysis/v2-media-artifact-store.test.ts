@@ -10,6 +10,7 @@ import {
     analysisV2MediaArtifactKey,
     analysisV2MediaArtifactObjectName,
     analysisV2MediaBundleArtifactKey,
+    analysisV2MediaBundleArtifactKeyV2,
     cleanupConfiguredAnalysisV2TerminalMedia,
     createAnalysisV2MediaArtifactRegistry,
     createAnalysisV2MediaArtifactStore,
@@ -101,6 +102,29 @@ describe('analysis V2 media artifact identities', () => {
         expect(name).toBe(`analysis-v2/${requestId}/${key}/${'a'.repeat(64)}.jpg`);
         expect(name).not.toContain('username');
         expect(() => analysisV2MediaArtifactKey(' ')).toThrow('invalid selection id');
+    });
+
+    it('derives selection-scoped v2 bundle keys from normalized ordered selection hashes', () => {
+        const forward = analysisV2MediaBundleArtifactKeyV2(
+            ' candidate:private ',
+            ['profile:private-source', 'post:opaque:1'],
+        );
+        const sameNormalizedSelection = analysisV2MediaBundleArtifactKeyV2(
+            'candidate:private',
+            ['profile:private-source', 'post:opaque:1'],
+        );
+        const reversed = analysisV2MediaBundleArtifactKeyV2(
+            'candidate:private',
+            ['post:opaque:1', 'profile:private-source'],
+        );
+
+        expect(forward).toMatch(/^[a-f0-9]{64}$/);
+        expect(forward).toBe(sameNormalizedSelection);
+        expect(forward).not.toBe(reversed);
+        expect(forward).not.toContain('private-source');
+        expect(() => analysisV2MediaBundleArtifactKeyV2('candidate:private', [])).toThrow(
+            'invalid bundle size'
+        );
     });
 
     it('validates private artifact bucket configuration without exposing a default', () => {
@@ -439,21 +463,21 @@ describe('analysis V2 media artifact orchestration', () => {
     });
 
     it('stores and reloads all normalized feature media through one bundle object', async () => {
-        let storedBytes: Buffer | null = null;
-        let storedReference: AnalysisV2MediaArtifactRef | null = null;
+        const references = new Map<string, AnalysisV2MediaArtifactRef>();
+        const bytesByObjectName = new Map<string, Buffer>();
         const objectClient = objects({
             create: vi.fn(async input => {
-                storedBytes = input.bytes;
+                bytesByObjectName.set(input.objectName, input.bytes);
                 return { created: true, generation: '1234567890123456' };
             }),
-            read: vi.fn(async () => storedBytes ?? Buffer.alloc(0)),
+            read: vi.fn(async input => bytesByObjectName.get(input.objectName) ?? Buffer.alloc(0)),
         });
         const registryClient = registry({
             register: vi.fn(async input => {
-                storedReference = input;
+                references.set(input.artifactKey, input);
                 return input;
             }),
-            load: vi.fn(async () => storedReference),
+            load: vi.fn(async input => references.get(input.artifactKey) ?? null),
         });
         const store = createAnalysisV2MediaArtifactStore({
             objects: objectClient,
@@ -474,6 +498,7 @@ describe('analysis V2 media artifact orchestration', () => {
             artifactKind: 'media_bundle',
             contentType: 'application/octet-stream',
         });
+        expect(persisted.artifactKey).toBe(analysisV2MediaBundleArtifactKey('candidate:opaque'));
         expect(objectClient.create).toHaveBeenCalledTimes(1);
 
         await expect(store.loadBundle({
@@ -489,21 +514,21 @@ describe('analysis V2 media artifact orchestration', () => {
     });
 
     it('reuses a valid immutable bundle on retry even when normalization bytes drift', async () => {
-        let storedBytes: Buffer | null = null;
-        let storedReference: AnalysisV2MediaArtifactRef | null = null;
+        const references = new Map<string, AnalysisV2MediaArtifactRef>();
+        const bytesByObjectName = new Map<string, Buffer>();
         const objectClient = objects({
             create: vi.fn(async input => {
-                storedBytes = input.bytes;
+                bytesByObjectName.set(input.objectName, input.bytes);
                 return { created: true, generation: '1234567890123456' };
             }),
-            read: vi.fn(async () => storedBytes ?? Buffer.alloc(0)),
+            read: vi.fn(async input => bytesByObjectName.get(input.objectName) ?? Buffer.alloc(0)),
         });
         const registryClient = registry({
             register: vi.fn(async input => {
-                storedReference = input;
+                references.set(input.artifactKey, input);
                 return input;
             }),
-            load: vi.fn(async () => storedReference),
+            load: vi.fn(async input => references.get(input.artifactKey) ?? null),
         });
         const store = createAnalysisV2MediaArtifactStore({ objects: objectClient, registry: registryClient });
         const base = { requestId, jobKey, claimToken, bundleId: 'candidate:retry' };
@@ -519,46 +544,218 @@ describe('analysis V2 media artifact orchestration', () => {
         expect(objectClient.create).toHaveBeenCalledTimes(1);
     });
 
-    it('fails closed on retry selection-order drift without creating a second bundle', async () => {
-        let storedBytes: Buffer | null = null;
-        let storedReference: AnalysisV2MediaArtifactRef | null = null;
+    it('reuses an exact legacy bundle for a retry with content drift', async () => {
+        const bundleId = 'candidate:legacy-exact';
+        const legacyMedia = [
+            { selectionId: 'profile:1', normalizedJpeg: jpeg },
+            { selectionId: 'post:1', normalizedJpeg: jpeg2 },
+        ];
+        const legacyBytes = serializeAnalysisV2MediaBundle(legacyMedia);
+        const legacyArtifactKey = analysisV2MediaBundleArtifactKey(bundleId);
+        const legacyReference = reference({
+            artifactKey: legacyArtifactKey,
+            artifactKind: 'media_bundle',
+            contentSha256: contentHash(legacyBytes),
+            contentType: 'application/octet-stream',
+            byteSize: legacyBytes.length,
+        });
+        const references = new Map([[legacyArtifactKey, legacyReference]]);
+        const bytesByObjectName = new Map([[legacyReference.objectName, legacyBytes]]);
+        const objectClient = objects({
+            create: vi.fn(),
+            read: vi.fn(async input => bytesByObjectName.get(input.objectName) ?? Buffer.alloc(0)),
+        });
+        const registryClient = registry({
+            load: vi.fn(async input => references.get(input.artifactKey) ?? null),
+            register: vi.fn(async input => {
+                references.set(input.artifactKey, input);
+                return input;
+            }),
+        });
+        const store = createAnalysisV2MediaArtifactStore({
+            objects: objectClient,
+            registry: registryClient,
+        });
+
+        await expect(store.persistBundle({
+            requestId,
+            jobKey,
+            claimToken,
+            bundleId,
+            media: [
+                { selectionId: 'profile:1', normalizedJpeg: jpeg2 },
+                { selectionId: 'post:1', normalizedJpeg: jpeg },
+            ],
+        })).resolves.toEqual(legacyReference);
+        await expect(store.loadBundle({
+            requestId,
+            jobKey,
+            claimToken,
+            bundleId,
+            expectedSelectionIds: ['profile:1', 'post:1'],
+        })).resolves.toEqual(legacyMedia);
+
+        expect(objectClient.create).not.toHaveBeenCalled();
+        expect(registryClient.register).not.toHaveBeenCalled();
+        expect(references.get(legacyArtifactKey)).toEqual(legacyReference);
+    });
+
+    it('creates and then reuses a selection-scoped bundle after a legacy selection mismatch', async () => {
+        const bundleId = 'candidate:legacy-mismatch';
+        const legacyMedia = [
+            { selectionId: 'profile:1', normalizedJpeg: jpeg },
+            { selectionId: 'post:1', normalizedJpeg: jpeg2 },
+        ];
+        const legacyBytes = serializeAnalysisV2MediaBundle(legacyMedia);
+        const legacyArtifactKey = analysisV2MediaBundleArtifactKey(bundleId);
+        const legacyReference = reference({
+            artifactKey: legacyArtifactKey,
+            artifactKind: 'media_bundle',
+            contentSha256: contentHash(legacyBytes),
+            contentType: 'application/octet-stream',
+            byteSize: legacyBytes.length,
+        });
+        const references = new Map([[legacyArtifactKey, legacyReference]]);
+        const objectBytes = new Map([[legacyReference.objectName, legacyBytes]]);
         const objectClient = objects({
             create: vi.fn(async input => {
-                storedBytes = input.bytes;
+                objectBytes.set(input.objectName, input.bytes);
                 return { created: true, generation: '1234567890123456' };
             }),
-            read: vi.fn(async () => storedBytes ?? Buffer.alloc(0)),
+            read: vi.fn(async input => objectBytes.get(input.objectName) ?? Buffer.alloc(0)),
+        });
+        const registryClient = registry({
+            load: vi.fn(async input => references.get(input.artifactKey) ?? null),
+            register: vi.fn(async input => {
+                references.set(input.artifactKey, input);
+                return input;
+            }),
+        });
+        const store = createAnalysisV2MediaArtifactStore({
+            objects: objectClient,
+            registry: registryClient,
+        });
+
+        const persisted = await store.persistBundle({
+            requestId,
+            jobKey,
+            claimToken,
+            bundleId,
+            media: [
+                { selectionId: 'post:1', normalizedJpeg: jpeg2 },
+                { selectionId: 'profile:1', normalizedJpeg: jpeg },
+            ],
+        });
+
+        expect(persisted.artifactKey).not.toBe(legacyArtifactKey);
+        const selectionScopedArtifactKey = analysisV2MediaBundleArtifactKeyV2(
+            bundleId,
+            ['post:1', 'profile:1'],
+        );
+        expect(persisted.artifactKey).toBe(selectionScopedArtifactKey);
+        const retried = await store.persistBundle({
+            requestId,
+            jobKey,
+            claimToken,
+            bundleId,
+            media: [
+                { selectionId: 'post:1', normalizedJpeg: jpeg },
+                { selectionId: 'profile:1', normalizedJpeg: jpeg2 },
+            ],
+        });
+        expect(retried).toEqual(persisted);
+        await expect(store.loadBundle({
+            requestId,
+            jobKey,
+            claimToken,
+            bundleId,
+            expectedSelectionIds: ['post:1', 'profile:1'],
+        })).resolves.toEqual([
+            { selectionId: 'post:1', normalizedJpeg: jpeg2 },
+            { selectionId: 'profile:1', normalizedJpeg: jpeg },
+        ]);
+
+        expect(registryClient.register).toHaveBeenCalledOnce();
+        expect(objectClient.create).toHaveBeenCalledOnce();
+        expect(references.get(legacyArtifactKey)).toEqual(legacyReference);
+    });
+
+    it('does not fall back to a mismatching legacy bundle during load', async () => {
+        const bundleId = 'candidate:legacy-load-mismatch';
+        const legacyMedia = [
+            { selectionId: 'profile:1', normalizedJpeg: jpeg },
+            { selectionId: 'post:1', normalizedJpeg: jpeg2 },
+        ];
+        const legacyBytes = serializeAnalysisV2MediaBundle(legacyMedia);
+        const legacyArtifactKey = analysisV2MediaBundleArtifactKey(bundleId);
+        const legacyReference = reference({
+            artifactKey: legacyArtifactKey,
+            artifactKind: 'media_bundle',
+            contentSha256: contentHash(legacyBytes),
+            contentType: 'application/octet-stream',
+            byteSize: legacyBytes.length,
+        });
+        const references = new Map([[legacyArtifactKey, legacyReference]]);
+        const bytesByObjectName = new Map([[legacyReference.objectName, legacyBytes]]);
+        const objectClient = objects({
+            read: vi.fn(async input => bytesByObjectName.get(input.objectName) ?? Buffer.alloc(0)),
+        });
+        const registryClient = registry({
+            load: vi.fn(async input => references.get(input.artifactKey) ?? null),
+        });
+        const store = createAnalysisV2MediaArtifactStore({
+            objects: objectClient,
+            registry: registryClient,
+        });
+        await expect(store.loadBundle({
+            requestId,
+            jobKey,
+            claimToken,
+            bundleId,
+            expectedSelectionIds: ['post:1', 'profile:1'],
+        })).resolves.toBeNull();
+        expect(objectClient.create).not.toHaveBeenCalled();
+    });
+
+    it('creates a distinct selection-scoped bundle when a retry changes selection order', async () => {
+        const references = new Map<string, AnalysisV2MediaArtifactRef>();
+        const bytesByObjectName = new Map<string, Buffer>();
+        const objectClient = objects({
+            create: vi.fn(async input => {
+                bytesByObjectName.set(input.objectName, input.bytes);
+                return { created: true, generation: '1234567890123456' };
+            }),
+            read: vi.fn(async input => bytesByObjectName.get(input.objectName) ?? Buffer.alloc(0)),
         });
         const registryClient = registry({
             register: vi.fn(async input => {
-                storedReference = input;
+                references.set(input.artifactKey, input);
                 return input;
             }),
-            load: vi.fn(async () => storedReference),
+            load: vi.fn(async input => references.get(input.artifactKey) ?? null),
         });
         const store = createAnalysisV2MediaArtifactStore({
             objects: objectClient,
             registry: registryClient,
         });
         const base = { requestId, jobKey, claimToken, bundleId: 'candidate:selection-drift' };
-        await store.persistBundle({
+        const first = await store.persistBundle({
             ...base,
             media: [
                 { selectionId: 'profile:1', normalizedJpeg: jpeg },
                 { selectionId: 'post:1', normalizedJpeg: jpeg2 },
             ],
         });
-
-        await expect(store.persistBundle({
+        const reordered = await store.persistBundle({
             ...base,
             media: [
                 { selectionId: 'post:1', normalizedJpeg: jpeg2 },
                 { selectionId: 'profile:1', normalizedJpeg: jpeg },
             ],
-        })).rejects.toThrow(
-            'ANALYSIS_V2_MEDIA_ARTIFACT_OBJECT_ERROR: bundle selection mismatch.'
-        );
-        expect(objectClient.create).toHaveBeenCalledOnce();
+        });
+        expect(reordered.artifactKey).not.toBe(first.artifactKey);
+        expect(objectClient.create).toHaveBeenCalledTimes(2);
+        expect(registryClient.register).toHaveBeenCalledTimes(2);
     });
 
     it('rejects an invalid retry JPEG before registry or object operations', async () => {
