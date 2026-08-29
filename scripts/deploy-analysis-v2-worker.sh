@@ -3161,6 +3161,9 @@ command -v git >/dev/null 2>&1 || die "git is required to record source provenan
 readonly source_commit_sha="$(git -C "$worker_source_dir" rev-parse --verify 'HEAD^{commit}' 2>/dev/null)"
 [[ "$source_commit_sha" =~ ^[0-9a-f]{40}$ ]] \
   || die "ANALYSIS_V2_WORKER_SOURCE_DIR must have a valid Git commit"
+if [[ "$mode" == "apply" ]]; then
+  bash "$script_dir/require-github-ci-success.sh" "$source_commit_sha"
+fi
 revision_nonce="${ANALYSIS_V2_DEPLOY_REVISION_NONCE:-}"
 if [[ -z "$revision_nonce" ]]; then
   printf -v revision_nonce '%05d' "$(( (RANDOM * 32768 + RANDOM) % 100000 ))"

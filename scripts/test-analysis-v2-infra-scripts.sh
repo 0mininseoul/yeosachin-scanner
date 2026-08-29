@@ -63,6 +63,27 @@ done
   exit 86
 }
 config="$(cat)"
+if [[ "$request_url" == *'/repos/0mininseoul/yeosachin-scanner/actions/workflows/ci.yml/runs?head_sha='* ]]; then
+  [[ "$config" == *'Authorization: Bearer GITHUB_TOKEN_SENTINEL'* ]] \
+    || exit 89
+  output_file=''
+  for ((index = 0; index < ${#args[@]}; index++)); do
+    if [[ "${args[$index]}" == '--output' ]]; then
+      output_file="${args[$((index + 1))]:-}"
+    fi
+  done
+  github_ci_sha="${request_url##*head_sha=}"
+  github_ci_sha="${github_ci_sha%%&*}"
+  [[ "$github_ci_sha" =~ ^[0-9a-f]{40}$ ]] || exit 90
+  github_ci_response="{\"total_count\":1,\"workflow_runs\":[{\"path\":\".github/workflows/ci.yml\",\"head_sha\":\"$github_ci_sha\",\"status\":\"completed\",\"conclusion\":\"success\"}]}"
+  if [[ -n "$output_file" ]]; then
+    printf '%s' "$github_ci_response" >"$output_file"
+    printf '200'
+  else
+    printf '%s\n' "$github_ci_response"
+  fi
+  exit 0
+fi
 [[ "$config" == *'apikey: SUPABASE_SERVICE_ROLE_SENTINEL_MUST_NOT_BE_PRINTED'* ]] \
   || exit 89
 [[ "$config" == *'Authorization: Bearer SUPABASE_SERVICE_ROLE_SENTINEL_MUST_NOT_BE_PRINTED'* ]] \
@@ -1966,6 +1987,7 @@ common_env=(
   'ANALYSIS_V2_GENDER_ROUTING_HMAC_SECRET_VERSION=7'
   'ANALYSIS_V2_WORKER_ENABLED=false'
   'ANALYSIS_V2_RECOVERY_ENABLED=false'
+  'GITHUB_TOKEN=GITHUB_TOKEN_SENTINEL'
   'ANALYSIS_V2_DEPLOY_REVISION_NONCE=abc12'
   "FAKE_GCLOUD_SOURCE_COMMIT=$repo_source_commit"
   "ANALYSIS_V2_WORKER_BUILD_ENV_VARS_FILE=$temp_dir/build.yaml"
