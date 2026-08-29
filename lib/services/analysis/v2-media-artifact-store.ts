@@ -441,12 +441,23 @@ export function createAnalysisV2MediaArtifactRegistry(
 
 function gcsStatusCode(error: unknown): number | null {
     if (!isRecord(error)) return null;
-    const code = error.code;
-    if (typeof code === 'number' && Number.isSafeInteger(code)) return code;
+    const statusFromValue = (value: unknown): number | null => {
+        if (typeof value === 'number' && Number.isSafeInteger(value)) return value;
+        if (typeof value === 'string' && /^[0-9]{3}$/.test(value)) return Number(value);
+        return null;
+    };
+    // Gaxios exposes HTTP status both as `response.status` and, depending on
+    // the transport/wrapper, as the error's own `status`/`statusCode`. Prefer
+    // the response status because it is the authoritative HTTP result, then
+    // retain the wrapper forms before falling back to an API numeric `code`.
     const response = error.response;
-    if (!isRecord(response)) return null;
-    const status = response.status;
-    return typeof status === 'number' && Number.isSafeInteger(status) ? status : null;
+    const responseStatus = isRecord(response)
+        ? statusFromValue(response.status)
+        : null;
+    return responseStatus
+        ?? statusFromValue(error.status)
+        ?? statusFromValue(error.statusCode)
+        ?? statusFromValue(error.code);
 }
 
 function throwSafeGcsError(

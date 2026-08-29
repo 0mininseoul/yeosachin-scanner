@@ -519,6 +519,48 @@ describe('analysis V2 media artifact orchestration', () => {
         expect(objectClient.create).toHaveBeenCalledTimes(1);
     });
 
+    it('fails closed on retry selection-order drift without creating a second bundle', async () => {
+        let storedBytes: Buffer | null = null;
+        let storedReference: AnalysisV2MediaArtifactRef | null = null;
+        const objectClient = objects({
+            create: vi.fn(async input => {
+                storedBytes = input.bytes;
+                return { created: true, generation: '1234567890123456' };
+            }),
+            read: vi.fn(async () => storedBytes ?? Buffer.alloc(0)),
+        });
+        const registryClient = registry({
+            register: vi.fn(async input => {
+                storedReference = input;
+                return input;
+            }),
+            load: vi.fn(async () => storedReference),
+        });
+        const store = createAnalysisV2MediaArtifactStore({
+            objects: objectClient,
+            registry: registryClient,
+        });
+        const base = { requestId, jobKey, claimToken, bundleId: 'candidate:selection-drift' };
+        await store.persistBundle({
+            ...base,
+            media: [
+                { selectionId: 'profile:1', normalizedJpeg: jpeg },
+                { selectionId: 'post:1', normalizedJpeg: jpeg2 },
+            ],
+        });
+
+        await expect(store.persistBundle({
+            ...base,
+            media: [
+                { selectionId: 'post:1', normalizedJpeg: jpeg2 },
+                { selectionId: 'profile:1', normalizedJpeg: jpeg },
+            ],
+        })).rejects.toThrow(
+            'ANALYSIS_V2_MEDIA_ARTIFACT_OBJECT_ERROR: bundle selection mismatch.'
+        );
+        expect(objectClient.create).toHaveBeenCalledOnce();
+    });
+
     it('rejects an invalid retry JPEG before registry or object operations', async () => {
         const objectClient = objects({
             create: vi.fn(),
@@ -770,5 +812,70 @@ describe('Google Cloud private media object adapter', () => {
             'ANALYSIS_V2_MEDIA_ARTIFACT_OBJECT_ERROR: upload failed (500).'
         );
         expect(caught).not.toHaveProperty('cause');
+    });
+
+    it('preserves an HTTP status exposed on the provider error itself', async () => {
+        const artifactKey = 'a'.repeat(64);
+        const contentSha256 = contentHash(jpeg);
+        const objectName = analysisV2MediaArtifactObjectName({
+            requestId,
+            artifactKey,
+            contentSha256,
+        });
+        const request = vi.fn(async () => {
+            throw {
+                message: 'permission denied',
+                status: 403,
+                config: { data: jpeg },
+            };
+        });
+        const client = createGoogleCloudPrivateMediaObjectClient({
+            bucketName: 'private-artifacts-1',
+            requester: { request } as GoogleCloudStorageAuthorizedRequester,
+        });
+
+        await expect(client.create({
+            objectName,
+            bytes: jpeg,
+            artifactKey,
+            artifactKind: 'jpeg',
+            contentSha256,
+            contentType: 'image/jpeg',
+        })).rejects.toThrow(
+            'ANALYSIS_V2_MEDIA_ARTIFACT_OBJECT_ERROR: upload failed (403).'
+        );
+    });
+
+    it('uses the HTTP response status over a conflicting API error code', async () => {
+        const artifactKey = 'a'.repeat(64);
+        const contentSha256 = contentHash(jpeg);
+        const objectName = analysisV2MediaArtifactObjectName({
+            requestId,
+            artifactKey,
+            contentSha256,
+        });
+        const request = vi.fn(async () => {
+            throw {
+                // API payload codes are not authoritative for the transport result.
+                code: 403,
+                response: { status: 503 },
+                config: { data: jpeg },
+            };
+        });
+        const client = createGoogleCloudPrivateMediaObjectClient({
+            bucketName: 'private-artifacts-1',
+            requester: { request } as GoogleCloudStorageAuthorizedRequester,
+        });
+
+        await expect(client.create({
+            objectName,
+            bytes: jpeg,
+            artifactKey,
+            artifactKind: 'jpeg',
+            contentSha256,
+            contentType: 'image/jpeg',
+        })).rejects.toThrow(
+            'ANALYSIS_V2_MEDIA_ARTIFACT_OBJECT_ERROR: upload failed (503).'
+        );
     });
 });

@@ -1108,7 +1108,10 @@ describe('analysis V2 durable DAG worker', () => {
             'ANALYSIS_V2_AI_RESULT_PERSISTENCE_ERROR: invalid cache response.',
             'ANALYSIS_V2_PROFILE_CHECKPOINT_ERROR: invalid load response.',
             'ANALYSIS_V2_MEDIA_ARTIFACT_OBJECT_ERROR: metadata mismatch.',
+            'ANALYSIS_V2_MEDIA_ARTIFACT_OBJECT_ERROR: bundle selection mismatch.',
+            'ANALYSIS_V2_MEDIA_ARTIFACT_OBJECT_ERROR: existing content mismatch.',
             'ANALYSIS_V2_MEDIA_ARTIFACT_OBJECT_ERROR: object read failed (403).',
+            'ANALYSIS_V2_MEDIA_ARTIFACT_OBJECT_ERROR: object read failed (409).',
         ]) {
             expect(classifyAnalysisV2JobFailure(new Error(message))).toMatchObject({
                 disposition: 'permanent',
@@ -1126,7 +1129,10 @@ describe('analysis V2 durable DAG worker', () => {
             'ANALYSIS_V2_PROFILE_CHECKPOINT_ERROR: primary checkpoint failed (08006).',
             'ANALYSIS_V2_PROFILE_CHECKPOINT_ERROR: fallback checkpoint failed (PGRST000).',
             'ANALYSIS_V2_MEDIA_ARTIFACT_OBJECT_ERROR: object write failed (429).',
+            'ANALYSIS_V2_MEDIA_ARTIFACT_OBJECT_ERROR: object read failed (408).',
+            'ANALYSIS_V2_MEDIA_ARTIFACT_OBJECT_ERROR: object read failed (500).',
             'ANALYSIS_V2_MEDIA_ARTIFACT_OBJECT_ERROR: object read failed (503).',
+            'ANALYSIS_V2_MEDIA_ARTIFACT_OBJECT_ERROR: object read failed (599).',
             'ANALYSIS_V2_MEDIA_ARTIFACT_OBJECT_ERROR: object read failed (unknown).',
         ]) {
             expect(classifyAnalysisV2JobFailure(new Error(message))).toMatchObject({
@@ -1262,6 +1268,53 @@ describe('analysis V2 durable DAG worker', () => {
             errorCode: 'JOB_ATTEMPTS_EXHAUSTED',
         });
         expect(terminalFailureFinalizer).toHaveBeenCalledOnce();
+    });
+
+    it('keeps a transient short-lived object failure retryable within the fenced job budget', async () => {
+        const failureCode = 'ANALYSIS_V2_MEDIA_ARTIFACT_OBJECT_ERROR';
+        const handler = vi.fn(async () => {
+            throw new Error(`${failureCode}: object read failed (503).`);
+        });
+        const terminalFailureFinalizer = vi.fn(async () => undefined);
+        const terminalMediaCleanup = vi.fn(async () => undefined);
+        const releasedClaims: ClaimedAnalysisV2Job[] = [];
+        const outcomes: Awaited<ReturnType<typeof processAnalysisV2TaskDelivery>>[] = [];
+
+        for (let attemptCount = 1; attemptCount <= ANALYSIS_V2_JOB_MAX_ATTEMPTS; attemptCount++) {
+            const claimed = { ...bootstrapClaim, attemptCount };
+            const jobStore = store(claimed, {
+                releaseClaim: vi.fn(async (claim: ClaimedAnalysisV2Job) => {
+                    releasedClaims.push(claim);
+                    return {
+                        released: true,
+                        status: 'pending' as const,
+                        attemptCount: claim.attemptCount,
+                        requestStatus: 'processing' as const,
+                    };
+                }),
+            });
+            outcomes.push(await processAnalysisV2TaskDelivery(delivery, {
+                store: jobStore,
+                handler,
+                terminalFailureFinalizer,
+                terminalMediaCleanup,
+            }));
+        }
+
+        expect(outcomes.slice(0, -1)).toEqual(Array.from(
+            { length: ANALYSIS_V2_JOB_MAX_ATTEMPTS - 1 },
+            () => ({ status: 'retry', errorCode: failureCode })
+        ));
+        expect(outcomes.at(-1)).toEqual({
+            status: 'failed',
+            errorCode: 'JOB_ATTEMPTS_EXHAUSTED',
+        });
+        expect(releasedClaims.map(claim => claim.attemptCount)).toEqual([1, 2, 3, 4, 5, 6]);
+        expect(terminalFailureFinalizer).toHaveBeenCalledWith(
+            expect.objectContaining({ attemptCount: ANALYSIS_V2_JOB_MAX_ATTEMPTS }),
+            'JOB_ATTEMPTS_EXHAUSTED'
+        );
+        expect(terminalMediaCleanup).toHaveBeenCalledOnce();
     });
 
     it('keeps a dependency-complete finalizer retryable beyond the generic limit', async () => {

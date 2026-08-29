@@ -70,12 +70,20 @@ describe('analysis V2 worker error codes', () => {
     it.each([
         ['ANALYSIS_V2_SOURCE_MEDIA_ARCHIVE_OBJECT_ERROR: retained upload failed (403).',
             'permanent', false],
+        ['ANALYSIS_V2_SOURCE_MEDIA_ARCHIVE_OBJECT_ERROR: retained upload failed (408).',
+            'transient', true],
         ['ANALYSIS_V2_SOURCE_MEDIA_ARCHIVE_OBJECT_ERROR: retained upload failed (429).',
+            'transient', true],
+        ['ANALYSIS_V2_SOURCE_MEDIA_ARCHIVE_OBJECT_ERROR: retained upload failed (500).',
             'transient', true],
         ['ANALYSIS_V2_SOURCE_MEDIA_ARCHIVE_OBJECT_ERROR: retained upload failed (503).',
             'transient', true],
+        ['ANALYSIS_V2_SOURCE_MEDIA_ARCHIVE_OBJECT_ERROR: retained upload failed (599).',
+            'transient', true],
         ['ANALYSIS_V2_SOURCE_MEDIA_ARCHIVE_OBJECT_ERROR: retained upload failed (unknown).',
             'transient', true],
+        ['ANALYSIS_V2_SOURCE_MEDIA_ARCHIVE_OBJECT_ERROR: retained upload failed (409).',
+            'permanent', false],
     ] as const)(
         'classifies the retained media failure %s as %s',
         (message, disposition, retryable) => {
