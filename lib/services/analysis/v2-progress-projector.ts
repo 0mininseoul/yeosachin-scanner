@@ -1,5 +1,7 @@
 import type { ProgressTrackId } from '@/lib/domain/analysis/progress-policy';
+import { getAnalysisPlan } from '@/lib/domain/analysis/plan-catalog';
 import type { AnalysisV2DagState } from './v2-dag-planner';
+import { ANALYSIS_V2_PROFILE_BATCH_LIMIT } from './v2-dag-planner';
 import type {
     AnalysisV2ProgressEventInput,
     AnalysisV2ProgressTracksInput,
@@ -55,11 +57,6 @@ const TRACK_COMPLETE_CODES: Readonly<Record<ProgressTrackId, string>> = Object.f
     finalization: 'FINALIZATION_COMPLETE',
 });
 
-// The DAG schema bounds profile fan-out to thirty batches. Holding this
-// denominator until relationship topology is durable prevents an early
-// provisional display from overshooting when the real topology expands.
-export const ANALYSIS_V2_MAX_PROFILE_BATCHES = 30;
-
 export interface AnalysisV2ProgressWorkTotals {
     relationshipAi: number;
     interactions: number;
@@ -71,11 +68,24 @@ export interface AnalysisV2ProjectedProgress {
     event: AnalysisV2ProgressEventInput | null;
 }
 
+/**
+ * Keep bootstrap progress below the eventual first durable profile checkpoint.
+ * Once the relationship manifest is available its frozen topology replaces
+ * this plan-aware upper bound.
+ */
+export function getAnalysisV2ConservativeProfileBatchCount(
+    planId: AnalysisV2DagState['planId'],
+): number {
+    return Math.ceil(
+        getAnalysisPlan(planId).detailedMutualLimit / ANALYSIS_V2_PROFILE_BATCH_LIMIT
+    );
+}
+
 export function getAnalysisV2ProgressWorkTotals(
     state: AnalysisV2DagState
 ): AnalysisV2ProgressWorkTotals {
     const profileBatches = state.relationships?.profileBatches.length
-        ?? ANALYSIS_V2_MAX_PROFILE_BATCHES;
+        ?? getAnalysisV2ConservativeProfileBatchCount(state.planId);
     const privateNameBatches = state.relationships?.privateNameBatches.length ?? 0;
     return Object.freeze({
         relationshipAi: profileBatches * 2 + 4,

@@ -327,14 +327,15 @@ export function updateProgressDisplay(
         : confirmedProgressBp;
     const checkpointStartProgressBp = checkpointJump
         ? confirmedProgressBp
-        : Math.max(
-            previous.displayProgressBp,
-            confirmedProgressBp,
-            provisionalTargetProgressBp,
-        );
+        : Math.max(previous.displayProgressBp, confirmedProgressBp);
     const signalEasingProgressRate = input.status === 'processing'
         ? signalEasingRate(input.currentOrdinal, input.totalCount, input.callPhase)
         : 1;
+    const signalChanged = signalKey !== previous.lastSignalKey;
+    const isInitialState = previous.displayProgressBp === 0
+        && previous.targetProgressBp === 0
+        && previous.capProgressBp === 0
+        && previous.confirmedProgressBp === 0;
     const startProgressBp = checkpointStartProgressBp;
     const targetProgressBp = input.status === 'processing'
         ? capProgressBp
@@ -393,10 +394,12 @@ export function updateProgressDisplay(
         };
     }
 
-    const easingStartedAtMs = checkpointJump || previous.lastSignalKey === null
+    const easingStartedAtMs = checkpointJump || signalChanged || isInitialState
         ? nowMs
         : previous.easingStartedAtMs;
-    const easingStartProgressBp = checkpointJump || previous.lastSignalKey === null
+    const easingStartProgressBp = checkpointJump
+        ? confirmedProgressBp
+        : signalChanged || isInitialState
         ? startProgressBp
         : previous.easingStartProgressBp;
     const elapsedMs = Math.max(0, nowMs - easingStartedAtMs);

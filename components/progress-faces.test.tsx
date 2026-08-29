@@ -6,13 +6,22 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { ProgressCandidateMediaV1 } from '@/lib/contracts/analysis-v2';
 import type { ActiveCandidateMedia } from '@/lib/services/analysis/progress-faces';
 
+const { imageErrorHandlers } = vi.hoisted(() => ({
+    imageErrorHandlers: new Map<string, Array<() => void>>(),
+}));
+
 vi.mock('next/image', () => ({
-    default: ({ unoptimized, src }: {
+    default: ({ unoptimized, src, onError }: {
         unoptimized?: boolean;
         src: string;
+        onError?: () => void;
     }) => {
         void unoptimized;
-        return <div data-progress-image={src} />;
+        if (onError) imageErrorHandlers.set(src, [
+            ...(imageErrorHandlers.get(src) ?? []),
+            onError,
+        ]);
+        return <div data-progress-image={src} onError={onError} />;
     },
 }));
 vi.mock('@/lib/services/result-local-image', () => ({
@@ -54,6 +63,7 @@ describe('ProgressFaces stable rail identity', () => {
     let container: HTMLDivElement;
 
     beforeEach(() => {
+        imageErrorHandlers.clear();
         vi.stubGlobal('requestAnimationFrame', vi.fn(() => 1));
         vi.stubGlobal('cancelAnimationFrame', vi.fn());
         container = document.createElement('div');
@@ -101,11 +111,21 @@ describe('ProgressFaces stable rail identity', () => {
             .toBe(fallbackTile);
         expect(repeatedCopy?.children).toHaveLength(2);
 
+        act(() => {
+            imageErrorHandlers.get(firstUrl)?.[0]?.();
+        });
+        expect(firstCopy.querySelector('[data-progress-image]')).toBeNull();
+        expect((firstTile as HTMLElement).style.width).toBe('84px');
+
         render(refreshedUrl);
         const refreshedCopy = container.querySelector<HTMLElement>('[data-progress-copy]');
         const refreshedImage = refreshedCopy?.querySelector('[data-progress-image]');
+        expect(refreshedImage).toBeTruthy();
         expect(refreshedCopy?.querySelector('[data-progress-image]')?.parentElement).toBe(firstTile);
-        expect(refreshedImage).toBe(firstImage);
+        expect((refreshedCopy?.querySelector('[data-progress-image]')?.parentElement as HTMLElement)
+            .style.width).toBe('84px');
+        expect(refreshedCopy?.querySelector('[data-progress-image]')?.parentElement).toBe(firstTile);
+        expect(refreshedImage).not.toBe(firstImage);
         expect(refreshedImage?.getAttribute('data-progress-image')).toContain('token=refreshed');
         expect(refreshedCopy?.children).toHaveLength(2);
         expect(container.querySelectorAll('[data-progress-copy]')).toHaveLength(3);

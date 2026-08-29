@@ -22,9 +22,18 @@ function state(overrides: Partial<AnalysisV2DagState> = {}): AnalysisV2DagState 
 }
 
 describe('analysis V2 progress projector', () => {
+    it('uses the canonical plan limit for the bootstrap profile denominator', () => {
+        expect(getAnalysisV2ProgressWorkTotals(state({ planId: 'basic' })).relationshipAi)
+            .toBe(10 * 2 + 4);
+        expect(getAnalysisV2ProgressWorkTotals(state({ planId: 'standard' })).relationshipAi)
+            .toBe(20 * 2 + 4);
+        expect(getAnalysisV2ProgressWorkTotals(state({ planId: 'plus' })).relationshipAi)
+            .toBe(30 * 2 + 4);
+    });
+
     it('uses the frozen fan-out topology instead of a plan-capacity estimate', () => {
         expect(getAnalysisV2ProgressWorkTotals(state())).toEqual({
-            relationshipAi: 64,
+            relationshipAi: 24,
             interactions: 2,
             finalization: 3,
         });
@@ -69,7 +78,7 @@ describe('analysis V2 progress projector', () => {
         }));
 
         expect(topologyKnownAtMaximum.relationshipAi).toBe(64);
-        expect(getAnalysisV2ProgressWorkTotals(state()).relationshipAi)
+        expect(getAnalysisV2ProgressWorkTotals(state({ planId: 'plus' })).relationshipAi)
             .toBe(topologyKnownAtMaximum.relationshipAi);
     });
 

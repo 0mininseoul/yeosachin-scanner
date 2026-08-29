@@ -627,6 +627,15 @@ export async function executeAnalysisV2DagJob(
         executionError('ANALYSIS_V2_PROFILE_PROGRESS_TOPOLOGY_MISSING', 'permanent');
     }
     let lastActiveProfileStartedAtMs = 0;
+    // Fence an idempotent stage-start checkpoint before entering provider/AI work. This keeps
+    // long unresolved executors observable without emitting a duplicate stage event; the
+    // completion report below remains responsible for the durable stage transition.
+    await progressReporter?.report({
+        claim,
+        state,
+        stage: current.stage,
+        includeStageEvent: false,
+    });
     const checkpoint = await executeRegisteredStage(current.stage, executors, {
         claim,
         job: current.job,

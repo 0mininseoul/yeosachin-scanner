@@ -10,6 +10,8 @@ import {
 import {
     ANALYSIS_V2_CANDIDATE_SCREENING_JOB_KEY,
     ANALYSIS_V2_FINALIZE_JOB_KEY,
+    ANALYSIS_V2_NARRATIVE_JOB_KEY,
+    ANALYSIS_V2_REVERSE_LIKES_JOB_KEY,
     buildAnalysisV2DagPlan,
     type AnalysisV2DagRelationshipManifest,
     type AnalysisV2DagState,
@@ -97,6 +99,20 @@ function relationshipManifest(): AnalysisV2DagRelationshipManifest {
         privateNameBatches: [
             { batch: 0, itemCount: 1, inputHash: digest('private-topology:0') },
         ],
+    };
+}
+
+function emptyRelationshipManifest(): AnalysisV2DagRelationshipManifest {
+    return {
+        revision: 1,
+        resultHash: digest('empty-relationships-for-stage-start'),
+        detectedMutualCount: 0,
+        publicCount: 0,
+        privateCount: 0,
+        detailedSelectedPublicCount: 0,
+        notScreenedPublicCount: 0,
+        profileBatches: [],
+        privateNameBatches: [],
     };
 }
 
@@ -848,6 +864,236 @@ describe('analysis V2 durable DAG worker', () => {
             .toBe(true);
     });
 
+    it('reports a concrete stage before an unresolved target-evidence executor', async () => {
+        const initial: AnalysisV2DagState = {
+            ...baseState(),
+            relationships: relationshipManifest(),
+        };
+        const targetClaim = claimFor(initial, ANALYSIS_V2_TARGET_EVIDENCE_JOB_KEY);
+        const targetManifest = {
+            revision: 1,
+            resultHash: digest('target-evidence-before-resolution'),
+            interactorCount: 2,
+        };
+        const completed: AnalysisV2DagState = {
+            ...initial,
+            targetEvidence: targetManifest,
+        };
+        let current = initial;
+        const dagStore = stateStore(initial, {
+            load: vi.fn(async () => current),
+            checkpointManifest: vi.fn(async () => {
+                current = completed;
+                return current;
+            }),
+        });
+        const result = {
+            checkpoint: {
+                kind: 'target_evidence' as const,
+                manifest: targetManifest,
+            },
+        };
+        let resolveExecutor: ((value: typeof result) => void) | undefined;
+        const executor: NonNullable<AnalysisV2StageExecutorRegistry['target_evidence']> =
+            vi.fn(() => new Promise<typeof result>(resolve => {
+                resolveExecutor = resolve;
+            }));
+        const progress = progressReporter();
+
+        const running = executeAnalysisV2DagJob(targetClaim, {
+            stateStore: dagStore,
+            executors: { target_evidence: executor },
+            progressReporter: progress,
+        });
+        await vi.waitFor(() => expect(executor).toHaveBeenCalledOnce());
+        expect(progress.report).toHaveBeenCalledExactlyOnceWith({
+            claim: targetClaim,
+            state: initial,
+            stage: 'target_evidence',
+            includeStageEvent: false,
+        });
+        expect(vi.mocked(progress.report).mock.invocationCallOrder[0])
+            .toBeLessThan(vi.mocked(executor).mock.invocationCallOrder[0]!);
+
+        resolveExecutor?.(result);
+        await expect(running).resolves.toEqual(expect.any(Array));
+        expect(executor).toHaveBeenCalledOnce();
+        expect(progress.report).toHaveBeenCalledTimes(2);
+    });
+
+    it('reports a concrete stage before an unresolved reverse-likes executor', async () => {
+        const initial: AnalysisV2DagState = {
+            ...baseState(),
+            relationships: emptyRelationshipManifest(),
+            targetEvidence: {
+                revision: 1,
+                resultHash: digest('target-evidence-for-reverse-start'),
+                interactorCount: 0,
+            },
+            primaryJoin: {
+                revision: 1,
+                resultHash: digest('primary-join-for-reverse-start'),
+                verifiedFemaleCount: 0,
+            },
+            screening: {
+                revision: 1,
+                resultHash: digest('screening-for-reverse-start'),
+                verifiedFemaleCount: 0,
+                shortlistCount: 0,
+                shortlistHash: digest('shortlist-for-reverse-start'),
+            },
+        };
+        const reverseClaim = claimFor(initial, ANALYSIS_V2_REVERSE_LIKES_JOB_KEY);
+        const reverseManifest = {
+            revision: 1,
+            resultHash: digest('reverse-likes-before-resolution'),
+            shortlistCount: 0,
+        };
+        const completed: AnalysisV2DagState = {
+            ...initial,
+            reverseLikes: reverseManifest,
+        };
+        let current = initial;
+        const dagStore = stateStore(initial, {
+            load: vi.fn(async () => current),
+            checkpointManifest: vi.fn(async () => {
+                current = completed;
+                return current;
+            }),
+        });
+        const result = {
+            checkpoint: {
+                kind: 'reverse_likes' as const,
+                manifest: reverseManifest,
+            },
+        };
+        let resolveExecutor: ((value: typeof result) => void) | undefined;
+        const executor: NonNullable<AnalysisV2StageExecutorRegistry['reverse_likes']> =
+            vi.fn(() => new Promise<typeof result>(resolve => {
+                resolveExecutor = resolve;
+            }));
+        const progress = progressReporter();
+
+        const running = executeAnalysisV2DagJob(reverseClaim, {
+            stateStore: dagStore,
+            executors: { reverse_likes: executor },
+            progressReporter: progress,
+            aiPolicyStore: {
+                loadAiStagePolicyVersion: vi.fn(async () => AI_STAGE_POLICY_LATEST_VERSION),
+                loadRiskPolicyVersion: vi.fn(async () => 'risk-policy-v2.4'),
+            },
+        });
+        await vi.waitFor(() => expect(executor).toHaveBeenCalledOnce());
+        expect(progress.report).toHaveBeenCalledExactlyOnceWith({
+            claim: reverseClaim,
+            state: initial,
+            stage: 'reverse_likes',
+            includeStageEvent: false,
+        });
+        expect(vi.mocked(progress.report).mock.invocationCallOrder[0])
+            .toBeLessThan(vi.mocked(executor).mock.invocationCallOrder[0]!);
+
+        resolveExecutor?.(result);
+        await expect(running).resolves.toEqual(expect.any(Array));
+        expect(executor).toHaveBeenCalledOnce();
+        expect(progress.report).toHaveBeenCalledTimes(2);
+    });
+
+    it('reports a concrete stage before an unresolved narrative executor', async () => {
+        const initial: AnalysisV2DagState = {
+            ...baseState(),
+            relationships: emptyRelationshipManifest(),
+            targetEvidence: {
+                revision: 1,
+                resultHash: digest('target-evidence-for-narrative-start'),
+                interactorCount: 0,
+            },
+            primaryJoin: {
+                revision: 1,
+                resultHash: digest('primary-join-for-narrative-start'),
+                verifiedFemaleCount: 0,
+            },
+            screening: {
+                revision: 1,
+                resultHash: digest('screening-for-narrative-start'),
+                verifiedFemaleCount: 0,
+                shortlistCount: 0,
+                shortlistHash: digest('shortlist-for-narrative-start'),
+            },
+            reverseLikes: {
+                revision: 1,
+                resultHash: digest('reverse-likes-for-narrative-start'),
+                shortlistCount: 0,
+            },
+            partnerSafety: {
+                revision: 1,
+                resultHash: digest('partner-safety-for-narrative-start'),
+                shortlistCount: 0,
+            },
+            finalScore: {
+                revision: 1,
+                resultHash: digest('final-score-for-narrative-start'),
+                featuredHighRiskCount: 0,
+                narrativeCount: 0,
+                narrativeBatchHash: digest('narrative-batch-for-narrative-start'),
+            },
+        };
+        const narrativeClaim = claimFor(initial, ANALYSIS_V2_NARRATIVE_JOB_KEY);
+        const narrativeManifest = {
+            revision: 1,
+            resultHash: digest('narrative-before-resolution'),
+            narrativeCount: 0,
+        };
+        const completed: AnalysisV2DagState = {
+            ...initial,
+            narrative: narrativeManifest,
+        };
+        let current = initial;
+        const dagStore = stateStore(initial, {
+            load: vi.fn(async () => current),
+            checkpointManifest: vi.fn(async () => {
+                current = completed;
+                return current;
+            }),
+        });
+        const result = {
+            checkpoint: {
+                kind: 'narrative' as const,
+                manifest: narrativeManifest,
+            },
+        };
+        let resolveExecutor: ((value: typeof result) => void) | undefined;
+        const executor: NonNullable<AnalysisV2StageExecutorRegistry['narrative']> =
+            vi.fn(() => new Promise<typeof result>(resolve => {
+                resolveExecutor = resolve;
+            }));
+        const progress = progressReporter();
+
+        const running = executeAnalysisV2DagJob(narrativeClaim, {
+            stateStore: dagStore,
+            executors: { narrative: executor },
+            progressReporter: progress,
+            aiPolicyStore: {
+                loadAiStagePolicyVersion: vi.fn(async () => AI_STAGE_POLICY_LATEST_VERSION),
+                loadRiskPolicyVersion: vi.fn(async () => 'risk-policy-v2.4'),
+            },
+        });
+        await vi.waitFor(() => expect(executor).toHaveBeenCalledOnce());
+        expect(progress.report).toHaveBeenCalledExactlyOnceWith({
+            claim: narrativeClaim,
+            state: initial,
+            stage: 'narrative',
+            includeStageEvent: false,
+        });
+        expect(vi.mocked(progress.report).mock.invocationCallOrder[0])
+            .toBeLessThan(vi.mocked(executor).mock.invocationCallOrder[0]!);
+
+        resolveExecutor?.(result);
+        await expect(running).resolves.toEqual(expect.any(Array));
+        expect(executor).toHaveBeenCalledOnce();
+        expect(progress.report).toHaveBeenCalledTimes(2);
+    });
+
     it('wires an exact profile-start callback to the fenced progress heartbeat', async () => {
         const initial: AnalysisV2DagState = {
             ...baseState(),
@@ -921,10 +1167,15 @@ describe('analysis V2 durable DAG worker', () => {
         expect(Date.parse(calls[1]![0].startedAt)).toBeGreaterThan(
             Date.parse(calls[0]![0].startedAt)
         );
-        expect(progress.report).toHaveBeenCalledOnce();
-        expect(dagStore.checkpointManifest).toHaveBeenCalledBefore(
-            vi.mocked(progress.report)
-        );
+        expect(progress.report).toHaveBeenCalledTimes(2);
+        expect(progress.report).toHaveBeenNthCalledWith(1, {
+            claim: profileClaim,
+            state: initial,
+            stage: 'profile_fetch',
+            includeStageEvent: false,
+        });
+        expect(vi.mocked(dagStore.checkpointManifest).mock.invocationCallOrder[0])
+            .toBeLessThan(vi.mocked(progress.report).mock.invocationCallOrder[1]!);
     });
 
     it('accepts one profile-AI preview callback without adding a heartbeat', async () => {
@@ -1028,7 +1279,12 @@ describe('analysis V2 durable DAG worker', () => {
         })).rejects.toThrow('MANIFEST_PERSISTENCE_FAILED');
 
         expect(progress.heartbeat).toHaveBeenCalledOnce();
-        expect(progress.report).not.toHaveBeenCalled();
+        expect(progress.report).toHaveBeenCalledExactlyOnceWith({
+            claim: profileClaim,
+            state: initial,
+            stage: 'profile_fetch',
+            includeStageEvent: false,
+        });
     });
 
     it('replays a persisted checkpoint without repeating provider work after completion failure', async () => {

@@ -196,6 +196,13 @@ describe('useAnalysisProgress V2 display lifecycle', () => {
             },
         }));
         await act(async () => { await refetch?.(); });
+        // A changed ordinal/phase is a non-durable signal: it re-anchors at the
+        // prior display and only moves on a later visible timer tick.
+        expect(Number(displayed().split(':')[1])).toBe(Number(second.split(':')[1]));
+        await act(async () => {
+            vi.advanceTimersByTime(1_000);
+            await Promise.resolve();
+        });
         expect(Number(displayed().split(':')[1])).toBeGreaterThan(Number(second.split(':')[1]));
     });
 
