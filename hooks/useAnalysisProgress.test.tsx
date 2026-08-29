@@ -328,14 +328,15 @@ describe('useAnalysisProgress V2 display lifecycle', () => {
         expect(displayed()).toBe('completed:100');
     });
 
-    it('resets display progress when publication lag explicitly returns a queued snapshot', async () => {
+    it('preserves display progress while publication lag returns a queued snapshot, then reaches 100 after publication', async () => {
         await render();
         expect(container.querySelector('[data-testid="history"]')?.textContent).toBe('1');
         await act(async () => {
             vi.advanceTimersByTime(15_000);
             await Promise.resolve();
         });
-        expect(Number(displayed().split(':')[1])).toBeGreaterThan(0);
+        const beforePublicationLag = Number(displayed().split(':')[1]);
+        expect(beforePublicationLag).toBeGreaterThan(0);
 
         current.set(REQUEST_A, snapshot(REQUEST_A, {
             revision: 2,
@@ -373,17 +374,53 @@ describe('useAnalysisProgress V2 display lifecycle', () => {
         }));
         currentEvents.set(REQUEST_A, []);
         await act(async () => { await refetch?.(); });
-        expect(displayed()).toBe('pending:0');
+        expect(Number(displayed().split(':')[1])).toBeGreaterThanOrEqual(beforePublicationLag);
         expect(container.querySelector('[data-testid="history"]')?.textContent).toBe('0');
 
         await act(async () => {
             vi.advanceTimersByTime(10_000);
             await Promise.resolve();
         });
-        expect(displayed()).toBe('pending:0');
+        expect(Number(displayed().split(':')[1])).toBe(beforePublicationLag);
 
         await act(async () => { await refetch?.(); });
         expect(fetchUrls.at(-1)).toContain('afterSeq=0');
         expect(container.querySelector('[data-testid="history"]')?.textContent).toBe('0');
+
+        current.set(REQUEST_A, snapshot(REQUEST_A, {
+            revision: 3,
+            status: 'completed',
+            progressBp: 10_000,
+            backgroundProcessing: false,
+            activeProfile: null,
+            candidateMedia: [],
+            etaRange: null,
+            tracks: {
+                relationshipAi: {
+                    state: 'completed',
+                    stageCode: 'RELATIONSHIP_AI_COMPLETE',
+                    done: 1,
+                    total: 1,
+                    progressBp: 10_000,
+                },
+                interactions: {
+                    state: 'completed',
+                    stageCode: 'INTERACTIONS_COMPLETE',
+                    done: 1,
+                    total: 1,
+                    progressBp: 10_000,
+                },
+                finalization: {
+                    state: 'completed',
+                    stageCode: 'FINALIZATION_COMPLETE',
+                    done: 1,
+                    total: 1,
+                    progressBp: 10_000,
+                },
+            },
+            lastEventSeq: 0,
+        }));
+        await act(async () => { await refetch?.(); });
+        expect(displayed()).toBe('completed:100');
     });
 });

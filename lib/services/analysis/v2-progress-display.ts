@@ -278,11 +278,25 @@ export function updateProgressDisplay(
     input: ProgressDisplayInput,
 ): ProgressDisplayState {
     const nowMs = safeNow(input.nowMs, previous.lastNowMs);
-    if (input.publicationLagReset === true) {
+    if (input.publicationLagReset === true && input.status !== 'completed') {
+        const preservedDisplayProgressBp = Math.min(
+            9_999,
+            boundedBasisPoints(previous.displayProgressBp),
+        );
         return {
             ...createProgressDisplayState(),
+            displayProgressBp: preservedDisplayProgressBp,
+            targetProgressBp: preservedDisplayProgressBp,
+            capProgressBp: preservedDisplayProgressBp,
+            confirmedProgressBp: Math.min(
+                9_999,
+                boundedBasisPoints(input.confirmedProgressBp),
+            ),
             lastSignalKey: input.signalKey ?? null,
             easingStartedAtMs: nowMs,
+            easingStartProgressBp: preservedDisplayProgressBp,
+            provisionalTargetProgressBp: preservedDisplayProgressBp,
+            easingRate: 1,
             lastNowMs: nowMs,
         };
     }

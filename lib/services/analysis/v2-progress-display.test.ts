@@ -547,7 +547,7 @@ describe('V2 progress display easing', () => {
         expect(completed.targetProgressBp).toBe(10_000);
     });
 
-    it('resets a publication-lag snapshot explicitly without weakening normal monotonic progress', () => {
+    it('preserves displayed progress while publication lag resets transient easing state', () => {
         const high = updateProgressDisplay(
             createProgressDisplayState(),
             input({
@@ -573,9 +573,30 @@ describe('V2 progress display easing', () => {
             signalKey: 'publication-lag-reset',
             publicationLagReset: true,
         }));
-        expect(reset.displayProgressBp).toBe(0);
-        expect(reset.targetProgressBp).toBe(0);
-        expect(reset.capProgressBp).toBe(0);
+        expect(high.displayProgressBp).toBe(9_900);
+        expect(reset.displayProgressBp).toBe(high.displayProgressBp);
+        expect(reset.displayProgressBp).toBeLessThan(10_000);
+        expect(reset.targetProgressBp).toBe(reset.displayProgressBp);
+        expect(reset.capProgressBp).toBe(reset.displayProgressBp);
+        expect(reset.confirmedProgressBp).toBe(0);
+        expect(reset.easingStartedAtMs).toBe(200);
+        expect(reset.easingStartProgressBp).toBe(reset.displayProgressBp);
+        expect(reset.provisionalTargetProgressBp).toBe(reset.displayProgressBp);
+        expect(reset.easingRate).toBe(1);
+        expect(reset.lastNowMs).toBe(200);
+
+        const emptyReset = updateProgressDisplay(
+            createProgressDisplayState(),
+            input({
+                status: 'queued',
+                confirmedProgressBp: 0,
+                nextCheckpointBp: undefined,
+                nowMs: 200,
+                signalKey: 'publication-lag-reset-without-progress',
+                publicationLagReset: true,
+            }),
+        );
+        expect(emptyReset.displayProgressBp).toBe(0);
 
         const resumed = updateProgressDisplay(reset, input({
             confirmedProgressBp: 100,
@@ -583,7 +604,17 @@ describe('V2 progress display easing', () => {
             nowMs: 300,
             signalKey: 'resumed-processing',
         }));
-        expect(resumed.displayProgressBp).toBeGreaterThanOrEqual(0);
+        expect(resumed.displayProgressBp).toBe(reset.displayProgressBp);
         expect(resumed.displayProgressBp).toBeLessThan(10_000);
+
+        const completed = updateProgressDisplay(resumed, input({
+            status: 'completed',
+            confirmedProgressBp: 10_000,
+            nextCheckpointBp: undefined,
+            nowMs: 400,
+            signalKey: 'published-completion',
+        }));
+        expect(completed.displayProgressBp).toBe(10_000);
+        expect(completed.targetProgressBp).toBe(10_000);
     });
 });
