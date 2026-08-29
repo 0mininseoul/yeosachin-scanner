@@ -172,6 +172,27 @@ assert_no_sensitive_probe_value "$output"
 [[ "$(<"$command_log")" != *"$vercel_token"* ]] \
   || fail 'Vercel token appeared in a release-readiness command argv'
 
+export FAKE_SUPABASE_JSON='{"message":"","migrations":[{"local":"20260829120000_add_analysis_v2_progress_signals_history.sql","remote":"20260829120000","time":"2026-08-29T12:00:00Z"}]}'
+if ! output="$(run_gate 2>&1)"; then
+  printf '%s\n' "$output" >&2
+  fail 'row-level remote migration provenance was rejected'
+fi
+assert_no_token "$output"
+assert_no_sensitive_probe_value "$output"
+[[ "$output" == *"release readiness passed"* ]] \
+  || fail 'row-level remote migration provenance did not report a pass'
+
+export FAKE_SUPABASE_JSON='{"message":"","migrations":[{"local":"20260829120000_add_analysis_v2_progress_signals_history.sql","remote":null,"time":null}]}'
+if output="$(run_gate 2>&1)"; then
+  fail 'local-only migration provenance was accepted'
+fi
+assert_no_token "$output"
+assert_no_sensitive_probe_value "$output"
+[[ "$output" == *'DB progress migration 20260829120000 is not applied'* ]] \
+  || fail 'local-only migration provenance was not rejected explicitly'
+
+export FAKE_SUPABASE_JSON='[{"version":"20260829120000","name":"add_analysis_v2_progress_signals_history"}]'
+
 export FAKE_REVISION_JSON="{\"metadata\":{\"name\":\"analysis-worker-active\",\"labels\":{\"analysis-v2-source-commit\":\"$expected_sha\"}},\"status\":{\"conditions\":[{\"type\":\"Ready\",\"status\":\"True\"}]}}"
 export FAKE_SERVICE_JSON='{"status":{"traffic":[{"revisionName":"analysis-worker-active","percent":100}]}}'
 export FAKE_REVISION_JSON="${FAKE_REVISION_JSON/$expected_sha/ffffffffffffffffffffffffffffffffffffffff}"

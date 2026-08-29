@@ -176,7 +176,18 @@ if ! migration_list="$(supabase --workdir "$supabase_workdir" migration list \
 fi
 jq -e --arg version "$expected_progress_migration_version" '
   def version_of:
-    (.version // .migration_version // .migration // .id // "") | tostring;
+    if type == "object" and has("local") then
+      if (.remote? | type) == "string" then .remote
+      elif (.remote? | type) == "object" then
+        (.remote.version // .remote.migration_version // .remote.migration // .remote.id // "")
+      else ""
+      end
+    elif type == "object" and (.remote? | type) == "string" then .remote
+    elif type == "object" and (.remote? | type) == "object" then
+      (.remote.version // .remote.migration_version // .remote.migration // .remote.id // "")
+    else
+      (.version // .migration_version // .migration // .id // "")
+    end | tostring;
   def applied_rows:
     if type == "array" then .
     elif type == "object" and (.remote? | type) == "array" then .remote
