@@ -11,7 +11,7 @@ describe('earlybird payment-pending status refresh', () => {
         vi.useRealTimers();
     });
 
-    it('refreshes a pending payment a bounded number of times', () => {
+    it('refreshes a pending payment through the full burst', () => {
         vi.useFakeTimers();
         const refresh = vi.fn();
 
@@ -21,12 +21,47 @@ describe('earlybird payment-pending status refresh', () => {
         expect(refresh).not.toHaveBeenCalled();
         vi.advanceTimersByTime(1);
         expect(refresh).toHaveBeenCalledTimes(1);
-        vi.advanceTimersByTime(2_000);
+        vi.advanceTimersByTime(1_000);
         expect(refresh).toHaveBeenCalledTimes(2);
+        vi.advanceTimersByTime(2_000);
+        expect(refresh).toHaveBeenCalledTimes(3);
         vi.advanceTimersByTime(4_000);
-        expect(refresh).toHaveBeenCalledTimes(3);
-        vi.advanceTimersByTime(10_000);
-        expect(refresh).toHaveBeenCalledTimes(3);
+        expect(refresh).toHaveBeenCalledTimes(4);
+        vi.advanceTimersByTime(7_000);
+        expect(refresh).toHaveBeenCalledTimes(5);
+        vi.advanceTimersByTime(15_000);
+        expect(refresh).toHaveBeenCalledTimes(6);
+        vi.advanceTimersByTime(30_000);
+        expect(refresh).toHaveBeenCalledTimes(7);
+    });
+
+    it('continues payment confirmation with a bounded low-frequency tail', () => {
+        vi.useFakeTimers();
+        const refresh = vi.fn();
+
+        scheduleEarlybirdStatusSnapshotRefresh(refresh, 'payment_pending');
+
+        vi.advanceTimersByTime(60_000);
+        expect(refresh).toHaveBeenCalledTimes(7);
+        vi.advanceTimersByTime(59_999);
+        expect(refresh).toHaveBeenCalledTimes(7);
+        vi.advanceTimersByTime(1);
+        expect(refresh).toHaveBeenCalledTimes(8);
+        vi.advanceTimersByTime(5 * 60_000);
+        expect(refresh).toHaveBeenCalledTimes(13);
+    });
+
+    it('cancels the recurring payment tail when the status view stops refreshing', () => {
+        vi.useFakeTimers();
+        const refresh = vi.fn();
+
+        const stop = scheduleEarlybirdStatusSnapshotRefresh(refresh, 'payment_pending');
+        vi.advanceTimersByTime(120_000);
+        expect(refresh).toHaveBeenCalledTimes(8);
+
+        stop();
+        vi.advanceTimersByTime(10 * 60_000);
+        expect(refresh).toHaveBeenCalledTimes(8);
     });
 
     it('cancels every scheduled refresh when the status view unmounts', () => {

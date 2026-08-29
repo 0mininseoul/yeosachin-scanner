@@ -516,6 +516,49 @@ AS $$
     );
 $$;
 
+/* Stage canonicalization can change the payload after the client has already
+   hashed its pre-canonical snapshot. Rebuild a deterministic DB identity from
+   the canonical payload so state and any later event share one identity. */
+CREATE OR REPLACE FUNCTION public.analysis_v2_progress_snapshot_fingerprint(
+    p_status TEXT,
+    p_background_processing BOOLEAN,
+    p_tracks JSONB,
+    p_active_profile JSONB,
+    p_eta_range JSONB
+)
+RETURNS TEXT
+LANGUAGE plpgsql
+IMMUTABLE
+SET search_path = ''
+AS $$
+DECLARE
+    v_payload BYTEA := pg_catalog.convert_to(
+        pg_catalog.jsonb_build_object(
+            'domain', 'analysis-v2-progress-canonical-fingerprint-v1',
+            'status', p_status,
+            'backgroundProcessing', p_background_processing,
+            'tracks', p_tracks,
+            'activeProfile', p_active_profile,
+            'etaRange', p_eta_range
+        )::TEXT,
+        'UTF8'
+    );
+    v_fingerprint TEXT;
+BEGIN
+    BEGIN
+        EXECUTE 'SELECT pg_catalog.encode(pg_catalog.sha256($1::BYTEA), ''hex'')'
+            INTO v_fingerprint
+            USING v_payload;
+    EXCEPTION
+        WHEN undefined_function THEN
+            EXECUTE 'SELECT pg_catalog.encode(extensions.digest($1::BYTEA, ''sha256''), ''hex'')'
+                INTO v_fingerprint
+                USING v_payload;
+    END;
+    RETURN v_fingerprint;
+END;
+$$;
+
 /* The historical checkpoint remains the implementation of fencing, counter
    monotonicity, revision/event idempotence, and conflict recovery. Rename it
    once, then put the stage canonicalization boundary in front of it. The
@@ -621,6 +664,20 @@ BEGIN
                 v_effective_event := NULL;
                 v_effective_event_key := NULL;
             END IF;
+        ELSIF v_stage_canonicalized THEN
+            /* The caller's fingerprint covers the stale stage. Use a hash of
+               the rewritten payload, and never let an event for that stale
+               stage enter the durable history. A later canonical retry can
+               attach its event against this stored identity. */
+            v_effective_fingerprint := public.analysis_v2_progress_snapshot_fingerprint(
+                p_status,
+                p_background_processing,
+                v_canonical_tracks,
+                p_active_profile,
+                p_eta_range
+            );
+            v_effective_event := NULL;
+            v_effective_event_key := NULL;
         END IF;
     END IF;
 
@@ -642,17 +699,6 @@ BEGIN
 END;
 $$;
 
--- The dedupe order is request/username-first; this partial index avoids
--- scanning failed/private rows before selecting the bounded newest window.
-CREATE INDEX IF NOT EXISTS analysis_v2_progress_media_outcomes_idx
-    ON public.analysis_v2_profile_fetch_outcomes (
-        request_id, username, captured_at DESC, ordinal DESC, attempt DESC
-    )
-    WHERE status = 'success'
-      AND job_key LIKE 'track:profiles:batch:%'
-      AND profile_snapshot IS NOT NULL
-      AND profile_snapshot->>'isPrivate' = 'false';
-
 REVOKE ALL ON FUNCTION public.analysis_v2_load_progress_internal(UUID, UUID, BIGINT, INTEGER, BOOLEAN)
     FROM PUBLIC, anon, authenticated, service_role;
 GRANT EXECUTE ON FUNCTION public.analysis_v2_load_progress_internal(UUID, UUID, BIGINT, INTEGER, BOOLEAN)
@@ -671,6 +717,9 @@ REVOKE ALL ON FUNCTION public.analysis_v2_progress_merge_track_stage(TEXT, JSONB
     FROM PUBLIC, anon, authenticated, service_role;
 REVOKE ALL ON FUNCTION public.analysis_v2_progress_canonical_tracks(JSONB, JSONB)
     FROM PUBLIC, anon, authenticated, service_role;
+REVOKE ALL ON FUNCTION public.analysis_v2_progress_snapshot_fingerprint(
+    TEXT, BOOLEAN, JSONB, JSONB, JSONB
+) FROM PUBLIC, anon, authenticated, service_role;
 REVOKE ALL ON FUNCTION public.checkpoint_analysis_v2_progress_v1(
     UUID, TEXT, UUID, TEXT, TEXT, INTEGER, BOOLEAN, JSONB, JSONB, JSONB, TEXT, JSONB, TEXT
 ) FROM PUBLIC, anon, authenticated, service_role;

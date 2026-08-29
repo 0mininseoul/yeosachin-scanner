@@ -57,7 +57,7 @@ describe('V2 progress signals and history migration contract', () => {
         expect(migration).toContain('LIMIT 20');
         expect(migration).toContain('ORDER BY candidate.captured_at DESC, candidate.ordinal DESC, candidate.username DESC');
         expect(migration).toContain('ORDER BY candidate.captured_at ASC, candidate.ordinal, candidate.username');
-        expect(migration).toContain('CREATE INDEX IF NOT EXISTS analysis_v2_progress_media_outcomes_idx');
+        expect(migration).not.toContain('CREATE INDEX IF NOT EXISTS analysis_v2_progress_media_outcomes_idx');
         expect(migration).toContain('load_analysis_v2_progress_with_candidate_media');
         expect(migration).toContain("'currentOrdinal', heartbeat.completed_count");
         expect(migration).toContain("'totalCount', heartbeat.total_count");
@@ -80,6 +80,12 @@ describe('V2 progress signals and history migration contract', () => {
         expect(migration).toContain('THEN p_previous');
         expect(migration).toContain('v_previous_progress_bp');
         expect(migration).toContain('v_stage_canonicalized');
+        expect(migration).toContain('analysis_v2_progress_snapshot_fingerprint');
+        expect(migration).toContain('WHEN undefined_function THEN');
+        expect(migration).toContain('extensions.digest');
+        expect(migration).toContain('analysis-v2-progress-canonical-fingerprint-v1');
+        expect(migration).toContain('v_effective_event := NULL;');
+        expect(migration).toContain('v_effective_event_key := NULL;');
         expect(migration).toContain('FOR UPDATE');
         expect(migration).not.toMatch(/pg_advisory_(?:xact_)?lock/i);
         expect(migration).not.toMatch(/CREATE\s+TABLE/i);

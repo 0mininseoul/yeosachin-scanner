@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { PGlite } from '@electric-sql/pglite';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
@@ -52,6 +53,29 @@ function weightedProgress(relationshipDone: number, relationshipTotal: number, f
         7200 * relationshipDone / relationshipTotal
         + 1100 * finalizationDone / finalizationTotal,
     );
+}
+
+function clientEventKey(
+    fingerprint: string,
+    event: {
+        state: 'provisional' | 'confirmed' | 'corrected';
+        eventCode: string;
+        copyCode: string;
+        aggregateCount: number | null;
+    },
+): string {
+    return createHash('sha256')
+        .update('analysis-v2-progress-event-v1\n', 'utf8')
+        .update(REQUEST_ID.toLowerCase(), 'utf8')
+        .update('\n', 'utf8')
+        .update(FINALIZATION_JOB, 'utf8')
+        .update('\n', 'utf8')
+        .update(HASH, 'utf8')
+        .update('\n', 'utf8')
+        .update(fingerprint, 'utf8')
+        .update('\n', 'utf8')
+        .update(JSON.stringify(event), 'utf8')
+        .digest('hex');
 }
 
 function tracks(overrides: {
@@ -337,6 +361,86 @@ describe('V2 progress stage canonicalization under distributed races', () => {
         expect(mixed.snapshot.tracks.finalization.stageCode)
             .toBe('HIGH_RISK_NARRATIVES_WRITING');
         expect(mixed.snapshot.revision).toBe(profile.snapshot.revision + 1);
+    });
+
+    it('reconciles a stale-stage event after another field advances', async () => {
+        await checkpoint({
+            jobKey: PROFILE_AI_JOB,
+            stageTracks: tracks({ relationshipStage: 'PROFILE_SCREENING' }),
+            progressBp: 1800,
+            fingerprint: '7'.repeat(64),
+        });
+
+        const staleTracks = tracks({
+            relationshipStage: 'PUBLIC_PROFILES_COLLECTING',
+            finalizationStage: 'HIGH_RISK_NARRATIVES_WRITING',
+            finalizationDone: 1,
+        });
+        const event = {
+            state: 'confirmed' as const,
+            eventCode: 'PROFILE_SCREENED',
+            copyCode: 'PROFILE_SCREENED_CONFIRMED',
+            aggregateCount: 1,
+        };
+        const staleFingerprint = '8'.repeat(64);
+        const stale = await checkpoint({
+            jobKey: FINALIZATION_JOB,
+            stageTracks: staleTracks,
+            progressBp: weightedProgress(1, 4, 1, 3),
+            fingerprint: staleFingerprint,
+            event,
+            eventKey: clientEventKey(staleFingerprint, event),
+        });
+
+        expect(stale.snapshot.tracks.relationshipAi.stageCode).toBe('PROFILE_SCREENING');
+        expect(stale.snapshot.tracks.finalization.done).toBe(1);
+        expect(stale.event).toBeNull();
+
+        const canonicalTracks = tracks({
+            relationshipStage: 'PROFILE_SCREENING',
+            finalizationStage: 'HIGH_RISK_NARRATIVES_WRITING',
+            finalizationDone: 1,
+        });
+        const canonicalFingerprint = 'a'.repeat(64);
+        const canonical = await checkpoint({
+            jobKey: FINALIZATION_JOB,
+            stageTracks: canonicalTracks,
+            progressBp: weightedProgress(1, 4, 1, 3),
+            fingerprint: canonicalFingerprint,
+            event,
+            eventKey: clientEventKey(canonicalFingerprint, event),
+        });
+
+        const retried = await checkpoint({
+            jobKey: FINALIZATION_JOB,
+            stageTracks: canonicalTracks,
+            progressBp: weightedProgress(1, 4, 1, 3),
+            fingerprint: canonicalFingerprint,
+            event,
+            eventKey: clientEventKey(canonicalFingerprint, event),
+        });
+
+        expect(canonical.event?.eventCode).toBe('PROFILE_SCREENED');
+        expect(retried.event?.eventCode).toBe('PROFILE_SCREENED');
+        expect(retried.event).toEqual(canonical.event);
+
+        const events = await db.query<{ count: string; snapshot_fingerprint: string }>(
+            `SELECT COUNT(*)::TEXT AS count,
+                    MIN(snapshot_fingerprint) AS snapshot_fingerprint
+             FROM public.analysis_progress_events
+             WHERE request_id = $1`,
+            [REQUEST_ID],
+        );
+        const state = await db.query<{ snapshot_fingerprint: string }>(
+            `SELECT snapshot_fingerprint
+             FROM public.analysis_progress_state
+             WHERE request_id = $1`,
+            [REQUEST_ID],
+        );
+        expect(events.rows[0]?.count).toBe('1');
+        expect(state.rows[0]?.snapshot_fingerprint).toMatch(/^[a-f0-9]{64}$/);
+        expect(events.rows[0]?.snapshot_fingerprint)
+            .toBe(state.rows[0]?.snapshot_fingerprint);
     });
 
     it('keeps counter and state regression guards after stage canonicalization', async () => {

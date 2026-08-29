@@ -1,6 +1,6 @@
 import type { EarlybirdOrderStatusDto } from './order-status';
 
-const PAYMENT_PENDING_REFRESH_DELAYS_MS = [1_000, 2_000, 4_000] as const;
+const PAYMENT_PENDING_REFRESH_DELAYS_MS = [1_000, 2_000, 4_000, 8_000, 15_000, 30_000, 60_000] as const;
 const AUTOMATIC_REFRESH_DELAYS_MS = [1_000, 2_000, 4_000, 8_000, 15_000, 30_000, 60_000] as const;
 const AUTOMATIC_TAIL_INTERVAL_MS = 60_000;
 const LIFECYCLE_REFRESH_COOLDOWN_MS = 250;
@@ -70,12 +70,12 @@ export function shouldAutomaticallyRedirectEarlybirdStatus(
 }
 
 /**
- * Re-reads the dynamic server order snapshot for the short interval in which
+ * Re-reads the dynamic server order snapshot during the bounded burst in which
  * Groble can confirm payment and automatic fulfillment can materialize a request.
- * Automatic fulfillment keeps a bounded-rate low-frequency tail after the
- * burst so a delayed request materialization can still recover while this
- * refresh mode remains active. Payment confirmation retains the short canary
- * window; support and all other terminal states do not poll.
+ * Both refresh modes keep a bounded-rate low-frequency tail after the burst so
+ * delayed payment confirmation or request materialization can still recover
+ * while this refresh mode remains active. Support and other terminal states do
+ * not poll.
  */
 export function scheduleEarlybirdStatusSnapshotRefresh(
     refresh: () => void,
@@ -127,12 +127,9 @@ export function scheduleEarlybirdStatusSnapshotRefresh(
         timers.add(timer);
     }
 
-    if (mode === 'automatic') {
-        scheduleTail(
-            AUTOMATIC_REFRESH_DELAYS_MS[AUTOMATIC_REFRESH_DELAYS_MS.length - 1]
-                + AUTOMATIC_TAIL_INTERVAL_MS,
-        );
-    }
+    scheduleTail(
+        delays[delays.length - 1] + AUTOMATIC_TAIL_INTERVAL_MS,
+    );
 
     const stopTimers = () => {
         for (const timer of timers) clearTimeout(timer);
