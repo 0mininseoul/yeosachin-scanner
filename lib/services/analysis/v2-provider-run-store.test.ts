@@ -1463,6 +1463,39 @@ describe('analysis V2 provider run store', () => {
         );
     });
 
+    it('loads cleanup admission only for the exact failed job and input fence', async () => {
+        const { rpc, client } = clientWithRpc();
+        rpc.mockResolvedValueOnce({
+            data: {
+                requestId,
+                jobKey,
+                jobInputHash: inputHash,
+                errorCode: 'ORIGINAL_PROVIDER_FAILURE',
+            },
+            error: null,
+        });
+        const store = createAnalysisV2ProviderRunStore(client);
+
+        await expect(store.loadCleanupIntentForJob?.({
+            requestId,
+            jobKey,
+            jobInputHash: inputHash,
+        })).resolves.toEqual({
+            requestId,
+            jobKey,
+            jobInputHash: inputHash,
+            errorCode: 'ORIGINAL_PROVIDER_FAILURE',
+        });
+        expect(rpc).toHaveBeenCalledWith(
+            ANALYSIS_V2_PROVIDER_RUN_DATABASE_NAMES.loadCleanupIntentForJobRpc,
+            {
+                p_request_id: requestId,
+                p_job_key: jobKey,
+                p_job_input_hash: inputHash,
+            }
+        );
+    });
+
     it('preserves the typed cleanup freeze when a sibling tries to reserve paid work', async () => {
         const { rpc, client } = clientWithRpc();
         rpc.mockResolvedValueOnce({

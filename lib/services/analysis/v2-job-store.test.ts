@@ -60,6 +60,48 @@ describe('analysis V2 job store', () => {
         expect(ANALYSIS_V2_JOB_LEASE_SECONDS).toBe(600);
     });
 
+    it('reclaims an intent-owned terminal failure through the additive takeover RPC', async () => {
+        const dispatchFence = randomUUID();
+        const rpc = vi.fn().mockResolvedValue({
+            data: [{
+                claimed: true,
+                job_status: 'processing',
+                attempt_count: 4,
+                track: 'coordinator',
+                job_kind: 'bootstrap',
+                batch: null,
+                input_hash: inputHash,
+            }],
+            error: null,
+        });
+        const store = createSupabaseAnalysisV2JobStore(rpcClient(rpc));
+
+        await expect(store.takeoverTerminalFailure!({
+            requestId,
+            jobKey,
+            generation: 3,
+            reservationToken: dispatchFence,
+        }, 90)).resolves.toMatchObject({
+            requestId,
+            jobKey,
+            inputHash,
+            generation: 3,
+            reservationToken: dispatchFence,
+            attemptCount: 4,
+        });
+        expect(rpc).toHaveBeenCalledWith(
+            ANALYSIS_V2_DATABASE_NAMES.takeoverTerminalFailureRpc,
+            expect.objectContaining({
+                p_request_id: requestId,
+                p_job_key: jobKey,
+                p_dispatch_generation: 3,
+                p_dispatch_token: dispatchFence,
+                p_claim_token: expect.stringMatching(/^[0-9a-f-]{36}$/),
+                p_lease_seconds: 90,
+            })
+        );
+    });
+
     it('reserves a deterministic dispatch generation through the service RPC', async () => {
         const dispatchFence = randomUUID();
         const rpc = vi.fn().mockResolvedValue({

@@ -1011,10 +1011,24 @@ async function durableFreshApifyProfiles(input: {
     } = input;
     assertFreshRevenueCollectionRuntime(request, dependencies);
     const identity = profileIdentity(claim);
+    const freshOperation = freshProfileOperation({ claim, request, usernames });
+    const canonicalInput = freshOperation.canonicalInput;
+    const operationKey = createAnalysisV2ProviderOperationKey(
+        freshOperation.operation,
+        canonicalInput,
+    );
+    const providerInputHash = createAnalysisV2ProviderInputHash(canonicalInput);
     // Inspect a retained direct-Apify checkpoint before binding a provider row.
     // Both strict and paid Earlybird direct-fresh admissions reject any mixed
     // fallback/repair state before provider work.
-    const resume = await dependencies.profileCheckpointStore.load(identity);
+    const resume = !isRevenueCostLedgerRequest(request)
+        && dependencies.profileCheckpointStore.loadFreshApifyRetry
+        ? await dependencies.profileCheckpointStore.loadFreshApifyRetry({
+            ...identity,
+            operationKey,
+            providerInputHash,
+        })
+        : await dependencies.profileCheckpointStore.load(identity);
     if (resume && !isDirectApifyProfileResume(resume)) {
         throw new Error('FRESH_PROVENANCE_PROFILE_CHECKPOINT_UNPROVEN');
     }
@@ -1025,13 +1039,6 @@ async function durableFreshApifyProfiles(input: {
     ) {
         throw new Error('FRESH_PROVENANCE_PROFILE_REPAIR_UNAUTHORIZED');
     }
-    const freshOperation = freshProfileOperation({ claim, request, usernames });
-    const canonicalInput = freshOperation.canonicalInput;
-    const operationKey = createAnalysisV2ProviderOperationKey(
-        freshOperation.operation,
-        canonicalInput,
-    );
-    const providerInputHash = createAnalysisV2ProviderInputHash(canonicalInput);
     // The exact provider row is the only permitted retained state. This bind
     // reasserts its source lineage and will never select target reuse, a cache,
     // or an adopted Dataset for the trusted cohort.

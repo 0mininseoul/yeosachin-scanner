@@ -125,7 +125,7 @@ describe('earlybird paid delivery notice', () => {
         }
     );
 
-    it('shows the automatic-start bridge when a validated progress path is available', () => {
+    it('keeps the return shell navigation-only when a validated progress path is available', () => {
         const markup = renderToStaticMarkup(createElement(EarlybirdStatus, {
             order: {
                 ...cancelledOrder(),

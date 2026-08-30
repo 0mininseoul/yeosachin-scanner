@@ -23,6 +23,7 @@ export const ANALYSIS_V2_DATABASE_NAMES = Object.freeze({
     deferRecoveryRpc: 'defer_analysis_v2_job_recovery',
     markDispatchedRpc: 'mark_analysis_v2_job_dispatched',
     claimRpc: 'claim_analysis_v2_job',
+    takeoverTerminalFailureRpc: 'takeover_analysis_v2_terminal_failure',
     deferTerminalCleanupRpc: 'defer_analysis_v2_terminal_cleanup',
     deferAiCapacityRpc: 'defer_analysis_v2_job_for_ai_capacity',
     continueSchedulerRpc: 'continue_analysis_v2_scheduler_job',
@@ -140,6 +141,11 @@ export interface AnalysisV2JobStore {
         leaseSeconds?: number,
         maxAttempts?: number
     ): Promise<ClaimedAnalysisV2Job | null>;
+    /** Reclaims an intent-owned terminal-failure lease after an owner crash. */
+    takeoverTerminalFailure?(
+        delivery: AnalysisV2TaskDelivery,
+        leaseSeconds?: number
+    ): Promise<ClaimedAnalysisV2Job | null>;
     deferTerminalCleanup(
         claim: ClaimedAnalysisV2Job
     ): Promise<AnalysisV2JobReleaseResult>;
@@ -247,6 +253,7 @@ function throwRpcError(error: RpcError, operation: string): never {
         || error.message === 'ANALYSIS_V2_JOB_LEASE_FENCE_MISMATCH'
         || error.message === 'ANALYSIS_V2_JOB_FENCE_MISMATCH'
         || error.message === 'ANALYSIS_V2_JOB_LEASE_LOST'
+        || error.message === 'ANALYSIS_V2_TERMINAL_FAILURE_TAKEOVER_FENCE_MISMATCH'
     ) {
         throw new AnalysisV2JobFenceError();
     }
@@ -628,6 +635,44 @@ export function createSupabaseAnalysisV2JobStore(
             });
             if (error) throwRpcError(error, 'claim');
             return claimedFromRow(singleRpcRow(data, 'claim'), {
+                ...identity,
+                generation,
+                reservationToken,
+            }, claimToken);
+        },
+
+        async takeoverTerminalFailure(
+            delivery,
+            leaseSeconds = ANALYSIS_V2_JOB_LEASE_SECONDS
+        ) {
+            const identity = assertAnalysisV2JobIdentity(delivery);
+            const generation = requiredSafeInteger(
+                delivery.generation,
+                'dispatch generation',
+                1,
+                1_000
+            );
+            const reservationToken = requiredUuid(
+                delivery.reservationToken,
+                'reservation token'
+            );
+            if (!Number.isSafeInteger(leaseSeconds) || leaseSeconds < 30 || leaseSeconds > 600) {
+                throw new Error('ANALYSIS_V2_JOB_VALIDATION_ERROR: invalid lease duration.');
+            }
+            const claimToken = randomUUID();
+            const { data, error } = await client.rpc(
+                ANALYSIS_V2_DATABASE_NAMES.takeoverTerminalFailureRpc,
+                {
+                    p_request_id: identity.requestId,
+                    p_job_key: identity.jobKey,
+                    p_dispatch_generation: generation,
+                    p_dispatch_token: reservationToken,
+                    p_claim_token: claimToken,
+                    p_lease_seconds: leaseSeconds,
+                }
+            );
+            if (error) throwRpcError(error, 'terminal failure takeover');
+            return claimedFromRow(singleRpcRow(data, 'terminal failure takeover'), {
                 ...identity,
                 generation,
                 reservationToken,

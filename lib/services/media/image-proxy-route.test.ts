@@ -63,6 +63,14 @@ function signedResultRequest() {
     return new NextRequest(`https://baram-detector.example${path}`);
 }
 
+function abortedSignedRequest() {
+    const request = signedRequest();
+    const controller = new AbortController();
+    controller.abort();
+    Object.defineProperty(request, 'signal', { value: controller.signal });
+    return request;
+}
+
 describe('image proxy route authorization', () => {
     afterEach(() => {
         vi.useRealTimers();
@@ -343,6 +351,34 @@ describe('image proxy route authorization', () => {
 
             expect(rejectedResponses.every(response => response.status === 403)).toBe(true);
             expect(warning).toHaveBeenCalledTimes(2);
+        } finally {
+            warning.mockRestore();
+        }
+    });
+
+    it('treats only an EPIPE paired with this route request abort as benign noise', async () => {
+        const warning = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+        mocks.downloadSecureImage.mockRejectedValue(new Error('write EPIPE'));
+
+        try {
+            const response = await GET(abortedSignedRequest());
+
+            expect(response.status).toBe(503);
+            expect(warning).not.toHaveBeenCalled();
+        } finally {
+            warning.mockRestore();
+        }
+    });
+
+    it('keeps an EPIPE warning when the image-proxy request itself is not aborted', async () => {
+        const warning = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+        mocks.downloadSecureImage.mockRejectedValue(new Error('write EPIPE'));
+
+        try {
+            const response = await GET(signedRequest());
+
+            expect(response.status).toBe(503);
+            expect(warning).toHaveBeenCalled();
         } finally {
             warning.mockRestore();
         }

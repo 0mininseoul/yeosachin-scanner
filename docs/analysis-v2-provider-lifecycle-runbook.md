@@ -49,6 +49,35 @@ leases to expire or complete first, then verify recovery has re-enqueued only fe
   read receives bounded exponential backoff, so one poisoned row cannot pin the head of the
   reconciliation page.
 
+### 2026-08-30 paid-analysis stabilization
+
+The forward-only stabilization migrations are applied in filename order:
+`20260830100000_retain_succeeded_direct_fresh_checkpoint.sql` (progress merge),
+`20260830101000_retain_succeeded_direct_fresh_checkpoint.sql` (direct-fresh retry admission),
+`20260830102000_add_analysis_v2_terminal_failure_takeover.sql` (intent-owned crash-window
+takeover), then `20260830103000_scope_analysis_v2_provider_cleanup.sql` (failed-job cleanup
+scope). Do not apply these migrations piecemeal or replay the incident order.
+
+An exact succeeded direct-fresh provider row is admissible after a legitimate job claim rotates:
+the reservation identity and run ID remain immutable, while the current job claim is a separate
+execution fence. The retry admission RPC returns only a fully attributed, completed checkpoint;
+it rejects mixed fallback/repair rows, missing provider proof, input drift, or ambiguous starts
+with sanitized `ANALYSIS_V2_PROFILE_RETRY_ADMISSION_*` reason codes. It does not call Apify.
+
+Cleanup intent is the terminalization authority for its exact failed job. If no running provider
+row or unconfirmed `starting` row remains, `takeover_analysis_v2_terminal_failure` transfers the
+live execution fence immediately without incrementing attempts; repeated delivery by the current
+owner is idempotent and a competing live owner is fenced. A sibling job may reserve work while
+the intent is pending, but its provider rows are not included in that intent's cleanup list or
+settlement path. The request-level finalizer still waits for all active/ambiguous provider rows
+before marking the request terminal, preserving spend safety.
+
+The paid return path redirects server-side to the owner-scoped progress route as soon as a
+request ID exists. The progress media rail is an accumulated, non-gating presentation surface:
+it retains loaded candidates across refreshes, account changes, publication-lag snapshots, and
+transient image errors. Only an EPIPE paired with this image-proxy request's aborted client
+signal is benign observability noise; an EPIPE without that route-specific abort remains logged.
+
 ## Unconfirmed Actor start
 
 A `starting` ledger row with no `run_id` means the Actor start response was ambiguous.

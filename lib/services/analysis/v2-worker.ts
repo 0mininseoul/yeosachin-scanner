@@ -28,6 +28,7 @@ import {
     type AnalysisV2DagStateStore,
 } from './v2-dag-state-store';
 import {
+    AnalysisV2JobLeaseBusyError,
     AnalysisV2JobFenceError,
     analysisV2JobStore,
     type AnalysisV2JobStore,
@@ -292,7 +293,14 @@ const cleanupTerminalMedia: AnalysisV2TerminalMediaCleanup = async () => {
 };
 
 const loadTerminalFailureIntent: AnalysisV2TerminalFailureIntentLoader = async claim => {
-    const intent = await analysisV2ProviderRunStore.loadCleanupIntent(claim.requestId);
+    const exactIntentLoader = analysisV2ProviderRunStore.loadCleanupIntentForJob;
+    const intent = exactIntentLoader
+        ? await exactIntentLoader({
+            requestId: claim.requestId,
+            jobKey: claim.jobKey,
+            jobInputHash: claim.inputHash,
+        })
+        : await analysisV2ProviderRunStore.loadCleanupIntent(claim.requestId);
     if (!intent) return null;
     if (
         intent.jobKey !== claim.jobKey
@@ -1037,7 +1045,32 @@ export async function processAnalysisV2TaskDelivery(
             { analysisLifecycleEventEmitter: dependencies.analysisLifecycleEventEmitter },
         )
     );
-    const claim = await store.claim(delivery, dependencies.jobLeaseSeconds);
+    let claim: ClaimedAnalysisV2Job | null;
+    try {
+        claim = await store.claim(delivery, dependencies.jobLeaseSeconds);
+    } catch (error) {
+        // A crash after requestCleanup commits can leave the failed owner's
+        // lease live. The intent-owned takeover is the only path allowed to
+        // replace that lease, and it is attempted only after the ordinary
+        // claim reports the live-lease fence.
+        if (
+            !(error instanceof AnalysisV2JobLeaseBusyError)
+            || !store.takeoverTerminalFailure
+        ) {
+            throw error;
+        }
+        try {
+            claim = await store.takeoverTerminalFailure(
+                delivery,
+                dependencies.jobLeaseSeconds,
+            );
+        } catch {
+            // Preserve normal lease-busy semantics when this delivery does
+            // not belong to a pending terminal-failure intent.
+            throw error;
+        }
+        if (!claim) throw error;
+    }
     if (!claim) return Object.freeze({ status: 'already_terminal' });
 
     try {

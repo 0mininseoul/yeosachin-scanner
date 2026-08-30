@@ -514,6 +514,20 @@ function stageCodeIsCurrentOrLater(
     return actualRank >= 0 && expectedRank >= 0 && actualRank > expectedRank;
 }
 
+function trackStateIsCurrentOrLater(
+    actual: AnalysisV2ProgressTrackState,
+    expected: AnalysisV2ProgressTrackState,
+): boolean {
+    if (actual === expected) return true;
+    // Completed and failed are both terminal, but a terminal state must not
+    // silently change its outcome while acknowledging a stale writer.
+    if (expected === 'completed' || expected === 'failed') return false;
+    const rank = (state: AnalysisV2ProgressTrackState): number => (
+        state === 'pending' ? 0 : state === 'running' ? 1 : 2
+    );
+    return rank(actual) >= rank(expected);
+}
+
 function snapshotMatchesCheckpoint(
     snapshot: ProgressSnapshotV1,
     input: z.infer<typeof checkpointInputSchema>
@@ -530,11 +544,11 @@ function snapshotMatchesCheckpoint(
     return PROGRESS_TRACK_IDS.every(trackId => {
         const actual = snapshot.tracks[trackId];
         const expected = input.tracks[trackId];
-        return actual.state === expected.state
+        return trackStateIsCurrentOrLater(actual.state, expected.state)
             && stageCodeIsCurrentOrLater(trackId, actual.stageCode, expected.stageCode)
-            && actual.done === expected.done
-            && actual.total === expected.total
-            && actual.progressBp === calculateTrackProgressBp(expected);
+            && actual.done >= expected.done
+            && actual.total >= expected.total
+            && actual.progressBp >= calculateTrackProgressBp(expected);
     });
 }
 

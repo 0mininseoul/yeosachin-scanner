@@ -222,6 +222,15 @@ export interface AnalysisV2ProfileFetchCheckpointStore {
     }): Promise<AnalysisV2ProfileFetchResume>;
     load(input: AnalysisV2ProfileFetchCheckpointIdentity):
         Promise<AnalysisV2ProfileFetchResume | null>;
+    /**
+     * Re-admits an exact paid direct-fresh checkpoint after a job claim rotates.
+     * Optional keeps in-memory/test stores source-compatible; production uses
+     * the fenced RPC whenever the executor has a paid Earlybird request.
+     */
+    loadFreshApifyRetry?(input: AnalysisV2ProfileFetchCheckpointIdentity & {
+        operationKey: string;
+        providerInputHash: string;
+    }): Promise<AnalysisV2ProfileFetchResume | null>;
     purgeTerminal(requestId: string): Promise<number>;
 }
 
@@ -248,6 +257,7 @@ export const ANALYSIS_V2_PROFILE_FETCH_DATABASE_NAMES = Object.freeze({
     fallbackRpc: 'checkpoint_analysis_v2_profile_fallback',
     repairRpc: 'checkpoint_analysis_v2_profile_repair',
     loadRpc: 'load_analysis_v2_profile_fetch_checkpoint',
+    loadFreshApifyRetryRpc: 'load_analysis_v2_profile_fetch_checkpoint_for_retry',
     purgeRpc: 'purge_analysis_v2_profile_fetch_checkpoints',
 });
 
@@ -498,6 +508,12 @@ function throwRpcError(error: RpcError, operation: string): never {
         'ANALYSIS_V2_PROFILE_CHECKPOINT_INVALID',
         'ANALYSIS_V2_PROFILE_CHECKPOINT_NOT_READY',
         'ANALYSIS_V2_PROFILE_CHECKPOINT_FENCE_MISMATCH',
+        'ANALYSIS_V2_PROFILE_RETRY_ADMISSION_INVALID',
+        'ANALYSIS_V2_PROFILE_RETRY_ADMISSION_FENCE_MISMATCH',
+        'ANALYSIS_V2_PROFILE_RETRY_ADMISSION_PROVIDER_NOT_SUCCEEDED',
+        'ANALYSIS_V2_PROFILE_RETRY_ADMISSION_CHECKPOINT_MISSING',
+        'ANALYSIS_V2_PROFILE_RETRY_ADMISSION_CHECKPOINT_UNUSABLE',
+        'ANALYSIS_V2_PROFILE_RETRY_ADMISSION_SCOPE_MISMATCH',
     ].find(message => error.message === message);
     if (knownConflict) throw new Error(knownConflict);
     throw new Error(
@@ -666,6 +682,31 @@ export function createAnalysisV2ProfileFetchCheckpointStore(
 
         async load(input) {
             return loadCheckpoint(input);
+        },
+
+        async loadFreshApifyRetry(input) {
+            validateIdentity(input);
+            if (
+                !PROVIDER_OPERATION_KEY_PATTERN.test(input.operationKey)
+                || !SHA256_PATTERN.test(input.providerInputHash)
+            ) {
+                throw new Error(
+                    'ANALYSIS_V2_PROFILE_CHECKPOINT_ERROR: invalid fresh Apify retry identity.'
+                );
+            }
+            const { data, error } = await client.rpc(
+                ANALYSIS_V2_PROFILE_FETCH_DATABASE_NAMES.loadFreshApifyRetryRpc,
+                {
+                    p_request_id: input.requestId,
+                    p_job_key: input.jobKey,
+                    p_claim_token: input.claimToken,
+                    p_job_input_hash: input.jobInputHash,
+                    p_operation_key: input.operationKey,
+                    p_provider_input_hash: input.providerInputHash,
+                }
+            );
+            if (error) throwRpcError(error, 'fresh Apify retry admission');
+            return data === null ? null : parseResume(data, 'fresh Apify retry admission');
         },
 
         async purgeTerminal(requestId) {

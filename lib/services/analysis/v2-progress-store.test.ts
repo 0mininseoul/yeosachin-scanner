@@ -163,6 +163,41 @@ describe('V2 progress persistence adapter', () => {
         );
     });
 
+    it('accepts a canonical same-or-ahead snapshot returned by a concurrent writer', async () => {
+        const mock = client({
+            snapshot: snapshot({
+                progressBp: 6_000,
+                tracks: {
+                    ...snapshot().tracks,
+                    relationshipAi: {
+                        ...snapshot().tracks.relationshipAi,
+                        stageCode: 'EVIDENCE_JOINING',
+                        done: 3,
+                        total: 5,
+                        progressBp: 6_000,
+                    },
+                },
+            }),
+            event: null,
+            advanced: true,
+        });
+        const store = createAnalysisV2ProgressStore(mock);
+
+        await expect(store.checkpoint(input({ event: undefined }))).resolves.toMatchObject({
+            snapshot: {
+                progressBp: 6_000,
+                tracks: {
+                    relationshipAi: {
+                        stageCode: 'EVIDENCE_JOINING',
+                        done: 3,
+                        total: 5,
+                        progressBp: 6_000,
+                    },
+                },
+            },
+        });
+    });
+
     it('persists masked profile-start media under the exact job fence in one RPC call', async () => {
         const mock = client(true);
         const store = createAnalysisV2ProgressStore(mock);
