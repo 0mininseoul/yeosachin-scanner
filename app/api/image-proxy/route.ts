@@ -22,6 +22,7 @@ import {
     readImageProxyCacheObject,
     writeImageProxyCacheObject,
 } from '@/lib/services/media/image-proxy-cache';
+import { isImageProxyClientDisconnectEpipe } from '@/lib/observability/image-proxy-request-error';
 
 const IMAGE_PROXY_MAX_BYTES = 3 * 1024 * 1024;
 const IMAGE_PROXY_TOTAL_TIMEOUT_MS = 6_000;
@@ -40,36 +41,6 @@ type ImagePayload = {
 type ImageAttempt =
     | { source: 'direct' | 'trusted_proxy'; kind: 'success'; result: ImagePayload }
     | { source: 'direct' | 'trusted_proxy'; kind: 'failure'; error: unknown };
-
-function nestedErrorMessage(value: unknown, depth = 0): string {
-    if (depth > 3 || value === null || value === undefined) return '';
-    if (typeof value === 'string') return value;
-    if (typeof value !== 'object') return '';
-    const candidate = value as {
-        code?: unknown;
-        name?: unknown;
-        message?: unknown;
-        cause?: unknown;
-    };
-    return [
-        typeof candidate.code === 'string' ? candidate.code : '',
-        typeof candidate.name === 'string' ? candidate.name : '',
-        typeof candidate.message === 'string' ? candidate.message : '',
-        nestedErrorMessage(candidate.cause, depth + 1),
-    ].filter(Boolean).join(' ');
-}
-
-/**
- * An EPIPE is benign only when this route's client has disconnected. Keep the
- * check local to image-proxy observability: provider and other server EPIPEs
- * remain actionable everywhere else.
- */
-function isImageProxyClientDisconnectEpipe(
-    error: unknown,
-    signal: AbortSignal,
-): boolean {
-    return signal.aborted && /(?:^|\b)EPIPE(?:\b|$)/i.test(nestedErrorMessage(error));
-}
 
 function withTimeout<T>(promise: Promise<T>, timeoutMs: number): Promise<T | undefined> {
     return new Promise(resolve => {
