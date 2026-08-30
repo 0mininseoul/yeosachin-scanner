@@ -1,8 +1,8 @@
 # Five-Hour Production Stabilization and Cleanup Design
 
-**Date:** 2026-08-30  
-**Decision owner:** coordinator, delegated by the user  
-**Deadline:** five-hour working window  
+**Date:** 2026-08-30
+**Decision owner:** coordinator, delegated by the user
+**Deadline:** five-hour working window
 **Release base:** `origin/main` at `2a28326462bf636f92368dc894b5ea76911d79bb`
 
 ## Objective
@@ -95,9 +95,24 @@ Required outputs:
 - Release readiness, image signing, and public no-spend canaries pass.
 - The cleanup audit names object-level evidence and a safe execution order without mutating production.
 
+## Execution and Verification Record
+
+- **Origin/base:** `origin/main` resolved to `2a28326462bf636f92368dc894b5ea76911d79bb`; the candidate's merge-base is the same SHA.
+- **New candidate SHA:** `TBD-after-documentation-commit` (finalize with `git rev-parse HEAD` after this commit; embedding a commit's own SHA is self-referential).
+- **Approved implementation stack (exact SHAs already present in the candidate):**
+  - Stabilization scope/spec: `0a13620a92bae131a5855284562202f804916659`, `3d84714f724ce5cb509fc6c49dc11ebe73623c9f`.
+  - CI contract repair: `f6e0ad69c117d36e20f92997620d5399df441377`, `3bd018a44fedcc624fbdccfb4746683d208b2308`, `563692ed17fbf844ca54cf2089c5f6f2aec31309`.
+  - Exact-SHA gate: `86118e435dab47e1faf8489040726a4ec2f1f636`, `984980fbf5fcc5a5da4a9ef709c395d07e0d057f`, `e04cfe63eef7f204ccda77d2582f8cd5463a3801`, `14f14294a31dfd5d96dafd3e1688c2da2ccb6bc8`.
+  - Supabase/legacy audit: `a16a46a170e353e3b00a2e18291afa1dba7c59b0`, `a882e7e24b7d201b878d8212d49f6af420c96d77`, `e5e1b5761f81be75159100ea3c8e4ca4aa0b7b00`.
+- **Passing focused evidence:** the four CI contract files passed, 66 tests total; `bash scripts/require-github-ci-success.test.sh` passed; and `bash scripts/test-analysis-v2-infra-scripts.sh` passed.
+- **Passing quality evidence:** `npm run lint`, `npx tsc --noEmit`, and `npm run build` passed. The available full suite passed with `npm test -- --exclude lib/services/analysis/beta-apify-credit-postgres-concurrency.test.ts --reporter=dot`: 715 files passed, 1 skipped; 7,557 tests passed, 48 skipped.
+- **Full-suite caveat:** unexcluded `npm test` reached 715 passed files and 7,557 passed tests but exited on the Docker-backed `beta-apify-credit-postgres-concurrency.test.ts` setup because the local Docker daemon was unavailable; its 23 tests were skipped. PGlite-backed tests passed in the available suite.
+- **Environment-only setup caveats:** `node_modules` was absent, so dependencies were installed with `npm ci --ignore-scripts`; tracked postinstall patches were then applied with `npx patch-package --error-on-fail`. The ignore-scripts install must not be mistaken for a source or test result.
+- **Deferred mandatory release-stage gates:** exact-SHA GitHub CI for the final SHA, Vercel production SHA evidence, and Cloud Run deployment/provenance evidence remain mandatory release-stage gates and were not run here. No provider call or production Supabase database mutation (DDL, DML, RPC, migration, or deletion) occurred.
+
 ## Self-Review
 
-- No placeholders or undecided production mutations remain.
+- No release/runtime placeholders or undecided production mutations remain; the candidate SHA line is an intentional post-commit documentation placeholder.
 - Workstream ownership is disjoint.
 - The release path is serialized only at integration and deployment.
 - Cleanup findings cannot be applied accidentally by `supabase db push`.

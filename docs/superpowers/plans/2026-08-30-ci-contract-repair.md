@@ -22,7 +22,7 @@ Do not change payment state transitions, analysis orchestration, database schema
 
 ## Task 1: Reproduce the exact CI failures
 
-- [ ] **Step 1: Verify the worktree base**
+- [x] **Step 1: Verify the worktree base**
 
 Run:
 
@@ -56,7 +56,7 @@ Expected before changes: six failed assertions matching GitHub Actions run `3326
 
 ## Task 2: Restore the bounded analytics flush
 
-- [ ] **Step 1: Make the caller-contract test require the intended behavior**
+- [x] **Step 1: Make the caller-contract test require the intended behavior**
 
 Require the paid automatic-fulfillment effect to:
 
@@ -68,7 +68,7 @@ Require the paid automatic-fulfillment effect to:
 
 Keep the existing privacy assertions and event-key ownership intact.
 
-- [ ] **Step 2: Implement the minimal production repair**
+- [x] **Step 2: Implement the minimal production repair**
 
 In `app/earlybird/earlybird-status.tsx`, import `flushAnalytics` and use the existing bounded helper before the automatic paid-return redirect. Use an effect-local active flag so an unmounted component does not navigate:
 
@@ -84,7 +84,7 @@ return () => {
 
 Do not add another timeout. The helper already has the 500 ms upper bound.
 
-- [ ] **Step 3: Run the two Amplitude contract files**
+- [x] **Step 3: Run the two Amplitude contract files**
 
 ```bash
 npx vitest run \
@@ -96,11 +96,11 @@ Expected: both files pass.
 
 ## Task 3: Align recovery and media contracts with current ownership
 
-- [ ] **Step 1: Replace stale prop ownership in recovery assertions**
+- [x] **Step 1: Replace stale prop ownership in recovery assertions**
 
 Update `lib/services/earlybird/ui-state.test.ts` assertions from `order.*` to the current owner snapshot `currentOrder.*`, including checkout recovery, system status, result URL, support state, and effect dependencies. Do not loosen assertions to generic property-name fragments.
 
-- [ ] **Step 2: Preserve both progress-image paths**
+- [x] **Step 2: Preserve both progress-image paths**
 
 Update `lib/services/media/proxy-image-rendering.test.ts` so the progress component contract separately proves:
 
@@ -110,7 +110,7 @@ Update `lib/services/media/proxy-image-rendering.test.ts` so the progress compon
 
 Do not reduce the expectation to merely finding any `<Image>` tag.
 
-- [ ] **Step 3: Re-run the four-file reproduction**
+- [x] **Step 3: Re-run the four-file reproduction**
 
 Run the command from Task 1. Expected: all four files pass, with 65 tests passing unless the clean base contains an independently documented test-count change.
 
@@ -142,7 +142,7 @@ git diff -- \
 
 Expected: only owned files changed; no secret, generated output, snapshot churn, or unrelated formatting.
 
-- [ ] **Step 3: Commit**
+- [x] **Step 3: Commit**
 
 ```bash
 git add \

@@ -22,11 +22,11 @@ Do not mutate GitHub, Vercel, GCP, Supabase, or provider state. Do not change th
 
 ## Task 1: Characterize the current release boundary
 
-- [ ] **Step 1: Inspect the controlled rollout path**
+- [x] **Step 1: Inspect the controlled rollout path**
 
 Confirm where `source_commit_sha` is resolved and prove which commands can mutate production after that point. Record the exact earliest mutation boundary in the worker handoff.
 
-- [ ] **Step 2: Inspect Vercel deployment ownership read-only**
+- [x] **Step 2: Inspect Vercel deployment ownership read-only**
 
 Inspect repository configuration and available read-only Vercel project metadata to determine whether Git-connected Vercel deployments can promote before GitHub CI completes. Do not change project settings. Document this as either:
 
@@ -37,7 +37,7 @@ Do not claim this shell gate controls Vercel if it only controls Cloud Run.
 
 ## Task 2: Add a fail-closed exact-SHA checker
 
-- [ ] **Step 1: Write failing focused tests**
+- [x] **Step 1: Write failing focused tests**
 
 The test harness must put fake `gh` behavior on a temporary `PATH` and prove these cases without network calls:
 
@@ -59,7 +59,7 @@ bash scripts/require-github-ci-success.test.sh
 
 Expected before implementation: failure because the checker does not exist.
 
-- [ ] **Step 2: Implement the checker**
+- [x] **Step 2: Implement the checker**
 
 The checker must:
 
@@ -73,7 +73,7 @@ The checker must:
 
 Do not embed credentials or rely on a caller-provided repository name.
 
-- [ ] **Step 3: Make focused tests pass**
+- [x] **Step 3: Make focused tests pass**
 
 ```bash
 bash scripts/require-github-ci-success.test.sh
@@ -83,7 +83,7 @@ Expected: all scenarios pass.
 
 ## Task 3: Wire the gate before rollout mutation
 
-- [ ] **Step 1: Add a deployment-script regression assertion**
+- [x] **Step 1: Add a deployment-script regression assertion**
 
 Extend the smallest suitable shell test so it proves:
 
@@ -92,11 +92,11 @@ Extend the smallest suitable shell test so it proves:
 - dry-run remains read-only and clearly reports whether the CI query was intentionally skipped or evaluated;
 - no environment flag bypasses the gate.
 
-- [ ] **Step 2: Invoke the checker**
+- [x] **Step 2: Invoke the checker**
 
 Call the checker immediately after the source SHA validation and before the existing `gcloud auth list` boundary. Preserve all existing source-archive, provenance-label, deploy-lock, revision-readiness, and traffic-promotion gates.
 
-- [ ] **Step 3: Run shell suites**
+- [x] **Step 3: Run shell suites**
 
 ```bash
 bash scripts/require-github-ci-success.test.sh
@@ -107,7 +107,7 @@ Expected: both pass without external mutations.
 
 ## Task 4: Document the release rule and verify
 
-- [ ] **Step 1: Update the operations source of truth**
+- [x] **Step 1: Update the operations source of truth**
 
 Document:
 
@@ -130,7 +130,7 @@ npm run build
 
 Expected: zero failures.
 
-- [ ] **Step 3: Commit**
+- [x] **Step 3: Commit**
 
 Commit only owned files with:
 

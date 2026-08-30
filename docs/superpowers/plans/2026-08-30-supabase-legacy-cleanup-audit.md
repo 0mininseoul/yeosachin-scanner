@@ -45,17 +45,17 @@ Collect sanitized metadata for application schemas, including:
 
 Do not include row contents or identifiers in the report.
 
-- [ ] **Step 3: Record evidence limitations**
+- [x] **Step 3: Record evidence limitations**
 
 Distinguish exact counts from PostgreSQL estimates, live catalog evidence from migration history, and objects whose external consumers cannot be proven locally.
 
 ## Task 2: Cross-reference repository usage
 
-- [ ] **Step 1: Map database objects to code**
+- [x] **Step 1: Map database objects to code**
 
 Search `app/`, `lib/`, `hooks/`, `components/`, `scripts/`, `supabase/migrations/`, `.github/`, and current operations documentation for each object, function, status, and storage dependency. Exclude generated dependency directories.
 
-- [ ] **Step 2: Map analysis engines and adapters**
+- [x] **Step 2: Map analysis engines and adapters**
 
 Identify the current canonical paid analysis path and every older or duplicate entry point, including:
 
@@ -66,7 +66,7 @@ Identify the current canonical paid analysis path and every older or duplicate e
 
 Do not recommend removing a provider implementation merely because it is inactive by default; the switchable collection architecture is intentional.
 
-- [ ] **Step 3: Classify confidence**
+- [x] **Step 3: Classify confidence**
 
 For every candidate, assign exactly one:
 
@@ -80,11 +80,11 @@ Every `drop-candidate` must have zero live code references, no unresolved depend
 
 ## Task 3: Apply the approved data-policy constraints to the proposal
 
-- [ ] **Step 1: Preserve the required cohort**
+- [x] **Step 1: Preserve the required cohort**
 
 The proposal must preserve as much user-owned data as possible from 2026-07-24 onward. It must also preserve the administrator identity while treating administrator-generated test orders and analysis artifacts as removable only in a later separately approved mutation.
 
-- [ ] **Step 2: Account for known entity splits**
+- [x] **Step 2: Account for known entity splits**
 
 The target schema proposal must address:
 
@@ -97,7 +97,7 @@ The target schema proposal must address:
 - removal of the 22 known E2E identities and their artifacts only in a later approved cleanup;
 - preservation of valid external-user orders and results.
 
-- [ ] **Step 3: Sequence the future reduction safely**
+- [x] **Step 3: Sequence the future reduction safely**
 
 Propose phases with explicit preconditions:
 
@@ -112,7 +112,7 @@ No SQL in the report may be presented as ready-to-run production migration. Pref
 
 ## Task 4: Produce the reports and commit
 
-- [ ] **Step 1: Write the English evidence report**
+- [x] **Step 1: Write the English evidence report**
 
 Include:
 
@@ -125,11 +125,11 @@ Include:
 - unknowns and required validation;
 - explicit statement that no production mutation occurred.
 
-- [ ] **Step 2: Write the Korean executive summary**
+- [x] **Step 2: Write the Korean executive summary**
 
 Keep it concise and decision-oriented: what can be removed confidently, what must stay, what requires archive/migration first, and the next approval boundary.
 
-- [ ] **Step 3: Validate privacy and scope**
+- [x] **Step 3: Validate privacy and scope**
 
 ```bash
 git diff --check
@@ -141,7 +141,7 @@ rg -n '(service_role|SUPABASE_SERVICE_ROLE_KEY|postgres(ql)?://|Bearer |eyJ[a-zA
 
 Expected: only the two report files are changed and the secret-pattern scan returns no findings.
 
-- [ ] **Step 4: Commit**
+- [x] **Step 4: Commit**
 
 ```bash
 git add \
