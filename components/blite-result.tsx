@@ -21,10 +21,16 @@ import type {
  * per-row measure without drawing a shared axis, a scale, or any derived summary statistic —
  * all of which were explicitly rejected for this screen.
  *
- * Nothing here depends on posts or a profile picture. A preflight target can have neither, and
- * the contract still guarantees a persona, four signals, and a candidate range, so every
- * element is driven by text and numbers that are always present. No element renders as an empty
- * frame when the optional media is missing, because no element is bound to media at all.
+ * Nothing here is bound to a post, a thumbnail, or a profile picture. Every element is driven by
+ * `persona`, `signals`, `candidateRange` and `targetUsername` — the fields
+ * `precheckoutBliteV1Schema` always requires — so there is no element that could render as an
+ * empty frame if a media-backed field were absent, and no copy that names one as its evidence.
+ *
+ * That is a property of this component, and the tests prove it at this level only. It is not a
+ * claim that a zero-post target reaches this screen: `blite-inference.ts` returns null for a
+ * digest with `postCount === 0`, so today the backend never produces such a DTO at all. The
+ * guard is here so the screen cannot acquire a media dependency that the contract does not
+ * actually promise — not because that path is currently reachable.
  *
  * Presentation only: the parent owns fetching, deadlines, the gender gate, and every analytics
  * emission. `onContinue` is the sole outward edge.
@@ -40,7 +46,16 @@ const SIGNAL_BAND_BAR_COLOR: Record<PrecheckoutBliteSignalBand, string> = {
     low: 'var(--color-fg-mute)',
 };
 
-/** Reading order, taught once on arrival. Reduced motion collapses all of it in globals.css. */
+/**
+ * Reading order, taught once on arrival.
+ *
+ * These are applied as inline `animationDelay`, and the animations they drive run with `both`,
+ * so each delay is also a window in which the element is held at its from-state — invisible, or
+ * a measure at zero width. Under `prefers-reduced-motion: reduce` that window is not motion the
+ * reader opted out of, it is content arriving late, so `app/globals.css` zeroes the delay for
+ * `.reveal`, `.reveal-rail` and `.meter-fill` inside that media query. Any new staggered class
+ * used here has to be added to that rule; `blite-result.test.tsx` fails if it is not.
+ */
 const REVEAL_SUBJECT_MS = 0;
 const REVEAL_PERSONA_MS = 70;
 const REVEAL_LEDGER_MS = 150;
@@ -190,8 +205,14 @@ export function BliteResultScreen({ targetUsername, dto, onContinue }: BliteResu
                     <span className="mb-[3px] shrink-0 text-[14px] font-bold text-fg-dim">명</span>
                 </div>
 
+                {/* Source-agnostic on purpose. This line used to read
+                    `공개 피드와 계정 규모를 바탕으로 한 1차 범위예요`, which names public posts and
+                    account scale as the evidence. The screen itself is built to stand up without
+                    any media-backed field, so naming one would be a claim the sheet cannot keep
+                    for every DTO it renders. It now points at what is demonstrably above it —
+                    the signals in the ledger — which is true of every valid `PrecheckoutBliteV1`. */}
                 <p className="mt-4 text-[12px] leading-relaxed text-fg-mute">
-                    공개 피드와 계정 규모를 바탕으로 한 1차 범위예요. 전체 판독에서 후보별 관계 신호를 확인할 수 있어요.
+                    이번 판독에서 확인한 내용을 바탕으로 좁힌 1차 범위예요. 전체 판독에서 후보별 관계 신호를 확인할 수 있어요.
                 </p>
                 <PrimaryButton size="lg" onClick={onContinue} className="mt-5">
                     상세 분석 보기

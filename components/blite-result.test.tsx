@@ -1,5 +1,7 @@
 // @vitest-environment jsdom
 
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
 import { act, createElement } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -51,9 +53,16 @@ function richDto(): PrecheckoutBliteV1 {
 }
 
 /**
- * A real preflight target can have no posts and no profile picture. The contract still
- * guarantees persona, four signals, and a candidate range, so the screen must be complete
- * from text and numbers alone — with nothing on it that would render as an empty frame.
+ * A DTO carrying none of the optional media-backed evidence: `postCount: 0` and only
+ * `post.caption` in `evidenceFields`. It is schema-valid (`postCount` is a nonnegative int),
+ * and it exists to prove that *this component* has no media dependency — every element still
+ * renders from `persona`, `signals` and `candidateRange` alone.
+ *
+ * It is deliberately not a claim about what the backend can produce. `blite-inference.ts`
+ * returns null when the digest has `postCount === 0`, so no such DTO reaches the UI today.
+ * This fixture guards the component against acquiring a dependency the contract never
+ * promised; it does not assert that a zero-post target is reachable end to end.
+ *
  * The wide four-digit range doubles as the overflow fixture.
  */
 function mediaFreeDto(): PrecheckoutBliteV1 {
@@ -152,6 +161,32 @@ describe('BliteResultScreen', () => {
         expect(container.textContent).not.toContain('28 – 64명');
         expect(container.textContent).toContain('분석 후보 예상 범위');
         expect(container.textContent).toContain('전체 판독에서 후보별 관계 신호를 확인할 수 있어요.');
+    });
+
+    it('states the range provenance without naming an evidence source the sheet may not have', () => {
+        // The old wording was `공개 피드와 계정 규모를 바탕으로 한 1차 범위예요`, which tells the
+        // reader the number came from public posts and account scale. The sheet renders from
+        // persona/signals/range alone, so that is a source claim it cannot keep for every DTO.
+        for (const dto of [richDto(), mediaFreeDto()]) {
+            render({ dto });
+            const text = container.textContent ?? '';
+
+            expect(text).toContain('이번 판독에서 확인한 내용을 바탕으로 좁힌 1차 범위예요.');
+            expect(text).not.toContain('공개 피드와 계정 규모');
+            // No static copy on the screen names a post, a feed, a follower count, or a picture
+            // as the evidence. (Signal claims are model output about the target, not the
+            // screen's own provenance statement, so they are excluded from this sweep.)
+            const staticCopy = text
+                .split(dto.persona.summary).join('')
+                .split(dto.persona.headline).join('');
+            const withoutClaims = dto.signals.reduce(
+                (acc, signal) => acc.split(signal.claim).join('').split(signal.category).join(''),
+                staticCopy,
+            );
+            for (const sourceWord of ['공개 피드', '게시물', '프로필 사진', '팔로워', '계정 규모']) {
+                expect(withoutClaims).not.toContain(sourceWord);
+            }
+        }
     });
 
     it('falls back to a neutral subject label when no target username is supplied', () => {
@@ -282,6 +317,38 @@ describe('BliteResultScreen', () => {
                     .toBe(dto.signals[index].confidence.toFixed(2));
             });
         }
+    });
+
+    it('has every staggered class it uses covered by the reduced-motion delay reset', () => {
+        const component = readFileSync(join(process.cwd(), 'components/blite-result.tsx'), 'utf8');
+        const css = readFileSync(join(process.cwd(), 'app/globals.css'), 'utf8');
+
+        /**
+         * `.reveal`, `.reveal-rail` and `.meter-fill` all animate with `both`, so an element
+         * sits at its from-state — invisible, or a measure at zero width — for the whole of its
+         * `animation-delay`. Collapsing only `animation-duration` under
+         * `prefers-reduced-motion: reduce` therefore did not produce a still screen: it produced
+         * a screen whose rows and measures were blank and arrived up to half a second late.
+         *
+         * Every class this component staggers must be named in the delay reset, or the reduced
+         * motion screen is missing content rather than missing motion.
+         */
+        const reduced = css.slice(css.indexOf('@media (prefers-reduced-motion: reduce)'));
+        const resetBlock = reduced.slice(0, reduced.indexOf('animation-delay: 0s !important;'));
+        expect(reduced).toContain('animation-delay: 0s !important;');
+
+        const staggered = new Set(
+            [...component.matchAll(/className="([^"]*)"/g)]
+                .flatMap(match => match[1].split(/\s+/))
+                .filter(name => name === 'reveal' || name.startsWith('reveal-') || name === 'meter-fill'),
+        );
+        expect(staggered.size).toBeGreaterThan(0);
+        for (const className of staggered) {
+            expect(resetBlock).toContain(`.${className}`);
+        }
+
+        // Inline delays are what the reset has to outrank, so the rule cannot drop !important.
+        expect(component).toContain('animationDelay');
     });
 
     it('gives the ordered evidence real list semantics with one row per signal', () => {

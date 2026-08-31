@@ -282,6 +282,23 @@ body::before {
     transition-duration: 0.001ms !important;
     scroll-behavior: auto !important;
   }
+
+  /* Collapsing the duration alone is not enough for a staggered reveal. These animations run
+     with `both`, so the from-state — opacity 0, scaleY(0), width 0 — is held for the whole of
+     `animation-delay`, and the delays are set per element inline. A reader who asked for less
+     motion was getting blank rows and empty measures that popped in up to half a second late:
+     not reduced motion, just late content. Zeroing the delay is what makes the reduced-motion
+     screen the finished frame from its first paint.
+
+     `!important` is required: these delays are inline styles, and an important author
+     declaration is the only thing that outranks one. */
+  .reveal,
+  .reveal-rail,
+  .reveal-wipe,
+  .reveal-sweep,
+  .meter-fill {
+    animation-delay: 0s !important;
+  }
 }
 
 /* ============================================================

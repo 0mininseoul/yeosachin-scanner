@@ -57,6 +57,39 @@ describe('/analyze precheckout plan gate', () => {
         expect(page).toContain('setBliteResultShown(false);');
     });
 
+    it('hands the heading eyebrow back on every transition that leaves the result sheet', () => {
+        const page = readFileSync(join(process.cwd(), 'app/analyze/page.tsx'), 'utf8');
+
+        /**
+         * The withdrawal is state, and the sheet only exists on a non-legacy surface, so any
+         * transition to the legacy surface unmounts the sheet while `bliteResultShown` is still
+         * true. That left the plan screen — a state that is not the result sheet — rendering
+         * permanently without its `판독 의뢰서 · 대상 확인` eyebrow.
+         *
+         * The result CTA is the path that matters most: `onGoToPlans` is what the sheet's
+         * `상세 분석 보기` button calls, and it is a direct move to the legacy plan layout.
+         */
+        const goToPlans = page.slice(
+            page.indexOf('const handleGoToPlans = useCallback(() => {'),
+        );
+        const goToPlansBody = goToPlans.slice(0, goToPlans.indexOf('}, ['));
+        expect(goToPlansBody).toContain("setPrecheckoutSurface({ preflightId, surface: 'legacy' });");
+        expect(goToPlansBody).toContain('setBliteResultShown(false);');
+
+        // …and the rule is not specific to that one handler: every legacy transition in the file
+        // has to hand the eyebrow back, so a new one cannot quietly reintroduce the bug.
+        const legacyTransitions = [...page.matchAll(/surface: 'legacy'/g)];
+        expect(legacyTransitions.length).toBeGreaterThanOrEqual(2);
+        for (const transition of legacyTransitions) {
+            const preceding = page.slice(Math.max(0, transition.index - 600), transition.index);
+            expect(preceding).toContain('setBliteResultShown(false);');
+        }
+
+        // A full target reset restores it too, and nothing else may set it back to true.
+        expect(page).toContain('const handleBliteResultShown = useCallback(() => setBliteResultShown(true), []);');
+        expect(page.match(/setBliteResultShown\(true\)/g)).toHaveLength(1);
+    });
+
     it('resets the viewport to the top on the explicit immersive CTA transition instead of scrolling to plans', () => {
         const page = readFileSync(join(process.cwd(), 'app/analyze/page.tsx'), 'utf8');
 

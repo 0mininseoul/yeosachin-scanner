@@ -122,6 +122,18 @@ const DISCLOSURE_ACCEPTED = true;
         preflightId: null,
         surface: 'awaiting',
     });
+    /**
+     * The B-lite result sheet carries its own single eyebrow. The page heading above it carries
+     * a second one, which put two eyebrow-like labels on the same screen, so the page withdraws
+     * its own while that sheet is up.
+     *
+     * It lives next to `precheckoutSurface` because it is bound to it: the sheet only exists on
+     * a non-legacy surface, so every transition that leaves that surface has to hand the eyebrow
+     * back. Kept as state rather than derived so the withdrawal is committed in the same pass as
+     * the announcement (see `PrecheckoutImmersive`'s layout effect).
+     */
+    const [bliteResultShown, setBliteResultShown] = useState(false);
+    const handleBliteResultShown = useCallback(() => setBliteResultShown(true), []);
     const querySelectedPlan = useHydrationSafePlanQuery();
     const queryCheckoutPlan = useHydrationSafeCheckoutPlanQuery();
     const router = useRouter();
@@ -460,6 +472,10 @@ const DISCLOSURE_ACCEPTED = true;
         const preflightId = immersivePreflight?.preflightId;
         if (!preflightId) return;
         planGateRequestedRef.current = true;
+        // The legacy surface unmounts the result sheet, so the heading takes its own eyebrow
+        // back. Without this the withdrawal outlived the sheet and the plan screen rendered
+        // permanently unlabelled.
+        setBliteResultShown(false);
         setPrecheckoutSurface({ preflightId, surface: 'legacy' });
     }, [immersivePreflight?.preflightId]);
     useEffect(() => {
@@ -734,7 +750,9 @@ const DISCLOSURE_ACCEPTED = true;
         );
         // Only after every exact check above has passed: release the legacy
         // surface so a failed submission still lands on the plan/error screen
-        // instead of replaying the four-stage demo.
+        // instead of replaying the four-stage demo. Same rule as the CTA path:
+        // the sheet is gone, so the heading's eyebrow comes back.
+        setBliteResultShown(false);
         setPrecheckoutSurface({ preflightId, surface: 'legacy' });
         consumeAutoCheckoutContinuation();
         autoCheckoutRecoveryRequestedRef.current = true;
@@ -755,14 +773,6 @@ const DISCLOSURE_ACCEPTED = true;
         selectedPlanAvailable,
         user,
     ]);
-
-    /**
-     * The B-lite result sheet carries its own single eyebrow. The page heading above it carries
-     * a second one, which put two eyebrow-like labels on the same screen, so the page withdraws
-     * its own for that state only.
-     */
-    const [bliteResultShown, setBliteResultShown] = useState(false);
-    const handleBliteResultShown = useCallback(() => setBliteResultShown(true), []);
 
     const handleReset = () => {
         const activePreflightId = preflight?.preflightId;

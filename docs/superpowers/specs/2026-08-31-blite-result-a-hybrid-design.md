@@ -50,11 +50,20 @@ These come straight from the approval and are treated as hard exclusions, each w
 ### Also excluded by the "no post/media-backed visualization" rule
 
 No thumbnail strip, no post grid, no profile picture, no follower/following counts, no
-"n개의 게시물" counters, no example/placeholder posts, and no empty chart shell that would
-render as a blank frame when a preflight target has neither posts nor a profile picture. The
-entire screen is driven by `persona`, `signals`, `candidateRange`, and `targetUsername`, all of
-which are always present in a valid `PrecheckoutBliteV1`. A DTO whose target has no media
-renders exactly the same complete screen.
+"n개의 게시물" counters, no example/placeholder posts, and no empty chart shell that could render
+as a blank frame if a media-backed field were absent. The entire screen is driven by `persona`,
+`signals`, `candidateRange`, and `targetUsername`, all of which `precheckoutBliteV1Schema`
+always requires, and no copy on the screen names a post, a feed, a picture or a follower count
+as its evidence.
+
+**Scope of that guarantee.** It is a property of the component, and the tests prove it at that
+level: a schema-valid DTO with `postCount: 0` renders the same complete screen. It is *not* a
+claim that such a target reaches this screen. `lib/services/precheckout/blite-inference.ts`
+returns `null` when the digest has `postCount === 0`, so the backend produces no B-lite DTO at
+all for a zero-post target today. Earlier drafts of this spec and of the test fixtures described
+that shape as "what a preflight target with no posts still produces", which was false. The guard
+exists so the screen cannot quietly acquire a media dependency the contract never promised —
+not because the zero-post path is currently reachable end to end.
 
 ## Preserved
 
@@ -157,8 +166,13 @@ One `CaseCard` with crimson brackets, `data-precheckout-result-card`.
   `clamp(30px, 9.5vw, 40px)` extrabold tabular, joined by a 1px crimson-dim dimension rule
   with 9px crimson end ticks, `명` trailing at 14px `fg-dim`. The rule flexes and the numbers
   never shrink, so a four-digit range still fits at 320px.
-- The existing explanatory copy, unchanged:
-  `공개 피드와 계정 규모를 바탕으로 한 1차 범위예요. 전체 판독에서 후보별 관계 신호를 확인할 수 있어요.`
+- The explanatory copy, **source-agnostic**:
+  `이번 판독에서 확인한 내용을 바탕으로 좁힌 1차 범위예요. 전체 판독에서 후보별 관계 신호를 확인할 수 있어요.`
+  The inherited first sentence read `공개 피드와 계정 규모를 바탕으로 한 1차 범위예요`, which names
+  public posts and account scale as the evidence behind the number. That is a provenance claim
+  the sheet cannot keep for every DTO it renders — the screen is deliberately built to stand up
+  with no media-backed field at all — so it was replaced with wording that points at what is
+  demonstrably above it. The second sentence is unchanged.
 - `PrimaryButton size="lg"` `상세 분석 보기`.
 
 Accessibility: the visual caliper is `aria-hidden`; a `sr-only` sibling carries
@@ -170,9 +184,10 @@ with the reading assembled once rather than announced twice.
 ### 5. No footnote
 
 Prototype A closes with `1차 판독은 공개 게시물만 사용합니다.` That line is dropped. It carries
-the rejected `1차 판독` wording, and it would be inaccurate for a target with no public posts —
-which is exactly the case this screen must survive. The verdict copy already states provenance
-(`공개 피드와 계정 규모를 바탕으로 한 1차 범위예요.`), so the footnote was only chrome.
+the rejected `1차 판독` wording, and it names public posts as the sole source — the same
+provenance claim the verdict copy had to give up. The verdict line already frames the number
+(`이번 판독에서 확인한 내용을 바탕으로 좁힌 1차 범위예요.`) without naming a source, so the
+footnote was only chrome, and a less truthful version of it.
 
 ## Parent contract — `onBliteResultShown`
 

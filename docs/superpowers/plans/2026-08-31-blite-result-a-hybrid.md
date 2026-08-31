@@ -56,10 +56,16 @@ least one not `high`, band derived from confidence, `min < max`, 3 gender reason
 
 - `richDto()` — realistic Korean claims, `candidateRange: { min: 28, max: 64 }`,
   `postCount: 47`, evidence fields including `post.caption`.
-- `mediaFreeDto()` — the shape a preflight target with **no posts and no profile picture**
-  still produces: `postCount: 0`, `evidenceFields: ['post.caption']` only, a wide
+- `mediaFreeDto()` — a schema-valid DTO carrying **none of the optional media-backed
+  evidence**: `postCount: 0`, `evidenceFields: ['post.caption']` only, a wide
   `candidateRange: { min: 4, max: 1200 }` to also exercise 4-digit overflow. All four signals,
   the persona, and the range are still present, because the contract requires them.
+
+  This fixture proves the **component** has no media dependency. It is not a claim about
+  backend reachability, and the first draft of this line — "the shape a preflight target with
+  no posts and no profile picture still produces" — was wrong:
+  `lib/services/precheckout/blite-inference.ts` returns `null` for a digest with
+  `postCount === 0`, so no such DTO reaches the UI today. See the 2026-09-01 follow-up.
 
 Render with `createRoot` + `act`, mirroring the harness already used in
 `components/precheckout-immersive.test.tsx` (no new test dependency).
@@ -453,3 +459,105 @@ Revert-detection, run both ways: with `useLayoutEffect` restored to `useEffect`,
 fails (`expected '\n' to contain 'onBliteResultShown?.();'`); with the fix in place it passes.
 The existing exactly-once tests — the callback under a re-rendering parent with a fresh
 callback identity, and the fallback path never announcing — pass unchanged.
+
+---
+
+## Follow-up — 2026-09-01: three review blockers
+
+The layout-effect fix earlier the same day closed the first-paint flash and left the passive
+exactly-once analytics alone, but review found three defects it did not touch. All three are
+now closed, each with a regression that was checked in both directions.
+
+### 1. The withdrawal outlived the sheet
+
+`bliteResultShown` was set true on arrival and cleared only in `handleReset`. The sheet exists
+only on a non-legacy surface, so **any** move to the legacy surface unmounted it while the flag
+stayed true — and the plan screen, which is not the result sheet, then rendered permanently
+without its `판독 의뢰서 · 대상 확인` eyebrow. The result CTA is the ordinary path into that
+state: `상세 분석 보기` → `onGoToPlans` → `handleGoToPlans` → `surface: 'legacy'`.
+
+`setBliteResultShown(false)` now runs in `handleGoToPlans` and in the auto-checkout recovery
+release — both direct legacy transitions. The state declaration also moved up beside
+`precheckoutSurface`, which is what it is actually bound to.
+
+The regression in `app/analyze/page.test.ts` pins the CTA path by name, and then generalises:
+**every** `surface: 'legacy'` occurrence in the file must be preceded by the reset, so a fourth
+transition cannot reintroduce the bug silently. It also pins that exactly one site sets the flag
+true. Removing the reset from `handleGoToPlans` fails it.
+
+### 2. Reduced motion was hiding content, not motion
+
+`@media (prefers-reduced-motion: reduce)` collapsed `animation-duration` to `0.001ms` but left
+`animation-delay` alone. `.reveal`, `.reveal-rail` and `.meter-fill` all animate with `both`, so
+the from-state — `opacity: 0`, `scaleY(0)`, `width: 0` — is held for the entire delay. With the
+sheet's stagger (ledger rows to 330ms, measures to 500ms, the verdict card at 420ms), a reader
+who asked for less motion got blank rows and empty measures that popped in up to half a second
+late. The previous verification recorded "the final frame with no movement" because the
+screenshot was taken after the delays had already elapsed; it measured the wrong instant.
+
+`app/globals.css` now zeroes `animation-delay` for `.reveal`, `.reveal-rail`, `.reveal-wipe`,
+`.reveal-sweep` and `.meter-fill` inside that media query. `!important` is required and not
+incidental: the delays are inline styles, and an important author declaration is the only thing
+that outranks one. `components/blite-result.tsx` documents the coupling at its delay constants.
+
+The regression reads both files: it extracts every `reveal*`/`meter-fill` class the component
+actually uses and asserts each is named in the reset, so a new staggered class cannot be added
+without covering it. Dropping `.meter-fill` from the rule fails it.
+
+### 3. The verdict copy claimed a source the sheet cannot always have
+
+`공개 피드와 계정 규모를 바탕으로 한 1차 범위예요` names public posts and account scale as the
+evidence behind the number, on a screen deliberately built to stand up with no media-backed
+field. It now reads `이번 판독에서 확인한 내용을 바탕으로 좁힌 1차 범위예요` — source-agnostic,
+and true of every DTO the sheet renders. The second sentence is untouched, as is `1차 범위`
+(the rejected string was `1차 판독`, which still appears nowhere).
+
+The regression asserts the new sentence on both fixtures and sweeps the screen's **static** copy
+— persona and signal text excluded, since those are model output about the target rather than
+the screen's own provenance statement — for `공개 피드`, `게시물`, `프로필 사진`, `팔로워` and
+`계정 규모`.
+
+### 3b. The media-free claim was overstated, and is now scoped
+
+`lib/services/precheckout/blite-inference.ts` returns `null` when the digest has
+`postCount === 0`, so the backend produces no B-lite DTO at all for a zero-post target. The
+fixture comment ("the shape a preflight target with no posts and no profile picture still
+produces"), the component docstring, and the spec's "A DTO whose target has no media renders
+exactly the same complete screen" all asserted a reachability that does not exist.
+
+All three now say what is actually true: the guard is **component-level**. A schema-valid DTO
+with `postCount: 0` renders the same complete screen, which stops the component acquiring a
+media dependency the contract never promised. No test or doc claims the zero-post path is
+reachable end to end.
+
+### Scope held
+
+No shared-axis or spectrum graph, no case-file header, no confidence badge, no new eyebrow: the
+sheet still carries exactly one `Eyebrow` and one `.label-ko`, one bracketed card, and the four
+rejections' tests are unchanged and green. Blocker 3 changed one sentence of copy; blockers 1
+and 2 changed no markup at all.
+
+### Verification — 2026-09-01 (blocker pass)
+
+```
+npx vitest run components/blite-result.test.tsx components/precheckout-immersive.test.tsx \
+  components/precheckout-demo.test.tsx app/analyze/page.test.ts
+                          → Test Files 4 passed (4) · Tests 64 passed (64)
+npx tsc --noEmit          → exit 0, no diagnostics
+npm run lint              → exit 0 · 16 pre-existing warnings, 0 errors, none in owned files
+npm run test              → Test Files 732 passed | 2 skipped (734)
+                            Tests 7749 passed | 75 skipped (7824)
+NEXT_PUBLIC_SUPABASE_URL=… NEXT_PUBLIC_SUPABASE_ANON_KEY=… npm run build
+                          → ✓ Compiled successfully in 8.1s · exit 0 · ○ /analyze
+```
+
+Each regression was run both ways rather than only green:
+
+| Regression | Broken how | Failure |
+| --- | --- | --- |
+| CTA → legacy | reset removed from `handleGoToPlans` | `expected 'const handleGoToPlans = useCallback((…' to contain 'setBliteResultShown(false);'` |
+| Reduced motion | `.meter-fill` dropped from the reset | `expected '@media (prefers-reduced-motion: reduc…' to contain '.meter-fill'` |
+
+Placeholder **public** build-time values again — no `.env.local` in this worktree. No secret, no
+service-role key, no provider call. `package-lock.json`, `.playwright-mcp/` and `reports/` were
+not read, edited, staged, or deleted.
