@@ -494,6 +494,37 @@ async function handlePOST(
         }
         return NextResponse.json({ status: outcome });
     } catch (error) {
+        // A roleless fresh predecessor is drain-only. Once the paid admission gate is enabled,
+        // the readiness barrier must already have proven this cohort empty; a late delivery must
+        // be terminally rejected instead of returning 500 and burning Cloud Tasks attempts.
+        if (
+            isFreshAdmission
+            && error instanceof Error
+            && error.message === 'ANALYSIS_V2_LEGACY_FRESH_DRAIN_DISABLED'
+        ) {
+            operationalLogger.emit({
+                event: 'preflight.failed',
+                severity: 'warn',
+                fields: {
+                    ...context,
+                    preflight_id: task.preflightId,
+                    operation: 'fresh_admission',
+                    disposition: 'legacy_drain_required',
+                    retryable: false,
+                    error_code: 'ANALYSIS_V2_LEGACY_FRESH_DRAIN_REQUIRED',
+                },
+            });
+            // This is a terminal drain acknowledgement, not a request failure. A 4xx
+            // response would make Cloud Tasks redeliver an already-accounted-for legacy
+            // predecessor and can exhaust attempts while the paid gate is on.
+            return NextResponse.json(
+                {
+                    status: 'legacy_drain_required',
+                    code: 'ANALYSIS_V2_LEGACY_FRESH_DRAIN_REQUIRED',
+                },
+                { status: 200 },
+            );
+        }
         const failure = classifyPreflightWorkerFailure(error);
         console.error(JSON.stringify({
             event: 'preflight_worker_failed',

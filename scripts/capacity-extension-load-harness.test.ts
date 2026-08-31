@@ -37,7 +37,20 @@ describe('automatic-analysis capacity load harness', () => {
         expect(report.relationshipProviderMaxActive).toBe(4);
         expect(report.relationshipCapacityPendingCount).toBeGreaterThan(0);
         expect(report.relationshipCapacityPending).toBe(true);
+        expect(report.relationshipProviderStarts).toBe(4);
+        expect(report.taskCreateCalls).toBeGreaterThan(report.accepted);
+        expect(report.providerAdmissionWrapperCalls).toBeGreaterThan(0);
+        expect(report.fakeProviderCalls).toBe(
+            report.providerStarts + report.geminiStarts + report.relationshipProviderStarts,
+        );
+        expect(report.databaseContentionEvidence).toMatchObject({
+            source: 'deterministic-serial-fake',
+            transactionCount: expect.any(Number),
+            contentionEvents: expect.any(Number),
+            maxInFlight: 1,
+        });
         expect(report.eventualDrain).toBe(true);
+        expect(() => assertCapacityExtensionLoadReport(report)).not.toThrow();
     });
 
     it('fails closed unless the caller explicitly selects the load mode', async () => {
@@ -80,8 +93,10 @@ describe('automatic-analysis capacity load harness', () => {
         expect(report.relationshipProviderMaxActive).toBe(4);
         expect(report.relationshipCapacityPendingCount).toBeGreaterThan(0);
         expect(report.relationshipCapacityPending).toBe(true);
-        expect(report.databaseContentionBounded).toBe(true);
+        expect(report.databaseContentionEvidence.source).toBe('deterministic-serial-fake');
+        expect(report.databaseContentionEvidence.maxInFlight).toBe(1);
         expect(report.eventualDrain).toBe(true);
+        expect(() => assertCapacityExtensionLoadReport(report)).not.toThrow();
     });
 
     it('fails the executable release proof when an exact ceiling is not observed', async () => {
@@ -97,5 +112,34 @@ describe('automatic-analysis capacity load harness', () => {
             ...report,
             maxPaidProviderActive: 7,
         })).toThrow('CAPACITY_LOAD_ASSERTION_FAILED:maxPaidProviderActive');
+    });
+
+    it('rejects fabricated wrapper/provider evidence even when the totals drain', async () => {
+        const report = await runCapacityExtensionLoad({
+            fakeProviderMode: 'load',
+            preflightRequests: 400,
+            paidRequests: 200,
+            preflightConcurrency: 32,
+            paidConcurrency: 8,
+            geminiConcurrency: 8,
+        });
+        expect(() => assertCapacityExtensionLoadReport({
+            ...report,
+            fakeProviderCalls: 0,
+        })).toThrow('CAPACITY_LOAD_ASSERTION_FAILED:fakeProviderCalls');
+        expect(() => assertCapacityExtensionLoadReport({
+            ...report,
+            relationshipProviderMaxActive: report.relationshipBudgetMaxActive,
+            relationshipProviderStarts: 0,
+            fakeProviderCalls: report.fakeProviderCalls - report.relationshipProviderStarts,
+        })).toThrow('CAPACITY_LOAD_ASSERTION_FAILED:relationshipProviderStarts');
+        expect(() => assertCapacityExtensionLoadReport({
+            ...report,
+            databaseContentionEvidence: {
+                ...report.databaseContentionEvidence,
+                source: 'deterministic-serial-fake',
+                transactionCount: 0,
+            },
+        })).toThrow('CAPACITY_LOAD_ASSERTION_FAILED:databaseContentionEvidence.transactionCount');
     });
 });

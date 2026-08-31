@@ -10,7 +10,10 @@ readonly IMAGE_SIGNING_SECRET_ID="ai-baram-v2-image-proxy-signing"
 readonly PREFLIGHT_IDENTITY_HMAC_SECRET_ID="ai-baram-v2-preflight-identity-hmac"
 readonly GENDER_ROUTING_HMAC_SECRET_ID="ai-baram-v2-gender-routing-hmac"
 readonly APIFY_SLOTS=(primary secondary tertiary quaternary quinary senary septenary tenth)
-readonly PROVENANCE_LABEL_KEY="analysis-capacity-source-commit"
+# Keep the split-capacity deployment provenance key identical to the existing
+# V2 release-readiness contract.  A single source-of-truth label prevents an
+# operator from mistaking a capacity wrapper SHA for the reviewed V2 source SHA.
+readonly PROVENANCE_LABEL_KEY="analysis-v2-source-commit"
 
 mode="check"
 mode_was_explicit="false"
@@ -634,6 +637,132 @@ verify_legacy_quiescence() {
   log "verified: legacy queue $legacy_queue is paused and empty; public target $legacy_target_url is frozen"
 }
 
+origin_from_public_url() {
+  local url="$1"
+  if [[ "$url" =~ ^(https://[A-Za-z0-9.-]+(:[0-9]+)?)(/|$) ]]; then
+    printf '%s\n' "${BASH_REMATCH[1]}"
+    return 0
+  fi
+  return 1
+}
+
+escape_curl_config_value() {
+  local value="$1"
+  value="${value//\\/\\\\}"
+  value="${value//\"/\\\"}"
+  printf '%s' "$value"
+}
+
+verify_vercel_public_deployment() {
+  [[ "$stage" != "bootstrap" ]] || return 0
+  local vercel_project_id="${VERCEL_PROJECT_ID:-}"
+  local vercel_token="${VERCEL_TOKEN:-}"
+  local vercel_api_base="${VERCEL_API_BASE_URL:-https://api.vercel.com}"
+  [[ -n "$vercel_project_id" && "$vercel_project_id" =~ ^[A-Za-z0-9_-]{1,128}$ ]] \
+    || die "active capacity stages require a valid VERCEL_PROJECT_ID"
+  [[ -n "$vercel_token" && "$vercel_token" != *[[:space:]]* \
+     && ${#vercel_token} -ge 8 && ${#vercel_token} -le 512 ]] \
+    || die "active capacity stages require a valid VERCEL_TOKEN"
+  [[ "$vercel_api_base" =~ ^https://[^[:space:]]+$ ]] \
+    || die "VERCEL_API_BASE_URL must be an HTTPS origin"
+  vercel_api_base="${vercel_api_base%/}"
+  local vercel_list_url="$vercel_api_base/v6/deployments?projectId=$vercel_project_id&target=production&limit=20"
+  local vercel_alias_url
+  if [[ -n "${VERCEL_TEAM_ID:-}" ]]; then
+    [[ "${VERCEL_TEAM_ID}" =~ ^[A-Za-z0-9_-]{1,128}$ ]] \
+      || die "VERCEL_TEAM_ID contains unsupported characters"
+    vercel_list_url+="&teamId=${VERCEL_TEAM_ID}"
+  fi
+  local escaped_token
+  escaped_token="$(escape_curl_config_value "$vercel_token")"
+  local vercel_json
+  vercel_json="$(curl --disable --proto '=https' --tlsv1.2 \
+    --max-redirs 0 --connect-timeout 10 --max-time 30 \
+    --fail --silent --show-error --url "$vercel_list_url" \
+    --header 'Accept: application/json' --config - 2>/dev/null <<EOF
+header = "Authorization: Bearer $escaped_token"
+EOF
+  )" || die "Vercel production deployment lookup failed"
+  local deployment_json
+  deployment_json="$(jq -cer '
+    [ .deployments[]?
+      | select((.target // "") == "production")
+      | select((.readyState // .state // "") == "READY")
+    ] | first // empty
+  ' <<<"$vercel_json" 2>/dev/null)" \
+    || die "Vercel has no ready production deployment record"
+  local deployment_id
+  deployment_id="$(jq -er '(.uid // .id // empty) | strings' <<<"$deployment_json" 2>/dev/null)" \
+    || die "selected Vercel production deployment has no immutable uid/id"
+  [[ "$deployment_id" =~ ^[A-Za-z0-9_-]{1,128}$ ]] \
+    || die "selected Vercel deployment uid/id is invalid"
+  local vercel_sha
+  vercel_sha="$(jq -er '(.meta.githubCommitSha // .meta.gitCommitSha // .gitSource.sha // empty)' \
+    <<<"$deployment_json" 2>/dev/null)" \
+    || die "Vercel has no ready production deployment Git SHA"
+  [[ "$vercel_sha" == "$source_sha" ]] \
+    || die "Vercel production SHA does not match the deployed source SHA"
+  if [[ -n "${ANALYSIS_CAPACITY_SOURCE_SHA:-}" \
+     && "${ANALYSIS_CAPACITY_SOURCE_SHA}" != "$source_sha" ]]; then
+    die "ANALYSIS_CAPACITY_SOURCE_SHA does not match the reviewed source SHA"
+  fi
+
+  local public_origin
+  public_origin="$(origin_from_public_url "$public_freeze_readiness_url")" \
+    || die "public freeze readiness URL has no canonical HTTPS origin"
+  local legacy_origin
+  legacy_origin="$(origin_from_public_url "$legacy_target_url")" \
+    || die "legacy V1 target URL has no canonical HTTPS origin"
+  [[ "$public_origin" == "$legacy_origin" ]] \
+    || die "public readiness and legacy V1 target URLs must share the exact same origin"
+
+  local origin_match="false"
+  local observed_origin
+  observed_origin="$(jq -r '(.url // empty)' <<<"$deployment_json")"
+  if [[ -n "$observed_origin" ]]; then
+    observed_origin="$(origin_from_public_url "https://${observed_origin#https://}" || true)"
+    [[ "$observed_origin" == "$public_origin" ]] && origin_match="true"
+  fi
+  vercel_alias_url="$vercel_api_base/v2/deployments/$deployment_id/aliases"
+  if [[ -n "${VERCEL_TEAM_ID:-}" ]]; then
+    vercel_alias_url+="?teamId=${VERCEL_TEAM_ID}"
+  fi
+  local aliases_json
+  aliases_json="$(curl --disable --proto '=https' --tlsv1.2 \
+    --max-redirs 0 --connect-timeout 10 --max-time 30 \
+    --fail --silent --show-error --url "$vercel_alias_url" \
+    --header 'Accept: application/json' --config - 2>/dev/null <<EOF
+header = "Authorization: Bearer $escaped_token"
+EOF
+  )" || die "selected Vercel deployment aliases lookup failed"
+  jq -e --arg deployment_id "$deployment_id" '
+    type == "object"
+    and (.aliases | type == "array")
+    and all(.aliases[];
+      type == "object"
+      and (.uid | type == "string")
+      and (.alias | type == "string")
+      and (.created | type == "string")
+      and (.alias | test("^[A-Za-z0-9.-]+$"))
+      and (.alias | test("(^|\\.)[A-Za-z0-9-]+\\.[A-Za-z]{2,}$"))
+      and ((.deploymentId? // .deployment_id? // null) == null
+        or ((.deploymentId? // .deployment_id?) | tostring) == $deployment_id)
+    )
+  ' <<<"$aliases_json" >/dev/null 2>&1 \
+    || die "selected Vercel deployment aliases response is malformed or belongs to another deployment"
+  while IFS= read -r alias_domain; do
+    [[ -n "$alias_domain" ]] || continue
+    observed_origin="$(origin_from_public_url "https://$alias_domain" || true)"
+    if [[ "$observed_origin" == "$public_origin" ]]; then
+      origin_match="true"
+      break
+    fi
+  done < <(jq -r '.aliases[]?.alias' <<<"$aliases_json")
+  [[ "$origin_match" == "true" ]] \
+    || die "public freeze origin does not match the selected READY Vercel deployment URL or exact alias"
+  log "verified: public freeze origin is bound to Vercel deployment $deployment_id at reviewed source SHA"
+}
+
 selected_slot="${ANALYSIS_V2_APIFY_API_TOKEN_SLOT:-}"
 [[ "$selected_slot" =~ ^(primary|secondary|tertiary|quaternary|quinary|senary|septenary|tenth)$ ]] \
   || die "ANALYSIS_V2_APIFY_API_TOKEN_SLOT is invalid"
@@ -1015,7 +1144,7 @@ verify_staged_revision() {
     and ([.status.conditions[]?
       | select(.type == "Ready" and .status == "True")] | length) == 1
     and ((.spec.containers[0].image // "") | test("@sha256:[0-9a-f]{64}$"))
-    and ((.metadata.labels["analysis-capacity-source-commit"] // "") == $source_sha)
+    and ((.metadata.labels["analysis-v2-source-commit"] // "") == $source_sha)
   ' <<<"$revision_json" >/dev/null \
     || die "Cloud Run staged revision is not the exact Ready revision for this service"
   local revision_env_value
@@ -1237,6 +1366,7 @@ if [[ "$mode" == "check" ]]; then
   service_exists || die "Cloud Run service does not exist"
   verify_service_contract
   verify_legacy_quiescence
+  verify_vercel_public_deployment
   verify_capacity_activation_readiness
   verify_preflight_maintenance
   exit 0
@@ -1264,6 +1394,7 @@ if service_exists; then
   verify_stage_transition "$observed_stage"
   verify_service_contract "$observed_stage"
   verify_legacy_quiescence
+  verify_vercel_public_deployment
   verify_capacity_activation_readiness
 else
   [[ "$stage" == "bootstrap" ]] \
@@ -1292,6 +1423,7 @@ else
     || die "Cloud Run traffic changed while the staged revision was being verified"
   verify_staged_revision "$staged_revision"
   verify_legacy_quiescence
+  verify_vercel_public_deployment
   verify_capacity_activation_readiness
   rollback_armed="true"
   gcloud run services update-traffic "$service" \
@@ -1299,6 +1431,7 @@ else
     || die "Cloud Run staged revision could not be promoted"
   verify_service_contract "$stage" true
   verify_legacy_quiescence
+  verify_vercel_public_deployment
   verify_capacity_activation_readiness
 fi
 verify_preflight_maintenance

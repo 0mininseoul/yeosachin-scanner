@@ -21,7 +21,7 @@ All of these gates are required before enabling provider admission in production
    npm run load:analysis-capacity
    ```
 
-   The initial-stage JSON report must show `fakeProvider=true`, `accepted=600`, `terminalized=600`, `lost=0`, `duplicateTerminalEffects=0`, `eventualDrain=true`, `maxPreflightProviderActive===32`, `maxPaidProviderActive===8`, `maxGeminiActive===8`, `workerPreflightConcurrency===32`, and `workerPaidConcurrency===8`; the expanded-stage run must show the same exact provider maxima with `workerPreflightConcurrency===64` and `workerPaidConcurrency===16`. Both reports must include positive capacity-pending, retry/recovery, and fence-rotation evidence. The harness must not resolve or call Apify, Gemini, Cloud Tasks, Cloud Run, Supabase, or any other external provider.
+   The initial-stage JSON report must show `accepted=600`, `terminalized=600`, `lost=0`, `duplicateTerminalEffects=0`, `eventualDrain=true`, `maxPreflightProviderActive===32`, `maxPaidProviderActive===8`, `maxGeminiActive===8`, `workerPreflightConcurrency===32`, and `workerPaidConcurrency===8`; the expanded-stage run must show the same exact provider maxima with `workerPreflightConcurrency===64` and `workerPaidConcurrency===16`. Both reports must include positive capacity-pending, retry/recovery, and fence-rotation evidence, plus independently observed task-create, admission-wrapper, and fake-provider invocation counters. The report labels database contention as `deterministic-serial-fake`; native PostgreSQL contention and EXPLAIN evidence are separate release artifacts. The harness must not resolve or call Apify, Gemini, Cloud Tasks, Cloud Run, Supabase, or any other external provider.
 
 2. Run the targeted admission, PGlite, queue-role, worker-route, and infra contract tests. Then run the scheduler benchmark, full test suite, lint, TypeScript check, production build, and `git diff --check`.
 
@@ -35,6 +35,15 @@ All of these gates are required before enabling provider admission in production
 
 5. Set `ANALYSIS_PROVIDER_ADMISSION_ENABLED=true` only in a reviewed runtime manifest for the canary. Missing, malformed, or mismatched workload-role configuration is fail-closed. Never use a plaintext provider token or a `latest` secret reference in a deployment manifest.
 
+Active capacity promotion also requires the deployer to perform the same
+official Vercel evidence check as release readiness: select the READY production
+deployment from `GET /v6/deployments`, fetch
+`GET /v2/deployments/{uid-or-id}/aliases` for that exact deployment under the
+same token/team context, and bind the public freeze/readiness origin to its
+immutable URL or returned alias. The observed Vercel Git SHA and the Cloud Run
+`analysis-v2-source-commit` label must equal the reviewed source SHA; a caller
+supplied origin or capacity-only SHA is not evidence.
+
 The bootstrap stage is intentionally gate-off: deploy both private role services
 with `PREFLIGHT_TASKS_ENABLED=false`, `ANALYSIS_V2_TASKS_ENABLED=false`,
 `ANALYSIS_V2_WORKER_ENABLED=false`, and `ANALYSIS_PROVIDER_ADMISSION_ENABLED=false`,
@@ -42,8 +51,14 @@ then verify the exact ready revisions, service URL/audience, resources, secrets,
 and role-scoped IAM. Before any initial or expanded gate-on revision, freeze the
 public V1 producer configuration and beta-prepare intake, pause the legacy
 queues, block the old invocation targets, and verify the actual queue state is
-empty plus all legacy V1/provider claims and ambiguous runs are zero. Readiness
-is an authoritative pre-promotion barrier, not a post-promotion assertion.
+empty plus all legacy V1/provider claims and ambiguous runs are zero. Roleless
+fresh predecessors are accepted only by the preflight drain path while gates
+are off; the readiness barrier must prove that cohort empty before admission is
+enabled. A late roleless delivery after the gate is on is terminally rejected
+with `ANALYSIS_V2_LEGACY_FRESH_DRAIN_REQUIRED` and `status=legacy_drain_required`
+in a 200 acknowledgement, rather than retried
+as paid work. Readiness is an authoritative pre-promotion barrier, not a
+post-promotion assertion.
 
 ## Rollout sequence
 
@@ -63,7 +78,7 @@ Set `ANALYSIS_CAPACITY_EXPANSION_CANARY=true` only after the 32 worker/provider 
 
 ### 4. Paid 8 canary
 
-Configure and deploy the paid role independently with `ANALYSIS_CAPACITY_STAGE=initial`, `ANALYSIS_WORKLOAD_ROLE=paid`, and the paid target URL/audience/service identity. The durable queue identity is `analysis-v2-pipeline`; new paid fresh-admission tasks use this queue and `/api/analysis/v2/worker`, while legacy roleless fresh-admission tasks drain on `analysis-preflight` during the mixed-version window. Use the same no-traffic exact-revision/readiness/captured-revision promotion sequence. Admit at least 200 paid requests durably, but keep active paid worker execution at 8 and paid Apify/Gemini provider ceilings at 8. Verify that preflight queue age and admission success are unchanged while paid work drains. Full followers/following must remain on the secondary credential and be covered by the relationship-specific budget.
+Configure and deploy the paid role independently with `ANALYSIS_CAPACITY_STAGE=initial`, `ANALYSIS_WORKLOAD_ROLE=paid`, and the paid target URL/audience/service identity. The durable queue identity is `analysis-v2-pipeline`; new paid fresh-admission tasks use this queue and `/api/analysis/v2/worker`. During the gates-off mixed-version window only, legacy roleless fresh-admission tasks drain on `analysis-preflight`; do not enable admission until that cohort is empty. Use the same no-traffic exact-revision/readiness/captured-revision promotion sequence. Admit at least 200 paid requests durably, but keep active paid worker execution at 8 and paid Apify/Gemini provider ceilings at 8. Verify that preflight queue age and admission success are unchanged while paid work drains. Full followers/following must remain on the secondary credential and be covered by the relationship-specific budget.
 
 ### 5. Paid expansion
 

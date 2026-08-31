@@ -243,11 +243,13 @@ jq -e '
   and (.aliases | type == "array")
   and all(.aliases[];
     type == "object"
-    and (.domain | type == "string")
-    and (.domain | test("^[A-Za-z0-9.-]+$"))
-    and (.domain | test("(^|\\.)[A-Za-z0-9-]+\\.[A-Za-z]{2,}$"))
-    and ((.deploymentId? // .deployment_id? // .uid? // .id? // null) == null
-      or ((.deploymentId? // .deployment_id? // .uid? // .id?) | tostring) == $deployment_id)
+    and (.uid | type == "string")
+    and (.alias | type == "string")
+    and (.created | type == "string")
+    and (.alias | test("^[A-Za-z0-9.-]+$"))
+    and (.alias | test("(^|\\.)[A-Za-z0-9-]+\\.[A-Za-z]{2,}$"))
+    and ((.deploymentId? // .deployment_id? // null) == null
+      or ((.deploymentId? // .deployment_id?) | tostring) == $deployment_id)
   )
 ' --arg deployment_id "$vercel_deployment_id" <<<"$vercel_aliases_json" >/dev/null 2>&1 \
   || die 'selected Vercel deployment aliases response is malformed or belongs to another deployment'
@@ -258,7 +260,7 @@ while IFS= read -r vercel_host; do
     vercel_origin_match='true'
     break
   fi
-done < <(jq -r '.aliases[]?.domain' <<<"$vercel_aliases_json")
+done < <(jq -r '.aliases[]?.alias' <<<"$vercel_aliases_json")
 [[ "$vercel_origin_match" == 'true' ]] \
   || die 'public freeze origin does not match the selected READY Vercel deployment URL or exact alias'
 

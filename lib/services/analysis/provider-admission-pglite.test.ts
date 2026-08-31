@@ -1708,6 +1708,43 @@ describe('provider admission migration PGlite contract', () => {
         expect(ordinaryReplay.rows[0]?.result).toBe(true);
     });
 
+    it('does not upgrade roleless V2 or roleless B-lite predecessors', async () => {
+        const v2 = paidInput(9);
+        const v2Token = '12121212-1212-4121-8121-aaaaaaaaaaaa';
+        await db.query(
+            `UPDATE public.analysis_pipeline_jobs
+             SET dispatch_state = 'enqueued', dispatch_generation = 3,
+                 dispatch_reservation_token = $2, dispatch_reserved_at = clock_timestamp(),
+                 dispatched_at = clock_timestamp(), dispatch_workload_role = NULL,
+                 dispatch_contract_version = NULL
+             WHERE request_id = $1 AND job_key = $3`,
+            [v2.requestId, v2Token, v2.jobKey],
+        );
+        await expect(asService(
+            `SELECT * FROM public.reserve_analysis_v2_job_dispatch_v2(
+                $1,$2,$3,'paid'::text,2::smallint
+            )`,
+            [v2.requestId, v2.jobKey, '13131313-1313-4131-8131-aaaaaaaaaaaa'],
+        )).rejects.toThrow('ANALYSIS_V2_LEGACY_DISPATCH_ROLELESS');
+
+        const bliteId = 'abababab-abab-4bab-8bab-777777777777';
+        await db.query(
+            `INSERT INTO public.analysis_preflights(id, expires_at, status)
+             VALUES ($1, clock_timestamp() + interval '10 minutes', 'ready')`,
+            [bliteId],
+        );
+        await db.query(
+            `INSERT INTO public.precheckout_blite_dispatches(preflight_id, state, dispatch_token)
+             VALUES ($1, 'enqueuing', '14141414-1414-4141-8141-aaaaaaaaaaaa')`,
+            [bliteId],
+        );
+        await expect(asService(
+            `SELECT public.reserve_precheckout_blite_dispatch_v2(
+                'abababab-abab-4bab-8bab-777777777777'::uuid, 'preflight'::text, 2::smallint
+            )`,
+        )).rejects.toThrow('ANALYSIS_V2_LEGACY_DISPATCH_ROLELESS');
+    });
+
     it('readiness permits exact role/fence traffic but blocks legacy and unsafe fresh claims', async () => {
         // Earlier cases intentionally leave provider-admission fixtures behind.  Readiness is
         // tested against a fresh preflight universe so a previous capacity case cannot masquerade
@@ -1743,6 +1780,26 @@ describe('provider admission migration PGlite contract', () => {
             legacyActiveV2JobClaims: 0,
             legacyActiveFreshAdmissions: 0,
         });
+
+        const legacyFreshId = 'abababab-abab-4bab-8bab-888888888888';
+        await db.query(`
+            INSERT INTO public.analysis_preflights(
+                id, expires_at, status, admission_status, admission_generation,
+                admission_dispatch_state, admission_dispatch_generation,
+                admission_dispatch_token, admission_dispatch_reserved_at,
+                admission_dispatched_at
+            ) VALUES (
+                $1, clock_timestamp() + interval '10 minutes', 'ready', 'ready', 1,
+                'enqueued', 1, 'cdcdcdcd-cdcd-4dcd-8dcd-888888888888',
+                clock_timestamp(), clock_timestamp()
+            )
+        `, [legacyFreshId]);
+        const legacyFresh = await asService<{ payload: Record<string, unknown> }>(
+            `SELECT public.analysis_capacity_activation_readiness() AS payload`,
+        );
+        expect(legacyFresh.rows[0]?.payload).toMatchObject({ ready: false });
+        expect(Number(legacyFresh.rows[0]?.payload.legacyActiveFreshAdmissions)).toBeGreaterThan(0);
+        await db.query(`DELETE FROM public.analysis_preflights WHERE id = $1`, [legacyFreshId]);
 
         await db.query(`
             UPDATE public.analysis_pipeline_jobs

@@ -217,18 +217,18 @@ assert_no_sensitive_probe_value "$output"
   || fail 'Vercel token appeared in a release-readiness command argv'
 
 export FAKE_VERCEL_JSON="{\"deployments\":[{\"target\":\"production\",\"readyState\":\"READY\",\"uid\":\"$FAKE_VERCEL_DEPLOYMENT_ID\",\"url\":\"vercel-preview.example\",\"meta\":{\"githubCommitSha\":\"$expected_sha\"}}]}"
-export FAKE_VERCEL_ALIASES_JSON='{"aliases":[{"domain":"yeosachin.com"}]}'
+export FAKE_VERCEL_ALIASES_JSON='{"aliases":[{"uid":"alias_selected","alias":"yeosachin.com","created":"2026-08-01T00:00:00.000Z"}]}'
 if ! output="$(run_gate 2>&1)"; then
   printf '%s\n' "$output" >&2
   fail 'exact deployment alias provenance was rejected'
 fi
-export FAKE_VERCEL_ALIASES_JSON='{"aliases":[{"domain":123}]}'
+export FAKE_VERCEL_ALIASES_JSON='{"aliases":[{"uid":"alias_selected","alias":123,"created":"2026-08-01T00:00:00.000Z"}]}'
 if output="$(run_gate 2>&1)"; then
   fail 'malformed deployment alias provenance was accepted'
 fi
 [[ "$output" == *'aliases response is malformed'* ]] \
   || fail 'malformed deployment alias was not classified explicitly'
-export FAKE_VERCEL_ALIASES_JSON='{"aliases":[{"domain":"yeosachin.com","deploymentId":"dpl_other"}]}'
+export FAKE_VERCEL_ALIASES_JSON='{"aliases":[{"uid":"alias_other","alias":"yeosachin.com","deploymentId":"dpl_other","created":"2026-08-01T00:00:00.000Z"}]}'
 if output="$(run_gate 2>&1)"; then
   fail 'alias provenance from another deployment was accepted'
 fi

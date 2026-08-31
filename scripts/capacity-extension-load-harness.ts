@@ -51,7 +51,7 @@ export interface CapacityExtensionLoadOptions {
 }
 
 export interface CapacityExtensionLoadReport {
-    schemaVersion: 'automatic-analysis-capacity-load-v3';
+    schemaVersion: 'automatic-analysis-capacity-load-v4';
     capacityStage: 'initial' | 'expanded';
     workerPreflightConcurrency: number;
     workerPaidConcurrency: number;
@@ -76,15 +76,28 @@ export interface CapacityExtensionLoadReport {
     maxGeminiActive: number;
     providerStarts: number;
     geminiStarts: number;
+    relationshipProviderStarts: number;
+    /** Counts calls made through the deterministic Cloud Tasks client wrapper. */
+    taskCreateCalls: number;
+    duplicateTaskCreateCalls: number;
+    /** Counts invocations of the production admission checkpoint wrapper. */
+    providerAdmissionWrapperCalls: number;
+    providerAdmissionAcquireCalls: number;
+    providerAdmissionRenewCalls: number;
+    providerAdmissionReleaseCalls: number;
+    /** Counts actual local fake-provider invocations, never inferred from leases. */
+    fakeProviderCalls: number;
     maxDatabaseInFlight: number;
     databaseContentionEvents: number;
-    databaseContentionBounded: boolean;
+    databaseContentionEvidence: {
+        source: 'deterministic-serial-fake';
+        transactionCount: number;
+        contentionEvents: number;
+        maxInFlight: number;
+    };
     preflightQueueDrained: boolean;
     paidQueueDrained: boolean;
     eventualDrain: boolean;
-    taskWrappers: true;
-    providerAdmissionWrappers: true;
-    fakeProvider: true;
 }
 
 type WorkloadRole = 'preflight' | 'paid';
@@ -177,9 +190,29 @@ export function assertCapacityExtensionLoadReport(
     if (!report.preflightQueueDrained) fail('preflightQueueDrained');
     if (!report.paidQueueDrained) fail('paidQueueDrained');
     if (!report.eventualDrain) fail('eventualDrain');
-    if (!report.taskWrappers) fail('taskWrappers');
-    if (!report.providerAdmissionWrappers) fail('providerAdmissionWrappers');
-    if (!report.fakeProvider) fail('fakeProvider');
+    if (report.taskCreateCalls <= report.accepted) fail('taskCreateCalls');
+    if (report.duplicateTaskCreateCalls <= 0) fail('duplicateTaskCreateCalls');
+    if (report.providerAdmissionWrapperCalls <= 0) fail('providerAdmissionWrapperCalls');
+    if (report.providerAdmissionAcquireCalls <= 0) fail('providerAdmissionAcquireCalls');
+    if (report.providerAdmissionReleaseCalls <= 0) fail('providerAdmissionReleaseCalls');
+    if (report.fakeProviderCalls !== report.providerStarts
+        + report.geminiStarts
+        + report.relationshipProviderStarts) {
+        fail('fakeProviderCalls');
+    }
+    if (report.relationshipProviderStarts !== 4) fail('relationshipProviderStarts');
+    if (report.databaseContentionEvidence.source !== 'deterministic-serial-fake') {
+        fail('databaseContentionEvidence.source');
+    }
+    if (report.databaseContentionEvidence.transactionCount <= 0) {
+        fail('databaseContentionEvidence.transactionCount');
+    }
+    if (report.databaseContentionEvidence.contentionEvents <= 0) {
+        fail('databaseContentionEvidence.contentionEvents');
+    }
+    if (report.databaseContentionEvidence.maxInFlight !== 1) {
+        fail('databaseContentionEvidence.maxInFlight');
+    }
 }
 
 function deterministicUuid(role: WorkloadRole, index: number): string {
@@ -220,6 +253,8 @@ function taskConfig(role: WorkloadRole): PreflightTasksConfig | AnalysisV2TasksC
 class DeterministicTaskClient {
     readonly tasks = new Map<string, Record<string, unknown>>();
 
+    constructor(private readonly stats: LoadDbStats) {}
+
     queuePath(project: string, location: string, queue: string): string {
         return `projects/${project}/locations/${location}/queues/${queue}`;
     }
@@ -229,10 +264,12 @@ class DeterministicTaskClient {
     }
 
     async createTask(request: Record<string, unknown>): Promise<void> {
+        this.stats.taskCreateCalls += 1;
         const task = request.task as { name?: string } | undefined;
         const name = task?.name;
         if (!name) throw new Error('CAPACITY_LOAD_TASK_NAME_MISSING');
         if (this.tasks.has(name)) {
+            this.stats.duplicateTaskCreateCalls += 1;
             const error = new Error('ALREADY_EXISTS');
             Object.assign(error, { code: 6 });
             throw error;
@@ -245,6 +282,14 @@ interface LoadDbStats {
     databaseInFlight: number;
     maxDatabaseInFlight: number;
     databaseContentionEvents: number;
+    databaseTransactions: number;
+    taskCreateCalls: number;
+    duplicateTaskCreateCalls: number;
+    providerAdmissionWrapperCalls: number;
+    providerAdmissionAcquireCalls: number;
+    providerAdmissionRenewCalls: number;
+    providerAdmissionReleaseCalls: number;
+    fakeProviderCalls: number;
 }
 
 type StoredAdmission = AnalysisProviderAdmissionLease & {
@@ -278,6 +323,7 @@ class DeterministicAdmissionStore implements AnalysisProviderAdmissionStore {
         this.dbTail = new Promise<void>(resolve => { release = resolve; });
         const queued = this.dbQueued > 0;
         this.dbQueued += 1;
+        this.stats.databaseTransactions += 1;
         if (queued) this.stats.databaseContentionEvents += 1;
         await predecessor;
         this.dbQueued -= 1;
@@ -328,6 +374,7 @@ class DeterministicAdmissionStore implements AnalysisProviderAdmissionStore {
     }
 
     async acquire(input: AnalysisProviderAdmissionInput): Promise<AnalysisProviderAdmissionLease> {
+        this.stats.providerAdmissionAcquireCalls += 1;
         return this.db(() => {
             const id = analysisProviderAdmissionId(input);
             const existing = this.leases.get(id);
@@ -393,6 +440,7 @@ class DeterministicAdmissionStore implements AnalysisProviderAdmissionStore {
     }
 
     async renew(lease: AnalysisProviderAdmissionLease): Promise<AnalysisProviderAdmissionLease> {
+        this.stats.providerAdmissionRenewCalls += 1;
         return this.db(() => {
             const current = this.leases.get(lease.admissionId);
             if (!current || current.state !== 'leased'
@@ -414,6 +462,7 @@ class DeterministicAdmissionStore implements AnalysisProviderAdmissionStore {
         lease: AnalysisProviderAdmissionLease,
         reason: 'terminal' | 'prestart_rejected' = 'terminal',
     ): Promise<void> {
+        this.stats.providerAdmissionReleaseCalls += 1;
         await this.db(() => {
             const current = this.leases.get(lease.admissionId);
             if (!current) {
@@ -562,8 +611,11 @@ class DeterministicFakeProviders {
     maxPreflightActive = 0;
     maxPaidActive = 0;
     maxGeminiActive = 0;
+    relationshipProviderActive = 0;
+    maxRelationshipActive = 0;
     providerStarts = 0;
     geminiStarts = 0;
+    relationshipProviderStarts = 0;
     private readonly barrierReleased = { preflight: false, paid: false, gemini: false };
     private readonly barrierReached = new Map<'preflight' | 'paid' | 'gemini', () => void>();
     private readonly barrierWaiters = new Map<'preflight' | 'paid' | 'gemini', Array<() => void>>();
@@ -572,6 +624,7 @@ class DeterministicFakeProviders {
         private readonly preflightBarrierTarget: number,
         private readonly paidBarrierTarget: number,
         private readonly geminiBarrierTarget: number,
+        private readonly stats: LoadDbStats,
     ) {
         this.barrierWaiters.set('preflight', []);
         this.barrierWaiters.set('paid', []);
@@ -617,6 +670,7 @@ class DeterministicFakeProviders {
     }
 
     async apify(role: WorkloadRole): Promise<void> {
+        this.stats.fakeProviderCalls += 1;
         this.providerStarts += 1;
         if (role === 'preflight') {
             this.preflightActive += 1;
@@ -633,12 +687,28 @@ class DeterministicFakeProviders {
     }
 
     async gemini(): Promise<void> {
+        this.stats.fakeProviderCalls += 1;
         this.geminiStarts += 1;
         this.geminiActive += 1;
         this.maxGeminiActive = Math.max(this.maxGeminiActive, this.geminiActive);
         this.signalSaturated('gemini');
         await this.firstWaveBarrier('gemini');
         this.geminiActive -= 1;
+    }
+
+    async relationship(): Promise<void> {
+        this.stats.fakeProviderCalls += 1;
+        this.relationshipProviderStarts += 1;
+        this.relationshipProviderActive += 1;
+        this.maxRelationshipActive = Math.max(
+            this.maxRelationshipActive,
+            this.relationshipProviderActive,
+        );
+        // The four calls are started together below. Yielding once makes the
+        // tracker observe real concurrent fake-provider invocations without a
+        // second serializer or a fabricated maximum.
+        await Promise.resolve();
+        this.relationshipProviderActive -= 1;
     }
 }
 
@@ -681,6 +751,7 @@ async function runWrappedProvider(
     stats: LoadDbStats,
     env: Record<string, string | undefined>,
 ): Promise<'completed' | 'adopted' | 'rejected'> {
+    stats.providerAdmissionWrapperCalls += 1;
     const providerStatus = store.providerStatus(item);
     if (providerStatus === 'succeeded') return 'adopted';
     const checkpoint = checkpointFor(item, terminal, terminalEffectCalls);
@@ -759,13 +830,21 @@ export async function runCapacityExtensionLoad(
         databaseInFlight: 0,
         maxDatabaseInFlight: 0,
         databaseContentionEvents: 0,
+        databaseTransactions: 0,
+        taskCreateCalls: 0,
+        duplicateTaskCreateCalls: 0,
+        providerAdmissionWrapperCalls: 0,
+        providerAdmissionAcquireCalls: 0,
+        providerAdmissionRenewCalls: 0,
+        providerAdmissionReleaseCalls: 0,
+        fakeProviderCalls: 0,
     };
     let duplicateDeliveries = 0;
     let deliveries = 0;
 
     const taskClients: Record<WorkloadRole, DeterministicTaskClient> = {
-        preflight: new DeterministicTaskClient(),
-        paid: new DeterministicTaskClient(),
+        preflight: new DeterministicTaskClient(stats),
+        paid: new DeterministicTaskClient(stats),
     };
     const taskConfigs = {
         preflight: taskConfig('preflight') as PreflightTasksConfig,
@@ -853,6 +932,7 @@ export async function runCapacityExtensionLoad(
         Math.min(32, options.preflightConcurrency),
         Math.min(8, options.paidConcurrency),
         Math.min(8, options.geminiConcurrency),
+        stats,
     );
     const admission = new DeterministicAdmissionStore(stats);
     let geminiCapacityPending = 0;
@@ -1199,6 +1279,7 @@ export async function runCapacityExtensionLoad(
             leaseSeconds: 120,
         }));
     }
+    await Promise.all(Array.from({ length: 4 }, () => providers.relationship()));
     // Exercise the same durable renew primitive used by the production
     // checkpoint wrapper.  This is deliberately performed while the exact
     // relationship lease/fence is held, before release, so the report proves
@@ -1230,7 +1311,7 @@ export async function runCapacityExtensionLoad(
     const duplicateTerminalEffects = [...terminalEffectCalls.values()]
         .reduce((total, calls) => total + Math.max(0, calls - 1), 0);
     return Object.freeze({
-        schemaVersion: 'automatic-analysis-capacity-load-v3',
+        schemaVersion: 'automatic-analysis-capacity-load-v4',
         capacityStage: options.capacityStage,
         workerPreflightConcurrency: options.preflightConcurrency,
         workerPaidConcurrency: options.paidConcurrency,
@@ -1247,9 +1328,7 @@ export async function runCapacityExtensionLoad(
         relationshipBudgetMaxActive: admission.maxObservedBudget(
             'paid:apify:secondary:relationship',
         ),
-        relationshipProviderMaxActive: admission.maxObservedBudget(
-            'paid:apify:secondary:relationship',
-        ),
+        relationshipProviderMaxActive: providers.maxRelationshipActive,
         relationshipCapacityPendingCount,
         relationshipCapacityPending,
         recoveredLeases: admission.recoveryCount,
@@ -1261,18 +1340,27 @@ export async function runCapacityExtensionLoad(
         maxGeminiActive: providers.maxGeminiActive,
         providerStarts: providers.providerStarts,
         geminiStarts: providers.geminiStarts,
+        relationshipProviderStarts: providers.relationshipProviderStarts,
+        taskCreateCalls: stats.taskCreateCalls,
+        duplicateTaskCreateCalls: stats.duplicateTaskCreateCalls,
+        providerAdmissionWrapperCalls: stats.providerAdmissionWrapperCalls,
+        providerAdmissionAcquireCalls: stats.providerAdmissionAcquireCalls,
+        providerAdmissionRenewCalls: stats.providerAdmissionRenewCalls,
+        providerAdmissionReleaseCalls: stats.providerAdmissionReleaseCalls,
+        fakeProviderCalls: stats.fakeProviderCalls,
         maxDatabaseInFlight: stats.maxDatabaseInFlight,
         databaseContentionEvents: stats.databaseContentionEvents,
-        databaseContentionBounded: stats.maxDatabaseInFlight === 1
-            && stats.databaseContentionEvents > 0,
+        databaseContentionEvidence: {
+            source: 'deterministic-serial-fake' as const,
+            transactionCount: stats.databaseTransactions,
+            contentionEvents: stats.databaseContentionEvents,
+            maxInFlight: stats.maxDatabaseInFlight,
+        },
         preflightQueueDrained,
         paidQueueDrained,
         eventualDrain: preflightQueueDrained
             && paidQueueDrained
             && terminal.size === accepted,
-        taskWrappers: true,
-        providerAdmissionWrappers: true,
-        fakeProvider: true,
     });
 }
 

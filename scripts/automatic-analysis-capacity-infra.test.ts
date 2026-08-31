@@ -5,6 +5,11 @@ import { tmpdir } from 'node:os';
 import { describe, expect, it } from 'vitest';
 
 const root = new URL('../', import.meta.url);
+// Every child command in this contract suite is deliberately bounded.  The
+// suite exercises shell wrappers, so an accidentally waiting fake command must
+// fail the test deterministically instead of leaving Vitest's worker RPC
+// pending behind a synchronous child process.
+const CHILD_PROCESS_TIMEOUT_MS = 30_000;
 
 function baseEnvironment(role: 'preflight' | 'paid' = 'preflight') {
     const preflight = {
@@ -58,6 +63,10 @@ function baseEnvironment(role: 'preflight' | 'paid' = 'preflight') {
         ANALYSIS_CAPACITY_LEGACY_TARGET_URL: 'https://public.example.com/api/analysis/start',
         ANALYSIS_CAPACITY_LEGACY_TARGET_RESOURCE: 'vercel:production:analysis-v1',
         ANALYSIS_CAPACITY_DEPLOY_LOCK_BUCKET: 'analysis-capacity-lock-fixture',
+        VERCEL_PROJECT_ID: 'fixture-project',
+        VERCEL_TOKEN: 'vercel-token-fixture',
+        VERCEL_API_BASE_URL: 'https://api.vercel.test',
+        VERCEL_TEAM_ID: 'fixture-team',
         ANALYSIS_PROVIDER_ADMISSION_ENABLED: 'true',
         ANALYSIS_BETA_PREPARE_ENABLED: 'false',
         ANALYSIS_CAPACITY_SOURCE_DIR: '.',
@@ -175,6 +184,7 @@ function runQueue(script: string, args: string[], extra: Record<string, string> 
         execFileSync('git', ['clone', '--quiet', '--no-local', root.pathname, sourceDir], {
             cwd: root.pathname,
             encoding: 'utf8',
+            timeout: CHILD_PROCESS_TIMEOUT_MS,
         });
     }
     try {
@@ -194,6 +204,7 @@ function runQueue(script: string, args: string[], extra: Record<string, string> 
                 ...extra,
             },
             encoding: 'utf8',
+            timeout: CHILD_PROCESS_TIMEOUT_MS,
         });
     } finally {
         rmSync(fixtureDir, { recursive: true, force: true });
@@ -209,6 +220,8 @@ interface FakeRunOptions {
     readiness?: Record<string, unknown>;
     args?: string[];
     revisionService?: string;
+    vercelDeployments?: unknown;
+    vercelAliases?: unknown;
 }
 
 function fakeRun(options: FakeRunOptions = {}) {
@@ -235,11 +248,12 @@ function fakeRun(options: FakeRunOptions = {}) {
     execFileSync('git', ['clone', '--quiet', '--no-local', root.pathname, sourceDir], {
         cwd: root.pathname,
         encoding: 'utf8',
+        timeout: CHILD_PROCESS_TIMEOUT_MS,
     });
     const sourceCommit = execFileSync(
         'git',
         ['rev-parse', '--verify', 'HEAD^{commit}'],
-        { cwd: root.pathname, encoding: 'utf8' },
+        { cwd: root.pathname, encoding: 'utf8', timeout: CHILD_PROCESS_TIMEOUT_MS },
     ).trim();
     const githubPath = join(fixtureDir, 'github.json');
     writeFileSync(githubPath, JSON.stringify({
@@ -290,7 +304,7 @@ function fakeRun(options: FakeRunOptions = {}) {
             labels: {
                 'analysis-workload-role': role,
                 'analysis-capacity-stage': stage,
-                'analysis-capacity-source-commit': sourceCommit,
+                'analysis-v2-source-commit': sourceCommit,
             },
         },
         spec: {
@@ -301,7 +315,7 @@ function fakeRun(options: FakeRunOptions = {}) {
                         'autoscaling.knative.dev/minScale': '0',
                     },
                     labels: {
-                        'analysis-capacity-source-commit': sourceCommit,
+                        'analysis-v2-source-commit': sourceCommit,
                     },
                 },
                 spec: {
@@ -363,6 +377,8 @@ function fakeRun(options: FakeRunOptions = {}) {
     const legacyQueuePath = join(fixtureDir, 'legacy-queue.json');
     const legacyTasksPath = join(fixtureDir, 'legacy-tasks.json');
     const publicFreezePath = join(fixtureDir, 'public-freeze.json');
+    const vercelDeploymentsPath = join(fixtureDir, 'vercel-deployments.json');
+    const vercelAliasesPath = join(fixtureDir, 'vercel-aliases.json');
     const lockPath = join(fixtureDir, 'deploy.lock');
     const manifestPath = join(fixtureDir, 'runtime.json');
     const logPath = join(fixtureDir, 'calls.log');
@@ -392,6 +408,18 @@ function fakeRun(options: FakeRunOptions = {}) {
             expectedStatus: active ? 410 : 503,
             gateBeforeRuntime: true,
         }])),
+    }));
+    writeFileSync(vercelDeploymentsPath, JSON.stringify(options.vercelDeployments ?? {
+        deployments: [{
+            uid: 'dpl_fixture',
+            url: 'vercel-fixture.example.com',
+            target: 'production',
+            readyState: 'READY',
+            meta: { githubCommitSha: sourceCommit },
+        }],
+    }));
+    writeFileSync(vercelAliasesPath, JSON.stringify(options.vercelAliases ?? {
+        aliases: [{ uid: 'alias_fixture', alias: 'public.example.com', created: '2026-08-01T00:00:00.000Z' }],
     }));
     writeFileSync(schedulerPath, JSON.stringify({
         schedule: '* * * * *',
@@ -500,7 +528,7 @@ if [[ "\${1:-} \${2:-} \${3:-}" == "run revisions describe" ]]; then
   done
   jq --arg revision "\${4:-}" --arg service "\$FAKE_GCLOUD_REVISION_SERVICE" \
     --arg source "\$FAKE_GCLOUD_SOURCE_SHA" \
-    '{metadata:{name:$revision,labels:{"serving.knative.dev/service":$service,"analysis-capacity-source-commit":$source}},spec:.spec.template.spec,status:{conditions:[{type:"Ready",status:"True"}]}}' \
+    '{metadata:{name:$revision,labels:{"serving.knative.dev/service":$service,"analysis-v2-source-commit":$source}},spec:.spec.template.spec,status:{conditions:[{type:"Ready",status:"True"}]}}' \
     "$FAKE_GCLOUD_SERVICE_JSON"
   exit 0
 fi
@@ -574,6 +602,14 @@ if [[ "$url" == https://api.github.com/* ]]; then
   fi
   exit 0
 fi
+if [[ "$url" == https://api.vercel.test/v6/deployments* ]]; then
+  cat "$FAKE_VERCEL_DEPLOYMENTS_JSON"
+  exit 0
+fi
+if [[ "$url" == https://api.vercel.test/v2/deployments/*/aliases* ]]; then
+  cat "$FAKE_VERCEL_ALIASES_JSON"
+  exit 0
+fi
 if [[ "$url" == */api/analysis/capacity/readiness ]]; then
   cat "$FAKE_GCLOUD_PUBLIC_FREEZE_JSON"
 elif [[ "$request_method" == 'POST' && "$url" =~ /api/analysis/(start|step|run)$ ]]; then
@@ -623,6 +659,8 @@ fi
                 FAKE_GCLOUD_LOCK_PATH: lockPath,
                 FAKE_GCLOUD_LOCK_GENERATION_PATH: `${lockPath}.generation`,
                 FAKE_GITHUB_JSON: join(fixtureDir, 'github.json'),
+                FAKE_VERCEL_DEPLOYMENTS_JSON: vercelDeploymentsPath,
+                FAKE_VERCEL_ALIASES_JSON: vercelAliasesPath,
                 FAKE_GCLOUD_NEXT_REVISION: `${service}-00002-staged`,
                 FAKE_GCLOUD_TARGET_STAGE: stage,
                 FAKE_GCLOUD_REVISION_SERVICE: options.revisionService ?? service,
@@ -763,6 +801,36 @@ describe('automatic-analysis infrastructure contracts', () => {
             'exact Ready revision for this service',
         );
         expect(result.calls).not.toContain('run services update-traffic');
+    });
+
+    it.each([
+        ['malformed aliases', { vercelAliases: { aliases: [{ uid: 'alias_fixture', alias: 42, created: '2026-08-01T00:00:00.000Z' }] } }],
+        ['other deployment alias', { vercelAliases: { aliases: [{ uid: 'alias_other', alias: 'public.example.com', deploymentId: 'dpl_other', created: '2026-08-01T00:00:00.000Z' }] } }],
+        ['missing public alias', { vercelAliases: { aliases: [{ uid: 'alias_other', alias: 'unrelated.example.com', created: '2026-08-01T00:00:00.000Z' }] } }],
+    ] as const)('rejects Vercel alias evidence drift: %s', (_name, options) => {
+        const result = fakeRun({ ...options, args: ['--check'] });
+        expect(result.status).not.toBe(0);
+        expect(`${result.stdout}\n${result.stderr}`).toMatch(/Vercel deployment|public freeze origin/);
+        expect(result.calls).not.toContain('run deploy');
+    });
+
+    it('does not trust optional aliases in the v6 deployment record', () => {
+        const result = fakeRun({
+            vercelDeployments: {
+                deployments: [{
+                    uid: 'dpl_fixture',
+                    url: 'vercel-fixture.example.com',
+                    aliases: ['public.example.com'],
+                    target: 'production',
+                    readyState: 'READY',
+                    meta: { githubCommitSha: execFileSync('git', ['rev-parse', 'HEAD'], { cwd: root.pathname, encoding: 'utf8', timeout: CHILD_PROCESS_TIMEOUT_MS }).trim() },
+                }],
+            },
+            vercelAliases: { aliases: [] },
+            args: ['--check'],
+        });
+        expect(result.status).not.toBe(0);
+        expect(`${result.stdout}\n${result.stderr}`).toContain('public freeze origin');
     });
 
     it.each(['preflight', 'paid'] as const)('checks the role-specific identity branch: %s', (role) => {

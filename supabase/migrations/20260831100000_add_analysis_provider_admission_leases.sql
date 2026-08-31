@@ -1919,7 +1919,7 @@ BEGIN
     SELECT pg_catalog.count(*)
     INTO v_legacy_active_fresh_admissions
     FROM public.analysis_preflights AS preflight
-    WHERE preflight.status IN ('pending', 'processing')
+    WHERE preflight.status IN ('pending', 'processing', 'ready')
       AND preflight.expires_at > v_now
       AND (
           (
@@ -1954,7 +1954,11 @@ BEGIN
               )
           )
           OR (
+              -- Roleless/unknown fresh predecessors are part of the drain cohort. They can
+              -- remain status=ready while their durable admission task is queued, so count the
+              -- exact admission dispatch states rather than relying on the profile status alone.
               preflight.admission_dispatch_state IN ('reserved', 'enqueued')
+              AND preflight.admission_generation BETWEEN 1 AND 100
               AND (
                   preflight.admission_dispatch_workload_role IS NULL
                   OR preflight.admission_dispatch_contract_version IS NULL
@@ -4315,9 +4319,17 @@ BEGIN
        AND v_job.dispatch_contract_version IS NULL THEN
         RAISE EXCEPTION USING MESSAGE = 'ANALYSIS_V2_LEGACY_DISPATCH_ROLELESS', ERRCODE = 'P0001';
     END IF;
-    IF FOUND AND v_job.dispatch_workload_role IS NOT NULL
-       AND (v_job.dispatch_workload_role IS DISTINCT FROM 'paid'
-            OR v_job.dispatch_contract_version IS DISTINCT FROM 2) THEN
+    IF FOUND AND v_job.dispatch_state IN ('reserved', 'enqueued', 'delivered')
+       AND (
+           v_job.dispatch_workload_role IS NULL
+           OR v_job.dispatch_contract_version IS NULL
+           OR v_job.dispatch_workload_role IS DISTINCT FROM 'paid'
+           OR v_job.dispatch_contract_version IS DISTINCT FROM 2
+       ) THEN
+        IF v_job.dispatch_workload_role IS NULL
+           AND v_job.dispatch_contract_version IS NULL THEN
+            RAISE EXCEPTION USING MESSAGE = 'ANALYSIS_V2_LEGACY_DISPATCH_ROLELESS', ERRCODE = 'P0001';
+        END IF;
         RAISE EXCEPTION USING MESSAGE = 'ANALYSIS_WORKLOAD_ROLE_MISMATCH', ERRCODE = 'P0001';
     END IF;
     SELECT reserved.* INTO v_result FROM public.reserve_analysis_v2_job_dispatch(

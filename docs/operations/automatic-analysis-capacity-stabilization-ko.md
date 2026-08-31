@@ -21,7 +21,7 @@ production provider를 활성화하기 전에 다음 게이트를 모두 통과�
    npm run load:analysis-capacity
    ```
 
-   Initial JSON 결과는 `fakeProvider=true`, `accepted=600`, `terminalized=600`, `lost=0`, `duplicateTerminalEffects=0`, `eventualDrain=true`, `maxPreflightProviderActive===32`, `maxPaidProviderActive===8`, `maxGeminiActive===8`, `workerPreflightConcurrency===32`, `workerPaidConcurrency===8`이어야 한다. Expanded 실행도 provider 최대값은 정확히 32/8/8이어야 하며 worker 동시성만 `workerPreflightConcurrency===64`, `workerPaidConcurrency===16`이어야 한다. 두 결과 모두 양수인 capacity-pending, retry/recovery, fence-rotation 증거를 포함해야 한다. harness는 Apify, Gemini, Cloud Tasks, Cloud Run, Supabase 등 외부 provider를 resolve하거나 호출해서는 안 된다.
+   Initial JSON 결과는 `accepted=600`, `terminalized=600`, `lost=0`, `duplicateTerminalEffects=0`, `eventualDrain=true`, `maxPreflightProviderActive===32`, `maxPaidProviderActive===8`, `maxGeminiActive===8`, `workerPreflightConcurrency===32`, `workerPaidConcurrency===8`이어야 한다. Expanded 실행도 provider 최대값은 정확히 32/8/8이어야 하며 worker 동시성만 `workerPreflightConcurrency===64`, `workerPaidConcurrency===16`이어야 한다. 두 결과 모두 양수인 capacity-pending, retry/recovery, fence-rotation 증거와 독립적으로 관측한 task-create, admission-wrapper, fake-provider 호출 카운터를 포함해야 한다. DB contention은 `deterministic-serial-fake`임을 표시하고 native PostgreSQL contention/EXPLAIN은 별도 release artifact로 보관한다. harness는 Apify, Gemini, Cloud Tasks, Cloud Run, Supabase 등 외부 provider를 resolve하거나 호출해서는 안 된다.
 
 2. admission, PGlite, queue-role, worker-route, infra contract 대상 테스트를 실행한다. 이어 scheduler benchmark, 전체 test, lint, TypeScript 검사, production build, `git diff --check`를 실행한다.
 
@@ -35,6 +35,15 @@ production provider를 활성화하기 전에 다음 게이트를 모두 통과�
 
 5. 검토된 canary runtime manifest에서만 `ANALYSIS_PROVIDER_ADMISSION_ENABLED=true`로 설정한다. workload-role 설정이 없거나 잘못되었거나 서로 다르면 fail-closed여야 한다. plaintext provider token이나 `latest` secret reference를 배포 manifest에 넣지 않는다.
 
+Active capacity promotion은 release readiness와 동일한 공식 Vercel 증거를
+배포자가 직접 확인해야 한다. `GET /v6/deployments`에서 READY production
+deployment를 선택하고, 같은 token/team context로 정확한 uid/id의
+`GET /v2/deployments/{uid-or-id}/aliases`를 조회해 public freeze/readiness
+origin이 immutable URL 또는 반환된 alias와 일치하는지 확인한다. 관측된
+Vercel Git SHA와 Cloud Run `analysis-v2-source-commit` label은 reviewed
+source SHA와 같아야 하며 caller가 준 origin이나 capacity 전용 SHA는 증거가
+아니다.
+
 Bootstrap 단계는 의도적으로 gate-off다. 두 private role service를
 `PREFLIGHT_TASKS_ENABLED=false`, `ANALYSIS_V2_TASKS_ENABLED=false`,
 `ANALYSIS_V2_WORKER_ENABLED=false`, `ANALYSIS_PROVIDER_ADMISSION_ENABLED=false`로
@@ -42,8 +51,13 @@ Bootstrap 단계는 의도적으로 gate-off다. 두 private role service를
 IAM을 확인한다. Initial/expanded gate-on revision 전에는 public V1 producer와
 beta-prepare intake를 freeze하고 legacy queue를 pause하며 old invocation target을
 차단한다. 실제 queue가 비어 있고 legacy V1/provider claim 및 ambiguous run이
-0인지 확인해야 한다. Readiness는 promotion 후 검사가 아니라 promotion 직전의
-authoritative barrier다.
+0인지 확인해야 한다. Roleless fresh predecessor는 gate-off preflight drain에서만
+허용한다. Admission을 켜기 전 readiness가 해당 cohort를 0건으로 증명해야
+하며, gate-on 뒤 늦게 도착한 roleless fresh task는
+`ANALYSIS_V2_LEGACY_FRESH_DRAIN_REQUIRED`와 `status=legacy_drain_required`를
+담은 HTTP 200 acknowledgement로 terminal 처리해
+retry loop를 만들지 않는다. Readiness는 promotion 후 검사가 아니라
+promotion 직전의 authoritative barrier다.
 
 ## 출시 순서
 
@@ -63,7 +77,7 @@ Harness와 대상 테스트를 clean CI checkout에서 실행한다. machine-rea
 
 ### 4. 유료 8 canary
 
-`ANALYSIS_CAPACITY_STAGE=initial`, `ANALYSIS_WORKLOAD_ROLE=paid`와 유료 전용 target URL/audience/service identity로 독립 설정 및 배포한다. 기존 paid queue identity는 `analysis-v2-pipeline`이다. 새 paid `fresh_admission` task는 이 queue와 `/api/analysis/v2/worker`를 사용하고, mixed-version 동안 기존 roleless task는 `analysis-preflight`에서 drain한다. 같은 no-traffic exact revision/readiness/captured-revision promotion 절차를 사용한다. 유료 요청을 최소 200건 durable하게 접수하되 active worker 실행은 8, paid Apify/Gemini provider ceiling도 각각 8로 유지한다. 유료 작업이 drain되는 동안 preflight queue age와 admission 성공률이 변하지 않는지 확인한다. Full followers/following은 secondary credential을 계속 사용하고 relationship 전용 budget 적용을 확인한다.
+`ANALYSIS_CAPACITY_STAGE=initial`, `ANALYSIS_WORKLOAD_ROLE=paid`와 유료 전용 target URL/audience/service identity로 독립 설정 및 배포한다. 기존 paid queue identity는 `analysis-v2-pipeline`이다. 새 paid `fresh_admission` task는 이 queue와 `/api/analysis/v2/worker`를 사용한다. Gate-off mixed-version window에서만 기존 roleless task를 `analysis-preflight`에서 drain하며, 해당 cohort가 0건임을 확인하기 전에는 admission을 켜지 않는다. 같은 no-traffic exact revision/readiness/captured-revision promotion 절차를 사용한다. 유료 요청을 최소 200건 durable하게 접수하되 active worker 실행은 8, paid Apify/Gemini provider ceiling도 각각 8로 유지한다. 유료 작업이 drain되는 동안 preflight queue age와 admission 성공률이 변하지 않는지 확인한다. Full followers/following은 secondary credential을 계속 사용하고 relationship 전용 budget 적용을 확인한다.
 
 ### 5. 유료 확장
 

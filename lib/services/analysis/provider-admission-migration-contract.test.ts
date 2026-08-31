@@ -149,4 +149,37 @@ describe('provider admission migration contract', () => {
         expect(readiness).toContain("analysis_entry_channel = 'betatest'");
         expect(readiness).toContain('beta_prepare_dispatch_state IN');
     });
+
+    it('fences explicit V2 rearm/reserve marker mismatches before legacy delegation', () => {
+        const reserve = capacityFunctionDefinition('reserve_analysis_v2_job_dispatch_v2');
+        const reserveGuard = reserve.indexOf('v_job.dispatch_state IN');
+        const reserveLegacyCall = reserve.indexOf('public.reserve_analysis_v2_job_dispatch(');
+        expect(reserveGuard).toBeGreaterThanOrEqual(0);
+        expect(reserveLegacyCall).toBeGreaterThan(reserveGuard);
+        expect(reserve.slice(reserveGuard, reserveLegacyCall)).toContain(
+            'v_job.dispatch_workload_role IS NULL',
+        );
+        expect(reserve.slice(reserveGuard, reserveLegacyCall)).toContain(
+            'v_job.dispatch_contract_version IS NULL',
+        );
+        const rearm = capacityFunctionDefinition('rearm_analysis_v2_job_dispatch_v2');
+        const rearmGuard = rearm.indexOf('IF FOUND AND (');
+        const rearmLegacyCall = rearm.indexOf('public.rearm_analysis_v2_job_dispatch(');
+        expect(rearmGuard).toBeGreaterThanOrEqual(0);
+        expect(rearmLegacyCall).toBeGreaterThan(rearmGuard);
+        expect(rearm.slice(rearmGuard, rearmLegacyCall)).toContain(
+            'v_job.dispatch_workload_role IS DISTINCT FROM \'paid\'',
+        );
+        expect(rearm.slice(rearmGuard, rearmLegacyCall)).toContain(
+            'v_job.dispatch_contract_version IS DISTINCT FROM 2',
+        );
+        const blite = capacityFunctionDefinition('reserve_precheckout_blite_dispatch_v2');
+        const bliteLegacyCall = blite.indexOf('public.reserve_precheckout_blite_dispatch_v1(');
+        expect(blite.slice(0, bliteLegacyCall)).toContain(
+            'ANALYSIS_V2_LEGACY_DISPATCH_ROLELESS',
+        );
+        expect(blite.slice(0, bliteLegacyCall)).toContain(
+            'v_dispatch.dispatch_workload_role IS DISTINCT FROM \'preflight\'',
+        );
+    });
 });

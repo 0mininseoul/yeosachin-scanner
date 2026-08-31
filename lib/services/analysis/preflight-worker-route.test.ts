@@ -267,6 +267,34 @@ describe('preflight worker route', () => {
         );
     });
 
+    it('terminally rejects a stale roleless fresh delivery after paid admission is enabled', async () => {
+        mocks.processAdmission.mockRejectedValue(
+            new Error('ANALYSIS_V2_LEGACY_FRESH_DRAIN_DISABLED'),
+        );
+
+        const response = await POST(request({
+            preflightId,
+            kind: 'fresh_admission',
+            generation: 3,
+            dispatchGeneration: 2,
+            dispatchToken,
+        }));
+
+        expect(response.status).toBe(200);
+        await expect(response.json()).resolves.toEqual({
+            status: 'legacy_drain_required',
+            code: 'ANALYSIS_V2_LEGACY_FRESH_DRAIN_REQUIRED',
+        });
+        expect(mocks.emit).toHaveBeenCalledWith(expect.objectContaining({
+            event: 'preflight.failed',
+            severity: 'warn',
+            fields: expect.objectContaining({
+                disposition: 'legacy_drain_required',
+                error_code: 'ANALYSIS_V2_LEGACY_FRESH_DRAIN_REQUIRED',
+            }),
+        }));
+    });
+
     it('drains only roleless legacy fresh-admission payloads on preflight', async () => {
         const response = await POST(request({
             preflightId,
