@@ -51,6 +51,29 @@ describe('authorized analysis V2 test provider policy', () => {
         })).toBe('quinary');
     });
 
+    it('pins policy-null ordinary production relationships to secondary', () => {
+        for (const operation of ['relationship-followers', 'relationship-following'] as const) {
+            expect(resolveAnalysisV2ApifyProviderBinding({
+                accessMode: 'production',
+                policy: null,
+                operation,
+                maxChargeUsd: 0.02,
+                env: {
+                    ANALYSIS_V2_APIFY_API_TOKEN_SLOT: 'senary',
+                    APIFY_SECONDARY_API_TOKEN: 'secondary-test-token',
+                    APIFY_SENARY_API_TOKEN: 'senary-test-token',
+                },
+            })).toMatchObject({ credentialSlot: 'secondary' });
+        }
+        expect(resolveAnalysisV2ApifyProviderBinding({
+            accessMode: 'production',
+            policy: null,
+            operation: 'target-profile',
+            maxChargeUsd: 0.0026,
+            env: { ANALYSIS_V2_APIFY_API_TOKEN_SLOT: 'senary' },
+        })).toMatchObject({ credentialSlot: 'senary' });
+    });
+
     it('builds an exact-target operation map and resolves signed test operations', () => {
         const policy = configuredAuthorizedTestProviderPolicy({
             targetUsername: '@0_MIN._.00',

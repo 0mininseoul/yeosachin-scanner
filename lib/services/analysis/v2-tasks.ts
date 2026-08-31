@@ -7,6 +7,7 @@ import {
     type CloudTasksCallerAuthConfig,
 } from '@/lib/services/google/vercel-wif';
 import { createCloudTasksClient } from './background-tasks';
+import { getAnalysisWorkloadRole } from './workload-role';
 import {
     analysisV2JobStore,
     assertAnalysisV2JobIdentity,
@@ -33,6 +34,7 @@ export const ANALYSIS_V2_TASK_DISPATCH_DEADLINE_SECONDS =
 export const ANALYSIS_V2_TASK_MAX_DELAY_SECONDS = 300;
 
 export interface AnalysisV2TasksConfig {
+    workloadRole?: 'paid';
     project: string;
     location: string;
     queue: string;
@@ -44,11 +46,39 @@ export interface AnalysisV2TasksConfig {
 
 export type AnalysisV2TaskPayload = AnalysisV2TaskDelivery;
 
+/**
+ * Fresh paid admission is a paid workload even though the legacy task used the
+ * preflight queue. Keeping a distinct payload lets the paid route execute the
+ * same admission engine without pretending it is an ordinary V2 job.
+ */
+export interface AnalysisV2FreshAdmissionTaskPayload {
+    preflightId: string;
+    kind: 'fresh_admission';
+    workloadRole?: 'preflight' | 'paid';
+    generation: number;
+    dispatchGeneration: number;
+    dispatchToken: string;
+}
+
+export type AnalysisV2WorkerTaskPayload =
+    | AnalysisV2TaskPayload
+    | AnalysisV2FreshAdmissionTaskPayload;
+
 const analysisV2TaskPayloadSchema = z.object({
     requestId: z.string().regex(UUID_PATTERN).transform(value => value.toLowerCase()),
     jobKey: z.string().regex(JOB_KEY_PATTERN),
+    workloadRole: z.enum(['preflight', 'paid']).optional(),
     generation: z.number().int().min(1).max(1_000),
     reservationToken: z.string().regex(UUID_PATTERN).transform(value => value.toLowerCase()),
+}).strict();
+
+const analysisV2FreshAdmissionTaskPayloadSchema = z.object({
+    preflightId: z.string().regex(UUID_PATTERN).transform(value => value.toLowerCase()),
+    kind: z.literal('fresh_admission'),
+    workloadRole: z.enum(['preflight', 'paid']).optional(),
+    generation: z.number().int().min(1).max(100),
+    dispatchGeneration: z.number().int().min(1).max(100),
+    dispatchToken: z.string().regex(UUID_PATTERN).transform(value => value.toLowerCase()),
 }).strict();
 
 export type AnalysisV2TaskLookupOutcome = 'exists' | 'not_found';
@@ -56,6 +86,20 @@ export type AnalysisV2TaskEnqueueOutcome = 'enqueued' | 'exists';
 export type AnalysisV2JobDispatchOutcome =
     | AnalysisV2TaskEnqueueOutcome
     | 'already_dispatched';
+
+export type AnalysisV2TaskEnqueueFailureDisposition = 'terminal' | 'replayable';
+
+/**
+ * Deliberately discards provider error text while retaining whether a create refusal was
+ * definitive.  A replayable error leaves the durable dispatch reservation untouched because
+ * Cloud Tasks may have accepted the deterministic task before the response was lost.
+ */
+export class AnalysisV2TaskEnqueueError extends Error {
+    constructor(readonly disposition: AnalysisV2TaskEnqueueFailureDisposition) {
+        super('ANALYSIS_V2_TASKS_ENQUEUE_ERROR: task creation failed.');
+        this.name = 'AnalysisV2TaskEnqueueError';
+    }
+}
 
 interface CloudTasksClientLike {
     queuePath(project: string, location: string, queue: string): string;
@@ -180,7 +224,15 @@ export function getAnalysisV2TasksConfig(
         errorPrefix: 'ANALYSIS_V2_TASKS_CONFIG_ERROR',
     });
 
+    const configuredRole = env.ANALYSIS_WORKLOAD_ROLE?.trim();
+    if (configuredRole !== undefined) {
+        if (getAnalysisWorkloadRole(env) !== 'paid') {
+            throw new Error('ANALYSIS_V2_TASKS_CONFIG_ERROR: workload role must be paid.');
+        }
+    }
+
     return Object.freeze({
+        workloadRole: 'paid' as const,
         project,
         location,
         queue,
@@ -193,6 +245,14 @@ export function getAnalysisV2TasksConfig(
 
 export function parseAnalysisV2TaskPayload(input: unknown): AnalysisV2TaskPayload {
     return analysisV2TaskPayloadSchema.parse(input);
+}
+
+/** Parses both current paid job deliveries and the explicit fresh-admission paid payload. */
+export function parseAnalysisV2WorkerTaskPayload(input: unknown): AnalysisV2WorkerTaskPayload {
+    return z.union([
+        analysisV2TaskPayloadSchema,
+        analysisV2FreshAdmissionTaskPayloadSchema,
+    ]).parse(input);
 }
 
 export function analysisV2TaskId(
@@ -208,6 +268,27 @@ export function analysisV2TaskId(
     return `analysis-v2-${identity.requestId}-${jobDigest}-g${generation}`;
 }
 
+export function analysisV2FreshAdmissionTaskId(
+    preflightId: string,
+    generation: number,
+    dispatchGeneration: number,
+): string {
+    if (!UUID_PATTERN.test(preflightId)) {
+        throw new Error('ANALYSIS_V2_TASKS_CONFIG_ERROR: invalid preflight id.');
+    }
+    if (!Number.isSafeInteger(generation) || generation < 1 || generation > 100) {
+        throw new Error('ANALYSIS_V2_TASKS_CONFIG_ERROR: invalid admission generation.');
+    }
+    if (
+        !Number.isSafeInteger(dispatchGeneration)
+        || dispatchGeneration < 1
+        || dispatchGeneration > 100
+    ) {
+        throw new Error('ANALYSIS_V2_TASKS_CONFIG_ERROR: invalid admission dispatch generation.');
+    }
+    return `analysis-v2-fresh-${preflightId.toLowerCase()}-g${generation}-d${dispatchGeneration}`;
+}
+
 function isAlreadyExists(error: unknown): boolean {
     if (!error || typeof error !== 'object') return false;
     const value = error as { code?: unknown; message?: unknown };
@@ -220,6 +301,28 @@ function isNotFound(error: unknown): boolean {
     const value = error as { code?: unknown; message?: unknown };
     return value.code === 5
         || value.code === 'NOT_FOUND';
+}
+
+const TERMINAL_CREATE_ERROR_CODES = new Set<unknown>([
+    3,
+    5,
+    7,
+    9,
+    11,
+    12,
+    16,
+    'INVALID_ARGUMENT',
+    'NOT_FOUND',
+    'PERMISSION_DENIED',
+    'FAILED_PRECONDITION',
+    'OUT_OF_RANGE',
+    'UNIMPLEMENTED',
+    'UNAUTHENTICATED',
+]);
+
+function isTerminalCreateFailure(error: unknown): boolean {
+    if (!error || typeof error !== 'object') return false;
+    return TERMINAL_CREATE_ERROR_CODES.has((error as { code?: unknown }).code);
 }
 
 function configuredTaskName(
@@ -251,10 +354,13 @@ export async function enqueueAnalysisV2Task(
     delivery: AnalysisV2TaskDelivery,
     options: EnqueueOptions = {}
 ): Promise<{ outcome: AnalysisV2TaskEnqueueOutcome; taskName: string }> {
-    const payload = parseAnalysisV2TaskPayload(delivery);
     const config = requireConfig(
         options.config === undefined ? getAnalysisV2TasksConfig() : options.config
     );
+    const payload = parseAnalysisV2TaskPayload({
+        ...delivery,
+        workloadRole: delivery.workloadRole ?? config.workloadRole ?? 'paid',
+    });
     const delaySeconds = options.delaySeconds ?? 0;
     if (
         !Number.isSafeInteger(delaySeconds)
@@ -302,7 +408,120 @@ export async function enqueueAnalysisV2Task(
         return { outcome: 'enqueued', taskName };
     } catch (error) {
         if (isAlreadyExists(error)) return { outcome: 'exists', taskName };
-        throw new Error('ANALYSIS_V2_TASKS_ENQUEUE_ERROR: task creation failed.');
+        throw new AnalysisV2TaskEnqueueError(
+            isTerminalCreateFailure(error) ? 'terminal' : 'replayable',
+        );
+    }
+}
+
+/**
+ * Enqueues a fresh paid admission on the paid V2 queue/service. Legacy
+ * roleless fresh payloads are drain-only data accepted by the preflight route;
+ * no new producer can create them on the preflight queue.
+ */
+export async function enqueueAnalysisV2FreshAdmissionTask(
+    delivery: Omit<AnalysisV2FreshAdmissionTaskPayload, 'kind'> & {
+        kind?: 'fresh_admission';
+    },
+    options: EnqueueOptions = {},
+): Promise<{ outcome: AnalysisV2TaskEnqueueOutcome; taskName: string }> {
+    const config = requireConfig(
+        options.config === undefined ? getAnalysisV2TasksConfig() : options.config
+    );
+    const payload = analysisV2FreshAdmissionTaskPayloadSchema.parse({
+        ...delivery,
+        kind: 'fresh_admission',
+        workloadRole: delivery.workloadRole ?? config.workloadRole ?? 'paid',
+    });
+    if (payload.workloadRole !== 'paid') {
+        throw new Error('ANALYSIS_V2_TASKS_CONFIG_ERROR: fresh admission role must be paid.');
+    }
+    const delaySeconds = options.delaySeconds ?? 0;
+    if (
+        !Number.isSafeInteger(delaySeconds)
+        || delaySeconds < 0
+        || delaySeconds > ANALYSIS_V2_TASK_MAX_DELAY_SECONDS
+    ) {
+        throw new Error('ANALYSIS_V2_TASKS_CONFIG_ERROR: invalid task delay.');
+    }
+
+    const client = options.client ?? await getSharedTasksClient(config);
+    const parent = client.queuePath(config.project, config.location, config.queue);
+    const taskName = client.taskPath(
+        config.project,
+        config.location,
+        config.queue,
+        analysisV2FreshAdmissionTaskId(
+            payload.preflightId,
+            payload.generation,
+            payload.dispatchGeneration,
+        ),
+    );
+    const task: Record<string, unknown> = {
+        name: taskName,
+        dispatchDeadline: { seconds: ANALYSIS_V2_TASK_DISPATCH_DEADLINE_SECONDS },
+        httpRequest: {
+            httpMethod: 'POST',
+            url: config.targetUrl,
+            headers: {
+                'Content-Type': 'application/json',
+                [ANALYSIS_V2_WORKER_TASK_CONTRACT_HEADER]: String(
+                    ANALYSIS_V2_CURRENT_WORKER_TASK_CONTRACT_VERSION,
+                ),
+            },
+            body: Buffer.from(JSON.stringify(payload)).toString('base64'),
+            oidcToken: {
+                serviceAccountEmail: config.serviceAccountEmail,
+                audience: config.oidcAudience,
+            },
+        },
+        ...(delaySeconds > 0
+            ? { scheduleTime: { seconds: Math.floor(Date.now() / 1_000) + delaySeconds } }
+            : {}),
+    };
+    try {
+        await client.createTask({ parent, task });
+        return { outcome: 'enqueued', taskName };
+    } catch (error) {
+        if (isAlreadyExists(error)) return { outcome: 'exists', taskName };
+        throw new AnalysisV2TaskEnqueueError(
+            isTerminalCreateFailure(error) ? 'terminal' : 'replayable',
+        );
+    }
+}
+
+/** Looks up a generation-qualified fresh-admission task by its deterministic name. */
+export async function lookupAnalysisV2FreshAdmissionTask(
+    input: { preflightId: string; generation: number; dispatchGeneration: number },
+    options: {
+        config?: AnalysisV2TasksConfig | null;
+        client?: CloudTasksLookupClientLike & Pick<CloudTasksClientLike, 'taskPath'>;
+    } = {},
+): Promise<AnalysisV2TaskLookupOutcome> {
+    const preflightId = input.preflightId.toLowerCase();
+    if (!UUID_PATTERN.test(preflightId)) {
+        throw new Error('ANALYSIS_V2_TASKS_CONFIG_ERROR: invalid preflight id.');
+    }
+    const config = requireConfig(
+        options.config === undefined ? getAnalysisV2TasksConfig() : options.config
+    );
+    const client = options.client ?? await getSharedTasksClient(config);
+    const name = client.taskPath(
+        config.project,
+        config.location,
+        config.queue,
+        analysisV2FreshAdmissionTaskId(
+            preflightId,
+            input.generation,
+            input.dispatchGeneration,
+        ),
+    );
+    try {
+        await client.getTask({ name, responseView: 'BASIC' });
+        return 'exists';
+    } catch (error) {
+        if (isNotFound(error)) return 'not_found';
+        throw new Error('ANALYSIS_V2_TASKS_LOOKUP_ERROR: fresh task lookup failed.');
     }
 }
 
@@ -391,6 +610,27 @@ export async function dispatchReservedAnalysisV2Job(
         throw new Error('ANALYSIS_V2_TASKS_DISPATCH_ERROR: dispatch mark failed.');
     }
     return enqueued.outcome;
+}
+
+/**
+ * Capacity waits are durable job deferrals, not transport retries. Rotate the exact dispatch
+ * generation before creating a successor task so Cloud Tasks' finite delivery budget cannot
+ * strand a pending job after repeated provider-capacity responses.
+ */
+export async function rearmAnalysisV2JobAfterCapacity(
+    delivery: AnalysisV2TaskDelivery,
+    options: DispatchOptions & { store: AnalysisV2JobStore },
+): Promise<AnalysisV2TaskEnqueueOutcome> {
+    const config = requireConfig(
+        options.config === undefined ? getAnalysisV2TasksConfig() : options.config
+    );
+    const reservation = await options.store.rearmDispatch({
+        requestId: delivery.requestId,
+        jobKey: delivery.jobKey,
+        expectedGeneration: delivery.generation,
+        expectedReservationToken: delivery.reservationToken,
+    });
+    return dispatchReservedAnalysisV2Job(reservation, { ...options, config });
 }
 
 export async function verifyAnalysisV2TaskAuthorization(

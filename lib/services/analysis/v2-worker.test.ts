@@ -22,7 +22,10 @@ import type {
     AnalysisV2JobStore,
     ClaimedAnalysisV2Job,
 } from './v2-job-store';
-import { AnalysisV2JobFenceError } from './v2-job-store';
+import {
+    AnalysisV2JobFenceError,
+    AnalysisV2JobLeaseBusyError,
+} from './v2-job-store';
 import { AnalysisV2AiResultRecoveryPendingError } from './v2-ai-result-store';
 import { AnalysisV2SchedulerContinuationError } from './v2-ai-scheduler-continuation';
 import {
@@ -547,6 +550,37 @@ describe('analysis V2 durable DAG worker', () => {
         expect(terminalFailureFinalizer).not.toHaveBeenCalledWith(
             expect.anything(),
             'JOB_ATTEMPTS_EXHAUSTED'
+        );
+    });
+
+    it('takes over a live crashed failure owner through the intent-owned recovery fence', async () => {
+        const recoveredClaim = {
+            ...bootstrapClaim,
+            claimToken: '423e4567-e89b-42d3-a456-426614174000',
+        };
+        const jobStore = store(bootstrapClaim, {
+            claim: vi.fn(async () => { throw new AnalysisV2JobLeaseBusyError(); }),
+            takeoverTerminalFailure: vi.fn(async () => recoveredClaim),
+        });
+        const terminalFailureFinalizer = vi.fn(async () => undefined);
+
+        await expect(processAnalysisV2TaskDelivery(delivery, {
+            store: jobStore,
+            handler: vi.fn(),
+            terminalFailureIntentLoader: vi.fn(async () => 'ORIGINAL_PROVIDER_FAILURE'),
+            terminalFailureFinalizer,
+            terminalMediaCleanup: vi.fn(async () => undefined),
+        })).resolves.toEqual({
+            status: 'failed',
+            errorCode: 'ORIGINAL_PROVIDER_FAILURE',
+        });
+        expect(jobStore.takeoverTerminalFailure).toHaveBeenCalledWith(
+            delivery,
+            undefined,
+        );
+        expect(terminalFailureFinalizer).toHaveBeenCalledWith(
+            recoveredClaim,
+            'ORIGINAL_PROVIDER_FAILURE',
         );
     });
 

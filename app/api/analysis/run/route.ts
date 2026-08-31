@@ -44,6 +44,7 @@ import {
     AccountPrincipalAdmissionError,
     requireActiveAccountClassification,
 } from '@/lib/services/identity/account-principal-store';
+import { legacyAnalysisProducerGateResponse } from '@/lib/services/analysis/legacy-analysis-gate';
 
 const LEGACY_RUN_LEASE_SECONDS = 3_600;
 
@@ -65,6 +66,13 @@ function providerOptions(
 
 // Migration-only legacy path. Disabled by default and admin-gated when explicitly enabled.
 export async function POST(request: Request) {
+    const gate = legacyAnalysisProducerGateResponse();
+    if (gate) {
+        return NextResponse.json(
+            { error: 'Legacy analysis execution is unavailable.', code: gate.code },
+            { status: gate.status },
+        );
+    }
     const legacyAccess = getLegacyRunAccess(request.headers.get('authorization'));
     if (legacyAccess === 'disabled') {
         return NextResponse.json(

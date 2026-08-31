@@ -1251,7 +1251,7 @@ describe('V2 staged AI services', () => {
         expect(prompt).toContain('물음표나 ㅋㅋ은');
     });
 
-    it('rejects a v2.11 overview that exposes analysis limitations instead of composing fallback copy', async () => {
+    it('repairs a v2.11 overview that exposes analysis limitations with deterministic evidence copy', async () => {
         const input = featureInput();
         mocks.analyzeWithGemini.mockImplementationOnce(async (
             _prompt: string,
@@ -1280,7 +1280,7 @@ describe('V2 staged AI services', () => {
     it.each([
         ['여행과 활동적 순간을 조화롭게 담아내고 있는 피드입니다.', '아내'],
         ['국내뿐 아니라 해외도 오가며 공연의 여운을 기록하는 피드입니다.', '외도'],
-    ])('repairs a v2.11 overview whose ordinary wording contains the forbidden substring %s', async (
+    ])('repairs a v2.11 overview deterministically when ordinary wording contains %s', async (
         invalidOverview,
         forbiddenSubstring,
     ) => {
@@ -1295,21 +1295,10 @@ describe('V2 staged AI services', () => {
                 issues: [{ code: 'custom', path: ['oneLineOverview'], message: 'v2.8 public copy must not assert or speculate about a relationship.' }],
             },
         );
-        mocks.analyzeWithGemini
-            .mockRejectedValueOnce(new Error('AI_GENERATION_RESPONSE_REJECTED_ERROR: generated response failed strict validation.', { cause: validation }))
-            .mockImplementationOnce(async (
-                prompt: string,
-                _images: string[],
-                options: { schema: { parse(value: unknown): unknown } },
-            ) => {
-                expect(prompt).toContain(invalid.oneLineOverview);
-                expect(prompt).toContain('v2.8 public copy must not assert or speculate about a relationship.');
-                expect(prompt).toContain('금지 부분 문자열 목록:');
-                expect(prompt).toContain(forbiddenSubstring);
-                expect(prompt).toContain('아내');
-                expect(prompt).toContain('외도');
-                return options.schema.parse({ value: '여행 사진과 짧은 기록이 일정표처럼 또렷하게 정돈된 피드입니다.' });
-            });
+        mocks.analyzeWithGemini.mockRejectedValueOnce(new Error(
+            'AI_GENERATION_RESPONSE_REJECTED_ERROR: generated response failed strict validation.',
+            { cause: validation },
+        ));
 
         const result = await featureAnalysis(
             featureInput(),
@@ -1317,15 +1306,16 @@ describe('V2 staged AI services', () => {
             { aiStagePolicyVersion: AI_STAGE_POLICY_V211_VERSION },
         );
 
-        expect(result.features.oneLineOverview).toContain('일정표처럼');
+        expect(result.features.oneLineOverview).toContain('여행');
+        expect(result.features.oneLineOverview).not.toContain(forbiddenSubstring);
         expect(result.features).toEqual({
             ...invalid,
-            oneLineOverview: '여행 사진과 짧은 기록이 일정표처럼 또렷하게 정돈된 피드입니다.',
+            oneLineOverview: result.features.oneLineOverview,
         });
-        expect(mocks.analyzeWithGemini).toHaveBeenCalledTimes(2);
+        expect(mocks.analyzeWithGemini).toHaveBeenCalledTimes(1);
     });
 
-    it('repairs the proven v2.11 methodological-disclaimer overview violation with one bounded Gemini rewrite', async () => {
+    it('repairs the proven v2.11 methodological-disclaimer overview without another Gemini call', async () => {
         const invalid = featureResponse({
             oneLineOverview:
                 '공개 자료만으로는 단정하기 어렵지만, 여행 기록과 주말 산책이 또렷하게 남은 피드입니다.',
@@ -1351,21 +1341,10 @@ describe('V2 staged AI services', () => {
             issues: [{ path: 'oneLineOverview', code: 'custom' }],
             truncated: false,
         });
-        mocks.analyzeWithGemini
-            .mockRejectedValueOnce(new Error(
-                'AI_GENERATION_RESPONSE_REJECTED_ERROR: generated response failed strict validation.',
-                { cause: validation },
-            ))
-            .mockImplementationOnce(async (
-                prompt: string,
-                _images: string[],
-                options: { schema: { parse(value: unknown): unknown } },
-            ) => {
-                expect(prompt).toContain('분석 방법이나 자료의 한계를 직접 말하지 마세요');
-                return options.schema.parse({
-                    value: '여행 기록과 주말 산책이 또렷하게 남아 하루의 취향이 보이는 피드입니다.',
-                });
-            });
+        mocks.analyzeWithGemini.mockRejectedValueOnce(new Error(
+            'AI_GENERATION_RESPONSE_REJECTED_ERROR: generated response failed strict validation.',
+            { cause: validation },
+        ));
 
         const result = await featureAnalysis(
             featureInput(),
@@ -1373,9 +1352,9 @@ describe('V2 staged AI services', () => {
             { aiStagePolicyVersion: AI_STAGE_POLICY_V211_VERSION },
         );
 
-        expect(result.features.oneLineOverview).toContain('주말 산책');
+        expect(result.features.oneLineOverview).toContain('여행');
         expect(result.features.oneLineOverview).not.toContain('공개 자료만');
-        expect(mocks.analyzeWithGemini).toHaveBeenCalledTimes(2);
+        expect(mocks.analyzeWithGemini).toHaveBeenCalledTimes(1);
     });
 
     it('does not repair an unrelated custom issue on a v2.11 overview', async () => {
@@ -1446,7 +1425,7 @@ describe('V2 staged AI services', () => {
         expect(mocks.analyzeWithGemini).toHaveBeenCalledTimes(1);
     });
 
-    it('fails closed after one overview repair when relationship prose remains outside the canonical name', async () => {
+    it('repairs an overview with relationship prose without a second Gemini generation', async () => {
         const input = {
             ...featureInput(),
             accountProfile: { fullName: '김부부', hasProfileImage: true },
@@ -1462,25 +1441,18 @@ describe('V2 staged AI services', () => {
                 issues: [{ code: 'custom', path: ['oneLineOverview'], message: 'v2.8 public copy must not assert or speculate about a relationship.' }],
             },
         );
-        mocks.analyzeWithGemini
-            .mockRejectedValueOnce(new Error(
-                'AI_GENERATION_RESPONSE_REJECTED_ERROR: generated response failed strict validation.',
-                { cause: validation },
-            ))
-            .mockImplementationOnce(async (
-                _prompt: string,
-                _images: string[],
-                options: { schema: { parse(value: unknown): unknown } },
-            ) => options.schema.parse({
-                value: '김부부님의 여행 기록은 부부의 다정한 일상을 보여주는 피드입니다.',
-            }));
+        mocks.analyzeWithGemini.mockRejectedValueOnce(new Error(
+            'AI_GENERATION_RESPONSE_REJECTED_ERROR: generated response failed strict validation.',
+            { cause: validation },
+        ));
 
-        await expect(featureAnalysis(
+        const result = await featureAnalysis(
             input,
             audit('featureAnalysis', input, AI_STAGE_POLICY_V211_VERSION),
             { aiStagePolicyVersion: AI_STAGE_POLICY_V211_VERSION },
-        )).rejects.toThrow('v2.8 public copy must not assert or speculate about a relationship.');
-        expect(mocks.analyzeWithGemini).toHaveBeenCalledTimes(2);
+        );
+        expect(result.features.oneLineOverview).not.toContain('부부');
+        expect(mocks.analyzeWithGemini).toHaveBeenCalledTimes(1);
     });
 
     it('does not repair a non-custom v2.11 overview schema rejection', async () => {
@@ -3071,7 +3043,7 @@ describe('V2 staged AI services', () => {
         expect(prompt).toContain('실제로 수집된 좋아요·댓글·태그·멘션 방향');
     });
 
-    it('repairs only a custom-invalid v2.11 narrative field with Gemini and revalidates both lines', async () => {
+    it('repairs only a custom-invalid v2.11 narrative field deterministically and revalidates both lines', async () => {
         const input = {
             ...narrativeInput(),
             interactions: {
@@ -3098,17 +3070,10 @@ describe('V2 staged AI services', () => {
                 issues: [{ code: 'custom', path: ['lines', 1, 'text'], message: 'Narrative violates the public two-line contract.' }],
             },
         );
-        mocks.analyzeWithGemini
-            .mockRejectedValueOnce(new Error('AI_GENERATION_RESPONSE_REJECTED_ERROR: generated response failed strict validation.', { cause: validation }))
-            .mockImplementationOnce(async (
-                prompt: string,
-                _images: string[],
-                options: { schema: { parse(value: unknown): unknown } },
-            ) => {
-                expect(prompt).toContain(candidate.lines[1].text);
-                expect(prompt).toContain('Narrative violates the public two-line contract.');
-                return options.schema.parse({ value: '박민지님이 김준호님을 태그한 흔적은 확인되지만, 수집 표본 밖 누락 가능성은 남습니다.' });
-            });
+        mocks.analyzeWithGemini.mockRejectedValueOnce(new Error(
+            'AI_GENERATION_RESPONSE_REJECTED_ERROR: generated response failed strict validation.',
+            { cause: validation },
+        ));
 
         const result = await highRiskNarrative(
             input,
@@ -3117,10 +3082,10 @@ describe('V2 staged AI services', () => {
         );
 
         expect(result.lines[1]).toContain('수집 표본 밖');
-        expect(mocks.analyzeWithGemini).toHaveBeenCalledTimes(2);
+        expect(mocks.analyzeWithGemini).toHaveBeenCalledTimes(1);
     });
 
-    it('repairs an invalid v2.11 two-line narrative with one Gemini call and preserves evidence refs', async () => {
+    it('repairs an invalid v2.11 two-line narrative deterministically and preserves evidence refs', async () => {
         const input = {
             ...narrativeInput(),
             interactions: {
@@ -3145,22 +3110,10 @@ describe('V2 staged AI services', () => {
                 issues: [{ code: 'custom', path: ['lines'], message: 'Narrative violates the public two-line contract.' }],
             },
         );
-        mocks.analyzeWithGemini
-            .mockRejectedValueOnce(new Error('AI_GENERATION_RESPONSE_REJECTED_ERROR: generated response failed strict validation.', { cause: validation }))
-            .mockImplementationOnce(async (
-                prompt: string,
-                _images: string[],
-                options: { schema: { parse(value: unknown): unknown } },
-            ) => {
-                expect(prompt).toContain(candidate.lines[0].text);
-                expect(prompt).toContain(candidate.lines[1].text);
-                expect(prompt).toContain('각 문장은 180자 이하');
-                expect(prompt).toContain('상호작용 수량 표현 없이');
-                return options.schema.parse({ lines: [
-                    'Gemini가 바꾸려 한 첫 문장입니다.',
-                    '박민지님이 김준호님에게 남긴 좋아요가 관측되었고, 수집 표본 밖의 다른 상호작용은 누락될 수 있습니다.',
-                ] });
-            });
+        mocks.analyzeWithGemini.mockRejectedValueOnce(new Error(
+            'AI_GENERATION_RESPONSE_REJECTED_ERROR: generated response failed strict validation.',
+            { cause: validation },
+        ));
 
         const result = await highRiskNarrative(
             input,
@@ -3168,13 +3121,13 @@ describe('V2 staged AI services', () => {
             { aiStagePolicyVersion: AI_STAGE_POLICY_V211_VERSION },
         );
 
-        expect(result.lines[0]).toBe(candidate.lines[0].text);
+        expect(result.lines[0]).toContain('박민지님');
         expect(result.lines[1]).toContain('수집 표본 밖');
-        expect(result.evidenceRefs).toEqual(candidate.lines.map(line => line.evidenceRefs));
-        expect(mocks.analyzeWithGemini).toHaveBeenCalledTimes(2);
+        expect(result.evidenceRefs[1]).toContain('like:candidate-to-target');
+        expect(mocks.analyzeWithGemini).toHaveBeenCalledTimes(1);
     });
 
-    it('repairs the observed v2.11 relationship-style and omitted-like contract violation', async () => {
+    it('repairs the observed v2.11 relationship-style and omitted-like contract violation without spend', async () => {
         const input = narrativeInput();
         const candidate = { lines: [{
             text: '박민지님의 여행 피드에는 커플 기류가 은근히 읽히는 장면이 이어집니다.',
@@ -3220,27 +3173,10 @@ describe('V2 staged AI services', () => {
                 ],
             },
         );
-        mocks.analyzeWithGemini
-            .mockRejectedValueOnce(new Error(
-                'AI_GENERATION_RESPONSE_REJECTED_ERROR: generated response failed strict validation.',
-                { cause: validation },
-            ))
-            .mockImplementationOnce(async (
-                prompt: string,
-                _images: string[],
-                options: { schema: { parse(value: unknown): unknown } },
-            ) => {
-                expect(prompt).toContain(
-                    'v2.8 public copy must not assert or speculate about a relationship.',
-                );
-                expect(prompt).toContain(
-                    'v2.11 narrative omitted the candidate-to-target like direction.',
-                );
-                return options.schema.parse({ lines: [
-                    '박민지님의 여행과 일상 기록은 차분하게 이어지는 피드입니다.',
-                    '박민지님이 김준호님에게 남긴 좋아요와 댓글의 반가워 표현, 김준호님이 박민지님에게 남긴 좋아요 흔적은 확인되지만, 수집 표본 밖 누락 가능성은 남습니다.',
-                ] });
-            });
+        mocks.analyzeWithGemini.mockRejectedValueOnce(new Error(
+            'AI_GENERATION_RESPONSE_REJECTED_ERROR: generated response failed strict validation.',
+            { cause: validation },
+        ));
 
         const result = await highRiskNarrative(
             input,
@@ -3250,7 +3186,7 @@ describe('V2 staged AI services', () => {
 
         expect(result.source).toBe('gemini');
         expect(result.lines[1]).toContain('김준호님이 박민지님에게 남긴 좋아요');
-        expect(mocks.analyzeWithGemini).toHaveBeenCalledTimes(2);
+        expect(mocks.analyzeWithGemini).toHaveBeenCalledTimes(1);
     });
 
     it('emits PII-free high-risk validator predicate and affected-field diagnostics', async () => {
@@ -3321,25 +3257,18 @@ describe('V2 staged AI services', () => {
                 issues: [{ code: 'custom', path: ['lines'], message: 'Narrative violates the public two-line contract.' }],
             },
         );
-        mocks.analyzeWithGemini
-            .mockRejectedValueOnce(new Error(
-                'AI_GENERATION_RESPONSE_REJECTED_ERROR: generated response failed strict validation.',
-                { cause: validation },
-            ))
-            .mockImplementationOnce(async (
-                _prompt: string,
-                _images: string[],
-                options: { schema: { parse(value: unknown): unknown } },
-            ) => options.schema.parse({ lines: [
-                '박민지님과 김준호님은 연애 중입니다.',
-                candidate.lines[1].text,
-            ] }));
+        mocks.analyzeWithGemini.mockRejectedValueOnce(new Error(
+            'AI_GENERATION_RESPONSE_REJECTED_ERROR: generated response failed strict validation.',
+            { cause: validation },
+        ));
 
-        await expect(highRiskNarrative(
+        const repaired = await highRiskNarrative(
             input,
             audit('highRiskNarrative', input, AI_STAGE_POLICY_V211_VERSION),
             { aiStagePolicyVersion: AI_STAGE_POLICY_V211_VERSION },
-        )).rejects.toThrow();
+        );
+        expect(repaired.lines[0]).not.toContain('연애');
+        expect(repaired.lines[1]).toContain('좋아요');
 
         const diagnostics = consoleWarn.mock.calls
             .filter(call => call[0] === 'ANALYSIS_V2_AI_HIGH_RISK_VALIDATION_DIAGNOSTIC')
@@ -3347,10 +3276,7 @@ describe('V2 staged AI services', () => {
         expect(diagnostics.at(-1)).toEqual({
             stage: 'highRiskNarrative',
             issues: [
-                { field: '$', code: 'custom', subpredicate: 'relationship_inference' },
-                { field: 'lines.#.text', code: 'custom', subpredicate: 'v211_missing_target_to_candidate_like' },
-                { field: 'lines.#.evidenceRefs', code: 'custom', subpredicate: 'interaction_direction_evidence_refs' },
-                { field: 'lines.#.text', code: 'custom', subpredicate: 'sanitized_comment_content' },
+                { field: 'lines', code: 'custom', subpredicate: 'public_two_line_contract' },
             ],
             truncated: false,
         });
@@ -3405,20 +3331,18 @@ describe('V2 staged AI services', () => {
                 issues: [{ code: 'custom', path: ['lines'], message: 'Narrative violates the public two-line contract.' }],
             },
         );
-        mocks.analyzeWithGemini
-            .mockRejectedValueOnce(new Error('AI_GENERATION_RESPONSE_REJECTED_ERROR: generated response failed strict validation.', { cause: validation }))
-            .mockImplementationOnce(async (
-                _prompt: string,
-                _images: string[],
-                options: { schema: { parse(value: unknown): unknown } },
-            ) => options.schema.parse({ lines: candidate.lines.map(line => line.text) }));
+        mocks.analyzeWithGemini.mockRejectedValueOnce(new Error(
+            'AI_GENERATION_RESPONSE_REJECTED_ERROR: generated response failed strict validation.',
+            { cause: validation },
+        ));
 
-        await expect(highRiskNarrative(
+        const result = await highRiskNarrative(
             input,
             audit('highRiskNarrative', input, AI_STAGE_POLICY_V211_VERSION),
             { aiStagePolicyVersion: AI_STAGE_POLICY_V211_VERSION },
-        )).rejects.toThrow();
-        expect(mocks.analyzeWithGemini).toHaveBeenCalledTimes(2);
+        );
+        expect(result.lines[0]).not.toContain('커플');
+        expect(mocks.analyzeWithGemini).toHaveBeenCalledTimes(1);
     });
 
     it('masks digits in canonical username subjects while requiring exact evidence refs', async () => {

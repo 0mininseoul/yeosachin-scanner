@@ -1,7 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 const mocks = vi.hoisted(() => ({
-    createClient: vi.fn(), getUser: vi.fn(), enabled: vi.fn(), ensureAccess: vi.fn(),
+    createClient: vi.fn(), getUser: vi.fn(), enabled: vi.fn(), betaPrepareEnabled: vi.fn(), ensureAccess: vi.fn(),
     requireActiveAccountClassification: vi.fn(),
     reserve: vi.fn(), admit: vi.fn(), replayConsumed: vi.fn(), dispatch: vi.fn(),
     runtimeConfig: vi.fn(),
@@ -11,7 +11,9 @@ const mocks = vi.hoisted(() => ({
 vi.mock('@/lib/supabase/server', () => ({ createClient: mocks.createClient }));
 vi.mock('@/lib/supabase/admin', () => ({ supabaseAdmin: mocks.admin }));
 vi.mock('@/lib/services/analysis/betatest-access', () => ({
-    betaTestFreePoolEnabled: mocks.enabled, ensureBetaTestAccess: mocks.ensureAccess,
+    betaTestFreePoolEnabled: mocks.enabled,
+    isAnalysisBetaPrepareEnabled: mocks.betaPrepareEnabled,
+    ensureBetaTestAccess: mocks.ensureAccess,
     BETA_TEST_ACCESS_UNAVAILABLE: 'BETA_ACCESS_UNAVAILABLE',
 }));
 vi.mock('@/lib/services/analysis/fresh-plan-admission', () => ({
@@ -65,6 +67,7 @@ describe('betatest plan admission route', () => {
             classificationVersion: 'runtime_default_v1',
         });
         mocks.enabled.mockReturnValue(true); mocks.ensureAccess.mockResolvedValue(true);
+        mocks.betaPrepareEnabled.mockReturnValue(true);
         mocks.runtimeConfig.mockReturnValue({
             enabled: true,
             maxSnapshotAgeSeconds: 300,
@@ -77,6 +80,18 @@ describe('betatest plan admission route', () => {
         mocks.reserve.mockResolvedValue({ state: 'ready', generation: 1, admissionToken: '423e4567-e89b-42d3-a456-426614174000', selectedPlanAllowed: true, snapshot: {} });
         mocks.admit.mockResolvedValue({ requestId, initialJobKey: 'coordinator:bootstrap', allocationId: '523e4567-e89b-42d3-a456-426614174000', replayed: false });
         mocks.dispatch.mockResolvedValue('enqueued');
+    });
+
+    it('rejects before replay or provider admission when beta preparation is retired', async () => {
+        mocks.betaPrepareEnabled.mockReturnValue(false);
+
+        const response = await POST(request(), context);
+
+        expect(response.status).toBe(503);
+        await expect(response.json()).resolves.toMatchObject({ code: 'BETA_PREPARE_DISABLED' });
+        expect(mocks.replayConsumed).not.toHaveBeenCalled();
+        expect(mocks.reserve).not.toHaveBeenCalled();
+        expect(mocks.admit).not.toHaveBeenCalled();
     });
 
     it('rechecks flag, grant, ownership, and beta channel before admission mutations', async () => {

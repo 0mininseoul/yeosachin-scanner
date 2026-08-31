@@ -12,6 +12,19 @@ export interface BetaTestAccessClient {
 
 export const BETA_TEST_ACCESS_UNAVAILABLE = 'BETA_ACCESS_UNAVAILABLE' as const;
 
+/**
+ * Beta preparation is a separately retired producer gate.  The active
+ * split-capacity manifests must state `false`; only an explicit `true` in a
+ * rehearsal/legacy-drain manifest can enable the producer.  Missing,
+ * malformed, and every non-true value fail closed so a partially rendered
+ * manifest cannot reach the claim or provider boundary.
+ */
+export function isAnalysisBetaPrepareEnabled(
+    env: Record<string, string | undefined> = process.env,
+): boolean {
+    return env.ANALYSIS_BETA_PREPARE_ENABLED?.trim().toLowerCase() === 'true';
+}
+
 export function betaTestFreePoolEnabled(
     env: Record<string, string | undefined> = process.env
 ): boolean {

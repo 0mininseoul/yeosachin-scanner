@@ -360,6 +360,7 @@ async function runAttempt<T>(
         onRunStarted: options?.providerRun?.onRunStarted,
         onRunStartRejected: options?.providerRun?.onRunStartRejected,
         onRunStartAmbiguous: options?.providerRun?.onRunStartAmbiguous,
+        onInvocationFinished: options?.providerRun?.onInvocationFinished,
         onProviderDatasetResolved: options?.providerRun?.onProviderDatasetResolved,
         onProfileStart: options?.onProfileStart,
         onProfileResolved: options?.onProfileResolved,
@@ -389,6 +390,15 @@ async function runAttempt<T>(
         failureCategory = safeFailureCategory(error);
         throw error;
     } finally {
+        // Provider resume/pending paths may return without terminal or
+        // ambiguity callbacks. Always end the invocation scope so a warm
+        // worker cannot keep renewing a durable admission indefinitely.
+        try {
+            await context.onInvocationFinished?.();
+        } catch {
+            // Local renewal cleanup must not mask the provider outcome; the
+            // durable admission remains fail-closed for recovery.
+        }
         if (usage.raw_result_count === 0) usage.raw_result_count = usage.result_count;
         if (usage.unique_result_count === 0) usage.unique_result_count = usage.result_count;
         await emitTelemetry(options, {

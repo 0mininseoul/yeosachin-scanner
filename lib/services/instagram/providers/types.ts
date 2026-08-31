@@ -181,6 +181,12 @@ export interface ProviderRunCheckpoint
     }): void | Promise<void>;
     onRunStarted?(runId: string): void | Promise<void>;
     /**
+     * Ends the local invocation scope without releasing durable provider
+     * ownership. A resumed/pending provider call may return before any
+     * terminal callback, so callers must invoke this in their finally path.
+     */
+    onInvocationFinished?(): void | Promise<void>;
+    /**
      * Internal, adopted-dataset-only allowance. It is emitted exclusively by
      * `adoptedProviderCheckpoint` for a cross-count relationship adoption.
      */
@@ -230,6 +236,8 @@ export interface ProviderCallContext
         maxChargeUsd: number;
     }): void | Promise<void>;
     onRunStarted?(runId: string): void | Promise<void>;
+    /** Ends local renewal for this invocation; durable ownership remains fenced. */
+    onInvocationFinished?(): void | Promise<void>;
     /** Internal, adopted-dataset-only allowance; never set for a live run. */
     allowAdoptedRelationshipTruncation?: true;
     /** Source declared count paired with the adopted-only allowance above. */

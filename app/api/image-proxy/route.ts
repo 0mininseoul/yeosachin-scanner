@@ -22,6 +22,7 @@ import {
     readImageProxyCacheObject,
     writeImageProxyCacheObject,
 } from '@/lib/services/media/image-proxy-cache';
+import { isImageProxyClientDisconnectEpipe } from '@/lib/observability/image-proxy-request-error';
 
 const IMAGE_PROXY_MAX_BYTES = 3 * 1024 * 1024;
 const IMAGE_PROXY_TOTAL_TIMEOUT_MS = 6_000;
@@ -111,11 +112,13 @@ function logImageProxyOutcome(outcome: {
     cacheEnabled: boolean;
     elapsedMs: number;
     error?: unknown;
+    benignClientDisconnect?: boolean;
 }) {
     // The progress rail can request dozens of images at once. Success records
     // add no release-actionable signal, so keep only privacy-safe rejection
     // and final-unavailable warnings for 403/503 monitoring.
     if (outcome.outcome !== 'unavailable' && outcome.outcome !== 'rejected') return;
+    if (outcome.benignClientDisconnect === true) return;
     if (process.env.NODE_ENV === 'production') {
         const key = `${outcome.scope}:${outcome.outcome}`;
         const now = Date.now();
@@ -456,6 +459,9 @@ export async function GET(request: NextRequest) {
             cacheEnabled: Boolean(cacheKey),
             elapsedMs: Date.now() - startedAt,
             ...(failure ? { error: failure } : {}),
+            benignClientDisconnect: failure
+                ? isImageProxyClientDisconnectEpipe(failure, request.signal)
+                : false,
         });
         return retryableImageUnavailableResponse();
     } catch (error) {
@@ -465,6 +471,7 @@ export async function GET(request: NextRequest) {
             cacheEnabled: Boolean(cacheKey),
             elapsedMs: Date.now() - startedAt,
             error,
+            benignClientDisconnect: isImageProxyClientDisconnectEpipe(error, request.signal),
         });
         return retryableImageUnavailableResponse();
     }

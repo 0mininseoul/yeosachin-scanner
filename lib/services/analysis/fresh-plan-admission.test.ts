@@ -239,6 +239,8 @@ describe('durable fresh V2 admission reservation', () => {
                 p_entitlement_jti_hash: ENTITLEMENT_JTI_HASH,
                 p_admission_token: ADMISSION_TOKEN,
                 p_dispatch_token: DISPATCH_TOKEN,
+                p_workload_role: 'paid',
+                p_contract_version: 2,
             }
         );
     });
@@ -308,15 +310,28 @@ describe('durable fresh V2 admission reservation', () => {
             .resolves.toBe('marked');
         await expect(releaseAnalysisV2FreshAdmissionDispatch(client, dispatch))
             .resolves.toBe('already_settled');
-        for (const [, params] of rpc.mock.calls) {
-            expect(params).toEqual({
+        expect(rpc.mock.calls).toContainEqual([
+            ANALYSIS_V2_FRESH_ADMISSION_DATABASE_NAMES.markDispatchedRpc,
+            {
                 p_preflight_id: PREFLIGHT_ID,
                 p_user_id: USER_ID,
                 p_admission_generation: 2,
                 p_dispatch_generation: DISPATCH_GENERATION,
                 p_dispatch_token: DISPATCH_TOKEN,
-            });
-        }
+                p_workload_role: 'paid',
+                p_contract_version: 2,
+            },
+        ]);
+        expect(rpc.mock.calls).toContainEqual([
+            ANALYSIS_V2_FRESH_ADMISSION_DATABASE_NAMES.releaseDispatchRpc,
+            {
+                p_preflight_id: PREFLIGHT_ID,
+                p_user_id: USER_ID,
+                p_admission_generation: 2,
+                p_dispatch_generation: DISPATCH_GENERATION,
+                p_dispatch_token: DISPATCH_TOKEN,
+            },
+        ]);
     });
 
     it('returns the committed latest counts and canonical plan cards before consumption', async () => {
@@ -473,6 +488,46 @@ describe('durable fresh V2 admission worker', () => {
                 p_target_followers_count: 620,
                 p_target_following_count: 710,
                 p_target_is_private: false,
+            })
+        );
+    });
+
+    it('uses the marker-free legacy claim only for an explicitly marked drain invocation', async () => {
+        const { client, rpc } = clientWith(async (name) => {
+            if (name === 'claim_analysis_v2_preflight_admission_v3') {
+                return {
+                    data: [{
+                        claimed: true,
+                        admission_status: 'processing',
+                        target_instagram_id: 'target.account',
+                        access_mode: 'production',
+                    }],
+                    error: null,
+                };
+            }
+            if (name === ANALYSIS_V2_FRESH_ADMISSION_DATABASE_NAMES.completeRpc) {
+                return {
+                    data: [{ admission_status: 'ready', admission_error_code: null }],
+                    error: null,
+                };
+            }
+            throw new Error(`unexpected RPC ${name}`);
+        });
+
+        await expect(processAnalysisV2FreshAdmission(client, workerInput(), {
+            getProfile: vi.fn().mockResolvedValue(profile()),
+            providerRunStore: providerRunStore(),
+            env: FRESH_ENV,
+            createClaimToken: () => CLAIM_TOKEN,
+            legacyDrain: true,
+        })).resolves.toBe('ready');
+
+        expect(rpc).toHaveBeenNthCalledWith(
+            1,
+            'claim_analysis_v2_preflight_admission_v3',
+            expect.not.objectContaining({
+                p_workload_role: expect.anything(),
+                p_contract_version: expect.anything(),
             })
         );
     });

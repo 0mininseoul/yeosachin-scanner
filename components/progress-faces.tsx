@@ -335,10 +335,7 @@ export function ProgressFaces({
        a prop that changes over time, and an effect would paint the old row once
        before correcting it. The stable snapshot key makes repeated heartbeats a
        no-op while allowing the same candidate to be enriched with feed media. */
-    if (publicationLagReset && snapshotKey !== lastSnapshotKey) {
-        setLastSnapshotKey(snapshotKey);
-        setCandidates([]);
-    } else if (active && snapshotKey !== lastSnapshotKey) {
+    if (active && snapshotKey !== lastSnapshotKey) {
         setLastSnapshotKey(snapshotKey);
         setCandidates(current => {
             const withActive = appendScreenedCandidate(current, active);
@@ -346,7 +343,7 @@ export function ProgressFaces({
         });
     }
 
-    if (!publicationLagReset && !active && candidateMedia.length > 0 && snapshotKey !== lastSnapshotKey) {
+    if (!active && candidateMedia.length > 0 && snapshotKey !== lastSnapshotKey) {
         setLastSnapshotKey(snapshotKey);
         setCandidates(current => mergeScreenedCandidateHistory(current, serverCandidates));
     }

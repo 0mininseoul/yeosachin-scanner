@@ -2696,27 +2696,16 @@ export async function featureAnalysis(
             || Array.isArray(candidate)
             || typeof (candidate as { oneLineOverview?: unknown }).oneLineOverview !== 'string'
         ) throw error;
-        const invalidValue = (candidate as { oneLineOverview: string }).oneLineOverview;
-        const repairRequirements = issue.message === V211_METHODOLOGICAL_DISCLAIMER_ISSUE_MESSAGE
-            ? '분석 방법이나 자료의 한계를 직접 말하지 마세요. 원문에 드러난 실제 단서만 유지하고 새로운 사실이나 근거를 만들지 마세요.'
-            : '관계 어휘를 어떤 언어·활용형·인용·부정문으로도 쓰지 마세요.';
-        const repaired = await analyzeWithGemini(
-            `다음 공개 문구 필드 하나만 수정하세요. 원문: ${JSON.stringify(invalidValue)}\n검증 요구사항: ${issue.message}\n${repairRequirements}\n금지 부분 문자열 목록: ${V28_RELATIONSHIP_FORBIDDEN_SUBSTRINGS.join(', ')}. 이 목록은 일반 단어의 일부로도 쓰지 말고, 바람을 피우다·바람이 났다 계열 및 영어 관계 용어도 쓰지 마세요. JSON만 반환하세요.`,
-            [],
-            {
-                schema: z.object({
-                    value: safeOverviewSchemaFor(policyVersion, input.accountProfile?.fullName),
-                }).strict(),
-                analysisType: 'v2_feature_analysis',
-                requestId: audit.requestId,
-                ...(options.replayCapability
-                    ? { skipTokenLog: true, replayCapability: options.replayCapability }
-                    : {}),
-            },
-        );
+        // The invalid value is generated data already rejected by the stage
+        // schema.  Do not issue an untracked second Gemini call: compose a
+        // deterministic, evidence-specific overview and re-run the complete
+        // response schema before publication.
         features = responseSchema.parse({
             ...(candidate as Record<string, unknown>),
-            oneLineOverview: repaired.value,
+            oneLineOverview: buildV211EvidenceSpecificOverview({
+                profileEvidence: input.bio,
+                feedEvidence: input.captions.map(caption => caption.text),
+            }),
         });
     }
     return featureAnalysisResultSchema.parse({
@@ -3639,6 +3628,94 @@ function fallbackEvidenceRefs(
     return [first, second];
 }
 
+/**
+ * Repairs the narrow v2.11 public-copy contract without opening another model
+ * attempt.  A failed validation is a generated-data boundary, not a reason to
+ * spend another provider call: compose only from already-sanitized evidence,
+ * canonical subjects, and the durable interaction observations supplied to
+ * this stage.
+ */
+function deterministicV211NarrativeRepair(
+    input: ParsedHighRiskNarrativeInput,
+    media: readonly NormalizedAiMediaSelection[],
+    sanitized: SanitizedNarrativeEvidence,
+): z.infer<typeof highRiskNarrativeModelResponseSchema> {
+    const subjects = v211NarrativeSubjects(input);
+    const [firstRefs, secondRefs] = fallbackEvidenceRefs(input, media, sanitized);
+    const styleEvidence = {
+        profileEvidence: sanitized.bio,
+        feedEvidence: [
+            ...sanitized.captions.map(caption => caption.text),
+            ...(sanitized.carouselCaptionDossier
+                ? [sanitized.carouselCaptionDossier.text]
+                : []),
+        ],
+    };
+    let first: string;
+    try {
+        first = `${subjects.candidate}님의 ${buildV211EvidenceSpecificOverview(styleEvidence)}`;
+    } catch {
+        // The input schema permits image-only evidence.  The subject and the
+        // supplied media reference still make this a grounded, deterministic
+        // sentence without inventing a textual fact.
+        first = `${subjects.candidate}님의 공개 장면은 제공된 범위에서 차분한 기록으로 남아 있습니다.`;
+    }
+    if (input.appearance.isReliable) {
+        first = `${first} 예쁘게 보이는 이미지라도 이미지 인상만으로 관계를 판단할 수는 없습니다.`;
+    }
+    if (first.length > MAX_PUBLIC_RISK_NARRATIVE_LINE_LENGTH) {
+        first = input.appearance.isReliable
+            ? `${subjects.candidate}님의 공개 장면은 차분한 기록입니다. 예쁘게 보이는 이미지라도 이미지 인상만으로 관계를 판단할 수는 없습니다.`
+            : `${subjects.candidate}님의 공개 장면은 제공된 범위에서 차분한 기록으로 남아 있습니다.`;
+    }
+
+    const directionClauses: string[] = [];
+    const addDirection = (
+        observation: z.infer<typeof interactionObservationSchema>,
+        actor: string,
+        receiver: string,
+        interaction: '좋아요' | '댓글' | '태그' | '멘션',
+    ) => {
+        if (observation.status !== 'observed') return;
+        directionClauses.push(
+            `${actor}${actor.endsWith('님') ? '이' : '가'} ${receiver}에게 남긴 ${interaction} 방향이 확인됩니다.`,
+        );
+    };
+    addDirection(input.interactions.candidateToTargetLike, subjects.candidate, subjects.target, '좋아요');
+    addDirection(input.interactions.targetToCandidateLike, subjects.target, subjects.candidate, '좋아요');
+    addDirection(input.interactions.candidateToTargetComment, subjects.candidate, subjects.target, '댓글');
+    addDirection(input.interactions.candidateToTargetTag, subjects.candidate, subjects.target, '태그');
+    addDirection(input.interactions.targetToCandidateTag, subjects.target, subjects.candidate, '태그');
+    addDirection(input.interactions.candidateToTargetMention, subjects.candidate, subjects.target, '멘션');
+    addDirection(input.interactions.targetToCandidateMention, subjects.target, subjects.candidate, '멘션');
+    const commentTerm = sanitized.comments[0]
+        ? extractSafePublicCommentTerms(sanitized.comments[0].text)
+            .find(term => !REDACTION_COMMENT_TERMS.has(term))
+        : null;
+    // Keep comment content in its own sentence.  Besides reading naturally, the full-stop
+    // boundaries are part of the validator's actor -> receiver -> interaction grammar: without
+    // them, a target->candidate clause could be falsely inferred by crossing a prior clause.
+    const commentSuffix = commentTerm ? ` 실제 댓글에는 “${commentTerm}” 표현이 남았습니다.` : '';
+    const second = directionClauses.length > 0
+        ? `${directionClauses.join(' ')}${commentSuffix} 수집 표본 밖 누락 가능성은 남습니다.`
+        : `${subjects.candidate}님과 ${subjects.target}님의 공개 상호작용은 제공 범위에서 제한적으로 확인되며, 수집 표본 밖 누락 가능성은 남습니다.`;
+
+    return {
+        lines: [
+            {
+                text: first,
+                evidenceRefs: firstRefs.length > 0 ? firstRefs : [input.interactions.coverage.evidenceRefId],
+            },
+            {
+                text: second,
+                evidenceRefs: secondRefs.length > 0
+                    ? secondRefs
+                    : [input.interactions.coverage.evidenceRefId],
+            },
+        ],
+    };
+}
+
 export function createHighRiskNarrativeResultIdentity(
     rawInput: HighRiskNarrativeInput,
     policyVersion: AiStagePolicyVersion = AI_STAGE_POLICY_VERSION,
@@ -3732,63 +3809,10 @@ export async function highRiskNarrative(
                 line => typeof line?.text === 'string',
             )
         ) {
-            const repairedCandidate = structuredClone(repair.candidate) as {
-                lines: Array<{ text: string; evidenceRefs?: readonly string[] }>;
-                [key: string]: unknown;
-            };
-            const invalidLines = repairedCandidate.lines.map(line => line.text) as [string, string];
-            const invalidLineIndexes = [...new Set(v211NarrativeInvalidLineIndexes(
-                invalidLines,
-                v211NarrativeSubjects(input),
-            ))] as Array<0 | 1>;
-            const observedInteractionEvidenceRefs = new Set(allObservedInteractionRefs(input));
-            const hasObservedInteractionEvidence = repairedCandidate.lines.some(line => (
-                line.evidenceRefs?.some(ref => observedInteractionEvidenceRefs.has(ref)) ?? false
-            ));
-            const skipRelationshipInference = policyVersion === AI_STAGE_POLICY_V211_VERSION
-                && validationMode === 'first_order_concierge_correction';
-            repairedCandidate.lines.forEach((line, lineIndex) => {
-                const allowsGroundedRelationship = hasObservedInteractionEvidence;
-                if (
-                    containsV28UnsupportedRelationshipFact(line.text)
-                    || (
-                        containsV28RelationshipStyle(line.text)
-                        && !skipRelationshipInference
-                        && !allowsGroundedRelationship
-                    )
-                ) {
-                    const normalizedLineIndex = lineIndex as 0 | 1;
-                    if (!invalidLineIndexes.includes(normalizedLineIndex)) {
-                        invalidLineIndexes.push(normalizedLineIndex);
-                    }
-                }
-            });
-            invalidLineIndexes.sort((left, right) => left - right);
-            if (invalidLineIndexes.length === 0) throw error;
-            const repairRequirements = [...new Set(
-                (repair.issues ?? [])
-                    .filter(issue => issue.code === 'custom')
-                    .map(issue => issue.message.trim())
-                    .filter(message => message.length > 0 && message.length <= 240),
-            )].join('\n- ');
-            const repaired = await analyzeWithGemini(
-                `다음 공개 서사 두 문장만 수정하세요. 원문: ${JSON.stringify(invalidLines)}\n검증 요구사항:\n- ${repairRequirements || contractIssue.message}\n정확히 두 문장을 반환하고 각 문장은 180자 이하로 쓰세요. 첫 문장의 근거와 둘째 문장의 인물 이름·관측된 상호작용 방향은 보존하세요. 위 검증 요구사항을 모두 해결하고, 관측된 상호작용 방향을 빠짐없이 정확한 이름과 용어로 포함하세요. 관계 관련 표현은 해당 문장이 직접 인용한 검증된 상호작용에 근거한 제한된 해석만 허용하고, 그 밖의 관계 추측은 쓰지 마세요. 둘째 문장에는 수집·관측 범위의 누락 가능성을 포함하되 상호작용 수량 표현 없이 간결하게 쓰세요. 새 사실이나 관계 추측을 추가하지 말고 JSON만 반환하세요.`,
-                [],
-                {
-                    schema: z.object({
-                        lines: z.tuple([
-                            z.string().min(1).max(MAX_PUBLIC_RISK_NARRATIVE_LINE_LENGTH),
-                            z.string().min(1).max(MAX_PUBLIC_RISK_NARRATIVE_LINE_LENGTH),
-                        ]),
-                    }).strict(),
-                    analysisType: 'v2_high_risk_narrative',
-                    requestId: audit.requestId,
-                },
+            response = parseRepairedHighRiskNarrative(
+                responseSchema,
+                deterministicV211NarrativeRepair(input, media, sanitized),
             );
-            for (const lineIndex of invalidLineIndexes) {
-                repairedCandidate.lines[lineIndex]!.text = repaired.lines[lineIndex];
-            }
-            response = parseRepairedHighRiskNarrative(responseSchema, repairedCandidate);
         } else if (
             policyVersion === AI_STAGE_POLICY_V211_VERSION
             && textIssues.length > 0
@@ -3797,26 +3821,10 @@ export async function highRiskNarrative(
             && !Array.isArray(repair.candidate)
             && Array.isArray((repair.candidate as { lines?: unknown }).lines)
         ) {
-            const repairedCandidate = structuredClone(repair.candidate) as {
-                lines: Array<{ text?: unknown }>;
-                [key: string]: unknown;
-            };
-            for (const issue of textIssues) {
-                const lineIndex = issue.path[1] as 0 | 1;
-                const invalidValue = repairedCandidate.lines[lineIndex]?.text;
-                if (typeof invalidValue !== 'string') throw error;
-                const repaired = await analyzeWithGemini(
-                    `다음 공개 문구 필드 하나만 수정하세요. 원문: ${JSON.stringify(invalidValue)}\n검증 요구사항: ${issue.message}\n관계 어휘를 어떤 언어·활용형·인용·부정문으로도 쓰지 말고 JSON만 반환하세요.`,
-                    [],
-                    {
-                        schema: z.object({ value: z.string().min(1).max(180) }).strict(),
-                        analysisType: 'v2_high_risk_narrative',
-                        requestId: audit.requestId,
-                    },
-                );
-                repairedCandidate.lines[lineIndex]!.text = repaired.value;
-            }
-            response = parseRepairedHighRiskNarrative(responseSchema, repairedCandidate);
+            response = parseRepairedHighRiskNarrative(
+                responseSchema,
+                deterministicV211NarrativeRepair(input, media, sanitized),
+            );
         } else {
             if (
                 !isAnalysisV2AiDeterministicFallbackError(error)

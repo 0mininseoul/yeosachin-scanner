@@ -40,6 +40,15 @@ import {
     refreshBetaApifyCreditSnapshots,
 } from './beta-apify-credit-settlement-runtime';
 import { getBetaApifyCreditPoolRuntimeConfig } from './beta-apify-credit-runtime';
+import {
+    recoverExpiredAnalysisProviderAdmissions,
+    type AnalysisProviderAdmissionRecoverySummary,
+} from './provider-admission-recovery';
+import {
+    recoverAnalysisCapacityDispatches,
+    CAPACITY_DISPATCH_RECOVERY_LIMIT,
+    type AnalysisCapacityDispatchRecoverySummary,
+} from './capacity-dispatch-recovery';
 
 export const ANALYSIS_V2_RECOVERY_MAX_JOBS = 100;
 export const ANALYSIS_V2_RECOVERY_CONCURRENCY = 10;
@@ -68,6 +77,16 @@ export interface AnalysisV2RecoverySummary {
     betaCreditArchiveFailures: number;
     betaCreditRefreshAttempts: number;
     betaCreditRefreshFailures: number;
+    providerAdmissionsScanned: number;
+    providerAdmissionsRecovered: number;
+    providerAdmissionsSkipped: number;
+    providerAdmissionsFailed: number;
+    providerAdmissionsHasMore: boolean;
+    capacityDispatchesScanned: number;
+    capacityDispatchesRecovered: number;
+    capacityDispatchesTaskPresent: number;
+    capacityDispatchesSkipped: number;
+    capacityDispatchesFailed: number;
 }
 
 type RecoveryLookup = (job: {
@@ -88,6 +107,7 @@ type SchedulerGeminiLeaseReaper = () => Promise<number>;
 type ScoreAuditRecovery = () => Promise<void>;
 type BetaCreditMaintenance = () => Promise<number>;
 type BetaCreditRefresh = () => Promise<void>;
+type ProviderAdmissionRecovery = () => Promise<AnalysisProviderAdmissionRecoverySummary>;
 
 function betaPoolSnapshotAge(
     env: Record<string, string | undefined> | undefined,
@@ -231,6 +251,11 @@ export async function recoverAnalysisV2Jobs(
         recoverBetaCredit?: BetaCreditMaintenance;
         archiveBetaCredit?: BetaCreditMaintenance;
         refreshBetaCredit?: BetaCreditRefresh;
+        recoverProviderAdmissions?: ProviderAdmissionRecovery;
+        recoverCapacityDispatches?: (options?: {
+            limit?: number;
+            env?: Record<string, string | undefined>;
+        }) => Promise<AnalysisCapacityDispatchRecoverySummary>;
         env?: Record<string, string | undefined>;
         scoreAuditTimeoutMs?: number;
     } = {}
@@ -239,6 +264,10 @@ export async function recoverAnalysisV2Jobs(
     const lookup = dependencies.lookup ?? (input => lookupAnalysisV2Task(input));
     const dispatch = dependencies.dispatch ?? dispatchAnalysisV2Job;
     const limit = dependencies.limit ?? ANALYSIS_V2_RECOVERY_MAX_JOBS;
+    // The V2 job recovery page is intentionally larger than the capacity-dispatch RPC's
+    // bounded maintenance universe.  Never pass the job page size through unchanged: doing so
+    // makes the capacity RPC reject the entire recovery invocation at its 64-row contract.
+    const capacityRecoveryLimit = Math.min(limit, CAPACITY_DISPATCH_RECOVERY_LIMIT);
     const concurrency = dependencies.concurrency ?? ANALYSIS_V2_RECOVERY_CONCURRENCY;
     const scoreAuditTimeoutMs = dependencies.scoreAuditTimeoutMs ?? 250;
     if (!Number.isSafeInteger(limit) || limit < 1 || limit > ANALYSIS_V2_RECOVERY_MAX_JOBS) {
@@ -280,7 +309,64 @@ export async function recoverAnalysisV2Jobs(
         betaCreditArchiveFailures: 0,
         betaCreditRefreshAttempts: 0,
         betaCreditRefreshFailures: 0,
+        providerAdmissionsScanned: 0,
+        providerAdmissionsRecovered: 0,
+        providerAdmissionsSkipped: 0,
+        providerAdmissionsFailed: 0,
+        providerAdmissionsHasMore: false,
+        capacityDispatchesScanned: 0,
+        capacityDispatchesRecovered: 0,
+        capacityDispatchesTaskPresent: 0,
+        capacityDispatchesSkipped: 0,
+        capacityDispatchesFailed: 0,
     };
+    const hasCapacityDispatchRecovery = Boolean(
+        dependencies.recoverCapacityDispatches
+        || typeof (supabaseAdmin as { rpc?: unknown }).rpc === 'function'
+    );
+    if (hasCapacityDispatchRecovery) {
+        try {
+            const capacityDispatches = await (
+                dependencies.recoverCapacityDispatches
+                ?? (() => recoverAnalysisCapacityDispatches({
+                    limit: capacityRecoveryLimit,
+                    env: dependencies.env,
+                }))
+            )({ limit: capacityRecoveryLimit, env: dependencies.env });
+            summary.capacityDispatchesScanned = capacityDispatches.scanned;
+            summary.capacityDispatchesRecovered = capacityDispatches.recovered;
+            summary.capacityDispatchesTaskPresent = capacityDispatches.taskPresent;
+            summary.capacityDispatchesSkipped = capacityDispatches.skipped;
+            summary.capacityDispatchesFailed = capacityDispatches.failed;
+            if (capacityDispatches.failed > 0) summary.failed += 1;
+        } catch {
+            summary.failed += 1;
+            summary.capacityDispatchesFailed += 1;
+        }
+    }
+    const hasProviderAdmissionRecovery = Boolean(
+        dependencies.recoverProviderAdmissions
+        || typeof (supabaseAdmin as { rpc?: unknown }).rpc === 'function'
+    );
+    if (hasProviderAdmissionRecovery) {
+        try {
+            const providerAdmissions = await (
+                dependencies.recoverProviderAdmissions
+                ?? (() => recoverExpiredAnalysisProviderAdmissions())
+            )();
+            summary.providerAdmissionsScanned = providerAdmissions.scanned;
+            summary.providerAdmissionsRecovered = providerAdmissions.recovered;
+            summary.providerAdmissionsSkipped = providerAdmissions.skipped;
+            summary.providerAdmissionsFailed = providerAdmissions.failed;
+            summary.providerAdmissionsHasMore = providerAdmissions.hasMore;
+            if (providerAdmissions.failed > 0) {
+                summary.failed += 1;
+            }
+        } catch {
+            summary.failed += 1;
+            summary.providerAdmissionsFailed += 1;
+        }
+    }
     try {
         summary.geminiCutoffAttemptsRecovered = await (
             dependencies.recoverGeminiCutoffAttempts

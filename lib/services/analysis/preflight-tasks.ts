@@ -5,6 +5,7 @@ import {
     type CloudTasksCallerAuthConfig,
 } from '@/lib/services/google/vercel-wif';
 import { createCloudTasksClient } from './background-tasks';
+import { getAnalysisWorkloadRole } from './workload-role';
 import {
     PREFLIGHT_TASK_DISPATCH_DEADLINE_SECONDS,
     assertPreflightRuntimePolicy,
@@ -17,6 +18,7 @@ const QUEUE_PATTERN = /^[a-z](?:[a-z0-9-]{0,98}[a-z0-9])?$/;
 const SERVICE_ACCOUNT_PATTERN = /^[a-z0-9-]{1,63}@[a-z][a-z0-9-]{4,28}[a-z0-9]\.iam\.gserviceaccount\.com$/;
 
 export interface PreflightTasksConfig {
+    workloadRole?: 'preflight';
     project: string;
     location: string;
     queue: string;
@@ -35,6 +37,10 @@ interface CloudTasksClientLike {
     queuePath(project: string, location: string, queue: string): string;
     taskPath(project: string, location: string, queue: string, task: string): string;
     createTask(request: Record<string, unknown>): PromiseLike<unknown>;
+}
+
+interface CloudTasksLookupClientLike {
+    getTask(request: { name: string; responseView: 'BASIC' }): PromiseLike<unknown>;
 }
 
 export type PreflightTaskEnqueueFailureDisposition = 'terminal' | 'replayable';
@@ -269,7 +275,15 @@ export function getPreflightTasksConfig(
         errorPrefix: 'PREFLIGHT_TASKS_CONFIG_ERROR',
     });
 
+    const configuredRole = env.ANALYSIS_WORKLOAD_ROLE?.trim();
+    if (configuredRole !== undefined) {
+        if (getAnalysisWorkloadRole(env) !== 'preflight') {
+            throw new Error('PREFLIGHT_TASKS_CONFIG_ERROR: workload role must be preflight.');
+        }
+    }
+
     return Object.freeze({
+        workloadRole: 'preflight' as const,
         project,
         location,
         queue,
@@ -317,11 +331,22 @@ export function preflightTaskId(preflightId: string, generation: number): string
     return `preflight-${preflightId.toLowerCase()}-g${generation}`;
 }
 
-export function precheckoutBliteTaskId(preflightId: string): string {
+export function precheckoutBliteTaskId(
+    preflightId: string,
+    dispatchGeneration?: number,
+): string {
     if (!UUID_PATTERN.test(preflightId)) {
         throw new Error('PREFLIGHT_TASKS_CONFIG_ERROR: invalid preflight id.');
     }
-    return `preflight-blite-${preflightId.toLowerCase()}`;
+    if (dispatchGeneration !== undefined && (
+        !Number.isSafeInteger(dispatchGeneration)
+        || dispatchGeneration < 1
+        || dispatchGeneration > 100
+    )) {
+        throw new Error('PREFLIGHT_TASKS_CONFIG_ERROR: invalid B-lite dispatch generation.');
+    }
+    return `preflight-blite-${preflightId.toLowerCase()}`
+        + (dispatchGeneration === undefined ? '' : `-g${dispatchGeneration}`);
 }
 
 export function freshAdmissionTaskId(
@@ -375,6 +400,14 @@ function isAlreadyExists(error: unknown): boolean {
         || (typeof value.message === 'string' && value.message.includes('ALREADY_EXISTS'));
 }
 
+function isNotFound(error: unknown): boolean {
+    if (!error || typeof error !== 'object') return false;
+    const value = error as { code?: unknown; message?: unknown };
+    return value.code === 5
+        || value.code === 'NOT_FOUND'
+        || (typeof value.message === 'string' && value.message.includes('NOT_FOUND'));
+}
+
 const TERMINAL_CREATE_ERROR_CODES = new Set<unknown>([
     3,
     5,
@@ -412,7 +445,10 @@ function taskRequest(
                 httpMethod: 'POST',
                 url: config.targetUrl,
                 headers: { 'Content-Type': 'application/json' },
-                body: Buffer.from(JSON.stringify(payload)).toString('base64'),
+                body: Buffer.from(JSON.stringify({
+                    ...payload,
+                    workloadRole: config.workloadRole ?? 'preflight',
+                })).toString('base64'),
                 oidcToken: {
                     serviceAccountEmail: config.serviceAccountEmail,
                     audience: config.oidcAudience,
@@ -428,6 +464,7 @@ export async function enqueuePreflightTask(
     options: {
         config?: PreflightTasksConfig;
         client?: CloudTasksClientLike;
+        reservationToken?: string;
     } = {}
 ): Promise<'enqueued' | 'exists'> {
     const config = options.config ?? getPreflightTasksConfig();
@@ -436,11 +473,22 @@ export async function enqueuePreflightTask(
     }
 
     const client = options.client ?? await getSharedTasksClient(config);
+    if (options.reservationToken !== undefined && !UUID_PATTERN.test(options.reservationToken)) {
+        throw new Error('PREFLIGHT_TASKS_CONFIG_ERROR: invalid reservation token.');
+    }
     const taskId = preflightTaskId(preflightId, generation);
     const parent = client.queuePath(config.project, config.location, config.queue);
     const name = client.taskPath(config.project, config.location, config.queue, taskId);
 
-    const request = taskRequest({ preflightId }, name, parent, config);
+    const request = taskRequest({
+        preflightId,
+        ...(options.reservationToken === undefined
+            ? {}
+            : {
+                generation,
+                reservationToken: options.reservationToken.toLowerCase(),
+            }),
+    }, name, parent, config);
     for (let attempt = 0; attempt < 2; attempt += 1) {
         try {
             await client.createTask(request);
@@ -467,11 +515,47 @@ export async function enqueuePreflightTask(
     throw new PreflightTaskEnqueueError('replayable');
 }
 
+/**
+ * Looks up the exact ordinary preflight task name.  Recovery callers must use this before
+ * changing a reserved row after an ambiguous create response; a missing task is not proof that
+ * a create did not commit, so callers retain the reservation and retry in maintenance.
+ */
+export async function lookupPreflightTask(
+    preflightId: string,
+    generation: number,
+    options: {
+        config?: PreflightTasksConfig;
+        client?: CloudTasksLookupClientLike & Pick<CloudTasksClientLike, 'taskPath'>;
+    } = {},
+): Promise<'exists' | 'not_found'> {
+    const config = options.config ?? getPreflightTasksConfig();
+    if (!config) {
+        throw new Error('PREFLIGHT_TASKS_CONFIG_ERROR: queue is not configured.');
+    }
+    const client = (options.client ?? await getSharedTasksClient(config)) as
+        CloudTasksLookupClientLike & Pick<CloudTasksClientLike, 'taskPath'>;
+    const name = client.taskPath(
+        config.project,
+        config.location,
+        config.queue,
+        preflightTaskId(preflightId, generation),
+    );
+    try {
+        await client.getTask({ name, responseView: 'BASIC' });
+        return 'exists';
+    } catch (error) {
+        if (isNotFound(error)) return 'not_found';
+        throw new Error('PREFLIGHT_TASKS_LOOKUP_ERROR: task lookup failed.');
+    }
+}
+
 export async function enqueuePrecheckoutBliteTask(
     preflightId: string,
     options: {
         config?: PreflightTasksConfig;
         client?: CloudTasksClientLike;
+        dispatchGeneration?: number;
+        dispatchToken?: string;
     } = {}
 ): Promise<'enqueued' | 'exists'> {
     const config = options.config ?? getPreflightTasksConfig();
@@ -479,12 +563,26 @@ export async function enqueuePrecheckoutBliteTask(
         throw new Error('PREFLIGHT_TASKS_CONFIG_ERROR: queue is not configured.');
     }
     const client = options.client ?? await getSharedTasksClient(config);
-    const taskId = precheckoutBliteTaskId(preflightId);
+    const hasDispatchGeneration = options.dispatchGeneration !== undefined;
+    const hasDispatchToken = options.dispatchToken !== undefined;
+    if (hasDispatchGeneration !== hasDispatchToken) {
+        throw new Error('PREFLIGHT_TASKS_CONFIG_ERROR: B-lite dispatch fence is incomplete.');
+    }
+    if (hasDispatchToken && !UUID_PATTERN.test(options.dispatchToken!)) {
+        throw new Error('PREFLIGHT_TASKS_CONFIG_ERROR: invalid B-lite dispatch token.');
+    }
+    const taskId = precheckoutBliteTaskId(preflightId, options.dispatchGeneration);
     const parent = client.queuePath(config.project, config.location, config.queue);
     const name = client.taskPath(config.project, config.location, config.queue, taskId);
     const request = taskRequest({
         kind: 'precheckout_blite',
         preflightId: preflightId.toLowerCase(),
+        ...(options.dispatchGeneration !== undefined
+            ? { dispatchGeneration: options.dispatchGeneration }
+            : {}),
+        ...(options.dispatchToken !== undefined
+            ? { dispatchToken: options.dispatchToken.toLowerCase() }
+            : {}),
     }, name, parent, config);
     for (let attempt = 0; attempt < 2; attempt += 1) {
         try {
@@ -499,6 +597,36 @@ export async function enqueuePrecheckoutBliteTask(
         }
     }
     throw new PreflightTaskEnqueueError('replayable');
+}
+
+/** Looks up the exact generation-qualified B-lite task for bounded dispatch recovery. */
+export async function lookupPrecheckoutBliteTask(
+    preflightId: string,
+    options: {
+        config?: PreflightTasksConfig;
+        client?: CloudTasksLookupClientLike & Pick<CloudTasksClientLike, 'taskPath'>;
+        dispatchGeneration?: number;
+    } = {},
+): Promise<'exists' | 'not_found'> {
+    const config = options.config ?? getPreflightTasksConfig();
+    if (!config) {
+        throw new Error('PREFLIGHT_TASKS_CONFIG_ERROR: queue is not configured.');
+    }
+    const client = (options.client ?? await getSharedTasksClient(config)) as unknown as
+        CloudTasksLookupClientLike & Pick<CloudTasksClientLike, 'taskPath'>;
+    const name = client.taskPath(
+        config.project,
+        config.location,
+        config.queue,
+        precheckoutBliteTaskId(preflightId, options.dispatchGeneration),
+    );
+    try {
+        await client.getTask({ name, responseView: 'BASIC' });
+        return 'exists';
+    } catch (error) {
+        if (isNotFound(error)) return 'not_found';
+        throw new Error('PREFLIGHT_TASKS_LOOKUP_ERROR: B-lite task lookup failed.');
+    }
 }
 
 /**
@@ -548,44 +676,6 @@ export async function enqueueBetaPreflightPrepareTask(
         }
     }
     throw new PreflightTaskEnqueueError('replayable');
-}
-
-export async function enqueueFreshAdmissionTask(
-    preflightId: string,
-    generation: number,
-    dispatchGeneration: number,
-    dispatchToken: string,
-    options: {
-        config?: PreflightTasksConfig;
-        client?: CloudTasksClientLike;
-    } = {}
-): Promise<'enqueued' | 'exists'> {
-    const config = options.config ?? getPreflightTasksConfig();
-    if (!config) {
-        throw new Error('PREFLIGHT_TASKS_CONFIG_ERROR: queue is not configured.');
-    }
-    if (!UUID_PATTERN.test(dispatchToken)) {
-        throw new Error('PREFLIGHT_TASKS_CONFIG_ERROR: invalid admission dispatch token.');
-    }
-
-    const client = options.client ?? await getSharedTasksClient(config);
-    const taskId = freshAdmissionTaskId(preflightId, generation, dispatchGeneration);
-    const parent = client.queuePath(config.project, config.location, config.queue);
-    const name = client.taskPath(config.project, config.location, config.queue, taskId);
-
-    try {
-        await client.createTask(taskRequest({
-            preflightId,
-            kind: 'fresh_admission',
-            generation,
-            dispatchGeneration,
-            dispatchToken: dispatchToken.toLowerCase(),
-        }, name, parent, config));
-        return 'enqueued';
-    } catch (error) {
-        if (isAlreadyExists(error)) return 'exists';
-        throw new Error('PREFLIGHT_TASKS_ENQUEUE_ERROR: admission task creation failed.');
-    }
 }
 
 export async function verifyPreflightTaskAuthorization(

@@ -9,8 +9,10 @@ import {
     type AnalysisV2FreshAdmissionReservation,
     type AnalysisV2FreshAdmissionRpcClient,
 } from '@/lib/services/analysis/fresh-plan-admission';
-import { enqueueFreshAdmissionTask } from '@/lib/services/analysis/preflight-tasks';
-import { dispatchAnalysisV2Job } from '@/lib/services/analysis/v2-tasks';
+import {
+    dispatchAnalysisV2Job,
+    enqueueAnalysisV2FreshAdmissionTask,
+} from '@/lib/services/analysis/v2-tasks';
 import { operationalLogger } from '@/lib/observability/server';
 import type { OperationalEvent } from '@/lib/observability/schema';
 
@@ -724,12 +726,13 @@ function defaultAdvanceDependencies(): EarlybirdFulfillmentAdvanceDependencies {
             generation,
             dispatchGeneration,
             dispatchToken
-        ) => enqueueFreshAdmissionTask(
+        ) => enqueueAnalysisV2FreshAdmissionTask({
             preflightId,
             generation,
             dispatchGeneration,
-            dispatchToken
-        ),
+            dispatchToken,
+            workloadRole: 'paid',
+        }),
         markFreshAdmissionDispatched: (client, input) => (
             markAnalysisV2FreshAdmissionDispatched(client, input)
         ),
@@ -925,17 +928,9 @@ export async function advanceAdmittedEarlybirdFulfillment(
                     },
                 });
             } catch (error) {
-                try {
-                    await dependencies.releaseFreshAdmissionDispatch(
-                        supabaseAdmin,
-                        dispatchInput
-                    );
-                } catch (releaseError) {
-                    throw diagnoseEarlybirdFulfillmentError(
-                        releaseError,
-                        'dispatch_release'
-                    );
-                }
+                // Retain every generation-bearing fence, including typed terminal responses:
+                // Cloud Tasks can commit before the response is observed. Recovery retries the
+                // same deterministic identity and prevents accepted paid work from going idle.
                 throw error;
             }
         }

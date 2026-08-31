@@ -4,6 +4,7 @@ import {
     isAnalysisV2AdmissionAvailable,
     isAnalysisV2RecoveryAvailable,
     isAnalysisV2WorkerAvailable,
+    isPreflightRecoveryAvailable,
 } from './v2-execution-gate';
 
 describe('analysis V2 split execution gates', () => {
@@ -28,5 +29,14 @@ describe('analysis V2 split execution gates', () => {
         expect(gate({ [key]: 'off' })).toBe(false);
         expect(gate({ [key]: 'on' })).toBe(true);
         expect(() => gate({ [key]: 'enabled' })).toThrow(`${key} must be boolean.`);
+    });
+
+    it('keeps preflight recovery behind its own strict gate', () => {
+        expect(isPreflightRecoveryAvailable({})).toBe(false);
+        expect(isPreflightRecoveryAvailable({ PREFLIGHT_TASKS_RECOVERY_ENABLED: 'false' })).toBe(false);
+        expect(isPreflightRecoveryAvailable({ PREFLIGHT_TASKS_RECOVERY_ENABLED: 'true' })).toBe(true);
+        expect(() => isPreflightRecoveryAvailable({
+            PREFLIGHT_TASKS_RECOVERY_ENABLED: 'maybe',
+        })).toThrow('PREFLIGHT_TASKS_RECOVERY_ENABLED must be boolean.');
     });
 });

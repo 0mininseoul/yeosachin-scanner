@@ -167,6 +167,12 @@ export interface AnalysisV2ProviderRunStore {
     requestCleanup(input: AnalysisV2ProviderRunCleanupIntentInput): Promise<void>;
     loadCleanupIntent(requestId: string):
         Promise<StoredAnalysisV2ProviderRunCleanupIntent | null>;
+    /** Exact job/input admission read; unrelated jobs in the same request see null. */
+    loadCleanupIntentForJob?(input: {
+        requestId: string;
+        jobKey: string;
+        jobInputHash: string;
+    }): Promise<StoredAnalysisV2ProviderRunCleanupIntent | null>;
     listActiveForCleanup(input?: {
         requestId?: string;
         limit?: number;
@@ -213,6 +219,7 @@ export const ANALYSIS_V2_PROVIDER_RUN_DATABASE_NAMES = Object.freeze({
     reconcileUsageRpc: 'reconcile_analysis_v2_provider_run_usage',
     requestCleanupRpc: 'request_analysis_v2_provider_run_cleanup',
     loadCleanupIntentRpc: 'load_analysis_v2_provider_run_cleanup_intent',
+    loadCleanupIntentForJobRpc: 'load_analysis_v2_provider_run_cleanup_intent_for_job',
     listActiveCleanupRpc: 'list_analysis_v2_active_provider_runs_for_cleanup',
     settleCleanupRpc: 'settle_analysis_v2_provider_run_for_cleanup',
 });
@@ -1234,6 +1241,28 @@ export function createAnalysisV2ProviderRunStore(
                 { p_request_id: requestId.toLowerCase() }
             );
             if (error) throwRpcError(error, 'cleanup intent load');
+            return data === null ? null : parseCleanupIntent(data);
+        },
+
+        async loadCleanupIntentForJob(input) {
+            if (
+                !UUID_PATTERN.test(input.requestId)
+                || !JOB_KEY_PATTERN.test(input.jobKey)
+                || !SHA256_PATTERN.test(input.jobInputHash)
+            ) {
+                throw new Error(
+                    'ANALYSIS_V2_PROVIDER_RUN_VALIDATION_ERROR: invalid cleanup job identity.'
+                );
+            }
+            const { data, error } = await client.rpc(
+                ANALYSIS_V2_PROVIDER_RUN_DATABASE_NAMES.loadCleanupIntentForJobRpc,
+                {
+                    p_request_id: input.requestId.toLowerCase(),
+                    p_job_key: input.jobKey,
+                    p_job_input_hash: input.jobInputHash,
+                }
+            );
+            if (error) throwRpcError(error, 'cleanup job intent load');
             return data === null ? null : parseCleanupIntent(data);
         },
 

@@ -30,10 +30,14 @@ import type {
     PreflightProviderRunStore,
     StoredPreflightProviderRun,
 } from './preflight-provider-run';
+import type {
+    AnalysisProviderAdmissionStore,
+} from './provider-admission-store';
 import { preflightTargetInputHash } from './preflight-identity';
 import { PREFLIGHT_PROVIDER_DEADLINE_MS } from './preflight-runtime-policy';
 import type { BetaApifyPreflightCoordinator } from './beta-apify-preflight-coordinator';
 import { projectPrecheckoutBliteSource } from '@/lib/services/precheckout/blite-source';
+import { PreflightTaskEnqueueError } from './preflight-tasks';
 
 const preflightId = '123e4567-e89b-42d3-a456-426614174000';
 const userId = '223e4567-e89b-42d3-a456-426614174000';
@@ -99,6 +103,115 @@ describe('betatest preflight credit fence', () => {
         expect(apifyProfile).toHaveBeenCalled();
         expect(store.finalizeReady).toHaveBeenCalled();
         expect(outcome).toBe('ready');
+    });
+
+    it('charges a held beta septenary profile to paid admission while staying on the preflight route', async () => {
+        const claimed = claim({ analysisEntryChannel: 'betatest' });
+        const store = workerStore(claimed);
+        const runs = providerRunStore();
+        vi.mocked(runs.reserve).mockResolvedValue({
+            created: true,
+            run: {
+                ...storedRun('starting'),
+                credentialSlot: 'septenary',
+                runId: null,
+            },
+        });
+        vi.mocked(runs.checkpointStarted).mockResolvedValue({
+            ...storedRun('running'),
+            credentialSlot: 'septenary',
+            runId: 'StartedRun1234567',
+        });
+        vi.mocked(runs.checkpointTerminal).mockResolvedValue({
+            ...storedRun('succeeded'),
+            credentialSlot: 'septenary',
+            runId: 'StartedRun1234567',
+        });
+        const admission: AnalysisProviderAdmissionStore = {
+            acquire: vi.fn(async input => ({
+                ...input,
+                outcome: 'acquired' as const,
+                admissionId: 'a'.repeat(64),
+                leaseToken: '423e4567-e89b-42d3-a456-426614174000',
+                fence: 1,
+                expiresAt: new Date(Date.now() + 120_000).toISOString(),
+                activeCount: 1,
+                maxActive: 8,
+            })),
+            renew: vi.fn(),
+            release: vi.fn(async () => undefined),
+            recoverExpired: vi.fn(),
+            resolve: vi.fn(),
+            listExpired: vi.fn(),
+        };
+        const getFallbackProfile = vi.fn(async (
+            _username: string,
+            context?: ProviderCallContext,
+        ) => completeFallbackRun(context));
+
+        await expect(processPreflight(preflightId, {
+            store,
+            providerRunStore: runs,
+            providerAdmissionStore: admission,
+            betaCreditCoordinator: {
+                reuse: vi.fn(async () => ({
+                    allocationId: '423e4567-e89b-42d3-a456-426614174001',
+                    credentialSlot: 'septenary' as const,
+                })),
+                prepare: vi.fn(),
+            },
+            getFallbackProfile,
+            env: {
+                ...preflightApifyPoolEnv,
+                ANALYSIS_PROVIDER_ADMISSION_ENABLED: 'true',
+            },
+        })).resolves.toBe('ready');
+
+        expect(admission.acquire).toHaveBeenCalledWith(expect.objectContaining({
+            workloadRole: 'paid',
+            logicalProvider: 'apify',
+            credentialSlot: 'septenary',
+            budgetKey: 'paid:apify:septenary',
+            jobKey: 'preflight:provider',
+            operationKey: 'target-profile-fallback',
+        }));
+        expect(admission.release).toHaveBeenCalledOnce();
+        expect(getFallbackProfile).toHaveBeenCalledOnce();
+    });
+
+    it('rejects a septenary beta profile when no durable preflight-held reservation exists', async () => {
+        const claimed = claim({ analysisEntryChannel: 'betatest' });
+        const store = workerStore(claimed);
+        const admission: AnalysisProviderAdmissionStore = {
+            acquire: vi.fn(),
+            renew: vi.fn(),
+            release: vi.fn(),
+            recoverExpired: vi.fn(),
+            resolve: vi.fn(),
+            listExpired: vi.fn(),
+        };
+
+        await expect(processPreflight(preflightId, {
+            store,
+            providerAdmissionStore: admission,
+            betaCreditCoordinator: {
+                reuse: vi.fn(async () => {
+                    throw new Error('ANALYSIS_BETA_POOL_CAPACITY_UNAVAILABLE');
+                }),
+                prepare: vi.fn(),
+            },
+            getFallbackProfile: vi.fn(),
+            env: {
+                ...preflightApifyPoolEnv,
+                ANALYSIS_PROVIDER_ADMISSION_ENABLED: 'true',
+            },
+        })).resolves.toBe('blocked');
+
+        expect(admission.acquire).not.toHaveBeenCalled();
+        expect(store.finalizeBlocked).toHaveBeenCalledWith(
+            claimed,
+            'BETA_CAPACITY_UNAVAILABLE',
+        );
     });
 
     it('blocks beta capacity before profile collection and releases the claim', async () => {
@@ -859,16 +972,17 @@ describe('B-lite single-collection preflight', () => {
         expect(order).toEqual(['finalize', 'enqueue']);
     });
 
-    it('recovers a finalized row after enqueue failure without reclaiming or recollecting', async () => {
+    it('retains a finalized B-lite fence after a definitive enqueue refusal for maintenance recovery', async () => {
         const dispatchToken = '623e4567-e89b-42d3-a456-426614174000'; // gitleaks:allow -- UUID fixture
         const reserveBliteDispatch = vi.fn(async () => ({
             shouldEnqueue: true,
             dispatchToken,
+            dispatchGeneration: 1,
         }));
         const markBliteDispatchFailed = vi.fn(async () => true);
         const markBliteDispatchEnqueued = vi.fn(async () => true);
         const enqueueBliteInference = vi.fn()
-            .mockRejectedValueOnce(new Error('cloud task unavailable'))
+            .mockRejectedValueOnce(new PreflightTaskEnqueueError('terminal'))
             .mockResolvedValueOnce('enqueued' as const);
         const store = {
             ...workerStore(null),
@@ -886,7 +1000,7 @@ describe('B-lite single-collection preflight', () => {
             store,
             enqueueBliteInference,
             env,
-        })).rejects.toThrow('cloud task unavailable');
+        })).rejects.toBeInstanceOf(PreflightTaskEnqueueError);
         await expect(processPreflight(preflightId, {
             store,
             enqueueBliteInference,
@@ -895,8 +1009,58 @@ describe('B-lite single-collection preflight', () => {
 
         expect(store.claim).toHaveBeenCalledTimes(2);
         expect(reserveBliteDispatch).toHaveBeenCalledTimes(2);
-        expect(markBliteDispatchFailed).toHaveBeenCalledWith({ preflightId, dispatchToken });
-        expect(markBliteDispatchEnqueued).toHaveBeenCalledWith({ preflightId, dispatchToken });
+        // A terminal create response is not an ownership proof: Cloud Tasks may have committed
+        // before the refusal was observed. The enqueuing fence must remain recoverable.
+        expect(markBliteDispatchFailed).not.toHaveBeenCalled();
+        expect(markBliteDispatchEnqueued).toHaveBeenCalledWith({
+            preflightId,
+            dispatchGeneration: 1,
+            dispatchToken,
+        });
+        expect(enqueueBliteInference).toHaveBeenCalledTimes(2);
+    });
+
+    it('retains a B-lite reservation after replayable enqueue ambiguity for maintenance recovery', async () => {
+        const dispatchToken = '723e4567-e89b-42d3-a456-426614174000'; // gitleaks:allow -- UUID fixture
+        const reserveBliteDispatch = vi.fn(async () => ({
+            shouldEnqueue: true,
+            dispatchToken,
+            dispatchGeneration: 2,
+        }));
+        const markBliteDispatchFailed = vi.fn(async () => true);
+        const markBliteDispatchEnqueued = vi.fn(async () => true);
+        const enqueueBliteInference = vi.fn()
+            .mockRejectedValueOnce(new PreflightTaskEnqueueError('replayable'))
+            .mockResolvedValueOnce('enqueued' as const);
+        const store = {
+            ...workerStore(null),
+            reserveBliteDispatch,
+            markBliteDispatchFailed,
+            markBliteDispatchEnqueued,
+        };
+        const env = {
+            PRECHECKOUT_BLITE_ENABLED: 'false',
+            PRECHECKOUT_BLITE_ROLLOUT_PERCENT: '0',
+            ANALYSIS_V2_PREFLIGHT_IDENTITY_HMAC_SECRET: preflightIdentitySecret,
+        };
+
+        await expect(processPreflight(preflightId, {
+            store,
+            enqueueBliteInference,
+            env,
+        })).rejects.toBeInstanceOf(PreflightTaskEnqueueError);
+        expect(markBliteDispatchFailed).not.toHaveBeenCalled();
+
+        await expect(processPreflight(preflightId, {
+            store,
+            enqueueBliteInference,
+            env,
+        })).resolves.toBe('noop');
+        expect(markBliteDispatchEnqueued).toHaveBeenCalledWith({
+            preflightId,
+            dispatchGeneration: 2,
+            dispatchToken,
+        });
         expect(enqueueBliteInference).toHaveBeenCalledTimes(2);
     });
 
@@ -962,6 +1126,25 @@ it('classifies rejection checkpoint failure as retryable persistence', () => {
     )).toEqual({
         category: 'persistence',
         retryable: true,
+        httpStatus: null,
+        paidFallbackEligible: false,
+    });
+});
+
+it('classifies provider admission persistence and identity failures without opening fallback', () => {
+    expect(classifyPreflightError(
+        new Error('ANALYSIS_PROVIDER_ADMISSION_PERSISTENCE_ERROR: acquire failed.'),
+    )).toEqual({
+        category: 'persistence',
+        retryable: true,
+        httpStatus: null,
+        paidFallbackEligible: false,
+    });
+    expect(classifyPreflightError(
+        new Error('ANALYSIS_PROVIDER_ADMISSION_IDENTITY_CONFLICT'),
+    )).toEqual({
+        category: 'persistence',
+        retryable: false,
         httpStatus: null,
         paidFallbackEligible: false,
     });
@@ -1417,6 +1600,8 @@ describe('preflight persistence adapter', () => {
             p_user_id: userId,
             p_dispatch_generation: 2,
             p_dispatch_token: reservationToken,
+            p_workload_role: 'preflight',
+            p_contract_version: 2,
         });
     });
 
@@ -1438,7 +1623,11 @@ describe('preflight persistence adapter', () => {
             dispatchToken,
         });
         await expect(store.markBliteDispatchFailed!({ preflightId, dispatchToken })).resolves.toBe(true);
-        await expect(store.markBliteDispatchEnqueued!({ preflightId, dispatchToken })).resolves.toBe(true);
+        await expect(store.markBliteDispatchEnqueued!({
+            preflightId,
+            dispatchGeneration: 1,
+            dispatchToken,
+        })).resolves.toBe(true);
         expect(rpc.mock.calls.map(call => call[0])).toEqual([
             PREFLIGHT_DATABASE_NAMES.bliteDispatchReserveRpc,
             PREFLIGHT_DATABASE_NAMES.bliteDispatchFailedRpc,

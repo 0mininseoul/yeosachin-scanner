@@ -8,6 +8,10 @@ export interface AnalysisV2MaintenanceAuthConfig {
     serviceAccountEmail: string;
 }
 
+type MaintenanceAuthEnvironment =
+    | 'ANALYSIS_V2'
+    | 'PREFLIGHT_TASKS';
+
 interface IdTokenTicketLike {
     getPayload(): {
         email?: string;
@@ -24,21 +28,25 @@ interface IdTokenVerifierLike {
 
 let sharedVerifier: OAuth2Client | undefined;
 
-export function getAnalysisV2MaintenanceAuthConfig(
-    env: Record<string, string | undefined> = process.env
+function getMaintenanceAuthConfig(
+    env: Record<string, string | undefined>,
+    environment: MaintenanceAuthEnvironment,
 ): AnalysisV2MaintenanceAuthConfig {
+    const prefix = environment === 'ANALYSIS_V2'
+        ? 'ANALYSIS_V2_MAINTENANCE'
+        : 'PREFLIGHT_TASKS_MAINTENANCE';
     const serviceAccountEmail = (
-        env.ANALYSIS_V2_MAINTENANCE_SERVICE_ACCOUNT_EMAIL ?? ''
+        env[`${prefix}_SERVICE_ACCOUNT_EMAIL`] ?? ''
     ).trim().toLowerCase();
     if (!SERVICE_ACCOUNT_PATTERN.test(serviceAccountEmail)) {
-        throw new Error('ANALYSIS_V2_MAINTENANCE_CONFIG_ERROR: invalid service account.');
+        throw new Error(`${environment}_MAINTENANCE_CONFIG_ERROR: invalid service account.`);
     }
 
     let audience: URL;
     try {
-        audience = new URL(env.ANALYSIS_V2_MAINTENANCE_OIDC_AUDIENCE ?? '');
+        audience = new URL(env[`${prefix}_OIDC_AUDIENCE`] ?? '');
     } catch {
-        throw new Error('ANALYSIS_V2_MAINTENANCE_CONFIG_ERROR: invalid OIDC audience.');
+        throw new Error(`${environment}_MAINTENANCE_CONFIG_ERROR: invalid OIDC audience.`);
     }
     if (
         audience.protocol !== 'https:'
@@ -49,13 +57,25 @@ export function getAnalysisV2MaintenanceAuthConfig(
         || audience.search
         || audience.hash
     ) {
-        throw new Error('ANALYSIS_V2_MAINTENANCE_CONFIG_ERROR: invalid OIDC audience.');
+        throw new Error(`${environment}_MAINTENANCE_CONFIG_ERROR: invalid OIDC audience.`);
     }
 
     return Object.freeze({
         oidcAudience: audience.origin,
         serviceAccountEmail,
     });
+}
+
+export function getAnalysisV2MaintenanceAuthConfig(
+    env: Record<string, string | undefined> = process.env
+): AnalysisV2MaintenanceAuthConfig {
+    return getMaintenanceAuthConfig(env, 'ANALYSIS_V2');
+}
+
+export function getPreflightMaintenanceAuthConfig(
+    env: Record<string, string | undefined> = process.env
+): AnalysisV2MaintenanceAuthConfig {
+    return getMaintenanceAuthConfig(env, 'PREFLIGHT_TASKS');
 }
 
 export async function verifyAnalysisV2MaintenanceAuthorization(

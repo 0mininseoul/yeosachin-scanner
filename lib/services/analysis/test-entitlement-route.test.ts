@@ -1,6 +1,12 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 const mocks = vi.hoisted(() => ({
+    AnalysisV2TaskEnqueueError: class extends Error {
+        constructor(readonly disposition: 'terminal' | 'replayable') {
+            super('ANALYSIS_V2_TASKS_ENQUEUE_ERROR: task creation failed.');
+            this.name = 'AnalysisV2TaskEnqueueError';
+        }
+    },
     createServerClient: vi.fn(),
     dispatchAdmission: vi.fn(),
     dispatchJob: vi.fn(),
@@ -21,11 +27,12 @@ vi.mock('@/lib/supabase/server', () => ({
     createClient: mocks.createServerClient,
 }));
 vi.mock('@/lib/services/analysis/v2-tasks', () => ({
+    AnalysisV2TaskEnqueueError: mocks.AnalysisV2TaskEnqueueError,
     dispatchAnalysisV2Job: mocks.dispatchJob,
+    enqueueAnalysisV2FreshAdmissionTask: mocks.dispatchAdmission,
     getAnalysisV2TasksConfig: mocks.getTasksConfig,
 }));
 vi.mock('@/lib/services/analysis/preflight-tasks', () => ({
-    enqueueFreshAdmissionTask: mocks.dispatchAdmission,
     getPreflightTasksConfig: mocks.getPreflightTasksConfig,
 }));
 vi.mock('@/lib/observability/request', () => ({
@@ -261,7 +268,7 @@ describe('analysis V2 durable test-entitlement route', () => {
             name: string,
             params: Record<string, unknown>
         ) => {
-            if (name === 'reserve_analysis_v2_preflight_admission') {
+            if (name === 'reserve_analysis_v2_preflight_admission_dispatch_v2') {
                 return {
                     data: [admissionRow({
                         selected_plan_id: params.p_selected_plan_id,
@@ -303,7 +310,7 @@ describe('analysis V2 durable test-entitlement route', () => {
                     error: null,
                 };
             }
-            if (name === 'mark_analysis_v2_preflight_admission_dispatched') {
+            if (name === 'mark_analysis_v2_preflight_admission_dispatched_v2') {
                 return { data: true, error: null };
             }
             if (name === 'release_analysis_v2_preflight_admission_dispatch') {
@@ -353,15 +360,18 @@ describe('analysis V2 durable test-entitlement route', () => {
             retryAfterMs: 1_000,
         });
         expect(mocks.dispatchAdmission).toHaveBeenCalledWith(
-            PREFLIGHT_ID,
-            2,
-            DISPATCH_GENERATION,
-            DISPATCH_TOKEN,
-            { config: preflightTaskConfig }
+            {
+                preflightId: PREFLIGHT_ID,
+                generation: 2,
+                dispatchGeneration: DISPATCH_GENERATION,
+                dispatchToken: DISPATCH_TOKEN,
+                workloadRole: 'paid',
+            },
+            { config: taskConfig }
         );
         expect(mocks.rpc.mock.calls.map(([name]) => name)).toEqual([
-            'reserve_analysis_v2_preflight_admission',
-            'mark_analysis_v2_preflight_admission_dispatched',
+            'reserve_analysis_v2_preflight_admission_dispatch_v2',
+            'mark_analysis_v2_preflight_admission_dispatched_v2',
         ]);
         expect(mocks.dispatchJob).not.toHaveBeenCalled();
         expect(mocks.operationalEmit).toHaveBeenCalledWith({
@@ -485,7 +495,7 @@ describe('analysis V2 durable test-entitlement route', () => {
             backgroundProcessing: true,
         });
         expect(mocks.rpc.mock.calls.map(([name]) => name)).toEqual([
-            'reserve_analysis_v2_preflight_admission',
+            'reserve_analysis_v2_preflight_admission_dispatch_v2',
             'consume_analysis_v2_test_entitlement',
         ]);
         const jtiHash = hashAnalysisTestEntitlementJti('route_entitlement_nonce_01');
@@ -665,7 +675,7 @@ describe('analysis V2 durable test-entitlement route', () => {
                     error: null,
                 };
             }
-            if (name === 'reserve_analysis_v2_preflight_admission') {
+            if (name === 'reserve_analysis_v2_preflight_admission_dispatch_v2') {
                 return {
                     data: [admissionRow({ admission_token: params.p_admission_token })],
                     error: null,
@@ -694,7 +704,7 @@ describe('analysis V2 durable test-entitlement route', () => {
         expect(raced.status).toBe(202);
         expect(mocks.rpc.mock.calls.map(([name]) => name)).toEqual([
             'prepare_analysis_v2_authorized_revenue_settlement_admission',
-            'reserve_analysis_v2_preflight_admission',
+            'reserve_analysis_v2_preflight_admission_dispatch_v2',
             'prepare_analysis_v2_authorized_revenue_settlement_admission',
         ]);
         expect(mocks.dispatchJob).not.toHaveBeenCalled();
@@ -704,7 +714,7 @@ describe('analysis V2 durable test-entitlement route', () => {
         expect(settled.status).toBe(201);
         expect(mocks.rpc.mock.calls.map(([name]) => name)).toEqual([
             'prepare_analysis_v2_authorized_revenue_settlement_admission',
-            'reserve_analysis_v2_preflight_admission',
+            'reserve_analysis_v2_preflight_admission_dispatch_v2',
             'prepare_analysis_v2_authorized_revenue_settlement_admission',
             'prepare_analysis_v2_authorized_revenue_settlement_admission',
             'consume_analysis_v2_authorized_test_entitlement',
@@ -743,7 +753,7 @@ describe('analysis V2 durable test-entitlement route', () => {
                     error: null,
                 };
             }
-            if (name === 'reserve_analysis_v2_preflight_admission') {
+            if (name === 'reserve_analysis_v2_preflight_admission_dispatch_v2') {
                 return { data: [admissionRow({ admission_token: params.p_admission_token })], error: null };
             }
             if (name === 'consume_analysis_v2_authorized_test_entitlement') {
@@ -769,7 +779,7 @@ describe('analysis V2 durable test-entitlement route', () => {
         expect(mocks.dispatchJob).not.toHaveBeenCalled();
         expect(mocks.rpc.mock.calls.map(([name]) => name)).toEqual([
             'prepare_analysis_v2_authorized_revenue_settlement_admission',
-            'reserve_analysis_v2_preflight_admission',
+            'reserve_analysis_v2_preflight_admission_dispatch_v2',
             'prepare_analysis_v2_authorized_revenue_settlement_admission',
             'consume_analysis_v2_authorized_test_entitlement',
         ]);
@@ -799,7 +809,7 @@ describe('analysis V2 durable test-entitlement route', () => {
                 });
                 return { data: { disposition: 'not_applicable' }, error: null };
             }
-            if (name === 'reserve_analysis_v2_preflight_admission') {
+            if (name === 'reserve_analysis_v2_preflight_admission_dispatch_v2') {
                 return {
                     data: null,
                     error: {
@@ -820,7 +830,7 @@ describe('analysis V2 durable test-entitlement route', () => {
         });
         expect(mocks.rpc.mock.calls.map(([name]) => name)).toEqual([
             'prepare_analysis_v2_authorized_revenue_settlement_admission',
-            'reserve_analysis_v2_preflight_admission',
+            'reserve_analysis_v2_preflight_admission_dispatch_v2',
         ]);
         expect(mocks.dispatchJob).not.toHaveBeenCalled();
     });
@@ -849,7 +859,7 @@ describe('analysis V2 durable test-entitlement route', () => {
                     error: null,
                 };
             }
-            if (name === 'reserve_analysis_v2_preflight_admission') {
+            if (name === 'reserve_analysis_v2_preflight_admission_dispatch_v2') {
                 return {
                     data: [admissionRow({ admission_token: params.p_admission_token })],
                     error: null,
@@ -894,7 +904,7 @@ describe('analysis V2 durable test-entitlement route', () => {
         expect(settlementPrepareCalls).toBe(2);
         expect(mocks.rpc.mock.calls.map(([name]) => name)).toEqual([
             'prepare_analysis_v2_authorized_revenue_settlement_admission',
-            'reserve_analysis_v2_preflight_admission',
+            'reserve_analysis_v2_preflight_admission_dispatch_v2',
             'prepare_analysis_v2_authorized_revenue_settlement_admission',
             'consume_analysis_v2_authorized_test_entitlement',
             'begin_analysis_revenue_cost_ledger_v1',
@@ -1062,7 +1072,7 @@ describe('analysis V2 durable test-entitlement route', () => {
                     error: null,
                 };
             }
-            if (name === 'reserve_analysis_v2_preflight_admission') {
+            if (name === 'reserve_analysis_v2_preflight_admission_dispatch_v2') {
                 return { data: [admissionRow({ admission_token: params.p_admission_token })], error: null };
             }
             if (name === 'consume_analysis_v2_authorized_test_entitlement') {
@@ -1087,7 +1097,7 @@ describe('analysis V2 durable test-entitlement route', () => {
         await expect(response.json()).resolves.toMatchObject({ code: 'ANALYSIS_START_FAILED' });
         expect(mocks.rpc.mock.calls.map(([name]) => name)).toEqual([
             'prepare_analysis_v2_authorized_revenue_settlement_admission',
-            'reserve_analysis_v2_preflight_admission',
+            'reserve_analysis_v2_preflight_admission_dispatch_v2',
             'prepare_analysis_v2_authorized_revenue_settlement_admission',
             'consume_analysis_v2_authorized_test_entitlement',
             'begin_analysis_revenue_cost_ledger_v1',
@@ -1118,7 +1128,7 @@ describe('analysis V2 durable test-entitlement route', () => {
         expect(response.status).toBe(201);
         expect(mocks.rpc.mock.calls.map(([name]) => name)).toEqual([
             'prepare_analysis_v2_authorized_revenue_settlement_admission',
-            'reserve_analysis_v2_preflight_admission',
+            'reserve_analysis_v2_preflight_admission_dispatch_v2',
             'prepare_analysis_v2_authorized_revenue_settlement_admission',
             'consume_analysis_v2_authorized_test_entitlement',
             'begin_analysis_revenue_cost_ledger_v1',
@@ -1164,7 +1174,7 @@ describe('analysis V2 durable test-entitlement route', () => {
 
         expect(response.status).toBe(201);
         expect(mocks.rpc.mock.calls.map(([name]) => name)).toEqual([
-            'reserve_analysis_v2_preflight_admission',
+            'reserve_analysis_v2_preflight_admission_dispatch_v2',
             'consume_analysis_v2_test_entitlement',
         ]);
     });
@@ -1192,7 +1202,7 @@ describe('analysis V2 durable test-entitlement route', () => {
 
         expect(response.status).toBe(201);
         expect(mocks.rpc.mock.calls.map(([name]) => name)).toEqual([
-            'reserve_analysis_v2_preflight_admission',
+            'reserve_analysis_v2_preflight_admission_dispatch_v2',
             'consume_analysis_v2_authorized_test_entitlement',
         ]);
         expect(mocks.rpc).not.toHaveBeenCalledWith(
@@ -1270,7 +1280,7 @@ describe('analysis V2 durable test-entitlement route', () => {
 
         expect(response.status).toBe(201);
         expect(mocks.rpc.mock.calls.map(([name]) => name)).toEqual([
-            'reserve_analysis_v2_preflight_admission',
+            'reserve_analysis_v2_preflight_admission_dispatch_v2',
             'consume_analysis_v2_test_entitlement',
         ]);
     });
@@ -1460,21 +1470,15 @@ describe('analysis V2 durable test-entitlement route', () => {
         expect(mocks.dispatchJob).toHaveBeenCalledOnce();
     });
 
-    it('fails closed before reservation when either durable queue is unavailable', async () => {
-        for (const unavailable of ['analysis', 'preflight'] as const) {
-            if (unavailable === 'analysis') mocks.getTasksConfig.mockReturnValueOnce(null);
-            else mocks.getPreflightTasksConfig.mockReturnValueOnce(null);
-
-            const response = await POST(request(), context());
-            expect(response.status).toBe(503);
-            await expect(response.json()).resolves.toMatchObject({ code: 'QUEUE_UNAVAILABLE' });
-            expect(mocks.rpc).not.toHaveBeenCalled();
-            mocks.getTasksConfig.mockReturnValue(taskConfig);
-            mocks.getPreflightTasksConfig.mockReturnValue(preflightTaskConfig);
-        }
+    it('fails closed before reservation when the paid queue is unavailable', async () => {
+        mocks.getTasksConfig.mockReturnValueOnce(null);
+        const response = await POST(request(), context());
+        expect(response.status).toBe(503);
+        await expect(response.json()).resolves.toMatchObject({ code: 'QUEUE_UNAVAILABLE' });
+        expect(mocks.rpc).not.toHaveBeenCalled();
     });
 
-    it('keeps a failed enqueue replayable and never consumes or dispatches analysis', async () => {
+    it('keeps an ambiguous enqueue reservation replayable and never consumes or dispatches analysis', async () => {
         mocks.rpc.mockResolvedValueOnce({
             data: [{
                 ...admissionRow(),
@@ -1498,10 +1502,38 @@ describe('analysis V2 durable test-entitlement route', () => {
         expect(response.status).toBe(503);
         await expect(response.json()).resolves.toMatchObject({ code: 'QUEUE_UNAVAILABLE' });
         expect(mocks.rpc.mock.calls.map(([name]) => name)).toEqual([
-            'reserve_analysis_v2_preflight_admission',
-            'release_analysis_v2_preflight_admission_dispatch',
+            'reserve_analysis_v2_preflight_admission_dispatch_v2',
         ]);
         expect(mocks.dispatchJob).not.toHaveBeenCalled();
+    });
+
+    it('retains a fresh admission fence after enqueue refusal for maintenance replay', async () => {
+        mocks.rpc.mockResolvedValueOnce({
+            data: [{
+                ...admissionRow(),
+                admission_status: 'pending',
+                should_enqueue: true,
+                dispatch_token: DISPATCH_TOKEN,
+                selected_plan_allowed: null,
+                admission_token: null,
+                admission_refreshed_at: null,
+                target_followers_count: null,
+                target_following_count: null,
+                capacity_required_plan_id: null,
+                required_plan_id: null,
+                plan_cards_snapshot: null,
+            }],
+            error: null,
+        });
+        mocks.dispatchAdmission.mockRejectedValueOnce(
+            new mocks.AnalysisV2TaskEnqueueError('terminal'),
+        );
+
+        const response = await POST(request(), context());
+        expect(response.status).toBe(503);
+        expect(mocks.rpc.mock.calls.map(([name]) => name)).toEqual([
+            'reserve_analysis_v2_preflight_admission_dispatch_v2',
+        ]);
     });
 
     it('rejects unauthenticated, malformed, cross-owner, and invalid-entitlement requests', async () => {

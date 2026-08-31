@@ -19,6 +19,7 @@ import {
     BETA_TEST_ACCESS_UNAVAILABLE,
     betaTestFreePoolEnabled,
     ensureBetaTestAccess,
+    isAnalysisBetaPrepareEnabled,
 } from '@/lib/services/analysis/betatest-access';
 import {
     AccountPrincipalAdmissionError,
@@ -47,6 +48,12 @@ export async function POST(request: Request): Promise<NextResponse> {
             return response(403, error.code, '이 계정은 현재 사용할 수 없습니다.');
         }
         return response(503, 'QUEUE_UNAVAILABLE', '사전 점검 작업을 시작할 수 없습니다.');
+    }
+    // Beta preparation is retired for the active exact-three preflight
+    // service.  Check before any beta grant/create mutation so a disabled
+    // manifest cannot claim or spend through the historical six-slot path.
+    if (!isAnalysisBetaPrepareEnabled()) {
+        return response(503, 'BETA_PREPARE_DISABLED', '베타 사전 준비 작업이 일시 중단되었습니다.');
     }
     if (!betaTestFreePoolEnabled() || !await ensureBetaTestAccess(supabaseAdmin, user.id)) {
         return response(403, BETA_TEST_ACCESS_UNAVAILABLE, '베타 분석을 사용할 수 없습니다.');

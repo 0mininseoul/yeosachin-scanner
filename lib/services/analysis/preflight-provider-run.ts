@@ -13,6 +13,9 @@ import {
 } from '@/lib/services/instagram/providers/apify';
 import { getApifyClient } from '@/lib/services/instagram/providers/apify-relationship';
 import type { ClaimedPreflight } from './preflight';
+import { withAnalysisProviderAdmissionCheckpoint } from './provider-admission-checkpoint';
+import type { AnalysisProviderAdmissionStore } from './provider-admission-store';
+import type { AnalysisWorkloadRole } from './workload-role';
 
 export type PreflightProviderRunClaim = Pick<
     ClaimedPreflight,
@@ -802,6 +805,16 @@ export async function bindPreflightProviderRunCheckpoint(input: {
     claim: PreflightProviderRunClaim;
     inputHash: string;
     identity: ProviderIdentity;
+    operationKey?: string;
+    /** Fresh paid admission runs on the paid worker route while its provider-run
+     * ledger remains the generation-fenced preflight lineage. */
+    workloadRole?: AnalysisWorkloadRole;
+    /** A frozen beta hold executes on the preflight route but is charged to the
+     * paid Apify budget. */
+    providerAdmissionWorkloadRole?: AnalysisWorkloadRole;
+    providerAdmissionJobKey?: string;
+    env?: Record<string, string | undefined>;
+    providerAdmissionStore?: AnalysisProviderAdmissionStore;
 }): Promise<{
     stored: StoredPreflightProviderRun | null;
     checkpoint: ProviderRunCheckpoint;
@@ -848,23 +861,41 @@ export async function bindPreflightProviderRunCheckpoint(input: {
         },
     };
 
+    const withAdmission = async (checkpoint: ProviderRunCheckpoint): Promise<ProviderRunCheckpoint> => (
+        withAnalysisProviderAdmissionCheckpoint({
+            checkpoint,
+            storedStatus: current?.status === 'starting' || current?.status === 'running'
+                ? current.status
+                : null,
+            workloadRole: input.workloadRole ?? 'preflight',
+            providerAdmissionWorkloadRole: input.providerAdmissionWorkloadRole,
+            requestId: input.claim.preflightId,
+            jobKey: input.providerAdmissionJobKey
+                ?? (input.workloadRole === 'paid' ? 'paid:target-profile' : 'preflight:provider'),
+            operationKey: current?.operationKey ?? input.operationKey ?? INITIAL_PROFILE_OPERATION_KEY,
+            claimToken: input.claim.claimToken,
+            env: input.env,
+            store: input.providerAdmissionStore,
+        })
+    );
+
     if (current) {
         return {
             stored: current,
-            checkpoint: {
+            checkpoint: await withAdmission({
                 ...costCallbacks,
                 logicalProvider: current.logicalProvider,
                 actorId: current.actorId,
                 credentialSlot: current.credentialSlot,
                 maxChargeUsd: current.maxChargeUsd,
                 ...(current.runId ? { resumeRunId: current.runId } : { startReserved: true }),
-            },
+            }),
         };
     }
 
     return {
         stored: null,
-        checkpoint: {
+        checkpoint: await withAdmission({
             ...costCallbacks,
             ...input.identity,
             onBeforeRunStart: async actual => {
@@ -897,6 +928,6 @@ export async function bindPreflightProviderRunCheckpoint(input: {
                     ...input.identity,
                 });
             },
-        },
+        }),
     };
 }

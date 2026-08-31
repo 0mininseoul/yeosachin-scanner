@@ -7,6 +7,7 @@ import {
     flushOperationalLogs,
     operationalLogger,
 } from './lib/observability/server';
+import { isBenignImageProxyRequestError } from './lib/observability/image-proxy-request-error';
 
 export async function register(): Promise<void> {
     try {
@@ -25,6 +26,20 @@ export const onRequestError: Instrumentation.onRequestError = async (
     errorRequest,
     errorContext,
 ) => {
+    let benignImageProxyError = false;
+    try {
+        benignImageProxyError = isBenignImageProxyRequestError({
+            error,
+            method: errorRequest.method,
+            routePath: errorContext.routePath,
+        });
+    } catch {
+        // A malformed error/request object must remain observable.
+    }
+    if (benignImageProxyError) {
+        return;
+    }
+
     try {
         Sentry.captureRequestError(error, errorRequest, errorContext);
     } catch {

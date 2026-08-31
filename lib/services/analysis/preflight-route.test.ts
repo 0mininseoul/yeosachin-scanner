@@ -430,7 +430,10 @@ describe('preflight owner routes', () => {
             targetInstagramId: 'target.name',
             idempotencyKey: 'preflight-key-000000000000',
         }), expect.objectContaining({ client: expect.any(Object) }));
-        expect(mocks.enqueue).toHaveBeenCalledWith(preflightId, 1, { config: taskConfig });
+        expect(mocks.enqueue).toHaveBeenCalledWith(preflightId, 1, {
+            config: taskConfig,
+            reservationToken: '323e4567-e89b-42d3-a456-426614174000', // gitleaks:allow -- UUID fixture
+        });
         expect(mocks.anonymousMark).toHaveBeenCalledWith(expect.objectContaining({
             preflightId,
             generation: 1,
@@ -914,7 +917,10 @@ describe('preflight owner routes', () => {
             idempotencyKey: 'preflight-key-000000000000',
             accessMode: 'test_entitlement',
         });
-        expect(mocks.enqueue).toHaveBeenCalledWith(preflightId, 1, { config: taskConfig });
+        expect(mocks.enqueue).toHaveBeenCalledWith(preflightId, 1, {
+            config: taskConfig,
+            reservationToken: '323e4567-e89b-42d3-a456-426614174000', // gitleaks:allow -- UUID fixture
+        });
         expect(mocks.store.markDispatched).toHaveBeenCalledWith({
             preflightId,
             userId,

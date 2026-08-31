@@ -65,6 +65,23 @@ describe('V1 route isolation from durable V2 requests', () => {
         expect(cleanupBlock).toContain('failAnalysisRequest');
     });
 
+    it('puts every legacy V1 provider producer behind the active freeze gate', () => {
+        for (const routePath of [
+            'app/api/analysis/start/route.ts',
+            'app/api/analysis/step/route.ts',
+            'app/api/analysis/run/route.ts',
+        ]) {
+            const route = source(routePath);
+            expect(route).toContain('legacyAnalysisProducerGateResponse');
+            // Compare executable calls, not import declarations.  The gate must
+            // run before a Supabase client is created on every public producer.
+            const gateCall = route.indexOf('legacyAnalysisProducerGateResponse();');
+            const clientCall = route.indexOf('createClient()');
+            expect(gateCall).toBeGreaterThanOrEqual(0);
+            expect(clientCall).toBeGreaterThan(gateCall);
+        }
+    });
+
     it('makes both shared pages follow an explicit V2 route marker', () => {
         const progressHook = source('hooks/useAnalysisProgress.ts');
         const progressPage = source('app/progress/[requestId]/page.tsx');

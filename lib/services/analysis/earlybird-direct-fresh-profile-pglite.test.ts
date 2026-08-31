@@ -10,12 +10,17 @@ const migrationName = readdirSync(migrationDirectory)
 const migration = migrationName
     ? readFileSync(new URL(migrationName, migrationDirectory), 'utf8')
     : '';
+const retryAdmissionMigration = readFileSync(new URL(
+    '../../../supabase/migrations/20260830101000_retain_succeeded_direct_fresh_checkpoint.sql',
+    import.meta.url,
+), 'utf8');
 
 const REQUEST_ID = '11111111-1111-4111-8111-111111111111';
 const USER_ID = '22222222-2222-4222-8222-222222222222';
 const PREFLIGHT_ID = '33333333-3333-4333-8333-333333333333';
 const ORDER_ID = '44444444-4444-4444-8444-444444444444';
 const CLAIM_TOKEN = '55555555-5555-4555-8555-555555555555';
+const RETRY_CLAIM_TOKEN = '55555555-5555-4555-8555-555555555556';
 const TARGET_RUN_ID = '66666666-6666-4666-8666-666666666666';
 const BATCH_RUN_ID = '77777777-7777-4777-8777-777777777777';
 const TARGET_JOB = 'track:target-evidence:collect';
@@ -178,6 +183,7 @@ CREATE TABLE public.analysis_v2_provider_runs (
     run_started_at TIMESTAMPTZ,
     terminalized_at TIMESTAMPTZ,
     usage_reconciled_at TIMESTAMPTZ,
+    updated_at TIMESTAMPTZ,
     PRIMARY KEY (request_id, job_key, operation_key)
 );
 CREATE TABLE public.analysis_v2_profile_fetch_batches (
@@ -338,10 +344,11 @@ async function checkpoint(input: {
     providerInputHash: string;
     requestedUsernames: string[];
     outcomes: unknown[];
+    claimToken?: string;
 }) {
     return asService<{ snapshot: unknown }>(
         `SELECT ${rpc}($1, $2, $3, $4, $5, $6::jsonb, $7, $8) AS snapshot`,
-        [REQUEST_ID, input.jobKey, CLAIM_TOKEN, JOB_HASH, input.requestedUsernames,
+        [REQUEST_ID, input.jobKey, input.claimToken ?? CLAIM_TOKEN, JOB_HASH, input.requestedUsernames,
             JSON.stringify(input.outcomes), input.operationKey, input.providerInputHash],
     );
 }
@@ -350,6 +357,7 @@ beforeAll(async () => {
     db = await PGlite.create({ extensions: { pgcrypto } });
     await db.exec(bootstrap);
     await db.exec(migration);
+    await db.exec(retryAdmissionMigration);
 });
 
 beforeEach(async () => {
@@ -415,6 +423,41 @@ afterAll(async () => {
 });
 
 describe('paid Earlybird direct fresh-Apify checkpoint RPC', () => {
+    it('replays a retained 30/30 checkpoint after the execution claim rotates without rewriting provider identity', async () => {
+        const usernames = Array.from({ length: 30 }, (_, index) => `candidate_${index}`);
+        const outcomes = usernames.map(username => outcome(username));
+        const persisted = await checkpoint({
+            jobKey: BATCH_JOB,
+            operationKey: BATCH_OPERATION,
+            providerInputHash: BATCH_PROVIDER_HASH,
+            requestedUsernames: usernames,
+            outcomes,
+        });
+
+        await db.query(
+            `UPDATE public.analysis_pipeline_jobs
+             SET lease_token = $1
+             WHERE request_id = $2 AND job_key = $3`,
+            [RETRY_CLAIM_TOKEN, REQUEST_ID, BATCH_JOB],
+        );
+
+        const replay = await asService<{ snapshot: unknown }>(
+            `SELECT public.load_analysis_v2_profile_fetch_checkpoint_for_retry(
+                $1::uuid, $2::text, $3::uuid, $4::text, $5::text, $6::text
+            ) AS snapshot`,
+            [REQUEST_ID, BATCH_JOB, RETRY_CLAIM_TOKEN, JOB_HASH, BATCH_OPERATION, BATCH_PROVIDER_HASH],
+        );
+
+        expect(replay.rows[0]?.snapshot).toEqual(persisted.rows[0]?.snapshot);
+        const provider = await db.query<{ job_claim_token: string }>(
+            `SELECT job_claim_token::text AS job_claim_token
+             FROM public.analysis_v2_provider_runs
+             WHERE request_id = $1 AND job_key = $2 AND operation_key = $3`,
+            [REQUEST_ID, BATCH_JOB, BATCH_OPERATION],
+        );
+        expect(provider.rows[0]?.job_claim_token).toBe(RETRY_CLAIM_TOKEN);
+    });
+
     it('persists and exactly replays target and incomplete batch evidence with fresh telemetry', async () => {
         const target = await checkpoint({
             jobKey: TARGET_JOB,

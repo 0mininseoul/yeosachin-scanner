@@ -25,8 +25,11 @@ export const ANONYMOUS_PREFLIGHT_DATABASE_NAMES = Object.freeze({
     readRpc: 'read_anonymous_analysis_v2_preflight_public',
     claimRpc: 'claim_anonymous_analysis_v2_preflight',
     exclusionRpc: 'set_anonymous_analysis_v2_preflight_exclusion',
-    reserveDispatchRpc: 'reserve_anonymous_analysis_v2_preflight_dispatch',
-    markDispatchedRpc: 'mark_anonymous_analysis_v2_preflight_dispatched',
+    // New anonymous producers stamp the same trusted preflight dispatch
+    // contract as authenticated producers. The historical RPCs remain
+    // marker-free for roleless mixed-version drain only.
+    reserveDispatchRpc: 'reserve_anonymous_analysis_v2_preflight_dispatch_v2',
+    markDispatchedRpc: 'mark_anonymous_analysis_v2_preflight_dispatched_v2',
 });
 
 interface RpcError {
@@ -303,6 +306,8 @@ export async function reserveAnonymousAnalysisV2PreflightDispatch(
             p_preflight_id: id,
             p_claim_token_hash: claim.tokenHash,
             p_dispatch_token: dispatchToken,
+            p_workload_role: 'preflight',
+            p_contract_version: 2,
         },
     );
     if (error) rpcError(error, 'dispatch reserve');
@@ -342,6 +347,8 @@ export async function markAnonymousAnalysisV2PreflightDispatched(input: {
             p_claim_token_hash: claim.tokenHash,
             p_dispatch_generation: input.generation,
             p_dispatch_token: reservationToken,
+            p_workload_role: 'preflight',
+            p_contract_version: 2,
         },
     );
     if (error) rpcError(error, 'dispatch mark');

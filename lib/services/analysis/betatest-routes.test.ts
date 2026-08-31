@@ -5,7 +5,11 @@ const mocks = vi.hoisted(() => ({
     getUser: vi.fn(),
     ensureAccess: vi.fn(),
     enabled: vi.fn(),
+    betaPrepareEnabled: vi.fn(),
     enqueuePrepare: vi.fn(),
+    enqueueAdmission: vi.fn(),
+    getAnalysisConfig: vi.fn(),
+    dispatchJob: vi.fn(),
     store: {
         createOrReplayBeta: vi.fn(),
         markBetaPrepareDispatched: vi.fn(),
@@ -20,6 +24,7 @@ vi.mock('@/lib/supabase/admin', () => ({ supabaseAdmin: mocks.admin }));
 vi.mock('@/lib/services/analysis/betatest-access', async importOriginal => ({
     ...(await importOriginal<typeof import('./betatest-access')>()),
     betaTestFreePoolEnabled: mocks.enabled,
+    isAnalysisBetaPrepareEnabled: mocks.betaPrepareEnabled,
     ensureBetaTestAccess: mocks.ensureAccess,
 }));
 vi.mock('@/lib/services/analysis/preflight', async importOriginal => ({
@@ -29,6 +34,11 @@ vi.mock('@/lib/services/analysis/preflight', async importOriginal => ({
 vi.mock('@/lib/services/analysis/preflight-tasks', () => ({
     getPreflightTasksConfig: () => ({ queue: 'configured' }),
     enqueueBetaPreflightPrepareTask: mocks.enqueuePrepare,
+}));
+vi.mock('@/lib/services/analysis/v2-tasks', () => ({
+    enqueueAnalysisV2FreshAdmissionTask: mocks.enqueueAdmission,
+    getAnalysisV2TasksConfig: mocks.getAnalysisConfig,
+    dispatchAnalysisV2Job: mocks.dispatchJob,
 }));
 vi.mock('@/lib/services/identity/account-principal-store', async importOriginal => ({
     ...(await importOriginal<typeof import('@/lib/services/identity/account-principal-store')>()),
@@ -63,6 +73,7 @@ describe('dedicated betatest preflight route', () => {
             id: userId, email: 'owner@example.com', app_metadata: { provider: 'google' },
         } }, error: null });
         mocks.enabled.mockReturnValue(true);
+        mocks.betaPrepareEnabled.mockReturnValue(true);
         mocks.ensureAccess.mockResolvedValue(true);
         mocks.store.createOrReplayBeta.mockResolvedValue({
             preflightId, expiresAt: '2030-07-13T13:00:00.000Z', created: true, status: 'pending',
@@ -71,6 +82,9 @@ describe('dedicated betatest preflight route', () => {
         mocks.store.markBetaPrepareDispatched.mockResolvedValue(undefined);
         mocks.store.blockBetaPrepareCapacity.mockResolvedValue('blocked');
         mocks.enqueuePrepare.mockResolvedValue('enqueued');
+        mocks.enqueueAdmission.mockResolvedValue({ outcome: 'enqueued', taskName: 'task' });
+        mocks.getAnalysisConfig.mockReturnValue({ queue: 'analysis-v2-pipeline' });
+        mocks.dispatchJob.mockResolvedValue('enqueued');
         mocks.requireActiveAccountClassification.mockResolvedValue({
             userId,
             accountClass: 'production',
@@ -89,6 +103,17 @@ describe('dedicated betatest preflight route', () => {
         mocks.enabled.mockReturnValue(true);
         mocks.ensureAccess.mockResolvedValue(false);
         expect((await createBetaPreflight(request())).status).toBe(403);
+        expect(mocks.store.createOrReplayBeta).not.toHaveBeenCalled();
+    });
+
+    it('fails closed before beta preparation when the active retirement gate is disabled', async () => {
+        mocks.betaPrepareEnabled.mockReturnValue(false);
+
+        const response = await createBetaPreflight(request());
+
+        expect(response.status).toBe(503);
+        await expect(response.json()).resolves.toMatchObject({ code: 'BETA_PREPARE_DISABLED' });
+        expect(mocks.ensureAccess).not.toHaveBeenCalled();
         expect(mocks.store.createOrReplayBeta).not.toHaveBeenCalled();
     });
 
