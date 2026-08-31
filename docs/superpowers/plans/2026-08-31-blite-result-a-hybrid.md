@@ -6,8 +6,11 @@
 
 **Goal:** Ship the approved A+B hybrid B-lite result screen — one Tier 0 filed sheet with
 exactly one bracketed verdict block — while proving by test that the four user-rejected
-elements are gone, that every real DTO field still renders, and that a target with no posts
-and no profile picture gets a complete screen with no empty visualization.
+elements are gone, that every real DTO field still renders, and that the component itself has
+no media dependency: a schema-valid DTO carrying no post- or profile-picture-backed evidence
+renders the same complete screen, with no empty visualization. That is a component-level
+property. It is not a claim that such a target reaches this screen — see the 2026-09-01
+follow-up, §3b.
 
 **Architecture:** `BliteResultScreen` moves out of `components/precheckout-immersive.tsx` into
 a prop-only `components/blite-result.tsx`. The parent keeps 100% of the fetch/deadline/gating/
@@ -38,8 +41,16 @@ existing `precheckoutBliteV1Schema` DTO and `PRECHECKOUT_EVENTS` analytics vocab
   `onBliteResultShown` callback. No other state, no landing copy.
 
 Out of bounds for this plan: `app/page.tsx`, everything on `app/analyze/page.tsx` except the
-one eyebrow gate above, the B-lite API route, `lib/services/precheckout/*`, `app/globals.css`,
-migrations, any backend or capacity work.
+one eyebrow gate above, the B-lite API route, `lib/services/precheckout/*`, migrations, any
+backend or capacity work.
+
+`app/globals.css` was out of bounds as originally written, and is now **in bounds for exactly
+one reviewed exception**: the `animation-delay` reset inside the existing
+`@media (prefers-reduced-motion: reduce)` block, added on 2026-09-01 (§2 of the follow-up).
+Nothing else in that stylesheet may be touched by this work — no new keyframes, no new
+utilities, no changes to the reveal animations themselves. The exception exists because the
+defect is only fixable there: the delays are inline styles on this component, and an important
+author declaration in that media query is the only thing that outranks them.
 
 ---
 
@@ -132,7 +143,9 @@ assertion mismatch against some other component.
 Order: root `<section data-precheckout-result>` → subject masthead → persona lead → evidence
 ledger `<ol>` → single bracketed verdict `CaseCard`. No footnote. Reuse `CaseCard`, `Eyebrow`,
 and `PrimaryButton` from `components/case-ui`; reuse `.eyebrow`, `.label-ko`, `.num`,
-`.reveal`, `.reveal-rail`, `.meter-fill` from `app/globals.css`. Add no new global CSS.
+`.reveal`, `.reveal-rail`, `.meter-fill` from `app/globals.css`. Add no new global CSS — with
+the single later exception recorded in §File structure and boundaries: the reduced-motion
+`animation-delay` reset, which is a correction to an existing rule rather than new styling.
 
 Keep `SIGNAL_BAND_BAR_COLOR` (colour encoding survives) and delete `SIGNAL_BAND_LABEL`
 (text labels do not).
@@ -251,6 +264,14 @@ the sheet.
   hierarchy, the CTA's `:focus-visible` ring, `prefers-reduced-motion: reduce` rendering the
   final frame with every measure at full width, and the media-free screen having no blank
   frame.
+
+  **This step's reduced-motion check was written wrong and passed wrongly.** "Rendering the
+  final frame" is only true once every `animation-delay` has elapsed, and the step never said
+  *when* to sample. It was sampled late, so it confirmed the end state and missed the delay
+  window entirely. The correct check is stated in the follow-up, §2: with `both` fill and a
+  non-zero delay, the element holds its *from*-state — invisible, or a measure at zero width —
+  for the whole delay, so the reduced-motion screen has to be sampled at first paint, not after
+  it settles.
 
 ---
 
@@ -386,7 +407,9 @@ Task 5's browser pass was executed in the implementation session against the tem
 `/blite-preview-tmp` route; its measured results are recorded in
 `docs/superpowers/specs/2026-08-31-blite-result-a-hybrid-design.md` §Verification record
 (overflow at 320/390/1280, eyebrow and bracket budgets, zero media elements inside the sheet,
-every measure bound to its own confidence, reduced-motion final frame, CTA focus ring). It was
+every measure bound to its own confidence, CTA focus ring — and a reduced-motion reading that
+was sampled after the delays had elapsed and is therefore superseded by §2 of the follow-up).
+It was
 **not** re-run in this finalization pass, because the route it depended on has since been
 deleted and re-creating it would reintroduce exactly the temporary artifact this pass is
 meant to confirm is gone. The screenshots remain at

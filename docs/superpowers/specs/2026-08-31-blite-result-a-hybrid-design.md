@@ -243,9 +243,22 @@ fixed bar would overlap the surrounding `/analyze` flow, which owns its own scro
 One staggered reveal on arrival, using the existing `.reveal` / `.reveal-rail` / `.meter-fill`
 utilities and `animationDelay` — no new keyframes. Blocks land in reading order
 (subject → persona → ledger rows → verdict), which teaches the order instead of decorating it.
-`@media (prefers-reduced-motion: reduce)` in `app/globals.css` already collapses every
-animation to 0.001ms with `both` fill, so the reduced-motion screen is the final frame with
-no movement and no missing state.
+`@media (prefers-reduced-motion: reduce)` in `app/globals.css` collapses every animation to
+0.001ms. **That alone did not make the reduced-motion screen the final frame**, and this
+paragraph originally claimed it did.
+
+`both` fill is the reason. It holds the *from*-state for the whole of `animation-delay`, not
+just the duration, and the delays here are set per element as inline `animationDelay` — up to
+330ms on the ledger rows, 500ms on the last measure, 420ms on the verdict card. Collapsing the
+duration therefore left every one of those elements at `opacity: 0` / `scaleY(0)` / `width: 0`
+for its full delay, so a reader who asked for less motion got blank rows and empty measures
+that popped in up to half a second late. Less motion, but also less content.
+
+The media query now also resets `animation-delay: 0s !important` for `.reveal`, `.reveal-rail`,
+`.reveal-wipe`, `.reveal-sweep` and `.meter-fill`. `!important` is load-bearing rather than
+defensive: the delays are inline styles, and an important author declaration is the only thing
+in the cascade that outranks one. With duration and delay both collapsed, the reduced-motion
+screen is the finished frame from its first paint. See the plan's 2026-09-01 follow-up, §2.
 
 ## Component structure
 
@@ -260,7 +273,13 @@ no movement and no missing state.
 - `components/precheckout-immersive.test.tsx` — existing behaviour tests keep their meaning;
   the `toHaveLength(4)` card counts become the `data-precheckout-result` presence check.
 
-No DTO change, no API change, no new dependency, no new global CSS.
+No DTO change, no API change, no new dependency.
+
+`app/globals.css` carries **one narrow, reviewed exception** and nothing more: the
+`animation-delay` reset inside the existing `@media (prefers-reduced-motion: reduce)` block
+(§Motion). It adds no keyframe, no utility and no new styling — it corrects an existing rule
+that under-specified what "reduce motion" has to collapse. Every other part of that stylesheet
+is out of bounds for this work.
 
 ## Self-review against the brief
 
@@ -304,9 +323,15 @@ Measured, not eyeballed:
 - **Measures bind to data.** Every `[data-blite-measure]` equals its signal's
   `confidence.toFixed(2)`, and its fill width divided by the track equals that value
   (315.8/336 = 0.94, 305.8/336 = 0.91, 194.9/336 = 0.58, 141.1/336 = 0.42).
-- **Reduced motion.** Under `prefers-reduced-motion: reduce`, every `.reveal`/`.reveal-rail`
-  computes to `opacity: 1`, no transform, `animation-duration: 1e-06s`, and the measures sit at
-  their final widths — the reduced-motion screen is the final frame, not a missing state.
+- **Reduced motion — this reading was taken at the wrong instant and is superseded.** It
+  recorded that every `.reveal`/`.reveal-rail` computes to `opacity: 1`, no transform,
+  `animation-duration: 1e-06s`, with the measures at their final widths. All of that is true,
+  and none of it was evidence for the claim it was used to support: the screen was sampled
+  after every `animation-delay` had already elapsed, which is exactly the window the defect
+  lived in. With `both` fill and the delay left intact, the same screen at first paint had
+  blank ledger rows and zero-width measures for up to half a second. Corrected in §Motion and
+  in the plan's 2026-09-01 follow-up, §2; the delay is now reset in the media query, and the
+  claim holds from first paint.
 - **Focus.** The CTA matches `:focus-visible` with the global `2px solid var(--color-blood)`
   ring at 2px offset.
 - **Not a shared axis.** Confirmed visually at all three widths: the rules carry no scale, no
