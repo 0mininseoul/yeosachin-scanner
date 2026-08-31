@@ -581,12 +581,23 @@ url=''
 previous=''
 output_path=''
 request_method='GET'
+consume_stdin=false
 for argument in "$@"; do
   if [[ "$previous" == '--url' ]]; then url="$argument"; fi
   if [[ "$previous" == '--output' || "$previous" == '-o' ]]; then output_path="$argument"; fi
   if [[ "$previous" == '--request' || "$previous" == '-X' ]]; then request_method="$argument"; fi
+  if [[ "$previous" == '--header' && "$argument" == '@-' ]] \
+    || [[ "$previous" == '--config' && "$argument" == '-' ]]; then
+    consume_stdin=true
+  fi
   previous="$argument"
 done
+# Real curl consumes stdin for --header @- (and --config -).  Always drain the
+# requested stream before emitting a response so the producer side of a pipe
+# cannot receive a timing-dependent SIGPIPE when a fake response is terminal.
+if [[ "$consume_stdin" == true ]]; then
+  cat >/dev/null
+fi
 if [[ "$url" == https://api.github.com/* ]]; then
   output_path=''
   previous=''
