@@ -1,5 +1,7 @@
 // @vitest-environment jsdom
 
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
 import { act, createElement, StrictMode } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -827,6 +829,38 @@ describe('PrecheckoutImmersive', () => {
         expect(onBliteResultShown).toHaveBeenCalledOnce();
         expect(analyticsMocks.trackPrecheckoutEvent.mock.calls
             .filter(call => call[0] === 'precheckout_blite_result_viewed')).toHaveLength(1);
+    });
+
+    it('announces from a layout effect so the page eyebrow never shares a frame with the sheet', () => {
+        const source = readFileSync(join(process.cwd(), 'components/precheckout-immersive.tsx'), 'utf8');
+
+        /**
+         * The page withdraws its own heading eyebrow on this announcement, so the withdrawal
+         * has to be committed in the same pass that mounts the sheet. A passive effect is a
+         * frame too late: React hands that commit to the browser before flushing passive
+         * effects, so both eyebrows could be painted together once on arrival.
+         *
+         * This is asserted against the source rather than by rendering, because the runtime
+         * harness genuinely cannot see it: `act()` drains layout effects, passive effects and
+         * the resulting re-render into one synchronous flush, which erases the task boundary a
+         * real browser would paint at. Both spellings produce a byte-identical DOM timeline
+         * under jsdom — verified by instrumenting one — so a render-based assertion here would
+         * pass just as happily on the bug. `app/analyze/page.test.ts` pins its half of this
+         * contract the same way.
+         */
+        expect(source).toContain('useLayoutEffect(() => {');
+        const announcement = source.slice(source.indexOf('useLayoutEffect(() => {'));
+        expect(announcement).toContain('onBliteResultShown?.();');
+        // The announcement carries no analytics: emitting on the pre-paint path would put an
+        // Amplitude call in front of the first frame for no reason.
+        expect(announcement.slice(0, announcement.indexOf('}, ['))).not.toContain('emitPrecheckoutEvent');
+
+        // Analytics stays passive, and keeps a guard of its own so the two cannot drift.
+        const viewed = source.slice(source.indexOf('useEffect(() => {', source.indexOf('useLayoutEffect(() => {')));
+        expect(viewed).toContain('resultViewedRef.current');
+        expect(viewed).toContain('PRECHECKOUT_EVENTS.BLITE_RESULT_VIEWED');
+        expect(source).toContain('const resultAnnouncedRef = useRef(false);');
+        expect(source).toContain('const resultViewedRef = useRef(false);');
     });
 
     it('never announces a result sheet when the run ends in the neutral fallback', async () => {

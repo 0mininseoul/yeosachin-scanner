@@ -394,3 +394,62 @@ meant to confirm is gone. The screenshots remain at
 - `.playwright-mcp/` — user-owned browser session logs, untouched and left untracked.
 - `package-lock.json` — a one-line `devOptional` flag change from a local `npm install`.
   Setup noise, not part of this change; left unstaged and uncommitted.
+
+---
+
+## Follow-up — 2026-09-01: the first-paint double-eyebrow flash
+
+Shipped, then found on arrival: the withdrawal was announced from a **passive** effect, which
+React flushes only after handing the commit that mounts the sheet back to the browser. For one
+frame the page's heading eyebrow and the sheet's own `관계 판독 범위` eyebrow were both on
+screen — the two-eyebrow state this design exists to prevent, surviving as a flash.
+
+**Fix (safe and minimal).** In `components/precheckout-immersive.tsx`, split the one effect in
+two:
+
+- `useLayoutEffect` — `onBliteResultShown?.()` only, still `resultAnnouncedRef`-guarded. Layout
+  effects run before the commit is handed to the browser, and the parent state update this
+  schedules is flushed in the same pass, so the withdrawal is never a frame late.
+- `useEffect` — `BLITE_RESULT_VIEWED` only, guarded by a new `resultViewedRef`. Analytics keeps
+  its passive timing and its own exactly-once guard, so nothing about the event changed and no
+  Amplitude call moved onto the pre-paint path.
+
+Nothing else was touched: no markup, no copy, no design exclusion, no CTA/gender/fallback path,
+no `data-amp` masking, no DTO or analytics vocabulary.
+
+**Why the test is a source contract, not a render.** The first two attempts were render-based
+and both were wrong for the same reason. jsdom cannot observe a paint, and `act()` makes it
+worse: it drains layout effects, passive effects, and the resulting re-render into one
+synchronous flush. Instrumenting a timeline (announcement, analytics, and a `MutationObserver`
+delivery, each sampling the DOM) produced **identical output for the fixed and the broken
+implementation** — the harness cannot see this bug at all, so a render-based assertion would
+have passed on the bug and proved nothing. The contract is therefore asserted against the
+component's source, which is the convention `app/analyze/page.test.ts` already uses for its
+half of the same handoff. Reverting the layout effect fails that test.
+
+### Verification — 2026-09-01
+
+`node_modules` was empty at the start of this pass (wiped between dispatches), so dependencies
+were restored with `npm ci`, which installs from the lockfile and never rewrites it —
+`package-lock.json` is byte-identical afterwards (md5 `7d1d879b…` before and after), its
+one-line `devOptional` change still unstaged.
+
+```
+npx vitest run components/blite-result.test.tsx components/precheckout-immersive.test.tsx \
+  components/precheckout-demo.test.tsx app/analyze/page.test.ts
+                          → Test Files 4 passed (4) · Tests 61 passed (61)
+npx tsc --noEmit          → exit 0, no diagnostics
+npm run lint              → exit 0 · 16 pre-existing warnings, 0 errors, none in owned files
+npm run test              → Test Files 732 passed | 2 skipped (734)
+                            Tests 7746 passed | 75 skipped (7821)
+NEXT_PUBLIC_SUPABASE_URL=… NEXT_PUBLIC_SUPABASE_ANON_KEY=… npm run build
+                          → ✓ Compiled successfully in 14.4s · exit 0 · ○ /analyze
+```
+
+Placeholder public build-time values again, for the same reason as the previous pass: no
+`.env.local` in this worktree. No secret, no service-role key, no provider call.
+
+Revert-detection, run both ways: with `useLayoutEffect` restored to `useEffect`, the new test
+fails (`expected '\n' to contain 'onBliteResultShown?.();'`); with the fix in place it passes.
+The existing exactly-once tests — the callback under a re-rendering parent with a fresh
+callback identity, and the fallback path never announcing — pass unchanged.

@@ -1,6 +1,6 @@
 'use client';
 
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
 import {
     PRECHECKOUT_BLITE_LIKELY_FEMALE_CONFIDENCE_THRESHOLD,
     precheckoutBliteV1Schema,
@@ -161,6 +161,7 @@ export function PrecheckoutImmersive({
     const settledExitRef = useRef(false);
     const emittedEventKeysRef = useRef(new Set<string>());
     const resultAnnouncedRef = useRef(false);
+    const resultViewedRef = useRef(false);
     const deadlineAtMs = startedAtMs + BLITE_UX_DEADLINE_MS;
     /**
      * Waiting on the exclusion screen spends the submission-anchored deadline before this screen
@@ -324,17 +325,37 @@ export function PrecheckoutImmersive({
     }, [claimToken, emitPrecheckoutEvent, hasExtendedVisibleGrace, preflightId, requestExit, visibleEntryAtMs, visibleFallbackAtMs]);
 
     /**
-     * One shot, guarded here rather than at the call site. `emitPrecheckoutEvent` already
-     * dedupes per preflight, but `onBliteResultShown` is a caller-supplied callback whose
-     * identity this component does not control: an inline arrow in the parent would rerun this
-     * effect on every parent render. The ref makes the announcement correct regardless.
+     * The page withdraws its own heading eyebrow on this announcement, so the announcement has
+     * to land in the same commit the sheet does. As a passive effect it did not: React hands
+     * the mounting commit back to the browser before flushing those, so the page eyebrow and
+     * the sheet's own eyebrow could share a frame — a visible double-eyebrow flash on arrival.
+     * A layout effect runs before the browser is given the commit, and the state update it
+     * schedules is flushed in the same pass, so the withdrawal is never a frame late.
+     *
+     * One shot, guarded here rather than at the call site. `onBliteResultShown` is a
+     * caller-supplied callback whose identity this component does not control: an inline arrow
+     * in the parent would rerun this effect on every parent render. The ref makes the
+     * announcement correct regardless of the caller.
+     *
+     * This component is only ever mounted behind client state (`/analyze` has no preflight to
+     * render on the server), so the layout effect never runs during a prerender.
      */
-    useEffect(() => {
+    useLayoutEffect(() => {
         if (view !== 'result' || !dtoRef.current || resultAnnouncedRef.current) return;
         resultAnnouncedRef.current = true;
-        emitPrecheckoutEvent(PRECHECKOUT_EVENTS.BLITE_RESULT_VIEWED);
         onBliteResultShown?.();
-    }, [emitPrecheckoutEvent, onBliteResultShown, view]);
+    }, [onBliteResultShown, view]);
+
+    /**
+     * Analytics deliberately stays a passive effect: it is not something the first frame waits
+     * on, and `emitPrecheckoutEvent` already dedupes per preflight. Its own ref keeps the
+     * exactly-once guarantee independent of the announcement above.
+     */
+    useEffect(() => {
+        if (view !== 'result' || !dtoRef.current || resultViewedRef.current) return;
+        resultViewedRef.current = true;
+        emitPrecheckoutEvent(PRECHECKOUT_EVENTS.BLITE_RESULT_VIEWED);
+    }, [emitPrecheckoutEvent, view]);
 
     const handleDemoComplete = useCallback(() => {
         finishExit(exitRef.current ?? 'fallback');

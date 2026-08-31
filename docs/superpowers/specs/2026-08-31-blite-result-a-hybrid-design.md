@@ -181,13 +181,36 @@ when the result sheet reaches the screen. `/analyze` uses it to withdraw its hea
 for that state, and resets the flag in `handleReset` so a new target restores it. Nothing else
 about the parent changes: no analytics property, no gating, no copy on any other state.
 
-The announcement is **ref-guarded inside the component**, not at the call site. It shares an
-effect with `BLITE_RESULT_VIEWED`, and a caller-supplied callback's identity is not something
-this component controls — an inline arrow in the parent re-runs that effect on every parent
-render, which fired the callback three times in review. `emitPrecheckoutEvent` already dedupes
-per preflight, so the analytics event was never at risk, but the callback was. The page also
-wraps its handler in `useCallback` so the effect does not churn in the first place; the ref is
-what makes the contract correct for any caller.
+The announcement is **ref-guarded inside the component**, not at the call site. A
+caller-supplied callback's identity is not something this component controls — an inline arrow
+in the parent re-runs the effect on every parent render, which fired the callback three times
+in review. `emitPrecheckoutEvent` already dedupes per preflight, so the analytics event was
+never at risk, but the callback was. The page also wraps its handler in `useCallback` so the
+effect does not churn in the first place; the ref is what makes the contract correct for any
+caller.
+
+The announcement fires from a **layout effect**, and it is the only thing in that effect.
+Originally it shared one passive effect with `BLITE_RESULT_VIEWED`, and that put the
+withdrawal a frame late: React hands the commit that mounts the sheet to the browser before it
+flushes passive effects, so the page's eyebrow and the sheet's own eyebrow could be painted
+together once on arrival — a visible double-eyebrow flash. A layout effect runs before that
+commit is handed over, and the parent state update it schedules is flushed in the same pass,
+so the two eyebrows never share a frame. The component is only ever mounted behind client
+state — `/analyze` has no preflight to render during a prerender — so the layout effect never
+runs on the server.
+
+`BLITE_RESULT_VIEWED` stays in a passive effect with a **second ref of its own**
+(`resultViewedRef`), so its exactly-once guarantee does not depend on the announcement's.
+Analytics is not something the first frame should wait on, and moving an Amplitude call onto
+the pre-paint path would buy nothing.
+
+This split is asserted against the component's **source**, not by rendering it. Under jsdom,
+`act()` drains layout effects, passive effects, and the resulting re-render into a single
+synchronous flush, which erases exactly the task boundary a real browser paints at: both
+spellings produce a byte-identical DOM timeline, verified by instrumenting one with a
+`MutationObserver` and comparing. A render-based assertion would therefore have passed just as
+happily on the bug. `app/analyze/page.test.ts` already pins its half of this contract the same
+way.
 
 ## Deliberate deviation from prototype B
 
