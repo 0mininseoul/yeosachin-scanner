@@ -16,6 +16,15 @@ for name in \
   }
 done
 
+# Legacy V2 deployments reuse the historical preflight queue during mixed-version
+# drain.  Keep that contract task+maintenance, while split-capacity deployments
+# provide the role-scoped preflight maintenance identity explicitly.
+preflight_maintenance_service_account="${PREFLIGHT_TASKS_MAINTENANCE_SERVICE_ACCOUNT_EMAIL:-${ANALYSIS_V2_MAINTENANCE_SERVICE_ACCOUNT_EMAIL:-}}"
+[[ -n "$preflight_maintenance_service_account" ]] || {
+  printf 'error: PREFLIGHT_TASKS_MAINTENANCE_SERVICE_ACCOUNT_EMAIL is required\n' >&2
+  exit 1
+}
+
 export ANALYSIS_TASKS_PROJECT="$PREFLIGHT_TASKS_PROJECT"
 export ANALYSIS_TASKS_LOCATION="$PREFLIGHT_TASKS_LOCATION"
 export ANALYSIS_TASKS_QUEUE="$PREFLIGHT_TASKS_QUEUE"
@@ -37,5 +46,6 @@ export ANALYSIS_TASKS_RUNTIME_SERVICE_ACCOUNT_EMAIL="$PREFLIGHT_TASKS_RUNTIME_SE
 # declaration -- stripping the runtime's enqueuer binding and stranding every paid
 # order at admission until the binding was restored by hand.
 export ANALYSIS_TASKS_RUNTIME_QUEUE_ACCESS="enqueue-view"
+export ANALYSIS_TASKS_CLOUD_RUN_ALLOWED_INVOKER_MEMBERS="serviceAccount:$PREFLIGHT_TASKS_SERVICE_ACCOUNT_EMAIL,serviceAccount:$preflight_maintenance_service_account"
 
 exec bash "$(dirname "$0")/configure-analysis-tasks-queue.sh" "$@"

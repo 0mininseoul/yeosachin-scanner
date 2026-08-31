@@ -10,9 +10,16 @@ import {
     prepareAnalysisImages,
     type AnalysisImagePolicy,
 } from '@/lib/services/ai/image-preprocessing';
+import { BLITE_INFERENCE_DEADLINE_MS } from './blite-deadline';
 import {
-    BLITE_INFERENCE_DEADLINE_MS,
-} from './blite-deadline';
+    createAnalysisV2GeminiLeaseStore,
+    isAnalysisV2AiAdmissionSignal,
+    type AnalysisV2GeminiLease,
+    type AnalysisV2GeminiLeaseStore,
+} from '@/lib/services/analysis/v2-gemini-lease-store';
+import {
+    AnalysisProviderAdmissionCapacityPendingError,
+} from '@/lib/services/analysis/provider-admission-store';
 import {
     PRECHECKOUT_BLITE_EVIDENCE_FIELDS,
     PRECHECKOUT_BLITE_SCHEMA_VERSION,
@@ -35,6 +42,10 @@ const MAX_HASHTAGS_PER_POST = 15;
 // Gemini 3 counts thinking tokens against maxOutputTokens. Keep reasoning minimal for this
 // compact schema and leave enough room for the complete JSON response.
 const PRECHECKOUT_BLITE_MAX_OUTPUT_TOKENS = 3072;
+
+function toMonotonicDeadline(epochDeadlineAtMs: number): number {
+    return performance.now() + Math.max(0, epochDeadlineAtMs - Date.now());
+}
 
 /** Durable source media: one profile reference plus at most three post references. */
 const PRECHECKOUT_BLITE_MAX_GENDER_EVIDENCE_POST_IMAGES = 3;
@@ -372,6 +383,17 @@ function calibratePrecheckoutBliteSignals(
 
 export interface PrecheckoutBliteInferenceOptions {
     requestId?: string;
+    /** The claimed precheckout cache lease is the authoritative B-lite job identity. */
+    jobClaimToken?: string;
+    /** Test/load injection; production defaults to the shared DB-global Gemini lease store. */
+    geminiLeaseStore?: AnalysisV2GeminiLeaseStore;
+    /**
+     * An already acquired shared Gemini lease owned by the runner. When supplied, inference
+     * borrows it and never releases it: the runner holds the lease until the durable cache
+     * terminal commit has succeeded or failed.
+     */
+    geminiLease?: AnalysisV2GeminiLease;
+    env?: Record<string, string | undefined>;
     abortSignal?: AbortSignal;
     /** Original preflight snapshot metadata; never reconstructed from the source artifact. */
     candidateRange: PrecheckoutBliteCandidateRange;
@@ -535,11 +557,33 @@ export async function inferPrecheckoutBlite(
         options.abortSignal,
         inferenceDeadlineAtMs,
     );
+    let geminiLease: AnalysisV2GeminiLease | undefined = options.geminiLease;
+    let ownsGeminiLease = false;
+    let leaseStore: AnalysisV2GeminiLeaseStore | undefined;
     try {
         assertInferenceActive(effectiveDeadline.signal, inferenceDeadlineAtMs);
 
         const digest = buildPrecheckoutBliteDigest(durableSource);
         if (digest.postCount === 0) return null;
+
+        // B-lite always consumes the established database-global Gemini eight-slot fence.
+        // The provider-admission feature flag is evaluated only by the lease store when it
+        // attaches the additive Apify/Gemini admission row; it never bypasses this acquire.
+        if (!options.requestId || !options.jobClaimToken) return null;
+        leaseStore = options.geminiLeaseStore ?? createAnalysisV2GeminiLeaseStore({
+            env: options.env,
+        });
+        if (!geminiLease) {
+            geminiLease = await leaseStore.acquire({
+                requestId: options.requestId,
+                jobKey: 'preflight:blite',
+                jobClaimToken: options.jobClaimToken,
+                attempt: 1,
+                handlerDeadlineAtMs: toMonotonicDeadline(inferenceDeadlineAtMs),
+                leaseProfile: 'precheckout_blite',
+            });
+            ownsGeminiLease = true;
+        }
 
         const work = (async (): Promise<PrecheckoutBliteModelResponse> => {
             assertInferenceActive(effectiveDeadline.signal, inferenceDeadlineAtMs);
@@ -577,7 +621,10 @@ export async function inferPrecheckoutBlite(
                     abortSignal: effectiveDeadline.signal,
                     thinkingLevel: 'MINIMAL',
                     maxOutputTokens: PRECHECKOUT_BLITE_MAX_OUTPUT_TOKENS,
-                    maxAttempts: 2,
+                    // One durable B-lite slot/admission identity may account for exactly one
+                    // actual Gemini provider attempt. Retries are Cloud Task/durable-cache
+                    // deliveries, each with a fresh fenced identity, never hidden model calls.
+                    maxAttempts: 1,
                     onAttemptTelemetry: options.onAttemptTelemetry,
                 },
             );
@@ -609,9 +656,29 @@ export async function inferPrecheckoutBlite(
         } finally {
             abortRejection.cleanup();
         }
-    } catch {
+    } catch (error) {
+        // Capacity is a durable wait, not an inference failure. Let the runner rearm the
+        // cache claim without consuming its attempt budget; swallowing this signal would make
+        // the worker terminal-fail a request while the provider was never invoked.
+        if (
+            error instanceof AnalysisProviderAdmissionCapacityPendingError
+            || isAnalysisV2AiAdmissionSignal(error)
+        ) {
+            throw error;
+        }
         return null;
     } finally {
+        if (geminiLease && ownsGeminiLease) {
+            try {
+                const ownedLeaseStore = leaseStore ?? options.geminiLeaseStore ?? createAnalysisV2GeminiLeaseStore({
+                    env: options.env,
+                });
+                await ownedLeaseStore.release(geminiLease);
+            } catch {
+                // Retain the authoritative slot/admission on release
+                // ambiguity; maintenance can recover it by fence/ledger.
+            }
+        }
         effectiveDeadline.cleanup();
     }
 }

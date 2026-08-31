@@ -10,6 +10,8 @@ const mocks = vi.hoisted(() => ({
     verify: vi.fn(),
     available: vi.fn(),
     process: vi.fn(),
+    processFresh: vi.fn(),
+    settleBlockedFresh: vi.fn(),
     emit: vi.fn(),
     observeRoute: vi.fn((
         _request: Request,
@@ -43,6 +45,12 @@ vi.mock('@/lib/services/analysis/v2-execution-gate', () => ({
 vi.mock('@/lib/services/analysis/v2-worker', () => ({
     processAnalysisV2TaskDelivery: mocks.process,
 }));
+vi.mock('@/lib/services/analysis/fresh-plan-admission', () => ({
+    processAnalysisV2FreshAdmission: mocks.processFresh,
+}));
+vi.mock('@/lib/services/analysis/fresh-admission-worker-runtime', () => ({
+    settleBlockedFreshAdmission: mocks.settleBlockedFresh,
+}));
 
 import {
     maxDuration,
@@ -63,6 +71,14 @@ const payload = {
     jobKey: 'coordinator:bootstrap',
     generation: 1,
     reservationToken: '223e4567-e89b-42d3-a456-426614174000', // gitleaks:allow -- UUID fixture
+};
+const freshAdmissionPayload = {
+    preflightId: payload.requestId,
+    kind: 'fresh_admission' as const,
+    workloadRole: 'paid' as const,
+    generation: 3,
+    dispatchGeneration: 2,
+    dispatchToken: '323e4567-e89b-42d3-a456-426614174000',
 };
 
 function request(
@@ -98,6 +114,8 @@ describe('analysis V2 worker route', () => {
             successorCount: 2,
             pendingRecoveryCount: 0,
         });
+        mocks.processFresh.mockResolvedValue('ready');
+        mocks.settleBlockedFresh.mockResolvedValue(undefined);
     });
 
     it('authenticates OIDC and processes only a strict task payload', async () => {
@@ -121,6 +139,52 @@ describe('analysis V2 worker route', () => {
             'analysis_v2.worker_failed',
         ]);
         expect(JSON.stringify(mocks.emit.mock.calls)).not.toContain('raw_user');
+    });
+
+    it('executes new fresh-admission deliveries on the paid worker path', async () => {
+        const response = await POST(request(freshAdmissionPayload));
+
+        expect(response.status).toBe(200);
+        await expect(response.json()).resolves.toEqual({ status: 'ready' });
+        expect(mocks.processFresh).toHaveBeenCalledWith(expect.anything(), {
+            preflightId: freshAdmissionPayload.preflightId,
+            generation: freshAdmissionPayload.generation,
+            dispatchGeneration: freshAdmissionPayload.dispatchGeneration,
+            dispatchToken: freshAdmissionPayload.dispatchToken,
+        }, expect.objectContaining({ betaCreditCoordinator: expect.anything() }));
+        expect(mocks.process).not.toHaveBeenCalled();
+    });
+
+    it('rejects roleless fresh-admission deliveries while preserving roleless V2 drain', async () => {
+        const response = await POST(request({
+            ...freshAdmissionPayload,
+            workloadRole: undefined,
+        }));
+
+        expect(response.status).toBe(503);
+        await expect(response.json()).resolves.toEqual({ code: 'WORKLOAD_ROLE_MISMATCH' });
+        expect(mocks.processFresh).not.toHaveBeenCalled();
+    });
+
+    it('preserves blocked fresh-admission settlement and paid-worker telemetry', async () => {
+        mocks.processFresh.mockResolvedValueOnce('blocked');
+
+        const response = await POST(request(freshAdmissionPayload));
+
+        expect(response.status).toBe(200);
+        await expect(response.json()).resolves.toEqual({ status: 'blocked' });
+        expect(mocks.settleBlockedFresh).toHaveBeenCalledWith(
+            expect.anything(),
+            freshAdmissionPayload.preflightId,
+            expect.objectContaining({ emit: expect.any(Function) }),
+        );
+        expect(mocks.emit).toHaveBeenCalledWith(expect.objectContaining({
+            event: 'analysis_v2.worker_completed',
+            fields: expect.objectContaining({
+                analysis_request_id: freshAdmissionPayload.preflightId,
+                disposition: 'blocked',
+            }),
+        }));
     });
 
     it('uses the 540-second/600-second contract only when the authenticated task declares header v2', async () => {

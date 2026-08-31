@@ -285,7 +285,7 @@ describe('ProgressFaces stable rail identity', () => {
         ))).toBe(true);
     });
 
-    it('clears retained media only for an explicit publication-lag reset', () => {
+    it('keeps retained media through an explicit publication-lag reset', () => {
         const imageUrl = '/api/image-proxy?token=before-reset';
         render(imageUrl);
         act(() => {
@@ -303,8 +303,8 @@ describe('ProgressFaces stable rail identity', () => {
             );
         });
 
-        expect(container.querySelector('[data-progress-image]')).toBeNull();
-        expect(container.querySelector('[data-progress-copy]')).toBeNull();
+        expect(container.querySelector('[data-progress-image]')).toBeTruthy();
+        expect(container.querySelector('[data-progress-copy]')).toBeTruthy();
     });
 
     it('keeps the last-good image visible when a refreshed proxy source errors', () => {

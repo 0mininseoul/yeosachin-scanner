@@ -1302,6 +1302,7 @@ export function createAnalysisV2AiAuditAdapter<T>(
                 const lease = await leaseStore.acquire({
                     requestId: request.data.requestId,
                     jobKey: request.data.jobKey,
+                    jobClaimToken: request.data.claimToken,
                     operationKey: resultIdentity.operationKey,
                     stage: resultIdentity.stage,
                     attempt: telemetry.attempt,

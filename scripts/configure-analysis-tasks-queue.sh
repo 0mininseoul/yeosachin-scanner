@@ -12,8 +12,10 @@ readonly QUEUE_MAX_DOUBLINGS="4"
 readonly ENQUEUER_IAM_SCOPE="${ANALYSIS_TASKS_IAM_SCOPE:-project}"
 readonly EXACT_IAM="${ANALYSIS_TASKS_EXACT_IAM:-false}"
 readonly RUNTIME_QUEUE_ACCESS="${ANALYSIS_TASKS_RUNTIME_QUEUE_ACCESS:-none}"
+readonly EXPECTED_QUEUE_STATE="${ANALYSIS_TASKS_EXPECTED_QUEUE_STATE:-RUNNING}"
 
 mode="apply"
+mode_was_explicit="false"
 reconcile_iam="false"
 
 usage() {
@@ -33,6 +35,10 @@ Required environment variables:
 Optional private Cloud Run target variables (set both or neither):
   ANALYSIS_TASKS_CLOUD_RUN_SERVICE
   ANALYSIS_TASKS_CLOUD_RUN_REGION
+  ANALYSIS_TASKS_CLOUD_RUN_ALLOWED_INVOKER_MEMBERS
+    Optional comma-separated unconditional service-account members for exact
+    mode. Defaults to the declared task identity; legacy V2 sets its reviewed
+    maintenance identity explicitly.
 
 Optional bounded queue overrides:
   ANALYSIS_TASKS_MAX_DISPATCHES_PER_SECOND      Integer 1..100. Defaults to 2.
@@ -41,6 +47,7 @@ Optional bounded queue overrides:
   ANALYSIS_TASKS_EXACT_IAM                     true or false. Defaults to false.
   ANALYSIS_TASKS_RUNTIME_SERVICE_ACCOUNT_EMAIL Required when exact IAM is true.
   ANALYSIS_TASKS_RUNTIME_QUEUE_ACCESS          none or enqueue-view.
+  ANALYSIS_TASKS_EXPECTED_QUEUE_STATE         RUNNING (default) or PAUSED.
 
 Set ANALYSIS_TASKS_IAM_SCOPE=queue for a dedicated queue. In queue mode the
 configured enqueuer must not retain project-wide roles/cloudtasks.enqueuer.
@@ -317,6 +324,81 @@ cloud_run_invoker_binding_exists() {
   grep -Fqx "roles/run.invoker,${member}," <<<"$bindings"
 }
 
+cloud_run_iam_policy() {
+  gcloud run services get-iam-policy \
+    "$ANALYSIS_TASKS_CLOUD_RUN_SERVICE" \
+    "--project=$ANALYSIS_TASKS_PROJECT" \
+    "--region=$ANALYSIS_TASKS_CLOUD_RUN_REGION" \
+    '--format=json'
+}
+
+cloud_run_invoker_policy_is_exact() {
+  local policy="$1"
+  jq -e \
+    --argjson expected "$cloud_run_allowed_invoker_members_json" '
+      ([.bindings[]? | select(.role == "roles/run.invoker")] as $invokers
+        | ($invokers | length) == 1
+        and ($invokers[0].condition? == null)
+        and (($invokers[0].members | sort) == ($expected | sort))
+        and ([$invokers[].members[]?]
+          | all(. != "allUsers" and . != "allAuthenticatedUsers")))
+    ' <<<"$policy" >/dev/null
+}
+
+cloud_run_invoker_policy_has_unexpected() {
+  local policy="$1"
+  jq -e --argjson expected "$cloud_run_allowed_invoker_members_json" '
+    ([.bindings[]? | select(.role == "roles/run.invoker")] as $invokers
+      | ($invokers | length) > 1
+        or any($invokers[];
+          (.condition? != null)
+          or ((.members // []) | any(. == "allUsers" or . == "allAuthenticatedUsers"))
+          or ((.members | sort) != ($expected | sort)))
+    )
+  ' <<<"$policy" >/dev/null
+}
+
+write_exact_cloud_run_policy() {
+  local current="$1"
+  local file
+  file="$(mktemp "${TMPDIR:-/tmp}/analysis-cloud-run-iam.XXXXXX")"
+  iam_policy_files+=("$file")
+  jq --argjson expected "$cloud_run_allowed_invoker_members_json" \
+    '.bindings = ((.bindings // [])
+      | map(select(.role != "roles/run.invoker"))
+      + [{"role": "roles/run.invoker", "members": $expected}])' \
+    <<<"$current" >"$file"
+  written_iam_policy_file="$file"
+}
+
+ensure_exact_cloud_run_invoker_binding() {
+  local policy
+  local file
+  policy="$(cloud_run_iam_policy)"
+  if cloud_run_invoker_policy_is_exact "$policy"; then
+    log "verified: Cloud Run has exact private invoker policy for the task identity"
+    return 0
+  fi
+  [[ "$mode" != "check" ]] \
+    || die "Cloud Run invoker IAM has drifted or is not private"
+  if cloud_run_invoker_policy_has_unexpected "$policy" \
+     && [[ "$reconcile_iam" != "true" ]]; then
+    die "Cloud Run invoker IAM has unexpected principals; inspect or use --reconcile-iam"
+  fi
+  write_exact_cloud_run_policy "$policy"
+  file="$written_iam_policy_file"
+  run_mutation gcloud run services set-iam-policy \
+    "$ANALYSIS_TASKS_CLOUD_RUN_SERVICE" "$file" \
+    "--project=$ANALYSIS_TASKS_PROJECT" \
+    "--region=$ANALYSIS_TASKS_CLOUD_RUN_REGION" \
+    --quiet
+  if [[ "$mode" == "apply" ]]; then
+    policy="$(cloud_run_iam_policy)"
+    cloud_run_invoker_policy_is_exact "$policy" \
+      || die "exact private Cloud Run invoker IAM was not observable"
+  fi
+}
+
 ensure_cloud_run_invoker_binding() {
   local member="$1"
   if cloud_run_invoker_binding_exists "$member"; then
@@ -370,14 +452,14 @@ queue_limits_match() {
     || "$policy" == "${QUEUE_MAX_DISPATCHES_PER_SECOND},${QUEUE_MAX_CONCURRENT_DISPATCHES},8,$QUEUE_MAX_RETRY_DURATION,40s,300s,4" ]]
 }
 
-verify_queue_running() {
+verify_queue_state() {
   local state
   state="$(gcloud tasks queues describe "$ANALYSIS_TASKS_QUEUE" \
     "--project=$ANALYSIS_TASKS_PROJECT" \
     "--location=$ANALYSIS_TASKS_LOCATION" \
     '--format=value(state)')"
-  [[ "$state" == "RUNNING" ]] \
-    || die "queue state is $state; inspect it and resume it explicitly if appropriate"
+  [[ "$state" == "$EXPECTED_QUEUE_STATE" ]] \
+    || die "queue state is $state; expected $EXPECTED_QUEUE_STATE for this rollout stage"
 }
 
 ensure_queue_configuration() {
@@ -392,14 +474,30 @@ ensure_queue_configuration() {
     fi
     if [[ "$mode" != "dry-run" ]]; then
       queue_limits_match || die "queue policy was not applied"
-      verify_queue_running
+      if [[ "$EXPECTED_QUEUE_STATE" == "PAUSED" && "$(gcloud tasks queues describe "$ANALYSIS_TASKS_QUEUE" \
+          "--project=$ANALYSIS_TASKS_PROJECT" "--location=$ANALYSIS_TASKS_LOCATION" '--format=value(state)')" != "PAUSED" ]]; then
+        run_mutation gcloud tasks queues pause "$ANALYSIS_TASKS_QUEUE" \
+          "--project=$ANALYSIS_TASKS_PROJECT" \
+          "--location=$ANALYSIS_TASKS_LOCATION" --quiet
+      elif [[ "$EXPECTED_QUEUE_STATE" == "RUNNING" && "$(gcloud tasks queues describe "$ANALYSIS_TASKS_QUEUE" \
+          "--project=$ANALYSIS_TASKS_PROJECT" "--location=$ANALYSIS_TASKS_LOCATION" '--format=value(state)')" != "RUNNING" ]]; then
+        run_mutation gcloud tasks queues resume "$ANALYSIS_TASKS_QUEUE" \
+          "--project=$ANALYSIS_TASKS_PROJECT" \
+          "--location=$ANALYSIS_TASKS_LOCATION" --quiet
+      fi
+      verify_queue_state
     fi
   else
     [[ "$mode" != "check" ]] || die "analysis task queue does not exist"
     run_mutation gcloud tasks queues create "${queue_args[@]}"
     if [[ "$mode" == "apply" ]]; then
       queue_limits_match || die "queue policy was not applied"
-      verify_queue_running
+      if [[ "$EXPECTED_QUEUE_STATE" == "PAUSED" ]]; then
+        run_mutation gcloud tasks queues pause "$ANALYSIS_TASKS_QUEUE" \
+          "--project=$ANALYSIS_TASKS_PROJECT" \
+          "--location=$ANALYSIS_TASKS_LOCATION" --quiet
+      fi
+      verify_queue_state
     fi
   fi
 }
@@ -591,13 +689,12 @@ verify_task_identity_is_keyless_and_project_role_free() {
 
 while (($# > 0)); do
   case "$1" in
-    --dry-run)
-      [[ "$mode" == "apply" ]] || die "choose only one of --dry-run or --check"
-      mode="dry-run"
-      ;;
-    --check)
-      [[ "$mode" == "apply" ]] || die "choose only one of --dry-run or --check"
-      mode="check"
+    --dry-run|--check|--apply)
+      [[ "$mode_was_explicit" == "false" ]] \
+        || die "choose exactly one of --dry-run, --check, or --apply"
+      mode="${1#--}"
+      [[ "$mode" == "dry-run" ]] || [[ "$mode" == "check" ]] || mode="apply"
+      mode_was_explicit="true"
       ;;
     --reconcile-iam)
       reconcile_iam="true"
@@ -614,6 +711,9 @@ while (($# > 0)); do
   shift
 done
 
+[[ "$reconcile_iam" != "true" || ("$mode" == "apply" && "$mode_was_explicit" == "true") ]] \
+  || die "--reconcile-iam requires explicit --apply"
+
 for name in \
   ANALYSIS_TASKS_PROJECT \
   ANALYSIS_TASKS_LOCATION \
@@ -629,6 +729,8 @@ validate_queue "$ANALYSIS_TASKS_QUEUE"
 validate_queue_capacity
 validate_iam_scope
 validate_exact_iam_mode
+[[ "$EXPECTED_QUEUE_STATE" == "RUNNING" || "$EXPECTED_QUEUE_STATE" == "PAUSED" ]] \
+  || die "ANALYSIS_TASKS_EXPECTED_QUEUE_STATE must be RUNNING or PAUSED"
 validate_service_account_email \
   "$ANALYSIS_TASKS_SERVICE_ACCOUNT_EMAIL" \
   "ANALYSIS_TASKS_SERVICE_ACCOUNT_EMAIL"
@@ -743,6 +845,26 @@ readonly service_agent_member="serviceAccount:service-${project_number}@gcp-sa-c
 readonly task_invoker_member="serviceAccount:$ANALYSIS_TASKS_SERVICE_ACCOUNT_EMAIL"
 readonly runtime_member="serviceAccount:${ANALYSIS_TASKS_RUNTIME_SERVICE_ACCOUNT_EMAIL:-unused@invalid}"
 
+cloud_run_allowed_invoker_members_json="[$(printf '%s' "$task_invoker_member" | jq -R .)]"
+if [[ -n "${ANALYSIS_TASKS_CLOUD_RUN_ALLOWED_INVOKER_MEMBERS:-}" ]]; then
+  IFS=',' read -r -a allowed_invoker_members <<<"$ANALYSIS_TASKS_CLOUD_RUN_ALLOWED_INVOKER_MEMBERS"
+  ((${#allowed_invoker_members[@]} > 0)) \
+    || die "ANALYSIS_TASKS_CLOUD_RUN_ALLOWED_INVOKER_MEMBERS must not be empty"
+  for allowed_member in "${allowed_invoker_members[@]}"; do
+    [[ "$allowed_member" =~ ^serviceAccount:[a-z][a-z0-9-]{4,28}[a-z0-9]@[a-z][a-z0-9-]{4,28}[a-z0-9]\.iam\.gserviceaccount\.com$ ]] \
+      || die "exact Cloud Run invoker members must be unconditional service-account members"
+    [[ "$allowed_member" != "allUsers" && "$allowed_member" != "allAuthenticatedUsers" ]] \
+      || die "public Cloud Run invoker members are forbidden"
+  done
+  cloud_run_allowed_invoker_members_json="$(printf '%s\n' "${allowed_invoker_members[@]}" | jq -Rsc 'split("\n") | map(select(length > 0)) | unique | sort')"
+fi
+if [[ "$EXACT_IAM" == "true" ]]; then
+  jq -n -e --arg task "$task_invoker_member" \
+    --argjson members "$cloud_run_allowed_invoker_members_json" \
+    '$members | index($task) != null' >/dev/null \
+    || die "exact Cloud Run invoker members must include the declared task identity"
+fi
+
 cleanup() {
   local file
   for file in "${iam_policy_files[@]:-}"; do
@@ -792,7 +914,9 @@ if [[ -n "${ANALYSIS_TASKS_CLOUD_RUN_SERVICE:-}" ]]; then
     "--region=$ANALYSIS_TASKS_CLOUD_RUN_REGION" \
     '--format=value(metadata.name)' >/dev/null \
     || die "private Cloud Run worker service does not exist or is not visible"
-  if [[ "$EXACT_IAM" != "true" ]]; then
+  if [[ "$EXACT_IAM" == "true" ]]; then
+    ensure_exact_cloud_run_invoker_binding
+  else
     ensure_cloud_run_invoker_binding "$task_invoker_member"
   fi
 fi

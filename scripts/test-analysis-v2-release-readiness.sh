@@ -53,27 +53,59 @@ printf 'curl' >>"${FAKE_COMMAND_LOG:?}"
 printf ' %q' "$@" >>"${FAKE_COMMAND_LOG:?}"
 printf '\n' >>"${FAKE_COMMAND_LOG:?}"
 
-case "$*" in
-  *' -X '*|*' POST '*|*' PATCH '*|*' DELETE '*)
-    printf 'unexpected mutating HTTP method\n' >&2
-    exit 92
-    ;;
-esac
-
 expected_vercel_url='https://api.vercel.com/v6/deployments?projectId=prj_existing_analysis_v2&target=production&limit=20'
 url_is_argv=false
 accept_is_argv=false
+request_method='GET'
+url=''
+previous=''
 for arg in "$@"; do
   [[ "$arg" == "$expected_vercel_url" ]] && url_is_argv=true
   [[ "$arg" == 'Accept: application/json' ]] && accept_is_argv=true
+  if [[ "$previous" == '--url' ]]; then url="$arg"; fi
+  if [[ "$previous" == '--request' || "$previous" == '-X' ]]; then request_method="$arg"; fi
+  previous="$arg"
 done
-[[ "$url_is_argv" == true ]] || exit 96
-[[ "$accept_is_argv" == true ]] || exit 97
-curl_config="$(cat)"
-[[ "$curl_config" == *'header = "Authorization: Bearer '* ]] || exit 98
-[[ "$curl_config" != *'url ='* ]] || exit 99
-[[ "$curl_config" != *'Accept: application/json'* ]] || exit 100
-printf '%s\n' "${FAKE_VERCEL_JSON:?}"
+if [[ "$url" == https://api.vercel.com/* ]]; then
+  [[ "$accept_is_argv" == true ]] || exit 97
+  curl_config="$(cat)"
+  [[ "$curl_config" == *'header = "Authorization: Bearer '* ]] || exit 98
+  [[ "$curl_config" != *'url ='* ]] || exit 99
+  [[ "$curl_config" != *'Accept: application/json'* ]] || exit 100
+  if [[ "$url" == https://api.vercel.com/v2/deployments/*/aliases* ]]; then
+    [[ "$url" == "https://api.vercel.com/v2/deployments/${FAKE_VERCEL_DEPLOYMENT_ID:?}/aliases" ]] || exit 102
+    printf '%s\n' "${FAKE_VERCEL_ALIASES_JSON:?}"
+    exit 0
+  fi
+  [[ "$url_is_argv" == true ]] || exit 96
+  printf '%s\n' "${FAKE_VERCEL_JSON:?}"
+  exit 0
+fi
+if [[ "$request_method" == 'GET' && "$url" == */api/analysis/capacity/readiness ]]; then
+  printf '%s\n' "${FAKE_PUBLIC_FREEZE_JSON:?}"
+  exit 0
+fi
+if [[ "$request_method" == 'POST' && "$url" =~ /api/analysis/(start|step|run)$ ]]; then
+  for arg in "$@"; do
+    [[ "$arg" != *Authorization* ]] || exit 101
+  done
+  expected_args=(
+    --disable --proto '=https' --tlsv1.2 --max-redirs 0
+    --connect-timeout 10 --max-time 30 --silent --show-error
+    --request POST --header 'Accept: application/json'
+    --header 'Content-Type: application/json' --data-binary '{}'
+    --write-out '\n%{http_code}' --url "$url"
+  )
+  actual_args=("$@")
+  [[ "${#actual_args[@]}" == "${#expected_args[@]}" ]] || exit 103
+  for index in "${!expected_args[@]}"; do
+    [[ "${actual_args[$index]}" == "${expected_args[$index]}" ]] || exit 104
+  done
+  printf '{"code":"%s"}\n410\n' "${FAKE_LEGACY_FREEZE_CODE:-LEGACY_ANALYSIS_FROZEN}"
+  exit 0
+fi
+printf 'unexpected HTTP probe: %s %s\n' "$request_method" "$url" >&2
+exit 92
 EOF
 
 cat >"$bin_dir/supabase" <<'EOF'
@@ -121,11 +153,17 @@ chmod +x "$bin_dir/gcloud" "$bin_dir/curl" "$bin_dir/supabase" "$bin_dir/npx"
 export FAKE_COMMAND_LOG="$command_log"
 export FAKE_SERVICE_JSON='{"status":{"traffic":[{"revisionName":"analysis-worker-active","percent":100}]}}'
 export FAKE_REVISION_JSON="{\"metadata\":{\"name\":\"analysis-worker-active\",\"labels\":{\"analysis-v2-source-commit\":\"$expected_sha\"}},\"status\":{\"conditions\":[{\"type\":\"Ready\",\"status\":\"True\"}]}}"
-export FAKE_VERCEL_JSON="{\"deployments\":[{\"target\":\"production\",\"readyState\":\"READY\",\"meta\":{\"githubCommitSha\":\"$expected_sha\"}}]}"
+export FAKE_VERCEL_DEPLOYMENT_ID='dpl_selected'
+export FAKE_VERCEL_JSON="{\"deployments\":[{\"target\":\"production\",\"readyState\":\"READY\",\"uid\":\"$FAKE_VERCEL_DEPLOYMENT_ID\",\"url\":\"yeosachin.com\",\"meta\":{\"githubCommitSha\":\"$expected_sha\"}}]}"
+export FAKE_VERCEL_ALIASES_JSON='{"aliases":[]}'
+export FAKE_PUBLIC_FREEZE_JSON="{\"schemaVersion\":\"analysis-public-freeze-readiness-v1\",\"ready\":true,\"stage\":\"initial\",\"freezeMode\":\"drain-and-block\",\"publicFreezeEnabled\":true,\"sourceSha\":\"$expected_sha\",\"legacyTargetResource\":\"vercel:production:analysis-v1\",\"routes\":{\"/api/analysis/start\":{\"gateState\":\"frozen\",\"expectedStatus\":410,\"gateBeforeRuntime\":true},\"/api/analysis/step\":{\"gateState\":\"frozen\",\"expectedStatus\":410,\"gateBeforeRuntime\":true},\"/api/analysis/run\":{\"gateState\":\"frozen\",\"expectedStatus\":410,\"gateBeforeRuntime\":true}}}"
 export FAKE_SUPABASE_JSON='[{"version":"20260829120000","name":"add_analysis_v2_progress_signals_history"}]'
 export VERCEL_TOKEN="$vercel_token"
 export IMAGE_PROXY_SIGNING_SECRET="$image_proxy_secret"
 export ANALYSIS_V2_IMAGE_PROXY_PROBE_BASE_URL='https://yeosachin.com'
+export ANALYSIS_CAPACITY_PUBLIC_FREEZE_READINESS_URL='https://yeosachin.com/api/analysis/capacity/readiness'
+export ANALYSIS_CAPACITY_LEGACY_TARGET_URL='https://yeosachin.com/api/analysis/start'
+export ANALYSIS_CAPACITY_LEGACY_TARGET_RESOURCE='vercel:production:analysis-v1'
 
 run_gate() (
   export PATH="$bin_dir:/usr/bin:/bin"
@@ -137,11 +175,17 @@ run_gate() (
   export VERCEL_TOKEN
   export IMAGE_PROXY_SIGNING_SECRET
   export ANALYSIS_V2_IMAGE_PROXY_PROBE_BASE_URL
+  export ANALYSIS_CAPACITY_PUBLIC_FREEZE_READINESS_URL
+  export ANALYSIS_CAPACITY_LEGACY_TARGET_URL
+  export ANALYSIS_CAPACITY_LEGACY_TARGET_RESOURCE
   export ANALYSIS_V2_RELEASE_SUPABASE_WORKDIR="$repo_dir"
   export FAKE_COMMAND_LOG
   export FAKE_SERVICE_JSON
   export FAKE_REVISION_JSON
   export FAKE_VERCEL_JSON
+  export FAKE_VERCEL_DEPLOYMENT_ID
+  export FAKE_VERCEL_ALIASES_JSON
+  export FAKE_PUBLIC_FREEZE_JSON
   export FAKE_SUPABASE_JSON
   export FAKE_IMAGE_PROXY_PROBE_RESULT
   bash "$gate"
@@ -171,6 +215,56 @@ assert_no_sensitive_probe_value "$output"
   || fail 'successful release readiness did not report a pass'
 [[ "$(<"$command_log")" != *"$vercel_token"* ]] \
   || fail 'Vercel token appeared in a release-readiness command argv'
+
+export FAKE_VERCEL_JSON="{\"deployments\":[{\"target\":\"production\",\"readyState\":\"READY\",\"uid\":\"$FAKE_VERCEL_DEPLOYMENT_ID\",\"url\":\"vercel-preview.example\",\"meta\":{\"githubCommitSha\":\"$expected_sha\"}}]}"
+export FAKE_VERCEL_ALIASES_JSON='{"aliases":[{"uid":"alias_selected","alias":"yeosachin.com","created":"2026-08-01T00:00:00.000Z"}]}'
+if ! output="$(run_gate 2>&1)"; then
+  printf '%s\n' "$output" >&2
+  fail 'exact deployment alias provenance was rejected'
+fi
+export FAKE_VERCEL_ALIASES_JSON='{"aliases":[{"uid":"alias_selected","alias":123,"created":"2026-08-01T00:00:00.000Z"}]}'
+if output="$(run_gate 2>&1)"; then
+  fail 'malformed deployment alias provenance was accepted'
+fi
+[[ "$output" == *'aliases response is malformed'* ]] \
+  || fail 'malformed deployment alias was not classified explicitly'
+export FAKE_VERCEL_ALIASES_JSON='{"aliases":[{"uid":"alias_other","alias":"yeosachin.com","deploymentId":"dpl_other","created":"2026-08-01T00:00:00.000Z"}]}'
+if output="$(run_gate 2>&1)"; then
+  fail 'alias provenance from another deployment was accepted'
+fi
+[[ "$output" == *'aliases response is malformed or belongs to another deployment'* ]] \
+  || fail 'other-deployment alias was not classified explicitly'
+export FAKE_VERCEL_ALIASES_JSON='{"aliases":[]}'
+if output="$(run_gate 2>&1)"; then
+  fail 'missing deployment URL/alias provenance was accepted'
+fi
+[[ "$output" == *'public freeze origin does not match the selected READY Vercel deployment URL or exact alias'* ]] \
+  || fail 'missing deployment alias was not classified explicitly'
+export FAKE_VERCEL_JSON="{\"deployments\":[{\"target\":\"production\",\"readyState\":\"READY\",\"uid\":\"$FAKE_VERCEL_DEPLOYMENT_ID\",\"url\":\"yeosachin.com\",\"meta\":{\"githubCommitSha\":\"$expected_sha\"}}]}"
+
+export ANALYSIS_CAPACITY_PUBLIC_FREEZE_READINESS_URL='https://other.example/api/analysis/capacity/readiness'
+if output="$(run_gate 2>&1)"; then
+  fail 'readiness/legacy origin mismatch was accepted'
+fi
+[[ "$output" == *'public readiness and legacy V1 target URLs must share the exact same origin'* ]] \
+  || fail 'readiness/legacy origin mismatch was not classified explicitly'
+export ANALYSIS_CAPACITY_PUBLIC_FREEZE_READINESS_URL='https://yeosachin.com/api/analysis/capacity/readiness'
+
+export FAKE_VERCEL_JSON="{\"deployments\":[{\"target\":\"production\",\"readyState\":\"READY\",\"uid\":\"$FAKE_VERCEL_DEPLOYMENT_ID\",\"url\":\"other.example\",\"meta\":{\"githubCommitSha\":\"$expected_sha\"}}]}"
+if output="$(run_gate 2>&1)"; then
+  fail 'readiness origin not bound to the selected Vercel deployment was accepted'
+fi
+[[ "$output" == *'public freeze origin does not match the selected READY Vercel deployment URL or exact alias'* ]] \
+  || fail 'Vercel deployment origin mismatch was not classified explicitly'
+export FAKE_VERCEL_JSON="{\"deployments\":[{\"target\":\"production\",\"readyState\":\"READY\",\"uid\":\"$FAKE_VERCEL_DEPLOYMENT_ID\",\"url\":\"yeosachin.com\",\"meta\":{\"githubCommitSha\":\"$expected_sha\"}}]}"
+
+export FAKE_LEGACY_FREEZE_CODE='LEGACY_ANALYSIS_DISABLED'
+if output="$(run_gate 2>&1)"; then
+  fail 'a status-only V1 freeze probe was accepted'
+fi
+[[ "$output" == *'did not return exact LEGACY_ANALYSIS_FROZEN JSON'* ]] \
+  || fail 'V1 route JSON-code mismatch was not classified explicitly'
+unset FAKE_LEGACY_FREEZE_CODE
 
 export FAKE_SUPABASE_JSON='{"message":"","migrations":[{"local":"20260829120000_add_analysis_v2_progress_signals_history.sql","remote":"20260829120000","time":"2026-08-29T12:00:00Z"}]}'
 if ! output="$(run_gate 2>&1)"; then
@@ -205,7 +299,7 @@ assert_no_sensitive_probe_value "$output"
   || fail 'Cloud Run mismatch was not classified explicitly'
 
 export FAKE_REVISION_JSON="${FAKE_REVISION_JSON/ffffffffffffffffffffffffffffffffffffffff/$expected_sha}"
-export FAKE_VERCEL_JSON="{\"deployments\":[{\"target\":\"production\",\"readyState\":\"READY\",\"meta\":{\"githubCommitSha\":\"ffffffffffffffffffffffffffffffffffffffff\"}}]}"
+export FAKE_VERCEL_JSON="{\"deployments\":[{\"target\":\"production\",\"readyState\":\"READY\",\"uid\":\"$FAKE_VERCEL_DEPLOYMENT_ID\",\"url\":\"yeosachin.com\",\"meta\":{\"githubCommitSha\":\"ffffffffffffffffffffffffffffffffffffffff\"}}]}"
 if output="$(run_gate 2>&1)"; then
   fail 'stale Vercel provenance was accepted'
 fi
@@ -214,7 +308,7 @@ assert_no_sensitive_probe_value "$output"
 [[ "$output" == *'Vercel production SHA mismatch'* ]] \
   || fail 'Vercel mismatch was not classified explicitly'
 
-export FAKE_VERCEL_JSON="{\"deployments\":[{\"target\":\"production\",\"readyState\":\"READY\",\"meta\":{\"githubCommitSha\":\"$expected_sha\"}}]}"
+export FAKE_VERCEL_JSON="{\"deployments\":[{\"target\":\"production\",\"readyState\":\"READY\",\"uid\":\"$FAKE_VERCEL_DEPLOYMENT_ID\",\"url\":\"yeosachin.com\",\"meta\":{\"githubCommitSha\":\"$expected_sha\"}}]}"
 export FAKE_SUPABASE_JSON='[{"version":"20260828000000","name":"older_migration"}]'
 if output="$(run_gate 2>&1)"; then
   fail 'missing DB migration provenance was accepted'
@@ -243,7 +337,50 @@ assert_no_sensitive_probe_value "$output"
 [[ "$output" == *'IMAGE_PROXY_SIGNING_SECRET compatibility probe returned an invalid result'* ]] \
   || fail 'invalid image proxy probe output was not classified explicitly'
 
-if grep -Eiq -- '(^|[[:space:]])(deploy|create|apply|push|repair|up|down|post|patch|delete)([[:space:]]|$)' "$command_log"; then
+export FAKE_IMAGE_PROXY_PROBE_RESULT='pass'
+: >"$command_log"
+if ! output="$(run_gate 2>&1)"; then
+  printf '%s\n' "$output" >&2
+  fail 'final read-only contract pass was rejected'
+fi
+
+approved_post_log="$temp_dir/approved-post-probes.log"
+remaining_command_log="$temp_dir/remaining-commands.log"
+# The fake curl above accepts only this complete argv shape. Keep the final
+# audit equally exact: route text alone must never whitelist another mutation.
+approved_probe_line() {
+  local route="$1"
+  local args=(
+    --disable --proto '=https' --tlsv1.2 --max-redirs 0
+    --connect-timeout 10 --max-time 30 --silent --show-error
+    --request POST --header 'Accept: application/json'
+    --header 'Content-Type: application/json' --data-binary '{}'
+    --write-out '\n%{http_code}' --url "https://yeosachin.com/api/analysis/$route"
+  )
+  printf 'curl'
+  printf ' %q' "${args[@]}"
+}
+approved_start_line="$(approved_probe_line start)"
+approved_step_line="$(approved_probe_line step)"
+approved_run_line="$(approved_probe_line run)"
+: >"$approved_post_log"
+: >"$remaining_command_log"
+while IFS= read -r command_line; do
+  if [[ "$command_line" == "$approved_start_line" \
+     || "$command_line" == "$approved_step_line" \
+     || "$command_line" == "$approved_run_line" ]]; then
+    printf '%s\n' "$command_line" >>"$approved_post_log"
+  else
+    printf '%s\n' "$command_line" >>"$remaining_command_log"
+  fi
+done <"$command_log"
+approved_count="$(wc -l <"$approved_post_log" | tr -d '[:space:]')"
+[[ "$approved_count" == '3' ]] || fail "expected exactly three approved V1 POST probes, found $approved_count"
+for route in start step run; do
+  route_count="$(grep -Fic -- "api/analysis/$route" "$approved_post_log" || true)"
+  [[ "$route_count" == '1' ]] || fail "expected exactly one approved POST probe for /$route"
+done
+if grep -Eiq -- '(^|[[:space:]])(deploy|create|apply|push|repair|up|down|post|patch|delete)([[:space:]]|$)' "$remaining_command_log"; then
   fail 'release readiness issued a mutating command'
 fi
 

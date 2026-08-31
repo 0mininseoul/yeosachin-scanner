@@ -1,17 +1,43 @@
 import { NextResponse } from 'next/server';
 import { ZodError } from 'zod';
 import { isAnalysisV2WorkerAvailable } from '@/lib/services/analysis/v2-execution-gate';
+import { processAnalysisV2FreshAdmission } from '@/lib/services/analysis/fresh-plan-admission';
+import {
+    classifyPreflightWorkerFailure,
+} from '@/lib/services/analysis/preflight';
+import { preflightWorkerErrorCode } from '@/lib/observability/preflight-events';
+import { settleBlockedFreshAdmission } from '@/lib/services/analysis/fresh-admission-worker-runtime';
+import { supabaseAdmin } from '@/lib/supabase/admin';
+import {
+    createBetaApifyCreditPoolStore,
+} from '@/lib/services/analysis/beta-apify-credit-runtime';
+import {
+    createBetaApifyPreflightCoordinator,
+    createServerBetaApifyCreditClientFactory,
+} from '@/lib/services/analysis/beta-apify-preflight-coordinator';
 import {
     AnalysisV2JobDispatchNotReadyError,
     AnalysisV2JobFenceError,
     AnalysisV2JobLeaseBusyError,
+    analysisV2JobStore,
+    type AnalysisV2TaskDelivery,
 } from '@/lib/services/analysis/v2-job-store';
 import {
     getAnalysisV2TasksConfig,
-    parseAnalysisV2TaskPayload,
+    enqueueAnalysisV2FreshAdmissionTask,
+    lookupAnalysisV2FreshAdmissionTask,
+    parseAnalysisV2WorkerTaskPayload,
+    rearmAnalysisV2JobAfterCapacity,
     verifyAnalysisV2TaskAuthorization,
 } from '@/lib/services/analysis/v2-tasks';
+import {
+    rearmAnalysisV2FreshAdmissionDispatch,
+} from '@/lib/services/analysis/fresh-plan-admission';
 import { processAnalysisV2TaskDelivery } from '@/lib/services/analysis/v2-worker';
+import {
+    CLOUD_TASK_DELIVERY_RETRY_SAFETY_CEILING,
+    trustedCloudTasksRetryCount,
+} from '@/lib/services/analysis/pipeline-retry';
 import {
     ANALYSIS_V2_WORKER_TASK_CONTRACT_HEADER,
     analysisV2WorkerTaskContractFromHeader,
@@ -22,12 +48,23 @@ import {
     type OperationalRequestContext,
 } from '@/lib/observability/request';
 import { operationalLogger } from '@/lib/observability/server';
+import {
+    assertAnalysisTaskWorkloadRole,
+    assertAnalysisWorkerWorkloadRole,
+} from '@/lib/services/analysis/workload-role';
 
 // Keep the Vercel build declaration within the Hobby ceiling. Cloud Tasks invokes only the
 // canonical Cloud Run worker, whose independently configured request timeout is 600 seconds.
 export const maxDuration = 300;
 
 const OBSERVABLE_JOB_KEY_PATTERN = /^(?:coordinator:(?:bootstrap|candidate-screening|finalize|join:(?:primary-evidence|final-score))|track:(?:relationships:collect|target-evidence:collect|profiles:batch:[0-9]+|profile-ai:batch:[0-9]+|private-names:batch:[0-9]+|reverse-likes:collect|partner-safety:batch:0|narratives:batch:0))$/;
+const CAPACITY_WAIT_ERROR_CODES = new Set([
+    'ANALYSIS_V2_AI_CAPACITY_PENDING',
+    'ANALYSIS_V2_PROVIDER_ADMISSION_CAPACITY_PENDING',
+    'ANALYSIS_V2_AI_DEADLINE_TOO_SHORT',
+    'ANALYSIS_V2_AI_QUARANTINE_ACTIVE',
+    'ANALYSIS_V2_AI_RESULT_RECOVERY_PENDING',
+]);
 
 function safeErrorCode(value: unknown, fallback: string): string {
     return isAnalysisV2WorkerErrorCode(value)
@@ -82,6 +119,7 @@ async function handlePOST(
     let config;
     try {
         config = getAnalysisV2TasksConfig();
+        assertAnalysisWorkerWorkloadRole('paid');
     } catch {
         emitWorkerOutcome({
             context,
@@ -107,6 +145,11 @@ async function handlePOST(
         });
         return NextResponse.json({ code: 'UNAUTHORIZED' }, { status: 401 });
     }
+    // The OIDC check above authenticated this task.  A successor generation
+    // may be rotated only when the authenticated Cloud Tasks retry header has
+    // reached the bounded safety ceiling; all earlier capacity responses use
+    // the queue's normal backoff.
+    const retryCount = trustedCloudTasksRetryCount(request.headers, true);
     if (!isAnalysisV2WorkerAvailable()) {
         emitWorkerOutcome({
             context,
@@ -136,7 +179,7 @@ async function handlePOST(
 
     let delivery;
     try {
-        delivery = parseAnalysisV2TaskPayload(body);
+        delivery = parseAnalysisV2WorkerTaskPayload(body);
     } catch (error) {
         if (error instanceof ZodError) {
             emitWorkerOutcome({
@@ -160,13 +203,135 @@ async function handlePOST(
         return NextResponse.json({ code: 'ANALYSIS_FAILED' }, { status: 500 });
     }
 
-    const jobKey = observableJobKey(delivery.jobKey);
-    const analysisRequestId = delivery.requestId;
+    try {
+        assertAnalysisTaskWorkloadRole(delivery.workloadRole, 'paid');
+    } catch {
+        const requestId = 'kind' in delivery ? delivery.preflightId : delivery.requestId;
+        const jobKey = 'kind' in delivery ? null : observableJobKey(delivery.jobKey);
+        emitWorkerOutcome({
+            context,
+            event: 'analysis_v2.worker_failed',
+            analysisRequestId: requestId,
+            jobKey,
+            disposition: 'rejected',
+            retryable: false,
+            errorCode: 'ANALYSIS_V2_WORKLOAD_ROLE_MISMATCH',
+        });
+        return NextResponse.json({ code: 'WORKLOAD_ROLE_MISMATCH' }, { status: 503 });
+    }
+
+    // New fresh-admission tasks must carry the explicit paid role. Ordinary
+    // pre-existing V2 deliveries remain roleless-compatible during drain, but
+    // a roleless fresh payload is ambiguous and must not cross the split.
+    if ('kind' in delivery
+        && delivery.kind === 'fresh_admission'
+        && delivery.workloadRole !== 'paid') {
+        emitWorkerOutcome({
+            context,
+            analysisRequestId: delivery.preflightId,
+            jobKey: null,
+            event: 'analysis_v2.worker_failed',
+            disposition: 'rejected',
+            retryable: false,
+            errorCode: 'ANALYSIS_V2_WORKLOAD_ROLE_MISMATCH',
+        });
+        return NextResponse.json({ code: 'WORKLOAD_ROLE_MISMATCH' }, { status: 503 });
+    }
+
     const taskContract = analysisV2WorkerTaskContractFromHeader(
         request.headers.get(ANALYSIS_V2_WORKER_TASK_CONTRACT_HEADER),
     );
+    if ('kind' in delivery && delivery.kind === 'fresh_admission') {
+        try {
+            const outcome = await processAnalysisV2FreshAdmission(
+                supabaseAdmin,
+                {
+                    preflightId: delivery.preflightId,
+                    generation: delivery.generation,
+                    dispatchGeneration: delivery.dispatchGeneration,
+                    dispatchToken: delivery.dispatchToken,
+                },
+                {
+                    betaCreditCoordinator: createBetaApifyPreflightCoordinator({
+                        store: createBetaApifyCreditPoolStore(supabaseAdmin),
+                        clientForSlot: createServerBetaApifyCreditClientFactory(),
+                    }),
+                },
+            );
+            if (outcome === 'capacity_pending') {
+                if (
+                    retryCount !== null
+                    && retryCount >= CLOUD_TASK_DELIVERY_RETRY_SAFETY_CEILING
+                ) {
+                    await rearmAnalysisV2FreshAdmissionDispatch(
+                        supabaseAdmin,
+                        {
+                            preflightId: delivery.preflightId,
+                            generation: delivery.generation,
+                            dispatchGeneration: delivery.dispatchGeneration,
+                            dispatchToken: delivery.dispatchToken,
+                        },
+                        {
+                            enqueue: payload => enqueueAnalysisV2FreshAdmissionTask(
+                                payload,
+                                { config },
+                            ),
+                            lookup: input => lookupAnalysisV2FreshAdmissionTask(input, { config }),
+                        },
+                    );
+                }
+                emitWorkerOutcome({
+                    context,
+                    analysisRequestId: delivery.preflightId,
+                    jobKey: null,
+                    event: 'analysis_v2.worker_retry',
+                    disposition: 'capacity_pending',
+                    retryable: true,
+                    errorCode: 'ANALYSIS_V2_PROVIDER_ADMISSION_CAPACITY_PENDING',
+                });
+                return NextResponse.json(
+                    { code: 'ANALYSIS_V2_PROVIDER_ADMISSION_CAPACITY_PENDING' },
+                    { status: 503 },
+                );
+            }
+            if (outcome === 'blocked') {
+                await settleBlockedFreshAdmission(
+                    supabaseAdmin,
+                    delivery.preflightId,
+                    operationalLogger,
+                );
+            }
+            emitWorkerOutcome({
+                context,
+                analysisRequestId: delivery.preflightId,
+                jobKey: null,
+                event: 'analysis_v2.worker_completed',
+                disposition: outcome,
+            });
+            return NextResponse.json({ status: outcome });
+        } catch (error) {
+            const failure = classifyPreflightWorkerFailure(error);
+            const errorCode = preflightWorkerErrorCode(failure.category);
+            emitWorkerOutcome({
+                context,
+                analysisRequestId: delivery.preflightId,
+                jobKey: null,
+                event: 'analysis_v2.worker_retry',
+                disposition: 'transient',
+                retryable: failure.retryable,
+                errorCode,
+            });
+            return NextResponse.json(
+                { code: 'ANALYSIS_FAILED' },
+                { status: failure.httpStatus ?? 500 },
+            );
+        }
+    }
+    const paidDelivery = delivery as import('@/lib/services/analysis/v2-job-store').AnalysisV2TaskDelivery;
+    const jobKey = observableJobKey(paidDelivery.jobKey);
+    const analysisRequestId = paidDelivery.requestId;
     try {
-        const outcome = await processAnalysisV2TaskDelivery(delivery, {
+        const outcome = await processAnalysisV2TaskDelivery(paidDelivery, {
             handlerDeadlineAtMs: startedAtMs + taskContract.handlerWindowMs,
             jobLeaseSeconds: taskContract.jobLeaseSeconds,
         });
@@ -184,7 +349,29 @@ async function handlePOST(
                 retryable: true,
                 errorCode,
             });
-            return NextResponse.json({ code: errorCode }, { status: 500 });
+            const isCapacityWait = errorCode === 'ANALYSIS_V2_AI_CAPACITY_PENDING'
+                || errorCode === 'ANALYSIS_V2_PROVIDER_ADMISSION_CAPACITY_PENDING';
+            if (isCapacityWait) {
+                if (
+                    retryCount !== null
+                    && retryCount >= CLOUD_TASK_DELIVERY_RETRY_SAFETY_CEILING
+                ) {
+                    try {
+                        await rearmAnalysisV2JobAfterCapacity(
+                            paidDelivery as AnalysisV2TaskDelivery,
+                            { config, store: analysisV2JobStore },
+                        );
+                    } catch {
+                        // The old delivery remains retryable; a failed rearm must never ack work
+                        // without either a successor task or the original dispatch fence.
+                        return NextResponse.json({ code: errorCode }, { status: 503 });
+                    }
+                }
+            }
+            return NextResponse.json(
+                { code: errorCode },
+                { status: isCapacityWait ? 503 : 500 },
+            );
         }
         if (outcome.status === 'failed') {
             const errorCode = safeErrorCode(

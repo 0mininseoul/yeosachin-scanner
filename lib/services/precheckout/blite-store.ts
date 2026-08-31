@@ -127,7 +127,19 @@ const statusSchema = z.discriminatedUnion('state', [
     }).strict(),
 ]);
 
-const claimInputSchema = z.object({ preflightId: uuid }).strict();
+const claimInputSchema = z.object({
+    preflightId: uuid,
+    dispatchGeneration: z.number().int().min(1).max(100).optional(),
+    dispatchToken: uuid.optional(),
+}).strict().superRefine((value, context) => {
+    if ((value.dispatchGeneration === undefined) !== (value.dispatchToken === undefined)) {
+        context.addIssue({
+            code: z.ZodIssueCode.custom,
+            path: ['dispatchToken'],
+            message: 'B-lite dispatch generation/token must be supplied together',
+        });
+    }
+});
 const terminalInputSchema = z.object({
     preflightId: uuid,
     leaseToken: uuid,
@@ -146,12 +158,24 @@ export type { PrecheckoutBliteSourceV1 };
  */
 export function createPrecheckoutBliteTerminalStore(client: RpcClient = supabaseAdmin) {
     return {
-        async claim(input: { preflightId: string }): Promise<PrecheckoutBliteClaim> {
+        async claim(input: {
+            preflightId: string;
+            dispatchGeneration?: number;
+            dispatchToken?: string;
+        }): Promise<PrecheckoutBliteClaim> {
             const parsedInput = claimInputSchema.safeParse(input);
             if (!parsedInput.success) throw persistenceError();
-            const { data, error } = await client.rpc('claim_precheckout_blite_v2', {
-                p_preflight_id: parsedInput.data.preflightId,
-            });
+            const { data, error } = parsedInput.data.dispatchGeneration !== undefined
+                ? await client.rpc('claim_precheckout_blite_v3', {
+                    p_preflight_id: parsedInput.data.preflightId,
+                    p_dispatch_generation: parsedInput.data.dispatchGeneration,
+                    p_dispatch_token: parsedInput.data.dispatchToken,
+                    p_workload_role: 'preflight',
+                    p_contract_version: 2,
+                })
+                : await client.rpc('claim_precheckout_blite_v2', {
+                    p_preflight_id: parsedInput.data.preflightId,
+                });
             if (error) throw persistenceError(error);
             const parsed = v2ClaimSchema.safeParse(data);
             if (!parsed.success) throw persistenceError();
@@ -186,6 +210,44 @@ export function createPrecheckoutBliteTerminalStore(client: RpcClient = supabase
                 p_lease_token: parsedInput.data.leaseToken,
                 p_reason: parsedInput.data.reason,
             });
+            if (error || typeof data !== 'boolean') throw persistenceError(error);
+            return data;
+        },
+
+        /** Release a capacity wait without consuming the two-attempt B-lite budget. */
+        async deferCapacity(input: {
+            preflightId: string;
+            leaseToken: string;
+            dispatchGeneration?: number;
+            dispatchToken?: string;
+        }): Promise<boolean> {
+            const parsedInput = terminalInputSchema.safeParse(input);
+            if (!parsedInput.success) throw persistenceError();
+            const hasDispatchFence = input.dispatchGeneration !== undefined
+                || input.dispatchToken !== undefined;
+            if (hasDispatchFence && (
+                input.dispatchGeneration === undefined
+                || input.dispatchToken === undefined
+                || !Number.isSafeInteger(input.dispatchGeneration)
+                || input.dispatchGeneration < 1
+                || input.dispatchGeneration > 100
+                || !uuid.safeParse(input.dispatchToken).success
+            )) {
+                throw persistenceError();
+            }
+            const { data, error } = hasDispatchFence
+                ? await client.rpc('defer_precheckout_blite_v2_capacity_v2', {
+                    p_preflight_id: parsedInput.data.preflightId,
+                    p_lease_token: parsedInput.data.leaseToken,
+                    p_dispatch_generation: input.dispatchGeneration,
+                    p_dispatch_token: input.dispatchToken,
+                    p_workload_role: 'preflight',
+                    p_contract_version: 2,
+                })
+                : await client.rpc('defer_precheckout_blite_v2_capacity', {
+                    p_preflight_id: parsedInput.data.preflightId,
+                    p_lease_token: parsedInput.data.leaseToken,
+                });
             if (error || typeof data !== 'boolean') throw persistenceError(error);
             return data;
         },

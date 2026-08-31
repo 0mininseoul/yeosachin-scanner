@@ -73,11 +73,13 @@ import {
     type StoredPreflightProviderRun,
     type PreflightProviderRunStore,
 } from './preflight-provider-run';
+import { AnalysisProviderAdmissionCapacityPendingError } from './provider-admission-store';
 import { preflightTargetInputHash } from './preflight-identity';
 import {
     BETA_APIFY_POOL_CAPACITY_ERROR,
     type BetaApifyPreflightCoordinator,
 } from './beta-apify-preflight-coordinator';
+import { PreflightTaskEnqueueError } from './preflight-tasks';
 import { shouldAbortPipelineBeforeExecution } from './pipeline-retry';
 import {
     anonymousProfileCache,
@@ -165,13 +167,23 @@ export const PREFLIGHT_DATABASE_NAMES = Object.freeze({
     claimBetaPrepareRpc: 'claim_analysis_beta_preflight_prepare',
     releaseBetaPrepareClaimRpc: 'release_analysis_beta_preflight_prepare_claim',
     blockBetaPrepareCapacityRpc: 'block_analysis_beta_preflight_capacity',
-    claimRpc: 'claim_analysis_v2_preflight',
+    // Versioned split-role RPCs are the only path allowed to stamp the durable
+    // preflight dispatch/claim contract. The old RPC remains available solely
+    // for roleless mixed-version drain.
+    claimRpc: 'claim_analysis_v2_preflight_v2',
+    legacyClaimRpc: 'claim_analysis_v2_preflight',
     claimedTargetHashRpc: 'read_claimed_analysis_v2_preflight_target_hash_v1',
-    reserveDispatchRpc: 'reserve_analysis_v2_preflight_dispatch',
-    markDispatchedRpc: 'mark_analysis_v2_preflight_dispatched',
-    bliteDispatchReserveRpc: 'reserve_precheckout_blite_dispatch_v1',
+    reserveDispatchRpc: 'reserve_analysis_v2_preflight_dispatch_v2',
+    markDispatchedRpc: 'mark_analysis_v2_preflight_dispatched_v2',
+    bliteDispatchReserveRpc: 'reserve_precheckout_blite_dispatch_v2',
     bliteDispatchFailedRpc: 'mark_precheckout_blite_dispatch_failed_v1',
-    bliteDispatchEnqueuedRpc: 'mark_precheckout_blite_dispatch_enqueued_v1',
+    bliteDispatchEnqueuedRpc: 'mark_precheckout_blite_dispatch_v2',
+    bliteDispatchRearmRpc: 'rearm_precheckout_blite_dispatch_v3',
+    providerCapacityDeferRpc: 'defer_analysis_preflight_for_provider_capacity_v2',
+    providerCapacityRearmRpc: 'rearm_analysis_preflight_dispatch_for_provider_capacity_v2',
+    providerCapacityMarkRpc: 'mark_analysis_preflight_rearmed_dispatch_for_provider_capacity_v2',
+    providerCapacityRecoveryListRpc: 'list_analysis_preflight_dispatch_recovery_v2',
+    bliteDispatchRecoveryListRpc: 'list_precheckout_blite_dispatch_recovery_v2',
     releaseClaimRpc: 'release_analysis_preflight_claim',
     completeRpc: 'complete_analysis_v2_preflight',
     blockRpc: 'block_analysis_v2_preflight',
@@ -519,7 +531,10 @@ export interface PreflightStore {
         userId: string,
         options?: OwnerScopedOptions,
     ): Promise<StoredPreflight | null>;
-    claim(preflightId: string): Promise<ClaimedPreflight | null>;
+    claim(preflightId: string, dispatchFence?: {
+        generation: number;
+        reservationToken: string;
+    }): Promise<ClaimedPreflight | null>;
     reserveDispatch(preflightId: string, userId: string): Promise<{
         shouldEnqueue: boolean;
         generation: number;
@@ -532,9 +547,34 @@ export interface PreflightStore {
         generation: number;
         reservationToken: string;
     }): Promise<void>;
+    deferProviderCapacity?(claim: ClaimedPreflight): Promise<boolean>;
+    rearmProviderCapacityDispatch?(input: {
+        preflightId: string;
+        expectedGeneration: number;
+        expectedReservationToken: string;
+    }): Promise<{
+        shouldEnqueue: boolean;
+        generation: number;
+        reservationToken: string | null;
+    }>;
+    markProviderCapacityDispatch?(input: {
+        preflightId: string;
+        generation: number;
+        reservationToken: string;
+    }): Promise<boolean>;
     reserveBliteDispatch?(preflightId: string): Promise<{
         shouldEnqueue: boolean;
         dispatchToken: string | null;
+        dispatchGeneration?: number;
+    }>;
+    rearmBliteDispatch?(input: {
+        preflightId: string;
+        expectedGeneration: number;
+        expectedDispatchToken: string;
+    }): Promise<{
+        shouldEnqueue: boolean;
+        dispatchToken: string | null;
+        dispatchGeneration: number;
     }>;
     markBliteDispatchFailed?(input: {
         preflightId: string;
@@ -542,6 +582,7 @@ export interface PreflightStore {
     }): Promise<boolean>;
     markBliteDispatchEnqueued?(input: {
         preflightId: string;
+        dispatchGeneration: number;
         dispatchToken: string;
     }): Promise<boolean>;
     releaseClaim(claim: ClaimedPreflight): Promise<void>;
@@ -1223,6 +1264,8 @@ export function createSupabasePreflightStore(
                     p_preflight_id: preflightId,
                     p_user_id: userId,
                     p_dispatch_token: proposedToken,
+                    p_workload_role: 'preflight',
+                    p_contract_version: 2,
                 }
             );
             if (error) throwRpcError(error, 'dispatch reserve');
@@ -1260,6 +1303,8 @@ export function createSupabasePreflightStore(
                     p_user_id: input.userId,
                     p_dispatch_generation: input.generation,
                     p_dispatch_token: input.reservationToken,
+                    p_workload_role: 'preflight',
+                    p_contract_version: 2,
                 }
             );
             if (error) throwRpcError(error, 'dispatch mark');
@@ -1268,10 +1313,87 @@ export function createSupabasePreflightStore(
             }
         },
 
+        async deferProviderCapacity(claim) {
+            const { data, error } = await client.rpc(
+                PREFLIGHT_DATABASE_NAMES.providerCapacityDeferRpc,
+                {
+                    p_preflight_id: claim.preflightId,
+                    p_claim_token: claim.claimToken,
+                    p_workload_role: 'preflight',
+                    p_contract_version: 2,
+                },
+            );
+            if (error) throwRpcError(error, 'provider capacity defer');
+            if (typeof data !== 'boolean') {
+                throw new Error('PREFLIGHT_PERSISTENCE_ERROR: invalid provider capacity defer.');
+            }
+            return data;
+        },
+
+        async rearmProviderCapacityDispatch(input) {
+            const expectedGeneration = Number(input.expectedGeneration);
+            if (!Number.isSafeInteger(expectedGeneration) || expectedGeneration < 1) {
+                throw new Error('PREFLIGHT_PERSISTENCE_ERROR: invalid provider dispatch generation.');
+            }
+            const expectedReservationToken = requiredUuid(
+                input.expectedReservationToken,
+                'provider expected reservation token',
+            );
+            const { data, error } = await client.rpc(
+                PREFLIGHT_DATABASE_NAMES.providerCapacityRearmRpc,
+                {
+                    p_preflight_id: input.preflightId,
+                    p_expected_generation: expectedGeneration,
+                    p_expected_reservation_token: expectedReservationToken,
+                },
+            );
+            if (error) throwRpcError(error, 'provider capacity dispatch rearm');
+            const row = rpcRow(data, 'provider capacity dispatch rearm');
+            if (
+                !row
+                || typeof row.should_enqueue !== 'boolean'
+                || !Number.isSafeInteger(Number(row.dispatch_generation))
+                || Number(row.dispatch_generation) < 1
+            ) {
+                throw new Error('PREFLIGHT_PERSISTENCE_ERROR: invalid provider dispatch rearm.');
+            }
+            const reservationToken = row.reservation_token === null
+                ? null
+                : requiredUuid(row.reservation_token, 'provider dispatch reservation token');
+            if (row.should_enqueue && reservationToken === null) {
+                throw new Error('PREFLIGHT_PERSISTENCE_ERROR: provider rearm token missing.');
+            }
+            return {
+                shouldEnqueue: row.should_enqueue,
+                generation: Number(row.dispatch_generation),
+                reservationToken,
+            };
+        },
+
+        async markProviderCapacityDispatch(input) {
+            const { data, error } = await client.rpc(
+                PREFLIGHT_DATABASE_NAMES.providerCapacityMarkRpc,
+                {
+                    p_preflight_id: input.preflightId,
+                    p_dispatch_generation: input.generation,
+                    p_dispatch_token: requiredUuid(input.reservationToken, 'provider dispatch token'),
+                },
+            );
+            if (error) throwRpcError(error, 'provider capacity dispatch mark');
+            if (typeof data !== 'boolean') {
+                throw new Error('PREFLIGHT_PERSISTENCE_ERROR: invalid provider dispatch mark.');
+            }
+            return data;
+        },
+
         async reserveBliteDispatch(preflightId) {
             const { data, error } = await client.rpc(
                 PREFLIGHT_DATABASE_NAMES.bliteDispatchReserveRpc,
-                { p_preflight_id: preflightId }
+                {
+                    p_preflight_id: preflightId,
+                    p_workload_role: 'preflight',
+                    p_contract_version: 2,
+                }
             );
             if (error) throwRpcError(error, 'B-lite dispatch reserve');
             const row = rpcRow(data, 'B-lite dispatch reserve');
@@ -1284,7 +1406,56 @@ export function createSupabasePreflightStore(
             if (row.should_enqueue && dispatchToken === null) {
                 throw new Error('PREFLIGHT_PERSISTENCE_ERROR: B-lite dispatch token is missing.');
             }
-            return { shouldEnqueue: row.should_enqueue, dispatchToken };
+            const dispatchGeneration = row.dispatch_generation === undefined
+                ? undefined
+                : Number(row.dispatch_generation);
+            if (dispatchGeneration !== undefined && (
+                !Number.isSafeInteger(dispatchGeneration) || dispatchGeneration < 1
+            )) {
+                throw new Error('PREFLIGHT_PERSISTENCE_ERROR: invalid B-lite dispatch generation.');
+            }
+            return { shouldEnqueue: row.should_enqueue, dispatchToken, dispatchGeneration };
+        },
+
+        async rearmBliteDispatch(input) {
+            if (!Number.isSafeInteger(input.expectedGeneration) || input.expectedGeneration < 1) {
+                throw new Error('PREFLIGHT_PERSISTENCE_ERROR: invalid B-lite dispatch generation.');
+            }
+            const expectedDispatchToken = requiredUuid(
+                input.expectedDispatchToken,
+                'B-lite expected dispatch token',
+            );
+            const { data, error } = await client.rpc(
+                PREFLIGHT_DATABASE_NAMES.bliteDispatchRearmRpc,
+                {
+                    p_preflight_id: input.preflightId,
+                    p_expected_generation: input.expectedGeneration,
+                    p_expected_dispatch_token: expectedDispatchToken,
+                    p_workload_role: 'preflight',
+                    p_contract_version: 2,
+                }
+            );
+            if (error) throwRpcError(error, 'B-lite dispatch rearm');
+            const row = rpcRow(data, 'B-lite dispatch rearm');
+            if (
+                !row
+                || typeof row.should_enqueue !== 'boolean'
+                || !Number.isSafeInteger(Number(row.dispatch_generation))
+                || Number(row.dispatch_generation) < 1
+            ) {
+                throw new Error('PREFLIGHT_PERSISTENCE_ERROR: invalid B-lite dispatch rearm.');
+            }
+            const dispatchToken = row.dispatch_token === null
+                ? null
+                : requiredUuid(row.dispatch_token, 'B-lite dispatch token');
+            if (row.should_enqueue && dispatchToken === null) {
+                throw new Error('PREFLIGHT_PERSISTENCE_ERROR: B-lite rearm token is missing.');
+            }
+            return {
+                shouldEnqueue: row.should_enqueue,
+                dispatchToken,
+                dispatchGeneration: Number(row.dispatch_generation),
+            };
         },
 
         async markBliteDispatchFailed(input) {
@@ -1307,7 +1478,10 @@ export function createSupabasePreflightStore(
                 PREFLIGHT_DATABASE_NAMES.bliteDispatchEnqueuedRpc,
                 {
                     p_preflight_id: input.preflightId,
+                    p_dispatch_generation: input.dispatchGeneration,
                     p_dispatch_token: input.dispatchToken,
+                    p_workload_role: 'preflight',
+                    p_contract_version: 2,
                 }
             );
             if (error) throwRpcError(error, 'B-lite dispatch mark');
@@ -1317,13 +1491,26 @@ export function createSupabasePreflightStore(
             return data;
         },
 
-        async claim(preflightId) {
+        async claim(preflightId, dispatchFence) {
             const claimToken = randomUUID();
-            const { data, error } = await client.rpc(PREFLIGHT_DATABASE_NAMES.claimRpc, {
-                p_preflight_id: preflightId,
-                p_claim_token: claimToken,
-                p_lease_seconds: PREFLIGHT_WORKER_LEASE_SECONDS,
-            });
+            const { data, error } = dispatchFence
+                ? await client.rpc(PREFLIGHT_DATABASE_NAMES.claimRpc, {
+                    p_preflight_id: preflightId,
+                    p_dispatch_generation: dispatchFence.generation,
+                    p_dispatch_token: requiredUuid(
+                        dispatchFence.reservationToken,
+                        'dispatch reservation token',
+                    ),
+                    p_claim_token: claimToken,
+                    p_lease_seconds: PREFLIGHT_WORKER_LEASE_SECONDS,
+                    p_workload_role: 'preflight',
+                    p_contract_version: 2,
+                })
+                : await client.rpc(PREFLIGHT_DATABASE_NAMES.legacyClaimRpc, {
+                    p_preflight_id: preflightId,
+                    p_claim_token: claimToken,
+                    p_lease_seconds: PREFLIGHT_WORKER_LEASE_SECONDS,
+                });
             if (error) throwRpcError(error, 'claim');
             const row = rpcRow(data, 'claim');
             if (!row) return null;
@@ -1611,6 +1798,40 @@ export function classifyPreflightError(error: unknown): ClassifiedPreflightError
             paidFallbackEligible: false,
         };
     }
+    if (message === 'ANALYSIS_PROVIDER_ADMISSION_CAPACITY_PENDING') {
+        return {
+            category: 'run_pending',
+            retryable: true,
+            httpStatus: null,
+            paidFallbackEligible: false,
+        };
+    }
+    if (
+        message === 'ANALYSIS_PROVIDER_ADMISSION_IDENTITY_CONFLICT'
+        || message === 'ANALYSIS_PROVIDER_ADMISSION_CLAIM_CONFLICT'
+        || message === 'ANALYSIS_PROVIDER_ADMISSION_CREDENTIAL_FORBIDDEN'
+        || message === 'ANALYSIS_PROVIDER_ADMISSION_CONFIG_ERROR'
+    ) {
+        return {
+            category: 'persistence',
+            retryable: false,
+            httpStatus: null,
+            paidFallbackEligible: false,
+        };
+    }
+    if (
+        message.startsWith('ANALYSIS_PROVIDER_ADMISSION_PERSISTENCE_ERROR')
+        || message === 'ANALYSIS_PROVIDER_ADMISSION_RELEASE_REQUIRED'
+        || message === 'ANALYSIS_PROVIDER_ADMISSION_RENEW_REQUIRED'
+        || message === 'ANALYSIS_PROVIDER_ADMISSION_RESOLUTION_PENDING'
+    ) {
+        return {
+            category: 'persistence',
+            retryable: true,
+            httpStatus: null,
+            paidFallbackEligible: false,
+        };
+    }
     if (message === PRECHECKOUT_BLITE_PREFLIGHT_FENCE_LOST) {
         return {
             category: 'persistence',
@@ -1753,7 +1974,11 @@ export async function prepareBetaPreflightDispatch(input: {
     deliveryRetryCount?: number | null;
     coordinator: BetaApifyPreflightCoordinator;
     store?: BetaPreflightPrepareStore;
-    enqueue: (preflightId: string, generation: number) => Promise<'enqueued' | 'exists'>;
+    enqueue: (
+        preflightId: string,
+        generation: number,
+        reservationToken: string,
+    ) => Promise<'enqueued' | 'exists'>;
 }): Promise<'prepared' | 'blocked' | 'noop'> {
     const store = input.store ?? preflightStore;
     if (shouldAbortPipelineBeforeExecution(input.deliveryRetryCount ?? null)) {
@@ -1831,7 +2056,11 @@ export async function prepareBetaPreflightDispatch(input: {
     if (!reservation.reservationToken) {
         throw new Error('PREFLIGHT_PERSISTENCE_ERROR: beta dispatch token is missing.');
     }
-    await input.enqueue(input.preflightId, reservation.generation);
+    await input.enqueue(
+        input.preflightId,
+        reservation.generation,
+        reservation.reservationToken,
+    );
     await store.markDispatched({
         preflightId: input.preflightId,
         userId: input.userId,
@@ -1854,6 +2083,7 @@ export async function processPreflight(
         /** Full profile collection for the B-lite single-collection cohort path. */
         getFullProfile?: typeof getApifyProfile;
         providerRunStore?: PreflightProviderRunStore;
+        providerAdmissionStore?: import('./provider-admission-store').AnalysisProviderAdmissionStore;
         anonymousProfileCache?: AnonymousProfileCache;
         betaCreditCoordinator?: BetaApifyPreflightCoordinator;
         recordPreflightFailure?: typeof recordPreflightFailure;
@@ -1876,11 +2106,28 @@ export async function processPreflight(
         finalizeReadyWithSource?: (
             input: FinalizePrecheckoutBliteSourceInput
         ) => Promise<boolean>;
-        enqueueBliteInference?: (preflightId: string) => Promise<'enqueued' | 'exists'>;
+        /** Exact database-owned dispatch fence carried by a new task.  An absent fence means
+         * this invocation is a roleless mixed-version drain and must use the legacy claim RPC. */
+        dispatchFence?: {
+            generation: number;
+            reservationToken: string;
+        };
+        enqueueBliteInference?: (
+            preflightId: string,
+            dispatchGeneration?: number,
+            dispatchToken?: string,
+        ) => Promise<'enqueued' | 'exists'>;
     } = {}
-): Promise<'noop' | 'ready' | 'blocked'> {
+): Promise<'noop' | 'ready' | 'blocked' | 'capacity_pending'> {
     const store = dependencies.store ?? preflightStore;
     const providerRuns = dependencies.providerRunStore ?? preflightProviderRunStore;
+    const bindProviderRun = (
+        input: Parameters<typeof bindPreflightProviderRunCheckpoint>[0],
+    ) => bindPreflightProviderRunCheckpoint({
+        ...input,
+        env: dependencies.env,
+        providerAdmissionStore: dependencies.providerAdmissionStore,
+    });
     const recordTerminalFailure = (
         claim: ClaimedPreflight,
         errorCode: string,
@@ -1917,24 +2164,31 @@ export async function processPreflight(
         if (reservation && !reservation.shouldEnqueue) return;
         const dispatchToken = reservation?.dispatchToken ?? null;
         try {
-            await dependencies.enqueueBliteInference(targetPreflightId);
+            await dependencies.enqueueBliteInference(
+                targetPreflightId,
+                reservation?.dispatchGeneration,
+                dispatchToken ?? undefined,
+            );
         } catch (error) {
-            if (dispatchToken && store.markBliteDispatchFailed) {
-                await store.markBliteDispatchFailed({
-                    preflightId: targetPreflightId,
-                    dispatchToken,
-                });
-            }
+            // Every enqueue failure retains the exact generation/token.  Even a typed terminal
+            // rejection can arrive after the task service committed the deterministic task; an
+            // idle transition would make accepted B-lite work invisible to maintenance recovery.
+            // The enqueuing fence is therefore cleared only by an exact successful mark or a
+            // bounded maintenance reconciliation of the same task identity.
             throw error;
         }
         if (dispatchToken && store.markBliteDispatchEnqueued) {
+            if (reservation?.dispatchGeneration === undefined) {
+                throw new Error('PREFLIGHT_PERSISTENCE_ERROR: B-lite dispatch generation missing.');
+            }
             await store.markBliteDispatchEnqueued({
                 preflightId: targetPreflightId,
+                dispatchGeneration: reservation.dispatchGeneration,
                 dispatchToken,
             });
         }
     };
-    const claim = await store.claim(preflightId);
+    const claim = await store.claim(preflightId, dependencies.dispatchFence);
     if (!claim) {
         // A finalized cohort row may be replayed after the original worker lost the
         // enqueue response. The database fence checks persisted cohort/readiness/source;
@@ -2103,11 +2357,17 @@ export async function processPreflight(
                         dependencies.env,
                     )
             );
-            const bound = await bindPreflightProviderRunCheckpoint({
+            const bound = await bindProviderRun({
                 store: providerRuns,
                 claim,
                 inputHash,
                 identity,
+                ...(isBetatest && betaHold
+                    ? {
+                        providerAdmissionWorkloadRole: 'paid' as const,
+                        providerAdmissionJobKey: 'preflight:provider',
+                    }
+                    : {}),
             });
             try {
                 profile = await (dependencies.getFullProfile ?? getApifyProfile)(
@@ -2199,7 +2459,7 @@ export async function processPreflight(
                         });
                         return 'blocked';
                     }
-                    const bound = await bindPreflightProviderRunCheckpoint({
+                    const bound = await bindProviderRun({
                         store: providerRuns,
                         claim,
                         inputHash,
@@ -2216,7 +2476,7 @@ export async function processPreflight(
                             dependencies.env,
                         )
                     );
-                    const bound = await bindPreflightProviderRunCheckpoint({
+                    const bound = await bindProviderRun({
                         store: providerRuns,
                         claim,
                         inputHash,
@@ -2264,11 +2524,17 @@ export async function processPreflight(
                 });
                 return 'blocked';
             }
-            const bound = await bindPreflightProviderRunCheckpoint({
+            const bound = await bindProviderRun({
                 store: providerRuns,
                 claim,
                 inputHash,
                 identity: preflightProviderIdentity(existingRun.credentialSlot),
+                ...(isBetatest && betaHold
+                    ? {
+                        providerAdmissionWorkloadRole: 'paid' as const,
+                        providerAdmissionJobKey: 'preflight:provider',
+                    }
+                    : {}),
             });
             profile = await (dependencies.getFallbackProfile ?? getApifyProfileSummary)(
                 claim.targetInstagramId,
@@ -2279,11 +2545,17 @@ export async function processPreflight(
                 betaHold?.credentialSlot
                 ?? selectAnalysisV2ApifyCredentialSlot(dependencies.env)
             );
-            const bound = await bindPreflightProviderRunCheckpoint({
+            const bound = await bindProviderRun({
                 store: providerRuns,
                 claim,
                 inputHash,
                 identity,
+                ...(betaHold
+                    ? {
+                        providerAdmissionWorkloadRole: 'paid' as const,
+                        providerAdmissionJobKey: 'preflight:provider',
+                    }
+                    : {}),
             });
             profile = await (dependencies.getFallbackProfile ?? getApifyProfileSummary)(
                 claim.targetInstagramId,
@@ -2329,7 +2601,7 @@ export async function processPreflight(
                         dependencies.env,
                     )
                 );
-                const bound = await bindPreflightProviderRunCheckpoint({
+                const bound = await bindProviderRun({
                     store: providerRuns,
                     claim,
                     inputHash,
@@ -2465,6 +2737,35 @@ export async function processPreflight(
                 ...profileObservation, errorCode: 'BETA_CAPACITY_UNAVAILABLE',
             });
             return 'blocked';
+        }
+        if (
+            !terminalized
+            && error instanceof AnalysisProviderAdmissionCapacityPendingError
+        ) {
+            if (!store.deferProviderCapacity) {
+                throw new Error(
+                    'ANALYSIS_PROVIDER_ADMISSION_PERSISTENCE_ERROR: capacity defer unavailable.'
+                );
+            }
+            const deferred = await store.deferProviderCapacity(claim);
+            if (!deferred) {
+                throw new Error(
+                    'ANALYSIS_PROVIDER_ADMISSION_PERSISTENCE_ERROR: capacity defer fence mismatch.'
+                );
+            }
+            // The claim is durably rearmed without consuming worker_attempt_count. The route
+            // returns a non-2xx response and rotates the dispatch generation before acking.
+            terminalized = false;
+            notifyPreflightObserver(dependencies.observer, {
+                type: 'failed',
+                ...baseObservation,
+                ...profileObservation,
+                category: 'run_pending',
+                retryable: true,
+                httpStatus: 503,
+                workerAttemptCount: claim.workerAttemptCount,
+            });
+            return 'capacity_pending';
         }
         let failure = classifyPreflightError(error);
         if (!terminalized) {

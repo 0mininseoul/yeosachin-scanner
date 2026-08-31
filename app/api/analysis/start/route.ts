@@ -27,6 +27,7 @@ import {
     AccountPrincipalAdmissionError,
     requireActiveAccountClassification,
 } from '@/lib/services/identity/account-principal-store';
+import { legacyAnalysisProducerGateResponse } from '@/lib/services/analysis/legacy-analysis-gate';
 
 // 무료 분석 횟수 제한
 const FREE_ANALYSIS_LIMIT = 1;
@@ -76,6 +77,13 @@ async function tryStartBackgroundProcessing(
 }
 
 export async function POST(request: Request) {
+    const gate = legacyAnalysisProducerGateResponse();
+    if (gate) {
+        return NextResponse.json(
+            { error: 'Legacy analysis intake is unavailable.', code: gate.code },
+            { status: gate.status },
+        );
+    }
     try {
         const supabase = await createClient();
 

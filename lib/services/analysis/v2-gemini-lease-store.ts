@@ -12,12 +12,28 @@ import {
 import type {
     AnalysisV2AiAttemptTerminalInput,
 } from '@/lib/services/analysis/v2-ai-attempt-store';
+import {
+    analysisProviderAdmissionStore,
+    isAnalysisProviderAdmissionEnabled,
+    AnalysisProviderAdmissionFenceError,
+    AnalysisProviderAdmissionCapacityPendingError,
+    AnalysisProviderAdmissionClaimConflictError,
+    AnalysisProviderAdmissionIdentityConflictError,
+    AnalysisProviderAdmissionPersistenceError,
+    AnalysisProviderAdmissionResolutionPendingError,
+    type AnalysisProviderAdmissionLease,
+    type AnalysisProviderAdmissionStore,
+} from './provider-admission-store';
 
 const UUID_PATTERN =
     /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const JOB_KEY_PATTERN = /^[a-z0-9][a-z0-9:._-]{0,159}$/;
 const OPERATION_KEY_PATTERN =
     /^(gender-triage|gender-resolution|feature-analysis|high-risk-narrative|private-account-name|partner-safety):[0-9a-f]{64}$/;
+
+/** B-lite has a shorter, explicit T+86s budget but keeps the established 240s DB lease. */
+export const ANALYSIS_V2_GEMINI_BLITE_MIN_REMAINING_MS = 43_000;
+export const ANALYSIS_V2_GEMINI_BLITE_LEASE_SECONDS = 240;
 
 export const ANALYSIS_V2_GEMINI_LEASE_DATABASE_NAMES = Object.freeze({
     table: 'analysis_v2_gemini_leases',
@@ -69,8 +85,13 @@ const releaseResultSchema = z.array(z.object({
 const acquireInputSchema = z.object({
     requestId: z.string().regex(UUID_PATTERN),
     jobKey: z.string().regex(JOB_KEY_PATTERN),
+    /** Durable analysis_pipeline_jobs ownership; distinct from the Gemini slot claim. */
+    jobClaimToken: z.string().regex(UUID_PATTERN),
     attempt: z.number().int().min(1).max(4),
+    /** Handler deadline is monotonic (the same clock returned by dependencies.nowMs). */
     handlerDeadlineAtMs: z.number().finite().nonnegative(),
+    /** The only deadline/lease override is the exact, audited B-lite identity. */
+    leaseProfile: z.literal('precheckout_blite').optional(),
     operationKey: z.string().regex(OPERATION_KEY_PATTERN).optional(),
     stage: z.enum([
         'genderTriage',
@@ -88,6 +109,17 @@ const acquireInputSchema = z.object({
         context.addIssue({
             code: 'custom',
             message: 'V2 leases require a complete operation identity.',
+        });
+    }
+    const isExactBliteIdentity = input.jobKey === 'preflight:blite'
+        && input.attempt === 1
+        && input.operationKey === undefined
+        && input.stage === undefined
+        && input.aiStagePolicyVersion === undefined;
+    if (input.leaseProfile !== undefined && !isExactBliteIdentity) {
+        context.addIssue({
+            code: 'custom',
+            message: 'B-lite lease profile is restricted to the exact preflight identity.',
         });
     }
 });
@@ -112,6 +144,8 @@ export type AnalysisV2GeminiLease = Readonly<{
     claimToken: string;
     fence: number;
     expiresAt: string;
+    /** Additive rate-budget fence; the eight-slot Gemini lease remains authoritative. */
+    providerAdmissionLease?: AnalysisProviderAdmissionLease;
     operationKey?: string;
     stage?: AiStageName;
     aiStagePolicyVersion?: AiStagePolicyVersion;
@@ -126,14 +160,18 @@ export interface AnalysisV2GeminiLeaseDependencies {
     rpc(name: string, params: Record<string, unknown>): PromiseLike<RpcResult>;
     nowMs(): number;
     randomUuid(): string;
+    env?: Record<string, string | undefined>;
+    providerAdmissionStore?: AnalysisProviderAdmissionStore;
 }
 
 export interface AnalysisV2GeminiLeaseStore {
     acquire(input: {
         requestId: string;
         jobKey: string;
+        jobClaimToken: string;
         attempt: number;
         handlerDeadlineAtMs: number;
+        leaseProfile?: 'precheckout_blite';
         operationKey?: string;
         stage?: AiStageName;
         aiStagePolicyVersion?: AiStagePolicyVersion;
@@ -228,9 +266,170 @@ function isV2Lease(lease: AnalysisV2GeminiLease): lease is AnalysisV2GeminiLease
         && typeof lease.stage === 'string';
 }
 
+async function releaseExistingLease(
+    lease: AnalysisV2GeminiLease,
+    dependencies: AnalysisV2GeminiLeaseDependencies,
+): Promise<void> {
+    const { data, error } = await dependencies.rpc(
+        isV2Lease(lease)
+            ? ANALYSIS_V2_GEMINI_LEASE_DATABASE_NAMES.releaseV2Rpc
+            : ANALYSIS_V2_GEMINI_LEASE_DATABASE_NAMES.releaseRpc,
+        isV2Lease(lease) ? {
+            p_slot: lease.slot,
+            p_claim_token: lease.claimToken,
+            p_fence: lease.fence,
+            p_operation_key: lease.operationKey,
+        } : {
+            p_slot: lease.slot,
+            p_claim_token: lease.claimToken,
+            p_fence: lease.fence,
+        }
+    );
+    if (error) throw new AnalysisV2GeminiLeasePersistenceError();
+    const parsed = releaseResultSchema.safeParse(data);
+    if (!parsed.success) {
+        throw new AnalysisV2GeminiLeasePersistenceError();
+    }
+    const row = parsed.data[0];
+    // A release RPC may commit the slot update and lose its response. A
+    // retry then returns the idempotent post-release shape (`released=false`,
+    // `available`, unchanged fence). Treat that exact state as success; a
+    // newer owner necessarily advances the monotonic fence and still fails
+    // closed below.
+    if (
+        row.lease_state === 'available'
+        && row.fence === lease.fence
+    ) {
+        return;
+    }
+    if (!row.released || row.lease_state !== 'available' || row.fence !== lease.fence) {
+        throw new AnalysisV2GeminiLeaseFenceError();
+    }
+}
+
 export function createAnalysisV2GeminiLeaseStore(
-    dependencies: AnalysisV2GeminiLeaseDependencies = defaultDependencies()
+    overrides: Partial<AnalysisV2GeminiLeaseDependencies> = {}
 ): AnalysisV2GeminiLeaseStore {
+    // Production callers may provide only environment overrides. Always merge them with the
+    // real server defaults so a partial factory call cannot fail at TypeScript/runtime setup.
+    const dependencies: AnalysisV2GeminiLeaseDependencies = {
+        ...defaultDependencies(),
+        ...overrides,
+    };
+    const providerAdmissions = () => dependencies.providerAdmissionStore ?? analysisProviderAdmissionStore;
+    const admissionOperationKey = (input: {
+        operationKey?: string;
+        stage?: AiStageName;
+        attempt: number;
+    }): string => `gemini:${input.operationKey ?? `legacy:${input.stage ?? 'unknown'}`}:attempt:${input.attempt}`;
+    const isKnownNoCommitAdmissionError = (error: unknown): error is
+        AnalysisProviderAdmissionCapacityPendingError
+        | AnalysisProviderAdmissionClaimConflictError
+        | AnalysisProviderAdmissionIdentityConflictError =>
+        error instanceof AnalysisProviderAdmissionCapacityPendingError
+        || error instanceof AnalysisProviderAdmissionClaimConflictError
+        || error instanceof AnalysisProviderAdmissionIdentityConflictError;
+    const rejectAdmissionAndReleaseSlot = async (
+        lease: AnalysisV2GeminiLease,
+        denial: Error,
+    ): Promise<never> => {
+        try {
+            await releaseExistingLease(lease, dependencies);
+        } catch {
+            // Do not return a slot whose release is uncertain. The caller can
+            // retry the lease cleanup using its still-authoritative fence.
+            throw new AnalysisV2GeminiLeasePersistenceError();
+        }
+        throw denial;
+    };
+    const attachProviderAdmission = async (
+        lease: AnalysisV2GeminiLease,
+        input: z.infer<typeof acquireInputSchema>,
+    ): Promise<AnalysisV2GeminiLease> => {
+        if (!isAnalysisProviderAdmissionEnabled(dependencies.env ?? process.env)) {
+            return lease;
+        }
+        const admissionInput = {
+                workloadRole: 'paid',
+                logicalProvider: 'gemini',
+                credentialSlot: `gemini-${lease.slot}`,
+                budgetKey: `paid:gemini:gemini-${lease.slot}`,
+                requestId: input.requestId,
+                jobKey: input.jobKey,
+                operationKey: admissionOperationKey(input),
+                // Gemini's slot lease claim is the provider fence. The worker's
+                // analysis_pipeline_jobs claim is checked separately by the DB RPC.
+                claimToken: lease.claimToken,
+                jobClaimToken: input.jobClaimToken,
+                providerFence: lease.fence,
+                leaseSeconds: input.leaseProfile === 'precheckout_blite'
+                    ? ANALYSIS_V2_GEMINI_BLITE_LEASE_SECONDS
+                    : AI_GEMINI_LEASE_SECONDS,
+            } as const;
+        let providerAdmissionLease: AnalysisProviderAdmissionLease;
+        try {
+            providerAdmissionLease = await providerAdmissions().acquire(admissionInput);
+        } catch (firstError) {
+            // Typed capacity/claim/identity denials are explicit no-commit
+            // outcomes. Do not replay them: return the authoritative Gemini
+            // slot before returning the original denial.
+            if (isKnownNoCommitAdmissionError(firstError)) {
+                return rejectAdmissionAndReleaseSlot(lease, firstError);
+            }
+            // Only an unknown persistence result is replayed. The first call
+            // may have committed the admission before its response was lost,
+            // so the same identity/claims must be retried exactly once.
+            try {
+                providerAdmissionLease = await providerAdmissions().acquire(admissionInput);
+            } catch (secondError) {
+                // A typed denial on replay proves that this identity did not
+                // commit in the first attempt, so safely return the slot and
+                // preserve the typed error for normal queue handling.
+                if (isKnownNoCommitAdmissionError(secondError)) {
+                    return rejectAdmissionAndReleaseSlot(lease, secondError);
+                }
+                // A second unknown result remains ambiguous. Keep the slot
+                // leased (fail closed) so a committed admission cannot be
+                // orphaned by cleanup here.
+                if (!(firstError instanceof AnalysisProviderAdmissionPersistenceError)) {
+                    throw new AnalysisV2GeminiLeasePersistenceError();
+                }
+                throw secondError instanceof AnalysisProviderAdmissionPersistenceError
+                    ? secondError
+                    : new AnalysisV2GeminiLeasePersistenceError();
+            }
+        }
+        return Object.freeze({ ...lease, providerAdmissionLease });
+    };
+    const renewProviderAdmission = async (
+        lease: AnalysisV2GeminiLease,
+    ): Promise<AnalysisV2GeminiLease> => {
+        if (!lease.providerAdmissionLease) return lease;
+        const providerAdmissionLease = await providerAdmissions().renew(
+            lease.providerAdmissionLease
+        );
+        return Object.freeze({ ...lease, providerAdmissionLease });
+    };
+    const releaseProviderAdmission = async (
+        lease: AnalysisV2GeminiLease,
+    ): Promise<void> => {
+        if (!lease.providerAdmissionLease) return;
+        try {
+            await providerAdmissions().release(lease.providerAdmissionLease);
+        } catch (error) {
+            if (!(error instanceof AnalysisProviderAdmissionFenceError)) throw error;
+            const recovered = await providerAdmissions().recoverExpired({
+                admissionId: lease.providerAdmissionLease.admissionId,
+                recoveryToken: randomUUID(),
+            });
+            if (!recovered) throw error;
+            const resolved = await providerAdmissions().resolve({
+                admissionId: lease.providerAdmissionLease.admissionId,
+                resolutionToken: randomUUID(),
+            });
+            if (!resolved) throw new AnalysisProviderAdmissionResolutionPendingError();
+        }
+    };
     return {
         async acquire(rawInput) {
             const input = acquireInputSchema.safeParse(rawInput);
@@ -239,7 +438,11 @@ export function createAnalysisV2GeminiLeaseStore(
             }
             if (
                 input.data.handlerDeadlineAtMs - dependencies.nowMs()
-                < AI_GEMINI_MIN_REMAINING_MS
+                < (
+                    input.data.leaseProfile === 'precheckout_blite'
+                        ? ANALYSIS_V2_GEMINI_BLITE_MIN_REMAINING_MS
+                        : AI_GEMINI_MIN_REMAINING_MS
+                )
             ) {
                 throw new AnalysisV2AiDeadlineTooShortError();
             }
@@ -257,28 +460,39 @@ export function createAnalysisV2GeminiLeaseStore(
                     || input.data.stage === 'featureAnalysis'
                     || input.data.stage === 'privateAccountName'
                 );
-            const { data, error } = await dependencies.rpc(
-                usesSchedulerV1Admission
-                    ? ANALYSIS_V2_GEMINI_LEASE_DATABASE_NAMES.acquireSchedulerV1Rpc
-                    : usesV2
-                    ? ANALYSIS_V2_GEMINI_LEASE_DATABASE_NAMES.acquireV2Rpc
-                    : ANALYSIS_V2_GEMINI_LEASE_DATABASE_NAMES.acquireRpc,
-                usesV2 ? {
+            const acquireRpc = usesSchedulerV1Admission
+                ? ANALYSIS_V2_GEMINI_LEASE_DATABASE_NAMES.acquireSchedulerV1Rpc
+                : usesV2
+                ? ANALYSIS_V2_GEMINI_LEASE_DATABASE_NAMES.acquireV2Rpc
+                : ANALYSIS_V2_GEMINI_LEASE_DATABASE_NAMES.acquireRpc;
+            const acquireParams = usesV2 ? {
                     p_request_id: input.data.requestId,
                     p_job_key: input.data.jobKey,
                     p_operation_key: input.data.operationKey,
                     p_stage: input.data.stage,
                     p_attempt: input.data.attempt,
                     p_claim_token: proposedToken,
-                    p_lease_seconds: AI_GEMINI_LEASE_SECONDS,
+                    p_lease_seconds: input.data.leaseProfile === 'precheckout_blite'
+                        ? ANALYSIS_V2_GEMINI_BLITE_LEASE_SECONDS
+                        : AI_GEMINI_LEASE_SECONDS,
                 } : {
                     p_request_id: input.data.requestId,
                     p_job_key: input.data.jobKey,
                     p_attempt: input.data.attempt,
                     p_claim_token: proposedToken,
-                    p_lease_seconds: AI_GEMINI_LEASE_SECONDS,
-                }
-            );
+                    p_lease_seconds: input.data.leaseProfile === 'precheckout_blite'
+                        ? ANALYSIS_V2_GEMINI_BLITE_LEASE_SECONDS
+                        : AI_GEMINI_LEASE_SECONDS,
+                };
+            let result = await dependencies.rpc(acquireRpc, acquireParams);
+            if (result.error) {
+                // The slot RPC is idempotent by durable operation identity and
+                // proposed claim token. Replay once with the same token when
+                // the first response is unknown; this recovers a committed
+                // lease without inventing a second Gemini fence.
+                result = await dependencies.rpc(acquireRpc, acquireParams);
+            }
+            const { data, error } = result;
             if (error) throw new AnalysisV2GeminiLeasePersistenceError();
             const parsed = acquireResultSchema.safeParse(data);
             if (!parsed.success) {
@@ -297,7 +511,7 @@ export function createAnalysisV2GeminiLeaseStore(
             if (row.lease_claim_token !== proposedToken) {
                 throw new AnalysisV2GeminiLeasePersistenceError();
             }
-            return parseLease(row, input.data);
+            return attachProviderAdmission(parseLease(row, input.data), input.data);
         },
 
         async renew(lease) {
@@ -327,38 +541,15 @@ export function createAnalysisV2GeminiLeaseStore(
             if (!row.renewed || row.lease_state !== 'leased' || !row.expires_at) {
                 throw new AnalysisV2GeminiLeaseFenceError();
             }
-            return Object.freeze({ ...lease, expiresAt: row.expires_at });
+            return renewProviderAdmission(Object.freeze({ ...lease, expiresAt: row.expires_at }));
         },
 
         async release(lease) {
-            const { data, error } = await dependencies.rpc(
-                isV2Lease(lease)
-                    ? ANALYSIS_V2_GEMINI_LEASE_DATABASE_NAMES.releaseV2Rpc
-                    : ANALYSIS_V2_GEMINI_LEASE_DATABASE_NAMES.releaseRpc,
-                isV2Lease(lease) ? {
-                    p_slot: lease.slot,
-                    p_claim_token: lease.claimToken,
-                    p_fence: lease.fence,
-                    p_operation_key: lease.operationKey,
-                } : {
-                    p_slot: lease.slot,
-                    p_claim_token: lease.claimToken,
-                    p_fence: lease.fence,
-                }
-            );
-            if (error) throw new AnalysisV2GeminiLeasePersistenceError();
-            const parsed = releaseResultSchema.safeParse(data);
-            if (!parsed.success) {
-                throw new AnalysisV2GeminiLeasePersistenceError();
-            }
-            const row = parsed.data[0];
-            if (
-                !row.released
-                || row.lease_state !== 'available'
-                || row.fence !== lease.fence
-            ) {
-                throw new AnalysisV2GeminiLeaseFenceError();
-            }
+            await releaseProviderAdmission(lease);
+            // Fail closed: an uncertain admission release must retain the
+            // authoritative Gemini fence. If this second step fails, the slot
+            // remains leased and prevents duplicate provider execution.
+            await releaseExistingLease(lease, dependencies);
         },
 
         async cutoff(lease) {

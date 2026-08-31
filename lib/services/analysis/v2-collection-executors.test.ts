@@ -870,17 +870,20 @@ describe('analysis V2 concrete collection executors', () => {
             provider: 'apify',
             fallback: false,
             expectedResultCount: 2,
-            providerRun: expect.objectContaining({ credentialSlot: 'tertiary' }),
+            // Policy-null production relationship work is always bound to the
+            // shared secondary slot, even if a staging/global selector says
+            // otherwise.  This is the DB admission contract being exercised.
+            providerRun: expect.objectContaining({ credentialSlot: 'secondary' }),
         }));
         expect(getFollowingMock).toHaveBeenCalledWith('target', 2, expect.objectContaining({
             provider: 'apify',
             fallback: false,
             expectedResultCount: 2,
-            providerRun: expect.objectContaining({ credentialSlot: 'tertiary' }),
+            providerRun: expect.objectContaining({ credentialSlot: 'secondary' }),
         }));
         expect(checkpointRelationshipSide).toHaveBeenCalledTimes(2);
         expect(providers.bindAdapterCheckpoint).toHaveBeenCalledWith(
-            expect.objectContaining({ credentialSlot: 'tertiary' })
+            expect.objectContaining({ credentialSlot: 'secondary' })
         );
         expect(result.checkpoint.manifest.profileBatches).toHaveLength(1);
         expect(result.checkpoint.manifest.privateNameBatches).toHaveLength(1);
@@ -2659,6 +2662,66 @@ describe('analysis V2 concrete collection executors', () => {
         expect(providers.bindAdapterCheckpoint).toHaveBeenCalledWith(
             expect.objectContaining({ credentialSlot: 'secondary' })
         );
+    });
+
+    it('admits production paid profile retries through the retained direct-fresh checkpoint reader', async () => {
+        const usernames = ['alice'];
+        const topology = createAnalysisV2CollectionTopology('profiles', usernames);
+        const profileStore = inMemoryProfileStore(null);
+        const loadFreshApifyRetry = vi.fn(async () => null);
+        profileStore.store.loadFreshApifyRetry = loadFreshApifyRetry;
+        const providers = providerStore();
+        const fetcher = vi.fn(async (
+            requested: readonly string[],
+            options: Parameters<typeof import('@/lib/services/instagram/scraper').getProfilesBatchV2>[1]
+        ) => {
+            await options.persistAttemptOutcomes({
+                attempt: 'fresh_apify',
+                source: 'apify',
+                requestedUsernames: requested,
+                results: [success('alice', 'apify')],
+            });
+            return {
+                results: [success('alice', 'apify')],
+                profiles: [profile('alice')],
+                primaryResults: [],
+                fallbackResults: [],
+                frozenUnresolvedUsernames: [],
+            };
+        });
+
+        await createAnalysisV2ProfileFetchExecutor({
+            requestContextStore: contextStore(requestContext()),
+            profileCheckpointStore: profileStore.store,
+            providerRunStore: providers.value,
+            evidenceStore: relationshipEvidence(usernames),
+            getProfilesBatchV2: fetcher as unknown as typeof import('@/lib/services/instagram/scraper').getProfilesBatchV2,
+            env: {
+                ANALYSIS_V2_APIFY_API_TOKEN_SLOT: 'secondary',
+                SCRAPER_PROFILE: 'selfhosted',
+                SCRAPER_PROFILES_BATCH: 'selfhosted',
+                SCRAPER_FOLLOWERS: 'selfhosted_auth',
+                SCRAPER_FOLLOWING: 'selfhosted_auth',
+                SCRAPER_LIKERS: 'selfhosted_auth',
+                SCRAPER_COMMENTS: 'apify',
+                SELFHOSTED_AUTH_ENABLED: 'true',
+            },
+        })(stageContext(
+            'profile_fetch',
+            state({ relationships: relationshipManifest(topology) }),
+            0
+        ));
+
+        expect(loadFreshApifyRetry).toHaveBeenCalledWith(expect.objectContaining({
+            requestId,
+            jobKey: 'track:profiles:batch:0',
+            claimToken,
+            jobInputHash: inputHash,
+            operationKey: expect.stringMatching(/^profile-fallback:/),
+            providerInputHash: expect.stringMatching(/^[a-f0-9]{64}$/),
+        }));
+        expect(profileStore.store.load).toHaveBeenCalledOnce();
+        expect(fetcher).toHaveBeenCalledOnce();
     });
 
     it('fails an incomplete ordinary Apify batch closed without fallback or repair spend', async () => {

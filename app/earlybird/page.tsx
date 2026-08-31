@@ -5,6 +5,7 @@ import { TopBar, CaseCard, Eyebrow } from '@/components/case-ui';
 import { NOINDEX_METADATA } from '@/lib/services/seo/discovery';
 import { createClient } from '@/lib/supabase/server';
 import { loadLatestEarlybirdOrder } from '@/lib/services/earlybird/order-status';
+import { earlybirdStatusNavigationTarget } from '@/lib/services/earlybird/payment-pending-status-refresh';
 import { EarlybirdStatus } from './earlybird-status';
 import { requireActiveAccountSession } from '@/lib/services/identity/account-principal-store';
 
@@ -42,6 +43,14 @@ export default async function EarlybirdPage({
     } catch {
         order = null;
     }
+
+    // A paid return with a durable request id already has an owner-scoped
+    // destination. Redirect from the server so the return page never paints
+    // an intermediate "preparing" card while the client waits for effects.
+    const immediateTarget = order
+        ? earlybirdStatusNavigationTarget(order)
+        : null;
+    if (immediateTarget) redirect(immediateTarget);
 
     return (
         <div className="min-h-dvh">

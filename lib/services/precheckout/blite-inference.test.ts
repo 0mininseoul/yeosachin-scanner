@@ -42,8 +42,26 @@ type DurableSource = {
 
 const CANDIDATE_RANGE = { min: 3, max: 9 } as const;
 
+const TEST_GEMINI_LEASE = {
+    slot: 3,
+    claimToken: '33333333-3333-4333-8333-333333333333',
+    fence: 7,
+    expiresAt: '2026-08-13T00:02:00.000Z',
+} as const;
+
+function testGeminiLeaseStore() {
+    return {
+        acquire: vi.fn(async () => TEST_GEMINI_LEASE),
+        renew: vi.fn(async (lease: typeof TEST_GEMINI_LEASE) => lease),
+        release: vi.fn(async () => undefined),
+    } as never;
+}
+
 function inferenceOptions(overrides: Record<string, unknown> = {}) {
     return {
+        requestId: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',
+        jobClaimToken: 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb',
+        geminiLeaseStore: testGeminiLeaseStore(),
         candidateRange: CANDIDATE_RANGE,
         submittedAtMs: Date.now(),
         ...overrides,
@@ -326,6 +344,8 @@ describe('inferPrecheckoutBlite', () => {
         mocks.analyzeWithGemini.mockResolvedValue(validModelResponse());
         const result = await inferPrecheckoutBlite(source(), {
             requestId: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',
+            jobClaimToken: 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb',
+            geminiLeaseStore: testGeminiLeaseStore(),
             candidateRange: CANDIDATE_RANGE,
             submittedAtMs: Date.now(),
         });
@@ -344,6 +364,8 @@ describe('inferPrecheckoutBlite', () => {
         const onAttemptTelemetry = vi.fn();
         await inferPrecheckoutBlite(source(), {
             requestId: 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb',
+            jobClaimToken: 'cccccccc-cccc-4ccc-8ccc-cccccccccccc',
+            geminiLeaseStore: testGeminiLeaseStore(),
             abortSignal: controller.signal,
             candidateRange: CANDIDATE_RANGE,
             submittedAtMs: Date.now(),
@@ -359,7 +381,55 @@ describe('inferPrecheckoutBlite', () => {
         expect(options.analysisType).toBe('precheckout_blite');
         expect(options.thinkingLevel).toBe('MINIMAL');
         expect(options.maxOutputTokens).toBe(3_072);
-        expect(options.maxAttempts).toBe(2);
+        expect(options.maxAttempts).toBe(1);
+    });
+
+    it('uses the shared fenced Gemini admission for the gate-enabled B-lite path', async () => {
+        mocks.analyzeWithGemini.mockResolvedValue(validModelResponse());
+        const lease = {
+            slot: 3,
+            claimToken: '33333333-3333-4333-8333-333333333333',
+            fence: 7,
+            expiresAt: new Date(Date.now() + 60_000).toISOString(),
+        } as const;
+        const geminiLeaseStore = {
+            acquire: vi.fn(async (input: Record<string, unknown>) => {
+                expect(input).toMatchObject({
+                    requestId: 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb',
+                    jobKey: 'preflight:blite',
+                    jobClaimToken: '44444444-4444-4444-8444-444444444444',
+                    attempt: 1,
+                });
+                return lease;
+            }),
+            release: vi.fn(async () => undefined),
+        };
+
+        const result = await inferPrecheckoutBlite(source(), {
+            requestId: 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb',
+            jobClaimToken: '44444444-4444-4444-8444-444444444444',
+            geminiLeaseStore: geminiLeaseStore as never,
+            env: { ANALYSIS_PROVIDER_ADMISSION_ENABLED: 'true' },
+            candidateRange: CANDIDATE_RANGE,
+            submittedAtMs: Date.now(),
+        });
+
+        expect(result).not.toBeNull();
+        expect(geminiLeaseStore.acquire).toHaveBeenCalledOnce();
+        expect(geminiLeaseStore.release).toHaveBeenCalledWith(lease);
+        expect(mocks.analyzeWithGemini).toHaveBeenCalledOnce();
+    });
+
+    it('fails closed before Gemini when admission is enabled without the claimed cache lease', async () => {
+        const result = await inferPrecheckoutBlite(source(), {
+            requestId: 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb',
+            env: { ANALYSIS_PROVIDER_ADMISSION_ENABLED: 'true' },
+            candidateRange: CANDIDATE_RANGE,
+            submittedAtMs: Date.now(),
+        });
+
+        expect(result).toBeNull();
+        expect(mocks.analyzeWithGemini).not.toHaveBeenCalled();
     });
 
     it('uses only the ordered durable image references, bounded to four total', async () => {
@@ -410,6 +480,9 @@ describe('inferPrecheckoutBlite', () => {
             mocks.analyzeWithGemini.mockImplementation(() => new Promise(() => undefined));
             const submittedAtMs = Date.now();
             const resultPromise = inferPrecheckoutBlite(source(), {
+                requestId: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',
+                jobClaimToken: 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb',
+                geminiLeaseStore: testGeminiLeaseStore(),
                 candidateRange: CANDIDATE_RANGE,
                 submittedAtMs,
             });
@@ -430,6 +503,9 @@ describe('inferPrecheckoutBlite', () => {
         mocks.analyzeWithGemini.mockResolvedValue(validModelResponse());
         const controller = new AbortController();
         await inferPrecheckoutBlite(source(), {
+            requestId: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',
+            jobClaimToken: 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb',
+            geminiLeaseStore: testGeminiLeaseStore(),
             abortSignal: controller.signal,
             candidateRange: CANDIDATE_RANGE,
             submittedAtMs: Date.now(),
@@ -486,6 +562,9 @@ describe('inferPrecheckoutBlite', () => {
         }));
         const controller = new AbortController();
         const resultPromise = inferPrecheckoutBlite(source(), {
+            requestId: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',
+            jobClaimToken: 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb',
+            geminiLeaseStore: testGeminiLeaseStore(),
             abortSignal: controller.signal,
             candidateRange: CANDIDATE_RANGE,
             submittedAtMs: Date.now(),

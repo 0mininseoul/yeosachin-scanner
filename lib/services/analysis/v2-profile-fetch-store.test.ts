@@ -325,6 +325,38 @@ describe('analysis V2 profile fetch checkpoint store', () => {
         );
     });
 
+    it('admits a retained direct-fresh checkpoint through the current-claim retry RPC', async () => {
+        const directResume = {
+            requestId,
+            jobKey,
+            requestedUsernames: ['alice'],
+            frozenUnresolvedUsernames: [],
+            primaryResults: [apifySuccess('alice')],
+            fallbackResults: [],
+            primaryCapturedAt: capturedAt,
+            fallbackCapturedAt: null,
+        };
+        const fake = clientWith({ data: directResume, error: null });
+        const store = createAnalysisV2ProfileFetchCheckpointStore(fake.client);
+
+        await expect(store.loadFreshApifyRetry!({
+            ...checkpointIdentity,
+            operationKey,
+            providerInputHash,
+        })).resolves.toMatchObject(directResume);
+        expect(fake.rpc).toHaveBeenCalledWith(
+            ANALYSIS_V2_PROFILE_FETCH_DATABASE_NAMES.loadFreshApifyRetryRpc,
+            {
+                p_request_id: requestId,
+                p_job_key: jobKey,
+                p_claim_token: claimToken,
+                p_job_input_hash: jobInputHash,
+                p_operation_key: operationKey,
+                p_provider_input_hash: providerInputHash,
+            },
+        );
+    });
+
     it('keeps omitted fresh admission on the strict test-entitlement RPC', async () => {
         const directResume = {
             requestId,

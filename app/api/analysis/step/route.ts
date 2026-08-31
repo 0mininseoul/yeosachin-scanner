@@ -163,6 +163,7 @@ import {
     AccountPrincipalAdmissionError,
     requireActiveAccountClassification,
 } from '@/lib/services/identity/account-principal-store';
+import { legacyAnalysisProducerGateResponse } from '@/lib/services/analysis/legacy-analysis-gate';
 
 const MAX_INTERACTION_EVIDENCE_ROWS = 2_500;
 
@@ -170,6 +171,13 @@ export const maxDuration = 300;
 
 // 단계별 분석 처리 API
 export async function POST(request: Request) {
+    const gate = legacyAnalysisProducerGateResponse();
+    if (gate) {
+        return NextResponse.json(
+            { error: 'Legacy analysis execution is unavailable.', code: gate.code },
+            { status: gate.status },
+        );
+    }
     try {
         const isBackgroundTask = await verifyAnalysisTaskAuthorization(
             request.headers.get('authorization')

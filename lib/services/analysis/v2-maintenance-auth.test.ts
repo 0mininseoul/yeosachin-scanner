@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
 import {
     getAnalysisV2MaintenanceAuthConfig,
+    getPreflightMaintenanceAuthConfig,
     verifyAnalysisV2MaintenanceAuthorization,
 } from './v2-maintenance-auth';
 
@@ -56,5 +57,20 @@ describe('Analysis V2 maintenance OIDC authorization', () => {
             'Bearer signed-token',
             { config, verifier: { verifyIdToken } }
         )).resolves.toBe(false);
+    });
+
+    it('parses the preflight maintenance identity independently from paid V2', () => {
+        expect(getPreflightMaintenanceAuthConfig({
+            PREFLIGHT_TASKS_MAINTENANCE_OIDC_AUDIENCE: 'https://preflight.example.com',
+            PREFLIGHT_TASKS_MAINTENANCE_SERVICE_ACCOUNT_EMAIL:
+                'preflight-maintenance@example-project.iam.gserviceaccount.com',
+        })).toEqual({
+            oidcAudience: 'https://preflight.example.com',
+            serviceAccountEmail: 'preflight-maintenance@example-project.iam.gserviceaccount.com',
+        });
+        expect(() => getPreflightMaintenanceAuthConfig({
+            ANALYSIS_V2_MAINTENANCE_OIDC_AUDIENCE: 'https://worker.example.com',
+            ANALYSIS_V2_MAINTENANCE_SERVICE_ACCOUNT_EMAIL: config.serviceAccountEmail,
+        })).toThrow('PREFLIGHT_TASKS_MAINTENANCE_CONFIG_ERROR');
     });
 });

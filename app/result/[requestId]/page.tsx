@@ -900,13 +900,6 @@ export default function ResultPage({ params }: PageProps) {
                                         >
                                             @{account.instagramId}
                                         </a> : <span className="block truncate text-[14px] font-bold text-fg">@{account.instagramId}</span>}
-                                        {(account.fullName || account.bio) && (
-                                            <p className="mt-0.5 truncate text-[12px] text-fg-dim">
-                                                {account.fullName && <span>{account.fullName}</span>}
-                                                {account.fullName && account.bio && ' · '}
-                                                {account.bio}
-                                            </p>
-                                        )}
                                     </div>
                                     {account.instagramUrl && externalProfileLinks && (
                                         <InstaButton url={account.instagramUrl} />
@@ -916,9 +909,7 @@ export default function ResultPage({ params }: PageProps) {
                                             type="button"
                                             onClick={() => setProfilePreview({
                                                 instagramId: account.instagramId,
-                                                fullName: account.fullName,
                                                 profileImage: account.profileImage,
-                                                bio: account.bio,
                                             })}
                                             className="shrink-0 border border-line px-3 py-2 text-[11px] font-bold text-fg transition-colors hover:border-fg-dim"
                                         >

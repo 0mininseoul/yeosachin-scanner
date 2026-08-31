@@ -2,7 +2,9 @@ import { describe, expect, it, vi } from 'vitest';
 import {
     claimAnonymousAnalysisV2Preflight,
     createAnonymousAnalysisV2Preflight,
+    markAnonymousAnalysisV2PreflightDispatched,
     readAnonymousAnalysisV2Preflight,
+    reserveAnonymousAnalysisV2PreflightDispatch,
     reserveAnonymousPreflightBudget,
 } from './anonymous-preflight';
 import { createAnonymousPreflightClaim } from './anonymous-preflight-claim';
@@ -158,5 +160,47 @@ describe('anonymous preflight service', () => {
             claimed: false,
             ownerPreflightId: preflightId,
         });
+    });
+    it('uses versioned role-aware dispatch RPCs for new anonymous tasks', async () => {
+        const claim = createAnonymousPreflightClaim({ env });
+        const dispatchToken = '323e4567-e89b-42d3-a456-426614174000';
+        const rpc = vi.fn()
+            .mockResolvedValueOnce({
+                data: [{
+                    should_enqueue: true,
+                    dispatch_generation: 1,
+                    reservation_token: dispatchToken,
+                    preflight_status: 'pending',
+                }],
+                error: null,
+            })
+            .mockResolvedValueOnce({ data: true, error: null });
+
+        await expect(reserveAnonymousAnalysisV2PreflightDispatch(
+            preflightId,
+            claim.token,
+            { env, client: { rpc } },
+        )).resolves.toMatchObject({
+            shouldEnqueue: true,
+            generation: 1,
+            reservationToken: dispatchToken,
+        });
+        await expect(markAnonymousAnalysisV2PreflightDispatched({
+            preflightId,
+            claimToken: claim.token,
+            generation: 1,
+            reservationToken: dispatchToken,
+        }, { env, client: { rpc } })).resolves.toBe(true);
+
+        expect(rpc).toHaveBeenNthCalledWith(
+            1,
+            'reserve_anonymous_analysis_v2_preflight_dispatch_v2',
+            expect.objectContaining({ p_workload_role: 'preflight', p_contract_version: 2 }),
+        );
+        expect(rpc).toHaveBeenNthCalledWith(
+            2,
+            'mark_anonymous_analysis_v2_preflight_dispatched_v2',
+            expect.objectContaining({ p_workload_role: 'preflight', p_contract_version: 2 }),
+        );
     });
 });

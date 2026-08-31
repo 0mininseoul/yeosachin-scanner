@@ -66,6 +66,8 @@ import {
     type FreshProvenanceStore,
 } from './fresh-provenance-store';
 import { RevenueCostOperationStore } from './revenue-cost-operation-store';
+import { withAnalysisProviderAdmissionCheckpoint } from './provider-admission-checkpoint';
+import type { AnalysisProviderAdmissionStore } from './provider-admission-store';
 export {
     ANALYSIS_V2_MAX_REVERSE_CANDIDATES as MAX_REVERSE_CANDIDATES,
     ANALYSIS_V2_REVERSE_LIKE_LIMIT as REVERSE_LIKE_LIMIT,
@@ -375,6 +377,7 @@ export function createAnalysisV2ReverseLikeCollector(input: {
     adapter?: ApifyInteractionAdapter;
     selfHostedAuthAdapter?: ApifyInteractionAdapter;
     providerRunStore?: AnalysisV2ProviderRunStore;
+    providerAdmissionStore?: AnalysisProviderAdmissionStore;
     revenueCostOperationStore?: RevenueCostOperationStore;
     /** Injected only for the strict Basic/Standard test-entitlement cohort. */
     freshProvenanceStore?: FreshProvenanceStore;
@@ -385,6 +388,7 @@ export function createAnalysisV2ReverseLikeCollector(input: {
     const adapter = input.adapter ?? apifyInteractionAdapter;
     const authenticatedAdapter = input.selfHostedAuthAdapter ?? selfHostedAuthInteractionAdapter;
     const providerRunStore = input.providerRunStore ?? analysisV2ProviderRunStore;
+    const providerAdmissionStore = input.providerAdmissionStore;
     const revenueCostOperationStore = input.revenueCostOperationStore
         ?? analysisV2RevenueCostOperationStore;
     const injectedFreshProvenanceStore = input.freshProvenanceStore;
@@ -471,7 +475,7 @@ export function createAnalysisV2ReverseLikeCollector(input: {
                     credentialSlot: providerBinding.credentialSlot,
                     maxChargeUsd,
                 } as const;
-                const binding = isStrictFreshRequest
+                const rawBinding = isStrictFreshRequest
                     ? await providerRunStore.bindAdapterCheckpoint(providerRunIdentity, {
                         revenueCostOperationStore,
                         freshProvenanceStore: injectedFreshProvenanceStore
@@ -479,6 +483,23 @@ export function createAnalysisV2ReverseLikeCollector(input: {
                         jobInputHash: claim.jobInputHash,
                     })
                     : await providerRunStore.bindAdapterCheckpoint(providerRunIdentity);
+                const binding = {
+                    ...rawBinding,
+                    checkpoint: await withAnalysisProviderAdmissionCheckpoint({
+                        checkpoint: rawBinding.checkpoint,
+                        storedStatus: rawBinding.stored?.status === 'starting'
+                            || rawBinding.stored?.status === 'running'
+                            ? rawBinding.stored.status
+                            : null,
+                        workloadRole: 'paid',
+                        requestId: claim.requestId,
+                        jobKey: claim.jobKey,
+                        operationKey,
+                        claimToken: claim.claimToken,
+                        env,
+                        store: providerAdmissionStore,
+                    }),
+                };
                 const likers = await adapter.getPostLikers(
                     candidates.map(row => row.postUrl),
                     REVERSE_LIKE_LIMIT,

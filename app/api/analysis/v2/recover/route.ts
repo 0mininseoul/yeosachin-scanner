@@ -12,6 +12,7 @@ import {
     purgeConfiguredResultImages,
 } from '@/lib/services/media/result-image-purge';
 import { observeRoute } from '@/lib/observability/request';
+import { assertAnalysisWorkerWorkloadRole } from '@/lib/services/analysis/workload-role';
 
 export const maxDuration = 300;
 
@@ -19,6 +20,7 @@ async function handlePOST(request: Request) {
     let config;
     try {
         config = getAnalysisV2MaintenanceAuthConfig();
+        assertAnalysisWorkerWorkloadRole('paid');
     } catch {
         return NextResponse.json({ code: 'MAINTENANCE_UNAVAILABLE' }, { status: 503 });
     }

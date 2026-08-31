@@ -19,6 +19,10 @@ const signalsMigration = readFileSync(new URL(
     '../../../supabase/migrations/20260829120000_add_analysis_v2_progress_signals_history.sql',
     import.meta.url,
 ), 'utf8');
+const canonicalMergeMigration = readFileSync(new URL(
+    '../../../supabase/migrations/20260830100000_retain_succeeded_direct_fresh_checkpoint.sql',
+    import.meta.url,
+), 'utf8');
 
 const REQUEST_ID = '11111111-1111-4111-8111-111111111111';
 const OWNER_ID = '22222222-2222-4222-8222-222222222222';
@@ -41,6 +45,7 @@ type Tracks = Record<TrackId, JsonTrack>;
 type CheckpointResult = {
     snapshot: {
         revision: number;
+        progressBp: number;
         tracks: Tracks;
     };
     event: { eventCode: string } | null;
@@ -237,6 +242,7 @@ describe('V2 progress stage canonicalization under distributed races', () => {
             );
         `);
         await db.exec(signalsMigration);
+        await db.exec(canonicalMergeMigration);
     }, 30_000);
 
     beforeEach(async () => {
@@ -277,6 +283,99 @@ describe('V2 progress stage canonicalization under distributed races', () => {
         expect(stale.snapshot.tracks.relationshipAi.stageCode).toBe('PROFILE_SCREENING');
         expect(stale.snapshot.revision).toBe(newer.snapshot.revision);
         expect(stale.event).toBeNull();
+    });
+
+    it('merges every monotonic track field and recalculates aggregate progress for stale writers', async () => {
+        const advanced = await checkpoint({
+            jobKey: PROFILE_AI_JOB,
+            stageTracks: tracks({
+                relationshipStage: 'PROFILE_SCREENING',
+                relationshipDone: 2,
+                finalizationStage: 'FINALIZATION_RUNNING',
+                finalizationDone: 1,
+            }),
+            // Deliberately use the stale writer's lower aggregate. The
+            // wrapper must pass its canonical calculation to the historical
+            // validator instead of forwarding this value.
+            progressBp: weightedProgress(2, 4, 1, 3),
+            fingerprint: '4'.repeat(64),
+        });
+        const stale = await checkpoint({
+            jobKey: PROFILE_JOB,
+            stageTracks: tracks({
+                relationshipStage: 'PUBLIC_PROFILES_COLLECTING',
+                relationshipDone: 1,
+                finalizationStage: 'FINALIZATION_QUEUED',
+                finalizationDone: 0,
+            }),
+            progressBp: weightedProgress(1, 4, 0, 3),
+            fingerprint: '5'.repeat(64),
+        });
+
+        expect(advanced.snapshot.tracks.relationshipAi).toMatchObject({
+            state: 'running',
+            stageCode: 'PROFILE_SCREENING',
+            done: 2,
+            total: 4,
+            progressBp: 5000,
+        });
+        expect(stale.snapshot.tracks.relationshipAi).toMatchObject({
+            state: 'running',
+            stageCode: 'PROFILE_SCREENING',
+            done: 2,
+            total: 4,
+            progressBp: 5000,
+        });
+        expect(stale.snapshot.tracks.finalization).toMatchObject({
+            state: 'running',
+            stageCode: 'FINALIZATION_RUNNING',
+            done: 1,
+            total: 3,
+            progressBp: 3333,
+        });
+        expect(stale.snapshot.progressBp).toBe(weightedProgress(2, 4, 1, 3));
+    });
+
+    it('converges concurrent stale writers to one monotonic canonical snapshot', async () => {
+        const results = await Promise.all([
+            checkpoint({
+                jobKey: PROFILE_JOB,
+                stageTracks: tracks({
+                    relationshipStage: 'PROFILE_SCREENING',
+                    relationshipDone: 2,
+                }),
+                progressBp: weightedProgress(2, 4, 0, 3),
+                fingerprint: '6'.repeat(64),
+            }),
+            checkpoint({
+                jobKey: PROFILE_AI_JOB,
+                stageTracks: tracks({
+                    finalizationStage: 'FINALIZATION_RUNNING',
+                    finalizationDone: 2,
+                }),
+                progressBp: weightedProgress(1, 4, 2, 3),
+                fingerprint: '7'.repeat(64),
+            }),
+        ]);
+
+        const current = await db.query<{ progress_bp: number; tracks: Tracks }>(
+            `SELECT progress_bp, tracks
+             FROM public.analysis_progress_state
+             WHERE request_id = $1`,
+            [REQUEST_ID],
+        );
+        expect(results).toHaveLength(2);
+        expect(current.rows[0]?.tracks.relationshipAi).toMatchObject({
+            stageCode: 'PROFILE_SCREENING',
+            done: 2,
+            progressBp: 5000,
+        });
+        expect(current.rows[0]?.tracks.finalization).toMatchObject({
+            stageCode: 'FINALIZATION_RUNNING',
+            done: 2,
+            progressBp: 6666,
+        });
+        expect(current.rows[0]?.progress_bp).toBe(weightedProgress(2, 4, 2, 3));
     });
 
     it('reuses a canonical fingerprint for a later no-op while retaining its event', async () => {
@@ -443,8 +542,8 @@ describe('V2 progress stage canonicalization under distributed races', () => {
             .toBe(state.rows[0]?.snapshot_fingerprint);
     });
 
-    it('keeps counter and state regression guards after stage canonicalization', async () => {
-        await checkpoint({
+    it('accepts a stale counter as a canonical no-op while retaining the high-water snapshot', async () => {
+        const advanced = await checkpoint({
             jobKey: PROFILE_AI_JOB,
             stageTracks: tracks({ relationshipStage: 'PROFILE_SCREENING', relationshipDone: 2 }),
             progressBp: weightedProgress(2, 4, 0, 3),
@@ -456,7 +555,35 @@ describe('V2 progress stage canonicalization under distributed races', () => {
             stageTracks: tracks({ relationshipStage: 'PROFILE_SCREENING', relationshipDone: 1 }),
             progressBp: weightedProgress(1, 4, 0, 3),
             fingerprint: 'a'.repeat(64),
-        })).rejects.toThrow('ANALYSIS_V2_PROGRESS_REGRESSION');
+        })).resolves.toMatchObject({
+            snapshot: {
+                revision: advanced.snapshot.revision,
+                tracks: { relationshipAi: { done: 2, progressBp: 5_000 } },
+            },
+            advanced: false,
+        });
+    });
+
+    it('reuses the durable fingerprint when recalculation is below a prior aggregate high-water mark', async () => {
+        await db.query(
+            `UPDATE public.analysis_progress_state
+             SET progress_bp = 6_000
+             WHERE request_id = $1`,
+            [REQUEST_ID],
+        );
+
+        await expect(checkpoint({
+            jobKey: PROFILE_JOB,
+            stageTracks: tracks(),
+            progressBp: weightedProgress(1, 4, 0, 3),
+            fingerprint: 'b'.repeat(64),
+        })).resolves.toMatchObject({
+            snapshot: {
+                progressBp: 6_000,
+                revision: 1,
+            },
+            advanced: false,
+        });
     });
 
     it('fails closed when either side of a stage merge has an unknown rank', async () => {

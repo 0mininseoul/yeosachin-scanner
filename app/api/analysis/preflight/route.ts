@@ -272,6 +272,7 @@ async function handleAnonymousPOST(
             try {
                 await enqueuePreflightTask(created.preflightId, reservation.generation, {
                     config: dispatchPolicy.config,
+                    reservationToken: reservation.reservationToken!,
                 });
                 if (!reservation.reservationToken) {
                     throw new Error('ANONYMOUS_PREFLIGHT_DISPATCH_TOKEN_MISSING');
@@ -576,6 +577,7 @@ async function handlePOST(
             try {
                 await enqueuePreflightTask(created.preflightId, reservation.generation, {
                     config: dispatchPolicy.config,
+                    reservationToken: reservation.reservationToken!,
                 });
             } catch (error) {
                 const metadata = error instanceof PreflightTaskEnqueueError

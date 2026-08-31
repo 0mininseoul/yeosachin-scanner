@@ -3,7 +3,6 @@ import {
     PreflightTaskEnqueueError,
     betaPreflightPrepareTaskId,
     enqueueBetaPreflightPrepareTask,
-    enqueueFreshAdmissionTask,
     enqueuePreflightTask,
     preflightEnqueueFailureCode,
     preflightEnqueueFailureMetadata,
@@ -21,6 +20,7 @@ const preflightId = '123e4567-e89b-42d3-a456-426614174000';
 const dispatchToken = '123e4567-e89b-42d3-a456-426614174005';
 const prepareToken = preflightId.replace(/0$/, '6');
 const config: PreflightTasksConfig = {
+    workloadRole: 'preflight',
     project: 'example-project',
     location: 'asia-northeast3',
     queue: 'analysis-preflight',
@@ -40,6 +40,7 @@ function configEnv(): Record<string, string> {
         PREFLIGHT_TASKS_OIDC_AUDIENCE: config.oidcAudience,
         PREFLIGHT_TASKS_SERVICE_ACCOUNT_EMAIL: config.serviceAccountEmail,
         PREFLIGHT_TASKS_CALLER_AUTH_MODE: 'adc',
+        ANALYSIS_WORKLOAD_ROLE: 'preflight',
     };
 }
 
@@ -188,7 +189,7 @@ describe('preflight Cloud Tasks', () => {
             serviceAccountEmail: config.serviceAccountEmail,
         });
         expect(JSON.parse(Buffer.from(request.task.httpRequest.body, 'base64').toString()))
-            .toEqual({ preflightId });
+            .toEqual({ workloadRole: 'preflight', preflightId });
     });
 
     it('creates one deterministic source-only B-lite task', async () => {
@@ -205,7 +206,7 @@ describe('preflight Cloud Tasks', () => {
             .resolves.toBe('enqueued');
         const request = createTask.mock.calls[0][0] as { task: { httpRequest: { body: string } } };
         expect(JSON.parse(Buffer.from(request.task.httpRequest.body, 'base64').toString()))
-            .toEqual({ kind: 'precheckout_blite', preflightId });
+            .toEqual({ workloadRole: 'preflight', kind: 'precheckout_blite', preflightId });
     });
 
     it('treats the UUID-named task as idempotent when Cloud Tasks reports it exists', async () => {
@@ -313,39 +314,6 @@ describe('preflight Cloud Tasks', () => {
         expect(createTask.mock.calls[0][0]).toEqual(createTask.mock.calls[1][0]);
     });
 
-    it('creates a separately named, generation-fenced fresh-admission task', async () => {
-        const createTask = vi.fn().mockResolvedValue([{}]);
-        const client = {
-            queuePath: vi.fn(() => 'queue-path'),
-            taskPath: vi.fn((_p: string, _l: string, _q: string, task: string) => (
-                `queue-path/tasks/${task}`
-            )),
-            createTask,
-        };
-
-        expect(freshAdmissionTaskId(preflightId, 3, 2))
-            .toBe(`preflight-admission-${preflightId}-g3-d2`);
-        await expect(enqueueFreshAdmissionTask(
-            preflightId,
-            3,
-            2,
-            dispatchToken,
-            { config, client }
-        ))
-            .resolves.toBe('enqueued');
-        const request = createTask.mock.calls[0][0] as {
-            task: { httpRequest: { body: string } };
-        };
-        expect(JSON.parse(Buffer.from(request.task.httpRequest.body, 'base64').toString()))
-            .toEqual({
-                preflightId,
-                kind: 'fresh_admission',
-                generation: 3,
-                dispatchGeneration: 2,
-                dispatchToken,
-            });
-    });
-
     it('replays a deterministic beta-prepare task without reserving ordinary dispatch', async () => {
         const createTask = vi.fn().mockRejectedValue({ code: 6 });
         const client = {
@@ -366,6 +334,7 @@ describe('preflight Cloud Tasks', () => {
         expect(JSON.parse(Buffer.from(task.task.httpRequest.body, 'base64').toString()))
             .toEqual({
                 kind: 'beta_prepare', preflightId, userId: ownerId,
+                workloadRole: 'preflight',
                 prepareGeneration: 3, prepareToken,
             });
     });

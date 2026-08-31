@@ -27,20 +27,16 @@ import {
     AnalysisV2FreshAdmissionError,
     AnalysisV2RevenueSettlementFenceError,
     markAnalysisV2FreshAdmissionDispatched,
-    releaseAnalysisV2FreshAdmissionDispatch,
     reserveAnalysisV2FreshAdmission,
     type AnalysisV2FreshPlanSnapshot,
     type AnalysisV2FreshAdmissionErrorCode,
 } from '@/lib/services/analysis/fresh-plan-admission';
 import { supabaseAdmin } from '@/lib/supabase/admin';
 import { createClient } from '@/lib/supabase/server';
-import {
-    enqueueFreshAdmissionTask,
-    getPreflightTasksConfig,
-} from '@/lib/services/analysis/preflight-tasks';
 import { preflightTargetInputHash } from '@/lib/services/analysis/preflight-identity';
 import {
     dispatchAnalysisV2Job,
+    enqueueAnalysisV2FreshAdmissionTask,
     getAnalysisV2TasksConfig,
 } from '@/lib/services/analysis/v2-tasks';
 import {
@@ -60,6 +56,7 @@ const uuidSchema = z.string().uuid().transform(value => value.toLowerCase());
 const requestBodySchema = z.object({
     planId: planIdSchema,
 }).strict();
+
 type EntitlementRouteContext = { params: Promise<{ preflightId: string }> };
 
 const PREFLIGHT_COLUMNS = [
@@ -351,12 +348,10 @@ async function handlePOST(
         }
 
         let analysisTasksConfig;
-        let preflightTasksConfig;
         if (validatedPreflight.state === 'ready') {
             try {
                 analysisTasksConfig = getAnalysisV2TasksConfig();
-                preflightTasksConfig = getPreflightTasksConfig();
-                if (!analysisTasksConfig || !preflightTasksConfig) {
+                if (!analysisTasksConfig) {
                     throw new Error('queue disabled');
                 }
             } catch {
@@ -439,24 +434,18 @@ async function handlePOST(
                         dispatchToken: admission.dispatchToken!,
                     };
                     try {
-                        await enqueueFreshAdmissionTask(
+                        await enqueueAnalysisV2FreshAdmissionTask({
                             preflightId,
-                            admission.generation,
-                            admission.dispatchGeneration,
-                            admission.dispatchToken!,
-                            { config: preflightTasksConfig! }
-                        );
-                    } catch {
-                        try {
-                            await releaseAnalysisV2FreshAdmissionDispatch(
-                                supabaseAdmin,
-                                dispatch
-                            );
-                        } catch {
-                            console.error(
-                                'Analysis V2 fresh admission dispatch release failed.'
-                            );
-                        }
+                            generation: admission.generation,
+                            dispatchGeneration: admission.dispatchGeneration,
+                            dispatchToken: admission.dispatchToken!,
+                            workloadRole: 'paid',
+                        }, { config: analysisTasksConfig! });
+                    } catch (error) {
+                        // Retain every accepted-work fence, including typed terminal responses:
+                        // the task service can commit before returning its response. Maintenance
+                        // must reconcile this exact generation/token rather than allowing an idle
+                        // transition to strand the paid admission.
                         console.error('Analysis V2 fresh admission dispatch failed.');
                         return NextResponse.json(
                             {

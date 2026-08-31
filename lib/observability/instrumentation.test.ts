@@ -2,11 +2,15 @@ import { readFileSync } from 'node:fs';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 const observabilityMocks = vi.hoisted(() => ({
+    captureRequestError: vi.fn(),
     emit: vi.fn(),
     flush: vi.fn(),
 }));
 
 vi.mock('server-only', () => ({}));
+vi.mock('@sentry/nextjs', () => ({
+    captureRequestError: observabilityMocks.captureRequestError,
+}));
 vi.mock('./server', () => ({
     operationalLogger: { emit: observabilityMocks.emit },
     flushOperationalLogs: observabilityMocks.flush,
@@ -20,6 +24,78 @@ beforeEach(() => {
 });
 
 describe('onRequestError', () => {
+    it('suppresses only nested EPIPE for the GET image-proxy request boundary', async () => {
+        const imageProxyEpipe = Object.assign(new Error('response write failed'), {
+            cause: { code: 'EPIPE' },
+        });
+        const cases = [
+            {
+                name: 'image proxy GET EPIPE',
+                method: 'GET',
+                routePath: '/api/image-proxy',
+                error: imageProxyEpipe,
+                suppressed: true,
+            },
+            {
+                name: 'image proxy POST EPIPE',
+                method: 'POST',
+                routePath: '/api/image-proxy',
+                error: imageProxyEpipe,
+                suppressed: false,
+            },
+            {
+                name: 'image proxy lowercase method EPIPE',
+                method: 'get',
+                routePath: '/api/image-proxy',
+                error: imageProxyEpipe,
+                suppressed: false,
+            },
+            {
+                name: 'image proxy GET non-EPIPE',
+                method: 'GET',
+                routePath: '/api/image-proxy',
+                error: new Error('response write failed'),
+                suppressed: false,
+            },
+            {
+                name: 'other route GET EPIPE',
+                method: 'GET',
+                routePath: '/api/other',
+                error: imageProxyEpipe,
+                suppressed: false,
+            },
+        ];
+
+        for (const testCase of cases) {
+            vi.clearAllMocks();
+            observabilityMocks.flush.mockResolvedValue(undefined);
+            await onRequestError(testCase.error, {
+                method: testCase.method,
+                get path(): string {
+                    throw new Error(`${testCase.name} must not inspect raw request path`);
+                },
+                get headers(): NodeJS.Dict<string | string[]> {
+                    throw new Error(`${testCase.name} must not inspect request headers`);
+                },
+            }, {
+                routerKind: 'App Router',
+                routePath: testCase.routePath,
+                routeType: 'route',
+                revalidateReason: undefined,
+            });
+
+            if (testCase.suppressed) {
+                expect(observabilityMocks.captureRequestError.mock.calls.length).toBe(0);
+                expect(observabilityMocks.emit.mock.calls.length).toBe(0);
+                expect(observabilityMocks.flush.mock.calls.length).toBe(0);
+            } else {
+                expect(observabilityMocks.captureRequestError.mock.calls.length).toBe(1);
+                expect(observabilityMocks.emit.mock.calls.length).toBe(1);
+                expect(observabilityMocks.flush.mock.calls.length).toBe(1);
+            }
+        }
+    });
+
     it('uses only routePath and method, then awaits the bounded flush', async () => {
         let resolveFlush: (() => void) | undefined;
         observabilityMocks.flush.mockReturnValue(new Promise<void>(resolve => {

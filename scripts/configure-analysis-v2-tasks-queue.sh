@@ -22,6 +22,7 @@ tasks. No V2 identity receives project-wide task access.
 
 Additional required environment variable:
   ANALYSIS_V2_WORKER_RUNTIME_SERVICE_ACCOUNT_EMAIL
+  ANALYSIS_V2_MAINTENANCE_SERVICE_ACCOUNT_EMAIL
 
 The deprecated ANALYSIS_V2_TASKS_RECOVERY_SERVICE_ACCOUNT_EMAIL alias remains
 accepted during migration. If both names are set, they must match exactly.
@@ -62,6 +63,7 @@ for name in \
   ANALYSIS_V2_TASKS_SERVICE_ACCOUNT_EMAIL \
   ANALYSIS_V2_TASKS_ENQUEUER_SERVICE_ACCOUNT_EMAIL \
   ANALYSIS_V2_WORKER_RUNTIME_SERVICE_ACCOUNT_EMAIL \
+  ANALYSIS_V2_MAINTENANCE_SERVICE_ACCOUNT_EMAIL \
   ANALYSIS_V2_TASKS_CLOUD_RUN_SERVICE \
   ANALYSIS_V2_TASKS_CLOUD_RUN_REGION; do
   [[ -n "${!name:-}" ]] || die "$name is required"
@@ -77,6 +79,8 @@ readonly v2_max_concurrent_dispatches="${ANALYSIS_V2_TASKS_MAX_CONCURRENT_DISPAT
 readonly email_pattern='^[a-z][a-z0-9-]{4,28}[a-z0-9]@[a-z][a-z0-9-]{4,28}[a-z0-9]\.iam\.gserviceaccount\.com$'
 [[ "$ANALYSIS_V2_WORKER_RUNTIME_SERVICE_ACCOUNT_EMAIL" =~ $email_pattern ]] \
   || die "ANALYSIS_V2_WORKER_RUNTIME_SERVICE_ACCOUNT_EMAIL is invalid"
+[[ "$ANALYSIS_V2_MAINTENANCE_SERVICE_ACCOUNT_EMAIL" =~ $email_pattern ]] \
+  || die "ANALYSIS_V2_MAINTENANCE_SERVICE_ACCOUNT_EMAIL is invalid"
 
 export ANALYSIS_TASKS_PROJECT="$ANALYSIS_V2_TASKS_PROJECT"
 export ANALYSIS_TASKS_LOCATION="$ANALYSIS_V2_TASKS_LOCATION"
@@ -92,6 +96,7 @@ export ANALYSIS_TASKS_IAM_SCOPE="queue"
 export ANALYSIS_TASKS_EXACT_IAM="true"
 export ANALYSIS_TASKS_RUNTIME_SERVICE_ACCOUNT_EMAIL="$ANALYSIS_V2_WORKER_RUNTIME_SERVICE_ACCOUNT_EMAIL"
 export ANALYSIS_TASKS_RUNTIME_QUEUE_ACCESS="enqueue-view"
+export ANALYSIS_TASKS_CLOUD_RUN_ALLOWED_INVOKER_MEMBERS="serviceAccount:$ANALYSIS_V2_TASKS_SERVICE_ACCOUNT_EMAIL,serviceAccount:$ANALYSIS_V2_MAINTENANCE_SERVICE_ACCOUNT_EMAIL"
 
 bash "$(dirname "$0")/configure-analysis-tasks-queue.sh" "$@"
 
