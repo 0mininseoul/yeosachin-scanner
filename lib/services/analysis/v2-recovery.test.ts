@@ -17,6 +17,16 @@ const emptyBetaRecovery = {
     betaCreditArchiveFailures: 0,
     betaCreditRefreshAttempts: 0,
     betaCreditRefreshFailures: 0,
+    providerAdmissionsScanned: 0,
+    providerAdmissionsRecovered: 0,
+    providerAdmissionsSkipped: 0,
+    providerAdmissionsFailed: 0,
+    providerAdmissionsHasMore: false,
+    capacityDispatchesScanned: 0,
+    capacityDispatchesRecovered: 0,
+    capacityDispatchesTaskPresent: 0,
+    capacityDispatchesSkipped: 0,
+    capacityDispatchesFailed: 0,
 } as const;
 
 function job(
@@ -149,6 +159,30 @@ describe('analysis V2 dispatch recovery', () => {
         });
         expect(jobStore.rearmDispatch).not.toHaveBeenCalled();
         expect(cleanupTerminalMedia).toHaveBeenCalledOnce();
+    });
+
+    it('caps the capacity-dispatch page independently of the 100-job V2 recovery page', async () => {
+        const recoverCapacityDispatches = vi.fn(async (options?: { limit?: number }) => {
+            expect(options?.limit).toBe(64);
+            return { scanned: 0, recovered: 0, taskPresent: 0, skipped: 0, failed: 0 };
+        });
+
+        const summary = await recoverAnalysisV2Jobs({
+            ...providerRecovery(),
+            store: store([]),
+            limit: 100,
+            recoverCapacityDispatches,
+        });
+        expect(recoverCapacityDispatches).toHaveBeenCalledOnce();
+        expect(summary).toMatchObject({
+            scanned: 0,
+            capacityDispatchesScanned: 0,
+            capacityDispatchesFailed: 0,
+        });
+        expect(recoverCapacityDispatches).toHaveBeenCalledWith({
+            limit: 64,
+            env: undefined,
+        });
     });
 
     it('rotates task-present rows so the next bounded scan reaches later work', async () => {
@@ -385,6 +419,32 @@ describe('analysis V2 dispatch recovery', () => {
         expect(recoverSchedulerOperations).toHaveBeenCalledBefore(
             reapSchedulerGeminiLeases,
         );
+    });
+
+    it('recovers expired provider admissions as a bounded maintenance step', async () => {
+        const recoverProviderAdmissions = vi.fn(async () => ({
+            scanned: 3,
+            recovered: 2,
+            resolved: 2,
+            skipped: 1,
+            failed: 0,
+            hasMore: true,
+        }));
+        const summary = await recoverAnalysisV2Jobs({
+            ...providerRecovery(),
+            store: store([]),
+            recoverProviderAdmissions,
+        });
+
+        expect(summary).toMatchObject({
+            failed: 0,
+            providerAdmissionsScanned: 3,
+            providerAdmissionsRecovered: 2,
+            providerAdmissionsSkipped: 1,
+            providerAdmissionsFailed: 0,
+            providerAdmissionsHasMore: true,
+        });
+        expect(recoverProviderAdmissions).toHaveBeenCalledOnce();
     });
 
     it('drains score audits only after media and provider safety cleanup', async () => {

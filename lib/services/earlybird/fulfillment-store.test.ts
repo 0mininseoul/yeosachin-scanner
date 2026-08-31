@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
 import { AnalysisV2FreshAdmissionError } from '@/lib/services/analysis/fresh-plan-admission';
+import { AnalysisV2TaskEnqueueError } from '@/lib/services/analysis/v2-tasks';
 import {
     admitAndAdvanceEarlybirdFulfillment,
     advanceAdmittedEarlybirdFulfillment,
@@ -395,7 +396,7 @@ describe('earlybird fulfillment store', () => {
         expect(orderStore.createOrReplayRequest).not.toHaveBeenCalled();
     });
 
-    it('labels admission-task enqueue failure and releases its reservation', async () => {
+    it('retains an admission fence after enqueue refusal for deterministic recovery', async () => {
         const secret = 'cloud-task-secret';
         const orderStore = store();
         const releaseFreshAdmissionDispatch = vi.fn(async () => 'released' as const);
@@ -412,7 +413,9 @@ describe('earlybird fulfillment store', () => {
                     dispatchToken: CLAIM,
                 })),
                 enqueueFreshAdmission: vi.fn(async () => {
-                    throw new Error(`PREFLIGHT_TASKS_ENQUEUE_ERROR: ${secret}`);
+                    const error = new AnalysisV2TaskEnqueueError('terminal');
+                    error.cause = new Error(secret);
+                    throw error;
                 }),
                 markFreshAdmissionDispatched: vi.fn(),
                 releaseFreshAdmissionDispatch,
@@ -423,22 +426,78 @@ describe('earlybird fulfillment store', () => {
         expect(failure).toMatchObject({
             stage: 'enqueue',
             category: 'transport',
-            code: 'PREFLIGHT_TASKS_ENQUEUE_ERROR',
+            code: 'ANALYSIS_V2_TASKS_ENQUEUE_ERROR',
         });
         expect((failure as Error).message).not.toContain(secret);
-        expect(releaseFreshAdmissionDispatch).toHaveBeenCalledOnce();
+        expect(releaseFreshAdmissionDispatch).not.toHaveBeenCalled();
         expect(orderStore.claim).not.toHaveBeenCalled();
     });
 
-    it('reports a release failure at dispatch_release and preserves that cause', async () => {
-        const enqueueError = new Error('PREFLIGHT_TASKS_ENQUEUE_ERROR: enqueue failed');
-        const releaseError = new Error(
-            'EARLYBIRD_FULFILLMENT_PERSISTENCE_ERROR: release failed'
-        );
+    it('retains an ambiguous fresh-admission reservation for deterministic recovery', async () => {
         const orderStore = store();
-        const releaseFreshAdmissionDispatch = vi.fn(async () => {
-            throw releaseError;
+        const releaseFreshAdmissionDispatch = vi.fn(async () => 'released' as const);
+        const enqueueFreshAdmission = vi.fn(async () => {
+            const error = new AnalysisV2TaskEnqueueError('replayable');
+            error.cause = new Error('response lost after create');
+            throw error;
         });
+        const failure = await advanceAdmittedEarlybirdFulfillment(
+            identity(),
+            {
+                store: orderStore,
+                rebindExpiredPaidPreflight: vi.fn(async () => PREFLIGHT),
+                reserveFreshAdmission: vi.fn(async () => ({
+                    state: 'pending' as const,
+                    shouldEnqueue: true,
+                    generation: 1,
+                    dispatchGeneration: 1,
+                    dispatchToken: CLAIM,
+                })),
+                enqueueFreshAdmission,
+                markFreshAdmissionDispatched: vi.fn(),
+                releaseFreshAdmissionDispatch,
+                dispatchAnalysisJob: vi.fn(),
+            },
+        ).catch(error => error);
+
+        expect(failure).toMatchObject({ stage: 'enqueue', category: 'transport' });
+        expect(releaseFreshAdmissionDispatch).not.toHaveBeenCalled();
+        expect(orderStore.claim).not.toHaveBeenCalled();
+    });
+
+    it('retains the fresh-admission reservation when the dispatch mark response is ambiguous', async () => {
+        const orderStore = store();
+        const releaseFreshAdmissionDispatch = vi.fn(async () => 'released' as const);
+        const markFreshAdmissionDispatched = vi.fn(async () => {
+            throw new Error('dispatch mark response lost');
+        });
+        const failure = await advanceAdmittedEarlybirdFulfillment(
+            identity(),
+            {
+                store: orderStore,
+                rebindExpiredPaidPreflight: vi.fn(async () => PREFLIGHT),
+                reserveFreshAdmission: vi.fn(async () => ({
+                    state: 'pending' as const,
+                    shouldEnqueue: true,
+                    generation: 1,
+                    dispatchGeneration: 1,
+                    dispatchToken: CLAIM,
+                })),
+                enqueueFreshAdmission: vi.fn(async () => 'enqueued'),
+                markFreshAdmissionDispatched,
+                releaseFreshAdmissionDispatch,
+                dispatchAnalysisJob: vi.fn(),
+            },
+        ).catch(error => error);
+
+        expect(failure).toMatchObject({ stage: 'dispatch_mark', category: 'persistence' });
+        expect(releaseFreshAdmissionDispatch).not.toHaveBeenCalled();
+    });
+
+    it('preserves the enqueue error without releasing an accepted-work fence', async () => {
+        const enqueueError = new AnalysisV2TaskEnqueueError('terminal');
+        const orderStore = store();
+        const releaseFreshAdmissionDispatch = vi.fn(async () => 'released' as const);
         const failure = await advanceAdmittedEarlybirdFulfillment(
             identity(),
             {
@@ -461,12 +520,12 @@ describe('earlybird fulfillment store', () => {
         ).catch(error => error);
 
         expect(failure).toMatchObject({
-            stage: 'dispatch_release',
-            category: 'persistence',
-            code: 'EARLYBIRD_FULFILLMENT_PERSISTENCE_ERROR',
+            stage: 'enqueue',
+            category: 'transport',
+            code: 'ANALYSIS_V2_TASKS_ENQUEUE_ERROR',
         });
-        expect(failure.cause).toBe(releaseError);
-        expect(failure.cause).not.toBe(enqueueError);
+        expect(releaseFreshAdmissionDispatch).not.toHaveBeenCalled();
+        expect(failure.cause).toBe(enqueueError);
     });
 
     it('claims only after fresh admission and creates before dispatching one request', async () => {

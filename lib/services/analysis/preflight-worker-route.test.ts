@@ -9,6 +9,7 @@ const mocks = vi.hoisted(() => ({
     runBlite: vi.fn(),
     settleBetaCredit: vi.fn(),
     refreshBetaCredit: vi.fn(),
+    betaPrepareEnabled: vi.fn(),
     verify: vi.fn(),
     emit: vi.fn(),
     observeRoute: vi.fn((
@@ -57,6 +58,10 @@ vi.mock('@/lib/services/analysis/beta-apify-credit-settlement-runtime', async (i
         refreshBetaApifyCreditSnapshots: mocks.refreshBetaCredit,
     };
 });
+vi.mock('@/lib/services/analysis/betatest-access', async (importOriginal) => ({
+    ...(await importOriginal<typeof import('./betatest-access')>()),
+    isAnalysisBetaPrepareEnabled: mocks.betaPrepareEnabled,
+}));
 
 import { POST } from '@/app/api/analysis/preflight/worker/route';
 import { PreflightWorkerRetryError } from './preflight';
@@ -100,6 +105,7 @@ describe('preflight worker route', () => {
         mocks.runBlite.mockResolvedValue('complete');
         mocks.settleBetaCredit.mockResolvedValue(false);
         mocks.refreshBetaCredit.mockResolvedValue(undefined);
+        mocks.betaPrepareEnabled.mockReturnValue(true);
     });
 
     it('rejects an unverified caller before parsing or claiming work', async () => {
@@ -236,6 +242,46 @@ describe('preflight worker route', () => {
         expect(mocks.process).not.toHaveBeenCalled();
     });
 
+    it('routes roleless legacy fresh-admission work through the marker-free drain contract', async () => {
+        const response = await POST(request({
+            preflightId,
+            kind: 'fresh_admission',
+            generation: 3,
+            dispatchGeneration: 2,
+            dispatchToken,
+        }));
+
+        expect(response.status).toBe(200);
+        expect(mocks.processAdmission).toHaveBeenCalledWith(
+            expect.anything(),
+            {
+                preflightId,
+                generation: 3,
+                dispatchGeneration: 2,
+                dispatchToken,
+            },
+            expect.objectContaining({
+                betaCreditCoordinator: expect.any(Object),
+                legacyDrain: true,
+            })
+        );
+    });
+
+    it('drains only roleless legacy fresh-admission payloads on preflight', async () => {
+        const response = await POST(request({
+            preflightId,
+            kind: 'fresh_admission',
+            workloadRole: 'preflight',
+            generation: 3,
+            dispatchGeneration: 2,
+            dispatchToken,
+        }));
+
+        expect(response.status).toBe(503);
+        await expect(response.json()).resolves.toEqual({ code: 'QUEUE_UNAVAILABLE' });
+        expect(mocks.processAdmission).not.toHaveBeenCalled();
+    });
+
     it('runs the trusted B-lite task without invoking the profile preflight worker', async () => {
         const response = await POST(request({ preflightId, kind: 'precheckout_blite' }));
 
@@ -243,6 +289,28 @@ describe('preflight worker route', () => {
         expect(mocks.runBlite).toHaveBeenCalledWith(preflightId);
         expect(mocks.process).not.toHaveBeenCalled();
         await expect(response.json()).resolves.toEqual({ status: 'complete' });
+    });
+
+    it('returns retryable 503 after a B-lite capacity defer so Cloud Tasks redelivers the task', async () => {
+        mocks.runBlite.mockResolvedValue('capacity_pending');
+
+        const response = await POST(request({ preflightId, kind: 'precheckout_blite' }));
+
+        expect(response.status).toBe(503);
+        await expect(response.json()).resolves.toEqual({
+            code: 'CAPACITY_PENDING',
+            status: 'pending',
+        });
+        expect(mocks.emit).toHaveBeenCalledWith(expect.objectContaining({
+            event: 'preflight.failed',
+            severity: 'warn',
+            fields: expect.objectContaining({
+                operation: 'precheckout_blite',
+                disposition: 'capacity_pending',
+                retryable: true,
+                error_code: 'ANALYSIS_PROVIDER_ADMISSION_CAPACITY_PENDING',
+            }),
+        }));
     });
 
     it('prepares beta credit only with the persisted generation/token fence', async () => {
@@ -264,6 +332,22 @@ describe('preflight worker route', () => {
         }));
         expect(mocks.process).not.toHaveBeenCalled();
         await expect(response.json()).resolves.toEqual({ status: 'prepared' });
+    });
+
+    it('rejects beta preparation before claim/provider work when the active gate is disabled', async () => {
+        mocks.betaPrepareEnabled.mockReturnValue(false);
+        const response = await POST(request({
+            preflightId,
+            kind: 'beta_prepare',
+            userId: '223e4567-e89b-42d3-a456-426614174000',
+            prepareGeneration: 2,
+            prepareToken: preflightId.replace(/^1/, '3'),
+        }));
+
+        expect(response.status).toBe(503);
+        await expect(response.json()).resolves.toEqual({ code: 'QUEUE_UNAVAILABLE' });
+        expect(mocks.prepareBeta).not.toHaveBeenCalled();
+        expect(mocks.process).not.toHaveBeenCalled();
     });
 
     it('acknowledges retry-exhausted and stale beta prepare deliveries as noops', async () => {

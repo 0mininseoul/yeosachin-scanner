@@ -1335,7 +1335,17 @@ export async function getApifyProfile(
     if (!apifyProvider.getProfile) {
         throw new Error('SCRAPING_CONFIG_ERROR: Apify full profile capability is unavailable.');
     }
-    return apifyProvider.getProfile(username, context);
+    try {
+        return await apifyProvider.getProfile(username, context);
+    } finally {
+        // Direct preflight callers do not pass through scraper.runAttempt;
+        // close their local renewal scope on pending/abort exits as well.
+        try {
+            await context?.onInvocationFinished?.();
+        } catch {
+            // Preserve the provider result; durable ownership remains fenced.
+        }
+    }
 }
 
 export async function getApifyProfileSummary(
@@ -1345,5 +1355,13 @@ export async function getApifyProfileSummary(
     if (!apifyProvider.getProfileSummary) {
         throw new Error('SCRAPING_CONFIG_ERROR: Apify summary capability is unavailable.');
     }
-    return apifyProvider.getProfileSummary(username, context);
+    try {
+        return await apifyProvider.getProfileSummary(username, context);
+    } finally {
+        try {
+            await context?.onInvocationFinished?.();
+        } catch {
+            // Preserve the provider result; durable ownership remains fenced.
+        }
+    }
 }

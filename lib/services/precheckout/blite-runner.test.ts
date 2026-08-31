@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
 import { runPrecheckoutBlite } from './blite-runner';
+import { AnalysisV2AiCapacityPendingError } from '@/lib/services/analysis/v2-gemini-lease-store';
 
 const PREFLIGHT = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa';
 const LEASE = 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb';
@@ -19,6 +20,21 @@ const dto = {
     postCount: 0,
     evidenceFields: [],
 };
+
+const GEMINI_LEASE = {
+    slot: 3,
+    claimToken: '33333333-3333-4333-8333-333333333333',
+    fence: 7,
+    expiresAt: '2026-08-13T00:02:00.000Z',
+} as const;
+
+function sharedGeminiLeaseStore() {
+    return {
+        acquire: vi.fn(async () => GEMINI_LEASE),
+        renew: vi.fn(async (lease: typeof GEMINI_LEASE) => lease),
+        release: vi.fn(async () => undefined),
+    };
+}
 
 describe('runPrecheckoutBlite', () => {
     function observability() {
@@ -51,6 +67,7 @@ describe('runPrecheckoutBlite', () => {
 
         await expect(runPrecheckoutBlite(PREFLIGHT, {
             terminalStore: terminal,
+            geminiLeaseStore: sharedGeminiLeaseStore() as never,
             infer,
             observability: telemetry,
             now: () => Date.parse(submittedAt) + 1_000,
@@ -85,6 +102,7 @@ describe('runPrecheckoutBlite', () => {
 
         await expect(runPrecheckoutBlite(PREFLIGHT, {
             terminalStore: terminal,
+            geminiLeaseStore: sharedGeminiLeaseStore() as never,
             infer,
             observability: telemetry,
             now: () => Date.parse(submittedAt) + 1_000,
@@ -125,6 +143,7 @@ describe('runPrecheckoutBlite', () => {
 
         await expect(runPrecheckoutBlite(PREFLIGHT, {
             terminalStore: terminal,
+            geminiLeaseStore: sharedGeminiLeaseStore() as never,
             infer: vi.fn(async () => null),
             observability: telemetry,
             now: () => Date.parse(submittedAt) + 1_000,
@@ -168,5 +187,159 @@ describe('runPrecheckoutBlite', () => {
             reason: 'inference_timeout',
         });
         expect(telemetry.inferenceFailed).toHaveBeenCalledWith('timeout');
+    });
+
+    it('returns retryable capacity_pending after each durable rearm and eventually completes within T+86', async () => {
+        const claims = [1, 2, 3].map((index) => ({
+            disposition: 'claimed' as const,
+            leaseToken: `bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbb${index}`,
+            source,
+            submittedAt,
+            deadlineAt: '2026-08-13T00:01:00.000Z',
+            followersCount: 1_200,
+            followingCount: 900,
+        }));
+        const events: string[] = [];
+        const terminal = {
+            claim: vi.fn(async () => claims.shift() ?? { disposition: 'pending' as const }),
+            complete: vi.fn(async () => {
+                events.push('complete');
+                return true;
+            }),
+            fail: vi.fn(async () => true),
+            deferCapacity: vi.fn(async ({ leaseToken }: { leaseToken: string }) => {
+                events.push(`defer:${leaseToken.slice(-1)}`);
+                return true;
+            }),
+        };
+        const geminiLeaseStore = {
+            acquire: vi.fn()
+                .mockRejectedValueOnce(new AnalysisV2AiCapacityPendingError())
+                .mockRejectedValueOnce(new AnalysisV2AiCapacityPendingError())
+                .mockResolvedValueOnce(GEMINI_LEASE),
+            release: vi.fn(async () => {
+                events.push('release');
+            }),
+        };
+        const infer = vi.fn(async () => {
+            events.push('infer');
+            return dto;
+        });
+
+        const options = {
+            terminalStore: terminal,
+            geminiLeaseStore: geminiLeaseStore as never,
+            infer,
+            env: { ANALYSIS_PROVIDER_ADMISSION_ENABLED: 'true' },
+            now: () => Date.parse(submittedAt) + 1_000,
+        };
+        await expect(runPrecheckoutBlite(PREFLIGHT, options)).resolves.toBe('capacity_pending');
+        await expect(runPrecheckoutBlite(PREFLIGHT, options)).resolves.toBe('capacity_pending');
+        await expect(runPrecheckoutBlite(PREFLIGHT, options)).resolves.toBe('complete');
+
+        expect(terminal.deferCapacity).toHaveBeenCalledTimes(2);
+        expect(infer).toHaveBeenCalledTimes(1);
+        expect(terminal.complete).toHaveBeenCalledTimes(1);
+        expect(geminiLeaseStore.release).toHaveBeenCalledOnce();
+        expect(events).toEqual([
+            'defer:1',
+            'defer:2',
+            'infer',
+            'complete',
+            'release',
+        ]);
+    });
+
+    it('keeps the Gemini fence when complete returns false or throws an ambiguous persistence error', async () => {
+        const makeTerminal = (complete: () => Promise<boolean>) => ({
+            claim: vi.fn(async () => ({
+                disposition: 'claimed' as const,
+                leaseToken: LEASE,
+                source,
+                submittedAt,
+                deadlineAt: '2026-08-13T00:01:00.000Z',
+                followersCount: 1_200,
+                followingCount: 900,
+            })),
+            complete: vi.fn(complete),
+            fail: vi.fn(async () => true),
+        });
+
+        const falseTerminal = makeTerminal(async () => false);
+        const falseStore = {
+            acquire: vi.fn(async () => GEMINI_LEASE),
+            release: vi.fn(async () => undefined),
+        };
+        await expect(runPrecheckoutBlite(PREFLIGHT, {
+            terminalStore: falseTerminal,
+            geminiLeaseStore: falseStore as never,
+            infer: vi.fn(async () => dto),
+            env: { ANALYSIS_PROVIDER_ADMISSION_ENABLED: 'true' },
+            now: () => Date.parse(submittedAt) + 1_000,
+        })).resolves.toBe('pending');
+        expect(falseStore.release).not.toHaveBeenCalled();
+
+        const persistenceError = new Error('unknown checkpoint response');
+        const unknownTerminal = makeTerminal(async () => {
+            throw persistenceError;
+        });
+        const unknownStore = {
+            acquire: vi.fn(async () => GEMINI_LEASE),
+            release: vi.fn(async () => undefined),
+        };
+        await expect(runPrecheckoutBlite(PREFLIGHT, {
+            terminalStore: unknownTerminal,
+            geminiLeaseStore: unknownStore as never,
+            infer: vi.fn(async () => dto),
+            env: { ANALYSIS_PROVIDER_ADMISSION_ENABLED: 'true' },
+            now: () => Date.parse(submittedAt) + 1_000,
+        })).rejects.toBe(persistenceError);
+        expect(unknownStore.release).not.toHaveBeenCalled();
+    });
+
+    it('returns retryable pending and keeps the Gemini fence when failure CAS is ambiguous', async () => {
+        const makeTerminal = (fail: () => Promise<boolean>) => ({
+            claim: vi.fn(async () => ({
+                disposition: 'claimed' as const,
+                leaseToken: LEASE,
+                source,
+                submittedAt,
+                deadlineAt: '2026-08-13T00:01:00.000Z',
+                followersCount: 1_200,
+                followingCount: 900,
+            })),
+            complete: vi.fn(async () => true),
+            fail: vi.fn(fail),
+        });
+
+        const falseTerminal = makeTerminal(async () => false);
+        const falseStore = {
+            acquire: vi.fn(async () => GEMINI_LEASE),
+            release: vi.fn(async () => undefined),
+        };
+        await expect(runPrecheckoutBlite(PREFLIGHT, {
+            terminalStore: falseTerminal,
+            geminiLeaseStore: falseStore as never,
+            infer: vi.fn(async () => null),
+            now: () => Date.parse(submittedAt) + 1_000,
+        })).resolves.toBe('pending');
+        expect(falseTerminal.fail).toHaveBeenCalledOnce();
+        expect(falseStore.release).not.toHaveBeenCalled();
+
+        const unknownTerminal = makeTerminal(async () => {
+            throw new Error('unknown terminal persistence result');
+        });
+        const unknownStore = {
+            acquire: vi.fn(async () => GEMINI_LEASE),
+            release: vi.fn(async () => undefined),
+        };
+        await expect(runPrecheckoutBlite(PREFLIGHT, {
+            terminalStore: unknownTerminal,
+            geminiLeaseStore: unknownStore as never,
+            infer: vi.fn(async () => null),
+            now: () => Date.parse(submittedAt) + 86_000,
+        })).resolves.toBe('pending');
+        expect(unknownTerminal.fail).toHaveBeenCalledOnce();
+        expect(unknownStore.release).not.toHaveBeenCalled();
     });
 });

@@ -35,6 +35,24 @@ let retryExhaustionAfterUpgrade: {
     validated: boolean;
 } | null = null;
 
+// Docker-backed coverage is optional in the local full suite.  A caller-provided
+// URL remains an explicit opt-in; otherwise skip cleanly when the daemon is not
+// available so the suite can still run its PGlite/local-Postgres substitutes.
+function hasDockerDaemon(): boolean {
+    if (suppliedUrl) return true;
+    try {
+        execFileSync('docker', ['info', '--format', '{{.ServerVersion}}'], {
+            stdio: 'ignore',
+            timeout: 5_000,
+        });
+        return true;
+    } catch {
+        return false;
+    }
+}
+
+const describePostgres = hasDockerDaemon() ? describe : describe.skip;
+
 const migrationFiles = [
     '20260802010000_add_betatest_apify_credit_pool.sql',
     '20260802010100_validate_betatest_entry_channel_constraints.sql',
@@ -560,7 +578,7 @@ async function seedActivatedBetaRequest(client: Client, snapshotLimit = 10): Pro
     };
 }
 
-describe('beta Apify credit PostgreSQL 16 concurrency', () => {
+describePostgres('beta Apify credit PostgreSQL 16 concurrency', () => {
     beforeAll(async () => {
         if (!databaseUrl) {
             const id = execFileSync('docker', [

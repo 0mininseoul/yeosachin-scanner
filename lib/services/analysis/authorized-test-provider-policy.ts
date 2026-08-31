@@ -297,8 +297,21 @@ export function resolveAnalysisV2ApifyProviderBinding(input: {
     ) {
         throw new Error('ANALYSIS_V2_ORDER_CREDENTIAL_SLOT_SCOPE_ERROR');
     }
+    const ordinaryProductionRelationship = input.policy === null
+        && input.accessMode === 'production'
+        && (
+            input.operation === 'relationship-followers'
+            || input.operation === 'relationship-following'
+        );
+    // Ordinary production relationship collection is an immutable secondary-only
+    // contract in the admission database. Keep the deployment-wide selector for
+    // profile/non-relationship work, but do not let a staging selector (for
+    // example senary) leak into a policy-null relationship admission. Frozen
+    // order/policy selectors remain authoritative through the branches above.
     const credentialSlot = input.orderScopedCredentialSlot
-        ?? resolveAnalysisV2ApifyCredentialSlot(input);
+        ?? (ordinaryProductionRelationship
+            ? 'secondary'
+            : resolveAnalysisV2ApifyCredentialSlot(input));
     if (input.policy?.mode !== 'betatest_free_pool') {
         return Object.freeze({ credentialSlot, frozenFamilyBudgetUsd: null });
     }

@@ -8,15 +8,16 @@ import {
     BETA_TEST_ACCESS_UNAVAILABLE,
     betaTestFreePoolEnabled,
     ensureBetaTestAccess,
+    isAnalysisBetaPrepareEnabled,
 } from '@/lib/services/analysis/betatest-access';
 import {
     markAnalysisV2FreshAdmissionDispatched,
     reserveAnalysisV2FreshAdmission,
 } from '@/lib/services/analysis/fresh-plan-admission';
 import {
-    enqueueFreshAdmissionTask,
-    getPreflightTasksConfig,
-} from '@/lib/services/analysis/preflight-tasks';
+    enqueueAnalysisV2FreshAdmissionTask,
+    getAnalysisV2TasksConfig,
+} from '@/lib/services/analysis/v2-tasks';
 import {
     BETA_APIFY_PLAN_ACCESS_UNAVAILABLE,
     BETA_APIFY_PLAN_ADMISSION_ERROR,
@@ -64,6 +65,12 @@ export async function POST(request: Request, { params }: RouteContext): Promise<
             return failure(403, error.code, '이 계정은 현재 사용할 수 없습니다.');
         }
         return failure(503, BETA_ADMISSION_PENDING, '베타 분석을 준비할 수 없습니다.');
+    }
+    // Check the retirement gate before replaying or dispatching any beta
+    // admission. A disabled active manifest must not restart historical beta
+    // work through the paid queue.
+    if (!isAnalysisBetaPrepareEnabled()) {
+        return failure(503, 'BETA_PREPARE_DISABLED', '베타 사전 준비 작업이 일시 중단되었습니다.');
     }
     const preflight = idSchema.safeParse((await params).preflightId);
     let rawBody: unknown;
@@ -140,18 +147,18 @@ export async function POST(request: Request, { params }: RouteContext): Promise<
         });
         if (admission.state === 'pending') {
             if (admission.shouldEnqueue && admission.dispatchToken) {
-                const config = getPreflightTasksConfig();
+                const config = getAnalysisV2TasksConfig();
                 if (!config) return failure(503, BETA_ADMISSION_PENDING, '베타 분석을 준비할 수 없습니다.');
                 if (!betaTestFreePoolEnabled() || !await ensureBetaTestAccess(supabaseAdmin, user.id)) {
                     return failure(403, BETA_TEST_ACCESS_UNAVAILABLE, '베타 분석을 사용할 수 없습니다.');
                 }
-                await enqueueFreshAdmissionTask(
-                    preflight.data,
-                    admission.generation,
-                    admission.dispatchGeneration,
-                    admission.dispatchToken,
-                    { config }
-                );
+                await enqueueAnalysisV2FreshAdmissionTask({
+                    preflightId: preflight.data,
+                    generation: admission.generation,
+                    dispatchGeneration: admission.dispatchGeneration,
+                    dispatchToken: admission.dispatchToken,
+                    workloadRole: 'paid',
+                }, { config });
                 if (!betaTestFreePoolEnabled() || !await ensureBetaTestAccess(supabaseAdmin, user.id)) {
                     return failure(403, BETA_TEST_ACCESS_UNAVAILABLE, '베타 분석을 사용할 수 없습니다.');
                 }

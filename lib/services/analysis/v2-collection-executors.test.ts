@@ -870,17 +870,20 @@ describe('analysis V2 concrete collection executors', () => {
             provider: 'apify',
             fallback: false,
             expectedResultCount: 2,
-            providerRun: expect.objectContaining({ credentialSlot: 'tertiary' }),
+            // Policy-null production relationship work is always bound to the
+            // shared secondary slot, even if a staging/global selector says
+            // otherwise.  This is the DB admission contract being exercised.
+            providerRun: expect.objectContaining({ credentialSlot: 'secondary' }),
         }));
         expect(getFollowingMock).toHaveBeenCalledWith('target', 2, expect.objectContaining({
             provider: 'apify',
             fallback: false,
             expectedResultCount: 2,
-            providerRun: expect.objectContaining({ credentialSlot: 'tertiary' }),
+            providerRun: expect.objectContaining({ credentialSlot: 'secondary' }),
         }));
         expect(checkpointRelationshipSide).toHaveBeenCalledTimes(2);
         expect(providers.bindAdapterCheckpoint).toHaveBeenCalledWith(
-            expect.objectContaining({ credentialSlot: 'tertiary' })
+            expect.objectContaining({ credentialSlot: 'secondary' })
         );
         expect(result.checkpoint.manifest.profileBatches).toHaveLength(1);
         expect(result.checkpoint.manifest.privateNameBatches).toHaveLength(1);

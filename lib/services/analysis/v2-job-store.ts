@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { supabaseAdmin } from '@/lib/supabase/admin';
 import { ANALYSIS_V2_CURRENT_WORKER_TASK_CONTRACT } from './v2-worker-task-contract';
+import type { AnalysisWorkloadRole } from './workload-role';
 
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const JOB_KEY_PATTERN = /^[a-z0-9][a-z0-9:._-]{0,159}$/;
@@ -18,11 +19,11 @@ export const ANALYSIS_V2_JOB_LEASE_SECONDS =
 /** RPC names are a shared contract with the additive Phase C migration. */
 export const ANALYSIS_V2_DATABASE_NAMES = Object.freeze({
     table: 'analysis_pipeline_jobs',
-    reserveDispatchRpc: 'reserve_analysis_v2_job_dispatch',
-    rearmDispatchRpc: 'rearm_analysis_v2_job_dispatch',
+    reserveDispatchRpc: 'reserve_analysis_v2_job_dispatch_v2',
+    rearmDispatchRpc: 'rearm_analysis_v2_job_dispatch_v2',
     deferRecoveryRpc: 'defer_analysis_v2_job_recovery',
-    markDispatchedRpc: 'mark_analysis_v2_job_dispatched',
-    claimRpc: 'claim_analysis_v2_job',
+    markDispatchedRpc: 'mark_analysis_v2_job_dispatched_v2',
+    claimRpc: 'claim_analysis_v2_job_v2',
     takeoverTerminalFailureRpc: 'takeover_analysis_v2_terminal_failure',
     deferTerminalCleanupRpc: 'defer_analysis_v2_terminal_cleanup',
     deferAiCapacityRpc: 'defer_analysis_v2_job_for_ai_capacity',
@@ -85,6 +86,8 @@ export interface AnalysisV2JobDispatchReservation extends AnalysisV2JobIdentity 
 }
 
 export interface AnalysisV2TaskDelivery extends AnalysisV2JobIdentity {
+    /** Deployment role fence; optional only while older task payloads drain during rollout. */
+    workloadRole?: AnalysisWorkloadRole;
     generation: number;
     reservationToken: string;
 }
@@ -116,6 +119,7 @@ export interface AnalysisV2JobReleaseResult {
 
 export type AnalysisV2AiAdmissionErrorCode =
     | 'ANALYSIS_V2_AI_CAPACITY_PENDING'
+    | 'ANALYSIS_V2_PROVIDER_ADMISSION_CAPACITY_PENDING'
     | 'ANALYSIS_V2_AI_DEADLINE_TOO_SHORT'
     | 'ANALYSIS_V2_AI_QUARANTINE_ACTIVE'
     | 'ANALYSIS_V2_AI_RESULT_RECOVERY_PENDING';
@@ -477,6 +481,8 @@ export function createSupabaseAnalysisV2JobStore(
                     p_request_id: identity.requestId,
                     p_job_key: identity.jobKey,
                     p_dispatch_token: proposedToken,
+                    p_workload_role: 'paid',
+                    p_contract_version: 2,
                 }
             );
             if (error) throwRpcError(error, 'dispatch reserve');
@@ -504,6 +510,8 @@ export function createSupabaseAnalysisV2JobStore(
                     p_expected_generation: expectedGeneration,
                     p_expected_dispatch_token: expectedReservationToken,
                     p_new_dispatch_token: proposedToken,
+                    p_workload_role: 'paid',
+                    p_contract_version: 2,
                 }
             );
             if (error) throwRpcError(error, 'dispatch rearm');
@@ -585,6 +593,8 @@ export function createSupabaseAnalysisV2JobStore(
                     p_dispatch_generation: generation,
                     p_dispatch_token: token,
                     p_task_name: requiredTaskName(reservation.taskName),
+                    p_workload_role: 'paid',
+                    p_contract_version: 2,
                 }
             );
             if (error) throwRpcError(error, 'dispatch mark');
@@ -632,6 +642,8 @@ export function createSupabaseAnalysisV2JobStore(
                 p_claim_token: claimToken,
                 p_lease_seconds: leaseSeconds,
                 p_max_attempts: maxAttempts,
+                p_workload_role: 'paid',
+                p_contract_version: 2,
             });
             if (error) throwRpcError(error, 'claim');
             return claimedFromRow(singleRpcRow(data, 'claim'), {
@@ -765,6 +777,7 @@ export function createSupabaseAnalysisV2JobStore(
             const identity = assertAnalysisV2JobIdentity(claim);
             if (![
                 'ANALYSIS_V2_AI_CAPACITY_PENDING',
+                'ANALYSIS_V2_PROVIDER_ADMISSION_CAPACITY_PENDING',
                 'ANALYSIS_V2_AI_DEADLINE_TOO_SHORT',
                 'ANALYSIS_V2_AI_QUARANTINE_ACTIVE',
                 'ANALYSIS_V2_AI_RESULT_RECOVERY_PENDING',
@@ -822,6 +835,7 @@ export function createSupabaseAnalysisV2JobStore(
             const identity = assertAnalysisV2JobIdentity(claim);
             if (![
                 'ANALYSIS_V2_AI_CAPACITY_PENDING',
+                'ANALYSIS_V2_PROVIDER_ADMISSION_CAPACITY_PENDING',
                 'ANALYSIS_V2_AI_DEADLINE_TOO_SHORT',
                 'ANALYSIS_V2_AI_QUARANTINE_ACTIVE',
                 'ANALYSIS_V2_AI_RESULT_RECOVERY_PENDING',

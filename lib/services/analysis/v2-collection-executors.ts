@@ -140,6 +140,10 @@ import {
     analysisRevenueFreshProvenanceStore,
     type FreshProvenanceStore,
 } from './fresh-provenance-store';
+import {
+    withAnalysisProviderAdmissionCheckpoint,
+} from './provider-admission-checkpoint';
+import type { AnalysisProviderAdmissionStore } from './provider-admission-store';
 
 const PROFILE_ACTOR_ID = 'apify/instagram-profile-scraper';
 const analysisV2RevenueCostOperationStore = new RevenueCostOperationStore(supabaseAdmin);
@@ -152,6 +156,7 @@ export interface AnalysisV2CollectionExecutorDependencies {
     evidenceStore?: AnalysisV2EvidenceStore;
     profileCheckpointStore?: AnalysisV2ProfileFetchCheckpointStore;
     providerRunStore?: AnalysisV2ProviderRunStore;
+    providerAdmissionStore?: AnalysisProviderAdmissionStore;
     revenueCostOperationStore?: RevenueCostOperationStore;
     freshProvenanceStore?: FreshProvenanceStore;
     providerRunAdoptionStore?: AnalysisV2ProviderRunAdoptionStore;
@@ -176,6 +181,7 @@ interface ResolvedDependencies {
     evidenceStore: AnalysisV2EvidenceStore;
     profileCheckpointStore: AnalysisV2ProfileFetchCheckpointStore;
     providerRunStore: AnalysisV2ProviderRunStore;
+    providerAdmissionStore?: AnalysisProviderAdmissionStore;
     revenueCostOperationStore: RevenueCostOperationStore;
     /** Deliberately absent for normal/Plus production requests. */
     freshProvenanceStore?: FreshProvenanceStore;
@@ -202,6 +208,7 @@ function deps(input: AnalysisV2CollectionExecutorDependencies): ResolvedDependen
         profileCheckpointStore:
             input.profileCheckpointStore ?? analysisV2ProfileFetchCheckpointStore,
         providerRunStore: input.providerRunStore ?? analysisV2ProviderRunStore,
+        providerAdmissionStore: input.providerAdmissionStore,
         revenueCostOperationStore:
             input.revenueCostOperationStore ?? analysisV2RevenueCostOperationStore,
         freshProvenanceStore: input.freshProvenanceStore,
@@ -407,6 +414,26 @@ async function bindApifyRun(input: {
         credentialSlot: providerBinding.credentialSlot,
         maxChargeUsd: input.maxChargeUsd,
     } as const;
+    const withAdmission = async <T extends {
+        stored: StoredAnalysisV2ProviderRun | null;
+        checkpoint: ProviderRunCheckpoint;
+    }>(binding: T): Promise<T> => ({
+        ...binding,
+        checkpoint: await withAnalysisProviderAdmissionCheckpoint({
+            checkpoint: binding.checkpoint,
+            storedStatus: binding.stored?.status === 'starting'
+                || binding.stored?.status === 'running'
+                ? binding.stored.status
+                : null,
+            workloadRole: 'paid',
+            requestId: input.claim.requestId,
+            jobKey: input.claim.jobKey,
+            operationKey: input.operationKey,
+            claimToken: input.claim.claimToken,
+            env: input.dependencies.env,
+            store: input.dependencies.providerAdmissionStore,
+        }),
+    });
     if (freshRevenueRequest || input.requireCurrentProviderRun) {
         // Fresh provenance rejects any adoption before it can select an external
         // Dataset. The only resumable path is the exact durable provider row.
@@ -421,7 +448,7 @@ async function bindApifyRun(input: {
                 jobInputHash: input.claim.jobInputHash,
             })
             : await input.dependencies.providerRunStore.bindAdapterCheckpoint(identity);
-        return { ...fallback, evidenceRun: null };
+        return { ...(await withAdmission(fallback)), evidenceRun: null };
     }
     const binding = await bindAdoptedProviderRunOrFallback({
         adoptionStore: input.dependencies.providerRunAdoptionStore,
@@ -435,7 +462,7 @@ async function bindApifyRun(input: {
             evidenceRun: binding.adopted,
         };
     }
-    return { ...binding.fallback, evidenceRun: null };
+    return { ...(await withAdmission(binding.fallback)), evidenceRun: null };
 }
 
 async function requireSucceededRun(

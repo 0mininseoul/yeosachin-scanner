@@ -21,6 +21,7 @@ import {
 import {
     bindPreflightProviderRunCheckpoint,
     createFreshAdmissionProviderRunStore,
+    freshAdmissionProviderOperationKey,
     preflightProviderIdentity,
     type FreshAdmissionProviderRunStore,
     type StoredPreflightProviderRun,
@@ -30,16 +31,35 @@ import {
     BETA_APIFY_POOL_CAPACITY_ERROR,
     type BetaApifyPreflightCoordinator,
 } from './beta-apify-preflight-coordinator';
+import {
+    AnalysisProviderAdmissionCapacityPendingError,
+    isAnalysisProviderAdmissionEnabled,
+} from './provider-admission-store';
 
 export const ANALYSIS_V2_FRESH_ADMISSION_DATABASE_NAMES = Object.freeze({
-    reserveRpc: 'reserve_analysis_v2_preflight_admission',
-    markDispatchedRpc: 'mark_analysis_v2_preflight_admission_dispatched',
+    reserveRpc: 'reserve_analysis_v2_preflight_admission_dispatch_v2',
+    markDispatchedRpc: 'mark_analysis_v2_preflight_admission_dispatched_v2',
     releaseDispatchRpc: 'release_analysis_v2_preflight_admission_dispatch',
-    claimRpc: 'claim_analysis_v2_preflight_admission_v3',
+    deferCapacityRpc: 'defer_analysis_v2_preflight_admission_for_provider_capacity_v2',
+    rearmDispatchRpc: 'rearm_analysis_v2_preflight_admission_dispatch_v2',
+    markRearmedDispatchRpc: 'mark_analysis_v2_preflight_admission_rearmed_dispatch_v2',
+    releaseRearmedDispatchRpc: 'release_analysis_v2_preflight_admission_rearmed_dispatch_v2',
+    dispatchRecoveryListRpc: 'list_analysis_v2_preflight_admission_dispatch_recovery_v2',
+    claimRpc: 'claim_analysis_v2_preflight_admission_v4',
     completeRpc: 'complete_analysis_v2_preflight_admission',
     blockRpc: 'block_analysis_v2_preflight_admission',
     releaseRpc: 'release_analysis_v2_preflight_admission',
     failureRpc: 'record_analysis_v2_preflight_admission_failure',
+});
+
+/**
+ * Roleless fresh-admission tasks predate the split queue contract. They may be
+ * drained only by the legacy claim RPC; keeping this name separate makes it
+ * impossible for a caller to accidentally turn a legacy task into a paid/2
+ * marker claim.
+ */
+export const ANALYSIS_V2_LEGACY_FRESH_ADMISSION_DATABASE_NAMES = Object.freeze({
+    claimRpc: 'claim_analysis_v2_preflight_admission_v3',
 });
 
 export const ANALYSIS_V2_FRESH_ADMISSION_MAX_FAILURES = 3;
@@ -156,6 +176,22 @@ const dispatchMutationInputSchema = z.object({
     dispatchGeneration: z.number().int().min(1).max(100),
     dispatchToken: uuidSchema,
 }).strict();
+const capacityDeferInputSchema = z.object({
+    preflightId: uuidSchema,
+    generation: z.number().int().min(1).max(100),
+    claimToken: uuidSchema,
+}).strict();
+const rearmDispatchInputSchema = z.object({
+    preflightId: uuidSchema,
+    generation: z.number().int().min(1).max(100),
+    dispatchGeneration: z.number().int().min(1).max(100),
+    dispatchToken: uuidSchema,
+}).strict();
+const rearmDispatchResultSchema = z.object({
+    should_enqueue: z.boolean(),
+    dispatch_generation: z.number().int().min(1).max(100),
+    dispatch_token: uuidSchema.nullable(),
+}).strict();
 const claimResultSchema = z.array(z.object({
     claimed: z.boolean(),
     admission_status: z.enum(['pending', 'processing', 'ready', 'blocked']),
@@ -250,6 +286,7 @@ interface ClaimedAnalysisV2FreshAdmission {
     analysisEntryChannel: 'standard' | 'betatest';
     accessMode: z.infer<typeof accessModeSchema>;
     orderScopedCredentialSlot: ApifyCredentialSlot | null;
+    legacyDrain: boolean;
 }
 
 export type AnalysisV2FreshProfileFetcher = typeof getSelfHostedAdmissionProfileSummary;
@@ -369,6 +406,8 @@ export async function reserveAnalysisV2FreshAdmission(
             p_entitlement_jti_hash: validatedInput.entitlementJtiHash,
             p_admission_token: proposedToken,
             p_dispatch_token: proposedDispatchToken,
+            p_workload_role: 'paid',
+            p_contract_version: 2,
         }
     );
     if (error) throwRpcError(error, 'reserve');
@@ -444,6 +483,8 @@ export async function markAnalysisV2FreshAdmissionDispatched(
             p_admission_generation: validatedInput.generation,
             p_dispatch_generation: validatedInput.dispatchGeneration,
             p_dispatch_token: validatedInput.dispatchToken,
+            p_workload_role: 'paid',
+            p_contract_version: 2,
         }
     );
     if (error) throwRpcError(error, 'dispatch mark');
@@ -475,23 +516,137 @@ export async function releaseAnalysisV2FreshAdmissionDispatch(
     return data ? 'released' : 'already_settled';
 }
 
-async function claimAnalysisV2FreshAdmission(
+/** Rearms an exact paid fresh-admission dispatch after a durable capacity wait. */
+export async function rearmAnalysisV2FreshAdmissionDispatch(
     client: AnalysisV2FreshAdmissionRpcClient,
-    input: { preflightId: string; generation: number },
-    createClaimToken: () => string
-): Promise<ClaimedAnalysisV2FreshAdmission | null> {
-    const validatedInput = claimInputSchema.parse(input);
-    const claimToken = uuidSchema.parse(createClaimToken());
+    input: z.input<typeof rearmDispatchInputSchema>,
+    dependencies: {
+        enqueue: (payload: {
+            preflightId: string;
+            kind: 'fresh_admission';
+            workloadRole: 'paid';
+            generation: number;
+            dispatchGeneration: number;
+            dispatchToken: string;
+        }) => Promise<unknown>;
+        lookup?: (input: {
+            preflightId: string;
+            generation: number;
+            dispatchGeneration: number;
+        }) => Promise<'exists' | 'not_found'>;
+    },
+): Promise<'rearmed' | 'already_rearmed'> {
+    const validatedInput = rearmDispatchInputSchema.parse(input);
     const { data, error } = await client.rpc(
-        ANALYSIS_V2_FRESH_ADMISSION_DATABASE_NAMES.claimRpc,
+        ANALYSIS_V2_FRESH_ADMISSION_DATABASE_NAMES.rearmDispatchRpc,
         {
             p_preflight_id: validatedInput.preflightId,
             p_admission_generation: validatedInput.generation,
-            p_dispatch_generation: validatedInput.dispatchGeneration,
-            p_dispatch_token: validatedInput.dispatchToken,
-            p_claim_token: claimToken,
-            p_lease_seconds: 120,
+            p_expected_dispatch_generation: validatedInput.dispatchGeneration,
+            p_expected_dispatch_token: validatedInput.dispatchToken,
         }
+    );
+    if (error) throwRpcError(error, 'dispatch rearm');
+    const parsed = rearmDispatchResultSchema.safeParse(data);
+    if (!parsed.success) {
+        throw new Error('ANALYSIS_V2_FRESH_ADMISSION_ERROR: invalid dispatch rearm result.');
+    }
+    const row = parsed.data;
+    if (!row.should_enqueue) return 'already_rearmed';
+    if (!row.dispatch_token) {
+        throw new Error('ANALYSIS_V2_FRESH_ADMISSION_ERROR: rearm token is missing.');
+    }
+    const payload = {
+        preflightId: validatedInput.preflightId,
+        kind: 'fresh_admission' as const,
+        workloadRole: 'paid' as const,
+        generation: validatedInput.generation,
+        dispatchGeneration: row.dispatch_generation,
+        dispatchToken: row.dispatch_token,
+    };
+    let taskConfirmed = false;
+    try {
+        await dependencies.enqueue(payload);
+        taskConfirmed = true;
+    } catch (error) {
+        // A retryable/unknown create response may follow a committed Cloud Tasks create.  Keep
+        // this exact reservation until deterministic lookup proves the task exists.  If lookup
+        // is unavailable or says not_found, maintenance can retry the same generation/token.
+        // Do not release a generation-bearing reservation on any create error, including a
+        // typed terminal refusal.  Cloud Tasks may have accepted the deterministic task before
+        // returning that response; maintenance must retain the exact fence and reconcile it.
+        if (dependencies.lookup && await dependencies.lookup({
+            preflightId: validatedInput.preflightId,
+            generation: validatedInput.generation,
+            dispatchGeneration: row.dispatch_generation,
+        }) === 'exists') {
+            taskConfirmed = true;
+        }
+        if (!taskConfirmed) throw error;
+    }
+
+    const mark = async (): Promise<boolean> => {
+        const { data: marked, error: markError } = await client.rpc(
+            ANALYSIS_V2_FRESH_ADMISSION_DATABASE_NAMES.markRearmedDispatchRpc,
+            {
+                p_preflight_id: validatedInput.preflightId,
+                p_admission_generation: validatedInput.generation,
+                p_dispatch_generation: row.dispatch_generation,
+                p_dispatch_token: row.dispatch_token,
+            }
+        );
+        if (markError) throwRpcError(markError, 'rearmed dispatch mark');
+        return marked === true;
+    };
+    try {
+        if (await mark()) return 'rearmed';
+        if (dependencies.lookup && await dependencies.lookup({
+            preflightId: validatedInput.preflightId,
+            generation: validatedInput.generation,
+            dispatchGeneration: row.dispatch_generation,
+        }) === 'exists') {
+            return 'rearmed';
+        }
+        throw new Error('ANALYSIS_V2_FRESH_ADMISSION_ERROR: rearmed dispatch fence mismatch.');
+    } catch (error) {
+        // The mark may have committed before its response was lost.  Retry the same fenced mark
+        // only after confirming the task; never release a potentially live deterministic task.
+        if (dependencies.lookup && await dependencies.lookup({
+            preflightId: validatedInput.preflightId,
+            generation: validatedInput.generation,
+            dispatchGeneration: row.dispatch_generation,
+        }) === 'exists' && await mark()) {
+            return 'rearmed';
+        }
+        throw error;
+    }
+}
+
+async function claimAnalysisV2FreshAdmission(
+    client: AnalysisV2FreshAdmissionRpcClient,
+    input: z.input<typeof claimInputSchema>,
+    createClaimToken: () => string,
+    legacyDrain: boolean,
+): Promise<ClaimedAnalysisV2FreshAdmission | null> {
+    const validatedInput = claimInputSchema.parse(input);
+    const claimToken = uuidSchema.parse(createClaimToken());
+    const params: Record<string, unknown> = {
+        p_preflight_id: validatedInput.preflightId,
+        p_admission_generation: validatedInput.generation,
+        p_dispatch_generation: validatedInput.dispatchGeneration,
+        p_dispatch_token: validatedInput.dispatchToken,
+        p_claim_token: claimToken,
+        p_lease_seconds: 120,
+    };
+    if (!legacyDrain) {
+        params.p_workload_role = 'paid';
+        params.p_contract_version = 2;
+    }
+    const { data, error } = await client.rpc(
+        legacyDrain
+            ? ANALYSIS_V2_LEGACY_FRESH_ADMISSION_DATABASE_NAMES.claimRpc
+            : ANALYSIS_V2_FRESH_ADMISSION_DATABASE_NAMES.claimRpc,
+        params
     );
     if (error) throwRpcError(error, 'claim');
     const parsed = claimResultSchema.safeParse(data);
@@ -519,6 +674,7 @@ async function claimAnalysisV2FreshAdmission(
         analysisEntryChannel: row.analysis_entry_channel,
         accessMode: row.access_mode,
         orderScopedCredentialSlot: row.order_scoped_credential_slot ?? null,
+        legacyDrain,
     });
 }
 
@@ -535,6 +691,40 @@ async function releaseAnalysisV2FreshAdmission(
         }
     );
     if (error) throwRpcError(error, 'release');
+}
+
+async function deferAnalysisV2FreshAdmissionForProviderCapacity(
+    client: AnalysisV2FreshAdmissionRpcClient,
+    claim: ClaimedAnalysisV2FreshAdmission,
+): Promise<boolean> {
+    const input = capacityDeferInputSchema.parse({
+        preflightId: claim.preflightId,
+        generation: claim.generation,
+        claimToken: claim.claimToken,
+    });
+    const { data, error } = await client.rpc(
+        claim.legacyDrain
+            ? ANALYSIS_V2_FRESH_ADMISSION_DATABASE_NAMES.releaseRpc
+            : ANALYSIS_V2_FRESH_ADMISSION_DATABASE_NAMES.deferCapacityRpc,
+        claim.legacyDrain
+            ? {
+                p_preflight_id: input.preflightId,
+                p_admission_generation: input.generation,
+                p_claim_token: input.claimToken,
+            }
+            : {
+                p_preflight_id: input.preflightId,
+                p_admission_generation: input.generation,
+                p_claim_token: input.claimToken,
+                p_workload_role: 'paid',
+                p_contract_version: 2,
+            },
+    );
+    if (error) throwRpcError(error, 'provider capacity defer');
+    if (typeof data !== 'boolean') {
+        throw new Error('ANALYSIS_V2_FRESH_ADMISSION_ERROR: invalid provider capacity defer.');
+    }
+    return data;
 }
 
 async function recordAnalysisV2FreshAdmissionFailure(
@@ -638,15 +828,26 @@ export async function processAnalysisV2FreshAdmission(
         getAuthenticatedProfile?: AnalysisV2FreshAuthenticatedProfileFetcher;
         getFallbackProfile?: AnalysisV2FreshFallbackProfileFetcher;
         providerRunStore?: FreshAdmissionProviderRunStore;
+        providerAdmissionStore?: import('./provider-admission-store').AnalysisProviderAdmissionStore;
         env?: Record<string, string | undefined>;
         createClaimToken?: () => string;
         betaCreditCoordinator?: BetaApifyPreflightCoordinator;
+        /** True only for roleless tasks created before the paid queue split. */
+        legacyDrain?: boolean;
     } = {}
-): Promise<'noop' | 'ready' | 'blocked'> {
+): Promise<'noop' | 'ready' | 'blocked' | 'capacity_pending'> {
+    const legacyDrain = dependencies.legacyDrain === true;
+    // A roleless predecessor is safe only while the old provider path is still
+    // draining. Once admission is enabled, reject before claiming or provider
+    // work so a stale task cannot bypass the paid marker contract.
+    if (legacyDrain && isAnalysisProviderAdmissionEnabled(dependencies.env ?? process.env)) {
+        throw new Error('ANALYSIS_V2_LEGACY_FRESH_DRAIN_DISABLED');
+    }
     const claim = await claimAnalysisV2FreshAdmission(
         client,
         input,
-        dependencies.createClaimToken ?? randomUUID
+        dependencies.createClaimToken ?? randomUUID,
+        legacyDrain,
     );
     if (!claim) return 'noop';
 
@@ -654,6 +855,24 @@ export async function processAnalysisV2FreshAdmission(
         ?? createFreshAdmissionProviderRunStore(client, input.generation);
     const workerStartedAt = Date.now();
     let claimSettled = false;
+    const isProviderCapacityPending = (error: unknown): boolean => (
+        error instanceof AnalysisProviderAdmissionCapacityPendingError
+        || (
+            error instanceof Error
+            && error.message.startsWith('ANALYSIS_V2_PROVIDER_ADMISSION_CAPACITY_PENDING')
+        )
+    );
+    const deferProviderCapacity = async (error: unknown): Promise<'capacity_pending'> => {
+        if (!isProviderCapacityPending(error)) throw error;
+        const deferred = await deferAnalysisV2FreshAdmissionForProviderCapacity(client, claim);
+        if (!deferred) {
+            throw new Error(
+                'ANALYSIS_V2_FRESH_ADMISSION_PERSISTENCE_ERROR: capacity defer fence mismatch.'
+            );
+        }
+        claimSettled = true;
+        return 'capacity_pending';
+    };
     const retryWithoutFailureBudget = async (error: unknown): Promise<never> => {
         const failure = classifyPreflightError(error);
         await releaseAnalysisV2FreshAdmission(client, claim);
@@ -664,7 +883,10 @@ export async function processAnalysisV2FreshAdmission(
             httpStatus: failure.httpStatus,
         }, null, error);
     };
-    const settleFailure = async (error: unknown): Promise<'blocked'> => {
+    const settleFailure = async (
+        error: unknown,
+    ): Promise<'blocked' | 'capacity_pending'> => {
+        if (isProviderCapacityPending(error)) return deferProviderCapacity(error);
         const failure = classifyPreflightError(error);
         if (
             failure.category === 'run_pending'
@@ -761,6 +983,10 @@ export async function processAnalysisV2FreshAdmission(
                 claim,
                 inputHash: paidInputHash,
                 identity,
+                operationKey: freshAdmissionProviderOperationKey(input.generation),
+                workloadRole: 'paid',
+                env: dependencies.env,
+                providerAdmissionStore: dependencies.providerAdmissionStore,
             });
             const paidProfile = await (
                 dependencies.getFallbackProfile ?? getApifyProfile

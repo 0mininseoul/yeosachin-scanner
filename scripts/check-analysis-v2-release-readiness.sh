@@ -44,6 +44,9 @@ required_env VERCEL_PROJECT_ID
 required_env VERCEL_TOKEN
 required_env IMAGE_PROXY_SIGNING_SECRET
 required_env ANALYSIS_V2_IMAGE_PROXY_PROBE_BASE_URL
+required_env ANALYSIS_CAPACITY_PUBLIC_FREEZE_READINESS_URL
+required_env ANALYSIS_CAPACITY_LEGACY_TARGET_URL
+required_env ANALYSIS_CAPACITY_LEGACY_TARGET_RESOURCE
 
 expected_sha="$ANALYSIS_V2_EXPECTED_GIT_SHA"
 cloud_project="$ANALYSIS_V2_TASKS_PROJECT"
@@ -64,6 +67,14 @@ validate_identifier VERCEL_PROJECT_ID "$vercel_project_id"
   || die 'ANALYSIS_V2_TASKS_CLOUD_RUN_REGION is invalid'
 [[ -f "$image_proxy_probe_script" ]] \
   || die 'image proxy signing compatibility probe is missing'
+[[ "$ANALYSIS_CAPACITY_PUBLIC_FREEZE_READINESS_URL" =~ ^https://[^[:space:]]+/api/analysis/capacity/readiness$ ]] \
+  || die 'ANALYSIS_CAPACITY_PUBLIC_FREEZE_READINESS_URL must be the exact read-only public freeze endpoint'
+[[ "$ANALYSIS_CAPACITY_LEGACY_TARGET_URL" =~ ^https://[^[:space:]]+/api/analysis/(start|step|run)$ ]] \
+  || die 'ANALYSIS_CAPACITY_LEGACY_TARGET_URL must be one exact public V1 route'
+[[ -n "$ANALYSIS_CAPACITY_LEGACY_TARGET_RESOURCE" \
+   && ${#ANALYSIS_CAPACITY_LEGACY_TARGET_RESOURCE} -le 256 \
+   && "$ANALYSIS_CAPACITY_LEGACY_TARGET_RESOURCE" != *[!A-Za-z0-9._:/@-]* ]] \
+  || die 'ANALYSIS_CAPACITY_LEGACY_TARGET_RESOURCE is invalid'
 
 [[ -f "$progress_migration_path" ]] \
   || die "expected DB progress migration is missing: $expected_progress_migration_version"
@@ -153,19 +164,156 @@ EOF
 )"; then
   die 'Vercel production deployment lookup failed'
 fi
-if ! vercel_sha="$(jq -er '
+if ! vercel_deployment_json="$(jq -cer '
   [ .deployments[]?
     | select((.target // "") == "production")
     | select((.readyState // .state // "") == "READY")
   ]
-  | first // {}
-  | (.meta.githubCommitSha // .meta.gitCommitSha // .gitSource.sha // empty)
+  | first // empty
 ' <<<"$vercel_json" 2>/dev/null)"; then
+  die 'Vercel has no ready production deployment record'
+fi
+if ! vercel_deployment_id="$(jq -er '(.uid // .id // empty) | strings' <<<"$vercel_deployment_json" 2>/dev/null)"; then
+  die 'selected Vercel production deployment has no immutable uid/id'
+fi
+[[ "$vercel_deployment_id" =~ ^[A-Za-z0-9_-]{1,128}$ ]] \
+  || die 'selected Vercel deployment uid/id is invalid'
+if ! vercel_sha="$(jq -er '
+  (.meta.githubCommitSha // .meta.gitCommitSha // .gitSource.sha // empty)
+' <<<"$vercel_deployment_json" 2>/dev/null)"; then
   die 'Vercel has no ready production deployment Git SHA'
 fi
 validate_sha 'Vercel production source provenance' "$vercel_sha"
 [[ "$vercel_sha" == "$expected_sha" ]] \
   || die "Vercel production SHA mismatch (expected $expected_sha)"
+
+origin_from_public_url() {
+  local url="$1"
+  if [[ "$url" =~ ^https://([A-Za-z0-9.-]+)(:[0-9]+)?(/|$) ]]; then
+    printf 'https://%s%s\n' "${BASH_REMATCH[1]}" "${BASH_REMATCH[2]:-}"
+    return 0
+  fi
+  return 1
+}
+
+public_freeze_origin="$(origin_from_public_url "$ANALYSIS_CAPACITY_PUBLIC_FREEZE_READINESS_URL")" \
+  || die 'public freeze readiness URL has no canonical HTTPS origin'
+legacy_target_origin="$(origin_from_public_url "$ANALYSIS_CAPACITY_LEGACY_TARGET_URL")" \
+  || die 'legacy V1 target URL has no canonical HTTPS origin'
+[[ "$public_freeze_origin" == "$legacy_target_origin" ]] \
+  || die 'public readiness and legacy V1 target URLs must share the exact same origin'
+
+# Vercel's deployment API returns the immutable deployment URL separately from
+# optional production aliases.  The public origin must match one of those
+# observed names; a caller-supplied readiness host is never trusted alone.
+vercel_origin_match='false'
+while IFS= read -r vercel_host; do
+  [[ -n "$vercel_host" ]] || continue
+  if [[ "$vercel_host" =~ ^https:// ]]; then
+    observed_vercel_origin="$(origin_from_public_url "$vercel_host" || true)"
+  else
+    observed_vercel_origin="$(origin_from_public_url "https://$vercel_host" || true)"
+  fi
+  if [[ "$observed_vercel_origin" == "$public_freeze_origin" ]]; then
+    vercel_origin_match='true'
+    break
+  fi
+done < <(jq -r '(.url // empty)' <<<"$vercel_deployment_json")
+
+# Do not infer custom production aliases from optional v6 list fields.  Read
+# the aliases for the exact selected deployment under the same bearer/team
+# context, then validate every returned hostname before using it as evidence.
+vercel_alias_url="$vercel_api_base/v2/deployments/$vercel_deployment_id/aliases"
+if [[ -n "${VERCEL_TEAM_ID:-}" ]]; then
+  vercel_alias_url="$vercel_alias_url?teamId=$VERCEL_TEAM_ID"
+fi
+if ! vercel_aliases_json="$(curl --disable --proto '=https' --tlsv1.2 \
+  --max-redirs 0 --connect-timeout 10 --max-time 30 \
+  --fail --silent --show-error \
+  --url "$vercel_alias_url" \
+  --header 'Accept: application/json' \
+  --config - 2>/dev/null <<EOF
+header = "Authorization: Bearer $escaped_vercel_token"
+EOF
+)"; then
+  die 'selected Vercel deployment aliases lookup failed'
+fi
+jq -e '
+  type == "object"
+  and (.aliases | type == "array")
+  and all(.aliases[];
+    type == "object"
+    and (.domain | type == "string")
+    and (.domain | test("^[A-Za-z0-9.-]+$"))
+    and (.domain | test("(^|\\.)[A-Za-z0-9-]+\\.[A-Za-z]{2,}$"))
+    and ((.deploymentId? // .deployment_id? // .uid? // .id? // null) == null
+      or ((.deploymentId? // .deployment_id? // .uid? // .id?) | tostring) == $deployment_id)
+  )
+' --arg deployment_id "$vercel_deployment_id" <<<"$vercel_aliases_json" >/dev/null 2>&1 \
+  || die 'selected Vercel deployment aliases response is malformed or belongs to another deployment'
+while IFS= read -r vercel_host; do
+  [[ -n "$vercel_host" ]] || continue
+  observed_vercel_origin="$(origin_from_public_url "https://$vercel_host" || true)"
+  if [[ "$observed_vercel_origin" == "$public_freeze_origin" ]]; then
+    vercel_origin_match='true'
+    break
+  fi
+done < <(jq -r '.aliases[]?.domain' <<<"$vercel_aliases_json")
+[[ "$vercel_origin_match" == 'true' ]] \
+  || die 'public freeze origin does not match the selected READY Vercel deployment URL or exact alias'
+
+# This is an independent read-only observation from the public Next/Vercel
+# process that owns /analysis/start, /step, and /run.  A private Cloud Run
+# worker manifest cannot prove that those public producers are frozen.
+if ! public_freeze_json="$(curl --disable --proto '=https' --tlsv1.2 \
+  --max-redirs 0 --connect-timeout 10 --max-time 30 \
+  --fail --silent --show-error \
+  --request GET \
+  --url "$ANALYSIS_CAPACITY_PUBLIC_FREEZE_READINESS_URL" \
+  --header 'Accept: application/json' 2>/dev/null)"; then
+  die 'public V1 freeze readiness observation failed'
+fi
+jq -e --arg expected_sha "$expected_sha" \
+  --arg expected_resource "$ANALYSIS_CAPACITY_LEGACY_TARGET_RESOURCE" '
+  (keys | sort) == ["freezeMode", "legacyTargetResource", "publicFreezeEnabled", "ready", "routes", "schemaVersion", "sourceSha", "stage"]
+  and .schemaVersion == "analysis-public-freeze-readiness-v1"
+  and .ready == true
+  and (.stage == "initial" or .stage == "expanded")
+  and .freezeMode == "drain-and-block"
+  and .publicFreezeEnabled == true
+  and .sourceSha == $expected_sha
+  and .legacyTargetResource == $expected_resource
+  and ((.routes | keys | sort) == ["/api/analysis/run", "/api/analysis/start", "/api/analysis/step"])
+  and ([.routes[] | select(.gateState == "frozen" and .expectedStatus == 410 and .gateBeforeRuntime == true)] | length) == 3
+' <<<"$public_freeze_json" >/dev/null 2>&1 \
+  || die 'public V1 freeze readiness is not an exact active gate-before-runtime contract'
+
+probe_legacy_route() {
+  local route="$1"
+  local response
+  local status
+  local body
+  response="$(curl --disable --proto '=https' --tlsv1.2 \
+    --max-redirs 0 --connect-timeout 10 --max-time 30 \
+    --silent --show-error \
+    --request POST \
+    --header 'Accept: application/json' \
+    --header 'Content-Type: application/json' \
+    --data-binary '{}' \
+    --write-out '\n%{http_code}' \
+    --url "${public_freeze_origin}${route}" 2>/dev/null)" \
+    || die "public V1 freeze probe failed for $route"
+  status="${response##*$'\n'}"
+  body="${response%$'\n'*}"
+  [[ "$status" == '410' ]] \
+    || die "public V1 freeze probe for $route returned HTTP $status, expected 410"
+  jq -e 'type == "object" and (keys | sort) == ["code"] and .code == "LEGACY_ANALYSIS_FROZEN"' <<<"$body" >/dev/null 2>&1 \
+    || die "public V1 freeze probe for $route did not return exact LEGACY_ANALYSIS_FROZEN JSON"
+}
+
+for legacy_route in /api/analysis/start /api/analysis/step /api/analysis/run; do
+  probe_legacy_route "$legacy_route"
+done
 
 supabase_workdir="${ANALYSIS_V2_RELEASE_SUPABASE_WORKDIR:-$repo_dir}"
 [[ -d "$supabase_workdir" ]] \

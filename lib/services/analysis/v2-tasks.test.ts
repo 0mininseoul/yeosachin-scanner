@@ -9,13 +9,16 @@ import type {
 } from './v2-job-store';
 import {
     analysisV2TaskId,
+    analysisV2FreshAdmissionTaskId,
     assertAnalysisV2TasksConfigured,
     dispatchAnalysisV2Job,
     dispatchReservedAnalysisV2Job,
     enqueueAnalysisV2Task,
+    enqueueAnalysisV2FreshAdmissionTask,
     getAnalysisV2TasksConfig,
     lookupAnalysisV2Task,
     parseAnalysisV2TaskPayload,
+    parseAnalysisV2WorkerTaskPayload,
     verifyAnalysisV2TaskAuthorization,
     type AnalysisV2TasksConfig,
 } from './v2-tasks';
@@ -23,6 +26,7 @@ import {
 const requestId = '123e4567-e89b-42d3-a456-426614174000';
 const jobKey = 'coordinator:bootstrap';
 const config: AnalysisV2TasksConfig = {
+    workloadRole: 'paid',
     project: 'example-project',
     location: 'asia-northeast3',
     queue: 'analysis-v2',
@@ -42,6 +46,7 @@ function configEnv(): Record<string, string> {
         ANALYSIS_V2_TASKS_OIDC_AUDIENCE: config.oidcAudience,
         ANALYSIS_V2_TASKS_SERVICE_ACCOUNT_EMAIL: config.serviceAccountEmail,
         ANALYSIS_V2_TASKS_CALLER_AUTH_MODE: 'adc',
+        ANALYSIS_WORKLOAD_ROLE: 'paid',
     };
 }
 
@@ -211,9 +216,57 @@ describe('analysis V2 Cloud Tasks', () => {
             .toEqual({
                 requestId,
                 jobKey,
+                workloadRole: 'paid',
                 generation: 1,
                 reservationToken: dispatchFence,
             });
+    });
+
+    it('routes fresh paid admission through the paid queue and worker contract', async () => {
+        const createTask = vi.fn().mockResolvedValue([{}]);
+        const client = queueClient(createTask);
+        const dispatchToken = randomUUID();
+        const result = await enqueueAnalysisV2FreshAdmissionTask({
+            preflightId: requestId,
+            generation: 3,
+            dispatchGeneration: 2,
+            dispatchToken,
+        }, { config, client });
+
+        expect(result.outcome).toBe('enqueued');
+        expect(result.taskName).toContain(
+            analysisV2FreshAdmissionTaskId(requestId, 3, 2),
+        );
+        const request = createTask.mock.calls[0][0] as {
+            parent: string;
+            task: { httpRequest: {
+                url: string;
+                body: string;
+                oidcToken: { audience: string; serviceAccountEmail: string };
+            } };
+        };
+        expect(client.queuePath).toHaveBeenCalledWith(
+            config.project,
+            config.location,
+            config.queue,
+        );
+        expect(request.task.httpRequest.url).toBe(config.targetUrl);
+        expect(request.task.httpRequest.oidcToken).toEqual({
+            audience: config.oidcAudience,
+            serviceAccountEmail: config.serviceAccountEmail,
+        });
+        expect(JSON.parse(Buffer.from(request.task.httpRequest.body, 'base64').toString()))
+            .toEqual({
+                preflightId: requestId,
+                kind: 'fresh_admission',
+                workloadRole: 'paid',
+                generation: 3,
+                dispatchGeneration: 2,
+                dispatchToken,
+            });
+        expect(parseAnalysisV2WorkerTaskPayload(
+            JSON.parse(Buffer.from(request.task.httpRequest.body, 'base64').toString()),
+        )).toMatchObject({ kind: 'fresh_admission', workloadRole: 'paid' });
     });
 
     it('accepts canonical ALREADY_EXISTS but not a message-only imitation', async () => {

@@ -5,6 +5,7 @@ function strictBoolean(
     key: 'ANALYSIS_V2_ADMISSION_ENABLED'
         | 'ANALYSIS_V2_WORKER_ENABLED'
         | 'ANALYSIS_V2_RECOVERY_ENABLED'
+        | 'PREFLIGHT_TASKS_RECOVERY_ENABLED'
 ): boolean {
     const normalized = value?.trim().toLowerCase();
     if (!normalized || ['0', 'false', 'off', 'no'].includes(normalized)) return false;
@@ -31,4 +32,14 @@ export function isAnalysisV2RecoveryAvailable(
 ): boolean {
     return ANALYSIS_V2_EXECUTION_CAPABILITY === ('jobs' as string)
         && strictBoolean(env.ANALYSIS_V2_RECOVERY_ENABLED, 'ANALYSIS_V2_RECOVERY_ENABLED');
+}
+
+/** Preflight maintenance has an independent fail-closed availability gate. */
+export function isPreflightRecoveryAvailable(
+    env: Record<string, string | undefined> = process.env
+): boolean {
+    return strictBoolean(
+        env.PREFLIGHT_TASKS_RECOVERY_ENABLED,
+        'PREFLIGHT_TASKS_RECOVERY_ENABLED',
+    );
 }

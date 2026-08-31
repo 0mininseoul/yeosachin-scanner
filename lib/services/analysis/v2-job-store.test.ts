@@ -171,6 +171,8 @@ describe('analysis V2 job store', () => {
             p_expected_generation: 1,
             p_expected_dispatch_token: previousFence,
             p_new_dispatch_token: expect.stringMatching(/^[0-9a-f-]{36}$/),
+            p_workload_role: 'paid',
+            p_contract_version: 2,
         });
     });
 
@@ -250,6 +252,8 @@ describe('analysis V2 job store', () => {
             p_dispatch_generation: 1,
             p_dispatch_token: dispatch.reservationToken,
             p_task_name: taskName,
+            p_workload_role: 'paid',
+            p_contract_version: 2,
         });
     });
 
@@ -308,6 +312,8 @@ describe('analysis V2 job store', () => {
             p_claim_token: expect.stringMatching(/^[0-9a-f-]{36}$/),
             p_lease_seconds: 600,
             p_max_attempts: 7,
+            p_workload_role: 'paid',
+            p_contract_version: 2,
         });
     });
 

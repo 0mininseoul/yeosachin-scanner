@@ -81,6 +81,14 @@ import {
     ANALYSIS_V2_GENERIC_JOB_FAILURE_CODE,
     isAnalysisV2WorkerErrorCode,
 } from './v2-worker-error-codes';
+import {
+    AnalysisProviderAdmissionCapacityPendingError,
+    AnalysisProviderAdmissionClaimConflictError,
+    AnalysisProviderAdmissionFenceError,
+    AnalysisProviderAdmissionIdentityConflictError,
+    AnalysisProviderAdmissionPersistenceError,
+    AnalysisProviderAdmissionResolutionPendingError,
+} from './provider-admission-store';
 
 const PROFILE_FETCH_JOB_PATTERN = /^track:profiles:batch:\d+$/;
 const PROFILE_AI_JOB_PATTERN = /^track:profile-ai:batch:\d+$/;
@@ -88,6 +96,7 @@ const PRIVATE_NAME_JOB_PATTERN = /^track:private-names:batch:\d+$/;
 const AI_ADMISSION_FAILURE_CODES: ReadonlySet<AnalysisV2AiAdmissionErrorCode> =
     new Set([
         'ANALYSIS_V2_AI_CAPACITY_PENDING',
+        'ANALYSIS_V2_PROVIDER_ADMISSION_CAPACITY_PENDING',
         'ANALYSIS_V2_AI_DEADLINE_TOO_SHORT',
         'ANALYSIS_V2_AI_QUARANTINE_ACTIVE',
         'ANALYSIS_V2_AI_RESULT_RECOVERY_PENDING',
@@ -782,6 +791,11 @@ const TRANSIENT_FAILURE_CODES = new Set([
     'ANALYSIS_V2_PROFILE_CONSUMER_RETRYABLE_OUTCOME',
     'ANALYSIS_V2_PROGRESS_CONFLICT',
     'ANALYSIS_V2_PROVIDER_RUN_ALREADY_RESERVED',
+    'ANALYSIS_V2_PROVIDER_ADMISSION_CAPACITY_PENDING',
+    'ANALYSIS_V2_PROVIDER_ADMISSION_PERSISTENCE_ERROR',
+    'ANALYSIS_V2_PROVIDER_ADMISSION_RELEASE_REQUIRED',
+    'ANALYSIS_V2_PROVIDER_ADMISSION_RENEW_REQUIRED',
+    'ANALYSIS_V2_PROVIDER_ADMISSION_RESOLUTION_PENDING',
     'ANALYSIS_V2_PROVIDER_RUN_CLEANUP_NOT_READY',
     'ANALYSIS_V2_PROVIDER_RUN_CLEANUP_REQUIRED',
     'ANALYSIS_V2_PROVIDER_RUN_RECONCILIATION_NOT_READY',
@@ -979,6 +993,42 @@ export function classifyAnalysisV2JobFailure(error: unknown): AnalysisV2JobExecu
     }
     if (error instanceof AnalysisV2ProgressConflictError) {
         return new AnalysisV2JobExecutionError('ANALYSIS_V2_PROGRESS_CONFLICT', 'transient');
+    }
+    if (error instanceof AnalysisProviderAdmissionCapacityPendingError) {
+        return new AnalysisV2JobExecutionError(
+            'ANALYSIS_V2_PROVIDER_ADMISSION_CAPACITY_PENDING',
+            'transient',
+        );
+    }
+    if (error instanceof AnalysisProviderAdmissionClaimConflictError) {
+        return new AnalysisV2JobExecutionError(
+            'ANALYSIS_V2_PROVIDER_ADMISSION_CLAIM_CONFLICT',
+            'permanent',
+        );
+    }
+    if (error instanceof AnalysisProviderAdmissionFenceError) {
+        return new AnalysisV2JobExecutionError(
+            'ANALYSIS_V2_PROVIDER_ADMISSION_PERSISTENCE_ERROR',
+            'transient',
+        );
+    }
+    if (error instanceof AnalysisProviderAdmissionIdentityConflictError) {
+        return new AnalysisV2JobExecutionError(
+            'ANALYSIS_V2_PROVIDER_ADMISSION_IDENTITY_CONFLICT',
+            'permanent',
+        );
+    }
+    if (error instanceof AnalysisProviderAdmissionResolutionPendingError) {
+        return new AnalysisV2JobExecutionError(
+            'ANALYSIS_V2_PROVIDER_ADMISSION_RESOLUTION_PENDING',
+            'transient',
+        );
+    }
+    if (error instanceof AnalysisProviderAdmissionPersistenceError) {
+        return new AnalysisV2JobExecutionError(
+            'ANALYSIS_V2_PROVIDER_ADMISSION_PERSISTENCE_ERROR',
+            'transient',
+        );
     }
     if (error instanceof Error) {
         if (error.name === 'ZodError') {
