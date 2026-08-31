@@ -216,7 +216,7 @@ describe('PrecheckoutImmersive', () => {
         );
         expect(container.querySelector('[data-precheckout-fallback]')).toBeNull();
         expect(container.querySelector('[data-precheckout-demo-mode="waiting"]')).toBeNull();
-        expect(container.querySelectorAll('[data-precheckout-result-card]')).toHaveLength(4);
+        expect(container.querySelector('[data-precheckout-result]')).not.toBeNull();
         expect(container.textContent).not.toContain('성별 판독 요약');
         expect(analyticsMocks.trackPrecheckoutEvent).toHaveBeenCalledWith(
             'precheckout_blite_result_viewed', PREFLIGHT_ID,
@@ -499,7 +499,7 @@ describe('PrecheckoutImmersive', () => {
         await advance(1);
 
         expect(container.querySelector('[data-precheckout-fallback]')).toBeNull();
-        expect(container.querySelectorAll('[data-precheckout-result-card]')).toHaveLength(4);
+        expect(container.querySelector('[data-precheckout-result]')).not.toBeNull();
         expect(container.textContent).toContain('@target');
     });
 
@@ -535,7 +535,7 @@ describe('PrecheckoutImmersive', () => {
         await settleUi();
 
         expect(container.querySelector('[data-precheckout-fallback]')).toBeNull();
-        expect(container.querySelectorAll('[data-precheckout-result-card]')).toHaveLength(4);
+        expect(container.querySelector('[data-precheckout-result]')).not.toBeNull();
         expect(analyticsMocks.trackPrecheckoutEvent).not.toHaveBeenCalledWith(
             'precheckout_blite_fallback_selected', PREFLIGHT_ID, expect.anything(),
         );
@@ -565,7 +565,7 @@ describe('PrecheckoutImmersive', () => {
         await advance(44_000);
         expect(fetchMock.mock.calls.length).toBeGreaterThan(1);
         expect(container.querySelector('[data-precheckout-fallback]')).toBeNull();
-        expect(container.querySelectorAll('[data-precheckout-result-card]')).toHaveLength(4);
+        expect(container.querySelector('[data-precheckout-result]')).not.toBeNull();
         expect(analyticsMocks.trackPrecheckoutEvent).not.toHaveBeenCalledWith(
             'precheckout_blite_fallback_selected', PREFLIGHT_ID, expect.anything(),
         );
@@ -712,7 +712,7 @@ describe('PrecheckoutImmersive', () => {
             'precheckout_blite_gender_confirmation_completed', PREFLIGHT_ID,
             { gender_confirmation_outcome: 'confirmed' },
         );
-        expect(container.querySelectorAll('[data-precheckout-result-card]')).toHaveLength(4);
+        expect(container.querySelector('[data-precheckout-result]')).not.toBeNull();
         expect(container.textContent).not.toContain('성별 판독 요약');
         expect(onGoToPlans).not.toHaveBeenCalled();
         clickButton(container, '상세 분석 보기');
@@ -780,8 +780,74 @@ describe('PrecheckoutImmersive', () => {
         await advance(20_000);
 
         expect(container.textContent).not.toContain('판독 방향 확인');
-        expect(container.querySelectorAll('[data-precheckout-result-card]')).toHaveLength(4);
+        expect(container.querySelector('[data-precheckout-result]')).not.toBeNull();
         expect(container.textContent).toContain('상세 분석 보기');
+    });
+
+    it('tells the page the result sheet is on screen, and only for the result state', async () => {
+        vi.stubGlobal('fetch', vi.fn().mockResolvedValue(jsonResponse(completeStatus())));
+        const onBliteResultShown = vi.fn();
+
+        await act(async () => {
+            root.render(createElement(PrecheckoutImmersive, {
+                preflightId: PREFLIGHT_ID,
+                claimToken: null,
+                submittedAtMs: Date.parse(SUBMITTED_AT),
+                targetUsername: 'target',
+                onGoToPlans: vi.fn(),
+                onBliteResultShown,
+            }));
+        });
+        await settleUi();
+
+        expect(onBliteResultShown).not.toHaveBeenCalled();
+        await advance(20_000);
+        expect(container.querySelector('[data-precheckout-result]')).not.toBeNull();
+        expect(onBliteResultShown).toHaveBeenCalledOnce();
+        expect(analyticsMocks.trackPrecheckoutEvent.mock.calls
+            .filter(call => call[0] === 'precheckout_blite_result_viewed')).toHaveLength(1);
+
+        // A parent that rerenders with a fresh callback identity — the ordinary result of
+        // holding this announcement in parent state — must not re-announce or re-emit.
+        for (let pass = 0; pass < 2; pass += 1) {
+            await act(async () => {
+                root.render(createElement(PrecheckoutImmersive, {
+                    preflightId: PREFLIGHT_ID,
+                    claimToken: null,
+                    submittedAtMs: Date.parse(SUBMITTED_AT),
+                    targetUsername: 'target',
+                    onGoToPlans: vi.fn(),
+                    onBliteResultShown: () => onBliteResultShown(),
+                }));
+            });
+            await settleUi();
+        }
+
+        expect(container.querySelector('[data-precheckout-result]')).not.toBeNull();
+        expect(onBliteResultShown).toHaveBeenCalledOnce();
+        expect(analyticsMocks.trackPrecheckoutEvent.mock.calls
+            .filter(call => call[0] === 'precheckout_blite_result_viewed')).toHaveLength(1);
+    });
+
+    it('never announces a result sheet when the run ends in the neutral fallback', async () => {
+        vi.stubGlobal('fetch', vi.fn().mockResolvedValue(jsonResponse(failedStatus())));
+        const onBliteResultShown = vi.fn();
+
+        await act(async () => {
+            root.render(createElement(PrecheckoutImmersive, {
+                preflightId: PREFLIGHT_ID,
+                claimToken: null,
+                submittedAtMs: Date.parse(SUBMITTED_AT),
+                targetUsername: 'target',
+                onGoToPlans: vi.fn(),
+                onBliteResultShown,
+            }));
+        });
+        await settleUi();
+        await advance(120_000);
+
+        expect(container.querySelector('[data-precheckout-fallback]')).not.toBeNull();
+        expect(onBliteResultShown).not.toHaveBeenCalled();
     });
 
     it('renders the candidate range with a tilde and a generic feed caption without the exact post count', async () => {
@@ -805,7 +871,7 @@ describe('PrecheckoutImmersive', () => {
         expect(container.textContent).toContain('34~80명');
         expect(container.textContent).not.toContain('34 – 80명');
         expect(container.textContent).not.toContain('34-80명');
-        expect(container.textContent).toContain('최근 게시물들에서 확인한 패턴');
+        expect(container.textContent).not.toContain('최근 게시물들에서 확인한 패턴');
         expect(container.textContent).not.toContain('47개');
     });
 });

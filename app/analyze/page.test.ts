@@ -38,6 +38,25 @@ describe('/analyze precheckout plan gate', () => {
             .toBeLessThan(page.indexOf('consumeAutoCheckoutContinuation();\n        autoCheckoutRecoveryRequestedRef'));
     });
 
+    it('withdraws the page heading eyebrow while the B-lite result sheet owns the screen', () => {
+        const page = readFileSync(join(process.cwd(), 'app/analyze/page.tsx'), 'utf8');
+
+        // The result sheet carries exactly one eyebrow of its own; the page must not add a
+        // second one above it.
+        expect(page).toContain('onBliteResultShown={handleBliteResultShown}');
+        // Referentially stable: an inline arrow would rerun the component's one-shot
+        // result-announcement effect on every parent render.
+        expect(page).toContain(
+            'const handleBliteResultShown = useCallback(() => setBliteResultShown(true), []);',
+        );
+        expect(page).toContain(
+            "{!bliteResultShown && (\n                                    <Eyebrow>{exclusionDecided ? '판독 의뢰서 · 대상 확인' : '판독 의뢰서 · 본인 제외'}</Eyebrow>\n                                )}",
+        );
+        // Every other state keeps it, and a target reset restores it.
+        expect(page).toContain("'판독 의뢰서 · 본인 제외'");
+        expect(page).toContain('setBliteResultShown(false);');
+    });
+
     it('resets the viewport to the top on the explicit immersive CTA transition instead of scrolling to plans', () => {
         const page = readFileSync(join(process.cwd(), 'app/analyze/page.tsx'), 'utf8');
 

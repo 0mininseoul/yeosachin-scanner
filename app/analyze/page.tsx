@@ -756,6 +756,14 @@ const DISCLOSURE_ACCEPTED = true;
         user,
     ]);
 
+    /**
+     * The B-lite result sheet carries its own single eyebrow. The page heading above it carries
+     * a second one, which put two eyebrow-like labels on the same screen, so the page withdraws
+     * its own for that state only.
+     */
+    const [bliteResultShown, setBliteResultShown] = useState(false);
+    const handleBliteResultShown = useCallback(() => setBliteResultShown(true), []);
+
     const handleReset = () => {
         const activePreflightId = preflight?.preflightId;
         const storage = availablePendingTargetStorage();
@@ -776,6 +784,7 @@ const DISCLOSURE_ACCEPTED = true;
         setPurchaseSubmitting(false);
         setWaitlistComplete(false);
         setCheckoutStatusCta(null);
+        setBliteResultShown(false);
         initializedRef.current = true;
         router.replace('/analyze');
     };
@@ -922,8 +931,10 @@ const DISCLOSURE_ACCEPTED = true;
                     <>
                         <div className="flex items-start justify-between gap-3">
                             <div>
-                                <Eyebrow>{exclusionDecided ? '판독 의뢰서 · 대상 확인' : '판독 의뢰서 · 본인 제외'}</Eyebrow>
-                                <h1 className="mt-3 text-[24px] font-extrabold leading-snug text-fg">
+                                {!bliteResultShown && (
+                                    <Eyebrow>{exclusionDecided ? '판독 의뢰서 · 대상 확인' : '판독 의뢰서 · 본인 제외'}</Eyebrow>
+                                )}
+                                <h1 className={`${bliteResultShown ? '' : 'mt-3 '}text-[24px] font-extrabold leading-snug text-fg`}>
                                     {!exclusionDecided
                                         ? '본인 계정은 먼저 제외해주세요'
                                         : readyPreflight
@@ -1002,6 +1013,7 @@ const DISCLOSURE_ACCEPTED = true;
                                 submittedAtMs={preflightStartedAt}
                                 targetUsername={targetInstagramId}
                                 onGoToPlans={handleGoToPlans}
+                                onBliteResultShown={handleBliteResultShown}
                             />
                         )}
 

@@ -4,9 +4,9 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import {
     PRECHECKOUT_BLITE_LIKELY_FEMALE_CONFIDENCE_THRESHOLD,
     precheckoutBliteV1Schema,
-    type PrecheckoutBliteSignalBand,
     type PrecheckoutBliteV1,
 } from '@/lib/services/precheckout/blite-contract';
+import { BliteResultScreen } from '@/components/blite-result';
 import { CaseCard, Eyebrow, PrimaryButton } from '@/components/case-ui';
 import { PrecheckoutDemo } from '@/components/precheckout-demo';
 import {
@@ -121,18 +121,6 @@ async function fetchPrecheckoutBlite(
     return pending;
 }
 
-const SIGNAL_BAND_LABEL: Record<PrecheckoutBliteSignalBand, string> = {
-    high: '신뢰도 높음',
-    medium: '신뢰도 보통',
-    low: '신뢰도 낮음 · 표본 부족',
-};
-
-const SIGNAL_BAND_BAR_COLOR: Record<PrecheckoutBliteSignalBand, string> = {
-    high: 'var(--color-blood)',
-    medium: 'var(--color-amber)',
-    low: 'var(--color-fg-mute)',
-};
-
 export interface PrecheckoutImmersiveProps {
     preflightId: string;
     claimToken: string | null;
@@ -142,6 +130,13 @@ export interface PrecheckoutImmersiveProps {
     targetUsername?: string | null;
     onGoToPlans: () => void;
     onDemoError?: () => void;
+    /**
+     * Fired once the B-lite result sheet is on screen. The page owns the heading above this
+     * surface, and that heading's eyebrow is the second eyebrow-like label on the result
+     * screen, so the page needs to know when to withdraw it. Result state only — the demo,
+     * confirmation, rejection, and fallback screens never fire it.
+     */
+    onBliteResultShown?: () => void;
 }
 
 export function PrecheckoutImmersive({
@@ -151,6 +146,7 @@ export function PrecheckoutImmersive({
     targetUsername = null,
     onGoToPlans,
     onDemoError,
+    onBliteResultShown,
 }: PrecheckoutImmersiveProps) {
     /** The accepted-preflight clock; governs BLITE_UX_DEADLINE_MS only. */
     const [startedAtMs] = useState(() => isValidEpoch(submittedAtMs) ? submittedAtMs : Date.now());
@@ -164,6 +160,7 @@ export function PrecheckoutImmersive({
     const exitTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
     const settledExitRef = useRef(false);
     const emittedEventKeysRef = useRef(new Set<string>());
+    const resultAnnouncedRef = useRef(false);
     const deadlineAtMs = startedAtMs + BLITE_UX_DEADLINE_MS;
     /**
      * Waiting on the exclusion screen spends the submission-anchored deadline before this screen
@@ -326,11 +323,18 @@ export function PrecheckoutImmersive({
         };
     }, [claimToken, emitPrecheckoutEvent, hasExtendedVisibleGrace, preflightId, requestExit, visibleEntryAtMs, visibleFallbackAtMs]);
 
+    /**
+     * One shot, guarded here rather than at the call site. `emitPrecheckoutEvent` already
+     * dedupes per preflight, but `onBliteResultShown` is a caller-supplied callback whose
+     * identity this component does not control: an inline arrow in the parent would rerun this
+     * effect on every parent render. The ref makes the announcement correct regardless.
+     */
     useEffect(() => {
-        if (view === 'result' && dtoRef.current) {
-            emitPrecheckoutEvent(PRECHECKOUT_EVENTS.BLITE_RESULT_VIEWED);
-        }
-    }, [emitPrecheckoutEvent, view]);
+        if (view !== 'result' || !dtoRef.current || resultAnnouncedRef.current) return;
+        resultAnnouncedRef.current = true;
+        emitPrecheckoutEvent(PRECHECKOUT_EVENTS.BLITE_RESULT_VIEWED);
+        onBliteResultShown?.();
+    }, [emitPrecheckoutEvent, onBliteResultShown, view]);
 
     const handleDemoComplete = useCallback(() => {
         finishExit(exitRef.current ?? 'fallback');
@@ -452,79 +456,6 @@ function GenderConfirmScreen({
                 &quot;아니오&quot;를 선택하면 이 미리보기는 안전하게 종료돼요.
             </p>
         </CaseCard>
-    );
-}
-
-function BliteResultScreen({
-    targetUsername,
-    dto,
-    onContinue,
-}: {
-    targetUsername: string | null;
-    dto: PrecheckoutBliteV1;
-    onContinue: () => void;
-}) {
-    const target = targetUsername?.trim() || '판독 대상';
-    return (
-        <section className="mt-7 space-y-3" aria-label="B-lite 판독 요약">
-            <CaseCard data-precheckout-result-card bracket="var(--color-blood)" className="p-5">
-                <Eyebrow>판독 대상</Eyebrow>
-                <p className="mt-2 text-[19px] font-extrabold text-fg">@{target}</p>
-            </CaseCard>
-
-            <CaseCard data-precheckout-result-card bracket="var(--color-blood)" className="p-5">
-                <Eyebrow>AI 1차 페르소나</Eyebrow>
-                <h2 data-amp-block className="mt-2 text-[17px] font-extrabold leading-snug text-fg">
-                    {dto.persona.headline}
-                </h2>
-                <p data-amp-block className="mt-2 text-[12.5px] leading-relaxed text-fg-dim">
-                    {dto.persona.summary}
-                </p>
-            </CaseCard>
-
-            <CaseCard data-precheckout-result-card bracket="var(--color-amber)" className="p-5">
-                <Eyebrow>공개 피드 신호</Eyebrow>
-                <p className="mt-2 text-[12px] text-fg-dim">최근 게시물들에서 확인한 패턴</p>
-                <div className="mt-3 divide-y divide-line border-t border-line">
-                    {dto.signals.map(signal => (
-                        <div key={signal.claim} className="py-3">
-                            <div className="flex items-baseline gap-2">
-                                <span data-amp-block className="flex-1 text-[12.5px] font-bold leading-snug text-fg">
-                                    {signal.claim}
-                                </span>
-                                <span className="num shrink-0 text-[12px] font-extrabold text-fg">
-                                    {signal.confidence.toFixed(2)}
-                                </span>
-                            </div>
-                            <div className="relative mt-1.5 h-[3px] bg-line">
-                                <span
-                                    className="absolute inset-y-0 left-0"
-                                    style={{
-                                        width: `${signal.confidence * 100}%`,
-                                        background: SIGNAL_BAND_BAR_COLOR[signal.band],
-                                    }}
-                                />
-                            </div>
-                            <div className="mt-1 flex justify-between text-[10px] text-fg-mute">
-                                <span>{signal.category}</span>
-                                <span>{SIGNAL_BAND_LABEL[signal.band]}</span>
-                            </div>
-                        </div>
-                    ))}
-                </div>
-            </CaseCard>
-
-            <CaseCard data-precheckout-result-card bracket="var(--color-blood)" className="p-5">
-                <Eyebrow>관계 판독 범위</Eyebrow>
-                <p className="num mt-2 text-[18px] font-extrabold text-fg">
-                    분석 후보 예상 범위 {dto.candidateRange.min}~{dto.candidateRange.max}명
-                </p>
-                <p className="mt-2 text-[11.5px] leading-relaxed text-fg-mute">
-                    공개 피드와 계정 규모를 바탕으로 한 1차 범위예요. 전체 판독에서 후보별 관계 신호를 확인할 수 있어요.
-                </p>
-                <PrimaryButton onClick={onContinue} className="mt-5">상세 분석 보기</PrimaryButton>
-            </CaseCard>
-        </section>
     );
 }
 
