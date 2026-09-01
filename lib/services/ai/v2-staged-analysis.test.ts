@@ -32,6 +32,7 @@ import {
     AI_STAGE_POLICY_V29_VERSION,
     AI_STAGE_POLICY_V210_VERSION,
     AI_STAGE_POLICY_V211_VERSION,
+    AI_STAGE_POLICY_V212_VERSION,
     type AiStagePolicyVersion,
 } from './stage-policy';
 import {
@@ -1222,6 +1223,53 @@ describe('V2 staged AI services', () => {
         expect(prompt).toContain('실제 보이는 단서를 한 가지 이상 콕 집어');
         expect(prompt).toContain('official_group_or_brand면 로고·팀명·발매');
         expect(prompt).toContain('물음표나 ㅋㅋ은');
+    });
+
+    it('binds v2.12 route identity and generation options to the triage escalation reason', async () => {
+        const defaultInput = featureInput(routedTriage({
+            inferredGender: 'female',
+            confidence: 'high',
+            ownerConsistency: 'same_person',
+            evidenceSelectionIds: ['profile:candidate', 'post:1:thumbnail'],
+        }));
+        const ambiguousInput = featureInput(routedTriage());
+        const defaultIdentity = createFeatureAnalysisResultIdentity(
+            defaultInput,
+            AI_STAGE_POLICY_V212_VERSION,
+        );
+        const ambiguousIdentity = createFeatureAnalysisResultIdentity(
+            ambiguousInput,
+            AI_STAGE_POLICY_V212_VERSION,
+        );
+
+        expect(defaultIdentity).toMatchObject({
+            modelName: 'gemini-3.1-flash-lite',
+            maxOutputTokens: 1_024,
+        });
+        expect(ambiguousIdentity).toMatchObject({
+            modelName: 'gemini-3.7-flash',
+            maxOutputTokens: 4_096,
+        });
+        expect(ambiguousIdentity.operationKey).not.toBe(defaultIdentity.operationKey);
+
+        mocks.analyzeWithGemini.mockImplementationOnce(async (
+            _prompt: string,
+            _images: string[],
+            options: { schema: { parse(value: unknown): unknown } },
+        ) => options.schema.parse(featureResponse({
+            oneLineOverview: '여행 사진과 짧은 기록이 같은 방향을 봅니다.',
+        })));
+        await featureAnalysis(
+            ambiguousInput,
+            audit('featureAnalysis', ambiguousInput, AI_STAGE_POLICY_V212_VERSION),
+            { aiStagePolicyVersion: AI_STAGE_POLICY_V212_VERSION },
+        );
+        expect(mocks.analyzeWithGemini.mock.calls[0]?.[2]).toMatchObject({
+            model: 'gemini-3.7-flash',
+            budgetRoute: 'ambiguous',
+            maxOutputTokens: 4_096,
+            maxAttempts: 2,
+        });
     });
 
     it('keeps v2.9 legacy presentation byte-distinct while v2.10 restores v2.8 concrete copy rules', async () => {

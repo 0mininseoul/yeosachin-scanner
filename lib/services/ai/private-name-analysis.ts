@@ -4,6 +4,7 @@ import {
     analyzeWithGemini,
     type GeminiAttemptStartTelemetry,
     type GeminiAttemptTelemetry,
+    type GeminiRequestTelemetry,
 } from './gemini';
 import { getVertexAIAnalysisConcurrency } from './pipeline-config';
 import {
@@ -23,6 +24,7 @@ import {
     type AnalysisV2AiPreparedResult,
     type AnalysisV2AiResultIdentity,
 } from '@/lib/services/analysis/v2-ai-result-store';
+import type { VertexAiBudgetGuard } from './vertex-ai-cost-policy';
 
 export const PRIVATE_NAME_BATCH_SIZE = 100;
 const MAX_PRIVATE_NAME_ACCOUNTS = 10_000;
@@ -119,6 +121,9 @@ export interface PrivateNameAnalysisAuditSink {
         telemetry: GeminiAttemptTelemetry,
         parsedResult?: unknown
     ): void | Promise<void>;
+    onTelemetry?: (telemetry: GeminiRequestTelemetry) => void | Promise<void>;
+    budgetGuard?: VertexAiBudgetGuard;
+    budgetOrderId?: string | null;
 }
 
 export interface PrivateNameAnalysisChunkIdentity {
@@ -208,8 +213,15 @@ async function analyzePrivateNameChunk(
                             startingAttempt: prepared?.startingAttempt ?? 1,
                             onBeforeAttempt: audit.onBeforeAttempt,
                             onAttemptTelemetry: audit.onAttemptTelemetry,
+                            ...(audit.onTelemetry ? { onTelemetry: audit.onTelemetry } : {}),
+                            budgetRunId: audit.requestId,
+                            budgetOperationKey: audit.operationKey,
+                            ...(audit.budgetGuard ? { budgetGuard: audit.budgetGuard } : {}),
+                            ...(audit.budgetOrderId !== undefined
+                                ? { budgetOrderId: audit.budgetOrderId }
+                                : {}),
                             ...(replayCapability
-                                ? { skipTokenLog: true, replayCapability }
+                                ? { replayCapability }
                                 : {}),
                         }
                         : {

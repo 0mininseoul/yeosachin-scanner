@@ -1,0 +1,38 @@
+{
+  "baseline": {
+    "modelName": "gemini-3.7-flash",
+    "location": "global",
+    "inputTokens": 28696298,
+    "outputTokens": 13834322,
+    "highRiskRecall": 1
+  },
+  "proposed": {
+    "routes": [
+      {
+        "route": "default",
+        "reason": null,
+        "modelName": "gemini-3.1-flash-lite",
+        "location": "global",
+        "inputTokens": 24000000,
+        "outputTokens": 10000000,
+        "calls": 80,
+        "attempts": 80
+      },
+      {
+        "route": "high_value",
+        "reason": "high_value",
+        "modelName": "gemini-3.7-flash",
+        "location": "global",
+        "inputTokens": 4696298,
+        "outputTokens": 3834322,
+        "calls": 20,
+        "attempts": 20
+      }
+    ],
+    "unknownUsageRate": 0,
+    "highRiskRecall": 0.97,
+    "maxOutputTokens": 4096,
+    "maxThinkingLevel": "LOW",
+    "maxAttempts": 2
+  }
+}

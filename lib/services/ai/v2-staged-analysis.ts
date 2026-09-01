@@ -22,6 +22,7 @@ import {
     analyzeWithGemini,
     type GeminiAttemptStartTelemetry,
     type GeminiAttemptTelemetry,
+    type GeminiRequestTelemetry,
 } from './gemini';
 import { GeminiResponseValidationError } from './gemini-response';
 import {
@@ -30,12 +31,20 @@ import {
     AI_STAGE_POLICY_V29_VERSION,
     AI_STAGE_POLICY_V210_VERSION,
     AI_STAGE_POLICY_V211_VERSION,
+    AI_STAGE_POLICY_V212_VERSION,
     aiStagePolicySupports,
     getAiStagePolicy,
     type AiStageName,
     type AiStagePolicyVersion,
     type AiThinkingLevel,
 } from './stage-policy';
+import {
+    selectVertexAiRoute,
+    type VertexAiCostStage,
+    type VertexAiCostRoutePolicy,
+    type VertexAiEscalationReason,
+} from './vertex-ai-cost-policy';
+import type { VertexAiBudgetGuard } from './vertex-ai-cost-policy';
 import type { ReplayStatelessCapability } from './replay-stateless-capability';
 import {
     isAnalysisV2AiDeterministicFallbackError,
@@ -628,7 +637,7 @@ function safeOverviewSchemaFor(
         );
         if (
             (policyVersion === AI_STAGE_POLICY_V210_VERSION
-                || policyVersion === AI_STAGE_POLICY_V211_VERSION)
+                || usesDecisiveSummaryPresentation(policyVersion))
             && publicLaughTokenCount(value) > 1
         ) {
             context.addIssue({
@@ -1189,7 +1198,7 @@ function highRiskNarrativeResultSchemaFor(
     input: ParsedHighRiskNarrativeInput,
     policyVersion: AiStagePolicyVersion,
 ) {
-    if (policyVersion !== AI_STAGE_POLICY_V211_VERSION) {
+    if (!usesDecisiveSummaryPresentation(policyVersion)) {
         return highRiskNarrativeResultSchema;
     }
     const subjects = v211NarrativeSubjects(input);
@@ -1223,6 +1232,11 @@ export interface StagedAiAuditContext {
         telemetry: GeminiAttemptTelemetry,
         parsedResult?: unknown
     ) => void | Promise<void>;
+    /** Replay-only in-memory telemetry; durable adapters may omit this sink. */
+    onTelemetry?: (telemetry: GeminiRequestTelemetry) => void | Promise<void>;
+    /** Optional shared monetary guard; replay supplies an in-memory guard. */
+    budgetGuard?: VertexAiBudgetGuard;
+    budgetOrderId?: string | null;
 }
 
 function parseAuditContext(
@@ -1260,6 +1274,30 @@ function parseAuditContext(
         prepare: context.prepare,
         onBeforeAttempt: context.onBeforeAttempt,
         onAttemptTelemetry: context.onAttemptTelemetry,
+        ...(context.onTelemetry ? { onTelemetry: context.onTelemetry } : {}),
+        ...(context.budgetGuard ? { budgetGuard: context.budgetGuard } : {}),
+        ...(context.budgetOrderId !== undefined ? { budgetOrderId: context.budgetOrderId } : {}),
+    };
+}
+
+function stagedTelemetryOptions(
+    audit: StagedAiAuditContext,
+    route?: VertexAiCostRoutePolicy | null,
+): {
+    onTelemetry?: (telemetry: GeminiRequestTelemetry) => void | Promise<void>;
+    budgetRunId: string;
+    budgetOperationKey: string;
+    budgetGuard?: VertexAiBudgetGuard;
+    budgetOrderId?: string | null;
+    budgetRoute?: VertexAiCostRoutePolicy['route'];
+} {
+    return {
+        ...(audit.onTelemetry ? { onTelemetry: audit.onTelemetry } : {}),
+        budgetRunId: audit.requestId,
+        budgetOperationKey: audit.operationKey,
+        ...(audit.budgetGuard ? { budgetGuard: audit.budgetGuard } : {}),
+        ...(audit.budgetOrderId !== undefined ? { budgetOrderId: audit.budgetOrderId } : {}),
+        ...(route ? { budgetRoute: route.route } : {}),
     };
 }
 
@@ -1273,21 +1311,79 @@ function stagedResultIdentity(
         promptVersion?: string;
         schemaVersion?: number;
         maxOutputTokens?: number;
+        modelName?: string;
+        thinkingLevel?: AiThinkingLevel;
+        mediaResolution?: 'LOW' | 'MEDIUM' | 'HIGH';
+        escalationReason?: VertexAiEscalationReason | null;
     }> = {},
 ): AnalysisV2AiResultIdentity {
     const policy = getAiStagePolicy(policyVersion, stage);
+    const route = policyVersion === AI_STAGE_POLICY_V212_VERSION
+        ? selectVertexAiRoute({
+            stage,
+            escalationReason: overrides.escalationReason,
+        })
+        : null;
     return createAnalysisV2AiResultIdentity({
         stage,
-        modelName: policy.model,
-        thinkingLevel: policy.thinkingLevel,
-        mediaResolution: policy.mediaResolution,
+        modelName: overrides.modelName ?? route?.modelName ?? policy.model,
+        thinkingLevel: overrides.thinkingLevel ?? route?.thinkingLevel ?? policy.thinkingLevel,
+        mediaResolution: overrides.mediaResolution ?? route?.mediaResolution ?? policy.mediaResolution,
         promptVersion: overrides.promptVersion ?? policy.promptVersion,
         schemaVersion: overrides.schemaVersion ?? policy.schemaVersion,
-        maxOutputTokens: overrides.maxOutputTokens ?? policy.maxOutputTokens,
+        maxOutputTokens: overrides.maxOutputTokens
+            ?? route?.maxOutputTokens
+            ?? policy.maxOutputTokens,
         inputHash: createAnalysisV2AiResultInputHash(prompt),
         mediaSnapshotHash: createAnalysisV2AiMediaSnapshotHashFromParts(media),
         cacheScope,
     });
+}
+
+function costRouteForStage(
+    stage: VertexAiCostStage,
+    policyVersion: AiStagePolicyVersion,
+    escalationReason?: VertexAiEscalationReason | null,
+): VertexAiCostRoutePolicy | null {
+    return policyVersion === AI_STAGE_POLICY_V212_VERSION
+        ? selectVertexAiRoute({ stage, escalationReason })
+        : null;
+}
+
+function costRouteGenerationOptions(
+    route: VertexAiCostRoutePolicy | null,
+): {
+    model?: string;
+    thinkingLevel?: AiThinkingLevel;
+    mediaResolution?: 'LOW' | 'MEDIUM' | 'HIGH';
+        maxOutputTokens?: number;
+        maxAttempts?: number;
+        retryResponseRejections?: boolean;
+        budgetRoute?: VertexAiCostRoutePolicy['route'];
+} {
+    if (!route) return {};
+    return {
+        model: route.modelName,
+        thinkingLevel: route.thinkingLevel,
+        mediaResolution: route.mediaResolution,
+        maxOutputTokens: route.maxOutputTokens,
+        maxAttempts: route.maxAttempts,
+        retryResponseRejections: route.retryResponseRejections,
+        budgetRoute: route.route,
+    };
+}
+
+function featureEscalationReason(
+    input: z.output<typeof featureAnalysisInputSchema>,
+    policyVersion: AiStagePolicyVersion,
+): VertexAiEscalationReason | null {
+    if (policyVersion !== AI_STAGE_POLICY_V212_VERSION) return null;
+    const assessment = input.triage.assessment;
+    return assessment.inferredGender === 'unknown'
+        || assessment.confidence !== 'high'
+        || assessment.ownerConsistency !== 'same_person'
+        ? 'ambiguous'
+        : null;
 }
 
 async function prepareStagedResult<T>(
@@ -1535,7 +1631,7 @@ function normalizeFeatureResponse(
         // A v2.11 overview is public concierge copy. Reject an invalid Gemini
         // sentence at the grounded schema boundary instead of composing a
         // repetitive deterministic substitute.
-        oneLineOverview: safeOverview.success || policyVersion === AI_STAGE_POLICY_V211_VERSION
+        oneLineOverview: safeOverview.success || usesDecisiveSummaryPresentation(policyVersion)
             ? value.oneLineOverview
             : featureOverviewFallback({
                 accountContext,
@@ -2191,16 +2287,26 @@ export function createGenderTriageMicrobatchAccountId(
  * Earlier policy versions keep the genderTriage stage's own model.
  */
 function genderNameOnlyModelFor(policyVersion: AiStagePolicyVersion): string {
-    return policyVersion === AI_STAGE_POLICY_V211_VERSION
-        ? GENDER_NAME_ONLY_V211_MODEL
-        : getAiStagePolicy(policyVersion, 'genderTriage').model;
+    if (policyVersion === AI_STAGE_POLICY_V211_VERSION) return GENDER_NAME_ONLY_V211_MODEL;
+    if (policyVersion === AI_STAGE_POLICY_V212_VERSION) {
+        return selectVertexAiRoute({ stage: 'genderTriage' }).modelName;
+    }
+    return getAiStagePolicy(policyVersion, 'genderTriage').model;
 }
 
 /** Must move with genderNameOnlyModelFor: the model constrains the admissible level. */
 function genderNameOnlyThinkingLevelFor(policyVersion: AiStagePolicyVersion): AiThinkingLevel {
-    return policyVersion === AI_STAGE_POLICY_V211_VERSION
-        ? GENDER_NAME_ONLY_V211_THINKING_LEVEL
-        : getAiStagePolicy(policyVersion, 'genderTriage').thinkingLevel;
+    if (policyVersion === AI_STAGE_POLICY_V211_VERSION) return GENDER_NAME_ONLY_V211_THINKING_LEVEL;
+    if (policyVersion === AI_STAGE_POLICY_V212_VERSION) {
+        return selectVertexAiRoute({ stage: 'genderTriage' }).thinkingLevel;
+    }
+    return getAiStagePolicy(policyVersion, 'genderTriage').thinkingLevel;
+}
+
+function genderNameOnlyMaxOutputTokensFor(policyVersion: AiStagePolicyVersion): number {
+    return policyVersion === AI_STAGE_POLICY_V212_VERSION
+        ? selectVertexAiRoute({ stage: 'genderTriage' }).maxOutputTokens
+        : GENDER_NAME_ONLY_MAX_OUTPUT_TOKENS;
 }
 
 function genderNameOnlyResultIdentity(
@@ -2217,7 +2323,7 @@ function genderNameOnlyResultIdentity(
         mediaResolution: policy.mediaResolution,
         promptVersion: genderNameOnlyPromptVersion(assertive),
         schemaVersion: GENDER_NAME_ONLY_SCHEMA_VERSION,
-        maxOutputTokens: GENDER_NAME_ONLY_MAX_OUTPUT_TOKENS,
+        maxOutputTokens: genderNameOnlyMaxOutputTokensFor(policyVersion),
         inputHash: createAnalysisV2AiResultInputHash(prompt),
         mediaSnapshotHash: createAnalysisV2AiMediaSnapshotHashFromParts([]),
         cacheScope: 'request',
@@ -2241,6 +2347,7 @@ export async function genderNameOnlyBatch(
 ): Promise<readonly GenderNameOnlyResult[]> {
     const candidates = parseGenderNameOnlyCandidates(rawCandidates);
     const policyVersion = options.aiStagePolicyVersion ?? AI_STAGE_POLICY_V211_VERSION;
+    const costRoute = costRouteForStage('genderTriage', policyVersion);
     const assertive = conciergeBatchNameGenderAssertiveEnabled();
     const prompt = genderNameOnlyPrompt(candidates, assertive);
     const identity = genderNameOnlyResultIdentity(candidates, policyVersion);
@@ -2261,15 +2368,17 @@ export async function genderNameOnlyBatch(
             startingAttempt: prepared.startingAttempt,
             model: genderNameOnlyModelFor(policyVersion),
             thinkingLevel: genderNameOnlyThinkingLevelFor(policyVersion),
-            maxOutputTokens: GENDER_NAME_ONLY_MAX_OUTPUT_TOKENS,
+            maxOutputTokens: genderNameOnlyMaxOutputTokensFor(policyVersion),
             // Reproducibility for a batch classifier with no visual grounding to anchor it.
             temperature: GENDER_NAME_ONLY_TEMPERATURE,
             promptVersion: genderNameOnlyPromptVersion(assertive),
             schemaVersion: GENDER_NAME_ONLY_SCHEMA_VERSION,
             onBeforeAttempt: audit.onBeforeAttempt,
             onAttemptTelemetry: audit.onAttemptTelemetry,
+            ...stagedTelemetryOptions(audit),
+            ...costRouteGenerationOptions(costRoute),
             ...(options.replayCapability
-                ? { skipTokenLog: true, replayCapability: options.replayCapability }
+                ? { replayCapability: options.replayCapability }
                 : {}),
         },
     ));
@@ -2337,8 +2446,10 @@ export async function genderTriageMicrobatch(
     const projected = projectGenderTriageMicrobatch(accounts);
     const prompt = genderTriageMicrobatchPrompt(projected, policyVersion);
     const media = projected.flatMap(account => account.projectedMedia);
+    const costRoute = costRouteForStage('genderTriage', policyVersion);
     const identity = stagedResultIdentity(
         'genderTriage', prompt, media, 'request', policyVersion,
+        { escalationReason: null },
     );
     const audit = parseAuditContext(rawAuditContext, identity);
     const responseSchema = genderTriageMicrobatchResponseSchemaFor(
@@ -2360,8 +2471,10 @@ export async function genderTriageMicrobatch(
                 maxImages: GENDER_TRIAGE_V29_MAX_MEDIA_PER_BATCH,
                 onBeforeAttempt: audit.onBeforeAttempt,
                 onAttemptTelemetry: audit.onAttemptTelemetry,
+                ...costRouteGenerationOptions(costRoute),
+                ...stagedTelemetryOptions(audit, costRoute),
                 ...(options.replayCapability
-                    ? { skipTokenLog: true, replayCapability: options.replayCapability }
+                    ? { replayCapability: options.replayCapability }
                     : {}),
             },
         ));
@@ -2410,15 +2523,19 @@ export function createGenderResolutionResultIdentity(
 export function createFeatureAnalysisResultIdentity(
     rawInput: FeatureAnalysisInput,
     policyVersion: AiStagePolicyVersion = AI_STAGE_POLICY_VERSION,
+    options: { escalationReason?: VertexAiEscalationReason | null } = {},
 ): AnalysisV2AiResultIdentity {
     const input = featureAnalysisInputSchema.parse(rawInput);
     const media = selectedMedia(input.media, MAX_FEATURE_FEED_MEDIA);
+    const escalationReason = options.escalationReason
+        ?? featureEscalationReason(input, policyVersion);
     return stagedResultIdentity(
         'featureAnalysis',
         featureAnalysisPrompt(input, media, policyVersion),
         media,
         'request',
         policyVersion,
+        { escalationReason },
     );
 }
 
@@ -2456,6 +2573,7 @@ export async function genderFirstPass(
     const input = genderFirstPassInputSchema.parse(rawInput);
     const media = input.media;
     const policyVersion = options.aiStagePolicyVersion ?? AI_STAGE_POLICY_VERSION;
+    const costRoute = costRouteForStage('genderTriage', policyVersion);
     const prompt = genderFirstPassPrompt(input, media);
     const identity = stagedResultIdentity(
         'genderTriage',
@@ -2463,6 +2581,7 @@ export async function genderFirstPass(
         media,
         'request',
         policyVersion,
+        { escalationReason: null },
     );
     const audit = parseAuditContext(rawAuditContext, identity);
     const responseSchema = genderFirstPassResponseSchemaFor(media);
@@ -2479,8 +2598,10 @@ export async function genderFirstPass(
             startingAttempt: prepared.startingAttempt,
             onBeforeAttempt: audit.onBeforeAttempt,
             onAttemptTelemetry: audit.onAttemptTelemetry,
+            ...costRouteGenerationOptions(costRoute),
+            ...stagedTelemetryOptions(audit, costRoute),
             ...(options.replayCapability
-                ? { skipTokenLog: true, replayCapability: options.replayCapability }
+                ? { replayCapability: options.replayCapability }
                 : {}),
         },
     ));
@@ -2506,6 +2627,7 @@ export async function genderTriage(
     const input = genderTriageInputSchema.parse(rawInput);
     const media = selectedMedia(input.media, MAX_TRIAGE_FEED_MEDIA);
     const policyVersion = options.aiStagePolicyVersion ?? AI_STAGE_POLICY_VERSION;
+    const costRoute = costRouteForStage('genderTriage', policyVersion);
     const prompt = genderTriagePrompt(media, policyVersion, input.accountProfile);
     const identity = stagedResultIdentity(
         'genderTriage',
@@ -2513,6 +2635,7 @@ export async function genderTriage(
         media,
         'request',
         policyVersion,
+        { escalationReason: null },
     );
     const audit = parseAuditContext(rawAuditContext, identity);
     const responseSchema = genderResponseSchemaFor(media);
@@ -2529,8 +2652,10 @@ export async function genderTriage(
                 startingAttempt: prepared.startingAttempt,
                 onBeforeAttempt: audit.onBeforeAttempt,
                 onAttemptTelemetry: audit.onAttemptTelemetry,
+                ...costRouteGenerationOptions(costRoute),
+                ...stagedTelemetryOptions(audit, costRoute),
                 ...(options.replayCapability
-                    ? { skipTokenLog: true, replayCapability: options.replayCapability }
+                    ? { replayCapability: options.replayCapability }
                     : {}),
             }
         ));
@@ -2578,8 +2703,10 @@ async function prepareGenderResolutionGeneration(
     const projection = projectGenderResolutionMedia(media);
     const policyVersion = options.aiStagePolicyVersion ?? AI_STAGE_POLICY_LATEST_VERSION;
     const prompt = projection.prompt;
+    const costRoute = costRouteForStage('genderResolution', policyVersion);
     const identity = stagedResultIdentity(
         'genderResolution', prompt, media, 'request', policyVersion,
+        { escalationReason: null },
     );
     const audit = parseAuditContext(rawAuditContext, identity);
     const responseSchema = genderResolutionModelResponseSchemaFor(
@@ -2615,6 +2742,14 @@ async function prepareGenderResolutionGeneration(
             startingAttempt: prepared.startingAttempt,
             abortSignal: options.abortSignal,
             replayCapability: options.replayCapability,
+            ...(costRoute ? {
+                model: costRoute.modelName,
+                thinkingLevel: costRoute.thinkingLevel,
+                mediaResolution: costRoute.mediaResolution,
+                maxOutputTokens: costRoute.maxOutputTokens,
+                maxAttempts: costRoute.maxAttempts,
+                retryResponseRejections: costRoute.retryResponseRejections,
+            } : {}),
         } satisfies PreparedGenderResolutionGeneration<
             z.infer<typeof genderResolutionModelResponseSchema>
         >,
@@ -2629,11 +2764,15 @@ export async function featureAnalysis(
     options: {
         aiStagePolicyVersion?: AiStagePolicyVersion;
         replayCapability?: ReplayStatelessCapability;
+        escalationReason?: VertexAiEscalationReason | null;
     } = {},
 ): Promise<FeatureAnalysisResult> {
     const input = featureAnalysisInputSchema.parse(rawInput);
     const media = selectedMedia(input.media, MAX_FEATURE_FEED_MEDIA);
     const policyVersion = options.aiStagePolicyVersion ?? AI_STAGE_POLICY_VERSION;
+    const escalationReason = options.escalationReason
+        ?? featureEscalationReason(input, policyVersion);
+    const costRoute = costRouteForStage('featureAnalysis', policyVersion, escalationReason);
     const prompt = featureAnalysisPrompt(input, media, policyVersion);
     const identity = stagedResultIdentity(
         'featureAnalysis',
@@ -2641,6 +2780,7 @@ export async function featureAnalysis(
         media,
         'request',
         policyVersion,
+        { escalationReason },
     );
     const audit = parseAuditContext(rawAuditContext, identity);
     const responseSchema = featureResponseSchemaFor(media, policyVersion, {
@@ -2662,6 +2802,8 @@ export async function featureAnalysis(
                 startingAttempt: prepared.startingAttempt,
                 onBeforeAttempt: audit.onBeforeAttempt,
                 onAttemptTelemetry: audit.onAttemptTelemetry,
+                ...costRouteGenerationOptions(costRoute),
+                ...stagedTelemetryOptions(audit, costRoute),
                 ...(policyVersion === AI_STAGE_POLICY_V211_VERSION
                     ? {
                         maxAttempts: conciergeBatchFeatureAnalysisMaxAttempts(),
@@ -2669,7 +2811,7 @@ export async function featureAnalysis(
                     }
                     : {}),
                 ...(options.replayCapability
-                    ? { skipTokenLog: true, replayCapability: options.replayCapability }
+                    ? { replayCapability: options.replayCapability }
                     : {}),
             }
         ));
@@ -2848,6 +2990,7 @@ export async function partnerSafetyAnalysis(
         });
     }
     const policyVersion = options.aiStagePolicyVersion ?? AI_STAGE_POLICY_VERSION;
+    const costRoute = costRouteForStage('partnerSafety', policyVersion);
 
     if (!rawAuditContext) {
         throw new Error('A durable partner-safety audit context is required.');
@@ -2857,7 +3000,7 @@ export async function partnerSafetyAnalysis(
         selectionId: input.contactSheet.selectionId,
         kind: 'contact_sheet',
         normalizedJpegBase64: input.contactSheet.normalizedJpegBase64,
-    }], 'request', policyVersion);
+    }], 'request', policyVersion, { escalationReason: null });
     const audit = parseAuditContext(rawAuditContext, identity);
     const responseSchema = partnerSafetyResponseSchemaFor(input.contactSheet);
     let assessment: z.infer<typeof partnerSafetyModelResponseSchema>;
@@ -2873,8 +3016,10 @@ export async function partnerSafetyAnalysis(
                     aiStagePolicyVersion: policyVersion,
                     requestId: audit.requestId,
                     startingAttempt: prepared.startingAttempt,
-                    onBeforeAttempt: audit.onBeforeAttempt,
-                    onAttemptTelemetry: audit.onAttemptTelemetry,
+                onBeforeAttempt: audit.onBeforeAttempt,
+                onAttemptTelemetry: audit.onAttemptTelemetry,
+                ...costRouteGenerationOptions(costRoute),
+                ...stagedTelemetryOptions(audit, costRoute),
                 }
             ));
     } catch (error) {
@@ -3055,7 +3200,7 @@ function narrativePrompt(
 ): string {
     const legacy = narrativePromptLegacy(input, media, sanitized);
     if (!usesSafePublicPresentation(policyVersion)) return legacy;
-    if (policyVersion === AI_STAGE_POLICY_V211_VERSION) {
+    if (usesDecisiveSummaryPresentation(policyVersion)) {
         const subjects = v211CopySubjectNames({
             ...input.forbiddenIdentifiers,
             ...input.publicSubjects,
@@ -3281,7 +3426,7 @@ function narrativeResponseSchemaFor(
     policyVersion: AiStagePolicyVersion,
     validationMode: HighRiskNarrativeValidationMode,
 ) {
-    const v211Subjects = policyVersion === AI_STAGE_POLICY_V211_VERSION
+    const v211Subjects = usesDecisiveSummaryPresentation(policyVersion)
         ? v211NarrativeSubjects(input)
         : null;
     const allowedRefs = new Set([
@@ -3719,6 +3864,7 @@ function deterministicV211NarrativeRepair(
 export function createHighRiskNarrativeResultIdentity(
     rawInput: HighRiskNarrativeInput,
     policyVersion: AiStagePolicyVersion = AI_STAGE_POLICY_VERSION,
+    options: { escalationReason?: VertexAiEscalationReason | null } = {},
 ): AnalysisV2AiResultIdentity {
     const input = highRiskNarrativeInputSchema.parse(rawInput);
     const media = selectedMedia(input.media, MAX_FEATURE_FEED_MEDIA);
@@ -3729,6 +3875,7 @@ export function createHighRiskNarrativeResultIdentity(
         media,
         'request',
         policyVersion,
+        { escalationReason: options.escalationReason },
     );
 }
 
@@ -3738,12 +3885,18 @@ export async function highRiskNarrative(
     options: {
         aiStagePolicyVersion?: AiStagePolicyVersion;
         narrativeValidationMode?: HighRiskNarrativeValidationMode;
+        escalationReason?: VertexAiEscalationReason | null;
     } = {},
 ): Promise<HighRiskNarrativeResult> {
     const input = highRiskNarrativeInputSchema.parse(rawInput);
     const media = selectedMedia(input.media, MAX_FEATURE_FEED_MEDIA);
     const sanitized = sanitizedNarrativeEvidence(input);
     const policyVersion = options.aiStagePolicyVersion ?? AI_STAGE_POLICY_VERSION;
+    const costRoute = costRouteForStage(
+        'highRiskNarrative',
+        policyVersion,
+        options.escalationReason,
+    );
     const validationMode = options.narrativeValidationMode ?? 'strict';
     const prompt = narrativePrompt(input, media, sanitized, policyVersion);
     const identity = stagedResultIdentity(
@@ -3752,6 +3905,7 @@ export async function highRiskNarrative(
         media,
         'request',
         policyVersion,
+        { escalationReason: options.escalationReason },
     );
     const audit = parseAuditContext(rawAuditContext, identity);
     const responseSchema = narrativeResponseSchemaFor(
@@ -3776,6 +3930,8 @@ export async function highRiskNarrative(
                     startingAttempt: prepared.startingAttempt,
                     onBeforeAttempt: audit.onBeforeAttempt,
                     onAttemptTelemetry: audit.onAttemptTelemetry,
+                    ...costRouteGenerationOptions(costRoute),
+                    ...stagedTelemetryOptions(audit, costRoute),
                 }
             ));
     } catch (error) {

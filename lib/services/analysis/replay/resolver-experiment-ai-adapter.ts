@@ -23,8 +23,13 @@ import {
 import type {
     GeminiAttemptStartTelemetry,
     GeminiAttemptTelemetry,
+    GeminiRequestTelemetry,
 } from '@/lib/services/ai/gemini';
 import { issueReplayStatelessCapability } from '@/lib/services/ai/replay-stateless-capability';
+import {
+    createVertexAiBudgetGuard,
+    type VertexAiBudgetGuard,
+} from '@/lib/services/ai/vertex-ai-cost-policy';
 import { planGenderTriageMicrobatches } from '@/lib/services/ai/gender-triage-microbatch-plan';
 import type {
     ReplayAiRunner,
@@ -46,6 +51,13 @@ type InvocationState = {
     rateLimited: number;
     failureDisposition: Record<string, number>;
     attemptLatenciesMs: number[];
+    inputTokens: number;
+    outputTokens: number;
+    thinkingTokens: number;
+    estimatedCostUsd: number;
+    guardedCostUsd: number;
+    unknownUsage: number;
+    requestTelemetry: GeminiRequestTelemetry[];
 };
 
 function normalized(media: readonly ReplayMedia[]) {
@@ -68,11 +80,24 @@ function recordTerminal(state: InvocationState, value: GeminiAttemptTelemetry) {
         state.failureDisposition[value.disposition] =
             (state.failureDisposition[value.disposition] ?? 0) + 1;
     }
+    if (value.tokenUsage) {
+        state.inputTokens += value.tokenUsage.promptTokens;
+        state.outputTokens += value.tokenUsage.completionTokens;
+        state.thinkingTokens += value.tokenUsage.thinkingTokens ?? 0;
+    }
+    if (value.estimatedCostUsd !== null && value.estimatedCostUsd !== undefined) {
+        state.estimatedCostUsd += value.estimatedCostUsd;
+    }
+    if (value.preDispatchCostUsd !== null && value.preDispatchCostUsd !== undefined) {
+        state.guardedCostUsd += value.preDispatchCostUsd;
+    }
+    if (value.usageMetadataStatus !== 'complete') state.unknownUsage++;
 }
 function audit(
     requestId: string,
     identity: StagedAiAuditContext['resultIdentity'],
     state: InvocationState,
+    budgetGuard: VertexAiBudgetGuard,
 ): StagedAiAuditContext {
     return {
         requestId,
@@ -81,6 +106,8 @@ function audit(
         prepare: async () => ({ result: null, source: null, startingAttempt: 1 }),
         onBeforeAttempt: value => recordStart(state, value),
         onAttemptTelemetry: value => recordTerminal(state, value),
+        onTelemetry: value => { state.requestTelemetry.push(value); },
+        budgetGuard,
     };
 }
 
@@ -106,11 +133,12 @@ async function resolveGender(
     media: ReturnType<typeof normalized>,
     state: InvocationState,
     replayCapability: ReturnType<typeof issueReplayStatelessCapability>,
+    budgetGuard: VertexAiBudgetGuard,
     signal: AbortSignal,
 ) {
     const projected = projectGenderResolutionMedia(media);
     const identity = resolverIdentity(media);
-    const context = audit(requestId, identity, state);
+    const context = audit(requestId, identity, state, budgetGuard);
     const assessment = projected.schema.parse(await analyzeWithGemini(
         projected.prompt,
         projected.media.map(item => item.normalizedJpegBase64),
@@ -124,7 +152,11 @@ async function resolveGender(
             abortSignal: signal,
             onBeforeAttempt: context.onBeforeAttempt,
             onAttemptTelemetry: context.onAttemptTelemetry,
-            skipTokenLog: true,
+            onTelemetry: context.onTelemetry,
+            budgetGuard: context.budgetGuard,
+            budgetRunId: requestId,
+            budgetOperationKey: identity.operationKey,
+            budgetRoute: 'default',
             replayCapability,
             model: 'gemini-3-flash-preview',
             thinkingLevel: 'HIGH',
@@ -158,6 +190,9 @@ async function invoke<T>(
     const state: InvocationState = {
         calls: 0, retries: 0, attempts: 0, rateLimited: 0,
         failureDisposition: {}, attemptLatenciesMs: [],
+        inputTokens: 0, outputTokens: 0, thinkingTokens: 0,
+        estimatedCostUsd: 0, guardedCostUsd: 0, unknownUsage: 0,
+        requestTelemetry: [],
     };
     try {
         const value = await task(state);
@@ -168,6 +203,13 @@ async function invoke<T>(
             failureDisposition: state.failureDisposition,
             attemptLatenciesMs: state.attemptLatenciesMs,
             elapsedMs: Math.round(performance.now() - started),
+            inputTokens: state.inputTokens,
+            outputTokens: state.outputTokens,
+            thinkingTokens: state.thinkingTokens,
+            estimatedCostUsd: state.estimatedCostUsd,
+            guardedCostUsd: state.guardedCostUsd,
+            unknownUsage: state.unknownUsage,
+            requestTelemetry: state.requestTelemetry,
         };
     } catch (error) {
         if (!isolateError(error)) throw error;
@@ -178,6 +220,13 @@ async function invoke<T>(
             failureDisposition: state.failureDisposition,
             attemptLatenciesMs: state.attemptLatenciesMs,
             elapsedMs: Math.round(performance.now() - started),
+            inputTokens: state.inputTokens,
+            outputTokens: state.outputTokens,
+            thinkingTokens: state.thinkingTokens,
+            estimatedCostUsd: state.estimatedCostUsd,
+            guardedCostUsd: state.guardedCostUsd,
+            unknownUsage: state.unknownUsage,
+            requestTelemetry: state.requestTelemetry,
         };
     }
 }
@@ -186,6 +235,7 @@ async function invoke<T>(
 export function createStrongUncertainResolverExperimentAdapter(): ExperimentRunner {
     const requestId = randomUUID();
     const replayCapability = issueReplayStatelessCapability();
+    const budgetGuard = createVertexAiBudgetGuard();
     type Pending = {
         accountId: string;
         input: {
@@ -227,7 +277,7 @@ export function createStrongUncertainResolverExperimentAdapter(): ExperimentRunn
                 const identity = createGenderTriageMicrobatchResultIdentity(accounts);
                 return genderTriageMicrobatch(
                     accounts,
-                    audit(requestId, identity, state),
+                    audit(requestId, identity, state, budgetGuard),
                     { replayCapability },
                 );
             });
@@ -251,6 +301,13 @@ export function createStrongUncertainResolverExperimentAdapter(): ExperimentRunn
                         failureDisposition: metrics ? invocation.failureDisposition : {},
                         attemptLatenciesMs: metrics ? invocation.attemptLatenciesMs : [],
                         elapsedMs: metrics ? invocation.elapsedMs : 0,
+                        inputTokens: metrics ? invocation.inputTokens : 0,
+                        outputTokens: metrics ? invocation.outputTokens : 0,
+                        thinkingTokens: metrics ? invocation.thinkingTokens : 0,
+                        estimatedCostUsd: metrics ? invocation.estimatedCostUsd : 0,
+                        guardedCostUsd: metrics ? invocation.guardedCostUsd : 0,
+                        unknownUsage: metrics ? invocation.unknownUsage : 0,
+                        requestTelemetry: metrics ? invocation.requestTelemetry : [],
                     });
                 }
             }
@@ -288,6 +345,7 @@ export function createStrongUncertainResolverExperimentAdapter(): ExperimentRunn
                 aiInput.media,
                 state,
                 replayCapability,
+                budgetGuard,
                 input.signal,
             );
         }, error =>

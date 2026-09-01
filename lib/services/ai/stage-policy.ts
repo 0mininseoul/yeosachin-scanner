@@ -26,6 +26,9 @@ export interface AiStagePolicy {
     concurrency: number;
     promptVersion: string;
     schemaVersion: number;
+    /** Forward-only cost policy ceilings. Historical policies intentionally omit these fields. */
+    maxAttempts?: number;
+    retryResponseRejections?: boolean;
 }
 
 export const AI_STAGE_POLICY_VERSION = 'ai-stage-policy-v2.6';
@@ -54,6 +57,11 @@ export const AI_STAGE_POLICY_V210_VERSION = 'ai-stage-policy-v2.10';
  * decisive, evidence-led public summary copy.
  */
 export const AI_STAGE_POLICY_V211_VERSION = 'ai-stage-policy-v2.11';
+/**
+ * v2.12 is the forward-only cost policy. It preserves the v2.11 quality capabilities while
+ * routing to Flash-Lite by default; 3.7 is selected only by an explicit typed escalation route.
+ */
+export const AI_STAGE_POLICY_V212_VERSION = 'ai-stage-policy-v2.12';
 export const SUPPORTED_AI_STAGE_POLICY_VERSIONS = Object.freeze([
     AI_STAGE_POLICY_VERSION,
     AI_STAGE_POLICY_LATEST_VERSION,
@@ -61,6 +69,7 @@ export const SUPPORTED_AI_STAGE_POLICY_VERSIONS = Object.freeze([
     AI_STAGE_POLICY_V29_VERSION,
     AI_STAGE_POLICY_V210_VERSION,
     AI_STAGE_POLICY_V211_VERSION,
+    AI_STAGE_POLICY_V212_VERSION,
 ] as const);
 export type AiStagePolicyVersion = typeof SUPPORTED_AI_STAGE_POLICY_VERSIONS[number];
 export const AI_CONCURRENCY_ENFORCEMENT_SCOPE = 'deployment' as const;
@@ -228,6 +237,70 @@ const AI_STAGE_POLICIES_V211 = Object.freeze({
     }),
 } satisfies Record<AiStageName, Readonly<AiStagePolicy>>);
 
+const AI_STAGE_POLICIES_V212 = Object.freeze({
+    ...AI_STAGE_POLICIES_V211,
+    genderTriage: Object.freeze({
+        ...AI_STAGE_POLICIES_V211.genderTriage,
+        model: 'gemini-3.1-flash-lite',
+        thinkingLevel: 'MINIMAL',
+        mediaResolution: 'LOW',
+        maxOutputTokens: 512,
+        maxAttempts: 1,
+        retryResponseRejections: false,
+        promptVersion: 'gender-triage-cost-v1',
+    }),
+    featureAnalysis: Object.freeze({
+        ...AI_STAGE_POLICIES_V211.featureAnalysis,
+        model: 'gemini-3.1-flash-lite',
+        thinkingLevel: 'LOW',
+        mediaResolution: 'LOW',
+        maxOutputTokens: 1_024,
+        maxAttempts: 1,
+        retryResponseRejections: false,
+        promptVersion: 'feature-analysis-cost-v1',
+    }),
+    partnerSafety: Object.freeze({
+        ...AI_STAGE_POLICIES_V211.partnerSafety,
+        model: 'gemini-3.1-flash-lite',
+        thinkingLevel: 'LOW',
+        mediaResolution: 'LOW',
+        maxOutputTokens: 512,
+        maxAttempts: 1,
+        retryResponseRejections: false,
+        promptVersion: 'partner-safety-cost-v1',
+    }),
+    highRiskNarrative: Object.freeze({
+        ...AI_STAGE_POLICIES_V211.highRiskNarrative,
+        model: 'gemini-3.1-flash-lite',
+        thinkingLevel: 'LOW',
+        mediaResolution: 'LOW',
+        maxOutputTokens: 2_048,
+        maxAttempts: 1,
+        retryResponseRejections: false,
+        promptVersion: 'high-risk-narrative-cost-v1',
+    }),
+    privateAccountName: Object.freeze({
+        ...AI_STAGE_POLICIES_V211.privateAccountName,
+        model: 'gemini-3.1-flash-lite',
+        thinkingLevel: 'MINIMAL',
+        mediaResolution: 'LOW',
+        maxOutputTokens: 2_048,
+        maxAttempts: 1,
+        retryResponseRejections: false,
+        promptVersion: 'private-account-name-cost-v1',
+    }),
+    genderResolution: Object.freeze({
+        ...AI_STAGE_POLICIES_V211.genderResolution,
+        model: 'gemini-3.1-flash-lite',
+        thinkingLevel: 'LOW',
+        mediaResolution: 'LOW',
+        maxOutputTokens: 1_024,
+        maxAttempts: 1,
+        retryResponseRejections: false,
+        promptVersion: 'gender-resolution-cost-v1',
+    }),
+} satisfies Record<AiStageName, Readonly<AiStagePolicy>>);
+
 export const AI_STAGE_POLICY_REGISTRY = Object.freeze({
     [AI_STAGE_POLICY_VERSION]: AI_STAGE_POLICIES,
     [AI_STAGE_POLICY_LATEST_VERSION]: AI_STAGE_POLICIES_V27,
@@ -235,6 +308,7 @@ export const AI_STAGE_POLICY_REGISTRY = Object.freeze({
     [AI_STAGE_POLICY_V29_VERSION]: AI_STAGE_POLICIES_V29,
     [AI_STAGE_POLICY_V210_VERSION]: AI_STAGE_POLICIES_V210,
     [AI_STAGE_POLICY_V211_VERSION]: AI_STAGE_POLICIES_V211,
+    [AI_STAGE_POLICY_V212_VERSION]: AI_STAGE_POLICIES_V212,
 });
 
 export type AiStagePolicyCapability =
@@ -245,7 +319,8 @@ export type AiStagePolicyCapability =
     | 'genderTriageMicrobatchV29'
     /** Safe v2.8 public-copy contracts, restored for the v2.10 successor only. */
     | 'safePublicPresentationV28'
-    | 'genderSummaryQualityV211';
+    | 'genderSummaryQualityV211'
+    | 'vertexAiCostGuardV1';
 
 const AI_STAGE_POLICY_CAPABILITIES: Readonly<Record<
     AiStagePolicyVersion,
@@ -287,6 +362,16 @@ const AI_STAGE_POLICY_CAPABILITIES: Readonly<Record<
         'genderTriageMicrobatchV29',
         'safePublicPresentationV28',
         'genderSummaryQualityV211',
+    ]),
+    [AI_STAGE_POLICY_V212_VERSION]: new Set<AiStagePolicyCapability>([
+        'durableGeminiLease',
+        'genderResolution',
+        'partialMediaCoverage',
+        'inputQualityV28',
+        'genderTriageMicrobatchV29',
+        'safePublicPresentationV28',
+        'genderSummaryQualityV211',
+        'vertexAiCostGuardV1',
     ]),
 });
 
@@ -341,12 +426,14 @@ export function selectAiStagePolicyVersion({
     narrativeV28RolloutMode,
     microbatchV29RolloutMode,
     genderSummaryQualityV211RolloutMode,
+    costOptimizationV212RolloutMode,
     accessMode,
 }: {
     rolloutMode: string | undefined;
     narrativeV28RolloutMode?: string | undefined;
     microbatchV29RolloutMode?: string | undefined;
     genderSummaryQualityV211RolloutMode?: string | undefined;
+    costOptimizationV212RolloutMode?: string | undefined;
     accessMode: AiStagePolicyAccessMode;
 }): AiStagePolicyVersion {
     const v27Eligible = rolloutMode === 'production'
@@ -366,6 +453,14 @@ export function selectAiStagePolicyVersion({
             genderSummaryQualityV211RolloutMode === 'test_entitlement'
             && accessMode === 'test_entitlement'
         );
+    const v212Eligible = costOptimizationV212RolloutMode === 'production'
+        || (
+            costOptimizationV212RolloutMode === 'test_entitlement'
+            && accessMode === 'test_entitlement'
+        );
+    if (v212Eligible) {
+        return AI_STAGE_POLICY_V212_VERSION;
+    }
     if (v27Eligible && v28Eligible && v29Eligible && v211Eligible) {
         return AI_STAGE_POLICY_V211_VERSION;
     }

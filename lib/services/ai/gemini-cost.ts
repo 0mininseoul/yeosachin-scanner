@@ -4,7 +4,7 @@ export const VERTEX_AI_PRICING_SOURCE = 'https://cloud.google.com/vertex-ai/gene
 
 const TOKENS_PER_MILLION = 1_000_000;
 
-interface ModelPricing {
+export interface GeminiModelPricing {
     canonicalModelName: string;
     globalInputUsdPerMillionTokens: number;
     globalOutputUsdPerMillionTokens: number;
@@ -12,7 +12,7 @@ interface ModelPricing {
     nonGlobalOutputUsdPerMillionTokens: number;
 }
 
-const STANDARD_MODEL_PRICING: Record<string, ModelPricing> = {
+const STANDARD_MODEL_PRICING: Record<string, GeminiModelPricing> = {
     'gemini-3.1-flash-lite': {
         canonicalModelName: 'gemini-3.1-flash-lite',
         globalInputUsdPerMillionTokens: 0.25,
@@ -33,6 +33,14 @@ const STANDARD_MODEL_PRICING: Record<string, ModelPricing> = {
         globalOutputUsdPerMillionTokens: 3,
         nonGlobalInputUsdPerMillionTokens: 0.5,
         nonGlobalOutputUsdPerMillionTokens: 3,
+    },
+    /** Historical release rate used by the 2026-08-19 cost baseline. */
+    'gemini-3.7-flash': {
+        canonicalModelName: 'gemini-3.7-flash',
+        globalInputUsdPerMillionTokens: 1.5,
+        globalOutputUsdPerMillionTokens: 7.5,
+        nonGlobalInputUsdPerMillionTokens: 1.5,
+        nonGlobalOutputUsdPerMillionTokens: 7.5,
     },
 };
 
@@ -74,7 +82,7 @@ function modelIdFromResourceName(modelName: string): string {
     return modelName.trim().split('/').at(-1) ?? modelName.trim();
 }
 
-function getModelPricing(modelName: string): ModelPricing | null {
+export function getGeminiModelPricing(modelName: string): GeminiModelPricing | null {
     const modelId = modelIdFromResourceName(modelName);
     const directMatch = STANDARD_MODEL_PRICING[modelId];
     if (directMatch) {
@@ -83,6 +91,10 @@ function getModelPricing(modelName: string): ModelPricing | null {
 
     if (/^gemini-3\.1-flash-lite-\d{3}$/.test(modelId)) {
         return STANDARD_MODEL_PRICING['gemini-3.1-flash-lite'];
+    }
+
+    if (/^gemini-3\.7-flash(?:-\d{3})?$/.test(modelId)) {
+        return STANDARD_MODEL_PRICING['gemini-3.7-flash'];
     }
 
     return null;
@@ -102,7 +114,7 @@ export function estimateGeminiRequestCost(
     modelName: string,
     location: string = 'global'
 ): GeminiRequestCostEstimate | null {
-    const pricing = getModelPricing(modelName);
+    const pricing = getGeminiModelPricing(modelName);
     if (!pricing) {
         return null;
     }
@@ -136,4 +148,26 @@ export function estimateGeminiRequestCost(
         outputCostUsd: roundUsd(outputCostUsd),
         totalCostUsd: roundUsd(inputCostUsd + outputCostUsd),
     };
+}
+
+/**
+ * Strict counterpart used by pre-dispatch budget admission.
+ *
+ * The nullable estimator remains intentionally available to legacy telemetry callers. A budget
+ * guard must never interpret an unknown model or location as a free request, so it gets this
+ * fail-closed API instead.
+ */
+export function estimateGeminiRequestCostStrict(
+    tokenUsage: GeminiCostTokenUsage,
+    modelName: string,
+    location: string = 'global'
+): GeminiRequestCostEstimate {
+    if (!modelName.trim() || !location.trim()) {
+        throw new Error('VERTEX_AI_PRICING_UNKNOWN');
+    }
+    const estimate = estimateGeminiRequestCost(tokenUsage, modelName, location);
+    if (!estimate) {
+        throw new Error('VERTEX_AI_PRICING_UNKNOWN');
+    }
+    return estimate;
 }

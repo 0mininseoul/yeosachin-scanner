@@ -5,6 +5,7 @@ import { supabaseAdmin } from '@/lib/supabase/admin';
 import {
     analyzeWithGemini,
     type AnalyzeWithGeminiOptions,
+    type GeminiRequestTelemetry,
 } from '@/lib/services/ai/gemini';
 import { createAnalysisV2SelectedMediaNormalizer } from '@/lib/services/ai/image-preprocessing';
 import {
@@ -12,6 +13,10 @@ import {
     type ReplayStatelessCapability,
 } from '@/lib/services/ai/replay-stateless-capability';
 import { AI_STAGE_POLICY_V211_VERSION } from '@/lib/services/ai/stage-policy';
+import {
+    createVertexAiBudgetGuard,
+    type VertexAiBudgetGuard,
+} from '@/lib/services/ai/vertex-ai-cost-policy';
 import {
     isAmbiguousGeminiGenerationError,
     isGeminiRateLimitError,
@@ -99,7 +104,10 @@ type V214AttemptDiagnostic = Pick<
     responseRejection?: { category?: string };
 };
 
-type V214DiagnosticSink = { category: V214FailureCategory | null };
+type V214DiagnosticSink = {
+    category: V214FailureCategory | null;
+    telemetry?: GeminiRequestTelemetry[];
+};
 
 const interactionTerms = {
     like: '좋아요',
@@ -523,6 +531,7 @@ function featureAudit(
     input: FeatureAnalysisInput,
     requestId: string,
     diagnostic?: V214DiagnosticSink,
+    budgetGuard?: VertexAiBudgetGuard,
 ): StagedAiAuditContext {
     const resultIdentity = createFeatureAnalysisResultIdentity(input, AI_STAGE_POLICY_V211_VERSION);
     return {
@@ -534,6 +543,10 @@ function featureAudit(
         onAttemptTelemetry: telemetry => {
             recordV214AttemptDiagnostic(diagnostic, telemetry);
         },
+        ...(diagnostic?.telemetry
+            ? { onTelemetry: telemetry => { diagnostic.telemetry?.push(telemetry); } }
+            : {}),
+        ...(budgetGuard ? { budgetGuard } : {}),
     };
 }
 
@@ -1057,6 +1070,7 @@ export async function generateV214RelaxedNarrative(input: {
     requestId: string;
     replayCapability?: ReplayStatelessCapability;
     diagnostic?: V214DiagnosticSink;
+    budgetGuard?: VertexAiBudgetGuard;
 }): Promise<V214RelaxedNarrativeDto> {
     const promptInput = {
         narrativeInput: input.narrativeInput,
@@ -1064,6 +1078,8 @@ export async function generateV214RelaxedNarrative(input: {
         targetFullName: input.targetFullName,
     };
     const images = input.narrativeInput.media.map(media => media.normalizedJpegBase64);
+    const budgetGuard = input.budgetGuard
+        ?? (input.replayCapability ? createVertexAiBudgetGuard() : undefined);
     const generationOptions: AnalyzeWithGeminiOptions<V214RelaxedNarrativeDto> = input.replayCapability
         ? {
             schema: v214RelaxedNarrativeModelResponseSchema,
@@ -1072,7 +1088,14 @@ export async function generateV214RelaxedNarrative(input: {
             stage: 'highRiskNarrative' as const,
             aiStagePolicyVersion: AI_STAGE_POLICY_V211_VERSION,
             replayCapability: input.replayCapability,
-            skipTokenLog: true,
+            ...(budgetGuard ? { budgetGuard } : {}),
+            ...(input.diagnostic?.telemetry
+                ? {
+                    onTelemetry: (telemetry: GeminiRequestTelemetry) => {
+                        input.diagnostic?.telemetry?.push(telemetry);
+                    },
+                }
+                : {}),
             onBeforeAttempt: () => undefined,
             onAttemptTelemetry: telemetry => {
                 recordV214AttemptDiagnostic(input.diagnostic, telemetry);
@@ -1145,6 +1168,7 @@ async function generateGeminiCopy(
     const retainedByUsername = new Map(selectedProfiles.map(profile => [profile.username.toLowerCase(), profile]));
     const requestId = randomUUID();
     const replayCapability = issueReplayStatelessCapability();
+    const budgetGuard = createVertexAiBudgetGuard();
     const targetProfile = {
         username: scope.order.target_instagram_id,
         fullName: scope.targetFullName,
@@ -1194,7 +1218,7 @@ async function generateGeminiCopy(
         };
         const feature = await featureAnalysis(
             featureInput,
-            featureAudit(featureInput, requestId, diagnostic),
+            featureAudit(featureInput, requestId, diagnostic, budgetGuard),
             { aiStagePolicyVersion: AI_STAGE_POLICY_V211_VERSION, replayCapability },
         );
         if (row.risk_grade !== 'high_risk') {
@@ -1225,6 +1249,7 @@ async function generateGeminiCopy(
             requestId,
             replayCapability,
             diagnostic,
+            budgetGuard,
         });
         generated.push({
             rank: row.rank,

@@ -3,6 +3,10 @@ import { analyzeWithGemini } from './gemini';
 import type { ReplayStatelessCapability } from './replay-stateless-capability';
 import type { AiStagePolicyVersion } from './stage-policy';
 import type { StagedAiAuditContext } from './v2-staged-analysis';
+import type {
+    VertexAiMediaResolution,
+    VertexAiThinkingLevel,
+} from './vertex-ai-cost-policy';
 
 export interface PreparedGenderResolutionGeneration<T> {
     prompt: string;
@@ -13,6 +17,12 @@ export interface PreparedGenderResolutionGeneration<T> {
     startingAttempt: number;
     abortSignal?: AbortSignal;
     replayCapability?: ReplayStatelessCapability;
+    model?: string;
+    thinkingLevel?: VertexAiThinkingLevel;
+    mediaResolution?: VertexAiMediaResolution;
+    maxOutputTokens?: number;
+    maxAttempts?: number;
+    retryResponseRejections?: boolean;
 }
 
 async function run<T>(
@@ -31,8 +41,23 @@ async function run<T>(
             abortSignal: input.abortSignal,
             onBeforeAttempt: input.audit.onBeforeAttempt,
             onAttemptTelemetry: input.audit.onAttemptTelemetry,
+            ...(input.audit.onTelemetry ? { onTelemetry: input.audit.onTelemetry } : {}),
+            ...(input.audit.budgetGuard ? { budgetGuard: input.audit.budgetGuard } : {}),
+            ...(input.audit.budgetOrderId !== undefined
+                ? { budgetOrderId: input.audit.budgetOrderId }
+                : {}),
+            budgetRunId: input.audit.requestId,
+            budgetOperationKey: input.audit.operationKey,
+            ...(input.model ? {
+                model: input.model,
+                thinkingLevel: input.thinkingLevel,
+                mediaResolution: input.mediaResolution,
+                maxOutputTokens: input.maxOutputTokens,
+                maxAttempts: input.maxAttempts,
+                retryResponseRejections: input.retryResponseRejections,
+            } : {}),
             ...(input.replayCapability
-                ? { skipTokenLog: true, replayCapability: input.replayCapability }
+                ? { replayCapability: input.replayCapability }
                 : {}),
         },
     ));

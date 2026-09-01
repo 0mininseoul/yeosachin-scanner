@@ -49,6 +49,8 @@ import {
 } from './analysis-response-schemas';
 import { deepRiskNarrativeResponseSchema } from './deep-risk-analysis';
 import { createPrivateNameBatchResponseSchema } from './private-name-analysis';
+import { AI_STAGE_POLICY_V212_VERSION } from './stage-policy';
+import type { VertexAiBudgetGuard } from './vertex-ai-cost-policy';
 
 const responseSchema = z.object({ value: z.string() }).strict();
 const stageRequestId = '11111111-1111-4111-8111-111111111111';
@@ -134,6 +136,43 @@ describe('analyzeWithGemini generation retry policy', () => {
         expect(JSON.stringify(attemptTelemetry.mock.calls)).not.toContain(providerSecret);
         expect(consoleError.mock.calls.flat().join(' ')).not.toContain(providerSecret);
         consoleError.mockRestore();
+    });
+
+    it('rejects an unclassified 3.7 override before provider dispatch in the cost policy', async () => {
+        const audit = stageAuditOptions();
+
+        await expect(analyzeWithGemini('prompt', undefined, {
+            schema: responseSchema,
+            stage: 'featureAnalysis',
+            aiStagePolicyVersion: AI_STAGE_POLICY_V212_VERSION,
+            model: 'gemini-3.7-flash',
+            ...audit,
+        })).rejects.toThrow('VERTEX_AI_ESCALATION_REASON_REQUIRED');
+
+        expect(mocks.generateContent).not.toHaveBeenCalled();
+        expect(audit.onBeforeAttempt).not.toHaveBeenCalled();
+    });
+
+    it('reserves the budget before attempt audit and provider dispatch', async () => {
+        const audit = stageAuditOptions();
+        const budgetGuard = {
+            reserve: vi.fn().mockRejectedValue(new Error('VERTEX_AI_BUDGET_EXCEEDED:run')),
+            settle: vi.fn(),
+            cancel: vi.fn(),
+            snapshot: vi.fn(),
+        } as unknown as VertexAiBudgetGuard;
+
+        await expect(analyzeWithGemini('prompt', undefined, {
+            schema: responseSchema,
+            stage: 'featureAnalysis',
+            aiStagePolicyVersion: AI_STAGE_POLICY_V212_VERSION,
+            budgetGuard,
+            ...audit,
+        })).rejects.toThrow('VERTEX_AI_BUDGET_EXCEEDED:run');
+
+        expect(budgetGuard.reserve).toHaveBeenCalledOnce();
+        expect(audit.onBeforeAttempt).not.toHaveBeenCalled();
+        expect(mocks.generateContent).not.toHaveBeenCalled();
     });
 
     it('does not retry a rate-limit phrase without an explicit 429 status', async () => {
@@ -260,6 +299,23 @@ describe('analyzeWithGemini generation retry policy', () => {
             markAttemptTelemetryStarted();
         }));
         const onTelemetry = vi.fn();
+        const budgetGuard = {
+            reserve: vi.fn().mockResolvedValue({
+                reservationId: 'reservation-1',
+                reservationKey: 'request-1:precheckout_blite:1',
+                runId: 'request-1',
+                orderId: 'request-1',
+                dayKey: '2026-09-02',
+                route: 'default',
+                modelName: 'gemini-3.1-flash-lite',
+                attempt: 1,
+                estimatedCostUsd: 0.001,
+                actualCostUsd: null,
+            }),
+            settle: vi.fn().mockResolvedValue(undefined),
+            cancel: vi.fn().mockResolvedValue(undefined),
+            snapshot: vi.fn(),
+        } as unknown as VertexAiBudgetGuard;
         mocks.generateContent.mockResolvedValueOnce(successfulResponse());
         setTimeout(() => controller.abort(), 56_000);
 
@@ -270,6 +326,7 @@ describe('analyzeWithGemini generation retry policy', () => {
             abortSignal: controller.signal,
             onAttemptTelemetry,
             onTelemetry,
+            budgetGuard,
         });
 
         await attemptTelemetryStarted;
@@ -279,6 +336,55 @@ describe('analyzeWithGemini generation retry policy', () => {
         await expect(result).rejects.toThrow('AI_GENERATION_DEADLINE_EXCEEDED');
         expect(mocks.tokenUsageInsert).not.toHaveBeenCalled();
         expect(onTelemetry).not.toHaveBeenCalled();
+        expect(budgetGuard.cancel).not.toHaveBeenCalled();
+        expect(budgetGuard.settle).toHaveBeenCalledWith(
+            expect.objectContaining({ reservationId: 'reservation-1' }),
+            { actualCostUsd: 0.000017 },
+        );
+    });
+
+    it('conservatively settles an unknown charge when abort arrives after provider dispatch', async () => {
+        const controller = new AbortController();
+        const onAttemptTelemetry = vi.fn();
+        const budgetGuard = {
+            reserve: vi.fn().mockResolvedValue({
+                reservationId: 'reservation-aborted',
+                reservationKey: 'request-aborted:featureAnalysis:1',
+                runId: 'request-aborted',
+                orderId: 'request-aborted',
+                dayKey: '2026-09-02',
+                route: 'default',
+                modelName: 'gemini-3.1-flash-lite',
+                attempt: 1,
+                estimatedCostUsd: 0.001,
+                actualCostUsd: null,
+            }),
+            settle: vi.fn().mockResolvedValue(undefined),
+            cancel: vi.fn().mockResolvedValue(undefined),
+            snapshot: vi.fn(),
+        } as unknown as VertexAiBudgetGuard;
+        mocks.generateContent.mockImplementationOnce(() => {
+            controller.abort();
+            return Promise.resolve(successfulResponse());
+        });
+
+        await expect(analyzeWithGemini('prompt', undefined, {
+            schema: responseSchema,
+            stage: 'featureAnalysis',
+            requestId: stageRequestId,
+            abortSignal: controller.signal,
+            onBeforeAttempt: vi.fn().mockResolvedValue(undefined),
+            onAttemptTelemetry,
+            budgetGuard,
+        })).rejects.toThrow('AI_GENERATION_DEADLINE_EXCEEDED');
+
+        expect(mocks.generateContent).toHaveBeenCalledOnce();
+        expect(onAttemptTelemetry).not.toHaveBeenCalled();
+        expect(budgetGuard.cancel).not.toHaveBeenCalled();
+        expect(budgetGuard.settle).toHaveBeenCalledWith(
+            expect.objectContaining({ reservationId: 'reservation-aborted' }),
+            { actualCostUsd: null },
+        );
     });
 
     it('does not retry schema-invalid responses', async () => {

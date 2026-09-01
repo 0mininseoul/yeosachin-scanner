@@ -5,6 +5,8 @@ import type {
     GenderResolutionResult,
     GenderTriageResult,
 } from '@/lib/services/ai/v2-staged-analysis';
+import type { GeminiRequestTelemetry } from '@/lib/services/ai/gemini';
+import type { VertexAiCostRoute } from '@/lib/services/ai/vertex-ai-cost-policy';
 import { MAX_FEATURE_MEDIA } from '@/lib/domain/analysis/media-policy';
 import { applyGenderResolution, type GenderBaselineClassification } from '@/lib/services/ai/gender-resolution-reconciliation';
 import { aiStagePolicySupports } from '@/lib/services/ai/stage-policy';
@@ -52,6 +54,16 @@ export interface ReplayInvocation<T> {
     attempts: number;
     retries: number;
     elapsedMs: number;
+    inputTokens?: number;
+    outputTokens?: number;
+    thinkingTokens?: number;
+    /** Sum of measured response costs; unknown responses are excluded. */
+    estimatedCostUsd?: number;
+    /** Sum of conservative pre-dispatch reservations, including unknown responses. */
+    guardedCostUsd?: number;
+    unknownUsage?: number;
+    /** Request-level telemetry is retained in-memory so replay never silently drops it. */
+    requestTelemetry?: readonly GeminiRequestTelemetry[];
 }
 
 export interface ReplayMedia {
@@ -127,9 +139,30 @@ export interface ReplayAttemptStart { attempt: number; retryCount: number; }
 export interface ReplayAttemptTelemetry extends ReplayAttemptStart {
     disposition: string;
     latencyMs: number;
+    tokenUsage?: {
+        promptTokens: number;
+        completionTokens: number;
+        thinkingTokens?: number;
+    } | null;
+    estimatedCostUsd?: number | null;
+    preDispatchCostUsd?: number | null;
+    usageMetadataStatus?: 'complete' | 'missing' | 'malformed';
+    costRoute?: VertexAiCostRoute;
 }
 export interface ReplayStageMetrics {
-    calls: number; rateLimited: number; retries: number; meanLatencyMs: number; p50LatencyMs: number; p95LatencyMs: number; failureDisposition: Record<string, number>;
+    calls: number;
+    rateLimited: number;
+    retries: number;
+    meanLatencyMs: number;
+    p50LatencyMs: number;
+    p95LatencyMs: number;
+    failureDisposition: Record<string, number>;
+    inputTokens: number;
+    outputTokens: number;
+    thinkingTokens: number;
+    estimatedCostUsd: number;
+    guardedCostUsd: number;
+    unknownUsage: number;
 }
 export interface AnalysisV2AiReplayReport {
     benchmarkScope: 'ai-only-exact-replay' | 'ai-only-historical-partial-available';
@@ -219,6 +252,12 @@ interface TrackedResolver {
         rateLimited: number;
         attemptLatenciesMs: number[];
         failureDisposition: Record<string, number>;
+        inputTokens: number;
+        outputTokens: number;
+        thinkingTokens: number;
+        estimatedCostUsd: number;
+        guardedCostUsd: number;
+        unknownUsage: number;
         pendingAttemptStartedAt?: number;
     };
 }
@@ -263,6 +302,12 @@ function metrics(): ReplayStageMetrics {
         p50LatencyMs: 0,
         p95LatencyMs: 0,
         failureDisposition: {},
+        inputTokens: 0,
+        outputTokens: 0,
+        thinkingTokens: 0,
+        estimatedCostUsd: 0,
+        guardedCostUsd: 0,
+        unknownUsage: 0,
     };
 }
 
@@ -352,6 +397,12 @@ function collect(stage: ReplayStageMetrics, durations: number[], invocation: Rep
         stage.failureDisposition[invocation.outcome] =
             (stage.failureDisposition[invocation.outcome] ?? 0) + 1;
     }
+    stage.inputTokens += invocation.inputTokens ?? 0;
+    stage.outputTokens += invocation.outputTokens ?? 0;
+    stage.thinkingTokens += invocation.thinkingTokens ?? 0;
+    stage.estimatedCostUsd += invocation.estimatedCostUsd ?? 0;
+    stage.guardedCostUsd += invocation.guardedCostUsd ?? 0;
+    stage.unknownUsage += invocation.unknownUsage ?? 0;
 }
 
 function collectCutoffResolver(
@@ -369,6 +420,12 @@ function collectCutoffResolver(
             (stage.failureDisposition[disposition] ?? 0) + count;
     }
     durations.push(...tracked.telemetry.attemptLatenciesMs);
+    stage.inputTokens += tracked.telemetry.inputTokens;
+    stage.outputTokens += tracked.telemetry.outputTokens;
+    stage.thinkingTokens += tracked.telemetry.thinkingTokens;
+    stage.estimatedCostUsd += tracked.telemetry.estimatedCostUsd;
+    stage.guardedCostUsd += tracked.telemetry.guardedCostUsd;
+    stage.unknownUsage += tracked.telemetry.unknownUsage;
     if (tracked.telemetry.pendingAttemptStartedAt !== undefined) {
         stage.failureDisposition.cutoff =
             (stage.failureDisposition.cutoff ?? 0) + 1;
@@ -624,6 +681,12 @@ function safeLine(report: AnalysisV2AiReplayReport): string {
                 p50_latency_ms: values.p50LatencyMs,
                 p95_latency_ms: values.p95LatencyMs,
                 failure_disposition: values.failureDisposition,
+                input_tokens: values.inputTokens,
+                output_tokens: values.outputTokens,
+                thinking_tokens: values.thinkingTokens,
+                estimated_cost_usd: values.estimatedCostUsd,
+                guarded_cost_usd: values.guardedCostUsd,
+                unknown_usage: values.unknownUsage,
             },
         ])),
         gender: report.gender,
@@ -1009,6 +1072,12 @@ export async function runAnalysisV2AiReplay(input: {
                         rateLimited: 0,
                         attemptLatenciesMs: [],
                         failureDisposition: {},
+                        inputTokens: 0,
+                        outputTokens: 0,
+                        thinkingTokens: 0,
+                        estimatedCostUsd: 0,
+                        guardedCostUsd: 0,
+                        unknownUsage: 0,
                         pendingAttemptStartedAt: undefined,
                     },
                 };
@@ -1042,6 +1111,20 @@ export async function runAnalysisV2AiReplay(input: {
                                 trackedResolver.telemetry.failureDisposition;
                             failures[value.disposition] =
                                 (failures[value.disposition] ?? 0) + 1;
+                        }
+                        if (value.tokenUsage) {
+                            trackedResolver.telemetry.inputTokens += value.tokenUsage.promptTokens;
+                            trackedResolver.telemetry.outputTokens += value.tokenUsage.completionTokens;
+                            trackedResolver.telemetry.thinkingTokens += value.tokenUsage.thinkingTokens ?? 0;
+                        }
+                        if (value.estimatedCostUsd !== null && value.estimatedCostUsd !== undefined) {
+                            trackedResolver.telemetry.estimatedCostUsd += value.estimatedCostUsd;
+                        }
+                        if (value.preDispatchCostUsd !== null && value.preDispatchCostUsd !== undefined) {
+                            trackedResolver.telemetry.guardedCostUsd += value.preDispatchCostUsd;
+                        }
+                        if (value.usageMetadataStatus !== 'complete') {
+                            trackedResolver.telemetry.unknownUsage++;
                         }
                     },
                 }));

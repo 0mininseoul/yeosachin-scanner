@@ -4,6 +4,7 @@ import {
     assertSupportedAiStagePolicyVersion,
     type AiStagePolicyVersion,
 } from '@/lib/services/ai/stage-policy';
+import type { VertexAiBudgetGuard } from '@/lib/services/ai/vertex-ai-cost-policy';
 import {
     analyzePrivateAccountNames,
     createPrivateNameBatchIdentity,
@@ -77,6 +78,9 @@ export interface AnalysisV2AiJobFence {
     jobKey: string;
     claimToken: string;
     aiStagePolicyVersion: string;
+    /** Optional shared monetary guard; v2.12 uses a fail-closed default when omitted. */
+    budgetGuard?: VertexAiBudgetGuard;
+    budgetOrderId?: string | null;
     schedulerCapability?: AiSchedulerCapability;
     handlerDeadlineAtMs?: number;
     /** Internal checkpoint-only replay fence; production callers must not set it. */
@@ -246,6 +250,8 @@ function adapter<T>(
         handlerDeadlineAtMs: fence.handlerDeadlineAtMs,
         schedulerRecoveryOnly: fence.schedulerRecoveryOnly,
         schedulerTerminalUnavailable: fence.schedulerTerminalUnavailable,
+        budgetGuard: fence.budgetGuard,
+        budgetOrderId: fence.budgetOrderId,
     });
 }
 
@@ -819,7 +825,13 @@ export function createDurableAnalysisV2AiStageRuntime(
                                     checkpointed = true;
                                     envelopeHash = analysisV2CanonicalAiResultHash(envelope);
                                 }
-                            }
+                            },
+                            ...(durable.budgetGuard
+                                ? { budgetGuard: durable.budgetGuard }
+                                : {}),
+                            ...(durable.budgetOrderId !== undefined
+                                ? { budgetOrderId: durable.budgetOrderId }
+                                : {}),
                         };
                     },
                 };
@@ -898,7 +910,13 @@ export function createDurableAnalysisV2AiStageRuntime(
 
         async narrative(input, fence) {
             const policyVersion = assertAiStagePolicyVersion(fence);
-            const identity = createHighRiskNarrativeResultIdentity(input, policyVersion);
+            const identity = createHighRiskNarrativeResultIdentity(
+                input,
+                policyVersion,
+                aiStagePolicySupports(policyVersion, 'vertexAiCostGuardV1')
+                    ? { escalationReason: 'high_value' }
+                    : {},
+            );
             const audit = adapter(
                 createAudit,
                 fence,
@@ -908,7 +926,12 @@ export function createDurableAnalysisV2AiStageRuntime(
             const result = await runNarrative(
                 input,
                 audit,
-                { aiStagePolicyVersion: policyVersion },
+                {
+                    aiStagePolicyVersion: policyVersion,
+                    ...(aiStagePolicySupports(policyVersion, 'vertexAiCostGuardV1')
+                        ? { escalationReason: 'high_value' as const }
+                        : {}),
+                },
             );
             const modelEnvelope = {
                 lines: [

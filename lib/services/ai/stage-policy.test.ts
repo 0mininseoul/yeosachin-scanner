@@ -8,6 +8,7 @@ import {
     AI_STAGE_POLICY_V29_VERSION,
     AI_STAGE_POLICY_V210_VERSION,
     AI_STAGE_POLICY_V211_VERSION,
+    AI_STAGE_POLICY_V212_VERSION,
     AI_STAGE_POLICY_REGISTRY,
     AI_STAGE_POLICY_VERSION,
     SUPPORTED_AI_STAGE_POLICY_VERSIONS,
@@ -183,6 +184,7 @@ describe('V2 AI stage policy', () => {
             'ai-stage-policy-v2.9',
             'ai-stage-policy-v2.10',
             'ai-stage-policy-v2.11',
+            'ai-stage-policy-v2.12',
         ]);
         expect(AI_STAGE_POLICY_VERSION).toBe('ai-stage-policy-v2.6');
         expect(AI_STAGE_POLICY_LATEST_VERSION).toBe('ai-stage-policy-v2.7');
@@ -207,6 +209,7 @@ describe('V2 AI stage policy', () => {
             'ai-stage-policy-v2.9',
             'ai-stage-policy-v2.10',
             'ai-stage-policy-v2.11',
+            'ai-stage-policy-v2.12',
         ]);
         expect(Object.isFrozen(AI_STAGE_POLICY_REGISTRY['ai-stage-policy-v2.8'])).toBe(true);
         expect(getAiStagePolicy('ai-stage-policy-v2.8', 'featureAnalysis')).toMatchObject({
@@ -258,6 +261,7 @@ describe('V2 AI stage policy', () => {
             'ai-stage-policy-v2.9',
             'ai-stage-policy-v2.10',
             'ai-stage-policy-v2.11',
+            'ai-stage-policy-v2.12',
         ]);
         expect(AI_STAGE_POLICY_REGISTRY[AI_STAGE_POLICY_V210_VERSION])
             .toEqual(AI_STAGE_POLICY_REGISTRY[AI_STAGE_POLICY_V29_VERSION]);
@@ -295,6 +299,41 @@ describe('V2 AI stage policy', () => {
             genderSummaryQualityV211RolloutMode: 'production',
             accessMode: 'production',
         })).toBe(AI_STAGE_POLICY_V211_VERSION);
+    });
+
+    it('adds v2.12 as a forward-only low-cost policy with an explicit rollout gate', () => {
+        expect(AI_STAGE_POLICY_V212_VERSION).toBe('ai-stage-policy-v2.12');
+        for (const stage of AI_STAGE_NAMES_V27) {
+            expect(getAiStagePolicy(AI_STAGE_POLICY_V212_VERSION, stage)).toMatchObject({
+                model: 'gemini-3.1-flash-lite',
+                maxAttempts: 1,
+                retryResponseRejections: false,
+            });
+        }
+        expect(getAiStagePolicy(AI_STAGE_POLICY_V212_VERSION, 'featureAnalysis'))
+            .toMatchObject({ thinkingLevel: 'LOW', maxOutputTokens: 1_024 });
+        expect(aiStagePolicySupports(AI_STAGE_POLICY_V212_VERSION, 'vertexAiCostGuardV1'))
+            .toBe(true);
+        expect(aiStagePolicySupports(AI_STAGE_POLICY_V211_VERSION, 'vertexAiCostGuardV1'))
+            .toBe(false);
+        expect(selectAiStagePolicyVersion({
+            rolloutMode: 'production',
+            costOptimizationV212RolloutMode: 'production',
+            accessMode: 'production',
+        })).toBe(AI_STAGE_POLICY_V212_VERSION);
+        expect(selectAiStagePolicyVersion({
+            rolloutMode: 'production',
+            narrativeV28RolloutMode: 'production',
+            microbatchV29RolloutMode: 'production',
+            genderSummaryQualityV211RolloutMode: 'production',
+            costOptimizationV212RolloutMode: 'test_entitlement',
+            accessMode: 'production',
+        })).toBe(AI_STAGE_POLICY_V211_VERSION);
+        expect(selectAiStagePolicyVersion({
+            rolloutMode: 'test_entitlement',
+            costOptimizationV212RolloutMode: 'test_entitlement',
+            accessMode: 'test_entitlement',
+        })).toBe(AI_STAGE_POLICY_V212_VERSION);
     });
 
     it('moves featureAnalysis to gemini-3.7-flash only on v2.11, leaving v2.6 through v2.10 untouched', () => {
