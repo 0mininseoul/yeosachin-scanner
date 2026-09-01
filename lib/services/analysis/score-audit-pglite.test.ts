@@ -11,6 +11,10 @@ const migration = readFileSync(new URL(
     '../../../supabase/migrations/20260727032000_add_analysis_v2_score_audit.sql',
     import.meta.url,
 ), 'utf8');
+const cleanupMigration = readFileSync(new URL(
+    '../../../supabase/migrations/20260901192353_fix_analysis_v2_score_audit_expiry_orphans.sql',
+    import.meta.url,
+), 'utf8');
 const riskPolicyV24Migration = readFileSync(new URL(
     '../../../supabase/migrations/20260726090000_add_risk_policy_v24.sql',
     import.meta.url,
@@ -114,6 +118,7 @@ beforeAll(async () => {
         [preMigrationRequestId],
     );
     await db.exec(migration);
+    await db.exec(cleanupMigration);
     await db.exec(functionDefinition(
         riskPolicyV25Migration,
         'analysis_v2_expected_relative_risk_rows_v25',
@@ -1717,6 +1722,140 @@ describe('analysis score audit database materializer', () => {
         await db.query(
             `DELETE FROM public.analysis_requests
              WHERE id::text LIKE '90000000-0000-4000-8000-%'`,
+        );
+    });
+
+    it('releases expired intents whose summaries were purged and leaves fresh intents queued', async () => {
+        const orphanRequestId = 'f6000000-e89b-42d3-a456-426614174000';
+        const expiredRequestId = 'f6100000-e89b-42d3-a456-426614174000';
+        const pendingRequestId = 'f6200000-e89b-42d3-a456-426614174000';
+        const requestIds = [orphanRequestId, expiredRequestId, pendingRequestId];
+        const hashes = [
+            '6'.repeat(64),
+            '7'.repeat(64),
+            '8'.repeat(64),
+        ];
+
+        for (const [index, fixtureRequestId] of requestIds.entries()) {
+            await db.query(
+                'INSERT INTO public.analysis_requests VALUES ($1, $2, $3, $4::jsonb)',
+                [fixtureRequestId, 'completed', 'v2', JSON.stringify({
+                    risk: 'risk-policy-v2.4', aiStage: 'ai-stage-policy-v2.7',
+                })],
+            );
+            await db.query(
+                `INSERT INTO public.analysis_v2_ai_scoring_stage_checkpoints
+                 VALUES ($1, 'final_score', -1, $2, $3::jsonb, DEFAULT)`,
+                [fixtureRequestId, hashes[index], JSON.stringify({
+                    riskPolicyVersion: 'risk-policy-v2.4', candidates: [],
+                })],
+            );
+            await db.query(
+                `INSERT INTO public.analysis_v2_result_summaries
+                    (request_id, score_policy_version, female_count)
+                 VALUES ($1, 'risk-policy-v2.4', 0)`,
+                [fixtureRequestId],
+            );
+        }
+
+        // This is the production failure boundary: the result summary is
+        // removed first while its audit intent survives for the TTL drain.
+        await db.query(
+            'SELECT public.analysis_v2_purge_result_working_set($1, FALSE)',
+            [orphanRequestId],
+        );
+        await db.query(
+            `UPDATE public.analysis_v2_score_audit_intents
+             SET retain_until = CASE request_id
+                 WHEN $1::uuid THEN clock_timestamp() - INTERVAL '2 minutes'
+                 WHEN $2::uuid THEN clock_timestamp() - INTERVAL '1 minute'
+                 ELSE retain_until
+             END
+             WHERE request_id = ANY($3::uuid[])`,
+            [orphanRequestId, expiredRequestId, requestIds],
+        );
+
+        const firstPurge = await db.query<{ count: number }>(
+            'SELECT public.purge_expired_analysis_v2_score_audit_evidence(100) AS count',
+        );
+        expect(firstPurge.rows[0]?.count).toBe(2);
+
+        const outcomes = await db.query<{
+            request_id: string;
+            intent_status: string;
+            run_status: string | null;
+            summary_present: boolean;
+            checkpoint_count: number;
+        }>(
+            `SELECT intent.request_id::text,
+                    intent.intent_status,
+                    run.status AS run_status,
+                    summary.request_id IS NOT NULL AS summary_present,
+                    (SELECT count(*)::int
+                     FROM public.analysis_v2_ai_scoring_stage_checkpoints AS stage
+                     WHERE stage.request_id = intent.request_id) AS checkpoint_count
+             FROM public.analysis_v2_score_audit_intents AS intent
+             LEFT JOIN public.analysis_v2_score_audit_runs AS run
+               ON run.request_id = intent.request_id
+             LEFT JOIN public.analysis_v2_result_summaries AS summary
+               ON summary.request_id = intent.request_id
+             WHERE intent.request_id = ANY($1::uuid[])
+             ORDER BY intent.request_id`,
+            [requestIds],
+        );
+        expect(outcomes.rows).toEqual([
+            {
+                request_id: orphanRequestId,
+                intent_status: 'released',
+                run_status: null,
+                summary_present: false,
+                checkpoint_count: 0,
+            },
+            {
+                request_id: expiredRequestId,
+                intent_status: 'released',
+                run_status: 'partial',
+                summary_present: true,
+                checkpoint_count: 0,
+            },
+            {
+                request_id: pendingRequestId,
+                intent_status: 'queued',
+                run_status: null,
+                summary_present: true,
+                checkpoint_count: 1,
+            },
+        ]);
+
+        const secondPurge = await db.query<{ count: number }>(
+            'SELECT public.purge_expired_analysis_v2_score_audit_evidence(100) AS count',
+        );
+        expect(secondPurge.rows[0]?.count).toBe(0);
+
+        await db.query(
+            `DELETE FROM public.analysis_v2_ai_scoring_stage_checkpoints
+             WHERE request_id = ANY($1::uuid[])`,
+            [requestIds],
+        );
+        await db.query(
+            `DELETE FROM public.analysis_v2_score_audit_runs
+             WHERE request_id = ANY($1::uuid[])`,
+            [requestIds],
+        );
+        await db.query(
+            `DELETE FROM public.analysis_v2_score_audit_intents
+             WHERE request_id = ANY($1::uuid[])`,
+            [requestIds],
+        );
+        await db.query(
+            `DELETE FROM public.analysis_v2_result_summaries
+             WHERE request_id = ANY($1::uuid[])`,
+            [requestIds],
+        );
+        await db.query(
+            `DELETE FROM public.analysis_requests
+             WHERE id = ANY($1::uuid[])`,
+            [requestIds],
         );
     });
 

@@ -9,6 +9,10 @@ const migration = readFileSync(new URL(
     '../../../supabase/migrations/20260727032000_add_analysis_v2_score_audit.sql',
     import.meta.url,
 ), 'utf8');
+const cleanupMigration = readFileSync(new URL(
+    '../../../supabase/migrations/20260901192353_fix_analysis_v2_score_audit_expiry_orphans.sql',
+    import.meta.url,
+), 'utf8');
 const riskPolicyMigration = readFileSync(new URL(
     '../../../supabase/migrations/20260726090000_add_risk_policy_v24.sql',
     import.meta.url,
@@ -129,6 +133,7 @@ describePostgres('actual score-audit migration PostgreSQL lock order', () => {
             riskPolicyMigration, 'analysis_v2_expected_relative_risk_rows', 1,
         ));
         await first.query(migration);
+        await first.query(cleanupMigration);
     }, 30_000);
 
     afterAll(async () => {

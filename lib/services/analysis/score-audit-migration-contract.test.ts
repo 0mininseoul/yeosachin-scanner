@@ -5,6 +5,10 @@ const migration = readFileSync(new URL(
     '../../../supabase/migrations/20260727032000_add_analysis_v2_score_audit.sql',
     import.meta.url,
 ), 'utf8');
+const cleanupMigration = readFileSync(new URL(
+    '../../../supabase/migrations/20260901192353_fix_analysis_v2_score_audit_expiry_orphans.sql',
+    import.meta.url,
+), 'utf8');
 
 describe('analysis score audit migration contract', () => {
     it('uses a private, service-role-only projection and a bounded outbox lease', () => {
@@ -113,5 +117,22 @@ describe('analysis score audit migration contract', () => {
         expect(migration).toContain(
             'expected.expected_band_rank <= 10'
         );
+    });
+
+    it('reconciles expired orphan intents before inserting child audit runs', () => {
+        expect(cleanupMigration).toContain(
+            '-- MIGRATION_PREDECESSOR=20260831100000'
+        );
+        expect(cleanupMigration).toContain(
+            'CREATE OR REPLACE FUNCTION public.purge_expired_analysis_v2_score_audit_evidence('
+        );
+        expect(cleanupMigration).toContain('FOR UPDATE SKIP LOCKED');
+        expect(cleanupMigration).toContain('FOR KEY SHARE');
+        expect(cleanupMigration).toContain(
+            'analysis_v2_result_summaries AS summary'
+        );
+        expect(cleanupMigration).toContain("intent_status = 'released'");
+        expect(cleanupMigration).toContain('SOURCE_EVIDENCE_EXPIRED');
+        expect(cleanupMigration).not.toContain('ON DELETE CASCADE');
     });
 });
