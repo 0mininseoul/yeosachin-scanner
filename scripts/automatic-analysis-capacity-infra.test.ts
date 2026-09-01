@@ -214,6 +214,7 @@ function runQueue(script: string, args: string[], extra: Record<string, string> 
 interface FakeRunOptions {
     role?: 'preflight' | 'paid';
     stage?: 'bootstrap' | 'initial' | 'expanded';
+    serviceResourceShape?: 'missing' | 'wrong-cpu' | 'wrong-memory' | 'legacy-top-level-only';
     serviceOverrides?: Record<string, unknown>;
     omitMinScaleAnnotation?: boolean;
     iam?: Record<string, unknown>;
@@ -323,9 +324,9 @@ function fakeRun(options: FakeRunOptions = {}) {
                     serviceAccountName: runtime,
                     containerConcurrency: 1,
                     timeoutSeconds: 600,
-                    resources: { limits: { cpu: '2', memory: '2Gi' } },
                     containers: [{
                         image: 'asia-northeast3-docker.pkg.dev/example-project/cloud-run-source-deploy/analysis-worker@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+                        resources: { limits: { cpu: '2', memory: '2Gi' } },
                         env: [
                             { name: `${prefix}_PROJECT`, value: env[`${prefix}_PROJECT` as keyof typeof env] },
                             { name: `${prefix}_LOCATION`, value: env[`${prefix}_LOCATION` as keyof typeof env] },
@@ -361,6 +362,21 @@ function fakeRun(options: FakeRunOptions = {}) {
         },
     };
     const serviceJson = deepMerge(serviceJsonDefaults, options.serviceOverrides ?? {});
+    const containerSpec = serviceJson.spec.template.spec as {
+        containers: Array<{ resources: { limits: { cpu: string; memory: string } } }>;
+        resources?: unknown;
+    };
+    const container = containerSpec.containers[0];
+    if (options.serviceResourceShape === 'missing') {
+        Reflect.deleteProperty(container, 'resources');
+    } else if (options.serviceResourceShape === 'wrong-cpu') {
+        container.resources.limits.cpu = '1';
+    } else if (options.serviceResourceShape === 'wrong-memory') {
+        container.resources.limits.memory = '1Gi';
+    } else if (options.serviceResourceShape === 'legacy-top-level-only') {
+        containerSpec.resources = { limits: { cpu: '2', memory: '2Gi' } };
+        Reflect.deleteProperty(container, 'resources');
+    }
     if (options.omitMinScaleAnnotation) {
         Reflect.deleteProperty(serviceJson.spec.template.metadata.annotations, 'autoscaling.knative.dev/minScale');
     }
@@ -888,6 +904,23 @@ describe('automatic-analysis infrastructure contracts', () => {
         });
         expect(result.status).not.toBe(0);
         expect(`${result.stdout}\n${result.stderr}`).toContain('minScale');
+        expect(result.calls).not.toContain('run deploy');
+    });
+
+    it('accepts exact container-scoped CPU and memory resources', () => {
+        const result = fakeRun({ args: ['--check'] });
+        expect(result.status, `${result.stderr?.toString() ?? ''}\n${result.calls}`).toBe(0);
+    });
+
+    it.each([
+        ['missing container resources', 'missing', 'CPU contract'],
+        ['wrong container CPU', 'wrong-cpu', 'CPU contract'],
+        ['wrong container memory', 'wrong-memory', 'memory contract'],
+        ['legacy top-level-only resources', 'legacy-top-level-only', 'CPU contract'],
+    ] as const)('rejects non-contract Cloud Run resource shape: %s', (_name, serviceResourceShape, expected) => {
+        const result = fakeRun({ serviceResourceShape, args: ['--check'] });
+        expect(result.status).not.toBe(0);
+        expect(`${result.stdout}\n${result.stderr}`).toContain(expected);
         expect(result.calls).not.toContain('run deploy');
     });
 

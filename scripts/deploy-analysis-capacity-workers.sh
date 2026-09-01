@@ -1179,9 +1179,9 @@ verify_staged_revision() {
   [[ "$(jq -r '.spec.timeoutSeconds // .spec.timeout // empty' <<<"$revision_json")" == "600" \
      || "$(jq -r '.spec.timeoutSeconds // .spec.timeout // empty' <<<"$revision_json")" == "600s" ]] \
     || die "Cloud Run staged revision timeout must be 600s/600 seconds"
-  [[ "$(jq -r '.spec.resources.limits.cpu // empty' <<<"$revision_json")" == "$worker_cpu" ]] \
+  [[ "$(jq -r '.spec.containers[0].resources.limits.cpu // empty' <<<"$revision_json")" == "$worker_cpu" ]] \
     || die "Cloud Run staged revision CPU contract drifted"
-  [[ "$(jq -r '.spec.resources.limits.memory // empty' <<<"$revision_json")" == "$worker_memory" ]] \
+  [[ "$(jq -r '.spec.containers[0].resources.limits.memory // empty' <<<"$revision_json")" == "$worker_memory" ]] \
     || die "Cloud Run staged revision memory contract drifted"
   for entry in "${secret_ref_entries[@]}"; do
     secret_env="${entry%%|*}"
@@ -1306,9 +1306,9 @@ verify_service_contract() {
   jq -e '.spec.template.spec.containers[0].image // "" | test("@sha256:[0-9a-f]{64}$")' \
     <<<"$service_json" >/dev/null \
     || die "Cloud Run service image must be an immutable sha256 digest"
-  [[ "$(jq -r '.spec.template.spec.resources.limits.cpu // empty' <<<"$service_json")" == "$worker_cpu" ]] \
+  [[ "$(jq -r '.spec.template.spec.containers[0].resources.limits.cpu // empty' <<<"$service_json")" == "$worker_cpu" ]] \
     || die "Cloud Run CPU contract drifted"
-  [[ "$(jq -r '.spec.template.spec.resources.limits.memory // empty' <<<"$service_json")" == "$worker_memory" ]] \
+  [[ "$(jq -r '.spec.template.spec.containers[0].resources.limits.memory // empty' <<<"$service_json")" == "$worker_memory" ]] \
     || die "Cloud Run memory contract drifted"
   while IFS= read -r manifest_key; do
     manifest_expected="$(manifest_value "$env_file" "$manifest_key")"
