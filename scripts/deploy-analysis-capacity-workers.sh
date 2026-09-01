@@ -403,6 +403,10 @@ validate_runtime_manifest() {
     for gate in "${required_gates[@]}"; do
       require_manifest_value "$env_file" "$gate" false
     done
+    if [[ "$role" == "preflight" ]]; then
+      require_manifest_value "$env_file" ANALYSIS_V2_WORKER_ENABLED false
+      require_manifest_value "$env_file" ANALYSIS_V2_RECOVERY_ENABLED false
+    fi
   else
     require_manifest_value "$env_file" ANALYSIS_PROVIDER_ADMISSION_ENABLED true
     require_manifest_value "$env_file" ANALYSIS_CAPACITY_PUBLIC_FREEZE_ENABLED true
@@ -1201,10 +1205,16 @@ verify_service_contract() {
   local contract_stage="${1:-$stage}"
   local require_traffic="${2:-true}"
   local allow_stale_bootstrap_provenance="${3:-false}"
+  local allow_bootstrap_cross_role_gate_transition="${4:-false}"
   local contract_expansion_canary="false"
   local contract_recovery_enabled="false"
   local contract_max_instances=8
   local observed_source_sha
+  if [[ "$allow_bootstrap_cross_role_gate_transition" == "true" ]]; then
+    [[ "$mode" == "apply" && "$role" == "preflight" && "$stage" == "bootstrap" \
+       && "$contract_stage" == "bootstrap" && "$require_traffic" == "true" ]] \
+      || die "bootstrap cross-role gate transition is valid only for preflight bootstrap apply"
+  fi
   if [[ "$role" == "preflight" ]]; then
     contract_max_instances=32
   fi
@@ -1312,8 +1322,21 @@ verify_service_contract() {
     || die "Cloud Run memory contract drifted"
   while IFS= read -r manifest_key; do
     manifest_expected="$(manifest_value "$env_file" "$manifest_key")"
-    [[ "$(env_value "$manifest_key")" == "$manifest_expected" ]] \
-      || die "Cloud Run observed environment drifted for $manifest_key"
+    observed_manifest_value="$(env_value "$manifest_key")"
+    if [[ "$observed_manifest_value" == "$manifest_expected" ]]; then
+      continue
+    fi
+    case "$manifest_key" in
+      ANALYSIS_V2_WORKER_ENABLED|ANALYSIS_V2_RECOVERY_ENABLED)
+        if [[ "$allow_bootstrap_cross_role_gate_transition" == "true" \
+           && "$observed_manifest_value" == "true" \
+           && "$manifest_expected" == "false" ]]; then
+          log "bootstrap: tolerating stale preflight cross-role $manifest_key=true before apply"
+          continue
+        fi
+        ;;
+    esac
+    die "Cloud Run observed environment drifted for $manifest_key"
   done < <(jq -r 'keys[]' "$env_file")
   for entry in "${secret_ref_entries[@]}"; do
     secret_env="${entry%%|*}"
@@ -1410,10 +1433,13 @@ if service_exists; then
   observed_stage="$(observed_capacity_stage)"
   verify_stage_transition "$observed_stage"
   allow_stale_bootstrap_provenance="false"
+  allow_bootstrap_cross_role_gate_transition="false"
   if [[ "$stage" == "bootstrap" && "$observed_stage" == "bootstrap" ]]; then
     allow_stale_bootstrap_provenance="true"
+    [[ "$role" == "preflight" ]] && allow_bootstrap_cross_role_gate_transition="true"
   fi
-  verify_service_contract "$observed_stage" true "$allow_stale_bootstrap_provenance"
+  verify_service_contract "$observed_stage" true "$allow_stale_bootstrap_provenance" \
+    "$allow_bootstrap_cross_role_gate_transition"
   verify_legacy_quiescence
   verify_vercel_public_deployment
   verify_capacity_activation_readiness
