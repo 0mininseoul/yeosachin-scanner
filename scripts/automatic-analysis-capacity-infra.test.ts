@@ -362,7 +362,7 @@ function fakeRun(options: FakeRunOptions = {}) {
     };
     const serviceJson = deepMerge(serviceJsonDefaults, options.serviceOverrides ?? {});
     if (options.omitMinScaleAnnotation) {
-        delete serviceJson.spec.template.metadata.annotations['autoscaling.knative.dev/minScale'];
+        Reflect.deleteProperty(serviceJson.spec.template.metadata.annotations, 'autoscaling.knative.dev/minScale');
     }
     const iamJson = options.iam ?? {
             bindings: [
