@@ -1274,7 +1274,14 @@ verify_service_contract() {
     || die "Cloud Run containerConcurrency must be 1"
   [[ "$(number_annotation autoscaling.knative.dev/maxScale)" == "$contract_max_instances" ]] \
     || die "Cloud Run maxScale drifted"
-  [[ "$(number_annotation autoscaling.knative.dev/minScale)" == "0" ]] \
+  jq -e '
+    (.spec.template.metadata.annotations // {}) as $annotations
+    | if ($annotations | has("autoscaling.knative.dev/minScale"))
+      then $annotations["autoscaling.knative.dev/minScale"] == 0
+        or $annotations["autoscaling.knative.dev/minScale"] == "0"
+      else true
+      end
+  ' <<<"$service_json" >/dev/null \
     || die "Cloud Run minScale must be 0"
   jq -e '.spec.template.spec.timeout == "600s"
       or .spec.template.spec.timeoutSeconds == 600

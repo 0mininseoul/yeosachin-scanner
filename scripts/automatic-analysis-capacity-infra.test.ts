@@ -215,6 +215,7 @@ interface FakeRunOptions {
     role?: 'preflight' | 'paid';
     stage?: 'bootstrap' | 'initial' | 'expanded';
     serviceOverrides?: Record<string, unknown>;
+    omitMinScaleAnnotation?: boolean;
     iam?: Record<string, unknown>;
     manifestOverrides?: Record<string, unknown>;
     readiness?: Record<string, unknown>;
@@ -360,6 +361,9 @@ function fakeRun(options: FakeRunOptions = {}) {
         },
     };
     const serviceJson = deepMerge(serviceJsonDefaults, options.serviceOverrides ?? {});
+    if (options.omitMinScaleAnnotation) {
+        Reflect.deleteProperty(serviceJson.spec.template.metadata.annotations, 'autoscaling.knative.dev/minScale');
+    }
     const iamJson = options.iam ?? {
             bindings: [
                 { role: 'roles/viewer', members: ['serviceAccount:unrelated@example-project.iam.gserviceaccount.com'] },
@@ -856,6 +860,29 @@ describe('automatic-analysis infrastructure contracts', () => {
         expect(result.calls).toContain('scheduler jobs describe');
         expect((result.finalScheduler.httpTarget as { uri?: string }).uri)
             .toBe('https://preflight.example.com/api/analysis/preflight/recover');
+    });
+
+    it('accepts Cloud Run default minScale when the annotation is absent', () => {
+        const result = fakeRun({ omitMinScaleAnnotation: true, args: ['--check'] });
+        expect(result.status, `${result.stderr?.toString() ?? ''}\n${result.calls}`).toBe(0);
+    });
+
+    it('rejects an invalid minScale annotation', () => {
+        const result = fakeRun({
+            serviceOverrides: {
+                spec: {
+                    template: {
+                        metadata: {
+                            annotations: { 'autoscaling.knative.dev/minScale': 'not-a-number' },
+                        },
+                    },
+                },
+            },
+            args: ['--check'],
+        });
+        expect(result.status).not.toBe(0);
+        expect(`${result.stdout}\n${result.stderr}`).toContain('minScale');
+        expect(result.calls).not.toContain('run deploy');
     });
 
     it.each([
