@@ -124,6 +124,8 @@ function manifestFor(role: 'preflight' | 'paid', overrides: Record<string, unkno
         PREFLIGHT_TASKS_ENABLED: role === 'preflight' && active ? 'true' : 'false',
         ANALYSIS_V2_TASKS_ENABLED: role === 'paid' && active ? 'true' : 'false',
         ANALYSIS_V2_WORKER_ENABLED: role === 'paid' && active ? 'true' : 'false',
+        PREFLIGHT_TASKS_RECOVERY_ENABLED: role === 'preflight' && active ? 'true' : 'false',
+        ANALYSIS_V2_RECOVERY_ENABLED: role === 'paid' && active ? 'true' : 'false',
         ...overrides,
     };
 }
@@ -216,6 +218,7 @@ interface FakeRunOptions {
     stage?: 'bootstrap' | 'initial' | 'expanded';
     serviceResourceShape?: 'missing' | 'wrong-cpu' | 'wrong-memory' | 'legacy-top-level-only';
     serviceOverrides?: Record<string, unknown>;
+    serviceEnv?: Record<string, string | null>;
     omitMinScaleAnnotation?: boolean;
     iam?: Record<string, unknown>;
     manifestOverrides?: Record<string, unknown>;
@@ -336,7 +339,8 @@ function fakeRun(options: FakeRunOptions = {}) {
                             { name: `${prefix}_SERVICE_ACCOUNT_EMAIL`, value: taskServiceAccount },
                             { name: `${maintenancePrefix}_MAINTENANCE_SERVICE_ACCOUNT_EMAIL`, value: env[`${maintenancePrefix}_MAINTENANCE_SERVICE_ACCOUNT_EMAIL` as keyof typeof env] },
                             { name: `${maintenancePrefix}_MAINTENANCE_OIDC_AUDIENCE`, value: env[`${maintenancePrefix}_MAINTENANCE_OIDC_AUDIENCE` as keyof typeof env] },
-                            { name: role === 'preflight' ? 'PREFLIGHT_TASKS_RECOVERY_ENABLED' : 'ANALYSIS_V2_RECOVERY_ENABLED', value: active ? 'true' : 'false' },
+                            { name: 'PREFLIGHT_TASKS_RECOVERY_ENABLED', value: role === 'preflight' && active ? 'true' : 'false' },
+                            { name: 'ANALYSIS_V2_RECOVERY_ENABLED', value: role === 'paid' && active ? 'true' : 'false' },
                             { name: 'ANALYSIS_WORKLOAD_ROLE', value: role },
                             { name: 'ANALYSIS_CAPACITY_STAGE', value: stage },
                             { name: 'ANALYSIS_CAPACITY_EXPANSION_CANARY', value: expansionCanary },
@@ -362,6 +366,17 @@ function fakeRun(options: FakeRunOptions = {}) {
         },
     };
     const serviceJson = deepMerge(serviceJsonDefaults, options.serviceOverrides ?? {});
+    const serviceEnv = serviceJson.spec.template.spec.containers[0].env as Array<{ name: string; value?: string }>;
+    for (const [name, value] of Object.entries(options.serviceEnv ?? {})) {
+        const index = serviceEnv.findIndex((entry) => entry.name === name);
+        if (value === null) {
+            if (index >= 0) serviceEnv.splice(index, 1);
+        } else if (index < 0) {
+            serviceEnv.push({ name, value });
+        } else {
+            serviceEnv[index].value = value;
+        }
+    }
     const containerSpec = serviceJson.spec.template.spec as {
         containers: Array<{ resources: { limits: { cpu: string; memory: string } } }>;
         resources?: unknown;
@@ -571,7 +586,8 @@ if [[ "\${1:-} \${2:-}" == "run deploy" ]]; then
         elif .name == "PREFLIGHT_TASKS_ENABLED" then .value = (if $stage == "bootstrap" or $role != "preflight" then "false" else "true" end)
         elif .name == "ANALYSIS_V2_TASKS_ENABLED" then .value = (if $stage == "bootstrap" or $role != "paid" then "false" else "true" end)
         elif .name == "ANALYSIS_V2_WORKER_ENABLED" then .value = (if $stage == "bootstrap" or $role != "paid" then "false" else "true" end)
-        elif .name == "PREFLIGHT_TASKS_RECOVERY_ENABLED" or .name == "ANALYSIS_V2_RECOVERY_ENABLED" then .value = $active
+        elif .name == "PREFLIGHT_TASKS_RECOVERY_ENABLED" then .value = (if $stage == "bootstrap" or $role != "preflight" then "false" else "true" end)
+        elif .name == "ANALYSIS_V2_RECOVERY_ENABLED" then .value = (if $stage == "bootstrap" or $role != "paid" then "false" else "true" end)
         else . end
       )
   ' "$FAKE_GCLOUD_SERVICE_JSON" > "$FAKE_GCLOUD_SERVICE_JSON.tmp"
@@ -734,7 +750,8 @@ fi
         }
         const finalIam = JSON.parse(readFileSync(iamPath, 'utf8')) as Record<string, unknown>;
         const finalScheduler = JSON.parse(readFileSync(schedulerPath, 'utf8')) as Record<string, unknown>;
-        return { ...result, calls, finalIam, finalScheduler };
+        const finalService = JSON.parse(readFileSync(servicePath, 'utf8')) as Record<string, unknown>;
+        return { ...result, calls, finalIam, finalScheduler, finalService };
     } finally {
         rmSync(fixtureDir, { recursive: true, force: true });
     }
@@ -947,6 +964,71 @@ describe('automatic-analysis infrastructure contracts', () => {
         const result = fakeRun({ role: 'paid', stage: 'bootstrap', args: ['--check'] });
         expect(result.status).toBe(0);
         expect(result.stdout).toContain('verified: paid worker');
+    });
+
+    it('reconciles exactly the stale preflight bootstrap cross-role gates during apply', () => {
+        const result = fakeRun({
+            role: 'preflight',
+            stage: 'bootstrap',
+            serviceEnv: {
+                ANALYSIS_V2_WORKER_ENABLED: 'true',
+                ANALYSIS_V2_RECOVERY_ENABLED: 'true',
+            },
+            args: ['--apply'],
+        });
+        expect(result.status, `${result.stderr?.toString() ?? ''}\n${result.calls}`).toBe(0);
+        expect(result.calls).toContain('run deploy');
+        expect((result.finalService.spec as { template: { spec: { containers: Array<{ env: Array<{ name: string; value?: string }> }> } } })
+            .template.spec.containers[0].env
+            .filter(({ name }) => ['ANALYSIS_V2_WORKER_ENABLED', 'ANALYSIS_V2_RECOVERY_ENABLED'].includes(name))
+            .map(({ value }) => value))
+            .toEqual(['false', 'false']);
+    });
+
+    it.each([
+        ['check mode', { args: ['--check'] }, 'ANALYSIS_V2_RECOVERY_ENABLED'],
+        ['non-bootstrap apply', { stage: 'initial' as const }, 'ANALYSIS_V2_RECOVERY_ENABLED'],
+        ['paid role', { role: 'paid' as const }, 'recovery gate drifted'],
+        ['own-role gate', { serviceEnv: { PREFLIGHT_TASKS_ENABLED: 'true' } }, 'bootstrap role gate'],
+        ['provider admission gate', { serviceEnv: { ANALYSIS_PROVIDER_ADMISSION_ENABLED: 'true' } }, 'bootstrap admission gate'],
+        ['missing worker key', { serviceEnv: { ANALYSIS_V2_WORKER_ENABLED: null } }, 'ANALYSIS_V2_WORKER_ENABLED'],
+        ['missing recovery key', { serviceEnv: { ANALYSIS_V2_RECOVERY_ENABLED: null } }, 'ANALYSIS_V2_RECOVERY_ENABLED'],
+        ['non-literal worker value', { serviceEnv: { ANALYSIS_V2_WORKER_ENABLED: 'TRUE' } }, 'ANALYSIS_V2_WORKER_ENABLED'],
+        ['non-literal recovery value', { serviceEnv: { ANALYSIS_V2_RECOVERY_ENABLED: '1' } }, 'ANALYSIS_V2_RECOVERY_ENABLED'],
+        ['arbitrary key', {
+            manifestOverrides: { ANALYSIS_V2_LEGACY_GATE: 'false' },
+            serviceEnv: { ANALYSIS_V2_LEGACY_GATE: 'true' },
+        }, 'ANALYSIS_V2_LEGACY_GATE'],
+        ['manifest keeps worker gate enabled', {
+            manifestOverrides: { ANALYSIS_V2_WORKER_ENABLED: 'true' },
+        }, 'required ANALYSIS_V2_WORKER_ENABLED'],
+        ['manifest omits worker gate', {
+            manifestOverrides: { ANALYSIS_V2_WORKER_ENABLED: undefined },
+        }, 'required ANALYSIS_V2_WORKER_ENABLED'],
+        ['manifest enables recovery gate', {
+            manifestOverrides: { ANALYSIS_V2_RECOVERY_ENABLED: 'true' },
+        }, 'required ANALYSIS_V2_RECOVERY_ENABLED'],
+        ['manifest enables worker from a disabled service', {
+            manifestOverrides: { ANALYSIS_V2_WORKER_ENABLED: 'true' },
+            serviceEnv: { ANALYSIS_V2_WORKER_ENABLED: 'false' },
+        }, 'required ANALYSIS_V2_WORKER_ENABLED'],
+    ] as const)('fails closed for an unsafe bootstrap exception input: %s', (_name, overrides, expected) => {
+        const staleCrossRoleGates = {
+            ANALYSIS_V2_WORKER_ENABLED: 'true',
+            ANALYSIS_V2_RECOVERY_ENABLED: 'true',
+        };
+        const overrideServiceEnv = 'serviceEnv' in overrides ? overrides.serviceEnv : undefined;
+        const overrideArgs = 'args' in overrides ? overrides.args : undefined;
+        const result = fakeRun({
+            role: 'preflight',
+            stage: 'bootstrap',
+            ...overrides,
+            serviceEnv: { ...staleCrossRoleGates, ...overrideServiceEnv },
+            args: overrideArgs ? [...overrideArgs] : ['--apply'],
+        });
+        expect(result.status).not.toBe(0);
+        expect(`${result.stdout}\n${result.stderr}`).toContain(expected);
+        expect(result.calls).not.toContain('run deploy');
     });
 
     it('updates an existing private gate-off bootstrap service from stale provenance', () => {
