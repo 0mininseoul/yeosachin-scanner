@@ -538,8 +538,14 @@ if [[ "\${1:-} \${2:-} \${3:-}" == "run revisions describe" ]]; then
 fi
 if [[ "\${1:-} \${2:-} \${3:-}" == "run services get-iam-policy" ]]; then cat "$FAKE_GCLOUD_IAM_JSON"; exit 0; fi
 if [[ "\${1:-} \${2:-}" == "run deploy" ]]; then
-  jq --arg rev "$FAKE_GCLOUD_NEXT_REVISION" --arg stage "$FAKE_GCLOUD_TARGET_STAGE" --arg active "$FAKE_GCLOUD_ACTIVE" --arg role "$FAKE_GCLOUD_ROLE" '
+  jq --arg rev "$FAKE_GCLOUD_NEXT_REVISION" --arg stage "$FAKE_GCLOUD_TARGET_STAGE" --arg active "$FAKE_GCLOUD_ACTIVE" --arg role "$FAKE_GCLOUD_ROLE" --arg source "$FAKE_GCLOUD_SOURCE_SHA" '
     .status.latestCreatedRevisionName = $rev
+    | if $active == "false"
+      then .status.latestReadyRevisionName = $rev | .status.traffic = [{revisionName:$rev,percent:100}]
+      else .
+      end
+    | .metadata.labels["analysis-v2-source-commit"] = $source
+    | .spec.template.metadata.labels["analysis-v2-source-commit"] = $source
     | .metadata.labels["analysis-capacity-stage"] = $stage
     | .spec.template.metadata.labels["analysis-capacity-stage"] = $stage
     | (.spec.template.spec.containers[0].env) |= map(
@@ -908,6 +914,58 @@ describe('automatic-analysis infrastructure contracts', () => {
         const result = fakeRun({ role: 'paid', stage: 'bootstrap', args: ['--check'] });
         expect(result.status).toBe(0);
         expect(result.stdout).toContain('verified: paid worker');
+    });
+
+    it('updates an existing private gate-off bootstrap service from stale provenance', () => {
+        const staleSha = 'd'.repeat(40);
+        const result = fakeRun({
+            role: 'preflight',
+            stage: 'bootstrap',
+            serviceOverrides: {
+                metadata: { labels: { 'analysis-v2-source-commit': staleSha } },
+            },
+            args: ['--apply'],
+        });
+        expect(result.status, `${result.stderr?.toString() ?? ''}\n${result.calls}`).toBe(0);
+        expect(result.calls).toContain('run deploy');
+        expect(result.calls).not.toContain('run services update-traffic');
+        expect(result.stdout).toContain('verified: preflight worker');
+        expect(result.stdout).not.toContain(staleSha);
+    });
+
+    it('keeps stale provenance fail-closed for non-bootstrap stages', () => {
+        const result = fakeRun({
+            role: 'preflight',
+            stage: 'initial',
+            serviceOverrides: {
+                metadata: { labels: { 'analysis-v2-source-commit': 'd'.repeat(40) } },
+            },
+            args: ['--apply'],
+        });
+        expect(result.status).not.toBe(0);
+        expect(`${result.stdout}\n${result.stderr}`).toContain('source provenance');
+        expect(result.calls).not.toContain('run deploy');
+    });
+
+    it('keeps stale bootstrap provenance fail-closed when a workload gate is unsafe', () => {
+        const result = fakeRun({
+            role: 'preflight',
+            stage: 'bootstrap',
+            serviceOverrides: {
+                metadata: { labels: { 'analysis-v2-source-commit': 'd'.repeat(40) } },
+                spec: {
+                    template: {
+                        spec: {
+                            containers: [{ env: [{ name: 'PREFLIGHT_TASKS_ENABLED', value: 'true' }] }],
+                        },
+                    },
+                },
+            },
+            args: ['--apply'],
+        });
+        expect(result.status).not.toBe(0);
+        expect(`${result.stdout}\n${result.stderr}`).toContain('bootstrap role gate');
+        expect(result.calls).not.toContain('run deploy');
     });
 
     it.each([

@@ -1200,9 +1200,11 @@ verify_service_contract() {
   # staged with no traffic.
   local contract_stage="${1:-$stage}"
   local require_traffic="${2:-true}"
+  local allow_stale_bootstrap_provenance="${3:-false}"
   local contract_expansion_canary="false"
   local contract_recovery_enabled="false"
   local contract_max_instances=8
+  local observed_source_sha
   if [[ "$role" == "preflight" ]]; then
     contract_max_instances=32
   fi
@@ -1291,8 +1293,16 @@ verify_service_contract() {
     || die "Cloud Run workload-role label drifted"
   [[ "$(jq -r '.metadata.labels["analysis-capacity-stage"] // empty' <<<"$service_json")" == "$contract_stage" ]] \
     || die "Cloud Run capacity-stage label drifted"
-  [[ "$(jq -r --arg key "$PROVENANCE_LABEL_KEY" '.metadata.labels[$key] // empty' <<<"$service_json")" == "$source_sha" ]] \
-    || die "Cloud Run source provenance label drifted"
+  observed_source_sha="$(jq -r --arg key "$PROVENANCE_LABEL_KEY" '.metadata.labels[$key] // empty' <<<"$service_json")"
+  if [[ "$observed_source_sha" != "$source_sha" ]]; then
+    if [[ "$allow_stale_bootstrap_provenance" != "true" \
+       || "$stage" != "bootstrap" \
+       || "$contract_stage" != "bootstrap" \
+       || ! "$observed_source_sha" =~ ^[0-9a-f]{40}$ ]]; then
+      die "Cloud Run source provenance label drifted"
+    fi
+    log "bootstrap: reconciling an older valid Cloud Run source provenance label"
+  fi
   jq -e '.spec.template.spec.containers[0].image // "" | test("@sha256:[0-9a-f]{64}$")' \
     <<<"$service_json" >/dev/null \
     || die "Cloud Run service image must be an immutable sha256 digest"
@@ -1399,7 +1409,11 @@ if service_exists; then
   previous_ready_revision="$(jq -r '.status.latestReadyRevisionName // empty' <<<"$service_json")"
   observed_stage="$(observed_capacity_stage)"
   verify_stage_transition "$observed_stage"
-  verify_service_contract "$observed_stage"
+  allow_stale_bootstrap_provenance="false"
+  if [[ "$stage" == "bootstrap" && "$observed_stage" == "bootstrap" ]]; then
+    allow_stale_bootstrap_provenance="true"
+  fi
+  verify_service_contract "$observed_stage" true "$allow_stale_bootstrap_provenance"
   verify_legacy_quiescence
   verify_vercel_public_deployment
   verify_capacity_activation_readiness
