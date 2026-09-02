@@ -161,6 +161,12 @@ function emptyResolverTelemetry(): ReplayStageMetrics {
         p50LatencyMs: 0,
         p95LatencyMs: 0,
         failureDisposition: {},
+        inputTokens: 0,
+        outputTokens: 0,
+        thinkingTokens: 0,
+        estimatedCostUsd: 0,
+        guardedCostUsd: 0,
+        unknownUsage: 0,
     };
 }
 

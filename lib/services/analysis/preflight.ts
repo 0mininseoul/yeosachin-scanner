@@ -210,6 +210,8 @@ export function preflightPolicyVersions(accessMode: PlanAccessMode): PreflightPo
             microbatchV29RolloutMode: process.env.ANALYSIS_V2_AI_MICROBATCH_V29_ROLLOUT,
             genderSummaryQualityV211RolloutMode:
                 process.env.ANALYSIS_V2_GENDER_SUMMARY_QUALITY_V211_ROLLOUT,
+            costOptimizationV212RolloutMode:
+                process.env.ANALYSIS_V2_VERTEX_AI_COST_OPTIMIZATION_V212_ROLLOUT,
             accessMode,
         }),
     });

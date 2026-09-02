@@ -5,6 +5,7 @@ import type {
     GeminiAttemptStartTelemetry,
     GeminiAttemptTelemetry,
 } from '@/lib/services/ai/gemini';
+import type { VertexAiBudgetGuard } from '@/lib/services/ai/vertex-ai-cost-policy';
 import {
     AI_GENERATION_RESPONSE_REJECTED_ERROR_PREFIX,
 } from '@/lib/services/ai/gemini-generation-policy';
@@ -356,6 +357,9 @@ export interface AnalysisV2AiAuditAdapter<T> {
     operationKey: string;
     resultIdentity: AnalysisV2AiResultIdentity;
     handlerDeadlineAtMs?: number;
+    /** Shared monetary guard handed to the staged Gemini transport. */
+    budgetGuard?: VertexAiBudgetGuard;
+    budgetOrderId?: string | null;
     /** Checkpoint/cache recovery and durable retry resumption must run before any provider call. */
     prepare(): Promise<AnalysisV2AiPreparedResult<T>>;
     /** Reserve the paid generation attempt before the Gemini SDK call. */
@@ -381,6 +385,9 @@ export interface CreateAnalysisV2AiAuditAdapterOptions<T> {
     resultStore?: AnalysisV2AiResultStore;
     leaseStore?: AnalysisV2GeminiLeaseStore;
     handlerDeadlineAtMs?: number;
+    /** Shared monetary guard handed to the staged Gemini transport. */
+    budgetGuard?: VertexAiBudgetGuard;
+    budgetOrderId?: string | null;
     /** A scheduler recovery may read checkpoints but can never reserve a new paid attempt. */
     schedulerRecoveryOnly?: boolean;
     /** A bounded scheduler recovery expired; force the stage's deterministic safe fallback. */
@@ -1158,6 +1165,8 @@ export function createAnalysisV2AiAuditAdapter<T>(
         operationKey: resultIdentity.operationKey,
         resultIdentity,
         handlerDeadlineAtMs,
+        budgetGuard: options.budgetGuard,
+        budgetOrderId: options.budgetOrderId,
         resultSchema: options.resultSchema,
 
         async prepare() {

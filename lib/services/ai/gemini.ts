@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto';
 import {
     GoogleGenAI,
     MediaResolution,
@@ -29,6 +30,7 @@ import {
 } from './gemini-generation-policy';
 import {
     AI_STAGE_POLICY_VERSION,
+    AI_STAGE_POLICY_V212_VERSION,
     AI_SHARED_CONCURRENCY_LIMIT,
     AI_GEMINI_SDK_TIMEOUT_MS,
     aiStagePolicySupports,
@@ -44,6 +46,20 @@ import {
     isReplayStatelessCapability,
     type ReplayStatelessCapability,
 } from './replay-stateless-capability';
+import {
+    createVertexAiBudgetGuard,
+    estimateVertexAiInputTokens,
+    assertVertexAiBudgetStoreConfigured,
+    assertVertexAiCostRouteModel,
+    isVertexAiEscalationModel,
+    type VertexAiBudgetGuard,
+    type VertexAiBudgetReservation,
+    type VertexAiCostRoute,
+} from './vertex-ai-cost-policy';
+import {
+    createSupabaseVertexAiBudgetStore,
+    type VertexAiBudgetRpcResponse,
+} from './vertex-ai-budget-store';
 
 const GOOGLE_CLOUD_LOCATION = process.env.GOOGLE_CLOUD_LOCATION || 'global';
 
@@ -141,6 +157,40 @@ const generationLimiterState = processScope.__AI_BARAM_GEMINI_GENERATION_LIMITER
     stages: new Map<string, AsyncSemaphore>(),
 };
 processScope.__AI_BARAM_GEMINI_GENERATION_LIMITER_V1__ = generationLimiterState;
+
+interface VertexAiBudgetProcessGuard {
+    mode: 'memory' | 'supabase';
+    guard: VertexAiBudgetGuard;
+}
+
+const budgetProcessScope = globalThis as typeof globalThis & {
+    __AI_BARAM_VERTEX_AI_BUDGET_GUARD_V2__?: VertexAiBudgetProcessGuard;
+};
+
+function defaultVertexAiBudgetGuard(): VertexAiBudgetGuard {
+    assertVertexAiBudgetStoreConfigured();
+    const mode = process.env.VERTEX_AI_BUDGET_STORE?.trim().toLowerCase() === 'supabase'
+        ? 'supabase'
+        : 'memory';
+    const existing = budgetProcessScope.__AI_BARAM_VERTEX_AI_BUDGET_GUARD_V2__;
+    if (existing?.mode === mode) return existing.guard;
+    const store = mode === 'supabase'
+        ? createSupabaseVertexAiBudgetStore({
+            rpc: async (functionName, args) => {
+                // Keep the stateless replay import boundary free of Supabase's service-role
+                // client; production budget RPC access is loaded only when this store dispatches.
+                const { supabaseAdmin } = await import('@/lib/supabase/admin');
+                return supabaseAdmin.rpc(
+                    functionName,
+                    args,
+                ) as unknown as Promise<VertexAiBudgetRpcResponse>;
+            },
+        })
+        : undefined;
+    const guard = createVertexAiBudgetGuard({ store });
+    budgetProcessScope.__AI_BARAM_VERTEX_AI_BUDGET_GUARD_V2__ = { mode, guard };
+    return guard;
+}
 
 function getStageGenerationSemaphore(
     policyVersion: AiStagePolicyVersion,
@@ -309,6 +359,9 @@ export interface GeminiRequestTelemetry {
     maxOutputTokens: number | null;
     latencyMs: number;
     estimatedCostUsd: number | null;
+    /** Maximum guarded charge reserved before dispatch; present when the cost guard is enabled. */
+    preDispatchCostUsd?: number | null;
+    costRoute?: VertexAiCostRoute;
 }
 
 export interface GeminiAttemptTelemetry extends GeminiRequestTelemetry {
@@ -332,6 +385,7 @@ export interface GeminiAttemptStartTelemetry {
     maxOutputTokens: number;
     attempt: number;
     retryCount: number;
+    costRoute?: VertexAiCostRoute;
 }
 
 export interface AnalyzeWithGeminiOptions<T> {
@@ -362,6 +416,12 @@ export interface AnalyzeWithGeminiOptions<T> {
     /** Feature analysis may explicitly retry strict response rejections; all other stages remain fail-fast. */
     retryResponseRejections?: boolean;
     onTelemetry?: (telemetry: GeminiRequestTelemetry) => void | Promise<void>;
+    /** Shared monetary guard. v2.12 supplies a process default; tests/replay may inject one. */
+    budgetGuard?: VertexAiBudgetGuard;
+    budgetRunId?: string;
+    budgetOrderId?: string | null;
+    budgetOperationKey?: string;
+    budgetRoute?: VertexAiCostRoute;
     /** Reserve a durable, PII-free generation intent before the SDK request starts. */
     onBeforeAttempt?: (telemetry: GeminiAttemptStartTelemetry) => void | Promise<void>;
     /** The V2 caller must persist this PII-free event when it is used as the stage audit sink. */
@@ -710,6 +770,20 @@ async function emitAttemptTelemetry<T>(
     }
 }
 
+async function emitRequestTelemetry<T>(
+    telemetry: GeminiRequestTelemetry,
+    hook: AnalyzeWithGeminiOptions<T>['onTelemetry'],
+): Promise<void> {
+    if (!hook) return;
+    try {
+        await hook(telemetry);
+    } catch {
+        // Telemetry is best effort for legacy callers; the durable V2 attempt hook remains the
+        // authoritative persistence boundary.
+        console.warn('Gemini telemetry hook failed');
+    }
+}
+
 const REQUEST_UUID_PATTERN =
     /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
@@ -815,6 +889,11 @@ export async function analyzeWithGemini<T>(
         maxAttempts,
         retryResponseRejections = false,
         onTelemetry,
+        budgetGuard: suppliedBudgetGuard,
+        budgetRunId,
+        budgetOrderId,
+        budgetOperationKey,
+        budgetRoute,
         onBeforeAttempt,
         onAttemptTelemetry,
         schema,
@@ -871,8 +950,8 @@ export async function analyzeWithGemini<T>(
     if (stage && skipTokenLog && !statelessReplay) {
         throw new Error('Gemini stage calls cannot skip durable token logging');
     }
-    if (statelessReplay && (!stage || !skipTokenLog)) {
-        throw new Error('Stateless replay requires a staged call with token logging disabled');
+    if (statelessReplay && !stage) {
+        throw new Error('Stateless replay requires a staged call');
     }
     if (
         stage
@@ -916,6 +995,36 @@ export async function analyzeWithGemini<T>(
     const resolvedMaxOutputTokens = maxOutputTokens
         ?? stagePolicy?.maxOutputTokens
         ?? (costOptimized ? 1_024 : undefined);
+    const resolvedMaxAttempts = maxAttempts
+        ?? stagePolicy?.maxAttempts;
+    // An explicit escalation route may opt into the feature-stage response retry even though the
+    // v2.12 stage default is fail-fast. A false stage default must not erase that route decision.
+    const resolvedRetryResponseRejections = retryResponseRejections
+        || stagePolicy?.retryResponseRejections === true;
+    const configuredBudgetGuard = ['1', 'true', 'yes', 'on'].includes(
+        process.env.VERTEX_AI_BUDGET_GUARD_ENABLED?.trim().toLowerCase() ?? '',
+    );
+    const resolvedBudgetGuard = suppliedBudgetGuard
+        ?? (configuredBudgetGuard
+            || Boolean(stage && aiStagePolicySupports(resolvedPolicyVersion, 'vertexAiCostGuardV1'))
+            ? defaultVertexAiBudgetGuard()
+            : null);
+    const resolvedCostRoute = budgetRoute
+        ?? (isVertexAiEscalationModel(modelName) ? 'high_value' : 'default');
+    if (resolvedPolicyVersion === AI_STAGE_POLICY_V212_VERSION) {
+        if (isVertexAiEscalationModel(modelName) && budgetRoute === undefined) {
+            throw new Error('VERTEX_AI_ESCALATION_REASON_REQUIRED');
+        }
+        assertVertexAiCostRouteModel({ route: resolvedCostRoute, modelName });
+    }
+    const includeCostTelemetry = resolvedBudgetGuard !== null || budgetRoute !== undefined;
+    // Legacy/non-stage callers may not provide a request ID. Keep each invocation in its own
+    // budget scope so a process-global fallback key cannot deduplicate unrelated requests.
+    const resolvedBudgetRunId = budgetRunId
+        ?? requestId
+        ?? `legacy:${analysisType}:${randomUUID()}`;
+    const resolvedBudgetOperationKey = budgetOperationKey
+        ?? `${stage ?? analysisType}:${requestId ?? resolvedBudgetRunId}`;
     const resolvedPromptVersion = promptVersion ?? stagePolicy?.promptVersion;
     const resolvedSchemaVersion = schemaVersion ?? stagePolicy?.schemaVersion;
     const imagePolicy = getAnalysisImagePolicy(costOptimized);
@@ -934,7 +1043,7 @@ export async function analyzeWithGemini<T>(
     let lastError: Error | null = null;
     const finalAttemptNumber = Math.min(
         RETRY_CONFIG.maxRetries + 1,
-        startingAttempt + (maxAttempts ?? RETRY_CONFIG.maxRetries + 1) - 1,
+        startingAttempt + (resolvedMaxAttempts ?? RETRY_CONFIG.maxRetries + 1) - 1,
     );
 
     for (
@@ -942,6 +1051,9 @@ export async function analyzeWithGemini<T>(
         attemptNumber <= finalAttemptNumber;
         attemptNumber++
     ) {
+        let budgetReservation: VertexAiBudgetReservation | null = null;
+        let providerDispatchStarted = false;
+        let budgetSettled = false;
         try {
             if (abortSignal?.aborted) {
                 throw new Error('AI_GENERATION_DEADLINE_EXCEEDED');
@@ -957,25 +1069,45 @@ export async function analyzeWithGemini<T>(
                 }
             }
 
-            const client = getGenAIClient();
-            let attemptStartedAt = performance.now();
-
-            const parts: Part[] = [{ text: prompt }];
-
-            // 이미지가 있으면 추가
-            if (selectedImages.length > 0) {
-                for (const image of selectedImages) {
-                    parts.push({
-                        inlineData: {
-                            mimeType: 'image/jpeg',
-                            data: image,
-                        },
-                    });
-                }
+            if (resolvedBudgetGuard) {
+                budgetReservation = await resolvedBudgetGuard.reserve({
+                    reservationKey: `${resolvedBudgetRunId}:${resolvedBudgetOperationKey}:${attemptNumber}`,
+                    runId: resolvedBudgetRunId,
+                    orderId: budgetOrderId,
+                    operationKey: resolvedBudgetOperationKey,
+                    attempt: attemptNumber,
+                    modelName,
+                    location: GOOGLE_CLOUD_LOCATION,
+                    inputTokens: estimateVertexAiInputTokens(prompt, selectedImages.length),
+                    maxOutputTokens: resolvedMaxOutputTokens
+                        ?? stagePolicy?.maxOutputTokens
+                        ?? 1_024,
+                    route: resolvedCostRoute,
+                });
             }
+
+            let attemptStartedAt = performance.now();
 
             let response;
             try {
+                // Keep client initialization and request assembly inside the settlement boundary:
+                // a failed credential/project lookup must release its pre-dispatch reservation
+                // because the provider was never reached.
+                const client = getGenAIClient();
+                const parts: Part[] = [{ text: prompt }];
+
+                // 이미지가 있으면 추가
+                if (selectedImages.length > 0) {
+                    for (const image of selectedImages) {
+                        parts.push({
+                            inlineData: {
+                                mimeType: 'image/jpeg',
+                                data: image,
+                            },
+                        });
+                    }
+                }
+
                 const config: GenerateContentConfig = {
                     responseMimeType: 'application/json',
                     responseJsonSchema,
@@ -1022,6 +1154,7 @@ export async function analyzeWithGemini<T>(
                                         ?? stagePolicy.maxOutputTokens,
                                     attempt: attemptNumber,
                                     retryCount: attemptNumber - 1,
+                                    costRoute: resolvedCostRoute,
                                 });
                             } catch (error) {
                                 if (
@@ -1043,6 +1176,7 @@ export async function analyzeWithGemini<T>(
                         if (abortSignal?.aborted) {
                             throw new Error('AI_GENERATION_DEADLINE_EXCEEDED');
                         }
+                        providerDispatchStarted = true;
                         return client.models.generateContent({
                             model: modelName,
                             contents: [{ role: 'user', parts }],
@@ -1052,6 +1186,16 @@ export async function analyzeWithGemini<T>(
                     abortSignal,
                 );
             } catch (generationError) {
+                if (budgetReservation && !budgetSettled) {
+                    if (providerDispatchStarted) {
+                        await resolvedBudgetGuard?.settle(budgetReservation, {
+                            actualCostUsd: null,
+                        });
+                    } else {
+                        await resolvedBudgetGuard?.cancel(budgetReservation);
+                    }
+                    budgetSettled = true;
+                }
                 if (abortSignal?.aborted) {
                     throw new Error('AI_GENERATION_DEADLINE_EXCEEDED');
                 }
@@ -1088,6 +1232,12 @@ export async function analyzeWithGemini<T>(
                     retryCount: attemptNumber - 1,
                     disposition,
                     finishReason: null,
+                    ...(includeCostTelemetry
+                        ? {
+                            preDispatchCostUsd: budgetReservation?.estimatedCostUsd ?? null,
+                            costRoute: resolvedCostRoute,
+                        }
+                        : {}),
                 }, onAttemptTelemetry);
                 throw sanitizeGenerationError(generationError);
             }
@@ -1129,6 +1279,12 @@ export async function analyzeWithGemini<T>(
                 retryCount: attemptNumber - 1,
                 disposition: completionError ? 'response_rejected' : 'success',
                 finishReason,
+                ...(includeCostTelemetry
+                    ? {
+                        preDispatchCostUsd: budgetReservation?.estimatedCostUsd ?? null,
+                        costRoute: resolvedCostRoute,
+                    }
+                    : {}),
                 ...(completionError
                     ? { responseRejection: responseRejectionDiagnostics(completionError) }
                     : {}),
@@ -1137,6 +1293,12 @@ export async function analyzeWithGemini<T>(
             // V2 persists the validated result and attempt outcome before any best-effort legacy log.
             if (abortSignal?.aborted) {
                 throw new Error('AI_GENERATION_DEADLINE_EXCEEDED');
+            }
+            if (budgetReservation && !budgetSettled) {
+                await resolvedBudgetGuard?.settle(budgetReservation, {
+                    actualCostUsd: costEstimate?.totalCostUsd ?? null,
+                });
+                budgetSettled = true;
             }
             await emitAttemptTelemetry(
                 attemptTelemetry,
@@ -1149,7 +1311,7 @@ export async function analyzeWithGemini<T>(
             emitResponseRejectionDiagnostic(attemptTelemetry);
 
             // The legacy table cannot represent unknown usage. Never persist a fabricated zero.
-            if (!skipTokenLog && usage.tokenUsage) {
+            if (!skipTokenLog && !statelessReplay && usage.tokenUsage) {
                 await logTokenUsage(usage.tokenUsage, analysisType, requestId, false, modelName, {
                     latencyMs: attemptTelemetry.latencyMs,
                     location: attemptTelemetry.location,
@@ -1179,19 +1341,32 @@ export async function analyzeWithGemini<T>(
                 maxOutputTokens: attemptTelemetry.maxOutputTokens,
                 latencyMs: Math.max(0, Math.round(performance.now() - analysisStartedAt)),
                 estimatedCostUsd: attemptTelemetry.estimatedCostUsd,
+                ...(includeCostTelemetry
+                    ? {
+                        preDispatchCostUsd: attemptTelemetry.preDispatchCostUsd,
+                        costRoute: attemptTelemetry.costRoute,
+                    }
+                    : {}),
             };
             console.log('Gemini request telemetry:', telemetry);
-            if (onTelemetry) {
-                try {
-                    await onTelemetry(telemetry);
-                } catch {
-                    console.warn('Gemini telemetry hook failed');
-                }
-            }
+            await emitRequestTelemetry(telemetry, onTelemetry);
             console.log('--- AnalyzeWithGemini End (Success) ---');
 
             return parsed as T;
         } catch (error) {
+            // An abort can arrive after the provider returned but before result/telemetry
+            // persistence. Close the reservation on every exit path: a reached provider is
+            // conservatively settled as unknown, while a pre-dispatch failure is released.
+            if (budgetReservation && !budgetSettled) {
+                if (providerDispatchStarted) {
+                    await resolvedBudgetGuard?.settle(budgetReservation, {
+                        actualCostUsd: null,
+                    });
+                } else {
+                    await resolvedBudgetGuard?.cancel(budgetReservation);
+                }
+                budgetSettled = true;
+            }
             if (abortSignal?.aborted) {
                 lastError = new Error('AI_GENERATION_DEADLINE_EXCEEDED');
                 console.error(`Gemini API Error (attempt ${attemptNumber}):`, lastError.message);
@@ -1202,7 +1377,7 @@ export async function analyzeWithGemini<T>(
             console.error(`Gemini API Error (attempt ${attemptNumber}):`, lastError.message);
 
             // 재시도 불가능한 에러거나 마지막 시도면 throw
-            const retryableResponseRejection = retryResponseRejections
+            const retryableResponseRejection = resolvedRetryResponseRejections
                 && error instanceof Error
                 && error.message.startsWith(AI_GENERATION_RESPONSE_REJECTED_ERROR_PREFIX);
             if (

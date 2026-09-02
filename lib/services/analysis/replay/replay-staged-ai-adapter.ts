@@ -21,7 +21,15 @@ import {
 } from '@/lib/services/ai/v2-staged-analysis';
 import { analyzePrivateAccountNames, type PrivateNameAnalysisAudit } from '@/lib/services/ai/private-name-analysis';
 import { classifyGeminiGenerationError } from '@/lib/services/ai/gemini-generation-policy';
-import type { GeminiAttemptStartTelemetry, GeminiAttemptTelemetry } from '@/lib/services/ai/gemini';
+import type {
+    GeminiAttemptStartTelemetry,
+    GeminiAttemptTelemetry,
+    GeminiRequestTelemetry,
+} from '@/lib/services/ai/gemini';
+import {
+    createVertexAiBudgetGuard,
+    type VertexAiBudgetGuard,
+} from '@/lib/services/ai/vertex-ai-cost-policy';
 import {
     issueReplayStatelessCapability,
     type ReplayStatelessCapability,
@@ -94,6 +102,13 @@ interface InvocationTelemetry {
     rateLimited: number;
     failureDisposition: Record<string, number>;
     attemptLatenciesMs: number[];
+    inputTokens: number;
+    outputTokens: number;
+    thinkingTokens: number;
+    estimatedCostUsd: number;
+    guardedCostUsd: number;
+    unknownUsage: number;
+    requestTelemetry: GeminiRequestTelemetry[];
 }
 
 function normalized(media: readonly ReplayMedia[]) {
@@ -129,6 +144,18 @@ function recordTerminal(state: InvocationTelemetry, value: GeminiAttemptTelemetr
         state.failureDisposition[value.disposition] =
             (state.failureDisposition[value.disposition] ?? 0) + 1;
     }
+    if (value.tokenUsage) {
+        state.inputTokens += value.tokenUsage.promptTokens;
+        state.outputTokens += value.tokenUsage.completionTokens;
+        state.thinkingTokens += value.tokenUsage.thinkingTokens ?? 0;
+    }
+    if (value.estimatedCostUsd !== null && value.estimatedCostUsd !== undefined) {
+        state.estimatedCostUsd += value.estimatedCostUsd;
+    }
+    if (value.preDispatchCostUsd !== null && value.preDispatchCostUsd !== undefined) {
+        state.guardedCostUsd += value.preDispatchCostUsd;
+    }
+    if (value.usageMetadataStatus !== 'complete') state.unknownUsage++;
 }
 
 function statelessAudit(
@@ -138,7 +165,9 @@ function statelessAudit(
     observer: {
         onAttemptStart?: (value: GeminiAttemptStartTelemetry) => void;
         onAttemptTelemetry?: (value: GeminiAttemptTelemetry) => void;
+        onTelemetry?: (value: GeminiRequestTelemetry) => void;
     } = {},
+    budgetGuard?: VertexAiBudgetGuard,
 ): StagedAiAuditContext {
     return {
         requestId,
@@ -153,6 +182,11 @@ function statelessAudit(
             recordTerminal(state, telemetry);
             observer.onAttemptTelemetry?.(telemetry);
         },
+        onTelemetry: telemetry => {
+            state.requestTelemetry.push(telemetry);
+            observer.onTelemetry?.(telemetry);
+        },
+        budgetGuard,
     };
 }
 
@@ -165,6 +199,13 @@ async function invoke<T>(task: (state: InvocationTelemetry) => Promise<T>): Prom
         rateLimited: 0,
         failureDisposition: {},
         attemptLatenciesMs: [],
+        inputTokens: 0,
+        outputTokens: 0,
+        thinkingTokens: 0,
+        estimatedCostUsd: 0,
+        guardedCostUsd: 0,
+        unknownUsage: 0,
+        requestTelemetry: [],
     };
     try {
         const value = await task(state);
@@ -178,6 +219,13 @@ async function invoke<T>(task: (state: InvocationTelemetry) => Promise<T>): Prom
             attempts: state.attempts,
             retries: state.retries,
             elapsedMs: Math.round(performance.now() - started),
+            inputTokens: state.inputTokens,
+            outputTokens: state.outputTokens,
+            thinkingTokens: state.thinkingTokens,
+            estimatedCostUsd: state.estimatedCostUsd,
+            guardedCostUsd: state.guardedCostUsd,
+            unknownUsage: state.unknownUsage,
+            requestTelemetry: state.requestTelemetry,
         };
     } catch (error) {
         return {
@@ -189,6 +237,13 @@ async function invoke<T>(task: (state: InvocationTelemetry) => Promise<T>): Prom
             attempts: state.attempts || (state.calls ? 1 : 0),
             retries: state.retries,
             elapsedMs: Math.round(performance.now() - started),
+            inputTokens: state.inputTokens,
+            outputTokens: state.outputTokens,
+            thinkingTokens: state.thinkingTokens,
+            estimatedCostUsd: state.estimatedCostUsd,
+            guardedCostUsd: state.guardedCostUsd,
+            unknownUsage: state.unknownUsage,
+            requestTelemetry: state.requestTelemetry,
         };
     }
 }
@@ -212,6 +267,13 @@ function combineInvocations<T>(
         attempts: invocations.reduce((sum, invocation) => sum + invocation.attempts, 0),
         retries: invocations.reduce((sum, invocation) => sum + invocation.retries, 0),
         elapsedMs: invocations.reduce((sum, invocation) => sum + invocation.elapsedMs, 0),
+        inputTokens: invocations.reduce((sum, invocation) => sum + (invocation.inputTokens ?? 0), 0),
+        outputTokens: invocations.reduce((sum, invocation) => sum + (invocation.outputTokens ?? 0), 0),
+        thinkingTokens: invocations.reduce((sum, invocation) => sum + (invocation.thinkingTokens ?? 0), 0),
+        estimatedCostUsd: invocations.reduce((sum, invocation) => sum + (invocation.estimatedCostUsd ?? 0), 0),
+        guardedCostUsd: invocations.reduce((sum, invocation) => sum + (invocation.guardedCostUsd ?? 0), 0),
+        unknownUsage: invocations.reduce((sum, invocation) => sum + (invocation.unknownUsage ?? 0), 0),
+        requestTelemetry: invocations.flatMap(invocation => invocation.requestTelemetry ?? []),
     };
 }
 
@@ -229,6 +291,7 @@ async function runGenderNameOnlyBatch(
     requestId: string,
     aiStagePolicyVersion: ReplaySupportedAiStagePolicyVersion,
     replayCapability: ReplayStatelessCapability,
+    budgetGuard: VertexAiBudgetGuard,
     depth: number,
 ): Promise<ReplayInvocation<readonly GenderNameOnlyResult[]>> {
     let lastFinishReason: string | null = null;
@@ -238,7 +301,7 @@ async function runGenderNameOnlyBatch(
             batch,
             statelessAudit(requestId, identity, state, {
                 onAttemptTelemetry: telemetry => { lastFinishReason = telemetry.finishReason; },
-            }),
+            }, budgetGuard),
             { aiStagePolicyVersion, replayCapability },
         );
     });
@@ -253,10 +316,12 @@ async function runGenderNameOnlyBatch(
     const mid = Math.ceil(batch.length / 2);
     const [left, right] = await Promise.all([
         runGenderNameOnlyBatch(
-            batch.slice(0, mid), requestId, aiStagePolicyVersion, replayCapability, depth + 1,
+            batch.slice(0, mid), requestId, aiStagePolicyVersion, replayCapability,
+            budgetGuard, depth + 1,
         ),
         runGenderNameOnlyBatch(
-            batch.slice(mid), requestId, aiStagePolicyVersion, replayCapability, depth + 1,
+            batch.slice(mid), requestId, aiStagePolicyVersion, replayCapability,
+            budgetGuard, depth + 1,
         ),
     ]);
     return combineInvocations([left, right]);
@@ -303,6 +368,7 @@ export function createReplayStagedAiAdapter(
     }
     const requestId = randomUUID();
     const replayCapability = issueReplayStatelessCapability();
+    const budgetGuard = createVertexAiBudgetGuard();
     const supportsGenderTriageMicrobatch = aiStagePolicySupports(
         aiStagePolicyVersion,
         'genderTriageMicrobatchV29',
@@ -347,7 +413,7 @@ export function createReplayStagedAiAdapter(
                     );
                 return genderTriageMicrobatch(
                     accounts,
-                    statelessAudit(requestId, identity, state),
+                    statelessAudit(requestId, identity, state, {}, budgetGuard),
                     { aiStagePolicyVersion, replayCapability },
                 );
             });
@@ -375,6 +441,15 @@ export function createReplayStagedAiAdapter(
                         attempts: ownsMetrics ? invocation.attempts : 0,
                         retries: ownsMetrics ? invocation.retries : 0,
                         elapsedMs: ownsMetrics ? invocation.elapsedMs : 0,
+                        inputTokens: ownsMetrics ? invocation.inputTokens : 0,
+                        outputTokens: ownsMetrics ? invocation.outputTokens : 0,
+                        thinkingTokens: ownsMetrics ? invocation.thinkingTokens : 0,
+                        estimatedCostUsd: ownsMetrics ? invocation.estimatedCostUsd : 0,
+                        guardedCostUsd: ownsMetrics ? invocation.guardedCostUsd : 0,
+                        unknownUsage: ownsMetrics ? invocation.unknownUsage : 0,
+                        requestTelemetry: ownsMetrics
+                            ? invocation.requestTelemetry
+                            : [],
                     });
                 }
             }
@@ -421,7 +496,7 @@ export function createReplayStagedAiAdapter(
             );
             return genderFirstPass(
                 aiInput,
-                statelessAudit(requestId, identity, state),
+                statelessAudit(requestId, identity, state, {}, budgetGuard),
                 { aiStagePolicyVersion, replayCapability },
             );
         }),
@@ -436,7 +511,7 @@ export function createReplayStagedAiAdapter(
                 );
                 return genderTriage(
                     aiInput,
-                    statelessAudit(requestId, identity, state),
+                    statelessAudit(requestId, identity, state, {}, budgetGuard),
                     { aiStagePolicyVersion, replayCapability },
                 );
             }),
@@ -461,6 +536,7 @@ export function createReplayStagedAiAdapter(
                 requestId,
                 aiStagePolicyVersion,
                 replayCapability,
+                budgetGuard,
                 0,
             )));
             return combineInvocations<GenderNameOnlyResult>(invocations);
@@ -476,7 +552,11 @@ export function createReplayStagedAiAdapter(
                 captions: [...input.captions],
             };
             const identity = createFeatureAnalysisResultIdentity(aiInput, aiStagePolicyVersion);
-            return featureAnalysis(aiInput, statelessAudit(requestId, identity, state), { aiStagePolicyVersion, replayCapability });
+            return featureAnalysis(
+                aiInput,
+                statelessAudit(requestId, identity, state, {}, budgetGuard),
+                { aiStagePolicyVersion, replayCapability },
+            );
         })),
         resolveGender: input => invoke(async state => {
             const aiInput = { media: normalized(input.media) };
@@ -494,8 +574,13 @@ export function createReplayStagedAiAdapter(
                     retryCount: value.retryCount,
                     disposition: value.disposition,
                     latencyMs: value.latencyMs,
+                    tokenUsage: value.tokenUsage,
+                    estimatedCostUsd: value.estimatedCostUsd,
+                    preDispatchCostUsd: value.preDispatchCostUsd,
+                    usageMetadataStatus: value.usageMetadataStatus,
+                    costRoute: value.costRoute,
                 }),
-            }), {
+            }, budgetGuard), {
                 abortSignal: input.signal,
                 aiStagePolicyVersion,
                 replayCapability,
@@ -511,6 +596,8 @@ export function createReplayStagedAiAdapter(
                         prepare: async () => ({ result: null, source: null, startingAttempt: 1 }),
                         onBeforeAttempt: telemetry => recordStart(state, telemetry),
                         onAttemptTelemetry: telemetry => recordTerminal(state, telemetry),
+                        onTelemetry: telemetry => { state.requestTelemetry.push(telemetry); },
+                        budgetGuard,
                     };
                 },
             };

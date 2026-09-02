@@ -214,9 +214,9 @@ describe('dedicated resolver experiment AI adapter', () => {
             thinkingLevel: 'HIGH',
             mediaResolution: 'HIGH',
             maxOutputTokens: 2048,
-            skipTokenLog: true,
             replayCapability: expect.any(Object),
         });
+        expect(mocks.analyze.mock.calls[0]?.[2]).not.toHaveProperty('skipTokenLog');
     });
 
     it('the experiment runner queues the complete canonical triage order before awaiting', async () => {
@@ -541,6 +541,12 @@ describe('dedicated resolver experiment AI adapter', () => {
             p50LatencyMs: 10,
             p95LatencyMs: 30,
             failureDisposition: { rate_limited: 1 },
+            inputTokens: 0,
+            outputTokens: 0,
+            thinkingTokens: 0,
+            estimatedCostUsd: 0,
+            guardedCostUsd: 0,
+            unknownUsage: 0,
         });
         expect(report.cohorts.existing.resolverTelemetry)
             .toEqual(report.resolverTelemetry);

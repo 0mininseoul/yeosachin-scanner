@@ -462,6 +462,12 @@ describe('v2.14 first-payment Gemini copy correction', () => {
 
         expect(v214TestMocks.strictHighRiskNarrative).not.toHaveBeenCalled();
         expect(v214TestMocks.analyzeWithGemini).toHaveBeenCalledOnce();
+        expect(v214TestMocks.analyzeWithGemini.mock.calls[0]?.[2]).toMatchObject({
+            replayCapability: expect.any(Object),
+            budgetGuard: expect.any(Object),
+        });
+        expect(v214TestMocks.analyzeWithGemini.mock.calls[0]?.[2])
+            .not.toHaveProperty('skipTokenLog');
         expect(result.lines).toHaveLength(2);
         expect(result.lines[0]?.text).toContain('연애 맥락');
         expect(result.lines[1]?.text).toContain('연애 중');
