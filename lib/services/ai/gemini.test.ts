@@ -153,6 +153,42 @@ describe('analyzeWithGemini generation retry policy', () => {
         expect(audit.onBeforeAttempt).not.toHaveBeenCalled();
     });
 
+    it.each([
+        ['gemini-3-flash-preview', 'default'],
+        ['custom-free-form-model', 'default'],
+    ] as const)('rejects a non-canonical v2.12 model override (%s) before dispatch', async (model, route) => {
+        const audit = stageAuditOptions();
+
+        await expect(analyzeWithGemini('prompt', undefined, {
+            schema: responseSchema,
+            stage: 'featureAnalysis',
+            aiStagePolicyVersion: AI_STAGE_POLICY_V212_VERSION,
+            model,
+            budgetRoute: route,
+            ...audit,
+        })).rejects.toThrow('VERTEX_AI_DEFAULT_MODEL_MISMATCH');
+
+        expect(mocks.generateContent).not.toHaveBeenCalled();
+        expect(audit.onBeforeAttempt).not.toHaveBeenCalled();
+    });
+
+    it('fails closed before a v2.12 provider call when production has no durable budget store', async () => {
+        vi.stubEnv('NODE_ENV', 'production');
+        vi.stubEnv('VERTEX_AI_BUDGET_STORE', 'memory');
+        vi.stubEnv('VERTEX_AI_BUDGET_GUARD_ENABLED', 'false');
+        const audit = stageAuditOptions();
+
+        await expect(analyzeWithGemini('prompt', undefined, {
+            schema: responseSchema,
+            stage: 'featureAnalysis',
+            aiStagePolicyVersion: AI_STAGE_POLICY_V212_VERSION,
+            ...audit,
+        })).rejects.toThrow('VERTEX_AI_BUDGET_STORE_REQUIRED');
+
+        expect(mocks.generateContent).not.toHaveBeenCalled();
+        expect(audit.onBeforeAttempt).not.toHaveBeenCalled();
+    });
+
     it('reserves the budget before attempt audit and provider dispatch', async () => {
         const audit = stageAuditOptions();
         const budgetGuard = {

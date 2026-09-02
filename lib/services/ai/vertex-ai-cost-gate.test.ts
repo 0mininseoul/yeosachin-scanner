@@ -9,7 +9,11 @@ const qualityFixture: VertexAiCostGateFixture = {
         modelName: 'gemini-3.7-flash',
         inputTokens: 28_696_298,
         outputTokens: 13_834_322,
-        highRiskRecall: 1,
+        highRiskRecallEvidence: {
+            truePositiveCases: 100,
+            actualHighRiskCases: 100,
+            status: 'labeled',
+        },
     },
     proposed: {
         routes: [
@@ -33,7 +37,11 @@ const qualityFixture: VertexAiCostGateFixture = {
             },
         ],
         unknownUsageRate: 0,
-        highRiskRecall: 0.97,
+        highRiskRecallEvidence: {
+            truePositiveCases: 97,
+            actualHighRiskCases: 100,
+            status: 'labeled',
+        },
         maxOutputTokens: 4_096,
         maxThinkingLevel: 'LOW',
         maxAttempts: 2,
@@ -84,7 +92,11 @@ describe('Vertex AI dry-run quality and cost gate', () => {
             proposed: {
                 ...qualityFixture.proposed,
                 unknownUsageRate: 0.31,
-                highRiskRecall: 0.94,
+                highRiskRecallEvidence: {
+                    truePositiveCases: 94,
+                    actualHighRiskCases: 100,
+                    status: 'labeled',
+                },
                 maxOutputTokens: 8_192,
                 maxThinkingLevel: 'HIGH',
                 maxAttempts: 3,
@@ -99,5 +111,43 @@ describe('Vertex AI dry-run quality and cost gate', () => {
             'VERTEX_AI_THINKING_BUDGET_TOO_HIGH',
             'VERTEX_AI_RETRY_BUDGET_TOO_HIGH',
         ]));
+    });
+
+    it('computes recall from labeled case counts and blocks an unverified fixture', () => {
+        const result = evaluateVertexAiCostGate({
+            ...qualityFixture,
+            proposed: {
+                ...qualityFixture.proposed,
+                highRiskRecallEvidence: {
+                    truePositiveCases: 97,
+                    actualHighRiskCases: 100,
+                    status: 'unverified_fixture',
+                },
+            },
+        });
+
+        expect(result.qualityContract).toMatchObject({
+            requiredHighRiskRecall: 0.95,
+            highRiskRecall: 0.97,
+            highRiskRecallEvidenceStatus: 'unverified_fixture',
+        });
+        expect(result.violations).toContain('VERTEX_AI_HIGH_RISK_RECALL_EVIDENCE_UNVERIFIED');
+        expect(result.passed).toBe(false);
+    });
+
+    it('rejects a priced but non-canonical default-family model', () => {
+        const result = evaluateVertexAiCostGate({
+            ...qualityFixture,
+            proposed: {
+                ...qualityFixture.proposed,
+                routes: [{
+                    ...qualityFixture.proposed.routes[0]!,
+                    modelName: 'gemini-3-flash-preview',
+                }, qualityFixture.proposed.routes[1]!],
+            },
+        });
+
+        expect(result.passed).toBe(false);
+        expect(result.violations).toContain('VERTEX_AI_DEFAULT_MODEL_MISMATCH');
     });
 });

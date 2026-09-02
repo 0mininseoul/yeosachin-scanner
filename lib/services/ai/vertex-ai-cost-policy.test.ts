@@ -1,9 +1,10 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import {
     DEFAULT_VERTEX_AI_BUDGET_LIMITS,
     VertexAiBudgetExceededError,
     createVertexAiBudgetGuard,
     estimateVertexAiPreDispatchCost,
+    isVertexAiDefaultModel,
     isVertexAiEscalationModel,
     selectVertexAiRoute,
 } from './vertex-ai-cost-policy';
@@ -53,6 +54,15 @@ describe('Vertex AI cost routing', () => {
         })).toThrow('VERTEX_AI_PRICING_UNKNOWN');
         expect(isVertexAiEscalationModel('publishers/google/models/gemini-3.7-flash-001')).toBe(true);
         expect(isVertexAiEscalationModel('gemini-3.1-flash-lite')).toBe(false);
+    });
+
+    it('recognizes only the canonical v2.12 default and escalation model families', () => {
+        expect(isVertexAiDefaultModel('gemini-3.1-flash-lite')).toBe(true);
+        expect(isVertexAiDefaultModel('publishers/google/models/gemini-3.1-flash-lite-001'))
+            .toBe(true);
+        expect(isVertexAiDefaultModel('gemini-3-flash-preview')).toBe(false);
+        expect(isVertexAiEscalationModel('gemini-3.7-flash-001')).toBe(true);
+        expect(isVertexAiEscalationModel('gemini-3-flash-preview')).toBe(false);
     });
 });
 
@@ -138,5 +148,77 @@ describe('Vertex AI budget guard', () => {
         expect((await guard.snapshot()).run['run-settle']).toBeCloseTo(0.001, 12);
         await expect(guard.settle(reservation, { actualCostUsd: 0.002 }))
             .rejects.toThrow('VERTEX_AI_BUDGET_SETTLEMENT_IDENTITY_DRIFT');
+    });
+
+    it('keeps an implicit active reservation on its original UTC day during recovery', async () => {
+        let now = new Date('2026-08-19T23:59:59.000Z');
+        const guard = createVertexAiBudgetGuard({
+            limits: { perRunUsd: 1, perOrderUsd: 2, dailyUsd: 3 },
+            now: () => now,
+        });
+        const input = {
+            reservationKey: 'midnight-active',
+            runId: 'midnight-run',
+            operationKey: 'operation-1',
+            attempt: 1,
+            route: 'default' as const,
+            modelName: 'gemini-3.1-flash-lite',
+            inputTokens: 1_000,
+            maxOutputTokens: 1_000,
+        };
+
+        const first = await guard.reserve(input);
+        now = new Date('2026-08-20T00:00:01.000Z');
+        const recovered = await guard.reserve(input);
+
+        expect(first.dayKey).toBe('2026-08-19');
+        expect(recovered.reservationId).toBe(first.reservationId);
+        expect(recovered.dayKey).toBe('2026-08-19');
+        expect((await guard.snapshot()).day).toEqual({ '2026-08-19': 0.00175 });
+    });
+
+    it('re-admits a cancelled implicit retry on the new UTC day', async () => {
+        let now = new Date('2026-08-19T23:59:59.000Z');
+        const guard = createVertexAiBudgetGuard({
+            limits: { perRunUsd: 1, perOrderUsd: 2, dailyUsd: 3 },
+            now: () => now,
+        });
+        const input = {
+            reservationKey: 'midnight-cancelled',
+            runId: 'midnight-cancelled-run',
+            operationKey: 'operation-1',
+            attempt: 1,
+            route: 'default' as const,
+            modelName: 'gemini-3.1-flash-lite',
+            inputTokens: 1_000,
+            maxOutputTokens: 1_000,
+        };
+
+        const first = await guard.reserve(input);
+        await guard.cancel(first);
+        now = new Date('2026-08-20T00:00:01.000Z');
+        const retry = await guard.reserve(input);
+
+        expect(retry.reservationId).not.toBe(first.reservationId);
+        expect(retry.dayKey).toBe('2026-08-20');
+        expect((await guard.snapshot()).day).toEqual({ '2026-08-20': 0.00175 });
+    });
+
+    it('fails closed in production without the durable Supabase budget store', () => {
+        vi.stubEnv('NODE_ENV', 'production');
+        vi.stubEnv('VERTEX_AI_BUDGET_STORE', 'memory');
+
+        expect(() => createVertexAiBudgetGuard()).toThrow('VERTEX_AI_BUDGET_STORE_REQUIRED');
+        vi.stubEnv('VERTEX_AI_BUDGET_STORE', 'supabase');
+        expect(() => createVertexAiBudgetGuard()).toThrow('VERTEX_AI_BUDGET_STORE_CLIENT_REQUIRED');
+        expect(() => createVertexAiBudgetGuard({
+            store: {
+                reserve: vi.fn(),
+                settle: vi.fn(),
+                cancel: vi.fn(),
+                snapshot: vi.fn(),
+            },
+        })).not.toThrow();
+        vi.unstubAllEnvs();
     });
 });

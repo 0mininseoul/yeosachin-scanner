@@ -49,6 +49,8 @@ import {
 import {
     createVertexAiBudgetGuard,
     estimateVertexAiInputTokens,
+    assertVertexAiBudgetStoreConfigured,
+    assertVertexAiCostRouteModel,
     isVertexAiEscalationModel,
     type VertexAiBudgetGuard,
     type VertexAiBudgetReservation,
@@ -156,14 +158,23 @@ const generationLimiterState = processScope.__AI_BARAM_GEMINI_GENERATION_LIMITER
 };
 processScope.__AI_BARAM_GEMINI_GENERATION_LIMITER_V1__ = generationLimiterState;
 
+interface VertexAiBudgetProcessGuard {
+    mode: 'memory' | 'supabase';
+    guard: VertexAiBudgetGuard;
+}
+
 const budgetProcessScope = globalThis as typeof globalThis & {
-    __AI_BARAM_VERTEX_AI_BUDGET_GUARD_V1__?: VertexAiBudgetGuard;
+    __AI_BARAM_VERTEX_AI_BUDGET_GUARD_V2__?: VertexAiBudgetProcessGuard;
 };
 
 function defaultVertexAiBudgetGuard(): VertexAiBudgetGuard {
-    const existing = budgetProcessScope.__AI_BARAM_VERTEX_AI_BUDGET_GUARD_V1__;
-    if (existing) return existing;
-    const store = process.env.VERTEX_AI_BUDGET_STORE?.trim().toLowerCase() === 'supabase'
+    assertVertexAiBudgetStoreConfigured();
+    const mode = process.env.VERTEX_AI_BUDGET_STORE?.trim().toLowerCase() === 'supabase'
+        ? 'supabase'
+        : 'memory';
+    const existing = budgetProcessScope.__AI_BARAM_VERTEX_AI_BUDGET_GUARD_V2__;
+    if (existing?.mode === mode) return existing.guard;
+    const store = mode === 'supabase'
         ? createSupabaseVertexAiBudgetStore({
             rpc: async (functionName, args) => {
                 // Keep the stateless replay import boundary free of Supabase's service-role
@@ -177,7 +188,7 @@ function defaultVertexAiBudgetGuard(): VertexAiBudgetGuard {
         })
         : undefined;
     const guard = createVertexAiBudgetGuard({ store });
-    budgetProcessScope.__AI_BARAM_VERTEX_AI_BUDGET_GUARD_V1__ = guard;
+    budgetProcessScope.__AI_BARAM_VERTEX_AI_BUDGET_GUARD_V2__ = { mode, guard };
     return guard;
 }
 
@@ -1000,21 +1011,11 @@ export async function analyzeWithGemini<T>(
             : null);
     const resolvedCostRoute = budgetRoute
         ?? (isVertexAiEscalationModel(modelName) ? 'high_value' : 'default');
-    if (
-        resolvedPolicyVersion === AI_STAGE_POLICY_V212_VERSION
-        && isVertexAiEscalationModel(modelName)
-        && budgetRoute !== 'high_value'
-        && budgetRoute !== 'ambiguous'
-    ) {
-        throw new Error('VERTEX_AI_ESCALATION_REASON_REQUIRED');
-    }
-    if (
-        resolvedPolicyVersion === AI_STAGE_POLICY_V212_VERSION
-        && !isVertexAiEscalationModel(modelName)
-        && budgetRoute !== undefined
-        && budgetRoute !== 'default'
-    ) {
-        throw new Error('VERTEX_AI_ESCALATION_MODEL_MISMATCH');
+    if (resolvedPolicyVersion === AI_STAGE_POLICY_V212_VERSION) {
+        if (isVertexAiEscalationModel(modelName) && budgetRoute === undefined) {
+            throw new Error('VERTEX_AI_ESCALATION_REASON_REQUIRED');
+        }
+        assertVertexAiCostRouteModel({ route: resolvedCostRoute, modelName });
     }
     const includeCostTelemetry = resolvedBudgetGuard !== null || budgetRoute !== undefined;
     // Legacy/non-stage callers may not provide a request ID. Keep each invocation in its own

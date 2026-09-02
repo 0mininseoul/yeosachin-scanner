@@ -13,14 +13,36 @@ export const VERTEX_AI_BUDGET_RPC_NAMES = Object.freeze({
     snapshot: 'snapshot_vertex_ai_budget',
 });
 
+function vertexAiModelId(modelName: string): string {
+    return modelName.trim().split('/').at(-1) ?? modelName.trim();
+}
+
+/** Recognizes the canonical v2.12 default Flash-Lite family, including revision aliases. */
+export function isVertexAiDefaultModel(modelName: string): boolean {
+    return /^gemini-3\.1-flash-lite(?:-preview|-\d{3})?$/.test(vertexAiModelId(modelName));
+}
+
 /** Recognizes the billed 3.7 release family, including a versioned model resource ID. */
 export function isVertexAiEscalationModel(modelName: string): boolean {
-    const modelId = modelName.trim().split('/').at(-1) ?? modelName.trim();
+    const modelId = vertexAiModelId(modelName);
     return /^gemini-3\.7-flash(?:-\d{3})?$/.test(modelId);
 }
 
 export type VertexAiCostRoute = 'default' | 'high_value' | 'ambiguous';
 export type VertexAiEscalationReason = Exclude<VertexAiCostRoute, 'default'>;
+
+/** Enforce the v2.12 route/model pairing before a provider or budget request is assembled. */
+export function assertVertexAiCostRouteModel(input: {
+    route: VertexAiCostRoute;
+    modelName: string;
+}): void {
+    if (input.route === 'default' && !isVertexAiDefaultModel(input.modelName)) {
+        throw new Error('VERTEX_AI_DEFAULT_MODEL_MISMATCH');
+    }
+    if (input.route !== 'default' && !isVertexAiEscalationModel(input.modelName)) {
+        throw new Error('VERTEX_AI_ESCALATION_MODEL_MISMATCH');
+    }
+}
 export type VertexAiCostStage =
     | 'genderTriage'
     | 'featureAnalysis'
@@ -289,10 +311,7 @@ function addTotal(totals: Record<string, number>, key: string, delta: number): v
     if (totals[key] === 0) delete totals[key];
 }
 
-function reservationFingerprint(
-    input: VertexAiBudgetReservationInput,
-    dayKey: string,
-): string {
+function reservationFingerprint(input: VertexAiBudgetReservationInput): string {
     return JSON.stringify({
         reservationKey: input.reservationKey,
         runId: input.runId,
@@ -304,7 +323,6 @@ function reservationFingerprint(
         location: input.location ?? 'global',
         inputTokens: input.inputTokens,
         maxOutputTokens: input.maxOutputTokens,
-        dayKey,
     });
 }
 
@@ -323,6 +341,7 @@ export class InMemoryVertexAiBudgetStore implements VertexAiBudgetStore {
     private readonly runTotals: Record<string, number> = {};
     private readonly orderTotals: Record<string, number> = {};
     private readonly dayTotals: Record<string, number> = {};
+    private reservationSequence = 0;
 
     constructor(
         private readonly limits: VertexAiBudgetLimits = vertexAiBudgetLimitsFromEnv(),
@@ -338,10 +357,13 @@ export class InMemoryVertexAiBudgetStore implements VertexAiBudgetStore {
         if (!/^\d{4}-\d{2}-\d{2}$/.test(dayKey)) {
             throw new Error('VERTEX_AI_BUDGET_RESERVATION_INVALID');
         }
-        const fingerprint = reservationFingerprint(input, dayKey);
+        const fingerprint = reservationFingerprint(input);
         const existing = this.reservations.get(input.reservationKey);
         if (existing) {
-            if (existing.fingerprint !== fingerprint) {
+            if (
+                existing.fingerprint !== fingerprint
+                || input.dayKey != null && existing.reservation.dayKey !== dayKey
+            ) {
                 throw new Error('VERTEX_AI_BUDGET_RESERVATION_IDENTITY_DRIFT');
             }
             return { ...existing.reservation };
@@ -374,7 +396,7 @@ export class InMemoryVertexAiBudgetStore implements VertexAiBudgetStore {
         for (const scope of scopes) addTotal(scope.totals, scope.key, estimate);
 
         const reservation: VertexAiBudgetReservation = {
-            reservationId: `vertex-budget:${input.reservationKey}`,
+            reservationId: `vertex-budget:${input.reservationKey}:${++this.reservationSequence}`,
             reservationKey: input.reservationKey,
             runId: input.runId,
             orderId,
@@ -445,12 +467,29 @@ export class InMemoryVertexAiBudgetStore implements VertexAiBudgetStore {
 
 export type VertexAiBudgetGuard = VertexAiBudgetStore;
 
+export function assertVertexAiBudgetStoreConfigured(
+    env: NodeJS.ProcessEnv = process.env,
+): void {
+    if (
+        env.NODE_ENV === 'production'
+        && env.VERTEX_AI_BUDGET_STORE?.trim().toLowerCase() !== 'supabase'
+    ) {
+        throw new Error('VERTEX_AI_BUDGET_STORE_REQUIRED');
+    }
+}
+
 export function createVertexAiBudgetGuard(options: {
     limits?: VertexAiBudgetLimits;
     now?: () => Date;
     store?: VertexAiBudgetStore;
 } = {}): VertexAiBudgetGuard {
     if (options.store) return options.store;
+    assertVertexAiBudgetStoreConfigured();
+    if (process.env.NODE_ENV === 'production') {
+        // The Supabase adapter must be injected by the production resolver. Never turn a
+        // production request into an in-process counter merely because a client was omitted.
+        throw new Error('VERTEX_AI_BUDGET_STORE_CLIENT_REQUIRED');
+    }
     return new InMemoryVertexAiBudgetStore(
         options.limits ?? vertexAiBudgetLimitsFromEnv(),
         options.now,

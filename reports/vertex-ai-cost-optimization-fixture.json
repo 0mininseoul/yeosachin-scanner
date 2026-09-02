@@ -4,7 +4,11 @@
     "location": "global",
     "inputTokens": 28696298,
     "outputTokens": 13834322,
-    "highRiskRecall": 1
+    "highRiskRecallEvidence": {
+      "truePositiveCases": 100,
+      "actualHighRiskCases": 100,
+      "status": "unverified_fixture"
+    }
   },
   "proposed": {
     "routes": [
@@ -30,7 +34,11 @@
       }
     ],
     "unknownUsageRate": 0,
-    "highRiskRecall": 0.97,
+    "highRiskRecallEvidence": {
+      "truePositiveCases": 97,
+      "actualHighRiskCases": 100,
+      "status": "unverified_fixture"
+    },
     "maxOutputTokens": 4096,
     "maxThinkingLevel": "LOW",
     "maxAttempts": 2

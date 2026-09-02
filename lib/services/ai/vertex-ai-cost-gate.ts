@@ -3,6 +3,7 @@ import {
     type GeminiRequestCostEstimate,
 } from './gemini-cost';
 import {
+    isVertexAiDefaultModel,
     isVertexAiEscalationModel,
     type VertexAiCostRoute,
 } from './vertex-ai-cost-policy';
@@ -13,12 +14,20 @@ export const VERTEX_AI_COST_GATE_MIN_HIGH_RISK_RECALL = 0.95;
 export const VERTEX_AI_COST_GATE_MAX_OUTPUT_TOKENS = 4_096;
 export const VERTEX_AI_COST_GATE_MAX_ATTEMPTS = 2;
 
+export type VertexAiCostGateEvidenceStatus = 'labeled' | 'canary' | 'unverified_fixture';
+
+export interface VertexAiCostGateRecallEvidence {
+    truePositiveCases: number;
+    actualHighRiskCases: number;
+    status: VertexAiCostGateEvidenceStatus;
+}
+
 export interface VertexAiCostGateBaseline {
     modelName: string;
     location?: string;
     inputTokens: number;
     outputTokens: number;
-    highRiskRecall: number;
+    highRiskRecallEvidence: VertexAiCostGateRecallEvidence;
 }
 
 export interface VertexAiCostGateRoute {
@@ -35,7 +44,7 @@ export interface VertexAiCostGateRoute {
 export interface VertexAiCostGateProposed {
     routes: readonly VertexAiCostGateRoute[];
     unknownUsageRate: number;
-    highRiskRecall: number;
+    highRiskRecallEvidence: VertexAiCostGateRecallEvidence;
     maxOutputTokens: number;
     maxThinkingLevel: 'MINIMAL' | 'LOW' | 'MEDIUM' | 'HIGH';
     maxAttempts: number;
@@ -48,7 +57,10 @@ export interface VertexAiCostGateFixture {
 
 export interface VertexAiCostGateQualityContract {
     unknownUsageRate: number;
-    highRiskRecall: number;
+    /** Observed ratio derived from case counts; null means the evidence is malformed. */
+    highRiskRecall: number | null;
+    requiredHighRiskRecall: number;
+    highRiskRecallEvidenceStatus: VertexAiCostGateEvidenceStatus | null;
     defaultRouteShare: number;
     maxOutputTokens: number;
     maxThinkingLevel: VertexAiCostGateProposed['maxThinkingLevel'];
@@ -87,6 +99,31 @@ function tokenCount(value: number): boolean {
     return Number.isSafeInteger(value) && value >= 0;
 }
 
+function validRecallEvidence(value: unknown): value is VertexAiCostGateRecallEvidence {
+    if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
+    const evidence = value as Partial<VertexAiCostGateRecallEvidence>;
+    const truePositiveCases = evidence.truePositiveCases;
+    const actualHighRiskCases = evidence.actualHighRiskCases;
+    return typeof truePositiveCases === 'number'
+        && Number.isSafeInteger(truePositiveCases)
+        && truePositiveCases >= 0
+        && typeof actualHighRiskCases === 'number'
+        && Number.isSafeInteger(actualHighRiskCases)
+        && actualHighRiskCases > 0
+        && truePositiveCases <= actualHighRiskCases
+        && (
+            evidence.status === 'labeled'
+            || evidence.status === 'canary'
+            || evidence.status === 'unverified_fixture'
+        );
+}
+
+function recallFromEvidence(
+    evidence: VertexAiCostGateRecallEvidence,
+): number {
+    return evidence.truePositiveCases / evidence.actualHighRiskCases;
+}
+
 function estimateRoute(route: VertexAiCostGateRoute): GeminiRequestCostEstimate | null {
     try {
         return estimateGeminiRequestCostStrict(
@@ -115,8 +152,22 @@ export function evaluateVertexAiCostGate(
     const proposed = fixture.proposed;
     const baselineValid = tokenCount(baseline.inputTokens)
         && tokenCount(baseline.outputTokens)
-        && finiteRatio(baseline.highRiskRecall);
+        && validRecallEvidence(baseline.highRiskRecallEvidence);
     if (!baselineValid) violations.push('VERTEX_AI_BASELINE_INVALID');
+
+    const baselineRecall = baselineValid
+        ? recallFromEvidence(baseline.highRiskRecallEvidence)
+        : null;
+    const proposedRecallEvidenceValid = validRecallEvidence(proposed.highRiskRecallEvidence);
+    if (!proposedRecallEvidenceValid) {
+        violations.push('VERTEX_AI_HIGH_RISK_RECALL_EVIDENCE_INVALID');
+    }
+    const proposedRecall = proposedRecallEvidenceValid
+        ? recallFromEvidence(proposed.highRiskRecallEvidence)
+        : null;
+    const requiredHighRiskRecall = baselineRecall === null
+        ? VERTEX_AI_COST_GATE_MIN_HIGH_RISK_RECALL
+        : baselineRecall * VERTEX_AI_COST_GATE_MIN_HIGH_RISK_RECALL;
 
     const baselineEstimate = baselineValid
         ? (() => {
@@ -142,12 +193,15 @@ export function evaluateVertexAiCostGate(
             ? estimateRoute(route)
             : null;
         if (!estimate) violations.push('VERTEX_AI_PRICING_UNKNOWN');
+        if (route.route === 'default' && !isVertexAiDefaultModel(route.modelName)) {
+            violations.push('VERTEX_AI_DEFAULT_MODEL_MISMATCH');
+        }
+        if (route.route !== 'default' && !isVertexAiEscalationModel(route.modelName)) {
+            violations.push('VERTEX_AI_ESCALATION_MODEL_MISMATCH');
+        }
         if (isVertexAiEscalationModel(route.modelName)
             && (route.route === 'default' || route.reason === null)) {
             violations.push('VERTEX_AI_ESCALATION_REASON_REQUIRED');
-        }
-        if (!isVertexAiEscalationModel(route.modelName) && route.route !== 'default') {
-            violations.push('VERTEX_AI_ESCALATION_MODEL_MISMATCH');
         }
         if (route.route !== 'default'
             && route.reason !== 'high_value'
@@ -194,9 +248,14 @@ export function evaluateVertexAiCostGate(
         || proposed.unknownUsageRate > VERTEX_AI_COST_GATE_MAX_UNKNOWN_USAGE_RATE) {
         violations.push('VERTEX_AI_UNKNOWN_USAGE_RATE_TOO_HIGH');
     }
-    if (!finiteRatio(proposed.highRiskRecall)
-        || proposed.highRiskRecall < VERTEX_AI_COST_GATE_MIN_HIGH_RISK_RECALL) {
+    if (proposedRecall === null || proposedRecall < requiredHighRiskRecall) {
         violations.push('VERTEX_AI_HIGH_RISK_RECALL_TOO_LOW');
+    }
+    if (
+        proposedRecallEvidenceValid
+        && proposed.highRiskRecallEvidence.status === 'unverified_fixture'
+    ) {
+        violations.push('VERTEX_AI_HIGH_RISK_RECALL_EVIDENCE_UNVERIFIED');
     }
 
     const totalCalls = proposed.routes.reduce((sum, route) => sum + Math.max(0, route.calls), 0);
@@ -221,7 +280,11 @@ export function evaluateVertexAiCostGate(
 
     const qualityContract: VertexAiCostGateQualityContract = {
         unknownUsageRate: proposed.unknownUsageRate,
-        highRiskRecall: proposed.highRiskRecall,
+        highRiskRecall: proposedRecall,
+        requiredHighRiskRecall,
+        highRiskRecallEvidenceStatus: proposedRecallEvidenceValid
+            ? proposed.highRiskRecallEvidence.status
+            : null,
         defaultRouteShare,
         maxOutputTokens: proposed.maxOutputTokens,
         maxThinkingLevel: proposed.maxThinkingLevel,

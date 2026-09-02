@@ -12,6 +12,7 @@ describe('Vertex AI budget reservation migration contract', () => {
         expect(migration).toContain('vertex_ai_budget_run_totals_idx');
         expect(migration).toContain('vertex_ai_budget_order_totals_idx');
         expect(migration).toContain('vertex_ai_budget_day_totals_idx');
+        expect(migration).toContain('vertex_ai_budget_terminal_retention_idx');
         expect(migration).toContain("state IN ('reserved', 'settled', 'cancelled')");
         expect(migration).toContain('ALTER TABLE public.vertex_ai_budget_reservations FORCE ROW LEVEL SECURITY');
     });
@@ -25,6 +26,8 @@ describe('Vertex AI budget reservation migration contract', () => {
         expect(migration).toContain('VERTEX_AI_BUDGET_EXCEEDED:order');
         expect(migration).toContain('VERTEX_AI_BUDGET_EXCEEDED:day');
         expect(migration).toContain('RETURN QUERY INSERT INTO public.vertex_ai_budget_reservations');
+        expect(migration).toContain('p_day_key IS NOT NULL');
+        expect(migration).toContain('reserved/settled work anchored to its original UTC day');
     });
 
     it('keeps cancellation, conservative settlement, and RPC access fail-closed', () => {
@@ -36,6 +39,7 @@ describe('Vertex AI budget reservation migration contract', () => {
         expect(migration).toContain('GRANT EXECUTE ON FUNCTION public.settle_vertex_ai_budget');
         expect(migration).toContain('GRANT EXECUTE ON FUNCTION public.cancel_vertex_ai_budget');
         expect(migration).toContain('GRANT EXECUTE ON FUNCTION public.snapshot_vertex_ai_budget');
+        expect(migration).toContain('preserves reservation-key tombstones');
         expect(migration).not.toContain('20260719190000_reconcile_stuck_groble_earlybird_order.sql');
     });
 });

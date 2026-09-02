@@ -1,6 +1,10 @@
 -- Shared monetary reservations for every Vertex AI generation attempt.
 -- This is deliberately separate from provider concurrency leases: leases bound active calls,
 -- while this table bounds estimated dollars across run, order, and UTC-day scopes.
+-- Terminal rows are intentionally retained until the replay/recovery horizon is explicitly
+-- configured. Deleting them earlier would turn a late duplicate into a second charge. The
+-- indexed terminal lifecycle is the bounded-retention hook for a future service-role archive
+-- job that preserves reservation-key tombstones and reconciled aggregates before pruning detail.
 SET LOCAL lock_timeout = '5s';
 SET LOCAL statement_timeout = '2min';
 
@@ -61,6 +65,9 @@ CREATE INDEX IF NOT EXISTS vertex_ai_budget_order_totals_idx
     ON public.vertex_ai_budget_reservations (order_id, state);
 CREATE INDEX IF NOT EXISTS vertex_ai_budget_day_totals_idx
     ON public.vertex_ai_budget_reservations (day_key, state);
+CREATE INDEX IF NOT EXISTS vertex_ai_budget_terminal_retention_idx
+    ON public.vertex_ai_budget_reservations (state, created_at)
+    WHERE state IN ('settled', 'cancelled');
 
 ALTER TABLE public.vertex_ai_budget_reservations ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.vertex_ai_budget_reservations FORCE ROW LEVEL SECURITY;
@@ -166,7 +173,11 @@ BEGIN
            OR v_existing.input_tokens IS DISTINCT FROM p_input_tokens
            OR v_existing.max_output_tokens IS DISTINCT FROM p_max_output_tokens
            OR v_existing.estimated_cost_usd IS DISTINCT FROM p_estimated_cost_usd
-           OR v_existing.day_key IS DISTINCT FROM v_day_key THEN
+           -- An omitted day is recovery metadata, not part of the attempt identity. This keeps
+           -- reserved/settled work anchored to its original UTC day after a midnight retry;
+           -- explicit day assertions still detect drift for every lifecycle state.
+           OR p_day_key IS NOT NULL
+              AND v_existing.day_key IS DISTINCT FROM v_day_key THEN
             RAISE EXCEPTION 'VERTEX_AI_BUDGET_RESERVATION_IDENTITY_DRIFT';
         END IF;
         -- A cancelled reservation never reached the provider. Permit the same deterministic

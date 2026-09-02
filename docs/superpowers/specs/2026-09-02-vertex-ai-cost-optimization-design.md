@@ -37,12 +37,12 @@ The modeled reduction is exactly `$90.000000`, or `61.307124%`, which clears the
 
 ## Routing contract
 
-The new forward-only AI stage policy (`ai-stage-policy-v2.12`) uses `gemini-3.1-flash-lite` as the first-pass/default model. `gemini-3.7-flash` is selected only when the caller supplies one of two typed, auditable escalation reasons:
+The new forward-only AI stage policy (`ai-stage-policy-v2.12`) uses the canonical `gemini-3.1-flash-lite` family as the first-pass/default model. `gemini-3.7-flash` is selected only when the caller supplies one of two typed, auditable escalation reasons:
 
 * `high_value`: a high-risk narrative or another explicitly designated high-value concierge operation;
 * `ambiguous`: a triage result that is unknown, mixed, or below the deterministic confidence threshold and requires a quality-preserving second pass.
 
-An absent reason always means the default route. A free-form model override cannot silently turn a normal request into an escalation: the selected model and route are part of the result identity and the pre-dispatch budget record. Legacy policies (`v2.6` through `v2.11`) keep their existing model choices and identities. The cost-optimized policy has its own forward-only rollout gate and durable `v2.12` policy fence; it carries forward the prior quality capabilities without rewriting historical policy snapshots.
+An absent reason always means the default route. A v2.12 free-form model override is accepted only when it belongs to the canonical Flash-Lite family for `default` or the canonical 3.7 family for `high_value`/`ambiguous`; every other pairing is rejected before reservation or provider dispatch. The selected model and route are part of the result identity and the pre-dispatch budget record. Legacy policies (`v2.6` through `v2.11`) keep their existing model choices and identities. The cost-optimized policy has its own forward-only rollout gate and durable `v2.12` policy fence; it carries forward the prior quality capabilities without rewriting historical policy snapshots.
 
 Output and thinking budgets are part of the route contract. The default route uses the smallest stage-specific ceiling that can satisfy its schema; escalation uses a bounded ceiling rather than inheriting the historical 8,192-token feature/narrative ceiling. Retry policy is capped at one retry for cost-optimized stages, and response-rejection retries are disabled unless the stage explicitly declares the ambiguous/high-value quality contract. A retry is a new budget admission and is never free.
 
@@ -64,7 +64,9 @@ The guard enforces three independent ceilings:
 * `VERTEX_AI_PER_ORDER_BUDGET_USD` (default `5.00`), grouped by the optional paid order;
 * `VERTEX_AI_DAILY_BUDGET_USD` (default `100.00`), grouped by UTC day.
 
-Deployments use a shared durable reservation store so concurrent instances cannot race past a ceiling. Tests and local dry runs use an in-memory implementation with the same atomic interface. A successful response settles to measured usage when usage is complete; unknown usage keeps the reserved estimate. Failed attempts keep their reservation because a provider may have charged for a generated response. A reservation is never released merely because a caller did not receive a parseable result.
+Deployments use a shared durable reservation store so concurrent instances cannot race past a ceiling. In `NODE_ENV=production`, a configured/global guard and v2.12 fail closed unless `VERTEX_AI_BUDGET_STORE=supabase`; the resolver never silently creates a process-local store. Tests and local dry runs use an in-memory implementation with the same atomic interface, and explicit injected stores remain valid for tests/replay. A successful response settles to measured usage when usage is complete; unknown usage keeps the reserved estimate. Failed attempts keep their reservation because a provider may have charged for a generated response. A reservation is never released merely because a caller did not receive a parseable result.
+
+Recovery identity does not treat an omitted `dayKey` as a new identity field. An existing reserved or settled attempt keeps its original UTC day across midnight. A cancelled pre-dispatch attempt can be re-admitted under the same deterministic key and is assigned the current UTC day, while explicit day assertions still detect drift.
 
 The guard is deliberately independent of the existing concurrency/admission lease. The lease controls active calls and rate; this guard controls dollars. Both checks must pass before dispatch. Budget denial is a typed, observable failure and is returned before any paid-model SDK call.
 
@@ -76,14 +78,15 @@ Each attempt reports model, route, policy version, location, prompt/schema versi
 
 ## Dry-run quality and cost gate
 
-`reports/vertex-ai-cost-optimization-fixture.json` is a checked-in, non-secret fixture containing the fixed baseline/proposed token split and quality contract. `scripts/vertex-ai-cost-gate.ts` and its pure library evaluate:
+`reports/vertex-ai-cost-optimization-fixture.json` is a checked-in, non-secret fixture containing the fixed baseline/proposed token split and a case-count quality contract. `scripts/vertex-ai-cost-gate.ts` and its pure library evaluate:
 
 * gross modeled savings is at least 50%;
 * all priced routes have known, non-null rates;
 * 3.7 usage has an explicit `high_value` or `ambiguous` reason;
 * default first-pass routing is the majority path;
 * unknown-usage rate is at most 30%;
-* high-risk recall is at least 95% of the baseline fixture;
+* high-risk recall is computed as `truePositiveCases / actualHighRiskCases` and is at least 95% of the baseline;
+* evidence status is `labeled` or `canary`; an `unverified_fixture` status blocks rollout even when its observed ratio clears the threshold;
 * output/thinking/retry ceilings stay within the new policy limits.
 
 The gate prints a stable JSON summary and exits non-zero on any violation. It never imports a provider client, reads production credentials, or sends a network request. Focused tests exercise both the failing (RED) and passing (GREEN) cases, including unknown pricing, budget denial before dispatch, retry reservation, replay telemetry, and the exact baseline arithmetic.
@@ -91,9 +94,11 @@ The gate prints a stable JSON summary and exits non-zero on any violation. It ne
 ## Rollout, deployment, and rollback
 
 1. Apply the dedicated budget-reservation migration and deploy the code with the new policy rollout flag off.
-2. Run the fixture gate, focused tests, typecheck, lint, relevant full tests, and build in CI. Confirm no paid-model invocation is present in the dry-run path.
-3. Enable the policy only for an internal/test entitlement. Inspect route share, budget denials, unknown-usage rate, measured-vs-reserved cost, schema rejection rate, and high-risk recall against the fixture contract.
-4. Promote to production in a guarded percentage rollout after the shared reservation store and UTC-day aggregation are verified. Batch remains disabled for interactive traffic.
+2. Run the fixture gate, focused tests, typecheck, lint, relevant full tests, and build in CI. Confirm no paid-model invocation is present in the dry-run path. The checked-in fixture intentionally reports `unverified_fixture`, so this gate remains blocked until real labeled or canary evidence is supplied.
+3. Enable the policy only for an internal/test entitlement after a durable store is available. Inspect route share, budget denials, unknown-usage rate, measured-vs-reserved cost, schema rejection rate, and high-risk recall against real labeled/canary cases.
+4. Promote to production in a guarded percentage rollout only after the shared reservation store, UTC-day recovery behavior, and real quality evidence are verified. Batch remains disabled for interactive traffic.
 5. Roll back by disabling the policy flag; historical policy versions and result identities remain available for recovery. If the budget store is unavailable, fail closed before provider dispatch and alert rather than bypassing the guard.
 
-Required deployment configuration is the rollout flag, all three budget ceilings, a durable budget-store connection/RPC, and the existing Vertex project/location credentials. No production account canary is part of this change. The release handoff must include the exact fixture output (`$146.801862 → $56.801862`, `$90.000000`, `61.307124%`) and the quality-contract result, plus a confirmation that no score-audit cleanup migration was changed.
+Required deployment configuration is the rollout flag, all three budget ceilings, `VERTEX_AI_BUDGET_STORE=supabase`, a durable budget-store connection/RPC, and the existing Vertex project/location credentials. No production account canary is part of this change. The release handoff must include the exact modeled cost output (`$146.801862 → $56.801862`, `$90.000000`, `61.307124%`), the blocked/unverified fixture status, and later real evidence before enabling production, plus a confirmation that no score-audit cleanup migration was changed.
+
+The reservation ledger has no automatic deletion in this migration because pruning terminal rows would break late duplicate recovery. The migration adds a terminal `(state, created_at)` index as the bounded-retention hook. Before the ledger grows beyond the agreed operational horizon, a service-role archive job must (a) choose a replay horizon longer than the maximum recovery/retry window, (b) aggregate settled/cancelled detail by run/order/day with an immutable checksum, (c) retain reservation-key tombstones for idempotency, (d) verify no active rows or unresolved usage are in the archive batch, and (e) make snapshots read the aggregate plus active detail. Until that job and its reconciliation evidence exist, retention safety is not claimed and the ledger remains unbounded by design.
