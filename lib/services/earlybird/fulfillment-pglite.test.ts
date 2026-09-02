@@ -546,6 +546,7 @@ async function seedSourcePreflight(): Promise<void> {
 async function seedRecoveredRequestCollision(): Promise<string> {
     const requestKey = `earlybird:${ORDER}`;
     const preflightKey = `earlybird.fulfillment.${ORDER.replace(/-/g, '')}.r1`;
+    const fixtureNow = new Date().toISOString();
     await seedSourcePreflight();
     await db.query(
         `UPDATE public.analysis_preflights
@@ -576,14 +577,14 @@ async function seedRecoveredRequestCollision(): Promise<string> {
             pricing_version, pricing_snapshot, policy_versions_snapshot,
             NULL, NULL,
             'ready', 'basic', $5, $6,
-            pg_catalog.clock_timestamp() - INTERVAL '2 hours',
+            $7::TIMESTAMPTZ - INTERVAL '2 hours',
             target_followers_count, target_following_count,
             capacity_required_plan_id, required_plan_id, plan_cards_snapshot,
-            pg_catalog.clock_timestamp() - INTERVAL '2 hours',
-            pg_catalog.clock_timestamp() - INTERVAL '90 minutes',
-            pg_catalog.clock_timestamp() - INTERVAL '90 minutes',
+            $7::TIMESTAMPTZ - INTERVAL '2 hours',
+            $7::TIMESTAMPTZ - INTERVAL '90 minutes',
+            $7::TIMESTAMPTZ - INTERVAL '90 minutes',
             NULL,
-            pg_catalog.clock_timestamp() - INTERVAL '80 minutes'
+            $7::TIMESTAMPTZ - INTERVAL '80 minutes'
          FROM public.analysis_preflights
          WHERE id = $1`,
         [
@@ -593,6 +594,7 @@ async function seedRecoveredRequestCollision(): Promise<string> {
             canonicalScrubToken(RECOVERY_PREFLIGHT),
             admissionHash(),
             ADMISSION_TOKEN,
+            fixtureNow,
         ]
     );
     await db.query(
