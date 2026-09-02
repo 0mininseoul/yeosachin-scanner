@@ -5,6 +5,19 @@ const migration = readFileSync(new URL(
     '../../../supabase/migrations/20260727032000_add_analysis_v2_score_audit.sql',
     import.meta.url,
 ), 'utf8');
+const cleanupMigration = readFileSync(new URL(
+    '../../../supabase/migrations/20260901192353_fix_analysis_v2_score_audit_expiry_orphans.sql',
+    import.meta.url,
+), 'utf8');
+
+function expectInOrder(source: string, fragments: readonly string[]): void {
+    let previous = -1;
+    for (const fragment of fragments) {
+        const index = source.indexOf(fragment, previous + 1);
+        expect(index, `missing or out-of-order fragment: ${fragment}`).toBeGreaterThan(previous);
+        previous = index;
+    }
+}
 
 describe('analysis score audit migration contract', () => {
     it('uses a private, service-role-only projection and a bounded outbox lease', () => {
@@ -113,5 +126,60 @@ describe('analysis score audit migration contract', () => {
         expect(migration).toContain(
             'expected.expected_band_rank <= 10'
         );
+    });
+
+    it('reconciles expired orphan intents and serializes working-set cleanup in lock order', () => {
+        expect(cleanupMigration).toContain(
+            '-- MIGRATION_PREDECESSOR=20260831100000'
+        );
+        expect(cleanupMigration).toContain(
+            'CREATE OR REPLACE FUNCTION public.purge_expired_analysis_v2_score_audit_evidence('
+        );
+        expect(cleanupMigration).toContain('FOR UPDATE SKIP LOCKED');
+        expect(cleanupMigration).toContain('FOR KEY SHARE');
+        expect(cleanupMigration).toContain(
+            'analysis_v2_result_summaries AS summary'
+        );
+        expect(cleanupMigration).toContain("intent_status = 'released'");
+        expect(cleanupMigration).toContain('SOURCE_EVIDENCE_EXPIRED');
+        expect(cleanupMigration).not.toContain('ON DELETE CASCADE');
+
+        const purgeStart = cleanupMigration.indexOf(
+            'CREATE OR REPLACE FUNCTION public.purge_expired_analysis_v2_score_audit_evidence('
+        );
+        const purgeEnd = cleanupMigration.indexOf('\n$$;', purgeStart);
+        expectInOrder(cleanupMigration.slice(purgeStart, purgeEnd), [
+            'FROM public.analysis_v2_score_audit_intents AS intent',
+            'FOR UPDATE SKIP LOCKED',
+            'FROM public.analysis_v2_result_summaries AS summary',
+            'FOR KEY SHARE;',
+            'INSERT INTO public.analysis_v2_score_audit_runs',
+            'DELETE FROM public.analysis_v2_ai_scoring_stage_checkpoints AS stage',
+        ]);
+
+        const workingSetStart = cleanupMigration.indexOf(
+            'CREATE OR REPLACE FUNCTION public.analysis_v2_purge_result_working_set('
+        );
+        const workingSetEnd = cleanupMigration.indexOf('\n$$;', workingSetStart);
+        expectInOrder(cleanupMigration.slice(workingSetStart, workingSetEnd), [
+            'FROM public.analysis_v2_score_audit_intents AS intent',
+            'FOR UPDATE;',
+            'FROM public.analysis_v2_result_summaries AS summary',
+            'FOR KEY SHARE;',
+            'FROM public.analysis_v2_score_audit_runs AS run',
+            'FOR UPDATE;',
+            'FROM public.analysis_v2_ai_scoring_stage_checkpoints AS stage',
+            'ORDER BY stage.stage_kind, stage.batch_key\n    FOR UPDATE;',
+        ]);
+        expectInOrder(cleanupMigration.slice(workingSetStart, workingSetEnd), [
+            'FROM public.analysis_v2_score_audit_intents AS intent',
+            'FOR UPDATE;',
+            'FROM public.analysis_v2_result_summaries AS summary',
+            'FOR UPDATE;',
+            'FROM public.analysis_v2_score_audit_runs AS run',
+            'FOR UPDATE;',
+            'FROM public.analysis_v2_ai_scoring_stage_checkpoints AS stage',
+            'ORDER BY stage.stage_kind, stage.batch_key\n    FOR UPDATE;',
+        ]);
     });
 });
