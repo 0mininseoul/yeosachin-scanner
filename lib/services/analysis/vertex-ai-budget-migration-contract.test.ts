@@ -5,6 +5,10 @@ const migration = readFileSync(new URL(
     '../../../supabase/migrations/20260902090000_add_vertex_ai_cost_budget_reservations.sql',
     import.meta.url,
 ), 'utf8');
+const aclCorrectionMigration = readFileSync(new URL(
+    '../../../supabase/migrations/20260902091001_revoke_vertex_ai_budget_rpc_api_execute.sql',
+    import.meta.url,
+), 'utf8');
 
 describe('Vertex AI budget reservation migration contract', () => {
     it('creates a service-only monetary reservation ledger with all three scope indexes', () => {
@@ -41,5 +45,24 @@ describe('Vertex AI budget reservation migration contract', () => {
         expect(migration).toContain('GRANT EXECUTE ON FUNCTION public.snapshot_vertex_ai_budget');
         expect(migration).toContain('preserves reservation-key tombstones');
         expect(migration).not.toContain('20260719190000_reconcile_stuck_groble_earlybird_order.sql');
+    });
+
+    it('removes explicit API-role EXECUTE grants without changing defaults or function bodies', () => {
+        for (const signature of [
+            'public.reserve_vertex_ai_budget(',
+            'public.settle_vertex_ai_budget(TEXT, UUID, NUMERIC)',
+            'public.cancel_vertex_ai_budget(TEXT, UUID)',
+            'public.snapshot_vertex_ai_budget()',
+        ]) {
+            expect(aclCorrectionMigration).toContain(`REVOKE EXECUTE ON FUNCTION ${signature}`);
+            expect(aclCorrectionMigration).toContain('FROM PUBLIC, anon, authenticated;');
+            expect(aclCorrectionMigration).toContain(`GRANT EXECUTE ON FUNCTION ${signature}`);
+            expect(aclCorrectionMigration).toContain('TO service_role;');
+        }
+        expect(aclCorrectionMigration.match(/REVOKE EXECUTE ON FUNCTION/g)).toHaveLength(4);
+        expect(aclCorrectionMigration.match(/GRANT EXECUTE ON FUNCTION/g)).toHaveLength(4);
+        expect(aclCorrectionMigration).not.toContain('ALTER DEFAULT PRIVILEGES');
+        expect(aclCorrectionMigration).not.toContain('CREATE OR REPLACE FUNCTION');
+        expect(aclCorrectionMigration).not.toMatch(/TO\s+(?:PUBLIC|anon|authenticated)/);
     });
 });
