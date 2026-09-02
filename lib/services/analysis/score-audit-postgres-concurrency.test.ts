@@ -21,6 +21,9 @@ const finalScoreCheckpointPayload =
     '{"riskPolicyVersion":"risk-policy-v2.4","candidates":[]}';
 let first: Client;
 let second: Client;
+let barrier: Client;
+
+const lockBarrierKey = 842_194_731_006;
 
 describe('score-audit PostgreSQL fixture', () => {
     it('provides a structurally valid final-score checkpoint payload', () => {
@@ -62,7 +65,8 @@ describePostgres('actual score-audit migration PostgreSQL lock order', () => {
     beforeAll(async () => {
         first = new Client({ connectionString: databaseUrl });
         second = new Client({ connectionString: databaseUrl });
-        await Promise.all([first.connect(), second.connect()]);
+        barrier = new Client({ connectionString: databaseUrl });
+        await Promise.all([first.connect(), second.connect(), barrier.connect()]);
         await first.query(`
             DO $$ BEGIN
                 IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'anon')
@@ -137,7 +141,7 @@ describePostgres('actual score-audit migration PostgreSQL lock order', () => {
     }, 30_000);
 
     afterAll(async () => {
-        await Promise.all([first?.end(), second?.end()]);
+        await Promise.all([first?.end(), second?.end(), barrier?.end()]);
     }, 30_000);
 
     it.each([['claim-first', false], ['purge-first', true]] as const)(
@@ -241,4 +245,123 @@ describePostgres('actual score-audit migration PostgreSQL lock order', () => {
         },
         30_000,
     );
+
+    it('does not deadlock exact expiry and working-set purges when they interleave', async () => {
+        const requestId = randomUUID();
+        const resultHash = 'e'.repeat(64);
+        const triggerName = 'score_audit_test_wait_for_purge_barrier';
+        const triggerFunction = 'score_audit_test_wait_for_purge_barrier';
+
+        await barrier.query(`
+            CREATE OR REPLACE FUNCTION public.${triggerFunction}()
+            RETURNS TRIGGER
+            LANGUAGE plpgsql
+            AS $$
+            BEGIN
+                PERFORM pg_catalog.pg_advisory_xact_lock(${lockBarrierKey.toString()});
+                RETURN NEW;
+            END;
+            $$;
+            CREATE TRIGGER ${triggerName}
+            BEFORE INSERT ON public.analysis_v2_score_audit_runs
+            FOR EACH ROW EXECUTE FUNCTION public.${triggerFunction}();
+        `);
+
+        try {
+            await first.query(
+                `INSERT INTO public.analysis_requests VALUES (
+                    $1, 'completed', 'v2',
+                    '{"risk":"risk-policy-v2.4","aiStage":"ai-stage-policy-v2.7"}'
+                 )`,
+                [requestId],
+            );
+            await first.query(
+                `INSERT INTO public.analysis_v2_ai_scoring_stage_checkpoints
+                 VALUES (
+                    $1, 'final_score', -1, $2,
+                    '${finalScoreCheckpointPayload}', DEFAULT
+                 )`,
+                [requestId, resultHash],
+            );
+            await first.query(
+                `INSERT INTO public.analysis_v2_result_summaries
+                 VALUES ($1, 'risk-policy-v2.4', 0, clock_timestamp())`,
+                [requestId],
+            );
+            await first.query(
+                `UPDATE public.analysis_v2_score_audit_intents
+                 SET retain_until = clock_timestamp() - interval '1 second'
+                 WHERE request_id = $1`,
+                [requestId],
+            );
+
+            await barrier.query('BEGIN');
+            await barrier.query(
+                'SELECT pg_catalog.pg_advisory_xact_lock($1::bigint)',
+                [lockBarrierKey.toString()],
+            );
+            await Promise.all([
+                first.query(`BEGIN; SET LOCAL lock_timeout = '5s';
+                             SET LOCAL statement_timeout = '8s';
+                             SET LOCAL deadlock_timeout = '100ms'`),
+                second.query(`BEGIN; SET LOCAL lock_timeout = '5s';
+                              SET LOCAL statement_timeout = '8s';
+                              SET LOCAL deadlock_timeout = '100ms'`),
+            ]);
+
+            const purgePid = await first.query<{ pid: number }>(
+                'SELECT pg_backend_pid() AS pid',
+            );
+            const workingSetPid = await second.query<{ pid: number }>(
+                'SELECT pg_backend_pid() AS pid',
+            );
+            const purge = first.query(
+                'SELECT public.purge_expired_analysis_v2_score_audit_evidence(100)',
+            );
+            await waitUntilLockBlocked(barrier, purgePid.rows[0]!.pid);
+            const workingSet = second.query(
+                'SELECT public.analysis_v2_purge_result_working_set($1, FALSE)',
+                [requestId],
+            );
+            await waitUntilLockBlocked(barrier, workingSetPid.rows[0]!.pid);
+            await barrier.query('COMMIT');
+
+            const outcomes = await Promise.allSettled([
+                purge.then(async result => {
+                    await first.query('COMMIT');
+                    return result;
+                }).catch(async error => {
+                    await first.query('ROLLBACK').catch(() => undefined);
+                    throw error;
+                }),
+                workingSet.then(async result => {
+                    await second.query('COMMIT');
+                    return result;
+                }).catch(async error => {
+                    await second.query('ROLLBACK').catch(() => undefined);
+                    throw error;
+                }),
+            ]);
+            const outcomeDetails = outcomes.map(outcome => (
+                outcome.status === 'fulfilled'
+                    ? outcome.status
+                    : `${outcome.status}: ${outcome.reason instanceof Error
+                        ? `${outcome.reason.name}: ${outcome.reason.message}`
+                        : String(outcome.reason)}`
+            ));
+            expect(outcomeDetails, outcomeDetails.join('; ')).toEqual([
+                'fulfilled',
+                'fulfilled',
+            ]);
+        } finally {
+            await barrier.query('ROLLBACK').catch(() => undefined);
+            await first.query('ROLLBACK').catch(() => undefined);
+            await second.query('ROLLBACK').catch(() => undefined);
+            await barrier.query(`
+                DROP TRIGGER IF EXISTS ${triggerName}
+                    ON public.analysis_v2_score_audit_runs;
+                DROP FUNCTION IF EXISTS public.${triggerFunction}();
+            `).catch(() => undefined);
+        }
+    }, 30_000);
 });

@@ -10,6 +10,15 @@ const cleanupMigration = readFileSync(new URL(
     import.meta.url,
 ), 'utf8');
 
+function expectInOrder(source: string, fragments: readonly string[]): void {
+    let previous = -1;
+    for (const fragment of fragments) {
+        const index = source.indexOf(fragment, previous + 1);
+        expect(index, `missing or out-of-order fragment: ${fragment}`).toBeGreaterThan(previous);
+        previous = index;
+    }
+}
+
 describe('analysis score audit migration contract', () => {
     it('uses a private, service-role-only projection and a bounded outbox lease', () => {
         expect(migration).toContain('ENABLE ROW LEVEL SECURITY');
@@ -134,5 +143,32 @@ describe('analysis score audit migration contract', () => {
         expect(cleanupMigration).toContain("intent_status = 'released'");
         expect(cleanupMigration).toContain('SOURCE_EVIDENCE_EXPIRED');
         expect(cleanupMigration).not.toContain('ON DELETE CASCADE');
+
+        const purgeStart = cleanupMigration.indexOf(
+            'CREATE OR REPLACE FUNCTION public.purge_expired_analysis_v2_score_audit_evidence('
+        );
+        const purgeEnd = cleanupMigration.indexOf('\n$$;', purgeStart);
+        expectInOrder(cleanupMigration.slice(purgeStart, purgeEnd), [
+            'FROM public.analysis_v2_ai_scoring_stage_checkpoints AS stage',
+            'FOR UPDATE;',
+            'FROM public.analysis_v2_result_summaries AS summary',
+            'FOR KEY SHARE;',
+            'INSERT INTO public.analysis_v2_score_audit_runs',
+        ]);
+
+        const workingSetStart = cleanupMigration.indexOf(
+            'CREATE OR REPLACE FUNCTION public.analysis_v2_purge_result_working_set('
+        );
+        const workingSetEnd = cleanupMigration.indexOf('\n$$;', workingSetStart);
+        expectInOrder(cleanupMigration.slice(workingSetStart, workingSetEnd), [
+            'FROM public.analysis_v2_score_audit_intents AS intent',
+            'FOR UPDATE;',
+            'FROM public.analysis_v2_ai_scoring_stage_checkpoints AS stage',
+            'ORDER BY stage.stage_kind, stage.batch_key\n    FOR UPDATE;',
+            'FROM public.analysis_v2_result_summaries AS summary',
+            'FOR KEY SHARE;',
+            'FROM public.analysis_v2_score_audit_runs AS run',
+            'FOR UPDATE;',
+        ]);
     });
 });
