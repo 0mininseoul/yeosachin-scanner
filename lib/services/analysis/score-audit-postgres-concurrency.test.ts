@@ -61,6 +61,22 @@ async function waitUntilLockBlocked(observer: Client, blockedPid: number): Promi
     throw new Error('POSTGRES_LOCK_BARRIER_TIMEOUT');
 }
 
+async function waitUntilBlockedBy(
+    observer: Client,
+    blockedPid: number,
+    blockerPid: number,
+): Promise<void> {
+    for (let attempt = 0; attempt < 100; attempt += 1) {
+        const state = await observer.query<{ blocked: boolean }>(
+            'SELECT $2 = ANY(pg_catalog.pg_blocking_pids($1)) AS blocked',
+            [blockedPid, blockerPid],
+        );
+        if (state.rows[0]?.blocked) return;
+        await new Promise(resolve => setTimeout(resolve, 20));
+    }
+    throw new Error('POSTGRES_LOCK_BLOCKER_TIMEOUT');
+}
+
 describePostgres('actual score-audit migration PostgreSQL lock order', () => {
     beforeAll(async () => {
         first = new Client({ connectionString: databaseUrl });
@@ -323,7 +339,11 @@ describePostgres('actual score-audit migration PostgreSQL lock order', () => {
                 'SELECT public.analysis_v2_purge_result_working_set($1, FALSE)',
                 [requestId],
             );
-            await waitUntilLockBlocked(barrier, workingSetPid.rows[0]!.pid);
+            await waitUntilBlockedBy(
+                barrier,
+                workingSetPid.rows[0]!.pid,
+                purgePid.rows[0]!.pid,
+            );
             await barrier.query('COMMIT');
 
             const outcomes = await Promise.allSettled([
@@ -353,6 +373,130 @@ describePostgres('actual score-audit migration PostgreSQL lock order', () => {
                 'fulfilled',
                 'fulfilled',
             ]);
+        } finally {
+            await barrier.query('ROLLBACK').catch(() => undefined);
+            await first.query('ROLLBACK').catch(() => undefined);
+            await second.query('ROLLBACK').catch(() => undefined);
+            await barrier.query(`
+                DROP TRIGGER IF EXISTS ${triggerName}
+                    ON public.analysis_v2_score_audit_runs;
+                DROP FUNCTION IF EXISTS public.${triggerFunction}();
+            `).catch(() => undefined);
+        }
+    }, 30_000);
+
+    it('does not deadlock claim and working-set cleanup when they interleave', async () => {
+        const requestId = randomUUID();
+        const resultHash = 'f'.repeat(64);
+        const triggerName = 'score_audit_test_wait_for_claim_barrier';
+        const triggerFunction = 'score_audit_test_wait_for_claim_barrier';
+
+        await barrier.query(`
+            CREATE OR REPLACE FUNCTION public.${triggerFunction}()
+            RETURNS TRIGGER
+            LANGUAGE plpgsql
+            AS $$
+            BEGIN
+                PERFORM pg_catalog.pg_advisory_xact_lock(${lockBarrierKey.toString()});
+                RETURN NEW;
+            END;
+            $$;
+            CREATE TRIGGER ${triggerName}
+            BEFORE INSERT ON public.analysis_v2_score_audit_runs
+            FOR EACH ROW EXECUTE FUNCTION public.${triggerFunction}();
+        `);
+
+        try {
+            await first.query(
+                `INSERT INTO public.analysis_requests VALUES (
+                    $1, 'completed', 'v2',
+                    '{"risk":"risk-policy-v2.4","aiStage":"ai-stage-policy-v2.7"}'
+                 )`,
+                [requestId],
+            );
+            await first.query(
+                `INSERT INTO public.analysis_v2_ai_scoring_stage_checkpoints
+                 VALUES (
+                    $1, 'final_score', -1, $2,
+                    '${finalScoreCheckpointPayload}', DEFAULT
+                 )`,
+                [requestId, resultHash],
+            );
+            await first.query(
+                `INSERT INTO public.analysis_v2_result_summaries
+                 VALUES ($1, 'risk-policy-v2.4', 0, clock_timestamp())`,
+                [requestId],
+            );
+
+            await barrier.query('BEGIN');
+            await barrier.query(
+                'SELECT pg_catalog.pg_advisory_xact_lock($1::bigint)',
+                [lockBarrierKey.toString()],
+            );
+            await Promise.all([
+                first.query(`BEGIN; SET LOCAL lock_timeout = '5s';
+                             SET LOCAL statement_timeout = '8s';
+                             SET LOCAL deadlock_timeout = '100ms'`),
+                second.query(`BEGIN; SET LOCAL lock_timeout = '5s';
+                              SET LOCAL statement_timeout = '8s';
+                              SET LOCAL deadlock_timeout = '100ms'`),
+            ]);
+
+            const claimPid = await first.query<{ pid: number }>(
+                'SELECT pg_backend_pid() AS pid',
+            );
+            const workingSetPid = await second.query<{ pid: number }>(
+                'SELECT pg_backend_pid() AS pid',
+            );
+            const claim = first.query(
+                'SELECT public.claim_analysis_v2_score_audit($1) AS result',
+                [requestId],
+            );
+            await waitUntilLockBlocked(barrier, claimPid.rows[0]!.pid);
+            const workingSet = second.query(
+                'SELECT public.analysis_v2_purge_result_working_set($1, FALSE)',
+                [requestId],
+            );
+            await waitUntilBlockedBy(
+                barrier,
+                workingSetPid.rows[0]!.pid,
+                claimPid.rows[0]!.pid,
+            );
+            await barrier.query('COMMIT');
+
+            const claimResult = await claim;
+            expect(claimResult.rows[0]?.result).toMatchObject({
+                leaseToken: expect.any(String),
+                sourceResultHash: resultHash,
+                sourceGeneration: 1,
+            });
+            await first.query('COMMIT');
+            await workingSet;
+            await second.query('COMMIT');
+
+            const finalState = await first.query<{
+                summary_present: boolean;
+                run_present: boolean;
+                checkpoint_count: number;
+            }>(
+                `SELECT EXISTS (
+                            SELECT 1 FROM public.analysis_v2_result_summaries
+                            WHERE request_id = $1
+                        ) AS summary_present,
+                        EXISTS (
+                            SELECT 1 FROM public.analysis_v2_score_audit_runs
+                            WHERE request_id = $1
+                        ) AS run_present,
+                        (SELECT count(*)::int
+                         FROM public.analysis_v2_ai_scoring_stage_checkpoints
+                         WHERE request_id = $1) AS checkpoint_count`,
+                [requestId],
+            );
+            expect(finalState.rows[0]).toEqual({
+                summary_present: false,
+                run_present: false,
+                checkpoint_count: 0,
+            });
         } finally {
             await barrier.query('ROLLBACK').catch(() => undefined);
             await first.query('ROLLBACK').catch(() => undefined);

@@ -128,7 +128,7 @@ describe('analysis score audit migration contract', () => {
         );
     });
 
-    it('reconciles expired orphan intents before inserting child audit runs', () => {
+    it('reconciles expired orphan intents and serializes working-set cleanup in lock order', () => {
         expect(cleanupMigration).toContain(
             '-- MIGRATION_PREDECESSOR=20260831100000'
         );
@@ -149,11 +149,12 @@ describe('analysis score audit migration contract', () => {
         );
         const purgeEnd = cleanupMigration.indexOf('\n$$;', purgeStart);
         expectInOrder(cleanupMigration.slice(purgeStart, purgeEnd), [
-            'FROM public.analysis_v2_ai_scoring_stage_checkpoints AS stage',
-            'FOR UPDATE;',
+            'FROM public.analysis_v2_score_audit_intents AS intent',
+            'FOR UPDATE SKIP LOCKED',
             'FROM public.analysis_v2_result_summaries AS summary',
             'FOR KEY SHARE;',
             'INSERT INTO public.analysis_v2_score_audit_runs',
+            'DELETE FROM public.analysis_v2_ai_scoring_stage_checkpoints AS stage',
         ]);
 
         const workingSetStart = cleanupMigration.indexOf(
@@ -163,12 +164,22 @@ describe('analysis score audit migration contract', () => {
         expectInOrder(cleanupMigration.slice(workingSetStart, workingSetEnd), [
             'FROM public.analysis_v2_score_audit_intents AS intent',
             'FOR UPDATE;',
-            'FROM public.analysis_v2_ai_scoring_stage_checkpoints AS stage',
-            'ORDER BY stage.stage_kind, stage.batch_key\n    FOR UPDATE;',
             'FROM public.analysis_v2_result_summaries AS summary',
             'FOR KEY SHARE;',
             'FROM public.analysis_v2_score_audit_runs AS run',
             'FOR UPDATE;',
+            'FROM public.analysis_v2_ai_scoring_stage_checkpoints AS stage',
+            'ORDER BY stage.stage_kind, stage.batch_key\n    FOR UPDATE;',
+        ]);
+        expectInOrder(cleanupMigration.slice(workingSetStart, workingSetEnd), [
+            'FROM public.analysis_v2_score_audit_intents AS intent',
+            'FOR UPDATE;',
+            'FROM public.analysis_v2_result_summaries AS summary',
+            'FOR UPDATE;',
+            'FROM public.analysis_v2_score_audit_runs AS run',
+            'FOR UPDATE;',
+            'FROM public.analysis_v2_ai_scoring_stage_checkpoints AS stage',
+            'ORDER BY stage.stage_kind, stage.batch_key\n    FOR UPDATE;',
         ]);
     });
 });

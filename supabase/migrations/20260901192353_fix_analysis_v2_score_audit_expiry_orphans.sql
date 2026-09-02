@@ -15,10 +15,9 @@ DECLARE
     v_expired RECORD;
     v_summary_request_id UUID;
 BEGIN
-    -- Keep the lock order intent -> checkpoint -> summary -> run. Locking the
-    -- checkpoint before the summary matches terminal working-set cleanup, and
-    -- locking the summary before inserting the child run keeps FK validation
-    -- safe when the summary is concurrently eligible for deletion.
+    -- Keep the lock order intent -> summary -> run -> checkpoint, matching the
+    -- claim function. Locking the summary before inserting the child run keeps
+    -- FK validation safe when the summary is concurrently eligible for deletion.
     FOR v_expired IN
         SELECT intent.request_id, intent.source_result_hash,
                intent.source_generation,
@@ -32,17 +31,6 @@ BEGIN
         LIMIT LEAST(GREATEST(p_limit, 1), 100)
         FOR UPDATE SKIP LOCKED
     LOOP
-        -- Lock the exact rich checkpoint before taking the result-summary lock.
-        -- An orphaned intent has no checkpoint, which intentionally remains a
-        -- valid path and is reconciled below without creating a child run.
-        PERFORM 1
-        FROM public.analysis_v2_ai_scoring_stage_checkpoints AS stage
-        WHERE stage.request_id = v_expired.request_id
-          AND stage.stage_kind = 'final_score'
-          AND stage.batch_key = -1
-          AND stage.result_hash = v_expired.source_result_hash
-        FOR UPDATE;
-
         v_summary_request_id := NULL;
         SELECT summary.request_id
         INTO v_summary_request_id
@@ -88,7 +76,7 @@ BEGIN
 END;
 $$;
 
--- Terminal result cleanup takes the same intent/checkpoint/summary/run locks as
+-- Terminal result cleanup takes the same intent/summary/run/checkpoint locks as
 -- the TTL drain. Keeping the intent lock first serializes this purge with audit
 -- claims, while the parent summary lock keeps the run FK-safe.
 CREATE OR REPLACE FUNCTION public.analysis_v2_purge_result_working_set(
@@ -109,14 +97,9 @@ BEGIN
     WHERE intent.request_id = p_request_id
     FOR UPDATE;
 
-    -- Lock every rich checkpoint before taking either the result-summary or run
-    -- lock. This includes checkpoints that will be deleted unconditionally.
-    PERFORM 1
-    FROM public.analysis_v2_ai_scoring_stage_checkpoints AS stage
-    WHERE stage.request_id = p_request_id
-    ORDER BY stage.stage_kind, stage.batch_key
-    FOR UPDATE;
-
+    -- Match the claim/TTL order for both terminal cleanup modes. Keep-final
+    -- takes KEY SHARE so the parent remains available for audit FK checks;
+    -- deleting cleanup takes UPDATE because it removes the parent below.
     IF p_keep_final THEN
         PERFORM 1
         FROM public.analysis_v2_result_summaries AS summary
@@ -134,6 +117,15 @@ BEGIN
     PERFORM 1
     FROM public.analysis_v2_score_audit_runs AS run
     WHERE run.request_id = p_request_id
+    FOR UPDATE;
+
+    -- Lock all rich scoring checkpoints in a deterministic order before the
+    -- original working-set deletes, including the checkpoint retained by an
+    -- active audit intent.
+    PERFORM 1
+    FROM public.analysis_v2_ai_scoring_stage_checkpoints AS stage
+    WHERE stage.request_id = p_request_id
+    ORDER BY stage.stage_kind, stage.batch_key
     FOR UPDATE;
 
     DELETE FROM public.analysis_v2_narrative_manifests WHERE request_id = p_request_id;
