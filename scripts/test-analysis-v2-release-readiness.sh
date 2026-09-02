@@ -101,7 +101,12 @@ if [[ "$request_method" == 'POST' && "$url" =~ /api/analysis/(start|step|run)$ ]
   for index in "${!expected_args[@]}"; do
     [[ "${actual_args[$index]}" == "${expected_args[$index]}" ]] || exit 104
   done
-  printf '{"code":"%s"}\n410\n' "${FAKE_LEGACY_FREEZE_CODE:-LEGACY_ANALYSIS_FROZEN}"
+  legacy_status="${FAKE_LEGACY_FREEZE_STATUS:-410}"
+  legacy_body="${FAKE_LEGACY_FREEZE_BODY:-}"
+  if [[ -z "$legacy_body" ]]; then
+    legacy_body="{\"error\":\"Legacy analysis intake is unavailable.\",\"code\":\"${FAKE_LEGACY_FREEZE_CODE:-LEGACY_ANALYSIS_FROZEN}\"}"
+  fi
+  printf '%s\n%s\n' "$legacy_body" "$legacy_status"
   exit 0
 fi
 printf 'unexpected HTTP probe: %s %s\n' "$request_method" "$url" >&2
@@ -188,6 +193,9 @@ run_gate() (
   export FAKE_PUBLIC_FREEZE_JSON
   export FAKE_SUPABASE_JSON
   export FAKE_IMAGE_PROXY_PROBE_RESULT
+  export FAKE_LEGACY_FREEZE_CODE
+  export FAKE_LEGACY_FREEZE_STATUS
+  export FAKE_LEGACY_FREEZE_BODY
   bash "$gate"
 )
 
@@ -260,11 +268,27 @@ export FAKE_VERCEL_JSON="{\"deployments\":[{\"target\":\"production\",\"readySta
 
 export FAKE_LEGACY_FREEZE_CODE='LEGACY_ANALYSIS_DISABLED'
 if output="$(run_gate 2>&1)"; then
-  fail 'a status-only V1 freeze probe was accepted'
+  fail 'a V1 freeze probe with the wrong code was accepted'
 fi
 [[ "$output" == *'did not return exact LEGACY_ANALYSIS_FROZEN JSON'* ]] \
   || fail 'V1 route JSON-code mismatch was not classified explicitly'
 unset FAKE_LEGACY_FREEZE_CODE
+
+export FAKE_LEGACY_FREEZE_BODY='{"error":"Legacy analysis intake is unavailable."}'
+if output="$(run_gate 2>&1)"; then
+  fail 'a V1 freeze probe with a missing code was accepted'
+fi
+[[ "$output" == *'did not return exact LEGACY_ANALYSIS_FROZEN JSON'* ]] \
+  || fail 'V1 route missing code was not classified explicitly'
+unset FAKE_LEGACY_FREEZE_BODY
+
+export FAKE_LEGACY_FREEZE_STATUS='200'
+if output="$(run_gate 2>&1)"; then
+  fail 'a successful V1 response was accepted as frozen'
+fi
+[[ "$output" == *'returned HTTP 200, expected 410'* ]] \
+  || fail 'unsafe successful V1 response was not classified explicitly'
+unset FAKE_LEGACY_FREEZE_STATUS
 
 export FAKE_SUPABASE_JSON='{"message":"","migrations":[{"local":"20260829120000_add_analysis_v2_progress_signals_history.sql","remote":"20260829120000","time":"2026-08-29T12:00:00Z"}]}'
 if ! output="$(run_gate 2>&1)"; then
