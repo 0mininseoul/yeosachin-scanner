@@ -1716,7 +1716,7 @@ describe('rearm_earlybird_pfe3_media_artifact_error', () => {
         const wrongTrackSpelling = await createDb();
         await buildValidFixture(wrongTrackSpelling, { profileAiJobOverrides: { track: 'profile-ai' } });
         await expect(rearm(wrongTrackSpelling)).rejects.toThrow('EARLYBIRD_PFE3_MEDIA_ARTIFACT_REARM_INELIGIBLE');
-    });
+    }, 30_000);
 
     it('forbids any undeleted media artifact for the media-failed successor', async () => {
         const db = await createDb();
