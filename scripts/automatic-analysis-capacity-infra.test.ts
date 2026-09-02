@@ -216,6 +216,7 @@ function runQueue(script: string, args: string[], extra: Record<string, string> 
 interface FakeRunOptions {
     role?: 'preflight' | 'paid';
     stage?: 'bootstrap' | 'initial' | 'expanded';
+    serviceStage?: 'bootstrap' | 'initial' | 'expanded';
     serviceResourceShape?: 'missing' | 'wrong-cpu' | 'wrong-memory' | 'legacy-top-level-only';
     serviceOverrides?: Record<string, unknown>;
     serviceEnv?: Record<string, string | null>;
@@ -243,9 +244,12 @@ function fakeRun(options: FakeRunOptions = {}) {
         ? 'PREFLIGHT_TASKS_RUNTIME_SERVICE_ACCOUNT_EMAIL'
         : 'ANALYSIS_V2_WORKER_RUNTIME_SERVICE_ACCOUNT_EMAIL'] as string;
     const stage = options.stage ?? 'initial';
+    const serviceStage = options.serviceStage ?? stage;
     const expansionCanary = stage === 'expanded' ? 'true' : 'false';
     const active = stage !== 'bootstrap';
-    const maxScale = stage === 'expanded' ? (role === 'preflight' ? '64' : '16') : (role === 'preflight' ? '32' : '8');
+    const serviceExpansionCanary = serviceStage === 'expanded' ? 'true' : 'false';
+    const serviceActive = serviceStage !== 'bootstrap';
+    const maxScale = serviceStage === 'expanded' ? (role === 'preflight' ? '64' : '16') : (role === 'preflight' ? '32' : '8');
     const queue = env[`${prefix}_QUEUE` as keyof typeof env] as string;
     const service = env[`${prefix}_CLOUD_RUN_SERVICE` as keyof typeof env] as string;
     const fixtureDir = mkdtempSync(join(tmpdir(), 'capacity-fake-gcloud-'));
@@ -308,7 +312,7 @@ function fakeRun(options: FakeRunOptions = {}) {
             name: service,
             labels: {
                 'analysis-workload-role': role,
-                'analysis-capacity-stage': stage,
+                'analysis-capacity-stage': serviceStage,
                 'analysis-v2-source-commit': sourceCommit,
             },
         },
@@ -339,25 +343,25 @@ function fakeRun(options: FakeRunOptions = {}) {
                             { name: `${prefix}_SERVICE_ACCOUNT_EMAIL`, value: taskServiceAccount },
                             { name: `${maintenancePrefix}_MAINTENANCE_SERVICE_ACCOUNT_EMAIL`, value: env[`${maintenancePrefix}_MAINTENANCE_SERVICE_ACCOUNT_EMAIL` as keyof typeof env] },
                             { name: `${maintenancePrefix}_MAINTENANCE_OIDC_AUDIENCE`, value: env[`${maintenancePrefix}_MAINTENANCE_OIDC_AUDIENCE` as keyof typeof env] },
-                            { name: 'PREFLIGHT_TASKS_RECOVERY_ENABLED', value: role === 'preflight' && active ? 'true' : 'false' },
-                            { name: 'ANALYSIS_V2_RECOVERY_ENABLED', value: role === 'paid' && active ? 'true' : 'false' },
+                            { name: 'PREFLIGHT_TASKS_RECOVERY_ENABLED', value: role === 'preflight' && serviceActive ? 'true' : 'false' },
+                            { name: 'ANALYSIS_V2_RECOVERY_ENABLED', value: role === 'paid' && serviceActive ? 'true' : 'false' },
                             { name: 'ANALYSIS_WORKLOAD_ROLE', value: role },
-                            { name: 'ANALYSIS_CAPACITY_STAGE', value: stage },
-                            { name: 'ANALYSIS_CAPACITY_EXPANSION_CANARY', value: expansionCanary },
+                            { name: 'ANALYSIS_CAPACITY_STAGE', value: serviceStage },
+                            { name: 'ANALYSIS_CAPACITY_EXPANSION_CANARY', value: serviceExpansionCanary },
                             { name: 'ANALYSIS_CAPACITY_WORKER_CPU', value: '2' },
                             { name: 'ANALYSIS_CAPACITY_WORKER_MEMORY', value: '2Gi' },
                             { name: 'ANALYSIS_V2_APIFY_API_TOKEN_SLOT', value: env.ANALYSIS_V2_APIFY_API_TOKEN_SLOT },
-                            { name: 'ANALYSIS_CAPACITY_LEGACY_FREEZE_MODE', value: active ? 'drain-and-block' : 'bootstrap' },
-                            { name: 'ANALYSIS_CAPACITY_LEGACY_PRODUCERS_FROZEN', value: active ? 'true' : 'false' },
-                            { name: 'ANALYSIS_CAPACITY_LEGACY_TASKS_DRAINED', value: active ? 'true' : 'false' },
-                            { name: 'ANALYSIS_CAPACITY_LEGACY_TARGETS_BLOCKED', value: active ? 'true' : 'false' },
-                            { name: 'ANALYSIS_CAPACITY_LEGACY_QUEUE_PAUSE_CONFIRMED', value: active ? 'true' : 'false' },
-                            { name: 'ANALYSIS_CAPACITY_PUBLIC_FREEZE_ENABLED', value: active ? 'true' : 'false' },
-                            { name: 'ANALYSIS_PROVIDER_ADMISSION_ENABLED', value: active ? 'true' : 'false' },
+                            { name: 'ANALYSIS_CAPACITY_LEGACY_FREEZE_MODE', value: serviceActive ? 'drain-and-block' : 'bootstrap' },
+                            { name: 'ANALYSIS_CAPACITY_LEGACY_PRODUCERS_FROZEN', value: serviceActive ? 'true' : 'false' },
+                            { name: 'ANALYSIS_CAPACITY_LEGACY_TASKS_DRAINED', value: serviceActive ? 'true' : 'false' },
+                            { name: 'ANALYSIS_CAPACITY_LEGACY_TARGETS_BLOCKED', value: serviceActive ? 'true' : 'false' },
+                            { name: 'ANALYSIS_CAPACITY_LEGACY_QUEUE_PAUSE_CONFIRMED', value: serviceActive ? 'true' : 'false' },
+                            { name: 'ANALYSIS_CAPACITY_PUBLIC_FREEZE_ENABLED', value: serviceActive ? 'true' : 'false' },
+                            { name: 'ANALYSIS_PROVIDER_ADMISSION_ENABLED', value: serviceActive ? 'true' : 'false' },
                             { name: 'ANALYSIS_BETA_PREPARE_ENABLED', value: 'false' },
-                            { name: 'PREFLIGHT_TASKS_ENABLED', value: role === 'preflight' && active ? 'true' : 'false' },
-                            { name: 'ANALYSIS_V2_TASKS_ENABLED', value: role === 'paid' && active ? 'true' : 'false' },
-                            { name: 'ANALYSIS_V2_WORKER_ENABLED', value: role === 'paid' && active ? 'true' : 'false' },
+                            { name: 'PREFLIGHT_TASKS_ENABLED', value: role === 'preflight' && serviceActive ? 'true' : 'false' },
+                            { name: 'ANALYSIS_V2_TASKS_ENABLED', value: role === 'paid' && serviceActive ? 'true' : 'false' },
+                            { name: 'ANALYSIS_V2_WORKER_ENABLED', value: role === 'paid' && serviceActive ? 'true' : 'false' },
                             ...secretEnv,
                         ],
                     }],
@@ -477,7 +481,7 @@ function fakeRun(options: FakeRunOptions = {}) {
             maxBackoffDuration: '60s',
             maxDoublings: 3,
         },
-        state: stage === 'bootstrap' ? 'PAUSED' : 'ENABLED',
+        state: serviceStage === 'bootstrap' ? 'PAUSED' : 'ENABLED',
     }));
     writeFileSync(readinessPath, JSON.stringify(options.readiness ?? {
         ready: true,
@@ -583,6 +587,12 @@ if [[ "\${1:-} \${2:-}" == "run deploy" ]]; then
         if .name == "ANALYSIS_CAPACITY_STAGE" then .value = $stage
         elif .name == "ANALYSIS_CAPACITY_EXPANSION_CANARY" then .value = (if $stage == "expanded" then "true" else "false" end)
         elif .name == "ANALYSIS_PROVIDER_ADMISSION_ENABLED" then .value = $active
+        elif .name == "ANALYSIS_CAPACITY_LEGACY_FREEZE_MODE" then .value = (if $active == "true" then "drain-and-block" else "bootstrap" end)
+        elif .name == "ANALYSIS_CAPACITY_LEGACY_PRODUCERS_FROZEN" then .value = (if $active == "true" then "true" else "false" end)
+        elif .name == "ANALYSIS_CAPACITY_LEGACY_TASKS_DRAINED" then .value = (if $active == "true" then "true" else "false" end)
+        elif .name == "ANALYSIS_CAPACITY_LEGACY_TARGETS_BLOCKED" then .value = (if $active == "true" then "true" else "false" end)
+        elif .name == "ANALYSIS_CAPACITY_LEGACY_QUEUE_PAUSE_CONFIRMED" then .value = (if $active == "true" then "true" else "false" end)
+        elif .name == "ANALYSIS_CAPACITY_PUBLIC_FREEZE_ENABLED" then .value = $active
         elif .name == "PREFLIGHT_TASKS_ENABLED" then .value = (if $stage == "bootstrap" or $role != "preflight" then "false" else "true" end)
         elif .name == "ANALYSIS_V2_TASKS_ENABLED" then .value = (if $stage == "bootstrap" or $role != "paid" then "false" else "true" end)
         elif .name == "ANALYSIS_V2_WORKER_ENABLED" then .value = (if $stage == "bootstrap" or $role != "paid" then "false" else "true" end)
@@ -670,10 +680,10 @@ elif [[ "$request_method" == 'POST' && "$url" =~ /api/analysis/(start|step|run)$
     [[ "$arg" != *Authorization* ]] || exit 101
   done
   if [[ -n "$output_path" ]]; then
-    printf '{"code":"LEGACY_ANALYSIS_FROZEN"}\n' >"$output_path"
+    printf '{"error":"Legacy analysis intake is unavailable.","code":"LEGACY_ANALYSIS_FROZEN"}\n' >"$output_path"
     printf '410'
   else
-    printf '{"code":"LEGACY_ANALYSIS_FROZEN"}\n410\n'
+    printf '{"error":"Legacy analysis intake is unavailable.","code":"LEGACY_ANALYSIS_FROZEN"}\n410\n'
   fi
 else
   cat "$FAKE_GCLOUD_READINESS_JSON"
@@ -964,6 +974,71 @@ describe('automatic-analysis infrastructure contracts', () => {
         const result = fakeRun({ role: 'paid', stage: 'bootstrap', args: ['--check'] });
         expect(result.status).toBe(0);
         expect(result.stdout).toContain('verified: paid worker');
+    });
+
+    it.each(['preflight', 'paid'] as const)('allows only the explicit serving bootstrap to initial transition: %s', (role) => {
+        const args = ['--apply', '--allow-bootstrap-initial-transition'];
+        if (role === 'preflight') args.push('--reconcile-jobs');
+        const result = fakeRun({ role, stage: 'initial', serviceStage: 'bootstrap', args });
+        expect(result.status, `${result.stderr?.toString() ?? ''}\n${result.calls}`).toBe(0);
+        expect(result.calls).toContain('run deploy');
+        expect(result.calls).toContain('run services update-traffic');
+        const deployIndex = result.calls.indexOf('run deploy');
+        expect(result.calls.indexOf('tasks queues describe')).toBeGreaterThanOrEqual(0);
+        expect(result.calls.indexOf('tasks queues describe')).toBeLessThan(deployIndex);
+        expect(result.calls.indexOf('api/analysis/capacity/readiness')).toBeLessThan(deployIndex);
+        expect(result.stdout).toContain(`verified: ${role} worker`);
+    });
+
+    it.each([
+        ['wrong legacy freeze value', { serviceEnv: { ANALYSIS_CAPACITY_LEGACY_FREEZE_MODE: 'unexpected' } }, 'ANALYSIS_CAPACITY_LEGACY_FREEZE_MODE'],
+        ['wrong provider admission value', { serviceEnv: { ANALYSIS_PROVIDER_ADMISSION_ENABLED: 'true' } }, 'bootstrap admission gate'],
+        ['stable routing drift', { serviceEnv: { PREFLIGHT_TASKS_TARGET_URL: 'https://wrong.example.com/api/analysis/preflight/worker' } }, 'target URL drifted'],
+        ['non-serving bootstrap service', { serviceOverrides: { status: { traffic: [{ revisionName: 'bootstrap-revision', percent: 0 }] } } }, 'non-empty exact traffic allocation'],
+        ['extra manifest key drift', {
+            manifestOverrides: { ANALYSIS_V2_LEGACY_GATE: 'false' },
+            serviceEnv: { ANALYSIS_V2_LEGACY_GATE: 'true' },
+        }, 'ANALYSIS_V2_LEGACY_GATE'],
+    ] as const)('rejects unsafe bootstrap to initial transition input: %s', (_name, options, expected) => {
+        const result = fakeRun({
+            role: 'preflight',
+            stage: 'initial',
+            serviceStage: 'bootstrap',
+            ...options,
+            args: ['--apply', '--allow-bootstrap-initial-transition', '--reconcile-jobs'],
+        });
+        expect(result.status).not.toBe(0);
+        expect(`${result.stdout}\n${result.stderr}`).toContain(expected);
+        expect(result.calls).not.toContain('run deploy');
+    });
+
+    it.each([
+        ['check mode', ['--check', '--allow-bootstrap-initial-transition']],
+        ['dry-run mode', ['--dry-run', '--allow-bootstrap-initial-transition']],
+    ] as const)('rejects bootstrap to initial transition flag outside apply: %s', (_name, args) => {
+        const result = fakeRun({
+            role: 'preflight',
+            stage: 'initial',
+            serviceStage: 'bootstrap',
+            args: [...args],
+        });
+        expect(result.status).not.toBe(0);
+        expect(`${result.stdout}\n${result.stderr}`).toContain('requires explicit --apply');
+        expect(result.calls).toBe('');
+    });
+
+    it.each([
+        ['initial serving service', { serviceStage: 'initial' as const }, 'observed bootstrap'],
+        ['expanded target stage', { stage: 'expanded' as const, serviceStage: 'bootstrap' as const }, 'target stage=initial'],
+    ] as const)('rejects bootstrap to initial transition flag outside its exact stage contract: %s', (_name, options, expected) => {
+        const result = fakeRun({
+            role: 'preflight',
+            ...options,
+            args: ['--apply', '--allow-bootstrap-initial-transition', '--reconcile-jobs'],
+        });
+        expect(result.status).not.toBe(0);
+        expect(`${result.stdout}\n${result.stderr}`).toContain(expected);
+        expect(result.calls).not.toContain('run deploy');
     });
 
     it('reconciles exactly the stale preflight bootstrap cross-role gates during apply', () => {

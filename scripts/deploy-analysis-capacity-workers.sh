@@ -19,11 +19,12 @@ mode="check"
 mode_was_explicit="false"
 reconcile_iam="false"
 reconcile_jobs="false"
+allow_bootstrap_initial_transition="false"
 role="${ANALYSIS_CAPACITY_ROLE:-}"
 
 usage() {
   cat <<'EOF'
-Usage: scripts/deploy-analysis-capacity-workers.sh --role=preflight|paid [--dry-run | --check | --apply] [--reconcile-iam] [--reconcile-jobs]
+Usage: scripts/deploy-analysis-capacity-workers.sh --role=preflight|paid [--dry-run | --check | --apply] [--reconcile-iam] [--reconcile-jobs] [--allow-bootstrap-initial-transition]
 
 Deploys one private split-capacity Cloud Run worker from the shared source
 tree. Existing queue names remain analysis-preflight and analysis-v2-pipeline.
@@ -63,6 +64,9 @@ Modes:
              roles/run.invoker binding; unrelated service IAM bindings remain.
   --reconcile-jobs is valid only with an explicit --apply and permits replacing
              reviewed preflight recovery scheduler drift.
+  --allow-bootstrap-initial-transition is valid only with an explicit --apply
+             when an existing exact serving bootstrap service is promoted to
+             initial; only the known activation gate values may transition.
 
 Stage contract:
   bootstrap: all admission/worker gates false; private build/runtime/IAM only.
@@ -104,6 +108,9 @@ while (($# > 0)); do
     --reconcile-jobs)
       reconcile_jobs="true"
       ;;
+    --allow-bootstrap-initial-transition)
+      allow_bootstrap_initial_transition="true"
+      ;;
     -h|--help)
       usage
       exit 0
@@ -119,6 +126,9 @@ done
   || die "--reconcile-iam requires explicit --apply"
 [[ "$reconcile_jobs" != "true" || ("$mode" == "apply" && "$mode_was_explicit" == "true") ]] \
   || die "--reconcile-jobs requires explicit --apply"
+[[ "$allow_bootstrap_initial_transition" != "true" \
+   || ("$mode" == "apply" && "$mode_was_explicit" == "true") ]] \
+  || die "--allow-bootstrap-initial-transition requires explicit --apply"
 [[ "$role" == "preflight" || "$role" == "paid" ]] \
   || die "--role=preflight or --role=paid is required"
 [[ "${ANALYSIS_WORKLOAD_ROLE:-}" == "$role" ]] \
@@ -135,6 +145,9 @@ if [[ "$stage" == "expanded" && "$expansion_canary" != "true" ]]; then
 fi
 if [[ "$stage" != "expanded" && "$expansion_canary" == "true" ]]; then
   die "ANALYSIS_CAPACITY_EXPANSION_CANARY=true is valid only for expanded capacity"
+fi
+if [[ "$allow_bootstrap_initial_transition" == "true" && "$stage" != "initial" ]]; then
+  die "--allow-bootstrap-initial-transition requires target stage=initial"
 fi
 
 legacy_freeze_mode="${ANALYSIS_CAPACITY_LEGACY_FREEZE_MODE:-bootstrap}"
@@ -630,7 +643,12 @@ verify_legacy_quiescence() {
       rm -f -- "$body_file"
       die "public V1 freeze probe for $route returned HTTP $status, expected 410"
     fi
-    jq -e 'type == "object" and (keys | sort) == ["code"] and .code == "LEGACY_ANALYSIS_FROZEN"' \
+    jq -e '
+      type == "object"
+      and ((keys | sort) == ["code"] or (keys | sort) == ["code", "error"])
+      and .code == "LEGACY_ANALYSIS_FROZEN"
+      and ((has("error") | not) or (.error | type == "string"))
+    ' \
       "$body_file" >/dev/null 2>&1 \
       || { rm -f -- "$body_file"; die "public V1 freeze probe for $route did not return exact LEGACY_ANALYSIS_FROZEN JSON"; }
     rm -f -- "$body_file"
@@ -1197,6 +1215,36 @@ verify_staged_revision() {
   done
 }
 
+bootstrap_initial_transition_value_is_allowed() {
+  local key="$1"
+  local observed="$2"
+  local expected="$3"
+  case "$key" in
+    ANALYSIS_CAPACITY_STAGE)
+      [[ "$observed" == "bootstrap" && "$expected" == "initial" ]]
+      ;;
+    ANALYSIS_CAPACITY_LEGACY_FREEZE_MODE)
+      [[ "$observed" == "bootstrap" && "$expected" == "drain-and-block" ]]
+      ;;
+    ANALYSIS_CAPACITY_LEGACY_PRODUCERS_FROZEN|\
+    ANALYSIS_CAPACITY_LEGACY_TASKS_DRAINED|\
+    ANALYSIS_CAPACITY_LEGACY_TARGETS_BLOCKED|\
+    ANALYSIS_CAPACITY_LEGACY_QUEUE_PAUSE_CONFIRMED|\
+    ANALYSIS_CAPACITY_PUBLIC_FREEZE_ENABLED|\
+    ANALYSIS_PROVIDER_ADMISSION_ENABLED)
+      [[ "$observed" == "false" && "$expected" == "true" ]]
+      ;;
+    PREFLIGHT_TASKS_ENABLED|PREFLIGHT_TASKS_RECOVERY_ENABLED|\
+    ANALYSIS_V2_TASKS_ENABLED|ANALYSIS_V2_WORKER_ENABLED|\
+    ANALYSIS_V2_RECOVERY_ENABLED)
+      [[ "$observed" == "false" && "$expected" == "true" ]]
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+}
+
 verify_service_contract() {
   # During an approved stage transition we verify the currently serving
   # revision against its observed stage before deploying the successor.  The
@@ -1206,6 +1254,7 @@ verify_service_contract() {
   local require_traffic="${2:-true}"
   local allow_stale_bootstrap_provenance="${3:-false}"
   local allow_bootstrap_cross_role_gate_transition="${4:-false}"
+  local allow_bootstrap_initial_transition_for_contract="${5:-false}"
   local contract_expansion_canary="false"
   local contract_recovery_enabled="false"
   local contract_max_instances=8
@@ -1214,6 +1263,13 @@ verify_service_contract() {
     [[ "$mode" == "apply" && "$role" == "preflight" && "$stage" == "bootstrap" \
        && "$contract_stage" == "bootstrap" && "$require_traffic" == "true" ]] \
       || die "bootstrap cross-role gate transition is valid only for preflight bootstrap apply"
+  fi
+  if [[ "$allow_bootstrap_initial_transition_for_contract" == "true" ]]; then
+    [[ "$mode" == "apply" && "$mode_was_explicit" == "true" ]] \
+      || die "bootstrap initial transition requires explicit --apply"
+    [[ "$stage" == "initial" && "$contract_stage" == "bootstrap" \
+       && "$require_traffic" == "true" ]] \
+      || die "bootstrap initial transition requires target stage=initial and observed/contract stage=bootstrap"
   fi
   if [[ "$role" == "preflight" ]]; then
     contract_max_instances=32
@@ -1326,6 +1382,12 @@ verify_service_contract() {
     if [[ "$observed_manifest_value" == "$manifest_expected" ]]; then
       continue
     fi
+    if [[ "$allow_bootstrap_initial_transition_for_contract" == "true" ]] \
+       && bootstrap_initial_transition_value_is_allowed \
+         "$manifest_key" "$observed_manifest_value" "$manifest_expected"; then
+      log "bootstrap: allowing exact activation transition for $manifest_key"
+      continue
+    fi
     case "$manifest_key" in
       ANALYSIS_V2_WORKER_ENABLED|ANALYSIS_V2_RECOVERY_ENABLED)
         if [[ "$allow_bootstrap_cross_role_gate_transition" == "true" \
@@ -1432,6 +1494,12 @@ if service_exists; then
   previous_ready_revision="$(jq -r '.status.latestReadyRevisionName // empty' <<<"$service_json")"
   observed_stage="$(observed_capacity_stage)"
   verify_stage_transition "$observed_stage"
+  if [[ "$allow_bootstrap_initial_transition" == "true" ]]; then
+    [[ "$observed_stage" == "bootstrap" ]] \
+      || die "--allow-bootstrap-initial-transition requires an observed bootstrap service"
+    [[ -n "$previous_traffic_spec" ]] \
+      || die "bootstrap initial transition requires an existing serving service"
+  fi
   allow_stale_bootstrap_provenance="false"
   allow_bootstrap_cross_role_gate_transition="false"
   if [[ "$stage" == "bootstrap" && "$observed_stage" == "bootstrap" ]]; then
@@ -1439,7 +1507,8 @@ if service_exists; then
     [[ "$role" == "preflight" ]] && allow_bootstrap_cross_role_gate_transition="true"
   fi
   verify_service_contract "$observed_stage" true "$allow_stale_bootstrap_provenance" \
-    "$allow_bootstrap_cross_role_gate_transition"
+    "$allow_bootstrap_cross_role_gate_transition" \
+    "$allow_bootstrap_initial_transition"
   verify_legacy_quiescence
   verify_vercel_public_deployment
   verify_capacity_activation_readiness

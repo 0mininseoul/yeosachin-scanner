@@ -309,7 +309,12 @@ probe_legacy_route() {
   body="${response%$'\n'*}"
   [[ "$status" == '410' ]] \
     || die "public V1 freeze probe for $route returned HTTP $status, expected 410"
-  jq -e 'type == "object" and (keys | sort) == ["code"] and .code == "LEGACY_ANALYSIS_FROZEN"' <<<"$body" >/dev/null 2>&1 \
+  jq -e '
+    type == "object"
+    and ((keys | sort) == ["code"] or (keys | sort) == ["code", "error"])
+    and .code == "LEGACY_ANALYSIS_FROZEN"
+    and ((has("error") | not) or (.error | type == "string"))
+  ' <<<"$body" >/dev/null 2>&1 \
     || die "public V1 freeze probe for $route did not return exact LEGACY_ANALYSIS_FROZEN JSON"
 }
 
