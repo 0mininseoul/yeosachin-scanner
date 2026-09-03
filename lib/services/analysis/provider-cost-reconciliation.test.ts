@@ -20,7 +20,9 @@ function database(rows: unknown[]) {
     chain.limit.mockResolvedValue({ data: rows, error: null });
     return {
         from: vi.fn(() => chain),
-        rpc: vi.fn().mockResolvedValue({ data: true, error: null }),
+        rpc: vi.fn(async (name: string) => name === 'enqueue_analysis_order_audit_bundle'
+            ? { data: { status: 'queued', requestId: '123e4567-e89b-42d3-a456-426614174000' }, error: null }
+            : { data: true, error: null }),
         chain,
     };
 }
@@ -32,6 +34,11 @@ const settledRow = {
     credential_slot: 'primary',
     status: 'succeeded',
     max_charge_usd: '0.078',
+};
+
+const requestScopedSettledRow = {
+    ...settledRow,
+    request_id: '123e4567-e89b-42d3-a456-426614174000',
 };
 
 describe('provider cost reconciliation', () => {
@@ -118,5 +125,21 @@ describe('provider cost reconciliation', () => {
         });
         expect(db.chain.limit).toHaveBeenCalledWith(65);
         expect(db.rpc).toHaveBeenCalledTimes(64);
+    });
+
+    it('enqueues a corrected order audit after a settled provider cost commits', async () => {
+        const db = database([requestScopedSettledRow]);
+
+        await expect(reconcileSettledAnalysisProviderCosts(db as never, undefined, {
+            clientForSlot: () => ({
+                run: () => ({
+                    get: async () => ({ status: 'SUCCEEDED', usageTotalUsd: 0.0754 }),
+                }),
+            }),
+        })).resolves.toEqual({ eligible: 1, finalized: 1, failed: 0, hasMore: false });
+
+        expect(db.rpc).toHaveBeenCalledWith('enqueue_analysis_order_audit_bundle', {
+            p_request_id: requestScopedSettledRow.request_id,
+        });
     });
 });

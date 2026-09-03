@@ -32,6 +32,7 @@ import {
 import { supabaseAdmin } from '@/lib/supabase/admin';
 import { createAnalysisV2RevenueFinalQualityGate } from './revenue-final-quality-gate';
 import { createAnalysisV2RevenueResolverCapacity } from './revenue-resolver-capacity';
+import { enqueueAnalysisOrderAuditBundle } from './order-audit-bundle';
 
 export type AnalysisV2ProductionEnvironment = Record<string, string | undefined>;
 
@@ -88,6 +89,11 @@ export function createProductionAnalysisV2AiScoringExecutorDependencies(
         targetProfiles: createAnalysisV2TargetProfileReadModel(),
         stageStore: analysisV2AiScoringStageStore,
         resultStore: analysisV2ResultStore,
+        orderAuditBundle: {
+            enqueue: async requestId => {
+                await enqueueAnalysisOrderAuditBundle(supabaseAdmin, requestId);
+            },
+        },
         resultImages: createProductionResultImageCapture(env),
         mediaStore,
         sourceMediaArchive,

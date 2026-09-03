@@ -85,6 +85,10 @@ import type {
     AnalysisV2StageExecutorRegistry,
 } from './v2-worker';
 import {
+    enqueueFinalizedAnalysisOrderAuditBundle,
+    type OrderAuditBundleEnqueue,
+} from './order-audit-bundle';
+import {
     AnalysisV2GenderResolutionCutoffPersistenceError,
     type AnalysisV2AiStageRuntime,
     type AnalysisV2GenderResolutionHandle,
@@ -531,6 +535,9 @@ export interface AnalysisV2AiScoringExecutorDependencies {
             orderedManifestHash: string;
             expectedRows: number;
         }): Promise<unknown>;
+    };
+    orderAuditBundle?: {
+        enqueue: OrderAuditBundleEnqueue;
     };
     mediaStore: AnalysisV2MediaArtifactStore;
     /** Required archive for every normalized image set actually passed to V2 AI. */
@@ -3339,6 +3346,10 @@ export function createAnalysisV2AiScoringExecutorRegistry(
                 targetProfileImageUrl: target.profilePicUrl ?? null,
                 ...(resultImageManifest ? { resultImageManifest } : {}),
             });
+            await enqueueFinalizedAnalysisOrderAuditBundle(
+                dependencies.orderAuditBundle?.enqueue,
+                context.claim.requestId,
+            );
             try {
                 await (dependencies.analysisLifecycleEventEmitter ?? emitAnalysisLifecycleEvent)({
                     requestId: context.claim.requestId,
