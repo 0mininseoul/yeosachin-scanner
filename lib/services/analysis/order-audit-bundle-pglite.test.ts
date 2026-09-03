@@ -425,6 +425,35 @@ describe('permanent order audit bundle SQL behavior', () => {
         expect(payload).not.toHaveProperty('providerToken');
     });
 
+    it('assembles at the terminal request boundary before working-set cleanup', async () => {
+        await db.query(
+            `UPDATE public.analysis_requests
+                SET status = 'completed'
+              WHERE id = $1`,
+            [REQUEST_ID],
+        );
+        const queue = await db.query<{ status: string }>(
+            'SELECT status FROM public.analysis_order_audit_assembly_queue WHERE request_id = $1',
+            [REQUEST_ID],
+        );
+        expect(queue.rows[0]?.status).toBe('completed');
+
+        await db.query(
+            'DELETE FROM public.analysis_target_interactors WHERE request_id = $1',
+            [REQUEST_ID],
+        );
+        const loadedAfterCleanup = await db.query<{ payload: unknown }>(
+            `SELECT public.load_analysis_order_audit_bundle(
+                $1, 'interactions', 0, 10, 'comments'
+            ) AS payload`,
+            [REQUEST_ID],
+        );
+        const payload = loadedAfterCleanup.rows[0]?.payload as Record<string, unknown>;
+        expect(payload.rows).toEqual(expect.arrayContaining([
+            expect.objectContaining({ commentText: 'hello' }),
+        ]));
+    });
+
     it('keeps request and cost DML committed when enqueue trigger queue writes fail', async () => {
         await db.exec('BEGIN');
         try {

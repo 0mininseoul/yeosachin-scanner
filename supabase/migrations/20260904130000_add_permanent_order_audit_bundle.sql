@@ -1586,6 +1586,13 @@ BEGIN
             -- sweep or application hook must be able to retry without rolling back this DML.
             RAISE WARNING USING MESSAGE = 'ANALYSIS_ORDER_AUDIT_ENQUEUE_FAILED';
         END;
+        BEGIN
+            -- The V2 terminal finalizer purges rich working-set rows in the same transaction;
+            -- assemble while those authoritative rows are still present, before that purge.
+            PERFORM public.assemble_analysis_order_audit_bundle(NEW.id);
+        EXCEPTION WHEN OTHERS THEN
+            RAISE WARNING USING MESSAGE = 'ANALYSIS_ORDER_AUDIT_ASSEMBLY_FAILED';
+        END;
     END IF;
     RETURN NEW;
 END;
