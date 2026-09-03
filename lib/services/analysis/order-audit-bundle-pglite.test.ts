@@ -10,6 +10,15 @@ const migration = readFileSync(new URL(
 
 const REQUEST_ID = '80000000-0000-4000-8000-000000000001';
 const PREVIOUS_REQUEST_ID = '80000000-0000-4000-8000-000000000002';
+const POSTS_REQUEST_ID = '80000000-0000-4000-8000-000000000003';
+const ZERO_POST_REQUEST_ID = '80000000-0000-4000-8000-000000000004';
+const MISSING_MANIFEST_REQUEST_ID = '80000000-0000-4000-8000-000000000005';
+const INCOHERENT_MANIFEST_REQUEST_ID = '80000000-0000-4000-8000-000000000006';
+const PREFLIGHT_PROFILE_REQUEST_ID = '80000000-0000-4000-8000-000000000007';
+const SUMMARY_PROFILE_REQUEST_ID = '80000000-0000-4000-8000-000000000008';
+const UNION_REQUEST_ID = '80000000-0000-4000-8000-000000000009';
+const PREFLIGHT_PROFILE_ID = '81000000-0000-4000-8000-000000000001';
+const ORDER_ID = '82000000-0000-4000-8000-000000000001';
 const HASH_A = 'a'.repeat(64);
 const HASH_B = 'b'.repeat(64);
 const HASH_C = 'c'.repeat(64);
@@ -42,7 +51,9 @@ CREATE TABLE public.analysis_preflights (
     status TEXT NOT NULL,
     provider_selector TEXT NOT NULL DEFAULT 'selfhosted_auth',
     target_instagram_id TEXT,
-    target_profile_image_url TEXT
+    target_profile_image_url TEXT,
+    target_followers_count INTEGER,
+    target_following_count INTEGER
 );
 CREATE TABLE public.earlybird_orders (
     id UUID PRIMARY KEY,
@@ -71,6 +82,94 @@ CREATE TABLE public.analysis_v2_relationship_manifests (
     detailed_public_count INTEGER NOT NULL,
     updated_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp()
 );
+CREATE OR REPLACE FUNCTION public.analysis_v2_valid_target_evidence_source(
+    p_signal TEXT,
+    p_source JSONB
+)
+RETURNS BOOLEAN
+LANGUAGE sql
+IMMUTABLE
+AS $$
+    SELECT p_signal IN ('target_post_like', 'target_post_comment')
+       AND p_source IS NOT NULL
+       AND pg_catalog.jsonb_typeof(p_source) = 'object'
+       AND p_source ?& ARRAY[
+            'status', 'input_hash', 'provider', 'provider_run_id',
+            'provider_operation_key', 'provider_credential_slot', 'coverage'
+       ]
+       AND p_source - ARRAY[
+            'status', 'input_hash', 'provider', 'provider_run_id',
+            'provider_operation_key', 'provider_credential_slot', 'coverage'
+       ] = '{}'::JSONB
+       AND pg_catalog.jsonb_typeof(p_source->'status') = 'string'
+       AND p_source->>'status' IN ('collected', 'not_applicable')
+       AND pg_catalog.jsonb_typeof(p_source->'input_hash') = 'string'
+       AND p_source->>'input_hash' ~ '^[0-9a-f]{64}$'
+       AND pg_catalog.jsonb_typeof(p_source->'coverage') = 'array'
+       AND pg_catalog.jsonb_array_length(p_source->'coverage') <= CASE p_signal
+            WHEN 'target_post_like' THEN 4 ELSE 6
+       END
+       AND (
+            (
+                p_source->>'status' = 'not_applicable'
+                AND p_source->'provider' = 'null'::JSONB
+                AND p_source->'provider_run_id' = 'null'::JSONB
+                AND p_source->'provider_operation_key' = 'null'::JSONB
+                AND p_source->'provider_credential_slot' = 'null'::JSONB
+                AND pg_catalog.jsonb_array_length(p_source->'coverage') = 0
+            )
+            OR (
+                p_source->>'status' = 'collected'
+                AND pg_catalog.jsonb_typeof(p_source->'provider') = 'string'
+                AND p_source->>'provider' IN ('apify', 'coderx')
+                AND pg_catalog.jsonb_typeof(p_source->'provider_run_id') = 'string'
+                AND p_source->>'provider_run_id' ~ '^[A-Za-z0-9]{8,64}$'
+                AND pg_catalog.jsonb_typeof(p_source->'provider_operation_key') = 'string'
+                AND p_source->>'provider_operation_key' ~ CASE p_signal
+                    WHEN 'target_post_like' THEN '^target-likers:[0-9a-f]{64}$'
+                    ELSE '^target-comments:[0-9a-f]{64}$'
+                END
+                AND pg_catalog.jsonb_typeof(p_source->'provider_credential_slot') = 'string'
+                AND p_source->>'provider_credential_slot' IN ('primary', 'secondary')
+                AND pg_catalog.jsonb_array_length(p_source->'coverage') >= 1
+            )
+       )
+       AND NOT EXISTS (
+            SELECT 1
+            FROM pg_catalog.jsonb_array_elements(p_source->'coverage') AS coverage(value)
+            WHERE pg_catalog.jsonb_typeof(coverage.value) <> 'object'
+               OR NOT coverage.value ?& ARRAY[
+                    'post_id', 'declared_count', 'returned_count', 'requested_limit'
+               ]
+               OR coverage.value - ARRAY[
+                    'post_id', 'declared_count', 'returned_count', 'requested_limit'
+               ] <> '{}'::JSONB
+               OR pg_catalog.jsonb_typeof(coverage.value->'post_id') <> 'string'
+               OR pg_catalog.char_length(coverage.value->>'post_id') NOT BETWEEN 1 AND 255
+               OR coverage.value->>'post_id' ~ '[[:cntrl:]]'
+               OR pg_catalog.jsonb_typeof(coverage.value->'declared_count') <> 'number'
+               OR coverage.value->>'declared_count' !~ '^(0|[1-9][0-9]{0,7})$'
+               OR (coverage.value->>'declared_count')::INTEGER > 10000000
+               OR pg_catalog.jsonb_typeof(coverage.value->'returned_count') <> 'number'
+               OR coverage.value->>'returned_count' !~ '^(0|[1-9][0-9]{0,2})$'
+               OR (coverage.value->>'returned_count')::INTEGER > CASE p_signal
+                    WHEN 'target_post_like' THEN 150 ELSE 15
+               END
+               OR pg_catalog.jsonb_typeof(coverage.value->'requested_limit') <> 'number'
+               OR coverage.value->>'requested_limit' !~ '^(15|150)$'
+               OR (coverage.value->>'requested_limit')::INTEGER <> CASE p_signal
+                    WHEN 'target_post_like' THEN 150 ELSE 15
+               END
+               OR (coverage.value->>'returned_count')::INTEGER
+                    > (coverage.value->>'requested_limit')::INTEGER
+       )
+       AND NOT EXISTS (
+            SELECT 1
+            FROM pg_catalog.jsonb_array_elements(p_source->'coverage') AS coverage(value)
+            GROUP BY coverage.value->>'post_id'
+            HAVING pg_catalog.count(*) > 1
+       );
+$$;
 CREATE TABLE public.analysis_v2_mutual_rows (
     request_id UUID NOT NULL,
     job_key TEXT NOT NULL,
@@ -98,6 +197,8 @@ CREATE TABLE public.analysis_v2_target_evidence_manifests (
     interactor_count INTEGER NOT NULL,
     liker_count INTEGER NOT NULL,
     comment_count INTEGER NOT NULL,
+    liker_source JSONB,
+    comment_source JSONB,
     updated_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp()
 );
 CREATE TABLE public.analysis_v2_candidate_feature_rows (
@@ -272,14 +373,48 @@ describe('permanent order audit bundle SQL behavior', () => {
         await db.exec(bootstrap);
         await db.query(`
             INSERT INTO public.analysis_requests(
-                id, selected_plan_id_snapshot, plan_access_mode_snapshot,
+                id, preflight_id, selected_plan_id_snapshot, plan_access_mode_snapshot,
                 status, policy_versions_snapshot, created_at
             ) VALUES
-                ($1, 'basic', 'production', 'completed',
+                ($1, NULL, 'basic', 'production', 'completed',
                     '{"pipeline":"v2","risk":"risk-policy-v2.5","aiStage":"ai-stage-policy-v2.12","scheduler":"ai-scheduler-v1"}'::jsonb, $3),
-                ($2, 'standard', 'test_entitlement', 'completed',
+                ($2, NULL, 'standard', 'test_entitlement', 'completed',
+                    '{"pipeline":"v2","risk":"risk-policy-v2.5","aiStage":"ai-stage-policy-v2.12","scheduler":"ai-scheduler-v1"}'::jsonb, $3),
+                ($4, NULL, 'basic', 'production', 'completed',
+                    '{"pipeline":"v2","risk":"risk-policy-v2.5","aiStage":"ai-stage-policy-v2.12","scheduler":"ai-scheduler-v1"}'::jsonb, $3),
+                ($5, NULL, 'basic', 'production', 'completed',
+                    '{"pipeline":"v2","risk":"risk-policy-v2.5","aiStage":"ai-stage-policy-v2.12","scheduler":"ai-scheduler-v1"}'::jsonb, $3),
+                ($6, NULL, 'basic', 'production', 'completed',
+                    '{"pipeline":"v2","risk":"risk-policy-v2.5","aiStage":"ai-stage-policy-v2.12","scheduler":"ai-scheduler-v1"}'::jsonb, $3),
+                ($7, NULL, 'basic', 'production', 'completed',
+                    '{"pipeline":"v2","risk":"risk-policy-v2.5","aiStage":"ai-stage-policy-v2.12","scheduler":"ai-scheduler-v1"}'::jsonb, $3),
+                ($8, $11, 'basic', 'production', 'completed',
                     '{"pipeline":"v2","risk":"risk-policy-v2.5","aiStage":"ai-stage-policy-v2.12","scheduler":"ai-scheduler-v1"}'::jsonb, $3)
-        `, [REQUEST_ID, PREVIOUS_REQUEST_ID, NOW]);
+                ,($9, NULL, 'basic', 'production', 'completed',
+                    '{"pipeline":"v2","risk":"risk-policy-v2.5","aiStage":"ai-stage-policy-v2.12","scheduler":"ai-scheduler-v1"}'::jsonb, $3)
+                ,($10, NULL, 'basic', 'production', 'completed',
+                    '{"pipeline":"v2","risk":"risk-policy-v2.5","aiStage":"ai-stage-policy-v2.12","scheduler":"ai-scheduler-v1"}'::jsonb, $3)
+        `, [
+            REQUEST_ID, PREVIOUS_REQUEST_ID, NOW, POSTS_REQUEST_ID,
+            ZERO_POST_REQUEST_ID, MISSING_MANIFEST_REQUEST_ID,
+            INCOHERENT_MANIFEST_REQUEST_ID, PREFLIGHT_PROFILE_REQUEST_ID,
+            SUMMARY_PROFILE_REQUEST_ID, UNION_REQUEST_ID, PREFLIGHT_PROFILE_ID,
+        ]);
+        await db.query(`
+            INSERT INTO public.analysis_preflights(
+                id, consumed_request_id, status, target_instagram_id,
+                target_profile_image_url, target_followers_count, target_following_count
+            ) VALUES ($1, $2, 'consumed', 'profile.noimage', NULL, 0, 0)
+        `, [PREFLIGHT_PROFILE_ID, PREFLIGHT_PROFILE_REQUEST_ID]);
+        await db.query(`
+            INSERT INTO public.analysis_v2_result_summaries(
+                request_id, target_instagram_id, target_profile_image_url, plan_id
+            ) VALUES ($1, 'summary.noimage', NULL, 'basic')
+        `, [SUMMARY_PROFILE_REQUEST_ID]);
+        await db.query(`
+            INSERT INTO public.earlybird_orders(id, result_request_id)
+            VALUES ($1, $2)
+        `, [ORDER_ID, REQUEST_ID]);
         await db.exec(migration);
     });
 
@@ -297,6 +432,8 @@ describe('permanent order audit bundle SQL behavior', () => {
         expect(payload.status).toBe('partial');
         expect(payload.version).toBe(1);
         expect(payload.cost).toMatchObject({ usageUnknown: true, status: 'unknown' });
+        expect(payload).toMatchObject({ orderId: ORDER_ID });
+        expect(payload).not.toHaveProperty('user_id');
         expect(payload.gapCodes).toEqual(expect.arrayContaining([
             'TARGET_PROFILE_MISSING',
             'TARGET_POSTS_MISSING',
@@ -308,6 +445,185 @@ describe('permanent order audit bundle SQL behavior', () => {
             [REQUEST_ID],
         );
         expect(count.rows[0]?.count).toBe(1);
+    });
+
+    it('counts distinct manifest coverage posts even when interactions are zero', async () => {
+        const likerSource = {
+            status: 'collected',
+            input_hash: HASH_A,
+            provider: 'apify',
+            provider_run_id: 'likerrun01',
+            provider_operation_key: `target-likers:${HASH_A}`,
+            provider_credential_slot: 'primary',
+            coverage: [{
+                post_id: 'post-without-interactions',
+                declared_count: 1,
+                returned_count: 0,
+                requested_limit: 150,
+            }],
+        };
+        const commentSource = {
+            status: 'not_applicable',
+            input_hash: HASH_B,
+            provider: null,
+            provider_run_id: null,
+            provider_operation_key: null,
+            provider_credential_slot: null,
+            coverage: [],
+        };
+        await db.query(`
+            INSERT INTO public.analysis_v2_target_evidence_manifests(
+                request_id, result_hash, interactor_count, liker_count, comment_count,
+                liker_source, comment_source
+            ) VALUES ($1, $2, 0, 0, 0, $3::jsonb, $4::jsonb)
+        `, [POSTS_REQUEST_ID, HASH_C, JSON.stringify(likerSource), JSON.stringify(commentSource)]);
+
+        const assembled = await db.query<{ payload: unknown }>(
+            'SELECT public.assemble_analysis_order_audit_bundle($1) AS payload',
+            [POSTS_REQUEST_ID],
+        );
+        const payload = assembled.rows[0]?.payload as Record<string, unknown>;
+        expect(payload).toMatchObject({
+            targetPostsAvailable: true,
+            targetPostCount: 1,
+            interactions: { declared: 0, collected: 0 },
+            stageStatus: { targetEvidence: true },
+        });
+        expect(payload.gapCodes).not.toContain('TARGET_POSTS_MISSING');
+    });
+
+    it('publishes a valid zero-post manifest without inventing a missing gap', async () => {
+        const notApplicable = {
+            status: 'not_applicable',
+            input_hash: HASH_A,
+            provider: null,
+            provider_run_id: null,
+            provider_operation_key: null,
+            provider_credential_slot: null,
+            coverage: [],
+        };
+        await db.query(`
+            INSERT INTO public.analysis_v2_target_evidence_manifests(
+                request_id, result_hash, interactor_count, liker_count, comment_count,
+                liker_source, comment_source
+            ) VALUES ($1, $2, 0, 0, 0, $3::jsonb, $3::jsonb)
+        `, [ZERO_POST_REQUEST_ID, HASH_C, JSON.stringify(notApplicable)]);
+
+        const assembled = await db.query<{ payload: unknown }>(
+            'SELECT public.assemble_analysis_order_audit_bundle($1) AS payload',
+            [ZERO_POST_REQUEST_ID],
+        );
+        const payload = assembled.rows[0]?.payload as Record<string, unknown>;
+        expect(payload).toMatchObject({
+            targetPostsAvailable: false,
+            targetPostCount: 0,
+            interactions: { declared: 0, collected: 0 },
+            stageStatus: { targetEvidence: true },
+        });
+        expect(payload.gapCodes).not.toContain('TARGET_POSTS_MISSING');
+    });
+
+    it('treats a missing target evidence manifest as a target-post gap', async () => {
+        const assembled = await db.query<{ payload: unknown }>(
+            'SELECT public.assemble_analysis_order_audit_bundle($1) AS payload',
+            [MISSING_MANIFEST_REQUEST_ID],
+        );
+        const payload = assembled.rows[0]?.payload as Record<string, unknown>;
+        expect(payload).toMatchObject({
+            targetPostsAvailable: false,
+            targetPostCount: null,
+            stageStatus: { targetEvidence: false },
+        });
+        expect(payload.gapCodes).toContain('TARGET_POSTS_MISSING');
+    });
+
+    it('treats an incoherent target evidence manifest as a target-post gap', async () => {
+        await db.query(`
+            INSERT INTO public.analysis_v2_target_evidence_manifests(
+                request_id, result_hash, interactor_count, liker_count, comment_count,
+                liker_source, comment_source
+            ) VALUES ($1, $2, 0, 0, 0, '{"status":"collected","coverage":[]}'::jsonb,
+                '{"status":"not_applicable","coverage":[]}'::jsonb)
+        `, [INCOHERENT_MANIFEST_REQUEST_ID, HASH_C]);
+
+        const assembled = await db.query<{ payload: unknown }>(
+            'SELECT public.assemble_analysis_order_audit_bundle($1) AS payload',
+            [INCOHERENT_MANIFEST_REQUEST_ID],
+        );
+        const payload = assembled.rows[0]?.payload as Record<string, unknown>;
+        expect(payload).toMatchObject({
+            targetPostsAvailable: false,
+            targetPostCount: null,
+            stageStatus: { targetEvidence: false },
+        });
+        expect(payload.gapCodes).toContain('TARGET_POSTS_MISSING');
+    });
+
+    it('deduplicates post ids across liker and comment coverage', async () => {
+        const source = (signal: 'liker' | 'comment', postIds: string[]) => ({
+            status: 'collected',
+            input_hash: signal === 'liker' ? HASH_A : HASH_B,
+            provider: 'apify',
+            provider_run_id: `${signal}run01`,
+            provider_operation_key: `${signal === 'liker' ? 'target-likers' : 'target-comments'}:${signal === 'liker' ? HASH_A : HASH_B}`,
+            provider_credential_slot: 'primary',
+            coverage: postIds.map(post_id => ({
+                post_id,
+                declared_count: 1,
+                returned_count: 0,
+                requested_limit: signal === 'liker' ? 150 : 15,
+            })),
+        });
+        await db.query(`
+            INSERT INTO public.analysis_v2_target_evidence_manifests(
+                request_id, result_hash, interactor_count, liker_count, comment_count,
+                liker_source, comment_source
+            ) VALUES ($1, $2, 2, 1, 1, $3::jsonb, $4::jsonb)
+        `, [
+            UNION_REQUEST_ID,
+            HASH_C,
+            JSON.stringify(source('liker', ['shared-post', 'liker-only'])),
+            JSON.stringify(source('comment', ['shared-post', 'comment-only'])),
+        ]);
+
+        const assembled = await db.query<{ payload: unknown }>(
+            'SELECT public.assemble_analysis_order_audit_bundle($1) AS payload',
+            [UNION_REQUEST_ID],
+        );
+        const payload = assembled.rows[0]?.payload as Record<string, unknown>;
+        expect(payload).toMatchObject({
+            targetPostsAvailable: true,
+            targetPostCount: 3,
+            interactions: { declared: 2 },
+            stageStatus: { targetEvidence: true },
+        });
+        expect(payload.gapCodes).not.toContain('TARGET_POSTS_MISSING');
+    });
+
+    it('accepts a profile proven by preflight counts when its image is null', async () => {
+        const assembled = await db.query<{ payload: unknown }>(
+            'SELECT public.assemble_analysis_order_audit_bundle($1) AS payload',
+            [PREFLIGHT_PROFILE_REQUEST_ID],
+        );
+        const payload = assembled.rows[0]?.payload as Record<string, unknown>;
+        expect(payload).toMatchObject({
+            targetInstagramId: 'profile.noimage',
+            targetProfileAvailable: true,
+        });
+        expect(payload.gapCodes).not.toContain('TARGET_PROFILE_MISSING');
+    });
+
+    it('accepts a completed result summary as profile evidence without an image', async () => {
+        const assembled = await db.query<{ payload: unknown }>(
+            'SELECT public.assemble_analysis_order_audit_bundle($1) AS payload',
+            [SUMMARY_PROFILE_REQUEST_ID],
+        );
+        const payload = assembled.rows[0]?.payload as Record<string, unknown>;
+        expect(payload).toMatchObject({
+            targetInstagramId: 'summary.noimage',
+            targetProfileAvailable: true,
+        });
+        expect(payload.gapCodes).not.toContain('TARGET_PROFILE_MISSING');
     });
 
     it('appends a new version on source change, is idempotent for the same source set, and rejects mutation', async () => {
@@ -415,6 +731,16 @@ describe('permanent order audit bundle SQL behavior', () => {
             distinct_count: '1002',
             max_ordinal: '1002',
         });
+        const reverseOrdinal = await db.query<{ min_ordinal: string; max_ordinal: string }>(
+            `SELECT min(ordinal)::TEXT AS min_ordinal, max(ordinal)::TEXT AS max_ordinal
+               FROM public.analysis_order_audit_interactions
+              WHERE request_id = $1 AND version = 2
+                AND signal = 'candidate_post_like'`,
+            [REQUEST_ID],
+        );
+        expect(reverseOrdinal.rows[0]).toEqual({ min_ordinal: '1002', max_ordinal: '1002' });
+        expect(String(secondCounts.rows[0]?.interaction_collected))
+            .toBe(secondInteractionOrdinals.rows[0]?.count);
 
         const repeat = await db.query<{ payload: unknown }>(
             'SELECT public.assemble_analysis_order_audit_bundle($1) AS payload',
@@ -426,7 +752,8 @@ describe('permanent order audit bundle SQL behavior', () => {
             INSERT INTO public.analysis_v2_cost_rollup_snapshots(
                 request_id, total_known_cost_usd, total_conservative_cost_usd,
                 directly_attributable_cost_complete, usage_unknown, cost_provenance
-            ) VALUES ($1, 0.42, 0.42, TRUE, FALSE, '{"source":"reconciled"}'::jsonb)
+            ) VALUES ($1, 0.42, 0.42, TRUE, FALSE,
+                '{"source":"reconciled","provider":{"actualUsd":0.12},"ai":{"estimatedUsd":0.30},"user_id":"redacted"}'::jsonb)
         `, [REQUEST_ID]);
         const reconciled = await db.query<{ payload: unknown }>(
             'SELECT public.assemble_analysis_order_audit_bundle($1) AS payload',
@@ -440,6 +767,12 @@ describe('permanent order audit bundle SQL behavior', () => {
             usageUnknown: false,
             status: 'complete',
         });
+        expect((reconciledPayload.cost as Record<string, unknown>).provenance).toMatchObject({
+            source: 'reconciled',
+            provider: { actualUsd: 0.12 },
+            ai: { estimatedUsd: 0.3 },
+        });
+        expect(reconciledPayload.cost).not.toHaveProperty('provenance.user_id');
 
         const duplicateEnqueue = await db.query<{ payload: Record<string, unknown> }>(
             'SELECT public.enqueue_analysis_order_audit_bundle($1) AS payload',
@@ -609,6 +942,15 @@ describe('permanent order audit bundle SQL behavior', () => {
             );
             expect(summaryInsert.rows).toHaveLength(1);
 
+            const costAttributionInsert = await db.query<{ request_id: string }>(
+                `INSERT INTO public.analysis_v2_cost_attributions(
+                    request_id, preflight_id, source_kind, source_operation_key
+                 ) VALUES ($1, $2, 'provider', 'provider:queue-outage')
+                 RETURNING request_id`,
+                [REQUEST_ID, PREFLIGHT_PROFILE_ID],
+            );
+            expect(costAttributionInsert.rows).toHaveLength(1);
+
             const costUpdate = await db.query<{ request_id: string }>(
                 `UPDATE public.analysis_v2_cost_rollup_snapshots
                     SET total_known_cost_usd = 0.77,
@@ -639,6 +981,13 @@ describe('permanent order audit bundle SQL behavior', () => {
             [PREVIOUS_REQUEST_ID],
         );
         expect(committedSummary.rows).toHaveLength(1);
+        const committedCostAttribution = await db.query<{ request_id: string }>(
+            `SELECT request_id
+               FROM public.analysis_v2_cost_attributions
+              WHERE request_id = $1 AND source_operation_key = 'provider:queue-outage'`,
+            [REQUEST_ID],
+        );
+        expect(committedCostAttribution.rows).toHaveLength(1);
         const committedCost = await db.query<{
             request_id: string;
             total_known_cost_usd: string;

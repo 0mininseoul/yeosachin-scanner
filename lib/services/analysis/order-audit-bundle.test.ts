@@ -30,6 +30,7 @@ describe('permanent order audit bundle service boundary', () => {
             version: 2,
             bundleHash: 'a'.repeat(64),
             sourceSetHash: 'b'.repeat(64),
+            orderId: '423e4567-e89b-42d3-a456-426614174001',
             gapCodes: ['COST_USAGE_UNKNOWN'],
             cost: {
                 currency: 'USD',
@@ -37,6 +38,10 @@ describe('permanent order audit bundle service boundary', () => {
                 conservativeUsd: 0,
                 usageUnknown: true,
                 status: 'unknown',
+                provenance: {
+                    provider: { actualUsd: 0.12 },
+                    ai: { estimatedUsd: 0.3 },
+                },
             },
         } satisfies OrderAuditBundlePayload;
         const rpc = vi.fn(async () => ({ data: payload, error: null }));
@@ -45,6 +50,12 @@ describe('permanent order audit bundle service boundary', () => {
             .resolves.toEqual(payload);
         expect(payload.cost.knownUsd).toBeNull();
         expect(payload.cost.usageUnknown).toBe(true);
+        expect(payload).toMatchObject({ orderId: '423e4567-e89b-42d3-a456-426614174001' });
+        expect(payload).not.toHaveProperty('user_id');
+        expect(payload.cost.provenance).toMatchObject({
+            provider: { actualUsd: 0.12 },
+            ai: { estimatedUsd: 0.3 },
+        });
         expect(rpc).toHaveBeenCalledWith('assemble_analysis_order_audit_bundle', {
             p_request_id: requestId,
         });

@@ -881,7 +881,7 @@ AS $$
         'schedulerPolicyVersion', p_bundle.scheduler_policy_version,
         'planId', p_bundle.plan_id,
         'accessMode', p_bundle.access_mode,
-        'orderId', NULL,
+        'orderId', p_bundle.order_id,
         'targetInstagramId', p_bundle.target_instagram_id,
         'targetProfileAvailable', p_bundle.target_profile_available,
         'targetPostsAvailable', p_bundle.target_posts_available,
@@ -1067,8 +1067,11 @@ BEGIN
         NULLIF(v_preflight.target_instagram_id, '')
     );
     v_target_profile_available := (
-        NULLIF(v_summary.target_profile_image_url, '') IS NOT NULL
-        OR NULLIF(v_preflight.target_profile_image_url, '') IS NOT NULL
+        v_summary.request_id IS NOT NULL
+        OR (
+            v_preflight.target_followers_count IS NOT NULL
+            AND v_preflight.target_following_count IS NOT NULL
+        )
     );
     v_target_posts_available := FALSE;
     v_plan_id := COALESCE(NULLIF(v_request.selected_plan_id_snapshot, ''), v_summary.plan_id);
@@ -1148,17 +1151,41 @@ BEGIN
     END IF;
 
     SELECT target_manifest.job_key, target_manifest.result_hash, target_manifest.interactor_count,
-           target_manifest.liker_count, target_manifest.comment_count
+           target_manifest.liker_count, target_manifest.comment_count,
+           target_manifest.liker_source, target_manifest.comment_source
       INTO v_target_evidence
       FROM public.analysis_v2_target_evidence_manifests AS target_manifest
      WHERE target_manifest.request_id = p_request_id
      ORDER BY target_manifest.updated_at DESC NULLS LAST
      LIMIT 1;
-    IF v_target_evidence.interactor_count IS NULL THEN
+    IF v_target_evidence.job_key IS NULL
+       OR v_target_evidence.interactor_count IS NULL
+       OR v_target_evidence.liker_count IS NULL
+       OR v_target_evidence.comment_count IS NULL
+       OR NOT public.analysis_v2_valid_target_evidence_source(
+           'target_post_like', v_target_evidence.liker_source
+       )
+       OR NOT public.analysis_v2_valid_target_evidence_source(
+           'target_post_comment', v_target_evidence.comment_source
+       )
+       OR v_target_evidence.liker_count + v_target_evidence.comment_count
+            IS DISTINCT FROM v_target_evidence.interactor_count THEN
         v_gaps := pg_catalog.array_append(v_gaps, 'TARGET_POSTS_MISSING');
     ELSE
-        v_target_posts_available := TRUE;
-        v_target_post_count := v_target_evidence.interactor_count;
+        SELECT pg_catalog.count(*)::INTEGER
+          INTO v_target_post_count
+          FROM (
+              SELECT coverage.value->>'post_id' AS post_id
+              FROM pg_catalog.jsonb_array_elements(
+                  v_target_evidence.liker_source->'coverage'
+              ) AS coverage(value)
+              UNION
+              SELECT coverage.value->>'post_id' AS post_id
+              FROM pg_catalog.jsonb_array_elements(
+                  v_target_evidence.comment_source->'coverage'
+              ) AS coverage(value)
+          ) AS target_posts;
+        v_target_posts_available := v_target_post_count > 0;
         v_interaction_declared := v_target_evidence.interactor_count;
         v_target_evidence_ready := TRUE;
     END IF;
@@ -1241,6 +1268,8 @@ BEGIN
         v_inconsistent := TRUE;
     END IF;
 
+    -- Compute the target ordinal boundary and reverse count before inserting the immutable parent;
+    -- the resulting complete total is materialized in the child copy below.
     SELECT COALESCE(pg_catalog.max(interaction.ordinal), 0)::INTEGER
       INTO v_target_interaction_max_ordinal
       FROM public.analysis_target_interactors AS interaction
@@ -1326,6 +1355,7 @@ BEGIN
             v_gaps := pg_catalog.array_append(v_gaps, 'VERTEX_USAGE_GAP');
         END IF;
     END IF;
+    v_order_id := COALESCE(v_order_id, v_cost.order_id);
     v_cost_status := CASE
         WHEN v_cost.request_id IS NULL THEN 'not_available'
         WHEN v_cost_complete THEN 'complete'
@@ -1530,6 +1560,8 @@ BEGIN
         );
     END IF;
 
+    -- Keep candidate declared/collected values from their carried authoritative variables. In a
+    -- late cost-only version those variables are restored from the previous immutable parent.
     INSERT INTO public.analysis_order_audit_bundles (
         request_id, version, bundle_hash, previous_version_hash, source_set_hash,
         pipeline_version, pipeline_policy, risk_policy_version, ai_policy_version,
