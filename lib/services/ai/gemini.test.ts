@@ -735,6 +735,26 @@ describe('analyzeWithGemini stage request policy', () => {
         }
     );
 
+    it('proves the V2 transport uses inline contents and never sends cachedContent', async () => {
+        await analyzeWithGemini('inline-only prompt', ['image'], {
+            schema: responseSchema,
+            stage: 'featureAnalysis',
+            ...stageAuditOptions(),
+        });
+
+        const request = mocks.generateContent.mock.calls[0][0] as {
+            contents?: Array<{ parts?: Array<Record<string, unknown>> }>;
+            config?: Record<string, unknown>;
+            cachedContent?: unknown;
+        };
+        expect(request.contents).toHaveLength(1);
+        expect(request.contents?.[0]?.parts).toEqual(expect.arrayContaining([
+            expect.objectContaining({ text: 'inline-only prompt' }),
+        ]));
+        expect(request).not.toHaveProperty('cachedContent');
+        expect(request.config).not.toHaveProperty('cachedContent');
+    });
+
     it('admits only the bounded v2.9 two-account gender microbatch media override', async () => {
         const images = Array.from({ length: 11 }, (_, index) => `image-${index}`);
         await analyzeWithGemini('prompt', images, {
