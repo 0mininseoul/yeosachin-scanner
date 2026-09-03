@@ -360,6 +360,21 @@ describe('permanent order audit bundle SQL behavior', () => {
             ) VALUES ($1, 'track:target-evidence:collect', 1, 'candidate.one',
                 'target-post-1', 'target_post_comment', 'comment-1', 'hello', '{"confidence":"high"}')
         `, [REQUEST_ID]);
+        await db.query(`
+            INSERT INTO public.analysis_target_interactors(
+                request_id, job_key, ordinal, actor_username, post_id, signal,
+                source_interaction_id
+            )
+            SELECT $1, 'track:target-evidence:collect', item.ordinal, 'candidate.one',
+                'target-post-' || item.ordinal::TEXT, 'target_post_like',
+                'target-interaction-' || item.ordinal::TEXT
+              FROM generate_series(2, 1001) AS item(ordinal)
+        `, [REQUEST_ID]);
+        await db.query(`
+            INSERT INTO public.analysis_v2_reverse_like_rows(
+                request_id, candidate_id, evidence_ref_ids
+            ) VALUES ($1, 'candidate:one', ARRAY['candidate-post-1'])
+        `, [REQUEST_ID]);
 
         const second = await db.query<{ payload: unknown }>(
             'SELECT public.assemble_analysis_order_audit_bundle($1) AS payload',
@@ -368,6 +383,38 @@ describe('permanent order audit bundle SQL behavior', () => {
         const secondPayload = second.rows[0]?.payload as Record<string, unknown>;
         expect(secondPayload.version).toBe(2);
         expect(secondPayload.previousVersionHash).toBeTruthy();
+        const secondCounts = await db.query<{
+            candidate_declared: number;
+            candidate_collected: number;
+            interaction_collected: number;
+        }>(
+            `SELECT candidate_declared, candidate_collected, interaction_collected
+               FROM public.analysis_order_audit_bundles
+              WHERE request_id = $1 AND version = 2`,
+            [REQUEST_ID],
+        );
+        expect(secondCounts.rows[0]).toMatchObject({
+            candidate_declared: 1,
+            candidate_collected: 1,
+            interaction_collected: 1002,
+        });
+        const secondInteractionOrdinals = await db.query<{
+            count: string;
+            distinct_count: string;
+            max_ordinal: string;
+        }>(
+            `SELECT count(*)::TEXT AS count,
+                    count(DISTINCT ordinal)::TEXT AS distinct_count,
+                    max(ordinal)::TEXT AS max_ordinal
+               FROM public.analysis_order_audit_interactions
+              WHERE request_id = $1 AND version = 2`,
+            [REQUEST_ID],
+        );
+        expect(secondInteractionOrdinals.rows[0]).toEqual({
+            count: '1002',
+            distinct_count: '1002',
+            max_ordinal: '1002',
+        });
 
         const repeat = await db.query<{ payload: unknown }>(
             'SELECT public.assemble_analysis_order_audit_bundle($1) AS payload',
@@ -393,6 +440,32 @@ describe('permanent order audit bundle SQL behavior', () => {
             usageUnknown: false,
             status: 'complete',
         });
+
+        const duplicateEnqueue = await db.query<{ payload: Record<string, unknown> }>(
+            'SELECT public.enqueue_analysis_order_audit_bundle($1) AS payload',
+            [REQUEST_ID],
+        );
+        expect(duplicateEnqueue.rows[0]?.payload).toMatchObject({
+            status: 'queued',
+            requestId: REQUEST_ID,
+        });
+        const queueAfterDuplicate = await db.query<{ status: string }>(
+            'SELECT status FROM public.analysis_order_audit_assembly_queue WHERE request_id = $1',
+            [REQUEST_ID],
+        );
+        expect(queueAfterDuplicate.rows[0]?.status).toBe('completed');
+
+        await db.query(
+            `UPDATE public.analysis_v2_cost_rollup_snapshots
+                SET cost_provenance = '{"source":"reconciled-late"}'::jsonb
+              WHERE request_id = $1`,
+            [REQUEST_ID],
+        );
+        const queueAfterCostRefresh = await db.query<{ status: string }>(
+            'SELECT status FROM public.analysis_order_audit_assembly_queue WHERE request_id = $1',
+            [REQUEST_ID],
+        );
+        expect(queueAfterCostRefresh.rows[0]?.status).toBe('queued');
 
         await expect(db.query(
             `UPDATE public.analysis_order_audit_bundles
@@ -452,10 +525,70 @@ describe('permanent order audit bundle SQL behavior', () => {
         expect(payload.rows).toEqual(expect.arrayContaining([
             expect.objectContaining({ commentText: 'hello' }),
         ]));
+
+        await db.exec(`
+            DELETE FROM public.analysis_v2_relationship_sides WHERE request_id = '${REQUEST_ID}';
+            DELETE FROM public.analysis_v2_relationship_manifests WHERE request_id = '${REQUEST_ID}';
+            DELETE FROM public.analysis_v2_mutual_rows WHERE request_id = '${REQUEST_ID}';
+            DELETE FROM public.analysis_v2_candidate_feature_rows WHERE request_id = '${REQUEST_ID}';
+            DELETE FROM public.analysis_v2_candidate_score_rows WHERE request_id = '${REQUEST_ID}';
+        `);
+        await db.query(
+            `UPDATE public.analysis_v2_cost_rollup_snapshots
+                SET total_known_cost_usd = 0.55,
+                    total_conservative_cost_usd = 0.55,
+                    cost_provenance = '{"source":"post-purge-reconciliation"}'::jsonb
+              WHERE request_id = $1`,
+            [REQUEST_ID],
+        );
+        const late = await db.query<{ payload: unknown }>(
+            'SELECT public.assemble_analysis_order_audit_bundle($1) AS payload',
+            [REQUEST_ID],
+        );
+        const latePayload = late.rows[0]?.payload as Record<string, unknown>;
+        expect(latePayload.cost).toMatchObject({ knownUsd: 0.55, usageUnknown: false });
+        const lateCounts = await db.query<{
+            candidate_declared: number;
+            candidate_collected: number;
+            interaction_collected: number;
+        }>(
+            `SELECT candidate_declared, candidate_collected, interaction_collected
+               FROM public.analysis_order_audit_bundles
+              WHERE request_id = $1
+              ORDER BY version DESC
+              LIMIT 1`,
+            [REQUEST_ID],
+        );
+        expect(lateCounts.rows[0]).toMatchObject({
+            candidate_declared: 1,
+            candidate_collected: 1,
+            interaction_collected: 1002,
+        });
+        const lateChildCount = await db.query<{ count: string }>(
+            `SELECT count(*)::TEXT AS count
+               FROM public.analysis_order_audit_interactions
+              WHERE request_id = $1
+                AND version = (SELECT max(version)
+                                 FROM public.analysis_order_audit_bundles
+                                WHERE request_id = $1)`,
+            [REQUEST_ID],
+        );
+        expect(lateChildCount.rows[0]?.count).toBe('1002');
+        const lateInteractions = await db.query<{ payload: unknown }>(
+            `SELECT public.load_analysis_order_audit_bundle(
+                $1, 'interactions', 0, 10, 'comments'
+            ) AS payload`,
+            [REQUEST_ID],
+        );
+        expect((lateInteractions.rows[0]?.payload as Record<string, unknown>).rows)
+            .toEqual(expect.arrayContaining([
+                expect.objectContaining({ commentText: 'hello' }),
+            ]));
     });
 
     it('keeps request and cost DML committed when enqueue trigger queue writes fail', async () => {
         await db.exec('BEGIN');
+        let committed = false;
         try {
             await db.exec('DROP TABLE public.analysis_order_audit_assembly_queue');
 
@@ -475,8 +608,51 @@ describe('permanent order audit bundle SQL behavior', () => {
                 [PREVIOUS_REQUEST_ID],
             );
             expect(summaryInsert.rows).toHaveLength(1);
+
+            const costUpdate = await db.query<{ request_id: string }>(
+                `UPDATE public.analysis_v2_cost_rollup_snapshots
+                    SET total_known_cost_usd = 0.77,
+                        total_conservative_cost_usd = 0.77,
+                        directly_attributable_cost_complete = TRUE,
+                        usage_unknown = FALSE,
+                        cost_provenance = '{"source":"queue-outage"}'::jsonb
+                  WHERE request_id = $1
+                RETURNING request_id`,
+                [REQUEST_ID],
+            );
+            expect(costUpdate.rows).toHaveLength(1);
+            await db.exec('COMMIT');
+            committed = true;
         } finally {
-            await db.exec('ROLLBACK');
+            if (!committed) {
+                await db.exec('ROLLBACK');
+            }
         }
+
+        const committedRequest = await db.query<{ status: string }>(
+            'SELECT status FROM public.analysis_requests WHERE id = $1',
+            [REQUEST_ID],
+        );
+        expect(committedRequest.rows[0]?.status).toBe('completed');
+        const committedSummary = await db.query<{ request_id: string }>(
+            'SELECT request_id FROM public.analysis_v2_result_summaries WHERE request_id = $1',
+            [PREVIOUS_REQUEST_ID],
+        );
+        expect(committedSummary.rows).toHaveLength(1);
+        const committedCost = await db.query<{
+            request_id: string;
+            total_known_cost_usd: string;
+            usage_unknown: boolean;
+        }>(
+            `SELECT request_id, total_known_cost_usd, usage_unknown
+               FROM public.analysis_v2_cost_rollup_snapshots
+              WHERE request_id = $1`,
+            [REQUEST_ID],
+        );
+        expect(committedCost.rows[0]).toMatchObject({
+            request_id: REQUEST_ID,
+            total_known_cost_usd: '0.77',
+            usage_unknown: false,
+        });
     });
 });
