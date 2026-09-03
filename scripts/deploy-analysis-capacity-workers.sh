@@ -895,7 +895,6 @@ deploy_lock_url=""
 deploy_lock_generation=""
 deploy_lock_acquired="false"
 rollback_armed="false"
-previous_traffic_json='[]'
 previous_traffic_projection='[]'
 previous_traffic_spec=''
 staged_revision=''
@@ -1021,6 +1020,24 @@ env_value() {
   jq -r --arg key "$key" \
     '[.spec.template.spec.containers[]?.env[]? | select(.name == $key) | .value][0] // empty' \
     <<<"$service_json"
+}
+
+# Cloud Run represents the attached runtime identity in the service/revision
+# spec, not as a container environment variable.  Keep the role-specific
+# manifest alias bound to that exact control-plane field at verification time.
+runtime_identity_value() {
+  local config="$1"
+  jq -r '.spec.template.spec.serviceAccountName // .spec.serviceAccountName // empty' \
+    <<<"$config"
+}
+
+observed_manifest_value() {
+  local key="$1"
+  if [[ "$key" == "$runtime_var" ]]; then
+    runtime_identity_value "$service_json"
+  else
+    env_value "$key"
+  fi
 }
 
 canonical_service_url() {
@@ -1176,6 +1193,15 @@ verify_staged_revision() {
       '[.spec.containers[]?.env[]? | select(.name == $key) | .value][0] // empty' \
       <<<"$revision_json"
   }
+  local revision_manifest_value
+  revision_manifest_value() {
+    local key="$1"
+    if [[ "$key" == "$runtime_var" ]]; then
+      runtime_identity_value "$revision_json"
+    else
+      revision_env_value "$key"
+    fi
+  }
   local revision_secret_ref
   revision_secret_ref() {
     local env_name="$1"
@@ -1191,7 +1217,7 @@ verify_staged_revision() {
   }
   while IFS= read -r key; do
     expected_value="$(manifest_value "$env_file" "$key")"
-    [[ "$(revision_env_value "$key")" == "$expected_value" ]] \
+    [[ "$(revision_manifest_value "$key")" == "$expected_value" ]] \
       || die "Cloud Run staged revision environment drifted for $key"
   done < <(jq -r 'keys[]' "$env_file")
   [[ "$(jq -r '.spec.serviceAccountName // empty' <<<"$revision_json")" == "$runtime" ]] \
@@ -1378,20 +1404,20 @@ verify_service_contract() {
     || die "Cloud Run memory contract drifted"
   while IFS= read -r manifest_key; do
     manifest_expected="$(manifest_value "$env_file" "$manifest_key")"
-    observed_manifest_value="$(env_value "$manifest_key")"
-    if [[ "$observed_manifest_value" == "$manifest_expected" ]]; then
+    observed_value="$(observed_manifest_value "$manifest_key")"
+    if [[ "$observed_value" == "$manifest_expected" ]]; then
       continue
     fi
     if [[ "$allow_bootstrap_initial_transition_for_contract" == "true" ]] \
        && bootstrap_initial_transition_value_is_allowed \
-         "$manifest_key" "$observed_manifest_value" "$manifest_expected"; then
+         "$manifest_key" "$observed_value" "$manifest_expected"; then
       log "bootstrap: allowing exact activation transition for $manifest_key"
       continue
     fi
     case "$manifest_key" in
       ANALYSIS_V2_WORKER_ENABLED|ANALYSIS_V2_RECOVERY_ENABLED)
         if [[ "$allow_bootstrap_cross_role_gate_transition" == "true" \
-           && "$observed_manifest_value" == "true" \
+           && "$observed_value" == "true" \
            && "$manifest_expected" == "false" ]]; then
           log "bootstrap: tolerating stale preflight cross-role $manifest_key=true before apply"
           continue
@@ -1486,7 +1512,6 @@ if service_exists; then
   service_json="$(gcloud run services describe "$service" \
     "--project=$project" "--region=$region" '--format=json')" \
     || die "Cloud Run service could not be observed for stage transition"
-  previous_traffic_json="$(jq -c '.status.traffic // []' <<<"$service_json")"
   previous_traffic_projection="$(traffic_projection "$service_json")"
   previous_traffic_spec="$(traffic_revision_spec "$service_json")"
   [[ -n "$previous_traffic_spec" ]] \
@@ -1515,7 +1540,6 @@ if service_exists; then
 else
   [[ "$stage" == "bootstrap" ]] \
     || die "active capacity stages require an existing, verified bootstrap service"
-  previous_traffic_json='[]'
   previous_traffic_projection='[]'
   previous_traffic_spec=''
   previous_ready_revision=''
@@ -1535,7 +1559,7 @@ else
   staged_revision="$(jq -r '.status.latestCreatedRevisionName // empty' <<<"$service_json")"
   [[ -n "$staged_revision" && "$staged_revision" != "$previous_ready_revision" ]] \
     || die "Cloud Run did not expose a new exact staged ready revision"
-  [[ "$(jq -c '.status.traffic // []' <<<"$service_json")" == "$previous_traffic_json" ]] \
+  [[ "$(traffic_projection "$service_json")" == "$previous_traffic_projection" ]] \
     || die "Cloud Run traffic changed while the staged revision was being verified"
   verify_staged_revision "$staged_revision"
   verify_legacy_quiescence
