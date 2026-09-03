@@ -2,9 +2,10 @@ import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync 
 import { execFileSync, spawnSync } from 'node:child_process';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
+import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
 
-const root = new URL('../', import.meta.url);
+const root = fileURLToPath(new URL('../', import.meta.url));
 // Every child command in this contract suite is deliberately bounded.  The
 // suite exercises shell wrappers, so an accidentally waiting fake command must
 // fail the test deterministically instead of leaving Vitest's worker RPC
@@ -183,15 +184,15 @@ function runQueue(script: string, args: string[], extra: Record<string, string> 
         ? join(fixtureDir, 'source')
         : '.';
     if (script === 'deploy-analysis-capacity-workers.sh') {
-        execFileSync('git', ['clone', '--quiet', '--no-local', root.pathname, sourceDir], {
-            cwd: root.pathname,
+        execFileSync('git', ['clone', '--quiet', '--no-local', root, sourceDir], {
+            cwd: root,
             encoding: 'utf8',
             timeout: CHILD_PROCESS_TIMEOUT_MS,
         });
     }
     try {
         return execFileSync('bash', [`scripts/${script}`, ...args], {
-            cwd: root.pathname,
+            cwd: root,
             env: {
                 ...process.env,
                 ...env,
@@ -217,6 +218,7 @@ interface FakeRunOptions {
     role?: 'preflight' | 'paid';
     stage?: 'bootstrap' | 'initial' | 'expanded';
     serviceStage?: 'bootstrap' | 'initial' | 'expanded';
+    stagedTraffic?: 'none' | 'zero-percent' | 'real-change';
     serviceResourceShape?: 'missing' | 'wrong-cpu' | 'wrong-memory' | 'legacy-top-level-only';
     serviceOverrides?: Record<string, unknown>;
     serviceEnv?: Record<string, string | null>;
@@ -254,15 +256,15 @@ function fakeRun(options: FakeRunOptions = {}) {
     const service = env[`${prefix}_CLOUD_RUN_SERVICE` as keyof typeof env] as string;
     const fixtureDir = mkdtempSync(join(tmpdir(), 'capacity-fake-gcloud-'));
     const sourceDir = join(fixtureDir, 'source');
-    execFileSync('git', ['clone', '--quiet', '--no-local', root.pathname, sourceDir], {
-        cwd: root.pathname,
+    execFileSync('git', ['clone', '--quiet', '--no-local', root, sourceDir], {
+        cwd: root,
         encoding: 'utf8',
         timeout: CHILD_PROCESS_TIMEOUT_MS,
     });
     const sourceCommit = execFileSync(
         'git',
         ['rev-parse', '--verify', 'HEAD^{commit}'],
-        { cwd: root.pathname, encoding: 'utf8', timeout: CHILD_PROCESS_TIMEOUT_MS },
+        { cwd: root, encoding: 'utf8', timeout: CHILD_PROCESS_TIMEOUT_MS },
     ).trim();
     const githubPath = join(fixtureDir, 'github.json');
     writeFileSync(githubPath, JSON.stringify({
@@ -573,10 +575,14 @@ if [[ "\${1:-} \${2:-} \${3:-}" == "run revisions describe" ]]; then
 fi
 if [[ "\${1:-} \${2:-} \${3:-}" == "run services get-iam-policy" ]]; then cat "$FAKE_GCLOUD_IAM_JSON"; exit 0; fi
 if [[ "\${1:-} \${2:-}" == "run deploy" ]]; then
-  jq --arg rev "$FAKE_GCLOUD_NEXT_REVISION" --arg stage "$FAKE_GCLOUD_TARGET_STAGE" --arg active "$FAKE_GCLOUD_ACTIVE" --arg role "$FAKE_GCLOUD_ROLE" --arg source "$FAKE_GCLOUD_SOURCE_SHA" '
+  jq --arg rev "$FAKE_GCLOUD_NEXT_REVISION" --arg stage "$FAKE_GCLOUD_TARGET_STAGE" --arg active "$FAKE_GCLOUD_ACTIVE" --arg role "$FAKE_GCLOUD_ROLE" --arg source "$FAKE_GCLOUD_SOURCE_SHA" --arg stagedTraffic "$FAKE_GCLOUD_STAGED_TRAFFIC" '
     .status.latestCreatedRevisionName = $rev
     | if $active == "false"
       then .status.latestReadyRevisionName = $rev | .status.traffic = [{revisionName:$rev,percent:100}]
+      elif $stagedTraffic == "zero-percent"
+      then .status.traffic += [{revisionName:$rev,percent:0}]
+      elif $stagedTraffic == "real-change"
+      then .status.traffic = [{revisionName:"unexpected-serving-revision",percent:100},{revisionName:$rev,percent:0}]
       else .
       end
     | .metadata.labels["analysis-v2-source-commit"] = $source
@@ -697,7 +703,7 @@ fi
             `--role=${role}`,
             ...(options.args ?? ['--check']),
         ], {
-            cwd: root.pathname,
+            cwd: root,
             env: {
                 ...process.env,
                 ...env,
@@ -730,6 +736,7 @@ fi
                 FAKE_GCLOUD_SOURCE_SHA: sourceCommit,
                 FAKE_GCLOUD_ACTIVE: active ? 'true' : 'false',
                 FAKE_GCLOUD_ROLE: role,
+                FAKE_GCLOUD_STAGED_TRAFFIC: options.stagedTraffic ?? 'none',
                 FAKE_GCLOUD_MAINTENANCE_EMAIL: (env[`${maintenancePrefix}_MAINTENANCE_SERVICE_ACCOUNT_EMAIL` as keyof typeof env] as string),
                 FAKE_GCLOUD_MAINTENANCE_AUDIENCE: (env[`${maintenancePrefix}_MAINTENANCE_OIDC_AUDIENCE` as keyof typeof env] as string),
                 FAKE_GCLOUD_SCHEDULER_URI: `${origin}/api/analysis/preflight/recover`,
@@ -855,6 +862,47 @@ describe('automatic-analysis infrastructure contracts', () => {
         ]);
     });
 
+    it('normalizes the role runtime identity manifest key against the Cloud Run service spec', () => {
+        const result = fakeRun({
+            role: 'preflight',
+            manifestOverrides: {
+                PREFLIGHT_TASKS_RUNTIME_SERVICE_ACCOUNT_EMAIL: 'preflight-runtime@example-project.iam.gserviceaccount.com',
+            },
+            args: ['--check'],
+        });
+        expect(result.status, `${result.stderr?.toString() ?? ''}\n${result.calls}`).toBe(0);
+    });
+
+    it('rejects a runtime identity manifest alias that crosses workload roles', () => {
+        const result = fakeRun({
+            role: 'preflight',
+            manifestOverrides: {
+                PREFLIGHT_TASKS_RUNTIME_SERVICE_ACCOUNT_EMAIL: 'paid-runtime@example-project.iam.gserviceaccount.com',
+            },
+            args: ['--check'],
+        });
+        expect(result.status).not.toBe(0);
+        expect(`${result.stdout}\n${result.stderr}`).toContain(
+            'PREFLIGHT_TASKS_RUNTIME_SERVICE_ACCOUNT_EMAIL',
+        );
+        expect(result.calls).not.toContain('run deploy');
+    });
+
+    it('ignores a zero-percent staged revision when comparing live traffic', () => {
+        const result = fakeRun({ stagedTraffic: 'zero-percent', args: ['--apply'] });
+        expect(result.status, `${result.stderr?.toString() ?? ''}\n${result.calls}`).toBe(0);
+        expect(result.calls).toContain('run services update-traffic');
+    });
+
+    it('fails closed when staged verification changes nonzero live traffic', () => {
+        const result = fakeRun({ stagedTraffic: 'real-change', args: ['--apply'] });
+        expect(result.status).not.toBe(0);
+        expect(`${result.stdout}\n${result.stderr}`).toContain(
+            'Cloud Run traffic changed while the staged revision was being verified',
+        );
+        expect(result.calls).not.toContain('run services update-traffic');
+    });
+
     it('rejects a staged revision that belongs to a different Cloud Run service', () => {
         const result = fakeRun({
             revisionService: 'analysis-other-worker',
@@ -887,7 +935,7 @@ describe('automatic-analysis infrastructure contracts', () => {
                     aliases: ['public.example.com'],
                     target: 'production',
                     readyState: 'READY',
-                    meta: { githubCommitSha: execFileSync('git', ['rev-parse', 'HEAD'], { cwd: root.pathname, encoding: 'utf8', timeout: CHILD_PROCESS_TIMEOUT_MS }).trim() },
+                    meta: { githubCommitSha: execFileSync('git', ['rev-parse', 'HEAD'], { cwd: root, encoding: 'utf8', timeout: CHILD_PROCESS_TIMEOUT_MS }).trim() },
                 }],
             },
             vercelAliases: { aliases: [] },
