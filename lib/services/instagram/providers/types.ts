@@ -22,15 +22,34 @@ export const APIFY_CREDENTIAL_SLOTS = [
     'quinary',
     'senary',
     'septenary',
+    'octonary',
+    'nonary',
     'tenth',
 ] as const;
-/**
- * Octonary and nonary are operator-scoped concierge batch slots. Keep them
- * out of the general V2 slot catalog so deployment/admission validators do
- * not silently broaden, while still allowing the batch runner to bind its
- * provider ledger.
- */
-export type ApifyCredentialSlot = typeof APIFY_CREDENTIAL_SLOTS[number] | 'octonary' | 'nonary';
+export type ApifyCredentialSlot = typeof APIFY_CREDENTIAL_SLOTS[number];
+
+/** Stable same-name environment mapping for every configured Apify account. */
+export const APIFY_CREDENTIAL_TOKEN_ENV: Readonly<Record<ApifyCredentialSlot, string>> =
+    Object.freeze({
+        primary: 'APIFY_PRIMARY_API_TOKEN',
+        secondary: 'APIFY_SECONDARY_API_TOKEN',
+        tertiary: 'APIFY_TERTIARY_API_TOKEN',
+        quaternary: 'APIFY_QUATERNARY_API_TOKEN',
+        quinary: 'APIFY_QUINARY_API_TOKEN',
+        senary: 'APIFY_SENARY_API_TOKEN',
+        septenary: 'APIFY_SEPTENARY_API_TOKEN',
+        octonary: 'APIFY_OCTONARY_API_TOKEN',
+        nonary: 'APIFY_NONARY_API_TOKEN',
+        tenth: 'APIFY_TENTH_API_TOKEN',
+    });
+
+export type ApifyFreeCredentialSlot = Exclude<ApifyCredentialSlot, 'secondary'>;
+
+export const APIFY_FREE_CREDENTIAL_SLOTS = Object.freeze(
+    APIFY_CREDENTIAL_SLOTS.filter(
+        (slot): slot is ApifyFreeCredentialSlot => slot !== 'secondary',
+    ),
+);
 
 export function isApifyCredentialSlot(value: unknown): value is ApifyCredentialSlot {
     return typeof value === 'string'
@@ -242,10 +261,6 @@ export interface ProviderCallContext
     allowAdoptedRelationshipTruncation?: true;
     /** Source declared count paired with the adopted-only allowance above. */
     adoptedRelationshipSourceDeclaredCount?: number;
-    /** Explicit concierge-only opt-in for the operator-scoped octonary slot. */
-    allowConciergeBatchOctonary?: true;
-    /** Explicit concierge-only opt-in for the operator-scoped nonary slot. */
-    allowConciergeBatchNonary?: true;
     onProfileStart?(username: string): void | Promise<void>;
     onProfileResolved?(profile: InstagramProfile): void | Promise<void>;
     onSelfHostedAuthRunFinished?(receipt: SelfHostedAuthRunReceipt): void | Promise<void>;

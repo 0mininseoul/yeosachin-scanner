@@ -71,7 +71,9 @@ const snapshotSchema = persistedSnapshotSchema.extend({
     }
 });
 
-const exactSixSnapshotsSchema = z.array(snapshotSchema).length(6).superRefine((rows, context) => {
+const exactPoolSnapshotsSchema = z.array(snapshotSchema).length(
+    BETA_APIFY_FREE_CREDENTIAL_SLOTS.length,
+).superRefine((rows, context) => {
     const received = rows.map(row => row.credentialSlot);
     if (new Set(received).size !== BETA_APIFY_FREE_CREDENTIAL_SLOTS.length
         || BETA_APIFY_FREE_CREDENTIAL_SLOTS.some(slot => !received.includes(slot))) {
@@ -189,8 +191,8 @@ function persistenceFailure(error: { code?: string; message?: string } | null): 
     throw new Error(known ?? BETA_APIFY_POOL_PERSISTENCE_ERROR);
 }
 
-function ensureExactSixSnapshots(value: unknown): readonly BetaApifyPoolSnapshot[] {
-    const parsed = exactSixSnapshotsSchema.safeParse(value);
+function ensureExactPoolSnapshots(value: unknown): readonly BetaApifyPoolSnapshot[] {
+    const parsed = exactPoolSnapshotsSchema.safeParse(value);
     if (!parsed.success) throw new Error(BETA_APIFY_POOL_PERSISTENCE_ERROR);
     return Object.freeze(parsed.data.map(row => Object.freeze({ ...row })));
 }
@@ -198,7 +200,7 @@ function ensureExactSixSnapshots(value: unknown): readonly BetaApifyPoolSnapshot
 function exactHeadrooms(value: readonly BetaApifyPoolSnapshot[]): Readonly<Record<BetaApifyFreeCredentialSlot, number>> {
     let snapshots: readonly BetaApifyPoolSnapshot[];
     try {
-        snapshots = ensureExactSixSnapshots(value);
+        snapshots = ensureExactPoolSnapshots(value);
     } catch {
         throw new Error(BETA_APIFY_POOL_CAPACITY_ERROR);
     }
@@ -330,7 +332,7 @@ async function invoke(client: BetaApifyPoolStoreClient, name: string, params: Re
 export function createBetaApifyCreditPoolStore(client: BetaApifyPoolStoreClient): BetaApifyCreditPoolStore {
     const store: BetaApifyCreditPoolStore = {
         async upsertSnapshots(snapshots) {
-            const parsed = exactSixSnapshotsSchema.safeParse(snapshots);
+            const parsed = exactPoolSnapshotsSchema.safeParse(snapshots);
             if (!parsed.success) throw new Error(BETA_APIFY_POOL_PERSISTENCE_ERROR);
             const payload = parsed.data.map(snapshot => ({
                 credentialSlot: snapshot.credentialSlot,
@@ -343,13 +345,13 @@ export function createBetaApifyCreditPoolStore(client: BetaApifyPoolStoreClient)
             }));
             const data = await invoke(client, 'upsert_analysis_beta_apify_credit_snapshots', { p_snapshots: payload });
             // The RPC returns the same exact sanitized snapshot shape, without local headroom.
-            return ensureExactSixSnapshots(data);
+            return ensureExactPoolSnapshots(data);
         },
         async loadSnapshots(maxSnapshotAgeSeconds) {
             const data = await invoke(client, 'load_analysis_beta_apify_credit_pool', {
                 p_max_age_seconds: checkedAge(maxSnapshotAgeSeconds),
             });
-            return ensureExactSixSnapshots(data);
+            return ensureExactPoolSnapshots(data);
         },
         async loadPreflightHold(preflightId) {
             const data = await invoke(client, 'load_analysis_beta_apify_preflight_hold', {

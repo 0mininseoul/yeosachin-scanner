@@ -64,7 +64,7 @@ function betaSlotAmounts(value: number): Record<BetaApifyFreeCredentialSlot, num
 }
 
 describe('beta Apify credit pool primitives', () => {
-    it('defines one immutable exact free-slot subset that structurally excludes secondary', () => {
+    it('defines one immutable exact nine-slot subset that structurally excludes secondary', () => {
         expect(BETA_APIFY_FREE_CREDENTIAL_SLOTS).toEqual([
             'primary',
             'tertiary',
@@ -72,6 +72,9 @@ describe('beta Apify credit pool primitives', () => {
             'quinary',
             'senary',
             'septenary',
+            'octonary',
+            'nonary',
+            'tenth',
         ]);
         expect(Object.isFrozen(BETA_APIFY_FREE_CREDENTIAL_SLOTS)).toBe(true);
 
@@ -297,7 +300,7 @@ describe('beta Apify credit pool primitives', () => {
         })).toThrow(BETA_APIFY_CREDIT_INPUT_ERROR);
     });
 
-    it('starts all six account reads concurrently and returns only sanitized credit state', async () => {
+    it('starts all nine account reads concurrently and returns only sanitized credit state', async () => {
         let releaseReads: (() => void) | undefined;
         const readGate = new Promise<void>(resolve => {
             releaseReads = resolve;
@@ -323,7 +326,7 @@ describe('beta Apify credit pool primitives', () => {
             observedAt: OBSERVED_AT,
         }, TEST_CLOCK);
 
-        await vi.waitFor(() => expect(started).toHaveLength(12));
+        await vi.waitFor(() => expect(started).toHaveLength(BETA_APIFY_FREE_CREDENTIAL_SLOTS.length * 2));
         expect(clientForSlot.mock.calls.map(([slot]) => slot)).toEqual(
             BETA_APIFY_FREE_CREDENTIAL_SLOTS
         );
@@ -376,7 +379,7 @@ describe('beta Apify credit pool primitives', () => {
             observedAt: OBSERVED_AT,
         }, TEST_CLOCK);
 
-        await vi.waitFor(() => expect(started).toHaveLength(12));
+        await vi.waitFor(() => expect(started).toHaveLength(BETA_APIFY_FREE_CREDENTIAL_SLOTS.length * 2));
         for (const slot of BETA_APIFY_FREE_CREDENTIAL_SLOTS) {
             activeReservationsUsdBySlot[slot] = 0;
             localPostSnapshotDebitUsdBySlot[slot] = 0;
@@ -407,7 +410,7 @@ describe('beta Apify credit pool primitives', () => {
     });
 
     it.each(['rejected provider call', 'invalid provider response'])(
-        'fails the entire six-slot refresh closed for a %s',
+        'fails the entire free-pool refresh closed for a %s',
         async failureKind => {
             const clientForSlot = vi.fn((slot: BetaApifyFreeCredentialSlot) => {
                 if (slot !== 'quinary') return clientWith();

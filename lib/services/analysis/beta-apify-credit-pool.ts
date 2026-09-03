@@ -1,16 +1,12 @@
-import type { ApifyCredentialSlot } from '@/lib/services/instagram/providers/types';
+import {
+    APIFY_FREE_CREDENTIAL_SLOTS,
+    type ApifyFreeCredentialSlot,
+} from '@/lib/services/instagram/providers/types';
 
-export const BETA_APIFY_FREE_CREDENTIAL_SLOTS = Object.freeze([
-    'primary',
-    'tertiary',
-    'quaternary',
-    'quinary',
-    'senary',
-    'septenary',
-] as const satisfies readonly ApifyCredentialSlot[]);
+export const BETA_APIFY_FREE_CREDENTIAL_SLOTS = APIFY_FREE_CREDENTIAL_SLOTS;
 
 export type BetaApifyFreeCredentialSlot =
-    typeof BETA_APIFY_FREE_CREDENTIAL_SLOTS[number];
+    ApifyFreeCredentialSlot;
 
 export const BETA_APIFY_CREDIT_INPUT_ERROR =
     'ANALYSIS_BETA_APIFY_CREDIT_INPUT_ERROR';

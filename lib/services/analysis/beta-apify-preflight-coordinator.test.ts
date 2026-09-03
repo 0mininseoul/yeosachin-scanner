@@ -62,13 +62,15 @@ function store(): BetaApifyPreflightCoordinatorStore {
 }
 
 describe('beta preflight credit coordinator', () => {
-    it('maps only the six named free-pool token keys to lazy Apify user clients', () => {
+    it('maps only the nine named free-pool token keys to lazy Apify user clients', () => {
         const created: string[] = [];
         const options: unknown[] = [];
         const factory = createServerBetaApifyCreditClientFactory({
             APIFY_PRIMARY_API_TOKEN: 'p', APIFY_TERTIARY_API_TOKEN: 't',
             APIFY_QUATERNARY_API_TOKEN: 'q4', APIFY_QUINARY_API_TOKEN: 'q5',
             APIFY_SENARY_API_TOKEN: 's', APIFY_SEPTENARY_API_TOKEN: 's7',
+            APIFY_OCTONARY_API_TOKEN: 'o8', APIFY_NONARY_API_TOKEN: 'n9',
+            APIFY_TENTH_API_TOKEN: 't10',
             APIFY_SECONDARY_API_TOKEN: 'must-never-be-selected',
         }, (token, option) => {
             created.push(token);
@@ -76,12 +78,12 @@ describe('beta preflight credit coordinator', () => {
             return { user: () => ({ limits: async () => ({}), monthlyUsage: async () => ({}) }) };
         });
         for (const slot of BETA_APIFY_FREE_CREDENTIAL_SLOTS) factory(slot);
-        expect(created).toEqual(['p', 't', 'q4', 'q5', 's', 's7']);
+        expect(created).toEqual(['p', 't', 'q4', 'q5', 's', 's7', 'o8', 'n9', 't10']);
         expect(created).not.toContain('must-never-be-selected');
-        expect(options).toEqual(Array(6).fill({ maxRetries: 0, timeoutSecs: 10 }));
+        expect(options).toEqual(Array(9).fill({ maxRetries: 0, timeoutSecs: 10 }));
     });
 
-    it('refreshes all exact-six accounts before atomically holding the deterministic fitting target slot', async () => {
+    it('refreshes all exact-nine accounts before atomically holding the deterministic fitting target slot', async () => {
         const pool = store();
         const clients = new Map(BETA_APIFY_FREE_CREDENTIAL_SLOTS.map(slot => [slot, {
             limits: vi.fn(async () => providerReply()),
@@ -112,6 +114,36 @@ describe('beta preflight credit coordinator', () => {
         expect(pool.holdPreflight).toHaveBeenCalledWith(expect.objectContaining({
             preflightId, userId, ...prepareFence, credentialSlot: 'tertiary',
         }));
+    });
+
+    it('chooses the eligible slot with the least positive residual headroom', async () => {
+        const pool = store();
+        pool.loadSnapshots = vi.fn(async () => BETA_APIFY_FREE_CREDENTIAL_SLOTS.map((credentialSlot, index) => ({
+            credentialSlot,
+            monthlyLimitUsd: 10,
+            monthlyUsageUsd: 1,
+            billingCycleStartAt: '2026-08-01T00:00:00.000Z',
+            billingCycleEndAt: '2026-09-01T00:00:00.000Z',
+            observedAt: now.toISOString(),
+            healthState: 'healthy' as const,
+            effectiveHeadroomUsd: index === 1 ? 0.25 : index === 2 ? 0.01 : 0.004,
+        })));
+        const clientForSlot = vi.fn(() => ({
+            limits: vi.fn(async () => providerReply()),
+            monthlyUsage: vi.fn(async () => ({
+                totalUsageCreditsUsdAfterVolumeDiscount: 1,
+                usageCycle: providerReply().monthlyUsageCycle,
+            })),
+        }));
+        const coordinator = createBetaApifyPreflightCoordinator({
+            store: pool,
+            clientForSlot,
+            env: { BETATEST_FREE_POOL_ENABLED: 'true' },
+            now: () => now.getTime(),
+        });
+
+        await expect(coordinator.prepare({ preflightId, userId, ...prepareFence }))
+            .resolves.toMatchObject({ credentialSlot: 'quaternary', existing: false });
     });
 
     it('atomically promotes a stored frozen target hold without calling Apify', async () => {
@@ -168,7 +200,7 @@ describe('beta preflight credit coordinator', () => {
         expect(clientForSlot).not.toHaveBeenCalled();
     });
 
-    it('fails closed without a hold when any exact-six account refresh fails', async () => {
+    it('fails closed without a hold when any exact-nine account refresh fails', async () => {
         const pool = store();
         const coordinator = createBetaApifyPreflightCoordinator({
             store: pool,

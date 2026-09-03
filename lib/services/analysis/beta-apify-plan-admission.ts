@@ -13,6 +13,7 @@ import {
     type BetaApifyPoolSnapshot,
 } from './beta-apify-credit-runtime';
 import type { BetaApifyFreeCredentialSlot } from './beta-apify-credit-pool';
+import { BETA_APIFY_FREE_CREDENTIAL_SLOTS } from './beta-apify-credit-pool';
 import {
     ANALYSIS_BETA_POOL_BUDGET_DRIFT,
 } from './authorized-test-provider-policy';
@@ -37,7 +38,7 @@ export const BETA_APIFY_PLAN_REPLAY_IDENTITY_CONFLICT =
 
 const UUID = z.string().uuid();
 const planId = z.enum(['basic', 'standard', 'plus']);
-const slot = z.enum(['primary', 'tertiary', 'quaternary', 'quinary', 'senary', 'septenary']);
+const slot = z.enum(BETA_APIFY_FREE_CREDENTIAL_SLOTS);
 const operationSlots = z.object(Object.fromEntries(
     BETA_APIFY_OPERATION_FAMILIES.map(operation => [operation, slot])
 ) as Record<(typeof BETA_APIFY_OPERATION_FAMILIES)[number], typeof slot>).strict();

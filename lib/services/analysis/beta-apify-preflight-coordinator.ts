@@ -61,13 +61,25 @@ function sanitizedCapacityError(): Error {
 }
 
 function targetSlot(snapshots: readonly BetaApifyPoolSnapshot[]): BetaApifyFreeCredentialSlot {
-    // Preserve the fixed slot order for deterministic retry/concurrency behavior.
-    for (const slot of BETA_APIFY_FREE_CREDENTIAL_SLOTS) {
+    // Fit the frozen target-profile budget as tightly as possible. The
+    // canonical slot order is the deterministic tie-break for equal residuals.
+    const candidates = BETA_APIFY_FREE_CREDENTIAL_SLOTS.map((slot, order) => {
         const snapshot = snapshots.find(candidate => candidate.credentialSlot === slot);
-        if (snapshot && snapshot.effectiveHeadroomUsd + Number.EPSILON >= BETA_APIFY_TARGET_PROFILE_BUDGET_USD) {
-            return slot;
+        if (!snapshot || snapshot.effectiveHeadroomUsd + Number.EPSILON < BETA_APIFY_TARGET_PROFILE_BUDGET_USD) {
+            return null;
         }
-    }
+        return {
+            slot,
+            order,
+            residual: snapshot.effectiveHeadroomUsd - BETA_APIFY_TARGET_PROFILE_BUDGET_USD,
+        };
+    }).filter((candidate): candidate is {
+        slot: BetaApifyFreeCredentialSlot;
+        order: number;
+        residual: number;
+    } => candidate !== null)
+        .sort((left, right) => left.residual - right.residual || left.order - right.order);
+    if (candidates[0]) return candidates[0].slot;
     throw sanitizedCapacityError();
 }
 
@@ -158,7 +170,7 @@ export function createBetaApifyPreflightCoordinator(input: {
                     clientForSlot: input.clientForSlot,
                     observedAt,
                 }, { now: input.now ?? Date.now });
-                // One exact-six write is intentionally completed before any pool read/hold.
+                // One exact-nine write is intentionally completed before any pool read/hold.
                 await input.store.upsertSnapshots(refreshed.map(snapshot => ({
                     credentialSlot: snapshot.credentialSlot,
                     monthlyLimitUsd: snapshot.monthlyLimitUsd,
@@ -219,6 +231,9 @@ export function createServerBetaApifyCreditClientFactory(
         quinary: 'APIFY_QUINARY_API_TOKEN',
         senary: 'APIFY_SENARY_API_TOKEN',
         septenary: 'APIFY_SEPTENARY_API_TOKEN',
+        octonary: 'APIFY_OCTONARY_API_TOKEN',
+        nonary: 'APIFY_NONARY_API_TOKEN',
+        tenth: 'APIFY_TENTH_API_TOKEN',
     });
     const clients = new Map<BetaApifyFreeCredentialSlot, ApifyUserCreditClient>();
     return slot => {

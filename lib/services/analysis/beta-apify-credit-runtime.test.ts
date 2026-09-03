@@ -64,7 +64,7 @@ describe('beta Apify runtime foundation', () => {
         })).toThrow(BETA_APIFY_RUNTIME_CONFIG_ERROR);
     });
 
-    it('serializes only exact-six sanitized snapshots and validates the final RPC response', async () => {
+    it('serializes only exact-nine sanitized snapshots and validates the final RPC response', async () => {
         const client = rpcClient(slots());
         const store = createBetaApifyCreditPoolStore(client);
         await expect(store.upsertSnapshots(slots())).resolves.toEqual(slots());

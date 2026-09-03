@@ -51,9 +51,15 @@ const preflightInputHash = preflightTargetInputHash('target.name', {
 });
 const preflightApifyPoolEnv = {
     APIFY_PRIMARY_API_TOKEN: 'primary-token',
+    APIFY_TERTIARY_API_TOKEN: 'tertiary-token',
+    APIFY_QUATERNARY_API_TOKEN: 'quaternary-token',
     APIFY_QUINARY_API_TOKEN: 'quinary-token',
     APIFY_SENARY_API_TOKEN: 'senary-token',
-    PREFLIGHT_APIFY_API_TOKEN_SLOTS: 'primary,quinary,senary',
+    APIFY_SEPTENARY_API_TOKEN: 'septenary-token',
+    APIFY_OCTONARY_API_TOKEN: 'octonary-token',
+    APIFY_NONARY_API_TOKEN: 'nonary-token',
+    APIFY_TENTH_API_TOKEN: 'tenth-token',
+    PREFLIGHT_APIFY_API_TOKEN_SLOTS: 'primary,tertiary,quaternary,quinary,senary,septenary,octonary,nonary,tenth',
 } as const;
 
 describe('betatest preflight credit fence', () => {
@@ -282,7 +288,7 @@ describe('B-lite single-collection preflight', () => {
         const store = workerStore(claimed);
         const runs = providerRunStore();
         expect(selectPreflightApifyCredentialSlot(preflightId, preflightApifyPoolEnv))
-            .toBe('senary');
+            .toBe('septenary');
         let loadCount = 0;
         vi.mocked(runs.load).mockImplementation(async () => {
             loadCount += 1;

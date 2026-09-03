@@ -33,7 +33,7 @@ function snapshots(headroom = 10) {
 
 describe('beta Apify plan admission', () => {
     it('preserves the frozen target-profile hold and derives all eight budgets from the reviewed catalog', async () => {
-        const hold = { allocationId: '55555555-5555-4555-8555-555555555555', preflightId: PREFLIGHT_ID, credentialSlot: 'septenary' as const, targetProfileBudgetUsd: BETA_APIFY_TARGET_PROFILE_BUDGET_USD };
+        const hold = { allocationId: '55555555-5555-4555-8555-555555555555', preflightId: PREFLIGHT_ID, credentialSlot: 'octonary' as const, targetProfileBudgetUsd: BETA_APIFY_TARGET_PROFILE_BUDGET_USD };
         const activate = vi.fn().mockResolvedValue({ requestId: REQUEST_ID, initialJobKey: 'coordinator:bootstrap', allocationId: hold.allocationId, replayed: false });
         const result = await admitBetaApifyPlan({
             preflightId: PREFLIGHT_ID, userId: USER_ID, admissionToken: ADMISSION_TOKEN, admissionGeneration: 1, selectedPlanId: 'basic',
@@ -45,7 +45,7 @@ describe('beta Apify plan admission', () => {
         expect(result).toMatchObject({ requestId: REQUEST_ID, initialJobKey: 'coordinator:bootstrap', replayed: false });
         expect(activate).toHaveBeenCalledOnce();
         const input = activate.mock.calls[0]?.[0];
-        expect(input.operationSlotMap['target-profile']).toBe('septenary');
+        expect(input.operationSlotMap['target-profile']).toBe('octonary');
         expect(input.operationBudgetMap['target-profile']).toBe(BETA_APIFY_TARGET_PROFILE_BUDGET_USD);
         expect(Object.keys(input.operationBudgetMap).sort()).toEqual([
             'candidate-likers', 'profile-fallback', 'profile-repair', 'relationship-followers',
