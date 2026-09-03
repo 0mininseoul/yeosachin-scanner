@@ -87,8 +87,8 @@ Apply the concurrent Supabase optimization migration
 `20260904110000`. Rebase this branch on `origin/main` after the optimizer PR
 lands, rerun the migration contract and PGlite tests, and perform the normal
 review/CI migration checks before any remote application. This change requires
-no external Instagram/provider/account reads or canary, and it performs no
-production mutation; it does not by itself require an app-runtime code deploy;
-after merge, apply
+no external Instagram/provider/account reads or canary. Remote application
+necessarily mutates production by writing the schema and backfill, but it does
+not by itself require an app-runtime code deploy. After merge, apply
 `20260904110000` remotely only through the documented predecessor gate. Shared
 infrastructure allocation is explicitly out of scope.
