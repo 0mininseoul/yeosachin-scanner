@@ -88,7 +88,7 @@ describe('beta Apify terminal settlement runtime', () => {
         )).resolves.toBe(1);
     });
 
-    it('bounds a hanging exact-six read and never starts the snapshot upsert', async () => {
+    it('bounds a hanging exact-nine read and never starts the snapshot upsert', async () => {
         vi.useFakeTimers();
         const rpc = vi.fn();
         const cycle = {
@@ -149,7 +149,7 @@ describe('beta Apify terminal settlement runtime', () => {
 
         expect(emit).toHaveBeenCalledWith(expect.objectContaining({
             event: 'betatest_apify_credit.refresh_completed',
-            fields: expect.objectContaining({ total_effective_headroom_usd: 16.5 }),
+            fields: expect.objectContaining({ total_effective_headroom_usd: 38.25 }),
         }));
     });
 

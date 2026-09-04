@@ -34,7 +34,7 @@ describe('beta Apify pool aggregate observability', () => {
         const invalid = [
             { ...payload, credentialSlot: 'secondary' },
             { ...payload, userId: '11111111-1111-4111-8111-111111111111' },
-            { ...payload, staleSnapshotCount: 7 },
+            { ...payload, staleSnapshotCount: 10 },
             { ...payload, overcommittedSlotCount: -1 },
             { ...payload, settlementLagMs: Number.POSITIVE_INFINITY },
         ];
