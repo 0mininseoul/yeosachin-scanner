@@ -12,6 +12,7 @@ readonly GENDER_ROUTING_HMAC_SECRET_ID="ai-baram-v2-gender-routing-hmac"
 readonly APIFY_SLOTS=(primary secondary tertiary quaternary quinary senary septenary octonary nonary tenth)
 readonly PREFLIGHT_APIFY_API_TOKEN_SLOTS_VALUE="primary,tertiary,quaternary,quinary,senary,septenary,octonary,nonary,tenth"
 readonly PREFLIGHT_INITIAL_PREDEPLOY_OLD_SOURCE_SHA="3b28e55c8877276557f8a5a218fb2b966376d889"
+readonly PAID_INITIAL_PREDEPLOY_OLD_SOURCE_SHA="3b28e55c8877276557f8a5a218fb2b966376d889"
 # Keep the split-capacity deployment provenance key identical to the existing
 # V2 release-readiness contract.  A single source-of-truth label prevents an
 # operator from mistaking a capacity wrapper SHA for the reviewed V2 source SHA.
@@ -1205,6 +1206,65 @@ preflight_secret_ref_roll_forward_is_exact() {
     && preflight_legacy_secret_refs_are_exact
 }
 
+paid_legacy_secret_refs_are_exact() {
+  local observed_refs
+  local expected_refs
+  observed_refs="$(jq -c '
+    [ .spec.template.spec.containers[]?.env[]?
+      | select(
+          (.name | test("^(APIFY_[A-Z_]+_API_TOKEN|SUPABASE_SERVICE_ROLE_KEY|IMAGE_PROXY_SIGNING_SECRET|ANALYSIS_V2_(PREFLIGHT_IDENTITY|GENDER_ROUTING)_HMAC_SECRET)$"))
+          or (.valueFrom.secretKeyRef? != null)
+        )
+      | {
+          name: .name,
+          secret: (.valueFrom.secretKeyRef.name // ""),
+          version: ((.valueFrom.secretKeyRef.key // "") | tostring),
+          plaintext: (if has("value") then (.value | tostring) else "" end)
+        }
+    ] | sort_by(.name)
+  ' <<<"$service_json")" || return 1
+  expected_refs="$(jq -cn \
+    --arg supabase "$SUPABASE_SECRET_ID" \
+    --arg image "$IMAGE_SIGNING_SECRET_ID" \
+    --arg identity "$PREFLIGHT_IDENTITY_HMAC_SECRET_ID" \
+    --arg gender "$GENDER_ROUTING_HMAC_SECRET_ID" '
+    [
+      {name:"APIFY_PRIMARY_API_TOKEN", secret:"ai-baram-v2-apify-primary", version:"3", plaintext:""},
+      {name:"APIFY_SECONDARY_API_TOKEN", secret:"ai-baram-v2-apify-secondary", version:"4", plaintext:""},
+      {name:"APIFY_TERTIARY_API_TOKEN", secret:"ai-baram-v2-apify-tertiary", version:"1", plaintext:""},
+      {name:"APIFY_QUATERNARY_API_TOKEN", secret:"ai-baram-v2-apify-quaternary", version:"1", plaintext:""},
+      {name:"APIFY_QUINARY_API_TOKEN", secret:"ai-baram-v2-apify-quinary", version:"1", plaintext:""},
+      {name:"APIFY_SENARY_API_TOKEN", secret:"ai-baram-v2-apify-senary", version:"1", plaintext:""},
+      {name:"APIFY_SEPTENARY_API_TOKEN", secret:"ai-baram-v2-apify-septenary", version:"1", plaintext:""},
+      {name:"APIFY_TENTH_API_TOKEN", secret:"ai-baram-v2-apify-tenth", version:"1", plaintext:""},
+      {name:"SUPABASE_SERVICE_ROLE_KEY", secret:$supabase, version:"1", plaintext:""},
+      {name:"IMAGE_PROXY_SIGNING_SECRET", secret:$image, version:"1", plaintext:""},
+      {name:"ANALYSIS_V2_PREFLIGHT_IDENTITY_HMAC_SECRET", secret:$identity, version:"1", plaintext:""},
+      {name:"ANALYSIS_V2_GENDER_ROUTING_HMAC_SECRET", secret:$gender, version:"1", plaintext:""}
+    ] | sort_by(.name)
+  ')"
+  [[ "$observed_refs" == "$expected_refs" ]]
+}
+
+paid_secret_ref_roll_forward_desired_set_is_exact() {
+  [[ "${observed_source_sha:-}" == "$PAID_INITIAL_PREDEPLOY_OLD_SOURCE_SHA" \
+     && "$role" == "paid" \
+     && "$stage" == "initial" \
+     && "$contract_stage" == "initial" \
+     && "$selected_slot" == "secondary" \
+     && "$apify_secret_version" == "4" \
+     && "$supabase_secret_version" == "1" \
+     && "$image_signing_secret_version" == "1" \
+     && "$identity_hmac_secret_version" == "1" \
+     && "$gender_hmac_secret_version" == "1" ]] || return 1
+  [[ "$additional_refs" == "primary:3,tertiary:1,quaternary:1,quinary:1,senary:1,septenary:1,octonary:1,nonary:1,tenth:1" ]]
+}
+
+paid_secret_ref_roll_forward_is_exact() {
+  paid_secret_ref_roll_forward_desired_set_is_exact \
+    && paid_legacy_secret_refs_are_exact
+}
+
 verify_traffic_revision() {
   local latest_ready
   latest_ready="$(jq -r '.status.latestReadyRevisionName // empty' <<<"$service_json")"
@@ -1335,12 +1395,14 @@ verify_service_contract() {
   local allow_existing_service_predeploy_source_roll_forward="${6:-false}"
   local allow_existing_service_predeploy_preflight_slot_roll_forward="${7:-false}"
   local allow_existing_service_predeploy_preflight_secret_ref_roll_forward="${8:-false}"
+  local allow_existing_service_predeploy_paid_secret_ref_roll_forward="${9:-false}"
   local contract_expansion_canary="false"
   local contract_recovery_enabled="false"
   local contract_max_instances=8
   local observed_source_sha
   local source_roll_forward_observed="false"
   local preflight_secret_ref_roll_forward_observed="false"
+  local paid_secret_ref_roll_forward_observed="false"
   [[ "$allow_existing_service_predeploy_source_roll_forward" == "true" \
      || "$allow_existing_service_predeploy_source_roll_forward" == "false" ]] \
     || die "invalid internal source roll-forward allowance"
@@ -1350,6 +1412,9 @@ verify_service_contract() {
   [[ "$allow_existing_service_predeploy_preflight_secret_ref_roll_forward" == "true" \
      || "$allow_existing_service_predeploy_preflight_secret_ref_roll_forward" == "false" ]] \
     || die "invalid internal preflight Secret Manager ref roll-forward allowance"
+  [[ "$allow_existing_service_predeploy_paid_secret_ref_roll_forward" == "true" \
+     || "$allow_existing_service_predeploy_paid_secret_ref_roll_forward" == "false" ]] \
+    || die "invalid internal paid Secret Manager ref roll-forward allowance"
   if [[ "$allow_existing_service_predeploy_source_roll_forward" == "true" ]]; then
     [[ "$mode" == "apply" && "$mode_was_explicit" == "true" \
        && "$require_traffic" == "true" ]] \
@@ -1370,6 +1435,14 @@ verify_service_contract() {
        && "$role" == "preflight" && "$stage" == "initial" \
        && "$contract_stage" == "initial" ]] \
       || die "preflight Secret Manager ref roll-forward allowance is valid only for explicit initial preflight apply predeploy verification"
+  fi
+  if [[ "$allow_existing_service_predeploy_paid_secret_ref_roll_forward" == "true" ]]; then
+    [[ "$allow_existing_service_predeploy_source_roll_forward" == "true" \
+       && "$mode" == "apply" && "$mode_was_explicit" == "true" \
+       && "$require_traffic" == "true" \
+       && "$role" == "paid" && "$stage" == "initial" \
+       && "$contract_stage" == "initial" ]] \
+      || die "paid Secret Manager ref roll-forward allowance is valid only for explicit initial paid apply predeploy verification"
   fi
   if [[ "$allow_bootstrap_cross_role_gate_transition" == "true" ]]; then
     [[ "$mode" == "apply" && "$role" == "preflight" && "$stage" == "bootstrap" \
@@ -1527,9 +1600,17 @@ verify_service_contract() {
   done < <(jq -r 'keys[]' "$env_file")
   if [[ "$allow_existing_service_predeploy_preflight_secret_ref_roll_forward" == "true" \
      && "$source_roll_forward_observed" == "true" ]] \
-     && preflight_secret_ref_roll_forward_is_exact; then
+    && preflight_secret_ref_roll_forward_is_exact; then
     preflight_secret_ref_roll_forward_observed="true"
     log "predeploy: allowing exact additive preflight Apify Secret Manager refs"
+  fi
+  if [[ "$allow_existing_service_predeploy_paid_secret_ref_roll_forward" == "true" \
+     && "$source_roll_forward_observed" == "true" \
+     && "$observed_source_sha" == "$PAID_INITIAL_PREDEPLOY_OLD_SOURCE_SHA" ]]; then
+    paid_secret_ref_roll_forward_is_exact \
+      || die "paid Secret Manager ref roll-forward requires the exact reviewed eight-ref starting set"
+    paid_secret_ref_roll_forward_observed="true"
+    log "predeploy: allowing exact additive paid Apify Secret Manager refs"
   fi
   for entry in "${secret_ref_entries[@]}"; do
     secret_env="${entry%%|*}"
@@ -1543,7 +1624,8 @@ verify_service_contract() {
       APIFY_TERTIARY_API_TOKEN|APIFY_QUATERNARY_API_TOKEN|\
       APIFY_SEPTENARY_API_TOKEN|APIFY_OCTONARY_API_TOKEN|\
       APIFY_NONARY_API_TOKEN|APIFY_TENTH_API_TOKEN)
-        [[ "$preflight_secret_ref_roll_forward_observed" == "true" ]] \
+        [[ "$preflight_secret_ref_roll_forward_observed" == "true" \
+           || "$paid_secret_ref_roll_forward_observed" == "true" ]] \
           || die "Cloud Run required Secret Manager ref drifted for $secret_env"
         ;;
       *)
@@ -1646,6 +1728,7 @@ if service_exists; then
   allow_bootstrap_cross_role_gate_transition="false"
   allow_existing_service_predeploy_preflight_slot_roll_forward="false"
   allow_existing_service_predeploy_preflight_secret_ref_roll_forward="false"
+  allow_existing_service_predeploy_paid_secret_ref_roll_forward="false"
   if [[ "$stage" == "bootstrap" && "$observed_stage" == "bootstrap" ]]; then
     allow_stale_bootstrap_provenance="true"
     [[ "$role" == "preflight" ]] && allow_bootstrap_cross_role_gate_transition="true"
@@ -1654,12 +1737,16 @@ if service_exists; then
     allow_existing_service_predeploy_preflight_slot_roll_forward="true"
     allow_existing_service_predeploy_preflight_secret_ref_roll_forward="true"
   fi
+  if [[ "$role" == "paid" && "$stage" == "initial" && "$observed_stage" == "initial" ]]; then
+    allow_existing_service_predeploy_paid_secret_ref_roll_forward="true"
+  fi
   verify_service_contract "$observed_stage" true "$allow_stale_bootstrap_provenance" \
     "$allow_bootstrap_cross_role_gate_transition" \
     "$allow_bootstrap_initial_transition" \
     "true" \
     "$allow_existing_service_predeploy_preflight_slot_roll_forward" \
-    "$allow_existing_service_predeploy_preflight_secret_ref_roll_forward"
+    "$allow_existing_service_predeploy_preflight_secret_ref_roll_forward" \
+    "$allow_existing_service_predeploy_paid_secret_ref_roll_forward"
   verify_legacy_quiescence
   verify_vercel_public_deployment
   verify_capacity_activation_readiness

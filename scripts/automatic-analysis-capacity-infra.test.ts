@@ -7,6 +7,7 @@ import { describe, expect, it } from 'vitest';
 
 const root = fileURLToPath(new URL('../', import.meta.url));
 const KNOWN_PREFLIGHT_OLD_SOURCE_SHA = '3b28e55c8877276557f8a5a218fb2b966376d889';
+const KNOWN_PAID_OLD_SOURCE_SHA = '3b28e55c8877276557f8a5a218fb2b966376d889';
 // Every child command in this contract suite is deliberately bounded.  The
 // suite exercises shell wrappers, so an accidentally waiting fake command must
 // fail the test deterministically instead of leaving Vitest's worker RPC
@@ -1485,8 +1486,169 @@ describe('automatic-analysis infrastructure contracts', () => {
                 APIFY_TERTIARY_API_TOKEN: null,
             },
             args: ['--apply'],
-        }, 'Cloud Run required Secret Manager ref drifted for APIFY_TERTIARY_API_TOKEN'],
+        }, 'paid Secret Manager ref roll-forward requires the exact reviewed eight-ref starting set'],
     ] as const)('rejects non-exact preflight Secret Manager roll-forward: %s', (_name, options, expected) => {
+        const result = fakeRun(options);
+        expect(result.status).not.toBe(0);
+        expect(`${result.stdout}\n${result.stderr}`).toContain(expected);
+        expect(result.calls).not.toContain('run deploy');
+    });
+
+    it('allows the exact additive paid Secret Manager ref set for a valid new source candidate', () => {
+        const candidateSourceSha = execFileSync(
+            'git',
+            ['rev-parse', '--verify', 'HEAD^{commit}'],
+            { cwd: root, encoding: 'utf8', timeout: CHILD_PROCESS_TIMEOUT_MS },
+        ).trim();
+        expect(candidateSourceSha).toMatch(/^[0-9a-f]{40}$/);
+        const exactPaidVersions = {
+            ANALYSIS_V2_APIFY_API_TOKEN_SLOT: 'secondary',
+            ANALYSIS_V2_APIFY_API_TOKEN_SECRET_VERSION: '4',
+            ANALYSIS_V2_SUPABASE_SERVICE_ROLE_SECRET_VERSION: '1',
+            ANALYSIS_V2_IMAGE_PROXY_SIGNING_SECRET_VERSION: '1',
+            ANALYSIS_V2_PREFLIGHT_IDENTITY_HMAC_SECRET_VERSION: '1',
+            ANALYSIS_V2_GENDER_ROUTING_HMAC_SECRET_VERSION: '1',
+            ANALYSIS_V2_APIFY_ADDITIONAL_SECRET_VERSIONS: 'primary:3,tertiary:1,quaternary:1,quinary:1,senary:1,septenary:1,octonary:1,nonary:1,tenth:1',
+        };
+        const result = fakeRun({
+            role: 'paid',
+            environment: exactPaidVersions,
+            observedSourceSha: KNOWN_PAID_OLD_SOURCE_SHA,
+            serviceEnv: {
+                APIFY_OCTONARY_API_TOKEN: null,
+                APIFY_NONARY_API_TOKEN: null,
+            },
+            args: ['--apply'],
+        });
+        expect(result.status, `${result.stderr?.toString() ?? ''}\n${result.calls}`).toBe(0);
+        expect(result.stdout).toContain('predeploy: allowing exact additive paid Apify Secret Manager refs');
+        expect(result.calls).toContain('run deploy');
+        expect(result.calls).toContain('run services update-traffic');
+        expect((result.finalService.metadata as {
+            labels: { 'analysis-v2-source-commit': string };
+        }).labels['analysis-v2-source-commit']).toBe(candidateSourceSha);
+        const finalSecretNames = ((result.finalService.spec as {
+            template: { spec: { containers: Array<{ env: Array<{ name: string; valueFrom?: unknown }> }> } };
+        }).template.spec.containers[0].env)
+            .filter(({ name, valueFrom }) => name.startsWith('APIFY_') && valueFrom)
+            .map(({ name }) => name)
+            .sort();
+        expect(finalSecretNames).toEqual([
+            'APIFY_NONARY_API_TOKEN',
+            'APIFY_OCTONARY_API_TOKEN',
+            'APIFY_PRIMARY_API_TOKEN',
+            'APIFY_QUATERNARY_API_TOKEN',
+            'APIFY_QUINARY_API_TOKEN',
+            'APIFY_SECONDARY_API_TOKEN',
+            'APIFY_SENARY_API_TOKEN',
+            'APIFY_SEPTENARY_API_TOKEN',
+            'APIFY_TENTH_API_TOKEN',
+            'APIFY_TERTIARY_API_TOKEN',
+        ]);
+    });
+
+    it('allows a later valid source to roll forward normally when paid refs are already complete', () => {
+        const result = fakeRun({
+            role: 'paid',
+            observedSourceSha: 'd'.repeat(40),
+            args: ['--apply'],
+        });
+        expect(result.status, `${result.stderr?.toString() ?? ''}\n${result.calls}`).toBe(0);
+        expect(result.stdout).not.toContain('predeploy: allowing exact additive paid Apify Secret Manager refs');
+        expect(result.calls).toContain('run deploy');
+        expect(result.calls).toContain('run services update-traffic');
+    });
+
+    it.each([
+        ['altered existing ref', {
+            role: 'paid' as const,
+            observedSourceSha: KNOWN_PAID_OLD_SOURCE_SHA,
+            serviceEnv: {
+                APIFY_TERTIARY_API_TOKEN: 'unexpected-plaintext-ref',
+                APIFY_OCTONARY_API_TOKEN: null,
+                APIFY_NONARY_API_TOKEN: null,
+            },
+            args: ['--apply'],
+        }, 'paid Secret Manager ref roll-forward requires the exact reviewed eight-ref starting set'],
+        ['missing existing ref', {
+            role: 'paid' as const,
+            observedSourceSha: KNOWN_PAID_OLD_SOURCE_SHA,
+            serviceEnv: {
+                APIFY_PRIMARY_API_TOKEN: null,
+                APIFY_OCTONARY_API_TOKEN: null,
+                APIFY_NONARY_API_TOKEN: null,
+            },
+            args: ['--apply'],
+        }, 'paid Secret Manager ref roll-forward requires the exact reviewed eight-ref starting set'],
+        ['extra ref', {
+            role: 'paid' as const,
+            observedSourceSha: KNOWN_PAID_OLD_SOURCE_SHA,
+            serviceEnv: {
+                APIFY_EXTRA_SLOT_API_TOKEN: 'unexpected-secret-ref',
+            },
+            args: ['--apply'],
+        }, 'paid Secret Manager ref roll-forward requires the exact reviewed eight-ref starting set'],
+        ['secret ref version mismatch', {
+            role: 'paid' as const,
+            observedSourceSha: KNOWN_PAID_OLD_SOURCE_SHA,
+            serviceOverrides: {
+                spec: {
+                    template: {
+                        spec: {
+                            containers: [{
+                                env: [{
+                                    name: 'APIFY_TERTIARY_API_TOKEN',
+                                    valueFrom: { secretKeyRef: { key: '2' } },
+                                }],
+                            }],
+                        },
+                    },
+                },
+            },
+            args: ['--apply'],
+        }, 'paid Secret Manager ref roll-forward requires the exact reviewed eight-ref starting set'],
+        ['later source with incomplete refs', {
+            role: 'paid' as const,
+            observedSourceSha: 'd'.repeat(40),
+            serviceEnv: { APIFY_TERTIARY_API_TOKEN: null },
+            args: ['--apply'],
+        }, 'Cloud Run required Secret Manager ref drifted for APIFY_TERTIARY_API_TOKEN'],
+        ['malformed source', {
+            role: 'paid' as const,
+            observedSourceSha: 'not-a-git-sha',
+            args: ['--apply'],
+        }, 'source provenance'],
+        ['wrong role', {
+            role: 'paid' as const,
+            observedSourceSha: KNOWN_PAID_OLD_SOURCE_SHA,
+            serviceOverrides: { metadata: { labels: { 'analysis-workload-role': 'preflight' } } },
+            args: ['--apply'],
+        }, 'workload-role label'],
+        ['check mode', {
+            role: 'paid' as const,
+            observedSourceSha: KNOWN_PAID_OLD_SOURCE_SHA,
+            args: ['--check'],
+        }, 'source provenance'],
+        ['unsafe stage transition', {
+            role: 'paid' as const,
+            observedSourceSha: KNOWN_PAID_OLD_SOURCE_SHA,
+            serviceStage: 'expanded' as const,
+            args: ['--apply'],
+        }, 'unsafe capacity stage transition'],
+        ['non-100-percent serving traffic', {
+            role: 'paid' as const,
+            observedSourceSha: KNOWN_PAID_OLD_SOURCE_SHA,
+            serviceOverrides: {
+                status: {
+                    traffic: [
+                        { revisionName: 'analysis-paid-worker-00001-abc', percent: 50 },
+                        { revisionName: 'analysis-paid-worker-00000-old', percent: 50 },
+                    ],
+                },
+            },
+            args: ['--apply'],
+        }, 'latest ready revision at 100 percent'],
+    ] as const)('keeps paid secret ref roll-forward fail-closed for %s', (_name, options, expected) => {
         const result = fakeRun(options);
         expect(result.status).not.toBe(0);
         expect(`${result.stdout}\n${result.stderr}`).toContain(expected);
