@@ -6,6 +6,7 @@ import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
 
 const root = fileURLToPath(new URL('../', import.meta.url));
+const KNOWN_PREFLIGHT_OLD_SOURCE_SHA = '3b28e55c8877276557f8a5a218fb2b966376d889';
 // Every child command in this contract suite is deliberately bounded.  The
 // suite exercises shell wrappers, so an accidentally waiting fake command must
 // fail the test deterministically instead of leaving Vitest's worker RPC
@@ -86,8 +87,12 @@ function baseEnvironment(role: 'preflight' | 'paid' = 'preflight') {
     };
 }
 
-function manifestFor(role: 'preflight' | 'paid', overrides: Record<string, unknown> = {}) {
-    const env = baseEnvironment(role);
+function manifestFor(
+    role: 'preflight' | 'paid',
+    overrides: Record<string, unknown> = {},
+    environmentOverrides: Record<string, string> = {},
+) {
+    const env = { ...baseEnvironment(role), ...environmentOverrides };
     const prefix = role === 'preflight' ? 'PREFLIGHT_TASKS' : 'ANALYSIS_V2_TASKS';
     const stage = (overrides.ANALYSIS_CAPACITY_STAGE as string | undefined) ?? 'initial';
     const expansionCanary = (overrides.ANALYSIS_CAPACITY_EXPANSION_CANARY as string | undefined) ?? 'false';
@@ -228,6 +233,7 @@ interface FakeRunOptions {
     serviceResourceShape?: 'missing' | 'wrong-cpu' | 'wrong-memory' | 'legacy-top-level-only';
     serviceOverrides?: Record<string, unknown>;
     serviceEnv?: Record<string, string | null>;
+    environment?: Record<string, string>;
     omitMinScaleAnnotation?: boolean;
     iam?: Record<string, unknown>;
     manifestOverrides?: Record<string, unknown>;
@@ -240,7 +246,7 @@ interface FakeRunOptions {
 
 function fakeRun(options: FakeRunOptions = {}) {
     const role = options.role ?? 'paid';
-    const env = baseEnvironment(role);
+    const env = { ...baseEnvironment(role), ...(options.environment ?? {}) };
     const prefix = role === 'preflight' ? 'PREFLIGHT_TASKS' : 'ANALYSIS_V2_TASKS';
     const maintenancePrefix = role === 'preflight' ? 'PREFLIGHT_TASKS' : 'ANALYSIS_V2';
     const target = env[`${prefix}_TARGET_URL` as keyof typeof env] as string;
@@ -308,7 +314,7 @@ function fakeRun(options: FakeRunOptions = {}) {
             ['APIFY_OCTONARY_API_TOKEN', 'ai-baram-v2-apify-octonary', '7'],
             ['APIFY_NONARY_API_TOKEN', 'ai-baram-v2-apify-nonary', '7'],
             ['APIFY_TENTH_API_TOKEN', 'ai-baram-v2-apify-tenth', '7'],
-        ]).concat([
+    ]).concat([
         ['SUPABASE_SERVICE_ROLE_KEY', 'ai-baram-v2-supabase-service-role', '7'],
         ['IMAGE_PROXY_SIGNING_SECRET', 'ai-baram-v2-image-proxy-signing', '7'],
         ['ANALYSIS_V2_PREFLIGHT_IDENTITY_HMAC_SECRET', 'ai-baram-v2-preflight-identity-hmac', '7'],
@@ -317,6 +323,25 @@ function fakeRun(options: FakeRunOptions = {}) {
         name,
         valueFrom: { secretKeyRef: { name: secretName, key: version } },
     }));
+    const configuredSecretVersions = new Map<string, string>([
+        ['SUPABASE_SERVICE_ROLE_KEY', env.ANALYSIS_V2_SUPABASE_SERVICE_ROLE_SECRET_VERSION],
+        ['IMAGE_PROXY_SIGNING_SECRET', env.ANALYSIS_V2_IMAGE_PROXY_SIGNING_SECRET_VERSION],
+        ['ANALYSIS_V2_PREFLIGHT_IDENTITY_HMAC_SECRET', env.ANALYSIS_V2_PREFLIGHT_IDENTITY_HMAC_SECRET_VERSION],
+        ['ANALYSIS_V2_GENDER_ROUTING_HMAC_SECRET', env.ANALYSIS_V2_GENDER_ROUTING_HMAC_SECRET_VERSION],
+    ]);
+    const selectedSlot = env.ANALYSIS_V2_APIFY_API_TOKEN_SLOT;
+    configuredSecretVersions.set(
+        `APIFY_${selectedSlot.toUpperCase()}_API_TOKEN`,
+        env.ANALYSIS_V2_APIFY_API_TOKEN_SECRET_VERSION,
+    );
+    for (const entry of env.ANALYSIS_V2_APIFY_ADDITIONAL_SECRET_VERSIONS.split(',')) {
+        const [slot, version] = entry.split(':');
+        if (slot && version) configuredSecretVersions.set(`APIFY_${slot.toUpperCase()}_API_TOKEN`, version);
+    }
+    for (const entry of secretEnv) {
+        const configuredVersion = configuredSecretVersions.get(entry.name);
+        if (configuredVersion) entry.valueFrom.secretKeyRef.key = configuredVersion;
+    }
     const serviceJsonDefaults = {
         status: {
             url: origin,
@@ -529,7 +554,7 @@ function fakeRun(options: FakeRunOptions = {}) {
         ANALYSIS_CAPACITY_STAGE: stage,
         ANALYSIS_CAPACITY_EXPANSION_CANARY: expansionCanary,
         ...options.manifestOverrides,
-    })));
+    }, options.environment)));
     const buildManifestPath = join(fixtureDir, 'build.json');
     writeFileSync(buildManifestPath, JSON.stringify({
         NEXT_PUBLIC_SUPABASE_URL: 'https://abcdefghijklmnopqrst.supabase.co',
@@ -593,7 +618,7 @@ if [[ "\${1:-} \${2:-} \${3:-}" == "run revisions describe" ]]; then
 fi
 if [[ "\${1:-} \${2:-} \${3:-}" == "run services get-iam-policy" ]]; then cat "$FAKE_GCLOUD_IAM_JSON"; exit 0; fi
 if [[ "\${1:-} \${2:-}" == "run deploy" ]]; then
-  jq --arg rev "$FAKE_GCLOUD_NEXT_REVISION" --arg stage "$FAKE_GCLOUD_TARGET_STAGE" --arg active "$FAKE_GCLOUD_ACTIVE" --arg role "$FAKE_GCLOUD_ROLE" --arg source "$FAKE_GCLOUD_SOURCE_SHA" --arg stagedTraffic "$FAKE_GCLOUD_STAGED_TRAFFIC" '
+  jq --arg rev "$FAKE_GCLOUD_NEXT_REVISION" --arg stage "$FAKE_GCLOUD_TARGET_STAGE" --arg active "$FAKE_GCLOUD_ACTIVE" --arg role "$FAKE_GCLOUD_ROLE" --arg source "$FAKE_GCLOUD_SOURCE_SHA" --arg stagedTraffic "$FAKE_GCLOUD_STAGED_TRAFFIC" --argjson desiredSecretEnv "$FAKE_GCLOUD_DEPLOY_SECRET_ENV" '
     .status.latestCreatedRevisionName = $rev
     | if $active == "false"
       then .status.latestReadyRevisionName = $rev | .status.traffic = [{revisionName:$rev,percent:100}]
@@ -624,6 +649,13 @@ if [[ "\${1:-} \${2:-}" == "run deploy" ]]; then
         elif .name == "ANALYSIS_V2_RECOVERY_ENABLED" then .value = (if $stage == "bootstrap" or $role != "paid" then "false" else "true" end)
         elif .name == "PREFLIGHT_APIFY_API_TOKEN_SLOTS" then .value = "primary,tertiary,quaternary,quinary,senary,septenary,octonary,nonary,tenth"
         else . end
+      )
+    | (.spec.template.spec.containers[0].env) as $currentEnv
+    | .spec.template.spec.containers[0].env = reduce $desiredSecretEnv[] as $desired ($currentEnv;
+        if any(.[]; .name == $desired.name)
+        then map(if .name == $desired.name then $desired else . end)
+        else . + [$desired]
+        end
       )
   ' "$FAKE_GCLOUD_SERVICE_JSON" > "$FAKE_GCLOUD_SERVICE_JSON.tmp"
   mv "$FAKE_GCLOUD_SERVICE_JSON.tmp" "$FAKE_GCLOUD_SERVICE_JSON"
@@ -765,6 +797,7 @@ fi
                 FAKE_GCLOUD_ACTIVE: active ? 'true' : 'false',
                 FAKE_GCLOUD_ROLE: role,
                 FAKE_GCLOUD_STAGED_TRAFFIC: options.stagedTraffic ?? 'none',
+                FAKE_GCLOUD_DEPLOY_SECRET_ENV: JSON.stringify(secretEnv),
                 FAKE_GCLOUD_MAINTENANCE_EMAIL: (env[`${maintenancePrefix}_MAINTENANCE_SERVICE_ACCOUNT_EMAIL` as keyof typeof env] as string),
                 FAKE_GCLOUD_MAINTENANCE_AUDIENCE: (env[`${maintenancePrefix}_MAINTENANCE_OIDC_AUDIENCE` as keyof typeof env] as string),
                 FAKE_GCLOUD_SCHEDULER_URI: `${origin}/api/analysis/preflight/recover`,
@@ -1292,10 +1325,178 @@ describe('automatic-analysis infrastructure contracts', () => {
             .toBe('primary,tertiary,quaternary,quinary,senary,septenary,octonary,nonary,tenth');
     });
 
+    it('allows only the exact additive preflight Secret Manager ref set with the known old ref contract', () => {
+        const exactPreflightVersions = {
+            ANALYSIS_V2_APIFY_API_TOKEN_SLOT: 'primary',
+            ANALYSIS_V2_APIFY_API_TOKEN_SECRET_VERSION: '3',
+            ANALYSIS_V2_SUPABASE_SERVICE_ROLE_SECRET_VERSION: '1',
+            ANALYSIS_V2_IMAGE_PROXY_SIGNING_SECRET_VERSION: '1',
+            ANALYSIS_V2_PREFLIGHT_IDENTITY_HMAC_SECRET_VERSION: '1',
+            ANALYSIS_V2_GENDER_ROUTING_HMAC_SECRET_VERSION: '1',
+            ANALYSIS_V2_APIFY_ADDITIONAL_SECRET_VERSIONS: 'tertiary:1,quaternary:1,quinary:1,senary:1,septenary:1,octonary:1,nonary:1,tenth:1',
+        };
+        const result = fakeRun({
+            role: 'preflight',
+            environment: exactPreflightVersions,
+            observedSourceSha: KNOWN_PREFLIGHT_OLD_SOURCE_SHA,
+            serviceEnv: {
+                PREFLIGHT_APIFY_API_TOKEN_SLOTS: 'primary,quinary,senary',
+                APIFY_TERTIARY_API_TOKEN: null,
+                APIFY_QUATERNARY_API_TOKEN: null,
+                APIFY_SEPTENARY_API_TOKEN: null,
+                APIFY_OCTONARY_API_TOKEN: null,
+                APIFY_NONARY_API_TOKEN: null,
+                APIFY_TENTH_API_TOKEN: null,
+            },
+            args: ['--apply'],
+        });
+        expect(result.status, `${result.stderr?.toString() ?? ''}\n${result.calls}`).toBe(0);
+        expect(result.stdout).toContain('predeploy: allowing exact additive preflight Apify Secret Manager refs');
+        expect(result.calls).toContain('run deploy');
+        expect(result.calls).toContain('run services update-traffic');
+        const finalSecretNames = ((result.finalService.spec as {
+            template: { spec: { containers: Array<{ env: Array<{ name: string; valueFrom?: unknown }> }> } };
+        }).template.spec.containers[0].env)
+            .filter(({ name, valueFrom }) => name.startsWith('APIFY_') && valueFrom)
+            .map(({ name }) => name)
+            .sort();
+        expect(finalSecretNames).toEqual([
+            'APIFY_NONARY_API_TOKEN',
+            'APIFY_OCTONARY_API_TOKEN',
+            'APIFY_PRIMARY_API_TOKEN',
+            'APIFY_QUATERNARY_API_TOKEN',
+            'APIFY_QUINARY_API_TOKEN',
+            'APIFY_SENARY_API_TOKEN',
+            'APIFY_SEPTENARY_API_TOKEN',
+            'APIFY_TENTH_API_TOKEN',
+            'APIFY_TERTIARY_API_TOKEN',
+        ]);
+    });
+
+    it.each([
+        ['altered old ref', {
+            role: 'preflight' as const,
+            environment: {
+                ANALYSIS_V2_APIFY_API_TOKEN_SLOT: 'primary',
+                ANALYSIS_V2_APIFY_API_TOKEN_SECRET_VERSION: '3',
+                ANALYSIS_V2_SUPABASE_SERVICE_ROLE_SECRET_VERSION: '1',
+                ANALYSIS_V2_IMAGE_PROXY_SIGNING_SECRET_VERSION: '1',
+                ANALYSIS_V2_PREFLIGHT_IDENTITY_HMAC_SECRET_VERSION: '1',
+                ANALYSIS_V2_GENDER_ROUTING_HMAC_SECRET_VERSION: '1',
+                ANALYSIS_V2_APIFY_ADDITIONAL_SECRET_VERSIONS: 'tertiary:1,quaternary:1,quinary:1,senary:1,septenary:1,octonary:1,nonary:1,tenth:1',
+            },
+            observedSourceSha: KNOWN_PREFLIGHT_OLD_SOURCE_SHA,
+            serviceEnv: {
+                PREFLIGHT_APIFY_API_TOKEN_SLOTS: 'primary,quinary,senary',
+                APIFY_QUINARY_API_TOKEN: 'wrong-secret-ref-version',
+                APIFY_TERTIARY_API_TOKEN: null,
+                APIFY_QUATERNARY_API_TOKEN: null,
+                APIFY_SEPTENARY_API_TOKEN: null,
+                APIFY_OCTONARY_API_TOKEN: null,
+                APIFY_NONARY_API_TOKEN: null,
+                APIFY_TENTH_API_TOKEN: null,
+            },
+            args: ['--apply'],
+        }, 'Cloud Run required Secret Manager ref drifted for APIFY_TERTIARY_API_TOKEN'],
+        ['extra secondary ref', {
+            role: 'preflight' as const,
+            environment: {
+                ANALYSIS_V2_APIFY_API_TOKEN_SLOT: 'primary',
+                ANALYSIS_V2_APIFY_API_TOKEN_SECRET_VERSION: '3',
+                ANALYSIS_V2_SUPABASE_SERVICE_ROLE_SECRET_VERSION: '1',
+                ANALYSIS_V2_IMAGE_PROXY_SIGNING_SECRET_VERSION: '1',
+                ANALYSIS_V2_PREFLIGHT_IDENTITY_HMAC_SECRET_VERSION: '1',
+                ANALYSIS_V2_GENDER_ROUTING_HMAC_SECRET_VERSION: '1',
+                ANALYSIS_V2_APIFY_ADDITIONAL_SECRET_VERSIONS: 'tertiary:1,quaternary:1,quinary:1,senary:1,septenary:1,octonary:1,nonary:1,tenth:1',
+            },
+            observedSourceSha: KNOWN_PREFLIGHT_OLD_SOURCE_SHA,
+            serviceEnv: {
+                PREFLIGHT_APIFY_API_TOKEN_SLOTS: 'primary,quinary,senary',
+                APIFY_SECONDARY_API_TOKEN: 'unexpected-secret-ref',
+                APIFY_TERTIARY_API_TOKEN: null,
+                APIFY_QUATERNARY_API_TOKEN: null,
+                APIFY_SEPTENARY_API_TOKEN: null,
+                APIFY_OCTONARY_API_TOKEN: null,
+                APIFY_NONARY_API_TOKEN: null,
+                APIFY_TENTH_API_TOKEN: null,
+            },
+            args: ['--apply'],
+        }, 'Cloud Run required Secret Manager ref drifted for APIFY_TERTIARY_API_TOKEN'],
+        ['missing old primary ref', {
+            role: 'preflight' as const,
+            environment: {
+                ANALYSIS_V2_APIFY_API_TOKEN_SLOT: 'primary',
+                ANALYSIS_V2_APIFY_API_TOKEN_SECRET_VERSION: '3',
+                ANALYSIS_V2_SUPABASE_SERVICE_ROLE_SECRET_VERSION: '1',
+                ANALYSIS_V2_IMAGE_PROXY_SIGNING_SECRET_VERSION: '1',
+                ANALYSIS_V2_PREFLIGHT_IDENTITY_HMAC_SECRET_VERSION: '1',
+                ANALYSIS_V2_GENDER_ROUTING_HMAC_SECRET_VERSION: '1',
+                ANALYSIS_V2_APIFY_ADDITIONAL_SECRET_VERSIONS: 'tertiary:1,quaternary:1,quinary:1,senary:1,septenary:1,octonary:1,nonary:1,tenth:1',
+            },
+            observedSourceSha: KNOWN_PREFLIGHT_OLD_SOURCE_SHA,
+            serviceEnv: {
+                PREFLIGHT_APIFY_API_TOKEN_SLOTS: 'primary,quinary,senary',
+                APIFY_PRIMARY_API_TOKEN: null,
+                APIFY_TERTIARY_API_TOKEN: null,
+                APIFY_QUATERNARY_API_TOKEN: null,
+                APIFY_SEPTENARY_API_TOKEN: null,
+                APIFY_OCTONARY_API_TOKEN: null,
+                APIFY_NONARY_API_TOKEN: null,
+                APIFY_TENTH_API_TOKEN: null,
+            },
+            args: ['--apply'],
+        }, 'Cloud Run required Secret Manager ref drifted for APIFY_PRIMARY_API_TOKEN'],
+        ['altered desired version', {
+            role: 'preflight' as const,
+            environment: {
+                ANALYSIS_V2_APIFY_API_TOKEN_SLOT: 'primary',
+                ANALYSIS_V2_APIFY_API_TOKEN_SECRET_VERSION: '3',
+                ANALYSIS_V2_SUPABASE_SERVICE_ROLE_SECRET_VERSION: '1',
+                ANALYSIS_V2_IMAGE_PROXY_SIGNING_SECRET_VERSION: '1',
+                ANALYSIS_V2_PREFLIGHT_IDENTITY_HMAC_SECRET_VERSION: '1',
+                ANALYSIS_V2_GENDER_ROUTING_HMAC_SECRET_VERSION: '1',
+                ANALYSIS_V2_APIFY_ADDITIONAL_SECRET_VERSIONS: 'tertiary:2,quaternary:1,quinary:1,senary:1,septenary:1,octonary:1,nonary:1,tenth:1',
+            },
+            observedSourceSha: KNOWN_PREFLIGHT_OLD_SOURCE_SHA,
+            serviceEnv: {
+                PREFLIGHT_APIFY_API_TOKEN_SLOTS: 'primary,quinary,senary',
+                APIFY_TERTIARY_API_TOKEN: null,
+                APIFY_QUATERNARY_API_TOKEN: null,
+                APIFY_SEPTENARY_API_TOKEN: null,
+                APIFY_OCTONARY_API_TOKEN: null,
+                APIFY_NONARY_API_TOKEN: null,
+                APIFY_TENTH_API_TOKEN: null,
+            },
+            args: ['--apply'],
+        }, 'Cloud Run required Secret Manager ref drifted for APIFY_TERTIARY_API_TOKEN'],
+        ['wrong role', {
+            role: 'paid' as const,
+            environment: {
+                ANALYSIS_V2_APIFY_API_TOKEN_SLOT: 'secondary',
+                ANALYSIS_V2_APIFY_API_TOKEN_SECRET_VERSION: '4',
+                ANALYSIS_V2_SUPABASE_SERVICE_ROLE_SECRET_VERSION: '1',
+                ANALYSIS_V2_IMAGE_PROXY_SIGNING_SECRET_VERSION: '1',
+                ANALYSIS_V2_PREFLIGHT_IDENTITY_HMAC_SECRET_VERSION: '1',
+                ANALYSIS_V2_GENDER_ROUTING_HMAC_SECRET_VERSION: '1',
+                ANALYSIS_V2_APIFY_ADDITIONAL_SECRET_VERSIONS: 'primary:3,tertiary:1,quaternary:1,quinary:1,senary:1,septenary:1,octonary:1,nonary:1,tenth:1',
+            },
+            observedSourceSha: KNOWN_PREFLIGHT_OLD_SOURCE_SHA,
+            serviceEnv: {
+                APIFY_TERTIARY_API_TOKEN: null,
+            },
+            args: ['--apply'],
+        }, 'Cloud Run required Secret Manager ref drifted for APIFY_TERTIARY_API_TOKEN'],
+    ] as const)('rejects non-exact preflight Secret Manager roll-forward: %s', (_name, options, expected) => {
+        const result = fakeRun(options);
+        expect(result.status).not.toBe(0);
+        expect(`${result.stdout}\n${result.stderr}`).toContain(expected);
+        expect(result.calls).not.toContain('run deploy');
+    });
+
     it.each([
         ['check mode', {
             role: 'preflight' as const,
-            observedSourceSha: 'd'.repeat(40),
+            observedSourceSha: KNOWN_PREFLIGHT_OLD_SOURCE_SHA,
             serviceEnv: { PREFLIGHT_APIFY_API_TOKEN_SLOTS: 'primary,quinary,senary' },
             args: ['--check'],
         }, 'source provenance'],
