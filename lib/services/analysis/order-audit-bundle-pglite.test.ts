@@ -22,6 +22,10 @@ const LINEAGE_REQUEST_ID = '80000000-0000-4000-8000-000000000011';
 const PURGE_FENCE_REQUEST_ID = '80000000-0000-4000-8000-000000000012';
 const PREFLIGHT_PROFILE_ID = '81000000-0000-4000-8000-000000000001';
 const ORDER_ID = '82000000-0000-4000-8000-000000000001';
+const LIST_REQUEST_A = '80000000-0000-4000-8000-000000000013';
+const LIST_REQUEST_B = '80000000-0000-4000-8000-000000000014';
+const LIST_REQUEST_C = '80000000-0000-4000-8000-000000000015';
+const LIST_REQUEST_D = '80000000-0000-4000-8000-000000000016';
 const HASH_A = 'a'.repeat(64);
 const HASH_B = 'b'.repeat(64);
 const HASH_C = 'c'.repeat(64);
@@ -1545,5 +1549,161 @@ describe('permanent order audit bundle SQL behavior', () => {
             batch_key: -1,
             result_hash: HASH_A,
         }]);
+    });
+
+    it('lists one latest bundle per request with stable assembledAt/requestId keyset pages', async () => {
+        const insertBundle = async (
+            requestId: string,
+            version: number,
+            bundleHash: string,
+            sourceHash: string,
+            assembledAt: string,
+        ) => {
+            await db.query(`
+                INSERT INTO public.analysis_order_audit_bundles(
+                    request_id, version, bundle_hash, source_set_hash,
+                    pipeline_version, plan_id, access_mode,
+                    target_instagram_id, target_profile_available, target_posts_available,
+                    mutual_total, mutual_list_hash, public_total, private_total,
+                    screened_total, candidate_declared, candidate_collected,
+                    interaction_declared, interaction_collected,
+                    completeness_status, gap_codes, cost_status,
+                    cost_known_usd, cost_conservative_usd, cost_usage_unknown,
+                    usage_unknown, stage_status, assembled_at
+                ) VALUES (
+                    $1, $2, $3, $4, 'v2', 'basic', 'production',
+                    'target.account', TRUE, FALSE,
+                    0, $5, 0, 0, 0, 0, 0, 0, 0,
+                    'partial', ARRAY['COST_USAGE_UNKNOWN']::TEXT[], 'unknown',
+                    NULL, NULL, TRUE, TRUE,
+                    '{"relationships":true,"targetEvidence":false,"candidateFeatures":false,"riskScores":false,"finalized":true,"costSourceHash":"secret","candidateKeyCoverage":{"secret":true}}'::JSONB,
+                    $6::TIMESTAMPTZ
+                )
+            `, [requestId, version, bundleHash, sourceHash, HASH_A, assembledAt]);
+        };
+
+        await insertBundle(
+            LIST_REQUEST_A, 1, 'a'.repeat(64), '1'.repeat(64), '2099-09-04T00:05:00Z',
+        );
+        await insertBundle(
+            LIST_REQUEST_A, 2, 'b'.repeat(64), '2'.repeat(64), '2099-09-04T00:01:00Z',
+        );
+        await insertBundle(
+            LIST_REQUEST_B, 1, 'c'.repeat(64), '3'.repeat(64), '2099-09-04T00:04:00Z',
+        );
+        await insertBundle(
+            LIST_REQUEST_C, 1, 'd'.repeat(64), '4'.repeat(64), '2099-09-04T00:04:00Z',
+        );
+        await insertBundle(
+            LIST_REQUEST_D, 1, 'e'.repeat(64), '5'.repeat(64), '2099-09-04T00:03:00Z',
+        );
+
+        const loadPage = async (
+            cursor: { assembledAt: string; requestId: string } | null,
+        ) => {
+            const result = await db.query<{ payload: Record<string, unknown> }>(
+                `SELECT public.list_analysis_order_audit_bundles($1, $2, 2) AS payload`,
+                [cursor?.assembledAt ?? null, cursor?.requestId ?? null],
+            );
+            return result.rows[0]?.payload as {
+                rows: Array<Record<string, unknown>>;
+                nextCursor: { assembledAt: string; requestId: string } | null;
+            };
+        };
+
+        const first = await loadPage(null);
+        expect(first.rows.map(row => row.requestId)).toEqual([LIST_REQUEST_C, LIST_REQUEST_B]);
+        expect(first.rows.map(row => row.version)).toEqual([1, 1]);
+        expect(first.nextCursor).toMatchObject({ requestId: LIST_REQUEST_B });
+        expect(first.rows[0]).toEqual(expect.objectContaining({
+            orderId: null,
+            targetInstagramId: 'target.account',
+            planId: 'basic',
+            completenessStatus: 'partial',
+            gapCodes: ['COST_USAGE_UNKNOWN'],
+            cost: {
+                status: 'unknown',
+                knownUsd: null,
+                conservativeUsd: null,
+                usageUnknown: true,
+            },
+            stageStatus: {
+                relationships: true,
+                targetEvidence: false,
+                candidateFeatures: false,
+                riskScores: false,
+                finalized: true,
+            },
+        }));
+        expect(first.rows[0]).not.toHaveProperty('providerRuns');
+        expect(first.rows[0]).not.toHaveProperty('costProvenance');
+        expect(first.rows[0]).not.toHaveProperty('candidateKeyCoverage');
+
+        const second = await loadPage(first.nextCursor);
+        expect(second.rows.map(row => row.requestId)).toEqual([LIST_REQUEST_D, LIST_REQUEST_A]);
+        expect(second.rows.find(row => row.requestId === LIST_REQUEST_A)?.version).toBe(2);
+        expect(second.nextCursor).toBeTruthy();
+
+        const seen = [...first.rows, ...second.rows].map(row => row.requestId);
+        expect(new Set(seen)).toEqual(new Set([
+            LIST_REQUEST_A, LIST_REQUEST_B, LIST_REQUEST_C, LIST_REQUEST_D,
+        ]));
+        expect(seen).toHaveLength(4);
+
+        const allRows = [...first.rows, ...second.rows];
+        let cursor = second.nextCursor;
+        while (cursor && allRows.length < 100) {
+            const page = await loadPage(cursor);
+            allRows.push(...page.rows);
+            cursor = page.nextCursor;
+        }
+        expect(cursor).toBeNull();
+        const allIds = allRows.map(row => row.requestId);
+        expect(new Set(allIds).size).toBe(allIds.length);
+        const distinctRequestCount = await db.query<{ count: string }>(
+            'SELECT count(DISTINCT request_id)::TEXT AS count FROM public.analysis_order_audit_bundles',
+        );
+        expect(allIds).toHaveLength(Number(distinctRequestCount.rows[0]?.count));
+
+        await expect(db.query(
+            `SELECT public.list_analysis_order_audit_bundles(NULL, $1, 2)`,
+            [LIST_REQUEST_B],
+        )).rejects.toThrow('ANALYSIS_ORDER_AUDIT_INVALID_QUERY');
+        await expect(db.query(
+            `SELECT public.list_analysis_order_audit_bundles(NULL, NULL, 51)`,
+        )).rejects.toThrow('ANALYSIS_ORDER_AUDIT_INVALID_QUERY');
+
+        const privileges = await db.query<{
+            anon_execute: boolean;
+            authenticated_execute: boolean;
+            service_execute: boolean;
+            service_select: boolean;
+        }>(`
+            SELECT
+                has_function_privilege(
+                    'anon',
+                    'public.list_analysis_order_audit_bundles(timestamptz,uuid,integer)',
+                    'EXECUTE'
+                ) AS anon_execute,
+                has_function_privilege(
+                    'authenticated',
+                    'public.list_analysis_order_audit_bundles(timestamptz,uuid,integer)',
+                    'EXECUTE'
+                ) AS authenticated_execute,
+                has_function_privilege(
+                    'service_role',
+                    'public.list_analysis_order_audit_bundles(timestamptz,uuid,integer)',
+                    'EXECUTE'
+                ) AS service_execute,
+                has_table_privilege(
+                    'service_role', 'public.analysis_order_audit_bundles', 'SELECT'
+                ) AS service_select
+        `);
+        expect(privileges.rows[0]).toEqual({
+            anon_execute: false,
+            authenticated_execute: false,
+            service_execute: true,
+            service_select: false,
+        });
     });
 });

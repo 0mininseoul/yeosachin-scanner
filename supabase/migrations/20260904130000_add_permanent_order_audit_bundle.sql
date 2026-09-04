@@ -1070,6 +1070,150 @@ AS $$
     );
 $$;
 
+-- Service-only overview read. Latest selection happens before keyset pagination so a request
+-- contributes exactly one immutable bundle even when reconciliation has appended many versions.
+CREATE OR REPLACE FUNCTION public.list_analysis_order_audit_bundles(
+    p_cursor_assembled_at TIMESTAMPTZ DEFAULT NULL,
+    p_cursor_request_id UUID DEFAULT NULL,
+    p_page_size INTEGER DEFAULT 25
+)
+RETURNS JSONB
+LANGUAGE plpgsql
+SECURITY DEFINER
+STABLE
+SET search_path = ''
+SET statement_timeout = '5s'
+AS $$
+DECLARE
+    v_rows JSONB;
+    v_has_more BOOLEAN;
+    v_next_assembled_at TIMESTAMPTZ;
+    v_next_request_id UUID;
+BEGIN
+    IF (p_cursor_assembled_at IS NULL) <> (p_cursor_request_id IS NULL)
+       OR p_page_size IS NULL
+       OR p_page_size NOT BETWEEN 1 AND 50 THEN
+        RAISE EXCEPTION USING
+            MESSAGE = 'ANALYSIS_ORDER_AUDIT_INVALID_QUERY', ERRCODE = 'P0001';
+    END IF;
+
+    WITH latest AS (
+        SELECT DISTINCT ON (bundle.request_id)
+            bundle.request_id,
+            bundle.order_id,
+            bundle.target_instagram_id,
+            bundle.plan_id,
+            bundle.version,
+            bundle.completeness_status,
+            bundle.gap_codes,
+            bundle.cost_status,
+            bundle.cost_known_usd,
+            bundle.cost_conservative_usd,
+            bundle.cost_usage_unknown,
+            bundle.stage_status,
+            bundle.assembled_at
+        FROM public.analysis_order_audit_bundles AS bundle
+        ORDER BY bundle.request_id, bundle.version DESC
+    ), candidates AS (
+        SELECT latest.*
+        FROM latest
+        WHERE p_cursor_assembled_at IS NULL
+           OR assembled_at < p_cursor_assembled_at
+           OR (
+               assembled_at = p_cursor_assembled_at
+               AND request_id < p_cursor_request_id
+           )
+        ORDER BY assembled_at DESC, request_id DESC
+        LIMIT p_page_size + 1
+    ), ordered AS (
+        SELECT candidates.*,
+               pg_catalog.row_number() OVER (
+                   ORDER BY assembled_at DESC, request_id DESC
+               ) AS page_ordinal
+        FROM candidates
+    ), page AS (
+        SELECT ordered.*
+        FROM ordered
+        WHERE ordered.page_ordinal <= p_page_size
+    ), has_more AS (
+        SELECT EXISTS (
+            SELECT 1
+            FROM ordered
+            WHERE ordered.page_ordinal = p_page_size + 1
+        ) AS value
+    )
+    SELECT
+        COALESCE((
+            SELECT pg_catalog.jsonb_agg(
+                pg_catalog.jsonb_build_object(
+                    'requestId', page.request_id,
+                    'orderId', page.order_id,
+                    'targetInstagramId', page.target_instagram_id,
+                    'planId', page.plan_id,
+                    'version', page.version,
+                    'completenessStatus', page.completeness_status,
+                    'gapCodes', COALESCE((
+                        SELECT pg_catalog.jsonb_agg(bounded.code ORDER BY bounded.ordinality)
+                        FROM (
+                            SELECT gap.code, gap.ordinality
+                            FROM pg_catalog.unnest(
+                                COALESCE(page.gap_codes, ARRAY[]::TEXT[])
+                            ) WITH ORDINALITY AS gap(code, ordinality)
+                            WHERE pg_catalog.char_length(gap.code) BETWEEN 1 AND 96
+                              AND gap.code !~ '[[:cntrl:]]'
+                            ORDER BY gap.ordinality
+                            LIMIT 32
+                        ) AS bounded
+                    ), '[]'::JSONB),
+                    'cost', pg_catalog.jsonb_build_object(
+                        'status', page.cost_status,
+                        'knownUsd', page.cost_known_usd,
+                        'conservativeUsd', page.cost_conservative_usd,
+                        'usageUnknown', page.cost_usage_unknown
+                    ),
+                    'stageStatus', pg_catalog.jsonb_build_object(
+                        'relationships', page.stage_status->>'relationships' = 'true',
+                        'targetEvidence', page.stage_status->>'targetEvidence' = 'true',
+                        'candidateFeatures', page.stage_status->>'candidateFeatures' = 'true',
+                        'riskScores', page.stage_status->>'riskScores' = 'true',
+                        'finalized', page.stage_status->>'finalized' = 'true'
+                    ),
+                    'assembledAt', page.assembled_at
+                ) ORDER BY page.assembled_at DESC, page.request_id DESC
+            )
+            FROM page
+        ), '[]'::JSONB),
+        has_more.value,
+        CASE WHEN has_more.value THEN (
+            SELECT page.assembled_at
+            FROM page
+            ORDER BY page.assembled_at ASC, page.request_id ASC
+            LIMIT 1
+        ) ELSE NULL END,
+        CASE WHEN has_more.value THEN (
+            SELECT page.request_id
+            FROM page
+            ORDER BY page.assembled_at ASC, page.request_id ASC
+            LIMIT 1
+        ) ELSE NULL END
+      INTO v_rows, v_has_more, v_next_assembled_at, v_next_request_id
+      FROM has_more;
+
+    RETURN pg_catalog.jsonb_build_object(
+        'rows', v_rows,
+        'nextCursor', CASE WHEN v_has_more THEN pg_catalog.jsonb_build_object(
+            'assembledAt', v_next_assembled_at,
+            'requestId', v_next_request_id
+        ) ELSE NULL END
+    );
+END;
+$$;
+
+REVOKE ALL ON FUNCTION public.list_analysis_order_audit_bundles(TIMESTAMPTZ, UUID, INTEGER)
+    FROM PUBLIC, anon, authenticated, service_role;
+GRANT EXECUTE ON FUNCTION public.list_analysis_order_audit_bundles(TIMESTAMPTZ, UUID, INTEGER)
+    TO service_role;
+
 REVOKE ALL ON FUNCTION public.analysis_order_audit_bundle_payload(
     public.analysis_order_audit_bundles
 ) FROM PUBLIC, anon, authenticated, service_role;
