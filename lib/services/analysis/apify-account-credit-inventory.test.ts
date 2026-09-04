@@ -1,6 +1,8 @@
 import { describe, expect, it, vi } from 'vitest';
 import {
+    APIFY_ACCOUNT_EXCLUSION_RPC,
     APIFY_ACCOUNT_CREDIT_INVENTORY_PERSISTENCE_ERROR,
+    APIFY_ACCOUNT_CREDIT_INVENTORY_VALIDATION_ERROR,
     APIFY_ACCOUNT_CREDIT_INVENTORY_RPC,
     APIFY_PAID_CREDIT_SNAPSHOT_RPC,
     createApifyAccountCreditInventoryStore,
@@ -63,6 +65,59 @@ function providerReply() {
 }
 
 describe('all-account Apify credit inventory', () => {
+    it('sets exclusion only for a free slot and rejects secondary before the RPC', async () => {
+        const client = rpcClient({
+            credentialSlot: 'octonary',
+            excluded: true,
+            updatedAt: REFETCHED_AT,
+        });
+        const store = createApifyAccountCreditInventoryStore(client);
+
+        await store.setManualExclusion({ credentialSlot: 'octonary', excluded: true });
+        expect(client.rpc).toHaveBeenCalledWith(
+            APIFY_ACCOUNT_EXCLUSION_RPC,
+            { p_credential_slot: 'octonary', p_excluded: true },
+        );
+
+        (client.rpc as ReturnType<typeof vi.fn>).mockClear();
+        await expect(store.setManualExclusion({
+            credentialSlot: 'secondary',
+            excluded: true,
+        }))
+            .rejects.toThrow(APIFY_ACCOUNT_CREDIT_INVENTORY_VALIDATION_ERROR);
+        expect(client.rpc).not.toHaveBeenCalled();
+    });
+
+    it('accepts a one-row wrapper around the sanitized exclusion RPC result', async () => {
+        const client = rpcClient([{
+            credentialSlot: 'octonary',
+            excluded: false,
+            updatedAt: REFETCHED_AT,
+        }]);
+
+        await expect(createApifyAccountCreditInventoryStore(client).setManualExclusion({
+            credentialSlot: 'octonary',
+            excluded: false,
+        })).resolves.toBeUndefined();
+    });
+
+    it('fails closed when the exclusion RPC returns an unexpected payload', async () => {
+        const client = rpcClient({ credentialSlot: 'octonary', excluded: true });
+
+        await expect(createApifyAccountCreditInventoryStore(client).setManualExclusion({
+            credentialSlot: 'octonary',
+            excluded: true,
+        })).rejects.toThrow(APIFY_ACCOUNT_CREDIT_INVENTORY_PERSISTENCE_ERROR);
+    });
+
+    it('fails closed when a fresh row omits remaining capacity', async () => {
+        const rows = inventoryRows();
+        rows[0] = { ...rows[0]!, effectiveRemainingUsd: null };
+
+        await expect(createApifyAccountCreditInventoryStore(rpcClient(rows)).load())
+            .rejects.toThrow(APIFY_ACCOUNT_CREDIT_INVENTORY_PERSISTENCE_ERROR);
+    });
+
     it('requires canonical ten aliases, role labels, and explicit missing secondary state', async () => {
         const rows = inventoryRows();
         rows[1] = {

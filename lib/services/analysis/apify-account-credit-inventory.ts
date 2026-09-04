@@ -3,6 +3,7 @@ import { z } from 'zod';
 import {
     APIFY_CREDENTIAL_SLOTS,
     APIFY_CREDENTIAL_TOKEN_ENV,
+    APIFY_FREE_CREDENTIAL_SLOTS,
     type ApifyCredentialSlot,
 } from '@/lib/services/instagram/providers/types';
 import {
@@ -16,6 +17,8 @@ export const APIFY_ACCOUNT_CREDIT_INVENTORY_RPC =
     'load_analysis_apify_account_credit_inventory';
 export const APIFY_PAID_CREDIT_SNAPSHOT_RPC =
     'upsert_analysis_apify_paid_credit_snapshot';
+export const APIFY_ACCOUNT_EXCLUSION_RPC =
+    'set_analysis_apify_account_exclusion';
 export const APIFY_ACCOUNT_CREDIT_INVENTORY_VALIDATION_ERROR =
     'ANALYSIS_APIFY_ACCOUNT_INVENTORY_VALIDATION_ERROR';
 export const APIFY_ACCOUNT_CREDIT_INVENTORY_PERSISTENCE_ERROR =
@@ -23,6 +26,7 @@ export const APIFY_ACCOUNT_CREDIT_INVENTORY_PERSISTENCE_ERROR =
 
 const MAX_USD = 100_000;
 const MAX_AGE_SECONDS = 900;
+export const APIFY_ACCOUNT_CREDIT_INVENTORY_DEFAULT_MAX_AGE_SECONDS = 300;
 const TIMESTAMP = z.string().datetime({ offset: true });
 const nullableUsd = z.number().finite().min(0).max(MAX_USD).nullable();
 
@@ -69,6 +73,12 @@ const inventoryRowSchema = z.object({
                 message: 'Missing credit data must remain explicit and non-numeric.',
             });
         }
+    } else if (row.freshnessState === 'fresh' && row.effectiveRemainingUsd === null) {
+        context.addIssue({
+            code: 'custom',
+            path: ['effectiveRemainingUsd'],
+            message: 'Fresh credit data must include current remaining capacity.',
+        });
     } else if (!populated || row.healthState !== 'healthy') {
         context.addIssue({
             code: 'custom',
@@ -111,6 +121,21 @@ const inventorySchema = z.array(inventoryRowSchema)
 
 export type ApifyAccountCreditInventoryRow = z.infer<typeof inventoryRowSchema>;
 
+export const apifyAccountCreditExclusionInputSchema = z.object({
+    credentialSlot: z.enum(APIFY_FREE_CREDENTIAL_SLOTS),
+    excluded: z.boolean(),
+}).strict();
+
+export type ApifyAccountCreditExclusionInput = z.infer<
+    typeof apifyAccountCreditExclusionInputSchema
+>;
+
+const exclusionResultSchema = z.object({
+    credentialSlot: z.enum(APIFY_FREE_CREDENTIAL_SLOTS),
+    excluded: z.boolean(),
+    updatedAt: TIMESTAMP,
+}).strict();
+
 export interface ApifyAccountCreditInventoryClient {
     rpc(name: string, params: Record<string, unknown>): PromiseLike<{
         data: unknown;
@@ -120,6 +145,7 @@ export interface ApifyAccountCreditInventoryClient {
 
 export interface ApifyAccountCreditInventoryStore {
     load(maxSnapshotAgeSeconds?: number): Promise<readonly ApifyAccountCreditInventoryRow[]>;
+    setManualExclusion(input: unknown): Promise<void>;
     /** Paid/operator-only refresh; beta/free callers cannot pass secondary here. */
     refreshPaidSecondary(input: ApifyPaidSecondaryCreditRefreshInput): Promise<ApifyAccountCreditInventoryRow>;
 }
@@ -144,6 +170,13 @@ function rpcData(data: unknown): unknown {
     if (Array.isArray(data) && data.length === 1 && Array.isArray(data[0])) {
         return data[0];
     }
+    return data;
+}
+
+function rpcScalarData(data: unknown): unknown {
+    // PostgREST can represent a scalar JSONB result as one row. Unlike the
+    // inventory reader, a mutation result cannot be confused with a row set.
+    if (Array.isArray(data) && data.length === 1) return data[0];
     return data;
 }
 
@@ -176,13 +209,32 @@ export function createApifyAccountCreditInventoryStore(
     client: ApifyAccountCreditInventoryClient,
 ): ApifyAccountCreditInventoryStore {
     return Object.freeze({
-        async load(maxSnapshotAgeSeconds = 300) {
+        async load(
+            maxSnapshotAgeSeconds = APIFY_ACCOUNT_CREDIT_INVENTORY_DEFAULT_MAX_AGE_SECONDS,
+        ) {
             validateMaxAge(maxSnapshotAgeSeconds);
             return parseInventory(await callRpc(
                 client,
                 APIFY_ACCOUNT_CREDIT_INVENTORY_RPC,
                 { p_max_age_seconds: maxSnapshotAgeSeconds },
             ));
+        },
+        async setManualExclusion(input: unknown) {
+            const parsed = apifyAccountCreditExclusionInputSchema.safeParse(input);
+            if (!parsed.success) {
+                throw new Error(APIFY_ACCOUNT_CREDIT_INVENTORY_VALIDATION_ERROR);
+            }
+            const result = await callRpc(
+                client,
+                APIFY_ACCOUNT_EXCLUSION_RPC,
+                {
+                    p_credential_slot: parsed.data.credentialSlot,
+                    p_excluded: parsed.data.excluded,
+                },
+            );
+            if (!exclusionResultSchema.safeParse(rpcScalarData(result)).success) {
+                throw new Error(APIFY_ACCOUNT_CREDIT_INVENTORY_PERSISTENCE_ERROR);
+            }
         },
         async refreshPaidSecondary(input: ApifyPaidSecondaryCreditRefreshInput) {
             let reading: ApifyAccountCreditReading;
