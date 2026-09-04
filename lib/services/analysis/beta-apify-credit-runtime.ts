@@ -43,6 +43,7 @@ const MAX_BUDGET_USD = 1_000;
 const DECIMAL_SCALE = 1_000_000_000_000;
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const TIMESTAMP = z.string().datetime({ offset: true });
+const nullableTimestamp = TIMESTAMP.nullable();
 const slotSchema = z.enum(BETA_APIFY_FREE_CREDENTIAL_SLOTS);
 const usdSchema = z.number().finite().min(0).max(MAX_USD).refine(
     value => Math.abs(Math.round(value * DECIMAL_SCALE) - value * DECIMAL_SCALE) < 0.01,
@@ -55,18 +56,39 @@ const budgetSchema = usdSchema.refine(
 
 const persistedSnapshotSchema = z.object({
     credentialSlot: slotSchema,
-    monthlyLimitUsd: usdSchema,
-    monthlyUsageUsd: usdSchema,
-    billingCycleStartAt: TIMESTAMP,
-    billingCycleEndAt: TIMESTAMP,
-    observedAt: TIMESTAMP,
-    healthState: z.literal('healthy'),
-}).strict();
-const snapshotSchema = persistedSnapshotSchema.extend({
-    effectiveHeadroomUsd: usdSchema,
+    monthlyLimitUsd: usdSchema.nullable(),
+    monthlyUsageUsd: usdSchema.nullable(),
+    billingCycleStartAt: nullableTimestamp,
+    billingCycleEndAt: nullableTimestamp,
+    observedAt: nullableTimestamp,
+    healthState: z.enum(['healthy', 'unhealthy']),
 }).strict().superRefine((value, context) => {
-    if (Date.parse(value.billingCycleStartAt) > Date.parse(value.observedAt)
-        || Date.parse(value.observedAt) >= Date.parse(value.billingCycleEndAt)) {
+    const complete = value.monthlyLimitUsd !== null
+        && value.monthlyUsageUsd !== null
+        && value.billingCycleStartAt !== null
+        && value.billingCycleEndAt !== null
+        && value.observedAt !== null;
+    if (value.healthState === 'healthy' && !complete) {
+        context.addIssue({ code: 'custom', message: 'Healthy snapshot is incomplete.' });
+    }
+    if (value.healthState === 'unhealthy' && complete) {
+        context.addIssue({ code: 'custom', message: 'Unhealthy snapshot must be explicit.' });
+    }
+});
+const snapshotSchema = persistedSnapshotSchema.extend({
+    effectiveHeadroomUsd: usdSchema.nullable(),
+    freshnessState: z.enum(['fresh', 'stale', 'missing']).optional(),
+    manuallyExcluded: z.boolean().optional(),
+}).strict().superRefine((value, context) => {
+    if (
+        value.billingCycleStartAt !== null
+        && value.billingCycleEndAt !== null
+        && value.observedAt !== null
+        && (
+            Date.parse(value.billingCycleStartAt) > Date.parse(value.observedAt)
+            || Date.parse(value.observedAt) >= Date.parse(value.billingCycleEndAt)
+        )
+    ) {
         context.addIssue({ code: 'custom', message: 'Snapshot cycle is invalid.' });
     }
 });
@@ -206,8 +228,13 @@ function exactHeadrooms(value: readonly BetaApifyPoolSnapshot[]): Readonly<Recor
     }
     return Object.freeze(Object.fromEntries(BETA_APIFY_FREE_CREDENTIAL_SLOTS.map(slot => {
         const snapshot = snapshots.find(row => row.credentialSlot === slot);
-        if (!snapshot) throw new Error(BETA_APIFY_POOL_CAPACITY_ERROR);
-        return [slot, exactUsd(snapshot.effectiveHeadroomUsd)];
+        const usable = snapshot !== undefined
+            && snapshot.healthState === 'healthy'
+            && snapshot.effectiveHeadroomUsd !== null
+            && snapshot.freshnessState !== 'stale'
+            && snapshot.freshnessState !== 'missing'
+            && snapshot.manuallyExcluded !== true;
+        return [slot, usable ? exactUsd(snapshot?.effectiveHeadroomUsd ?? 0) : 0];
     })) as Record<BetaApifyFreeCredentialSlot, number>);
 }
 

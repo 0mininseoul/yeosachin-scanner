@@ -1,8 +1,6 @@
 import type { SupabaseClient } from '@supabase/supabase-js';
 import { getApifyClient } from '@/lib/services/instagram/providers/apify-relationship';
 import {
-    isApifyCredentialSlot,
-    type ApifyCredentialSlot,
     type ProviderCostTerminalStatus,
 } from '@/lib/services/instagram/providers/types';
 import {
@@ -16,6 +14,7 @@ const RECONCILIATION_CONCURRENCY = 4;
 const RUN_ID_PATTERN = /^[A-Za-z0-9]{8,64}$/;
 const ACTOR_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._~/-]{2,199}$/;
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+type ProviderCostCredentialSlot = 'primary' | 'secondary';
 
 type ReconciliationClient = Pick<SupabaseClient, 'from' | 'rpc'>;
 
@@ -24,7 +23,7 @@ interface StoredCostRun {
     runId: string;
     logicalProvider: 'apify' | 'coderx';
     actorId: string;
-    credentialSlot: ApifyCredentialSlot;
+    credentialSlot: ProviderCostCredentialSlot;
     status: ProviderCostTerminalStatus;
     maxChargeUsd: number;
 }
@@ -70,7 +69,7 @@ function parseRun(value: unknown): StoredCostRun {
         || (row.logical_provider !== 'apify' && row.logical_provider !== 'coderx')
         || typeof row.actor_id !== 'string'
         || !ACTOR_ID_PATTERN.test(row.actor_id)
-        || !isApifyCredentialSlot(row.credential_slot)
+        || (row.credential_slot !== 'primary' && row.credential_slot !== 'secondary')
         || !['succeeded', 'failed', 'aborted', 'timed_out'].includes(String(row.status))
         || !Number.isFinite(maxChargeUsd)
         || maxChargeUsd < 0
@@ -94,7 +93,7 @@ export async function reconcileSettledAnalysisProviderCosts(
     requestId?: string,
     deps: {
         now?: Date;
-        clientForSlot?: (slot: ApifyCredentialSlot) => ReconciliationApifyClient;
+        clientForSlot?: (slot: ProviderCostCredentialSlot) => ReconciliationApifyClient;
         env?: Record<string, string | undefined>;
     } = {}
 ): Promise<ProviderCostReconciliationResult> {

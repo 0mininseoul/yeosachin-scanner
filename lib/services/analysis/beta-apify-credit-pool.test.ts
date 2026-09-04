@@ -341,6 +341,7 @@ describe('beta Apify credit pool primitives', () => {
                 billingCycleStartAt: CYCLE_START,
                 billingCycleEndAt: CYCLE_END,
                 observedAt: OBSERVED_AT.toISOString(),
+                healthState: 'healthy',
                 activeReservationsUsd: 1,
                 localPostSnapshotDebitUsd: 0.5,
                 effectiveHeadroomUsd: 6.5,
@@ -410,7 +411,7 @@ describe('beta Apify credit pool primitives', () => {
     });
 
     it.each(['rejected provider call', 'invalid provider response'])(
-        'fails the entire free-pool refresh closed for a %s',
+        'keeps healthy slots available when one slot has a %s',
         async failureKind => {
             const clientForSlot = vi.fn((slot: BetaApifyFreeCredentialSlot) => {
                 if (slot !== 'quinary') return clientWith();
@@ -425,19 +426,53 @@ describe('beta Apify credit pool primitives', () => {
                 return clientWith(rawLimits(-1), rawMonthlyUsage());
             });
 
-            const error = await refreshBetaApifyCreditPool({
+            const readings = await refreshBetaApifyCreditPool({
                 clientForSlot,
                 observedAt: OBSERVED_AT,
-            }, TEST_CLOCK).then(
-                () => undefined,
-                reason => reason
-            );
+            }, TEST_CLOCK);
 
-            expect(error).toEqual(new Error(BETA_APIFY_CREDIT_REFRESH_ERROR));
-            expect(String(error)).not.toMatch(/apify-secret-token|provider-account-id/);
+            expect(readings).toHaveLength(BETA_APIFY_FREE_CREDENTIAL_SLOTS.length);
+            expect(readings.find(reading => reading.credentialSlot === 'quinary'))
+                .toMatchObject({
+                    credentialSlot: 'quinary',
+                    healthState: 'unhealthy',
+                    monthlyLimitUsd: null,
+                    monthlyUsageUsd: null,
+                    effectiveHeadroomUsd: null,
+                });
+            expect(readings.find(reading => reading.credentialSlot === 'primary'))
+                .toMatchObject({
+                    healthState: 'healthy',
+                    effectiveHeadroomUsd: 8,
+                });
+            expect(JSON.stringify(readings)).not.toMatch(/apify-secret-token|provider-account-id/);
             expect(clientForSlot.mock.calls.map(([slot]) => slot)).toEqual(
                 BETA_APIFY_FREE_CREDENTIAL_SLOTS
             );
         }
     );
+
+    it('returns an exact-nine sanitized unhealthy catalog when every account refresh fails', async () => {
+        const readings = await refreshBetaApifyCreditPool({
+            clientForSlot: () => ({
+                limits: vi.fn().mockRejectedValue(new Error('provider-secret-must-not-escape')),
+                monthlyUsage: vi.fn().mockRejectedValue(new Error('account-id-must-not-escape')),
+            }),
+            observedAt: OBSERVED_AT,
+        }, TEST_CLOCK);
+
+        expect(readings).toEqual(BETA_APIFY_FREE_CREDENTIAL_SLOTS.map(credentialSlot => ({
+            credentialSlot,
+            monthlyLimitUsd: null,
+            monthlyUsageUsd: null,
+            billingCycleStartAt: null,
+            billingCycleEndAt: null,
+            observedAt: null,
+            healthState: 'unhealthy',
+            activeReservationsUsd: null,
+            localPostSnapshotDebitUsd: null,
+            effectiveHeadroomUsd: null,
+        })));
+        expect(JSON.stringify(readings)).not.toMatch(/provider-secret|account-id/);
+    });
 });

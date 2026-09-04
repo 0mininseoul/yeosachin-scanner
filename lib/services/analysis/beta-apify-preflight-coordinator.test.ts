@@ -35,7 +35,8 @@ function store(): BetaApifyPreflightCoordinatorStore {
         loadPreflightHold: vi.fn(async () => null),
         upsertSnapshots: vi.fn(async (snapshots: readonly BetaApifyPoolSnapshot[]) => snapshots.map(snapshot => ({
             ...snapshot,
-            effectiveHeadroomUsd: snapshot.monthlyLimitUsd - snapshot.monthlyUsageUsd,
+            effectiveHeadroomUsd: (snapshot.monthlyLimitUsd ?? 0)
+                - (snapshot.monthlyUsageUsd ?? 0),
         }))),
         loadSnapshots: vi.fn(async () => BETA_APIFY_FREE_CREDENTIAL_SLOTS.map((credentialSlot, index) => ({
             credentialSlot,
@@ -200,7 +201,7 @@ describe('beta preflight credit coordinator', () => {
         expect(clientForSlot).not.toHaveBeenCalled();
     });
 
-    it('fails closed without a hold when any exact-nine account refresh fails', async () => {
+    it('keeps healthy accounts allocatable when one exact-nine refresh fails', async () => {
         const pool = store();
         const coordinator = createBetaApifyPreflightCoordinator({
             store: pool,
@@ -216,8 +217,39 @@ describe('beta preflight credit coordinator', () => {
         });
 
         await expect(coordinator.prepare({ preflightId, userId, ...prepareFence }))
+            .resolves.toMatchObject({ existing: false });
+        expect(pool.upsertSnapshots).toHaveBeenCalledOnce();
+        expect(pool.holdPreflight).toHaveBeenCalledOnce();
+        expect(pool.holdPreflight).toHaveBeenCalledWith(expect.objectContaining({
+            credentialSlot: expect.any(String),
+        }));
+    });
+
+    it('persists an exact-nine unhealthy refresh and reports capacity pending when all reads fail', async () => {
+        const pool = store();
+        let persisted: readonly BetaApifyPoolSnapshot[] = [];
+        pool.upsertSnapshots = vi.fn(async snapshots => {
+            persisted = snapshots;
+            return snapshots;
+        });
+        pool.loadSnapshots = vi.fn(async () => persisted);
+        const coordinator = createBetaApifyPreflightCoordinator({
+            store: pool,
+            clientForSlot: () => ({
+                limits: async () => { throw new Error('provider-secret-must-not-escape'); },
+                monthlyUsage: async () => { throw new Error('account-id-must-not-escape'); },
+            }),
+            env: { BETATEST_FREE_POOL_ENABLED: 'true' },
+            now: () => now.getTime(),
+        });
+
+        await expect(coordinator.prepare({ preflightId, userId, ...prepareFence }))
             .rejects.toEqual(new Error(BETA_APIFY_POOL_CAPACITY_ERROR));
-        expect(pool.upsertSnapshots).not.toHaveBeenCalled();
+        expect(pool.upsertSnapshots).toHaveBeenCalledOnce();
+        const snapshots = vi.mocked(pool.upsertSnapshots).mock.calls[0]?.[0] ?? [];
+        expect(snapshots).toHaveLength(BETA_APIFY_FREE_CREDENTIAL_SLOTS.length);
+        expect(snapshots.every(snapshot => snapshot.healthState === 'unhealthy'))
+            .toBe(true);
         expect(pool.holdPreflight).not.toHaveBeenCalled();
     });
 });

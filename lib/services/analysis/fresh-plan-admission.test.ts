@@ -182,6 +182,14 @@ function providerRunStore(
             };
             return { created: true, run: current };
         }),
+        reserveFree: vi.fn(async input => {
+            current = {
+                ...storedProviderRun('starting'),
+                inputHash: input.inputHash,
+                credentialSlot: 'quinary',
+            };
+            return { created: true, run: current };
+        }),
         checkpointStarted: vi.fn(async input => {
             current = {
                 ...storedProviderRun('running'),
@@ -660,7 +668,7 @@ describe('durable fresh V2 admission worker', () => {
         expect(getProfile).not.toHaveBeenCalled();
         expect(getAuthenticatedProfile).not.toHaveBeenCalled();
         expect(getFallbackProfile).toHaveBeenCalledOnce();
-        expect(runs.reserve).toHaveBeenCalledOnce();
+        expect(runs.reserveFree).toHaveBeenCalledOnce();
         expect(runs.checkpointStarted).toHaveBeenCalledOnce();
         expect(runs.checkpointTerminal).toHaveBeenCalledOnce();
         expect(runs.markReusableProfileSchemaV1).toHaveBeenCalledOnce();

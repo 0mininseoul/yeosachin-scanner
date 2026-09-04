@@ -36,6 +36,33 @@ describe('Apify ten-account runtime migration contract', () => {
         expect(betaValidator).not.toContain("'secondary'");
     });
 
+    it('seeds the global budget and every exact-nine preflight budget without secondary', () => {
+        expect(migration).toContain('analysis_provider_admission_budgets');
+        expect(migration).toContain("'preflight:apify:global'");
+        for (const slot of FREE_SLOTS) {
+            expect(migration).toContain(`'preflight:apify:${slot}'`);
+        }
+        expect(migration).not.toContain("'preflight:apify:secondary'");
+        expect(migration).toContain('ON CONFLICT (budget_key) DO NOTHING');
+        expect(migration).toContain('ANALYSIS_PROVIDER_ADMISSION_BUDGET_DRIFT');
+    });
+
+    it('adds and drift-validates the paid octonary/nonary target and relationship budgets', () => {
+        for (const [budgetKey, maxActive, rate] of [
+            ['paid:apify:octonary', 8, 480],
+            ['paid:apify:nonary', 8, 480],
+            ['paid:apify:octonary:relationship', 4, 240],
+            ['paid:apify:nonary:relationship', 4, 240],
+        ] as const) {
+            expect(migration).toContain(`'${budgetKey}'`);
+            expect(migration).toContain(`'${budgetKey}', 'paid', 'apify'`);
+            expect(migration).toContain(`'${budgetKey}', 'paid', 'apify', '${budgetKey.includes('octonary') ? 'octonary' : 'nonary'}', ${maxActive}, ${rate}`);
+        }
+        expect(migration.indexOf('paid:apify:octonary')).toBeLessThan(
+            migration.indexOf('ANALYSIS_PROVIDER_ADMISSION_BUDGET_DRIFT'),
+        );
+    });
+
     it('keeps one sanitized all-account inventory with an independent paid refresh path', () => {
         expect(migration).toContain(
             'analysis_apify_credit_snapshots_credential_slot_check',
@@ -71,23 +98,16 @@ describe('Apify ten-account runtime migration contract', () => {
         );
     });
 
-    it('creates an append-only operator exclusion event log with service-only RPCs', () => {
-        expect(migration).toContain('CREATE TABLE public.analysis_apify_account_control_events');
-        for (const column of ['operator_id', 'credential_slot', 'action', 'reason', 'event_time']) {
-            expect(migration).toContain(column);
-        }
-        expect(migration).toMatch(/action\s+TEXT\s+NOT NULL[\s\S]*exclude[\s\S]*restore/);
-        expect(migration).toContain('char_length(pg_catalog.btrim(reason))');
-        expect(migration).toContain('ENABLE ROW LEVEL SECURITY');
-        expect(migration).toContain('FORCE ROW LEVEL SECURITY');
-        expect(migration).toMatch(
-            /REVOKE ALL ON TABLE public\.analysis_apify_account_control_events\s+FROM PUBLIC, anon, authenticated, service_role/,
+    it('reuses the existing snapshot ledger for locked operator exclusions', () => {
+        expect(migration).toContain(
+            'ADD COLUMN IF NOT EXISTS manually_excluded BOOLEAN NOT NULL DEFAULT FALSE',
         );
-        expect(migration).toContain('prevent_analysis_apify_account_control_event_mutation');
-        expect(migration).toContain('BEFORE UPDATE OR DELETE');
-        expect(migration).toContain('append_analysis_apify_account_control_event');
+        expect(migration).not.toContain('CREATE TABLE public.analysis_apify_account_control_events');
+        expect(migration).not.toContain('append_analysis_apify_account_control_event');
+        expect(migration).toContain('set_analysis_apify_account_exclusion');
         expect(migration).toContain('load_analysis_apify_account_control_state');
-        expect(migration).toMatch(/GRANT EXECUTE ON FUNCTION public\.(?:append|load)_analysis_apify_account_control/);
+        expect(migration).toContain("SET manually_excluded = p_excluded");
+        expect(migration).toMatch(/set_analysis_apify_account_exclusion[\s\S]*pg_advisory_xact_lock/);
     });
 
     it('replaces six-row runtime fences with the exact nine-row canonical order', () => {

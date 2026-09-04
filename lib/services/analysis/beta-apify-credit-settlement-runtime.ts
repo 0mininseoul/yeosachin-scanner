@@ -206,7 +206,7 @@ export async function refreshBetaApifyCreditSnapshots(
                 billingCycleStartAt: snapshot.billingCycleStartAt,
                 billingCycleEndAt: snapshot.billingCycleEndAt,
                 observedAt: snapshot.observedAt,
-                healthState: 'healthy' as const,
+                healthState: snapshot.healthState,
                 effectiveHeadroomUsd: snapshot.effectiveHeadroomUsd,
             })));
         emitBetaApifyCreditTelemetry(dependencies.telemetry, {
@@ -214,7 +214,7 @@ export async function refreshBetaApifyCreditSnapshots(
             severity: 'info',
             durationMs: Math.max(0, now() - startedAt),
             totalEffectiveHeadroomUsd: persisted.reduce(
-                (total, snapshot) => total + snapshot.effectiveHeadroomUsd, 0
+                (total, snapshot) => total + (snapshot.effectiveHeadroomUsd ?? 0), 0
             ),
             staleSnapshotCount: 0,
         });

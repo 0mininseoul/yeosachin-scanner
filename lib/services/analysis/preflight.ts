@@ -47,7 +47,6 @@ import { selfHostedAuthProvider } from '@/lib/services/instagram/providers/selfh
 import { getAnalysisV2PaidCollectionProvider } from '@/lib/services/instagram/config';
 import {
     selectAnalysisV2ApifyCredentialSlot,
-    selectPreflightApifyCredentialSlot,
 } from '@/lib/services/instagram/providers/apify-relationship';
 import {
     classifyWebProfileFailure,
@@ -2354,16 +2353,14 @@ export async function processPreflight(
             const identity = preflightProviderIdentity(
                 existingRun?.credentialSlot
                     ?? betaHold?.credentialSlot
-                    ?? selectPreflightApifyCredentialSlot(
-                        claim.preflightId,
-                        dependencies.env,
-                    )
+                    ?? 'primary'
             );
             const bound = await bindProviderRun({
                 store: providerRuns,
                 claim,
                 inputHash,
                 identity,
+                freePool: !isBetatest && !betaHold,
                 ...(isBetatest && betaHold
                     ? {
                         providerAdmissionWorkloadRole: 'paid' as const,
@@ -2466,6 +2463,7 @@ export async function processPreflight(
                         claim,
                         inputHash,
                         identity: preflightProviderIdentity(existingRun.credentialSlot),
+                        freePool: true,
                     });
                     profile = await (dependencies.getFallbackProfile ?? getApifyProfileSummary)(
                         claim.targetInstagramId,
@@ -2473,16 +2471,14 @@ export async function processPreflight(
                     );
                 } else if (!profile) {
                     const identity = preflightProviderIdentity(
-                        selectPreflightApifyCredentialSlot(
-                            claim.preflightId,
-                            dependencies.env,
-                        )
+                        existingRun?.credentialSlot ?? 'primary'
                     );
                     const bound = await bindProviderRun({
                         store: providerRuns,
                         claim,
                         inputHash,
                         identity,
+                        freePool: true,
                     });
                     profile = await (dependencies.getFallbackProfile ?? getApifyProfileSummary)(
                         claim.targetInstagramId,
@@ -2531,6 +2527,7 @@ export async function processPreflight(
                 claim,
                 inputHash,
                 identity: preflightProviderIdentity(existingRun.credentialSlot),
+                freePool: !isBetatest && !betaHold,
                 ...(isBetatest && betaHold
                     ? {
                         providerAdmissionWorkloadRole: 'paid' as const,
@@ -2552,6 +2549,7 @@ export async function processPreflight(
                 claim,
                 inputHash,
                 identity,
+                freePool: false,
                 ...(betaHold
                     ? {
                         providerAdmissionWorkloadRole: 'paid' as const,
@@ -2598,16 +2596,14 @@ export async function processPreflight(
                 });
                 const identity = preflightProviderIdentity(
                     betaHold?.credentialSlot
-                    ?? selectPreflightApifyCredentialSlot(
-                        claim.preflightId,
-                        dependencies.env,
-                    )
+                    ?? 'primary'
                 );
                 const bound = await bindProviderRun({
                     store: providerRuns,
                     claim,
                     inputHash,
                     identity,
+                    freePool: !betaHold,
                 });
                 profile = await (dependencies.getFallbackProfile ?? getApifyProfileSummary)(
                     claim.targetInstagramId,

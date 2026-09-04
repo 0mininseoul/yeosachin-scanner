@@ -44,10 +44,29 @@ export interface BetaApifyAccountCreditReading
 }
 
 export interface BetaApifyEffectiveCredit extends BetaApifyAccountCreditReading {
+    readonly healthState: 'healthy';
     readonly activeReservationsUsd: number;
     readonly localPostSnapshotDebitUsd: number;
     readonly effectiveHeadroomUsd: number;
 }
+
+/** A failed account read remains visible in the exact catalog but can never be allocated. */
+export interface BetaApifyUnavailableCredit {
+    readonly credentialSlot: BetaApifyFreeCredentialSlot;
+    readonly monthlyLimitUsd: null;
+    readonly monthlyUsageUsd: null;
+    readonly billingCycleStartAt: null;
+    readonly billingCycleEndAt: null;
+    readonly observedAt: null;
+    readonly healthState: 'unhealthy';
+    readonly activeReservationsUsd: null;
+    readonly localPostSnapshotDebitUsd: null;
+    readonly effectiveHeadroomUsd: null;
+}
+
+export type BetaApifyCreditRefreshResult =
+    | BetaApifyEffectiveCredit
+    | BetaApifyUnavailableCredit;
 
 export type BetaApifySlotAmounts = Readonly<
     Partial<Record<BetaApifyFreeCredentialSlot, number>>
@@ -291,7 +310,7 @@ export async function refreshBetaApifyCreditPool(input: {
     readonly activeReservationsUsdBySlot?: BetaApifySlotAmounts;
     readonly localPostSnapshotDebitUsdBySlot?: BetaApifySlotAmounts;
     readonly observedAt?: Date;
-}, clock: BetaApifyCreditClock = SYSTEM_CREDIT_CLOCK): Promise<readonly BetaApifyEffectiveCredit[]> {
+}, clock: BetaApifyCreditClock = SYSTEM_CREDIT_CLOCK): Promise<readonly BetaApifyCreditRefreshResult[]> {
     try {
         const activeReservationsUsdBySlot = snapshotSlotAmounts(
             input.activeReservationsUsdBySlot
@@ -302,29 +321,48 @@ export async function refreshBetaApifyCreditPool(input: {
         const observedAt = input.observedAt ?? new Date(clock.now());
         const readings = await Promise.all(
             BETA_APIFY_FREE_CREDENTIAL_SLOTS.map(async credentialSlot => {
-                const reading = await readBetaApifyAccountCredit({
-                    credentialSlot,
-                    client: input.clientForSlot(credentialSlot),
-                    observedAt,
-                }, clock);
                 const activeReservationsUsd =
                     activeReservationsUsdBySlot[credentialSlot];
                 const localPostSnapshotDebitUsd =
                     localPostSnapshotDebitUsdBySlot[credentialSlot];
-
-                return Object.freeze({
-                    ...reading,
-                    activeReservationsUsd,
-                    localPostSnapshotDebitUsd,
-                    effectiveHeadroomUsd: calculateBetaApifyEffectiveHeadroom({
-                        monthlyLimitUsd: reading.monthlyLimitUsd,
-                        monthlyUsageUsd: reading.monthlyUsageUsd,
+                try {
+                    const reading = await readBetaApifyAccountCredit({
+                        credentialSlot,
+                        client: input.clientForSlot(credentialSlot),
+                        observedAt,
+                    }, clock);
+                    return Object.freeze({
+                        ...reading,
+                        healthState: 'healthy' as const,
                         activeReservationsUsd,
                         localPostSnapshotDebitUsd,
-                    }),
-                });
+                        effectiveHeadroomUsd: calculateBetaApifyEffectiveHeadroom({
+                            monthlyLimitUsd: reading.monthlyLimitUsd,
+                            monthlyUsageUsd: reading.monthlyUsageUsd,
+                            activeReservationsUsd,
+                            localPostSnapshotDebitUsd,
+                        }),
+                    });
+                } catch {
+                    return Object.freeze({
+                        credentialSlot,
+                        monthlyLimitUsd: null,
+                        monthlyUsageUsd: null,
+                        billingCycleStartAt: null,
+                        billingCycleEndAt: null,
+                        observedAt: null,
+                        healthState: 'unhealthy' as const,
+                        activeReservationsUsd: null,
+                        localPostSnapshotDebitUsd: null,
+                        effectiveHeadroomUsd: null,
+                    });
+                }
             })
         );
+        // Preserve an exact-nine unhealthy catalog even when every account
+        // read fails. Persistence can then record the degraded inventory and
+        // the allocator will fail closed without discarding healthy peers from
+        // a partial refresh.
         return Object.freeze(readings);
     } catch {
         throw new Error(BETA_APIFY_CREDIT_REFRESH_ERROR);

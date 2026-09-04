@@ -153,19 +153,87 @@ describe('beta Apify terminal settlement runtime', () => {
         }));
     });
 
-    it('emits a fixed refresh failure for a provider read error and stays sanitized', async () => {
+    it('persists one sanitized unhealthy row while eight healthy rows remain usable', async () => {
+        const observedAt = '2026-08-02T00:00:00.000Z';
+        const cycle = {
+            startAt: '2026-08-01T00:00:00.000Z',
+            endAt: '2026-09-01T00:00:00.000Z',
+        };
+        const persisted = BETA_APIFY_FREE_CREDENTIAL_SLOTS.map(credentialSlot => (
+            credentialSlot === 'quinary'
+                ? {
+                    credentialSlot, monthlyLimitUsd: null, monthlyUsageUsd: null,
+                    billingCycleStartAt: null, billingCycleEndAt: null,
+                    observedAt: null, healthState: 'unhealthy', effectiveHeadroomUsd: null,
+                }
+                : {
+                    credentialSlot, monthlyLimitUsd: 10, monthlyUsageUsd: 2,
+                    billingCycleStartAt: cycle.startAt, billingCycleEndAt: cycle.endAt,
+                    observedAt, healthState: 'healthy', effectiveHeadroomUsd: 8,
+                }
+        ));
+        const rpc = vi.fn().mockResolvedValue({ data: persisted, error: null });
+        const client = {
+            limits: async () => ({ limits: { maxMonthlyUsageUsd: 10 }, current: { monthlyUsageUsd: 2 }, monthlyUsageCycle: cycle }),
+            monthlyUsage: async () => ({ totalUsageCreditsUsdAfterVolumeDiscount: 2, usageCycle: cycle }),
+        };
+        const secret = 'provider-token-and-account-id';
+
+        await expect(refreshBetaApifyCreditSnapshots({ rpc }, {
+            now: () => Date.parse(observedAt),
+            clientForSlot: slot => slot === 'quinary'
+                ? {
+                    limits: async () => { throw new Error(secret); },
+                    monthlyUsage: client.monthlyUsage,
+                }
+                : client,
+        })).resolves.toBeUndefined();
+
+        const payload = rpc.mock.calls[0]?.[1]?.p_snapshots as Array<Record<string, unknown>>;
+        expect(payload).toHaveLength(BETA_APIFY_FREE_CREDENTIAL_SLOTS.length);
+        expect(payload.filter(row => row.healthState === 'healthy')).toHaveLength(8);
+        expect(payload.find(row => row.credentialSlot === 'quinary')).toEqual({
+            credentialSlot: 'quinary',
+            monthlyLimitUsd: null,
+            monthlyUsageUsd: null,
+            billingCycleStartAt: null,
+            billingCycleEndAt: null,
+            observedAt: null,
+            healthState: 'unhealthy',
+        });
+        expect(JSON.stringify(payload)).not.toContain(secret);
+    });
+
+    it('persists an exact-nine sanitized unhealthy catalog when every provider read fails', async () => {
         const emit = vi.fn();
         const secret = 'provider-token-and-account-id';
-        await expect(refreshBetaApifyCreditSnapshots({ rpc: vi.fn() }, {
+        const persisted = BETA_APIFY_FREE_CREDENTIAL_SLOTS.map(credentialSlot => ({
+            credentialSlot,
+            monthlyLimitUsd: null,
+            monthlyUsageUsd: null,
+            billingCycleStartAt: null,
+            billingCycleEndAt: null,
+            observedAt: null,
+            healthState: 'unhealthy',
+            effectiveHeadroomUsd: null,
+        }));
+        const rpc = vi.fn().mockResolvedValue({ data: persisted, error: null });
+        await expect(refreshBetaApifyCreditSnapshots({ rpc }, {
             now: () => Date.parse('2026-08-02T00:00:00.000Z'),
             telemetry: { emit },
             clientForSlot: () => ({
                 limits: async () => { throw new Error(secret); },
                 monthlyUsage: async () => ({}),
             }),
-        })).rejects.toThrow('ANALYSIS_BETA_APIFY_CREDIT_REFRESH_ERROR');
+        })).resolves.toBeUndefined();
+        const payload = rpc.mock.calls[0]?.[1]?.p_snapshots as Array<Record<string, unknown>>;
+        expect(payload).toHaveLength(BETA_APIFY_FREE_CREDENTIAL_SLOTS.length);
+        expect(payload.every(row => row.healthState === 'unhealthy')).toBe(true);
+        expect(payload.every(row => row.monthlyLimitUsd === null)).toBe(true);
         expect(emit).toHaveBeenCalledWith(expect.objectContaining({
-            event: 'betatest_apify_credit.refresh_failed', fields: expect.any(Object),
+            event: 'betatest_apify_credit.refresh_completed', fields: expect.objectContaining({
+                total_effective_headroom_usd: 0,
+            }),
         }));
         expect(JSON.stringify(emit.mock.calls)).not.toContain(secret);
     });

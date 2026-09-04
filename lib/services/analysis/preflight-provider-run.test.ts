@@ -15,6 +15,7 @@ import {
     type StoredPreflightProviderRun,
 } from './preflight-provider-run';
 import type { ClaimedPreflight } from './preflight';
+import { AnalysisProviderAdmissionCapacityPendingError } from './provider-admission-store';
 
 const preflightId = '123e4567-e89b-42d3-a456-426614174000';
 const claimToken = '323e4567-e89b-42d3-a456-426614174000'; // gitleaks:allow -- fixture
@@ -178,6 +179,239 @@ describe('preflight provider-run adapter', () => {
             inputHash,
             ...preflightProviderIdentity('quinary'),
         })).rejects.toThrow('invalid money');
+    });
+
+    it('reserves a new free-pool slot through the null-slot RPC fence', async () => {
+        const rpc = vi.fn(async () => ({
+            data: { created: true, run: row('starting', { credentialSlot: 'tertiary' }) },
+            error: null,
+        }));
+        const store = createPreflightProviderRunStore({ rpc });
+
+        await expect(store.reserveFree!({
+            preflightId,
+            claimToken,
+            inputHash,
+            logicalProvider: 'apify',
+            actorId: 'apify/instagram-profile-scraper',
+            maxChargeUsd: 0.0026,
+        })).resolves.toMatchObject({
+            created: true,
+            run: { credentialSlot: 'tertiary' },
+        });
+        expect(rpc).toHaveBeenCalledWith(
+            PREFLIGHT_PROVIDER_RUN_DATABASE_NAMES.reserveRpc,
+            expect.objectContaining({
+                p_credential_slot: null,
+                p_max_charge_usd: 0.0026,
+            }),
+        );
+    });
+
+    it('binds a free-pool reservation before an external start and never calls reserve twice', async () => {
+        const reserved = row('starting', { credentialSlot: 'octonary' }) as StoredPreflightProviderRun;
+        const store = {
+            load: vi.fn(async () => null),
+            reserve: vi.fn(),
+            reserveFree: vi.fn(async () => ({ created: true, run: reserved })),
+            checkpointStarted: vi.fn(async () => row('running', {
+                credentialSlot: 'octonary',
+            }) as StoredPreflightProviderRun),
+            checkpointRejected: vi.fn(),
+            checkpointTerminal: vi.fn(),
+        };
+        const result = await bindPreflightProviderRunCheckpoint({
+            store,
+            claim: { preflightId, claimToken } as ClaimedPreflight,
+            inputHash,
+            identity: preflightProviderIdentity('primary'),
+            freePool: true,
+        });
+
+        expect(result.stored).toMatchObject({ credentialSlot: 'octonary' });
+        expect(result.checkpoint).toMatchObject({ credentialSlot: 'octonary' });
+        await result.checkpoint.onBeforeRunStart?.({
+            ...preflightProviderIdentity('octonary'),
+        });
+        expect(store.reserveFree).toHaveBeenCalledOnce();
+        expect(store.reserve).not.toHaveBeenCalled();
+        await result.checkpoint.onRunStarted?.(runId);
+        expect(store.checkpointStarted).toHaveBeenCalledWith(expect.objectContaining({
+            credentialSlot: 'octonary',
+            runId,
+        }));
+    });
+
+    it('admits the durable free-pool slot with its exact preflight budget before start', async () => {
+        const reserved = row('starting', { credentialSlot: 'octonary' }) as StoredPreflightProviderRun;
+        const store = {
+            load: vi.fn(async () => null),
+            reserve: vi.fn(),
+            reserveFree: vi.fn(async () => ({ created: true, run: reserved })),
+            checkpointStarted: vi.fn(async () => row('running', {
+                credentialSlot: 'octonary',
+            }) as StoredPreflightProviderRun),
+            checkpointRejected: vi.fn(),
+            checkpointTerminal: vi.fn(),
+        };
+        const admission = {
+            acquire: vi.fn(async () => ({
+                outcome: 'acquired' as const,
+                admissionId: 'a'.repeat(64),
+                workloadRole: 'preflight' as const,
+                logicalProvider: 'apify' as const,
+                credentialSlot: 'octonary' as const,
+                budgetKey: 'preflight:apify:octonary',
+                requestId: preflightId,
+                jobKey: 'preflight:provider',
+                operationKey: 'target-profile-fallback',
+                claimToken,
+                jobClaimToken: claimToken,
+                leaseSeconds: 120,
+                leaseToken: claimToken,
+                fence: 1,
+                expiresAt: '2026-09-04T12:00:00.000Z',
+                activeCount: 1,
+                maxActive: 16,
+            })),
+            renew: vi.fn(),
+            release: vi.fn(),
+            recoverExpired: vi.fn(),
+            resolve: vi.fn(),
+            listExpired: vi.fn(),
+        };
+
+        const result = await bindPreflightProviderRunCheckpoint({
+            store,
+            claim: { preflightId, claimToken } as ClaimedPreflight,
+            inputHash,
+            identity: preflightProviderIdentity('primary'),
+            freePool: true,
+            env: {
+                NODE_ENV: 'test',
+                ANALYSIS_PROVIDER_ADMISSION_ENABLED: 'true',
+            },
+            providerAdmissionStore: admission,
+        });
+
+        expect(admission.acquire).toHaveBeenCalledWith(expect.objectContaining({
+            workloadRole: 'preflight',
+            credentialSlot: 'octonary',
+            budgetKey: 'preflight:apify:octonary',
+        }));
+        await result.checkpoint.onBeforeRunStart?.({
+            ...preflightProviderIdentity('octonary'),
+        });
+        expect(store.checkpointStarted).not.toHaveBeenCalled();
+    });
+
+    it('closes a newly selected free row when admission is denied before provider start', async () => {
+        const reserved = row('starting', { credentialSlot: 'octonary' }) as StoredPreflightProviderRun;
+        const rejected = row('rejected', { credentialSlot: 'octonary' }) as StoredPreflightProviderRun;
+        const store = {
+            load: vi.fn(async () => null),
+            reserve: vi.fn(),
+            reserveFree: vi.fn(async () => ({ created: true, run: reserved })),
+            checkpointStarted: vi.fn(),
+            checkpointRejected: vi.fn(async () => rejected),
+            checkpointTerminal: vi.fn(),
+        };
+        const admission = {
+            acquire: vi.fn(async () => {
+                throw new AnalysisProviderAdmissionCapacityPendingError();
+            }),
+            renew: vi.fn(),
+            release: vi.fn(),
+            recoverExpired: vi.fn(),
+            resolve: vi.fn(),
+            listExpired: vi.fn(),
+        };
+
+        await expect(bindPreflightProviderRunCheckpoint({
+            store,
+            claim: { preflightId, claimToken } as ClaimedPreflight,
+            inputHash,
+            identity: preflightProviderIdentity('primary'),
+            freePool: true,
+            env: {
+                NODE_ENV: 'test',
+                ANALYSIS_PROVIDER_ADMISSION_ENABLED: 'true',
+            },
+            providerAdmissionStore: admission,
+        })).rejects.toBeInstanceOf(AnalysisProviderAdmissionCapacityPendingError);
+
+        expect(store.checkpointRejected).toHaveBeenCalledWith(expect.objectContaining({
+            credentialSlot: 'octonary',
+        }));
+        expect(store.checkpointStarted).not.toHaveBeenCalled();
+    });
+
+    it('denies admission before reserving a new provider run', async () => {
+        const identity = preflightProviderIdentity('primary');
+        const store = {
+            load: vi.fn(async () => null),
+            reserve: vi.fn(async () => ({ created: true, run: row('starting') as StoredPreflightProviderRun })),
+            checkpointStarted: vi.fn(),
+            checkpointRejected: vi.fn(),
+            checkpointTerminal: vi.fn(),
+        };
+        const admission = {
+            acquire: vi.fn(async () => {
+                throw new AnalysisProviderAdmissionCapacityPendingError();
+            }),
+            renew: vi.fn(),
+            release: vi.fn(),
+            recoverExpired: vi.fn(),
+            resolve: vi.fn(),
+            listExpired: vi.fn(),
+        };
+        const result = await bindPreflightProviderRunCheckpoint({
+            store,
+            claim: { preflightId, claimToken } as ClaimedPreflight,
+            inputHash,
+            identity,
+            env: {
+                NODE_ENV: 'test',
+                ANALYSIS_PROVIDER_ADMISSION_ENABLED: 'true',
+            },
+            providerAdmissionStore: admission,
+        });
+
+        await expect(result.checkpoint.onBeforeRunStart?.(identity))
+            .rejects.toBeInstanceOf(AnalysisProviderAdmissionCapacityPendingError);
+        expect(store.reserve).not.toHaveBeenCalled();
+        expect(store.checkpointStarted).not.toHaveBeenCalled();
+    });
+
+    it('uses the database-selected free slot for terminal cost reconciliation', async () => {
+        const reserved = row('running', {
+            credentialSlot: 'octonary',
+        }) as StoredPreflightProviderRun;
+        const store = {
+            load: vi.fn(async () => null),
+            reserve: vi.fn(),
+            reserveFree: vi.fn(async () => ({ created: true, run: reserved })),
+            checkpointStarted: vi.fn(),
+            checkpointRejected: vi.fn(),
+            checkpointTerminal: vi.fn(async () => reserved),
+        };
+        const result = await bindPreflightProviderRunCheckpoint({
+            store,
+            claim: { preflightId, claimToken } as ClaimedPreflight,
+            inputHash,
+            identity: preflightProviderIdentity('primary'),
+            freePool: true,
+        });
+
+        await result.checkpoint.onCostRunFinished?.({
+            ...preflightProviderIdentity('octonary'),
+            runId,
+            status: 'succeeded',
+            usageTotalUsd: 0.001,
+        });
+        expect(store.checkpointTerminal).toHaveBeenCalledWith(expect.objectContaining({
+            credentialSlot: 'octonary',
+        }));
     });
 
     it('replays starting without exposing a new start callback', async () => {

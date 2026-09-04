@@ -65,7 +65,15 @@ function targetSlot(snapshots: readonly BetaApifyPoolSnapshot[]): BetaApifyFreeC
     // canonical slot order is the deterministic tie-break for equal residuals.
     const candidates = BETA_APIFY_FREE_CREDENTIAL_SLOTS.map((slot, order) => {
         const snapshot = snapshots.find(candidate => candidate.credentialSlot === slot);
-        if (!snapshot || snapshot.effectiveHeadroomUsd + Number.EPSILON < BETA_APIFY_TARGET_PROFILE_BUDGET_USD) {
+        if (
+            !snapshot
+            || snapshot.healthState !== 'healthy'
+            || snapshot.effectiveHeadroomUsd === null
+            || snapshot.manuallyExcluded === true
+            || snapshot.freshnessState === 'stale'
+            || snapshot.freshnessState === 'missing'
+            || snapshot.effectiveHeadroomUsd + Number.EPSILON < BETA_APIFY_TARGET_PROFILE_BUDGET_USD
+        ) {
             return null;
         }
         return {
@@ -178,7 +186,7 @@ export function createBetaApifyPreflightCoordinator(input: {
                     billingCycleStartAt: snapshot.billingCycleStartAt,
                     billingCycleEndAt: snapshot.billingCycleEndAt,
                     observedAt: snapshot.observedAt,
-                    healthState: 'healthy' as const,
+                    healthState: snapshot.healthState,
                     effectiveHeadroomUsd: snapshot.effectiveHeadroomUsd,
                 })));
                 const snapshots = await input.store.loadSnapshots(config.maxSnapshotAgeSeconds);
