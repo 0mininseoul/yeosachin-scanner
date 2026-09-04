@@ -60,12 +60,48 @@ const redactedObjectSchema = z.object({}).passthrough();
 const forbiddenPayloadKeys = new Set([
     'userid',
     'user_id',
+    'useruuid',
+    'user_uuid',
+    'ownerid',
+    'owner_id',
+    'actorid',
+    'actor_id',
+    'provideraccountid',
+    'provider_account_id',
+    'provideraccount',
+    'provider_account',
+    'accountid',
+    'account_id',
+    'account',
+    'owner',
     'providertoken',
     'provider_token',
     'accesstoken',
     'access_token',
     'cookie',
     'authorization',
+    'secret',
+    'token',
+    'jobclaimtoken',
+    'job_claim_token',
+    'claimtoken',
+    'claim_token',
+    'reservationtoken',
+    'reservation_token',
+    'session',
+    'sessionid',
+    'session_id',
+    'producerclaimtoken',
+    'producer_claim_token',
+    'raw',
+    'rawdata',
+    'raw_data',
+    'rawpayload',
+    'raw_payload',
+    'providerpayload',
+    'provider_payload',
+    'providerresponse',
+    'provider_response',
 ]);
 
 function assertRedactedPayload(value: unknown): void {
@@ -143,6 +179,7 @@ export async function enqueueAnalysisOrderAuditBundle(
     });
     if (error) throwRpcError('ANALYSIS_ORDER_AUDIT_ENQUEUE_FAILED');
     if (data === null) return null;
+    assertRedactedPayload(data);
     const parsed = redactedObjectSchema.safeParse(data);
     if (!parsed.success) throwRpcError('ANALYSIS_ORDER_AUDIT_ENQUEUE_PAYLOAD_INVALID');
     return parsed.data;

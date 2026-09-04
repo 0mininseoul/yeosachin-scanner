@@ -23,6 +23,55 @@ describe('permanent order audit bundle service boundary', () => {
         });
     });
 
+    it('rejects provider account and user identity fields in an RPC payload', async () => {
+        const rpc = vi.fn(async () => ({
+            data: {
+                status: 'queued',
+                requestId,
+                providerRuns: [{
+                    logicalProvider: 'apify',
+                    credentialSlot: 'primary',
+                    runId: 'Abcdefgh',
+                    operationKey: 'relationship-followers:aaaaaaaa',
+                    resultHash: 'a'.repeat(64),
+                    actorId: 'apify/account-42',
+                }],
+            },
+            error: null,
+        }));
+
+        await expect(enqueueAnalysisOrderAuditBundle({ rpc }, requestId))
+            .rejects.toThrow('ANALYSIS_ORDER_AUDIT_REDACTION_VIOLATION');
+    });
+
+    it('rejects nested user UUID and provider token fields from an assembled payload', async () => {
+        const rpc = vi.fn(async () => ({
+            data: {
+                status: 'partial',
+                requestId,
+                version: 1,
+                bundleHash: 'a'.repeat(64),
+                sourceSetHash: 'b'.repeat(64),
+                gapCodes: [],
+                cost: {
+                    currency: 'USD',
+                    status: 'unknown',
+                    knownUsd: null,
+                    conservativeUsd: null,
+                    usageUnknown: true,
+                    provenance: {
+                        providerToken: 'must-not-cross-boundary',
+                        userUuid: '423e4567-e89b-42d3-a456-426614174001',
+                    },
+                },
+            },
+            error: null,
+        }));
+
+        await expect(assembleAnalysisOrderAuditBundle({ rpc }, requestId))
+            .rejects.toThrow('ANALYSIS_ORDER_AUDIT_REDACTION_VIOLATION');
+    });
+
     it('assembles through the service RPC and preserves unknown cost state', async () => {
         const payload = {
             status: 'partial',

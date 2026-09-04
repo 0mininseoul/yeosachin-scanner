@@ -32,6 +32,9 @@ CREATE TABLE public.analysis_order_audit_assembly_queue (
     lease_expires_at TIMESTAMPTZ,
     last_error_code VARCHAR(96),
     last_error_at TIMESTAMPTZ,
+    purge_fenced_at TIMESTAMPTZ,
+    purge_fence_reason VARCHAR(96),
+    purged_at TIMESTAMPTZ,
     created_at TIMESTAMPTZ NOT NULL DEFAULT pg_catalog.clock_timestamp(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT pg_catalog.clock_timestamp(),
     CONSTRAINT analysis_order_audit_queue_status_check CHECK (
@@ -77,6 +80,18 @@ CREATE TABLE public.analysis_order_audit_bundles (
     candidate_collected INTEGER NOT NULL,
     interaction_declared INTEGER NOT NULL,
     interaction_collected INTEGER NOT NULL,
+    target_likes_declared INTEGER,
+    target_likes_collected INTEGER,
+    target_comments_declared INTEGER,
+    target_comments_collected INTEGER,
+    candidate_likes_declared INTEGER,
+    candidate_likes_collected INTEGER,
+    candidate_likes_evidence_collected INTEGER,
+    tags_declared INTEGER,
+    tags_collected INTEGER,
+    mentions_declared INTEGER,
+    mentions_collected INTEGER,
+    candidate_key_coverage JSONB NOT NULL DEFAULT '{}'::JSONB,
     provider_runs JSONB NOT NULL DEFAULT '[]'::JSONB,
     stage_status JSONB NOT NULL DEFAULT '{}'::JSONB,
     completeness_status VARCHAR(16) NOT NULL,
@@ -126,6 +141,17 @@ CREATE TABLE public.analysis_order_audit_bundles (
         AND candidate_collected >= 0
         AND interaction_declared >= 0
         AND interaction_collected >= 0
+        AND (target_likes_declared IS NULL OR target_likes_declared >= 0)
+        AND (target_likes_collected IS NULL OR target_likes_collected >= 0)
+        AND (target_comments_declared IS NULL OR target_comments_declared >= 0)
+        AND (target_comments_collected IS NULL OR target_comments_collected >= 0)
+        AND (candidate_likes_declared IS NULL OR candidate_likes_declared >= 0)
+        AND (candidate_likes_collected IS NULL OR candidate_likes_collected >= 0)
+        AND (candidate_likes_evidence_collected IS NULL OR candidate_likes_evidence_collected >= 0)
+        AND (tags_declared IS NULL OR tags_declared >= 0)
+        AND (tags_collected IS NULL OR tags_collected >= 0)
+        AND (mentions_declared IS NULL OR mentions_declared >= 0)
+        AND (mentions_collected IS NULL OR mentions_collected >= 0)
     ),
     CONSTRAINT analysis_order_audit_bundle_completeness_check CHECK (
         completeness_status IN ('complete', 'partial', 'inconsistent', 'failed')
@@ -143,6 +169,7 @@ CREATE TABLE public.analysis_order_audit_bundles (
         pg_catalog.jsonb_typeof(pipeline_policy) = 'object'
         AND pg_catalog.jsonb_typeof(provider_runs) = 'array'
         AND pg_catalog.jsonb_typeof(stage_status) = 'object'
+        AND pg_catalog.jsonb_typeof(candidate_key_coverage) = 'object'
         AND pg_catalog.jsonb_typeof(cost_provenance) IN ('object', 'array')
     )
 );
@@ -237,6 +264,8 @@ CREATE TABLE public.analysis_order_audit_interactions (
     occurred_at VARCHAR(64),
     comment_text VARCHAR(1000),
     details JSONB,
+    reverse_like_status VARCHAR(16),
+    reverse_component_score NUMERIC(3, 1),
     completeness_status VARCHAR(16) NOT NULL DEFAULT 'complete',
     gap_codes TEXT[] NOT NULL DEFAULT '{}'::TEXT[],
     created_at TIMESTAMPTZ NOT NULL DEFAULT pg_catalog.clock_timestamp(),
@@ -274,6 +303,14 @@ CREATE TABLE public.analysis_order_audit_interactions (
     ),
     CONSTRAINT analysis_order_audit_interaction_status_check CHECK (
         completeness_status IN ('complete', 'partial', 'unknown')
+    ),
+    CONSTRAINT analysis_order_audit_interaction_reverse_check CHECK (
+        (reverse_like_status IS NULL AND reverse_component_score IS NULL)
+        OR (
+            signal = 'candidate_post_like'
+            AND reverse_like_status IN ('observed', 'not_observed', 'not_collected')
+            AND reverse_component_score IN (0, 3)
+        )
     ),
     CONSTRAINT analysis_order_audit_interaction_json_check CHECK (
         details IS NULL OR pg_catalog.jsonb_typeof(details) = 'object'
@@ -361,8 +398,16 @@ BEGIN
              'userid', 'user_id', 'providertoken', 'provider_token',
              'accesstoken', 'access_token', 'cookie', 'authorization',
              'requestid', 'request_id', 'orderid', 'order_id',
-             'preflightid', 'preflight_id', 'actor', 'credentialslot',
-             'credential_slot', 'secret', 'token'
+             'preflightid', 'preflight_id', 'actor', 'secret', 'token',
+             'useruuid', 'user_uuid',
+             'ownerid', 'owner_id', 'actorid', 'actor_id',
+             'provideraccountid', 'provider_account_id', 'provideraccount',
+             'provider_account', 'accountid', 'account_id', 'account', 'owner',
+             'raw_payload', 'rawpayload', 'raw', 'raw_data', 'rawdata', 'provider_payload',
+             'providerpayload', 'provider_response', 'providerresponse', 'job_claim_token',
+             'jobclaimtoken', 'claim_token', 'claimtoken', 'reservation_token',
+             'reservationtoken', 'session', 'session_id', 'sessionid',
+             'producer_claim_token', 'producerclaimtoken'
          );
         RETURN v_result;
     END IF;
@@ -379,6 +424,72 @@ BEGIN
     RETURN p_value;
 END;
 $$;
+
+-- Candidate completeness is a set property, not a count property. This bounded helper exposes
+-- the expected mutual username keys and the observed feature/private keys so the assembler can
+-- preserve both missing and extra rows in its immutable version metadata.
+CREATE OR REPLACE FUNCTION public.analysis_order_audit_candidate_key_coverage(
+    p_request_id UUID
+)
+RETURNS JSONB
+LANGUAGE sql
+SECURITY DEFINER
+STABLE
+SET search_path = ''
+AS $$
+    WITH selected_relationship AS (
+        SELECT manifest.job_key
+        FROM public.analysis_v2_relationship_manifests AS manifest
+        WHERE manifest.request_id = p_request_id
+        ORDER BY manifest.updated_at DESC NULLS LAST, manifest.job_key DESC
+        LIMIT 1
+    ),
+    expected AS (
+        SELECT DISTINCT mutual.username
+        FROM public.analysis_v2_mutual_rows AS mutual
+        WHERE mutual.request_id = p_request_id
+          AND (
+              NOT EXISTS (SELECT 1 FROM selected_relationship)
+              OR mutual.job_key = (SELECT job_key FROM selected_relationship)
+          )
+    ),
+    observed AS (
+        SELECT DISTINCT feature.instagram_id AS username
+        FROM public.analysis_v2_candidate_feature_rows AS feature
+        WHERE feature.request_id = p_request_id
+        UNION
+        SELECT DISTINCT private_name.instagram_id AS username
+        FROM public.analysis_v2_private_name_rows AS private_name
+        WHERE private_name.request_id = p_request_id
+    ),
+    missing AS (
+        SELECT expected.username FROM expected
+        EXCEPT SELECT observed.username FROM observed
+    ),
+    extra AS (
+        SELECT observed.username FROM observed
+        EXCEPT SELECT expected.username FROM expected
+    )
+    SELECT pg_catalog.jsonb_build_object(
+        'expected', COALESCE((
+            SELECT pg_catalog.jsonb_agg(username ORDER BY username) FROM expected
+        ), '[]'::JSONB),
+        'observed', COALESCE((
+            SELECT pg_catalog.jsonb_agg(username ORDER BY username) FROM observed
+        ), '[]'::JSONB),
+        'missing', COALESCE((
+            SELECT pg_catalog.jsonb_agg(username ORDER BY username) FROM missing
+        ), '[]'::JSONB),
+        'extra', COALESCE((
+            SELECT pg_catalog.jsonb_agg(username ORDER BY username) FROM extra
+        ), '[]'::JSONB),
+        'complete', NOT EXISTS (SELECT 1 FROM missing)
+            AND NOT EXISTS (SELECT 1 FROM extra)
+    );
+$$;
+
+REVOKE ALL ON FUNCTION public.analysis_order_audit_candidate_key_coverage(UUID)
+    FROM PUBLIC, anon, authenticated, service_role;
 
 CREATE OR REPLACE FUNCTION public.load_analysis_order_audit_bundle(
     p_request_id UUID,
@@ -635,88 +746,6 @@ CREATE TRIGGER prevent_analysis_order_audit_interaction_mutation
 BEFORE UPDATE OR DELETE ON public.analysis_order_audit_interactions
 FOR EACH ROW EXECUTE FUNCTION public.prevent_analysis_order_audit_mutation();
 
-CREATE OR REPLACE FUNCTION public.enqueue_analysis_order_audit_bundle(
-    p_request_id UUID
-)
-RETURNS JSONB
-LANGUAGE plpgsql
-SECURITY DEFINER
-SET search_path = ''
-AS $$
-BEGIN
-    IF p_request_id IS NULL THEN
-        RAISE EXCEPTION USING
-            MESSAGE = 'ANALYSIS_ORDER_AUDIT_INVALID_REQUEST', ERRCODE = 'P0001';
-    END IF;
-
-    IF NOT EXISTS (
-        SELECT 1
-        FROM public.analysis_requests AS request
-        WHERE request.id = p_request_id
-          AND request.pipeline_version = 'v2'
-    ) THEN
-        RETURN NULL;
-    END IF;
-
-    INSERT INTO public.analysis_order_audit_assembly_queue (
-        request_id, status, attempt_count, next_attempt_at,
-        lease_token, lease_expires_at, last_error_code, last_error_at,
-        updated_at
-    ) VALUES (
-        p_request_id, 'queued', 0, pg_catalog.clock_timestamp(),
-        NULL, NULL, NULL, NULL, pg_catalog.clock_timestamp()
-    )
-    ON CONFLICT (request_id) DO UPDATE SET
-        status = CASE
-            WHEN public.analysis_order_audit_assembly_queue.status = 'completed'
-                THEN 'completed'
-            WHEN public.analysis_order_audit_assembly_queue.status = 'processing'
-                AND public.analysis_order_audit_assembly_queue.lease_expires_at
-                    > pg_catalog.clock_timestamp()
-                THEN 'processing'
-            ELSE 'queued'
-        END,
-        next_attempt_at = CASE
-            WHEN public.analysis_order_audit_assembly_queue.status = 'completed'
-                THEN public.analysis_order_audit_assembly_queue.next_attempt_at
-            WHEN public.analysis_order_audit_assembly_queue.status = 'processing'
-                AND public.analysis_order_audit_assembly_queue.lease_expires_at
-                    > pg_catalog.clock_timestamp()
-                THEN public.analysis_order_audit_assembly_queue.next_attempt_at
-            ELSE pg_catalog.clock_timestamp()
-        END,
-        lease_token = CASE
-            WHEN public.analysis_order_audit_assembly_queue.status = 'processing'
-                AND public.analysis_order_audit_assembly_queue.lease_expires_at
-                    > pg_catalog.clock_timestamp()
-                THEN public.analysis_order_audit_assembly_queue.lease_token
-            ELSE NULL
-        END,
-        lease_expires_at = CASE
-            WHEN public.analysis_order_audit_assembly_queue.status = 'processing'
-                AND public.analysis_order_audit_assembly_queue.lease_expires_at
-                    > pg_catalog.clock_timestamp()
-                THEN public.analysis_order_audit_assembly_queue.lease_expires_at
-            ELSE NULL
-        END,
-        last_error_code = CASE
-            WHEN public.analysis_order_audit_assembly_queue.status IN ('completed', 'processing')
-                THEN public.analysis_order_audit_assembly_queue.last_error_code
-            ELSE NULL
-        END,
-        last_error_at = CASE
-            WHEN public.analysis_order_audit_assembly_queue.status IN ('completed', 'processing')
-                THEN public.analysis_order_audit_assembly_queue.last_error_at
-            ELSE NULL
-        END,
-        updated_at = pg_catalog.clock_timestamp();
-
-    RETURN pg_catalog.jsonb_build_object(
-        'status', 'queued',
-        'requestId', p_request_id::TEXT
-    );
-END;
-$$;
 
 CREATE OR REPLACE FUNCTION public.list_analysis_order_audit_bundle_recovery(
     p_limit INTEGER DEFAULT 10
@@ -856,6 +885,100 @@ BEGIN
 END;
 $$;
 
+
+
+CREATE OR REPLACE FUNCTION public.analysis_order_audit_cost_source_hash(
+    p_request_id UUID
+)
+RETURNS VARCHAR(64)
+LANGUAGE sql
+SECURITY DEFINER
+STABLE
+    SET search_path = ''
+AS $$
+    SELECT public.analysis_order_audit_digest(COALESCE((
+        SELECT public.analysis_order_audit_redact_json(pg_catalog.to_jsonb(rollup))::TEXT
+        FROM public.analysis_v2_cost_rollups AS rollup
+        WHERE rollup.request_id = p_request_id
+        LIMIT 1
+    ), 'missing-cost-source'));
+$$;
+
+REVOKE ALL ON FUNCTION public.analysis_order_audit_cost_source_hash(UUID)
+    FROM PUBLIC, anon, authenticated, service_role;
+
+CREATE OR REPLACE FUNCTION public.analysis_order_audit_source_table_hash(
+    p_table_name TEXT,
+    p_request_id UUID
+)
+RETURNS VARCHAR(64)
+LANGUAGE plpgsql
+SECURITY DEFINER
+STABLE
+SET search_path = ''
+AS $$
+DECLARE
+    v_hash VARCHAR(64);
+BEGIN
+    IF p_table_name IS NULL
+       OR p_table_name !~ '^analysis_v2_[a-z0-9_]+$' THEN
+        RAISE EXCEPTION USING
+            MESSAGE = 'ANALYSIS_ORDER_AUDIT_INVALID_SOURCE_TABLE', ERRCODE = 'P0001';
+    END IF;
+    IF pg_catalog.to_regclass('public.' || p_table_name) IS NULL THEN
+        RETURN public.analysis_order_audit_digest('missing-table:' || p_table_name);
+    END IF;
+    EXECUTE pg_catalog.format(
+        'SELECT public.analysis_order_audit_digest(COALESCE((
+             SELECT pg_catalog.jsonb_agg(
+                 public.analysis_order_audit_redact_json(pg_catalog.to_jsonb(source))
+                 ORDER BY pg_catalog.to_jsonb(source)::TEXT
+             )::TEXT
+             FROM public.%I AS source
+             WHERE source.request_id = $1
+         ), ''[]''))', p_table_name
+    ) INTO v_hash USING p_request_id;
+    RETURN v_hash;
+END;
+$$;
+
+REVOKE ALL ON FUNCTION public.analysis_order_audit_source_table_hash(TEXT, UUID)
+    FROM PUBLIC, anon, authenticated, service_role;
+
+CREATE OR REPLACE FUNCTION public.analysis_order_audit_purge_fence(
+    p_request_id UUID,
+    p_reason TEXT DEFAULT 'ANALYSIS_ORDER_AUDIT_ASSEMBLY_FAILED'
+)
+RETURNS VOID
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = ''
+AS $$
+BEGIN
+    -- ANALYSIS_ORDER_AUDIT_PURGE_FENCED is the durable safety outcome; the successful path emits
+    -- ANALYSIS_ORDER_AUDIT_PURGE_COMPLETED after all allowlisted source rows are deleted.
+    IF p_request_id IS NULL
+       OR p_reason IS NULL
+       OR p_reason !~ '^[A-Z][A-Z0-9_:-]{1,95}$' THEN
+        RAISE EXCEPTION USING
+            MESSAGE = 'ANALYSIS_ORDER_AUDIT_INVALID_PURGE_FENCE', ERRCODE = 'P0001';
+    END IF;
+    UPDATE public.analysis_order_audit_assembly_queue
+       SET status = 'failed',
+           next_attempt_at = pg_catalog.clock_timestamp(),
+           lease_token = NULL,
+           lease_expires_at = NULL,
+           purge_fenced_at = pg_catalog.clock_timestamp(),
+           purge_fence_reason = p_reason,
+           purged_at = NULL,
+           updated_at = pg_catalog.clock_timestamp()
+     WHERE request_id = p_request_id;
+END;
+$$;
+
+REVOKE ALL ON FUNCTION public.analysis_order_audit_purge_fence(UUID, TEXT)
+    FROM PUBLIC, anon, authenticated, service_role;
+
 CREATE OR REPLACE FUNCTION public.analysis_order_audit_bundle_payload(
     p_bundle public.analysis_order_audit_bundles
 )
@@ -873,9 +996,9 @@ AS $$
         'sourceSetHash', p_bundle.source_set_hash,
         'status', p_bundle.completeness_status,
         'completeness', p_bundle.completeness_status,
-        'gapCodes', to_jsonb(p_bundle.gap_codes),
+        'gapCodes', pg_catalog.to_jsonb(p_bundle.gap_codes),
         'pipelineVersion', p_bundle.pipeline_version,
-        'pipelinePolicy', p_bundle.pipeline_policy,
+        'pipelinePolicy', public.analysis_order_audit_redact_json(p_bundle.pipeline_policy),
         'riskPolicyVersion', p_bundle.risk_policy_version,
         'aiPolicyVersion', p_bundle.ai_policy_version,
         'schedulerPolicyVersion', p_bundle.scheduler_policy_version,
@@ -901,11 +1024,33 @@ AS $$
             'screened', p_bundle.screened_total,
             'declared', p_bundle.candidate_declared,
             'collected', p_bundle.candidate_collected,
-            'listHash', p_bundle.mutual_list_hash
+            'listHash', p_bundle.mutual_list_hash,
+            'keyCoverage', p_bundle.candidate_key_coverage
         ),
         'interactions', pg_catalog.jsonb_build_object(
             'declared', p_bundle.interaction_declared,
-            'collected', p_bundle.interaction_collected
+            'collected', p_bundle.interaction_collected,
+            'targetLikes', pg_catalog.jsonb_build_object(
+                'declared', p_bundle.target_likes_declared,
+                'collected', p_bundle.target_likes_collected
+            ),
+            'targetComments', pg_catalog.jsonb_build_object(
+                'declared', p_bundle.target_comments_declared,
+                'collected', p_bundle.target_comments_collected
+            ),
+            'candidateLikes', pg_catalog.jsonb_build_object(
+                'declared', p_bundle.candidate_likes_declared,
+                'collected', p_bundle.candidate_likes_collected,
+                'evidenceCollected', p_bundle.candidate_likes_evidence_collected
+            ),
+            'tags', pg_catalog.jsonb_build_object(
+                'declared', p_bundle.tags_declared,
+                'collected', p_bundle.tags_collected
+            ),
+            'mentions', pg_catalog.jsonb_build_object(
+                'declared', p_bundle.mentions_declared,
+                'collected', p_bundle.mentions_collected
+            )
         ),
         'providerRuns', p_bundle.provider_runs,
         'stageStatus', p_bundle.stage_status,
@@ -918,7 +1063,7 @@ AS $$
             'totalKnownCostUsd', p_bundle.total_known_cost_usd,
             'totalConservativeCostUsd', p_bundle.total_conservative_cost_usd,
             'usageUnknown', p_bundle.cost_usage_unknown,
-            'missingSourceCodes', to_jsonb(p_bundle.cost_missing_source_codes),
+            'missingSourceCodes', pg_catalog.to_jsonb(p_bundle.cost_missing_source_codes),
             'provenance', public.analysis_order_audit_redact_json(p_bundle.cost_provenance)
         ),
         'usageUnknown', p_bundle.usage_unknown
@@ -928,6 +1073,331 @@ $$;
 REVOKE ALL ON FUNCTION public.analysis_order_audit_bundle_payload(
     public.analysis_order_audit_bundles
 ) FROM PUBLIC, anon, authenticated, service_role;
+
+CREATE OR REPLACE FUNCTION public.enqueue_analysis_order_audit_bundle(
+    p_request_id UUID
+)
+RETURNS JSONB
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = ''
+AS $$
+DECLARE
+    v_latest public.analysis_order_audit_bundles%ROWTYPE;
+    v_cost_hash VARCHAR(64);
+    v_reopen BOOLEAN := FALSE;
+BEGIN
+    IF p_request_id IS NULL THEN
+        RAISE EXCEPTION USING
+            MESSAGE = 'ANALYSIS_ORDER_AUDIT_INVALID_REQUEST', ERRCODE = 'P0001';
+    END IF;
+    IF NOT EXISTS (
+        SELECT 1 FROM public.analysis_requests AS request
+        WHERE request.id = p_request_id AND request.pipeline_version = 'v2'
+    ) THEN
+        RETURN NULL;
+    END IF;
+
+    v_cost_hash := public.analysis_order_audit_cost_source_hash(p_request_id);
+    SELECT bundle.* INTO v_latest
+    FROM public.analysis_order_audit_bundles AS bundle
+    WHERE bundle.request_id = p_request_id
+    ORDER BY bundle.version DESC
+    LIMIT 1;
+    v_reopen := v_latest.request_id IS NOT NULL
+        AND v_latest.stage_status->>'costSourceHash' IS DISTINCT FROM v_cost_hash;
+
+    INSERT INTO public.analysis_order_audit_assembly_queue (
+        request_id, status, attempt_count, next_attempt_at, lease_token,
+        lease_expires_at, last_error_code, last_error_at, updated_at
+    ) VALUES (
+        p_request_id, 'queued', 0, pg_catalog.clock_timestamp(), NULL,
+        NULL, NULL, NULL, pg_catalog.clock_timestamp()
+    )
+    ON CONFLICT (request_id) DO UPDATE SET
+        status = CASE
+            WHEN public.analysis_order_audit_assembly_queue.status = 'completed'
+                 AND NOT v_reopen THEN 'completed'
+            WHEN public.analysis_order_audit_assembly_queue.status = 'processing'
+                 AND public.analysis_order_audit_assembly_queue.lease_expires_at
+                     > pg_catalog.clock_timestamp()
+                 AND NOT v_reopen THEN 'processing'
+            ELSE 'queued'
+        END,
+        next_attempt_at = CASE
+            WHEN public.analysis_order_audit_assembly_queue.status = 'completed'
+                 AND NOT v_reopen
+                THEN public.analysis_order_audit_assembly_queue.next_attempt_at
+            WHEN public.analysis_order_audit_assembly_queue.status = 'processing'
+                 AND public.analysis_order_audit_assembly_queue.lease_expires_at
+                     > pg_catalog.clock_timestamp()
+                 AND NOT v_reopen
+                THEN public.analysis_order_audit_assembly_queue.next_attempt_at
+            ELSE pg_catalog.clock_timestamp()
+        END,
+        lease_token = CASE
+            WHEN public.analysis_order_audit_assembly_queue.status = 'processing'
+                 AND public.analysis_order_audit_assembly_queue.lease_expires_at
+                     > pg_catalog.clock_timestamp()
+                 AND NOT v_reopen
+                THEN public.analysis_order_audit_assembly_queue.lease_token
+            ELSE NULL
+        END,
+        lease_expires_at = CASE
+            WHEN public.analysis_order_audit_assembly_queue.status = 'processing'
+                 AND public.analysis_order_audit_assembly_queue.lease_expires_at
+                     > pg_catalog.clock_timestamp()
+                 AND NOT v_reopen
+                THEN public.analysis_order_audit_assembly_queue.lease_expires_at
+            ELSE NULL
+        END,
+        last_error_code = CASE
+            WHEN public.analysis_order_audit_assembly_queue.status IN ('completed', 'processing')
+                 AND NOT v_reopen
+                THEN public.analysis_order_audit_assembly_queue.last_error_code
+            ELSE NULL
+        END,
+        last_error_at = CASE
+            WHEN public.analysis_order_audit_assembly_queue.status IN ('completed', 'processing')
+                 AND NOT v_reopen
+                THEN public.analysis_order_audit_assembly_queue.last_error_at
+            ELSE NULL
+        END,
+        -- A late cost source changes the immutable version but must not erase a terminal purge
+        -- fence; the retry assembler will purge only after the new finalized bundle is durable.
+        purge_fenced_at = public.analysis_order_audit_assembly_queue.purge_fenced_at,
+        purge_fence_reason = public.analysis_order_audit_assembly_queue.purge_fence_reason,
+        purged_at = CASE WHEN v_reopen THEN NULL
+            ELSE public.analysis_order_audit_assembly_queue.purged_at END,
+        updated_at = pg_catalog.clock_timestamp();
+
+    RETURN pg_catalog.jsonb_build_object(
+        'status', 'queued',
+        'requestId', p_request_id::TEXT,
+        'costSourceHash', v_cost_hash
+    );
+END;
+$$;
+
+-- This private implementation preserves the production purge contract. The lock sequence must stay
+-- intent -> summary -> audit run -> ordered scoring checkpoints; the terminal final-score predicate
+-- below is the only exception to deleting the rich scoring checkpoint working set.
+CREATE OR REPLACE FUNCTION public.analysis_v2_purge_result_working_set_exact(
+    p_request_id UUID,
+    p_keep_final BOOLEAN
+)
+RETURNS VOID
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = ''
+AS $$
+DECLARE
+    v_table TEXT;
+    v_child_tables CONSTANT TEXT[] := ARRAY[
+        'analysis_v2_candidate_score_rows',
+        'analysis_v2_partner_safety_rows',
+        'analysis_v2_narrative_rows',
+        'analysis_v2_reverse_like_rows',
+        'analysis_v2_preliminary_score_rows',
+        'analysis_target_interactors',
+        'analysis_v2_candidate_feature_rows',
+        'analysis_v2_private_name_rows',
+        'analysis_v2_mutual_rows',
+        'analysis_v2_relationship_rows',
+        'analysis_v2_profile_fetch_outcomes'
+    ];
+BEGIN
+    IF p_request_id IS NULL OR p_keep_final IS NULL THEN
+        RAISE EXCEPTION USING
+            MESSAGE = 'ANALYSIS_V2_RESULT_INVALID', ERRCODE = 'P0001';
+    END IF;
+
+    -- The production function locks the score-audit intent first so claim/expiry work cannot race
+    -- the destructive cleanup. A missing intent remains a supported orphan path.
+    PERFORM 1
+    FROM public.analysis_v2_score_audit_intents AS intent
+    WHERE intent.request_id = p_request_id
+    FOR UPDATE;
+
+    -- Lock the parent summary before touching the audit run or deleting it below.
+    IF p_keep_final THEN
+        PERFORM 1
+        FROM public.analysis_v2_result_summaries AS summary
+        WHERE summary.request_id = p_request_id
+        FOR KEY SHARE;
+    ELSE
+        PERFORM 1
+        FROM public.analysis_v2_result_summaries AS summary
+        WHERE summary.request_id = p_request_id
+        FOR UPDATE;
+    END IF;
+
+    PERFORM 1
+    FROM public.analysis_v2_score_audit_runs AS run
+    WHERE run.request_id = p_request_id
+    FOR UPDATE;
+
+    -- Lock every scoring checkpoint in stable order before any working-set delete.
+    PERFORM 1
+    FROM public.analysis_v2_ai_scoring_stage_checkpoints AS stage
+    WHERE stage.request_id = p_request_id
+    ORDER BY stage.stage_kind, stage.batch_key
+    FOR UPDATE;
+
+    -- Additional child ledgers are removed before their manifests/parents. Every delete is guarded
+    -- so this function remains usable in narrowly provisioned repair stacks.
+    FOREACH v_table IN ARRAY v_child_tables LOOP
+        IF pg_catalog.to_regclass('public.' || v_table) IS NOT NULL THEN
+            EXECUTE pg_catalog.format(
+                'DELETE FROM public.%I WHERE request_id = $1', v_table
+            ) USING p_request_id;
+        END IF;
+    END LOOP;
+
+    -- Keep the exact latest production deletion sequence below, including its final-score intent
+    -- retention predicate.
+    DELETE FROM public.analysis_v2_narrative_manifests WHERE request_id = p_request_id;
+    DELETE FROM public.analysis_v2_candidate_score_manifests WHERE request_id = p_request_id;
+    DELETE FROM public.analysis_v2_partner_safety_manifests WHERE request_id = p_request_id;
+    DELETE FROM public.analysis_v2_reverse_like_manifests WHERE request_id = p_request_id;
+    DELETE FROM public.analysis_v2_preliminary_score_manifests WHERE request_id = p_request_id;
+    DELETE FROM public.analysis_v2_private_name_manifests WHERE request_id = p_request_id;
+    DELETE FROM public.analysis_v2_candidate_feature_manifests WHERE request_id = p_request_id;
+    DELETE FROM public.analysis_v2_ai_result_checkpoints WHERE request_id = p_request_id;
+    DELETE FROM public.analysis_v2_ai_scoring_stage_checkpoints AS stage
+    WHERE stage.request_id = p_request_id
+      AND NOT (
+        p_keep_final
+        AND stage.stage_kind = 'final_score' AND stage.batch_key = -1
+        AND EXISTS (
+            SELECT 1
+            FROM public.analysis_v2_score_audit_intents AS intent
+            LEFT JOIN public.analysis_v2_score_audit_runs AS run
+              ON run.request_id = intent.request_id
+             AND run.source_result_hash = intent.source_result_hash
+             AND run.source_generation = intent.source_generation
+            WHERE intent.request_id = p_request_id
+              AND intent.source_result_hash = stage.result_hash
+              AND intent.intent_status = 'queued'
+              AND intent.retain_until > pg_catalog.clock_timestamp()
+              AND (
+                run.request_id IS NULL
+                OR run.status IN ('queued','processing')
+              )
+        )
+      );
+    DELETE FROM public.analysis_v2_profile_fetch_batches WHERE request_id = p_request_id;
+    DELETE FROM public.analysis_v2_target_evidence_manifests WHERE request_id = p_request_id;
+    DELETE FROM public.analysis_v2_relationship_manifests WHERE request_id = p_request_id;
+    DELETE FROM public.analysis_v2_relationship_sides WHERE request_id = p_request_id;
+    IF NOT p_keep_final THEN
+        DELETE FROM public.analysis_v2_result_summaries WHERE request_id = p_request_id;
+    END IF;
+
+    UPDATE public.analysis_order_audit_assembly_queue
+       SET purged_at = pg_catalog.clock_timestamp(),
+           purge_fenced_at = NULL,
+           purge_fence_reason = NULL,
+           updated_at = pg_catalog.clock_timestamp()
+     WHERE request_id = p_request_id;
+END;
+$$;
+
+REVOKE ALL ON FUNCTION public.analysis_v2_purge_result_working_set_exact(UUID, BOOLEAN)
+    FROM PUBLIC, anon, authenticated, service_role;
+
+-- A terminal purge is allowed only after the immutable parent is durable. Missing parents are
+-- recorded as a durable fence and leave all rich evidence available for a later retry.
+CREATE OR REPLACE FUNCTION public.analysis_v2_purge_result_working_set(
+    p_request_id UUID,
+    p_keep_final BOOLEAN
+)
+RETURNS VOID
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = ''
+AS $$
+DECLARE
+    v_bundle_assembled_at TIMESTAMPTZ;
+    v_bundle_finalized BOOLEAN;
+    v_purge_fenced_at TIMESTAMPTZ;
+    v_queue_status TEXT;
+    v_request_status TEXT;
+BEGIN
+    IF p_request_id IS NULL OR p_keep_final IS NULL THEN
+        RAISE EXCEPTION USING
+            MESSAGE = 'ANALYSIS_V2_RESULT_INVALID', ERRCODE = 'P0001';
+    END IF;
+    PERFORM pg_catalog.pg_advisory_xact_lock(
+        pg_catalog.hashtextextended(p_request_id::TEXT, 0)
+    );
+
+    SELECT request.status
+      INTO v_request_status
+      FROM public.analysis_requests AS request
+     WHERE request.id = p_request_id
+       AND request.pipeline_version = 'v2'
+     FOR KEY SHARE;
+    IF NOT FOUND OR v_request_status NOT IN ('completed', 'failed') THEN
+        RETURN;
+    END IF;
+
+    -- The queue row is the durable fence state. A caller cannot purge merely because an older
+    -- partial bundle exists, and a missing queue row cannot prove that assembly completed.
+    SELECT queue.status, queue.purge_fenced_at
+      INTO v_queue_status, v_purge_fenced_at
+      FROM public.analysis_order_audit_assembly_queue AS queue
+     WHERE queue.request_id = p_request_id
+     FOR UPDATE;
+    IF NOT FOUND THEN
+        -- The request FK makes this insert safe. Persist the fence even when an earlier deployment
+        -- or repair path lost the queue row; never treat a missing queue as permission to purge.
+        INSERT INTO public.analysis_order_audit_assembly_queue(
+            request_id, status, attempt_count, next_attempt_at,
+            purge_fenced_at, purge_fence_reason, purged_at, updated_at
+        ) VALUES (
+            p_request_id, 'failed', 0, pg_catalog.clock_timestamp(),
+            pg_catalog.clock_timestamp(), 'ANALYSIS_ORDER_AUDIT_ASSEMBLY_FAILED', NULL,
+            pg_catalog.clock_timestamp()
+        )
+        ON CONFLICT (request_id) DO NOTHING;
+        RETURN;
+    END IF;
+
+    SELECT bundle.assembled_at,
+           bundle.stage_status->>'finalized' = 'true'
+      INTO v_bundle_assembled_at, v_bundle_finalized
+      FROM public.analysis_order_audit_bundles AS bundle
+     WHERE bundle.request_id = p_request_id
+     ORDER BY bundle.version DESC
+     LIMIT 1;
+    IF v_bundle_assembled_at IS NULL THEN
+        PERFORM public.analysis_order_audit_purge_fence(
+            p_request_id, 'ANALYSIS_ORDER_AUDIT_ASSEMBLY_FAILED'
+        );
+        RETURN;
+    END IF;
+    IF NOT COALESCE(v_bundle_finalized, FALSE) THEN
+        PERFORM public.analysis_order_audit_purge_fence(
+            p_request_id, 'ANALYSIS_ORDER_AUDIT_ASSEMBLY_NOT_FINALIZED'
+        );
+        RETURN;
+    END IF;
+    IF v_queue_status IS DISTINCT FROM 'completed'
+       OR (v_purge_fenced_at IS NOT NULL AND v_bundle_assembled_at <= v_purge_fenced_at) THEN
+        RETURN;
+    END IF;
+
+    PERFORM public.analysis_v2_purge_result_working_set_exact(
+        p_request_id, p_keep_final
+    );
+END;
+$$;
+
+REVOKE ALL ON FUNCTION public.analysis_v2_purge_result_working_set(UUID, BOOLEAN)
+    FROM PUBLIC, anon, authenticated, service_role;
+GRANT EXECUTE ON FUNCTION public.analysis_v2_purge_result_working_set(UUID, BOOLEAN)
+    TO service_role;
 
 CREATE OR REPLACE FUNCTION public.assemble_analysis_order_audit_bundle(
     p_request_id UUID
@@ -967,22 +1437,34 @@ DECLARE
     v_private_total INTEGER := 0;
     v_screened_total INTEGER := 0;
     v_mutual_rows_collected INTEGER := 0;
-    v_feature_collected INTEGER := 0;
-    v_score_collected INTEGER := 0;
     v_candidate_declared INTEGER := 0;
     v_candidate_collected INTEGER := 0;
     v_interaction_declared INTEGER := 0;
     v_interaction_collected INTEGER := 0;
-    v_reverse_interaction_collected INTEGER := 0;
+    v_target_likes_declared INTEGER;
+    v_target_likes_collected INTEGER;
+    v_target_comments_declared INTEGER;
+    v_target_comments_collected INTEGER;
+    v_candidate_likes_declared INTEGER;
+    v_candidate_likes_collected INTEGER;
+    v_candidate_likes_evidence_collected INTEGER;
+    v_score_collected INTEGER := 0;
+    v_tags_declared INTEGER;
+    v_tags_collected INTEGER;
+    v_mentions_declared INTEGER;
+    v_mentions_collected INTEGER;
     v_target_interaction_max_ordinal INTEGER := 0;
+    v_reverse_manifest_exists BOOLEAN := FALSE;
     v_mutual_list_hash VARCHAR(64);
-    v_source_hashes JSONB;
-    v_provider_runs JSONB;
-    v_stage_status JSONB;
+    v_source_set_json JSONB := '{}'::JSONB;
+    v_retained_source_set_hash VARCHAR(64);
     v_source_set_hash VARCHAR(64);
+    v_cost_source_hash VARCHAR(64);
+    v_provider_runs JSONB := '[]'::JSONB;
+    v_stage_status JSONB := '{}'::JSONB;
+    v_candidate_key_coverage JSONB := '{}'::JSONB;
     v_bundle_hash VARCHAR(64);
     v_previous_hash VARCHAR(64);
-    v_retained_source_set_hash VARCHAR(64);
     v_version INTEGER;
     v_gaps TEXT[] := ARRAY[]::TEXT[];
     v_cost_missing TEXT[] := ARRAY[]::TEXT[];
@@ -1008,6 +1490,8 @@ DECLARE
     v_finalized BOOLEAN := FALSE;
     v_inconsistent BOOLEAN := FALSE;
     v_reuse_latest BOOLEAN := FALSE;
+    v_queue_fenced BOOLEAN := FALSE;
+    v_purge_fenced_at TIMESTAMPTZ;
     v_now TIMESTAMPTZ := pg_catalog.clock_timestamp();
 BEGIN
     IF p_request_id IS NULL THEN
@@ -1015,27 +1499,33 @@ BEGIN
             MESSAGE = 'ANALYSIS_ORDER_AUDIT_INVALID_REQUEST', ERRCODE = 'P0001';
     END IF;
 
-    -- This lock serializes assemblers for one request. It is deliberately request-scoped,
-    -- allowing large orders to assemble independently without a table-wide lock.
+    -- One request lock covers queue state, source reads, append, and the retry purge fence.
     PERFORM pg_catalog.pg_advisory_xact_lock(
         pg_catalog.hashtextextended(p_request_id::TEXT, 0)
     );
 
-    SELECT request.*
-      INTO v_request
-      FROM public.analysis_requests AS request
-     WHERE request.id = p_request_id
-       AND request.pipeline_version = 'v2';
+    SELECT request.* INTO v_request
+    FROM public.analysis_requests AS request
+    WHERE request.id = p_request_id AND request.pipeline_version = 'v2';
     IF NOT FOUND THEN
         RETURN NULL;
     END IF;
 
-    SELECT bundle.*
-      INTO v_latest
-      FROM public.analysis_order_audit_bundles AS bundle
-     WHERE bundle.request_id = p_request_id
-     ORDER BY bundle.version DESC
-     LIMIT 1;
+    SELECT bundle.* INTO v_latest
+    FROM public.analysis_order_audit_bundles AS bundle
+    WHERE bundle.request_id = p_request_id
+    ORDER BY bundle.version DESC
+    LIMIT 1;
+    SELECT queue.purge_fenced_at IS NOT NULL, queue.purge_fenced_at
+      INTO v_queue_fenced, v_purge_fenced_at
+    FROM public.analysis_order_audit_assembly_queue AS queue
+    WHERE queue.request_id = p_request_id;
+    v_queue_fenced := COALESCE(v_queue_fenced, FALSE);
+    -- Keep the durable freshness fence strict even when the database clock has only millisecond
+    -- resolution or moves backwards between the failed terminal attempt and its retry.
+    IF v_purge_fenced_at IS NOT NULL AND v_now <= v_purge_fenced_at THEN
+        v_now := v_purge_fenced_at + INTERVAL '1 microsecond';
+    END IF;
 
     INSERT INTO public.analysis_order_audit_assembly_queue(request_id, status, updated_at)
     VALUES (p_request_id, 'processing', v_now)
@@ -1045,36 +1535,31 @@ BEGIN
         lease_expires_at = NULL,
         updated_at = v_now;
 
-    SELECT summary.*
-      INTO v_summary
-      FROM public.analysis_v2_result_summaries AS summary
-     WHERE summary.request_id = p_request_id;
-
-    SELECT preflight.*
-      INTO v_preflight
-      FROM public.analysis_preflights AS preflight
-     WHERE preflight.id = v_request.preflight_id;
-
-    SELECT earlybird_order.id
-      INTO v_order_id
-      FROM public.earlybird_orders AS earlybird_order
-     WHERE earlybird_order.result_request_id = p_request_id
-     ORDER BY earlybird_order.id
-     LIMIT 1;
+    SELECT summary.* INTO v_summary
+    FROM public.analysis_v2_result_summaries AS summary
+    WHERE summary.request_id = p_request_id;
+    SELECT preflight.* INTO v_preflight
+    FROM public.analysis_preflights AS preflight
+    WHERE preflight.id = v_request.preflight_id;
+    SELECT earlybird_order.id INTO v_order_id
+    FROM public.earlybird_orders AS earlybird_order
+    WHERE earlybird_order.result_request_id = p_request_id
+    ORDER BY earlybird_order.id
+    LIMIT 1;
 
     v_target_username := COALESCE(
         NULLIF(v_summary.target_instagram_id, ''),
         NULLIF(v_preflight.target_instagram_id, '')
     );
-    v_target_profile_available := (
-        v_summary.request_id IS NOT NULL
+    v_target_profile_available := v_summary.request_id IS NOT NULL
         OR (
             v_preflight.target_followers_count IS NOT NULL
             AND v_preflight.target_following_count IS NOT NULL
-        )
+        );
+    v_plan_id := COALESCE(
+        NULLIF(v_request.selected_plan_id_snapshot, ''),
+        NULLIF(v_summary.plan_id, '')
     );
-    v_target_posts_available := FALSE;
-    v_plan_id := COALESCE(NULLIF(v_request.selected_plan_id_snapshot, ''), v_summary.plan_id);
     v_access_mode := v_request.plan_access_mode_snapshot;
     v_risk_policy := COALESCE(
         v_request.policy_versions_snapshot->>'risk',
@@ -1082,6 +1567,7 @@ BEGIN
     );
     v_ai_policy := v_request.policy_versions_snapshot->>'aiStage';
     v_scheduler_policy := v_request.policy_versions_snapshot->>'scheduler';
+    v_finalized := v_request.status IN ('completed', 'failed');
 
     IF v_target_username IS NULL THEN
         v_gaps := pg_catalog.array_append(v_gaps, 'TARGET_ID_MISSING');
@@ -1091,26 +1577,27 @@ BEGIN
     END IF;
     IF v_summary.request_id IS NULL THEN
         v_gaps := pg_catalog.array_append(v_gaps, 'RESULT_SUMMARY_MISSING');
-    ELSE
-        v_finalized := v_request.status IN ('completed', 'failed');
     END IF;
 
     SELECT side.declared_count, side.collected_count, side.result_hash,
-           side.provider, side.provider_run_id, side.provider_operation_key
+           side.input_hash, side.provider, side.provider_run_id,
+           side.provider_operation_key, side.provider_credential_slot,
+           side.job_key
       INTO v_followers
       FROM public.analysis_v2_relationship_sides AS side
-     WHERE side.request_id = p_request_id
-       AND side.side = 'followers'
-     ORDER BY side.updated_at DESC NULLS LAST
+     WHERE side.request_id = p_request_id AND side.side = 'followers'
+     ORDER BY side.updated_at DESC NULLS LAST, side.job_key DESC
      LIMIT 1;
     SELECT side.declared_count, side.collected_count, side.result_hash,
-           side.provider, side.provider_run_id, side.provider_operation_key
+           side.input_hash, side.provider, side.provider_run_id,
+           side.provider_operation_key, side.provider_credential_slot,
+           side.job_key
       INTO v_following
       FROM public.analysis_v2_relationship_sides AS side
-     WHERE side.request_id = p_request_id
-       AND side.side = 'following'
-     ORDER BY side.updated_at DESC NULLS LAST
+     WHERE side.request_id = p_request_id AND side.side = 'following'
+     ORDER BY side.updated_at DESC NULLS LAST, side.job_key DESC
      LIMIT 1;
+
     IF v_followers.declared_count IS NULL THEN
         v_gaps := pg_catalog.array_append(v_gaps, 'FOLLOWERS_SOURCE_MISSING');
     ELSE
@@ -1128,35 +1615,84 @@ BEGIN
     IF v_followers.declared_count IS NOT NULL
        AND v_following.declared_count IS NOT NULL
        AND (
-           v_followers.collected_count <> v_followers.declared_count
-           OR v_following.collected_count <> v_following.declared_count
+           v_followers.collected_count IS DISTINCT FROM v_followers.declared_count
+           OR v_following.collected_count IS DISTINCT FROM v_following.declared_count
        ) THEN
         v_gaps := pg_catalog.array_append(v_gaps, 'RELATIONSHIP_COUNT_GAP');
+        v_inconsistent := TRUE;
     END IF;
 
-    SELECT manifest.job_key, manifest.result_hash, manifest.mutual_count, manifest.public_count,
-           manifest.private_count, manifest.detailed_public_count
+    SELECT manifest.job_key, manifest.result_hash, manifest.mutual_count,
+           manifest.public_count, manifest.private_count,
+           manifest.detailed_public_count, manifest.excluded_username,
+           manifest.exclusion_decision_hash, manifest.followers_result_hash,
+           manifest.following_result_hash, manifest.detailed_mutual_limit
       INTO v_relationship
       FROM public.analysis_v2_relationship_manifests AS manifest
      WHERE manifest.request_id = p_request_id
-     ORDER BY manifest.updated_at DESC NULLS LAST
+     ORDER BY manifest.updated_at DESC NULLS LAST, manifest.job_key DESC
      LIMIT 1;
     IF v_relationship.mutual_count IS NULL THEN
         v_gaps := pg_catalog.array_append(v_gaps, 'MUTUAL_MANIFEST_MISSING');
     ELSE
         v_mutual_total := v_relationship.mutual_count;
-        v_public_total := v_relationship.public_count;
-        v_private_total := v_relationship.private_count;
-        v_screened_total := v_relationship.detailed_public_count;
+        v_public_total := COALESCE(v_relationship.public_count, 0);
+        v_private_total := COALESCE(v_relationship.private_count, 0);
+        v_screened_total := COALESCE(v_relationship.detailed_public_count, 0);
     END IF;
 
-    SELECT target_manifest.job_key, target_manifest.result_hash, target_manifest.interactor_count,
-           target_manifest.liker_count, target_manifest.comment_count,
-           target_manifest.liker_source, target_manifest.comment_source
+    -- The relationship intersection itself is authoritative. Compare its keys with the copied
+    -- mutual rows, retaining an explicit gap for both omissions and unexpected extras.
+    IF v_relationship.job_key IS NOT NULL
+       AND EXISTS (
+           WITH follower_keys AS (
+               SELECT DISTINCT row.username
+               FROM public.analysis_v2_relationship_rows AS row
+               WHERE row.request_id = p_request_id
+                 AND row.job_key = v_relationship.job_key
+                 AND row.side = 'followers'
+           ),
+           following_keys AS (
+               SELECT DISTINCT row.username
+               FROM public.analysis_v2_relationship_rows AS row
+               WHERE row.request_id = p_request_id
+                 AND row.job_key = v_relationship.job_key
+                 AND row.side = 'following'
+           ),
+           expected_keys AS (
+               SELECT username FROM follower_keys
+               INTERSECT
+               SELECT username FROM following_keys
+           ),
+           copied_keys AS (
+               SELECT DISTINCT mutual.username
+               FROM public.analysis_v2_mutual_rows AS mutual
+               WHERE mutual.request_id = p_request_id
+                 AND mutual.job_key = v_relationship.job_key
+           )
+           SELECT 1
+           FROM (
+               (SELECT username FROM expected_keys
+                EXCEPT SELECT username FROM copied_keys)
+               UNION ALL
+               (SELECT username FROM copied_keys
+                EXCEPT SELECT username FROM expected_keys)
+           ) AS difference
+       ) THEN
+        v_gaps := pg_catalog.array_append(v_gaps, 'CANDIDATE_KEY_SET_GAP');
+        v_inconsistent := TRUE;
+    END IF;
+
+    SELECT target_manifest.job_key, target_manifest.result_hash,
+           target_manifest.input_hash, target_manifest.target_username,
+           target_manifest.interactor_count, target_manifest.liker_count,
+           target_manifest.comment_count, target_manifest.liker_source,
+           target_manifest.comment_source, target_manifest.liker_source_hash,
+           target_manifest.comment_source_hash
       INTO v_target_evidence
-      FROM public.analysis_v2_target_evidence_manifests AS target_manifest
+     FROM public.analysis_v2_target_evidence_manifests AS target_manifest
      WHERE target_manifest.request_id = p_request_id
-     ORDER BY target_manifest.updated_at DESC NULLS LAST
+     ORDER BY target_manifest.updated_at DESC NULLS LAST, target_manifest.job_key DESC
      LIMIT 1;
     IF v_target_evidence.job_key IS NULL
        OR v_target_evidence.interactor_count IS NULL
@@ -1186,8 +1722,9 @@ BEGIN
               ) AS coverage(value)
           ) AS target_posts;
         v_target_posts_available := v_target_post_count > 0;
-        v_interaction_declared := v_target_evidence.interactor_count;
         v_target_evidence_ready := TRUE;
+        v_target_likes_declared := v_target_evidence.liker_count;
+        v_target_comments_declared := v_target_evidence.comment_count;
     END IF;
 
     SELECT pg_catalog.count(*)::INTEGER
@@ -1198,112 +1735,145 @@ BEGIN
            v_relationship.job_key IS NULL
            OR mutual.job_key = v_relationship.job_key
        );
-    IF v_relationship.mutual_count IS NOT NULL THEN
-        v_candidate_declared := v_relationship.mutual_count;
-        IF v_mutual_rows_collected <> v_candidate_declared THEN
-            v_gaps := pg_catalog.array_append(v_gaps, 'MUTUAL_ROWS_MISSING');
-            v_inconsistent := TRUE;
-        END IF;
-    ELSE
-        v_candidate_declared := v_mutual_rows_collected;
-        IF v_mutual_rows_collected = 0 THEN
-            v_gaps := pg_catalog.array_append(v_gaps, 'MUTUAL_ROWS_MISSING');
-        END IF;
+    v_candidate_declared := COALESCE(v_relationship.mutual_count, v_mutual_rows_collected);
+    v_candidate_collected := v_mutual_rows_collected;
+    IF v_relationship.mutual_count IS NOT NULL
+       AND v_mutual_rows_collected <> v_relationship.mutual_count THEN
+        v_gaps := pg_catalog.array_append(v_gaps, 'MUTUAL_ROWS_MISSING');
+        v_inconsistent := TRUE;
+    ELSIF v_relationship.mutual_count IS NULL AND v_mutual_rows_collected = 0 THEN
+        v_gaps := pg_catalog.array_append(v_gaps, 'MUTUAL_ROWS_MISSING');
     END IF;
+
     IF v_mutual_rows_collected > 0 THEN
         v_mutual_list_hash := public.analysis_order_audit_digest(COALESCE((
-            SELECT pg_catalog.string_agg(
-                mutual.username || E'\t' || mutual.mutual_ordinal::TEXT
-                    || E'\t' || mutual.following_ordinal::TEXT,
-                E'\n' ORDER BY mutual.mutual_ordinal
-            )
+            SELECT pg_catalog.jsonb_agg(
+                public.analysis_order_audit_redact_json(pg_catalog.to_jsonb(mutual))
+                ORDER BY mutual.mutual_ordinal, mutual.username
+            )::TEXT
             FROM public.analysis_v2_mutual_rows AS mutual
             WHERE mutual.request_id = p_request_id
               AND (
                   v_relationship.job_key IS NULL
                   OR mutual.job_key = v_relationship.job_key
               )
-        ), ''));
+        ), '[]'));
     ELSE
-        v_mutual_list_hash := public.analysis_order_audit_digest('');
+        v_mutual_list_hash := public.analysis_order_audit_digest('[]');
     END IF;
 
-    SELECT pg_catalog.count(DISTINCT COALESCE(
-        feature.candidate_id, private_name.candidate_id, 'username:' || mutual.username
-    ))::INTEGER
-      INTO v_candidate_collected
-      FROM public.analysis_v2_mutual_rows AS mutual
-      LEFT JOIN public.analysis_v2_candidate_feature_rows AS feature
-        ON feature.request_id = mutual.request_id
-       AND feature.instagram_id = mutual.username
-      LEFT JOIN public.analysis_v2_private_name_rows AS private_name
-        ON private_name.request_id = mutual.request_id
-       AND private_name.instagram_id = mutual.username
-     WHERE mutual.request_id = p_request_id
-       AND (
-           v_relationship.job_key IS NULL
-           OR mutual.job_key = v_relationship.job_key
-       );
-
-    SELECT pg_catalog.count(*)::INTEGER
-      INTO v_feature_collected
-      FROM public.analysis_v2_candidate_feature_rows AS feature
-     WHERE feature.request_id = p_request_id;
-    v_features_ready := v_feature_collected >= v_public_total;
+    v_candidate_key_coverage :=
+        public.analysis_order_audit_candidate_key_coverage(p_request_id);
+    IF pg_catalog.jsonb_array_length(
+           COALESCE(v_candidate_key_coverage->'missing', '[]'::JSONB)
+       ) > 0
+       OR pg_catalog.jsonb_array_length(
+           COALESCE(v_candidate_key_coverage->'extra', '[]'::JSONB)
+       ) > 0 THEN
+        v_gaps := pg_catalog.array_append(v_gaps, 'CANDIDATE_KEY_SET_GAP');
+        v_inconsistent := TRUE;
+    END IF;
+    v_features_ready := COALESCE((v_candidate_key_coverage->>'complete')::BOOLEAN, FALSE);
     IF v_public_total > 0 AND NOT v_features_ready THEN
         v_gaps := pg_catalog.array_append(v_gaps, 'CANDIDATE_FEATURES_MISSING');
     END IF;
 
-    SELECT pg_catalog.count(*)::INTEGER
-      INTO v_interaction_collected
+    SELECT
+        count(*) FILTER (WHERE interaction.signal = 'target_post_like')::INTEGER,
+        count(*) FILTER (WHERE interaction.signal = 'target_post_comment')::INTEGER,
+        COALESCE(max(interaction.ordinal), 0)::INTEGER
+      INTO v_target_likes_collected, v_target_comments_collected,
+           v_target_interaction_max_ordinal
       FROM public.analysis_target_interactors AS interaction
      WHERE interaction.request_id = p_request_id
        AND (
            v_target_evidence.job_key IS NULL
            OR interaction.job_key = v_target_evidence.job_key
        );
+    IF NOT v_target_evidence_ready
+       AND v_target_likes_collected = 0
+       AND v_target_comments_collected = 0 THEN
+        v_target_likes_collected := NULL;
+        v_target_comments_collected := NULL;
+    END IF;
     IF v_target_evidence.interactor_count IS NOT NULL
-       AND v_interaction_collected <> v_interaction_declared THEN
+       AND v_target_likes_collected + v_target_comments_collected
+            IS DISTINCT FROM v_target_evidence.interactor_count THEN
         v_gaps := pg_catalog.array_append(v_gaps, 'INTERACTION_ROWS_GAP');
         v_inconsistent := TRUE;
     END IF;
+    IF v_target_likes_declared IS NOT NULL
+       AND v_target_likes_collected <> v_target_likes_declared THEN
+        v_gaps := pg_catalog.array_append(v_gaps, 'TARGET_LIKES_ROWS_GAP');
+        v_inconsistent := TRUE;
+    END IF;
+    IF v_target_comments_declared IS NOT NULL
+       AND v_target_comments_collected <> v_target_comments_declared THEN
+        v_gaps := pg_catalog.array_append(v_gaps, 'TARGET_COMMENTS_ROWS_GAP');
+        v_inconsistent := TRUE;
+    END IF;
 
-    -- Compute the target ordinal boundary and reverse count before inserting the immutable parent;
-    -- the resulting complete total is materialized in the child copy below.
-    SELECT COALESCE(pg_catalog.max(interaction.ordinal), 0)::INTEGER
-      INTO v_target_interaction_max_ordinal
-      FROM public.analysis_target_interactors AS interaction
-     WHERE interaction.request_id = p_request_id
-       AND (
-           v_target_evidence.job_key IS NULL
-           OR interaction.job_key = v_target_evidence.job_key
-       );
-    SELECT pg_catalog.count(*)::INTEGER
-      INTO v_reverse_interaction_collected
+    SELECT EXISTS (
+        SELECT 1 FROM public.analysis_v2_reverse_like_manifests AS manifest
+        WHERE manifest.request_id = p_request_id
+    ) INTO v_reverse_manifest_exists;
+    IF v_reverse_manifest_exists THEN
+        SELECT manifest.item_count
+          INTO v_candidate_likes_declared
+          FROM public.analysis_v2_reverse_like_manifests AS manifest
+         WHERE manifest.request_id = p_request_id;
+    END IF;
+    SELECT count(*)::INTEGER,
+           COALESCE(sum(pg_catalog.cardinality(reverse.evidence_ref_ids)), 0)::INTEGER
+      INTO v_candidate_likes_collected, v_candidate_likes_evidence_collected
       FROM public.analysis_v2_reverse_like_rows AS reverse
-      CROSS JOIN LATERAL unnest(reverse.evidence_ref_ids) AS refs(value)
-     WHERE reverse.request_id = p_request_id
+      WHERE reverse.request_id = p_request_id
        AND EXISTS (
            SELECT 1
-             FROM public.analysis_v2_mutual_rows AS mutual
-             LEFT JOIN public.analysis_v2_candidate_feature_rows AS feature
-               ON feature.request_id = mutual.request_id
-              AND feature.instagram_id = mutual.username
-             LEFT JOIN public.analysis_v2_private_name_rows AS private_name
-               ON private_name.request_id = mutual.request_id
-              AND private_name.instagram_id = mutual.username
-            WHERE mutual.request_id = p_request_id
-              AND (
-                  v_relationship.job_key IS NULL
-                  OR mutual.job_key = v_relationship.job_key
-              )
-              AND COALESCE(
-                  feature.candidate_id, private_name.candidate_id, 'username:' || mutual.username
-              ) = reverse.candidate_id
+           FROM public.analysis_v2_mutual_rows AS mutual
+           LEFT JOIN public.analysis_v2_candidate_feature_rows AS feature
+             ON feature.request_id = mutual.request_id
+            AND feature.instagram_id = mutual.username
+           LEFT JOIN public.analysis_v2_private_name_rows AS private_name
+             ON private_name.request_id = mutual.request_id
+            AND private_name.instagram_id = mutual.username
+           WHERE mutual.request_id = p_request_id
+             AND (
+                 v_relationship.job_key IS NULL
+                 OR mutual.job_key = v_relationship.job_key
+             )
+             AND COALESCE(
+                 feature.candidate_id, private_name.candidate_id,
+                 'username:' || mutual.username
+             ) = reverse.candidate_id
        );
-    v_interaction_collected := v_interaction_collected + v_reverse_interaction_collected;
+    IF NOT v_reverse_manifest_exists
+       AND v_candidate_likes_collected = 0 THEN
+        v_candidate_likes_collected := NULL;
+        v_candidate_likes_evidence_collected := NULL;
+    END IF;
+    IF NOT v_reverse_manifest_exists THEN
+        v_gaps := pg_catalog.array_append(v_gaps, 'CANDIDATE_LIKES_SOURCE_MISSING');
+    ELSIF v_candidate_likes_declared IS DISTINCT FROM v_candidate_likes_collected THEN
+        v_gaps := pg_catalog.array_append(v_gaps, 'CANDIDATE_LIKES_ROWS_GAP');
+        v_inconsistent := TRUE;
+    END IF;
 
-    SELECT pg_catalog.count(*)::INTEGER
+    -- Tags and mentions have no authoritative V2 row ledger. Keep their unknown declaration
+    -- explicit and prevent an empty child page from looking complete.
+    v_gaps := pg_catalog.array_append(v_gaps, 'TAGS_SOURCE_MISSING');
+    v_gaps := pg_catalog.array_append(v_gaps, 'MENTIONS_SOURCE_MISSING');
+
+    v_interaction_declared :=
+        COALESCE(v_target_likes_declared, 0)
+        + COALESCE(v_target_comments_declared, 0)
+        ;
+    v_interaction_collected :=
+        COALESCE(v_target_likes_collected, 0)
+        + COALESCE(v_target_comments_collected, 0)
+        + COALESCE(v_candidate_likes_evidence_collected, 0);
+
+    SELECT count(*)::INTEGER
       INTO v_score_collected
       FROM public.analysis_v2_candidate_score_rows AS score
      WHERE score.request_id = p_request_id;
@@ -1312,11 +1882,11 @@ BEGIN
         v_gaps := pg_catalog.array_append(v_gaps, 'RISK_SCORES_MISSING');
     END IF;
 
-    SELECT rollup.*
-      INTO v_cost
-      FROM public.analysis_v2_cost_rollups AS rollup
-     WHERE rollup.request_id = p_request_id
-     LIMIT 1;
+    SELECT rollup.* INTO v_cost
+    FROM public.analysis_v2_cost_rollups AS rollup
+    WHERE rollup.request_id = p_request_id
+    LIMIT 1;
+    v_cost_source_hash := public.analysis_order_audit_cost_source_hash(p_request_id);
     IF v_cost.request_id IS NULL THEN
         v_cost_missing := pg_catalog.array_append(v_cost_missing, 'COST_SOURCE_MISSING');
         v_gaps := pg_catalog.array_append(v_gaps, 'COST_SOURCE_MISSING');
@@ -1326,7 +1896,9 @@ BEGIN
         v_cost_usage_unknown := COALESCE(v_cost.usage_unknown, TRUE);
         v_cost_complete := COALESCE(v_cost.directly_attributable_cost_complete, FALSE)
             AND NOT v_cost_usage_unknown;
-        v_cost_provenance := COALESCE(v_cost.cost_provenance, '{}'::JSONB);
+        v_cost_provenance := public.analysis_order_audit_redact_json(
+            COALESCE(v_cost.cost_provenance, '{}'::JSONB)
+        );
         v_preflight_usage_unknown := COALESCE(v_cost.preflight_usage_unknown_count, 0);
         v_provider_usage_unknown := COALESCE(v_cost.provider_usage_unknown_count, 0);
         v_ai_usage_unknown := COALESCE(v_cost.ai_usage_unknown_count, 0);
@@ -1350,12 +1922,12 @@ BEGIN
             v_cost_missing := pg_catalog.array_append(v_cost_missing, 'AI_USAGE_UNKNOWN');
             v_gaps := pg_catalog.array_append(v_gaps, 'AI_USAGE_UNKNOWN');
         END IF;
-        IF v_vertex_unmatched + v_vertex_usage_unknown + v_vertex_duplicate + v_vertex_mismatch > 0 THEN
+        IF v_vertex_unmatched + v_vertex_usage_unknown + v_vertex_duplicate
+             + v_vertex_mismatch > 0 THEN
             v_cost_missing := pg_catalog.array_append(v_cost_missing, 'VERTEX_USAGE_GAP');
             v_gaps := pg_catalog.array_append(v_gaps, 'VERTEX_USAGE_GAP');
         END IF;
     END IF;
-    v_order_id := COALESCE(v_order_id, v_cost.order_id);
     v_cost_status := CASE
         WHEN v_cost.request_id IS NULL THEN 'not_available'
         WHEN v_cost_complete THEN 'complete'
@@ -1366,19 +1938,19 @@ BEGIN
         v_cost_known := v_total_known;
     END IF;
     v_cost_conservative := v_total_conservative;
+    -- Resolve the authoritative order identity before hashing the request lineage.
+    v_order_id := COALESCE(v_order_id, v_cost.order_id);
 
-    -- Terminal finalization purges the relationship, profile, AI, and target-evidence working
-    -- sets after the first bundle is committed. A later cost-only reconciliation must therefore
-    -- carry forward that immutable evidence instead of publishing a misleading empty bundle.
+    -- Once terminal cleanup has removed source rows, carry the immutable rich evidence forward.
     v_reuse_latest := v_latest.request_id IS NOT NULL
-        AND v_request.status IN ('completed', 'failed')
+        AND v_finalized
         AND v_followers.declared_count IS NULL
         AND v_following.declared_count IS NULL
         AND v_relationship.mutual_count IS NULL
         AND v_target_evidence.interactor_count IS NULL;
     IF v_reuse_latest THEN
         v_retained_source_set_hash := COALESCE(
-            v_latest.stage_status->>'retainedSourceSetHash',
+            v_latest.stage_status->>'retainedEvidenceSourceSetHash',
             v_latest.source_set_hash
         );
         v_target_username := v_latest.target_instagram_id;
@@ -1398,6 +1970,18 @@ BEGIN
         v_candidate_collected := v_latest.candidate_collected;
         v_interaction_declared := v_latest.interaction_declared;
         v_interaction_collected := v_latest.interaction_collected;
+        v_target_likes_declared := v_latest.target_likes_declared;
+        v_target_likes_collected := v_latest.target_likes_collected;
+        v_target_comments_declared := v_latest.target_comments_declared;
+        v_target_comments_collected := v_latest.target_comments_collected;
+        v_candidate_likes_declared := v_latest.candidate_likes_declared;
+        v_candidate_likes_collected := v_latest.candidate_likes_collected;
+        v_candidate_likes_evidence_collected := v_latest.candidate_likes_evidence_collected;
+        v_tags_declared := v_latest.tags_declared;
+        v_tags_collected := v_latest.tags_collected;
+        v_mentions_declared := v_latest.mentions_declared;
+        v_mentions_collected := v_latest.mentions_collected;
+        v_candidate_key_coverage := v_latest.candidate_key_coverage;
         v_finalized := TRUE;
         v_inconsistent := v_latest.completeness_status = 'inconsistent';
         v_relationship_ready := COALESCE(v_latest.stage_status->>'relationships' = 'true', FALSE);
@@ -1417,84 +2001,256 @@ BEGIN
         v_gaps := v_gaps || v_cost_missing;
     END IF;
 
-    -- A source-set hash covers every authoritative manifest and the live cost snapshot. Its
-    -- JSON object key order is canonical, so repeated assemblers get exactly one version.
+    -- Hash the canonical redacted projections of every copied immutable source field. Arrays are
+    -- ordered by stable keys; JSONB itself canonicalizes object key order.
     IF v_reuse_latest THEN
-        v_source_hashes := pg_catalog.jsonb_build_object(
-            'retainedEvidenceSourceSet', v_retained_source_set_hash,
-            'cost', COALESCE(v_cost::TEXT, 'missing')
+        v_source_set_json := pg_catalog.jsonb_build_object(
+            'request', pg_catalog.jsonb_build_object(
+                'pipelineVersion', v_request.pipeline_version,
+                'policyVersions', public.analysis_order_audit_redact_json(
+                    COALESCE(v_request.policy_versions_snapshot, '{}'::JSONB)
+                ),
+                'preflightId', v_request.preflight_id,
+                'planId', v_plan_id,
+                'accessMode', v_access_mode,
+                'orderId', v_order_id,
+                'targetUsername', v_target_username,
+                'targetProfileAvailable', v_target_profile_available,
+                'targetPostsAvailable', v_target_posts_available,
+                'targetPostCount', v_target_post_count,
+                'finalized', v_finalized
+            ),
+            'retainedEvidenceSourceSetHash', v_retained_source_set_hash,
+            'costSourceHash', v_cost_source_hash
         );
     ELSE
-        v_source_hashes := pg_catalog.jsonb_build_object(
-            'followers', COALESCE(v_followers.result_hash, 'missing'),
-            'following', COALESCE(v_following.result_hash, 'missing'),
-            'relationships', COALESCE(v_relationship.result_hash, 'missing'),
-            'mutualList', v_mutual_list_hash,
-            'targetEvidence', COALESCE(v_target_evidence.result_hash, 'missing'),
-            'features', COALESCE((
-                SELECT public.analysis_order_audit_digest(COALESCE(
-                    pg_catalog.string_agg(feature.gender_result_hash, E'\n' ORDER BY feature.candidate_id),
-                    ''
-                ))
-                FROM public.analysis_v2_candidate_feature_rows AS feature
-                WHERE feature.request_id = p_request_id
-            ), 'missing'),
-            'scores', COALESCE((
-                SELECT public.analysis_order_audit_digest(COALESCE(
-                    pg_catalog.string_agg(score.candidate_id || ':' || score.display_score::TEXT, E'\n' ORDER BY score.candidate_id),
-                    ''
-                ))
-                FROM public.analysis_v2_candidate_score_rows AS score
-                WHERE score.request_id = p_request_id
-            ), 'missing'),
-            'finalizer', COALESCE(v_summary.finalizer_input_hash, 'missing'),
-            'interactions', COALESCE((
-                SELECT public.analysis_order_audit_digest(COALESCE(
-                    pg_catalog.string_agg(interaction.signal || ':' || interaction.source_interaction_id, E'\n' ORDER BY interaction.ordinal),
-                    ''
-                ))
+        v_source_set_json := pg_catalog.jsonb_build_object(
+            'request', pg_catalog.jsonb_build_object(
+                'pipelineVersion', v_request.pipeline_version,
+                'policyVersions', public.analysis_order_audit_redact_json(
+                    COALESCE(v_request.policy_versions_snapshot, '{}'::JSONB)
+                ),
+                'preflightId', v_request.preflight_id,
+                'planId', v_plan_id,
+                'accessMode', v_access_mode,
+                'orderId', v_order_id,
+                'targetUsername', v_target_username,
+                'targetProfileAvailable', v_target_profile_available,
+                'targetPostsAvailable', v_target_posts_available,
+                'targetPostCount', v_target_post_count,
+                'finalized', v_finalized
+            ),
+            'relationshipSides', COALESCE((
+                SELECT pg_catalog.jsonb_agg(
+                    pg_catalog.jsonb_build_object(
+                        'side', side.side,
+                        'jobKey', side.job_key,
+                        'logicalProvider', side.provider,
+                        'credentialSlot', side.provider_credential_slot,
+                        'runId', side.provider_run_id,
+                        'operationKey', side.provider_operation_key,
+                        'inputHash', side.input_hash,
+                        'resultHash', side.result_hash,
+                        'declared', side.declared_count,
+                        'collected', side.collected_count
+                    ) ORDER BY side.side, side.job_key
+                )
+                FROM public.analysis_v2_relationship_sides AS side
+                WHERE side.request_id = p_request_id
+                  AND (
+                      (side.side = 'followers' AND side.job_key = v_followers.job_key)
+                      OR (side.side = 'following' AND side.job_key = v_following.job_key)
+                  )
+            ), '[]'::JSONB),
+            'relationshipManifest', COALESCE((
+                SELECT public.analysis_order_audit_redact_json(pg_catalog.to_jsonb(manifest))
+                FROM public.analysis_v2_relationship_manifests AS manifest
+                WHERE manifest.request_id = p_request_id
+                ORDER BY manifest.updated_at DESC NULLS LAST, manifest.job_key DESC
+                LIMIT 1
+            ), '{}'::JSONB),
+            'relationshipRows', COALESCE((
+                SELECT pg_catalog.jsonb_agg(
+                    public.analysis_order_audit_redact_json(pg_catalog.to_jsonb(row))
+                    ORDER BY row.side, row.ordinal, row.username
+                )
+                FROM public.analysis_v2_relationship_rows AS row
+                WHERE row.request_id = p_request_id
+                  AND (
+                      v_relationship.job_key IS NULL
+                      OR row.job_key = v_relationship.job_key
+                  )
+            ), '[]'::JSONB),
+            'mutualRows', COALESCE((
+                SELECT pg_catalog.jsonb_agg(
+                    public.analysis_order_audit_redact_json(pg_catalog.to_jsonb(mutual))
+                    ORDER BY mutual.mutual_ordinal, mutual.username
+                )
+                FROM public.analysis_v2_mutual_rows AS mutual
+                WHERE mutual.request_id = p_request_id
+                  AND (
+                      v_relationship.job_key IS NULL
+                      OR mutual.job_key = v_relationship.job_key
+                  )
+            ), '[]'::JSONB),
+            'targetEvidenceManifest', COALESCE((
+                SELECT public.analysis_order_audit_redact_json(pg_catalog.to_jsonb(manifest))
+                FROM public.analysis_v2_target_evidence_manifests AS manifest
+                WHERE manifest.request_id = p_request_id
+                ORDER BY manifest.updated_at DESC NULLS LAST, manifest.job_key DESC
+                LIMIT 1
+            ), '{}'::JSONB),
+            'targetInteractors', COALESCE((
+                SELECT pg_catalog.jsonb_agg(
+                    pg_catalog.jsonb_build_object(
+                        'jobKey', interaction.job_key,
+                        'ordinal', interaction.ordinal,
+                        'actorUsername', interaction.actor_username,
+                        'postId', interaction.post_id,
+                        'signal', interaction.signal,
+                        'sourceInteractionId', interaction.source_interaction_id,
+                        'occurredAt', interaction.occurred_at,
+                        'commentText', interaction.comment_text,
+                        'details', public.analysis_order_audit_redact_json(
+                            NULLIF(to_jsonb(interaction)->'details', 'null'::JSONB)
+                        )
+                    ) ORDER BY interaction.ordinal, interaction.signal,
+                        interaction.source_interaction_id
+                )
                 FROM public.analysis_target_interactors AS interaction
                 WHERE interaction.request_id = p_request_id
                   AND (
                       v_target_evidence.job_key IS NULL
                       OR interaction.job_key = v_target_evidence.job_key
                   )
-            ), 'missing'),
-            'cost', COALESCE(v_cost::TEXT, 'missing')
+            ), '[]'::JSONB),
+            'candidateFeatures', COALESCE((
+                SELECT pg_catalog.jsonb_agg(
+                    public.analysis_order_audit_redact_json(pg_catalog.to_jsonb(feature))
+                    ORDER BY feature.instagram_id, feature.candidate_id
+                )
+                FROM public.analysis_v2_candidate_feature_rows AS feature
+                WHERE feature.request_id = p_request_id
+            ), '[]'::JSONB),
+            'privateNames', COALESCE((
+                SELECT pg_catalog.jsonb_agg(
+                    public.analysis_order_audit_redact_json(pg_catalog.to_jsonb(private_name))
+                    ORDER BY private_name.instagram_id, private_name.candidate_id
+                )
+                FROM public.analysis_v2_private_name_rows AS private_name
+                WHERE private_name.request_id = p_request_id
+            ), '[]'::JSONB),
+            'scoreManifest', COALESCE((
+                SELECT public.analysis_order_audit_redact_json(pg_catalog.to_jsonb(manifest))
+                FROM public.analysis_v2_candidate_score_manifests AS manifest
+                WHERE manifest.request_id = p_request_id
+                LIMIT 1
+            ), '{}'::JSONB),
+            'scoreRows', COALESCE((
+                SELECT pg_catalog.jsonb_agg(
+                    public.analysis_order_audit_redact_json(pg_catalog.to_jsonb(score))
+                    ORDER BY score.candidate_id
+                )
+                FROM public.analysis_v2_candidate_score_rows AS score
+                WHERE score.request_id = p_request_id
+            ), '[]'::JSONB),
+            'femaleResults', COALESCE((
+                SELECT pg_catalog.jsonb_agg(
+                    public.analysis_order_audit_redact_json(pg_catalog.to_jsonb(result))
+                    ORDER BY result.sort_ordinal, result.candidate_id
+                )
+                FROM public.analysis_v2_female_results AS result
+                WHERE result.request_id = p_request_id
+            ), '[]'::JSONB),
+            'aiCheckpoints', COALESCE((
+                SELECT pg_catalog.jsonb_agg(
+                    pg_catalog.jsonb_build_object(
+                        'operationKey', checkpoint.operation_key,
+                        'stage', checkpoint.stage,
+                        'model', checkpoint.model_name,
+                        'inputHash', checkpoint.input_hash,
+                        'resultHash', checkpoint.result_hash,
+                        'result', public.analysis_order_audit_redact_json(checkpoint.result_json)
+                    ) ORDER BY checkpoint.operation_key
+                )
+                FROM public.analysis_v2_ai_result_checkpoints AS checkpoint
+                WHERE checkpoint.request_id = p_request_id
+            ), '[]'::JSONB),
+            'reverseLikeManifest', COALESCE((
+                SELECT public.analysis_order_audit_redact_json(pg_catalog.to_jsonb(manifest))
+                FROM public.analysis_v2_reverse_like_manifests AS manifest
+                WHERE manifest.request_id = p_request_id
+                LIMIT 1
+            ), '{}'::JSONB),
+            'reverseLikeRows', COALESCE((
+                SELECT pg_catalog.jsonb_agg(
+                    public.analysis_order_audit_redact_json(pg_catalog.to_jsonb(reverse))
+                    ORDER BY reverse.candidate_id
+                )
+                FROM public.analysis_v2_reverse_like_rows AS reverse
+                WHERE reverse.request_id = p_request_id
+            ), '[]'::JSONB),
+            'candidateKeyCoverage', v_candidate_key_coverage,
+            'candidateFeatureManifestHash', public.analysis_order_audit_source_table_hash(
+                'analysis_v2_candidate_feature_manifests', p_request_id
+            ),
+            'preliminaryScoreManifestHash', public.analysis_order_audit_source_table_hash(
+                'analysis_v2_preliminary_score_manifests', p_request_id
+            ),
+            'partnerSafetyManifestHash', public.analysis_order_audit_source_table_hash(
+                'analysis_v2_partner_safety_manifests', p_request_id
+            ),
+            'narrativeManifestHash', public.analysis_order_audit_source_table_hash(
+                'analysis_v2_narrative_manifests', p_request_id
+            ),
+            'privateNameManifestHash', public.analysis_order_audit_source_table_hash(
+                'analysis_v2_private_name_manifests', p_request_id
+            ),
+            'finalResolution', pg_catalog.jsonb_build_object(
+                'summary', public.analysis_order_audit_redact_json(
+                    COALESCE(pg_catalog.to_jsonb(v_summary), '{}'::JSONB)
+                ),
+                'finalizerInputHash', v_summary.finalizer_input_hash
+            ),
+            'costSourceHash', v_cost_source_hash
+        );
+        v_retained_source_set_hash := public.analysis_order_audit_digest(
+            'analysis-order-audit-retained-v2' || E'\n'
+            || (v_source_set_json - 'costSourceHash')::TEXT
         );
     END IF;
     v_source_set_hash := public.analysis_order_audit_digest(
-        'analysis-order-audit-source-set-v1' || E'\n' || v_source_hashes::TEXT
+        'analysis-order-audit-source-set-v2' || E'\n' || v_source_set_json::TEXT
     );
 
-    SELECT bundle.*
-      INTO v_existing
-      FROM public.analysis_order_audit_bundles AS bundle
-     WHERE bundle.request_id = p_request_id
-       AND bundle.source_set_hash = v_source_set_hash;
+    SELECT bundle.* INTO v_existing
+    FROM public.analysis_order_audit_bundles AS bundle
+    WHERE bundle.request_id = p_request_id
+      AND bundle.source_set_hash = v_source_set_hash;
     IF FOUND THEN
         UPDATE public.analysis_order_audit_assembly_queue
            SET status = 'completed', lease_token = NULL, lease_expires_at = NULL,
                updated_at = pg_catalog.clock_timestamp()
          WHERE request_id = p_request_id;
+        IF v_queue_fenced AND v_finalized THEN
+            PERFORM public.analysis_v2_purge_result_working_set(p_request_id, TRUE);
+        END IF;
         RETURN public.analysis_order_audit_bundle_payload(v_existing);
     END IF;
 
-    SELECT bundle.*
-      INTO v_latest
-      FROM public.analysis_order_audit_bundles AS bundle
-     WHERE bundle.request_id = p_request_id
-     ORDER BY bundle.version DESC
-     LIMIT 1;
+    SELECT bundle.* INTO v_latest
+    FROM public.analysis_order_audit_bundles AS bundle
+    WHERE bundle.request_id = p_request_id
+    ORDER BY bundle.version DESC
+    LIMIT 1;
     v_version := COALESCE(v_latest.version, 0) + 1;
     v_previous_hash := v_latest.bundle_hash;
     v_bundle_hash := public.analysis_order_audit_digest(
-        'analysis-order-audit-bundle-v1' || E'\n'
+        'analysis-order-audit-bundle-v2' || E'\n'
         || p_request_id::TEXT || E'\n' || v_version::TEXT || E'\n'
         || COALESCE(v_previous_hash, 'none') || E'\n' || v_source_set_hash
     );
 
-    -- Keep repeated gap codes out of the immutable payload while retaining every reason.
     SELECT COALESCE(pg_catalog.array_agg(code ORDER BY code), ARRAY[]::TEXT[])
       INTO v_gaps
       FROM (
@@ -1508,60 +2264,81 @@ BEGIN
           FROM pg_catalog.unnest(v_cost_missing) AS gap(code)
       ) AS unique_gaps;
 
-    v_provider_runs := CASE
-        WHEN v_followers.provider_run_id IS NULL
-         AND v_following.provider_run_id IS NULL THEN '[]'::JSONB
-        WHEN v_followers.provider_run_id IS NULL THEN pg_catalog.jsonb_build_array(
-            pg_catalog.jsonb_build_object(
-                'stage', 'following', 'providerAlias', v_following.provider,
-                'runId', v_following.provider_run_id,
-                'operationKey', v_following.provider_operation_key,
-                'resultHash', v_following.result_hash
-            )
-        )
-        WHEN v_following.provider_run_id IS NULL THEN pg_catalog.jsonb_build_array(
-            pg_catalog.jsonb_build_object(
-                'stage', 'followers', 'providerAlias', v_followers.provider,
-                'runId', v_followers.provider_run_id,
-                'operationKey', v_followers.provider_operation_key,
-                'resultHash', v_followers.result_hash
-            )
-        )
-        ELSE pg_catalog.jsonb_build_array(
-            pg_catalog.jsonb_build_object(
-                'stage', 'followers', 'providerAlias', v_followers.provider,
-                'runId', v_followers.provider_run_id,
-                'operationKey', v_followers.provider_operation_key,
-                'resultHash', v_followers.result_hash
-            ),
-            pg_catalog.jsonb_build_object(
-                'stage', 'following', 'providerAlias', v_following.provider,
-                'runId', v_following.provider_run_id,
-                'operationKey', v_following.provider_operation_key,
-                'resultHash', v_following.result_hash
-            )
-        )
-    END;
+    -- Only the safe lineage aliases are serialized. Source records and provider/account metadata
+    -- never cross this boundary.
+    SELECT COALESCE(pg_catalog.jsonb_agg(
+        pg_catalog.jsonb_build_object(
+            'stage', run.stage,
+            'logicalProvider', run.logical_provider,
+            'credentialSlot', run.credential_slot,
+            'runId', run.run_id,
+            'operationKey', run.operation_key,
+            'inputHash', run.input_hash,
+            'resultHash', run.result_hash
+        ) ORDER BY run.stage
+    ), '[]'::JSONB)
+      INTO v_provider_runs
+      FROM (
+          SELECT 'followers'::TEXT AS stage, v_followers.provider AS logical_provider,
+                 v_followers.provider_credential_slot AS credential_slot,
+                 v_followers.provider_run_id AS run_id,
+                 v_followers.provider_operation_key AS operation_key,
+                 v_followers.input_hash AS input_hash, v_followers.result_hash AS result_hash
+          WHERE v_followers.provider_run_id IS NOT NULL
+          UNION ALL
+          SELECT 'following', v_following.provider, v_following.provider_credential_slot,
+                 v_following.provider_run_id, v_following.provider_operation_key,
+                 v_following.input_hash, v_following.result_hash
+          WHERE v_following.provider_run_id IS NOT NULL
+          UNION ALL
+          SELECT 'target_likers', v_target_evidence.liker_source->>'provider',
+                 v_target_evidence.liker_source->>'provider_credential_slot',
+                 v_target_evidence.liker_source->>'provider_run_id',
+                 v_target_evidence.liker_source->>'provider_operation_key',
+                 v_target_evidence.liker_source->>'input_hash',
+                 v_target_evidence.liker_source_hash
+          WHERE v_target_evidence.liker_source->>'provider_run_id' IS NOT NULL
+          UNION ALL
+          SELECT 'target_comments', v_target_evidence.comment_source->>'provider',
+                 v_target_evidence.comment_source->>'provider_credential_slot',
+                 v_target_evidence.comment_source->>'provider_run_id',
+                 v_target_evidence.comment_source->>'provider_operation_key',
+                 v_target_evidence.comment_source->>'input_hash',
+                 v_target_evidence.comment_source_hash
+          WHERE v_target_evidence.comment_source->>'provider_run_id' IS NOT NULL
+      ) AS run;
+
     v_stage_status := pg_catalog.jsonb_build_object(
         'relationships', v_relationship_ready,
         'targetEvidence', v_target_evidence_ready,
         'candidateFeatures', v_features_ready,
         'riskScores', v_scores_ready,
         'finalized', v_finalized,
-        'cost', v_cost_status
+        'cost', v_cost_status,
+        'costSourceHash', v_cost_source_hash,
+        'candidateKeyCoverage', v_candidate_key_coverage,
+        'targetLikes', v_target_likes_declared IS NOT NULL,
+        'targetComments', v_target_comments_declared IS NOT NULL,
+        'candidateLikes', v_candidate_likes_declared IS NOT NULL,
+        'tags', FALSE,
+        'mentions', FALSE,
+        'retainedEvidenceSourceSetHash', v_retained_source_set_hash
     );
     IF v_reuse_latest THEN
         v_provider_runs := v_latest.provider_runs;
         v_stage_status := pg_catalog.jsonb_set(
             COALESCE(v_latest.stage_status, '{}'::JSONB),
-            ARRAY['retainedSourceSetHash'],
-            pg_catalog.to_jsonb(v_retained_source_set_hash),
-            TRUE
+            ARRAY['costSourceHash'], pg_catalog.to_jsonb(v_cost_source_hash), TRUE
+        );
+        v_stage_status := pg_catalog.jsonb_set(
+            v_stage_status, ARRAY['retainedEvidenceSourceSetHash'],
+            pg_catalog.to_jsonb(v_retained_source_set_hash), TRUE
+        );
+        v_stage_status := pg_catalog.jsonb_set(
+            v_stage_status, ARRAY['finalized'], pg_catalog.to_jsonb(v_finalized), TRUE
         );
     END IF;
 
-    -- Keep candidate declared/collected values from their carried authoritative variables. In a
-    -- late cost-only version those variables are restored from the previous immutable parent.
     INSERT INTO public.analysis_order_audit_bundles (
         request_id, version, bundle_hash, previous_version_hash, source_set_hash,
         pipeline_version, pipeline_policy, risk_policy_version, ai_policy_version,
@@ -1571,22 +2348,33 @@ BEGIN
         following_declared, following_collected, mutual_total, mutual_list_hash,
         public_total, private_total, screened_total, candidate_declared,
         candidate_collected, interaction_declared, interaction_collected,
-        provider_runs, stage_status, completeness_status, gap_codes,
-        cost_currency, cost_status, cost_known_usd, cost_conservative_usd,
-        total_known_cost_usd, total_conservative_cost_usd, cost_usage_unknown,
-        usage_unknown, cost_missing_source_codes, cost_provenance, assembled_at
+        target_likes_declared, target_likes_collected,
+        target_comments_declared, target_comments_collected,
+        candidate_likes_declared, candidate_likes_collected,
+        candidate_likes_evidence_collected,
+        tags_declared, tags_collected, mentions_declared, mentions_collected,
+        candidate_key_coverage, provider_runs, stage_status,
+        completeness_status, gap_codes, cost_currency, cost_status,
+        cost_known_usd, cost_conservative_usd, total_known_cost_usd,
+        total_conservative_cost_usd, cost_usage_unknown, usage_unknown,
+        cost_missing_source_codes, cost_provenance, assembled_at
     ) VALUES (
         p_request_id, v_version, v_bundle_hash, v_previous_hash, v_source_set_hash,
-        v_request.pipeline_version, COALESCE(v_request.policy_versions_snapshot, '{}'::JSONB),
-        v_risk_policy, v_ai_policy, v_scheduler_policy, v_plan_id, v_access_mode,
+        v_request.pipeline_version, public.analysis_order_audit_redact_json(
+            COALESCE(v_request.policy_versions_snapshot, '{}'::JSONB)
+        ), v_risk_policy, v_ai_policy, v_scheduler_policy, v_plan_id, v_access_mode,
         v_order_id, v_request.preflight_id, v_target_username,
         v_target_profile_available, v_target_posts_available, v_target_post_count,
         v_followers_declared, v_followers_collected, v_following_declared,
         v_following_collected, v_mutual_total, v_mutual_list_hash,
         v_public_total, v_private_total, v_screened_total, v_candidate_declared,
         v_candidate_collected, v_interaction_declared, v_interaction_collected,
-        v_provider_runs,
-        v_stage_status,
+        v_target_likes_declared, v_target_likes_collected,
+        v_target_comments_declared, v_target_comments_collected,
+        v_candidate_likes_declared, v_candidate_likes_collected,
+        v_candidate_likes_evidence_collected,
+        v_tags_declared, v_tags_collected, v_mentions_declared, v_mentions_collected,
+        v_candidate_key_coverage, v_provider_runs, v_stage_status,
         CASE WHEN pg_catalog.cardinality(v_gaps) = 0 THEN 'complete'
              WHEN v_inconsistent THEN 'inconsistent' ELSE 'partial' END,
         v_gaps, 'USD', v_cost_status, v_cost_known, v_cost_conservative,
@@ -1594,9 +2382,21 @@ BEGIN
         v_cost_usage_unknown, v_cost_missing, v_cost_provenance, v_now
     ) ON CONFLICT (request_id, source_set_hash) DO NOTHING
       RETURNING * INTO v_existing;
+    IF NOT FOUND THEN
+        SELECT bundle.* INTO v_existing
+        FROM public.analysis_order_audit_bundles AS bundle
+        WHERE bundle.request_id = p_request_id
+          AND bundle.source_set_hash = v_source_set_hash;
+        UPDATE public.analysis_order_audit_assembly_queue
+           SET status = 'completed', lease_token = NULL, lease_expires_at = NULL,
+               updated_at = pg_catalog.clock_timestamp()
+         WHERE request_id = p_request_id;
+        IF v_queue_fenced AND v_finalized THEN
+            PERFORM public.analysis_v2_purge_result_working_set(p_request_id, TRUE);
+        END IF;
+        RETURN public.analysis_order_audit_bundle_payload(v_existing);
+    END IF;
 
-    -- Candidates are copied from the mutual intersection and joined to every authoritative
-    -- feature/score/checkpoint row. A missing feature is retained as an explicit unknown.
     IF v_reuse_latest THEN
         INSERT INTO public.analysis_order_audit_candidates (
             request_id, version, candidate_id, username, mutual_ordinal,
@@ -1612,8 +2412,7 @@ BEGIN
             risk_band, final_rank, featured_rank, recent_mutual_rank,
             partner_safety_operation_key, partner_safety_result_hash
         )
-        SELECT
-            p_request_id, v_version, candidate.candidate_id, candidate.username,
+        SELECT p_request_id, v_version, candidate.candidate_id, candidate.username,
             candidate.mutual_ordinal, candidate.following_ordinal, candidate.is_private,
             candidate.is_verified, candidate.profile_available,
             candidate.profile_image_available, candidate.profile_failure_code,
@@ -1635,201 +2434,242 @@ BEGIN
           AND candidate.version = v_latest.version;
     ELSE
         INSERT INTO public.analysis_order_audit_candidates (
-        request_id, version, candidate_id, username, mutual_ordinal,
-        following_ordinal, is_private, is_verified, profile_available,
-        profile_image_available, profile_failure_code, initial_gender_output,
-        initial_gender_model, initial_gender_confidence, initial_gender_reason,
-        final_gender_output, final_gender_model, final_gender_confidence,
-        final_gender_reason, gender_operation_key, gender_result_hash,
-        gender_resolution_operation_key, gender_resolution_result_hash,
-        feature_operation_key, feature_result_hash, evidence_checkpoint_ids,
-        account_context, final_inclusion_state, risk_components,
-        risk_formula_version, pre_score, raw_score, public_score, final_score,
-        risk_band, final_rank, featured_rank, recent_mutual_rank,
-        partner_safety_operation_key, partner_safety_result_hash
-    )
-    SELECT
-        p_request_id, v_version,
-        COALESCE(feature.candidate_id, private_name.candidate_id, 'username:' || mutual.username),
-        mutual.username, mutual.mutual_ordinal, mutual.following_ordinal,
-        mutual.is_private, mutual.is_verified,
-        (feature.candidate_id IS NOT NULL OR private_name.candidate_id IS NOT NULL)
-            AND COALESCE(feature.terminal_classification, 'available') NOT IN ('unavailable', 'media_unavailable'),
-        (feature.profile_image_url IS NOT NULL OR private_name.profile_image_url IS NOT NULL),
-        CASE WHEN feature.terminal_classification IN ('unavailable', 'media_unavailable')
-            THEN feature.terminal_classification ELSE NULL END,
-        CASE COALESCE(feature.baseline_classification, feature.terminal_classification)
-            WHEN 'verified_female' THEN 'female'
-            WHEN 'verified_non_female' THEN 'male'
-            WHEN 'unavailable' THEN 'unavailable'
-            WHEN 'media_unavailable' THEN 'unavailable'
-            ELSE 'unknown'
-        END,
-        initial_checkpoint.model_name,
-        initial_checkpoint.result_json->'assessment'->>'confidence',
-        COALESCE(
-            initial_checkpoint.result_json->>'routingReason',
-            feature.classification_source
-        ),
-        CASE COALESCE(feature.terminal_classification, feature.baseline_classification)
-            WHEN 'verified_female' THEN 'female'
-            WHEN 'verified_non_female' THEN 'male'
-            WHEN 'unavailable' THEN 'unavailable'
-            WHEN 'media_unavailable' THEN 'unavailable'
-            ELSE 'unknown'
-        END,
-        final_checkpoint.model_name,
-        final_checkpoint.result_json->'assessment'->>'confidence',
-        COALESCE(
-            final_checkpoint.result_json->>'reason',
-            feature.gender_resolution_status,
-            feature.classification_source
-        ),
-        feature.gender_operation_key, feature.gender_result_hash,
-        feature.gender_resolution_operation_key, feature.gender_resolution_result_hash,
-        feature.feature_operation_key, feature.feature_result_hash,
-        ARRAY_REMOVE(ARRAY[
-            feature.gender_operation_key, feature.gender_resolution_operation_key,
-            feature.feature_operation_key, score.partner_safety_operation_key
-        ], NULL),
-        CASE
-            WHEN feature.media_context->>'accountContext' IN (
-                'personal', 'individual_creator', 'official_group_or_brand', 'uncertain'
-            ) THEN feature.media_context->>'accountContext'
-            ELSE 'uncertain'
-        END,
-        CASE
-            WHEN mutual.is_private THEN 'private'
-            WHEN result.candidate_id IS NOT NULL THEN 'included'
-            WHEN feature.terminal_classification IN ('unavailable', 'media_unavailable') THEN 'unavailable'
-            WHEN feature.candidate_id IS NOT NULL THEN 'excluded'
-            ELSE 'unknown'
-        END,
-        score.components,
-        COALESCE(score_manifest.risk_policy_version, v_risk_policy),
-        score.pre_score, score.raw_score, score.public_score,
-        result.display_score, COALESCE(result.risk_band, score.risk_band),
-        result.sort_ordinal, COALESCE(result.featured_rank, score.featured_rank),
-        COALESCE(result.recent_mutual_rank, score.recent_mutual_rank),
-        score.partner_safety_operation_key, score.partner_safety_result_hash
-     FROM public.analysis_v2_mutual_rows AS mutual
-    LEFT JOIN public.analysis_v2_candidate_feature_rows AS feature
-      ON feature.request_id = mutual.request_id
-     AND feature.instagram_id = mutual.username
-    LEFT JOIN public.analysis_v2_private_name_rows AS private_name
-      ON private_name.request_id = mutual.request_id
-     AND private_name.instagram_id = mutual.username
-    LEFT JOIN public.analysis_v2_ai_result_checkpoints AS initial_checkpoint
-      ON initial_checkpoint.request_id = mutual.request_id
-     AND initial_checkpoint.operation_key = feature.gender_operation_key
-    LEFT JOIN public.analysis_v2_ai_result_checkpoints AS final_checkpoint
-      ON final_checkpoint.request_id = mutual.request_id
-     AND final_checkpoint.operation_key = feature.gender_resolution_operation_key
-    LEFT JOIN public.analysis_v2_candidate_score_rows AS score
-      ON score.request_id = mutual.request_id
-     AND score.candidate_id = COALESCE(feature.candidate_id, private_name.candidate_id)
-    LEFT JOIN public.analysis_v2_candidate_score_manifests AS score_manifest
-      ON score_manifest.request_id = mutual.request_id
-    LEFT JOIN public.analysis_v2_female_results AS result
-      ON result.request_id = mutual.request_id
-     AND result.candidate_id = score.candidate_id
-     WHERE mutual.request_id = p_request_id
-       AND (
-           v_relationship.job_key IS NULL
-           OR mutual.job_key = v_relationship.job_key
-       );
+            request_id, version, candidate_id, username, mutual_ordinal,
+            following_ordinal, is_private, is_verified, profile_available,
+            profile_image_available, profile_failure_code, initial_gender_output,
+            initial_gender_model, initial_gender_confidence, initial_gender_reason,
+            final_gender_output, final_gender_model, final_gender_confidence,
+            final_gender_reason, gender_operation_key, gender_result_hash,
+            gender_resolution_operation_key, gender_resolution_result_hash,
+            feature_operation_key, feature_result_hash, evidence_checkpoint_ids,
+            account_context, final_inclusion_state, risk_components,
+            risk_formula_version, pre_score, raw_score, public_score, final_score,
+            risk_band, final_rank, featured_rank, recent_mutual_rank,
+            partner_safety_operation_key, partner_safety_result_hash
+        )
+        SELECT p_request_id, v_version,
+            COALESCE(feature.candidate_id, private_name.candidate_id,
+                'username:' || mutual.username),
+            mutual.username, mutual.mutual_ordinal, mutual.following_ordinal,
+            mutual.is_private, mutual.is_verified,
+            (feature.candidate_id IS NOT NULL OR private_name.candidate_id IS NOT NULL)
+                AND COALESCE(feature.terminal_classification, 'available')
+                    NOT IN ('unavailable', 'media_unavailable'),
+            (feature.profile_image_url IS NOT NULL OR private_name.profile_image_url IS NOT NULL),
+            CASE WHEN feature.terminal_classification IN ('unavailable', 'media_unavailable')
+                THEN feature.terminal_classification ELSE NULL END,
+            CASE COALESCE(feature.baseline_classification, feature.terminal_classification)
+                WHEN 'verified_female' THEN 'female'
+                WHEN 'verified_non_female' THEN 'male'
+                WHEN 'unavailable' THEN 'unavailable'
+                WHEN 'media_unavailable' THEN 'unavailable'
+                ELSE 'unknown'
+            END,
+            initial_checkpoint.model_name,
+            initial_checkpoint.result_json->'assessment'->>'confidence',
+            COALESCE(initial_checkpoint.result_json->>'routingReason',
+                feature.classification_source),
+            CASE COALESCE(feature.terminal_classification, feature.baseline_classification)
+                WHEN 'verified_female' THEN 'female'
+                WHEN 'verified_non_female' THEN 'male'
+                WHEN 'unavailable' THEN 'unavailable'
+                WHEN 'media_unavailable' THEN 'unavailable'
+                ELSE 'unknown'
+            END,
+            final_checkpoint.model_name,
+            final_checkpoint.result_json->'assessment'->>'confidence',
+            COALESCE(final_checkpoint.result_json->>'reason',
+                feature.gender_resolution_status, feature.classification_source),
+            feature.gender_operation_key, feature.gender_result_hash,
+            feature.gender_resolution_operation_key, feature.gender_resolution_result_hash,
+            feature.feature_operation_key, feature.feature_result_hash,
+            ARRAY_REMOVE(ARRAY[
+                feature.gender_operation_key, feature.gender_resolution_operation_key,
+                feature.feature_operation_key, score.partner_safety_operation_key
+            ], NULL),
+            CASE
+                WHEN feature.media_context->>'accountContext' IN (
+                    'personal', 'individual_creator', 'official_group_or_brand', 'uncertain'
+                ) THEN feature.media_context->>'accountContext'
+                ELSE 'uncertain'
+            END,
+            CASE
+                WHEN mutual.is_private THEN 'private'
+                WHEN result.candidate_id IS NOT NULL THEN 'included'
+                WHEN feature.terminal_classification IN ('unavailable', 'media_unavailable')
+                    THEN 'unavailable'
+                WHEN feature.candidate_id IS NOT NULL THEN 'excluded'
+                ELSE 'unknown'
+            END,
+            public.analysis_order_audit_redact_json(score.components),
+            COALESCE(score_manifest.risk_policy_version, v_risk_policy),
+            score.pre_score, score.raw_score, score.public_score,
+            result.display_score, COALESCE(result.risk_band, score.risk_band),
+            result.sort_ordinal, COALESCE(result.featured_rank, score.featured_rank),
+            COALESCE(result.recent_mutual_rank, score.recent_mutual_rank),
+            score.partner_safety_operation_key, score.partner_safety_result_hash
+        FROM public.analysis_v2_mutual_rows AS mutual
+        LEFT JOIN public.analysis_v2_candidate_feature_rows AS feature
+          ON feature.request_id = mutual.request_id
+         AND feature.instagram_id = mutual.username
+        LEFT JOIN public.analysis_v2_private_name_rows AS private_name
+          ON private_name.request_id = mutual.request_id
+         AND private_name.instagram_id = mutual.username
+        LEFT JOIN public.analysis_v2_ai_result_checkpoints AS initial_checkpoint
+          ON initial_checkpoint.request_id = mutual.request_id
+         AND initial_checkpoint.operation_key = feature.gender_operation_key
+        LEFT JOIN public.analysis_v2_ai_result_checkpoints AS final_checkpoint
+          ON final_checkpoint.request_id = mutual.request_id
+         AND final_checkpoint.operation_key = feature.gender_resolution_operation_key
+        LEFT JOIN public.analysis_v2_candidate_score_rows AS score
+          ON score.request_id = mutual.request_id
+         AND score.candidate_id = COALESCE(feature.candidate_id, private_name.candidate_id)
+        LEFT JOIN public.analysis_v2_candidate_score_manifests AS score_manifest
+          ON score_manifest.request_id = mutual.request_id
+        LEFT JOIN public.analysis_v2_female_results AS result
+          ON result.request_id = mutual.request_id
+         AND result.candidate_id = score.candidate_id
+        WHERE mutual.request_id = p_request_id
+          AND (
+              v_relationship.job_key IS NULL
+              OR mutual.job_key = v_relationship.job_key
+          );
     END IF;
 
-    -- Target evidence is retained verbatim only in the bounded operator copy. `to_jsonb(row)`
-    -- allows later source migrations to add comment-detail columns without coupling this SQL to
-    -- a particular working-set shape; absent details remain NULL rather than invented.
     IF v_reuse_latest THEN
         INSERT INTO public.analysis_order_audit_interactions (
             request_id, version, ordinal, candidate_id, username, signal,
             source_post_id, evidence_id, occurred_at, comment_text, details,
+            reverse_like_status, reverse_component_score,
             completeness_status, gap_codes
         )
-        SELECT
-            p_request_id, v_version, interaction.ordinal, interaction.candidate_id,
+        SELECT p_request_id, v_version, interaction.ordinal, interaction.candidate_id,
             interaction.username, interaction.signal, interaction.source_post_id,
             interaction.evidence_id, interaction.occurred_at, interaction.comment_text,
-            interaction.details, interaction.completeness_status, interaction.gap_codes
+            interaction.details, interaction.reverse_like_status,
+            interaction.reverse_component_score, interaction.completeness_status,
+            interaction.gap_codes
         FROM public.analysis_order_audit_interactions AS interaction
         WHERE interaction.request_id = p_request_id
           AND interaction.version = v_latest.version;
     ELSE
         INSERT INTO public.analysis_order_audit_interactions (
-        request_id, version, ordinal, candidate_id, username, signal,
-        source_post_id, evidence_id, occurred_at, comment_text, details,
-        completeness_status, gap_codes
-    )
-    SELECT
-        p_request_id, v_version, interaction.ordinal,
-        candidate.candidate_id, interaction.actor_username, interaction.signal,
-        interaction.post_id, interaction.source_interaction_id, interaction.occurred_at,
-        interaction.comment_text,
-        NULLIF(to_jsonb(interaction)->'details', 'null'::JSONB),
-        'complete', ARRAY[]::TEXT[]
-    FROM public.analysis_target_interactors AS interaction
-    LEFT JOIN public.analysis_order_audit_candidates AS candidate
-      ON candidate.request_id = p_request_id
-     AND candidate.version = v_version
-     AND candidate.username = interaction.actor_username
-    WHERE interaction.request_id = p_request_id
-       AND (
-          v_target_evidence.job_key IS NULL
-          OR interaction.job_key = v_target_evidence.job_key
-      )
-    ORDER BY interaction.ordinal;
-    END IF;
+            request_id, version, ordinal, candidate_id, username, signal,
+            source_post_id, evidence_id, occurred_at, comment_text, details,
+            reverse_like_status, reverse_component_score,
+            completeness_status, gap_codes
+        )
+        SELECT p_request_id, v_version, interaction.ordinal,
+            candidate.candidate_id, interaction.actor_username, interaction.signal,
+            interaction.post_id, interaction.source_interaction_id, interaction.occurred_at,
+            interaction.comment_text, public.analysis_order_audit_redact_json(
+                NULLIF(to_jsonb(interaction)->'details', 'null'::JSONB)
+            ),
+            NULL, NULL,
+            CASE
+                WHEN interaction.signal = 'target_post_like'
+                     AND v_target_likes_declared IS NOT NULL
+                     AND v_target_likes_collected = v_target_likes_declared THEN 'complete'
+                WHEN interaction.signal = 'target_post_comment'
+                     AND v_target_comments_declared IS NOT NULL
+                     AND v_target_comments_collected = v_target_comments_declared THEN 'complete'
+                ELSE 'partial'
+            END,
+            CASE
+                WHEN interaction.signal = 'target_post_like'
+                     AND v_target_likes_declared IS NOT NULL
+                     AND v_target_likes_collected <> v_target_likes_declared
+                    THEN ARRAY['TARGET_LIKES_ROWS_GAP']::TEXT[]
+                WHEN interaction.signal = 'target_post_comment'
+                     AND v_target_comments_declared IS NOT NULL
+                     AND v_target_comments_collected <> v_target_comments_declared
+                    THEN ARRAY['TARGET_COMMENTS_ROWS_GAP']::TEXT[]
+                ELSE ARRAY[]::TEXT[]
+            END
+        FROM public.analysis_target_interactors AS interaction
+        LEFT JOIN public.analysis_order_audit_candidates AS candidate
+          ON candidate.request_id = p_request_id
+         AND candidate.version = v_version
+         AND candidate.username = interaction.actor_username
+        WHERE interaction.request_id = p_request_id
+          AND (
+              v_target_evidence.job_key IS NULL
+              OR interaction.job_key = v_target_evidence.job_key
+          )
+        ORDER BY interaction.ordinal;
 
-    -- Reverse-like evidence is normalized as candidate-post likes. Tags/mentions are represented
-    -- by their authoritative score components when the source ledger has no separate row.
-    IF NOT v_reuse_latest THEN
         INSERT INTO public.analysis_order_audit_interactions (
-        request_id, version, ordinal, candidate_id, username, signal,
-        source_post_id, evidence_id, occurred_at, comment_text, details,
-        completeness_status, gap_codes
-    )
-    SELECT p_request_id, v_version,
-        (v_target_interaction_max_ordinal + row_number() OVER (
-            ORDER BY reverse.candidate_id, refs.value
-        ))::INTEGER,
-        candidate.candidate_id, candidate.username, 'candidate_post_like', NULL,
-        refs.value, NULL, NULL, NULL, 'complete', ARRAY[]::TEXT[]
-    FROM public.analysis_v2_reverse_like_rows AS reverse
-    CROSS JOIN LATERAL unnest(reverse.evidence_ref_ids) AS refs(value)
-    JOIN public.analysis_order_audit_candidates AS candidate
-      ON candidate.request_id = p_request_id
-     AND candidate.version = v_version
-     AND candidate.candidate_id = reverse.candidate_id
-    WHERE reverse.request_id = p_request_id;
+            request_id, version, ordinal, candidate_id, username, signal,
+            source_post_id, evidence_id, occurred_at, comment_text, details,
+            reverse_like_status, reverse_component_score,
+            completeness_status, gap_codes
+        )
+        SELECT p_request_id, v_version,
+            (v_target_interaction_max_ordinal + row_number() OVER (
+                ORDER BY reverse.candidate_id, refs.value
+            ))::INTEGER,
+            candidate.candidate_id, candidate.username, 'candidate_post_like', NULL,
+            refs.value, NULL, NULL,
+            public.analysis_order_audit_redact_json(
+                pg_catalog.jsonb_build_object(
+                    'reverseLikeStatus', reverse.reverse_like_status,
+                    'componentScore', reverse.component_score
+                )
+            ),
+            reverse.reverse_like_status, reverse.component_score,
+            CASE WHEN v_reverse_manifest_exists THEN 'complete' ELSE 'partial' END,
+            CASE WHEN v_reverse_manifest_exists THEN ARRAY[]::TEXT[]
+                ELSE ARRAY['CANDIDATE_LIKES_SOURCE_MISSING']::TEXT[] END
+        FROM public.analysis_v2_reverse_like_rows AS reverse
+        CROSS JOIN LATERAL unnest(reverse.evidence_ref_ids) AS refs(value)
+        JOIN public.analysis_order_audit_candidates AS candidate
+          ON candidate.request_id = p_request_id
+         AND candidate.version = v_version
+         AND candidate.candidate_id = reverse.candidate_id
+        WHERE reverse.request_id = p_request_id;
     END IF;
 
-    v_interaction_collected := (
-        SELECT pg_catalog.count(*)::INTEGER
-        FROM public.analysis_order_audit_interactions AS interaction
-        WHERE interaction.request_id = p_request_id AND interaction.version = v_version
-    );
     UPDATE public.analysis_order_audit_assembly_queue
        SET status = 'completed', lease_token = NULL, lease_expires_at = NULL,
+           last_error_code = NULL, last_error_at = NULL,
            updated_at = pg_catalog.clock_timestamp()
      WHERE request_id = p_request_id;
+
+    IF v_queue_fenced AND v_finalized THEN
+        PERFORM public.analysis_v2_purge_result_working_set(p_request_id, TRUE);
+    END IF;
     RETURN public.analysis_order_audit_bundle_payload(v_existing);
 EXCEPTION WHEN OTHERS THEN
-    UPDATE public.analysis_order_audit_assembly_queue
-       SET status = 'failed', next_attempt_at = pg_catalog.clock_timestamp() + INTERVAL '30 seconds',
-           lease_token = NULL, lease_expires_at = NULL,
-           last_error_code = CASE
-               WHEN SQLSTATE = 'P0001' THEN SQLERRM
-               ELSE 'ANALYSIS_ORDER_AUDIT_ASSEMBLY_FAILED'
-           END,
-           last_error_at = pg_catalog.clock_timestamp(), updated_at = pg_catalog.clock_timestamp()
-     WHERE request_id = p_request_id;
+    BEGIN
+        UPDATE public.analysis_order_audit_assembly_queue
+           SET status = 'failed',
+               next_attempt_at = pg_catalog.clock_timestamp() + INTERVAL '30 seconds',
+               lease_token = NULL, lease_expires_at = NULL,
+               last_error_code = CASE
+                   WHEN SQLSTATE = 'P0001' THEN SQLERRM
+                   ELSE 'ANALYSIS_ORDER_AUDIT_ASSEMBLY_FAILED'
+               END,
+               last_error_at = pg_catalog.clock_timestamp(),
+               updated_at = pg_catalog.clock_timestamp()
+         WHERE request_id = p_request_id;
+    EXCEPTION WHEN OTHERS THEN
+        NULL;
+    END;
+    IF v_finalized THEN
+        BEGIN
+            PERFORM public.analysis_order_audit_purge_fence(
+                p_request_id, 'ANALYSIS_ORDER_AUDIT_ASSEMBLY_FAILED'
+            );
+        EXCEPTION WHEN OTHERS THEN
+            NULL;
+        END;
+    END IF;
     RAISE;
 END;
 $$;
 
+-- Install the trigger implementations after all hardening helpers exist. Existing trigger objects
+-- keep their names and therefore continue to use these replaced function bodies.
 CREATE OR REPLACE FUNCTION public.analysis_order_audit_enqueue_from_request()
 RETURNS TRIGGER
 LANGUAGE plpgsql
@@ -1842,15 +2682,19 @@ BEGIN
         BEGIN
             PERFORM public.enqueue_analysis_order_audit_bundle(NEW.id);
         EXCEPTION WHEN OTHERS THEN
-            -- Queue writes are advisory at a durable customer-result boundary. A later recovery
-            -- sweep or application hook must be able to retry without rolling back this DML.
             RAISE WARNING USING MESSAGE = 'ANALYSIS_ORDER_AUDIT_ENQUEUE_FAILED';
         END;
         BEGIN
-            -- The V2 terminal finalizer purges rich working-set rows in the same transaction;
-            -- assemble while those authoritative rows are still present, before that purge.
             PERFORM public.assemble_analysis_order_audit_bundle(NEW.id);
+            PERFORM public.analysis_v2_purge_result_working_set(NEW.id, TRUE);
         EXCEPTION WHEN OTHERS THEN
+            BEGIN
+                PERFORM public.analysis_order_audit_purge_fence(
+                    NEW.id, 'ANALYSIS_ORDER_AUDIT_ASSEMBLY_FAILED'
+                );
+            EXCEPTION WHEN OTHERS THEN
+                NULL;
+            END;
             RAISE WARNING USING MESSAGE = 'ANALYSIS_ORDER_AUDIT_ASSEMBLY_FAILED';
         END;
     END IF;
@@ -1865,26 +2709,17 @@ SECURITY DEFINER
 SET search_path = ''
 AS $$
 BEGIN
-    BEGIN
-        PERFORM public.enqueue_analysis_order_audit_bundle(NEW.request_id);
-        IF TG_TABLE_NAME IN (
-            'analysis_v2_cost_rollup_snapshots', 'analysis_v2_cost_attributions'
-        ) THEN
-            UPDATE public.analysis_order_audit_assembly_queue AS queue
-               SET status = 'queued',
-                   next_attempt_at = pg_catalog.clock_timestamp(),
-                   lease_token = NULL,
-                   lease_expires_at = NULL,
-                   last_error_code = NULL,
-                   last_error_at = NULL,
-                   updated_at = pg_catalog.clock_timestamp()
-             WHERE queue.request_id = NEW.request_id
-               AND queue.status = 'completed';
-        END IF;
-    EXCEPTION WHEN OTHERS THEN
-        -- Cost/result writes remain authoritative even when the audit queue is temporarily down.
-        RAISE WARNING USING MESSAGE = 'ANALYSIS_ORDER_AUDIT_ENQUEUE_FAILED';
-    END;
+    -- enqueue_analysis_order_audit_bundle compares costSourceHash with the latest immutable
+    -- parent. INSERT and UPDATE both reach that comparison; unchanged cost keeps queue status = 'completed'
+    -- while an IS DISTINCT FROM cost source reopens exactly one queue.
+    IF TG_OP = 'INSERT'
+       OR (TG_OP = 'UPDATE' AND NEW.request_id IS DISTINCT FROM NULL) THEN
+        BEGIN
+            PERFORM public.enqueue_analysis_order_audit_bundle(NEW.request_id);
+        EXCEPTION WHEN OTHERS THEN
+            RAISE WARNING USING MESSAGE = 'ANALYSIS_ORDER_AUDIT_ENQUEUE_FAILED';
+        END;
+    END IF;
     RETURN NEW;
 END;
 $$;

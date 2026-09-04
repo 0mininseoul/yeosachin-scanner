@@ -17,6 +17,9 @@ const INCOHERENT_MANIFEST_REQUEST_ID = '80000000-0000-4000-8000-000000000006';
 const PREFLIGHT_PROFILE_REQUEST_ID = '80000000-0000-4000-8000-000000000007';
 const SUMMARY_PROFILE_REQUEST_ID = '80000000-0000-4000-8000-000000000008';
 const UNION_REQUEST_ID = '80000000-0000-4000-8000-000000000009';
+const KEY_COVERAGE_REQUEST_ID = '80000000-0000-4000-8000-000000000010';
+const LINEAGE_REQUEST_ID = '80000000-0000-4000-8000-000000000011';
+const PURGE_FENCE_REQUEST_ID = '80000000-0000-4000-8000-000000000012';
 const PREFLIGHT_PROFILE_ID = '81000000-0000-4000-8000-000000000001';
 const ORDER_ID = '82000000-0000-4000-8000-000000000001';
 const HASH_A = 'a'.repeat(64);
@@ -69,13 +72,32 @@ CREATE TABLE public.analysis_v2_relationship_sides (
     provider TEXT NOT NULL,
     provider_run_id TEXT NOT NULL,
     provider_operation_key TEXT NOT NULL,
+    provider_credential_slot TEXT NOT NULL DEFAULT 'primary',
+    input_hash TEXT NOT NULL DEFAULT repeat('a', 64),
     result_hash TEXT NOT NULL,
     updated_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp()
+);
+CREATE TABLE public.analysis_v2_relationship_rows (
+    request_id UUID NOT NULL,
+    job_key TEXT NOT NULL DEFAULT 'coordinator:relationships',
+    side TEXT NOT NULL,
+    ordinal INTEGER NOT NULL,
+    username TEXT NOT NULL,
+    is_private BOOLEAN NOT NULL DEFAULT FALSE,
+    is_verified BOOLEAN NOT NULL DEFAULT FALSE,
+    full_name TEXT,
+    profile_pic_url TEXT,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp()
 );
 CREATE TABLE public.analysis_v2_relationship_manifests (
     request_id UUID NOT NULL,
     job_key TEXT NOT NULL,
     result_hash TEXT NOT NULL,
+    excluded_username TEXT,
+    exclusion_decision_hash TEXT NOT NULL DEFAULT repeat('a', 64),
+    followers_result_hash TEXT NOT NULL DEFAULT repeat('a', 64),
+    following_result_hash TEXT NOT NULL DEFAULT repeat('b', 64),
+    detailed_mutual_limit INTEGER NOT NULL DEFAULT 300,
     mutual_count INTEGER NOT NULL,
     public_count INTEGER NOT NULL,
     private_count INTEGER NOT NULL,
@@ -187,6 +209,7 @@ CREATE TABLE public.analysis_v2_ai_result_checkpoints (
     operation_key TEXT NOT NULL,
     stage TEXT NOT NULL,
     model_name TEXT NOT NULL,
+    input_hash TEXT NOT NULL DEFAULT repeat('a', 64),
     result_hash TEXT NOT NULL,
     result_json JSONB NOT NULL
 );
@@ -194,6 +217,10 @@ CREATE TABLE public.analysis_v2_target_evidence_manifests (
     request_id UUID NOT NULL,
     job_key TEXT NOT NULL DEFAULT 'track:target-evidence:collect',
     result_hash TEXT NOT NULL,
+    input_hash TEXT NOT NULL DEFAULT repeat('a', 64),
+    target_username TEXT NOT NULL DEFAULT 'target.account',
+    liker_source_hash TEXT NOT NULL DEFAULT repeat('a', 64),
+    comment_source_hash TEXT NOT NULL DEFAULT repeat('b', 64),
     interactor_count INTEGER NOT NULL,
     liker_count INTEGER NOT NULL,
     comment_count INTEGER NOT NULL,
@@ -231,7 +258,10 @@ CREATE TABLE public.analysis_v2_private_name_rows (
 );
 CREATE TABLE public.analysis_v2_candidate_score_manifests (
     request_id UUID NOT NULL,
-    risk_policy_version TEXT
+    risk_policy_version TEXT,
+    producer_input_hash TEXT DEFAULT repeat('a', 64),
+    result_hash TEXT DEFAULT repeat('a', 64),
+    item_count INTEGER DEFAULT 0
 );
 CREATE TABLE public.analysis_v2_candidate_score_rows (
     request_id UUID NOT NULL,
@@ -271,7 +301,15 @@ CREATE TABLE public.analysis_v2_result_summaries (
 CREATE TABLE public.analysis_v2_reverse_like_rows (
     request_id UUID NOT NULL,
     candidate_id TEXT NOT NULL,
+    reverse_like_status TEXT NOT NULL DEFAULT 'observed',
+    component_score NUMERIC NOT NULL DEFAULT 3,
     evidence_ref_ids TEXT[] NOT NULL DEFAULT '{}'
+);
+CREATE TABLE public.analysis_v2_reverse_like_manifests (
+    request_id UUID PRIMARY KEY,
+    producer_input_hash TEXT DEFAULT repeat('a', 64),
+    result_hash TEXT DEFAULT repeat('a', 64),
+    item_count INTEGER NOT NULL DEFAULT 0
 );
 CREATE TABLE public.analysis_target_interactors (
     request_id UUID NOT NULL,
@@ -282,9 +320,35 @@ CREATE TABLE public.analysis_target_interactors (
     signal TEXT NOT NULL,
     source_interaction_id TEXT NOT NULL,
     occurred_at TEXT,
-    comment_text TEXT,
-    details JSONB
+    comment_text TEXT
 );
+CREATE TABLE public.analysis_v2_score_audit_intents (
+    request_id UUID PRIMARY KEY,
+    source_result_hash TEXT NOT NULL,
+    source_generation INTEGER NOT NULL DEFAULT 1,
+    checkpoint_item_count INTEGER NOT NULL DEFAULT 0,
+    intent_status TEXT NOT NULL DEFAULT 'queued',
+    retain_until TIMESTAMPTZ NOT NULL
+);
+CREATE TABLE public.analysis_v2_score_audit_runs (
+    request_id UUID PRIMARY KEY,
+    source_result_hash TEXT,
+    source_generation INTEGER NOT NULL DEFAULT 0,
+    status TEXT NOT NULL
+);
+CREATE TABLE public.analysis_v2_ai_scoring_stage_checkpoints (
+    request_id UUID NOT NULL,
+    stage_kind TEXT NOT NULL,
+    batch_key INTEGER NOT NULL,
+    result_hash TEXT NOT NULL,
+    PRIMARY KEY (request_id, stage_kind, batch_key)
+);
+CREATE TABLE public.analysis_v2_narrative_manifests (request_id UUID NOT NULL);
+CREATE TABLE public.analysis_v2_partner_safety_manifests (request_id UUID NOT NULL);
+CREATE TABLE public.analysis_v2_preliminary_score_manifests (request_id UUID NOT NULL);
+CREATE TABLE public.analysis_v2_private_name_manifests (request_id UUID NOT NULL);
+CREATE TABLE public.analysis_v2_candidate_feature_manifests (request_id UUID NOT NULL);
+CREATE TABLE public.analysis_v2_profile_fetch_batches (request_id UUID NOT NULL);
 CREATE TABLE public.analysis_v2_cost_attributions (
     request_id UUID NOT NULL,
     preflight_id UUID NOT NULL,
@@ -401,6 +465,18 @@ describe('permanent order audit bundle SQL behavior', () => {
             SUMMARY_PROFILE_REQUEST_ID, UNION_REQUEST_ID, PREFLIGHT_PROFILE_ID,
         ]);
         await db.query(`
+            INSERT INTO public.analysis_requests(
+                id, preflight_id, selected_plan_id_snapshot, plan_access_mode_snapshot,
+                status, policy_versions_snapshot, created_at
+            ) VALUES
+                ($1, NULL, 'basic', 'production', 'completed',
+                    '{"pipeline":"v2","risk":"risk-policy-v2.5","aiStage":"ai-stage-policy-v2.12","scheduler":"ai-scheduler-v1"}'::jsonb, $2),
+                ($3, NULL, 'basic', 'production', 'completed',
+                    '{"pipeline":"v2","risk":"risk-policy-v2.5","aiStage":"ai-stage-policy-v2.12","scheduler":"ai-scheduler-v1"}'::jsonb, $2),
+                ($4, NULL, 'basic', 'production', 'processing',
+                    '{"pipeline":"v2","risk":"risk-policy-v2.5","aiStage":"ai-stage-policy-v2.12","scheduler":"ai-scheduler-v1"}'::jsonb, $2)
+        `, [KEY_COVERAGE_REQUEST_ID, NOW, LINEAGE_REQUEST_ID, PURGE_FENCE_REQUEST_ID]);
+        await db.query(`
             INSERT INTO public.analysis_preflights(
                 id, consumed_request_id, status, target_instagram_id,
                 target_profile_image_url, target_followers_count, target_following_count
@@ -420,6 +496,50 @@ describe('permanent order audit bundle SQL behavior', () => {
 
     afterAll(async () => {
         await db?.close();
+    });
+
+    it('keeps the purge wrapper service-only and the exact implementation private', async () => {
+        const privileges = await db.query<{
+            wrapper_anon: boolean;
+            wrapper_authenticated: boolean;
+            wrapper_service: boolean;
+            exact_service: boolean;
+            fence_service: boolean;
+        }>(`
+            SELECT
+                has_function_privilege(
+                    'anon',
+                    'public.analysis_v2_purge_result_working_set(uuid,boolean)',
+                    'EXECUTE'
+                ) AS wrapper_anon,
+                has_function_privilege(
+                    'authenticated',
+                    'public.analysis_v2_purge_result_working_set(uuid,boolean)',
+                    'EXECUTE'
+                ) AS wrapper_authenticated,
+                has_function_privilege(
+                    'service_role',
+                    'public.analysis_v2_purge_result_working_set(uuid,boolean)',
+                    'EXECUTE'
+                ) AS wrapper_service,
+                has_function_privilege(
+                    'service_role',
+                    'public.analysis_v2_purge_result_working_set_exact(uuid,boolean)',
+                    'EXECUTE'
+                ) AS exact_service,
+                has_function_privilege(
+                    'service_role',
+                    'public.analysis_order_audit_purge_fence(uuid,text)',
+                    'EXECUTE'
+                ) AS fence_service
+        `);
+        expect(privileges.rows[0]).toEqual({
+            wrapper_anon: false,
+            wrapper_authenticated: false,
+            wrapper_service: true,
+            exact_service: false,
+            fence_service: false,
+        });
     });
 
     it('creates an explicit partial bundle when profile/posts/cost evidence is missing', async () => {
@@ -532,6 +652,10 @@ describe('permanent order audit bundle SQL behavior', () => {
         expect(payload).toMatchObject({
             targetPostsAvailable: false,
             targetPostCount: null,
+            interactions: {
+                targetLikes: { declared: null, collected: null },
+                targetComments: { declared: null, collected: null },
+            },
             stageStatus: { targetEvidence: false },
         });
         expect(payload.gapCodes).toContain('TARGET_POSTS_MISSING');
@@ -672,9 +796,9 @@ describe('permanent order audit bundle SQL behavior', () => {
         await db.query(`
             INSERT INTO public.analysis_target_interactors(
                 request_id, job_key, ordinal, actor_username, post_id, signal,
-                source_interaction_id, comment_text, details
+                source_interaction_id, comment_text
             ) VALUES ($1, 'track:target-evidence:collect', 1, 'candidate.one',
-                'target-post-1', 'target_post_comment', 'comment-1', 'hello', '{"confidence":"high"}')
+                'target-post-1', 'target_post_comment', 'comment-1', 'hello')
         `, [REQUEST_ID]);
         await db.query(`
             INSERT INTO public.analysis_target_interactors(
@@ -699,6 +823,24 @@ describe('permanent order audit bundle SQL behavior', () => {
         const secondPayload = second.rows[0]?.payload as Record<string, unknown>;
         expect(secondPayload.version).toBe(2);
         expect(secondPayload.previousVersionHash).toBeTruthy();
+        expect(secondPayload.providerRuns).toEqual(expect.arrayContaining([
+            expect.objectContaining({
+                stage: 'followers',
+                logicalProvider: 'apify',
+                credentialSlot: 'primary',
+                runId: 'run-follower',
+                operationKey: 'relationship-followers:aaaa',
+                resultHash: HASH_A,
+            }),
+            expect.objectContaining({
+                stage: 'following',
+                logicalProvider: 'apify',
+                credentialSlot: 'primary',
+                runId: 'run-following',
+                operationKey: 'relationship-following:bbbb',
+                resultHash: HASH_B,
+            }),
+        ]));
         const secondCounts = await db.query<{
             candidate_declared: number;
             candidate_collected: number;
@@ -748,6 +890,21 @@ describe('permanent order audit bundle SQL behavior', () => {
         );
         expect((repeat.rows[0]?.payload as Record<string, unknown>).version).toBe(2);
 
+        await db.query(
+            `UPDATE public.analysis_target_interactors
+                SET comment_text = 'changed immutable evidence'
+              WHERE request_id = $1 AND source_interaction_id = 'comment-1'`,
+            [REQUEST_ID],
+        );
+        const changedInteraction = await db.query<{ payload: unknown }>(
+            'SELECT public.assemble_analysis_order_audit_bundle($1) AS payload',
+            [REQUEST_ID],
+        );
+        const changedInteractionPayload = changedInteraction.rows[0]?.payload as Record<string, unknown>;
+        expect(changedInteractionPayload.version).toBe(3);
+        expect(changedInteractionPayload.sourceSetHash)
+            .not.toBe(secondPayload.sourceSetHash);
+
         await db.query(`
             INSERT INTO public.analysis_v2_cost_rollup_snapshots(
                 request_id, total_known_cost_usd, total_conservative_cost_usd,
@@ -760,7 +917,7 @@ describe('permanent order audit bundle SQL behavior', () => {
             [REQUEST_ID],
         );
         const reconciledPayload = reconciled.rows[0]?.payload as Record<string, unknown>;
-        expect(reconciledPayload.version).toBe(3);
+        expect(reconciledPayload.version).toBe(4);
         expect(reconciledPayload.cost).toMatchObject({
             knownUsd: 0.42,
             conservativeUsd: 0.42,
@@ -800,6 +957,22 @@ describe('permanent order audit bundle SQL behavior', () => {
         );
         expect(queueAfterCostRefresh.rows[0]?.status).toBe('queued');
 
+        await db.query(
+            'SELECT public.assemble_analysis_order_audit_bundle($1)',
+            [REQUEST_ID],
+        );
+        await db.query(
+            `UPDATE public.analysis_v2_cost_rollup_snapshots
+                SET cost_provenance = '{"source":"reconciled-late"}'::jsonb
+              WHERE request_id = $1`,
+            [REQUEST_ID],
+        );
+        const queueAfterUnchangedCost = await db.query<{ status: string }>(
+            'SELECT status FROM public.analysis_order_audit_assembly_queue WHERE request_id = $1',
+            [REQUEST_ID],
+        );
+        expect(queueAfterUnchangedCost.rows[0]?.status).toBe('completed');
+
         await expect(db.query(
             `UPDATE public.analysis_order_audit_bundles
                 SET gap_codes = '{}' WHERE request_id = $1`,
@@ -823,8 +996,7 @@ describe('permanent order audit bundle SQL behavior', () => {
         expect(payload.rows).toEqual(expect.arrayContaining([
             expect.objectContaining({
                 username: 'candidate.one',
-                commentText: 'hello',
-                details: { confidence: 'high' },
+                commentText: 'changed immutable evidence',
             }),
         ]));
         expect(payload).not.toHaveProperty('userId');
@@ -856,7 +1028,7 @@ describe('permanent order audit bundle SQL behavior', () => {
         );
         const payload = loadedAfterCleanup.rows[0]?.payload as Record<string, unknown>;
         expect(payload.rows).toEqual(expect.arrayContaining([
-            expect.objectContaining({ commentText: 'hello' }),
+            expect.objectContaining({ commentText: 'changed immutable evidence' }),
         ]));
 
         await db.exec(`
@@ -915,7 +1087,7 @@ describe('permanent order audit bundle SQL behavior', () => {
         );
         expect((lateInteractions.rows[0]?.payload as Record<string, unknown>).rows)
             .toEqual(expect.arrayContaining([
-                expect.objectContaining({ commentText: 'hello' }),
+                expect.objectContaining({ commentText: 'changed immutable evidence' }),
             ]));
     });
 
@@ -1003,5 +1175,375 @@ describe('permanent order audit bundle SQL behavior', () => {
             total_known_cost_usd: '0.77',
             usage_unknown: false,
         });
+        await db.exec(`
+            CREATE TABLE public.analysis_order_audit_assembly_queue (
+                request_id UUID PRIMARY KEY,
+                status TEXT NOT NULL DEFAULT 'queued',
+                attempt_count SMALLINT NOT NULL DEFAULT 0,
+                next_attempt_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
+                lease_token UUID,
+                lease_expires_at TIMESTAMPTZ,
+                last_error_code TEXT,
+                last_error_at TIMESTAMPTZ,
+                purge_fenced_at TIMESTAMPTZ,
+                purge_fence_reason TEXT,
+                purged_at TIMESTAMPTZ,
+                created_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
+                updated_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp()
+            )
+        `);
+    });
+
+    it('records a durable purge fence when the queue row is missing', async () => {
+        await db.query(
+            'SELECT public.analysis_v2_purge_result_working_set($1, TRUE)',
+            [PREVIOUS_REQUEST_ID],
+        );
+        const fenced = await db.query<{
+            status: string;
+            purge_fenced_at: string | null;
+            purge_fence_reason: string | null;
+        }>(
+            `SELECT status, purge_fenced_at::TEXT, purge_fence_reason
+               FROM public.analysis_order_audit_assembly_queue WHERE request_id = $1`,
+            [PREVIOUS_REQUEST_ID],
+        );
+        expect(fenced.rows[0]).toMatchObject({
+            status: 'failed',
+            purge_fence_reason: 'ANALYSIS_ORDER_AUDIT_ASSEMBLY_FAILED',
+        });
+        expect(fenced.rows[0]?.purge_fenced_at).toBeTruthy();
+    });
+
+    it('preserves provider lineage for target liker/comment sources without raw identities', async () => {
+        const likerSource = {
+            status: 'collected',
+            input_hash: HASH_A,
+            provider: 'apify',
+            provider_run_id: 'likerrun01',
+            provider_operation_key: `target-likers:${HASH_A}`,
+            provider_credential_slot: 'primary',
+            coverage: [{
+                post_id: 'target-post-lineage',
+                declared_count: 1,
+                returned_count: 0,
+                requested_limit: 150,
+            }],
+        };
+        const commentSource = {
+            status: 'collected',
+            input_hash: HASH_B,
+            provider: 'coderx',
+            provider_run_id: 'commentrun01',
+            provider_operation_key: `target-comments:${HASH_B}`,
+            provider_credential_slot: 'secondary',
+            coverage: [{
+                post_id: 'target-post-lineage',
+                declared_count: 1,
+                returned_count: 0,
+                requested_limit: 15,
+            }],
+        };
+        await db.query(`
+            INSERT INTO public.analysis_v2_target_evidence_manifests(
+                request_id, result_hash, input_hash, target_username,
+                liker_source_hash, comment_source_hash,
+                interactor_count, liker_count, comment_count,
+                liker_source, comment_source
+            ) VALUES ($1, $2, $3, 'lineage.target', $4, $5, 0, 0, 0, $6::jsonb, $7::jsonb)
+        `, [
+            LINEAGE_REQUEST_ID, HASH_C, HASH_A, HASH_A, HASH_B,
+            JSON.stringify(likerSource), JSON.stringify(commentSource),
+        ]);
+
+        const assembled = await db.query<{ payload: unknown }>(
+            'SELECT public.assemble_analysis_order_audit_bundle($1) AS payload',
+            [LINEAGE_REQUEST_ID],
+        );
+        const payload = assembled.rows[0]?.payload as Record<string, unknown>;
+        expect(payload.providerRuns).toEqual(expect.arrayContaining([
+            expect.objectContaining({
+                stage: 'target_likers',
+                logicalProvider: 'apify',
+                credentialSlot: 'primary',
+                runId: 'likerrun01',
+                operationKey: `target-likers:${HASH_A}`,
+                resultHash: HASH_A,
+            }),
+            expect.objectContaining({
+                stage: 'target_comments',
+                logicalProvider: 'coderx',
+                credentialSlot: 'secondary',
+                runId: 'commentrun01',
+                operationKey: `target-comments:${HASH_B}`,
+                resultHash: HASH_B,
+            }),
+        ]));
+        expect(JSON.stringify(payload)).not.toContain('actorId');
+        expect(JSON.stringify(payload)).not.toContain('userUuid');
+    });
+
+    it('marks a missing-one plus extra-one candidate key set as inconsistent', async () => {
+        await db.query(`
+            INSERT INTO public.analysis_v2_relationship_sides(
+                request_id, side, declared_count, collected_count, provider,
+                provider_run_id, provider_operation_key, result_hash
+            ) VALUES
+                ($1, 'followers', 2, 2, 'apify', 'run-key-follower', 'relationship-followers:aaaa', $2),
+                ($1, 'following', 2, 2, 'apify', 'run-key-following', 'relationship-following:bbbb', $3)
+        `, [KEY_COVERAGE_REQUEST_ID, HASH_A, HASH_B]);
+        await db.query(`
+            INSERT INTO public.analysis_v2_relationship_manifests(
+                request_id, job_key, result_hash, mutual_count, public_count,
+                private_count, detailed_public_count
+            ) VALUES ($1, 'coordinator:relationships', $2, 2, 2, 0, 2)
+        `, [KEY_COVERAGE_REQUEST_ID, HASH_C]);
+        await db.query(`
+            INSERT INTO public.analysis_v2_relationship_rows(
+                request_id, side, ordinal, username
+            ) VALUES
+                ($1, 'followers', 1, 'candidate.one'),
+                ($1, 'followers', 2, 'candidate.two'),
+                ($1, 'following', 1, 'candidate.one'),
+                ($1, 'following', 2, 'candidate.two')
+        `, [KEY_COVERAGE_REQUEST_ID]);
+        await db.query(`
+            INSERT INTO public.analysis_v2_mutual_rows(
+                request_id, job_key, mutual_ordinal, following_ordinal, username,
+                is_private, is_verified, detailed_ordinal
+            ) VALUES
+                ($1, 'coordinator:relationships', 1, 1, 'candidate.one', FALSE, FALSE, 1),
+                ($1, 'coordinator:relationships', 2, 2, 'candidate.two', FALSE, FALSE, 2)
+        `, [KEY_COVERAGE_REQUEST_ID]);
+        await db.query(`
+            INSERT INTO public.analysis_v2_candidate_feature_rows(
+                request_id, candidate_id, instagram_id, terminal_classification,
+                baseline_classification, classification_source, media_context,
+                gender_operation_key, gender_result_hash
+            ) VALUES
+                ($1, 'candidate:one', 'candidate.one', 'verified_female',
+                    'verified_female', 'feature', '{"accountContext":"personal"}',
+                    'gender-triage:aaaa', $2),
+                ($1, 'candidate:extra', 'candidate.extra', 'verified_female',
+                    'verified_female', 'feature', '{"accountContext":"personal"}',
+                    'gender-triage:bbbb', $3)
+        `, [KEY_COVERAGE_REQUEST_ID, HASH_A, HASH_B]);
+
+        const assembled = await db.query<{ payload: unknown }>(
+            'SELECT public.assemble_analysis_order_audit_bundle($1) AS payload',
+            [KEY_COVERAGE_REQUEST_ID],
+        );
+        const payload = assembled.rows[0]?.payload as Record<string, unknown>;
+        expect(payload.status).toBe('inconsistent');
+        expect(payload.gapCodes).toEqual(expect.arrayContaining(['CANDIDATE_KEY_SET_GAP']));
+        expect(payload.mutuals).toMatchObject({ declared: 2, collected: 2 });
+    });
+
+    it('keeps target interaction totals explicit and records tag/mention source gaps', async () => {
+        const likerSource = {
+            status: 'collected', input_hash: HASH_A, provider: 'apify',
+            provider_run_id: 'likerrun02', provider_operation_key: `target-likers:${HASH_A}`,
+            provider_credential_slot: 'primary', coverage: [{
+                post_id: 'target-post-interactions', declared_count: 1,
+                returned_count: 1, requested_limit: 150,
+            }],
+        };
+        const commentSource = {
+            status: 'collected', input_hash: HASH_B, provider: 'apify',
+            provider_run_id: 'commentrun02', provider_operation_key: `target-comments:${HASH_B}`,
+            provider_credential_slot: 'primary', coverage: [{
+                post_id: 'target-post-interactions', declared_count: 1,
+                returned_count: 1, requested_limit: 15,
+            }],
+        };
+        await db.query(`
+            INSERT INTO public.analysis_v2_target_evidence_manifests(
+                request_id, result_hash, interactor_count, liker_count, comment_count,
+                liker_source, comment_source
+            ) VALUES ($1, $2, 2, 1, 1, $3::jsonb, $4::jsonb)
+        `, [UNION_REQUEST_ID, HASH_A, JSON.stringify(likerSource), JSON.stringify(commentSource)]);
+        await db.query(`
+            INSERT INTO public.analysis_target_interactors(
+                request_id, job_key, ordinal, actor_username, post_id, signal,
+                source_interaction_id, comment_text
+            ) VALUES
+                ($1, 'track:target-evidence:collect', 1, 'candidate.one',
+                    'target-post-interactions', 'target_post_like', 'interaction-like', NULL),
+                ($1, 'track:target-evidence:collect', 2, 'candidate.one',
+                    'target-post-interactions', 'target_post_comment', 'interaction-comment', 'hello')
+        `, [UNION_REQUEST_ID]);
+
+        const assembled = await db.query<{ payload: unknown }>(
+            'SELECT public.assemble_analysis_order_audit_bundle($1) AS payload',
+            [UNION_REQUEST_ID],
+        );
+        const payload = assembled.rows[0]?.payload as Record<string, unknown>;
+        expect(payload.interactions).toMatchObject({
+            declared: 2,
+            collected: 2,
+            targetLikes: { declared: 1, collected: 1 },
+            targetComments: { declared: 1, collected: 1 },
+            candidateLikes: { declared: null, collected: null, evidenceCollected: null },
+        });
+        expect(payload.gapCodes).toEqual(expect.arrayContaining([
+            'CANDIDATE_LIKES_SOURCE_MISSING',
+            'TAGS_SOURCE_MISSING',
+            'MENTIONS_SOURCE_MISSING',
+        ]));
+    });
+
+    it('retains rich evidence behind a purge fence after forced assembly failure, then purges after retry', async () => {
+        await db.query(`
+            INSERT INTO public.analysis_v2_relationship_sides(
+                request_id, side, declared_count, collected_count, provider,
+                provider_run_id, provider_operation_key, result_hash
+            ) VALUES
+                ($1, 'followers', 1, 1, 'apify', 'run-purge-1', 'relationship-followers:aaaa', $2),
+                ($1, 'following', 1, 1, 'apify', 'run-purge-2', 'relationship-following:bbbb', $3)
+        `, [PURGE_FENCE_REQUEST_ID, HASH_A, HASH_B]);
+        await db.query(`
+            INSERT INTO public.analysis_v2_relationship_manifests(
+                request_id, job_key, result_hash, mutual_count, public_count,
+                private_count, detailed_public_count
+            ) VALUES ($1, 'coordinator:relationships', $2, 1, 1, 0, 1)
+        `, [PURGE_FENCE_REQUEST_ID, HASH_C]);
+        await db.query(`
+            INSERT INTO public.analysis_v2_mutual_rows(
+                request_id, job_key, mutual_ordinal, following_ordinal, username,
+                is_private, is_verified, detailed_ordinal
+            ) VALUES ($1, 'coordinator:relationships', 1, 1, 'purge.candidate', FALSE, FALSE, 1)
+        `, [PURGE_FENCE_REQUEST_ID]);
+        await db.query(`
+            INSERT INTO public.analysis_v2_candidate_feature_rows(
+                request_id, candidate_id, instagram_id, terminal_classification,
+                baseline_classification, classification_source, media_context,
+                gender_operation_key, gender_result_hash
+            ) VALUES ($1, 'candidate:purge', 'purge.candidate', 'verified_female',
+                'verified_female', 'feature', '{"accountContext":"personal"}',
+                'gender-triage:aaaa', $2)
+        `, [PURGE_FENCE_REQUEST_ID, HASH_A]);
+
+        const initialBundle = await db.query<{ payload: unknown }>(
+            'SELECT public.assemble_analysis_order_audit_bundle($1) AS payload',
+            [PURGE_FENCE_REQUEST_ID],
+        );
+        expect((initialBundle.rows[0]?.payload as Record<string, unknown>).version).toBe(1);
+
+        await db.query(
+            `UPDATE public.analysis_v2_candidate_feature_rows
+                SET candidate_id = 'invalid/id'
+              WHERE request_id = $1`,
+            [PURGE_FENCE_REQUEST_ID],
+        );
+        await db.query(
+            `UPDATE public.analysis_requests SET status = 'completed' WHERE id = $1`,
+            [PURGE_FENCE_REQUEST_ID],
+        );
+        const retained = await db.query<{ count: string }>(
+            'SELECT count(*)::TEXT AS count FROM public.analysis_v2_candidate_feature_rows WHERE request_id = $1',
+            [PURGE_FENCE_REQUEST_ID],
+        );
+        const fenced = await db.query<{ purge_fenced_at: string; purge_fence_reason: string }>(
+            `SELECT purge_fenced_at::TEXT, purge_fence_reason
+               FROM public.analysis_order_audit_assembly_queue WHERE request_id = $1`,
+            [PURGE_FENCE_REQUEST_ID],
+        );
+        expect(retained.rows[0]?.count).toBe('1');
+        expect(fenced.rows[0]?.purge_fenced_at).toBeTruthy();
+        expect(fenced.rows[0]?.purge_fence_reason).toBe('ANALYSIS_ORDER_AUDIT_ASSEMBLY_FAILED');
+
+        await db.query(
+            'SELECT public.analysis_v2_purge_result_working_set($1, TRUE)',
+            [PURGE_FENCE_REQUEST_ID],
+        );
+        const blockedPurge = await db.query<{ count: string }>(
+            'SELECT count(*)::TEXT AS count FROM public.analysis_v2_candidate_feature_rows WHERE request_id = $1',
+            [PURGE_FENCE_REQUEST_ID],
+        );
+        expect(blockedPurge.rows[0]?.count).toBe('1');
+
+        await db.query(`
+            INSERT INTO public.analysis_v2_cost_rollup_snapshots(
+                request_id, total_known_cost_usd, total_conservative_cost_usd,
+                directly_attributable_cost_complete, usage_unknown, cost_provenance
+            ) VALUES ($1, 0.21, 0.21, TRUE, FALSE,
+                '{"source":"late-purge-fence-cost"}'::jsonb)
+        `, [PURGE_FENCE_REQUEST_ID]);
+        const reopenedFence = await db.query<{
+            status: string;
+            purge_fenced_at: string | null;
+        }>(
+            `SELECT status, purge_fenced_at::TEXT
+               FROM public.analysis_order_audit_assembly_queue WHERE request_id = $1`,
+            [PURGE_FENCE_REQUEST_ID],
+        );
+        expect(reopenedFence.rows[0]?.status).toBe('queued');
+        expect(reopenedFence.rows[0]?.purge_fenced_at).toBeTruthy();
+
+        await db.query(
+            `UPDATE public.analysis_v2_candidate_feature_rows
+                SET candidate_id = 'candidate:purge-retry'
+              WHERE request_id = $1`,
+            [PURGE_FENCE_REQUEST_ID],
+        );
+        const retried = await db.query<{ payload: unknown }>(
+            'SELECT public.assemble_analysis_order_audit_bundle($1) AS payload',
+            [PURGE_FENCE_REQUEST_ID],
+        );
+        expect((retried.rows[0]?.payload as Record<string, unknown>).version).toBe(2);
+        const purged = await db.query<{ count: string }>(
+            'SELECT count(*)::TEXT AS count FROM public.analysis_v2_candidate_feature_rows WHERE request_id = $1',
+            [PURGE_FENCE_REQUEST_ID],
+        );
+        const completedFence = await db.query<{ purged_at: string; purge_fenced_at: string | null }>(
+            `SELECT purged_at::TEXT, purge_fenced_at::TEXT
+               FROM public.analysis_order_audit_assembly_queue WHERE request_id = $1`,
+            [PURGE_FENCE_REQUEST_ID],
+        );
+        expect(purged.rows[0]?.count).toBe('0');
+        expect(completedFence.rows[0]?.purged_at).toBeTruthy();
+        expect(completedFence.rows[0]?.purge_fenced_at).toBeNull();
+    });
+
+    it('keeps the active queued final-score checkpoint while purging other scoring checkpoints', async () => {
+        await db.query(`
+            INSERT INTO public.analysis_v2_score_audit_intents(
+                request_id, source_result_hash, source_generation,
+                checkpoint_item_count, intent_status, retain_until
+            ) VALUES ($1, $2, 1, 1, 'queued', clock_timestamp() + INTERVAL '1 hour')
+        `, [PURGE_FENCE_REQUEST_ID, HASH_A]);
+        await db.query(`
+            INSERT INTO public.analysis_v2_score_audit_runs(
+                request_id, source_result_hash, source_generation, status
+            ) VALUES ($1, $2, 1, 'queued')
+        `, [PURGE_FENCE_REQUEST_ID, HASH_A]);
+        await db.query(`
+            INSERT INTO public.analysis_v2_ai_scoring_stage_checkpoints(
+                request_id, stage_kind, batch_key, result_hash
+            ) VALUES
+                ($1, 'final_score', -1, $2),
+                ($1, 'screening', -1, $3)
+        `, [PURGE_FENCE_REQUEST_ID, HASH_A, HASH_B]);
+
+        await db.query(
+            'SELECT public.analysis_v2_purge_result_working_set($1, TRUE)',
+            [PURGE_FENCE_REQUEST_ID],
+        );
+
+        const checkpoints = await db.query<{
+            stage_kind: string;
+            batch_key: number;
+            result_hash: string;
+        }>(
+            `SELECT stage_kind, batch_key, result_hash
+               FROM public.analysis_v2_ai_scoring_stage_checkpoints
+              WHERE request_id = $1`,
+            [PURGE_FENCE_REQUEST_ID],
+        );
+        expect(checkpoints.rows).toEqual([{
+            stage_kind: 'final_score',
+            batch_key: -1,
+            result_hash: HASH_A,
+        }]);
     });
 });
