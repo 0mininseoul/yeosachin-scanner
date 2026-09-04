@@ -10,6 +10,18 @@ readonly SUPABASE_SECRET_ID="ai-baram-v2-supabase-service-role"
 readonly IMAGE_SIGNING_SECRET_ID="ai-baram-v2-image-proxy-signing"
 readonly PREFLIGHT_IDENTITY_HMAC_SECRET_ID="ai-baram-v2-preflight-identity-hmac"
 readonly GENDER_ROUTING_HMAC_SECRET_ID="ai-baram-v2-gender-routing-hmac"
+readonly -a APIFY_TOKEN_SLOTS=(
+  primary
+  secondary
+  tertiary
+  quaternary
+  quinary
+  senary
+  septenary
+  octonary
+  nonary
+  tenth
+)
 
 mode="apply"
 rotate_target=""
@@ -27,7 +39,7 @@ dotenv file directly to gcloud over stdin.
 Required environment variables:
   ANALYSIS_V2_TASKS_PROJECT
   ANALYSIS_V2_WORKER_RUNTIME_SERVICE_ACCOUNT_EMAIL
-  ANALYSIS_V2_APIFY_API_TOKEN_SLOT
+  ANALYSIS_V2_APIFY_API_TOKEN_SLOT (one of the ten canonical slots)
 
 The deprecated ANALYSIS_V2_TASKS_RECOVERY_SERVICE_ACCOUNT_EMAIL alias remains
 accepted during migration. If both names are set, they must match exactly.
@@ -135,10 +147,12 @@ service_account_project() {
 }
 
 validate_slot() {
-  case "$1" in
-    primary|secondary|tertiary|quaternary|quinary|senary|septenary|tenth) ;;
-    *) die "ANALYSIS_V2_APIFY_API_TOKEN_SLOT must be primary, secondary, tertiary, quaternary, quinary, senary, septenary, or tenth" ;;
-  esac
+  local allowed
+  for allowed in "${APIFY_TOKEN_SLOTS[@]}"; do
+    [[ "$1" == "$allowed" ]] || continue
+    return 0
+  done
+  die "ANALYSIS_V2_APIFY_API_TOKEN_SLOT must be one of the ten canonical Apify slots"
 }
 
 validate_numeric_version() {

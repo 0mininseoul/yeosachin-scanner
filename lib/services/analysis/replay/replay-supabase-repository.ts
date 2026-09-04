@@ -47,7 +47,7 @@ export interface TestEntitlementLegacySecondaryTextOnlyReplaySourceRpcClient {
 
 const run = z.object({
     actorId: z.string().min(3).max(200),
-    credentialSlot: z.string().regex(/^(?:primary|secondary|tertiary|quaternary|quinary|senary|septenary|tenth)$/),
+    credentialSlot: z.string().regex(/^(?:primary|secondary|tertiary|quaternary|quinary|senary|septenary|octonary|nonary|tenth)$/),
     runId: z.string().regex(/^[A-Za-z0-9]{8,64}$/),
     status: z.literal('succeeded'),
     operationKey: z.string().min(1).max(100),
@@ -115,10 +115,10 @@ const currentProductionSource = z.object({
 
 const betatestFreePoolSource = currentProductionSource.extend({
     preflightRuns: z.array(run.extend({
-        credentialSlot: z.string().regex(/^(?:primary|tertiary|quaternary|quinary|senary|septenary|tenth)$/),
+        credentialSlot: z.string().regex(/^(?:primary|tertiary|quaternary|quinary|senary|septenary|octonary|nonary|tenth)$/),
     })).min(1).max(4),
     providerRuns: z.array(run.extend({
-        credentialSlot: z.string().regex(/^(?:primary|tertiary|quaternary|quinary|senary|septenary|tenth)$/),
+        credentialSlot: z.string().regex(/^(?:primary|tertiary|quaternary|quinary|senary|septenary|octonary|nonary|tenth)$/),
     })).min(1).max(128),
 }).strict();
 

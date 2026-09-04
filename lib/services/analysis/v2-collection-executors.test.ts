@@ -41,6 +41,10 @@ import {
     type AnalysisV2CollectionRequestContext,
     type AnalysisV2CollectionRequestContextStore,
 } from './v2-request-context';
+import {
+    analysisProviderAdmissionId,
+    createAnalysisProviderAdmissionStore,
+} from './provider-admission-store';
 import type { AnalysisV2StageExecutorContext } from './v2-worker';
 import {
     createAnalysisV2CollectionTopology,
@@ -603,6 +607,114 @@ describe('analysis V2 concrete collection executors', () => {
             value: { resolve } as AnalysisV2ProviderRunAdoptionStore,
         };
     }
+
+    it('passes the paid relationship lease to the admission RPC caller', async () => {
+        const providers = providerStore();
+        const admissionRpc = vi.fn(async (
+            _name: string,
+            params: Record<string, unknown>,
+        ) => {
+            const admissionInput = {
+                workloadRole: params.p_workload_role as 'paid',
+                logicalProvider: params.p_logical_provider as 'apify',
+                credentialSlot: params.p_credential_slot as string,
+                budgetKey: params.p_budget_key as string,
+                requestId: params.p_request_id as string,
+                jobKey: params.p_job_key as string,
+                operationKey: params.p_operation_key as string,
+                claimToken: params.p_claim_token as string,
+                jobClaimToken: params.p_job_claim_token as string,
+                leaseSeconds: params.p_lease_seconds as number,
+            };
+            return {
+                data: {
+                    outcome: 'acquired',
+                    admissionId: analysisProviderAdmissionId(admissionInput),
+                    workloadRole: 'paid',
+                    logicalProvider: 'apify',
+                    credentialSlot: admissionInput.credentialSlot,
+                    budgetKey: admissionInput.budgetKey,
+                    requestId: admissionInput.requestId,
+                    jobKey: admissionInput.jobKey,
+                    operationKey: admissionInput.operationKey,
+                    leaseToken: '423e4567-e89b-42d3-a456-426614174000',
+                    fence: 1,
+                    expiresAt: '2026-09-04T12:00:00.000Z',
+                    activeCount: 1,
+                    maxActive: 4,
+                },
+                error: null,
+            };
+        });
+        const admission = createAnalysisProviderAdmissionStore({
+            rpc: admissionRpc,
+            randomUuid: () => '523e4567-e89b-42d3-a456-426614174000',
+        });
+        const executor = createAnalysisV2RelationshipsExecutor({
+            requestContextStore: contextStore(requestContext({
+                followersDeclaredCount: 1,
+                followingDeclaredCount: 0,
+            })),
+            providerRunStore: providers.value,
+            providerAdmissionStore: admission,
+            getFollowers: vi.fn(async (
+                _username: string,
+                _limit: number | undefined,
+                options?: ScrapeRequestOptions,
+            ) => {
+                if (options?.providerRun) {
+                    await options.providerRun.onBeforeRunStart?.({
+                        logicalProvider: options.providerRun.logicalProvider!,
+                        actorId: options.providerRun.actorId!,
+                        credentialSlot: options.providerRun.credentialSlot!,
+                        maxChargeUsd: options.providerRun.maxChargeUsd!,
+                    });
+                }
+                return [{
+                    username: 'alice',
+                    isPrivate: false,
+                    isVerified: false,
+                }];
+            }),
+            getFollowing: vi.fn(async () => []),
+            evidenceStore: {
+                checkpointRelationshipSide: vi.fn(async () => ({})),
+                freezeRelationships: vi.fn(async () => ({
+                    revision: 1,
+                    resultHash,
+                    exclusionDecisionHash: 'f'.repeat(64),
+                    followersResultHash: resultHash,
+                    followingResultHash: resultHash,
+                    mutualCount: 1,
+                    publicCount: 1,
+                    privateCount: 0,
+                    detailedPublicCount: 0,
+                    unscreenedPublicCount: 1,
+                })),
+                loadRelationshipStaging: vi.fn(async () => ({
+                    excludedUsername: 'girlfriend',
+                    detailedPublicUsernames: [],
+                    privateMutualUsernames: [],
+                    mutualRows: [],
+                })),
+            } as unknown as AnalysisV2EvidenceStore,
+            env: {
+                ANALYSIS_PROVIDER_ADMISSION_ENABLED: 'true',
+                ANALYSIS_V2_INSTAGRAM_ROUTE: 'apify_v1',
+            },
+        });
+
+        await executor(stageContext('relationships', state()));
+
+        expect(admissionRpc).toHaveBeenCalledWith(
+            'acquire_analysis_provider_admission',
+            expect.objectContaining({
+                p_workload_role: 'paid',
+                p_operation_key: expect.stringMatching(/^relationship-followers:[a-f0-9]{64}$/),
+                p_lease_seconds: 12,
+            }),
+        );
+    });
 
     it('rejects a beta family charge above its frozen budget before reserve or provider I/O', async () => {
         const providers = providerStore();

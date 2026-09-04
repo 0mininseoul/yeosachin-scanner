@@ -1,12 +1,16 @@
 import { supabaseAdmin } from '@/lib/supabase/admin';
 import type {
     ApifyCredentialSlot,
+    ApifyFreeCredentialSlot,
     ProviderCostRunFinished,
     ProviderCostRunStarted,
     ProviderCostTerminalStatus,
     ProviderRunCheckpoint,
 } from '@/lib/services/instagram/providers/types';
-import { isApifyCredentialSlot } from '@/lib/services/instagram/providers/types';
+import {
+    APIFY_FREE_CREDENTIAL_SLOTS,
+    isApifyCredentialSlot,
+} from '@/lib/services/instagram/providers/types';
 import {
     APIFY_PROFILE_ACTOR_ID,
     APIFY_PROFILE_SUMMARY_MAX_CHARGE_USD,
@@ -14,7 +18,10 @@ import {
 import { getApifyClient } from '@/lib/services/instagram/providers/apify-relationship';
 import type { ClaimedPreflight } from './preflight';
 import { withAnalysisProviderAdmissionCheckpoint } from './provider-admission-checkpoint';
-import type { AnalysisProviderAdmissionStore } from './provider-admission-store';
+import {
+    AnalysisProviderAdmissionCapacityPendingError,
+    type AnalysisProviderAdmissionStore,
+} from './provider-admission-store';
 import type { AnalysisWorkloadRole } from './workload-role';
 
 export type PreflightProviderRunClaim = Pick<
@@ -102,6 +109,11 @@ interface ProviderIdentity {
 export interface PreflightProviderRunStore {
     load(input: RunClaimInput): Promise<StoredPreflightProviderRun | null>;
     reserve(input: RunClaimInput & ProviderIdentity): Promise<{
+        created: boolean;
+        run: StoredPreflightProviderRun;
+    }>;
+    /** Atomically selects and persists a fresh free-pool slot in the database. */
+    reserveFree?(input: RunClaimInput & Omit<ProviderIdentity, 'credentialSlot'>): Promise<{
         created: boolean;
         run: StoredPreflightProviderRun;
     }>;
@@ -393,6 +405,29 @@ function assertIdentity(
     }
 }
 
+function assertFreeIdentity(
+    actual: {
+        logicalProvider: 'apify' | 'coderx';
+        actorId: string;
+        maxChargeUsd: number;
+    },
+    expected: Omit<ProviderIdentity, 'credentialSlot'>
+): void {
+    if (
+        actual.logicalProvider !== expected.logicalProvider
+        || actual.actorId !== expected.actorId
+        || actual.maxChargeUsd !== expected.maxChargeUsd
+    ) {
+        throw new Error('PREFLIGHT_PROVIDER_RUN_IDENTITY_CONFLICT');
+    }
+}
+
+function assertFreeSlot(run: StoredPreflightProviderRun): void {
+    if (!APIFY_FREE_CREDENTIAL_SLOTS.includes(run.credentialSlot as ApifyFreeCredentialSlot)) {
+        throw new Error('PREFLIGHT_PROVIDER_RUN_IDENTITY_CONFLICT');
+    }
+}
+
 function assertRunClaim(
     run: StoredPreflightProviderRun,
     input: Pick<RunClaimInput, 'preflightId' | 'inputHash'>
@@ -411,6 +446,9 @@ export function createPreflightProviderRunStore(
     async function rpc(name: string, params: Record<string, unknown>, label: string) {
         const { data, error } = await client.rpc(name, params);
         if (error) {
+            if (error.message?.startsWith('ANALYSIS_APIFY_FREE_POOL_CAPACITY_UNAVAILABLE')) {
+                throw new AnalysisProviderAdmissionCapacityPendingError();
+            }
             throw new Error(
                 `PREFLIGHT_PROVIDER_RUN_PERSISTENCE_ERROR: ${label} (${safeRpcCode(error)}).`
             );
@@ -459,6 +497,30 @@ export function createPreflightProviderRunStore(
             const run = parseRun(value.run);
             assertRunClaim(run, input);
             assertIdentity(run, input);
+            return { created: value.created, run };
+        },
+        async reserveFree(input) {
+            assertClaimInput(input);
+            const data = await rpc(
+                PREFLIGHT_PROVIDER_RUN_DATABASE_NAMES.reserveRpc,
+                {
+                    ...params(input),
+                    p_credential_slot: null,
+                    p_max_charge_usd: input.maxChargeUsd,
+                },
+                'free-pool reserve failed'
+            );
+            if (!data || typeof data !== 'object' || Array.isArray(data)) {
+                throw new Error('PREFLIGHT_PROVIDER_RUN_PERSISTENCE_ERROR: invalid reservation.');
+            }
+            const value = data as Record<string, unknown>;
+            if (typeof value.created !== 'boolean') {
+                throw new Error('PREFLIGHT_PROVIDER_RUN_PERSISTENCE_ERROR: invalid reservation.');
+            }
+            const run = parseRun(value.run);
+            assertRunClaim(run, input);
+            assertFreeIdentity(run, input);
+            assertFreeSlot(run);
             return { created: value.created, run };
         },
         async checkpointStarted(input) {
@@ -643,6 +705,13 @@ export function createFreshAdmissionProviderRunStore(
             const reserved = await store.reserve(input);
             return { ...reserved, run: assertOperation(reserved.run) };
         },
+        async reserveFree(input) {
+            if (!store.reserveFree) {
+                throw new Error('PREFLIGHT_PROVIDER_RUN_PERSISTENCE_ERROR: free-pool reserve unavailable.');
+            }
+            const reserved = await store.reserveFree(input);
+            return { ...reserved, run: assertOperation(reserved.run) };
+        },
         async checkpointStarted(input) {
             return assertOperation(await store.checkpointStarted(input));
         },
@@ -805,6 +874,8 @@ export async function bindPreflightProviderRunCheckpoint(input: {
     claim: PreflightProviderRunClaim;
     inputHash: string;
     identity: ProviderIdentity;
+    /** New anonymous/B-lite/free admission uses the database best-fit fence. */
+    freePool?: boolean;
     operationKey?: string;
     /** Fresh paid admission runs on the paid worker route while its provider-run
      * ledger remains the generation-fenced preflight lineage. */
@@ -827,7 +898,14 @@ export async function bindPreflightProviderRunCheckpoint(input: {
     let current = await input.store.load(claimInput);
     if (current) {
         assertRunClaim(current, claimInput);
-        assertIdentity(current, input.identity);
+        if (input.freePool) {
+            // A durable row is authoritative, including legacy paid-slot rows.
+            // New reservations are fenced to the nine-slot free pool below;
+            // replay must never remap an already-started external run.
+            assertFreeIdentity(current, input.identity);
+        } else {
+            assertIdentity(current, input.identity);
+        }
     }
 
     const requireCurrent = (): StoredPreflightProviderRun => {
@@ -836,7 +914,14 @@ export async function bindPreflightProviderRunCheckpoint(input: {
     };
     const assertCostEvent = (event: ProviderCostRunStarted): StoredPreflightProviderRun => {
         const stored = requireCurrent();
-        assertIdentity(event, input.identity);
+        if (input.freePool) {
+            assertFreeIdentity(event, input.identity);
+            if (event.credentialSlot !== stored.credentialSlot) {
+                throw new Error('PREFLIGHT_PROVIDER_RUN_IDENTITY_CONFLICT');
+            }
+        } else {
+            assertIdentity(event, input.identity);
+        }
         if (!stored.runId || event.runId !== stored.runId) {
             throw new Error('PREFLIGHT_PROVIDER_RUN_IDENTITY_CONFLICT');
         }
@@ -850,10 +935,16 @@ export async function bindPreflightProviderRunCheckpoint(input: {
             assertCostEvent(event);
         },
         onCostRunFinished: async (event: ProviderCostRunFinished) => {
-            assertCostEvent(event);
+            // A free-pool reservation may choose a different slot than the
+            // caller's provisional identity. Persist the durable row's
+            // selected identity, not the provisional input identity.
+            const stored = assertCostEvent(event);
             current = await input.store.checkpointTerminal({
                 ...claimInput,
-                ...input.identity,
+                logicalProvider: stored.logicalProvider,
+                actorId: stored.actorId,
+                credentialSlot: stored.credentialSlot,
+                maxChargeUsd: stored.maxChargeUsd,
                 runId: event.runId,
                 status: event.status,
                 actualUsageUsd: event.usageTotalUsd,
@@ -861,8 +952,9 @@ export async function bindPreflightProviderRunCheckpoint(input: {
         },
     };
 
-    const withAdmission = async (checkpoint: ProviderRunCheckpoint): Promise<ProviderRunCheckpoint> => (
-        withAnalysisProviderAdmissionCheckpoint({
+    const withAdmission = async (checkpoint: ProviderRunCheckpoint): Promise<ProviderRunCheckpoint> => {
+        const admissionWorkloadRole = input.providerAdmissionWorkloadRole ?? input.workloadRole ?? 'preflight';
+        return withAnalysisProviderAdmissionCheckpoint({
             checkpoint,
             storedStatus: current?.status === 'starting' || current?.status === 'running'
                 ? current.status
@@ -876,8 +968,9 @@ export async function bindPreflightProviderRunCheckpoint(input: {
             claimToken: input.claim.claimToken,
             env: input.env,
             store: input.providerAdmissionStore,
-        })
-    );
+            leaseSeconds: admissionWorkloadRole === 'paid' ? 30 : 120,
+        });
+    };
 
     if (current) {
         return {
@@ -889,6 +982,89 @@ export async function bindPreflightProviderRunCheckpoint(input: {
                 credentialSlot: current.credentialSlot,
                 maxChargeUsd: current.maxChargeUsd,
                 ...(current.runId ? { resumeRunId: current.runId } : { startReserved: true }),
+            }),
+        };
+    }
+
+    if (input.freePool) {
+        if (!input.store.reserveFree) {
+            throw new Error('ANALYSIS_PROVIDER_ADMISSION_CAPACITY_PENDING');
+        }
+        const reserved = await input.store.reserveFree({
+            ...claimInput,
+            logicalProvider: input.identity.logicalProvider,
+            actorId: input.identity.actorId,
+            maxChargeUsd: input.identity.maxChargeUsd,
+        });
+        current = reserved.run;
+        assertFreeIdentity(current, input.identity);
+        assertFreeSlot(current);
+        const freeIdentity = preflightProviderIdentity(current.credentialSlot);
+        const withFreeAdmission = async (
+            checkpoint: ProviderRunCheckpoint,
+        ): Promise<ProviderRunCheckpoint> => {
+            try {
+                return await withAdmission(checkpoint);
+            } catch (error) {
+                // reserveFree intentionally persists the selected slot before
+                // admission so the slot decision is durable. If that initial
+                // admission is denied, close only the row created by this
+                // invocation; a replayed/started row remains authoritative.
+                if (
+                    error instanceof AnalysisProviderAdmissionCapacityPendingError
+                    && reserved.created
+                    && current?.runId === null
+                    && current.status === 'starting'
+                ) {
+                    current = await input.store.checkpointRejected({
+                        ...claimInput,
+                        ...freeIdentity,
+                    });
+                }
+                throw error;
+            }
+        };
+        if (!reserved.created && !current.runId) {
+            return {
+                stored: current,
+                checkpoint: await withFreeAdmission({
+                    ...costCallbacks,
+                    ...freeIdentity,
+                    startReserved: true,
+                }),
+            };
+        }
+        return {
+            stored: current,
+            checkpoint: await withFreeAdmission({
+                ...costCallbacks,
+                ...freeIdentity,
+                ...(current.runId
+                    ? { resumeRunId: current.runId }
+                    : {
+                        onBeforeRunStart: async actual => {
+                            assertIdentity(actual, freeIdentity);
+                        },
+                        onRunStarted: async runId => {
+                            requireCurrent();
+                            current = await input.store.checkpointStarted({
+                                ...claimInput,
+                                ...freeIdentity,
+                                runId,
+                            });
+                        },
+                        onRunStartRejected: async event => {
+                            const reservedRun = requireCurrent();
+                            assertIdentity(event, freeIdentity);
+                            if (reservedRun.runId !== null || reservedRun.status !== 'starting') {
+                                throw new Error('PREFLIGHT_PROVIDER_RUN_IDENTITY_CONFLICT');
+                            }
+                            current = await input.store.checkpointRejected({
+                                ...claimInput,
+                                ...freeIdentity,
+                            });
+                        },
+                    }),
             }),
         };
     }

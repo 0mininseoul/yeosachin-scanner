@@ -949,6 +949,9 @@ export async function processAnalysisV2FreshAdmission(
                 assertFreshCount(value.followingCount);
             }
         };
+        const freeProfilePath = claim.accessMode === 'test_entitlement'
+            && !claim.orderScopedCredentialSlot
+            && !betaHold;
         const fetchPaidProfile = async (
             fallbackFailure?: ReturnType<typeof classifyPreflightError>
         ): Promise<Readonly<{
@@ -976,13 +979,16 @@ export async function processAnalysisV2FreshAdmission(
                 existingRun?.credentialSlot
                 ?? betaHold?.credentialSlot
                 ?? claim.orderScopedCredentialSlot
-                ?? selectAnalysisV2ApifyCredentialSlot(dependencies.env)
+                ?? (freeProfilePath
+                    ? 'primary'
+                    : selectAnalysisV2ApifyCredentialSlot(dependencies.env))
             );
             const bound = await bindPreflightProviderRunCheckpoint({
                 store: providerRuns,
                 claim,
                 inputHash: paidInputHash,
                 identity,
+                freePool: freeProfilePath,
                 operationKey: freshAdmissionProviderOperationKey(input.generation),
                 workloadRole: 'paid',
                 env: dependencies.env,

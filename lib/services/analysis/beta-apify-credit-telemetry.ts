@@ -75,10 +75,10 @@ export function emitBetaApifyCreditTelemetry(
         ['reservation_usd', input.reservationUsd, MAX_USD],
         ['actual_usd', input.actualUsd, MAX_USD],
         ['released_usd', input.releasedUsd, MAX_USD],
-        ['stale_snapshot_count', input.staleSnapshotCount, 6, true],
+        ['stale_snapshot_count', input.staleSnapshotCount, BETA_APIFY_FREE_CREDENTIAL_SLOTS.length, true],
         ['settlement_lag_ms', input.settlementLagMs, MAX_SETTLEMENT_LAG_MS],
         ['active_allocation_count', input.activeAllocationCount, MAX_COUNT, true],
-        ['overcommitted_slot_count', input.overcommittedSlotCount, 6, true],
+        ['overcommitted_slot_count', input.overcommittedSlotCount, BETA_APIFY_FREE_CREDENTIAL_SLOTS.length, true],
     ];
     for (const [key, value, maximum, integer] of values) {
         const safe = finite(value, maximum, integer);

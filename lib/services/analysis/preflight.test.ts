@@ -51,9 +51,15 @@ const preflightInputHash = preflightTargetInputHash('target.name', {
 });
 const preflightApifyPoolEnv = {
     APIFY_PRIMARY_API_TOKEN: 'primary-token',
+    APIFY_TERTIARY_API_TOKEN: 'tertiary-token',
+    APIFY_QUATERNARY_API_TOKEN: 'quaternary-token',
     APIFY_QUINARY_API_TOKEN: 'quinary-token',
     APIFY_SENARY_API_TOKEN: 'senary-token',
-    PREFLIGHT_APIFY_API_TOKEN_SLOTS: 'primary,quinary,senary',
+    APIFY_SEPTENARY_API_TOKEN: 'septenary-token',
+    APIFY_OCTONARY_API_TOKEN: 'octonary-token',
+    APIFY_NONARY_API_TOKEN: 'nonary-token',
+    APIFY_TENTH_API_TOKEN: 'tenth-token',
+    PREFLIGHT_APIFY_API_TOKEN_SLOTS: 'primary,tertiary,quaternary,quinary,senary,septenary,octonary,nonary,tenth',
 } as const;
 
 describe('betatest preflight credit fence', () => {
@@ -174,6 +180,7 @@ describe('betatest preflight credit fence', () => {
             budgetKey: 'paid:apify:septenary',
             jobKey: 'preflight:provider',
             operationKey: 'target-profile-fallback',
+            leaseSeconds: 30,
         }));
         expect(admission.release).toHaveBeenCalledOnce();
         expect(getFallbackProfile).toHaveBeenCalledOnce();
@@ -282,7 +289,7 @@ describe('B-lite single-collection preflight', () => {
         const store = workerStore(claimed);
         const runs = providerRunStore();
         expect(selectPreflightApifyCredentialSlot(preflightId, preflightApifyPoolEnv))
-            .toBe('senary');
+            .toBe('septenary');
         let loadCount = 0;
         vi.mocked(runs.load).mockImplementation(async () => {
             loadCount += 1;
@@ -1207,6 +1214,15 @@ function providerRunStore(): PreflightProviderRunStore {
     return {
         load: vi.fn(async () => null),
         reserve: vi.fn(),
+        reserveFree: vi.fn(async input => ({
+            created: true,
+            run: {
+                ...storedRun('starting'),
+                preflightId: input.preflightId,
+                inputHash: input.inputHash,
+                credentialSlot: 'quinary' as const,
+            },
+        })),
         checkpointStarted: vi.fn(),
         checkpointRejected: vi.fn(),
         checkpointTerminal: vi.fn(),
@@ -1864,7 +1880,7 @@ describe('preflight persistence adapter', () => {
 });
 
 describe('preflight worker domain', () => {
-    it('selects the deterministic three-account slot for a new anonymous fallback', async () => {
+    it('uses the database-selected free-pool slot for a new anonymous fallback', async () => {
         const selectedPreflightId = '123e4567-e89b-42d3-a456-000000000001';
         const env = {
             ...preflightApifyPoolEnv,
@@ -1885,14 +1901,15 @@ describe('preflight worker domain', () => {
                 }])) as PreflightCatalogSnapshot['plans'],
             },
         });
-        const selectedSlot = selectPreflightApifyCredentialSlot(selectedPreflightId, env);
+        const selectedSlot = 'quinary' as const;
         const runs = providerRunStore();
-        vi.mocked(runs.reserve).mockImplementation(async input => ({
+        vi.mocked(runs.reserveFree!).mockImplementation(async input => ({
             created: true,
             run: {
                 ...storedRun('starting'),
                 preflightId: selectedPreflightId,
-                credentialSlot: input.credentialSlot,
+                inputHash: input.inputHash,
+                credentialSlot: selectedSlot,
             },
         }));
         const apify = vi.fn(async (
@@ -1921,27 +1938,27 @@ describe('preflight worker domain', () => {
         })).resolves.toBe('ready');
 
         expect(apify).toHaveBeenCalledOnce();
-        expect(runs.reserve).toHaveBeenCalledWith(expect.objectContaining({
+        expect(runs.reserveFree).toHaveBeenCalledWith(expect.objectContaining({
             preflightId: selectedPreflightId,
-            credentialSlot: selectedSlot,
         }));
     });
 
-    it('selects the deterministic three-account slot for a new standard fallback', async () => {
+    it('uses the database-selected free-pool slot for a new standard fallback', async () => {
         const selectedPreflightId = '123e4567-e89b-42d3-a456-000000000001';
         const env = {
             ...preflightApifyPoolEnv,
             ANALYSIS_V2_PREFLIGHT_IDENTITY_HMAC_SECRET: preflightIdentitySecret,
         };
         const selectedClaim = claim({ preflightId: selectedPreflightId });
-        const selectedSlot = selectPreflightApifyCredentialSlot(selectedPreflightId, env);
+        const selectedSlot = 'quinary' as const;
         const runs = providerRunStore();
-        vi.mocked(runs.reserve).mockImplementation(async input => ({
+        vi.mocked(runs.reserveFree!).mockImplementation(async input => ({
             created: true,
             run: {
                 ...storedRun('starting'),
                 preflightId: selectedPreflightId,
-                credentialSlot: input.credentialSlot,
+                inputHash: input.inputHash,
+                credentialSlot: selectedSlot,
             },
         }));
         const apify = vi.fn(async (
@@ -1969,13 +1986,12 @@ describe('preflight worker domain', () => {
         })).resolves.toBe('ready');
 
         expect(apify).toHaveBeenCalledOnce();
-        expect(runs.reserve).toHaveBeenCalledWith(expect.objectContaining({
+        expect(runs.reserveFree).toHaveBeenCalledWith(expect.objectContaining({
             preflightId: selectedPreflightId,
-            credentialSlot: selectedSlot,
         }));
     });
 
-    it('rejects a misconfigured preflight pool before reserving or starting paid work', async () => {
+    it('ignores the legacy slot-list setting because free allocation is database-fenced', async () => {
         const store = workerStore();
         const runs = providerRunStore();
         const fallback = vi.fn();
@@ -1994,7 +2010,8 @@ describe('preflight worker domain', () => {
             },
         })).resolves.toBe('blocked');
 
-        expect(fallback).not.toHaveBeenCalled();
+        expect(fallback).toHaveBeenCalledOnce();
+        expect(runs.reserveFree).toHaveBeenCalledOnce();
         expect(runs.reserve).not.toHaveBeenCalled();
     });
 
@@ -2318,7 +2335,7 @@ describe('preflight worker domain', () => {
         const info = vi.spyOn(console, 'info').mockImplementation(() => undefined);
         const store = workerStore();
         const runs = providerRunStore();
-        vi.mocked(runs.reserve).mockResolvedValue({ created: true, run: storedRun('starting') });
+        vi.mocked(runs.reserveFree!).mockResolvedValue({ created: true, run: storedRun('starting') });
         vi.mocked(runs.checkpointStarted).mockResolvedValue({
             ...storedRun('running'),
             runId: 'StartedRun1234567',
@@ -2369,10 +2386,10 @@ describe('preflight worker domain', () => {
         })).resolves.toBe('ready');
 
         expect(fallback).toHaveBeenCalledOnce();
-        expect(runs.reserve).toHaveBeenCalledOnce();
+        expect(runs.reserveFree).toHaveBeenCalledOnce();
         expect(runs.checkpointStarted).toHaveBeenCalledOnce();
         expect(runs.checkpointTerminal).toHaveBeenCalledOnce();
-        expect(JSON.stringify(vi.mocked(runs.reserve).mock.calls[0])).not.toContain('target.name');
+        expect(JSON.stringify(vi.mocked(runs.reserveFree!).mock.calls[0])).not.toContain('target.name');
         const record = String(info.mock.calls[0]?.[0]);
         expect(JSON.parse(record)).toEqual({
             event: 'preflight_profile_fallback_entered',

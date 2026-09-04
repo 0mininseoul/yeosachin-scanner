@@ -7,7 +7,11 @@ import type {
     ProviderCostRunStarted,
     ProviderCostTerminalStatus,
 } from './types';
-import { isApifyCredentialSlot } from './types';
+import {
+    APIFY_CREDENTIAL_TOKEN_ENV,
+    APIFY_FREE_CREDENTIAL_SLOTS,
+    isApifyCredentialSlot,
+} from './types';
 import { isInstagramUsername } from '../username';
 
 export type ApifyClientLike = Pick<ApifyClient, 'actor' | 'dataset' | 'run'>;
@@ -15,19 +19,8 @@ export type ApifyRelationshipKind = 'followers' | 'following';
 
 const APIFY_RUN_ID_PATTERN = /^[A-Za-z0-9]{8,64}$/;
 const MAX_INVOCATION_WAIT_SECS = 240;
-const PREFLIGHT_APIFY_API_TOKEN_SLOTS_VALUE = 'primary,quinary,senary';
-const PREFLIGHT_APIFY_API_TOKEN_SLOTS = [
-    'primary',
-    'quinary',
-    'senary',
-] as const;
-const PREFLIGHT_APIFY_API_TOKEN_ENV: Readonly<Record<
-    (typeof PREFLIGHT_APIFY_API_TOKEN_SLOTS)[number], string
->> = Object.freeze({
-    primary: 'APIFY_PRIMARY_API_TOKEN',
-    quinary: 'APIFY_QUINARY_API_TOKEN',
-    senary: 'APIFY_SENARY_API_TOKEN',
-});
+const PREFLIGHT_APIFY_API_TOKEN_SLOTS = APIFY_FREE_CREDENTIAL_SLOTS;
+const PREFLIGHT_APIFY_API_TOKEN_SLOTS_VALUE = PREFLIGHT_APIFY_API_TOKEN_SLOTS.join(',');
 export const APIFY_PROVIDER_QUOTA_ERROR_CODE = 'SCRAPING_PROVIDER_QUOTA_ERROR';
 export const APIFY_PROVIDER_START_REJECTED_ERROR_CODE =
     'SCRAPING_PROVIDER_START_REJECTED_ERROR';
@@ -284,11 +277,11 @@ function assertLimit(limit: number, maximum: number): void {
 
 export function selectApifyCredentialSlot(
     env: Record<string, string | undefined> = process.env
-): Extract<ApifyCredentialSlot, 'primary' | 'secondary'> {
+): ApifyCredentialSlot {
     const slot = env.APIFY_API_TOKEN_SLOT?.trim().toLowerCase() || 'primary';
-    if (slot !== 'primary' && slot !== 'secondary') {
+    if (!isApifyCredentialSlot(slot)) {
         throw new Error(
-            'SCRAPING_CONFIG_ERROR: APIFY_API_TOKEN_SLOT은 primary 또는 secondary여야 합니다.'
+            'SCRAPING_CONFIG_ERROR: APIFY_API_TOKEN_SLOT이 올바르지 않습니다.'
         );
     }
     return slot;
@@ -308,18 +301,24 @@ export function selectAnalysisV2ApifyCredentialSlot(
     return configured;
 }
 
+/**
+ * Legacy ordinary anonymous/B-lite fail-open selection. The balance-aware
+ * best-fit allocator is intentionally owned by the beta-held/betatest-free
+ * admission coordinator; callers here must preserve deterministic slot
+ * identity for ordinary fallback and persisted-run replay.
+ */
 export function selectPreflightApifyCredentialSlot(
     preflightId: string,
     env: Record<string, string | undefined> = process.env,
 ): ApifyCredentialSlot {
     if (env.PREFLIGHT_APIFY_API_TOKEN_SLOTS !== PREFLIGHT_APIFY_API_TOKEN_SLOTS_VALUE) {
         throw new Error(
-            'SCRAPING_CONFIG_ERROR: PREFLIGHT_APIFY_API_TOKEN_SLOTS must be exactly primary,quinary,senary.'
+            'SCRAPING_CONFIG_ERROR: PREFLIGHT_APIFY_API_TOKEN_SLOTS must be exactly primary,tertiary,quaternary,quinary,senary,septenary,octonary,nonary,tenth.'
         );
     }
 
     for (const slot of PREFLIGHT_APIFY_API_TOKEN_SLOTS) {
-        const tokenEnv = PREFLIGHT_APIFY_API_TOKEN_ENV[slot];
+        const tokenEnv = APIFY_CREDENTIAL_TOKEN_ENV[slot];
         if (!env[tokenEnv]?.trim()) {
             throw new Error(
                 `SCRAPING_CONFIG_ERROR: ${tokenEnv} is required for the preflight Apify pool.`
@@ -341,18 +340,7 @@ export function selectApifyApiToken(
     if (!isApifyCredentialSlot(slot)) {
         throw new Error('SCRAPING_CONFIG_ERROR: invalid Apify credential slot.');
     }
-    const key = {
-        primary: 'APIFY_PRIMARY_API_TOKEN',
-        secondary: 'APIFY_SECONDARY_API_TOKEN',
-        tertiary: 'APIFY_TERTIARY_API_TOKEN',
-        quaternary: 'APIFY_QUATERNARY_API_TOKEN',
-        quinary: 'APIFY_QUINARY_API_TOKEN',
-        senary: 'APIFY_SENARY_API_TOKEN',
-        septenary: 'APIFY_SEPTENARY_API_TOKEN',
-        tenth: 'APIFY_TENTH_API_TOKEN',
-        octonary: 'APIFY_OCTONARY_API_TOKEN',
-        nonary: 'APIFY_NONARY_API_TOKEN',
-    }[slot];
+    const key = APIFY_CREDENTIAL_TOKEN_ENV[slot];
     const token = slot === 'primary'
         ? env[key]?.trim() || env.APIFY_API_TOKEN?.trim()
         : env[key]?.trim();
@@ -409,9 +397,7 @@ export async function startOrResumeApifyActor(
     const maxTotalChargeUsd = context?.maxChargeUsd ?? options.maxTotalChargeUsd;
     const executionMaxTotalChargeUsd = options.executionMaxTotalChargeUsd
         ?? maxTotalChargeUsd;
-    if (!isApifyCredentialSlot(credentialSlot)
-        && !(credentialSlot === 'octonary' && context?.allowConciergeBatchOctonary === true)
-        && !(credentialSlot === 'nonary' && context?.allowConciergeBatchNonary === true)) {
+    if (!isApifyCredentialSlot(credentialSlot)) {
         throw new Error('SCRAPING_RUN_CHECKPOINT_ERROR: stored credential slot is invalid.');
     }
     if (

@@ -1,8 +1,10 @@
 import { NextResponse } from 'next/server';
+import { z } from 'zod';
 import { supabaseAdmin } from '@/lib/supabase/admin';
 import { createClient } from '@/lib/supabase/server';
 import {
-    isAnalysisAuditOperator,
+    classifyOperatorAuthError,
+    getAnalysisAuditOperatorDecision,
     loadAnalysisScoreAudit,
     parseAnalysisAuditQuery,
 } from '@/lib/services/analysis/score-audit';
@@ -15,19 +17,56 @@ function privateJson(body: unknown, status = 200) {
     });
 }
 
+const uuidSchema = z.string().uuid();
+
 export async function GET(request: Request) {
-    const supabase = await createClient();
-    const { data: { user }, error } = await supabase.auth.getUser();
-    if (error || !user) return privateJson({ error: 'Unauthorized' }, 401);
-    if (!isAnalysisAuditOperator(user.id)) {
+    let supabase: Awaited<ReturnType<typeof createClient>>;
+    let user: { id: string } | null = null;
+    try {
+        supabase = await createClient();
+        const auth = await supabase.auth.getUser();
+        if (auth.error) {
+            if (classifyOperatorAuthError(auth.error) === 'unauthorized') {
+                return privateJson({ error: 'Unauthorized' }, 401);
+            }
+            return privateJson({ error: 'Authentication unavailable' }, 503);
+        }
+        user = auth.data.user;
+    } catch (caught) {
+        if (classifyOperatorAuthError(caught) === 'unauthorized') {
+            return privateJson({ error: 'Unauthorized' }, 401);
+        }
+        return privateJson({ error: 'Authentication unavailable' }, 503);
+    }
+    if (!user || !uuidSchema.safeParse(user.id).success) {
+        return privateJson({ error: 'Unauthorized' }, 401);
+    }
+
+    let operatorDecision: ReturnType<typeof getAnalysisAuditOperatorDecision>;
+    try {
+        operatorDecision = getAnalysisAuditOperatorDecision(user.id);
+    } catch {
+        return privateJson({ error: 'Authentication unavailable' }, 503);
+    }
+    if (operatorDecision === 'unavailable') {
+        return privateJson({ error: 'Authentication unavailable' }, 503);
+    }
+    if (operatorDecision === 'forbidden') {
         return privateJson({ error: 'Forbidden' }, 403);
     }
+
+    let query: ReturnType<typeof parseAnalysisAuditQuery>;
     try {
-        const query = parseAnalysisAuditQuery(request.url);
+        query = parseAnalysisAuditQuery(request.url);
+    } catch {
+        return privateJson({ error: 'Invalid audit request' }, 400);
+    }
+
+    try {
         const payload = await loadAnalysisScoreAudit(supabaseAdmin, query);
         if (!payload) return privateJson({ error: 'Not found' }, 404);
         return privateJson(payload);
     } catch {
-        return privateJson({ error: 'Invalid audit request' }, 400);
+        return privateJson({ error: 'Audit service unavailable' }, 503);
     }
 }

@@ -9,7 +9,12 @@ import { isRecoverableGeminiResponseError } from '@/lib/services/ai/gemini-gener
 import { getAnalysisPlan } from '@/lib/domain/analysis/plan-catalog';
 import { INSTAGRAM_MEDIA_HOST_SUFFIXES } from '@/lib/services/media/secure-image-fetch';
 import type { InstagramFollower, InstagramPost, InstagramProfile } from '@/lib/types/instagram';
-import { APIFY_CREDENTIAL_SLOTS, type ApifyCredentialSlot, type ProviderCallContext } from '@/lib/services/instagram/providers/types';
+import {
+    APIFY_CREDENTIAL_SLOTS,
+    type ApifyCredentialSlot,
+    type ApifyFreeCredentialSlot,
+    type ProviderCallContext,
+} from '@/lib/services/instagram/providers/types';
 import {
     APIFY_PROFILE_ACTOR_ID,
     APIFY_RELATIONSHIP_ACTOR_ID,
@@ -42,6 +47,7 @@ import {
     createConciergeBatchCasPublisher,
     assertConciergeRelationshipCoverage,
     CONCIERGE_BATCH_RELATIONSHIP_TOKEN_PRIORITY,
+    CONCIERGE_BATCH_PAID_RELATIONSHIP_TOKEN_PRIORITY,
     CONCIERGE_BATCH_TOKEN_PRIORITY,
     isConciergeBatchRelationshipCoverageError,
     runConciergeBatch,
@@ -70,22 +76,11 @@ const ORDER_ID = z.string().uuid();
 const USERNAME = z.string().regex(/^[a-z0-9._]{1,30}$/);
 const APPROVED_SLOTS = CONCIERGE_BATCH_TOKEN_PRIORITY;
 const RELATIONSHIP_SLOTS = CONCIERGE_BATCH_RELATIONSHIP_TOKEN_PRIORITY;
-type ApprovedSlot = typeof APPROVED_SLOTS[number];
-// Widened beyond RELATIONSHIP_SLOTS' own [nonary, secondary] default so
-// CONCIERGE_BATCH_RELATIONSHIP_SLOTS (see relationshipCollectionSlots) can
-// fail over to any balance-holding Apify slot, not just those two.
+const PAID_RELATIONSHIP_SLOTS = CONCIERGE_BATCH_PAID_RELATIONSHIP_TOKEN_PRIORITY;
+type ApprovedSlot = ApifyFreeCredentialSlot;
 type RelationshipSlot = ApifyCredentialSlot;
 type ConciergeProviderSlot = ApprovedSlot | RelationshipSlot;
-// isApifyCredentialSlot (providers/types.ts) deliberately excludes
-// octonary/nonary from its general V2 catalog check; both are valid
-// concierge-batch slots here, so validate against the full slot universe.
-// tenth (a fresh-quota operator slot) is batch-scoped the same way.
-const ALL_APIFY_CREDENTIAL_SLOTS: readonly ApifyCredentialSlot[] = [
-    ...APIFY_CREDENTIAL_SLOTS,
-    'octonary',
-    'nonary',
-    'tenth',
-];
+const ALL_APIFY_CREDENTIAL_SLOTS: readonly ApifyCredentialSlot[] = APIFY_CREDENTIAL_SLOTS;
 const APIFY_RUN_ID = z.string().regex(/^[A-Za-z0-9]{8,64}$/);
 const EMPTY_MANUAL_CSV = 'username,instagram_url,ai_classification,ai_confidence/evidence_status,manual_gender,operator_note\n';
 const RETRY_CODE_PATTERN = /^CONCIERGE_[A-Z0-9_]{2,100}$/;
@@ -1412,6 +1407,18 @@ export function capConciergeRelationshipDestinationLimit(
     return artifact ? Math.min(destinationLimit, artifact.sourceDeclaredCount) : destinationLimit;
 }
 
+/**
+ * Paid relationship collection is an explicit operator capability.  The
+ * default concierge path remains free-only; persisted historical artifacts
+ * may still replay their recorded secondary identity without this capability.
+ */
+export function conciergePaidRelationshipCapabilityEnabled(
+    raw = process.env.CONCIERGE_BATCH_PAID_RELATIONSHIP_CAPABILITY
+        ?? process.env.CONCIERGE_BATCH_ALLOW_PAID_RELATIONSHIPS,
+): boolean {
+    return raw === 'true' || raw === '1';
+}
+
 export function relationshipArtifactProviderContext(
     requestId: string,
     artifact: ConciergeExistingRelationshipArtifact,
@@ -1426,9 +1433,6 @@ export function relationshipArtifactProviderContext(
         credentialSlot: artifact.credentialSlot,
         maxChargeUsd: 100,
         invocationWaitLimitSecs: 240,
-        ...(artifact.credentialSlot === 'nonary' ? {
-            allowConciergeBatchNonary: true as const,
-        } : {}),
         ...(allowTruncation ? {
             allowAdoptedRelationshipTruncation: true as const,
             adoptedRelationshipSourceDeclaredCount: artifact.sourceDeclaredCount,
@@ -1455,7 +1459,7 @@ function readOnlyTokenFor(slot: ConciergeProviderSlot): string | null {
     }
 }
 
-function newCollectionSlots(): readonly ApprovedSlot[] {
+export function newCollectionSlots(): readonly ApprovedSlot[] {
     const raw = process.env.CONCIERGE_BATCH_NEW_COLLECTION_SLOTS?.trim();
     if (!raw) return APPROVED_SLOTS;
     const slots = [...new Set(raw.split(',').map(value => value.trim()).filter(Boolean))];
@@ -1466,20 +1470,27 @@ function newCollectionSlots(): readonly ApprovedSlot[] {
 }
 
 /**
- * Reads CONCIERGE_BATCH_RELATIONSHIP_SLOTS (comma-separated); default the
- * frozen CONCIERGE_BATCH_RELATIONSHIP_TOKEN_PRIORITY ([nonary, secondary]).
- * Mirrors newCollectionSlots' parse -> validate -> throw shape: an operator
- * override for when the default relationship slots are all balance-exhausted
- * (SCRAPING_PROVIDER_START_REJECTED) and interaction/relationship collection
- * (withInteractions' getPostLikers/getPostComments) needs to fail over to a
- * slot with remaining balance.
+ * Reads CONCIERGE_BATCH_RELATIONSHIP_SLOTS (comma-separated).  Ordinary
+ * relationship collection defaults to all nine free slots.  Selecting the
+ * paid secondary slot requires CONCIERGE_BATCH_PAID_RELATIONSHIP_CAPABILITY
+ * (or its compatibility alias) and cannot mix paid and free fallback slots.
+ * Persisted artifacts are handled separately by withProvider's preferred-slot
+ * path, which preserves their historical provider identity exactly.
  */
 export function relationshipCollectionSlots(): readonly RelationshipSlot[] {
     const raw = process.env.CONCIERGE_BATCH_RELATIONSHIP_SLOTS?.trim();
-    if (!raw) return RELATIONSHIP_SLOTS;
+    const paidCapability = conciergePaidRelationshipCapabilityEnabled();
+    if (!raw) return paidCapability ? PAID_RELATIONSHIP_SLOTS : RELATIONSHIP_SLOTS;
     const slots = [...new Set(raw.split(',').map(value => value.trim()).filter(Boolean))];
     if (slots.length === 0 || slots.some(value => !ALL_APIFY_CREDENTIAL_SLOTS.includes(value as ApifyCredentialSlot))) {
         throw new Error('CONCIERGE_BATCH_RELATIONSHIP_SLOTS_INVALID');
+    }
+    const hasSecondary = slots.includes('secondary');
+    if (hasSecondary && !paidCapability) {
+        throw new Error('CONCIERGE_BATCH_PAID_RELATIONSHIP_CAPABILITY_REQUIRED');
+    }
+    if (hasSecondary && slots.length !== 1) {
+        throw new Error('CONCIERGE_BATCH_RELATIONSHIP_WORKLOAD_BOUNDARY_CONFLICT');
     }
     return slots as RelationshipSlot[];
 }
@@ -1502,8 +1513,6 @@ function providerContext(requestId: string, slot: ConciergeProviderSlot): Provid
     return {
         requestId,
         credentialSlot: slot,
-        ...(slot === 'octonary' ? { allowConciergeBatchOctonary: true as const } : {}),
-        ...(slot === 'nonary' ? { allowConciergeBatchNonary: true as const } : {}),
         maxChargeUsd: 100,
         invocationWaitLimitSecs: 240,
         recordUsage: () => undefined,
@@ -1757,7 +1766,7 @@ export async function collectOrder(
             );
             assertConciergeRelationshipCoverage('followers', followersLimit, followers.length);
             return followers;
-        }, followersArtifact?.credentialSlot, RELATIONSHIP_SLOTS),
+        }, followersArtifact?.credentialSlot, followersArtifact ? undefined : relationshipCollectionSlots()),
         withProvider(prepared.sourceRequestId, context, async (slot, provider) => {
             if (!provider.getFollowing) throw new Error('CONCIERGE_RELATIONSHIP_PROVIDER_UNAVAILABLE');
             const following = await provider.getFollowing(
@@ -1773,7 +1782,7 @@ export async function collectOrder(
             );
             assertConciergeRelationshipCoverage('following', followingLimit, following.length);
             return following;
-        }, followingArtifact?.credentialSlot, RELATIONSHIP_SLOTS),
+        }, followingArtifact?.credentialSlot, followingArtifact ? undefined : relationshipCollectionSlots()),
     ]);
     assertConciergeRelationshipCoverage('followers', followersLimit, followers.length);
     assertConciergeRelationshipCoverage('following', followingLimit, following.length);

@@ -32,6 +32,7 @@ import {
     recoverAnalysisV2SchedulerOperations,
 } from './v2-ai-scheduler-operation-store';
 import { recoverQueuedAnalysisScoreAudits } from './score-audit';
+import { recoverQueuedAnalysisOrderAudits } from './order-audit-bundle';
 import { supabaseAdmin } from '@/lib/supabase/admin';
 import { operationalLogger } from '@/lib/observability/server';
 import {
@@ -105,6 +106,7 @@ type GeminiCutoffLeaseReaper = () => Promise<number>;
 type SchedulerOperationRecovery = () => Promise<number>;
 type SchedulerGeminiLeaseReaper = () => Promise<number>;
 type ScoreAuditRecovery = () => Promise<void>;
+type OrderAuditRecovery = () => Promise<void>;
 type BetaCreditMaintenance = () => Promise<number>;
 type BetaCreditRefresh = () => Promise<void>;
 type ProviderAdmissionRecovery = () => Promise<AnalysisProviderAdmissionRecoverySummary>;
@@ -248,6 +250,7 @@ export async function recoverAnalysisV2Jobs(
         recoverSchedulerOperations?: SchedulerOperationRecovery;
         reapSchedulerGeminiLeases?: SchedulerGeminiLeaseReaper;
         recoverScoreAudits?: ScoreAuditRecovery;
+        recoverOrderAudits?: OrderAuditRecovery;
         recoverBetaCredit?: BetaCreditMaintenance;
         archiveBetaCredit?: BetaCreditMaintenance;
         refreshBetaCredit?: BetaCreditRefresh;
@@ -502,12 +505,21 @@ export async function recoverAnalysisV2Jobs(
             }
         }
     }
-    // The durable audit outbox drains only after provider safety cleanup and reconciliation.
-    // A hung audit cannot extend this recovery pass beyond the small fixed budget.
+    // Durable audit outboxes drain only after provider safety cleanup and reconciliation. A hung
+    // audit cannot extend this recovery pass beyond the small fixed budget.
     try {
         await boundedBestEffort(
             dependencies.recoverScoreAudits
                 ?? (() => recoverQueuedAnalysisScoreAudits(supabaseAdmin, 5)),
+            scoreAuditTimeoutMs,
+        );
+    } catch {
+        // Audit observability never changes analysis/provider cleanup success.
+    }
+    try {
+        await boundedBestEffort(
+            dependencies.recoverOrderAudits
+                ?? (() => recoverQueuedAnalysisOrderAudits(supabaseAdmin, 5)),
             scoreAuditTimeoutMs,
         );
     } catch {

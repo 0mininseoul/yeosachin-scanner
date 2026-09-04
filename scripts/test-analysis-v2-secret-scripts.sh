@@ -221,7 +221,7 @@ GOOGLE_CLOUD_PROJECT=test-project
 GOOGLE_CLOUD_LOCATION=global
 ANALYSIS_V2_MEDIA_ARTIFACT_BUCKET=test-project-analysis-v2-media
 ANALYSIS_V2_APIFY_API_TOKEN_SLOT=quinary
-PREFLIGHT_APIFY_API_TOKEN_SLOTS=primary,quinary,senary
+PREFLIGHT_APIFY_API_TOKEN_SLOTS=primary,tertiary,quaternary,quinary,senary,septenary,octonary,nonary,tenth
 ANALYSIS_V2_INSTAGRAM_ROUTE=apify_v1
 ANALYSIS_V2_AUTHORIZED_TEST_SHARDING_ENABLED=false
 BETATEST_FREE_POOL_ENABLED=false
@@ -927,7 +927,7 @@ env \
 assert_contains "$temp_dir/generated/analysis-v2-runtime.yaml" \
   'ANALYSIS_V2_APIFY_API_TOKEN_SLOT: "senary"'
 assert_contains "$temp_dir/generated/analysis-v2-runtime.yaml" \
-  'PREFLIGHT_APIFY_API_TOKEN_SLOTS: "primary,quinary,senary"'
+  'PREFLIGHT_APIFY_API_TOKEN_SLOTS: "primary,tertiary,quaternary,quinary,senary,septenary,octonary,nonary,tenth"'
 assert_contains "$temp_dir/generated/analysis-v2-runtime.yaml" \
   'ANALYSIS_V2_AUTHORIZED_TEST_SHARDING_ENABLED: "false"'
 assert_contains "$temp_dir/generated/analysis-v2-runtime.yaml" \
@@ -1100,7 +1100,7 @@ for invalid_preflight_pool in \
   fi
   if [[ -n "$invalid_preflight_pool" ]]; then
     assert_contains "$temp_dir/invalid-preflight-pool-${#invalid_preflight_pool}.out" \
-      "PREFLIGHT_APIFY_API_TOKEN_SLOTS must be exactly primary,quinary,senary"
+      "PREFLIGHT_APIFY_API_TOKEN_SLOTS must be exactly primary,tertiary,quaternary,quinary,senary,septenary,octonary,nonary,tenth"
   else
     assert_contains "$temp_dir/invalid-preflight-pool-${#invalid_preflight_pool}.out" \
       "required manifest value is missing or invalid: PREFLIGHT_APIFY_API_TOKEN_SLOTS"

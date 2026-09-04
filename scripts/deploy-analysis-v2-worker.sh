@@ -31,9 +31,11 @@ readonly -a APIFY_TOKEN_SLOTS=(
   quinary
   senary
   septenary
+  octonary
+  nonary
   tenth
 )
-readonly PREFLIGHT_APIFY_API_TOKEN_SLOTS_VALUE="primary,quinary,senary"
+readonly PREFLIGHT_APIFY_API_TOKEN_SLOTS_VALUE="primary,tertiary,quaternary,quinary,senary,septenary,octonary,nonary,tenth"
 
 mode="apply"
 reconcile_iam="false"
@@ -267,12 +269,12 @@ validate_slot() {
   for allowed in "${APIFY_TOKEN_SLOTS[@]}"; do
     [[ "$1" != "$allowed" ]] || return 0
   done
-  die "ANALYSIS_V2_APIFY_API_TOKEN_SLOT must be primary, secondary, tertiary, quaternary, quinary, senary, septenary, or tenth"
+  die "ANALYSIS_V2_APIFY_API_TOKEN_SLOT must be one of the ten canonical Apify slots"
 }
 
 validate_preflight_apify_token_slots() {
   [[ "$1" == "$PREFLIGHT_APIFY_API_TOKEN_SLOTS_VALUE" ]] \
-    || die "PREFLIGHT_APIFY_API_TOKEN_SLOTS must be exactly primary,quinary,senary"
+    || die "PREFLIGHT_APIFY_API_TOKEN_SLOTS must be exactly primary,tertiary,quaternary,quinary,senary,septenary,octonary,nonary,tenth"
 }
 
 validate_instagram_route() {
@@ -338,8 +340,8 @@ parse_prune_apify_secret_refs() {
   [[ -n "$raw" ]] || return 0
   prune_apify_secret_refs_enabled="true"
   IFS=',' read -r -a slots <<<"$raw"
-  ((${#slots[@]} > 0 && ${#slots[@]} <= 6)) \
-    || die "--prune-apify-secret-refs requires one through six exact non-primary slots"
+  ((${#slots[@]} > 0 && ${#slots[@]} <= 9)) \
+    || die "--prune-apify-secret-refs requires one through nine exact non-primary slots"
   for slot in "${slots[@]}"; do
     [[ -n "$slot" && "$slot" != "primary" ]] \
       || die "--prune-apify-secret-refs must not include the selected primary slot"
@@ -368,8 +370,8 @@ parse_clear_apify_secret_ref_prune_fence() {
   [[ -n "$raw" ]] || return 0
   clear_apify_secret_ref_prune_fence_enabled="true"
   IFS=',' read -r -a slots <<<"$raw"
-  ((${#slots[@]} > 0 && ${#slots[@]} <= 6)) \
-    || die "--clear-apify-secret-ref-prune-fence requires one through six exact non-primary slots"
+  ((${#slots[@]} > 0 && ${#slots[@]} <= 9)) \
+    || die "--clear-apify-secret-ref-prune-fence requires one through nine exact non-primary slots"
   for slot in "${slots[@]}"; do
     [[ -n "$slot" && "$slot" != "primary" ]] \
       || die "--clear-apify-secret-ref-prune-fence must contain only non-primary slots"
@@ -644,6 +646,8 @@ service_runtime_config_matches() {
         {env: "APIFY_QUINARY_API_TOKEN", secret: "ai-baram-v2-apify-quinary"},
         {env: "APIFY_SENARY_API_TOKEN", secret: "ai-baram-v2-apify-senary"},
         {env: "APIFY_SEPTENARY_API_TOKEN", secret: "ai-baram-v2-apify-septenary"},
+        {env: "APIFY_OCTONARY_API_TOKEN", secret: "ai-baram-v2-apify-octonary"},
+        {env: "APIFY_NONARY_API_TOKEN", secret: "ai-baram-v2-apify-nonary"},
         {env: "APIFY_TENTH_API_TOKEN", secret: "ai-baram-v2-apify-tenth"}
       ];
       def apify_env_names: [apify_specs[].env];
@@ -730,7 +734,7 @@ service_runtime_config_matches() {
         and result_image_config_matches
         and (apify_refs == ($expected_apify_refs | sort_by(.env)))
         and (apify_refs | length) >= 1
-        and (apify_refs | length) <= 8
+        and (apify_refs | length) <= 10
         and ([env[]
           | select(.name as $name | apify_env_names | index($name))
           | select(has("value"))] | length) == 0
@@ -841,6 +845,8 @@ service_has_forbidden_plaintext_credential() {
       "APIFY_QUINARY_API_TOKEN",
       "APIFY_SENARY_API_TOKEN",
       "APIFY_SEPTENARY_API_TOKEN",
+      "APIFY_OCTONARY_API_TOKEN",
+      "APIFY_NONARY_API_TOKEN",
       "APIFY_TENTH_API_TOKEN"
     ];
     [containers[]?.env[]?
@@ -946,6 +952,8 @@ apify_identity_for_existing_config() {
         {slot: "quinary", env: "APIFY_QUINARY_API_TOKEN", secret: "ai-baram-v2-apify-quinary"},
         {slot: "senary", env: "APIFY_SENARY_API_TOKEN", secret: "ai-baram-v2-apify-senary"},
         {slot: "septenary", env: "APIFY_SEPTENARY_API_TOKEN", secret: "ai-baram-v2-apify-septenary"},
+        {slot: "octonary", env: "APIFY_OCTONARY_API_TOKEN", secret: "ai-baram-v2-apify-octonary"},
+        {slot: "nonary", env: "APIFY_NONARY_API_TOKEN", secret: "ai-baram-v2-apify-nonary"},
         {slot: "tenth", env: "APIFY_TENTH_API_TOKEN", secret: "ai-baram-v2-apify-tenth"}
       ];
       [env[] | select(.name | test("^APIFY_.*_API_TOKEN$"))] as $entries
@@ -957,7 +965,7 @@ apify_identity_for_existing_config() {
       | [$entries[] | select(.name == ($runtime_specs[0].env // ""))]
           as $runtime_refs
       | if (containers | length) != 1 then error("invalid container count")
-        elif ($entries | length) < 1 or ($entries | length) > 8
+        elif ($entries | length) < 1 or ($entries | length) > 10
           then error("invalid Apify ref count")
         elif ($names | length) != ($names | unique | length)
           then error("duplicate Apify ref")
@@ -1258,6 +1266,8 @@ prepare_apify_secret_assignments() {
           {slot: "quinary", env: "APIFY_QUINARY_API_TOKEN", secret: "ai-baram-v2-apify-quinary"},
           {slot: "senary", env: "APIFY_SENARY_API_TOKEN", secret: "ai-baram-v2-apify-senary"},
           {slot: "septenary", env: "APIFY_SEPTENARY_API_TOKEN", secret: "ai-baram-v2-apify-septenary"},
+          {slot: "octonary", env: "APIFY_OCTONARY_API_TOKEN", secret: "ai-baram-v2-apify-octonary"},
+          {slot: "nonary", env: "APIFY_NONARY_API_TOKEN", secret: "ai-baram-v2-apify-nonary"},
           {slot: "tenth", env: "APIFY_TENTH_API_TOKEN", secret: "ai-baram-v2-apify-tenth"}
         ];
         def entries($name): [env[] | select(.name == $name)];
@@ -1342,6 +1352,8 @@ require_canonical_apify_secret_inventory() {
       {env: "APIFY_QUINARY_API_TOKEN", secret: "ai-baram-v2-apify-quinary"},
       {env: "APIFY_SENARY_API_TOKEN", secret: "ai-baram-v2-apify-senary"},
       {env: "APIFY_SEPTENARY_API_TOKEN", secret: "ai-baram-v2-apify-septenary"},
+      {env: "APIFY_OCTONARY_API_TOKEN", secret: "ai-baram-v2-apify-octonary"},
+      {env: "APIFY_NONARY_API_TOKEN", secret: "ai-baram-v2-apify-nonary"},
       {env: "APIFY_TENTH_API_TOKEN", secret: "ai-baram-v2-apify-tenth"}
     ];
     ($refs | length) == (specs | length)
@@ -1352,7 +1364,7 @@ require_canonical_apify_secret_inventory() {
       ))
       and ([ $refs[].env ] | sort) == ([ specs[].env ] | sort)
   ' >/dev/null \
-    || die "canonical analysis-worker requires exactly all eight Apify Secret Manager refs"
+    || die "canonical analysis-worker requires exactly all ten Apify Secret Manager refs"
 }
 
 call_apify_prune_fence_rpc() {

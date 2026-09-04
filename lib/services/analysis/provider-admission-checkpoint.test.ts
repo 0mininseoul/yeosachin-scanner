@@ -13,6 +13,7 @@ import {
     type AnalysisProviderAdmissionStore,
 } from './provider-admission-store';
 import { withAnalysisProviderAdmissionCheckpoint } from './provider-admission-checkpoint';
+import { APIFY_FREE_CREDENTIAL_SLOTS } from '@/lib/services/instagram/providers/types';
 
 // gitleaks:allow -- deterministic UUID fixtures
 const requestId = '11111111-1111-4111-8111-111111111111';
@@ -80,6 +81,51 @@ const enabledEnv = {
 };
 
 describe('provider admission checkpoint', () => {
+    it.each(APIFY_FREE_CREDENTIAL_SLOTS)(
+        'maps the preflight free alias %s to its durable admission budget',
+        async credentialSlot => {
+            const admission = store();
+            const base = checkpoint({ credentialSlot });
+            const wrapped = await Promise.resolve(withAnalysisProviderAdmissionCheckpoint({
+                checkpoint: base,
+                storedStatus: null,
+                workloadRole: 'preflight',
+                requestId,
+                jobKey: 'preflight:provider',
+                operationKey,
+                claimToken,
+                env: enabledEnv,
+                store: admission,
+            }));
+
+            await wrapped.onBeforeRunStart?.({ ...identity, credentialSlot });
+
+            expect(admission.acquire).toHaveBeenCalledWith(expect.objectContaining({
+                credentialSlot,
+                budgetKey: `preflight:apify:${credentialSlot}`,
+            }));
+        },
+    );
+
+    it.each(['secondary', 'unknown'] as const)(
+        'rejects %s as a preflight admission credential',
+        credentialSlot => {
+            expect(() => withAnalysisProviderAdmissionCheckpoint({
+                checkpoint: checkpoint({
+                    credentialSlot: credentialSlot as ProviderRunCheckpoint['credentialSlot'],
+                }),
+                storedStatus: null,
+                workloadRole: 'preflight',
+                requestId,
+                jobKey: 'preflight:provider',
+                operationKey,
+                claimToken,
+                env: enabledEnv,
+                store: store(),
+            })).toThrow('ANALYSIS_PROVIDER_ADMISSION_CREDENTIAL_FORBIDDEN');
+        },
+    );
+
     it('replays one unknown acquire persistence failure before reserving a provider run', async () => {
         const admission = store({
             acquire: vi.fn()

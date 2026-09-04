@@ -28,7 +28,10 @@ import {
 } from '@/lib/services/analysis/v2-provider-run-store';
 import { RevenueCostOperationStore } from '@/lib/services/analysis/revenue-cost-operation-store';
 import type { InstagramProfile } from '@/lib/types/instagram';
-import { APIFY_CREDENTIAL_SLOTS } from './types';
+import {
+    APIFY_CREDENTIAL_SLOTS,
+    APIFY_FREE_CREDENTIAL_SLOTS,
+} from './types';
 
 function rejectedStartError(
     statusCode = 402,
@@ -141,12 +144,18 @@ function adoptedRelationshipContext() {
 }
 
 describe('apifyProvider', () => {
-    it('deterministically distributes preflight runs across three dedicated credentials', () => {
+    it('deterministically distributes preflight runs across all nine free credentials', () => {
         const env = {
             APIFY_PRIMARY_API_TOKEN: 'primary-token',
+            APIFY_TERTIARY_API_TOKEN: 'tertiary-token',
+            APIFY_QUATERNARY_API_TOKEN: 'quaternary-token',
             APIFY_QUINARY_API_TOKEN: 'quinary-token',
             APIFY_SENARY_API_TOKEN: 'senary-token',
-            PREFLIGHT_APIFY_API_TOKEN_SLOTS: 'primary,quinary,senary',
+            APIFY_SEPTENARY_API_TOKEN: 'septenary-token',
+            APIFY_OCTONARY_API_TOKEN: 'octonary-token',
+            APIFY_NONARY_API_TOKEN: 'nonary-token',
+            APIFY_TENTH_API_TOKEN: 'tenth-token',
+            PREFLIGHT_APIFY_API_TOKEN_SLOTS: APIFY_FREE_CREDENTIAL_SLOTS.join(','),
         };
         const ids = Array.from({ length: 100 }, (_, index) =>
             `123e4567-e89b-42d3-a456-${index.toString().padStart(12, '0')}`
@@ -155,14 +164,12 @@ describe('apifyProvider', () => {
 
         expect(selectPreflightApifyCredentialSlot(ids[0], env))
             .toBe(selectPreflightApifyCredentialSlot(ids[0].toUpperCase(), env));
-        expect(new Set(selected)).toEqual(
-            new Set(['primary', 'quinary', 'senary'])
-        );
-        for (const slot of ['primary', 'quinary', 'senary'] as const) {
+        expect(new Set(selected)).toEqual(new Set(APIFY_FREE_CREDENTIAL_SLOTS));
+        for (const slot of APIFY_FREE_CREDENTIAL_SLOTS) {
             expect(selected.filter(candidate => candidate === slot).length)
-                .toBeGreaterThanOrEqual(20);
+                .toBeGreaterThanOrEqual(5);
             expect(selected.filter(candidate => candidate === slot).length)
-                .toBeLessThanOrEqual(45);
+                .toBeLessThanOrEqual(20);
         }
     });
 
@@ -170,18 +177,23 @@ describe('apifyProvider', () => {
         const preflightId = '123e4567-e89b-42d3-a456-426614174000';
         const env = {
             APIFY_PRIMARY_API_TOKEN: 'primary-token',
+            APIFY_TERTIARY_API_TOKEN: 'tertiary-token',
+            APIFY_QUATERNARY_API_TOKEN: 'quaternary-token',
             APIFY_QUINARY_API_TOKEN: 'quinary-token',
             APIFY_SENARY_API_TOKEN: 'senary-token',
-            PREFLIGHT_APIFY_API_TOKEN_SLOTS: 'primary,quinary,senary',
-            ANALYSIS_V2_APIFY_API_TOKEN_SLOT: 'tenth',
+            APIFY_SEPTENARY_API_TOKEN: 'septenary-token',
+            APIFY_OCTONARY_API_TOKEN: 'octonary-token',
+            APIFY_NONARY_API_TOKEN: 'nonary-token',
             APIFY_TENTH_API_TOKEN: 'tenth-token',
+            PREFLIGHT_APIFY_API_TOKEN_SLOTS: APIFY_FREE_CREDENTIAL_SLOTS.join(','),
+            ANALYSIS_V2_APIFY_API_TOKEN_SLOT: 'tenth',
         };
         const withoutGlobalOverride = { ...env };
         Reflect.deleteProperty(withoutGlobalOverride, 'ANALYSIS_V2_APIFY_API_TOKEN_SLOT');
 
         expect(selectPreflightApifyCredentialSlot(preflightId, env))
             .toBe(selectPreflightApifyCredentialSlot(preflightId, withoutGlobalOverride));
-        expect(['primary', 'quinary', 'senary']).toContain(
+        expect(APIFY_FREE_CREDENTIAL_SLOTS).toContain(
             selectPreflightApifyCredentialSlot(preflightId, env)
         );
     });
@@ -189,17 +201,23 @@ describe('apifyProvider', () => {
     it.each([
         ['missing', undefined],
         ['blank', ''],
-        ['reordered', 'senary,quinary,primary'],
-        ['duplicate', 'primary,quinary,quinary'],
-        ['extra', 'primary,quinary,senary,secondary'],
-        ['invalid', 'primary,quinary,unknown'],
-        ['secondary', 'primary,secondary,senary'],
-        ['tenth', 'primary,quinary,tenth'],
+        ['reordered', 'tertiary,primary,quaternary,quinary,senary,septenary,octonary,nonary,tenth'],
+        ['duplicate', 'primary,tertiary,tertiary,quaternary,quinary,senary,septenary,octonary,nonary,tenth'],
+        ['extra', 'primary,tertiary,quaternary,quinary,senary,septenary,octonary,nonary,tenth,secondary'],
+        ['invalid', 'primary,tertiary,quaternary,quinary,senary,septenary,octonary,nonary,unknown'],
+        ['secondary', 'primary,secondary,tertiary,quaternary,quinary,senary,septenary,octonary,nonary,tenth'],
+        ['missing-free-slot', 'primary,tertiary,quaternary,quinary,senary,septenary,octonary,nonary'],
     ] as const)('rejects a %s preflight slot-list configuration', (_label, slotList) => {
         const env = {
             APIFY_PRIMARY_API_TOKEN: 'primary-token',
+            APIFY_TERTIARY_API_TOKEN: 'tertiary-token',
+            APIFY_QUATERNARY_API_TOKEN: 'quaternary-token',
             APIFY_QUINARY_API_TOKEN: 'quinary-token',
             APIFY_SENARY_API_TOKEN: 'senary-token',
+            APIFY_SEPTENARY_API_TOKEN: 'septenary-token',
+            APIFY_OCTONARY_API_TOKEN: 'octonary-token',
+            APIFY_NONARY_API_TOKEN: 'nonary-token',
+            APIFY_TENTH_API_TOKEN: 'tenth-token',
             ...(slotList === undefined
                 ? {}
                 : { PREFLIGHT_APIFY_API_TOKEN_SLOTS: slotList }),
@@ -213,14 +231,26 @@ describe('apifyProvider', () => {
 
     it.each([
         ['primary', 'APIFY_PRIMARY_API_TOKEN'],
+        ['tertiary', 'APIFY_TERTIARY_API_TOKEN'],
+        ['quaternary', 'APIFY_QUATERNARY_API_TOKEN'],
         ['quinary', 'APIFY_QUINARY_API_TOKEN'],
         ['senary', 'APIFY_SENARY_API_TOKEN'],
+        ['septenary', 'APIFY_SEPTENARY_API_TOKEN'],
+        ['octonary', 'APIFY_OCTONARY_API_TOKEN'],
+        ['nonary', 'APIFY_NONARY_API_TOKEN'],
+        ['tenth', 'APIFY_TENTH_API_TOKEN'],
     ] as const)('rejects a preflight pool with an empty %s token', (_slot, tokenName) => {
         const env: Record<string, string | undefined> = {
             APIFY_PRIMARY_API_TOKEN: 'primary-token',
+            APIFY_TERTIARY_API_TOKEN: 'tertiary-token',
+            APIFY_QUATERNARY_API_TOKEN: 'quaternary-token',
             APIFY_QUINARY_API_TOKEN: 'quinary-token',
             APIFY_SENARY_API_TOKEN: 'senary-token',
-            PREFLIGHT_APIFY_API_TOKEN_SLOTS: 'primary,quinary,senary',
+            APIFY_SEPTENARY_API_TOKEN: 'septenary-token',
+            APIFY_OCTONARY_API_TOKEN: 'octonary-token',
+            APIFY_NONARY_API_TOKEN: 'nonary-token',
+            APIFY_TENTH_API_TOKEN: 'tenth-token',
+            PREFLIGHT_APIFY_API_TOKEN_SLOTS: APIFY_FREE_CREDENTIAL_SLOTS.join(','),
         };
         env[tokenName] = ' ';
 
@@ -239,6 +269,8 @@ describe('apifyProvider', () => {
             'quinary',
             'senary',
             'septenary',
+            'octonary',
+            'nonary',
             'tenth',
         ]);
         const env = {
@@ -249,6 +281,8 @@ describe('apifyProvider', () => {
             APIFY_QUINARY_API_TOKEN: 'quinary-token',
             APIFY_SENARY_API_TOKEN: 'senary-token',
             APIFY_SEPTENARY_API_TOKEN: 'septenary-token',
+            APIFY_OCTONARY_API_TOKEN: 'octonary-token',
+            APIFY_NONARY_API_TOKEN: 'nonary-token',
             APIFY_TENTH_API_TOKEN: 'tenth-token',
         };
         expect(selectApifyApiToken(env)).toBe('primary-token');
@@ -269,6 +303,8 @@ describe('apifyProvider', () => {
             'quinary',
             'senary',
             'septenary',
+            'octonary',
+            'nonary',
             'tenth',
         ] as const) {
             const selected = { ...env, ANALYSIS_V2_APIFY_API_TOKEN_SLOT: slot };
@@ -286,7 +322,7 @@ describe('apifyProvider', () => {
             .toBe('legacy-primary-token');
     });
 
-    it('keeps nonary outside global slot validation unless concierge opts in', async () => {
+    it('accepts every canonical slot for a stored provider run without a concierge carve-out', async () => {
         const options = {
             logicalProvider: 'apify' as const,
             credentialSlot: 'primary' as const,
@@ -294,27 +330,14 @@ describe('apifyProvider', () => {
             maxItems: 1,
             maxTotalChargeUsd: 0.1,
         };
-        const { client: rejectedClient } = mockClient([]);
+        const { client: acceptedClient } = mockClient([]);
         await expect(startOrResumeApifyActor(
-            rejectedClient,
+            acceptedClient,
             APIFY_RELATIONSHIP_ACTOR_ID,
             {},
             options,
             {
                 credentialSlot: 'nonary',
-                recordUsage: vi.fn(),
-            },
-        )).rejects.toThrow('SCRAPING_RUN_CHECKPOINT_ERROR: stored credential slot is invalid.');
-
-        const { client: allowedClient } = mockClient([]);
-        await expect(startOrResumeApifyActor(
-            allowedClient,
-            APIFY_RELATIONSHIP_ACTOR_ID,
-            {},
-            options,
-            {
-                credentialSlot: 'nonary',
-                allowConciergeBatchNonary: true,
                 recordUsage: vi.fn(),
             },
         )).resolves.toMatchObject({ status: 'SUCCEEDED' });

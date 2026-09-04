@@ -112,6 +112,26 @@ describe('replay capture read-only repository', () => {
         expect(descriptor).not.toHaveProperty('target');
     });
 
+    it('preserves the octonary and nonary beta-free aliases during replay', async () => {
+        for (const credentialSlot of ['octonary', 'nonary'] as const) {
+            const run = {
+                actorId: 'apify/instagram-profile-scraper', credentialSlot,
+                runId: 'BetaRun1', status: 'succeeded', operationKey: 'target-profile-fallback',
+            } as const;
+            const rpc = vi.fn().mockResolvedValue({
+                data: {
+                    requestId, preflightId, targetUsername: `replay_${'b'.repeat(23)}`,
+                    selectedPlanId: 'standard',
+                    policyVersions: { pipeline: 'v2', risk: 'risk-policy-v2.5', aiStage: 'ai-stage-policy-v2.10', scheduler: 'ai-scheduler-v1' },
+                    preflightRuns: [run], providerRuns: [{ ...run, runId: 'BetaRun2', operationKey: `profile-fallback:${'a'.repeat(64)}` }],
+                }, error: null,
+            });
+            await expect(loadBetatestFreePoolReplayCaptureDescriptor(
+                { rpc } satisfies BetatestFreePoolReplaySourceRpcClient, requestId,
+            )).resolves.toMatchObject({ sourceKind: 'betatest_free_pool' });
+        }
+    });
+
     it('rejects beta sources that try the explicitly forbidden secondary slot', async () => {
         await expect(loadBetatestFreePoolReplayCaptureDescriptor({
             rpc: vi.fn().mockResolvedValue({

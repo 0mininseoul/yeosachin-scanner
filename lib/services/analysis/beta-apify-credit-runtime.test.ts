@@ -45,6 +45,19 @@ function slots(headroomUsd = 1) {
     }));
 }
 
+function unhealthySlot(credentialSlot: (typeof BETA_APIFY_FREE_CREDENTIAL_SLOTS)[number]) {
+    return {
+        credentialSlot,
+        monthlyLimitUsd: null,
+        monthlyUsageUsd: null,
+        billingCycleStartAt: null,
+        billingCycleEndAt: null,
+        observedAt: null,
+        healthState: 'unhealthy' as const,
+        effectiveHeadroomUsd: null,
+    };
+}
+
 function rpcClient(result: unknown, error: { message?: string } | null = null) {
     return { rpc: vi.fn().mockResolvedValue({ data: result, error }) } satisfies BetaApifyPoolStoreClient;
 }
@@ -64,7 +77,7 @@ describe('beta Apify runtime foundation', () => {
         })).toThrow(BETA_APIFY_RUNTIME_CONFIG_ERROR);
     });
 
-    it('serializes only exact-six sanitized snapshots and validates the final RPC response', async () => {
+    it('serializes only exact-nine sanitized snapshots and validates the final RPC response', async () => {
         const client = rpcClient(slots());
         const store = createBetaApifyCreditPoolStore(client);
         await expect(store.upsertSnapshots(slots())).resolves.toEqual(slots());
@@ -189,6 +202,64 @@ describe('beta Apify runtime foundation', () => {
             effectiveHeadrooms: slots(0),
             targetProfileSlot: 'primary',
             selectedPlanId: 'plus',
+        })).toThrow(BETA_APIFY_POOL_CAPACITY_ERROR);
+    });
+
+    it('treats unhealthy, missing, stale, manually excluded, and null-headroom rows as zero candidates', () => {
+        const unavailable = new Set(['quinary', 'senary', 'septenary', 'octonary', 'nonary']);
+        const input = slots(10).map(row => {
+            if (row.credentialSlot === 'quinary' || row.credentialSlot === 'nonary') {
+                return unhealthySlot(row.credentialSlot);
+            }
+            if (row.credentialSlot === 'senary') {
+                return { ...row, freshnessState: 'missing' as const };
+            }
+            if (row.credentialSlot === 'septenary') {
+                return { ...row, freshnessState: 'stale' as const };
+            }
+            if (row.credentialSlot === 'octonary') {
+                return { ...row, manuallyExcluded: true, effectiveHeadroomUsd: null };
+            }
+            return row;
+        });
+        const planned = planBetaApifyCreditAllocation({
+            effectiveHeadrooms: input,
+            targetProfileSlot: 'primary',
+            selectedPlanId: 'basic',
+        });
+
+        expect(Object.values(planned.operationSlotMap).every(slot => !unavailable.has(slot)))
+            .toBe(true);
+    });
+
+    it('plans with eight healthy peers when one exact-nine row is unhealthy', () => {
+        const input = slots(10).map(row => (
+            row.credentialSlot === 'quinary' ? unhealthySlot(row.credentialSlot) : row
+        ));
+        const planned = planBetaApifyCreditAllocation({
+            effectiveHeadrooms: input,
+            targetProfileSlot: 'primary',
+            selectedPlanId: 'basic',
+        });
+
+        expect(Object.values(planned.operationSlotMap)).not.toContain('quinary');
+    });
+
+    it('returns capacity unavailable when every exact-nine row is unhealthy', () => {
+        expect(() => planBetaApifyCreditAllocation({
+            effectiveHeadrooms: BETA_APIFY_FREE_CREDENTIAL_SLOTS.map(unhealthySlot),
+            targetProfileSlot: 'primary',
+            selectedPlanId: 'basic',
+        })).toThrow(BETA_APIFY_POOL_CAPACITY_ERROR);
+    });
+
+    it('never allocates an unhealthy target slot even when healthy peers have capacity', () => {
+        expect(() => planBetaApifyCreditAllocation({
+            effectiveHeadrooms: slots(10).map(row => (
+                row.credentialSlot === 'quinary' ? unhealthySlot(row.credentialSlot) : row
+            )),
+            targetProfileSlot: 'quinary',
+            selectedPlanId: 'basic',
         })).toThrow(BETA_APIFY_POOL_CAPACITY_ERROR);
     });
 

@@ -57,8 +57,11 @@ describe('ambiguous preflight start resolution CLI options', () => {
         });
     });
 
-    it('accepts senary, septenary, and tenth as V2 slots and rejects octonary', () => {
-        for (const credentialSlot of ['senary', 'septenary', 'tenth'] as const) {
+    it('accepts every named Apify slot and rejects unknown slots', () => {
+        for (const credentialSlot of [
+            'primary', 'secondary', 'tertiary', 'quaternary', 'quinary',
+            'senary', 'septenary', 'octonary', 'nonary', 'tenth',
+        ] as const) {
             expect(parseAmbiguousStartOptions(resolveArguments.map((argument) =>
                 argument === '--credential-slot=quinary'
                     ? `--credential-slot=${credentialSlot}`
@@ -70,7 +73,7 @@ describe('ambiguous preflight start resolution CLI options', () => {
         }
         expect(() => parseAmbiguousStartOptions(resolveArguments.map((argument) =>
             argument === '--credential-slot=quinary'
-                ? '--credential-slot=octonary'
+                ? '--credential-slot=eleventh'
                 : argument
         ))).toThrow(/unsupported --credential-slot/);
     });

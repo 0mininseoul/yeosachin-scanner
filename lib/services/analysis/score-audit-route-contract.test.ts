@@ -12,8 +12,8 @@ describe('analysis audit operator route privacy contract', () => {
     it('authenticates the Supabase session before the service-role audit RPC', () => {
         expect(route).toContain('createClient');
         expect(route).toContain('supabase.auth.getUser()');
-        expect(route).toContain('isAnalysisAuditOperator(user.id)');
-        expect(route.slice(route.indexOf('isAnalysisAuditOperator(user.id)')))
+        expect(route).toContain('getAnalysisAuditOperatorDecision(user.id)');
+        expect(route.slice(route.indexOf('getAnalysisAuditOperatorDecision(user.id)')))
             .toContain('loadAnalysisScoreAudit(supabaseAdmin, query)');
         expect(route).toContain("'Cache-Control': 'private, no-store'");
         expect(route).toContain("privateJson({ error: 'Unauthorized' }, 401)");

@@ -14,6 +14,7 @@ import {
     analysisProviderAdmissionStore,
     isAnalysisProviderAdmissionEnabled,
 } from './provider-admission-store';
+import { APIFY_FREE_CREDENTIAL_SLOTS } from '@/lib/services/instagram/providers/types';
 
 type ActiveProviderRunStatus = 'starting' | 'running';
 
@@ -45,7 +46,9 @@ function budgetKey(input: Pick<
     'workloadRole' | 'operationKey'
 > & { credentialSlot: string }): string {
     if (input.workloadRole === 'preflight') {
-        if (!['primary', 'quinary', 'senary'].includes(input.credentialSlot)) {
+        if (!APIFY_FREE_CREDENTIAL_SLOTS.includes(
+            input.credentialSlot as typeof APIFY_FREE_CREDENTIAL_SLOTS[number]
+        )) {
             throw new Error('ANALYSIS_PROVIDER_ADMISSION_CREDENTIAL_FORBIDDEN');
         }
         return `preflight:apify:${input.credentialSlot}`;

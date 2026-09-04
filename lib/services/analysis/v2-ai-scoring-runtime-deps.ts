@@ -498,6 +498,7 @@ export function createAnalysisV2ReverseLikeCollector(input: {
                         claimToken: claim.claimToken,
                         env,
                         store: providerAdmissionStore,
+                        leaseSeconds: 30,
                     }),
                 };
                 const likers = await adapter.getPostLikers(

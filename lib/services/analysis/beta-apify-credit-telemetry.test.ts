@@ -50,7 +50,7 @@ describe('beta Apify credit telemetry boundary', () => {
             actualUsd: -1,
             releasedUsd: Number.POSITIVE_INFINITY,
             settlementLagMs: -1,
-            staleSnapshotCount: 7,
+            staleSnapshotCount: 10,
         });
 
         const input = emit.mock.calls[0]?.[0];
@@ -63,7 +63,7 @@ describe('beta Apify credit telemetry boundary', () => {
         expect(sanitizeOperationalEvent(input).fields).not.toHaveProperty('reservation_usd');
         expect(sanitizeOperationalEvent({
             event: 'betatest_apify_credit.pool_health_observed',
-            severity: 'warn', fields: { stale_snapshot_count: 7 },
+            severity: 'warn', fields: { stale_snapshot_count: 10 },
         }).fields).not.toHaveProperty('stale_snapshot_count');
     });
 
