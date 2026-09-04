@@ -15,7 +15,11 @@ import {
     type StoredPreflightProviderRun,
 } from './preflight-provider-run';
 import type { ClaimedPreflight } from './preflight';
-import { AnalysisProviderAdmissionCapacityPendingError } from './provider-admission-store';
+import {
+    AnalysisProviderAdmissionCapacityPendingError,
+    analysisProviderAdmissionId,
+    createAnalysisProviderAdmissionStore,
+} from './provider-admission-store';
 
 const preflightId = '123e4567-e89b-42d3-a456-426614174000';
 const claimToken = '323e4567-e89b-42d3-a456-426614174000'; // gitleaks:allow -- fixture
@@ -50,6 +54,52 @@ function row(
             ? null
             : '2026-07-14T18:05:00.000Z',
         ...overrides,
+    };
+}
+
+function admissionStoreWithRpc() {
+    const rpc = vi.fn(async (
+        _name: string,
+        params: Record<string, unknown>,
+    ) => {
+        const admissionInput = {
+            workloadRole: params.p_workload_role as 'preflight' | 'paid',
+            logicalProvider: params.p_logical_provider as 'apify',
+            credentialSlot: params.p_credential_slot as string,
+            budgetKey: params.p_budget_key as string,
+            requestId: params.p_request_id as string,
+            jobKey: params.p_job_key as string,
+            operationKey: params.p_operation_key as string,
+            claimToken: params.p_claim_token as string,
+            jobClaimToken: params.p_job_claim_token as string,
+            leaseSeconds: params.p_lease_seconds as number,
+        };
+        return {
+            data: {
+                outcome: 'acquired',
+                admissionId: analysisProviderAdmissionId(admissionInput),
+                workloadRole: admissionInput.workloadRole,
+                logicalProvider: admissionInput.logicalProvider,
+                credentialSlot: admissionInput.credentialSlot,
+                budgetKey: admissionInput.budgetKey,
+                requestId: admissionInput.requestId,
+                jobKey: admissionInput.jobKey,
+                operationKey: admissionInput.operationKey,
+                leaseToken: '423e4567-e89b-42d3-a456-426614174000',
+                fence: 1,
+                expiresAt: '2026-09-04T12:00:00.000Z',
+                activeCount: 1,
+                maxActive: 16,
+            },
+            error: null,
+        };
+    });
+    return {
+        rpc,
+        store: createAnalysisProviderAdmissionStore({
+            rpc,
+            randomUuid: () => '523e4567-e89b-42d3-a456-426614174000',
+        }),
     };
 }
 
@@ -298,11 +348,91 @@ describe('preflight provider-run adapter', () => {
             workloadRole: 'preflight',
             credentialSlot: 'octonary',
             budgetKey: 'preflight:apify:octonary',
+            leaseSeconds: 120,
         }));
         await result.checkpoint.onBeforeRunStart?.({
             ...preflightProviderIdentity('octonary'),
         });
         expect(store.checkpointStarted).not.toHaveBeenCalled();
+    });
+
+    it('passes the preflight lease duration to the admission RPC caller', async () => {
+        const reserved = row('starting', { credentialSlot: 'octonary' }) as StoredPreflightProviderRun;
+        const providerRuns = {
+            load: vi.fn(async () => null),
+            reserve: vi.fn(),
+            reserveFree: vi.fn(async () => ({ created: true, run: reserved })),
+            checkpointStarted: vi.fn(),
+            checkpointRejected: vi.fn(),
+            checkpointTerminal: vi.fn(),
+        };
+        const admission = admissionStoreWithRpc();
+        const result = await bindPreflightProviderRunCheckpoint({
+            store: providerRuns,
+            claim: { preflightId, claimToken } as ClaimedPreflight,
+            inputHash,
+            identity: preflightProviderIdentity('primary'),
+            freePool: true,
+            env: {
+                NODE_ENV: 'test',
+                ANALYSIS_PROVIDER_ADMISSION_ENABLED: 'true',
+            },
+            providerAdmissionStore: admission.store,
+        });
+
+        await result.checkpoint.onBeforeRunStart?.({
+            ...preflightProviderIdentity('octonary'),
+        });
+
+        expect(admission.rpc).toHaveBeenCalledWith(
+            'acquire_analysis_provider_admission',
+            expect.objectContaining({
+                p_workload_role: 'preflight',
+                p_budget_key: 'preflight:apify:octonary',
+                p_lease_seconds: 120,
+            }),
+        );
+    });
+
+    it('passes the paid target lease duration to the admission RPC caller', async () => {
+        const reserved = row('starting', {
+            credentialSlot: 'quinary',
+        }) as StoredPreflightProviderRun;
+        const providerRuns = {
+            load: vi.fn(async () => null),
+            reserve: vi.fn(async () => ({ created: true, run: reserved })),
+            reserveFree: vi.fn(),
+            checkpointStarted: vi.fn(),
+            checkpointRejected: vi.fn(),
+            checkpointTerminal: vi.fn(),
+        };
+        const admission = admissionStoreWithRpc();
+        const result = await bindPreflightProviderRunCheckpoint({
+            store: providerRuns,
+            claim: { preflightId, claimToken } as ClaimedPreflight,
+            inputHash,
+            identity: preflightProviderIdentity('quinary'),
+            operationKey: 'target-profile-fallback',
+            workloadRole: 'paid',
+            env: {
+                NODE_ENV: 'test',
+                ANALYSIS_PROVIDER_ADMISSION_ENABLED: 'true',
+            },
+            providerAdmissionStore: admission.store,
+        });
+
+        await result.checkpoint.onBeforeRunStart?.({
+            ...preflightProviderIdentity('quinary'),
+        });
+
+        expect(admission.rpc).toHaveBeenCalledWith(
+            'acquire_analysis_provider_admission',
+            expect.objectContaining({
+                p_workload_role: 'paid',
+                p_budget_key: 'paid:apify:quinary',
+                p_lease_seconds: 30,
+            }),
+        );
     });
 
     it('closes a newly selected free row when admission is denied before provider start', async () => {

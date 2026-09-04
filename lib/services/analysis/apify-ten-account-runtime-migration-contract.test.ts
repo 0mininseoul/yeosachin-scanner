@@ -63,6 +63,25 @@ describe('Apify ten-account runtime migration contract', () => {
         );
     });
 
+    it('fails closed unless the exact predecessor or exact widened admission guard is present', () => {
+        const rewrite = migration.match(
+            /DO \$\$[\s\S]*?v_old_guard[\s\S]*?v_new_guard[\s\S]*?\$\$;/,
+        )?.[0] ?? '';
+        expect(rewrite).not.toBe('');
+        expect(rewrite).toContain(
+            "v_old_guard TEXT :=\n        'p_credential_slot NOT IN (''primary'', ''quinary'', ''senary'')'",
+        );
+        expect(rewrite).toContain(
+            "v_new_guard TEXT :=\n        'p_credential_slot NOT IN (''primary'', ''tertiary'', ''quaternary'', ''quinary'', ''senary'', ''septenary'', ''octonary'', ''nonary'', ''tenth'')'",
+        );
+        expect(rewrite).toContain('ANALYSIS_PROVIDER_ADMISSION_FUNCTION_MISSING');
+        expect(rewrite).toContain('ANALYSIS_PROVIDER_ADMISSION_FUNCTION_BODY_UNKNOWN');
+        expect(rewrite).toContain('pg_get_functiondef');
+        expect(rewrite).toContain('pg_catalog.replace(v_definition, v_old_guard, v_new_guard)');
+        expect(rewrite).toContain('v_definition_after');
+        expect(rewrite).toContain('old guard remains');
+    });
+
     it('keeps one sanitized all-account inventory with an independent paid refresh path', () => {
         expect(migration).toContain(
             'analysis_apify_credit_snapshots_credential_slot_check',

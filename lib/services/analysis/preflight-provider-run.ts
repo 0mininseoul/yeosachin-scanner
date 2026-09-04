@@ -953,6 +953,7 @@ export async function bindPreflightProviderRunCheckpoint(input: {
     };
 
     const withAdmission = async (checkpoint: ProviderRunCheckpoint): Promise<ProviderRunCheckpoint> => {
+        const admissionWorkloadRole = input.providerAdmissionWorkloadRole ?? input.workloadRole ?? 'preflight';
         return withAnalysisProviderAdmissionCheckpoint({
             checkpoint,
             storedStatus: current?.status === 'starting' || current?.status === 'running'
@@ -967,6 +968,7 @@ export async function bindPreflightProviderRunCheckpoint(input: {
             claimToken: input.claim.claimToken,
             env: input.env,
             store: input.providerAdmissionStore,
+            leaseSeconds: admissionWorkloadRole === 'paid' ? 30 : 120,
         });
     };
 

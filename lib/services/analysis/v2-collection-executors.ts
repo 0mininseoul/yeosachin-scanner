@@ -432,6 +432,7 @@ async function bindApifyRun(input: {
             claimToken: input.claim.claimToken,
             env: input.dependencies.env,
             store: input.dependencies.providerAdmissionStore,
+            leaseSeconds: input.operationKey.startsWith('relationship-') ? 12 : 30,
         }),
     });
     if (freshRevenueRequest || input.requireCurrentProviderRun) {

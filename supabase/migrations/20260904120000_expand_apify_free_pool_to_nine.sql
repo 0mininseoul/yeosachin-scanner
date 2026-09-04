@@ -164,6 +164,9 @@ $$;
 DO $$
 DECLARE
     v_definition TEXT;
+    v_definition_after TEXT;
+    v_has_old_guard BOOLEAN;
+    v_has_new_guard BOOLEAN;
     v_old_guard TEXT :=
         'p_credential_slot NOT IN (''primary'', ''quinary'', ''senary'')';
     v_new_guard TEXT :=
@@ -175,9 +178,38 @@ BEGIN
     WHERE function_row.oid = pg_catalog.to_regprocedure(
         'public.acquire_analysis_provider_admission(text,text,text,text,text,uuid,text,text,uuid,uuid,bigint,uuid,integer)'
     );
-    IF v_definition IS NOT NULL
-       AND pg_catalog.strpos(v_definition, v_old_guard) > 0 THEN
+
+    IF v_definition IS NULL THEN
+        RAISE EXCEPTION USING
+            MESSAGE = 'ANALYSIS_PROVIDER_ADMISSION_FUNCTION_MISSING',
+            ERRCODE = 'P0001';
+    END IF;
+
+    v_has_old_guard := pg_catalog.strpos(v_definition, v_old_guard) > 0;
+    v_has_new_guard := pg_catalog.strpos(v_definition, v_new_guard) > 0;
+    IF v_has_old_guard = v_has_new_guard THEN
+        RAISE EXCEPTION USING
+            MESSAGE = 'ANALYSIS_PROVIDER_ADMISSION_FUNCTION_BODY_UNKNOWN',
+            ERRCODE = 'P0001';
+    END IF;
+
+    IF v_has_old_guard THEN
+        -- CREATE OR REPLACE preserves the predecessor function owner and ACL.
         EXECUTE pg_catalog.replace(v_definition, v_old_guard, v_new_guard);
+
+        SELECT pg_catalog.pg_get_functiondef(function_row.oid)
+        INTO v_definition_after
+        FROM pg_catalog.pg_proc AS function_row
+        WHERE function_row.oid = pg_catalog.to_regprocedure(
+            'public.acquire_analysis_provider_admission(text,text,text,text,text,uuid,text,text,uuid,uuid,bigint,uuid,integer)'
+        );
+        IF v_definition_after IS NULL
+           OR pg_catalog.strpos(v_definition_after, v_new_guard) = 0
+           OR pg_catalog.strpos(v_definition_after, v_old_guard) > 0 THEN
+            RAISE EXCEPTION USING
+                MESSAGE = 'ANALYSIS_PROVIDER_ADMISSION_FUNCTION_REWRITE_FAILED: old guard remains',
+                ERRCODE = 'P0001';
+        END IF;
     END IF;
 END;
 $$;
@@ -1503,7 +1535,10 @@ DO $$
 BEGIN
     IF pg_catalog.to_regprocedure(
         'public.reserve_analysis_preflight_provider_run(uuid,uuid,text,text,numeric)'
-    ) IS NOT NULL THEN
+    ) IS NOT NULL
+       AND pg_catalog.to_regprocedure(
+           'public.reserve_analysis_preflight_provider_run_fixed_20260904(uuid,uuid,text,text,numeric)'
+       ) IS NULL THEN
         ALTER FUNCTION public.reserve_analysis_preflight_provider_run(
             UUID, UUID, TEXT, TEXT, NUMERIC
         ) RENAME TO reserve_analysis_preflight_provider_run_fixed_20260904;
@@ -1573,7 +1608,10 @@ DO $$
 BEGIN
     IF pg_catalog.to_regprocedure(
         'public.reserve_analysis_v2_fresh_admission_provider_run(uuid,integer,uuid,text,text,numeric)'
-    ) IS NOT NULL THEN
+    ) IS NOT NULL
+       AND pg_catalog.to_regprocedure(
+           'public.reserve_analysis_v2_fresh_admission_provider_run_fixed_20260904(uuid,integer,uuid,text,text,numeric)'
+       ) IS NULL THEN
         ALTER FUNCTION public.reserve_analysis_v2_fresh_admission_provider_run(
             UUID, INTEGER, UUID, TEXT, TEXT, NUMERIC
         ) RENAME TO reserve_analysis_v2_fresh_admission_provider_run_fixed_20260904;

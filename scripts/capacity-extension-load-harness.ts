@@ -113,6 +113,11 @@ type QueueItem = {
     expireMarker?: boolean;
 };
 
+function providerAdmissionLeaseSeconds(input: Pick<QueueItem, 'role' | 'operationKey'>): 12 | 30 | 120 {
+    if (input.role === 'preflight') return 120;
+    return input.operationKey.startsWith('relationship-') ? 12 : 30;
+}
+
 const DEFAULTS = Object.freeze({
     preflightRequests: 400,
     paidRequests: 200,
@@ -554,7 +559,7 @@ class DeterministicAdmissionStore implements AnalysisProviderAdmissionStore {
             operationKey: item.operationKey,
             claimToken: item.claimToken ?? '',
             jobClaimToken: item.claimToken ?? '',
-            leaseSeconds: 120,
+            leaseSeconds: providerAdmissionLeaseSeconds(item),
         } as AnalysisProviderAdmissionInput;
         const id = analysisProviderAdmissionId(input);
         const lease = this.leases.get(id);
@@ -771,6 +776,7 @@ async function runWrappedProvider(
         claimToken: item.claimToken,
         env,
         store,
+        leaseSeconds: providerAdmissionLeaseSeconds(item),
     }));
     await wrapped.onBeforeRunStart?.(providerIdentity);
     if (providerStatus === 'running') return 'adopted';
@@ -1031,7 +1037,7 @@ export async function runCapacityExtensionLoad(
                 : 'target-profile-fresh-admission:g900002',
             claimToken: deterministicClaim(role, probeIndex),
             jobClaimToken: deterministicClaim(role, probeIndex),
-            leaseSeconds: 120,
+            leaseSeconds: role === 'preflight' ? 120 : 30,
         };
         try {
             const lease = await admission.acquire(input);
@@ -1276,7 +1282,7 @@ export async function runCapacityExtensionLoad(
             operationKey: `relationship-followers:g${index}`,
             claimToken: deterministicClaim('paid', 910_000 + index),
             jobClaimToken: deterministicClaim('paid', 910_000 + index),
-            leaseSeconds: 120,
+            leaseSeconds: 12,
         }));
     }
     await Promise.all(Array.from({ length: 4 }, () => providers.relationship()));
@@ -1296,7 +1302,7 @@ export async function runCapacityExtensionLoad(
             operationKey: 'relationship-followers:g5',
             claimToken: deterministicClaim('paid', 910_005),
             jobClaimToken: deterministicClaim('paid', 910_005),
-            leaseSeconds: 120,
+            leaseSeconds: 12,
         });
         await admission.release(unexpectedLease, 'prestart_rejected');
     } catch (error) {

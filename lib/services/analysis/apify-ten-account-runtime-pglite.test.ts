@@ -19,6 +19,42 @@ const freePreflightId = '123e4567-e89b-42d3-a456-426614174000';
 const freeClaimToken = '223e4567-e89b-42d3-a456-426614174000';
 const freeInputHash = 'a'.repeat(64);
 
+const predecessorAdmission = `
+CREATE FUNCTION public.acquire_analysis_provider_admission(
+ p_admission_id TEXT, p_workload_role TEXT, p_logical_provider TEXT,
+ p_credential_slot TEXT, p_budget_key TEXT, p_request_id UUID,
+ p_job_key TEXT, p_operation_key TEXT, p_job_claim_token UUID,
+ p_claim_token UUID, p_provider_fence BIGINT, p_lease_token UUID,
+ p_lease_seconds INTEGER
+)
+RETURNS JSONB LANGUAGE plpgsql SECURITY DEFINER SET search_path=''
+AS $$
+BEGIN
+ IF p_workload_role = 'preflight'
+    AND (p_logical_provider <> 'apify'
+         OR p_credential_slot NOT IN ('primary', 'quinary', 'senary')) THEN
+  RAISE EXCEPTION USING MESSAGE = 'ANALYSIS_PROVIDER_ADMISSION_CREDENTIAL_FORBIDDEN';
+ END IF;
+ RETURN jsonb_build_object(
+  'outcome', 'acquired',
+  'admissionId', p_admission_id,
+  'workloadRole', p_workload_role,
+  'logicalProvider', p_logical_provider,
+  'credentialSlot', p_credential_slot,
+  'budgetKey', p_budget_key,
+  'requestId', p_request_id,
+  'jobKey', p_job_key,
+  'operationKey', p_operation_key,
+  'leaseToken', p_lease_token,
+  'fence', 1,
+  'expiresAt', clock_timestamp() + make_interval(secs => p_lease_seconds),
+  'activeCount', 1,
+  'maxActive', 16
+ );
+END;
+$$;
+`;
+
 const bootstrap = `
 CREATE ROLE anon NOLOGIN;
 CREATE ROLE authenticated NOLOGIN;
@@ -222,6 +258,7 @@ AS $$
   p_max_charge_usd, 'target-profile-fresh-admission:g' || p_admission_generation::TEXT
  )
 $$;
+${predecessorAdmission}
 `;
 
 let db: PGlite;
@@ -375,6 +412,90 @@ describe('Apify ten-account runtime PGlite migration', () => {
              WHERE budget_key = 'paid:apify:secondary'`,
         );
         expect(preserved.rows).toEqual([{ window_count: 1 }]);
+    });
+
+    it('executes the widened preflight admission guard for octonary, nonary, and tenth', async () => {
+        const sql = `SELECT public.acquire_analysis_provider_admission(
+            $1, 'preflight', 'apify', $2, $3, $4, 'preflight:provider',
+            'target-profile-fallback', $5, $5, NULL, $6, 120
+        ) AS result`;
+        for (const slot of ['octonary', 'nonary', 'tenth'] as const) {
+            const result = await db.query<{ result: { credentialSlot: string } }>(sql, [
+                'a'.repeat(64),
+                slot,
+                `preflight:apify:${slot}`,
+                freePreflightId,
+                freeClaimToken,
+                '323e4567-e89b-42d3-a456-426614174000',
+            ]);
+            expect(result.rows[0]?.result).toMatchObject({
+                outcome: 'acquired',
+                credentialSlot: slot,
+            });
+        }
+        await expect(db.query(sql, [
+            'a'.repeat(64),
+            'secondary',
+            'paid:apify:secondary',
+            freePreflightId,
+            freeClaimToken,
+            '323e4567-e89b-42d3-a456-426614174000',
+        ])).rejects.toThrow('ANALYSIS_PROVIDER_ADMISSION_CREDENTIAL_FORBIDDEN');
+    });
+
+    it('accepts an already widened admission body on an idempotent migration replay', async () => {
+        await expect(db.exec(migration)).resolves.toBeDefined();
+        const definition = await db.query<{ definition: string }>(`
+            SELECT pg_catalog.pg_get_functiondef(function_row.oid) AS definition
+            FROM pg_catalog.pg_proc AS function_row
+            WHERE function_row.oid = pg_catalog.to_regprocedure(
+                'public.acquire_analysis_provider_admission(text,text,text,text,text,uuid,text,text,uuid,uuid,bigint,uuid,integer)'
+            )
+        `);
+        expect(definition.rows[0]?.definition).toContain(
+            "p_credential_slot NOT IN ('primary', 'tertiary', 'quaternary', 'quinary', 'senary', 'septenary', 'octonary', 'nonary', 'tenth')",
+        );
+        expect(definition.rows[0]?.definition).not.toContain(
+            "p_credential_slot NOT IN ('primary', 'quinary', 'senary')",
+        );
+    });
+
+    it('aborts a migration when the exact admission signature is missing', async () => {
+        const isolated = await PGlite.create({ extensions: { pgcrypto } });
+        try {
+            await isolated.exec(bootstrap);
+            await isolated.exec(`DROP FUNCTION public.acquire_analysis_provider_admission(
+                text,text,text,text,text,uuid,text,text,uuid,uuid,bigint,uuid,integer
+            )`);
+            await expect(isolated.exec(migration)).rejects.toThrow(
+                'ANALYSIS_PROVIDER_ADMISSION_FUNCTION_MISSING',
+            );
+        } finally {
+            await isolated.close();
+        }
+    });
+
+    it('aborts a migration when the exact admission body is unknown', async () => {
+        const isolated = await PGlite.create({ extensions: { pgcrypto } });
+        try {
+            await isolated.exec(bootstrap);
+            await isolated.exec(`
+                CREATE OR REPLACE FUNCTION public.acquire_analysis_provider_admission(
+                    p_admission_id TEXT, p_workload_role TEXT, p_logical_provider TEXT,
+                    p_credential_slot TEXT, p_budget_key TEXT, p_request_id UUID,
+                    p_job_key TEXT, p_operation_key TEXT, p_job_claim_token UUID,
+                    p_claim_token UUID, p_provider_fence BIGINT, p_lease_token UUID,
+                    p_lease_seconds INTEGER
+                )
+                RETURNS JSONB LANGUAGE plpgsql SECURITY DEFINER SET search_path=''
+                AS $$ BEGIN RETURN '{}'::JSONB; END; $$;
+            `);
+            await expect(isolated.exec(migration)).rejects.toThrow(
+                'ANALYSIS_PROVIDER_ADMISSION_FUNCTION_BODY_UNKNOWN',
+            );
+        } finally {
+            await isolated.close();
+        }
     });
 
     it('seeds all ten aliases while exposing exactly nine beta/free aliases', async () => {

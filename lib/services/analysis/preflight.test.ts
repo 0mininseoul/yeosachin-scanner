@@ -180,6 +180,7 @@ describe('betatest preflight credit fence', () => {
             budgetKey: 'paid:apify:septenary',
             jobKey: 'preflight:provider',
             operationKey: 'target-profile-fallback',
+            leaseSeconds: 30,
         }));
         expect(admission.release).toHaveBeenCalledOnce();
         expect(getFallbackProfile).toHaveBeenCalledOnce();
