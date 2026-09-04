@@ -1,8 +1,10 @@
 import { NextResponse } from 'next/server';
+import { z } from 'zod';
 import { supabaseAdmin } from '@/lib/supabase/admin';
 import { createClient } from '@/lib/supabase/server';
 import {
-    isAnalysisAuditOperator,
+    classifyOperatorAuthError,
+    getAnalysisAuditOperatorDecision,
 } from '@/lib/services/analysis/score-audit';
 import {
     loadAnalysisOrderAuditBundle,
@@ -18,56 +20,7 @@ function privateJson(body: unknown, status = 200) {
 }
 
 const requestIdPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
-
-type AuthErrorLike = {
-    name?: unknown;
-    status?: unknown;
-    code?: unknown;
-    message?: unknown;
-};
-
-function isUnauthenticatedAuthError(error: unknown, allowMessageFallback = true): boolean {
-    if (!error || typeof error !== 'object') return false;
-    const authError = error as AuthErrorLike;
-    const status = typeof authError.status === 'number'
-        ? authError.status
-        : Number(authError.status);
-    if (status === 401 || status === 403) return true;
-    if (status === 429 || status >= 500) return false;
-
-    const name = typeof authError.name === 'string' ? authError.name : '';
-    if (
-        name === 'AuthSessionMissingError'
-        || name === 'AuthInvalidCredentialsError'
-        || name === 'AuthInvalidJwtError'
-    ) {
-        return true;
-    }
-
-    const code = typeof authError.code === 'string'
-        ? authError.code.toLowerCase()
-        : '';
-    if (
-        code === 'invalid_token'
-        || code === 'invalid_jwt'
-        || code === 'bad_jwt'
-        || code === 'no_authorization'
-        || code === 'invalid_credentials'
-        || code === 'jwt_expired'
-        || code === 'session_expired'
-        || code === 'session_not_found'
-        || code === 'refresh_token_not_found'
-        || code === 'refresh_token_already_used'
-        || code === 'user_not_found'
-        || code === 'unauthorized'
-    ) {
-        return true;
-    }
-
-    if (!allowMessageFallback) return false;
-    const message = typeof authError.message === 'string' ? authError.message : '';
-    return /(?:invalid|expired|missing|not found).*(?:token|session|jwt)|(?:token|session|jwt).*(?:invalid|expired|missing|not found)/i.test(message);
-}
+const uuidSchema = z.string().uuid();
 
 export async function GET(
     request: Request,
@@ -79,25 +32,33 @@ export async function GET(
         supabase = await createClient();
         const auth = await supabase.auth.getUser();
         if (auth.error) {
-            if (isUnauthenticatedAuthError(auth.error)) {
+            if (classifyOperatorAuthError(auth.error) === 'unauthorized') {
                 return privateJson({ error: 'Unauthorized' }, 401);
             }
             return privateJson({ error: 'Authentication unavailable' }, 503);
         }
         user = auth.data.user;
     } catch (caught) {
-        if (isUnauthenticatedAuthError(caught, false)) {
+        if (classifyOperatorAuthError(caught) === 'unauthorized') {
             return privateJson({ error: 'Unauthorized' }, 401);
         }
         return privateJson({ error: 'Authentication unavailable' }, 503);
     }
-    if (!user) return privateJson({ error: 'Unauthorized' }, 401);
+    if (!user || !uuidSchema.safeParse(user.id).success) {
+        return privateJson({ error: 'Unauthorized' }, 401);
+    }
+
+    let operatorDecision: ReturnType<typeof getAnalysisAuditOperatorDecision>;
     try {
-        if (!isAnalysisAuditOperator(user.id)) {
-            return privateJson({ error: 'Forbidden' }, 403);
-        }
+        operatorDecision = getAnalysisAuditOperatorDecision(user.id);
     } catch {
         return privateJson({ error: 'Authentication unavailable' }, 503);
+    }
+    if (operatorDecision === 'unavailable') {
+        return privateJson({ error: 'Authentication unavailable' }, 503);
+    }
+    if (operatorDecision === 'forbidden') {
+        return privateJson({ error: 'Forbidden' }, 403);
     }
 
     let requestId: string;

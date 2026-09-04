@@ -4,23 +4,93 @@ const uuidSchema = z.string().uuid();
 const cursorSchema = z.number().int().min(0).max(100_000);
 const pageSizeSchema = z.number().int().min(1).max(50);
 
+type OperatorAuthErrorLike = {
+    name?: unknown;
+    status?: unknown;
+    code?: unknown;
+};
+
+const trustedUnauthenticatedErrorNames = new Set([
+    'AuthSessionMissingError',
+    'AuthInvalidCredentialsError',
+    'AuthInvalidJwtError',
+]);
+
+const trustedUnauthenticatedErrorCodes = new Set([
+    'invalid_token',
+    'invalid_jwt',
+    'bad_jwt',
+    'no_authorization',
+    'invalid_credentials',
+    'jwt_expired',
+    'session_expired',
+    'session_not_found',
+    'refresh_token_not_found',
+    'refresh_token_already_used',
+    'user_not_found',
+    'unauthorized',
+]);
+
+export type OperatorAuthErrorClassification = 'unauthorized' | 'unavailable';
+
+/**
+ * Classifies only explicit Supabase auth signals as an absent/invalid session.
+ * Messages are intentionally ignored because transport and backend failures can
+ * contain deceptive token wording.
+ */
+export function classifyOperatorAuthError(error: unknown): OperatorAuthErrorClassification {
+    if (!error || typeof error !== 'object') return 'unavailable';
+    const authError = error as OperatorAuthErrorLike;
+    const status = authError.status;
+    if (status === 429 || (typeof status === 'number' && status >= 500)) {
+        return 'unavailable';
+    }
+    if (status === 401) return 'unauthorized';
+
+    if (
+        typeof authError.name === 'string'
+        && trustedUnauthenticatedErrorNames.has(authError.name)
+    ) {
+        return 'unauthorized';
+    }
+
+    if (
+        typeof authError.code === 'string'
+        && trustedUnauthenticatedErrorCodes.has(authError.code.toLowerCase())
+    ) {
+        return 'unauthorized';
+    }
+
+    return 'unavailable';
+}
+
+export type AnalysisAuditOperatorDecision = 'authorized' | 'forbidden' | 'unavailable';
+
 /**
  * This is deliberately an environment-only allowlist.  It is evaluated on the
  * server after Supabase has verified the current session; it is never shipped
  * to a client, accepted from a request, or written to logs.
  */
+export function getAnalysisAuditOperatorDecision(
+    userId: string | null | undefined,
+    env: Record<string, string | undefined> = process.env,
+): AnalysisAuditOperatorDecision {
+    if (!userId || !uuidSchema.safeParse(userId).success) return 'forbidden';
+    const configured = env.ANALYSIS_AUDIT_OPERATOR_USER_IDS;
+    if (typeof configured !== 'string' || configured.trim() === '') return 'unavailable';
+    const tokens = configured.split(',').map(value => value.trim().toLowerCase());
+    const parsed = z.array(uuidSchema).min(1).safeParse(tokens);
+    if (!parsed.success || new Set(parsed.data).size !== parsed.data.length) return 'unavailable';
+    // One malformed, blank, or duplicate token invalidates the entire configuration.
+    return parsed.data.includes(userId.toLowerCase()) ? 'authorized' : 'forbidden';
+}
+
+/** Compatibility boolean for existing server-rendered admin callers. */
 export function isAnalysisAuditOperator(
     userId: string | null | undefined,
     env: Record<string, string | undefined> = process.env,
 ): boolean {
-    if (!userId || !uuidSchema.safeParse(userId).success) return false;
-    const configured = env.ANALYSIS_AUDIT_OPERATOR_USER_IDS;
-    if (!configured) return false;
-    const tokens = configured.split(',').map(value => value.trim().toLowerCase());
-    const parsed = z.array(uuidSchema).min(1).safeParse(tokens);
-    if (!parsed.success || new Set(parsed.data).size !== parsed.data.length) return false;
-    // One malformed, blank, or duplicate token invalidates the entire configuration.
-    return parsed.data.includes(userId.toLowerCase());
+    return getAnalysisAuditOperatorDecision(userId, env) === 'authorized';
 }
 
 export const analysisAuditPageSchema = z.object({

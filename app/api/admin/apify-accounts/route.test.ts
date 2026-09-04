@@ -6,7 +6,7 @@ import {
 
 const mocks = vi.hoisted(() => ({
     createClient: vi.fn(),
-    isAnalysisAuditOperator: vi.fn(),
+    getAnalysisAuditOperatorDecision: vi.fn(),
     createStore: vi.fn(),
     createServerFactory: vi.fn(),
     load: vi.fn(),
@@ -19,9 +19,15 @@ vi.mock('@/lib/supabase/server', () => ({ createClient: mocks.createClient }));
 vi.mock('@/lib/supabase/admin', () => ({
     supabaseAdmin: { rpc: mocks.adminRpc },
 }));
-vi.mock('@/lib/services/analysis/score-audit', () => ({
-    isAnalysisAuditOperator: mocks.isAnalysisAuditOperator,
-}));
+vi.mock('@/lib/services/analysis/score-audit', async () => {
+    const actual = await vi.importActual<typeof import('@/lib/services/analysis/score-audit')>(
+        '@/lib/services/analysis/score-audit',
+    );
+    return {
+        ...actual,
+        getAnalysisAuditOperatorDecision: mocks.getAnalysisAuditOperatorDecision,
+    };
+});
 vi.mock('@/lib/services/analysis/apify-account-credit-inventory', () => ({
     createApifyAccountCreditInventoryStore: mocks.createStore,
     createServerApifyCreditClientFactory: mocks.createServerFactory,
@@ -76,7 +82,7 @@ function authenticate({
 beforeEach(() => {
     vi.clearAllMocks();
     authenticate();
-    mocks.isAnalysisAuditOperator.mockReturnValue(true);
+    mocks.getAnalysisAuditOperatorDecision.mockReturnValue('authorized');
     mocks.load.mockResolvedValue(inventory());
     mocks.setManualExclusion.mockResolvedValue(undefined);
     mocks.refreshPaidSecondary.mockResolvedValue(inventory()[1]);
@@ -218,17 +224,28 @@ describe('operator Apify account API', () => {
 
         expect(response.status).toBe(401);
         expect(await response.json()).toEqual({ error: 'Unauthorized' });
-        expect(mocks.isAnalysisAuditOperator).not.toHaveBeenCalled();
+        expect(mocks.getAnalysisAuditOperatorDecision).not.toHaveBeenCalled();
         expect(mocks.createStore).not.toHaveBeenCalled();
     });
 
     it('returns 403 when an authenticated user is not an audit operator', async () => {
-        mocks.isAnalysisAuditOperator.mockReturnValue(false);
+        mocks.getAnalysisAuditOperatorDecision.mockReturnValue('forbidden');
 
         const response = await GET(request('GET'));
 
         expect(response.status).toBe(403);
         expect(response.headers.get('cache-control')).toBe('private, no-store');
+    });
+
+    it('returns 503 when the operator allowlist is unavailable without touching inventory', async () => {
+        mocks.getAnalysisAuditOperatorDecision.mockReturnValue('unavailable');
+
+        const response = await GET(request('GET'));
+
+        expect(response.status).toBe(503);
+        expect(await response.json()).toEqual({ error: 'Authentication unavailable' });
+        expect(response.headers.get('cache-control')).toBe('private, no-store');
+        expect(mocks.createStore).not.toHaveBeenCalled();
     });
 
     it('loads exactly ten durable rows in canonical order without creating an Apify client', async () => {

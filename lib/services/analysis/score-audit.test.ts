@@ -1,6 +1,8 @@
 import { describe, expect, it, vi } from 'vitest';
 import {
     captureAnalysisScoreAuditSource,
+    classifyOperatorAuthError,
+    getAnalysisAuditOperatorDecision,
     isAnalysisAuditOperator,
     loadAnalysisScoreAudit,
     materializeQueuedAnalysisScoreAudit,
@@ -12,6 +14,48 @@ const requestId = '123e4567-e89b-42d3-a456-426614174000';
 const otherId = '223e4567-e89b-42d3-a456-426614174000';
 
 describe('analysis score audit operator boundary', () => {
+    it.each([
+        ['explicit 401 status', { status: 401, message: 'private details' }],
+        ['typed missing-session name', { name: 'AuthSessionMissingError', status: 400 }],
+        ['typed invalid JWT name', { name: 'AuthInvalidJwtError', status: 400 }],
+        ['recognized expired-session code', { name: 'AuthApiError', status: 400, code: 'session_expired' }],
+    ] as const)('classifies %s as unauthorized', (_label, error) => {
+        expect(classifyOperatorAuthError(error)).toBe('unauthorized');
+    });
+
+    it.each([
+        ['bare 403', { status: 403 }],
+        ['unknown 400 with deceptive message', {
+            status: 400,
+            code: 'unknown_auth_failure',
+            message: 'invalid token endpoint unavailable',
+        }],
+        ['429', { status: 429, code: 'invalid_token' }],
+        ['5xx', { status: 503, code: 'invalid_token' }],
+        ['transport exception', new Error('invalid token from transport')],
+    ] as const)('classifies %s as unavailable', (_label, error) => {
+        expect(classifyOperatorAuthError(error)).toBe('unavailable');
+    });
+
+    it('returns a tri-state decision that distinguishes unavailable configuration from a non-operator', () => {
+        expect(getAnalysisAuditOperatorDecision(requestId, {})).toBe('unavailable');
+        expect(getAnalysisAuditOperatorDecision(requestId, {
+            ANALYSIS_AUDIT_OPERATOR_USER_IDS: '   ',
+        })).toBe('unavailable');
+        expect(getAnalysisAuditOperatorDecision(requestId, {
+            ANALYSIS_AUDIT_OPERATOR_USER_IDS: 'not-a-uuid',
+        })).toBe('unavailable');
+        expect(getAnalysisAuditOperatorDecision(requestId, {
+            ANALYSIS_AUDIT_OPERATOR_USER_IDS: `${requestId},${requestId}`,
+        })).toBe('unavailable');
+        expect(getAnalysisAuditOperatorDecision(requestId, {
+            ANALYSIS_AUDIT_OPERATOR_USER_IDS: otherId,
+        })).toBe('forbidden');
+        expect(getAnalysisAuditOperatorDecision(requestId, {
+            ANALYSIS_AUDIT_OPERATOR_USER_IDS: `${otherId}, ${requestId}`,
+        })).toBe('authorized');
+    });
+
     it('fails closed for absent, malformed, and nonmatching environment allowlists', () => {
         expect(isAnalysisAuditOperator(requestId, {})).toBe(false);
         expect(isAnalysisAuditOperator(requestId, { ANALYSIS_AUDIT_OPERATOR_USER_IDS: 'not-a-uuid' })).toBe(false);

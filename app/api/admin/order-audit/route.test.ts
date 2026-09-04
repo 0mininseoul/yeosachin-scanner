@@ -4,7 +4,7 @@ import { readFileSync } from 'node:fs';
 const routeMocks = vi.hoisted(() => ({
     createClient: vi.fn(),
     getUser: vi.fn(),
-    isAnalysisAuditOperator: vi.fn(),
+    getAnalysisAuditOperatorDecision: vi.fn(),
     parseOrderAuditListQuery: vi.fn(),
     loadAnalysisOrderAuditList: vi.fn(),
 }));
@@ -15,9 +15,15 @@ vi.mock('@/lib/supabase/server', () => ({
 vi.mock('@/lib/supabase/admin', () => ({
     supabaseAdmin: { rpc: vi.fn() },
 }));
-vi.mock('@/lib/services/analysis/score-audit', () => ({
-    isAnalysisAuditOperator: routeMocks.isAnalysisAuditOperator,
-}));
+vi.mock('@/lib/services/analysis/score-audit', async () => {
+    const actual = await vi.importActual<typeof import('@/lib/services/analysis/score-audit')>(
+        '@/lib/services/analysis/score-audit',
+    );
+    return {
+        ...actual,
+        getAnalysisAuditOperatorDecision: routeMocks.getAnalysisAuditOperatorDecision,
+    };
+});
 vi.mock('@/lib/services/analysis/order-audit-list', () => ({
     parseOrderAuditListQuery: routeMocks.parseOrderAuditListQuery,
     loadAnalysisOrderAuditList: routeMocks.loadAnalysisOrderAuditList,
@@ -37,7 +43,7 @@ describe('operator order-audit list route contract', () => {
     it('uses cookie session authentication, the operator allowlist, and private no-store responses', () => {
         expect(route).toContain('createClient');
         expect(route).toContain('supabase.auth.getUser()');
-        expect(route).toContain('isAnalysisAuditOperator(user.id)');
+        expect(route).toContain('getAnalysisAuditOperatorDecision(user.id)');
         expect(route).toContain("privateJson({ error: 'Unauthorized' }, 401)");
         expect(route).toContain("privateJson({ error: 'Forbidden' }, 403)");
         expect(route).toContain("'Cache-Control': 'private, no-store'");
@@ -60,7 +66,7 @@ describe('operator order-audit list route responses', () => {
             data: { user: { id: '423e4567-e89b-42d3-a456-426614174001' } },
             error: null,
         });
-        routeMocks.isAnalysisAuditOperator.mockReturnValue(true);
+        routeMocks.getAnalysisAuditOperatorDecision.mockReturnValue('authorized');
         routeMocks.parseOrderAuditListQuery.mockReturnValue(query);
         routeMocks.loadAnalysisOrderAuditList.mockResolvedValue({ rows: [], nextCursor: null });
     });
@@ -110,14 +116,56 @@ describe('operator order-audit list route responses', () => {
         expect(unavailable.headers.get('Cache-Control')).toBe('private, no-store');
     });
 
+    it('returns 503 for an unknown returned auth error despite a deceptive token message', async () => {
+        routeMocks.getUser.mockResolvedValue({
+            data: { user: null },
+            error: {
+                status: 400,
+                code: 'unknown_auth_failure',
+                message: 'invalid token endpoint unavailable',
+            },
+        });
+
+        const response = await GET(request());
+
+        expect(response.status).toBe(503);
+        expect(await response.json()).toEqual({ error: 'Authentication unavailable' });
+        expect(response.headers.get('Cache-Control')).toBe('private, no-store');
+    });
+
+    it('returns 401 for an authenticated user with a malformed id', async () => {
+        routeMocks.getUser.mockResolvedValue({
+            data: { user: { id: 'not-a-uuid' } },
+            error: null,
+        });
+
+        const response = await GET(request());
+
+        expect(response.status).toBe(401);
+        expect(await response.json()).toEqual({ error: 'Unauthorized' });
+        expect(response.headers.get('Cache-Control')).toBe('private, no-store');
+        expect(routeMocks.getAnalysisAuditOperatorDecision).not.toHaveBeenCalled();
+    });
+
     it('returns 403 for an authenticated non-operator', async () => {
-        routeMocks.isAnalysisAuditOperator.mockReturnValue(false);
+        routeMocks.getAnalysisAuditOperatorDecision.mockReturnValue('forbidden');
 
         const response = await GET(request());
 
         expect(response.status).toBe(403);
         expect(await response.json()).toEqual({ error: 'Forbidden' });
         expect(response.headers.get('Cache-Control')).toBe('private, no-store');
+    });
+
+    it('returns 503 when the operator allowlist is unavailable', async () => {
+        routeMocks.getAnalysisAuditOperatorDecision.mockReturnValue('unavailable');
+
+        const response = await GET(request());
+
+        expect(response.status).toBe(503);
+        expect(await response.json()).toEqual({ error: 'Authentication unavailable' });
+        expect(response.headers.get('Cache-Control')).toBe('private, no-store');
+        expect(routeMocks.loadAnalysisOrderAuditList).not.toHaveBeenCalled();
     });
 
     it('returns 400 for invalid input without leaking parser details', async () => {
