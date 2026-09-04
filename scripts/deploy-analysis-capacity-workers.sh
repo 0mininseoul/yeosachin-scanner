@@ -1283,17 +1283,30 @@ verify_service_contract() {
   local allow_bootstrap_cross_role_gate_transition="${4:-false}"
   local allow_bootstrap_initial_transition_for_contract="${5:-false}"
   local allow_existing_service_predeploy_source_roll_forward="${6:-false}"
+  local allow_existing_service_predeploy_preflight_slot_roll_forward="${7:-false}"
   local contract_expansion_canary="false"
   local contract_recovery_enabled="false"
   local contract_max_instances=8
   local observed_source_sha
+  local source_roll_forward_observed="false"
   [[ "$allow_existing_service_predeploy_source_roll_forward" == "true" \
      || "$allow_existing_service_predeploy_source_roll_forward" == "false" ]] \
     || die "invalid internal source roll-forward allowance"
+  [[ "$allow_existing_service_predeploy_preflight_slot_roll_forward" == "true" \
+     || "$allow_existing_service_predeploy_preflight_slot_roll_forward" == "false" ]] \
+    || die "invalid internal preflight slot roll-forward allowance"
   if [[ "$allow_existing_service_predeploy_source_roll_forward" == "true" ]]; then
     [[ "$mode" == "apply" && "$mode_was_explicit" == "true" \
        && "$require_traffic" == "true" ]] \
       || die "source roll-forward allowance is valid only for explicit apply predeploy verification"
+  fi
+  if [[ "$allow_existing_service_predeploy_preflight_slot_roll_forward" == "true" ]]; then
+    [[ "$allow_existing_service_predeploy_source_roll_forward" == "true" \
+       && "$mode" == "apply" && "$mode_was_explicit" == "true" \
+       && "$require_traffic" == "true" \
+       && "$role" == "preflight" && "$stage" == "initial" \
+       && "$contract_stage" == "initial" ]] \
+      || die "preflight slot roll-forward allowance is valid only for explicit initial preflight apply predeploy verification"
   fi
   if [[ "$allow_bootstrap_cross_role_gate_transition" == "true" ]]; then
     [[ "$mode" == "apply" && "$role" == "preflight" && "$stage" == "bootstrap" \
@@ -1400,6 +1413,7 @@ verify_service_contract() {
     if [[ "$allow_existing_service_predeploy_source_roll_forward" == "true" \
        && "$observed_source_sha" =~ ^[0-9a-f]{40}$ ]]; then
       log "predeploy: allowing an older valid Cloud Run source provenance label"
+      source_roll_forward_observed="true"
     elif [[ "$allow_stale_bootstrap_provenance" == "true" \
        && "$stage" == "bootstrap" \
        && "$contract_stage" == "bootstrap" \
@@ -1420,6 +1434,14 @@ verify_service_contract() {
     manifest_expected="$(manifest_value "$env_file" "$manifest_key")"
     observed_value="$(observed_manifest_value "$manifest_key")"
     if [[ "$observed_value" == "$manifest_expected" ]]; then
+      continue
+    fi
+    if [[ "$manifest_key" == "PREFLIGHT_APIFY_API_TOKEN_SLOTS" \
+       && "$allow_existing_service_predeploy_preflight_slot_roll_forward" == "true" \
+       && "$source_roll_forward_observed" == "true" \
+       && "$observed_value" == "primary,quinary,senary" \
+       && "$manifest_expected" == "$PREFLIGHT_APIFY_API_TOKEN_SLOTS_VALUE" ]]; then
+      log "predeploy: allowing exact preflight Apify slot-pool roll-forward"
       continue
     fi
     if [[ "$allow_bootstrap_initial_transition_for_contract" == "true" ]] \
@@ -1541,14 +1563,19 @@ if service_exists; then
   fi
   allow_stale_bootstrap_provenance="false"
   allow_bootstrap_cross_role_gate_transition="false"
+  allow_existing_service_predeploy_preflight_slot_roll_forward="false"
   if [[ "$stage" == "bootstrap" && "$observed_stage" == "bootstrap" ]]; then
     allow_stale_bootstrap_provenance="true"
     [[ "$role" == "preflight" ]] && allow_bootstrap_cross_role_gate_transition="true"
   fi
+  if [[ "$role" == "preflight" && "$stage" == "initial" && "$observed_stage" == "initial" ]]; then
+    allow_existing_service_predeploy_preflight_slot_roll_forward="true"
+  fi
   verify_service_contract "$observed_stage" true "$allow_stale_bootstrap_provenance" \
     "$allow_bootstrap_cross_role_gate_transition" \
     "$allow_bootstrap_initial_transition" \
-    "true"
+    "true" \
+    "$allow_existing_service_predeploy_preflight_slot_roll_forward"
   verify_legacy_quiescence
   verify_vercel_public_deployment
   verify_capacity_activation_readiness

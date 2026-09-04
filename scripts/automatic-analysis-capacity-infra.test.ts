@@ -115,6 +115,9 @@ function manifestFor(role: 'preflight' | 'paid', overrides: Record<string, unkno
         ANALYSIS_CAPACITY_WORKER_MEMORY: '2Gi',
         ANALYSIS_CAPACITY_PUBLIC_FREEZE_ENABLED: active ? 'true' : 'false',
         ANALYSIS_V2_APIFY_API_TOKEN_SLOT: env.ANALYSIS_V2_APIFY_API_TOKEN_SLOT,
+        ...(role === 'preflight'
+            ? { PREFLIGHT_APIFY_API_TOKEN_SLOTS: env.PREFLIGHT_APIFY_API_TOKEN_SLOTS }
+            : {}),
         ANALYSIS_CAPACITY_LEGACY_FREEZE_MODE: active ? 'drain-and-block' : 'bootstrap',
         ANALYSIS_CAPACITY_LEGACY_PRODUCERS_FROZEN: active ? 'true' : 'false',
         ANALYSIS_CAPACITY_LEGACY_TASKS_DRAINED: active ? 'true' : 'false',
@@ -365,6 +368,9 @@ function fakeRun(options: FakeRunOptions = {}) {
                             { name: 'ANALYSIS_CAPACITY_WORKER_CPU', value: '2' },
                             { name: 'ANALYSIS_CAPACITY_WORKER_MEMORY', value: '2Gi' },
                             { name: 'ANALYSIS_V2_APIFY_API_TOKEN_SLOT', value: env.ANALYSIS_V2_APIFY_API_TOKEN_SLOT },
+                            ...(role === 'preflight'
+                                ? [{ name: 'PREFLIGHT_APIFY_API_TOKEN_SLOTS', value: env.PREFLIGHT_APIFY_API_TOKEN_SLOTS }]
+                                : []),
                             { name: 'ANALYSIS_CAPACITY_LEGACY_FREEZE_MODE', value: serviceActive ? 'drain-and-block' : 'bootstrap' },
                             { name: 'ANALYSIS_CAPACITY_LEGACY_PRODUCERS_FROZEN', value: serviceActive ? 'true' : 'false' },
                             { name: 'ANALYSIS_CAPACITY_LEGACY_TASKS_DRAINED', value: serviceActive ? 'true' : 'false' },
@@ -616,6 +622,7 @@ if [[ "\${1:-} \${2:-}" == "run deploy" ]]; then
         elif .name == "ANALYSIS_V2_WORKER_ENABLED" then .value = (if $stage == "bootstrap" or $role != "paid" then "false" else "true" end)
         elif .name == "PREFLIGHT_TASKS_RECOVERY_ENABLED" then .value = (if $stage == "bootstrap" or $role != "preflight" then "false" else "true" end)
         elif .name == "ANALYSIS_V2_RECOVERY_ENABLED" then .value = (if $stage == "bootstrap" or $role != "paid" then "false" else "true" end)
+        elif .name == "PREFLIGHT_APIFY_API_TOKEN_SLOTS" then .value = "primary,tertiary,quaternary,quinary,senary,septenary,octonary,nonary,tenth"
         else . end
       )
   ' "$FAKE_GCLOUD_SERVICE_JSON" > "$FAKE_GCLOUD_SERVICE_JSON.tmp"
@@ -1263,6 +1270,135 @@ describe('automatic-analysis infrastructure contracts', () => {
         expect(result.stdout).toContain('predeploy: allowing an older valid Cloud Run source provenance label');
         expect((result.finalService.metadata as { labels: Record<string, string> }).labels['analysis-v2-source-commit'])
             .toBe(desiredSourceSha);
+    });
+
+    it('allows only the preflight initial slot pool to roll forward with an older source during apply predeploy', () => {
+        const result = fakeRun({
+            role: 'preflight',
+            observedSourceSha: 'd'.repeat(40),
+            serviceEnv: {
+                PREFLIGHT_APIFY_API_TOKEN_SLOTS: 'primary,quinary,senary',
+            },
+            args: ['--apply'],
+        });
+        expect(result.status, `${result.stderr?.toString() ?? ''}\n${result.calls}`).toBe(0);
+        expect(result.calls).toContain('run deploy');
+        expect(result.calls).toContain('run services update-traffic');
+        expect(result.stdout).toContain('predeploy: allowing exact preflight Apify slot-pool roll-forward');
+        const finalEnv = (result.finalService.spec as {
+            template: { spec: { containers: Array<{ env: Array<{ name: string; value?: string }> }> } };
+        }).template.spec.containers[0].env;
+        expect(finalEnv.find(({ name }) => name === 'PREFLIGHT_APIFY_API_TOKEN_SLOTS')?.value)
+            .toBe('primary,tertiary,quaternary,quinary,senary,septenary,octonary,nonary,tenth');
+    });
+
+    it.each([
+        ['check mode', {
+            role: 'preflight' as const,
+            observedSourceSha: 'd'.repeat(40),
+            serviceEnv: { PREFLIGHT_APIFY_API_TOKEN_SLOTS: 'primary,quinary,senary' },
+            args: ['--check'],
+        }, 'source provenance'],
+        ['malformed observed SHA', {
+            role: 'preflight' as const,
+            observedSourceSha: 'not-a-git-sha',
+            serviceEnv: { PREFLIGHT_APIFY_API_TOKEN_SLOTS: 'primary,quinary,senary' },
+            args: ['--apply'],
+        }, 'source provenance'],
+        ['same source SHA', {
+            role: 'preflight' as const,
+            serviceEnv: { PREFLIGHT_APIFY_API_TOKEN_SLOTS: 'primary,quinary,senary' },
+            args: ['--apply'],
+        }, 'observed environment drifted for PREFLIGHT_APIFY_API_TOKEN_SLOTS'],
+        ['wrong old slot list', {
+            role: 'preflight' as const,
+            observedSourceSha: 'd'.repeat(40),
+            serviceEnv: { PREFLIGHT_APIFY_API_TOKEN_SLOTS: 'primary,quinary' },
+            args: ['--apply'],
+        }, 'observed environment drifted for PREFLIGHT_APIFY_API_TOKEN_SLOTS'],
+        ['wrong desired slot list', {
+            role: 'preflight' as const,
+            observedSourceSha: 'd'.repeat(40),
+            serviceEnv: { PREFLIGHT_APIFY_API_TOKEN_SLOTS: 'primary,quinary,senary' },
+            manifestOverrides: { PREFLIGHT_APIFY_API_TOKEN_SLOTS: 'primary,tertiary,quinary' },
+            args: ['--apply'],
+        }, 'observed environment drifted for PREFLIGHT_APIFY_API_TOKEN_SLOTS'],
+        ['missing slot list', {
+            role: 'preflight' as const,
+            observedSourceSha: 'd'.repeat(40),
+            serviceEnv: { PREFLIGHT_APIFY_API_TOKEN_SLOTS: null },
+            args: ['--apply'],
+        }, 'observed environment drifted for PREFLIGHT_APIFY_API_TOKEN_SLOTS'],
+        ['wrong role', {
+            role: 'paid' as const,
+            observedSourceSha: 'd'.repeat(40),
+            serviceEnv: { PREFLIGHT_APIFY_API_TOKEN_SLOTS: 'primary,quinary,senary' },
+            manifestOverrides: {
+                PREFLIGHT_APIFY_API_TOKEN_SLOTS: 'primary,tertiary,quaternary,quinary,senary,septenary,octonary,nonary,tenth',
+            },
+            args: ['--apply'],
+        }, 'observed environment drifted for PREFLIGHT_APIFY_API_TOKEN_SLOTS'],
+        ['unsafe stage transition', {
+            role: 'preflight' as const,
+            observedSourceSha: 'd'.repeat(40),
+            serviceStage: 'expanded' as const,
+            serviceEnv: { PREFLIGHT_APIFY_API_TOKEN_SLOTS: 'primary,quinary,senary' },
+            args: ['--apply'],
+        }, 'unsafe capacity stage transition'],
+        ['non-100-percent serving traffic', {
+            role: 'preflight' as const,
+            observedSourceSha: 'd'.repeat(40),
+            serviceEnv: { PREFLIGHT_APIFY_API_TOKEN_SLOTS: 'primary,quinary,senary' },
+            serviceOverrides: {
+                status: {
+                    traffic: [
+                        { revisionName: 'analysis-preflight-worker-00001-abc', percent: 50 },
+                        { revisionName: 'analysis-preflight-worker-00000-old', percent: 50 },
+                    ],
+                },
+            },
+            args: ['--apply'],
+        }, 'latest ready revision at 100 percent'],
+        ['protected admission gate drift', {
+            role: 'preflight' as const,
+            observedSourceSha: 'd'.repeat(40),
+            serviceEnv: {
+                PREFLIGHT_APIFY_API_TOKEN_SLOTS: 'primary,quinary,senary',
+                ANALYSIS_PROVIDER_ADMISSION_ENABLED: 'false',
+            },
+            args: ['--apply'],
+        }, 'observed admission gate is not true'],
+    ] as const)('keeps preflight slot roll-forward fail-closed for %s', (_name, options, expected) => {
+        const result = fakeRun(options);
+        expect(result.status).not.toBe(0);
+        expect(`${result.stdout}\n${result.stderr}`).toContain(expected);
+        expect(result.calls).not.toContain('run deploy');
+    });
+
+    it('rejects a preflight staged revision whose source provenance does not match the desired SHA', () => {
+        const result = fakeRun({
+            role: 'preflight',
+            observedSourceSha: 'd'.repeat(40),
+            stagedSourceSha: 'e'.repeat(40),
+            serviceEnv: { PREFLIGHT_APIFY_API_TOKEN_SLOTS: 'primary,quinary,senary' },
+            args: ['--apply'],
+        });
+        expect(result.status).not.toBe(0);
+        expect(`${result.stdout}\n${result.stderr}`).toContain('exact Ready revision for this service');
+        expect(result.calls).not.toContain('run services update-traffic');
+    });
+
+    it('rejects preflight post-promotion source provenance drift after the new revision reaches 100 percent traffic', () => {
+        const result = fakeRun({
+            role: 'preflight',
+            observedSourceSha: 'd'.repeat(40),
+            postDeploySourceSha: 'e'.repeat(40),
+            serviceEnv: { PREFLIGHT_APIFY_API_TOKEN_SLOTS: 'primary,quinary,senary' },
+            args: ['--apply'],
+        });
+        expect(result.status).not.toBe(0);
+        expect(`${result.stdout}\n${result.stderr}`).toContain('source provenance');
+        expect(result.calls.match(/run services update-traffic/g) ?? []).toHaveLength(2);
     });
 
     it.each([
