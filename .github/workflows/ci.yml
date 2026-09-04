@@ -38,7 +38,19 @@ jobs:
       - run: npx tsc --noEmit
       - run: npm test
       - run: npm run build
-      - run: npm audit --audit-level=high
+      - name: Run npm audit with bounded retries
+        run: |
+          audit_attempt=1
+          while [ "$audit_attempt" -le 3 ]; do
+            if npm audit --audit-level=high; then
+              exit 0
+            fi
+            if [ "$audit_attempt" -eq 3 ]; then
+              exit 1
+            fi
+            sleep $((audit_attempt * 5))
+            audit_attempt=$((audit_attempt + 1))
+          done
 
   production-payment-recovery-postgres:
     runs-on: ubuntu-latest
