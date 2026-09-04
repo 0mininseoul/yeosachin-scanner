@@ -69,6 +69,14 @@ CREATE TABLE public.analysis_apify_credit_snapshots(
  observed_at TIMESTAMPTZ, health_state VARCHAR(16) NOT NULL DEFAULT 'unhealthy',
  refreshed_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp()
 );
+INSERT INTO public.analysis_apify_credit_snapshots(credential_slot, health_state)
+VALUES
+    ('primary', 'unhealthy'),
+    ('tertiary', 'unhealthy'),
+    ('quaternary', 'unhealthy'),
+    ('quinary', 'unhealthy'),
+    ('senary', 'unhealthy'),
+    ('septenary', 'unhealthy');
 CREATE TABLE public.analysis_beta_pool_allocations(
  id UUID PRIMARY KEY, preflight_id UUID, request_id UUID, user_id UUID,
  lifecycle_state TEXT, selected_plan_id TEXT, policy_version TEXT,
@@ -100,6 +108,7 @@ AS $$ SELECT 0::NUMERIC $$;
 `;
 
 let db: PGlite;
+let migrationInitialRows: Array<{ credential_slot: string; valid: boolean }> = [];
 
 function snapshotRows() {
     return slots.map(credentialSlot => ({
@@ -117,6 +126,12 @@ beforeAll(async () => {
     db = await PGlite.create({ extensions: { pgcrypto } });
     await db.exec(bootstrap);
     await db.exec(migration);
+    const seeded = await db.query<{ credential_slot: string; valid: boolean }>(
+        `SELECT credential_slot,
+                public.analysis_beta_valid_apify_credential_slot(credential_slot) AS valid
+         FROM public.analysis_apify_credit_snapshots ORDER BY credential_slot`,
+    );
+    migrationInitialRows = seeded.rows;
 });
 
 beforeEach(async () => {
@@ -136,13 +151,10 @@ afterAll(async () => {
 
 describe('Apify ten-account runtime PGlite migration', () => {
     it('seeds all ten aliases while exposing exactly nine beta/free aliases', async () => {
-        const result = await db.query<{ credential_slot: string; valid: boolean }>(
-            `SELECT credential_slot, public.analysis_beta_valid_apify_credential_slot(credential_slot) AS valid
-             FROM public.analysis_apify_credit_snapshots ORDER BY credential_slot`,
-        );
-        expect(result.rows).toHaveLength(10);
-        expect(result.rows.filter(row => row.valid).map(row => row.credential_slot).sort()).toEqual([...slots].sort());
-        expect(result.rows.find(row => row.credential_slot === 'secondary')?.valid).toBe(false);
+        expect(migrationInitialRows).toHaveLength(10);
+        expect(migrationInitialRows.map(row => row.credential_slot).sort()).toEqual([...allSlots].sort());
+        expect(migrationInitialRows.filter(row => row.valid).map(row => row.credential_slot).sort()).toEqual([...slots].sort());
+        expect(migrationInitialRows.find(row => row.credential_slot === 'secondary')?.valid).toBe(false);
         const allValid = await db.query<{ valid: boolean }>(
             `SELECT bool_and(public.analysis_v2_valid_apify_credential_slot(credential_slot)) AS valid
              FROM public.analysis_apify_credit_snapshots`,

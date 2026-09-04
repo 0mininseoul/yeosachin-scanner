@@ -301,6 +301,12 @@ export function selectAnalysisV2ApifyCredentialSlot(
     return configured;
 }
 
+/**
+ * Legacy ordinary anonymous/B-lite fail-open selection. The balance-aware
+ * best-fit allocator is intentionally owned by the beta-held/betatest-free
+ * admission coordinator; callers here must preserve deterministic slot
+ * identity for ordinary fallback and persisted-run replay.
+ */
 export function selectPreflightApifyCredentialSlot(
     preflightId: string,
     env: Record<string, string | undefined> = process.env,

@@ -43,7 +43,9 @@ describe('Apify ten-account runtime migration contract', () => {
         expect(migration).toContain(
             'CHECK (public.analysis_v2_valid_apify_credential_slot(credential_slot))',
         );
-        expect(migration).toContain("VALUES ('secondary', 'unhealthy')");
+        for (const slot of ['secondary', 'octonary', 'nonary', 'tenth']) {
+            expect(migration).toContain(`('${slot}', 'unhealthy')`);
+        }
         expect(migration).toContain('load_analysis_apify_account_credit_inventory');
         expect(migration).toContain('upsert_analysis_apify_paid_credit_snapshot');
         for (const field of [

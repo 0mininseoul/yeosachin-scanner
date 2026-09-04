@@ -3,7 +3,8 @@
 -- secondary is the paid full-analysis account.  The other nine aliases are
 -- the beta/free pool.  This migration widens the current runtime fences and
 -- adds an append-only operator exclusion log; historical receipts and policy
--- snapshots are intentionally left untouched.
+-- snapshots keep any historical rows and are completed with unhealthy
+-- sentinels for each newly configured alias below.
 
 BEGIN;
 SET LOCAL lock_timeout = '5s';
@@ -53,7 +54,10 @@ REVOKE ALL ON FUNCTION public.analysis_beta_valid_apify_credential_slot(TEXT)
 
 -- The historical snapshot table was intentionally beta-only.  Keep one
 -- sanitized row for every configured account so operator/paid monitoring can
--- observe secondary without making it a beta allocation candidate.
+-- observe secondary and the newly configured free slots without making
+-- secondary a beta allocation candidate.  The predecessor seeds the first
+-- six free aliases; these four idempotent inserts complete the exact ten-row
+-- inventory on an already-migrated installation.
 ALTER TABLE public.analysis_apify_credit_snapshots
     DROP CONSTRAINT IF EXISTS analysis_apify_credit_snapshots_credential_slot_check;
 ALTER TABLE public.analysis_apify_credit_snapshots
@@ -61,7 +65,11 @@ ALTER TABLE public.analysis_apify_credit_snapshots
     CHECK (public.analysis_v2_valid_apify_credential_slot(credential_slot));
 
 INSERT INTO public.analysis_apify_credit_snapshots (credential_slot, health_state)
-VALUES ('secondary', 'unhealthy')
+VALUES
+    ('secondary', 'unhealthy'),
+    ('octonary', 'unhealthy'),
+    ('nonary', 'unhealthy'),
+    ('tenth', 'unhealthy')
 ON CONFLICT (credential_slot) DO NOTHING;
 
 COMMENT ON TABLE public.analysis_apify_credit_snapshots IS
