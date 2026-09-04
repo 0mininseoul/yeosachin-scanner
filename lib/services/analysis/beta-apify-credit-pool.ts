@@ -1,5 +1,7 @@
 import {
     APIFY_FREE_CREDENTIAL_SLOTS,
+    isApifyCredentialSlot,
+    type ApifyCredentialSlot,
     type ApifyFreeCredentialSlot,
 } from '@/lib/services/instagram/providers/types';
 
@@ -27,13 +29,18 @@ export interface BetaApifyCreditClock {
     readonly now: () => number;
 }
 
-export interface BetaApifyAccountCreditReading {
-    readonly credentialSlot: BetaApifyFreeCredentialSlot;
+export interface ApifyAccountCreditReading {
+    readonly credentialSlot: ApifyCredentialSlot;
     readonly monthlyLimitUsd: number;
     readonly monthlyUsageUsd: number;
     readonly billingCycleStartAt: string;
     readonly billingCycleEndAt: string;
     readonly observedAt: string;
+}
+
+export interface BetaApifyAccountCreditReading
+    extends Omit<ApifyAccountCreditReading, 'credentialSlot'> {
+    readonly credentialSlot: BetaApifyFreeCredentialSlot;
 }
 
 export interface BetaApifyEffectiveCredit extends BetaApifyAccountCreditReading {
@@ -168,11 +175,12 @@ function snapshotSlotAmounts(amounts?: BetaApifySlotAmounts): CompleteSlotAmount
     ) as Record<BetaApifyFreeCredentialSlot, number>);
 }
 
-export async function readBetaApifyAccountCredit(input: {
-    readonly credentialSlot: BetaApifyFreeCredentialSlot;
+/** Reads one account's sanitized balance and billing-cycle state. */
+export async function readApifyAccountCredit(input: {
+    readonly credentialSlot: ApifyCredentialSlot;
     readonly client: ApifyUserCreditClient;
     readonly observedAt?: Date;
-}, clock: BetaApifyCreditClock = SYSTEM_CREDIT_CLOCK): Promise<BetaApifyAccountCreditReading> {
+}, clock: BetaApifyCreditClock = SYSTEM_CREDIT_CLOCK): Promise<ApifyAccountCreditReading> {
     try {
         const trustedNowMs = requireTimestampMilliseconds(clock.now());
         const observedAt = requireTimestamp(
@@ -182,7 +190,7 @@ export async function readBetaApifyAccountCredit(input: {
         if (observedAtMs > trustedNowMs + MAX_OBSERVED_AT_FUTURE_SKEW_MS) {
             throw new Error(BETA_APIFY_CREDIT_INPUT_ERROR);
         }
-        if (!isBetaApifyFreeCredentialSlot(input.credentialSlot)) {
+        if (!isApifyCredentialSlot(input.credentialSlot)) {
             throw new Error(BETA_APIFY_CREDIT_INPUT_ERROR);
         }
         const [rawLimits, rawMonthlyUsage] = await Promise.all([
@@ -238,6 +246,18 @@ export async function readBetaApifyAccountCredit(input: {
     } catch {
         throw new Error(BETA_APIFY_CREDIT_READ_ERROR);
     }
+}
+
+/** Beta/free wrapper retaining the exact nine-slot type fence. */
+export async function readBetaApifyAccountCredit(input: {
+    readonly credentialSlot: BetaApifyFreeCredentialSlot;
+    readonly client: ApifyUserCreditClient;
+    readonly observedAt?: Date;
+}, clock: BetaApifyCreditClock = SYSTEM_CREDIT_CLOCK): Promise<BetaApifyAccountCreditReading> {
+    if (!isBetaApifyFreeCredentialSlot(input.credentialSlot)) {
+        throw new Error(BETA_APIFY_CREDIT_READ_ERROR);
+    }
+    return readApifyAccountCredit(input, clock) as Promise<BetaApifyAccountCreditReading>;
 }
 
 export function calculateBetaApifyEffectiveHeadroom(input: {

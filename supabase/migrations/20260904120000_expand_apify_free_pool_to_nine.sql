@@ -51,6 +51,22 @@ $$;
 REVOKE ALL ON FUNCTION public.analysis_beta_valid_apify_credential_slot(TEXT)
     FROM PUBLIC, anon, authenticated, service_role;
 
+-- The historical snapshot table was intentionally beta-only.  Keep one
+-- sanitized row for every configured account so operator/paid monitoring can
+-- observe secondary without making it a beta allocation candidate.
+ALTER TABLE public.analysis_apify_credit_snapshots
+    DROP CONSTRAINT IF EXISTS analysis_apify_credit_snapshots_credential_slot_check;
+ALTER TABLE public.analysis_apify_credit_snapshots
+    ADD CONSTRAINT analysis_apify_credit_snapshots_credential_slot_check
+    CHECK (public.analysis_v2_valid_apify_credential_slot(credential_slot));
+
+INSERT INTO public.analysis_apify_credit_snapshots (credential_slot, health_state)
+VALUES ('secondary', 'unhealthy')
+ON CONFLICT (credential_slot) DO NOTHING;
+
+COMMENT ON TABLE public.analysis_apify_credit_snapshots IS
+    'Exact ten-slot sanitized Apify limit/usage/cycle snapshots; secondary is paid-only and starts as an explicit unhealthy sentinel until independently refreshed.';
+
 -- The event log is the source of truth for manual account exclusions.  It has
 -- no mutable projection and intentionally stores no provider credential data.
 CREATE TABLE public.analysis_apify_account_control_events (
@@ -337,6 +353,7 @@ BEGIN
     FOR v_locked_slot IN
         SELECT snapshot.credential_slot
         FROM public.analysis_apify_credit_snapshots AS snapshot
+        WHERE public.analysis_beta_valid_apify_credential_slot(snapshot.credential_slot)
         ORDER BY CASE snapshot.credential_slot
             WHEN 'primary' THEN 1 WHEN 'tertiary' THEN 2
             WHEN 'quaternary' THEN 3 WHEN 'quinary' THEN 4
@@ -434,7 +451,8 @@ AS $$
               AND (archive.archive_state = 'ambiguous_held'
                    OR archive.reconciliation_watermark >= snapshot.observed_at)
         ) AS item
-    ) AS debit ON TRUE;
+    ) AS debit ON TRUE
+    WHERE public.analysis_beta_valid_apify_credential_slot(snapshot.credential_slot);
 $$;
 
 REVOKE ALL ON FUNCTION public.analysis_beta_pool_effective_capacity_snapshot()
@@ -456,32 +474,35 @@ BEGIN
     IF p_max_age_seconds IS NULL OR p_max_age_seconds NOT BETWEEN 1 AND 900 THEN
         RAISE EXCEPTION USING MESSAGE = 'ANALYSIS_BETA_POOL_SNAPSHOT_INVALID', ERRCODE = 'P0001';
     END IF;
-    IF (SELECT pg_catalog.count(*) FROM public.analysis_apify_credit_snapshots) <> 9
-       OR (SELECT pg_catalog.count(DISTINCT credential_slot)
-           FROM public.analysis_apify_credit_snapshots) <> 9
-       OR (SELECT pg_catalog.count(*) FROM public.analysis_apify_credit_snapshots AS snapshot
+    IF (SELECT pg_catalog.count(*) FROM public.analysis_apify_credit_snapshots AS snapshot
            WHERE public.analysis_beta_valid_apify_credential_slot(snapshot.credential_slot)) <> 9
-       OR (SELECT pg_catalog.count(DISTINCT observed_at)
-           FROM public.analysis_apify_credit_snapshots) <> 1 THEN
+       OR (SELECT pg_catalog.count(DISTINCT snapshot.credential_slot)
+           FROM public.analysis_apify_credit_snapshots AS snapshot
+           WHERE public.analysis_beta_valid_apify_credential_slot(snapshot.credential_slot)) <> 9
+       OR (SELECT pg_catalog.count(DISTINCT snapshot.observed_at)
+           FROM public.analysis_apify_credit_snapshots AS snapshot
+           WHERE public.analysis_beta_valid_apify_credential_slot(snapshot.credential_slot)) <> 1 THEN
         RAISE EXCEPTION USING MESSAGE = 'ANALYSIS_BETA_POOL_SNAPSHOT_INCOMPLETE', ERRCODE = 'P0001';
     END IF;
     IF EXISTS (
         SELECT 1 FROM public.analysis_apify_credit_snapshots AS snapshot
-        WHERE snapshot.health_state <> 'healthy'
+        WHERE public.analysis_beta_valid_apify_credential_slot(snapshot.credential_slot)
+          AND (snapshot.health_state <> 'healthy'
            OR snapshot.monthly_limit_usd IS NULL
            OR snapshot.monthly_usage_usd IS NULL
            OR snapshot.billing_cycle_start_at IS NULL
            OR snapshot.billing_cycle_end_at IS NULL
-           OR snapshot.observed_at IS NULL
+           OR snapshot.observed_at IS NULL)
     ) THEN
         RAISE EXCEPTION USING MESSAGE = 'ANALYSIS_BETA_POOL_SNAPSHOT_UNHEALTHY', ERRCODE = 'P0001';
     END IF;
     IF EXISTS (
         SELECT 1 FROM public.analysis_apify_credit_snapshots AS snapshot
-        WHERE snapshot.observed_at < v_now - pg_catalog.make_interval(secs => p_max_age_seconds)
+        WHERE public.analysis_beta_valid_apify_credential_slot(snapshot.credential_slot)
+          AND (snapshot.observed_at < v_now - pg_catalog.make_interval(secs => p_max_age_seconds)
            OR snapshot.observed_at > v_now + INTERVAL '1 minute'
            OR snapshot.billing_cycle_start_at > v_now
-           OR snapshot.billing_cycle_end_at <= v_now
+           OR snapshot.billing_cycle_end_at <= v_now)
     ) THEN
         RAISE EXCEPTION USING MESSAGE = 'ANALYSIS_BETA_POOL_SNAPSHOT_STALE', ERRCODE = 'P0001';
     END IF;
@@ -513,7 +534,8 @@ BEGIN
         FROM public.analysis_beta_pool_reservations AS reservation
         WHERE reservation.lifecycle_state IN ('preflight_held', 'active')
         GROUP BY reservation.credential_slot
-    ) AS held ON held.credential_slot = snapshot.credential_slot;
+    ) AS held ON held.credential_slot = snapshot.credential_slot
+    WHERE public.analysis_beta_valid_apify_credential_slot(snapshot.credential_slot);
     RETURN v_result;
 END;
 $$;
@@ -522,6 +544,218 @@ REVOKE ALL ON FUNCTION public.load_analysis_beta_apify_credit_pool(INTEGER)
     FROM PUBLIC, anon, authenticated, service_role;
 GRANT EXECUTE ON FUNCTION public.load_analysis_beta_apify_credit_pool(INTEGER)
     TO service_role;
+
+-- One service-only read model covers operator/paid monitoring for all ten
+-- accounts. It reuses the beta snapshot rows but keeps secondary outside all
+-- free-pool capacity functions. A missing/unhealthy/stale row never becomes a
+-- numeric zero, so operators can distinguish unavailable data from no credit.
+CREATE OR REPLACE FUNCTION public.load_analysis_apify_account_credit_inventory(
+    p_max_age_seconds INTEGER DEFAULT 300
+)
+RETURNS JSONB
+LANGUAGE plpgsql
+STABLE
+SECURITY DEFINER
+SET search_path = ''
+AS $$
+DECLARE
+    v_now TIMESTAMP WITH TIME ZONE := pg_catalog.clock_timestamp();
+    v_result JSONB;
+BEGIN
+    IF p_max_age_seconds IS NULL OR p_max_age_seconds NOT BETWEEN 1 AND 900 THEN
+        RAISE EXCEPTION USING MESSAGE = 'ANALYSIS_APIFY_ACCOUNT_INVENTORY_INVALID', ERRCODE = 'P0001';
+    END IF;
+
+    WITH required_slots(credential_slot, workload_role, slot_order) AS (
+        VALUES
+            ('primary'::TEXT, 'free'::TEXT, 1),
+            ('secondary'::TEXT, 'paid'::TEXT, 2),
+            ('tertiary'::TEXT, 'free'::TEXT, 3),
+            ('quaternary'::TEXT, 'free'::TEXT, 4),
+            ('quinary'::TEXT, 'free'::TEXT, 5),
+            ('senary'::TEXT, 'free'::TEXT, 6),
+            ('septenary'::TEXT, 'free'::TEXT, 7),
+            ('octonary'::TEXT, 'free'::TEXT, 8),
+            ('nonary'::TEXT, 'free'::TEXT, 9),
+            ('tenth'::TEXT, 'free'::TEXT, 10)
+    ), latest_exclusion AS (
+        SELECT DISTINCT ON (event_row.credential_slot)
+               event_row.credential_slot,
+               event_row.action = 'exclude' AS excluded
+        FROM public.analysis_apify_account_control_events AS event_row
+        ORDER BY event_row.credential_slot, event_row.event_time DESC, event_row.id DESC
+    ), capacity AS (
+        SELECT effective.credential_slot, effective.effective_capacity_usd
+        FROM public.analysis_beta_pool_effective_capacity_snapshot() AS effective
+    ), inventory AS (
+        SELECT required_slots.credential_slot,
+               required_slots.workload_role,
+               required_slots.slot_order,
+               snapshot.health_state,
+               snapshot.monthly_limit_usd,
+               snapshot.monthly_usage_usd,
+               snapshot.billing_cycle_start_at,
+               snapshot.billing_cycle_end_at,
+               snapshot.observed_at,
+               snapshot.refreshed_at,
+               capacity.effective_capacity_usd,
+               COALESCE(latest_exclusion.excluded, FALSE) AS manually_excluded,
+               CASE
+                   WHEN snapshot.credential_slot IS NULL
+                     OR snapshot.health_state IS DISTINCT FROM 'healthy'
+                     OR snapshot.monthly_limit_usd IS NULL
+                     OR snapshot.monthly_usage_usd IS NULL
+                     OR snapshot.billing_cycle_start_at IS NULL
+                     OR snapshot.billing_cycle_end_at IS NULL
+                     OR snapshot.observed_at IS NULL
+                     THEN 'missing'
+                   WHEN snapshot.observed_at < v_now - pg_catalog.make_interval(secs => p_max_age_seconds)
+                     OR snapshot.observed_at > v_now + INTERVAL '1 minute'
+                     OR snapshot.billing_cycle_start_at > v_now
+                     OR snapshot.billing_cycle_end_at <= v_now
+                     THEN 'stale'
+                   ELSE 'fresh'
+               END AS freshness_state
+        FROM required_slots
+        LEFT JOIN public.analysis_apify_credit_snapshots AS snapshot
+          ON snapshot.credential_slot = required_slots.credential_slot
+        LEFT JOIN capacity
+          ON capacity.credential_slot = required_slots.credential_slot
+        LEFT JOIN latest_exclusion
+          ON latest_exclusion.credential_slot = required_slots.credential_slot
+    )
+    SELECT pg_catalog.jsonb_agg(pg_catalog.jsonb_build_object(
+        'credentialSlot', inventory.credential_slot,
+        'workloadRole', inventory.workload_role,
+        'healthState', COALESCE(inventory.health_state, 'missing'),
+        'freshnessState', inventory.freshness_state,
+        'monthlyLimitUsd', inventory.monthly_limit_usd,
+        'monthlyUsageUsd', inventory.monthly_usage_usd,
+        'effectiveRemainingUsd', CASE
+            WHEN inventory.freshness_state <> 'fresh' THEN NULL
+            WHEN inventory.workload_role = 'free' THEN inventory.effective_capacity_usd
+            ELSE GREATEST(
+                inventory.monthly_limit_usd - inventory.monthly_usage_usd,
+                0::NUMERIC
+            )
+        END,
+        'billingCycleStartAt', inventory.billing_cycle_start_at,
+        'billingCycleEndAt', inventory.billing_cycle_end_at,
+        'cycleResetAt', inventory.billing_cycle_end_at,
+        'observedAt', inventory.observed_at,
+        'refreshedAt', inventory.refreshed_at,
+        'manuallyExcluded', CASE
+            WHEN inventory.workload_role = 'free' THEN inventory.manually_excluded
+            ELSE FALSE
+        END
+    ) ORDER BY inventory.slot_order)
+    INTO v_result
+    FROM inventory;
+
+    RETURN COALESCE(v_result, '[]'::JSONB);
+END;
+$$;
+
+REVOKE ALL ON FUNCTION public.load_analysis_apify_account_credit_inventory(INTEGER)
+    FROM PUBLIC, anon, authenticated, service_role;
+GRANT EXECUTE ON FUNCTION public.load_analysis_apify_account_credit_inventory(INTEGER)
+    TO service_role;
+
+COMMENT ON FUNCTION public.load_analysis_apify_account_credit_inventory(INTEGER) IS
+    'Service-only sanitized exact-ten Apify balance/cycle inventory; missing or stale values remain explicit and secondary is paid-only.';
+
+-- Paid/operator refresh is deliberately one-row and secondary-only. Free
+-- preflight refresh remains an independent exact-nine atomic operation and
+-- never requires this account or its secret.
+CREATE OR REPLACE FUNCTION public.upsert_analysis_apify_paid_credit_snapshot(
+    p_snapshot JSONB
+)
+RETURNS JSONB
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = ''
+AS $$
+DECLARE
+    v_now TIMESTAMP WITH TIME ZONE := pg_catalog.clock_timestamp();
+    v_slot TEXT;
+    v_monthly_limit_usd NUMERIC;
+    v_monthly_usage_usd NUMERIC;
+    v_cycle_start_at TIMESTAMP WITH TIME ZONE;
+    v_cycle_end_at TIMESTAMP WITH TIME ZONE;
+    v_observed_at TIMESTAMP WITH TIME ZONE;
+BEGIN
+    IF pg_catalog.jsonb_typeof(p_snapshot) <> 'object'
+       OR NOT p_snapshot ?& ARRAY[
+            'credentialSlot', 'monthlyLimitUsd', 'monthlyUsageUsd',
+            'billingCycleStartAt', 'billingCycleEndAt', 'observedAt', 'healthState'
+       ]
+       OR p_snapshot - ARRAY[
+            'credentialSlot', 'monthlyLimitUsd', 'monthlyUsageUsd',
+            'billingCycleStartAt', 'billingCycleEndAt', 'observedAt', 'healthState'
+       ] <> '{}'::JSONB
+       OR p_snapshot->>'credentialSlot' IS DISTINCT FROM 'secondary'
+       OR p_snapshot->>'healthState' IS DISTINCT FROM 'healthy'
+       OR pg_catalog.jsonb_typeof(p_snapshot->'monthlyLimitUsd') <> 'number'
+       OR pg_catalog.jsonb_typeof(p_snapshot->'monthlyUsageUsd') <> 'number'
+       OR pg_catalog.jsonb_typeof(p_snapshot->'billingCycleStartAt') <> 'string'
+       OR pg_catalog.jsonb_typeof(p_snapshot->'billingCycleEndAt') <> 'string'
+       OR pg_catalog.jsonb_typeof(p_snapshot->'observedAt') <> 'string' THEN
+        RAISE EXCEPTION USING MESSAGE = 'ANALYSIS_APIFY_ACCOUNT_INVENTORY_INVALID', ERRCODE = 'P0001';
+    END IF;
+
+    BEGIN
+        v_slot := p_snapshot->>'credentialSlot';
+        v_monthly_limit_usd := (p_snapshot->>'monthlyLimitUsd')::NUMERIC;
+        v_monthly_usage_usd := (p_snapshot->>'monthlyUsageUsd')::NUMERIC;
+        v_cycle_start_at := (p_snapshot->>'billingCycleStartAt')::TIMESTAMP WITH TIME ZONE;
+        v_cycle_end_at := (p_snapshot->>'billingCycleEndAt')::TIMESTAMP WITH TIME ZONE;
+        v_observed_at := (p_snapshot->>'observedAt')::TIMESTAMP WITH TIME ZONE;
+    EXCEPTION WHEN invalid_text_representation OR numeric_value_out_of_range
+        OR invalid_datetime_format OR datetime_field_overflow THEN
+        RAISE EXCEPTION USING MESSAGE = 'ANALYSIS_APIFY_ACCOUNT_INVENTORY_INVALID', ERRCODE = 'P0001';
+    END;
+
+    IF v_slot IS DISTINCT FROM 'secondary'
+       OR v_monthly_limit_usd NOT BETWEEN 0 AND 100000
+       OR v_monthly_usage_usd NOT BETWEEN 0 AND 100000
+       OR v_monthly_limit_usd <> pg_catalog.round(v_monthly_limit_usd, 12)
+       OR v_monthly_usage_usd <> pg_catalog.round(v_monthly_usage_usd, 12)
+       OR NOT pg_catalog.isfinite(v_cycle_start_at)
+       OR NOT pg_catalog.isfinite(v_cycle_end_at)
+       OR NOT pg_catalog.isfinite(v_observed_at)
+       OR v_cycle_start_at > v_observed_at
+       OR v_observed_at >= v_cycle_end_at
+       OR v_cycle_start_at > v_now
+       OR v_cycle_end_at <= v_now
+       OR v_observed_at < v_now - INTERVAL '5 minutes'
+       OR v_observed_at > v_now + INTERVAL '1 minute' THEN
+        RAISE EXCEPTION USING MESSAGE = 'ANALYSIS_APIFY_ACCOUNT_INVENTORY_INVALID', ERRCODE = 'P0001';
+    END IF;
+
+    UPDATE public.analysis_apify_credit_snapshots AS snapshot
+    SET monthly_limit_usd = v_monthly_limit_usd,
+        monthly_usage_usd = v_monthly_usage_usd,
+        billing_cycle_start_at = v_cycle_start_at,
+        billing_cycle_end_at = v_cycle_end_at,
+        observed_at = v_observed_at,
+        health_state = 'healthy',
+        refreshed_at = v_now
+    WHERE snapshot.credential_slot = 'secondary';
+    IF NOT FOUND THEN
+        RAISE EXCEPTION USING MESSAGE = 'ANALYSIS_APIFY_ACCOUNT_INVENTORY_INCOMPLETE', ERRCODE = 'P0001';
+    END IF;
+
+    RETURN public.load_analysis_apify_account_credit_inventory(300);
+END;
+$$;
+
+REVOKE ALL ON FUNCTION public.upsert_analysis_apify_paid_credit_snapshot(JSONB)
+    FROM PUBLIC, anon, authenticated, service_role;
+GRANT EXECUTE ON FUNCTION public.upsert_analysis_apify_paid_credit_snapshot(JSONB)
+    TO service_role;
+
+COMMENT ON FUNCTION public.upsert_analysis_apify_paid_credit_snapshot(JSONB) IS
+    'Service-only secondary paid/operator snapshot refresh; accepts sanitized aggregate balance/cycle fields only.';
 
 -- This is the implementation called by the fenced prepare RPC.  Keep the
 -- historical public signature unavailable; only the generation/claim-bound
@@ -629,6 +863,7 @@ BEGIN
     FOR v_locked_snapshot IN
         SELECT snapshot.*
         FROM public.analysis_apify_credit_snapshots AS snapshot
+        WHERE public.analysis_beta_valid_apify_credential_slot(snapshot.credential_slot)
         ORDER BY CASE snapshot.credential_slot
             WHEN 'primary' THEN 1 WHEN 'tertiary' THEN 2
             WHEN 'quaternary' THEN 3 WHEN 'quinary' THEN 4
@@ -665,6 +900,7 @@ BEGIN
     FOR v_locked_snapshot IN
         SELECT snapshot.*
         FROM public.analysis_apify_credit_snapshots AS snapshot
+        WHERE public.analysis_beta_valid_apify_credential_slot(snapshot.credential_slot)
         ORDER BY CASE snapshot.credential_slot
             WHEN 'primary' THEN 1 WHEN 'tertiary' THEN 2
             WHEN 'quaternary' THEN 3 WHEN 'quinary' THEN 4
@@ -891,6 +1127,7 @@ BEGIN
     PERFORM public.analysis_beta_pool_lock();
     FOR v_locked_snapshot IN
         SELECT snapshot.* FROM public.analysis_apify_credit_snapshots AS snapshot
+        WHERE public.analysis_beta_valid_apify_credential_slot(snapshot.credential_slot)
         ORDER BY CASE snapshot.credential_slot
             WHEN 'primary' THEN 1 WHEN 'tertiary' THEN 2
             WHEN 'quaternary' THEN 3 WHEN 'quinary' THEN 4
@@ -926,6 +1163,7 @@ BEGIN
     END IF;
     FOR v_locked_snapshot IN
         SELECT snapshot.* FROM public.analysis_apify_credit_snapshots AS snapshot
+        WHERE public.analysis_beta_valid_apify_credential_slot(snapshot.credential_slot)
         ORDER BY CASE snapshot.credential_slot
             WHEN 'primary' THEN 1 WHEN 'tertiary' THEN 2
             WHEN 'quaternary' THEN 3 WHEN 'quinary' THEN 4
@@ -1046,6 +1284,7 @@ BEGIN
     PERFORM public.analysis_beta_pool_lock();
     FOR v_snapshot IN
         SELECT snapshot.* FROM public.analysis_apify_credit_snapshots AS snapshot
+        WHERE public.analysis_beta_valid_apify_credential_slot(snapshot.credential_slot)
         ORDER BY CASE snapshot.credential_slot
             WHEN 'primary' THEN 1 WHEN 'tertiary' THEN 2
             WHEN 'quaternary' THEN 3 WHEN 'quinary' THEN 4

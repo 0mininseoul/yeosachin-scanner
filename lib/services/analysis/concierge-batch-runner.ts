@@ -11,16 +11,22 @@ import {
  */
 export const CONCIERGE_BATCH_MAX_ORDERS = 7;
 export const CONCIERGE_BATCH_ACTOR_CONCURRENCY = 2;
-export const CONCIERGE_BATCH_TOKEN_PRIORITY = Object.freeze([
+export const CONCIERGE_BATCH_FREE_TOKEN_PRIORITY = Object.freeze([
     'octonary',
+    'nonary',
     'quaternary',
     'primary',
+    'tertiary',
     'quinary',
-    'secondary',
+    'senary',
+    'septenary',
     'tenth',
 ] as const satisfies readonly ApifyCredentialSlot[]);
-export const CONCIERGE_BATCH_RELATIONSHIP_TOKEN_PRIORITY = Object.freeze([
-    'nonary',
+/** Backwards-compatible name for the free-path profile priority. */
+export const CONCIERGE_BATCH_TOKEN_PRIORITY = CONCIERGE_BATCH_FREE_TOKEN_PRIORITY;
+/** Backwards-compatible name for the free-path relationship priority. */
+export const CONCIERGE_BATCH_RELATIONSHIP_TOKEN_PRIORITY = CONCIERGE_BATCH_FREE_TOKEN_PRIORITY;
+export const CONCIERGE_BATCH_PAID_RELATIONSHIP_TOKEN_PRIORITY = Object.freeze([
     'secondary',
 ] as const satisfies readonly ApifyCredentialSlot[]);
 
@@ -175,9 +181,9 @@ function createActorGate(limit: number): ConciergeBatchStageContext['withActorSl
 }
 
 /**
- * Selects only an approved token slot by presence; token values are never
- * returned or logged.  SECONDARY is the paid fallback after the approved
- * free-token priority; all other slots remain excluded.
+ * Selects only an approved free-token slot by presence; token values are never
+ * returned or logged.  The paid secondary slot is intentionally absent from
+ * this ordinary concierge fallback path.
  */
 export function selectConciergeApifyTokenSlot(
     env: Readonly<Record<string, string | undefined>> = process.env,

@@ -60,6 +60,36 @@ it('resolves an exact recovery-lineage run without constructing callbacks', asyn
     );
 });
 
+it('accepts every canonical alias when replaying a historical provider receipt', async () => {
+    const credentialSlots = [
+        'primary', 'secondary', 'tertiary', 'quaternary', 'quinary',
+        'senary', 'septenary', 'octonary', 'nonary', 'tenth',
+    ] as const;
+    for (const credentialSlot of credentialSlots) {
+        const rpc = vi.fn().mockResolvedValue({
+            data: {
+                sourceRequestId: '33333333-3333-4333-8333-333333333333',
+                sourceJobKey: identity.jobKey,
+                operationKey: identity.operationKey,
+                inputHash: identity.inputHash,
+                logicalProvider: 'apify',
+                actorId: identity.actorId,
+                credentialSlot,
+                maxChargeUsd: 1.25,
+                runId: 'ExistingRun1234',
+                actualUsageUsd: 0.42,
+                usageReconciledAt: '2026-07-30T00:00:00Z',
+            },
+            error: null,
+        });
+        const result = await createAnalysisV2ProviderRunAdoptionStore({ rpc }).resolve({
+            ...identity,
+            credentialSlot,
+        });
+        expect(result?.credentialSlot).toBe(credentialSlot);
+    }
+});
+
 it('carries the source count only for a cross-count adopted relationship run', async () => {
     const rpc = vi.fn().mockResolvedValue({
         data: {

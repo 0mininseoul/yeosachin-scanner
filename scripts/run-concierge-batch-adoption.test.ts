@@ -55,6 +55,7 @@ import {
     conciergeBatchNameOnlyEnabled,
     conciergeBatchFeedTriageEnabled,
     conciergeBatchNameFallbackEnabled,
+    conciergePaidRelationshipCapabilityEnabled,
     conciergeBatchCandidateHygieneEnabled,
     conciergeGenderRosterCounts,
     conciergeUpsertAccountDetail,
@@ -336,8 +337,10 @@ describe('concierge profile pack adapter', () => {
     it('drops candidate posts without ids before interaction evidence is forwarded', async () => {
         const previousPackPath = process.env.CONCIERGE_BATCH_PROFILE_PACK_PATH;
         const previousSecondaryToken = process.env.APIFY_SECONDARY_API_TOKEN;
+        const previousPrimaryToken = process.env.APIFY_PRIMARY_API_TOKEN;
         process.env.CONCIERGE_BATCH_PROFILE_PACK_PATH = '/tmp/concierge-invalid-interaction-post-pack.json';
         process.env.APIFY_SECONDARY_API_TOKEN = 'test-token';
+        process.env.APIFY_PRIMARY_API_TOKEN = 'test-token';
         conciergeBatchTestMocks.readFileSync.mockReset().mockReturnValue(JSON.stringify({
             version: 1,
             profiles: {
@@ -410,14 +413,18 @@ describe('concierge profile pack adapter', () => {
             else process.env.CONCIERGE_BATCH_PROFILE_PACK_PATH = previousPackPath;
             if (previousSecondaryToken === undefined) delete process.env.APIFY_SECONDARY_API_TOKEN;
             else process.env.APIFY_SECONDARY_API_TOKEN = previousSecondaryToken;
+            if (previousPrimaryToken === undefined) delete process.env.APIFY_PRIMARY_API_TOKEN;
+            else process.env.APIFY_PRIMARY_API_TOKEN = previousPrimaryToken;
         }
     });
 
     it('keeps the first post when candidate and target post ids are duplicated', async () => {
         const previousPackPath = process.env.CONCIERGE_BATCH_PROFILE_PACK_PATH;
         const previousSecondaryToken = process.env.APIFY_SECONDARY_API_TOKEN;
+        const previousPrimaryToken = process.env.APIFY_PRIMARY_API_TOKEN;
         process.env.CONCIERGE_BATCH_PROFILE_PACK_PATH = '/tmp/concierge-duplicate-interaction-post-pack.json';
         process.env.APIFY_SECONDARY_API_TOKEN = 'test-token';
+        process.env.APIFY_PRIMARY_API_TOKEN = 'test-token';
         const targetPost = {
             id: 'target-duplicate', shortCode: 'target-duplicate', type: 'image',
             displayUrl: 'https://example.com/target.jpg', likesCount: 1, commentsCount: 0,
@@ -509,14 +516,18 @@ describe('concierge profile pack adapter', () => {
             else process.env.CONCIERGE_BATCH_PROFILE_PACK_PATH = previousPackPath;
             if (previousSecondaryToken === undefined) delete process.env.APIFY_SECONDARY_API_TOKEN;
             else process.env.APIFY_SECONDARY_API_TOKEN = previousSecondaryToken;
+            if (previousPrimaryToken === undefined) delete process.env.APIFY_PRIMARY_API_TOKEN;
+            else process.env.APIFY_PRIMARY_API_TOKEN = previousPrimaryToken;
         }
     });
 
     it('continues the order with empty comments when comment collection fails', async () => {
         const previousPackPath = process.env.CONCIERGE_BATCH_PROFILE_PACK_PATH;
         const previousSecondaryToken = process.env.APIFY_SECONDARY_API_TOKEN;
+        const previousPrimaryToken = process.env.APIFY_PRIMARY_API_TOKEN;
         process.env.CONCIERGE_BATCH_PROFILE_PACK_PATH = '/tmp/concierge-comments-best-effort-pack.json';
         process.env.APIFY_SECONDARY_API_TOKEN = 'test-token';
+        process.env.APIFY_PRIMARY_API_TOKEN = 'test-token';
         conciergeBatchTestMocks.readFileSync.mockReset().mockReturnValue(JSON.stringify({
             version: 1,
             profiles: {
@@ -559,14 +570,18 @@ describe('concierge profile pack adapter', () => {
             else process.env.CONCIERGE_BATCH_PROFILE_PACK_PATH = previousPackPath;
             if (previousSecondaryToken === undefined) delete process.env.APIFY_SECONDARY_API_TOKEN;
             else process.env.APIFY_SECONDARY_API_TOKEN = previousSecondaryToken;
+            if (previousPrimaryToken === undefined) delete process.env.APIFY_PRIMARY_API_TOKEN;
+            else process.env.APIFY_PRIMARY_API_TOKEN = previousPrimaryToken;
         }
     });
 
     it('keeps liker collection failures fatal to the order', async () => {
         const previousPackPath = process.env.CONCIERGE_BATCH_PROFILE_PACK_PATH;
         const previousSecondaryToken = process.env.APIFY_SECONDARY_API_TOKEN;
+        const previousPrimaryToken = process.env.APIFY_PRIMARY_API_TOKEN;
         process.env.CONCIERGE_BATCH_PROFILE_PACK_PATH = '/tmp/concierge-likers-fatal-pack.json';
         process.env.APIFY_SECONDARY_API_TOKEN = 'test-token';
+        process.env.APIFY_PRIMARY_API_TOKEN = 'test-token';
         conciergeBatchTestMocks.readFileSync.mockReset().mockReturnValue(JSON.stringify({
             version: 1,
             profiles: {
@@ -600,6 +615,8 @@ describe('concierge profile pack adapter', () => {
             else process.env.CONCIERGE_BATCH_PROFILE_PACK_PATH = previousPackPath;
             if (previousSecondaryToken === undefined) delete process.env.APIFY_SECONDARY_API_TOKEN;
             else process.env.APIFY_SECONDARY_API_TOKEN = previousSecondaryToken;
+            if (previousPrimaryToken === undefined) delete process.env.APIFY_PRIMARY_API_TOKEN;
+            else process.env.APIFY_PRIMARY_API_TOKEN = previousPrimaryToken;
         }
     });
 });
@@ -749,25 +766,44 @@ describe('concierge name-only gender classification', () => {
 });
 
 describe('relationshipCollectionSlots (CONCIERGE_BATCH_RELATIONSHIP_SLOTS override)', () => {
-    function withEnv(value: string | undefined, run: () => void): void {
+    function withEnv(value: string | undefined, run: () => void, paidCapability = false): void {
         const previous = process.env.CONCIERGE_BATCH_RELATIONSHIP_SLOTS;
+        const previousCapability = process.env.CONCIERGE_BATCH_PAID_RELATIONSHIP_CAPABILITY;
         if (value === undefined) delete process.env.CONCIERGE_BATCH_RELATIONSHIP_SLOTS;
         else process.env.CONCIERGE_BATCH_RELATIONSHIP_SLOTS = value;
+        if (paidCapability) process.env.CONCIERGE_BATCH_PAID_RELATIONSHIP_CAPABILITY = 'true';
+        else delete process.env.CONCIERGE_BATCH_PAID_RELATIONSHIP_CAPABILITY;
         try {
             run();
         } finally {
             if (previous === undefined) delete process.env.CONCIERGE_BATCH_RELATIONSHIP_SLOTS;
             else process.env.CONCIERGE_BATCH_RELATIONSHIP_SLOTS = previous;
+            if (previousCapability === undefined) delete process.env.CONCIERGE_BATCH_PAID_RELATIONSHIP_CAPABILITY;
+            else process.env.CONCIERGE_BATCH_PAID_RELATIONSHIP_CAPABILITY = previousCapability;
         }
     }
 
-    it('defaults to [nonary, secondary] when unset - byte parity with the frozen priority', () => {
+    it('defaults to all nine free slots when unset', () => {
         withEnv(undefined, () => {
-            expect(relationshipCollectionSlots()).toEqual(['nonary', 'secondary']);
+            expect(relationshipCollectionSlots()).toEqual([
+                'octonary', 'nonary', 'quaternary', 'primary', 'tertiary',
+                'quinary', 'senary', 'septenary', 'tenth',
+            ]);
         });
         withEnv('', () => {
-            expect(relationshipCollectionSlots()).toEqual(['nonary', 'secondary']);
+            expect(relationshipCollectionSlots()).toEqual([
+                'octonary', 'nonary', 'quaternary', 'primary', 'tertiary',
+                'quinary', 'senary', 'septenary', 'tenth',
+            ]);
         });
+    });
+
+    it('defaults to the paid secondary slot only when explicitly enabled', () => {
+        withEnv(undefined, () => {
+            expect(relationshipCollectionSlots()).toEqual(['secondary']);
+        }, true);
+        expect(conciergePaidRelationshipCapabilityEnabled(undefined)).toBe(false);
+        expect(conciergePaidRelationshipCapabilityEnabled('true')).toBe(true);
     });
 
     it('overrides to a balance-holding slot outside the default pair when set', () => {
@@ -796,8 +832,20 @@ describe('relationshipCollectionSlots (CONCIERGE_BATCH_RELATIONSHIP_SLOTS overri
             expect(() => relationshipCollectionSlots()).toThrow('CONCIERGE_BATCH_RELATIONSHIP_SLOTS_INVALID');
         });
         withEnv('secondary,secondary', () => {
-            expect(relationshipCollectionSlots()).toEqual(['secondary']);
+            expect(() => relationshipCollectionSlots())
+                .toThrow('CONCIERGE_BATCH_PAID_RELATIONSHIP_CAPABILITY_REQUIRED');
         });
+        withEnv('secondary,secondary', () => {
+            expect(relationshipCollectionSlots()).toEqual(['secondary']);
+        }, true);
+        withEnv('secondary,tertiary', () => {
+            expect(() => relationshipCollectionSlots())
+                .toThrow('CONCIERGE_BATCH_RELATIONSHIP_WORKLOAD_BOUNDARY_CONFLICT');
+        }, true);
+        withEnv('tertiary,secondary', () => {
+            expect(() => relationshipCollectionSlots())
+                .toThrow('CONCIERGE_BATCH_RELATIONSHIP_WORKLOAD_BOUNDARY_CONFLICT');
+        }, true);
     });
 });
 
@@ -1138,7 +1186,6 @@ describe('concierge existing relationship artifact resolver', () => {
             80,
         )).toMatchObject({
             credentialSlot: 'nonary',
-            allowConciergeBatchNonary: true,
         });
     });
 

@@ -30,7 +30,43 @@ describe('Apify ten-account runtime migration contract', () => {
         for (const slot of FREE_SLOTS) expect(migration).toContain(`'${slot}'`);
         expect(migration).toContain("p_slot IN (");
         expect(migration).toContain('ANALYSIS_BETA_POOL_CAPACITY_UNAVAILABLE');
-        expect(migration).not.toMatch(/analysis_beta_valid_apify_credential_slot[\s\S]{0,800}'secondary'/);
+        const betaValidator = migration.match(
+            /CREATE OR REPLACE FUNCTION public\.analysis_beta_valid_apify_credential_slot[\s\S]*?\$\$;/,
+        )?.[0] ?? '';
+        expect(betaValidator).not.toContain("'secondary'");
+    });
+
+    it('keeps one sanitized all-account inventory with an independent paid refresh path', () => {
+        expect(migration).toContain(
+            'analysis_apify_credit_snapshots_credential_slot_check',
+        );
+        expect(migration).toContain(
+            'CHECK (public.analysis_v2_valid_apify_credential_slot(credential_slot))',
+        );
+        expect(migration).toContain("VALUES ('secondary', 'unhealthy')");
+        expect(migration).toContain('load_analysis_apify_account_credit_inventory');
+        expect(migration).toContain('upsert_analysis_apify_paid_credit_snapshot');
+        for (const field of [
+            'workloadRole',
+            'healthState',
+            'freshnessState',
+            'monthlyLimitUsd',
+            'monthlyUsageUsd',
+            'effectiveRemainingUsd',
+            'billingCycleEndAt',
+            'cycleResetAt',
+            'manuallyExcluded',
+        ]) {
+            expect(migration).toContain(`'${field}'`);
+        }
+        expect(migration).toContain("'freshnessState', inventory.freshness_state");
+        expect(migration).toContain("WHEN inventory.freshness_state <> 'fresh' THEN NULL");
+        expect(migration).toContain("p_snapshot->>'credentialSlot' IS DISTINCT FROM 'secondary'");
+        expect(migration).toContain('GRANT EXECUTE ON FUNCTION public.load_analysis_apify_account_credit_inventory(INTEGER)');
+        expect(migration).toContain('GRANT EXECUTE ON FUNCTION public.upsert_analysis_apify_paid_credit_snapshot(JSONB)');
+        expect(migration).not.toMatch(
+            /upsert_analysis_apify_paid_credit_snapshot[\s\S]{0,1500}monthly_limit_usd[^\n]*COALESCE/i,
+        );
     });
 
     it('creates an append-only operator exclusion event log with service-only RPCs', () => {

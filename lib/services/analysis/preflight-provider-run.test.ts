@@ -123,8 +123,19 @@ describe('preflight provider-run adapter', () => {
         expect(JSON.stringify(rpc.mock.calls)).not.toContain('target.name');
     });
 
-    it('loads stored senary, septenary, and tenth identities and rejects octonary', async () => {
-        for (const credentialSlot of ['senary', 'septenary', 'tenth'] as const) {
+    it('loads stored identities for every canonical credential slot', async () => {
+        for (const credentialSlot of [
+            'primary',
+            'secondary',
+            'tertiary',
+            'quaternary',
+            'quinary',
+            'senary',
+            'septenary',
+            'octonary',
+            'nonary',
+            'tenth',
+        ] as const) {
             const store = createPreflightProviderRunStore({
                 rpc: vi.fn(async () => ({
                     data: row('running', { credentialSlot }),
@@ -137,7 +148,7 @@ describe('preflight provider-run adapter', () => {
 
         const unsupportedStore = createPreflightProviderRunStore({
             rpc: vi.fn(async () => ({
-                data: row('running', { credentialSlot: 'octonary' }),
+                data: row('running', { credentialSlot: 'unsupported-slot' }),
                 error: null,
             })),
         });

@@ -936,7 +936,7 @@ case "$command_line" in
       runtime_queue='analysis-v2-pipeline'
       credential_name=''
       runtime_slot="${FAKE_GCLOUD_RUNTIME_SLOT:-quinary}"
-      preflight_apify_token_slots="${PREFLIGHT_APIFY_API_TOKEN_SLOTS:-primary,quinary,senary}"
+      preflight_apify_token_slots="${PREFLIGHT_APIFY_API_TOKEN_SLOTS:-primary,tertiary,quaternary,quinary,senary,septenary,octonary,nonary,tenth}"
       instagram_route="${FAKE_GCLOUD_SERVICE_INSTAGRAM_ROUTE:-${ANALYSIS_V2_INSTAGRAM_ROUTE:-apify_v1}}"
       selfhosted_auth_enabled="${FAKE_GCLOUD_SELFHOSTED_AUTH_ENABLED:-false}"
       selfhosted_auth_worker_url="${FAKE_GCLOUD_SELFHOSTED_AUTH_WORKER_URL:-}"
@@ -959,7 +959,7 @@ case "$command_line" in
       beta_free_pool_enabled="${BETATEST_FREE_POOL_ENABLED:-false}"
       beta_free_pool_max_snapshot_age_seconds="${BETATEST_FREE_POOL_MAX_SNAPSHOT_AGE_SECONDS:-300}"
       beta_free_pool_refresh_interval_seconds="${BETATEST_FREE_POOL_REFRESH_INTERVAL_SECONDS:-60}"
-      apify_secret_slots="${FAKE_GCLOUD_APIFY_SECRET_SLOTS:-primary,secondary,tertiary,quaternary,quinary,senary,septenary,tenth}"
+      apify_secret_slots="${FAKE_GCLOUD_APIFY_SECRET_SLOTS:-primary,secondary,tertiary,quaternary,quinary,senary,septenary,octonary,nonary,tenth}"
       apify_secret_version="${FAKE_GCLOUD_APIFY_SECRET_VERSION:-7}"
       apify_plaintext_slot="${FAKE_GCLOUD_APIFY_PLAINTEXT_SLOT:-}"
       apify_bad_ref_slot="${FAKE_GCLOUD_APIFY_BAD_REF_SLOT:-}"
@@ -1304,7 +1304,7 @@ case "$command_line" in
     fi
     known_good_recovery="${FAKE_GCLOUD_KNOWN_GOOD_RECOVERY_ENABLED:-false}"
     active_runtime_slot="${FAKE_GCLOUD_ACTIVE_RUNTIME_SLOT:-quinary}"
-    active_apify_secret_slots="${FAKE_GCLOUD_ACTIVE_APIFY_SECRET_SLOTS:-${FAKE_GCLOUD_APIFY_SECRET_SLOTS:-primary,secondary,tertiary,quaternary,quinary,senary,septenary,tenth}}"
+    active_apify_secret_slots="${FAKE_GCLOUD_ACTIVE_APIFY_SECRET_SLOTS:-${FAKE_GCLOUD_APIFY_SECRET_SLOTS:-primary,secondary,tertiary,quaternary,quinary,senary,septenary,octonary,nonary,tenth}}"
     active_apify_secret_version="${FAKE_GCLOUD_ACTIVE_APIFY_SECRET_VERSION:-${FAKE_GCLOUD_APIFY_SECRET_VERSION:-7}}"
     active_identity_hmac_mode="${FAKE_GCLOUD_ACTIVE_IDENTITY_HMAC_MODE:-${FAKE_GCLOUD_IDENTITY_HMAC_MODE:-canonical}}"
     active_identity_hmac_version="${FAKE_GCLOUD_ACTIVE_IDENTITY_HMAC_VERSION:-${FAKE_GCLOUD_IDENTITY_HMAC_VERSION:-7}}"
@@ -1345,7 +1345,7 @@ case "$command_line" in
       --arg source_commit "$source_commit" \
       --arg known_good_recovery "$known_good_recovery" \
       --arg active_runtime_slot "$active_runtime_slot" \
-      --arg preflight_apify_token_slots "${PREFLIGHT_APIFY_API_TOKEN_SLOTS:-primary,quinary,senary}" \
+      --arg preflight_apify_token_slots "${PREFLIGHT_APIFY_API_TOKEN_SLOTS:-primary,tertiary,quaternary,quinary,senary,septenary,octonary,nonary,tenth}" \
       --arg active_apify_secret_slots "$active_apify_secret_slots" \
       --arg active_apify_secret_version "$active_apify_secret_version" \
       --arg active_identity_hmac_mode "$active_identity_hmac_mode" \
@@ -1745,7 +1745,7 @@ assert_contains "$temp_dir/unsupported-queue-condition.out" \
 cat >"$temp_dir/runtime.env" <<'EOF'
 ANALYSIS_V2_MEDIA_ARTIFACT_BUCKET="test-project-analysis-v2-media"
 ANALYSIS_V2_APIFY_API_TOKEN_SLOT="quinary"
-PREFLIGHT_APIFY_API_TOKEN_SLOTS="primary,quinary,senary"
+PREFLIGHT_APIFY_API_TOKEN_SLOTS="primary,tertiary,quaternary,quinary,senary,septenary,octonary,nonary,tenth"
 ANALYSIS_V2_INSTAGRAM_ROUTE="apify_v1"
 BETATEST_FREE_POOL_ENABLED="false"
 BETATEST_FREE_POOL_MAX_SNAPSHOT_AGE_SECONDS="300"
@@ -1793,7 +1793,7 @@ sed 's/^SCRAPER_FOLLOWERS=.*/SCRAPER_FOLLOWERS="selfhosted_auth"/' \
 cat >"$temp_dir/runtime-provider-secret.env" <<'EOF'
 ANALYSIS_V2_MEDIA_ARTIFACT_BUCKET="test-project-analysis-v2-media"
 ANALYSIS_V2_APIFY_API_TOKEN_SLOT="quinary"
-PREFLIGHT_APIFY_API_TOKEN_SLOTS="primary,quinary,senary"
+PREFLIGHT_APIFY_API_TOKEN_SLOTS="primary,tertiary,quaternary,quinary,senary,septenary,octonary,nonary,tenth"
 ANALYSIS_V2_INSTAGRAM_ROUTE="apify_v1"
 APIFY_QUINARY_API_TOKEN="SECRET_SENTINEL_MUST_NOT_BE_PRINTED"
 EOF
@@ -1801,7 +1801,7 @@ EOF
 cat >"$temp_dir/runtime-quoted-secret.yaml" <<'EOF'
 ANALYSIS_V2_MEDIA_ARTIFACT_BUCKET: "test-project-analysis-v2-media"
 ANALYSIS_V2_APIFY_API_TOKEN_SLOT: "quinary"
-PREFLIGHT_APIFY_API_TOKEN_SLOTS: "primary,quinary,senary"
+PREFLIGHT_APIFY_API_TOKEN_SLOTS: "primary,tertiary,quaternary,quinary,senary,septenary,octonary,nonary,tenth"
 ANALYSIS_V2_INSTAGRAM_ROUTE: "apify_v1"
 "APIFY_QUINARY_API_TOKEN": "QUOTED_SECRET_SENTINEL_MUST_NOT_BE_PRINTED"
 EOF
@@ -1809,7 +1809,7 @@ EOF
 cat >"$temp_dir/runtime-quoted-gate.yaml" <<'EOF'
 ANALYSIS_V2_MEDIA_ARTIFACT_BUCKET: "test-project-analysis-v2-media"
 ANALYSIS_V2_APIFY_API_TOKEN_SLOT: "quinary"
-PREFLIGHT_APIFY_API_TOKEN_SLOTS: "primary,quinary,senary"
+PREFLIGHT_APIFY_API_TOKEN_SLOTS: "primary,tertiary,quaternary,quinary,senary,septenary,octonary,nonary,tenth"
 ANALYSIS_V2_INSTAGRAM_ROUTE: "apify_v1"
 "ANALYSIS_V2_TASKS_ENABLED": "true"
 EOF
@@ -1817,14 +1817,14 @@ EOF
 cat >"$temp_dir/runtime-wrong-slot.env" <<'EOF'
 ANALYSIS_V2_MEDIA_ARTIFACT_BUCKET="test-project-analysis-v2-media"
 ANALYSIS_V2_APIFY_API_TOKEN_SLOT="primary"
-PREFLIGHT_APIFY_API_TOKEN_SLOTS="primary,quinary,senary"
+PREFLIGHT_APIFY_API_TOKEN_SLOTS="primary,tertiary,quaternary,quinary,senary,septenary,octonary,nonary,tenth"
 ANALYSIS_V2_INSTAGRAM_ROUTE="apify_v1"
 EOF
 
 cat >"$temp_dir/runtime-secondary-slot.env" <<'EOF'
 ANALYSIS_V2_MEDIA_ARTIFACT_BUCKET="test-project-analysis-v2-media"
 ANALYSIS_V2_APIFY_API_TOKEN_SLOT="secondary"
-PREFLIGHT_APIFY_API_TOKEN_SLOTS="primary,quinary,senary"
+PREFLIGHT_APIFY_API_TOKEN_SLOTS="primary,tertiary,quaternary,quinary,senary,septenary,octonary,nonary,tenth"
 ANALYSIS_V2_INSTAGRAM_ROUTE="apify_v1"
 BETATEST_FREE_POOL_ENABLED="false"
 BETATEST_FREE_POOL_MAX_SNAPSHOT_AGE_SECONDS="300"
@@ -1843,7 +1843,7 @@ EOF
 cat >"$temp_dir/runtime-beta-secondary-slot.env" <<'EOF'
 ANALYSIS_V2_MEDIA_ARTIFACT_BUCKET="test-project-analysis-v2-media"
 ANALYSIS_V2_APIFY_API_TOKEN_SLOT="secondary"
-PREFLIGHT_APIFY_API_TOKEN_SLOTS="primary,quinary,senary"
+PREFLIGHT_APIFY_API_TOKEN_SLOTS="primary,tertiary,quaternary,quinary,senary,septenary,octonary,nonary,tenth"
 ANALYSIS_V2_INSTAGRAM_ROUTE="apify_v1"
 BETATEST_FREE_POOL_ENABLED="true"
 BETATEST_FREE_POOL_MAX_SNAPSHOT_AGE_SECONDS="300"
@@ -1862,7 +1862,7 @@ EOF
 cat >"$temp_dir/runtime-primary-slot.env" <<'EOF'
 ANALYSIS_V2_MEDIA_ARTIFACT_BUCKET="test-project-analysis-v2-media"
 ANALYSIS_V2_APIFY_API_TOKEN_SLOT="primary"
-PREFLIGHT_APIFY_API_TOKEN_SLOTS="primary,quinary,senary"
+PREFLIGHT_APIFY_API_TOKEN_SLOTS="primary,tertiary,quaternary,quinary,senary,septenary,octonary,nonary,tenth"
 ANALYSIS_V2_INSTAGRAM_ROUTE="apify_v1"
 ANALYSIS_V2_AUTHORIZED_TEST_SHARDING_ENABLED="false"
 BETATEST_FREE_POOL_ENABLED="false"
@@ -1921,14 +1921,14 @@ cp "$temp_dir/build.yaml" "$temp_dir/build.env"
 
 cat >"$temp_dir/runtime-credential.env" <<'EOF'
 ANALYSIS_V2_MEDIA_ARTIFACT_BUCKET="test-project-analysis-v2-media"
-PREFLIGHT_APIFY_API_TOKEN_SLOTS="primary,quinary,senary"
+PREFLIGHT_APIFY_API_TOKEN_SLOTS="primary,tertiary,quaternary,quinary,senary,septenary,octonary,nonary,tenth"
 ANALYSIS_V2_INSTAGRAM_ROUTE="apify_v1"
 GOOGLE_APPLICATION_CREDENTIALS="RUNTIME_CREDENTIAL_SENTINEL_MUST_NOT_BE_PRINTED"
 EOF
 
 cat >"$temp_dir/runtime-r2-credential.env" <<'EOF'
 ANALYSIS_V2_MEDIA_ARTIFACT_BUCKET="test-project-analysis-v2-media"
-PREFLIGHT_APIFY_API_TOKEN_SLOTS="primary,quinary,senary"
+PREFLIGHT_APIFY_API_TOKEN_SLOTS="primary,tertiary,quaternary,quinary,senary,septenary,octonary,nonary,tenth"
 ANALYSIS_V2_INSTAGRAM_ROUTE="apify_v1"
 ANALYSIS_V2_RESULT_IMAGE_R2_SECRET_ACCESS_KEY="R2_RUNTIME_CREDENTIAL_SENTINEL_MUST_NOT_BE_PRINTED"
 EOF
@@ -1936,7 +1936,7 @@ EOF
 cat >"$temp_dir/runtime-admission.env" <<'EOF'
 ANALYSIS_V2_MEDIA_ARTIFACT_BUCKET="test-project-analysis-v2-media"
 ANALYSIS_V2_APIFY_API_TOKEN_SLOT="quinary"
-PREFLIGHT_APIFY_API_TOKEN_SLOTS="primary,quinary,senary"
+PREFLIGHT_APIFY_API_TOKEN_SLOTS="primary,tertiary,quaternary,quinary,senary,septenary,octonary,nonary,tenth"
 ANALYSIS_V2_INSTAGRAM_ROUTE="apify_v1"
 ANALYSIS_V2_ADMISSION_ENABLED="true"
 EOF
@@ -1944,7 +1944,7 @@ EOF
 cat >"$temp_dir/runtime-legacy-gate.env" <<'EOF'
 ANALYSIS_V2_MEDIA_ARTIFACT_BUCKET="test-project-analysis-v2-media"
 ANALYSIS_V2_APIFY_API_TOKEN_SLOT="quinary"
-PREFLIGHT_APIFY_API_TOKEN_SLOTS="primary,quinary,senary"
+PREFLIGHT_APIFY_API_TOKEN_SLOTS="primary,tertiary,quaternary,quinary,senary,septenary,octonary,nonary,tenth"
 ANALYSIS_V2_INSTAGRAM_ROUTE="apify_v1"
 ANALYSIS_V2_WORKER_EXECUTION_ENABLED="true"
 EOF
@@ -1952,7 +1952,7 @@ EOF
 cat >"$temp_dir/runtime-blite-gate.env" <<'EOF'
 ANALYSIS_V2_MEDIA_ARTIFACT_BUCKET="test-project-analysis-v2-media"
 ANALYSIS_V2_APIFY_API_TOKEN_SLOT="quinary"
-PREFLIGHT_APIFY_API_TOKEN_SLOTS="primary,quinary,senary"
+PREFLIGHT_APIFY_API_TOKEN_SLOTS="primary,tertiary,quaternary,quinary,senary,septenary,octonary,nonary,tenth"
 ANALYSIS_V2_INSTAGRAM_ROUTE="apify_v1"
 PRECHECKOUT_BLITE_ENABLED="true"
 PRECHECKOUT_BLITE_ROLLOUT_PERCENT="1"
@@ -1977,11 +1977,11 @@ common_env=(
   'ANALYSIS_V2_MEDIA_ARTIFACT_BUCKET=test-project-analysis-v2-media'
   'ANALYSIS_V2_DEPLOY_LOCK_BUCKET=analysis-v2-lock-0123456789abcdef0123456789abcdef'
   'ANALYSIS_V2_APIFY_API_TOKEN_SLOT=quinary'
-  'PREFLIGHT_APIFY_API_TOKEN_SLOTS=primary,quinary,senary'
+  'PREFLIGHT_APIFY_API_TOKEN_SLOTS=primary,tertiary,quaternary,quinary,senary,septenary,octonary,nonary,tenth'
   'ANALYSIS_V2_INSTAGRAM_ROUTE=apify_v1'
   'ANALYSIS_V2_SUPABASE_SERVICE_ROLE_SECRET_VERSION=7'
   'ANALYSIS_V2_APIFY_API_TOKEN_SECRET_VERSION=7'
-  'ANALYSIS_V2_APIFY_ADDITIONAL_SECRET_VERSIONS=primary:7,secondary:7,tertiary:7,quaternary:7,senary:7,septenary:7,tenth:7'
+  'ANALYSIS_V2_APIFY_ADDITIONAL_SECRET_VERSIONS=primary:7,secondary:7,tertiary:7,quaternary:7,senary:7,septenary:7,octonary:7,nonary:7,tenth:7'
   'ANALYSIS_V2_IMAGE_PROXY_SIGNING_SECRET_VERSION=7'
   'ANALYSIS_V2_PREFLIGHT_IDENTITY_HMAC_SECRET_VERSION=7'
   'ANALYSIS_V2_GENDER_ROUTING_HMAC_SECRET_VERSION=7'
@@ -2008,7 +2008,7 @@ for invalid_preflight_pool in \
   fi
   if [[ -n "$invalid_preflight_pool" ]]; then
     assert_contains "$temp_dir/invalid-preflight-pool-${#invalid_preflight_pool}.out" \
-      "PREFLIGHT_APIFY_API_TOKEN_SLOTS must be exactly primary,quinary,senary"
+      "PREFLIGHT_APIFY_API_TOKEN_SLOTS must be exactly primary,tertiary,quaternary,quinary,senary,septenary,octonary,nonary,tenth"
   else
     assert_contains "$temp_dir/invalid-preflight-pool-${#invalid_preflight_pool}.out" \
       "PREFLIGHT_APIFY_API_TOKEN_SLOTS is required"
@@ -2518,7 +2518,7 @@ assert_contains "$temp_dir/worker.out" \
 assert_contains "$temp_dir/worker.out" \
   "--build-service-account=projects/test-project/serviceAccounts/analysis-build@test-project.iam.gserviceaccount.com"
 assert_contains "$temp_dir/worker.out" \
-  "--set-secrets=SUPABASE_SERVICE_ROLE_KEY=ai-baram-v2-supabase-service-role:7\\,APIFY_PRIMARY_API_TOKEN=ai-baram-v2-apify-primary:7\\,APIFY_QUATERNARY_API_TOKEN=ai-baram-v2-apify-quaternary:7\\,APIFY_QUINARY_API_TOKEN=ai-baram-v2-apify-quinary:7\\,APIFY_SECONDARY_API_TOKEN=ai-baram-v2-apify-secondary:7\\,APIFY_SENARY_API_TOKEN=ai-baram-v2-apify-senary:7\\,APIFY_SEPTENARY_API_TOKEN=ai-baram-v2-apify-septenary:7\\,APIFY_TENTH_API_TOKEN=ai-baram-v2-apify-tenth:7\\,APIFY_TERTIARY_API_TOKEN=ai-baram-v2-apify-tertiary:7\\,IMAGE_PROXY_SIGNING_SECRET=ai-baram-v2-image-proxy-signing:7\\,ANALYSIS_V2_PREFLIGHT_IDENTITY_HMAC_SECRET=ai-baram-v2-preflight-identity-hmac:7\\,ANALYSIS_V2_GENDER_ROUTING_HMAC_SECRET=ai-baram-v2-gender-routing-hmac:7"
+  "--set-secrets=SUPABASE_SERVICE_ROLE_KEY=ai-baram-v2-supabase-service-role:7\\,APIFY_NONARY_API_TOKEN=ai-baram-v2-apify-nonary:7\\,APIFY_OCTONARY_API_TOKEN=ai-baram-v2-apify-octonary:7\\,APIFY_PRIMARY_API_TOKEN=ai-baram-v2-apify-primary:7\\,APIFY_QUATERNARY_API_TOKEN=ai-baram-v2-apify-quaternary:7\\,APIFY_QUINARY_API_TOKEN=ai-baram-v2-apify-quinary:7\\,APIFY_SECONDARY_API_TOKEN=ai-baram-v2-apify-secondary:7\\,APIFY_SENARY_API_TOKEN=ai-baram-v2-apify-senary:7\\,APIFY_SEPTENARY_API_TOKEN=ai-baram-v2-apify-septenary:7\\,APIFY_TENTH_API_TOKEN=ai-baram-v2-apify-tenth:7\\,APIFY_TERTIARY_API_TOKEN=ai-baram-v2-apify-tertiary:7\\,IMAGE_PROXY_SIGNING_SECRET=ai-baram-v2-image-proxy-signing:7\\,ANALYSIS_V2_PREFLIGHT_IDENTITY_HMAC_SECRET=ai-baram-v2-preflight-identity-hmac:7\\,ANALYSIS_V2_GENDER_ROUTING_HMAC_SECRET=ai-baram-v2-gender-routing-hmac:7"
 assert_contains "$temp_dir/worker.out" "roles/run.invoker will contain only task and maintenance OIDC identities"
 assert_not_contains "$temp_dir/worker.out" "SECRET_SENTINEL_MUST_NOT_BE_PRINTED"
 assert_not_contains "$temp_dir/worker.out" "PUBLIC_BUILD_SENTINEL_MUST_NOT_BE_PRINTED"
@@ -2776,15 +2776,15 @@ printf 'ready\n' >"$temp_dir/slot-staging-state"
 : >"$temp_dir/slot-staging-traffic.out"
 env -u ANALYSIS_V2_WORKER_ENV_VARS_FILE "${common_env[@]}" \
   'ANALYSIS_V2_APIFY_API_TOKEN_SLOT=primary' \
-  'ANALYSIS_V2_APIFY_ADDITIONAL_SECRET_VERSIONS=secondary:7,tertiary:7,quaternary:7,quinary:7,senary:7,septenary:7,tenth:7' \
+  'ANALYSIS_V2_APIFY_ADDITIONAL_SECRET_VERSIONS=secondary:7,tertiary:7,quaternary:7,quinary:7,senary:7,septenary:7,octonary:7,nonary:7,tenth:7' \
   "ANALYSIS_V2_WORKER_SOURCE_DIR=$deploy_source_repo" \
   "ANALYSIS_V2_WORKER_BUILD_ENV_VARS_FILE=$temp_dir/build.yaml" \
   "FAKE_GCLOUD_STATE_FILE=$temp_dir/slot-staging-state" \
   "FAKE_GCLOUD_SOURCE_COMMIT=$deploy_source_commit" \
   'FAKE_GCLOUD_RUNTIME_SLOT=quaternary' \
   'FAKE_GCLOUD_ACTIVE_RUNTIME_SLOT=quaternary' \
-  'FAKE_GCLOUD_APIFY_SECRET_SLOTS=quaternary' \
-  'FAKE_GCLOUD_ACTIVE_APIFY_SECRET_SLOTS=quaternary' \
+  'FAKE_GCLOUD_APIFY_SECRET_SLOTS=primary,secondary,tertiary,quaternary,quinary,senary,septenary,octonary,nonary,tenth' \
+  'FAKE_GCLOUD_ACTIVE_APIFY_SECRET_SLOTS=primary,secondary,tertiary,quaternary,quinary,senary,septenary,octonary,nonary,tenth' \
   "FAKE_GCLOUD_DEPLOY_LOG=$temp_dir/slot-staging-deploy.out" \
   "FAKE_GCLOUD_ENDPOINT_UPDATE_LOG=$temp_dir/slot-staging-endpoint.out" \
   "FAKE_GCLOUD_TRAFFIC_LOG=$temp_dir/slot-staging-traffic.out" \
@@ -2794,7 +2794,7 @@ assert_not_contains "$temp_dir/slot-staging-deploy.out" ' --env-vars-file='
 assert_contains "$temp_dir/slot-staging-deploy.out" \
   "--build-env-vars-file="
 assert_contains "$temp_dir/slot-staging-deploy.out" \
-  "--update-env-vars=^|^ANALYSIS_V2_MEDIA_ARTIFACT_BUCKET=test-project-analysis-v2-media|ANALYSIS_V2_APIFY_API_TOKEN_SLOT=primary|PREFLIGHT_APIFY_API_TOKEN_SLOTS=primary,quinary,senary"
+  "--update-env-vars=^|^ANALYSIS_V2_MEDIA_ARTIFACT_BUCKET=test-project-analysis-v2-media|ANALYSIS_V2_APIFY_API_TOKEN_SLOT=primary|PREFLIGHT_APIFY_API_TOKEN_SLOTS=primary,tertiary,quaternary,quinary,senary,septenary,octonary,nonary,tenth"
 assert_contains "$temp_dir/slot-staging-deploy.out" \
   'PREFLIGHT_APIFY_API_TOKEN_SLOTS='
 assert_contains "$temp_dir/slot-staging-deploy.out" \
@@ -3199,7 +3199,7 @@ beta_free_slots="$(cd "$repo_dir" && "$repo_dir/node_modules/.bin/tsx" -e '
 import { BETA_APIFY_FREE_CREDENTIAL_SLOTS } from "./lib/services/analysis/beta-apify-credit-pool";
 process.stdout.write(BETA_APIFY_FREE_CREDENTIAL_SLOTS.join(","));
 ')"
-[[ "$beta_free_slots" == "primary,tertiary,quaternary,quinary,senary,septenary" ]] \
+[[ "$beta_free_slots" == "primary,tertiary,quaternary,quinary,senary,septenary,octonary,nonary,tenth" ]] \
   || fail "beta free-pool slot inventory drifted"
 [[ ",$beta_free_slots," != *",secondary,"* ]] \
   || fail "beta free-pool slot inventory must exclude secondary"
@@ -3211,15 +3211,15 @@ if env "${common_env[@]}" 'FAKE_GCLOUD_STATE=prerequisites_ready' \
   "ANALYSIS_V2_WORKER_ENV_VARS_FILE=$temp_dir/runtime-beta-secondary-slot.env" \
   bash "$script_dir/deploy-analysis-v2-worker.sh" --dry-run \
   >"$temp_dir/beta-incomplete-secret-inventory.out" 2>&1; then
-  fail "beta worker accepted an incomplete eight-slot Secret Manager inventory"
+  fail "beta worker accepted an incomplete ten-slot Secret Manager inventory"
 fi
 assert_contains "$temp_dir/beta-incomplete-secret-inventory.out" \
-  "canonical analysis-worker requires exactly all eight Apify Secret Manager refs"
+  "canonical analysis-worker requires exactly all ten Apify Secret Manager refs"
 
 env "${common_env[@]}" 'FAKE_GCLOUD_STATE=prerequisites_ready' \
   'BETATEST_FREE_POOL_ENABLED=true' \
   'ANALYSIS_V2_APIFY_API_TOKEN_SLOT=secondary' \
-  'ANALYSIS_V2_APIFY_ADDITIONAL_SECRET_VERSIONS=primary:6,tertiary:6,quaternary:6,quinary:6,senary:6,septenary:6,tenth:6' \
+  'ANALYSIS_V2_APIFY_ADDITIONAL_SECRET_VERSIONS=primary:6,tertiary:6,quaternary:6,quinary:6,senary:6,septenary:6,octonary:6,nonary:6,tenth:6' \
   "ANALYSIS_V2_WORKER_ENV_VARS_FILE=$temp_dir/runtime-beta-secondary-slot.env" \
   bash "$script_dir/deploy-analysis-v2-worker.sh" --dry-run \
   >"$temp_dir/beta-seven-secret-inventory.out"
@@ -3231,6 +3231,8 @@ for beta_inventory_assignment in \
   'APIFY_QUINARY_API_TOKEN=ai-baram-v2-apify-quinary:6' \
   'APIFY_SENARY_API_TOKEN=ai-baram-v2-apify-senary:6' \
   'APIFY_SEPTENARY_API_TOKEN=ai-baram-v2-apify-septenary:6' \
+  'APIFY_OCTONARY_API_TOKEN=ai-baram-v2-apify-octonary:6' \
+  'APIFY_NONARY_API_TOKEN=ai-baram-v2-apify-nonary:6' \
   'APIFY_TENTH_API_TOKEN=ai-baram-v2-apify-tenth:6'; do
   assert_contains "$temp_dir/beta-seven-secret-inventory.out" \
     "$beta_inventory_assignment"
@@ -3281,11 +3283,11 @@ if env "${common_env[@]}" 'FAKE_GCLOUD_STATE=prerequisites_ready' \
   fail "canonical worker accepted a beta-disabled incomplete Apify inventory"
 fi
 assert_contains "$temp_dir/worker-secondary-slot.out" \
-  'canonical analysis-worker requires exactly all eight Apify Secret Manager refs'
+  'canonical analysis-worker requires exactly all ten Apify Secret Manager refs'
 
 env "${common_env[@]}" 'FAKE_GCLOUD_STATE=prerequisites_ready' \
   'ANALYSIS_V2_APIFY_API_TOKEN_SLOT=secondary' \
-  'ANALYSIS_V2_APIFY_ADDITIONAL_SECRET_VERSIONS=primary:6,tertiary:6,quaternary:6,quinary:6,senary:6,septenary:6,tenth:6' \
+  'ANALYSIS_V2_APIFY_ADDITIONAL_SECRET_VERSIONS=primary:6,tertiary:6,quaternary:6,quinary:6,senary:6,septenary:6,octonary:6,nonary:6,tenth:6' \
   "ANALYSIS_V2_WORKER_ENV_VARS_FILE=$temp_dir/runtime-secondary-slot.env" \
   bash "$script_dir/deploy-analysis-v2-worker.sh" --dry-run \
   >"$temp_dir/worker-secondary-slot-additional-refs.out"
@@ -3297,6 +3299,8 @@ for additional_assignment in \
   'APIFY_QUINARY_API_TOKEN=ai-baram-v2-apify-quinary:6' \
   'APIFY_SENARY_API_TOKEN=ai-baram-v2-apify-senary:6' \
   'APIFY_SEPTENARY_API_TOKEN=ai-baram-v2-apify-septenary:6' \
+  'APIFY_OCTONARY_API_TOKEN=ai-baram-v2-apify-octonary:6' \
+  'APIFY_NONARY_API_TOKEN=ai-baram-v2-apify-nonary:6' \
   'APIFY_TENTH_API_TOKEN=ai-baram-v2-apify-tenth:6'; do
   assert_contains "$temp_dir/worker-secondary-slot-additional-refs.out" \
     "$additional_assignment"
@@ -3334,7 +3338,7 @@ env "${common_env[@]}" 'FAKE_GCLOUD_STATE=ready' \
   'FAKE_GCLOUD_APIFY_SECRET_SLOTS=primary,tertiary,quaternary,quinary' \
   'FAKE_GCLOUD_APIFY_SECRET_VERSION=6' \
   'ANALYSIS_V2_APIFY_API_TOKEN_SLOT=secondary' \
-  'ANALYSIS_V2_APIFY_ADDITIONAL_SECRET_VERSIONS=senary:6,septenary:6,tenth:6' \
+  'ANALYSIS_V2_APIFY_ADDITIONAL_SECRET_VERSIONS=senary:6,septenary:6,octonary:6,nonary:6,tenth:6' \
   "ANALYSIS_V2_WORKER_ENV_VARS_FILE=$temp_dir/runtime-secondary-slot.env" \
   bash "$script_dir/deploy-analysis-v2-worker.sh" --dry-run \
   >"$temp_dir/worker-secondary-slot-recovery.out"
@@ -3345,6 +3349,8 @@ for retained_assignment in \
   'APIFY_QUINARY_API_TOKEN=ai-baram-v2-apify-quinary:6' \
   'APIFY_SENARY_API_TOKEN=ai-baram-v2-apify-senary:6' \
   'APIFY_SEPTENARY_API_TOKEN=ai-baram-v2-apify-septenary:6' \
+  'APIFY_OCTONARY_API_TOKEN=ai-baram-v2-apify-octonary:6' \
+  'APIFY_NONARY_API_TOKEN=ai-baram-v2-apify-nonary:6' \
   'APIFY_TENTH_API_TOKEN=ai-baram-v2-apify-tenth:6'; do
   assert_contains "$temp_dir/worker-secondary-slot-recovery.out" \
     "$retained_assignment"
@@ -3364,7 +3370,7 @@ env "${common_env[@]}" 'FAKE_GCLOUD_STATE=ready' \
   'FAKE_GCLOUD_APIFY_SECRET_VERSION=7' \
   'ANALYSIS_V2_APIFY_API_TOKEN_SLOT=primary' \
   'ANALYSIS_V2_APIFY_API_TOKEN_SECRET_VERSION=3' \
-  'ANALYSIS_V2_APIFY_ADDITIONAL_SECRET_VERSIONS=secondary:7,tertiary:7,quaternary:7,quinary:7,senary:7,septenary:7,tenth:7' \
+  'ANALYSIS_V2_APIFY_ADDITIONAL_SECRET_VERSIONS=secondary:7,tertiary:7,quaternary:7,quinary:7,senary:7,septenary:7,octonary:7,nonary:7,tenth:7' \
   "ANALYSIS_V2_WORKER_ENV_VARS_FILE=$temp_dir/runtime-primary-slot.env" \
   bash "$script_dir/deploy-analysis-v2-worker.sh" --dry-run \
   >"$temp_dir/worker-primary-retained-cutover.out"
@@ -3376,6 +3382,8 @@ for retained_cutover_assignment in \
   'APIFY_QUINARY_API_TOKEN=ai-baram-v2-apify-quinary:7' \
   'APIFY_SENARY_API_TOKEN=ai-baram-v2-apify-senary:7' \
   'APIFY_SEPTENARY_API_TOKEN=ai-baram-v2-apify-septenary:7' \
+  'APIFY_OCTONARY_API_TOKEN=ai-baram-v2-apify-octonary:7' \
+  'APIFY_NONARY_API_TOKEN=ai-baram-v2-apify-nonary:7' \
   'APIFY_TENTH_API_TOKEN=ai-baram-v2-apify-tenth:7'; do
   assert_contains "$temp_dir/worker-primary-retained-cutover.out" \
     "$retained_cutover_assignment"
@@ -3422,18 +3430,18 @@ if env "${canonical_common_env[@]}" \
   fail "canonical analysis-worker accepted a partial Apify inventory clear"
 fi
 assert_contains "$temp_dir/canonical-clear-partial-rejected.out" \
-  'canonical analysis-worker requires exactly all eight Apify Secret Manager refs'
+  'canonical analysis-worker requires exactly all ten Apify Secret Manager refs'
 [[ ! -s "$temp_dir/canonical-clear-partial-events" ]] \
   || fail "canonical partial clear reached a gcloud mutation before failing closed"
 
 env "${canonical_common_env[@]}" \
   'FAKE_GCLOUD_STATE=ready' \
-  'FAKE_GCLOUD_APIFY_SECRET_SLOTS=primary,secondary,tertiary,quaternary,quinary,senary,septenary,tenth' \
-  'FAKE_GCLOUD_ACTIVE_APIFY_SECRET_SLOTS=primary,secondary,tertiary,quaternary,quinary,senary,septenary,tenth' \
+  'FAKE_GCLOUD_APIFY_SECRET_SLOTS=primary,secondary,tertiary,quaternary,quinary,senary,septenary,octonary,nonary,tenth' \
+  'FAKE_GCLOUD_ACTIVE_APIFY_SECRET_SLOTS=primary,secondary,tertiary,quaternary,quinary,senary,septenary,octonary,nonary,tenth' \
   'FAKE_GCLOUD_APIFY_SECRET_VERSION=3' \
   'ANALYSIS_V2_APIFY_API_TOKEN_SLOT=primary' \
   'ANALYSIS_V2_APIFY_API_TOKEN_SECRET_VERSION=3' \
-  'ANALYSIS_V2_APIFY_ADDITIONAL_SECRET_VERSIONS=secondary:3,tertiary:3,quaternary:3,quinary:3,senary:3,septenary:3,tenth:3' \
+  'ANALYSIS_V2_APIFY_ADDITIONAL_SECRET_VERSIONS=secondary:3,tertiary:3,quaternary:3,quinary:3,senary:3,septenary:3,octonary:3,nonary:3,tenth:3' \
   "FAKE_GCLOUD_EVENT_LOG=$temp_dir/canonical-clear-full-events" \
   "ANALYSIS_V2_WORKER_ENV_VARS_FILE=$temp_dir/runtime-primary-slot.env" \
   bash "$script_dir/deploy-analysis-v2-worker.sh" --dry-run \
@@ -4251,7 +4259,7 @@ fi
 assert_contains "$temp_dir/worker-prune-extra-ref-check.out" \
   'explicit prune check requires exactly APIFY_PRIMARY_API_TOKEN=ai-baram-v2-apify-primary:3'
 
-# Resume the canonical normal-worker seven-ref fixture after maintenance-only
+# Resume the canonical normal-worker ten-ref fixture after maintenance-only
 # prune/fence cases have completed.
 common_env=("${canonical_common_env[@]}")
 
@@ -4552,7 +4560,7 @@ assert_contains "$temp_dir/worker-recovery-latest-ref.out" \
   'existing worker Apify references are invalid or the selected slot version changed'
 
 if env "${common_env[@]}" 'FAKE_GCLOUD_STATE=ready' \
-  'FAKE_GCLOUD_APIFY_SECRET_SLOTS=quinary,octonary' \
+  'FAKE_GCLOUD_APIFY_SECRET_SLOTS=quinary,unallowlisted' \
   "ANALYSIS_V2_WORKER_ENV_VARS_FILE=$temp_dir/runtime.env" \
   bash "$script_dir/deploy-analysis-v2-worker.sh" --dry-run \
   >"$temp_dir/worker-recovery-unallowlisted.out" 2>&1; then

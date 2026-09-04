@@ -13,6 +13,7 @@ const slots = [
     'primary', 'tertiary', 'quaternary', 'quinary', 'senary',
     'septenary', 'octonary', 'nonary', 'tenth',
 ] as const;
+const allSlots = ['primary', 'secondary', ...slots.slice(1)] as const;
 const operatorId = '11111111-1111-4111-8111-111111111111';
 const observedAt = new Date(Date.now() - 1_000).toISOString();
 
@@ -121,12 +122,12 @@ beforeAll(async () => {
 beforeEach(async () => {
     // Snapshot rows are replaceable runtime state; control events are
     // deliberately never deleted, even by a test reset.
-    await db.exec('DELETE FROM public.analysis_apify_credit_snapshots;');
-    await db.query(
-        `INSERT INTO public.analysis_apify_credit_snapshots(credential_slot, health_state)
-         SELECT slot, 'unhealthy' FROM unnest($1::TEXT[]) AS slot`,
-        [slots],
-    );
+        await db.exec('DELETE FROM public.analysis_apify_credit_snapshots;');
+        await db.query(
+            `INSERT INTO public.analysis_apify_credit_snapshots(credential_slot, health_state)
+             SELECT slot, 'unhealthy' FROM unnest($1::TEXT[]) AS slot`,
+            [allSlots],
+        );
 });
 
 afterAll(async () => {
@@ -134,17 +135,19 @@ afterAll(async () => {
 });
 
 describe('Apify ten-account runtime PGlite migration', () => {
-    it('seeds and accepts exactly nine free aliases while rejecting secondary', async () => {
+    it('seeds all ten aliases while exposing exactly nine beta/free aliases', async () => {
         const result = await db.query<{ credential_slot: string; valid: boolean }>(
             `SELECT credential_slot, public.analysis_beta_valid_apify_credential_slot(credential_slot) AS valid
              FROM public.analysis_apify_credit_snapshots ORDER BY credential_slot`,
         );
-        expect(result.rows).toHaveLength(9);
-        expect(result.rows.every(row => row.valid)).toBe(true);
-        const secondary = await db.query<{ valid: boolean }>(
-            `SELECT public.analysis_beta_valid_apify_credential_slot('secondary') AS valid`,
+        expect(result.rows).toHaveLength(10);
+        expect(result.rows.filter(row => row.valid).map(row => row.credential_slot).sort()).toEqual([...slots].sort());
+        expect(result.rows.find(row => row.credential_slot === 'secondary')?.valid).toBe(false);
+        const allValid = await db.query<{ valid: boolean }>(
+            `SELECT bool_and(public.analysis_v2_valid_apify_credential_slot(credential_slot)) AS valid
+             FROM public.analysis_apify_credit_snapshots`,
         );
-        expect(secondary.rows[0]?.valid).toBe(false);
+        expect(allValid.rows[0]?.valid).toBe(true);
     });
 
     it('keeps exclusion history append-only and projects restore state by latest event', async () => {
@@ -192,5 +195,84 @@ describe('Apify ten-account runtime PGlite migration', () => {
             'SELECT public.upsert_analysis_beta_apify_credit_snapshots($1::JSONB)',
             [JSON.stringify(secondaryPayload)],
         )).rejects.toThrow('ANALYSIS_BETA_POOL_SNAPSHOT_INCOMPLETE');
+    });
+
+    it('returns an exact ten-row sanitized inventory and keeps missing secondary explicit', async () => {
+        const initial = await db.query<{ inventory: unknown }>(
+            'SELECT public.load_analysis_apify_account_credit_inventory(300) AS inventory',
+        );
+        const missing = initial.rows[0]?.inventory as Array<Record<string, unknown>>;
+        expect(missing).toHaveLength(10);
+        expect(missing.map(row => row.credentialSlot)).toEqual([...allSlots]);
+        expect(missing[1]).toMatchObject({
+            credentialSlot: 'secondary',
+            workloadRole: 'paid',
+            healthState: 'unhealthy',
+            freshnessState: 'missing',
+            effectiveRemainingUsd: null,
+        });
+        expect(JSON.stringify(missing)).not.toMatch(/token|account|userId|provider/i);
+
+        await db.query(
+            'SELECT public.upsert_analysis_beta_apify_credit_snapshots($1::JSONB)',
+            [JSON.stringify(snapshotRows())],
+        );
+        const paidPayload = {
+            credentialSlot: 'secondary',
+            monthlyLimitUsd: 20,
+            monthlyUsageUsd: 3,
+            billingCycleStartAt: '2026-09-01T00:00:00.000Z',
+            billingCycleEndAt: '2026-10-01T00:00:00.000Z',
+            observedAt,
+            healthState: 'healthy',
+        };
+        const refreshed = await db.query<{ inventory: unknown }>(
+            'SELECT public.upsert_analysis_apify_paid_credit_snapshot($1::JSONB) AS inventory',
+            [JSON.stringify(paidPayload)],
+        );
+        const inventory = refreshed.rows[0]?.inventory as Array<Record<string, unknown>>;
+        expect(inventory).toHaveLength(10);
+        expect(inventory[1]).toMatchObject({
+            credentialSlot: 'secondary',
+            workloadRole: 'paid',
+            healthState: 'healthy',
+            freshnessState: 'fresh',
+            monthlyLimitUsd: 20,
+            monthlyUsageUsd: 3,
+            effectiveRemainingUsd: 17,
+        });
+        expect(Date.parse(String(inventory[1]?.billingCycleEndAt)))
+            .toBe(Date.parse('2026-10-01T00:00:00Z'));
+        expect(Date.parse(String(inventory[1]?.cycleResetAt)))
+            .toBe(Date.parse('2026-10-01T00:00:00Z'));
+    });
+
+    it('allows secondary staleness without blocking the independent nine-row free refresh', async () => {
+        await db.query(
+            'SELECT public.upsert_analysis_beta_apify_credit_snapshots($1::JSONB)',
+            [JSON.stringify(snapshotRows())],
+        );
+        await db.query(
+            `UPDATE public.analysis_apify_credit_snapshots
+             SET monthly_limit_usd = 20, monthly_usage_usd = 3,
+                 billing_cycle_start_at = '2026-09-01T00:00:00Z',
+                 billing_cycle_end_at = '2026-10-01T00:00:00Z',
+                 observed_at = clock_timestamp() - interval '1 day',
+                 health_state = 'healthy'
+             WHERE credential_slot = 'secondary'`,
+        );
+        await expect(db.query(
+            'SELECT public.upsert_analysis_beta_apify_credit_snapshots($1::JSONB)',
+            [JSON.stringify(snapshotRows())],
+        )).resolves.toBeDefined();
+        const inventory = await db.query<{ inventory: unknown }>(
+            'SELECT public.load_analysis_apify_account_credit_inventory(300) AS inventory',
+        );
+        const rows = inventory.rows[0]?.inventory as Array<Record<string, unknown>>;
+        expect(rows[1]).toMatchObject({
+            credentialSlot: 'secondary',
+            freshnessState: 'stale',
+            effectiveRemainingUsd: null,
+        });
     });
 });

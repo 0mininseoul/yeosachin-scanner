@@ -1,8 +1,9 @@
 import type { SupabaseClient } from '@supabase/supabase-js';
 import { getApifyClient } from '@/lib/services/instagram/providers/apify-relationship';
-import type {
-    ApifyCredentialSlot,
-    ProviderCostTerminalStatus,
+import {
+    isApifyCredentialSlot,
+    type ApifyCredentialSlot,
+    type ProviderCostTerminalStatus,
 } from '@/lib/services/instagram/providers/types';
 import {
     enqueueAnalysisOrderAuditBundle,
@@ -69,7 +70,7 @@ function parseRun(value: unknown): StoredCostRun {
         || (row.logical_provider !== 'apify' && row.logical_provider !== 'coderx')
         || typeof row.actor_id !== 'string'
         || !ACTOR_ID_PATTERN.test(row.actor_id)
-        || (row.credential_slot !== 'primary' && row.credential_slot !== 'secondary')
+        || !isApifyCredentialSlot(row.credential_slot)
         || !['succeeded', 'failed', 'aborted', 'timed_out'].includes(String(row.status))
         || !Number.isFinite(maxChargeUsd)
         || maxChargeUsd < 0

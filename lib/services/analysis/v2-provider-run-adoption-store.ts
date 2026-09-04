@@ -1,6 +1,10 @@
 import { z } from 'zod';
 import { supabaseAdmin } from '@/lib/supabase/admin';
-import type { ApifyCredentialSlot, ProviderRunCheckpoint } from '@/lib/services/instagram/providers/types';
+import {
+    APIFY_CREDENTIAL_SLOTS,
+    type ApifyCredentialSlot,
+    type ProviderRunCheckpoint,
+} from '@/lib/services/instagram/providers/types';
 import type {
     AnalysisV2LogicalPaidProvider,
     AnalysisV2ProviderRunReservationInput,
@@ -13,9 +17,7 @@ const adoptedRunSchema = z.object({
     inputHash: z.string().regex(/^[0-9a-f]{64}$/),
     logicalProvider: z.enum(['apify', 'coderx']),
     actorId: z.string().min(3).max(200),
-    credentialSlot: z.enum([
-        'primary', 'secondary', 'tertiary', 'quaternary', 'quinary', 'senary',
-    ]),
+    credentialSlot: z.enum(APIFY_CREDENTIAL_SLOTS),
     maxChargeUsd: z.coerce.number().min(0).max(100_000),
     runId: z.string().regex(/^[A-Za-z0-9]{8,64}$/),
     actualUsageUsd: z.coerce.number().min(0).max(100_000),

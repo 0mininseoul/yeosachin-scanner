@@ -72,15 +72,15 @@ function baseEnvironment(role: 'preflight' | 'paid' = 'preflight') {
         ANALYSIS_BETA_PREPARE_ENABLED: 'false',
         ANALYSIS_CAPACITY_SOURCE_DIR: '.',
         ANALYSIS_V2_APIFY_API_TOKEN_SLOT: role === 'paid' ? 'secondary' : 'senary',
-        PREFLIGHT_APIFY_API_TOKEN_SLOTS: 'primary,quinary,senary',
+        PREFLIGHT_APIFY_API_TOKEN_SLOTS: 'primary,tertiary,quaternary,quinary,senary,septenary,octonary,nonary,tenth',
         ANALYSIS_V2_SUPABASE_SERVICE_ROLE_SECRET_VERSION: '7',
         ANALYSIS_V2_APIFY_API_TOKEN_SECRET_VERSION: '7',
         ANALYSIS_V2_IMAGE_PROXY_SIGNING_SECRET_VERSION: '7',
         ANALYSIS_V2_PREFLIGHT_IDENTITY_HMAC_SECRET_VERSION: '7',
         ANALYSIS_V2_GENDER_ROUTING_HMAC_SECRET_VERSION: '7',
         ANALYSIS_V2_APIFY_ADDITIONAL_SECRET_VERSIONS: role === 'paid'
-            ? 'primary:7,tertiary:7,quaternary:7,quinary:7,senary:7,septenary:7,tenth:7'
-            : 'primary:7,quinary:7',
+            ? 'primary:7,tertiary:7,quaternary:7,quinary:7,senary:7,septenary:7,octonary:7,nonary:7,tenth:7'
+            : 'primary:7,tertiary:7,quaternary:7,quinary:7,septenary:7,octonary:7,nonary:7,tenth:7',
         ANALYSIS_V2_WORKER_BUILD_SERVICE_ACCOUNT: 'analysis-build@example-project.iam.gserviceaccount.com',
         GITHUB_TOKEN: 'github-token-fixture',
     };
@@ -281,8 +281,14 @@ function fakeRun(options: FakeRunOptions = {}) {
     const secretEnv = (role === 'preflight'
         ? [
             ['APIFY_PRIMARY_API_TOKEN', 'ai-baram-v2-apify-primary', '7'],
+            ['APIFY_TERTIARY_API_TOKEN', 'ai-baram-v2-apify-tertiary', '7'],
+            ['APIFY_QUATERNARY_API_TOKEN', 'ai-baram-v2-apify-quaternary', '7'],
             ['APIFY_QUINARY_API_TOKEN', 'ai-baram-v2-apify-quinary', '7'],
             ['APIFY_SENARY_API_TOKEN', 'ai-baram-v2-apify-senary', '7'],
+            ['APIFY_SEPTENARY_API_TOKEN', 'ai-baram-v2-apify-septenary', '7'],
+            ['APIFY_OCTONARY_API_TOKEN', 'ai-baram-v2-apify-octonary', '7'],
+            ['APIFY_NONARY_API_TOKEN', 'ai-baram-v2-apify-nonary', '7'],
+            ['APIFY_TENTH_API_TOKEN', 'ai-baram-v2-apify-tenth', '7'],
         ]
         : [
             ['APIFY_PRIMARY_API_TOKEN', 'ai-baram-v2-apify-primary', '7'],
@@ -292,6 +298,8 @@ function fakeRun(options: FakeRunOptions = {}) {
             ['APIFY_QUINARY_API_TOKEN', 'ai-baram-v2-apify-quinary', '7'],
             ['APIFY_SENARY_API_TOKEN', 'ai-baram-v2-apify-senary', '7'],
             ['APIFY_SEPTENARY_API_TOKEN', 'ai-baram-v2-apify-septenary', '7'],
+            ['APIFY_OCTONARY_API_TOKEN', 'ai-baram-v2-apify-octonary', '7'],
+            ['APIFY_NONARY_API_TOKEN', 'ai-baram-v2-apify-nonary', '7'],
             ['APIFY_TENTH_API_TOKEN', 'ai-baram-v2-apify-tenth', '7'],
         ]).concat([
         ['SUPABASE_SERVICE_ROLE_KEY', 'ai-baram-v2-supabase-service-role', '7'],
@@ -775,6 +783,42 @@ fi
 }
 
 describe('automatic-analysis infrastructure contracts', () => {
+    it('declares the canonical ten-slot Apify inventory in every deployment path', () => {
+        const slots = [
+            'primary',
+            'secondary',
+            'tertiary',
+            'quaternary',
+            'quinary',
+            'senary',
+            'septenary',
+            'octonary',
+            'nonary',
+            'tenth',
+        ] as const;
+        for (const script of [
+            'scripts/configure-analysis-v2-secrets.sh',
+            'scripts/generate-analysis-v2-env-files.sh',
+            'scripts/deploy-analysis-v2-worker.sh',
+            'scripts/deploy-analysis-capacity-workers.sh',
+        ]) {
+            const source = readFileSync(join(root, script), 'utf8');
+            for (const slot of slots) {
+                expect(source, `${script} is missing ${slot}`).toContain(slot);
+            }
+        }
+        expect(readFileSync(join(root, 'scripts/deploy-analysis-v2-worker.sh'), 'utf8'))
+            .toContain('exactly all ten Apify Secret Manager refs');
+        expect(readFileSync(join(root, 'scripts/deploy-analysis-capacity-workers.sh'), 'utf8'))
+            .toContain('exactly ten Apify refs');
+    });
+
+    it('hard-fences paid workers to the secondary Apify slot', () => {
+        const source = readFileSync(join(root, 'scripts/deploy-analysis-capacity-workers.sh'), 'utf8');
+        expect(source).toContain('[[ "$selected_slot" == "secondary" ]]');
+        expect(source).toContain('active paid worker must select ANALYSIS_V2_APIFY_API_TOKEN_SLOT=secondary');
+    });
+
     it('dry-runs a preflight queue without invoking gcloud', () => {
         const output = runQueue('configure-analysis-capacity-queues.sh', [
             '--role=preflight', '--dry-run',

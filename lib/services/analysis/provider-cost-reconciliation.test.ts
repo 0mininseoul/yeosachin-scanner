@@ -89,6 +89,27 @@ describe('provider cost reconciliation', () => {
         expect(db.rpc).not.toHaveBeenCalled();
     });
 
+    it('preserves a historical octonary receipt identity during reconciliation', async () => {
+        const db = database([{ ...settledRow, credential_slot: 'octonary' }]);
+        const selectedSlots: string[] = [];
+        const get = vi.fn().mockResolvedValue({
+            status: 'SUCCEEDED',
+            usageTotalUsd: 0.0754,
+        });
+
+        await expect(reconcileSettledAnalysisProviderCosts(db as never, undefined, {
+            clientForSlot: slot => {
+                selectedSlots.push(slot);
+                return { run: () => ({ get }) };
+            },
+        })).resolves.toEqual({ eligible: 1, finalized: 1, failed: 0, hasMore: false });
+
+        expect(selectedSlots).toEqual(['octonary']);
+        expect(db.rpc).toHaveBeenCalledWith('finalize_analysis_provider_cost', expect.objectContaining({
+            p_credential_slot: 'octonary',
+        }));
+    });
+
     it('can reconcile the oldest global rows without a request filter', async () => {
         const db = database([settledRow]);
         const get = vi.fn().mockResolvedValue({

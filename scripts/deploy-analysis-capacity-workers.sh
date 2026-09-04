@@ -9,7 +9,8 @@ readonly SUPABASE_SECRET_ID="ai-baram-v2-supabase-service-role"
 readonly IMAGE_SIGNING_SECRET_ID="ai-baram-v2-image-proxy-signing"
 readonly PREFLIGHT_IDENTITY_HMAC_SECRET_ID="ai-baram-v2-preflight-identity-hmac"
 readonly GENDER_ROUTING_HMAC_SECRET_ID="ai-baram-v2-gender-routing-hmac"
-readonly APIFY_SLOTS=(primary secondary tertiary quaternary quinary senary septenary tenth)
+readonly APIFY_SLOTS=(primary secondary tertiary quaternary quinary senary septenary octonary nonary tenth)
+readonly PREFLIGHT_APIFY_API_TOKEN_SLOTS_VALUE="primary,tertiary,quaternary,quinary,senary,septenary,octonary,nonary,tenth"
 # Keep the split-capacity deployment provenance key identical to the existing
 # V2 release-readiness contract.  A single source-of-truth label prevents an
 # operator from mistaking a capacity wrapper SHA for the reviewed V2 source SHA.
@@ -786,7 +787,7 @@ EOF
 }
 
 selected_slot="${ANALYSIS_V2_APIFY_API_TOKEN_SLOT:-}"
-[[ "$selected_slot" =~ ^(primary|secondary|tertiary|quaternary|quinary|senary|septenary|tenth)$ ]] \
+[[ "$selected_slot" =~ ^(primary|secondary|tertiary|quaternary|quinary|senary|septenary|octonary|nonary|tenth)$ ]] \
   || die "ANALYSIS_V2_APIFY_API_TOKEN_SLOT is invalid"
 if [[ "$role" == "paid" && "$stage" != "bootstrap" ]]; then
   [[ "$selected_slot" == "secondary" ]] \
@@ -812,7 +813,7 @@ if [[ -n "$additional_refs" ]]; then
     version="${entry#*:}"
     [[ "$entry" == "$slot:$version" && -n "$slot" && -n "$version" ]] \
       || die "ANALYSIS_V2_APIFY_ADDITIONAL_SECRET_VERSIONS must be slot:version entries"
-    [[ "$slot" =~ ^(primary|secondary|tertiary|quaternary|quinary|senary|septenary|tenth)$ ]] \
+    [[ "$slot" =~ ^(primary|secondary|tertiary|quaternary|quinary|senary|septenary|octonary|nonary|tenth)$ ]] \
       || die "invalid additional Apify credential slot"
     numeric_version ANALYSIS_V2_APIFY_ADDITIONAL_SECRET_VERSIONS "$version"
     [[ "$slot" != "$selected_slot" ]] || die "additional Apify refs must not repeat selected slot"
@@ -821,16 +822,16 @@ if [[ -n "$additional_refs" ]]; then
   done
 fi
 if [[ "$role" == "preflight" ]]; then
-  preflight_slots="${PREFLIGHT_APIFY_API_TOKEN_SLOTS:-primary,quinary,senary}"
+  preflight_slots="${PREFLIGHT_APIFY_API_TOKEN_SLOTS:-$PREFLIGHT_APIFY_API_TOKEN_SLOTS_VALUE}"
   IFS=',' read -r -a required_preflight_slots <<<"$preflight_slots"
-  [[ "$preflight_slots" == "primary,quinary,senary" ]] \
-    || die "PREFLIGHT_APIFY_API_TOKEN_SLOTS must remain exactly primary,quinary,senary"
+  [[ "$preflight_slots" == "$PREFLIGHT_APIFY_API_TOKEN_SLOTS_VALUE" ]] \
+    || die "PREFLIGHT_APIFY_API_TOKEN_SLOTS must remain exactly $PREFLIGHT_APIFY_API_TOKEN_SLOTS_VALUE"
   slot_is_preflight="false"
   for slot in "${required_preflight_slots[@]}"; do
     [[ "$slot" == "$selected_slot" ]] && slot_is_preflight="true"
   done
   [[ "$slot_is_preflight" == "true" ]] \
-    || die "preflight selected Apify slot must belong to primary,quinary,senary"
+    || die "preflight selected Apify slot must belong to the nine free Apify slots"
   for slot in "${required_preflight_slots[@]}"; do
     found="false"
     slot_upper="$(printf '%s' "$slot" | tr '[:lower:]' '[:upper:]')"
@@ -847,13 +848,13 @@ if [[ "$role" == "preflight" ]]; then
     apify_entry_count=$((apify_entry_count + 1))
     expected_slot="$(printf '%s' "${entry%%|*}" | sed -E 's/^APIFY_(.*)_API_TOKEN$/\1/' | tr '[:upper:]' '[:lower:]')"
     [[ ",${preflight_slots}," == *",${expected_slot},"* ]] \
-      || die "preflight cannot carry an Apify ref outside primary,quinary,senary"
+      || die "preflight cannot carry an Apify ref outside the nine free Apify slots"
   done
-  [[ "$apify_entry_count" == "3" ]] \
-    || die "preflight must carry exactly three Apify refs: primary,quinary,senary"
+  [[ "$apify_entry_count" == "9" ]] \
+    || die "preflight must carry exactly nine Apify refs: $PREFLIGHT_APIFY_API_TOKEN_SLOTS_VALUE"
 else
   # Paid V2 can resume frozen policy cohorts on every historical credential slot.  Requiring
-  # the complete eight-slot inventory here keeps release/recovery from depending on a selected
+  # the complete ten-slot inventory here keeps release/recovery from depending on a selected
   # slot only; the ordinary production relationship policy still selects secondary at runtime.
   for slot in "${APIFY_SLOTS[@]}"; do
     found="false"
@@ -870,8 +871,8 @@ else
     [[ "${entry%%|*}" == APIFY_*_API_TOKEN ]] || continue
     apify_entry_count=$((apify_entry_count + 1))
   done
-  [[ "$apify_entry_count" == "8" ]] \
-    || die "paid worker must carry exactly eight Apify refs"
+  [[ "$apify_entry_count" == "10" ]] \
+    || die "paid worker must carry exactly ten Apify refs"
 fi
 
 secret_assignments=""

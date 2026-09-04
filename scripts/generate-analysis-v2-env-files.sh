@@ -23,7 +23,7 @@ Required source dotenv keys:
   GOOGLE_CLOUD_LOCATION
   ANALYSIS_V2_MEDIA_ARTIFACT_BUCKET
   ANALYSIS_V2_APIFY_API_TOKEN_SLOT
-  PREFLIGHT_APIFY_API_TOKEN_SLOTS=primary,quinary,senary
+  PREFLIGHT_APIFY_API_TOKEN_SLOTS=primary,tertiary,quaternary,quinary,senary,septenary,octonary,nonary,tenth
   ANALYSIS_V2_INSTAGRAM_ROUTE=apify_v1|selfhosted_auth_v1
   ANALYSIS_V2_AUTHORIZED_TEST_SHARDING_ENABLED=true|false
   BETATEST_FREE_POOL_ENABLED=true|false
@@ -125,6 +125,12 @@ const path = require('node:path');
 
 const runtimePath = process.argv[2];
 const buildPath = process.argv[3];
+const apifyCredentialSlots = [
+  'primary', 'secondary', 'tertiary', 'quaternary', 'quinary',
+  'senary', 'septenary', 'octonary', 'nonary', 'tenth',
+];
+const preflightApifyCredentialSlots = apifyCredentialSlots.filter((candidate) => candidate !== 'secondary');
+const preflightApifyCredentialSlotsValue = preflightApifyCredentialSlots.join(',');
 
 const required = (name) => {
   const value = process.env[name];
@@ -174,11 +180,11 @@ if (location !== 'global') {
 if (!/^[a-z0-9]([a-z0-9-]{1,61}[a-z0-9])$/.test(bucket)) {
   throw new Error('ANALYSIS_V2_MEDIA_ARTIFACT_BUCKET is invalid');
 }
-if (!['primary', 'secondary', 'tertiary', 'quaternary', 'quinary', 'senary', 'septenary', 'tenth'].includes(slot)) {
+if (!apifyCredentialSlots.includes(slot)) {
   throw new Error('ANALYSIS_V2_APIFY_API_TOKEN_SLOT must be explicit and valid');
 }
-if (process.env.PREFLIGHT_APIFY_API_TOKEN_SLOTS !== 'primary,quinary,senary') {
-  throw new Error('PREFLIGHT_APIFY_API_TOKEN_SLOTS must be exactly primary,quinary,senary');
+if (process.env.PREFLIGHT_APIFY_API_TOKEN_SLOTS !== preflightApifyCredentialSlotsValue) {
+  throw new Error(`PREFLIGHT_APIFY_API_TOKEN_SLOTS must be exactly ${preflightApifyCredentialSlotsValue}`);
 }
 if (!['apify_v1', 'selfhosted_auth_v1'].includes(instagramRoute)) {
   throw new Error('ANALYSIS_V2_INSTAGRAM_ROUTE must be apify_v1 or selfhosted_auth_v1');
