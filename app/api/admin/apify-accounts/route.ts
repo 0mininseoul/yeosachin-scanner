@@ -2,6 +2,7 @@ import { NextResponse } from 'next/server';
 import { z } from 'zod';
 import { supabaseAdmin } from '@/lib/supabase/admin';
 import { createClient } from '@/lib/supabase/server';
+import { isJsonRequest } from '@/lib/services/earlybird/contracts';
 import { isAnalysisAuditOperator } from '@/lib/services/analysis/score-audit';
 import {
     createApifyAccountCreditInventoryStore,
@@ -31,24 +32,90 @@ function privateJson(body: unknown, status = 200) {
     });
 }
 
+type AuthErrorLike = {
+    name?: unknown;
+    status?: unknown;
+    code?: unknown;
+    message?: unknown;
+};
+
+function isUnauthenticatedAuthError(error: unknown, allowMessageFallback = true): boolean {
+    if (!error || typeof error !== 'object') return false;
+    const authError = error as AuthErrorLike;
+    const status = typeof authError.status === 'number'
+        ? authError.status
+        : Number(authError.status);
+    if (status === 401 || status === 403) return true;
+    if (status === 429 || status >= 500) return false;
+
+    const name = typeof authError.name === 'string' ? authError.name : '';
+    if (
+        name === 'AuthSessionMissingError'
+        || name === 'AuthInvalidCredentialsError'
+        || name === 'AuthInvalidJwtError'
+    ) {
+        return true;
+    }
+
+    const code = typeof authError.code === 'string'
+        ? authError.code.toLowerCase()
+        : '';
+    if (
+        code === 'invalid_token'
+        || code === 'invalid_jwt'
+        || code === 'bad_jwt'
+        || code === 'no_authorization'
+        || code === 'invalid_credentials'
+        || code === 'jwt_expired'
+        || code === 'session_expired'
+        || code === 'session_not_found'
+        || code === 'refresh_token_not_found'
+        || code === 'refresh_token_already_used'
+        || code === 'user_not_found'
+        || code === 'unauthorized'
+    ) {
+        return true;
+    }
+
+    if (!allowMessageFallback) return false;
+    const message = typeof authError.message === 'string' ? authError.message : '';
+    return /(?:no|invalid|expired|missing|not found).*(?:token|session|jwt)|(?:token|session|jwt).*(?:no|invalid|expired|missing|not found)/i.test(message);
+}
+
 type OperatorAuth =
     | { supabase: Awaited<ReturnType<typeof createClient>> }
     | { response: NextResponse };
 
 async function authenticateOperator(): Promise<OperatorAuth> {
+    let supabase: Awaited<ReturnType<typeof createClient>>;
+    let user: { id: string } | null = null;
     try {
-        const supabase = await createClient();
-        const { data: { user }, error } = await supabase.auth.getUser();
-        if (error || !user || !uuidSchema.safeParse(user.id).success) {
+        supabase = await createClient();
+        const auth = await supabase.auth.getUser();
+        if (auth.error) {
+            if (isUnauthenticatedAuthError(auth.error)) {
+                return { response: privateJson({ error: 'Unauthorized' }, 401) };
+            }
+            return { response: privateJson({ error: 'Authentication unavailable' }, 503) };
+        }
+        user = auth.data.user;
+    } catch (caught) {
+        if (isUnauthenticatedAuthError(caught, false)) {
             return { response: privateJson({ error: 'Unauthorized' }, 401) };
         }
+        return { response: privateJson({ error: 'Authentication unavailable' }, 503) };
+    }
+    if (!user || !uuidSchema.safeParse(user.id).success) {
+        return { response: privateJson({ error: 'Unauthorized' }, 401) };
+    }
+    try {
         if (!isAnalysisAuditOperator(user.id)) {
             return { response: privateJson({ error: 'Forbidden' }, 403) };
         }
-        return { supabase };
     } catch {
-        return { response: privateJson({ error: 'Unauthorized' }, 401) };
+        return { response: privateJson({ error: 'Authentication unavailable' }, 503) };
     }
+    return { supabase };
 }
 
 function isAuthResponse(value: OperatorAuth): value is { response: NextResponse } {
@@ -130,6 +197,9 @@ export async function GET(request: Request) {
 export async function PATCH(request: Request) {
     const auth = await authenticateOperator();
     if (isAuthResponse(auth)) return auth.response;
+    if (!isJsonRequest(request)) {
+        return privateJson({ error: 'Unsupported Media Type' }, 415);
+    }
 
     let input: z.infer<typeof exclusionSchema>;
     try {
@@ -151,6 +221,9 @@ export async function PATCH(request: Request) {
 export async function POST(request: Request) {
     const auth = await authenticateOperator();
     if (isAuthResponse(auth)) return auth.response;
+    if (!isJsonRequest(request)) {
+        return privateJson({ error: 'Unsupported Media Type' }, 415);
+    }
 
     let action: z.infer<typeof postActionSchema>;
     try {

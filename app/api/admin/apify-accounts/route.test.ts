@@ -64,7 +64,7 @@ function authenticate({
     error = null,
 }: {
     user?: { id: string } | null;
-    error?: { message: string } | null;
+    error?: unknown;
 } = {}) {
     mocks.createClient.mockResolvedValue({
         auth: {
@@ -99,6 +99,86 @@ describe('operator Apify account API', () => {
 
         expect(response.status).toBe(401);
         expect(response.headers.get('cache-control')).toBe('private, no-store');
+    });
+
+    it('returns 401 for an invalid or expired session error', async () => {
+        authenticate({
+            user: null,
+            error: { name: 'AuthApiError', status: 400, code: 'jwt_expired' },
+        });
+
+        const response = await GET(request('GET'));
+
+        expect(response.status).toBe(401);
+        expect(await response.json()).toEqual({ error: 'Unauthorized' });
+        expect(mocks.createStore).not.toHaveBeenCalled();
+    });
+
+    it('returns 503 for an authentication service outage without exposing internals', async () => {
+        authenticate({
+            user: null,
+            error: { name: 'AuthApiError', status: 503, message: 'provider token leaked' },
+        });
+
+        const response = await GET(request('GET'));
+
+        expect(response.status).toBe(503);
+        const body = await response.json();
+        expect(body).toEqual({ error: 'Authentication unavailable' });
+        expect(JSON.stringify(body)).not.toContain('provider token');
+        expect(response.headers.get('cache-control')).toBe('private, no-store');
+        expect(mocks.createStore).not.toHaveBeenCalled();
+    });
+
+    it('returns 503 for an authentication client transport failure', async () => {
+        mocks.createClient.mockRejectedValue(new Error('auth provider token leaked'));
+
+        const response = await GET(request('GET'));
+
+        expect(response.status).toBe(503);
+        expect(await response.json()).toEqual({ error: 'Authentication unavailable' });
+        expect(mocks.createStore).not.toHaveBeenCalled();
+    });
+
+    it.each([
+        ['429', { status: 429, code: 'rate_limited', message: 'auth rate limit internals' }],
+        ['5xx', { status: 500, code: 'service_unavailable', message: 'auth service internals' }],
+        ['unknown', { status: 400, code: 'unknown_auth_failure', message: 'auth internals' }],
+    ] as const)('returns 503 for a %s auth error returned by getUser', async (_label, error) => {
+        authenticate({ user: null, error });
+
+        const response = await GET(request('GET'));
+
+        expect(response.status).toBe(503);
+        const body = await response.json();
+        expect(body).toEqual({ error: 'Authentication unavailable' });
+        expect(JSON.stringify(body)).not.toContain('internals');
+        expect(mocks.createStore).not.toHaveBeenCalled();
+    });
+
+    it('returns 503 for an unknown getUser transport exception', async () => {
+        mocks.createClient.mockResolvedValue({
+            auth: {
+                getUser: vi.fn().mockRejectedValue(new Error('auth transport internals')),
+            },
+        });
+
+        const response = await GET(request('GET'));
+
+        expect(response.status).toBe(503);
+        expect(await response.json()).toEqual({ error: 'Authentication unavailable' });
+        expect(mocks.createStore).not.toHaveBeenCalled();
+    });
+
+    it('returns 401 when the authenticated user id is not a UUID', async () => {
+        authenticate({ user: { id: 'not-a-uuid' } });
+
+        const response = await GET(request('GET'));
+
+        expect(response.status).toBe(401);
+        expect(await response.json()).toEqual({ error: 'Unauthorized' });
+        expect(mocks.isAnalysisAuditOperator).not.toHaveBeenCalled();
+        expect(mocks.createStore).not.toHaveBeenCalled();
     });
 
     it('returns 403 when an authenticated user is not an audit operator', async () => {
@@ -203,6 +283,49 @@ describe('operator Apify account API', () => {
         expect(mocks.refreshPaidSecondary).toHaveBeenCalledWith({ client: secondaryClient });
         expect(body.inventory).toHaveLength(10);
         expect(body.secondary.credentialSlot).toBe('secondary');
+        expect(response.headers.get('cache-control')).toBe('private, no-store');
+    });
+
+    it.each([
+        ['PATCH', { credentialSlot: 'octonary', excluded: true }],
+        ['POST', { action: 'refresh-paid-secondary' }],
+    ] as const)('rejects %s text/plain before reading or touching persistence/provider', async (method, body) => {
+        const response = await (method === 'PATCH'
+            ? PATCH(request(method, body, { 'content-type': 'text/plain; charset=utf-8' }))
+            : POST(request(method, body, { 'Content-Type': 'TEXT/PLAIN' })));
+
+        expect(response.status).toBe(415);
+        expect(await response.json()).toEqual({ error: 'Unsupported Media Type' });
+        expect(mocks.createStore).not.toHaveBeenCalled();
+        expect(mocks.setManualExclusion).not.toHaveBeenCalled();
+        expect(mocks.createServerFactory).not.toHaveBeenCalled();
+        expect(mocks.refreshPaidSecondary).not.toHaveBeenCalled();
+        expect(response.headers.get('cache-control')).toBe('private, no-store');
+    });
+
+    it.each([
+        ['PATCH', { credentialSlot: 'octonary', excluded: true }],
+        ['POST', { action: 'refresh-paid-secondary' }],
+    ] as const)('rejects %s with a missing Content-Type before reading or touching persistence/provider', async (method, body) => {
+        const headers = new Headers();
+        const responseRequest = {
+            headers,
+            get body() {
+                throw new Error('request body must not be read');
+            },
+        } as unknown as Request;
+
+        void body;
+        const response = method === 'PATCH'
+            ? await PATCH(responseRequest)
+            : await POST(responseRequest);
+
+        expect(response.status).toBe(415);
+        expect(await response.json()).toEqual({ error: 'Unsupported Media Type' });
+        expect(mocks.createStore).not.toHaveBeenCalled();
+        expect(mocks.setManualExclusion).not.toHaveBeenCalled();
+        expect(mocks.createServerFactory).not.toHaveBeenCalled();
+        expect(mocks.refreshPaidSecondary).not.toHaveBeenCalled();
         expect(response.headers.get('cache-control')).toBe('private, no-store');
     });
 
