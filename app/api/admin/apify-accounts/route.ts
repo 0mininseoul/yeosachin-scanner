@@ -36,17 +36,14 @@ type AuthErrorLike = {
     name?: unknown;
     status?: unknown;
     code?: unknown;
-    message?: unknown;
 };
 
-function isUnauthenticatedAuthError(error: unknown, allowMessageFallback = true): boolean {
+function isUnauthenticatedAuthError(error: unknown): boolean {
     if (!error || typeof error !== 'object') return false;
     const authError = error as AuthErrorLike;
-    const status = typeof authError.status === 'number'
-        ? authError.status
-        : Number(authError.status);
-    if (status === 401 || status === 403) return true;
-    if (status === 429 || status >= 500) return false;
+    const status = authError.status;
+    if (status === 401) return true;
+    if (status === 429 || (typeof status === 'number' && status >= 500)) return false;
 
     const name = typeof authError.name === 'string' ? authError.name : '';
     if (
@@ -77,9 +74,7 @@ function isUnauthenticatedAuthError(error: unknown, allowMessageFallback = true)
         return true;
     }
 
-    if (!allowMessageFallback) return false;
-    const message = typeof authError.message === 'string' ? authError.message : '';
-    return /(?:no|invalid|expired|missing|not found).*(?:token|session|jwt)|(?:token|session|jwt).*(?:no|invalid|expired|missing|not found)/i.test(message);
+    return false;
 }
 
 type OperatorAuth =
@@ -100,7 +95,7 @@ async function authenticateOperator(): Promise<OperatorAuth> {
         }
         user = auth.data.user;
     } catch (caught) {
-        if (isUnauthenticatedAuthError(caught, false)) {
+        if (isUnauthenticatedAuthError(caught)) {
             return { response: privateJson({ error: 'Unauthorized' }, 401) };
         }
         return { response: privateJson({ error: 'Authentication unavailable' }, 503) };

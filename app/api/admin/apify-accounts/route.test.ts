@@ -93,7 +93,10 @@ beforeEach(() => {
 
 describe('operator Apify account API', () => {
     it('returns 401 for an unauthenticated request with private no-store headers', async () => {
-        authenticate({ user: null, error: { message: 'no session' } });
+        authenticate({
+            user: null,
+            error: { name: 'AuthSessionMissingError', status: 400 },
+        });
 
         const response = await GET(request('GET'));
 
@@ -101,16 +104,54 @@ describe('operator Apify account API', () => {
         expect(response.headers.get('cache-control')).toBe('private, no-store');
     });
 
-    it('returns 401 for an invalid or expired session error', async () => {
-        authenticate({
-            user: null,
-            error: { name: 'AuthApiError', status: 400, code: 'jwt_expired' },
-        });
+    it.each([
+        ['invalid JWT name', { name: 'AuthInvalidJwtError', status: 400 }],
+        ['invalid token code', { name: 'AuthApiError', status: 400, code: 'invalid_token' }],
+        ['expired JWT code', { name: 'AuthApiError', status: 400, code: 'jwt_expired' }],
+    ] as const)('returns 401 for a recognized %s', async (_label, error) => {
+        authenticate({ user: null, error });
 
         const response = await GET(request('GET'));
 
         expect(response.status).toBe(401);
         expect(await response.json()).toEqual({ error: 'Unauthorized' });
+        expect(mocks.createStore).not.toHaveBeenCalled();
+    });
+
+    it('returns 503 for an unknown returned auth error despite a deceptive token message', async () => {
+        authenticate({
+            user: null,
+            error: {
+                status: 400,
+                code: 'unknown_auth_failure',
+                message: 'invalid token endpoint unavailable',
+            },
+        });
+
+        const response = await GET(request('GET'));
+
+        expect(response.status).toBe(503);
+        expect(await response.json()).toEqual({ error: 'Authentication unavailable' });
+        expect(mocks.createStore).not.toHaveBeenCalled();
+    });
+
+    it('returns 503 for a bare returned 403 auth error', async () => {
+        authenticate({ user: null, error: { status: 403 } });
+
+        const response = await GET(request('GET'));
+
+        expect(response.status).toBe(503);
+        expect(await response.json()).toEqual({ error: 'Authentication unavailable' });
+        expect(mocks.createStore).not.toHaveBeenCalled();
+    });
+
+    it('returns 503 for a returned auth error without trusted status, name, or code', async () => {
+        authenticate({ user: null, error: { message: 'no session' } });
+
+        const response = await GET(request('GET'));
+
+        expect(response.status).toBe(503);
+        expect(await response.json()).toEqual({ error: 'Authentication unavailable' });
         expect(mocks.createStore).not.toHaveBeenCalled();
     });
 
@@ -250,6 +291,24 @@ describe('operator Apify account API', () => {
         expect(response.headers.get('cache-control')).toBe('private, no-store');
     });
 
+    it('accepts application/json with mixed casing and a charset parameter', async () => {
+        const response = await PATCH(new Request(
+            'https://example.test/api/admin/apify-accounts',
+            {
+                method: 'PATCH',
+                headers: { 'Content-Type': 'Application/JSON; Charset=UTF-8' },
+                body: JSON.stringify({ credentialSlot: 'octonary', excluded: true }),
+            },
+        ));
+
+        expect(response.status).toBe(200);
+        expect(mocks.setManualExclusion).toHaveBeenCalledWith({
+            credentialSlot: 'octonary',
+            excluded: true,
+        });
+        expect(response.headers.get('cache-control')).toBe('private, no-store');
+    });
+
     it('returns a safe 500 when exclusion persistence fails', async () => {
         mocks.setManualExclusion.mockRejectedValue(new Error('provider token must not escape'));
 
@@ -329,29 +388,41 @@ describe('operator Apify account API', () => {
         expect(response.headers.get('cache-control')).toBe('private, no-store');
     });
 
-    it('rejects oversized or unknown mutation bodies before persistence', async () => {
-        const response = await PATCH(request(
-            'PATCH',
-            { credentialSlot: 'octonary', excluded: true },
-            { 'content-length': '999999' },
-        ));
+    it.each([
+        ['PATCH', { credentialSlot: 'octonary', excluded: true }],
+        ['POST', { action: 'refresh-paid-secondary' }],
+    ] as const)('rejects an oversized %s body before persistence/provider', async (method, body) => {
+        const response = method === 'PATCH'
+            ? await PATCH(request(method, body, { 'content-length': '999999' }))
+            : await POST(request(method, body, { 'content-length': '999999' }));
 
         expect(response.status).toBe(400);
+        expect(mocks.createStore).not.toHaveBeenCalled();
         expect(mocks.setManualExclusion).not.toHaveBeenCalled();
+        expect(mocks.createServerFactory).not.toHaveBeenCalled();
+        expect(mocks.refreshPaidSecondary).not.toHaveBeenCalled();
         expect(response.headers.get('cache-control')).toBe('private, no-store');
     });
 
-    it('bounds chunked mutation bodies before parsing JSON', async () => {
+    it.each([
+        ['PATCH', '{"credentialSlot":"octonary","excluded":true,"padding":"' + 'x'.repeat(5_000) + '"}'],
+        ['POST', '{"action":"refresh-paid-secondary","padding":"' + 'x'.repeat(5_000) + '"}'],
+    ] as const)('bounds chunked %s mutation bodies before parsing JSON', async (method, body) => {
         const oversized = new Request('https://example.test/api/admin/apify-accounts', {
-            method: 'PATCH',
+            method,
             headers: { 'content-type': 'application/json' },
-            body: `{"credentialSlot":"octonary","excluded":true,"padding":"${'x'.repeat(5_000)}"}`,
+            body,
         });
 
-        const response = await PATCH(oversized);
+        const response = method === 'PATCH'
+            ? await PATCH(oversized)
+            : await POST(oversized);
 
         expect(response.status).toBe(400);
+        expect(mocks.createStore).not.toHaveBeenCalled();
         expect(mocks.setManualExclusion).not.toHaveBeenCalled();
+        expect(mocks.createServerFactory).not.toHaveBeenCalled();
+        expect(mocks.refreshPaidSecondary).not.toHaveBeenCalled();
         expect(response.headers.get('cache-control')).toBe('private, no-store');
     });
 });
