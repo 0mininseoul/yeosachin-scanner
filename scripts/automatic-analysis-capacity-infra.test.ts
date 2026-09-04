@@ -218,6 +218,9 @@ interface FakeRunOptions {
     role?: 'preflight' | 'paid';
     stage?: 'bootstrap' | 'initial' | 'expanded';
     serviceStage?: 'bootstrap' | 'initial' | 'expanded';
+    observedSourceSha?: string;
+    stagedSourceSha?: string;
+    postDeploySourceSha?: string;
     stagedTraffic?: 'none' | 'zero-percent' | 'real-change';
     serviceResourceShape?: 'missing' | 'wrong-cpu' | 'wrong-memory' | 'legacy-top-level-only';
     serviceOverrides?: Record<string, unknown>;
@@ -226,7 +229,7 @@ interface FakeRunOptions {
     iam?: Record<string, unknown>;
     manifestOverrides?: Record<string, unknown>;
     readiness?: Record<string, unknown>;
-    args?: string[];
+    args?: readonly string[];
     revisionService?: string;
     vercelDeployments?: unknown;
     vercelAliases?: unknown;
@@ -266,6 +269,7 @@ function fakeRun(options: FakeRunOptions = {}) {
         ['rev-parse', '--verify', 'HEAD^{commit}'],
         { cwd: root, encoding: 'utf8', timeout: CHILD_PROCESS_TIMEOUT_MS },
     ).trim();
+    const observedSourceSha = options.observedSourceSha ?? sourceCommit;
     const githubPath = join(fixtureDir, 'github.json');
     writeFileSync(githubPath, JSON.stringify({
         total_count: 1,
@@ -323,7 +327,7 @@ function fakeRun(options: FakeRunOptions = {}) {
             labels: {
                 'analysis-workload-role': role,
                 'analysis-capacity-stage': serviceStage,
-                'analysis-v2-source-commit': sourceCommit,
+                'analysis-v2-source-commit': observedSourceSha,
             },
         },
         spec: {
@@ -334,7 +338,7 @@ function fakeRun(options: FakeRunOptions = {}) {
                         'autoscaling.knative.dev/minScale': '0',
                     },
                     labels: {
-                        'analysis-v2-source-commit': sourceCommit,
+                        'analysis-v2-source-commit': observedSourceSha,
                     },
                 },
                 spec: {
@@ -576,7 +580,7 @@ if [[ "\${1:-} \${2:-} \${3:-}" == "run revisions describe" ]]; then
     }
   done
   jq --arg revision "\${4:-}" --arg service "\$FAKE_GCLOUD_REVISION_SERVICE" \
-    --arg source "\$FAKE_GCLOUD_SOURCE_SHA" \
+    --arg source "\$FAKE_GCLOUD_STAGED_SOURCE_SHA" \
     '{metadata:{name:$revision,labels:{"serving.knative.dev/service":$service,"analysis-v2-source-commit":$source}},spec:.spec.template.spec,status:{conditions:[{type:"Ready",status:"True"}]}}' \
     "$FAKE_GCLOUD_SERVICE_JSON"
   exit 0
@@ -624,7 +628,14 @@ if [[ "\${1:-} \${2:-} \${3:-}" == "run services update-traffic" ]]; then
   for argument in "\$@"; do
     case "\$argument" in --to-revisions=*) revision="\${argument#--to-revisions=}"; revision="\${revision%%=*}" ;; esac
   done
-  jq --arg rev "\$revision" '.status.traffic=[{revisionName:$rev,percent:100}] | .status.latestReadyRevisionName=$rev' "$FAKE_GCLOUD_SERVICE_JSON" > "$FAKE_GCLOUD_SERVICE_JSON.tmp"
+  jq --arg rev "\$revision" --arg postDeploySourceSha "\$FAKE_GCLOUD_POST_DEPLOY_SOURCE_SHA" '
+    .status.traffic=[{revisionName:$rev,percent:100}]
+    | .status.latestReadyRevisionName=$rev
+    | if $postDeploySourceSha == "" then . else
+        .metadata.labels["analysis-v2-source-commit"]=$postDeploySourceSha
+        | .spec.template.metadata.labels["analysis-v2-source-commit"]=$postDeploySourceSha
+      end
+  ' "$FAKE_GCLOUD_SERVICE_JSON" > "$FAKE_GCLOUD_SERVICE_JSON.tmp"
   mv "$FAKE_GCLOUD_SERVICE_JSON.tmp" "$FAKE_GCLOUD_SERVICE_JSON"
   exit 0
 fi
@@ -742,6 +753,8 @@ fi
                 FAKE_GCLOUD_TARGET_STAGE: stage,
                 FAKE_GCLOUD_REVISION_SERVICE: options.revisionService ?? service,
                 FAKE_GCLOUD_SOURCE_SHA: sourceCommit,
+                FAKE_GCLOUD_STAGED_SOURCE_SHA: options.stagedSourceSha ?? sourceCommit,
+                FAKE_GCLOUD_POST_DEPLOY_SOURCE_SHA: options.postDeploySourceSha ?? '',
                 FAKE_GCLOUD_ACTIVE: active ? 'true' : 'false',
                 FAKE_GCLOUD_ROLE: role,
                 FAKE_GCLOUD_STAGED_TRAFFIC: options.stagedTraffic ?? 'none',
@@ -1215,20 +1228,6 @@ describe('automatic-analysis infrastructure contracts', () => {
         expect(result.stdout).not.toContain(staleSha);
     });
 
-    it('keeps stale provenance fail-closed for non-bootstrap stages', () => {
-        const result = fakeRun({
-            role: 'preflight',
-            stage: 'initial',
-            serviceOverrides: {
-                metadata: { labels: { 'analysis-v2-source-commit': 'd'.repeat(40) } },
-            },
-            args: ['--apply'],
-        });
-        expect(result.status).not.toBe(0);
-        expect(`${result.stdout}\n${result.stderr}`).toContain('source provenance');
-        expect(result.calls).not.toContain('run deploy');
-    });
-
     it('keeps stale bootstrap provenance fail-closed when a workload gate is unsafe', () => {
         const result = fakeRun({
             role: 'preflight',
@@ -1248,6 +1247,70 @@ describe('automatic-analysis infrastructure contracts', () => {
         expect(result.status).not.toBe(0);
         expect(`${result.stdout}\n${result.stderr}`).toContain('bootstrap role gate');
         expect(result.calls).not.toContain('run deploy');
+    });
+
+    it('allows an existing initial service to roll forward from a valid old source SHA during apply predeploy', () => {
+        const oldSourceSha = 'd'.repeat(40);
+        const desiredSourceSha = execFileSync(
+            'git',
+            ['rev-parse', '--verify', 'HEAD^{commit}'],
+            { cwd: root, encoding: 'utf8', timeout: CHILD_PROCESS_TIMEOUT_MS },
+        ).trim();
+        const result = fakeRun({ observedSourceSha: oldSourceSha, args: ['--apply'] });
+        expect(result.status, `${result.stderr?.toString() ?? ''}\n${result.calls}`).toBe(0);
+        expect(result.calls).toContain('run deploy');
+        expect(result.calls).toContain('run services update-traffic');
+        expect(result.stdout).toContain('predeploy: allowing an older valid Cloud Run source provenance label');
+        expect((result.finalService.metadata as { labels: Record<string, string> }).labels['analysis-v2-source-commit'])
+            .toBe(desiredSourceSha);
+    });
+
+    it.each([
+        ['check mode', { args: ['--check'] }, 'source provenance'],
+        ['malformed observed SHA', { args: ['--apply'], observedSourceSha: 'not-a-git-sha' }, 'source provenance'],
+        ['wrong role', {
+            args: ['--apply'],
+            serviceOverrides: { metadata: { labels: { 'analysis-workload-role': 'preflight' } } },
+        }, 'workload-role label'],
+        ['unsafe stage transition', { args: ['--apply'], serviceStage: 'expanded' as const }, 'unsafe capacity stage transition'],
+        ['non-100-percent serving traffic', {
+            args: ['--apply'],
+            serviceOverrides: {
+                status: {
+                    traffic: [
+                        { revisionName: 'analysis-paid-worker-00001-abc', percent: 50 },
+                        { revisionName: 'analysis-paid-worker-00000-old', percent: 50 },
+                    ],
+                },
+            },
+        }, 'latest ready revision at 100 percent'],
+    ] as const)('keeps source roll-forward fail-closed for %s', (_name, options, expected) => {
+        const result = fakeRun({ observedSourceSha: 'd'.repeat(40), ...options });
+        expect(result.status).not.toBe(0);
+        expect(`${result.stdout}\n${result.stderr}`).toContain(expected);
+        expect(result.calls).not.toContain('run deploy');
+    });
+
+    it('rejects a staged revision whose source provenance does not match the desired SHA', () => {
+        const result = fakeRun({
+            observedSourceSha: 'd'.repeat(40),
+            stagedSourceSha: 'e'.repeat(40),
+            args: ['--apply'],
+        });
+        expect(result.status).not.toBe(0);
+        expect(`${result.stdout}\n${result.stderr}`).toContain('exact Ready revision for this service');
+        expect(result.calls).not.toContain('run services update-traffic');
+    });
+
+    it('rejects post-promotion source provenance drift after the new revision reaches 100 percent traffic', () => {
+        const result = fakeRun({
+            observedSourceSha: 'd'.repeat(40),
+            postDeploySourceSha: 'e'.repeat(40),
+            args: ['--apply'],
+        });
+        expect(result.status).not.toBe(0);
+        expect(`${result.stdout}\n${result.stderr}`).toContain('source provenance');
+        expect(result.calls.match(/run services update-traffic/g) ?? []).toHaveLength(2);
     });
 
     it.each([

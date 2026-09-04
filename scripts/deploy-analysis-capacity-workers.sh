@@ -1282,10 +1282,19 @@ verify_service_contract() {
   local allow_stale_bootstrap_provenance="${3:-false}"
   local allow_bootstrap_cross_role_gate_transition="${4:-false}"
   local allow_bootstrap_initial_transition_for_contract="${5:-false}"
+  local allow_existing_service_predeploy_source_roll_forward="${6:-false}"
   local contract_expansion_canary="false"
   local contract_recovery_enabled="false"
   local contract_max_instances=8
   local observed_source_sha
+  [[ "$allow_existing_service_predeploy_source_roll_forward" == "true" \
+     || "$allow_existing_service_predeploy_source_roll_forward" == "false" ]] \
+    || die "invalid internal source roll-forward allowance"
+  if [[ "$allow_existing_service_predeploy_source_roll_forward" == "true" ]]; then
+    [[ "$mode" == "apply" && "$mode_was_explicit" == "true" \
+       && "$require_traffic" == "true" ]] \
+      || die "source roll-forward allowance is valid only for explicit apply predeploy verification"
+  fi
   if [[ "$allow_bootstrap_cross_role_gate_transition" == "true" ]]; then
     [[ "$mode" == "apply" && "$role" == "preflight" && "$stage" == "bootstrap" \
        && "$contract_stage" == "bootstrap" && "$require_traffic" == "true" ]] \
@@ -1388,13 +1397,17 @@ verify_service_contract() {
     || die "Cloud Run capacity-stage label drifted"
   observed_source_sha="$(jq -r --arg key "$PROVENANCE_LABEL_KEY" '.metadata.labels[$key] // empty' <<<"$service_json")"
   if [[ "$observed_source_sha" != "$source_sha" ]]; then
-    if [[ "$allow_stale_bootstrap_provenance" != "true" \
-       || "$stage" != "bootstrap" \
-       || "$contract_stage" != "bootstrap" \
-       || ! "$observed_source_sha" =~ ^[0-9a-f]{40}$ ]]; then
+    if [[ "$allow_existing_service_predeploy_source_roll_forward" == "true" \
+       && "$observed_source_sha" =~ ^[0-9a-f]{40}$ ]]; then
+      log "predeploy: allowing an older valid Cloud Run source provenance label"
+    elif [[ "$allow_stale_bootstrap_provenance" == "true" \
+       && "$stage" == "bootstrap" \
+       && "$contract_stage" == "bootstrap" \
+       && "$observed_source_sha" =~ ^[0-9a-f]{40}$ ]]; then
+      log "bootstrap: reconciling an older valid Cloud Run source provenance label"
+    else
       die "Cloud Run source provenance label drifted"
     fi
-    log "bootstrap: reconciling an older valid Cloud Run source provenance label"
   fi
   jq -e '.spec.template.spec.containers[0].image // "" | test("@sha256:[0-9a-f]{64}$")' \
     <<<"$service_json" >/dev/null \
@@ -1534,7 +1547,8 @@ if service_exists; then
   fi
   verify_service_contract "$observed_stage" true "$allow_stale_bootstrap_provenance" \
     "$allow_bootstrap_cross_role_gate_transition" \
-    "$allow_bootstrap_initial_transition"
+    "$allow_bootstrap_initial_transition" \
+    "true"
   verify_legacy_quiescence
   verify_vercel_public_deployment
   verify_capacity_activation_readiness
