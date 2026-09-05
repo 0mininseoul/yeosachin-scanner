@@ -3,6 +3,7 @@ import {
     assembleAnalysisOrderAuditBundle,
     enqueueAnalysisOrderAuditBundle,
     loadAnalysisOrderAuditBundle,
+    orderAuditSummarySchema,
     parseOrderAuditQuery,
     type OrderAuditBundlePayload,
 } from './order-audit-bundle';
@@ -10,6 +11,23 @@ import {
 const requestId = '123e4567-e89b-42d3-a456-426614174000';
 
 describe('permanent order audit bundle service boundary', () => {
+    it('rejects a noncanonical provider run credential slot while allowing null attribution', () => {
+        const providerRun = {
+            stage: 'followers',
+            logicalProvider: 'apify',
+            credentialSlot: 'primary',
+            runId: 'run-1',
+            operationKey: 'followers:aaaaaaaa',
+            inputHash: 'a'.repeat(64),
+            resultHash: 'b'.repeat(64),
+        };
+        const providerRunsSchema = orderAuditSummarySchema.shape.providerRuns;
+
+        expect(providerRunsSchema.safeParse([providerRun]).success).toBe(true);
+        expect(providerRunsSchema.safeParse([{ ...providerRun, credentialSlot: 'not-a-slot' }]).success).toBe(false);
+        expect(providerRunsSchema.safeParse([{ ...providerRun, credentialSlot: null }]).success).toBe(true);
+    });
+
     it('enqueues an idempotent request without exposing provider credentials', async () => {
         const rpc = vi.fn(async () => ({
             data: { status: 'queued', requestId },
@@ -118,10 +136,73 @@ describe('permanent order audit bundle service boundary', () => {
                     status: 'complete',
                     bundleHash: 'a'.repeat(64),
                     sourceSetHash: 'b'.repeat(64),
+                    requestId,
+                    previousVersionHash: null,
                     planId: 'basic',
                     accessMode: 'production',
                     completeness: 'complete',
                     gapCodes: [],
+                    pipelineVersion: 'v2',
+                    pipelinePolicy: {},
+                    riskPolicyVersion: null,
+                    aiPolicyVersion: null,
+                    schedulerPolicyVersion: null,
+                    orderId: null,
+                    targetInstagramId: 'target.account',
+                    targetProfileAvailable: true,
+                    targetPostsAvailable: true,
+                    targetPostCount: 0,
+                    followers: { declared: 0, collected: 0 },
+                    following: { declared: 0, collected: 0 },
+                    mutuals: {
+                        total: 0,
+                        public: 0,
+                        private: 0,
+                        screened: 0,
+                        declared: 0,
+                        collected: 0,
+                        listHash: 'c'.repeat(64),
+                        keyCoverage: { expected: [], observed: [], missing: [], extra: [], complete: true },
+                    },
+                    gender: { initialResolved: 0, finalResolved: 0 },
+                    risk: { declared: 0, collected: 0 },
+                    interactions: {
+                        declared: 0,
+                        collected: 0,
+                        targetLikes: { declared: 0, collected: 0 },
+                        targetComments: { declared: 0, collected: 0 },
+                        candidateLikes: { declared: null, collected: null, evidenceCollected: null },
+                        tags: { declared: 0, collected: 0 },
+                        mentions: { declared: 0, collected: 0 },
+                    },
+                    providerRuns: [],
+                    stageStatus: {
+                        relationships: true,
+                        targetEvidence: true,
+                        candidateFeatures: true,
+                        riskScores: true,
+                        finalized: true,
+                        cost: 'complete',
+                        costSourceHash: null,
+                        candidateKeyCoverage: { expected: [], observed: [], missing: [], extra: [], complete: true },
+                        targetLikes: true,
+                        targetComments: true,
+                        candidateLikes: false,
+                        tags: false,
+                        mentions: false,
+                        retainedEvidenceSourceSetHash: null,
+                    },
+                    retention: {
+                        state: 'retained',
+                        queueStatus: 'completed',
+                        version: 1,
+                        assembledAt: '2026-09-05T00:00:00.000Z',
+                        purgeFencedAt: null,
+                        purgeFenceReason: null,
+                        purgedAt: null,
+                        queueUpdatedAt: '2026-09-05T00:00:00.000Z',
+                    },
+                    assembledAt: '2026-09-05T00:00:00.000Z',
                     cost: {
                         currency: 'USD',
                         knownUsd: 0.12,
@@ -129,6 +210,7 @@ describe('permanent order audit bundle service boundary', () => {
                         usageUnknown: false,
                         status: 'complete',
                     },
+                    usageUnknown: false,
                 },
                 section: 'interactions',
                 rows: [{

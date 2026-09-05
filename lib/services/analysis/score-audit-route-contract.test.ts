@@ -22,7 +22,8 @@ describe('analysis audit operator route privacy contract', () => {
 
     it('does not render images or raw provider/prompt material', () => {
         expect(workbench).not.toMatch(/<Image|profileImage|prompt|api[_ -]?token|fullName|row\.bio/iu);
-        expect(workbench).toContain('개인 여성 위험 순위 제외 / 공식 단체·브랜드');
+        expect(workbench).toContain('공개 여성 위험 산출');
+        expect(workbench).toContain("filter: 'public_female'");
     });
 
     it('fences stale responses and uses stable composite row identities', () => {
@@ -32,12 +33,8 @@ describe('analysis audit operator route privacy contract', () => {
         expect(workbench).toContain(
             'activeRequest.current?.sequence !== sequence'
         );
-        expect(workbench).toContain(
-            '<Fragment key={`${payload.request.requestId}:${payload.request.resultHash'
-        );
-        expect(workbench).toContain(
-            ':official:${row.candidateId}`}'
-        );
+        expect(workbench).toContain('key={`${row.ordinal}:${row.evidenceId}`}');
+        expect(workbench).toContain('key={row.candidateId}');
         expect(workbench).not.toContain('displayedRows.map(row => <>');
     });
 });

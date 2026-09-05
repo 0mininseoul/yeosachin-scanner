@@ -31,6 +31,18 @@ const row = {
         conservativeUsd: 0.42,
         usageUnknown: true,
     },
+    gender: { initialResolved: 0, finalResolved: 0 },
+    risk: { declared: 0, collected: 0 },
+    retention: {
+        state: 'pending',
+        queueStatus: 'processing',
+        version: 2,
+        assembledAt,
+        purgeFencedAt: null,
+        purgeFenceReason: null,
+        purgedAt: null,
+        queueUpdatedAt: assembledAt,
+    },
     stageStatus,
     assembledAt,
 };
