@@ -31,6 +31,7 @@
     "replay:analysis-v2": "tsx --conditions=react-server --env-file=.env.local scripts/replay-analysis-v2.ts",
     "replay:resolver-experiment": "tsx --conditions=react-server --env-file=.env.local scripts/replay-resolver-experiment.ts",
     "cost:vertex-ai:gate": "tsx scripts/vertex-ai-cost-gate.ts",
+    "verify:order-audit-parity": "tsx --conditions=react-server --env-file=.env.local scripts/verify-analysis-order-audit-parity.ts",
     "benchmark:analysis-v2-scheduler": "tsx scripts/benchmark-analysis-v2-scheduler.ts",
     "load:analysis-capacity": "tsx --conditions=react-server scripts/capacity-extension-load-harness.ts",
     "bootstrap:demo-fixture": "tsx --conditions=react-server --env-file=.env.local scripts/bootstrap-demo-editable-fixture.ts",

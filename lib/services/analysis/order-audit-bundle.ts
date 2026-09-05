@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { apifyCredentialSlotSchema } from '@/lib/contracts/apify-account-credit-inventory';
 
 const uuidSchema = z.string().uuid();
 const hashSchema = z.string().regex(/^[a-f0-9]{64}$/);
@@ -15,6 +16,7 @@ const sectionSchema = z.enum([
 const filterSchema = z.enum([
     'all',
     'public',
+    'public_female',
     'private',
     'comments',
     'likes',
@@ -32,6 +34,12 @@ export const orderAuditQuerySchema = z.object({
 
 export type OrderAuditQuery = z.infer<typeof orderAuditQuerySchema>;
 
+const countSchema = z.number().int().min(0).max(100_000);
+const nullableCountSchema = countSchema.nullable();
+const nullableTextSchema = (max: number) => z.string().max(max).nullable();
+const nullableHashSchema = hashSchema.nullable();
+const gapCodeSchema = z.string().min(1).max(96).regex(/^[A-Za-z0-9_.:-]+$/);
+
 const costSchema = z.object({
     currency: z.string().length(3),
     status: z.enum(['complete', 'partial', 'unknown', 'not_available']),
@@ -42,7 +50,199 @@ const costSchema = z.object({
     usageUnknown: z.boolean(),
     missingSourceCodes: z.array(z.string()).optional(),
     provenance: z.unknown().optional(),
-}).passthrough();
+}).strict();
+
+const declaredCollectedSchema = z.object({
+    declared: nullableCountSchema,
+    collected: nullableCountSchema,
+}).strict();
+
+const keyCoverageSchema = z.object({
+    expected: z.array(z.string().min(1).max(30)).max(100_000),
+    observed: z.array(z.string().min(1).max(30)).max(100_000),
+    missing: z.array(z.string().min(1).max(30)).max(100_000),
+    extra: z.array(z.string().min(1).max(30)).max(100_000),
+    complete: z.boolean(),
+}).strict();
+
+const providerRunSchema = z.object({
+    stage: z.string().min(1).max(64),
+    logicalProvider: z.string().min(1).max(32),
+    credentialSlot: apifyCredentialSlotSchema.nullable(),
+    runId: z.string().min(1).max(255),
+    operationKey: z.string().min(1).max(255).nullable(),
+    inputHash: nullableHashSchema,
+    resultHash: nullableHashSchema,
+}).strict();
+
+const stageStatusSchema = z.object({
+    relationships: z.boolean(),
+    targetEvidence: z.boolean(),
+    candidateFeatures: z.boolean(),
+    riskScores: z.boolean(),
+    finalized: z.boolean(),
+    cost: z.enum(['complete', 'partial', 'unknown', 'not_available']),
+    costSourceHash: nullableHashSchema,
+    candidateKeyCoverage: keyCoverageSchema,
+    targetLikes: z.boolean(),
+    targetComments: z.boolean(),
+    candidateLikes: z.boolean(),
+    tags: z.boolean(),
+    mentions: z.boolean(),
+    retainedEvidenceSourceSetHash: nullableHashSchema,
+}).strict();
+
+export const retentionSchema = z.object({
+    state: z.enum(['retained', 'pending', 'fenced', 'unknown']),
+    queueStatus: z.enum(['queued', 'processing', 'completed', 'failed']).nullable(),
+    version: z.number().int().positive().max(100_000),
+    assembledAt: z.string().datetime({ offset: true }).max(64),
+    purgeFencedAt: z.string().datetime({ offset: true }).max(64).nullable(),
+    purgeFenceReason: nullableTextSchema(96),
+    purgedAt: z.string().datetime({ offset: true }).max(64).nullable(),
+    queueUpdatedAt: z.string().datetime({ offset: true }).max(64).nullable(),
+}).strict();
+
+export const genderCountsSchema = z.object({
+    initialResolved: countSchema,
+    finalResolved: countSchema,
+}).strict();
+
+export const riskCountsSchema = z.object({
+    declared: countSchema,
+    collected: countSchema,
+}).strict();
+
+export const orderAuditSummarySchema = z.object({
+    requestId: uuidSchema,
+    version: z.number().int().positive().max(100_000),
+    bundleHash: hashSchema,
+    previousVersionHash: nullableHashSchema,
+    sourceSetHash: hashSchema,
+    status: z.enum(['complete', 'partial', 'inconsistent', 'failed']),
+    completeness: z.enum(['complete', 'partial', 'inconsistent', 'failed']),
+    gapCodes: z.array(gapCodeSchema).max(32),
+    pipelineVersion: z.literal('v2'),
+    pipelinePolicy: z.record(z.string(), z.unknown()),
+    riskPolicyVersion: nullableTextSchema(64),
+    aiPolicyVersion: nullableTextSchema(64),
+    schedulerPolicyVersion: nullableTextSchema(64),
+    planId: z.enum(['basic', 'standard', 'plus']),
+    accessMode: z.enum(['production', 'test_entitlement']),
+    orderId: uuidSchema.nullable(),
+    targetInstagramId: z.string().min(1).max(30).nullable(),
+    targetProfileAvailable: z.boolean(),
+    targetPostsAvailable: z.boolean(),
+    targetPostCount: nullableCountSchema,
+    followers: declaredCollectedSchema,
+    following: declaredCollectedSchema,
+    mutuals: z.object({
+        total: countSchema,
+        public: countSchema,
+        private: countSchema,
+        screened: countSchema,
+        declared: countSchema,
+        collected: countSchema,
+        listHash: hashSchema,
+        keyCoverage: keyCoverageSchema,
+    }).strict(),
+    gender: genderCountsSchema,
+    risk: riskCountsSchema,
+    interactions: z.object({
+        declared: countSchema,
+        collected: countSchema,
+        targetLikes: declaredCollectedSchema,
+        targetComments: declaredCollectedSchema,
+        candidateLikes: z.object({
+            declared: nullableCountSchema,
+            collected: nullableCountSchema,
+            evidenceCollected: nullableCountSchema,
+        }).strict(),
+        tags: declaredCollectedSchema,
+        mentions: declaredCollectedSchema,
+    }).strict(),
+    providerRuns: z.array(providerRunSchema).max(16),
+    stageStatus: stageStatusSchema,
+    retention: retentionSchema,
+    assembledAt: z.string().datetime({ offset: true }).max(64),
+    cost: costSchema,
+    usageUnknown: z.boolean(),
+}).strict();
+
+export type OrderAuditSummary = z.infer<typeof orderAuditSummarySchema>;
+
+export const mutualAuditRowSchema = z.object({
+    candidateId: z.string().min(1).max(128),
+    username: z.string().min(1).max(30),
+    mutualOrdinal: nullableCountSchema,
+    followingOrdinal: nullableCountSchema,
+    isPrivate: z.boolean(),
+    isVerified: z.boolean(),
+    profileAvailable: z.boolean(),
+    profileImageAvailable: z.boolean(),
+    profileFailureCode: nullableTextSchema(64),
+    finalInclusionState: z.enum(['included', 'excluded', 'private', 'unknown', 'unavailable']),
+    completeness: z.enum(['complete', 'partial']),
+}).strict();
+
+const genderResultSchema = z.object({
+    output: z.enum(['female', 'male', 'unknown', 'unavailable']).nullable(),
+    model: nullableTextSchema(100),
+    confidence: z.enum(['low', 'medium', 'high']).nullable(),
+    reason: nullableTextSchema(160),
+    operationKey: nullableTextSchema(128),
+    resultHash: nullableHashSchema,
+}).strict();
+
+export const genderAuditRowSchema = z.object({
+    candidateId: z.string().min(1).max(128),
+    username: z.string().min(1).max(30),
+    isPrivate: z.boolean(),
+    initial: genderResultSchema,
+    final: genderResultSchema,
+    completeness: z.enum(['complete', 'partial']),
+}).strict();
+
+const auditGapCodeSchema = z.string().min(1).max(96).regex(/^[A-Za-z0-9_.:-]+$/);
+
+export const interactionAuditRowSchema = z.object({
+    ordinal: countSchema,
+    candidateId: z.string().min(1).max(128).nullable(),
+    username: z.string().min(1).max(30).nullable(),
+    signal: z.enum(['target_post_like', 'target_post_comment', 'candidate_post_like', 'tag', 'mention']),
+    sourcePostId: nullableTextSchema(255),
+    evidenceId: z.string().min(1).max(255),
+    occurredAt: nullableTextSchema(64),
+    commentText: nullableTextSchema(1000),
+    details: z.record(z.string(), z.unknown()).nullable(),
+    completeness: z.enum(['complete', 'partial', 'unknown']),
+    gapCodes: z.array(auditGapCodeSchema).max(32),
+}).strict();
+
+export const riskAuditRowSchema = z.object({
+    candidateId: z.string().min(1).max(128),
+    username: z.string().min(1).max(30),
+    riskComponents: z.record(z.string(), z.unknown()).nullable(),
+    riskFormulaVersion: nullableTextSchema(64),
+    preScore: z.number().finite().min(0).max(100).nullable(),
+    rawScore: z.number().finite().min(0).max(100).nullable(),
+    publicScore: z.number().finite().min(1).max(10).nullable(),
+    finalScore: z.number().finite().min(1).max(10).nullable(),
+    riskBand: z.enum(['normal', 'caution', 'high_risk']).nullable(),
+    finalRank: nullableCountSchema,
+    featuredRank: nullableCountSchema,
+    recentMutualRank: nullableCountSchema,
+    partnerSafety: z.object({
+        operationKey: nullableTextSchema(128),
+        resultHash: nullableHashSchema,
+    }).strict(),
+    completeness: z.enum(['complete', 'partial']),
+}).strict();
+
+export type MutualAuditRow = z.infer<typeof mutualAuditRowSchema>;
+export type GenderAuditRow = z.infer<typeof genderAuditRowSchema>;
+export type InteractionAuditRow = z.infer<typeof interactionAuditRowSchema>;
+export type RiskAuditRow = z.infer<typeof riskAuditRowSchema>;
 
 const orderAuditAssemblyPayloadSchema = z.object({
     status: z.enum(['complete', 'partial', 'inconsistent', 'failed']),
@@ -118,13 +318,27 @@ function assertRedactedPayload(value: unknown): void {
     }
 }
 
-const orderAuditLoadPayloadSchema = z.object({
-    summary: redactedObjectSchema,
-    section: sectionSchema,
-    rows: z.array(redactedObjectSchema).max(50),
-    total: z.number().int().min(0).max(100_000),
+const summaryLoadPayloadSchema = z.object({
+    summary: orderAuditSummarySchema,
+    section: z.literal('summary'),
+    rows: z.array(z.never()).max(50),
+    total: z.literal(0),
+    nextCursor: z.null(),
+}).strict();
+
+const paginatedLoadFields = {
+    summary: orderAuditSummarySchema,
+    total: countSchema,
     nextCursor: cursorSchema.nullable(),
-}).passthrough();
+};
+
+export const orderAuditLoadPayloadSchema = z.discriminatedUnion('section', [
+    summaryLoadPayloadSchema,
+    z.object({ ...paginatedLoadFields, section: z.literal('mutuals'), rows: z.array(mutualAuditRowSchema).max(50) }).strict(),
+    z.object({ ...paginatedLoadFields, section: z.literal('gender'), rows: z.array(genderAuditRowSchema).max(50) }).strict(),
+    z.object({ ...paginatedLoadFields, section: z.literal('interactions'), rows: z.array(interactionAuditRowSchema).max(50) }).strict(),
+    z.object({ ...paginatedLoadFields, section: z.literal('risk'), rows: z.array(riskAuditRowSchema).max(50) }).strict(),
+]);
 
 export type OrderAuditBundlePayload =
     | z.infer<typeof orderAuditAssemblyPayloadSchema>

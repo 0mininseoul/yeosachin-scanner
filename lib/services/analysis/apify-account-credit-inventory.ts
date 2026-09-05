@@ -1,7 +1,10 @@
 import { ApifyClient } from 'apify-client';
 import { z } from 'zod';
 import {
-    APIFY_CREDENTIAL_SLOTS,
+    apifyAccountCreditInventorySchema,
+    type ApifyAccountCreditInventoryRow,
+} from '@/lib/contracts/apify-account-credit-inventory';
+import {
     APIFY_CREDENTIAL_TOKEN_ENV,
     APIFY_FREE_CREDENTIAL_SLOTS,
     type ApifyCredentialSlot,
@@ -24,102 +27,11 @@ export const APIFY_ACCOUNT_CREDIT_INVENTORY_VALIDATION_ERROR =
 export const APIFY_ACCOUNT_CREDIT_INVENTORY_PERSISTENCE_ERROR =
     'ANALYSIS_APIFY_ACCOUNT_INVENTORY_PERSISTENCE_ERROR';
 
-const MAX_USD = 100_000;
 const MAX_AGE_SECONDS = 900;
 export const APIFY_ACCOUNT_CREDIT_INVENTORY_DEFAULT_MAX_AGE_SECONDS = 300;
 const TIMESTAMP = z.string().datetime({ offset: true });
-const nullableUsd = z.number().finite().min(0).max(MAX_USD).nullable();
-
-const inventoryRowSchema = z.object({
-    credentialSlot: z.enum(APIFY_CREDENTIAL_SLOTS),
-    workloadRole: z.enum(['free', 'paid']),
-    healthState: z.enum(['healthy', 'unhealthy', 'missing']),
-    freshnessState: z.enum(['fresh', 'stale', 'missing']),
-    monthlyLimitUsd: nullableUsd,
-    monthlyUsageUsd: nullableUsd,
-    effectiveRemainingUsd: nullableUsd,
-    billingCycleStartAt: TIMESTAMP.nullable(),
-    billingCycleEndAt: TIMESTAMP.nullable(),
-    cycleResetAt: TIMESTAMP.nullable(),
-    observedAt: TIMESTAMP.nullable(),
-    refreshedAt: TIMESTAMP.nullable(),
-    manuallyExcluded: z.boolean(),
-}).strict().superRefine((row, context) => {
-    const expectedRole = row.credentialSlot === 'secondary' ? 'paid' : 'free';
-    if (row.workloadRole !== expectedRole) {
-        context.addIssue({
-            code: 'custom',
-            path: ['workloadRole'],
-            message: 'Apify workload role does not match the canonical slot.',
-        });
-    }
-    if (row.credentialSlot === 'secondary' && row.manuallyExcluded) {
-        context.addIssue({
-            code: 'custom',
-            path: ['manuallyExcluded'],
-            message: 'Paid secondary cannot be represented as a beta exclusion.',
-        });
-    }
-    const populated = row.monthlyLimitUsd !== null
-        && row.monthlyUsageUsd !== null
-        && row.billingCycleStartAt !== null
-        && row.billingCycleEndAt !== null
-        && row.observedAt !== null
-        && row.refreshedAt !== null;
-    if (row.freshnessState === 'missing') {
-        if (row.effectiveRemainingUsd !== null || row.healthState === 'healthy') {
-            context.addIssue({
-                code: 'custom',
-                message: 'Missing credit data must remain explicit and non-numeric.',
-            });
-        }
-    } else if (row.freshnessState === 'fresh' && row.effectiveRemainingUsd === null) {
-        context.addIssue({
-            code: 'custom',
-            path: ['effectiveRemainingUsd'],
-            message: 'Fresh credit data must include current remaining capacity.',
-        });
-    } else if (!populated || row.healthState !== 'healthy') {
-        context.addIssue({
-            code: 'custom',
-            message: 'Fresh or stale credit data must include a healthy snapshot.',
-        });
-    }
-    if (row.freshnessState !== 'fresh' && row.effectiveRemainingUsd !== null) {
-        context.addIssue({
-            code: 'custom',
-            path: ['effectiveRemainingUsd'],
-            message: 'Stale credit data cannot be used as current remaining capacity.',
-        });
-    }
-    if (row.billingCycleEndAt !== row.cycleResetAt) {
-        context.addIssue({
-            code: 'custom',
-            path: ['cycleResetAt'],
-            message: 'Cycle reset must match the billing cycle end.',
-        });
-    }
-});
-
-const inventorySchema = z.array(inventoryRowSchema)
-    .length(APIFY_CREDENTIAL_SLOTS.length)
-    .superRefine((rows, context) => {
-        const received = rows.map(row => row.credentialSlot);
-        if (received.some((slot, index) => slot !== APIFY_CREDENTIAL_SLOTS[index])) {
-            context.addIssue({
-                code: 'custom',
-                message: 'Inventory must contain the canonical all-ten slot order.',
-            });
-        }
-        if (new Set(received).size !== APIFY_CREDENTIAL_SLOTS.length) {
-            context.addIssue({
-                code: 'custom',
-                message: 'Inventory must not contain duplicate slots.',
-            });
-        }
-    });
-
-export type ApifyAccountCreditInventoryRow = z.infer<typeof inventoryRowSchema>;
+export { apifyAccountCreditInventorySchema };
+export type { ApifyAccountCreditInventoryRow };
 
 export const apifyAccountCreditExclusionInputSchema = z.object({
     credentialSlot: z.enum(APIFY_FREE_CREDENTIAL_SLOTS),
@@ -181,7 +93,7 @@ function rpcScalarData(data: unknown): unknown {
 }
 
 function parseInventory(data: unknown): readonly ApifyAccountCreditInventoryRow[] {
-    const parsed = inventorySchema.safeParse(rpcData(data));
+    const parsed = apifyAccountCreditInventorySchema.safeParse(rpcData(data));
     if (!parsed.success) {
         throw new Error(APIFY_ACCOUNT_CREDIT_INVENTORY_PERSISTENCE_ERROR);
     }

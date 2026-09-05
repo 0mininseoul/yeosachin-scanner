@@ -65,6 +65,15 @@ function providerReply() {
 }
 
 describe('all-account Apify credit inventory', () => {
+    it('exports the strict all-ten inventory schema for client response validation', async () => {
+        const loaded = await import('./apify-account-credit-inventory') as unknown as {
+            apifyAccountCreditInventorySchema?: {
+                safeParse(value: unknown): { success: boolean };
+            };
+        };
+        expect(loaded.apifyAccountCreditInventorySchema).toBeDefined();
+    });
+
     it('sets exclusion only for a free slot and rejects secondary before the RPC', async () => {
         const client = rpcClient({
             credentialSlot: 'octonary',

@@ -1,0 +1,1194 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex, nofollow">
+<title>판독 운영 콘솔 — 설계안</title>
+<style>
+:root{
+  --board:#EEF1F5;
+  --surface:#FFFFFF;
+  --ink:#16202B;
+  --ink-2:#4A5A6E;
+  --ink-3:#5D6D80;
+  --line:#D3DBE4;
+  --line-2:#E7ECF2;
+  --ok:#0A6E4A;
+  --ok-bg:#E6F4EE;
+  --warn:#8A4A00;
+  --warn-bg:#FBF0E2;
+  --bad:#B01818;
+  --bad-bg:#FBEAEA;
+  --sel:#1B4FD8;
+  --sel-bg:#EAF0FE;
+  --track:#DDE3EB;
+  --sans:"Apple SD Gothic Neo","Pretendard","Noto Sans KR",-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,"Malgun Gothic",sans-serif;
+  --mono:ui-monospace,SFMono-Regular,"SF Mono",Menlo,Consolas,"Liberation Mono",monospace;
+}
+*{box-sizing:border-box}
+html{-webkit-text-size-adjust:100%}
+body{
+  margin:0;background:var(--board);color:var(--ink);
+  font-family:var(--sans);font-size:15px;line-height:1.5;
+  -webkit-font-smoothing:antialiased;
+  font-variant-numeric:tabular-nums;font-feature-settings:"tnum" 1;
+}
+h1,h2,h3{margin:0;font-weight:700;letter-spacing:-.015em}
+p{margin:0}
+button{font:inherit;color:inherit;font-variant-numeric:tabular-nums}
+:focus-visible{outline:2px solid var(--sel);outline-offset:2px;border-radius:2px}
+
+/* ---------- shell ---------- */
+.wrap{max-width:1360px;margin:0 auto;padding:0 24px 72px}
+.masthead{
+  display:flex;flex-wrap:wrap;gap:12px 20px;align-items:baseline;
+  padding:22px 0 18px;border-bottom:2px solid var(--ink);margin-bottom:22px;
+}
+.masthead h1{font-size:21px}
+.masthead .meta{margin-left:auto;font-size:13.5px;color:var(--ink-2)}
+.masthead .meta b{font-weight:600;color:var(--ink)}
+.demo-note{
+  background:#FFF;border:1px solid var(--line);border-left:3px solid var(--sel);
+  padding:10px 14px;font-size:13.5px;color:var(--ink-2);margin:0 0 22px;
+}
+.demo-note code{font-family:var(--mono);font-size:12.5px;overflow-wrap:anywhere}
+
+/* ---------- section frame ---------- */
+.sec{margin:0 0 26px}
+.sec-head{display:flex;flex-wrap:wrap;gap:10px 16px;align-items:baseline;margin:0 0 10px}
+.sec-head h2{font-size:16.5px}
+.sec-head .aside{margin-left:auto;font-size:13.5px;color:var(--ink-2)}
+.card{background:var(--surface);border:1px solid var(--line)}
+
+/* ---------- top: runway + attention ---------- */
+.top{display:grid;grid-template-columns:minmax(300px,380px) 1fr;gap:16px;margin:0 0 26px;align-items:start}
+.runway{background:var(--surface);border:1px solid var(--line);padding:18px 20px}
+.runway .lbl{font-size:13.5px;color:var(--ink-2)}
+.runway .big{font-size:46px;font-weight:700;letter-spacing:-.03em;line-height:1.05;margin:6px 0 2px}
+.runway .big small{font-size:20px;font-weight:600;color:var(--ink-2);letter-spacing:0}
+.runway .basis{font-size:13px;color:var(--ink-3);margin-top:8px;line-height:1.45}
+.runway .split{display:flex;gap:22px;margin-top:14px;padding-top:13px;border-top:1px solid var(--line-2)}
+.runway .split div{font-size:13.5px;color:var(--ink-2)}
+.runway .split b{display:block;font-size:19px;font-weight:700;color:var(--ink);letter-spacing:-.02em}
+
+.attn{background:var(--surface);border:1px solid var(--line);border-left:4px solid var(--bad);padding:16px 20px}
+.attn.is-clear{border-left-color:var(--ok)}
+.attn h2{font-size:16.5px;margin-bottom:2px}
+.attn .sub{font-size:13.5px;color:var(--ink-2);margin-bottom:12px}
+.attn ul{list-style:none;margin:0;padding:0;display:grid;gap:1px;background:var(--line-2)}
+.attn li{background:var(--surface);display:flex;flex-wrap:wrap;gap:4px 12px;align-items:baseline;padding:9px 0}
+.attn li .what{font-weight:600}
+.attn li .why{font-size:13.5px;color:var(--ink-2)}
+.attn li .go{margin-left:auto}
+
+/* ---------- generic link-button ---------- */
+.lnk{
+  background:none;border:0;padding:2px 0;cursor:pointer;
+  color:var(--sel);font-size:13.5px;font-weight:600;
+  border-bottom:1px solid currentColor;
+}
+.lnk:hover{color:#12379B}
+.btn{
+  background:var(--surface);border:1px solid var(--line);cursor:pointer;
+  padding:7px 13px;font-size:13.5px;font-weight:600;color:var(--ink);
+}
+.btn:hover{border-color:var(--ink-3);background:#F7F9FB}
+.btn[aria-pressed="true"]{background:var(--ink);border-color:var(--ink);color:#fff}
+.btn:disabled{opacity:.45;cursor:default}
+.btn-row{display:flex;flex-wrap:wrap;gap:8px}
+.btn.sm{padding:5px 10px;font-size:12.5px;white-space:nowrap}
+.sr{position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0 0 0 0);white-space:nowrap}
+
+/* ---------- status chip ---------- */
+.chip{
+  display:inline-flex;align-items:center;gap:6px;
+  font-size:12.5px;font-weight:700;padding:2px 8px 3px;
+  border:1px solid;white-space:nowrap;
+}
+.chip::before{content:"";width:7px;height:7px;flex:none;background:currentColor}
+.chip.ok{color:var(--ok);border-color:#A9D6C4;background:var(--ok-bg)}
+.chip.warn{color:var(--warn);border-color:#E2C49A;background:var(--warn-bg)}
+.chip.bad{color:var(--bad);border-color:#E5B2B2;background:var(--bad-bg)}
+.chip.mute{color:var(--ink-2);border-color:var(--line);background:#F3F6F9}
+.chip.mute::before{background:var(--ink-3)}
+
+/* ---------- accounts ---------- */
+.paid{display:grid;grid-template-columns:1fr auto;gap:18px 28px;align-items:center;padding:18px 20px}
+.paid .id{display:flex;flex-wrap:wrap;gap:6px 12px;align-items:baseline}
+.paid .id h3{font-size:18px}
+.paid .id .role{font-size:13px;color:var(--ink-2)}
+.paid .amt{font-size:34px;font-weight:700;letter-spacing:-.025em;line-height:1.1;margin:8px 0 0}
+.paid .amt small{font-size:14px;font-weight:600;color:var(--ink-2);letter-spacing:0;margin-left:6px}
+.paid .paidfacts{display:flex;flex-wrap:wrap;gap:4px 22px;margin-top:10px;font-size:13.5px;color:var(--ink-2)}
+.paid .paidfacts b{font-weight:600;color:var(--ink)}
+.paid .act{text-align:right}
+.paid .act .stamp{font-size:12.5px;color:var(--ink-3);margin-top:7px}
+
+.meter{height:6px;background:var(--track);margin-top:12px;max-width:520px}
+.meter i{display:block;height:100%;background:var(--ok)}
+.meter.warn i{background:var(--warn)}
+.meter.bad i{background:var(--bad)}
+.meter.empty{background:repeating-linear-gradient(135deg,var(--track) 0 4px,#EDF1F5 4px 8px)}
+
+/* ---------- data grid (accounts + orders) ---------- */
+.grid{width:100%;border-collapse:collapse;font-size:14.5px}
+.grid caption{text-align:left;font-size:13.5px;color:var(--ink-2);padding:0 0 8px}
+.grid th{
+  text-align:left;font-weight:600;font-size:13px;color:var(--ink-2);
+  padding:9px 14px;border-bottom:1px solid var(--line);white-space:nowrap;background:#F7F9FB;
+}
+.grid td{padding:11px 14px;border-bottom:1px solid var(--line-2);vertical-align:middle}
+.grid tbody tr:last-child td{border-bottom:0}
+.grid .num{text-align:right;font-variant-numeric:tabular-nums}
+.grid .slot{font-weight:600}
+.grid .mono{font-family:var(--mono);font-size:13px}
+.grid .dim{color:var(--ink-2)}
+.grid tr.flagged td{background:#FDF6F6}
+.grid tr.excluded td{background:#F7F9FB;color:var(--ink-2)}
+.grid td .meter{margin-top:5px;max-width:120px;height:5px}
+
+.rowbtn{
+  background:none;border:0;padding:0;cursor:pointer;text-align:left;
+  font-weight:600;color:var(--sel);border-bottom:1px solid currentColor;font-family:var(--mono);font-size:13px;
+}
+.rowbtn:hover{color:#12379B}
+.grid tbody tr.clickable{cursor:pointer}
+.grid tbody tr.clickable:hover td{background:var(--sel-bg)}
+.grid tbody tr.flagged.clickable:hover td{background:#FBECEC}
+
+.gaps{display:flex;flex-wrap:wrap;gap:4px}
+.gap{
+  font-family:var(--mono);font-size:11.5px;padding:1px 6px 2px;
+  border:1px solid #E5B2B2;background:var(--bad-bg);color:var(--bad);white-space:nowrap;
+}
+.gap.soft{border-color:#E2C49A;background:var(--warn-bg);color:var(--warn)}
+
+.scroller{overflow-x:auto}
+
+/* ---------- detail view ---------- */
+.view[hidden]{display:none}
+.crumb{display:flex;flex-wrap:wrap;gap:12px 18px;align-items:center;margin:0 0 18px}
+.dhead{padding:18px 20px;display:grid;grid-template-columns:1fr auto;gap:16px 28px;align-items:start}
+.dhead h2{font-size:19px}
+.dhead .sub{font-size:13.5px;color:var(--ink-2);margin-top:4px}
+.dhead .sub .mono{font-family:var(--mono);font-size:13px}
+.dhead .right{text-align:right}
+
+.facts{display:grid;grid-template-columns:repeat(4,1fr);gap:1px;background:var(--line-2);border-top:1px solid var(--line)}
+.fact{background:var(--surface);padding:14px 20px}
+.fact .k{font-size:13px;color:var(--ink-2)}
+.fact .v{font-size:25px;font-weight:700;letter-spacing:-.02em;margin-top:3px;line-height:1.15}
+.fact .v.sm{font-size:16px;font-weight:600;letter-spacing:0}
+.fact .n{font-size:12.5px;color:var(--ink-3);margin-top:4px;line-height:1.4}
+.fact.alert{background:var(--bad-bg)}
+.fact.alert .v{color:var(--bad)}
+
+.retention{display:flex;flex-wrap:wrap;gap:8px 16px;align-items:center;padding:13px 20px;border-top:1px solid var(--line);font-size:13.5px}
+.retention .mono{font-family:var(--mono);font-size:12.5px;color:var(--ink-2)}
+
+/* ---------- evidence rail ---------- */
+.rail{border:1px solid var(--line);background:var(--surface)}
+.stage{border-bottom:1px solid var(--line-2)}
+.stage:last-child{border-bottom:0}
+.stage-hd{
+  width:100%;background:none;border:0;cursor:pointer;text-align:left;
+  display:grid;grid-template-columns:34px minmax(190px,1.4fr) 150px 118px 1fr 90px;
+  gap:16px;align-items:center;padding:13px 18px;
+}
+.stage-hd:hover{background:var(--sel-bg)}
+.stage-hd .ord{
+  font-size:14px;font-weight:700;color:var(--ink-2);
+  width:26px;height:26px;border:1px solid var(--line);display:grid;place-items:center;
+}
+.stage.bad .stage-hd .ord{border-color:#E5B2B2;background:var(--bad-bg);color:var(--bad)}
+.stage-hd .nm{font-weight:600}
+.stage-hd .nm span{display:block;font-size:12.5px;font-weight:400;color:var(--ink-3);margin-top:1px}
+.stage-hd .cnt{font-size:20px;font-weight:700;letter-spacing:-.02em}
+.stage-hd .cnt small{font-size:13px;font-weight:400;color:var(--ink-2);letter-spacing:0}
+.stage-hd .delta{font-size:13.5px;color:var(--bad);font-weight:600}
+.stage-hd .open{font-size:13.5px;color:var(--sel);font-weight:600;text-align:right}
+.stage[aria-expanded] .open::after{content:" ▾"}
+.stage.is-open .open::after{content:" ▴"}
+
+.firstdiv{
+  display:flex;gap:10px;align-items:baseline;
+  background:var(--ink);color:#fff;padding:10px 18px;font-size:13.5px;
+}
+.firstdiv b{font-weight:700}
+.firstdiv .tag{
+  font-size:11.5px;font-weight:700;border:1px solid rgba(255,255,255,.45);
+  padding:1px 7px 2px;white-space:nowrap;
+}
+
+.panel{padding:0 18px 18px;border-top:1px solid var(--line-2);background:#FBFCFD}
+.panel-tools{display:flex;flex-wrap:wrap;gap:8px 12px;align-items:center;padding:13px 0}
+.panel-tools .lbl{font-size:13px;color:var(--ink-2);margin-right:2px}
+.pager{display:flex;flex-wrap:wrap;gap:12px;align-items:center;padding:12px 0 0;font-size:13.5px;color:var(--ink-2)}
+.panel .grid{background:var(--surface);border:1px solid var(--line)}
+.empty{padding:22px 0;color:var(--ink-2);font-size:14px}
+
+.comment{max-width:340px;color:var(--ink-2)}
+.bandcell{white-space:nowrap}
+.ledger{display:grid;grid-template-columns:auto 1fr;gap:2px 12px;font-size:13px;margin:0}
+.ledger dt{color:var(--ink-2)}
+.ledger dd{margin:0;font-weight:600;text-align:right;font-variant-numeric:tabular-nums}
+
+/* ---------- responsive ---------- */
+@media (max-width:1180px){
+  .top{grid-template-columns:1fr}
+  .facts{grid-template-columns:repeat(2,1fr)}
+  .stage-hd{grid-template-columns:30px minmax(150px,1fr) 130px 100px 84px;gap:12px}
+  .stage-hd .delta{display:none}
+}
+@media (max-width:860px){
+  .wrap{padding:0 16px 56px}
+  .paid{grid-template-columns:1fr}
+  .paid .act{text-align:left}
+  .dhead{grid-template-columns:1fr}
+  .dhead .right{text-align:left}
+  .facts{grid-template-columns:1fr}
+  .stage-hd{grid-template-columns:28px 1fr auto;gap:7px 10px;align-items:center}
+  .stage-hd .ord{grid-area:1 / 1 / 3 / 2;align-self:start}
+  .stage-hd .nm{grid-area:1 / 2 / 2 / 3}
+  .stage-hd .cnt{grid-area:2 / 2 / 3 / 3;font-size:18px}
+  .stage-hd .st{grid-area:1 / 3 / 2 / 4;justify-self:end}
+  .stage-hd .open{grid-area:2 / 3 / 3 / 4}
+  .runway .big{font-size:38px}
+}
+@media (prefers-reduced-motion:reduce){*{transition:none!important;animation:none!important}}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header class="masthead">
+    <h1>판독 운영 콘솔</h1>
+    <p class="meta">데이터 기준 <b id="stamp">—</b> · Apify 스냅샷 최대 5분 캐시</p>
+  </header>
+
+  <p class="demo-note">
+    설계 시안입니다. 모든 수치는 합성 데이터이며 실제 계정·주문·이용자 값이 아닙니다.
+    필드와 상태값은 <code>load_analysis_order_audit_bundle</code> · <code>list_analysis_order_audit_bundles</code> · <code>load_analysis_apify_account_credit_inventory</code> 계약을 그대로 따릅니다.
+  </p>
+
+  <!-- ============ OVERVIEW ============ -->
+  <section class="view" id="view-overview">
+    <div class="top">
+      <div class="runway">
+        <p class="lbl">남은 분석 여력</p>
+        <p class="big" id="runway-count">—</p>
+        <p class="basis" id="runway-basis">—</p>
+        <div class="split">
+          <div>유료 잔여<b id="paid-left">—</b></div>
+          <div>무료 잔여<b id="free-left">—</b></div>
+          <div>가용 계정<b id="usable-count">—</b></div>
+        </div>
+      </div>
+      <div class="attn" id="attn">
+        <h2 id="attn-title">확인 필요</h2>
+        <p class="sub" id="attn-sub">—</p>
+        <ul id="attn-list"></ul>
+      </div>
+    </div>
+
+    <section class="sec">
+      <div class="sec-head"><h2>유료 계정</h2><p class="aside">secondary 1개 · 실제 과금이 발생하는 유일한 계정</p></div>
+      <div class="card"><div class="paid" id="paid-card"></div></div>
+    </section>
+
+    <section class="sec">
+      <div class="sec-head">
+        <h2>무료 계정 9개</h2>
+        <p class="aside" id="free-aside">—</p>
+      </div>
+      <div class="card scroller"><table class="grid" id="free-grid"></table></div>
+    </section>
+
+    <section class="sec">
+      <div class="sec-head">
+        <h2>주문</h2>
+        <div class="btn-row" style="margin-left:auto">
+          <button class="btn" type="button" data-filter="defect" aria-pressed="true">결함 있는 것만</button>
+          <button class="btn" type="button" data-filter="all" aria-pressed="false">전체</button>
+        </div>
+      </div>
+      <div class="card scroller"><table class="grid" id="order-grid"></table></div>
+      <p class="pager" id="order-pager"></p>
+    </section>
+  </section>
+
+  <!-- ============ DETAIL ============ -->
+  <section class="view" id="view-detail" hidden>
+    <p class="crumb">
+      <button class="lnk" type="button" id="back">← 주문 목록</button>
+      <span class="dim" id="crumb-id" style="font-family:var(--mono);font-size:13px;color:var(--ink-2)"></span>
+    </p>
+    <div class="card" style="margin-bottom:22px">
+      <div class="dhead" id="d-head"></div>
+      <div class="facts" id="d-facts"></div>
+      <div class="retention" id="d-retention"></div>
+    </div>
+
+    <section class="sec">
+      <div class="sec-head">
+        <h2>증거 단계</h2>
+        <p class="aside">파이프라인 순서. 각 단계는 선언 대비 수집 수를 비교합니다.</p>
+      </div>
+      <div class="rail" id="rail"></div>
+    </section>
+  </section>
+</div>
+
+<script>
+"use strict";
+/* =======================================================================
+   Synthetic fixtures. Field names and enum values mirror the production
+   RPC contracts exactly so the layout is testable against real payloads.
+   ======================================================================= */
+const NOW = new Date('2026-09-05T14:22:00+09:00');
+const usd = n => n === null || n === undefined ? '—' : '$' + n.toFixed(n < 1 ? 3 : 2);
+const usdBal = n => n === null || n === undefined ? '—' : '$' + n.toFixed(2);
+const pad = n => String(n).padStart(2, '0');
+const dayLabel = iso => { const d = new Date(iso); return `${pad(d.getMonth()+1)}-${pad(d.getDate())}`; };
+const timeLabel = iso => { const d = new Date(iso); return `${pad(d.getMonth()+1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`; };
+const ago = iso => {
+  if (!iso) return '없음';
+  const s = Math.round((NOW - new Date(iso)) / 1000);
+  if (s < 90) return `${s}초 전`;
+  if (s < 5400) return `${Math.round(s/60)}분 전`;
+  if (s < 172800) return `${Math.round(s/3600)}시간 전`;
+  return `${Math.round(s/86400)}일 전`;
+};
+const esc = s => String(s).replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+const el = (h) => { const t = document.createElement('template'); t.innerHTML = h.trim(); return t.content.firstElementChild; };
+
+function mulberry32(a){return function(){a|=0;a=a+0x6D2B79F5|0;let t=Math.imul(a^a>>>15,1|a);t=t+Math.imul(t^t>>>7,61|t)^t;return((t^t>>>14)>>>0)/4294967296;};}
+const hex = (seed, len) => { const r = mulberry32(seed); let s=''; while (s.length < len) s += Math.floor(r()*16).toString(16); return s; };
+
+/* ---- 1. Apify accounts: canonical 10-slot order, secondary is the paid one ---- */
+const CYCLE_END = '2026-09-21T00:00:00+09:00';
+const acct = (credentialSlot, o) => Object.assign({
+  credentialSlot, workloadRole: credentialSlot === 'secondary' ? 'paid' : 'free',
+  healthState:'healthy', freshnessState:'fresh',
+  monthlyLimitUsd:5, monthlyUsageUsd:0, effectiveRemainingUsd:5,
+  billingCycleStartAt:'2026-08-21T00:00:00+09:00', billingCycleEndAt:CYCLE_END,
+  cycleResetAt:CYCLE_END, observedAt:'2026-09-05T14:20:00+09:00',
+  refreshedAt:'2026-09-05T14:20:00+09:00', manuallyExcluded:false,
+}, o);
+
+const ACCOUNTS = [
+  acct('primary',    { monthlyUsageUsd:3.42, effectiveRemainingUsd:1.58, observedAt:'2026-09-05T14:19:10+09:00', refreshedAt:'2026-09-05T14:19:10+09:00' }),
+  acct('secondary',  { monthlyLimitUsd:49, monthlyUsageUsd:14.90, effectiveRemainingUsd:34.10,
+                       observedAt:'2026-09-05T14:21:31+09:00', refreshedAt:'2026-09-05T14:21:31+09:00' }),
+  acct('tertiary',   { monthlyUsageUsd:0.85, effectiveRemainingUsd:4.15, observedAt:'2026-09-05T14:18:44+09:00', refreshedAt:'2026-09-05T14:18:44+09:00' }),
+  /* stale: snapshot older than the 300s freshness window -> remaining must be null */
+  acct('quaternary', { freshnessState:'stale', effectiveRemainingUsd:null, monthlyUsageUsd:2.10,
+                       observedAt:'2026-09-05T13:31:02+09:00', refreshedAt:'2026-09-05T13:31:02+09:00' }),
+  acct('quinary',    { monthlyUsageUsd:4.87, effectiveRemainingUsd:0.13, observedAt:'2026-09-05T14:20:05+09:00', refreshedAt:'2026-09-05T14:20:05+09:00' }),
+  /* missing: never observed -> every numeric field stays null and health cannot be healthy */
+  acct('senary',     { healthState:'missing', freshnessState:'missing', monthlyLimitUsd:null, monthlyUsageUsd:null,
+                       effectiveRemainingUsd:null, billingCycleStartAt:null, billingCycleEndAt:null,
+                       cycleResetAt:null, observedAt:null, refreshedAt:null }),
+  acct('septenary',  { monthlyUsageUsd:1.05, effectiveRemainingUsd:3.95, observedAt:'2026-09-05T14:17:58+09:00', refreshedAt:'2026-09-05T14:17:58+09:00' }),
+  acct('octonary',   { monthlyUsageUsd:0.40, effectiveRemainingUsd:4.60, manuallyExcluded:true,
+                       observedAt:'2026-09-05T14:20:41+09:00', refreshedAt:'2026-09-05T14:20:41+09:00' }),
+  acct('nonary',     { healthState:'unhealthy', freshnessState:'stale', effectiveRemainingUsd:null, monthlyUsageUsd:2.95,
+                       observedAt:'2026-09-05T11:02:19+09:00', refreshedAt:'2026-09-05T11:02:19+09:00' }),
+  acct('tenth',      { monthlyUsageUsd:0.12, effectiveRemainingUsd:4.88, observedAt:'2026-09-05T14:19:33+09:00', refreshedAt:'2026-09-05T14:19:33+09:00' }),
+];
+const PAID = ACCOUNTS.find(a => a.credentialSlot === 'secondary');
+const FREE = ACCOUNTS.filter(a => a.credentialSlot !== 'secondary');
+
+/* An account can take work only when its snapshot is fresh, healthy, not excluded, and non-empty. */
+const usable = a => a.freshnessState === 'fresh' && a.healthState === 'healthy'
+  && !a.manuallyExcluded && (a.effectiveRemainingUsd ?? 0) > 0.05;
+
+function accountState(a){
+  if (a.freshnessState === 'missing') return { tone:'bad', label:'스냅샷 없음', why:'한 번도 관측되지 않았습니다.' };
+  if (a.healthState === 'unhealthy')  return { tone:'bad', label:'토큰 오류', why:'마지막 조회가 실패했습니다. 토큰을 확인하세요.' };
+  if (a.freshnessState === 'stale')   return { tone:'warn', label:'스냅샷 만료', why:'5분 캐시를 넘겼습니다. 잔액을 신뢰할 수 없습니다.' };
+  if (a.manuallyExcluded)             return { tone:'mute', label:'수동 제외', why:'운영자가 배차에서 뺐습니다.' };
+  if ((a.effectiveRemainingUsd ?? 0) <= 0.05) return { tone:'warn', label:'잔액 소진', why:'다음 초기화까지 쓸 수 없습니다.' };
+  if ((a.effectiveRemainingUsd ?? 0) < 1)     return { tone:'warn', label:'잔액 부족', why:'곧 소진됩니다.' };
+  return { tone:'ok', label:'정상', why:'' };
+}
+
+/* ---- 2. Orders: list rows follow orderAuditListRowSchema exactly ---- */
+const NAME_A = ['soo','min','ye','ha','ji','na','yu','da','se','eun','hyo','bo','ga','ra','chae','seo','won','ju','hee','sol'];
+const NAME_B = ['rin','young','jin','eun','ah','bin','won','hee','ki','na','mi','sun','ho','yeon','bi','ram','deul','kyung'];
+const SUFFIX = ['','_','.','__','_0','01','2','_ig','.official','_daily','9','7'];
+
+function roster(seed, spec){
+  const r = mulberry32(seed);
+  const out = []; const used = new Set();
+  for (let i = 0; i < spec.mutualTotal; i++){
+    let u;
+    do { u = NAME_A[Math.floor(r()*NAME_A.length)] + NAME_B[Math.floor(r()*NAME_B.length)] + SUFFIX[Math.floor(r()*SUFFIX.length)]; }
+    while (used.has(u));
+    used.add(u);
+    const isPrivate = r() < 0.17;
+    /* Profile fetch can fail independently of privacy; that is what leaves a mutual "partial". */
+    const profileAvailable = i < spec.mutualCollected;
+    const c = {
+      candidateId: 'c_' + hex(seed + i * 7717, 12),
+      username: u, mutualOrdinal: i + 1, followingOrdinal: Math.floor(r() * spec.mutualTotal * 2) + 1,
+      isPrivate, isVerified: r() < 0.04,
+      profileAvailable, profileImageAvailable: profileAvailable && !isPrivate && r() > 0.05,
+      profileFailureCode: profileAvailable ? null : (isPrivate ? 'PROFILE_PRIVATE' : 'PROFILE_FETCH_FAILED'),
+      finalInclusionState: 'included',
+      completeness: profileAvailable ? 'complete' : 'partial',
+    };
+    /* Pass 1 — cheap triage over whatever profile signal exists. */
+    if (profileAvailable){
+      const g = r();
+      c.initial = {
+        output: g < 0.52 ? 'female' : g < 0.86 ? 'male' : 'unknown',
+        model: 'gemini-2.5-flash-lite', confidence: g < 0.3 ? 'high' : g < 0.7 ? 'medium' : 'low',
+        reason: g < 0.52 ? '프로필명·게시물 신호가 여성으로 일치' : g < 0.86 ? '프로필명이 남성형' : '판별 신호 부족',
+        operationKey: 'gender:' + c.candidateId, resultHash: hex(seed + i * 131, 64),
+      };
+    } else {
+      c.initial = { output:null, model:null, confidence:null, reason:null, operationKey:null, resultHash:null };
+    }
+    /* Pass 2 — only ambiguous/unknown rows are re-resolved; the rest carry pass 1 forward. */
+    const resolved = c.initial.output !== null && i < spec.genderResolved;
+    if (resolved){
+      const flip = c.initial.output === 'unknown' && r() < 0.6;
+      c.final = {
+        output: flip ? (r() < 0.5 ? 'female' : 'male') : c.initial.output,
+        model: c.initial.output === 'unknown' ? 'gemini-2.5-flash' : c.initial.model,
+        confidence: c.initial.output === 'unknown' ? 'medium' : c.initial.confidence,
+        reason: flip ? '추가 게시물 표본으로 재판정' : '1차 판정 유지',
+        operationKey: 'gender-resolution:' + c.candidateId, resultHash: hex(seed + i * 977, 64),
+      };
+    } else {
+      c.final = { output:null, model:null, confidence:null, reason:null, operationKey:null, resultHash:null };
+      c.completeness = 'partial';
+    }
+    c.genderCompleteness = c.final.output === null ? 'partial' : 'complete';
+    if (c.isPrivate) c.finalInclusionState = 'private';
+    else if (c.final.output && c.final.output !== 'female') c.finalInclusionState = 'excluded';
+    out.push(c);
+  }
+  /* Public females are the only rows that receive a risk score. */
+  const scorable = out.filter(c => !c.isPrivate && c.final.output === 'female');
+  scorable.forEach((c, idx) => {
+    const rr = mulberry32(seed + idx * 3301);
+    const likes = Math.floor(rr() * 5), comments = Math.floor(rr() * 7);
+    const comps = [
+      { key:'candidateToTargetLikes', contributionUnits: likes * 4 },
+      { key:'candidateToTargetComments', contributionUnits: comments * 6 },
+      { key:'candidateToTargetTagOrCaptionMention', contributionUnits: rr() < 0.18 ? 12 : 0 },
+      { key:'targetToCandidateTagOrCaptionMention', contributionUnits: rr() < 0.12 ? 10 : 0 },
+      { key:'targetToCandidateLike', contributionUnits: rr() < 0.3 ? 8 : 0 },
+      { key:'recentMutual', contributionUnits: idx < 12 ? 14 - idx : 0 },
+      { key:'appearanceExposure', contributionUnits: Math.floor(rr() * 16) },
+      { key:'weakPartnerAdjustment', contributionUnits: rr() < 0.14 ? -9 : 0 },
+    ];
+    const raw = comps.reduce((s, x) => s + x.contributionUnits, 0);
+    const scored = idx < spec.riskScored;
+    c.riskComponents = comps;
+    c.riskFormulaVersion = 'risk-2026.08.30';
+    c.preScore = Number((raw * 0.92).toFixed(4));
+    c.rawScore = Number(raw.toFixed(4));
+    c.publicScore = scored ? Number(Math.min(10, Math.max(1, 1 + raw / 9)).toFixed(4)) : null;
+    c.finalScore = scored ? Number(Math.min(10, Math.max(1, 1 + raw / 9.6)).toFixed(4)) : null;
+    c.riskBand = scored ? (c.finalScore >= 7.5 ? 'high_risk' : c.finalScore >= 4.5 ? 'caution' : 'normal') : null;
+    c.recentMutualRank = idx < 12 ? idx + 1 : null;
+    c.partnerSafety = { operationKey:'partner-safety:' + c.candidateId, resultHash: hex(seed + idx * 613, 64) };
+    c.riskCompleteness = scored ? 'complete' : 'partial';
+    c.signalLikes = likes; c.signalComments = comments;
+  });
+  scorable.filter(c => c.finalScore !== null)
+    .sort((a, b) => b.finalScore - a.finalScore)
+    .forEach((c, i) => { c.finalRank = i + 1; c.featuredRank = i < 10 ? i + 1 : null; });
+  return { candidates: out, scorable };
+}
+
+function interactions(seed, spec, scorable){
+  const r = mulberry32(seed + 55);
+  const rows = []; let ordinal = 0;
+  const KO = ['오늘도 예쁘네','이거 어디서 찍었어?','같이 가자 ㅋㅋ','대박 ㅋㅋㅋ','언제 한번 보자','너무 잘 나왔다','완전 부럽다','ㅋㅋㅋㅋㅋ 이거 뭐야','연락해','진짜 좋다'];
+  const push = (signal, count, cand) => {
+    for (let i = 0; i < count; i++){
+      const c = cand[Math.floor(r() * cand.length)];
+      if (!c) continue;
+      const missing = signal === 'target_post_like' && ordinal >= spec.targetLikesCollected;
+      rows.push({
+        ordinal: ++ordinal, candidateId: c.candidateId, username: c.username, signal,
+        sourcePostId: 'p_' + hex(seed + ordinal * 37, 10),
+        evidenceId: 'e_' + hex(seed + ordinal * 91, 10),
+        occurredAt: new Date(NOW - Math.floor(r() * 26 * 864e5)).toISOString(),
+        commentText: signal === 'target_post_comment' ? KO[Math.floor(r() * KO.length)] : null,
+        details: signal === 'candidate_post_like'
+          ? { reverseLikeStatus: r() < .5 ? 'observed' : 'not_observed', reverseComponentScore: r() < .5 ? 3 : 0 } : {},
+        completeness: missing ? 'unknown' : 'complete',
+        gapCodes: missing ? ['TARGET_LIKES_ROWS_GAP'] : [],
+      });
+    }
+  };
+  push('target_post_like', spec.targetLikesCollected, scorable);
+  push('target_post_comment', spec.targetCommentsCollected, scorable);
+  push('candidate_post_like', spec.candidateLikesCollected, scorable);
+  return rows;
+}
+
+/* ---- 3. Order definitions. `retention` is a proposed field — see the gap report. ---- */
+function order(i, o){
+  const seed = 90210 + i * 4211;
+  const spec = Object.assign({ mutualTotal:0, mutualCollected:0, genderResolved:9999, riskScored:9999,
+    targetLikesDeclared:0, targetLikesCollected:0, targetCommentsDeclared:0, targetCommentsCollected:0,
+    candidateLikesDeclared:0, candidateLikesCollected:0 }, o.spec);
+  const { candidates, scorable } = roster(seed, spec);
+  const inter = interactions(seed, spec, scorable);
+  const publicTotal = candidates.filter(c => !c.isPrivate).length;
+  const privateTotal = spec.mutualTotal - publicTotal;
+  const screened = candidates.filter(c => c.final.output !== null).length;
+  const scoredCount = scorable.filter(c => c.finalScore !== null).length;
+  return Object.assign({
+    requestId: hex(seed, 8) + '-' + hex(seed+1, 4) + '-4' + hex(seed+2, 3) + '-a' + hex(seed+3, 3) + '-' + hex(seed+4, 12),
+    orderId: hex(seed+9, 8) + '-' + hex(seed+10, 4) + '-4' + hex(seed+11, 3) + '-b' + hex(seed+12, 3) + '-' + hex(seed+13, 12),
+    version:1, accessMode:'paid', pipelineVersion:'v2.14.0',
+    riskPolicyVersion:'risk-2026.08.30', aiPolicyVersion:'ai-2026.09.01',
+    bundleHash: hex(seed+21, 64), sourceSetHash: hex(seed+22, 64), previousVersionHash:null,
+    targetPostCount: 12 + (i % 7),
+    mutuals: { total:spec.mutualTotal, public:publicTotal, private:privateTotal, screened,
+               declared:spec.mutualTotal, collected:spec.mutualCollected,
+               listHash: hex(seed+23, 64), keyCoverage:{ complete:true } },
+    interactions: {
+      declared: spec.targetLikesDeclared + spec.targetCommentsDeclared + spec.candidateLikesDeclared,
+      collected: spec.targetLikesCollected + spec.targetCommentsCollected + spec.candidateLikesCollected,
+      targetLikes:{ declared:spec.targetLikesDeclared, collected:spec.targetLikesCollected },
+      targetComments:{ declared:spec.targetCommentsDeclared, collected:spec.targetCommentsCollected },
+      candidateLikes:{ declared:spec.candidateLikesDeclared, collected:spec.candidateLikesCollected, evidenceCollected:spec.candidateLikesCollected },
+      tags:{ declared:0, collected:0 }, mentions:{ declared:0, collected:0 },
+    },
+    providerRuns: [
+      { stage:'followers', logicalProvider:'apify', credentialSlot:o.slot || 'secondary', runId:'r_'+hex(seed+31,10), operationKey:'followers:'+hex(seed+32,8), inputHash:hex(seed+33,64), resultHash:hex(seed+34,64) },
+      { stage:'following', logicalProvider:'rapidapi', credentialSlot:null, runId:'r_'+hex(seed+35,10), operationKey:'following:'+hex(seed+36,8), inputHash:hex(seed+37,64), resultHash:hex(seed+38,64) },
+      { stage:'target_likers', logicalProvider:'apify', credentialSlot:o.slot || 'secondary', runId:'r_'+hex(seed+39,10), operationKey:'likers:'+hex(seed+40,8), inputHash:hex(seed+41,64), resultHash:hex(seed+42,64) },
+      { stage:'target_comments', logicalProvider:'apify', credentialSlot:o.slot || 'secondary', runId:'r_'+hex(seed+43,10), operationKey:'comments:'+hex(seed+44,8), inputHash:hex(seed+45,64), resultHash:hex(seed+46,64) },
+    ],
+    scoredCount, candidates, inter, spec,
+  }, o.row);
+}
+
+const ORDERS = [
+  order(1, { slot:'secondary', spec:{ mutualTotal:412, mutualCollected:412, genderResolved:9999, riskScored:9999,
+      targetLikesDeclared:96, targetLikesCollected:88, targetCommentsDeclared:31, targetCommentsCollected:31,
+      candidateLikesDeclared:52, candidateLikesCollected:52 },
+    row:{ targetInstagramId:'yeonwoo_.k', planId:'plus', completenessStatus:'partial',
+      gapCodes:['COST_USAGE_UNKNOWN','PROVIDER_USAGE_UNKNOWN','TARGET_LIKES_ROWS_GAP'],
+      cost:{ currency:'USD', status:'unknown', knownUsd:null, conservativeUsd:0.4124, usageUnknown:true,
+             missingSourceCodes:['COST_USAGE_UNKNOWN','PROVIDER_USAGE_UNKNOWN'] },
+      stageStatus:{ relationships:true, targetEvidence:true, candidateFeatures:true, riskScores:true, finalized:true },
+      assembledAt:'2026-09-05T14:02:11+09:00',
+      retention:{ state:'retained', version:1, assembledAt:'2026-09-05T14:02:11+09:00', purgeFencedAt:null, reason:null } } }),
+
+  order(2, { slot:'secondary', spec:{ mutualTotal:288, mutualCollected:288, genderResolved:9999, riskScored:9999,
+      targetLikesDeclared:64, targetLikesCollected:64, targetCommentsDeclared:22, targetCommentsCollected:22,
+      candidateLikesDeclared:40, candidateLikesCollected:40 },
+    row:{ targetInstagramId:'jiwon.hh', planId:'standard', completenessStatus:'complete', gapCodes:[],
+      cost:{ currency:'USD', status:'complete', knownUsd:0.3168, conservativeUsd:0.3402, usageUnknown:false, missingSourceCodes:[] },
+      stageStatus:{ relationships:true, targetEvidence:true, candidateFeatures:true, riskScores:true, finalized:true },
+      assembledAt:'2026-09-05T13:41:52+09:00',
+      retention:{ state:'retained', version:1, assembledAt:'2026-09-05T13:41:52+09:00', purgeFencedAt:null, reason:null } } }),
+
+  order(3, { slot:'secondary', spec:{ mutualTotal:531, mutualCollected:531, genderResolved:9999, riskScored:0,
+      targetLikesDeclared:118, targetLikesCollected:118, targetCommentsDeclared:44, targetCommentsCollected:44,
+      candidateLikesDeclared:70, candidateLikesCollected:70 },
+    row:{ targetInstagramId:'seoyunnn_', planId:'plus', completenessStatus:'inconsistent',
+      gapCodes:['RISK_SCORES_MISSING','CANDIDATE_FEATURES_MISSING'],
+      cost:{ currency:'USD', status:'partial', knownUsd:0.5012, conservativeUsd:0.5610, usageUnknown:false, missingSourceCodes:[] },
+      stageStatus:{ relationships:true, targetEvidence:true, candidateFeatures:false, riskScores:false, finalized:false },
+      assembledAt:'2026-09-05T13:20:07+09:00',
+      retention:{ state:'fenced', version:1, assembledAt:'2026-09-05T13:20:07+09:00',
+        purgeFencedAt:'2026-09-05T13:22:40+09:00', reason:'ANALYSIS_ORDER_AUDIT_ASSEMBLY_NOT_FINALIZED' } } }),
+
+  order(4, { slot:'primary', spec:{ mutualTotal:196, mutualCollected:196, genderResolved:9999, riskScored:9999,
+      targetLikesDeclared:41, targetLikesCollected:41, targetCommentsDeclared:15, targetCommentsCollected:15,
+      candidateLikesDeclared:28, candidateLikesCollected:28 },
+    row:{ targetInstagramId:'haeun__b', planId:'basic', completenessStatus:'complete', gapCodes:[],
+      cost:{ currency:'USD', status:'complete', knownUsd:0.2214, conservativeUsd:0.2380, usageUnknown:false, missingSourceCodes:[] },
+      stageStatus:{ relationships:true, targetEvidence:true, candidateFeatures:true, riskScores:true, finalized:true },
+      assembledAt:'2026-09-05T12:58:33+09:00',
+      retention:{ state:'retained', version:1, assembledAt:'2026-09-05T12:58:33+09:00', purgeFencedAt:null, reason:null } } }),
+
+  order(5, { slot:'secondary', spec:{ mutualTotal:347, mutualCollected:339, genderResolved:9999, riskScored:9999,
+      targetLikesDeclared:77, targetLikesCollected:77, targetCommentsDeclared:26, targetCommentsCollected:26,
+      candidateLikesDeclared:0, candidateLikesCollected:0 },
+    row:{ targetInstagramId:'minseo.ye', planId:'standard', completenessStatus:'partial',
+      gapCodes:['CANDIDATE_KEY_SET_GAP','CANDIDATE_LIKES_SOURCE_MISSING'],
+      cost:{ currency:'USD', status:'complete', knownUsd:0.3540, conservativeUsd:0.3711, usageUnknown:false, missingSourceCodes:[] },
+      stageStatus:{ relationships:true, targetEvidence:true, candidateFeatures:true, riskScores:true, finalized:true },
+      assembledAt:'2026-09-05T12:33:19+09:00',
+      retention:{ state:'retained', version:1, assembledAt:'2026-09-05T12:33:19+09:00', purgeFencedAt:null, reason:null } } }),
+
+  order(6, { slot:'secondary', spec:{ mutualTotal:264, mutualCollected:264, genderResolved:9999, riskScored:9999,
+      targetLikesDeclared:58, targetLikesCollected:58, targetCommentsDeclared:19, targetCommentsCollected:19,
+      candidateLikesDeclared:33, candidateLikesCollected:33 },
+    row:{ targetInstagramId:'chaerin_00', planId:'standard', completenessStatus:'partial',
+      gapCodes:['COST_SOURCE_MISSING'],
+      cost:{ currency:'USD', status:'not_available', knownUsd:null, conservativeUsd:null, usageUnknown:true, missingSourceCodes:['COST_SOURCE_MISSING'] },
+      stageStatus:{ relationships:true, targetEvidence:true, candidateFeatures:true, riskScores:true, finalized:true },
+      assembledAt:'2026-09-05T11:47:02+09:00',
+      retention:{ state:'retained', version:1, assembledAt:'2026-09-05T11:47:02+09:00', purgeFencedAt:null, reason:null } } }),
+
+  order(7, { slot:'secondary', spec:{ mutualTotal:305, mutualCollected:305, genderResolved:9999, riskScored:9999,
+      targetLikesDeclared:69, targetLikesCollected:69, targetCommentsDeclared:24, targetCommentsCollected:24,
+      candidateLikesDeclared:38, candidateLikesCollected:38 },
+    row:{ targetInstagramId:'dain.lee_', planId:'plus', completenessStatus:'complete', gapCodes:[],
+      cost:{ currency:'USD', status:'complete', knownUsd:0.3395, conservativeUsd:0.3560, usageUnknown:false, missingSourceCodes:[] },
+      stageStatus:{ relationships:true, targetEvidence:true, candidateFeatures:true, riskScores:true, finalized:true },
+      assembledAt:'2026-09-05T11:12:44+09:00',
+      retention:{ state:'retained', version:1, assembledAt:'2026-09-05T11:12:44+09:00', purgeFencedAt:null, reason:null } } }),
+
+  order(8, { slot:'tertiary', spec:{ mutualTotal:158, mutualCollected:158, genderResolved:9999, riskScored:9999,
+      targetLikesDeclared:33, targetLikesCollected:33, targetCommentsDeclared:11, targetCommentsCollected:11,
+      candidateLikesDeclared:20, candidateLikesCollected:20 },
+    row:{ targetInstagramId:'sol_._a', planId:'basic', completenessStatus:'complete', gapCodes:[],
+      cost:{ currency:'USD', status:'complete', knownUsd:0.1902, conservativeUsd:0.2044, usageUnknown:false, missingSourceCodes:[] },
+      stageStatus:{ relationships:true, targetEvidence:true, candidateFeatures:true, riskScores:true, finalized:true },
+      assembledAt:'2026-09-05T10:29:58+09:00',
+      retention:{ state:'retained', version:1, assembledAt:'2026-09-05T10:29:58+09:00', purgeFencedAt:null, reason:null } } }),
+
+  order(9, { slot:'secondary', spec:{ mutualTotal:377, mutualCollected:377, genderResolved:9999, riskScored:9999,
+      targetLikesDeclared:84, targetLikesCollected:84, targetCommentsDeclared:29, targetCommentsCollected:29,
+      candidateLikesDeclared:47, candidateLikesCollected:47 },
+    row:{ targetInstagramId:'nayeon_._', planId:'plus', completenessStatus:'complete', gapCodes:[],
+      cost:{ currency:'USD', status:'complete', knownUsd:0.4088, conservativeUsd:0.4301, usageUnknown:false, missingSourceCodes:[] },
+      stageStatus:{ relationships:true, targetEvidence:true, candidateFeatures:true, riskScores:true, finalized:true },
+      assembledAt:'2026-09-05T09:51:26+09:00',
+      retention:{ state:'pending', version:1, assembledAt:'2026-09-05T09:51:26+09:00', purgeFencedAt:null, reason:null } } }),
+
+  order(10, { slot:'secondary', spec:{ mutualTotal:221, mutualCollected:221, genderResolved:9999, riskScored:9999,
+      targetLikesDeclared:48, targetLikesCollected:48, targetCommentsDeclared:17, targetCommentsCollected:17,
+      candidateLikesDeclared:29, candidateLikesCollected:29 },
+    row:{ targetInstagramId:'boram.j', planId:'standard', completenessStatus:'complete', gapCodes:[],
+      cost:{ currency:'USD', status:'complete', knownUsd:0.2531, conservativeUsd:0.2688, usageUnknown:false, missingSourceCodes:[] },
+      stageStatus:{ relationships:true, targetEvidence:true, candidateFeatures:true, riskScores:true, finalized:true },
+      assembledAt:'2026-09-05T09:14:03+09:00',
+      retention:{ state:'retained', version:1, assembledAt:'2026-09-05T09:14:03+09:00', purgeFencedAt:null, reason:null } } }),
+
+  order(11, { slot:'secondary', spec:{ mutualTotal:293, mutualCollected:293, genderResolved:9999, riskScored:9999,
+      targetLikesDeclared:66, targetLikesCollected:66, targetCommentsDeclared:23, targetCommentsCollected:23,
+      candidateLikesDeclared:36, candidateLikesCollected:36 },
+    row:{ targetInstagramId:'yerin__k', planId:'standard', completenessStatus:'complete', gapCodes:[],
+      cost:{ currency:'USD', status:'complete', knownUsd:0.3247, conservativeUsd:0.3419, usageUnknown:false, missingSourceCodes:[] },
+      stageStatus:{ relationships:true, targetEvidence:true, candidateFeatures:true, riskScores:true, finalized:true },
+      assembledAt:'2026-09-05T08:37:41+09:00',
+      retention:{ state:'retained', version:1, assembledAt:'2026-09-05T08:37:41+09:00', purgeFencedAt:null, reason:null } } }),
+
+  order(12, { slot:'quinary', spec:{ mutualTotal:174, mutualCollected:174, genderResolved:9999, riskScored:9999,
+      targetLikesDeclared:36, targetLikesCollected:36, targetCommentsDeclared:13, targetCommentsCollected:13,
+      candidateLikesDeclared:22, candidateLikesCollected:22 },
+    row:{ targetInstagramId:'eunji_p', planId:'basic', completenessStatus:'complete', gapCodes:[],
+      cost:{ currency:'USD', status:'complete', knownUsd:0.2077, conservativeUsd:0.2219, usageUnknown:false, missingSourceCodes:[] },
+      stageStatus:{ relationships:true, targetEvidence:true, candidateFeatures:true, riskScores:true, finalized:true },
+      assembledAt:'2026-09-05T07:55:12+09:00',
+      retention:{ state:'retained', version:1, assembledAt:'2026-09-05T07:55:12+09:00', purgeFencedAt:null, reason:null } } }),
+];
+const ORDER_BY_ID = new Map(ORDERS.map(o => [o.requestId, o]));
+
+/* =======================================================================
+   Derived operating numbers
+   ======================================================================= */
+const COMPLETE_COSTS = ORDERS.filter(o => o.cost.status === 'complete').map(o => o.cost.knownUsd).sort((a,b) => a-b);
+const BASELINE = COMPLETE_COSTS[Math.floor(COMPLETE_COSTS.length / 2)];
+const capacity = () => {
+  const paidLeft = usable(PAID) ? PAID.effectiveRemainingUsd : 0;
+  const freeLeft = FREE.filter(usable).reduce((s, a) => s + a.effectiveRemainingUsd, 0);
+  return { paidLeft, freeLeft, usableCount: ACCOUNTS.filter(usable).length,
+           runwayOrders: Math.floor((paidLeft + freeLeft) / BASELINE) };
+};
+
+const defectOrders = ORDERS.filter(o => o.completenessStatus !== 'complete');
+const badAccounts = ACCOUNTS.filter(a => ['bad','warn'].includes(accountState(a).tone));
+
+/* =======================================================================
+   Overview
+   ======================================================================= */
+document.getElementById('stamp').textContent = timeLabel(NOW.toISOString());
+function renderCapacity(){
+  const c = capacity();
+  document.getElementById('runway-count').innerHTML = `약 ${c.runwayOrders}<small> 건</small>`;
+  document.getElementById('runway-basis').textContent =
+    `실측 주문 원가 중앙값 ${usd(BASELINE)} 기준. 잔액을 신뢰할 수 있는 계정만 더했습니다 (${c.usableCount}/10).`;
+  document.getElementById('paid-left').textContent = usdBal(c.paidLeft);
+  document.getElementById('free-left').textContent = usdBal(c.freeLeft);
+  document.getElementById('usable-count').textContent = `${c.usableCount} / 10`;
+}
+renderCapacity();
+
+/* ---- attention block: the only coloured region on the first screen ---- */
+(function renderAttention(){
+  const box = document.getElementById('attn');
+  const list = document.getElementById('attn-list');
+  const items = [];
+  badAccounts.forEach(a => {
+    const st = accountState(a);
+    items.push({ tone:st.tone, what:`${a.credentialSlot} 계정 · ${st.label}`, why:st.why, go:null });
+  });
+  defectOrders.forEach(o => {
+    items.push({ tone:o.completenessStatus === 'inconsistent' ? 'bad' : 'warn',
+      what:`주문 @${o.targetInstagramId} · ${o.gapCodes.length}개 결함`,
+      why:o.cost.status === 'not_available' ? '원가 원장이 없습니다.'
+        : o.cost.usageUnknown ? '사용량 미상이라 실비를 확정할 수 없습니다.'
+        : '수집 수가 선언 수와 다릅니다.',
+      go:o.requestId });
+  });
+  items.sort((a,b) => (a.tone === 'bad' ? 0 : 1) - (b.tone === 'bad' ? 0 : 1));
+  document.getElementById('attn-title').textContent = items.length ? `확인 필요 ${items.length}건` : '확인 필요 없음';
+  document.getElementById('attn-sub').textContent = items.length
+    ? '나머지 파이프라인은 정상입니다. 위에서부터 처리하세요.'
+    : '모든 계정과 주문이 정상입니다.';
+  if (!items.length) box.classList.add('is-clear');
+  items.forEach(it => {
+    const li = el(`<li>
+      <span class="chip ${it.tone}">${it.tone === 'bad' ? '차단' : '주의'}</span>
+      <span class="what">${esc(it.what)}</span>
+      <span class="why">${esc(it.why)}</span>
+    </li>`);
+    if (it.go){
+      const b = el(`<span class="go"><button class="lnk" type="button">주문 열기</button></span>`);
+      b.querySelector('button').addEventListener('click', () => openOrder(it.go));
+      li.appendChild(b);
+    }
+    list.appendChild(li);
+  });
+})();
+
+/* ---- paid account ---- */
+(function renderPaid(){
+  const st = accountState(PAID);
+  const pct = PAID.effectiveRemainingUsd === null ? 0
+    : Math.max(2, Math.round(PAID.effectiveRemainingUsd / PAID.monthlyLimitUsd * 100));
+  const tone = pct > 40 ? '' : pct > 15 ? 'warn' : 'bad';
+  const host = document.getElementById('paid-card');
+  host.appendChild(el(`<div>
+    <div class="id">
+      <h3>secondary</h3>
+      <span class="role">유료 · 배차 우선순위 1</span>
+      <span class="chip ${st.tone}">${esc(st.label)}</span>
+    </div>
+    <p class="amt">${usdBal(PAID.effectiveRemainingUsd)}<small>남음 / 한도 ${usdBal(PAID.monthlyLimitUsd)}</small></p>
+    <div class="meter ${tone}"><i style="width:${pct}%"></i></div>
+    <p class="paidfacts">
+      <span>이번 주기 사용 <b>${usdBal(PAID.monthlyUsageUsd)}</b></span>
+      <span>초기화 <b>${dayLabel(PAID.cycleResetAt)}</b></span>
+      <span>이 잔액으로 <b>약 ${Math.floor(PAID.effectiveRemainingUsd / BASELINE)}건</b></span>
+    </p>
+  </div>`));
+  const act = el(`<div class="act">
+    <button class="btn" type="button" id="refresh-paid">지금 잔액 새로고침</button>
+    <p class="stamp">마지막 관측 ${ago(PAID.observedAt)}</p>
+  </div>`);
+  act.querySelector('button').addEventListener('click', e => {
+    const b = e.currentTarget; b.disabled = true; b.textContent = '조회 중…';
+    setTimeout(() => { b.disabled = false; b.textContent = '지금 잔액 새로고침';
+      act.querySelector('.stamp').textContent = '마지막 관측 방금'; }, 900);
+  });
+  host.appendChild(act);
+})();
+
+/* ---- free accounts ---- */
+function renderFree(){
+  const flagged = FREE.filter(a => ['bad','warn'].includes(accountState(a).tone)).length;
+  document.getElementById('free-aside').textContent = flagged
+    ? `${flagged}개 확인 필요 · 무료 계정은 잔액이 소진되면 스스로 배차에서 빠집니다`
+    : '전부 정상';
+  const t = document.getElementById('free-grid');
+  t.innerHTML = `<thead><tr>
+    <th scope="col">계정</th><th scope="col" class="num">잔여</th><th scope="col">소진율</th>
+    <th scope="col" class="num">한도</th><th scope="col">초기화</th>
+    <th scope="col">마지막 관측</th><th scope="col">상태</th><th scope="col">비고</th>
+    <th scope="col"><span class="sr">배차 제어</span></th>
+  </tr></thead><tbody></tbody>`;
+  const body = t.querySelector('tbody');
+  FREE.slice().sort((a,b) => {
+    const rank = x => ({bad:0, warn:1, mute:2, ok:3})[accountState(x).tone];
+    return rank(a) - rank(b) || (b.effectiveRemainingUsd ?? -1) - (a.effectiveRemainingUsd ?? -1);
+  }).forEach(a => {
+    const st = accountState(a);
+    const known = a.effectiveRemainingUsd !== null && a.monthlyLimitUsd;
+    const pct = known ? Math.max(2, Math.round(a.effectiveRemainingUsd / a.monthlyLimitUsd * 100)) : 0;
+    const tone = !known ? '' : pct > 40 ? '' : pct > 15 ? 'warn' : 'bad';
+    const tr = el(`<tr class="${st.tone === 'bad' || st.tone === 'warn' ? 'flagged' : a.manuallyExcluded ? 'excluded' : ''}">
+      <td class="slot">${a.credentialSlot}</td>
+      <td class="num">${known ? usdBal(a.effectiveRemainingUsd) : '<span class="dim">미상</span>'}</td>
+      <td>${known
+        ? `<div class="meter ${tone}"><i style="width:${pct}%"></i></div>`
+        : '<div class="meter empty" title="잔액을 신뢰할 수 없음"></div>'}</td>
+      <td class="num dim">${a.monthlyLimitUsd === null ? '—' : usdBal(a.monthlyLimitUsd)}</td>
+      <td class="dim">${a.cycleResetAt ? dayLabel(a.cycleResetAt) : '—'}</td>
+      <td class="dim">${ago(a.observedAt)}</td>
+      <td><span class="chip ${st.tone}">${esc(st.label)}</span></td>
+      <td class="dim">${esc(st.why || '—')}</td>
+      <td class="actcell"></td>
+    </tr>`);
+    /* PATCH /api/admin/apify-accounts accepts the nine free slots only. */
+    const toggle = el(`<button class="btn sm" type="button">${a.manuallyExcluded ? '배차 복귀' : '배차 제외'}</button>`);
+    toggle.addEventListener('click', () => {
+      a.manuallyExcluded = !a.manuallyExcluded;
+      document.getElementById('free-grid').innerHTML = '';
+      renderFree();
+      renderCapacity();
+    });
+    tr.querySelector('.actcell').appendChild(toggle);
+    body.appendChild(tr);
+  });
+}
+renderFree();
+
+/* ---- order ledger ---- */
+let orderFilter = 'defect', orderCursor = 0;
+const ORDER_PAGE = 8;
+
+function costCell(c){
+  if (c.status === 'not_available') return `<span class="dim">원장 없음</span>`;
+  if (c.knownUsd === null) return `<span class="dim">미확정</span>`;
+  return usd(c.knownUsd);
+}
+function attributionChip(o){
+  const map = { complete:['ok','완전'], partial:['warn','부분'], unknown:['bad','미상'], not_available:['bad','원장 없음'] };
+  const [tone, label] = map[o.cost.status];
+  return `<span class="chip ${tone}">${label}</span>`;
+}
+function renderOrders(){
+  const rows = (orderFilter === 'defect' ? defectOrders : ORDERS);
+  const page = rows.slice(orderCursor, orderCursor + ORDER_PAGE);
+  const t = document.getElementById('order-grid');
+  t.innerHTML = `<thead><tr>
+    <th scope="col">주문</th><th scope="col">대상</th><th scope="col">요금제</th>
+    <th scope="col" class="num">실비</th><th scope="col" class="num">보수 추정</th>
+    <th scope="col">원가 귀속</th><th scope="col">결함</th><th scope="col">조립 시각</th>
+  </tr></thead><tbody></tbody>`;
+  const body = t.querySelector('tbody');
+  if (!page.length){
+    body.appendChild(el(`<tr><td colspan="8" class="empty">해당하는 주문이 없습니다.</td></tr>`));
+  }
+  page.forEach(o => {
+    const tr = el(`<tr class="clickable ${o.completenessStatus !== 'complete' ? 'flagged' : ''}">
+      <td><button type="button" class="rowbtn">${o.requestId.slice(0, 8)}</button></td>
+      <td>@${esc(o.targetInstagramId)}</td>
+      <td class="dim">${o.planId}</td>
+      <td class="num">${costCell(o.cost)}</td>
+      <td class="num dim">${usd(o.cost.conservativeUsd)}</td>
+      <td>${attributionChip(o)}</td>
+      <td><span class="gaps">${o.gapCodes.length
+        ? o.gapCodes.map(g => `<span class="gap ${g.endsWith('_GAP') ? 'soft' : ''}">${g}</span>`).join('')
+        : '<span class="dim">없음</span>'}</span></td>
+      <td class="dim">${timeLabel(o.assembledAt)}</td>
+    </tr>`);
+    tr.addEventListener('click', () => openOrder(o.requestId));
+    body.appendChild(tr);
+  });
+  const pager = document.getElementById('order-pager');
+  pager.innerHTML = '';
+  pager.append(`${rows.length}건 중 ${Math.min(orderCursor + ORDER_PAGE, rows.length)}건 표시 `);
+  if (orderCursor + ORDER_PAGE < rows.length){
+    const b = el(`<button class="btn" type="button">다음 ${ORDER_PAGE}건</button>`);
+    b.addEventListener('click', () => { orderCursor += ORDER_PAGE; renderOrders(); });
+    pager.appendChild(b);
+  }
+}
+document.querySelectorAll('[data-filter]').forEach(b => b.addEventListener('click', () => {
+  orderFilter = b.dataset.filter; orderCursor = 0;
+  document.querySelectorAll('[data-filter]').forEach(x => x.setAttribute('aria-pressed', String(x === b)));
+  renderOrders();
+}));
+renderOrders();
+
+/* =======================================================================
+   Order drill-down
+   ======================================================================= */
+const PAGE = 25;
+const GENDER_KO = { female:'여성', male:'남성', unknown:'불명', unavailable:'조회 불가' };
+const BAND_KO = { high_risk:['bad','고위험'], caution:['warn','주의'], normal:['ok','정상'] };
+const COMP_KO = {
+  candidateToTargetLikes:'상대 → 대상 좋아요', candidateToTargetComments:'상대 → 대상 댓글',
+  candidateToTargetTagOrCaptionMention:'상대 → 대상 태그·멘션',
+  targetToCandidateTagOrCaptionMention:'대상 → 상대 태그·멘션',
+  targetToCandidateLike:'대상 → 상대 좋아요', recentMutual:'최근 맞팔 가산',
+  appearanceExposure:'공개 프로필 특성', weakPartnerAdjustment:'관계 안전 조정',
+};
+
+function stagesFor(o){
+  const judgeable = o.candidates.filter(c => c.profileAvailable).length;
+  const pass1 = o.candidates.filter(c => c.initial.output !== null).length;
+  const pass2 = o.candidates.filter(c => c.final.output !== null).length;
+  const publicFemales = o.candidates.filter(c => !c.isPrivate && c.final.output === 'female').length;
+  return [
+    { n:1, key:'mutuals', name:'맞팔 계정', hint:'팔로워 ∩ 팔로잉', section:'mutuals',
+      declared:o.mutuals.declared, collected:o.mutuals.collected,
+      filters:[['all','전체'],['public','공개'],['private','비공개']] },
+    { n:2, key:'gender1', name:'1차 성별 판정', hint:'저비용 트리아지', section:'gender',
+      declared:judgeable, collected:pass1, filters:[['all','전체'],['public','공개'],['private','비공개']] },
+    { n:3, key:'gender2', name:'최종 성별 판정', hint:'모호 건 재판정', section:'gender',
+      declared:pass1, collected:pass2, filters:[['all','전체'],['public','공개'],['private','비공개']] },
+    { n:4, key:'likes', name:'대상 게시물 좋아요', hint:'맞팔이 대상 글에 누른 좋아요', section:'interactions',
+      declared:o.interactions.targetLikes.declared, collected:o.interactions.targetLikes.collected,
+      filters:[['likes','좋아요만']] },
+    { n:5, key:'comments', name:'대상 게시물 댓글', hint:'맞팔이 대상 글에 단 댓글', section:'interactions',
+      declared:o.interactions.targetComments.declared, collected:o.interactions.targetComments.collected,
+      filters:[['comments','댓글만']] },
+    { n:6, key:'risk', name:'공개 여성 위험 산출', hint:'점수가 매겨진 공개 여성', section:'risk',
+      declared:publicFemales, collected:o.scoredCount, filters:[['public','공개만'],['all','전체']] },
+  ];
+}
+const stageTone = s => s.declared === 0 && s.collected === 0 ? 'mute'
+  : s.collected < s.declared ? (s.collected === 0 ? 'bad' : 'warn') : 'ok';
+const stageLabel = s => ({ ok:'완전', warn:'불완전', bad:'미수집', mute:'해당 없음' })[stageTone(s)];
+
+function rowsFor(o, stage, filter){
+  if (stage.section === 'mutuals' || stage.section === 'gender'){
+    return o.candidates.filter(c => filter === 'all' ? true : filter === 'public' ? !c.isPrivate : c.isPrivate);
+  }
+  if (stage.section === 'risk'){
+    return o.candidates
+      .filter(c => c.riskComponents && (filter === 'public' ? !c.isPrivate : true))
+      .sort((a,b) => (a.finalRank ?? 9e9) - (b.finalRank ?? 9e9));
+  }
+  const sig = { likes:'target_post_like', comments:'target_post_comment', candidate_likes:'candidate_post_like' }[filter];
+  return o.inter.filter(x => !sig || x.signal === sig);
+}
+
+function tableFor(o, stage, rows){
+  if (!rows.length) return el(`<p class="empty">이 구간에 저장된 행이 없습니다.</p>`);
+  const t = el('<table class="grid"></table>');
+  const head = (cols) => `<thead><tr>${cols.map(c =>
+    `<th scope="col"${c[1] ? ' class="' + c[1] + '"' : ''}>${c[0]}</th>`).join('')}</tr></thead><tbody></tbody>`;
+
+  if (stage.key === 'mutuals'){
+    t.innerHTML = head([['#','num'],['계정'],['공개 여부'],['프로필 수집'],['프로필 이미지'],['최종 포함'],['상태']]);
+    rows.forEach(c => t.querySelector('tbody').appendChild(el(`<tr class="${c.completeness === 'partial' ? 'flagged' : ''}">
+      <td class="num dim">${c.mutualOrdinal}</td>
+      <td>@${esc(c.username)}${c.isVerified ? ' <span class="dim">인증</span>' : ''}</td>
+      <td class="dim">${c.isPrivate ? '비공개' : '공개'}</td>
+      <td>${c.profileAvailable ? '수집됨' : `<span class="gap">${c.profileFailureCode}</span>`}</td>
+      <td class="dim">${c.profileImageAvailable ? '있음' : '없음'}</td>
+      <td class="dim">${({included:'포함', excluded:'제외', private:'비공개', unknown:'불명', unavailable:'조회 불가'})[c.finalInclusionState]}</td>
+      <td><span class="chip ${c.completeness === 'complete' ? 'ok' : 'warn'}">${c.completeness === 'complete' ? '완전' : '부분'}</span></td>
+    </tr>`)));
+  } else if (stage.key === 'gender1' || stage.key === 'gender2'){
+    const p = stage.key === 'gender1' ? 'initial' : 'final';
+    t.innerHTML = head([['#','num'],['계정'],['판정'],['확신도'],['모델'],['근거'],['결과 해시']]);
+    rows.forEach(c => {
+      const g = c[p];
+      t.querySelector('tbody').appendChild(el(`<tr class="${g.output === null ? 'flagged' : ''}">
+        <td class="num dim">${c.mutualOrdinal}</td>
+        <td>@${esc(c.username)}</td>
+        <td>${g.output === null
+          ? '<span class="chip bad">판정 없음</span>'
+          : `<span class="chip ${g.output === 'female' ? 'ok' : 'mute'}">${GENDER_KO[g.output]}</span>`}</td>
+        <td class="dim">${g.confidence ?? '—'}</td>
+        <td class="mono dim">${g.model ?? '—'}</td>
+        <td class="dim">${esc(g.reason ?? (c.profileAvailable ? '재판정 미실행' : '프로필 미수집'))}</td>
+        <td class="mono dim">${g.resultHash ? g.resultHash.slice(0, 12) : '—'}</td>
+      </tr>`));
+    });
+  } else if (stage.key === 'risk'){
+    t.innerHTML = head([['순위','num'],['계정'],['최종 점수','num'],['등급'],['원점수','num'],['공개 점수','num'],['최근 맞팔','num'],['보관'],['산식','']]);
+    rows.forEach(c => {
+      const band = c.riskBand ? BAND_KO[c.riskBand] : ['bad','미산출'];
+      const tr = el(`<tr class="${c.riskCompleteness === 'partial' ? 'flagged' : ''}">
+        <td class="num dim">${c.finalRank ?? '—'}</td>
+        <td>@${esc(c.username)}</td>
+        <td class="num"><b>${c.finalScore === null ? '—' : c.finalScore.toFixed(1)}</b></td>
+        <td class="bandcell"><span class="chip ${band[0]}">${band[1]}</span></td>
+        <td class="num dim">${c.rawScore}</td>
+        <td class="num dim">${c.publicScore === null ? '—' : c.publicScore.toFixed(2)}</td>
+        <td class="num dim">${c.recentMutualRank ?? '—'}</td>
+        <td class="dim">${o.retention.state === 'retained' ? '영구' : o.retention.state === 'fenced' ? '차단' : '대기'}</td>
+        <td><button class="lnk" type="button">산식 보기</button></td>
+      </tr>`);
+      const detail = el(`<tr hidden><td colspan="9" style="background:#F4F7FA">
+        <div style="display:grid;grid-template-columns:minmax(240px,1fr) minmax(240px,1fr);gap:22px">
+          <div>
+            <p style="font-weight:600;margin-bottom:6px">기여도 원장 · ${esc(c.riskFormulaVersion)}</p>
+            <dl class="ledger">${c.riskComponents.map(x =>
+              `<dt>${COMP_KO[x.key]}</dt><dd>${x.contributionUnits > 0 ? '+' : ''}${x.contributionUnits}</dd>`).join('')}
+              <dt style="border-top:1px solid var(--line);padding-top:4px;margin-top:4px">합계 (원점수)</dt>
+              <dd style="border-top:1px solid var(--line);padding-top:4px;margin-top:4px">${c.rawScore}</dd>
+            </dl>
+          </div>
+          <div>
+            <p style="font-weight:600;margin-bottom:6px">점수 전이 · 영구 보관</p>
+            <dl class="ledger">
+              <dt>사전 점수 (preScore)</dt><dd>${c.preScore}</dd>
+              <dt>원점수 (rawScore)</dt><dd>${c.rawScore}</dd>
+              <dt>공개 점수 (publicScore)</dt><dd>${c.publicScore === null ? '미산출' : c.publicScore}</dd>
+              <dt>최종 점수 (finalScore)</dt><dd>${c.finalScore === null ? '미산출' : c.finalScore}</dd>
+              <dt>노출 순위 (featuredRank)</dt><dd>${c.featuredRank ?? '비노출'}</dd>
+              <dt>관계 안전 판정 해시</dt><dd class="mono">${c.partnerSafety.resultHash.slice(0, 12)}</dd>
+              <dt>번들 보관 상태</dt><dd>${o.retention.state === 'retained' ? `영구 보관 v${o.retention.version}` : o.retention.state === 'fenced' ? '보관 차단' : '보관 대기'}</dd>
+            </dl>
+            <p style="font-size:12.5px;color:var(--ink-3);margin-top:8px">
+              보관 상태는 주문 단위 값을 상속합니다. 현재 계약에는 후보별 보관 필드가 없습니다.
+            </p>
+          </div>
+        </div>
+      </td></tr>`);
+      tr.querySelector('button').addEventListener('click', e => {
+        e.stopPropagation();
+        detail.hidden = !detail.hidden;
+        e.currentTarget.textContent = detail.hidden ? '산식 보기' : '산식 닫기';
+      });
+      t.querySelector('tbody').append(tr, detail);
+    });
+  } else {
+    const isComment = stage.key === 'comments';
+    t.innerHTML = head([['#','num'],['계정'],[isComment ? '댓글' : '게시물'],['발생 시각'],['증거 ID'],['상태']]);
+    rows.forEach(x => t.querySelector('tbody').appendChild(el(`<tr class="${x.completeness !== 'complete' ? 'flagged' : ''}">
+      <td class="num dim">${x.ordinal}</td>
+      <td>@${esc(x.username)}</td>
+      <td class="${isComment ? 'comment' : 'mono dim'}">${isComment ? esc(x.commentText) : esc(x.sourcePostId)}</td>
+      <td class="dim">${timeLabel(x.occurredAt)}</td>
+      <td class="mono dim">${esc(x.evidenceId)}</td>
+      <td>${x.gapCodes.length
+        ? `<span class="gap soft">${x.gapCodes[0]}</span>`
+        : '<span class="chip ok">완전</span>'}</td>
+    </tr>`)));
+  }
+  return t;
+}
+
+const RETENTION = {
+  retained:{ tone:'ok', label:'영구 보관됨', note:'실행 테이블이 정리돼도 이 증거는 남습니다.' },
+  pending: { tone:'warn', label:'보관 대기', note:'조립 큐에 있습니다. 아직 영구 사본이 확정되지 않았습니다.' },
+  fenced:  { tone:'bad', label:'보관 차단', note:'퍼지 펜스가 걸려 이 버전은 영구 사본으로 승격되지 않습니다.' },
+};
+
+function renderDetail(o){
+  const stages = stagesFor(o);
+  const firstBad = stages.find(s => stageTone(s) === 'warn' || stageTone(s) === 'bad');
+
+  document.getElementById('crumb-id').textContent = `${o.requestId}  ·  v${o.version}`;
+
+  const dh = document.getElementById('d-head');
+  dh.innerHTML = '';
+  dh.appendChild(el(`<div>
+    <h2>@${esc(o.targetInstagramId)}</h2>
+    <p class="sub"><span class="mono">${o.requestId.slice(0, 18)}…</span> · ${o.planId} · 조립 ${timeLabel(o.assembledAt)}</p>
+  </div>`));
+  const statusMap = { complete:['ok','완전'], partial:['warn','부분'], inconsistent:['bad','불일치'], failed:['bad','실패'] };
+  const sm = statusMap[o.completenessStatus];
+  dh.appendChild(el(`<div class="right">
+    <span class="chip ${sm[0]}">${sm[1]}</span>
+    <p class="sub" style="margin-top:8px">번들 해시 <span class="mono">${o.bundleHash.slice(0, 16)}…</span></p>
+  </div>`));
+
+  const known = o.cost.knownUsd;
+  const facts = document.getElementById('d-facts');
+  facts.innerHTML = '';
+  facts.appendChild(el(`<div class="fact${known === null ? ' alert' : ''}">
+    <p class="k">실측 원가</p>
+    <p class="v">${known === null ? '미확정' : usd(known)}</p>
+    <p class="n">${known === null
+      ? (o.cost.status === 'not_available' ? '원가 원장 행이 없습니다.' : '사용량 미상이라 확정할 수 없습니다.')
+      : '공급자 실행과 AI 시도에서 직접 귀속된 금액입니다.'}</p>
+  </div>`));
+  facts.appendChild(el(`<div class="fact">
+    <p class="k">보수 추정 상한</p>
+    <p class="v">${usd(o.cost.conservativeUsd)}</p>
+    <p class="n">${o.cost.conservativeUsd === null ? '추정 근거가 없습니다.' : '실비를 확정할 수 없을 때 이 값을 상한으로 씁니다.'}</p>
+  </div>`));
+  facts.appendChild(el(`<div class="fact">
+    <p class="k">원가 귀속</p>
+    <p class="v sm">${({complete:'완전', partial:'부분', unknown:'미상', not_available:'원장 없음'})[o.cost.status]}</p>
+    <p class="n">${o.cost.missingSourceCodes.length ? o.cost.missingSourceCodes.join(', ') : '누락된 원가 소스가 없습니다.'}</p>
+  </div>`));
+  facts.appendChild(el(`<div class="fact">
+    <p class="k">과금 계정</p>
+    <p class="v sm">${o.providerRuns.filter(r => r.credentialSlot).map(r => r.credentialSlot)[0] ?? '없음'}</p>
+    <p class="n">${o.providerRuns.map(r => `${r.stage}: ${r.logicalProvider}${r.credentialSlot ? ' / ' + r.credentialSlot : ''}`).join(' · ')}</p>
+  </div>`));
+
+  const ret = RETENTION[o.retention.state];
+  const rbox = document.getElementById('d-retention');
+  rbox.innerHTML = '';
+  rbox.appendChild(el(`<span class="chip ${ret.tone}">${ret.label}</span>`));
+  rbox.appendChild(el(`<span>${ret.note}</span>`));
+  rbox.appendChild(el(`<span class="mono" style="margin-left:auto">source_set ${o.sourceSetHash.slice(0, 16)}…${
+    o.retention.purgeFencedAt ? ` · 펜스 ${timeLabel(o.retention.purgeFencedAt)} · ${o.retention.reason}` : ''}</span>`));
+
+  /* ---- evidence rail ---- */
+  const rail = document.getElementById('rail');
+  rail.innerHTML = '';
+  stages.forEach(s => {
+    const tone = stageTone(s), missing = s.declared - s.collected;
+    const wrap = el(`<div class="stage ${tone === 'bad' || tone === 'warn' ? 'bad' : ''}"></div>`);
+    if (firstBad && s.key === firstBad.key){
+      wrap.appendChild(el(`<div class="firstdiv">
+        <span class="tag">최초 이탈</span>
+        <span>여기서 처음으로 수집 수가 선언 수와 어긋납니다. <b>앞 단계는 모두 완전하므로 원인은 이 단계입니다.</b></span>
+      </div>`));
+    }
+    const hd = el(`<button class="stage-hd" type="button" aria-expanded="false">
+      <span class="ord">${s.n}</span>
+      <span class="nm">${s.name}<span>${s.hint}</span></span>
+      <span class="cnt">${s.collected.toLocaleString()}<small> / ${s.declared.toLocaleString()}</small></span>
+      <span class="delta">${missing > 0 ? `${missing}건 누락` : ''}</span>
+      <span class="st"><span class="chip ${tone}">${stageLabel(s)}</span></span>
+      <span class="open">목록</span>
+    </button>`);
+    const panel = el(`<div class="panel" hidden></div>`);
+    let filter = s.filters[0][0], cursor = 0;
+
+    function draw(){
+      panel.innerHTML = '';
+      const tools = el(`<div class="panel-tools"><span class="lbl">필터</span></div>`);
+      s.filters.forEach(([v, label]) => {
+        const b = el(`<button class="btn" type="button" aria-pressed="${v === filter}">${label}</button>`);
+        b.addEventListener('click', () => { filter = v; cursor = 0; draw(); });
+        tools.appendChild(b);
+      });
+      tools.appendChild(el(`<span class="lbl" style="margin-left:auto">section=${s.section} · filter=${filter} · pageSize=${PAGE}</span>`));
+      panel.appendChild(tools);
+
+      const all = rowsFor(o, s, filter);
+      const holder = el('<div class="scroller"></div>');
+      holder.appendChild(tableFor(o, s, all.slice(cursor, cursor + PAGE)));
+      panel.appendChild(holder);
+
+      const pg = el(`<p class="pager"></p>`);
+      pg.append(`전체 ${all.length.toLocaleString()}건 중 ${Math.min(cursor + PAGE, all.length).toLocaleString()}건 표시`);
+      if (cursor + PAGE < all.length){
+        const b = el(`<button class="btn" type="button">다음 ${PAGE}건</button>`);
+        b.addEventListener('click', () => { cursor += PAGE; draw(); });
+        pg.appendChild(b);
+      }
+      if (cursor > 0){
+        const b = el(`<button class="btn" type="button">처음으로</button>`);
+        b.addEventListener('click', () => { cursor = 0; draw(); });
+        pg.appendChild(b);
+      }
+      panel.appendChild(pg);
+    }
+    hd.addEventListener('click', () => {
+      const open = panel.hidden;
+      panel.hidden = !open;
+      hd.setAttribute('aria-expanded', String(open));
+      wrap.classList.toggle('is-open', open);
+      if (open && !panel.childElementCount) draw();
+    });
+    wrap.append(hd, panel);
+    rail.appendChild(wrap);
+  });
+}
+
+function openOrder(requestId){
+  renderDetail(ORDER_BY_ID.get(requestId));
+  document.getElementById('view-overview').hidden = true;
+  document.getElementById('view-detail').hidden = false;
+  window.scrollTo(0, 0);
+  document.getElementById('back').focus();
+}
+document.getElementById('back').addEventListener('click', () => {
+  document.getElementById('view-detail').hidden = true;
+  document.getElementById('view-overview').hidden = false;
+  window.scrollTo(0, 0);
+});
+</script>
+</body>
+</html>

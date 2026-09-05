@@ -1,4 +1,9 @@
 import { z } from 'zod';
+import {
+    genderCountsSchema,
+    retentionSchema,
+    riskCountsSchema,
+} from './order-audit-bundle';
 
 const uuidSchema = z.string().uuid();
 const cursorAssembledAtSchema = z.string().datetime({ offset: true }).max(64);
@@ -49,6 +54,9 @@ export const orderAuditListRowSchema = z.object({
     completenessStatus: z.enum(['complete', 'partial', 'inconsistent', 'failed']),
     gapCodes: z.array(gapCodeSchema).max(32),
     cost: costSchema,
+    gender: genderCountsSchema,
+    risk: riskCountsSchema,
+    retention: retentionSchema,
     stageStatus: stageStatusSchema,
     assembledAt: cursorAssembledAtSchema,
 }).strict();
