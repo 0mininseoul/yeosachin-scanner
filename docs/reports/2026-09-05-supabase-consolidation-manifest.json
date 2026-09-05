@@ -1,0 +1,558 @@
+{
+  "schemaVersion": "supabase-consolidation-manifest-v1",
+  "generatedFrom": {
+    "baseline": "origin/main",
+    "permanentBundleMigration": "supabase/migrations/20260904130000_add_permanent_order_audit_bundle.sql",
+    "parityMigration": "supabase/migrations/20260905110000_add_order_audit_consolidation_readiness.sql",
+    "sourceAudit": "docs/reports/2026-08-30-supabase-legacy-cleanup-audit.md"
+  },
+  "readOnly": true,
+  "destructiveOperations": "refused",
+  "currentResult": {
+    "status": "blocked",
+    "reason": "no genuine completed permanent audit bundles or parity evidence are available",
+    "completedBundleCount": 0,
+    "parityEvidenceCount": 0
+  },
+  "archiveParityPolicy": {
+    "requiresAtLeastOneGenuineCompletedBundle": true,
+    "requiresCompletedRecoveryRow": true,
+    "requiresEverySelectedRequestReady": true,
+    "requiresZeroBlockedOrMismatchedChecks": true,
+    "zeroSelectedRequests": "blocked",
+    "doesNotGrantContractionReadiness": true
+  },
+  "parityAttestation": {
+    "storage": "analysis_order_audit_assembly_queue.parity_attestation",
+    "capture": "after permanent bundle children exist on transition to completed and before source purge",
+    "fallback": "captured source sections are used only when live source rows are absent",
+    "lateCost": "carry forward non-cost source sections and refresh the latest bundle and cost section",
+    "maxJsonBytes": 65536,
+    "piiPolicy": "aggregate counts, completeness markers, and checksums only"
+  },
+  "retention": {
+    "policy": "permanent-audit-retention",
+    "persistentUserLinkedRecords": "retain",
+    "paymentEvidence": "retain",
+    "recoveryEvidence": "retain",
+    "paymentPendingMutation": "deny-without-independent-provider-evidence"
+  },
+  "contractionAllowlist": [],
+  "contractionDenylist": [
+    {
+      "object": "analysis_order_audit_bundles",
+      "reason": "permanent immutable audit parent"
+    },
+    {
+      "object": "analysis_order_audit_candidates",
+      "reason": "permanent candidate audit evidence"
+    },
+    {
+      "object": "analysis_order_audit_interactions",
+      "reason": "permanent interaction and comment audit evidence"
+    },
+    {
+      "object": "analysis_order_audit_assembly_queue",
+      "reason": "audit assembly recovery and purge fence"
+    },
+    {
+      "object": "earlybird_orders",
+      "reason": "commercial identity and payment lineage"
+    },
+    {
+      "object": "payments",
+      "reason": "unresolved server-owned payment boundary"
+    },
+    {
+      "object": "payment_orders",
+      "reason": "unresolved server-owned payment boundary"
+    },
+    {
+      "object": "pending_analysis",
+      "reason": "owner catalog and historical dependency evidence missing"
+    },
+    {
+      "object": "analysis_v2_cost_rollups",
+      "reason": "cost ledger source required for per-order parity"
+    },
+    {
+      "object": "analysis_v2_cost_rollup_snapshots",
+      "reason": "immutable cost history and late reconciliation"
+    },
+    {
+      "object": "analysis_v2_cost_attributions",
+      "reason": "cost attribution and provider reconciliation"
+    }
+  ],
+  "objects": [
+    {
+      "name": "analysis_operational_cost_summary",
+      "kind": "view",
+      "classification": "consolidate-after-compatibility-proof",
+      "codeReferences": [
+        "app/api/admin/analysis-observability/route.ts",
+        "lib/services/analysis/observability-route.test.ts"
+      ],
+      "dependencyReferences": {
+        "viewSources": ["analysis_v2_cost_rollups"],
+        "functions": ["load_analysis_v2_cost_rollup"],
+        "policies": ["owner-level pg_policy snapshot required"],
+        "triggers": [],
+        "foreignKeys": []
+      },
+      "requiredGates": [
+        "canonical replacement has equivalent columns and aggregate semantics",
+        "all historical readers resolve through the compatibility projection",
+        "owner catalog proves no remaining view/function/policy dependency",
+        "archive and restore drill passes"
+      ]
+    },
+    {
+      "name": "account_e2e_test_runners",
+      "kind": "table",
+      "classification": "archive-then-drop-after-separate-approval",
+      "codeReferences": ["scripts/", "supabase/migrations/"],
+      "dependencyReferences": {
+        "viewSources": [],
+        "functions": ["owner catalog routine dependency snapshot required"],
+        "policies": ["owner catalog policy and grant snapshot required"],
+        "triggers": ["owner catalog trigger snapshot required"],
+        "foreignKeys": ["owner catalog constraint snapshot required"]
+      },
+      "requiredGates": [
+        "exact owner-provided identity allowlist preflight",
+        "sanitized archive manifest",
+        "restore verification",
+        "Auth deletion proof where applicable",
+        "post-operation aggregate verification"
+      ]
+    },
+    {
+      "name": "demo_analysis_fixtures",
+      "kind": "table",
+      "classification": "archive-then-drop-after-separate-approval",
+      "codeReferences": ["lib/services/demo-analysis/", "scripts/"],
+      "dependencyReferences": {
+        "viewSources": [],
+        "functions": ["demo fixture RPCs"],
+        "policies": ["owner catalog policy and grant snapshot required"],
+        "triggers": ["owner catalog trigger snapshot required"],
+        "foreignKeys": ["owner catalog constraint snapshot required"]
+      },
+      "requiredGates": [
+        "exact fixture ownership preflight",
+        "archive and restore drill",
+        "post-operation route verification"
+      ]
+    },
+    {
+      "name": "demo_analysis_runs",
+      "kind": "table",
+      "classification": "archive-then-drop-after-separate-approval",
+      "codeReferences": ["lib/services/demo-analysis/", "scripts/"],
+      "dependencyReferences": {
+        "viewSources": ["demo_analysis_fixtures"],
+        "functions": ["demo fixture RPCs"],
+        "policies": ["owner catalog policy and grant snapshot required"],
+        "triggers": ["owner catalog trigger snapshot required"],
+        "foreignKeys": ["owner catalog constraint snapshot required"]
+      },
+      "requiredGates": [
+        "exact fixture ownership preflight",
+        "archive and restore drill",
+        "post-operation route verification"
+      ]
+    },
+    {
+      "name": "analysis_v2_relationship_sides",
+      "kind": "table",
+      "classification": "keep-until-parity-and-rollback-window",
+      "codeReferences": ["lib/services/analysis/v2-evidence-store.ts", "supabase/migrations/20260904130000_add_permanent_order_audit_bundle.sql"],
+      "dependencyReferences": {
+        "viewSources": [],
+        "functions": ["assemble_analysis_order_audit_bundle", "analysis_v2_relationship_freeze_hash"],
+        "policies": ["service-role-only RLS"],
+        "triggers": ["analysis V2 relationship lifecycle triggers"],
+        "foreignKeys": ["analysis_requests", "analysis_pipeline_jobs"]
+      },
+      "requiredGates": ["genuine completed bundle", "per-order relationship parity", "rollback evidence"]
+    },
+    {
+      "name": "analysis_v2_relationship_rows",
+      "kind": "table",
+      "classification": "keep-until-parity-and-rollback-window",
+      "codeReferences": ["lib/services/analysis/v2-evidence-store.ts", "supabase/migrations/20260904130000_add_permanent_order_audit_bundle.sql"],
+      "dependencyReferences": {
+        "viewSources": [],
+        "functions": ["assemble_analysis_order_audit_bundle"],
+        "policies": ["service-role-only RLS"],
+        "triggers": ["relationship row immutability and lifecycle triggers"],
+        "foreignKeys": ["analysis_v2_relationship_sides"]
+      },
+      "requiredGates": ["genuine completed bundle", "per-order relationship parity", "archive and restore drill"]
+    },
+    {
+      "name": "analysis_v2_relationship_manifests",
+      "kind": "table",
+      "classification": "keep-until-parity-and-rollback-window",
+      "codeReferences": ["lib/services/analysis/v2-evidence-store.ts", "supabase/migrations/20260904130000_add_permanent_order_audit_bundle.sql"],
+      "dependencyReferences": {
+        "viewSources": [],
+        "functions": ["analysis_order_audit_candidate_key_coverage", "assemble_analysis_order_audit_bundle"],
+        "policies": ["service-role-only RLS"],
+        "triggers": ["relationship manifest immutability and lifecycle triggers"],
+        "foreignKeys": ["analysis_pipeline_jobs"]
+      },
+      "requiredGates": ["genuine completed bundle", "per-order relationship parity", "owner catalog dependency proof"]
+    },
+    {
+      "name": "analysis_v2_mutual_rows",
+      "kind": "table",
+      "classification": "keep-until-parity-and-rollback-window",
+      "codeReferences": ["lib/services/analysis/v2-evidence-store.ts", "supabase/migrations/20260904130000_add_permanent_order_audit_bundle.sql"],
+      "dependencyReferences": {
+        "viewSources": [],
+        "functions": ["analysis_order_audit_candidate_key_coverage", "assemble_analysis_order_audit_bundle"],
+        "policies": ["service-role-only RLS"],
+        "triggers": ["mutual row immutability and lifecycle triggers"],
+        "foreignKeys": ["analysis_v2_relationship_manifests"]
+      },
+      "requiredGates": ["100% candidate key parity", "aggregate checksum match", "rollback evidence"]
+    },
+    {
+      "name": "analysis_v2_target_evidence_manifests",
+      "kind": "table",
+      "classification": "keep-until-parity-and-rollback-window",
+      "codeReferences": ["lib/services/analysis/v2-evidence-store.ts", "supabase/migrations/20260904130000_add_permanent_order_audit_bundle.sql"],
+      "dependencyReferences": {
+        "viewSources": [],
+        "functions": ["analysis_v2_target_evidence_result_hash", "assemble_analysis_order_audit_bundle"],
+        "policies": ["service-role-only RLS"],
+        "triggers": ["target evidence immutability and lifecycle triggers"],
+        "foreignKeys": ["analysis_pipeline_jobs"]
+      },
+      "requiredGates": ["100% target evidence parity", "aggregate checksum match", "cost ledger parity"]
+    },
+    {
+      "name": "analysis_target_interactors",
+      "kind": "table",
+      "classification": "keep-until-parity-and-rollback-window",
+      "codeReferences": ["lib/services/analysis/v2-evidence-store.ts", "supabase/migrations/20260904130000_add_permanent_order_audit_bundle.sql"],
+      "dependencyReferences": {
+        "viewSources": [],
+        "functions": ["assemble_analysis_order_audit_bundle"],
+        "policies": ["service-role-only RLS"],
+        "triggers": ["interaction immutability and lifecycle triggers"],
+        "foreignKeys": ["analysis_v2_target_evidence_manifests"]
+      },
+      "requiredGates": ["100% interaction parity", "mismatch paths empty", "archive and restore drill"]
+    },
+    {
+      "name": "analysis_v2_candidate_feature_rows",
+      "kind": "table",
+      "classification": "keep-until-parity-and-rollback-window",
+      "codeReferences": ["lib/services/analysis/v2-result-store.ts", "supabase/migrations/20260904130000_add_permanent_order_audit_bundle.sql"],
+      "dependencyReferences": {
+        "viewSources": [],
+        "functions": ["analysis_order_audit_candidate_key_coverage", "assemble_analysis_order_audit_bundle"],
+        "policies": ["service-role-only RLS"],
+        "triggers": ["candidate feature immutability and lifecycle triggers"],
+        "foreignKeys": ["analysis_v2_candidate_feature_manifests"]
+      },
+      "requiredGates": ["100% candidate key parity", "archive and restore drill", "rollback evidence"]
+    },
+    {
+      "name": "analysis_v2_private_name_rows",
+      "kind": "table",
+      "classification": "keep-until-parity-and-rollback-window",
+      "codeReferences": ["lib/services/analysis/v2-result-store.ts", "supabase/migrations/20260904130000_add_permanent_order_audit_bundle.sql"],
+      "dependencyReferences": {
+        "viewSources": [],
+        "functions": ["analysis_order_audit_candidate_key_coverage", "assemble_analysis_order_audit_bundle"],
+        "policies": ["service-role-only RLS"],
+        "triggers": ["private-name immutability and lifecycle triggers"],
+        "foreignKeys": ["analysis_v2_candidate_feature_manifests"]
+      },
+      "requiredGates": ["private candidate key parity", "archive and restore drill", "rollback evidence"]
+    },
+    {
+      "name": "analysis_v2_candidate_score_manifests",
+      "kind": "table",
+      "classification": "keep-until-parity-and-rollback-window",
+      "codeReferences": ["lib/services/analysis/v2-result-store.ts", "supabase/migrations/20260904130000_add_permanent_order_audit_bundle.sql"],
+      "dependencyReferences": {
+        "viewSources": [],
+        "functions": ["assemble_analysis_order_audit_bundle"],
+        "policies": ["service-role-only RLS"],
+        "triggers": ["score manifest immutability and lifecycle triggers"],
+        "foreignKeys": ["analysis_v2_candidate_score_rows"]
+      },
+      "requiredGates": ["100% risk score parity", "cost ledger parity", "rollback evidence"]
+    },
+    {
+      "name": "analysis_v2_candidate_score_rows",
+      "kind": "table",
+      "classification": "keep-until-parity-and-rollback-window",
+      "codeReferences": ["lib/services/analysis/v2-result-store.ts", "supabase/migrations/20260904130000_add_permanent_order_audit_bundle.sql"],
+      "dependencyReferences": {
+        "viewSources": [],
+        "functions": ["assemble_analysis_order_audit_bundle"],
+        "policies": ["service-role-only RLS"],
+        "triggers": ["score row immutability and lifecycle triggers"],
+        "foreignKeys": ["analysis_v2_candidate_feature_rows", "analysis_v2_candidate_score_manifests"]
+      },
+      "requiredGates": ["100% risk score parity", "aggregate checksum match", "observation window"]
+    },
+    {
+      "name": "analysis_v2_result_summaries",
+      "kind": "table",
+      "classification": "keep-until-compatibility-and-rollback-window",
+      "codeReferences": ["app/", "lib/services/analysis/v2-result-store.ts", "lib/services/analysis/order-audit-bundle.ts"],
+      "dependencyReferences": {
+        "viewSources": [],
+        "functions": ["assemble_analysis_order_audit_bundle", "historical owner-history readers"],
+        "policies": ["owner-scoped result read policies"],
+        "triggers": ["result publication and immutability triggers"],
+        "foreignKeys": ["analysis_requests"]
+      },
+      "requiredGates": ["all retained historical results resolve", "compatibility adapter", "rollback evidence"]
+    },
+    {
+      "name": "analysis_v2_cost_rollups",
+      "kind": "view",
+      "classification": "keep-until-cost-parity",
+      "codeReferences": ["lib/services/analysis/order-audit-bundle.ts", "lib/services/analysis/provider-cost-reconciliation.ts"],
+      "dependencyReferences": {
+        "viewSources": ["analysis_v2_cost_attributions", "analysis_v2_cost_rollup_snapshots", "analysis_provider_runs", "gemini_token_usage"],
+        "functions": ["analysis_order_audit_cost_source_hash", "load_analysis_v2_cost_rollup"],
+        "policies": ["service-role-only RLS"],
+        "triggers": ["cost snapshot and attribution reconciliation triggers"],
+        "foreignKeys": ["analysis_requests", "analysis_preflights", "earlybird_orders"]
+      },
+      "requiredGates": ["100% per-order cost ledger parity", "unknown usage count is zero", "late reconciliation observed"]
+    },
+    {
+      "name": "analysis_v2_cost_rollup_snapshots",
+      "kind": "table",
+      "classification": "keep-permanent-cost-history",
+      "codeReferences": ["lib/services/analysis/order-audit-bundle.ts", "lib/services/analysis/provider-cost-reconciliation.ts"],
+      "dependencyReferences": {
+        "viewSources": ["analysis_v2_cost_rollups"],
+        "functions": ["analysis_order_audit_cost_source_hash"],
+        "policies": ["service-role-only RLS"],
+        "triggers": ["cost rollup snapshot reconciliation triggers"],
+        "foreignKeys": ["analysis_requests", "analysis_preflights", "earlybird_orders"]
+      },
+      "requiredGates": ["permanent audit retention", "restore drill", "rollback evidence"]
+    },
+    {
+      "name": "analysis_v2_cost_attributions",
+      "kind": "table",
+      "classification": "keep-permanent-cost-history",
+      "codeReferences": ["lib/services/analysis/provider-cost-reconciliation.ts", "supabase/migrations/20260904110000_add_analysis_v2_cost_attribution.sql"],
+      "dependencyReferences": {
+        "viewSources": ["analysis_v2_cost_rollups"],
+        "functions": ["analysis_v2_cost_attribution_trigger"],
+        "policies": ["service-role-only RLS"],
+        "triggers": ["cost attribution reconciliation triggers"],
+        "foreignKeys": ["analysis_requests", "analysis_preflights", "earlybird_orders"]
+      },
+      "requiredGates": ["permanent audit retention", "provider reconciliation", "rollback evidence"]
+    },
+    {
+      "name": "analysis_order_audit_assembly_queue",
+      "kind": "table",
+      "classification": "keep-permanent-recovery-control",
+      "codeReferences": ["lib/services/analysis/order-audit-bundle.ts", "supabase/migrations/20260904130000_add_permanent_order_audit_bundle.sql"],
+      "dependencyReferences": {
+        "viewSources": [],
+        "functions": ["enqueue_analysis_order_audit_bundle", "claim_analysis_order_audit_bundle", "release_analysis_order_audit_bundle", "analysis_order_audit_purge_fence"],
+        "policies": ["forced service-role-only RLS"],
+        "triggers": ["audit enqueue trigger"],
+        "foreignKeys": ["analysis_requests"]
+      },
+      "requiredGates": ["recovery rows exist", "rollback drill", "observation window"]
+    },
+    {
+      "name": "analysis_order_audit_bundles",
+      "kind": "table",
+      "classification": "keep-permanent-audit",
+      "codeReferences": ["app/api/admin/order-audit/", "lib/services/analysis/order-audit-bundle.ts"],
+      "dependencyReferences": {
+        "viewSources": [],
+        "functions": ["assemble_analysis_order_audit_bundle", "load_analysis_order_audit_bundle", "read_analysis_order_audit_parity_snapshot"],
+        "policies": ["forced service-role-only RLS"],
+        "triggers": ["prevent_analysis_order_audit_bundle_mutation"],
+        "foreignKeys": []
+      },
+      "requiredGates": ["permanent retention", "archive and restore drill", "rollback evidence"]
+    },
+    {
+      "name": "analysis_order_audit_candidates",
+      "kind": "table",
+      "classification": "keep-permanent-audit",
+      "codeReferences": ["app/api/admin/order-audit/", "lib/services/analysis/order-audit-bundle.ts"],
+      "dependencyReferences": {
+        "viewSources": [],
+        "functions": ["load_analysis_order_audit_bundle", "read_analysis_order_audit_parity_snapshot"],
+        "policies": ["forced service-role-only RLS"],
+        "triggers": ["prevent_analysis_order_audit_candidate_mutation"],
+        "foreignKeys": ["analysis_order_audit_bundles"]
+      },
+      "requiredGates": ["permanent retention", "candidate parity", "restore verification"]
+    },
+    {
+      "name": "analysis_order_audit_interactions",
+      "kind": "table",
+      "classification": "keep-permanent-audit",
+      "codeReferences": ["app/api/admin/order-audit/", "lib/services/analysis/order-audit-bundle.ts"],
+      "dependencyReferences": {
+        "viewSources": [],
+        "functions": ["load_analysis_order_audit_bundle", "read_analysis_order_audit_parity_snapshot"],
+        "policies": ["forced service-role-only RLS"],
+        "triggers": ["prevent_analysis_order_audit_interaction_mutation"],
+        "foreignKeys": ["analysis_order_audit_bundles"]
+      },
+      "requiredGates": ["permanent interaction retention", "interaction parity", "restore verification"]
+    },
+    {
+      "name": "payments",
+      "kind": "unknown-relation",
+      "classification": "unknown-no-action",
+      "codeReferences": ["lib/services/earlybird/", "supabase/migrations/"],
+      "dependencyReferences": {
+        "viewSources": [],
+        "functions": ["owner catalog routine dependency snapshot required"],
+        "policies": ["owner catalog policy and grant snapshot required"],
+        "triggers": ["owner catalog trigger snapshot required"],
+        "foreignKeys": ["owner catalog constraint snapshot required"]
+      },
+      "requiredGates": ["management-plane identity proof", "owner catalog snapshot", "payment provider reconciliation"]
+    },
+    {
+      "name": "payment_orders",
+      "kind": "unknown-relation",
+      "classification": "unknown-no-action",
+      "codeReferences": ["lib/services/earlybird/", "supabase/migrations/"],
+      "dependencyReferences": {
+        "viewSources": [],
+        "functions": ["owner catalog routine dependency snapshot required"],
+        "policies": ["owner catalog policy and grant snapshot required"],
+        "triggers": ["owner catalog trigger snapshot required"],
+        "foreignKeys": ["owner catalog constraint snapshot required"]
+      },
+      "requiredGates": ["management-plane identity proof", "owner catalog snapshot", "payment provider reconciliation"]
+    },
+    {
+      "name": "pending_analysis",
+      "kind": "unknown-relation",
+      "classification": "unknown-no-action",
+      "codeReferences": ["supabase/migrations/"],
+      "dependencyReferences": {
+        "viewSources": [],
+        "functions": ["owner catalog routine dependency snapshot required"],
+        "policies": ["owner catalog policy and grant snapshot required"],
+        "triggers": ["owner catalog trigger snapshot required"],
+        "foreignKeys": ["owner catalog constraint snapshot required"]
+      },
+      "requiredGates": ["owner catalog snapshot", "historical provenance", "compatibility proof"]
+    }
+  ],
+  "dependencyEdges": [
+    {
+      "from": "analysis_order_audit_candidates",
+      "to": "analysis_order_audit_bundles",
+      "type": "foreign_key",
+      "evidence": "supabase/migrations/20260904130000_add_permanent_order_audit_bundle.sql"
+    },
+    {
+      "from": "analysis_order_audit_interactions",
+      "to": "analysis_order_audit_bundles",
+      "type": "foreign_key",
+      "evidence": "supabase/migrations/20260904130000_add_permanent_order_audit_bundle.sql"
+    },
+    {
+      "from": "analysis_order_audit_assembly_queue",
+      "to": "analysis_requests",
+      "type": "foreign_key",
+      "evidence": "supabase/migrations/20260904130000_add_permanent_order_audit_bundle.sql"
+    },
+    {
+      "from": "analysis_order_audit_bundles",
+      "to": "analysis_v2_relationship_manifests",
+      "type": "function_read",
+      "evidence": "assemble_analysis_order_audit_bundle"
+    },
+    {
+      "from": "analysis_order_audit_bundles",
+      "to": "analysis_v2_target_evidence_manifests",
+      "type": "function_read",
+      "evidence": "assemble_analysis_order_audit_bundle"
+    },
+    {
+      "from": "analysis_order_audit_bundles",
+      "to": "analysis_v2_cost_rollups",
+      "type": "function_read",
+      "evidence": "analysis_order_audit_cost_source_hash"
+    },
+    {
+      "from": "analysis_operational_cost_summary",
+      "to": "analysis_v2_cost_rollups",
+      "type": "view",
+      "evidence": "supabase/migrations/20260904110000_add_analysis_v2_cost_attribution.sql"
+    },
+    {
+      "from": "analysis_v2_cost_rollups",
+      "to": "analysis_v2_cost_attributions",
+      "type": "view",
+      "evidence": "supabase/migrations/20260904110000_add_analysis_v2_cost_attribution.sql"
+    },
+    {
+      "from": "analysis_v2_cost_rollups",
+      "to": "analysis_v2_cost_rollup_snapshots",
+      "type": "view",
+      "evidence": "supabase/migrations/20260904110000_add_analysis_v2_cost_attribution.sql"
+    },
+    {
+      "from": "analysis_v2_relationship_manifests",
+      "to": "analysis_pipeline_jobs",
+      "type": "foreign_key",
+      "evidence": "supabase/migrations/20260713175434_add_analysis_v2_evidence_staging.sql"
+    },
+    {
+      "from": "analysis_v2_target_evidence_manifests",
+      "to": "analysis_pipeline_jobs",
+      "type": "foreign_key",
+      "evidence": "supabase/migrations/20260713175434_add_analysis_v2_evidence_staging.sql"
+    },
+    {
+      "from": "analysis_v2_result_summaries",
+      "to": "analysis_requests",
+      "type": "foreign_key",
+      "evidence": "supabase/migrations/20260713185711_add_analysis_v2_result_finalization.sql"
+    },
+    {
+      "from": "analysis_v2_candidate_score_rows",
+      "to": "analysis_v2_candidate_feature_rows",
+      "type": "foreign_key",
+      "evidence": "supabase/migrations/20260713185711_add_analysis_v2_result_finalization.sql"
+    },
+    {
+      "from": "analysis_v2_reverse_like_rows",
+      "to": "analysis_v2_reverse_like_manifests",
+      "type": "foreign_key",
+      "evidence": "supabase/migrations/20260713185711_add_analysis_v2_result_finalization.sql"
+    }
+  ],
+  "requiredContractionGates": [
+    "at least one genuine completed production order with a complete permanent audit bundle",
+    "100% per-order parity for relationships, target evidence, candidates, risk, and cost ledger",
+    "aggregate checksums match for every selected order and the checksum manifest is retained",
+    "encrypted access-controlled archive manifest exists",
+    "restore drill reproduces counts and aggregate checksums",
+    "rollback evidence covers the old read path during the observation window",
+    "owner catalog proves no unresolved FK/view/function/policy/trigger/RLS/grant/publication dependency",
+    "complete traffic observation window shows the retired write path is quiet",
+    "separate owner approval supplies an exact contraction allowlist"
+  ]
+}
