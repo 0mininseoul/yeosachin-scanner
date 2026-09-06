@@ -40,6 +40,7 @@ export const PRECHECKOUT_EVENTS = Object.freeze({
     BLITE_AVAILABLE: 'precheckout_blite_available',
     BLITE_RESULT_VIEWED: 'precheckout_blite_result_viewed',
     BLITE_FALLBACK_SELECTED: 'precheckout_blite_fallback_selected',
+    BLITE_FALLBACK_CTA_CLICKED: 'precheckout_blite_fallback_cta_clicked',
     BLITE_GENDER_CONFIRMATION_COMPLETED: 'precheckout_blite_gender_confirmation_completed',
     BLITE_PREVIEW_CTA_CLICKED: 'precheckout_blite_preview_cta_clicked',
     DEMO_STARTED: 'precheckout_demo_started',
@@ -96,6 +97,7 @@ type PropertyName =
     | 'medium'
     | 'notice_dismiss_scope'
     | 'order_id'
+    | 'parent_state'
     | 'plan_id'
     | 'preflight_id'
     | 'provider'
@@ -229,7 +231,7 @@ const PROPERTY_VALIDATORS: Record<PropertyName, PropertyValidator> = {
     campaign: enumValidator(['launch_2026']),
     content: enumValidator(['hero-a']),
     decision: enumValidator(['exclude', 'skip']),
-    demo_mode: enumValidator(['success', 'fallback']),
+    demo_mode: enumValidator(['success', 'fallback', 'waiting', 'result']),
     duration_ms: integerValidator(0, 86_400_000),
     duration_range: enumValidator(['4_6', '5_8', '8_12', '10_15', '60_90_seconds']),
     error_code: registeredErrorCodeValidator,
@@ -240,6 +242,9 @@ const PROPERTY_VALIDATORS: Record<PropertyName, PropertyValidator> = {
         'unresolved_at_48',
         'unresolved_at_90',
         'demo_error',
+        'blite_unavailable',
+        'blite_terminal',
+        'preflight_expired',
     ]),
     following_bucket: enumValidator(['unknown', '0_400', '401_800', '801_1200', 'over_1200']),
     gender_confirmation_outcome: enumValidator(['confirmed', 'rejected']),
@@ -247,6 +252,7 @@ const PROPERTY_VALIDATORS: Record<PropertyName, PropertyValidator> = {
     medium: enumValidator(['direct', 'organic', 'paid_social', 'referral']),
     notice_dismiss_scope: enumValidator(['snoozed', 'permanent']),
     order_id: uuidValidator,
+    parent_state: enumValidator(['pending', 'processing', 'ready', 'expired', 'unknown']),
     plan_id: enumValidator(['basic', 'standard', 'plus']),
     preflight_id: uuidValidator,
     provider: enumValidator(['google', 'kakao']),
@@ -316,6 +322,11 @@ const EVENT_SCHEMAS: Record<AnalyticsEvent, readonly PropertyName[]> = {
     [PRECHECKOUT_EVENTS.BLITE_AVAILABLE]: ['preflight_id'],
     [PRECHECKOUT_EVENTS.BLITE_RESULT_VIEWED]: ['preflight_id'],
     [PRECHECKOUT_EVENTS.BLITE_FALLBACK_SELECTED]: ['preflight_id', 'fallback_reason'],
+    [PRECHECKOUT_EVENTS.BLITE_FALLBACK_CTA_CLICKED]: [
+        'preflight_id',
+        'parent_state',
+        'fallback_reason',
+    ],
     [PRECHECKOUT_EVENTS.BLITE_GENDER_CONFIRMATION_COMPLETED]: [
         'preflight_id',
         'gender_confirmation_outcome',
