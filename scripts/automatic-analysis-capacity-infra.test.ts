@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { execFileSync, spawnSync } from 'node:child_process';
 import { join } from 'node:path';
@@ -8,11 +9,22 @@ import { describe, expect, it } from 'vitest';
 const root = fileURLToPath(new URL('../', import.meta.url));
 const KNOWN_PREFLIGHT_OLD_SOURCE_SHA = '3b28e55c8877276557f8a5a218fb2b966376d889';
 const KNOWN_PAID_OLD_SOURCE_SHA = '3b28e55c8877276557f8a5a218fb2b966376d889';
+const PREFLIGHT_PRODUCER_CONFIG_FINGERPRINT_VERSION = 'preflight-producer-config-v1';
 // Every child command in this contract suite is deliberately bounded.  The
 // suite exercises shell wrappers, so an accidentally waiting fake command must
 // fail the test deterministically instead of leaving Vitest's worker RPC
 // pending behind a synchronous child process.
 const CHILD_PROCESS_TIMEOUT_MS = 30_000;
+
+function preflightProducerConfigFingerprint(environment: Record<string, string>): string {
+    return createHash('sha256').update([
+        PREFLIGHT_PRODUCER_CONFIG_FINGERPRINT_VERSION,
+        environment.PREFLIGHT_TASKS_SERVICE_ACCOUNT_EMAIL.trim().toLowerCase(),
+        new URL(environment.PREFLIGHT_TASKS_TARGET_URL.trim()).origin.toLowerCase()
+            + new URL(environment.PREFLIGHT_TASKS_TARGET_URL.trim()).pathname,
+        new URL(environment.PREFLIGHT_TASKS_OIDC_AUDIENCE.trim()).origin.toLowerCase(),
+    ].join('\n'), 'utf8').digest('hex');
+}
 
 function baseEnvironment(role: 'preflight' | 'paid' = 'preflight') {
     const preflight = {
@@ -243,6 +255,9 @@ interface FakeRunOptions {
     revisionService?: string;
     vercelDeployments?: unknown;
     vercelAliases?: unknown;
+    vercelProjectEnvironment?: unknown;
+    queueTasks?: unknown;
+    publicFreeze?: Record<string, unknown>;
 }
 
 function fakeRun(options: FakeRunOptions = {}) {
@@ -464,6 +479,8 @@ function fakeRun(options: FakeRunOptions = {}) {
     const publicFreezePath = join(fixtureDir, 'public-freeze.json');
     const vercelDeploymentsPath = join(fixtureDir, 'vercel-deployments.json');
     const vercelAliasesPath = join(fixtureDir, 'vercel-aliases.json');
+    const vercelProjectEnvironmentPath = join(fixtureDir, 'vercel-project-environment.json');
+    const queueTasksPath = join(fixtureDir, 'queue-tasks.json');
     const lockPath = join(fixtureDir, 'deploy.lock');
     const manifestPath = join(fixtureDir, 'runtime.json');
     const logPath = join(fixtureDir, 'calls.log');
@@ -486,6 +503,9 @@ function fakeRun(options: FakeRunOptions = {}) {
         publicFreezeEnabled: active,
         sourceSha: active ? sourceCommit : null,
         legacyTargetResource: 'vercel:production:analysis-v1',
+        preflightProducerConfigFingerprintVersion: PREFLIGHT_PRODUCER_CONFIG_FINGERPRINT_VERSION,
+        preflightProducerConfigFingerprint: active ? preflightProducerConfigFingerprint(env) : null,
+        preflightProducerConfigReady: active,
         routes: Object.fromEntries([
             '/api/analysis/start', '/api/analysis/step', '/api/analysis/run',
         ].map((route) => [route, {
@@ -493,6 +513,7 @@ function fakeRun(options: FakeRunOptions = {}) {
             expectedStatus: active ? 410 : 503,
             gateBeforeRuntime: true,
         }])),
+        ...options.publicFreeze,
     }));
     writeFileSync(vercelDeploymentsPath, JSON.stringify(options.vercelDeployments ?? {
         deployments: [{
@@ -506,6 +527,23 @@ function fakeRun(options: FakeRunOptions = {}) {
     writeFileSync(vercelAliasesPath, JSON.stringify(options.vercelAliases ?? {
         aliases: [{ uid: 'alias_fixture', alias: 'public.example.com', created: '2026-08-01T00:00:00.000Z' }],
     }));
+    writeFileSync(vercelProjectEnvironmentPath, JSON.stringify(options.vercelProjectEnvironment ?? {
+        envs: [
+            { key: 'PREFLIGHT_TASKS_SERVICE_ACCOUNT_EMAIL', target: ['production'] },
+            { key: 'PREFLIGHT_TASKS_TARGET_URL', target: ['production'] },
+            { key: 'PREFLIGHT_TASKS_OIDC_AUDIENCE', target: ['production'] },
+        ],
+    }));
+    writeFileSync(queueTasksPath, JSON.stringify(options.queueTasks ?? [{
+        name: 'projects/example-project/locations/asia-northeast3/queues/analysis-preflight/tasks/probe-fixture',
+        httpRequest: {
+            url: env.PREFLIGHT_TASKS_TARGET_URL,
+            oidcToken: {
+                serviceAccountEmail: env.PREFLIGHT_TASKS_SERVICE_ACCOUNT_EMAIL,
+                audience: env.PREFLIGHT_TASKS_OIDC_AUDIENCE,
+            },
+        },
+    }]));
     writeFileSync(schedulerPath, JSON.stringify({
         schedule: '* * * * *',
         timeZone: 'Etc/UTC',
@@ -583,7 +621,14 @@ fi
 if [[ "\${1:-} \${2:-} \${3:-} \${4:-}" == "iam service-accounts keys list" ]]; then exit 0; fi
 if [[ "\${1:-} \${2:-}" == "projects get-iam-policy" ]]; then exit 0; fi
 if [[ "\${1:-} \${2:-} \${3:-}" == "tasks queues describe" ]]; then cat "$FAKE_GCLOUD_LEGACY_QUEUE_JSON"; exit 0; fi
-if [[ "\${1:-} \${2:-}" == "tasks list" ]]; then cat "$FAKE_GCLOUD_LEGACY_TASKS_JSON"; exit 0; fi
+if [[ "\${1:-} \${2:-}" == "tasks list" ]]; then
+  if [[ "$*" == *"--queue=analysis-pipeline"* ]]; then
+    cat "$FAKE_GCLOUD_LEGACY_TASKS_JSON"
+  else
+    cat "$FAKE_GCLOUD_QUEUE_TASKS_JSON"
+  fi
+  exit 0
+fi
 if [[ "\${1:-}" == "storage" && "\${2:-}" == "cp" ]]; then
   if [[ -e "$FAKE_GCLOUD_LOCK_PATH" ]]; then exit 1; fi
   cp "\$3" "$FAKE_GCLOUD_LOCK_PATH"
@@ -734,6 +779,10 @@ if [[ "$url" == https://api.vercel.test/v6/deployments* ]]; then
   cat "$FAKE_VERCEL_DEPLOYMENTS_JSON"
   exit 0
 fi
+if [[ "$url" == https://api.vercel.test/v9/projects/*/env* ]]; then
+  cat "$FAKE_VERCEL_PROJECT_ENV_JSON"
+  exit 0
+fi
 if [[ "$url" == https://api.vercel.test/v2/deployments/*/aliases* ]]; then
   cat "$FAKE_VERCEL_ALIASES_JSON"
   exit 0
@@ -789,6 +838,8 @@ fi
                 FAKE_GITHUB_JSON: join(fixtureDir, 'github.json'),
                 FAKE_VERCEL_DEPLOYMENTS_JSON: vercelDeploymentsPath,
                 FAKE_VERCEL_ALIASES_JSON: vercelAliasesPath,
+                FAKE_VERCEL_PROJECT_ENV_JSON: vercelProjectEnvironmentPath,
+                FAKE_GCLOUD_QUEUE_TASKS_JSON: queueTasksPath,
                 FAKE_GCLOUD_NEXT_REVISION: `${service}-00002-staged`,
                 FAKE_GCLOUD_TARGET_STAGE: stage,
                 FAKE_GCLOUD_REVISION_SERVICE: options.revisionService ?? service,
@@ -958,6 +1009,127 @@ describe('automatic-analysis infrastructure contracts', () => {
                 'serviceAccount:paid-task@example-project.iam.gserviceaccount.com',
             ] },
         ]);
+    });
+
+    it('fails closed when the production preflight producer task identity drifts', () => {
+        const result = fakeRun({
+            role: 'preflight',
+            queueTasks: [{
+                httpRequest: {
+                    url: 'https://preflight.example.com/api/analysis/preflight/worker',
+                    oidcToken: {
+                        serviceAccountEmail: 'other-task@example-project.iam.gserviceaccount.com',
+                        audience: 'https://preflight.example.com',
+                    },
+                },
+            }],
+            args: ['--check'],
+        });
+        expect(result.status).not.toBe(0);
+        expect(`${result.stdout}\n${result.stderr}`).toContain(
+            'preflight queue task OIDC contract',
+        );
+        expect(result.calls).not.toContain('run deploy');
+    });
+
+    it.each([
+        ['target', { url: 'https://other.example.com/api/analysis/preflight/worker', audience: 'https://preflight.example.com' }],
+        ['audience', { url: 'https://preflight.example.com/api/analysis/preflight/worker', audience: 'https://other.example.com' }],
+    ] as const)('fails closed when a sampled preflight task has a drifted %s', (_name, observed) => {
+        const result = fakeRun({
+            role: 'preflight',
+            queueTasks: [{
+                httpRequest: {
+                    url: observed.url,
+                    oidcToken: {
+                        serviceAccountEmail: 'preflight-task@example-project.iam.gserviceaccount.com',
+                        audience: observed.audience,
+                    },
+                },
+            }],
+            args: ['--check'],
+        });
+        expect(result.status).not.toBe(0);
+        expect(`${result.stdout}\n${result.stderr}`).toContain(
+            'preflight queue task OIDC contract',
+        );
+        expect(result.calls).not.toContain('run deploy');
+    });
+
+    it('uses the active Vercel runtime fingerprint when the preflight queue is empty', () => {
+        const result = fakeRun({
+            role: 'preflight',
+            queueTasks: [],
+            args: ['--check'],
+        });
+        expect(result.status, `${result.stderr?.toString() ?? ''}\n${result.calls}`).toBe(0);
+        expect(result.stdout).toContain('active Vercel preflight producer fingerprint');
+    });
+
+    it('fails closed when the active Vercel runtime fingerprint drifts', () => {
+        const result = fakeRun({
+            role: 'preflight',
+            publicFreeze: {
+                preflightProducerConfigFingerprint: 'f'.repeat(64),
+            },
+            args: ['--check'],
+        });
+        expect(result.status).not.toBe(0);
+        expect(`${result.stdout}\n${result.stderr}`).toContain(
+            'active Vercel preflight producer fingerprint',
+        );
+        expect(result.calls).not.toContain('run deploy');
+    });
+
+    it('fails closed when the active Vercel runtime fingerprint is missing', () => {
+        const result = fakeRun({
+            role: 'preflight',
+            publicFreeze: {
+                ready: false,
+                preflightProducerConfigFingerprint: null,
+                preflightProducerConfigReady: false,
+            },
+            args: ['--check'],
+        });
+        expect(result.status).not.toBe(0);
+        expect(result.calls).not.toContain('run deploy');
+    });
+
+    it('does not accept a complete manifest or project env listing without active runtime evidence', () => {
+        const result = fakeRun({
+            role: 'preflight',
+            publicFreeze: {
+                preflightProducerConfigFingerprint: 'f'.repeat(64),
+            },
+            vercelProjectEnvironment: {
+                envs: [
+                    { key: 'PREFLIGHT_TASKS_SERVICE_ACCOUNT_EMAIL', target: ['production'] },
+                    { key: 'PREFLIGHT_TASKS_TARGET_URL', target: ['production'] },
+                    { key: 'PREFLIGHT_TASKS_OIDC_AUDIENCE', target: ['production'] },
+                ],
+            },
+            args: ['--check'],
+        });
+        expect(result.status).not.toBe(0);
+        expect(result.calls).not.toContain('run deploy');
+    });
+
+    it('fails closed when next-deploy Vercel preflight keys are incomplete', () => {
+        const result = fakeRun({
+            role: 'preflight',
+            vercelProjectEnvironment: {
+                envs: [
+                    { key: 'PREFLIGHT_TASKS_TARGET_URL', target: ['production'] },
+                    { key: 'PREFLIGHT_TASKS_OIDC_AUDIENCE', target: ['production'] },
+                ],
+            },
+            args: ['--check'],
+        });
+        expect(result.status).not.toBe(0);
+        expect(`${result.stdout}\n${result.stderr}`).toContain(
+            'next-deploy Vercel preflight environment',
+        );
+        expect(result.calls).not.toContain('run deploy');
     });
 
     it('normalizes the role runtime identity manifest key against the Cloud Run service spec', () => {

@@ -277,7 +277,7 @@ if ! public_freeze_json="$(curl --disable --proto '=https' --tlsv1.2 \
 fi
 jq -e --arg expected_sha "$expected_sha" \
   --arg expected_resource "$ANALYSIS_CAPACITY_LEGACY_TARGET_RESOURCE" '
-  (keys | sort) == ["freezeMode", "legacyTargetResource", "publicFreezeEnabled", "ready", "routes", "schemaVersion", "sourceSha", "stage"]
+  (keys | sort) == ["freezeMode", "legacyTargetResource", "preflightProducerConfigFingerprint", "preflightProducerConfigFingerprintVersion", "preflightProducerConfigReady", "publicFreezeEnabled", "ready", "routes", "schemaVersion", "sourceSha", "stage"]
   and .schemaVersion == "analysis-public-freeze-readiness-v1"
   and .ready == true
   and (.stage == "initial" or .stage == "expanded")
@@ -285,6 +285,9 @@ jq -e --arg expected_sha "$expected_sha" \
   and .publicFreezeEnabled == true
   and .sourceSha == $expected_sha
   and .legacyTargetResource == $expected_resource
+  and .preflightProducerConfigFingerprintVersion == "preflight-producer-config-v1"
+  and .preflightProducerConfigReady == true
+  and (.preflightProducerConfigFingerprint | type == "string" and test("^[0-9a-f]{64}$"))
   and ((.routes | keys | sort) == ["/api/analysis/run", "/api/analysis/start", "/api/analysis/step"])
   and ([.routes[] | select(.gateState == "frozen" and .expectedStatus == 410 and .gateBeforeRuntime == true)] | length) == 3
 ' <<<"$public_freeze_json" >/dev/null 2>&1 \
