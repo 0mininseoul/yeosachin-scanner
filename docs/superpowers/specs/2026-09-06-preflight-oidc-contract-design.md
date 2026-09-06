@@ -51,17 +51,23 @@ following observations must agree:
    preflight manifest values and requires an exact version, readiness, and
    digest match from the currently serving public DTO. The manifest is the
    expected-contract input for this comparison, never proof that the producer
-   loaded those values. The wrapper may separately inspect the Vercel project
-   Production environment listing to require the three required keys exist for
-   the next deployment, but it must not decrypt or treat those records as
-   active-producer evidence.
-4. The selected preflight Cloud Tasks queue is observed read-only with a
-   bounded list. If tasks exist, every observed task must carry the exact
-   target URL, normalized origin audience, and OIDC `serviceAccountEmail` that
-   match the reviewed manifest, active-runtime fingerprint contract, receiver,
-   and service IAM. If the queue is empty, the active-runtime fingerprint
-   observation is the independently verifiable, deployment-bound producer
-   evidence; no caller-provided probe identity is accepted.
+   loaded those values. The wrapper makes exactly one read-only Vercel v10
+   project environment request without pagination parameters. It requires the
+   exact top-level keys `envs` and `hiddenProductionEnvCount`, a valid metadata
+   array, an integer hidden count of zero, and exactly one Production entry for
+   each required key. It must not decrypt or treat environment records as
+   active-producer evidence. Any hidden production values, pagination fields,
+   direct-single-env variant, legacy endpoint, duplicate, or malformed shape
+   fails closed. Only non-secret `key` and `target` fields are retained for the
+   required-key check.
+4. The selected preflight Cloud Tasks queue is observed read-only with the
+   provider's complete list. If tasks exist, every returned task must carry
+   the exact target URL, normalized origin audience, and OIDC
+   `serviceAccountEmail` that match the reviewed manifest, active-runtime
+   fingerprint contract, receiver, and service IAM. If the queue is empty, the
+   active-runtime fingerprint observation is the independently verifiable,
+   deployment-bound producer evidence; no caller-provided probe identity is
+   accepted.
 5. The dedicated receiver value
    `PREFLIGHT_TASKS_SERVICE_ACCOUNT_EMAIL` in the Cloud Run runtime manifest
    and observed service environment is the same task identity. The exact
@@ -111,7 +117,7 @@ The capacity infrastructure harness covers:
   even when the manifest and queue fixture are otherwise matching;
 - the active-runtime fingerprint permits an empty preflight queue without a
   caller-provided identity string;
-- sampled queue identity, URL, or audience drift fails closed;
+- any returned queue task identity, URL, or audience drift fails closed;
 - missing next-deploy Vercel required keys fails closed while a project-env
   listing alone cannot pass the active-runtime check; and
 - check/apply parity preserves exact service-level IAM and distinct
