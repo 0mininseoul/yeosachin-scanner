@@ -4,17 +4,21 @@
 
 **Goal:** Make active preflight capacity deployment checks fail closed unless
 the currently serving Vercel producer's independently reported configuration
-fingerprint, observed Cloud Tasks delivery (when present), dedicated receiver,
-and exact Cloud Run service-level IAM agree with the reviewed manifest.
+fingerprint, every observed Cloud Tasks delivery (when present), dedicated
+receiver, and exact Cloud Run service-level IAM agree with the reviewed
+manifest.
 
 **Architecture:** The public readiness route is an active-runtime evidence
 boundary. It computes a versioned SHA-256 fingerprint from its own preflight
 producer tuple and exposes only the digest/version/readiness booleans. The
 capacity deploy wrapper first binds that response to the selected READY Vercel
 deployment's source SHA and alias, then compares the digest to the reviewed
-manifest-derived expectation. It separately verifies next-deploy Vercel env key
-presence without using those values as active evidence, and observes every
-bounded queue task when the queue is non-empty. An empty queue relies on the
+manifest-derived expectation. It separately verifies the complete Vercel v10
+next-deploy environment response with exactly `envs` and
+`hiddenProductionEnvCount`, requiring zero hidden Production values and
+retaining only key/target metadata. It observes every task returned by the
+complete Cloud Tasks list when the queue is non-empty. An empty queue relies on
+the
 deployment-bound active-runtime fingerprint, never on a caller-provided probe
 identity. Paid and bootstrap behavior otherwise stays unchanged.
 
@@ -35,9 +39,10 @@ harness.
 Document the distinction between the currently serving READY Vercel
 deployment and project Production env values used by a future deployment.
 Document the exact readiness DTO fields, canonical fingerprint serialization,
-invalid/missing fail-closed behavior, queue observation rule, next-deploy key
-presence check, and identity separation. Remove every plain probe-env and
-role-manifest-as-active-producer claim.
+invalid/missing fail-closed behavior, complete queue observation rule, exact
+Vercel v10 next-deploy response shape and hidden-value check, and identity
+separation. Remove every plain probe-env and role-manifest-as-active-producer
+claim.
 
 - [ ] **Step 2: Self-review the docs before implementation**
 
@@ -99,14 +104,16 @@ Re-run the focused readiness test and inspect the exact-key assertion.
 - [ ] **Step 1: Add fake active-runtime and next-deploy fixtures**
 
 Add a fake public readiness DTO containing the expected fingerprint, a
-`publicFreeze` override, and a next-deploy Vercel env-key fixture. Keep project
-env fixtures key-only and fake-only; never store tuple values or credentials in
-them. Keep the bounded queue fixture with fake target/audience/identity and
-route queue calls separately from the legacy freeze queue.
+`publicFreeze` override, and a complete Vercel v10 next-deploy fixture with
+more than one hundred key/target entries plus `hiddenProductionEnvCount: 0`.
+Keep project env fixtures key-only and fake-only; never store tuple values or
+credentials in them. Keep the complete queue fixture with fake
+target/audience/identity and route queue calls separately from the legacy
+freeze queue.
 
 - [ ] **Step 2: Add the RED regression before shell changes**
 
-Add a test where the manifest and sampled queue agree but the active public
+Add a test where the manifest and complete queue agree but the active public
 readiness fingerprint is drifted. Assert nonzero status and no `run deploy`.
 Add a test where the active fingerprint is missing/false while the manifest is
 complete, proving the manifest or project env listing alone cannot pass.
@@ -142,14 +149,16 @@ binding, fetch the public readiness DTO and require the exact fingerprint
 version, valid digest, and `preflightProducerConfigReady: true` to match the
 manifest-derived digest. The DTO's overall readiness and exact existing route
 fields remain required. Do not read/decrypt Vercel env values as producer
-evidence. Separately require the three next-deploy Production env keys to be
-present if the project env API is available; fail closed on a malformed or
-missing listing.
+evidence. Require exactly one read-only Vercel v10 project environment
+response with the exact top-level `envs` and `hiddenProductionEnvCount` keys,
+integer hidden count `0`, valid key/target metadata, and exactly one
+Production entry for each required key; fail closed on malformed, hidden,
+duplicate, paginated, direct-single-env, or legacy response variants.
 
 - [ ] **Step 3: Require independent queue evidence**
 
 Remove the caller-provided probe identity variable entirely. For a non-empty
-queue, require every bounded task's URL, normalized audience, and
+queue, require every returned task's URL, normalized audience, and
 OIDC service-account identity to match the reviewed receiver contract. For an
 empty queue, accept only the already verified active-runtime fingerprint. Call
 this helper after Vercel deployment/readiness binding in check, pre-deploy,
@@ -216,12 +225,11 @@ git diff --check
 ```
 
 If an environment-only dependency or external service blocks a command, record
-the exact bounded failure without claiming success.
+the exact command failure without claiming success.
 
 - [ ] **Step 3: Commit only clean logical changes**
 
-Amend the existing docs-only commit first, then create one implementation
-commit containing only the deployment guard, readiness DTO/tests, release
-checker/test updates, and capacity harness changes. Preserve the pre-existing
-`package-lock.json` modification unstaged. Do not merge, deploy, mutate
-production, or open a PR.
+Preserve commits `94fe6a25` and `75b03b16`, then create one follow-up commit
+containing only the deployment guard, docs, and capacity harness changes.
+Leave `package-lock.json` clean. Do not merge, deploy, mutate production, or
+open a PR.

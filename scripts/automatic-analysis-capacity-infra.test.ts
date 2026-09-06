@@ -527,13 +527,15 @@ function fakeRun(options: FakeRunOptions = {}) {
     writeFileSync(vercelAliasesPath, JSON.stringify(options.vercelAliases ?? {
         aliases: [{ uid: 'alias_fixture', alias: 'public.example.com', created: '2026-08-01T00:00:00.000Z' }],
     }));
-    writeFileSync(vercelProjectEnvironmentPath, JSON.stringify(options.vercelProjectEnvironment ?? {
+    const defaultVercelProjectEnvironment = options.vercelProjectEnvironment ?? {
         envs: [
             { key: 'PREFLIGHT_TASKS_SERVICE_ACCOUNT_EMAIL', target: ['production'] },
             { key: 'PREFLIGHT_TASKS_TARGET_URL', target: ['production'] },
             { key: 'PREFLIGHT_TASKS_OIDC_AUDIENCE', target: ['production'] },
         ],
-    }));
+        hiddenProductionEnvCount: 0,
+    };
+    writeFileSync(vercelProjectEnvironmentPath, JSON.stringify(defaultVercelProjectEnvironment));
     writeFileSync(queueTasksPath, JSON.stringify(options.queueTasks ?? [{
         name: 'projects/example-project/locations/asia-northeast3/queues/analysis-preflight/tasks/probe-fixture',
         httpRequest: {
@@ -625,7 +627,11 @@ if [[ "\${1:-} \${2:-}" == "tasks list" ]]; then
   if [[ "$*" == *"--queue=analysis-pipeline"* ]]; then
     cat "$FAKE_GCLOUD_LEGACY_TASKS_JSON"
   else
-    cat "$FAKE_GCLOUD_QUEUE_TASKS_JSON"
+    if [[ "$*" == *"--limit="* ]]; then
+      jq '.[0:20]' "$FAKE_GCLOUD_QUEUE_TASKS_JSON"
+    else
+      cat "$FAKE_GCLOUD_QUEUE_TASKS_JSON"
+    fi
   fi
   exit 0
 fi
@@ -779,7 +785,7 @@ if [[ "$url" == https://api.vercel.test/v6/deployments* ]]; then
   cat "$FAKE_VERCEL_DEPLOYMENTS_JSON"
   exit 0
 fi
-if [[ "$url" == https://api.vercel.test/v9/projects/*/env* ]]; then
+if [[ "$url" == https://api.vercel.test/v10/projects/*/env* ]]; then
   cat "$FAKE_VERCEL_PROJECT_ENV_JSON"
   exit 0
 fi
@@ -1035,7 +1041,7 @@ describe('automatic-analysis infrastructure contracts', () => {
     it.each([
         ['target', { url: 'https://other.example.com/api/analysis/preflight/worker', audience: 'https://preflight.example.com' }],
         ['audience', { url: 'https://preflight.example.com/api/analysis/preflight/worker', audience: 'https://other.example.com' }],
-    ] as const)('fails closed when a sampled preflight task has a drifted %s', (_name, observed) => {
+    ] as const)('fails closed when an observed preflight task has a drifted %s', (_name, observed) => {
         const result = fakeRun({
             role: 'preflight',
             queueTasks: [{
@@ -1053,6 +1059,156 @@ describe('automatic-analysis infrastructure contracts', () => {
         expect(`${result.stdout}\n${result.stderr}`).toContain(
             'preflight queue task OIDC contract',
         );
+        expect(result.calls).not.toContain('run deploy');
+    });
+
+    it('validates every queued preflight task after the first twenty', () => {
+        const expectedTarget = baseEnvironment('preflight').PREFLIGHT_TASKS_TARGET_URL;
+        const expectedAudience = baseEnvironment('preflight').PREFLIGHT_TASKS_OIDC_AUDIENCE;
+        const expectedServiceAccount = baseEnvironment('preflight').PREFLIGHT_TASKS_SERVICE_ACCOUNT_EMAIL;
+        const queueTasks = Array.from({ length: 21 }, (_, index) => ({
+            name: `projects/example-project/locations/asia-northeast3/queues/analysis-preflight/tasks/task-${index + 1}`,
+            httpRequest: {
+                url: expectedTarget,
+                oidcToken: {
+                    serviceAccountEmail: expectedServiceAccount,
+                    audience: expectedAudience,
+                },
+            },
+        }));
+        queueTasks[20].httpRequest.oidcToken.serviceAccountEmail = 'drifted-task@example-project.iam.gserviceaccount.com';
+        const result = fakeRun({ role: 'preflight', queueTasks, args: ['--check'] });
+        expect(result.status).not.toBe(0);
+        expect(`${result.stdout}\n${result.stderr}`).toContain(
+            'preflight queue task OIDC contract',
+        );
+        expect(result.calls).not.toMatch(/tasks list .*--limit=20/);
+        expect(result.calls).not.toContain('run deploy');
+    });
+
+    it('accepts a complete Vercel v10 environment response with more than one hundred entries', () => {
+        const filler = Array.from({ length: 101 }, (_, index) => ({
+            key: `UNRELATED_ENV_${index}`,
+            target: ['production'],
+        }));
+        const result = fakeRun({
+            role: 'preflight',
+            queueTasks: [],
+            vercelProjectEnvironment: {
+                envs: [
+                    ...filler,
+                    { key: 'PREFLIGHT_TASKS_SERVICE_ACCOUNT_EMAIL', target: ['production'] },
+                    { key: 'PREFLIGHT_TASKS_TARGET_URL', target: ['production'] },
+                    { key: 'PREFLIGHT_TASKS_OIDC_AUDIENCE', target: ['production'] },
+                ],
+                hiddenProductionEnvCount: 0,
+            },
+            args: ['--check'],
+        });
+        expect(result.status, `${result.stderr?.toString() ?? ''}\n${result.calls}`).toBe(0);
+        const envCalls = result.calls.split('\n').filter((call) => call.includes('/v10/projects/fixture-project/env'));
+        expect(envCalls).toHaveLength(1);
+        expect(envCalls[0]).not.toContain('limit=');
+        expect(envCalls[0]).not.toContain('until=');
+        expect(result.stdout).toContain('next-deploy Vercel preflight environment has required production keys');
+    });
+
+    it('fails closed when Vercel reports hidden production environment values', () => {
+        const result = fakeRun({
+            role: 'preflight',
+            queueTasks: [],
+            vercelProjectEnvironment: {
+                envs: [
+                    { key: 'PREFLIGHT_TASKS_SERVICE_ACCOUNT_EMAIL', target: ['production'] },
+                    { key: 'PREFLIGHT_TASKS_TARGET_URL', target: ['production'] },
+                    { key: 'PREFLIGHT_TASKS_OIDC_AUDIENCE', target: ['production'] },
+                ],
+                hiddenProductionEnvCount: 1,
+            },
+            args: ['--check'],
+        });
+        expect(result.status).not.toBe(0);
+        expect(`${result.stdout}\n${result.stderr}`).toContain(
+            'next-deploy Vercel preflight environment has hidden production values',
+        );
+        expect(result.calls).not.toContain('run deploy');
+    });
+
+    it.each([
+        ['missing hidden count', {
+            envs: [
+                { key: 'PREFLIGHT_TASKS_SERVICE_ACCOUNT_EMAIL', target: ['production'] },
+                { key: 'PREFLIGHT_TASKS_TARGET_URL', target: ['production'] },
+                { key: 'PREFLIGHT_TASKS_OIDC_AUDIENCE', target: ['production'] },
+            ],
+        }],
+        ['non-integer hidden count', {
+            envs: [],
+            hiddenProductionEnvCount: 0.5,
+        }],
+        ['negative hidden count', {
+            envs: [],
+            hiddenProductionEnvCount: -1,
+        }],
+        ['string hidden count', {
+            envs: [],
+            hiddenProductionEnvCount: '0',
+        }],
+        ['malformed envs', {
+            envs: {},
+            hiddenProductionEnvCount: 0,
+        }],
+    ] as const)('fails closed when the Vercel v10 response is %s', (_name, response) => {
+        const result = fakeRun({ role: 'preflight', queueTasks: [], vercelProjectEnvironment: response, args: ['--check'] });
+        expect(result.status).not.toBe(0);
+        expect(`${result.stdout}\n${result.stderr}`).toContain(
+            'next-deploy Vercel preflight environment response is malformed',
+        );
+        expect(result.calls).not.toContain('run deploy');
+    });
+
+    it('fails closed on an unexpected paginated or direct-single-env response variant', () => {
+        for (const response of [
+            {
+                envs: [
+                    { key: 'PREFLIGHT_TASKS_SERVICE_ACCOUNT_EMAIL', target: ['production'] },
+                    { key: 'PREFLIGHT_TASKS_TARGET_URL', target: ['production'] },
+                    { key: 'PREFLIGHT_TASKS_OIDC_AUDIENCE', target: ['production'] },
+                ],
+                hiddenProductionEnvCount: 0,
+                pagination: { next: null },
+            },
+            {
+                env: { key: 'PREFLIGHT_TASKS_SERVICE_ACCOUNT_EMAIL', target: ['production'] },
+                hiddenProductionEnvCount: 0,
+            },
+        ]) {
+            const result = fakeRun({ role: 'preflight', queueTasks: [], vercelProjectEnvironment: response, args: ['--check'] });
+            expect(result.status).not.toBe(0);
+            expect(`${result.stdout}\n${result.stderr}`).toContain(
+                'next-deploy Vercel preflight environment response is malformed',
+            );
+            expect(result.calls).not.toContain('run deploy');
+        }
+    });
+
+    it('fails closed when a required Vercel environment key is duplicated', () => {
+        const result = fakeRun({
+            role: 'preflight',
+            queueTasks: [],
+            vercelProjectEnvironment: {
+                envs: [
+                    { key: 'PREFLIGHT_TASKS_SERVICE_ACCOUNT_EMAIL', target: ['production'] },
+                    { key: 'PREFLIGHT_TASKS_SERVICE_ACCOUNT_EMAIL', target: ['production'] },
+                    { key: 'PREFLIGHT_TASKS_TARGET_URL', target: ['production'] },
+                    { key: 'PREFLIGHT_TASKS_OIDC_AUDIENCE', target: ['production'] },
+                ],
+                hiddenProductionEnvCount: 0,
+            },
+            args: ['--check'],
+        });
+        expect(result.status).not.toBe(0);
+        expect(`${result.stdout}\n${result.stderr}`).toContain('next-deploy Vercel preflight environment');
         expect(result.calls).not.toContain('run deploy');
     });
 
@@ -1107,6 +1263,7 @@ describe('automatic-analysis infrastructure contracts', () => {
                     { key: 'PREFLIGHT_TASKS_TARGET_URL', target: ['production'] },
                     { key: 'PREFLIGHT_TASKS_OIDC_AUDIENCE', target: ['production'] },
                 ],
+                hiddenProductionEnvCount: 0,
             },
             args: ['--check'],
         });
@@ -1122,6 +1279,7 @@ describe('automatic-analysis infrastructure contracts', () => {
                     { key: 'PREFLIGHT_TASKS_TARGET_URL', target: ['production'] },
                     { key: 'PREFLIGHT_TASKS_OIDC_AUDIENCE', target: ['production'] },
                 ],
+                hiddenProductionEnvCount: 0,
             },
             args: ['--check'],
         });

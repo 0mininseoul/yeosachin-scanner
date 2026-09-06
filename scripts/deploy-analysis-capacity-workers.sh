@@ -761,9 +761,14 @@ verify_preflight_next_deploy_environment() {
   local vercel_api_base="$1"
   local vercel_project_id="$2"
   local escaped_token="$3"
-  local vercel_env_url="$vercel_api_base/v9/projects/$vercel_project_id/env?target=production&limit=100"
+  # Vercel's v10 project-env endpoint is the authoritative complete-list
+  # response. It has no supported limit/until pagination parameters; adding
+  # cursor requests here would create an unverifiable partial-observation
+  # contract.
+  local vercel_env_url="$vercel_api_base/v10/projects/$vercel_project_id/env"
+  local query_separator='?'
   if [[ -n "${VERCEL_TEAM_ID:-}" ]]; then
-    vercel_env_url+="&teamId=${VERCEL_TEAM_ID}"
+    vercel_env_url+="${query_separator}teamId=${VERCEL_TEAM_ID}"
   fi
   local vercel_env_json
   vercel_env_json="$(curl --disable --proto '=https' --tlsv1.2 \
@@ -773,16 +778,49 @@ verify_preflight_next_deploy_environment() {
 header = "Authorization: Bearer $escaped_token"
 EOF
   )" || die 'Vercel next-deploy preflight environment lookup failed'
+  local env_metadata
+  env_metadata="$(jq -e -c '
+    if type != "object" then error("response-not-object")
+    elif ((keys | sort) != ["envs", "hiddenProductionEnvCount"]) then error("response-variant")
+    elif (.envs | type) != "array" then error("envs-not-array")
+    elif (.hiddenProductionEnvCount | type) != "number" then error("hidden-count-not-number")
+    elif (.hiddenProductionEnvCount < 0
+      or .hiddenProductionEnvCount != (.hiddenProductionEnvCount | floor)) then error("hidden-count-not-integer")
+    elif .hiddenProductionEnvCount != 0 then error("hidden-production-values")
+    elif any(.envs[];
+      type != "object"
+      or ((.key? | type) != "string")
+      or ((.key? | length) == 0)
+      or (((.target? | type) != "array") and ((.target? | type) != "string"))
+      or (((.target? | type) == "array") and any(.target[]?; type != "string"))
+    ) then error("env-metadata-malformed")
+    else [.envs[] | {key: .key, target: .target}]
+    end
+  ' <<<"$vercel_env_json" 2>/dev/null)" \
+    || {
+      if jq -e '
+        if (.hiddenProductionEnvCount? | type) != "number" then false
+        elif (.hiddenProductionEnvCount | floor) != .hiddenProductionEnvCount then false
+        elif .hiddenProductionEnvCount > 0 then true
+        else false
+        end
+      ' \
+        <<<"$vercel_env_json" >/dev/null 2>&1; then
+        die 'next-deploy Vercel preflight environment has hidden production values'
+      fi
+      die 'next-deploy Vercel preflight environment response is malformed'
+    }
+  vercel_env_json=''
   jq -e '
     def production_target:
       ((.target // [])
         | if type == "array" then index("production") != null
           else . == "production" end);
-    (.envs | type == "array")
-    and ([.envs[]? | select(type == "object" and .key == "PREFLIGHT_TASKS_SERVICE_ACCOUNT_EMAIL" and production_target)] | length) == 1
-    and ([.envs[]? | select(type == "object" and .key == "PREFLIGHT_TASKS_TARGET_URL" and production_target)] | length) == 1
-    and ([.envs[]? | select(type == "object" and .key == "PREFLIGHT_TASKS_OIDC_AUDIENCE" and production_target)] | length) == 1
-  ' <<<"$vercel_env_json" >/dev/null 2>&1 \
+    type == "array"
+    and ([.[] | select(.key == "PREFLIGHT_TASKS_SERVICE_ACCOUNT_EMAIL" and production_target)] | length) == 1
+    and ([.[] | select(.key == "PREFLIGHT_TASKS_TARGET_URL" and production_target)] | length) == 1
+    and ([.[] | select(.key == "PREFLIGHT_TASKS_OIDC_AUDIENCE" and production_target)] | length) == 1
+  ' <<<"$env_metadata" >/dev/null 2>&1 \
     || die 'next-deploy Vercel preflight environment is missing required production keys'
   log 'verified: next-deploy Vercel preflight environment has required production keys'
 }
@@ -1287,7 +1325,6 @@ verify_preflight_queue_oidc_contract() {
     "--queue=$queue" \
     "--project=$project" \
     "--location=$location" \
-    '--limit=20' \
     '--format=json')" \
     || die "preflight queue OIDC evidence could not be observed"
   task_count="$(jq -er 'if type == "array" then length else error("not-array") end' <<<"$queue_tasks" 2>/dev/null)" \
