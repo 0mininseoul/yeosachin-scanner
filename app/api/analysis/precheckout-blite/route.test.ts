@@ -109,14 +109,82 @@ describe('POST /api/analysis/precheckout-blite', () => {
         });
     });
 
-    it('keeps anonymous claim access and fails open when cache is unavailable', async () => {
+    it('distinguishes a pending parent before reading B-lite', async () => {
+        mocks.findForOwner.mockResolvedValue({ ...ready(), status: 'pending' });
+
+        const response = await POST(request());
+
+        expect(response.status).toBe(202);
+        expect(await response.json()).toEqual({
+            state: 'parent_pending',
+            parentState: 'pending',
+            retryAfterMs: 1_000,
+        });
+        expect(mocks.readStatus).not.toHaveBeenCalled();
+    });
+
+    it('returns expired before parent-pending when a pending row has passed its expiry', async () => {
+        mocks.findForOwner.mockResolvedValue({
+            ...ready(),
+            status: 'pending',
+            expiresAt: new Date(Date.now() - 1).toISOString(),
+        });
+
+        const response = await POST(request());
+
+        expect(response.status).toBe(410);
+        expect(await response.json()).toEqual({ state: 'expired' });
+        expect(mocks.readStatus).not.toHaveBeenCalled();
+    });
+
+    it('fails open for a malformed expiry before parent-pending classification', async () => {
+        mocks.findForOwner.mockResolvedValue({
+            ...ready(),
+            status: 'pending',
+            expiresAt: 'not-a-timestamp',
+        });
+
+        const response = await POST(request());
+
+        expect(response.status).toBe(204);
+        expect(mocks.readStatus).not.toHaveBeenCalled();
+    });
+
+    it('returns explicit unavailable when a ready parent has no B-lite row', async () => {
+        mocks.readStatus.mockResolvedValue(null);
+
+        const response = await POST(request());
+
+        expect(response.status).toBe(200);
+        expect(await response.json()).toEqual({ state: 'unavailable' });
+    });
+
+    it('returns explicit terminal and expired parent states without reading B-lite', async () => {
+        mocks.findForOwner.mockResolvedValueOnce({ ...ready(), status: 'blocked' });
+        const terminal = await POST(request());
+        expect(terminal.status).toBe(200);
+        expect(await terminal.json()).toEqual({ state: 'terminal' });
+
+        mocks.findForOwner.mockResolvedValueOnce({
+            ...ready(),
+            status: 'expired',
+            expiresAt: new Date(Date.now() - 1).toISOString(),
+        });
+        const expired = await POST(request());
+        expect(expired.status).toBe(410);
+        expect(await expired.json()).toEqual({ state: 'expired' });
+        expect(mocks.readStatus).not.toHaveBeenCalled();
+    });
+
+    it('keeps anonymous claim access and exposes ready-parent unavailability', async () => {
         mocks.getUser.mockResolvedValue({ data: { user: null }, error: null });
         mocks.readAnonymous.mockResolvedValue(ready());
         mocks.readStatus.mockResolvedValue(null);
 
         const response = await POST(request({ 'x-preflight-claim-token': 'anonymous-claim' }));
 
-        expect(response.status).toBe(204);
+        expect(response.status).toBe(200);
+        expect(await response.json()).toEqual({ state: 'unavailable' });
         expect(mocks.readAnonymous).toHaveBeenCalledWith(
             preflightId, 'anonymous-claim', expect.objectContaining({ client: expect.anything() }),
         );

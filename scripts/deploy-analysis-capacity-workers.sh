@@ -230,6 +230,7 @@ legacy_queue="${ANALYSIS_CAPACITY_LEGACY_QUEUE:-}"
 legacy_target_url="${ANALYSIS_CAPACITY_LEGACY_TARGET_URL:-}"
 legacy_target_resource="${ANALYSIS_CAPACITY_LEGACY_TARGET_RESOURCE:-}"
 public_freeze_readiness_url="${ANALYSIS_CAPACITY_PUBLIC_FREEZE_READINESS_URL:-}"
+preflight_runtime_fingerprint_verified="false"
 
 [[ -n "$project" && -n "$location" && -n "$region" && -n "$service" \
    && -n "$queue" && -n "$target" && -n "$audience" && -n "$task_sa" \
@@ -612,7 +613,7 @@ verify_legacy_quiescence() {
     || die "public V1 freeze readiness observation failed"
   jq -e --arg source_sha "$source_sha" \
     --arg target_resource "$legacy_target_resource" '
-    (keys | sort) == ["freezeMode", "legacyTargetResource", "publicFreezeEnabled", "ready", "routes", "schemaVersion", "sourceSha", "stage"]
+    (keys | sort) == ["freezeMode", "legacyTargetResource", "preflightProducerConfigFingerprint", "preflightProducerConfigFingerprintVersion", "preflightProducerConfigReady", "publicFreezeEnabled", "ready", "routes", "schemaVersion", "sourceSha", "stage"]
     and .schemaVersion == "analysis-public-freeze-readiness-v1"
     and .ready == true
     and (.stage == "initial" or .stage == "expanded")
@@ -620,6 +621,9 @@ verify_legacy_quiescence() {
     and .publicFreezeEnabled == true
     and .sourceSha == $source_sha
     and .legacyTargetResource == $target_resource
+    and .preflightProducerConfigFingerprintVersion == "preflight-producer-config-v1"
+    and .preflightProducerConfigReady == true
+    and (.preflightProducerConfigFingerprint | type == "string" and test("^[0-9a-f]{64}$"))
     and ((.routes | keys | sort) == ["/api/analysis/run", "/api/analysis/start", "/api/analysis/step"])
     and ([.routes[] | select(.gateState == "frozen" and .expectedStatus == 410 and .gateBeforeRuntime == true)] | length) == 3
   ' <<<"$public_json" >/dev/null \
@@ -676,6 +680,182 @@ escape_curl_config_value() {
   value="${value//\\/\\\\}"
   value="${value//\"/\\\"}"
   printf '%s' "$value"
+}
+
+normalize_preflight_target_url() {
+  local value="$1"
+  [[ "$value" =~ ^https://([A-Za-z0-9.-]+)(:([0-9]+))?/api/analysis/preflight/worker$ ]] \
+    || return 1
+  local host
+  host="$(printf '%s' "${BASH_REMATCH[1]}" | tr '[:upper:]' '[:lower:]')"
+  local port="${BASH_REMATCH[3]:-}"
+  local normalized_port
+  normalized_port="$(normalize_preflight_port "$port")" || return 1
+  if [[ -n "$normalized_port" ]]; then
+    printf 'https://%s:%s/api/analysis/preflight/worker\n' "$host" "$normalized_port"
+  else
+    printf 'https://%s/api/analysis/preflight/worker\n' "$host"
+  fi
+}
+
+normalize_preflight_port() {
+  local port="$1"
+  [[ -z "$port" ]] && return 0
+  [[ "$port" =~ ^[0-9]{1,5}$ ]] || return 1
+  while [[ "${port:0:1}" == '0' && "${#port}" -gt 1 ]]; do
+    port="${port:1}"
+  done
+  [[ "$port" -le 65535 ]] || return 1
+  [[ "$port" == '443' ]] && return 0
+  printf '%s\n' "$port"
+}
+
+normalize_preflight_audience() {
+  local value="$1"
+  [[ "$value" =~ ^https://([A-Za-z0-9.-]+)(:([0-9]+))?/?$ ]] \
+    || return 1
+  local host
+  host="$(printf '%s' "${BASH_REMATCH[1]}" | tr '[:upper:]' '[:lower:]')"
+  local port="${BASH_REMATCH[3]:-}"
+  local normalized_port
+  normalized_port="$(normalize_preflight_port "$port")" || return 1
+  if [[ -n "$normalized_port" ]]; then
+    printf 'https://%s:%s\n' "$host" "$normalized_port"
+  else
+    printf 'https://%s\n' "$host"
+  fi
+}
+
+preflight_producer_config_fingerprint() {
+  local producer_service_account="$1"
+  local producer_target="$2"
+  local producer_audience="$3"
+  local normalized_target
+  local normalized_audience
+  local normalized_service_account
+  normalized_target="$(normalize_preflight_target_url "$producer_target")" || return 1
+  normalized_audience="$(normalize_preflight_audience "$producer_audience")" || return 1
+  normalized_service_account="$(printf '%s' "$producer_service_account" | tr '[:upper:]' '[:lower:]')"
+  local target_origin="${normalized_target%/api/analysis/preflight/worker}"
+  [[ "$target_origin" == "$normalized_audience" ]] || return 1
+  local serialized
+  serialized="$(printf '%s\n%s\n%s\n%s' \
+    'preflight-producer-config-v1' \
+    "$normalized_service_account" \
+    "$normalized_target" \
+    "$normalized_audience")"
+  local fingerprint
+  if command -v sha256sum >/dev/null 2>&1; then
+    fingerprint="$(printf '%s' "$serialized" | sha256sum | cut -d' ' -f1)"
+  elif command -v shasum >/dev/null 2>&1; then
+    fingerprint="$(printf '%s' "$serialized" | shasum -a 256 | cut -d' ' -f1)"
+  else
+    return 1
+  fi
+  [[ "$fingerprint" =~ ^[0-9a-f]{64}$ ]] || return 1
+  printf '%s\n' "$fingerprint"
+}
+
+verify_preflight_next_deploy_environment() {
+  [[ "$role" == 'preflight' ]] || return 0
+  local vercel_api_base="$1"
+  local vercel_project_id="$2"
+  local escaped_token="$3"
+  # Vercel's v10 project-env endpoint is the authoritative complete-list
+  # response. It has no supported limit/until pagination parameters; adding
+  # cursor requests here would create an unverifiable partial-observation
+  # contract.
+  local vercel_env_url="$vercel_api_base/v10/projects/$vercel_project_id/env"
+  local query_separator='?'
+  if [[ -n "${VERCEL_TEAM_ID:-}" ]]; then
+    vercel_env_url+="${query_separator}teamId=${VERCEL_TEAM_ID}"
+  fi
+  local vercel_env_json
+  vercel_env_json="$(curl --disable --proto '=https' --tlsv1.2 \
+    --max-redirs 0 --connect-timeout 10 --max-time 30 \
+    --fail --silent --show-error --url "$vercel_env_url" \
+    --header 'Accept: application/json' --config - 2>/dev/null <<EOF
+header = "Authorization: Bearer $escaped_token"
+EOF
+  )" || die 'Vercel next-deploy preflight environment lookup failed'
+  local env_metadata
+  env_metadata="$(jq -e -c '
+    if type != "object" then error("response-not-object")
+    elif ((keys | sort) != ["envs", "hiddenProductionEnvCount"]) then error("response-variant")
+    elif (.envs | type) != "array" then error("envs-not-array")
+    elif (.hiddenProductionEnvCount | type) != "number" then error("hidden-count-not-number")
+    elif (.hiddenProductionEnvCount < 0
+      or .hiddenProductionEnvCount != (.hiddenProductionEnvCount | floor)) then error("hidden-count-not-integer")
+    elif .hiddenProductionEnvCount != 0 then error("hidden-production-values")
+    elif any(.envs[];
+      type != "object"
+      or ((.key? | type) != "string")
+      or ((.key? | length) == 0)
+      or (((.target? | type) != "array") and ((.target? | type) != "string"))
+      or (((.target? | type) == "array") and any(.target[]?; type != "string"))
+    ) then error("env-metadata-malformed")
+    else [.envs[] | {key: .key, target: .target}]
+    end
+  ' <<<"$vercel_env_json" 2>/dev/null)" \
+    || {
+      if jq -e '
+        if (.hiddenProductionEnvCount? | type) != "number" then false
+        elif (.hiddenProductionEnvCount | floor) != .hiddenProductionEnvCount then false
+        elif .hiddenProductionEnvCount > 0 then true
+        else false
+        end
+      ' \
+        <<<"$vercel_env_json" >/dev/null 2>&1; then
+        die 'next-deploy Vercel preflight environment has hidden production values'
+      fi
+      die 'next-deploy Vercel preflight environment response is malformed'
+    }
+  vercel_env_json=''
+  jq -e '
+    def production_target:
+      ((.target // [])
+        | if type == "array" then index("production") != null
+          else . == "production" end);
+    type == "array"
+    and ([.[] | select(.key == "PREFLIGHT_TASKS_SERVICE_ACCOUNT_EMAIL" and production_target)] | length) == 1
+    and ([.[] | select(.key == "PREFLIGHT_TASKS_TARGET_URL" and production_target)] | length) == 1
+    and ([.[] | select(.key == "PREFLIGHT_TASKS_OIDC_AUDIENCE" and production_target)] | length) == 1
+  ' <<<"$env_metadata" >/dev/null 2>&1 \
+    || die 'next-deploy Vercel preflight environment is missing required production keys'
+  log 'verified: next-deploy Vercel preflight environment has required production keys'
+}
+
+verify_preflight_runtime_fingerprint() {
+  [[ "$role" == 'preflight' ]] || return 0
+  local manifest_task_sa
+  local manifest_target
+  local manifest_audience
+  manifest_task_sa="$(manifest_value "$env_file" "$task_sa_var" 2>/dev/null)" \
+    || die 'reviewed preflight producer contract is missing its task identity'
+  manifest_target="$(manifest_value "$env_file" "$target_var" 2>/dev/null)" \
+    || die 'reviewed preflight producer contract is missing its target'
+  manifest_audience="$(manifest_value "$env_file" "$audience_var" 2>/dev/null)" \
+    || die 'reviewed preflight producer contract is missing its audience'
+  local expected_fingerprint
+  expected_fingerprint="$(preflight_producer_config_fingerprint \
+    "$manifest_task_sa" "$manifest_target" "$manifest_audience")" \
+    || die 'reviewed preflight producer contract could not be fingerprinted'
+  local public_json
+  public_json="$(call_public_freeze_readiness)" \
+    || die 'active Vercel preflight producer readiness observation failed'
+  jq -e \
+    --arg version 'preflight-producer-config-v1' \
+    --arg expected "$expected_fingerprint" '
+      type == "object"
+      and .preflightProducerConfigFingerprintVersion == $version
+      and .preflightProducerConfigReady == true
+      and (.preflightProducerConfigFingerprint | type == "string")
+      and (.preflightProducerConfigFingerprint | test("^[0-9a-f]{64}$"))
+      and .preflightProducerConfigFingerprint == $expected
+    ' <<<"$public_json" >/dev/null 2>&1 \
+    || die 'active Vercel preflight producer fingerprint does not match the reviewed contract'
+  preflight_runtime_fingerprint_verified='true'
+  log 'verified: active Vercel preflight producer fingerprint agrees with the reviewed contract'
 }
 
 verify_vercel_public_deployment() {
@@ -785,6 +965,8 @@ EOF
   done < <(jq -r '.aliases[]?.alias' <<<"$aliases_json")
   [[ "$origin_match" == "true" ]] \
     || die "public freeze origin does not match the selected READY Vercel deployment URL or exact alias"
+  verify_preflight_next_deploy_environment "$vercel_api_base" "$vercel_project_id" "$escaped_token"
+  verify_preflight_runtime_fingerprint
   log "verified: public freeze origin is bound to Vercel deployment $deployment_id at reviewed source SHA"
 }
 
@@ -1133,6 +1315,40 @@ verify_service_iam() {
       and ([$invokers[].members[]?]
         | all(. != "allUsers" and . != "allAuthenticatedUsers")))
   ' <<<"$service_iam_json" >/dev/null
+}
+
+verify_preflight_queue_oidc_contract() {
+  [[ "$role" == "preflight" && "${contract_stage:-$stage}" != "bootstrap" ]] || return 0
+  local queue_tasks
+  local task_count
+  queue_tasks="$(gcloud tasks list \
+    "--queue=$queue" \
+    "--project=$project" \
+    "--location=$location" \
+    '--format=json')" \
+    || die "preflight queue OIDC evidence could not be observed"
+  task_count="$(jq -er 'if type == "array" then length else error("not-array") end' <<<"$queue_tasks" 2>/dev/null)" \
+    || die "preflight queue OIDC evidence is malformed"
+  if [[ "$task_count" == "0" ]]; then
+    [[ "$preflight_runtime_fingerprint_verified" == 'true' ]] \
+      || die "empty preflight queue requires active Vercel producer fingerprint evidence"
+    log "verified: empty preflight queue is covered by active Vercel producer fingerprint evidence"
+    return 0
+  fi
+  jq -e \
+    --arg task "$task_sa" \
+    --arg target "$target" \
+    --arg audience "${audience%/}" '
+      type == "array"
+      and length > 0
+      and all(.[];
+        (.httpRequest.url // "") == $target
+        and (.httpRequest.oidcToken.serviceAccountEmail // "") == $task
+        and (((.httpRequest.oidcToken.audience // "") | rtrimstr("/")) == $audience)
+      )
+    ' <<<"$queue_tasks" >/dev/null 2>&1 \
+    || die "preflight queue task OIDC contract is missing or drifted"
+  log "verified: preflight queue task OIDC identity, target, and audience agree"
 }
 
 write_exact_service_iam_policy() {
@@ -1694,6 +1910,7 @@ if [[ "$mode" == "check" ]]; then
   verify_service_contract
   verify_legacy_quiescence
   verify_vercel_public_deployment
+  verify_preflight_queue_oidc_contract
   verify_capacity_activation_readiness
   verify_preflight_maintenance
   exit 0
@@ -1749,6 +1966,7 @@ if service_exists; then
     "$allow_existing_service_predeploy_paid_secret_ref_roll_forward"
   verify_legacy_quiescence
   verify_vercel_public_deployment
+  verify_preflight_queue_oidc_contract
   verify_capacity_activation_readiness
 else
   [[ "$stage" == "bootstrap" ]] \
@@ -1777,6 +1995,7 @@ else
   verify_staged_revision "$staged_revision"
   verify_legacy_quiescence
   verify_vercel_public_deployment
+  verify_preflight_queue_oidc_contract
   verify_capacity_activation_readiness
   rollback_armed="true"
   gcloud run services update-traffic "$service" \
@@ -1785,6 +2004,7 @@ else
   verify_service_contract "$stage" true
   verify_legacy_quiescence
   verify_vercel_public_deployment
+  verify_preflight_queue_oidc_contract
   verify_capacity_activation_readiness
 fi
 verify_preflight_maintenance

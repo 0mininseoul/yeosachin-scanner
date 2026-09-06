@@ -1,8 +1,10 @@
 import { describe, expect, it } from 'vitest';
 import {
     beginBlitePage,
+    canRetryPrecheckout,
     initialBlitePageState,
     reduceBlitePage,
+    resolvePrecheckoutFallbackAction,
     type BlitePageState,
 } from './blite-page-flow';
 
@@ -333,5 +335,28 @@ describe('reduceBlitePage', () => {
         const complete = reduceBlitePage(fallback, { type: 'DEMO_COMPLETE' });
         expect(reduceBlitePage(complete, { type: 'DEMO_COMPLETE' })).toBe(complete);
         expect(reduceBlitePage(complete, { type: 'DEMO_ERROR' })).toBe(complete);
+    });
+});
+
+describe('bounded precheckout browser states', () => {
+    it.each([
+        ['parent_pending', 'delayed'],
+        ['pending', 'delayed'],
+        ['transient', 'delayed'],
+        ['unavailable', 'plans'],
+        ['failed', 'plans'],
+        ['terminal', 'retry'],
+        ['expired', 'retry'],
+    ] as const)('maps %s to the bounded %s action', (status, expected) => {
+        expect(resolvePrecheckoutFallbackAction(status)).toBe(expected);
+    });
+
+    it('allows a new preflight only after an explicit terminal or expiry retry action', () => {
+        expect(canRetryPrecheckout('failed')).toBe(false);
+        expect(canRetryPrecheckout('terminal')).toBe(true);
+        expect(canRetryPrecheckout('expired')).toBe(true);
+        expect(canRetryPrecheckout('parent_pending')).toBe(false);
+        expect(canRetryPrecheckout('pending')).toBe(false);
+        expect(canRetryPrecheckout('unavailable')).toBe(false);
     });
 });

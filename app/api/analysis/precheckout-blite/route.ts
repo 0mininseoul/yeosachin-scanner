@@ -9,7 +9,10 @@ import {
 } from '@/lib/services/analysis/preflight';
 import { readAnonymousAnalysisV2Preflight } from '@/lib/services/analysis/anonymous-preflight';
 import { precheckoutBliteTerminalStore } from '@/lib/services/precheckout/blite-store';
-import { toBliteStatusV1 } from '@/lib/services/precheckout/blite-status-contract';
+import {
+    parseBliteBrowserStatusV1,
+    toBliteStatusV1,
+} from '@/lib/services/precheckout/blite-status-contract';
 
 export const maxDuration = 15;
 
@@ -18,6 +21,13 @@ const noStoreHeaders = { 'Cache-Control': 'no-store' };
 
 function empty(): NextResponse {
     return new NextResponse(null, { status: 204, headers: noStoreHeaders });
+}
+
+function statusResponse(value: unknown, status: number): NextResponse {
+    const body = parseBliteBrowserStatusV1(value);
+    return body === null
+        ? empty()
+        : NextResponse.json(body, { status, headers: noStoreHeaders });
 }
 
 async function anonymousStoredPreflight(
@@ -45,14 +55,33 @@ export async function POST(request: Request): Promise<NextResponse> {
         const stored = error || !user
             ? await anonymousStoredPreflight(request, parsed.preflightId, client)
             : await preflightStore.findForOwner(parsed.preflightId, user.id, { client });
-        if (!stored || stored.status !== 'ready' || Date.parse(stored.expiresAt) <= Date.now()) {
+        if (!stored) return empty();
+
+        const expiresAtMs = Date.parse(stored.expiresAt);
+        if (!Number.isFinite(expiresAtMs)) return empty();
+        if (stored.status === 'expired' || expiresAtMs <= Date.now()) {
+            return statusResponse({ state: 'expired' }, 410);
+        }
+
+        if (stored.status === 'pending' || stored.status === 'processing') {
+            return statusResponse({
+                state: 'parent_pending',
+                parentState: stored.status,
+                retryAfterMs: 1_000,
+            }, 202);
+        }
+
+        if (stored.status === 'blocked' || stored.status === 'consumed') {
+            return statusResponse({ state: 'terminal' }, 200);
+        }
+        if (stored.status !== 'ready') {
             return empty();
         }
         const durable = await precheckoutBliteTerminalStore.readStatus({
             preflightId: parsed.preflightId,
         });
-        if (!durable) return empty();
-        const body = toBliteStatusV1(durable);
+        if (!durable) return statusResponse({ state: 'unavailable' }, 200);
+        const body = parseBliteBrowserStatusV1(toBliteStatusV1(durable));
         if (!body) return empty();
         return NextResponse.json(body, {
             status: body.state === 'pending' ? 202 : 200,

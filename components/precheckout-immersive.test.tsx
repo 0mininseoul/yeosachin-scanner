@@ -14,6 +14,7 @@ const analyticsMocks = vi.hoisted(() => ({
         BLITE_AVAILABLE: 'precheckout_blite_available',
         BLITE_RESULT_VIEWED: 'precheckout_blite_result_viewed',
         BLITE_FALLBACK_SELECTED: 'precheckout_blite_fallback_selected',
+        BLITE_FALLBACK_CTA_CLICKED: 'precheckout_blite_fallback_cta_clicked',
         BLITE_GENDER_CONFIRMATION_COMPLETED: 'precheckout_blite_gender_confirmation_completed',
         BLITE_PREVIEW_CTA_CLICKED: 'precheckout_blite_preview_cta_clicked',
         DEMO_STARTED: 'precheckout_demo_started',
@@ -92,6 +93,26 @@ function pendingStatus() {
         fallbackAt: new Date(Date.parse(SUBMITTED_AT) + 78_000).toISOString(),
         retryAfterMs: 1_000,
     };
+}
+
+function parentPendingStatus() {
+    return {
+        state: 'parent_pending',
+        parentState: 'pending',
+        retryAfterMs: 1_000,
+    };
+}
+
+function unavailableStatus() {
+    return { state: 'unavailable' };
+}
+
+function expiredStatus() {
+    return { state: 'expired' };
+}
+
+function terminalStatus() {
+    return { state: 'terminal' };
 }
 
 function failedStatus() {
@@ -233,8 +254,11 @@ describe('PrecheckoutImmersive', () => {
         );
     });
 
-    it('uses the slow loop with changing progress while B-lite is pending', async () => {
-        vi.stubGlobal('fetch', vi.fn().mockResolvedValue(jsonResponse(pendingStatus(), 202)));
+    it('keeps parent pending in a static delayed state indefinitely after one graph pass', async () => {
+        const fetchMock = vi.fn().mockResolvedValue(jsonResponse(parentPendingStatus(), 202));
+        vi.stubGlobal('fetch', fetchMock);
+        const onGoToPlans = vi.fn();
+        const onRetry = vi.fn();
 
         await act(async () => {
             root.render(createElement(PrecheckoutImmersive, {
@@ -242,22 +266,55 @@ describe('PrecheckoutImmersive', () => {
                 claimToken: null,
                 submittedAtMs: Date.parse(SUBMITTED_AT),
                 targetUsername: 'target',
-                onGoToPlans: vi.fn(),
+                onGoToPlans,
+                onRetry,
             }));
         });
         await settleUi();
         await advance(20_000);
-        const firstCopy = container.querySelector('[data-precheckout-progress]')?.textContent;
-        await advance(6_000);
-        const secondCopy = container.querySelector('[data-precheckout-progress]')?.textContent;
+        expect(container.querySelector('[data-precheckout-delayed-state="parent_pending"]')).not.toBeNull();
+        expect(container.querySelector('[data-precheckout-fallback]')).toBeNull();
+        expect(container.querySelector('[data-precheckout-progress]')).toBeNull();
 
-        expect(firstCopy).toContain('추가 신호');
-        expect(secondCopy).toContain('연결 밀도');
-        expect(container.querySelector('[data-precheckout-demo-mode="waiting"]')).not.toBeNull();
+        await advance(90_000);
+
+        expect(container.querySelector('[data-precheckout-delayed-state="parent_pending"]')).not.toBeNull();
+        expect(container.querySelector('[data-precheckout-fallback]')).toBeNull();
+        expect(container.textContent).not.toContain('다시 확인하기');
+        expect(onGoToPlans).not.toHaveBeenCalled();
+        expect(onRetry).not.toHaveBeenCalled();
+        expect(fetchMock.mock.calls.length).toBeLessThanOrEqual(40);
     });
 
-    it('holds unresolved fresh entries through T+90 and settles at the next graph boundary', async () => {
+    it('keeps fail-open transient reads in the static delayed state without elapsed retry', async () => {
         vi.stubGlobal('fetch', vi.fn().mockResolvedValue(noBody()));
+        const onGoToPlans = vi.fn();
+        const onRetry = vi.fn();
+
+        await act(async () => {
+            root.render(createElement(PrecheckoutImmersive, {
+                preflightId: PREFLIGHT_ID,
+                claimToken: null,
+                submittedAtMs: Date.parse(SUBMITTED_AT),
+                targetUsername: 'target',
+                onGoToPlans,
+                onRetry,
+            }));
+        });
+        await settleUi();
+        expect(onGoToPlans).not.toHaveBeenCalled();
+        expect(container.textContent).not.toContain('상세 분석 보기');
+        await advance(110_000);
+
+        expect(container.querySelector('[data-precheckout-delayed-state="pending"]')).not.toBeNull();
+        expect(container.querySelector('[data-precheckout-fallback]')).toBeNull();
+        expect(container.textContent).not.toContain('다시 확인하기');
+        expect(onGoToPlans).not.toHaveBeenCalled();
+        expect(onRetry).not.toHaveBeenCalled();
+    });
+
+    it('opens a plans fallback only for an authoritative ready-parent unavailable state', async () => {
+        vi.stubGlobal('fetch', vi.fn().mockResolvedValue(jsonResponse(unavailableStatus())));
         const onGoToPlans = vi.fn();
 
         await act(async () => {
@@ -270,43 +327,19 @@ describe('PrecheckoutImmersive', () => {
             }));
         });
         await settleUi();
-        expect(onGoToPlans).not.toHaveBeenCalled();
-        expect(container.textContent).not.toContain('상세 분석 보기');
-        await advance(90_000);
 
-        expect(container.querySelector('[data-precheckout-fallback]')).toBeNull();
-        await advance(1_999);
-        expect(container.querySelector('[data-precheckout-fallback]')).toBeNull();
-        await advance(1);
+        await advance(20_000);
 
-        expect(analyticsMocks.trackPrecheckoutEvent).toHaveBeenCalledWith(
-            'precheckout_blite_fallback_selected', PREFLIGHT_ID, { fallback_reason: 'unresolved_at_90' },
-        );
         expect(container.querySelector('[data-precheckout-fallback]')).not.toBeNull();
         expect(container.textContent).toContain('상세 분석 보기');
-        expect(container.textContent).not.toContain('실패');
         clickButton(container, '상세 분석 보기');
         expect(onGoToPlans).toHaveBeenCalledOnce();
-    });
-
-    it('does not exit mid-stage when the T+90 deadline callback is late', async () => {
-        vi.stubGlobal('fetch', vi.fn().mockResolvedValue(noBody()));
-
-        await act(async () => {
-            root.render(createElement(PrecheckoutImmersive, {
-                preflightId: PREFLIGHT_ID,
-                claimToken: null,
-                submittedAtMs: Date.parse(SUBMITTED_AT),
-                targetUsername: 'target',
-                onGoToPlans: vi.fn(),
-            }));
-        });
-        await settleUi();
-        await advance(90_001);
-
-        expect(container.querySelector('[data-precheckout-fallback]')).toBeNull();
-        await advance(1_999);
-        expect(container.querySelector('[data-precheckout-fallback]')).not.toBeNull();
+        expect(analyticsMocks.trackPrecheckoutEvent).toHaveBeenCalledWith(
+            'precheckout_blite_fallback_cta_clicked', PREFLIGHT_ID, {
+                parent_state: 'ready',
+                fallback_reason: 'blite_unavailable',
+            },
+        );
     });
 
     it('keeps the plan gate closed through a demo runtime error until the initial pass ends', async () => {
@@ -332,8 +365,46 @@ describe('PrecheckoutImmersive', () => {
         expect(container.querySelector('[data-precheckout-fallback]')).not.toBeNull();
     });
 
-    it('holds a terminal B-lite status through T+90 and settles at the next graph boundary', async () => {
+    it('keeps a ready-parent terminal B-lite status on the existing plans fallback', async () => {
         vi.stubGlobal('fetch', vi.fn().mockResolvedValue(jsonResponse(failedStatus())));
+        const onGoToPlans = vi.fn();
+        const onRetry = vi.fn();
+
+        await act(async () => {
+            root.render(createElement(PrecheckoutImmersive, {
+                preflightId: PREFLIGHT_ID,
+                claimToken: null,
+                submittedAtMs: Date.parse(SUBMITTED_AT),
+                targetUsername: 'target',
+                onGoToPlans,
+                onRetry,
+            }));
+        });
+        await settleUi();
+        await advance(19_999);
+        expect(container.querySelector('[data-precheckout-demo-mode="waiting"]')).not.toBeNull();
+        await advance(1);
+
+        expect(container.querySelector('[data-precheckout-fallback]')).not.toBeNull();
+        expect(container.textContent).toContain('상세 분석 보기');
+        expect(container.textContent).not.toContain('B-lite');
+        expect(container.textContent).not.toContain('실패');
+        expect(onRetry).not.toHaveBeenCalled();
+
+        clickButton(container, '상세 분석 보기');
+        expect(onGoToPlans).toHaveBeenCalledOnce();
+        expect(onRetry).not.toHaveBeenCalled();
+        expect(analyticsMocks.trackPrecheckoutEvent).toHaveBeenCalledWith(
+            'precheckout_blite_fallback_cta_clicked', PREFLIGHT_ID, {
+                parent_state: 'ready',
+                fallback_reason: 'blite_terminal',
+            },
+        );
+    });
+
+    it('offers an explicit retry for an authoritative expired parent status', async () => {
+        vi.stubGlobal('fetch', vi.fn().mockResolvedValue(jsonResponse(expiredStatus(), 410)));
+        const onRetry = vi.fn();
 
         await act(async () => {
             root.render(createElement(PrecheckoutImmersive, {
@@ -342,18 +413,50 @@ describe('PrecheckoutImmersive', () => {
                 submittedAtMs: Date.parse(SUBMITTED_AT),
                 targetUsername: 'target',
                 onGoToPlans: vi.fn(),
+                onRetry,
             }));
         });
         await settleUi();
-        await advance(89_999);
-        expect(container.querySelector('[data-precheckout-demo-mode="waiting"]')).not.toBeNull();
-        await advance(1);
+        await advance(20_000);
 
-        expect(container.querySelector('[data-precheckout-fallback]')).toBeNull();
-        await advance(2_000);
-        expect(container.querySelector('[data-precheckout-fallback]')).not.toBeNull();
-        expect(container.textContent).not.toContain('B-lite');
-        expect(container.textContent).not.toContain('실패');
+        expect(container.textContent).toContain('다시 확인하기');
+        expect(onRetry).not.toHaveBeenCalled();
+        clickButton(container, '다시 확인하기');
+        expect(onRetry).toHaveBeenCalledOnce();
+        expect(analyticsMocks.trackPrecheckoutEvent).toHaveBeenCalledWith(
+            'precheckout_blite_fallback_cta_clicked', PREFLIGHT_ID, {
+                parent_state: 'expired',
+                fallback_reason: 'preflight_expired',
+            },
+        );
+    });
+
+    it('offers an explicit retry for an authoritative terminal parent status', async () => {
+        vi.stubGlobal('fetch', vi.fn().mockResolvedValue(jsonResponse(terminalStatus())));
+        const onRetry = vi.fn();
+
+        await act(async () => {
+            root.render(createElement(PrecheckoutImmersive, {
+                preflightId: PREFLIGHT_ID,
+                claimToken: null,
+                submittedAtMs: Date.parse(SUBMITTED_AT),
+                targetUsername: 'target',
+                onGoToPlans: vi.fn(),
+                onRetry,
+            }));
+        });
+        await settleUi();
+        await advance(20_000);
+
+        expect(container.textContent).toContain('다시 확인하기');
+        clickButton(container, '다시 확인하기');
+        expect(onRetry).toHaveBeenCalledOnce();
+        expect(analyticsMocks.trackPrecheckoutEvent).toHaveBeenCalledWith(
+            'precheckout_blite_fallback_cta_clicked', PREFLIGHT_ID, {
+                parent_state: 'unknown',
+                fallback_reason: 'blite_terminal',
+            },
+        );
     });
 
     it('reconstructs a complete result on refresh without a second status request', async () => {
@@ -411,7 +514,7 @@ describe('PrecheckoutImmersive', () => {
         await advance(19_999);
         expect(container.querySelector('[data-precheckout-demo-phase="initial"]')).not.toBeNull();
         await advance(1);
-        expect(container.querySelector('[data-precheckout-demo-phase="waiting"]')).not.toBeNull();
+        expect(container.querySelector('[data-precheckout-delayed-state]')).not.toBeNull();
     });
 
     it('renders a fresh visible entry on every remount instead of resuming a stale elapsed position', async () => {
@@ -443,11 +546,10 @@ describe('PrecheckoutImmersive', () => {
         expect(container.querySelector('[data-precheckout-demo-phase="waiting"]')).toBeNull();
     });
 
-    it('gives a partially elapsed submission clock the whole guaranteed pass and waiting loop', async () => {
+    it('gives a partially elapsed submission clock the whole initial pass without elapsed retry', async () => {
         vi.stubGlobal('fetch', vi.fn().mockResolvedValue(noBody()));
-        // submittedAtMs + BLITE_UX_DEADLINE_MS(90s) leaves only 8s after this mount's visible
-        // entry, so the submission deadline expires inside the freshly-restarted 20s pass and
-        // on its own would buy far less than the guaranteed visible grace.
+        // The submission deadline has only 8s left at mount, but a pending parent remains
+        // delayed after the fresh initial pass rather than becoming retryable at T+90.
         const staleSubmittedAtMs = Date.parse(SUBMITTED_AT) - 82_000;
         const onGoToPlans = vi.fn();
 
@@ -469,12 +571,9 @@ describe('PrecheckoutImmersive', () => {
         await advance(11_999);
         expect(container.querySelector('[data-precheckout-fallback]')).toBeNull();
 
-        // The initial pass alone is not the whole guarantee: one complete waiting loop follows it.
         await advance(24_000);
         expect(container.querySelector('[data-precheckout-fallback]')).toBeNull();
-        await advance(1);
-
-        expect(container.querySelector('[data-precheckout-fallback]')).not.toBeNull();
+        expect(container.querySelector('[data-precheckout-delayed-state="pending"]')).not.toBeNull();
         expect(onGoToPlans).not.toHaveBeenCalled();
     });
 
@@ -543,10 +642,10 @@ describe('PrecheckoutImmersive', () => {
         );
     });
 
-    it('lets a final deadline read reveal a durable complete result before fallback analytics', async () => {
-        const visibleDeadlineAtMs = Date.parse(SUBMITTED_AT) + 44_000;
+    it('lets the next slow status read reveal a durable complete result before fallback analytics', async () => {
+        const completeAtMs = Date.parse(SUBMITTED_AT) + 45_000;
         const fetchMock = vi.fn().mockImplementation(() => (
-            Date.now() < visibleDeadlineAtMs
+            Date.now() < completeAtMs
                 ? Promise.resolve(noBody())
                 : Promise.resolve(jsonResponse(completeStatus()))
         ));
@@ -564,7 +663,7 @@ describe('PrecheckoutImmersive', () => {
         });
         await settleUi();
 
-        await advance(44_000);
+        await advance(45_000);
         expect(fetchMock.mock.calls.length).toBeGreaterThan(1);
         expect(container.querySelector('[data-precheckout-fallback]')).toBeNull();
         expect(container.querySelector('[data-precheckout-result]')).not.toBeNull();
@@ -590,22 +689,20 @@ describe('PrecheckoutImmersive', () => {
         });
         await settleUi();
 
-        await advance(89_999);
+        await advance(19_999);
         expect(container.querySelector('[data-precheckout-demo-mode="waiting"]')).not.toBeNull();
         await advance(1);
 
         expect(fetchMock).toHaveBeenCalledTimes(1);
-        expect(container.querySelector('[data-precheckout-fallback]')).toBeNull();
-        await advance(2_000);
         expect(container.querySelector('[data-precheckout-fallback]')).not.toBeNull();
         expect(container.querySelector('[data-precheckout-result-card]')).toBeNull();
         expect(analyticsMocks.trackPrecheckoutEvent).toHaveBeenCalledWith(
             'precheckout_blite_fallback_selected', PREFLIGHT_ID,
-            { fallback_reason: 'unresolved_at_90' },
+            { fallback_reason: 'blite_terminal' },
         );
     });
 
-    it('grants a stale unresolved entry exactly one waiting loop before the fallback', async () => {
+    it('keeps a stale unresolved entry delayed indefinitely without a client deadline fallback', async () => {
         const fetchMock = vi.fn().mockResolvedValue(jsonResponse(pendingStatus(), 202));
         vi.stubGlobal('fetch', fetchMock);
         const staleSubmittedAtMs = Date.parse(SUBMITTED_AT) - 300_000;
@@ -623,14 +720,11 @@ describe('PrecheckoutImmersive', () => {
 
         await advance(20_000);
         expect(container.querySelector('[data-precheckout-fallback]')).toBeNull();
-        expect(container.querySelector('[data-precheckout-demo-phase="waiting"]')).not.toBeNull();
+        expect(container.querySelector('[data-precheckout-delayed-state]')).not.toBeNull();
 
-        // One full four-stage waiting loop at 6s per stage still owes 24s after the initial pass.
-        await advance(23_999);
+        await advance(24_000);
         expect(container.querySelector('[data-precheckout-fallback]')).toBeNull();
-        await advance(1);
-
-        expect(container.querySelector('[data-precheckout-fallback]')).not.toBeNull();
+        expect(container.querySelector('[data-precheckout-delayed-state="pending"]')).not.toBeNull();
         expect(fetchMock.mock.calls.length).toBeGreaterThan(1);
     });
 

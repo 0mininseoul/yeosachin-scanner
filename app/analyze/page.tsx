@@ -478,6 +478,38 @@ const DISCLOSURE_ACCEPTED = true;
         setBliteResultShown(false);
         setPrecheckoutSurface({ preflightId, surface: 'legacy' });
     }, [immersivePreflight?.preflightId]);
+    const handleRetryPreflight = useCallback(async () => {
+        clearAutoCheckoutContinuation();
+        const retryTarget = targetInstagramId;
+        if (!retryTarget) return;
+        const activePreflightId = preflight?.preflightId;
+        const storage = availablePendingTargetStorage();
+        if (storage && activePreflightId) {
+            clearPreflightDisplayTarget(storage, activePreflightId);
+        }
+        setBliteResultShown(false);
+        setPrecheckoutSurface({ preflightId: null, surface: 'awaiting' });
+        reset();
+        const accepted = await startPreflight(retryTarget);
+        if (!accepted) {
+            if (user) clearPendingAnalysisTarget(sessionStorage);
+            return;
+        }
+        if (accepted.demo === true) {
+            router.replace(`/result/${encodeURIComponent(accepted.preflightId)}?pipeline=v2`);
+            return;
+        }
+        if (user) {
+            bindPendingAnalysisTarget(sessionStorage, {
+                ownerId: user.id,
+                preflightId: accepted.preflightId,
+                target: retryTarget,
+            });
+        }
+        const next = new URLSearchParams({ preflight: accepted.preflightId });
+        if (accepted.claimToken) next.set('claim', accepted.claimToken);
+        router.replace(`/analyze?${next.toString()}`);
+    }, [clearAutoCheckoutContinuation, preflight?.preflightId, reset, router, startPreflight, targetInstagramId, user]);
     useEffect(() => {
         // Fires once, exactly on the explicit CTA transition — whether the legacy surface
         // initially renders the pending status or the ready target/plans. A later readiness
@@ -1023,6 +1055,7 @@ const DISCLOSURE_ACCEPTED = true;
                                 submittedAtMs={preflightStartedAt}
                                 targetUsername={targetInstagramId}
                                 onGoToPlans={handleGoToPlans}
+                                onRetry={handleRetryPreflight}
                                 onBliteResultShown={handleBliteResultShown}
                             />
                         )}
