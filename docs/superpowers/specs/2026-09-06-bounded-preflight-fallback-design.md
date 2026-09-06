@@ -21,9 +21,10 @@ progressing, and it leaves the visible surface dependent on an indefinite poll.
 `POST /api/analysis/precheckout-blite` currently returns an empty `204` both when the
 parent preflight is not ready and when a ready parent has no B-lite cache row. The
 browser maps both responses to `unavailable`, so the UI cannot distinguish “the parent
-is still collecting” from “B-lite is not available for this ready parent.” A terminal
-B-lite failure is represented separately in the durable store, but the route and the
-client do not expose an explicit expired/terminal action that can create a new request.
+is still collecting” from “B-lite is not available for this ready parent.” A durable
+B-lite failure is read only after the parent is ready, so it belongs to the existing
+plans fallback; only a terminal parent or expired parent can expose an action that
+creates a new request.
 
 The page already owns the accepted-preflight binding and the request coordinator. A
 retry must use that owner and must not start provider work directly from a fallback
@@ -43,9 +44,11 @@ after the user clicks.
    static state has no indeterminate bar, blink animation, or legacy plans CTA.
 3. A durable complete DTO still wins after the graph pass and reveals the existing
    result screen. A ready parent with no B-lite row becomes an explicit plans CTA.
-4. A durable B-lite terminal failure or an expired parent becomes an explicit retry
-   CTA. The retry is inert until clicked; the click starts a new preflight through the
-   existing page/hook path.
+4. A ready parent with a durable B-lite failure or no B-lite row becomes an explicit
+   plans CTA. The plans action keeps the current preflight binding and opens the
+   existing plans surface. A terminal parent or expired parent becomes an explicit
+   retry CTA; the retry is inert until clicked and then starts a new preflight through
+   the existing page/hook path.
 5. If a transient/pending read remains unresolved, keep the same request bound to a
    static delayed state indefinitely. Elapsed client time, including T+90, never
    synthesizes a retry action or a new request. Only an authoritative terminal or
@@ -54,8 +57,16 @@ after the user clicks.
 The `parent_pending` response is deliberately not treated as B-lite unavailability.
 It renders the delayed state while the existing parent status poll continues. A parent
 that later becomes ready can then resolve to a B-lite result, B-lite pending, or B-lite
-unavailable without changing the preflight ID. Parent expiry is a separate `expired`
-outcome and is eligible for the explicit new-preflight retry.
+unavailable, or durable B-lite failed state without changing the preflight ID. Parent
+expiry is a separate `expired` outcome and is eligible for the explicit new-preflight
+retry; the ready-parent durable failed state remains on plans.
+
+During the 20,000ms visual pass, status reads may honor the bounded server retry hint.
+After the graph reports its initial boundary, `parent_pending`, B-lite `pending`, and
+transient/fail-open reads use the named 5,000ms slow poll interval. The slow interval
+limits long-tail route/store load without changing the next-read semantics: a complete,
+terminal, or expired response still replaces the delayed surface as soon as that next
+read returns.
 
 ### State contract
 
@@ -69,16 +80,19 @@ columns that are not already part of the existing DTO contract.
 | Ready parent, B-lite cache is pending | 202 | `pending` plus bounded `retryAfterMs` | Static delayed | None |
 | Ready parent, B-lite DTO is complete | 200 | `complete` | Existing result | Existing plans CTA |
 | Ready parent, no B-lite status row | 200 | `unavailable` | Explicit fallback | Open existing plans |
-| Ready parent, B-lite status is terminal failed | 200 | `failed` | Explicit fallback | Create new preflight on click |
+| Ready parent, B-lite status is terminal failed | 200 | `failed` | Explicit fallback | Open existing plans |
 | Parent is terminal (`blocked` or `consumed`) | 200 | `terminal` | Explicit fallback | Create new preflight on click |
 | Parent is expired or past its expiry | 410 | `expired` | Explicit fallback | Create new preflight on click |
 | Owner/auth/read failure or malformed request | 204 | Client treats as transient delayed | Static delayed | Never auto-retry submission |
 
 The route may preserve the existing `204` fail-open behavior for malformed or
-unauthorized requests. The client treats that fail-open response as a non-terminal
-delayed read and never turns elapsed time into a retry. A valid owned ready parent with
-no B-lite status must use the explicit `unavailable` body so the client can distinguish
-it from `parent_pending`.
+unauthorized requests. It parses `expiresAt` before classifying `pending` or
+`processing`: malformed expiry fails open as `204`, while a past expiry (including on a
+pending row) is authoritative `expired` with `410`. Only a valid, unexpired pending
+parent can become `parent_pending`. The client treats fail-open responses as a
+non-terminal delayed read and never turns elapsed time into a retry. A valid owned ready
+parent with no B-lite status must use the explicit `unavailable` body so the client can
+distinguish it from `parent_pending`.
 
 ### Request binding and retry
 
@@ -89,9 +103,10 @@ past their individual request. No status read reserves a task or calls a provide
 
 The retry callback is page-owned. It captures the normalized target already bound to the
 active preflight, clears the old lifecycle/idempotency state, and calls `startPreflight`
-with that target only after the retry button's click handler runs. It does not invoke
-the B-lite route, worker, provider, or payment endpoint. A normal plans CTA keeps the
-current preflight and only releases the existing legacy plans surface.
+with that target only after an authoritative terminal/expired parent retry button's
+click handler runs. It does not invoke the B-lite route, worker, provider, or payment
+endpoint. A normal plans CTA, including the ready-parent durable B-lite `failed` case,
+keeps the current preflight and only releases the existing legacy plans surface.
 
 The page must reset the precheckout surface and result-heading state before starting the
 new request. The active-surface guard continues to reject stale callbacks from the old
@@ -112,7 +127,8 @@ preflight, so a late old status cannot release plans or replace the new graph.
   `lib/services/precheckout/blite-status-contract.ts`: validate ownership, classify
   parent readiness before reading B-lite, and serialize the finite status union.
 - `components/precheckout-immersive.tsx`: binds one status poll to one preflight,
-  transitions from the graph to delayed/result/fallback state, and emits the dedicated
+  transitions from the graph to delayed/result/fallback state, uses a named 5,000ms
+  slow interval after the graph boundary for unresolved reads, and emits the dedicated
   fallback CTA event only on a user click.
 - `lib/services/precheckout/blite-page-flow.ts`: records the pure state/action rules
   for delayed, unavailable, terminal, expired, and explicit retry transitions so the
@@ -165,7 +181,7 @@ payload is sent to analytics.
   without a click. A still-pending status may remain a static delayed state
   indefinitely, but it never becomes a retry CTA from elapsed time.
 - Plans remain closed until the existing result CTA or the explicit ready-parent/
-  unavailable fallback CTA is clicked.
+  unavailable/failed fallback CTA is clicked.
 - Only authoritative terminal/expired retry creates a new preflight after the click, with no duplicate
   provider/task work from the old ID.
 - StrictMode, remounts, late status reads, and callback rerenders remain idempotent.
@@ -174,10 +190,11 @@ payload is sent to analytics.
 ## Verification and rollback
 
 The focused tests must prove the one-pass graph boundary, static delayed markup,
-parent-pending API classification, ready-parent unavailability, terminal/expired CTA
-actions, retry-on-click request binding, analytics allowlists, and no duplicate status
-or submission calls. Run the focused suites, TypeScript, lint, build, and
-`git diff --check`; then run the full Vitest suite if the worktree permits it.
+parent-pending API classification (including expiry ordering), ready-parent
+unavailability/failed plans behavior, terminal/expired CTA actions, retry-on-click
+request binding, analytics allowlists, and bounded slow polling through T+90 with no
+duplicate status or submission calls. Run the focused suites, TypeScript, lint, build,
+and `git diff --check`; then run the full Vitest suite if the worktree permits it.
 
 Rollback is the application commit revert. No database, provider, payment, or external
 service rollback is required because this design changes no durable schema or worker

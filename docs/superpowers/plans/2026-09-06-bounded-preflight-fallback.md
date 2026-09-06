@@ -4,7 +4,7 @@
 
 **Goal:** Play the precheckout graph once, expose parent/B-lite readiness as bounded client/API states, and make fallback plans/retry actions explicit and idempotent.
 
-**Architecture:** Keep the accepted preflight and B-lite status read as the single request binding. Stop the SVG player after its 20,000ms pass, render a static delayed surface for non-terminal work, and use sanitized `unavailable`, `failed`, and `expired` outcomes to choose a plans or explicit-new-preflight CTA. Extend the closed analytics vocabulary without changing provider, worker, payment, database, or landing-page code.
+**Architecture:** Keep the accepted preflight and B-lite status read as the single request binding. Stop the SVG player after its 20,000ms pass, render a static delayed surface for non-terminal work, and use sanitized ready-parent `unavailable`/`failed` outcomes for the existing plans CTA while only parent `terminal`/`expired` outcomes enable an explicit-new-preflight CTA. Extend the closed analytics vocabulary without changing provider, worker, payment, database, or landing-page code.
 
 **Tech Stack:** Next.js 16 App Router, React 19, TypeScript, Vitest/jsdom, Supabase-owned preflight status and existing B-lite terminal store.
 
@@ -191,6 +191,11 @@ it('distinguishes a pending parent before reading B-lite', async () => {
 });
 ```
 
+Add the ordering regression explicitly: a pending row whose `expiresAt` is in the
+past must return `410` `{ state: 'expired' }` without calling `readStatus`, while a
+pending row with a malformed `expiresAt` fails open as `204` without calling
+`readStatus`. These assertions must run before the pending-parent branch is changed.
+
 - [ ] **Step 4: Run route tests and record RED.**
 
 Run:
@@ -218,7 +223,7 @@ z.object({ state: z.literal('expired') }).strict(),
 
 Export its inferred type and helper constructors that parse before returning. Do not add raw parent status, database error, provider, or target fields.
 
-In the route, classify the owned `StoredPreflight` before calling `readStatus`: `pending`/`processing` returns a parsed `parent_pending` 202 body; `expired` or an expiry timestamp at/before `Date.now()` returns a parsed `expired` 410 body; `blocked`/`consumed` returns a sanitized `terminal` 200 body without exposing the block code. For a ready parent, a null durable status returns a parsed `unavailable` 200 body; existing complete/pending/failed durable rows continue through `toBliteStatusV1`. Keep all exception paths fail-open `204` and preserve `Cache-Control: no-store`.
+In the route, parse and validate `expiresAt` before classifying the owned `StoredPreflight`: malformed expiry fails open as `204`, and `expired` or an expiry timestamp at/before `Date.now()` returns a parsed `expired` 410 body even when the row is still `pending`/`processing`; only then may a valid unexpired `pending`/`processing` row return `parent_pending` 202. `blocked`/`consumed` returns a sanitized `terminal` 200 body without exposing the block code. For a ready parent, a null durable status returns a parsed `unavailable` 200 body; existing complete/pending/failed durable rows continue through `toBliteStatusV1`, with durable `failed` remaining a ready-parent plans fallback. Keep all exception paths fail-open `204` and preserve `Cache-Control: no-store`.
 
 - [ ] **Step 6: Run status-contract and route tests to GREEN.**
 
@@ -243,7 +248,7 @@ git commit -m "fix: expose bounded preflight status states"
 
 - [ ] **Step 1: Write the failing pure state tests.**
 
-Add focused tests for a status-to-surface resolver. The resolver must map `parent_pending`, B-lite `pending`, and transient reads to a CTA-free delayed surface, `unavailable` to a plans action, and `failed`/`terminal`/`expired` to a retry action. Add a second test proving `canRetryPrecheckout` is true only for authoritative terminal/expired outcomes and false for delayed, transient, and unavailable states; add a request-binding test proving retry receives the same target but requires an explicit `retry` action before creating a new lifecycle.
+Add focused tests for a status-to-surface resolver. The resolver must map `parent_pending`, B-lite `pending`, and transient reads to a CTA-free delayed surface, `unavailable` and durable B-lite `failed` to a plans action, and parent `terminal`/`expired` to a retry action. Add a second test proving `canRetryPrecheckout` is true only for authoritative parent terminal/expired outcomes and false for delayed, transient, unavailable, and durable B-lite failed states; add a request-binding test proving retry receives the same target but requires an explicit `retry` action before creating a new lifecycle.
 
 ```ts
 it.each([
@@ -251,7 +256,7 @@ it.each([
     ['pending', 'delayed'],
     ['transient', 'delayed'],
     ['unavailable', 'plans'],
-    ['failed', 'retry'],
+    ['failed', 'plans'],
     ['terminal', 'retry'],
     ['expired', 'retry'],
 ] as const)('maps %s to the bounded %s action', (status, expected) => {
@@ -259,7 +264,7 @@ it.each([
 });
 
 it('allows a new preflight only after an explicit terminal/expiry retry action', () => {
-    expect(canRetryPrecheckout('failed')).toBe(true);
+    expect(canRetryPrecheckout('failed')).toBe(false);
     expect(canRetryPrecheckout('expired')).toBe(true);
     expect(canRetryPrecheckout('parent_pending')).toBe(false);
     expect(canRetryPrecheckout('transient')).toBe(false);
@@ -286,19 +291,22 @@ export type PrecheckoutFallbackAction = 'delayed' | 'plans' | 'retry';
 export function resolvePrecheckoutFallbackAction(
     status: Exclude<PrecheckoutBrowserStatus, 'complete'>,
 ): PrecheckoutFallbackAction {
-    if (status === 'unavailable') return 'plans';
-    if (status === 'failed' || status === 'terminal' || status === 'expired') return 'retry';
+    if (status === 'unavailable' || status === 'failed') return 'plans';
+    if (status === 'terminal' || status === 'expired') return 'retry';
     return 'delayed';
 }
 
 export function canRetryPrecheckout(
     status: Exclude<PrecheckoutBrowserStatus, 'complete'>,
 ): boolean {
-    return status === 'failed' || status === 'terminal' || status === 'expired';
+    return status === 'terminal' || status === 'expired';
 }
 ```
 
-Keep the existing reducer behavior and idempotency tests intact; these helpers are the single mapping used by the immersive component and the retry decision.
+Keep the existing reducer behavior and idempotency tests intact; these helpers are the
+single mapping used by the immersive component and the retry decision. In particular,
+`failed` is a ready-parent plans action, and `canRetryPrecheckout` returns true only
+for authoritative parent `terminal` or `expired`.
 
 - [ ] **Step 4: Run the pure state tests to GREEN.**
 
@@ -402,7 +410,8 @@ git commit -m "feat: track bounded precheckout fallback CTA"
 
 - [ ] **Step 1: Write the failing immersive state tests.**
 
-Add tests with a valid `parent_pending` 202 body, ready-parent `unavailable` 200 body, terminal `failed` body, and `expired` 410 body.
+Add tests with a valid `parent_pending` 202 body, ready-parent `unavailable` 200 body,
+ready-parent durable `failed` 200 body, parent terminal 200 body, and `expired` 410 body.
 
 ```tsx
 it('shows a static delayed state after the one graph pass for a pending parent', async () => {
@@ -428,7 +437,7 @@ it('shows a static delayed state after the one graph pass for a pending parent',
 });
 ```
 
-Add one test asserting ready-parent `unavailable` shows the plans label and clicking it emits `precheckout_blite_fallback_cta_clicked` plus `precheckout_plan_gate_reached` and calls `onGoToPlans` once. Add terminal/expired tests asserting their button is `다시 확인하기`, no callback runs before click, and exactly one `onRetry` runs after click. Advance beyond T+90 and assert a `parent_pending`/B-lite `pending` delayed state remains static, has no retry CTA, and does not create a new preflight until an authoritative terminal/expired response and explicit click.
+Add one test asserting ready-parent `unavailable` shows the plans label and clicking it emits `precheckout_blite_fallback_cta_clicked` plus `precheckout_plan_gate_reached` and calls `onGoToPlans` once. Add a ready-parent durable `failed` test asserting the same existing plans action, `parent_state: 'ready'`, and no `onRetry`. Add terminal/expired tests asserting their button is `다시 확인하기`, no callback runs before click, and exactly one `onRetry` runs after click. Advance beyond T+90 and assert a `parent_pending`/B-lite `pending` delayed state remains static, has no retry CTA, and does not create a new preflight until an authoritative terminal/expired response and explicit click; assert the status fetch count stays within the fast-pass plus 5-second slow-poll bound.
 
 - [ ] **Step 2: Run immersive tests and record RED.**
 
@@ -444,14 +453,14 @@ In `PrecheckoutImmersive`:
 
 - Extend `BrowserBliteStatus` with `parent_pending`, `expired`, `terminal`, and `transient` handling as represented by the status contract; preserve complete DTO validation and request coalescing.
 - Mount `PrecheckoutDemo` in waiting mode with `continueAfterFirstPass={false}` (or remove the prop) and `onInitialPassComplete`.
-- Keep `exitRef` null for delayed state. At the initial boundary call `finishExit('delayed')` only when no result/terminal exit has already been requested. Do not mark delayed as a settled terminal path, so a later complete/failed/expired status can replace the static state.
+- Keep `exitRef` null for delayed state. At the initial boundary call `setView('delayed')` only when no result/terminal exit has already been requested. Do not mark delayed as a settled terminal path, so a later complete/failed/expired status can replace the static state.
 - Set `initialPassCompleteRef` before resolving a late status. A result or authoritative terminal/expired fallback received after the boundary settles immediately; a status received before it settles at exactly the boundary. Parent-pending, B-lite-pending, and transient reads never settle the flow into a retry action.
-- Map `parent_pending` and B-lite `pending` to `PrecheckoutDelayedStatus`; map `unavailable` to a plans fallback; map `failed`, `terminal`, and `expired` to a retry fallback. Map transient/fail-open reads to the same static delayed surface. Do not use a client display bound to synthesize retry; a still-pending status remains delayed indefinitely, including after T+90, until an authoritative terminal/expired response arrives.
-- Keep the status polling interval bounded at 250–5,000ms for pending and 1,000ms for transient reads; clear all timers and do not create a second poll in flight.
-- Emit `BLITE_FALLBACK_SELECTED` once on fallback selection with only bounded `parent_state`/`fallback_reason` fields. Emit `BLITE_FALLBACK_CTA_CLICKED` once inside the fallback button handler, then call either `onGoToPlans` or `onRetry`; never call either callback during render or polling.
+- Map `parent_pending` and B-lite `pending` to `PrecheckoutDelayedStatus`; map `unavailable` and durable B-lite `failed` to a plans fallback; map parent `terminal` and `expired` to a retry fallback. Map transient/fail-open reads to the same static delayed surface. Do not use a client display bound to synthesize retry; a still-pending status remains delayed indefinitely, including after T+90, until an authoritative parent terminal/expired response arrives.
+- During the one 20,000ms visual pass, honor only bounded fast retry hints (250–2,000ms). Once `onInitialPassComplete` fires, use the named `PRECHECKOUT_BLITE_SLOW_POLL_INTERVAL_MS = 5_000` interval for `parent_pending`, B-lite `pending`, and transient/fail-open reads; clear all timers and do not create a second poll in flight. The next slow read must still immediately accept complete/terminal/expired state.
+- Emit `BLITE_FALLBACK_SELECTED` once on fallback selection with only bounded `parent_state`/`fallback_reason` fields. Emit `BLITE_FALLBACK_CTA_CLICKED` once inside the fallback button handler, then call either `onGoToPlans` or `onRetry`; never call either callback during render or polling. A durable B-lite `failed` state calls `onGoToPlans`; only parent `terminal`/`expired` calls `onRetry`.
 - Keep result, gender confirmation, rejection, demo error, and heading-announcement behavior unchanged except for the new dedicated fallback-click event.
 
-Update `FallbackScreen` to accept `action: 'plans' | 'retry'`, `onRetry`, and a boolean indicating whether this is a B-lite fallback. Use `다시 확인하기` only for retry action and preserve `상세 분석 보기` for plans action and gender rejection. Do not show B-lite failure details.
+Update `FallbackScreen` to accept `action: 'plans' | 'retry'` and a continuation callback. Use `다시 확인하기` only for parent terminal/expiry retry action and preserve `상세 분석 보기` for ready-parent plans action and gender rejection. Do not show B-lite failure details.
 
 - [ ] **Step 4: Run immersive tests to GREEN.**
 
@@ -472,7 +481,7 @@ it('owns terminal retry in the page and starts a new preflight only from the ret
     expect(page).toContain('const handleRetryPreflight = useCallback');
     expect(page).toContain('setPrecheckoutSurface({ preflightId: null, surface: \'awaiting\' });');
     expect(page).toContain('reset();');
-    expect(page).toContain('void startPreflight(target);');
+    expect(page).toContain('void startPreflight(retryTarget);');
 });
 ```
 
@@ -486,7 +495,7 @@ Expected RED: the page currently passes no retry callback and has no handler tha
 
 - [ ] **Step 7: Implement the page-owned explicit retry.**
 
-In `app/analyze/page.tsx`, add a stable `handleRetryPreflight` callback that captures `targetInstagramId`, returns when no target is bound, clears `bliteResultShown`, sets the active surface to `{ preflightId: null, surface: 'awaiting' }`, calls the existing `reset()` to clear coordinator/idempotency state, and then calls `void startPreflight(target)`. Pass it as `onRetry` to `PrecheckoutImmersive`. Do not change `app/page.tsx` or landing copy. Keep normal `onGoToPlans` unchanged so unavailable plans do not create a new preflight.
+In `app/analyze/page.tsx`, add a stable `handleRetryPreflight` callback that captures `targetInstagramId` as `retryTarget`, returns when no target is bound, clears `bliteResultShown`, sets the active surface to `{ preflightId: null, surface: 'awaiting' }`, calls the existing `reset()` to clear coordinator/idempotency state, and then calls `void startPreflight(retryTarget)`. Pass it as `onRetry` to `PrecheckoutImmersive`. Do not change `app/page.tsx` or landing copy. Keep normal `onGoToPlans` unchanged so unavailable plans and durable B-lite `failed` do not create a new preflight.
 
 - [ ] **Step 8: Run page tests to GREEN.**
 
