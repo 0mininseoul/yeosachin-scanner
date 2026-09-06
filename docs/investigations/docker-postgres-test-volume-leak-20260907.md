@@ -14,9 +14,9 @@ Confidence: high. The container-start path, the image's `VOLUME` declaration, th
 
 The harness used `docker run -d --rm ...` and tore down with `docker rm -f <name>`. Both halves fail to reap the anonymous volume in the cases that mattered:
 
-- `--rm` removes a container's anonymous volumes only when the container **exits on its own**. It does not cover a force removal.
+- `--rm` can reap a container's anonymous volumes during its automatic removal, but it does not replace an explicit `rm -f -v` for manual force-removal or failed-initialization paths.
 - `docker rm -f` without `-v` **never** removes the anonymous volume, and it races the daemon's auto-remove routine for an `AutoRemove=true` container.
-- Cleanup must not rely solely on `afterAll`: it does not provide cleanup when `beforeAll` throws before reaching its teardown pair. A `process.once('exit')` handler is only a best-effort normal-exit path; it cannot guarantee cleanup for `SIGKILL`, hard timeouts, or other abrupt worker termination.
+- Cleanup must not rely solely on `afterAll` after partial initialization. Each failure boundary should close connected clients and attempt container removal. A `process.once('exit')` handler is only a best-effort normal-exit path; it cannot guarantee cleanup for `SIGKILL`, hard timeouts, or other abrupt worker termination.
 
 Those interrupted, timed-out, or force-removed paths could orphan roughly 82MB per affected run; this does not mean every run leaked. The audit identified 613 matching orphaned volumes.
 
