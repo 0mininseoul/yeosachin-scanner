@@ -5,6 +5,7 @@ import { Client } from 'pg';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { getAnalysisPlan, PLAN_IDS, type PlanId } from '@/lib/domain/analysis/plan-catalog';
 import { getBetaApifyOperationBudgetCatalog } from './beta-apify-operation-budget';
+import { buildPostgresRemoveArgs, buildPostgresRunArgs } from './postgres-test-container';
 
 // This is intentionally a real PostgreSQL test.  It starts a uniquely named
 // postgres:16 container unless a caller supplies the same URL-style opt-in
@@ -12,7 +13,28 @@ import { getBetaApifyOperationBudgetCatalog } from './beta-apify-operation-budge
 const suppliedUrl = process.env.BETA_APIFY_POSTGRES_TEST_URL;
 const containerName = `beta-apify-credit-${randomUUID().replaceAll('-', '')}`;
 let databaseUrl = suppliedUrl;
-let containerStarted = false;
+// Flipped before `docker run` is issued, so a run that creates the container and then
+// fails mid-start is still torn down.  Removal is idempotent and by name, so attempting
+// it for a container that was never created is harmless.
+let containerAttempted = false;
+let containerReaped = false;
+
+// Teardown must survive a partial failure: `afterAll` does not run when `beforeAll`
+// throws early, and neither hook runs when the worker is killed by a timeout or signal.
+// This synchronous reaper is safe to call repeatedly and is also registered on process
+// exit so no path leaves a container, or the storage it owns, behind.
+function reapPostgresContainer(): void {
+    if (!containerAttempted || containerReaped) return;
+    containerReaped = true;
+    try {
+        execFileSync('docker', buildPostgresRemoveArgs(containerName), {
+            stdio: 'ignore',
+            timeout: 15_000,
+        });
+    } catch {
+        // `--rm` may already have removed a container that exited unexpectedly.
+    }
+}
 let first: Client;
 let second: Client;
 let observer: Client;
@@ -581,13 +603,14 @@ async function seedActivatedBetaRequest(client: Client, snapshotLimit = 10): Pro
 describePostgres('beta Apify credit PostgreSQL 16 concurrency', () => {
     beforeAll(async () => {
         if (!databaseUrl) {
-            const id = execFileSync('docker', [
-                'run', '-d', '--rm', '--name', containerName,
-                '-e', 'POSTGRES_PASSWORD=postgres', '-e', 'POSTGRES_DB=beta_credit_test',
-                '-p', '127.0.0.1::5432', 'postgres:16-alpine',
-            ], { encoding: 'utf8' }).trim();
+            process.once('exit', reapPostgresContainer);
+            containerAttempted = true;
+            const id = execFileSync('docker', buildPostgresRunArgs({
+                containerName,
+                password: 'postgres',
+                database: 'beta_credit_test',
+            }), { encoding: 'utf8' }).trim();
             if (!id) throw new Error('BETA_APIFY_POSTGRES_DOCKER_START_FAILED');
-            containerStarted = true;
             const port = execFileSync('docker', ['port', containerName, '5432/tcp'], { encoding: 'utf8' })
                 .trim().split(':').at(-1);
             databaseUrl = `postgres://postgres:postgres@127.0.0.1:${port}/beta_credit_test`;
@@ -607,13 +630,7 @@ describePostgres('beta Apify credit PostgreSQL 16 concurrency', () => {
                 .filter((client): client is Client => Boolean(client));
             await Promise.allSettled(clients.map(client => client.end()));
         } finally {
-            if (containerStarted) {
-                try {
-                    execFileSync('docker', ['rm', '-f', containerName], { stdio: 'ignore' });
-                } catch {
-                    // `--rm` may already have removed a container that exited unexpectedly.
-                }
-            }
+            reapPostgresContainer();
         }
     }, 30_000);
 
