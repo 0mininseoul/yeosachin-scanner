@@ -57,21 +57,18 @@ export async function POST(request: Request): Promise<NextResponse> {
             : await preflightStore.findForOwner(parsed.preflightId, user.id, { client });
         if (!stored) return empty();
 
+        const expiresAtMs = Date.parse(stored.expiresAt);
+        if (!Number.isFinite(expiresAtMs)) return empty();
+        if (stored.status === 'expired' || expiresAtMs <= Date.now()) {
+            return statusResponse({ state: 'expired' }, 410);
+        }
+
         if (stored.status === 'pending' || stored.status === 'processing') {
             return statusResponse({
                 state: 'parent_pending',
                 parentState: stored.status,
                 retryAfterMs: 1_000,
             }, 202);
-        }
-
-        const expiresAtMs = Date.parse(stored.expiresAt);
-        if (
-            stored.status === 'expired'
-            || !Number.isFinite(expiresAtMs)
-            || expiresAtMs <= Date.now()
-        ) {
-            return statusResponse({ state: 'expired' }, 410);
         }
 
         if (stored.status === 'blocked' || stored.status === 'consumed') {
