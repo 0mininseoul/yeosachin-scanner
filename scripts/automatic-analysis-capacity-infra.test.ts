@@ -1546,13 +1546,98 @@ describe('automatic-analysis infrastructure contracts', () => {
                 ],
                 hiddenProductionEnvCount: 0,
             },
-            args: ['--check'],
+            iam: {
+                bindings: [{
+                    role: 'roles/run.invoker',
+                    members: ['allUsers'],
+                }],
+            },
+            args: ['--apply', '--reconcile-iam'],
         });
         expect(result.status).not.toBe(0);
         expect(`${result.stdout}\n${result.stderr}`).toContain(
             'next-deploy Vercel paid environment',
         );
         expect(result.calls).not.toContain('run deploy');
+        expect(result.calls).not.toContain('run services set-iam-policy');
+    });
+
+    it('rejects duplicate paid next-deploy production environment metadata before IAM mutation', () => {
+        const result = fakeRun({
+            role: 'paid',
+            queueTasks: [],
+            vercelProjectEnvironment: {
+                envs: [
+                    { key: 'ANALYSIS_V2_TASKS_SERVICE_ACCOUNT_EMAIL', target: ['production'] },
+                    { key: 'ANALYSIS_V2_TASKS_SERVICE_ACCOUNT_EMAIL', target: ['production'] },
+                    { key: 'ANALYSIS_V2_TASKS_TARGET_URL', target: ['production'] },
+                    { key: 'ANALYSIS_V2_TASKS_OIDC_AUDIENCE', target: ['production'] },
+                ],
+                hiddenProductionEnvCount: 0,
+            },
+            iam: {
+                bindings: [{
+                    role: 'roles/run.invoker',
+                    members: ['allUsers'],
+                }],
+            },
+            args: ['--apply', '--reconcile-iam'],
+        });
+        expect(result.status).not.toBe(0);
+        expect(`${result.stdout}\n${result.stderr}`).toContain(
+            'next-deploy Vercel paid environment',
+        );
+        expect(result.calls).not.toContain('run deploy');
+        expect(result.calls).not.toContain('run services set-iam-policy');
+    });
+
+    it.each([
+        ['target userinfo', { ANALYSIS_V2_TASKS_TARGET_URL: 'https://user:secret@paid.example.com/api/analysis/v2/worker' }],
+        ['target query', { ANALYSIS_V2_TASKS_TARGET_URL: 'https://paid.example.com/api/analysis/v2/worker?probe=1' }],
+        ['target hash', { ANALYSIS_V2_TASKS_TARGET_URL: 'https://paid.example.com/api/analysis/v2/worker#probe' }],
+        ['target wrong path', { ANALYSIS_V2_TASKS_TARGET_URL: 'https://paid.example.com/api/analysis/not-worker' }],
+        ['audience query', { ANALYSIS_V2_TASKS_OIDC_AUDIENCE: 'https://paid.example.com?probe=1' }],
+        ['audience hash', { ANALYSIS_V2_TASKS_OIDC_AUDIENCE: 'https://paid.example.com#probe' }],
+        ['audience path', { ANALYSIS_V2_TASKS_OIDC_AUDIENCE: 'https://paid.example.com/audience' }],
+        ['audience origin', { ANALYSIS_V2_TASKS_OIDC_AUDIENCE: 'https://other.example.com' }],
+    ] as const)('rejects paid producer %s before IAM or Cloud Run mutation', (_name, environment) => {
+        const result = fakeRun({
+            role: 'paid',
+            environment,
+            iam: {
+                bindings: [{
+                    role: 'roles/run.invoker',
+                    members: ['allUsers'],
+                }],
+            },
+            args: ['--apply', '--reconcile-iam'],
+        });
+        expect(result.status).not.toBe(0);
+        expect(result.calls).not.toContain('run deploy');
+        expect(result.calls).not.toContain('run services set-iam-policy');
+        expect(`${result.stdout}\n${result.stderr}`).not.toContain('secret');
+    });
+
+    it.each([
+        ['preflight aggregate readiness false', 'preflight', { ready: false }],
+        ['preflight missing paid fingerprint', 'preflight', { paidProducerConfigFingerprint: undefined }],
+        ['paid aggregate readiness false', 'paid', { ready: false }],
+        ['paid missing preflight fingerprint', 'paid', { preflightProducerConfigFingerprint: undefined }],
+    ] as const)('rejects %s before IAM or Cloud Run mutation', (_name, role, publicFreeze) => {
+        const result = fakeRun({
+            role,
+            publicFreeze,
+            iam: {
+                bindings: [{
+                    role: 'roles/run.invoker',
+                    members: ['allUsers'],
+                }],
+            },
+            args: ['--apply', '--reconcile-iam'],
+        });
+        expect(result.status).not.toBe(0);
+        expect(result.calls).not.toContain('run deploy');
+        expect(result.calls).not.toContain('run services set-iam-policy');
     });
 
     it.each([
@@ -2607,10 +2692,10 @@ describe('automatic-analysis infrastructure contracts', () => {
         expect(iamMutationIndex).toBeLessThan(deployIndex);
     });
 
-    // The active public runtime exposes a producer fingerprint only for the
-    // preflight producer contract, so there is no equivalent published evidence
-    // that a rotated paid caller is already live.  The exceptional flag is
-    // therefore refused for paid outright, before any observation or mutation.
+    // Public readiness v2 exposes producer fingerprints for both role
+    // contracts. The exceptional flag remains preflight-only because only that
+    // transition was reviewed/authorized and the production audit found no
+    // paid identity rotation need; it is refused for paid before observation.
     it('refuses the exceptional identity roll-forward for the paid role before observing anything', () => {
         const result = identityRollForwardRun('paid');
         expect(result.status).not.toBe(0);

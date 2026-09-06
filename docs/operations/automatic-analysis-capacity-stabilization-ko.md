@@ -99,15 +99,15 @@ identity, 그리고 현재 revision에 아예 없던 role enqueuer 환경값을 
 `--allow-initial-identity-roll-forward`를 명시해야 한다. 이전 identity는 절대
 코드에 넣지 않고 실행할 때마다 외부에서 공급한다.
 
-**이 허용은 preflight 전용이다.** 활성 public runtime은 preflight producer
-contract에 대해서만 producer configuration fingerprint를 공개한다. 따라서 회전된
-caller/target/audience가 이미 라이브 producer contract임을 공개된 증거로 증명할
-수 있는 role은 preflight뿐이다. paid producer에는 이에 상응하는 공개 증거가
-없으므로 `--role=paid`에서는 관측이나 mutation 이전에 곧바로 거부한다. 이는 현재
-공개된 증거의 한계이지 paid에 producer가 없다는 뜻이 아니다. paid identity 회전은
-별도의 검토된 증거 경로가 필요하며 여기서는 범위 밖이다. 일반 paid apply 동작은
-바뀌지 않고 그대로 exact이다. paid task caller, target URL, OIDC audience drift는
-여전히 fail-closed다.
+**이 허용은 preflight 전용이다.** Public readiness schema v2는 preflight와
+paid 양쪽 producer configuration fingerprint를 공개하며, 일반 paid apply는 paid
+fingerprint와 완전한 paid producer 증거 체인이 일치해야 진행된다. 다만
+exceptional identity roll-forward는 해당 전환만 검토·승인되었고 production audit에서
+paid identity rotation 필요가 없었기 때문에 계속 preflight 전용이다.
+`--allow-initial-identity-roll-forward`는 따라서 `--role=paid`에서 관측이나
+mutation 이전에 거부하며, paid exceptional identity roll-forward는 활성화하지
+않는다. 일반 paid apply는 exact 동작을 유지하고 paid task caller, target URL,
+OIDC audience 또는 paid runtime fingerprint drift를 계속 fail-closed 처리한다.
 
 다음 조건이 전부 성립할 때만 허용한다.
 

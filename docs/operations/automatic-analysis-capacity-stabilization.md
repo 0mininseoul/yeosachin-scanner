@@ -101,17 +101,16 @@ verification is exact and rejects all three, so this rotation needs the explicit
 `--allow-initial-identity-roll-forward` allowance. Never hardcode the prior
 identities anywhere; supply them per run.
 
-**The allowance is preflight-only.** The active public runtime publishes a
-producer-configuration fingerprint for the preflight producer contract only, so
-preflight is the sole role where the deployer can prove from published evidence
-that the rotated caller/target/audience is already the live producer contract
-before the worker adopts it. There is no equivalent published evidence for the
-paid producer, so `--allow-initial-identity-roll-forward` is refused outright for
-`--role=paid`, before any observation or mutation. This is a limitation of the
-current published evidence, not a claim that paid has no producer: a paid
-identity rotation needs its own reviewed evidence path and is out of scope here.
-Ordinary paid apply behaviour is unchanged and stays exact — a drifted paid task
-caller, target URL, or OIDC audience still fails closed.
+**The allowance is preflight-only.** Public readiness schema v2 publishes both
+role producer-configuration fingerprints, and ordinary paid apply is gated by
+the paid fingerprint plus the complete paid producer evidence chain. The
+exceptional identity roll-forward remains preflight-only because only that
+transition was reviewed and authorized, and the production audit found no paid
+identity rotation need. `--allow-initial-identity-roll-forward` is therefore
+refused outright for `--role=paid`, before any observation or mutation; paid
+exceptional identity roll-forward is not enabled. Ordinary paid apply remains
+exact — a drifted paid task caller, target URL, OIDC audience, or paid runtime
+fingerprint still fails closed.
 
 The allowance is accepted only when every one of these holds:
 

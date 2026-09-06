@@ -82,9 +82,12 @@ Modes:
   --allow-initial-identity-roll-forward is preflight-only and valid only with an
              explicit --apply plus --reconcile-iam when an existing serving
              initial preflight service must adopt rotated task caller, enqueuer,
-             and runtime identities. Paid is refused outright: the active public
-             runtime publishes a producer fingerprint only for the preflight
-             producer contract. It requires target and observed stage initial,
+             and runtime identities. Paid is refused outright: public readiness
+             v2 publishes both role producer fingerprints and ordinary paid
+             apply is gated by the paid fingerprint. This exceptional transition
+             remains preflight-only because only it was reviewed/authorized and
+             the production audit found no paid identity rotation need. It
+             requires target and observed stage initial,
              an exact externally supplied prior identity/source assertion set,
              the exact PAUSED and observably empty full target queue resource,
              pairwise-distinct desired workload identities across both roles,
@@ -781,27 +784,30 @@ verify_legacy_quiescence() {
   jq -e 'type == "array" and length == 0' <<<"$task_json" >/dev/null \
     || die "legacy Cloud Tasks queue is not empty"
   public_json="$(call_public_freeze_readiness)" \
-    || die "public V1 freeze readiness observation failed"
-  jq -e --arg source_sha "$source_sha" \
-    --arg target_resource "$legacy_target_resource" '
+    || die "public freeze readiness observation failed"
+  jq -e --arg schema_version "$PUBLIC_READINESS_SCHEMA_VERSION" \
+    --arg source_sha "$source_sha" \
+    --arg target_resource "$legacy_target_resource" \
+    --arg preflight_version "$PREFLIGHT_PRODUCER_CONFIG_FINGERPRINT_VERSION" \
+    --arg paid_version "$PAID_PRODUCER_CONFIG_FINGERPRINT_VERSION" '
     (keys | sort) == ["freezeMode", "legacyTargetResource", "paidProducerConfigFingerprint", "paidProducerConfigFingerprintVersion", "paidProducerConfigReady", "preflightProducerConfigFingerprint", "preflightProducerConfigFingerprintVersion", "preflightProducerConfigReady", "publicFreezeEnabled", "ready", "routes", "schemaVersion", "sourceSha", "stage"]
-    and .schemaVersion == "analysis-public-freeze-readiness-v2"
+    and .schemaVersion == $schema_version
     and .ready == true
     and (.stage == "initial" or .stage == "expanded")
     and .freezeMode == "drain-and-block"
     and .publicFreezeEnabled == true
     and .sourceSha == $source_sha
     and .legacyTargetResource == $target_resource
-    and .preflightProducerConfigFingerprintVersion == "preflight-producer-config-v1"
+    and .preflightProducerConfigFingerprintVersion == $preflight_version
     and .preflightProducerConfigReady == true
     and (.preflightProducerConfigFingerprint | type == "string" and test("^[0-9a-f]{64}$"))
-    and .paidProducerConfigFingerprintVersion == "paid-producer-config-v1"
+    and .paidProducerConfigFingerprintVersion == $paid_version
     and .paidProducerConfigReady == true
     and (.paidProducerConfigFingerprint | type == "string" and test("^[0-9a-f]{64}$"))
     and ((.routes | keys | sort) == ["/api/analysis/run", "/api/analysis/start", "/api/analysis/step"])
     and ([.routes[] | select(.gateState == "frozen" and .expectedStatus == 410 and .gateBeforeRuntime == true)] | length) == 3
   ' <<<"$public_json" >/dev/null \
-    || die "public V1 service does not expose exact gate-before-runtime freeze evidence"
+    || die "public freeze readiness does not expose exact gate-before-runtime freeze evidence"
   probe_legacy_route() {
     local route="$1"
     local body_file
@@ -1079,16 +1085,6 @@ EOF
   log "verified: next-deploy Vercel $role_label environment has required production keys"
 }
 
-verify_preflight_next_deploy_environment() {
-  [[ "$role" == 'preflight' ]] || return 0
-  verify_role_next_deploy_environment "$@"
-}
-
-verify_paid_next_deploy_environment() {
-  [[ "$role" == 'paid' ]] || return 0
-  verify_role_next_deploy_environment "$@"
-}
-
 verify_role_runtime_fingerprint() {
   local role_label
   local producer_version
@@ -1137,15 +1133,51 @@ verify_role_runtime_fingerprint() {
   public_json="$(call_public_freeze_readiness)" \
     || die "active Vercel $role_label producer readiness observation failed"
   jq -e \
+    --arg schema_version "$PUBLIC_READINESS_SCHEMA_VERSION" \
+    --arg source_sha "$source_sha" \
+    --arg target_resource "$legacy_target_resource" \
     --arg version "$producer_version" \
     --arg expected "$expected_fingerprint" \
+    --arg preflight_version "$PREFLIGHT_PRODUCER_CONFIG_FINGERPRINT_VERSION" \
+    --arg paid_version "$PAID_PRODUCER_CONFIG_FINGERPRINT_VERSION" \
     --arg producer_version_field "${role_label}ProducerConfigFingerprintVersion" \
     --arg producer_fingerprint_field "$producer_fingerprint_field" \
     --arg producer_ready_field "$producer_ready_field" \
     '
       type == "object"
-      and .schemaVersion == "analysis-public-freeze-readiness-v2"
+      and ((keys | sort) == [
+        "freezeMode",
+        "legacyTargetResource",
+        "paidProducerConfigFingerprint",
+        "paidProducerConfigFingerprintVersion",
+        "paidProducerConfigReady",
+        "preflightProducerConfigFingerprint",
+        "preflightProducerConfigFingerprintVersion",
+        "preflightProducerConfigReady",
+        "publicFreezeEnabled",
+        "ready",
+        "routes",
+        "schemaVersion",
+        "sourceSha",
+        "stage"
+      ])
+      and .schemaVersion == $schema_version
       and .ready == true
+      and (.stage == "initial" or .stage == "expanded")
+      and .freezeMode == "drain-and-block"
+      and .publicFreezeEnabled == true
+      and .sourceSha == $source_sha
+      and .legacyTargetResource == $target_resource
+      and .preflightProducerConfigFingerprintVersion == $preflight_version
+      and .preflightProducerConfigReady == true
+      and (.preflightProducerConfigFingerprint | type == "string")
+      and (.preflightProducerConfigFingerprint | test("^[0-9a-f]{64}$"))
+      and .paidProducerConfigFingerprintVersion == $paid_version
+      and .paidProducerConfigReady == true
+      and (.paidProducerConfigFingerprint | type == "string")
+      and (.paidProducerConfigFingerprint | test("^[0-9a-f]{64}$"))
+      and ((.routes | keys | sort) == ["/api/analysis/run", "/api/analysis/start", "/api/analysis/step"])
+      and ([.routes[] | select(.gateState == "frozen" and .expectedStatus == 410 and .gateBeforeRuntime == true)] | length) == 3
       and .[$producer_version_field] == $version
       and .[$producer_ready_field] == true
       and (.[ $producer_fingerprint_field ] | type == "string")
@@ -1159,16 +1191,6 @@ verify_role_runtime_fingerprint() {
     paid_runtime_fingerprint_verified='true'
   fi
   log "verified: active Vercel $role_label producer fingerprint agrees with the reviewed contract"
-}
-
-verify_preflight_runtime_fingerprint() {
-  [[ "$role" == 'preflight' ]] || return 0
-  verify_role_runtime_fingerprint
-}
-
-verify_paid_runtime_fingerprint() {
-  [[ "$role" == 'paid' ]] || return 0
-  verify_role_runtime_fingerprint
 }
 
 verify_vercel_public_deployment() {
@@ -1669,16 +1691,6 @@ verify_active_queue_oidc_contract() {
     ' <<<"$queue_tasks" >/dev/null 2>&1 \
     || die "$role_label queue task OIDC contract is missing or drifted"
   log "verified: $role_label queue task OIDC identity, target, and audience agree"
-}
-
-verify_preflight_queue_oidc_contract() {
-  [[ "$role" == "preflight" ]] || return 0
-  verify_active_queue_oidc_contract
-}
-
-verify_paid_queue_oidc_contract() {
-  [[ "$role" == "paid" ]] || return 0
-  verify_active_queue_oidc_contract
 }
 
 write_exact_service_iam_policy() {
@@ -2642,10 +2654,11 @@ if service_exists; then
     verify_initial_identity_roll_forward_preconditions
     allow_existing_service_predeploy_initial_identity_roll_forward="true"
   fi
-  # Paid producer evidence is an independent active-runtime gate.  Verify it
-  # before verify_service_contract can reconcile IAM, then verify it again at
-  # the existing pre-deploy/promotion barriers to catch evidence drift.
-  if [[ "$role" == "paid" ]]; then
+  # Ordinary active apply for either role must prove the complete public
+  # producer evidence chain and queue contract before verify_service_contract
+  # can reconcile IAM.  The exceptional preflight identity path has its own
+  # dedicated barrier below and is intentionally not enabled for paid.
+  if [[ "$allow_initial_identity_roll_forward" != "true" ]]; then
     verify_vercel_public_deployment
     verify_active_queue_oidc_contract
   fi
