@@ -46,10 +46,10 @@ after the user clicks.
 4. A durable B-lite terminal failure or an expired parent becomes an explicit retry
    CTA. The retry is inert until clicked; the click starts a new preflight through the
    existing page/hook path.
-5. If a transient/pending read remains unresolved through the client display bound,
-   show the same terminal-style retry action with the bounded reason
-   `unresolved_at_90`. There is no route from this state to an indefinite loading
-   spinner or an implicit new request.
+5. If a transient/pending read remains unresolved, keep the same request bound to a
+   static delayed state indefinitely. Elapsed client time, including T+90, never
+   synthesizes a retry action or a new request. Only an authoritative terminal or
+   expired state can produce the retry CTA.
 
 The `parent_pending` response is deliberately not treated as B-lite unavailability.
 It renders the delayed state while the existing parent status poll continues. A parent
@@ -72,11 +72,13 @@ columns that are not already part of the existing DTO contract.
 | Ready parent, B-lite status is terminal failed | 200 | `failed` | Explicit fallback | Create new preflight on click |
 | Parent is terminal (`blocked` or `consumed`) | 200 | `terminal` | Explicit fallback | Create new preflight on click |
 | Parent is expired or past its expiry | 410 | `expired` | Explicit fallback | Create new preflight on click |
-| Owner/auth/read failure or malformed request | 204 | Client treats as transient/unavailable | Existing bounded handling | Never auto-retry submission |
+| Owner/auth/read failure or malformed request | 204 | Client treats as transient delayed | Static delayed | Never auto-retry submission |
 
 The route may preserve the existing `204` fail-open behavior for malformed or
-unauthorized requests. A valid owned ready parent with no B-lite status must use the
-explicit `unavailable` body so the client can distinguish it from `parent_pending`.
+unauthorized requests. The client treats that fail-open response as a non-terminal
+delayed read and never turns elapsed time into a retry. A valid owned ready parent with
+no B-lite status must use the explicit `unavailable` body so the client can distinguish
+it from `parent_pending`.
 
 ### Request binding and retry
 
@@ -135,9 +137,10 @@ the existing `DEMO_STARTED` event is not silently stripped.
 Allowed parent states are finite (`pending`, `processing`, `ready`, `expired`,
 `unknown`). Allowed fallback reasons retain the existing values and add only
 `blite_unavailable`, `blite_terminal`, `preflight_expired`, and
-`unresolved_at_90`. Durations remain integer milliseconds bounded by 86,400,000. No
-raw response body, username, provider error, target ID, task ID, or timer payload is
-sent to analytics.
+`unresolved_at_90` remains accepted for historical events but is never synthesized from
+elapsed client time by this flow. Durations remain integer milliseconds bounded by
+86,400,000. No raw response body, username, provider error, target ID, task ID, or timer
+payload is sent to analytics.
 
 ## Alternatives considered
 
@@ -159,10 +162,11 @@ sent to analytics.
 - Every B-lite status request includes the current preflight ID and, when present, the
   current claim token; no old request can mutate the new surface.
 - No fallback CTA is rendered as an indefinite spinner, and no retry request starts
-  without a click.
+  without a click. A still-pending status may remain a static delayed state
+  indefinitely, but it never becomes a retry CTA from elapsed time.
 - Plans remain closed until the existing result CTA or the explicit ready-parent/
   unavailable fallback CTA is clicked.
-- Terminal/expired retry creates a new preflight only after the click, with no duplicate
+- Only authoritative terminal/expired retry creates a new preflight after the click, with no duplicate
   provider/task work from the old ID.
 - StrictMode, remounts, late status reads, and callback rerenders remain idempotent.
 - `app/page.tsx` marketing copy remains byte-for-byte untouched.

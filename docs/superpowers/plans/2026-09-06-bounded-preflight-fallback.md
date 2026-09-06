@@ -33,7 +33,7 @@ For every behavior below, perform the listed RED step before changing the produc
 
 - [ ] **Step 1: Write the failing one-pass graph test.**
 
-In `components/precheckout-demo.test.tsx`, replace the waiting-loop expectation with a single-boundary contract. Render `PrecheckoutDemo` in waiting mode with `finishRequested={false}` and an `onInitialPassComplete` spy. Advance exactly `PRECHECKOUT_DEMO_DURATION_MS`; assert the spy was called once, `onComplete` was not called, and the player has not scheduled a later stage transition. Advance `PRECHECKOUT_WAIT_STAGE_DURATION_MS`; assert the initial-boundary spy is still called once and no waiting-copy cycle has changed.
+In `components/precheckout-demo.test.tsx`, replace the waiting-loop expectation with a single-boundary contract. Render `PrecheckoutDemo` in waiting mode with `finishRequested={false}` and an `onInitialPassComplete` spy. Advance exactly `PRECHECKOUT_DEMO_DURATION_MS`; assert the spy was called once, `onComplete` was not called, and the player has not scheduled a later stage transition. Advance another 24,000ms; assert the initial-boundary spy is still called once and no waiting-copy cycle has changed.
 
 ```tsx
 it('reports the initial pass once and never loops the graph after 20 seconds', async () => {
@@ -53,9 +53,9 @@ it('reports the initial pass once and never loops the graph after 20 seconds', a
     await advanceTimersBy(DEMO_DURATION_MS);
     expect(onInitialPassComplete).toHaveBeenCalledOnce();
     expect(onComplete).not.toHaveBeenCalled();
-    expect(container.querySelector('[data-precheckout-demo-phase="initial"]')).not.toBeNull();
+    expect(container.querySelector('[data-precheckout-demo-phase="waiting"]')).not.toBeNull();
 
-    await advanceTimersBy(PRECHECKOUT_WAIT_STAGE_DURATION_MS);
+    await advanceTimersBy(24_000);
     expect(onInitialPassComplete).toHaveBeenCalledOnce();
     expect(container.querySelector('[data-precheckout-progress]')).toBeNull();
 });
@@ -112,7 +112,7 @@ onInitialPassComplete?: () => void;
 
 Use a `initialPassReportedRef` and invoke the callback at `startedAt + PRECHECKOUT_DEMO_DURATION_MS` in waiting mode. Waiting mode must not schedule rotating copy or call `onComplete` unless an explicit completion request was made before the boundary. Keep `onComplete` exactly-once and preserve the existing absolute `startedAtMs` clock. Remove `nextTransitionAt`, `PRECHECKOUT_WAIT_STAGE_DURATION_MS`, and `WAITING_PROGRESS_COPY` only after the focused tests no longer reference the old loop.
 
-In `components/preflight-pending-status.tsx`, keep `PreflightPendingStatus` unchanged for the legacy surface and add a pure `PrecheckoutDelayedStatus` with `role="status"`, `aria-live="polite"`, `data-precheckout-delayed-state`, and no timers, button, or animated loading classes. Use the fixed copy `확인이 조금 더 필요해요` and `화면을 벗어나도 점검은 계속됩니다.`.
+In `components/preflight-pending-status.tsx`, keep `PreflightPendingStatus` unchanged for the legacy surface and add a pure `PrecheckoutDelayedStatus` with `role="status"`, `aria-live="polite"`, `data-precheckout-delayed-state`, and no timers, button, or animated loading classes. Use the fixed copy `확인이 조금 더 필요해요` and a static request-status supporting message.
 
 - [ ] **Step 6: Run the Task 1 focused tests to GREEN.**
 
@@ -141,7 +141,7 @@ git commit -m "fix: stop precheckout graph after one pass"
 
 - [ ] **Step 1: Write the failing status-contract tests.**
 
-Create `lib/services/precheckout/blite-status-contract.test.ts` with finite-state tests for `parent_pending`, `unavailable`, and `expired`, including rejection of an unbounded retry delay and unknown state. Keep existing `pending`, `complete`, and `failed` serialization tests unchanged.
+Create `lib/services/precheckout/blite-status-contract.test.ts` with finite-state tests for `parent_pending`, `unavailable`, `terminal`, and `expired`, including rejection of an unbounded retry delay and unknown state. Keep existing `pending`, `complete`, and `failed` serialization tests unchanged.
 
 ```ts
 it('accepts only bounded parent-pending and terminal browser states', () => {
@@ -243,12 +243,13 @@ git commit -m "fix: expose bounded preflight status states"
 
 - [ ] **Step 1: Write the failing pure state tests.**
 
-Add focused tests for a status-to-surface resolver. The resolver must map `parent_pending` and B-lite `pending` to a CTA-free delayed surface, `unavailable` to a plans action, and `failed`/`expired` to a retry action. Add a second test proving `canRetryPrecheckout` is true only for terminal/expired outcomes and false for delayed/unavailable; add a request-binding test proving retry receives the same target but requires an explicit `retry` action before creating a new lifecycle.
+Add focused tests for a status-to-surface resolver. The resolver must map `parent_pending`, B-lite `pending`, and transient reads to a CTA-free delayed surface, `unavailable` to a plans action, and `failed`/`terminal`/`expired` to a retry action. Add a second test proving `canRetryPrecheckout` is true only for authoritative terminal/expired outcomes and false for delayed, transient, and unavailable states; add a request-binding test proving retry receives the same target but requires an explicit `retry` action before creating a new lifecycle.
 
 ```ts
 it.each([
     ['parent_pending', 'delayed'],
     ['pending', 'delayed'],
+    ['transient', 'delayed'],
     ['unavailable', 'plans'],
     ['failed', 'retry'],
     ['terminal', 'retry'],
@@ -261,6 +262,7 @@ it('allows a new preflight only after an explicit terminal/expiry retry action',
     expect(canRetryPrecheckout('failed')).toBe(true);
     expect(canRetryPrecheckout('expired')).toBe(true);
     expect(canRetryPrecheckout('parent_pending')).toBe(false);
+    expect(canRetryPrecheckout('transient')).toBe(false);
     expect(canRetryPrecheckout('unavailable')).toBe(false);
 });
 ```
@@ -426,7 +428,7 @@ it('shows a static delayed state after the one graph pass for a pending parent',
 });
 ```
 
-Add one test asserting ready-parent `unavailable` shows the plans label and clicking it emits `precheckout_blite_fallback_cta_clicked` plus `precheckout_plan_gate_reached` and calls `onGoToPlans` once. Add terminal/expired tests asserting their button is `다시 확인하기`, no callback runs before click, and exactly one `onRetry` runs after click. Advance beyond the old loop interval and assert the delayed state remains static rather than changing graph stage/progress.
+Add one test asserting ready-parent `unavailable` shows the plans label and clicking it emits `precheckout_blite_fallback_cta_clicked` plus `precheckout_plan_gate_reached` and calls `onGoToPlans` once. Add terminal/expired tests asserting their button is `다시 확인하기`, no callback runs before click, and exactly one `onRetry` runs after click. Advance beyond T+90 and assert a `parent_pending`/B-lite `pending` delayed state remains static, has no retry CTA, and does not create a new preflight until an authoritative terminal/expired response and explicit click.
 
 - [ ] **Step 2: Run immersive tests and record RED.**
 
@@ -440,11 +442,11 @@ Expected RED: the current component maps `parent_pending` to transient, keeps a 
 
 In `PrecheckoutImmersive`:
 
-- Extend `BrowserBliteStatus` with `parent_pending`, `expired`, and `terminal` handling as represented by the status contract; preserve complete DTO validation and request coalescing.
+- Extend `BrowserBliteStatus` with `parent_pending`, `expired`, `terminal`, and `transient` handling as represented by the status contract; preserve complete DTO validation and request coalescing.
 - Mount `PrecheckoutDemo` in waiting mode with `continueAfterFirstPass={false}` (or remove the prop) and `onInitialPassComplete`.
 - Keep `exitRef` null for delayed state. At the initial boundary call `finishExit('delayed')` only when no result/terminal exit has already been requested. Do not mark delayed as a settled terminal path, so a later complete/failed/expired status can replace the static state.
-- Set `initialPassCompleteRef` before resolving a late status. A result or fallback received after the boundary settles immediately; a status received before it settles at exactly the boundary.
-- Map `parent_pending` and B-lite `pending` to `PrecheckoutDelayedStatus`; map `unavailable` to a plans fallback; map `failed` to a retry fallback; map `expired` to a retry fallback. At the finite unresolved display bound, use retry action and reason `unresolved_at_90`.
+- Set `initialPassCompleteRef` before resolving a late status. A result or authoritative terminal/expired fallback received after the boundary settles immediately; a status received before it settles at exactly the boundary. Parent-pending, B-lite-pending, and transient reads never settle the flow into a retry action.
+- Map `parent_pending` and B-lite `pending` to `PrecheckoutDelayedStatus`; map `unavailable` to a plans fallback; map `failed`, `terminal`, and `expired` to a retry fallback. Map transient/fail-open reads to the same static delayed surface. Do not use a client display bound to synthesize retry; a still-pending status remains delayed indefinitely, including after T+90, until an authoritative terminal/expired response arrives.
 - Keep the status polling interval bounded at 250–5,000ms for pending and 1,000ms for transient reads; clear all timers and do not create a second poll in flight.
 - Emit `BLITE_FALLBACK_SELECTED` once on fallback selection with only bounded `parent_state`/`fallback_reason` fields. Emit `BLITE_FALLBACK_CTA_CLICKED` once inside the fallback button handler, then call either `onGoToPlans` or `onRetry`; never call either callback during render or polling.
 - Keep result, gender confirmation, rejection, demo error, and heading-announcement behavior unchanged except for the new dedicated fallback-click event.
