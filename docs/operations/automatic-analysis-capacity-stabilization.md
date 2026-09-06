@@ -92,6 +92,142 @@ On rollback, first stop admission of the affected role, then deploy the last kno
 
 The deployment scripts are intentionally separate from the existing legacy queue script. A dry-run prints mutations without invoking `gcloud`; `--check` reports drift without mutating resources; apply re-verifies the observed service account, concurrency, max scale, role, admission gate, queue target, and OIDC audience. Any collision between role queues, services, target URLs, or audiences fails closed. The scripts default to check-only; `--apply` is required for mutation.
 
+## Initial-stage service-account identity roll-forward
+
+An already-serving `initial` worker sometimes has to adopt a rotated identity
+set: a new Cloud Tasks caller, a new Cloud Run runtime identity, and a role
+enqueuer environment value that the serving revision never carried. Ordinary
+verification is exact and rejects all three, so this rotation needs the explicit
+`--allow-initial-identity-roll-forward` allowance. Never hardcode the prior
+identities anywhere; supply them per run.
+
+**The allowance is preflight-only.** The active public runtime publishes a
+producer-configuration fingerprint for the preflight producer contract only, so
+preflight is the sole role where the deployer can prove from published evidence
+that the rotated caller/target/audience is already the live producer contract
+before the worker adopts it. There is no equivalent published evidence for the
+paid producer, so `--allow-initial-identity-roll-forward` is refused outright for
+`--role=paid`, before any observation or mutation. This is a limitation of the
+current published evidence, not a claim that paid has no producer: a paid
+identity rotation needs its own reviewed evidence path and is out of scope here.
+Ordinary paid apply behaviour is unchanged and stays exact — a drifted paid task
+caller, target URL, or OIDC audience still fails closed.
+
+The allowance is accepted only when every one of these holds:
+
+- `--role=preflight`;
+- an explicit `--apply` together with `--reconcile-iam` — the invoker binding
+  must be rotated onto the new caller, so a check/dry-run is refused;
+- target stage `initial` and observed stage `initial`, and never combined with
+  `--allow-bootstrap-initial-transition`;
+- the complete externally supplied prior-state assertion set
+  `ANALYSIS_CAPACITY_INITIAL_ROLL_FORWARD_OLD_TASK_SERVICE_ACCOUNT_EMAIL`,
+  `..._OLD_ENQUEUER_SERVICE_ACCOUNT_EMAIL` (the literal `absent` when the
+  serving revision carries no enqueuer value), `..._OLD_RUNTIME_SERVICE_ACCOUNT_EMAIL`,
+  and `..._OLD_SOURCE_SHA`, each matching the observed service exactly. Every
+  prior identity must be a service account in the task project, must differ from
+  all eight desired workload identities and the build identity, and must be
+  pairwise distinct; the prior source SHA must differ from the reviewed source
+  SHA. Supplying any of these assertions *without* the flag is rejected before
+  anything is observed;
+- the role's own target queue matches the full resource identity
+  `projects/PROJECT/locations/LOCATION/queues/QUEUE` exactly — a same-named queue
+  in another project or region is refused — and is `PAUSED` and observably empty,
+  so no in-flight task can still carry the prior caller identity;
+- the preflight recovery scheduler is provably quiescent. A `PAUSED` Cloud Tasks
+  queue still accepts `createTask`, and the currently serving recovery endpoint
+  enqueues with the *old* caller identity, so an every-minute scheduler that is
+  still `ENABLED` can put an old-caller task into the queue after it was observed
+  empty. The guard therefore requires the exact job resource
+  `projects/PROJECT/locations/LOCATION/jobs/JOB` in state `PAUSED` with its
+  reviewed attempt-deadline and retry contract, plus an externally supplied
+  `ANALYSIS_CAPACITY_INITIAL_ROLL_FORWARD_PREFLIGHT_RECOVERY_PAUSE_EPOCH`
+  (strict decimal epoch seconds, not in the future) that is at least 660 seconds
+  old — the deployed Cloud Run request timeout of 600s plus grace. Take that
+  epoch as the audited pause time rounded **up** to the next whole second;
+  observed attempt timestamps are likewise rounded up, so a sub-second remainder
+  can never buy up to 0.999s of extra apparent age. The job name and the
+  resolved scheduler location (`PREFLIGHT_TASKS_MAINTENANCE_LOCATION`, falling
+  back to the Cloud Run region — not the Cloud Tasks queue location) are
+  validated before either reaches a `gcloud` argument. **An absent
+  `lastAttemptTime` never proves drain:** a paused job has been observed to stop
+  reporting it seconds after a real attempt, so the aged pause assertion is
+  mandatory and a *present* `lastAttemptTime` inside the window is also refused.
+  `userUpdateTime` is documented as creation time and is never used as pause time;
+- all eight desired workload identities — preflight and paid
+  task/enqueuer/runtime/maintenance — are pairwise distinct, and the reviewed
+  runtime manifest already carries the desired role enqueuer value;
+- the complete published Vercel evidence chain already agrees with the desired
+  contract: the selected READY production deployment's Git SHA equals the
+  reviewed source SHA, the public freeze origin is bound to that exact
+  deployment URL or one of its returned aliases, the next-deploy production
+  environment metadata carries the required producer keys with no hidden
+  production values, and the active producer fingerprint matches the desired
+  caller/target/audience;
+- the existing service IAM already carries exactly one unconditioned
+  `roles/run.invoker` binding whose members are exactly the asserted prior task
+  caller and the unchanged current maintenance caller. An extra member, a public
+  or `allAuthenticatedUsers` member, an IAM condition, a missing member, more
+  than one invoker binding, or no invoker binding at all is refused before
+  `set-iam-policy` runs.
+
+All of that evidence is gathered before any service, IAM, or deploy mutation.
+(The generation-bound GCS deploy lock is acquired earlier — it is this run's
+mutual-exclusion token, not a change to the service, its IAM, or its revisions.)
+The evidence is then re-proven a
+second time in one dedicated **final mutation barrier** immediately before the
+single `set-iam-policy` call, because a read-then-write gap is exactly where an
+out-of-band change would slip through. The barrier re-describes the exact paused
+and empty target queue, re-checks the recovery scheduler and the aged pause
+assertion, re-runs the complete Vercel evidence chain, re-reads the service and
+requires the *same* `metadata.resourceVersion` and `metadata.generation` plus the
+exact asserted prior task/enqueuer/runtime identities, prior source SHA, and the
+captured serving traffic allocation, and finally re-reads the IAM policy and
+requires the exact prior invoker binding together with a non-empty `etag`. The
+desired policy is then built from that latest policy JSON with the `etag`
+preserved, written with exactly one `set-iam-policy` call and no retry, and read
+back; the observed policy must equal the intended policy modulo the new
+server-issued `etag`, so any unrelated binding change, added binding or member,
+introduced condition, or changed policy version fails the run before
+`gcloud run deploy`. If the invoker binding has independently become the desired
+binding between reads, the run fails closed rather than treating it as success.
+
+The allowance is predeploy-only and covers only the three identity values.
+Arbitrary environment, source, maintenance, target, audience, queue, stage, and
+traffic checks stay exact; under the flag the source provenance must equal the
+externally asserted prior SHA rather than any syntactically valid older SHA. The
+staged revision is verified exactly against the reviewed manifest and runtime
+identity, and the promoted revision is verified exactly again; post-promotion
+drift of the task caller, the enqueuer, or the runtime identity each
+independently triggers the automatic rollback.
+
+An exceptional run never resumes the recovery scheduler. On success it re-proves
+the job is still `PAUSED` and reports the resume as deferred; every failure path
+also leaves it paused. The external final rollout owns the sole resume of both
+recovery schedulers and both queues, after both role deploys, Vercel, IAM, logs,
+ledger, and provider-free probes have all passed.
+
+### What rollback actually does
+
+Be precise about this when handling a failure. **The automatic rollback restores
+traffic only.** It moves the serving allocation back to the exact captured
+pre-deploy revision and verifies that it matches; it does *not* redeploy the
+previous source, and it does *not* restore the previous IAM policy. A
+`set-iam-policy` that already succeeded stays applied.
+
+So after a failed identity roll-forward:
+
+- the target queue stays `PAUSED` and the recovery scheduler stays `PAUSED`;
+- if the failure happened *after* the invoker rotation, the service is already
+  serving the rotated invoker binding. Restoring the prior binding is a separate,
+  explicit operator step that must itself be verified against a freshly read
+  policy and its `etag` before any retry;
+- because the queue was paused and empty before the rotation, no task is stranded
+  on a caller identity that has lost invoke permission.
+
+Re-enable the queue and the recovery scheduler only after the promoted revision
+verifies and the final rollout checks pass.
+
 ## Observability and stop thresholds
 
 Page the on-call and stop the canary for any one of the following:
