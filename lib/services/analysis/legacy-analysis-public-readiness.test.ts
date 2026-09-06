@@ -6,6 +6,7 @@ import {
 
 const sourceSha = '0123456789abcdef0123456789abcdef01234567';
 const expectedPreflightFingerprint = '6ab53812cdc725c34bf3409713a893ec7787482e17df16ef622f3173a57251f2';
+const expectedPaidFingerprint = 'd074cb79af9df1622cfff38f981e1f7ea0e892390c442d4504d6c77c9b398c1f';
 
 describe('public V1 freeze readiness observation', () => {
     it('reports non-sensitive active freeze evidence from the public runtime', () => {
@@ -20,13 +21,23 @@ describe('public V1 freeze readiness observation', () => {
             PREFLIGHT_TASKS_SERVICE_ACCOUNT_EMAIL: 'preflight-task@example-project.iam.gserviceaccount.com',
             PREFLIGHT_TASKS_TARGET_URL: 'https://preflight.example.com/api/analysis/preflight/worker',
             PREFLIGHT_TASKS_OIDC_AUDIENCE: 'https://preflight.example.com',
+            ANALYSIS_V2_TASKS_SERVICE_ACCOUNT_EMAIL: 'PAID-TASK@example-project.iam.gserviceaccount.com',
+            ANALYSIS_V2_TASKS_TARGET_URL: 'https://Paid.Example.com:443/api/analysis/v2/worker',
+            ANALYSIS_V2_TASKS_OIDC_AUDIENCE: 'https://PAID.example.com:443/',
         });
         expect(result.ready).toBe(true);
+        expect(result.schemaVersion).toBe('analysis-public-freeze-readiness-v2');
         expect(result.sourceSha).toBe(sourceSha);
         expect(result.preflightProducerConfigFingerprintVersion)
             .toBe(PREFLIGHT_PRODUCER_CONFIG_FINGERPRINT_VERSION);
         expect(result.preflightProducerConfigFingerprint).toBe(expectedPreflightFingerprint);
         expect(result.preflightProducerConfigReady).toBe(true);
+        expect(result.paidProducerConfigFingerprintVersion).toBe('paid-producer-config-v1');
+        expect(result.paidProducerConfigFingerprint).toBe(expectedPaidFingerprint);
+        expect(result.paidProducerConfigReady).toBe(true);
+        expect(JSON.stringify(result)).not.toContain('PAID-TASK@example-project');
+        expect(JSON.stringify(result)).not.toContain('Paid.Example.com');
+        expect(JSON.stringify(result)).not.toContain('PAID.example.com');
         expect(result.routes['/api/analysis/start']).toEqual({
             gateState: 'frozen',
             expectedStatus: 410,
@@ -36,7 +47,9 @@ describe('public V1 freeze readiness observation', () => {
             'schemaVersion', 'ready', 'stage', 'freezeMode',
             'publicFreezeEnabled', 'sourceSha', 'legacyTargetResource',
             'preflightProducerConfigFingerprintVersion',
-            'preflightProducerConfigFingerprint', 'preflightProducerConfigReady', 'routes',
+            'preflightProducerConfigFingerprint', 'preflightProducerConfigReady',
+            'paidProducerConfigFingerprintVersion',
+            'paidProducerConfigFingerprint', 'paidProducerConfigReady', 'routes',
         ]);
     });
 
@@ -53,7 +66,28 @@ describe('public V1 freeze readiness observation', () => {
         expect(result.sourceSha).toBe(sourceSha);
         expect(result.preflightProducerConfigFingerprint).toBeNull();
         expect(result.preflightProducerConfigReady).toBe(false);
+        expect(result.paidProducerConfigFingerprint).toBeNull();
+        expect(result.paidProducerConfigReady).toBe(false);
         expect(Object.values(result.routes).every((route) => route.expectedStatus === 410)).toBe(true);
+    });
+
+    it('fails closed when the active paid producer tuple is missing or malformed', () => {
+        const result = getLegacyAnalysisPublicReadiness({
+            ANALYSIS_CAPACITY_STAGE: 'initial',
+            ANALYSIS_CAPACITY_PUBLIC_FREEZE_ENABLED: 'true',
+            ANALYSIS_CAPACITY_LEGACY_FREEZE_MODE: 'drain-and-block',
+            ANALYSIS_CAPACITY_LEGACY_PRODUCERS_FROZEN: 'true',
+            VERCEL_GIT_COMMIT_SHA: sourceSha,
+            PREFLIGHT_TASKS_SERVICE_ACCOUNT_EMAIL: 'preflight-task@example-project.iam.gserviceaccount.com',
+            PREFLIGHT_TASKS_TARGET_URL: 'https://preflight.example.com/api/analysis/preflight/worker',
+            PREFLIGHT_TASKS_OIDC_AUDIENCE: 'https://preflight.example.com',
+            ANALYSIS_V2_TASKS_SERVICE_ACCOUNT_EMAIL: 'paid-task@example-project.iam.gserviceaccount.com',
+            ANALYSIS_V2_TASKS_TARGET_URL: 'https://paid.example.com/api/analysis/not-worker',
+            ANALYSIS_V2_TASKS_OIDC_AUDIENCE: 'https://paid.example.com',
+        });
+        expect(result.ready).toBe(false);
+        expect(result.paidProducerConfigFingerprint).toBeNull();
+        expect(result.paidProducerConfigReady).toBe(false);
     });
 
     it('fails closed when the active producer target or audience is invalid', () => {

@@ -22,6 +22,9 @@ readonly PROVENANCE_LABEL_KEY="analysis-v2-source-commit"
 # scheduler must therefore have been paused for longer than the deployed Cloud
 # Run request timeout (600s) plus grace before an empty queue proves anything.
 readonly PREFLIGHT_RECOVERY_QUIESCENCE_SECONDS=660
+readonly PUBLIC_READINESS_SCHEMA_VERSION="analysis-public-freeze-readiness-v2"
+readonly PREFLIGHT_PRODUCER_CONFIG_FINGERPRINT_VERSION="preflight-producer-config-v1"
+readonly PAID_PRODUCER_CONFIG_FINGERPRINT_VERSION="paid-producer-config-v1"
 
 mode="check"
 mode_was_explicit="false"
@@ -176,13 +179,12 @@ done
   || die "--role=preflight or --role=paid is required"
 [[ "${ANALYSIS_WORKLOAD_ROLE:-}" == "$role" ]] \
   || die "ANALYSIS_WORKLOAD_ROLE must equal --role"
-# The active public runtime publishes a producer-configuration fingerprint only
-# for the preflight producer contract, so preflight is the only role where a
-# rotated caller/target/audience can be proven live from published evidence
-# before the worker adopts it.  Paid identity rotation needs its own reviewed
-# evidence path and is refused here rather than accepted on weaker proof.
+# The active public runtime publishes a producer-configuration fingerprint for
+# both role contracts.  The exceptional identity roll-forward remains
+# preflight-only: paid identity rotation is refused here rather than accepted
+# on a path that was not explicitly reviewed for that transition.
 [[ "$allow_initial_identity_roll_forward" != "true" || "$role" == "preflight" ]] \
-  || die "--allow-initial-identity-roll-forward is valid only for --role=preflight; the active public runtime publishes a producer fingerprint only for the preflight producer contract"
+  || die "--allow-initial-identity-roll-forward is valid only for --role=preflight; paid identity rotation has no approved exceptional transition path"
 
 stage="${ANALYSIS_CAPACITY_STAGE:-initial}"
 expansion_canary="${ANALYSIS_CAPACITY_EXPANSION_CANARY:-false}"
@@ -281,6 +283,7 @@ legacy_target_url="${ANALYSIS_CAPACITY_LEGACY_TARGET_URL:-}"
 legacy_target_resource="${ANALYSIS_CAPACITY_LEGACY_TARGET_RESOURCE:-}"
 public_freeze_readiness_url="${ANALYSIS_CAPACITY_PUBLIC_FREEZE_READINESS_URL:-}"
 preflight_runtime_fingerprint_verified="false"
+paid_runtime_fingerprint_verified="false"
 # Prior-state assertions for the initial-stage identity roll-forward. They are
 # always externally supplied; no prior production identity is ever compiled in.
 old_task_sa="${ANALYSIS_CAPACITY_INITIAL_ROLL_FORWARD_OLD_TASK_SERVICE_ACCOUNT_EMAIL:-}"
@@ -781,8 +784,8 @@ verify_legacy_quiescence() {
     || die "public V1 freeze readiness observation failed"
   jq -e --arg source_sha "$source_sha" \
     --arg target_resource "$legacy_target_resource" '
-    (keys | sort) == ["freezeMode", "legacyTargetResource", "preflightProducerConfigFingerprint", "preflightProducerConfigFingerprintVersion", "preflightProducerConfigReady", "publicFreezeEnabled", "ready", "routes", "schemaVersion", "sourceSha", "stage"]
-    and .schemaVersion == "analysis-public-freeze-readiness-v1"
+    (keys | sort) == ["freezeMode", "legacyTargetResource", "paidProducerConfigFingerprint", "paidProducerConfigFingerprintVersion", "paidProducerConfigReady", "preflightProducerConfigFingerprint", "preflightProducerConfigFingerprintVersion", "preflightProducerConfigReady", "publicFreezeEnabled", "ready", "routes", "schemaVersion", "sourceSha", "stage"]
+    and .schemaVersion == "analysis-public-freeze-readiness-v2"
     and .ready == true
     and (.stage == "initial" or .stage == "expanded")
     and .freezeMode == "drain-and-block"
@@ -792,6 +795,9 @@ verify_legacy_quiescence() {
     and .preflightProducerConfigFingerprintVersion == "preflight-producer-config-v1"
     and .preflightProducerConfigReady == true
     and (.preflightProducerConfigFingerprint | type == "string" and test("^[0-9a-f]{64}$"))
+    and .paidProducerConfigFingerprintVersion == "paid-producer-config-v1"
+    and .paidProducerConfigReady == true
+    and (.paidProducerConfigFingerprint | type == "string" and test("^[0-9a-f]{64}$"))
     and ((.routes | keys | sort) == ["/api/analysis/run", "/api/analysis/start", "/api/analysis/step"])
     and ([.routes[] | select(.gateState == "frozen" and .expectedStatus == 410 and .gateBeforeRuntime == true)] | length) == 3
   ' <<<"$public_json" >/dev/null \
@@ -894,6 +900,38 @@ normalize_preflight_audience() {
   fi
 }
 
+normalize_paid_target_url() {
+  local value="$1"
+  [[ "$value" =~ ^https://([A-Za-z0-9.-]+)(:([0-9]+))?/api/analysis/v2/worker$ ]] \
+    || return 1
+  local host
+  host="$(printf '%s' "${BASH_REMATCH[1]}" | tr '[:upper:]' '[:lower:]')"
+  local port="${BASH_REMATCH[3]:-}"
+  local normalized_port
+  normalized_port="$(normalize_preflight_port "$port")" || return 1
+  if [[ -n "$normalized_port" ]]; then
+    printf 'https://%s:%s/api/analysis/v2/worker\n' "$host" "$normalized_port"
+  else
+    printf 'https://%s/api/analysis/v2/worker\n' "$host"
+  fi
+}
+
+normalize_paid_audience() {
+  local value="$1"
+  [[ "$value" =~ ^https://([A-Za-z0-9.-]+)(:([0-9]+))?/?$ ]] \
+    || return 1
+  local host
+  host="$(printf '%s' "${BASH_REMATCH[1]}" | tr '[:upper:]' '[:lower:]')"
+  local port="${BASH_REMATCH[3]:-}"
+  local normalized_port
+  normalized_port="$(normalize_preflight_port "$port")" || return 1
+  if [[ -n "$normalized_port" ]]; then
+    printf 'https://%s:%s\n' "$host" "$normalized_port"
+  else
+    printf 'https://%s\n' "$host"
+  fi
+}
+
 preflight_producer_config_fingerprint() {
   local producer_service_account="$1"
   local producer_target="$2"
@@ -924,8 +962,52 @@ preflight_producer_config_fingerprint() {
   printf '%s\n' "$fingerprint"
 }
 
-verify_preflight_next_deploy_environment() {
-  [[ "$role" == 'preflight' ]] || return 0
+paid_producer_config_fingerprint() {
+  local producer_service_account="$1"
+  local producer_target="$2"
+  local producer_audience="$3"
+  local normalized_target
+  local normalized_audience
+  local normalized_service_account
+  normalized_target="$(normalize_paid_target_url "$producer_target")" || return 1
+  normalized_audience="$(normalize_paid_audience "$producer_audience")" || return 1
+  normalized_service_account="$(printf '%s' "$producer_service_account" | tr '[:upper:]' '[:lower:]')"
+  local target_origin="${normalized_target%/api/analysis/v2/worker}"
+  [[ "$target_origin" == "$normalized_audience" ]] || return 1
+  local serialized
+  serialized="$(printf '%s\n%s\n%s\n%s' \
+    "$PAID_PRODUCER_CONFIG_FINGERPRINT_VERSION" \
+    "$normalized_service_account" \
+    "$normalized_target" \
+    "$normalized_audience")"
+  local fingerprint
+  if command -v sha256sum >/dev/null 2>&1; then
+    fingerprint="$(printf '%s' "$serialized" | sha256sum | cut -d' ' -f1)"
+  elif command -v shasum >/dev/null 2>&1; then
+    fingerprint="$(printf '%s' "$serialized" | shasum -a 256 | cut -d' ' -f1)"
+  else
+    return 1
+  fi
+  [[ "$fingerprint" =~ ^[0-9a-f]{64}$ ]] || return 1
+  printf '%s\n' "$fingerprint"
+}
+
+verify_role_next_deploy_environment() {
+  local role_label
+  local required_service_account_key
+  local required_target_key
+  local required_audience_key
+  if [[ "$role" == 'preflight' ]]; then
+    role_label='preflight'
+    required_service_account_key='PREFLIGHT_TASKS_SERVICE_ACCOUNT_EMAIL'
+    required_target_key='PREFLIGHT_TASKS_TARGET_URL'
+    required_audience_key='PREFLIGHT_TASKS_OIDC_AUDIENCE'
+  else
+    role_label='paid'
+    required_service_account_key='ANALYSIS_V2_TASKS_SERVICE_ACCOUNT_EMAIL'
+    required_target_key='ANALYSIS_V2_TASKS_TARGET_URL'
+    required_audience_key='ANALYSIS_V2_TASKS_OIDC_AUDIENCE'
+  fi
   local vercel_api_base="$1"
   local vercel_project_id="$2"
   local escaped_token="$3"
@@ -945,7 +1027,7 @@ verify_preflight_next_deploy_environment() {
     --header 'Accept: application/json' --config - 2>/dev/null <<EOF
 header = "Authorization: Bearer $escaped_token"
 EOF
-  )" || die 'Vercel next-deploy preflight environment lookup failed'
+  )" || die "Vercel next-deploy $role_label environment lookup failed"
   local env_metadata
   env_metadata="$(jq -e -c '
     if type != "object" then error("response-not-object")
@@ -974,56 +1056,119 @@ EOF
         end
       ' \
         <<<"$vercel_env_json" >/dev/null 2>&1; then
-        die 'next-deploy Vercel preflight environment has hidden production values'
+        die "next-deploy Vercel $role_label environment has hidden production values"
       fi
-      die 'next-deploy Vercel preflight environment response is malformed'
+      die "next-deploy Vercel $role_label environment response is malformed"
     }
   vercel_env_json=''
-  jq -e '
+  jq -e \
+    --arg required_service_account_key "$required_service_account_key" \
+    --arg required_target_key "$required_target_key" \
+    --arg required_audience_key "$required_audience_key" \
+    '
     def production_target:
       ((.target // [])
         | if type == "array" then index("production") != null
           else . == "production" end);
     type == "array"
-    and ([.[] | select(.key == "PREFLIGHT_TASKS_SERVICE_ACCOUNT_EMAIL" and production_target)] | length) == 1
-    and ([.[] | select(.key == "PREFLIGHT_TASKS_TARGET_URL" and production_target)] | length) == 1
-    and ([.[] | select(.key == "PREFLIGHT_TASKS_OIDC_AUDIENCE" and production_target)] | length) == 1
+    and ([.[] | select(.key == $required_service_account_key and production_target)] | length) == 1
+    and ([.[] | select(.key == $required_target_key and production_target)] | length) == 1
+    and ([.[] | select(.key == $required_audience_key and production_target)] | length) == 1
   ' <<<"$env_metadata" >/dev/null 2>&1 \
-    || die 'next-deploy Vercel preflight environment is missing required production keys'
-  log 'verified: next-deploy Vercel preflight environment has required production keys'
+    || die "next-deploy Vercel $role_label environment is missing required production keys"
+  log "verified: next-deploy Vercel $role_label environment has required production keys"
+}
+
+verify_preflight_next_deploy_environment() {
+  [[ "$role" == 'preflight' ]] || return 0
+  verify_role_next_deploy_environment "$@"
+}
+
+verify_paid_next_deploy_environment() {
+  [[ "$role" == 'paid' ]] || return 0
+  verify_role_next_deploy_environment "$@"
+}
+
+verify_role_runtime_fingerprint() {
+  local role_label
+  local producer_version
+  local producer_fingerprint_field
+  local producer_ready_field
+  local producer_task_key
+  local producer_target_key
+  local producer_audience_key
+  if [[ "$role" == 'preflight' ]]; then
+    role_label='preflight'
+    producer_version="$PREFLIGHT_PRODUCER_CONFIG_FINGERPRINT_VERSION"
+    producer_fingerprint_field='preflightProducerConfigFingerprint'
+    producer_ready_field='preflightProducerConfigReady'
+    producer_task_key='PREFLIGHT_TASKS_SERVICE_ACCOUNT_EMAIL'
+    producer_target_key='PREFLIGHT_TASKS_TARGET_URL'
+    producer_audience_key='PREFLIGHT_TASKS_OIDC_AUDIENCE'
+  else
+    role_label='paid'
+    producer_version="$PAID_PRODUCER_CONFIG_FINGERPRINT_VERSION"
+    producer_fingerprint_field='paidProducerConfigFingerprint'
+    producer_ready_field='paidProducerConfigReady'
+    producer_task_key='ANALYSIS_V2_TASKS_SERVICE_ACCOUNT_EMAIL'
+    producer_target_key='ANALYSIS_V2_TASKS_TARGET_URL'
+    producer_audience_key='ANALYSIS_V2_TASKS_OIDC_AUDIENCE'
+  fi
+  local manifest_task_sa
+  local manifest_target
+  local manifest_audience
+  manifest_task_sa="$(manifest_value "$env_file" "$producer_task_key" 2>/dev/null)" \
+    || die "reviewed $role_label producer contract is missing its task identity"
+  manifest_target="$(manifest_value "$env_file" "$producer_target_key" 2>/dev/null)" \
+    || die "reviewed $role_label producer contract is missing its target"
+  manifest_audience="$(manifest_value "$env_file" "$producer_audience_key" 2>/dev/null)" \
+    || die "reviewed $role_label producer contract is missing its audience"
+  local expected_fingerprint
+  if [[ "$role" == 'preflight' ]]; then
+    expected_fingerprint="$(preflight_producer_config_fingerprint \
+    "$manifest_task_sa" "$manifest_target" "$manifest_audience")" \
+      || die "reviewed $role_label producer contract could not be fingerprinted"
+  else
+    expected_fingerprint="$(paid_producer_config_fingerprint \
+      "$manifest_task_sa" "$manifest_target" "$manifest_audience")" \
+      || die "reviewed $role_label producer contract could not be fingerprinted"
+  fi
+  local public_json
+  public_json="$(call_public_freeze_readiness)" \
+    || die "active Vercel $role_label producer readiness observation failed"
+  jq -e \
+    --arg version "$producer_version" \
+    --arg expected "$expected_fingerprint" \
+    --arg producer_version_field "${role_label}ProducerConfigFingerprintVersion" \
+    --arg producer_fingerprint_field "$producer_fingerprint_field" \
+    --arg producer_ready_field "$producer_ready_field" \
+    '
+      type == "object"
+      and .schemaVersion == "analysis-public-freeze-readiness-v2"
+      and .ready == true
+      and .[$producer_version_field] == $version
+      and .[$producer_ready_field] == true
+      and (.[ $producer_fingerprint_field ] | type == "string")
+      and (.[ $producer_fingerprint_field ] | test("^[0-9a-f]{64}$"))
+      and .[$producer_fingerprint_field] == $expected
+    ' <<<"$public_json" >/dev/null 2>&1 \
+    || die "active Vercel $role_label producer fingerprint does not match the reviewed contract"
+  if [[ "$role" == 'preflight' ]]; then
+    preflight_runtime_fingerprint_verified='true'
+  else
+    paid_runtime_fingerprint_verified='true'
+  fi
+  log "verified: active Vercel $role_label producer fingerprint agrees with the reviewed contract"
 }
 
 verify_preflight_runtime_fingerprint() {
   [[ "$role" == 'preflight' ]] || return 0
-  local manifest_task_sa
-  local manifest_target
-  local manifest_audience
-  manifest_task_sa="$(manifest_value "$env_file" "$task_sa_var" 2>/dev/null)" \
-    || die 'reviewed preflight producer contract is missing its task identity'
-  manifest_target="$(manifest_value "$env_file" "$target_var" 2>/dev/null)" \
-    || die 'reviewed preflight producer contract is missing its target'
-  manifest_audience="$(manifest_value "$env_file" "$audience_var" 2>/dev/null)" \
-    || die 'reviewed preflight producer contract is missing its audience'
-  local expected_fingerprint
-  expected_fingerprint="$(preflight_producer_config_fingerprint \
-    "$manifest_task_sa" "$manifest_target" "$manifest_audience")" \
-    || die 'reviewed preflight producer contract could not be fingerprinted'
-  local public_json
-  public_json="$(call_public_freeze_readiness)" \
-    || die 'active Vercel preflight producer readiness observation failed'
-  jq -e \
-    --arg version 'preflight-producer-config-v1' \
-    --arg expected "$expected_fingerprint" '
-      type == "object"
-      and .preflightProducerConfigFingerprintVersion == $version
-      and .preflightProducerConfigReady == true
-      and (.preflightProducerConfigFingerprint | type == "string")
-      and (.preflightProducerConfigFingerprint | test("^[0-9a-f]{64}$"))
-      and .preflightProducerConfigFingerprint == $expected
-    ' <<<"$public_json" >/dev/null 2>&1 \
-    || die 'active Vercel preflight producer fingerprint does not match the reviewed contract'
-  preflight_runtime_fingerprint_verified='true'
-  log 'verified: active Vercel preflight producer fingerprint agrees with the reviewed contract'
+  verify_role_runtime_fingerprint
+}
+
+verify_paid_runtime_fingerprint() {
+  [[ "$role" == 'paid' ]] || return 0
+  verify_role_runtime_fingerprint
 }
 
 verify_vercel_public_deployment() {
@@ -1133,8 +1278,8 @@ EOF
   done < <(jq -r '.aliases[]?.alias' <<<"$aliases_json")
   [[ "$origin_match" == "true" ]] \
     || die "public freeze origin does not match the selected READY Vercel deployment URL or exact alias"
-  verify_preflight_next_deploy_environment "$vercel_api_base" "$vercel_project_id" "$escaped_token"
-  verify_preflight_runtime_fingerprint
+  verify_role_next_deploy_environment "$vercel_api_base" "$vercel_project_id" "$escaped_token"
+  verify_role_runtime_fingerprint
   log "verified: public freeze origin is bound to Vercel deployment $deployment_id at reviewed source SHA"
 }
 
@@ -1485,22 +1630,29 @@ verify_service_iam() {
   ' <<<"$service_iam_json" >/dev/null
 }
 
-verify_preflight_queue_oidc_contract() {
-  [[ "$role" == "preflight" && "${contract_stage:-$stage}" != "bootstrap" ]] || return 0
+verify_active_queue_oidc_contract() {
+  [[ "${contract_stage:-$stage}" != "bootstrap" ]] || return 0
   local queue_tasks
   local task_count
+  local role_label="$role"
+  local runtime_fingerprint_verified="false"
+  if [[ "$role" == "preflight" ]]; then
+    runtime_fingerprint_verified="$preflight_runtime_fingerprint_verified"
+  else
+    runtime_fingerprint_verified="$paid_runtime_fingerprint_verified"
+  fi
   queue_tasks="$(gcloud tasks list \
     "--queue=$queue" \
     "--project=$project" \
     "--location=$location" \
     '--format=json')" \
-    || die "preflight queue OIDC evidence could not be observed"
+    || die "$role_label queue OIDC evidence could not be observed"
   task_count="$(jq -er 'if type == "array" then length else error("not-array") end' <<<"$queue_tasks" 2>/dev/null)" \
-    || die "preflight queue OIDC evidence is malformed"
+    || die "$role_label queue OIDC evidence is malformed"
   if [[ "$task_count" == "0" ]]; then
-    [[ "$preflight_runtime_fingerprint_verified" == 'true' ]] \
-      || die "empty preflight queue requires active Vercel producer fingerprint evidence"
-    log "verified: empty preflight queue is covered by active Vercel producer fingerprint evidence"
+    [[ "$runtime_fingerprint_verified" == 'true' ]] \
+      || die "empty $role_label queue requires active Vercel producer fingerprint evidence"
+    log "verified: empty $role_label queue is covered by active Vercel producer fingerprint evidence"
     return 0
   fi
   jq -e \
@@ -1515,8 +1667,18 @@ verify_preflight_queue_oidc_contract() {
         and (((.httpRequest.oidcToken.audience // "") | rtrimstr("/")) == $audience)
       )
     ' <<<"$queue_tasks" >/dev/null 2>&1 \
-    || die "preflight queue task OIDC contract is missing or drifted"
-  log "verified: preflight queue task OIDC identity, target, and audience agree"
+    || die "$role_label queue task OIDC contract is missing or drifted"
+  log "verified: $role_label queue task OIDC identity, target, and audience agree"
+}
+
+verify_preflight_queue_oidc_contract() {
+  [[ "$role" == "preflight" ]] || return 0
+  verify_active_queue_oidc_contract
+}
+
+verify_paid_queue_oidc_contract() {
+  [[ "$role" == "paid" ]] || return 0
+  verify_active_queue_oidc_contract
 }
 
 write_exact_service_iam_policy() {
@@ -2426,7 +2588,7 @@ if [[ "$mode" == "check" ]]; then
   verify_service_contract
   verify_legacy_quiescence
   verify_vercel_public_deployment
-  verify_preflight_queue_oidc_contract
+  verify_active_queue_oidc_contract
   verify_capacity_activation_readiness
   verify_preflight_maintenance
   exit 0
@@ -2480,6 +2642,13 @@ if service_exists; then
     verify_initial_identity_roll_forward_preconditions
     allow_existing_service_predeploy_initial_identity_roll_forward="true"
   fi
+  # Paid producer evidence is an independent active-runtime gate.  Verify it
+  # before verify_service_contract can reconcile IAM, then verify it again at
+  # the existing pre-deploy/promotion barriers to catch evidence drift.
+  if [[ "$role" == "paid" ]]; then
+    verify_vercel_public_deployment
+    verify_active_queue_oidc_contract
+  fi
   verify_service_contract "$observed_stage" true "$allow_stale_bootstrap_provenance" \
     "$allow_bootstrap_cross_role_gate_transition" \
     "$allow_bootstrap_initial_transition" \
@@ -2490,7 +2659,7 @@ if service_exists; then
     "$allow_existing_service_predeploy_initial_identity_roll_forward"
   verify_legacy_quiescence
   verify_vercel_public_deployment
-  verify_preflight_queue_oidc_contract
+  verify_active_queue_oidc_contract
   verify_capacity_activation_readiness
 else
   [[ "$stage" == "bootstrap" ]] \
@@ -2519,7 +2688,7 @@ else
   verify_staged_revision "$staged_revision"
   verify_legacy_quiescence
   verify_vercel_public_deployment
-  verify_preflight_queue_oidc_contract
+  verify_active_queue_oidc_contract
   verify_capacity_activation_readiness
   rollback_armed="true"
   gcloud run services update-traffic "$service" \
@@ -2528,7 +2697,7 @@ else
   verify_service_contract "$stage" true
   verify_legacy_quiescence
   verify_vercel_public_deployment
-  verify_preflight_queue_oidc_contract
+  verify_active_queue_oidc_contract
   verify_capacity_activation_readiness
 fi
 if [[ "$allow_initial_identity_roll_forward" == "true" ]]; then
