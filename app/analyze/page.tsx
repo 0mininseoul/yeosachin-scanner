@@ -478,6 +478,19 @@ const DISCLOSURE_ACCEPTED = true;
         setBliteResultShown(false);
         setPrecheckoutSurface({ preflightId, surface: 'legacy' });
     }, [immersivePreflight?.preflightId]);
+    const handleRetryPreflight = useCallback(() => {
+        const retryTarget = targetInstagramId;
+        if (!retryTarget) return;
+        const activePreflightId = preflight?.preflightId;
+        const storage = availablePendingTargetStorage();
+        if (storage && activePreflightId) {
+            clearPreflightDisplayTarget(storage, activePreflightId);
+        }
+        setBliteResultShown(false);
+        setPrecheckoutSurface({ preflightId: null, surface: 'awaiting' });
+        reset();
+        void startPreflight(retryTarget);
+    }, [preflight?.preflightId, reset, startPreflight, targetInstagramId]);
     useEffect(() => {
         // Fires once, exactly on the explicit CTA transition — whether the legacy surface
         // initially renders the pending status or the ready target/plans. A later readiness
@@ -1023,6 +1036,7 @@ const DISCLOSURE_ACCEPTED = true;
                                 submittedAtMs={preflightStartedAt}
                                 targetUsername={targetInstagramId}
                                 onGoToPlans={handleGoToPlans}
+                                onRetry={handleRetryPreflight}
                                 onBliteResultShown={handleBliteResultShown}
                             />
                         )}
