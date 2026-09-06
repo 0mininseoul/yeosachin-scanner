@@ -6,7 +6,7 @@ Date: 2026-09-07 (Asia/Seoul)
 
 The confirmed leak of orphaned anonymous Docker volumes on the development machine is caused by a single test harness: `lib/services/analysis/beta-apify-credit-postgres-concurrency.test.ts`. It is the only file in the repository that starts a container (`grep -rln 'postgres:16' --include='*.ts'` returns exactly one match; every other `*postgres*` test uses PGlite or a caller-supplied URL).
 
-`postgres:16-alpine` declares `VOLUME /var/lib/postgresql/data`. Docker allocates a fresh anonymous volume for any declared `VOLUME` path left without an explicit mount, so each run of the suite stranded one initdb cluster on the host. The audit arithmetic matches this mechanism exactly: 49.47GB across 613 volumes is approximately 82MB per volume, the size of a fresh PostgreSQL 16 cluster.
+`postgres:16-alpine` declares `VOLUME /var/lib/postgresql/data`. Docker allocates a fresh anonymous volume for any declared `VOLUME` path left without an explicit mount, so a run that exits through an affected path could strand one initdb cluster on the host. The audit arithmetic matches this mechanism: 49.47GB across 613 volumes is approximately 82MB per volume, the size of a fresh PostgreSQL 16 cluster.
 
 Confidence: high. The container-start path, the image's `VOLUME` declaration, the per-volume size, and the sole-caller grep all agree.
 
@@ -16,9 +16,9 @@ The harness used `docker run -d --rm ...` and tore down with `docker rm -f <name
 
 - `--rm` removes a container's anonymous volumes only when the container **exits on its own**. It does not cover a force removal.
 - `docker rm -f` without `-v` **never** removes the anonymous volume, and it races the daemon's auto-remove routine for an `AutoRemove=true` container.
-- `afterAll` does not provide cleanup when `beforeAll` throws before reaching its teardown pair. A `process.once('exit')` handler is only a best-effort normal-exit path; it cannot guarantee cleanup for `SIGKILL`, hard timeouts, or other abrupt worker termination.
+- Cleanup must not rely solely on `afterAll`: it does not provide cleanup when `beforeAll` throws before reaching its teardown pair. A `process.once('exit')` handler is only a best-effort normal-exit path; it cannot guarantee cleanup for `SIGKILL`, hard timeouts, or other abrupt worker termination.
 
-So every interrupted, timed-out, or force-removed run orphaned roughly 82MB, permanently.
+Those interrupted, timed-out, or force-removed paths could orphan roughly 82MB per affected run; this does not mean every run leaked. The audit identified 613 matching orphaned volumes.
 
 ## Fix
 
@@ -42,11 +42,11 @@ External `BETA_APIFY_POSTGRES_TEST_URL` behavior is exact: when a URL is supplie
 
 ## Regression guard
 
-`lib/services/analysis/postgres-test-container.test.ts` runs 13 daemon-free lifecycle and argument assertions with an injected fake command runner. It proves supplied URLs execute zero Docker calls, the cleanup fence precedes `run`, `run`/`port`/readiness/setup failures reach `rm -f -v`, transient removal is retried, and the tmpfs covers the exact `PGDATA` path.
+`lib/services/analysis/postgres-test-container.test.ts` runs 14 daemon-free lifecycle and argument assertions with an injected fake command runner. It proves supplied URLs execute zero Docker calls, the cleanup fence precedes `run`, `run`/`port`/readiness/connect/setup failures reach `rm -f -v`, transient removal is retried, every removal call uses the full exact argument tuple, and the tmpfs covers the exact `PGDATA` path.
 
 ## Verification status and residual risk
 
-Verified so far: TypeScript (`tsc --noEmit`, clean), focused ESLint (clean), `git diff --check` (clean), the 13 daemon-free lifecycle/argument assertions pass, and the Docker-backed suite reports 23 skipped because the daemon was down. No live Docker test was run and Docker Desktop remained stopped.
+Verified so far: TypeScript (`tsc --noEmit`, clean), focused ESLint (clean), `git diff --check` (clean), the 14 daemon-free lifecycle/argument assertions pass, and the Docker-backed suite reports 23 skipped because the daemon was down. No live Docker test was run and Docker Desktop remained stopped.
 
 The full repository lint also completed with 0 errors and 17 existing warnings outside this change.
 

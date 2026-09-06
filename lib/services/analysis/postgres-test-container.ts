@@ -4,12 +4,11 @@ import { execFileSync } from 'node:child_process';
 //
 // `postgres:16-alpine` declares `VOLUME /var/lib/postgresql/data`.  Docker allocates a
 // fresh *anonymous* volume for any declared VOLUME path left without an explicit mount,
-// so every `docker run` of the image used to strand roughly one initdb cluster (~82MB)
-// on the host.  `--rm` only reaps that volume when the container exits on its own, and
-// `docker rm -f` without `-v` never reaps it, so an interrupted run, a suite timeout or
-// a force removal orphaned the volume permanently.  A 2026-08-23 audit of the
-// development machine found 671 orphaned anonymous volumes, 613 of them (49.47GB)
-// traceable to these test containers.
+// so a run that leaves the path unmounted and exits through an affected path could strand
+// roughly one initdb cluster (~82MB) on the host.  `--rm` only reaps that volume when the
+// container exits on its own, and `docker rm -f` without `-v` never reaps it.  A
+// 2026-08-23 audit of the development machine found 671 orphaned anonymous volumes, 613
+// of them (49.47GB) traceable to these test containers.
 //
 // Mounting a tmpfs over the declared path removes the failure mode at the source rather
 // than relying on teardown running: with an explicit mount present Docker never creates

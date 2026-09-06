@@ -146,9 +146,11 @@ describe('postgres test container lifecycle', () => {
         expect(closed).toEqual([]);
     });
 
-    for (const failure of ['run', 'port', 'readiness', 'setup'] as const) {
+    for (const failure of ['run', 'port', 'readiness', 'connect', 'setup'] as const) {
         it(`reaps after a ${failure} failure`, async () => {
-            const fake = fakeDockerRunner({ failAction: failure === 'readiness' || failure === 'setup' ? undefined : failure });
+            const fake = fakeDockerRunner({
+                failAction: failure === 'run' || failure === 'port' ? failure : undefined,
+            });
             const lifecycle = createPostgresTestContainerLifecycle({
                 ...lifecycleSpec,
                 commandRunner: fake.runner,
@@ -161,7 +163,10 @@ describe('postgres test container lifecycle', () => {
                 waitForDatabase: async () => {
                     if (failure === 'readiness') throw new Error('FAKE_READINESS_FAILURE');
                 },
-                connectClients: async () => { connected = true; },
+                connectClients: async () => {
+                    connected = true;
+                    if (failure === 'connect') throw new Error('FAKE_CONNECT_FAILURE');
+                },
                 setupDatabase: async () => {
                     if (failure === 'setup') throw new Error('FAKE_SETUP_FAILURE');
                 },
@@ -169,11 +174,13 @@ describe('postgres test container lifecycle', () => {
             })).rejects.toThrow(`FAKE_${failure.toUpperCase()}_FAILURE`);
 
             expect(closed).toBe(true);
-            expect(connected).toBe(failure === 'setup');
+            expect(connected).toBe(failure === 'connect' || failure === 'setup');
             const removals = fake.calls.filter(call => call.args[0] === 'rm');
             expect(removals).toHaveLength(2);
-            expect(removals.every(call => call.args[1] === '-f' && call.args[2] === '-v')).toBe(true);
-            expect(removals[1]!.args).toEqual(buildPostgresRemoveArgs(lifecycleSpec.containerName));
+            expect(removals.map(call => call.args)).toEqual([
+                buildPostgresRemoveArgs(lifecycleSpec.containerName),
+                buildPostgresRemoveArgs(lifecycleSpec.containerName),
+            ]);
         });
     }
 
@@ -201,6 +208,10 @@ describe('postgres test container lifecycle', () => {
 
         const removals = calls.filter(call => call.args[0] === 'rm');
         expect(removals).toHaveLength(3);
-        expect(removals.every(call => call.args[1] === '-f' && call.args[2] === '-v')).toBe(true);
+        expect(removals.map(call => call.args)).toEqual([
+            buildPostgresRemoveArgs(lifecycleSpec.containerName),
+            buildPostgresRemoveArgs(lifecycleSpec.containerName),
+            buildPostgresRemoveArgs(lifecycleSpec.containerName),
+        ]);
     });
 });
