@@ -31,6 +31,30 @@ export const bliteStatusV1Schema = z.discriminatedUnion('state', [
 
 export type BliteStatusV1 = z.infer<typeof bliteStatusV1Schema>;
 
+const bliteBrowserAdditionalStatusV1Schema = z.discriminatedUnion('state', [
+    z.object({
+        state: z.literal('parent_pending'),
+        parentState: z.enum(['pending', 'processing']),
+        retryAfterMs: z.number().int().min(500).max(2_000),
+    }).strict(),
+    z.object({ state: z.literal('unavailable') }).strict(),
+    z.object({ state: z.literal('terminal') }).strict(),
+    z.object({ state: z.literal('expired') }).strict(),
+]);
+
+/** Browser-only states that are safe to expose beyond the existing B-lite DTO contract. */
+export const bliteBrowserStatusV1Schema = z.union([
+    bliteStatusV1Schema,
+    bliteBrowserAdditionalStatusV1Schema,
+]);
+
+export type BliteBrowserStatusV1 = z.infer<typeof bliteBrowserStatusV1Schema>;
+
+export function parseBliteBrowserStatusV1(value: unknown): BliteBrowserStatusV1 | null {
+    const parsed = bliteBrowserStatusV1Schema.safeParse(value);
+    return parsed.success ? parsed.data : null;
+}
+
 export function toBliteStatusV1(
     status: PrecheckoutBliteStatus,
     retryAfterMs = 1_000,

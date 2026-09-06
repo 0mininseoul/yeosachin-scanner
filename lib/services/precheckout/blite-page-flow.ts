@@ -25,6 +25,31 @@ export type PrecheckoutSurfaceState = Readonly<{
 }>;
 export { BLITE_FALLBACK_LATCH_MS } from './blite-deadline';
 
+export type PrecheckoutBrowserStatus =
+    | 'parent_pending'
+    | 'pending'
+    | 'complete'
+    | 'unavailable'
+    | 'failed'
+    | 'terminal'
+    | 'expired'
+    | 'transient';
+export type PrecheckoutFallbackAction = 'delayed' | 'plans' | 'retry';
+
+export function resolvePrecheckoutFallbackAction(
+    status: Exclude<PrecheckoutBrowserStatus, 'complete'>,
+): PrecheckoutFallbackAction {
+    if (status === 'unavailable') return 'plans';
+    if (status === 'failed' || status === 'terminal' || status === 'expired') return 'retry';
+    return 'delayed';
+}
+
+export function canRetryPrecheckout(
+    status: Exclude<PrecheckoutBrowserStatus, 'complete'>,
+): boolean {
+    return status === 'failed' || status === 'terminal' || status === 'expired';
+}
+
 export type BlitePageState = Readonly<{
     view: BliteView;
     pathLatch: PathLatch;
