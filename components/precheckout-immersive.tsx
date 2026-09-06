@@ -9,43 +9,45 @@ import {
 import { BliteResultScreen } from '@/components/blite-result';
 import { CaseCard, Eyebrow, PrimaryButton } from '@/components/case-ui';
 import { PrecheckoutDemo } from '@/components/precheckout-demo';
-import {
-    PRECHECKOUT_DEMO_DURATION_MS,
-    PRECHECKOUT_WAIT_LOOP_DURATION_MS,
-    PRECHECKOUT_WAIT_STAGE_DURATION_MS,
-} from '@/components/precheckout-stage-graphs';
+import { PRECHECKOUT_DEMO_DURATION_MS } from '@/components/precheckout-stage-graphs';
+import { PrecheckoutDelayedStatus } from '@/components/preflight-pending-status';
 import { PRECHECKOUT_EVENTS, trackPrecheckoutEvent } from '@/lib/services/analytics';
-import { BLITE_UX_DEADLINE_MS } from '@/lib/services/precheckout/blite-deadline';
+import {
+    canRetryPrecheckout,
+    resolvePrecheckoutFallbackAction,
+} from '@/lib/services/precheckout/blite-page-flow';
 
 const FETCH_DEADLINE_MS = 5_000;
-/**
- * The visible grace every mount is guaranteed from its own entry: the initial four-stage pass
- * plus exactly one complete slow waiting loop. It is the only definition of that duration.
- */
-const MINIMUM_VISIBLE_GRACE_MS = PRECHECKOUT_DEMO_DURATION_MS + PRECHECKOUT_WAIT_LOOP_DURATION_MS;
 const TRANSIENT_STATUS_RETRY_MS = 1_000;
+const PRECHECKOUT_BLITE_SLOW_POLL_INTERVAL_MS = 5_000;
 const MAX_ANALYTICS_DURATION_MS = 86_400_000;
 
 type PrecheckoutEventName = typeof PRECHECKOUT_EVENTS[keyof typeof PRECHECKOUT_EVENTS];
 type DemoExit = 'result' | 'fallback';
-type ImmersiveView = 'demo' | 'genderConfirm' | 'result' | 'fallback' | 'rejected';
-type FallbackReason = 'unresolved_at_90' | 'demo_error';
+type ImmersiveView = 'demo' | 'delayed' | 'genderConfirm' | 'result' | 'fallback' | 'rejected';
+type FallbackAction = 'plans' | 'retry';
+type FallbackReason =
+    | 'blite_unavailable'
+    | 'blite_terminal'
+    | 'preflight_expired'
+    | 'demo_error';
+type ParentState = 'pending' | 'processing' | 'ready' | 'expired' | 'unknown';
+type DelayedState = 'parent_pending' | 'pending';
 
 type BrowserBliteStatus =
+    | { state: 'parent_pending'; parentState: 'pending' | 'processing'; retryAfterMs: number }
     | { state: 'pending'; retryAfterMs: number }
     | { state: 'complete'; dto: PrecheckoutBliteV1 }
     | { state: 'failed' }
     | { state: 'unavailable' }
+    | { state: 'terminal' }
+    | { state: 'expired' }
     | { state: 'transient' };
 
 const browserBliteRequests = new Map<string, Promise<BrowserBliteStatus>>();
 
 export function __resetBrowserBliteRequestsForTest(): void {
     browserBliteRequests.clear();
-}
-
-function isValidEpoch(value: number | null | undefined): value is number {
-    return typeof value === 'number' && Number.isFinite(value) && value >= 0;
 }
 
 function boundedDemoDurationMs(startedAtMs: number, finishedAtMs: number): number {
@@ -55,10 +57,7 @@ function boundedDemoDurationMs(startedAtMs: number, finishedAtMs: number): numbe
 
 function nextGraphTransitionAt(startedAtMs: number, nowMs: number): number {
     const firstPassEndsAt = startedAtMs + PRECHECKOUT_DEMO_DURATION_MS;
-    if (nowMs <= firstPassEndsAt) return firstPassEndsAt;
-    return firstPassEndsAt + Math.ceil(
-        (nowMs - firstPassEndsAt) / PRECHECKOUT_WAIT_STAGE_DURATION_MS,
-    ) * PRECHECKOUT_WAIT_STAGE_DURATION_MS;
+    return nowMs <= firstPassEndsAt ? firstPassEndsAt : nowMs;
 }
 
 async function fetchPrecheckoutBlite(
@@ -83,13 +82,37 @@ async function fetchPrecheckoutBlite(
                 signal: controller.signal,
                 cache: 'no-store',
             });
-            if (response.status === 204) return { state: 'unavailable' as const };
+            if (response.status === 204) return { state: 'transient' as const };
             if (response.status === 202) {
-                const value = await response.json() as { state?: unknown; retryAfterMs?: unknown };
+                const value = await response.json() as {
+                    state?: unknown;
+                    parentState?: unknown;
+                    retryAfterMs?: unknown;
+                };
+                const retryAfterMs = value.retryAfterMs;
+                const boundedRetry = typeof retryAfterMs === 'number'
+                    && Number.isInteger(retryAfterMs)
+                    && retryAfterMs >= 500
+                    && retryAfterMs <= 2_000;
+                if (!boundedRetry) return { state: 'transient' as const };
+                if (
+                    value.state === 'parent_pending'
+                    && (value.parentState === 'pending' || value.parentState === 'processing')
+                ) {
+                    return {
+                        state: 'parent_pending' as const,
+                        parentState: value.parentState as 'pending' | 'processing',
+                        retryAfterMs,
+                    };
+                }
                 return value.state === 'pending'
-                    && typeof value.retryAfterMs === 'number'
-                    && Number.isInteger(value.retryAfterMs)
-                    ? { state: 'pending' as const, retryAfterMs: value.retryAfterMs }
+                    ? { state: 'pending' as const, retryAfterMs }
+                    : { state: 'transient' as const };
+            }
+            if (response.status === 410) {
+                const value = await response.json() as { state?: unknown };
+                return value.state === 'expired'
+                    ? { state: 'expired' as const }
                     : { state: 'transient' as const };
             }
             if (response.status !== 200) return { state: 'transient' as const };
@@ -100,8 +123,10 @@ async function fetchPrecheckoutBlite(
                     ? { state: 'complete' as const, dto: parsed.data }
                     : { state: 'transient' as const };
             }
-            return value.state === 'failed'
-                ? { state: 'failed' as const }
+            if (value.state === 'failed') return { state: 'failed' as const };
+            if (value.state === 'unavailable') return { state: 'unavailable' as const };
+            return value.state === 'terminal'
+                ? { state: 'terminal' as const }
                 : { state: 'transient' as const };
         } catch {
             return { state: 'transient' as const };
@@ -129,6 +154,8 @@ export interface PrecheckoutImmersiveProps {
     /** Normalized safe handle; it is available before the ready profile snapshot. */
     targetUsername?: string | null;
     onGoToPlans: () => void;
+    /** Starts a new page-owned preflight only after an authoritative terminal/expiry CTA click. */
+    onRetry?: () => void;
     onDemoError?: () => void;
     /**
      * Fired once the B-lite result sheet is on screen. The page owns the heading above this
@@ -142,40 +169,30 @@ export interface PrecheckoutImmersiveProps {
 export function PrecheckoutImmersive({
     preflightId,
     claimToken,
-    submittedAtMs = null,
     targetUsername = null,
     onGoToPlans,
+    onRetry,
     onDemoError,
     onBliteResultShown,
 }: PrecheckoutImmersiveProps) {
-    /** The accepted-preflight clock; governs BLITE_UX_DEADLINE_MS only. */
-    const [startedAtMs] = useState(() => isValidEpoch(submittedAtMs) ? submittedAtMs : Date.now());
     /** Mount-local clock, always fresh, so every mount/remount/reload plays S1 first. */
     const [visibleEntryAtMs] = useState(() => Date.now());
     const [view, setView] = useState<ImmersiveView>('demo');
     const [dto, setDto] = useState<PrecheckoutBliteV1 | null>(null);
     const dtoRef = useRef<PrecheckoutBliteV1 | null>(null);
-    const [exit, setExit] = useState<DemoExit | null>(null);
     const exitRef = useRef<DemoExit | null>(null);
     const exitTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
     const settledExitRef = useRef(false);
+    const initialPassCompleteRef = useRef(false);
+    const [delayedState, setDelayedState] = useState<DelayedState>('pending');
+    const [parentState, setParentState] = useState<ParentState>('unknown');
+    const parentStateRef = useRef<ParentState>('unknown');
+    const fallbackActionRef = useRef<FallbackAction>('plans');
+    const fallbackReasonRef = useRef<FallbackReason>('demo_error');
+    const fallbackCtaClickedRef = useRef(false);
     const emittedEventKeysRef = useRef(new Set<string>());
     const resultAnnouncedRef = useRef(false);
     const resultViewedRef = useRef(false);
-    const deadlineAtMs = startedAtMs + BLITE_UX_DEADLINE_MS;
-    /**
-     * Waiting on the exclusion screen spends the submission-anchored deadline before this screen
-     * ever renders, so whatever is left of it can be less than one watchable run. The browser
-     * display deadline is therefore never earlier than the guaranteed grace, however little of
-     * the submission clock remains. Server, provider, and inference budgets stay anchored to
-     * submission and are untouched.
-     */
-    const visibleFallbackAtMs = Math.max(
-        deadlineAtMs,
-        visibleEntryAtMs + MINIMUM_VISIBLE_GRACE_MS,
-    );
-    /** Whether this mount waits past the submission deadline purely to keep a result possible. */
-    const hasExtendedVisibleGrace = visibleFallbackAtMs > deadlineAtMs;
 
     const emitPrecheckoutEvent = useCallback((
         eventName: PrecheckoutEventName,
@@ -209,17 +226,22 @@ export function PrecheckoutImmersive({
     const requestExit = useCallback((
         nextExit: DemoExit,
         forceImmediate = false,
-        fallbackReason: FallbackReason = 'unresolved_at_90',
+        fallbackReason: FallbackReason = 'blite_terminal',
+        fallbackAction: FallbackAction = 'plans',
+        nextParentState: ParentState = parentStateRef.current,
     ) => {
         if (exitRef.current !== null) return;
         exitRef.current = nextExit;
         if (nextExit === 'fallback') {
+            fallbackActionRef.current = fallbackAction;
+            fallbackReasonRef.current = fallbackReason;
+            parentStateRef.current = nextParentState;
+            setParentState(nextParentState);
             emitPrecheckoutEvent(PRECHECKOUT_EVENTS.BLITE_FALLBACK_SELECTED, {
                 fallback_reason: fallbackReason,
             });
         }
-        setExit(nextExit);
-        const targetAtMs = forceImmediate
+        const targetAtMs = forceImmediate || initialPassCompleteRef.current
             ? Date.now()
             : nextGraphTransitionAt(visibleEntryAtMs, Date.now());
         const settle = () => {
@@ -231,6 +253,15 @@ export function PrecheckoutImmersive({
             exitTimerRef.current = setTimeout(settle, targetAtMs - Date.now());
         }
     }, [emitPrecheckoutEvent, finishExit, visibleEntryAtMs]);
+
+    const handleInitialPassComplete = useCallback(() => {
+        initialPassCompleteRef.current = true;
+        if (exitRef.current !== null) {
+            finishExit(exitRef.current);
+            return;
+        }
+        setView('delayed');
+    }, [finishExit]);
 
     useEffect(() => () => {
         if (exitTimerRef.current) clearTimeout(exitTimerRef.current);
@@ -244,85 +275,109 @@ export function PrecheckoutImmersive({
         let active = true;
         let pollTimer: ReturnType<typeof setTimeout> | undefined;
         let statusReadInFlight = false;
-        let deadlineReached = false;
-        let finalReadStarted = false;
-        let terminalFailureSeen = false;
-
-        const settleFallback = () => {
-            if (!active || exitRef.current !== null) return;
-            requestExit('fallback');
-        };
 
         const schedulePoll = (delayMs: number) => {
-            if (!active || exitRef.current !== null || deadlineReached
-                || Date.now() >= visibleFallbackAtMs) return;
-            pollTimer = setTimeout(() => { void poll(); }, delayMs);
+            if (!active || exitRef.current !== null || pollTimer !== undefined) return;
+            pollTimer = setTimeout(() => {
+                pollTimer = undefined;
+                void poll();
+            }, delayMs);
         };
 
-        function startFinalRead(): void {
-            if (!active || exitRef.current !== null || finalReadStarted) return;
-            finalReadStarted = true;
-            void poll(true);
-        }
+        const setAuthoritativeParentState = (next: ParentState) => {
+            parentStateRef.current = next;
+            setParentState(next);
+        };
 
-        async function poll(isFinalRead = false): Promise<void> {
-            if (!active || exitRef.current !== null || (deadlineReached && !isFinalRead)) return;
+        const keepDelayed = (nextState: DelayedState, nextParentState: ParentState) => {
+            setDelayedState(nextState);
+            setAuthoritativeParentState(nextParentState);
+            if (initialPassCompleteRef.current && exitRef.current === null) setView('delayed');
+        };
+
+        const schedulePendingPoll = (retryAfterMs: number) => {
+            const fastDelay = Math.max(250, Math.min(retryAfterMs, 2_000));
+            schedulePoll(initialPassCompleteRef.current
+                ? PRECHECKOUT_BLITE_SLOW_POLL_INTERVAL_MS
+                : fastDelay);
+        };
+
+        async function poll(): Promise<void> {
+            if (!active || exitRef.current !== null || statusReadInFlight) return;
             statusReadInFlight = true;
             const status = await fetchPrecheckoutBlite(preflightId, claimToken);
             statusReadInFlight = false;
             if (!active || exitRef.current !== null) return;
-            // A durable result is read before any deadline is applied: once it exists it is the
-            // truthful screen, and the graph boundary still decides when it becomes visible.
-            if (status.state === 'complete') {
-                dtoRef.current = status.dto;
-                setDto(status.dto);
-                emitPrecheckoutEvent(PRECHECKOUT_EVENTS.BLITE_AVAILABLE);
-                requestExit('result');
-                return;
-            }
-            if (status.state === 'failed') {
-                terminalFailureSeen = true;
-                // Nothing is left to poll for, and the extra visible grace exists only for a
-                // result that can still arrive, so a terminal failure leaves at the next safe
-                // graph boundary instead of playing that loop out.
-                if (hasExtendedVisibleGrace || deadlineReached || Date.now() >= visibleFallbackAtMs) {
-                    requestExit('fallback');
-                }
-                return;
-            }
-            if (deadlineReached || Date.now() >= visibleFallbackAtMs) {
-                // Give one last status read a chance to observe a durable completion before the
-                // fallback latch emits analytics. A non-complete final read is authoritative.
-                if (isFinalRead) settleFallback();
-                else startFinalRead();
-                return;
-            }
-            const delayMs = status.state === 'pending'
-                ? Math.max(250, Math.min(status.retryAfterMs, 5_000))
-                : TRANSIENT_STATUS_RETRY_MS;
-            schedulePoll(delayMs);
-        }
 
-        const deadlineTimer = setTimeout(() => {
-            if (!active || exitRef.current !== null) return;
-            deadlineReached = true;
-            if (terminalFailureSeen) {
-                settleFallback();
-                return;
+            switch (status.state) {
+                case 'complete':
+                    setAuthoritativeParentState('ready');
+                    dtoRef.current = status.dto;
+                    setDto(status.dto);
+                    emitPrecheckoutEvent(PRECHECKOUT_EVENTS.BLITE_AVAILABLE);
+                    requestExit('result');
+                    return;
+                case 'failed':
+                    {
+                        const action = resolvePrecheckoutFallbackAction(status.state);
+                        if (action === 'delayed' || (action === 'retry' && !canRetryPrecheckout(status.state))) {
+                            return;
+                        }
+                        requestExit('fallback', false, 'blite_terminal', action, 'ready');
+                    }
+                    return;
+                case 'terminal':
+                    {
+                        const action = resolvePrecheckoutFallbackAction(status.state);
+                        if (action === 'delayed' || (action === 'retry' && !canRetryPrecheckout(status.state))) {
+                            return;
+                        }
+                        requestExit('fallback', false, 'blite_terminal', action, 'unknown');
+                    }
+                    return;
+                case 'expired':
+                    {
+                        const action = resolvePrecheckoutFallbackAction(status.state);
+                        if (action === 'delayed' || (action === 'retry' && !canRetryPrecheckout(status.state))) {
+                            return;
+                        }
+                        requestExit('fallback', false, 'preflight_expired', action, 'expired');
+                    }
+                    return;
+                case 'unavailable':
+                    {
+                        const action = resolvePrecheckoutFallbackAction(status.state);
+                        if (action === 'delayed' || (action === 'retry' && !canRetryPrecheckout(status.state))) {
+                            return;
+                        }
+                        requestExit('fallback', false, 'blite_unavailable', action, 'ready');
+                    }
+                    return;
+                case 'parent_pending':
+                    keepDelayed('parent_pending', status.parentState);
+                    schedulePendingPoll(status.retryAfterMs);
+                    return;
+                case 'pending':
+                    keepDelayed('pending', 'ready');
+                    schedulePendingPoll(status.retryAfterMs);
+                    return;
+                case 'transient':
+                    if (parentStateRef.current === 'pending' || parentStateRef.current === 'processing') {
+                        keepDelayed('parent_pending', parentStateRef.current);
+                    } else {
+                        keepDelayed('pending', 'unknown');
+                    }
+                    schedulePendingPoll(TRANSIENT_STATUS_RETRY_MS);
+                    return;
             }
-            // A read that crossed the deadline still owns the completion race. Its result is
-            // processed above before this effect can lock fallback or emit its event.
-            if (statusReadInFlight) return;
-            startFinalRead();
-        }, Math.max(0, visibleFallbackAtMs - Date.now()));
+        }
 
         void poll();
         return () => {
             active = false;
             if (pollTimer) clearTimeout(pollTimer);
-            if (deadlineTimer) clearTimeout(deadlineTimer);
         };
-    }, [claimToken, emitPrecheckoutEvent, hasExtendedVisibleGrace, preflightId, requestExit, visibleEntryAtMs, visibleFallbackAtMs]);
+    }, [claimToken, emitPrecheckoutEvent, preflightId, requestExit]);
 
     /**
      * The page withdraws its own heading eyebrow on this announcement, so the announcement has
@@ -366,18 +421,46 @@ export function PrecheckoutImmersive({
             demo_mode: exitRef.current === 'result' ? 'result' : 'fallback',
             duration_ms: boundedDemoDurationMs(visibleEntryAtMs, Date.now()),
         });
-        requestExit('fallback', false, 'demo_error');
+        requestExit('fallback', false, 'demo_error', 'plans', parentStateRef.current);
         onDemoError?.();
     }, [emitPrecheckoutEvent, onDemoError, requestExit, visibleEntryAtMs]);
+
+    const handleFallbackCta = useCallback(() => {
+        if (fallbackCtaClickedRef.current) return;
+        fallbackCtaClickedRef.current = true;
+        emitPrecheckoutEvent(PRECHECKOUT_EVENTS.BLITE_FALLBACK_CTA_CLICKED, {
+            parent_state: parentStateRef.current,
+            fallback_reason: fallbackReasonRef.current,
+        });
+        if (fallbackActionRef.current === 'retry') {
+            onRetry?.();
+            return;
+        }
+        emitPrecheckoutEvent(PRECHECKOUT_EVENTS.PLAN_GATE_REACHED, { demo_mode: 'fallback' });
+        onGoToPlans();
+    }, [emitPrecheckoutEvent, onGoToPlans, onRetry]);
 
     if (view === 'demo') {
         return (
             <PrecheckoutDemo
                 mode="waiting"
                 startedAtMs={visibleEntryAtMs}
-                finishRequested={exit !== null}
+                onInitialPassComplete={handleInitialPassComplete}
                 onComplete={handleDemoComplete}
                 onError={handleDemoError}
+            />
+        );
+    }
+
+    if (view === 'delayed') {
+        const delayedParentState = parentState === 'processing' || parentState === 'ready'
+            ? parentState
+            : 'pending';
+        return (
+            <PrecheckoutDelayedStatus
+                targetInstagramId={targetUsername}
+                state={delayedState}
+                parentState={delayedParentState}
             />
         );
     }
@@ -419,16 +502,13 @@ export function PrecheckoutImmersive({
     if (view === 'rejected') {
         // A gender rejection is not a B-lite timeout/failure: the neutral completion CTA is
         // reused as-is, but its analytics still record the already-available `result` demo mode.
-        return <FallbackScreen onContinue={() => {
+        return <FallbackScreen action="plans" onContinue={() => {
             emitPrecheckoutEvent(PRECHECKOUT_EVENTS.PLAN_GATE_REACHED, { demo_mode: 'result' });
             onGoToPlans();
         }} />;
     }
 
-    return <FallbackScreen onContinue={() => {
-        emitPrecheckoutEvent(PRECHECKOUT_EVENTS.PLAN_GATE_REACHED, { demo_mode: 'fallback' });
-        onGoToPlans();
-    }} />;
+    return <FallbackScreen action={fallbackActionRef.current} onContinue={handleFallbackCta} />;
 }
 
 function GenderConfirmScreen({
@@ -480,14 +560,22 @@ function GenderConfirmScreen({
     );
 }
 
-function FallbackScreen({ onContinue }: { onContinue: () => void }) {
+function FallbackScreen({
+    action,
+    onContinue,
+}: {
+    action: FallbackAction;
+    onContinue: () => void;
+}) {
     return (
         <CaseCard data-precheckout-fallback className="mt-7 overflow-hidden p-6">
             <Eyebrow>4단계 관계 판독 완료</Eyebrow>
             <p className="mt-3 text-[14px] font-bold leading-snug text-fg">
                 전체 판독에서 계정 규모에 맞는 상세 결과를 확인할 수 있어요.
             </p>
-            <PrimaryButton onClick={onContinue} className="mt-6">상세 분석 보기</PrimaryButton>
+            <PrimaryButton onClick={onContinue} className="mt-6">
+                {action === 'retry' ? '다시 확인하기' : '상세 분석 보기'}
+            </PrimaryButton>
         </CaseCard>
     );
 }

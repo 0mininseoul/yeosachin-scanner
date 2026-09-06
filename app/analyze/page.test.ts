@@ -90,6 +90,22 @@ describe('/analyze precheckout plan gate', () => {
         expect(page.match(/setBliteResultShown\(true\)/g)).toHaveLength(1);
     });
 
+    it('owns terminal retry in the page and starts a new preflight only from the retry callback', () => {
+        const page = readFileSync(join(process.cwd(), 'app/analyze/page.tsx'), 'utf8');
+        const retry = page.slice(page.indexOf('const handleRetryPreflight = useCallback(() => {'));
+        const retryBody = retry.slice(0, retry.indexOf('}, ['));
+
+        expect(retryBody).toContain('const retryTarget = targetInstagramId;');
+        expect(retryBody).toContain('if (!retryTarget) return;');
+        expect(retryBody).toContain('reset();');
+        expect(retryBody).toContain("setPrecheckoutSurface({ preflightId: null, surface: 'awaiting' });");
+        expect(retryBody).toContain('void startPreflight(retryTarget);');
+        expect(retryBody.indexOf('reset();')).toBeLessThan(
+            retryBody.indexOf('void startPreflight(retryTarget);'),
+        );
+        expect(page).toContain('onRetry={handleRetryPreflight}');
+    });
+
     it('resets the viewport to the top on the explicit immersive CTA transition instead of scrolling to plans', () => {
         const page = readFileSync(join(process.cwd(), 'app/analyze/page.tsx'), 'utf8');
 
