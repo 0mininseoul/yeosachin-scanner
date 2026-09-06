@@ -2,6 +2,7 @@ import { createElement } from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { describe, expect, it } from 'vitest';
 import {
+    PrecheckoutDelayedStatus,
     PreflightPendingStatus,
     preflightPendingStage,
 } from '@/components/preflight-pending-status';
@@ -31,5 +32,17 @@ describe('preflight pending status', () => {
         expect(markup).toContain('anim-indeterminate');
         expect(markup).toContain('data-amp-block');
         expect(markup).not.toMatch(/\d+%|초 남/);
+    });
+
+    it('renders the post-graph delayed state as static copy without a spinner or CTA', () => {
+        const markup = renderToStaticMarkup(createElement(PrecheckoutDelayedStatus, {
+            targetInstagramId: 'private_target',
+            parentState: 'pending',
+        }));
+
+        expect(markup).toContain('확인이 조금 더 필요해요');
+        expect(markup).toContain('data-precheckout-delayed-state="parent_pending"');
+        expect(markup).not.toContain('anim-indeterminate');
+        expect(markup).not.toContain('button');
     });
 });

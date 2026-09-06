@@ -8,7 +8,6 @@ import {
     PRECHECKOUT_DEMO_STAGE_DURATIONS_MS,
     PrecheckoutDemo,
 } from './precheckout-demo';
-import { PRECHECKOUT_WAIT_STAGE_DURATION_MS } from './precheckout-stage-graphs';
 import { reduceBlitePage, type BlitePageState } from '@/lib/services/precheckout/blite-page-flow';
 
 (globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT: boolean })
@@ -408,97 +407,39 @@ describe('PrecheckoutDemo', () => {
         expect(onError).toHaveBeenCalledTimes(1);
     });
 
-    it('keeps the graphs alive with changing progress after the initial four-stage pass', async () => {
-        const onComplete = vi.fn();
+    it('reports the initial pass once and leaves no looping progress surface', async () => {
+        const onInitialPassComplete = vi.fn();
         await act(async () => {
             root.render(createElement(PrecheckoutDemo, {
                 mode: 'waiting',
                 startedAtMs: 0,
                 finishRequested: false,
-                onComplete,
+                onInitialPassComplete,
+                onComplete: vi.fn(),
                 onError: vi.fn(),
             }));
         });
 
         await advanceTimersBy(DEMO_DURATION_MS);
 
-        expect(onComplete).not.toHaveBeenCalled();
+        expect(onInitialPassComplete).toHaveBeenCalledOnce();
         expect(container.querySelector('[data-precheckout-demo-phase="waiting"]')).not.toBeNull();
-        expect(container.querySelector('[data-precheckout-progress]')?.textContent)
-            .toContain('추가 신호');
+        expect(container.querySelector('[data-precheckout-progress]')).toBeNull();
     });
 
-    it('finishes a waiting flow only on the next slow graph transition after requested', async () => {
-        const onComplete = vi.fn();
+    it('does not report a second pass after the initial boundary', async () => {
+        const onInitialPassComplete = vi.fn();
         await act(async () => {
             root.render(createElement(PrecheckoutDemo, {
                 mode: 'waiting',
                 startedAtMs: 0,
                 finishRequested: false,
-                onComplete,
+                onInitialPassComplete,
+                onComplete: vi.fn(),
                 onError: vi.fn(),
             }));
         });
-        await advanceTimersBy(DEMO_DURATION_MS + 1);
-        await act(async () => {
-            root.render(createElement(PrecheckoutDemo, {
-                mode: 'waiting',
-                startedAtMs: 0,
-                finishRequested: true,
-                onComplete,
-                onError: vi.fn(),
-            }));
-        });
-
-        await advanceTimersBy(5_998);
-        expect(onComplete).not.toHaveBeenCalled();
-        await advanceTimersBy(1);
-        expect(onComplete).toHaveBeenCalledOnce();
-    });
-
-    it('empties every rail at each new waiting cycle instead of leaving stage 4 full', async () => {
-        const onComplete = vi.fn();
-        await act(async () => {
-            root.render(createElement(PrecheckoutDemo, {
-                mode: 'waiting',
-                startedAtMs: 0,
-                finishRequested: false,
-                onComplete,
-                onError: vi.fn(),
-            }));
-        });
-
-        async function paintAt(ms: number) {
-            await act(async () => {
-                vi.setSystemTime(ms);
-                monotonicTimeMs = ms;
-                rafCallback?.(ms);
-            });
-        }
-        function railWidths() {
-            return [...container.querySelectorAll('.precheckout-stage-graphs i span')]
-                .map(el => (el as HTMLSpanElement).style.width);
-        }
-        const status = container.querySelector('[role="status"]');
-
-        // Drive through the initial four-stage pass so stage 4 (rail index 3) fills before the wrap.
-        await paintAt(13_500);
-        await paintAt(18_000);
-
-        // First waiting boundary: elapsed === PRECHECKOUT_DEMO_DURATION_MS (20,000ms).
-        await paintAt(DEMO_DURATION_MS);
-        expect(status?.textContent).toContain('1/4');
-        expect(railWidths()[0]).toBe('0%');
-        expect(railWidths()[3]).toBe('0px');
-
-        // Drive through the rest of the cycle so stage 4 fills again before the next wrap.
-        await paintAt(DEMO_DURATION_MS + 3 * PRECHECKOUT_WAIT_STAGE_DURATION_MS);
-        await paintAt(DEMO_DURATION_MS + 4 * PRECHECKOUT_WAIT_STAGE_DURATION_MS - 1);
-
-        // Next full waiting-cycle boundary: elapsed === 20,000 + 4*6,000ms (44,000ms).
-        await paintAt(DEMO_DURATION_MS + 4 * PRECHECKOUT_WAIT_STAGE_DURATION_MS);
-        expect(status?.textContent).toContain('1/4');
-        expect(railWidths()[0]).toBe('0%');
-        expect(railWidths()[3]).toBe('0px');
+        await advanceTimersBy(DEMO_DURATION_MS + 24_000);
+        expect(onInitialPassComplete).toHaveBeenCalledOnce();
     });
 });
