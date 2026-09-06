@@ -91,6 +91,48 @@ Rollback할 때는 먼저 해당 역할의 admission을 멈추고, 직전 정상
 
 배포 script는 기존 legacy queue script와 분리되어 있다. `--dry-run`은 `gcloud`를 호출하지 않고 mutation을 출력하며, `--check`는 변경 없이 drift를 보고한다. apply는 service account, concurrency, max scale, role, admission gate, queue target, OIDC audience를 재검증한다. 역할 간 queue, service, target URL, audience 충돌은 fail-closed다. Script 기본 동작은 check-only이며 mutation에는 `--apply`가 필요하다.
 
+## initial 단계 service account identity roll-forward
+
+이미 서비스 중인 `initial` worker가 새 Cloud Tasks caller, 새 Cloud Run runtime
+identity, 그리고 현재 revision에 아예 없던 role enqueuer 환경값을 한 번에
+채택해야 할 때가 있다. 일반 검증은 exact이라 이 세 가지를 모두 거부하므로
+`--allow-initial-identity-roll-forward`를 명시해야 한다. 이전 identity는 절대
+코드에 넣지 않고 실행할 때마다 외부에서 공급한다.
+
+다음 조건이 전부 성립할 때만 허용한다.
+
+- 명시적 `--apply`와 `--reconcile-iam`. invoker binding을 새 caller로 교체해야
+  하므로 check/dry-run은 거부한다.
+- 대상 stage `initial`과 관측 stage `initial`. `--allow-bootstrap-initial-transition`과
+  함께 쓸 수 없다.
+- 완전한 외부 공급 이전 상태 단언
+  `ANALYSIS_CAPACITY_INITIAL_ROLL_FORWARD_OLD_TASK_SERVICE_ACCOUNT_EMAIL`,
+  `..._OLD_ENQUEUER_SERVICE_ACCOUNT_EMAIL`(현재 revision에 enqueuer 값이 없으면
+  리터럴 `absent`), `..._OLD_RUNTIME_SERVICE_ACCOUNT_EMAIL`, `..._OLD_SOURCE_SHA`가
+  관측된 서비스와 정확히 일치해야 한다. 모든 이전 identity는 task 프로젝트의
+  service account여야 하고, 양쪽 role의 모든 목표 task/enqueuer/runtime/maintenance/build
+  identity와 달라야 하며, 서로도 pairwise distinct여야 한다. 이전 source SHA는
+  검토된 source SHA와 달라야 한다.
+- 해당 role의 target queue가 관측 가능하고 `PAUSED`이며 비어 있어야 한다. 이전
+  caller identity를 그대로 들고 있는 in-flight task가 남으면 안 된다.
+- 양쪽 role의 목표 task/enqueuer/runtime identity가 pairwise distinct이고,
+  검토된 runtime manifest가 목표 role enqueuer 값을 이미 담고 있어야 한다.
+- preflight는 활성 Vercel producer fingerprint가 목표 caller/target/audience와
+  이미 일치해야 한다. paid는 Vercel producer가 없고, secondary credential slot,
+  10개 Apify ref 전체, queue contract 등 자기 producer contract를 그대로 유지한다.
+
+모든 증거는 mutation 이전에 수집한다. paused/empty target queue와 producer
+fingerprint는 IAM reconcile과 `gcloud run deploy`보다 먼저 관측된다. 이 허용은
+predeploy 전용이며 위 세 identity 값만 대상으로 한다. 그 밖의 환경, maintenance,
+gate, source drift는 여전히 fail-closed다. staged revision은 검토된 manifest와
+runtime identity에 대해 exact하게 검증하고, 승격된 revision도 다시 exact하게
+검증한다. 승격 이후 caller drift는 기존 검증 rollback을 발동한다.
+
+Rollback은 기존 경로 그대로다. 마지막 정상 revision을 재배포하고 이전 invoker
+binding을 복원한다. 회전 전에 target queue를 paused/empty로 만들었으므로 invoke
+권한이 사라진 caller identity에 묶여 남는 task는 없다. queue 재개는 승격된
+revision 검증이 끝난 뒤에만 한다.
+
 ## 관찰 및 중단 기준
 
 다음 중 하나라도 발생하면 on-call에 알리고 canary를 중지한다.

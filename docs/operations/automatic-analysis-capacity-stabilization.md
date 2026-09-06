@@ -92,6 +92,53 @@ On rollback, first stop admission of the affected role, then deploy the last kno
 
 The deployment scripts are intentionally separate from the existing legacy queue script. A dry-run prints mutations without invoking `gcloud`; `--check` reports drift without mutating resources; apply re-verifies the observed service account, concurrency, max scale, role, admission gate, queue target, and OIDC audience. Any collision between role queues, services, target URLs, or audiences fails closed. The scripts default to check-only; `--apply` is required for mutation.
 
+## Initial-stage service-account identity roll-forward
+
+An already-serving `initial` worker sometimes has to adopt a rotated identity
+set: a new Cloud Tasks caller, a new Cloud Run runtime identity, and a role
+enqueuer environment value that the serving revision never carried. Ordinary
+verification is exact and rejects all three, so this rotation needs the explicit
+`--allow-initial-identity-roll-forward` allowance. Never hardcode the prior
+identities anywhere; supply them per run.
+
+The allowance is accepted only when every one of these holds:
+
+- an explicit `--apply` together with `--reconcile-iam` — the invoker binding
+  must be rotated onto the new caller, so a check/dry-run is refused;
+- target stage `initial` and observed stage `initial`, and never combined with
+  `--allow-bootstrap-initial-transition`;
+- the complete externally supplied prior-state assertion set
+  `ANALYSIS_CAPACITY_INITIAL_ROLL_FORWARD_OLD_TASK_SERVICE_ACCOUNT_EMAIL`,
+  `..._OLD_ENQUEUER_SERVICE_ACCOUNT_EMAIL` (the literal `absent` when the
+  serving revision carries no enqueuer value), `..._OLD_RUNTIME_SERVICE_ACCOUNT_EMAIL`,
+  and `..._OLD_SOURCE_SHA`, each matching the observed service exactly. Every
+  prior identity must be a service account in the task project, must differ from
+  every desired task/enqueuer/runtime/maintenance/build identity of both roles,
+  and must be pairwise distinct; the prior source SHA must differ from the
+  reviewed source SHA;
+- the role's own target queue is observable, `PAUSED`, and empty, so no in-flight
+  task can still carry the prior caller identity;
+- the desired task, enqueuer, and runtime identities of both roles are pairwise
+  distinct, and the reviewed runtime manifest already carries the desired role
+  enqueuer value;
+- for preflight, the active Vercel producer fingerprint already matches the
+  desired caller/target/audience. Paid has no Vercel producer and keeps its own
+  producer contract — the secondary credential slot, the full ten-ref Apify
+  inventory, and its queue contract — unchanged.
+
+All of that evidence is gathered before any mutation: the paused/empty target
+queue and the producer fingerprint are observed before the IAM reconcile and
+before `gcloud run deploy`. The allowance is predeploy-only and covers only the
+three identity values. Arbitrary environment, maintenance, gate, or source drift
+still fails closed, the staged revision is verified exactly against the reviewed
+manifest and runtime identity, and the promoted revision is verified exactly
+again; post-promotion caller drift triggers the ordinary verified rollback.
+
+Rollback is the ordinary path: redeploy the last known-good revision and restore
+the prior invoker binding. Because the target queue was paused and empty before
+the rotation, no task is stranded on a caller identity that no longer has invoke
+permission. Re-enable the queue only after the promoted revision verifies.
+
 ## Observability and stop thresholds
 
 Page the on-call and stop the canary for any one of the following:

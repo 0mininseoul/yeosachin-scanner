@@ -10,6 +10,20 @@ const root = fileURLToPath(new URL('../', import.meta.url));
 const KNOWN_PREFLIGHT_OLD_SOURCE_SHA = '3b28e55c8877276557f8a5a218fb2b966376d889';
 const KNOWN_PAID_OLD_SOURCE_SHA = '3b28e55c8877276557f8a5a218fb2b966376d889';
 const PREFLIGHT_PRODUCER_CONFIG_FINGERPRINT_VERSION = 'preflight-producer-config-v1';
+// Sanitized fixture identities for the initial-stage service-account
+// roll-forward.  These are deliberately synthetic; no real production service
+// account, project, or source SHA ever appears in this suite.
+const OLD_IDENTITY_SOURCE_SHA = 'c'.repeat(40);
+const OLD_IDENTITIES = {
+    preflight: {
+        task: 'preflight-task-legacy@example-project.iam.gserviceaccount.com',
+        runtime: 'preflight-runtime-legacy@example-project.iam.gserviceaccount.com',
+    },
+    paid: {
+        task: 'paid-task-legacy@example-project.iam.gserviceaccount.com',
+        runtime: 'paid-runtime-legacy@example-project.iam.gserviceaccount.com',
+    },
+} as const;
 // Every child command in this contract suite is deliberately bounded.  The
 // suite exercises shell wrappers, so an accidentally waiting fake command must
 // fail the test deterministically instead of leaving Vitest's worker RPC
@@ -257,6 +271,9 @@ interface FakeRunOptions {
     vercelAliases?: unknown;
     vercelProjectEnvironment?: unknown;
     queueTasks?: unknown;
+    targetQueue?: Record<string, unknown> | 'unobservable';
+    deployAppliesIdentities?: boolean;
+    postDeployTaskServiceAccount?: string;
     publicFreeze?: Record<string, unknown>;
 }
 
@@ -481,6 +498,7 @@ function fakeRun(options: FakeRunOptions = {}) {
     const vercelAliasesPath = join(fixtureDir, 'vercel-aliases.json');
     const vercelProjectEnvironmentPath = join(fixtureDir, 'vercel-project-environment.json');
     const queueTasksPath = join(fixtureDir, 'queue-tasks.json');
+    const targetQueuePath = join(fixtureDir, 'target-queue.json');
     const lockPath = join(fixtureDir, 'deploy.lock');
     const manifestPath = join(fixtureDir, 'runtime.json');
     const logPath = join(fixtureDir, 'calls.log');
@@ -495,6 +513,16 @@ function fakeRun(options: FakeRunOptions = {}) {
         state: 'PAUSED',
     }));
     writeFileSync(legacyTasksPath, JSON.stringify([]));
+    // An empty file makes the fake `tasks queues describe` fail, which models an
+    // unobservable target queue.
+    writeFileSync(
+        targetQueuePath,
+        options.targetQueue === 'unobservable' ? '' : JSON.stringify({
+            name: `projects/${env[`${prefix}_PROJECT` as keyof typeof env]}/locations/${env[`${prefix}_LOCATION` as keyof typeof env]}/queues/${queue}`,
+            state: 'PAUSED',
+            ...(options.targetQueue ?? {}),
+        }),
+    );
     writeFileSync(publicFreezePath, JSON.stringify({
         schemaVersion: 'analysis-public-freeze-readiness-v1',
         ready: active,
@@ -591,11 +619,21 @@ function fakeRun(options: FakeRunOptions = {}) {
         legacyActiveTotal: 0,
         unreconciledTotal: 0,
     }));
-    writeFileSync(manifestPath, JSON.stringify(manifestFor(role, {
+    const desiredManifest = manifestFor(role, {
         ANALYSIS_CAPACITY_STAGE: stage,
         ANALYSIS_CAPACITY_EXPANSION_CANARY: expansionCanary,
         ...options.manifestOverrides,
-    }, options.environment)));
+    }, options.environment) as Record<string, unknown>;
+    writeFileSync(manifestPath, JSON.stringify(desiredManifest));
+    // The real `gcloud run deploy` writes the reviewed manifest identities and
+    // the `--service-account` runtime identity into the new revision.  Mirror
+    // exactly those three fields so post-deploy verification stays authentic.
+    const deployIdentityEnv = [
+        `${prefix}_SERVICE_ACCOUNT_EMAIL`,
+        `${prefix}_ENQUEUER_SERVICE_ACCOUNT_EMAIL`,
+    ]
+        .filter((key) => typeof desiredManifest[key] === 'string')
+        .map((key) => ({ name: key, value: desiredManifest[key] as string }));
     const buildManifestPath = join(fixtureDir, 'build.json');
     writeFileSync(buildManifestPath, JSON.stringify({
         NEXT_PUBLIC_SUPABASE_URL: 'https://abcdefghijklmnopqrst.supabase.co',
@@ -622,7 +660,15 @@ if [[ "\${1:-} \${2:-} \${3:-}" == "secrets versions access" ]]; then
 fi
 if [[ "\${1:-} \${2:-} \${3:-} \${4:-}" == "iam service-accounts keys list" ]]; then exit 0; fi
 if [[ "\${1:-} \${2:-}" == "projects get-iam-policy" ]]; then exit 0; fi
-if [[ "\${1:-} \${2:-} \${3:-}" == "tasks queues describe" ]]; then cat "$FAKE_GCLOUD_LEGACY_QUEUE_JSON"; exit 0; fi
+if [[ "\${1:-} \${2:-} \${3:-}" == "tasks queues describe" ]]; then
+  if [[ "\${4:-}" == "$FAKE_GCLOUD_LEGACY_QUEUE_NAME" ]]; then
+    cat "$FAKE_GCLOUD_LEGACY_QUEUE_JSON"
+    exit 0
+  fi
+  [[ -s "$FAKE_GCLOUD_TARGET_QUEUE_JSON" ]] || exit 1
+  cat "$FAKE_GCLOUD_TARGET_QUEUE_JSON"
+  exit 0
+fi
 if [[ "\${1:-} \${2:-}" == "tasks list" ]]; then
   if [[ "$*" == *"--queue=analysis-pipeline"* ]]; then
     cat "$FAKE_GCLOUD_LEGACY_TASKS_JSON"
@@ -670,7 +716,7 @@ if [[ "\${1:-} \${2:-} \${3:-}" == "run revisions describe" ]]; then
 fi
 if [[ "\${1:-} \${2:-} \${3:-}" == "run services get-iam-policy" ]]; then cat "$FAKE_GCLOUD_IAM_JSON"; exit 0; fi
 if [[ "\${1:-} \${2:-}" == "run deploy" ]]; then
-  jq --arg rev "$FAKE_GCLOUD_NEXT_REVISION" --arg stage "$FAKE_GCLOUD_TARGET_STAGE" --arg active "$FAKE_GCLOUD_ACTIVE" --arg role "$FAKE_GCLOUD_ROLE" --arg source "$FAKE_GCLOUD_SOURCE_SHA" --arg stagedTraffic "$FAKE_GCLOUD_STAGED_TRAFFIC" --argjson desiredSecretEnv "$FAKE_GCLOUD_DEPLOY_SECRET_ENV" '
+  jq --arg rev "$FAKE_GCLOUD_NEXT_REVISION" --arg stage "$FAKE_GCLOUD_TARGET_STAGE" --arg active "$FAKE_GCLOUD_ACTIVE" --arg role "$FAKE_GCLOUD_ROLE" --arg source "$FAKE_GCLOUD_SOURCE_SHA" --arg stagedTraffic "$FAKE_GCLOUD_STAGED_TRAFFIC" --argjson desiredSecretEnv "$FAKE_GCLOUD_DEPLOY_SECRET_ENV" --argjson desiredIdentityEnv "$FAKE_GCLOUD_DEPLOY_IDENTITY_ENV" --arg desiredRuntimeSa "$FAKE_GCLOUD_DEPLOY_RUNTIME_SA" '
     .status.latestCreatedRevisionName = $rev
     | if $active == "false"
       then .status.latestReadyRevisionName = $rev | .status.traffic = [{revisionName:$rev,percent:100}]
@@ -709,6 +755,14 @@ if [[ "\${1:-} \${2:-}" == "run deploy" ]]; then
         else . + [$desired]
         end
       )
+    | (if $desiredRuntimeSa == "" then . else .spec.template.spec.serviceAccountName = $desiredRuntimeSa end)
+    | (.spec.template.spec.containers[0].env) as $identityEnv
+    | .spec.template.spec.containers[0].env = reduce $desiredIdentityEnv[] as $desired ($identityEnv;
+        if any(.[]; .name == $desired.name)
+        then map(if .name == $desired.name then {name: .name, value: $desired.value} else . end)
+        else . + [$desired]
+        end
+      )
   ' "$FAKE_GCLOUD_SERVICE_JSON" > "$FAKE_GCLOUD_SERVICE_JSON.tmp"
   mv "$FAKE_GCLOUD_SERVICE_JSON.tmp" "$FAKE_GCLOUD_SERVICE_JSON"
   exit 0
@@ -719,9 +773,14 @@ if [[ "\${1:-} \${2:-} \${3:-}" == "run services update-traffic" ]]; then
   for argument in "\$@"; do
     case "\$argument" in --to-revisions=*) revision="\${argument#--to-revisions=}"; revision="\${revision%%=*}" ;; esac
   done
-  jq --arg rev "\$revision" --arg postDeploySourceSha "\$FAKE_GCLOUD_POST_DEPLOY_SOURCE_SHA" '
+  jq --arg rev "\$revision" --arg postDeploySourceSha "\$FAKE_GCLOUD_POST_DEPLOY_SOURCE_SHA" \
+    --arg postDeployTaskSa "\$FAKE_GCLOUD_POST_DEPLOY_TASK_SA" --arg taskSaKey "$FAKE_GCLOUD_TASK_SA_ENV_KEY" '
     .status.traffic=[{revisionName:$rev,percent:100}]
     | .status.latestReadyRevisionName=$rev
+    | (if $postDeployTaskSa == "" then . else
+        (.spec.template.spec.containers[0].env) |= map(
+          if .name == $taskSaKey then {name: .name, value: $postDeployTaskSa} else . end)
+      end)
     | if $postDeploySourceSha == "" then . else
         .metadata.labels["analysis-v2-source-commit"]=$postDeploySourceSha
         | .spec.template.metadata.labels["analysis-v2-source-commit"]=$postDeploySourceSha
@@ -846,6 +905,14 @@ fi
                 FAKE_VERCEL_ALIASES_JSON: vercelAliasesPath,
                 FAKE_VERCEL_PROJECT_ENV_JSON: vercelProjectEnvironmentPath,
                 FAKE_GCLOUD_QUEUE_TASKS_JSON: queueTasksPath,
+                FAKE_GCLOUD_TARGET_QUEUE_JSON: targetQueuePath,
+                FAKE_GCLOUD_LEGACY_QUEUE_NAME: env.ANALYSIS_CAPACITY_LEGACY_QUEUE,
+                FAKE_GCLOUD_TASK_SA_ENV_KEY: `${prefix}_SERVICE_ACCOUNT_EMAIL`,
+                FAKE_GCLOUD_DEPLOY_IDENTITY_ENV: JSON.stringify(
+                    options.deployAppliesIdentities === false ? [] : deployIdentityEnv,
+                ),
+                FAKE_GCLOUD_DEPLOY_RUNTIME_SA: options.deployAppliesIdentities === false ? '' : runtime,
+                FAKE_GCLOUD_POST_DEPLOY_TASK_SA: options.postDeployTaskServiceAccount ?? '',
                 FAKE_GCLOUD_NEXT_REVISION: `${service}-00002-staged`,
                 FAKE_GCLOUD_TARGET_STAGE: stage,
                 FAKE_GCLOUD_REVISION_SERVICE: options.revisionService ?? service,
@@ -2150,5 +2217,329 @@ describe('automatic-analysis infrastructure contracts', () => {
         const result = fakeRun({ ...options, args: ['--check'] });
         expect(result.status).not.toBe(0);
         expect(`${result.stdout}\n${result.stderr}`).toContain(expected);
+    });
+
+    // The production-shaped drift: an existing initial-stage service still runs
+    // the prior task caller and runtime identities and carries no enqueuer env
+    // at all, while the reviewed manifest names the rotated three-identity set.
+    function identityRollForwardRun(
+        role: 'preflight' | 'paid',
+        overrides: FakeRunOptions = {},
+    ) {
+        const prefix = role === 'preflight' ? 'PREFLIGHT_TASKS' : 'ANALYSIS_V2_TASKS';
+        const maintenancePrefix = role === 'preflight' ? 'PREFLIGHT_TASKS' : 'ANALYSIS_V2';
+        const env = { ...baseEnvironment(role), ...(overrides.environment ?? {}) };
+        const enqueuerKey = `${prefix}_ENQUEUER_SERVICE_ACCOUNT_EMAIL`;
+        const desiredEnqueuer = env[enqueuerKey as keyof typeof env] as string;
+        const maintenance = env[`${maintenancePrefix}_MAINTENANCE_SERVICE_ACCOUNT_EMAIL` as keyof typeof env] as string;
+        const old = OLD_IDENTITIES[role];
+        const defaults: FakeRunOptions = {
+            role,
+            observedSourceSha: OLD_IDENTITY_SOURCE_SHA,
+            manifestOverrides: { [enqueuerKey]: desiredEnqueuer },
+            serviceEnv: { [`${prefix}_SERVICE_ACCOUNT_EMAIL`]: old.task },
+            serviceOverrides: { spec: { template: { spec: { serviceAccountName: old.runtime } } } },
+            iam: {
+                bindings: [
+                    { role: 'roles/viewer', members: ['serviceAccount:unrelated@example-project.iam.gserviceaccount.com'] },
+                    { role: 'roles/run.invoker', members: [
+                        `serviceAccount:${old.task}`,
+                        `serviceAccount:${maintenance}`,
+                    ] },
+                ],
+            },
+            queueTasks: [],
+            environment: {
+                ANALYSIS_CAPACITY_INITIAL_ROLL_FORWARD_OLD_TASK_SERVICE_ACCOUNT_EMAIL: old.task,
+                ANALYSIS_CAPACITY_INITIAL_ROLL_FORWARD_OLD_ENQUEUER_SERVICE_ACCOUNT_EMAIL: 'absent',
+                ANALYSIS_CAPACITY_INITIAL_ROLL_FORWARD_OLD_RUNTIME_SERVICE_ACCOUNT_EMAIL: old.runtime,
+                ANALYSIS_CAPACITY_INITIAL_ROLL_FORWARD_OLD_SOURCE_SHA: OLD_IDENTITY_SOURCE_SHA,
+            },
+            args: ['--apply', '--reconcile-iam', '--allow-initial-identity-roll-forward'],
+        };
+        return fakeRun({
+            ...defaults,
+            ...overrides,
+            environment: { ...defaults.environment, ...overrides.environment },
+            serviceEnv: { ...defaults.serviceEnv, ...overrides.serviceEnv },
+            manifestOverrides: { ...defaults.manifestOverrides, ...overrides.manifestOverrides },
+            serviceOverrides: deepMerge(defaults.serviceOverrides, overrides.serviceOverrides ?? {}),
+        });
+    }
+
+    function serviceIdentities(finalService: Record<string, unknown>, role: 'preflight' | 'paid') {
+        const prefix = role === 'preflight' ? 'PREFLIGHT_TASKS' : 'ANALYSIS_V2_TASKS';
+        const template = (finalService.spec as {
+            template: {
+                spec: {
+                    serviceAccountName: string;
+                    containers: Array<{ env: Array<{ name: string; value?: string }> }>;
+                };
+            };
+        }).template;
+        const value = (name: string) => template.spec.containers[0].env
+            .find((entry) => entry.name === name)?.value;
+        return {
+            task: value(`${prefix}_SERVICE_ACCOUNT_EMAIL`),
+            enqueuer: value(`${prefix}_ENQUEUER_SERVICE_ACCOUNT_EMAIL`),
+            runtime: template.spec.serviceAccountName,
+        };
+    }
+
+    it('rolls an existing initial preflight service forward onto rotated task, enqueuer, and runtime identities', () => {
+        const base = baseEnvironment('preflight');
+        const result = identityRollForwardRun('preflight');
+        expect(result.status, `${result.stderr?.toString() ?? ''}\n${result.calls}`).toBe(0);
+        expect(result.stdout).toContain(
+            'verified: initial identity roll-forward preconditions before any IAM or deploy mutation',
+        );
+        expect(result.stdout).toContain('predeploy: allowing exact initial task caller identity roll-forward');
+        expect(result.stdout).toContain('predeploy: allowing exact initial runtime identity roll-forward');
+        expect(result.stdout).toContain(
+            'predeploy: allowing exact initial identity roll-forward for PREFLIGHT_TASKS_ENQUEUER_SERVICE_ACCOUNT_EMAIL',
+        );
+        expect(result.calls).toContain('run deploy');
+        expect(result.calls).toContain('run services update-traffic');
+        expect(serviceIdentities(result.finalService, 'preflight')).toEqual({
+            task: base.PREFLIGHT_TASKS_SERVICE_ACCOUNT_EMAIL,
+            enqueuer: base.PREFLIGHT_TASKS_ENQUEUER_SERVICE_ACCOUNT_EMAIL,
+            runtime: base.PREFLIGHT_TASKS_RUNTIME_SERVICE_ACCOUNT_EMAIL,
+        });
+        const invokers = (result.finalIam.bindings as Array<{ role: string; members: string[] }>)
+            .find((binding) => binding.role === 'roles/run.invoker');
+        expect(invokers?.members).toEqual([
+            `serviceAccount:${base.PREFLIGHT_TASKS_MAINTENANCE_SERVICE_ACCOUNT_EMAIL}`,
+            `serviceAccount:${base.PREFLIGHT_TASKS_SERVICE_ACCOUNT_EMAIL}`,
+        ]);
+        expect(invokers?.members).not.toContain(`serviceAccount:${OLD_IDENTITIES.preflight.task}`);
+    });
+
+    it('proves the desired preflight producer fingerprint and paused empty queue precede every IAM and deploy mutation', () => {
+        const result = identityRollForwardRun('preflight');
+        expect(result.status, `${result.stderr?.toString() ?? ''}\n${result.calls}`).toBe(0);
+        const lines = result.calls.split('\n');
+        const indexOf = (predicate: (line: string) => boolean) => lines.findIndex(predicate);
+        const readinessIndex = indexOf((line) => line.startsWith('curl ') && line.includes('/api/analysis/capacity/readiness'));
+        const targetQueueIndex = indexOf((line) => line.startsWith('tasks queues describe analysis-preflight'));
+        const iamMutationIndex = indexOf((line) => line.startsWith('run services set-iam-policy'));
+        const deployIndex = indexOf((line) => line.startsWith('run deploy'));
+        expect(readinessIndex).toBeGreaterThanOrEqual(0);
+        expect(targetQueueIndex).toBeGreaterThanOrEqual(0);
+        expect(iamMutationIndex).toBeGreaterThanOrEqual(0);
+        expect(deployIndex).toBeGreaterThanOrEqual(0);
+        expect(readinessIndex).toBeLessThan(iamMutationIndex);
+        expect(targetQueueIndex).toBeLessThan(iamMutationIndex);
+        expect(readinessIndex).toBeLessThan(deployIndex);
+        expect(targetQueueIndex).toBeLessThan(deployIndex);
+    });
+
+    it('rolls the paid worker forward while preserving its own producer contract', () => {
+        const base = baseEnvironment('paid');
+        const result = identityRollForwardRun('paid');
+        expect(result.status, `${result.stderr?.toString() ?? ''}\n${result.calls}`).toBe(0);
+        expect(serviceIdentities(result.finalService, 'paid')).toEqual({
+            task: base.ANALYSIS_V2_TASKS_SERVICE_ACCOUNT_EMAIL,
+            enqueuer: base.ANALYSIS_V2_TASKS_ENQUEUER_SERVICE_ACCOUNT_EMAIL,
+            runtime: base.ANALYSIS_V2_WORKER_RUNTIME_SERVICE_ACCOUNT_EMAIL,
+        });
+        // Paid keeps its own producer contract: the secondary credential slot,
+        // the full ten-ref Apify inventory, and no preflight producer evidence.
+        const finalEnv = (result.finalService.spec as {
+            template: { spec: { containers: Array<{ env: Array<{ name: string; value?: string; valueFrom?: unknown }> }> } };
+        }).template.spec.containers[0].env;
+        expect(finalEnv.find(({ name }) => name === 'ANALYSIS_V2_APIFY_API_TOKEN_SLOT')?.value).toBe('secondary');
+        expect(finalEnv.filter(({ name, valueFrom }) => name.startsWith('APIFY_') && valueFrom)).toHaveLength(10);
+        expect(result.calls).not.toContain('/v10/projects/');
+        expect(result.calls).toContain('tasks queues describe analysis-v2-pipeline');
+    });
+
+    const unauthorizedIdentityRollForwardCases: Array<[string, FakeRunOptions, string]> = [
+        ['check mode', { args: ['--check', '--allow-initial-identity-roll-forward'] },
+            '--allow-initial-identity-roll-forward requires explicit --apply'],
+        ['dry-run mode', { args: ['--dry-run', '--allow-initial-identity-roll-forward'] },
+            '--allow-initial-identity-roll-forward requires explicit --apply'],
+        ['implicit apply', { args: ['--allow-initial-identity-roll-forward'] },
+            '--allow-initial-identity-roll-forward requires explicit --apply'],
+        ['missing reconcile-iam', { args: ['--apply', '--allow-initial-identity-roll-forward'] },
+            '--allow-initial-identity-roll-forward requires --reconcile-iam'],
+        ['expanded target stage', { stage: 'expanded' },
+            '--allow-initial-identity-roll-forward requires target stage=initial'],
+        ['bootstrap target stage', { stage: 'bootstrap' },
+            '--allow-initial-identity-roll-forward requires target stage=initial'],
+        ['combined with the bootstrap transition', {
+            args: ['--apply', '--reconcile-iam', '--allow-initial-identity-roll-forward',
+                '--allow-bootstrap-initial-transition'],
+        }, 'cannot combine'],
+        ['missing prior task assertion', {
+            environment: { ANALYSIS_CAPACITY_INITIAL_ROLL_FORWARD_OLD_TASK_SERVICE_ACCOUNT_EMAIL: '' },
+        }, 'requires exact prior task, enqueuer, runtime, and source SHA assertions'],
+        ['missing prior enqueuer assertion', {
+            environment: { ANALYSIS_CAPACITY_INITIAL_ROLL_FORWARD_OLD_ENQUEUER_SERVICE_ACCOUNT_EMAIL: '' },
+        }, 'requires exact prior task, enqueuer, runtime, and source SHA assertions'],
+        ['missing prior runtime assertion', {
+            environment: { ANALYSIS_CAPACITY_INITIAL_ROLL_FORWARD_OLD_RUNTIME_SERVICE_ACCOUNT_EMAIL: '' },
+        }, 'requires exact prior task, enqueuer, runtime, and source SHA assertions'],
+        ['missing prior source SHA assertion', {
+            environment: { ANALYSIS_CAPACITY_INITIAL_ROLL_FORWARD_OLD_SOURCE_SHA: '' },
+        }, 'requires exact prior task, enqueuer, runtime, and source SHA assertions'],
+        ['malformed prior source SHA', {
+            environment: { ANALYSIS_CAPACITY_INITIAL_ROLL_FORWARD_OLD_SOURCE_SHA: 'not-a-git-sha' },
+        }, 'prior source SHA must be one exact 40-character commit'],
+        ['prior identity aliases a desired identity', {
+            environment: {
+                ANALYSIS_CAPACITY_INITIAL_ROLL_FORWARD_OLD_TASK_SERVICE_ACCOUNT_EMAIL:
+                    'preflight-runtime@example-project.iam.gserviceaccount.com',
+            },
+        }, 'must differ from every desired workload identity'],
+        ['prior identities alias each other', {
+            environment: {
+                ANALYSIS_CAPACITY_INITIAL_ROLL_FORWARD_OLD_RUNTIME_SERVICE_ACCOUNT_EMAIL:
+                    OLD_IDENTITIES.preflight.task,
+            },
+        }, 'prior identities must be pairwise distinct'],
+        ['prior identity outside the task project', {
+            environment: {
+                ANALYSIS_CAPACITY_INITIAL_ROLL_FORWARD_OLD_TASK_SERVICE_ACCOUNT_EMAIL:
+                    'preflight-task-legacy@other-project.iam.gserviceaccount.com',
+            },
+        }, 'prior identities must belong to the task project'],
+        ['aliased desired workload identities', {
+            environment: {
+                PREFLIGHT_TASKS_ENQUEUER_SERVICE_ACCOUNT_EMAIL:
+                    'preflight-task@example-project.iam.gserviceaccount.com',
+            },
+        }, 'task, enqueuer, and runtime identities must be distinct'],
+        ['manifest without the desired enqueuer identity', {
+            manifestOverrides: { PREFLIGHT_TASKS_ENQUEUER_SERVICE_ACCOUNT_EMAIL: undefined },
+        }, 'requires the runtime manifest to carry the desired PREFLIGHT_TASKS_ENQUEUER_SERVICE_ACCOUNT_EMAIL'],
+    ];
+
+    it.each(unauthorizedIdentityRollForwardCases)(
+        'rejects an unauthorized initial identity roll-forward before observing anything: %s',
+        (_name, overrides, expected) => {
+            const result = identityRollForwardRun('preflight', overrides);
+            expect(result.status).not.toBe(0);
+            expect(`${result.stdout}\n${result.stderr}`).toContain(expected);
+            expect(result.calls).toBe('');
+        },
+    );
+
+    const failClosedIdentityRollForwardCases: Array<[string, FakeRunOptions, string]> = [
+        ['observed bootstrap service', { serviceStage: 'bootstrap' },
+            '--allow-initial-identity-roll-forward requires an observed initial service'],
+        ['running target queue', { targetQueue: { state: 'RUNNING' } },
+            'requires the exact PAUSED target queue'],
+        ['foreign target queue name', {
+            targetQueue: { name: 'projects/example-project/locations/asia-northeast3/queues/somewhere-else' },
+        }, 'requires the exact PAUSED target queue'],
+        ['unobservable target queue', { targetQueue: 'unobservable' },
+            'target queue could not be observed'],
+        ['non-empty target queue', { queueTasks: undefined },
+            'requires an empty target queue'],
+        ['wrong prior task assertion', {
+            environment: {
+                ANALYSIS_CAPACITY_INITIAL_ROLL_FORWARD_OLD_TASK_SERVICE_ACCOUNT_EMAIL:
+                    'preflight-task-other@example-project.iam.gserviceaccount.com',
+            },
+        }, 'prior task identity assertion does not match the observed service'],
+        ['wrong prior runtime assertion', {
+            environment: {
+                ANALYSIS_CAPACITY_INITIAL_ROLL_FORWARD_OLD_RUNTIME_SERVICE_ACCOUNT_EMAIL:
+                    'preflight-runtime-other@example-project.iam.gserviceaccount.com',
+            },
+        }, 'prior runtime identity assertion does not match the observed service'],
+        ['prior enqueuer asserted absent while one is observed', {
+            serviceEnv: {
+                PREFLIGHT_TASKS_ENQUEUER_SERVICE_ACCOUNT_EMAIL:
+                    'preflight-enqueuer-legacy@example-project.iam.gserviceaccount.com',
+            },
+        }, 'prior enqueuer identity assertion does not match the observed service'],
+        ['prior enqueuer asserted present while none is observed', {
+            environment: {
+                ANALYSIS_CAPACITY_INITIAL_ROLL_FORWARD_OLD_ENQUEUER_SERVICE_ACCOUNT_EMAIL:
+                    'preflight-enqueuer-legacy@example-project.iam.gserviceaccount.com',
+            },
+        }, 'prior enqueuer identity assertion does not match the observed service'],
+        ['wrong prior source SHA assertion', {
+            environment: { ANALYSIS_CAPACITY_INITIAL_ROLL_FORWARD_OLD_SOURCE_SHA: 'b'.repeat(40) },
+        }, 'prior source SHA assertion does not match the observed service'],
+        ['misaligned preflight producer fingerprint', {
+            publicFreeze: { preflightProducerConfigFingerprint: 'f'.repeat(64) },
+        }, 'producer fingerprint does not match the reviewed contract'],
+        ['unready preflight producer configuration', {
+            publicFreeze: { preflightProducerConfigReady: false },
+        }, 'producer fingerprint does not match the reviewed contract'],
+    ];
+
+    it.each(failClosedIdentityRollForwardCases)(
+        'keeps the initial identity roll-forward fail-closed before any mutation: %s',
+        (_name, overrides, expected) => {
+            const result = identityRollForwardRun('preflight', overrides);
+            expect(result.status).not.toBe(0);
+            expect(`${result.stdout}\n${result.stderr}`).toContain(expected);
+            expect(result.calls).not.toContain('run deploy');
+            expect(result.calls).not.toContain('run services set-iam-policy');
+        },
+    );
+
+    const unrelatedDriftIdentityRollForwardCases: Array<[string, FakeRunOptions, string]> = [
+        ['maintenance identity drift', {
+            serviceEnv: {
+                PREFLIGHT_TASKS_MAINTENANCE_SERVICE_ACCOUNT_EMAIL:
+                    'preflight-maintenance-old@example-project.iam.gserviceaccount.com',
+            },
+        }, 'observed maintenance identity drifted'],
+        ['maintenance audience drift', {
+            serviceEnv: { PREFLIGHT_TASKS_MAINTENANCE_OIDC_AUDIENCE: 'https://stale.example.com' },
+        }, 'observed maintenance audience drifted'],
+        ['queue drift', {
+            serviceEnv: { PREFLIGHT_TASKS_QUEUE: 'analysis-preflight-legacy' },
+        }, 'observed queue drifted'],
+        ['target URL drift', {
+            serviceEnv: { PREFLIGHT_TASKS_TARGET_URL: 'https://stale.example.com/api/analysis/preflight/worker' },
+        }, 'observed target URL drifted'],
+        ['unrelated env drift', {
+            serviceEnv: { ANALYSIS_CAPACITY_WORKER_MEMORY: '1Gi' },
+        }, 'observed environment drifted for ANALYSIS_CAPACITY_WORKER_MEMORY'],
+        ['admission gate drift', {
+            serviceEnv: { ANALYSIS_PROVIDER_ADMISSION_ENABLED: 'false' },
+        }, 'observed admission gate is not true'],
+    ];
+
+    it.each(unrelatedDriftIdentityRollForwardCases)(
+        'never widens the initial identity roll-forward into other drift: %s',
+        (_name, overrides, expected) => {
+            const result = identityRollForwardRun('preflight', overrides);
+            expect(result.status).not.toBe(0);
+            expect(`${result.stdout}\n${result.stderr}`).toContain(expected);
+            expect(result.calls).not.toContain('run deploy');
+        },
+    );
+
+    it('requires the staged revision to carry the exact rotated identities', () => {
+        const result = identityRollForwardRun('preflight', { deployAppliesIdentities: false });
+        expect(result.status).not.toBe(0);
+        expect(`${result.stdout}\n${result.stderr}`).toContain('Cloud Run observed task identity drifted');
+        expect(result.calls).toContain('run deploy');
+        expect(result.calls).not.toContain('run services update-traffic');
+    });
+
+    it('rejects post-promotion task caller drift after the rotated revision serves all traffic', () => {
+        const result = identityRollForwardRun('preflight', {
+            postDeployTaskServiceAccount: OLD_IDENTITIES.preflight.task,
+        });
+        expect(result.status).not.toBe(0);
+        expect(`${result.stdout}\n${result.stderr}`).toContain('Cloud Run observed task identity drifted');
+        expect(result.calls.match(/run services update-traffic/g) ?? []).toHaveLength(2);
+    });
+
+    it('leaves the ordinary initial deploy path unchanged without the explicit allowance', () => {
+        const result = identityRollForwardRun('preflight', {
+            args: ['--apply', '--reconcile-iam'],
+        });
+        expect(result.status).not.toBe(0);
+        expect(`${result.stdout}\n${result.stderr}`).toContain('Cloud Run observed task identity drifted');
+        expect(result.calls).not.toContain('run deploy');
+        expect(result.calls).not.toContain('run services set-iam-policy');
     });
 });

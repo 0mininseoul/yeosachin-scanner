@@ -23,11 +23,12 @@ mode_was_explicit="false"
 reconcile_iam="false"
 reconcile_jobs="false"
 allow_bootstrap_initial_transition="false"
+allow_initial_identity_roll_forward="false"
 role="${ANALYSIS_CAPACITY_ROLE:-}"
 
 usage() {
   cat <<'EOF'
-Usage: scripts/deploy-analysis-capacity-workers.sh --role=preflight|paid [--dry-run | --check | --apply] [--reconcile-iam] [--reconcile-jobs] [--allow-bootstrap-initial-transition]
+Usage: scripts/deploy-analysis-capacity-workers.sh --role=preflight|paid [--dry-run | --check | --apply] [--reconcile-iam] [--reconcile-jobs] [--allow-bootstrap-initial-transition] [--allow-initial-identity-roll-forward]
 
 Deploys one private split-capacity Cloud Run worker from the shared source
 tree. Existing queue names remain analysis-preflight and analysis-v2-pipeline.
@@ -70,6 +71,23 @@ Modes:
   --allow-bootstrap-initial-transition is valid only with an explicit --apply
              when an existing exact serving bootstrap service is promoted to
              initial; only the known activation gate values may transition.
+  --allow-initial-identity-roll-forward is valid only with an explicit --apply
+             plus --reconcile-iam when an existing serving initial service must
+             adopt rotated task caller, enqueuer, and runtime identities. It
+             requires target and observed stage initial, an exact externally
+             supplied prior identity/source assertion set, a PAUSED and
+             observably empty target queue, pairwise-distinct desired workload
+             identities, and (preflight) an already-aligned Vercel producer
+             fingerprint. The allowance is predeploy-only: the staged revision
+             and the promoted revision are verified exactly.
+
+Initial identity roll-forward assertions (required only with that flag):
+  ANALYSIS_CAPACITY_INITIAL_ROLL_FORWARD_OLD_TASK_SERVICE_ACCOUNT_EMAIL
+  ANALYSIS_CAPACITY_INITIAL_ROLL_FORWARD_OLD_ENQUEUER_SERVICE_ACCOUNT_EMAIL
+    The exact prior enqueuer identity, or the literal absent when the observed
+    service carries no enqueuer environment value at all.
+  ANALYSIS_CAPACITY_INITIAL_ROLL_FORWARD_OLD_RUNTIME_SERVICE_ACCOUNT_EMAIL
+  ANALYSIS_CAPACITY_INITIAL_ROLL_FORWARD_OLD_SOURCE_SHA
 
 Stage contract:
   bootstrap: all admission/worker gates false; private build/runtime/IAM only.
@@ -114,6 +132,9 @@ while (($# > 0)); do
     --allow-bootstrap-initial-transition)
       allow_bootstrap_initial_transition="true"
       ;;
+    --allow-initial-identity-roll-forward)
+      allow_initial_identity_roll_forward="true"
+      ;;
     -h|--help)
       usage
       exit 0
@@ -132,6 +153,14 @@ done
 [[ "$allow_bootstrap_initial_transition" != "true" \
    || ("$mode" == "apply" && "$mode_was_explicit" == "true") ]] \
   || die "--allow-bootstrap-initial-transition requires explicit --apply"
+[[ "$allow_initial_identity_roll_forward" != "true" \
+   || ("$mode" == "apply" && "$mode_was_explicit" == "true") ]] \
+  || die "--allow-initial-identity-roll-forward requires explicit --apply"
+[[ "$allow_initial_identity_roll_forward" != "true" || "$reconcile_iam" == "true" ]] \
+  || die "--allow-initial-identity-roll-forward requires --reconcile-iam"
+[[ "$allow_initial_identity_roll_forward" != "true" \
+   || "$allow_bootstrap_initial_transition" != "true" ]] \
+  || die "--allow-initial-identity-roll-forward cannot combine with --allow-bootstrap-initial-transition"
 [[ "$role" == "preflight" || "$role" == "paid" ]] \
   || die "--role=preflight or --role=paid is required"
 [[ "${ANALYSIS_WORKLOAD_ROLE:-}" == "$role" ]] \
@@ -151,6 +180,9 @@ if [[ "$stage" != "expanded" && "$expansion_canary" == "true" ]]; then
 fi
 if [[ "$allow_bootstrap_initial_transition" == "true" && "$stage" != "initial" ]]; then
   die "--allow-bootstrap-initial-transition requires target stage=initial"
+fi
+if [[ "$allow_initial_identity_roll_forward" == "true" && "$stage" != "initial" ]]; then
+  die "--allow-initial-identity-roll-forward requires target stage=initial"
 fi
 
 legacy_freeze_mode="${ANALYSIS_CAPACITY_LEGACY_FREEZE_MODE:-bootstrap}"
@@ -231,6 +263,12 @@ legacy_target_url="${ANALYSIS_CAPACITY_LEGACY_TARGET_URL:-}"
 legacy_target_resource="${ANALYSIS_CAPACITY_LEGACY_TARGET_RESOURCE:-}"
 public_freeze_readiness_url="${ANALYSIS_CAPACITY_PUBLIC_FREEZE_READINESS_URL:-}"
 preflight_runtime_fingerprint_verified="false"
+# Prior-state assertions for the initial-stage identity roll-forward. They are
+# always externally supplied; no prior production identity is ever compiled in.
+old_task_sa="${ANALYSIS_CAPACITY_INITIAL_ROLL_FORWARD_OLD_TASK_SERVICE_ACCOUNT_EMAIL:-}"
+old_enqueuer="${ANALYSIS_CAPACITY_INITIAL_ROLL_FORWARD_OLD_ENQUEUER_SERVICE_ACCOUNT_EMAIL:-}"
+old_runtime="${ANALYSIS_CAPACITY_INITIAL_ROLL_FORWARD_OLD_RUNTIME_SERVICE_ACCOUNT_EMAIL:-}"
+old_source_sha_assertion="${ANALYSIS_CAPACITY_INITIAL_ROLL_FORWARD_OLD_SOURCE_SHA:-}"
 
 [[ -n "$project" && -n "$location" && -n "$region" && -n "$service" \
    && -n "$queue" && -n "$target" && -n "$audience" && -n "$task_sa" \
@@ -462,6 +500,38 @@ source_sha="$(git -C "$source_dir" rev-parse --verify 'HEAD^{commit}' 2>/dev/nul
   || die "ANALYSIS_CAPACITY_SOURCE_DIR source provenance is invalid"
 [[ -z "$(git -C "$source_dir" status --porcelain --untracked-files=all)" ]] \
   || die "ANALYSIS_CAPACITY_SOURCE_DIR must have no tracked, staged, or untracked changes"
+
+if [[ "$allow_initial_identity_roll_forward" == "true" ]]; then
+  [[ -n "$old_task_sa" && -n "$old_enqueuer" && -n "$old_runtime" \
+     && -n "$old_source_sha_assertion" ]] \
+    || die "initial identity roll-forward requires exact prior task, enqueuer, runtime, and source SHA assertions"
+  [[ "$old_source_sha_assertion" =~ ^[0-9a-f]{40}$ ]] \
+    || die "initial identity roll-forward prior source SHA must be one exact 40-character commit"
+  [[ "$old_source_sha_assertion" != "$source_sha" ]] \
+    || die "initial identity roll-forward prior source SHA must differ from the reviewed source SHA"
+  old_identity_values=("$old_task_sa" "$old_runtime")
+  # An absent prior enqueuer environment value is the reviewed production shape;
+  # it is asserted explicitly rather than inferred from an unset variable.
+  [[ "$old_enqueuer" == "absent" ]] || old_identity_values+=("$old_enqueuer")
+  for old_identity in "${old_identity_values[@]}"; do
+    [[ "$old_identity" =~ $service_account_pattern ]] \
+      || die "initial identity roll-forward prior identities must be exact service accounts"
+    [[ "${old_identity#*@}" == "${project}.iam.gserviceaccount.com" ]] \
+      || die "initial identity roll-forward prior identities must belong to the task project"
+    for desired_identity in "${identity_values[@]}" "$maintenance" "$build_service_account"; do
+      [[ "$old_identity" != "$desired_identity" ]] \
+        || die "initial identity roll-forward prior identities must differ from every desired workload identity"
+    done
+  done
+  for ((old_index = 0; old_index < ${#old_identity_values[@]}; old_index += 1)); do
+    for ((other_old_index = old_index + 1; other_old_index < ${#old_identity_values[@]}; other_old_index += 1)); do
+      [[ "${old_identity_values[$old_index]}" != "${old_identity_values[$other_old_index]}" ]] \
+        || die "initial identity roll-forward prior identities must be pairwise distinct"
+    done
+  done
+  [[ "$(manifest_value "$env_file" "$enqueuer_var" 2>/dev/null || true)" == "$enqueuer" ]] \
+    || die "initial identity roll-forward requires the runtime manifest to carry the desired $enqueuer_var"
+fi
 
 [[ "$deploy_lock_bucket" != */* && "$deploy_lock_bucket" != *[[:space:]]* ]] \
   || die "ANALYSIS_CAPACITY_DEPLOY_LOCK_BUCKET must be one exact bucket name"
@@ -1568,6 +1638,88 @@ verify_staged_revision() {
   done
 }
 
+expected_old_enqueuer_value() {
+  [[ "$old_enqueuer" != "absent" ]] || return 0
+  printf '%s\n' "$old_enqueuer"
+}
+
+verify_target_queue_is_paused_and_empty() {
+  local queue_json
+  local task_json
+  queue_json="$(gcloud tasks queues describe "$queue" \
+    "--project=$project" \
+    "--location=$location" \
+    '--format=json')" \
+    || die "initial identity roll-forward target queue could not be observed"
+  jq -e --arg queue "$queue" '
+    ((.name // "") | endswith("/queues/" + $queue))
+    and (.state // "") == "PAUSED"
+  ' <<<"$queue_json" >/dev/null \
+    || die "initial identity roll-forward requires the exact PAUSED target queue"
+  task_json="$(gcloud tasks list \
+    "--queue=$queue" \
+    "--project=$project" \
+    "--location=$location" \
+    '--format=json')" \
+    || die "initial identity roll-forward target queue contents could not be observed"
+  jq -e 'type == "array" and length == 0' <<<"$task_json" >/dev/null \
+    || die "initial identity roll-forward requires an empty target queue"
+  log "verified: target queue $queue is paused and observably empty"
+}
+
+# The complete precondition set for an initial-stage identity rotation.  It runs
+# before the contract verification that may reconcile IAM and before any deploy,
+# so no mutation can precede the prior-state, queue, and producer evidence.
+verify_initial_identity_roll_forward_preconditions() {
+  local observed_task
+  local observed_enqueuer
+  local observed_runtime
+  local observed_label_sha
+  local expected_old_enqueuer
+  expected_old_enqueuer="$(expected_old_enqueuer_value)"
+  observed_task="$(env_value "$task_sa_var")"
+  observed_enqueuer="$(env_value "$enqueuer_var")"
+  observed_runtime="$(runtime_identity_value "$service_json")"
+  observed_label_sha="$(jq -r --arg key "$PROVENANCE_LABEL_KEY" \
+    '.metadata.labels[$key] // empty' <<<"$service_json")"
+  [[ "$observed_task" == "$old_task_sa" ]] \
+    || die "initial identity roll-forward prior task identity assertion does not match the observed service"
+  [[ "$observed_enqueuer" == "$expected_old_enqueuer" ]] \
+    || die "initial identity roll-forward prior enqueuer identity assertion does not match the observed service"
+  [[ "$observed_runtime" == "$old_runtime" ]] \
+    || die "initial identity roll-forward prior runtime identity assertion does not match the observed service"
+  [[ "$observed_label_sha" == "$old_source_sha_assertion" ]] \
+    || die "initial identity roll-forward prior source SHA assertion does not match the observed service"
+  verify_target_queue_is_paused_and_empty
+  # Preflight producers live in Vercel; the desired caller/target/audience must
+  # already be the active producer contract before the worker adopts it.  Paid
+  # has no Vercel producer and keeps its own unchanged producer contract.
+  verify_preflight_runtime_fingerprint
+  log "verified: initial identity roll-forward preconditions before any IAM or deploy mutation"
+}
+
+initial_identity_roll_forward_value_is_allowed() {
+  local key="$1"
+  local observed="$2"
+  local expected="$3"
+  local expected_old_enqueuer
+  expected_old_enqueuer="$(expected_old_enqueuer_value)"
+  case "$key" in
+    "$task_sa_var")
+      [[ "$observed" == "$old_task_sa" && "$expected" == "$task_sa" ]]
+      ;;
+    "$enqueuer_var")
+      [[ "$observed" == "$expected_old_enqueuer" && "$expected" == "$enqueuer" ]]
+      ;;
+    "$runtime_var")
+      [[ "$observed" == "$old_runtime" && "$expected" == "$runtime" ]]
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+}
+
 bootstrap_initial_transition_value_is_allowed() {
   local key="$1"
   local observed="$2"
@@ -1612,10 +1764,13 @@ verify_service_contract() {
   local allow_existing_service_predeploy_preflight_slot_roll_forward="${7:-false}"
   local allow_existing_service_predeploy_preflight_secret_ref_roll_forward="${8:-false}"
   local allow_existing_service_predeploy_paid_secret_ref_roll_forward="${9:-false}"
+  local allow_existing_service_predeploy_initial_identity_roll_forward="${10:-false}"
   local contract_expansion_canary="false"
   local contract_recovery_enabled="false"
   local contract_max_instances=8
   local observed_source_sha
+  local observed_task_identity
+  local observed_runtime_identity
   local source_roll_forward_observed="false"
   local preflight_secret_ref_roll_forward_observed="false"
   local paid_secret_ref_roll_forward_observed="false"
@@ -1631,6 +1786,17 @@ verify_service_contract() {
   [[ "$allow_existing_service_predeploy_paid_secret_ref_roll_forward" == "true" \
      || "$allow_existing_service_predeploy_paid_secret_ref_roll_forward" == "false" ]] \
     || die "invalid internal paid Secret Manager ref roll-forward allowance"
+  [[ "$allow_existing_service_predeploy_initial_identity_roll_forward" == "true" \
+     || "$allow_existing_service_predeploy_initial_identity_roll_forward" == "false" ]] \
+    || die "invalid internal initial identity roll-forward allowance"
+  if [[ "$allow_existing_service_predeploy_initial_identity_roll_forward" == "true" ]]; then
+    [[ "$allow_initial_identity_roll_forward" == "true" \
+       && "$mode" == "apply" && "$mode_was_explicit" == "true" \
+       && "$reconcile_iam" == "true" \
+       && "$require_traffic" == "true" \
+       && "$stage" == "initial" && "$contract_stage" == "initial" ]] \
+      || die "initial identity roll-forward allowance is valid only for explicit initial apply predeploy verification"
+  fi
   if [[ "$allow_existing_service_predeploy_source_roll_forward" == "true" ]]; then
     [[ "$mode" == "apply" && "$mode_was_explicit" == "true" \
        && "$require_traffic" == "true" ]] \
@@ -1713,7 +1879,13 @@ verify_service_contract() {
   [[ "$(env_value "$queue_var")" == "$queue" ]] || die "Cloud Run observed queue drifted"
   [[ "$(env_value "$target_var")" == "$target" ]] || die "Cloud Run observed target URL drifted"
   [[ "$(env_value "$audience_var")" == "$audience" ]] || die "Cloud Run observed OIDC audience drifted"
-  [[ "$(env_value "$task_sa_var")" == "$task_sa" ]] || die "Cloud Run observed task identity drifted"
+  observed_task_identity="$(env_value "$task_sa_var")"
+  if [[ "$observed_task_identity" != "$task_sa" ]]; then
+    [[ "$allow_existing_service_predeploy_initial_identity_roll_forward" == "true" \
+       && "$observed_task_identity" == "$old_task_sa" ]] \
+      || die "Cloud Run observed task identity drifted"
+    log "predeploy: allowing exact initial task caller identity roll-forward"
+  fi
   [[ "$(env_value "$maintenance_var")" == "$maintenance" ]] \
     || die "Cloud Run observed maintenance identity drifted"
   [[ "$(env_value "$maintenance_audience_var")" == "$maintenance_audience" ]] \
@@ -1737,8 +1909,13 @@ verify_service_contract() {
       [[ "$(env_value "$gate")" == "true" ]] || die "Cloud Run observed role enable gate is not true"
     done
   fi
-  [[ "$(jq -r '.spec.template.spec.serviceAccountName // empty' <<<"$service_json")" == "$runtime" ]] \
-    || die "Cloud Run runtime service account drifted"
+  observed_runtime_identity="$(jq -r '.spec.template.spec.serviceAccountName // empty' <<<"$service_json")"
+  if [[ "$observed_runtime_identity" != "$runtime" ]]; then
+    [[ "$allow_existing_service_predeploy_initial_identity_roll_forward" == "true" \
+       && "$observed_runtime_identity" == "$old_runtime" ]] \
+      || die "Cloud Run runtime service account drifted"
+    log "predeploy: allowing exact initial runtime identity roll-forward"
+  fi
   [[ "$(jq -r '.spec.template.spec.containerConcurrency // empty' <<<"$service_json")" == "1" ]] \
     || die "Cloud Run containerConcurrency must be 1"
   [[ "$(number_annotation autoscaling.knative.dev/maxScale)" == "$contract_max_instances" ]] \
@@ -1794,6 +1971,12 @@ verify_service_contract() {
        && "$observed_value" == "primary,quinary,senary" \
        && "$manifest_expected" == "$PREFLIGHT_APIFY_API_TOKEN_SLOTS_VALUE" ]]; then
       log "predeploy: allowing exact preflight Apify slot-pool roll-forward"
+      continue
+    fi
+    if [[ "$allow_existing_service_predeploy_initial_identity_roll_forward" == "true" ]] \
+       && initial_identity_roll_forward_value_is_allowed \
+         "$manifest_key" "$observed_value" "$manifest_expected"; then
+      log "predeploy: allowing exact initial identity roll-forward for $manifest_key"
       continue
     fi
     if [[ "$allow_bootstrap_initial_transition_for_contract" == "true" ]] \
@@ -1957,13 +2140,21 @@ if service_exists; then
   if [[ "$role" == "paid" && "$stage" == "initial" && "$observed_stage" == "initial" ]]; then
     allow_existing_service_predeploy_paid_secret_ref_roll_forward="true"
   fi
+  allow_existing_service_predeploy_initial_identity_roll_forward="false"
+  if [[ "$allow_initial_identity_roll_forward" == "true" ]]; then
+    [[ "$observed_stage" == "initial" ]] \
+      || die "--allow-initial-identity-roll-forward requires an observed initial service"
+    verify_initial_identity_roll_forward_preconditions
+    allow_existing_service_predeploy_initial_identity_roll_forward="true"
+  fi
   verify_service_contract "$observed_stage" true "$allow_stale_bootstrap_provenance" \
     "$allow_bootstrap_cross_role_gate_transition" \
     "$allow_bootstrap_initial_transition" \
     "true" \
     "$allow_existing_service_predeploy_preflight_slot_roll_forward" \
     "$allow_existing_service_predeploy_preflight_secret_ref_roll_forward" \
-    "$allow_existing_service_predeploy_paid_secret_ref_roll_forward"
+    "$allow_existing_service_predeploy_paid_secret_ref_roll_forward" \
+    "$allow_existing_service_predeploy_initial_identity_roll_forward"
   verify_legacy_quiescence
   verify_vercel_public_deployment
   verify_preflight_queue_oidc_contract
