@@ -273,12 +273,12 @@ if ! public_freeze_json="$(curl --disable --proto '=https' --tlsv1.2 \
   --request GET \
   --url "$ANALYSIS_CAPACITY_PUBLIC_FREEZE_READINESS_URL" \
   --header 'Accept: application/json' 2>/dev/null)"; then
-  die 'public V1 freeze readiness observation failed'
+  die 'public freeze readiness observation failed'
 fi
 jq -e --arg expected_sha "$expected_sha" \
   --arg expected_resource "$ANALYSIS_CAPACITY_LEGACY_TARGET_RESOURCE" '
-  (keys | sort) == ["freezeMode", "legacyTargetResource", "preflightProducerConfigFingerprint", "preflightProducerConfigFingerprintVersion", "preflightProducerConfigReady", "publicFreezeEnabled", "ready", "routes", "schemaVersion", "sourceSha", "stage"]
-  and .schemaVersion == "analysis-public-freeze-readiness-v1"
+  (keys | sort) == ["freezeMode", "legacyTargetResource", "paidProducerConfigFingerprint", "paidProducerConfigFingerprintVersion", "paidProducerConfigReady", "preflightProducerConfigFingerprint", "preflightProducerConfigFingerprintVersion", "preflightProducerConfigReady", "publicFreezeEnabled", "ready", "routes", "schemaVersion", "sourceSha", "stage"]
+  and .schemaVersion == "analysis-public-freeze-readiness-v2"
   and .ready == true
   and (.stage == "initial" or .stage == "expanded")
   and .freezeMode == "drain-and-block"
@@ -288,10 +288,13 @@ jq -e --arg expected_sha "$expected_sha" \
   and .preflightProducerConfigFingerprintVersion == "preflight-producer-config-v1"
   and .preflightProducerConfigReady == true
   and (.preflightProducerConfigFingerprint | type == "string" and test("^[0-9a-f]{64}$"))
+  and .paidProducerConfigFingerprintVersion == "paid-producer-config-v1"
+  and .paidProducerConfigReady == true
+  and (.paidProducerConfigFingerprint | type == "string" and test("^[0-9a-f]{64}$"))
   and ((.routes | keys | sort) == ["/api/analysis/run", "/api/analysis/start", "/api/analysis/step"])
   and ([.routes[] | select(.gateState == "frozen" and .expectedStatus == 410 and .gateBeforeRuntime == true)] | length) == 3
 ' <<<"$public_freeze_json" >/dev/null 2>&1 \
-  || die 'public V1 freeze readiness is not an exact active gate-before-runtime contract'
+  || die 'public freeze readiness is not an exact active gate-before-runtime contract'
 
 probe_legacy_route() {
   local route="$1"

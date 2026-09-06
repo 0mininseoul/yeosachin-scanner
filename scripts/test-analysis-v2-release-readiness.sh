@@ -161,7 +161,7 @@ export FAKE_REVISION_JSON="{\"metadata\":{\"name\":\"analysis-worker-active\",\"
 export FAKE_VERCEL_DEPLOYMENT_ID='dpl_selected'
 export FAKE_VERCEL_JSON="{\"deployments\":[{\"target\":\"production\",\"readyState\":\"READY\",\"uid\":\"$FAKE_VERCEL_DEPLOYMENT_ID\",\"url\":\"yeosachin.com\",\"meta\":{\"githubCommitSha\":\"$expected_sha\"}}]}"
 export FAKE_VERCEL_ALIASES_JSON='{"aliases":[]}'
-export FAKE_PUBLIC_FREEZE_JSON="{\"schemaVersion\":\"analysis-public-freeze-readiness-v1\",\"ready\":true,\"stage\":\"initial\",\"freezeMode\":\"drain-and-block\",\"publicFreezeEnabled\":true,\"sourceSha\":\"$expected_sha\",\"legacyTargetResource\":\"vercel:production:analysis-v1\",\"preflightProducerConfigFingerprintVersion\":\"preflight-producer-config-v1\",\"preflightProducerConfigFingerprint\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"preflightProducerConfigReady\":true,\"routes\":{\"/api/analysis/start\":{\"gateState\":\"frozen\",\"expectedStatus\":410,\"gateBeforeRuntime\":true},\"/api/analysis/step\":{\"gateState\":\"frozen\",\"expectedStatus\":410,\"gateBeforeRuntime\":true},\"/api/analysis/run\":{\"gateState\":\"frozen\",\"expectedStatus\":410,\"gateBeforeRuntime\":true}}}"
+export FAKE_PUBLIC_FREEZE_JSON="{\"schemaVersion\":\"analysis-public-freeze-readiness-v2\",\"ready\":true,\"stage\":\"initial\",\"freezeMode\":\"drain-and-block\",\"publicFreezeEnabled\":true,\"sourceSha\":\"$expected_sha\",\"legacyTargetResource\":\"vercel:production:analysis-v1\",\"preflightProducerConfigFingerprintVersion\":\"preflight-producer-config-v1\",\"preflightProducerConfigFingerprint\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"preflightProducerConfigReady\":true,\"paidProducerConfigFingerprintVersion\":\"paid-producer-config-v1\",\"paidProducerConfigFingerprint\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"paidProducerConfigReady\":true,\"routes\":{\"/api/analysis/start\":{\"gateState\":\"frozen\",\"expectedStatus\":410,\"gateBeforeRuntime\":true},\"/api/analysis/step\":{\"gateState\":\"frozen\",\"expectedStatus\":410,\"gateBeforeRuntime\":true},\"/api/analysis/run\":{\"gateState\":\"frozen\",\"expectedStatus\":410,\"gateBeforeRuntime\":true}}}"
 export FAKE_SUPABASE_JSON='[{"version":"20260829120000","name":"add_analysis_v2_progress_signals_history"}]'
 export VERCEL_TOKEN="$vercel_token"
 export IMAGE_PROXY_SIGNING_SECRET="$image_proxy_secret"
@@ -213,6 +213,20 @@ assert_no_sensitive_probe_value() {
     || fail 'image proxy signing secret appeared in a release-readiness command argv'
 }
 
+assert_public_readiness_rejected() {
+  local scenario="$1"
+  local candidate="$2"
+  local original="$FAKE_PUBLIC_FREEZE_JSON"
+  FAKE_PUBLIC_FREEZE_JSON="$candidate"
+  if output="$(run_gate 2>&1)"; then
+    printf '%s\n' "$output" >&2
+    fail "$scenario public readiness was accepted"
+  fi
+  assert_no_token "$output"
+  assert_no_sensitive_probe_value "$output"
+  FAKE_PUBLIC_FREEZE_JSON="$original"
+}
+
 if ! output="$(run_gate 2>&1)"; then
   printf '%s\n' "$output" >&2
   fail 'matching release provenance was rejected'
@@ -223,6 +237,34 @@ assert_no_sensitive_probe_value "$output"
   || fail 'successful release readiness did not report a pass'
 [[ "$(<"$command_log")" != *"$vercel_token"* ]] \
   || fail 'Vercel token appeared in a release-readiness command argv'
+
+assert_public_readiness_rejected \
+  'schema v1' \
+  "$(jq -c '.schemaVersion = "analysis-public-freeze-readiness-v1"' <<<"$FAKE_PUBLIC_FREEZE_JSON")"
+assert_public_readiness_rejected \
+  'aggregate ready=false' \
+  "$(jq -c '.ready = false' <<<"$FAKE_PUBLIC_FREEZE_JSON")"
+assert_public_readiness_rejected \
+  'missing paid fingerprint version' \
+  "$(jq -c 'del(.paidProducerConfigFingerprintVersion)' <<<"$FAKE_PUBLIC_FREEZE_JSON")"
+assert_public_readiness_rejected \
+  'malformed paid fingerprint version' \
+  "$(jq -c '.paidProducerConfigFingerprintVersion = "paid-producer-config-v0"' <<<"$FAKE_PUBLIC_FREEZE_JSON")"
+assert_public_readiness_rejected \
+  'missing paid fingerprint digest' \
+  "$(jq -c 'del(.paidProducerConfigFingerprint)' <<<"$FAKE_PUBLIC_FREEZE_JSON")"
+assert_public_readiness_rejected \
+  'malformed paid fingerprint digest' \
+  "$(jq -c '.paidProducerConfigFingerprint = "not-a-digest"' <<<"$FAKE_PUBLIC_FREEZE_JSON")"
+assert_public_readiness_rejected \
+  'missing paid fingerprint ready' \
+  "$(jq -c 'del(.paidProducerConfigReady)' <<<"$FAKE_PUBLIC_FREEZE_JSON")"
+assert_public_readiness_rejected \
+  'paid fingerprint ready=false' \
+  "$(jq -c '.paidProducerConfigReady = false' <<<"$FAKE_PUBLIC_FREEZE_JSON")"
+assert_public_readiness_rejected \
+  'malformed paid fingerprint ready' \
+  "$(jq -c '.paidProducerConfigReady = "true"' <<<"$FAKE_PUBLIC_FREEZE_JSON")"
 
 export FAKE_VERCEL_JSON="{\"deployments\":[{\"target\":\"production\",\"readyState\":\"READY\",\"uid\":\"$FAKE_VERCEL_DEPLOYMENT_ID\",\"url\":\"vercel-preview.example\",\"meta\":{\"githubCommitSha\":\"$expected_sha\"}}]}"
 export FAKE_VERCEL_ALIASES_JSON='{"aliases":[{"uid":"alias_selected","alias":"yeosachin.com","created":"2026-08-01T00:00:00.000Z"}]}'

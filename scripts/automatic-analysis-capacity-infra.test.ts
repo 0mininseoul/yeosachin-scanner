@@ -10,6 +10,7 @@ const root = fileURLToPath(new URL('../', import.meta.url));
 const KNOWN_PREFLIGHT_OLD_SOURCE_SHA = '3b28e55c8877276557f8a5a218fb2b966376d889';
 const KNOWN_PAID_OLD_SOURCE_SHA = '3b28e55c8877276557f8a5a218fb2b966376d889';
 const PREFLIGHT_PRODUCER_CONFIG_FINGERPRINT_VERSION = 'preflight-producer-config-v1';
+const PAID_PRODUCER_CONFIG_FINGERPRINT_VERSION = 'paid-producer-config-v1';
 // Sanitized fixture identities for the initial-stage service-account
 // roll-forward.  These are deliberately synthetic; no real production service
 // account, project, or source SHA ever appears in this suite.
@@ -36,13 +37,22 @@ const OLD_IDENTITIES = {
 // pending behind a synchronous child process.
 const CHILD_PROCESS_TIMEOUT_MS = 30_000;
 
-function preflightProducerConfigFingerprint(environment: Record<string, string>): string {
+function producerConfigFingerprint(
+    environment: Record<string, string>,
+    role: 'preflight' | 'paid',
+): string {
+    const prefix = role === 'preflight' ? 'PREFLIGHT_TASKS' : 'ANALYSIS_V2_TASKS';
+    const targetPath = role === 'preflight'
+        ? '/api/analysis/preflight/worker'
+        : '/api/analysis/v2/worker';
+    const version = role === 'preflight'
+        ? PREFLIGHT_PRODUCER_CONFIG_FINGERPRINT_VERSION
+        : PAID_PRODUCER_CONFIG_FINGERPRINT_VERSION;
     return createHash('sha256').update([
-        PREFLIGHT_PRODUCER_CONFIG_FINGERPRINT_VERSION,
-        environment.PREFLIGHT_TASKS_SERVICE_ACCOUNT_EMAIL.trim().toLowerCase(),
-        new URL(environment.PREFLIGHT_TASKS_TARGET_URL.trim()).origin.toLowerCase()
-            + new URL(environment.PREFLIGHT_TASKS_TARGET_URL.trim()).pathname,
-        new URL(environment.PREFLIGHT_TASKS_OIDC_AUDIENCE.trim()).origin.toLowerCase(),
+        version,
+        environment[`${prefix}_SERVICE_ACCOUNT_EMAIL`].trim().toLowerCase(),
+        new URL(environment[`${prefix}_TARGET_URL`].trim()).origin.toLowerCase() + targetPath,
+        new URL(environment[`${prefix}_OIDC_AUDIENCE`].trim()).origin.toLowerCase(),
     ].join('\n'), 'utf8').digest('hex');
 }
 
@@ -567,7 +577,7 @@ function fakeRun(options: FakeRunOptions = {}) {
         }),
     );
     writeFileSync(publicFreezePath, JSON.stringify({
-        schemaVersion: 'analysis-public-freeze-readiness-v1',
+        schemaVersion: 'analysis-public-freeze-readiness-v2',
         ready: active,
         stage,
         freezeMode: active ? 'drain-and-block' : 'unknown',
@@ -575,8 +585,11 @@ function fakeRun(options: FakeRunOptions = {}) {
         sourceSha: active ? sourceCommit : null,
         legacyTargetResource: 'vercel:production:analysis-v1',
         preflightProducerConfigFingerprintVersion: PREFLIGHT_PRODUCER_CONFIG_FINGERPRINT_VERSION,
-        preflightProducerConfigFingerprint: active ? preflightProducerConfigFingerprint(env) : null,
+        preflightProducerConfigFingerprint: active ? producerConfigFingerprint(env, 'preflight') : null,
         preflightProducerConfigReady: active,
+        paidProducerConfigFingerprintVersion: PAID_PRODUCER_CONFIG_FINGERPRINT_VERSION,
+        paidProducerConfigFingerprint: active ? producerConfigFingerprint(env, 'paid') : null,
+        paidProducerConfigReady: active,
         routes: Object.fromEntries([
             '/api/analysis/start', '/api/analysis/step', '/api/analysis/run',
         ].map((route) => [route, {
@@ -603,17 +616,21 @@ function fakeRun(options: FakeRunOptions = {}) {
             { key: 'PREFLIGHT_TASKS_SERVICE_ACCOUNT_EMAIL', target: ['production'] },
             { key: 'PREFLIGHT_TASKS_TARGET_URL', target: ['production'] },
             { key: 'PREFLIGHT_TASKS_OIDC_AUDIENCE', target: ['production'] },
+            { key: 'ANALYSIS_V2_TASKS_SERVICE_ACCOUNT_EMAIL', target: ['production'] },
+            { key: 'ANALYSIS_V2_TASKS_TARGET_URL', target: ['production'] },
+            { key: 'ANALYSIS_V2_TASKS_OIDC_AUDIENCE', target: ['production'] },
         ],
         hiddenProductionEnvCount: 0,
     };
     writeFileSync(vercelProjectEnvironmentPath, JSON.stringify(defaultVercelProjectEnvironment));
+    const queueTaskPrefix = role === 'preflight' ? 'PREFLIGHT_TASKS' : 'ANALYSIS_V2_TASKS';
     writeFileSync(queueTasksPath, JSON.stringify(options.queueTasks ?? [{
-        name: 'projects/example-project/locations/asia-northeast3/queues/analysis-preflight/tasks/probe-fixture',
+        name: `projects/example-project/locations/asia-northeast3/queues/${env[`${queueTaskPrefix}_QUEUE` as keyof typeof env]}/tasks/probe-fixture`,
         httpRequest: {
-            url: env.PREFLIGHT_TASKS_TARGET_URL,
+            url: env[`${queueTaskPrefix}_TARGET_URL` as keyof typeof env],
             oidcToken: {
-                serviceAccountEmail: env.PREFLIGHT_TASKS_SERVICE_ACCOUNT_EMAIL,
-                audience: env.PREFLIGHT_TASKS_OIDC_AUDIENCE,
+                serviceAccountEmail: env[`${queueTaskPrefix}_SERVICE_ACCOUNT_EMAIL` as keyof typeof env],
+                audience: env[`${queueTaskPrefix}_OIDC_AUDIENCE` as keyof typeof env],
             },
         },
     }]));
@@ -1476,6 +1493,208 @@ describe('automatic-analysis infrastructure contracts', () => {
             'next-deploy Vercel preflight environment',
         );
         expect(result.calls).not.toContain('run deploy');
+    });
+
+    it('uses the active Vercel paid runtime fingerprint when the paid queue is empty', () => {
+        const result = fakeRun({
+            role: 'paid',
+            queueTasks: [],
+            args: ['--check'],
+        });
+        expect(result.status, `${result.stderr?.toString() ?? ''}\n${result.calls}`).toBe(0);
+        expect(result.stdout).toContain('active Vercel paid producer fingerprint');
+    });
+
+    it('fails closed when the active Vercel paid runtime fingerprint drifts', () => {
+        const result = fakeRun({
+            role: 'paid',
+            queueTasks: [],
+            publicFreeze: {
+                paidProducerConfigFingerprint: 'f'.repeat(64),
+            },
+            args: ['--check'],
+        });
+        expect(result.status).not.toBe(0);
+        expect(`${result.stdout}\n${result.stderr}`).toContain(
+            'active Vercel paid producer fingerprint',
+        );
+        expect(result.calls).not.toContain('run deploy');
+    });
+
+    it('fails closed when the active Vercel paid runtime fingerprint is missing or false', () => {
+        const result = fakeRun({
+            role: 'paid',
+            queueTasks: [],
+            publicFreeze: {
+                paidProducerConfigFingerprint: null,
+                paidProducerConfigReady: false,
+            },
+            args: ['--check'],
+        });
+        expect(result.status).not.toBe(0);
+        expect(result.calls).not.toContain('run deploy');
+    });
+
+    it('fails closed when next-deploy Vercel paid keys are incomplete', () => {
+        const result = fakeRun({
+            role: 'paid',
+            queueTasks: [],
+            vercelProjectEnvironment: {
+                envs: [
+                    { key: 'ANALYSIS_V2_TASKS_TARGET_URL', target: ['production'] },
+                    { key: 'ANALYSIS_V2_TASKS_OIDC_AUDIENCE', target: ['production'] },
+                ],
+                hiddenProductionEnvCount: 0,
+            },
+            iam: {
+                bindings: [{
+                    role: 'roles/run.invoker',
+                    members: ['allUsers'],
+                }],
+            },
+            args: ['--apply', '--reconcile-iam'],
+        });
+        expect(result.status).not.toBe(0);
+        expect(`${result.stdout}\n${result.stderr}`).toContain(
+            'next-deploy Vercel paid environment',
+        );
+        expect(result.calls).not.toContain('run deploy');
+        expect(result.calls).not.toContain('run services set-iam-policy');
+    });
+
+    it('rejects duplicate paid next-deploy production environment metadata before IAM mutation', () => {
+        const result = fakeRun({
+            role: 'paid',
+            queueTasks: [],
+            vercelProjectEnvironment: {
+                envs: [
+                    { key: 'ANALYSIS_V2_TASKS_SERVICE_ACCOUNT_EMAIL', target: ['production'] },
+                    { key: 'ANALYSIS_V2_TASKS_SERVICE_ACCOUNT_EMAIL', target: ['production'] },
+                    { key: 'ANALYSIS_V2_TASKS_TARGET_URL', target: ['production'] },
+                    { key: 'ANALYSIS_V2_TASKS_OIDC_AUDIENCE', target: ['production'] },
+                ],
+                hiddenProductionEnvCount: 0,
+            },
+            iam: {
+                bindings: [{
+                    role: 'roles/run.invoker',
+                    members: ['allUsers'],
+                }],
+            },
+            args: ['--apply', '--reconcile-iam'],
+        });
+        expect(result.status).not.toBe(0);
+        expect(`${result.stdout}\n${result.stderr}`).toContain(
+            'next-deploy Vercel paid environment',
+        );
+        expect(result.calls).not.toContain('run deploy');
+        expect(result.calls).not.toContain('run services set-iam-policy');
+    });
+
+    it.each([
+        ['target userinfo', { ANALYSIS_V2_TASKS_TARGET_URL: 'https://user:secret@paid.example.com/api/analysis/v2/worker' }],
+        ['target query', { ANALYSIS_V2_TASKS_TARGET_URL: 'https://paid.example.com/api/analysis/v2/worker?probe=1' }],
+        ['target hash', { ANALYSIS_V2_TASKS_TARGET_URL: 'https://paid.example.com/api/analysis/v2/worker#probe' }],
+        ['target wrong path', { ANALYSIS_V2_TASKS_TARGET_URL: 'https://paid.example.com/api/analysis/not-worker' }],
+        ['audience query', { ANALYSIS_V2_TASKS_OIDC_AUDIENCE: 'https://paid.example.com?probe=1' }],
+        ['audience hash', { ANALYSIS_V2_TASKS_OIDC_AUDIENCE: 'https://paid.example.com#probe' }],
+        ['audience path', { ANALYSIS_V2_TASKS_OIDC_AUDIENCE: 'https://paid.example.com/audience' }],
+        ['audience origin', { ANALYSIS_V2_TASKS_OIDC_AUDIENCE: 'https://other.example.com' }],
+    ] as const)('rejects paid producer %s before IAM or Cloud Run mutation', (_name, environment) => {
+        const result = fakeRun({
+            role: 'paid',
+            environment,
+            iam: {
+                bindings: [{
+                    role: 'roles/run.invoker',
+                    members: ['allUsers'],
+                }],
+            },
+            args: ['--apply', '--reconcile-iam'],
+        });
+        expect(result.status).not.toBe(0);
+        expect(result.calls).not.toContain('run deploy');
+        expect(result.calls).not.toContain('run services set-iam-policy');
+        expect(`${result.stdout}\n${result.stderr}`).not.toContain('secret');
+    });
+
+    it.each([
+        ['preflight aggregate readiness false', 'preflight', { ready: false }],
+        ['preflight missing paid fingerprint', 'preflight', { paidProducerConfigFingerprint: undefined }],
+        ['paid aggregate readiness false', 'paid', { ready: false }],
+        ['paid missing preflight fingerprint', 'paid', { preflightProducerConfigFingerprint: undefined }],
+    ] as const)('rejects %s before IAM or Cloud Run mutation', (_name, role, publicFreeze) => {
+        const result = fakeRun({
+            role,
+            publicFreeze,
+            iam: {
+                bindings: [{
+                    role: 'roles/run.invoker',
+                    members: ['allUsers'],
+                }],
+            },
+            args: ['--apply', '--reconcile-iam'],
+        });
+        expect(result.status).not.toBe(0);
+        expect(result.calls).not.toContain('run deploy');
+        expect(result.calls).not.toContain('run services set-iam-policy');
+    });
+
+    it.each([
+        ['task identity', {
+            serviceAccountEmail: 'other-task@example-project.iam.gserviceaccount.com',
+            url: 'https://paid.example.com/api/analysis/v2/worker',
+            audience: 'https://paid.example.com',
+        }],
+        ['target', {
+            serviceAccountEmail: 'paid-task@example-project.iam.gserviceaccount.com',
+            url: 'https://other.example.com/api/analysis/v2/worker',
+            audience: 'https://paid.example.com',
+        }],
+        ['audience', {
+            serviceAccountEmail: 'paid-task@example-project.iam.gserviceaccount.com',
+            url: 'https://paid.example.com/api/analysis/v2/worker',
+            audience: 'https://other.example.com',
+        }],
+    ] as const)('fails closed when an observed paid task has drifted %s', (_name, observed) => {
+        const result = fakeRun({
+            role: 'paid',
+            queueTasks: [{
+                httpRequest: {
+                    url: observed.url,
+                    oidcToken: {
+                        serviceAccountEmail: observed.serviceAccountEmail,
+                        audience: observed.audience,
+                    },
+                },
+            }],
+            args: ['--apply', '--reconcile-iam'],
+        });
+        expect(result.status).not.toBe(0);
+        expect(`${result.stdout}\n${result.stderr}`).toContain(
+            'paid queue task OIDC contract',
+        );
+        expect(result.calls).not.toContain('run deploy');
+        expect(result.calls).not.toContain('run services set-iam-policy');
+    });
+
+    it('verifies paid producer evidence before any IAM reconcile or Cloud Run deploy mutation', () => {
+        const result = fakeRun({
+            role: 'paid',
+            publicFreeze: {
+                paidProducerConfigFingerprint: 'f'.repeat(64),
+            },
+            iam: {
+                bindings: [{
+                    role: 'roles/run.invoker',
+                    members: ['allUsers'],
+                }],
+            },
+            args: ['--apply', '--reconcile-iam'],
+        });
+        expect(result.status).not.toBe(0);
+        expect(result.calls).not.toContain('run deploy');
+        expect(result.calls).not.toContain('run services set-iam-policy');
     });
 
     it('normalizes the role runtime identity manifest key against the Cloud Run service spec', () => {
@@ -2473,10 +2692,10 @@ describe('automatic-analysis infrastructure contracts', () => {
         expect(iamMutationIndex).toBeLessThan(deployIndex);
     });
 
-    // The active public runtime exposes a producer fingerprint only for the
-    // preflight producer contract, so there is no equivalent published evidence
-    // that a rotated paid caller is already live.  The exceptional flag is
-    // therefore refused for paid outright, before any observation or mutation.
+    // Public readiness v2 exposes producer fingerprints for both role
+    // contracts. The exceptional flag remains preflight-only because only that
+    // transition was reviewed/authorized and the production audit found no
+    // paid identity rotation need; it is refused for paid before observation.
     it('refuses the exceptional identity roll-forward for the paid role before observing anything', () => {
         const result = identityRollForwardRun('paid');
         expect(result.status).not.toBe(0);
