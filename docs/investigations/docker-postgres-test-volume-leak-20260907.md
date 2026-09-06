@@ -16,7 +16,7 @@ The harness used `docker run -d --rm ...` and tore down with `docker rm -f <name
 
 - `--rm` removes a container's anonymous volumes only when the container **exits on its own**. It does not cover a force removal.
 - `docker rm -f` without `-v` **never** removes the anonymous volume, and it races the daemon's auto-remove routine for an `AutoRemove=true` container.
-- Neither hook runs at all when the Vitest worker is killed by a suite timeout or a signal, or when `beforeAll` throws before reaching its teardown pair.
+- `afterAll` does not provide cleanup when `beforeAll` throws before reaching its teardown pair. A `process.once('exit')` handler is only a best-effort normal-exit path; it cannot guarantee cleanup for `SIGKILL`, hard timeouts, or other abrupt worker termination.
 
 So every interrupted, timed-out, or force-removed run orphaned roughly 82MB, permanently.
 
@@ -28,23 +28,29 @@ The fix removes the failure mode at the source rather than relying on teardown r
 --mount type=tmpfs,destination=/var/lib/postgresql/data,tmpfs-size=536870912,tmpfs-mode=0700
 ```
 
-Docker only auto-creates an anonymous volume for a `VOLUME` path that has **no** explicit mount, so with the tmpfs present no persistent storage is ever allocated — however the test process dies. The cluster is throwaway per suite, so holding it in RAM preserves test semantics exactly while removing the disk write entirely. tmpfs consumes only the pages actually written, so the 512MB figure is a ceiling, not an allocation; Docker's 64MB default is too small for an initdb cluster plus its 16MB WAL segments.
+Docker only auto-creates an anonymous volume for a `VOLUME` path that has **no** explicit mount, so with the tmpfs present no persistent storage is ever allocated, regardless of how the test process terminates. The cluster is throwaway per suite, so holding it in RAM preserves test semantics exactly while removing the disk write entirely. Docker's default tmpfs maximum is 50% of host RAM; `64m` is the default `/dev/shm` size, not this data mount. The explicit 512MB ceiling gives initdb and its 16MB WAL segments room, while tmpfs consumes only the pages actually written.
 
 Defence in depth, all in the same change:
 
 - Teardown now uses `docker rm -f -v`, so a caller that reintroduces a volume cannot silently reintroduce the leak.
-- The removal flag is set **before** `docker run` is issued, so a container that is created and then fails mid-start is still torn down.
-- The reaper is idempotent and additionally registered on `process.once('exit')`, covering the partial-failure paths where `afterAll` never runs.
+- An idempotent `rm -f -v` name fence runs before `docker run`, even though the generated name is UUID-based.
+- The entire beforeAll lifecycle is inside one catch boundary. It closes any clients that connected, attempts removal, and rethrows the original readiness/setup/start failure.
+- The reaper only marks the container reaped after a successful removal command. A transient removal failure remains retryable from afterAll or a later normal-process-exit cleanup attempt.
+- The tmpfs mount independently prevents persistent-volume leakage. Explicit catch, afterAll, and normal-process-exit cleanup are best-effort container cleanup and cannot guarantee removal after `SIGKILL`, hard timeouts, or other abrupt termination.
 
-External `BETA_APIFY_POSTGRES_TEST_URL` behavior is unchanged: when a URL is supplied no container is started, no exit hook is registered, and the reaper is a no-op.
+External `BETA_APIFY_POSTGRES_TEST_URL` behavior is exact: when a URL is supplied, no container lifecycle is started, no exit hook is registered, and no Docker command is executed, including no `docker info` probe.
 
 ## Regression guard
 
-`lib/services/analysis/postgres-test-container.test.ts` asserts the tmpfs destination, size floor, the absence of any `-v`/`--volume` bind, and that teardown passes `-v`. These assertions run **without a Docker daemon** on purpose, so the invariant stays enforced in environments that skip the Docker-backed suite entirely — which is the normal case in CI and was the case on this machine during the fix.
+`lib/services/analysis/postgres-test-container.test.ts` runs 13 daemon-free lifecycle and argument assertions with an injected fake command runner. It proves supplied URLs execute zero Docker calls, the cleanup fence precedes `run`, `run`/`port`/readiness/setup failures reach `rm -f -v`, transient removal is retried, and the tmpfs covers the exact `PGDATA` path.
 
 ## Verification status and residual risk
 
-Verified: TypeScript (`tsc --noEmit`, clean), ESLint (clean), `git diff --check` (clean), and the 6 new regression assertions pass. The Docker-backed suite reports 23 skipped because the daemon was down.
+Verified so far: TypeScript (`tsc --noEmit`, clean), focused ESLint (clean), `git diff --check` (clean), the 13 daemon-free lifecycle/argument assertions pass, and the Docker-backed suite reports 23 skipped because the daemon was down. No live Docker test was run and Docker Desktop remained stopped.
+
+The full repository lint also completed with 0 errors and 17 existing warnings outside this change.
+
+The full `lib/services/analysis` test set completed with 475 files passed and 1 skipped, covering 4,457 passed and 45 skipped tests; the Docker-backed PostgreSQL file was among the skipped integration files because Docker remained stopped.
 
 **Not verified live.** The Docker daemon was not running and the task boundary forbade starting Docker Desktop, so the tmpfs-backed container was never actually booted. The residual risk is bounded: if the tmpfs mount were wrong, the container would fail to start and the suite would fail loudly in `beforeAll` — it cannot regress silently, and no volume would leak in that case either. The mount shape matches what the official entrypoint already expects (it runs as root, chowns `PGDATA` to `postgres`, then `chmod 00700` before dropping privileges via `gosu`), which is the same shape a volume mount presents to it.
 

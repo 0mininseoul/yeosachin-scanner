@@ -2,6 +2,8 @@ import { describe, expect, it } from 'vitest';
 import {
     buildPostgresRemoveArgs,
     buildPostgresRunArgs,
+    createPostgresTestContainerLifecycle,
+    initializePostgresTestContainer,
     POSTGRES_TEST_DATA_DIR,
     POSTGRES_TEST_IMAGE,
     POSTGRES_TEST_TMPFS_SIZE_BYTES,
@@ -39,7 +41,8 @@ describe('postgres test container arguments', () => {
         expect(buildPostgresRunArgs(spec)).toContain(POSTGRES_TEST_IMAGE);
     });
 
-    // Docker's default tmpfs size is 64MB; a fresh initdb cluster plus WAL needs more.
+    // Docker's default tmpfs maximum is 50% of host RAM; 64m is `/dev/shm`, not this
+    // mount.  The explicit ceiling gives initdb and WAL ample room.
     it('requests a tmpfs large enough for an initdb cluster', () => {
         expect(POSTGRES_TEST_TMPFS_SIZE_BYTES).toBeGreaterThanOrEqual(256 * 1024 * 1024);
     });
@@ -68,5 +71,136 @@ describe('postgres test container arguments', () => {
     it('removes associated volumes on teardown even under force removal', () => {
         const args = buildPostgresRemoveArgs(spec.containerName);
         expect(args).toEqual(['rm', '-f', '-v', spec.containerName]);
+    });
+});
+
+interface FakeDockerCall {
+    command: string;
+    args: string[];
+}
+
+function fakeDockerRunner(input: {
+    failAction?: string;
+} = {}): { calls: FakeDockerCall[]; runner: (command: string, args: string[]) => string } {
+    const calls: FakeDockerCall[] = [];
+    return {
+        calls,
+        runner: (command, args) => {
+            calls.push({ command, args: [...args] });
+            if (args[0] === input.failAction) {
+                throw new Error(`FAKE_${args[0]!.toUpperCase()}_FAILURE`);
+            }
+            if (args[0] === 'run') return 'fake-container-id\n';
+            if (args[0] === 'port') return '127.0.0.1:54321\n';
+            return '';
+        },
+    };
+}
+
+const lifecycleSpec = {
+    containerName: 'beta-apify-credit-fake',
+    password: 'postgres',
+    database: 'beta_credit_test',
+};
+
+describe('postgres test container lifecycle', () => {
+    it('runs the cleanup fence before Docker run and reaps with -f -v', () => {
+        const fake = fakeDockerRunner();
+        const lifecycle = createPostgresTestContainerLifecycle({
+            ...lifecycleSpec,
+            commandRunner: fake.runner,
+        });
+
+        expect(lifecycle.start()).toBe('postgres://postgres:postgres@127.0.0.1:54321/beta_credit_test');
+        lifecycle.cleanup();
+
+        expect(fake.calls.map(call => call.args)).toEqual([
+            buildPostgresRemoveArgs(lifecycleSpec.containerName),
+            buildPostgresRunArgs(lifecycleSpec),
+            ['port', lifecycleSpec.containerName, '5432/tcp'],
+            buildPostgresRemoveArgs(lifecycleSpec.containerName),
+        ]);
+    });
+
+    it('executes zero Docker commands when a URL is supplied', async () => {
+        const fake = fakeDockerRunner();
+        const suppliedUrl = 'postgres://supplied.example/db';
+        const lifecycle = createPostgresTestContainerLifecycle({
+            ...lifecycleSpec,
+            suppliedUrl,
+            commandRunner: fake.runner,
+        });
+        const closed: boolean[] = [];
+
+        await expect(initializePostgresTestContainer({
+            lifecycle,
+            suppliedUrl,
+            waitForDatabase: async url => expect(url).toBe(suppliedUrl),
+            connectClients: async url => expect(url).toBe(suppliedUrl),
+            setupDatabase: async () => undefined,
+            closeClients: async () => { closed.push(true); },
+        })).resolves.toBe(suppliedUrl);
+        lifecycle.cleanup();
+
+        expect(fake.calls).toEqual([]);
+        expect(closed).toEqual([]);
+    });
+
+    for (const failure of ['run', 'port', 'readiness', 'setup'] as const) {
+        it(`reaps after a ${failure} failure`, async () => {
+            const fake = fakeDockerRunner({ failAction: failure === 'readiness' || failure === 'setup' ? undefined : failure });
+            const lifecycle = createPostgresTestContainerLifecycle({
+                ...lifecycleSpec,
+                commandRunner: fake.runner,
+            });
+            let connected = false;
+            let closed = false;
+
+            await expect(initializePostgresTestContainer({
+                lifecycle,
+                waitForDatabase: async () => {
+                    if (failure === 'readiness') throw new Error('FAKE_READINESS_FAILURE');
+                },
+                connectClients: async () => { connected = true; },
+                setupDatabase: async () => {
+                    if (failure === 'setup') throw new Error('FAKE_SETUP_FAILURE');
+                },
+                closeClients: async () => { closed = true; },
+            })).rejects.toThrow(`FAKE_${failure.toUpperCase()}_FAILURE`);
+
+            expect(closed).toBe(true);
+            expect(connected).toBe(failure === 'setup');
+            const removals = fake.calls.filter(call => call.args[0] === 'rm');
+            expect(removals).toHaveLength(2);
+            expect(removals.every(call => call.args[1] === '-f' && call.args[2] === '-v')).toBe(true);
+            expect(removals[1]!.args).toEqual(buildPostgresRemoveArgs(lifecycleSpec.containerName));
+        });
+    }
+
+    it('retries removal after a transient command failure', () => {
+        const calls: FakeDockerCall[] = [];
+        let removalAttempts = 0;
+        const runner = (command: string, args: string[]): string => {
+            calls.push({ command, args: [...args] });
+            if (args[0] === 'rm') {
+                removalAttempts += 1;
+                if (removalAttempts === 2) throw new Error('FAKE_TRANSIENT_REMOVE_FAILURE');
+            }
+            if (args[0] === 'run') return 'fake-container-id\n';
+            if (args[0] === 'port') return '127.0.0.1:54321\n';
+            return '';
+        };
+        const lifecycle = createPostgresTestContainerLifecycle({
+            ...lifecycleSpec,
+            commandRunner: runner,
+        });
+
+        lifecycle.start();
+        lifecycle.cleanup();
+        lifecycle.cleanup();
+
+        const removals = calls.filter(call => call.args[0] === 'rm');
+        expect(removals).toHaveLength(3);
+        expect(removals.every(call => call.args[1] === '-f' && call.args[2] === '-v')).toBe(true);
     });
 });
